@@ -1,0 +1,171 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type Config struct {
+	Environment           string
+	LogLevel              string
+	HTTPAddr              string
+	ReadHeaderTimeout     time.Duration
+	ReadTimeout           time.Duration
+	WriteTimeout          time.Duration
+	IdleTimeout           time.Duration
+	ShutdownTimeout       time.Duration
+	WorkerPollInterval    time.Duration
+	AIBaseURL             string
+	AIModel               string
+	AIAPIKey              string
+	AIRequestTimeout      time.Duration
+	AIConfidenceThreshold float64
+	DatabaseURL           string
+	RedisURL              string
+	MinIOEndpoint         string
+	MinIOAccessKey        string
+	MinIOSecretKey        string
+	MinIOUseSSL           bool
+	MinIOUploadsBucket    string
+	AuthTokenIssuer       string
+	AuthAccessSecret      string
+	AuthAccessTTL         time.Duration
+	AuthRefreshTTL        time.Duration
+	AuthBcryptCost        int
+	ConnectorURL          string
+	ConnectorToken        string
+}
+
+// Load 从环境变量构建运行配置，并在返回前完成完整校验。
+func Load() (Config, error) {
+	cfg := Config{
+		Environment:           envOrDefault("APP_ENV", "development"),
+		LogLevel:              envOrDefault("APP_LOG_LEVEL", "info"),
+		HTTPAddr:              envOrDefault("API_HTTP_ADDR", ":8080"),
+		ReadHeaderTimeout:     5 * time.Second,
+		ReadTimeout:           15 * time.Second,
+		WriteTimeout:          30 * time.Second,
+		IdleTimeout:           60 * time.Second,
+		ShutdownTimeout:       10 * time.Second,
+		WorkerPollInterval:    2 * time.Second,
+		AIBaseURL:             envOrDefault("AI_BASE_URL", "https://mgallery.haier.net/v1/"),
+		AIModel:               envOrDefault("AI_MODEL", "deepseek-v3"),
+		AIAPIKey:              os.Getenv("AI_API_KEY"),
+		AIRequestTimeout:      25 * time.Second,
+		AIConfidenceThreshold: 0.8,
+		DatabaseURL:           envOrDefault("DATABASE_URL", "postgres://report_app:local_report_password@127.0.0.1:5432/intelligent_report?sslmode=disable"),
+		RedisURL:              envOrDefault("REDIS_URL", "redis://:local_redis_password@127.0.0.1:6379/0"),
+		MinIOEndpoint:         envOrDefault("MINIO_ENDPOINT", "127.0.0.1:9000"),
+		MinIOAccessKey:        envOrDefault("MINIO_ACCESS_KEY", "report_minio"),
+		MinIOSecretKey:        envOrDefault("MINIO_SECRET_KEY", "local_minio_password"),
+		MinIOUseSSL:           strings.EqualFold(os.Getenv("MINIO_USE_SSL"), "true"),
+		MinIOUploadsBucket:    envOrDefault("MINIO_BUCKET_UPLOADS", "uploads"),
+		AuthTokenIssuer:       envOrDefault("AUTH_TOKEN_ISSUER", "intelligent-report-system"),
+		AuthAccessSecret:      envOrDefault("AUTH_ACCESS_TOKEN_SECRET", "local_access_token_secret_change_me"),
+		AuthAccessTTL:         15 * time.Minute,
+		AuthRefreshTTL:        7 * 24 * time.Hour,
+		AuthBcryptCost:        12,
+		ConnectorURL:          envOrDefault("CONNECTOR_SERVICE_URL", "http://127.0.0.1:8090"),
+		ConnectorToken:        envOrDefault("CONNECTOR_INTERNAL_TOKEN", "local_connector_token_change_me"),
+	}
+
+	durations := []struct {
+		key    string
+		target *time.Duration
+	}{
+		{"API_READ_HEADER_TIMEOUT", &cfg.ReadHeaderTimeout},
+		{"API_READ_TIMEOUT", &cfg.ReadTimeout},
+		{"API_WRITE_TIMEOUT", &cfg.WriteTimeout},
+		{"API_IDLE_TIMEOUT", &cfg.IdleTimeout},
+		{"SHUTDOWN_TIMEOUT", &cfg.ShutdownTimeout},
+		{"WORKER_POLL_INTERVAL", &cfg.WorkerPollInterval},
+		{"AI_REQUEST_TIMEOUT", &cfg.AIRequestTimeout},
+		{"AUTH_ACCESS_TOKEN_TTL", &cfg.AuthAccessTTL},
+		{"AUTH_REFRESH_TOKEN_TTL", &cfg.AuthRefreshTTL},
+	}
+	if value := os.Getenv("AUTH_PASSWORD_BCRYPT_COST"); value != "" {
+		cost, err := strconv.Atoi(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse AUTH_PASSWORD_BCRYPT_COST: %w", err)
+		}
+		cfg.AuthBcryptCost = cost
+	}
+	if value := os.Getenv("AI_CONFIDENCE_THRESHOLD"); value != "" {
+		threshold, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse AI_CONFIDENCE_THRESHOLD: %w", err)
+		}
+		cfg.AIConfidenceThreshold = threshold
+	}
+
+	for _, item := range durations {
+		value := os.Getenv(item.key)
+		if value == "" {
+			continue
+		}
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse %s: %w", item.key, err)
+		}
+		*item.target = parsed
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// Validate 检查服务启动所需的地址、密钥、超时和配额边界。
+func (c Config) Validate() error {
+	if strings.TrimSpace(c.HTTPAddr) == "" {
+		return errors.New("API_HTTP_ADDR must not be empty")
+	}
+	if c.ReadHeaderTimeout <= 0 || c.ReadTimeout <= 0 || c.WriteTimeout <= 0 || c.IdleTimeout <= 0 {
+		return errors.New("HTTP timeouts must be greater than zero")
+	}
+	if c.ShutdownTimeout <= 0 {
+		return errors.New("SHUTDOWN_TIMEOUT must be greater than zero")
+	}
+	if c.WorkerPollInterval <= 0 {
+		return errors.New("WORKER_POLL_INTERVAL must be greater than zero")
+	}
+	if c.AIRequestTimeout <= 0 || c.AIRequestTimeout >= c.WriteTimeout {
+		return errors.New("AI_REQUEST_TIMEOUT must be greater than zero and less than API_WRITE_TIMEOUT")
+	}
+	if c.AIConfidenceThreshold < 0 || c.AIConfidenceThreshold > 1 {
+		return errors.New("AI_CONFIDENCE_THRESHOLD must be between zero and one")
+	}
+	if strings.TrimSpace(c.AIAPIKey) != "" {
+		parsed, err := url.Parse(c.AIBaseURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || strings.TrimSpace(c.AIModel) == "" {
+			return errors.New("AI_BASE_URL or AI_MODEL is invalid")
+		}
+	}
+	if len(c.AuthAccessSecret) < 32 {
+		return errors.New("AUTH_ACCESS_TOKEN_SECRET must be at least 32 characters")
+	}
+	if c.AuthAccessTTL <= 0 || c.AuthRefreshTTL <= c.AuthAccessTTL {
+		return errors.New("auth token TTLs are invalid")
+	}
+	if c.AuthBcryptCost < 10 || c.AuthBcryptCost > 14 {
+		return errors.New("AUTH_PASSWORD_BCRYPT_COST must be between 10 and 14")
+	}
+	if strings.TrimSpace(c.ConnectorURL) == "" || len(c.ConnectorToken) < 24 {
+		return errors.New("connector service URL or internal token is invalid")
+	}
+	return nil
+}
+
+// envOrDefault 返回去除首尾空白的环境变量值或指定默认值。
+func envOrDefault(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}

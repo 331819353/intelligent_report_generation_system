@@ -1,0 +1,173 @@
+name: intelligent-report-system
+
+services:
+  # 平台控制面数据库，初始化脚本只创建最小权限应用账号。
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-intelligent_report}
+      POSTGRES_USER: ${POSTGRES_USER:-report_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_admin_password}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER:-report_app}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-local_report_password}
+      TZ: Asia/Shanghai
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deployments/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks: [report_net]
+
+  # 为后续查询缓存和任务调度预留的持久化 Redis。
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:-local_redis_password}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-local_redis_password}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    networks: [report_net]
+
+  # 保存上传文件、报告产物和元数据快照的 S3 兼容存储。
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-report_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-local_minio_password}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks: [report_net]
+
+  # 一次性、幂等创建应用所需对象桶。
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-report_minio}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-local_minio_password}
+      MINIO_BUCKET_REPORTS: ${MINIO_BUCKET_REPORTS:-reports}
+      MINIO_BUCKET_UPLOADS: ${MINIO_BUCKET_UPLOADS:-uploads}
+      MINIO_BUCKET_SNAPSHOTS: ${MINIO_BUCKET_SNAPSHOTS:-snapshots}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mc alias set local http://minio:9000 "$${MINIO_ACCESS_KEY}" "$${MINIO_SECRET_KEY}"
+        mc mb --ignore-existing "local/$${MINIO_BUCKET_REPORTS}"
+        mc mb --ignore-existing "local/$${MINIO_BUCKET_UPLOADS}"
+        mc mb --ignore-existing "local/$${MINIO_BUCKET_SNAPSHOTS}"
+    restart: "no"
+    networks: [report_net]
+
+  # 本地数据源联调实例，业务账号仅授予读取权限。
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-local_mysql_root_password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-report_source}
+      MYSQL_USER: ${MYSQL_USER:-report_reader}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-local_mysql_reader_password}
+      TZ: Asia/Shanghai
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./deployments/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [report_net]
+
+  # 本地 Oracle 数据源联调实例。
+  oracle:
+    image: gvenzl/oracle-free:23.26.2-slim-faststart
+    restart: unless-stopped
+    environment:
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-local_oracle_system_password}
+      APP_USER: ${ORACLE_USER:-report_reader}
+      APP_USER_PASSWORD: ${ORACLE_PASSWORD_APP:-local_oracle_reader_password}
+    ports:
+      - "${ORACLE_PORT:-1521}:1521"
+    volumes:
+      - oracle_data:/opt/oracle/oradata
+      - ./deployments/oracle/init:/container-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 60s
+    shm_size: 1gb
+    networks: [report_net]
+
+  # 隔离数据库驱动与外部查询执行的 Python 服务。
+  connector-service:
+    build:
+      context: ./connector_service
+    restart: unless-stopped
+    environment:
+      CONNECTOR_INTERNAL_TOKEN: ${CONNECTOR_INTERNAL_TOKEN:-local_connector_token_change_me}
+      CONNECTOR_MAX_CONNECTIONS_PER_SOURCE: ${CONNECTOR_MAX_CONNECTIONS_PER_SOURCE:-5}
+      CONNECTOR_MAX_CONCURRENT_QUERIES: ${CONNECTOR_MAX_CONCURRENT_QUERIES:-10}
+      CONNECTOR_POOL_IDLE_TTL_SECONDS: ${CONNECTOR_POOL_IDLE_TTL_SECONDS:-300}
+    ports:
+      - "${CONNECTOR_PORT:-8090}:8090"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      oracle:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health/live', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks: [report_net]
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  mysql_data:
+  oracle_data:
+
+networks:
+  report_net:
+    driver: bridge

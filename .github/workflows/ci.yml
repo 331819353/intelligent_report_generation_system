@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install frontend dependencies
+        run: npm --prefix web ci
+      - name: Install connector test dependencies
+        run: python -m pip install -r connector_service/requirements-dev.txt
+      - name: Static repository checks
+        run: sh scripts/ci-check.sh
+      - name: Go lint, race tests and build
+        run: make lint test build
+      - name: Frontend lint, tests and build
+        run: make frontend-lint frontend-test frontend-build
+      - name: Python connector tests
+        run: make connector-test
+      - name: Dependency audit
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./cmd/... ./internal/...
+          npm --prefix web audit --audit-level=high
+      - name: Start infrastructure and apply migrations
+        run: make infra-up db-migrate db-verify
+      - name: PostgreSQL integration tests
+        run: make test-integration
+      - name: Infrastructure logs on failure
+        if: failure()
+        run: make infra-logs
+      - name: Stop infrastructure
+        if: always()
+        run: make infra-down

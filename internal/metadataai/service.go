@@ -1,0 +1,133 @@
+package metadataai
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"time"
+)
+
+var (
+	ErrNotFound = errors.New("metadata AI resource not found")
+	ErrConflict = errors.New("metadata AI resource conflict")
+)
+
+type Store interface {
+	LoadInput(context.Context, string, string) (CompletionInput, error)
+	CreateJob(context.Context, string, string, Job) (Job, error)
+	FailJob(context.Context, string, string, Job, string) (Job, error)
+	SaveResult(context.Context, string, string, Job, CompletionInput, ProviderResult, float64) (Job, []Suggestion, error)
+	ListSuggestions(context.Context, string, string, string, int) ([]Suggestion, error)
+	DecideSuggestion(context.Context, string, string, string, string) (Suggestion, error)
+}
+
+type Service struct {
+	store     Store
+	provider  Provider
+	timeout   time.Duration
+	threshold float64
+	now       func() time.Time
+}
+
+type GenerateResult struct {
+	Job         Job          `json:"job"`
+	Suggestions []Suggestion `json:"suggestions"`
+}
+
+// NewService 创建元数据智能补全编排服务，并设置调用超时和自动应用阈值。
+func NewService(store Store, provider Provider, timeout time.Duration, confidenceThreshold float64) *Service {
+	return &Service{store: store, provider: provider, timeout: timeout, threshold: confidenceThreshold, now: time.Now}
+}
+
+// Generate 创建任务、调用模型、校验结构化结果并持久化建议。
+func (s *Service) Generate(ctx context.Context, tenantID, actorID, tableID string) (GenerateResult, error) {
+	if s.provider == nil || !s.provider.Configured() {
+		return GenerateResult{}, ErrProviderUnavailable
+	}
+	input, err := s.store.LoadInput(ctx, tenantID, tableID)
+	if err != nil {
+		return GenerateResult{}, err
+	}
+	hash, err := inputHash(input)
+	if err != nil {
+		return GenerateResult{}, err
+	}
+	job, err := s.store.CreateJob(ctx, tenantID, actorID, Job{
+		TableID:       tableID,
+		Provider:      s.provider.Name(),
+		Model:         s.provider.Model(),
+		PromptVersion: PromptVersion,
+		InputHash:     hash,
+		Status:        "RUNNING",
+	})
+	if err != nil {
+		return GenerateResult{}, err
+	}
+	// 模型调用使用独立超时，任务失败仍需回到原请求上下文记录最终状态。
+	started := s.now()
+	callCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	providerResult, callErr := s.provider.Complete(callCtx, input)
+	cancel()
+	job.LatencyMS = s.now().Sub(started).Milliseconds()
+	if callErr != nil {
+		code := "PROVIDER_ERROR"
+		if errors.Is(callErr, context.DeadlineExceeded) || errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+			code = "TIMEOUT"
+		}
+		job, callErr = s.recordFailure(ctx, tenantID, actorID, job, code, callErr)
+		return GenerateResult{Job: job, Suggestions: []Suggestion{}}, callErr
+	}
+	job.Model = firstNonBlank(providerResult.Model, job.Model)
+	job.ModelVersion = providerResult.ModelVersion
+	job.PromptTokens = providerResult.Usage.PromptTokens
+	job.CompletionTokens = providerResult.Usage.CompletionTokens
+	job.TotalTokens = providerResult.Usage.TotalTokens
+	providerResult.Output = normalizeOutput(providerResult.Output)
+	// 不信任外部模型输出；在任何数据库写入前再次执行领域级校验。
+	if err := ValidateOutput(input, providerResult.Output); err != nil {
+		job, err = s.recordFailure(ctx, tenantID, actorID, job, "INVALID_OUTPUT", err)
+		return GenerateResult{Job: job, Suggestions: []Suggestion{}}, err
+	}
+	job, suggestions, err := s.store.SaveResult(ctx, tenantID, actorID, job, input, providerResult, s.threshold)
+	if err != nil {
+		job, err = s.recordFailure(ctx, tenantID, actorID, job, "PERSISTENCE_ERROR", err)
+		return GenerateResult{Job: job, Suggestions: []Suggestion{}}, err
+	}
+	return GenerateResult{Job: job, Suggestions: suggestions}, nil
+}
+
+// ListSuggestions 按任务与状态筛选智能补全建议。
+func (s *Service) ListSuggestions(ctx context.Context, tenantID, jobID, status string, limit int) ([]Suggestion, error) {
+	return s.store.ListSuggestions(ctx, tenantID, jobID, status, limit)
+}
+
+// DecideSuggestion 接受或拒绝待人工确认的建议。
+func (s *Service) DecideSuggestion(ctx context.Context, tenantID, actorID, suggestionID, decision string) (Suggestion, error) {
+	if decision != "ACCEPT" && decision != "REJECT" {
+		return Suggestion{}, ErrInvalidDecision
+	}
+	return s.store.DecideSuggestion(ctx, tenantID, actorID, suggestionID, decision)
+}
+
+// recordFailure 脱离已取消的请求上下文，在短超时内尽力持久化任务失败状态。
+func (s *Service) recordFailure(ctx context.Context, tenantID, actorID string, job Job, code string, cause error) (Job, error) {
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	failed, err := s.store.FailJob(persistCtx, tenantID, actorID, job, code)
+	if err != nil {
+		return job, errors.Join(cause, err)
+	}
+	return failed, cause
+}
+
+// inputHash 标识模型输入版本，便于审计和结果复现。
+func inputHash(input CompletionInput) (string, error) {
+	payload, err := json.Marshal(input)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:]), nil
+}

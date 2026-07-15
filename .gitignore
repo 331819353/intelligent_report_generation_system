@@ -1,0 +1,16 @@
+.DS_Store
+.env
+bin/
+.cache/
+coverage.out
+*.log
+node_modules/
+dist/
+*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
+.idea/
+.vscode/
+.venv-connector/
+__pycache__/
+.pytest_cache/
