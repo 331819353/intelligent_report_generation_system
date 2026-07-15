@@ -1,5 +1,7 @@
 # 数据资产中心 API
 
+Excel/CSV 表资产在 `fileVersionId` 返回当前不可变文件版本；数据集设计器必须将其写入 TABLE 节点，数据库型资产不返回该字段。
+
 所有接口均从访问令牌获取租户范围。读取要求 `DATA_ASSET:READ`，维护要求 `DATA_ASSET:MANAGE`。
 
 ## 搜索与详情

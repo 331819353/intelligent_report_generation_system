@@ -86,7 +86,11 @@ def test_connection_pool_close_releases_idle_connection() -> None:
     "SELECT * FROM users INTO OUTFILE '/tmp/users'",
     "SELECT SLEEP(10)",
     "SELECT 1 # hidden comment",
+    "SELECT 1 -- hidden comment",
+    "SELECT 1 /* hidden comment */",
     "SELECT 1; DELETE FROM users",
+    "DROP TABLE users",
+    "CALL dangerous_procedure()",
 ])
 def test_read_only_guard_rejects_bypasses(sql: str) -> None:
     with pytest.raises(Exception):

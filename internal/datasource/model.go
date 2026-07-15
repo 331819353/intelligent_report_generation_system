@@ -46,6 +46,31 @@ type TestResult struct {
 	ServerVersion string `json:"serverVersion"`
 	LatencyMS     int64  `json:"latencyMs"`
 }
+type QueryResult struct {
+	Columns     []string          `json:"columns"`
+	Rows        [][]any           `json:"rows"`
+	RowCount    int               `json:"rowCount"`
+	DurationMS  int64             `json:"durationMs"`
+	Warnings    []QueryWarning    `json:"warnings,omitempty"`
+	SourceStats []QuerySourceStat `json:"-"`
+}
+
+// QueryWarning 是查询成功但存在语义或性能风险时返回的结构化提示。
+type QueryWarning struct {
+	Code          string `json:"code"`
+	Message       string `json:"message"`
+	JoinID        string `json:"joinId,omitempty"`
+	EstimatedRows int    `json:"estimatedRows,omitempty"`
+}
+
+// QuerySourceStat 是可信网关采集的跨源节点运行摘要，不接受远端 Connector 注入。
+type QuerySourceStat struct {
+	NodeID     string
+	SubqueryID string
+	RowCount   int
+	DurationMS int64
+	Status     string
+}
 type SyncResult struct {
 	Assets       int             `json:"assets"`
 	Watermark    string          `json:"watermark"`

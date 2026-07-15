@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intelligent-report.local/schemas/report-json-v1.schema.json",
+  "title": "报告 JSON Schema V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "report", "canvas", "pages"],
+  "properties": {
+    "schemaVersion": {"const": "1.0"},
+    "report": {"$ref": "#/$defs/report"},
+    "canvas": {"$ref": "#/$defs/canvas"},
+    "theme": {"type": "object"},
+    "parameters": {"type": "array", "items": {"$ref": "#/$defs/parameter"}},
+    "dataRequirements": {"type": "array", "items": {"$ref": "#/$defs/dataRequirement"}},
+    "pages": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/page"}},
+    "generation": {"$ref": "#/$defs/generation"},
+    "extensions": {"type": "object"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "code": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"},
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "name", "type", "language", "status", "visibility", "onlineEnabled", "pdfArchiveEnabled", "defaultRefreshPolicy", "timezone"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "code": {"$ref": "#/$defs/code"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "description": {"type": "string", "maxLength": 2000},
+        "type": {"enum": ["DASHBOARD", "REPORT"]},
+        "language": {"type": "string", "minLength": 1, "maxLength": 35},
+        "status": {"enum": ["DRAFT", "PUBLISHED", "ARCHIVED"]},
+        "visibility": {"enum": ["PRIVATE", "TENANT", "PUBLIC"]},
+        "publicAccessPolicy": {"type": "object"},
+        "onlineEnabled": {"type": "boolean"},
+        "pdfArchiveEnabled": {"type": "boolean"},
+        "defaultRefreshPolicy": {"enum": ["REALTIME", "CACHE", "MATERIALIZED", "SNAPSHOT"]},
+        "timezone": {"type": "string", "minLength": 1, "maxLength": 100}
+      }
+    },
+    "canvas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logicalWidth", "viewportHeight", "gridColumns", "viewportGridRows", "contentGridRows", "minContentGridRows", "innerGridMultiplier", "scaleMode", "verticalOverflow"],
+      "properties": {
+        "logicalWidth": {"const": 1920},
+        "viewportHeight": {"const": 1080},
+        "gridColumns": {"const": 12},
+        "viewportGridRows": {"const": 10},
+        "contentGridRows": {"const": "AUTO"},
+        "minContentGridRows": {"const": 10},
+        "innerGridMultiplier": {"const": 4},
+        "scaleMode": {"const": "FIT_WIDTH"},
+        "verticalOverflow": {"const": "SCROLL"}
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "code", "name", "dataType", "required", "multiValue", "scope"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "code": {"$ref": "#/$defs/code"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "dataType": {"enum": ["STRING", "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "DATETIME", "DATE_RANGE", "DATE_YEAR", "DATE_MONTH", "DATE_QUARTER", "SINGLE_SELECT", "MULTI_SELECT", "ORG_TREE", "CASCADE", "SYSTEM"]},
+        "required": {"type": "boolean"},
+        "multiValue": {"type": "boolean"},
+        "defaultValue": true,
+        "scope": {"enum": ["REPORT", "PAGE"]},
+        "pageId": {"$ref": "#/$defs/id"},
+        "optionSource": {"type": "object"}
+      }
+    },
+    "dataRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "intent", "requiredMetrics", "requiredDimensions", "preferredDatasetIds", "resolvedMetricIds", "resolutionStatus", "confidence", "warnings"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "intent": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "requiredMetrics": {"type": "array", "items": {"type": "string"}},
+        "requiredDimensions": {"type": "array", "items": {"type": "string"}},
+        "preferredDatasetIds": {"type": "array", "items": {"$ref": "#/$defs/id"}},
+        "resolvedDatasetVersionId": {"$ref": "#/$defs/id"},
+        "resolvedMetricIds": {"type": "array", "items": {"$ref": "#/$defs/id"}},
+        "resolutionStatus": {"enum": ["RESOLVED", "PARTIAL", "UNRESOLVED", "INVALID"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "warnings": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "order", "blocks"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "order": {"type": "integer", "minimum": 1},
+        "background": {"type": "object"},
+        "contentGridRows": {"type": "integer", "minimum": 10},
+        "blocks": {"type": "array", "items": {"$ref": "#/$defs/block"}}
+      }
+    },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "grid", "innerGrid", "locks", "sticky", "components"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "grid": {"$ref": "#/$defs/grid"},
+        "innerGrid": {"$ref": "#/$defs/innerGrid"},
+        "zIndex": {"type": "integer", "minimum": 0},
+        "locks": {"$ref": "#/$defs/locks"},
+        "sticky": {"$ref": "#/$defs/sticky"},
+        "style": {"type": "object"},
+        "permissionPolicy": {"$ref": "#/$defs/permissionPolicy"},
+        "components": {"type": "array", "items": {"$ref": "#/$defs/component"}}
+      }
+    },
+    "grid": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "w", "h"],
+      "properties": {
+        "x": {"type": "integer", "minimum": 0},
+        "y": {"type": "integer", "minimum": 0},
+        "w": {"type": "integer", "minimum": 1},
+        "h": {"type": "integer", "minimum": 1}
+      }
+    },
+    "innerGrid": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["columns", "rows"],
+      "properties": {
+        "columns": {"type": "integer", "minimum": 4},
+        "rows": {"type": "integer", "minimum": 4}
+      }
+    },
+    "locks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layout", "config", "dataSnapshot"],
+      "properties": {
+        "layout": {"type": "boolean"},
+        "config": {"type": "boolean"},
+        "dataSnapshot": {"type": "boolean"}
+      }
+    },
+    "sticky": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "top": {"type": "integer", "minimum": 0},
+        "scope": {"enum": ["PAGE", "BLOCK", "CONTAINER"]},
+        "containerId": {"$ref": "#/$defs/id"},
+        "zIndex": {"type": "integer", "minimum": 1}
+      }
+    },
+    "permissionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requiredPermission": {"type": "string", "minLength": 1, "maxLength": 100},
+        "allowedRoleCodes": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/code"}},
+        "denyDownload": {"type": "boolean"}
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "name", "grid", "visible", "manualLocked", "sticky", "sourceTrace"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "type": {"enum": ["TITLE", "RICH_TEXT", "FILTER", "KPI", "ADDITIONAL_INFO", "TABLE", "CROSSTAB", "CHART", "RANKING", "IMAGE", "ATTACHMENT_LIST", "DATA_SOURCE", "UPDATED_AT", "CONCLUSION", "DIVIDER", "DECORATION"]},
+        "name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "grid": {"$ref": "#/$defs/grid"},
+        "zIndex": {"type": "integer", "minimum": 0},
+        "visible": {"type": "boolean"},
+        "manualLocked": {"type": "boolean"},
+        "style": {"type": "object"},
+        "binding": {"type": "object"},
+        "interaction": {"type": "object"},
+        "sticky": {"$ref": "#/$defs/sticky"},
+        "refreshPolicy": {"type": "object"},
+        "permissionPolicy": {"$ref": "#/$defs/permissionPolicy"},
+        "sourceTrace": {"type": "array", "items": {"$ref": "#/$defs/sourceTrace"}},
+        "conclusion": {"type": "object"},
+        "extensions": {"type": "object"}
+      }
+    },
+    "sourceTrace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceType", "sourceId", "usage"],
+      "properties": {
+        "sourceType": {"enum": ["USER_REQUIREMENT", "ATTACHMENT", "IMAGE", "TABLE_ASSET", "DATASET", "METRIC", "REPORT_TEMPLATE", "MANUAL_EDIT"]},
+        "sourceId": {"$ref": "#/$defs/id"},
+        "location": {"type": "string", "maxLength": 500},
+        "excerptHash": {"type": "string", "maxLength": 128},
+        "usage": {"type": "string", "minLength": 1, "maxLength": 100}
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "sourceFiles", "confidence", "warnings"],
+      "properties": {
+        "mode": {"enum": ["MANUAL", "TEMPLATE", "AI_INITIAL", "AI_BLOCK_EDIT"]},
+        "jobId": {"$ref": "#/$defs/id"},
+        "provider": {"type": "string", "maxLength": 100},
+        "modelRef": {"type": "string", "maxLength": 200},
+        "promptTemplateId": {"$ref": "#/$defs/id"},
+        "sourceFiles": {"type": "array", "items": {"$ref": "#/$defs/id"}},
+        "requirementText": {"type": "string", "maxLength": 10000},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "generatedAt": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

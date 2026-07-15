@@ -13,8 +13,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
 	"golang.org/x/text/encoding/simplifiedchinese"
+	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasource"
 	"intelligent-report-generation-system/internal/platform/database"
+	"intelligent-report-generation-system/internal/queryruntime"
 )
 
 func TestExcelUploadVersionSyncAndRemovedColumn(t *testing.T) {
@@ -80,6 +82,15 @@ func TestExcelUploadVersionSyncAndRemovedColumn(t *testing.T) {
 	if err != nil || len(versions) != 3 || versions[0].CurrentVersion != 3 || versions[0].Version != 3 {
 		t.Fatalf("versions=%#v err=%v", versions, err)
 	}
+	// 当前指针已到 v3，仍必须按不可变标识读回 v1/v2 各自的真实表头。
+	oldVersion, oldTables, err := manager.ReadVersionTables(ctx, tenantID, asset.VersionID, 50<<20)
+	if err != nil || oldVersion.Version != 1 || len(oldTables) != 1 || len(oldTables[0].Columns) != 4 {
+		t.Fatalf("fixed v1=%#v tables=%#v err=%v", oldVersion, oldTables, err)
+	}
+	expandedVersion, expandedTables, err := manager.ReadVersionTables(ctx, tenantID, version2.VersionID, 50<<20)
+	if err != nil || expandedVersion.Version != 2 || len(expandedTables) != 1 || len(expandedTables[0].Columns) != 5 || expandedTables[0].Columns[4] != "region" {
+		t.Fatalf("fixed v2=%#v tables=%#v err=%v", expandedVersion, expandedTables, err)
+	}
 	csvData, err := simplifiedchinese.GBK.NewEncoder().Bytes([]byte("id;name;amount;active;date\n1;'华东;一区';12.50;true;2026-07-15\n2;'华北';8.00;false;2026-07-16\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -100,6 +111,7 @@ func TestExcelUploadVersionSyncAndRemovedColumn(t *testing.T) {
 		t.Fatalf("csv sync=%#v err=%v", result, err)
 	}
 
+	var excelTableID string
 	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
 		var versions int
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.file_asset_versions WHERE file_asset_id=$1`, asset.ID).Scan(&versions); err != nil {
@@ -109,7 +121,7 @@ func TestExcelUploadVersionSyncAndRemovedColumn(t *testing.T) {
 			return fmt.Errorf("version count=%d", versions)
 		}
 		var status string
-		if err := tx.QueryRow(ctx, `SELECT c.asset_status FROM platform.metadata_columns c JOIN platform.metadata_tables t ON t.id=c.table_id WHERE t.data_source_id=$1 AND c.column_name='region'`, source.ID).Scan(&status); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT t.id::text,c.asset_status FROM platform.metadata_columns c JOIN platform.metadata_tables t ON t.id=c.table_id WHERE t.data_source_id=$1 AND c.column_name='region'`, source.ID).Scan(&excelTableID, &status); err != nil {
 			return err
 		}
 		if status != "INACTIVE" {
@@ -138,6 +150,12 @@ func TestExcelUploadVersionSyncAndRemovedColumn(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	resolved, err := queryruntime.NewPostgresStore(pool).Resolve(ctx, tenantID, dataset.Document{Nodes: []dataset.Node{{
+		ID: "sales", Type: "TABLE", DataSourceID: source.ID, TableID: excelTableID, FileVersionID: version2.VersionID, Projection: []string{"id", "region"},
+	}}})
+	if err != nil || resolved.FileVersionID != version2.VersionID || !resolved.Tables["sales"].Columns["region"] {
+		t.Fatalf("fixed file plan=%#v err=%v", resolved, err)
 	}
 }
 

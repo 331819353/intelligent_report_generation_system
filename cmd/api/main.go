@@ -14,11 +14,16 @@ import (
 	"intelligent-report-generation-system/internal/asset"
 	"intelligent-report-generation-system/internal/auth"
 	"intelligent-report-generation-system/internal/config"
+	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasource"
+	"intelligent-report-generation-system/internal/federation"
+	"intelligent-report-generation-system/internal/filequery"
 	"intelligent-report-generation-system/internal/httpserver"
 	"intelligent-report-generation-system/internal/metadataai"
 	"intelligent-report-generation-system/internal/observability"
 	"intelligent-report-generation-system/internal/platform/database"
+	"intelligent-report-generation-system/internal/policy"
+	"intelligent-report-generation-system/internal/queryruntime"
 )
 
 // main 装配 API 服务依赖，并负责启动、信号监听与优雅停机。
@@ -51,10 +56,12 @@ func main() {
 	}
 	excelManager := datasource.NewExcelManager(dataSourceRepo, objectStorage, cfg.MinIOUploadsBucket)
 	// 连接器按数据源类型注册：数据库走隔离的 Python 服务，文件走本地解析器。
+	mysqlConnector := datasource.NewPythonConnector(datasource.TypeMySQL, cfg.ConnectorURL, cfg.ConnectorToken, datasource.EnvSecretResolver{})
+	oracleConnector := datasource.NewPythonConnector(datasource.TypeOracle, cfg.ConnectorURL, cfg.ConnectorToken, datasource.EnvSecretResolver{})
 	dataSourceService := datasource.NewService(
 		dataSourceRepo,
-		datasource.NewPythonConnector(datasource.TypeMySQL, cfg.ConnectorURL, cfg.ConnectorToken, datasource.EnvSecretResolver{}),
-		datasource.NewPythonConnector(datasource.TypeOracle, cfg.ConnectorURL, cfg.ConnectorToken, datasource.EnvSecretResolver{}),
+		mysqlConnector,
+		oracleConnector,
 		datasource.NewExcelConnector(excelManager),
 	)
 	dataSourceHandler := datasource.NewHandler(authService, accessService, dataSourceService)
@@ -63,6 +70,22 @@ func main() {
 	metadataAIProvider := metadataai.NewOpenAICompatibleProvider(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel, &http.Client{Timeout: cfg.AIRequestTimeout})
 	metadataAIService := metadataai.NewService(metadataai.NewPostgresStore(pool), metadataAIProvider, cfg.AIRequestTimeout, cfg.AIConfidenceThreshold)
 	metadataAIHandler := metadataai.NewHandler(authService, accessService, metadataAIService)
+	datasetStore := dataset.NewPostgresStore(pool)
+	datasetService := dataset.NewService(datasetStore)
+	queryConnectors := map[datasource.Type]queryruntime.QueryConnector{
+		datasource.TypeMySQL:  mysqlConnector,
+		datasource.TypeOracle: oracleConnector,
+	}
+	queryService := queryruntime.NewService(
+		datasetStore,
+		dataSourceRepo,
+		policy.NewPostgresStore(pool),
+		queryruntime.NewPostgresStore(pool),
+		queryConnectors,
+		filequery.NewExecutor(excelManager),
+	)
+	queryService.SetFederatedExecutor(federation.NewExecutor(queryConnectors, excelManager))
+	datasetHandler := dataset.NewHandler(authService, accessService, datasetService, queryService)
 	api := http.NewServeMux()
 	api.Handle("/api/v1/auth/", auth.NewHandler(authService))
 	api.Handle("POST /api/v1/permissions/evaluate", auth.RequireAccessToken(authService, access.EvaluateHandler(accessService)))
@@ -78,6 +101,8 @@ func main() {
 	api.Handle("/api/v1/assets/", assetHandler)
 	api.Handle("/api/v1/metadata-diffs", assetHandler)
 	api.Handle("/api/v1/metadata-ai/", metadataAIHandler)
+	api.Handle("/api/v1/datasets", datasetHandler)
+	api.Handle("/api/v1/datasets/", datasetHandler)
 	server := httpserver.New(cfg, logger, api)
 
 	serverErrors := make(chan error, 1)

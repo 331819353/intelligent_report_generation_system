@@ -22,6 +22,8 @@ var envSecretName = regexp.MustCompile(`^[A-Z][A-Z0-9_]{2,100}$`)
 
 // Resolve 将受限的 ENV 引用解析为连接凭据，禁止任意环境变量名注入。
 func (EnvSecretResolver) Resolve(_ context.Context, ref string) (map[string]string, error) {
+	// 数据源记录只保存 env:// 引用；凭据在调用 Connector 前即时解析，不回写控制库，
+	// 错误也不会包含环境变量内容。
 	if !strings.HasPrefix(ref, "env://") {
 		return nil, errors.New("unsupported secret reference")
 	}
@@ -81,6 +83,35 @@ func (c *PythonConnector) Sync(ctx context.Context, source Source) (SyncResult, 
 	return result, nil
 }
 
+// Query 执行服务端生成的参数化只读 SQL，并传递统一查询标识和行数上限。
+func (c *PythonConnector) Query(ctx context.Context, source Source, queryID, sql string, parameters []any, maxRows int) (QueryResult, error) {
+	connection, err := c.connection(ctx, source)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	payload := map[string]any{"connection": connection, "query_id": queryID, "sql": sql, "parameters": parameters, "max_rows": maxRows}
+	var result QueryResult
+	if err := c.call(ctx, "/v1/query", payload, &result); err != nil {
+		return QueryResult{}, err
+	}
+	// 风险告警和节点运行指标只能由可信 Go 查询网关生成；远端 Connector 即使
+	// 返回同名字段也必须丢弃，避免源端内容进入用户响应和控制库审计。
+	result.Warnings = nil
+	result.SourceStats = nil
+	return result, nil
+}
+
+// Cancel 中断 Connector 中使用同一查询标识的在途数据库调用。
+func (c *PythonConnector) Cancel(ctx context.Context, queryID string) (bool, error) {
+	var result struct {
+		Cancelled bool `json:"cancelled"`
+	}
+	if err := c.call(ctx, "/v1/query/cancel", map[string]string{"query_id": queryID}, &result); err != nil {
+		return false, err
+	}
+	return result.Cancelled, nil
+}
+
 // Close 通知远端释放指定连接配置对应的连接池。
 func (c *PythonConnector) Close(ctx context.Context, source Source) error {
 	payload, err := c.connection(ctx, source)
@@ -95,6 +126,8 @@ func (c *PythonConnector) Close(ctx context.Context, source Source) error {
 
 // connection 合并公开连接配置与密钥引用解析出的敏感字段。
 func (c *PythonConnector) connection(ctx context.Context, source Source) (map[string]any, error) {
+	// 连接负载是唯一会短暂包含明文密码的结构，只发送给带内部令牌的隔离服务。
+	// 并发上限来自租户配额而非数据源自定义配置，避免单个源自行放大资源占用。
 	secret, err := c.secrets.Resolve(ctx, source.SecretRef)
 	if err != nil {
 		return nil, err
@@ -112,6 +145,7 @@ func (c *PythonConnector) connection(ctx context.Context, source Source) (map[st
 		"max_concurrent_queries": source.RuntimeQuota.MaxConcurrentQueries,
 	}
 	if source.ID == "" {
+		// 连接测试发生在持久化 ID 缺失的场景时，用租户与代码构成稳定池隔离键。
 		payload["source_key"] = source.TenantID + ":" + source.Code
 	}
 	if source.RuntimeQuota.MaxConnectionsPerSource <= 0 {
@@ -137,8 +171,9 @@ func (c *PythonConnector) connection(ctx context.Context, source Source) (map[st
 	return payload, nil
 }
 
-// call 统一执行带内部令牌的 JSON 请求，并限制响应体大小。
+// call 统一执行带内部令牌的 JSON 请求；非 2xx 响应不回传远端正文，避免驱动错误泄露连接信息。
 func (c *PythonConnector) call(ctx context.Context, path string, input, output any) error {
+	// http.Client 超时是外层兜底；请求上下文仍负责把调用方的超时和主动取消传递到网络层。
 	body, err := json.Marshal(input)
 	if err != nil {
 		return err
@@ -157,5 +192,9 @@ func (c *PythonConnector) call(ctx context.Context, path string, input, output a
 	if response.StatusCode/100 != 2 {
 		return fmt.Errorf("connector service returned %s", response.Status)
 	}
-	return json.NewDecoder(response.Body).Decode(output)
+	// 查询行使用 interface{} 承载值；保留 JSON 数字文本，避免 64 位业务主键在
+	// 进入跨源类型归一化前先被 float64 截断。结构化整数字段仍由解码器正常转换。
+	decoder := json.NewDecoder(response.Body)
+	decoder.UseNumber()
+	return decoder.Decode(output)
 }

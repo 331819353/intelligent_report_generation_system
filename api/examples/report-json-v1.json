@@ -1,0 +1,191 @@
+{
+  "schemaVersion": "1.0",
+  "report": {
+    "id": "report_enterprise_monthly",
+    "code": "enterprise_operation_monthly",
+    "name": "企业经营月度分析报告",
+    "description": "展示企业经营指标、产业趋势和分析结论",
+    "type": "REPORT",
+    "language": "zh-CN",
+    "status": "DRAFT",
+    "visibility": "PRIVATE",
+    "onlineEnabled": true,
+    "pdfArchiveEnabled": true,
+    "defaultRefreshPolicy": "MATERIALIZED",
+    "timezone": "Asia/Shanghai"
+  },
+  "canvas": {
+    "logicalWidth": 1920,
+    "viewportHeight": 1080,
+    "gridColumns": 12,
+    "viewportGridRows": 10,
+    "contentGridRows": "AUTO",
+    "minContentGridRows": 10,
+    "innerGridMultiplier": 4,
+    "scaleMode": "FIT_WIDTH",
+    "verticalOverflow": "SCROLL"
+  },
+  "theme": {
+    "themeId": "theme_business_light",
+    "pageBackground": "#FFFFFF",
+    "componentGap": 8
+  },
+  "parameters": [
+    {
+      "id": "param_stat_month",
+      "code": "stat_month",
+      "name": "统计月份",
+      "dataType": "DATE_MONTH",
+      "required": true,
+      "multiValue": false,
+      "defaultValue": "CURRENT_MONTH_MINUS_1",
+      "scope": "REPORT",
+      "optionSource": {"type": "STATIC"}
+    }
+  ],
+  "dataRequirements": [
+    {
+      "id": "req_revenue_trend",
+      "intent": "展示营业收入趋势并生成可追溯结论",
+      "requiredMetrics": ["营业收入"],
+      "requiredDimensions": ["统计月份"],
+      "preferredDatasetIds": ["dataset_enterprise_revenue"],
+      "resolvedDatasetVersionId": "dsv_enterprise_revenue_v3",
+      "resolvedMetricIds": ["metric_revenue_v2"],
+      "resolutionStatus": "RESOLVED",
+      "confidence": 0.96,
+      "warnings": []
+    }
+  ],
+  "pages": [
+    {
+      "id": "page_overview",
+      "name": "经营概览",
+      "order": 1,
+      "background": {"type": "SOLID", "value": "#FFFFFF"},
+      "contentGridRows": 14,
+      "blocks": [
+        {
+          "id": "block_overview",
+          "grid": {"x": 0, "y": 0, "w": 12, "h": 10},
+          "innerGrid": {"columns": 48, "rows": 40},
+          "locks": {"layout": false, "config": false, "dataSnapshot": false},
+          "sticky": {"enabled": false},
+          "style": {"padding": 2, "background": "TRANSPARENT"},
+          "permissionPolicy": {
+            "requiredPermission": "report:view",
+            "allowedRoleCodes": ["REPORT_VIEWER"],
+            "denyDownload": false
+          },
+          "components": [
+            {
+              "id": "title_main",
+              "type": "TITLE",
+              "name": "主标题",
+              "grid": {"x": 0, "y": 0, "w": 48, "h": 4},
+              "visible": true,
+              "manualLocked": true,
+              "style": {"fontSize": 34, "fontWeight": 700},
+              "binding": {"text": "企业经营月度分析报告"},
+              "interaction": {},
+              "sticky": {"enabled": false},
+              "refreshPolicy": {"mode": "NONE"},
+              "sourceTrace": [
+                {
+                  "sourceType": "USER_REQUIREMENT",
+                  "sourceId": "requirement_001",
+                  "location": "title",
+                  "usage": "CONTENT"
+                }
+              ]
+            },
+            {
+              "id": "chart_revenue_trend",
+              "type": "CHART",
+              "name": "营业收入趋势",
+              "grid": {"x": 0, "y": 4, "w": 32, "h": 36},
+              "visible": true,
+              "manualLocked": false,
+              "style": {"legendPosition": "TOP"},
+              "binding": {
+                "datasetVersionId": "dsv_enterprise_revenue_v3",
+                "metricIds": ["metric_revenue_v2"],
+                "dimensions": [{"fieldId": "field_stat_month", "role": "TIME"}],
+                "chart": {"type": "LINE"}
+              },
+              "interaction": {"clickFilter": false},
+              "sticky": {"enabled": false},
+              "refreshPolicy": {"mode": "INHERIT"},
+              "sourceTrace": []
+            },
+            {
+              "id": "conclusion_overview",
+              "type": "CONCLUSION",
+              "name": "核心结论",
+              "grid": {"x": 32, "y": 4, "w": 16, "h": 36},
+              "visible": true,
+              "manualLocked": false,
+              "style": {"showEvidenceLinks": true},
+              "binding": {
+                "metricIds": ["metric_revenue_v2"],
+                "chartComponentIds": ["chart_revenue_trend"]
+              },
+              "interaction": {"showRevisionHistory": true},
+              "sticky": {"enabled": false},
+              "refreshPolicy": {"mode": "ON_REPORT_RUN"},
+              "sourceTrace": [],
+              "conclusion": {
+                "mode": "LLM_WITH_TEMPLATE",
+                "allowManualEdit": true,
+                "requireEvidence": true,
+                "maxLength": 500
+              }
+            }
+          ]
+        },
+        {
+          "id": "block_source_note",
+          "grid": {"x": 0, "y": 11, "w": 12, "h": 3},
+          "innerGrid": {"columns": 48, "rows": 12},
+          "locks": {"layout": false, "config": false, "dataSnapshot": false},
+          "sticky": {"enabled": false},
+          "components": [
+            {
+              "id": "source_note",
+              "type": "DATA_SOURCE",
+              "name": "数据来源说明",
+              "grid": {"x": 0, "y": 0, "w": 48, "h": 12},
+              "visible": true,
+              "manualLocked": false,
+              "binding": {"datasetVersionIds": ["dsv_enterprise_revenue_v3"]},
+              "sticky": {"enabled": false},
+              "sourceTrace": [
+                {
+                  "sourceType": "MANUAL_EDIT",
+                  "sourceId": "revision_001",
+                  "usage": "CONTENT"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "generation": {
+    "mode": "AI_INITIAL",
+    "jobId": "ai_job_001",
+    "provider": "OPENAI_COMPATIBLE",
+    "modelRef": "configured-model",
+    "promptTemplateId": "report_generation_v1",
+    "sourceFiles": [],
+    "requirementText": "生成企业经营月度报告",
+    "confidence": 0.92,
+    "warnings": [],
+    "generatedAt": "2026-07-15T10:00:00+08:00"
+  },
+  "extensions": {
+    "pdf": {"pageSize": "SCREEN_16_9"},
+    "online": {"enableFullScreen": true}
+  }
+}

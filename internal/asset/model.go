@@ -7,6 +7,7 @@ type Table struct {
 	DataSourceID        string   `json:"dataSourceId"`
 	DataSourceName      string   `json:"dataSourceName"`
 	DataSourceType      string   `json:"dataSourceType"`
+	FileVersionID       string   `json:"fileVersionId,omitempty"`
 	CatalogName         string   `json:"catalogName"`
 	SchemaName          string   `json:"schemaName"`
 	TableName           string   `json:"tableName"`

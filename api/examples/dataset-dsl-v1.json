@@ -1,0 +1,86 @@
+{
+  "dslVersion": "1.0",
+  "dataset": {
+    "code": "monthly_orders",
+    "name": "月度订单数据集",
+    "description": "按月份汇总有效订单金额",
+    "type": "SINGLE_SOURCE"
+  },
+  "nodes": [
+    {
+      "id": "orders",
+      "type": "TABLE",
+      "datasourceId": "11111111-1111-4111-8111-111111111111",
+      "tableId": "22222222-2222-4222-8222-222222222222",
+      "alias": "o",
+      "projection": ["order_date", "order_amount", "order_status"],
+      "sourceFilters": [
+        { "field": "order_status", "operator": "EQUALS", "value": "VALID" }
+      ]
+    }
+  ],
+  "joins": [],
+  "fields": [
+    {
+      "id": "field_stat_month",
+      "code": "stat_month",
+      "name": "统计月份",
+      "role": "TIME",
+      "expression": {
+        "type": "DATE_TRUNC",
+        "unit": "MONTH",
+        "argument": { "type": "FIELD_REF", "nodeId": "orders", "field": "order_date" }
+      },
+      "canonicalType": "DATE",
+      "nullable": false,
+      "visible": true
+    },
+    {
+      "id": "field_revenue",
+      "code": "revenue",
+      "name": "订单金额",
+      "role": "MEASURE",
+      "expression": {
+        "type": "AGGREGATE",
+        "function": "SUM",
+        "argument": { "type": "FIELD_REF", "nodeId": "orders", "field": "order_amount" }
+      },
+      "canonicalType": "DECIMAL",
+      "unit": "元",
+      "nullable": false,
+      "visible": true
+    }
+  ],
+  "filters": [
+    {
+      "id": "filter_start_date",
+      "stage": "PRE_AGGREGATION",
+      "optional": false,
+      "expression": {
+        "type": "GTE",
+        "left": { "type": "FIELD_REF", "nodeId": "orders", "field": "order_date" },
+        "right": { "type": "PARAM_REF", "code": "start_date" }
+      }
+    }
+  ],
+  "groupBy": ["field_stat_month"],
+  "having": [],
+  "sorts": [{ "fieldId": "field_stat_month", "direction": "ASC" }],
+  "parameters": [
+    { "code": "start_date", "name": "开始日期", "dataType": "DATE", "multiValue": false, "required": true }
+  ],
+  "outputGrain": {
+    "description": "每一行代表一个统计月份",
+    "keyFields": ["stat_month"],
+    "timeField": "stat_month",
+    "defaultTimeGrain": "MONTH"
+  },
+  "executionPolicy": {
+    "mode": "REALTIME",
+    "timeoutMs": 5000,
+    "previewLimit": 500,
+    "resultLimit": 10000,
+    "cacheTtlSeconds": 300,
+    "materialization": { "enabled": false }
+  }
+}

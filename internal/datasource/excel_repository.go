@@ -68,6 +68,25 @@ func (r *PostgresRepository) CurrentFileVersion(ctx context.Context, tenantID, a
 	return
 }
 
+// FileVersionByID 按不可变版本标识加载对象位置，禁止查询阶段回退到当前版本。
+func (r *PostgresRepository) FileVersionByID(ctx context.Context, tenantID, versionID string) (out FileVersion, err error) {
+	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
+		var configJSON, summaryJSON []byte
+		err := tx.QueryRow(ctx, `SELECT a.id::text,a.tenant_id::text,v.filename,v.mime_type,a.current_version,v.id::text,v.version,v.size_bytes,v.sha256,v.storage_bucket,v.storage_key,v.parse_config,v.workbook_summary
+			FROM platform.file_asset_versions v JOIN platform.file_assets a ON a.id=v.file_asset_id AND a.tenant_id=v.tenant_id
+			WHERE v.id::text=$1 AND a.deleted_at IS NULL`, versionID).
+			Scan(&out.ID, &out.TenantID, &out.Filename, &out.MimeType, &out.CurrentVersion, &out.VersionID, &out.Version, &out.SizeBytes, &out.SHA256, &out.StorageBucket, &out.StorageKey, &configJSON, &summaryJSON)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(configJSON, &out.ParseConfig); err != nil {
+			return err
+		}
+		return json.Unmarshal(summaryJSON, &out.WorkbookSummary)
+	})
+	return out, err
+}
+
 // ListFileVersions 查询文件资产的全部历史版本。
 func (r *PostgresRepository) ListFileVersions(ctx context.Context, tenantID, assetID string) (out []FileAsset, err error) {
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {

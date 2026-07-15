@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intelligent-report.local/schemas/dataset-dsl-v1.schema.json",
+  "title": "数据集 DSL V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["dslVersion", "dataset", "nodes", "joins", "fields", "filters", "groupBy", "having", "sorts", "parameters", "outputGrain", "executionPolicy"],
+  "properties": {
+    "dslVersion": { "const": "1.0" },
+    "dataset": { "$ref": "#/$defs/dataset" },
+    "nodes": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/node" } },
+    "joins": { "type": "array", "items": { "$ref": "#/$defs/join" } },
+    "fields": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/field" } },
+    "filters": { "type": "array", "items": { "$ref": "#/$defs/filter" } },
+    "groupBy": { "type": "array", "items": { "$ref": "#/$defs/identifier" }, "uniqueItems": true },
+    "having": { "type": "array", "items": { "$ref": "#/$defs/filter" } },
+    "sorts": { "type": "array", "items": { "$ref": "#/$defs/sort" } },
+    "parameters": { "type": "array", "items": { "$ref": "#/$defs/parameter" } },
+    "outputGrain": { "$ref": "#/$defs/outputGrain" },
+    "executionPolicy": { "$ref": "#/$defs/executionPolicy" }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$" },
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "name", "type"],
+      "properties": {
+        "code": { "$ref": "#/$defs/identifier" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "type": { "enum": ["SINGLE_SOURCE", "CROSS_SOURCE"] }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "alias", "projection", "sourceFilters"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "type": { "enum": ["TABLE", "DATASET"] },
+        "datasourceId": { "type": "string", "minLength": 1 },
+        "tableId": { "type": "string", "minLength": 1 },
+        "datasetVersionId": { "type": "string", "minLength": 1 },
+        "fileVersionId": { "type": "string", "minLength": 1 },
+        "alias": { "$ref": "#/$defs/identifier" },
+        "projection": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/identifier" }, "uniqueItems": true },
+        "sourceFilters": { "type": "array", "items": { "$ref": "#/$defs/sourceFilter" } }
+      }
+    },
+    "sourceFilter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "field": { "$ref": "#/$defs/identifier" },
+        "operator": { "enum": ["EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "IN", "NOT_IN", "IS_NULL", "IS_NOT_NULL"] },
+        "value": true,
+        "expression": { "$ref": "#/$defs/expression" }
+      },
+      "anyOf": [
+        { "required": ["field", "operator"] },
+        { "required": ["expression"] }
+      ]
+    },
+    "join": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "leftNodeId", "rightNodeId", "joinType", "cardinality", "conditions", "manualConfirmed"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "leftNodeId": { "$ref": "#/$defs/identifier" },
+        "rightNodeId": { "$ref": "#/$defs/identifier" },
+        "joinType": { "enum": ["INNER", "LEFT", "RIGHT", "FULL"] },
+        "cardinality": { "enum": ["ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_ONE", "MANY_TO_MANY"] },
+        "conditions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/joinCondition" } },
+        "manualConfirmed": { "type": "boolean" }
+      }
+    },
+    "joinCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["leftExpression", "operator", "rightExpression"],
+      "properties": {
+        "leftExpression": { "$ref": "#/$defs/expression" },
+        "operator": { "enum": ["EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE"] },
+        "rightExpression": { "$ref": "#/$defs/expression" }
+      }
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "code", "name", "role", "expression", "canonicalType", "nullable"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "code": { "$ref": "#/$defs/identifier" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "role": { "enum": ["DIMENSION", "MEASURE", "ATTRIBUTE", "TIME", "IDENTIFIER"] },
+        "expression": { "$ref": "#/$defs/expression" },
+        "canonicalType": { "$ref": "#/$defs/dataType" },
+        "semanticType": { "type": "string", "maxLength": 100 },
+        "aggregation": { "type": "string", "maxLength": 40 },
+        "format": { "type": "string", "maxLength": 100 },
+        "unit": { "type": "string", "maxLength": 40 },
+        "nullable": { "type": "boolean" },
+        "visible": { "type": "boolean" }
+      }
+    },
+    "filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "stage", "optional", "expression"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "stage": { "enum": ["PRE_AGGREGATION", "POST_AGGREGATION"] },
+        "optional": { "type": "boolean" },
+        "expression": { "$ref": "#/$defs/expression" }
+      }
+    },
+    "sort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fieldId", "direction"],
+      "properties": {
+        "fieldId": { "$ref": "#/$defs/identifier" },
+        "direction": { "enum": ["ASC", "DESC"] },
+        "nulls": { "enum": ["FIRST", "LAST"] }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "name", "dataType", "multiValue", "required"],
+      "properties": {
+        "code": { "$ref": "#/$defs/identifier" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "dataType": { "$ref": "#/$defs/dataType" },
+        "multiValue": { "type": "boolean" },
+        "required": { "type": "boolean" },
+        "defaultValue": true
+      }
+    },
+    "outputGrain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "keyFields"],
+      "properties": {
+        "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "keyFields": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/identifier" }, "uniqueItems": true },
+        "timeField": { "$ref": "#/$defs/identifier" },
+        "defaultTimeGrain": { "enum": ["DAY", "WEEK", "MONTH", "QUARTER", "YEAR"] }
+      }
+    },
+    "executionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "timeoutMs", "previewLimit", "resultLimit", "cacheTtlSeconds", "materialization"],
+      "properties": {
+        "mode": { "enum": ["REALTIME", "CACHE_PREFERRED", "MATERIALIZED_PREFERRED"] },
+        "timeoutMs": { "type": "integer", "minimum": 100, "maximum": 120000 },
+        "previewLimit": { "type": "integer", "minimum": 1, "maximum": 5000 },
+        "resultLimit": { "type": "integer", "minimum": 1, "maximum": 100000 },
+        "cacheTtlSeconds": { "type": "integer", "minimum": 0, "maximum": 86400 },
+        "materialization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "refreshMode": { "enum": ["MANUAL", "SCHEDULED", "ON_DEMAND"] },
+            "cron": { "type": "string", "maxLength": 120 }
+          }
+        }
+      }
+    },
+    "dataType": { "enum": ["STRING", "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "DATETIME"] },
+    "expression": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["FIELD_REF", "PARAM_REF", "LITERAL", "DATE_TRUNC", "AGGREGATE", "CAST", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "CONCAT", "COALESCE", "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "LIKE", "IN", "NOT_IN", "BETWEEN", "IS_NULL", "IS_NOT_NULL", "AND", "OR", "NOT", "CASE"] },
+        "nodeId": { "$ref": "#/$defs/identifier" },
+        "field": { "$ref": "#/$defs/identifier" },
+        "code": { "$ref": "#/$defs/identifier" },
+        "function": { "enum": ["SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT"] },
+        "unit": { "enum": ["DAY", "WEEK", "MONTH", "QUARTER", "YEAR"] },
+        "targetType": { "$ref": "#/$defs/dataType" },
+        "value": true,
+        "argument": { "$ref": "#/$defs/expression" },
+        "arguments": { "type": "array", "items": { "$ref": "#/$defs/expression" } },
+        "left": { "$ref": "#/$defs/expression" },
+        "right": { "$ref": "#/$defs/expression" },
+        "lower": { "$ref": "#/$defs/expression" },
+        "upper": { "$ref": "#/$defs/expression" },
+        "whens": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["when", "then"],
+            "properties": {
+              "when": { "$ref": "#/$defs/expression" },
+              "then": { "$ref": "#/$defs/expression" }
+            }
+          }
+        },
+        "else": { "$ref": "#/$defs/expression" }
+      }
+    }
+  }
+}

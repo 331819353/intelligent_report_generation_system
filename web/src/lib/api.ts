@@ -1,9 +1,10 @@
-export type APIError = { code: string; message: string; requestId?: string }
+export type APIError = { code: string; message: string; requestId?: string; details?: Array<{ path: string; reason: string }> }
 
 export class RequestError extends Error {
   /** 保留服务端错误结构和 HTTP 状态，便于页面精确展示。 */
   constructor(public readonly detail: APIError, public readonly status: number) {
-    super(detail.message)
+    const first = detail.details?.[0]
+    super(first ? `${detail.message}：${first.path} ${first.reason}` : detail.message)
   }
 }
 

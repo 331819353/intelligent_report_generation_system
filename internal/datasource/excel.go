@@ -36,6 +36,14 @@ type FileVersion struct {
 	ParseConfig   map[string]any
 }
 
+// FileTableData 是从固定文件版本解析出的只读二维表及规范类型。
+type FileTableData struct {
+	Name    string
+	Columns []string
+	Types   map[string]string
+	Rows    [][]string
+}
+
 type ObjectStorage interface {
 	Put(context.Context, string, string, io.Reader, int64, string) error
 	Get(context.Context, string, string) (io.ReadCloser, error)
@@ -55,6 +63,8 @@ func NewExcelManager(repo *PostgresRepository, storage ObjectStorage, bucket str
 
 // Upload 校验配额与文件格式，上传新版本，并在失败时回滚已写入对象。
 func (m *ExcelManager) Upload(ctx context.Context, tenantID, assetID, filename, mimeType string, input io.Reader, size int64, config map[string]any) (FileAsset, error) {
+	// 在写对象存储前完整读取并解析文件：只有能按租户限制安全解析、且能生成稳定
+	// 元数据的内容才会成为版本。请求声明的 size 也必须与实际字节数一致。
 	quota, err := m.repo.Quota(ctx, tenantID)
 	if err != nil {
 		return FileAsset{}, err
@@ -96,7 +106,8 @@ func (m *ExcelManager) Upload(ctx context.Context, tenantID, assetID, filename, 
 	}
 	versionID := uuid.NewString()
 	key := fmt.Sprintf("%s/%s/v%d/%s/%s", tenantID, assetID, version, versionID, filepath.Base(filename))
-	// 先写对象再登记版本；数据库失败时删除孤立对象以保持一致性。
+	// 先写对象再登记版本；数据库失败时删除孤立对象以保持一致性。控制库提交后，
+	// 对象键包含 versionID，后续版本不会覆盖这份不可变内容。
 	if err := m.storage.Put(ctx, m.bucket, key, bytes.NewReader(data), size, mimeType); err != nil {
 		return FileAsset{}, err
 	}
@@ -112,6 +123,52 @@ func (m *ExcelManager) Upload(ctx context.Context, tenantID, assetID, filename, 
 // Current 返回文件资产当前生效版本的对象位置和解析配置。
 func (m *ExcelManager) Current(ctx context.Context, tenantID, assetID string) (FileVersion, error) {
 	return m.repo.CurrentFileVersion(ctx, tenantID, assetID)
+}
+
+// ReadVersionTables 精确读取不可变文件版本，并验证对象大小、摘要和原始解析配置。
+func (m *ExcelManager) ReadVersionTables(ctx context.Context, tenantID, versionID string, maxFileBytes int64) (FileVersion, []FileTableData, error) {
+	// 运行时必须按 versionID 读取不可变对象，不能回退到资产“当前版本”；否则
+	// 已保存数据集会在文件替换后静默改变含义。
+	version, err := m.repo.FileVersionByID(ctx, tenantID, versionID)
+	if err != nil {
+		return FileVersion{}, nil, err
+	}
+	if maxFileBytes <= 0 || version.SizeBytes <= 0 || version.SizeBytes > maxFileBytes {
+		return FileVersion{}, nil, errors.New("file version exceeds execution quota")
+	}
+	body, err := m.storage.Get(ctx, version.StorageBucket, version.StorageKey)
+	if err != nil {
+		return FileVersion{}, nil, err
+	}
+	defer body.Close()
+	// 以元数据声明大小而不是租户总配额作为读取边界；对象若被异常放大，只多读
+	// 一个字节即可失败，避免小文件元数据对应的大对象占满进程内存。
+	data, err := io.ReadAll(io.LimitReader(body, version.SizeBytes+1))
+	if err != nil {
+		return FileVersion{}, nil, err
+	}
+	if int64(len(data)) != version.SizeBytes || int64(len(data)) > maxFileBytes {
+		return FileVersion{}, nil, errors.New("file version object size does not match metadata")
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != version.SHA256 {
+		return FileVersion{}, nil, errors.New("file version checksum verification failed")
+	}
+	limits := spikeexcel.DefaultLimits()
+	limits.MaxFileBytes = maxFileBytes
+	csvOptions, err := parseCSVOptions(version.ParseConfig)
+	if err != nil {
+		return FileVersion{}, nil, err
+	}
+	book, err := spikeexcel.ReadWithOptions(version.Filename, bytes.NewReader(data), version.SizeBytes, limits, csvOptions)
+	if err != nil {
+		return FileVersion{}, nil, err
+	}
+	tables, err := prepareFileTables(book, version.ParseConfig)
+	if err != nil {
+		return FileVersion{}, nil, err
+	}
+	return version, tables, nil
 }
 
 // Versions 按新到旧列出文件资产的历史版本。
@@ -201,6 +258,8 @@ func (c *ExcelConnector) Close(context.Context, Source) error { return nil }
 
 // parseCSVOptions 将持久化的 JSON 配置转换成读取器参数。Excel 文件会忽略这些参数。
 func parseCSVOptions(config map[string]any) (spikeexcel.CSVOptions, error) {
+	// CSV 方言来自持久化配置；字符选项被限制为单个非换行 rune，避免同一版本
+	// 在同步和查询阶段被解析成不同的列边界。
 	options := spikeexcel.DefaultCSVOptions()
 	raw, exists := config["csvOptions"]
 	if !exists || raw == nil {
@@ -258,6 +317,8 @@ func csvRune(value string, aliases map[string]rune) (rune, error) {
 
 // inferWorkbook 把工作簿内容推断为统一的技术元数据，供后续资产同步复用。
 func inferWorkbook(book spikeexcel.Workbook, config map[string]any) ([]MetadataTable, error) {
+	// 元数据推断与运行时 prepareFileTables 共用表头、空行和类型规则。同步阶段
+	// 发布的列白名单因此能在固定版本查询时被完全复现。
 	headerRow := intConfig(config, "headerRow", 1)
 	if headerRow < 1 {
 		return nil, errors.New("headerRow must be greater than zero")
@@ -309,8 +370,53 @@ func inferWorkbook(book spikeexcel.Workbook, config map[string]any) ([]MetadataT
 	return tables, nil
 }
 
+// prepareFileTables 使用与元数据同步相同的表头、空行和类型规则生成执行输入。
+func prepareFileTables(book spikeexcel.Workbook, config map[string]any) ([]FileTableData, error) {
+	// 保留原始单元格文本，只附带同步阶段确定的规范类型；真正的类型转换在查询
+	// 求值时发生，错误便可以准确定位到工作表、行和列。
+	metadata, err := inferWorkbook(book, config)
+	if err != nil {
+		return nil, err
+	}
+	metadataByName := make(map[string]MetadataTable, len(metadata))
+	for _, table := range metadata {
+		metadataByName[table.Name] = table
+	}
+	headerRow := intConfig(config, "headerRow", 1)
+	selected := stringSet(config["selectedSheets"])
+	result := make([]FileTableData, 0, len(metadata))
+	for _, sheet := range book.Sheets {
+		if len(selected) > 0 && !selected[sheet.Name] {
+			continue
+		}
+		definition, ok := metadataByName[sheet.Name]
+		if !ok || len(sheet.Rows) < headerRow {
+			continue
+		}
+		columns := deduplicateHeaders(sheet.Rows[headerRow-1])
+		rows := append([][]string(nil), sheet.Rows[headerRow:]...)
+		if boolConfig(config, "skipEmptyRows", true) {
+			filtered := make([][]string, 0, len(rows))
+			for _, row := range rows {
+				if !emptyRow(row) {
+					filtered = append(filtered, row)
+				}
+			}
+			rows = filtered
+		}
+		types := make(map[string]string, len(definition.Columns))
+		for _, column := range definition.Columns {
+			types[column.Name] = column.CanonicalType
+		}
+		result = append(result, FileTableData{Name: sheet.Name, Columns: columns, Types: types, Rows: rows})
+	}
+	return result, nil
+}
+
 // deduplicateHeaders 补全空表头并为重复名称追加稳定序号。
 func deduplicateHeaders(row []string) []string {
+	// 空表头生成 column_N，重复表头追加出现序号。同一文件重复同步时会得到相同
+	// 技术列名，避免已保存 DSL 因表头规范化漂移而失效。
 	seen := map[string]int{}
 	out := make([]string, len(row))
 	for index, value := range row {
@@ -329,6 +435,8 @@ func deduplicateHeaders(row []string) []string {
 
 // inferType 按布尔、整数、小数、日期时间的优先级推断规范类型。
 func inferType(values []string) string {
+	// 采用“全部非空样本都能解析”的最窄共同类型；只要出现混合值就回退 TEXT，
+	// 避免少数异常单元格直到预览阶段才暴露为批量类型错误。
 	if len(values) == 0 {
 		return "TEXT"
 	}
