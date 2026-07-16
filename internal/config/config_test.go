@@ -45,3 +45,46 @@ func TestLoadAllowsMissingAIKeyAndRejectsInvalidThreshold(t *testing.T) {
 		t.Fatal("invalid AI confidence threshold was accepted")
 	}
 }
+
+func TestLoadParsesAIOrchestrationLimits(t *testing.T) {
+	t.Setenv("AI_API_KEY", "")
+	t.Setenv("AI_ATTEMPT_TIMEOUT", "7s")
+	t.Setenv("AI_MAX_ATTEMPTS", "4")
+	t.Setenv("AI_MAX_INPUT_BYTES", "131072")
+	t.Setenv("AI_INPUT_COST_MICROS_PER_MILLION_TOKENS", "125000")
+	t.Setenv("AI_OUTPUT_COST_MICROS_PER_MILLION_TOKENS", "500000")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AIAttemptTimeout != 7*time.Second || cfg.AIMaxAttempts != 4 || cfg.AIMaxInputBytes != 131072 {
+		t.Fatalf("AI 编排边界未正确加载: %#v", cfg)
+	}
+	if cfg.AIInputCostMicrosPerMTokens != 125000 || cfg.AIOutputCostMicrosPerMTokens != 500000 {
+		t.Fatalf("AI 成本配置未正确加载: %#v", cfg)
+	}
+}
+
+func TestLoadRejectsUnsafeAIOrchestrationLimits(t *testing.T) {
+	t.Setenv("AI_MAX_ATTEMPTS", "6")
+	if _, err := Load(); err == nil {
+		t.Fatal("超过上限的 AI 重试次数未被拒绝")
+	}
+	t.Setenv("AI_MAX_ATTEMPTS", "3")
+	t.Setenv("AI_INPUT_COST_MICROS_PER_MILLION_TOKENS", "-1")
+	if _, err := Load(); err == nil {
+		t.Fatal("负数 AI 成本配置未被拒绝")
+	}
+}
+
+func TestLoadRejectsRemotePlaintextAIEndpoint(t *testing.T) {
+	t.Setenv("AI_API_KEY", "configured-secret")
+	t.Setenv("AI_BASE_URL", "http://provider.example.test/v1")
+	if _, err := Load(); err == nil {
+		t.Fatal("远程明文 HTTP Provider 地址未被拒绝")
+	}
+	t.Setenv("AI_BASE_URL", "http://127.0.0.1:11434/v1")
+	if _, err := Load(); err != nil {
+		t.Fatalf("本机开发 Provider 地址应被允许: %v", err)
+	}
+}

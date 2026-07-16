@@ -20,7 +20,7 @@ type metadataProvider struct{ output metadataai.CompletionOutput }
 func (metadataProvider) Name() string     { return "integration" }
 func (metadataProvider) Model() string    { return "metadata-test-v1" }
 func (metadataProvider) Configured() bool { return true }
-func (p metadataProvider) Complete(context.Context, metadataai.CompletionInput) (metadataai.ProviderResult, error) {
+func (p metadataProvider) Complete(context.Context, string, string, metadataai.CompletionInput) (metadataai.ProviderResult, error) {
 	return metadataai.ProviderResult{Output: p.output, Model: p.Model(), ModelVersion: "2026-07-15", Usage: metadataai.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30}}, nil
 }
 

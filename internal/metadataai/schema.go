@@ -1,5 +1,7 @@
 package metadataai
 
+import "sort"
+
 // OutputSchema 提供给支持严格结构化输出的模型，同时由 ValidateOutput 在本地复核；
 // 无论上游是否声明遵守 Schema，本地域校验始终是最终可信边界。
 var OutputSchema = map[string]any{
@@ -43,5 +45,6 @@ func mapKeys(values map[string]bool) []string {
 	for key := range values {
 		keys = append(keys, key)
 	}
+	sort.Strings(keys)
 	return keys
 }

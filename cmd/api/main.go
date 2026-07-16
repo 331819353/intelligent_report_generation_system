@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"intelligent-report-generation-system/internal/access"
+	aiplatform "intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/asset"
 	"intelligent-report-generation-system/internal/auth"
 	"intelligent-report-generation-system/internal/config"
@@ -68,7 +69,18 @@ func main() {
 	dataSourceHandler := datasource.NewHandler(authService, accessService, dataSourceService)
 	excelHandler := datasource.NewExcelHandler(authService, accessService, excelManager)
 	assetHandler := asset.NewHandler(authService, accessService, asset.NewRepository(pool))
-	metadataAIProvider := metadataai.NewOpenAICompatibleProvider(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel, &http.Client{Timeout: cfg.AIRequestTimeout})
+	modelProvider := aiplatform.NewOpenAICompatibleProvider(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel, &http.Client{Timeout: cfg.AIAttemptTimeout})
+	aiService, err := aiplatform.NewService(aiplatform.NewPostgresStore(pool), modelProvider, aiplatform.ServiceOptions{
+		Timeout: cfg.AIRequestTimeout, AttemptTimeout: cfg.AIAttemptTimeout,
+		MaxAttempts: cfg.AIMaxAttempts, BaseRetryDelay: cfg.AIRetryBaseDelay, MaxRetryDelay: cfg.AIRetryMaxDelay,
+		MaxInputBytes: cfg.AIMaxInputBytes, InputCostMicrosPerMTokens: cfg.AIInputCostMicrosPerMTokens,
+		OutputCostMicrosPerMTokens: cfg.AIOutputCostMicrosPerMTokens,
+	})
+	if err != nil {
+		logger.Error("initialize AI orchestration", "error", err)
+		os.Exit(1)
+	}
+	metadataAIProvider := metadataai.NewOrchestratedProvider(aiService)
 	metadataAIService := metadataai.NewService(metadataai.NewPostgresStore(pool), metadataAIProvider, cfg.AIRequestTimeout, cfg.AIConfidenceThreshold)
 	metadataAIHandler := metadataai.NewHandler(authService, accessService, metadataAIService)
 	datasetStore := dataset.NewPostgresStore(pool)

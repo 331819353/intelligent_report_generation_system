@@ -37,6 +37,19 @@ DECLARE
   report_visible integer;
   report_a uuid;
   invalid_subject_rejected boolean := false;
+  ai_request_a uuid;
+  ai_request_failed uuid;
+  ai_request_canceled uuid;
+  ai_request_status text;
+  ai_policy_enabled boolean;
+  ai_policy_purpose_count integer;
+  ai_policy_version bigint;
+  ai_policy_visible integer;
+  ai_request_visible integer;
+  ai_request_immutable boolean := false;
+  ai_request_constraint boolean := false;
+  ai_accounted_tokens bigint;
+  ai_accounted_cost_micros bigint;
 BEGIN
   -- 构造两个租户的最小数据集，验证跨租户访问始终被拒绝。
   INSERT INTO platform.tenants(code, name) VALUES ('verify-a', 'Verify Tenant A') RETURNING id INTO tenant_a;
@@ -56,6 +69,88 @@ BEGIN
   SELECT count(*) INTO visible_count FROM platform.users;
   IF visible_count <> 1 THEN
     RAISE EXCEPTION 'tenant isolation failed: expected 1 visible user, got %', visible_count;
+  END IF;
+
+  -- 新租户必须自动获得默认禁用策略；显式启用后才能登记不含正文的 AI 调用审计。
+  SELECT enabled,cardinality(allowed_purposes),version
+  INTO ai_policy_enabled,ai_policy_purpose_count,ai_policy_version
+  FROM platform.ai_tenant_policies
+  WHERE tenant_id=tenant_a;
+  IF ai_policy_enabled OR ai_policy_purpose_count <> 1 OR ai_policy_version <> 1 THEN
+    RAISE EXCEPTION 'new tenant AI policy default is invalid';
+  END IF;
+  UPDATE platform.ai_tenant_policies SET enabled=true,
+    allowed_purposes=ARRAY['REPORT_GENERATION','BLOCK_EDIT']::text[] WHERE tenant_id=tenant_a;
+  SELECT version INTO ai_policy_version FROM platform.ai_tenant_policies WHERE tenant_id=tenant_a;
+  IF ai_policy_version <> 2 THEN
+    RAISE EXCEPTION 'AI policy version was not incremented';
+  END IF;
+  INSERT INTO platform.ai_requests(
+    tenant_id,actor_user_id,purpose,resource_type,resource_id,provider,model_name,prompt_version,
+    input_hash,input_bytes,redaction_count,reserved_tokens,reserved_cost_micros,max_attempts
+  ) VALUES (
+    tenant_a,user_a,'REPORT_GENERATION','REPORT','verify-report','verify-provider','verify-model','verify-v1',
+    repeat('a',64),128,2,256,100,1
+  ) RETURNING id INTO ai_request_a;
+  UPDATE platform.ai_requests SET
+    status='SUCCEEDED',provider_model='verify-model',provider_request_id=repeat('c',64),
+    finish_reason='stop',attempts=1,prompt_tokens=10,completion_tokens=5,total_tokens=15,
+    cost_micros=25,latency_ms=50,completed_at=now()
+  WHERE id=ai_request_a;
+  BEGIN
+    UPDATE platform.ai_requests SET cost_micros=26 WHERE id=ai_request_a;
+  EXCEPTION WHEN raise_exception THEN
+    ai_request_immutable := true;
+  END;
+  IF NOT ai_request_immutable THEN
+    RAISE EXCEPTION 'terminal AI request audit update was accepted';
+  END IF;
+  SELECT accounted_tokens,accounted_cost_micros
+  INTO ai_accounted_tokens,ai_accounted_cost_micros
+  FROM platform.ai_requests WHERE id=ai_request_a;
+  IF ai_accounted_tokens <> 256 OR ai_accounted_cost_micros <> 100 THEN
+    RAISE EXCEPTION 'successful AI request released its conservative reservation';
+  END IF;
+  INSERT INTO platform.ai_requests(
+    tenant_id,actor_user_id,purpose,provider,model_name,prompt_version,input_hash,input_bytes,
+    reserved_tokens,reserved_cost_micros,max_attempts
+  ) VALUES (
+    tenant_a,user_a,'BLOCK_EDIT','verify-provider','verify-model','verify-v1',repeat('b',64),128,256,100,2
+  ) RETURNING id INTO ai_request_failed;
+  UPDATE platform.ai_requests SET
+    status='FAILED',error_code='AI_PROVIDER_FAILED',attempts=2,latency_ms=50,completed_at=now()
+  WHERE id=ai_request_failed;
+  SELECT accounted_tokens,accounted_cost_micros
+  INTO ai_accounted_tokens,ai_accounted_cost_micros
+  FROM platform.ai_requests WHERE id=ai_request_failed;
+  IF ai_accounted_tokens <> 256 OR ai_accounted_cost_micros <> 100 THEN
+    RAISE EXCEPTION 'failed AI request did not consume reserved quota';
+  END IF;
+  INSERT INTO platform.ai_requests(
+    tenant_id,actor_user_id,purpose,provider,model_name,prompt_version,input_hash,input_bytes,
+    reserved_tokens,reserved_cost_micros,max_attempts
+  ) VALUES (
+    tenant_a,user_a,'BLOCK_EDIT','verify-provider','verify-model','verify-v1',repeat('d',64),128,256,100,1
+  ) RETURNING id INTO ai_request_canceled;
+  UPDATE platform.ai_requests SET
+    status='CANCELED',error_code='AI_REQUEST_CANCELED',attempts=1,latency_ms=10,completed_at=now()
+  WHERE id=ai_request_canceled;
+  SELECT status INTO ai_request_status FROM platform.ai_requests WHERE id=ai_request_canceled;
+  IF ai_request_status <> 'CANCELED' THEN
+    RAISE EXCEPTION 'canceled AI request did not reach canceled terminal state';
+  END IF;
+  BEGIN
+    INSERT INTO platform.ai_requests(
+      tenant_id,actor_user_id,purpose,provider,model_name,prompt_version,input_hash,input_bytes,
+      reserved_tokens,reserved_cost_micros,max_attempts
+    ) VALUES (
+      tenant_a,user_a,'REPORT_GENERATION','verify-provider','verify-model','verify-v1','raw-prompt',128,256,100,1
+    );
+  EXCEPTION WHEN check_violation THEN
+    ai_request_constraint := true;
+  END;
+  IF NOT ai_request_constraint THEN
+    RAISE EXCEPTION 'invalid AI request digest was accepted';
   END IF;
 
   BEGIN
@@ -122,6 +217,16 @@ BEGIN
   IF row_policy_visible <> 0 THEN
     RAISE EXCEPTION 'row policy leaked across tenants';
   END IF;
+  SELECT count(*),bool_or(enabled)::boolean
+  INTO ai_policy_visible,ai_policy_enabled
+  FROM platform.ai_tenant_policies;
+  IF ai_policy_visible <> 1 OR ai_policy_enabled THEN
+    RAISE EXCEPTION 'tenant B AI policy default or isolation failed';
+  END IF;
+  SELECT count(*) INTO ai_request_visible FROM platform.ai_requests;
+  IF ai_request_visible <> 0 THEN
+    RAISE EXCEPTION 'AI request audit leaked across tenants';
+  END IF;
 
   BEGIN
     INSERT INTO platform.object_permissions(tenant_id, subject_type, subject_id, object_type, object_id, action)
@@ -137,6 +242,11 @@ BEGIN
   SELECT count(*) INTO visible_count FROM platform.users;
   IF visible_count <> 0 THEN
     RAISE EXCEPTION 'RLS without tenant context exposed % users', visible_count;
+  END IF;
+  SELECT count(*) INTO ai_policy_visible FROM platform.ai_tenant_policies;
+  SELECT count(*) INTO ai_request_visible FROM platform.ai_requests;
+  IF ai_policy_visible <> 0 OR ai_request_visible <> 0 THEN
+    RAISE EXCEPTION 'RLS without tenant context exposed AI policy or request audit rows';
   END IF;
 END
 $$;

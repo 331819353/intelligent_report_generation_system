@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	aiplatform "intelligent-report-generation-system/internal/ai"
 )
 
 var (
@@ -68,12 +70,17 @@ func (s *Service) Generate(ctx context.Context, tenantID, actorID, tableID strin
 	// 模型调用使用独立超时，任务失败仍需回到原请求上下文记录最终状态。
 	started := s.now()
 	callCtx, cancel := context.WithTimeout(ctx, s.timeout)
-	providerResult, callErr := s.provider.Complete(callCtx, input)
+	providerResult, callErr := s.provider.Complete(callCtx, tenantID, actorID, input)
 	cancel()
 	job.LatencyMS = s.now().Sub(started).Milliseconds()
 	if callErr != nil {
 		code := "PROVIDER_ERROR"
-		if errors.Is(callErr, context.DeadlineExceeded) || errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+		switch {
+		case errors.Is(callErr, aiplatform.ErrTenantAIForbidden):
+			code = "TENANT_AI_FORBIDDEN"
+		case errors.Is(callErr, aiplatform.ErrQuotaExceeded):
+			code = "QUOTA_EXCEEDED"
+		case errors.Is(callErr, context.DeadlineExceeded) || errors.Is(callCtx.Err(), context.DeadlineExceeded):
 			code = "TIMEOUT"
 		}
 		job, callErr = s.recordFailure(ctx, tenantID, actorID, job, code, callErr)

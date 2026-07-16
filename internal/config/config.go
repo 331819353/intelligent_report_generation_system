@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -11,34 +12,41 @@ import (
 )
 
 type Config struct {
-	Environment           string
-	LogLevel              string
-	HTTPAddr              string
-	ReadHeaderTimeout     time.Duration
-	ReadTimeout           time.Duration
-	WriteTimeout          time.Duration
-	IdleTimeout           time.Duration
-	ShutdownTimeout       time.Duration
-	WorkerPollInterval    time.Duration
-	AIBaseURL             string
-	AIModel               string
-	AIAPIKey              string
-	AIRequestTimeout      time.Duration
-	AIConfidenceThreshold float64
-	DatabaseURL           string
-	RedisURL              string
-	MinIOEndpoint         string
-	MinIOAccessKey        string
-	MinIOSecretKey        string
-	MinIOUseSSL           bool
-	MinIOUploadsBucket    string
-	AuthTokenIssuer       string
-	AuthAccessSecret      string
-	AuthAccessTTL         time.Duration
-	AuthRefreshTTL        time.Duration
-	AuthBcryptCost        int
-	ConnectorURL          string
-	ConnectorToken        string
+	Environment                  string
+	LogLevel                     string
+	HTTPAddr                     string
+	ReadHeaderTimeout            time.Duration
+	ReadTimeout                  time.Duration
+	WriteTimeout                 time.Duration
+	IdleTimeout                  time.Duration
+	ShutdownTimeout              time.Duration
+	WorkerPollInterval           time.Duration
+	AIBaseURL                    string
+	AIModel                      string
+	AIAPIKey                     string
+	AIRequestTimeout             time.Duration
+	AIAttemptTimeout             time.Duration
+	AIRetryBaseDelay             time.Duration
+	AIRetryMaxDelay              time.Duration
+	AIMaxAttempts                int
+	AIMaxInputBytes              int
+	AIInputCostMicrosPerMTokens  int64
+	AIOutputCostMicrosPerMTokens int64
+	AIConfidenceThreshold        float64
+	DatabaseURL                  string
+	RedisURL                     string
+	MinIOEndpoint                string
+	MinIOAccessKey               string
+	MinIOSecretKey               string
+	MinIOUseSSL                  bool
+	MinIOUploadsBucket           string
+	AuthTokenIssuer              string
+	AuthAccessSecret             string
+	AuthAccessTTL                time.Duration
+	AuthRefreshTTL               time.Duration
+	AuthBcryptCost               int
+	ConnectorURL                 string
+	ConnectorToken               string
 }
 
 // Load 从环境变量构建运行配置，并在返回前完成完整校验。
@@ -57,6 +65,11 @@ func Load() (Config, error) {
 		AIModel:               envOrDefault("AI_MODEL", "deepseek-v3"),
 		AIAPIKey:              os.Getenv("AI_API_KEY"),
 		AIRequestTimeout:      25 * time.Second,
+		AIAttemptTimeout:      8 * time.Second,
+		AIRetryBaseDelay:      200 * time.Millisecond,
+		AIRetryMaxDelay:       2 * time.Second,
+		AIMaxAttempts:         3,
+		AIMaxInputBytes:       256 << 10,
 		AIConfidenceThreshold: 0.8,
 		DatabaseURL:           envOrDefault("DATABASE_URL", "postgres://report_app:local_report_password@127.0.0.1:5432/intelligent_report?sslmode=disable"),
 		RedisURL:              envOrDefault("REDIS_URL", "redis://:local_redis_password@127.0.0.1:6379/0"),
@@ -85,6 +98,9 @@ func Load() (Config, error) {
 		{"SHUTDOWN_TIMEOUT", &cfg.ShutdownTimeout},
 		{"WORKER_POLL_INTERVAL", &cfg.WorkerPollInterval},
 		{"AI_REQUEST_TIMEOUT", &cfg.AIRequestTimeout},
+		{"AI_ATTEMPT_TIMEOUT", &cfg.AIAttemptTimeout},
+		{"AI_RETRY_BASE_DELAY", &cfg.AIRetryBaseDelay},
+		{"AI_RETRY_MAX_DELAY", &cfg.AIRetryMaxDelay},
 		{"AUTH_ACCESS_TOKEN_TTL", &cfg.AuthAccessTTL},
 		{"AUTH_REFRESH_TOKEN_TTL", &cfg.AuthRefreshTTL},
 	}
@@ -101,6 +117,38 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("parse AI_CONFIDENCE_THRESHOLD: %w", err)
 		}
 		cfg.AIConfidenceThreshold = threshold
+	}
+	integerOptions := []struct {
+		key    string
+		target *int
+	}{
+		{"AI_MAX_ATTEMPTS", &cfg.AIMaxAttempts},
+		{"AI_MAX_INPUT_BYTES", &cfg.AIMaxInputBytes},
+	}
+	for _, item := range integerOptions {
+		if value := os.Getenv(item.key); value != "" {
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return Config{}, fmt.Errorf("parse %s: %w", item.key, err)
+			}
+			*item.target = parsed
+		}
+	}
+	costOptions := []struct {
+		key    string
+		target *int64
+	}{
+		{"AI_INPUT_COST_MICROS_PER_MILLION_TOKENS", &cfg.AIInputCostMicrosPerMTokens},
+		{"AI_OUTPUT_COST_MICROS_PER_MILLION_TOKENS", &cfg.AIOutputCostMicrosPerMTokens},
+	}
+	for _, item := range costOptions {
+		if value := os.Getenv(item.key); value != "" {
+			parsed, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				return Config{}, fmt.Errorf("parse %s: %w", item.key, err)
+			}
+			*item.target = parsed
+		}
 	}
 
 	for _, item := range durations {
@@ -138,12 +186,23 @@ func (c Config) Validate() error {
 	if c.AIRequestTimeout <= 0 || c.AIRequestTimeout >= c.WriteTimeout {
 		return errors.New("AI_REQUEST_TIMEOUT must be greater than zero and less than API_WRITE_TIMEOUT")
 	}
+	if c.AIAttemptTimeout <= 0 || c.AIAttemptTimeout > c.AIRequestTimeout {
+		return errors.New("AI_ATTEMPT_TIMEOUT must be greater than zero and at most AI_REQUEST_TIMEOUT")
+	}
+	if c.AIMaxAttempts < 1 || c.AIMaxAttempts > 5 || c.AIRetryBaseDelay <= 0 || c.AIRetryMaxDelay < c.AIRetryBaseDelay {
+		return errors.New("AI retry configuration is invalid")
+	}
+	if c.AIMaxInputBytes < 1024 || c.AIMaxInputBytes > 4<<20 {
+		return errors.New("AI_MAX_INPUT_BYTES must be between 1024 and 4194304")
+	}
+	if c.AIInputCostMicrosPerMTokens < 0 || c.AIOutputCostMicrosPerMTokens < 0 {
+		return errors.New("AI token cost configuration must not be negative")
+	}
 	if c.AIConfidenceThreshold < 0 || c.AIConfidenceThreshold > 1 {
 		return errors.New("AI_CONFIDENCE_THRESHOLD must be between zero and one")
 	}
 	if strings.TrimSpace(c.AIAPIKey) != "" {
-		parsed, err := url.Parse(c.AIBaseURL)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || strings.TrimSpace(c.AIModel) == "" {
+		if !validAIBaseURL(c.AIBaseURL) || strings.TrimSpace(c.AIModel) == "" {
 			return errors.New("AI_BASE_URL or AI_MODEL is invalid")
 		}
 	}
@@ -160,6 +219,26 @@ func (c Config) Validate() error {
 		return errors.New("connector service URL or internal token is invalid")
 	}
 	return nil
+}
+
+// validAIBaseURL 禁止携带凭据、查询和片段；明文 HTTP 只允许本机开发端点。
+func validAIBaseURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Opaque != "" {
+		return false
+	}
+	if parsed.Scheme == "https" {
+		return true
+	}
+	if parsed.Scheme != "http" {
+		return false
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // envOrDefault 返回去除首尾空白的环境变量值或指定默认值。

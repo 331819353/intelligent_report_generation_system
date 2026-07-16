@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	aiplatform "intelligent-report-generation-system/internal/ai"
 )
 
 type serviceStore struct {
@@ -51,7 +53,7 @@ type serviceProvider struct {
 func (serviceProvider) Name() string     { return "test" }
 func (serviceProvider) Model() string    { return "test-model" }
 func (serviceProvider) Configured() bool { return true }
-func (p serviceProvider) Complete(ctx context.Context, _ CompletionInput) (ProviderResult, error) {
+func (p serviceProvider) Complete(ctx context.Context, _, _ string, _ CompletionInput) (ProviderResult, error) {
 	if p.wait {
 		<-ctx.Done()
 		return ProviderResult{}, ctx.Err()
@@ -92,6 +94,16 @@ func TestGenerateConvertsPersistenceFailureToFailedJob(t *testing.T) {
 	service := NewService(store, serviceProvider{output: output}, time.Second, 0.8)
 	result, err := service.Generate(context.Background(), "tenant", "actor", "table-1")
 	if err == nil || store.failedCode != "PERSISTENCE_ERROR" || result.Job.Status != "FAILED" {
+		t.Fatalf("error=%v failedCode=%s result=%#v", err, store.failedCode, result)
+	}
+}
+
+func TestGenerateRecordsTenantQuotaFailureWithoutSavingSuggestions(t *testing.T) {
+	input, _ := validCompletion()
+	store := &serviceStore{input: input}
+	service := NewService(store, serviceProvider{err: aiplatform.ErrQuotaExceeded}, time.Second, 0.8)
+	result, err := service.Generate(context.Background(), "tenant", "actor", "table-1")
+	if !errors.Is(err, aiplatform.ErrQuotaExceeded) || store.saveCalled || store.failedCode != "QUOTA_EXCEEDED" || result.Job.Status != "FAILED" {
 		t.Fatalf("error=%v failedCode=%s result=%#v", err, store.failedCode, result)
 	}
 }

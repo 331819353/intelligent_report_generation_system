@@ -16,6 +16,8 @@
 
 未配置 `AI_API_KEY` 时返回 `503 AI_PROVIDER_UNAVAILABLE`，不影响其他数据源和资产接口。超时返回 `504 AI_TIMEOUT`，非法结构化输出返回 `502 AI_INVALID_OUTPUT`。
 
+所有模型调用统一经过 [AI 编排基础设施](ai-orchestration.md) 的租户策略、配额预留、有限重试、输入脱敏和无正文审计。租户未启用该用途或操作者已失效时返回 `403 AI_TENANT_FORBIDDEN`；日请求、月 Token 或月费用不足时返回 `429 AI_QUOTA_EXCEEDED`。这两类失败会收口已经创建的元数据 AI 任务，但不会调用模型或写入建议。
+
 ## 查询建议
 
 `GET /api/v1/metadata-ai/suggestions?jobId={jobId}&status=PENDING&limit=100`
@@ -34,4 +36,4 @@
 
 ## 审计与安全
 
-任务记录 Provider、模型、提示词版本、SHA-256 输入哈希、延迟、Prompt/Completion/Total Token、结构化结果和状态。审计日志记录开始、完成和人工决策。API Key、原始提示词、数据样本和失败响应正文均不落库。
+领域任务记录 Provider、模型、提示词版本、SHA-256 输入哈希、延迟、Prompt/Completion/Total Token、结构化结果和状态。通用 `platform.ai_requests` 另记录跨用途配额、费用、尝试次数和稳定错误码。审计日志记录开始、完成和人工决策。API Key、原始提示词、图片地址、数据样本和失败响应正文均不落库。
