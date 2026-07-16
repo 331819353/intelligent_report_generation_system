@@ -77,6 +77,7 @@ type RunSourceRecord struct {
 // RunRecord 仅保存查询摘要，不含 SQL、参数明文或结果样本。
 type RunRecord struct {
 	ID, TenantID, DatasetID, DatasetVersionID, ActorID, SourceID string
+	MetricID, MetricVersionID                                    string
 	RunType                                                      string
 	PlanHash, ParameterHash                                      string
 	Sources                                                      []RunSourceRecord

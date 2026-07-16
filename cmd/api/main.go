@@ -21,6 +21,7 @@ import (
 	"intelligent-report-generation-system/internal/filequery"
 	"intelligent-report-generation-system/internal/httpserver"
 	"intelligent-report-generation-system/internal/metadataai"
+	"intelligent-report-generation-system/internal/metric"
 	"intelligent-report-generation-system/internal/observability"
 	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/policy"
@@ -100,6 +101,9 @@ func main() {
 	queryService.SetFederatedExecutor(federation.NewExecutor(queryConnectors, excelManager))
 	datasetService.SetPublicationValidator(queryService)
 	datasetHandler := dataset.NewHandler(authService, accessService, datasetService, queryService)
+	metricService := metric.NewService(metric.NewPostgresStore(pool), queryService)
+	metricService.SetPermissionChecker(accessService)
+	metricHandler := metric.NewHandler(authService, accessService, metricService)
 	reportService := report.NewService(report.NewPostgresStore(pool))
 	reportHandler := report.NewHandler(authService, accessService, reportService)
 	api := http.NewServeMux()
@@ -119,6 +123,8 @@ func main() {
 	api.Handle("/api/v1/metadata-ai/", metadataAIHandler)
 	api.Handle("/api/v1/datasets", datasetHandler)
 	api.Handle("/api/v1/datasets/", datasetHandler)
+	api.Handle("/api/v1/metrics", metricHandler)
+	api.Handle("/api/v1/metrics/", metricHandler)
 	api.Handle("/api/v1/reports", reportHandler)
 	api.Handle("/api/v1/reports/", reportHandler)
 	server := httpserver.New(cfg, logger, api)

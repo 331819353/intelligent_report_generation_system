@@ -68,6 +68,17 @@ describe('buildPreviewParameters', () => {
 })
 
 describe('数据集发布版本 API', () => {
+  test('指标编辑器读取数据集摘要目录时携带分页并禁用缓存', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ items: [], total: 0, limit: 25, offset: 50 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await datasetAPI.list(25, 50)
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('/api/v1/datasets?limit=25&offset=50')
+    expect(init.cache).toBe('no-store')
+  })
+
   test('读取可变数据集聚合时禁用缓存', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ id: 'dataset-1' }))
     vi.stubGlobal('fetch', fetchMock)

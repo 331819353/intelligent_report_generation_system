@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "1.0",
+  "metric": {
+    "code": "monthly_sales_amount",
+    "name": "月销售额",
+    "description": "按月份和地区汇总已确认订单金额。",
+    "type": "ATOMIC"
+  },
+  "datasetId": "11111111-1111-4111-8111-111111111111",
+  "datasetVersionId": "22222222-2222-4222-8222-222222222222",
+  "expression": {
+    "type": "FIELD_REF",
+    "fieldId": "order_amount"
+  },
+  "aggregation": "SUM",
+  "unit": "元",
+  "numberFormat": "#,##0.00",
+  "timeFieldId": "order_date",
+  "timeGrain": "MONTH",
+  "additivity": "ADDITIVE",
+  "nonAdditiveDimensionFieldIds": [],
+  "allowedDimensions": [
+    {
+      "fieldId": "region",
+      "name": "地区",
+      "hierarchyFieldIds": [],
+      "sortDirection": "ASC",
+      "nullLabel": "未知地区"
+    },
+    {
+      "fieldId": "order_date",
+      "name": "月份",
+      "hierarchyFieldIds": [],
+      "sortDirection": "ASC",
+      "nullLabel": "未知日期"
+    }
+  ],
+  "decimalScale": 2,
+  "roundingMode": "HALF_UP",
+  "nullHandling": "IGNORE",
+  "divisionByZero": "NULL"
+}

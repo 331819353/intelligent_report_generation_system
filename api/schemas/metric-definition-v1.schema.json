@@ -1,0 +1,377 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intelligent-report.local/schemas/metric-definition-v1.schema.json",
+  "title": "指标定义 v1",
+  "description": "指标定义的机器可校验合同。JSON Schema 只覆盖结构约束，数据集字段、依赖版本、环路和执行边界仍由服务端语义校验负责。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "metric",
+    "datasetId",
+    "datasetVersionId",
+    "expression",
+    "aggregation",
+    "unit",
+    "numberFormat",
+    "timeGrain",
+    "additivity",
+    "nonAdditiveDimensionFieldIds",
+    "allowedDimensions",
+    "decimalScale",
+    "roundingMode",
+    "nullHandling",
+    "divisionByZero"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0",
+      "description": "指标定义合同版本。"
+    },
+    "metric": {
+      "$ref": "#/$defs/metricDescriptor"
+    },
+    "datasetId": {
+      "$ref": "#/$defs/uuid",
+      "description": "指标所属数据集标识。"
+    },
+    "datasetVersionId": {
+      "$ref": "#/$defs/uuid",
+      "description": "精确绑定的已发布数据集版本标识，不会自动回退到当前版本。"
+    },
+    "expression": {
+      "$ref": "#/$defs/expression"
+    },
+    "aggregation": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "SUM",
+        "AVG",
+        "MIN",
+        "MAX",
+        "COUNT",
+        "COUNT_DISTINCT"
+      ],
+      "description": "字段型指标的聚合方式；引用其他指标版本时必须为 NONE。"
+    },
+    "unit": {
+      "type": "string",
+      "maxLength": 32,
+      "description": "展示单位，可以为空字符串。"
+    },
+    "numberFormat": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "面向展示层的数字格式声明。"
+    },
+    "timeFieldId": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/fieldId"
+        },
+        {
+          "const": ""
+        }
+      ],
+      "description": "时间粒度字段；设置非 NONE 时间粒度时必填。NONE 时规范响应会省略该字段，输入也兼容空字符串。"
+    },
+    "timeGrain": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "DAY",
+        "WEEK",
+        "MONTH",
+        "QUARTER",
+        "YEAR"
+      ],
+      "description": "时间分组粒度。"
+    },
+    "additivity": {
+      "type": "string",
+      "enum": [
+        "ADDITIVE",
+        "SEMI_ADDITIVE",
+        "NON_ADDITIVE"
+      ],
+      "description": "指标可加性声明。"
+    },
+    "nonAdditiveDimensionFieldIds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/fieldId"
+      },
+      "uniqueItems": true,
+      "description": "半可加指标不可沿其汇总的维度字段列表。"
+    },
+    "allowedDimensions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/dimension"
+      },
+      "description": "当前指标版本内嵌的可分组字段映射，不是一级维度对象。"
+    },
+    "decimalScale": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 12,
+      "description": "小数位声明。第一阶段尚未保证跨数据库引擎统一精确落地。"
+    },
+    "roundingMode": {
+      "const": "HALF_UP",
+      "description": "舍入模式声明。第一阶段尚未保证跨数据库引擎统一精确落地。"
+    },
+    "nullHandling": {
+      "const": "IGNORE",
+      "description": "空值处理策略。"
+    },
+    "divisionByZero": {
+      "const": "NULL",
+      "description": "除零处理策略，执行计划将分母为零的结果转换为 NULL。"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "timeGrain": {
+            "const": "NONE"
+          }
+        },
+        "required": [
+          "timeGrain"
+        ]
+      },
+      "then": {
+        "properties": {
+          "timeFieldId": {
+            "const": ""
+          }
+        }
+      },
+      "else": {
+        "required": [
+          "timeFieldId"
+        ],
+        "properties": {
+          "timeFieldId": {
+            "$ref": "#/$defs/fieldId"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "additivity": {
+            "const": "SEMI_ADDITIVE"
+          }
+        },
+        "required": [
+          "additivity"
+        ]
+      },
+      "then": {
+        "properties": {
+          "nonAdditiveDimensionFieldIds": {
+            "type": "array",
+            "minItems": 1
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "nonAdditiveDimensionFieldIds": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "fieldId": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"
+    },
+    "metricDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "name",
+        "description",
+        "type"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$",
+          "description": "租户内唯一且发布后不可变的指标编码。"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "指标名称。"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 2000,
+          "description": "指标说明，可以为空字符串。"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "ATOMIC",
+            "DERIVED",
+            "RATIO"
+          ],
+          "description": "原子、派生或比率指标。"
+        }
+      }
+    },
+    "dimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fieldId",
+        "name",
+        "hierarchyFieldIds",
+        "sortDirection",
+        "nullLabel"
+      ],
+      "properties": {
+        "fieldId": {
+          "$ref": "#/$defs/fieldId",
+          "description": "精确数据集版本中的非度量字段标识。"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "当前指标中的维度展示名称。"
+        },
+        "hierarchyFieldIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/fieldId"
+          },
+          "uniqueItems": true,
+          "description": "可用于下钻展示的字段顺序声明。"
+        },
+        "sortDirection": {
+          "type": "string",
+          "enum": [
+            "ASC",
+            "DESC"
+          ],
+          "description": "默认排序方向。"
+        },
+        "nullLabel": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "空维度值的展示标签，可以为空字符串。"
+        }
+      }
+    },
+    "decimalLiteral": {
+      "type": "string",
+      "pattern": "^-?(?=(?:[^0-9]*[0-9]){1,38}[^0-9]*$)(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$",
+      "description": "规范十进制字符串，总数字位数不超过 38。"
+    },
+    "expression": {
+      "description": "指标表达式节点，服务端另行限制最大深度 16、最大节点数 128。",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "fieldId"
+          ],
+          "properties": {
+            "type": {
+              "const": "FIELD_REF"
+            },
+            "fieldId": {
+              "$ref": "#/$defs/fieldId"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "metricVersionId"
+          ],
+          "properties": {
+            "type": {
+              "const": "METRIC_REF"
+            },
+            "metricVersionId": {
+              "$ref": "#/$defs/uuid",
+              "description": "精确引用的已发布指标版本标识。"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ],
+          "properties": {
+            "type": {
+              "const": "LITERAL"
+            },
+            "value": {
+              "$ref": "#/$defs/decimalLiteral"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "arguments"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "ADD",
+                "SUBTRACT",
+                "MULTIPLY",
+                "DIVIDE"
+              ]
+            },
+            "arguments": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "prefixItems": [
+                {
+                  "$ref": "#/$defs/expression"
+                },
+                {
+                  "$ref": "#/$defs/expression"
+                }
+              ],
+              "items": false
+            }
+          }
+        }
+      ]
+    }
+  }
+}

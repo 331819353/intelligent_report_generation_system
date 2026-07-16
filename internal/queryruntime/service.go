@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasource"
+	"intelligent-report-generation-system/internal/metric"
 	"intelligent-report-generation-system/internal/policy"
 	"intelligent-report-generation-system/internal/querycompiler"
 )
@@ -76,6 +78,48 @@ func (s *Service) PreviewVersion(ctx context.Context, tenantID, actorID, dataset
 	}, input, "PREVIEW")
 }
 
+// PreviewMetric 执行指标服务端派生的计划，并复核它没有扩张精确数据集版本的来源边界。
+func (s *Service) PreviewMetric(ctx context.Context, tenantID, actorID string, candidate metric.QueryCandidate, input dataset.PreviewInput, validation bool) (dataset.PreviewResult, error) {
+	if tenantID == "" || actorID == "" || candidate.MetricID == "" || candidate.MetricVersionID == "" ||
+		candidate.DatasetID == "" || candidate.DatasetVersionID == "" || candidate.PlanHash == "" {
+		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+	}
+	version, err := s.datasets.GetVersion(ctx, tenantID, candidate.DatasetID, candidate.DatasetVersionID)
+	if err != nil {
+		return dataset.PreviewResult{}, err
+	}
+	if version.Status != "PUBLISHED" {
+		return dataset.PreviewResult{}, dataset.ErrVersionUnavailable
+	}
+	original, err := dataset.DecodeAndNormalize(version.DSL)
+	if err != nil {
+		return dataset.PreviewResult{}, dataset.ErrVersionUnavailable
+	}
+	derived, err := dataset.DecodeAndNormalize(candidate.DSL)
+	if err != nil || !sameMetricSourceEnvelope(original, derived) {
+		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+	}
+	runType := "PREVIEW"
+	if validation {
+		runType = "VALIDATION"
+	}
+	return s.previewSnapshot(ctx, tenantID, actorID, runtimeSnapshot{
+		DatasetID: candidate.DatasetID, VersionID: candidate.DatasetVersionID,
+		MetricID: candidate.MetricID, MetricVersionID: candidate.MetricVersionID,
+		PlanHash: candidate.PlanHash, DSL: candidate.DSL, ExactVersion: true, MetricDatabaseOnly: true,
+	}, input, runType)
+}
+
+// sameMetricSourceEnvelope 禁止指标派生计划增加节点、字段投影、Join、过滤、参数或执行限额。
+func sameMetricSourceEnvelope(original, derived dataset.Document) bool {
+	return reflect.DeepEqual(original.Dataset, derived.Dataset) &&
+		reflect.DeepEqual(original.Nodes, derived.Nodes) &&
+		reflect.DeepEqual(original.Joins, derived.Joins) &&
+		reflect.DeepEqual(original.Filters, derived.Filters) &&
+		reflect.DeepEqual(original.Parameters, derived.Parameters) &&
+		reflect.DeepEqual(original.ExecutionPolicy, derived.ExecutionPolicy)
+}
+
 // ValidatePublication 校验全部启用策略后执行一行试跑，结果样本只在进程内短暂存在并立即丢弃。
 func (s *Service) ValidatePublication(ctx context.Context, tenantID, actorID string, candidate dataset.PublicationCandidate) (dataset.PreviewResult, error) {
 	document, err := dataset.DecodeAndNormalize(candidate.DSL)
@@ -114,11 +158,14 @@ func (s *Service) ValidatePublication(ctx context.Context, tenantID, actorID str
 }
 
 type runtimeSnapshot struct {
-	DatasetID    string
-	VersionID    string
-	PlanHash     string
-	DSL          json.RawMessage
-	ExactVersion bool
+	DatasetID          string
+	VersionID          string
+	MetricID           string
+	MetricVersionID    string
+	PlanHash           string
+	DSL                json.RawMessage
+	ExactVersion       bool
+	MetricDatabaseOnly bool
 }
 
 func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string, snapshot runtimeSnapshot, input dataset.PreviewInput, runType string) (dataset.PreviewResult, error) {
@@ -137,6 +184,9 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
+	if snapshot.MetricDatabaseOnly && (document.Dataset.Type != "SINGLE_SOURCE" || resolved.SourceType == datasource.TypeExcel) {
+		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
+	}
 	quota, err := s.sources.Quota(ctx, tenantID)
 	if err != nil {
 		return dataset.PreviewResult{}, err
@@ -148,6 +198,11 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	scope, rowPolicies, columnPolicies, err := s.policies.Load(ctx, tenantID, actorID, "DATASET", snapshot.DatasetID)
 	if err != nil {
 		return dataset.PreviewResult{}, err
+	}
+	// 现有策略编译层位于聚合之后；指标若直接复用会导致行策略过晚生效，
+	// 因此首阶段对带数据策略的数据集失败关闭。
+	if snapshot.MetricDatabaseOnly && (len(rowPolicies) > 0 || len(columnPolicies) > 0) {
+		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
 	}
 	maxRows := input.MaxRows
 	if maxRows == 0 {
@@ -162,7 +217,11 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	}
 
 	// 数据库和文件路径共用同一审计记录与生命周期；分支只负责生成各自的执行计划。
-	baseRun := RunRecord{ID: queryID, TenantID: tenantID, DatasetID: snapshot.DatasetID, DatasetVersionID: snapshot.VersionID, ActorID: actorID, SourceID: resolved.SourceID, RunType: runType}
+	baseRun := RunRecord{
+		ID: queryID, TenantID: tenantID, DatasetID: snapshot.DatasetID, DatasetVersionID: snapshot.VersionID,
+		MetricID: snapshot.MetricID, MetricVersionID: snapshot.MetricVersionID,
+		ActorID: actorID, SourceID: resolved.SourceID, RunType: runType,
+	}
 	baseRun.Sources = resolvedRunSources(queryID, document.Dataset.Type, resolved)
 	if document.Dataset.Type == "CROSS_SOURCE" {
 		return s.previewFederated(ctx, sources, snapshot.PlanHash, document, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)

@@ -25,6 +25,13 @@ export type DatasetRecord = {
   version: number; draftVersionId: string; draftRecordVersion: number; currentPublishedVersionId?: string
   dslHash: string; planHash: string; dsl: DatasetDSL; logicalPlan: unknown
 }
+export type DatasetSummary = {
+  id: string; code: string; name: string; description: string; type: string; status: string
+  version: number; dslHash: string; currentPublishedVersionId?: string; updatedAt: string
+}
+export type DatasetPage = {
+  items: DatasetSummary[]; total: number; limit: number; offset: number
+}
 export type PublishedVersionRecord = {
   id: string; datasetId: string; versionNo: number; status: 'PUBLISHED' | 'STALE' | 'DEPRECATED'
   dslVersion: string; dslHash: string; planHash: string; dsl: DatasetDSL; logicalPlan: unknown
@@ -171,6 +178,11 @@ const datasetPath = (id: string) => `/v1/datasets/${encodeURIComponent(id)}`
 export const datasetAPI = {
   tables: () => apiRequest<{ items: AssetTable[] }>('/v1/assets/tables?limit=200'),
   columns: (tableID: string) => apiRequest<{ items: AssetColumn[] }>(`/v1/assets/tables/${encodeURIComponent(tableID)}/columns`),
+  // 指标等下游编辑器只能从租户内目录显式选择数据集，不能猜测或写死资源标识。
+  list: (limit = 50, offset = 0) => {
+    const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+    return apiRequest<DatasetPage>(`/v1/datasets?${query}`, { cache: 'no-store' })
+  },
   // 数据集聚合版本会在发布和协作保存时变化，读取时禁止复用浏览器或代理缓存。
   get: (id: string) => apiRequest<DatasetRecord>(datasetPath(id), { cache: 'no-store' }),
   validate: (dsl: DatasetDSL) => apiRequest<{ valid: boolean; dslHash: string; planHash: string; logicalPlan: unknown }>('/v1/datasets/validate', { method: 'POST', body: JSON.stringify({ dsl }) }),

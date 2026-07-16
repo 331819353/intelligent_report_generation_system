@@ -68,7 +68,7 @@ func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error 
 		{"data_source.manage", "管理数据源", "DATA_SOURCE", "MANAGE"}, {"dataset.read", "查看数据集", "DATASET", "READ"},
 		{"data_asset.read", "查看数据资产", "DATA_ASSET", "READ"}, {"data_asset.manage", "管理数据资产", "DATA_ASSET", "MANAGE"},
 		{"dataset.manage", "管理数据集", "DATASET", "MANAGE"}, {"dataset.publish", "发布数据集", "DATASET", "PUBLISH"},
-		{"metric.read", "查看指标", "METRIC", "READ"},
+		{"metric.read", "查看指标", "METRIC", "READ"}, {"metric.publish", "发布指标", "METRIC", "PUBLISH"},
 		{"metric.manage", "管理指标", "METRIC", "MANAGE"}, {"report.read", "查看报告", "REPORT", "READ"},
 		{"report.create", "创建报告", "REPORT", "CREATE"}, {"report.update", "编辑报告", "REPORT", "UPDATE"},
 		{"report.publish", "发布报告", "REPORT", "PUBLISH"}, {"report.delete", "删除报告", "REPORT", "DELETE"},
@@ -90,7 +90,7 @@ func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error 
 	}
 	grants := map[string][]string{
 		"platform_admin": allPermissionCodes(permissions), "tenant_admin": allPermissionCodes(permissions),
-		"data_admin":      {"data_source.manage", "data_asset.read", "data_asset.manage", "dataset.read", "dataset.manage", "dataset.publish", "metric.read", "metric.manage", "report.read"},
+		"data_admin":      {"data_source.manage", "data_asset.read", "data_asset.manage", "dataset.read", "dataset.manage", "dataset.publish", "metric.read", "metric.manage", "metric.publish", "report.read"},
 		"analyst":         {"data_asset.read", "dataset.read", "metric.read", "report.read", "report.create"},
 		"report_designer": {"data_asset.read", "dataset.read", "metric.read", "report.read", "report.create", "report.update", "report.publish"},
 		"viewer":          {"report.read"},

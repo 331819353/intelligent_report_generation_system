@@ -3,6 +3,7 @@ import { AdminPage } from '../pages/AdminPage'
 import { DesignerPage } from '../pages/DesignerPage'
 import { DatasetDesignerPage } from '../pages/DatasetDesignerPage'
 import { LoginPage } from '../pages/LoginPage'
+import { MetricCenterPage } from '../pages/MetricCenterPage'
 import { ViewerPage } from '../pages/ViewerPage'
 import { RequireAuth } from '../components/RequireAuth'
 
@@ -13,6 +14,8 @@ export function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/admin" element={<RequireAuth><AdminPage /></RequireAuth>} />
       <Route path="/datasets/:datasetId/edit" element={<RequireAuth><DatasetDesignerPage /></RequireAuth>} />
+      <Route path="/metrics" element={<RequireAuth><MetricCenterPage /></RequireAuth>} />
+      <Route path="/metrics/:metricId/edit" element={<RequireAuth><MetricCenterPage /></RequireAuth>} />
       <Route path="/designer/:reportId" element={<RequireAuth><DesignerPage /></RequireAuth>} />
       <Route path="/reports/:reportId" element={<RequireAuth><ViewerPage /></RequireAuth>} />
       <Route path="*" element={<Navigate to="/login" replace />} />

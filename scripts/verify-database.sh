@@ -50,6 +50,12 @@ DECLARE
   ai_request_constraint boolean := false;
   ai_accounted_tokens bigint;
   ai_accounted_cost_micros bigint;
+  metric_dataset_a uuid;
+  metric_dataset_version_a uuid;
+  metric_a uuid;
+  metric_version_a uuid;
+  metric_visible integer;
+  metric_cross_tenant_rejected boolean := false;
 BEGIN
   -- 构造两个租户的最小数据集，验证跨租户访问始终被拒绝。
   INSERT INTO platform.tenants(code, name) VALUES ('verify-a', 'Verify Tenant A') RETURNING id INTO tenant_a;
@@ -69,6 +75,36 @@ BEGIN
   SELECT count(*) INTO visible_count FROM platform.users;
   IF visible_count <> 1 THEN
     RAISE EXCEPTION 'tenant isolation failed: expected 1 visible user, got %', visible_count;
+  END IF;
+
+  -- 构造最小指标草稿，验证数据集归属复合外键、草稿指针和指标表 RLS。
+  INSERT INTO platform.datasets(tenant_id,code,name,dataset_type,created_by,updated_by)
+  VALUES (tenant_a,'verify_metric_dataset','Verify Metric Dataset','SINGLE_SOURCE',user_a,user_a)
+  RETURNING id INTO metric_dataset_a;
+  INSERT INTO platform.dataset_versions(
+    tenant_id,dataset_id,version_no,status,dsl_version,dsl_json,schema_hash,
+    logical_plan_json,plan_hash,created_by,updated_by
+  ) VALUES (
+    tenant_a,metric_dataset_a,1,'DRAFT','1.0','{}',repeat('1',64),'{}',repeat('2',64),user_a,user_a
+  ) RETURNING id INTO metric_dataset_version_a;
+  UPDATE platform.datasets SET current_draft_version_id=metric_dataset_version_a
+  WHERE id=metric_dataset_a;
+  INSERT INTO platform.metrics(
+    tenant_id,dataset_id,code,name,metric_type,created_by,updated_by
+  ) VALUES (
+    tenant_a,metric_dataset_a,'verify_metric','Verify Metric','ATOMIC',user_a,user_a
+  ) RETURNING id INTO metric_a;
+  INSERT INTO platform.metric_versions(
+    tenant_id,metric_id,dataset_id,dataset_version_id,version_no,status,
+    definition_version,definition_json,definition_hash,created_by,updated_by
+  ) VALUES (
+    tenant_a,metric_a,metric_dataset_a,metric_dataset_version_a,1,'DRAFT',
+    '1.0','{}',repeat('3',64),user_a,user_a
+  ) RETURNING id INTO metric_version_a;
+  UPDATE platform.metrics SET current_draft_version_id=metric_version_a WHERE id=metric_a;
+  SELECT count(*) INTO metric_visible FROM platform.metrics;
+  IF metric_visible <> 1 THEN
+    RAISE EXCEPTION 'metric draft was not visible in its tenant';
   END IF;
 
   -- 新租户必须自动获得默认禁用策略；显式启用后才能登记不含正文的 AI 调用审计。
@@ -217,6 +253,19 @@ BEGIN
   IF row_policy_visible <> 0 THEN
     RAISE EXCEPTION 'row policy leaked across tenants';
   END IF;
+  SELECT count(*) INTO metric_visible FROM platform.metrics;
+  IF metric_visible <> 0 THEN
+    RAISE EXCEPTION 'metric draft leaked across tenants';
+  END IF;
+  BEGIN
+    INSERT INTO platform.metrics(tenant_id,dataset_id,code,name,metric_type)
+    VALUES (tenant_b,metric_dataset_a,'verify_cross_metric','Invalid Cross Metric','ATOMIC');
+  EXCEPTION WHEN foreign_key_violation THEN
+    metric_cross_tenant_rejected := true;
+  END;
+  IF NOT metric_cross_tenant_rejected THEN
+    RAISE EXCEPTION 'cross-tenant metric dataset reference was accepted';
+  END IF;
   SELECT count(*),bool_or(enabled)::boolean
   INTO ai_policy_visible,ai_policy_enabled
   FROM platform.ai_tenant_policies;
@@ -247,6 +296,10 @@ BEGIN
   SELECT count(*) INTO ai_request_visible FROM platform.ai_requests;
   IF ai_policy_visible <> 0 OR ai_request_visible <> 0 THEN
     RAISE EXCEPTION 'RLS without tenant context exposed AI policy or request audit rows';
+  END IF;
+  SELECT count(*) INTO metric_visible FROM platform.metrics;
+  IF metric_visible <> 0 THEN
+    RAISE EXCEPTION 'RLS without tenant context exposed metric rows';
   END IF;
 END
 $$;

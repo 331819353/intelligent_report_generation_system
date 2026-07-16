@@ -56,3 +56,20 @@ test('loads assets from different sources into the dataset designer', async () =
   expect(screen.getByText('关联 t1 → t2')).toBeInTheDocument()
   expect(screen.getByRole('checkbox', { name: '已核对基数' })).not.toBeChecked()
 })
+
+test('renders the protected metric center route and navigation entry', async () => {
+  sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    const body = url.includes('/permissions/evaluate')
+      ? { allowed: true }
+      : { items: [], total: 0, limit: 50, offset: 0 }
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }))
+
+  render(<MemoryRouter initialEntries={['/metrics']}><App /></MemoryRouter>)
+
+  expect(screen.getByRole('heading', { level: 1, name: '指标中心' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: '指标中心' })).toHaveClass('active')
+  expect(await screen.findByLabelText('指标编码')).toBeEnabled()
+})

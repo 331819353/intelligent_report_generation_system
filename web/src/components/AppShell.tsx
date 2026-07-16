@@ -18,6 +18,7 @@ export function AppShell({ title, eyebrow, children, actions }: AppShellProps) {
         <nav aria-label="主导航">
           <NavLink to="/admin">工作台</NavLink>
           <NavLink to="/datasets/new/edit">数据集设计器</NavLink>
+          <NavLink to="/metrics">指标中心</NavLink>
           <NavLink to="/designer/draft">报告设计器</NavLink>
           <NavLink to="/reports/demo">在线报告</NavLink>
         </nav>

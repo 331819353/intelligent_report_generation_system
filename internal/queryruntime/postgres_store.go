@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasource"
+	"intelligent-report-generation-system/internal/metric"
 	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/querycompiler"
 )
@@ -158,8 +159,10 @@ func (s *PostgresStore) Start(ctx context.Context, run RunRecord) error {
 		return dataset.ErrPreviewInvalid
 	}
 	err := database.WithTenantTx(ctx, s.pool, run.TenantID, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO platform.query_runs(id,tenant_id,dataset_id,dataset_version_id,actor_user_id,data_source_id,run_type,plan_hash,parameter_hash,status)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'RUNNING')`, run.ID, run.TenantID, run.DatasetID, run.DatasetVersionID, run.ActorID, run.SourceID, run.RunType, run.PlanHash, run.ParameterHash)
+		_, err := tx.Exec(ctx, `INSERT INTO platform.query_runs(id,tenant_id,dataset_id,dataset_version_id,metric_id,metric_version_id,actor_user_id,data_source_id,run_type,plan_hash,parameter_hash,status)
+			VALUES($1,$2,$3,$4,NULLIF($5,'')::uuid,NULLIF($6,'')::uuid,$7,$8,$9,$10,$11,'RUNNING')`,
+			run.ID, run.TenantID, run.DatasetID, run.DatasetVersionID, run.MetricID, run.MetricVersionID,
+			run.ActorID, run.SourceID, run.RunType, run.PlanHash, run.ParameterHash)
 		if err != nil {
 			return err
 		}
@@ -174,6 +177,10 @@ func (s *PostgresStore) Start(ctx context.Context, run RunRecord) error {
 	var pgError *pgconn.PgError
 	if errors.As(err, &pgError) && pgError.Code == "23505" {
 		return dataset.ErrQueryConflict
+	}
+	if errors.As(err, &pgError) && pgError.Code == "23503" &&
+		pgError.ConstraintName == "query_runs_metric_version_dataset_tenant_snapshot_check" {
+		return metric.ErrVersionUnavailable
 	}
 	return err
 }
