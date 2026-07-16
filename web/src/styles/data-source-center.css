@@ -1,0 +1,37 @@
+.data-source-center { display: grid; gap: 18px; }
+.data-source-summary { display: flex; align-items: center; justify-content: space-between; padding: 24px; border: 1px solid #e8ebef; border-radius: 12px; background: white; box-shadow: 0 8px 30px #18213a08; }
+.data-source-summary h2 { margin: 5px 0 6px; font-size: 22px; }
+.data-source-summary p { margin: 0; color: var(--muted); font-size: 13px; }
+.data-source-summary > strong { color: var(--navy); font: 34px Georgia, serif; }
+.data-source-summary > strong small { color: var(--muted); font: 12px Inter, sans-serif; }
+.data-source-list { display: grid; gap: 12px; }
+.data-source-card { display: grid; grid-template-columns: 48px minmax(250px, 1fr) minmax(260px, .7fr); gap: 16px; align-items: center; padding: 18px 20px; border: 1px solid #e8ebef; border-radius: 12px; background: white; box-shadow: 0 8px 30px #18213a08; }
+.data-source-icon { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 12px; background: #e8efff; color: #1d4ed8; font-size: 12px; font-weight: 900; }
+.data-source-icon.oracle { background: #fff1f2; color: #be123c; }
+.data-source-icon.excel { background: #ecfdf3; color: #047857; }
+.data-source-main > div { display: flex; align-items: center; gap: 10px; }
+.data-source-main h3 { margin: 0; font-size: 16px; }
+.data-source-main p { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.data-source-status { border-radius: 999px; padding: 4px 8px; background: #f2f4f7; color: #475467; font-size: 10px; font-weight: 800; }
+.data-source-status.active { background: #dcfce7; color: #047857; }
+.data-source-status.syncing { background: #dbeafe; color: #1d4ed8; }
+.data-source-status.error { background: #fee2e2; color: #b42318; }
+.data-source-status.disabled { background: #f2f4f7; color: #667085; }
+.data-source-card dl { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 0; }
+.data-source-card dl > div { padding: 8px 10px; border-radius: 8px; background: #f8fafc; }
+.data-source-card dt { color: var(--muted); font-size: 10px; }
+.data-source-card dd { margin: 3px 0 0; font-size: 12px; font-weight: 700; }
+.data-source-empty { min-height: 250px; display: grid; place-content: center; gap: 8px; border: 1px dashed #cdd5df; border-radius: 12px; background: #ffffff99; color: var(--muted); text-align: center; }
+.data-source-empty strong { color: var(--ink); font-size: 18px; }
+.data-source-feedback { border-radius: 8px; padding: 10px 12px; font-size: 12px; }
+.data-source-feedback.error { border: 1px solid #fecaca; background: #fef2f2; color: #b42318; }
+.data-source-dialog-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 30px; background: #10182899; }
+.data-source-dialog { width: min(540px, 100%); border-radius: 14px; background: white; box-shadow: 0 24px 70px #10182845; }
+.data-source-dialog > header { display: flex; align-items: center; justify-content: space-between; padding: 22px 24px 16px; border-bottom: 1px solid #edf0f3; }
+.data-source-dialog h2 { margin: 5px 0 0; }
+.data-source-dialog > header button { width: 34px; height: 34px; border: 0; border-radius: 8px; background: #f2f4f7; color: #475467; font-size: 22px; }
+.data-source-dialog form { display: grid; gap: 14px; padding: 22px 24px 24px; }
+.data-source-dialog label { display: grid; gap: 7px; color: #344054; font-size: 12px; font-weight: 800; }
+.data-source-dialog input, .data-source-dialog select { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 11px; background: white; }
+.data-source-dialog label small { color: var(--muted); font-weight: 400; }
+.data-source-dialog footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }

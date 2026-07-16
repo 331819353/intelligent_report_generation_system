@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { AdminPage } from '../pages/AdminPage'
 import { DesignerPage } from '../pages/DesignerPage'
 import { DatasetDesignerPage } from '../pages/DatasetDesignerPage'
+import { DataSourceCenterPage } from '../pages/DataSourceCenterPage'
 import { LoginPage } from '../pages/LoginPage'
 import { MetricCenterPage } from '../pages/MetricCenterPage'
 import { ViewerPage } from '../pages/ViewerPage'
@@ -13,6 +14,7 @@ export function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/admin" element={<RequireAuth><AdminPage /></RequireAuth>} />
+      <Route path="/data-sources" element={<RequireAuth><DataSourceCenterPage /></RequireAuth>} />
       <Route path="/datasets/:datasetId/edit" element={<RequireAuth><DatasetDesignerPage /></RequireAuth>} />
       <Route path="/metrics" element={<RequireAuth><MetricCenterPage /></RequireAuth>} />
       <Route path="/metrics/:metricId/edit" element={<RequireAuth><MetricCenterPage /></RequireAuth>} />

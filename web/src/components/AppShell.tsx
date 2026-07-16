@@ -17,6 +17,7 @@ export function AppShell({ title, eyebrow, children, actions }: AppShellProps) {
         <div className="brand-copy"><strong>智能报告</strong><span>Insight Studio</span></div>
         <nav aria-label="主导航">
           <NavLink to="/admin">工作台</NavLink>
+          <NavLink to="/data-sources">数据源配置中心</NavLink>
           <NavLink to="/datasets/new/edit">数据集设计器</NavLink>
           <NavLink to="/metrics">指标中心</NavLink>
           <NavLink to="/designer/draft">报告设计器</NavLink>

@@ -73,3 +73,15 @@ test('renders the protected metric center route and navigation entry', async () 
   expect(screen.getByRole('link', { name: '指标中心' })).toHaveClass('active')
   expect(await screen.findByLabelText('指标编码')).toBeEnabled()
 })
+
+test('renders the protected data source center route and navigation entry', async () => {
+  sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ items: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+
+  render(<MemoryRouter initialEntries={['/data-sources']}><App /></MemoryRouter>)
+
+  expect(screen.getByRole('heading', { level: 1, name: '数据源配置中心' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: '数据源配置中心' })).toHaveClass('active')
+  expect(await screen.findByText('还没有数据源')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '新建数据源' })).toBeEnabled()
+})
