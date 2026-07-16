@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,13 +54,86 @@ func (s *Service) Preview(ctx context.Context, tenantID, actorID, datasetID stri
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
-	document, err := dataset.DecodeAndNormalize(record.DSL)
+	return s.previewSnapshot(ctx, tenantID, actorID, runtimeSnapshot{
+		DatasetID: record.ID, VersionID: record.DraftVersionID, PlanHash: record.PlanHash, DSL: record.DSL,
+	}, input, "PREVIEW")
+}
+
+// PreviewVersion 只执行 URL 中指定的发布版本，绝不回退到当前发布指针或可变草稿。
+func (s *Service) PreviewVersion(ctx context.Context, tenantID, actorID, datasetID, versionID string, input dataset.PreviewInput) (dataset.PreviewResult, error) {
+	if tenantID == "" || actorID == "" || datasetID == "" || versionID == "" {
+		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+	}
+	version, err := s.datasets.GetVersion(ctx, tenantID, datasetID, versionID)
+	if err != nil {
+		return dataset.PreviewResult{}, err
+	}
+	if version.Status != "PUBLISHED" {
+		return dataset.PreviewResult{}, dataset.ErrVersionUnavailable
+	}
+	return s.previewSnapshot(ctx, tenantID, actorID, runtimeSnapshot{
+		DatasetID: datasetID, VersionID: version.ID, PlanHash: version.PlanHash, DSL: version.DSL, ExactVersion: true,
+	}, input, "PREVIEW")
+}
+
+// ValidatePublication 校验全部启用策略后执行一行试跑，结果样本只在进程内短暂存在并立即丢弃。
+func (s *Service) ValidatePublication(ctx context.Context, tenantID, actorID string, candidate dataset.PublicationCandidate) (dataset.PreviewResult, error) {
+	document, err := dataset.DecodeAndNormalize(candidate.DSL)
+	if err != nil {
+		return dataset.PreviewResult{}, &dataset.PublicationValidationError{Issues: []dataset.PublicationIssue{{Path: "dsl", Code: "PUBLISH_DSL_INVALID", Reason: "发布草稿无法解析"}}}
+	}
+	// 首阶段只允许物理表节点进入查询试跑；嵌套数据集必须在实现递归边界后显式开放。
+	for index, node := range document.Nodes {
+		if node.Type != "TABLE" {
+			return dataset.PreviewResult{}, &dataset.PublicationValidationError{Issues: []dataset.PublicationIssue{{
+				Path: fmt.Sprintf("nodes[%d]", index), Code: "PUBLISH_DATASET_NODE_UNSUPPORTED", Reason: "当前发布试跑只支持物理表节点",
+			}}}
+		}
+	}
+	// 当前基数探测只对等值键有确定语义；其他操作符必须在进入查询前按 DSL 路径失败关闭。
+	for joinIndex, join := range document.Joins {
+		for conditionIndex, condition := range join.Conditions {
+			if condition.Operator != "EQUALS" {
+				return dataset.PreviewResult{}, &dataset.PublicationValidationError{Issues: []dataset.PublicationIssue{{
+					Path: fmt.Sprintf("joins[%d].conditions[%d].operator", joinIndex, conditionIndex),
+					Code: "JOIN_PROBE_OPERATOR_UNSUPPORTED", Reason: "当前发布基数探测只支持等值 Join",
+				}}}
+			}
+		}
+	}
+	fieldCodes := make([]string, 0, len(document.Fields))
+	for _, field := range document.Fields {
+		fieldCodes = append(fieldCodes, field.Code)
+	}
+	if err := s.policies.ValidateDefinitions(ctx, tenantID, "DATASET", candidate.DatasetID, fieldCodes); err != nil {
+		return dataset.PreviewResult{}, &dataset.PublicationValidationError{Issues: []dataset.PublicationIssue{{Path: "policies", Code: "PUBLISH_POLICY_INVALID", Reason: "启用的行列策略引用了无效字段或规则"}}}
+	}
+	return s.previewSnapshot(ctx, tenantID, actorID, runtimeSnapshot{
+		DatasetID: candidate.DatasetID, VersionID: candidate.DraftVersionID, PlanHash: candidate.PlanHash, DSL: candidate.DSL,
+	}, dataset.PreviewInput{Parameters: candidate.Parameters, MaxRows: 1}, "VALIDATION")
+}
+
+type runtimeSnapshot struct {
+	DatasetID    string
+	VersionID    string
+	PlanHash     string
+	DSL          json.RawMessage
+	ExactVersion bool
+}
+
+func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string, snapshot runtimeSnapshot, input dataset.PreviewInput, runType string) (dataset.PreviewResult, error) {
+	document, err := dataset.DecodeAndNormalize(snapshot.DSL)
 	if err != nil {
 		return dataset.PreviewResult{}, dataset.ErrInvalidDocument
 	}
 	// DSL 中只有资产 ID；每次执行都从控制库重新解析物理白名单并加载当前策略，
 	// 因而草稿不能缓存旧表名或旧权限来绕过撤权。
-	resolved, err := s.store.Resolve(ctx, tenantID, document)
+	var resolved ResolvedPlan
+	if snapshot.ExactVersion {
+		resolved, err = s.store.ResolveVersion(ctx, tenantID, snapshot.DatasetID, snapshot.VersionID, document)
+	} else {
+		resolved, err = s.store.Resolve(ctx, tenantID, document)
+	}
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
@@ -70,7 +145,7 @@ func (s *Service) Preview(ctx context.Context, tenantID, actorID, datasetID stri
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
-	scope, rowPolicies, columnPolicies, err := s.policies.Load(ctx, tenantID, actorID, "DATASET", datasetID)
+	scope, rowPolicies, columnPolicies, err := s.policies.Load(ctx, tenantID, actorID, "DATASET", snapshot.DatasetID)
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
@@ -87,17 +162,17 @@ func (s *Service) Preview(ctx context.Context, tenantID, actorID, datasetID stri
 	}
 
 	// 数据库和文件路径共用同一审计记录与生命周期；分支只负责生成各自的执行计划。
-	baseRun := RunRecord{ID: queryID, TenantID: tenantID, DatasetID: datasetID, DatasetVersionID: record.DraftVersionID, ActorID: actorID, SourceID: resolved.SourceID}
+	baseRun := RunRecord{ID: queryID, TenantID: tenantID, DatasetID: snapshot.DatasetID, DatasetVersionID: snapshot.VersionID, ActorID: actorID, SourceID: resolved.SourceID, RunType: runType}
 	baseRun.Sources = resolvedRunSources(queryID, document.Dataset.Type, resolved)
 	if document.Dataset.Type == "CROSS_SOURCE" {
-		return s.previewFederated(ctx, sources, record, document, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
+		return s.previewFederated(ctx, sources, snapshot.PlanHash, document, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
 	}
 	source, ok := sources[resolved.SourceID]
 	if !ok {
 		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
 	}
 	if resolved.SourceType == datasource.TypeExcel {
-		return s.previewFile(ctx, source, record, document, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
+		return s.previewFile(ctx, source, snapshot.PlanHash, document, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
 	}
 	return s.previewDatabase(ctx, source, document, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
 }
@@ -141,18 +216,181 @@ func (s *Service) previewDatabase(ctx context.Context, source datasource.Source,
 	if err != nil {
 		return dataset.PreviewResult{}, fmt.Errorf("%w: %v", dataset.ErrPreviewInvalid, err)
 	}
-	// 审计只保存计划和绑定摘要，不保存可还原的 SQL、参数明文或结果样本。
-	parameterJSON, err := json.Marshal(compiled.Args)
-	if err != nil {
-		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+	probes := []querycompiler.JoinProbeQuery{}
+	if run.RunType == "VALIDATION" && len(document.Joins) > 0 {
+		probes, err = querycompiler.CompileJoinProbes(querycompiler.JoinProbeInput{
+			Document: document, Dialect: dialect, Tables: resolved.Tables, Parameters: parameters,
+		})
+		if err != nil {
+			return dataset.PreviewResult{}, fmt.Errorf("%w: %v", dataset.ErrPreviewInvalid, err)
+		}
 	}
-	run.PlanHash, run.ParameterHash = hash([]byte(compiled.SQL)), hash(parameterJSON)
+	// 审计只保存计划和绑定摘要，不保存可还原的 SQL、参数明文或结果样本。
+	if len(probes) == 0 {
+		parameterJSON, marshalErr := json.Marshal(compiled.Args)
+		if marshalErr != nil {
+			return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+		}
+		run.PlanHash, run.ParameterHash = hash([]byte(compiled.SQL)), hash(parameterJSON)
+	} else {
+		parameterEnvelope := make([][]any, 0, len(probes)+1)
+		planEnvelope := make([]string, 0, len(probes)+1)
+		for _, probe := range probes {
+			parameterEnvelope = append(parameterEnvelope, probe.Query.Args)
+			planEnvelope = append(planEnvelope, probe.Query.SQL)
+		}
+		parameterEnvelope = append(parameterEnvelope, compiled.Args)
+		planEnvelope = append(planEnvelope, compiled.SQL)
+		parameterJSON, marshalErr := json.Marshal(parameterEnvelope)
+		if marshalErr != nil {
+			return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+		}
+		planJSON, marshalErr := json.Marshal(planEnvelope)
+		if marshalErr != nil {
+			return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+		}
+		run.PlanHash, run.ParameterHash = hash(planJSON), hash(parameterJSON)
+	}
 	return s.execute(ctx, document, run, compiled.MaxRows, connector, func(queryContext context.Context) (datasource.QueryResult, error) {
-		return connector.Query(queryContext, source, run.ID, compiled.SQL, compiled.Args, compiled.MaxRows)
+		warnings := []datasource.QueryWarning{}
+		for _, probe := range probes {
+			result, queryErr := connector.Query(queryContext, source, run.ID, probe.Query.SQL, probe.Query.Args, probe.Query.MaxRows)
+			if queryErr != nil {
+				return datasource.QueryResult{}, queryErr
+			}
+			stats, decodeErr := decodeJoinProbeResult(result)
+			if decodeErr != nil {
+				return datasource.QueryResult{}, decodeErr
+			}
+			probeWarnings, warningErr := joinProbeWarnings(document, probe.JoinID, stats)
+			if warningErr != nil {
+				return datasource.QueryResult{}, warningErr
+			}
+			warnings = append(warnings, probeWarnings...)
+		}
+		result, queryErr := connector.Query(queryContext, source, run.ID, compiled.SQL, compiled.Args, compiled.MaxRows)
+		if queryErr != nil {
+			return result, queryErr
+		}
+		// Connector 不是风险判定信任边界；数据库发布告警只能来自本地聚合探测。
+		result.Warnings = warnings
+		if len(probes) > 0 {
+			// 发布审计记录整个探测和试跑生命周期，不能只采用最后一条 SQL 的耗时。
+			result.DurationMS = 0
+		}
+		return result, nil
 	})
 }
 
-func (s *Service) previewFile(ctx context.Context, source datasource.Source, record dataset.Record, document dataset.Document, resolved ResolvedPlan, parameters map[string]any, scope policy.UserScope, rowPolicies []policy.RowPolicy, columnPolicies []policy.ColumnPolicy, maxRows int, run RunRecord) (dataset.PreviewResult, error) {
+type joinProbeStats struct {
+	LeftDuplicateKeys, RightDuplicateKeys     int
+	LeftMaxMultiplicity, RightMaxMultiplicity int
+	FanoutKeys                                int
+}
+
+var joinProbeColumns = []string{
+	"left_duplicate_keys", "right_duplicate_keys", "left_max_multiplicity", "right_max_multiplicity", "fanout_keys",
+}
+
+func decodeJoinProbeResult(result datasource.QueryResult) (joinProbeStats, error) {
+	if result.RowCount != 1 || len(result.Rows) != 1 || len(result.Rows[0]) != len(joinProbeColumns) || len(result.Columns) != len(joinProbeColumns) {
+		return joinProbeStats{}, errors.New("join probe returned an invalid result shape")
+	}
+	values := make([]int, len(joinProbeColumns))
+	for index, expected := range joinProbeColumns {
+		if !strings.EqualFold(result.Columns[index], expected) {
+			return joinProbeStats{}, errors.New("join probe returned an unexpected column")
+		}
+		value, err := nonNegativeProbeInteger(result.Rows[0][index])
+		if err != nil {
+			return joinProbeStats{}, err
+		}
+		values[index] = value
+	}
+	stats := joinProbeStats{
+		LeftDuplicateKeys: values[0], RightDuplicateKeys: values[1], LeftMaxMultiplicity: values[2],
+		RightMaxMultiplicity: values[3], FanoutKeys: values[4],
+	}
+	if (stats.LeftDuplicateKeys > 0 && stats.LeftMaxMultiplicity < 2) ||
+		(stats.RightDuplicateKeys > 0 && stats.RightMaxMultiplicity < 2) ||
+		(stats.LeftDuplicateKeys == 0 && stats.LeftMaxMultiplicity > 1) ||
+		(stats.RightDuplicateKeys == 0 && stats.RightMaxMultiplicity > 1) ||
+		stats.FanoutKeys > stats.LeftDuplicateKeys || stats.FanoutKeys > stats.RightDuplicateKeys {
+		return joinProbeStats{}, errors.New("join probe returned inconsistent statistics")
+	}
+	return stats, nil
+}
+
+func nonNegativeProbeInteger(value any) (int, error) {
+	var parsed int64
+	switch number := value.(type) {
+	case json.Number:
+		result, err := number.Int64()
+		if err != nil {
+			return 0, errors.New("join probe count is not an integer")
+		}
+		parsed = result
+	case int:
+		if number < 0 {
+			return 0, errors.New("join probe count is negative")
+		}
+		return number, nil
+	case int64:
+		parsed = number
+	case float64:
+		// float64 只接受可精确表示的整数；真实 Connector 使用 json.Number，
+		// 此分支主要兼容进程内测试替身，不能默许大整数精度丢失。
+		if math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number || number < 0 || number > 1<<53-1 {
+			return 0, errors.New("join probe count is not a supported integer")
+		}
+		parsed = int64(number)
+	default:
+		return 0, errors.New("join probe count has an unsupported type")
+	}
+	if parsed < 0 || uint64(parsed) > uint64(^uint(0)>>1) {
+		return 0, errors.New("join probe count is outside the supported range")
+	}
+	return int(parsed), nil
+}
+
+func joinProbeWarnings(document dataset.Document, joinID string, stats joinProbeStats) ([]datasource.QueryWarning, error) {
+	var target *dataset.Join
+	for index := range document.Joins {
+		if document.Joins[index].ID == joinID {
+			target = &document.Joins[index]
+			break
+		}
+	}
+	if target == nil {
+		return nil, errors.New("join probe does not match the dataset document")
+	}
+	warnings := []datasource.QueryWarning{}
+	violatedSides := []string{}
+	if (target.Cardinality == "ONE_TO_ONE" || target.Cardinality == "ONE_TO_MANY") && stats.LeftDuplicateKeys > 0 {
+		violatedSides = append(violatedSides, "左侧")
+	}
+	if (target.Cardinality == "ONE_TO_ONE" || target.Cardinality == "MANY_TO_ONE") && stats.RightDuplicateKeys > 0 {
+		violatedSides = append(violatedSides, "右侧")
+	}
+	if len(violatedSides) > 0 {
+		warnings = append(warnings, datasource.QueryWarning{
+			Code: "JOIN_CARDINALITY_MISMATCH", Message: "声明的 " + target.Cardinality + " 基数与实际数据不一致：" + strings.Join(violatedSides, "和") + " Join 键存在重复。", JoinID: target.ID,
+		})
+	}
+	if target.Cardinality == "MANY_TO_MANY" {
+		warnings = append(warnings, datasource.QueryWarning{
+			Code: "JOIN_MANY_TO_MANY", Message: "多对多关联可能重复累计度量，请确认输出粒度或先聚合再关联。", JoinID: target.ID,
+		})
+	}
+	if stats.FanoutKeys > 0 {
+		warnings = append(warnings, datasource.QueryWarning{
+			Code: "JOIN_FANOUT_RISK", Message: "检测到两侧重复 Join 键，关联结果可能发生扇出。", JoinID: target.ID,
+		})
+	}
+	return warnings, nil
+}
+
+func (s *Service) previewFile(ctx context.Context, source datasource.Source, planHash string, document dataset.Document, resolved ResolvedPlan, parameters map[string]any, scope policy.UserScope, rowPolicies []policy.RowPolicy, columnPolicies []policy.ColumnPolicy, maxRows int, run RunRecord) (dataset.PreviewResult, error) {
 	if s.files == nil || resolved.FileVersionID == "" {
 		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
 	}
@@ -168,7 +406,7 @@ func (s *Service) previewFile(ctx context.Context, source datasource.Source, rec
 		Tables      map[string]querycompiler.TableRef
 		Rows        []policy.RowPolicy
 		Columns     []policy.ColumnPolicy
-	}{record.PlanHash, resolved.FileVersionID, resolved.Tables, rowPolicies, columnPolicies})
+	}{planHash, resolved.FileVersionID, resolved.Tables, rowPolicies, columnPolicies})
 	if err != nil {
 		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
 	}
@@ -185,7 +423,7 @@ func (s *Service) previewFile(ctx context.Context, source datasource.Source, rec
 	})
 }
 
-func (s *Service) previewFederated(ctx context.Context, sources map[string]datasource.Source, record dataset.Record, document dataset.Document, resolved ResolvedPlan, parameters map[string]any, scope policy.UserScope, rowPolicies []policy.RowPolicy, columnPolicies []policy.ColumnPolicy, maxRows int, run RunRecord) (dataset.PreviewResult, error) {
+func (s *Service) previewFederated(ctx context.Context, sources map[string]datasource.Source, planHash string, document dataset.Document, resolved ResolvedPlan, parameters map[string]any, scope policy.UserScope, rowPolicies []policy.RowPolicy, columnPolicies []policy.ColumnPolicy, maxRows int, run RunRecord) (dataset.PreviewResult, error) {
 	if s.federated == nil || len(resolved.Nodes) < 2 {
 		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
 	}
@@ -198,7 +436,7 @@ func (s *Service) previewFederated(ctx context.Context, sources map[string]datas
 		Nodes       map[string]ResolvedNode
 		Rows        []policy.RowPolicy
 		Columns     []policy.ColumnPolicy
-	}{record.PlanHash, resolved.Nodes, rowPolicies, columnPolicies})
+	}{planHash, resolved.Nodes, rowPolicies, columnPolicies})
 	if err != nil {
 		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
 	}

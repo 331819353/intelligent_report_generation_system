@@ -35,6 +35,9 @@ test('loads assets from different sources into the dataset designer', async () =
   sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
+    if (url.includes('/permissions/evaluate')) {
+      return new Response(JSON.stringify({ allowed: true }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
     const body = url.includes('/columns')
       ? url.includes('table-2')
         ? { items: [{ id: 'column-2', tableId: 'table-2', columnName: 'customer_id', businessName: '客户编号', canonicalType: 'NUMBER', nullable: false, semanticType: 'IDENTIFIER' }] }

@@ -21,6 +21,12 @@ type fakeDatasets struct{ record dataset.Record }
 func (f fakeDatasets) Get(context.Context, string, string) (dataset.Record, error) {
 	return f.record, nil
 }
+func (f fakeDatasets) GetVersion(context.Context, string, string, string) (dataset.VersionRecord, error) {
+	return dataset.VersionRecord{ID: f.record.DraftVersionID, DatasetID: f.record.ID, Status: "PUBLISHED", DSL: f.record.DSL, PlanHash: f.record.PlanHash}, nil
+}
+func (fakeDatasets) ValidateVersionDependencies(context.Context, string, string, string) error {
+	return nil
+}
 
 type fakeSources struct {
 	source  datasource.Source
@@ -42,19 +48,31 @@ type fakePolicies struct{}
 func (fakePolicies) Load(_ context.Context, tenantID, actorID, _, _ string) (policy.UserScope, []policy.RowPolicy, []policy.ColumnPolicy, error) {
 	return policy.UserScope{TenantID: tenantID, UserID: actorID, Attributes: map[string]any{}}, nil, nil, nil
 }
+func (fakePolicies) ValidateDefinitions(context.Context, string, string, string, []string) error {
+	return nil
+}
 
 type fakeRuntimeStore struct {
-	mu       sync.Mutex
-	resolved ResolvedPlan
-	run      RunRecord
-	status   string
-	error    string
-	warnings []datasource.QueryWarning
-	stats    []datasource.QuerySourceStat
+	mu                  sync.Mutex
+	resolved            ResolvedPlan
+	resolveVersionCalls int
+	resolveVersionErr   error
+	resolvedDatasetID   string
+	resolvedVersionID   string
+	run                 RunRecord
+	status              string
+	error               string
+	warnings            []datasource.QueryWarning
+	stats               []datasource.QuerySourceStat
 }
 
 func (f *fakeRuntimeStore) Resolve(context.Context, string, dataset.Document) (ResolvedPlan, error) {
 	return f.resolved, nil
+}
+func (f *fakeRuntimeStore) ResolveVersion(_ context.Context, _, datasetID, versionID string, _ dataset.Document) (ResolvedPlan, error) {
+	f.resolveVersionCalls++
+	f.resolvedDatasetID, f.resolvedVersionID = datasetID, versionID
+	return f.resolved, f.resolveVersionErr
 }
 func (f *fakeRuntimeStore) Start(_ context.Context, run RunRecord) error {
 	f.mu.Lock()
@@ -176,6 +194,219 @@ func TestPreviewCompilesParametersAndCompletesAudit(t *testing.T) {
 	if len(store.run.PlanHash) != 64 || len(store.run.ParameterHash) != 64 {
 		t.Fatalf("audit hashes are missing: %#v", store.run)
 	}
+}
+
+func TestPreviewVersionAndPublicationValidationUseExactAuditVersion(t *testing.T) {
+	connector := &fakeConnector{query: func(_ context.Context, _ string, _ []any, maxRows int) (datasource.QueryResult, error) {
+		return datasource.QueryResult{Columns: []string{"stat_month", "revenue"}, Rows: [][]any{{"2026-01-01", 12}}, RowCount: 1}, nil
+	}}
+	service, store := runtimeFixture(t, connector)
+	result, err := service.PreviewVersion(context.Background(), "tenant-1", "actor-1", "dataset-1", "version-1", dataset.PreviewInput{
+		Parameters: map[string]any{"start_date": "2026-01-01"}, MaxRows: 1,
+	})
+	if err != nil || result.RowCount != 1 || store.run.DatasetVersionID != "version-1" || store.run.RunType != "PREVIEW" ||
+		store.resolveVersionCalls != 1 || store.resolvedDatasetID != "dataset-1" || store.resolvedVersionID != "version-1" {
+		t.Fatalf("version preview result=%#v run=%#v err=%v", result, store.run, err)
+	}
+
+	result, err = service.ValidatePublication(context.Background(), "tenant-1", "actor-1", dataset.PublicationCandidate{
+		DatasetID: "dataset-1", DraftVersionID: "draft-1", PlanHash: "logical-plan",
+		DSL: storeDocument(t), Parameters: map[string]any{"start_date": "2026-01-01"},
+	})
+	if err != nil || result.RowCount != 1 || store.run.DatasetVersionID != "draft-1" || store.run.RunType != "VALIDATION" {
+		t.Fatalf("publication validation result=%#v run=%#v err=%v", result, store.run, err)
+	}
+}
+
+func TestPreviewVersionFailsWhenAtomicResolutionDetectsDependencyDrift(t *testing.T) {
+	connectorCalled := false
+	service, store := runtimeFixture(t, &fakeConnector{query: func(context.Context, string, []any, int) (datasource.QueryResult, error) {
+		connectorCalled = true
+		return datasource.QueryResult{}, nil
+	}})
+	store.resolveVersionErr = dataset.ErrVersionUnavailable
+
+	_, err := service.PreviewVersion(context.Background(), "tenant-1", "actor-1", "dataset-1", "version-1", dataset.PreviewInput{
+		Parameters: map[string]any{"start_date": "2026-01-01"}, MaxRows: 1,
+	})
+	if !errors.Is(err, dataset.ErrVersionUnavailable) || connectorCalled || store.run.ID != "" {
+		t.Fatalf("error=%v connectorCalled=%v run=%#v", err, connectorCalled, store.run)
+	}
+}
+
+func TestValidatePublicationRejectsDatasetNodeWithStablePath(t *testing.T) {
+	service, store := runtimeFixture(t, &fakeConnector{query: func(context.Context, string, []any, int) (datasource.QueryResult, error) {
+		t.Fatal("不支持的嵌套数据集节点不应进入查询执行")
+		return datasource.QueryResult{}, nil
+	}})
+	document, err := dataset.DecodeAndNormalize(storeDocument(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Nodes[0].Type = "DATASET"
+	document.Nodes[0].DataSourceID = ""
+	document.Nodes[0].TableID = ""
+	document.Nodes[0].FileVersionID = ""
+	document.Nodes[0].DatasetVersionID = "22222222-2222-4222-8222-222222222222"
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.ValidatePublication(context.Background(), "tenant-1", "actor-1", dataset.PublicationCandidate{
+		DatasetID: "dataset-1", DraftVersionID: "draft-1", DSL: raw,
+	})
+	var validation *dataset.PublicationValidationError
+	if !errors.As(err, &validation) || len(validation.Issues) != 1 {
+		t.Fatalf("validation error=%v details=%#v", err, validation)
+	}
+	issue := validation.Issues[0]
+	if issue.Path != "nodes[0]" || issue.Code != "PUBLISH_DATASET_NODE_UNSUPPORTED" || store.run.ID != "" {
+		t.Fatalf("issue=%#v run=%#v", issue, store.run)
+	}
+}
+
+func TestValidatePublicationProbesSingleSourceJoinAndAuditsWarnings(t *testing.T) {
+	document := singleSourceJoinRuntimeDocument()
+	document.Parameters = []dataset.Parameter{{Code: "min_amount", Name: "最低金额", DataType: "DECIMAL", Required: true}}
+	document.Filters = []dataset.Filter{{
+		ID: "filter_min_amount", Stage: "PRE_AGGREGATION",
+		Expression: dataset.Expression{
+			Type:  "GT",
+			Left:  &dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "amount"},
+			Right: &dataset.Expression{Type: "PARAM_REF", Code: "min_amount"},
+		},
+	}}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queryCalls := 0
+	connector := &fakeConnector{query: func(_ context.Context, sql string, args []any, maxRows int) (datasource.QueryResult, error) {
+		queryCalls++
+		if contains(sql, "123.5") {
+			t.Fatalf("发布探测泄露了绑定参数: %s", sql)
+		}
+		switch queryCalls {
+		case 1:
+			if maxRows != 1 || !contains(sql, "left_duplicate_keys") || !contains(sql, "fanout_keys") || len(args) != 1 {
+				t.Fatalf("聚合探测计划不完整: sql=%s args=%#v maxRows=%d", sql, args, maxRows)
+			}
+			return datasource.QueryResult{
+				Columns:  append([]string(nil), joinProbeColumns...),
+				Rows:     [][]any{{json.Number("2"), json.Number("1"), json.Number("4"), json.Number("3"), json.Number("1")}},
+				RowCount: 1,
+			}, nil
+		case 2:
+			if maxRows != 1 || contains(sql, "left_duplicate_keys") || len(args) != 1 {
+				t.Fatalf("最终试跑计划异常: sql=%s args=%#v maxRows=%d", sql, args, maxRows)
+			}
+			return datasource.QueryResult{
+				Columns: []string{"customer_name", "revenue"}, Rows: [][]any{{"A", 20.0}}, RowCount: 1, DurationMS: 999,
+				Warnings: []datasource.QueryWarning{{Code: "REMOTE_WARNING", Message: "不可信远端告警"}},
+			}, nil
+		default:
+			t.Fatalf("发布校验执行了多余查询: %d", queryCalls)
+			return datasource.QueryResult{}, nil
+		}
+	}}
+	service, store := singleSourceJoinRuntimeFixture(t, raw, connector)
+	result, err := service.ValidatePublication(context.Background(), "tenant-1", "actor-1", dataset.PublicationCandidate{
+		DatasetID: "dataset-1", DraftVersionID: "draft-1", PlanHash: "logical-plan", DSL: raw,
+		Parameters: map[string]any{"min_amount": "123.5"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queryCalls != 2 || result.RowCount != 1 || store.status != "SUCCEEDED" || store.run.RunType != "VALIDATION" {
+		t.Fatalf("calls=%d result=%#v status=%s run=%#v", queryCalls, result, store.status, store.run)
+	}
+	if len(result.Warnings) != 2 || result.Warnings[0].Code != "JOIN_CARDINALITY_MISMATCH" || result.Warnings[1].Code != "JOIN_FANOUT_RISK" {
+		t.Fatalf("本地 Join 告警=%#v", result.Warnings)
+	}
+	if len(store.warnings) != 2 || store.warnings[0].JoinID != "orders_customers" || store.warnings[1].JoinID != "orders_customers" {
+		t.Fatalf("审计 Join 告警=%#v", store.warnings)
+	}
+	if len(store.run.PlanHash) != 64 || len(store.run.ParameterHash) != 64 {
+		t.Fatalf("发布探测审计摘要缺失: %#v", store.run)
+	}
+}
+
+func TestValidatePublicationRejectsUnsupportedJoinProbeOperator(t *testing.T) {
+	document := singleSourceJoinRuntimeDocument()
+	document.Joins[0].Conditions[0].Operator = "GT"
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, store := singleSourceJoinRuntimeFixture(t, raw, &fakeConnector{query: func(context.Context, string, []any, int) (datasource.QueryResult, error) {
+		t.Fatal("不支持的 Join 操作符不应进入 Connector")
+		return datasource.QueryResult{}, nil
+	}})
+
+	_, err = service.ValidatePublication(context.Background(), "tenant-1", "actor-1", dataset.PublicationCandidate{
+		DatasetID: "dataset-1", DraftVersionID: "draft-1", DSL: raw,
+	})
+	var validation *dataset.PublicationValidationError
+	if !errors.As(err, &validation) || len(validation.Issues) != 1 {
+		t.Fatalf("validation error=%v details=%#v", err, validation)
+	}
+	issue := validation.Issues[0]
+	if issue.Path != "joins[0].conditions[0].operator" || issue.Code != "JOIN_PROBE_OPERATOR_UNSUPPORTED" || store.run.ID != "" {
+		t.Fatalf("issue=%#v run=%#v", issue, store.run)
+	}
+}
+
+func TestValidatePublicationFailsClosedForInvalidJoinProbeResult(t *testing.T) {
+	document := singleSourceJoinRuntimeDocument()
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queryCalls := 0
+	service, store := singleSourceJoinRuntimeFixture(t, raw, &fakeConnector{query: func(context.Context, string, []any, int) (datasource.QueryResult, error) {
+		queryCalls++
+		return datasource.QueryResult{Columns: []string{"unexpected"}, Rows: [][]any{{1}}, RowCount: 1}, nil
+	}})
+
+	_, err = service.ValidatePublication(context.Background(), "tenant-1", "actor-1", dataset.PublicationCandidate{
+		DatasetID: "dataset-1", DraftVersionID: "draft-1", DSL: raw,
+	})
+	if !errors.Is(err, dataset.ErrPreviewFailed) || queryCalls != 1 || store.status != "FAILED" || store.error != "QUERY_EXECUTION_FAILED" {
+		t.Fatalf("error=%v calls=%d status=%s code=%s", err, queryCalls, store.status, store.error)
+	}
+}
+
+func TestDecodeJoinProbeResultRejectsInvalidCounts(t *testing.T) {
+	tests := []struct {
+		name string
+		row  []any
+	}{
+		{name: "负数", row: []any{json.Number("-1"), json.Number("0"), json.Number("0"), json.Number("0"), json.Number("0")}},
+		{name: "非整数", row: []any{json.Number("1.5"), json.Number("0"), json.Number("2"), json.Number("0"), json.Number("0")}},
+		{name: "最大重复度矛盾", row: []any{json.Number("0"), json.Number("0"), json.Number("2"), json.Number("0"), json.Number("0")}},
+		{name: "扇出组数越界", row: []any{json.Number("1"), json.Number("1"), json.Number("2"), json.Number("2"), json.Number("2")}},
+		{name: "不精确浮点整数", row: []any{float64(1 << 54), 0, 0, 0, 0}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := decodeJoinProbeResult(datasource.QueryResult{
+				Columns: append([]string(nil), joinProbeColumns...), Rows: [][]any{test.row}, RowCount: 1,
+			})
+			if err == nil {
+				t.Fatalf("非法探测统计被接受: %#v", test.row)
+			}
+		})
+	}
+}
+
+func storeDocument(t *testing.T) json.RawMessage {
+	t.Helper()
+	raw, err := os.ReadFile("../../api/examples/dataset-dsl-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func TestPreviewExecutesFixedFileVersionAndCompletesAudit(t *testing.T) {
@@ -365,4 +596,28 @@ func crossSourceRuntimeDocument() dataset.Document {
 		ExecutionPolicy: dataset.ExecutionPolicy{Mode: "REALTIME", TimeoutMS: 5000, PreviewLimit: 100, ResultLimit: 1000,
 			Materialization: dataset.MaterializationPolicy{Enabled: false}},
 	}
+}
+
+func singleSourceJoinRuntimeDocument() dataset.Document {
+	document := crossSourceRuntimeDocument()
+	document.Dataset.Type = "SINGLE_SOURCE"
+	document.Nodes[0].DataSourceID = "source-1"
+	document.Nodes[1].DataSourceID = "source-1"
+	return document
+}
+
+func singleSourceJoinRuntimeFixture(t *testing.T, raw json.RawMessage, connector QueryConnector) (*Service, *fakeRuntimeStore) {
+	t.Helper()
+	ordersTable := querycompiler.TableRef{NodeID: "orders", Schema: "sales", Name: "orders", Columns: map[string]bool{"customer_id": true, "amount": true}}
+	customersTable := querycompiler.TableRef{NodeID: "customers", Schema: "sales", Name: "customers", Columns: map[string]bool{"customer_id": true, "customer_name": true}}
+	store := &fakeRuntimeStore{resolved: ResolvedPlan{
+		SourceID: "source-1", SourceType: datasource.TypeMySQL,
+		Tables: map[string]querycompiler.TableRef{"orders": ordersTable, "customers": customersTable},
+	}}
+	service := NewService(
+		fakeDatasets{record: dataset.Record{ID: "dataset-1", DraftVersionID: "draft-1", PlanHash: "logical-plan", DSL: raw}},
+		fakeSources{source: datasource.Source{ID: "source-1", Type: datasource.TypeMySQL, Status: datasource.StatusActive}},
+		fakePolicies{}, store, map[datasource.Type]QueryConnector{datasource.TypeMySQL: connector},
+	)
+	return service, store
 }

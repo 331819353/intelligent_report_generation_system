@@ -22,7 +22,39 @@ export type DatasetDraft = {
 }
 export type DatasetRecord = {
   id: string; code: string; name: string; description: string; type: string; status: string
-  version: number; dslHash: string; planHash: string; dsl: DatasetDSL; logicalPlan: unknown
+  version: number; draftVersionId: string; draftRecordVersion: number; currentPublishedVersionId?: string
+  dslHash: string; planHash: string; dsl: DatasetDSL; logicalPlan: unknown
+}
+export type PublishedVersionRecord = {
+  id: string; datasetId: string; versionNo: number; status: 'PUBLISHED' | 'STALE' | 'DEPRECATED'
+  dslVersion: string; dslHash: string; planHash: string; dsl: DatasetDSL; logicalPlan: unknown
+  publishedAt: string; publishedBy: string
+  datasetRecordVersion: number; draftVersionId: string; draftRecordVersion: number
+}
+export type PublishedVersionSummary = Pick<PublishedVersionRecord,
+  'id' | 'datasetId' | 'versionNo' | 'status' | 'dslVersion' | 'dslHash' | 'planHash' |
+  'draftRecordVersion' | 'publishedAt' | 'publishedBy'>
+export type PublishedVersionPage = {
+  items: PublishedVersionSummary[]; total: number; limit: number; offset: number
+}
+export type VersionUsage = {
+  reportDraftReferences: number
+  downstreamDraftReferences: number
+  downstreamPublishedReferences: number
+  activeQueryRuns: number
+}
+export type VersionTransitionInput = {
+  expectedVersion: number
+  expectedStatus: PublishedVersionRecord['status']
+  targetStatus: 'STALE' | 'DEPRECATED'
+}
+export type DatasetPermissionAction = 'READ' | 'MANAGE' | 'PUBLISH'
+export type PublishDatasetInput = {
+  draftVersionId: string
+  expectedVersion: number
+  expectedDraftRecordVersion: number
+  expectedDslHash: string
+  validationParameters: Record<string, unknown>
 }
 export type DatasetPreview = {
   queryId: string; columns: string[]; rows: unknown[][]; rowCount: number; durationMs: number
@@ -129,13 +161,31 @@ export function buildPreviewParameters(parameters: ParameterOption[], values: Re
   return result
 }
 
+/** 为一次冻结后的发布候选生成重试时可复用的幂等键。 */
+export function createDatasetPublishIdempotencyKey(): string {
+  return globalThis.crypto.randomUUID()
+}
+
+const datasetPath = (id: string) => `/v1/datasets/${encodeURIComponent(id)}`
+
 export const datasetAPI = {
   tables: () => apiRequest<{ items: AssetTable[] }>('/v1/assets/tables?limit=200'),
-  columns: (tableID: string) => apiRequest<{ items: AssetColumn[] }>(`/v1/assets/tables/${tableID}/columns`),
-  get: (id: string) => apiRequest<DatasetRecord>(`/v1/datasets/${id}`),
+  columns: (tableID: string) => apiRequest<{ items: AssetColumn[] }>(`/v1/assets/tables/${encodeURIComponent(tableID)}/columns`),
+  // 数据集聚合版本会在发布和协作保存时变化，读取时禁止复用浏览器或代理缓存。
+  get: (id: string) => apiRequest<DatasetRecord>(datasetPath(id), { cache: 'no-store' }),
   validate: (dsl: DatasetDSL) => apiRequest<{ valid: boolean; dslHash: string; planHash: string; logicalPlan: unknown }>('/v1/datasets/validate', { method: 'POST', body: JSON.stringify({ dsl }) }),
   create: (dsl: DatasetDSL) => apiRequest<DatasetRecord>('/v1/datasets', { method: 'POST', body: JSON.stringify({ code: dsl.dataset.code, name: dsl.dataset.name, description: dsl.dataset.description ?? '', type: dsl.dataset.type, dsl }) }),
-  update: (id: string, version: number, draft: DatasetDraft, dsl: DatasetDSL) => apiRequest<DatasetRecord>(`/v1/datasets/${id}/draft`, { method: 'PUT', body: JSON.stringify({ name: draft.name, description: draft.description, expectedVersion: version, dsl }) }),
-  preview: (id: string, queryId: string, parameters: Record<string, unknown>, maxRows = 100) => apiRequest<DatasetPreview>(`/v1/datasets/${id}/preview`, { method: 'POST', body: JSON.stringify({ queryId, parameters, maxRows }) }),
-  cancel: (id: string, queryId: string) => apiRequest<{ cancelled: boolean }>(`/v1/datasets/${id}/query-runs/${queryId}/cancel`, { method: 'POST', body: '{}' }),
+  update: (id: string, version: number, draft: DatasetDraft, dsl: DatasetDSL) => apiRequest<DatasetRecord>(`${datasetPath(id)}/draft`, { method: 'PUT', body: JSON.stringify({ name: draft.name, description: draft.description, expectedVersion: version, dsl }) }),
+  publish: (id: string, input: PublishDatasetInput, idempotencyKey: string) => apiRequest<PublishedVersionRecord>(`${datasetPath(id)}/publish`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(input) }),
+  listVersions: (id: string, limit = 50, offset = 0) => {
+    const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+    return apiRequest<PublishedVersionPage>(`${datasetPath(id)}/versions?${query}`, { cache: 'no-store' })
+  },
+  getVersion: (id: string, versionId: string) => apiRequest<PublishedVersionRecord>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}`, { cache: 'no-store' }),
+  getVersionUsage: (id: string, versionId: string) => apiRequest<VersionUsage>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}/usage`, { cache: 'no-store' }),
+  transitionVersion: (id: string, versionId: string, input: VersionTransitionInput) => apiRequest<PublishedVersionRecord>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}/status`, { method: 'POST', body: JSON.stringify(input) }),
+  evaluatePermission: (id: string, action: DatasetPermissionAction) => apiRequest<{ allowed: boolean }>('/v1/permissions/evaluate', { method: 'POST', body: JSON.stringify({ resourceType: 'DATASET', action, objectId: id }) }),
+  preview: (id: string, queryId: string, parameters: Record<string, unknown>, maxRows = 100) => apiRequest<DatasetPreview>(`${datasetPath(id)}/preview`, { method: 'POST', body: JSON.stringify({ queryId, parameters, maxRows }) }),
+  previewVersion: (id: string, versionId: string, queryId: string, parameters: Record<string, unknown>, maxRows = 100) => apiRequest<DatasetPreview>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}/preview`, { method: 'POST', body: JSON.stringify({ queryId, parameters, maxRows }) }),
+  cancel: (id: string, queryId: string) => apiRequest<{ cancelled: boolean }>(`${datasetPath(id)}/query-runs/${encodeURIComponent(queryId)}/cancel`, { method: 'POST', body: '{}' }),
 }

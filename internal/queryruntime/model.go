@@ -32,9 +32,10 @@ type FederatedExecutor interface {
 	Cancel(context.Context, string) (bool, error)
 }
 
-// DatasetStore 只读取已经过领域校验和持久化的数据集草稿。
+// DatasetStore 读取当前草稿或精确发布版本定义；精确版本的依赖复核由物理解析事务完成。
 type DatasetStore interface {
 	Get(context.Context, string, string) (dataset.Record, error)
+	GetVersion(context.Context, string, string, string) (dataset.VersionRecord, error)
 }
 
 // SourceStore 提供源连接配置及租户运行配额。
@@ -46,6 +47,7 @@ type SourceStore interface {
 // PolicyStore 在每次执行前加载当前用户真正适用的行列策略。
 type PolicyStore interface {
 	Load(context.Context, string, string, string, string) (policy.UserScope, []policy.RowPolicy, []policy.ColumnPolicy, error)
+	ValidateDefinitions(context.Context, string, string, string, []string) error
 }
 
 // ResolvedPlan 是控制库白名单解析后的单数据源物理计划。
@@ -75,6 +77,7 @@ type RunSourceRecord struct {
 // RunRecord 仅保存查询摘要，不含 SQL、参数明文或结果样本。
 type RunRecord struct {
 	ID, TenantID, DatasetID, DatasetVersionID, ActorID, SourceID string
+	RunType                                                      string
 	PlanHash, ParameterHash                                      string
 	Sources                                                      []RunSourceRecord
 }
@@ -82,6 +85,7 @@ type RunRecord struct {
 // RuntimeStore 解析物理白名单并持久化可审计的查询生命周期。
 type RuntimeStore interface {
 	Resolve(context.Context, string, dataset.Document) (ResolvedPlan, error)
+	ResolveVersion(context.Context, string, string, string, dataset.Document) (ResolvedPlan, error)
 	Start(context.Context, RunRecord) error
 	Finish(context.Context, string, string, string, int, int64, string, []datasource.QueryWarning, []datasource.QuerySourceStat) error
 	CancellableSources(context.Context, string, string, string, string) ([]RunSourceRecord, error)

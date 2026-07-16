@@ -98,6 +98,7 @@ func main() {
 		filequery.NewExecutor(excelManager),
 	)
 	queryService.SetFederatedExecutor(federation.NewExecutor(queryConnectors, excelManager))
+	datasetService.SetPublicationValidator(queryService)
 	datasetHandler := dataset.NewHandler(authService, accessService, datasetService, queryService)
 	reportService := report.NewService(report.NewPostgresStore(pool))
 	reportHandler := report.NewHandler(authService, accessService, reportService)

@@ -8,16 +8,23 @@ import (
 const DSLVersion = "1.0"
 
 var (
-	ErrNotFound           = errors.New("dataset not found")
-	ErrConflict           = errors.New("dataset version conflict")
-	ErrAlreadyExists      = errors.New("dataset code already exists")
-	ErrInvalidDocument    = errors.New("dataset document is invalid")
-	ErrPreviewInvalid     = errors.New("dataset preview request is invalid")
-	ErrPreviewFailed      = errors.New("dataset preview failed")
-	ErrPreviewTimeout     = errors.New("dataset preview timed out")
-	ErrPreviewUnsupported = errors.New("dataset preview source is unsupported")
-	ErrQueryNotFound      = errors.New("query run not found")
-	ErrQueryConflict      = errors.New("query run already exists")
+	ErrNotFound            = errors.New("dataset not found")
+	ErrVersionNotFound     = errors.New("dataset version not found")
+	ErrVersionUnavailable  = errors.New("dataset version is unavailable")
+	ErrConflict            = errors.New("dataset version conflict")
+	ErrAlreadyExists       = errors.New("dataset code already exists")
+	ErrIdempotencyConflict = errors.New("dataset idempotency key conflict")
+	ErrPublishUnavailable  = errors.New("dataset publication validator is unavailable")
+	ErrPublishValidation   = errors.New("dataset publication validation failed")
+	ErrForbidden           = errors.New("dataset operation is forbidden")
+	ErrInvalidTransition   = errors.New("dataset version transition is invalid")
+	ErrInvalidDocument     = errors.New("dataset document is invalid")
+	ErrPreviewInvalid      = errors.New("dataset preview request is invalid")
+	ErrPreviewFailed       = errors.New("dataset preview failed")
+	ErrPreviewTimeout      = errors.New("dataset preview timed out")
+	ErrPreviewUnsupported  = errors.New("dataset preview source is unsupported")
+	ErrQueryNotFound       = errors.New("query run not found")
+	ErrQueryConflict       = errors.New("query run already exists")
 )
 
 // Document 是数据集 DSL V1 的完整、可版本化定义。
@@ -190,6 +197,23 @@ type ValidationError struct {
 
 func (e *ValidationError) Error() string { return "dataset DSL validation failed" }
 
+// PublicationIssue 描述发布前校验失败的稳定代码和 DSL 路径，不包含源数据或 SQL。
+type PublicationIssue struct {
+	Path   string `json:"path"`
+	Code   string `json:"code"`
+	Reason string `json:"reason"`
+}
+
+// PublicationValidationError 聚合发布试跑、依赖和策略校验发现的问题。
+type PublicationValidationError struct {
+	Issues []PublicationIssue `json:"details"`
+}
+
+func (e *PublicationValidationError) Error() string { return ErrPublishValidation.Error() }
+
+// Unwrap 让 HTTP 层可以用 errors.Is 识别发布校验错误。
+func (e *PublicationValidationError) Unwrap() error { return ErrPublishValidation }
+
 // Prepared 是完成迁移、规范化、校验和逻辑计划派生后的保存对象。
 type Prepared struct {
 	Document        Document
@@ -219,34 +243,78 @@ type PlanStep struct {
 
 // Record 是 API 返回的数据集及当前草稿快照。
 type Record struct {
-	ID             string          `json:"id"`
-	Code           string          `json:"code"`
-	Name           string          `json:"name"`
-	Description    string          `json:"description"`
-	Type           string          `json:"type"`
-	Status         string          `json:"status"`
-	Version        int64           `json:"version"`
-	DraftVersionID string          `json:"draftVersionId"`
-	DSLVersion     string          `json:"dslVersion"`
-	DSLHash        string          `json:"dslHash"`
-	PlanHash       string          `json:"planHash"`
-	DSL            json.RawMessage `json:"dsl"`
-	LogicalPlan    json.RawMessage `json:"logicalPlan"`
-	CreatedAt      string          `json:"createdAt"`
-	UpdatedAt      string          `json:"updatedAt"`
+	ID                        string          `json:"id"`
+	Code                      string          `json:"code"`
+	Name                      string          `json:"name"`
+	Description               string          `json:"description"`
+	Type                      string          `json:"type"`
+	Status                    string          `json:"status"`
+	Version                   int64           `json:"version"`
+	DraftVersionID            string          `json:"draftVersionId"`
+	DraftVersionNo            int             `json:"draftVersionNo"`
+	DraftRecordVersion        int64           `json:"draftRecordVersion"`
+	CurrentPublishedVersionID string          `json:"currentPublishedVersionId,omitempty"`
+	DSLVersion                string          `json:"dslVersion"`
+	DSLHash                   string          `json:"dslHash"`
+	PlanHash                  string          `json:"planHash"`
+	DSL                       json.RawMessage `json:"dsl"`
+	LogicalPlan               json.RawMessage `json:"logicalPlan"`
+	CreatedAt                 string          `json:"createdAt"`
+	UpdatedAt                 string          `json:"updatedAt"`
 }
 
 // Summary 是数据集目录使用的轻量摘要，不返回完整 DSL。
 type Summary struct {
-	ID          string `json:"id"`
-	Code        string `json:"code"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Type        string `json:"type"`
-	Status      string `json:"status"`
-	Version     int64  `json:"version"`
-	DSLHash     string `json:"dslHash"`
-	UpdatedAt   string `json:"updatedAt"`
+	ID                        string `json:"id"`
+	Code                      string `json:"code"`
+	Name                      string `json:"name"`
+	Description               string `json:"description"`
+	Type                      string `json:"type"`
+	Status                    string `json:"status"`
+	Version                   int64  `json:"version"`
+	DSLHash                   string `json:"dslHash"`
+	CurrentPublishedVersionID string `json:"currentPublishedVersionId,omitempty"`
+	UpdatedAt                 string `json:"updatedAt"`
+}
+
+// VersionRecord 是按精确版本 ID 加载的不可变发布快照。
+type VersionRecord struct {
+	ID                   string          `json:"id"`
+	DatasetID            string          `json:"datasetId"`
+	DatasetRecordVersion int64           `json:"datasetRecordVersion"`
+	DraftVersionID       string          `json:"draftVersionId"`
+	DraftRecordVersion   int64           `json:"draftRecordVersion"`
+	VersionNo            int             `json:"versionNo"`
+	Status               string          `json:"status"`
+	DSLVersion           string          `json:"dslVersion"`
+	DSLHash              string          `json:"dslHash"`
+	PlanHash             string          `json:"planHash"`
+	DSL                  json.RawMessage `json:"dsl"`
+	LogicalPlan          json.RawMessage `json:"logicalPlan"`
+	PublishedAt          string          `json:"publishedAt"`
+	PublishedBy          string          `json:"publishedBy"`
+}
+
+// VersionSummary 是版本目录使用的轻量发布快照。
+type VersionSummary struct {
+	ID                 string `json:"id"`
+	DatasetID          string `json:"datasetId"`
+	VersionNo          int    `json:"versionNo"`
+	Status             string `json:"status"`
+	DSLVersion         string `json:"dslVersion"`
+	DSLHash            string `json:"dslHash"`
+	PlanHash           string `json:"planHash"`
+	DraftRecordVersion int64  `json:"draftRecordVersion"`
+	PublishedAt        string `json:"publishedAt"`
+	PublishedBy        string `json:"publishedBy"`
+}
+
+// VersionUsage 汇总精确发布版本当前可见的引用和运行占用，不暴露下游资源标识。
+type VersionUsage struct {
+	ReportDraftReferences         int `json:"reportDraftReferences"`
+	DownstreamDraftReferences     int `json:"downstreamDraftReferences"`
+	DownstreamPublishedReferences int `json:"downstreamPublishedReferences"`
+	ActiveQueryRuns               int `json:"activeQueryRuns"`
 }
 
 // CreateInput 是创建数据集草稿的请求。
@@ -264,6 +332,44 @@ type UpdateInput struct {
 	Description     string          `json:"description"`
 	ExpectedVersion int64           `json:"expectedVersion"`
 	DSL             json.RawMessage `json:"dsl"`
+}
+
+// PublishInput 绑定一个确定的草稿修订和发布试跑参数。
+type PublishInput struct {
+	DraftVersionID             string         `json:"draftVersionId"`
+	ExpectedVersion            int64          `json:"expectedVersion"`
+	ExpectedDraftRecordVersion int64          `json:"expectedDraftRecordVersion"`
+	ExpectedDSLHash            string         `json:"expectedDslHash"`
+	ValidationParameters       map[string]any `json:"validationParameters"`
+}
+
+// PublicationCandidate 是交给查询运行时试跑的只读草稿快照。
+type PublicationCandidate struct {
+	DatasetID          string
+	DraftVersionID     string
+	DraftRecordVersion int64
+	DSLHash            string
+	PlanHash           string
+	DSL                json.RawMessage
+	Parameters         map[string]any
+}
+
+// PublishPlan 保存发布事务所需的规范内容和幂等身份。
+type PublishPlan struct {
+	IdempotencyKey             string
+	RequestHash                string
+	ExpectedVersion            int64
+	DraftVersionID             string
+	ExpectedDraftRecordVersion int64
+	ExpectedDSLHash            string
+	Prepared                   Prepared
+}
+
+// VersionTransitionInput 只允许受控地把发布版本单向转为失效或废弃。
+type VersionTransitionInput struct {
+	ExpectedVersion int64  `json:"expectedVersion"`
+	ExpectedStatus  string `json:"expectedStatus"`
+	TargetStatus    string `json:"targetStatus"`
 }
 
 // PreviewInput 包含受 DSL 定义约束的参数、行数上限和客户端预生成查询标识。

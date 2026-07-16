@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -124,6 +125,119 @@ func TestSecureCompilerQueriesMySQLAndOracle(t *testing.T) {
 				t.Fatalf("row count=%d max=%d", out.RowCount, compiled.MaxRows)
 			}
 		})
+	}
+}
+
+func TestJoinProbeCompilerQueriesMySQLAndOracle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cases := []struct {
+		name       string
+		dialect    querycompiler.Dialect
+		schema     string
+		table      string
+		field      string
+		connection map[string]any
+		want       []int64
+	}{
+		{
+			name: "mysql_customers", dialect: querycompiler.MySQL, schema: "report_source", table: "customers", field: "customer_id",
+			connection: map[string]any{"source_type": "MYSQL", "host": "mysql", "port": 3306, "database": "report_source", "username": "report_reader", "password": "local_mysql_reader_password"},
+			want:       []int64{0, 0, 1, 1, 0},
+		},
+		{
+			name: "oracle_orders", dialect: querycompiler.Oracle, schema: "REPORT_READER", table: "ORDERS", field: "CUSTOMER_ID",
+			connection: map[string]any{"source_type": "ORACLE", "host": "oracle", "port": 1521, "database": "FREEPDB1", "username": "report_reader", "password": "local_oracle_reader_password"},
+			want:       []int64{1, 1, 2, 2, 1},
+		},
+	}
+	wantColumns := []string{"left_duplicate_keys", "right_duplicate_keys", "left_max_multiplicity", "right_max_multiplicity", "fanout_keys"}
+
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			document := joinProbeDocument(item.field)
+			compiled, err := querycompiler.CompileJoinProbes(querycompiler.JoinProbeInput{
+				Document: document,
+				Dialect:  item.dialect,
+				Tables: map[string]querycompiler.TableRef{
+					"probe_left":  {NodeID: "probe_left", Schema: item.schema, Name: item.table, Columns: map[string]bool{item.field: true}},
+					"probe_right": {NodeID: "probe_right", Schema: item.schema, Name: item.table, Columns: map[string]bool{item.field: true}},
+				},
+				Parameters: map[string]any{},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(compiled) != 1 || compiled[0].JoinID != "probe_self_join" {
+				t.Fatalf("unexpected join probes: %#v", compiled)
+			}
+
+			probe := compiled[0].Query
+			out := query(t, ctx, item.connection, probe.SQL, probe.Args, probe.MaxRows)
+			if out.RowCount != 1 || len(out.Rows) != 1 || len(out.Rows[0]) != len(wantColumns) || len(out.Columns) != len(wantColumns) {
+				t.Fatalf("join probe shape columns=%#v rows=%#v rowCount=%d", out.Columns, out.Rows, out.RowCount)
+			}
+			for index, column := range out.Columns {
+				if !strings.EqualFold(column, wantColumns[index]) {
+					t.Fatalf("join probe column[%d]=%q want=%q", index, column, wantColumns[index])
+				}
+				if got := resultInteger(t, out.Rows[0][index]); got != item.want[index] {
+					t.Fatalf("join probe %s=%d want=%d row=%#v", wantColumns[index], got, item.want[index], out.Rows[0])
+				}
+			}
+		})
+	}
+}
+
+func joinProbeDocument(field string) dataset.Document {
+	return dataset.Document{
+		DSLVersion: dataset.DSLVersion,
+		Dataset:    dataset.Descriptor{Code: "self_join_probe", Name: "自关联基数探测", Type: "SINGLE_SOURCE"},
+		Nodes: []dataset.Node{
+			{ID: "probe_left", Type: "TABLE", DataSourceID: "source-id", TableID: "table-id", Alias: "pl", Projection: []string{field}, SourceFilters: []dataset.SourceFilter{}},
+			{ID: "probe_right", Type: "TABLE", DataSourceID: "source-id", TableID: "table-id", Alias: "pr", Projection: []string{field}, SourceFilters: []dataset.SourceFilter{}},
+		},
+		Joins: []dataset.Join{{
+			ID: "probe_self_join", LeftNodeID: "probe_left", RightNodeID: "probe_right", JoinType: "INNER", Cardinality: "ONE_TO_ONE", ManualConfirmed: true,
+			Conditions: []dataset.JoinCondition{{
+				LeftExpression:  dataset.Expression{Type: "FIELD_REF", NodeID: "probe_left", Field: field},
+				Operator:        "EQUALS",
+				RightExpression: dataset.Expression{Type: "FIELD_REF", NodeID: "probe_right", Field: field},
+			}},
+		}},
+		Fields: []dataset.Field{{
+			ID: "field_join_key", Code: "join_key", Name: "关联键", Role: "IDENTIFIER", CanonicalType: "INTEGER",
+			Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "probe_left", Field: field},
+		}},
+		Filters: []dataset.Filter{}, GroupBy: []string{}, Having: []dataset.Filter{}, Sorts: []dataset.Sort{}, Parameters: []dataset.Parameter{},
+		OutputGrain: dataset.OutputGrain{Description: "每行一个关联键", KeyFields: []string{"join_key"}},
+		ExecutionPolicy: dataset.ExecutionPolicy{Mode: "REALTIME", TimeoutMS: 5000, PreviewLimit: 10, ResultLimit: 100,
+			Materialization: dataset.MaterializationPolicy{Enabled: false}},
+	}
+}
+
+func resultInteger(t *testing.T, value any) int64 {
+	t.Helper()
+	switch number := value.(type) {
+	case float64:
+		result := int64(number)
+		if float64(result) != number {
+			t.Fatalf("result is not an integer: %#v", value)
+		}
+		return result
+	case int:
+		return int64(number)
+	case int64:
+		return number
+	case json.Number:
+		result, err := number.Int64()
+		if err != nil {
+			t.Fatalf("result is not an integer: %#v", value)
+		}
+		return result
+	default:
+		t.Fatalf("unexpected integer result type %T: %#v", value, value)
+		return 0
 	}
 }
 

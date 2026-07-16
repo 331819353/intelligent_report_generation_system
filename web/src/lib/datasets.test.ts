@@ -1,5 +1,8 @@
-import { describe, expect, test } from 'vitest'
-import { buildDatasetDSL, buildPreviewParameters, type AssetColumn, type AssetTable, type DatasetDraft } from './datasets'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+import { RequestError } from './api'
+import { buildDatasetDSL, buildPreviewParameters, createDatasetPublishIdempotencyKey, datasetAPI, type AssetColumn, type AssetTable, type DatasetDraft, type PublishedVersionRecord, type PublishDatasetInput } from './datasets'
+
+afterEach(() => vi.unstubAllGlobals())
 
 const table: AssetTable = { id: 'table-1', dataSourceId: 'source-1', dataSourceName: '订单库', dataSourceType: 'MYSQL', tableName: 'orders', schemaName: 'sales', businessName: '订单', columnCount: 2 }
 const columns: AssetColumn[] = [
@@ -63,3 +66,100 @@ describe('buildPreviewParameters', () => {
     expect(() => buildPreviewParameters(draft().parameters, {})).toThrow('开始日期')
   })
 })
+
+describe('数据集发布版本 API', () => {
+  test('读取可变数据集聚合时禁用缓存', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ id: 'dataset-1' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await datasetAPI.get('dataset/id')
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('/api/v1/datasets/dataset%2Fid')
+    expect(init.cache).toBe('no-store')
+  })
+
+  test('发布请求携带冻结草稿信封与幂等键', async () => {
+    const published = publishedRecord()
+    const fetchMock = vi.fn(async () => jsonResponse(published, 201))
+    vi.stubGlobal('fetch', fetchMock)
+    const input: PublishDatasetInput = {
+      draftVersionId: 'draft-version-1', expectedVersion: 5, expectedDraftRecordVersion: 3,
+      expectedDslHash: 'a'.repeat(64), validationParameters: { start_date: '2026-01-01' },
+    }
+
+    await expect(datasetAPI.publish('dataset/id', input, 'publish-key')).resolves.toEqual(published)
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('/api/v1/datasets/dataset%2Fid/publish')
+    expect(init.method).toBe('POST')
+    expect(new Headers(init.headers).get('Idempotency-Key')).toBe('publish-key')
+    expect(JSON.parse(String(init.body))).toEqual(input)
+  })
+
+  test('按父数据集访问版本目录、精确版本、使用汇总和版本预览', async () => {
+    const published = publishedRecord()
+    const usage = { reportDraftReferences: 2, downstreamDraftReferences: 3, downstreamPublishedReferences: 4, activeQueryRuns: 1 }
+    const preview = { queryId: 'query-1', columns: ['order_date'], rows: [['2026-01-01']], rowCount: 1, durationMs: 8 }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [published], total: 1, limit: 20, offset: 10 }))
+      .mockResolvedValueOnce(jsonResponse(published))
+      .mockResolvedValueOnce(jsonResponse(usage))
+      .mockResolvedValueOnce(jsonResponse(preview))
+      .mockResolvedValueOnce(jsonResponse({ ...published, status: 'STALE' }))
+      .mockResolvedValueOnce(jsonResponse({ allowed: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await datasetAPI.listVersions('dataset/id', 20, 10)
+    await datasetAPI.getVersion('dataset/id', 'version/id')
+    await datasetAPI.getVersionUsage('dataset/id', 'version/id')
+    await datasetAPI.previewVersion('dataset/id', 'version/id', 'query-1', { start_date: '2026-01-01' }, 50)
+    await datasetAPI.transitionVersion('dataset/id', 'version/id', { expectedVersion: 7, expectedStatus: 'PUBLISHED', targetStatus: 'STALE' })
+    await datasetAPI.evaluatePermission('dataset/id', 'PUBLISH')
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/datasets/dataset%2Fid/versions?limit=20&offset=10')
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).cache).toBe('no-store')
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/v1/datasets/dataset%2Fid/versions/version%2Fid')
+    expect((fetchMock.mock.calls[1]?.[1] as RequestInit).cache).toBe('no-store')
+    expect(fetchMock.mock.calls[2]?.[0]).toBe('/api/v1/datasets/dataset%2Fid/versions/version%2Fid/usage')
+    expect((fetchMock.mock.calls[2]?.[1] as RequestInit).cache).toBe('no-store')
+    const [previewURL, previewInit] = fetchMock.mock.calls[3] as unknown as [string, RequestInit]
+    expect(previewURL).toBe('/api/v1/datasets/dataset%2Fid/versions/version%2Fid/preview')
+    expect(JSON.parse(String(previewInit.body))).toEqual({ queryId: 'query-1', parameters: { start_date: '2026-01-01' }, maxRows: 50 })
+    const [statusURL, statusInit] = fetchMock.mock.calls[4] as unknown as [string, RequestInit]
+    expect(statusURL).toBe('/api/v1/datasets/dataset%2Fid/versions/version%2Fid/status')
+    expect(JSON.parse(String(statusInit.body))).toEqual({ expectedVersion: 7, expectedStatus: 'PUBLISHED', targetStatus: 'STALE' })
+    const [permissionURL, permissionInit] = fetchMock.mock.calls[5] as unknown as [string, RequestInit]
+    expect(permissionURL).toBe('/api/v1/permissions/evaluate')
+    expect(JSON.parse(String(permissionInit.body))).toEqual({ resourceType: 'DATASET', action: 'PUBLISH', objectId: 'dataset/id' })
+  })
+
+  test('生成 UUID 形状的发布幂等键', () => {
+    expect(createDatasetPublishIdempotencyKey()).toMatch(/^[0-9a-f-]{36}$/i)
+  })
+
+  test('发布校验错误保留全部路径、稳定代码和原因', () => {
+    const error = new RequestError({
+      code: 'DATASET_PUBLISH_VALIDATION_FAILED', message: '数据集发布前校验失败',
+      details: [
+        { path: 'nodes[0]', code: 'PUBLISH_DEPENDENCY_CHANGED', reason: '上游结构已变化' },
+        { path: 'joins[1]', code: 'JOIN_FANOUT_RISK', reason: '关联存在扇出风险' },
+      ],
+    }, 422)
+    expect(error.message).toContain('nodes[0] [PUBLISH_DEPENDENCY_CHANGED] 上游结构已变化')
+    expect(error.message).toContain('joins[1] [JOIN_FANOUT_RISK] 关联存在扇出风险')
+  })
+})
+
+function publishedRecord(): PublishedVersionRecord {
+  return {
+    id: 'published-version-1', datasetId: 'dataset-1', versionNo: 1, status: 'PUBLISHED',
+    dslVersion: '1.0', dslHash: 'a'.repeat(64), planHash: 'b'.repeat(64), dsl: buildDatasetDSL(draft()),
+    logicalPlan: {}, publishedAt: '2026-07-16T10:00:00Z', publishedBy: 'user-1',
+    datasetRecordVersion: 6, draftVersionId: 'draft-version-1', draftRecordVersion: 3,
+  }
+}
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+}

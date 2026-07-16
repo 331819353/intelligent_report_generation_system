@@ -2,7 +2,39 @@
 .dataset-status small { margin-left: auto; color: var(--muted); }
 .designer-error { color: #b42318; font-weight: 700; }
 .designer-success { color: #047857; font-weight: 700; }
+.dataset-version-manager { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 14px; margin-bottom: 16px; padding: 16px; background: white; border: 1px solid var(--line); border-radius: 10px; }
+.version-manager-heading { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #edf0f3; padding-bottom: 10px; }
+.version-manager-heading h2 { margin: 4px 0 0; font-size: 18px; }
+.version-manager-heading small, .version-empty { color: var(--muted); font-size: 12px; }
+.version-list { display: grid; align-content: start; gap: 7px; max-height: 320px; overflow: auto; }
+.version-list button { display: grid; grid-template-columns: max-content 1fr max-content; gap: 9px; align-items: center; width: 100%; padding: 10px; border: 1px solid #e0e6ee; border-radius: 8px; background: #f8fafc; text-align: left; }
+.version-list button.selected { border-color: #7aa2ff; background: #eef4ff; box-shadow: inset 3px 0 #2764ff; }
+.version-list button span { color: var(--muted); font-size: 11px; }
+.version-list button em, .current-version { border-radius: 999px; padding: 3px 7px; background: #dcfce7; color: #047857; font-size: 10px; font-style: normal; font-weight: 800; }
+.version-detail { min-width: 0; display: grid; gap: 10px; }
+.version-detail > header { display: flex; justify-content: space-between; align-items: center; }
+.version-detail > header > div { display: flex; align-items: center; gap: 8px; }
+.version-detail > header > small { color: var(--muted); }
+.version-status { border-radius: 999px; padding: 3px 8px; font-size: 10px; font-weight: 800; }
+.status-published { background: #dcfce7; color: #047857; }
+.status-stale { background: #ffedd5; color: #9a3412; }
+.status-deprecated { background: #f1f5f9; color: #475569; }
+.version-metadata { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 8px; margin: 0; }
+.version-metadata > div { min-width: 0; padding: 8px 10px; border-radius: 7px; background: #f8fafc; }
+.version-metadata dt { color: var(--muted); font-size: 10px; }
+.version-metadata dd { overflow: hidden; margin: 4px 0 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.version-usage { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.version-usage span { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border: 1px solid #e6eaf0; border-radius: 7px; color: var(--muted); font-size: 11px; }
+.version-usage strong { color: var(--ink); font-size: 15px; }
+.version-parameters { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px; border: 1px solid #c8d8f6; border-radius: 8px; background: #f5f8ff; }
+.version-parameters label { display: grid; gap: 4px; min-width: 180px; color: var(--muted); font-size: 10px; font-weight: 700; }
+.version-parameters input { border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; background: white; }
+.version-actions { display: flex; align-items: center; gap: 8px; }
+.version-actions .quiet-button, .version-actions .danger-button { padding: 7px 11px; font-size: 11px; }
+.version-actions small { color: var(--muted); }
+.version-detail .dataset-preview { margin-top: 2px; }
 .dataset-designer { display: grid; grid-template-columns: 230px minmax(640px, 1fr) 290px; gap: 16px; height: calc(100vh - 158px); }
+fieldset.dataset-designer { min-inline-size: 0; margin: 0; padding: 0; border: 0; }
 .dataset-assets, .dataset-config, .dataset-workbench { min-height: 0; overflow: auto; }
 .dataset-assets, .dataset-config { background: white; border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
 .dataset-assets h2, .dataset-config h2 { font-size: 18px; margin: 6px 0 18px; }
