@@ -40,7 +40,17 @@
       "multiValue": false,
       "defaultValue": "CURRENT_MONTH_MINUS_1",
       "scope": "REPORT",
-      "optionSource": {"type": "STATIC"}
+      "optionSource": {"type": "STATIC"},
+      "semanticBinding": {
+        "semanticFieldCode": "stat_month",
+        "datasetFields": [
+          {
+            "datasetVersionId": "dsv_enterprise_revenue_v3",
+            "fieldId": "field_stat_month",
+            "datasetParameterCode": "stat_month"
+          }
+        ]
+      }
     }
   ],
   "dataRequirements": [
@@ -82,13 +92,13 @@
               "id": "title_main",
               "type": "TITLE",
               "name": "主标题",
-              "grid": {"x": 0, "y": 0, "w": 48, "h": 4},
+              "grid": {"x": 0, "y": 0, "w": 36, "h": 4},
               "visible": true,
               "manualLocked": true,
               "style": {"fontSize": 34, "fontWeight": 700},
               "binding": {"text": "企业经营月度分析报告"},
               "interaction": {},
-              "sticky": {"enabled": false},
+              "sticky": {"enabled": true, "top": 0, "scope": "PAGE", "zIndex": 100},
               "refreshPolicy": {"mode": "NONE"},
               "sourceTrace": [
                 {
@@ -98,6 +108,31 @@
                   "usage": "CONTENT"
                 }
               ]
+            },
+            {
+              "id": "filter_stat_month",
+              "type": "FILTER",
+              "name": "统计月份",
+              "grid": {"x": 36, "y": 0, "w": 12, "h": 4},
+              "visible": true,
+              "manualLocked": false,
+              "style": {"layout": "HORIZONTAL"},
+              "binding": {
+                "parameterId": "param_stat_month",
+                "placeholder": "请选择月份",
+                "control": "SELECT",
+                "operator": "EQUALS",
+                "effectScope": {"kind": "REPORT"},
+                "options": [
+                  {"label": "2026年4月", "value": "2026-04"},
+                  {"label": "2026年5月", "value": "2026-05"},
+                  {"label": "2026年6月", "value": "2026-06"}
+                ]
+              },
+              "interaction": {"autoSubmit": true},
+              "sticky": {"enabled": true, "top": 0, "scope": "PAGE", "zIndex": 110},
+              "refreshPolicy": {"mode": "INHERIT"},
+              "sourceTrace": []
             },
             {
               "id": "chart_revenue_trend",
@@ -113,7 +148,20 @@
                 "dimensions": [{"fieldId": "field_stat_month", "role": "TIME"}],
                 "chart": {"type": "LINE"}
               },
-              "interaction": {"clickFilter": false},
+              "interaction": {
+                "clickFilter": true,
+                "linkage": {
+                  "parameterId": "param_stat_month",
+                  "operator": "EQUALS",
+                  "effectScope": {"kind": "REPORT"}
+                },
+                "drill": {
+                  "levels": [
+                    {"fieldId": "field_stat_quarter", "semanticFieldCode": "stat_quarter", "label": "季度"},
+                    {"fieldId": "field_stat_month", "semanticFieldCode": "stat_month", "label": "月份"}
+                  ]
+                }
+              },
               "sticky": {"enabled": false},
               "refreshPolicy": {"mode": "INHERIT"},
               "sourceTrace": []

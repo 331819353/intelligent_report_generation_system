@@ -24,6 +24,7 @@ import (
 	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/policy"
 	"intelligent-report-generation-system/internal/queryruntime"
+	"intelligent-report-generation-system/internal/report"
 )
 
 // main 装配 API 服务依赖，并负责启动、信号监听与优雅停机。
@@ -86,6 +87,8 @@ func main() {
 	)
 	queryService.SetFederatedExecutor(federation.NewExecutor(queryConnectors, excelManager))
 	datasetHandler := dataset.NewHandler(authService, accessService, datasetService, queryService)
+	reportService := report.NewService(report.NewPostgresStore(pool))
+	reportHandler := report.NewHandler(authService, accessService, reportService)
 	api := http.NewServeMux()
 	api.Handle("/api/v1/auth/", auth.NewHandler(authService))
 	api.Handle("POST /api/v1/permissions/evaluate", auth.RequireAccessToken(authService, access.EvaluateHandler(accessService)))
@@ -103,6 +106,8 @@ func main() {
 	api.Handle("/api/v1/metadata-ai/", metadataAIHandler)
 	api.Handle("/api/v1/datasets", datasetHandler)
 	api.Handle("/api/v1/datasets/", datasetHandler)
+	api.Handle("/api/v1/reports", reportHandler)
+	api.Handle("/api/v1/reports/", reportHandler)
 	server := httpserver.New(cfg, logger, api)
 
 	serverErrors := make(chan error, 1)

@@ -1057,28 +1057,18 @@ DRAFT -> PUBLISHED -> DEPRECATED
 
 报告支持多页面。每个页面包含一个或多个分块，每个分块包含多个组件。
 
-分块至少保存：
+分块至少保存以下嵌套 JSON 字段；字段名与正式报告合同保持一致，不再使用数据库风格的扁平 snake_case 名称：
 
 ```text
 id
-page_id
-x
-y
-width
-height
-z_index
-layout_locked
-config_locked
-data_snapshot_locked
-sticky_enabled
-sticky_top
-sticky_scope
-sticky_z_index
-background
-border
-padding
-inner_grid_columns
-inner_grid_rows
+grid { x, y, w, h }
+innerGrid { columns, rows }
+zIndex
+locks { layout, config, dataSnapshot }
+sticky { enabled, top?, scope?, containerId?, zIndex? }
+style
+permissionPolicy
+components
 ```
 
 #### 12.3.1 分块清空、删除与 1×1 恢复
@@ -1100,12 +1090,19 @@ inner_grid_rows
 
 | 冻结配置 | 含义 |
 |---|---|
-| `sticky_enabled` | 是否在浏览态启用冻结 |
-| `sticky_top` | 相对可视区顶部的悬浮偏移量 |
-| `sticky_scope` | 冻结约束范围，可为页面、分块或指定滚动容器 |
-| `sticky_z_index` | 悬浮层级，用于处理冻结内容之间的遮挡顺序 |
+| `sticky.enabled` | 是否在浏览态启用冻结 |
+| `sticky.top` | 相对可视区顶部的 CSS 像素偏移；画布缩小时先除以当前缩放比再进入逻辑坐标计算 |
+| `sticky.scope` | 冻结约束范围，可为 `PAGE`、组件所属 `BLOCK` 或显式祖先 `CONTAINER` |
+| `sticky.containerId` | 仅 `CONTAINER` 使用的报告实体 ID，不是 DOM ID 或选择器 |
+| `sticky.zIndex` | 悬浮期间的层级，用于处理冻结内容之间的遮挡顺序 |
 
-典型场景包括冻结报告标题、全局筛选区或关键指标摘要。多个冻结区域同时存在时，应按配置顺序堆叠，避免相互覆盖；在移动端、PDF 和打印场景可按渲染策略取消冻结并恢复文档流布局。
+禁用规范态只保存 `{"enabled": false}`；启用态必须同时保存 `top`、`scope` 和 `zIndex`，其中 `top` 为 `0..10000` 的整数，`zIndex` 为 `1..100000` 的整数。分块可使用 `PAGE`，或用 `CONTAINER` 显式引用所属页面；组件可使用 `PAGE`、所属 `BLOCK`，或用 `CONTAINER` 显式引用所属页面/分块。未知、跨页、非祖先或存在类型歧义的引用失败关闭并恢复普通文档流，`containerId` 绝不能直接拼接为浏览器选择器。
+
+典型场景包括冻结报告标题、全局筛选区或关键指标摘要。只有实际渲染、可见且有权限的项参与冻结计算；同一约束范围内按自然网格位置（纵坐标、横坐标、原数组顺序）稳定处理，横向区间相交的项才需要纵向堆叠，离开约束容器底边后随容器退出。父分块和子组件同时冻结时，子组件的最终位移扣除父级已产生的位移，避免重复移动。冻结 `zIndex` 只在元素真正发生位移时生效，待命项保留普通布局层级，且子组件层级不得提升整个所属分块。相同 `zIndex` 仍按 DOM 文档顺序稳定绘制，普通布局层级不改变冻结堆叠顺序。
+
+V1 遵循 CSS 原生层叠组：父分块显式配置普通 `zIndex` 或父分块自身发生冻结位移时，子组件的冻结层级仅在父组内比较；没有父层叠组时，页面作用域子组件可参与画布根层级比较。若后续产品要求子组件无条件跨父组全局排序，在线查看器必须使用保持单一 DOM、焦点和可访问顺序的页面级提升层，不能通过复制组件节点实现。
+
+视口滚动、画布缩放或容器尺寸变化时应按动画帧批量重算，不得在每个滚动事件中同步触发全树测量。容器容量不足、窄屏/触控、PDF 和打印场景按确定性策略取消相关冻结并恢复文档流布局，且不得遮挡正文、焦点或关键操作。
 
 冻结与“锁定”是不同能力：`layout_locked`、`config_locked` 和 `data_snapshot_locked` 分别用于限制设计态编辑和固定数据快照，不代表浏览态悬浮。
 
@@ -1602,7 +1599,7 @@ AI 草稿阶段使用语义数据需求，不强制要求已有真实 ID：
         "dataSnapshot": false
       },
       "sticky": {
-        "enabled": false,
+        "enabled": true,
         "top": 0,
         "scope": "PAGE",
         "zIndex": 100
@@ -1764,7 +1761,7 @@ AI 生成内容应保存来源：
 12. 页面动态内容高度、组件越界和冻结层叠规则校验通过。
 13. 若发布为公开版本，公开访问策略、脱敏规则和所有数据依赖均通过公开安全校验。
 
-发布后生成不可变 `report_version`，后续修改进入新草稿。
+发布后生成不可变 `report_version`，后续修改只进入当前草稿。草稿持久化与审计由 T0409 完成；版本号分配、依赖固化、发布租约、不可变 JSON 对象写入和当前已发布指针切换由 T0601 在一次可恢复的发布流程中完成，保存草稿本身不得产生可在线访问的“半发布版本”。
 
 ### 15.3 报告运行实例
 
@@ -1865,23 +1862,60 @@ sequenceDiagram
 - 运行详情中记录每个组件的查询状态；
 - 关键组件失败时将报告运行标记为 `PARTIAL_SUCCESS`。
 
-### 15.8 JSON 文件固化与页面加载
+### 15.8 草稿持久化、发布固化与页面加载
 
-用户在设计器中的布局、分块、组件、样式、数据绑定、筛选、交互、冻结、权限引用和运行策略均进入统一报告 JSON；数据源、数据资产、数据集、指标和权限等平台配置以 ID、版本和策略引用进入 JSON，不复制数据库密码、密钥等敏感值。保存草稿时可在控制库中使用 `jsonb` 进行事务管理；发布时必须生成不可变的标准 JSON 文件并保存文件哈希、Schema 版本和存储地址。
+用户在设计器中的布局、分块、组件、样式、数据绑定、筛选、交互、冻结、权限引用和运行策略均进入统一报告 JSON；数据源、数据资产、数据集、指标和权限等平台配置以 ID、版本和策略引用进入 JSON，不复制数据库密码、密钥等敏感值。T0409 只负责租户内报告草稿的规范完整 JSON、增量操作、乐观锁和审计；T0601 才把指定草稿版本转换为不可变发布版本及对象存储制品。
+
+#### 15.8.1 草稿身份与数据库事实来源
+
+- `platform.reports.id` 使用服务端生成的 UUID，并与对象权限的资源 ID、持久化后报告 JSON 的 `report.id` 保持一致；`report.code` 是租户内业务编码，不能代替授权主键。
+- 草稿保存接口只接受 `report.status=DRAFT`。客户端不能通过完整替换或 Patch 把草稿改成 `PUBLISHED/ARCHIVED`；发布状态只能由 T0601 的发布服务生成。
+- `platform.reports` 保存主对象，`platform.report_drafts` 以一对一主键保存当前规范完整 JSON、Schema 版本、SHA-256、`revision_no` 和独立 `editor_state_json`，`platform.report_revisions` 保存追加式语义变更。`report_idempotency_records` 保存首次响应快照，组件/依赖索引可从当前 JSON 重建。全部表使用租户复合外键和强制 RLS；同一报告只保留一个当前可变草稿。
+- 规范完整 JSON 是草稿唯一事实来源。Patch 操作日志用于审计、有限撤销和后续压缩，不得要求每次读取都从创世 Patch 重放，也不能让组件索引、依赖索引或浏览器缓存成为第二事实来源。
+- `report_edit_guards` 保存报告级或分块级临时占用，T0409 在保存事务中消费未释放且未过期的 guard；T0601 的发布/导出任务负责创建、续租、释放和过期回收。它不代替访问令牌、`REPORT/UPDATE` 对象权限、`expectedRevision` 或 `Idempotency-Key`。服务端必须依据数据库中的变更前草稿检查分块三类锁、组件 `manualLocked`、当前占用和版本，不能信任客户端结果中的解锁状态。
+
+#### 15.8.2 完整 JSON 与 JSON Patch 保存合同
+
+常规保存请求同时携带基础 `expectedRevision`、有序语义 `changes`（每项内含 JSON Patch）和客户端计算的结果完整 JSON。服务端在行锁前完成纯领域重放，并在写事务中重新检查数据库版本、权限、占用和首个 before hash；每个 change 严格按数组顺序应用，不得为了优化而重排、去重、并行或跳过。完成后重新执行迁移、严格解码、Schema、引用、锁、碰撞、最小尺寸、语义 target 和规范化校验。服务端重放结果与客户端结果完整 JSON 的规范 SHA-256 必须一致，否则整批拒绝，不更新草稿、索引或审计。
+
+Patch 使用受限 RFC 6902/6901 合同：
+
+- 仅允许 `add`、`remove`、`replace`；拒绝根替换、`test`、`move`、`copy` 和 `from`；
+- 指针必须以 `/` 开始并严格解码 `~0/~1`，拒绝未知转义；数组下标只接受 `0` 或无前导零的正十进制，`-` 仅可作为 `add` 的最后一段；
+- 请求信封最多 3 MiB，规范结果 JSON 最多 2 MiB，Patch 最多 256 KiB；单请求 change 和原子 Patch 操作均最多 100 条，单个指针最多 2048 字节和 64 段；
+- `schemaVersion`、`report.id`、`report.code` 和 `report.status` 属于持久化身份或状态边界，不能由增量保存修改；既有页面、分块和组件 ID 不允许原地改名，复制组件必须以 `add` 创建全新唯一 ID；
+- 同一批中先把旧文档锁改为未锁，再修改原本受保护的布局或配置，仍按变更前文档拒绝；完整替换用于初始化或明确恢复时，也必须通过同一套前后语义差异、身份、锁和大小校验，不能成为绕过 Patch 规则的后门。
+
+每个创建和草稿保存请求都必须携带 1 至 128 字节的 `Idempotency-Key`。服务端以租户、可信操作者、报告、操作入口和幂等键保存规范请求哈希及首次完整响应：同键同载荷重试在当前 CREATE/UPDATE 权限重新校验后返回首次成功结果而不再次增版，同键不同载荷或跨操作者重放返回冲突。幂等命中必须先于陈旧版本判断，以覆盖“数据库已提交但客户端未收到响应”的重试，但不能先于当前权限判断；用于日志关联的 `X-Request-ID` 不能代替幂等键或授权。
+
+一次成功保存必须在同一租户数据库事务中完成草稿行锁与 `expectedRevision` 判断、规范完整 JSON/哈希更新、组件和依赖派生索引重建、语义修订、通用审计与幂等响应写入。操作者、租户和发生时间取自可信认证/事务；当前用户入口只接受 `source=USER` 并由服务端固定保存，未来 AI/SYSTEM 来源只能由内部可信入口产生。修订至少包含操作 ID/类型、基础/结果修订、规范 Patch 与 Patch 哈希、前后完整 JSON 哈希以及稳定 target；复制操作同时记录原组件和新组件身份。首次创建前尚无服务端报告身份，本地模板及其编辑聚合为一条无客户端操作 ID 的 `REPORT_CREATE`；取得服务端 UUID 后，每项定义变化才写独立客户端操作修订。数据库约束保证修订号连续一步、change 下标不越界、创建/非创建操作 ID 空值规则及 `patch_count` 与 JSON 数组一致。通用 `audit_logs` 只保存必要 ID、哈希和摘要，不重复保存 Patch 正文、结论正文或运行数据值。
+
+#### 15.8.3 设计器保存状态、手势与旧草稿迁移
+
+- 指针拖拽和缩放从按下到释放合并为一次语义操作、一个撤销历史项和一批 Patch；移动中的每一帧只更新本地预览，取消手势不保存，禁止按 `pointermove` 频率发送请求。
+- 每份草稿同时只允许一个在途保存。请求发出后的新编辑进入下一批；较早响应只确认该请求覆盖的客户端修订，不能把随后产生的内容误标为已保存。设计器对用户显示 `CLEAN`、`DIRTY`、`SAVING`、`CONFLICT` 和 `ERROR`。
+- 存在 `DIRTY/SAVING` 状态时，站内路由、报告切换和窗口关闭必须等待保存、由用户明确放弃，或使用浏览器离开提示；导航行为不得静默丢弃尚未确认的修改。当前已覆盖普通站内链接与整页卸载，SPA 前进/后退和非链接式路由切换仍按 T0409 TODO 接入路由级阻断。
+- 版本冲突不做静默三方合并。设计器保留包含在途请求后新增编辑的最新本地内容供导出，重新加载服务端草稿后清空本地撤销/重做栈；补偿操作必须引用同报告的非补偿修订、保持 target 一致、真实差异仍匹配正式编辑语义，并让整份规范哈希精确回到引用修订的 before/after。结构化三方差异视图仍属于 T0409/T0802 的已记录收口项；多人实时协同和 CRDT 不属于首个纵向切片。
+- 迁移现有 `report-layout-draft:{reportId}` 时，识别 `report-designer-session-v1` 信封及更早期裸 V1 报告文档，并先取得服务端草稿，再校验本地报告 ID/编码、Schema、完整 JSON 及信封中的 `minimumRowsByPage`。该页面最小行数属于草稿编辑元数据，不进入发布 JSON，迁移时按已存在页面和编辑行数上限重新收敛。
+- 本地与服务端规范内容相同可直接删除旧会话键；内容不同不得自动上传或覆盖，必须提示用户选择放弃/导出本地副本，或使用当前服务端 `expectedRevision`、新幂等键和 `LEGACY_DRAFT_RECOVERY` 显式恢复。只有服务端确认成功后才删除旧键；损坏、跨报告或不支持版本的副本不得进入编辑态。结构化差异视图和首次新建入口旧键迁移是已记录的后续收口项；通用恢复操作收敛为一次性服务端凭据或独立迁移端点也已记录，避免授权客户端长期复用宽范围语义。
+
+#### 15.8.4 发布制品边界
 
 ```text
-设计器操作
-  -> JSON Patch/配置变更
-  -> 合并为完整报告 JSON
-  -> JSON Schema、权限和资源引用校验
-  -> 生成版本化 JSON 文件
-  -> 页面渲染器加载 JSON
-  -> 解析页面/分块/组件树
-  -> 注入数据与权限上下文
-  -> 渲染在线页面、公开页面或导出页面
+设计器手势/配置操作
+  -> 合并为有序 JSON Patch + 结果完整 JSON
+  -> T0409 权限、旧文档锁、版本、逐操作重放和完整合同校验
+  -> PostgreSQL 保存规范草稿、操作审计与可重建索引
+  -> 用户显式发布
+  -> T0601 固定依赖并创建不可变 report_version
+  -> 写入 reports 桶中的不可覆盖规范 JSON，保存 Schema/大小/SHA-256/地址
+  -> T0604 按精确报告版本加载并验证制品
+  -> 注入授权运行上下文并渲染在线页面、公开页面或导出页面
 ```
 
-页面渲染器不得依赖设计器的临时内存状态。相同报告版本应以同一 JSON 文件为事实来源；数据库中的组件索引、血缘索引和检索字段均为该 JSON 的派生数据。加载失败时应返回明确的 Schema 版本、校验错误和降级状态，禁止静默使用不完整配置。
+发布制品只能由服务端从指定且未变化的草稿版本生成。对象键应包含租户、报告、版本或制品 UUID 与内容哈希，并使用条件创建或唯一键保证不可覆盖；数据库保存版本、Schema、大小、SHA-256、桶和对象键，已发布版本及对象禁止原地修改。依赖版本固化、发布任务/编辑租约、对象写入与数据库指针切换的幂等恢复、孤儿对象收口均由 T0601 实现，不能在 T0409 草稿保存成功时提前宣称报告已发布。
+
+页面渲染器不得依赖设计器的临时内存状态。设计态从服务端规范草稿加载；在线、公开和导出态从精确不可变报告版本加载，并在读取时按元数据字节数限流、复算 SHA-256。数据库中的组件索引、血缘索引和检索字段均由同一规范 JSON 派生，可删除重建。加载失败时应返回明确的 Schema 版本、校验错误和降级状态，禁止静默使用不完整配置或回退到可变草稿。
 
 ---
 
@@ -2252,17 +2286,22 @@ deleted BOOLEAN
 
 | 表名 | 作用 | 关键字段 |
 |---|---|---|
-| `report` | 报告主对象 | code、name、type、status、current_version_id |
-| `report_version` | 发布版本 | report_id、version_no、definition_json、published_at |
-| `report_draft` | 当前草稿 | report_id、definition_json、revision_no |
-| `report_page` | 可选规范化页面索引 | report_version_id、page_code、order_no |
-| `report_component_index` | 可选组件检索索引 | report_version_id、component_id、type、dataset_version_id |
-| `report_attachment` | 报告附件关系 | report_id、file_id、usage_type、display_order |
-| `report_revision` | 报告修改记录 | report_id、source、json_patch、operator |
-| `report_conclusion_revision` | 结论修订 | component_id、report_run_id、content、source、revision_no |
-| `report_theme` | 主题 | name、theme_json、scope |
+| `reports` | 报告主对象 | tenant_id、code、name、report_type、status、version、created_by、updated_by |
+| `report_drafts` | 当前可变草稿 | report_id、schema_version、definition_json、definition_hash、revision_no、editor_state_json |
+| `report_revisions` | 追加式语义修订 | report_id、base_revision_no、revision_no、client_operation_id、operation_type、target_json、patch_json、patch_hash、before_hash、after_hash、actor_user_id、idempotency_key |
+| `report_idempotency_records` | 创建/保存首次响应快照 | actor_user_id、scope、report_id、idempotency_key、request_hash、http_status、response_json |
+| `report_draft_component_indexes` | 当前草稿可重建组件索引 | report_id、revision_no、page_id、block_id、component_id、component_type |
+| `report_draft_dependencies` | 当前草稿可重建依赖索引 | report_id、revision_no、dependency_type、dependency_id、json_path |
+| `report_edit_guards` | 报告/分块临时占用 | report_id、block_id、holder_type、holder_id、expires_at、released_at |
+| `report_versions` | 不可变发布版本 | report_id、version_no、schema_version、definition_hash、size_bytes、storage_bucket、storage_key、published_by、published_at |
+| `report_version_page_indexes` | 未来发布版本页面检索索引 | report_version_id、page_id、order_no |
+| `report_version_component_indexes` | 未来发布版本组件检索索引 | report_version_id、page_id、block_id、component_id、type |
+| `report_version_dependencies` | 未来发布版本依赖索引 | report_version_id、dependency_type、dependency_id、usage_path |
+| `report_attachments` | 报告附件关系 | report_id、file_id、usage_type、display_order |
+| `report_conclusion_revisions` | 结论修订 | component_id、report_run_id、content、source、revision_no |
+| `report_themes` | 主题 | name、theme_json、scope |
 
-说明：报告定义可整体保存在 `jsonb` 中，但为了按组件检索、做血缘和影响分析，可额外维护页面和组件索引表。
+说明：当前规范草稿整体保存在 `report_drafts.definition_json`；已发布版本以对象存储中的规范 JSON 为事实来源，数据库版本行只保存不可变定位与完整性元数据。页面、组件和依赖索引必须由相应规范 JSON 在同一事务或受控发布流程中生成，可删除重建，不接受客户端直接写入。`report_revisions` 采用显式保留策略并阻止报告硬删除级联；Patch 正文未来可按保留策略压缩，但基础/结果修订、前后哈希和通用不可变审计不得被压缩过程破坏。
 
 ### 18.7 运行、调度与归档域
 
@@ -2378,7 +2417,8 @@ POST   /reports
 GET    /reports
 GET    /reports/{id}
 GET    /reports/{id}/draft
-PUT    /reports/{id}/draft
+PUT    /reports/{id}/draft                         # expectedRevision + changes + 结果完整 JSON
+GET    /reports/{id}/revisions                     # 权限约束的追加式不可变修订（分页有界）
 POST   /reports/{id}/validate
 POST   /reports/{id}/publish
 GET    /reports/{id}/versions
@@ -2417,14 +2457,14 @@ GET    /audit-logs
 
 ### 19.9 API 通用要求
 
-- 所有写操作支持幂等键；
+- 所有写操作支持幂等键；报告草稿创建/保存使用独立 `Idempotency-Key`，同键异载荷必须冲突，`X-Request-ID` 只用于追踪；
 - 分页接口统一分页协议；
 - 错误码分层：参数、权限、业务、数据源、查询、AI、文件和系统错误；
 - 异步任务返回 `job_id`；
 - 长查询支持状态查询和取消；
 - API 日志不记录敏感参数；
 - 返回资源版本号用于乐观锁；
-- 前端保存草稿支持自动保存和冲突提示。
+- 前端保存草稿的目标态支持自动保存和冲突提示；T0409 核心当前先提供显式保存、单在途请求与安全重试，防抖自动保存、离线退避和 P95 验收已列入开发 TODO。
 
 ---
 
@@ -2594,7 +2634,8 @@ query_engine_version
 - 报告运行引用明确的报告、数据集和指标版本；
 - PDF 使用同一运行快照，禁止每页分别实时取数；
 - 物化刷新使用新旧版本原子切换；
-- 保存草稿使用乐观锁，避免覆盖他人修改；
+- 保存草稿使用乐观锁、编辑会话占用和幂等键，服务端逐操作重放 Patch 并核对结果完整 JSON，避免覆盖他人修改或因响应丢失重复增版；
+- 发布版本及其对象存储 JSON 不可变；发布只从指定草稿版本生成，草稿后续修改不得改变任何既有发布哈希；
 - 调度任务使用幂等键防止重复生成和重复发信。
 
 ### 22.3 可扩展性

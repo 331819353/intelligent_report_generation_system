@@ -69,7 +69,85 @@
         "defaultValue": true,
         "scope": {"enum": ["REPORT", "PAGE"]},
         "pageId": {"$ref": "#/$defs/id"},
-        "optionSource": {"type": "object"}
+        "optionSource": {"type": "object"},
+        "semanticBinding": {"$ref": "#/$defs/semanticBinding"}
+      }
+    },
+    "semanticBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticFieldCode", "datasetFields"],
+      "properties": {
+        "semanticFieldCode": {"$ref": "#/$defs/code"},
+        "datasetFields": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["datasetVersionId", "fieldId", "datasetParameterCode"],
+            "properties": {
+              "datasetVersionId": {"$ref": "#/$defs/id"},
+              "fieldId": {"$ref": "#/$defs/id"},
+              "datasetParameterCode": {"$ref": "#/$defs/code"}
+            }
+          }
+        }
+      }
+    },
+    "effectScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["REPORT", "PAGE", "BLOCK", "COMPONENTS"]},
+        "componentIds": {"type": "array", "minItems": 1, "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      },
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "COMPONENTS"}}, "required": ["kind"]}, "then": {"properties": {"componentIds": {}}, "required": ["componentIds"]}, "else": {"properties": {"componentIds": false}}}
+      ]
+    },
+    "filterOption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "value"],
+      "properties": {
+        "label": {"type": "string", "minLength": 1, "maxLength": 200},
+        "value": {"oneOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}
+      }
+    },
+    "chartLinkage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parameterId", "operator", "effectScope"],
+      "properties": {
+        "parameterId": {"$ref": "#/$defs/id"},
+        "operator": {"enum": ["EQUALS", "IN", "BETWEEN", "GTE", "LTE"]},
+        "effectScope": {"$ref": "#/$defs/effectScope"}
+      }
+    },
+    "chartDrill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["levels"],
+      "properties": {
+        "levels": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["fieldId", "semanticFieldCode", "label"],
+            "properties": {
+              "fieldId": {"$ref": "#/$defs/id"},
+              "semanticFieldCode": {"$ref": "#/$defs/code"},
+              "label": {"type": "string", "minLength": 1, "maxLength": 200}
+            }
+          }
+        }
       }
     },
     "dataRequirement": {
@@ -112,7 +190,7 @@
         "innerGrid": {"$ref": "#/$defs/innerGrid"},
         "zIndex": {"type": "integer", "minimum": 0},
         "locks": {"$ref": "#/$defs/locks"},
-        "sticky": {"$ref": "#/$defs/sticky"},
+        "sticky": {"$ref": "#/$defs/blockSticky"},
         "style": {"type": "object"},
         "permissionPolicy": {"$ref": "#/$defs/permissionPolicy"},
         "components": {"type": "array", "items": {"$ref": "#/$defs/component"}}
@@ -148,17 +226,62 @@
         "dataSnapshot": {"type": "boolean"}
       }
     },
-    "sticky": {
+    "stickyDisabled": {
       "type": "object",
       "additionalProperties": false,
       "required": ["enabled"],
       "properties": {
-        "enabled": {"type": "boolean"},
-        "top": {"type": "integer", "minimum": 0},
-        "scope": {"enum": ["PAGE", "BLOCK", "CONTAINER"]},
-        "containerId": {"$ref": "#/$defs/id"},
-        "zIndex": {"type": "integer", "minimum": 1}
+        "enabled": {"const": false}
       }
+    },
+    "stickyEnabledPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "top", "scope", "zIndex"],
+      "properties": {
+        "enabled": {"const": true},
+        "top": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "scope": {"const": "PAGE"},
+        "zIndex": {"type": "integer", "minimum": 1, "maximum": 100000}
+      }
+    },
+    "stickyEnabledBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "top", "scope", "zIndex"],
+      "properties": {
+        "enabled": {"const": true},
+        "top": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "scope": {"const": "BLOCK"},
+        "zIndex": {"type": "integer", "minimum": 1, "maximum": 100000}
+      }
+    },
+    "stickyEnabledContainer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "top", "scope", "containerId", "zIndex"],
+      "properties": {
+        "enabled": {"const": true},
+        "top": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "scope": {"const": "CONTAINER"},
+        "containerId": {"$ref": "#/$defs/id"},
+        "zIndex": {"type": "integer", "minimum": 1, "maximum": 100000}
+      }
+    },
+    "blockSticky": {
+      "oneOf": [
+        {"$ref": "#/$defs/stickyDisabled"},
+        {"$ref": "#/$defs/stickyEnabledPage"},
+        {"$ref": "#/$defs/stickyEnabledContainer"}
+      ]
+    },
+    "componentSticky": {
+      "oneOf": [
+        {"$ref": "#/$defs/stickyDisabled"},
+        {"$ref": "#/$defs/stickyEnabledPage"},
+        {"$ref": "#/$defs/stickyEnabledBlock"},
+        {"$ref": "#/$defs/stickyEnabledContainer"}
+      ]
     },
     "permissionPolicy": {
       "type": "object",
@@ -184,14 +307,172 @@
         "style": {"type": "object"},
         "binding": {"type": "object"},
         "interaction": {"type": "object"},
-        "sticky": {"$ref": "#/$defs/sticky"},
-        "refreshPolicy": {"type": "object"},
+        "sticky": {"$ref": "#/$defs/componentSticky"},
+        "refreshPolicy": {"$ref": "#/$defs/componentRefreshPolicy"},
         "permissionPolicy": {"$ref": "#/$defs/permissionPolicy"},
         "sourceTrace": {"type": "array", "items": {"$ref": "#/$defs/sourceTrace"}},
         "conclusion": {"type": "object"},
         "extensions": {"type": "object"}
-      }
+      },
+      "allOf": [
+        {"$ref": "#/$defs/titleComponentConfig"},
+        {"$ref": "#/$defs/richTextComponentConfig"},
+        {"$ref": "#/$defs/filterComponentConfig"},
+        {"$ref": "#/$defs/kpiComponentConfig"},
+        {"$ref": "#/$defs/additionalInfoComponentConfig"},
+        {"$ref": "#/$defs/tableComponentConfig"},
+        {"$ref": "#/$defs/chartComponentConfig"},
+        {"$ref": "#/$defs/imageComponentConfig"},
+        {"$ref": "#/$defs/attachmentComponentConfig"},
+        {"$ref": "#/$defs/dataSourceComponentConfig"},
+        {"$ref": "#/$defs/updatedAtComponentConfig"},
+        {"$ref": "#/$defs/conclusionComponentConfig"}
+      ]
     },
+    "componentRefreshPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {"mode": {"enum": ["NONE", "INHERIT", "ON_REPORT_RUN"]}}
+    },
+    "staticComponentRefreshPolicy": {"type": "object", "additionalProperties": false, "required": ["mode"], "properties": {"mode": {"const": "NONE"}}},
+    "dataComponentRefreshPolicy": {"type": "object", "additionalProperties": false, "required": ["mode"], "properties": {"mode": {"enum": ["INHERIT", "ON_REPORT_RUN"]}}},
+    "runComponentRefreshPolicy": {"type": "object", "additionalProperties": false, "required": ["mode"], "properties": {"mode": {"const": "ON_REPORT_RUN"}}},
+    "emptyComponentInteraction": {"type": "object", "additionalProperties": false},
+    "titleComponentConfig": {
+      "if": {"type": "object", "properties": {"type": {"const": "TITLE"}}, "required": ["type"]},
+      "then": {"type": "object", "properties": {
+        "grid": {"$ref": "#/$defs/minGrid4x2"},
+        "style": {"type": "object", "additionalProperties": false, "properties": {"fontSize": {"type": "number", "minimum": 10, "maximum": 96}, "fontWeight": {"type": "integer", "minimum": 100, "maximum": 900}}},
+        "binding": {"type": "object", "additionalProperties": false, "required": ["text"], "properties": {"text": {"type": "string", "maxLength": 500}}},
+        "interaction": {"$ref": "#/$defs/emptyComponentInteraction"}, "refreshPolicy": {"$ref": "#/$defs/staticComponentRefreshPolicy"}, "conclusion": false
+      }}
+    },
+    "richTextComponentConfig": {
+      "if": {"type": "object", "properties": {"type": {"const": "RICH_TEXT"}}, "required": ["type"]},
+      "then": {"type": "object", "properties": {
+        "grid": {"$ref": "#/$defs/minGrid4x3"},
+        "style": {"type": "object", "additionalProperties": false, "properties": {"align": {"enum": ["LEFT", "CENTER", "RIGHT"]}}},
+        "binding": {"type": "object", "additionalProperties": false, "minProperties": 1, "properties": {"text": {"type": "string", "maxLength": 20000}, "blocks": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/richTextBlock"}}}},
+        "interaction": {"$ref": "#/$defs/emptyComponentInteraction"}, "refreshPolicy": {"$ref": "#/$defs/staticComponentRefreshPolicy"}, "conclusion": false
+      }}
+    },
+    "filterComponentConfig": {
+      "if": {"type": "object", "properties": {"type": {"const": "FILTER"}}, "required": ["type"]},
+      "then": {"type": "object", "properties": {
+        "grid": {"$ref": "#/$defs/minGrid4x3"},
+        "style": {"type": "object", "additionalProperties": false, "properties": {"layout": {"enum": ["HORIZONTAL", "VERTICAL"]}}},
+        "binding": {"type": "object", "additionalProperties": false, "required": ["parameterId"], "properties": {
+          "parameterId": {"type": "string", "maxLength": 128},
+          "placeholder": {"type": "string", "maxLength": 200},
+          "control": {"enum": ["TEXT", "NUMBER", "DATE", "DATETIME", "MONTH", "QUARTER", "SELECT", "MULTI_SELECT", "BOOLEAN"]},
+          "operator": {"enum": ["EQUALS", "IN", "BETWEEN", "GTE", "LTE"]},
+          "effectScope": {"$ref": "#/$defs/effectScope"},
+          "options": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/filterOption"}}
+        }},
+        "interaction": {"type": "object", "additionalProperties": false, "properties": {"autoSubmit": {"type": "boolean"}}}, "refreshPolicy": {"$ref": "#/$defs/dataComponentRefreshPolicy"}, "conclusion": false
+      }}
+    },
+    "kpiComponentConfig": {
+      "if": {"type": "object", "properties": {"type": {"const": "KPI"}}, "required": ["type"]},
+      "then": {"type": "object", "properties": {
+        "grid": {"$ref": "#/$defs/minGrid4x4"},
+        "style": {"type": "object", "additionalProperties": false, "properties": {"trendVisible": {"type": "boolean"}}},
+        "binding": {"type": "object", "additionalProperties": false, "required": ["metricId"], "properties": {"datasetVersionId": {"type": "string", "maxLength": 128}, "metricId": {"type": "string", "maxLength": 128}, "format": {"enum": ["AUTO", "NUMBER", "PERCENT", "CURRENCY"]}}},
+        "interaction": {"$ref": "#/$defs/emptyComponentInteraction"}, "refreshPolicy": {"$ref": "#/$defs/dataComponentRefreshPolicy"}, "conclusion": false
+      }}
+    },
+    "additionalInfoComponentConfig": {
+      "if": {"type": "object", "properties": {"type": {"const": "ADDITIONAL_INFO"}}, "required": ["type"]},
+      "then": {"type": "object", "properties": {
+        "grid": {"$ref": "#/$defs/minGrid4x4"},
+        "style": {"type": "object", "additionalProperties": false, "properties": {"tone": {"enum": ["NEUTRAL", "INFO", "WARNING", "SUCCESS"]}}},
+        "binding": {"type": "object", "additionalProperties": false, "properties": {"title": {"type": "string", "maxLength": 200}, "text": {"type": "string", "maxLength": 5000}}},
+        "interaction": {"$ref": "#/$defs/emptyComponentInteraction"}, "refreshPolicy": {"$ref": "#/$defs/staticComponentRefreshPolicy"}, "conclusion": false
+      }}
+    },
+    "tableComponentConfig": {
+      "if": {"type": "object", "properties": {"type": {"const": "TABLE"}}, "required": ["type"]},
+      "then": {"type": "object", "properties": {
+        "grid": {"$ref": "#/$defs/minGrid4x4"},
+        "style": {"type": "object", "additionalProperties": false, "properties": {"striped": {"type": "boolean"}, "compact": {"type": "boolean"}}},
+        "binding": {"type": "object", "additionalProperties": false, "required": ["datasetVersionId", "columns"], "properties": {"datasetVersionId": {"type": "string", "maxLength": 128}, "columns": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/tableColumn"}}}},
+        "interaction": {"$ref": "#/$defs/emptyComponentInteraction"}, "refreshPolicy": {"$ref": "#/$defs/dataComponentRefreshPolicy"}, "conclusion": false
+      }}
+    },
+    "chartComponentConfig": {
+      "if": {"type": "object", "properties": {"type": {"const": "CHART"}}, "required": ["type"]},
+      "then": {"type": "object", "properties": {
+        "grid": {"$ref": "#/$defs/minGrid4x4"},
+        "style": {"type": "object", "additionalProperties": false, "properties": {"legendPosition": {"enum": ["TOP", "RIGHT", "BOTTOM", "NONE"]}}},
+        "binding": {"type": "object", "additionalProperties": false, "required": ["datasetVersionId", "metricIds", "dimensions", "chart"], "properties": {
+          "datasetVersionId": {"type": "string", "maxLength": 128},
+          "metricIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+          "dimensions": {"type": "array", "items": {"$ref": "#/$defs/chartDimension"}},
+          "chart": {"type": "object", "additionalProperties": false, "required": ["type"], "properties": {"type": {"enum": ["COLUMN", "BAR", "LINE", "PIE"]}}}
+        }},
+        "interaction": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"clickFilter": {"type": "boolean"}, "linkage": {"$ref": "#/$defs/chartLinkage"}, "drill": {"$ref": "#/$defs/chartDrill"}},
+          "allOf": [{"if": {"properties": {"clickFilter": {"const": true}}, "required": ["clickFilter"]}, "then": {"properties": {"linkage": {}}, "required": ["linkage"]}}]
+        }, "refreshPolicy": {"$ref": "#/$defs/dataComponentRefreshPolicy"}, "conclusion": false
+      }}
+    },
+    "imageComponentConfig": {
+      "if": {"type": "object", "properties": {"type": {"const": "IMAGE"}}, "required": ["type"]},
+      "then": {"type": "object", "properties": {
+        "grid": {"$ref": "#/$defs/minGrid4x4"},
+        "style": {"type": "object", "additionalProperties": false, "properties": {"fit": {"enum": ["CONTAIN", "COVER", "FILL"]}}},
+        "binding": {"type": "object", "additionalProperties": false, "required": ["url", "alt"], "properties": {"url": {"type": "string", "maxLength": 2000}, "alt": {"type": "string", "maxLength": 500}}},
+        "interaction": {"$ref": "#/$defs/emptyComponentInteraction"}, "refreshPolicy": {"$ref": "#/$defs/staticComponentRefreshPolicy"}, "conclusion": false
+      }}
+    },
+    "attachmentComponentConfig": {
+      "if": {"type": "object", "properties": {"type": {"const": "ATTACHMENT_LIST"}}, "required": ["type"]},
+      "then": {"type": "object", "properties": {
+        "grid": {"$ref": "#/$defs/minGrid4x4"},
+        "style": {"type": "object", "additionalProperties": false, "properties": {"showSize": {"type": "boolean"}}},
+        "binding": {"type": "object", "additionalProperties": false, "required": ["attachments"], "properties": {"attachments": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/attachment"}}}},
+        "interaction": {"$ref": "#/$defs/emptyComponentInteraction"}, "refreshPolicy": {"$ref": "#/$defs/staticComponentRefreshPolicy"}, "conclusion": false
+      }}
+    },
+    "dataSourceComponentConfig": {
+      "if": {"type": "object", "properties": {"type": {"const": "DATA_SOURCE"}}, "required": ["type"]},
+      "then": {"type": "object", "properties": {
+        "grid": {"$ref": "#/$defs/minGrid4x2"},
+        "style": {"type": "object", "additionalProperties": false, "properties": {"compact": {"type": "boolean"}}},
+        "binding": {"type": "object", "additionalProperties": false, "required": ["datasetVersionIds"], "properties": {"datasetVersionIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}}},
+        "interaction": {"$ref": "#/$defs/emptyComponentInteraction"}, "refreshPolicy": {"$ref": "#/$defs/runComponentRefreshPolicy"}, "conclusion": false
+      }}
+    },
+    "updatedAtComponentConfig": {
+      "if": {"type": "object", "properties": {"type": {"const": "UPDATED_AT"}}, "required": ["type"]},
+      "then": {"type": "object", "properties": {
+        "grid": {"$ref": "#/$defs/minGrid4x2"},
+        "style": {"type": "object", "additionalProperties": false, "properties": {"format": {"enum": ["DATE", "DATETIME", "RELATIVE"]}}},
+        "binding": {"type": "object", "additionalProperties": false, "properties": {"label": {"type": "string", "maxLength": 200}}},
+        "interaction": {"$ref": "#/$defs/emptyComponentInteraction"}, "refreshPolicy": {"$ref": "#/$defs/runComponentRefreshPolicy"}, "conclusion": false
+      }}
+    },
+    "conclusionComponentConfig": {
+      "if": {"type": "object", "properties": {"type": {"const": "CONCLUSION"}}, "required": ["type"]},
+      "then": {"type": "object", "properties": {
+        "grid": {"$ref": "#/$defs/minGrid4x4"},
+        "style": {"type": "object", "additionalProperties": false, "properties": {"showEvidenceLinks": {"type": "boolean"}}},
+        "binding": {"type": "object", "additionalProperties": false, "required": ["metricIds", "chartComponentIds"], "properties": {"metricIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}, "chartComponentIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}}},
+        "interaction": {"type": "object", "additionalProperties": false, "properties": {"showRevisionHistory": {"type": "boolean"}}},
+        "refreshPolicy": {"$ref": "#/$defs/runComponentRefreshPolicy"},
+        "conclusion": {"type": "object", "additionalProperties": false, "required": ["mode", "allowManualEdit", "requireEvidence", "maxLength"], "properties": {"mode": {"enum": ["TEMPLATE", "LLM_WITH_TEMPLATE", "MANUAL"]}, "allowManualEdit": {"type": "boolean"}, "requireEvidence": {"type": "boolean"}, "maxLength": {"type": "integer", "minimum": 1, "maximum": 10000}}}
+      }}
+    },
+    "minGrid4x2": {"allOf": [{"$ref": "#/$defs/grid"}, {"type": "object", "properties": {"w": {"type": "integer", "minimum": 4}, "h": {"type": "integer", "minimum": 2}}}]},
+    "minGrid4x3": {"allOf": [{"$ref": "#/$defs/grid"}, {"type": "object", "properties": {"w": {"type": "integer", "minimum": 4}, "h": {"type": "integer", "minimum": 3}}}]},
+    "minGrid4x4": {"allOf": [{"$ref": "#/$defs/grid"}, {"type": "object", "properties": {"w": {"type": "integer", "minimum": 4}, "h": {"type": "integer", "minimum": 4}}}]},
+    "tableColumn": {"type": "object", "additionalProperties": false, "required": ["key", "label"], "properties": {"key": {"type": "string", "minLength": 1, "maxLength": 128}, "label": {"type": "string", "minLength": 1, "maxLength": 200}}},
+    "richTextBlock": {"type": "object", "additionalProperties": false, "required": ["type", "text"], "properties": {"type": {"enum": ["PARAGRAPH", "HEADING", "QUOTE", "LIST_ITEM"]}, "text": {"type": "string", "maxLength": 5000}}},
+    "chartDimension": {"type": "object", "additionalProperties": false, "required": ["fieldId", "role"], "properties": {"fieldId": {"$ref": "#/$defs/id"}, "role": {"enum": ["CATEGORY", "TIME", "SERIES"]}}},
+    "attachment": {"type": "object", "additionalProperties": false, "required": ["name", "url"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 500}, "url": {"type": "string", "maxLength": 2000}, "sizeLabel": {"type": "string", "maxLength": 100}}},
     "sourceTrace": {
       "type": "object",
       "additionalProperties": false,

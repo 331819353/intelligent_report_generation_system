@@ -1,4 +1,12 @@
-export type APIError = { code: string; message: string; requestId?: string; details?: Array<{ path: string; reason: string }> }
+export type APIError = {
+  code: string
+  message: string
+  requestId?: string
+  details?: Array<{ path: string; reason: string }>
+  /** 乐观锁冲突返回服务端最新基线，页面仍需显式让用户选择是否加载。 */
+  currentRevision?: number
+  currentHash?: string
+}
 
 export class RequestError extends Error {
   /** 保留服务端错误结构和 HTTP 状态，便于页面精确展示。 */

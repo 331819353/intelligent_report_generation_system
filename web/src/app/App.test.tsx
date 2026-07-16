@@ -14,8 +14,15 @@ test('renders login route', () => {
 test('renders designer route', () => {
   sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
   render(<MemoryRouter initialEntries={['/designer/draft']}><App /></MemoryRouter>)
-  expect(screen.getByRole('heading', { level: 1, name: '企业经营月度分析' })).toBeInTheDocument()
+  expect(screen.getByRole('heading', { level: 1, name: '企业经营月度分析报告' })).toBeInTheDocument()
   expect(screen.getByRole('button', { name: /AI 修改/ })).toBeInTheDocument()
+})
+
+test('viewer uses the shared report renderer', () => {
+  sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
+  render(<MemoryRouter initialEntries={['/reports/demo']}><App /></MemoryRouter>)
+  expect(screen.getByLabelText('企业经营月度分析报告报告内容')).toHaveAttribute('data-render-mode', 'viewer')
+  expect(screen.getByRole('img', { name: '营业收入趋势趋势图' })).toBeInTheDocument()
 })
 
 test('redirects anonymous users away from protected routes', () => {
