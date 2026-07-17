@@ -56,6 +56,11 @@ func TestValidateOutputRejectsUnsafeOrOutOfTaxonomyValues(t *testing.T) {
 	if err := ValidateOutput(input, output); !errors.Is(err, ErrInvalidOutput) {
 		t.Fatalf("tag taxonomy error = %v", err)
 	}
+	_, output = validCompletion()
+	output.Table.Tags = []string{"领域:运营", "领域:运营"}
+	if err := ValidateOutput(input, output); !errors.Is(err, ErrInvalidOutput) {
+		t.Fatalf("duplicate tag error = %v", err)
+	}
 }
 
 func TestValidateOutputRejectsMissingRequiredCollectionsAndConfidence(t *testing.T) {
@@ -73,6 +78,16 @@ func TestValidateOutputRejectsMissingRequiredCollectionsAndConfidence(t *testing
 	output.Columns = nil
 	if err := ValidateOutput(input, output); !errors.Is(err, ErrInvalidOutput) {
 		t.Fatalf("missing columns error = %v", err)
+	}
+}
+
+func TestNormalizeOutputTrimsAndDeduplicatesProviderTags(t *testing.T) {
+	_, output := validCompletion()
+	output.Table.Tags = []string{" 领域:运营 ", "领域:运营", "作用:事实表"}
+
+	normalized := normalizeOutput(output)
+	if got := normalized.Table.Tags; len(got) != 2 || got[0] != "领域:运营" || got[1] != "作用:事实表" {
+		t.Fatalf("normalized tags=%#v", got)
 	}
 }
 

@@ -1,6 +1,7 @@
 package metadataai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -46,6 +47,19 @@ func TestOrchestratedProviderBuildsMinimalRequestAndParsesUsage(t *testing.T) {
 	}
 	if err := aiplatform.ValidateProviderRequest(invoker.invocation.Request); err != nil {
 		t.Fatalf("元数据输出 Schema 不满足通用严格合同: %v", err)
+	}
+	if bytes.Contains(invoker.invocation.Request.ResponseSchema.Schema, []byte(`"uniqueItems"`)) {
+		t.Fatal("元数据输出 Schema 包含 deepseek-v3 不支持的 uniqueItems")
+	}
+	for _, fragment := range [][]byte{
+		[]byte(`"const":"table-1"`),
+		[]byte(`"enum":["column-1","column-2"]`),
+		[]byte(`"minItems":2`),
+		[]byte(`"maxItems":2`),
+	} {
+		if !bytes.Contains(invoker.invocation.Request.ResponseSchema.Schema, fragment) {
+			t.Fatalf("元数据输出 Schema 缺少动态约束 %s: %s", fragment, invoker.invocation.Request.ResponseSchema.Schema)
+		}
 	}
 }
 

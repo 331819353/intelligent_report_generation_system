@@ -2,20 +2,34 @@ package metadataai
 
 import "sort"
 
-// OutputSchema 提供给支持严格结构化输出的模型，同时由 ValidateOutput 在本地复核；
-// 无论上游是否声明遵守 Schema，本地域校验始终是最终可信边界。
-var OutputSchema = map[string]any{
-	"type":                 "object",
-	"additionalProperties": false,
-	"required":             []string{"schemaVersion", "table", "columns"},
-	"properties": map[string]any{
-		"schemaVersion": map[string]any{"type": "string", "const": SchemaVersion},
-		"table":         valueSchema(false),
-		"columns": map[string]any{
-			"type":  "array",
-			"items": valueSchema(true),
+// outputSchema 按本次输入固定表 ID、字段 ID 集合和字段数量；
+// 无论上游是否声明遵守 Schema，ValidateOutput 仍是最终可信边界。
+func outputSchema(input CompletionInput) map[string]any {
+	table := valueSchema(false)
+	table["properties"].(map[string]any)["targetId"] = map[string]any{"type": "string", "const": input.Table.ID}
+
+	columnIDs := make([]string, 0, len(input.Columns))
+	for _, column := range input.Columns {
+		columnIDs = append(columnIDs, column.ID)
+	}
+	column := valueSchema(true)
+	if len(columnIDs) > 0 {
+		column["properties"].(map[string]any)["targetId"] = map[string]any{"type": "string", "enum": columnIDs}
+	}
+
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"schemaVersion", "table", "columns"},
+		"properties": map[string]any{
+			"schemaVersion": map[string]any{"type": "string", "const": SchemaVersion},
+			"table":         table,
+			"columns": map[string]any{
+				"type": "array", "minItems": len(columnIDs), "maxItems": len(columnIDs),
+				"items": column,
+			},
 		},
-	},
+	}
 }
 
 // valueSchema 构建表或字段建议的严格 JSON Schema 片段。
@@ -26,7 +40,8 @@ func valueSchema(column bool) map[string]any {
 		"businessName":        map[string]any{"type": "string", "minLength": 1, "maxLength": 120},
 		"businessDescription": map[string]any{"type": "string", "minLength": 1, "maxLength": 1000},
 		"tags": map[string]any{
-			"type": "array", "maxItems": 12, "uniqueItems": true,
+			// deepseek-v3 的严格 Schema 语法不支持 uniqueItems；重复标签仍由 ValidateOutput 拒绝。
+			"type": "array", "maxItems": 12,
 			"items": map[string]any{"type": "string", "enum": mapKeys(allowedTags)},
 		},
 		"sensitivityLevel": map[string]any{"type": "string", "enum": mapKeys(allowedSensitivity)},

@@ -77,20 +77,26 @@ sh -n scripts/migrate.sh
 export AI_BASE_URL="https://mgallery.haier.net/v1/"
 export AI_MODEL="deepseek-v3"
 export AI_API_KEY="<从密钥管理系统或本地安全环境注入>"
-export AI_REQUEST_TIMEOUT="25s"
+export API_WRITE_TIMEOUT="120s"
+export AI_REQUEST_TIMEOUT="100s"
+export AI_ATTEMPT_TIMEOUT="90s"
+export AI_MAX_ATTEMPTS="1"
 export AI_CONFIDENCE_THRESHOLD="0.8"
 ```
 
-未设置 `AI_API_KEY` 时元数据 AI 接口明确降级为不可用，非 AI 功能继续运行。元数据 AI API、结构化输出约束和审计字段见 `docs/api-metadata-ai.md`。
+上述超时用于本地 `deepseek-v3` 元数据验收；应按实际 Provider 延迟调整，并始终保持 `AI_REQUEST_TIMEOUT < API_WRITE_TIMEOUT`。批量加工仍应使用持久化异步任务，不能通过无限放大同步 HTTP 超时替代。未设置 `AI_API_KEY` 时元数据 AI 接口明确降级为不可用，非 AI 功能继续运行。元数据 AI API、结构化输出约束和审计字段见 `docs/api-metadata-ai.md`。
 
 ## 启动 API
 
 ```bash
-cp .env.example .env
+set -a
+. ./.env.example
+. ./.env
+set +a
 make run-api
 ```
 
-当前配置直接从进程环境变量读取；`.env` 文件用于开发者记录本地值，启动方式应由 shell、IDE 或后续容器编排注入变量。
+当前配置直接从进程环境变量读取；本地启动先加载示例默认值，再由忽略提交的 `.env` 覆盖模型密钥和 Provider 专属超时。生产环境应由密钥系统或容器编排注入变量。
 
 API 默认监听 `:8080`：
 

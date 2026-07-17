@@ -9,7 +9,7 @@ import (
 
 const (
 	SchemaVersion = "1.0"
-	PromptVersion = "metadata-completion-v1"
+	PromptVersion = "metadata-completion-v2"
 )
 
 var (
@@ -213,8 +213,19 @@ func normalizeValue(value SuggestionValue) SuggestionValue {
 	value.BusinessDescription = strings.TrimSpace(value.BusinessDescription)
 	value.SensitivityLevel = strings.TrimSpace(value.SensitivityLevel)
 	value.SemanticType = strings.TrimSpace(value.SemanticType)
-	for i := range value.Tags {
-		value.Tags[i] = strings.TrimSpace(value.Tags[i])
+	if value.Tags != nil {
+		// 上游 Schema 不支持 uniqueItems，按首次出现顺序去重后仍交由领域枚举校验兜底。
+		seen := make(map[string]bool, len(value.Tags))
+		tags := make([]string, 0, len(value.Tags))
+		for _, raw := range value.Tags {
+			tag := strings.TrimSpace(raw)
+			if seen[tag] {
+				continue
+			}
+			seen[tag] = true
+			tags = append(tags, tag)
+		}
+		value.Tags = tags
 	}
 	return value
 }
