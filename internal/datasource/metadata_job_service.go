@@ -13,7 +13,8 @@ import (
 
 // managedMetadataRepository 为刷新任务提供原子身份校验；导入仍使用 Repository 的可重新导入语义。
 type managedMetadataRepository interface {
-	ApplyManagedMetadata(context.Context, Source, string, string, SyncResult) (string, bool, error)
+	ApplyManagedMetadata(context.Context, Source, string, string, SyncResult) (ManagedMetadataApplyResult, error)
+	DeactivateManagedMetadata(context.Context, Source, TableSelection, time.Time) (bool, error)
 }
 
 // QueueImportTables 只校验并持久化用户选择，采样和 LLM 完善由 worker 执行。
@@ -269,6 +270,23 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 	if err != nil {
 		return err
 	}
+	var deletionObservedAt time.Time
+	if claim.Kind == MetadataJobRefresh {
+		for _, item := range items {
+			if item.Status == "SUCCEEDED" || item.Status == "SKIPPED" || item.Status == "FAILED" {
+				continue
+			}
+			key := item.CatalogName + "\x1f" + item.SchemaName + "\x1f" + item.TableName
+			if _, exists := available[key]; exists {
+				continue
+			}
+			deletionObservedAt, err = authoritativeMetadataSnapshot(discovered)
+			if err != nil {
+				return metadataJobExecutionError{code: "DISCOVERY_FAILED", message: "读取源库表结构失败，请稍后重试", cause: err}
+			}
+			break
+		}
+	}
 	for _, item := range items {
 		if item.Status == "SUCCEEDED" || item.Status == "SKIPPED" || item.Status == "FAILED" {
 			continue
@@ -279,6 +297,40 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 		key := item.CatalogName + "\x1f" + item.SchemaName + "\x1f" + item.TableName
 		table, exists := available[key]
 		if !exists {
+			if claim.Kind == MetadataJobRefresh {
+				if err := s.ensureMetadataJobSourceCurrent(ctx, claim); err != nil {
+					return err
+				}
+				managed, deactivateErr := refreshRepository.DeactivateManagedMetadata(ctx, source, TableSelection{
+					CatalogName: item.CatalogName, SchemaName: item.SchemaName, TableName: item.TableName,
+					TableID: item.TableID, StructureHash: item.PreviousStructureHash,
+				}, deletionObservedAt)
+				if errors.Is(deactivateErr, ErrMetadataSourceChanged) {
+					return metadataJobExecutionError{code: "SOURCE_CONFIGURATION_CHANGED", message: "数据源状态或配置已变更，请重新提交任务", cause: deactivateErr}
+				}
+				if errors.Is(deactivateErr, ErrMetadataRefreshSuperseded) {
+					if err := s.jobs.UpdateMetadataJobItem(ctx, claim.TenantID, claim.ID, item.ID, workerID, metadataJobItemUpdate{
+						Status: "SKIPPED", Stage: "COMPLETE", TableID: item.TableID,
+						ErrorCode: "STRUCTURE_SUPERSEDED", ErrorMessage: "表结构已被更新版本取代，请重新提交刷新",
+					}, lease); err != nil {
+						return err
+					}
+					continue
+				}
+				if deactivateErr != nil {
+					return deactivateErr
+				}
+				status, code := "SUCCEEDED", "SOURCE_TABLE_REMOVED"
+				if !managed {
+					status, code = "SKIPPED", "ASSET_NOT_MANAGED"
+				}
+				if err := s.jobs.UpdateMetadataJobItem(ctx, claim.TenantID, claim.ID, item.ID, workerID, metadataJobItemUpdate{
+					Status: status, Stage: "COMPLETE", TableID: item.TableID, ErrorCode: code,
+				}, lease); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := s.failMetadataJobItem(ctx, claim, item, workerID, lease, "DISCOVERY", "SOURCE_TABLE_NOT_FOUND", "源库中未找到该表"); err != nil {
 				return err
 			}
@@ -316,21 +368,10 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 			}
 			continue
 		}
-		if err := s.jobs.UpdateMetadataJobItem(ctx, claim.TenantID, claim.ID, item.ID, workerID, metadataJobItemUpdate{Status: "RUNNING", Stage: "SAMPLE", TableID: item.TableID}, lease); err != nil {
+		if err := s.jobs.UpdateMetadataJobItem(ctx, claim.TenantID, claim.ID, item.ID, workerID, metadataJobItemUpdate{Status: "RUNNING", Stage: "PERSISTENCE", TableID: item.TableID}, lease); err != nil {
 			return err
 		}
 		if err := s.ensureMetadataJobSourceCurrent(ctx, claim); err != nil {
-			return err
-		}
-		sample, err := sampler.Sample(ctx, source, table, 3)
-		if err != nil {
-			slog.ErrorContext(ctx, "metadata job table sampling failed", "job_id", claim.ID, "table", item.TableName, "error", err)
-			if err := s.failMetadataJobItem(ctx, claim, item, workerID, lease, "SAMPLE", "SAMPLE_FAILED", "读取表样本失败"); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := s.jobs.UpdateMetadataJobItem(ctx, claim.TenantID, claim.ID, item.ID, workerID, metadataJobItemUpdate{Status: "RUNNING", Stage: "PERSISTENCE", TableID: item.TableID}, lease); err != nil {
 			return err
 		}
 		metadata, err := selectedMetadataResult([]MetadataTable{table})
@@ -338,9 +379,23 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 			return err
 		}
 		managed := true
+		targetTable := true
+		var targetColumnIDs []string
+		var targetColumnNames []string
 		var tableID string
 		if claim.Kind == MetadataJobRefresh {
-			tableID, managed, err = refreshRepository.ApplyManagedMetadata(ctx, source, item.TableID, item.PreviousStructureHash, metadata)
+			var applied ManagedMetadataApplyResult
+			applied, err = refreshRepository.ApplyManagedMetadata(ctx, source, item.TableID, item.PreviousStructureHash, metadata)
+			tableID, managed = applied.TableID, applied.Managed
+			if claim.Mode == MetadataRefreshIncremental {
+				targetTable = applied.TablePending
+				targetColumnIDs = make([]string, 0, len(applied.PendingColumns))
+				targetColumnNames = make([]string, 0, len(applied.PendingColumns))
+				for _, column := range applied.PendingColumns {
+					targetColumnIDs = append(targetColumnIDs, column.ID)
+					targetColumnNames = append(targetColumnNames, column.Name)
+				}
+			}
 		} else {
 			var ids map[string]string
 			ids, err = s.repo.ApplySelectedMetadata(ctx, source, metadata)
@@ -374,13 +429,40 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 			}
 			continue
 		}
+		if claim.Kind == MetadataJobRefresh && claim.Mode == MetadataRefreshIncremental && !targetTable && len(targetColumnIDs) == 0 {
+			if err := s.jobs.UpdateMetadataJobItem(ctx, claim.TenantID, claim.ID, item.ID, workerID, metadataJobItemUpdate{
+				Status: "SUCCEEDED", Stage: "COMPLETE", TableID: tableID,
+			}, lease); err != nil {
+				return err
+			}
+			continue
+		}
+		var rows []map[string]any
+		shouldSample := claim.Kind == MetadataJobImport || claim.Mode == MetadataRefreshFull || len(targetColumnNames) > 0
+		if shouldSample {
+			if err := s.jobs.UpdateMetadataJobItem(ctx, claim.TenantID, claim.ID, item.ID, workerID, metadataJobItemUpdate{Status: "RUNNING", Stage: "SAMPLE", TableID: tableID}, lease); err != nil {
+				return err
+			}
+			if err := s.ensureMetadataJobSourceCurrent(ctx, claim); err != nil {
+				return err
+			}
+			sample, sampleErr := sampler.Sample(ctx, source, table, 3)
+			if sampleErr != nil {
+				slog.ErrorContext(ctx, "metadata job table sampling failed", "job_id", claim.ID, "table", item.TableName, "error", sampleErr)
+				if err := s.failMetadataJobItem(ctx, claim, item, workerID, lease, "SAMPLE", "SAMPLE_FAILED", "读取表样本失败"); err != nil {
+					return err
+				}
+				continue
+			}
+			rows = sampleRowsForColumns(sample, targetColumnNames)
+		}
 		if err := s.jobs.UpdateMetadataJobItem(ctx, claim.TenantID, claim.ID, item.ID, workerID, metadataJobItemUpdate{Status: "RUNNING", Stage: "LLM", TableID: tableID}, lease); err != nil {
 			return err
 		}
 		if err := s.ensureMetadataJobSourceCurrent(ctx, claim); err != nil {
 			return err
 		}
-		if err := s.completer.CompleteTable(ctx, claim.TenantID, claim.RequestedBy, tableID, sampleRows(sample), structureHash, item.ID, workerID, source.Version); err != nil {
+		if err := s.completer.CompleteTable(ctx, claim.TenantID, claim.RequestedBy, tableID, rows, targetTable, targetColumnIDs, structureHash, item.ID, workerID, source.Version); err != nil {
 			slog.ErrorContext(ctx, "metadata job LLM completion failed", "job_id", claim.ID, "table", item.TableName, "error", err)
 			if err := s.failMetadataJobItem(ctx, claim, item, workerID, lease, "LLM", "LLM_COMPLETION_FAILED", "LLM 表结构完善失败"); err != nil {
 				return err
@@ -392,6 +474,34 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 		}
 	}
 	return nil
+}
+
+// authoritativeMetadataSnapshot 只允许完整且可审计的发现快照驱动“源表已删除”判断。
+// 普通表刷新仍可使用目标表结果，但缺失表绝不能由计数不一致、重复键或无效水位的部分响应推断。
+func authoritativeMetadataSnapshot(result SyncResult) (time.Time, error) {
+	if result.Assets != len(result.Tables) {
+		return time.Time{}, errors.New("connector metadata snapshot asset count is inconsistent")
+	}
+	observedAt, err := time.Parse(time.RFC3339Nano, result.Watermark)
+	if err != nil {
+		return time.Time{}, errors.New("connector metadata snapshot watermark is invalid")
+	}
+	digest, err := hex.DecodeString(result.SnapshotHash)
+	if err != nil || len(digest) != sha256.Size {
+		return time.Time{}, errors.New("connector metadata snapshot hash is invalid")
+	}
+	seen := make(map[string]struct{}, len(result.Tables))
+	for _, table := range result.Tables {
+		if table.Name == "" {
+			return time.Time{}, errors.New("connector metadata snapshot contains an unnamed table")
+		}
+		key := metadataTableKey(table)
+		if _, exists := seen[key]; exists {
+			return time.Time{}, errors.New("connector metadata snapshot contains duplicate table keys")
+		}
+		seen[key] = struct{}{}
+	}
+	return observedAt, nil
 }
 
 func (s *Service) ensureMetadataJobSourceCurrent(ctx context.Context, claim *metadataJobClaim) error {

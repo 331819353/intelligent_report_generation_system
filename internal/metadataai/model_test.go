@@ -8,12 +8,13 @@ import (
 func validCompletion() (CompletionInput, CompletionOutput) {
 	input := CompletionInput{
 		SchemaVersion: SchemaVersion,
+		TargetTable:   true,
 		Table:         Target{ID: "table-1"},
 		Columns:       []Target{{ID: "column-1"}, {ID: "column-2"}},
 	}
 	output := CompletionOutput{
 		SchemaVersion: SchemaVersion,
-		Table: SuggestionValue{
+		Table: &SuggestionValue{
 			TargetID: "table-1", BusinessName: "订单", BusinessDescription: "客户订单事实表",
 			Tags: []string{"领域:运营", "作用:事实表"}, SensitivityLevel: "INTERNAL", Confidence: 0.91,
 		},
@@ -27,6 +28,32 @@ func validCompletion() (CompletionInput, CompletionOutput) {
 
 func TestValidateOutputAcceptsExactStructuredResult(t *testing.T) {
 	input, output := validCompletion()
+	if err := ValidateOutput(input, output); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateOutputAcceptsOnlyRequestedIncrementalTargets(t *testing.T) {
+	input, output := validCompletion()
+	input.TargetTable = false
+	input.Columns = input.Columns[:1]
+	output.Table = nil
+	output.Columns = output.Columns[:1]
+	if err := ValidateOutput(input, output); err != nil {
+		t.Fatal(err)
+	}
+
+	_, unexpectedTable := validCompletion()
+	unexpectedTable.Columns = unexpectedTable.Columns[:1]
+	if err := ValidateOutput(input, unexpectedTable); !errors.Is(err, ErrInvalidOutput) {
+		t.Fatalf("unexpected table error = %v", err)
+	}
+}
+
+func TestValidateOutputAcceptsTableOnlyCompletion(t *testing.T) {
+	input, output := validCompletion()
+	input.Columns = []Target{}
+	output.Columns = []SuggestionValue{}
 	if err := ValidateOutput(input, output); err != nil {
 		t.Fatal(err)
 	}

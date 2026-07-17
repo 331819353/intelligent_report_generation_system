@@ -47,7 +47,7 @@ Oracle 的非敏感连接选项放在 `config` 中：
 - `POST /api/v1/data-sources/{id}/sync`：同步元数据摘要。
 - `GET /api/v1/data-sources/{id}/tables/discovery`：只读取源库中当前可见的表清单，不创建资产。
 - `POST /api/v1/data-sources/{id}/tables/import`：把用户选择的表提交为后台采样与完善任务，返回 `202 Accepted`。
-- `POST /api/v1/data-sources/{id}/tables/refresh`：把已纳管表提交为增量或全量后台刷新任务，返回 `202 Accepted`；可传 `tableIds` 仅刷新指定活动表，省略时刷新全部已纳管表。
+- `POST /api/v1/data-sources/{id}/tables/refresh`：把已纳管表提交为字段级增量或全量后台刷新任务，返回 `202 Accepted`；可传 `tableIds` 仅刷新指定活动表，省略时刷新全部已纳管表。
 - `GET /api/v1/data-sources/{id}/metadata-jobs/{jobId}`：查询后台任务真实进度。
 - `GET /api/v1/data-sources/{id}/metadata-jobs/latest-active`：恢复该数据源最近的活动任务；无任务时返回 `{"job":null}`。
 - `POST /api/v1/data-sources/{id}/enable`：恢复已暂停数据源。
@@ -70,7 +70,11 @@ Oracle 的非敏感连接选项放在 `config` 中：
 
 接口只持久化批任务和选中的表键，立即返回任务摘要及 `Location`；worker 在请求之外采集技术结构和最多三行样本，调用已配置的 LLM 完善业务元数据，并将最终表资产保存到 PostgreSQL。样本行只在 worker 内存和本次模型请求中短暂存在，不写入任务表或元数据资产表。刷新单表结构复用同一后台流程；配置中心只展示当前技术结构已经完成元数据完善的活动资产，旧结构的成功记录不会让未完善的新结构提前进入清单。
 
-刷新请求体为 `{"mode":"INCREMENTAL"}` 或 `{"mode":"FULL"}`，缺省语义为增量。两种模式都只处理 PostgreSQL 中已纳管且未删除的表，不会自动导入源库中的其他表，也不会复活已删除资产。增量模式先比较排除估算行数后的结构哈希：结构未变化且最近一次完善成功时记为 `SKIPPED`，不采样、不调用 LLM；结构变化或上次完善失败时继续加工。全量模式始终重新采样并完善。
+刷新请求体为 `{"mode":"INCREMENTAL"}` 或 `{"mode":"FULL"}`，缺省语义为增量。两种模式都只处理 PostgreSQL 中已纳管且未删除的表，不会自动导入源库中的其他表，也不会复活用户已经删除的资产。
+
+`INCREMENTAL` 是字段级增量刷新。worker 先同步当前技术结构，再逐字段比较已落库的结构版本：仅新增字段、结构发生变化的字段，以及此前尚未成功完善的字段会进入采样和 LLM 请求；未变化字段不采样、不调用 LLM，也不会被本次模型结果覆盖，其业务名称、说明、标签、语义类型、敏感级别、人工锁定状态和版本保持原值。只有表级技术信息本身发生变化时，才重新完善表级业务信息。字段从源表中消失时保留历史记录并标记为 `INACTIVE`，不调用 LLM；只有 Connector 返回表数量一致、时间水位和快照哈希有效且业务键无重复的权威完整快照时，源表缺失才会停用 PostgreSQL 中对应的表资产及其字段；更晚的同结构同步会阻止旧任务停用资产。所有删除均不物理清除历史数据。
+
+`FULL` 会重新采样并对目标范围内的全部活动表和活动字段执行完整 LLM 完善，不使用字段级未变化跳过规则。无论哪种模式，任务都会把模型结果合并到本次明确处理的目标范围，不能用局部响应覆盖其他已落库字段。
 
 任务状态可取 `QUEUED`、`RUNNING`、`SUCCEEDED`、`PARTIAL` 或 `FAILED`。查询响应返回 `total`、`completed`、`succeeded`、`skipped`、`failed`、`stage` 和 `currentTable`；`completed` 是成功、跳过和失败之和，页面进度条使用 `completed / total`，不按时间伪造进度。单表失败不会阻断后续表，响应和审计只返回稳定错误码与安全文案，不包含样本数据、连接器原始错误或模型正文。worker 使用租户 RLS 事务、数据库租约和独立心跳领取任务；AI 成功与任务项及结构哈希绑定，租约恢复可直接收口已提交结果，API 或页面关闭不会中止任务。
 

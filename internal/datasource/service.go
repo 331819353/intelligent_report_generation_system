@@ -255,7 +255,7 @@ func (s *Service) RefreshTables(ctx context.Context, tenantID, actorID, id strin
 			result.Failed++
 			continue
 		}
-		if err := s.completer.CompleteTable(ctx, tenantID, actorID, item.ID, sampleRows(sample), structureHash, "", "", 0); err != nil {
+		if err := s.completer.CompleteTable(ctx, tenantID, actorID, item.ID, sampleRows(sample), true, nil, structureHash, "", "", 0); err != nil {
 			item.Stage, item.Code, item.Cause = "LLM", "LLM_COMPLETION_FAILED", err
 			result.Items = append(result.Items, item)
 			result.Failed++
@@ -330,7 +330,7 @@ func (s *Service) importTables(ctx context.Context, tenantID, actorID, id string
 		if err != nil {
 			return nil, fmt.Errorf("hash metadata for table %s: %w", table.Name, err)
 		}
-		if err := s.completer.CompleteTable(ctx, tenantID, actorID, tableID, rows, structureHash, "", "", 0); err != nil {
+		if err := s.completer.CompleteTable(ctx, tenantID, actorID, tableID, rows, true, nil, structureHash, "", "", 0); err != nil {
 			return nil, fmt.Errorf("complete metadata for table %s: %w", table.Name, err)
 		}
 		imported = append(imported, ImportedTable{ID: tableID, Table: table, Samples: rows})
@@ -355,6 +355,29 @@ func sampleRows(sample SampleResult) []map[string]any {
 			if index < len(values) {
 				row[column] = values[index]
 			}
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// sampleRowsForColumns 在字段级增量中只保留本次 LLM 目标，避免未变化字段样本继续出境。
+func sampleRowsForColumns(sample SampleResult, columns []string) []map[string]any {
+	if columns == nil {
+		return sampleRows(sample)
+	}
+	allowed := make(map[string]struct{}, len(columns))
+	for _, column := range columns {
+		allowed[column] = struct{}{}
+	}
+	rows := make([]map[string]any, 0, len(sample.Rows))
+	for _, values := range sample.Rows {
+		row := make(map[string]any, len(allowed))
+		for index, column := range sample.Columns {
+			if _, exists := allowed[column]; !exists || index >= len(values) {
+				continue
+			}
+			row[column] = values[index]
 		}
 		rows = append(rows, row)
 	}

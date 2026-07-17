@@ -661,9 +661,10 @@ export function DataSourceCenterPage() {
         <div className="data-source-detail">
           <div className="data-source-detail-actions" aria-label="表资产操作">
             <button className="action-add-table" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void openTableSelection(dialog.source!)}>新增数据表</button>
-            <label className="data-source-refresh-mode"><span>刷新方式</span><select aria-label="元数据刷新方式" value={refreshMode} disabled={actionBusy || metadataTaskBusy} onChange={event => setRefreshMode(event.target.value as MetadataRefreshMode)}><option value="INCREMENTAL">增量刷新</option><option value="FULL">全量刷新</option></select></label>
+            <label className="data-source-refresh-mode"><span>刷新方式</span><select aria-label="元数据刷新方式" value={refreshMode} disabled={actionBusy || metadataTaskBusy} onChange={event => setRefreshMode(event.target.value as MetadataRefreshMode)}><option value="INCREMENTAL">增量刷新（仅变化字段）</option><option value="FULL">全量刷新（全部重新处理）</option></select></label>
             <button className="action-refresh-all" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void refreshAllTableAssets(dialog.source!)}>{busyAction === `refresh-tables:${dialog.source.id}` ? '正在提交…' : `开始${refreshMode === 'INCREMENTAL' ? '增量' : '全量'}刷新`}</button>
           </div>
+          <div className="data-source-job-state" role="note">增量刷新仅调用 LLM 处理新增或结构发生变化的字段，未变化字段保留现有完善结果；源表被删除时停用对应资产。全量刷新会重新处理全部活动表和字段。</div>
           {metadataJobLoading && <div className="data-source-job-state" role="status">正在读取后台元数据任务…</div>}
           {visibleMetadataJob && <section className={`data-source-job-progress ${visibleMetadataJob.status.toLowerCase()}`} aria-label="元数据后台任务">
             <header><div><strong>{visibleMetadataJobTitle}</strong><span>{metadataStageLabels[visibleMetadataJob.stage] || visibleMetadataJob.stage || '处理中'}</span></div><em>{metadataProgressPercent}%</em></header>

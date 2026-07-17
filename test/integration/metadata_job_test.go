@@ -19,6 +19,8 @@ import (
 
 type metadataJobConnector struct {
 	table       datasource.MetadataTable
+	missing     bool
+	sample      datasource.SampleResult
 	sampleCalls int
 }
 
@@ -27,16 +29,27 @@ func (c *metadataJobConnector) Test(context.Context, datasource.Source) (datasou
 	return datasource.TestResult{}, nil
 }
 func (c *metadataJobConnector) Sync(context.Context, datasource.Source) (datasource.SyncResult, error) {
-	return datasource.SyncResult{Tables: []datasource.MetadataTable{c.table}}, nil
+	tables := []datasource.MetadataTable{c.table}
+	if c.missing {
+		tables = []datasource.MetadataTable{}
+	}
+	return datasource.SyncResult{
+		Assets: len(tables), Watermark: time.Now().UTC().Format(time.RFC3339Nano),
+		SnapshotHash: strings.Repeat("a", 64), Tables: tables,
+	}, nil
 }
 func (c *metadataJobConnector) Sample(context.Context, datasource.Source, datasource.MetadataTable, int) (datasource.SampleResult, error) {
 	c.sampleCalls++
+	if c.sample.Columns != nil {
+		return c.sample, nil
+	}
 	return datasource.SampleResult{Columns: []string{"order_id"}, Rows: [][]any{{1}, {2}, {3}}}, nil
 }
 func (c *metadataJobConnector) Close(context.Context, datasource.Source) error { return nil }
 
 type metadataJobAIProvider struct {
 	calls        int
+	inputs       []metadataai.CompletionInput
 	beforeReturn func() error
 }
 
@@ -45,6 +58,7 @@ func (*metadataJobAIProvider) Model() string    { return "metadata-job-test-v1" 
 func (*metadataJobAIProvider) Configured() bool { return true }
 func (p *metadataJobAIProvider) Complete(_ context.Context, _, _ string, input metadataai.CompletionInput) (metadataai.ProviderResult, error) {
 	p.calls++
+	p.inputs = append(p.inputs, input)
 	if p.beforeReturn != nil {
 		if err := p.beforeReturn(); err != nil {
 			return metadataai.ProviderResult{}, err
@@ -57,11 +71,15 @@ func (p *metadataJobAIProvider) Complete(_ context.Context, _, _ string, input m
 			Tags: []string{"作用:辅助信息"}, SensitivityLevel: "INTERNAL", SemanticType: "IDENTIFIER", Confidence: 0.95,
 		})
 	}
+	var tableSuggestion *metadataai.SuggestionValue
+	if input.TargetTable {
+		tableSuggestion = &metadataai.SuggestionValue{TargetID: input.Table.ID, BusinessName: input.Table.Name, BusinessDescription: "集成测试表",
+			Tags: []string{"作用:事实表"}, SensitivityLevel: "INTERNAL", Confidence: 0.95}
+	}
 	return metadataai.ProviderResult{Output: metadataai.CompletionOutput{
 		SchemaVersion: metadataai.SchemaVersion,
-		Table: metadataai.SuggestionValue{TargetID: input.Table.ID, BusinessName: input.Table.Name, BusinessDescription: "集成测试表",
-			Tags: []string{"作用:事实表"}, SensitivityLevel: "INTERNAL", Confidence: 0.95},
-		Columns: columns,
+		Table:         tableSuggestion,
+		Columns:       columns,
 	}, Model: p.Model()}, nil
 }
 
@@ -221,6 +239,178 @@ func TestMetadataJobPersistsProgressAndSkipsUnchangedTables(t *testing.T) {
 	}
 }
 
+func TestIncrementalMetadataRefreshOnlyCompletesChangedFieldsAndHandlesRemoval(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, env("DATABASE_URL", "postgres://report_app:local_report_password@127.0.0.1:5432/intelligent_report?sslmode=disable"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	tenantID := insertTenant(t, ctx, pool, "metadata-field-delta-it-"+suffix)
+	t.Cleanup(func() { cleanupTenant(pool, tenantID) })
+
+	var actorID, sourceID string
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `INSERT INTO platform.users(tenant_id,email,display_name,password_hash)
+			VALUES($1,$2,'metadata field delta','integration-hash') RETURNING id`, tenantID, "metadata-field-delta-"+suffix+"@it.test").Scan(&actorID); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `INSERT INTO platform.data_sources(tenant_id,code,name,source_type,status,config,secret_ref)
+			VALUES($1,$2,'Metadata Field Delta','MYSQL','ACTIVE','{"host":"db.internal","port":3306,"database":"sales","username":"reader"}','encrypted://metadata-field-delta') RETURNING id`, tenantID, "metadata-field-delta-"+suffix).Scan(&sourceID)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	connector := &metadataJobConnector{table: datasource.MetadataTable{
+		SchemaName: "sales", Name: "orders", Type: "TABLE",
+		Columns: []datasource.MetadataColumn{{Name: "order_id", OrdinalPosition: 1, NativeType: "bigint", CanonicalType: "INTEGER", Nullable: false}},
+	}}
+	provider := &metadataJobAIProvider{}
+	service := datasource.NewService(datasource.NewPostgresRepository(pool), connector)
+	service.SetTableCompleter(metadataai.NewService(metadataai.NewPostgresStore(pool), provider, 5*time.Second, 0.8))
+	service.SetMetadataJobRepository(datasource.NewPostgresMetadataJobRepository(pool))
+
+	job, err := service.QueueImportTables(ctx, tenantID, actorID, sourceID, []datasource.TableSelection{{SchemaName: "sales", TableName: "orders"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := service.ProcessNextMetadataJob(ctx, tenantID, "field-delta-worker", 2*time.Minute); err != nil || !processed {
+		t.Fatalf("initial import processed=%v err=%v", processed, err)
+	}
+	job, err = service.GetMetadataJob(ctx, tenantID, sourceID, job.ID)
+	if err != nil || job.Status != "SUCCEEDED" {
+		t.Fatalf("initial import=%#v err=%v", job, err)
+	}
+
+	var tableID, orderColumnID string
+	var orderBusinessName, orderDescription string
+	var orderBusinessVersion int64
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT id::text FROM platform.metadata_tables WHERE data_source_id=$1 AND table_name='orders'`, sourceID).Scan(&tableID); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT id::text,business_name,business_description,business_version
+			FROM platform.metadata_columns WHERE table_id=$1 AND column_name='order_id'`, tableID).
+			Scan(&orderColumnID, &orderBusinessName, &orderDescription, &orderBusinessVersion)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	length := int64(255)
+	connector.table.Columns = append(connector.table.Columns, datasource.MetadataColumn{
+		Name: "email", OrdinalPosition: 2, NativeType: "varchar(255)", CanonicalType: "STRING", Length: &length, Nullable: true,
+	})
+	connector.sample = datasource.SampleResult{
+		Columns: []string{"order_id", "email"},
+		Rows:    [][]any{{1, "first@example.com"}, {2, "second@example.com"}},
+	}
+	refresh, err := service.QueueRefreshTables(ctx, tenantID, actorID, sourceID, datasource.MetadataRefreshIncremental)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := service.ProcessNextMetadataJob(ctx, tenantID, "field-delta-worker", 2*time.Minute); err != nil || !processed {
+		t.Fatalf("field delta processed=%v err=%v", processed, err)
+	}
+	refresh, err = service.GetMetadataJob(ctx, tenantID, sourceID, refresh.ID)
+	if err != nil || refresh.Status != "SUCCEEDED" || refresh.Succeeded != 1 {
+		t.Fatalf("field delta refresh=%#v err=%v", refresh, err)
+	}
+	if provider.calls != 2 || connector.sampleCalls != 2 || len(provider.inputs) != 2 {
+		t.Fatalf("calls provider=%d sample=%d inputs=%d", provider.calls, connector.sampleCalls, len(provider.inputs))
+	}
+	deltaInput := provider.inputs[1]
+	if deltaInput.TargetTable || len(deltaInput.Columns) != 1 || deltaInput.Columns[0].Name != "email" {
+		t.Fatalf("incremental target scope=%#v", deltaInput)
+	}
+	if deltaInput.Columns[0].Length == nil || *deltaInput.Columns[0].Length != 255 || deltaInput.Columns[0].OrdinalPosition != 2 || !deltaInput.Columns[0].Nullable {
+		t.Fatalf("changed field technical context=%#v", deltaInput.Columns[0])
+	}
+	for _, row := range deltaInput.SampleRows {
+		if len(row) != 1 || row["email"] == nil {
+			t.Fatalf("incremental sample leaked unchanged fields: %#v", row)
+		}
+		if _, exists := row["order_id"]; exists {
+			t.Fatalf("unchanged order_id leaked into sample: %#v", row)
+		}
+	}
+
+	var emailColumnID, emailDescription, emailStructureHash, emailEnrichedHash string
+	var currentOrderName, currentOrderDescription string
+	var currentOrderVersion int64
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT business_name,business_description,business_version FROM platform.metadata_columns WHERE id=$1`, orderColumnID).
+			Scan(&currentOrderName, &currentOrderDescription, &currentOrderVersion); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT id::text,business_description,structure_hash,last_enriched_structure_hash
+			FROM platform.metadata_columns WHERE table_id=$1 AND column_name='email'`, tableID).
+			Scan(&emailColumnID, &emailDescription, &emailStructureHash, &emailEnrichedHash)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentOrderName != orderBusinessName || currentOrderDescription != orderDescription || currentOrderVersion != orderBusinessVersion {
+		t.Fatalf("unchanged field was overwritten: before=%q/%q/%d after=%q/%q/%d", orderBusinessName, orderDescription, orderBusinessVersion, currentOrderName, currentOrderDescription, currentOrderVersion)
+	}
+	if emailColumnID == "" || emailDescription != "集成测试字段" || emailEnrichedHash == "" || emailEnrichedHash != emailStructureHash {
+		t.Fatalf("changed field was not completed: id=%q description=%q current=%q enriched=%q", emailColumnID, emailDescription, emailStructureHash, emailEnrichedHash)
+	}
+
+	// 字段从源表消失时只软停用该字段，不再采样，也不调用 LLM。
+	connector.table.Columns = connector.table.Columns[:1]
+	sampleCallsBeforeRemoval, providerCallsBeforeRemoval := connector.sampleCalls, provider.calls
+	removal, err := service.QueueRefreshTables(ctx, tenantID, actorID, sourceID, datasource.MetadataRefreshIncremental)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := service.ProcessNextMetadataJob(ctx, tenantID, "field-delta-worker", 2*time.Minute); err != nil || !processed {
+		t.Fatalf("field removal processed=%v err=%v", processed, err)
+	}
+	removal, err = service.GetMetadataJob(ctx, tenantID, sourceID, removal.ID)
+	if err != nil || removal.Status != "SUCCEEDED" || removal.Succeeded != 1 || connector.sampleCalls != sampleCallsBeforeRemoval || provider.calls != providerCallsBeforeRemoval {
+		t.Fatalf("field removal=%#v sample=%d provider=%d err=%v", removal, connector.sampleCalls, provider.calls, err)
+	}
+	var emailStatus string
+	var tableFenceCurrent bool
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT asset_status::text FROM platform.metadata_columns WHERE id=$1`, emailColumnID).Scan(&emailStatus); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT last_enriched_structure_hash=structure_hash FROM platform.metadata_tables WHERE id=$1`, tableID).Scan(&tableFenceCurrent)
+	})
+	if err != nil || emailStatus != "INACTIVE" || !tableFenceCurrent {
+		t.Fatalf("removed field status=%s tableFenceCurrent=%v err=%v", emailStatus, tableFenceCurrent, err)
+	}
+
+	// 整个源表从权威快照中消失时停用 PostgreSQL 资产，且不触发 LLM。
+	connector.missing = true
+	tableRemoval, err := service.QueueRefreshTables(ctx, tenantID, actorID, sourceID, datasource.MetadataRefreshIncremental)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := service.ProcessNextMetadataJob(ctx, tenantID, "field-delta-worker", 2*time.Minute); err != nil || !processed {
+		t.Fatalf("table removal processed=%v err=%v", processed, err)
+	}
+	tableRemoval, err = service.GetMetadataJob(ctx, tenantID, sourceID, tableRemoval.ID)
+	if err != nil || tableRemoval.Status != "SUCCEEDED" || tableRemoval.Succeeded != 1 || connector.sampleCalls != sampleCallsBeforeRemoval || provider.calls != providerCallsBeforeRemoval {
+		t.Fatalf("table removal=%#v sample=%d provider=%d err=%v", tableRemoval, connector.sampleCalls, provider.calls, err)
+	}
+	var tableStatus, orderStatus string
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT asset_status::text FROM platform.metadata_tables WHERE id=$1`, tableID).Scan(&tableStatus); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT asset_status::text FROM platform.metadata_columns WHERE id=$1`, orderColumnID).Scan(&orderStatus)
+	})
+	if err != nil || tableStatus != "INACTIVE" || orderStatus != "INACTIVE" {
+		t.Fatalf("removed table status=%s orderStatus=%s err=%v", tableStatus, orderStatus, err)
+	}
+}
+
 func TestManagedMetadataRefreshDoesNotReactivateDeletedAsset(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -272,6 +462,12 @@ func TestManagedMetadataRefreshDoesNotReactivateDeletedAsset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 更晚的同结构同步已经确认资产存在时，旧发现快照不得再将其停用。
+	if _, err := repository.DeactivateManagedMetadata(ctx, source, datasource.TableSelection{
+		SchemaName: "sales", TableName: "orders", TableID: tableID, StructureHash: initialStructureHash,
+	}, time.Now().UTC().Add(-time.Minute)); !errors.Is(err, datasource.ErrMetadataRefreshSuperseded) {
+		t.Fatalf("stale source removal err=%v", err)
+	}
 	var currentSourceVersion int64
 	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `UPDATE platform.data_sources SET version=version+1 WHERE id=$1 RETURNING version`, sourceID).Scan(&currentSourceVersion)
@@ -279,7 +475,7 @@ func TestManagedMetadataRefreshDoesNotReactivateDeletedAsset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := repository.ApplyManagedMetadata(ctx, source, tableID, initialStructureHash, refreshResult); !errors.Is(err, datasource.ErrMetadataSourceChanged) {
+	if _, err := repository.ApplyManagedMetadata(ctx, source, tableID, initialStructureHash, refreshResult); !errors.Is(err, datasource.ErrMetadataSourceChanged) {
 		t.Fatalf("stale source version refresh err=%v", err)
 	}
 	source.Version = currentSourceVersion
@@ -292,7 +488,7 @@ func TestManagedMetadataRefreshDoesNotReactivateDeletedAsset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := repository.ApplyManagedMetadata(ctx, source, tableID, initialStructureHash, refreshResult); !errors.Is(err, datasource.ErrMetadataRefreshSuperseded) {
+	if _, err := repository.ApplyManagedMetadata(ctx, source, tableID, initialStructureHash, refreshResult); !errors.Is(err, datasource.ErrMetadataRefreshSuperseded) {
 		t.Fatalf("superseded refresh err=%v", err)
 	}
 	var supersedingHash, supersedingComment string
@@ -321,9 +517,9 @@ func TestManagedMetadataRefreshDoesNotReactivateDeletedAsset(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	refreshedID, managed, err := repository.ApplyManagedMetadata(ctx, source, tableID, initialStructureHash, refreshResult)
-	if err != nil || managed || refreshedID != "" {
-		t.Fatalf("guarded refresh id=%q managed=%v err=%v", refreshedID, managed, err)
+	applied, err := repository.ApplyManagedMetadata(ctx, source, tableID, initialStructureHash, refreshResult)
+	if err != nil || applied.Managed || applied.TableID != "" {
+		t.Fatalf("guarded refresh result=%#v err=%v", applied, err)
 	}
 
 	var status, managementStatus, structureHash, sourceComment string

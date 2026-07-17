@@ -21,9 +21,13 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore
 func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string) (input CompletionInput, err error) {
 	input.SchemaVersion = SchemaVersion
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		err := tx.QueryRow(ctx, `SELECT id::text,structure_hash,table_name,source_comment,business_name,business_description,tags,sensitivity_level::text,manual_locked,business_version
+		var primaryKeys, constraints, indexes []byte
+		err := tx.QueryRow(ctx, `SELECT id::text,structure_hash,catalog_name,schema_name,table_name,table_type,source_comment,
+			primary_key_columns,constraints_json,indexes_json,business_name,business_description,tags,sensitivity_level::text,manual_locked,business_version
 			FROM platform.metadata_tables WHERE id=$1 AND asset_status='ACTIVE'`, tableID).
-			Scan(&input.Table.ID, &input.StructureHash, &input.Table.Name, &input.Table.SourceComment, &input.Table.CurrentBusinessName, &input.Table.CurrentDescription, &input.Table.CurrentTags, &input.Table.CurrentSensitivity, &input.Table.ManualLocked, &input.Table.BusinessVersion)
+			Scan(&input.Table.ID, &input.StructureHash, &input.Table.CatalogName, &input.Table.SchemaName, &input.Table.Name, &input.Table.TableType,
+				&input.Table.SourceComment, &primaryKeys, &constraints, &indexes, &input.Table.CurrentBusinessName, &input.Table.CurrentDescription,
+				&input.Table.CurrentTags, &input.Table.CurrentSensitivity, &input.Table.ManualLocked, &input.Table.BusinessVersion)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -31,7 +35,15 @@ func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string)
 			return err
 		}
 		input.Table.Kind = "TABLE"
-		rows, err := tx.Query(ctx, `SELECT id::text,column_name,source_comment,native_type,canonical_type,nullable,business_name,business_description,tags,semantic_type,sensitivity_level::text,manual_locked,business_version
+		input.Table.StructureHash = input.StructureHash
+		if err := json.Unmarshal(primaryKeys, &input.Table.PrimaryKeyColumns); err != nil {
+			return err
+		}
+		input.Table.Constraints = append(json.RawMessage(nil), constraints...)
+		input.Table.Indexes = append(json.RawMessage(nil), indexes...)
+		rows, err := tx.Query(ctx, `SELECT id::text,column_name,ordinal_position,source_comment,native_type,canonical_type,
+			length,numeric_precision,numeric_scale,nullable,default_value,is_primary_key,is_foreign_key,is_unique,
+			business_name,business_description,tags,semantic_type,sensitivity_level::text,manual_locked,business_version,structure_hash
 			FROM platform.metadata_columns WHERE table_id=$1 AND asset_status='ACTIVE' ORDER BY ordinal_position,id`, tableID)
 		if err != nil {
 			return err
@@ -41,7 +53,10 @@ func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string)
 		for rows.Next() {
 			var target Target
 			target.Kind = "COLUMN"
-			if err := rows.Scan(&target.ID, &target.Name, &target.SourceComment, &target.NativeType, &target.CanonicalType, &target.Nullable, &target.CurrentBusinessName, &target.CurrentDescription, &target.CurrentTags, &target.CurrentSemanticType, &target.CurrentSensitivity, &target.ManualLocked, &target.BusinessVersion); err != nil {
+			if err := rows.Scan(&target.ID, &target.Name, &target.OrdinalPosition, &target.SourceComment, &target.NativeType, &target.CanonicalType,
+				&target.Length, &target.NumericPrecision, &target.NumericScale, &target.Nullable, &target.DefaultValue, &target.PrimaryKey, &target.ForeignKey, &target.Unique,
+				&target.CurrentBusinessName, &target.CurrentDescription, &target.CurrentTags, &target.CurrentSemanticType, &target.CurrentSensitivity,
+				&target.ManualLocked, &target.BusinessVersion, &target.StructureHash); err != nil {
 				return err
 			}
 			input.Columns = append(input.Columns, target)
@@ -137,10 +152,15 @@ func (s *PostgresStore) SaveResult(ctx context.Context, tenantID, actorID string
 			target Target
 			value  SuggestionValue
 		}, 0, len(input.Columns)+1)
-		values = append(values, struct {
-			target Target
-			value  SuggestionValue
-		}{input.Table, result.Output.Table})
+		if input.TargetTable {
+			if result.Output.Table == nil {
+				return ErrConflict
+			}
+			values = append(values, struct {
+				target Target
+				value  SuggestionValue
+			}{input.Table, *result.Output.Table})
+		}
 		byID := make(map[string]Target, len(input.Columns))
 		for _, target := range input.Columns {
 			byID[target.ID] = target
@@ -165,9 +185,38 @@ func (s *PostgresStore) SaveResult(ctx context.Context, tenantID, actorID string
 			}
 			suggestions = append(suggestions, suggestion)
 		}
-		// 该字段是后台任务恢复的幂等凭据：只有所有建议持久化成功后才推进。
-		tag, err := tx.Exec(ctx, `UPDATE platform.metadata_tables SET last_enriched_structure_hash=$1
-			WHERE id=$2 AND structure_hash=$1 AND asset_status='ACTIVE'`, job.StructureHash, job.TableID)
+		// scoped marker 与建议在同一事务推进；只有所有活动目标均已评估才发布完整结构 marker。
+		if input.TargetTable {
+			tag, err := tx.Exec(ctx, `UPDATE platform.metadata_tables
+				SET last_enriched_table_structure_hash=table_structure_hash
+				WHERE id=$1 AND structure_hash=$2 AND asset_status='ACTIVE'`, job.TableID, job.StructureHash)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != 1 {
+				return ErrStructureChanged
+			}
+		}
+		if len(input.Columns) > 0 {
+			columnIDs := make([]string, 0, len(input.Columns))
+			for _, target := range input.Columns {
+				columnIDs = append(columnIDs, target.ID)
+			}
+			tag, err := tx.Exec(ctx, `UPDATE platform.metadata_columns
+				SET last_enriched_structure_hash=structure_hash
+				WHERE table_id=$1 AND id=ANY($2::uuid[]) AND asset_status='ACTIVE'`, job.TableID, columnIDs)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != int64(len(columnIDs)) {
+				return ErrStructureChanged
+			}
+		}
+		tag, err := tx.Exec(ctx, `UPDATE platform.metadata_tables t SET last_enriched_structure_hash=t.structure_hash
+			WHERE t.id=$1 AND t.structure_hash=$2 AND t.asset_status='ACTIVE'
+			AND t.last_enriched_table_structure_hash=t.table_structure_hash
+			AND NOT EXISTS (SELECT 1 FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE'
+				AND c.last_enriched_structure_hash<>c.structure_hash)`, job.TableID, job.StructureHash)
 		if err != nil {
 			return err
 		}
@@ -195,16 +244,20 @@ func (s *PostgresStore) SaveResult(ctx context.Context, tenantID, actorID string
 func (s *PostgresStore) persistSuggestion(ctx context.Context, tx pgx.Tx, tenantID, jobID string, target Target, value SuggestionValue, threshold float64) (Suggestion, error) {
 	var locked bool
 	var currentVersion int64
+	var currentStructureHash string
 	table := target.Kind == "TABLE"
-	query := `SELECT manual_locked,business_version FROM platform.metadata_columns WHERE id=$1 FOR UPDATE`
+	query := `SELECT manual_locked,business_version,structure_hash FROM platform.metadata_columns WHERE id=$1 AND asset_status='ACTIVE' FOR UPDATE`
 	if table {
-		query = `SELECT manual_locked,business_version FROM platform.metadata_tables WHERE id=$1 FOR UPDATE`
+		query = `SELECT manual_locked,business_version,structure_hash FROM platform.metadata_tables WHERE id=$1 AND asset_status='ACTIVE' FOR UPDATE`
 	}
-	if err := tx.QueryRow(ctx, query, target.ID).Scan(&locked, &currentVersion); err != nil {
+	if err := tx.QueryRow(ctx, query, target.ID).Scan(&locked, &currentVersion, &currentStructureHash); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Suggestion{}, ErrConflict
 		}
 		return Suggestion{}, err
+	}
+	if target.StructureHash == "" || currentStructureHash != target.StructureHash {
+		return Suggestion{}, ErrStructureChanged
 	}
 	status, reason := suggestionDisposition(locked, currentVersion, target.BusinessVersion, value.Confidence, threshold)
 	if status == "APPLIED" {
@@ -233,8 +286,8 @@ func (s *PostgresStore) persistSuggestion(ctx context.Context, tx pgx.Tx, tenant
 		return Suggestion{}, err
 	}
 	suggestion := Suggestion{JobID: jobID, TargetType: target.Kind, TargetID: target.ID, Value: value, Confidence: value.Confidence, Status: status, PendingReason: reason}
-	err = tx.QueryRow(ctx, `INSERT INTO platform.ai_metadata_suggestions(tenant_id,job_id,target_type,target_id,proposed_value,confidence,expected_business_version,status,pending_reason)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id::text,created_at::text`, tenantID, jobID, target.Kind, target.ID, payload, value.Confidence, target.BusinessVersion, status, reason).
+	err = tx.QueryRow(ctx, `INSERT INTO platform.ai_metadata_suggestions(tenant_id,job_id,target_type,target_id,proposed_value,confidence,expected_business_version,expected_structure_hash,status,pending_reason)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id::text,created_at::text`, tenantID, jobID, target.Kind, target.ID, payload, value.Confidence, target.BusinessVersion, target.StructureHash, status, reason).
 		Scan(&suggestion.ID, &suggestion.CreatedAt)
 	return suggestion, err
 }
@@ -292,9 +345,10 @@ func (s *PostgresStore) DecideSuggestion(ctx context.Context, tenantID, actorID,
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		var payload []byte
 		var expectedVersion int64
-		if err := tx.QueryRow(ctx, `SELECT id::text,job_id::text,target_type,target_id::text,proposed_value,confidence::float8,status,pending_reason,expected_business_version,created_at::text
+		var expectedStructureHash string
+		if err := tx.QueryRow(ctx, `SELECT id::text,job_id::text,target_type,target_id::text,proposed_value,confidence::float8,status,pending_reason,expected_business_version,expected_structure_hash,created_at::text
 			FROM platform.ai_metadata_suggestions WHERE id=$1 FOR UPDATE`, suggestionID).
-			Scan(&item.ID, &item.JobID, &item.TargetType, &item.TargetID, &payload, &item.Confidence, &item.Status, &item.PendingReason, &expectedVersion, &item.CreatedAt); err != nil {
+			Scan(&item.ID, &item.JobID, &item.TargetType, &item.TargetID, &payload, &item.Confidence, &item.Status, &item.PendingReason, &expectedVersion, &expectedStructureHash, &item.CreatedAt); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
@@ -313,11 +367,13 @@ func (s *PostgresStore) DecideSuggestion(ctx context.Context, tenantID, actorID,
 			var command string
 			var args []any
 			if item.TargetType == "TABLE" {
-				command = `UPDATE platform.metadata_tables SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,business_version=business_version+1 WHERE id=$5 AND business_version=$6 AND manual_locked=false`
-				args = []any{item.Value.BusinessName, item.Value.BusinessDescription, item.Value.Tags, item.Value.SensitivityLevel, item.TargetID, expectedVersion}
+				command = `UPDATE platform.metadata_tables SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,business_version=business_version+1
+					WHERE id=$5 AND business_version=$6 AND structure_hash=$7 AND asset_status='ACTIVE' AND manual_locked=false`
+				args = []any{item.Value.BusinessName, item.Value.BusinessDescription, item.Value.Tags, item.Value.SensitivityLevel, item.TargetID, expectedVersion, expectedStructureHash}
 			} else {
-				command = `UPDATE platform.metadata_columns SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,semantic_type=$5,business_version=business_version+1 WHERE id=$6 AND business_version=$7 AND manual_locked=false`
-				args = []any{item.Value.BusinessName, item.Value.BusinessDescription, item.Value.Tags, item.Value.SensitivityLevel, item.Value.SemanticType, item.TargetID, expectedVersion}
+				command = `UPDATE platform.metadata_columns SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,semantic_type=$5,business_version=business_version+1
+					WHERE id=$6 AND business_version=$7 AND structure_hash=$8 AND asset_status='ACTIVE' AND manual_locked=false`
+				args = []any{item.Value.BusinessName, item.Value.BusinessDescription, item.Value.Tags, item.Value.SensitivityLevel, item.Value.SemanticType, item.TargetID, expectedVersion, expectedStructureHash}
 			}
 			tag, err := tx.Exec(ctx, command, args...)
 			if err != nil {

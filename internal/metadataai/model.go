@@ -1,6 +1,7 @@
 package metadataai
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -8,8 +9,8 @@ import (
 )
 
 const (
-	SchemaVersion = "1.0"
-	PromptVersion = "metadata-completion-v2"
+	SchemaVersion = "1.1"
+	PromptVersion = "metadata-completion-v3"
 )
 
 var (
@@ -19,26 +20,42 @@ var (
 )
 
 type Target struct {
-	ID                  string   `json:"id"`
-	Kind                string   `json:"kind"`
-	Name                string   `json:"name"`
-	SourceComment       string   `json:"sourceComment"`
-	NativeType          string   `json:"nativeType,omitempty"`
-	CanonicalType       string   `json:"canonicalType,omitempty"`
-	Nullable            bool     `json:"nullable,omitempty"`
-	CurrentBusinessName string   `json:"currentBusinessName"`
-	CurrentDescription  string   `json:"currentDescription"`
-	CurrentTags         []string `json:"currentTags"`
-	CurrentSemanticType string   `json:"currentSemanticType,omitempty"`
-	CurrentSensitivity  string   `json:"currentSensitivity"`
-	ManualLocked        bool     `json:"manualLocked"`
-	BusinessVersion     int64    `json:"-"`
+	ID                  string          `json:"id"`
+	Kind                string          `json:"kind"`
+	Name                string          `json:"name"`
+	CatalogName         string          `json:"catalogName,omitempty"`
+	SchemaName          string          `json:"schemaName,omitempty"`
+	TableType           string          `json:"tableType,omitempty"`
+	SourceComment       string          `json:"sourceComment"`
+	PrimaryKeyColumns   []string        `json:"primaryKeyColumns,omitempty"`
+	Constraints         json.RawMessage `json:"constraints,omitempty"`
+	Indexes             json.RawMessage `json:"indexes,omitempty"`
+	OrdinalPosition     int             `json:"ordinalPosition,omitempty"`
+	NativeType          string          `json:"nativeType,omitempty"`
+	CanonicalType       string          `json:"canonicalType,omitempty"`
+	Length              *int64          `json:"length,omitempty"`
+	NumericPrecision    *int            `json:"numericPrecision,omitempty"`
+	NumericScale        *int            `json:"numericScale,omitempty"`
+	Nullable            bool            `json:"nullable"`
+	DefaultValue        *string         `json:"defaultValue,omitempty"`
+	PrimaryKey          bool            `json:"primaryKey,omitempty"`
+	ForeignKey          bool            `json:"foreignKey,omitempty"`
+	Unique              bool            `json:"unique,omitempty"`
+	CurrentBusinessName string          `json:"currentBusinessName"`
+	CurrentDescription  string          `json:"currentDescription"`
+	CurrentTags         []string        `json:"currentTags"`
+	CurrentSemanticType string          `json:"currentSemanticType,omitempty"`
+	CurrentSensitivity  string          `json:"currentSensitivity"`
+	ManualLocked        bool            `json:"manualLocked"`
+	BusinessVersion     int64           `json:"-"`
+	StructureHash       string          `json:"-"`
 }
 
 type CompletionInput struct {
 	SchemaVersion string `json:"schemaVersion"`
 	// StructureHash 只用于数据库并发栅栏，不发送给外部模型，也不混入提示词输入哈希。
 	StructureHash string           `json:"-"`
+	TargetTable   bool             `json:"targetTable"`
 	Table         Target           `json:"table"`
 	Columns       []Target         `json:"columns"`
 	SampleRows    []map[string]any `json:"sampleRows,omitempty"`
@@ -56,7 +73,7 @@ type SuggestionValue struct {
 
 type CompletionOutput struct {
 	SchemaVersion string            `json:"schemaVersion"`
-	Table         SuggestionValue   `json:"table"`
+	Table         *SuggestionValue  `json:"table,omitempty"`
 	Columns       []SuggestionValue `json:"columns"`
 }
 
@@ -128,14 +145,18 @@ func ValidateOutput(input CompletionInput, output CompletionOutput) error {
 	if output.SchemaVersion != SchemaVersion {
 		return invalid("schemaVersion must be %q", SchemaVersion)
 	}
-	if output.Table.TargetID != input.Table.ID {
-		return invalid("table targetId does not match the requested table")
-	}
 	if output.Columns == nil {
 		return invalid("columns is required and must be an array")
 	}
-	if err := validateValue(output.Table, false); err != nil {
-		return fmt.Errorf("%w: table: %v", ErrInvalidOutput, err)
+	if input.TargetTable {
+		if output.Table == nil || output.Table.TargetID != input.Table.ID {
+			return invalid("table targetId does not match the requested table")
+		}
+		if err := validateValue(*output.Table, false); err != nil {
+			return fmt.Errorf("%w: table: %v", ErrInvalidOutput, err)
+		}
+	} else if output.Table != nil {
+		return invalid("table suggestion was not requested")
 	}
 	expected := make(map[string]bool, len(input.Columns))
 	for _, column := range input.Columns {
@@ -205,7 +226,10 @@ func validateValue(value SuggestionValue, column bool) error {
 
 // normalizeOutput 在领域校验前统一清理表和字段建议中的首尾空白。
 func normalizeOutput(output CompletionOutput) CompletionOutput {
-	output.Table = normalizeValue(output.Table)
+	if output.Table != nil {
+		normalized := normalizeValue(*output.Table)
+		output.Table = &normalized
+	}
 	for i := range output.Columns {
 		output.Columns[i] = normalizeValue(output.Columns[i])
 	}

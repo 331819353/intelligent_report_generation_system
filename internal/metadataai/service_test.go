@@ -94,12 +94,52 @@ func TestCompleteTableRejectsStaleExpectedStructureBeforeProviderCall(t *testing
 	service := NewService(store, serviceProvider{output: output, input: &captured}, time.Second, 0.8)
 
 	err := service.CompleteTable(context.Background(), "tenant", "actor", "table-1", nil,
-		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "item-1", "worker-1", 1)
+		true, nil, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "item-1", "worker-1", 1)
 	if !errors.Is(err, ErrStructureChanged) {
 		t.Fatalf("error=%v", err)
 	}
 	if store.createdJob.TableID != "" || captured.Table.ID != "" {
 		t.Fatal("stale structure reached job creation or provider")
+	}
+}
+
+func TestCompleteTableScopesIncrementalTargetsBeforeProviderCall(t *testing.T) {
+	input, output := validCompletion()
+	input.StructureHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	store := &serviceStore{input: input}
+	output.Table = nil
+	output.Columns = output.Columns[1:]
+	var captured CompletionInput
+	service := NewService(store, serviceProvider{output: output, input: &captured}, time.Second, 0.8)
+
+	err := service.CompleteTable(context.Background(), "tenant", "actor", "table-1", []map[string]any{{"column-2": 18}},
+		false, []string{"column-2"}, input.StructureHash, "item-1", "worker-1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if captured.TargetTable || len(captured.Columns) != 1 || captured.Columns[0].ID != "column-2" {
+		t.Fatalf("captured target scope=%#v", captured)
+	}
+	if len(captured.SampleRows) != 1 || captured.SampleRows[0]["column-2"] != 18 {
+		t.Fatalf("captured samples=%#v", captured.SampleRows)
+	}
+}
+
+func TestCompleteTableRejectsEmptyOrUnknownIncrementalScope(t *testing.T) {
+	input, output := validCompletion()
+	input.StructureHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, ids := range [][]string{{}, {"unknown-column"}, {"column-1", "column-1"}} {
+		store := &serviceStore{input: input}
+		var captured CompletionInput
+		service := NewService(store, serviceProvider{output: output, input: &captured}, time.Second, 0.8)
+		err := service.CompleteTable(context.Background(), "tenant", "actor", "table-1", nil,
+			false, ids, input.StructureHash, "item-1", "worker-1", 1)
+		if !errors.Is(err, ErrInvalidTargetScope) {
+			t.Fatalf("ids=%v error=%v", ids, err)
+		}
+		if store.createdJob.TableID != "" || captured.Table.ID != "" {
+			t.Fatalf("ids=%v reached job creation or provider", ids)
+		}
 	}
 }
 

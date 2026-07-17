@@ -83,39 +83,65 @@ func (r *PostgresRepository) ApplySelectedMetadata(ctx context.Context, source S
 
 // ApplyManagedMetadata 仅刷新仍处于纳管状态的既有表资产。
 // 锁定、身份校验、快照和 upsert 必须位于同一租户事务，避免并发删除后被刷新任务重新激活。
-func (r *PostgresRepository) ApplyManagedMetadata(ctx context.Context, source Source, expectedTableID, expectedStructureHash string, result SyncResult) (id string, managed bool, err error) {
+func (r *PostgresRepository) ApplyManagedMetadata(ctx context.Context, source Source, expectedTableID, expectedStructureHash string, result SyncResult) (applied ManagedMetadataApplyResult, err error) {
 	if len(result.Tables) != 1 {
-		return "", false, errors.New("managed metadata refresh requires exactly one table")
+		return applied, errors.New("managed metadata refresh requires exactly one table")
 	}
 	if expectedTableID == "" {
-		return "", false, nil
+		return applied, nil
 	}
 	watermark, err := time.Parse(time.RFC3339Nano, result.Watermark)
 	if err != nil {
-		return "", false, errors.New("invalid metadata watermark")
+		return applied, errors.New("invalid metadata watermark")
 	}
 	snapshot, err := json.Marshal(result.Tables)
 	if err != nil {
-		return "", false, err
+		return applied, err
 	}
 	table := result.Tables[0]
 	desiredStructureHash, _, err := metadataTableHash(table)
 	if err != nil {
-		return "", false, err
+		return applied, err
+	}
+	desiredTableHash, _, err := metadataTableHeaderHash(table)
+	if err != nil {
+		return applied, err
 	}
 	err = database.WithTenantTx(ctx, r.pool, source.TenantID, func(tx pgx.Tx) error {
 		if err := validateMetadataSourceForWrite(ctx, tx, source); err != nil {
 			return err
 		}
-		var lockedID, currentStructureHash string
-		err := tx.QueryRow(ctx, `SELECT id::text,structure_hash FROM platform.metadata_tables
+		var lockedID, currentStructureHash, storedTableHash, lastEnrichedHash string
+		var current MetadataTable
+		var primaryKeys, constraints, indexes []byte
+		err := tx.QueryRow(ctx, `SELECT id::text,structure_hash,table_structure_hash,last_enriched_structure_hash,
+			catalog_name,schema_name,table_name,table_type,source_comment,primary_key_columns,constraints_json,indexes_json
+			FROM platform.metadata_tables
 			WHERE id=$1 AND tenant_id=$2 AND data_source_id=$3 AND catalog_name=$4 AND schema_name=$5 AND table_name=$6
-			AND asset_status='ACTIVE' FOR UPDATE`, expectedTableID, source.TenantID, source.ID, table.CatalogName, table.SchemaName, table.Name).Scan(&lockedID, &currentStructureHash)
+			AND asset_status='ACTIVE' FOR UPDATE`, expectedTableID, source.TenantID, source.ID, table.CatalogName, table.SchemaName, table.Name).
+			Scan(&lockedID, &currentStructureHash, &storedTableHash, &lastEnrichedHash,
+				&current.CatalogName, &current.SchemaName, &current.Name, &current.Type, &current.SourceComment, &primaryKeys, &constraints, &indexes)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
 		if err != nil {
 			return err
+		}
+		if err := json.Unmarshal(primaryKeys, &current.PrimaryKeyColumns); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(constraints, &current.Constraints); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(indexes, &current.Indexes); err != nil {
+			return err
+		}
+		currentTableHash, _, err := metadataTableHeaderHash(current)
+		if err != nil {
+			return err
+		}
+		if storedTableHash != "" {
+			currentTableHash = storedTableHash
 		}
 		// 只允许从入队基线推进，或接受另一执行者已写入同一目标结构；绝不把更新后的结构回退。
 		if currentStructureHash != expectedStructureHash && currentStructureHash != desiredStructureHash {
@@ -124,17 +150,98 @@ func (r *PostgresRepository) ApplyManagedMetadata(ctx context.Context, source So
 		if _, err := tx.Exec(ctx, `INSERT INTO platform.metadata_snapshots(tenant_id,data_source_id,snapshot_hash,snapshot_json) VALUES($1,$2,$3,$4)`, source.TenantID, source.ID, result.SnapshotHash, snapshot); err != nil {
 			return err
 		}
-		id, err = r.upsertMetadataTable(ctx, tx, source, table, watermark)
+		id, err := r.upsertMetadataTable(ctx, tx, source, table, watermark)
 		if err != nil {
 			return err
 		}
 		if id != lockedID || id != expectedTableID {
 			return errors.New("managed metadata table identity changed")
 		}
-		managed = true
+		// 迁移前已完成的表若表头没有变化，可在首次增量写入时安全补齐表头 marker。
+		if storedTableHash == "" && lastEnrichedHash != "" && lastEnrichedHash == currentStructureHash && currentTableHash == desiredTableHash {
+			if _, err := tx.Exec(ctx, `UPDATE platform.metadata_tables SET last_enriched_table_structure_hash=table_structure_hash WHERE id=$1`, id); err != nil {
+				return err
+			}
+		}
+		applied = ManagedMetadataApplyResult{TableID: id, Managed: true, PendingColumns: []MetadataCompletionColumn{}}
+		if err := tx.QueryRow(ctx, `SELECT last_enriched_table_structure_hash<>table_structure_hash FROM platform.metadata_tables WHERE id=$1`, id).Scan(&applied.TablePending); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `SELECT id::text,column_name FROM platform.metadata_columns
+			WHERE table_id=$1 AND asset_status='ACTIVE' AND last_enriched_structure_hash<>structure_hash
+			ORDER BY ordinal_position,id`, id)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var column MetadataCompletionColumn
+			if err := rows.Scan(&column.ID, &column.Name); err != nil {
+				return err
+			}
+			applied.PendingColumns = append(applied.PendingColumns, column)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if !applied.TablePending && len(applied.PendingColumns) == 0 {
+			if _, err := tx.Exec(ctx, `UPDATE platform.metadata_tables SET last_enriched_structure_hash=structure_hash WHERE id=$1`, id); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
-	return id, managed, err
+	return applied, err
+}
+
+// DeactivateManagedMetadata 处理权威发现快照中消失的源表，仅软停用 PostgreSQL 资产与字段。
+func (r *PostgresRepository) DeactivateManagedMetadata(ctx context.Context, source Source, selection TableSelection, observedAt time.Time) (bool, error) {
+	if selection.TableID == "" {
+		return false, nil
+	}
+	managed := false
+	err := database.WithTenantTx(ctx, r.pool, source.TenantID, func(tx pgx.Tx) error {
+		if err := validateMetadataSourceForWrite(ctx, tx, source); err != nil {
+			return err
+		}
+		var currentHash, status string
+		var lastSyncAt time.Time
+		var before []byte
+		err := tx.QueryRow(ctx, `SELECT structure_hash,asset_status::text,last_sync_at,to_jsonb(t) FROM platform.metadata_tables t
+			WHERE id=$1 AND tenant_id=$2 AND data_source_id=$3 AND catalog_name=$4 AND schema_name=$5 AND table_name=$6
+			FOR UPDATE`, selection.TableID, source.TenantID, source.ID, selection.CatalogName, selection.SchemaName, selection.TableName).
+			Scan(&currentHash, &status, &lastSyncAt, &before)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if status != "ACTIVE" {
+			return nil
+		}
+		if currentHash != selection.StructureHash {
+			return ErrMetadataRefreshSuperseded
+		}
+		// 旧发现任务不能覆盖随后写入的同结构资产；结构哈希相同不代表观察代次相同。
+		if lastSyncAt.After(observedAt) {
+			return ErrMetadataRefreshSuperseded
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.metadata_diffs(tenant_id,data_source_id,object_type,object_key,change_type,before_json)
+			VALUES($1,$2,'TABLE',$3,'REMOVED',$4)`, source.TenantID, source.ID, selection.SchemaName+"."+selection.TableName, before); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE platform.metadata_columns SET asset_status='INACTIVE',last_sync_at=$2 WHERE table_id=$1 AND asset_status='ACTIVE'`, selection.TableID, observedAt); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `UPDATE platform.metadata_tables SET asset_status='INACTIVE',last_sync_at=$2 WHERE id=$1 AND asset_status='ACTIVE'`, selection.TableID, observedAt)
+		if err != nil {
+			return err
+		}
+		managed = tag.RowsAffected() == 1
+		return nil
+	})
+	return managed, err
 }
 
 // validateMetadataSourceForWrite 在技术资产事务内锁定数据源生命周期，避免旧配置任务在暂停、删除或修改后继续写入。
@@ -190,6 +297,10 @@ func (r *PostgresRepository) upsertMetadataTable(ctx context.Context, tx pgx.Tx,
 	if err != nil {
 		return "", err
 	}
+	tableHash, _, err := metadataTableHeaderHash(table)
+	if err != nil {
+		return "", err
+	}
 	constraints, _ := json.Marshal(table.Constraints)
 	indexes, _ := json.Marshal(table.Indexes)
 	var id, oldHash, oldStatus string
@@ -205,10 +316,10 @@ func (r *PostgresRepository) upsertMetadataTable(ctx context.Context, tx pgx.Tx,
 	if oldStatus == "INACTIVE" && oldHash == hash {
 		change = "REACTIVATED"
 	}
-	err = tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(tenant_id,data_source_id,catalog_name,schema_name,table_name,table_type,source_comment,estimated_row_count,primary_key_columns,constraints_json,indexes_json,structure_hash,last_sync_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-		ON CONFLICT(tenant_id,data_source_id,catalog_name,schema_name,table_name) DO UPDATE SET table_type=EXCLUDED.table_type,source_comment=EXCLUDED.source_comment,estimated_row_count=EXCLUDED.estimated_row_count,primary_key_columns=EXCLUDED.primary_key_columns,constraints_json=EXCLUDED.constraints_json,indexes_json=EXCLUDED.indexes_json,structure_hash=EXCLUDED.structure_hash,metadata_version=CASE WHEN metadata_tables.structure_hash<>EXCLUDED.structure_hash THEN metadata_tables.metadata_version+1 ELSE metadata_tables.metadata_version END,management_status=CASE WHEN metadata_tables.asset_status='INACTIVE' THEN 'ENABLED' ELSE metadata_tables.management_status END,asset_status='ACTIVE',last_sync_at=EXCLUDED.last_sync_at
-		RETURNING id::text`, source.TenantID, source.ID, table.CatalogName, table.SchemaName, table.Name, table.Type, table.SourceComment, table.EstimatedRowCount, table.PrimaryKeyColumns, constraints, indexes, hash, watermark).Scan(&id)
+	err = tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(tenant_id,data_source_id,catalog_name,schema_name,table_name,table_type,source_comment,estimated_row_count,primary_key_columns,constraints_json,indexes_json,structure_hash,table_structure_hash,last_sync_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		ON CONFLICT(tenant_id,data_source_id,catalog_name,schema_name,table_name) DO UPDATE SET table_type=EXCLUDED.table_type,source_comment=EXCLUDED.source_comment,estimated_row_count=EXCLUDED.estimated_row_count,primary_key_columns=EXCLUDED.primary_key_columns,constraints_json=EXCLUDED.constraints_json,indexes_json=EXCLUDED.indexes_json,structure_hash=EXCLUDED.structure_hash,table_structure_hash=EXCLUDED.table_structure_hash,metadata_version=CASE WHEN metadata_tables.structure_hash<>EXCLUDED.structure_hash THEN metadata_tables.metadata_version+1 ELSE metadata_tables.metadata_version END,last_enriched_structure_hash=CASE WHEN metadata_tables.asset_status='INACTIVE' THEN '' ELSE metadata_tables.last_enriched_structure_hash END,last_enriched_table_structure_hash=CASE WHEN metadata_tables.asset_status='INACTIVE' THEN '' ELSE metadata_tables.last_enriched_table_structure_hash END,management_status=CASE WHEN metadata_tables.asset_status='INACTIVE' THEN 'ENABLED' ELSE metadata_tables.management_status END,asset_status='ACTIVE',last_sync_at=EXCLUDED.last_sync_at
+		RETURNING id::text`, source.TenantID, source.ID, table.CatalogName, table.SchemaName, table.Name, table.Type, table.SourceComment, table.EstimatedRowCount, table.PrimaryKeyColumns, constraints, indexes, hash, tableHash, watermark).Scan(&id)
 	if err != nil {
 		return "", err
 	}
@@ -253,7 +364,7 @@ func (r *PostgresRepository) upsertMetadataColumn(ctx context.Context, tx pgx.Tx
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO platform.metadata_columns(tenant_id,table_id,column_name,ordinal_position,source_comment,native_type,canonical_type,length,numeric_precision,numeric_scale,nullable,default_value,is_primary_key,is_foreign_key,is_unique,structure_hash,last_sync_at)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-		ON CONFLICT(tenant_id,table_id,column_name) DO UPDATE SET ordinal_position=EXCLUDED.ordinal_position,source_comment=EXCLUDED.source_comment,native_type=EXCLUDED.native_type,canonical_type=EXCLUDED.canonical_type,length=EXCLUDED.length,numeric_precision=EXCLUDED.numeric_precision,numeric_scale=EXCLUDED.numeric_scale,nullable=EXCLUDED.nullable,default_value=EXCLUDED.default_value,is_primary_key=EXCLUDED.is_primary_key,is_foreign_key=EXCLUDED.is_foreign_key,is_unique=EXCLUDED.is_unique,structure_hash=EXCLUDED.structure_hash,asset_status='ACTIVE',last_sync_at=EXCLUDED.last_sync_at`, source.TenantID, tableID, column.Name, column.OrdinalPosition, column.SourceComment, column.NativeType, column.CanonicalType, column.Length, column.Precision, column.Scale, column.Nullable, column.DefaultValue, column.PrimaryKey, column.ForeignKey, column.Unique, hash, watermark)
+		ON CONFLICT(tenant_id,table_id,column_name) DO UPDATE SET ordinal_position=EXCLUDED.ordinal_position,source_comment=EXCLUDED.source_comment,native_type=EXCLUDED.native_type,canonical_type=EXCLUDED.canonical_type,length=EXCLUDED.length,numeric_precision=EXCLUDED.numeric_precision,numeric_scale=EXCLUDED.numeric_scale,nullable=EXCLUDED.nullable,default_value=EXCLUDED.default_value,is_primary_key=EXCLUDED.is_primary_key,is_foreign_key=EXCLUDED.is_foreign_key,is_unique=EXCLUDED.is_unique,structure_hash=EXCLUDED.structure_hash,last_enriched_structure_hash=CASE WHEN metadata_columns.asset_status='INACTIVE' THEN '' ELSE metadata_columns.last_enriched_structure_hash END,asset_status='ACTIVE',last_sync_at=EXCLUDED.last_sync_at`, source.TenantID, tableID, column.Name, column.OrdinalPosition, column.SourceComment, column.NativeType, column.CanonicalType, column.Length, column.Precision, column.Scale, column.Nullable, column.DefaultValue, column.PrimaryKey, column.ForeignKey, column.Unique, hash, watermark)
 	if err != nil {
 		return err
 	}
@@ -287,6 +398,26 @@ func metadataTableHash(table MetadataTable) (string, []byte, error) {
 	// 估算行数会随统计信息波动，不应触发结构版本变化。
 	table.EstimatedRowCount = nil
 	return metadataHash(table)
+}
+
+// metadataTableHeaderHash 排除字段集合，独立识别表注释、主键、约束和索引等表级变化。
+func metadataTableHeaderHash(table MetadataTable) (string, []byte, error) {
+	table = normalizeMetadataTableCollections(table)
+	header := struct {
+		CatalogName       string               `json:"catalogName"`
+		SchemaName        string               `json:"schemaName"`
+		Name              string               `json:"name"`
+		Type              string               `json:"type"`
+		SourceComment     string               `json:"sourceComment"`
+		PrimaryKeyColumns []string             `json:"primaryKeyColumns"`
+		Constraints       []MetadataConstraint `json:"constraints"`
+		Indexes           []MetadataIndex      `json:"indexes"`
+	}{
+		CatalogName: table.CatalogName, SchemaName: table.SchemaName, Name: table.Name, Type: table.Type,
+		SourceComment: table.SourceComment, PrimaryKeyColumns: table.PrimaryKeyColumns,
+		Constraints: table.Constraints, Indexes: table.Indexes,
+	}
+	return metadataHash(header)
 }
 
 func normalizeMetadataTableCollections(table MetadataTable) MetadataTable {

@@ -5,30 +5,35 @@ import "sort"
 // outputSchema 按本次输入固定表 ID、字段 ID 集合和字段数量；
 // 无论上游是否声明遵守 Schema，ValidateOutput 仍是最终可信边界。
 func outputSchema(input CompletionInput) map[string]any {
-	table := valueSchema(false)
-	table["properties"].(map[string]any)["targetId"] = map[string]any{"type": "string", "const": input.Table.ID}
-
 	columnIDs := make([]string, 0, len(input.Columns))
 	for _, column := range input.Columns {
 		columnIDs = append(columnIDs, column.ID)
 	}
 	column := valueSchema(true)
+	// 仅表头变化时 columns 必须是空数组；空 enum 不符合 JSON Schema，因此无需再约束不可出现的 item。
 	if len(columnIDs) > 0 {
 		column["properties"].(map[string]any)["targetId"] = map[string]any{"type": "string", "enum": columnIDs}
 	}
 
+	required := []string{"schemaVersion", "columns"}
+	properties := map[string]any{
+		"schemaVersion": map[string]any{"type": "string", "const": SchemaVersion},
+		"columns": map[string]any{
+			"type": "array", "minItems": len(columnIDs), "maxItems": len(columnIDs),
+			"items": column,
+		},
+	}
+	if input.TargetTable {
+		table := valueSchema(false)
+		table["properties"].(map[string]any)["targetId"] = map[string]any{"type": "string", "const": input.Table.ID}
+		required = append(required, "table")
+		properties["table"] = table
+	}
 	return map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
-		"required":             []string{"schemaVersion", "table", "columns"},
-		"properties": map[string]any{
-			"schemaVersion": map[string]any{"type": "string", "const": SchemaVersion},
-			"table":         table,
-			"columns": map[string]any{
-				"type": "array", "minItems": len(columnIDs), "maxItems": len(columnIDs),
-				"items": column,
-			},
-		},
+		"required":             required,
+		"properties":           properties,
 	}
 }
 

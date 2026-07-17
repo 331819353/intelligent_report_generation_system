@@ -2,6 +2,7 @@ package datasource
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -16,6 +17,16 @@ type metadataJobRepo struct {
 	finished         bool
 	heartbeatStarted chan struct{}
 	heartbeatRelease chan struct{}
+}
+
+type countingMetadataJobConnector struct {
+	importConnector
+	sampleCalls int
+}
+
+func (c *countingMetadataJobConnector) Sample(context.Context, Source, MetadataTable, int) (SampleResult, error) {
+	c.sampleCalls++
+	return c.sample, nil
 }
 
 func (r *metadataJobRepo) EnqueueMetadataJob(_ context.Context, request metadataJobRequest) (MetadataJob, error) {
@@ -190,6 +201,169 @@ func TestIncrementalMetadataJobDoesNotTrustStaleLatestEnrichmentStatus(t *testin
 	}
 }
 
+func TestIncrementalMetadataJobCompletesOnlyChangedColumnsWithFilteredSamples(t *testing.T) {
+	table := MetadataTable{
+		SchemaName: "sales",
+		Name:       "orders",
+		Columns: []MetadataColumn{
+			{Name: "id", CanonicalType: "INTEGER"},
+			{Name: "email", CanonicalType: "STRING"},
+		},
+	}
+	source := Source{ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive, Config: map[string]any{"host": "db"}, SecretRef: "encrypted://source"}
+	sourceHash, _ := metadataJobSourceHash(source)
+	baseRepo := &repo{
+		source: source,
+		quota:  Quota{MaxDataSources: 10},
+		managedResult: ManagedMetadataApplyResult{
+			TableID: "table-1",
+			Managed: true,
+			PendingColumns: []MetadataCompletionColumn{
+				{ID: "column-email", Name: "email"},
+			},
+		},
+	}
+	connector := &countingMetadataJobConnector{importConnector: importConnector{
+		connector:  connector{kind: TypeMySQL},
+		discovered: SyncResult{Tables: []MetadataTable{table}},
+		sample: SampleResult{
+			Columns: []string{"id", "email"},
+			Rows:    [][]any{{1, "first@example.com"}, {2, "second@example.com"}},
+		},
+	}}
+	completer := &completingRecorder{}
+	jobs := &metadataJobRepo{
+		claim: &metadataJobClaim{MetadataJob: MetadataJob{ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobRefresh, Mode: MetadataRefreshIncremental}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
+		items: []metadataJobItem{{ID: "item-1", SchemaName: "sales", TableName: "orders", TableID: "table-1", PreviousStructureHash: "previous-structure", Status: "QUEUED"}},
+	}
+	service := NewService(baseRepo, connector)
+	service.SetTableCompleter(completer)
+	service.SetMetadataJobRepository(jobs)
+
+	processed, err := service.ProcessNextMetadataJob(context.Background(), "tenant-1", "worker-1", time.Hour)
+	if err != nil || !processed {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	last := jobs.updates[len(jobs.updates)-1]
+	if last.Status != "SUCCEEDED" || connector.sampleCalls != 1 || len(completer.tableIDs) != 1 {
+		t.Fatalf("last=%#v sampleCalls=%d LLM=%#v", last, connector.sampleCalls, completer.tableIDs)
+	}
+	if completer.targetTables[0] || len(completer.targetColumnIDs[0]) != 1 || completer.targetColumnIDs[0][0] != "column-email" {
+		t.Fatalf("targetTable=%v targetColumnIDs=%#v", completer.targetTables[0], completer.targetColumnIDs[0])
+	}
+	if len(completer.rows) != 2 {
+		t.Fatalf("rows=%#v", completer.rows)
+	}
+	for _, row := range completer.rows {
+		if len(row) != 1 || row["email"] == nil {
+			t.Fatalf("sample row was not limited to the changed column: %#v", row)
+		}
+		if _, exists := row["id"]; exists {
+			t.Fatalf("unchanged column leaked into incremental sample: %#v", row)
+		}
+	}
+}
+
+func TestIncrementalMetadataJobWithNoPendingTargetsSkipsSamplingAndLLM(t *testing.T) {
+	table := MetadataTable{SchemaName: "sales", Name: "orders", Columns: []MetadataColumn{{Name: "id", CanonicalType: "INTEGER"}}}
+	source := Source{ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive, Config: map[string]any{"host": "db"}, SecretRef: "encrypted://source"}
+	sourceHash, _ := metadataJobSourceHash(source)
+	baseRepo := &repo{
+		source:        source,
+		quota:         Quota{MaxDataSources: 10},
+		managedResult: ManagedMetadataApplyResult{TableID: "table-1", Managed: true},
+	}
+	connector := &countingMetadataJobConnector{importConnector: importConnector{
+		connector:  connector{kind: TypeMySQL},
+		discovered: SyncResult{Tables: []MetadataTable{table}},
+		sample:     SampleResult{Columns: []string{"id"}, Rows: [][]any{{1}}},
+	}}
+	completer := &completingRecorder{}
+	jobs := &metadataJobRepo{
+		claim: &metadataJobClaim{MetadataJob: MetadataJob{ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobRefresh, Mode: MetadataRefreshIncremental}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
+		items: []metadataJobItem{{ID: "item-1", SchemaName: "sales", TableName: "orders", TableID: "table-1", PreviousStructureHash: "previous-structure", Status: "QUEUED"}},
+	}
+	service := NewService(baseRepo, connector)
+	service.SetTableCompleter(completer)
+	service.SetMetadataJobRepository(jobs)
+
+	processed, err := service.ProcessNextMetadataJob(context.Background(), "tenant-1", "worker-1", time.Hour)
+	if err != nil || !processed {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	last := jobs.updates[len(jobs.updates)-1]
+	if last.Status != "SUCCEEDED" || len(baseRepo.managedBatches) != 1 {
+		t.Fatalf("last=%#v managed=%d", last, len(baseRepo.managedBatches))
+	}
+	if connector.sampleCalls != 0 || len(completer.tableIDs) != 0 {
+		t.Fatalf("no-op incremental refresh sampled or invoked LLM: sampleCalls=%d LLM=%#v", connector.sampleCalls, completer.tableIDs)
+	}
+}
+
+func TestRefreshMetadataJobDeactivatesMissingSourceTableWithoutSamplingOrLLM(t *testing.T) {
+	source := Source{ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive, Config: map[string]any{"host": "db"}, SecretRef: "encrypted://source"}
+	sourceHash, _ := metadataJobSourceHash(source)
+	baseRepo := &repo{
+		source:           source,
+		quota:            Quota{MaxDataSources: 10},
+		deactivateResult: true,
+	}
+	connector := &countingMetadataJobConnector{importConnector: importConnector{
+		connector:  connector{kind: TypeMySQL},
+		discovered: SyncResult{Watermark: "2026-07-17T09:30:00Z", SnapshotHash: strings.Repeat("a", 64)},
+		sample:     SampleResult{Columns: []string{"id"}, Rows: [][]any{{1}}},
+	}}
+	completer := &completingRecorder{}
+	jobs := &metadataJobRepo{
+		claim: &metadataJobClaim{MetadataJob: MetadataJob{ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobRefresh, Mode: MetadataRefreshIncremental}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
+		items: []metadataJobItem{{
+			ID: "item-1", CatalogName: "warehouse", SchemaName: "sales", TableName: "orders",
+			TableID: "table-1", PreviousStructureHash: "previous-structure", Status: "QUEUED",
+		}},
+	}
+	service := NewService(baseRepo, connector)
+	service.SetTableCompleter(completer)
+	service.SetMetadataJobRepository(jobs)
+
+	processed, err := service.ProcessNextMetadataJob(context.Background(), "tenant-1", "worker-1", time.Hour)
+	if err != nil || !processed {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	last := jobs.updates[len(jobs.updates)-1]
+	if last.Status != "SUCCEEDED" || last.ErrorCode != "SOURCE_TABLE_REMOVED" {
+		t.Fatalf("last=%#v", last)
+	}
+	if len(baseRepo.deactivated) != 1 {
+		t.Fatalf("deactivated=%#v", baseRepo.deactivated)
+	}
+	selection := baseRepo.deactivated[0]
+	if selection.CatalogName != "warehouse" || selection.SchemaName != "sales" || selection.TableName != "orders" || selection.TableID != "table-1" || selection.StructureHash != "previous-structure" {
+		t.Fatalf("selection=%#v", selection)
+	}
+	if connector.sampleCalls != 0 || len(completer.tableIDs) != 0 || len(baseRepo.managedBatches) != 0 {
+		t.Fatalf("removed table sampled, persisted or invoked LLM: sampleCalls=%d managed=%d LLM=%#v", connector.sampleCalls, len(baseRepo.managedBatches), completer.tableIDs)
+	}
+}
+
+func TestAuthoritativeMetadataSnapshotRejectsPartialOrAmbiguousDiscovery(t *testing.T) {
+	valid := SyncResult{Assets: 0, Watermark: "2026-07-17T09:30:00Z", SnapshotHash: strings.Repeat("a", 64), Tables: []MetadataTable{}}
+	if observedAt, err := authoritativeMetadataSnapshot(valid); err != nil || observedAt.IsZero() {
+		t.Fatalf("valid snapshot observedAt=%v err=%v", observedAt, err)
+	}
+
+	tests := []SyncResult{
+		{Assets: 1, Watermark: valid.Watermark, SnapshotHash: valid.SnapshotHash, Tables: []MetadataTable{}},
+		{Assets: 0, Watermark: "invalid", SnapshotHash: valid.SnapshotHash, Tables: []MetadataTable{}},
+		{Assets: 0, Watermark: valid.Watermark, SnapshotHash: "short", Tables: []MetadataTable{}},
+		{Assets: 2, Watermark: valid.Watermark, SnapshotHash: valid.SnapshotHash, Tables: []MetadataTable{{SchemaName: "sales", Name: "orders"}, {SchemaName: "sales", Name: "orders"}}},
+	}
+	for index, snapshot := range tests {
+		if _, err := authoritativeMetadataSnapshot(snapshot); err == nil {
+			t.Fatalf("invalid snapshot %d was accepted: %#v", index, snapshot)
+		}
+	}
+}
+
 func TestRefreshMetadataJobSkipsAssetDeletedAfterQueue(t *testing.T) {
 	table := MetadataTable{SchemaName: "sales", Name: "orders", Columns: []MetadataColumn{{Name: "id", CanonicalType: "INTEGER"}}}
 	source := Source{ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive, Config: map[string]any{"host": "db"}, SecretRef: "encrypted://source"}
@@ -272,15 +446,37 @@ func TestImportMetadataJobKeepsReimportSemantics(t *testing.T) {
 }
 
 func TestFullMetadataRefreshReprocessesAlreadyEnrichedStructure(t *testing.T) {
-	table := MetadataTable{SchemaName: "sales", Name: "orders", Columns: []MetadataColumn{{Name: "id", CanonicalType: "INTEGER"}}}
+	table := MetadataTable{
+		SchemaName: "sales",
+		Name:       "orders",
+		Columns: []MetadataColumn{
+			{Name: "id", CanonicalType: "INTEGER"},
+			{Name: "email", CanonicalType: "STRING"},
+		},
+	}
 	structureHash, _, err := metadataTableHash(table)
 	if err != nil {
 		t.Fatal(err)
 	}
 	source := Source{ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive, Config: map[string]any{"host": "db"}, SecretRef: "encrypted://source"}
 	sourceHash, _ := metadataJobSourceHash(source)
-	baseRepo := &repo{source: source, quota: Quota{MaxDataSources: 10}}
-	connector := importConnector{connector: connector{kind: TypeMySQL}, discovered: SyncResult{Tables: []MetadataTable{table}}, sample: SampleResult{Columns: []string{"id"}, Rows: [][]any{{1}}}}
+	baseRepo := &repo{
+		source: source,
+		quota:  Quota{MaxDataSources: 10},
+		// FULL 模式必须忽略仓储返回的局部待完善字段，仍完整加工整张表。
+		managedResult: ManagedMetadataApplyResult{
+			TableID: "table-1",
+			Managed: true,
+			PendingColumns: []MetadataCompletionColumn{
+				{ID: "column-email", Name: "email"},
+			},
+		},
+	}
+	connector := &countingMetadataJobConnector{importConnector: importConnector{
+		connector:  connector{kind: TypeMySQL},
+		discovered: SyncResult{Tables: []MetadataTable{table}},
+		sample:     SampleResult{Columns: []string{"id", "email"}, Rows: [][]any{{1, "first@example.com"}}},
+	}}
 	completer := &completingRecorder{}
 	jobs := &metadataJobRepo{
 		claim:    &metadataJobClaim{MetadataJob: MetadataJob{ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobRefresh, Mode: MetadataRefreshFull}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
@@ -296,8 +492,14 @@ func TestFullMetadataRefreshReprocessesAlreadyEnrichedStructure(t *testing.T) {
 		t.Fatalf("processed=%v err=%v", processed, err)
 	}
 	last := jobs.updates[len(jobs.updates)-1]
-	if last.Status != "SUCCEEDED" || len(baseRepo.managedBatches) != 1 || len(completer.tableIDs) != 1 {
-		t.Fatalf("last=%#v managed=%d LLM=%#v", last, len(baseRepo.managedBatches), completer.tableIDs)
+	if last.Status != "SUCCEEDED" || len(baseRepo.managedBatches) != 1 || connector.sampleCalls != 1 || len(completer.tableIDs) != 1 {
+		t.Fatalf("last=%#v managed=%d sampleCalls=%d LLM=%#v", last, len(baseRepo.managedBatches), connector.sampleCalls, completer.tableIDs)
+	}
+	if !completer.targetTables[0] || completer.targetColumnIDs[0] != nil {
+		t.Fatalf("FULL refresh was narrowed: targetTable=%v targetColumnIDs=%#v", completer.targetTables[0], completer.targetColumnIDs[0])
+	}
+	if len(completer.rows) != 1 || len(completer.rows[0]) != 2 || completer.rows[0]["id"] == nil || completer.rows[0]["email"] == nil {
+		t.Fatalf("FULL refresh did not keep the complete sample: %#v", completer.rows)
 	}
 }
 

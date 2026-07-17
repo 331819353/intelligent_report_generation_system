@@ -14,6 +14,7 @@ import (
 var (
 	ErrNotFound            = errors.New("metadata AI resource not found")
 	ErrConflict            = errors.New("metadata AI resource conflict")
+	ErrInvalidTargetScope  = errors.New("metadata AI target scope is invalid")
 	ErrStructureChanged    = errors.New("metadata table structure changed during AI completion")
 	ErrProcessingLeaseLost = errors.New("metadata processing lease was lost")
 	ErrSourceChanged       = errors.New("metadata source changed during AI completion")
@@ -48,7 +49,7 @@ func NewService(store Store, provider Provider, timeout time.Duration, confidenc
 
 // Generate 创建任务、调用模型、校验结构化结果并持久化建议。
 func (s *Service) Generate(ctx context.Context, tenantID, actorID, tableID string) (GenerateResult, error) {
-	return s.generate(ctx, tenantID, actorID, tableID, nil, "", "", "", 0)
+	return s.generate(ctx, tenantID, actorID, tableID, nil, true, nil, "", "", "", 0)
 }
 
 // GenerateWithSamples 在不持久化样本行的前提下，将最多三行数据加入本次元数据完善输入。
@@ -56,19 +57,19 @@ func (s *Service) GenerateWithSamples(ctx context.Context, tenantID, actorID, ta
 	if len(samples) > 3 {
 		samples = samples[:3]
 	}
-	return s.generate(ctx, tenantID, actorID, tableID, samples, "", "", "", 0)
+	return s.generate(ctx, tenantID, actorID, tableID, samples, true, nil, "", "", "", 0)
 }
 
-// CompleteTable 使用 worker 已持久化的结构哈希作为并发栅栏，避免把旧结构结果应用到新结构。
-func (s *Service) CompleteTable(ctx context.Context, tenantID, actorID, tableID string, samples []map[string]any, expectedStructureHash, processingItemID, processingWorkerID string, processingSourceVersion int64) error {
+// CompleteTable 使用 worker 已持久化的结构哈希和目标范围作为并发栅栏；nil 字段集合表示全量活动字段。
+func (s *Service) CompleteTable(ctx context.Context, tenantID, actorID, tableID string, samples []map[string]any, targetTable bool, targetColumnIDs []string, expectedStructureHash, processingItemID, processingWorkerID string, processingSourceVersion int64) error {
 	if len(samples) > 3 {
 		samples = samples[:3]
 	}
-	_, err := s.generate(ctx, tenantID, actorID, tableID, samples, expectedStructureHash, processingItemID, processingWorkerID, processingSourceVersion)
+	_, err := s.generate(ctx, tenantID, actorID, tableID, samples, targetTable, targetColumnIDs, expectedStructureHash, processingItemID, processingWorkerID, processingSourceVersion)
 	return err
 }
 
-func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID string, samples []map[string]any, expectedStructureHash, processingItemID, processingWorkerID string, processingSourceVersion int64) (GenerateResult, error) {
+func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID string, samples []map[string]any, targetTable bool, targetColumnIDs []string, expectedStructureHash, processingItemID, processingWorkerID string, processingSourceVersion int64) (GenerateResult, error) {
 	if s.provider == nil || !s.provider.Configured() {
 		return GenerateResult{}, ErrProviderUnavailable
 	}
@@ -78,6 +79,10 @@ func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID strin
 	}
 	if expectedStructureHash != "" && input.StructureHash != expectedStructureHash {
 		return GenerateResult{}, ErrStructureChanged
+	}
+	input, err = scopeCompletionInput(input, targetTable, targetColumnIDs)
+	if err != nil {
+		return GenerateResult{}, err
 	}
 	input.SampleRows = samples
 	hash, err := inputHash(input)
@@ -143,6 +148,36 @@ func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID strin
 		return GenerateResult{Job: job, Suggestions: []Suggestion{}}, err
 	}
 	return GenerateResult{Job: job, Suggestions: suggestions}, nil
+}
+
+// scopeCompletionInput 按稳定字段 ID 收缩模型输出目标；顺序仍沿用技术字段顺序以保持输入哈希稳定。
+func scopeCompletionInput(input CompletionInput, targetTable bool, targetColumnIDs []string) (CompletionInput, error) {
+	input.TargetTable = targetTable
+	if targetColumnIDs == nil {
+		return input, nil
+	}
+	requested := make(map[string]struct{}, len(targetColumnIDs))
+	for _, id := range targetColumnIDs {
+		if id == "" {
+			return CompletionInput{}, ErrInvalidTargetScope
+		}
+		if _, exists := requested[id]; exists {
+			return CompletionInput{}, ErrInvalidTargetScope
+		}
+		requested[id] = struct{}{}
+	}
+	columns := make([]Target, 0, len(requested))
+	for _, column := range input.Columns {
+		if _, exists := requested[column.ID]; exists {
+			columns = append(columns, column)
+			delete(requested, column.ID)
+		}
+	}
+	if len(requested) != 0 || (!targetTable && len(columns) == 0) {
+		return CompletionInput{}, ErrInvalidTargetScope
+	}
+	input.Columns = columns
+	return input, nil
 }
 
 // ListSuggestions 按任务与状态筛选智能补全建议。

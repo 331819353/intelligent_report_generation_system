@@ -63,6 +63,36 @@ func TestOrchestratedProviderBuildsMinimalRequestAndParsesUsage(t *testing.T) {
 	}
 }
 
+func TestOutputSchemaSupportsColumnOnlyAndTableOnlyScopes(t *testing.T) {
+	input, _ := validCompletion()
+	input.TargetTable = false
+	input.Columns = input.Columns[:1]
+	columnOnly, err := json.Marshal(outputSchema(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(columnOnly, []byte(`"table"`)) || !bytes.Contains(columnOnly, []byte(`"enum":["column-1"]`)) {
+		t.Fatalf("字段级增量 Schema 范围错误: %s", columnOnly)
+	}
+
+	input.TargetTable = true
+	input.Columns = []Target{}
+	tableOnly, err := json.Marshal(outputSchema(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(tableOnly, []byte(`"table"`)) || bytes.Contains(tableOnly, []byte(`"enum":[]`)) {
+		t.Fatalf("仅表级 Schema 非法: %s", tableOnly)
+	}
+	request := aiplatform.ProviderRequest{
+		Messages:       []aiplatform.Message{{Role: aiplatform.MessageRoleUser, Parts: []aiplatform.ContentPart{{Type: aiplatform.ContentTypeText, Text: "{}"}}}},
+		ResponseSchema: aiplatform.JSONSchema{Name: "metadata_completion", Schema: tableOnly},
+	}
+	if err := aiplatform.ValidateProviderRequest(request); err != nil {
+		t.Fatalf("仅表级 Schema 不满足严格合同: %v", err)
+	}
+}
+
 func TestOrchestratedProviderRejectsUnknownStructuredFields(t *testing.T) {
 	input, _ := validCompletion()
 	invoker := &providerInvoker{configured: true, result: aiplatform.InvocationResult{ProviderResult: aiplatform.ProviderResult{

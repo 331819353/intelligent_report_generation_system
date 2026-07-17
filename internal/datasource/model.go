@@ -90,6 +90,16 @@ type TableSelection struct {
 	StructureHash          string `json:"-"`
 	LatestEnrichmentStatus string `json:"-"`
 }
+type MetadataCompletionColumn struct {
+	ID   string
+	Name string
+}
+type ManagedMetadataApplyResult struct {
+	TableID        string
+	Managed        bool
+	TablePending   bool
+	PendingColumns []MetadataCompletionColumn
+}
 type ImportedTable struct {
 	ID      string           `json:"id"`
 	Table   MetadataTable    `json:"table"`
@@ -160,7 +170,8 @@ type MetadataSampler interface {
 	Sample(context.Context, Source, MetadataTable, int) (SampleResult, error)
 }
 type TableCompleter interface {
-	CompleteTable(context.Context, string, string, string, []map[string]any, string, string, string, int64) error
+	// targetTable=false 且 targetColumnIDs 非空时只完善指定变化字段；nil 字段集合表示处理全部活动字段。
+	CompleteTable(context.Context, string, string, string, []map[string]any, bool, []string, string, string, string, int64) error
 }
 type Repository interface {
 	Count(context.Context, string) (int, error)

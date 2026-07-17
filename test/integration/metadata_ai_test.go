@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,7 +65,7 @@ func TestMetadataAICompletionAppliesOnlySafeSuggestions(t *testing.T) {
 		}{{"order_id", false, &highColumnID}, {"amount", false, &lowColumnID}, {"manual_note", true, &lockedColumnID}}
 		for position, column := range columns {
 			if err := tx.QueryRow(ctx, `INSERT INTO platform.metadata_columns(tenant_id,table_id,column_name,ordinal_position,native_type,canonical_type,nullable,structure_hash,last_sync_at,manual_locked,business_description)
-				VALUES($1,$2,$3,$4,'varchar','TEXT',false,$3||'-hash',now(),$5,CASE WHEN $5 THEN '人工说明' ELSE '' END) RETURNING id`, tenantID, tableID, column.name, position+1, column.locked).Scan(column.id); err != nil {
+				VALUES($1,$2,$3,$4,'varchar','TEXT',false,repeat('c',64),now(),$5,CASE WHEN $5 THEN '人工说明' ELSE '' END) RETURNING id`, tenantID, tableID, column.name, position+1, column.locked).Scan(column.id); err != nil {
 				return err
 			}
 		}
@@ -76,7 +77,7 @@ func TestMetadataAICompletionAppliesOnlySafeSuggestions(t *testing.T) {
 
 	output := metadataai.CompletionOutput{
 		SchemaVersion: metadataai.SchemaVersion,
-		Table:         metadataai.SuggestionValue{TargetID: tableID, BusinessName: "订单", BusinessDescription: "订单事实表", Tags: []string{"领域:运营", "作用:事实表"}, SensitivityLevel: "INTERNAL", Confidence: 0.95},
+		Table:         &metadataai.SuggestionValue{TargetID: tableID, BusinessName: "订单", BusinessDescription: "订单事实表", Tags: []string{"领域:运营", "作用:事实表"}, SensitivityLevel: "INTERNAL", Confidence: 0.95},
 		Columns: []metadataai.SuggestionValue{
 			{TargetID: highColumnID, BusinessName: "订单编号", BusinessDescription: "订单唯一编号", Tags: []string{"作用:主数据"}, SensitivityLevel: "INTERNAL", SemanticType: "IDENTIFIER", Confidence: 0.95},
 			{TargetID: lowColumnID, BusinessName: "订单金额", BusinessDescription: "订单金额", Tags: []string{"主题:经营分析"}, SensitivityLevel: "CONFIDENTIAL", SemanticType: "AMOUNT", Confidence: 0.6},
@@ -141,6 +142,24 @@ func TestMetadataAICompletionAppliesOnlySafeSuggestions(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// 待确认建议必须绑定生成时的字段结构；技术字段变化后不能套用旧建议。
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE platform.metadata_columns SET structure_hash=repeat('d',64) WHERE id=$1`, lowColumnID)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.DecideSuggestion(ctx, tenantID, actorID, statuses[lowColumnID].ID, "ACCEPT"); !errors.Is(err, metadataai.ErrConflict) {
+		t.Fatalf("stale pending suggestion err=%v", err)
+	}
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE platform.metadata_columns SET structure_hash=repeat('c',64) WHERE id=$1`, lowColumnID)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	accepted, err := service.DecideSuggestion(ctx, tenantID, actorID, statuses[lowColumnID].ID, "ACCEPT")
 	if err != nil || accepted.Status != "ACCEPTED" {
 		t.Fatalf("accept=%#v err=%v", accepted, err)
@@ -148,6 +167,86 @@ func TestMetadataAICompletionAppliesOnlySafeSuggestions(t *testing.T) {
 	rejected, err := service.DecideSuggestion(ctx, tenantID, actorID, statuses[lockedColumnID].ID, "REJECT")
 	if err != nil || rejected.Status != "REJECTED" {
 		t.Fatalf("reject=%#v err=%v", rejected, err)
+	}
+
+	// 成功幂等键在事务末尾冲突时，之前写入的建议、业务字段和完善 marker 必须整体回滚。
+	var processingJobID, processingItemID string
+	var tableVersionBefore, highVersionBefore, lowVersionBefore int64
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE platform.metadata_tables
+			SET last_enriched_structure_hash='',last_enriched_table_structure_hash='' WHERE id=$1`, tableID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE platform.metadata_columns SET last_enriched_structure_hash='' WHERE table_id=$1`, tableID); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT business_version FROM platform.metadata_tables WHERE id=$1`, tableID).Scan(&tableVersionBefore); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT business_version FROM platform.metadata_columns WHERE id=$1`, highColumnID).Scan(&highVersionBefore); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT business_version FROM platform.metadata_columns WHERE id=$1`, lowColumnID).Scan(&lowVersionBefore); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `INSERT INTO platform.data_source_metadata_jobs(
+			tenant_id,data_source_id,requested_by,kind,refresh_mode,source_config_hash,status,stage,total,lease_owner,lease_expires_at)
+			VALUES($1,$2,$3,'REFRESH','FULL',repeat('1',64),'RUNNING','LLM',1,'rollback-worker',now()+interval '2 minutes') RETURNING id::text`,
+			tenantID, sourceID, actorID).Scan(&processingJobID); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `INSERT INTO platform.data_source_metadata_job_items(
+			tenant_id,job_id,schema_name,table_name,table_id,previous_structure_hash,status,stage)
+			VALUES($1,$2,'sales','orders',$3,repeat('a',64),'RUNNING','LLM') RETURNING id::text`, tenantID, processingJobID, tableID).Scan(&processingItemID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO platform.ai_metadata_jobs(
+			tenant_id,table_id,metadata_structure_hash,data_source_metadata_job_item_id,provider,model_name,prompt_version,input_hash,status,created_by,completed_at)
+			VALUES($1,$2,repeat('a',64),$3,'integration','existing-success','rollback-fence',repeat('2',64),'SUCCEEDED',$4,now())`,
+			tenantID, tableID, processingItemID, actorID)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CompleteTable(ctx, tenantID, actorID, tableID, nil, true, nil, strings.Repeat("a", 64), processingItemID, "rollback-worker", 0); err == nil {
+		t.Fatal("expected success idempotency conflict")
+	}
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		var failedJobID, tableMarker, tableHeaderMarker string
+		var suggestionCount, completedColumnMarkers int
+		var tableVersionAfter, highVersionAfter, lowVersionAfter int64
+		if err := tx.QueryRow(ctx, `SELECT id::text FROM platform.ai_metadata_jobs
+			WHERE data_source_metadata_job_item_id=$1 AND status='FAILED' ORDER BY created_at DESC LIMIT 1`, processingItemID).Scan(&failedJobID); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.ai_metadata_suggestions WHERE job_id=$1`, failedJobID).Scan(&suggestionCount); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT business_version,last_enriched_structure_hash,last_enriched_table_structure_hash
+			FROM platform.metadata_tables WHERE id=$1`, tableID).Scan(&tableVersionAfter, &tableMarker, &tableHeaderMarker); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT business_version FROM platform.metadata_columns WHERE id=$1`, highColumnID).Scan(&highVersionAfter); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT business_version FROM platform.metadata_columns WHERE id=$1`, lowColumnID).Scan(&lowVersionAfter); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.metadata_columns
+			WHERE table_id=$1 AND last_enriched_structure_hash<>''`, tableID).Scan(&completedColumnMarkers); err != nil {
+			return err
+		}
+		if suggestionCount != 0 || tableMarker != "" || tableHeaderMarker != "" || completedColumnMarkers != 0 ||
+			tableVersionAfter != tableVersionBefore || highVersionAfter != highVersionBefore || lowVersionAfter != lowVersionBefore {
+			return fmt.Errorf("partial AI transaction escaped rollback: suggestions=%d markers=%q/%q/%d versions=%d/%d %d/%d %d/%d",
+				suggestionCount, tableMarker, tableHeaderMarker, completedColumnMarkers,
+				tableVersionBefore, tableVersionAfter, highVersionBefore, highVersionAfter, lowVersionBefore, lowVersionAfter)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	// 模型调用期间技术结构发生变化时，旧结果必须整体回滚且不能推进“已完善”结构标记。

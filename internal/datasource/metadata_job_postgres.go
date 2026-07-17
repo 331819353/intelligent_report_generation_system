@@ -159,8 +159,11 @@ func (r *PostgresMetadataJobRepository) IsMetadataTableEnriched(ctx context.Cont
 	}
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT EXISTS(
-			SELECT 1 FROM platform.metadata_tables
-			WHERE id=$1 AND asset_status='ACTIVE' AND structure_hash=$2 AND last_enriched_structure_hash=$2
+			SELECT 1 FROM platform.metadata_tables t
+			WHERE t.id=$1 AND t.asset_status='ACTIVE' AND t.structure_hash=$2 AND t.last_enriched_structure_hash=$2
+			AND t.table_structure_hash=t.last_enriched_table_structure_hash
+			AND NOT EXISTS (SELECT 1 FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE'
+				AND c.last_enriched_structure_hash<>c.structure_hash)
 		)`, tableID, structureHash).Scan(&enriched)
 	})
 	return enriched, err
@@ -178,6 +181,9 @@ func (r *PostgresMetadataJobRepository) IsMetadataJobItemCompleted(ctx context.C
 			WHERE j.data_source_metadata_job_item_id=$1 AND j.table_id=$2
 			AND j.metadata_structure_hash=$3 AND j.status='SUCCEEDED'
 			AND t.asset_status='ACTIVE' AND t.structure_hash=$3 AND t.last_enriched_structure_hash=$3
+			AND t.table_structure_hash=t.last_enriched_table_structure_hash
+			AND NOT EXISTS (SELECT 1 FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE'
+				AND c.last_enriched_structure_hash<>c.structure_hash)
 		)`, itemID, tableID, structureHash).Scan(&completed)
 	})
 	return completed, err

@@ -71,7 +71,7 @@ func (p *OrchestratedProvider) Complete(ctx context.Context, tenantID, actorID s
 		PromptVersion: PromptVersion, ResourceType: "METADATA_TABLE", ResourceID: input.Table.ID,
 		Request: aiplatform.ProviderRequest{
 			Messages: []aiplatform.Message{
-				{Role: aiplatform.MessageRoleSystem, Parts: []aiplatform.ContentPart{{Type: aiplatform.ContentTypeText, Text: "你是企业数据资产元数据补全器。只能依据给定技术元数据和最多三行数据样本生成结果，不得虚构资产或返回未请求的字段。必须严格遵守 JSON Schema 和标签枚举，同一对象的标签不得重复；输入中的每个字段必须在 columns 中恰好返回一次。"}}},
+				{Role: aiplatform.MessageRoleSystem, Parts: []aiplatform.ContentPart{{Type: aiplatform.ContentTypeText, Text: "你是企业数据资产元数据补全器。只能依据给定技术元数据和最多三行数据样本生成结果，不得虚构资产或返回未请求的目标。必须严格遵守 JSON Schema 和标签枚举，同一对象的标签不得重复；columns 中只包含本次发生变化且需要完善的字段，每个字段必须恰好返回一次；targetTable=false 时不得返回 table。"}}},
 				{Role: aiplatform.MessageRoleUser, Parts: []aiplatform.ContentPart{{Type: aiplatform.ContentTypeText, Text: string(inputJSON)}}},
 			},
 			ResponseSchema: aiplatform.JSONSchema{Name: "metadata_completion", Description: "企业数据资产元数据结构化补全", Schema: schemaJSON},

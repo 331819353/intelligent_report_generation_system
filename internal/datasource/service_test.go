@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 type repo struct {
@@ -18,6 +19,10 @@ type repo struct {
 	managedTableIDs  []string
 	managedMissing   bool
 	managedErr       error
+	managedResult    ManagedMetadataApplyResult
+	deactivated      []TableSelection
+	deactivateResult bool
+	deactivateErr    error
 	activeSelections []TableSelection
 }
 
@@ -32,16 +37,26 @@ func (r *repo) ApplySelectedMetadata(_ context.Context, _ Source, result SyncRes
 	r.selectedBatches = append(r.selectedBatches, result)
 	return r.selectedIDs, nil
 }
-func (r *repo) ApplyManagedMetadata(_ context.Context, _ Source, expectedTableID, _ string, result SyncResult) (string, bool, error) {
+func (r *repo) ApplyManagedMetadata(_ context.Context, _ Source, expectedTableID, _ string, result SyncResult) (ManagedMetadataApplyResult, error) {
 	r.managedBatches = append(r.managedBatches, result)
 	r.managedTableIDs = append(r.managedTableIDs, expectedTableID)
 	if r.managedErr != nil {
-		return "", false, r.managedErr
+		return ManagedMetadataApplyResult{}, r.managedErr
 	}
 	if r.managedMissing || expectedTableID == "" {
-		return "", false, nil
+		return ManagedMetadataApplyResult{}, nil
 	}
-	return expectedTableID, true, nil
+	if r.managedResult.TableID != "" || r.managedResult.Managed {
+		return r.managedResult, nil
+	}
+	return ManagedMetadataApplyResult{TableID: expectedTableID, Managed: true, TablePending: true}, nil
+}
+func (r *repo) DeactivateManagedMetadata(_ context.Context, _ Source, selection TableSelection, _ time.Time) (bool, error) {
+	r.deactivated = append(r.deactivated, selection)
+	if r.deactivateErr != nil {
+		return false, r.deactivateErr
+	}
+	return r.deactivateResult, nil
 }
 func (r *repo) ListActiveTableSelections(context.Context, string, string) ([]TableSelection, error) {
 	return r.activeSelections, nil
@@ -83,17 +98,21 @@ func (c importConnector) Sample(context.Context, Source, MetadataTable, int) (Sa
 }
 
 type completingRecorder struct {
-	tableID  string
-	tableIDs []string
-	rows     []map[string]any
-	hashes   []string
-	failIDs  map[string]error
+	tableID         string
+	tableIDs        []string
+	rows            []map[string]any
+	hashes          []string
+	targetTables    []bool
+	targetColumnIDs [][]string
+	failIDs         map[string]error
 }
 
-func (c *completingRecorder) CompleteTable(_ context.Context, _, _, tableID string, rows []map[string]any, structureHash, _, _ string, _ int64) error {
+func (c *completingRecorder) CompleteTable(_ context.Context, _, _, tableID string, rows []map[string]any, targetTable bool, targetColumnIDs []string, structureHash, _, _ string, _ int64) error {
 	c.tableID, c.rows = tableID, rows
 	c.tableIDs = append(c.tableIDs, tableID)
 	c.hashes = append(c.hashes, structureHash)
+	c.targetTables = append(c.targetTables, targetTable)
+	c.targetColumnIDs = append(c.targetColumnIDs, append([]string(nil), targetColumnIDs...))
 	if c.failIDs != nil {
 		return c.failIDs[tableID]
 	}
