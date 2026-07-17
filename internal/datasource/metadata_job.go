@@ -24,23 +24,33 @@ const (
 
 // MetadataJob 是页面轮询使用的批任务摘要；进度只来自已落库的逐表终态。
 type MetadataJob struct {
-	ID           string              `json:"id"`
-	DataSourceID string              `json:"dataSourceId"`
-	Kind         MetadataJobKind     `json:"kind"`
-	Mode         MetadataRefreshMode `json:"mode"`
-	Status       string              `json:"status"`
-	Stage        string              `json:"stage"`
-	Total        int                 `json:"total"`
-	Completed    int                 `json:"completed"`
-	Succeeded    int                 `json:"succeeded"`
-	Skipped      int                 `json:"skipped"`
-	Failed       int                 `json:"failed"`
-	CurrentTable string              `json:"currentTable"`
-	ErrorCode    string              `json:"errorCode,omitempty"`
-	ErrorMessage string              `json:"errorMessage,omitempty"`
-	CreatedAt    string              `json:"createdAt"`
-	StartedAt    string              `json:"startedAt,omitempty"`
-	CompletedAt  string              `json:"completedAt,omitempty"`
+	ID           string               `json:"id"`
+	DataSourceID string               `json:"dataSourceId"`
+	Kind         MetadataJobKind      `json:"kind"`
+	Mode         MetadataRefreshMode  `json:"mode"`
+	Status       string               `json:"status"`
+	Stage        string               `json:"stage"`
+	Total        int                  `json:"total"`
+	Completed    int                  `json:"completed"`
+	Succeeded    int                  `json:"succeeded"`
+	Skipped      int                  `json:"skipped"`
+	Failed       int                  `json:"failed"`
+	CurrentTable string               `json:"currentTable"`
+	ErrorCode    string               `json:"errorCode,omitempty"`
+	ErrorMessage string               `json:"errorMessage,omitempty"`
+	Failures     []MetadataJobFailure `json:"failures,omitempty"`
+	CreatedAt    string               `json:"createdAt"`
+	StartedAt    string               `json:"startedAt,omitempty"`
+	CompletedAt  string               `json:"completedAt,omitempty"`
+}
+
+// MetadataJobFailure 是页面可展示的逐表失败摘要，只包含任务项中已脱敏的错误信息。
+type MetadataJobFailure struct {
+	CatalogName  string `json:"catalogName,omitempty"`
+	SchemaName   string `json:"schemaName,omitempty"`
+	TableName    string `json:"tableName"`
+	ErrorCode    string `json:"errorCode,omitempty"`
+	ErrorMessage string `json:"errorMessage,omitempty"`
 }
 
 type metadataJobRequest struct {

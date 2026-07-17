@@ -119,6 +119,8 @@ func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID strin
 			code = "QUOTA_EXCEEDED"
 		case errors.Is(callErr, context.DeadlineExceeded) || errors.Is(callCtx.Err(), context.DeadlineExceeded):
 			code = "TIMEOUT"
+		case errors.Is(callErr, ErrInvalidOutput):
+			code = "INVALID_OUTPUT"
 		}
 		job, callErr = s.recordFailure(ctx, tenantID, actorID, job, code, callErr)
 		return GenerateResult{Job: job, Suggestions: []Suggestion{}}, callErr

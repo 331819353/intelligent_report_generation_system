@@ -76,7 +76,7 @@ Oracle 的非敏感连接选项放在 `config` 中：
 
 `FULL` 会重新采样并对目标范围内的全部活动表和活动字段执行完整 LLM 完善，不使用字段级未变化跳过规则。无论哪种模式，任务都会把模型结果合并到本次明确处理的目标范围，不能用局部响应覆盖其他已落库字段。
 
-任务状态可取 `QUEUED`、`RUNNING`、`SUCCEEDED`、`PARTIAL` 或 `FAILED`。查询响应返回 `total`、`completed`、`succeeded`、`skipped`、`failed`、`stage` 和 `currentTable`；`completed` 是成功、跳过和失败之和，页面进度条使用 `completed / total`，不按时间伪造进度。单表失败不会阻断后续表，响应和审计只返回稳定错误码与安全文案，不包含样本数据、连接器原始错误或模型正文。worker 使用租户 RLS 事务、数据库租约和独立心跳领取任务；AI 成功与任务项及结构哈希绑定，租约恢复可直接收口已提交结果，API 或页面关闭不会中止任务。
+任务状态可取 `QUEUED`、`RUNNING`、`SUCCEEDED`、`PARTIAL` 或 `FAILED`。查询响应返回 `total`、`completed`、`succeeded`、`skipped`、`failed`、`stage` 和 `currentTable`；存在失败项时还会返回可选的 `failures`，逐项包含库/Schema、表名、稳定错误码和安全文案。`completed` 是成功、跳过和失败之和，页面进度条使用 `completed / total`，不按时间伪造进度。单表失败不会阻断后续表，响应和审计不包含样本数据、连接器原始错误或模型正文。worker 使用租户 RLS 事务、数据库租约和独立心跳领取任务；AI 成功与任务项及结构哈希绑定，租约恢复可直接收口已提交结果，API 或页面关闭不会中止任务。
 
 数据源的修改、测试、暂停/恢复和删除操作管理连接本身；表资产的修改、字段映射、刷新、停用/恢复和删除操作管理 PostgreSQL 中的资产记录，两组生命周期相互独立。字段映射只允许修改业务名称、说明、标签、语义类型、敏感级别和人工锁定，不改写源库物理字段名或技术类型。
 

@@ -565,3 +565,22 @@ func TestMetadataJobHeartbeatStopsWithoutCancellingInflightPersistence(t *testin
 		t.Fatal("normal heartbeat shutdown cancelled the job context")
 	}
 }
+
+func TestFailMetadataJobItemKeepsActualFailureStage(t *testing.T) {
+	jobs := &metadataJobRepo{}
+	service := NewService(&repo{}, connector{kind: TypeMySQL})
+	service.SetMetadataJobRepository(jobs)
+	claim := &metadataJobClaim{MetadataJob: MetadataJob{ID: "job-1"}, TenantID: "tenant-1"}
+
+	err := service.failMetadataJobItem(context.Background(), claim, metadataJobItem{ID: "item-1", TableID: "table-1"}, "worker-1", time.Hour, "LLM", "LLM_COMPLETION_FAILED", "LLM 表结构完善失败")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs.updates) != 1 {
+		t.Fatalf("updates=%#v", jobs.updates)
+	}
+	update := jobs.updates[0]
+	if update.Status != "FAILED" || update.Stage != "LLM" || update.TableID != "table-1" || update.ErrorCode != "LLM_COMPLETION_FAILED" {
+		t.Fatalf("update=%#v", update)
+	}
+}

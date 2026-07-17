@@ -10,6 +10,7 @@ import {
   type DataSourceType,
   type DiscoveredTableRecord,
   type MetadataJob,
+  type MetadataJobFailure,
   type MetadataRefreshMode,
 } from '../lib/data-sources'
 
@@ -39,6 +40,8 @@ const metadataStageLabels: Record<string, string> = {
   QUEUED: '等待后台执行', DISCOVERY: '读取源库结构', DIFF: '比对结构变化', SAMPLE: '采集样本', PERSISTENCE: '保存技术元数据', LLM: 'LLM 完善', COMPLETE: '已完成', FAILED: '执行失败',
 }
 const metadataJobLabel = (job: MetadataJob) => job.kind === 'IMPORT' ? '新增数据表' : job.mode === 'INCREMENTAL' ? '增量刷新' : '全量刷新'
+const metadataJobFailureTable = (failure: MetadataJobFailure) => [failure.schemaName || failure.catalogName, failure.tableName].filter(Boolean).join('.')
+const metadataJobFailureMessage = (failure: MetadataJobFailure) => failure.errorMessage?.trim() || failure.errorCode?.trim() || '处理失败'
 const metadataJobCompletionNotice = (job: MetadataJob, title: string): Notice => {
   if (job.status === 'SUCCEEDED' && job.total === 0) return { tone: 'success', message: '当前没有可刷新的数据表资产' }
   if (job.status === 'SUCCEEDED') {
@@ -593,6 +596,9 @@ export function DataSourceCenterPage() {
       ? '已完成，无需处理数据表'
       : `已处理 ${visibleMetadataJob.completed} / ${visibleMetadataJob.total} 张，${metadataStageLabels[visibleMetadataJob.stage] || visibleMetadataJob.stage || '处理中'}${visibleMetadataJob.currentTable ? `，当前 ${visibleMetadataJob.currentTable}` : ''}`
     : ''
+  const visibleMetadataJobFailures = visibleMetadataJob && (visibleMetadataJob.status === 'FAILED' || visibleMetadataJob.status === 'PARTIAL')
+    ? visibleMetadataJob.failures || []
+    : []
   return (
     <AppShell title="数据源配置中心" eyebrow="工作栏" actions={<button className="primary-button" type="button" disabled={actionBusy} onClick={openCreate}>新建数据源</button>}>
       {notice && <div className={`data-source-toast ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'} aria-live="polite">
@@ -671,6 +677,9 @@ export function DataSourceCenterPage() {
             <progress aria-label="元数据任务进度" aria-valuetext={metadataProgressText} max={metadataProgressMax} value={metadataProgressValue} />
             <div className="data-source-job-counts" role="status" aria-live="polite"><span>已处理 {visibleMetadataJob.completed} / {visibleMetadataJob.total} 张</span><span className="success">成功 {visibleMetadataJob.succeeded}</span><span>跳过 {visibleMetadataJob.skipped}</span><span className={visibleMetadataJob.failed ? 'failed' : ''}>失败 {visibleMetadataJob.failed}</span>{visibleMetadataJob.currentTable && <span className="current">当前：{visibleMetadataJob.currentTable}</span>}</div>
             {(visibleMetadataJob.errorCode || visibleMetadataJob.errorMessage) && <p role="alert">{[visibleMetadataJob.errorCode, visibleMetadataJob.errorMessage].filter(Boolean).join(' · ')}</p>}
+            {visibleMetadataJobFailures.length > 0 && <ul className="data-source-job-failures" aria-label="逐表失败明细">
+              {visibleMetadataJobFailures.map((failure, index) => <li key={`${failure.catalogName || ''}:${failure.schemaName || ''}:${failure.tableName}:${failure.errorCode || ''}:${index}`}><strong>{metadataJobFailureTable(failure)}</strong><span>：{metadataJobFailureMessage(failure)}</span></li>)}
+            </ul>}
           </section>}
           <section className="data-source-structure" aria-label="表结构">
             <header><div><span className="eyebrow">元数据结构</span><h3>表与字段</h3></div><strong>{metadataTables.length}<small> 张表</small></strong></header>

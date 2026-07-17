@@ -100,6 +100,10 @@
 .data-source-job-counts .failed { color: #b42318; }
 .data-source-job-counts .current { margin-left: auto; color: #1d4ed8; font-weight: 700; }
 .data-source-job-progress p { margin: 0; color: #b42318; font-size: 11px; }
+.data-source-job-failures { display: grid; gap: 6px; margin: 0; padding: 10px 0 0; border-top: 1px solid #fecaca; color: #b42318; font-size: 11px; list-style: none; }
+.data-source-job-failures li { display: flex; align-items: baseline; min-width: 0; }
+.data-source-job-failures strong { flex: none; color: #7f1d1d; }
+.data-source-job-failures span { min-width: 0; overflow-wrap: anywhere; }
 .data-source-detail dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0; }
 .data-source-detail dl > div { min-width: 0; padding: 10px 12px; border-radius: 8px; background: #f8fafc; }
 .data-source-detail dt { color: var(--muted); font-size: 10px; }

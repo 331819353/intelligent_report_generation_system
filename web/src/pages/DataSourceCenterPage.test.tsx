@@ -275,6 +275,37 @@ test('恢复后台任务后展示真实进度并在终态刷新资产和消息',
   expect(tables).toHaveBeenCalledTimes(2)
 })
 
+test.each(['PARTIAL', 'FAILED'] as const)('%s 任务在进度卡内展示逐表安全失败原因', async status => {
+  vi.spyOn(dataSourceAPI, 'list').mockResolvedValue({ items: [source()] })
+  vi.spyOn(dataSourceAPI, 'tables').mockResolvedValue({ items: [metadataTable], total: 1 })
+  vi.mocked(dataSourceAPI.latestActiveMetadataJob).mockResolvedValue({ job: job({
+    id: `job-${status.toLowerCase()}`,
+    status,
+    stage: status === 'FAILED' ? 'FAILED' : 'COMPLETE',
+    total: 2,
+    completed: 2,
+    succeeded: status === 'PARTIAL' ? 1 : 0,
+    failed: status === 'PARTIAL' ? 1 : 2,
+    failures: [{
+      catalogName: 'sales',
+      schemaName: 'public',
+      tableName: 'orders',
+      errorCode: 'LLM_COMPLETION_FAILED',
+      errorMessage: 'LLM 表结构完善失败',
+    }],
+  }) })
+  const user = userEvent.setup()
+  renderPage()
+
+  await screen.findByText('销售业务库')
+  await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '查看' }))
+
+  const progressCard = await screen.findByRole('region', { name: '元数据后台任务' })
+  const failures = within(progressCard).getByRole('list', { name: '逐表失败明细' })
+  expect(failures).toHaveTextContent('public.orders：LLM 表结构完善失败')
+  expect(document.querySelector('.data-source-toast')).toBeNull()
+})
+
 test('关闭弹窗后轮询临时失败仍自动重试并展示最终结果', async () => {
   vi.spyOn(dataSourceAPI, 'list').mockResolvedValue({ items: [source()] })
   const tables = vi.spyOn(dataSourceAPI, 'tables').mockResolvedValue({ items: [metadataTable], total: 1 })

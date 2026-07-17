@@ -58,12 +58,38 @@ func (r *PostgresMetadataJobRepository) EnqueueMetadataJob(ctx context.Context, 
 
 func (r *PostgresMetadataJobRepository) GetMetadataJob(ctx context.Context, tenantID, sourceID, jobID string) (job MetadataJob, err error) {
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
-		return scanMetadataJob(tx.QueryRow(ctx, `SELECT `+metadataJobSelect+` FROM platform.data_source_metadata_jobs j WHERE j.id=$1 AND j.data_source_id=$2`, jobID, sourceID), &job)
+		if err := scanMetadataJob(tx.QueryRow(ctx, `SELECT `+metadataJobSelect+` FROM platform.data_source_metadata_jobs j WHERE j.id=$1 AND j.data_source_id=$2`, jobID, sourceID), &job); err != nil {
+			return err
+		}
+		if job.Failed == 0 {
+			return nil
+		}
+		rows, err := tx.Query(ctx, `SELECT catalog_name,schema_name,table_name,error_code,error_message
+			FROM platform.data_source_metadata_job_items
+			WHERE job_id=$1 AND status='FAILED'
+			ORDER BY created_at,id`, jobID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			failure, err := scanMetadataJobFailure(rows)
+			if err != nil {
+				return err
+			}
+			job.Failures = append(job.Failures, failure)
+		}
+		return rows.Err()
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MetadataJob{}, ErrMetadataJobNotFound
 	}
 	return job, err
+}
+
+func scanMetadataJobFailure(row rowScanner) (failure MetadataJobFailure, err error) {
+	err = row.Scan(&failure.CatalogName, &failure.SchemaName, &failure.TableName, &failure.ErrorCode, &failure.ErrorMessage)
+	return failure, err
 }
 
 func (r *PostgresMetadataJobRepository) LatestActiveMetadataJob(ctx context.Context, tenantID, sourceID string) (job *MetadataJob, err error) {

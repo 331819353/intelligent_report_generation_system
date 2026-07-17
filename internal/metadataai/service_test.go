@@ -157,6 +157,20 @@ func TestGenerateRejectsInvalidOutputBeforeFormalPersistence(t *testing.T) {
 	}
 }
 
+func TestGenerateRecordsProviderInvalidOutputAsInvalidOutput(t *testing.T) {
+	input, _ := validCompletion()
+	store := &serviceStore{input: input}
+	service := NewService(store, serviceProvider{err: ErrInvalidOutput}, time.Second, 0.8)
+
+	result, err := service.Generate(context.Background(), "tenant", "actor", "table-1")
+	if !errors.Is(err, ErrInvalidOutput) {
+		t.Fatalf("error=%v, want ErrInvalidOutput", err)
+	}
+	if store.saveCalled || store.failedCode != "INVALID_OUTPUT" || result.Job.Status != "FAILED" {
+		t.Fatalf("saveCalled=%v failedCode=%s result=%#v", store.saveCalled, store.failedCode, result)
+	}
+}
+
 func TestGenerateRecordsTimeoutWithoutSavingSuggestions(t *testing.T) {
 	input, _ := validCompletion()
 	store := &serviceStore{input: input}

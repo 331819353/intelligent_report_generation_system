@@ -524,7 +524,7 @@ func (s *Service) ensureMetadataJobSourceCurrent(ctx context.Context, claim *met
 
 func (s *Service) failMetadataJobItem(ctx context.Context, claim *metadataJobClaim, item metadataJobItem, workerID string, lease time.Duration, stage, code, message string) error {
 	return s.jobs.UpdateMetadataJobItem(ctx, claim.TenantID, claim.ID, item.ID, workerID, metadataJobItemUpdate{
-		Status: "FAILED", Stage: "FAILED", TableID: item.TableID, ErrorCode: code, ErrorMessage: message,
+		Status: "FAILED", Stage: stage, TableID: item.TableID, ErrorCode: code, ErrorMessage: message,
 	}, lease)
 }
 

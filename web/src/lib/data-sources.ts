@@ -67,6 +67,14 @@ export type MetadataRefreshMode = 'INCREMENTAL' | 'FULL'
 export type MetadataJobStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'PARTIAL' | 'FAILED'
 export type MetadataJobStage = 'QUEUED' | 'DISCOVERY' | 'DIFF' | 'SAMPLE' | 'PERSISTENCE' | 'LLM' | 'COMPLETE' | 'FAILED'
 
+export type MetadataJobFailure = {
+  catalogName?: string
+  schemaName?: string
+  tableName: string
+  errorCode?: string
+  errorMessage?: string
+}
+
 export type MetadataJob = {
   id: string
   dataSourceId: string
@@ -82,6 +90,7 @@ export type MetadataJob = {
   currentTable?: string
   errorCode?: string
   errorMessage?: string
+  failures?: MetadataJobFailure[]
   createdAt: string
   startedAt?: string
   completedAt?: string
