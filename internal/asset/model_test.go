@@ -23,3 +23,10 @@ func TestBusinessMetadataValidation(t *testing.T) {
 		t.Fatal("expected visibility validation error")
 	}
 }
+
+func TestColumnBusinessMetadataRejectsUnknownSemanticType(t *testing.T) {
+	metadata := BusinessMetadata{SensitivityLevel: "INTERNAL", SemanticType: "RAW_SQL", ExpectedVersion: 1}
+	if err := metadata.Validate(true); err == nil {
+		t.Fatal("unknown semantic type was accepted")
+	}
+}

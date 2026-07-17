@@ -36,7 +36,9 @@ type Target struct {
 }
 
 type CompletionInput struct {
-	SchemaVersion string           `json:"schemaVersion"`
+	SchemaVersion string `json:"schemaVersion"`
+	// StructureHash 只用于数据库并发栅栏，不发送给外部模型，也不混入提示词输入哈希。
+	StructureHash string           `json:"-"`
 	Table         Target           `json:"table"`
 	Columns       []Target         `json:"columns"`
 	SampleRows    []map[string]any `json:"sampleRows,omitempty"`
@@ -72,21 +74,25 @@ type ProviderResult struct {
 }
 
 type Job struct {
-	ID               string `json:"id"`
-	TableID          string `json:"tableId"`
-	Provider         string `json:"provider"`
-	Model            string `json:"model"`
-	ModelVersion     string `json:"modelVersion,omitempty"`
-	PromptVersion    string `json:"promptVersion"`
-	InputHash        string `json:"inputHash"`
-	Status           string `json:"status"`
-	ErrorCode        string `json:"errorCode,omitempty"`
-	PromptTokens     int    `json:"promptTokens"`
-	CompletionTokens int    `json:"completionTokens"`
-	TotalTokens      int    `json:"totalTokens"`
-	LatencyMS        int64  `json:"latencyMs"`
-	CreatedAt        string `json:"createdAt"`
-	CompletedAt      string `json:"completedAt,omitempty"`
+	ID                      string `json:"id"`
+	TableID                 string `json:"tableId"`
+	StructureHash           string `json:"metadataStructureHash"`
+	ProcessingItemID        string `json:"-"`
+	ProcessingWorkerID      string `json:"-"`
+	ProcessingSourceVersion int64  `json:"-"`
+	Provider                string `json:"provider"`
+	Model                   string `json:"model"`
+	ModelVersion            string `json:"modelVersion,omitempty"`
+	PromptVersion           string `json:"promptVersion"`
+	InputHash               string `json:"inputHash"`
+	Status                  string `json:"status"`
+	ErrorCode               string `json:"errorCode,omitempty"`
+	PromptTokens            int    `json:"promptTokens"`
+	CompletionTokens        int    `json:"completionTokens"`
+	TotalTokens             int    `json:"totalTokens"`
+	LatencyMS               int64  `json:"latencyMs"`
+	CreatedAt               string `json:"createdAt"`
+	CompletedAt             string `json:"completedAt,omitempty"`
 }
 
 type Suggestion struct {

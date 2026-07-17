@@ -72,6 +72,7 @@ func main() {
 		oracleConnector,
 		datasource.NewExcelConnector(excelManager),
 	)
+	dataSourceService.SetMetadataJobRepository(datasource.NewPostgresMetadataJobRepository(pool))
 	excelHandler := datasource.NewExcelHandler(authService, accessService, excelManager)
 	assetHandler := asset.NewHandler(authService, accessService, asset.NewRepository(pool))
 	modelProvider := aiplatform.NewOpenAICompatibleProvider(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel, &http.Client{Timeout: cfg.AIAttemptTimeout})

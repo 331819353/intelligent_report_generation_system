@@ -83,9 +83,12 @@ type SampleResult struct {
 	Rows    [][]any  `json:"rows"`
 }
 type TableSelection struct {
-	CatalogName string `json:"catalogName"`
-	SchemaName  string `json:"schemaName"`
-	TableName   string `json:"tableName"`
+	CatalogName            string `json:"catalogName"`
+	SchemaName             string `json:"schemaName"`
+	TableName              string `json:"tableName"`
+	TableID                string `json:"-"`
+	StructureHash          string `json:"-"`
+	LatestEnrichmentStatus string `json:"-"`
 }
 type ImportedTable struct {
 	ID      string           `json:"id"`
@@ -157,7 +160,7 @@ type MetadataSampler interface {
 	Sample(context.Context, Source, MetadataTable, int) (SampleResult, error)
 }
 type TableCompleter interface {
-	CompleteTable(context.Context, string, string, string, []map[string]any) error
+	CompleteTable(context.Context, string, string, string, []map[string]any, string, string, string, int64) error
 }
 type Repository interface {
 	Count(context.Context, string) (int, error)

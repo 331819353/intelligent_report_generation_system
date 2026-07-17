@@ -99,30 +99,64 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		if !decodeDS(w, r, &input) {
 			return
 		}
-		items, err := service.ImportTables(r.Context(), c.TenantID, c.Subject, r.PathValue("id"), input.Tables)
+		job, err := service.QueueImportTables(r.Context(), c.TenantID, c.Subject, r.PathValue("id"), input.Tables)
 		if err != nil {
-			slog.ErrorContext(r.Context(), "data source table import failed", "source_id", r.PathValue("id"), "error", err)
-			writeDSError(w, 502, "DATA_SOURCE_TABLE_IMPORT_FAILED", "failed to import and complete selected tables")
+			if errors.Is(err, ErrMetadataJobActive) {
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_METADATA_JOB_ACTIVE", "a metadata job is already active for this data source")
+				return
+			}
+			slog.ErrorContext(r.Context(), "data source table import enqueue failed", "source_id", r.PathValue("id"), "error", err)
+			writeDSError(w, 400, "DATA_SOURCE_TABLE_IMPORT_FAILED", "failed to submit selected tables for background processing")
 			return
 		}
-		auditDS(r, service, c.TenantID, c.Subject, "IMPORT_TABLE_ASSETS", r.PathValue("id"), map[string]any{"count": len(items)})
-		writeDSJSON(w, 201, map[string]any{"items": items, "total": len(items)})
+		w.Header().Set("Location", "/api/v1/data-sources/"+r.PathValue("id")+"/metadata-jobs/"+job.ID)
+		auditDS(r, service, c.TenantID, c.Subject, "QUEUE_IMPORT_TABLE_ASSETS", r.PathValue("id"), map[string]any{"jobId": job.ID, "count": len(input.Tables)})
+		writeDSJSON(w, http.StatusAccepted, job)
 	})))
 	mux.Handle("POST /api/v1/data-sources/{id}/tables/refresh", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
-		result, err := service.RefreshTables(r.Context(), c.TenantID, c.Subject, r.PathValue("id"))
-		if err != nil {
-			slog.ErrorContext(r.Context(), "data source table refresh failed", "source_id", r.PathValue("id"), "error", err)
-			writeDSError(w, 502, "DATA_SOURCE_TABLE_REFRESH_FAILED", "failed to refresh and complete managed tables")
+		var input struct {
+			Mode     MetadataRefreshMode `json:"mode"`
+			TableIDs []string            `json:"tableIds"`
+		}
+		if !decodeDS(w, r, &input) {
 			return
 		}
-		for _, item := range result.Items {
-			if item.Cause != nil {
-				slog.ErrorContext(r.Context(), "table asset refresh item failed", "source_id", r.PathValue("id"), "table", item.TableName, "stage", item.Stage, "code", item.Code, "error", item.Cause)
+		job, err := service.QueueRefreshTables(r.Context(), c.TenantID, c.Subject, r.PathValue("id"), input.Mode, input.TableIDs...)
+		if err != nil {
+			if errors.Is(err, ErrMetadataJobActive) {
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_METADATA_JOB_ACTIVE", "a metadata job is already active for this data source")
+				return
 			}
+			slog.ErrorContext(r.Context(), "data source table refresh enqueue failed", "source_id", r.PathValue("id"), "error", err)
+			writeDSError(w, 400, "DATA_SOURCE_TABLE_REFRESH_FAILED", "failed to submit managed tables for background refresh")
+			return
 		}
-		auditDS(r, service, c.TenantID, c.Subject, "REFRESH_TABLE_ASSETS", r.PathValue("id"), map[string]any{"status": result.Status, "total": result.Total, "succeeded": result.Succeeded, "technicalUpdated": result.TechnicalUpdated, "failed": result.Failed})
-		writeDSJSON(w, 200, result)
+		w.Header().Set("Location", "/api/v1/data-sources/"+r.PathValue("id")+"/metadata-jobs/"+job.ID)
+		auditDS(r, service, c.TenantID, c.Subject, "QUEUE_REFRESH_TABLE_ASSETS", r.PathValue("id"), map[string]any{"jobId": job.ID, "mode": job.Mode, "total": job.Total, "targeted": len(input.TableIDs) > 0})
+		writeDSJSON(w, http.StatusAccepted, job)
+	})))
+	mux.Handle("GET /api/v1/data-sources/{id}/metadata-jobs/latest-active", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		job, err := service.LatestActiveMetadataJob(r.Context(), c.TenantID, r.PathValue("id"))
+		if err != nil {
+			writeDSError(w, 500, "DATA_SOURCE_METADATA_JOB_QUERY_FAILED", "failed to query active metadata job")
+			return
+		}
+		writeDSJSON(w, 200, map[string]any{"job": job})
+	})))
+	mux.Handle("GET /api/v1/data-sources/{id}/metadata-jobs/{jobId}", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		job, err := service.GetMetadataJob(r.Context(), c.TenantID, r.PathValue("id"), r.PathValue("jobId"))
+		if errors.Is(err, ErrMetadataJobNotFound) {
+			writeDSError(w, 404, "DATA_SOURCE_METADATA_JOB_NOT_FOUND", "metadata job was not found")
+			return
+		}
+		if err != nil {
+			writeDSError(w, 500, "DATA_SOURCE_METADATA_JOB_QUERY_FAILED", "failed to query metadata job")
+			return
+		}
+		writeDSJSON(w, 200, job)
 	})))
 	action := func(run func(contextClaims, *http.Request, string) error) http.Handler {
 		return managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -14,12 +14,14 @@ type serviceStore struct {
 	failedCode string
 	saveCalled bool
 	saveErr    error
+	createdJob Job
 }
 
 func (s *serviceStore) LoadInput(context.Context, string, string) (CompletionInput, error) {
 	return s.input, nil
 }
 func (s *serviceStore) CreateJob(_ context.Context, _, _ string, job Job) (Job, error) {
+	s.createdJob = job
 	job.ID = "job-1"
 	return job, nil
 }
@@ -67,6 +69,7 @@ func (p serviceProvider) Complete(ctx context.Context, _, _ string, input Comple
 
 func TestGenerateWithSamplesForwardsAtMostThreeRowsToProvider(t *testing.T) {
 	input, output := validCompletion()
+	input.StructureHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	store := &serviceStore{input: input}
 	var captured CompletionInput
 	service := NewService(store, serviceProvider{output: output, input: &captured}, time.Second, 0.8)
@@ -77,6 +80,26 @@ func TestGenerateWithSamplesForwardsAtMostThreeRowsToProvider(t *testing.T) {
 	}
 	if len(captured.SampleRows) != 3 || captured.SampleRows[0]["id"] != 1 || captured.SampleRows[2]["id"] != 3 {
 		t.Fatalf("sample rows=%#v", captured.SampleRows)
+	}
+	if store.createdJob.StructureHash != input.StructureHash {
+		t.Fatalf("job structure hash=%q", store.createdJob.StructureHash)
+	}
+}
+
+func TestCompleteTableRejectsStaleExpectedStructureBeforeProviderCall(t *testing.T) {
+	input, output := validCompletion()
+	input.StructureHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	store := &serviceStore{input: input}
+	var captured CompletionInput
+	service := NewService(store, serviceProvider{output: output, input: &captured}, time.Second, 0.8)
+
+	err := service.CompleteTable(context.Background(), "tenant", "actor", "table-1", nil,
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "item-1", "worker-1", 1)
+	if !errors.Is(err, ErrStructureChanged) {
+		t.Fatalf("error=%v", err)
+	}
+	if store.createdJob.TableID != "" || captured.Table.ID != "" {
+		t.Fatal("stale structure reached job creation or provider")
 	}
 }
 

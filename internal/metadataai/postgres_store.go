@@ -21,9 +21,9 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore
 func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string) (input CompletionInput, err error) {
 	input.SchemaVersion = SchemaVersion
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		err := tx.QueryRow(ctx, `SELECT id::text,table_name,source_comment,business_name,business_description,tags,sensitivity_level::text,manual_locked,business_version
+		err := tx.QueryRow(ctx, `SELECT id::text,structure_hash,table_name,source_comment,business_name,business_description,tags,sensitivity_level::text,manual_locked,business_version
 			FROM platform.metadata_tables WHERE id=$1 AND asset_status='ACTIVE'`, tableID).
-			Scan(&input.Table.ID, &input.Table.Name, &input.Table.SourceComment, &input.Table.CurrentBusinessName, &input.Table.CurrentDescription, &input.Table.CurrentTags, &input.Table.CurrentSensitivity, &input.Table.ManualLocked, &input.Table.BusinessVersion)
+			Scan(&input.Table.ID, &input.StructureHash, &input.Table.Name, &input.Table.SourceComment, &input.Table.CurrentBusinessName, &input.Table.CurrentDescription, &input.Table.CurrentTags, &input.Table.CurrentSensitivity, &input.Table.ManualLocked, &input.Table.BusinessVersion)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -54,13 +54,13 @@ func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string)
 // CreateJob 创建运行中任务，并在同一事务内记录启动审计。
 func (s *PostgresStore) CreateJob(ctx context.Context, tenantID, actorID string, job Job) (Job, error) {
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.ai_metadata_jobs(tenant_id,table_id,provider,model_name,prompt_version,input_hash,status,created_by)
-			VALUES($1,$2,$3,$4,$5,$6,'RUNNING',$7) RETURNING id::text,created_at::text`, tenantID, job.TableID, job.Provider, job.Model, job.PromptVersion, job.InputHash, actorID).
+		if err := tx.QueryRow(ctx, `INSERT INTO platform.ai_metadata_jobs(tenant_id,table_id,metadata_structure_hash,data_source_metadata_job_item_id,provider,model_name,prompt_version,input_hash,status,created_by)
+			VALUES($1,$2,$3,NULLIF($4,'')::uuid,$5,$6,$7,$8,'RUNNING',$9) RETURNING id::text,created_at::text`, tenantID, job.TableID, job.StructureHash, job.ProcessingItemID, job.Provider, job.Model, job.PromptVersion, job.InputHash, actorID).
 			Scan(&job.ID, &job.CreatedAt); err != nil {
 			return err
 		}
 		return insertAudit(ctx, tx, tenantID, actorID, "START_METADATA_AI_COMPLETION", "AI_METADATA_JOB", job.ID, "SUCCESS", map[string]any{
-			"tableId": job.TableID, "provider": job.Provider, "model": job.Model, "promptVersion": job.PromptVersion, "inputHash": job.InputHash,
+			"tableId": job.TableID, "metadataStructureHash": job.StructureHash, "processingItemId": job.ProcessingItemID, "provider": job.Provider, "model": job.Model, "promptVersion": job.PromptVersion, "inputHash": job.InputHash,
 		})
 	})
 	return job, err
@@ -94,6 +94,45 @@ func (s *PostgresStore) SaveResult(ctx context.Context, tenantID, actorID string
 	}
 	suggestions := []Suggestion{}
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		if job.ProcessingItemID != "" {
+			// 迟到的旧 worker 即使模型忽略取消，也不能在租约转移后提交建议或占用成功幂等键。
+			var valid bool
+			err := tx.QueryRow(ctx, `SELECT true FROM platform.data_source_metadata_job_items i
+				JOIN platform.data_source_metadata_jobs j ON j.id=i.job_id AND j.tenant_id=i.tenant_id
+				WHERE i.id=$1 AND i.status='RUNNING' AND j.status='RUNNING'
+				AND j.lease_owner=$2 AND j.lease_expires_at>now()
+				FOR UPDATE OF i,j`, job.ProcessingItemID, job.ProcessingWorkerID).Scan(&valid)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrProcessingLeaseLost
+			}
+			if err != nil {
+				return err
+			}
+		}
+		// 锁定当前技术结构直到建议与成功标记提交，防止并发刷新后误应用旧模型结果。
+		var currentStructureHash string
+		query := `SELECT t.structure_hash FROM platform.metadata_tables t
+			WHERE t.id=$1 AND t.asset_status='ACTIVE' FOR UPDATE OF t`
+		args := []any{job.TableID}
+		if job.ProcessingItemID != "" {
+			query = `SELECT t.structure_hash FROM platform.metadata_tables t
+				JOIN platform.data_sources d ON d.id=t.data_source_id AND d.tenant_id=t.tenant_id
+				WHERE t.id=$1 AND t.asset_status='ACTIVE' AND d.status='ACTIVE' AND d.deleted_at IS NULL
+				AND ($2::bigint=0 OR d.version=$2) FOR UPDATE OF t,d`
+			args = append(args, job.ProcessingSourceVersion)
+		}
+		if err := tx.QueryRow(ctx, query, args...).Scan(&currentStructureHash); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				if job.ProcessingItemID != "" {
+					return ErrSourceChanged
+				}
+				return ErrStructureChanged
+			}
+			return err
+		}
+		if job.StructureHash == "" || input.StructureHash != job.StructureHash || currentStructureHash != job.StructureHash {
+			return ErrStructureChanged
+		}
 		values := make([]struct {
 			target Target
 			value  SuggestionValue
@@ -125,6 +164,15 @@ func (s *PostgresStore) SaveResult(ctx context.Context, tenantID, actorID string
 				pending++
 			}
 			suggestions = append(suggestions, suggestion)
+		}
+		// 该字段是后台任务恢复的幂等凭据：只有所有建议持久化成功后才推进。
+		tag, err := tx.Exec(ctx, `UPDATE platform.metadata_tables SET last_enriched_structure_hash=$1
+			WHERE id=$2 AND structure_hash=$1 AND asset_status='ACTIVE'`, job.StructureHash, job.TableID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return ErrStructureChanged
 		}
 		job.Status = "SUCCEEDED"
 		job.ErrorCode = ""

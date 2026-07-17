@@ -177,7 +177,7 @@ func cleanupTenant(pool *pgxpool.Pool, tenantID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
-		for _, table := range []string{"ai_metadata_suggestions", "ai_metadata_jobs", "asset_dependencies", "metadata_diffs", "metadata_snapshots", "metadata_columns", "metadata_tables", "data_sources", "object_permissions", "auth_sessions", "audit_logs", "users", "roles", "permissions", "data_row_policies", "data_column_policies"} {
+		for _, table := range []string{"data_source_metadata_job_items", "data_source_metadata_jobs", "ai_metadata_suggestions", "ai_metadata_jobs", "asset_dependencies", "metadata_diffs", "metadata_snapshots", "metadata_columns", "metadata_tables", "data_sources", "object_permissions", "auth_sessions", "audit_logs", "users", "roles", "permissions", "data_row_policies", "data_column_policies"} {
 			if _, err := tx.Exec(ctx, "DELETE FROM platform."+table+" WHERE tenant_id=$1", tenantID); err != nil {
 				return err
 			}

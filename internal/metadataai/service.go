@@ -12,8 +12,11 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("metadata AI resource not found")
-	ErrConflict = errors.New("metadata AI resource conflict")
+	ErrNotFound            = errors.New("metadata AI resource not found")
+	ErrConflict            = errors.New("metadata AI resource conflict")
+	ErrStructureChanged    = errors.New("metadata table structure changed during AI completion")
+	ErrProcessingLeaseLost = errors.New("metadata processing lease was lost")
+	ErrSourceChanged       = errors.New("metadata source changed during AI completion")
 )
 
 type Store interface {
@@ -45,7 +48,7 @@ func NewService(store Store, provider Provider, timeout time.Duration, confidenc
 
 // Generate 创建任务、调用模型、校验结构化结果并持久化建议。
 func (s *Service) Generate(ctx context.Context, tenantID, actorID, tableID string) (GenerateResult, error) {
-	return s.generate(ctx, tenantID, actorID, tableID, nil)
+	return s.generate(ctx, tenantID, actorID, tableID, nil, "", "", "", 0)
 }
 
 // GenerateWithSamples 在不持久化样本行的前提下，将最多三行数据加入本次元数据完善输入。
@@ -53,16 +56,19 @@ func (s *Service) GenerateWithSamples(ctx context.Context, tenantID, actorID, ta
 	if len(samples) > 3 {
 		samples = samples[:3]
 	}
-	return s.generate(ctx, tenantID, actorID, tableID, samples)
+	return s.generate(ctx, tenantID, actorID, tableID, samples, "", "", "", 0)
 }
 
-// CompleteTable 实现数据源导入流程所需的最小完善接口。
-func (s *Service) CompleteTable(ctx context.Context, tenantID, actorID, tableID string, samples []map[string]any) error {
-	_, err := s.GenerateWithSamples(ctx, tenantID, actorID, tableID, samples)
+// CompleteTable 使用 worker 已持久化的结构哈希作为并发栅栏，避免把旧结构结果应用到新结构。
+func (s *Service) CompleteTable(ctx context.Context, tenantID, actorID, tableID string, samples []map[string]any, expectedStructureHash, processingItemID, processingWorkerID string, processingSourceVersion int64) error {
+	if len(samples) > 3 {
+		samples = samples[:3]
+	}
+	_, err := s.generate(ctx, tenantID, actorID, tableID, samples, expectedStructureHash, processingItemID, processingWorkerID, processingSourceVersion)
 	return err
 }
 
-func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID string, samples []map[string]any) (GenerateResult, error) {
+func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID string, samples []map[string]any, expectedStructureHash, processingItemID, processingWorkerID string, processingSourceVersion int64) (GenerateResult, error) {
 	if s.provider == nil || !s.provider.Configured() {
 		return GenerateResult{}, ErrProviderUnavailable
 	}
@@ -70,18 +76,25 @@ func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID strin
 	if err != nil {
 		return GenerateResult{}, err
 	}
+	if expectedStructureHash != "" && input.StructureHash != expectedStructureHash {
+		return GenerateResult{}, ErrStructureChanged
+	}
 	input.SampleRows = samples
 	hash, err := inputHash(input)
 	if err != nil {
 		return GenerateResult{}, err
 	}
 	job, err := s.store.CreateJob(ctx, tenantID, actorID, Job{
-		TableID:       tableID,
-		Provider:      s.provider.Name(),
-		Model:         s.provider.Model(),
-		PromptVersion: PromptVersion,
-		InputHash:     hash,
-		Status:        "RUNNING",
+		TableID:                 tableID,
+		StructureHash:           input.StructureHash,
+		ProcessingItemID:        processingItemID,
+		ProcessingWorkerID:      processingWorkerID,
+		ProcessingSourceVersion: processingSourceVersion,
+		Provider:                s.provider.Name(),
+		Model:                   s.provider.Model(),
+		PromptVersion:           PromptVersion,
+		InputHash:               hash,
+		Status:                  "RUNNING",
 	})
 	if err != nil {
 		return GenerateResult{}, err
@@ -118,7 +131,15 @@ func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID strin
 	}
 	job, suggestions, err := s.store.SaveResult(ctx, tenantID, actorID, job, input, providerResult, s.threshold)
 	if err != nil {
-		job, err = s.recordFailure(ctx, tenantID, actorID, job, "PERSISTENCE_ERROR", err)
+		code := "PERSISTENCE_ERROR"
+		if errors.Is(err, ErrStructureChanged) {
+			code = "STRUCTURE_CHANGED"
+		} else if errors.Is(err, ErrProcessingLeaseLost) {
+			code = "PROCESSING_LEASE_LOST"
+		} else if errors.Is(err, ErrSourceChanged) {
+			code = "SOURCE_CHANGED"
+		}
+		job, err = s.recordFailure(ctx, tenantID, actorID, job, code, err)
 		return GenerateResult{Job: job, Suggestions: []Suggestion{}}, err
 	}
 	return GenerateResult{Job: job, Suggestions: suggestions}, nil

@@ -46,8 +46,10 @@ Oracle 的非敏感连接选项放在 `config` 中：
 - `POST /api/v1/data-sources/{id}/test`：测试连接，成功后变为 `ACTIVE`。
 - `POST /api/v1/data-sources/{id}/sync`：同步元数据摘要。
 - `GET /api/v1/data-sources/{id}/tables/discovery`：只读取源库中当前可见的表清单，不创建资产。
-- `POST /api/v1/data-sources/{id}/tables/import`：导入用户选择的表资产。
-- `POST /api/v1/data-sources/{id}/tables/refresh`：刷新全部已纳管表的技术结构并重新执行 LLM 完善。
+- `POST /api/v1/data-sources/{id}/tables/import`：把用户选择的表提交为后台采样与完善任务，返回 `202 Accepted`。
+- `POST /api/v1/data-sources/{id}/tables/refresh`：把已纳管表提交为增量或全量后台刷新任务，返回 `202 Accepted`；可传 `tableIds` 仅刷新指定活动表，省略时刷新全部已纳管表。
+- `GET /api/v1/data-sources/{id}/metadata-jobs/{jobId}`：查询后台任务真实进度。
+- `GET /api/v1/data-sources/{id}/metadata-jobs/latest-active`：恢复该数据源最近的活动任务；无任务时返回 `{"job":null}`。
 - `POST /api/v1/data-sources/{id}/enable`：恢复已暂停数据源。
 - `POST /api/v1/data-sources/{id}/disable`：暂停运行中数据源。
 - `DELETE /api/v1/data-sources/{id}`：逻辑删除。
@@ -66,11 +68,13 @@ Oracle 的非敏感连接选项放在 `config` 中：
 }
 ```
 
-服务端只导入本次选中的表，采集其技术结构和最多三行样本，调用已配置的 LLM 完善业务元数据，并将最终表资产保存到 PostgreSQL。样本行仅用于本次模型请求，不写入元数据资产表。刷新单表结构复用同一流程；配置中心只展示至少有一次元数据完善成功记录的活动资产，因此已有资产本次刷新失败时仍保留旧业务元数据和可见性。
+接口只持久化批任务和选中的表键，立即返回任务摘要及 `Location`；worker 在请求之外采集技术结构和最多三行样本，调用已配置的 LLM 完善业务元数据，并将最终表资产保存到 PostgreSQL。样本行只在 worker 内存和本次模型请求中短暂存在，不写入任务表或元数据资产表。刷新单表结构复用同一后台流程；配置中心只展示当前技术结构已经完成元数据完善的活动资产，旧结构的成功记录不会让未完善的新结构提前进入清单。
 
-全量刷新只处理 PostgreSQL 中已纳管且未删除的表，不会自动导入源库中的其他表，也不会复活已删除资产。每张表独立执行“采样 → 技术结构更新 → LLM 完善”，单表失败不会阻断后续表。响应的 `status` 可取 `SUCCEEDED`、`PARTIAL` 或 `FAILED`，并返回 `succeeded`、`technicalUpdated`、`failed` 计数和逐表阶段码；响应和审计均不包含样本数据或模型底层错误。
+刷新请求体为 `{"mode":"INCREMENTAL"}` 或 `{"mode":"FULL"}`，缺省语义为增量。两种模式都只处理 PostgreSQL 中已纳管且未删除的表，不会自动导入源库中的其他表，也不会复活已删除资产。增量模式先比较排除估算行数后的结构哈希：结构未变化且最近一次完善成功时记为 `SKIPPED`，不采样、不调用 LLM；结构变化或上次完善失败时继续加工。全量模式始终重新采样并完善。
 
-数据源的修改、测试、暂停/恢复和删除操作管理连接本身；表资产的修改、刷新、停用/恢复和删除操作管理 PostgreSQL 中的资产记录，两组生命周期相互独立。
+任务状态可取 `QUEUED`、`RUNNING`、`SUCCEEDED`、`PARTIAL` 或 `FAILED`。查询响应返回 `total`、`completed`、`succeeded`、`skipped`、`failed`、`stage` 和 `currentTable`；`completed` 是成功、跳过和失败之和，页面进度条使用 `completed / total`，不按时间伪造进度。单表失败不会阻断后续表，响应和审计只返回稳定错误码与安全文案，不包含样本数据、连接器原始错误或模型正文。worker 使用租户 RLS 事务、数据库租约和独立心跳领取任务；AI 成功与任务项及结构哈希绑定，租约恢复可直接收口已提交结果，API 或页面关闭不会中止任务。
+
+数据源的修改、测试、暂停/恢复和删除操作管理连接本身；表资产的修改、字段映射、刷新、停用/恢复和删除操作管理 PostgreSQL 中的资产记录，两组生命周期相互独立。字段映射只允许修改业务名称、说明、标签、语义类型、敏感级别和人工锁定，不改写源库物理字段名或技术类型。
 
 Python Connector 按数据源维护有界连接池，并同时执行每租户查询并发上限和服务进程全局上限。Go 核心从租户配额表下发限制，但不会向 Python 服务日志或响应传递明文凭证。
 

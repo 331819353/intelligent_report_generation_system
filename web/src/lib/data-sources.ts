@@ -63,13 +63,28 @@ export type DiscoveredTableRecord = {
   columns: Array<{ name: string; nativeType: string; canonicalType: string; nullable: boolean }>
 }
 
-export type DataSourceTableRefreshResult = {
-  status: 'SUCCEEDED' | 'PARTIAL' | 'FAILED'
+export type MetadataRefreshMode = 'INCREMENTAL' | 'FULL'
+export type MetadataJobStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'PARTIAL' | 'FAILED'
+export type MetadataJobStage = 'QUEUED' | 'DISCOVERY' | 'DIFF' | 'SAMPLE' | 'PERSISTENCE' | 'LLM' | 'COMPLETE' | 'FAILED'
+
+export type MetadataJob = {
+  id: string
+  dataSourceId: string
+  kind: 'IMPORT' | 'REFRESH'
+  mode: MetadataRefreshMode
+  status: MetadataJobStatus
+  stage: MetadataJobStage
   total: number
+  completed: number
   succeeded: number
-  technicalUpdated: number
+  skipped: number
   failed: number
-  items: Array<{ id?: string; tableName: string; status: 'SUCCEEDED' | 'FAILED'; stage: string; code?: string }>
+  currentTable?: string
+  errorCode?: string
+  errorMessage?: string
+  createdAt: string
+  startedAt?: string
+  completedAt?: string
 }
 
 export type DataSourceColumnRecord = {
@@ -77,11 +92,28 @@ export type DataSourceColumnRecord = {
   tableId: string
   columnName: string
   ordinalPosition: number
+  sourceComment: string
   nativeType: string
   canonicalType: string
   nullable: boolean
   businessName: string
+  businessDescription: string
+  tags: string[]
+  sensitivityLevel: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED'
+  semanticType: string
+  manualLocked: boolean
   assetStatus: string
+  businessVersion: number
+}
+
+export type DataSourceColumnBusinessMetadataInput = {
+  businessName: string
+  businessDescription: string
+  tags: string[]
+  sensitivityLevel: string
+  semanticType: string
+  manualLocked: boolean
+  expectedVersion: number
 }
 
 type DataSourceTablePage = {
@@ -120,11 +152,14 @@ export const dataSourceAPI = {
   test: (id: string) => apiRequest<DataSourceTestResult>(`/v1/data-sources/${encodeURIComponent(id)}/test`, { method: 'POST', body: '{}' }),
   sync: (id: string) => apiRequest<{ assets: number; snapshotHash: string }>(`/v1/data-sources/${encodeURIComponent(id)}/sync`, { method: 'POST', body: '{}' }),
   discoverTables: (id: string) => apiRequest<{ items: DiscoveredTableRecord[]; total: number }>(`/v1/data-sources/${encodeURIComponent(id)}/tables/discovery`, { cache: 'no-store' }),
-  importTables: (id: string, tables: Array<{ catalogName: string; schemaName: string; tableName: string }>) => apiRequest<{ items: Array<{ id: string }>; total: number }>(`/v1/data-sources/${encodeURIComponent(id)}/tables/import`, { method: 'POST', body: JSON.stringify({ tables }) }),
-  refreshTables: (id: string) => apiRequest<DataSourceTableRefreshResult>(`/v1/data-sources/${encodeURIComponent(id)}/tables/refresh`, { method: 'POST', body: '{}' }),
+  importTables: (id: string, tables: Array<{ catalogName: string; schemaName: string; tableName: string }>) => apiRequest<MetadataJob>(`/v1/data-sources/${encodeURIComponent(id)}/tables/import`, { method: 'POST', body: JSON.stringify({ tables }) }),
+  refreshTables: (id: string, mode: MetadataRefreshMode = 'INCREMENTAL', tableIds?: string[]) => apiRequest<MetadataJob>(`/v1/data-sources/${encodeURIComponent(id)}/tables/refresh`, { method: 'POST', body: JSON.stringify({ mode, ...(tableIds?.length ? { tableIds } : {}) }) }),
+  getMetadataJob: (sourceId: string, jobId: string) => apiRequest<MetadataJob>(`/v1/data-sources/${encodeURIComponent(sourceId)}/metadata-jobs/${encodeURIComponent(jobId)}`, { cache: 'no-store' }),
+  latestActiveMetadataJob: (sourceId: string) => apiRequest<{ job: MetadataJob | null }>(`/v1/data-sources/${encodeURIComponent(sourceId)}/metadata-jobs/latest-active`, { cache: 'no-store' }),
   tables: listAllTables,
   columns: (tableId: string) => apiRequest<{ items: DataSourceColumnRecord[] }>(`/v1/assets/tables/${encodeURIComponent(tableId)}/columns`, { cache: 'no-store' }),
   updateTable: (tableId: string, input: { businessName: string; businessDescription: string; tags: string[]; sensitivityLevel: string; visibility: string; manualLocked: boolean; expectedVersion: number }) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/business-metadata`, { method: 'PUT', body: JSON.stringify(input) }),
+  updateColumn: (columnId: string, input: DataSourceColumnBusinessMetadataInput) => apiRequest<DataSourceColumnRecord>(`/v1/assets/columns/${encodeURIComponent(columnId)}/business-metadata`, { method: 'PUT', body: JSON.stringify(input) }),
   disableTable: (tableId: string) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/disable`, { method: 'POST', body: '{}' }),
   enableTable: (tableId: string) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/enable`, { method: 'POST', body: '{}' }),
   deleteTable: (tableId: string) => apiRequest<void>(`/v1/assets/tables/${encodeURIComponent(tableId)}`, { method: 'DELETE' }),

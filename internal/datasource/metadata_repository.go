@@ -12,6 +12,11 @@ import (
 	"intelligent-report-generation-system/internal/platform/database"
 )
 
+var (
+	ErrMetadataRefreshSuperseded = errors.New("metadata refresh was superseded by a newer technical structure")
+	ErrMetadataSourceChanged     = errors.New("metadata source changed during background processing")
+)
+
 // ApplyMetadata 在单一租户事务中保存快照、更新当前资产并记录增删改差异。
 func (r *PostgresRepository) ApplyMetadata(ctx context.Context, source Source, result SyncResult) error {
 	watermark, err := time.Parse(time.RFC3339Nano, result.Watermark)
@@ -58,6 +63,9 @@ func (r *PostgresRepository) ApplySelectedMetadata(ctx context.Context, source S
 	}
 	ids = make(map[string]string, len(result.Tables))
 	err = database.WithTenantTx(ctx, r.pool, source.TenantID, func(tx pgx.Tx) error {
+		if err := validateMetadataSourceForWrite(ctx, tx, source); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO platform.metadata_snapshots(tenant_id,data_source_id,snapshot_hash,snapshot_json) VALUES($1,$2,$3,$4)`, source.TenantID, source.ID, result.SnapshotHash, snapshot); err != nil {
 			return err
 		}
@@ -73,11 +81,86 @@ func (r *PostgresRepository) ApplySelectedMetadata(ctx context.Context, source S
 	return ids, err
 }
 
+// ApplyManagedMetadata 仅刷新仍处于纳管状态的既有表资产。
+// 锁定、身份校验、快照和 upsert 必须位于同一租户事务，避免并发删除后被刷新任务重新激活。
+func (r *PostgresRepository) ApplyManagedMetadata(ctx context.Context, source Source, expectedTableID, expectedStructureHash string, result SyncResult) (id string, managed bool, err error) {
+	if len(result.Tables) != 1 {
+		return "", false, errors.New("managed metadata refresh requires exactly one table")
+	}
+	if expectedTableID == "" {
+		return "", false, nil
+	}
+	watermark, err := time.Parse(time.RFC3339Nano, result.Watermark)
+	if err != nil {
+		return "", false, errors.New("invalid metadata watermark")
+	}
+	snapshot, err := json.Marshal(result.Tables)
+	if err != nil {
+		return "", false, err
+	}
+	table := result.Tables[0]
+	desiredStructureHash, _, err := metadataTableHash(table)
+	if err != nil {
+		return "", false, err
+	}
+	err = database.WithTenantTx(ctx, r.pool, source.TenantID, func(tx pgx.Tx) error {
+		if err := validateMetadataSourceForWrite(ctx, tx, source); err != nil {
+			return err
+		}
+		var lockedID, currentStructureHash string
+		err := tx.QueryRow(ctx, `SELECT id::text,structure_hash FROM platform.metadata_tables
+			WHERE id=$1 AND tenant_id=$2 AND data_source_id=$3 AND catalog_name=$4 AND schema_name=$5 AND table_name=$6
+			AND asset_status='ACTIVE' FOR UPDATE`, expectedTableID, source.TenantID, source.ID, table.CatalogName, table.SchemaName, table.Name).Scan(&lockedID, &currentStructureHash)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		// 只允许从入队基线推进，或接受另一执行者已写入同一目标结构；绝不把更新后的结构回退。
+		if currentStructureHash != expectedStructureHash && currentStructureHash != desiredStructureHash {
+			return ErrMetadataRefreshSuperseded
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.metadata_snapshots(tenant_id,data_source_id,snapshot_hash,snapshot_json) VALUES($1,$2,$3,$4)`, source.TenantID, source.ID, result.SnapshotHash, snapshot); err != nil {
+			return err
+		}
+		id, err = r.upsertMetadataTable(ctx, tx, source, table, watermark)
+		if err != nil {
+			return err
+		}
+		if id != lockedID || id != expectedTableID {
+			return errors.New("managed metadata table identity changed")
+		}
+		managed = true
+		return nil
+	})
+	return id, managed, err
+}
+
+// validateMetadataSourceForWrite 在技术资产事务内锁定数据源生命周期，避免旧配置任务在暂停、删除或修改后继续写入。
+func validateMetadataSourceForWrite(ctx context.Context, tx pgx.Tx, source Source) error {
+	var status string
+	var version int64
+	err := tx.QueryRow(ctx, `SELECT status::text,version FROM platform.data_sources
+		WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE`, source.ID, source.TenantID).Scan(&status, &version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrMetadataSourceChanged
+	}
+	if err != nil {
+		return err
+	}
+	if status != string(StatusActive) || (source.Version > 0 && version != source.Version) {
+		return ErrMetadataSourceChanged
+	}
+	return nil
+}
+
 // ListActiveTableSelections 返回当前已纳管的活动表业务键，供全量刷新复用用户原有选择范围。
 func (r *PostgresRepository) ListActiveTableSelections(ctx context.Context, tenantID, sourceID string) (items []TableSelection, err error) {
 	items = []TableSelection{}
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT catalog_name,schema_name,table_name
+		rows, err := tx.Query(ctx, `SELECT id::text,catalog_name,schema_name,table_name,structure_hash,
+			CASE WHEN last_enriched_structure_hash<>'' AND last_enriched_structure_hash=structure_hash THEN 'SUCCEEDED' ELSE '' END
 			FROM platform.metadata_tables WHERE data_source_id=$1 AND asset_status='ACTIVE'
 			ORDER BY catalog_name,schema_name,table_name`, sourceID)
 		if err != nil {
@@ -86,7 +169,7 @@ func (r *PostgresRepository) ListActiveTableSelections(ctx context.Context, tena
 		defer rows.Close()
 		for rows.Next() {
 			var item TableSelection
-			if err := rows.Scan(&item.CatalogName, &item.SchemaName, &item.TableName); err != nil {
+			if err := rows.Scan(&item.TableID, &item.CatalogName, &item.SchemaName, &item.TableName, &item.StructureHash, &item.LatestEnrichmentStatus); err != nil {
 				return err
 			}
 			items = append(items, item)
@@ -102,6 +185,7 @@ func metadataTableKey(table MetadataTable) string {
 
 // upsertMetadataTable 按稳定业务键更新表资产，并基于结构哈希判断变化类型。
 func (r *PostgresRepository) upsertMetadataTable(ctx context.Context, tx pgx.Tx, source Source, table MetadataTable, watermark time.Time) (string, error) {
+	table = normalizeMetadataTableCollections(table)
 	hash, payload, err := metadataTableHash(table)
 	if err != nil {
 		return "", err
@@ -199,7 +283,22 @@ func metadataHash(value any) (string, []byte, error) {
 
 // metadataTableHash 排除易波动统计信息后计算表结构哈希。
 func metadataTableHash(table MetadataTable) (string, []byte, error) {
+	table = normalizeMetadataTableCollections(table)
 	// 估算行数会随统计信息波动，不应触发结构版本变化。
 	table.EstimatedRowCount = nil
 	return metadataHash(table)
+}
+
+func normalizeMetadataTableCollections(table MetadataTable) MetadataTable {
+	// Connector 允许返回空集合，但 PostgreSQL 技术资产和结构哈希始终使用 JSON 数组。
+	if table.PrimaryKeyColumns == nil {
+		table.PrimaryKeyColumns = []string{}
+	}
+	if table.Constraints == nil {
+		table.Constraints = []MetadataConstraint{}
+	}
+	if table.Indexes == nil {
+		table.Indexes = []MetadataIndex{}
+	}
+	return table
 }

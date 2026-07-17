@@ -9,6 +9,8 @@ import {
   type DataSourceTableRecord,
   type DataSourceType,
   type DiscoveredTableRecord,
+  type MetadataJob,
+  type MetadataRefreshMode,
 } from '../lib/data-sources'
 
 const statusLabels: Record<DataSourceStatus, string> = {
@@ -20,6 +22,49 @@ type ConnectionDraft = Omit<DataSourceConnectionInput, 'port' | 'config'> & { po
 type DialogState = { mode: 'create' | 'view' | 'edit' | 'delete' | 'select-tables' | 'edit-table' | 'delete-table'; source?: DataSourceRecord; table?: DataSourceTableRecord }
 type Notice = { tone: 'success' | 'error'; message: string }
 type TableDraft = { businessName: string; businessDescription: string; tags: string; sensitivityLevel: string; visibility: string; manualLocked: boolean }
+type MetadataJobSnapshot = { job: MetadataJob; title: string }
+type MetadataJobPoller = { jobId: string; timeout: number; stopped: boolean }
+type ColumnDraft = {
+  original: DataSourceColumnRecord
+  businessName: string
+  semanticType: string
+  sensitivityLevel: DataSourceColumnRecord['sensitivityLevel']
+  manualLocked: boolean
+}
+
+const semanticTypes = ['DATE', 'TIME', 'DATETIME', 'REGION', 'COMPANY_NAME', 'AMOUNT', 'PERCENTAGE', 'IDENTIFIER', 'CATEGORY', 'QUANTITY', 'BOOLEAN', 'TEXT']
+const metadataJobActive = (job: MetadataJob | null) => job?.status === 'QUEUED' || job?.status === 'RUNNING'
+const metadataJobTerminal = (job: MetadataJob) => !metadataJobActive(job)
+const metadataStageLabels: Record<string, string> = {
+  QUEUED: '等待后台执行', DISCOVERY: '读取源库结构', DIFF: '比对结构变化', SAMPLE: '采集样本', PERSISTENCE: '保存技术元数据', LLM: 'LLM 完善', COMPLETE: '已完成', FAILED: '执行失败',
+}
+const metadataJobLabel = (job: MetadataJob) => job.kind === 'IMPORT' ? '新增数据表' : job.mode === 'INCREMENTAL' ? '增量刷新' : '全量刷新'
+const metadataJobCompletionNotice = (job: MetadataJob, title: string): Notice => {
+  if (job.status === 'SUCCEEDED' && job.total === 0) return { tone: 'success', message: '当前没有可刷新的数据表资产' }
+  if (job.status === 'SUCCEEDED') {
+    const skipped = job.skipped ? `，跳过 ${job.skipped} 张未变化表` : ''
+    return { tone: 'success', message: `${title}完成：${job.succeeded} 张成功${skipped}` }
+  }
+  return { tone: 'error', message: `${title}完成：${job.succeeded} 张成功，${job.skipped} 张跳过，${job.failed} 张失败${job.errorMessage ? `；${job.errorMessage}` : ''}` }
+}
+const columnDraftFromRecord = (column: DataSourceColumnRecord): ColumnDraft => ({
+  original: column,
+  businessName: column.businessName,
+  semanticType: column.semanticType,
+  sensitivityLevel: column.sensitivityLevel,
+  manualLocked: column.manualLocked,
+})
+const columnDraftChanged = (draft: ColumnDraft) => draft.businessName.trim() !== draft.original.businessName
+  || draft.semanticType !== draft.original.semanticType
+  || draft.sensitivityLevel !== draft.original.sensitivityLevel
+  || draft.manualLocked !== draft.original.manualLocked
+const normalizedTags = (value: string) => value.split(',').map(tag => tag.trim()).filter(Boolean)
+const tableDraftChanged = (draft: TableDraft, table: DataSourceTableRecord) => draft.businessName.trim() !== table.businessName
+  || draft.businessDescription.trim() !== table.businessDescription
+  || normalizedTags(draft.tags).join('\u001f') !== table.tags.join('\u001f')
+  || draft.sensitivityLevel !== table.sensitivityLevel
+  || draft.visibility !== table.visibility
+  || draft.manualLocked !== table.manualLocked
 
 const emptyDraft = (): ConnectionDraft => ({ code: '', name: '', type: 'MYSQL', host: '', port: '3306', database: '', username: '', password: '' })
 const configText = (source: DataSourceRecord, key: string) => {
@@ -60,7 +105,26 @@ export function DataSourceCenterPage() {
   const [selectedTableKeys, setSelectedTableKeys] = useState<string[]>([])
   const [discoveryLoading, setDiscoveryLoading] = useState(false)
   const [tableDraft, setTableDraft] = useState<TableDraft>({ businessName: '', businessDescription: '', tags: '', sensitivityLevel: 'INTERNAL', visibility: 'PRIVATE', manualLocked: false })
+  const [columnDrafts, setColumnDrafts] = useState<ColumnDraft[]>([])
+  const [tableEditorLoading, setTableEditorLoading] = useState(false)
+  const [refreshMode, setRefreshMode] = useState<MetadataRefreshMode>('INCREMENTAL')
+  const [metadataJob, setMetadataJob] = useState<MetadataJob | null>(null)
+  const [metadataJobSourceId, setMetadataJobSourceId] = useState('')
+  const [metadataJobTitle, setMetadataJobTitle] = useState('')
+  const [metadataJobLoading, setMetadataJobLoading] = useState(false)
   const metadataRequest = useRef(0)
+  const metadataJobRequests = useRef(new Map<string, number>())
+  const metadataJobCache = useRef(new Map<string, MetadataJobSnapshot>())
+  const metadataJobPollers = useRef(new Map<string, MetadataJobPoller>())
+  const metadataJobSourceIdRef = useRef('')
+  const tableEditorRequest = useRef(0)
+  const discoveryRequest = useRef(0)
+  const notifiedMetadataJobs = useRef(new Set<string>())
+  const viewedSourceIdRef = useRef(dialog?.mode === 'view' ? dialog.source?.id || '' : '')
+
+  useEffect(() => {
+    viewedSourceIdRef.current = dialog?.mode === 'view' ? dialog.source?.id || '' : ''
+  }, [dialog?.mode, dialog?.source?.id])
 
   useEffect(() => {
     if (!notice) return
@@ -106,6 +170,90 @@ export function DataSourceCenterPage() {
     }
   }, [])
 
+  const startMetadataJobPolling = useCallback((sourceId: string, initialJob: MetadataJob, title: string) => {
+    const existing = metadataJobPollers.current.get(sourceId)
+    if (existing?.jobId === initialJob.id && !existing.stopped) return
+    if (existing) {
+      existing.stopped = true
+      window.clearTimeout(existing.timeout)
+    }
+    const tracker: MetadataJobPoller = { jobId: initialJob.id, timeout: 0, stopped: false }
+    metadataJobPollers.current.set(sourceId, tracker)
+    const current = () => !tracker.stopped && metadataJobPollers.current.get(sourceId) === tracker
+    const schedule = (delay: number) => {
+      tracker.timeout = window.setTimeout(() => void poll(), delay)
+    }
+    const poll = async () => {
+      try {
+        const next = await dataSourceAPI.getMetadataJob(sourceId, tracker.jobId)
+        if (!current()) return
+        metadataJobCache.current.set(sourceId, { job: next, title })
+        if (metadataJobTerminal(next)) {
+          // 只刷新当前正在查看的数据源，避免后台 A 任务覆盖 B 数据源的表清单。
+          if (viewedSourceIdRef.current === sourceId) await loadTableStructures(sourceId)
+          if (!current()) return
+          if (metadataJobSourceIdRef.current === sourceId) {
+            setMetadataJob(next)
+            setMetadataJobTitle(title)
+          }
+          metadataJobPollers.current.delete(sourceId)
+          if (!notifiedMetadataJobs.current.has(next.id)) {
+            notifiedMetadataJobs.current.add(next.id)
+            setNotice(metadataJobCompletionNotice(next, title))
+          }
+          return
+        }
+        if (metadataJobSourceIdRef.current === sourceId) {
+          setMetadataJob(next)
+          setMetadataJobTitle(title)
+        }
+        schedule(1200)
+      } catch (cause) {
+        if (!current()) return
+        setNotice({ tone: 'error', message: `${cause instanceof Error ? cause.message : '查询后台元数据任务进度失败'}；将自动重试` })
+        schedule(1800)
+      }
+    }
+    schedule(1200)
+  }, [loadTableStructures])
+
+  const loadLatestMetadataJob = useCallback(async (sourceId: string) => {
+    const request = (metadataJobRequests.current.get(sourceId) || 0) + 1
+    metadataJobRequests.current.set(sourceId, request)
+    setMetadataJobLoading(true)
+    try {
+      const result = await dataSourceAPI.latestActiveMetadataJob(sourceId)
+      if (request !== metadataJobRequests.current.get(sourceId)) return
+      if (result.job) {
+        const cached = metadataJobCache.current.get(sourceId)
+        const title = cached?.job.id === result.job.id ? cached.title : metadataJobLabel(result.job)
+        metadataJobCache.current.set(sourceId, { job: result.job, title })
+        startMetadataJobPolling(sourceId, result.job, title)
+      }
+      if (metadataJobSourceIdRef.current === sourceId) {
+        const snapshot = metadataJobCache.current.get(sourceId)
+        setMetadataJobSourceId(sourceId)
+        setMetadataJob(snapshot?.job || null)
+        setMetadataJobTitle(snapshot?.title || '')
+      }
+    } catch (cause) {
+      if (request === metadataJobRequests.current.get(sourceId)) setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '加载后台元数据任务失败' })
+    } finally {
+      if (request === metadataJobRequests.current.get(sourceId) && metadataJobSourceIdRef.current === sourceId) setMetadataJobLoading(false)
+    }
+  }, [startMetadataJobPolling])
+
+  useEffect(() => {
+    const pollers = metadataJobPollers.current
+    return () => {
+      pollers.forEach(poller => {
+        poller.stopped = true
+        window.clearTimeout(poller.timeout)
+      })
+      pollers.clear()
+    }
+  }, [])
+
   const loadColumns = async (table: DataSourceTableRecord) => {
     if (metadataColumns[table.id] || columnLoading[table.id]) return
     setColumnLoading(current => ({ ...current, [table.id]: true }))
@@ -141,9 +289,21 @@ export function DataSourceCenterPage() {
     setFormError('')
     setDraft(draftFromSource(source))
     setDialog({ mode, source })
-    if (mode === 'view') void loadTableStructures(source.id)
+    if (mode === 'view') {
+      setRefreshMode('INCREMENTAL')
+      void loadTableStructures(source.id)
+      viewedSourceIdRef.current = source.id
+      metadataJobSourceIdRef.current = source.id
+      const snapshot = metadataJobCache.current.get(source.id)
+      setMetadataJobSourceId(source.id)
+      setMetadataJob(snapshot?.job || null)
+      setMetadataJobTitle(snapshot?.title || '')
+      // 每次打开都恢复服务端活动任务，避免同源终态缓存遮蔽其他页面新建的任务。
+      void loadLatestMetadataJob(source.id)
+    }
   }
   const openTableSelection = async (source: DataSourceRecord) => {
+    const request = ++discoveryRequest.current
     setDialog({ mode: 'select-tables', source })
     setDiscoveredTables([])
     setSelectedTableKeys([])
@@ -151,25 +311,70 @@ export function DataSourceCenterPage() {
     setFormError('')
     try {
       const result = await dataSourceAPI.discoverTables(source.id)
-      setDiscoveredTables(result.items)
+      if (request === discoveryRequest.current) setDiscoveredTables(result.items)
     } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : '读取源库数据表失败')
+      if (request === discoveryRequest.current) setFormError(cause instanceof Error ? cause.message : '读取源库数据表失败')
     } finally {
-      setDiscoveryLoading(false)
+      if (request === discoveryRequest.current) setDiscoveryLoading(false)
     }
   }
-  const openTableEditor = (source: DataSourceRecord, table: DataSourceTableRecord) => {
+  const openTableEditor = async (source: DataSourceRecord, table: DataSourceTableRecord) => {
+    const request = ++tableEditorRequest.current
     setTableDraft({ businessName: table.businessName, businessDescription: table.businessDescription, tags: table.tags.join(', '), sensitivityLevel: table.sensitivityLevel, visibility: table.visibility, manualLocked: table.manualLocked })
+    setColumnDrafts([])
+    setTableEditorLoading(true)
     setFormError('')
     setDialog({ mode: 'edit-table', source, table })
+    try {
+      // 编辑时重新读取字段，确保 expectedVersion 来自最新资产版本。
+      const result = await dataSourceAPI.columns(table.id)
+      if (request !== tableEditorRequest.current) return
+      const columns = result.items.filter(column => column.assetStatus === 'ACTIVE')
+      setMetadataColumns(current => ({ ...current, [table.id]: columns }))
+      setColumnDrafts(columns.map(columnDraftFromRecord))
+    } catch (cause) {
+      if (request === tableEditorRequest.current) setFormError(cause instanceof Error ? cause.message : '加载字段映射失败')
+    } finally {
+      if (request === tableEditorRequest.current) setTableEditorLoading(false)
+    }
   }
   const closeDialog = () => {
     if (!busyAction) {
       metadataRequest.current += 1
+      tableEditorRequest.current += 1
+      discoveryRequest.current += 1
+      viewedSourceIdRef.current = ''
       setDialog(null)
     }
   }
+  const returnToTableAssets = (source: DataSourceRecord) => {
+    tableEditorRequest.current += 1
+    discoveryRequest.current += 1
+    viewedSourceIdRef.current = source.id
+    setDialog({ mode: 'view', source })
+    void loadTableStructures(source.id)
+  }
   const updateDraft = (key: keyof ConnectionDraft, value: string) => setDraft(current => ({ ...current, [key]: value }))
+  const updateColumnDraft = (id: string, update: Partial<Omit<ColumnDraft, 'original'>>) => setColumnDrafts(current => current.map(column => column.original.id === id ? { ...column, ...update } : column))
+
+  const acceptMetadataJob = async (job: MetadataJob, sourceId: string, title: string, queuedMessage: string) => {
+    notifiedMetadataJobs.current.delete(job.id)
+    metadataJobRequests.current.set(sourceId, (metadataJobRequests.current.get(sourceId) || 0) + 1)
+    metadataJobCache.current.set(sourceId, { job, title })
+    metadataJobSourceIdRef.current = sourceId
+    setMetadataJobLoading(false)
+    setMetadataJobSourceId(sourceId)
+    setMetadataJobTitle(title)
+    setMetadataJob(job)
+    if (metadataJobActive(job)) {
+      startMetadataJobPolling(sourceId, job, title)
+      setNotice({ tone: 'success', message: queuedMessage })
+      return
+    }
+    await loadTableStructures(sourceId)
+    notifiedMetadataJobs.current.add(job.id)
+    setNotice(metadataJobCompletionNotice(job, title))
+  }
 
   const importSelectedTables = async () => {
     const source = dialog?.source
@@ -182,10 +387,9 @@ export function DataSourceCenterPage() {
     setBusyAction('import-tables')
     setFormError('')
     try {
-      await dataSourceAPI.importTables(source.id, tables)
-      setNotice({ tone: 'success', message: `已完成 ${tables.length} 张表的采样、LLM 完善和资产入库` })
+      const job = await dataSourceAPI.importTables(source.id, tables)
+      await acceptMetadataJob(job, source.id, '新增数据表', `已提交 ${tables.length} 张表的后台采样与 LLM 完善任务，可关闭当前弹窗`)
       setDialog({ mode: 'view', source })
-      await loadTableStructures(source.id)
     } catch (cause) {
       setFormError(cause instanceof Error ? cause.message : '新增数据表资产失败')
     } finally {
@@ -202,17 +406,35 @@ export function DataSourceCenterPage() {
       return
     }
     setBusyAction(`edit-table:${table.id}`)
+    setFormError('')
+    let saved = 0
+    let saving = '表信息'
     try {
-      await dataSourceAPI.updateTable(table.id, {
-        businessName: tableDraft.businessName.trim(), businessDescription: tableDraft.businessDescription.trim(),
-        tags: tableDraft.tags.split(',').map(tag => tag.trim()).filter(Boolean), sensitivityLevel: tableDraft.sensitivityLevel,
-        visibility: tableDraft.visibility, manualLocked: tableDraft.manualLocked, expectedVersion: table.businessVersion,
-      })
-      setNotice({ tone: 'success', message: `已修改表资产“${table.businessName || table.tableName}”` })
+      if (tableDraftChanged(tableDraft, table)) {
+        const updated = await dataSourceAPI.updateTable(table.id, {
+          businessName: tableDraft.businessName.trim(), businessDescription: tableDraft.businessDescription.trim(),
+          tags: normalizedTags(tableDraft.tags), sensitivityLevel: tableDraft.sensitivityLevel,
+          visibility: tableDraft.visibility, manualLocked: tableDraft.manualLocked, expectedVersion: table.businessVersion,
+        })
+        saved += 1
+        setDialog(current => current?.mode === 'edit-table' && current.table?.id === updated.id ? { ...current, table: updated } : current)
+      }
+      for (const column of columnDrafts.filter(columnDraftChanged)) {
+        saving = `字段“${column.original.columnName}”`
+        const updated = await dataSourceAPI.updateColumn(column.original.id, {
+          businessName: column.businessName.trim(), businessDescription: column.original.businessDescription,
+          tags: column.original.tags, sensitivityLevel: column.sensitivityLevel, semanticType: column.semanticType,
+          manualLocked: column.manualLocked, expectedVersion: column.original.businessVersion,
+        })
+        saved += 1
+        setColumnDrafts(current => current.map(item => item.original.id === updated.id ? columnDraftFromRecord(updated) : item))
+      }
+      setNotice({ tone: 'success', message: saved === 0 ? '没有需要保存的修改' : `已修改表资产“${table.businessName || table.tableName}”` })
       setDialog({ mode: 'view', source })
       await loadTableStructures(source.id)
     } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : '修改数据表资产失败')
+      const message = cause instanceof Error ? cause.message : '修改数据表资产失败'
+      setFormError(saved > 0 ? `已保存 ${saved} 项；${saving}保存失败：${message}。未保存修改已保留，请重试。` : `${saving}保存失败：${message}`)
     } finally {
       setBusyAction('')
     }
@@ -236,9 +458,8 @@ export function DataSourceCenterPage() {
   const refreshTableAsset = async (source: DataSourceRecord, table: DataSourceTableRecord) => {
     setBusyAction(`refresh-table:${table.id}`)
     try {
-      await dataSourceAPI.importTables(source.id, [{ catalogName: table.catalogName, schemaName: table.schemaName, tableName: table.tableName }])
-      setNotice({ tone: 'success', message: `已刷新并重新完善表资产“${table.businessName || table.tableName}”` })
-      await loadTableStructures(source.id)
+      const job = await dataSourceAPI.refreshTables(source.id, 'FULL', [table.id])
+      await acceptMetadataJob(job, source.id, '刷新表结构', `已提交表资产“${table.businessName || table.tableName}”的后台刷新任务`)
     } catch (cause) {
       setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '刷新表结构失败' })
     } finally {
@@ -249,13 +470,11 @@ export function DataSourceCenterPage() {
   const refreshAllTableAssets = async (source: DataSourceRecord) => {
     setBusyAction(`refresh-tables:${source.id}`)
     try {
-      const result = await dataSourceAPI.refreshTables(source.id)
-      if (result.total === 0) setNotice({ tone: 'success', message: '当前没有可刷新的数据表资产' })
-      else if (result.status === 'SUCCEEDED') setNotice({ tone: 'success', message: `已刷新 ${result.succeeded} 张表的结构并重新完成 LLM 加工` })
-      else setNotice({ tone: 'error', message: `元数据刷新完成：${result.succeeded} 张成功，${result.failed} 张失败` })
-      await loadTableStructures(source.id)
+      const job = await dataSourceAPI.refreshTables(source.id, refreshMode)
+      const title = refreshMode === 'INCREMENTAL' ? '增量刷新' : '全量刷新'
+      await acceptMetadataJob(job, source.id, title, `已提交${refreshMode === 'INCREMENTAL' ? '增量' : '全量'}元数据后台刷新任务，可关闭当前弹窗`)
     } catch (cause) {
-      setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '刷新全部元数据失败' })
+      setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '提交元数据刷新任务失败' })
     } finally {
       setBusyAction('')
     }
@@ -358,6 +577,22 @@ export function DataSourceCenterPage() {
   }
 
   const actionBusy = Boolean(busyAction)
+  const visibleMetadataJob = dialog?.source?.id === metadataJobSourceId ? metadataJob : null
+  const metadataTaskActive = metadataJobActive(visibleMetadataJob)
+  const metadataTaskBusy = metadataTaskActive || metadataJobLoading
+  const visibleMetadataJobTitle = visibleMetadataJob ? metadataJobTitle || metadataJobLabel(visibleMetadataJob) : ''
+  const metadataProgressMax = Math.max(visibleMetadataJob?.total || 0, 1)
+  const metadataProgressValue = visibleMetadataJob
+    ? visibleMetadataJob.total > 0 ? Math.min(visibleMetadataJob.completed, visibleMetadataJob.total) : metadataJobTerminal(visibleMetadataJob) ? 1 : undefined
+    : undefined
+  const metadataProgressPercent = visibleMetadataJob
+    ? visibleMetadataJob.total > 0 ? Math.min(100, Math.round(visibleMetadataJob.completed / visibleMetadataJob.total * 100)) : metadataJobTerminal(visibleMetadataJob) ? 100 : 0
+    : 0
+  const metadataProgressText = visibleMetadataJob
+    ? visibleMetadataJob.total === 0 && metadataJobTerminal(visibleMetadataJob)
+      ? '已完成，无需处理数据表'
+      : `已处理 ${visibleMetadataJob.completed} / ${visibleMetadataJob.total} 张，${metadataStageLabels[visibleMetadataJob.stage] || visibleMetadataJob.stage || '处理中'}${visibleMetadataJob.currentTable ? `，当前 ${visibleMetadataJob.currentTable}` : ''}`
+    : ''
   return (
     <AppShell title="数据源配置中心" eyebrow="工作栏" actions={<button className="primary-button" type="button" disabled={actionBusy} onClick={openCreate}>新建数据源</button>}>
       {notice && <div className={`data-source-toast ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'} aria-live="polite">
@@ -384,7 +619,12 @@ export function DataSourceCenterPage() {
                 <button className="data-source-card-open" type="button" aria-label={`管理${source.name}的数据表资产`} onClick={() => openExisting('view', source)}>
                   <span className={`data-source-icon ${source.type.toLowerCase()}`}>{source.type === 'EXCEL' ? 'XL' : 'DB'}</span>
                   <span className="data-source-main"><span><strong role="heading" aria-level={3}>{source.name}</strong><span className={`data-source-status ${source.status.toLowerCase()}`}>{statusLabels[source.status]}</span></span><span className="data-source-subtitle">{typeLabels[source.type]} · {source.code}</span></span>
-                  <span className="data-source-card-facts"><span><small>地址</small><strong>{configText(source, 'host') || '文件数据源'}{configText(source, 'port') ? `:${configText(source, 'port')}` : ''}</strong></span><span><small>数据库</small><strong>{configText(source, 'database') || '—'}</strong></span></span>
+                  <span className="data-source-card-facts">
+                    <span><small>Host</small><strong>{configText(source, 'host') || (source.type === 'EXCEL' ? '文件数据源' : '—')}</strong></span>
+                    <span><small>Port</small><strong>{configText(source, 'port') || '—'}</strong></span>
+                    <span><small>Database</small><strong>{configText(source, 'database') || '—'}</strong></span>
+                    <span><small>Username</small><strong>{configText(source, 'username') || '—'}</strong></span>
+                  </span>
                 </button>
                 <div className="data-source-actions">
                   <button className="action-view" type="button" onClick={event => { event.stopPropagation(); openExisting('view', source) }}>查看</button>
@@ -420,9 +660,17 @@ export function DataSourceCenterPage() {
       {dialog?.mode === 'view' && dialog.source && <Dialog title="数据表资产" wide onClose={closeDialog}>
         <div className="data-source-detail">
           <div className="data-source-detail-actions" aria-label="表资产操作">
-            <button className="action-add-table" type="button" disabled={actionBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void openTableSelection(dialog.source!)}>新增数据表</button>
-            <button className="action-refresh-all" type="button" disabled={actionBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void refreshAllTableAssets(dialog.source!)}>{busyAction === `refresh-tables:${dialog.source.id}` ? '刷新加工中…' : '刷新全部元数据'}</button>
+            <button className="action-add-table" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void openTableSelection(dialog.source!)}>新增数据表</button>
+            <label className="data-source-refresh-mode"><span>刷新方式</span><select aria-label="元数据刷新方式" value={refreshMode} disabled={actionBusy || metadataTaskBusy} onChange={event => setRefreshMode(event.target.value as MetadataRefreshMode)}><option value="INCREMENTAL">增量刷新</option><option value="FULL">全量刷新</option></select></label>
+            <button className="action-refresh-all" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void refreshAllTableAssets(dialog.source!)}>{busyAction === `refresh-tables:${dialog.source.id}` ? '正在提交…' : `开始${refreshMode === 'INCREMENTAL' ? '增量' : '全量'}刷新`}</button>
           </div>
+          {metadataJobLoading && <div className="data-source-job-state" role="status">正在读取后台元数据任务…</div>}
+          {visibleMetadataJob && <section className={`data-source-job-progress ${visibleMetadataJob.status.toLowerCase()}`} aria-label="元数据后台任务">
+            <header><div><strong>{visibleMetadataJobTitle}</strong><span>{metadataStageLabels[visibleMetadataJob.stage] || visibleMetadataJob.stage || '处理中'}</span></div><em>{metadataProgressPercent}%</em></header>
+            <progress aria-label="元数据任务进度" aria-valuetext={metadataProgressText} max={metadataProgressMax} value={metadataProgressValue} />
+            <div className="data-source-job-counts" role="status" aria-live="polite"><span>已处理 {visibleMetadataJob.completed} / {visibleMetadataJob.total} 张</span><span className="success">成功 {visibleMetadataJob.succeeded}</span><span>跳过 {visibleMetadataJob.skipped}</span><span className={visibleMetadataJob.failed ? 'failed' : ''}>失败 {visibleMetadataJob.failed}</span>{visibleMetadataJob.currentTable && <span className="current">当前：{visibleMetadataJob.currentTable}</span>}</div>
+            {(visibleMetadataJob.errorCode || visibleMetadataJob.errorMessage) && <p role="alert">{[visibleMetadataJob.errorCode, visibleMetadataJob.errorMessage].filter(Boolean).join(' · ')}</p>}
+          </section>}
           <section className="data-source-structure" aria-label="表结构">
             <header><div><span className="eyebrow">元数据结构</span><h3>表与字段</h3></div><strong>{metadataTables.length}<small> 张表</small></strong></header>
             {metadataLoading ? <div className="data-source-structure-state" role="status">正在加载表结构…</div>
@@ -431,8 +679,8 @@ export function DataSourceCenterPage() {
               : <div className="data-source-table-list">{metadataTables.map(table => <details key={table.id} onToggle={event => { if (event.currentTarget.open) void loadColumns(table) }}>
                   <summary><span><strong>{table.businessName || table.tableName}</strong><small>{[table.catalogName, table.schemaName, table.tableName].filter(Boolean).join('.')}</small></span><span><em className={`table-management-status ${table.managementStatus.toLowerCase()}`}>{table.managementStatus === 'DISABLED' ? '已停用' : '可用'}</em>{table.tableType || 'TABLE'} · {table.columnCount} 字段</span></summary>
                   <div className="data-source-table-actions" aria-label={`${table.businessName || table.tableName}操作`}>
-                    <button className="action-edit" type="button" disabled={actionBusy} onClick={() => openTableEditor(dialog.source!, table)}>修改</button>
-                    <button className="action-refresh" type="button" disabled={actionBusy || dialog.source!.status !== 'ACTIVE'} onClick={() => void refreshTableAsset(dialog.source!, table)}>{busyAction === `refresh-table:${table.id}` ? '刷新中…' : '刷新结构'}</button>
+                    <button className="action-edit" type="button" disabled={actionBusy || metadataTaskBusy} onClick={() => void openTableEditor(dialog.source!, table)}>修改</button>
+                    <button className="action-refresh" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source!.status !== 'ACTIVE'} onClick={() => void refreshTableAsset(dialog.source!, table)}>{busyAction === `refresh-table:${table.id}` ? '正在提交…' : '刷新结构'}</button>
                     <button className={table.managementStatus === 'DISABLED' ? 'action-resume' : 'action-pause'} type="button" disabled={actionBusy} onClick={() => void changeTableStatus(dialog.source!, table)}>{table.managementStatus === 'DISABLED' ? '恢复' : '停用'}</button>
                     <button className="action-delete" type="button" disabled={actionBusy} onClick={() => { setFormError(''); setDialog({ mode: 'delete-table', source: dialog.source!, table }) }}>删除</button>
                   </div>
@@ -462,19 +710,32 @@ export function DataSourceCenterPage() {
               return <label className={imported ? 'imported' : ''} key={key}><input type="checkbox" disabled={imported || actionBusy} checked={selectedTableKeys.includes(key)} onChange={() => setSelectedTableKeys(current => current.includes(key) ? current.filter(item => item !== key) : [...current, key])} /><span><strong>{table.name}</strong><small>{[table.catalogName, table.schemaName, table.name].filter(Boolean).join('.')} · {table.columns.length} 字段</small></span><em>{imported ? '已入库' : table.type}</em></label>
             })}</div>
           </>}
-          <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => { setDialog({ mode: 'view', source: dialog.source }); void loadTableStructures(dialog.source!.id) }}>取消</button><button className="primary-button" type="button" disabled={actionBusy || discoveryLoading || selectedTableKeys.length === 0} onClick={() => void importSelectedTables()}>{actionBusy ? '正在采样并完善…' : `新增 ${selectedTableKeys.length} 张表`}</button></footer>
+          <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => returnToTableAssets(dialog.source!)}>取消</button><button className="primary-button" type="button" disabled={actionBusy || discoveryLoading || selectedTableKeys.length === 0} onClick={() => void importSelectedTables()}>{actionBusy ? '正在采样并完善…' : `新增 ${selectedTableKeys.length} 张表`}</button></footer>
         </div>
       </Dialog>}
 
-      {dialog?.mode === 'edit-table' && dialog.source && dialog.table && <Dialog title="修改数据表资产" onClose={closeDialog}>
+      {dialog?.mode === 'edit-table' && dialog.source && dialog.table && <Dialog title="修改数据表资产" wide onClose={closeDialog}>
         <form className="data-source-form" onSubmit={updateTableAsset}>
           <label>业务名称<input value={tableDraft.businessName} onChange={event => setTableDraft(current => ({ ...current, businessName: event.target.value }))} /></label>
           <label>业务说明<textarea rows={4} value={tableDraft.businessDescription} onChange={event => setTableDraft(current => ({ ...current, businessDescription: event.target.value }))} /></label>
           <label>标签<input value={tableDraft.tags} onChange={event => setTableDraft(current => ({ ...current, tags: event.target.value }))} placeholder="多个标签使用英文逗号分隔" /></label>
           <div className="data-source-form-grid"><label>敏感级别<select value={tableDraft.sensitivityLevel} onChange={event => setTableDraft(current => ({ ...current, sensitivityLevel: event.target.value }))}><option value="PUBLIC">公开</option><option value="INTERNAL">内部</option><option value="CONFIDENTIAL">机密</option><option value="RESTRICTED">严格限制</option></select></label><label>可见范围<select value={tableDraft.visibility} onChange={event => setTableDraft(current => ({ ...current, visibility: event.target.value }))}><option value="PRIVATE">私有</option><option value="TENANT_PUBLIC">租户公开</option></select></label></div>
           <label className="data-source-checkbox"><input type="checkbox" checked={tableDraft.manualLocked} onChange={event => setTableDraft(current => ({ ...current, manualLocked: event.target.checked }))} />锁定人工修改，后续 LLM 刷新不自动覆盖</label>
+          <section className="data-source-field-mapping" aria-label="字段映射">
+            <header><div><span className="eyebrow">字段映射</span><strong>源字段与业务字段</strong></div><small>{columnDrafts.length} 个字段</small></header>
+            {tableEditorLoading ? <div className="data-source-column-state" role="status">正在加载字段映射…</div>
+              : columnDrafts.length === 0 ? <div className="data-source-column-state">暂无可修改字段</div>
+              : <div className="data-source-field-mapping-scroll"><table><thead><tr><th>源字段</th><th>技术类型</th><th>业务字段名称</th><th>语义类型</th><th>敏感级别</th><th>人工锁定</th></tr></thead><tbody>{columnDrafts.map(column => <tr key={column.original.id}>
+                  <td><strong>{column.original.columnName}</strong><small>#{column.original.ordinalPosition}</small></td>
+                  <td><strong>{column.original.nativeType || '—'}</strong><small>{column.original.canonicalType || '—'}</small></td>
+                  <td><input aria-label={`${column.original.columnName}业务字段名称`} value={column.businessName} onChange={event => updateColumnDraft(column.original.id, { businessName: event.target.value })} /></td>
+                  <td><select aria-label={`${column.original.columnName}语义类型`} value={column.semanticType} onChange={event => updateColumnDraft(column.original.id, { semanticType: event.target.value })}><option value="">未设置</option>{semanticTypes.map(value => <option value={value} key={value}>{value}</option>)}</select></td>
+                  <td><select aria-label={`${column.original.columnName}敏感级别`} value={column.sensitivityLevel} onChange={event => updateColumnDraft(column.original.id, { sensitivityLevel: event.target.value as DataSourceColumnRecord['sensitivityLevel'] })}><option value="PUBLIC">公开</option><option value="INTERNAL">内部</option><option value="CONFIDENTIAL">机密</option><option value="RESTRICTED">严格限制</option></select></td>
+                  <td><input aria-label={`${column.original.columnName}人工锁定`} type="checkbox" checked={column.manualLocked} onChange={event => updateColumnDraft(column.original.id, { manualLocked: event.target.checked })} /></td>
+                </tr>)}</tbody></table></div>}
+          </section>
           {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
-          <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => { setDialog({ mode: 'view', source: dialog.source }); void loadTableStructures(dialog.source!.id) }}>取消</button><button className="primary-button" type="submit" disabled={actionBusy}>{actionBusy ? '正在保存…' : '保存修改'}</button></footer>
+          <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => returnToTableAssets(dialog.source!)}>取消</button><button className="primary-button" type="submit" disabled={actionBusy || tableEditorLoading}>{actionBusy ? '正在保存…' : '保存修改'}</button></footer>
         </form>
       </Dialog>}
 

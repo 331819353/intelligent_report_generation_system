@@ -14,10 +14,14 @@ type Service struct {
 	repo       Repository
 	connectors map[Type]Connector
 	completer  TableCompleter
+	jobs       MetadataJobRepository
 }
 
 // SetTableCompleter 注入 LLM 元数据完善器，保持数据源领域对具体 AI 实现解耦。
 func (s *Service) SetTableCompleter(completer TableCompleter) { s.completer = completer }
+
+// SetMetadataJobRepository 注入持久化任务仓储，使 HTTP 只负责入队、worker 负责采样和完善。
+func (s *Service) SetMetadataJobRepository(jobs MetadataJobRepository) { s.jobs = jobs }
 
 // NewService 按数据源类型注册连接器，使业务状态机与具体数据库驱动解耦。
 func NewService(repo Repository, connectors ...Connector) *Service {
@@ -244,7 +248,14 @@ func (s *Service) RefreshTables(ctx context.Context, tenantID, actorID, id strin
 		}
 		item.ID = ids[key]
 		result.TechnicalUpdated++
-		if err := s.completer.CompleteTable(ctx, tenantID, actorID, item.ID, sampleRows(sample)); err != nil {
+		structureHash, _, err := metadataTableHash(table)
+		if err != nil {
+			item.Stage, item.Code, item.Cause = "LLM", "STRUCTURE_HASH_FAILED", err
+			result.Items = append(result.Items, item)
+			result.Failed++
+			continue
+		}
+		if err := s.completer.CompleteTable(ctx, tenantID, actorID, item.ID, sampleRows(sample), structureHash, "", "", 0); err != nil {
 			item.Stage, item.Code, item.Cause = "LLM", "LLM_COMPLETION_FAILED", err
 			result.Items = append(result.Items, item)
 			result.Failed++
@@ -315,7 +326,11 @@ func (s *Service) importTables(ctx context.Context, tenantID, actorID, id string
 		}
 		rows := sampleRows(sample)
 		tableID := ids[metadataTableKey(table)]
-		if err := s.completer.CompleteTable(ctx, tenantID, actorID, tableID, rows); err != nil {
+		structureHash, _, err := metadataTableHash(table)
+		if err != nil {
+			return nil, fmt.Errorf("hash metadata for table %s: %w", table.Name, err)
+		}
+		if err := s.completer.CompleteTable(ctx, tenantID, actorID, tableID, rows, structureHash, "", "", 0); err != nil {
 			return nil, fmt.Errorf("complete metadata for table %s: %w", table.Name, err)
 		}
 		imported = append(imported, ImportedTable{ID: tableID, Table: table, Samples: rows})

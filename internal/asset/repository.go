@@ -16,7 +16,7 @@ type Repository struct{ pool *pgxpool.Pool }
 // NewRepository 创建数据资产读写仓储。
 func NewRepository(pool *pgxpool.Pool) *Repository { return &Repository{pool: pool} }
 
-const tableSelect = `t.id::text,t.data_source_id::text,d.name,d.source_type::text,COALESCE((SELECT fv.id::text FROM platform.file_assets fa JOIN platform.file_asset_versions fv ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version WHERE fa.id=d.file_asset_id),''),t.catalog_name,t.schema_name,t.table_name,t.table_type,t.source_comment,t.business_name,t.business_description,t.tags,t.sensitivity_level::text,t.visibility::text,t.manual_locked,t.asset_status::text,t.management_status,COALESCE((SELECT j.status FROM platform.ai_metadata_jobs j WHERE j.table_id=t.id ORDER BY j.created_at DESC LIMIT 1),'PENDING'),t.structure_hash,t.metadata_version,t.business_version,(SELECT count(*) FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE'),t.last_sync_at::text`
+const tableSelect = `t.id::text,t.data_source_id::text,d.name,d.source_type::text,COALESCE((SELECT fv.id::text FROM platform.file_assets fa JOIN platform.file_asset_versions fv ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version WHERE fa.id=d.file_asset_id),''),t.catalog_name,t.schema_name,t.table_name,t.table_type,t.source_comment,t.business_name,t.business_description,t.tags,t.sensitivity_level::text,t.visibility::text,t.manual_locked,t.asset_status::text,t.management_status,CASE WHEN t.last_enriched_structure_hash<>'' AND t.last_enriched_structure_hash=t.structure_hash THEN 'SUCCEEDED' ELSE COALESCE((SELECT j.status FROM platform.ai_metadata_jobs j WHERE j.table_id=t.id AND j.metadata_structure_hash=t.structure_hash ORDER BY j.created_at DESC LIMIT 1),'PENDING') END,t.structure_hash,t.metadata_version,t.business_version,(SELECT count(*) FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE'),t.last_sync_at::text`
 
 // SearchTables 按租户、关键词和分类条件分页检索表资产。
 func (r *Repository) SearchTables(ctx context.Context, tenantID string, search Search) (items []Table, total int, err error) {
@@ -28,7 +28,7 @@ func (r *Repository) SearchTables(ctx context.Context, tenantID string, search S
 			AND ($2='' OR t.data_source_id=$2::uuid) AND ($3='' OR d.source_type::text=$3) AND ($4='' OR t.asset_status::text=$4)
 			AND ($5='' OR t.sensitivity_level::text=$5) AND ($6='' OR $6=ANY(t.tags)) AND ($7='' OR t.visibility::text=$7)
 			AND ($8='' OR t.management_status=$8)
-			AND (NOT $9 OR EXISTS(SELECT 1 FROM platform.ai_metadata_jobs j WHERE j.table_id=t.id AND j.status='SUCCEEDED'))`
+			AND (NOT $9 OR (t.last_enriched_structure_hash<>'' AND t.last_enriched_structure_hash=t.structure_hash))`
 		if err := tx.QueryRow(ctx, `SELECT count(*)`+where, args...).Scan(&total); err != nil {
 			return err
 		}

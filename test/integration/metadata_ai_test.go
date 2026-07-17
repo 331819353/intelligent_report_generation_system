@@ -11,16 +11,25 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	assetpkg "intelligent-report-generation-system/internal/asset"
 	"intelligent-report-generation-system/internal/metadataai"
 	"intelligent-report-generation-system/internal/platform/database"
 )
 
-type metadataProvider struct{ output metadataai.CompletionOutput }
+type metadataProvider struct {
+	output       metadataai.CompletionOutput
+	beforeReturn func() error
+}
 
 func (metadataProvider) Name() string     { return "integration" }
 func (metadataProvider) Model() string    { return "metadata-test-v1" }
 func (metadataProvider) Configured() bool { return true }
 func (p metadataProvider) Complete(context.Context, string, string, metadataai.CompletionInput) (metadataai.ProviderResult, error) {
+	if p.beforeReturn != nil {
+		if err := p.beforeReturn(); err != nil {
+			return metadataai.ProviderResult{}, err
+		}
+	}
 	return metadataai.ProviderResult{Output: p.output, Model: p.Model(), ModelVersion: "2026-07-15", Usage: metadataai.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30}}, nil
 }
 
@@ -45,7 +54,7 @@ func TestMetadataAICompletionAppliesOnlySafeSuggestions(t *testing.T) {
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.data_sources(tenant_id,code,name,source_type,secret_ref) VALUES($1,'metadata-ai','Metadata AI','MYSQL','env://METADATA_AI') RETURNING id`, tenantID).Scan(&sourceID); err != nil {
 			return err
 		}
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(tenant_id,data_source_id,schema_name,table_name,table_type,structure_hash,last_sync_at) VALUES($1,$2,'sales','orders','TABLE','table-hash',now()) RETURNING id`, tenantID, sourceID).Scan(&tableID); err != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(tenant_id,data_source_id,schema_name,table_name,table_type,structure_hash,last_sync_at) VALUES($1,$2,'sales','orders','TABLE',repeat('a',64),now()) RETURNING id`, tenantID, sourceID).Scan(&tableID); err != nil {
 			return err
 		}
 		columns := []struct {
@@ -94,7 +103,7 @@ func TestMetadataAICompletionAppliesOnlySafeSuggestions(t *testing.T) {
 	}
 
 	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
-		var tableName, highDescription, lowDescription, lockedDescription string
+		var tableName, highDescription, lowDescription, lockedDescription, structureHash, enrichedHash, jobStructureHash string
 		if err := tx.QueryRow(ctx, `SELECT business_name FROM platform.metadata_tables WHERE id=$1`, tableID).Scan(&tableName); err != nil {
 			return err
 		}
@@ -107,8 +116,17 @@ func TestMetadataAICompletionAppliesOnlySafeSuggestions(t *testing.T) {
 		if err := tx.QueryRow(ctx, `SELECT business_description FROM platform.metadata_columns WHERE id=$1`, lockedColumnID).Scan(&lockedDescription); err != nil {
 			return err
 		}
+		if err := tx.QueryRow(ctx, `SELECT structure_hash,last_enriched_structure_hash FROM platform.metadata_tables WHERE id=$1`, tableID).Scan(&structureHash, &enrichedHash); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT metadata_structure_hash FROM platform.ai_metadata_jobs WHERE id=$1`, result.Job.ID).Scan(&jobStructureHash); err != nil {
+			return err
+		}
 		if tableName != "订单" || highDescription != "订单唯一编号" || lowDescription != "" || lockedDescription != "人工说明" {
 			return fmt.Errorf("unexpected formal metadata: %q %q %q %q", tableName, highDescription, lowDescription, lockedDescription)
+		}
+		if structureHash == "" || enrichedHash != structureHash || jobStructureHash != structureHash {
+			return fmt.Errorf("metadata structure fence mismatch: current=%q enriched=%q job=%q", structureHash, enrichedHash, jobStructureHash)
 		}
 		var auditCount int
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.audit_logs WHERE resource_type='AI_METADATA_JOB' AND resource_id=$1`, result.Job.ID).Scan(&auditCount); err != nil {
@@ -131,6 +149,43 @@ func TestMetadataAICompletionAppliesOnlySafeSuggestions(t *testing.T) {
 	if err != nil || rejected.Status != "REJECTED" {
 		t.Fatalf("reject=%#v err=%v", rejected, err)
 	}
+
+	// 模型调用期间技术结构发生变化时，旧结果必须整体回滚且不能推进“已完善”结构标记。
+	driftService := metadataai.NewService(metadataai.NewPostgresStore(pool), metadataProvider{
+		output: output,
+		beforeReturn: func() error {
+			return database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, `UPDATE platform.metadata_tables SET structure_hash=repeat('b',64) WHERE id=$1`, tableID)
+				return err
+			})
+		},
+	}, 5*time.Second, 0.8)
+	driftResult, err := driftService.Generate(ctx, tenantID, actorID, tableID)
+	if !errors.Is(err, metadataai.ErrStructureChanged) || driftResult.Job.Status != "FAILED" || driftResult.Job.ErrorCode != "STRUCTURE_CHANGED" {
+		t.Fatalf("drift result=%#v err=%v", driftResult, err)
+	}
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		var suggestionCount int
+		var structureHash, enrichedHash string
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.ai_metadata_suggestions WHERE job_id=$1`, driftResult.Job.ID).Scan(&suggestionCount); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT structure_hash,last_enriched_structure_hash FROM platform.metadata_tables WHERE id=$1`, tableID).Scan(&structureHash, &enrichedHash); err != nil {
+			return err
+		}
+		if suggestionCount != 0 || structureHash == enrichedHash {
+			return fmt.Errorf("stale AI result crossed structure fence: suggestions=%d current=%q enriched=%q", suggestionCount, structureHash, enrichedHash)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets, total, err := assetpkg.NewRepository(pool).SearchTables(ctx, tenantID, assetpkg.Search{DataSourceID: sourceID, EnrichedOnly: true, Limit: 20})
+	if err != nil || total != 0 || len(assets) != 0 {
+		t.Fatalf("stale enrichment leaked into current-structure asset list: total=%d items=%#v err=%v", total, assets, err)
+	}
+
 	invalidOutput := output
 	invalidOutput.Columns = append([]metadataai.SuggestionValue(nil), output.Columns...)
 	invalidOutput.Columns[0].TargetID = "550e8400-e29b-41d4-a716-446655440099"

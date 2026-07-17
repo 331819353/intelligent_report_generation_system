@@ -96,6 +96,12 @@ func (m BusinessMetadata) Validate(column bool) error {
 		default:
 			return errors.New("invalid visibility")
 		}
+	} else {
+		switch m.SemanticType {
+		case "", "DATE", "TIME", "DATETIME", "REGION", "COMPANY_NAME", "AMOUNT", "PERCENTAGE", "IDENTIFIER", "CATEGORY", "QUANTITY", "BOOLEAN", "TEXT":
+		default:
+			return errors.New("invalid semanticType")
+		}
 	}
 	if len(m.Tags) > 30 {
 		return errors.New("too many tags")

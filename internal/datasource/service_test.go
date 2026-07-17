@@ -14,6 +14,10 @@ type repo struct {
 	selectedMetadata SyncResult
 	selectedBatches  []SyncResult
 	selectedIDs      map[string]string
+	managedBatches   []SyncResult
+	managedTableIDs  []string
+	managedMissing   bool
+	managedErr       error
 	activeSelections []TableSelection
 }
 
@@ -27,6 +31,17 @@ func (r *repo) ApplySelectedMetadata(_ context.Context, _ Source, result SyncRes
 	r.selectedMetadata = result
 	r.selectedBatches = append(r.selectedBatches, result)
 	return r.selectedIDs, nil
+}
+func (r *repo) ApplyManagedMetadata(_ context.Context, _ Source, expectedTableID, _ string, result SyncResult) (string, bool, error) {
+	r.managedBatches = append(r.managedBatches, result)
+	r.managedTableIDs = append(r.managedTableIDs, expectedTableID)
+	if r.managedErr != nil {
+		return "", false, r.managedErr
+	}
+	if r.managedMissing || expectedTableID == "" {
+		return "", false, nil
+	}
+	return expectedTableID, true, nil
 }
 func (r *repo) ListActiveTableSelections(context.Context, string, string) ([]TableSelection, error) {
 	return r.activeSelections, nil
@@ -71,12 +86,14 @@ type completingRecorder struct {
 	tableID  string
 	tableIDs []string
 	rows     []map[string]any
+	hashes   []string
 	failIDs  map[string]error
 }
 
-func (c *completingRecorder) CompleteTable(_ context.Context, _, _, tableID string, rows []map[string]any) error {
+func (c *completingRecorder) CompleteTable(_ context.Context, _, _, tableID string, rows []map[string]any, structureHash, _, _ string, _ int64) error {
 	c.tableID, c.rows = tableID, rows
 	c.tableIDs = append(c.tableIDs, tableID)
+	c.hashes = append(c.hashes, structureHash)
 	if c.failIDs != nil {
 		return c.failIDs[tableID]
 	}
