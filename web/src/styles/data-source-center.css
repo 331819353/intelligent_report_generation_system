@@ -72,6 +72,7 @@
 .data-source-detail-actions button { border: 1px solid transparent; border-radius: 8px; padding: 8px 11px; font-size: 11px; font-weight: 800; }
 .data-source-detail-actions .action-edit { border-color: #fde68a; background: #fffbeb; color: #a16207; }
 .data-source-detail-actions .action-add-table { border-color: #bfdbfe; background: #eff6ff; color: #1d4ed8; }
+.data-source-detail-actions .action-refresh-all { border-color: #a7f3d0; background: #ecfdf3; color: #047857; }
 .data-source-detail-actions .action-test { border-color: #ddd6fe; background: #f5f3ff; color: #6d28d9; }
 .data-source-detail-actions .action-sync { border-color: #bae6fd; background: #f0f9ff; color: #0369a1; }
 .data-source-detail-actions .action-pause { border-color: #fed7aa; background: #fff7ed; color: #c2410c; }

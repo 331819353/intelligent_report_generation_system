@@ -47,6 +47,7 @@ Oracle 的非敏感连接选项放在 `config` 中：
 - `POST /api/v1/data-sources/{id}/sync`：同步元数据摘要。
 - `GET /api/v1/data-sources/{id}/tables/discovery`：只读取源库中当前可见的表清单，不创建资产。
 - `POST /api/v1/data-sources/{id}/tables/import`：导入用户选择的表资产。
+- `POST /api/v1/data-sources/{id}/tables/refresh`：刷新全部已纳管表的技术结构并重新执行 LLM 完善。
 - `POST /api/v1/data-sources/{id}/enable`：恢复已暂停数据源。
 - `POST /api/v1/data-sources/{id}/disable`：暂停运行中数据源。
 - `DELETE /api/v1/data-sources/{id}`：逻辑删除。
@@ -55,7 +56,7 @@ Oracle 的非敏感连接选项放在 `config` 中：
 
 同步会保存规范化的表与字段资产，同时保存完整 JSON 快照和 SHA-256 结构哈希。表、字段、约束或索引发生变化时记录 `ADDED`、`CHANGED`、`REMOVED` 差异；源库中消失的表和字段保留历史记录并标记为 `INACTIVE`，不做物理删除。
 
-配置中心的“新增数据表”采用两阶段流程：先通过 discovery 接口展示源库表清单，再由用户全选或选择一部分表。import 请求示例：
+配置中心的“新增数据表”采用两阶段流程：每次打开弹窗都先实时调用 discovery 接口刷新源库表清单，再由用户全选或选择一部分表。import 请求示例：
 
 ```json
 {
@@ -65,7 +66,9 @@ Oracle 的非敏感连接选项放在 `config` 中：
 }
 ```
 
-服务端只导入本次选中的表，采集其技术结构和最多三行样本，调用已配置的 LLM 完善业务元数据，并将最终表资产保存到 PostgreSQL。样本行仅用于本次模型请求，不写入元数据资产表。刷新单表结构复用同一流程；配置中心只展示最近一次元数据完善任务成功的活动资产。
+服务端只导入本次选中的表，采集其技术结构和最多三行样本，调用已配置的 LLM 完善业务元数据，并将最终表资产保存到 PostgreSQL。样本行仅用于本次模型请求，不写入元数据资产表。刷新单表结构复用同一流程；配置中心只展示至少有一次元数据完善成功记录的活动资产，因此已有资产本次刷新失败时仍保留旧业务元数据和可见性。
+
+全量刷新只处理 PostgreSQL 中已纳管且未删除的表，不会自动导入源库中的其他表，也不会复活已删除资产。每张表独立执行“采样 → 技术结构更新 → LLM 完善”，单表失败不会阻断后续表。响应的 `status` 可取 `SUCCEEDED`、`PARTIAL` 或 `FAILED`，并返回 `succeeded`、`technicalUpdated`、`failed` 计数和逐表阶段码；响应和审计均不包含样本数据或模型底层错误。
 
 数据源的修改、测试、暂停/恢复和删除操作管理连接本身；表资产的修改、刷新、停用/恢复和删除操作管理 PostgreSQL 中的资产记录，两组生命周期相互独立。
 

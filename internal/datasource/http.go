@@ -108,6 +108,22 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		auditDS(r, service, c.TenantID, c.Subject, "IMPORT_TABLE_ASSETS", r.PathValue("id"), map[string]any{"count": len(items)})
 		writeDSJSON(w, 201, map[string]any{"items": items, "total": len(items)})
 	})))
+	mux.Handle("POST /api/v1/data-sources/{id}/tables/refresh", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		result, err := service.RefreshTables(r.Context(), c.TenantID, c.Subject, r.PathValue("id"))
+		if err != nil {
+			slog.ErrorContext(r.Context(), "data source table refresh failed", "source_id", r.PathValue("id"), "error", err)
+			writeDSError(w, 502, "DATA_SOURCE_TABLE_REFRESH_FAILED", "failed to refresh and complete managed tables")
+			return
+		}
+		for _, item := range result.Items {
+			if item.Cause != nil {
+				slog.ErrorContext(r.Context(), "table asset refresh item failed", "source_id", r.PathValue("id"), "table", item.TableName, "stage", item.Stage, "code", item.Code, "error", item.Cause)
+			}
+		}
+		auditDS(r, service, c.TenantID, c.Subject, "REFRESH_TABLE_ASSETS", r.PathValue("id"), map[string]any{"status": result.Status, "total": result.Total, "succeeded": result.Succeeded, "technicalUpdated": result.TechnicalUpdated, "failed": result.Failed})
+		writeDSJSON(w, 200, result)
+	})))
 	action := func(run func(contextClaims, *http.Request, string) error) http.Handler {
 		return managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims, _ := auth.ClaimsFromContext(r.Context())

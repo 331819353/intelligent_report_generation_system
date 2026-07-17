@@ -73,6 +73,29 @@ func (r *PostgresRepository) ApplySelectedMetadata(ctx context.Context, source S
 	return ids, err
 }
 
+// ListActiveTableSelections 返回当前已纳管的活动表业务键，供全量刷新复用用户原有选择范围。
+func (r *PostgresRepository) ListActiveTableSelections(ctx context.Context, tenantID, sourceID string) (items []TableSelection, err error) {
+	items = []TableSelection{}
+	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT catalog_name,schema_name,table_name
+			FROM platform.metadata_tables WHERE data_source_id=$1 AND asset_status='ACTIVE'
+			ORDER BY catalog_name,schema_name,table_name`, sourceID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item TableSelection
+			if err := rows.Scan(&item.CatalogName, &item.SchemaName, &item.TableName); err != nil {
+				return err
+			}
+			items = append(items, item)
+		}
+		return rows.Err()
+	})
+	return items, err
+}
+
 func metadataTableKey(table MetadataTable) string {
 	return table.CatalogName + "\x1f" + table.SchemaName + "\x1f" + table.Name
 }

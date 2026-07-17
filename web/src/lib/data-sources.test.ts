@@ -21,6 +21,7 @@ test('数据源管理 API 使用结构化连接字段和明确生命周期端点
   await dataSourceAPI.update('source/id', connection)
   await dataSourceAPI.test('source/id')
   await dataSourceAPI.sync('source/id')
+  await dataSourceAPI.refreshTables('source/id')
   await dataSourceAPI.disable('source/id')
   await dataSourceAPI.enable('source/id')
   await dataSourceAPI.delete('source/id')
@@ -29,6 +30,7 @@ test('数据源管理 API 使用结构化连接字段和明确生命周期端点
     ['/api/v1/data-sources/source%2Fid', 'PUT'],
     ['/api/v1/data-sources/source%2Fid/test', 'POST'],
     ['/api/v1/data-sources/source%2Fid/sync', 'POST'],
+    ['/api/v1/data-sources/source%2Fid/tables/refresh', 'POST'],
     ['/api/v1/data-sources/source%2Fid/disable', 'POST'],
     ['/api/v1/data-sources/source%2Fid/enable', 'POST'],
     ['/api/v1/data-sources/source%2Fid', 'DELETE'],

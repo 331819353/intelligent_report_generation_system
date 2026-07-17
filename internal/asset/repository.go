@@ -28,7 +28,7 @@ func (r *Repository) SearchTables(ctx context.Context, tenantID string, search S
 			AND ($2='' OR t.data_source_id=$2::uuid) AND ($3='' OR d.source_type::text=$3) AND ($4='' OR t.asset_status::text=$4)
 			AND ($5='' OR t.sensitivity_level::text=$5) AND ($6='' OR $6=ANY(t.tags)) AND ($7='' OR t.visibility::text=$7)
 			AND ($8='' OR t.management_status=$8)
-			AND (NOT $9 OR COALESCE((SELECT j.status FROM platform.ai_metadata_jobs j WHERE j.table_id=t.id ORDER BY j.created_at DESC LIMIT 1),'PENDING')='SUCCEEDED')`
+			AND (NOT $9 OR EXISTS(SELECT 1 FROM platform.ai_metadata_jobs j WHERE j.table_id=t.id AND j.status='SUCCEEDED'))`
 		if err := tx.QueryRow(ctx, `SELECT count(*)`+where, args...).Scan(&total); err != nil {
 			return err
 		}

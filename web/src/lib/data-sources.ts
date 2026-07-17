@@ -63,6 +63,15 @@ export type DiscoveredTableRecord = {
   columns: Array<{ name: string; nativeType: string; canonicalType: string; nullable: boolean }>
 }
 
+export type DataSourceTableRefreshResult = {
+  status: 'SUCCEEDED' | 'PARTIAL' | 'FAILED'
+  total: number
+  succeeded: number
+  technicalUpdated: number
+  failed: number
+  items: Array<{ id?: string; tableName: string; status: 'SUCCEEDED' | 'FAILED'; stage: string; code?: string }>
+}
+
 export type DataSourceColumnRecord = {
   id: string
   tableId: string
@@ -112,6 +121,7 @@ export const dataSourceAPI = {
   sync: (id: string) => apiRequest<{ assets: number; snapshotHash: string }>(`/v1/data-sources/${encodeURIComponent(id)}/sync`, { method: 'POST', body: '{}' }),
   discoverTables: (id: string) => apiRequest<{ items: DiscoveredTableRecord[]; total: number }>(`/v1/data-sources/${encodeURIComponent(id)}/tables/discovery`, { cache: 'no-store' }),
   importTables: (id: string, tables: Array<{ catalogName: string; schemaName: string; tableName: string }>) => apiRequest<{ items: Array<{ id: string }>; total: number }>(`/v1/data-sources/${encodeURIComponent(id)}/tables/import`, { method: 'POST', body: JSON.stringify({ tables }) }),
+  refreshTables: (id: string) => apiRequest<DataSourceTableRefreshResult>(`/v1/data-sources/${encodeURIComponent(id)}/tables/refresh`, { method: 'POST', body: '{}' }),
   tables: listAllTables,
   columns: (tableId: string) => apiRequest<{ items: DataSourceColumnRecord[] }>(`/v1/assets/tables/${encodeURIComponent(tableId)}/columns`, { cache: 'no-store' }),
   updateTable: (tableId: string, input: { businessName: string; businessDescription: string; tags: string[]; sensitivityLevel: string; visibility: string; manualLocked: boolean; expectedVersion: number }) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/business-metadata`, { method: 'PUT', body: JSON.stringify(input) }),

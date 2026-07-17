@@ -12,7 +12,9 @@ type repo struct {
 	quota            Quota
 	statuses         []Status
 	selectedMetadata SyncResult
+	selectedBatches  []SyncResult
 	selectedIDs      map[string]string
+	activeSelections []TableSelection
 }
 
 func (r *repo) Count(context.Context, string) (int, error)              { return r.count, nil }
@@ -23,7 +25,11 @@ func (r *repo) Update(_ context.Context, s Source) (Source, error)      { r.sour
 func (r *repo) ApplyMetadata(context.Context, Source, SyncResult) error { return nil }
 func (r *repo) ApplySelectedMetadata(_ context.Context, _ Source, result SyncResult) (map[string]string, error) {
 	r.selectedMetadata = result
+	r.selectedBatches = append(r.selectedBatches, result)
 	return r.selectedIDs, nil
+}
+func (r *repo) ListActiveTableSelections(context.Context, string, string) ([]TableSelection, error) {
+	return r.activeSelections, nil
 }
 func (r *repo) Audit(context.Context, string, string, string, string, any) error { return nil }
 func (r *repo) UpdateStatus(_ context.Context, _, _ string, status Status, _ string) error {
@@ -62,12 +68,18 @@ func (c importConnector) Sample(context.Context, Source, MetadataTable, int) (Sa
 }
 
 type completingRecorder struct {
-	tableID string
-	rows    []map[string]any
+	tableID  string
+	tableIDs []string
+	rows     []map[string]any
+	failIDs  map[string]error
 }
 
 func (c *completingRecorder) CompleteTable(_ context.Context, _, _, tableID string, rows []map[string]any) error {
 	c.tableID, c.rows = tableID, rows
+	c.tableIDs = append(c.tableIDs, tableID)
+	if c.failIDs != nil {
+		return c.failIDs[tableID]
+	}
 	return nil
 }
 
@@ -133,6 +145,79 @@ func TestImportTablesPersistsOnlySelectionAndCompletesWithThreeSamples(t *testin
 	}
 	if len(completer.rows) != 3 || completer.rows[0]["id"] != 1 || completer.rows[2]["amount"] != 8.5 {
 		t.Fatalf("sample rows=%#v", completer.rows)
+	}
+}
+
+func TestRefreshTablesReloadsEveryManagedTableWithoutImportingOthers(t *testing.T) {
+	orders := MetadataTable{SchemaName: "sales", Name: "orders", Columns: []MetadataColumn{{Name: "id"}}}
+	customers := MetadataTable{SchemaName: "sales", Name: "customers", Columns: []MetadataColumn{{Name: "id"}}}
+	unmanaged := MetadataTable{SchemaName: "sales", Name: "audit_log", Columns: []MetadataColumn{{Name: "id"}}}
+	r := &repo{
+		source:           Source{ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive},
+		quota:            Quota{MaxDataSources: 10},
+		activeSelections: []TableSelection{{SchemaName: "sales", TableName: "orders"}, {SchemaName: "sales", TableName: "customers"}},
+		selectedIDs: map[string]string{
+			metadataTableKey(orders):    "table-orders",
+			metadataTableKey(customers): "table-customers",
+		},
+	}
+	connector := importConnector{
+		connector:  connector{kind: TypeMySQL},
+		discovered: SyncResult{Tables: []MetadataTable{orders, customers, unmanaged}},
+		sample:     SampleResult{Columns: []string{"id"}, Rows: [][]any{{1}, {2}, {3}}},
+	}
+	completer := &completingRecorder{}
+	service := NewService(r, connector)
+	service.SetTableCompleter(completer)
+
+	result, err := service.RefreshTables(context.Background(), "tenant-1", "actor-1", "source-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "SUCCEEDED" || result.Succeeded != 2 || result.Failed != 0 || len(r.selectedBatches) != 2 {
+		t.Fatalf("result=%#v batches=%#v", result, r.selectedBatches)
+	}
+	if r.selectedBatches[0].Tables[0].Name != "orders" || r.selectedBatches[1].Tables[0].Name != "customers" {
+		t.Fatalf("unexpected refresh scope=%#v", r.selectedBatches)
+	}
+	if len(completer.tableIDs) != 2 || completer.tableIDs[0] != "table-orders" || completer.tableIDs[1] != "table-customers" {
+		t.Fatalf("completed tables=%#v", completer.tableIDs)
+	}
+}
+
+func TestRefreshTablesContinuesAfterOneLLMFailure(t *testing.T) {
+	orders := MetadataTable{SchemaName: "sales", Name: "orders", Columns: []MetadataColumn{{Name: "id"}}}
+	customers := MetadataTable{SchemaName: "sales", Name: "customers", Columns: []MetadataColumn{{Name: "id"}}}
+	r := &repo{
+		source:           Source{ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive},
+		quota:            Quota{MaxDataSources: 10},
+		activeSelections: []TableSelection{{SchemaName: "sales", TableName: "orders"}, {SchemaName: "sales", TableName: "customers"}},
+		selectedIDs: map[string]string{
+			metadataTableKey(orders):    "table-orders",
+			metadataTableKey(customers): "table-customers",
+		},
+	}
+	connector := importConnector{
+		connector:  connector{kind: TypeMySQL},
+		discovered: SyncResult{Tables: []MetadataTable{orders, customers}},
+		sample:     SampleResult{Columns: []string{"id"}, Rows: [][]any{{1}, {2}, {3}}},
+	}
+	completer := &completingRecorder{failIDs: map[string]error{"table-orders": errors.New("provider unavailable")}}
+	service := NewService(r, connector)
+	service.SetTableCompleter(completer)
+
+	result, err := service.RefreshTables(context.Background(), "tenant-1", "actor-1", "source-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "PARTIAL" || result.Succeeded != 1 || result.Failed != 1 || result.TechnicalUpdated != 2 {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(completer.tableIDs) != 2 || completer.tableIDs[1] != "table-customers" {
+		t.Fatalf("refresh stopped before later table: %#v", completer.tableIDs)
+	}
+	if result.Items[0].Code != "LLM_COMPLETION_FAILED" || result.Items[1].Status != "SUCCEEDED" {
+		t.Fatalf("items=%#v", result.Items)
 	}
 }
 func TestConnectionFailureMovesToError(t *testing.T) {

@@ -174,6 +174,98 @@ func (s *Service) ImportTables(ctx context.Context, tenantID, actorID, id string
 	if len(selections) == 0 || len(selections) > 100 {
 		return nil, errors.New("between 1 and 100 tables must be selected")
 	}
+	return s.importTables(ctx, tenantID, actorID, id, selections)
+}
+
+// RefreshTables 按已纳管范围逐表执行采样、技术结构更新和 LLM 完善，单表失败不阻断后续表。
+func (s *Service) RefreshTables(ctx context.Context, tenantID, actorID, id string) (TableRefreshResult, error) {
+	result := TableRefreshResult{Items: []TableRefreshItem{}}
+	source, connector, err := s.load(ctx, tenantID, id)
+	if err != nil {
+		return result, err
+	}
+	if source.Status != StatusActive {
+		return result, fmt.Errorf("cannot refresh tables from source in %s status", source.Status)
+	}
+	if s.completer == nil {
+		return result, errors.New("metadata AI completer is not configured")
+	}
+	sampler, ok := connector.(MetadataSampler)
+	if !ok {
+		return result, errors.New("connector does not support metadata sampling")
+	}
+	selections, err := s.repo.ListActiveTableSelections(ctx, tenantID, id)
+	if err != nil {
+		return result, err
+	}
+	result.Total = len(selections)
+	if len(selections) == 0 {
+		result.Status = "SUCCEEDED"
+		return result, nil
+	}
+	discovered, err := connector.Sync(ctx, source)
+	if err != nil {
+		return result, err
+	}
+	available := make(map[string]MetadataTable, len(discovered.Tables))
+	for _, table := range discovered.Tables {
+		available[metadataTableKey(table)] = table
+	}
+	for _, selection := range selections {
+		item := TableRefreshItem{TableName: selection.TableName, Status: "FAILED", Stage: "DISCOVERY"}
+		key := selection.CatalogName + "\x1f" + selection.SchemaName + "\x1f" + selection.TableName
+		table, exists := available[key]
+		if !exists {
+			item.Code = "SOURCE_TABLE_NOT_FOUND"
+			result.Items = append(result.Items, item)
+			result.Failed++
+			continue
+		}
+		sample, err := sampler.Sample(ctx, source, table, 3)
+		if err != nil {
+			item.Stage, item.Code, item.Cause = "SAMPLE", "SAMPLE_FAILED", err
+			result.Items = append(result.Items, item)
+			result.Failed++
+			continue
+		}
+		metadata, err := selectedMetadataResult([]MetadataTable{table})
+		if err != nil {
+			item.Stage, item.Code, item.Cause = "PERSISTENCE", "METADATA_BUILD_FAILED", err
+			result.Items = append(result.Items, item)
+			result.Failed++
+			continue
+		}
+		ids, err := s.repo.ApplySelectedMetadata(ctx, source, metadata)
+		if err != nil {
+			item.Stage, item.Code, item.Cause = "PERSISTENCE", "METADATA_UPDATE_FAILED", err
+			result.Items = append(result.Items, item)
+			result.Failed++
+			continue
+		}
+		item.ID = ids[key]
+		result.TechnicalUpdated++
+		if err := s.completer.CompleteTable(ctx, tenantID, actorID, item.ID, sampleRows(sample)); err != nil {
+			item.Stage, item.Code, item.Cause = "LLM", "LLM_COMPLETION_FAILED", err
+			result.Items = append(result.Items, item)
+			result.Failed++
+			continue
+		}
+		item.Status, item.Stage = "SUCCEEDED", "COMPLETE"
+		result.Items = append(result.Items, item)
+		result.Succeeded++
+	}
+	switch {
+	case result.Failed == 0:
+		result.Status = "SUCCEEDED"
+	case result.Succeeded == 0:
+		result.Status = "FAILED"
+	default:
+		result.Status = "PARTIAL"
+	}
+	return result, nil
+}
+
+func (s *Service) importTables(ctx context.Context, tenantID, actorID, id string, selections []TableSelection) ([]ImportedTable, error) {
 	source, connector, err := s.load(ctx, tenantID, id)
 	if err != nil {
 		return nil, err
@@ -207,12 +299,10 @@ func (s *Service) ImportTables(ctx context.Context, tenantID, actorID, id string
 		seen[key] = true
 		selected = append(selected, table)
 	}
-	payload, err := json.Marshal(selected)
+	result, err := selectedMetadataResult(selected)
 	if err != nil {
 		return nil, err
 	}
-	hash := sha256.Sum256(payload)
-	result := SyncResult{Assets: len(selected), Watermark: time.Now().UTC().Format(time.RFC3339Nano), SnapshotHash: hex.EncodeToString(hash[:]), Tables: selected}
 	ids, err := s.repo.ApplySelectedMetadata(ctx, source, result)
 	if err != nil {
 		return nil, err
@@ -231,6 +321,15 @@ func (s *Service) ImportTables(ctx context.Context, tenantID, actorID, id string
 		imported = append(imported, ImportedTable{ID: tableID, Table: table, Samples: rows})
 	}
 	return imported, nil
+}
+
+func selectedMetadataResult(tables []MetadataTable) (SyncResult, error) {
+	payload, err := json.Marshal(tables)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	hash := sha256.Sum256(payload)
+	return SyncResult{Assets: len(tables), Watermark: time.Now().UTC().Format(time.RFC3339Nano), SnapshotHash: hex.EncodeToString(hash[:]), Tables: tables}, nil
 }
 
 func sampleRows(sample SampleResult) []map[string]any {

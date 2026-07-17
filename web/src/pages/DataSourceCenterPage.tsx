@@ -246,6 +246,21 @@ export function DataSourceCenterPage() {
     }
   }
 
+  const refreshAllTableAssets = async (source: DataSourceRecord) => {
+    setBusyAction(`refresh-tables:${source.id}`)
+    try {
+      const result = await dataSourceAPI.refreshTables(source.id)
+      if (result.total === 0) setNotice({ tone: 'success', message: '当前没有可刷新的数据表资产' })
+      else if (result.status === 'SUCCEEDED') setNotice({ tone: 'success', message: `已刷新 ${result.succeeded} 张表的结构并重新完成 LLM 加工` })
+      else setNotice({ tone: 'error', message: `元数据刷新完成：${result.succeeded} 张成功，${result.failed} 张失败` })
+      await loadTableStructures(source.id)
+    } catch (cause) {
+      setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '刷新全部元数据失败' })
+    } finally {
+      setBusyAction('')
+    }
+  }
+
   const deleteTableAsset = async () => {
     const source = dialog?.source
     const table = dialog?.table
@@ -366,7 +381,7 @@ export function DataSourceCenterPage() {
               const unavailable = source.status === 'SYNCING' || source.status === 'DELETING'
               const canTest = !unavailable && source.status !== 'DISABLED'
               return <article className="data-source-card" role="listitem" key={source.id}>
-                <button className="data-source-card-open" type="button" aria-label={`查看${source.name}详情和表结构`} onClick={() => openExisting('view', source)}>
+                <button className="data-source-card-open" type="button" aria-label={`管理${source.name}的数据表资产`} onClick={() => openExisting('view', source)}>
                   <span className={`data-source-icon ${source.type.toLowerCase()}`}>{source.type === 'EXCEL' ? 'XL' : 'DB'}</span>
                   <span className="data-source-main"><span><strong role="heading" aria-level={3}>{source.name}</strong><span className={`data-source-status ${source.status.toLowerCase()}`}>{statusLabels[source.status]}</span></span><span className="data-source-subtitle">{typeLabels[source.type]} · {source.code}</span></span>
                   <span className="data-source-card-facts"><span><small>地址</small><strong>{configText(source, 'host') || '文件数据源'}{configText(source, 'port') ? `:${configText(source, 'port')}` : ''}</strong></span><span><small>数据库</small><strong>{configText(source, 'database') || '—'}</strong></span></span>
@@ -402,18 +417,12 @@ export function DataSourceCenterPage() {
         </form>
       </Dialog>}
 
-      {dialog?.mode === 'view' && dialog.source && <Dialog title="数据源详情" wide onClose={closeDialog}>
+      {dialog?.mode === 'view' && dialog.source && <Dialog title="数据表资产" wide onClose={closeDialog}>
         <div className="data-source-detail">
-          <header><div><strong>{dialog.source.name}</strong><small>{typeLabels[dialog.source.type]} · {dialog.source.code}</small></div><span className={`data-source-status ${dialog.source.status.toLowerCase()}`}>{statusLabels[dialog.source.status]}</span></header>
-          <div className="data-source-detail-actions" aria-label="数据源操作">
+          <div className="data-source-detail-actions" aria-label="表资产操作">
             <button className="action-add-table" type="button" disabled={actionBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void openTableSelection(dialog.source!)}>新增数据表</button>
-            <button className="action-test" type="button" disabled={actionBusy || dialog.source.status === 'DISABLED' || dialog.source.status === 'SYNCING' || dialog.source.status === 'DELETING'} onClick={() => void testConnection(dialog.source!)}>{busyAction === `test:${dialog.source.id}` ? '测试中…' : '测试连接'}</button>
+            <button className="action-refresh-all" type="button" disabled={actionBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void refreshAllTableAssets(dialog.source!)}>{busyAction === `refresh-tables:${dialog.source.id}` ? '刷新加工中…' : '刷新全部元数据'}</button>
           </div>
-          <dl className="data-source-connection-summary">
-            <div><dt>Host</dt><dd>{configText(dialog.source, 'host') || '—'}</dd></div><div><dt>Port</dt><dd>{configText(dialog.source, 'port') || '—'}</dd></div>
-            <div><dt>Database</dt><dd>{configText(dialog.source, 'database') || '—'}</dd></div><div><dt>Username</dt><dd>{configText(dialog.source, 'username') || '—'}</dd></div>
-            <div><dt>配置版本</dt><dd>V{dialog.source.version}</dd></div><div><dt>密码</dt><dd>已安全保存，不可查看</dd></div>
-          </dl>
           <section className="data-source-structure" aria-label="表结构">
             <header><div><span className="eyebrow">元数据结构</span><h3>表与字段</h3></div><strong>{metadataTables.length}<small> 张表</small></strong></header>
             {metadataLoading ? <div className="data-source-structure-state" role="status">正在加载表结构…</div>
@@ -440,7 +449,7 @@ export function DataSourceCenterPage() {
         <div className="data-source-table-picker">
           <header><div><strong>{dialog.source.name}</strong><span>从源库选择需要完善并纳入管理的数据表</span></div><small>选中后采集表结构与 3 行样本，经 LLM 完善后存入 PostgreSQL。</small></header>
           {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
-          {discoveryLoading ? <div className="data-source-structure-state" role="status">正在读取源库表清单…</div> : <>
+          {discoveryLoading ? <div className="data-source-structure-state" role="status">正在从数据源刷新表清单…</div> : <>
             <div className="data-source-table-picker-toolbar">
               <label><input type="checkbox" checked={discoveredTables.filter(table => !metadataTables.some(asset => assetTableKey(asset) === discoveredTableKey(table))).length > 0 && selectedTableKeys.length === discoveredTables.filter(table => !metadataTables.some(asset => assetTableKey(asset) === discoveredTableKey(table))).length} onChange={event => {
                 if (event.target.checked) setSelectedTableKeys(discoveredTables.filter(table => !metadataTables.some(asset => assetTableKey(asset) === discoveredTableKey(table))).map(discoveredTableKey))

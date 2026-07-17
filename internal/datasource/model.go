@@ -92,6 +92,22 @@ type ImportedTable struct {
 	Table   MetadataTable    `json:"table"`
 	Samples []map[string]any `json:"-"`
 }
+type TableRefreshItem struct {
+	ID        string `json:"id,omitempty"`
+	TableName string `json:"tableName"`
+	Status    string `json:"status"`
+	Stage     string `json:"stage"`
+	Code      string `json:"code,omitempty"`
+	Cause     error  `json:"-"`
+}
+type TableRefreshResult struct {
+	Status           string             `json:"status"`
+	Total            int                `json:"total"`
+	Succeeded        int                `json:"succeeded"`
+	TechnicalUpdated int                `json:"technicalUpdated"`
+	Failed           int                `json:"failed"`
+	Items            []TableRefreshItem `json:"items"`
+}
 type MetadataTable struct {
 	CatalogName       string               `json:"catalogName"`
 	SchemaName        string               `json:"schemaName"`
@@ -151,6 +167,7 @@ type Repository interface {
 	Update(context.Context, Source) (Source, error)
 	ApplyMetadata(context.Context, Source, SyncResult) error
 	ApplySelectedMetadata(context.Context, Source, SyncResult) (map[string]string, error)
+	ListActiveTableSelections(context.Context, string, string) ([]TableSelection, error)
 	Audit(context.Context, string, string, string, string, any) error
 	UpdateStatus(context.Context, string, string, Status, string) error
 	Quota(context.Context, string) (Quota, error)
