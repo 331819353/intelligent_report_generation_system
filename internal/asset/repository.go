@@ -16,21 +16,23 @@ type Repository struct{ pool *pgxpool.Pool }
 // NewRepository 创建数据资产读写仓储。
 func NewRepository(pool *pgxpool.Pool) *Repository { return &Repository{pool: pool} }
 
-const tableSelect = `t.id::text,t.data_source_id::text,d.name,d.source_type::text,COALESCE((SELECT fv.id::text FROM platform.file_assets fa JOIN platform.file_asset_versions fv ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version WHERE fa.id=d.file_asset_id),''),t.catalog_name,t.schema_name,t.table_name,t.table_type,t.source_comment,t.business_name,t.business_description,t.tags,t.sensitivity_level::text,t.visibility::text,t.manual_locked,t.asset_status::text,t.structure_hash,t.metadata_version,t.business_version,(SELECT count(*) FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE'),t.last_sync_at::text`
+const tableSelect = `t.id::text,t.data_source_id::text,d.name,d.source_type::text,COALESCE((SELECT fv.id::text FROM platform.file_assets fa JOIN platform.file_asset_versions fv ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version WHERE fa.id=d.file_asset_id),''),t.catalog_name,t.schema_name,t.table_name,t.table_type,t.source_comment,t.business_name,t.business_description,t.tags,t.sensitivity_level::text,t.visibility::text,t.manual_locked,t.asset_status::text,t.management_status,COALESCE((SELECT j.status FROM platform.ai_metadata_jobs j WHERE j.table_id=t.id ORDER BY j.created_at DESC LIMIT 1),'PENDING'),t.structure_hash,t.metadata_version,t.business_version,(SELECT count(*) FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE'),t.last_sync_at::text`
 
 // SearchTables 按租户、关键词和分类条件分页检索表资产。
 func (r *Repository) SearchTables(ctx context.Context, tenantID string, search Search) (items []Table, total int, err error) {
 	items = []Table{}
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
-		args := []any{search.Query, search.DataSourceID, search.SourceType, search.Status, search.Sensitivity, search.Tag, search.Visibility}
+		args := []any{search.Query, search.DataSourceID, search.SourceType, search.Status, search.Sensitivity, search.Tag, search.Visibility, search.ManagementStatus, search.EnrichedOnly}
 		where := ` FROM platform.metadata_tables t JOIN platform.data_sources d ON d.id=t.data_source_id WHERE
 			($1='' OR t.table_name ILIKE '%'||$1||'%' OR t.business_name ILIKE '%'||$1||'%' OR t.business_description ILIKE '%'||$1||'%')
 			AND ($2='' OR t.data_source_id=$2::uuid) AND ($3='' OR d.source_type::text=$3) AND ($4='' OR t.asset_status::text=$4)
-			AND ($5='' OR t.sensitivity_level::text=$5) AND ($6='' OR $6=ANY(t.tags)) AND ($7='' OR t.visibility::text=$7)`
+			AND ($5='' OR t.sensitivity_level::text=$5) AND ($6='' OR $6=ANY(t.tags)) AND ($7='' OR t.visibility::text=$7)
+			AND ($8='' OR t.management_status=$8)
+			AND (NOT $9 OR COALESCE((SELECT j.status FROM platform.ai_metadata_jobs j WHERE j.table_id=t.id ORDER BY j.created_at DESC LIMIT 1),'PENDING')='SUCCEEDED')`
 		if err := tx.QueryRow(ctx, `SELECT count(*)`+where, args...).Scan(&total); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT `+tableSelect+where+` ORDER BY COALESCE(NULLIF(t.business_name,''),t.table_name),t.id LIMIT $8 OFFSET $9`, append(args, search.Limit, search.Offset)...)
+		rows, err := tx.Query(ctx, `SELECT `+tableSelect+where+` ORDER BY COALESCE(NULLIF(t.business_name,''),t.table_name),t.id LIMIT $10 OFFSET $11`, append(args, search.Limit, search.Offset)...)
 		if err != nil {
 			return err
 		}
@@ -57,7 +59,7 @@ func (r *Repository) GetTable(ctx context.Context, tenantID, id string) (item Ta
 
 // scanTable 统一数据库列到表资产模型的映射顺序。
 func scanTable(row interface{ Scan(...any) error }, item *Table) error {
-	return row.Scan(&item.ID, &item.DataSourceID, &item.DataSourceName, &item.DataSourceType, &item.FileVersionID, &item.CatalogName, &item.SchemaName, &item.TableName, &item.TableType, &item.SourceComment, &item.BusinessName, &item.BusinessDescription, &item.Tags, &item.SensitivityLevel, &item.Visibility, &item.ManualLocked, &item.AssetStatus, &item.StructureHash, &item.MetadataVersion, &item.BusinessVersion, &item.ColumnCount, &item.LastSyncAt)
+	return row.Scan(&item.ID, &item.DataSourceID, &item.DataSourceName, &item.DataSourceType, &item.FileVersionID, &item.CatalogName, &item.SchemaName, &item.TableName, &item.TableType, &item.SourceComment, &item.BusinessName, &item.BusinessDescription, &item.Tags, &item.SensitivityLevel, &item.Visibility, &item.ManualLocked, &item.AssetStatus, &item.ManagementStatus, &item.EnrichmentStatus, &item.StructureHash, &item.MetadataVersion, &item.BusinessVersion, &item.ColumnCount, &item.LastSyncAt)
 }
 
 // ListColumns 返回表下按序排列的字段资产。
@@ -124,6 +126,44 @@ func (r *Repository) UpdateColumn(ctx context.Context, tenantID, actorID, id str
 		return tx.QueryRow(ctx, `SELECT id::text,table_id::text,column_name,ordinal_position,source_comment,native_type,canonical_type,nullable,business_name,business_description,tags,sensitivity_level::text,semantic_type,manual_locked,asset_status::text,business_version FROM platform.metadata_columns WHERE id=$1`, id).Scan(&item.ID, &item.TableID, &item.ColumnName, &item.OrdinalPosition, &item.SourceComment, &item.NativeType, &item.CanonicalType, &item.Nullable, &item.BusinessName, &item.BusinessDescription, &item.Tags, &item.SensitivityLevel, &item.SemanticType, &item.ManualLocked, &item.AssetStatus, &item.BusinessVersion)
 	})
 	return item, err
+}
+
+// SetTableManagementStatus 只改变 PostgreSQL 表资产可用性，不对源数据库执行任何操作。
+func (r *Repository) SetTableManagementStatus(ctx context.Context, tenantID, actorID, id, status string) (Table, error) {
+	if status != "ENABLED" && status != "DISABLED" {
+		return Table{}, errors.New("invalid table management status")
+	}
+	err := database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE platform.metadata_tables SET management_status=$1 WHERE id=$2 AND asset_status='ACTIVE'`, status, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return errors.New("table asset not found")
+		}
+		return audit(ctx, tx, tenantID, actorID, "UPDATE_ASSET_STATUS", "TABLE_ASSET", id, map[string]string{"managementStatus": status})
+	})
+	if err != nil {
+		return Table{}, err
+	}
+	return r.GetTable(ctx, tenantID, id)
+}
+
+// DeleteTableAsset 软删除 PostgreSQL 资产及字段，不删除或修改源库原表。
+func (r *Repository) DeleteTableAsset(ctx context.Context, tenantID, actorID, id string) error {
+	return database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE platform.metadata_tables SET asset_status='INACTIVE',management_status='DISABLED' WHERE id=$1 AND asset_status='ACTIVE'`, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return errors.New("table asset not found")
+		}
+		if _, err := tx.Exec(ctx, `UPDATE platform.metadata_columns SET asset_status='INACTIVE' WHERE table_id=$1`, id); err != nil {
+			return err
+		}
+		return audit(ctx, tx, tenantID, actorID, "DELETE_TABLE_ASSET", "TABLE_ASSET", id, map[string]any{"sourceTableAffected": false})
+	})
 }
 
 // ListDiffs 查询数据源最近的元数据结构变化记录。

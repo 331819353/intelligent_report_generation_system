@@ -478,7 +478,7 @@ func loadDependencySnapshot(ctx context.Context, tx pgx.Tx, dependency Dependenc
 	switch dependency.Type {
 	case "TABLE":
 		err = tx.QueryRow(ctx, `SELECT metadata_version,structure_hash FROM platform.metadata_tables
-			WHERE id::text=$1 AND asset_status='ACTIVE' FOR SHARE`, dependency.ID).Scan(&snapshot.Version, &snapshot.Hash)
+			WHERE id::text=$1 AND asset_status='ACTIVE' AND management_status='ENABLED' FOR SHARE`, dependency.ID).Scan(&snapshot.Version, &snapshot.Hash)
 	case "FILE_VERSION":
 		err = tx.QueryRow(ctx, `SELECT version,sha256 FROM platform.file_asset_versions WHERE id::text=$1 FOR SHARE`, dependency.ID).
 			Scan(&snapshot.Version, &snapshot.Hash)
@@ -621,7 +621,7 @@ func validateUpstreams(ctx context.Context, tx pgx.Tx, document Document) error 
 		switch node.Type {
 		case "TABLE":
 			var exists bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM platform.metadata_tables WHERE id::text=$1 AND data_source_id::text=$2 AND asset_status='ACTIVE')`, node.TableID, node.DataSourceID).Scan(&exists); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM platform.metadata_tables WHERE id::text=$1 AND data_source_id::text=$2 AND asset_status='ACTIVE' AND management_status='ENABLED')`, node.TableID, node.DataSourceID).Scan(&exists); err != nil {
 				return err
 			}
 			if !exists {

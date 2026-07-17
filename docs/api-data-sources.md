@@ -14,12 +14,17 @@ MySQL 示例：
   "code": "sales_mysql",
   "name": "销售 MySQL",
   "type": "MYSQL",
-  "config": {},
-  "secretRef": "env://MYSQL_SOURCE_SECRET"
+  "host": "mysql.internal",
+  "port": 3306,
+  "database": "sales",
+  "username": "report_reader",
+  "password": "仅在请求中提交的数据库密码"
 }
 ```
 
-Oracle 将 `type` 改为 `ORACLE`，并使用 `env://ORACLE_SOURCE_SECRET`。接口和数据库均不接收明文密码；环境变量的值是包含 `host`、`port`、`database`、`username`、`password` 的 JSON 对象。生产环境应将 `env://` 解析器替换为正式密钥管理服务。
+Oracle 将 `type` 改为 `ORACLE`，通常使用端口 `1521`，`database` 填写 Service Name 或 SID。接口不接收 JDBC 连接串；`host`、`port`、`database`、`username` 必须拆分提交。
+
+密码仅在 HTTPS 请求处理期间短暂存在。Go 服务使用 `DATA_SOURCE_CREDENTIAL_KEY` 对完整连接凭据执行 AES-256-GCM 加密，控制库只保存不可回显的内部引用；列表、详情、审计和错误响应均不返回密码或引用。生产环境必须通过密钥系统注入独立的 32 字节 Base64 密钥，不能使用 `.env.example` 的开发默认值。
 
 Oracle 的非敏感连接选项放在 `config` 中：
 
@@ -32,26 +37,43 @@ Oracle 的非敏感连接选项放在 `config` 中：
 
 `oracleConnectMode` 可取 `SERVICE_NAME` 或 `SID`。Schema 名会转为大写、去重并严格校验，最多配置 20 个；实际可同步范围仍受源库账号权限约束。
 
-更新配置后状态回到 `DRAFT`，需重新执行连接测试。
+更新配置后状态回到 `DRAFT`，需重新执行连接测试。编辑请求仍需提交非敏感连接字段；`password` 传空字符串表示保留已保存密码，填写新值表示轮换密码。
 
 ## 查询和状态操作
 
 - `GET /api/v1/data-sources`：列表。
+- `GET /api/v1/data-sources/{id}`：查看详情；返回 host、port、database、username，不返回密码。
 - `POST /api/v1/data-sources/{id}/test`：测试连接，成功后变为 `ACTIVE`。
 - `POST /api/v1/data-sources/{id}/sync`：同步元数据摘要。
-- `POST /api/v1/data-sources/{id}/enable`：启用。
-- `POST /api/v1/data-sources/{id}/disable`：停用。
+- `GET /api/v1/data-sources/{id}/tables/discovery`：只读取源库中当前可见的表清单，不创建资产。
+- `POST /api/v1/data-sources/{id}/tables/import`：导入用户选择的表资产。
+- `POST /api/v1/data-sources/{id}/enable`：恢复已暂停数据源。
+- `POST /api/v1/data-sources/{id}/disable`：暂停运行中数据源。
 - `DELETE /api/v1/data-sources/{id}`：逻辑删除。
 
 状态流转为 `DRAFT →（连接测试成功）→ ACTIVE → SYNCING → ACTIVE`；失败进入 `ERROR` 后必须重新测试，不能直接启用或同步。只有已验证后被停用的 `DISABLED` 数据源可以直接重新启用。删除经过 `DELETING → DELETED`。
 
 同步会保存规范化的表与字段资产，同时保存完整 JSON 快照和 SHA-256 结构哈希。表、字段、约束或索引发生变化时记录 `ADDED`、`CHANGED`、`REMOVED` 差异；源库中消失的表和字段保留历史记录并标记为 `INACTIVE`，不做物理删除。
 
+配置中心的“新增数据表”采用两阶段流程：先通过 discovery 接口展示源库表清单，再由用户全选或选择一部分表。import 请求示例：
+
+```json
+{
+  "tables": [
+    {"catalogName": "sales", "schemaName": "sales", "tableName": "orders"}
+  ]
+}
+```
+
+服务端只导入本次选中的表，采集其技术结构和最多三行样本，调用已配置的 LLM 完善业务元数据，并将最终表资产保存到 PostgreSQL。样本行仅用于本次模型请求，不写入元数据资产表。刷新单表结构复用同一流程；配置中心只展示最近一次元数据完善任务成功的活动资产。
+
+数据源的修改、测试、暂停/恢复和删除操作管理连接本身；表资产的修改、刷新、停用/恢复和删除操作管理 PostgreSQL 中的资产记录，两组生命周期相互独立。
+
 Python Connector 按数据源维护有界连接池，并同时执行每租户查询并发上限和服务进程全局上限。Go 核心从租户配额表下发限制，但不会向 Python 服务日志或响应传递明文凭证。
 
 连接池支持空闲 TTL 淘汰，更新或删除数据源时由 Go 调用内部关闭接口释放旧连接。查询请求可携带唯一 `queryId`，执行器可调用 `/v1/query/cancel`：Oracle 使用驱动取消，MySQL 关闭正在执行的连接。只读查询在执行前进行失败关闭的词法检查，拒绝 CTE-DML、DDL、事务、锁、文件导出、延时函数、注释和多语句；源数据库账号仍必须只授予只读权限，不能依赖应用校验代替数据库授权。
 
-数据源创建、更新、测试、同步、启停和删除均记录审计摘要；审计内容不包含连接配置、密码或 `secretRef`。
+数据源创建、更新、测试、同步、暂停、恢复和删除均记录审计摘要；审计内容不包含连接配置、密码或内部凭证引用。
 
 ## Excel 文件版本
 

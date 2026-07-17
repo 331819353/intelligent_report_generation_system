@@ -22,6 +22,20 @@ def test_metadata_sync_requires_internal_auth() -> None:
     assert response.status_code == 401
 
 
+def test_metadata_sample_rejects_unsafe_table_name_before_connecting() -> None:
+    response = TestClient(app).post(
+        "/v1/metadata/sample",
+        headers={"X-Connector-Token": "local_connector_token_change_me"},
+        json={
+            "connection": {"source_type": "MYSQL", "host": "none", "port": 3306, "database": "db", "username": "u", "password": "p"},
+            "schema_name": "sales",
+            "table_name": "orders; DROP TABLE users",
+            "max_rows": 3,
+        },
+    )
+    assert response.status_code == 400
+
+
 def test_query_rejects_writes_before_connecting() -> None:
     response = TestClient(app).post(
         "/v1/query",

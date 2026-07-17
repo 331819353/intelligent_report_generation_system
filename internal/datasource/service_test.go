@@ -7,18 +7,24 @@ import (
 )
 
 type repo struct {
-	source   Source
-	count    int
-	quota    Quota
-	statuses []Status
+	source           Source
+	count            int
+	quota            Quota
+	statuses         []Status
+	selectedMetadata SyncResult
+	selectedIDs      map[string]string
 }
 
-func (r *repo) Count(context.Context, string) (int, error)                       { return r.count, nil }
-func (r *repo) Create(_ context.Context, s Source) (Source, error)               { r.source = s; return s, nil }
-func (r *repo) List(context.Context, string) ([]Source, error)                   { return []Source{r.source}, nil }
-func (r *repo) Get(context.Context, string, string) (Source, error)              { return r.source, nil }
-func (r *repo) Update(_ context.Context, s Source) (Source, error)               { r.source = s; return s, nil }
-func (r *repo) ApplyMetadata(context.Context, Source, SyncResult) error          { return nil }
+func (r *repo) Count(context.Context, string) (int, error)              { return r.count, nil }
+func (r *repo) Create(_ context.Context, s Source) (Source, error)      { r.source = s; return s, nil }
+func (r *repo) List(context.Context, string) ([]Source, error)          { return []Source{r.source}, nil }
+func (r *repo) Get(context.Context, string, string) (Source, error)     { return r.source, nil }
+func (r *repo) Update(_ context.Context, s Source) (Source, error)      { r.source = s; return s, nil }
+func (r *repo) ApplyMetadata(context.Context, Source, SyncResult) error { return nil }
+func (r *repo) ApplySelectedMetadata(_ context.Context, _ Source, result SyncResult) (map[string]string, error) {
+	r.selectedMetadata = result
+	return r.selectedIDs, nil
+}
 func (r *repo) Audit(context.Context, string, string, string, string, any) error { return nil }
 func (r *repo) UpdateStatus(_ context.Context, _, _ string, status Status, _ string) error {
 	r.source.Status = status
@@ -40,6 +46,31 @@ func (c connector) Sync(context.Context, Source) (SyncResult, error) {
 	return SyncResult{Assets: 3}, nil
 }
 func (c connector) Close(context.Context, Source) error { return nil }
+
+type importConnector struct {
+	connector
+	discovered SyncResult
+	sample     SampleResult
+}
+
+func (c importConnector) Sync(context.Context, Source) (SyncResult, error) {
+	return c.discovered, nil
+}
+
+func (c importConnector) Sample(context.Context, Source, MetadataTable, int) (SampleResult, error) {
+	return c.sample, nil
+}
+
+type completingRecorder struct {
+	tableID string
+	rows    []map[string]any
+}
+
+func (c *completingRecorder) CompleteTable(_ context.Context, _, _, tableID string, rows []map[string]any) error {
+	c.tableID, c.rows = tableID, rows
+	return nil
+}
+
 func TestLifecycleAndQuota(t *testing.T) {
 	r := &repo{quota: Quota{MaxDataSources: 1}}
 	s := NewService(r, connector{kind: TypeMySQL})
@@ -66,6 +97,42 @@ func TestLifecycleAndQuota(t *testing.T) {
 	r.count = 1
 	if _, err := s.Create(context.Background(), source); err == nil {
 		t.Fatal("quota was not enforced")
+	}
+}
+
+func TestImportTablesPersistsOnlySelectionAndCompletesWithThreeSamples(t *testing.T) {
+	orders := MetadataTable{SchemaName: "sales", Name: "orders", Columns: []MetadataColumn{{Name: "id"}, {Name: "amount"}}}
+	customers := MetadataTable{SchemaName: "sales", Name: "customers", Columns: []MetadataColumn{{Name: "id"}}}
+	tableKey := metadataTableKey(orders)
+	r := &repo{
+		source:      Source{ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive},
+		quota:       Quota{MaxDataSources: 10},
+		selectedIDs: map[string]string{tableKey: "table-1"},
+	}
+	connector := importConnector{
+		connector:  connector{kind: TypeMySQL},
+		discovered: SyncResult{Tables: []MetadataTable{orders, customers}},
+		sample: SampleResult{
+			Columns: []string{"id", "amount"},
+			Rows:    [][]any{{1, 12.5}, {2, 19.0}, {3, 8.5}},
+		},
+	}
+	completer := &completingRecorder{}
+	service := NewService(r, connector)
+	service.SetTableCompleter(completer)
+
+	imported, err := service.ImportTables(context.Background(), "tenant-1", "actor-1", "source-1", []TableSelection{{SchemaName: "sales", TableName: "orders"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.selectedMetadata.Tables) != 1 || r.selectedMetadata.Tables[0].Name != "orders" {
+		t.Fatalf("persisted tables=%#v", r.selectedMetadata.Tables)
+	}
+	if len(imported) != 1 || imported[0].ID != "table-1" || completer.tableID != "table-1" {
+		t.Fatalf("imported=%#v completedTable=%s", imported, completer.tableID)
+	}
+	if len(completer.rows) != 3 || completer.rows[0]["id"] != 1 || completer.rows[2]["amount"] != 8.5 {
+		t.Fatalf("sample rows=%#v", completer.rows)
 	}
 }
 func TestConnectionFailureMovesToError(t *testing.T) {
@@ -95,6 +162,15 @@ func TestEnableAndSyncRequireValidatedState(t *testing.T) {
 	r.source.Status = StatusDisabled
 	if err := s.Enable(context.Background(), "t", "id"); err != nil || r.source.Status != StatusActive {
 		t.Fatalf("disabled source enable failed: %v", err)
+	}
+}
+
+func TestUpdateKeepsCurrentSecretWhenPasswordIsNotReentered(t *testing.T) {
+	r := &repo{source: Source{ID: "source-1", TenantID: "t", Code: "old", Name: "Old", Type: TypeMySQL, Status: StatusActive, SecretRef: "encrypted://current"}}
+	s := NewService(r, connector{kind: TypeMySQL})
+	updated, err := s.Update(context.Background(), Source{ID: "source-1", TenantID: "t", Code: "new", Name: "New", Type: TypeMySQL, Config: map[string]any{"host": "db"}})
+	if err != nil || updated.SecretRef != "encrypted://current" || updated.Status != StatusDraft {
+		t.Fatalf("updated=%#v err=%v", updated, err)
 	}
 }
 

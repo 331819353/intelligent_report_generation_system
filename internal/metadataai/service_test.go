@@ -48,17 +48,36 @@ type serviceProvider struct {
 	output CompletionOutput
 	err    error
 	wait   bool
+	input  *CompletionInput
 }
 
 func (serviceProvider) Name() string     { return "test" }
 func (serviceProvider) Model() string    { return "test-model" }
 func (serviceProvider) Configured() bool { return true }
-func (p serviceProvider) Complete(ctx context.Context, _, _ string, _ CompletionInput) (ProviderResult, error) {
+func (p serviceProvider) Complete(ctx context.Context, _, _ string, input CompletionInput) (ProviderResult, error) {
+	if p.input != nil {
+		*p.input = input
+	}
 	if p.wait {
 		<-ctx.Done()
 		return ProviderResult{}, ctx.Err()
 	}
 	return ProviderResult{Output: p.output}, p.err
+}
+
+func TestGenerateWithSamplesForwardsAtMostThreeRowsToProvider(t *testing.T) {
+	input, output := validCompletion()
+	store := &serviceStore{input: input}
+	var captured CompletionInput
+	service := NewService(store, serviceProvider{output: output, input: &captured}, time.Second, 0.8)
+	samples := []map[string]any{{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}}
+
+	if _, err := service.GenerateWithSamples(context.Background(), "tenant", "actor", "table-1", samples); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured.SampleRows) != 3 || captured.SampleRows[0]["id"] != 1 || captured.SampleRows[2]["id"] != 3 {
+		t.Fatalf("sample rows=%#v", captured.SampleRows)
+	}
 }
 
 func TestGenerateRejectsInvalidOutputBeforeFormalPersistence(t *testing.T) {

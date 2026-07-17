@@ -58,16 +58,20 @@ func main() {
 		os.Exit(1)
 	}
 	excelManager := datasource.NewExcelManager(dataSourceRepo, objectStorage, cfg.MinIOUploadsBucket)
+	credentialManager, err := datasource.NewCredentialManager(cfg.DataSourceCredentialKey, datasource.EnvSecretResolver{})
+	if err != nil {
+		logger.Error("initialize data source credential manager", "error", err)
+		os.Exit(1)
+	}
 	// 连接器按数据源类型注册：数据库走隔离的 Python 服务，文件走本地解析器。
-	mysqlConnector := datasource.NewPythonConnector(datasource.TypeMySQL, cfg.ConnectorURL, cfg.ConnectorToken, datasource.EnvSecretResolver{})
-	oracleConnector := datasource.NewPythonConnector(datasource.TypeOracle, cfg.ConnectorURL, cfg.ConnectorToken, datasource.EnvSecretResolver{})
+	mysqlConnector := datasource.NewPythonConnector(datasource.TypeMySQL, cfg.ConnectorURL, cfg.ConnectorToken, credentialManager)
+	oracleConnector := datasource.NewPythonConnector(datasource.TypeOracle, cfg.ConnectorURL, cfg.ConnectorToken, credentialManager)
 	dataSourceService := datasource.NewService(
 		dataSourceRepo,
 		mysqlConnector,
 		oracleConnector,
 		datasource.NewExcelConnector(excelManager),
 	)
-	dataSourceHandler := datasource.NewHandler(authService, accessService, dataSourceService)
 	excelHandler := datasource.NewExcelHandler(authService, accessService, excelManager)
 	assetHandler := asset.NewHandler(authService, accessService, asset.NewRepository(pool))
 	modelProvider := aiplatform.NewOpenAICompatibleProvider(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel, &http.Client{Timeout: cfg.AIAttemptTimeout})
@@ -83,6 +87,8 @@ func main() {
 	}
 	metadataAIProvider := metadataai.NewOrchestratedProvider(aiService)
 	metadataAIService := metadataai.NewService(metadataai.NewPostgresStore(pool), metadataAIProvider, cfg.AIRequestTimeout, cfg.AIConfidenceThreshold)
+	dataSourceService.SetTableCompleter(metadataAIService)
+	dataSourceHandler := datasource.NewHandler(authService, accessService, dataSourceService, credentialManager)
 	metadataAIHandler := metadataai.NewHandler(authService, accessService, metadataAIService)
 	datasetStore := dataset.NewPostgresStore(pool)
 	datasetService := dataset.NewService(datasetStore)

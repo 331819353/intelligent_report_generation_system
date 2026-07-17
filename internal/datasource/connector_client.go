@@ -83,6 +83,23 @@ func (c *PythonConnector) Sync(ctx context.Context, source Source) (SyncResult, 
 	return result, nil
 }
 
+// Sample 通过专用 Connector 接口读取最多三行，不允许调用方传入任意 SQL。
+func (c *PythonConnector) Sample(ctx context.Context, source Source, table MetadataTable, maxRows int) (SampleResult, error) {
+	connection, err := c.connection(ctx, source)
+	if err != nil {
+		return SampleResult{}, err
+	}
+	payload := map[string]any{
+		"connection": connection, "catalog_name": table.CatalogName, "schema_name": table.SchemaName,
+		"table_name": table.Name, "max_rows": maxRows,
+	}
+	var result SampleResult
+	if err := c.call(ctx, "/v1/metadata/sample", payload, &result); err != nil {
+		return SampleResult{}, err
+	}
+	return result, nil
+}
+
 // Query 执行服务端生成的参数化只读 SQL，并传递统一查询标识和行数上限。
 func (c *PythonConnector) Query(ctx context.Context, source Source, queryID, sql string, parameters []any, maxRows int) (QueryResult, error) {
 	connection, err := c.connection(ctx, source)

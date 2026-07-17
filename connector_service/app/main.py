@@ -199,6 +199,16 @@ class CancelRequest(BaseModel):
     query_id: str = Field(min_length=1, max_length=100)
 
 
+class MetadataSampleRequest(BaseModel):
+    """采样单张已发现表的少量数据，供元数据完善使用。"""
+
+    connection: ConnectionConfig
+    catalog_name: str = Field(default="", max_length=128)
+    schema_name: str = Field(min_length=1, max_length=128)
+    table_name: str = Field(min_length=1, max_length=128)
+    max_rows: int = Field(default=3, ge=1, le=3)
+
+
 def canonical_type(native_type: str) -> str:
     """将 MySQL 和 Oracle 原生类型归一为平台规范类型。"""
     value = native_type.upper()
@@ -374,6 +384,13 @@ def validate_read_only_sql(sql: str) -> None:
         raise HTTPException(status_code=400, detail="query contains a forbidden operation")
 
 
+def quoted_identifier(value: str, source_type: str) -> str:
+    """只接受数据库元数据可返回的普通标识符，再按方言安全引用。"""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$#]{0,127}", value):
+        raise HTTPException(status_code=400, detail="invalid table identifier")
+    return f"`{value}`" if source_type == "MYSQL" else f'"{value}"'
+
+
 def sql_tokens(sql: str) -> list[str]:
     """提取引号外词元；这是失败关闭防线，数据源账号本身仍必须只读。"""
     tokens, current, quote, index = [], [], None, 0
@@ -456,6 +473,23 @@ def sync_metadata(config: ConnectionConfig) -> dict[str, Any]:
         "snapshotHash": hashlib.sha256(snapshot_json.encode()).hexdigest(),
         "tables": assets,
     }
+
+
+@app.post("/v1/metadata/sample", dependencies=[Depends(authorize)])
+def sample_metadata(request: MetadataSampleRequest) -> dict[str, Any]:
+    """使用经过校验和引用的表名采集最多三行样本，不接受任意 SQL。"""
+    source_type = request.connection.source_type
+    schema = quoted_identifier(request.schema_name, source_type)
+    table = quoted_identifier(request.table_name, source_type)
+    sql = f"SELECT * FROM {schema}.{table} LIMIT {request.max_rows}" if source_type == "MYSQL" else f"SELECT * FROM {schema}.{table} FETCH FIRST {request.max_rows} ROWS ONLY"
+    try:
+        with pooled_connection(request.connection) as connection, closing(connection.cursor()) as cursor:
+            cursor.execute(sql)
+            columns = [str(item[0]) for item in cursor.description or []]
+            rows = cursor.fetchmany(request.max_rows)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"metadata sample failed: {type(exc).__name__}") from exc
+    return {"columns": columns, "rows": rows, "rowCount": len(rows)}
 
 
 @app.post("/v1/query", dependencies=[Depends(authorize)])

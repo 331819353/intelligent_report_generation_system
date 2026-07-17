@@ -31,7 +31,7 @@ func (r *PostgresRepository) ApplyMetadata(ctx context.Context, source Source, r
 		for _, table := range result.Tables {
 			key := table.CatalogName + "\x1f" + table.SchemaName + "\x1f" + table.Name
 			tableKeys = append(tableKeys, key)
-			if err := r.upsertMetadataTable(ctx, tx, source, table, watermark); err != nil {
+			if _, err := r.upsertMetadataTable(ctx, tx, source, table, watermark); err != nil {
 				return err
 			}
 		}
@@ -46,11 +46,42 @@ func (r *PostgresRepository) ApplyMetadata(ctx context.Context, source Source, r
 	})
 }
 
+// ApplySelectedMetadata 只新增或刷新用户选中的表，不会把同一数据源的其他资产误判为移除。
+func (r *PostgresRepository) ApplySelectedMetadata(ctx context.Context, source Source, result SyncResult) (ids map[string]string, err error) {
+	watermark, err := time.Parse(time.RFC3339Nano, result.Watermark)
+	if err != nil {
+		return nil, errors.New("invalid metadata watermark")
+	}
+	snapshot, err := json.Marshal(result.Tables)
+	if err != nil {
+		return nil, err
+	}
+	ids = make(map[string]string, len(result.Tables))
+	err = database.WithTenantTx(ctx, r.pool, source.TenantID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.metadata_snapshots(tenant_id,data_source_id,snapshot_hash,snapshot_json) VALUES($1,$2,$3,$4)`, source.TenantID, source.ID, result.SnapshotHash, snapshot); err != nil {
+			return err
+		}
+		for _, table := range result.Tables {
+			id, err := r.upsertMetadataTable(ctx, tx, source, table, watermark)
+			if err != nil {
+				return err
+			}
+			ids[metadataTableKey(table)] = id
+		}
+		return nil
+	})
+	return ids, err
+}
+
+func metadataTableKey(table MetadataTable) string {
+	return table.CatalogName + "\x1f" + table.SchemaName + "\x1f" + table.Name
+}
+
 // upsertMetadataTable 按稳定业务键更新表资产，并基于结构哈希判断变化类型。
-func (r *PostgresRepository) upsertMetadataTable(ctx context.Context, tx pgx.Tx, source Source, table MetadataTable, watermark time.Time) error {
+func (r *PostgresRepository) upsertMetadataTable(ctx context.Context, tx pgx.Tx, source Source, table MetadataTable, watermark time.Time) (string, error) {
 	hash, payload, err := metadataTableHash(table)
 	if err != nil {
-		return err
+		return "", err
 	}
 	constraints, _ := json.Marshal(table.Constraints)
 	indexes, _ := json.Marshal(table.Indexes)
@@ -61,7 +92,7 @@ func (r *PostgresRepository) upsertMetadataTable(ctx context.Context, tx pgx.Tx,
 	if errors.Is(err, pgx.ErrNoRows) {
 		change = "ADDED"
 	} else if err != nil {
-		return err
+		return "", err
 	}
 	// 结构未变但曾被移除的资产单独标记为重新激活，便于审计区分。
 	if oldStatus == "INACTIVE" && oldHash == hash {
@@ -69,30 +100,30 @@ func (r *PostgresRepository) upsertMetadataTable(ctx context.Context, tx pgx.Tx,
 	}
 	err = tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(tenant_id,data_source_id,catalog_name,schema_name,table_name,table_type,source_comment,estimated_row_count,primary_key_columns,constraints_json,indexes_json,structure_hash,last_sync_at)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-		ON CONFLICT(tenant_id,data_source_id,catalog_name,schema_name,table_name) DO UPDATE SET table_type=EXCLUDED.table_type,source_comment=EXCLUDED.source_comment,estimated_row_count=EXCLUDED.estimated_row_count,primary_key_columns=EXCLUDED.primary_key_columns,constraints_json=EXCLUDED.constraints_json,indexes_json=EXCLUDED.indexes_json,structure_hash=EXCLUDED.structure_hash,metadata_version=CASE WHEN metadata_tables.structure_hash<>EXCLUDED.structure_hash THEN metadata_tables.metadata_version+1 ELSE metadata_tables.metadata_version END,asset_status='ACTIVE',last_sync_at=EXCLUDED.last_sync_at
+		ON CONFLICT(tenant_id,data_source_id,catalog_name,schema_name,table_name) DO UPDATE SET table_type=EXCLUDED.table_type,source_comment=EXCLUDED.source_comment,estimated_row_count=EXCLUDED.estimated_row_count,primary_key_columns=EXCLUDED.primary_key_columns,constraints_json=EXCLUDED.constraints_json,indexes_json=EXCLUDED.indexes_json,structure_hash=EXCLUDED.structure_hash,metadata_version=CASE WHEN metadata_tables.structure_hash<>EXCLUDED.structure_hash THEN metadata_tables.metadata_version+1 ELSE metadata_tables.metadata_version END,management_status=CASE WHEN metadata_tables.asset_status='INACTIVE' THEN 'ENABLED' ELSE metadata_tables.management_status END,asset_status='ACTIVE',last_sync_at=EXCLUDED.last_sync_at
 		RETURNING id::text`, source.TenantID, source.ID, table.CatalogName, table.SchemaName, table.Name, table.Type, table.SourceComment, table.EstimatedRowCount, table.PrimaryKeyColumns, constraints, indexes, hash, watermark).Scan(&id)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if change == "ADDED" || change == "REACTIVATED" || oldHash != hash {
 		if _, err := tx.Exec(ctx, `INSERT INTO platform.metadata_diffs(tenant_id,data_source_id,object_type,object_key,change_type,before_json,after_json) VALUES($1,$2,'TABLE',$3,$4,$5,$6)`, source.TenantID, source.ID, table.SchemaName+"."+table.Name, change, nullJSON(oldPayload), payload); err != nil {
-			return err
+			return "", err
 		}
 	}
 	columnNames := make([]string, 0, len(table.Columns))
 	for _, column := range table.Columns {
 		columnNames = append(columnNames, column.Name)
 		if err := r.upsertMetadataColumn(ctx, tx, source, id, table, column, watermark); err != nil {
-			return err
+			return "", err
 		}
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO platform.metadata_diffs(tenant_id,data_source_id,object_type,object_key,change_type,before_json)
 		SELECT tenant_id,$2,'COLUMN',$3||'.'||column_name,'REMOVED',to_jsonb(c) FROM platform.metadata_columns c
 		WHERE table_id=$1 AND asset_status='ACTIVE' AND NOT(column_name=ANY($4::text[]))`, id, source.ID, table.SchemaName+"."+table.Name, columnNames); err != nil {
-		return err
+		return "", err
 	}
 	_, err = tx.Exec(ctx, `UPDATE platform.metadata_columns SET asset_status='INACTIVE',last_sync_at=$2 WHERE table_id=$1 AND NOT(column_name=ANY($3::text[]))`, id, watermark, columnNames)
-	return err
+	return id, err
 }
 
 // upsertMetadataColumn 更新字段技术元数据，并保留前后快照用于差异追踪。

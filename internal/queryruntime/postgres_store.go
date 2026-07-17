@@ -62,7 +62,7 @@ func resolveTx(ctx context.Context, tx pgx.Tx, document dataset.Document) (Resol
 		var sourceVersion int64
 		err := tx.QueryRow(ctx, `SELECT t.data_source_id::text,t.schema_name,t.table_name,d.source_type,d.status,d.version,COALESCE(d.last_synced_at::text,'')
 				FROM platform.metadata_tables t JOIN platform.data_sources d ON d.id=t.data_source_id AND d.tenant_id=t.tenant_id
-				WHERE t.id::text=$1 AND t.data_source_id::text=$2 AND (d.source_type='EXCEL' OR t.asset_status='ACTIVE') AND d.deleted_at IS NULL`, node.TableID, node.DataSourceID).
+				WHERE t.id::text=$1 AND t.data_source_id::text=$2 AND (d.source_type='EXCEL' OR (t.asset_status='ACTIVE' AND t.management_status='ENABLED')) AND d.deleted_at IS NULL`, node.TableID, node.DataSourceID).
 			Scan(&sourceID, &schemaName, &tableName, &sourceType, &sourceStatus, &sourceVersion, &sourceWatermark)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ResolvedPlan{}, dataset.ErrInvalidDocument

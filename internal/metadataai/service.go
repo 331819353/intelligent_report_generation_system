@@ -45,6 +45,24 @@ func NewService(store Store, provider Provider, timeout time.Duration, confidenc
 
 // Generate 创建任务、调用模型、校验结构化结果并持久化建议。
 func (s *Service) Generate(ctx context.Context, tenantID, actorID, tableID string) (GenerateResult, error) {
+	return s.generate(ctx, tenantID, actorID, tableID, nil)
+}
+
+// GenerateWithSamples 在不持久化样本行的前提下，将最多三行数据加入本次元数据完善输入。
+func (s *Service) GenerateWithSamples(ctx context.Context, tenantID, actorID, tableID string, samples []map[string]any) (GenerateResult, error) {
+	if len(samples) > 3 {
+		samples = samples[:3]
+	}
+	return s.generate(ctx, tenantID, actorID, tableID, samples)
+}
+
+// CompleteTable 实现数据源导入流程所需的最小完善接口。
+func (s *Service) CompleteTable(ctx context.Context, tenantID, actorID, tableID string, samples []map[string]any) error {
+	_, err := s.GenerateWithSamples(ctx, tenantID, actorID, tableID, samples)
+	return err
+}
+
+func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID string, samples []map[string]any) (GenerateResult, error) {
 	if s.provider == nil || !s.provider.Configured() {
 		return GenerateResult{}, ErrProviderUnavailable
 	}
@@ -52,6 +70,7 @@ func (s *Service) Generate(ctx context.Context, tenantID, actorID, tableID strin
 	if err != nil {
 		return GenerateResult{}, err
 	}
+	input.SampleRows = samples
 	hash, err := inputHash(input)
 	if err != nil {
 		return GenerateResult{}, err

@@ -26,17 +26,18 @@ const (
 )
 
 type Source struct {
-	ID           string         `json:"id"`
-	TenantID     string         `json:"tenantId"`
-	Code         string         `json:"code"`
-	Name         string         `json:"name"`
-	Type         Type           `json:"type"`
-	Status       Status         `json:"status"`
-	Config       map[string]any `json:"config"`
-	SecretRef    string         `json:"secretRef,omitempty"`
-	FileAssetID  string         `json:"fileAssetId,omitempty"`
-	Version      int64          `json:"version"`
-	RuntimeQuota Quota          `json:"-"`
+	ID       string         `json:"id"`
+	TenantID string         `json:"tenantId"`
+	Code     string         `json:"code"`
+	Name     string         `json:"name"`
+	Type     Type           `json:"type"`
+	Status   Status         `json:"status"`
+	Config   map[string]any `json:"config"`
+	// SecretRef 只在服务端解析，任何数据源响应都不得把加密值或外部密钥引用返回浏览器。
+	SecretRef    string `json:"-"`
+	FileAssetID  string `json:"fileAssetId,omitempty"`
+	Version      int64  `json:"version"`
+	RuntimeQuota Quota  `json:"-"`
 }
 type Quota struct {
 	MaxDataSources, MaxConnectionsPerSource, MaxConcurrentQueries int
@@ -76,6 +77,20 @@ type SyncResult struct {
 	Watermark    string          `json:"watermark"`
 	SnapshotHash string          `json:"snapshotHash"`
 	Tables       []MetadataTable `json:"tables,omitempty"`
+}
+type SampleResult struct {
+	Columns []string `json:"columns"`
+	Rows    [][]any  `json:"rows"`
+}
+type TableSelection struct {
+	CatalogName string `json:"catalogName"`
+	SchemaName  string `json:"schemaName"`
+	TableName   string `json:"tableName"`
+}
+type ImportedTable struct {
+	ID      string           `json:"id"`
+	Table   MetadataTable    `json:"table"`
+	Samples []map[string]any `json:"-"`
 }
 type MetadataTable struct {
 	CatalogName       string               `json:"catalogName"`
@@ -122,6 +137,12 @@ type Connector interface {
 	Sync(context.Context, Source) (SyncResult, error)
 	Close(context.Context, Source) error
 }
+type MetadataSampler interface {
+	Sample(context.Context, Source, MetadataTable, int) (SampleResult, error)
+}
+type TableCompleter interface {
+	CompleteTable(context.Context, string, string, string, []map[string]any) error
+}
 type Repository interface {
 	Count(context.Context, string) (int, error)
 	Create(context.Context, Source) (Source, error)
@@ -129,6 +150,7 @@ type Repository interface {
 	Get(context.Context, string, string) (Source, error)
 	Update(context.Context, Source) (Source, error)
 	ApplyMetadata(context.Context, Source, SyncResult) error
+	ApplySelectedMetadata(context.Context, Source, SyncResult) (map[string]string, error)
 	Audit(context.Context, string, string, string, string, any) error
 	UpdateStatus(context.Context, string, string, Status, string) error
 	Quota(context.Context, string) (Quota, error)

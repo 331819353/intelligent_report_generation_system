@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"time"
 )
+
+const defaultDataSourceCredentialKey = "bG9jYWxfZGF0YV9zb3VyY2VfY3JlZGVudGlhbF9rZXk="
 
 type Config struct {
 	Environment                  string
@@ -47,44 +50,46 @@ type Config struct {
 	AuthBcryptCost               int
 	ConnectorURL                 string
 	ConnectorToken               string
+	DataSourceCredentialKey      string
 }
 
 // Load 从环境变量构建运行配置，并在返回前完成完整校验。
 func Load() (Config, error) {
 	cfg := Config{
-		Environment:           envOrDefault("APP_ENV", "development"),
-		LogLevel:              envOrDefault("APP_LOG_LEVEL", "info"),
-		HTTPAddr:              envOrDefault("API_HTTP_ADDR", ":8080"),
-		ReadHeaderTimeout:     5 * time.Second,
-		ReadTimeout:           15 * time.Second,
-		WriteTimeout:          30 * time.Second,
-		IdleTimeout:           60 * time.Second,
-		ShutdownTimeout:       10 * time.Second,
-		WorkerPollInterval:    2 * time.Second,
-		AIBaseURL:             envOrDefault("AI_BASE_URL", "https://mgallery.haier.net/v1/"),
-		AIModel:               envOrDefault("AI_MODEL", "deepseek-v3"),
-		AIAPIKey:              os.Getenv("AI_API_KEY"),
-		AIRequestTimeout:      25 * time.Second,
-		AIAttemptTimeout:      8 * time.Second,
-		AIRetryBaseDelay:      200 * time.Millisecond,
-		AIRetryMaxDelay:       2 * time.Second,
-		AIMaxAttempts:         3,
-		AIMaxInputBytes:       256 << 10,
-		AIConfidenceThreshold: 0.8,
-		DatabaseURL:           envOrDefault("DATABASE_URL", "postgres://report_app:local_report_password@127.0.0.1:5432/intelligent_report?sslmode=disable"),
-		RedisURL:              envOrDefault("REDIS_URL", "redis://:local_redis_password@127.0.0.1:6379/0"),
-		MinIOEndpoint:         envOrDefault("MINIO_ENDPOINT", "127.0.0.1:9000"),
-		MinIOAccessKey:        envOrDefault("MINIO_ACCESS_KEY", "report_minio"),
-		MinIOSecretKey:        envOrDefault("MINIO_SECRET_KEY", "local_minio_password"),
-		MinIOUseSSL:           strings.EqualFold(os.Getenv("MINIO_USE_SSL"), "true"),
-		MinIOUploadsBucket:    envOrDefault("MINIO_BUCKET_UPLOADS", "uploads"),
-		AuthTokenIssuer:       envOrDefault("AUTH_TOKEN_ISSUER", "intelligent-report-system"),
-		AuthAccessSecret:      envOrDefault("AUTH_ACCESS_TOKEN_SECRET", "local_access_token_secret_change_me"),
-		AuthAccessTTL:         15 * time.Minute,
-		AuthRefreshTTL:        7 * 24 * time.Hour,
-		AuthBcryptCost:        12,
-		ConnectorURL:          envOrDefault("CONNECTOR_SERVICE_URL", "http://127.0.0.1:8090"),
-		ConnectorToken:        envOrDefault("CONNECTOR_INTERNAL_TOKEN", "local_connector_token_change_me"),
+		Environment:             envOrDefault("APP_ENV", "development"),
+		LogLevel:                envOrDefault("APP_LOG_LEVEL", "info"),
+		HTTPAddr:                envOrDefault("API_HTTP_ADDR", ":8080"),
+		ReadHeaderTimeout:       5 * time.Second,
+		ReadTimeout:             15 * time.Second,
+		WriteTimeout:            30 * time.Second,
+		IdleTimeout:             60 * time.Second,
+		ShutdownTimeout:         10 * time.Second,
+		WorkerPollInterval:      2 * time.Second,
+		AIBaseURL:               envOrDefault("AI_BASE_URL", "https://mgallery.haier.net/v1/"),
+		AIModel:                 envOrDefault("AI_MODEL", "deepseek-v3"),
+		AIAPIKey:                os.Getenv("AI_API_KEY"),
+		AIRequestTimeout:        25 * time.Second,
+		AIAttemptTimeout:        8 * time.Second,
+		AIRetryBaseDelay:        200 * time.Millisecond,
+		AIRetryMaxDelay:         2 * time.Second,
+		AIMaxAttempts:           3,
+		AIMaxInputBytes:         256 << 10,
+		AIConfidenceThreshold:   0.8,
+		DatabaseURL:             envOrDefault("DATABASE_URL", "postgres://report_app:local_report_password@127.0.0.1:5432/intelligent_report?sslmode=disable"),
+		RedisURL:                envOrDefault("REDIS_URL", "redis://:local_redis_password@127.0.0.1:6379/0"),
+		MinIOEndpoint:           envOrDefault("MINIO_ENDPOINT", "127.0.0.1:9000"),
+		MinIOAccessKey:          envOrDefault("MINIO_ACCESS_KEY", "report_minio"),
+		MinIOSecretKey:          envOrDefault("MINIO_SECRET_KEY", "local_minio_password"),
+		MinIOUseSSL:             strings.EqualFold(os.Getenv("MINIO_USE_SSL"), "true"),
+		MinIOUploadsBucket:      envOrDefault("MINIO_BUCKET_UPLOADS", "uploads"),
+		AuthTokenIssuer:         envOrDefault("AUTH_TOKEN_ISSUER", "intelligent-report-system"),
+		AuthAccessSecret:        envOrDefault("AUTH_ACCESS_TOKEN_SECRET", "local_access_token_secret_change_me"),
+		AuthAccessTTL:           15 * time.Minute,
+		AuthRefreshTTL:          7 * 24 * time.Hour,
+		AuthBcryptCost:          12,
+		ConnectorURL:            envOrDefault("CONNECTOR_SERVICE_URL", "http://127.0.0.1:8090"),
+		ConnectorToken:          envOrDefault("CONNECTOR_INTERNAL_TOKEN", "local_connector_token_change_me"),
+		DataSourceCredentialKey: envOrDefault("DATA_SOURCE_CREDENTIAL_KEY", defaultDataSourceCredentialKey),
 	}
 
 	durations := []struct {
@@ -217,6 +222,13 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.ConnectorURL) == "" || len(c.ConnectorToken) < 24 {
 		return errors.New("connector service URL or internal token is invalid")
+	}
+	credentialKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(c.DataSourceCredentialKey))
+	if err != nil || len(credentialKey) != 32 {
+		return errors.New("DATA_SOURCE_CREDENTIAL_KEY must be base64-encoded 32 bytes")
+	}
+	if strings.EqualFold(c.Environment, "production") && c.DataSourceCredentialKey == defaultDataSourceCredentialKey {
+		return errors.New("production must override DATA_SOURCE_CREDENTIAL_KEY")
 	}
 	return nil
 }

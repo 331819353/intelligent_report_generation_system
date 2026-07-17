@@ -2,14 +2,22 @@ package datasource
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 type Service struct {
 	repo       Repository
 	connectors map[Type]Connector
+	completer  TableCompleter
 }
+
+// SetTableCompleter 注入 LLM 元数据完善器，保持数据源领域对具体 AI 实现解耦。
+func (s *Service) SetTableCompleter(completer TableCompleter) { s.completer = completer }
 
 // NewService 按数据源类型注册连接器，使业务状态机与具体数据库驱动解耦。
 func NewService(repo Repository, connectors ...Connector) *Service {
@@ -50,6 +58,11 @@ func (s *Service) List(ctx context.Context, tenantID string) ([]Source, error) {
 	return s.repo.List(ctx, tenantID)
 }
 
+// Get 在租户边界内返回单个数据源，供详情和编辑基线读取。
+func (s *Service) Get(ctx context.Context, tenantID, id string) (Source, error) {
+	return s.repo.Get(ctx, tenantID, id)
+}
+
 // Update 仅允许修改非同步、非删除状态的数据源，并重置为待验证草稿。
 func (s *Service) Update(ctx context.Context, source Source) (Source, error) {
 	current, err := s.repo.Get(ctx, source.TenantID, source.ID)
@@ -58,6 +71,16 @@ func (s *Service) Update(ctx context.Context, source Source) (Source, error) {
 	}
 	if current.Status == StatusSyncing || current.Status == StatusDeleting || current.Status == StatusDeleted {
 		return Source{}, fmt.Errorf("cannot update source in %s status", current.Status)
+	}
+	// 更新前释放旧配置对应的连接池；即使后续写入失败，下一次查询也会按当前配置安全重建。
+	if connector := s.connectors[current.Type]; connector != nil {
+		if err := connector.Close(ctx, current); err != nil {
+			return Source{}, fmt.Errorf("close current source connection: %w", err)
+		}
+	}
+	// 编辑表单不回显密码；未提交新密码时沿用当前内部引用，避免迫使浏览器获取秘密。
+	if source.SecretRef == "" && (source.Type == TypeMySQL || source.Type == TypeOracle) {
+		source.SecretRef = current.SecretRef
 	}
 	source.Status = StatusDraft
 	if err := source.Validate(); err != nil {
@@ -132,6 +155,96 @@ func (s *Service) Sync(ctx context.Context, tenantID, id string) (SyncResult, er
 	// 表明细只在服务内部用于入库，不随同步响应返回，避免大元数据快照占用接口带宽。
 	result.Tables = nil
 	return result, s.repo.UpdateStatus(ctx, tenantID, id, StatusActive, "")
+}
+
+// DiscoverTables 只读取源库技术元数据，不写入 PostgreSQL 资产表。
+func (s *Service) DiscoverTables(ctx context.Context, tenantID, id string) (SyncResult, error) {
+	source, connector, err := s.load(ctx, tenantID, id)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	if source.Status != StatusActive {
+		return SyncResult{}, fmt.Errorf("cannot discover source in %s status", source.Status)
+	}
+	return connector.Sync(ctx, source)
+}
+
+// ImportTables 对用户选中的源表采样三行，经 LLM 完善后形成 PostgreSQL 表资产。
+func (s *Service) ImportTables(ctx context.Context, tenantID, actorID, id string, selections []TableSelection) ([]ImportedTable, error) {
+	if len(selections) == 0 || len(selections) > 100 {
+		return nil, errors.New("between 1 and 100 tables must be selected")
+	}
+	source, connector, err := s.load(ctx, tenantID, id)
+	if err != nil {
+		return nil, err
+	}
+	if source.Status != StatusActive {
+		return nil, fmt.Errorf("cannot import tables from source in %s status", source.Status)
+	}
+	if s.completer == nil {
+		return nil, errors.New("metadata AI completer is not configured")
+	}
+	sampler, ok := connector.(MetadataSampler)
+	if !ok {
+		return nil, errors.New("connector does not support metadata sampling")
+	}
+	discovered, err := connector.Sync(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	available := make(map[string]MetadataTable, len(discovered.Tables))
+	for _, table := range discovered.Tables {
+		available[metadataTableKey(table)] = table
+	}
+	selected := make([]MetadataTable, 0, len(selections))
+	seen := map[string]bool{}
+	for _, selection := range selections {
+		key := selection.CatalogName + "\x1f" + selection.SchemaName + "\x1f" + selection.TableName
+		table, exists := available[key]
+		if !exists || seen[key] {
+			return nil, errors.New("selected table is invalid or duplicated")
+		}
+		seen[key] = true
+		selected = append(selected, table)
+	}
+	payload, err := json.Marshal(selected)
+	if err != nil {
+		return nil, err
+	}
+	hash := sha256.Sum256(payload)
+	result := SyncResult{Assets: len(selected), Watermark: time.Now().UTC().Format(time.RFC3339Nano), SnapshotHash: hex.EncodeToString(hash[:]), Tables: selected}
+	ids, err := s.repo.ApplySelectedMetadata(ctx, source, result)
+	if err != nil {
+		return nil, err
+	}
+	imported := make([]ImportedTable, 0, len(selected))
+	for _, table := range selected {
+		sample, err := sampler.Sample(ctx, source, table, 3)
+		if err != nil {
+			return nil, fmt.Errorf("sample table %s: %w", table.Name, err)
+		}
+		rows := sampleRows(sample)
+		tableID := ids[metadataTableKey(table)]
+		if err := s.completer.CompleteTable(ctx, tenantID, actorID, tableID, rows); err != nil {
+			return nil, fmt.Errorf("complete metadata for table %s: %w", table.Name, err)
+		}
+		imported = append(imported, ImportedTable{ID: tableID, Table: table, Samples: rows})
+	}
+	return imported, nil
+}
+
+func sampleRows(sample SampleResult) []map[string]any {
+	rows := make([]map[string]any, 0, len(sample.Rows))
+	for _, values := range sample.Rows {
+		row := make(map[string]any, len(sample.Columns))
+		for index, column := range sample.Columns {
+			if index < len(values) {
+				row[column] = values[index]
+			}
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 // Delete 先关闭连接器资源，再将数据源软删除。

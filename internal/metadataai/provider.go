@@ -52,7 +52,7 @@ func (p *OrchestratedProvider) Configured() bool {
 	return p != nil && p.invoker != nil && p.invoker.Configured()
 }
 
-// Complete 只发送已由元数据仓储最小化的技术与业务字段，不发送连接凭据或数据样本。
+// Complete 只发送最小化技术元数据与最多三行样本，绝不发送连接凭据；样本不会持久化。
 func (p *OrchestratedProvider) Complete(ctx context.Context, tenantID, actorID string, input CompletionInput) (ProviderResult, error) {
 	if !p.Configured() {
 		return ProviderResult{}, ErrProviderUnavailable
@@ -71,7 +71,7 @@ func (p *OrchestratedProvider) Complete(ctx context.Context, tenantID, actorID s
 		PromptVersion: PromptVersion, ResourceType: "METADATA_TABLE", ResourceID: input.Table.ID,
 		Request: aiplatform.ProviderRequest{
 			Messages: []aiplatform.Message{
-				{Role: aiplatform.MessageRoleSystem, Parts: []aiplatform.ContentPart{{Type: aiplatform.ContentTypeText, Text: "你是企业数据资产元数据补全器。只能依据给定技术元数据生成结果，不得虚构资产或返回未请求的字段。必须严格遵守 JSON Schema 和标签枚举。"}}},
+				{Role: aiplatform.MessageRoleSystem, Parts: []aiplatform.ContentPart{{Type: aiplatform.ContentTypeText, Text: "你是企业数据资产元数据补全器。只能依据给定技术元数据和最多三行数据样本生成结果，不得虚构资产或返回未请求的字段。必须严格遵守 JSON Schema 和标签枚举。"}}},
 				{Role: aiplatform.MessageRoleUser, Parts: []aiplatform.ContentPart{{Type: aiplatform.ContentTypeText, Text: string(inputJSON)}}},
 			},
 			ResponseSchema: aiplatform.JSONSchema{Name: "metadata_completion", Description: "企业数据资产元数据结构化补全", Schema: schemaJSON},

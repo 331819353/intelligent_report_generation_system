@@ -25,7 +25,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 				writeError(w, 400, "INVALID_PAGE_SIZE", "limit must be between 1 and 200")
 				return
 			}
-			search := Search{Query: strings.TrimSpace(q.Get("q")), DataSourceID: q.Get("dataSourceId"), SourceType: q.Get("sourceType"), Status: q.Get("status"), Sensitivity: q.Get("sensitivity"), Tag: q.Get("tag"), Visibility: q.Get("visibility"), Limit: limit, Offset: max(0, intParam(q.Get("offset"), 0))}
+			search := Search{Query: strings.TrimSpace(q.Get("q")), DataSourceID: q.Get("dataSourceId"), SourceType: q.Get("sourceType"), Status: q.Get("status"), Sensitivity: q.Get("sensitivity"), Tag: q.Get("tag"), Visibility: q.Get("visibility"), ManagementStatus: q.Get("managementStatus"), EnrichedOnly: q.Get("enrichedOnly") == "true", Limit: limit, Offset: max(0, intParam(q.Get("offset"), 0))}
 			if publicOnly {
 				search.Visibility = "TENANT_PUBLIC"
 			}
@@ -86,6 +86,32 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 			return
 		}
 		writeJSON(w, 200, item)
+	})))
+	mux.Handle("POST /api/v1/assets/tables/{id}/disable", protect("MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		item, err := repo.SetTableManagementStatus(r.Context(), c.TenantID, c.Subject, r.PathValue("id"), "DISABLED")
+		if err != nil {
+			writeError(w, 409, "ASSET_STATUS_UPDATE_FAILED", "failed to disable table asset")
+			return
+		}
+		writeJSON(w, 200, item)
+	})))
+	mux.Handle("POST /api/v1/assets/tables/{id}/enable", protect("MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		item, err := repo.SetTableManagementStatus(r.Context(), c.TenantID, c.Subject, r.PathValue("id"), "ENABLED")
+		if err != nil {
+			writeError(w, 409, "ASSET_STATUS_UPDATE_FAILED", "failed to enable table asset")
+			return
+		}
+		writeJSON(w, 200, item)
+	})))
+	mux.Handle("DELETE /api/v1/assets/tables/{id}", protect("MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		if err := repo.DeleteTableAsset(r.Context(), c.TenantID, c.Subject, r.PathValue("id")); err != nil {
+			writeError(w, 409, "ASSET_DELETE_FAILED", "failed to delete table asset")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})))
 	mux.Handle("GET /api/v1/assets/tables/{id}/impact", protect("READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())

@@ -88,3 +88,18 @@ func TestLoadRejectsRemotePlaintextAIEndpoint(t *testing.T) {
 		t.Fatalf("本机开发 Provider 地址应被允许: %v", err)
 	}
 }
+
+func TestLoadRejectsInvalidDataSourceCredentialKey(t *testing.T) {
+	t.Setenv("DATA_SOURCE_CREDENTIAL_KEY", "short")
+	if _, err := Load(); err == nil {
+		t.Fatal("invalid data source credential key was accepted")
+	}
+}
+
+func TestLoadRejectsDevelopmentCredentialKeyInProduction(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("DATA_SOURCE_CREDENTIAL_KEY", defaultDataSourceCredentialKey)
+	if _, err := Load(); err == nil {
+		t.Fatal("production accepted the development data source credential key")
+	}
+}

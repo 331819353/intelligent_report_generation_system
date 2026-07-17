@@ -36,9 +36,10 @@ type Target struct {
 }
 
 type CompletionInput struct {
-	SchemaVersion string   `json:"schemaVersion"`
-	Table         Target   `json:"table"`
-	Columns       []Target `json:"columns"`
+	SchemaVersion string           `json:"schemaVersion"`
+	Table         Target           `json:"table"`
+	Columns       []Target         `json:"columns"`
+	SampleRows    []map[string]any `json:"sampleRows,omitempty"`
 }
 
 type SuggestionValue struct {

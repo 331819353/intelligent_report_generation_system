@@ -20,6 +20,8 @@ type Table struct {
 	Visibility          string   `json:"visibility"`
 	ManualLocked        bool     `json:"manualLocked"`
 	AssetStatus         string   `json:"assetStatus"`
+	ManagementStatus    string   `json:"managementStatus"`
+	EnrichmentStatus    string   `json:"enrichmentStatus"`
 	StructureHash       string   `json:"structureHash"`
 	MetadataVersion     int64    `json:"metadataVersion"`
 	BusinessVersion     int64    `json:"businessVersion"`
@@ -45,8 +47,9 @@ type Column struct {
 	BusinessVersion     int64    `json:"businessVersion"`
 }
 type Search struct {
-	Query, DataSourceID, SourceType, Status, Sensitivity, Tag, Visibility string
-	Limit, Offset                                                         int
+	Query, DataSourceID, SourceType, Status, Sensitivity, Tag, Visibility, ManagementStatus string
+	EnrichedOnly                                                                            bool
+	Limit, Offset                                                                           int
 }
 type BusinessMetadata struct {
 	BusinessName        string   `json:"businessName"`
