@@ -11,18 +11,20 @@ import (
 const DefinitionVersion = "1.0"
 
 var (
-	ErrNotFound            = errors.New("metric not found")
-	ErrVersionNotFound     = errors.New("metric version not found")
-	ErrVersionUnavailable  = errors.New("metric version is unavailable")
-	ErrAlreadyExists       = errors.New("metric code already exists")
-	ErrConflict            = errors.New("metric version conflict")
-	ErrForbidden           = errors.New("metric operation is forbidden")
-	ErrInvalidDefinition   = errors.New("metric definition is invalid")
-	ErrInvalidTransition   = errors.New("metric version transition is invalid")
-	ErrVersionInUse        = errors.New("metric version is used by an active published dependency")
-	ErrIdempotencyConflict = errors.New("metric idempotency key conflict")
-	ErrPreviewUnavailable  = errors.New("metric preview is unavailable")
-	ErrPreviewFailed       = errors.New("metric preview failed")
+	ErrNotFound                   = errors.New("metric not found")
+	ErrVersionNotFound            = errors.New("metric version not found")
+	ErrVersionUnavailable         = errors.New("metric version is unavailable")
+	ErrAlreadyExists              = errors.New("metric code already exists")
+	ErrConflict                   = errors.New("metric version conflict")
+	ErrForbidden                  = errors.New("metric operation is forbidden")
+	ErrInvalidDefinition          = errors.New("metric definition is invalid")
+	ErrInvalidTransition          = errors.New("metric version transition is invalid")
+	ErrVersionInUse               = errors.New("metric version is used by an active published dependency")
+	ErrIdempotencyConflict        = errors.New("metric idempotency key conflict")
+	ErrPreviewUnavailable         = errors.New("metric preview is unavailable")
+	ErrPreviewFailed              = errors.New("metric preview failed")
+	ErrOriginCandidateConflict    = errors.New("origin metric candidate version conflict")
+	ErrOriginCandidateUnavailable = errors.New("origin metric candidate is unavailable")
 )
 
 // Definition 是指标草稿和发布版本共同使用的唯一事实来源。

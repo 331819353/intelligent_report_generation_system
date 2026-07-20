@@ -8,12 +8,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
 )
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}$`)
+
+// physicalIdentifierPattern 与查询编译器的物理白名单保持一致。DSL 自身的
+// code/id 仍使用更严格的 identifierPattern；projection 和 FIELD_REF 则必须
+// 能无损表达 Oracle 允许的 $/# 字段名。
+var physicalIdentifierPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_$#]{0,127}$`)
 
 // MaxNodes 限制单个数据集的节点数量，避免校验与跨源预览出现无界扇出。
 const MaxNodes = 16
@@ -102,6 +108,7 @@ func Validate(document Document) error {
 	if !oneOf(document.Dataset.Type, "SINGLE_SOURCE", "CROSS_SOURCE") {
 		add("dataset.type", "必须为 SINGLE_SOURCE 或 CROSS_SOURCE")
 	}
+	validateDesigner(&issues, document.Designer)
 	if len(document.Nodes) == 0 {
 		add("nodes", "至少需要一个节点")
 	}
@@ -155,7 +162,7 @@ func Validate(document Document) error {
 		}
 		seenProjection := map[string]bool{}
 		for j, field := range node.Projection {
-			validateIdentifier(&issues, fmt.Sprintf("%s.projection[%d]", path, j), field)
+			validatePhysicalIdentifier(&issues, fmt.Sprintf("%s.projection[%d]", path, j), field)
 			if seenProjection[field] {
 				add(fmt.Sprintf("%s.projection[%d]", path, j), "投影字段重复")
 			}
@@ -168,7 +175,7 @@ func Validate(document Document) error {
 				validateSourceFilterExpression(&issues, filterPath+".expression", *filter.Expression, node.ID)
 				continue
 			}
-			validateIdentifier(&issues, filterPath+".field", filter.Field)
+			validatePhysicalIdentifier(&issues, filterPath+".field", filter.Field)
 			if !seenProjection[filter.Field] {
 				add(filterPath+".field", "源端过滤字段必须包含在节点 projection 中")
 			}
@@ -213,7 +220,7 @@ func Validate(document Document) error {
 		if !oneOf(join.JoinType, "INNER", "LEFT", "RIGHT", "FULL") {
 			add(path+".joinType", "不支持的 Join 类型")
 		}
-		if !oneOf(join.Cardinality, "ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_ONE", "MANY_TO_MANY") {
+		if !oneOf(join.Cardinality, "UNKNOWN", "ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_ONE", "MANY_TO_MANY") {
 			add(path+".cardinality", "不支持的 Join 基数")
 		}
 		if len(join.Conditions) == 0 {
@@ -233,6 +240,113 @@ func Validate(document Document) error {
 				add(conditionPath+".rightExpression", "必须引用 Join 右节点字段")
 			}
 		}
+	}
+	joinsByID := make(map[string]Join, len(document.Joins))
+	for _, join := range document.Joins {
+		joinsByID[join.ID] = join
+	}
+	projections := make(map[string]map[string]bool, len(document.Nodes))
+	for _, node := range document.Nodes {
+		projections[node.ID] = map[string]bool{}
+		for _, field := range node.Projection {
+			projections[node.ID][field] = true
+		}
+	}
+	seenPreAggregationIDs := map[string]bool{}
+	preAggregatedNodes := map[string]bool{}
+	preAggregationOutputs := map[string]map[string]bool{}
+	for i, item := range document.PreAggregations {
+		path := fmt.Sprintf("preAggregations[%d]", i)
+		validateIdentifier(&issues, path+".id", item.ID)
+		if seenPreAggregationIDs[item.ID] {
+			add(path+".id", "分组组件标识重复")
+		}
+		seenPreAggregationIDs[item.ID] = true
+		if !nodeIDs[item.NodeID] {
+			add(path+".nodeId", "引用的数据节点不存在")
+		}
+		if preAggregatedNodes[item.NodeID] {
+			add(path+".nodeId", "同一个数据节点当前只允许一个关联前分组组件")
+		}
+		preAggregatedNodes[item.NodeID] = true
+		join, exists := joinsByID[item.JoinID]
+		if !exists {
+			add(path+".joinId", "引用的关联组件不存在")
+		} else if item.JoinSide == "LEFT" && join.LeftNodeID != item.NodeID || item.JoinSide == "RIGHT" && join.RightNodeID != item.NodeID {
+			add(path+".joinSide", "分组组件连接的槽位与 Join 节点不一致")
+		}
+		if !oneOf(item.JoinSide, "LEFT", "RIGHT") {
+			add(path+".joinSide", "必须为 LEFT 或 RIGHT")
+		}
+		if len(item.GroupBy) == 0 {
+			add(path+".groupBy", "至少需要一个分组字段")
+		}
+		if len(item.Metrics) == 0 {
+			add(path+".metrics", "至少需要一个聚合指标")
+		}
+		outputs := map[string]bool{}
+		preAggregationOutputs[item.NodeID] = outputs
+		for j, group := range item.GroupBy {
+			fieldPath := fmt.Sprintf("%s.groupBy[%d]", path, j)
+			validatePhysicalIdentifier(&issues, fieldPath+".field", group.Field)
+			if !projections[item.NodeID][group.Field] {
+				add(fieldPath+".field", "分组字段必须包含在节点 projection 中")
+			}
+			if outputs[group.Field] {
+				add(fieldPath+".field", "分组输出字段重复")
+			}
+			outputs[group.Field] = true
+			if group.Unit != "" && !oneOf(group.Unit, "DAY", "WEEK", "MONTH", "QUARTER", "YEAR") {
+				add(fieldPath+".unit", "不支持的日期粒度")
+			}
+		}
+		for j, metric := range item.Metrics {
+			fieldPath := fmt.Sprintf("%s.metrics[%d]", path, j)
+			validatePhysicalIdentifier(&issues, fieldPath+".field", metric.Field)
+			if !projections[item.NodeID][metric.Field] {
+				add(fieldPath+".field", "指标字段必须包含在节点 projection 中")
+			}
+			if outputs[metric.Field] {
+				add(fieldPath+".field", "分组组件的输出字段不能重名")
+			}
+			outputs[metric.Field] = true
+			if !oneOf(metric.Function, "SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT") {
+				add(fieldPath+".function", "不支持的聚合函数")
+			}
+		}
+		if exists {
+			conditions := join.Conditions
+			for conditionIndex, condition := range conditions {
+				expression := condition.LeftExpression
+				if item.JoinSide == "RIGHT" {
+					expression = condition.RightExpression
+				}
+				if expression.NodeID == item.NodeID && !outputs[expression.Field] {
+					add(fmt.Sprintf("%s.conditions[%d]", path, conditionIndex), "关联字段必须是分组组件的输出字段")
+				}
+			}
+		}
+	}
+	for i, field := range document.Fields {
+		visitDatasetExpression(field.Expression, func(expression Expression) {
+			if expression.Type == "FIELD_REF" && preAggregatedNodes[expression.NodeID] && !preAggregationOutputs[expression.NodeID][expression.Field] {
+				add(fmt.Sprintf("fields[%d].expression", i), "最终输出只能引用分组组件产出的字段")
+			}
+		})
+	}
+	for i, filter := range document.Having {
+		visitDatasetExpression(filter.Expression, func(expression Expression) {
+			if expression.Type == "FIELD_REF" && preAggregatedNodes[expression.NodeID] && !preAggregationOutputs[expression.NodeID][expression.Field] {
+				add(fmt.Sprintf("having[%d].expression", i), "聚合后过滤只能引用分组组件产出的字段")
+			}
+		})
+	}
+	for i, filter := range document.Filters {
+		visitDatasetExpression(filter.Expression, func(expression Expression) {
+			if expression.Type == "FIELD_REF" && preAggregatedNodes[expression.NodeID] {
+				add(fmt.Sprintf("filters[%d].expression", i), "关联前分组节点请使用 sourceFilters，不能再配置全局聚合前过滤")
+			}
+		})
 	}
 	validateJoinGraph(&issues, document.Nodes, document.Joins)
 	validateProjectedFieldRefs(&issues, document)
@@ -353,6 +467,344 @@ func Validate(document Document) error {
 	return nil
 }
 
+// validateDesigner 只校验画布元数据的稳定边界，不把展示配置提升为查询语义。
+// components 之外的扩展键会原样保留，便于前端在 DSL V1 内增量演进；执行计划
+// 刻意不读取 Designer，因此整理画布不会改变 planHash。
+func validateDesigner(issues *[]ValidationIssue, designer map[string]any) {
+	if designer == nil {
+		return
+	}
+	add := func(path, reason string) {
+		*issues = append(*issues, ValidationIssue{Path: path, Reason: reason})
+	}
+	if raw, exists := designer["version"]; exists {
+		version, ok := raw.(string)
+		if !ok || strings.TrimSpace(version) != "1.0" {
+			add("designer.version", "必须为 1.0")
+		}
+	}
+	// 当前画布使用 nodePositions + joins/groups/end 的固定图结构。设计态拓扑
+	// 必须保持引用完整且无环；字段执行语义仍由下方可执行 DSL 校验兜底。
+	fixedIDs := map[string]bool{}
+	if raw, exists := designer["nodePositions"]; exists {
+		positions, ok := designerObject(raw)
+		if !ok {
+			add("designer.nodePositions", "必须为坐标对象")
+		} else {
+			for id, position := range positions {
+				path := "designer.nodePositions." + id
+				if !identifierPattern.MatchString(strings.TrimSpace(id)) {
+					add(path, "节点标识不合法")
+				} else if fixedIDs[id] {
+					add(path, "画布组件标识重复")
+				} else {
+					fixedIDs[id] = true
+				}
+				validateDesignerPosition(issues, path, position)
+			}
+		}
+	}
+	validateDesignerItems(issues, designer, "joins", "关联", fixedIDs)
+	validateDesignerItems(issues, designer, "groups", "分组", fixedIDs)
+	if raw, exists := designer["end"]; exists {
+		end, ok := designerObject(raw)
+		if !ok {
+			add("designer.end", "必须为结束节点对象")
+		} else {
+			validateDesignerItem(issues, "designer.end", "结束", end, fixedIDs)
+		}
+	}
+	if raw, exists := designer["components"]; exists {
+		components, ok := designerList(raw)
+		if !ok {
+			add("designer.components", "必须为组件数组")
+		} else {
+			seen := map[string]bool{}
+			for index, component := range components {
+				path := fmt.Sprintf("designer.components[%d]", index)
+				if component == nil {
+					add(path, "必须为组件对象")
+					continue
+				}
+				id, idOK := component["id"].(string)
+				id = strings.TrimSpace(id)
+				if !idOK || !identifierPattern.MatchString(id) {
+					add(path+".id", "必须是合法且非空的组件标识")
+				} else if seen[id] {
+					add(path+".id", "组件标识重复")
+				} else {
+					seen[id] = true
+				}
+				kind, kindOK := component["kind"].(string)
+				kind = upper(kind)
+				if !kindOK || !oneOf(kind, "DATA", "NODE", "JOIN", "GROUP", "OUTPUT") {
+					add(path+".kind", "必须为 DATA、NODE、JOIN、GROUP 或 OUTPUT")
+				}
+				if position, exists := component["position"]; exists {
+					validateDesignerPosition(issues, path+".position", position)
+				} else if _, hasX := component["x"]; hasX {
+					validateDesignerPosition(issues, path, component)
+				} else if _, hasY := component["y"]; hasY {
+					validateDesignerPosition(issues, path, component)
+				}
+			}
+		}
+	}
+	// 兼容以组件 ID 为键单独保存坐标的客户端表示。
+	if raw, exists := designer["positions"]; exists {
+		positions, ok := designerObject(raw)
+		if !ok {
+			add("designer.positions", "必须为坐标对象")
+			return
+		}
+		for id, position := range positions {
+			validateDesignerPosition(issues, "designer.positions."+id, position)
+		}
+	}
+	validateDesignerDAG(issues, designer)
+}
+
+// validateDesignerDAG 校验固定画布图中已经声明的连线。缺少输入仍允许作为设计中间态，
+// 但只要提供了输入，就必须指向存在的上游组件且不能形成自环或间接循环。
+func validateDesignerDAG(issues *[]ValidationIssue, designer map[string]any) {
+	if _, hasJoins := designer["joins"]; !hasJoins {
+		if _, hasGroups := designer["groups"]; !hasGroups {
+			if _, hasEnd := designer["end"]; !hasEnd {
+				return
+			}
+		}
+	}
+	add := func(path, reason string) {
+		*issues = append(*issues, ValidationIssue{Path: path, Reason: reason})
+	}
+	existing := map[string]bool{}
+	if positions, ok := designerObject(designer["nodePositions"]); ok {
+		for id := range positions {
+			existing["NODE:"+strings.TrimSpace(id)] = true
+		}
+	}
+	joins, _ := designerList(designer["joins"])
+	groups, _ := designerList(designer["groups"])
+	for _, item := range joins {
+		if id, ok := item["id"].(string); ok && strings.TrimSpace(id) != "" {
+			existing["JOIN:"+strings.TrimSpace(id)] = true
+		}
+	}
+	for _, item := range groups {
+		if id, ok := item["id"].(string); ok && strings.TrimSpace(id) != "" {
+			existing["GROUP:"+strings.TrimSpace(id)] = true
+		}
+	}
+	end, hasEnd := designerObject(designer["end"])
+	if hasEnd {
+		if id, ok := end["id"].(string); ok && strings.TrimSpace(id) != "" {
+			existing["OUTPUT:"+strings.TrimSpace(id)] = true
+		}
+	}
+
+	dependencies := map[string][]string{}
+	for key := range existing {
+		dependencies[key] = nil
+	}
+	validateInput := func(path, target string, raw any) {
+		if raw == nil {
+			return
+		}
+		value, ok := designerObject(raw)
+		if !ok {
+			add(path, "必须为画布输入引用")
+			return
+		}
+		kind, kindOK := value["kind"].(string)
+		id, idOK := value["id"].(string)
+		kind, id = upper(kind), strings.TrimSpace(id)
+		if !kindOK || !idOK || !oneOf(kind, "NODE", "JOIN", "GROUP") || !identifierPattern.MatchString(id) {
+			add(path, "必须引用合法的数据、关联或分组组件")
+			return
+		}
+		source := kind + ":" + id
+		if !existing[source] {
+			add(path, "引用的上游组件不存在或已被删除")
+			return
+		}
+		if source == target {
+			add(path, "画布组件不能连接到自身")
+			return
+		}
+		dependencies[target] = append(dependencies[target], source)
+	}
+	for index, item := range joins {
+		id, _ := item["id"].(string)
+		target := "JOIN:" + strings.TrimSpace(id)
+		if target == "JOIN:" || !existing[target] {
+			continue
+		}
+		validateInput(fmt.Sprintf("designer.joins[%d].left", index), target, item["left"])
+		validateInput(fmt.Sprintf("designer.joins[%d].right", index), target, item["right"])
+	}
+	for index, item := range groups {
+		id, _ := item["id"].(string)
+		target := "GROUP:" + strings.TrimSpace(id)
+		if target == "GROUP:" || !existing[target] {
+			continue
+		}
+		validateInput(fmt.Sprintf("designer.groups[%d].input", index), target, item["input"])
+	}
+	if hasEnd {
+		id, _ := end["id"].(string)
+		target := "OUTPUT:" + strings.TrimSpace(id)
+		if target != "OUTPUT:" && existing[target] {
+			validateInput("designer.end.input", target, end["input"])
+		}
+	}
+
+	states := map[string]uint8{}
+	stack := make([]string, 0)
+	cycleAdded := false
+	var visit func(string)
+	visit = func(key string) {
+		if cycleAdded || states[key] == 2 {
+			return
+		}
+		states[key] = 1
+		stack = append(stack, key)
+		for _, dependency := range dependencies[key] {
+			if states[dependency] == 1 {
+				start := 0
+				for index, candidate := range stack {
+					if candidate == dependency {
+						start = index
+						break
+					}
+				}
+				cycle := append(append([]string{}, stack[start:]...), dependency)
+				add("designer", "画布存在循环依赖："+strings.Join(cycle, " → "))
+				cycleAdded = true
+				break
+			}
+			if states[dependency] == 0 {
+				visit(dependency)
+			}
+		}
+		stack = stack[:len(stack)-1]
+		states[key] = 2
+	}
+	for key := range dependencies {
+		if cycleAdded {
+			break
+		}
+		if states[key] == 0 {
+			visit(key)
+		}
+	}
+}
+
+func validateDesignerItems(issues *[]ValidationIssue, designer map[string]any, key, label string, seen map[string]bool) {
+	raw, exists := designer[key]
+	if !exists {
+		return
+	}
+	items, ok := designerList(raw)
+	if !ok {
+		*issues = append(*issues, ValidationIssue{Path: "designer." + key, Reason: "必须为" + label + "节点数组"})
+		return
+	}
+	for index, item := range items {
+		validateDesignerItem(issues, fmt.Sprintf("designer.%s[%d]", key, index), label, item, seen)
+	}
+}
+
+func validateDesignerItem(issues *[]ValidationIssue, path, label string, item map[string]any, seen map[string]bool) {
+	id, ok := item["id"].(string)
+	id = strings.TrimSpace(id)
+	if !ok || !identifierPattern.MatchString(id) {
+		*issues = append(*issues, ValidationIssue{Path: path + ".id", Reason: label + "节点标识不合法"})
+	} else if seen[id] {
+		*issues = append(*issues, ValidationIssue{Path: path + ".id", Reason: "画布组件标识重复"})
+	} else {
+		seen[id] = true
+	}
+	position, exists := item["position"]
+	if !exists {
+		*issues = append(*issues, ValidationIssue{Path: path + ".position", Reason: "必须提供坐标"})
+		return
+	}
+	validateDesignerPosition(issues, path+".position", position)
+}
+
+func validateDesignerPosition(issues *[]ValidationIssue, path string, raw any) {
+	position, ok := designerObject(raw)
+	if !ok {
+		*issues = append(*issues, ValidationIssue{Path: path, Reason: "必须为坐标对象"})
+		return
+	}
+	for _, axis := range []string{"x", "y"} {
+		value, exists := position[axis]
+		number, valid := designerNumber(value)
+		if !exists || !valid || math.IsNaN(number) || math.IsInf(number, 0) || number < 0 {
+			*issues = append(*issues, ValidationIssue{Path: path + "." + axis, Reason: "必须为有限的非负数"})
+		}
+	}
+}
+
+func designerList(raw any) ([]map[string]any, bool) {
+	switch values := raw.(type) {
+	case []any:
+		result := make([]map[string]any, len(values))
+		for index, value := range values {
+			object, ok := designerObject(value)
+			if !ok {
+				return nil, false
+			}
+			result[index] = object
+		}
+		return result, true
+	case []map[string]any:
+		return values, true
+	default:
+		return nil, false
+	}
+}
+
+func designerObject(raw any) (map[string]any, bool) {
+	value, ok := raw.(map[string]any)
+	return value, ok
+}
+
+func designerNumber(raw any) (float64, bool) {
+	switch value := raw.(type) {
+	case json.Number:
+		number, err := value.Float64()
+		return number, err == nil
+	case float64:
+		return value, true
+	case float32:
+		return float64(value), true
+	case int:
+		return float64(value), true
+	case int8:
+		return float64(value), true
+	case int16:
+		return float64(value), true
+	case int32:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	case uint:
+		return float64(value), true
+	case uint8:
+		return float64(value), true
+	case uint16:
+		return float64(value), true
+	case uint32:
+		return float64(value), true
+	case uint64:
+		return float64(value), true
+	default:
+		return 0, false
+	}
+}
+
 func validateSourceFilterExpression(issues *[]ValidationIssue, path string, expression Expression, nodeID string) {
 	// 源过滤会在 Join 前直接送往单个数据源，只允许布尔谓词，且其任意深度的
 	// 字段引用都必须属于当前节点；聚合只能在分组阶段执行。
@@ -393,6 +845,16 @@ func BuildLogicalPlan(document Document) LogicalPlan {
 	plan := LogicalPlan{DSLVersion: DSLVersion, OutputGrain: document.OutputGrain}
 	for _, node := range document.Nodes {
 		plan.Steps = append(plan.Steps, PlanStep{ID: node.ID, Kind: "SCAN", Fields: append([]string(nil), node.Projection...)})
+	}
+	for _, item := range document.PreAggregations {
+		fields := make([]string, 0, len(item.GroupBy)+len(item.Metrics))
+		for _, group := range item.GroupBy {
+			fields = append(fields, group.Field)
+		}
+		for _, metric := range item.Metrics {
+			fields = append(fields, metric.Function+":"+metric.Field)
+		}
+		plan.Steps = append(plan.Steps, PlanStep{ID: item.ID, Kind: "PRE_AGGREGATE", Inputs: []string{item.NodeID}, Fields: fields})
 	}
 	for _, join := range document.Joins {
 		plan.Steps = append(plan.Steps, PlanStep{ID: join.ID, Kind: "JOIN_" + join.JoinType, Inputs: []string{join.LeftNodeID, join.RightNodeID}})
@@ -452,6 +914,18 @@ func normalize(document Document) Document {
 			join.Conditions[j].Operator = upper(join.Conditions[j].Operator)
 			normalizeExpression(&join.Conditions[j].LeftExpression)
 			normalizeExpression(&join.Conditions[j].RightExpression)
+		}
+	}
+	for i := range document.PreAggregations {
+		item := &document.PreAggregations[i]
+		item.ID, item.NodeID, item.JoinID, item.JoinSide = strings.TrimSpace(item.ID), strings.TrimSpace(item.NodeID), strings.TrimSpace(item.JoinID), upper(item.JoinSide)
+		for j := range item.GroupBy {
+			item.GroupBy[j].Field = strings.TrimSpace(item.GroupBy[j].Field)
+			item.GroupBy[j].Unit = upper(item.GroupBy[j].Unit)
+		}
+		for j := range item.Metrics {
+			item.Metrics[j].Field = strings.TrimSpace(item.Metrics[j].Field)
+			item.Metrics[j].Function = upper(item.Metrics[j].Function)
 		}
 	}
 	for i := range document.Parameters {
@@ -519,6 +993,9 @@ func normalizeSlices(document *Document) {
 	if document.Joins == nil {
 		document.Joins = []Join{}
 	}
+	if document.PreAggregations == nil {
+		document.PreAggregations = []PreAggregation{}
+	}
 	if document.Fields == nil {
 		document.Fields = []Field{}
 	}
@@ -551,6 +1028,14 @@ func normalizeSlices(document *Document) {
 	for i := range document.Joins {
 		if document.Joins[i].Conditions == nil {
 			document.Joins[i].Conditions = []JoinCondition{}
+		}
+	}
+	for i := range document.PreAggregations {
+		if document.PreAggregations[i].GroupBy == nil {
+			document.PreAggregations[i].GroupBy = []PreAggregationGroup{}
+		}
+		if document.PreAggregations[i].Metrics == nil {
+			document.PreAggregations[i].Metrics = []PreAggregationMetric{}
 		}
 	}
 }
@@ -784,6 +1269,12 @@ func validateExecutionPolicy(issues *[]ValidationIssue, policy ExecutionPolicy) 
 func validateIdentifier(issues *[]ValidationIssue, path, value string) {
 	if !identifierPattern.MatchString(value) {
 		*issues = append(*issues, ValidationIssue{Path: path, Reason: "必须以字母开头且只能包含字母、数字和下划线，长度不超过 128"})
+	}
+}
+
+func validatePhysicalIdentifier(issues *[]ValidationIssue, path, value string) {
+	if !physicalIdentifierPattern.MatchString(value) {
+		*issues = append(*issues, ValidationIssue{Path: path, Reason: "必须是查询引擎支持的物理字段名"})
 	}
 }
 

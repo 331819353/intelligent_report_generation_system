@@ -3,7 +3,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
-from app.main import ConnectionConfig, ConnectionPool, app, canonical_type, oracle_dsn, validate_read_only_sql
+from app.main import ConnectionConfig, ConnectionPool, MetadataSampleRequest, app, canonical_type, open_connection, oracle_dsn, validate_read_only_sql
 
 
 def test_live() -> None:
@@ -34,6 +34,13 @@ def test_metadata_sample_rejects_unsafe_table_name_before_connecting() -> None:
         },
     )
     assert response.status_code == 400
+
+
+def test_metadata_sample_accepts_five_rows_but_rejects_more() -> None:
+    connection = {"source_type": "MYSQL", "host": "none", "port": 3306, "database": "db", "username": "u", "password": "p"}
+    assert MetadataSampleRequest(connection=connection, schema_name="sales", table_name="orders", max_rows=5).max_rows == 5
+    with pytest.raises(ValidationError):
+        MetadataSampleRequest(connection=connection, schema_name="sales", table_name="orders", max_rows=6)
 
 
 def test_query_rejects_writes_before_connecting() -> None:
@@ -92,6 +99,14 @@ def test_connection_pool_close_releases_idle_connection() -> None:
     assert connection.closed is True
     assert pool.created == 0
     with pytest.raises(RuntimeError): pool.acquire()
+
+
+def test_mysql_connection_uses_utf8mb4_and_does_not_reuse_old_transaction_snapshot() -> None:
+    config = ConnectionConfig(source_type="MYSQL", host="mysql", port=3306, database="report_source", username="reader", password="secret")
+    with patch("app.main.pymysql.connect", return_value=object()) as connect:
+        open_connection(config)
+    assert connect.call_args.kwargs["charset"] == "utf8mb4"
+    assert connect.call_args.kwargs["autocommit"] is True
 
 
 @pytest.mark.parametrize("sql", [

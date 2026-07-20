@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
-import { RequestError } from '../lib/api'
-import { buildDatasetDSL, buildPreviewParameters, createDatasetPublishIdempotencyKey, datasetAPI, type AssetColumn, type AssetTable, type CalculatedField, type DatasetDraft, type DatasetPreview, type DatasetRecord, type DesignerNode, type FieldOption, type FilterOption, type JoinOption, type ParameterOption, type PublishedVersionRecord, type PublishedVersionSummary, type PublishDatasetInput, type VersionUsage } from '../lib/datasets'
+import { hydrateDatasetDraft } from '../lib/dataset-draft'
+import { buildDatasetDSL, buildPreviewParameters, datasetAPI, type AssetColumn, type AssetTable, type CalculatedField, type DatasetDraft, type DatasetPreview, type DatasetRecord, type DesignerNode, type FieldOption, type FilterOption, type JoinOption, type ParameterOption, type PublishedVersionRecord, type PublishedVersionSummary, type PublishDatasetInput, type VersionUsage } from '../lib/datasets'
 
-const emptyDraft = (): DatasetDraft => ({ code: '', name: '', description: '', nodes: [], fields: [], joins: [], filters: [], parameters: [], calculations: [], sorts: [], grainDescription: '', grainKeys: [] })
+const emptyDraft = (): DatasetDraft => ({ code: '', name: '', description: '', nodes: [], fields: [], joins: [], filters: [], parameters: [], calculations: [], sorts: [], grainDescription: '', grainKeys: [], groupingEnabled: false })
 const text = (value: unknown) => typeof value === 'string' ? value : ''
 const object = (value: unknown) => (value && typeof value === 'object' ? value as Record<string, unknown> : {})
 const list = (value: unknown) => Array.isArray(value) ? value : []
@@ -16,20 +16,10 @@ const versionParameters = (version: PublishedVersionRecord | null): ParameterOpt
   code: text(raw.code), name: text(raw.name), dataType: text(raw.dataType), required: Boolean(raw.required), multiValue: Boolean(raw.multiValue),
 })).filter(parameter => parameter.code)
 type DatasetCapabilities = { read: boolean; manage: boolean; publish: boolean }
-// 发布请求发出后的未知异常（包括成功响应体被截断）都可能发生在服务端提交之后；
-// 只有收到明确的 HTTP 4xx 才能安全结束原幂等候选。
-const isAmbiguousPublishFailure = (cause: unknown) => !(cause instanceof RequestError) || cause.status >= 500
-const httpStatusUnauthorized = 401
-const httpStatusForbidden = 403
-const httpStatusNotFound = 404
-const httpStatusConflict = 409
-const requiresPublishReconciliation = (cause: unknown) => cause instanceof RequestError &&
-  [httpStatusUnauthorized, httpStatusForbidden, httpStatusNotFound, httpStatusConflict].includes(cause.status)
 
 type PendingDatasetPublication = {
   datasetId: string
   fingerprint: string
-  idempotencyKey: string
   input: PublishDatasetInput
 }
 
@@ -39,6 +29,8 @@ type PendingDatasetPublication = {
  * 恢复，避免用户在陈旧字段集合上继续保存并覆盖有效草稿。
  */
 async function hydrateDraft(record: DatasetRecord, tables: AssetTable[]): Promise<DatasetDraft> {
+  return hydrateDatasetDraft(record, tables)
+  /*
   const dsl = record.dsl
   const nodeValues = list(dsl.nodes).map(object)
   const nodes = await Promise.all(nodeValues.map(async (value, index): Promise<DesignerNode> => {
@@ -48,6 +40,7 @@ async function hydrateDraft(record: DatasetRecord, tables: AssetTable[]): Promis
     return { id: text(value.id), alias: text(value.alias), table, columns, selected: list(value.projection).map(text) }
   }))
   const idToCode = new Map<string, string>()
+  const groupByIDs = new Set(list(dsl.groupBy).map(text))
   const fields: FieldOption[] = []
   const calculations: CalculatedField[] = []
   for (const raw of list(dsl.fields).map(object)) {
@@ -55,17 +48,26 @@ async function hydrateDraft(record: DatasetRecord, tables: AssetTable[]): Promis
     const expression = object(raw.expression)
     if (text(expression.type) === 'AGGREGATE') {
       const source = object(expression.argument)
-      fields.push({ key: `${text(source.nodeId)}.${text(source.field)}`, role: 'MEASURE', aggregation: text(expression.function) })
+      if (text(source.type) === 'FIELD_REF') {
+        fields.push({ key: `${text(source.nodeId)}.${text(source.field)}`, role: 'MEASURE', aggregation: text(expression.function), code: text(raw.code), name: text(raw.name), output: true, metric: true })
+      } else {
+        const argumentsValue = list(source.arguments).map(object)
+        calculations.push({ id: text(raw.id), code: text(raw.code), name: text(raw.name), operation: text(source.type), leftKey: `${text(argumentsValue[0]?.nodeId)}.${text(argumentsValue[0]?.field)}`, rightKey: `${text(argumentsValue[1]?.nodeId)}.${text(argumentsValue[1]?.field)}`, canonicalType: text(raw.canonicalType), aggregation: text(expression.function) })
+      }
     } else if (text(expression.type) === 'FIELD_REF') {
-      fields.push({ key: `${text(expression.nodeId)}.${text(expression.field)}`, role: text(raw.role), aggregation: '' })
+      fields.push({ key: `${text(expression.nodeId)}.${text(expression.field)}`, role: text(raw.role), aggregation: '', code: text(raw.code), name: text(raw.name), groupBy: groupByIDs.has(text(raw.id)), output: true })
+    } else if (text(expression.type) === 'DATE_TRUNC') {
+      const source = object(expression.argument)
+      fields.push({ key: `${text(source.nodeId)}.${text(source.field)}`, role: 'DIMENSION', aggregation: '', code: text(raw.code), name: text(raw.name), groupBy: true, grouping: text(expression.unit), output: true })
     } else {
       const argumentsValue = list(expression.arguments).map(object)
-      calculations.push({ id: text(raw.id), code: text(raw.code), name: text(raw.name), operation: text(expression.type), leftKey: `${text(argumentsValue[0]?.nodeId)}.${text(argumentsValue[0]?.field)}`, rightKey: `${text(argumentsValue[1]?.nodeId)}.${text(argumentsValue[1]?.field)}`, canonicalType: text(raw.canonicalType) })
+      calculations.push({ id: text(raw.id), code: text(raw.code), name: text(raw.name), operation: text(expression.type), leftKey: `${text(argumentsValue[0]?.nodeId)}.${text(argumentsValue[0]?.field)}`, rightKey: `${text(argumentsValue[1]?.nodeId)}.${text(argumentsValue[1]?.field)}`, canonicalType: text(raw.canonicalType), aggregation: '' })
     }
   }
   const joins: JoinOption[] = list(dsl.joins).map(object).map(raw => {
-    const condition = object(list(raw.conditions)[0])
-    return { id: text(raw.id), leftNodeId: text(raw.leftNodeId), rightNodeId: text(raw.rightNodeId), leftField: text(object(condition.leftExpression).field), rightField: text(object(condition.rightExpression).field), joinType: text(raw.joinType), cardinality: text(raw.cardinality), manualConfirmed: Boolean(raw.manualConfirmed) }
+    const conditions = list(raw.conditions).map(object).map((condition, index) => ({ id: `${text(raw.id)}_condition_${index + 1}`, leftField: text(object(condition.leftExpression).field), rightField: text(object(condition.rightExpression).field) }))
+    const first = conditions[0] ?? { leftField: '', rightField: '' }
+    return { id: text(raw.id), leftNodeId: text(raw.leftNodeId), rightNodeId: text(raw.rightNodeId), leftField: first.leftField, rightField: first.rightField, joinType: text(raw.joinType), cardinality: text(raw.cardinality), manualConfirmed: Boolean(raw.manualConfirmed), conditions }
   })
   const filters: FilterOption[] = list(dsl.filters).map(object).map(raw => {
     const expression = object(raw.expression), left = object(expression.left), right = object(expression.right)
@@ -73,11 +75,14 @@ async function hydrateDraft(record: DatasetRecord, tables: AssetTable[]): Promis
   })
   const parameters: ParameterOption[] = list(dsl.parameters).map(object).map(raw => ({ code: text(raw.code), name: text(raw.name), dataType: text(raw.dataType), required: Boolean(raw.required), multiValue: Boolean(raw.multiValue) }))
   const grain = object(dsl.outputGrain)
+  const groupedNodeIDs = new Set(fields.filter(field => field.groupBy || field.aggregation).map(field => field.key.split('.')[0]))
   return {
-    code: record.code, name: record.name, description: record.description, nodes, fields, joins, filters, parameters, calculations,
+    code: record.code, name: record.name, description: record.description, nodes: nodes.map(node => ({ ...node, groupingEnabled: groupedNodeIDs.has(node.id) })), fields, joins, filters, parameters, calculations,
     sorts: list(dsl.sorts).map(object).map(raw => ({ fieldId: idToCode.get(text(raw.fieldId)) ?? text(raw.fieldId), direction: text(raw.direction) })),
     grainDescription: text(grain.description), grainKeys: list(grain.keyFields).map(text),
+    groupingEnabled: fields.some(field => Boolean(field.aggregation)) || calculations.some(field => Boolean(field.aggregation)),
   }
+  */
 }
 
 /** 提供单源与跨源数据集的可视化建模、校验、保存和重新加载能力。 */
@@ -219,7 +224,11 @@ export function DatasetDesignerPage() {
 
   // 这是表单控件共用的派生索引，不单独保存；节点选择变化后统一重算可避免字段、
   // 排序和粒度选项持有不同步的副本。
-  const selectedFields = useMemo(() => draft.nodes.flatMap(node => node.columns.filter(column => node.selected.includes(column.columnName)).map(column => ({ key: `${node.id}.${column.columnName}`, code: draft.nodes.length > 1 ? `${node.alias}_${column.columnName}` : column.columnName, label: `${node.alias}.${column.businessName || column.columnName}` }))), [draft.nodes])
+  const selectedFields = useMemo(() => draft.nodes.flatMap(node => node.columns.filter(column => node.selected.includes(column.columnName)).map(column => {
+    const key = `${node.id}.${column.columnName}`
+    const option = draft.fields.find(field => field.key === key)
+    return { key, code: option?.code || (draft.nodes.length > 1 ? `${node.alias}_${column.columnName}` : column.columnName), label: option?.name || `${node.alias}.${column.businessName || column.columnName}` }
+  })), [draft.fields, draft.nodes])
   const selectedVersionParameters = useMemo(() => versionParameters(selectedVersion), [selectedVersion])
   const currentDraftFingerprint = useMemo(() => draftFingerprint(draft), [draft])
 
@@ -339,7 +348,7 @@ export function DatasetDesignerPage() {
       const columns = (await datasetAPI.columns(table.id)).items
       const id = `node_${draft.nodes.length + 1}`
       const node: DesignerNode = { id, alias: `t${draft.nodes.length + 1}`, table, columns, selected: columns.map(column => column.columnName) }
-      const fields = [...draft.fields, ...columns.map(column => ({ key: `${id}.${column.columnName}`, role: column.semanticType === 'DATE' ? 'TIME' : 'ATTRIBUTE', aggregation: '' }))]
+      const fields = [...draft.fields, ...columns.map(column => ({ key: `${id}.${column.columnName}`, code: `${node.alias}_${column.columnName}`, name: column.businessName || column.columnName, role: column.semanticType === 'DATE' ? 'TIME' : column.semanticType === 'IDENTIFIER' ? 'IDENTIFIER' : 'ATTRIBUTE', aggregation: '', groupBy: false, grouping: '', output: true }))]
       const nodes = [...draft.nodes, node]
       // 新表先与前一节点建立可见的占位 Join，用户必须在保存前确认两侧字段和基数；
       // 这样节点图始终保持连通，服务端仍会再次校验引用与方向。
@@ -399,79 +408,32 @@ export function DatasetDesignerPage() {
   }
   const publishDataset = async () => {
     setBusy(true); setError(''); setMessage('')
-    const retryingUnknownOutcome = publishOutcomeUnknown
     try {
-      let attempt = publishAttempt.current
-      if (!retryingUnknownOutcome) {
-        const validationParameters = buildPreviewParameters(draft.parameters, previewValues)
-        const fingerprint = JSON.stringify({ draft: currentDraftFingerprint, validationParameters })
-        if (attempt && (attempt.datasetId !== persistedRecord?.id || attempt.fingerprint !== fingerprint)) {
-          attempt = null
-          publishAttempt.current = null
-        }
-        if (!attempt) {
-          // 保存和发布是两种独立权限；发布入口只使用最近保存的确定草稿，不能暗中先执行 MANAGE 写入。
-          if (!persistedRecord || currentDraftFingerprint !== savedDraftFingerprint) {
-            throw new Error('当前草稿有未保存修改，请先保存草稿后再发布')
-          }
-          attempt = {
-            datasetId: persistedRecord.id,
-            fingerprint,
-            idempotencyKey: createDatasetPublishIdempotencyKey(),
-            input: {
-              draftVersionId: persistedRecord.draftVersionId,
-              expectedVersion: persistedRecord.version,
-              expectedDraftRecordVersion: persistedRecord.draftRecordVersion,
-              expectedDslHash: persistedRecord.dslHash,
-              validationParameters,
-            },
-          }
-          publishAttempt.current = attempt
-        }
+      if (!persistedRecord || currentDraftFingerprint !== savedDraftFingerprint) {
+        throw new Error('当前草稿有未保存修改，请先保存草稿后再提交发布审批')
       }
-      if (!attempt) throw new Error('上一次发布候选已丢失，请重新加载数据集后确认发布状态')
-      // 模糊失败后始终优先重放冻结候选，不读取已变化的表单，也不生成新的幂等键。
-      const published = await datasetAPI.publish(attempt.datasetId, attempt.input, attempt.idempotencyKey)
+      const validationParameters = buildPreviewParameters(draft.parameters, previewValues)
+      const fingerprint = JSON.stringify({ draft: currentDraftFingerprint, validationParameters })
+      const attempt: PendingDatasetPublication = {
+        datasetId: persistedRecord.id,
+        fingerprint,
+        input: {
+          draftVersionId: persistedRecord.draftVersionId,
+          expectedVersion: persistedRecord.version,
+          expectedDraftRecordVersion: persistedRecord.draftRecordVersion,
+          expectedDslHash: persistedRecord.dslHash,
+          validationParameters,
+        },
+      }
+      publishAttempt.current = attempt
+      const request = await datasetAPI.requestPublication(attempt.datasetId, attempt.input)
       publishAttempt.current = null
       setPublishOutcomeUnknown(false)
-      selectedVersionID.current = published.id
-      setVersionRefreshKey(value => value + 1)
-
-      // 幂等重放可能发生在其他用户又修改草稿之后，必须重新加载当前基线，不能盲信首次响应中的旧版本号。
-      try {
-        const current = await datasetAPI.get(attempt.datasetId)
-        const sameDraft = current.draftVersionId === attempt.input.draftVersionId &&
-          current.draftRecordVersion === attempt.input.expectedDraftRecordVersion &&
-          current.dslHash === attempt.input.expectedDslHash
-        const currentEnough = current.version >= published.datasetRecordVersion
-        if (sameDraft && currentEnough) {
-          setVersion(current.version)
-          setPersistedRecord(current)
-          setReconciliationRequired(false)
-          setMessage(`数据集已发布 · V${published.versionNo} · 精确版本 ${published.id}`)
-        } else {
-          setReconciliationRequired(true)
-          setMessage(`数据集已发布 · V${published.versionNo} · 精确版本 ${published.id}`)
-          setError(sameDraft ? '发布已成功，但服务端返回的草稿基线过旧，请重新加载后继续编辑' : '发布已成功，但远端草稿随后发生变化，请重新加载后继续编辑')
-        }
-      } catch {
-        setReconciliationRequired(true)
-        setMessage(`数据集已发布 · V${published.versionNo} · 精确版本 ${published.id}；请重新加载以确认最新草稿`)
-      }
+      setMessage(`发布审批已提交 · ${request.id} · 当前状态：${request.status}`)
     } catch (cause) {
-      if (publishAttempt.current && isAmbiguousPublishFailure(cause)) {
-        setPublishOutcomeUnknown(true)
-        setError(`发布结果尚未确认，请点击“重试刚才发布”；确认前已锁定编辑和保存。${cause instanceof Error ? ` ${cause.message}` : ''}`)
-      } else {
-        publishAttempt.current = null
-        setPublishOutcomeUnknown(false)
-        if (retryingUnknownOutcome && requiresPublishReconciliation(cause)) {
-          setReconciliationRequired(true)
-          setError(`${cause instanceof Error ? cause.message : '数据集发布失败'}；请重新加载草稿核对远端状态`)
-        } else {
-          setError(cause instanceof Error ? cause.message : '数据集发布失败')
-        }
-      }
+      publishAttempt.current = null
+      setPublishOutcomeUnknown(false)
+      setError(cause instanceof Error ? cause.message : '提交发布审批失败')
     }
     finally { setBusy(false) }
   }
@@ -500,7 +462,7 @@ export function DatasetDesignerPage() {
   }
 
   return (
-    <AppShell title={draft.name || '新建数据集'} eyebrow="数据集设计器" actions={<><button className="quiet-button" onClick={validate} disabled={busy || versionBusy || !permissionsResolved || !capabilities.manage || publishOutcomeUnknown || reconciliationRequired}>校验 DSL</button>{activeQuery ? <button className="danger-button" onClick={cancelPreview}>取消查询</button> : <button className="quiet-button" onClick={runPreview} disabled={busy || versionBusy || !permissionsResolved || !capabilities.read || publishOutcomeUnknown || reconciliationRequired}>数据预览</button>}{reconciliationRequired && <button className="quiet-button" onClick={reloadCurrentDataset} disabled={busy || versionBusy}>重新加载草稿</button>}<button className="quiet-button" onClick={save} disabled={busy || versionBusy || !permissionsResolved || !capabilities.manage || publishOutcomeUnknown || reconciliationRequired}>保存草稿</button><button className="primary-button" onClick={publishDataset} disabled={busy || versionBusy || !permissionsResolved || !capabilities.publish || reconciliationRequired}>{publishOutcomeUnknown ? '重试刚才发布' : '发布版本'}</button></>}>
+    <AppShell title={draft.name || '新建数据集'} eyebrow="数据集配置中心" actions={<><button className="quiet-button" onClick={validate} disabled={busy || versionBusy || !permissionsResolved || !capabilities.manage || publishOutcomeUnknown || reconciliationRequired}>校验 DSL</button>{activeQuery ? <button className="danger-button" onClick={cancelPreview}>取消查询</button> : <button className="quiet-button" onClick={runPreview} disabled={busy || versionBusy || !permissionsResolved || !capabilities.read || publishOutcomeUnknown || reconciliationRequired}>数据预览</button>}{reconciliationRequired && <button className="quiet-button" onClick={reloadCurrentDataset} disabled={busy || versionBusy}>重新加载草稿</button>}<button className="quiet-button" onClick={save} disabled={busy || versionBusy || !permissionsResolved || !capabilities.manage || publishOutcomeUnknown || reconciliationRequired}>保存草稿</button><button className="primary-button" onClick={publishDataset} disabled={busy || versionBusy || !permissionsResolved || !capabilities.manage || reconciliationRequired}>提交发布审批</button></>}>
       <div className="dataset-status" aria-live="polite">{error && <span className="designer-error">{error}</span>}{message && <span className="designer-success">{message}</span>}<small>预览会先保存草稿；发布只使用最近保存的确定版本，并应用参数绑定、权限、超时与行数限制</small></div>
       {datasetId && datasetId !== 'new' && <PublishedVersionManager
         permissionsReady={permissionsResolved} canRead={capabilities.read} canPublish={capabilities.publish}
@@ -517,11 +479,11 @@ export function DatasetDesignerPage() {
         <section className="dataset-workbench">
           <div className="dataset-meta"><label>数据集编码<input value={draft.code} disabled={version > 0} onChange={event => update({ code: event.target.value })} /></label><label>数据集名称<input value={draft.name} onChange={event => update({ name: event.target.value })} /></label><label className="wide">说明<input value={draft.description} onChange={event => update({ description: event.target.value })} /></label></div>
           {!draft.nodes.length && <div className="dataset-empty"><strong>从左侧选择第一张表</strong><span>字段会自动载入，可继续配置语义角色、聚合和粒度。</span></div>}
-          {draft.nodes.map(node => <article className="dataset-node" key={node.id}><header><div><span className="eyebrow">{node.table.dataSourceType}</span><h3>{node.table.businessName || node.table.tableName}</h3></div><div className="node-actions"><label>别名<input value={node.alias} onChange={event => setDraft(current => ({ ...current, nodes: current.nodes.map(item => item.id === node.id ? { ...item, alias: event.target.value } : item) }))} /></label><button className="quiet-button" onClick={() => removeNode(node.id)}>移除</button></div></header><div className="dataset-field-head"><span>输出</span><span>字段</span><span>类型</span><span>角色</span><span>聚合</span></div>{node.columns.map(column => { const key = `${node.id}.${column.columnName}`, option = draft.fields.find(item => item.key === key); return <div className="dataset-field" key={column.id}><input aria-label={`选择 ${column.columnName}`} type="checkbox" checked={node.selected.includes(column.columnName)} onChange={() => toggleField(node.id, column)} /><strong>{column.businessName || column.columnName}<small>{column.columnName}</small></strong><span>{column.canonicalType}</span><select value={option?.role ?? 'ATTRIBUTE'} onChange={event => setField(key, { role: event.target.value })}><option>ATTRIBUTE</option><option>DIMENSION</option><option>TIME</option><option>IDENTIFIER</option><option>MEASURE</option></select><select value={option?.aggregation ?? ''} onChange={event => setField(key, { aggregation: event.target.value })}><option value="">不聚合</option><option>SUM</option><option>AVG</option><option>MIN</option><option>MAX</option><option>COUNT</option><option>COUNT_DISTINCT</option></select></div>})}</article>)}
+          {draft.nodes.map(node => <article className="dataset-node" key={node.id}><header><div><span className="eyebrow">{node.table.dataSourceType}</span><h3>{node.table.businessName || node.table.tableName}</h3></div><div className="node-actions"><label>别名<input value={node.alias} onChange={event => setDraft(current => ({ ...current, nodes: current.nodes.map(item => item.id === node.id ? { ...item, alias: event.target.value } : item) }))} /></label><button className="quiet-button" onClick={() => removeNode(node.id)}>移除</button></div></header><div className="dataset-field-table"><div className="dataset-field-head"><span>输出</span><span>原表字段</span><span>类型</span><span>输出名称</span><span>输出编码</span><span>角色</span><span>聚合</span><span>分组</span></div>{node.columns.map(column => { const key = `${node.id}.${column.columnName}`, option = draft.fields.find(item => item.key === key); return <div className="dataset-field" key={column.id}><input aria-label={`选择 ${column.columnName}`} type="checkbox" checked={node.selected.includes(column.columnName)} onChange={() => toggleField(node.id, column)} /><strong>{column.businessName || column.columnName}<small>{column.columnName}</small></strong><span>{column.canonicalType}</span><input aria-label={`${column.columnName} 输出名称`} value={option?.name ?? column.businessName ?? column.columnName} onChange={event => setField(key, { name: event.target.value })} /><input aria-label={`${column.columnName} 输出编码`} value={option?.code ?? ''} onChange={event => setField(key, { code: event.target.value })} /><select value={option?.role ?? 'ATTRIBUTE'} onChange={event => setField(key, { role: event.target.value })}><option>ATTRIBUTE</option><option>DIMENSION</option><option>TIME</option><option>IDENTIFIER</option><option>MEASURE</option></select><select value={option?.aggregation ?? ''} onChange={event => setField(key, { aggregation: event.target.value, groupBy: event.target.value ? false : option?.groupBy, grouping: event.target.value ? '' : option?.grouping })}><option value="">不聚合</option><option>SUM</option><option>AVG</option><option>MIN</option><option>MAX</option><option>COUNT</option><option>COUNT_DISTINCT</option></select><select aria-label={`${column.columnName} 分组方式`} value={option?.groupBy ? option.grouping || 'VALUE' : ''} onChange={event => setField(key, { groupBy: Boolean(event.target.value), grouping: event.target.value === 'VALUE' ? '' : event.target.value, aggregation: '' })}><option value="">不分组</option><option value="VALUE">按原值</option>{['DATE', 'DATETIME', 'TIMESTAMP'].includes(column.canonicalType.toUpperCase()) && <><option value="YEAR">按年</option><option value="QUARTER">按季度</option><option value="MONTH">按月</option><option value="DAY">按日</option></>}</select></div>})}</div></article>)}
           {draft.joins.map((join, index) => <JoinEditor key={join.id} join={join} nodes={draft.nodes} onChange={next => update({ joins: draft.joins.map((item, itemIndex) => itemIndex === index ? next : item) })} />)}
           {preview && <PreviewTable preview={preview} />}
         </section>
-        <aside className="dataset-config"><span className="eyebrow">建模设置</span><h2>过滤与粒度</h2><label>每一行代表什么<textarea value={draft.grainDescription} onChange={event => update({ grainDescription: event.target.value })} /></label><fieldset><legend>粒度键</legend>{selectedFields.map(field => <label className="check-row" key={field.key}><input type="checkbox" checked={draft.grainKeys.includes(field.code)} onChange={() => update({ grainKeys: draft.grainKeys.includes(field.code) ? draft.grainKeys.filter(item => item !== field.code) : [...draft.grainKeys, field.code] })} />{field.label}</label>)}</fieldset><ConfigList title="参数" onAdd={() => update({ parameters: [...draft.parameters, { code: `param_${draft.parameters.length + 1}`, name: '新参数', dataType: 'STRING', required: false, multiValue: false }] })}>{draft.parameters.map((parameter, index) => <ParameterEditor key={index} value={parameter} onChange={next => update({ parameters: draft.parameters.map((item, itemIndex) => itemIndex === index ? next : item) })} />)}</ConfigList>{draft.parameters.length > 0 && <section className="preview-parameters"><strong>预览参数值</strong>{draft.parameters.map(parameter => <label key={parameter.code}>{parameter.name || parameter.code}<input aria-label={`预览参数 ${parameter.code}`} type={parameter.dataType === 'DATE' ? 'date' : 'text'} placeholder={parameter.multiValue ? '多个值请用逗号分隔' : parameter.dataType} value={previewValues[parameter.code] ?? ''} onChange={event => setPreviewValues(current => ({ ...current, [parameter.code]: event.target.value }))} /></label>)}</section>}<ConfigList title="过滤条件" onAdd={() => { const first = draft.nodes[0], column = first?.columns[0]; if (first && column) update({ filters: [...draft.filters, { id: `filter_${draft.filters.length + 1}`, nodeId: first.id, field: column.columnName, operator: 'EQUALS', value: '', parameterCode: '' }] }) }}>{draft.filters.map((filter, index) => <FilterEditor key={filter.id} value={filter} nodes={draft.nodes} parameters={draft.parameters} onChange={next => update({ filters: draft.filters.map((item, itemIndex) => itemIndex === index ? next : item) })} />)}</ConfigList><ConfigList title="计算字段" onAdd={() => { const first = selectedFields[0], second = selectedFields[1] ?? first; if (first && second) update({ calculations: [...draft.calculations, { id: `field_calc_${draft.calculations.length + 1}`, code: `calculated_${draft.calculations.length + 1}`, name: '计算字段', operation: 'ADD', leftKey: first.key, rightKey: second.key, canonicalType: 'DECIMAL' }] }) }}>{draft.calculations.map((item, index) => <CalculatedEditor key={item.id} value={item} fields={selectedFields} onChange={next => update({ calculations: draft.calculations.map((field, fieldIndex) => fieldIndex === index ? next : field) })} />)}</ConfigList><ConfigList title="排序" onAdd={() => { const first = selectedFields[0]; if (first) update({ sorts: [...draft.sorts, { fieldId: first.code, direction: 'ASC' }] }) }}>{draft.sorts.map((item, index) => <div className="mini-editor" key={index}><select value={item.fieldId} onChange={event => update({ sorts: draft.sorts.map((sort, sortIndex) => sortIndex === index ? { ...sort, fieldId: event.target.value } : sort) })}>{selectedFields.map(field => <option key={field.key} value={field.code}>{field.label}</option>)}</select><select value={item.direction} onChange={event => update({ sorts: draft.sorts.map((sort, sortIndex) => sortIndex === index ? { ...sort, direction: event.target.value } : sort) })}><option>ASC</option><option>DESC</option></select></div>)}</ConfigList>
+        <aside className="dataset-config"><span className="eyebrow">建模设置</span><h2>过滤与粒度</h2><label>每一行代表什么<textarea value={draft.grainDescription} onChange={event => update({ grainDescription: event.target.value })} /></label><fieldset><legend>粒度键</legend>{selectedFields.map(field => <label className="check-row" key={field.key}><input type="checkbox" checked={draft.grainKeys.includes(field.code)} onChange={() => update({ grainKeys: draft.grainKeys.includes(field.code) ? draft.grainKeys.filter(item => item !== field.code) : [...draft.grainKeys, field.code] })} />{field.label}</label>)}</fieldset><ConfigList title="参数" onAdd={() => update({ parameters: [...draft.parameters, { code: `param_${draft.parameters.length + 1}`, name: '新参数', dataType: 'STRING', required: false, multiValue: false }] })}>{draft.parameters.map((parameter, index) => <ParameterEditor key={index} value={parameter} onChange={next => update({ parameters: draft.parameters.map((item, itemIndex) => itemIndex === index ? next : item) })} />)}</ConfigList>{draft.parameters.length > 0 && <section className="preview-parameters"><strong>预览参数值</strong>{draft.parameters.map(parameter => <label key={parameter.code}>{parameter.name || parameter.code}<input aria-label={`预览参数 ${parameter.code}`} type={parameter.dataType === 'DATE' ? 'date' : 'text'} placeholder={parameter.multiValue ? '多个值请用逗号分隔' : parameter.dataType} value={previewValues[parameter.code] ?? ''} onChange={event => setPreviewValues(current => ({ ...current, [parameter.code]: event.target.value }))} /></label>)}</section>}<ConfigList title="过滤条件" onAdd={() => { const first = draft.nodes[0], column = first?.columns[0]; if (first && column) update({ filters: [...draft.filters, { id: `filter_${draft.filters.length + 1}`, nodeId: first.id, field: column.columnName, operator: 'EQUALS', value: '', parameterCode: '' }] }) }}>{draft.filters.map((filter, index) => <FilterEditor key={filter.id} value={filter} nodes={draft.nodes} parameters={draft.parameters} onChange={next => update({ filters: draft.filters.map((item, itemIndex) => itemIndex === index ? next : item) })} />)}</ConfigList><ConfigList title="计算字段" onAdd={() => { const first = selectedFields[0], second = selectedFields[1] ?? first; if (first && second) update({ calculations: [...draft.calculations, { id: `field_calc_${draft.calculations.length + 1}`, code: `calculated_${draft.calculations.length + 1}`, name: '计算字段', operation: 'ADD', leftKey: first.key, rightKey: second.key, canonicalType: 'DECIMAL', aggregation: '' }] }) }}>{draft.calculations.map((item, index) => <CalculatedEditor key={item.id} value={item} fields={selectedFields} onChange={next => update({ calculations: draft.calculations.map((field, fieldIndex) => fieldIndex === index ? next : field) })} />)}</ConfigList><ConfigList title="排序" onAdd={() => { const first = selectedFields[0]; if (first) update({ sorts: [...draft.sorts, { fieldId: first.code, direction: 'ASC' }] }) }}>{draft.sorts.map((item, index) => <div className="mini-editor" key={index}><select value={item.fieldId} onChange={event => update({ sorts: draft.sorts.map((sort, sortIndex) => sortIndex === index ? { ...sort, fieldId: event.target.value } : sort) })}>{selectedFields.map(field => <option key={field.key} value={field.code}>{field.label}</option>)}</select><select value={item.direction} onChange={event => update({ sorts: draft.sorts.map((sort, sortIndex) => sortIndex === index ? { ...sort, direction: event.target.value } : sort) })}><option>ASC</option><option>DESC</option></select></div>)}</ConfigList>
         </aside>
       </fieldset>
     </AppShell>
@@ -612,5 +574,5 @@ export function PreviewTable({ preview }: { preview: DatasetPreview }) {
 function ConfigList({ title, onAdd, children }: { title: string; onAdd: () => void; children: ReactNode }) { return <section className="config-list"><header><strong>{title}</strong><button onClick={onAdd}>＋</button></header>{children}</section> }
 function ParameterEditor({ value, onChange }: { value: ParameterOption; onChange: (value: ParameterOption) => void }) { return <div className="mini-editor"><input aria-label="参数编码" value={value.code} onChange={event => onChange({ ...value, code: event.target.value })} /><input aria-label="参数名称" value={value.name} onChange={event => onChange({ ...value, name: event.target.value })} /><select value={value.dataType} onChange={event => onChange({ ...value, dataType: event.target.value })}><option>STRING</option><option>INTEGER</option><option>DECIMAL</option><option>DATE</option><option>DATETIME</option><option>BOOLEAN</option></select><label className="check-row"><input type="checkbox" checked={value.required} onChange={event => onChange({ ...value, required: event.target.checked })} />必填</label><label className="check-row"><input type="checkbox" checked={value.multiValue} onChange={event => onChange({ ...value, multiValue: event.target.checked })} />多值</label></div> }
 function FilterEditor({ value, nodes, parameters, onChange }: { value: FilterOption; nodes: DesignerNode[]; parameters: ParameterOption[]; onChange: (value: FilterOption) => void }) { const node = nodes.find(item => item.id === value.nodeId) ?? nodes[0]; return <div className="mini-editor"><select value={value.nodeId} onChange={event => onChange({ ...value, nodeId: event.target.value, field: nodes.find(item => item.id === event.target.value)?.columns[0]?.columnName ?? '' })}>{nodes.map(item => <option key={item.id} value={item.id}>{item.alias}</option>)}</select><select value={value.field} onChange={event => onChange({ ...value, field: event.target.value })}>{node?.columns.map(column => <option key={column.id} value={column.columnName}>{column.columnName}</option>)}</select><select value={value.operator} onChange={event => onChange({ ...value, operator: event.target.value })}><option>EQUALS</option><option>NOT_EQUALS</option><option>GT</option><option>GTE</option><option>LT</option><option>LTE</option><option>LIKE</option></select><select value={value.parameterCode} onChange={event => onChange({ ...value, parameterCode: event.target.value })}><option value="">固定值</option>{parameters.map(parameter => <option key={parameter.code}>{parameter.code}</option>)}</select>{!value.parameterCode && <input aria-label="过滤值" value={value.value} onChange={event => onChange({ ...value, value: event.target.value })} />}</div> }
-function CalculatedEditor({ value, fields, onChange }: { value: CalculatedField; fields: Array<{ key: string; label: string }>; onChange: (value: CalculatedField) => void }) { return <div className="mini-editor"><input aria-label="计算字段编码" value={value.code} onChange={event => onChange({ ...value, code: event.target.value })} /><input aria-label="计算字段名称" value={value.name} onChange={event => onChange({ ...value, name: event.target.value })} /><select value={value.leftKey} onChange={event => onChange({ ...value, leftKey: event.target.value })}>{fields.map(field => <option key={field.key} value={field.key}>{field.label}</option>)}</select><select value={value.operation} onChange={event => onChange({ ...value, operation: event.target.value })}><option>ADD</option><option>SUBTRACT</option><option>MULTIPLY</option><option>DIVIDE</option></select><select value={value.rightKey} onChange={event => onChange({ ...value, rightKey: event.target.value })}>{fields.map(field => <option key={field.key} value={field.key}>{field.label}</option>)}</select></div> }
-function JoinEditor({ join, nodes, onChange }: { join: JoinOption; nodes: DesignerNode[]; onChange: (value: JoinOption) => void }) { const left = nodes.find(node => node.id === join.leftNodeId), right = nodes.find(node => node.id === join.rightNodeId); return <article className="join-editor"><strong>关联 {left?.alias} → {right?.alias}</strong><select value={join.leftField} onChange={event => onChange({ ...join, leftField: event.target.value, manualConfirmed: false })}>{left?.columns.map(column => <option key={column.id}>{column.columnName}</option>)}</select><span>=</span><select value={join.rightField} onChange={event => onChange({ ...join, rightField: event.target.value, manualConfirmed: false })}>{right?.columns.map(column => <option key={column.id}>{column.columnName}</option>)}</select><select value={join.joinType} onChange={event => onChange({ ...join, joinType: event.target.value, manualConfirmed: false })}><option>INNER</option><option>LEFT</option><option>RIGHT</option><option>FULL</option></select><select value={join.cardinality} onChange={event => onChange({ ...join, cardinality: event.target.value, manualConfirmed: false })}><option>ONE_TO_ONE</option><option>ONE_TO_MANY</option><option>MANY_TO_ONE</option><option>MANY_TO_MANY</option></select><label className="join-confirm"><input type="checkbox" checked={join.manualConfirmed} onChange={event => onChange({ ...join, manualConfirmed: event.target.checked })} />已核对基数</label></article> }
+function CalculatedEditor({ value, fields, onChange }: { value: CalculatedField; fields: Array<{ key: string; label: string }>; onChange: (value: CalculatedField) => void }) { return <div className="mini-editor"><input aria-label="计算字段编码" value={value.code} onChange={event => onChange({ ...value, code: event.target.value })} /><input aria-label="计算字段名称" value={value.name} onChange={event => onChange({ ...value, name: event.target.value })} /><select value={value.leftKey} onChange={event => onChange({ ...value, leftKey: event.target.value })}>{fields.map(field => <option key={field.key} value={field.key}>{field.label}</option>)}</select><select value={value.operation} onChange={event => onChange({ ...value, operation: event.target.value })}><option>ADD</option><option>SUBTRACT</option><option>MULTIPLY</option><option>DIVIDE</option></select><select value={value.rightKey} onChange={event => onChange({ ...value, rightKey: event.target.value })}>{fields.map(field => <option key={field.key} value={field.key}>{field.label}</option>)}</select><select aria-label="计算字段聚合" value={value.aggregation ?? ''} onChange={event => onChange({ ...value, aggregation: event.target.value })}><option value="">不聚合</option><option>SUM</option><option>AVG</option><option>MIN</option><option>MAX</option><option>COUNT</option><option>COUNT_DISTINCT</option></select></div> }
+function JoinEditor({ join, nodes, onChange }: { join: JoinOption; nodes: DesignerNode[]; onChange: (value: JoinOption) => void }) { const left = nodes.find(node => node.id === join.leftNodeId), right = nodes.find(node => node.id === join.rightNodeId); return <article className="join-editor"><strong>关联 {left?.alias} → {right?.alias}</strong><select value={join.leftField} onChange={event => onChange({ ...join, leftField: event.target.value, manualConfirmed: false })}>{left?.columns.map(column => <option key={column.id}>{column.columnName}</option>)}</select><span>=</span><select value={join.rightField} onChange={event => onChange({ ...join, rightField: event.target.value, manualConfirmed: false })}>{right?.columns.map(column => <option key={column.id}>{column.columnName}</option>)}</select><select value={join.joinType} onChange={event => onChange({ ...join, joinType: event.target.value, manualConfirmed: false })}><option>INNER</option><option>LEFT</option><option>RIGHT</option><option>FULL</option></select><select value={join.cardinality || 'UNKNOWN'} onChange={event => onChange({ ...join, cardinality: event.target.value, manualConfirmed: false })}><option value="UNKNOWN">基数未知</option><option>ONE_TO_ONE</option><option>ONE_TO_MANY</option><option>MANY_TO_ONE</option><option>MANY_TO_MANY</option></select><label className="join-confirm"><input type="checkbox" checked={join.manualConfirmed} onChange={event => onChange({ ...join, manualConfirmed: event.target.checked })} />已核对关联</label></article> }

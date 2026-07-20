@@ -78,13 +78,13 @@ db-shell:
 
 # 应用进程与开发种子数据。
 run-api:
-	@go run ./cmd/api
+	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; go run ./cmd/api
 
 run-worker:
-	@go run ./cmd/worker
+	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; go run ./cmd/worker
 
 seed-dev:
-	@set -a; . ./.env.example; set +a; go run ./cmd/seed
+	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; go run ./cmd/seed
 
 clean:
 	@rm -rf bin .cache coverage.out

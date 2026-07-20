@@ -49,7 +49,10 @@ func main() {
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.users(tenant_id,email,display_name,password_hash,status) VALUES ($1,$2,'系统管理员',$3,'ACTIVE') ON CONFLICT (tenant_id,email) DO UPDATE SET password_hash=EXCLUDED.password_hash,status='ACTIVE',token_version=platform.users.token_version+1,deleted_at=NULL RETURNING id`, tenantID, email, hash).Scan(&adminID); err != nil {
 			return err
 		}
-		return seedAccess(ctx, tx, tenantID, adminID)
+		if err := seedAccess(ctx, tx, tenantID, adminID); err != nil {
+			return err
+		}
+		return seedDevelopmentAI(ctx, tx, tenantID)
 	})
 	if err != nil {
 		fatal("upsert seed admin", err)
@@ -67,7 +70,7 @@ func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error 
 		{"tenant.manage", "管理租户", "TENANT", "MANAGE"}, {"user.manage", "管理用户", "USER", "MANAGE"},
 		{"data_source.manage", "管理数据源", "DATA_SOURCE", "MANAGE"}, {"dataset.read", "查看数据集", "DATASET", "READ"},
 		{"data_asset.read", "查看数据资产", "DATA_ASSET", "READ"}, {"data_asset.manage", "管理数据资产", "DATA_ASSET", "MANAGE"},
-		{"dataset.manage", "管理数据集", "DATASET", "MANAGE"}, {"dataset.publish", "发布数据集", "DATASET", "PUBLISH"},
+		{"dataset.manage", "管理数据集", "DATASET", "MANAGE"}, {"dataset.publish", "审批发布数据集", "DATASET", "PUBLISH"},
 		{"metric.read", "查看指标", "METRIC", "READ"}, {"metric.publish", "发布指标", "METRIC", "PUBLISH"},
 		{"metric.manage", "管理指标", "METRIC", "MANAGE"}, {"report.read", "查看报告", "REPORT", "READ"},
 		{"report.create", "创建报告", "REPORT", "CREATE"}, {"report.update", "编辑报告", "REPORT", "UPDATE"},
@@ -103,6 +106,21 @@ func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error 
 		}
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO platform.user_roles(tenant_id,user_id,role_id,assigned_by) VALUES ($1,$2,$3,$2) ON CONFLICT DO NOTHING`, tenantID, adminID, roleIDs["platform_admin"])
+	return err
+}
+
+// seedDevelopmentAI 只为本地演示租户启用通用 AI，并合并仍需独立授权的用途。
+// 指标创建随通用 AI 开关启用，不写入 allowed_purposes。已有用途会被保留。
+func seedDevelopmentAI(ctx context.Context, tx pgx.Tx, tenantID string) error {
+	_, err := tx.Exec(ctx, `UPDATE platform.ai_tenant_policies
+		SET enabled=true,
+			allowed_purposes=ARRAY(
+				SELECT DISTINCT requested.purpose
+				FROM unnest(allowed_purposes || ARRAY['METADATA_COMPLETION','DATASET_DAG_GENERATION']::text[]) AS requested(purpose)
+				ORDER BY requested.purpose
+			)
+		WHERE tenant_id=$1
+			AND (NOT enabled OR NOT (allowed_purposes @> ARRAY['METADATA_COMPLETION','DATASET_DAG_GENERATION']::text[]))`, tenantID)
 	return err
 }
 

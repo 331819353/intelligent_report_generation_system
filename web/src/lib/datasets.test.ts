@@ -46,11 +46,174 @@ describe('buildDatasetDSL', () => {
     const customerColumn: AssetColumn = { ...columns[0], id: 'column-3', tableId: customerTable.id, columnName: 'customer_id', businessName: '客户编号', canonicalType: 'NUMBER' }
     value.nodes.push({ id: 'customers', alias: 'c', table: customerTable, columns: [customerColumn], selected: ['customer_id'] })
     value.fields.push({ key: 'customers.customer_id', role: 'IDENTIFIER', aggregation: '' })
-    value.joins.push({ id: 'orders_customers', leftNodeId: 'orders', rightNodeId: 'customers', leftField: 'order_date', rightField: 'customer_id', joinType: 'INNER', cardinality: 'MANY_TO_ONE', manualConfirmed: false })
+    value.joins.push({ id: 'orders_customers', leftNodeId: 'orders', rightNodeId: 'customers', leftField: 'order_date', rightField: 'customer_id', joinType: 'INNER', cardinality: '', manualConfirmed: false })
     value.grainKeys = ['o_order_date']
     const dsl = buildDatasetDSL(value)
     expect(dsl.dataset.type).toBe('CROSS_SOURCE')
     expect((dsl.joins as Array<Record<string, unknown>>)[0].manualConfirmed).toBe(false)
+    expect((dsl.joins as Array<Record<string, unknown>>)[0].cardinality).toBe('UNKNOWN')
+  })
+
+  test('支持自定义输出字段、日期分组函数和计算字段聚合', () => {
+    const value = draft()
+    value.groupingEnabled = true
+    value.fields[0] = { ...value.fields[0], code: 'order_month', name: '订单月份', groupBy: true, grouping: 'MONTH' }
+    value.calculations[0] = { ...value.calculations[0], aggregation: 'AVG' }
+    value.grainKeys = ['order_month']
+
+    const dsl = buildDatasetDSL(value)
+    expect(dsl.fields[0]).toMatchObject({
+      code: 'order_month',
+      name: '订单月份',
+      role: 'DIMENSION',
+      expression: { type: 'DATE_TRUNC', unit: 'MONTH' },
+    })
+    expect(dsl.fields[2]).toMatchObject({
+      name: '双倍金额',
+      expression: { type: 'AGGREGATE', function: 'AVG', argument: { type: 'ADD' } },
+    })
+    expect(dsl.groupBy).toEqual(['field_o_order_date'])
+  })
+
+  test('明细模式不生成分组计划', () => {
+    const value = draft()
+    value.groupingEnabled = false
+    value.fields[1] = { ...value.fields[1], aggregation: '' }
+    value.calculations = []
+
+    const dsl = buildDatasetDSL(value)
+    expect(dsl.groupBy).toEqual([])
+  })
+
+  test('关联后配置独立决定最终分组字段和指标逻辑', () => {
+    const value = draft()
+    value.nodes[0].groupingEnabled = true
+    value.fields[0] = { ...value.fields[0], groupBy: true, grouping: 'DAY', output: true, finalGroupBy: true, finalGrouping: 'MONTH', finalOutput: false }
+    value.fields[1] = { ...value.fields[1], metric: true, aggregation: 'SUM', output: true, finalMetric: true, finalAggregation: 'AVG', finalOutput: false }
+    value.finalConfigured = true
+    value.finalGroupingEnabled = true
+    value.calculations = []
+
+    const dsl = buildDatasetDSL(value)
+    expect(dsl.fields).toHaveLength(2)
+    expect(dsl.fields[0]).toMatchObject({ expression: { type: 'DATE_TRUNC', unit: 'MONTH' } })
+    expect(dsl.fields[1]).toMatchObject({ role: 'MEASURE', expression: { type: 'AGGREGATE', function: 'AVG' } })
+    expect(dsl.groupBy).toEqual(['field_o_order_date'])
+  })
+
+  test('保存数据节点先分组再进入关联槽位的执行拓扑', () => {
+    const value = draft()
+    const customerTable: AssetTable = { ...table, id: 'table-2', dataSourceId: 'source-2', dataSourceName: '客户库', dataSourceType: 'ORACLE', tableName: 'customers' }
+    const customerColumn: AssetColumn = { ...columns[0], id: 'column-3', tableId: customerTable.id, columnName: 'customer_id', businessName: '客户编号', canonicalType: 'NUMBER' }
+    value.nodes.push({ id: 'customers', alias: 'c', table: customerTable, columns: [customerColumn], selected: ['customer_id'] })
+    value.fields = [
+      { key: 'orders.order_date', role: 'TIME', aggregation: '', finalGroupBy: true, finalGrouping: 'MONTH' },
+      { key: 'orders.amount', role: 'MEASURE', aggregation: '', finalMetric: true, finalAggregation: 'SUM' },
+      { key: 'customers.customer_id', role: 'IDENTIFIER', aggregation: '', finalOutput: true },
+    ]
+    value.joins = [{ id: 'join_1', leftNodeId: 'orders', rightNodeId: 'customers', leftField: 'order_date', rightField: 'customer_id', joinType: 'LEFT', cardinality: '', manualConfirmed: true }]
+    value.calculations = []
+    value.finalConfigured = true
+    value.finalGroupingEnabled = true
+    value.preAggregation = { id: 'group_1', nodeId: 'orders', joinId: 'join_1', joinSide: 'LEFT' }
+    value.finalOutputKeys = ['orders.order_date', 'orders.amount', 'customers.customer_id']
+    value.grainKeys = ['o_order_date']
+
+    const dsl = buildDatasetDSL(value)
+
+    expect(dsl.preAggregations).toEqual([{
+      id: 'group_1', nodeId: 'orders', joinId: 'join_1', joinSide: 'LEFT',
+      groupBy: [{ field: 'order_date', unit: 'MONTH' }], metrics: [{ field: 'amount', function: 'SUM' }],
+    }])
+    expect(dsl.groupBy).toEqual([])
+    expect((dsl.fields as Array<Record<string, unknown>>).map(field => field.expression)).toEqual([
+      { type: 'FIELD_REF', nodeId: 'orders', field: 'order_date' },
+      { type: 'FIELD_REF', nodeId: 'orders', field: 'amount' },
+      { type: 'FIELD_REF', nodeId: 'customers', field: 'customer_id' },
+    ])
+  })
+
+  test('Designer V1 持久化排布并将多个关联前分组编译为独立产物', () => {
+    const value = draft()
+    const customerTable: AssetTable = { ...table, id: 'table-2', dataSourceId: 'source-2', dataSourceName: '客户库', dataSourceType: 'ORACLE', tableName: 'customers', businessName: '客户' }
+    const customerColumns: AssetColumn[] = [
+      { ...columns[0], id: 'column-3', tableId: customerTable.id, columnName: 'customer_id', businessName: '客户编号', canonicalType: 'NUMBER' },
+      { ...columns[1], id: 'column-4', tableId: customerTable.id, columnName: 'customer_name', businessName: '客户名称', canonicalType: 'TEXT' },
+    ]
+    value.nodes.push({ id: 'customers', alias: 'c', table: customerTable, columns: customerColumns, selected: ['customer_id', 'customer_name'] })
+    value.fields.push(
+      { key: 'customers.customer_id', role: 'IDENTIFIER', aggregation: '', code: 'customer_id', name: '客户编号' },
+      { key: 'customers.customer_name', role: 'ATTRIBUTE', aggregation: '', code: 'customer_name', name: '客户名称' },
+    )
+    value.joins = [{ id: 'join_1', leftNodeId: 'orders', rightNodeId: 'customers', leftField: 'order_date', rightField: 'customer_id', joinType: 'LEFT', cardinality: '', manualConfirmed: true }]
+    value.calculations = []
+    value.grainKeys = ['order_month']
+    value.designer = {
+      version: '1.0',
+      nodePositions: { orders: { x: 28, y: 44 }, customers: { x: 28, y: 244 } },
+      nodeNames: { orders: '订单明细', customers: '客户明细' },
+      groups: [
+        { id: 'group_orders', name: '订单月汇总', input: { kind: 'NODE', id: 'orders' }, position: { x: 330, y: 44 }, dimensions: [{ key: 'orders.order_date', name: '订单月份', code: 'order_month', grouping: 'MONTH' }], metrics: [{ key: 'orders.amount', name: '交易金额', code: 'sales_amount', aggregation: 'SUM' }] },
+        { id: 'group_customers', name: '客户汇总', input: { kind: 'NODE', id: 'customers' }, position: { x: 330, y: 244 }, dimensions: [{ key: 'customers.customer_id', name: '客户编号', code: 'customer_id' }], metrics: [{ key: 'customers.customer_name', name: '客户名称数', code: 'customer_name_count', aggregation: 'COUNT' }] },
+      ],
+      joins: [{ id: 'join_1', name: '月度客户关联', left: { kind: 'GROUP', id: 'group_orders' }, right: { kind: 'GROUP', id: 'group_customers' }, position: { x: 630, y: 144 }, outputKeys: ['orders.order_date', 'orders.amount', 'customers.customer_id'] }],
+      end: { id: 'end_1', name: '月度客户结果', input: { kind: 'JOIN', id: 'join_1' }, position: { x: 930, y: 144 }, outputs: [
+        { key: 'orders.order_date', name: '月份', code: 'order_month' },
+        { key: 'orders.amount', name: '成交金额', code: 'sales_amount' },
+        { key: 'customers.customer_id', name: '客户', code: 'customer_id' },
+      ] },
+    }
+
+    const dsl = buildDatasetDSL(value)
+
+    expect(dsl.preAggregations).toEqual([
+      { id: 'group_orders', nodeId: 'orders', joinId: 'join_1', joinSide: 'LEFT', groupBy: [{ field: 'order_date', unit: 'MONTH' }], metrics: [{ field: 'amount', function: 'SUM' }] },
+      { id: 'group_customers', nodeId: 'customers', joinId: 'join_1', joinSide: 'RIGHT', groupBy: [{ field: 'customer_id' }], metrics: [{ field: 'customer_name', function: 'COUNT' }] },
+    ])
+    expect(dsl.fields.map(field => ({ code: field.code, name: field.name, role: field.role, expression: field.expression }))).toEqual([
+      { code: 'order_month', name: '月份', role: 'DIMENSION', expression: { type: 'FIELD_REF', nodeId: 'orders', field: 'order_date' } },
+      { code: 'sales_amount', name: '成交金额', role: 'MEASURE', expression: { type: 'FIELD_REF', nodeId: 'orders', field: 'amount' } },
+      { code: 'customer_id', name: '客户', role: 'DIMENSION', expression: { type: 'FIELD_REF', nodeId: 'customers', field: 'customer_id' } },
+    ])
+    expect(dsl.designer?.nodePositions.orders).toEqual({ x: 28, y: 44 })
+    expect(dsl.designer?.groups).toHaveLength(2)
+  })
+
+  test('结束节点前的根分组生成最终 groupBy 与聚合字段', () => {
+    const value = draft()
+    value.calculations = []
+    value.grainKeys = ['order_month']
+    value.designer = {
+      version: '1.0', nodePositions: { orders: { x: 20, y: 40 } }, nodeNames: { orders: '订单' }, joins: [],
+      groups: [{ id: 'group_final', name: '月度汇总', input: { kind: 'NODE', id: 'orders' }, position: { x: 320, y: 40 }, dimensions: [{ key: 'orders.order_date', name: '订单月份', code: 'order_month', grouping: 'MONTH' }], metrics: [{ key: 'orders.amount', name: '月成交额', code: 'monthly_sales', aggregation: 'SUM' }] }],
+      end: { id: 'end_1', name: '月度订单结果', input: { kind: 'GROUP', id: 'group_final' }, position: { x: 620, y: 40 }, outputs: [{ key: 'orders.order_date', name: '月份', code: 'order_month' }, { key: 'orders.amount', name: '成交额', code: 'monthly_sales' }] },
+    }
+
+    const dsl = buildDatasetDSL(value)
+
+    expect(dsl.preAggregations).toEqual([])
+    expect(dsl.groupBy).toEqual(['field_o_order_date'])
+    expect(dsl.fields[0]).toMatchObject({ code: 'order_month', name: '月份', expression: { type: 'DATE_TRUNC', unit: 'MONTH' } })
+    expect(dsl.fields[1]).toMatchObject({ code: 'monthly_sales', name: '成交额', role: 'MEASURE', expression: { type: 'AGGREGATE', function: 'SUM' } })
+  })
+
+  test('结束节点隐藏根分组维度时仍保留真实聚合粒度并清理失效排序', () => {
+    const value = draft()
+    value.calculations = []
+    value.sorts = [{ fieldId: 'removed_output', direction: 'ASC' }]
+    value.designer = {
+      version: '1.0', nodePositions: { orders: { x: 20, y: 40 } }, nodeNames: { orders: '订单' }, joins: [],
+      groups: [{ id: 'group_final', name: '月度汇总', input: { kind: 'NODE', id: 'orders' }, position: { x: 320, y: 40 }, dimensions: [{ key: 'orders.order_date', name: '订单月份', code: 'order_month', grouping: 'MONTH' }], metrics: [{ key: 'orders.amount', name: '月成交额', code: 'monthly_sales', aggregation: 'SUM' }] }],
+      end: { id: 'end_1', name: '月度订单结果', input: { kind: 'GROUP', id: 'group_final' }, position: { x: 620, y: 40 }, outputs: [{ key: 'orders.amount', name: '成交额', code: 'monthly_sales' }] },
+    }
+
+    const dsl = buildDatasetDSL(value)
+    const dimension = dsl.fields.find(field => field.code === 'order_month')
+
+    expect(dimension).toMatchObject({ visible: false, expression: { type: 'DATE_TRUNC', unit: 'MONTH' } })
+    expect(dsl.groupBy).toEqual([dimension?.id])
+    expect(dsl.outputGrain).toMatchObject({ keyFields: ['order_month'] })
+    expect(dsl.sorts).toEqual([])
   })
 })
 
@@ -68,6 +231,40 @@ describe('buildPreviewParameters', () => {
 })
 
 describe('数据集发布版本 API', () => {
+  test('数据集字段目录过滤资产审计保留的失效字段', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ items: [
+      { ...columns[0], assetStatus: 'ACTIVE' },
+      { ...columns[1], assetStatus: 'INACTIVE' },
+    ] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await datasetAPI.columns(table.id)
+
+    expect(result.items.map(item => item.columnName)).toEqual(['order_date'])
+  })
+
+  test('建模资产目录只读取启用且已完成 LLM 映射的表', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ items: [], total: 0 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await datasetAPI.mappingTables(30, 60)
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('/api/v1/assets/tables?limit=30&offset=60&status=ACTIVE&managementStatus=ENABLED&enrichedOnly=true')
+    expect(init.cache).toBe('no-store')
+  })
+
+  test('数据节点预览只请求受控的前五行采样接口', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ columns: ['id'], rows: [[1]] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await datasetAPI.tablePreview(table.id, 5)
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe(`/api/v1/assets/tables/${table.id}/preview?maxRows=5`)
+    expect(init.cache).toBe('no-store')
+  })
+
   test('指标编辑器读取数据集摘要目录时携带分页并禁用缓存', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ items: [], total: 0, limit: 25, offset: 50 }))
     vi.stubGlobal('fetch', fetchMock)
@@ -90,25 +287,112 @@ describe('数据集发布版本 API', () => {
     expect(init.cache).toBe('no-store')
   })
 
-  test('发布请求携带冻结草稿信封与幂等键', async () => {
-    const published = publishedRecord()
-    const fetchMock = vi.fn(async () => jsonResponse(published, 201))
+  test('停用与恢复都携带聚合版本并使用独立生命周期接口', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ id: 'dataset/id', status: 'DISABLED', version: 8 }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'dataset/id', status: 'PUBLISHED', version: 9 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await datasetAPI.disable('dataset/id', 7)
+    await datasetAPI.restore('dataset/id', 8)
+
+    const [disableURL, disableInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(disableURL).toBe('/api/v1/datasets/dataset%2Fid/disable')
+    expect(disableInit.method).toBe('POST')
+    expect(JSON.parse(String(disableInit.body))).toEqual({ expectedVersion: 7 })
+    const [restoreURL, restoreInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit]
+    expect(restoreURL).toBe('/api/v1/datasets/dataset%2Fid/restore')
+    expect(restoreInit.method).toBe('POST')
+    expect(JSON.parse(String(restoreInit.body))).toEqual({ expectedVersion: 8 })
+  })
+
+  test('读取配置修订历史并按精确修订回滚', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [], total: 0, limit: 25, offset: 5 }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'revision/id' }))
+      .mockResolvedValueOnce(jsonResponse({ queryId: 'revision-preview', columns: ['customer_id'], rows: [[1]], rowCount: 1, durationMs: 3 }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'dataset/id', version: 8 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await datasetAPI.listRevisions('dataset/id', 25, 5)
+    await datasetAPI.getRevision('dataset/id', 'revision/id')
+    await datasetAPI.previewRevision('dataset/id', 'revision/id', 'revision-preview', {})
+    await datasetAPI.rollbackRevision('dataset/id', 'revision/id', 7)
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/datasets/dataset%2Fid/revisions?limit=25&offset=5')
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).cache).toBe('no-store')
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/v1/datasets/dataset%2Fid/revisions/revision%2Fid')
+    expect((fetchMock.mock.calls[1]?.[1] as RequestInit).cache).toBe('no-store')
+    const [previewURL, previewInit] = fetchMock.mock.calls[2] as unknown as [string, RequestInit]
+    expect(previewURL).toBe('/api/v1/datasets/dataset%2Fid/revisions/revision%2Fid/preview')
+    expect(previewInit.method).toBe('POST')
+    expect(JSON.parse(String(previewInit.body))).toEqual({ queryId: 'revision-preview', parameters: {}, maxRows: 5 })
+    const [rollbackURL, rollbackInit] = fetchMock.mock.calls[3] as unknown as [string, RequestInit]
+    expect(rollbackURL).toBe('/api/v1/datasets/dataset%2Fid/revisions/revision%2Fid/rollback')
+    expect(rollbackInit.method).toBe('POST')
+    expect(JSON.parse(String(rollbackInit.body))).toEqual({ expectedVersion: 7 })
+  })
+
+  test('未保存草稿预览携带当前候选 DSL、并发版本且禁止缓存', async () => {
+    const candidate = buildDatasetDSL(draft())
+    const fetchMock = vi.fn(async () => jsonResponse({
+      queryId: 'candidate-preview', dslHash: 'a'.repeat(64), planHash: 'b'.repeat(64), baseVersion: 7,
+      columns: ['order_date'], rows: [['2026-01-01']], rowCount: 1, durationMs: 4,
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await datasetAPI.previewDraft('dataset/id', 7, candidate, 'candidate-preview', { start_date: '2026-01-01' }, 5)
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('/api/v1/datasets/dataset%2Fid/draft/preview')
+    expect(init.method).toBe('POST')
+    expect(init.cache).toBe('no-store')
+    expect(JSON.parse(String(init.body))).toEqual({
+      queryId: 'candidate-preview', expectedVersion: 7, dsl: candidate,
+      parameters: { start_date: '2026-01-01' }, maxRows: 5,
+    })
+  })
+
+  test('发布审批 API 冻结草稿并支持查询、通过和拒绝', async () => {
+    const request = {
+      id: 'request/id', datasetId: 'dataset/id', status: 'PENDING', version: 1,
+      draftVersionId: 'draft-version-1', expectedDatasetVersion: 5, expectedDraftRecordVersion: 3,
+      expectedDslHash: 'a'.repeat(64), expectedPlanHash: 'b'.repeat(64), requesterId: 'user-1',
+      requestNote: '指标所需数据集', submittedAt: '2026-07-20T10:00:00Z', updatedAt: '2026-07-20T10:00:00Z',
+    }
+    const approved = { request: { ...request, status: 'APPROVED' }, publishedVersion: publishedRecord() }
+    const rejected = { ...request, status: 'REJECTED', reviewNote: '字段口径待确认' }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(request, 202))
+      .mockResolvedValueOnce(jsonResponse({ items: [request], total: 1, limit: 20, offset: 5 }))
+      .mockResolvedValueOnce(jsonResponse(approved))
+      .mockResolvedValueOnce(jsonResponse(rejected))
     vi.stubGlobal('fetch', fetchMock)
     const input: PublishDatasetInput = {
       draftVersionId: 'draft-version-1', expectedVersion: 5, expectedDraftRecordVersion: 3,
       expectedDslHash: 'a'.repeat(64), validationParameters: { start_date: '2026-01-01' },
     }
 
-    await expect(datasetAPI.publish('dataset/id', input, 'publish-key')).resolves.toEqual(published)
+    await expect(datasetAPI.requestPublication('dataset/id', input, '指标所需数据集')).resolves.toEqual(request)
+    await datasetAPI.listPublicationRequests('dataset/id', 20, 5)
+    await datasetAPI.approvePublication('dataset/id', 'request/id', 1, '校验通过')
+    await datasetAPI.rejectPublication('dataset/id', 'request/id', 1, '字段口径待确认')
 
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
-    expect(url).toBe('/api/v1/datasets/dataset%2Fid/publish')
-    expect(init.method).toBe('POST')
-    expect(new Headers(init.headers).get('Idempotency-Key')).toBe('publish-key')
-    expect(JSON.parse(String(init.body))).toEqual(input)
+    const [submitURL, submitInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(submitURL).toBe('/api/v1/datasets/dataset%2Fid/publish-requests')
+    expect(submitInit.method).toBe('POST')
+    expect(JSON.parse(String(submitInit.body))).toEqual({ ...input, note: '指标所需数据集' })
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/v1/datasets/dataset%2Fid/publish-requests?limit=20&offset=5')
+    expect((fetchMock.mock.calls[1]?.[1] as RequestInit).cache).toBe('no-store')
+    const [approveURL, approveInit] = fetchMock.mock.calls[2] as unknown as [string, RequestInit]
+    expect(approveURL).toBe('/api/v1/datasets/dataset%2Fid/publish-requests/request%2Fid/approve')
+    expect(JSON.parse(String(approveInit.body))).toEqual({ expectedVersion: 1, note: '校验通过' })
+    const [rejectURL, rejectInit] = fetchMock.mock.calls[3] as unknown as [string, RequestInit]
+    expect(rejectURL).toBe('/api/v1/datasets/dataset%2Fid/publish-requests/request%2Fid/reject')
+    expect(JSON.parse(String(rejectInit.body))).toEqual({ expectedVersion: 1, reason: '字段口径待确认' })
   })
 
-  test('按父数据集访问版本目录、精确版本、使用汇总和版本预览', async () => {
+  test('按父数据集访问版本目录、精确版本、使用汇总、版本预览和安全回滚', async () => {
     const published = publishedRecord()
     const usage = { reportDraftReferences: 2, downstreamDraftReferences: 3, downstreamPublishedReferences: 4, activeQueryRuns: 1 }
     const preview = { queryId: 'query-1', columns: ['order_date'], rows: [['2026-01-01']], rowCount: 1, durationMs: 8 }
@@ -117,6 +401,7 @@ describe('数据集发布版本 API', () => {
       .mockResolvedValueOnce(jsonResponse(published))
       .mockResolvedValueOnce(jsonResponse(usage))
       .mockResolvedValueOnce(jsonResponse(preview))
+      .mockResolvedValueOnce(jsonResponse({ id: 'dataset/id', version: 8 }))
       .mockResolvedValueOnce(jsonResponse({ ...published, status: 'STALE' }))
       .mockResolvedValueOnce(jsonResponse({ allowed: true }))
     vi.stubGlobal('fetch', fetchMock)
@@ -125,6 +410,7 @@ describe('数据集发布版本 API', () => {
     await datasetAPI.getVersion('dataset/id', 'version/id')
     await datasetAPI.getVersionUsage('dataset/id', 'version/id')
     await datasetAPI.previewVersion('dataset/id', 'version/id', 'query-1', { start_date: '2026-01-01' }, 50)
+    await datasetAPI.rollbackVersion('dataset/id', 'version/id', 7)
     await datasetAPI.transitionVersion('dataset/id', 'version/id', { expectedVersion: 7, expectedStatus: 'PUBLISHED', targetStatus: 'STALE' })
     await datasetAPI.evaluatePermission('dataset/id', 'PUBLISH')
 
@@ -137,10 +423,14 @@ describe('数据集发布版本 API', () => {
     const [previewURL, previewInit] = fetchMock.mock.calls[3] as unknown as [string, RequestInit]
     expect(previewURL).toBe('/api/v1/datasets/dataset%2Fid/versions/version%2Fid/preview')
     expect(JSON.parse(String(previewInit.body))).toEqual({ queryId: 'query-1', parameters: { start_date: '2026-01-01' }, maxRows: 50 })
-    const [statusURL, statusInit] = fetchMock.mock.calls[4] as unknown as [string, RequestInit]
+    const [rollbackURL, rollbackInit] = fetchMock.mock.calls[4] as unknown as [string, RequestInit]
+    expect(rollbackURL).toBe('/api/v1/datasets/dataset%2Fid/versions/version%2Fid/rollback')
+    expect(rollbackInit.method).toBe('POST')
+    expect(JSON.parse(String(rollbackInit.body))).toEqual({ expectedVersion: 7 })
+    const [statusURL, statusInit] = fetchMock.mock.calls[5] as unknown as [string, RequestInit]
     expect(statusURL).toBe('/api/v1/datasets/dataset%2Fid/versions/version%2Fid/status')
     expect(JSON.parse(String(statusInit.body))).toEqual({ expectedVersion: 7, expectedStatus: 'PUBLISHED', targetStatus: 'STALE' })
-    const [permissionURL, permissionInit] = fetchMock.mock.calls[5] as unknown as [string, RequestInit]
+    const [permissionURL, permissionInit] = fetchMock.mock.calls[6] as unknown as [string, RequestInit]
     expect(permissionURL).toBe('/api/v1/permissions/evaluate')
     expect(JSON.parse(String(permissionInit.body))).toEqual({ resourceType: 'DATASET', action: 'PUBLISH', objectId: 'dataset/id' })
   })

@@ -2,6 +2,7 @@ package federation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -14,6 +15,13 @@ import (
 	"intelligent-report-generation-system/internal/querycompiler"
 	"intelligent-report-generation-system/internal/queryruntime"
 )
+
+func TestNormalizeValuePreservesDecimalOracleNumber(t *testing.T) {
+	value, err := normalizeValue(json.Number("350.75"), "NUMBER")
+	if err != nil || value != json.Number("350.75") {
+		t.Fatalf("normalizeValue() value=%#v err=%v", value, err)
+	}
+}
 
 type fakeConnector struct {
 	mu        sync.Mutex
@@ -184,6 +192,19 @@ func TestExecutorSupportsDatabaseExcelAndExcelExcel(t *testing.T) {
 				t.Fatalf("result=%#v", result)
 			}
 		})
+	}
+}
+
+func TestExecutorAppliesFinalSampleLimitAfterFederatedSort(t *testing.T) {
+	orders := &fakeConnector{result: datasource.QueryResult{Columns: []string{"customer_id", "partial_sum_1"}, Rows: [][]any{{1.0, 20.0}, {2.0, 3.0}}, RowCount: 2}}
+	customers := &fakeConnector{result: datasource.QueryResult{Columns: []string{"customer_id", "customer_name"}, Rows: [][]any{{1.0, "A"}, {2.0, "B"}}, RowCount: 2}}
+	executor := NewExecutor(map[datasource.Type]queryruntime.QueryConnector{datasource.TypeOracle: orders, datasource.TypeMySQL: customers}, fileReader())
+	result, err := executor.Execute(context.Background(), "79d39206-c899-40f8-866c-5ad933b035f2", crossDocument(), crossPlan(datasource.TypeOracle, datasource.TypeMySQL), crossSources(datasource.TypeOracle, datasource.TypeMySQL), map[string]any{}, policy.UserScope{Attributes: map[string]any{}}, nil, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RowCount != 1 || len(result.Rows) != 1 || result.Rows[0][0] != "A" || result.Rows[0][1] != 20.0 {
+		t.Fatalf("联邦发布试跑应返回排序后的第一行: %#v", result)
 	}
 }
 

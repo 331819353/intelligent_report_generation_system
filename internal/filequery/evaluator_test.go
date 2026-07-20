@@ -61,7 +61,42 @@ func TestEvaluateAppliesFiltersAggregationPoliciesAndSort(t *testing.T) {
 	}
 }
 
-func TestEvaluateSkipsAbsentOptionalFilterAndEnforcesResultLimit(t *testing.T) {
+func TestEvaluateGroupsSlotOneBeforeJoining(t *testing.T) {
+	document := dataset.Document{
+		DSLVersion: "1.0", Dataset: dataset.Descriptor{Code: "group_then_join", Name: "先分组后关联", Type: "CROSS_SOURCE"},
+		Nodes: []dataset.Node{
+			{ID: "customers", Type: "TABLE", DataSourceID: "source-a", TableID: "table-a", Alias: "c", Projection: []string{"customer_id", "customer_name"}, SourceFilters: []dataset.SourceFilter{}},
+			{ID: "orders", Type: "TABLE", DataSourceID: "source-b", TableID: "table-b", Alias: "o", Projection: []string{"customer_id", "amount"}, SourceFilters: []dataset.SourceFilter{}},
+		},
+		Joins:           []dataset.Join{{ID: "join_1", LeftNodeID: "customers", RightNodeID: "orders", JoinType: "LEFT", Cardinality: "UNKNOWN", ManualConfirmed: true, Conditions: []dataset.JoinCondition{{LeftExpression: dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "customer_id"}, Operator: "EQUALS", RightExpression: dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "customer_id"}}}}},
+		PreAggregations: []dataset.PreAggregation{{ID: "group_1", NodeID: "customers", JoinID: "join_1", JoinSide: "LEFT", GroupBy: []dataset.PreAggregationGroup{{Field: "customer_id"}}, Metrics: []dataset.PreAggregationMetric{{Field: "customer_name", Function: "COUNT_DISTINCT"}}}},
+		Fields: []dataset.Field{
+			{ID: "field_customer_id", Code: "customer_id", Name: "客户ID", Role: "DIMENSION", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "customer_id"}, CanonicalType: "INTEGER", Nullable: false},
+			{ID: "field_customer_count", Code: "customer_count", Name: "客户数", Role: "MEASURE", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "customer_name"}, CanonicalType: "INTEGER", Nullable: false},
+			{ID: "field_amount", Code: "amount", Name: "金额", Role: "MEASURE", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "amount"}, CanonicalType: "DECIMAL", Nullable: true},
+		},
+		Filters: []dataset.Filter{}, GroupBy: []string{}, Having: []dataset.Filter{}, Sorts: []dataset.Sort{}, Parameters: []dataset.Parameter{},
+		OutputGrain:     dataset.OutputGrain{Description: "每行一个客户订单", KeyFields: []string{"customer_id"}},
+		ExecutionPolicy: dataset.ExecutionPolicy{Mode: "REALTIME", TimeoutMS: 5000, PreviewLimit: 100, ResultLimit: 1000, Materialization: dataset.MaterializationPolicy{Enabled: false}},
+	}
+	input := Input{Document: document, Tables: map[string]querycompiler.TableRef{
+		"customers": {NodeID: "customers", Columns: map[string]bool{"customer_id": true, "customer_name": true}},
+		"orders":    {NodeID: "orders", Columns: map[string]bool{"customer_id": true, "amount": true}},
+	}, NodeTables: map[string]NodeTableData{
+		"customers": {Columns: []string{"customer_id", "customer_name"}, Rows: [][]any{{int64(1), "张三"}, {int64(1), "李四"}, {int64(2), "王五"}}},
+		"orders":    {Columns: []string{"customer_id", "amount"}, Rows: [][]any{{int64(1), int64(10)}, {int64(1), int64(20)}, {int64(2), int64(30)}}},
+	}, MaxRows: 100}
+
+	result, err := Evaluate(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RowCount != 3 || result.Rows[0][0] != int64(1) || result.Rows[0][1] != int64(2) || result.Rows[2][1] != int64(1) {
+		t.Fatalf("pre-join aggregation result=%#v", result)
+	}
+}
+
+func TestEvaluateSkipsAbsentOptionalFilterAndAppliesResultLimit(t *testing.T) {
 	input := fileInput(t)
 	input.Document.Parameters[0].Required = false
 	input.Document.Filters[0].Optional = true
@@ -75,8 +110,12 @@ func TestEvaluateSkipsAbsentOptionalFilterAndEnforcesResultLimit(t *testing.T) {
 		t.Fatalf("optional filter result=%#v", result)
 	}
 	input.MaxRows = 2
-	if _, err := Evaluate(context.Background(), input); err == nil {
-		t.Fatal("超过文件预览行数上限的结果未被拒绝")
+	result, err = Evaluate(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RowCount != 2 || len(result.Rows) != 2 || result.Rows[0][0] != "2025-12-01" || result.Rows[1][0] != "2026-01-01" {
+		t.Fatalf("最终结果应在完整排序后截取前两行: %#v", result)
 	}
 }
 

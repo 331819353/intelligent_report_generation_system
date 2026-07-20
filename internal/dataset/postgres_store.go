@@ -12,29 +12,32 @@ import (
 	"intelligent-report-generation-system/internal/platform/database"
 )
 
+// PublicationCommitSink 在数据集发布事务内登记后续处理任务。实现必须复用传入
+// 事务，不能自行提交；这样发布版本和任务入队要么同时成功，要么同时回滚。
+type PublicationCommitSink interface {
+	EnqueueDatasetMetricExtractionTx(context.Context, pgx.Tx, string, string, VersionRecord) error
+}
+
 // PostgresStore 使用事务和 RLS 保存数据集草稿及全部派生索引。
-type PostgresStore struct{ pool *pgxpool.Pool }
+type PostgresStore struct {
+	pool            *pgxpool.Pool
+	publicationSink PublicationCommitSink
+}
 
 // NewPostgresStore 创建数据集 PostgreSQL 仓储。
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
+// SetPublicationCommitSink 接入发布后任务 outbox。应只在进程启动装配阶段调用。
+func (s *PostgresStore) SetPublicationCommitSink(sink PublicationCommitSink) {
+	s.publicationSink = sink
+}
+
 // Create 原子创建数据集、首个草稿版本、字段参数索引和审计记录。
 func (s *PostgresStore) Create(ctx context.Context, tenantID, actorID string, input CreateInput, prepared Prepared) (Record, error) {
-	var datasetID, versionID string
+	var datasetID string
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.datasets(tenant_id,code,name,description,dataset_type,created_by,updated_by) VALUES($1,$2,$3,$4,$5,$6,$6) RETURNING id::text`, tenantID, input.Code, input.Name, input.Description, input.Type, actorID).Scan(&datasetID); err != nil {
-			return err
-		}
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.dataset_versions(tenant_id,dataset_id,version_no,dsl_version,dsl_json,schema_hash,logical_plan_json,plan_hash,created_by,updated_by) VALUES($1,$2,1,$3,$4,$5,$6,$7,$8,$8) RETURNING id::text`, tenantID, datasetID, DSLVersion, prepared.DSLJSON, prepared.DSLHash, prepared.LogicalPlanJSON, prepared.PlanHash, actorID).Scan(&versionID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE platform.datasets SET current_draft_version_id=$1 WHERE id=$2`, versionID, datasetID); err != nil {
-			return err
-		}
-		if err := replaceDerived(ctx, tx, tenantID, datasetID, versionID, prepared.Document, true); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail) VALUES($1,$2,'CREATE','DATASET',$3,jsonb_build_object('dslHash',$4::text,'planHash',$5::text))`, tenantID, actorID, datasetID, prepared.DSLHash, prepared.PlanHash)
+		var err error
+		datasetID, err = createDatasetTx(ctx, tx, tenantID, actorID, input, prepared, "")
 		return err
 	})
 	if err != nil {
@@ -47,16 +50,52 @@ func (s *PostgresStore) Create(ctx context.Context, tenantID, actorID string, in
 	return s.Get(ctx, tenantID, datasetID)
 }
 
+// createDatasetTx 是所有真实数据集创建的唯一事务路径。originTableID 仅用于
+// LLM 映射表自动产生的数据集；手工创建传空字符串。调用方负责事务提交。
+func createDatasetTx(ctx context.Context, tx pgx.Tx, tenantID, actorID string, input CreateInput, prepared Prepared, originTableID string) (string, error) {
+	var datasetID, versionID string
+	if err := tx.QueryRow(ctx, `INSERT INTO platform.datasets(
+		tenant_id,code,name,description,dataset_type,origin_table_id,created_by,updated_by
+	) VALUES($1,$2,$3,$4,$5,NULLIF($6,'')::uuid,NULLIF($7,'')::uuid,NULLIF($7,'')::uuid) RETURNING id::text`,
+		tenantID, input.Code, input.Name, input.Description, input.Type, originTableID, actorID).Scan(&datasetID); err != nil {
+		return "", err
+	}
+	if err := tx.QueryRow(ctx, `INSERT INTO platform.dataset_versions(
+		tenant_id,dataset_id,version_no,dsl_version,dsl_json,schema_hash,logical_plan_json,plan_hash,created_by,updated_by
+	) VALUES($1,$2,1,$3,$4,$5,$6,$7,NULLIF($8,'')::uuid,NULLIF($8,'')::uuid) RETURNING id::text`,
+		tenantID, datasetID, DSLVersion, prepared.DSLJSON, prepared.DSLHash,
+		prepared.LogicalPlanJSON, prepared.PlanHash, actorID).Scan(&versionID); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE platform.datasets SET current_draft_version_id=$1 WHERE id=$2`, versionID, datasetID); err != nil {
+		return "", err
+	}
+	if err := replaceDerived(ctx, tx, tenantID, datasetID, versionID, prepared.Document, true); err != nil {
+		return "", err
+	}
+	if err := insertDraftRevisionTx(ctx, tx, tenantID, datasetID, actorID, versionID, 1, 1, "CREATE", "", prepared); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+		tenant_id,actor_user_id,action,resource_type,resource_id,detail
+	) VALUES($1,NULLIF($2,'')::uuid,'CREATE','DATASET',$3,jsonb_strip_nulls(jsonb_build_object(
+		'dslHash',$4::text,'planHash',$5::text,'originTableId',NULLIF($6,'')::text
+	)))`, tenantID, actorID, datasetID, prepared.DSLHash, prepared.PlanHash, originTableID); err != nil {
+		return "", err
+	}
+	return datasetID, nil
+}
+
 // Get 读取租户内数据集和 current_draft_version_id 指向的规范草稿。
 func (s *PostgresStore) Get(ctx context.Context, tenantID, id string) (record Record, err error) {
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		err := tx.QueryRow(ctx, `SELECT d.id::text,d.code::text,d.name,d.description,d.dataset_type,d.status,d.version,
+		err := tx.QueryRow(ctx, `SELECT d.id::text,COALESCE(d.origin_table_id::text,''),d.code::text,d.name,d.description,d.dataset_type,d.status,d.version,
 			v.id::text,v.version_no,v.record_version,COALESCE(d.current_published_version_id::text,''),
 			v.dsl_version,v.schema_hash,v.plan_hash,v.dsl_json,v.logical_plan_json,d.created_at::text,d.updated_at::text
 			FROM platform.datasets d JOIN platform.dataset_versions v
 			ON v.id=d.current_draft_version_id AND v.tenant_id=d.tenant_id AND v.dataset_id=d.id
 			WHERE d.id::text=$1 AND d.deleted_at IS NULL`, id).Scan(
-			&record.ID, &record.Code, &record.Name, &record.Description, &record.Type, &record.Status, &record.Version,
+			&record.ID, &record.OriginTableID, &record.Code, &record.Name, &record.Description, &record.Type, &record.Status, &record.Version,
 			&record.DraftVersionID, &record.DraftVersionNo, &record.DraftRecordVersion, &record.CurrentPublishedVersionID,
 			&record.DSLVersion, &record.DSLHash, &record.PlanHash, &record.DSL, &record.LogicalPlan,
 			&record.CreatedAt, &record.UpdatedAt,
@@ -76,7 +115,7 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.datasets WHERE deleted_at IS NULL`).Scan(&total); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT d.id::text,d.code::text,d.name,d.description,d.dataset_type,d.status,d.version,v.schema_hash,
+		rows, err := tx.Query(ctx, `SELECT d.id::text,COALESCE(d.origin_table_id::text,''),d.code::text,d.name,d.description,d.dataset_type,d.status,d.version,v.schema_hash,
 			COALESCE(d.current_published_version_id::text,''),d.updated_at::text
 			FROM platform.datasets d JOIN platform.dataset_versions v
 			ON v.id=d.current_draft_version_id AND v.tenant_id=d.tenant_id AND v.dataset_id=d.id
@@ -87,7 +126,7 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 		defer rows.Close()
 		for rows.Next() {
 			var item Summary
-			if err := rows.Scan(&item.ID, &item.Code, &item.Name, &item.Description, &item.Type, &item.Status, &item.Version, &item.DSLHash, &item.CurrentPublishedVersionID, &item.UpdatedAt); err != nil {
+			if err := rows.Scan(&item.ID, &item.OriginTableID, &item.Code, &item.Name, &item.Description, &item.Type, &item.Status, &item.Version, &item.DSLHash, &item.CurrentPublishedVersionID, &item.UpdatedAt); err != nil {
 				return err
 			}
 			items = append(items, item)
@@ -114,17 +153,23 @@ func (s *PostgresStore) Update(ctx context.Context, tenantID, actorID, id string
 		if version != input.ExpectedVersion {
 			return ErrConflict
 		}
-		result, err := tx.Exec(ctx, `UPDATE platform.dataset_versions SET dsl_json=$1,schema_hash=$2,logical_plan_json=$3,plan_hash=$4,record_version=record_version+1,updated_by=$5 WHERE id=$6 AND status='DRAFT'`, prepared.DSLJSON, prepared.DSLHash, prepared.LogicalPlanJSON, prepared.PlanHash, actorID, versionID)
+		var draftRecordVersion int64
+		err = tx.QueryRow(ctx, `UPDATE platform.dataset_versions SET dsl_json=$1,schema_hash=$2,logical_plan_json=$3,plan_hash=$4,record_version=record_version+1,updated_by=$5 WHERE id=$6 AND status='DRAFT' RETURNING record_version`, prepared.DSLJSON, prepared.DSLHash, prepared.LogicalPlanJSON, prepared.PlanHash, actorID, versionID).Scan(&draftRecordVersion)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrConflict
+		}
 		if err != nil {
 			return err
 		}
-		if result.RowsAffected() != 1 {
-			return ErrConflict
-		}
-		if _, err := tx.Exec(ctx, `UPDATE platform.datasets SET name=$1,description=$2,version=version+1,updated_by=$3 WHERE id::text=$4`, input.Name, input.Description, actorID, id); err != nil {
+		// dataset_type 是当前草稿的派生摘要；增删跨源节点时必须与规范 DSL 同步，
+		// 已发布版本仍保留各自不可变 DSL，不会被草稿类型切换改写。
+		if _, err := tx.Exec(ctx, `UPDATE platform.datasets SET name=$1,description=$2,dataset_type=$3,version=version+1,updated_by=$4 WHERE id::text=$5`, input.Name, input.Description, prepared.Document.Dataset.Type, actorID, id); err != nil {
 			return err
 		}
 		if err := replaceDerived(ctx, tx, tenantID, id, versionID, prepared.Document, true); err != nil {
+			return err
+		}
+		if err := insertDraftRevisionTx(ctx, tx, tenantID, id, actorID, versionID, version+1, draftRecordVersion, "SAVE", "", prepared); err != nil {
 			return err
 		}
 		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail) VALUES($1,$2,'UPDATE_DRAFT','DATASET',$3,jsonb_build_object('fromVersion',$4::bigint,'dslHash',$5::text,'planHash',$6::text))`, tenantID, actorID, id, version, prepared.DSLHash, prepared.PlanHash)
@@ -134,6 +179,288 @@ func (s *PostgresStore) Update(ctx context.Context, tenantID, actorID, id string
 		return Record{}, err
 	}
 	return s.Get(ctx, tenantID, id)
+}
+
+// GetRevision 按父数据集和精确修订 ID 读取不可变草稿快照。
+func (s *PostgresStore) GetRevision(ctx context.Context, tenantID, datasetID, revisionID string) (record RevisionRecord, err error) {
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		return scanRevisionTx(ctx, tx, datasetID, revisionID, &record)
+	})
+	return record, err
+}
+
+// ListRevisions 按产生快照时的数据集聚合版本倒序返回草稿历史。
+func (s *PostgresStore) ListRevisions(ctx context.Context, tenantID, datasetID string, limit, offset int) (items []RevisionSummary, total int, err error) {
+	items = []RevisionSummary{}
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM platform.datasets WHERE id::text=$1 AND deleted_at IS NULL)`, datasetID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return ErrNotFound
+		}
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.dataset_draft_revisions WHERE dataset_id::text=$1`, datasetID).Scan(&total); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `SELECT id::text,dataset_id::text,version_no,operation_type,
+			COALESCE(source_revision_id::text,''),name,description,dataset_type,draft_version_id::text,
+			draft_record_version,dsl_version,schema_hash,plan_hash,created_at::text,COALESCE(created_by::text,'')
+			FROM platform.dataset_draft_revisions WHERE dataset_id::text=$1
+			ORDER BY version_no DESC,id LIMIT $2 OFFSET $3`, datasetID, limit, offset)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item RevisionSummary
+			if err := rows.Scan(&item.ID, &item.DatasetID, &item.VersionNo, &item.OperationType,
+				&item.SourceRevisionID, &item.Name, &item.Description, &item.Type, &item.DraftVersionID,
+				&item.DraftRecordVersion, &item.DSLVersion, &item.DSLHash, &item.PlanHash,
+				&item.CreatedAt, &item.CreatedBy); err != nil {
+				return err
+			}
+			items = append(items, item)
+		}
+		return rows.Err()
+	})
+	return items, total, err
+}
+
+// RollbackRevision 将历史快照复制到唯一当前草稿并追加新的 ROLLBACK 修订。
+// 目标修订、既有历史以及 current_published_version_id 均不会被修改。
+func (s *PostgresStore) RollbackRevision(ctx context.Context, tenantID, actorID, datasetID string, input RollbackRevisionInput, revision RevisionRecord, prepared Prepared) (Record, error) {
+	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		var datasetVersion, currentDraftRecordVersion int64
+		var datasetCode, draftVersionID, currentDSLHash string
+		err := tx.QueryRow(ctx, `SELECT dataset.version,dataset.code::text,draft.id::text,draft.record_version,draft.schema_hash
+			FROM platform.datasets AS dataset
+			JOIN platform.dataset_versions AS draft
+			  ON draft.id=dataset.current_draft_version_id AND draft.dataset_id=dataset.id AND draft.tenant_id=dataset.tenant_id
+			WHERE dataset.id::text=$1 AND dataset.deleted_at IS NULL FOR UPDATE OF dataset,draft`, datasetID).
+			Scan(&datasetVersion, &datasetCode, &draftVersionID, &currentDraftRecordVersion, &currentDSLHash)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if datasetVersion != input.ExpectedVersion {
+			return ErrConflict
+		}
+		var storedDSLHash, storedPlanHash string
+		if err := tx.QueryRow(ctx, `SELECT schema_hash,plan_hash FROM platform.dataset_draft_revisions
+			WHERE id::text=$1 AND dataset_id::text=$2`, revision.ID, datasetID).Scan(&storedDSLHash, &storedPlanHash); errors.Is(err, pgx.ErrNoRows) {
+			return ErrRevisionNotFound
+		} else if err != nil {
+			return err
+		}
+		if storedDSLHash != revision.DSLHash || storedPlanHash != revision.PlanHash ||
+			prepared.DSLHash != revision.DSLHash || prepared.PlanHash != revision.PlanHash ||
+			prepared.Document.Dataset.Code != datasetCode {
+			return fmt.Errorf("%w: revision snapshot mismatch", ErrInvalidDocument)
+		}
+
+		var nextDraftRecordVersion int64
+		err = tx.QueryRow(ctx, `UPDATE platform.dataset_versions
+			SET dsl_json=$1,schema_hash=$2,logical_plan_json=$3,plan_hash=$4,
+			    record_version=record_version+1,updated_by=$5
+			WHERE id=$6 AND status='DRAFT' AND record_version=$7
+			RETURNING record_version`, prepared.DSLJSON, prepared.DSLHash, prepared.LogicalPlanJSON,
+			prepared.PlanHash, actorID, draftVersionID, currentDraftRecordVersion).Scan(&nextDraftRecordVersion)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrConflict
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE platform.datasets
+			SET name=$1,description=$2,dataset_type=$3,version=version+1,updated_by=$4
+			WHERE id::text=$5`, prepared.Document.Dataset.Name, prepared.Document.Dataset.Description,
+			prepared.Document.Dataset.Type, actorID, datasetID); err != nil {
+			return err
+		}
+		if err := replaceDerived(ctx, tx, tenantID, datasetID, draftVersionID, prepared.Document, true); err != nil {
+			return err
+		}
+		if err := insertDraftRevisionTx(ctx, tx, tenantID, datasetID, actorID, draftVersionID,
+			datasetVersion+1, nextDraftRecordVersion, "ROLLBACK", revision.ID, prepared); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail)
+			VALUES($1,$2,'ROLLBACK_DRAFT','DATASET',$3,jsonb_build_object(
+			  'fromVersion',$4::bigint,'sourceRevisionId',$5::text,'sourceRevisionVersion',$6::bigint,
+			  'fromDslHash',$7::text,'dslHash',$8::text,'draftRecordVersion',$9::bigint))`,
+			tenantID, actorID, datasetID, datasetVersion, revision.ID, revision.VersionNo,
+			currentDSLHash, prepared.DSLHash, nextDraftRecordVersion)
+		return err
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	return s.Get(ctx, tenantID, datasetID)
+}
+
+// Disable 在同一行锁内保存停用前状态并清除活动发布指针。不可变发布版本本身
+// 不做状态回退或改写；精确版本查询还会检查所属数据集未被停用。
+func (s *PostgresStore) Disable(ctx context.Context, tenantID, actorID, id string, input LifecycleInput) (Record, error) {
+	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		var version int64
+		var status, publishedVersionID string
+		err := tx.QueryRow(ctx, `SELECT version,status,COALESCE(current_published_version_id::text,'')
+			FROM platform.datasets WHERE id::text=$1 AND deleted_at IS NULL FOR UPDATE`, id).
+			Scan(&version, &status, &publishedVersionID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if version != input.ExpectedVersion {
+			return ErrConflict
+		}
+		if status != "DRAFT" && status != "PUBLISHED" && status != "STALE" {
+			return ErrInvalidTransition
+		}
+		if status == "PUBLISHED" && publishedVersionID == "" {
+			return ErrInvalidTransition
+		}
+		if _, err := tx.Exec(ctx, `UPDATE platform.datasets
+			SET status='DISABLED',current_published_version_id=NULL,disabled_from_status=$1,
+			    disabled_published_version_id=NULLIF($2,'')::uuid,version=version+1,updated_by=$3
+			WHERE id::text=$4`, status, publishedVersionID, actorID, id); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail)
+			VALUES($1,$2,'DISABLE','DATASET',$3,jsonb_build_object(
+			  'fromVersion',$4::bigint,'fromStatus',$5::text,'publishedVersionId',$6::text))`,
+			tenantID, actorID, id, version, status, publishedVersionID)
+		return err
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	return s.Get(ctx, tenantID, id)
+}
+
+// Restore 只接受目录级 DISABLED 数据集，并优先恢复停用事务保存的稳定状态。
+// 迁移前没有快照的停用记录回到 DRAFT，避免猜测并重新启用已经废弃的发布版本。
+func (s *PostgresStore) Restore(ctx context.Context, tenantID, actorID, id string, input LifecycleInput) (Record, error) {
+	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		var version int64
+		var status, previousStatus, previousPublishedVersionID string
+		err := tx.QueryRow(ctx, `SELECT version,status,COALESCE(disabled_from_status,''),
+			COALESCE(disabled_published_version_id::text,'')
+			FROM platform.datasets WHERE id::text=$1 AND deleted_at IS NULL FOR UPDATE`, id).
+			Scan(&version, &status, &previousStatus, &previousPublishedVersionID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if version != input.ExpectedVersion {
+			return ErrConflict
+		}
+		if status != "DISABLED" {
+			return ErrInvalidTransition
+		}
+
+		targetStatus, targetPublishedVersionID := "DRAFT", ""
+		switch previousStatus {
+		case "":
+			// 迁移前停用没有可信快照；保留历史版本，恢复为可编辑草稿。
+		case "DRAFT":
+		case "STALE":
+			targetStatus = "STALE"
+		case "PUBLISHED":
+			if previousPublishedVersionID == "" {
+				return ErrInvalidTransition
+			}
+			var versionStatus string
+			if err := tx.QueryRow(ctx, `SELECT status FROM platform.dataset_versions
+				WHERE id::text=$1 AND dataset_id::text=$2 FOR SHARE`, previousPublishedVersionID, id).
+				Scan(&versionStatus); errors.Is(err, pgx.ErrNoRows) {
+				return ErrInvalidTransition
+			} else if err != nil {
+				return err
+			} else if versionStatus != "PUBLISHED" {
+				return ErrInvalidTransition
+			}
+			targetStatus, targetPublishedVersionID = "PUBLISHED", previousPublishedVersionID
+		default:
+			return ErrInvalidTransition
+		}
+
+		if _, err := tx.Exec(ctx, `UPDATE platform.datasets
+			SET status=$1,current_published_version_id=NULLIF($2,'')::uuid,
+			    disabled_from_status=NULL,disabled_published_version_id=NULL,
+			    version=version+1,updated_by=$3
+			WHERE id::text=$4`, targetStatus, targetPublishedVersionID, actorID, id); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail)
+			VALUES($1,$2,'RESTORE','DATASET',$3,jsonb_build_object(
+			  'fromVersion',$4::bigint,'restoredStatus',$5::text,'publishedVersionId',$6::text))`,
+			tenantID, actorID, id, version, targetStatus, targetPublishedVersionID)
+		return err
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	return s.Get(ctx, tenantID, id)
+}
+
+// Delete 只做软删除；检测全部精确版本的下游占用后再隐藏目录项并废弃发布版本。
+func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string, input LifecycleInput) error {
+	return database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		var version int64
+		err := tx.QueryRow(ctx, `SELECT version FROM platform.datasets
+			WHERE id::text=$1 AND deleted_at IS NULL FOR UPDATE`, id).Scan(&version)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if version != input.ExpectedVersion {
+			return ErrConflict
+		}
+		var inUse bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1 FROM platform.metrics m WHERE m.dataset_id::text=$1 AND m.deleted_at IS NULL
+			UNION ALL
+			SELECT 1 FROM platform.dataset_dependencies dependency
+			JOIN platform.dataset_versions source_version ON source_version.id::text=dependency.source_id
+			JOIN platform.dataset_versions downstream_version ON downstream_version.id=dependency.dataset_version_id
+			JOIN platform.datasets downstream_dataset ON downstream_dataset.id=downstream_version.dataset_id AND downstream_dataset.deleted_at IS NULL
+			WHERE dependency.source_type='DATASET_VERSION' AND source_version.dataset_id::text=$1 AND downstream_version.status<>'DEPRECATED'
+			UNION ALL
+			SELECT 1 FROM platform.report_draft_dependencies dependency
+			JOIN platform.dataset_versions source_version ON source_version.id::text=dependency.dependency_id
+			JOIN platform.reports report ON report.id=dependency.report_id AND report.deleted_at IS NULL
+			WHERE dependency.dependency_type='DATASET_VERSION' AND source_version.dataset_id::text=$1
+			UNION ALL
+			SELECT 1 FROM platform.query_runs run WHERE run.dataset_id::text=$1 AND run.status='RUNNING'
+		)`, id).Scan(&inUse); err != nil {
+			return err
+		}
+		if inUse {
+			return ErrInUse
+		}
+		if _, err := tx.Exec(ctx, `UPDATE platform.dataset_versions SET status='DEPRECATED',updated_by=$1
+			WHERE dataset_id::text=$2 AND status IN ('PUBLISHED','STALE')`, actorID, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE platform.datasets SET status='DEPRECATED',current_published_version_id=NULL,
+			disabled_from_status=NULL,disabled_published_version_id=NULL,
+			deleted_at=now(),version=version+1,updated_by=$1 WHERE id::text=$2`, actorID, id); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail)
+			VALUES($1,$2,'DELETE','DATASET',$3,jsonb_build_object('fromVersion',$4::bigint))`, tenantID, actorID, id, version)
+		return err
+	})
 }
 
 // ReplayPublication 在当前发布权限仍有效时精确重放首次成功响应。
@@ -161,83 +488,106 @@ func (s *PostgresStore) Publish(ctx context.Context, tenantID, actorID, datasetI
 		if !allowed {
 			return ErrForbidden
 		}
-
-		var datasetVersion, draftRecordVersion int64
-		var draftVersionNo int
-		var draftVersionID, draftDSLHash, draftPlanHash string
-		err = tx.QueryRow(ctx, `SELECT d.version,v.id::text,v.version_no,v.record_version,v.schema_hash,v.plan_hash
-			FROM platform.datasets d JOIN platform.dataset_versions v
-			ON v.id=d.current_draft_version_id AND v.dataset_id=d.id AND v.tenant_id=d.tenant_id
-			WHERE d.id::text=$1 AND d.deleted_at IS NULL FOR UPDATE OF d,v`, datasetID).
-			Scan(&datasetVersion, &draftVersionID, &draftVersionNo, &draftRecordVersion, &draftDSLHash, &draftPlanHash)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrNotFound
-		}
-		if err != nil {
-			return err
-		}
-		// 数据集行锁同时串行化相同幂等键和不同键的发布请求；锁后必须再次查重。
-		var found bool
-		if err := replayPublicationTx(ctx, tx, actorID, datasetID, plan.IdempotencyKey, plan.RequestHash, &record, &found); err != nil || found {
-			return err
-		}
-		if datasetVersion != plan.ExpectedVersion || draftVersionID != plan.DraftVersionID ||
-			draftRecordVersion != plan.ExpectedDraftRecordVersion || draftDSLHash != plan.ExpectedDSLHash ||
-			plan.Prepared.DSLHash != draftDSLHash || plan.Prepared.PlanHash != draftPlanHash {
-			return ErrConflict
-		}
-		if err := validateDependencySnapshotsTx(ctx, tx, draftVersionID); err != nil {
-			return ErrPublishValidation
-		}
-
-		// 草稿的 version_no 表示下一待发布序号。先在事务内前移草稿序号，首个发布版本因此为 V1。
-		if tag, err := tx.Exec(ctx, `UPDATE platform.dataset_versions SET version_no=version_no+1,updated_by=$1 WHERE id=$2 AND status='DRAFT' AND record_version=$3`, actorID, draftVersionID, draftRecordVersion); err != nil {
-			return err
-		} else if tag.RowsAffected() != 1 {
-			return ErrConflict
-		}
-		var publishedVersionID string
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.dataset_versions(
-			tenant_id,dataset_id,version_no,status,dsl_version,dsl_json,schema_hash,logical_plan_json,plan_hash,
-			record_version,created_by,updated_by,published_at,published_by,source_draft_version_id,source_draft_record_version
-		) VALUES($1,$2,$3,'PUBLISHING',$4,$5,$6,$7,$8,1,$9,$9,now(),$9,$10,$11) RETURNING id::text`,
-			tenantID, datasetID, draftVersionNo, DSLVersion, plan.Prepared.DSLJSON, plan.Prepared.DSLHash,
-			plan.Prepared.LogicalPlanJSON, plan.Prepared.PlanHash, actorID, draftVersionID, draftRecordVersion).
-			Scan(&publishedVersionID); err != nil {
-			return err
-		}
-		if err := replaceDerived(ctx, tx, tenantID, datasetID, publishedVersionID, plan.Prepared.Document, false); err != nil {
-			return err
-		}
-		if tag, err := tx.Exec(ctx, `UPDATE platform.dataset_versions SET status='PUBLISHED' WHERE id=$1 AND status='PUBLISHING'`, publishedVersionID); err != nil {
-			return err
-		} else if tag.RowsAffected() != 1 {
-			return ErrConflict
-		}
-		if _, err := tx.Exec(ctx, `UPDATE platform.datasets SET current_published_version_id=$1,status='PUBLISHED',version=version+1,updated_by=$2 WHERE id=$3`, publishedVersionID, actorID, datasetID); err != nil {
-			return err
-		}
-		if err := scanVersionTx(ctx, tx, datasetID, publishedVersionID, &record); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail)
-			VALUES($1,$2,'PUBLISH','DATASET',$3,jsonb_build_object('datasetVersionId',$4::text,'versionNo',$5::int,'draftVersionId',$6::text,'draftRecordVersion',$7::bigint,'dslHash',$8::text,'planHash',$9::text))`,
-			tenantID, actorID, datasetID, publishedVersionID, draftVersionNo, draftVersionID, draftRecordVersion, plan.Prepared.DSLHash, plan.Prepared.PlanHash); err != nil {
-			return err
-		}
-		responseJSON, err := json.Marshal(record)
-		if err != nil {
-			return err
-		}
-		_, err = tx.Exec(ctx, `INSERT INTO platform.dataset_publish_idempotency(
-			tenant_id,dataset_id,actor_user_id,idempotency_key,request_hash,published_version_id,response_json
-		) VALUES($1,$2,$3,$4,$5,$6,$7)`, tenantID, datasetID, actorID, plan.IdempotencyKey, plan.RequestHash, publishedVersionID, responseJSON)
-		return err
+		var publishErr error
+		publishErr = s.publishTx(ctx, tx, tenantID, actorID, datasetID, plan, &record)
+		return publishErr
 	})
 	if err != nil {
 		return VersionRecord{}, mapPublicationPostgresError(err)
 	}
 	return record, nil
+}
+
+// publishTx is the single immutable publication commit path. The caller owns the tenant
+// transaction and must either have checked PUBLISH permission or have passed the stricter
+// pristine-mapped-dataset system guard. Approval finalization calls this helper so the decision,
+// published pointer, audit, outbox and idempotency record commit atomically.
+func (s *PostgresStore) publishTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, actorID, datasetID string,
+	plan PublishPlan,
+	record *VersionRecord,
+) (err error) {
+	var datasetVersion, draftRecordVersion int64
+	var draftVersionNo int
+	var datasetStatus, draftVersionID, draftDSLHash, draftPlanHash string
+	err = tx.QueryRow(ctx, `SELECT d.version,d.status,v.id::text,v.version_no,v.record_version,v.schema_hash,v.plan_hash
+			FROM platform.datasets d JOIN platform.dataset_versions v
+			ON v.id=d.current_draft_version_id AND v.dataset_id=d.id AND v.tenant_id=d.tenant_id
+			WHERE d.id::text=$1 AND d.deleted_at IS NULL FOR UPDATE OF d,v`, datasetID).
+		Scan(&datasetVersion, &datasetStatus, &draftVersionID, &draftVersionNo, &draftRecordVersion, &draftDSLHash, &draftPlanHash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if datasetStatus == "DISABLED" {
+		return ErrInvalidTransition
+	}
+	// 数据集行锁同时串行化相同幂等键和不同键的发布请求；锁后必须再次查重。
+	var found bool
+	if err := replayPublicationTx(ctx, tx, actorID, datasetID, plan.IdempotencyKey, plan.RequestHash, record, &found); err != nil || found {
+		return err
+	}
+	if datasetVersion != plan.ExpectedVersion || draftVersionID != plan.DraftVersionID ||
+		draftRecordVersion != plan.ExpectedDraftRecordVersion || draftDSLHash != plan.ExpectedDSLHash ||
+		plan.Prepared.DSLHash != draftDSLHash || plan.Prepared.PlanHash != draftPlanHash {
+		return ErrConflict
+	}
+	if err := validateDependencySnapshotsTx(ctx, tx, draftVersionID); err != nil {
+		return ErrPublishValidation
+	}
+
+	// 草稿的 version_no 表示下一待发布序号。先在事务内前移草稿序号，首个发布版本因此为 V1。
+	if tag, err := tx.Exec(ctx, `UPDATE platform.dataset_versions SET version_no=version_no+1,updated_by=$1 WHERE id=$2 AND status='DRAFT' AND record_version=$3`, actorID, draftVersionID, draftRecordVersion); err != nil {
+		return err
+	} else if tag.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	var publishedVersionID string
+	if err := tx.QueryRow(ctx, `INSERT INTO platform.dataset_versions(
+			tenant_id,dataset_id,version_no,status,dsl_version,dsl_json,schema_hash,logical_plan_json,plan_hash,
+			record_version,created_by,updated_by,published_at,published_by,source_draft_version_id,source_draft_record_version
+		) VALUES($1,$2,$3,'PUBLISHING',$4,$5,$6,$7,$8,1,$9,$9,now(),$9,$10,$11) RETURNING id::text`,
+		tenantID, datasetID, draftVersionNo, DSLVersion, plan.Prepared.DSLJSON, plan.Prepared.DSLHash,
+		plan.Prepared.LogicalPlanJSON, plan.Prepared.PlanHash, actorID, draftVersionID, draftRecordVersion).
+		Scan(&publishedVersionID); err != nil {
+		return err
+	}
+	if err := replaceDerived(ctx, tx, tenantID, datasetID, publishedVersionID, plan.Prepared.Document, false); err != nil {
+		return err
+	}
+	if tag, err := tx.Exec(ctx, `UPDATE platform.dataset_versions SET status='PUBLISHED' WHERE id=$1 AND status='PUBLISHING'`, publishedVersionID); err != nil {
+		return err
+	} else if tag.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	if _, err := tx.Exec(ctx, `UPDATE platform.datasets SET current_published_version_id=$1,status='PUBLISHED',version=version+1,updated_by=$2 WHERE id=$3`, publishedVersionID, actorID, datasetID); err != nil {
+		return err
+	}
+	if err := scanVersionTx(ctx, tx, datasetID, publishedVersionID, record); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail)
+			VALUES($1,$2,'PUBLISH','DATASET',$3,jsonb_build_object('datasetVersionId',$4::text,'versionNo',$5::int,'draftVersionId',$6::text,'draftRecordVersion',$7::bigint,'dslHash',$8::text,'planHash',$9::text))`,
+		tenantID, actorID, datasetID, publishedVersionID, draftVersionNo, draftVersionID, draftRecordVersion, plan.Prepared.DSLHash, plan.Prepared.PlanHash); err != nil {
+		return err
+	}
+	if s.publicationSink != nil {
+		if err := s.publicationSink.EnqueueDatasetMetricExtractionTx(ctx, tx, tenantID, actorID, *record); err != nil {
+			return err
+		}
+	}
+	responseJSON, err := json.Marshal(*record)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO platform.dataset_publish_idempotency(
+			tenant_id,dataset_id,actor_user_id,idempotency_key,request_hash,published_version_id,response_json
+		) VALUES($1,$2,$3,$4,$5,$6,$7)`, tenantID, datasetID, actorID, plan.IdempotencyKey, plan.RequestHash, publishedVersionID, responseJSON)
+	return err
 }
 
 // GetVersion 按父数据集和版本 ID 精确读取发布快照。
@@ -246,6 +596,61 @@ func (s *PostgresStore) GetVersion(ctx context.Context, tenantID, datasetID, ver
 		return scanVersionTx(ctx, tx, datasetID, versionID, &record)
 	})
 	return record, err
+}
+
+// ResolveVersionSourceRevision 按发布版本冻结的草稿身份和内容摘要解析唯一源修订。
+// 遗留缺失或重复数据均失败关闭，绝不按版本号、单独哈希或时间顺序降级匹配。
+func (s *PostgresStore) ResolveVersionSourceRevision(ctx context.Context, tenantID, datasetID, versionID string) (record RevisionRecord, err error) {
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		var version VersionRecord
+		if err := scanVersionTx(ctx, tx, datasetID, versionID, &version); err != nil {
+			return err
+		}
+
+		rows, err := tx.Query(ctx, `SELECT revision.id::text,revision.dataset_id::text,revision.version_no,
+			revision.operation_type,COALESCE(revision.source_revision_id::text,''),revision.name,
+			revision.description,revision.dataset_type,revision.draft_version_id::text,
+			revision.draft_record_version,revision.dsl_version,revision.schema_hash,revision.plan_hash,
+			revision.created_at::text,COALESCE(revision.created_by::text,''),revision.dsl_json,
+			revision.logical_plan_json
+			FROM platform.dataset_versions AS version
+			JOIN platform.datasets AS dataset
+			  ON dataset.id=version.dataset_id AND dataset.tenant_id=version.tenant_id AND dataset.deleted_at IS NULL
+			JOIN platform.dataset_draft_revisions AS revision
+			  ON revision.tenant_id=version.tenant_id AND revision.dataset_id=version.dataset_id
+			 AND revision.draft_version_id=version.source_draft_version_id
+			 AND revision.draft_record_version=version.source_draft_record_version
+			 AND revision.schema_hash=version.schema_hash AND revision.plan_hash=version.plan_hash
+			WHERE dataset.id::text=$1 AND version.id::text=$2
+			  AND version.status IN ('PUBLISHED','STALE','DEPRECATED')
+			ORDER BY revision.id LIMIT 2`, datasetID, versionID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		matches := make([]RevisionRecord, 0, 2)
+		for rows.Next() {
+			var match RevisionRecord
+			if err := scanRevisionRecord(rows, &match); err != nil {
+				return err
+			}
+			matches = append(matches, match)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		record, err = resolveUniqueVersionSourceRevision(matches)
+		return err
+	})
+	return record, err
+}
+
+func resolveUniqueVersionSourceRevision(matches []RevisionRecord) (RevisionRecord, error) {
+	if len(matches) != 1 {
+		return RevisionRecord{}, ErrVersionRollbackUnavailable
+	}
+	return matches[0], nil
 }
 
 // ListVersions 仅列出不可变发布版本，不把 PUBLISHING 或可变草稿暴露给版本目录。
@@ -348,17 +753,20 @@ func (s *PostgresStore) TransitionVersion(ctx context.Context, tenantID, actorID
 			return ErrForbidden
 		}
 		var datasetVersion int64
-		var currentPublishedID, currentStatus string
-		err = tx.QueryRow(ctx, `SELECT d.version,COALESCE(d.current_published_version_id::text,''),v.status
+		var currentPublishedID, currentStatus, datasetStatus string
+		err = tx.QueryRow(ctx, `SELECT d.version,COALESCE(d.current_published_version_id::text,''),v.status,d.status
 			FROM platform.datasets d JOIN platform.dataset_versions v
 			ON v.id::text=$2 AND v.dataset_id=d.id AND v.tenant_id=d.tenant_id
 			WHERE d.id::text=$1 AND d.deleted_at IS NULL FOR UPDATE OF d,v`, datasetID, versionID).
-			Scan(&datasetVersion, &currentPublishedID, &currentStatus)
+			Scan(&datasetVersion, &currentPublishedID, &currentStatus, &datasetStatus)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrVersionNotFound
 		}
 		if err != nil {
 			return err
+		}
+		if datasetStatus == "DISABLED" {
+			return ErrInvalidTransition
 		}
 		if datasetVersion != input.ExpectedVersion || currentStatus != input.ExpectedStatus {
 			return ErrConflict
@@ -393,14 +801,18 @@ func (s *PostgresStore) ValidateVersionDependencies(ctx context.Context, tenantI
 
 // ValidateVersionDependenciesInTx 在调用方事务内锁定精确版本及其上游摘要，供查询运行时原子完成物理解析。
 func ValidateVersionDependenciesInTx(ctx context.Context, tx pgx.Tx, datasetID, versionID string) error {
-	var status string
-	if err := tx.QueryRow(ctx, `SELECT status FROM platform.dataset_versions
-		WHERE id::text=$1 AND dataset_id::text=$2 FOR SHARE`, versionID, datasetID).Scan(&status); errors.Is(err, pgx.ErrNoRows) {
+	var status, ownerStatus string
+	if err := tx.QueryRow(ctx, `SELECT version.status,owner.status FROM platform.dataset_versions AS version
+		JOIN platform.datasets AS owner
+		  ON owner.id=version.dataset_id AND owner.tenant_id=version.tenant_id
+		WHERE version.id::text=$1 AND version.dataset_id::text=$2
+		  AND owner.deleted_at IS NULL
+		FOR SHARE OF version,owner`, versionID, datasetID).Scan(&status, &ownerStatus); errors.Is(err, pgx.ErrNoRows) {
 		return ErrVersionNotFound
 	} else if err != nil {
 		return err
 	}
-	if status != "PUBLISHED" {
+	if status != "PUBLISHED" || ownerStatus != "PUBLISHED" {
 		return ErrVersionUnavailable
 	}
 	if err := validateDependencySnapshotsTx(ctx, tx, versionID); err != nil {
@@ -447,6 +859,52 @@ func scanVersionTx(ctx context.Context, tx pgx.Tx, datasetID, versionID string, 
 	return err
 }
 
+type revisionRowScanner interface{ Scan(...any) error }
+
+func scanRevisionTx(ctx context.Context, tx pgx.Tx, datasetID, revisionID string, record *RevisionRecord) error {
+	err := scanRevisionRecord(tx.QueryRow(ctx, `SELECT revision.id::text,revision.dataset_id::text,revision.version_no,
+		revision.operation_type,COALESCE(revision.source_revision_id::text,''),revision.name,
+		revision.description,revision.dataset_type,revision.draft_version_id::text,
+		revision.draft_record_version,revision.dsl_version,revision.schema_hash,revision.plan_hash,
+		revision.created_at::text,COALESCE(revision.created_by::text,''),revision.dsl_json,
+		revision.logical_plan_json
+		FROM platform.dataset_draft_revisions AS revision
+		JOIN platform.datasets AS dataset
+		  ON dataset.id=revision.dataset_id AND dataset.tenant_id=revision.tenant_id AND dataset.deleted_at IS NULL
+		WHERE dataset.id::text=$1 AND revision.id::text=$2`, datasetID, revisionID), record)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrRevisionNotFound
+	}
+	return err
+}
+
+func scanRevisionRecord(row revisionRowScanner, record *RevisionRecord) error {
+	return row.Scan(
+		&record.ID, &record.DatasetID, &record.VersionNo, &record.OperationType,
+		&record.SourceRevisionID, &record.Name, &record.Description, &record.Type,
+		&record.DraftVersionID, &record.DraftRecordVersion, &record.DSLVersion,
+		&record.DSLHash, &record.PlanHash, &record.CreatedAt, &record.CreatedBy,
+		&record.DSL, &record.LogicalPlan,
+	)
+}
+
+func insertDraftRevisionTx(ctx context.Context, tx pgx.Tx, tenantID, datasetID, actorID, draftVersionID string,
+	versionNo, draftRecordVersion int64, operationType, sourceRevisionID string, prepared Prepared) error {
+	var sourceRevision any
+	if sourceRevisionID != "" {
+		sourceRevision = sourceRevisionID
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO platform.dataset_draft_revisions(
+		tenant_id,dataset_id,version_no,operation_type,source_revision_id,name,description,dataset_type,
+		draft_version_id,draft_record_version,dsl_version,dsl_json,schema_hash,logical_plan_json,plan_hash,created_by
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NULLIF($16,'')::uuid)`,
+		tenantID, datasetID, versionNo, operationType, sourceRevision,
+		prepared.Document.Dataset.Name, prepared.Document.Dataset.Description, prepared.Document.Dataset.Type,
+		draftVersionID, draftRecordVersion, DSLVersion, prepared.DSLJSON, prepared.DSLHash,
+		prepared.LogicalPlanJSON, prepared.PlanHash, actorID)
+	return err
+}
+
 func datasetActionAllowedTx(ctx context.Context, tx pgx.Tx, tenantID, actorID, datasetID, action string) (bool, error) {
 	var allowed bool
 	err := tx.QueryRow(ctx, `SELECT EXISTS(
@@ -483,8 +941,13 @@ func loadDependencySnapshot(ctx context.Context, tx pgx.Tx, dependency Dependenc
 		err = tx.QueryRow(ctx, `SELECT version,sha256 FROM platform.file_asset_versions WHERE id::text=$1 FOR SHARE`, dependency.ID).
 			Scan(&snapshot.Version, &snapshot.Hash)
 	case "DATASET_VERSION":
-		err = tx.QueryRow(ctx, `SELECT version_no,schema_hash,plan_hash FROM platform.dataset_versions
-			WHERE id::text=$1 AND status='PUBLISHED' FOR SHARE`, dependency.ID).Scan(&snapshot.Version, &snapshot.Hash, &snapshot.PlanHash)
+		err = tx.QueryRow(ctx, `SELECT version.version_no,version.schema_hash,version.plan_hash
+			FROM platform.dataset_versions AS version
+			JOIN platform.datasets AS owner
+			  ON owner.id=version.dataset_id AND owner.tenant_id=version.tenant_id
+			WHERE version.id::text=$1 AND version.status='PUBLISHED'
+			  AND owner.status='PUBLISHED' AND owner.deleted_at IS NULL
+			FOR SHARE OF version,owner`, dependency.ID).Scan(&snapshot.Version, &snapshot.Hash, &snapshot.PlanHash)
 	default:
 		return dependencySnapshot{}, fmt.Errorf("%w: unsupported dependency type", ErrInvalidDocument)
 	}
@@ -532,7 +995,7 @@ func validateDependencySnapshotsTx(ctx context.Context, tx pgx.Tx, versionID str
 
 func mapPublicationPostgresError(err error) error {
 	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden) || errors.Is(err, ErrConflict) ||
-		errors.Is(err, ErrIdempotencyConflict) || errors.Is(err, ErrPublishValidation) {
+		errors.Is(err, ErrIdempotencyConflict) || errors.Is(err, ErrPublishValidation) || errors.Is(err, ErrInvalidTransition) {
 		return err
 	}
 	var pgError *pgconn.PgError
@@ -644,7 +1107,14 @@ func validateUpstreams(ctx context.Context, tx pgx.Tx, document Document) error 
 			}
 		case "DATASET":
 			var exists bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM platform.dataset_versions WHERE id::text=$1 AND status='PUBLISHED')`, node.DatasetVersionID).Scan(&exists); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(
+				SELECT 1
+				FROM platform.dataset_versions AS version
+				JOIN platform.datasets AS owner
+				  ON owner.id=version.dataset_id AND owner.tenant_id=version.tenant_id
+				WHERE version.id::text=$1 AND version.status='PUBLISHED'
+				  AND owner.status='PUBLISHED' AND owner.deleted_at IS NULL
+			)`, node.DatasetVersionID).Scan(&exists); err != nil {
 				return err
 			}
 			if !exists {

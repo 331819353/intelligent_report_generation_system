@@ -2,7 +2,6 @@ import { act, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { RequestError } from '../lib/api'
 import { datasetAPI, type AssetColumn, type AssetTable, type DatasetDSL, type DatasetRecord, type PublishedVersionRecord } from '../lib/datasets'
 import { DatasetDesignerPage, PreviewTable } from './DatasetDesignerPage'
 
@@ -18,280 +17,64 @@ test('数据预览展示结构化 Join 风险告警', () => {
   expect(screen.getByText('预计 4 行')).toBeInTheDocument()
 })
 
-describe('数据集发布', () => {
-  test('保存草稿后发布精确版本并采用服务端新版本继续保存', async () => {
+describe('数据集发布审批', () => {
+  test('只冻结最近保存的草稿并提交审批，不直接生成发布版本', async () => {
     const user = userEvent.setup()
     const saved = datasetRecord({ version: 5, draftRecordVersion: 4, dslHash: 'b'.repeat(64) })
-    const savedAgain = datasetRecord({ version: 7, draftRecordVersion: 5, dslHash: 'c'.repeat(64) })
-    const published = publishedVersion({ datasetRecordVersion: 6 })
-    const { getSpy, publishSpy, updateSpy } = mockDesigner(saved)
-    getSpy.mockResolvedValueOnce(datasetRecord()).mockResolvedValueOnce(datasetRecord({
-      version: published.datasetRecordVersion, draftRecordVersion: saved.draftRecordVersion,
-      dslHash: saved.dslHash, status: 'PUBLISHED', currentPublishedVersionId: published.id,
-    }))
-    updateSpy.mockResolvedValueOnce(saved).mockResolvedValueOnce(savedAgain)
-    publishSpy.mockResolvedValue(published)
-    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue('00000000-0000-4000-8000-000000000099')
+    const { requestPublicationSpy, updateSpy } = mockDesigner(saved)
+    requestPublicationSpy.mockResolvedValue({
+      id: 'publication-request-1', datasetId: saved.id, status: 'PENDING', version: 1,
+      draftVersionId: saved.draftVersionId, expectedDatasetVersion: saved.version,
+      expectedDraftRecordVersion: saved.draftRecordVersion, expectedDslHash: saved.dslHash,
+      expectedPlanHash: saved.planHash, requesterId: 'user-1', requestNote: '',
+      submittedAt: '2026-07-20T10:00:00Z', updatedAt: '2026-07-20T10:00:00Z',
+    })
     renderDesigner()
 
     await screen.findByLabelText('预览参数 start_date')
     await user.click(screen.getByRole('button', { name: '保存草稿' }))
     await screen.findByText('草稿已保存 · 版本 5')
-    const parameter = await screen.findByLabelText('预览参数 start_date')
-    await user.type(parameter, '2026-01-01')
-    await user.click(screen.getByRole('button', { name: '发布版本' }))
+    await user.type(screen.getByLabelText('预览参数 start_date'), '2026-01-01')
+    await user.click(screen.getByRole('button', { name: '提交发布审批' }))
 
-    expect(await screen.findByText(`数据集已发布 · V1 · 精确版本 ${published.id}`)).toBeInTheDocument()
-    expect(publishSpy).toHaveBeenCalledWith('dataset-1', {
+    expect(await screen.findByText('发布审批已提交 · publication-request-1 · 当前状态：PENDING')).toBeInTheDocument()
+    expect(requestPublicationSpy).toHaveBeenCalledWith(saved.id, {
       draftVersionId: saved.draftVersionId,
       expectedVersion: saved.version,
       expectedDraftRecordVersion: saved.draftRecordVersion,
       expectedDslHash: saved.dslHash,
       validationParameters: { start_date: '2026-01-01' },
-    }, '00000000-0000-4000-8000-000000000099')
-
-    await user.click(screen.getByRole('button', { name: '保存草稿' }))
-    await screen.findByText('草稿已保存 · 版本 7')
-    expect(updateSpy.mock.calls[1]?.[1]).toBe(published.datasetRecordVersion)
-  })
-
-  test('发布校验失败时展示错误并恢复操作按钮', async () => {
-    const user = userEvent.setup()
-    const saved = datasetRecord({ version: 5, draftRecordVersion: 4 })
-    const { publishSpy } = mockDesigner(saved)
-    publishSpy.mockRejectedValue(new RequestError({ code: 'DATASET_PUBLISH_VALIDATION_FAILED', message: '发布试跑未通过：nodes[0] 上游资产不可用' }, 422))
-    renderDesigner()
-
-    await screen.findByLabelText('预览参数 start_date')
-    await user.click(screen.getByRole('button', { name: '保存草稿' }))
-    await screen.findByText('草稿已保存 · 版本 5')
-    await user.type(screen.getByLabelText('预览参数 start_date'), '2026-01-01')
-    await user.click(screen.getByRole('button', { name: '发布版本' }))
-
-    expect(await screen.findByText('发布试跑未通过：nodes[0] 上游资产不可用')).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByRole('button', { name: '发布版本' })).toBeEnabled())
-    expect(publishSpy).toHaveBeenCalledTimes(1)
-  })
-
-  test('发布在途和模糊结果阶段锁定编辑并原样重试冻结候选', async () => {
-    const user = userEvent.setup()
-    const saved = datasetRecord({ version: 5, draftRecordVersion: 4, dslHash: 'b'.repeat(64) })
-    const published = publishedVersion({ datasetRecordVersion: 6 })
-    const { getSpy, publishSpy, updateSpy, listVersionsSpy, getVersionSpy } = mockDesigner(saved)
-    getSpy.mockResolvedValueOnce(datasetRecord()).mockResolvedValueOnce(datasetRecord({
-      version: 6, draftRecordVersion: saved.draftRecordVersion, dslHash: saved.dslHash,
-      status: 'PUBLISHED', currentPublishedVersionId: published.id,
-    }))
-    listVersionsSpy.mockResolvedValue({ items: [published], total: 1, limit: 50, offset: 0 })
-    getVersionSpy.mockResolvedValue(published)
-    let rejectPublish!: (reason: unknown) => void
-    const firstRequest = new Promise<PublishedVersionRecord>((_, reject) => { rejectPublish = reject })
-    publishSpy.mockReturnValueOnce(firstRequest).mockResolvedValueOnce(published)
-    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue('00000000-0000-4000-8000-000000000088')
-    renderDesigner()
-
-    const manager = await screen.findByRole('region', { name: '已发布版本管理' })
-    await within(manager).findByText(published.id)
-    await screen.findByLabelText('预览参数 start_date')
-    await user.click(screen.getByRole('button', { name: '保存草稿' }))
-    await screen.findByText('草稿已保存 · 版本 5')
-    await user.type(screen.getByLabelText('预览参数 start_date'), '2026-01-01')
-    await user.click(screen.getByRole('button', { name: '发布版本' }))
-    await waitFor(() => expect(publishSpy).toHaveBeenCalledTimes(1))
-    expect(screen.getByLabelText('数据集名称')).toBeDisabled()
-    expect(screen.getByLabelText('预览参数 start_date')).toBeDisabled()
-    await act(async () => { rejectPublish(new TypeError('Failed to fetch')) })
-    expect(await screen.findByText(/发布结果尚未确认/)).toHaveTextContent('Failed to fetch')
-    expect(screen.getByRole('button', { name: '保存草稿' })).toBeDisabled()
-    expect(screen.getByLabelText('数据集名称')).toBeDisabled()
-    expect(within(manager).getByRole('button', { name: '预览精确版本' })).toBeDisabled()
-    expect(within(manager).getByRole('button', { name: '标记为失效' })).toBeDisabled()
-    expect(within(manager).getByRole('navigation', { name: '发布版本列表' }).querySelector('button')).toBeEnabled()
-    await user.click(screen.getByRole('button', { name: '重试刚才发布' }))
-
-    expect(await screen.findByText(`数据集已发布 · V1 · 精确版本 ${published.id}`)).toBeInTheDocument()
-    expect(updateSpy).toHaveBeenCalledTimes(1)
-    expect(publishSpy).toHaveBeenCalledTimes(2)
-    expect(publishSpy.mock.calls[1]).toEqual(publishSpy.mock.calls[0])
-  })
-
-  test('成功响应体解码失败后仍以原请求和幂等键重试', async () => {
-    const user = userEvent.setup()
-    const saved = datasetRecord({ version: 5, draftRecordVersion: 4, dslHash: 'b'.repeat(64) })
-    const published = publishedVersion({ datasetRecordVersion: 6 })
-    const { getSpy, publishSpy, updateSpy } = mockDesigner(saved)
-    getSpy.mockResolvedValueOnce(datasetRecord()).mockResolvedValueOnce(datasetRecord({
-      version: 6, draftRecordVersion: saved.draftRecordVersion, dslHash: saved.dslHash,
-      status: 'PUBLISHED', currentPublishedVersionId: published.id,
-    }))
-    publishSpy.mockRejectedValueOnce(new SyntaxError('Unexpected end of JSON input')).mockResolvedValueOnce(published)
-    renderDesigner()
-
-    await screen.findByLabelText('预览参数 start_date')
-    await user.click(screen.getByRole('button', { name: '保存草稿' }))
-    await screen.findByText('草稿已保存 · 版本 5')
-    await user.type(screen.getByLabelText('预览参数 start_date'), '2026-01-01')
-    await user.click(screen.getByRole('button', { name: '发布版本' }))
-    expect(await screen.findByText(/Unexpected end of JSON input/)).toHaveTextContent('发布结果尚未确认')
-    await user.click(screen.getByRole('button', { name: '重试刚才发布' }))
-
-    expect(await screen.findByText(`数据集已发布 · V1 · 精确版本 ${published.id}`)).toBeInTheDocument()
-    expect(updateSpy).toHaveBeenCalledTimes(1)
-    expect(publishSpy.mock.calls[1]).toEqual(publishSpy.mock.calls[0])
-  })
-
-  test('模糊重试收到 409 后结束原样重试并进入重载核对', async () => {
-    const user = userEvent.setup()
-    const saved = datasetRecord({ version: 5, draftRecordVersion: 4, dslHash: 'b'.repeat(64) })
-    const { publishSpy, updateSpy } = mockDesigner(saved)
-    publishSpy
-      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
-      .mockRejectedValueOnce(new RequestError({ code: 'DATASET_VERSION_CONFLICT', message: '数据集已被其他请求修改' }, 409))
-    renderDesigner()
-
-    await screen.findByLabelText('预览参数 start_date')
-    await user.click(screen.getByRole('button', { name: '保存草稿' }))
-    await screen.findByText('草稿已保存 · 版本 5')
-    await user.type(screen.getByLabelText('预览参数 start_date'), '2026-01-01')
-    await user.click(screen.getByRole('button', { name: '发布版本' }))
-    await user.click(await screen.findByRole('button', { name: '重试刚才发布' }))
-
-    expect(await screen.findByText(/请重新加载草稿核对远端状态/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '重试刚才发布' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '重新加载草稿' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: '发布版本' })).toBeDisabled()
-    expect(updateSpy).toHaveBeenCalledTimes(1)
-    expect(publishSpy.mock.calls[1]).toEqual(publishSpy.mock.calls[0])
-  })
-
-  test('模糊重试收到 422 后清除候选并恢复编辑', async () => {
-    const user = userEvent.setup()
-    const saved = datasetRecord({ version: 5, draftRecordVersion: 4, dslHash: 'b'.repeat(64) })
-    const { publishSpy, updateSpy } = mockDesigner(saved)
-    publishSpy
-      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
-      .mockRejectedValueOnce(new RequestError({
-        code: 'DATASET_PUBLISH_VALIDATION_FAILED', message: '数据集发布前校验失败',
-        details: [{ path: 'nodes[0]', code: 'PUBLISH_DEPENDENCY_CHANGED', reason: '上游结构已变化' }],
-      }, 422))
-    renderDesigner()
-
-    await screen.findByLabelText('预览参数 start_date')
-    await user.click(screen.getByRole('button', { name: '保存草稿' }))
-    await screen.findByText('草稿已保存 · 版本 5')
-    await user.type(screen.getByLabelText('预览参数 start_date'), '2026-01-01')
-    await user.click(screen.getByRole('button', { name: '发布版本' }))
-    await user.click(await screen.findByRole('button', { name: '重试刚才发布' }))
-
-    expect(await screen.findByText(/nodes\[0\] \[PUBLISH_DEPENDENCY_CHANGED\] 上游结构已变化/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '重试刚才发布' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '重新加载草稿' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '发布版本' })).toBeEnabled()
-    expect(screen.getByLabelText('数据集名称')).toBeEnabled()
-    expect(updateSpy).toHaveBeenCalledTimes(1)
-    expect(publishSpy.mock.calls[1]).toEqual(publishSpy.mock.calls[0])
-  })
-
-  test('拒绝采用低于发布响应版本下界的旧聚合基线', async () => {
-    const user = userEvent.setup()
-    const loaded = datasetRecord()
-    const published = publishedVersion({ datasetRecordVersion: 6, draftRecordVersion: loaded.draftRecordVersion })
-    const { getSpy, publishSpy } = mockDesigner(loaded)
-    getSpy.mockResolvedValueOnce(loaded).mockResolvedValueOnce(datasetRecord({
-      version: 5, draftRecordVersion: loaded.draftRecordVersion, dslHash: loaded.dslHash,
-    }))
-    publishSpy.mockResolvedValue(published)
-    renderDesigner()
-
-    await user.type(await screen.findByLabelText('预览参数 start_date'), '2026-01-01')
-    await user.click(screen.getByRole('button', { name: '发布版本' }))
-
-    expect(await screen.findByText('发布已成功，但服务端返回的草稿基线过旧，请重新加载后继续编辑')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '重新加载草稿' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: '保存草稿' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '发布版本' })).toBeDisabled()
-    expect(screen.getByLabelText('数据集名称')).toBeDisabled()
-  })
-
-  test('远端草稿变化时不采纳发布响应中的旧本地基线', async () => {
-    const user = userEvent.setup()
-    const loaded = datasetRecord()
-    const published = publishedVersion({ datasetRecordVersion: 6, draftRecordVersion: loaded.draftRecordVersion })
-    const { getSpy, publishSpy } = mockDesigner(loaded)
-    getSpy.mockResolvedValueOnce(loaded).mockResolvedValueOnce(datasetRecord({
-      version: 7, draftVersionId: 'remote-draft-version', draftRecordVersion: 1, dslHash: 'e'.repeat(64),
-    }))
-    publishSpy.mockResolvedValue(published)
-    renderDesigner()
-
-    await user.type(await screen.findByLabelText('预览参数 start_date'), '2026-01-01')
-    await user.click(screen.getByRole('button', { name: '发布版本' }))
-
-    expect(await screen.findByText('发布已成功，但远端草稿随后发生变化，请重新加载后继续编辑')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '重新加载草稿' })).toBeEnabled()
-    expect(screen.getByLabelText('数据集名称')).toBeDisabled()
-  })
-
-  test('发布成功后的 GET 对账失败时锁定编辑并提供重新加载入口', async () => {
-    const user = userEvent.setup()
-    const loaded = datasetRecord()
-    const published = publishedVersion({ datasetRecordVersion: 6, draftRecordVersion: loaded.draftRecordVersion })
-    const { getSpy, publishSpy } = mockDesigner(loaded)
-    getSpy.mockResolvedValueOnce(loaded).mockRejectedValueOnce(new TypeError('Failed to fetch'))
-    publishSpy.mockResolvedValue(published)
-    renderDesigner()
-
-    await user.type(await screen.findByLabelText('预览参数 start_date'), '2026-01-01')
-    await user.click(screen.getByRole('button', { name: '发布版本' }))
-
-    expect(await screen.findByText(/请重新加载以确认最新草稿/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '重新加载草稿' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: '保存草稿' })).toBeDisabled()
-    expect(screen.getByLabelText('数据集名称')).toBeDisabled()
-  })
-
-  test('未修改的已保存草稿可以不经过 MANAGE 保存直接发布', async () => {
-    const user = userEvent.setup()
-    const loaded = datasetRecord()
-    const published = publishedVersion({
-      datasetRecordVersion: 5, draftRecordVersion: loaded.draftRecordVersion, dslHash: loaded.dslHash,
     })
-    const { getSpy, publishSpy, updateSpy } = mockDesigner(loaded)
-    getSpy.mockResolvedValueOnce(loaded).mockResolvedValueOnce(datasetRecord({
-      version: 5, draftRecordVersion: loaded.draftRecordVersion, dslHash: loaded.dslHash,
-      status: 'PUBLISHED', currentPublishedVersionId: published.id,
-    }))
-    publishSpy.mockResolvedValue(published)
-    renderDesigner()
-
-    await user.type(await screen.findByLabelText('预览参数 start_date'), '2026-01-01')
-    await user.click(screen.getByRole('button', { name: '发布版本' }))
-
-    expect(await screen.findByText(`数据集已发布 · V1 · 精确版本 ${published.id}`)).toBeInTheDocument()
-    expect(updateSpy).not.toHaveBeenCalled()
-    expect(publishSpy).toHaveBeenCalledWith(loaded.id, {
-      draftVersionId: loaded.draftVersionId,
-      expectedVersion: loaded.version,
-      expectedDraftRecordVersion: loaded.draftRecordVersion,
-      expectedDslHash: loaded.dslHash,
-      validationParameters: { start_date: '2026-01-01' },
-    }, expect.any(String))
+    expect(updateSpy).toHaveBeenCalledTimes(1)
   })
 
-  test('有未保存修改时发布不会暗中写入草稿', async () => {
+  test('有未保存修改时不会暗中保存或提交审批', async () => {
     const user = userEvent.setup()
-    const { publishSpy, updateSpy } = mockDesigner(datasetRecord())
+    const { requestPublicationSpy, updateSpy } = mockDesigner(datasetRecord())
     renderDesigner()
 
     const name = await screen.findByLabelText('数据集名称')
     await user.clear(name)
     await user.type(name, '尚未保存的新名称')
-    await user.type(screen.getByLabelText('预览参数 start_date'), '2026-01-01')
-    await user.click(screen.getByRole('button', { name: '发布版本' }))
+    await user.click(screen.getByRole('button', { name: '提交发布审批' }))
 
-    expect(await screen.findByText('当前草稿有未保存修改，请先保存草稿后再发布')).toBeInTheDocument()
+    expect(await screen.findByText('当前草稿有未保存修改，请先保存草稿后再提交发布审批')).toBeInTheDocument()
     expect(updateSpy).not.toHaveBeenCalled()
-    expect(publishSpy).not.toHaveBeenCalled()
+    expect(requestPublicationSpy).not.toHaveBeenCalled()
+  })
+
+  test('审批提交失败时展示稳定错误并恢复按钮', async () => {
+    const user = userEvent.setup()
+    const loaded = datasetRecord()
+    const { requestPublicationSpy } = mockDesigner(loaded)
+    requestPublicationSpy.mockRejectedValue(new Error('当前草稿已有待审批申请'))
+    renderDesigner()
+
+    await user.type(await screen.findByLabelText('预览参数 start_date'), '2026-07-01')
+    await user.click(screen.getByRole('button', { name: '提交发布审批' }))
+
+    expect(await screen.findByText('当前草稿已有待审批申请')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('button', { name: '提交发布审批' })).toBeEnabled())
   })
 })
 
@@ -424,7 +207,7 @@ describe('已发布版本管理', () => {
     const manager = await screen.findByRole('region', { name: '已发布版本管理' })
     await within(manager).findByText(published.id)
     expect(screen.getByRole('button', { name: '保存草稿' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '发布版本' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '提交发布审批' })).toBeDisabled()
     expect(within(manager).getByRole('button', { name: '标记为失效' })).toBeDisabled()
     expect(within(manager).getByRole('button', { name: '废弃版本' })).toBeDisabled()
     expect(within(manager).getByRole('button', { name: '预览精确版本' })).toBeEnabled()
@@ -481,9 +264,9 @@ const dsl: DatasetDSL = {
 function datasetRecord(overrides: Partial<DatasetRecord> = {}): DatasetRecord {
   return {
     id: 'dataset-1', code: 'monthly_orders', name: '月度订单数据集', description: '订单汇总',
-    type: 'SINGLE_SOURCE', status: 'DRAFT', version: 4, draftVersionId: 'draft-version-1',
+    type: 'SINGLE_SOURCE', status: 'DRAFT', version: 4, draftVersionId: 'draft-version-1', draftVersionNo: 1,
     draftRecordVersion: 3, dslHash: 'a'.repeat(64), planHash: 'd'.repeat(64), dsl,
-    logicalPlan: {},
+    logicalPlan: {}, createdAt: '2026-07-16T00:00:00Z', updatedAt: '2026-07-16T01:00:00Z',
     ...overrides,
   }
 }
@@ -510,8 +293,8 @@ function mockDesigner(saved: DatasetRecord) {
   vi.spyOn(datasetAPI, 'columns').mockResolvedValue({ items: [column] })
   vi.spyOn(datasetAPI, 'validate').mockResolvedValue({ valid: true, dslHash: saved.dslHash, planHash: saved.planHash, logicalPlan: {} })
   const updateSpy = vi.spyOn(datasetAPI, 'update').mockResolvedValue(saved)
-  const publishSpy = vi.spyOn(datasetAPI, 'publish')
-  return { getSpy, publishSpy, updateSpy, permissionSpy, listVersionsSpy, getVersionSpy, usageSpy, versionPreviewSpy, transitionSpy }
+  const requestPublicationSpy = vi.spyOn(datasetAPI, 'requestPublication')
+  return { getSpy, requestPublicationSpy, updateSpy, permissionSpy, listVersionsSpy, getVersionSpy, usageSpy, versionPreviewSpy, transitionSpy }
 }
 
 function renderDesigner() {

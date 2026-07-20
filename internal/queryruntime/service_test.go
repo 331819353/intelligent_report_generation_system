@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,13 +17,33 @@ import (
 	"intelligent-report-generation-system/internal/querycompiler"
 )
 
-type fakeDatasets struct{ record dataset.Record }
+type fakeDatasets struct {
+	record      dataset.Record
+	revision    dataset.RevisionRecord
+	revisionErr error
+}
 
 func (f fakeDatasets) Get(context.Context, string, string) (dataset.Record, error) {
 	return f.record, nil
 }
 func (f fakeDatasets) GetVersion(context.Context, string, string, string) (dataset.VersionRecord, error) {
 	return dataset.VersionRecord{ID: f.record.DraftVersionID, DatasetID: f.record.ID, Status: "PUBLISHED", DSL: f.record.DSL, PlanHash: f.record.PlanHash}, nil
+}
+func (f fakeDatasets) GetRevision(context.Context, string, string, string) (dataset.RevisionRecord, error) {
+	if f.revisionErr != nil {
+		return dataset.RevisionRecord{}, f.revisionErr
+	}
+	if f.revision.ID != "" {
+		return f.revision, nil
+	}
+	prepared, _ := dataset.Prepare(f.record.DSL)
+	return dataset.RevisionRecord{
+		RevisionSummary: dataset.RevisionSummary{
+			ID: "revision-1", DatasetID: f.record.ID, DraftVersionID: f.record.DraftVersionID,
+			DSLHash: prepared.DSLHash, PlanHash: prepared.PlanHash,
+		},
+		DSL: prepared.DSLJSON,
+	}, nil
 }
 func (fakeDatasets) ValidateVersionDependencies(context.Context, string, string, string) error {
 	return nil
@@ -52,9 +73,36 @@ func (fakePolicies) ValidateDefinitions(context.Context, string, string, string,
 	return nil
 }
 
+type recordingDraftPolicies struct {
+	validateCalls int
+	loadCalls     int
+	validateErr   error
+	tenantID      string
+	actorID       string
+	objectType    string
+	objectID      string
+	fieldCodes    []string
+}
+
+func (p *recordingDraftPolicies) Load(_ context.Context, tenantID, actorID, objectType, objectID string) (policy.UserScope, []policy.RowPolicy, []policy.ColumnPolicy, error) {
+	p.loadCalls++
+	p.tenantID, p.actorID, p.objectType, p.objectID = tenantID, actorID, objectType, objectID
+	return policy.UserScope{TenantID: tenantID, UserID: actorID, Attributes: map[string]any{}}, nil, nil, nil
+}
+
+func (p *recordingDraftPolicies) ValidateDefinitions(_ context.Context, tenantID, objectType, objectID string, fieldCodes []string) error {
+	p.validateCalls++
+	p.tenantID, p.objectType, p.objectID = tenantID, objectType, objectID
+	p.fieldCodes = append([]string(nil), fieldCodes...)
+	return p.validateErr
+}
+
 type fakeRuntimeStore struct {
 	mu                  sync.Mutex
 	resolved            ResolvedPlan
+	resolveCalls        int
+	resolveDocument     dataset.Document
+	resolveErr          error
 	resolveVersionCalls int
 	resolveVersionErr   error
 	resolvedDatasetID   string
@@ -66,8 +114,10 @@ type fakeRuntimeStore struct {
 	stats               []datasource.QuerySourceStat
 }
 
-func (f *fakeRuntimeStore) Resolve(context.Context, string, dataset.Document) (ResolvedPlan, error) {
-	return f.resolved, nil
+func (f *fakeRuntimeStore) Resolve(_ context.Context, _ string, document dataset.Document) (ResolvedPlan, error) {
+	f.resolveCalls++
+	f.resolveDocument = document
+	return f.resolved, f.resolveErr
 }
 func (f *fakeRuntimeStore) ResolveVersion(_ context.Context, _, datasetID, versionID string, _ dataset.Document) (ResolvedPlan, error) {
 	f.resolveVersionCalls++
@@ -178,7 +228,7 @@ func runtimeFixture(t *testing.T, connector QueryConnector) (*Service, *fakeRunt
 
 func TestPreviewCompilesParametersAndCompletesAudit(t *testing.T) {
 	connector := &fakeConnector{query: func(_ context.Context, sql string, args []any, maxRows int) (datasource.QueryResult, error) {
-		if maxRows != 25 || len(args) != 2 || contains(sql, "2026-01-01") {
+		if maxRows != 25 || len(args) != 3 || args[2] != 25 || !strings.HasSuffix(sql, "LIMIT %s") || contains(sql, "2026-01-01") {
 			t.Fatalf("unsafe query sql=%s args=%#v maxRows=%d", sql, args, maxRows)
 		}
 		return datasource.QueryResult{Columns: []string{"stat_month", "revenue"}, Rows: [][]any{{"2026-01-01", 12}}, RowCount: 1, DurationMS: 9}, nil
@@ -193,6 +243,142 @@ func TestPreviewCompilesParametersAndCompletesAudit(t *testing.T) {
 	}
 	if len(store.run.PlanHash) != 64 || len(store.run.ParameterHash) != 64 {
 		t.Fatalf("audit hashes are missing: %#v", store.run)
+	}
+}
+
+func TestPreviewDraftExecutesUnsavedCandidateAndReturnsNormalizedIdentity(t *testing.T) {
+	savedDSL := storeDocument(t)
+	var candidateDocument dataset.Document
+	if err := json.Unmarshal(savedDSL, &candidateDocument); err != nil {
+		t.Fatal(err)
+	}
+	candidateDocument.Dataset.Name = "未保存的 AI 候选流程"
+	candidateDSL, err := json.Marshal(candidateDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := dataset.Prepare(candidateDSL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connector := &fakeConnector{query: func(_ context.Context, _ string, _ []any, maxRows int) (datasource.QueryResult, error) {
+		if maxRows != 5 {
+			t.Fatalf("draft preview maxRows=%d, want 5", maxRows)
+		}
+		return datasource.QueryResult{
+			Columns: []string{"stat_month", "revenue"}, Rows: [][]any{{"2026-01-01", 12}}, RowCount: 1,
+		}, nil
+	}}
+	store := &fakeRuntimeStore{resolved: ResolvedPlan{
+		SourceID: "source-1", SourceType: datasource.TypeMySQL,
+		Tables: map[string]querycompiler.TableRef{"orders": {
+			NodeID: "orders", Schema: "sales", Name: "orders",
+			Columns: map[string]bool{"order_date": true, "order_amount": true, "order_status": true},
+		}},
+	}}
+	policies := &recordingDraftPolicies{}
+	service := NewService(
+		fakeDatasets{record: dataset.Record{
+			ID: "dataset-1", Code: "monthly_orders", Version: 7,
+			DraftVersionID: "version-1", DSL: savedDSL,
+		}},
+		fakeSources{source: datasource.Source{ID: "source-1", Type: datasource.TypeMySQL, Status: datasource.StatusActive}},
+		policies, store, map[datasource.Type]QueryConnector{datasource.TypeMySQL: connector},
+	)
+	queryID := "d7567ac1-dd36-4d16-aac4-65d48d491d74"
+	result, err := service.PreviewDraft(context.Background(), "tenant-1", "actor-1", "dataset-1", dataset.DraftPreviewInput{
+		QueryID: queryID, ExpectedVersion: 7, DSL: candidateDSL,
+		Parameters: map[string]any{"start_date": "2026-01-01"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.QueryID != queryID || result.RowCount != 1 || result.DSLHash != prepared.DSLHash ||
+		result.PlanHash != prepared.PlanHash || result.BaseVersion != 7 {
+		t.Fatalf("result=%#v prepared=%#v", result, prepared)
+	}
+	if store.resolveCalls != 1 || store.resolveVersionCalls != 0 || store.resolveDocument.Dataset.Name != candidateDocument.Dataset.Name {
+		t.Fatalf("candidate was not resolved directly: resolveCalls=%d resolveVersionCalls=%d document=%#v",
+			store.resolveCalls, store.resolveVersionCalls, store.resolveDocument.Dataset)
+	}
+	if store.run.DatasetID != "dataset-1" || store.run.DatasetVersionID != "version-1" || store.run.RunType != "PREVIEW" || store.status != "SUCCEEDED" {
+		t.Fatalf("run=%#v status=%q", store.run, store.status)
+	}
+	if policies.validateCalls != 1 || policies.loadCalls != 1 || policies.tenantID != "tenant-1" ||
+		policies.actorID != "actor-1" || policies.objectType != "DATASET" || policies.objectID != "dataset-1" ||
+		strings.Join(policies.fieldCodes, ",") != "stat_month,revenue" {
+		t.Fatalf("policies=%#v", policies)
+	}
+}
+
+func TestPreviewDraftRejectsInvalidCandidateBoundaryBeforeExecution(t *testing.T) {
+	validDSL := storeDocument(t)
+	var changedCodeDocument dataset.Document
+	if err := json.Unmarshal(validDSL, &changedCodeDocument); err != nil {
+		t.Fatal(err)
+	}
+	changedCodeDocument.Dataset.Code = "different_dataset"
+	changedCodeDSL, err := json.Marshal(changedCodeDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name              string
+		input             dataset.DraftPreviewInput
+		policyErr         error
+		wantErr           error
+		wantAnyError      bool
+		wantValidateCalls int
+	}{
+		{
+			name: "预览超过五行", input: dataset.DraftPreviewInput{ExpectedVersion: 7, DSL: validDSL, Parameters: map[string]any{}, MaxRows: 6},
+			wantErr: dataset.ErrPreviewInvalid,
+		},
+		{
+			name: "编辑基线已变化", input: dataset.DraftPreviewInput{ExpectedVersion: 6, DSL: validDSL, Parameters: map[string]any{}, MaxRows: 5},
+			wantErr: dataset.ErrConflict,
+		},
+		{
+			name: "候选 DSL 无效", input: dataset.DraftPreviewInput{ExpectedVersion: 7, DSL: json.RawMessage(`{}`), Parameters: map[string]any{}, MaxRows: 5},
+			wantAnyError: true,
+		},
+		{
+			name: "数据集编码漂移", input: dataset.DraftPreviewInput{ExpectedVersion: 7, DSL: changedCodeDSL, Parameters: map[string]any{}, MaxRows: 5},
+			wantErr: dataset.ErrInvalidDocument,
+		},
+		{
+			name: "候选不再满足数据策略", input: dataset.DraftPreviewInput{ExpectedVersion: 7, DSL: validDSL, Parameters: map[string]any{}, MaxRows: 5},
+			policyErr: errors.New("unknown protected field"), wantErr: dataset.ErrPreviewInvalid, wantValidateCalls: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			connectorCalled := false
+			connector := &fakeConnector{query: func(context.Context, string, []any, int) (datasource.QueryResult, error) {
+				connectorCalled = true
+				return datasource.QueryResult{}, nil
+			}}
+			store := &fakeRuntimeStore{}
+			policies := &recordingDraftPolicies{validateErr: test.policyErr}
+			service := NewService(
+				fakeDatasets{record: dataset.Record{
+					ID: "dataset-1", Code: "monthly_orders", Version: 7, DraftVersionID: "version-1", DSL: validDSL,
+				}},
+				fakeSources{}, policies, store,
+				map[datasource.Type]QueryConnector{datasource.TypeMySQL: connector},
+			)
+			_, gotErr := service.PreviewDraft(context.Background(), "tenant-1", "actor-1", "dataset-1", test.input)
+			if test.wantAnyError {
+				if gotErr == nil {
+					t.Fatal("invalid candidate was accepted")
+				}
+			} else if !errors.Is(gotErr, test.wantErr) {
+				t.Fatalf("error=%v, want %v", gotErr, test.wantErr)
+			}
+			if connectorCalled || store.resolveCalls != 0 || store.run.ID != "" || policies.loadCalls != 0 || policies.validateCalls != test.wantValidateCalls {
+				t.Fatalf("connectorCalled=%v store=%#v policies=%#v", connectorCalled, store, policies)
+			}
+		})
 	}
 }
 
@@ -215,6 +401,69 @@ func TestPreviewVersionAndPublicationValidationUseExactAuditVersion(t *testing.T
 	})
 	if err != nil || result.RowCount != 1 || store.run.DatasetVersionID != "draft-1" || store.run.RunType != "VALIDATION" {
 		t.Fatalf("publication validation result=%#v run=%#v err=%v", result, store.run, err)
+	}
+}
+
+func TestPreviewRevisionUsesImmutableDSLWithFiveRowLimit(t *testing.T) {
+	connector := &fakeConnector{query: func(_ context.Context, _ string, _ []any, maxRows int) (datasource.QueryResult, error) {
+		if maxRows != 5 {
+			t.Fatalf("revision preview maxRows=%d, want 5", maxRows)
+		}
+		return datasource.QueryResult{
+			Columns: []string{"stat_month", "revenue"},
+			Rows:    [][]any{{"2026-01-01", 12}}, RowCount: 1,
+		}, nil
+	}}
+	service, store := runtimeFixture(t, connector)
+	result, err := service.PreviewRevision(context.Background(), "tenant-1", "actor-1", "dataset-1", "revision-1", dataset.PreviewInput{
+		Parameters: map[string]any{"start_date": "2026-01-01"},
+	})
+	if err != nil || result.RowCount != 1 || store.run.DatasetVersionID != "version-1" || store.run.RunType != "PREVIEW" || store.resolveVersionCalls != 0 {
+		t.Fatalf("revision preview result=%#v run=%#v resolveVersionCalls=%d err=%v", result, store.run, store.resolveVersionCalls, err)
+	}
+}
+
+func TestPreviewRevisionRejectsMoreThanFiveRowsBeforeExecution(t *testing.T) {
+	connectorCalled := false
+	service, store := runtimeFixture(t, &fakeConnector{query: func(context.Context, string, []any, int) (datasource.QueryResult, error) {
+		connectorCalled = true
+		return datasource.QueryResult{}, nil
+	}})
+	_, err := service.PreviewRevision(context.Background(), "tenant-1", "actor-1", "dataset-1", "revision-1", dataset.PreviewInput{MaxRows: 6})
+	if !errors.Is(err, dataset.ErrPreviewInvalid) || connectorCalled || store.run.ID != "" {
+		t.Fatalf("error=%v connectorCalled=%v run=%#v", err, connectorCalled, store.run)
+	}
+}
+
+func TestPreviewRevisionRejectsTamperedSnapshotBeforeExecution(t *testing.T) {
+	connectorCalled := false
+	service, store := runtimeFixture(t, &fakeConnector{query: func(context.Context, string, []any, int) (datasource.QueryResult, error) {
+		connectorCalled = true
+		return datasource.QueryResult{}, nil
+	}})
+	service.datasets = fakeDatasets{revision: dataset.RevisionRecord{
+		RevisionSummary: dataset.RevisionSummary{
+			ID: "revision-1", DatasetID: "dataset-1", DraftVersionID: "version-1",
+			DSLHash: strings.Repeat("0", 64), PlanHash: strings.Repeat("0", 64),
+		},
+		DSL: storeDocument(t),
+	}}
+	_, err := service.PreviewRevision(context.Background(), "tenant-1", "actor-1", "dataset-1", "revision-1", dataset.PreviewInput{})
+	if !errors.Is(err, dataset.ErrInvalidDocument) || connectorCalled || store.run.ID != "" {
+		t.Fatalf("error=%v connectorCalled=%v run=%#v", err, connectorCalled, store.run)
+	}
+}
+
+func TestPreviewRevisionUsesSharedHardTimeoutAndAuditLifecycle(t *testing.T) {
+	service, store := runtimeFixture(t, &fakeConnector{query: func(ctx context.Context, _ string, _ []any, _ int) (datasource.QueryResult, error) {
+		<-ctx.Done()
+		return datasource.QueryResult{}, ctx.Err()
+	}})
+	_, err := service.PreviewRevision(context.Background(), "tenant-1", "actor-1", "dataset-1", "revision-1", dataset.PreviewInput{
+		Parameters: map[string]any{"start_date": "2026-01-01"}, MaxRows: 5,
+	})
+	if !errors.Is(err, dataset.ErrPreviewTimeout) || store.status != "TIMEOUT" || store.error != "QUERY_TIMEOUT" {
+		t.Fatalf("error=%v status=%q auditError=%q", err, store.status, store.error)
 	}
 }
 
@@ -298,7 +547,7 @@ func TestValidatePublicationProbesSingleSourceJoinAndAuditsWarnings(t *testing.T
 				RowCount: 1,
 			}, nil
 		case 2:
-			if maxRows != 1 || contains(sql, "left_duplicate_keys") || len(args) != 1 {
+			if maxRows != 1 || contains(sql, "left_duplicate_keys") || len(args) != 2 || args[1] != 1 || !strings.HasSuffix(sql, "LIMIT %s") {
 				t.Fatalf("最终试跑计划异常: sql=%s args=%#v maxRows=%d", sql, args, maxRows)
 			}
 			return datasource.QueryResult{

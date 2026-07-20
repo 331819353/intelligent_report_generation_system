@@ -71,3 +71,21 @@ func TestNormalizeTerminalRecordsRejectsUnsafeAuditValues(t *testing.T) {
 		t.Fatalf("错误正文不能进入稳定错误码字段，实际错误：%v", err)
 	}
 }
+
+func TestTenantPolicyAllowsMetricAuthoringWithoutPurposeOptIn(t *testing.T) {
+	if !tenantPolicyAllowsPurpose(true, []string{PurposeReportGeneration}, PurposeMetricAuthoring) {
+		t.Fatal("enabled tenant policy must allow metric authoring without a separate purpose opt-in")
+	}
+	if tenantPolicyAllowsPurpose(false, []string{PurposeMetricAuthoring}, PurposeMetricAuthoring) {
+		t.Fatal("disabled tenant policy must reject metric authoring even when the legacy allowlist contains it")
+	}
+}
+
+func TestTenantPolicyKeepsExplicitAllowlistForOtherPurposes(t *testing.T) {
+	if tenantPolicyAllowsPurpose(true, nil, PurposeReportGeneration) {
+		t.Fatal("report generation must remain forbidden when it is absent from allowed purposes")
+	}
+	if !tenantPolicyAllowsPurpose(true, []string{PurposeReportGeneration}, PurposeReportGeneration) {
+		t.Fatal("report generation must remain allowed when explicitly configured")
+	}
+}

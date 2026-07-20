@@ -26,6 +26,14 @@ func pruneNodeProjections(document dataset.Document) dataset.Document {
 			collectExpressionFields(condition.RightExpression, required)
 		}
 	}
+	for _, item := range document.PreAggregations {
+		for _, group := range item.GroupBy {
+			required[item.NodeID][group.Field] = true
+		}
+		for _, metric := range item.Metrics {
+			required[item.NodeID][metric.Field] = true
+		}
+	}
 	for _, field := range document.Fields {
 		collectExpressionFields(field.Expression, required)
 	}

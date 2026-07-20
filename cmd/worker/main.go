@@ -12,8 +12,10 @@ import (
 	"github.com/google/uuid"
 	aiplatform "intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/config"
+	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasource"
 	"intelligent-report-generation-system/internal/metadataai"
+	"intelligent-report-generation-system/internal/metriccandidate"
 	"intelligent-report-generation-system/internal/observability"
 	"intelligent-report-generation-system/internal/platform/database"
 )
@@ -67,12 +69,28 @@ func main() {
 		logger.Error("initialize AI orchestration", "error", err)
 		os.Exit(1)
 	}
-	metadataAIService := metadataai.NewService(metadataai.NewPostgresStore(pool), metadataai.NewOrchestratedProvider(aiService), cfg.AIRequestTimeout, cfg.AIConfidenceThreshold)
+	datasetStore := dataset.NewPostgresStore(pool)
+	metricCandidateStore := metriccandidate.NewPostgresStore(pool)
+	datasetStore.SetPublicationCommitSink(metricCandidateStore)
+	metadataAIStore := metadataai.NewPostgresStore(pool)
+	metadataAIStore.SetEnrichmentCommitSink(datasetStore)
+	reconcileCtx, reconcileCancel := context.WithTimeout(ctx, 30*time.Second)
+	reconciledDatasets, err := datasetStore.ReconcileMappedDatasets(reconcileCtx)
+	reconcileCancel()
+	if err != nil {
+		logger.Error("reconcile mapped table datasets", "error", err)
+		os.Exit(1)
+	}
+	if reconciledDatasets > 0 {
+		logger.Info("mapped table datasets reconciled", "count", reconciledDatasets)
+	}
+	metadataAIService := metadataai.NewService(metadataAIStore, metadataai.NewOrchestratedProvider(aiService), cfg.AIRequestTimeout, cfg.AIConfidenceThreshold)
 	dataSourceService.SetTableCompleter(metadataAIService)
 
 	workerID := uuid.NewString()
 	logger.Info("worker starting", "worker_id", workerID, "poll_interval", cfg.WorkerPollInterval.String(), "environment", cfg.Environment)
-	runMetadataJobWorker(ctx, logger, dataSourceService, workerID, cfg.WorkerPollInterval)
+	go runMetadataJobWorker(ctx, logger, dataSourceService, workerID, cfg.WorkerPollInterval)
+	runMetricExtractionWorker(ctx, logger, metriccandidate.NewWorker(metricCandidateStore), workerID, cfg.WorkerPollInterval)
 	logger.Info("worker stopped")
 }
 
@@ -95,6 +113,39 @@ func runMetadataJobWorker(ctx context.Context, logger *slog.Logger, service *dat
 				didProcess, runErr := service.ProcessNextMetadataJob(ctx, tenantID, workerID, lease)
 				if runErr != nil {
 					logger.Error("process metadata job", "tenant_id", tenantID, "error", runErr)
+				}
+				if didProcess {
+					processed = true
+				}
+			}
+		}
+		if processed {
+			timer.Reset(10 * time.Millisecond)
+		} else {
+			timer.Reset(pollInterval)
+		}
+	}
+}
+
+func runMetricExtractionWorker(ctx context.Context, logger *slog.Logger, worker *metriccandidate.Worker, workerID string, pollInterval time.Duration) {
+	const lease = 5 * time.Minute
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		processed := false
+		tenantIDs, err := worker.TenantIDs(ctx)
+		if err != nil {
+			logger.Error("list metric extraction job tenants", "error", err)
+		} else {
+			for _, tenantID := range tenantIDs {
+				didProcess, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
+				if runErr != nil {
+					logger.Error("process metric extraction job", "tenant_id", tenantID, "error", runErr)
 				}
 				if didProcess {
 					processed = true

@@ -148,6 +148,22 @@ func TestLifecycleAndQuota(t *testing.T) {
 	}
 }
 
+func TestSampleTableUsesRegisteredMetadataSamplerAndCapsRows(t *testing.T) {
+	r := &repo{source: Source{ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive}, quota: Quota{MaxDataSources: 10}}
+	service := NewService(r, importConnector{connector: connector{kind: TypeMySQL}, sample: SampleResult{Columns: []string{"id"}, Rows: [][]any{{1}, {2}}}})
+
+	result, err := service.SampleTable(context.Background(), "tenant-1", "source-1", MetadataTable{SchemaName: "sales", Name: "orders"}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 2 || result.Rows[1][0] != 2 {
+		t.Fatalf("sample=%#v", result)
+	}
+	if _, err := service.SampleTable(context.Background(), "tenant-1", "source-1", MetadataTable{Name: "orders"}, 6); err == nil {
+		t.Fatal("sample limit above five was accepted")
+	}
+}
+
 func TestImportTablesPersistsOnlySelectionAndCompletesWithThreeSamples(t *testing.T) {
 	orders := MetadataTable{SchemaName: "sales", Name: "orders", Columns: []MetadataColumn{{Name: "id"}, {Name: "amount"}}}
 	customers := MetadataTable{SchemaName: "sales", Name: "customers", Columns: []MetadataColumn{{Name: "id"}}}

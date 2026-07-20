@@ -14,10 +14,12 @@ import (
 )
 
 const (
-	PurposeMetadataCompletion = "METADATA_COMPLETION"
-	PurposeReportGeneration   = "REPORT_GENERATION"
-	PurposeBlockEdit          = "BLOCK_EDIT"
-	PurposeConclusion         = "CONCLUSION_GENERATION"
+	PurposeMetadataCompletion   = "METADATA_COMPLETION"
+	PurposeReportGeneration     = "REPORT_GENERATION"
+	PurposeBlockEdit            = "BLOCK_EDIT"
+	PurposeConclusion           = "CONCLUSION_GENERATION"
+	PurposeDatasetDAGGeneration = "DATASET_DAG_GENERATION"
+	PurposeMetricAuthoring      = "METRIC_AUTHORING"
 )
 
 var (
@@ -279,7 +281,7 @@ func validateServiceOptions(options ServiceOptions) error {
 
 func allowedPurpose(purpose string) bool {
 	switch purpose {
-	case PurposeMetadataCompletion, PurposeReportGeneration, PurposeBlockEdit, PurposeConclusion:
+	case PurposeMetadataCompletion, PurposeReportGeneration, PurposeBlockEdit, PurposeConclusion, PurposeDatasetDAGGeneration, PurposeMetricAuthoring:
 		return true
 	default:
 		return false

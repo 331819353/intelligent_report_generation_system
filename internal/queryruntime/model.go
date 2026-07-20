@@ -36,6 +36,7 @@ type FederatedExecutor interface {
 type DatasetStore interface {
 	Get(context.Context, string, string) (dataset.Record, error)
 	GetVersion(context.Context, string, string, string) (dataset.VersionRecord, error)
+	GetRevision(context.Context, string, string, string) (dataset.RevisionRecord, error)
 }
 
 // SourceStore 提供源连接配置及租户运行配额。

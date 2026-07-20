@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"reflect"
 	"sort"
@@ -61,6 +62,60 @@ func (s *Service) Preview(ctx context.Context, tenantID, actorID, datasetID stri
 	}, input, "PREVIEW")
 }
 
+// PreviewDraft 执行已有数据集的一份完整未保存候选 DSL。持久化草稿只作为乐观锁
+// 和审计身份；候选经过规范化及策略复核后直接执行，不写入数据集或修订仓储。
+func (s *Service) PreviewDraft(ctx context.Context, tenantID, actorID, datasetID string, input dataset.DraftPreviewInput) (dataset.DraftPreviewResult, error) {
+	if tenantID == "" || actorID == "" || datasetID == "" || input.ExpectedVersion < 1 || input.MaxRows < 0 || input.MaxRows > 5 {
+		return dataset.DraftPreviewResult{}, dataset.ErrPreviewInvalid
+	}
+	record, err := s.datasets.Get(ctx, tenantID, datasetID)
+	if err != nil {
+		return dataset.DraftPreviewResult{}, err
+	}
+	if record.Version != input.ExpectedVersion {
+		return dataset.DraftPreviewResult{}, dataset.ErrConflict
+	}
+	prepared, err := dataset.Prepare(input.DSL)
+	if err != nil {
+		return dataset.DraftPreviewResult{}, err
+	}
+	if record.ID != datasetID || prepared.Document.Dataset.Code != record.Code || record.DraftVersionID == "" {
+		return dataset.DraftPreviewResult{}, dataset.ErrInvalidDocument
+	}
+	fieldCodes := make([]string, 0, len(prepared.Document.Fields))
+	for _, field := range prepared.Document.Fields {
+		fieldCodes = append(fieldCodes, field.Code)
+	}
+	if err := s.policies.ValidateDefinitions(ctx, tenantID, "DATASET", record.ID, fieldCodes); err != nil {
+		// 策略内部标识不应进入响应；候选不再满足数据集策略边界时直接失败关闭。
+		return dataset.DraftPreviewResult{}, dataset.ErrPreviewInvalid
+	}
+	maxRows := input.MaxRows
+	if maxRows == 0 {
+		maxRows = min(prepared.Document.ExecutionPolicy.PreviewLimit, 5)
+	}
+	if maxRows < 1 || maxRows > 5 {
+		return dataset.DraftPreviewResult{}, dataset.ErrPreviewInvalid
+	}
+	parameters := input.Parameters
+	if parameters == nil {
+		parameters = map[string]any{}
+	}
+	result, err := s.previewSnapshot(ctx, tenantID, actorID, runtimeSnapshot{
+		DatasetID: record.ID, VersionID: record.DraftVersionID,
+		PlanHash: prepared.PlanHash, DSL: prepared.DSLJSON,
+	}, dataset.PreviewInput{
+		QueryID: input.QueryID, Parameters: parameters, MaxRows: maxRows,
+	}, "PREVIEW")
+	if err != nil {
+		return dataset.DraftPreviewResult{}, err
+	}
+	return dataset.DraftPreviewResult{
+		PreviewResult: result, DSLHash: prepared.DSLHash,
+		PlanHash: prepared.PlanHash, BaseVersion: record.Version,
+	}, nil
+}
+
 // PreviewVersion 只执行 URL 中指定的发布版本，绝不回退到当前发布指针或可变草稿。
 func (s *Service) PreviewVersion(ctx context.Context, tenantID, actorID, datasetID, versionID string, input dataset.PreviewInput) (dataset.PreviewResult, error) {
 	if tenantID == "" || actorID == "" || datasetID == "" || versionID == "" {
@@ -75,6 +130,33 @@ func (s *Service) PreviewVersion(ctx context.Context, tenantID, actorID, dataset
 	}
 	return s.previewSnapshot(ctx, tenantID, actorID, runtimeSnapshot{
 		DatasetID: datasetID, VersionID: version.ID, PlanHash: version.PlanHash, DSL: version.DSL, ExactVersion: true,
+	}, input, "PREVIEW")
+}
+
+// PreviewRevision 使用调用者当前权限、数据策略和仍有效的资产映射执行一份不可变
+// 草稿修订。修订不是发布依赖快照，因此物理资产必须经 Resolve 重新解析，不能借用
+// ResolveVersion 绕开资产撤权。历史页面固定为小样本，客户端不能提高五行上限。
+func (s *Service) PreviewRevision(ctx context.Context, tenantID, actorID, datasetID, revisionID string, input dataset.PreviewInput) (dataset.PreviewResult, error) {
+	if tenantID == "" || actorID == "" || datasetID == "" || revisionID == "" || input.MaxRows < 0 || input.MaxRows > 5 {
+		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+	}
+	revision, err := s.datasets.GetRevision(ctx, tenantID, datasetID, revisionID)
+	if err != nil {
+		return dataset.PreviewResult{}, err
+	}
+	if revision.ID != revisionID || revision.DatasetID != datasetID || revision.DraftVersionID == "" {
+		return dataset.PreviewResult{}, dataset.ErrRevisionNotFound
+	}
+	prepared, err := dataset.Prepare(revision.DSL)
+	if err != nil || prepared.DSLHash != revision.DSLHash || prepared.PlanHash != revision.PlanHash {
+		return dataset.PreviewResult{}, dataset.ErrInvalidDocument
+	}
+	if input.MaxRows == 0 {
+		input.MaxRows = min(prepared.Document.ExecutionPolicy.PreviewLimit, 5)
+	}
+	return s.previewSnapshot(ctx, tenantID, actorID, runtimeSnapshot{
+		DatasetID: revision.DatasetID, VersionID: revision.DraftVersionID,
+		PlanHash: revision.PlanHash, DSL: prepared.DSLJSON,
 	}, input, "PREVIEW")
 }
 
@@ -329,6 +411,9 @@ func (s *Service) previewDatabase(ctx context.Context, source datasource.Source,
 		}
 		result, queryErr := connector.Query(queryContext, source, run.ID, compiled.SQL, compiled.Args, compiled.MaxRows)
 		if queryErr != nil {
+			// Connector 客户端不会回传远端响应正文，因此这里记录的错误只包含安全的
+			// 连接阶段或 HTTP 状态信息，便于区分密钥缺失、网络失败和源端拒绝。
+			slog.ErrorContext(queryContext, "dataset preview connector query failed", "query_id", run.ID, "dataset_id", run.DatasetID, "source_id", source.ID, "error", queryErr)
 			return result, queryErr
 		}
 		// Connector 不是风险判定信任边界；数据库发布告警只能来自本地聚合探测。

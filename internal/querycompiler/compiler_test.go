@@ -39,8 +39,56 @@ func TestCompileBindsValuesAndInjectsPolicies(t *testing.T) {
 	if !strings.Contains(compiled.SQL, "secure_base") || !strings.Contains(compiled.SQL, "NULL AS `revenue`") {
 		t.Fatalf("security wrappers are missing: %s", compiled.SQL)
 	}
-	if len(compiled.Args) != 3 || compiled.MaxRows != 100 {
+	if len(compiled.Args) != 4 || compiled.Args[3] != 100 || compiled.MaxRows != 100 || !strings.HasSuffix(compiled.SQL, "LIMIT %s") {
 		t.Fatalf("args=%#v maxRows=%d", compiled.Args, compiled.MaxRows)
+	}
+}
+
+func TestCompileWithoutBusinessParametersStillBindsRowLimit(t *testing.T) {
+	input := compilerInput(t)
+	input.Document.Parameters = nil
+	input.Document.Filters = nil
+	input.Document.Nodes[0].SourceFilters = nil
+	input.Parameters = nil
+	input.RowPolicies = nil
+	input.ColumnPolicies = nil
+	compiled, err := Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.Args == nil || len(compiled.Args) != 1 || compiled.Args[0] != 100 || !strings.HasSuffix(compiled.SQL, "LIMIT %s") {
+		t.Fatalf("无业务参数查询仍须绑定服务端行数上限: sql=%s args=%#v", compiled.SQL, compiled.Args)
+	}
+}
+
+func TestCompileBuildsGroupedDerivedTableBeforeJoin(t *testing.T) {
+	document := dataset.Document{
+		DSLVersion: "1.0", Dataset: dataset.Descriptor{Code: "group_then_join", Name: "先分组后关联", Type: "SINGLE_SOURCE"},
+		Nodes: []dataset.Node{
+			{ID: "customers", Type: "TABLE", DataSourceID: "source-a", TableID: "table-a", Alias: "c", Projection: []string{"customer_id", "customer_name"}, SourceFilters: []dataset.SourceFilter{}},
+			{ID: "orders", Type: "TABLE", DataSourceID: "source-a", TableID: "table-b", Alias: "o", Projection: []string{"customer_id", "amount"}, SourceFilters: []dataset.SourceFilter{}},
+		},
+		Joins:           []dataset.Join{{ID: "join_1", LeftNodeID: "customers", RightNodeID: "orders", JoinType: "LEFT", Cardinality: "UNKNOWN", ManualConfirmed: true, Conditions: []dataset.JoinCondition{{LeftExpression: dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "customer_id"}, Operator: "EQUALS", RightExpression: dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "customer_id"}}}}},
+		PreAggregations: []dataset.PreAggregation{{ID: "group_1", NodeID: "customers", JoinID: "join_1", JoinSide: "LEFT", GroupBy: []dataset.PreAggregationGroup{{Field: "customer_id"}}, Metrics: []dataset.PreAggregationMetric{{Field: "customer_name", Function: "COUNT_DISTINCT"}}}},
+		Fields: []dataset.Field{
+			{ID: "field_customer_id", Code: "customer_id", Name: "客户ID", Role: "DIMENSION", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "customer_id"}, CanonicalType: "INTEGER"},
+			{ID: "field_customer_count", Code: "customer_count", Name: "客户数", Role: "MEASURE", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "customer_name"}, CanonicalType: "INTEGER"},
+		},
+		Filters: []dataset.Filter{}, GroupBy: []string{}, Having: []dataset.Filter{}, Sorts: []dataset.Sort{}, Parameters: []dataset.Parameter{},
+		OutputGrain:     dataset.OutputGrain{Description: "每行一个客户", KeyFields: []string{"customer_id"}},
+		ExecutionPolicy: dataset.ExecutionPolicy{Mode: "REALTIME", TimeoutMS: 5000, PreviewLimit: 100, ResultLimit: 1000, Materialization: dataset.MaterializationPolicy{Enabled: false}},
+	}
+	input := Input{Document: document, Dialect: MySQL, MaxRows: 10, Tables: map[string]TableRef{
+		"customers": {NodeID: "customers", Schema: "sales", Name: "customers", Columns: map[string]bool{"customer_id": true, "customer_name": true}},
+		"orders":    {NodeID: "orders", Schema: "sales", Name: "orders", Columns: map[string]bool{"customer_id": true, "amount": true}},
+	}}
+
+	compiled, err := Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(compiled.SQL, "COUNT(DISTINCT `pre_source`.`customer_name`) AS `customer_name`") || !strings.Contains(compiled.SQL, "GROUP BY `pre_source`.`customer_id`) `c` LEFT JOIN") {
+		t.Fatalf("pre-join aggregation SQL=%s", compiled.SQL)
 	}
 }
 
@@ -108,7 +156,7 @@ func TestCompileAppliesSortORPoliciesAndMinimumGroupSize(t *testing.T) {
 	if !strings.Contains(compiled.SQL, "COUNT(*) >= %s") || !strings.Contains(compiled.SQL, " OR ") || !strings.Contains(compiled.SQL, "ORDER BY `stat_month` ASC") {
 		t.Fatalf("policy or sort compilation is incomplete: %s", compiled.SQL)
 	}
-	if len(compiled.Args) != 5 || compiled.Args[2] != 5 {
+	if len(compiled.Args) != 6 || compiled.Args[2] != 5 || compiled.Args[5] != 100 {
 		t.Fatalf("unexpected argument order: %#v", compiled.Args)
 	}
 }
@@ -148,7 +196,7 @@ func TestOracleUsesNumberedBindVariables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(compiled.SQL, ":1") || strings.Contains(compiled.SQL, "%s") {
+	if !strings.Contains(compiled.SQL, ":1") || strings.Contains(compiled.SQL, "%s") || !strings.HasSuffix(compiled.SQL, "FETCH FIRST :4 ROWS ONLY") || len(compiled.Args) != 4 || compiled.Args[3] != 100 {
 		t.Fatalf("unexpected Oracle placeholders: %s", compiled.SQL)
 	}
 }
@@ -163,7 +211,7 @@ func TestCompileSkipsOptionalFilterWhenParameterIsAbsent(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 仅保留源过滤值和行策略属性，不应绑定缺失的可选参数。
-	if len(compiled.Args) != 2 {
+	if len(compiled.Args) != 3 || compiled.Args[2] != 100 || !strings.HasSuffix(compiled.SQL, "LIMIT %s") {
 		t.Fatalf("optional filter args=%#v sql=%s", compiled.Args, compiled.SQL)
 	}
 }

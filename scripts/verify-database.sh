@@ -43,6 +43,7 @@ DECLARE
   ai_request_status text;
   ai_policy_enabled boolean;
   ai_policy_purpose_count integer;
+  ai_policy_default_only boolean;
   ai_policy_version bigint;
   ai_policy_visible integer;
   ai_request_visible integer;
@@ -107,16 +108,18 @@ BEGIN
     RAISE EXCEPTION 'metric draft was not visible in its tenant';
   END IF;
 
-  -- 新租户必须自动获得默认禁用策略；显式启用后才能登记不含正文的 AI 调用审计。
-  SELECT enabled,cardinality(allowed_purposes),version
-  INTO ai_policy_enabled,ai_policy_purpose_count,ai_policy_version
+  -- 新租户必须保持默认禁用且只预置元数据用途；数据集 DAG 能力必须显式授权。
+  SELECT enabled,cardinality(allowed_purposes),
+    allowed_purposes=ARRAY['METADATA_COMPLETION']::text[],version
+  INTO ai_policy_enabled,ai_policy_purpose_count,ai_policy_default_only,ai_policy_version
   FROM platform.ai_tenant_policies
   WHERE tenant_id=tenant_a;
-  IF ai_policy_enabled OR ai_policy_purpose_count <> 1 OR ai_policy_version <> 1 THEN
+  IF ai_policy_enabled OR ai_policy_purpose_count <> 1 OR NOT ai_policy_default_only OR ai_policy_version <> 1 THEN
     RAISE EXCEPTION 'new tenant AI policy default is invalid';
   END IF;
   UPDATE platform.ai_tenant_policies SET enabled=true,
-    allowed_purposes=ARRAY['REPORT_GENERATION','BLOCK_EDIT']::text[] WHERE tenant_id=tenant_a;
+    allowed_purposes=ARRAY['REPORT_GENERATION','BLOCK_EDIT','DATASET_DAG_GENERATION']::text[]
+  WHERE tenant_id=tenant_a;
   SELECT version INTO ai_policy_version FROM platform.ai_tenant_policies WHERE tenant_id=tenant_a;
   IF ai_policy_version <> 2 THEN
     RAISE EXCEPTION 'AI policy version was not incremented';
@@ -125,7 +128,7 @@ BEGIN
     tenant_id,actor_user_id,purpose,resource_type,resource_id,provider,model_name,prompt_version,
     input_hash,input_bytes,redaction_count,reserved_tokens,reserved_cost_micros,max_attempts
   ) VALUES (
-    tenant_a,user_a,'REPORT_GENERATION','REPORT','verify-report','verify-provider','verify-model','verify-v1',
+    tenant_a,user_a,'DATASET_DAG_GENERATION','DATASET',metric_dataset_a::text,'verify-provider','verify-model','verify-v1',
     repeat('a',64),128,2,256,100,1
   ) RETURNING id INTO ai_request_a;
   UPDATE platform.ai_requests SET

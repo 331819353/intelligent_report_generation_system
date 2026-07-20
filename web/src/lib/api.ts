@@ -2,6 +2,9 @@ export type APIError = {
   code: string
   message: string
   requestId?: string
+  reasonCode?: string
+  stage?: string
+  repairAttempted?: boolean
   details?: Array<{ path: string; code?: string; reason: string }>
   /** 乐观锁冲突返回服务端最新基线，页面仍需显式让用户选择是否加载。 */
   currentRevision?: number

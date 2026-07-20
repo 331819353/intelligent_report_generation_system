@@ -106,6 +106,11 @@ func (c *PythonConnector) Query(ctx context.Context, source Source, queryID, sql
 	if err != nil {
 		return QueryResult{}, err
 	}
+	// Connector 的 Pydantic 合同要求 parameters 始终是数组；在边界再次归一化，
+	// 防止其他受信调用方把 nil 切片序列化为 null。
+	if parameters == nil {
+		parameters = []any{}
+	}
 	payload := map[string]any{"connection": connection, "query_id": queryID, "sql": sql, "parameters": parameters, "max_rows": maxRows}
 	var result QueryResult
 	if err := c.call(ctx, "/v1/query", payload, &result); err != nil {

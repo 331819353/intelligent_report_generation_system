@@ -49,6 +49,9 @@ func TestQueryAndCancelUseConnectorContract(t *testing.T) {
 			if input["query_id"] != "query-1" || input["sql"] != "SELECT %s" || input["max_rows"] != float64(10) {
 				t.Fatalf("unexpected query payload: %#v", input)
 			}
+			if parameters, ok := input["parameters"].([]any); !ok || len(parameters) != 0 {
+				t.Fatalf("query parameters must be an empty JSON array: %#v", input["parameters"])
+			}
 			_, _ = w.Write([]byte(`{"columns":["value"],"rows":[[9007199254740993]],"rowCount":1,"durationMs":2,"warnings":[{"code":"FORGED","message":"source text"}],"sourceStats":[{"nodeId":"forged","rowCount":999,"status":"SUCCEEDED"}]}`))
 			return
 		}
@@ -62,7 +65,7 @@ func TestQueryAndCancelUseConnectorContract(t *testing.T) {
 		"host": "mysql", "port": "3306", "database": "app", "username": "reader", "password": "secret",
 	})
 	source := Source{ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, SecretRef: "env://MYSQL", RuntimeQuota: Quota{MaxConnectionsPerSource: 2, MaxConcurrentQueries: 3}}
-	result, err := connector.Query(context.Background(), source, "query-1", "SELECT %s", []any{1}, 10)
+	result, err := connector.Query(context.Background(), source, "query-1", "SELECT %s", nil, 10)
 	if err != nil || result.RowCount != 1 {
 		t.Fatalf("Query() result=%#v err=%v", result, err)
 	}

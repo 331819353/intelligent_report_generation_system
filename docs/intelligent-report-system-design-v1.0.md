@@ -76,6 +76,7 @@
 | 数据规模 | 单次分析数据量以万级为主 |
 | 响应目标 | 正式在线报表首屏和常用交互目标 1 秒以内 |
 | 调度能力 | 支持定时生成、邮件发送和历史归档 |
+| 数据集发布审批 | 普通数据集强制“提交申请 → 人工审批 → 原子发布”；映射表初始镜像由可信系统自动发布并独立审计 |
 | 指标审批 | 不设置强制审批流程 |
 | 数据权限 | 支持行级和列级权限 |
 | 自定义 SQL | 支持，但必须经过只读、安全和权限校验 |
@@ -760,6 +761,8 @@ materialization_id
 
 物理表资产与数据集必须分离。一张物理表可以被多个数据集以不同字段、过滤条件和业务口径复用。
 
+完成 LLM 业务映射的活动表会对应一张带 `originTableId` 的映射表数据集。它由系统创建并自动发布初始单表版本，可以直接支撑字段已经齐备的原子指标，也可以作为组合数据集的输入。在指标 AI 编排中，需要增加 Join、派生字段、过滤或聚合时必须新建普通单源/跨源/派生数据集，不会原地改造该映射表数据集。
+
 ### 10.2 数据集设计器能力
 
 设计器应支持：
@@ -785,6 +788,8 @@ materialization_id
 - 预览数据；
 - 查看编译 SQL 和执行计划摘要；
 - 保存草稿、验证和发布版本。
+
+从指标 AI 的 `CREATE_DATASET` 进入时，设计器打开空白普通数据集画布并带入新建指令；从 `MODIFY_DATASET` 进入时只允许加载不带 `originTableId` 的普通数据集。数据集中心原有的人工维护入口不受这条指标 AI 编排规则影响。
 
 ### 10.3 输出粒度
 
@@ -896,14 +901,25 @@ id
 DRAFT -> VALIDATING -> PUBLISHED -> STALE -> DEPRECATED
 ```
 
-本项目不设置审批流程，但仍需区分草稿和已发布版本：
+数据集必须区分草稿、发布审批申请和已发布版本；映射表数据集的精确初始版本可由可信系统自动发布并使用独立审计标识，后续人工修改仍使用发布审批路径：
 
 - 草稿可编辑；
-- 发布时执行结构、权限、查询和样本验证；
+- 具有管理权限的用户只能把精确草稿修订提交为待审批申请，申请冻结草稿版本、记录版本、DSL/计划哈希和试跑参数；
+- 具有发布审批权限的用户批准或拒绝申请，批准时重新执行结构、权限、查询和样本验证；
+- 审批通过、不可变发布版本、当前发布指针、审计和指标候选提取任务必须在同一事务提交，任一步失败都整体回滚；
 - 已发布版本不可直接修改；
 - 修改后生成新版本；
 - 报告版本引用明确的数据集版本；
 - 旧版本可回滚但不能被覆盖。
+
+发布审批申请采用独立状态机：
+
+```text
+PENDING -> APPROVED
+        -> REJECTED
+```
+
+指标定义和指标 AI 只能把当前仍为 `PUBLISHED` 的精数据集版本作为创建、表达式、维度和时间字段来源；人工维护的数据集版本必须来自人工审批，映射表初始版本可以来自可信系统自动发布。可管理的普通数据集草稿可以作为 `MODIFY_DATASET` 的 AI 改造上下文，但不得进入指标候选或被指标直接绑定；带 `originTableId` 的映射表数据集在指标 AI 编排中不会成为改造目标，结构不足时必须通过 `CREATE_DATASET` 新建普通数据集。新建或人工改造的草稿保存后仍须提交并通过数据集发布审批。
 
 ---
 
@@ -985,7 +1001,7 @@ null_label
 
 ### 11.5 指标生命周期
 
-由于不需要审批，建议采用：
+指标自身不设置审批节点，建议采用：
 
 ```text
 DRAFT -> PUBLISHED -> DEPRECATED
@@ -1000,6 +1016,8 @@ DRAFT -> PUBLISHED -> DEPRECATED
 - Join 扇出检查；
 - 单位和格式检查；
 - 引用循环检查。
+
+这里“不设置审核节点”仅指指标自身的发布流程。指标草稿中的 `dataset_version_id` 必须精确指向当前状态仍为 `PUBLISHED` 的不可变版本：普通数据集必须已经通过发布审批，映射表数据集必须是可信系统生成的初始镜像。不能使用数据集草稿、待审批申请、已拒绝申请、`STALE/DEPRECATED` 版本或仅凭 `dataset_id` 解析“当前版本”。
 
 ### 11.6 指标血缘
 
@@ -1745,7 +1763,7 @@ AI 生成内容应保存来源：
 
 ### 15.2 发布规则
 
-本项目不需要审批，但发布前必须自动校验：
+报告发布当前不设置审批节点，但发布前必须自动校验：
 
 1. 页面和组件 JSON 合法；
 2. 所有必需数据需求已解析；
@@ -2270,8 +2288,9 @@ deleted BOOLEAN
 
 | 表名 | 作用 | 关键字段 |
 |---|---|---|
-| `dataset` | 数据集主对象 | code、name、type、status、current_version_id |
+| `dataset` | 数据集主对象 | code、name、type、status、current_version_id、origin_table_id（非空表示映射表来源身份，字段本身不可变） |
 | `dataset_version` | 数据集版本 | dataset_id、version_no、dsl_json、compiled_sql、schema_hash |
+| `dataset_publication_request` | 冻结精确草稿修订的发布审批申请 | dataset_id、draft_version_id、expected_dataset_version、expected_draft_record_version、expected_dsl_hash、expected_plan_hash、status、version、requester_user_id、reviewer_user_id、published_version_id |
 | `dataset_field` | 输出字段 | dataset_version_id、field_code、expression、canonical_type、role |
 | `dataset_parameter` | 参数 | dataset_version_id、code、data_type、default_value |
 | `dataset_dependency` | 血缘依赖 | dataset_version_id、source_type、source_id |
@@ -2375,7 +2394,11 @@ GET    /datasets/{id}
 PUT    /datasets/{id}/draft
 POST   /datasets/{id}/validate
 POST   /datasets/{id}/preview
-POST   /datasets/{id}/publish
+POST   /datasets/{id}/publish-requests
+GET    /datasets/{id}/publish-requests
+POST   /datasets/{id}/publish-requests/{requestId}/approve
+POST   /datasets/{id}/publish-requests/{requestId}/reject
+POST   /datasets/{id}/publish   # 兼容别名：仅提交申请，不直接发布
 GET    /datasets/{id}/versions
 POST   /datasets/{id}/materializations/refresh
 POST   /sql/validate
@@ -2487,6 +2510,15 @@ DISCOVERED -> ENRICHING -> READY -> STALE -> DEPRECATED
 ```text
 DRAFT -> VALIDATING -> PUBLISHED -> STALE -> DEPRECATED
 ```
+
+`VALIDATING -> PUBLISHED` 只能在批准 `PENDING` 发布申请的原子事务中触发；申请状态独立为：
+
+```text
+PENDING -> APPROVED
+        -> REJECTED
+```
+
+申请提交不会改变数据集状态或当前发布指针。只有批准事务完成后才产生新的精确 `PUBLISHED` 版本；拒绝或批准失败均保留原草稿与原发布指针。
 
 ### 20.4 指标
 
@@ -2868,6 +2900,8 @@ user_id
 - 错误和风险提示；
 - 血缘。
 
+数据集中心的每张可管理数据集提供“发布”按钮。点击后展示当前精确草稿事实和历史审批记录：具有 `MANAGE` 的用户可填写可选备注并提交，具有 `PUBLISH` 的用户可批准或填写必填原因拒绝。界面必须明确区分“申请已提交”和“版本已发布”；只有批准成功并返回精确 `publishedVersionId` 后，才允许回到指标中心继续基于该版本生成指标。带 `originTableId` 的数据集额外显示“映射表数据集”来源标识；指标 AI 遇到需要关联或派生的场景时开启新数据集，不会进入该映射表数据集的修改页。
+
 ### 25.5 指标中心
 
 - 指标目录；
@@ -2879,6 +2913,10 @@ user_id
 - 版本；
 - 血缘；
 - 引用报告。
+
+新建指标以自然语言需求为唯一必需输入，AI 尽可能补齐配置后由用户确认。需求框上方提供已发布数据集、统计对象、统计日期、维度和聚合方式等可选参考，用户可以只选已知项或全部留空；前端把所选业务名称与需求描述合并后交给 AI，不要求填写内部 ID。参考区采用两列等宽表单卡、统一控件高度、分段聚合选择和紧凑多选标签。统计对象根据聚合动态收敛：数值聚合仅允许数值度量或属性，`COUNT` 支持全部非日期可见字段并允许留空表示由 AI 判断记录数，`COUNT_DISTINCT` 优先标识符、维度和属性并允许数值业务字段；切换聚合会清除不再合法的选择。候选数据集只包含当前仍为 `PUBLISHED` 的精确版本：普通版本来自人工发布审批，映射表初始镜像来自可信系统发布；可管理普通草稿只显示为数据集 AI 改造路径，不能成为指标定义来源。已发布映射表字段足够时可以直接创建指标；需要关联、派生或补字段时展示 `CREATE_DATASET` 新建计划并进入空白普通数据集画布，不能显示为 `MODIFY_DATASET`。
+
+每份提案以业务摘要、生成配置或数据集执行步骤、依据、假设和风险作为默认审核内容，提供“确认方案”“重新生成方案”和“根据意见修改方案”。重新生成沿用当前完整需求和可选参考，意见修改把补充内容附加到原需求后生成新提案。请求追踪、授权上下文哈希、数据集/版本 ID 和指标版本 ID 默认折叠在“技术信息”中，不要求用户阅读或填写。确认需要新建/改造普通数据集后，页面进入目标画布并自动触发一次数据集 AI 方案生成；用户仍需审核和应用方案、保存草稿并提交发布审批，批准后再带原需求回到指标中心继续生成。
 
 ### 25.6 智能创建向导
 
@@ -4360,8 +4398,10 @@ MANUAL
 | 跨源方式 | 联邦查询 + 缓存 + 物化 |
 | 正式报告数据策略 | 跨源组件默认物化或快照 |
 | 数据集事实来源 | DSL，而非 SQL 文本 |
+| 映射表数据集 | 由 `originTableId` 标识，初始镜像由系统自动发布；指标 AI 遇到组合或派生需求时必须新建普通数据集，数据集中心仍允许人工维护 |
+| 数据集发布 | 普通数据集保存草稿后提交审批；审批通过、不可变版本、发布指针、审计和指标候选任务原子提交。映射表初始镜像仅允许可信系统自动发布并独立审计 |
 | 自定义 SQL | 支持只读源端 SQL 和联邦 SQL |
-| 指标审批 | 不启用审批，保留草稿/发布版本 |
+| 指标审批 | 指标自身不启用审批，保留草稿/发布版本；指标只能绑定精确 `PUBLISHED` 数据集版本（普通版本来自审批，映射表初始镜像来自受控系统发布） |
 | 报告生成 | LLM 语义草稿 JSON -> 服务端编译 -> 可执行 JSON |
 | 云端模型 | Provider Adapter，可配置文本和视觉模型 |
 | 用户材料 | 支持附件、图片和需求描述，按租户授权发送 |

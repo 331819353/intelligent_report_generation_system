@@ -122,3 +122,68 @@ func TestAIOrchestrationTenantPolicyQuotaAndAuditLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMetricAuthoringUsesGeneralTenantAIEnablement(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, env("DATABASE_URL", "postgres://report_app:local_report_password@127.0.0.1:5432/intelligent_report?sslmode=disable"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	tenantID := insertTenant(t, ctx, pool, "metric-ai-policy-it-"+suffix)
+	var actorID string
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `INSERT INTO platform.users(tenant_id,email,display_name,password_hash)
+			VALUES($1,$2,'Metric AI tester','integration-hash') RETURNING id::text`, tenantID, "metric-ai-policy-"+suffix+"@it.test").Scan(&actorID)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := aiplatform.NewPostgresStore(pool)
+	start := aiplatform.StartRequest{
+		TenantID: tenantID, ActorID: actorID, Purpose: aiplatform.PurposeMetricAuthoring,
+		PromptVersion: "metric-authoring-v2", Provider: "test-provider", Model: "test-model",
+		InputHash: strings.Repeat("f", 64), ResourceType: "METRIC_AUTHORING", ResourceID: "context-1",
+		InputBytes: 128, ReservedTokens: 100, ReservedCostMicros: 10, MaxAttempts: 1,
+	}
+	if _, err := store.Start(ctx, start); !errors.Is(err, aiplatform.ErrTenantAIForbidden) {
+		t.Fatalf("disabled tenant metric authoring error=%v", err)
+	}
+
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE platform.ai_tenant_policies SET enabled=true,
+			allowed_purposes=ARRAY['METADATA_COMPLETION']::text[],max_requests_per_day=1,
+			max_tokens_per_month=1000,max_cost_micros_per_month=1000 WHERE tenant_id=$1`, tenantID)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	record, err := store.Start(ctx, start)
+	if err != nil {
+		t.Fatalf("metric authoring must not require a purpose opt-in: %v", err)
+	}
+	if err := store.Fail(ctx, tenantID, record.ID, aiplatform.FailureRecord{Attempts: 1, ErrorCode: "AI_PROVIDER_TIMEOUT"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var auditedPurpose, auditedStatus string
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT purpose,status FROM platform.ai_requests WHERE id=$1`, record.ID).Scan(&auditedPurpose, &auditedStatus)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auditedPurpose != aiplatform.PurposeMetricAuthoring || auditedStatus != "FAILED" {
+		t.Fatalf("unexpected metric authoring audit purpose=%q status=%q", auditedPurpose, auditedStatus)
+	}
+	start.InputHash = strings.Repeat("e", 64)
+	if _, err := store.Start(ctx, start); !errors.Is(err, aiplatform.ErrQuotaExceeded) {
+		t.Fatalf("metric authoring must retain common quota enforcement: %v", err)
+	}
+}

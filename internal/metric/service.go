@@ -65,6 +65,31 @@ func (s *Service) Create(ctx context.Context, tenantID, actorID string, input Cr
 	return s.store.Create(ctx, tenantID, actorID, prepared)
 }
 
+// CreateFromCandidate 执行与普通创建相同的授权和精确版本校验，但要求仓储用
+// candidateID 做持久幂等。该入口只创建草稿，不会验证试算或发布指标。
+func (s *Service) CreateFromCandidate(ctx context.Context, tenantID, actorID, candidateID string, expectedCandidateVersion int64, input CreateInput) (Record, error) {
+	if tenantID == "" || actorID == "" || !canonicalUUID(candidateID) || expectedCandidateVersion < 1 {
+		return Record{}, ErrInvalidDefinition
+	}
+	candidateStore, ok := s.store.(interface {
+		CreateFromCandidate(context.Context, string, string, string, int64, Prepared) (Record, error)
+	})
+	if !ok {
+		return Record{}, ErrInvalidDefinition
+	}
+	prepared, err := Prepare(input.Definition)
+	if err != nil {
+		return Record{}, err
+	}
+	if err := s.requireDatasetRead(ctx, tenantID, actorID, prepared.Definition.DatasetID); err != nil {
+		return Record{}, err
+	}
+	if _, err := s.validatePrepared(ctx, tenantID, actorID, "", prepared); err != nil {
+		return Record{}, err
+	}
+	return candidateStore.CreateFromCandidate(ctx, tenantID, actorID, candidateID, expectedCandidateVersion, prepared)
+}
+
 func (s *Service) Get(ctx context.Context, tenantID, id string) (Record, error) {
 	if tenantID == "" || !canonicalUUID(id) {
 		return Record{}, ErrNotFound
@@ -310,7 +335,7 @@ func (s *Service) validatePrepared(ctx context.Context, tenantID, actorID, metri
 	if err != nil || version.DatasetID != prepared.Definition.DatasetID {
 		return validatedDefinition{}, invalid("datasetVersionId", "METRIC_DATASET_VERSION_INVALID", "数据集版本定义无法解析或不属于指定数据集")
 	}
-	if len(document.GroupBy) > 0 || len(document.Having) > 0 {
+	if len(document.GroupBy) > 0 || len(document.Having) > 0 || len(document.PreAggregations) > 0 {
 		return validatedDefinition{}, invalid("datasetVersionId", "METRIC_AGGREGATED_DATASET_UNSUPPORTED", "首阶段指标只能基于未预聚合的数据集版本")
 	}
 	fields := make(map[string]dataset.Field, len(document.Fields))
@@ -506,7 +531,8 @@ func firstMetricJoinFanoutRisk(joins []dataset.Join, metricNodes map[string]bool
 		rightContainsMetric := joinSideContainsMetric(join.RightNodeID, index, joins, metricNodes)
 		risky := join.Cardinality == "MANY_TO_MANY" && (leftContainsMetric || rightContainsMetric) ||
 			join.Cardinality == "ONE_TO_MANY" && leftContainsMetric ||
-			join.Cardinality == "MANY_TO_ONE" && rightContainsMetric
+			join.Cardinality == "MANY_TO_ONE" && rightContainsMetric ||
+			join.Cardinality == "UNKNOWN" && (leftContainsMetric || rightContainsMetric)
 		if risky {
 			return index, true
 		}

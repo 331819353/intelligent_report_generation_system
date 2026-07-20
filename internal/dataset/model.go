@@ -8,39 +8,70 @@ import (
 const DSLVersion = "1.0"
 
 var (
-	ErrNotFound            = errors.New("dataset not found")
-	ErrVersionNotFound     = errors.New("dataset version not found")
-	ErrVersionUnavailable  = errors.New("dataset version is unavailable")
-	ErrConflict            = errors.New("dataset version conflict")
-	ErrAlreadyExists       = errors.New("dataset code already exists")
-	ErrIdempotencyConflict = errors.New("dataset idempotency key conflict")
-	ErrPublishUnavailable  = errors.New("dataset publication validator is unavailable")
-	ErrPublishValidation   = errors.New("dataset publication validation failed")
-	ErrForbidden           = errors.New("dataset operation is forbidden")
-	ErrInvalidTransition   = errors.New("dataset version transition is invalid")
-	ErrInvalidDocument     = errors.New("dataset document is invalid")
-	ErrPreviewInvalid      = errors.New("dataset preview request is invalid")
-	ErrPreviewFailed       = errors.New("dataset preview failed")
-	ErrPreviewTimeout      = errors.New("dataset preview timed out")
-	ErrPreviewUnsupported  = errors.New("dataset preview source is unsupported")
-	ErrQueryNotFound       = errors.New("query run not found")
-	ErrQueryConflict       = errors.New("query run already exists")
+	ErrNotFound                   = errors.New("dataset not found")
+	ErrVersionNotFound            = errors.New("dataset version not found")
+	ErrRevisionNotFound           = errors.New("dataset draft revision not found")
+	ErrVersionRollbackUnavailable = errors.New("dataset version rollback is unavailable")
+	ErrVersionUnavailable         = errors.New("dataset version is unavailable")
+	ErrConflict                   = errors.New("dataset version conflict")
+	ErrAlreadyExists              = errors.New("dataset code already exists")
+	ErrIdempotencyConflict        = errors.New("dataset idempotency key conflict")
+	ErrPublishUnavailable         = errors.New("dataset publication validator is unavailable")
+	ErrPublishValidation          = errors.New("dataset publication validation failed")
+	ErrForbidden                  = errors.New("dataset operation is forbidden")
+	ErrInvalidTransition          = errors.New("dataset version transition is invalid")
+	ErrInUse                      = errors.New("dataset is still in use")
+	ErrInvalidDocument            = errors.New("dataset document is invalid")
+	ErrPreviewInvalid             = errors.New("dataset preview request is invalid")
+	ErrPreviewFailed              = errors.New("dataset preview failed")
+	ErrPreviewTimeout             = errors.New("dataset preview timed out")
+	ErrPreviewUnsupported         = errors.New("dataset preview source is unsupported")
+	ErrQueryNotFound              = errors.New("query run not found")
+	ErrQueryConflict              = errors.New("query run already exists")
 )
 
 // Document 是数据集 DSL V1 的完整、可版本化定义。
 type Document struct {
-	DSLVersion      string          `json:"dslVersion"`
-	Dataset         Descriptor      `json:"dataset"`
-	Nodes           []Node          `json:"nodes"`
-	Joins           []Join          `json:"joins"`
-	Fields          []Field         `json:"fields"`
-	Filters         []Filter        `json:"filters"`
-	GroupBy         []string        `json:"groupBy"`
-	Having          []Filter        `json:"having"`
-	Sorts           []Sort          `json:"sorts"`
-	Parameters      []Parameter     `json:"parameters"`
-	OutputGrain     OutputGrain     `json:"outputGrain"`
-	ExecutionPolicy ExecutionPolicy `json:"executionPolicy"`
+	DSLVersion      string           `json:"dslVersion"`
+	Dataset         Descriptor       `json:"dataset"`
+	Nodes           []Node           `json:"nodes"`
+	Joins           []Join           `json:"joins"`
+	PreAggregations []PreAggregation `json:"preAggregations,omitempty"`
+	Fields          []Field          `json:"fields"`
+	Filters         []Filter         `json:"filters"`
+	GroupBy         []string         `json:"groupBy"`
+	Having          []Filter         `json:"having"`
+	Sorts           []Sort           `json:"sorts"`
+	Parameters      []Parameter      `json:"parameters"`
+	OutputGrain     OutputGrain      `json:"outputGrain"`
+	ExecutionPolicy ExecutionPolicy  `json:"executionPolicy"`
+	// Designer 保存不参与查询执行的画布元数据，例如组件位置、连线和展示名称。
+	// 使用开放对象让设计器可以向后兼容地扩展交互信息；领域校验仍会约束版本、
+	// 组件身份以及坐标，避免把无效画布写入不可变修订。
+	Designer map[string]any `json:"designer,omitempty"`
+}
+
+// PreAggregation 描述一个发生在 Join 槽位之前的显式分组组件。
+// Join 仍引用原始节点 ID，JoinID 与 JoinSide 用于保存画布上的准确连接拓扑。
+type PreAggregation struct {
+	ID       string                 `json:"id"`
+	NodeID   string                 `json:"nodeId"`
+	JoinID   string                 `json:"joinId"`
+	JoinSide string                 `json:"joinSide"`
+	GroupBy  []PreAggregationGroup  `json:"groupBy"`
+	Metrics  []PreAggregationMetric `json:"metrics"`
+}
+
+// PreAggregationGroup 描述关联前分组的维度字段及可选日期粒度。
+type PreAggregationGroup struct {
+	Field string `json:"field"`
+	Unit  string `json:"unit,omitempty"`
+}
+
+// PreAggregationMetric 描述关联前产生的指标；结果继续使用原字段名供 Join 引用。
+type PreAggregationMetric struct {
+	Field    string `json:"field"`
+	Function string `json:"function"`
 }
 
 // Descriptor 保存 DSL 内可移植的数据集基本信息。
@@ -73,7 +104,7 @@ type SourceFilter struct {
 	Expression *Expression `json:"expression,omitempty"`
 }
 
-// Join 描述两个节点之间的关联及声明基数。
+// Join 描述两个节点之间的关联；无法在设计期确认基数时使用 UNKNOWN，执行优化必须保守降级。
 type Join struct {
 	ID              string          `json:"id"`
 	LeftNodeID      string          `json:"leftNodeId"`
@@ -244,6 +275,7 @@ type PlanStep struct {
 // Record 是 API 返回的数据集及当前草稿快照。
 type Record struct {
 	ID                        string          `json:"id"`
+	OriginTableID             string          `json:"originTableId,omitempty"`
 	Code                      string          `json:"code"`
 	Name                      string          `json:"name"`
 	Description               string          `json:"description"`
@@ -266,6 +298,7 @@ type Record struct {
 // Summary 是数据集目录使用的轻量摘要，不返回完整 DSL。
 type Summary struct {
 	ID                        string `json:"id"`
+	OriginTableID             string `json:"originTableId,omitempty"`
 	Code                      string `json:"code"`
 	Name                      string `json:"name"`
 	Description               string `json:"description"`
@@ -309,6 +342,41 @@ type VersionSummary struct {
 	PublishedBy        string `json:"publishedBy"`
 }
 
+// RevisionSummary 是草稿历史目录中的不可变快照摘要。VersionNo 使用产生该
+// 快照时的数据集聚合版本号，因此发布和生命周期操作会留下有意义的编号间隙。
+type RevisionSummary struct {
+	ID                 string `json:"id"`
+	DatasetID          string `json:"datasetId"`
+	VersionNo          int64  `json:"versionNo"`
+	OperationType      string `json:"operationType"`
+	SourceRevisionID   string `json:"sourceRevisionId,omitempty"`
+	Name               string `json:"name"`
+	Description        string `json:"description"`
+	Type               string `json:"type"`
+	DraftVersionID     string `json:"draftVersionId"`
+	DraftRecordVersion int64  `json:"draftRecordVersion"`
+	DSLVersion         string `json:"dslVersion"`
+	DSLHash            string `json:"dslHash"`
+	PlanHash           string `json:"planHash"`
+	CreatedAt          string `json:"createdAt"`
+	CreatedBy          string `json:"createdBy"`
+}
+
+// RevisionRecord 增加完整 DSL 与逻辑计划，供查看和回滚到精确草稿修订。
+type RevisionRecord struct {
+	RevisionSummary
+	DSL         json.RawMessage `json:"dsl"`
+	LogicalPlan json.RawMessage `json:"logicalPlan"`
+}
+
+// RevisionPage 是草稿历史目录的稳定分页响应。
+type RevisionPage struct {
+	Items  []RevisionSummary `json:"items"`
+	Total  int               `json:"total"`
+	Limit  int               `json:"limit"`
+	Offset int               `json:"offset"`
+}
+
 // VersionUsage 汇总精确发布版本当前可见的引用和运行占用，不暴露下游资源标识。
 type VersionUsage struct {
 	ReportDraftReferences         int `json:"reportDraftReferences"`
@@ -332,6 +400,11 @@ type UpdateInput struct {
 	Description     string          `json:"description"`
 	ExpectedVersion int64           `json:"expectedVersion"`
 	DSL             json.RawMessage `json:"dsl"`
+}
+
+// LifecycleInput 使用数据集聚合版本保护停用、恢复和删除操作，避免覆盖并发保存或发布。
+type LifecycleInput struct {
+	ExpectedVersion int64 `json:"expectedVersion"`
 }
 
 // PublishInput 绑定一个确定的草稿修订和发布试跑参数。
@@ -372,11 +445,27 @@ type VersionTransitionInput struct {
 	TargetStatus    string `json:"targetStatus"`
 }
 
+// RollbackRevisionInput 以数据集聚合版本保护历史恢复，避免覆盖并发保存、发布
+// 或生命周期操作。目标修订由 URL 中的精确 revisionId 决定。
+type RollbackRevisionInput struct {
+	ExpectedVersion int64 `json:"expectedVersion"`
+}
+
 // PreviewInput 包含受 DSL 定义约束的参数、行数上限和客户端预生成查询标识。
 type PreviewInput struct {
 	QueryID    string         `json:"queryId,omitempty"`
 	Parameters map[string]any `json:"parameters"`
 	MaxRows    int            `json:"maxRows,omitempty"`
+}
+
+// DraftPreviewInput 携带已有数据集在客户端物化出的完整候选 DSL。
+// ExpectedVersion 把候选绑定到已加载的持久化基线；执行不会更新草稿或创建修订。
+type DraftPreviewInput struct {
+	QueryID         string          `json:"queryId,omitempty"`
+	ExpectedVersion int64           `json:"expectedVersion"`
+	DSL             json.RawMessage `json:"dsl"`
+	Parameters      map[string]any  `json:"parameters"`
+	MaxRows         int             `json:"maxRows,omitempty"`
 }
 
 // PreviewResult 返回小样本数据和运行摘要，不暴露生成 SQL。
@@ -387,6 +476,14 @@ type PreviewResult struct {
 	RowCount   int              `json:"rowCount"`
 	DurationMS int64            `json:"durationMs"`
 	Warnings   []PreviewWarning `json:"warnings,omitempty"`
+}
+
+// DraftPreviewResult 标识实际生成样本的规范候选，供编辑器丢弃过期 DAG 的响应。
+type DraftPreviewResult struct {
+	PreviewResult
+	DSLHash     string `json:"dslHash"`
+	PlanHash    string `json:"planHash"`
+	BaseVersion int64  `json:"baseVersion"`
 }
 
 // PreviewWarning 向设计器返回不含源数据值的 Join 语义与性能风险。

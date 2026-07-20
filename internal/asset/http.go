@@ -1,18 +1,29 @@
 package asset
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"intelligent-report-generation-system/internal/access"
 	"intelligent-report-generation-system/internal/auth"
+	"intelligent-report-generation-system/internal/datasource"
 )
 
+type tableSampler interface {
+	SampleTable(context.Context, string, string, datasource.MetadataTable, int) (datasource.SampleResult, error)
+}
+
 // NewHandler 注册资产检索、详情、业务元数据、差异和影响分析接口。
-func NewHandler(authService *auth.Service, permissions *access.Service, repo *Repository) http.Handler {
+func NewHandler(authService *auth.Service, permissions *access.Service, repo *Repository, samplers ...tableSampler) http.Handler {
 	mux := http.NewServeMux()
+	var sampler tableSampler
+	if len(samplers) > 0 {
+		sampler = samplers[0]
+	}
 	protect := func(action string, next http.Handler) http.Handler {
 		return auth.RequireAccessToken(authService, access.Require(permissions, "DATA_ASSET", action, nil, next))
 	}
@@ -60,6 +71,30 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 			return
 		}
 		writeJSON(w, 200, map[string]any{"items": items})
+	})))
+	mux.Handle("GET /api/v1/assets/tables/{id}/preview", protect("READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sampler == nil {
+			writeError(w, 503, "ASSET_PREVIEW_UNAVAILABLE", "table preview is not available")
+			return
+		}
+		maxRows := intParam(r.URL.Query().Get("maxRows"), 5)
+		if maxRows < 1 || maxRows > 5 {
+			writeError(w, 400, "INVALID_PREVIEW_LIMIT", "maxRows must be between 1 and 5")
+			return
+		}
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		item, err := repo.GetTable(r.Context(), claims.TenantID, r.PathValue("id"))
+		if err != nil {
+			writeError(w, 404, "ASSET_NOT_FOUND", "table asset not found")
+			return
+		}
+		result, err := sampler.SampleTable(r.Context(), claims.TenantID, item.DataSourceID, datasource.MetadataTable{CatalogName: item.CatalogName, SchemaName: item.SchemaName, Name: item.TableName, Type: item.TableType}, maxRows)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "sample table asset", "table_id", item.ID, "data_source_id", item.DataSourceID, "error", err)
+			writeError(w, 502, "ASSET_PREVIEW_FAILED", "failed to sample table asset")
+			return
+		}
+		writeJSON(w, 200, result)
 	})))
 	mux.Handle("PUT /api/v1/assets/tables/{id}/business-metadata", protect("MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())

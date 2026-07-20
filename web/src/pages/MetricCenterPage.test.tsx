@@ -1,14 +1,20 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { RequestError } from '../lib/api'
 import {
   datasetAPI,
   type DatasetDSL,
+  type DatasetRecord,
   type DatasetSummary,
   type PublishedVersionRecord,
 } from '../lib/datasets'
+import {
+  metricAIAPI,
+  type MetricAuthoringProposal,
+  type MetricAuthoringProposalResult,
+} from '../lib/metric-ai'
 import {
   metricAPI,
   type MetricDefinition,
@@ -20,47 +26,153 @@ import { MetricCenterPage } from './MetricCenterPage'
 afterEach(() => vi.restoreAllMocks())
 
 describe('指标中心原子指标编辑', () => {
-  test('从精确数据集版本选择字段和维度后创建结构化原子指标', async () => {
+  test('新建页提供可选 AI 参考条件，但不展示手工指标配置', async () => {
     const user = userEvent.setup()
     const mocks = mockMetricCenter()
-    let created: MetricRecord | undefined
-    mocks.createSpy.mockImplementation(async definition => {
-      created = metricRecord({
-        code: definition.metric.code,
-        name: definition.metric.name,
-        description: definition.metric.description,
-        definition,
-      })
-      return created
-    })
-    mocks.getSpy.mockImplementation(async () => created ?? metricRecord())
-    renderMetricCenter('/metrics')
+    renderMetricCenter('/metrics/new')
 
-    await user.selectOptions(await screen.findByLabelText('指标数据集'), dataset.id)
-    await waitFor(() => expect(mocks.datasetVersionListSpy).toHaveBeenCalledWith(dataset.id))
-    await user.selectOptions(screen.getByLabelText('指标数据集版本'), dataVersion.id)
-    await screen.findByRole('option', { name: /营业收入/ })
-    await user.selectOptions(screen.getByLabelText('原子指标字段'), 'field_revenue')
-    await user.type(screen.getByLabelText('指标编码'), 'revenue_total')
-    await user.type(screen.getByLabelText('指标名称'), '营业收入')
-    await user.click(screen.getByLabelText('允许维度 地区'))
-    await user.click(screen.getByRole('button', { name: '创建草稿' }))
+    const requirement = await screen.findByLabelText('指标创建需求')
+    const generate = screen.getByRole('button', { name: '生成指标配置' })
+    expect(generate).toHaveClass('metric-ai-generate-button')
+    expect(generate).toBeDisabled()
+    expect(screen.queryByLabelText('指标编码')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('指标数据集')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('原子指标字段')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '创建草稿' })).not.toBeInTheDocument()
+    expect(document.querySelector('.metric-catalog')).toBeNull()
+    expect(mocks.datasetListSpy).toHaveBeenCalledWith(200, 0)
+    expect(screen.getByLabelText(`优先使用数据集 ${dataset.name}`)).not.toBeChecked()
+    expect(screen.getByLabelText('统计日期字段')).toBeDisabled()
+    expect(screen.getByRole('radio', { name: '由 AI 判断' })).toBeChecked()
+    expect(screen.getByRole('button', { name: '清空条件' })).toBeDisabled()
+    const hints = screen.getByRole('region', { name: '给 AI 更多参考' })
+    expect(hints.querySelector('fieldset')).toBeNull()
+    expect(hints.querySelectorAll('.metric-ai-hint-card')).toHaveLength(5)
 
-    await waitFor(() => expect(mocks.createSpy).toHaveBeenCalledTimes(1))
-    const definition = mocks.createSpy.mock.calls[0]?.[0]
-    expect(definition).toMatchObject({
-      schemaVersion: '1.0',
-      metric: { code: 'revenue_total', name: '营业收入', type: 'ATOMIC' },
-      datasetId: dataset.id,
-      datasetVersionId: dataVersion.id,
-      expression: { type: 'FIELD_REF', fieldId: 'field_revenue' },
-      aggregation: 'SUM',
-      allowedDimensions: [{
-        fieldId: 'field_region', name: '地区', hierarchyFieldIds: ['field_region'], sortDirection: 'ASC', nullLabel: '未分类',
-      }],
-      roundingMode: 'HALF_UP', nullHandling: 'IGNORE', divisionByZero: 'NULL',
+    await user.type(requirement, '统计已支付订单销售额，按支付月份汇总。')
+    expect(generate).toBeEnabled()
+  })
+
+  test('选择已发布数据集后按其字段提供日期和维度，并稳定合并为自然语言需求', async () => {
+    const user = userEvent.setup()
+    const mocks = mockMetricCenter()
+    const proposeSpy = vi.spyOn(metricAIAPI, 'propose').mockResolvedValue(metricAIResult({
+      strategy: 'DATA_GAP', summary: '测试方案。',
+    }))
+    renderMetricCenter('/metrics/new')
+
+    const datasetChoice = await screen.findByLabelText(`优先使用数据集 ${dataset.name}`)
+    expect(screen.queryByLabelText(`分析维度 ${dataset.name} 地区`)).not.toBeInTheDocument()
+    await user.click(datasetChoice)
+    await waitFor(() => expect(mocks.datasetGetVersionSpy).toHaveBeenCalledWith(dataset.id, dataset.currentPublishedVersionId))
+
+    const dateField = await screen.findByLabelText('统计日期字段')
+    expect(within(dateField).getByRole('option', { name: `${dataset.name} · 统计月份（month）` })).toBeInTheDocument()
+    expect(screen.getByLabelText(`统计字段 ${dataset.name} 营业收入`)).toBeInTheDocument()
+    expect(screen.getByLabelText(`分析维度 ${dataset.name} 地区`)).toBeInTheDocument()
+    await user.selectOptions(dateField, `${dataset.id}::field_month`)
+    await user.click(screen.getByLabelText(`统计字段 ${dataset.name} 营业收入`))
+    await user.click(screen.getByLabelText(`分析维度 ${dataset.name} 地区`))
+    await user.click(screen.getByRole('radio', { name: '求和（SUM）' }))
+
+    const requirement = '创建月度区域销售额指标。'
+    await user.type(screen.getByLabelText('指标创建需求'), requirement)
+    await user.click(screen.getByRole('button', { name: '生成指标配置' }))
+
+    const expectedRequirement = `${requirement}\n\n【AI 参考条件】\n以下条件由用户选择；未指定的内容请由 AI 基于授权资产补全：\n- 优先参考的已发布数据集：企业收入数据集\n- 统计字段（SUM 数值聚合对象）：企业收入数据集 / 营业收入（revenue）\n- 统计日期字段：企业收入数据集 / 统计月份（month）\n- 分析维度：企业收入数据集 / 地区（region）\n- 统计口径与聚合：求和（SUM）`
+    expect(proposeSpy).toHaveBeenCalledWith({ requirement: expectedRequirement })
+    expect(expectedRequirement).not.toContain(dataset.id)
+    expect(screen.getByText(`合并后 ${expectedRequirement.length} / 4000 字`)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '清空条件' }))
+    expect(datasetChoice).not.toBeChecked()
+    expect(screen.queryByLabelText(`统计字段 ${dataset.name} 营业收入`)).not.toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: '由 AI 判断' })).toBeChecked()
+    expect(screen.queryByRole('article', { name: 'AI 指标审核提案' })).not.toBeInTheDocument()
+  })
+
+  test('统计字段按聚合语义展示候选，切换聚合时清除不再合法的字段', async () => {
+    const user = userEvent.setup()
+    const statisticalVersion = datasetVersion({
+      dsl: {
+        ...datasetDSL,
+        fields: [
+          ...datasetDSL.fields,
+          { id: 'field_order_id', code: 'order_id', name: '订单编号', role: 'IDENTIFIER', canonicalType: 'STRING', visible: true },
+          { id: 'field_channel', code: 'channel', name: '销售渠道', role: 'ATTRIBUTE', canonicalType: 'STRING', visible: true },
+          { id: 'field_sequence', code: 'sequence', name: '业务序号', role: 'DIMENSION', canonicalType: 'INTEGER', visible: true },
+          { id: 'field_paid', code: 'paid', name: '是否支付', role: 'MEASURE', canonicalType: 'BOOLEAN', visible: true },
+          { id: 'field_business_date', code: 'business_date', name: '业务日期', role: 'ATTRIBUTE', canonicalType: 'DATE', visible: true },
+          { id: 'field_hidden', code: 'hidden_code', name: '隐藏字段', role: 'IDENTIFIER', canonicalType: 'STRING', visible: false },
+        ],
+      },
     })
-    expect(await screen.findByText('指标草稿已创建。')).toBeInTheDocument()
+    mockMetricCenter({ dataVersion: statisticalVersion })
+    const proposeSpy = vi.spyOn(metricAIAPI, 'propose').mockResolvedValue(metricAIResult({
+      strategy: 'DATA_GAP', summary: '测试计数方案。',
+    }))
+    renderMetricCenter('/metrics/new')
+
+    await user.click(await screen.findByLabelText(`优先使用数据集 ${dataset.name}`))
+    await screen.findByRole('radiogroup', { name: '统计口径与聚合' })
+    expect(await screen.findByText('AI 判断时可参考标识符、维度、属性及可聚合数值字段；日期时间不作为统计对象。')).toBeInTheDocument()
+    expect(screen.getByLabelText(`统计字段 ${dataset.name} 订单编号`)).toBeInTheDocument()
+    expect(screen.getByLabelText(`统计字段 ${dataset.name} 销售渠道`)).toBeInTheDocument()
+    expect(screen.getByLabelText(`统计字段 ${dataset.name} 业务序号`)).toBeInTheDocument()
+    expect(screen.getByLabelText(`统计字段 ${dataset.name} 营业收入`)).toBeInTheDocument()
+    expect(screen.queryByLabelText(`统计字段 ${dataset.name} 是否支付`)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(`统计字段 ${dataset.name} 统计月份`)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(`统计字段 ${dataset.name} 业务日期`)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(`统计字段 ${dataset.name} 隐藏字段`)).not.toBeInTheDocument()
+
+    const orderID = screen.getByLabelText(`统计字段 ${dataset.name} 订单编号`)
+    await user.click(orderID)
+    for (const [numericAggregation, optionName] of [['SUM', '求和（SUM）'], ['AVG', '平均值（AVG）'], ['MIN', '最小值（MIN）'], ['MAX', '最大值（MAX）']] as const) {
+      await user.click(screen.getByRole('radio', { name: optionName }))
+      expect(screen.getByText(`${numericAggregation} 仅可选择数值型度量或数值属性字段。`)).toBeInTheDocument()
+      expect(screen.getByLabelText(`统计字段 ${dataset.name} 营业收入`)).toBeInTheDocument()
+      expect(screen.queryByLabelText(`统计字段 ${dataset.name} 订单编号`)).not.toBeInTheDocument()
+      expect(screen.queryByLabelText(`统计字段 ${dataset.name} 业务序号`)).not.toBeInTheDocument()
+    }
+
+    await user.click(screen.getByRole('radio', { name: '去重计数（COUNT DISTINCT）' }))
+    expect(screen.getByText('COUNT DISTINCT 优先选择标识符、维度或属性字段，也支持数值业务字段。')).toBeInTheDocument()
+    expect(screen.getByLabelText(`统计字段 ${dataset.name} 订单编号`)).not.toBeChecked()
+    expect(screen.getByLabelText(`统计字段 ${dataset.name} 业务序号`)).toBeInTheDocument()
+    expect(screen.getByLabelText(`统计字段 ${dataset.name} 营业收入`)).toBeInTheDocument()
+    expect(screen.queryByLabelText(`统计字段 ${dataset.name} 是否支付`)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('radio', { name: '计数（COUNT）' }))
+    const countedOrderID = screen.getByLabelText(`统计字段 ${dataset.name} 订单编号`)
+    const paid = screen.getByLabelText(`统计字段 ${dataset.name} 是否支付`)
+    expect(screen.getByText('COUNT 可选择任意非日期的可见输出字段并按非空值计数；留空时可由 AI 判断是否统计记录数。')).toBeInTheDocument()
+    expect(screen.queryByLabelText(`统计字段 ${dataset.name} 统计月份`)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(`统计字段 ${dataset.name} 业务日期`)).not.toBeInTheDocument()
+    await user.click(countedOrderID)
+    await user.click(paid)
+
+    const requirement = '统计已支付订单数。'
+    await user.type(screen.getByLabelText('指标创建需求'), requirement)
+    await user.click(screen.getByRole('button', { name: '生成指标配置' }))
+    const expectedRequirement = `${requirement}\n\n【AI 参考条件】\n以下条件由用户选择；未指定的内容请由 AI 基于授权资产补全：\n- 优先参考的已发布数据集：企业收入数据集\n- 统计字段（COUNT 非空计数对象）：企业收入数据集 / 订单编号（order_id）、企业收入数据集 / 是否支付（paid）\n- 统计口径与聚合：计数（COUNT）`
+    expect(proposeSpy).toHaveBeenCalledWith({ requirement: expectedRequirement })
+
+    await user.click(screen.getByRole('radio', { name: '由 AI 判断' }))
+    expect(screen.getByLabelText(`统计字段 ${dataset.name} 订单编号`)).toBeChecked()
+    expect(screen.queryByLabelText(`统计字段 ${dataset.name} 是否支付`)).not.toBeInTheDocument()
+  })
+
+  test('数据集审批返回后恢复原始指标需求但不自动调用 AI', async () => {
+    mockMetricCenter()
+    const proposeSpy = vi.spyOn(metricAIAPI, 'propose')
+    const requirement = '基于订单表和客户表，创建一个月度各区域销售额的指标'
+    render(<MemoryRouter initialEntries={[{ pathname: '/metrics/new', state: { metricAIRequirement: requirement } }]}><Routes>
+      <Route path="/metrics/new" element={<MetricCenterPage />} />
+    </Routes></MemoryRouter>)
+
+    expect(await screen.findByLabelText('指标创建需求')).toHaveValue(requirement)
+    expect(screen.getByRole('button', { name: '生成指标配置' })).toBeEnabled()
+    expect(proposeSpy).not.toHaveBeenCalled()
   })
 
   test('READ、MANAGE、PUBLISH 分离时发布者无需暗中保存草稿', async () => {
@@ -308,6 +420,294 @@ test('路由切换后丢弃旧指标迟到的聚合响应', async () => {
   expect(screen.getByDisplayValue('新指标')).toBeInTheDocument()
 })
 
+describe('指标中心 AI 审核提案', () => {
+  test('CREATE_ON_DATASET 展示完整只读配置，确认后直接创建草稿', async () => {
+    const user = userEvent.setup()
+    const mocks = mockMetricCenter()
+    const candidate = metricDefinition({
+      metric: { code: 'paid_revenue', name: '已支付销售额', description: '已支付订单金额总额', type: 'ATOMIC' },
+    })
+    const created = metricRecord({ id: 'metric-created', code: candidate.metric.code, name: candidate.metric.name, description: candidate.metric.description, definition: candidate })
+    mocks.createSpy.mockResolvedValue(created)
+    mocks.getSpy.mockResolvedValue(created)
+    const proposeSpy = vi.spyOn(metricAIAPI, 'propose').mockResolvedValue(metricAIResult({
+      strategy: 'CREATE_ON_DATASET',
+      summary: '可复用企业收入数据集的已发布版本创建指标',
+      targetDatasetId: dataset.id,
+      targetDatasetVersionId: dataVersion.id,
+      candidateMetricDefinition: candidate,
+      clarificationQuestions: ['请确认退款在次月发生时仍按支付月统计。'],
+    }))
+    renderMetricCenter('/metrics/new')
+
+    const requirement = '创建已支付销售额，汇总已支付且未退款订单金额，按统计月份汇总。'
+    await user.type(await screen.findByLabelText('指标创建需求'), requirement)
+    await user.click(screen.getByRole('button', { name: '生成指标配置' }))
+
+    const proposal = await screen.findByRole('article', { name: 'AI 指标审核提案' })
+    expect(proposeSpy).toHaveBeenCalledWith({ requirement })
+    const preview = within(proposal).getByRole('region', { name: 'AI 生成配置预览' })
+    expect(within(preview).getByText('已支付销售额')).toBeInTheDocument()
+    expect(within(preview).getByText(/指标编码 · paid_revenue/)).toBeInTheDocument()
+    expect(within(preview).getByText('已支付订单金额总额')).toBeInTheDocument()
+    expect(within(preview).getByText('已匹配并锁定精确发布版本')).toBeInTheDocument()
+    expect(within(preview).getByText('已匹配原子字段')).toBeInTheDocument()
+    expect(within(preview).getByText('元')).toBeInTheDocument()
+    expect(within(preview).getByText('#,##0.00')).toBeInTheDocument()
+    expect(within(preview).getByText('地区')).toBeInTheDocument()
+    expect(within(preview).getByText('HALF_UP')).toBeInTheDocument()
+    expect(within(preview).getByText('查看高级计算设置与完整配置').closest('details')).not.toHaveAttribute('open')
+    expect(within(preview).queryByRole('textbox')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('指标编码')).not.toBeInTheDocument()
+    const confirm = within(proposal).getByRole('button', { name: '确认方案并创建草稿' })
+    expect(confirm).toBeEnabled()
+    await user.click(confirm)
+
+    await waitFor(() => expect(mocks.createSpy).toHaveBeenCalledWith(candidate))
+    expect(mocks.datasetGetVersionSpy).toHaveBeenCalledWith(dataset.id, dataVersion.id)
+    expect(await screen.findByText('AI 生成的指标草稿已创建。')).toBeInTheDocument()
+    expect(mocks.updateSpy).not.toHaveBeenCalled()
+  })
+
+  test('MODIFY_DATASET 跳转到目标数据集并携带改造指令', async () => {
+    const user = userEvent.setup()
+    mockMetricCenter()
+    vi.spyOn(metricAIAPI, 'propose').mockResolvedValue(metricAIResult({
+      strategy: 'MODIFY_DATASET',
+      summary: '需要先补充退款状态字段',
+      targetDatasetId: dataset.id,
+      targetDatasetVersionId: dataVersion.id,
+      datasetInstruction: '在订单数据集中增加退款状态，并保留支付时间与金额字段。',
+    }))
+    render(<MemoryRouter initialEntries={['/metrics/new']}><Routes>
+      <Route path="/metrics/new" element={<MetricCenterPage />} />
+      <Route path="/datasets/:datasetId/edit" element={<LocationProbe />} />
+    </Routes></MemoryRouter>)
+
+    const requirement = '创建净销售额，按支付月份统计已支付金额扣除退款金额。'
+    await user.type(await screen.findByLabelText('指标创建需求'), requirement)
+    await user.click(screen.getByRole('button', { name: '生成指标配置' }))
+    await user.click(await screen.findByRole('button', { name: '确认方案并继续改造' }))
+
+    const route = JSON.parse((await screen.findByLabelText('当前路由')).textContent || '{}')
+    expect(route).toEqual({
+      pathname: `/datasets/${dataset.id}/edit`,
+      state: {
+        metricAIInstruction: '在订单数据集中增加退款状态，并保留支付时间与金额字段。',
+        metricAIRequirement: requirement,
+        metricAIHints: {
+          preferredTableIds: [], aggregation: 'SUM', measureFields: [], dimensionFields: [], timeGrain: 'MONTH',
+        },
+        returnTo: '/metrics/new',
+      },
+    })
+  })
+
+  test('CREATE_DATASET 确认后进入新建流程，不打开映射表数据集', async () => {
+    const user = userEvent.setup()
+    mockMetricCenter()
+    const instruction = '以订单映射表和客户映射表为来源，新建普通数据集；关联客户后输出销售额、区域和月份。'
+    vi.spyOn(metricAIAPI, 'propose').mockResolvedValue(metricAIResult({
+      strategy: 'CREATE_DATASET',
+      summary: '指标 AI 不会原地改造映射表数据集，需要新建普通数据集承载关联结果。',
+      targetDatasetId: '',
+      targetDatasetVersionId: '',
+      datasetInstruction: instruction,
+    }))
+    render(<MemoryRouter initialEntries={['/metrics/new']}><Routes>
+      <Route path="/metrics/new" element={<MetricCenterPage />} />
+      <Route path="/datasets/new/edit" element={<LocationProbe />} />
+    </Routes></MemoryRouter>)
+
+    const requirement = '基于订单表和客户表创建月度各区域销售额指标。'
+    await user.type(await screen.findByLabelText('指标创建需求'), requirement)
+    await user.click(screen.getByRole('button', { name: '生成指标配置' }))
+
+    const proposal = await screen.findByRole('article', { name: 'AI 指标审核提案' })
+    expect(within(proposal).getByText('不会修改作为来源的映射表数据集')).toBeInTheDocument()
+    await user.click(within(proposal).getByRole('button', { name: '确认方案并新建数据集' }))
+
+    expect(JSON.parse((await screen.findByLabelText('当前路由')).textContent || '{}')).toEqual({
+      pathname: '/datasets/new/edit',
+      state: {
+        metricAIInstruction: instruction,
+        metricAIRequirement: requirement,
+        metricAIHints: {
+          preferredTableIds: [], aggregation: 'SUM', measureFields: [], dimensionFields: [], timeGrain: 'MONTH',
+        },
+        returnTo: '/metrics/new',
+      },
+    })
+  })
+
+  test('CREATE_DATASET 将 COUNT、月份、维度和证据中的物理字段传给数据集 AI', async () => {
+    const user = userEvent.setup()
+    const mocks = mockMetricCenter()
+    const orderDataset: DatasetSummary = {
+      ...dataset, id: 'orders-mapped', name: '订单映射表', type: 'MAPPED_TABLE',
+      originTableId: 'orders-table', currentPublishedVersionId: 'orders-version',
+    }
+    const customerDataset: DatasetSummary = {
+      ...dataset, id: 'customers-mapped', name: '客户映射表', type: 'MAPPED_TABLE',
+      originTableId: 'customers-table', currentPublishedVersionId: 'customers-version',
+    }
+    const orderVersion = datasetVersion({
+      id: 'orders-version', datasetId: orderDataset.id,
+      dsl: {
+        ...datasetDSL,
+        nodes: [{ id: 'orders', tableId: 'orders-table' }],
+        fields: [
+          { id: 'order-id', code: 'order_id', name: '订单编号', role: 'IDENTIFIER', canonicalType: 'INTEGER', visible: true, expression: { type: 'FIELD_REF', nodeId: 'orders', field: 'ORDER_ID' } },
+          { id: 'created-at', code: 'created_at', name: '下单时间', role: 'TIME', canonicalType: 'DATETIME', visible: true, expression: { type: 'FIELD_REF', nodeId: 'orders', field: 'CREATED_AT' } },
+        ],
+      },
+    })
+    const customerVersion = datasetVersion({
+      id: 'customers-version', datasetId: customerDataset.id,
+      dsl: {
+        ...datasetDSL,
+        nodes: [{ id: 'customers', tableId: 'customers-table' }],
+        fields: [
+          { id: 'region-code', code: 'region_code', name: '地区代码', role: 'DIMENSION', canonicalType: 'STRING', visible: true, expression: { type: 'FIELD_REF', nodeId: 'customers', field: 'region_code' } },
+        ],
+      },
+    })
+    mocks.datasetListSpy.mockResolvedValue({ items: [orderDataset, customerDataset], total: 2, limit: 200, offset: 0 })
+    mocks.datasetGetVersionSpy.mockImplementation(async (datasetId, versionId) => {
+      if (datasetId === orderDataset.id && versionId === orderVersion.id) return orderVersion
+      if (datasetId === customerDataset.id && versionId === customerVersion.id) return customerVersion
+      throw new Error('unexpected dataset version')
+    })
+    const instruction = '关联订单和客户，按地区及下单月份分组，使用 COUNT(ORDER_ID) 统计交易量。'
+    vi.spyOn(metricAIAPI, 'propose').mockResolvedValue(metricAIResult({
+      strategy: 'CREATE_DATASET',
+      summary: '新建普通数据集承载关联与聚合结果。',
+      datasetInstruction: instruction,
+      retrievalEvidence: [
+        { sourceType: 'FIELD', sourceId: 'order-id', datasetId: orderDataset.id, datasetVersionId: orderVersion.id, reason: '订单计数对象' },
+        { sourceType: 'FIELD', sourceId: 'created-at', datasetId: orderDataset.id, datasetVersionId: orderVersion.id, reason: '统计日期' },
+        { sourceType: 'FIELD', sourceId: 'region-code', datasetId: customerDataset.id, datasetVersionId: customerVersion.id, reason: '地区维度' },
+      ],
+    }))
+    render(<MemoryRouter initialEntries={['/metrics/new']}><Routes>
+      <Route path="/metrics/new" element={<MetricCenterPage />} />
+      <Route path="/datasets/new/edit" element={<LocationProbe />} />
+    </Routes></MemoryRouter>)
+
+    await user.type(await screen.findByLabelText('指标创建需求'), '生成月度区域交易量。')
+    await user.click(screen.getByRole('button', { name: '生成指标配置' }))
+    await user.click(await screen.findByRole('button', { name: '确认方案并新建数据集' }))
+
+    await waitFor(() => expect(mocks.datasetGetVersionSpy).toHaveBeenCalledTimes(2))
+    expect(JSON.parse((await screen.findByLabelText('当前路由')).textContent || '{}')).toMatchObject({
+      pathname: '/datasets/new/edit',
+      state: {
+        metricAIHints: {
+          preferredTableIds: ['orders-table', 'customers-table'],
+          aggregation: 'COUNT',
+          measureFields: [{ tableId: 'orders-table', column: 'ORDER_ID' }],
+          timeField: { tableId: 'orders-table', column: 'CREATED_AT' },
+          dimensionFields: [{ tableId: 'customers-table', column: 'region_code' }],
+          timeGrain: 'MONTH',
+        },
+      },
+    })
+  })
+
+  test('可重新生成同一方案，也可追加意见生成修改方案', async () => {
+    const user = userEvent.setup()
+    mockMetricCenter()
+    const requirement = '创建月度区域销售额指标。'
+    const proposalBase: Partial<MetricAuthoringProposal> = {
+      strategy: 'MODIFY_DATASET', targetDatasetId: dataset.id, targetDatasetVersionId: dataVersion.id,
+      datasetInstruction: '补充区域字段。',
+    }
+    const proposeSpy = vi.spyOn(metricAIAPI, 'propose')
+      .mockResolvedValueOnce(metricAIResult({ ...proposalBase, summary: '初始方案。' }))
+      .mockResolvedValueOnce(metricAIResult({ ...proposalBase, summary: '重新生成的方案。' }))
+      .mockResolvedValueOnce(metricAIResult({ ...proposalBase, summary: '已根据新意见调整方案。' }))
+    renderMetricCenter('/metrics/new')
+
+    await user.click(await screen.findByRole('radio', { name: '求和（SUM）' }))
+    await user.type(await screen.findByLabelText('指标创建需求'), requirement)
+    await user.click(screen.getByRole('button', { name: '生成指标配置' }))
+    const requirementWithHints = `${requirement}\n\n【AI 参考条件】\n以下条件由用户选择；未指定的内容请由 AI 基于授权资产补全：\n- 统计口径与聚合：求和（SUM）`
+    let proposal = await screen.findByRole('article', { name: 'AI 指标审核提案' })
+    await user.click(within(proposal).getByRole('button', { name: '重新生成方案' }))
+    expect(await within(proposal).findByText('重新生成的方案。')).toBeInTheDocument()
+    expect(proposeSpy).toHaveBeenNthCalledWith(1, { requirement: requirementWithHints })
+    expect(proposeSpy).toHaveBeenNthCalledWith(2, { requirement: requirementWithHints })
+
+    await user.click(within(proposal).getByRole('button', { name: '根据意见修改方案' }))
+    const opinion = '销售额使用含税金额，区域以客户当前所属区域为准。'
+    const revision = within(proposal).getByLabelText('方案修改意见')
+    expect(Number(revision.getAttribute('maxlength'))).toBeLessThan(4000)
+    await user.type(revision, opinion)
+    await user.click(within(proposal).getByRole('button', { name: '生成修改方案' }))
+
+    proposal = await screen.findByRole('article', { name: 'AI 指标审核提案' })
+    expect(await within(proposal).findByText('已根据新意见调整方案。')).toBeInTheDocument()
+    const revisedRequirement = `${requirementWithHints}\n\n用户补充意见：${opinion}`
+    expect(proposeSpy).toHaveBeenNthCalledWith(3, { requirement: revisedRequirement })
+    expect(revisedRequirement.match(/【AI 参考条件】/g)).toHaveLength(1)
+    expect(within(proposal).queryByLabelText('方案修改意见')).not.toBeInTheDocument()
+  })
+
+  test('业务主视图按步骤展示方案并默认收起 UUID 与检索技术信息', async () => {
+    const user = userEvent.setup()
+    mockMetricCenter()
+    const targetID = '412b3965-6ede-4220-bf60-ed59c6d3b69b'
+    vi.spyOn(metricAIAPI, 'propose').mockResolvedValue(metricAIResult({
+      strategy: 'MODIFY_DATASET', targetDatasetId: targetID, targetDatasetVersionId: '29edfdda-ba53-4720-84cf-f0dc2b239302',
+      summary: `需要改造订单事实表（ID: ${targetID}）。完成后创建区域销售额指标。`,
+      datasetInstruction: `从客户信息表引入地区代码。通过客户 ID 建立关联。发布新版本。`,
+      retrievalEvidence: [{ sourceType: 'DATASET', sourceId: targetID, datasetId: targetID, datasetVersionId: '29edfdda-ba53-4720-84cf-f0dc2b239302', reason: '目标数据集可管理。' }],
+      assumptions: ['销售额使用订单金额。'], warnings: ['需要确认退款口径。'],
+    }))
+    renderMetricCenter('/metrics/new')
+
+    await user.type(await screen.findByLabelText('指标创建需求'), '创建区域销售额指标。')
+    await user.click(screen.getByRole('button', { name: '生成指标配置' }))
+    const proposal = await screen.findByRole('article', { name: 'AI 指标审核提案' })
+    const overview = within(proposal).getByRole('region', { name: '方案概览' })
+    expect(overview).not.toHaveTextContent(targetID)
+    const plan = within(proposal).getByRole('region', { name: '数据集执行方案' })
+    expect(within(plan).getAllByRole('listitem')).toHaveLength(3)
+    expect(within(proposal).getByRole('region', { name: '审核要点' })).toHaveTextContent('AI 当前假设')
+    expect(within(proposal).getByText('查看 AI 采用的业务依据（1 项）').closest('details')).not.toHaveAttribute('open')
+    expect(within(proposal).getByText('技术信息').closest('details')).not.toHaveAttribute('open')
+  })
+
+  test('待澄清和数据缺口提案都不提供应用动作', async () => {
+    const user = userEvent.setup()
+    mockMetricCenter()
+    const proposeSpy = vi.spyOn(metricAIAPI, 'propose')
+      .mockResolvedValueOnce(metricAIResult({
+        strategy: 'NEEDS_CLARIFICATION',
+        summary: '需要确认退款订单是否计入',
+        clarificationQuestions: ['退款发生在次月时应冲减哪个月份？'],
+      }))
+      .mockResolvedValueOnce(metricAIResult({
+        strategy: 'DATA_GAP',
+        summary: '授权目录中没有退款金额字段',
+      }))
+    renderMetricCenter('/metrics/new')
+
+    await user.type(await screen.findByLabelText('指标创建需求'), '创建净销售额，按月统计销售金额扣除退款金额。')
+    await user.click(screen.getByRole('button', { name: '生成指标配置' }))
+
+    let proposal = await screen.findByRole('article', { name: 'AI 指标审核提案' })
+    expect(within(proposal).getByText('还需要一点业务信息')).toBeInTheDocument()
+    expect(within(proposal).queryByRole('button', { name: /确认方案并创建草稿|确认方案并继续改造|确认方案并新建数据集/ })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '生成指标配置' }))
+    proposal = await screen.findByRole('article', { name: 'AI 指标审核提案' })
+    expect(within(proposal).getByText('当前不能安全创建')).toBeInTheDocument()
+    expect(within(proposal).queryByRole('button', { name: /确认方案并创建草稿|确认方案并继续改造|确认方案并新建数据集/ })).not.toBeInTheDocument()
+    expect(proposeSpy).toHaveBeenCalledTimes(2)
+  })
+})
+
 const dataset: DatasetSummary = {
   id: 'dataset-1', code: 'enterprise_revenue', name: '企业收入数据集', description: '', type: 'SINGLE_SOURCE',
   status: 'PUBLISHED', version: 4, dslHash: 'a'.repeat(64), currentPublishedVersionId: 'dataset-version-1', updatedAt: '2026-07-16T00:00:00Z',
@@ -325,6 +725,15 @@ const datasetDSL: DatasetDSL = {
 }
 
 const dataVersion = datasetVersion()
+
+function datasetRecord(overrides: Partial<DatasetRecord> = {}): DatasetRecord {
+  return {
+    ...dataset,
+    draftVersionId: 'dataset-draft-1', draftVersionNo: 1, draftRecordVersion: 3,
+    planHash: 'c'.repeat(64), dsl: datasetDSL, logicalPlan: {}, createdAt: '2026-07-16T00:00:00Z',
+    ...overrides,
+  }
+}
 
 function datasetVersion(overrides: Partial<PublishedVersionRecord> = {}): PublishedVersionRecord {
   return {
@@ -374,6 +783,18 @@ function metricPublishedVersion(overrides: Partial<MetricVersionRecord> = {}): M
 
 const metricVersion = metricPublishedVersion()
 
+function metricAIResult(overrides: Partial<MetricAuthoringProposal> = {}): MetricAuthoringProposalResult {
+  return {
+    requestId: 'metric-ai-request-1',
+    retrievalContextHash: 'f'.repeat(64),
+    proposal: {
+      schemaVersion: '1.0', strategy: 'DATA_GAP', summary: '', targetDatasetId: '', targetDatasetVersionId: '',
+      reuseMetricVersionId: '', retrievalEvidence: [], candidateMetricDefinition: null, datasetInstruction: '',
+      clarificationQuestions: [], assumptions: [], warnings: [], ...overrides,
+    },
+  }
+}
+
 function metricVersionSummary(version: MetricVersionRecord) {
   return {
     id: version.id, metricId: version.metricId, versionNo: version.versionNo, status: version.status,
@@ -388,6 +809,7 @@ function mockMetricCenter(options: { loaded?: MetricRecord; dataVersion?: Publis
   const selectedDataVersion = options.dataVersion ?? dataVersion
   const published = options.published ?? metricVersion
   const datasetListSpy = vi.spyOn(datasetAPI, 'list').mockResolvedValue({ items: [dataset], total: 1, limit: 200, offset: 0 })
+  const datasetGetSpy = vi.spyOn(datasetAPI, 'get').mockResolvedValue(datasetRecord())
   const datasetVersionListSpy = vi.spyOn(datasetAPI, 'listVersions').mockResolvedValue({ items: [versionSummary(selectedDataVersion)], total: 1, limit: 50, offset: 0 })
   const datasetGetVersionSpy = vi.spyOn(datasetAPI, 'getVersion').mockResolvedValue(selectedDataVersion)
   vi.spyOn(metricAPI, 'list').mockResolvedValue({ items: [], total: 0, limit: 50, offset: 0 })
@@ -404,7 +826,7 @@ function mockMetricCenter(options: { loaded?: MetricRecord; dataVersion?: Publis
   const versionPreviewSpy = vi.spyOn(metricAPI, 'previewVersion').mockResolvedValue({ queryId: 'query-version', columns: ['value'], rows: [['100']], rowCount: 1, durationMs: 5 })
   const transitionSpy = vi.spyOn(metricAPI, 'transitionVersion').mockResolvedValue(metricPublishedVersion({ status: 'DEPRECATED' }))
   return {
-    datasetListSpy, datasetVersionListSpy, datasetGetVersionSpy, permissionSpy, getSpy, createSpy, updateSpy, publishSpy,
+    datasetListSpy, datasetGetSpy, datasetVersionListSpy, datasetGetVersionSpy, permissionSpy, getSpy, createSpy, updateSpy, publishSpy,
     metricVersionListSpy, metricVersionGetSpy, usageSpy, versionPreviewSpy, transitionSpy,
   }
 }
@@ -420,8 +842,14 @@ function versionSummary(version: PublishedVersionRecord) {
 function renderMetricCenter(path: string) {
   return render(<MemoryRouter initialEntries={[path]}><Routes>
     <Route path="/metrics" element={<MetricCenterPage />} />
+    <Route path="/metrics/new" element={<MetricCenterPage />} />
     <Route path="/metrics/:metricId/edit" element={<MetricCenterPage />} />
   </Routes></MemoryRouter>)
+}
+
+function LocationProbe() {
+  const location = useLocation()
+  return <output aria-label="当前路由">{JSON.stringify({ pathname: location.pathname, state: location.state })}</output>
 }
 
 function MetricRouteSwitch() {

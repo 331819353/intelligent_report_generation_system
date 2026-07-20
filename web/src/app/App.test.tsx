@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -31,14 +31,15 @@ test('redirects anonymous users away from protected routes', () => {
   expect(screen.getByRole('heading', { name: '登录智能报告平台' })).toBeInTheDocument()
 })
 
-test('loads assets from different sources into the dataset designer', async () => {
+test('legacy new-dataset route also opens the configuration-center canvas', async () => {
   sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
-    if (url.includes('/permissions/evaluate')) {
-      return new Response(JSON.stringify({ allowed: true }), { status: 200, headers: { 'Content-Type': 'application/json' } })
-    }
-    const body = url.includes('/columns')
+    const body = url.includes('/v1/datasets?')
+      ? { items: [], total: 0, limit: 200, offset: 0 }
+      : url.includes('/preview?')
+      ? { columns: [url.includes('table-2') ? 'customer_id' : 'order_id'], rows: [[1]] }
+      : url.includes('/columns')
       ? url.includes('table-2')
         ? { items: [{ id: 'column-2', tableId: 'table-2', columnName: 'customer_id', businessName: '客户编号', canonicalType: 'NUMBER', nullable: false, semanticType: 'IDENTIFIER' }] }
         : { items: [{ id: 'column-1', tableId: 'table-1', columnName: 'order_id', businessName: '订单编号', canonicalType: 'TEXT', nullable: false, semanticType: 'IDENTIFIER' }] }
@@ -49,12 +50,29 @@ test('loads assets from different sources into the dataset designer', async () =
     return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
   }))
   render(<MemoryRouter initialEntries={['/datasets/new/edit']}><App /></MemoryRouter>)
-  await userEvent.click(await screen.findByRole('button', { name: /订单表/ }))
-  expect(await screen.findByRole('checkbox', { name: '选择 order_id' })).toBeChecked()
-  await userEvent.click(screen.getByRole('button', { name: /客户表/ }))
-  expect(await screen.findByRole('checkbox', { name: '选择 customer_id' })).toBeChecked()
-  expect(screen.getByText('关联 t1 → t2')).toBeInTheDocument()
-  expect(screen.getByRole('checkbox', { name: '已核对基数' })).not.toBeChecked()
+  const dialog = await screen.findByRole('dialog', { name: '新建数据集' })
+  await userEvent.click(within(dialog).getByRole('button', { name: /订单表/ }))
+  expect(await within(dialog).findByLabelText('输出字段 order_id')).toBeChecked()
+  await userEvent.click(within(dialog).getByRole('button', { name: /客户库/ }))
+  await userEvent.click(within(dialog).getByRole('button', { name: /客户表/ }))
+  expect(await within(dialog).findByLabelText('输出字段 customer_id')).toBeChecked()
+  await userEvent.click(within(dialog).getByRole('button', { name: /关联组件双输入/ }))
+  const relationDrawer = within(dialog).getByLabelText('配置表关联')
+  const values = new Map<string, string>()
+  const dataTransfer = { setData: (type: string, value: string) => values.set(type, value), getData: (type: string) => values.get(type) ?? '' }
+  const connect = (sourceName: string, targetName: string) => {
+    values.clear()
+    const source = within(dialog).getByRole('button', { name: sourceName })
+    const target = within(dialog).getByRole('button', { name: targetName })
+    fireEvent.dragStart(source, { dataTransfer })
+    fireEvent.drop(target, { dataTransfer })
+    fireEvent.dragEnd(source, { dataTransfer })
+  }
+  connect('从数据节点 1 拖出连接', '连接到关联节点 1 槽位 1')
+  connect('从数据节点 2 拖出连接', '连接到关联节点 1 槽位 2')
+  expect(within(relationDrawer).getByLabelText('关联槽位 1')).toHaveTextContent('订单表')
+  expect(within(relationDrawer).getByLabelText('关联槽位 2')).toHaveTextContent('客户表')
+  expect(within(dialog).getByRole('button', { name: '配置关联 1' })).toBeInTheDocument()
 })
 
 test('renders the protected metric center route and navigation entry', async () => {
@@ -71,7 +89,9 @@ test('renders the protected metric center route and navigation entry', async () 
 
   expect(screen.getByRole('heading', { level: 1, name: '指标中心' })).toBeInTheDocument()
   expect(screen.getByRole('link', { name: '指标中心' })).toHaveClass('active')
-  expect(await screen.findByLabelText('指标编码')).toBeEnabled()
+  expect(await screen.findByLabelText('搜索指标')).toBeEnabled()
+  expect(screen.getByText('还没有指标')).toBeInTheDocument()
+  expect(screen.getAllByRole('button', { name: '新建指标' })).toHaveLength(2)
 })
 
 test('renders the protected data source center route and navigation entry', async () => {
@@ -84,4 +104,15 @@ test('renders the protected data source center route and navigation entry', asyn
   expect(screen.getByRole('link', { name: '数据源配置中心' })).toHaveClass('active')
   expect(await screen.findByText('还没有数据源')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: '新建数据源' })).toBeEnabled()
+})
+
+test('renders the dataset configuration center route and renamed navigation entry', async () => {
+  sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ items: [], total: 0, limit: 200, offset: 0 }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+
+  render(<MemoryRouter initialEntries={['/datasets']}><App /></MemoryRouter>)
+
+  expect(screen.getByRole('heading', { level: 1, name: '数据集配置中心' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: '数据集配置中心' })).toHaveClass('active')
+  expect(await screen.findByText('还没有数据集')).toBeInTheDocument()
 })

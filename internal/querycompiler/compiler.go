@@ -76,7 +76,9 @@ func Compile(input Input) (CompiledQuery, error) {
 		return CompiledQuery{}, err
 	}
 	input.Parameters = parameters
-	c := &compiler{input: input}
+	// 空参数查询也必须生成非 nil 切片；Connector 的 JSON 合同要求数组，nil 会被
+	// 编码成 null 并在真正执行 SQL 之前被远端以 422 拒绝。
+	c := &compiler{input: input, args: []any{}}
 	// 内层查询只负责数据集语义（Join、计算、聚合）；外层查询再应用行列权限。
 	// 这种分层让策略只能看到稳定的输出字段，不能借策略表达式触达物理源列。
 	inner, err := c.compileInner()
@@ -101,6 +103,15 @@ func Compile(input Input) (CompiledQuery, error) {
 	}
 	if order != "" {
 		sql += " ORDER BY " + order
+	}
+	// Connector 会额外读取一行来确认调用方没有把截断结果误当成完整结果。
+	// 因此最终查询必须把已经校验过的行数上限下推到数据库；仅传 MaxRows
+	// 会让任何超过上限的合法结果被 Connector 以 413 拒绝，发布的一行试跑
+	// 也会因此对多行数据集稳定失败。
+	if input.Dialect == Oracle {
+		sql += " FETCH FIRST " + c.bind(input.MaxRows) + " ROWS ONLY"
+	} else {
+		sql += " LIMIT " + c.bind(input.MaxRows)
 	}
 	// 标识符已通过白名单校验、值已全部绑定，此处再做最终令牌兜底。命中时宁可
 	// 拒绝整个计划，也不尝试清理 SQL 后继续执行。
@@ -308,6 +319,7 @@ func normalizeDecimal(value any) (any, error) {
 func (c *compiler) compileInner() (string, error) {
 	aliases := map[string]string{}
 	from := ""
+	fromArgs := []any{}
 	// 选择没有入边的节点作为 Join 根。领域校验只保证忽略方向后的连通性；若存在
 	// 方向环或声明无法按 left -> right 扩展，下面的循环会失败而不会重排外连接。
 	incoming := map[string]bool{}
@@ -331,7 +343,12 @@ func (c *compiler) compileInner() (string, error) {
 		}
 		aliases[node.ID] = node.Alias
 		if node.ID == rootID {
-			from = c.tableName(ref) + " " + c.quote(node.Alias)
+			relation, args, err := c.nodeRelation(node, ref)
+			if err != nil {
+				return "", err
+			}
+			from = relation + " " + c.quote(node.Alias)
+			fromArgs = append(fromArgs, args...)
 		}
 	}
 	joined := map[string]bool{rootID: true}
@@ -368,7 +385,13 @@ func (c *compiler) compileInner() (string, error) {
 				}
 				conditions = append(conditions, left+" "+op+" "+right)
 			}
-			from += " " + join.JoinType + " JOIN " + c.tableName(ref) + " " + c.quote(aliases[join.RightNodeID]) + " ON " + strings.Join(conditions, " AND ")
+			node := c.documentNode(join.RightNodeID)
+			relation, args, err := c.nodeRelation(node, ref)
+			if err != nil {
+				return "", err
+			}
+			from += " " + join.JoinType + " JOIN " + relation + " " + c.quote(aliases[join.RightNodeID]) + " ON " + strings.Join(conditions, " AND ")
+			fromArgs = append(fromArgs, args...)
 			joined[join.RightNodeID], progressed = true, true
 		}
 		if !progressed {
@@ -386,10 +409,16 @@ func (c *compiler) compileInner() (string, error) {
 		fieldExpressions[field.ID] = expression
 		projections = append(projections, expression+" AS "+c.quote(field.Code))
 	}
+	// SELECT 表达式的绑定值在 SQL 文本中先于 FROM 派生表，因此关联前分组的
+	// sourceFilter 参数必须在投影参数之后、外层 WHERE 参数之前追加。
+	c.args = append(c.args, fromArgs...)
 	// 节点过滤和 PRE_AGGREGATION 过滤都进入 WHERE，因此一定发生在分组之前。
 	// 传统 sourceFilter 仍支持固定值，但值同样只能经 bind 进入 SQL。
 	where := make([]string, 0, len(c.input.Document.Filters))
 	for _, node := range c.input.Document.Nodes {
+		if c.preAggregation(node.ID) != nil {
+			continue
+		}
 		for _, filter := range node.SourceFilters {
 			if filter.Expression != nil {
 				value, err := c.expression(*filter.Expression, aliases)
@@ -478,6 +507,100 @@ func (c *compiler) compileInner() (string, error) {
 		sql += " HAVING " + strings.Join(having, " AND ")
 	}
 	return sql, nil
+}
+
+func (c *compiler) documentNode(nodeID string) dataset.Node {
+	for _, node := range c.input.Document.Nodes {
+		if node.ID == nodeID {
+			return node
+		}
+	}
+	return dataset.Node{}
+}
+
+func (c *compiler) preAggregation(nodeID string) *dataset.PreAggregation {
+	for index := range c.input.Document.PreAggregations {
+		if c.input.Document.PreAggregations[index].NodeID == nodeID {
+			return &c.input.Document.PreAggregations[index]
+		}
+	}
+	return nil
+}
+
+// nodeRelation 把显式关联前分组编译成受白名单约束的派生表。派生表输出仍沿用
+// 原字段名，因此外层 Join 和 FIELD_REF 的结构化引用保持稳定。
+func (c *compiler) nodeRelation(node dataset.Node, ref TableRef) (string, []any, error) {
+	item := c.preAggregation(node.ID)
+	if item == nil {
+		return c.tableName(ref), nil, nil
+	}
+	sub := &compiler{input: c.input, args: []any{}}
+	aliases := map[string]string{node.ID: "pre_source"}
+	projections := make([]string, 0, len(item.GroupBy)+len(item.Metrics))
+	groups := make([]string, 0, len(item.GroupBy))
+	for _, group := range item.GroupBy {
+		expression := dataset.Expression{Type: "FIELD_REF", NodeID: node.ID, Field: group.Field}
+		if group.Unit != "" {
+			expression = dataset.Expression{Type: "DATE_TRUNC", Unit: group.Unit, Argument: &expression}
+		}
+		value, err := sub.expression(expression, aliases)
+		if err != nil {
+			return "", nil, err
+		}
+		projections = append(projections, value+" AS "+c.quote(group.Field))
+		groups = append(groups, value)
+	}
+	for _, metric := range item.Metrics {
+		argument := dataset.Expression{Type: "FIELD_REF", NodeID: node.ID, Field: metric.Field}
+		value, err := sub.expression(dataset.Expression{Type: "AGGREGATE", Function: metric.Function, Argument: &argument}, aliases)
+		if err != nil {
+			return "", nil, err
+		}
+		projections = append(projections, value+" AS "+c.quote(metric.Field))
+	}
+	where := []string{}
+	for _, filter := range node.SourceFilters {
+		value, err := sub.sourceFilterExpression(node, filter, aliases)
+		if err != nil {
+			return "", nil, err
+		}
+		where = append(where, value)
+	}
+	sql := "(SELECT " + strings.Join(projections, ", ") + " FROM " + c.tableName(ref) + " " + c.quote("pre_source")
+	if len(where) > 0 {
+		sql += " WHERE " + strings.Join(where, " AND ")
+	}
+	sql += " GROUP BY " + strings.Join(groups, ", ") + ")"
+	return sql, sub.args, nil
+}
+
+func (c *compiler) sourceFilterExpression(node dataset.Node, filter dataset.SourceFilter, aliases map[string]string) (string, error) {
+	if filter.Expression != nil {
+		return c.expression(*filter.Expression, aliases)
+	}
+	ref := c.input.Tables[node.ID]
+	if !ref.Columns[filter.Field] {
+		return "", errors.New("source filter field is not in the whitelist")
+	}
+	left := c.quote(aliases[node.ID]) + "." + c.quote(filter.Field)
+	if filter.Operator == "IS_NULL" {
+		return left + " IS NULL", nil
+	}
+	if filter.Operator == "IS_NOT_NULL" {
+		return left + " IS NOT NULL", nil
+	}
+	op, err := comparison(filter.Operator)
+	if err != nil {
+		return "", err
+	}
+	if filter.Operator == "IN" || filter.Operator == "NOT_IN" {
+		values, err := c.bindCollection(filter.Value)
+		if err != nil {
+			return "", err
+		}
+		return "(" + left + " " + op + " (" + values + "))", nil
+	}
+	return "(" + left + " " + op + " " + c.bind(filter.Value) + ")", nil
 }
 
 func (c *compiler) minimumGroupSize() int {

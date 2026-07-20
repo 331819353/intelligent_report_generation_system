@@ -1,0 +1,477 @@
+import { describe, expect, it } from 'vitest'
+
+import {
+  generatedGraphFieldIdentity,
+  graphContains,
+  graphConnectionError,
+  graphLeaves,
+  graphProducedFieldLabel,
+  graphProducedFields,
+  graphRoot,
+  hydrateDesignerGraph,
+  layoutDesignerGraph,
+  serializeDesignerGraph,
+  validateDesignerGraph,
+  wouldCreateGraphCycle,
+  type DesignerGraphV1,
+} from './dataset-graph'
+import type { AssetColumn, AssetTable, DatasetDSL, DesignerNode, FieldOption, JoinOption } from './datasets'
+
+const assetTable = (id: string, businessName: string): AssetTable => ({
+  id,
+  dataSourceId: 'source_1',
+  dataSourceName: '测试数据源',
+  dataSourceType: 'MYSQL',
+  tableName: id,
+  schemaName: 'public',
+  businessName,
+  columnCount: 2,
+})
+
+const column = (tableId: string, columnName: string, businessName: string, canonicalType = 'STRING'): AssetColumn => ({
+  id: `${tableId}_${columnName}`,
+  tableId,
+  columnName,
+  businessName,
+  canonicalType,
+  nullable: false,
+  semanticType: '',
+})
+
+const node = (id: string, businessName: string, columns: AssetColumn[]): DesignerNode => ({
+  id,
+  alias: id,
+  table: assetTable(`table_${id}`, businessName),
+  columns,
+  selected: columns.map(item => item.columnName),
+})
+
+const nodes: DesignerNode[] = [
+  node('customer', '客户表', [
+    column('table_customer', 'customer_id', '客户ID'),
+    column('table_customer', 'amount', '交易金额', 'DECIMAL'),
+  ]),
+  node('region', '区域表', [
+    column('table_region', 'region_code', '区域编码'),
+    column('table_region', 'order_id', '订单ID'),
+  ]),
+]
+
+const fields: FieldOption[] = nodes.flatMap(item => item.columns.map(itemColumn => ({
+  key: `${item.id}.${itemColumn.columnName}`,
+  role: 'ATTRIBUTE',
+  aggregation: '',
+  output: true,
+})))
+
+const emptyDSL = (designer: DesignerGraphV1): DatasetDSL => ({
+  dslVersion: '1.0',
+  dataset: { code: 'graph_test', name: '图模型测试', type: 'SINGLE_SOURCE' },
+  nodes: [],
+  fields: [],
+  designer,
+})
+
+describe('dataset graph', () => {
+  it('按上游稳定编码自动生成只读字段身份，且不依赖聚合逻辑', () => {
+    expect(generatedGraphFieldIdentity({ key: 'node_2.customer_id', name: '客户编号', code: 't2_CUSTOMER_ID' })).toEqual({
+      name: '客户编号',
+      code: 't2_CUSTOMER_ID',
+    })
+    expect(generatedGraphFieldIdentity({ key: 'node_2.customer-id', name: '', code: 't2.CUSTOMER-ID' })).toEqual({
+      name: 't2_CUSTOMER_ID',
+      code: 't2_CUSTOMER_ID',
+    })
+  })
+
+  it('按依赖层级稳定整理，且不受整理前坐标影响', () => {
+    const graph: DesignerGraphV1 = {
+      version: '1.0',
+      nodePositions: {
+        customer: { x: 999, y: 777 },
+        order: { x: 888, y: 666 },
+        region: { x: 777, y: 555 },
+      },
+      nodeNames: { customer: '客户表', order: '订单表', region: '区域表' },
+      groups: [
+        {
+          id: 'group_customer',
+          name: '客户汇总',
+          input: { kind: 'NODE', id: 'customer' },
+          position: { x: 700, y: 700 },
+          dimensions: [],
+          metrics: [],
+        },
+        {
+          id: 'group_region',
+          name: '区域汇总',
+          input: { kind: 'NODE', id: 'region' },
+          position: { x: 600, y: 600 },
+          dimensions: [],
+          metrics: [],
+        },
+      ],
+      joins: [
+        {
+          id: 'join_customer_order',
+          name: '客户订单关联',
+          left: { kind: 'GROUP', id: 'group_customer' },
+          right: { kind: 'NODE', id: 'order' },
+          position: { x: 500, y: 500 },
+          outputKeys: [],
+        },
+        {
+          id: 'join_all',
+          name: '完整关联',
+          left: { kind: 'JOIN', id: 'join_customer_order' },
+          right: { kind: 'GROUP', id: 'group_region' },
+          position: { x: 400, y: 400 },
+          outputKeys: [],
+        },
+      ],
+      end: {
+        id: 'end_1',
+        name: '最终输出',
+        input: { kind: 'JOIN', id: 'join_all' },
+        position: { x: 300, y: 300 },
+        outputs: [],
+      },
+    }
+
+    const arranged = layoutDesignerGraph(graph, ['customer', 'order', 'region'])
+    const arrangedAgain = layoutDesignerGraph({
+      ...graph,
+      nodePositions: Object.fromEntries(Object.keys(graph.nodePositions).map((id, index) => [id, { x: index, y: index }])),
+      groups: graph.groups.map((item, index) => ({ ...item, position: { x: index, y: index } })),
+      joins: graph.joins.map((item, index) => ({ ...item, position: { x: index, y: index } })),
+      end: graph.end && { ...graph.end, position: { x: 1, y: 1 } },
+    }, ['customer', 'order', 'region'])
+
+    expect(arrangedAgain).toEqual(arranged)
+    expect(arranged.nodePositions.customer.x).toBeLessThan(arranged.groups[0].position.x)
+    expect(arranged.groups[0].position.x).toBeLessThan(arranged.joins[0].position.x)
+    expect(arranged.joins[0].position.x).toBeLessThan(arranged.joins[1].position.x)
+    expect(arranged.joins[1].position.x).toBeLessThan(arranged.end!.position.x)
+    expect(new Set(Object.values(arranged.nodePositions).map(item => item.y)).size).toBe(3)
+  })
+
+  it('serialize 后 hydrate 精确保留节点、关联、分组和结束节点坐标及名称', () => {
+    const graph: DesignerGraphV1 = {
+      version: '1.0',
+      nodePositions: { customer: { x: 17, y: 23 }, region: { x: 91, y: 37 } },
+      nodeNames: { customer: '客户数据节点', region: '区域数据节点' },
+      joins: [{
+        id: 'join_1',
+        name: '客户区域结果',
+        left: { kind: 'GROUP', id: 'group_customer' },
+        right: { kind: 'GROUP', id: 'group_region' },
+        position: { x: 417, y: 223 },
+        outputKeys: ['customer.customer_id', 'region.region_code'],
+      }],
+      groups: [
+        {
+          id: 'group_customer',
+          name: '客户聚合结果',
+          input: { kind: 'NODE', id: 'customer' },
+          position: { x: 137, y: 83 },
+          dimensions: [{ key: 'customer.customer_id', name: '客户标识', code: 'customer_key', grouping: 'DAY' }],
+          metrics: [{ key: 'customer.amount', name: '客户金额', code: 'customer_amount', aggregation: 'SUM' }],
+        },
+        {
+          id: 'group_region',
+          name: '区域聚合结果',
+          input: { kind: 'NODE', id: 'region' },
+          position: { x: 149, y: 271 },
+          dimensions: [{ key: 'region.region_code', name: '区域', code: 'region_key' }],
+          metrics: [{ key: 'region.order_id', name: '订单量', code: 'order_count', aggregation: 'COUNT' }],
+        },
+      ],
+      end: {
+        id: 'end_1',
+        name: '数据集最终结果',
+        input: { kind: 'JOIN', id: 'join_1' },
+        position: { x: 713, y: 211 },
+        outputs: [
+          { key: 'customer.customer_id', name: '客户ID', code: 'customer_id' },
+          { key: 'region.region_code', name: '所属区域', code: 'region_code' },
+        ],
+      },
+    }
+    const serialized = serializeDesignerGraph(graph)
+    const legacyJoins: JoinOption[] = [{
+      id: 'join_1',
+      leftNodeId: 'customer',
+      rightNodeId: 'region',
+      leftField: 'customer_id',
+      rightField: 'region_code',
+      joinType: 'LEFT',
+      cardinality: 'UNKNOWN',
+      manualConfirmed: true,
+    }]
+
+    const hydrated = hydrateDesignerGraph(emptyDSL(serialized), nodes, legacyJoins, fields)
+
+    expect(hydrated).toEqual(serialized)
+    expect(hydrated.nodeNames).toEqual({ customer: '客户数据节点', region: '区域数据节点' })
+    expect(hydrated.joins[0]).toMatchObject({ name: '客户区域结果', position: { x: 417, y: 223 } })
+    expect(hydrated.groups.map(item => [item.name, item.position])).toEqual([
+      ['客户聚合结果', { x: 137, y: 83 }],
+      ['区域聚合结果', { x: 149, y: 271 }],
+    ])
+    expect(hydrated.end).toMatchObject({ name: '数据集最终结果', position: { x: 713, y: 211 } })
+  })
+
+  it('fixed designer 缺少结束节点时将无关联单表修复为数据节点直连结束节点', () => {
+    const singleNode = nodes[0]
+    const singleFields = fields.filter(field => field.key.startsWith(`${singleNode.id}.`))
+    const designer: DesignerGraphV1 = {
+      version: '1.0',
+      nodePositions: { [singleNode.id]: { x: 77, y: 91 } },
+      nodeNames: { [singleNode.id]: '客户数据节点' },
+      joins: [],
+      groups: [],
+    }
+
+    const hydrated = hydrateDesignerGraph(emptyDSL(designer), [singleNode], [], singleFields)
+
+    expect(hydrated.end).toMatchObject({
+      id: 'end_1',
+      input: { kind: 'NODE', id: singleNode.id },
+      position: { x: 377, y: 91 },
+    })
+    expect(hydrated.end?.outputs.map(output => output.key)).toEqual([
+      'customer.customer_id',
+      'customer.amount',
+    ])
+  })
+
+  it('多个分组分别产出字段，并用组件名、字段名、编码和语义角色构造下游标签', () => {
+    const graph: DesignerGraphV1 = {
+      version: '1.0',
+      nodePositions: { customer: { x: 0, y: 0 }, region: { x: 0, y: 150 } },
+      nodeNames: { customer: '客户数据节点', region: '区域数据节点' },
+      joins: [{
+        id: 'join_1',
+        name: '客户区域关联',
+        left: { kind: 'GROUP', id: 'group_customer' },
+        right: { kind: 'GROUP', id: 'group_region' },
+        position: { x: 600, y: 75 },
+        outputKeys: [],
+      }],
+      groups: [
+        {
+          id: 'group_customer',
+          name: '客户汇总结果',
+          input: { kind: 'NODE', id: 'customer' },
+          position: { x: 300, y: 0 },
+          dimensions: [{ key: 'customer.customer_id', name: '客户标识', code: 'customer_key' }],
+          metrics: [{ key: 'customer.amount', name: '客户总金额', code: 'customer_amount_sum', aggregation: 'SUM' }],
+        },
+        {
+          id: 'group_region',
+          name: '区域汇总结果',
+          input: { kind: 'NODE', id: 'region' },
+          position: { x: 300, y: 150 },
+          dimensions: [{ key: 'region.region_code', name: '销售区域', code: 'sales_region' }],
+          metrics: [{ key: 'region.order_id', name: '区域订单数', code: 'region_order_count', aggregation: 'COUNT' }],
+        },
+      ],
+    }
+
+    const customerOutputs = graphProducedFields({ kind: 'GROUP', id: 'group_customer' }, graph, nodes, fields)
+    const regionOutputs = graphProducedFields({ kind: 'GROUP', id: 'group_region' }, graph, nodes, fields)
+
+    expect(customerOutputs.map(item => item.key)).toEqual(['customer.customer_id', 'customer.amount'])
+    expect(regionOutputs.map(item => item.key)).toEqual(['region.region_code', 'region.order_id'])
+    expect(customerOutputs).not.toEqual(regionOutputs)
+    expect(customerOutputs.map(graphProducedFieldLabel)).toEqual([
+      '客户汇总结果 / 客户标识 · customer_key · 维度',
+      '客户汇总结果 / 客户总金额 · customer_amount_sum · SUM 指标',
+    ])
+    expect(regionOutputs.map(graphProducedFieldLabel)).toEqual([
+      '区域汇总结果 / 销售区域 · sales_region · 维度',
+      '区域汇总结果 / 区域订单数 · region_order_count · COUNT 指标',
+    ])
+    expect(customerOutputs.every(item => item.producerName === '客户汇总结果')).toBe(true)
+    expect(regionOutputs.every(item => item.producerName === '区域汇总结果')).toBe(true)
+  })
+
+  it('循环拓扑会被递归保护，不产生伪叶子、伪根或堆栈溢出', () => {
+    const cyclic: DesignerGraphV1 = {
+      version: '1.0',
+      nodePositions: {},
+      nodeNames: {},
+      joins: [],
+      groups: [
+        { id: 'group_a', name: '循环 A', input: { kind: 'GROUP', id: 'group_b' }, position: { x: 0, y: 0 }, dimensions: [], metrics: [] },
+        { id: 'group_b', name: '循环 B', input: { kind: 'GROUP', id: 'group_a' }, position: { x: 0, y: 0 }, dimensions: [], metrics: [] },
+      ],
+      end: { id: 'end_1', name: '结束', input: { kind: 'GROUP', id: 'group_a' }, position: { x: 0, y: 0 }, outputs: [] },
+    }
+
+    expect(graphLeaves({ kind: 'GROUP', id: 'group_a' }, cyclic)).toEqual([])
+    expect(graphContains({ kind: 'GROUP', id: 'group_a' }, { kind: 'NODE', id: 'missing' }, cyclic)).toBe(false)
+    expect(graphProducedFields({ kind: 'GROUP', id: 'group_a' }, cyclic, [], [])).toEqual([])
+    expect(graphRoot([], cyclic)).toBeUndefined()
+
+    const arranged = layoutDesignerGraph(cyclic, [])
+    for (const item of [...arranged.groups, arranged.end!]) {
+      expect(Number.isFinite(item.position.x)).toBe(true)
+      expect(Number.isFinite(item.position.y)).toBe(true)
+    }
+  })
+
+  it('保存前拒绝缺失输入和引用已删除组件，并返回可直接展示的中文错误', () => {
+    const graph: DesignerGraphV1 = {
+      version: '1.0',
+      nodePositions: { customer: { x: 0, y: 0 } },
+      nodeNames: { customer: '客户数据节点' },
+      groups: [{
+        id: 'group_customer',
+        name: '客户汇总',
+        position: { x: 300, y: 0 },
+        dimensions: [],
+        metrics: [],
+      }],
+      joins: [{
+        id: 'join_customer',
+        name: '客户关联',
+        left: { kind: 'GROUP', id: 'group_customer' },
+        right: { kind: 'NODE', id: 'deleted_order' },
+        position: { x: 600, y: 0 },
+        outputKeys: [],
+      }],
+      end: {
+        id: 'end_1',
+        name: '最终输出',
+        input: { kind: 'JOIN', id: 'join_customer' },
+        position: { x: 900, y: 0 },
+        outputs: [],
+      },
+    }
+
+    const result = validateDesignerGraph(graph, ['customer'])
+
+    expect(result.valid).toBe(false)
+    expect(result.issues.map(item => item.code)).toEqual(expect.arrayContaining(['MISSING_INPUT', 'INVALID_REFERENCE']))
+    expect(result.errors).toEqual(expect.arrayContaining([
+      '分组组件「客户汇总」尚未连接输入组件。',
+      '关联组件「客户关联」的槽位 2 引用的数据节点「deleted_order」不存在或已被删除。',
+    ]))
+  })
+
+  it('保存前拒绝组件自环、跨组件循环和全局重复 ID', () => {
+    const selfLoop: DesignerGraphV1 = {
+      version: '1.0',
+      nodePositions: { customer: { x: 0, y: 0 } },
+      nodeNames: { customer: '客户表' },
+      groups: [{
+        id: 'group_self',
+        name: '自循环汇总',
+        input: { kind: 'GROUP', id: 'group_self' },
+        position: { x: 300, y: 0 },
+        dimensions: [],
+        metrics: [],
+      }],
+      joins: [],
+      end: { id: 'end_1', name: '最终输出', input: { kind: 'GROUP', id: 'group_self' }, position: { x: 600, y: 0 }, outputs: [] },
+    }
+    const selfResult = validateDesignerGraph(selfLoop, ['customer'])
+    expect(selfResult.valid).toBe(false)
+    expect(selfResult.issues.map(item => item.code)).toEqual(expect.arrayContaining(['SELF_LOOP', 'CYCLE']))
+    expect(selfResult.errors).toContain('不能将分组组件「自循环汇总」连接到自身。')
+
+    const cyclic: DesignerGraphV1 = {
+      version: '1.0',
+      nodePositions: { duplicated: { x: 0, y: 0 } },
+      nodeNames: { duplicated: '重复 ID 数据节点' },
+      groups: [{
+        id: 'duplicated',
+        name: '循环汇总',
+        input: { kind: 'JOIN', id: 'join_cycle' },
+        position: { x: 300, y: 0 },
+        dimensions: [],
+        metrics: [],
+      }],
+      joins: [{
+        id: 'join_cycle',
+        name: '循环关联',
+        left: { kind: 'GROUP', id: 'duplicated' },
+        right: { kind: 'NODE', id: 'duplicated' },
+        position: { x: 600, y: 0 },
+        outputKeys: [],
+      }],
+      end: { id: 'end_1', name: '最终输出', input: { kind: 'JOIN', id: 'join_cycle' }, position: { x: 900, y: 0 }, outputs: [] },
+    }
+    const cycleResult = validateDesignerGraph(cyclic, ['duplicated'])
+    expect(cycleResult.valid).toBe(false)
+    expect(cycleResult.issues.map(item => item.code)).toEqual(expect.arrayContaining(['DUPLICATE_COMPONENT_ID', 'CYCLE']))
+    expect(cycleResult.errors.some(message => message.includes('画布存在循环依赖'))).toBe(true)
+  })
+
+  it('连线阶段可预判新增边是否形成环，并校验失效端点', () => {
+    const graph: DesignerGraphV1 = {
+      version: '1.0',
+      nodePositions: { customer: { x: 0, y: 0 } },
+      nodeNames: { customer: '客户数据节点' },
+      groups: [
+        {
+          id: 'group_a',
+          name: '一级汇总',
+          input: { kind: 'NODE', id: 'customer' },
+          position: { x: 300, y: 0 },
+          dimensions: [],
+          metrics: [],
+        },
+        {
+          id: 'group_b',
+          name: '二级汇总',
+          input: { kind: 'GROUP', id: 'group_a' },
+          position: { x: 600, y: 0 },
+          dimensions: [],
+          metrics: [],
+        },
+      ],
+      joins: [],
+      end: { id: 'end_1', name: '最终输出', input: { kind: 'GROUP', id: 'group_b' }, position: { x: 900, y: 0 }, outputs: [] },
+    }
+
+    expect(wouldCreateGraphCycle({ kind: 'GROUP', id: 'group_b' }, { kind: 'GROUP', id: 'group_a' }, graph)).toBe(true)
+    expect(wouldCreateGraphCycle({ kind: 'GROUP', id: 'group_a' }, { kind: 'GROUP', id: 'group_a' }, graph)).toBe(true)
+    expect(wouldCreateGraphCycle({ kind: 'NODE', id: 'customer' }, { kind: 'GROUP', id: 'group_a' }, graph)).toBe(false)
+    expect(wouldCreateGraphCycle({ kind: 'GROUP', id: 'group_b' }, { kind: 'OUTPUT', id: 'end_1' }, graph)).toBe(false)
+
+    expect(graphConnectionError({ kind: 'GROUP', id: 'group_b' }, { kind: 'GROUP', id: 'group_a' }, graph, ['customer']))
+      .toBe('连接分组组件「二级汇总」与分组组件「一级汇总」会形成循环依赖，请调整连线。')
+    expect(graphConnectionError({ kind: 'NODE', id: 'customer' }, { kind: 'GROUP', id: 'group_a' }, graph, ['customer'])).toBeUndefined()
+    expect(graphConnectionError({ kind: 'NODE', id: 'deleted' }, { kind: 'GROUP', id: 'group_a' }, graph, ['customer']))
+      .toBe('数据节点「deleted」不存在或已被删除，请重新连线。')
+  })
+
+  it('完整且无环的画布通过 DAG 校验', () => {
+    const graph: DesignerGraphV1 = {
+      version: '1.0',
+      nodePositions: { customer: { x: 0, y: 0 }, region: { x: 0, y: 150 } },
+      nodeNames: { customer: '客户表', region: '区域表' },
+      groups: [{
+        id: 'group_customer',
+        name: '客户汇总',
+        input: { kind: 'NODE', id: 'customer' },
+        position: { x: 300, y: 0 },
+        dimensions: [],
+        metrics: [],
+      }],
+      joins: [{
+        id: 'join_customer_region',
+        name: '客户区域关联',
+        left: { kind: 'GROUP', id: 'group_customer' },
+        right: { kind: 'NODE', id: 'region' },
+        position: { x: 600, y: 75 },
+        outputKeys: [],
+      }],
+      end: { id: 'end_1', name: '最终输出', input: { kind: 'JOIN', id: 'join_customer_region' }, position: { x: 900, y: 75 }, outputs: [] },
+    }
+
+    expect(validateDesignerGraph(graph, ['customer', 'region'])).toEqual({ valid: true, issues: [], errors: [] })
+  })
+})

@@ -568,4 +568,8 @@ func TestMetricJoinFanoutRiskIncludesTransitiveJoin(t *testing.T) {
 	if index, risky := firstMetricJoinFanoutRisk(joins, map[string]bool{"orders": true}); risky {
 		t.Fatalf("指标始终位于多侧时不应误报扇出，index=%d", index)
 	}
+	joins[1].Cardinality = "UNKNOWN"
+	if index, risky := firstMetricJoinFanoutRisk(joins, map[string]bool{"orders": true}); !risky || index != 1 {
+		t.Fatalf("未知基数必须对指标扇出保守失败，index=%d risky=%v", index, risky)
+	}
 }

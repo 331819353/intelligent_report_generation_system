@@ -65,10 +65,14 @@ func Evaluate(ctx context.Context, input Input) (datasource.QueryResult, error) 
 	if input.Document.Dataset.Type != "SINGLE_SOURCE" && input.Document.Dataset.Type != "CROSS_SOURCE" || input.MaxRows < 1 || input.MaxRows > input.Document.ExecutionPolicy.PreviewLimit {
 		return datasource.QueryResult{}, errors.New("invalid file preview limits or dataset type")
 	}
-	// 执行顺序刻意与 SQL 编译器一致：扫描与源过滤 -> Join -> WHERE -> 分组 ->
+	// 执行顺序刻意与 SQL 编译器一致：扫描与源过滤 -> 显式关联前分组 -> Join -> WHERE -> 分组 ->
 	// HAVING -> 输出表达式 -> 行列权限 -> 排序。改变顺序会导致文件预览与数据库
 	// 预览产生不同结果，尤其可能让权限策略在错误的粒度上执行。
 	rowsByNode, err := loadNodes(ctx, input)
+	if err != nil {
+		return datasource.QueryResult{}, err
+	}
+	rowsByNode, err = preAggregateNodes(ctx, input.Document, rowsByNode, input.Parameters)
 	if err != nil {
 		return datasource.QueryResult{}, err
 	}
@@ -164,8 +168,12 @@ func Evaluate(ctx context.Context, input Input) (datasource.QueryResult, error) 
 	if err := sortOutput(input.Document, output); err != nil {
 		return datasource.QueryResult{}, err
 	}
+	// MaxRows 是预览/发布试跑的返回样本上限，不是“数据集完整结果必须少于该值”
+	// 的业务约束。此时过滤、聚合、策略和排序都已在完整的受控中间结果上执行，
+	// 可以安全地截取最终前 N 行；中间行数和联邦源端行数仍由各自的资源上限
+	// 失败关闭，不能在这里放宽。
 	if len(output) > input.MaxRows {
-		return datasource.QueryResult{}, errors.New("file query row limit exceeded")
+		output = output[:input.MaxRows]
 	}
 	columns := make([]string, len(input.Document.Fields))
 	resultRows := make([][]any, len(output))
@@ -179,6 +187,82 @@ func Evaluate(ctx context.Context, input Input) (datasource.QueryResult, error) 
 		}
 	}
 	return datasource.QueryResult{Columns: columns, Rows: resultRows, RowCount: len(resultRows)}, nil
+}
+
+// preAggregateNodes 执行画布中明确位于 Join 槽位之前的分组组件。
+// 输出仍使用 nodeId.field 键，因此现有 Join 条件和最终 FIELD_REF 无需引入 SQL 别名。
+func preAggregateNodes(ctx context.Context, document dataset.Document, rowsByNode map[string][]sourceRow, parameters map[string]any) (map[string][]sourceRow, error) {
+	if len(document.PreAggregations) == 0 {
+		return rowsByNode, nil
+	}
+	result := make(map[string][]sourceRow, len(rowsByNode))
+	for nodeID, rows := range rowsByNode {
+		result[nodeID] = rows
+	}
+	for _, item := range document.PreAggregations {
+		rows, exists := result[item.NodeID]
+		if !exists {
+			return nil, fmt.Errorf("pre-aggregation node %s is unavailable", item.NodeID)
+		}
+		groups := map[string][]sourceRow{}
+		order := []string{}
+		for index, row := range rows {
+			if err := checkContext(ctx, index); err != nil {
+				return nil, err
+			}
+			values := make([]any, 0, len(item.GroupBy))
+			for _, group := range item.GroupBy {
+				expression := dataset.Expression{Type: "FIELD_REF", NodeID: item.NodeID, Field: group.Field}
+				if group.Unit != "" {
+					expression = dataset.Expression{Type: "DATE_TRUNC", Unit: group.Unit, Argument: &expression}
+				}
+				value, err := evaluateExpression(expression, row, nil, parameters)
+				if err != nil {
+					return nil, err
+				}
+				values = append(values, value)
+			}
+			payload, err := json.Marshal(values)
+			if err != nil {
+				return nil, err
+			}
+			key := string(payload)
+			if _, exists := groups[key]; !exists {
+				order = append(order, key)
+			}
+			groups[key] = append(groups[key], row)
+		}
+		aggregated := make([]sourceRow, 0, len(order))
+		for index, key := range order {
+			if err := checkContext(ctx, index); err != nil {
+				return nil, err
+			}
+			groupRows := groups[key]
+			output := sourceRow{}
+			for _, group := range item.GroupBy {
+				expression := dataset.Expression{Type: "FIELD_REF", NodeID: item.NodeID, Field: group.Field}
+				if group.Unit != "" {
+					expression = dataset.Expression{Type: "DATE_TRUNC", Unit: group.Unit, Argument: &expression}
+				}
+				value, err := evaluateExpression(expression, groupRows[0], nil, parameters)
+				if err != nil {
+					return nil, err
+				}
+				output[item.NodeID+"."+group.Field] = value
+			}
+			for _, metric := range item.Metrics {
+				argument := dataset.Expression{Type: "FIELD_REF", NodeID: item.NodeID, Field: metric.Field}
+				value, err := aggregate(dataset.Expression{Type: "AGGREGATE", Function: metric.Function, Argument: &argument}, groupRows, parameters)
+				if err != nil {
+					return nil, err
+				}
+				output[item.NodeID+"."+metric.Field] = value
+			}
+			aggregated = append(aggregated, output)
+		}
+		result[item.NodeID] = aggregated
+	}
+	return result, nil
 }
 
 func loadNodes(ctx context.Context, input Input) (map[string][]sourceRow, error) {

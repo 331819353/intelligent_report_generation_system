@@ -57,7 +57,7 @@ func (s *PostgresStore) Start(ctx context.Context, input StartRequest) (record R
 		if err != nil {
 			return err
 		}
-		if !enabled || !containsPurpose(allowedPurposes, input.Purpose) {
+		if !tenantPolicyAllowsPurpose(enabled, allowedPurposes, input.Purpose) {
 			return ErrTenantAIForbidden
 		}
 
@@ -251,6 +251,16 @@ func containsPurpose(values []string, purpose string) bool {
 		}
 	}
 	return false
+}
+
+// tenantPolicyAllowsPurpose keeps the common tenant AI switch as the hard boundary. Metric
+// authoring is the tenant's primary AI workflow and therefore does not require a second
+// per-purpose opt-in; legacy and all other AI purposes retain their explicit allowlist fence.
+func tenantPolicyAllowsPurpose(enabled bool, allowedPurposes []string, purpose string) bool {
+	if !enabled {
+		return false
+	}
+	return purpose == PurposeMetricAuthoring || containsPurpose(allowedPurposes, purpose)
 }
 
 // exceedsQuota 使用减法比较避免 used+reserved 在极端输入下发生整数溢出。

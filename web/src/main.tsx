@@ -5,7 +5,9 @@ import { App } from './app/App'
 import './styles/global.css'
 import './styles/dataset-designer.css'
 import './styles/metric-center.css'
+import './styles/metric-catalog.css'
 import './styles/data-source-center.css'
+import './styles/dataset-center.css'
 import './styles/report-renderer.css'
 
 // 在严格模式和浏览器路由上下文中挂载应用根组件。

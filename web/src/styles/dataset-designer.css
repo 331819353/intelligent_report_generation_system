@@ -54,10 +54,12 @@ fieldset.dataset-designer { min-inline-size: 0; margin: 0; padding: 0; border: 0
 .dataset-node header input { width: 82px; }
 .node-actions { display: flex; align-items: center; gap: 8px; }
 .node-actions .quiet-button { padding: 8px 10px; }
-.dataset-field-head, .dataset-field { display: grid; grid-template-columns: 42px minmax(160px, 1fr) 90px 120px 130px; align-items: center; gap: 10px; padding: 9px 14px; }
+.dataset-field-table { overflow-x: auto; }
+.dataset-field-head, .dataset-field { display: grid; grid-template-columns: 42px minmax(150px, 1fr) 75px repeat(2, minmax(125px, .9fr)) 110px 120px 110px; align-items: center; gap: 10px; min-width: 980px; padding: 9px 14px; }
 .dataset-field-head { background: #fbfcfd; color: var(--muted); font-size: 11px; font-weight: 800; }
 .dataset-field { border-top: 1px solid #edf0f3; font-size: 12px; }
 .dataset-field > input { width: 16px; }
+.dataset-field > input:not([type="checkbox"]) { width: 100%; }
 .dataset-field strong { font-size: 12px; }
 .join-editor { display: grid; grid-template-columns: 1fr 1fr auto 1fr 100px 140px auto; gap: 8px; align-items: center; background: #eef4ff; border: 1px solid #c8d8f6; border-radius: 10px; padding: 12px; }
 .join-confirm { display: flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; white-space: nowrap; }

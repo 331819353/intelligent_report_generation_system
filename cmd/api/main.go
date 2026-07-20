@@ -16,12 +16,15 @@ import (
 	"intelligent-report-generation-system/internal/auth"
 	"intelligent-report-generation-system/internal/config"
 	"intelligent-report-generation-system/internal/dataset"
+	"intelligent-report-generation-system/internal/datasetai"
 	"intelligent-report-generation-system/internal/datasource"
 	"intelligent-report-generation-system/internal/federation"
 	"intelligent-report-generation-system/internal/filequery"
 	"intelligent-report-generation-system/internal/httpserver"
 	"intelligent-report-generation-system/internal/metadataai"
 	"intelligent-report-generation-system/internal/metric"
+	"intelligent-report-generation-system/internal/metricai"
+	"intelligent-report-generation-system/internal/metriccandidate"
 	"intelligent-report-generation-system/internal/observability"
 	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/policy"
@@ -74,7 +77,8 @@ func main() {
 	)
 	dataSourceService.SetMetadataJobRepository(datasource.NewPostgresMetadataJobRepository(pool))
 	excelHandler := datasource.NewExcelHandler(authService, accessService, excelManager)
-	assetHandler := asset.NewHandler(authService, accessService, asset.NewRepository(pool))
+	assetRepository := asset.NewRepository(pool)
+	assetHandler := asset.NewHandler(authService, accessService, assetRepository, dataSourceService)
 	modelProvider := aiplatform.NewOpenAICompatibleProvider(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel, &http.Client{Timeout: cfg.AIAttemptTimeout})
 	aiService, err := aiplatform.NewService(aiplatform.NewPostgresStore(pool), modelProvider, aiplatform.ServiceOptions{
 		Timeout: cfg.AIRequestTimeout, AttemptTimeout: cfg.AIAttemptTimeout,
@@ -86,12 +90,30 @@ func main() {
 		logger.Error("initialize AI orchestration", "error", err)
 		os.Exit(1)
 	}
+	datasetStore := dataset.NewPostgresStore(pool)
+	metricCandidateStore := metriccandidate.NewPostgresStore(pool)
+	datasetStore.SetPublicationCommitSink(metricCandidateStore)
+	metadataAIStore := metadataai.NewPostgresStore(pool)
+	metadataAIStore.SetEnrichmentCommitSink(datasetStore)
+	reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	reconciledDatasets, err := datasetStore.ReconcileMappedDatasets(reconcileCtx)
+	reconcileCancel()
+	if err != nil {
+		logger.Error("reconcile mapped table datasets", "error", err)
+		os.Exit(1)
+	}
+	if reconciledDatasets > 0 {
+		logger.Info("mapped table datasets reconciled", "count", reconciledDatasets)
+	}
 	metadataAIProvider := metadataai.NewOrchestratedProvider(aiService)
-	metadataAIService := metadataai.NewService(metadataai.NewPostgresStore(pool), metadataAIProvider, cfg.AIRequestTimeout, cfg.AIConfidenceThreshold)
+	metadataAIService := metadataai.NewService(metadataAIStore, metadataAIProvider, cfg.AIRequestTimeout, cfg.AIConfidenceThreshold)
 	dataSourceService.SetTableCompleter(metadataAIService)
 	dataSourceHandler := datasource.NewHandler(authService, accessService, dataSourceService, credentialManager)
 	metadataAIHandler := metadataai.NewHandler(authService, accessService, metadataAIService)
-	datasetStore := dataset.NewPostgresStore(pool)
+	datasetAIService := datasetai.NewService(assetRepository, aiService, datasetai.ServiceOptions{
+		Timeout: cfg.AIRequestTimeout, MaxProviderInputBytes: cfg.AIMaxInputBytes,
+	})
+	datasetAIHandler := datasetai.NewHandler(authService, accessService, datasetAIService)
 	datasetService := dataset.NewService(datasetStore)
 	queryConnectors := map[datasource.Type]queryruntime.QueryConnector{
 		datasource.TypeMySQL:  mysqlConnector,
@@ -108,9 +130,16 @@ func main() {
 	queryService.SetFederatedExecutor(federation.NewExecutor(queryConnectors, excelManager))
 	datasetService.SetPublicationValidator(queryService)
 	datasetHandler := dataset.NewHandler(authService, accessService, datasetService, queryService)
-	metricService := metric.NewService(metric.NewPostgresStore(pool), queryService)
+	datasetPublicationApprovalService := dataset.NewPublicationApprovalService(datasetStore, datasetService)
+	datasetPublicationApprovalHandler := dataset.NewPublicationApprovalHandler(authService, accessService, datasetPublicationApprovalService)
+	metricStore := metric.NewPostgresStore(pool)
+	metricService := metric.NewService(metricStore, queryService)
 	metricService.SetPermissionChecker(accessService)
 	metricHandler := metric.NewHandler(authService, accessService, metricService)
+	metricAIService := metricai.NewService(metricai.NewPostgresRetriever(pool), aiService, metricai.ServiceOptions{Timeout: cfg.AIRequestTimeout})
+	metricAIHandler := metricai.NewHandler(authService, accessService, metricAIService)
+	metricCandidateService := metriccandidate.NewService(metricCandidateStore, metricService)
+	metricCandidateHandler := metriccandidate.NewHandler(authService, accessService, metricCandidateService)
 	reportService := report.NewService(report.NewPostgresStore(pool))
 	reportHandler := report.NewHandler(authService, accessService, reportService)
 	api := http.NewServeMux()
@@ -128,10 +157,22 @@ func main() {
 	api.Handle("/api/v1/assets/", assetHandler)
 	api.Handle("/api/v1/metadata-diffs", assetHandler)
 	api.Handle("/api/v1/metadata-ai/", metadataAIHandler)
+	api.Handle("POST /api/v1/datasets/ai/proposals", datasetAIHandler)
+	api.Handle("POST /api/v1/datasets/{id}/ai/proposals", datasetAIHandler)
+	// Exact approval routes take precedence over the legacy dataset subtree. In particular,
+	// /publish now submits an approval request and cannot directly move the published pointer.
+	api.Handle("POST /api/v1/datasets/{id}/publish", datasetPublicationApprovalHandler)
+	api.Handle("POST /api/v1/datasets/{id}/publish-requests", datasetPublicationApprovalHandler)
+	api.Handle("GET /api/v1/datasets/{id}/publish-requests", datasetPublicationApprovalHandler)
+	api.Handle("POST /api/v1/datasets/{id}/publish-requests/{requestId}/approve", datasetPublicationApprovalHandler)
+	api.Handle("POST /api/v1/datasets/{id}/publish-requests/{requestId}/reject", datasetPublicationApprovalHandler)
 	api.Handle("/api/v1/datasets", datasetHandler)
 	api.Handle("/api/v1/datasets/", datasetHandler)
+	api.Handle("POST /api/v1/metrics/ai/proposals", metricAIHandler)
 	api.Handle("/api/v1/metrics", metricHandler)
 	api.Handle("/api/v1/metrics/", metricHandler)
+	api.Handle("/api/v1/metric-candidates", metricCandidateHandler)
+	api.Handle("/api/v1/metric-candidates/", metricCandidateHandler)
 	api.Handle("/api/v1/reports", reportHandler)
 	api.Handle("/api/v1/reports/", reportHandler)
 	server := httpserver.New(cfg, logger, api)

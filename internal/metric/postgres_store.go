@@ -21,17 +21,69 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore
 
 // Create 原子创建指标主对象、唯一草稿和可由定义重建的维度及依赖索引。
 func (s *PostgresStore) Create(ctx context.Context, tenantID, actorID string, prepared Prepared) (Record, error) {
+	return s.create(ctx, tenantID, actorID, "", 0, prepared)
+}
+
+// CreateFromCandidate 在同一事务内锁定候选版本、创建指标草稿并把候选置为
+// ACCEPTED。origin_candidate_id 同时让提交后丢失响应的重试返回同一草稿。
+func (s *PostgresStore) CreateFromCandidate(ctx context.Context, tenantID, actorID, candidateID string, expectedCandidateVersion int64, prepared Prepared) (Record, error) {
+	if existing, err := s.GetByOriginCandidate(ctx, tenantID, candidateID); err == nil {
+		existingPrepared, prepareErr := Prepare(existing.Definition)
+		if prepareErr != nil || existingPrepared.DefinitionHash != prepared.DefinitionHash {
+			return Record{}, ErrOriginCandidateUnavailable
+		}
+		return existing, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return Record{}, err
+	}
+	record, err := s.create(ctx, tenantID, actorID, candidateID, expectedCandidateVersion, prepared)
+	if errors.Is(err, ErrAlreadyExists) || errors.Is(err, ErrOriginCandidateConflict) || errors.Is(err, ErrOriginCandidateUnavailable) {
+		if existing, loadErr := s.GetByOriginCandidate(ctx, tenantID, candidateID); loadErr == nil {
+			existingPrepared, prepareErr := Prepare(existing.Definition)
+			if prepareErr == nil && existingPrepared.DefinitionHash == prepared.DefinitionHash {
+				return existing, nil
+			}
+		}
+	}
+	return record, err
+}
+
+func (s *PostgresStore) create(ctx context.Context, tenantID, actorID, candidateID string, expectedCandidateVersion int64, prepared Prepared) (Record, error) {
 	var metricID, versionID string
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		if candidateID != "" {
+			var status string
+			var version int64
+			var candidateDefinition json.RawMessage
+			err := tx.QueryRow(ctx, `SELECT status,version,proposed_definition
+				FROM platform.metric_candidates WHERE id::text=$1 FOR UPDATE`, candidateID).
+				Scan(&status, &version, &candidateDefinition)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrOriginCandidateUnavailable
+			}
+			if err != nil {
+				return err
+			}
+			if version != expectedCandidateVersion {
+				return ErrOriginCandidateConflict
+			}
+			if status != "READY" && status != "NEEDS_REVIEW" {
+				return ErrOriginCandidateUnavailable
+			}
+			candidatePrepared, err := Prepare(candidateDefinition)
+			if err != nil || candidatePrepared.DefinitionHash != prepared.DefinitionHash {
+				return ErrOriginCandidateUnavailable
+			}
+		}
 		if err := validatePreparedReferencesTx(ctx, tx, "", prepared); err != nil {
 			return err
 		}
 		definition := prepared.Definition
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.metrics(
-			tenant_id,dataset_id,code,name,description,metric_type,created_by,updated_by
-		) VALUES($1,$2,$3,$4,$5,$6,$7,$7) RETURNING id::text`,
+			tenant_id,dataset_id,code,name,description,metric_type,origin_candidate_id,created_by,updated_by
+		) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,'')::uuid,$8,$8) RETURNING id::text`,
 			tenantID, definition.DatasetID, definition.Metric.Code, definition.Metric.Name,
-			definition.Metric.Description, definition.Metric.Type, actorID).Scan(&metricID); err != nil {
+			definition.Metric.Description, definition.Metric.Type, candidateID, actorID).Scan(&metricID); err != nil {
 			return err
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.metric_versions(
@@ -48,11 +100,32 @@ func (s *PostgresStore) Create(ctx context.Context, tenantID, actorID string, pr
 		if err := replaceDerivedTx(ctx, tx, tenantID, metricID, versionID, prepared); err != nil {
 			return err
 		}
+		if candidateID != "" {
+			tag, err := tx.Exec(ctx, `UPDATE platform.metric_candidates SET
+				status='ACCEPTED',accepted_metric_id=$1,decision_reason='',reviewed_by=$2,reviewed_at=now(),
+				version=version+1,updated_at=now()
+				WHERE id::text=$3 AND version=$4 AND status IN ('READY','NEEDS_REVIEW')`,
+				metricID, actorID, candidateID, expectedCandidateVersion)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != 1 {
+				return ErrOriginCandidateConflict
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+				tenant_id,actor_user_id,action,resource_type,resource_id,detail
+			) VALUES($1,$2,'ACCEPT','METRIC_CANDIDATE',$3,
+				jsonb_build_object('metricId',$4::text,'fromVersion',$5::bigint))`,
+				tenantID, actorID, candidateID, metricID, expectedCandidateVersion); err != nil {
+				return err
+			}
+		}
 		_, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
 			tenant_id,actor_user_id,action,resource_type,resource_id,detail
-		) VALUES($1,$2,'CREATE','METRIC',$3,jsonb_build_object(
-			'datasetId',$4::text,'datasetVersionId',$5::text,'definitionHash',$6::text
-		))`, tenantID, actorID, metricID, definition.DatasetID, definition.DatasetVersionID, prepared.DefinitionHash)
+		) VALUES($1,$2,'CREATE','METRIC',$3,jsonb_strip_nulls(jsonb_build_object(
+			'datasetId',$4::text,'datasetVersionId',$5::text,'definitionHash',$6::text,
+			'originCandidateId',NULLIF($7,'')::text
+		)))`, tenantID, actorID, metricID, definition.DatasetID, definition.DatasetVersionID, prepared.DefinitionHash, candidateID)
 		return err
 	})
 	if err != nil {
@@ -61,6 +134,22 @@ func (s *PostgresStore) Create(ctx context.Context, tenantID, actorID string, pr
 			return Record{}, ErrAlreadyExists
 		}
 		return Record{}, mapReferenceError(err)
+	}
+	return s.Get(ctx, tenantID, metricID)
+}
+
+// GetByOriginCandidate 按候选幂等身份读取已经创建的指标草稿。
+func (s *PostgresStore) GetByOriginCandidate(ctx context.Context, tenantID, candidateID string) (Record, error) {
+	var metricID string
+	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT id::text FROM platform.metrics
+			WHERE origin_candidate_id::text=$1 AND deleted_at IS NULL`, candidateID).Scan(&metricID)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Record{}, ErrNotFound
+	}
+	if err != nil {
+		return Record{}, err
 	}
 	return s.Get(ctx, tenantID, metricID)
 }

@@ -206,7 +206,7 @@ class MetadataSampleRequest(BaseModel):
     catalog_name: str = Field(default="", max_length=128)
     schema_name: str = Field(min_length=1, max_length=128)
     table_name: str = Field(min_length=1, max_length=128)
-    max_rows: int = Field(default=3, ge=1, le=3)
+    max_rows: int = Field(default=3, ge=1, le=5)
 
 
 def canonical_type(native_type: str) -> str:
@@ -354,7 +354,7 @@ def open_connection(config: ConnectionConfig):
             host=config.host, port=config.port, user=config.username, password=password,
             database=config.database, connect_timeout=int(config.connect_timeout_seconds),
             read_timeout=int(config.query_timeout_seconds), write_timeout=int(config.query_timeout_seconds),
-            charset="utf8mb4", cursorclass=pymysql.cursors.Cursor,
+            charset="utf8mb4", cursorclass=pymysql.cursors.Cursor, autocommit=True,
         )
     connection = oracledb.connect(
         user=config.username, password=password,
@@ -477,7 +477,7 @@ def sync_metadata(config: ConnectionConfig) -> dict[str, Any]:
 
 @app.post("/v1/metadata/sample", dependencies=[Depends(authorize)])
 def sample_metadata(request: MetadataSampleRequest) -> dict[str, Any]:
-    """使用经过校验和引用的表名采集最多三行样本，不接受任意 SQL。"""
+    """使用经过校验和引用的表名采集最多五行样本，不接受任意 SQL。"""
     source_type = request.connection.source_type
     schema = quoted_identifier(request.schema_name, source_type)
     table = quoted_identifier(request.table_name, source_type)

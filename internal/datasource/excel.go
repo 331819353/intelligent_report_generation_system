@@ -253,6 +253,57 @@ func (c *ExcelConnector) Sync(ctx context.Context, source Source) (SyncResult, e
 	return SyncResult{Assets: len(tables), Watermark: time.Now().UTC().Format(time.RFC3339Nano), SnapshotHash: hash, Tables: tables}, nil
 }
 
+// Sample 读取指定工作表的少量真实行；表名来自已同步资产，调用方不能指定文件路径。
+func (c *ExcelConnector) Sample(ctx context.Context, source Source, table MetadataTable, maxRows int) (SampleResult, error) {
+	version, err := c.manager.Current(ctx, source.TenantID, source.FileAssetID)
+	if err != nil {
+		return SampleResult{}, err
+	}
+	body, err := c.manager.storage.Get(ctx, version.StorageBucket, version.StorageKey)
+	if err != nil {
+		return SampleResult{}, err
+	}
+	defer body.Close()
+	limits := spikeexcel.DefaultLimits()
+	limits.MaxFileBytes = source.RuntimeQuota.MaxExcelFileBytes
+	csvOptions, err := parseCSVOptions(version.ParseConfig)
+	if err != nil {
+		return SampleResult{}, err
+	}
+	book, err := spikeexcel.ReadWithOptions(version.Filename, body, version.SizeBytes, limits, csvOptions)
+	if err != nil {
+		return SampleResult{}, err
+	}
+	headerRow := intConfig(version.ParseConfig, "headerRow", 1)
+	for _, sheet := range book.Sheets {
+		if sheet.Name != table.Name {
+			continue
+		}
+		if headerRow < 1 || len(sheet.Rows) < headerRow {
+			return SampleResult{}, fmt.Errorf("sheet %s does not contain header row", sheet.Name)
+		}
+		headers := deduplicateHeaders(sheet.Rows[headerRow-1])
+		rows := make([][]any, 0, maxRows)
+		for _, row := range sheet.Rows[headerRow:] {
+			if boolConfig(version.ParseConfig, "skipEmptyRows", true) && emptyRow(row) {
+				continue
+			}
+			values := make([]any, len(headers))
+			for index := range headers {
+				if index < len(row) {
+					values[index] = row[index]
+				}
+			}
+			rows = append(rows, values)
+			if len(rows) == maxRows {
+				break
+			}
+		}
+		return SampleResult{Columns: headers, Rows: rows}, nil
+	}
+	return SampleResult{}, fmt.Errorf("worksheet %s is not available", table.Name)
+}
+
 // Close 无需释放持久连接，保留接口一致性。
 func (c *ExcelConnector) Close(context.Context, Source) error { return nil }
 

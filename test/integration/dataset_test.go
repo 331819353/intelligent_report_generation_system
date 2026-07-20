@@ -129,6 +129,59 @@ func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
 	if updated.Version != 2 {
 		t.Fatalf("updated version = %d, want 2", updated.Version)
 	}
+	revisions, revisionTotal, err := service.ListRevisions(ctx, tenantID, created.ID, 20, 0)
+	if err != nil || revisionTotal != 2 || len(revisions) != 2 ||
+		revisions[0].VersionNo != updated.Version || revisions[0].OperationType != "SAVE" ||
+		revisions[1].VersionNo != created.Version || revisions[1].OperationType != "CREATE" {
+		t.Fatalf("ListRevisions() revisions=%#v total=%d err=%v", revisions, revisionTotal, err)
+	}
+	createRevision, err := service.GetRevision(ctx, tenantID, created.ID, revisions[1].ID)
+	if err != nil || createRevision.DSLHash != created.DSLHash || createRevision.Name != created.Name {
+		t.Fatalf("GetRevision(CREATE) record=%#v err=%v", createRevision, err)
+	}
+	rolledBack, err := service.RollbackRevision(ctx, tenantID, actorID, created.ID, createRevision.ID, dataset.RollbackRevisionInput{ExpectedVersion: updated.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rolledBack.Version != updated.Version+1 || rolledBack.DraftVersionID != updated.DraftVersionID ||
+		rolledBack.DraftRecordVersion != updated.DraftRecordVersion+1 || rolledBack.DSLHash != created.DSLHash ||
+		rolledBack.Description != created.Description || rolledBack.CurrentPublishedVersionID != "" {
+		t.Fatalf("RollbackRevision() record=%#v", rolledBack)
+	}
+	revisions, revisionTotal, err = service.ListRevisions(ctx, tenantID, created.ID, 20, 0)
+	if err != nil || revisionTotal != 3 || len(revisions) != 3 || revisions[0].VersionNo != rolledBack.Version ||
+		revisions[0].OperationType != "ROLLBACK" || revisions[0].SourceRevisionID != createRevision.ID {
+		t.Fatalf("ListRevisions() after rollback revisions=%#v total=%d err=%v", revisions, revisionTotal, err)
+	}
+	unchangedCreateRevision, err := service.GetRevision(ctx, tenantID, created.ID, createRevision.ID)
+	if err != nil || unchangedCreateRevision.DSLHash != createRevision.DSLHash || string(unchangedCreateRevision.DSL) != string(createRevision.DSL) {
+		t.Fatalf("source revision changed after rollback: record=%#v err=%v", unchangedCreateRevision, err)
+	}
+	var rollbackAudits int
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM platform.audit_logs
+			WHERE resource_type='DATASET' AND resource_id=$1 AND action='ROLLBACK_DRAFT'
+			  AND detail->>'sourceRevisionId'=$2`, created.ID, createRevision.ID).Scan(&rollbackAudits)
+	})
+	if err != nil || rollbackAudits != 1 {
+		t.Fatalf("rollback audit count=%d err=%v", rollbackAudits, err)
+	}
+	if _, err := service.RollbackRevision(ctx, tenantID, actorID, created.ID, createRevision.ID, dataset.RollbackRevisionInput{ExpectedVersion: updated.Version}); !errors.Is(err, dataset.ErrConflict) {
+		t.Fatalf("stale RollbackRevision() error=%v, want ErrConflict", err)
+	}
+	if _, err := service.GetRevision(ctx, foreignTenantID, created.ID, createRevision.ID); !errors.Is(err, dataset.ErrRevisionNotFound) {
+		t.Fatalf("cross-tenant GetRevision() error=%v, want ErrRevisionNotFound", err)
+	}
+	if _, _, err := service.ListRevisions(ctx, foreignTenantID, created.ID, 20, 0); !errors.Is(err, dataset.ErrNotFound) {
+		t.Fatalf("cross-tenant ListRevisions() error=%v, want ErrNotFound", err)
+	}
+	// 后续保存从回滚产生的新基线继续推进，恢复操作本身不会产生发布版本。
+	updated, err = service.Update(ctx, tenantID, actorID, created.ID, dataset.UpdateInput{
+		Name: created.Name, Description: "新说明", ExpectedVersion: rolledBack.Version, DSL: updatedDSL,
+	})
+	if err != nil || updated.Version != rolledBack.Version+1 || updated.DSLHash == rolledBack.DSLHash {
+		t.Fatalf("Update() after rollback record=%#v err=%v", updated, err)
+	}
 	document, err := dataset.DecodeAndNormalize(updated.DSL)
 	if err != nil {
 		t.Fatal(err)
@@ -145,9 +198,35 @@ func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
 		ID: "customers", Type: "TABLE", DataSourceID: customerSourceID, TableID: customerTableID, Alias: "c",
 		Projection: []string{"customer_id", "customer_name"}, SourceFilters: []dataset.SourceFilter{},
 	})
+	crossDocument.Joins = []dataset.Join{{
+		ID: "orders_customers", LeftNodeID: "orders", RightNodeID: "customers", JoinType: "LEFT", Cardinality: "UNKNOWN", ManualConfirmed: true,
+		Conditions: []dataset.JoinCondition{{
+			LeftExpression:  dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_status"},
+			Operator:        "EQUALS",
+			RightExpression: dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "customer_id"},
+		}},
+	}}
 	crossResolved, err := runtimeStore.Resolve(ctx, tenantID, crossDocument)
 	if err != nil || len(crossResolved.Nodes) != 2 || crossResolved.Nodes["customers"].SourceID != customerSourceID || crossResolved.Nodes["orders"].Watermark == "" || crossResolved.Nodes["customers"].Watermark == "" {
 		t.Fatalf("Resolve() cross plan=%#v err=%v", crossResolved, err)
+	}
+	// 草稿的类型是节点来源的派生摘要：加入跨源节点后保存为 CROSS_SOURCE，
+	// 再移除节点时能够回到 SINGLE_SOURCE，编码和已发布版本均不受影响。
+	crossDSL, err := json.Marshal(crossDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crossUpdated, err := service.Update(ctx, tenantID, actorID, created.ID, dataset.UpdateInput{
+		Name: updated.Name, Description: updated.Description, ExpectedVersion: updated.Version, DSL: crossDSL,
+	})
+	if err != nil || crossUpdated.Type != "CROSS_SOURCE" {
+		t.Fatalf("cross-source Update() record=%#v err=%v", crossUpdated, err)
+	}
+	updated, err = service.Update(ctx, tenantID, actorID, created.ID, dataset.UpdateInput{
+		Name: updated.Name, Description: updated.Description, ExpectedVersion: crossUpdated.Version, DSL: updated.DSL,
+	})
+	if err != nil || updated.Type != "SINGLE_SOURCE" {
+		t.Fatalf("single-source Update() record=%#v err=%v", updated, err)
 	}
 	queryID := uuid.NewString()
 	orderSubqueryID := uuid.NewString()
@@ -484,6 +563,128 @@ func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
 		t.Fatalf("publication validator calls=%d, want 2", validator.calls)
 	}
 
+	// 并发停用可能发生在保存的首次可用性检查之后。保存事务在固定依赖快照时必须
+	// 对版本和所属数据集持共享锁；停用提交后重新判断谓词并失败关闭，不能留下新依赖。
+	concurrentDependencyDSL := datasetExampleWithIdentity(t,
+		datasetExampleForPublishedVersion(t, publishedV2.ID),
+		"concurrent_disabled_consumer", "并发停用消费数据集", "并发停用时不得绑定历史发布版本",
+	)
+	ownerLocked := make(chan error, 1)
+	releaseOwner := make(chan struct{})
+	disableDone := make(chan error, 1)
+	go func() {
+		disableDone <- database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+			var status, publishedVersionID string
+			err := tx.QueryRow(ctx, `SELECT status,COALESCE(current_published_version_id::text,'')
+				FROM platform.datasets WHERE id::text=$1 AND deleted_at IS NULL FOR UPDATE`, created.ID).
+				Scan(&status, &publishedVersionID)
+			if err == nil && (status != "PUBLISHED" || publishedVersionID != publishedV2.ID) {
+				err = fmt.Errorf("unexpected upstream before concurrent disable: status=%s version=%s", status, publishedVersionID)
+			}
+			if err == nil {
+				_, err = tx.Exec(ctx, `UPDATE platform.datasets SET
+					status='DISABLED',current_published_version_id=NULL,
+					disabled_from_status='PUBLISHED',disabled_published_version_id=$1,
+					version=version+1,updated_by=$2 WHERE id::text=$3`, publishedV2.ID, actorID, created.ID)
+			}
+			ownerLocked <- err
+			if err != nil {
+				return err
+			}
+			select {
+			case <-releaseOwner:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	}()
+	if err := <-ownerLocked; err != nil {
+		if txErr := <-disableDone; txErr != nil && !errors.Is(txErr, err) {
+			t.Logf("concurrent disable transaction error=%v", txErr)
+		}
+		t.Fatalf("lock upstream for concurrent disable: %v", err)
+	}
+	createDone := make(chan error, 1)
+	go func() {
+		_, err := service.Create(ctx, tenantID, actorID, dataset.CreateInput{
+			Code: "concurrent_disabled_consumer", Name: "并发停用消费数据集",
+			Description: "并发停用时不得绑定历史发布版本", Type: "SINGLE_SOURCE", DSL: concurrentDependencyDSL,
+		})
+		createDone <- err
+	}()
+	lockWaitCtx, cancelLockWait := context.WithTimeout(ctx, 5*time.Second)
+	lockWaitErr := waitForDatasetDependencyShareLock(lockWaitCtx, pool)
+	cancelLockWait()
+	close(releaseOwner)
+	disableErr := <-disableDone
+	createErr := <-createDone
+	if lockWaitErr != nil {
+		t.Fatalf("dependency snapshot did not wait for the owner lock: %v", lockWaitErr)
+	}
+	if disableErr != nil {
+		t.Fatalf("concurrent disable transaction: %v", disableErr)
+	}
+	if !errors.Is(createErr, dataset.ErrInvalidDocument) {
+		t.Fatalf("Create(concurrent disabled upstream) error=%v, want ErrInvalidDocument", createErr)
+	}
+	concurrentlyDisabled, err := service.Get(ctx, tenantID, created.ID)
+	if err != nil || concurrentlyDisabled.Status != "DISABLED" {
+		t.Fatalf("Get() after concurrent disable record=%#v err=%v", concurrentlyDisabled, err)
+	}
+	restoredAfterConcurrentDisable, err := service.Restore(ctx, tenantID, actorID, created.ID,
+		dataset.LifecycleInput{ExpectedVersion: concurrentlyDisabled.Version})
+	if err != nil || restoredAfterConcurrentDisable.Status != "PUBLISHED" ||
+		restoredAfterConcurrentDisable.CurrentPublishedVersionID != publishedV2.ID {
+		t.Fatalf("Restore() after concurrent disable record=%#v err=%v", restoredAfterConcurrentDisable, err)
+	}
+	afterSecondPublish = restoredAfterConcurrentDisable
+
+	// 目录级停用保留不可变发布快照但阻止精确版本继续绑定；恢复后重新挂接同一版本。
+	disabledPublished, err := service.Disable(ctx, tenantID, actorID, created.ID,
+		dataset.LifecycleInput{ExpectedVersion: afterSecondPublish.Version})
+	if err != nil || disabledPublished.Status != "DISABLED" || disabledPublished.CurrentPublishedVersionID != "" ||
+		disabledPublished.Version != afterSecondPublish.Version+1 {
+		t.Fatalf("Disable(PUBLISHED) record=%#v err=%v", disabledPublished, err)
+	}
+	if err := datasetStore.ValidateVersionDependencies(ctx, tenantID, created.ID, publishedV2.ID); !errors.Is(err, dataset.ErrVersionUnavailable) {
+		t.Fatalf("disabled ValidateVersionDependencies() error=%v, want ErrVersionUnavailable", err)
+	}
+	disabledDependencyDSL := datasetExampleWithIdentity(t,
+		datasetExampleForPublishedVersion(t, publishedV2.ID),
+		"disabled_upstream_consumer", "停用上游消费数据集", "不得绑定已停用数据集的历史发布版本",
+	)
+	if _, err := service.Create(ctx, tenantID, actorID, dataset.CreateInput{
+		Code: "disabled_upstream_consumer", Name: "停用上游消费数据集",
+		Description: "不得绑定已停用数据集的历史发布版本", Type: "SINGLE_SOURCE", DSL: disabledDependencyDSL,
+	}); !errors.Is(err, dataset.ErrInvalidDocument) {
+		t.Fatalf("Create(disabled upstream) error=%v, want ErrInvalidDocument", err)
+	}
+	restoredPublished, err := service.Restore(ctx, tenantID, actorID, created.ID,
+		dataset.LifecycleInput{ExpectedVersion: disabledPublished.Version})
+	if err != nil || restoredPublished.Status != "PUBLISHED" || restoredPublished.CurrentPublishedVersionID != publishedV2.ID ||
+		restoredPublished.Version != disabledPublished.Version+1 {
+		t.Fatalf("Restore(PUBLISHED) record=%#v err=%v", restoredPublished, err)
+	}
+	if err := datasetStore.ValidateVersionDependencies(ctx, tenantID, created.ID, publishedV2.ID); err != nil {
+		t.Fatalf("restored ValidateVersionDependencies() error=%v", err)
+	}
+	afterSecondPublish = restoredPublished
+
+	// 已有当前发布版本时，回滚只产生新的草稿历史，不移动或改写发布指针。
+	rollbackWithPublished, err := service.RollbackRevision(ctx, tenantID, actorID, created.ID, createRevision.ID,
+		dataset.RollbackRevisionInput{ExpectedVersion: afterSecondPublish.Version})
+	if err != nil || rollbackWithPublished.Version != afterSecondPublish.Version+1 ||
+		rollbackWithPublished.CurrentPublishedVersionID != publishedV2.ID || rollbackWithPublished.Status != "PUBLISHED" ||
+		rollbackWithPublished.DSLHash != createRevision.DSLHash {
+		t.Fatalf("RollbackRevision() with current publication record=%#v err=%v", rollbackWithPublished, err)
+	}
+	versions, versionTotal, err = service.ListVersions(ctx, tenantID, created.ID, 20, 0)
+	if err != nil || versionTotal != 2 || len(versions) != 2 || versions[0].ID != publishedV2.ID || versions[1].ID != published.ID {
+		t.Fatalf("published versions changed by draft rollback: versions=%#v total=%d err=%v", versions, versionTotal, err)
+	}
+	afterSecondPublish = rollbackWithPublished
+
 	assertTenantSQLRejected(t, ctx, pool, tenantID,
 		`UPDATE platform.dataset_versions SET status='STALE',dsl_json=jsonb_set(dsl_json,'{dataset,description}','\"被篡改\"'::jsonb) WHERE id::text=$1`, published.ID)
 	assertTenantSQLRejected(t, ctx, pool, tenantID,
@@ -492,6 +693,10 @@ func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
 		`INSERT INTO platform.dataset_fields(tenant_id,dataset_version_id,field_id,field_code,field_name,expression_json,canonical_type,field_role,ordinal_position) VALUES($1,$2,'forged_field','forged_field','伪造字段','{}','STRING','DIMENSION',999)`, tenantID, published.ID)
 	assertTenantSQLRejected(t, ctx, pool, tenantID,
 		`UPDATE platform.dataset_publish_idempotency SET response_json=jsonb_set(response_json,'{status}','\"STALE\"'::jsonb) WHERE dataset_id::text=$1 AND idempotency_key=$2`, created.ID, publishKey)
+	assertTenantSQLRejected(t, ctx, pool, tenantID,
+		`UPDATE platform.dataset_draft_revisions SET description='被篡改' WHERE id::text=$1`, createRevision.ID)
+	assertTenantSQLRejected(t, ctx, pool, tenantID,
+		`DELETE FROM platform.dataset_draft_revisions WHERE id::text=$1`, createRevision.ID)
 
 	// 当前发布版本失效时，版本状态和数据集指针必须在一个事务中同步收口。
 	staleVersion, err := service.TransitionVersion(ctx, tenantID, actorID, created.ID, publishedV2.ID, dataset.VersionTransitionInput{
@@ -504,6 +709,34 @@ func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
 	if err != nil || afterStale.Status != "STALE" || afterStale.CurrentPublishedVersionID != "" || afterStale.Version != afterSecondPublish.Version+1 {
 		t.Fatalf("dataset after stale=%#v err=%v", afterStale, err)
 	}
+
+	// 失效态同样可以停用并恢复到停用前状态；仍有精确版本下游占用时软删除必须失败关闭。
+	disabled, err := service.Disable(ctx, tenantID, actorID, created.ID, dataset.LifecycleInput{ExpectedVersion: afterStale.Version})
+	if err != nil || disabled.Status != "DISABLED" || disabled.CurrentPublishedVersionID != "" || disabled.Version != afterStale.Version+1 {
+		t.Fatalf("Disable() record=%#v err=%v", disabled, err)
+	}
+	restoredStale, err := service.Restore(ctx, tenantID, actorID, created.ID, dataset.LifecycleInput{ExpectedVersion: disabled.Version})
+	if err != nil || restoredStale.Status != "STALE" || restoredStale.CurrentPublishedVersionID != "" || restoredStale.Version != disabled.Version+1 {
+		t.Fatalf("Restore(STALE) record=%#v err=%v", restoredStale, err)
+	}
+	if err := service.Delete(ctx, tenantID, actorID, created.ID, dataset.LifecycleInput{ExpectedVersion: restoredStale.Version}); !errors.Is(err, dataset.ErrInUse) {
+		t.Fatalf("Delete(in-use) error=%v, want ErrInUse", err)
+	}
+
+	// 未发布且无下游占用的数据集可以软删除，并立即从加载和目录接口隐藏。
+	deletableDSL := datasetExampleWithIdentity(t, raw, "temporary_dataset", "临时数据集", "用于验证软删除")
+	deletable, err := service.Create(ctx, tenantID, actorID, dataset.CreateInput{
+		Code: "temporary_dataset", Name: "临时数据集", Description: "用于验证软删除", Type: "SINGLE_SOURCE", DSL: deletableDSL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Delete(ctx, tenantID, actorID, deletable.ID, dataset.LifecycleInput{ExpectedVersion: deletable.Version}); err != nil {
+		t.Fatalf("Delete() error=%v", err)
+	}
+	if _, err := service.Get(ctx, tenantID, deletable.ID); !errors.Is(err, dataset.ErrNotFound) {
+		t.Fatalf("Get(deleted) error=%v, want ErrNotFound", err)
+	}
 }
 
 func datasetExampleWithDescription(t *testing.T, raw []byte, description string) []byte {
@@ -513,6 +746,21 @@ func datasetExampleWithDescription(t *testing.T, raw []byte, description string)
 		t.Fatal(err)
 	}
 	document["dataset"].(map[string]any)["description"] = description
+	updated, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return updated
+}
+
+func datasetExampleWithIdentity(t *testing.T, raw []byte, code, name, description string) []byte {
+	t.Helper()
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	descriptor := document["dataset"].(map[string]any)
+	descriptor["code"], descriptor["name"], descriptor["description"] = code, name, description
 	updated, err := json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
@@ -589,6 +837,28 @@ func assertTenantSQLRejected(t *testing.T, ctx context.Context, pool *pgxpool.Po
 	})
 	if err == nil {
 		t.Fatalf("数据库接受了应被不可变约束拒绝的写入：%s", statement)
+	}
+}
+
+func waitForDatasetDependencyShareLock(ctx context.Context, pool *pgxpool.Pool) error {
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1 FROM pg_stat_activity
+			WHERE datname=current_database() AND pid<>pg_backend_pid()
+			  AND state='active' AND wait_event_type='Lock'
+			  AND position('FOR SHARE OF version,owner' in query)>0
+		)`).Scan(&waiting); err != nil {
+			return err
+		}
+		if waiting {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 

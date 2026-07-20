@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strings"
@@ -266,16 +267,20 @@ func (e *Executor) loadNode(ctx context.Context, queryID string, document datase
 	connector := e.connectors[resolved.SourceType]
 	result, err := connector.Query(ctx, source, queryruntime.FederatedSubqueryID(queryID, node.ID), compiled.SQL, compiled.Args, compiled.MaxRows)
 	if err != nil {
+		slog.ErrorContext(ctx, "federated source query failed", "query_id", queryID, "node_id", node.ID, "source_id", source.ID, "error", err)
 		return filequery.NodeTableData{}, err
 	}
 	if result.RowCount != len(result.Rows) || result.RowCount > rowLimit {
+		slog.ErrorContext(ctx, "federated source row shape is invalid", "query_id", queryID, "node_id", node.ID, "reported_rows", result.RowCount, "actual_rows", len(result.Rows), "row_limit", rowLimit)
 		return filequery.NodeTableData{}, ErrSourceRowLimit
 	}
 	if len(result.Columns) != len(node.Projection) {
+		slog.ErrorContext(ctx, "federated source column count is invalid", "query_id", queryID, "node_id", node.ID, "actual_columns", result.Columns, "expected_columns", node.Projection)
 		return filequery.NodeTableData{}, ErrInvalidSourceShape
 	}
 	for index, name := range node.Projection {
 		if !strings.EqualFold(result.Columns[index], name) {
+			slog.ErrorContext(ctx, "federated source column order is invalid", "query_id", queryID, "node_id", node.ID, "actual_columns", result.Columns, "expected_columns", node.Projection)
 			return filequery.NodeTableData{}, ErrInvalidSourceShape
 		}
 	}
@@ -317,15 +322,20 @@ func normalizeValue(value any, canonicalType string) (any, error) {
 		switch number := value.(type) {
 		case json.Number:
 			parsed, err := number.Int64()
-			if err != nil {
-				return nil, errors.New("integer source value is invalid")
+			if err == nil {
+				return parsed, nil
 			}
-			return parsed, nil
+			// Oracle NUMBER 既可表示整数也可表示定点小数；元数据无法仅凭类型名
+			// 判定精度时保留合法 json.Number，避免把 SUM(DECIMAL) 误判为整数。
+			if _, decimalErr := number.Float64(); decimalErr != nil {
+				return nil, errors.New("numeric source value is invalid")
+			}
+			return number, nil
 		case float64:
-			if math.Trunc(number) != number || number > math.MaxInt64 || number < math.MinInt64 {
-				return nil, errors.New("integer source value is outside the supported range")
+			if math.Trunc(number) == number && number <= math.MaxInt64 && number >= math.MinInt64 {
+				return int64(number), nil
 			}
-			return int64(number), nil
+			return number, nil
 		}
 	case "DECIMAL":
 		if number, ok := value.(json.Number); ok {

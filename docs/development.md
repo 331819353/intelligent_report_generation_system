@@ -84,19 +84,15 @@ export AI_MAX_ATTEMPTS="1"
 export AI_CONFIDENCE_THRESHOLD="0.8"
 ```
 
-上述超时用于本地 `deepseek-v3` 元数据验收；应按实际 Provider 延迟调整，并始终保持 `AI_REQUEST_TIMEOUT < API_WRITE_TIMEOUT`。批量加工仍应使用持久化异步任务，不能通过无限放大同步 HTTP 超时替代。未设置 `AI_API_KEY` 时元数据 AI 接口明确降级为不可用，非 AI 功能继续运行。元数据 AI API、结构化输出约束和审计字段见 `docs/api-metadata-ai.md`。
+上述超时用于本地 `deepseek-v3` 验收；应按实际 Provider 延迟调整，并始终保持 `AI_REQUEST_TIMEOUT < API_WRITE_TIMEOUT`。批量加工仍应使用持久化异步任务，不能通过无限放大同步 HTTP 超时替代。未设置 `AI_API_KEY` 时，元数据补全和数据集 DAG 提案等 AI 接口明确降级为不可用，非 AI 功能继续运行。元数据 AI API、数据集 API、结构化输出约束和审计字段分别见 `docs/api-metadata-ai.md`、`docs/api-datasets.md` 和 `docs/ai-orchestration.md`。
 
 ## 启动 API
 
 ```bash
-set -a
-. ./.env.example
-. ./.env
-set +a
 make run-api
 ```
 
-当前配置直接从进程环境变量读取；本地启动先加载示例默认值，再由忽略提交的 `.env` 覆盖模型密钥和 Provider 专属超时。生产环境应由密钥系统或容器编排注入变量。
+当前配置直接从进程环境变量读取；本地 `run-api`、`run-worker` 和 `seed-dev` 目标先加载示例默认值，再由忽略提交的 `.env` 覆盖模型密钥和 Provider 专属超时。生产环境不使用这些本地目标，应由密钥系统或容器编排注入变量。
 
 API 默认监听 `:8080`：
 
@@ -117,7 +113,7 @@ make run-worker
 make seed-dev
 ```
 
-默认租户和账号来自 `.env.example`。认证接口参见 [身份认证 API](api-auth.md)。
+默认租户和账号来自 `.env.example`。这个仅限开发环境的 Seed 会显式启用租户通用 AI，并在保留已有用途的前提下合并 `METADATA_COMPLETION` 和 `DATASET_DAG_GENERATION`；重复执行且策略已满足要求时不会空转策略版本。通用 AI 启用后指标创建提案立即可用，无需再授权 `METRIC_AUTHORING`。生产新租户始终默认禁用 AI，且只预置 `METADATA_COMPLETION`；模型密钥不等于启用通用 AI，仍必须由受信管理流程配置总开关与配额。认证接口参见 [身份认证 API](api-auth.md)。
 
 ## 验证
 

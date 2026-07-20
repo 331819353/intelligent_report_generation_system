@@ -67,6 +67,22 @@ func (s *Service) Get(ctx context.Context, tenantID, id string) (Source, error) 
 	return s.repo.Get(ctx, tenantID, id)
 }
 
+// SampleTable 通过受控元数据采样接口读取少量真实数据，不接受调用方传入 SQL。
+func (s *Service) SampleTable(ctx context.Context, tenantID, sourceID string, table MetadataTable, maxRows int) (SampleResult, error) {
+	if maxRows < 1 || maxRows > 5 {
+		return SampleResult{}, errors.New("sample row limit must be between 1 and 5")
+	}
+	source, connector, err := s.load(ctx, tenantID, sourceID)
+	if err != nil {
+		return SampleResult{}, err
+	}
+	sampler, ok := connector.(MetadataSampler)
+	if !ok {
+		return SampleResult{}, errors.New("connector does not support table sampling")
+	}
+	return sampler.Sample(ctx, source, table, maxRows)
+}
+
 // Update 仅允许修改非同步、非删除状态的数据源，并重置为待验证草稿。
 func (s *Service) Update(ctx context.Context, source Source) (Source, error) {
 	current, err := s.repo.Get(ctx, source.TenantID, source.ID)

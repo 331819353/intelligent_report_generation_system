@@ -12,10 +12,32 @@ import (
 	"intelligent-report-generation-system/internal/platform/database"
 )
 
-type PostgresStore struct{ pool *pgxpool.Pool }
+// EnrichmentCommitSink 在元数据表完成整表补全的同一事务内提交下游产物。
+// 实现方不得自行提交或回滚 tx。
+type EnrichmentCommitSink interface {
+	EnsureMappedDatasetTx(ctx context.Context, tx pgx.Tx, tenantID, actorID, tableID string) error
+}
+
+type PostgresStore struct {
+	pool                 *pgxpool.Pool
+	enrichmentCommitSink EnrichmentCommitSink
+}
 
 // NewPostgresStore 创建智能补全任务与建议的 PostgreSQL 存储。
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
+
+// SetEnrichmentCommitSink 注入整表补全成功后需在当前事务内提交的下游产物。
+func (s *PostgresStore) SetEnrichmentCommitSink(sink EnrichmentCommitSink) {
+	s.enrichmentCommitSink = sink
+}
+
+// ensureMappedDatasetTx 将可选 sink 的调用集中在一个可独立验证的边界；nil sink 保持兼容。
+func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, tenantID, actorID, tableID string) error {
+	if s.enrichmentCommitSink == nil {
+		return nil
+	}
+	return s.enrichmentCommitSink.EnsureMappedDatasetTx(ctx, tx, tenantID, actorID, tableID)
+}
 
 // LoadInput 加载目标表及字段的技术元数据、业务版本和人工锁定状态。
 func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string) (input CompletionInput, err error) {
@@ -222,6 +244,11 @@ func (s *PostgresStore) SaveResult(ctx context.Context, tenantID, actorID string
 		}
 		if tag.RowsAffected() != 1 {
 			return ErrStructureChanged
+		}
+		// 完整补全 marker 已原子推进后再生成映射数据集；sink 失败会使建议、marker
+		// 与映射数据集一并回滚，且任务不会被标记为成功。
+		if err := s.ensureMappedDatasetTx(ctx, tx, tenantID, actorID, job.TableID); err != nil {
+			return err
 		}
 		job.Status = "SUCCEEDED"
 		job.ErrorCode = ""
