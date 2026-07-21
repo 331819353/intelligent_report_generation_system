@@ -120,6 +120,8 @@ def test_mysql_connection_uses_utf8mb4_and_does_not_reuse_old_transaction_snapsh
     "SELECT 1; DELETE FROM users",
     "DROP TABLE users",
     "CALL dangerous_procedure()",
+    "WITH selected AS (SELECT id FROM users) REPLACE INTO archived_users SELECT * FROM selected",
+    "SELECT REPLACE FROM users",
 ])
 def test_read_only_guard_rejects_bypasses(sql: str) -> None:
     with pytest.raises(Exception):
@@ -129,3 +131,5 @@ def test_read_only_guard_rejects_bypasses(sql: str) -> None:
 def test_read_only_guard_accepts_select_and_cte() -> None:
     validate_read_only_sql("SELECT 'delete is text' AS note FROM users")
     validate_read_only_sql("WITH selected AS (SELECT id FROM users) SELECT * FROM selected")
+    validate_read_only_sql("SELECT REPLACE(name, 'old', 'new') FROM users")
+    validate_read_only_sql("SELECT REPLACE (name, 'old', 'new') FROM users")

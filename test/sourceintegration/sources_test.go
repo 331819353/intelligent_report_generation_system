@@ -128,6 +128,49 @@ func TestSecureCompilerQueriesMySQLAndOracle(t *testing.T) {
 	}
 }
 
+func TestTextExpressionCanaryQueriesMySQLAndOracle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cases := []struct {
+		name, schema, table, field string
+		dialect                    querycompiler.Dialect
+		connection                 map[string]any
+	}{
+		{name: "mysql", schema: "report_source", table: "customers", field: "customer_id", dialect: querycompiler.MySQL, connection: map[string]any{"source_type": "MYSQL", "host": "mysql", "port": 3306, "database": "report_source", "username": "report_reader", "password": "local_mysql_reader_password"}},
+		{name: "oracle", schema: "REPORT_READER", table: "ORDERS", field: "ORDER_ID", dialect: querycompiler.Oracle, connection: map[string]any{"source_type": "ORACLE", "host": "oracle", "port": 1521, "database": "FREEPDB1", "username": "report_reader", "password": "local_oracle_reader_password"}},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			document := executableDocument(item.field)
+			field := dataset.Expression{Type: "FIELD_REF", NodeID: "source", Field: item.field}
+			cast := dataset.Expression{Type: "CAST", TargetType: "STRING", Argument: &field}
+			trim := dataset.Expression{Type: "TRIM", Argument: &cast}
+			substring := dataset.Expression{Type: "SUBSTRING", Arguments: []dataset.Expression{trim, {Type: "LITERAL", Value: 1}, {Type: "LITERAL", Value: 1}}}
+			document.Fields[0].Expression = dataset.Expression{Type: "REPLACE", Arguments: []dataset.Expression{{Type: "UPPER", Argument: &substring}, {Type: "LITERAL", Value: "1"}, {Type: "LITERAL", Value: "X"}}}
+			document.Fields[0].CanonicalType = "STRING"
+			document.Sorts = nil
+			compiled, err := querycompiler.Compile(querycompiler.Input{
+				Document: document, Dialect: item.dialect, MaxRows: 10, Parameters: map[string]any{"minimum_id": 1},
+				Tables: map[string]querycompiler.TableRef{"source": {NodeID: "source", Schema: item.schema, Name: item.table, Columns: map[string]bool{item.field: true}}},
+				Scope:  policy.UserScope{TenantID: "source-test", UserID: "source-test", Attributes: map[string]any{}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := query(t, ctx, item.connection, compiled.SQL, compiled.Args, compiled.MaxRows)
+			found := false
+			for _, row := range out.Rows {
+				if len(row) == 1 && row[0] == "X" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("text canary rows=%#v sql=%s", out.Rows, compiled.SQL)
+			}
+		})
+	}
+}
+
 func TestJoinProbeCompilerQueriesMySQLAndOracle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

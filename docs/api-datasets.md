@@ -57,11 +57,12 @@
     ],
     "joins": [],
     "groups": [],
+    "transforms": [],
     "end": {
       "name": "最终输出",
       "input": { "kind": "NODE", "id": "node_1" },
       "outputs": [
-        { "nodeId": "node_1", "column": "customer_id", "name": "客户编号", "code": "customer_id" }
+        { "nodeId": "node_1", "column": "customer_id", "key": "node_1.customer_id", "name": "客户编号", "code": "customer_id" }
       ]
     }
   }
@@ -78,7 +79,7 @@
 {
   "requestId": "9c66e944-436e-4b58-bfe5-621323bd7d18",
   "proposal": {
-    "schemaVersion": "2.2",
+    "schemaVersion": "2.3",
     "mode": "MODIFY",
     "summary": "在客户明细中增加地区输出",
     "assumptions": [],
@@ -129,13 +130,14 @@
       ],
       "joins": [],
       "groups": [],
+      "transforms": [],
       "end": {
         "name": "最终输出",
         "input": { "kind": "NODE", "id": "node_1" },
         "outputs": [
-          { "nodeId": "node_1", "column": "customer_id", "name": "客户编号", "code": "customer_id" },
-          { "nodeId": "node_1", "column": "customer_name", "name": "客户名称", "code": "customer_name" },
-          { "nodeId": "node_1", "column": "region", "name": "客户地区", "code": "customer_region" }
+          { "nodeId": "node_1", "column": "customer_id", "key": "node_1.customer_id", "name": "客户编号", "code": "customer_id" },
+          { "nodeId": "node_1", "column": "customer_name", "key": "node_1.customer_name", "name": "客户名称", "code": "customer_name" },
+          { "nodeId": "node_1", "column": "region", "key": "node_1.region", "name": "客户地区", "code": "customer_region" }
         ]
       }
     }

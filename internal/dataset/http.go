@@ -16,6 +16,7 @@ import (
 type Previewer interface {
 	Preview(context.Context, string, string, string, PreviewInput) (PreviewResult, error)
 	PreviewDraft(context.Context, string, string, string, DraftPreviewInput) (DraftPreviewResult, error)
+	PreviewCandidate(context.Context, string, string, CandidatePreviewInput) (CandidatePreviewResult, error)
 	PreviewVersion(context.Context, string, string, string, string, PreviewInput) (PreviewResult, error)
 	PreviewRevision(context.Context, string, string, string, string, PreviewInput) (PreviewResult, error)
 	Cancel(context.Context, string, string, string, string) error
@@ -38,6 +39,11 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		assetRead := access.Require(permissions, "DATA_ASSET", "READ", nil, next)
 		datasetRead := access.Require(permissions, "DATASET", "READ", objectID, assetRead)
 		datasetManage := access.Require(permissions, "DATASET", "MANAGE", objectID, datasetRead)
+		return auth.RequireAccessToken(authService, datasetManage)
+	}
+	protectCandidatePreview := func(next http.Handler) http.Handler {
+		assetRead := access.Require(permissions, "DATA_ASSET", "READ", nil, next)
+		datasetManage := access.Require(permissions, "DATASET", "MANAGE", nil, assetRead)
 		return auth.RequireAccessToken(authService, datasetManage)
 	}
 	mux.Handle("POST /api/v1/datasets/validate", protect("MANAGE", nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -260,6 +266,19 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		writeDatasetJSON(w, http.StatusOK, record)
 	})))
 	if len(previewer) > 0 && previewer[0] != nil {
+		mux.Handle("POST /api/v1/datasets/candidate/preview", noStore(protectCandidatePreview(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			var input CandidatePreviewInput
+			if !decodeRequest(w, r, &input) {
+				return
+			}
+			result, err := previewer[0].PreviewCandidate(r.Context(), claims.TenantID, claims.Subject, input)
+			if err != nil {
+				writeDatasetError(w, err)
+				return
+			}
+			writeDatasetJSON(w, http.StatusOK, result)
+		}))))
 		mux.Handle("POST /api/v1/datasets/{id}/draft/preview", noStore(protectDraftPreview(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims, _ := auth.ClaimsFromContext(r.Context())
 			var input DraftPreviewInput

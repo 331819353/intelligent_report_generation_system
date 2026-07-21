@@ -10,9 +10,9 @@ func changeIntentOutputSchema(catalog []CatalogTable) map[string]any {
 			tableIDs = append(tableIDs, table.ID)
 		}
 	}
-	kind := map[string]any{"type": "string", "enum": []string{"DATASET", "NODE", "JOIN", "GROUP", "END"}}
+	kind := map[string]any{"type": "string", "enum": []string{"DATASET", "NODE", "JOIN", "GROUP", "TRANSFORM", "END"}}
 	input := strictObject([]string{"kind", "id"}, map[string]any{
-		"kind": map[string]any{"type": "string", "enum": []string{"NODE", "JOIN", "GROUP"}},
+		"kind": map[string]any{"type": "string", "enum": []string{"NODE", "JOIN", "GROUP", "TRANSFORM"}},
 		"id":   identifier,
 	})
 	componentRef := strictObject([]string{"componentKind", "componentId"}, map[string]any{
@@ -38,7 +38,7 @@ func changeIntentOutputSchema(catalog []CatalogTable) map[string]any {
 			"type": "array", "maxItems": 8,
 			"items": map[string]any{"type": "string", "enum": []string{
 				"name", "description", "tableId", "alias", "selectedColumns",
-				"left", "right", "joinType", "conditions", "input", "dimensions", "metrics", "outputs",
+				"left", "right", "joinType", "conditions", "input", "dimensions", "metrics", "family", "componentType", "rules", "outputs",
 			}},
 		},
 		"inputChanges": map[string]any{"type": "array", "maxItems": 3, "items": inputChange},
@@ -94,8 +94,9 @@ func proposalOutputSchema(catalog []CatalogTable) map[string]any {
 		}
 	}
 	column := map[string]any{"type": "string", "enum": allColumns}
+	producedColumn := map[string]any{"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_$#]{0,127}$"}
 	input := strictObject([]string{"kind", "id"}, map[string]any{
-		"kind": map[string]any{"type": "string", "enum": []string{"NODE", "JOIN", "GROUP"}},
+		"kind": map[string]any{"type": "string", "enum": []string{"NODE", "JOIN", "GROUP", "TRANSFORM"}},
 		"id":   identifier,
 	})
 	bindingProperties := map[string]any{
@@ -143,9 +144,14 @@ func proposalOutputSchema(catalog []CatalogTable) map[string]any {
 		},
 	})
 	dimensionProperties := cloneSchemaMap(bindingProperties)
+	// GROUP can consume a derived TRANSFORM field encoded as transformId.outputId. Physical
+	// node projections remain asset-enumerated; the local graph validator proves every derived
+	// key is actually produced by the group's input before accepting it.
+	dimensionProperties["column"] = producedColumn
 	dimensionProperties["grouping"] = map[string]any{"type": "string", "enum": []string{"", "DAY", "WEEK", "MONTH", "QUARTER", "YEAR"}}
 	dimension := strictObject([]string{"nodeId", "column", "grouping"}, dimensionProperties)
 	metricProperties := cloneSchemaMap(bindingProperties)
+	metricProperties["column"] = producedColumn
 	metricProperties["aggregation"] = map[string]any{"type": "string", "enum": []string{"SUM", "AVG", "COUNT", "COUNT_DISTINCT", "MIN", "MAX"}}
 	metric := strictObject([]string{"nodeId", "column", "aggregation"}, metricProperties)
 	group := strictObject([]string{"id", "name", "input", "dimensions", "metrics"}, map[string]any{
@@ -159,10 +165,48 @@ func proposalOutputSchema(catalog []CatalogTable) map[string]any {
 			"type": "array", "minItems": 1, "maxItems": 128, "items": metric,
 		},
 	})
+	fieldKey := map[string]any{"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}\\.[A-Za-z][A-Za-z0-9_$#]{0,127}$"}
+	conditionValue := strictObject([]string{"id", "mode", "value"}, map[string]any{
+		"id":    identifier,
+		"mode":  map[string]any{"type": "string", "enum": []string{"LITERAL", "FIELD"}},
+		"value": map[string]any{"type": "string", "minLength": 1, "maxLength": 500},
+	})
+	transformOutput := strictObject([]string{"id", "name", "code", "canonicalType"}, map[string]any{
+		"id":            identifier,
+		"name":          map[string]any{"type": "string", "minLength": 1, "maxLength": 200},
+		"code":          identifier,
+		"canonicalType": map[string]any{"type": "string", "enum": []string{"STRING", "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "DATETIME"}},
+	})
+	transformRule := strictObject([]string{"id", "operation", "inputKeys", "output", "unit", "targetType", "matchValue", "thenValue", "elseValue", "conditionOperator", "conditionValues", "fallbackMode", "fallbackValue", "separator", "precision", "start", "length", "searchValue", "replacementValue", "replaceSourceKey"}, map[string]any{
+		"id":         identifier,
+		"operation":  map[string]any{"type": "string", "enum": []string{"DATE_FORMAT", "CAST", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "ROUND", "ABS", "FLOOR", "CEIL", "CONCAT", "COALESCE", "CASE", "SUBSTRING", "TRIM", "UPPER", "LOWER", "REPLACE"}},
+		"inputKeys":  map[string]any{"type": "array", "minItems": 1, "maxItems": 16, "items": fieldKey},
+		"output":     transformOutput,
+		"unit":       map[string]any{"type": "string", "enum": []string{"", "YEAR", "MONTH", "QUARTER", "DAY"}},
+		"targetType": map[string]any{"type": "string", "enum": []string{"", "STRING", "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "DATETIME"}},
+		"matchValue": shortText(500), "thenValue": shortText(500), "elseValue": shortText(500),
+		"conditionOperator": map[string]any{"type": "string", "enum": []string{"", "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "CONTAINS", "NOT_CONTAINS", "IN", "IS_NULL", "IS_NOT_NULL"}},
+		"conditionValues":   map[string]any{"type": "array", "maxItems": 64, "items": conditionValue},
+		"fallbackMode":      map[string]any{"type": "string", "enum": []string{"", "LITERAL", "FIELD"}},
+		"fallbackValue":     shortText(500), "separator": shortText(100),
+		"precision":   map[string]any{"type": "integer", "minimum": -10, "maximum": 10},
+		"start":       map[string]any{"type": "integer", "minimum": 1, "maximum": 1000000},
+		"length":      map[string]any{"type": "integer", "minimum": 0, "maximum": 1000000},
+		"searchValue": shortText(500), "replacementValue": shortText(500), "replaceSourceKey": shortText(256),
+	})
+	transform := strictObject([]string{"id", "name", "family", "componentType", "input", "rules"}, map[string]any{
+		"id":            identifier,
+		"name":          map[string]any{"type": "string", "minLength": 1, "maxLength": 200},
+		"family":        map[string]any{"type": "string", "enum": []string{"TEXT", "NUMBER", "DATE", "NULL", "CAST", "CONDITION"}},
+		"componentType": map[string]any{"type": "string", "enum": []string{"TEXT_UPPER", "TEXT_TRIM", "TEXT_REPLACE", "TEXT_LOWER", "TEXT_SUBSTRING", "TEXT_CONCAT", "NUMBER_ABSOLUTE", "NUMBER_ROUNDING", "NUMBER_ARITHMETIC", "DATE_FORMAT", "NULL", "CAST", "CONDITION"}},
+		"input":         input,
+		"rules":         map[string]any{"type": "array", "minItems": 1, "maxItems": 64, "items": transformRule},
+	})
 	outputProperties := cloneSchemaMap(bindingProperties)
 	outputProperties["name"] = map[string]any{"type": "string", "minLength": 1, "maxLength": 200}
 	outputProperties["code"] = identifier
-	output := strictObject([]string{"nodeId", "column", "name", "code"}, outputProperties)
+	outputProperties["key"] = fieldKey
+	output := strictObject([]string{"nodeId", "column", "key", "name", "code"}, outputProperties)
 	end := strictObject([]string{"name", "input", "outputs"}, map[string]any{
 		"name":  map[string]any{"type": "string", "minLength": 1, "maxLength": 200},
 		"input": input,
@@ -170,15 +214,16 @@ func proposalOutputSchema(catalog []CatalogTable) map[string]any {
 			"type": "array", "minItems": 1, "maxItems": 512, "items": output,
 		},
 	})
-	plan := strictObject([]string{"dataset", "nodes", "joins", "groups", "end"}, map[string]any{
+	plan := strictObject([]string{"dataset", "nodes", "joins", "groups", "transforms", "end"}, map[string]any{
 		"dataset": strictObject([]string{"name", "description"}, map[string]any{
 			"name":        map[string]any{"type": "string", "minLength": 1, "maxLength": 200},
 			"description": shortText(2000),
 		}),
-		"nodes":  map[string]any{"type": "array", "minItems": 1, "maxItems": maxPlanNodes, "items": node},
-		"joins":  map[string]any{"type": "array", "maxItems": maxPlanComponents, "items": join},
-		"groups": map[string]any{"type": "array", "maxItems": maxPlanComponents, "items": group},
-		"end":    end,
+		"nodes":      map[string]any{"type": "array", "minItems": 1, "maxItems": maxPlanNodes, "items": node},
+		"joins":      map[string]any{"type": "array", "maxItems": maxPlanComponents, "items": join},
+		"groups":     map[string]any{"type": "array", "maxItems": maxPlanComponents, "items": group},
+		"transforms": map[string]any{"type": "array", "maxItems": maxPlanComponents, "items": transform},
+		"end":        end,
 	})
 	return strictObject([]string{"schemaVersion", "mode", "summary", "assumptions", "warnings", "plan"}, map[string]any{
 		"schemaVersion": map[string]any{"type": "string", "const": SchemaVersion},

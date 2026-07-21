@@ -309,6 +309,16 @@ func TestServicePlanBuildsAuditedProposalWithoutSamples(t *testing.T) {
 	if bytes.Contains(input.Request.ResponseSchema.Schema, []byte(`"uniqueItems"`)) {
 		t.Fatal("dataset proposal schema contains deepseek-v3 unsupported uniqueItems")
 	}
+	systemText := input.Request.Messages[0].Parts[0].Text
+	for _, expected := range []string{
+		"数据节点 → 源字段处理 → 关联前分组 → 关联 → 关联后分组 → 输出字段处理 → 结束节点",
+		"每个阶段可以是 0 个、1 个或多个组件",
+		"从 END 逆向遍历到每个 NODE",
+	} {
+		if !strings.Contains(systemText, expected) {
+			t.Fatalf("staged planner prompt does not contain %q: %s", expected, systemText)
+		}
+	}
 	userText := input.Request.Messages[1].Parts[0].Text
 	if strings.Contains(userText, "sampleRows") || strings.Contains(userText, "连接凭据") {
 		t.Fatalf("planner prompt leaked disallowed context: %s", userText)
@@ -403,6 +413,68 @@ func TestServicePlanRepairsOverBroadPostJoinGroupRemoval(t *testing.T) {
 	}
 	if len(result.Proposal.ChangeSet.Operations) != 2 {
 		t.Fatalf("canonical change review = %#v", result.Proposal.ChangeSet)
+	}
+}
+
+func TestServicePlanDiscardsUnrequestedDatasetMetadataRewrite(t *testing.T) {
+	current := proposalWithGroupsBeforeAndAfterJoin().Plan
+	changed := proposalAfterRemovingPostJoinGroup()
+	changed.Plan.Dataset.Name = "模型顺手重命名"
+	changed.Plan.Dataset.Description = "模型顺手改写说明"
+	invoker := &fakeInvoker{configured: true, results: []aiplatform.InvocationResult{
+		intentResult(t, removePostJoinGroupIntent(), "intent-valid"),
+		plannerResult(t, changed, "plan-valid"),
+	}}
+
+	result, err := NewService(plannerCatalog(), invoker).Plan(context.Background(), "tenant-1", "actor-1", "dataset-1", PlanRequest{
+		Instruction: "取消关联后的分组，其他配置保持不变",
+		Current:     &current,
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if len(invoker.inputs) != 2 || result.Proposal.Plan.Dataset != current.Dataset {
+		t.Fatalf("protected dataset metadata = %#v, calls = %d", result.Proposal.Plan.Dataset, len(invoker.inputs))
+	}
+}
+
+func TestPreserveProtectedDatasetMetadataKeepsGeneratedNameForUnnamedDraft(t *testing.T) {
+	current := proposalWithGroupsBeforeAndAfterJoin().Plan
+	current.Dataset.Name = ""
+	proposal := cloneGraphPlan(current)
+	proposal.Dataset.Name = "按地区统计客户数量"
+	proposal.Dataset.Description = "模型生成的说明"
+
+	protected := preserveProtectedDatasetMetadata(current, proposal, ChangeSet{Operations: []ChangeOperation{}, FieldChanges: []FieldChange{}})
+	if protected.Dataset.Name != "按地区统计客户数量" || protected.Dataset.Description != current.Dataset.Description {
+		t.Fatalf("unnamed draft metadata = %#v", protected.Dataset)
+	}
+}
+
+func TestServicePlanAllowsGeneratedNameForUnnamedDraftWithoutExpandingChangeSet(t *testing.T) {
+	current := proposalWithGroupsBeforeAndAfterJoin().Plan
+	current.Dataset.Name = ""
+	changed := proposalAfterRemovingPostJoinGroup()
+	changed.Plan.Dataset.Name = "按地区统计客户数量"
+	invoker := &fakeInvoker{configured: true, results: []aiplatform.InvocationResult{
+		intentResult(t, removePostJoinGroupIntent(), "intent-valid"),
+		plannerResult(t, changed, "plan-valid"),
+	}}
+
+	result, err := NewService(plannerCatalog(), invoker).Plan(context.Background(), "tenant-1", "actor-1", "dataset-1", PlanRequest{
+		Instruction: "取消关联后的分组，其他配置保持不变",
+		Current:     &current,
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if result.Proposal.Plan.Dataset.Name != "按地区统计客户数量" || len(result.Proposal.ChangeSet.Operations) != 2 {
+		t.Fatalf("unnamed draft result = %#v", result.Proposal)
+	}
+	for _, operation := range result.Proposal.ChangeSet.Operations {
+		if operation.ComponentKind == "DATASET" {
+			t.Fatalf("generated draft name expanded changeSet: %#v", result.Proposal.ChangeSet)
+		}
 	}
 }
 
@@ -595,6 +667,60 @@ func TestServicePlanStopsForAmbiguousModificationBeforePlanner(t *testing.T) {
 	var clarificationErr *ClarificationRequiredError
 	if !errors.As(err, &clarificationErr) || clarificationErr.Question != clarify.Question || len(invoker.inputs) != 1 {
 		t.Fatalf("clarification error/calls = %v/%d", err, len(invoker.inputs))
+	}
+}
+
+func TestServicePlanRepairsInvalidChangeIntentOnce(t *testing.T) {
+	current := proposalWithGroupsBeforeAndAfterJoin().Plan
+	invalidIntent := removePostJoinGroupIntent()
+	invalidIntent.ChangeSet.Operations[0].ComponentID = "group_missing"
+	invoker := &fakeInvoker{configured: true, results: []aiplatform.InvocationResult{
+		intentResult(t, invalidIntent, "intent-invalid"),
+		intentResult(t, removePostJoinGroupIntent(), "intent-repaired"),
+		plannerResult(t, proposalAfterRemovingPostJoinGroup(), "plan-valid"),
+	}}
+
+	result, err := NewService(plannerCatalog(), invoker).Plan(context.Background(), "tenant-1", "actor-1", "dataset-1", PlanRequest{
+		Instruction: "取消关联后的分组，关联前的保持不变",
+		Current:     &current,
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if result.RequestID != "plan-valid" || len(invoker.inputs) != 3 {
+		t.Fatalf("intent repair result/calls = %#v/%d", result, len(invoker.inputs))
+	}
+	if invoker.inputs[0].PromptVersion != IntentPromptVersion || invoker.inputs[1].PromptVersion != IntentPromptVersion || invoker.inputs[2].PromptVersion != PromptVersion {
+		t.Fatalf("intent repair prompt versions = %#v", invoker.inputs)
+	}
+	repairMessages := invoker.inputs[1].Request.Messages
+	repairText := repairMessages[len(repairMessages)-1].Parts[0].Text
+	for _, expected := range []string{InvalidOutputReasonGroup, InvalidOutputStageIntentValidation, "group_missing", "READY 仍不能可靠成立时返回 CLARIFY"} {
+		if !strings.Contains(repairText, expected) {
+			t.Fatalf("intent repair message does not contain %q: %s", expected, repairText)
+		}
+	}
+}
+
+func TestServicePlanReportsIntentRepairMetadataWhenSecondIntentStillInvalid(t *testing.T) {
+	current := proposalWithGroupsBeforeAndAfterJoin().Plan
+	invalidIntent := removePostJoinGroupIntent()
+	invalidIntent.ChangeSet.Operations[0].ComponentID = "group_missing"
+	invoker := &fakeInvoker{configured: true, results: []aiplatform.InvocationResult{
+		intentResult(t, invalidIntent, "intent-invalid-1"),
+		intentResult(t, invalidIntent, "intent-invalid-2"),
+	}}
+
+	_, err := NewService(plannerCatalog(), invoker).Plan(context.Background(), "tenant-1", "actor-1", "dataset-1", PlanRequest{
+		Instruction: "取消关联后的分组",
+		Current:     &current,
+	})
+	var invalid *InvalidOutputError
+	if !errors.As(err, &invalid) || invalid.ReasonCode != InvalidOutputReasonGroup || invalid.Stage != InvalidOutputStageIntentValidation || !invalid.RepairAttempted || invalid.RequestID != "intent-invalid-2" {
+		t.Fatalf("intent repair metadata = %#v, error = %v", invalid, err)
+	}
+	if len(invoker.inputs) != 2 {
+		t.Fatalf("intent repair calls = %d", len(invoker.inputs))
 	}
 }
 
@@ -898,7 +1024,9 @@ func TestServicePlanOmitsRawInvalidBodyWhenRepairWouldExceedBudget(t *testing.T)
 		plannerResult(t, invalid, "request-invalid"),
 		plannerResult(t, testProposal(), "request-repaired"),
 	}}
-	service := NewService(plannerCatalog(), invoker, ServiceOptions{Timeout: time.Second, MaxProviderInputBytes: 32 << 10})
+	// The staged workflow checklist intentionally makes the trusted system prompt larger.
+	// Keep enough room for the base request while still proving the 12 KiB invalid body is omitted.
+	service := NewService(plannerCatalog(), invoker, ServiceOptions{Timeout: time.Second, MaxProviderInputBytes: 48 << 10})
 	if _, err := service.Plan(context.Background(), "tenant-1", "actor-1", "", PlanRequest{Instruction: "生成客户订单汇总"}); err != nil {
 		t.Fatalf("Plan() error = %v", err)
 	}

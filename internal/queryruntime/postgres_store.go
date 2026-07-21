@@ -155,8 +155,14 @@ func (s *PostgresStore) Start(ctx context.Context, run RunRecord) error {
 	if run.RunType == "" {
 		run.RunType = "PREVIEW"
 	}
-	if run.RunType != "PREVIEW" && run.RunType != "VALIDATION" {
+	if run.RunType != "PREVIEW" && run.RunType != "VALIDATION" && run.RunType != "COMPONENT_PREVIEW" {
 		return dataset.ErrPreviewInvalid
+	}
+	if run.CandidateCode != "" {
+		if run.DatasetID != "" || run.DatasetVersionID != "" || run.RunType != "COMPONENT_PREVIEW" {
+			return dataset.ErrPreviewInvalid
+		}
+		return s.startCandidate(ctx, run)
 	}
 	err := database.WithTenantTx(ctx, s.pool, run.TenantID, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO platform.query_runs(id,tenant_id,dataset_id,dataset_version_id,metric_id,metric_version_id,actor_user_id,data_source_id,run_type,plan_hash,parameter_hash,status)
@@ -185,6 +191,27 @@ func (s *PostgresStore) Start(ctx context.Context, run RunRecord) error {
 	return err
 }
 
+func (s *PostgresStore) startCandidate(ctx context.Context, run RunRecord) error {
+	err := database.WithTenantTx(ctx, s.pool, run.TenantID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.query_candidate_runs(id,tenant_id,candidate_code,actor_user_id,data_source_id,run_type,plan_hash,parameter_hash,status)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,'RUNNING')`, run.ID, run.TenantID, run.CandidateCode, run.ActorID, run.SourceID, run.RunType, run.PlanHash, run.ParameterHash); err != nil {
+			return err
+		}
+		for _, source := range run.Sources {
+			if _, err := tx.Exec(ctx, `INSERT INTO platform.query_candidate_run_sources(query_run_id,tenant_id,node_id,data_source_id,subquery_id,source_version,source_watermark,file_version_id)
+				VALUES($1,$2,$3,$4,$5,$6,$7,NULLIF($8,'')::uuid)`, run.ID, run.TenantID, source.NodeID, source.SourceID, source.SubqueryID, source.SourceVersion, source.Watermark, source.FileVersionID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	var pgError *pgconn.PgError
+	if errors.As(err, &pgError) && pgError.Code == "23505" {
+		return dataset.ErrQueryConflict
+	}
+	return err
+}
+
 // Finish 只允许结束仍在运行的记录，取消和原请求回写并发时不会互相覆盖。
 
 func (s *PostgresStore) Finish(ctx context.Context, tenantID, queryID, status string, rowCount int, durationMS int64, errorCode string, warnings []datasource.QueryWarning, sourceStats []datasource.QuerySourceStat) error {
@@ -200,11 +227,23 @@ func (s *PostgresStore) Finish(ctx context.Context, tenantID, queryID, status st
 		if err != nil {
 			return err
 		}
+		candidate := false
 		if tag.RowsAffected() != 1 {
-			return dataset.ErrQueryNotFound
+			tag, err = tx.Exec(ctx, `UPDATE platform.query_candidate_runs SET status=$1,row_count=$2,duration_ms=$3,error_code=$4,warnings_json=$5,completed_at=now() WHERE id::text=$6 AND status='RUNNING'`, status, rowCount, durationMS, errorCode, warningsJSON, queryID)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != 1 {
+				return dataset.ErrQueryNotFound
+			}
+			candidate = true
+		}
+		sourceTable := "platform.query_run_sources"
+		if candidate {
+			sourceTable = "platform.query_candidate_run_sources"
 		}
 		for _, stat := range sourceStats {
-			tag, err = tx.Exec(ctx, `UPDATE platform.query_run_sources SET status=$1,row_count=$2,duration_ms=$3
+			tag, err = tx.Exec(ctx, `UPDATE `+sourceTable+` SET status=$1,row_count=$2,duration_ms=$3
 				WHERE query_run_id::text=$4 AND tenant_id::text=$5 AND node_id=$6 AND subquery_id::text=$7 AND status='RUNNING'`,
 				stat.Status, stat.RowCount, stat.DurationMS, queryID, tenantID, stat.NodeID, stat.SubqueryID)
 			if err != nil {
@@ -216,7 +255,7 @@ func (s *PostgresStore) Finish(ctx context.Context, tenantID, queryID, status st
 		}
 		if status == "SUCCEEDED" {
 			var missing int
-			if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.query_run_sources WHERE query_run_id::text=$1 AND status='RUNNING'`, queryID).Scan(&missing); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM `+sourceTable+` WHERE query_run_id::text=$1 AND status='RUNNING'`, queryID).Scan(&missing); err != nil {
 				return err
 			}
 			if missing > 0 {

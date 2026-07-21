@@ -2,6 +2,7 @@ package querycompiler
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -61,6 +62,110 @@ func TestCompileWithoutBusinessParametersStillBindsRowLimit(t *testing.T) {
 	}
 }
 
+func TestTextExpressionsCompileForMySQLAndOracle(t *testing.T) {
+	field := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_status"}
+	substring := dataset.Expression{Type: "SUBSTRING", Arguments: []dataset.Expression{{Type: "TRIM", Argument: &field}, {Type: "LITERAL", Value: 2}, {Type: "LITERAL", Value: 3}}}
+	replace := dataset.Expression{Type: "REPLACE", Arguments: []dataset.Expression{{Type: "UPPER", Argument: &substring}, {Type: "LITERAL", Value: "OLD"}, {Type: "LITERAL", Value: "NEW"}}}
+
+	for _, test := range []struct {
+		name, want string
+		dialect    Dialect
+	}{
+		{name: "mysql", dialect: MySQL, want: "REPLACE(UPPER(SUBSTRING(TRIM(`o`.`order_status`),%s,%s)),%s,%s)"},
+		{name: "oracle", dialect: Oracle, want: `REPLACE(UPPER(SUBSTR(TRIM("O"."ORDER_STATUS"),:1,:2)),:3,:4)`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			compiler := compiler{input: Input{Dialect: test.dialect, Tables: map[string]TableRef{"orders": {NodeID: "orders", Columns: map[string]bool{"order_status": true}}}}}
+			compiled, err := compiler.expression(replace, map[string]string{"orders": "o"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if compiled != test.want || !reflect.DeepEqual(compiler.args, []any{2, 3, "OLD", "NEW"}) {
+				t.Fatalf("compiled=%s args=%#v", compiled, compiler.args)
+			}
+		})
+	}
+}
+
+func TestDateFormatCompilesExactCodesForMySQLAndOracle(t *testing.T) {
+	field := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_date"}
+	for _, test := range []struct {
+		name, unit, mysql, oracle string
+	}{
+		{name: "year", unit: "YEAR", mysql: "DATE_FORMAT(`o`.`order_date`, '%Y')", oracle: `TO_CHAR("O"."ORDER_DATE", 'YYYY')`},
+		{name: "month", unit: "MONTH", mysql: "DATE_FORMAT(`o`.`order_date`, '%Y%m')", oracle: `TO_CHAR("O"."ORDER_DATE", 'YYYYMM')`},
+		{name: "quarter", unit: "QUARTER", mysql: "CONCAT(DATE_FORMAT(`o`.`order_date`, '%Y'), 'Q', QUARTER(`o`.`order_date`))", oracle: `TO_CHAR("O"."ORDER_DATE", 'YYYY') || 'Q' || TO_CHAR("O"."ORDER_DATE", 'Q')`},
+		{name: "day", unit: "DAY", mysql: "DATE_FORMAT(`o`.`order_date`, '%Y%m%d')", oracle: `TO_CHAR("O"."ORDER_DATE", 'YYYYMMDD')`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, dialect := range []Dialect{MySQL, Oracle} {
+				compiler := compiler{input: Input{Dialect: dialect, Tables: map[string]TableRef{"orders": {NodeID: "orders", Columns: map[string]bool{"order_date": true}}}}}
+				compiled, err := compiler.expression(dataset.Expression{Type: "DATE_FORMAT", Unit: test.unit, Argument: &field}, map[string]string{"orders": "o"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := test.mysql
+				if dialect == Oracle {
+					want = test.oracle
+				}
+				if compiled != want {
+					t.Fatalf("dialect=%s compiled=%s want=%s", dialect, compiled, want)
+				}
+			}
+		})
+	}
+}
+
+func TestNumericAndContainsExpressionsCompileForMySQLAndOracle(t *testing.T) {
+	field := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_amount"}
+	for _, test := range []struct {
+		name       string
+		expression dataset.Expression
+		mysql      string
+		oracle     string
+		wantArgs   []any
+	}{
+		{name: "round", expression: dataset.Expression{Type: "ROUND", Arguments: []dataset.Expression{field, {Type: "LITERAL", Value: 2}}}, mysql: "ROUND(`o`.`order_amount`,%s)", oracle: `ROUND("O"."ORDER_AMOUNT",:1)`, wantArgs: []any{2}},
+		{name: "absolute", expression: dataset.Expression{Type: "ABS", Argument: &field}, mysql: "ABS(`o`.`order_amount`)", oracle: `ABS("O"."ORDER_AMOUNT")`},
+		{name: "contains", expression: dataset.Expression{Type: "CONTAINS", Left: &field, Right: &dataset.Expression{Type: "LITERAL", Value: "12"}}, mysql: "(INSTR(`o`.`order_amount`,%s) > 0)", oracle: `(INSTR("O"."ORDER_AMOUNT",:1) > 0)`, wantArgs: []any{"12"}},
+		{name: "not_contains", expression: dataset.Expression{Type: "NOT_CONTAINS", Left: &field, Right: &dataset.Expression{Type: "LITERAL", Value: "12"}}, mysql: "(INSTR(`o`.`order_amount`,%s) = 0)", oracle: `(INSTR("O"."ORDER_AMOUNT",:1) = 0)`, wantArgs: []any{"12"}},
+		{name: "in_mixed_array", expression: dataset.Expression{Type: "IN", Left: &field, Right: &dataset.Expression{Type: "ARRAY", Arguments: []dataset.Expression{{Type: "LITERAL", Value: 12}, {Type: "FIELD_REF", NodeID: "orders", Field: "other_amount"}}}}, mysql: "(`o`.`order_amount` IN (%s,`o`.`other_amount`))", oracle: `("O"."ORDER_AMOUNT" IN (:1,"O"."OTHER_AMOUNT"))`, wantArgs: []any{12}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, dialect := range []Dialect{MySQL, Oracle} {
+				compiler := compiler{input: Input{Dialect: dialect, Tables: map[string]TableRef{"orders": {NodeID: "orders", Columns: map[string]bool{"order_amount": true, "other_amount": true}}}}}
+				compiled, err := compiler.expression(test.expression, map[string]string{"orders": "o"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := test.mysql
+				if dialect == Oracle {
+					want = test.oracle
+				}
+				if compiled != want || !reflect.DeepEqual(compiler.args, test.wantArgs) {
+					t.Fatalf("dialect=%s compiled=%s args=%#v want=%s/%#v", dialect, compiled, compiler.args, want, test.wantArgs)
+				}
+			}
+		})
+	}
+}
+
+func TestCompileAllowsProjectionAroundGroupedMetric(t *testing.T) {
+	input := compilerInput(t)
+	input.RowPolicies, input.ColumnPolicies = nil, nil
+	aggregate := input.Document.Fields[1].Expression
+	input.Document.Fields[1].Expression = dataset.Expression{Type: "CAST", TargetType: "STRING", Argument: &aggregate}
+	input.Document.Fields[1].CanonicalType = "STRING"
+
+	compiled, err := Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(compiled.SQL, "CAST(SUM(`o`.`order_amount`) AS CHAR) AS `revenue`") || !strings.Contains(compiled.SQL, "GROUP BY") {
+		t.Fatalf("post-group projection SQL=%s", compiled.SQL)
+	}
+}
+
 func TestCompileBuildsGroupedDerivedTableBeforeJoin(t *testing.T) {
 	document := dataset.Document{
 		DSLVersion: "1.0", Dataset: dataset.Descriptor{Code: "group_then_join", Name: "先分组后关联", Type: "SINGLE_SOURCE"},
@@ -89,6 +194,30 @@ func TestCompileBuildsGroupedDerivedTableBeforeJoin(t *testing.T) {
 	}
 	if !strings.Contains(compiled.SQL, "COUNT(DISTINCT `pre_source`.`customer_name`) AS `customer_name`") || !strings.Contains(compiled.SQL, "GROUP BY `pre_source`.`customer_id`) `c` LEFT JOIN") {
 		t.Fatalf("pre-join aggregation SQL=%s", compiled.SQL)
+	}
+
+	upperRegion := dataset.Expression{Type: "UPPER", Argument: &dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "customer_name"}}
+	customerCount := dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "customer_name"}
+	document.PreAggregations = []dataset.PreAggregation{{
+		ID: "group_1", NodeID: "customers", JoinID: "join_1", JoinSide: "LEFT",
+		GroupBy: []dataset.PreAggregationGroup{
+			{Field: "customer_id"},
+			{Field: "region_upper", Expression: &upperRegion},
+		},
+		Metrics: []dataset.PreAggregationMetric{{Field: "customer_count", Function: "COUNT", Expression: &customerCount}},
+	}}
+	document.Fields = []dataset.Field{
+		{ID: "field_region_upper", Code: "region_upper", Name: "大写地区", Role: "DIMENSION", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "region_upper"}, CanonicalType: "STRING"},
+		{ID: "field_customer_count", Code: "customer_count", Name: "客户数", Role: "MEASURE", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "customer_count"}, CanonicalType: "INTEGER"},
+	}
+	document.OutputGrain = dataset.OutputGrain{Description: "每行一个大写地区", KeyFields: []string{"region_upper"}}
+	input.Document = document
+	compiled, err = Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(compiled.SQL, "UPPER(`pre_source`.`customer_name`) AS `region_upper`") || !strings.Contains(compiled.SQL, "COUNT(`pre_source`.`customer_name`) AS `customer_count`") || !strings.Contains(compiled.SQL, "`c`.`region_upper` AS `region_upper`") {
+		t.Fatalf("transformed pre-join aggregation SQL=%s", compiled.SQL)
 	}
 }
 

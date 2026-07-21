@@ -311,6 +311,43 @@ func TestPreviewDraftExecutesUnsavedCandidateAndReturnsNormalizedIdentity(t *tes
 	}
 }
 
+func TestPreviewCandidateExecutesWithoutPersistedDatasetIdentity(t *testing.T) {
+	candidateDSL := storeDocument(t)
+	prepared, err := dataset.Prepare(candidateDSL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connector := &fakeConnector{query: func(_ context.Context, _ string, _ []any, maxRows int) (datasource.QueryResult, error) {
+		if maxRows != 5 {
+			t.Fatalf("candidate preview maxRows=%d, want 5", maxRows)
+		}
+		return datasource.QueryResult{Columns: []string{"stat_month", "revenue"}, Rows: [][]any{{"2026-01-01", 12}}, RowCount: 1}, nil
+	}}
+	store := &fakeRuntimeStore{resolved: ResolvedPlan{
+		SourceID: "source-1", SourceType: datasource.TypeMySQL,
+		Tables: map[string]querycompiler.TableRef{"orders": {
+			NodeID: "orders", Schema: "sales", Name: "orders",
+			Columns: map[string]bool{"order_date": true, "order_amount": true, "order_status": true},
+		}},
+	}}
+	policies := &recordingDraftPolicies{}
+	service := NewService(fakeDatasets{}, fakeSources{source: datasource.Source{ID: "source-1", Type: datasource.TypeMySQL, Status: datasource.StatusActive}}, policies, store, map[datasource.Type]QueryConnector{datasource.TypeMySQL: connector})
+	queryID := "d7567ac1-dd36-4d16-aac4-65d48d491d74"
+	result, err := service.PreviewCandidate(context.Background(), "tenant-1", "actor-1", dataset.CandidatePreviewInput{QueryID: queryID, DSL: candidateDSL, Parameters: map[string]any{"start_date": "2026-01-01"}, MaxRows: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.QueryID != queryID || result.RowCount != 1 || result.DSLHash != prepared.DSLHash || result.PlanHash != prepared.PlanHash {
+		t.Fatalf("result=%#v", result)
+	}
+	if store.run.DatasetID != "" || store.run.DatasetVersionID != "" || store.run.CandidateCode != prepared.Document.Dataset.Code || store.run.RunType != "COMPONENT_PREVIEW" || store.status != "SUCCEEDED" {
+		t.Fatalf("run=%#v status=%q", store.run, store.status)
+	}
+	if policies.validateCalls != 1 || policies.loadCalls != 1 || policies.objectID != candidatePolicyObjectID || policies.actorID != "actor-1" {
+		t.Fatalf("policies=%#v", policies)
+	}
+}
+
 func TestPreviewDraftRejectsInvalidCandidateBoundaryBeforeExecution(t *testing.T) {
 	validDSL := storeDocument(t)
 	var changedCodeDocument dataset.Document

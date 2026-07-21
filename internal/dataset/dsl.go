@@ -289,8 +289,12 @@ func Validate(document Document) error {
 		for j, group := range item.GroupBy {
 			fieldPath := fmt.Sprintf("%s.groupBy[%d]", path, j)
 			validatePhysicalIdentifier(&issues, fieldPath+".field", group.Field)
-			if !projections[item.NodeID][group.Field] {
+			if group.Expression == nil && !projections[item.NodeID][group.Field] {
 				add(fieldPath+".field", "分组字段必须包含在节点 projection 中")
+			} else if group.Expression != nil {
+				validateExpression(&issues, fieldPath+".expression", *group.Expression, nodeIDs, parameterRefs)
+				validateExpressionProjection(&issues, fieldPath+".expression", *group.Expression, projections)
+				validatePreAggregationSourceExpression(&issues, fieldPath+".expression", *group.Expression, item.NodeID)
 			}
 			if outputs[group.Field] {
 				add(fieldPath+".field", "分组输出字段重复")
@@ -303,8 +307,12 @@ func Validate(document Document) error {
 		for j, metric := range item.Metrics {
 			fieldPath := fmt.Sprintf("%s.metrics[%d]", path, j)
 			validatePhysicalIdentifier(&issues, fieldPath+".field", metric.Field)
-			if !projections[item.NodeID][metric.Field] {
+			if metric.Expression == nil && !projections[item.NodeID][metric.Field] {
 				add(fieldPath+".field", "指标字段必须包含在节点 projection 中")
+			} else if metric.Expression != nil {
+				validateExpression(&issues, fieldPath+".expression", *metric.Expression, nodeIDs, parameterRefs)
+				validateExpressionProjection(&issues, fieldPath+".expression", *metric.Expression, projections)
+				validatePreAggregationSourceExpression(&issues, fieldPath+".expression", *metric.Expression, item.NodeID)
 			}
 			if outputs[metric.Field] {
 				add(fieldPath+".field", "分组组件的输出字段不能重名")
@@ -483,7 +491,7 @@ func validateDesigner(issues *[]ValidationIssue, designer map[string]any) {
 			add("designer.version", "必须为 1.0")
 		}
 	}
-	// 当前画布使用 nodePositions + joins/groups/end 的固定图结构。设计态拓扑
+	// 当前画布使用 nodePositions + joins/groups/transforms/end 的固定图结构。设计态拓扑
 	// 必须保持引用完整且无环；字段执行语义仍由下方可执行 DSL 校验兜底。
 	fixedIDs := map[string]bool{}
 	if raw, exists := designer["nodePositions"]; exists {
@@ -506,6 +514,7 @@ func validateDesigner(issues *[]ValidationIssue, designer map[string]any) {
 	}
 	validateDesignerItems(issues, designer, "joins", "关联", fixedIDs)
 	validateDesignerItems(issues, designer, "groups", "分组", fixedIDs)
+	validateDesignerItems(issues, designer, "transforms", "字段处理", fixedIDs)
 	if raw, exists := designer["end"]; exists {
 		end, ok := designerObject(raw)
 		if !ok {
@@ -537,8 +546,8 @@ func validateDesigner(issues *[]ValidationIssue, designer map[string]any) {
 				}
 				kind, kindOK := component["kind"].(string)
 				kind = upper(kind)
-				if !kindOK || !oneOf(kind, "DATA", "NODE", "JOIN", "GROUP", "OUTPUT") {
-					add(path+".kind", "必须为 DATA、NODE、JOIN、GROUP 或 OUTPUT")
+				if !kindOK || !oneOf(kind, "DATA", "NODE", "JOIN", "GROUP", "TRANSFORM", "OUTPUT") {
+					add(path+".kind", "必须为 DATA、NODE、JOIN、GROUP、TRANSFORM 或 OUTPUT")
 				}
 				if position, exists := component["position"]; exists {
 					validateDesignerPosition(issues, path+".position", position)
@@ -569,8 +578,10 @@ func validateDesigner(issues *[]ValidationIssue, designer map[string]any) {
 func validateDesignerDAG(issues *[]ValidationIssue, designer map[string]any) {
 	if _, hasJoins := designer["joins"]; !hasJoins {
 		if _, hasGroups := designer["groups"]; !hasGroups {
-			if _, hasEnd := designer["end"]; !hasEnd {
-				return
+			if _, hasTransforms := designer["transforms"]; !hasTransforms {
+				if _, hasEnd := designer["end"]; !hasEnd {
+					return
+				}
 			}
 		}
 	}
@@ -585,6 +596,7 @@ func validateDesignerDAG(issues *[]ValidationIssue, designer map[string]any) {
 	}
 	joins, _ := designerList(designer["joins"])
 	groups, _ := designerList(designer["groups"])
+	transforms, _ := designerList(designer["transforms"])
 	for _, item := range joins {
 		if id, ok := item["id"].(string); ok && strings.TrimSpace(id) != "" {
 			existing["JOIN:"+strings.TrimSpace(id)] = true
@@ -593,6 +605,11 @@ func validateDesignerDAG(issues *[]ValidationIssue, designer map[string]any) {
 	for _, item := range groups {
 		if id, ok := item["id"].(string); ok && strings.TrimSpace(id) != "" {
 			existing["GROUP:"+strings.TrimSpace(id)] = true
+		}
+	}
+	for _, item := range transforms {
+		if id, ok := item["id"].(string); ok && strings.TrimSpace(id) != "" {
+			existing["TRANSFORM:"+strings.TrimSpace(id)] = true
 		}
 	}
 	end, hasEnd := designerObject(designer["end"])
@@ -618,8 +635,8 @@ func validateDesignerDAG(issues *[]ValidationIssue, designer map[string]any) {
 		kind, kindOK := value["kind"].(string)
 		id, idOK := value["id"].(string)
 		kind, id = upper(kind), strings.TrimSpace(id)
-		if !kindOK || !idOK || !oneOf(kind, "NODE", "JOIN", "GROUP") || !identifierPattern.MatchString(id) {
-			add(path, "必须引用合法的数据、关联或分组组件")
+		if !kindOK || !idOK || !oneOf(kind, "NODE", "JOIN", "GROUP", "TRANSFORM") || !identifierPattern.MatchString(id) {
+			add(path, "必须引用合法的数据、关联、分组或字段处理组件")
 			return
 		}
 		source := kind + ":" + id
@@ -649,6 +666,14 @@ func validateDesignerDAG(issues *[]ValidationIssue, designer map[string]any) {
 			continue
 		}
 		validateInput(fmt.Sprintf("designer.groups[%d].input", index), target, item["input"])
+	}
+	for index, item := range transforms {
+		id, _ := item["id"].(string)
+		target := "TRANSFORM:" + strings.TrimSpace(id)
+		if target == "TRANSFORM:" || !existing[target] {
+			continue
+		}
+		validateInput(fmt.Sprintf("designer.transforms[%d].input", index), target, item["input"])
 	}
 	if hasEnd {
 		id, _ := end["id"].(string)
@@ -808,7 +833,7 @@ func designerNumber(raw any) (float64, bool) {
 func validateSourceFilterExpression(issues *[]ValidationIssue, path string, expression Expression, nodeID string) {
 	// 源过滤会在 Join 前直接送往单个数据源，只允许布尔谓词，且其任意深度的
 	// 字段引用都必须属于当前节点；聚合只能在分组阶段执行。
-	if !oneOf(expression.Type, "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "LIKE", "IN", "NOT_IN", "BETWEEN", "IS_NULL", "IS_NOT_NULL", "AND", "OR", "NOT") {
+	if !oneOf(expression.Type, "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "LIKE", "CONTAINS", "NOT_CONTAINS", "IN", "NOT_IN", "BETWEEN", "IS_NULL", "IS_NOT_NULL", "AND", "OR", "NOT") {
 		*issues = append(*issues, ValidationIssue{Path: path + ".type", Reason: "源过滤表达式必须是布尔谓词"})
 	}
 	visit := func(item Expression) {
@@ -820,6 +845,20 @@ func validateSourceFilterExpression(issues *[]ValidationIssue, path string, expr
 		}
 	}
 	visitDatasetExpression(expression, visit)
+}
+
+// validatePreAggregationSourceExpression keeps derived pre-join grouping expressions inside
+// their single physical branch. Aggregation is applied by the preAggregation wrapper itself;
+// accepting a nested aggregate here would make the resulting grain ambiguous.
+func validatePreAggregationSourceExpression(issues *[]ValidationIssue, path string, expression Expression, nodeID string) {
+	visitDatasetExpression(expression, func(value Expression) {
+		if value.Type == "FIELD_REF" && value.NodeID != nodeID {
+			*issues = append(*issues, ValidationIssue{Path: path + ".nodeId", Reason: "关联前分组表达式只能引用所属数据节点"})
+		}
+		if value.Type == "AGGREGATE" {
+			*issues = append(*issues, ValidationIssue{Path: path, Reason: "关联前分组源表达式不能包含聚合函数"})
+		}
+	})
 }
 
 func visitDatasetExpression(expression Expression, visit func(Expression)) {
@@ -922,10 +961,12 @@ func normalize(document Document) Document {
 		for j := range item.GroupBy {
 			item.GroupBy[j].Field = strings.TrimSpace(item.GroupBy[j].Field)
 			item.GroupBy[j].Unit = upper(item.GroupBy[j].Unit)
+			normalizeExpression(item.GroupBy[j].Expression)
 		}
 		for j := range item.Metrics {
 			item.Metrics[j].Field = strings.TrimSpace(item.Metrics[j].Field)
 			item.Metrics[j].Function = upper(item.Metrics[j].Function)
+			normalizeExpression(item.Metrics[j].Expression)
 		}
 	}
 	for i := range document.Parameters {
@@ -1111,6 +1152,17 @@ func validateProjectedFieldRefs(issues *[]ValidationIssue, document Document) {
 			projections[node.ID][field] = true
 		}
 	}
+	// 关联前分组会把字段处理表达式物化为安全标识符别名。后续 Join 和最终字段
+	// 引用的是派生表输出，因此需要在校验下游表达式前把这些别名加入可用集合；
+	// 源表达式本身已在主校验流程中严格按原始 projection 检查。
+	for _, item := range document.PreAggregations {
+		for _, group := range item.GroupBy {
+			projections[item.NodeID][group.Field] = true
+		}
+		for _, metric := range item.Metrics {
+			projections[item.NodeID][metric.Field] = true
+		}
+	}
 	for nodeIndex, node := range document.Nodes {
 		for i, filter := range node.SourceFilters {
 			if filter.Expression != nil {
@@ -1183,9 +1235,21 @@ func validateExpression(issues *[]ValidationIssue, path string, expression Expre
 		}
 	case "LITERAL":
 		// Literal 允许显式 null，因此仅依赖 type 即可表达。
+	case "ARRAY":
+		if len(expression.Arguments) == 0 {
+			add(".arguments", "数组表达式至少需要一个元素")
+		}
+		for i := range expression.Arguments {
+			validateExpression(issues, fmt.Sprintf("%s.arguments[%d]", path, i), expression.Arguments[i], nodes, parameters)
+		}
 	case "DATE_TRUNC":
 		if !oneOf(expression.Unit, "DAY", "WEEK", "MONTH", "QUARTER", "YEAR") {
 			add(".unit", "不支持的日期粒度")
+		}
+		validateRequiredExpression(issues, path+".argument", expression.Argument, nodes, parameters)
+	case "DATE_FORMAT":
+		if !oneOf(expression.Unit, "DAY", "MONTH", "QUARTER", "YEAR") {
+			add(".unit", "不支持的日期输出格式")
 		}
 		validateRequiredExpression(issues, path+".argument", expression.Argument, nodes, parameters)
 	case "AGGREGATE":
@@ -1200,6 +1264,56 @@ func validateExpression(issues *[]ValidationIssue, path string, expression Expre
 			add(".targetType", "不支持的目标类型")
 		}
 		validateRequiredExpression(issues, path+".argument", expression.Argument, nodes, parameters)
+	case "TRIM", "UPPER", "LOWER":
+		validateRequiredExpression(issues, path+".argument", expression.Argument, nodes, parameters)
+	case "ABS", "FLOOR", "CEIL":
+		validateRequiredExpression(issues, path+".argument", expression.Argument, nodes, parameters)
+	case "ROUND":
+		if len(expression.Arguments) != 2 {
+			add(".arguments", "ROUND 必须包含数值和保留小数位两个参数")
+		}
+		for i := range expression.Arguments {
+			validateExpression(issues, fmt.Sprintf("%s.arguments[%d]", path, i), expression.Arguments[i], nodes, parameters)
+		}
+		if len(expression.Arguments) == 2 {
+			precision, ok := expressionLiteralInteger(expression.Arguments[1])
+			if !ok || precision < -10 || precision > 10 {
+				add(".arguments[1]", "保留小数位必须是 -10 到 10 的整数字面量")
+			}
+		}
+	case "SUBSTRING":
+		if len(expression.Arguments) != 3 {
+			add(".arguments", "SUBSTRING 必须包含文本、起始位置和长度三个参数")
+		}
+		for i := range expression.Arguments {
+			validateExpression(issues, fmt.Sprintf("%s.arguments[%d]", path, i), expression.Arguments[i], nodes, parameters)
+		}
+		if len(expression.Arguments) == 3 {
+			start, startOK := expressionLiteralInteger(expression.Arguments[1])
+			length, lengthOK := expressionLiteralInteger(expression.Arguments[2])
+			if !startOK || start < 1 {
+				add(".arguments[1]", "截取起始位置必须是大于等于 1 的整数字面量")
+			}
+			if !lengthOK || length < 0 {
+				add(".arguments[2]", "截取长度必须是大于等于 0 的整数字面量")
+			}
+		}
+	case "REPLACE":
+		if len(expression.Arguments) != 3 {
+			add(".arguments", "REPLACE 必须包含文本、查找文本和替换文本三个参数")
+		}
+		for i := range expression.Arguments {
+			validateExpression(issues, fmt.Sprintf("%s.arguments[%d]", path, i), expression.Arguments[i], nodes, parameters)
+		}
+		if len(expression.Arguments) == 3 {
+			search, searchOK := expressionLiteralString(expression.Arguments[1])
+			if !searchOK || search == "" {
+				add(".arguments[1]", "查找文本必须是非空字符串字面量")
+			}
+			if _, replacementOK := expressionLiteralString(expression.Arguments[2]); !replacementOK {
+				add(".arguments[2]", "替换文本必须是字符串字面量")
+			}
+		}
 	case "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "CONCAT", "COALESCE", "AND", "OR":
 		if len(expression.Arguments) < 2 {
 			add(".arguments", "至少需要两个参数")
@@ -1207,7 +1321,7 @@ func validateExpression(issues *[]ValidationIssue, path string, expression Expre
 		for i := range expression.Arguments {
 			validateExpression(issues, fmt.Sprintf("%s.arguments[%d]", path, i), expression.Arguments[i], nodes, parameters)
 		}
-	case "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "LIKE", "IN", "NOT_IN":
+	case "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "LIKE", "CONTAINS", "NOT_CONTAINS", "IN", "NOT_IN":
 		validateRequiredExpression(issues, path+".left", expression.Left, nodes, parameters)
 		validateRequiredExpression(issues, path+".right", expression.Right, nodes, parameters)
 	case "BETWEEN":
@@ -1230,6 +1344,36 @@ func validateExpression(issues *[]ValidationIssue, path string, expression Expre
 	default:
 		add(".type", "不支持的表达式类型")
 	}
+}
+
+func expressionLiteralInteger(expression Expression) (int64, bool) {
+	if expression.Type != "LITERAL" {
+		return 0, false
+	}
+	switch value := expression.Value.(type) {
+	case float64:
+		if math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value || value < math.MinInt64 || value > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(value), true
+	case int:
+		return int64(value), true
+	case int64:
+		return value, true
+	case json.Number:
+		result, err := value.Int64()
+		return result, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func expressionLiteralString(expression Expression) (string, bool) {
+	if expression.Type != "LITERAL" {
+		return "", false
+	}
+	value, ok := expression.Value.(string)
+	return value, ok
 }
 
 func validateRequiredExpression(issues *[]ValidationIssue, path string, expression *Expression, nodes, parameters map[string]bool) {

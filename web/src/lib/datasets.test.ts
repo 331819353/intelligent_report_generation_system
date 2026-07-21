@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { RequestError } from './api'
-import { buildDatasetDSL, buildPreviewParameters, createDatasetPublishIdempotencyKey, datasetAPI, type AssetColumn, type AssetTable, type DatasetDraft, type PublishedVersionRecord, type PublishDatasetInput } from './datasets'
+import { buildComponentPreviewDSL, buildDatasetDSL, buildPreviewParameters, createDatasetPublishIdempotencyKey, datasetAPI, type AssetColumn, type AssetTable, type DatasetDraft, type PublishedVersionRecord, type PublishDatasetInput } from './datasets'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -195,6 +195,101 @@ describe('buildDatasetDSL', () => {
     expect(dsl.groupBy).toEqual(['field_o_order_date'])
     expect(dsl.fields[0]).toMatchObject({ code: 'order_month', name: '月份', expression: { type: 'DATE_TRUNC', unit: 'MONTH' } })
     expect(dsl.fields[1]).toMatchObject({ code: 'monthly_sales', name: '成交额', role: 'MEASURE', expression: { type: 'AGGREGATE', function: 'SUM' } })
+  })
+
+  test('结束节点前的字段处理组件把结构化表达式写入可执行字段', () => {
+    const value = draft()
+    value.calculations = []
+    value.grainKeys = ['amount_text']
+    value.designer = {
+      version: '1.0', nodePositions: { orders: { x: 20, y: 40 } }, nodeNames: { orders: '订单' }, joins: [], groups: [],
+      transforms: [
+        {
+          id: 'transform_amount', name: '金额加倍', family: 'NUMBER', input: { kind: 'NODE', id: 'orders' }, position: { x: 320, y: 40 },
+          rules: [{ id: 'double_amount', operation: 'ADD', inputKeys: ['orders.amount', 'orders.amount'], output: { id: 'double_amount', name: '双倍金额', code: 'double_amount', canonicalType: 'DECIMAL' } }],
+        },
+        {
+          id: 'transform_text', name: '金额文本', family: 'CAST', input: { kind: 'TRANSFORM', id: 'transform_amount' }, position: { x: 620, y: 40 },
+          rules: [{ id: 'amount_text', operation: 'CAST', inputKeys: ['transform_amount.double_amount'], targetType: 'STRING', output: { id: 'amount_text', name: '金额文本', code: 'amount_text', canonicalType: 'STRING' } }],
+        },
+      ],
+      end: { id: 'end_1', name: '处理结果', input: { kind: 'TRANSFORM', id: 'transform_text' }, position: { x: 920, y: 40 }, outputs: [{ key: 'transform_text.amount_text', name: '金额文本', code: 'amount_text' }] },
+    }
+
+    const dsl = buildDatasetDSL(value)
+
+    expect(dsl.fields).toEqual([expect.objectContaining({
+      code: 'amount_text', canonicalType: 'STRING', expression: {
+        type: 'CAST', targetType: 'STRING', argument: {
+          type: 'ADD', arguments: [
+            { type: 'FIELD_REF', nodeId: 'orders', field: 'amount' },
+            { type: 'FIELD_REF', nodeId: 'orders', field: 'amount' },
+          ],
+        },
+      },
+    })])
+    expect(dsl.designer?.transforms).toHaveLength(2)
+  })
+
+  test('根分组产物可以继续字段处理且不会丢失聚合口径', () => {
+    const value = draft()
+    value.calculations = []
+    value.grainKeys = ['order_month']
+    value.designer = {
+      version: '1.0', nodePositions: { orders: { x: 20, y: 40 } }, nodeNames: { orders: '订单' }, joins: [],
+      groups: [{ id: 'group_final', name: '月度汇总', input: { kind: 'NODE', id: 'orders' }, position: { x: 320, y: 40 }, dimensions: [{ key: 'orders.order_date', name: '订单月份', code: 'order_month', grouping: 'MONTH' }], metrics: [{ key: 'orders.amount', name: '月成交额', code: 'monthly_sales', aggregation: 'SUM' }] }],
+      transforms: [{
+        id: 'transform_summary', name: '汇总结果格式化', family: 'CAST', input: { kind: 'GROUP', id: 'group_final' }, position: { x: 620, y: 40 },
+        rules: [
+          { id: 'month_text', operation: 'CAST', inputKeys: ['orders.order_date'], targetType: 'STRING', output: { id: 'month_text', name: '月份文本', code: 'month_text', canonicalType: 'STRING' } },
+          { id: 'sales_text', operation: 'CAST', inputKeys: ['orders.amount'], targetType: 'STRING', output: { id: 'sales_text', name: '成交额文本', code: 'sales_text', canonicalType: 'STRING' } },
+        ],
+      }],
+      end: { id: 'end_1', name: '格式化汇总', input: { kind: 'TRANSFORM', id: 'transform_summary' }, position: { x: 920, y: 40 }, outputs: [{ key: 'transform_summary.month_text', name: '月份', code: 'month_text' }, { key: 'transform_summary.sales_text', name: '成交额', code: 'sales_text' }] },
+    }
+
+    const dsl = buildDatasetDSL(value)
+    const hiddenDimension = dsl.fields.find(field => field.visible === false)
+
+    expect(dsl.preAggregations).toEqual([])
+    expect(dsl.fields.find(field => field.code === 'month_text')).toMatchObject({
+      role: 'DIMENSION', expression: { type: 'CAST', argument: { type: 'DATE_TRUNC', unit: 'MONTH' } },
+    })
+    expect(dsl.fields.find(field => field.code === 'sales_text')).toMatchObject({
+      role: 'MEASURE', expression: { type: 'CAST', argument: { type: 'AGGREGATE', function: 'SUM' } },
+    })
+    expect(hiddenDimension).toMatchObject({ code: 'order_month', role: 'DIMENSION', expression: { type: 'DATE_TRUNC', unit: 'MONTH' } })
+    expect(dsl.groupBy).toEqual([hiddenDimension?.id])
+  })
+
+  test('组件预览只物化目标组件及其上游子图', () => {
+    const value = draft()
+    value.designer = {
+      version: '1.0', nodePositions: { orders: { x: 20, y: 40 } }, nodeNames: { orders: '订单' }, joins: [], groups: [],
+      transforms: [
+        {
+          id: 'transform_amount', name: '金额加倍', family: 'NUMBER', input: { kind: 'NODE', id: 'orders' }, position: { x: 320, y: 40 },
+          rules: [{ id: 'double_amount', operation: 'ADD', inputKeys: ['orders.amount', 'orders.amount'], output: { id: 'double_amount', name: '双倍金额', code: 'double_amount', canonicalType: 'DECIMAL' } }],
+        },
+        {
+          id: 'transform_text', name: '金额文本', family: 'CAST', input: { kind: 'TRANSFORM', id: 'transform_amount' }, position: { x: 620, y: 40 },
+          rules: [{ id: 'amount_text', operation: 'CAST', inputKeys: ['transform_amount.double_amount'], targetType: 'STRING', output: { id: 'amount_text', name: '金额文本', code: 'amount_text', canonicalType: 'STRING' } }],
+        },
+      ],
+      end: { id: 'end_1', name: '最终输出', input: { kind: 'TRANSFORM', id: 'transform_text' }, position: { x: 920, y: 40 }, outputs: [{ key: 'transform_text.amount_text', name: '金额文本', code: 'amount_text' }] },
+    }
+
+    const preview = buildComponentPreviewDSL(value, { kind: 'TRANSFORM', id: 'transform_amount' })
+
+    expect(preview.designer?.transforms).toHaveLength(1)
+    expect(preview.designer?.transforms?.[0].id).toBe('transform_amount')
+    expect(preview.designer?.end?.input).toEqual({ kind: 'TRANSFORM', id: 'transform_amount' })
+    expect(preview.fields).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'order_date' }),
+      expect.objectContaining({ code: 'amount' }),
+      expect.objectContaining({ code: 'double_amount', expression: { type: 'ADD', arguments: expect.any(Array) } }),
+    ]))
+    expect(preview.fields).not.toEqual(expect.arrayContaining([expect.objectContaining({ code: 'amount_text' })]))
   })
 
   test('结束节点隐藏根分组维度时仍保留真实聚合粒度并清理失效排序', () => {

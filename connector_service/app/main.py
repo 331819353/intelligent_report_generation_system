@@ -374,12 +374,14 @@ def validate_read_only_sql(sql: str) -> None:
     if not tokens or tokens[0] not in ("SELECT", "WITH"):
         raise HTTPException(status_code=400, detail="only read-only SELECT queries are allowed")
     forbidden = {
-        "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "UPSERT", "CREATE", "ALTER", "DROP",
+        "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "CREATE", "ALTER", "DROP",
         "TRUNCATE", "RENAME", "GRANT", "REVOKE", "CALL", "EXEC", "EXECUTE", "BEGIN", "COMMIT",
         "ROLLBACK", "SAVEPOINT", "LOCK", "UNLOCK", "OUTFILE", "DUMPFILE", "LOAD_FILE",
         "GET_LOCK", "RELEASE_LOCK", "SLEEP", "BENCHMARK",
     }
     rejected = forbidden.intersection(tokens)
+    if "REPLACE" in tokens and not sql_keyword_occurrences_are_function_calls(normalized, "REPLACE"):
+        rejected.add("REPLACE")
     if rejected:
         raise HTTPException(status_code=400, detail="query contains a forbidden operation")
 
@@ -418,6 +420,42 @@ def sql_tokens(sql: str) -> list[str]:
     if quote: raise HTTPException(status_code=400, detail="unterminated quoted value")
     if current: tokens.append("".join(current).upper())
     return tokens
+
+
+def sql_keyword_occurrences_are_function_calls(sql: str, keyword: str) -> bool:
+    """确认引号外的同名词元都紧跟左括号，避免把 SQL 函数误判为写操作。"""
+    current, quote, index = [], None, 0
+    normalized_keyword = keyword.upper()
+    while index < len(sql):
+        char = sql[index]
+        if quote:
+            if char == quote:
+                if index + 1 < len(sql) and sql[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+            elif char == "\\" and index + 1 < len(sql):
+                index += 2
+                continue
+            index += 1
+            continue
+        if char in ("'", '"', "`"):
+            if current and "".join(current).upper() == normalized_keyword:
+                return False
+            current = []
+            quote = char
+        elif char.isalnum() or char in ("_", "$"):
+            current.append(char)
+        elif current:
+            if "".join(current).upper() == normalized_keyword:
+                lookahead = index
+                while lookahead < len(sql) and sql[lookahead].isspace():
+                    lookahead += 1
+                if lookahead >= len(sql) or sql[lookahead] != "(":
+                    return False
+            current = []
+        index += 1
+    return not current or "".join(current).upper() != normalized_keyword
 
 
 @app.get("/health/live")

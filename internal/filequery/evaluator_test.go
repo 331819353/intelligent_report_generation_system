@@ -61,6 +61,22 @@ func TestEvaluateAppliesFiltersAggregationPoliciesAndSort(t *testing.T) {
 	}
 }
 
+func TestEvaluateAllowsProjectionAroundGroupedMetric(t *testing.T) {
+	input := fileInput(t)
+	input.RowPolicies, input.ColumnPolicies = nil, nil
+	aggregate := input.Document.Fields[1].Expression
+	input.Document.Fields[1].Expression = dataset.Expression{Type: "CAST", TargetType: "STRING", Argument: &aggregate}
+	input.Document.Fields[1].CanonicalType = "STRING"
+
+	result, err := Evaluate(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RowCount != 2 || result.Rows[0][1] != "20" || result.Rows[1][1] != "30" {
+		t.Fatalf("post-group projection result=%#v", result)
+	}
+}
+
 func TestEvaluateGroupsSlotOneBeforeJoining(t *testing.T) {
 	document := dataset.Document{
 		DSLVersion: "1.0", Dataset: dataset.Descriptor{Code: "group_then_join", Name: "先分组后关联", Type: "CROSS_SOURCE"},
@@ -159,6 +175,98 @@ func TestComparisonKeepsSQLNullSemantics(t *testing.T) {
 	value, err = evaluateExpression(equals, nil, nil, nil)
 	if err != nil || value != false {
 		t.Fatalf("NULL equals NULL value=%#v err=%v", value, err)
+	}
+}
+
+func TestTextExpressionsUseUnicodeCharacterPositions(t *testing.T) {
+	field := dataset.Expression{Type: "FIELD_REF", NodeID: "source", Field: "name"}
+	substring := dataset.Expression{Type: "SUBSTRING", Arguments: []dataset.Expression{{Type: "TRIM", Argument: &field}, {Type: "LITERAL", Value: 2}, {Type: "LITERAL", Value: 3}}}
+	value, err := evaluateExpression(substring, sourceRow{"source.name": " 甲乙Ab丙 "}, nil, nil)
+	if err != nil || value != "乙Ab" {
+		t.Fatalf("substring value=%#v err=%v", value, err)
+	}
+	replace := dataset.Expression{Type: "REPLACE", Arguments: []dataset.Expression{{Type: "LOWER", Argument: &substring}, {Type: "LITERAL", Value: "ab"}, {Type: "LITERAL", Value: "xy"}}}
+	value, err = evaluateExpression(replace, sourceRow{"source.name": " 甲乙Ab丙 "}, nil, nil)
+	if err != nil || value != "乙xy" {
+		t.Fatalf("replace value=%#v err=%v", value, err)
+	}
+	nilValue, err := evaluateExpression(dataset.Expression{Type: "UPPER", Argument: &dataset.Expression{Type: "LITERAL", Value: nil}}, nil, nil, nil)
+	if err != nil || nilValue != nil {
+		t.Fatalf("upper NULL value=%#v err=%v", nilValue, err)
+	}
+}
+
+func TestDateTruncAcceptsConnectorTimestampWithFractionalSecondsAndNoTimezone(t *testing.T) {
+	field := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "created_at"}
+	for unit, expected := range map[string]string{
+		"YEAR": "2026-01-01", "MONTH": "2026-07-01", "QUARTER": "2026-07-01", "DAY": "2026-07-15",
+	} {
+		value, err := evaluateExpression(dataset.Expression{Type: "DATE_TRUNC", Unit: unit, Argument: &field}, sourceRow{
+			"orders.created_at": "2026-07-15T01:36:12.393392",
+		}, nil, nil)
+		if err != nil || value != expected {
+			t.Fatalf("unit=%s value=%#v err=%v", unit, value, err)
+		}
+	}
+}
+
+func TestDateFormatProducesExactCalendarCodes(t *testing.T) {
+	field := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "created_at"}
+	for unit, expected := range map[string]string{
+		"YEAR": "2026", "MONTH": "202607", "QUARTER": "2026Q3", "DAY": "20260715",
+	} {
+		value, err := evaluateExpression(dataset.Expression{Type: "DATE_FORMAT", Unit: unit, Argument: &field}, sourceRow{
+			"orders.created_at": "2026-07-15T01:36:12.393392",
+		}, nil, nil)
+		if err != nil || value != expected {
+			t.Fatalf("unit=%s value=%#v err=%v", unit, value, err)
+		}
+	}
+	nullValue, err := evaluateExpression(dataset.Expression{Type: "DATE_FORMAT", Unit: "MONTH", Argument: &field}, sourceRow{"orders.created_at": nil}, nil, nil)
+	if err != nil || nullValue != nil {
+		t.Fatalf("DATE_FORMAT NULL value=%#v err=%v", nullValue, err)
+	}
+}
+
+func TestNumericAndContainsExpressionsProduceExpectedValues(t *testing.T) {
+	field := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "amount"}
+	row := sourceRow{"orders.amount": -12.345}
+	for _, test := range []struct {
+		name       string
+		expression dataset.Expression
+		expected   any
+	}{
+		{name: "round", expression: dataset.Expression{Type: "ROUND", Arguments: []dataset.Expression{field, {Type: "LITERAL", Value: 2}}}, expected: -12.35},
+		{name: "absolute", expression: dataset.Expression{Type: "ABS", Argument: &field}, expected: 12.345},
+		{name: "floor", expression: dataset.Expression{Type: "FLOOR", Argument: &field}, expected: -13.0},
+		{name: "ceil", expression: dataset.Expression{Type: "CEIL", Argument: &field}, expected: -12.0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			value, err := evaluateExpression(test.expression, row, nil, nil)
+			if err != nil || value != test.expected {
+				t.Fatalf("value=%#v err=%v want=%#v", value, err, test.expected)
+			}
+		})
+	}
+
+	textField := dataset.Expression{Type: "CAST", TargetType: "STRING", Argument: &field}
+	needle := dataset.Expression{Type: "LITERAL", Value: "12.3"}
+	for operator, expected := range map[string]bool{"CONTAINS": true, "NOT_CONTAINS": false} {
+		value, err := evaluateExpression(dataset.Expression{Type: operator, Left: &textField, Right: &needle}, row, nil, nil)
+		if err != nil || value != expected {
+			t.Fatalf("operator=%s value=%#v err=%v", operator, value, err)
+		}
+	}
+
+	inValues := dataset.Expression{Type: "ARRAY", Arguments: []dataset.Expression{{Type: "LITERAL", Value: -10.0}, {Type: "FIELD_REF", NodeID: "orders", Field: "other_amount"}}}
+	inValue, err := evaluateExpression(dataset.Expression{Type: "IN", Left: &field, Right: &inValues}, sourceRow{"orders.amount": -12.345, "orders.other_amount": -12.345}, nil, nil)
+	if err != nil || inValue != true {
+		t.Fatalf("mixed IN value=%#v err=%v", inValue, err)
+	}
+
+	nullValue, err := evaluateExpression(dataset.Expression{Type: "ROUND", Arguments: []dataset.Expression{field, {Type: "LITERAL", Value: 2}}}, sourceRow{"orders.amount": nil}, nil, nil)
+	if err != nil || nullValue != nil {
+		t.Fatalf("ROUND NULL value=%#v err=%v", nullValue, err)
 	}
 }
 

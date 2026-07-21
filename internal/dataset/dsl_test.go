@@ -156,7 +156,10 @@ func TestValidateDesignerMetadataBoundariesAndLegacyCompatibility(t *testing.T) 
 		"groups": []any{
 			map[string]any{"id": "group_1", "name": "客户汇总", "position": map[string]any{"x": 642, "y": 48}},
 		},
-		"end": map[string]any{"id": "end_1", "name": "最终输出", "position": map[string]any{"x": 942, "y": 48}},
+		"transforms": []any{
+			map[string]any{"id": "transform_1", "name": "日期标准化", "position": map[string]any{"x": 792, "y": 48}, "input": map[string]any{"kind": "NODE", "id": "orders"}},
+		},
+		"end": map[string]any{"id": "end_1", "name": "最终输出", "position": map[string]any{"x": 942, "y": 48}, "input": map[string]any{"kind": "TRANSFORM", "id": "transform_1"}},
 	}
 	document := prepared.Document
 	document.Designer = fixedGraph
@@ -196,6 +199,12 @@ func TestValidateDesignerMetadataBoundariesAndLegacyCompatibility(t *testing.T) 
 				map[string]any{"id": "join_b", "position": map[string]any{"x": 100, "y": 0}, "left": map[string]any{"kind": "JOIN", "id": "join_a"}},
 			},
 		}, reason: "循环依赖"},
+		{name: "字段处理循环依赖", designer: map[string]any{
+			"transforms": []any{
+				map[string]any{"id": "transform_a", "position": map[string]any{"x": 0, "y": 0}, "input": map[string]any{"kind": "TRANSFORM", "id": "transform_b"}},
+				map[string]any{"id": "transform_b", "position": map[string]any{"x": 100, "y": 0}, "input": map[string]any{"kind": "TRANSFORM", "id": "transform_a"}},
+			},
+		}, reason: "循环依赖"},
 		{name: "固定图失效引用", designer: map[string]any{
 			"groups": []any{map[string]any{"id": "group_1", "position": map[string]any{"x": 0, "y": 0}, "input": map[string]any{"kind": "NODE", "id": "deleted_node"}}},
 		}, reason: "不存在或已被删除"},
@@ -230,6 +239,71 @@ func TestValidateReturnsPreciseReferencePaths(t *testing.T) {
 	}
 	if !paths["groupBy[0]"] || !paths["outputGrain.keyFields[0]"] {
 		t.Fatalf("validation paths = %#v", paths)
+	}
+}
+
+func TestValidateTextExpressionShapes(t *testing.T) {
+	field := Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_status"}
+	valid := Expression{Type: "REPLACE", Arguments: []Expression{
+		{Type: "SUBSTRING", Arguments: []Expression{field, {Type: "LITERAL", Value: float64(1)}, {Type: "LITERAL", Value: float64(8)}}},
+		{Type: "LITERAL", Value: "OLD"},
+		{Type: "LITERAL", Value: "NEW"},
+	}}
+	issues := []ValidationIssue{}
+	validateExpression(&issues, "expression", valid, map[string]bool{"orders": true}, nil)
+	if len(issues) != 0 {
+		t.Fatalf("valid text expression issues=%#v", issues)
+	}
+
+	invalid := Expression{Type: "SUBSTRING", Arguments: []Expression{field, {Type: "LITERAL", Value: float64(0)}, {Type: "LITERAL", Value: 1.5}}}
+	issues = nil
+	validateExpression(&issues, "expression", invalid, map[string]bool{"orders": true}, nil)
+	if len(issues) != 2 || !strings.Contains(issues[0].Reason+issues[1].Reason, "起始位置") || !strings.Contains(issues[0].Reason+issues[1].Reason, "截取长度") {
+		t.Fatalf("invalid substring issues=%#v", issues)
+	}
+}
+
+func TestValidateDateFormatExpressionShapes(t *testing.T) {
+	field := Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_date"}
+	for _, unit := range []string{"YEAR", "MONTH", "QUARTER", "DAY"} {
+		issues := []ValidationIssue{}
+		validateExpression(&issues, "expression", Expression{Type: "DATE_FORMAT", Unit: unit, Argument: &field}, map[string]bool{"orders": true}, nil)
+		if len(issues) != 0 {
+			t.Fatalf("valid DATE_FORMAT unit=%s issues=%#v", unit, issues)
+		}
+	}
+	issues := []ValidationIssue{}
+	validateExpression(&issues, "expression", Expression{Type: "DATE_FORMAT", Unit: "WEEK", Argument: &field}, map[string]bool{"orders": true}, nil)
+	if len(issues) != 1 || !strings.Contains(issues[0].Reason, "输出格式") {
+		t.Fatalf("invalid DATE_FORMAT issues=%#v", issues)
+	}
+}
+
+func TestValidateNumericAndContainsExpressionShapes(t *testing.T) {
+	field := Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_amount"}
+	valid := []Expression{
+		{Type: "ROUND", Arguments: []Expression{field, {Type: "LITERAL", Value: float64(2)}}},
+		{Type: "ABS", Argument: &field},
+		{Type: "FLOOR", Argument: &field},
+		{Type: "CEIL", Argument: &field},
+		{Type: "CONTAINS", Left: &field, Right: &Expression{Type: "LITERAL", Value: "12"}},
+		{Type: "NOT_CONTAINS", Left: &field, Right: &Expression{Type: "LITERAL", Value: "12"}},
+		{Type: "IN", Left: &field, Right: &Expression{Type: "ARRAY", Arguments: []Expression{{Type: "LITERAL", Value: "12"}, field}}},
+	}
+	for _, expression := range valid {
+		issues := []ValidationIssue{}
+		validateExpression(&issues, "expression", expression, map[string]bool{"orders": true}, nil)
+		if len(issues) != 0 {
+			t.Fatalf("valid %s expression issues=%#v", expression.Type, issues)
+		}
+	}
+
+	for _, precision := range []float64{1.5, 11} {
+		issues := []ValidationIssue{}
+		validateExpression(&issues, "expression", Expression{Type: "ROUND", Arguments: []Expression{field, {Type: "LITERAL", Value: precision}}}, map[string]bool{"orders": true}, nil)
+		if len(issues) != 1 || !strings.Contains(issues[0].Reason, "-10 到 10") {
+			t.Fatalf("invalid ROUND precision=%v issues=%#v", precision, issues)
+		}
 	}
 }
 
@@ -302,6 +376,38 @@ func TestPreparePersistsPreJoinAggregationBeforeJoin(t *testing.T) {
 	if len(result.Document.PreAggregations) != 1 || result.Document.PreAggregations[0].Metrics[0].Function != "SUM" {
 		t.Fatalf("pre-aggregation was not persisted: %#v", result.Document.PreAggregations)
 	}
+}
+
+func TestValidateRejectsCrossBranchPreAggregationExpression(t *testing.T) {
+	prepared, err := Prepare(readExample(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := prepared.Document
+	document.Parameters, document.Filters, document.Having, document.Sorts = nil, nil, nil, nil
+	document.Nodes[0].SourceFilters = nil
+	second := document.Nodes[0]
+	second.ID, second.Alias, second.TableID = "customers", "c", "table-customers"
+	document.Nodes = append(document.Nodes, second)
+	document.Joins = []Join{{ID: "join_1", LeftNodeID: "orders", RightNodeID: "customers", JoinType: "LEFT", Cardinality: "UNKNOWN", ManualConfirmed: true, Conditions: []JoinCondition{{LeftExpression: Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_date"}, Operator: "EQUALS", RightExpression: Expression{Type: "FIELD_REF", NodeID: "customers", Field: "order_date"}}}}}
+	foreign := Expression{Type: "UPPER", Argument: &Expression{Type: "FIELD_REF", NodeID: "customers", Field: "order_date"}}
+	document.PreAggregations = []PreAggregation{{
+		ID: "group_1", NodeID: "orders", JoinID: "join_1", JoinSide: "LEFT",
+		GroupBy: []PreAggregationGroup{{Field: "order_date"}, {Field: "foreign_value", Expression: &foreign}},
+		Metrics: []PreAggregationMetric{{Field: "order_amount", Function: "SUM"}},
+	}}
+
+	err = Validate(document)
+	var validation *ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("Validate() error=%v, want ValidationError", err)
+	}
+	for _, issue := range validation.Issues {
+		if issue.Path == "preAggregations[0].groupBy[1].expression.nodeId" && issue.Reason == "关联前分组表达式只能引用所属数据节点" {
+			return
+		}
+	}
+	t.Fatalf("cross-branch pre-aggregation issue is missing: %#v", validation.Issues)
 }
 
 func TestValidateRejectsUnboundedNodeFanout(t *testing.T) {

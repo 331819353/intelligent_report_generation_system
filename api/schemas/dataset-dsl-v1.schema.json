@@ -108,7 +108,8 @@
       "required": ["field"],
       "properties": {
         "field": { "$ref": "#/$defs/physicalIdentifier" },
-        "unit": { "enum": ["DAY", "WEEK", "MONTH", "QUARTER", "YEAR"] }
+        "unit": { "enum": ["DAY", "WEEK", "MONTH", "QUARTER", "YEAR"] },
+        "expression": { "$ref": "#/$defs/expression" }
       }
     },
     "preAggregationMetric": {
@@ -117,7 +118,8 @@
       "required": ["field", "function"],
       "properties": {
         "field": { "$ref": "#/$defs/physicalIdentifier" },
-        "function": { "enum": ["SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT"] }
+        "function": { "enum": ["SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT"] },
+        "expression": { "$ref": "#/$defs/expression" }
       }
     },
     "field": {
@@ -213,7 +215,7 @@
       "additionalProperties": false,
       "required": ["type"],
       "properties": {
-        "type": { "enum": ["FIELD_REF", "PARAM_REF", "LITERAL", "DATE_TRUNC", "AGGREGATE", "CAST", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "CONCAT", "COALESCE", "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "LIKE", "IN", "NOT_IN", "BETWEEN", "IS_NULL", "IS_NOT_NULL", "AND", "OR", "NOT", "CASE"] },
+        "type": { "enum": ["FIELD_REF", "PARAM_REF", "LITERAL", "ARRAY", "DATE_TRUNC", "DATE_FORMAT", "AGGREGATE", "CAST", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "ROUND", "ABS", "FLOOR", "CEIL", "CONCAT", "COALESCE", "SUBSTRING", "TRIM", "UPPER", "LOWER", "REPLACE", "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "LIKE", "CONTAINS", "NOT_CONTAINS", "IN", "NOT_IN", "BETWEEN", "IS_NULL", "IS_NOT_NULL", "AND", "OR", "NOT", "CASE"] },
         "nodeId": { "$ref": "#/$defs/identifier" },
         "field": { "$ref": "#/$defs/physicalIdentifier" },
         "code": { "$ref": "#/$defs/identifier" },

@@ -527,6 +527,24 @@ func (c *compiler) preAggregation(nodeID string) *dataset.PreAggregation {
 	return nil
 }
 
+func (c *compiler) preAggregationProduces(nodeID, field string) bool {
+	item := c.preAggregation(nodeID)
+	if item == nil {
+		return false
+	}
+	for _, group := range item.GroupBy {
+		if group.Field == field {
+			return true
+		}
+	}
+	for _, metric := range item.Metrics {
+		if metric.Field == field {
+			return true
+		}
+	}
+	return false
+}
+
 // nodeRelation 把显式关联前分组编译成受白名单约束的派生表。派生表输出仍沿用
 // 原字段名，因此外层 Join 和 FIELD_REF 的结构化引用保持稳定。
 func (c *compiler) nodeRelation(node dataset.Node, ref TableRef) (string, []any, error) {
@@ -540,6 +558,9 @@ func (c *compiler) nodeRelation(node dataset.Node, ref TableRef) (string, []any,
 	groups := make([]string, 0, len(item.GroupBy))
 	for _, group := range item.GroupBy {
 		expression := dataset.Expression{Type: "FIELD_REF", NodeID: node.ID, Field: group.Field}
+		if group.Expression != nil {
+			expression = *group.Expression
+		}
 		if group.Unit != "" {
 			expression = dataset.Expression{Type: "DATE_TRUNC", Unit: group.Unit, Argument: &expression}
 		}
@@ -552,6 +573,9 @@ func (c *compiler) nodeRelation(node dataset.Node, ref TableRef) (string, []any,
 	}
 	for _, metric := range item.Metrics {
 		argument := dataset.Expression{Type: "FIELD_REF", NodeID: node.ID, Field: metric.Field}
+		if metric.Expression != nil {
+			argument = *metric.Expression
+		}
 		value, err := sub.expression(dataset.Expression{Type: "AGGREGATE", Function: metric.Function, Argument: &argument}, aliases)
 		if err != nil {
 			return "", nil, err
@@ -626,7 +650,7 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 	switch expression.Type {
 	case "FIELD_REF":
 		ref, ok := c.input.Tables[expression.NodeID]
-		if !ok || !ref.Columns[expression.Field] {
+		if !ok || !ref.Columns[expression.Field] && !c.preAggregationProduces(expression.NodeID, expression.Field) {
 			return "", errors.New("field is not in the source whitelist")
 		}
 		return c.quote(aliases[expression.NodeID]) + "." + c.quote(expression.Field), nil
@@ -677,6 +701,32 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 			return "", errors.New("unsupported date truncation unit")
 		}
 		return "DATE_FORMAT(" + argument + ", '" + format + "')", nil
+	case "DATE_FORMAT":
+		if expression.Argument == nil {
+			return "", errors.New("DATE_FORMAT requires an argument")
+		}
+		argument, err := c.expression(*expression.Argument, aliases)
+		if err != nil {
+			return "", err
+		}
+		if c.input.Dialect == Oracle {
+			format := map[string]string{"YEAR": "YYYY", "MONTH": "YYYYMM", "DAY": "YYYYMMDD"}[expression.Unit]
+			if format != "" {
+				return "TO_CHAR(" + argument + ", '" + format + "')", nil
+			}
+			if expression.Unit == "QUARTER" {
+				return "TO_CHAR(" + argument + ", 'YYYY') || 'Q' || TO_CHAR(" + argument + ", 'Q')", nil
+			}
+			return "", errors.New("unsupported date format unit")
+		}
+		format := map[string]string{"YEAR": "%Y", "MONTH": "%Y%m", "DAY": "%Y%m%d"}[expression.Unit]
+		if format != "" {
+			return "DATE_FORMAT(" + argument + ", '" + format + "')", nil
+		}
+		if expression.Unit == "QUARTER" {
+			return "CONCAT(DATE_FORMAT(" + argument + ", '%Y'), 'Q', QUARTER(" + argument + "))", nil
+		}
+		return "", errors.New("unsupported date format unit")
 	case "CAST":
 		if expression.Argument == nil {
 			return "", errors.New("CAST requires an argument")
@@ -707,6 +757,28 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 			parts = append(parts, value)
 		}
 		return "(" + strings.Join(parts, " "+map[string]string{"ADD": "+", "SUBTRACT": "-", "MULTIPLY": "*", "DIVIDE": "/"}[expression.Type]+" ") + ")", nil
+	case "ABS", "FLOOR", "CEIL":
+		if expression.Argument == nil {
+			return "", errors.New(expression.Type + " requires an argument")
+		}
+		argument, err := c.expression(*expression.Argument, aliases)
+		if err != nil {
+			return "", err
+		}
+		return expression.Type + "(" + argument + ")", nil
+	case "ROUND":
+		if len(expression.Arguments) != 2 {
+			return "", errors.New("ROUND requires a value and precision")
+		}
+		parts := make([]string, 0, 2)
+		for _, argument := range expression.Arguments {
+			value, err := c.expression(argument, aliases)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, value)
+		}
+		return "ROUND(" + strings.Join(parts, ",") + ")", nil
 	case "CONCAT", "COALESCE":
 		parts := []string{}
 		for _, arg := range expression.Arguments {
@@ -723,7 +795,46 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 			return "CONCAT(" + strings.Join(parts, ",") + ")", nil
 		}
 		return "(" + strings.Join(parts, " || ") + ")", nil
-	case "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "LIKE", "IN", "NOT_IN":
+	case "TRIM", "UPPER", "LOWER":
+		if expression.Argument == nil {
+			return "", errors.New(expression.Type + " requires an argument")
+		}
+		argument, err := c.expression(*expression.Argument, aliases)
+		if err != nil {
+			return "", err
+		}
+		return expression.Type + "(" + argument + ")", nil
+	case "SUBSTRING":
+		if len(expression.Arguments) != 3 {
+			return "", errors.New("SUBSTRING requires text, start and length")
+		}
+		parts := make([]string, 0, 3)
+		for _, argument := range expression.Arguments {
+			value, err := c.expression(argument, aliases)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, value)
+		}
+		function := "SUBSTRING"
+		if c.input.Dialect == Oracle {
+			function = "SUBSTR"
+		}
+		return function + "(" + strings.Join(parts, ",") + ")", nil
+	case "REPLACE":
+		if len(expression.Arguments) != 3 {
+			return "", errors.New("REPLACE requires text, search and replacement")
+		}
+		parts := make([]string, 0, 3)
+		for _, argument := range expression.Arguments {
+			value, err := c.expression(argument, aliases)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, value)
+		}
+		return "REPLACE(" + strings.Join(parts, ",") + ")", nil
+	case "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "LIKE", "CONTAINS", "NOT_CONTAINS", "IN", "NOT_IN":
 		if expression.Left == nil || expression.Right == nil {
 			return "", errors.New("comparison requires both operands")
 		}
@@ -732,6 +843,21 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 			return "", err
 		}
 		if expression.Type == "IN" || expression.Type == "NOT_IN" {
+			if expression.Right.Type == "ARRAY" {
+				if len(expression.Right.Arguments) == 0 {
+					return "", errors.New("IN array cannot be empty")
+				}
+				values := make([]string, 0, len(expression.Right.Arguments))
+				for _, item := range expression.Right.Arguments {
+					compiled, err := c.expression(item, aliases)
+					if err != nil {
+						return "", err
+					}
+					values = append(values, compiled)
+				}
+				op, _ := comparison(expression.Type)
+				return "(" + left + " " + op + " (" + strings.Join(values, ",") + "))", nil
+			}
 			var raw any
 			switch expression.Right.Type {
 			case "PARAM_REF":
@@ -755,6 +881,12 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 		right, err := c.expression(*expression.Right, aliases)
 		if err != nil {
 			return "", err
+		}
+		if expression.Type == "CONTAINS" {
+			return "(INSTR(" + left + "," + right + ") > 0)", nil
+		}
+		if expression.Type == "NOT_CONTAINS" {
+			return "(INSTR(" + left + "," + right + ") = 0)", nil
 		}
 		op, err := comparison(expression.Type)
 		if err != nil {

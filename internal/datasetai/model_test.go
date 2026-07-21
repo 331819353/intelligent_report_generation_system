@@ -1,8 +1,10 @@
 package datasetai
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -55,6 +57,49 @@ func TestValidateProposalAcceptsConnectedTree(t *testing.T) {
 	}
 }
 
+func TestProposalSchemaIncludesEveryFineGrainedTransformComponent(t *testing.T) {
+	raw, err := json.Marshal(proposalOutputSchema(testCatalog()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract := string(raw)
+	for _, componentType := range []string{
+		"TEXT_UPPER", "TEXT_TRIM", "TEXT_REPLACE", "TEXT_LOWER", "TEXT_SUBSTRING", "TEXT_CONCAT",
+		"NUMBER_ABSOLUTE", "NUMBER_ROUNDING", "NUMBER_ARITHMETIC", "DATE_FORMAT", "NULL", "CAST", "CONDITION",
+	} {
+		if !strings.Contains(contract, `"`+componentType+`"`) {
+			t.Fatalf("proposal schema does not include transform component %s", componentType)
+		}
+	}
+	if !strings.Contains(contract, `"TRANSFORM"`) || !strings.Contains(contract, `"conditionValues"`) {
+		t.Fatal("proposal schema does not expose transform inputs or condition arrays")
+	}
+}
+
+func TestValidateProposalAcceptsConditionTransformWithMixedInValues(t *testing.T) {
+	proposal := Proposal{
+		SchemaVersion: SchemaVersion, Mode: "CREATE", Summary: "按候选区域生成映射字段", Assumptions: []string{}, Warnings: []string{},
+		Plan: GraphPlan{
+			Dataset: PlanDataset{Name: "客户区域映射", Description: "条件映射"},
+			Nodes:   []PlanNode{{ID: "node_1", TableID: "table-customers", Alias: "customers", SelectedColumns: []string{"customer_id", "region"}}},
+			Joins:   []PlanJoin{}, Groups: []PlanGroup{},
+			Transforms: []PlanTransform{{
+				ID: "transform_1", Name: "区域条件映射", Family: "CONDITION", ComponentType: "CONDITION", Input: PlanInput{Kind: "NODE", ID: "node_1"},
+				Rules: []PlanTransformRule{{
+					ID: "rule_1", Operation: "CASE", InputKeys: []string{"node_1.region"},
+					Output:            PlanTransformOutput{ID: "region_group", Name: "区域分组", Code: "region_group", CanonicalType: "STRING"},
+					ConditionOperator: "IN", ThenValue: "目标", ElseValue: "其他",
+					ConditionValues: []PlanConditionValue{{ID: "value_1", Mode: "LITERAL", Value: "华东"}, {ID: "value_2", Mode: "FIELD", Value: "node_1.customer_id"}},
+				}},
+			}},
+			End: PlanEnd{Name: "最终输出", Input: PlanInput{Kind: "TRANSFORM", ID: "transform_1"}, Outputs: []PlanOutput{{NodeID: "node_1", Column: "region", Key: "transform_1.region_group", Name: "区域分组", Code: "region_group"}}},
+		},
+	}
+	if err := validateProposal(proposal, testCatalog()); err != nil {
+		t.Fatalf("validateProposal() transform error = %v", err)
+	}
+}
+
 func TestValidateProposalRejectsUnavailableAssetAndField(t *testing.T) {
 	proposal := testProposal()
 	proposal.Plan.Nodes[0].TableID = "unknown"
@@ -95,6 +140,16 @@ func TestValidateProposalRejectsUnsupportedJoinAndNonNumericSum(t *testing.T) {
 	proposal.Plan.End.Outputs[1] = PlanOutput{NodeID: "node_1", Column: "region", Name: "地区合计", Code: "region_total"}
 	if err := validateProposal(proposal, testCatalog()); !errors.Is(err, ErrInvalidOutput) {
 		t.Fatalf("validateProposal() error = %v, want ErrInvalidOutput", err)
+	}
+}
+
+func TestValidateProposalExplainsThatGroupedOutputsKeepPhysicalKeys(t *testing.T) {
+	proposal := testProposal()
+	proposal.Plan.End.Outputs[1].Key = "group_1.amount_total"
+	err := validateProposal(proposal, testCatalog())
+	var invalid *InvalidOutputError
+	if !errors.As(err, &invalid) || invalid.ReasonCode != InvalidOutputReasonOutput || !strings.Contains(invalid.Detail, "physical nodeId.column key") {
+		t.Fatalf("grouped output key error = %#v (%v)", invalid, err)
 	}
 }
 

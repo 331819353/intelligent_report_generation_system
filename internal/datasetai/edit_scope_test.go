@@ -129,6 +129,23 @@ func TestNormalizeAndValidateReadyIntentCanonicalizesTrustedStructure(t *testing
 	}
 }
 
+func TestNormalizeAndValidateReadyIntentDropsRedundantRemoveFieldsAndInputs(t *testing.T) {
+	changeSet := scopePostRemovalSet()
+	changeSet.Operations[0].Fields = []string{"dimensions", "metrics"}
+	changeSet.Operations[0].InputChanges = []InputChange{{
+		Field: "input", From: PlanInput{Kind: "JOIN", ID: "join_1"}, To: PlanInput{Kind: "NODE", ID: "node_1"},
+	}}
+	normalized, err := normalizeAndValidateChangeIntent(scopeTestPlan(), ChangeIntent{Status: "READY", Candidates: []ComponentRef{}, ChangeSet: changeSet})
+	if err != nil {
+		t.Fatalf("normalize redundant remove metadata: %v", err)
+	}
+	for _, operation := range normalized.ChangeSet.Operations {
+		if operation.ComponentKind == "GROUP" && operation.ComponentID == "group_after" && (len(operation.Fields) != 0 || len(operation.InputChanges) != 0) {
+			t.Fatalf("redundant remove metadata was not discarded: %#v", operation)
+		}
+	}
+}
+
 func TestNormalizeAndValidateClarificationRequiresRealUniqueCandidates(t *testing.T) {
 	intent := ChangeIntent{
 		Status: "CLARIFY", Question: "请选择要删除的分组。",

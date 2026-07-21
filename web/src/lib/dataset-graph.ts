@@ -1,7 +1,7 @@
 import type { DatasetDSL, DesignerNode, FieldOption, JoinOption } from './datasets'
 
 export type CanvasPoint = { x: number; y: number }
-export type GraphInput = { kind: 'NODE' | 'JOIN' | 'GROUP'; id: string }
+export type GraphInput = { kind: 'NODE' | 'JOIN' | 'GROUP' | 'TRANSFORM'; id: string }
 export type GraphJoin = {
   id: string; name: string; left?: GraphInput; right?: GraphInput
   position: CanvasPoint; outputKeys: string[]
@@ -12,12 +12,57 @@ export type GraphGroup = {
   id: string; name: string; input?: GraphInput; position: CanvasPoint
   dimensions: GraphDimension[]; metrics: GraphMetric[]
 }
+export type GraphTransformFamily = 'DATE' | 'TEXT' | 'CAST' | 'NUMBER' | 'CONDITION' | 'NULL' | 'SPLIT_MERGE'
+export type GraphTransformComponentType =
+  | 'DATE_FORMAT'
+  | 'TEXT_UPPER'
+  | 'TEXT_TRIM'
+  | 'TEXT_REPLACE'
+  | 'TEXT_LOWER'
+  | 'TEXT_SUBSTRING'
+  | 'TEXT_CONCAT'
+  | 'NUMBER_ABSOLUTE'
+  | 'NUMBER_ROUNDING'
+  | 'NUMBER_ARITHMETIC'
+  | 'CAST'
+  | 'CONDITION'
+  | 'NULL'
+export type GraphTransformOperation = 'DATE_FORMAT' | 'DATE_TRUNC' | 'CAST' | 'ADD' | 'SUBTRACT' | 'MULTIPLY' | 'DIVIDE' | 'ROUND' | 'ABS' | 'FLOOR' | 'CEIL' | 'CONCAT' | 'COALESCE' | 'CASE' | 'SUBSTRING' | 'TRIM' | 'UPPER' | 'LOWER' | 'REPLACE'
+export type GraphConditionOperator = 'EQUALS' | 'NOT_EQUALS' | 'GT' | 'GTE' | 'LT' | 'LTE' | 'CONTAINS' | 'NOT_CONTAINS' | 'IN' | 'IS_NULL' | 'IS_NOT_NULL'
+export type GraphConditionValue = { id: string; mode: 'LITERAL' | 'FIELD'; value: string }
+export type GraphTransformOutput = { id: string; name: string; code: string; canonicalType: string }
+export type GraphTransformRule = {
+  id: string
+  operation: GraphTransformOperation
+  inputKeys: string[]
+  output: GraphTransformOutput
+  unit?: 'DAY' | 'WEEK' | 'MONTH' | 'QUARTER' | 'YEAR'
+  targetType?: 'STRING' | 'INTEGER' | 'DECIMAL' | 'BOOLEAN' | 'DATE' | 'DATETIME'
+  matchValue?: string
+  thenValue?: string
+  elseValue?: string
+  conditionOperator?: GraphConditionOperator
+  conditionValues?: GraphConditionValue[]
+  fallbackMode?: 'LITERAL' | 'FIELD'
+  fallbackValue?: string
+  separator?: string
+  precision?: number
+  start?: number
+  length?: number
+  searchValue?: string
+  replacementValue?: string
+  replaceSourceKey?: string
+}
+export type GraphTransform = {
+  id: string; name: string; family: GraphTransformFamily; componentType?: GraphTransformComponentType; input?: GraphInput; position: CanvasPoint
+  rules: GraphTransformRule[]
+}
 export type GraphEndOutput = { key: string; name: string; code: string }
 export type GraphEnd = {
   id: 'end_1'; name: string; input?: GraphInput; position: CanvasPoint
   outputs: GraphEndOutput[]
 }
-export type GraphTarget = { kind: 'JOIN' | 'GROUP' | 'OUTPUT'; id: string }
+export type GraphTarget = { kind: 'JOIN' | 'GROUP' | 'TRANSFORM' | 'OUTPUT'; id: string }
 export type GraphValidationIssueCode =
   | 'DUPLICATE_COMPONENT_ID'
   | 'INVALID_COMPONENT_ID'
@@ -42,6 +87,7 @@ export type DesignerGraphV1 = {
   nodeNames: Record<string, string>
   joins: GraphJoin[]
   groups: GraphGroup[]
+  transforms?: GraphTransform[]
   end?: GraphEnd
 }
 
@@ -52,7 +98,9 @@ export type ProducedField = {
   producerName: string
   kind: 'ATTRIBUTE' | 'DIMENSION' | 'METRIC'
   binding: { nodeId: string; field: string }
+  sourceBinding?: { nodeId: string; field: string }
   canonicalType: string
+  expression?: Record<string, unknown>
   aggregation?: string
   grouping?: string
 }
@@ -69,13 +117,43 @@ const point = (value: unknown, fallback: CanvasPoint): CanvasPoint => {
 }
 const input = (value: unknown): GraphInput | undefined => {
   const raw = record(value), kind = text(raw.kind), id = text(raw.id)
-  return id && (kind === 'NODE' || kind === 'JOIN' || kind === 'GROUP') ? { kind, id } : undefined
+  return id && (kind === 'NODE' || kind === 'JOIN' || kind === 'GROUP' || kind === 'TRANSFORM') ? { kind, id } : undefined
 }
 const keyParts = (key: string) => {
   const dot = key.indexOf('.')
   return dot > 0 ? { nodeId: key.slice(0, dot), field: key.slice(dot + 1) } : { nodeId: '', field: '' }
 }
 const identifier = (value: string) => value.trim().replace(/[^A-Za-z0-9_]/g, '_').replace(/^[^A-Za-z]+/, '') || 'field'
+const dateFormatSuffix: Record<'DAY' | 'MONTH' | 'QUARTER' | 'YEAR', string> = {
+  YEAR: 'yyyy', MONTH: 'yyyymm', QUARTER: 'yyyyq', DAY: 'yyyymmdd',
+}
+const dateFormatUnit = (value: unknown): 'DAY' | 'MONTH' | 'QUARTER' | 'YEAR' => {
+  const unit = text(value).toUpperCase()
+  return unit === 'YEAR' || unit === 'MONTH' || unit === 'QUARTER' || unit === 'DAY' ? unit : 'DAY'
+}
+const migrateLegacyDateOutputCode = (value: string, unit: 'DAY' | 'MONTH' | 'QUARTER' | 'YEAR') => {
+  const code = identifier(value)
+  return /_(day|date)$/i.test(code) ? code.replace(/_(day|date)$/i, `_${dateFormatSuffix[unit]}`) : code
+}
+const migrateLegacyDateOutputName = (value: string, unit: 'DAY' | 'MONTH' | 'QUARTER' | 'YEAR') => {
+  const label = { YEAR: '年', MONTH: '年月', QUARTER: '年季', DAY: '年月日' }[unit]
+  return value.endsWith('日期处理结果') ? `${value.slice(0, -'日期处理结果'.length)}${label}` : value
+}
+const typedLiteral = (value: string, canonicalType: string): unknown => {
+  const type = canonicalType.toUpperCase()
+  if (['NUMBER', 'INT', 'INTEGER', 'DECIMAL', 'FLOAT', 'DOUBLE'].includes(type)) {
+    const number = Number(value)
+    return Number.isFinite(number) ? number : value
+  }
+  if (type === 'BOOLEAN') {
+    if (value.toLowerCase() === 'true') return true
+    if (value.toLowerCase() === 'false') return false
+  }
+  return value
+}
+const stringExpression = (expression: Record<string, unknown>, field: ProducedField): Record<string, unknown> => ['STRING', 'TEXT', 'VARCHAR', 'CHAR'].includes(field.canonicalType.toUpperCase())
+  ? expression
+  : { type: 'CAST', targetType: 'STRING', argument: expression }
 
 /**
  * 新增分组产物时沿用上游稳定编码生成字段别名。
@@ -102,22 +180,28 @@ const graphComponentName = (value: GraphInput | GraphTarget, graph: DesignerGrap
     const join = graph.joins.find(item => item.id === value.id)
     return `关联组件「${join?.name || value.id}」`
   }
+  if (value.kind === 'TRANSFORM') {
+    const transform = graph.transforms?.find(item => item.id === value.id)
+    return `字段处理组件「${transform?.name || value.id}」`
+  }
   return `结束节点「${graph.end?.name || value.id}」`
 }
 
 const graphInputExists = (value: GraphInput, graph: DesignerGraphV1, nodeIDs: ReadonlySet<string>): boolean => {
   if (value.kind === 'NODE') return nodeIDs.has(value.id)
   if (value.kind === 'GROUP') return graph.groups.some(item => item.id === value.id)
+  if (value.kind === 'TRANSFORM') return Boolean(graph.transforms?.some(item => item.id === value.id))
   return graph.joins.some(item => item.id === value.id)
 }
 
 const graphTargetExists = (value: GraphTarget, graph: DesignerGraphV1): boolean => {
   if (value.kind === 'GROUP') return graph.groups.some(item => item.id === value.id)
   if (value.kind === 'JOIN') return graph.joins.some(item => item.id === value.id)
+  if (value.kind === 'TRANSFORM') return Boolean(graph.transforms?.some(item => item.id === value.id))
   return graph.end?.id === value.id
 }
 
-export function graphLeaves(value: GraphInput | undefined, graph: Pick<DesignerGraphV1, 'joins' | 'groups'>, visited = new Set<string>()): string[] {
+export function graphLeaves(value: GraphInput | undefined, graph: Pick<DesignerGraphV1, 'joins' | 'groups' | 'transforms'>, visited = new Set<string>()): string[] {
   if (!value) return []
   if (value.kind === 'NODE') return [value.id]
   const visitKey = graphInputKey(value)
@@ -127,11 +211,15 @@ export function graphLeaves(value: GraphInput | undefined, graph: Pick<DesignerG
     const group = graph.groups.find(item => item.id === value.id)
     return group ? graphLeaves(group.input, graph, next) : []
   }
+  if (value.kind === 'TRANSFORM') {
+    const transform = graph.transforms?.find(item => item.id === value.id)
+    return transform ? graphLeaves(transform.input, graph, next) : []
+  }
   const join = graph.joins.find(item => item.id === value.id)
   return join ? [...graphLeaves(join.left, graph, next), ...graphLeaves(join.right, graph, next)] : []
 }
 
-export function graphContains(value: GraphInput, target: GraphInput, graph: Pick<DesignerGraphV1, 'joins' | 'groups'>, visited = new Set<string>()): boolean {
+export function graphContains(value: GraphInput, target: GraphInput, graph: Pick<DesignerGraphV1, 'joins' | 'groups' | 'transforms'>, visited = new Set<string>()): boolean {
   if (value.kind === target.kind && value.id === target.id) return true
   if (value.kind === 'NODE') return false
   const visitKey = graphInputKey(value)
@@ -141,12 +229,16 @@ export function graphContains(value: GraphInput, target: GraphInput, graph: Pick
     const group = graph.groups.find(item => item.id === value.id)
     return Boolean(group?.input && graphContains(group.input, target, graph, next))
   }
+  if (value.kind === 'TRANSFORM') {
+    const transform = graph.transforms?.find(item => item.id === value.id)
+    return Boolean(transform?.input && graphContains(transform.input, target, graph, next))
+  }
   const join = graph.joins.find(item => item.id === value.id)
   return Boolean(join && ((join.left && graphContains(join.left, target, graph, next)) || (join.right && graphContains(join.right, target, graph, next))))
 }
 
 /** 判断把 source 作为 target 的输入后，是否会形成自环或间接循环。 */
-export function wouldCreateGraphCycle(source: GraphInput, target: GraphTarget, graph: Pick<DesignerGraphV1, 'joins' | 'groups'>): boolean {
+export function wouldCreateGraphCycle(source: GraphInput, target: GraphTarget, graph: Pick<DesignerGraphV1, 'joins' | 'groups' | 'transforms'>): boolean {
   if (target.kind === 'OUTPUT') return false
   const targetInput: GraphInput = { kind: target.kind, id: target.id }
   return graphInputKey(source) === graphInputKey(targetInput) || graphContains(source, targetInput, graph)
@@ -175,6 +267,7 @@ export function validateDesignerGraph(graph: DesignerGraphV1, nodeIDs: readonly 
   const components: Array<{ id: string; kind: GraphInput['kind'] | 'OUTPUT'; name: string }> = [
     ...nodeIDs.map(id => ({ id, kind: 'NODE' as const, name: graph.nodeNames[id] || id })),
     ...graph.groups.map(item => ({ id: item.id, kind: 'GROUP' as const, name: item.name })),
+    ...(graph.transforms ?? []).map(item => ({ id: item.id, kind: 'TRANSFORM' as const, name: item.name })),
     ...graph.joins.map(item => ({ id: item.id, kind: 'JOIN' as const, name: item.name })),
     ...(graph.end ? [{ id: graph.end.id, kind: 'OUTPUT' as const, name: graph.end.name }] : []),
   ]
@@ -210,6 +303,11 @@ export function validateDesignerGraph(graph: DesignerGraphV1, nodeIDs: readonly 
     const target: GraphTarget = { kind: 'GROUP', id: group.id }
     validateInput(group.input, target, '')
     dependencies.set(graphTargetKey(target), group.input && graphInputExists(group.input, graph, nodeIDSet) ? [graphInputKey(group.input)] : [])
+  }
+  for (const transform of graph.transforms ?? []) {
+    const target: GraphTarget = { kind: 'TRANSFORM', id: transform.id }
+    validateInput(transform.input, target, '')
+    dependencies.set(graphTargetKey(target), transform.input && graphInputExists(transform.input, graph, nodeIDSet) ? [graphInputKey(transform.input)] : [])
   }
   for (const join of graph.joins) {
     const target: GraphTarget = { kind: 'JOIN', id: join.id }
@@ -259,11 +357,13 @@ export function validateDesignerGraph(graph: DesignerGraphV1, nodeIDs: readonly 
   return { valid: issues.length === 0, issues, errors: issues.map(item => item.message) }
 }
 
-export function graphRoot(nodeIDs: string[], graph: Pick<DesignerGraphV1, 'joins' | 'groups'>): GraphInput | undefined {
+export function graphRoot(nodeIDs: string[], graph: Pick<DesignerGraphV1, 'joins' | 'groups' | 'transforms'>): GraphInput | undefined {
   const used = new Set<string>()
   for (const join of graph.joins) for (const value of [join.left, join.right]) if (value) used.add(graphInputKey(value))
   for (const group of graph.groups) if (group.input) used.add(graphInputKey(group.input))
+  for (const transform of graph.transforms ?? []) if (transform.input) used.add(graphInputKey(transform.input))
   const candidates: GraphInput[] = [
+    ...(graph.transforms ?? []).map(item => ({ kind: 'TRANSFORM' as const, id: item.id })),
     ...graph.groups.map(item => ({ kind: 'GROUP' as const, id: item.id })),
     ...graph.joins.map(item => ({ kind: 'JOIN' as const, id: item.id })),
     ...nodeIDs.map(id => ({ kind: 'NODE' as const, id })),
@@ -279,13 +379,14 @@ function nodeFields(node: DesignerNode, fields: FieldOption[]): ProducedField[] 
     return {
       key, name: option?.name?.trim() || column.businessName || column.columnName,
       code: identifier(option?.code || column.columnName), producerName: node.table.businessName || node.table.tableName,
-      kind: 'ATTRIBUTE' as const, binding: { nodeId: node.id, field: column.columnName }, canonicalType: column.canonicalType,
+      kind: 'ATTRIBUTE' as const, binding: { nodeId: node.id, field: column.columnName }, sourceBinding: { nodeId: node.id, field: column.columnName }, canonicalType: column.canonicalType,
+      expression: { type: 'FIELD_REF', nodeId: node.id, field: column.columnName },
     }
   })
 }
 
 /** 返回一个组件对下游公开的稳定产物；展示名称与物理字段绑定分离。 */
-export function graphProducedFields(value: GraphInput | undefined, graph: Pick<DesignerGraphV1, 'joins' | 'groups'> & { nodeNames?: Record<string, string> }, nodes: DesignerNode[], fields: FieldOption[], visited = new Set<string>()): ProducedField[] {
+export function graphProducedFields(value: GraphInput | undefined, graph: Pick<DesignerGraphV1, 'joins' | 'groups' | 'transforms'> & { nodeNames?: Record<string, string> }, nodes: DesignerNode[], fields: FieldOption[], visited = new Set<string>(), materializedGroupID = '', preAggregatedGroupIDs: ReadonlySet<string> = new Set()): ProducedField[] {
   if (!value) return []
   if (value.kind === 'NODE') {
     const node = nodes.find(item => item.id === value.id)
@@ -297,26 +398,110 @@ export function graphProducedFields(value: GraphInput | undefined, graph: Pick<D
   if (value.kind === 'GROUP') {
     const group = graph.groups.find(item => item.id === value.id)
     if (!group) return []
-    const upstream = new Map(graphProducedFields(group.input, graph, nodes, fields, next).map(item => [item.key, item]))
+    const upstream = new Map(graphProducedFields(group.input, graph, nodes, fields, next, materializedGroupID, preAggregatedGroupIDs).map(item => [item.key, item]))
+    const preAggregated = preAggregatedGroupIDs.has(group.id)
     return [
       ...group.dimensions.flatMap(item => {
         const source = upstream.get(item.key)
-        return source ? [{ ...source, name: item.name, code: item.code, producerName: group.name, kind: 'DIMENSION' as const, grouping: item.grouping, aggregation: undefined }] : []
+        if (!source) return []
+        const argument = source.expression ?? { type: 'FIELD_REF', nodeId: source.binding.nodeId, field: source.binding.field }
+        const outputField = keyParts(item.key).field || source.binding.field
+        return [{
+          ...source, name: item.name, code: item.code, producerName: group.name, kind: 'DIMENSION' as const,
+          binding: preAggregated ? { nodeId: source.binding.nodeId, field: outputField } : source.binding,
+          sourceBinding: source.sourceBinding ?? source.binding,
+          grouping: item.grouping, aggregation: undefined,
+          expression: preAggregated
+            ? { type: 'FIELD_REF', nodeId: source.binding.nodeId, field: outputField }
+            : materializedGroupID === group.id && item.grouping ? { type: 'DATE_TRUNC', unit: item.grouping, argument } : argument,
+        }]
       }),
       ...group.metrics.flatMap(item => {
         const source = upstream.get(item.key)
-        return source ? [{ ...source, name: item.name, code: item.code, producerName: group.name, kind: 'METRIC' as const, aggregation: item.aggregation, grouping: undefined, canonicalType: item.aggregation === 'COUNT' || item.aggregation === 'COUNT_DISTINCT' ? 'INTEGER' : source.canonicalType }] : []
+        if (!source) return []
+        const argument = source.expression ?? { type: 'FIELD_REF', nodeId: source.binding.nodeId, field: source.binding.field }
+        const outputField = keyParts(item.key).field || source.binding.field
+        return [{
+          ...source, name: item.name, code: item.code, producerName: group.name, kind: 'METRIC' as const,
+          binding: preAggregated ? { nodeId: source.binding.nodeId, field: outputField } : source.binding,
+          sourceBinding: source.sourceBinding ?? source.binding,
+          aggregation: item.aggregation, grouping: undefined,
+          canonicalType: item.aggregation === 'COUNT' || item.aggregation === 'COUNT_DISTINCT' ? 'INTEGER' : source.canonicalType,
+          expression: preAggregated
+            ? { type: 'FIELD_REF', nodeId: source.binding.nodeId, field: outputField }
+            : materializedGroupID === group.id ? { type: 'AGGREGATE', function: item.aggregation, argument } : argument,
+        }]
       }),
     ]
   }
+  if (value.kind === 'TRANSFORM') {
+    const transform = graph.transforms?.find(item => item.id === value.id)
+    if (!transform) return []
+    const upstream = graphProducedFields(transform.input, graph, nodes, fields, next, materializedGroupID, preAggregatedGroupIDs)
+    const upstreamByKey = new Map(upstream.map(item => [item.key, item]))
+    const replaced = new Set(transform.rules.map(rule => rule.replaceSourceKey).filter((key): key is string => Boolean(key)))
+    const derived = transform.rules.flatMap(rule => {
+      const inputs = rule.inputKeys.map(key => upstreamByKey.get(key)).filter((field): field is ProducedField => Boolean(field))
+      if (!inputs.length || inputs.length !== rule.inputKeys.length) return []
+      const expressions = inputs.map(field => field.expression ?? { type: 'FIELD_REF', nodeId: field.binding.nodeId, field: field.binding.field })
+      const textExpressions = expressions.map((expression, index) => stringExpression(expression, inputs[index]))
+      const mergeExpressions = textExpressions.map(expression => ({ type: 'COALESCE', arguments: [expression, { type: 'LITERAL', value: '' }] }))
+      let expression: Record<string, unknown>
+      if (rule.operation === 'DATE_FORMAT') expression = { type: 'DATE_FORMAT', unit: rule.unit || 'DAY', argument: expressions[0] }
+      else if (rule.operation === 'DATE_TRUNC') expression = { type: 'DATE_TRUNC', unit: rule.unit || 'DAY', argument: expressions[0] }
+      else if (rule.operation === 'CAST') expression = { type: 'CAST', targetType: rule.targetType || rule.output.canonicalType, argument: expressions[0] }
+      else if (rule.operation === 'SUBSTRING') expression = { type: 'SUBSTRING', arguments: [textExpressions[0], { type: 'LITERAL', value: rule.start || 1 }, { type: 'LITERAL', value: rule.length ?? 10 }] }
+      else if (rule.operation === 'TRIM' || rule.operation === 'UPPER' || rule.operation === 'LOWER') expression = { type: rule.operation, argument: textExpressions[0] }
+      else if (rule.operation === 'REPLACE') expression = { type: 'REPLACE', arguments: [textExpressions[0], { type: 'LITERAL', value: rule.searchValue ?? '' }, { type: 'LITERAL', value: rule.replacementValue ?? '' }] }
+      else if (rule.operation === 'ROUND') expression = { type: 'ROUND', arguments: [expressions[0], { type: 'LITERAL', value: rule.precision ?? 2 }] }
+      else if (rule.operation === 'ABS' || rule.operation === 'FLOOR' || rule.operation === 'CEIL') expression = { type: rule.operation, argument: expressions[0] }
+      else if (rule.operation === 'COALESCE') expression = {
+        type: 'COALESCE',
+        arguments: [expressions[0], rule.fallbackMode === 'FIELD' ? expressions[1] : { type: 'LITERAL', value: typedLiteral(rule.fallbackValue ?? '', inputs[0].canonicalType) }],
+      }
+      else if (rule.operation === 'CASE') {
+        const operator = rule.conditionOperator || 'EQUALS'
+        const unary = operator === 'IS_NULL' || operator === 'IS_NOT_NULL'
+        const contains = operator === 'CONTAINS' || operator === 'NOT_CONTAINS'
+        const collection = operator === 'IN' ? (rule.conditionValues ?? []).flatMap(item => {
+          if (item.mode === 'FIELD') {
+            const field = upstreamByKey.get(item.value)
+            return field ? [field.expression ?? { type: 'FIELD_REF', nodeId: field.binding.nodeId, field: field.binding.field }] : []
+          }
+          return item.value.length ? [{ type: 'LITERAL', value: typedLiteral(item.value, inputs[0].canonicalType) }] : []
+        }) : []
+        const when = unary
+          ? { type: operator, argument: expressions[0] }
+          : operator === 'IN'
+            ? { type: 'IN', left: expressions[0], right: { type: 'ARRAY', arguments: collection } }
+            : { type: operator, left: contains ? textExpressions[0] : expressions[0], right: { type: 'LITERAL', value: contains ? rule.matchValue ?? '' : typedLiteral(rule.matchValue ?? '', inputs[0].canonicalType) } }
+        expression = { type: 'CASE', whens: [{ when, then: { type: 'LITERAL', value: rule.thenValue ?? '' } }], else: { type: 'LITERAL', value: rule.elseValue ?? '' } }
+      }
+      else if (rule.operation === 'CONCAT') expression = { type: 'CONCAT', arguments: rule.separator === undefined ? mergeExpressions : [mergeExpressions[0], { type: 'LITERAL', value: rule.separator }, mergeExpressions[1]] }
+      else expression = { type: rule.operation, arguments: expressions }
+      return [{
+        key: `${transform.id}.${rule.output.id}`,
+        name: rule.output.name,
+        code: identifier(rule.output.code),
+        producerName: transform.name,
+        kind: inputs.some(field => field.kind === 'METRIC') ? 'METRIC' as const : inputs.every(field => field.kind === 'DIMENSION') ? 'DIMENSION' as const : 'ATTRIBUTE' as const,
+        binding: inputs[0].binding,
+        sourceBinding: inputs[0].sourceBinding ?? inputs[0].binding,
+        canonicalType: rule.output.canonicalType,
+        grouping: rule.operation === 'DATE_TRUNC' ? rule.unit || 'DAY' : undefined,
+        expression,
+      }]
+    })
+    return [...upstream.filter(field => !replaced.has(field.key)), ...derived]
+  }
   const join = graph.joins.find(item => item.id === value.id)
   if (!join) return []
-  const upstream = [...graphProducedFields(join.left, graph, nodes, fields, next), ...graphProducedFields(join.right, graph, nodes, fields, next)]
+  const upstream = [...graphProducedFields(join.left, graph, nodes, fields, next, materializedGroupID, preAggregatedGroupIDs), ...graphProducedFields(join.right, graph, nodes, fields, next, materializedGroupID, preAggregatedGroupIDs)]
   const allowed = new Set(join.outputKeys.length ? join.outputKeys : upstream.map(item => item.key))
   return upstream.filter(item => allowed.has(item.key)).map(item => ({ ...item, producerName: join.name }))
 }
 
-export const graphOutputKeys = (value: GraphInput | undefined, graph: Pick<DesignerGraphV1, 'joins' | 'groups'>, nodes: DesignerNode[], fields: FieldOption[]) => graphProducedFields(value, graph, nodes, fields).map(item => item.key)
+export const graphOutputKeys = (value: GraphInput | undefined, graph: Pick<DesignerGraphV1, 'joins' | 'groups' | 'transforms'>, nodes: DesignerNode[], fields: FieldOption[]) => graphProducedFields(value, graph, nodes, fields).map(item => item.key)
 
 export const graphProducedFieldLabel = (field: ProducedField) => `${field.producerName} / ${field.name} · ${field.code} · ${field.kind === 'DIMENSION' ? '维度' : field.kind === 'METRIC' ? `${field.aggregation || '聚合'} 指标` : '字段'}`
 
@@ -324,12 +509,14 @@ export function layoutDesignerGraph(graph: DesignerGraphV1, nodeIDs: string[]): 
   const keys = [
     ...nodeIDs.map(id => `NODE:${id}`),
     ...graph.groups.map(item => `GROUP:${item.id}`),
+    ...(graph.transforms ?? []).map(item => `TRANSFORM:${item.id}`),
     ...graph.joins.map(item => `JOIN:${item.id}`),
     ...(graph.end ? [`OUTPUT:${graph.end.id}`] : []),
   ]
   const stableOrder = new Map(keys.map((key, index) => [key, index]))
   const dependencies = new Map<string, string[]>()
   for (const group of graph.groups) dependencies.set(`GROUP:${group.id}`, group.input ? [graphInputKey(group.input)] : [])
+  for (const transform of graph.transforms ?? []) dependencies.set(`TRANSFORM:${transform.id}`, transform.input ? [graphInputKey(transform.input)] : [])
   for (const join of graph.joins) dependencies.set(`JOIN:${join.id}`, [join.left, join.right].flatMap(item => item ? [graphInputKey(item)] : []))
   if (graph.end) dependencies.set(`OUTPUT:${graph.end.id}`, graph.end.input ? [graphInputKey(graph.end.input)] : [])
   const depthCache = new Map<string, number>()
@@ -367,6 +554,7 @@ export function layoutDesignerGraph(graph: DesignerGraphV1, nodeIDs: string[]): 
     ...graph,
     nodePositions: Object.fromEntries(nodeIDs.map(id => [id, position(`NODE:${id}`)])),
     groups: graph.groups.map(item => ({ ...item, position: position(`GROUP:${item.id}`) })),
+    transforms: (graph.transforms ?? []).map(item => ({ ...item, position: position(`TRANSFORM:${item.id}`) })),
     joins: graph.joins.map(item => ({ ...item, position: position(`JOIN:${item.id}`) })),
     ...(graph.end ? { end: { ...graph.end, position: position(`OUTPUT:${graph.end.id}`) } } : {}),
   }
@@ -381,7 +569,7 @@ function legacyJoins(nodes: DesignerNode[], joins: JoinOption[]): GraphJoin[] {
     const item: GraphJoin = { id: join.id, name: `关联结果 ${index + 1}`, left, right, position: { x: 510 + index * 250, y: 150 }, outputKeys: [] }
     result.push(item)
     const root = { kind: 'JOIN' as const, id: item.id }
-    for (const nodeID of [...graphLeaves(left, { joins: result, groups: [] }), ...graphLeaves(right, { joins: result, groups: [] })]) component.set(nodeID, root)
+    for (const nodeID of [...graphLeaves(left, { joins: result, groups: [], transforms: [] }), ...graphLeaves(right, { joins: result, groups: [], transforms: [] })]) component.set(nodeID, root)
   }
   return result
 }
@@ -389,7 +577,7 @@ function legacyJoins(nodes: DesignerNode[], joins: JoinOption[]): GraphJoin[] {
 function parseExistingDesigner(rawValue: unknown, fallback: DesignerGraphV1): DesignerGraphV1 | null {
   const raw = record(rawValue)
   if (!Object.keys(raw).length || text(raw.version) !== '1.0') return null
-  if (!['nodePositions', 'joins', 'groups', 'end'].some(key => key in raw)) return null
+  if (!['nodePositions', 'joins', 'groups', 'transforms', 'end'].some(key => key in raw)) return null
   const nodePositionsRaw = record(raw.nodePositions), nodeNamesRaw = record(raw.nodeNames)
   const joins: GraphJoin[] = list(raw.joins).flatMap((value, index) => {
     const item = record(value), id = text(item.id)
@@ -403,6 +591,59 @@ function parseExistingDesigner(rawValue: unknown, fallback: DesignerGraphV1): De
     const metrics = list(item.metrics).flatMap(value => { const field = record(value), key = text(field.key), aggregation = text(field.aggregation); return key && aggregation ? [{ key, name: text(field.name) || key, code: identifier(text(field.code) || `${aggregation.toLowerCase()}_${keyParts(key).field}`), aggregation }] : [] })
     return [{ id, name: text(item.name) || `分组结果 ${index + 1}`, input: input(item.input), position: point(item.position, { x: 342, y: 48 + index * 150 }), dimensions, metrics }]
   })
+  const transforms: GraphTransform[] = list(raw.transforms).flatMap((value, index) => {
+    const item = record(value), id = text(item.id), family = text(item.family) as GraphTransformFamily
+    const componentType = text(item.componentType) as GraphTransformComponentType
+    if (!id || !['DATE', 'TEXT', 'CAST', 'NUMBER', 'CONDITION', 'NULL', 'SPLIT_MERGE'].includes(family)) return []
+    const rules: GraphTransformRule[] = list(item.rules).flatMap((value, ruleIndex) => {
+      const rule = record(value), output = record(rule.output), persistedOperation = text(rule.operation) as GraphTransformOperation
+      const legacyDateFormat = family === 'DATE' && persistedOperation === 'DATE_TRUNC'
+      const operation: GraphTransformOperation = legacyDateFormat ? 'DATE_FORMAT' : persistedOperation
+      const outputID = text(output.id), outputName = text(output.name), outputCode = text(output.code), canonicalType = text(output.canonicalType)
+      if (!text(rule.id) || !['DATE_FORMAT', 'DATE_TRUNC', 'CAST', 'ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'ROUND', 'ABS', 'FLOOR', 'CEIL', 'CONCAT', 'COALESCE', 'CASE', 'SUBSTRING', 'TRIM', 'UPPER', 'LOWER', 'REPLACE'].includes(operation) || !outputID || !outputCode || !canonicalType) return []
+      const unit = dateFormatUnit(rule.unit)
+      return [{
+        id: text(rule.id) || `rule_${ruleIndex + 1}`,
+        operation,
+        inputKeys: list(rule.inputKeys).map(text).filter(Boolean),
+        output: {
+          id: outputID,
+          name: legacyDateFormat ? migrateLegacyDateOutputName(outputName || outputCode, unit) : outputName || outputCode,
+          code: legacyDateFormat ? migrateLegacyDateOutputCode(outputCode, unit) : identifier(outputCode),
+          canonicalType: legacyDateFormat ? 'STRING' : canonicalType,
+        },
+        ...(text(rule.unit) ? { unit } : {}),
+        ...(text(rule.targetType) ? { targetType: text(rule.targetType) as GraphTransformRule['targetType'] } : {}),
+        ...('matchValue' in rule ? { matchValue: text(rule.matchValue) } : {}),
+        ...('thenValue' in rule ? { thenValue: text(rule.thenValue) } : {}),
+        ...('elseValue' in rule ? { elseValue: text(rule.elseValue) } : {}),
+        ...(text(rule.conditionOperator) ? { conditionOperator: text(rule.conditionOperator) as GraphConditionOperator } : {}),
+        ...('conditionValues' in rule ? { conditionValues: list(rule.conditionValues).flatMap((value, valueIndex) => {
+          const item = record(value), mode = text(item.mode) === 'FIELD' ? 'FIELD' as const : 'LITERAL' as const
+          const itemValue = text(item.value)
+          return itemValue || mode === 'LITERAL' ? [{ id: text(item.id) || `condition_value_${valueIndex + 1}`, mode, value: itemValue }] : []
+        }) } : {}),
+        ...(text(rule.fallbackMode) ? { fallbackMode: text(rule.fallbackMode) as GraphTransformRule['fallbackMode'] } : operation === 'COALESCE' ? { fallbackMode: list(rule.inputKeys).length > 1 ? 'FIELD' as const : 'LITERAL' as const } : {}),
+        ...('fallbackValue' in rule ? { fallbackValue: text(rule.fallbackValue) } : {}),
+        ...('separator' in rule ? { separator: text(rule.separator) } : {}),
+        ...(typeof rule.precision === 'number' ? { precision: Math.trunc(rule.precision) } : {}),
+        ...(typeof rule.start === 'number' ? { start: Math.trunc(rule.start) } : {}),
+        ...(typeof rule.length === 'number' ? { length: Math.trunc(rule.length) } : {}),
+        ...('searchValue' in rule ? { searchValue: text(rule.searchValue) } : {}),
+        ...('replacementValue' in rule ? { replacementValue: text(rule.replacementValue) } : {}),
+        ...(text(rule.replaceSourceKey) ? { replaceSourceKey: text(rule.replaceSourceKey) } : {}),
+      }]
+    })
+    return [{
+      id,
+      name: text(item.name) || `字段处理 ${index + 1}`,
+      family,
+      ...(['DATE_FORMAT', 'TEXT_UPPER', 'TEXT_TRIM', 'TEXT_REPLACE', 'TEXT_LOWER', 'TEXT_SUBSTRING', 'TEXT_CONCAT', 'NUMBER_ABSOLUTE', 'NUMBER_ROUNDING', 'NUMBER_ARITHMETIC', 'CAST', 'CONDITION', 'NULL'].includes(componentType) ? { componentType } : {}),
+      input: input(item.input),
+      position: point(item.position, { x: 642, y: 48 + index * 150 }),
+      rules,
+    }]
+  })
   const endRaw = record(raw.end), endID = text(endRaw.id)
   const end: GraphEnd | undefined = endID === 'end_1' ? {
     id: 'end_1', name: text(endRaw.name) || '最终输出', input: input(endRaw.input), position: point(endRaw.position, { x: 942, y: 123 }),
@@ -414,6 +655,7 @@ function parseExistingDesigner(rawValue: unknown, fallback: DesignerGraphV1): De
     nodeNames: Object.fromEntries(Object.entries(nodeNamesRaw).map(([id, value]) => [id, text(value)]).filter(([, value]) => value)),
     joins: joins.length || !fallback.joins.length ? joins : fallback.joins,
     groups,
+    transforms,
     end,
   }
   for (const [id, value] of Object.entries(fallback.nodePositions)) if (!graph.nodePositions[id]) graph.nodePositions[id] = value
@@ -427,7 +669,7 @@ function parseExistingDesigner(rawValue: unknown, fallback: DesignerGraphV1): De
  * “数据节点 → 结束节点”，避免修改旧数据集时要求用户重新搭线。
  */
 function repairSingleNodeEnd(graph: DesignerGraphV1, nodes: DesignerNode[], fields: FieldOption[]): DesignerGraphV1 {
-  if (graph.end || nodes.length !== 1 || graph.joins.length || graph.groups.length) return graph
+  if (graph.end || nodes.length !== 1 || graph.joins.length || graph.groups.length || graph.transforms?.length) return graph
   const node = nodes[0]
   const source: GraphInput = { kind: 'NODE', id: node.id }
   const persisted = new Map(fields.filter(field => field.finalOutput !== false).map(field => [field.key, field]))
@@ -475,6 +717,7 @@ function applyLegacyDesignerLayout(rawValue: unknown, graph: DesignerGraphV1): D
     nodeNames: Object.fromEntries(Object.entries(graph.nodeNames).map(([id, value]) => [id, names.get(id) || value])),
     joins: graph.joins.map(join => ({ ...join, name: names.get(join.id) || join.name, position: positionByID.get(join.id) ?? join.position })),
     groups: graph.groups.map(group => ({ ...group, name: names.get(group.id) || group.name, position: positionByID.get(group.id) ?? group.position })),
+    transforms: (graph.transforms ?? []).map(transform => ({ ...transform, name: names.get(transform.id) || transform.name, position: positionByID.get(transform.id) ?? transform.position })),
     ...(graph.end ? { end: { ...graph.end, name: outputName || names.get(graph.end.id) || graph.end.name, position: outputPosition ?? positionByID.get(graph.end.id) ?? graph.end.position } } : {}),
   }
 }
@@ -486,7 +729,7 @@ export function hydrateDesignerGraph(dsl: DatasetDSL, nodes: DesignerNode[], joi
     version: '1.0',
     nodePositions: Object.fromEntries(nodes.map((node, index) => [node.id, { x: 42, y: 48 + index * 150 }])),
     nodeNames: Object.fromEntries(nodes.map(node => [node.id, node.table.businessName || node.table.tableName])),
-    joins: legacyJoins(nodes, joins), groups: [],
+    joins: legacyJoins(nodes, joins), groups: [], transforms: [],
   }
   const parsed = parseExistingDesigner(legacyDSL.designer, graph)
   if (parsed) return repairSingleNodeEnd(parsed, nodes, fields)
@@ -531,5 +774,6 @@ export const serializeDesignerGraph = (graph: DesignerGraphV1): DesignerGraphV1 
   nodeNames: { ...graph.nodeNames },
   joins: graph.joins.map(item => ({ ...item, position: point(item.position, { x: 342, y: 48 }), outputKeys: [...item.outputKeys] })),
   groups: graph.groups.map(item => ({ ...item, position: point(item.position, { x: 342, y: 48 }), dimensions: item.dimensions.map(value => ({ ...value })), metrics: item.metrics.map(value => ({ ...value })) })),
+  transforms: (graph.transforms ?? []).map(item => ({ ...item, position: point(item.position, { x: 642, y: 48 }), rules: item.rules.map(rule => ({ ...rule, inputKeys: [...rule.inputKeys], output: { ...rule.output }, ...(rule.conditionValues ? { conditionValues: rule.conditionValues.map(value => ({ ...value })) } : {}) })) })),
   ...(graph.end ? { end: { ...graph.end, position: point(graph.end.position, { x: 642, y: 48 }), outputs: graph.end.outputs.map(value => ({ ...value })) } } : {}),
 })

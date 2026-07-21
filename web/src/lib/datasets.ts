@@ -1,5 +1,5 @@
 import { apiRequest } from './api'
-import { graphProducedFields, serializeDesignerGraph, type DesignerGraphV1 } from './dataset-graph'
+import { graphContains, graphLeaves, graphProducedFields, serializeDesignerGraph, type DesignerGraphV1, type GraphInput } from './dataset-graph'
 export type { CanvasPoint as GraphPosition, DesignerGraphV1, GraphDimension, GraphEnd, GraphEndOutput, GraphGroup, GraphInput, GraphJoin, GraphMetric } from './dataset-graph'
 
 export type AssetTable = {
@@ -112,6 +112,7 @@ export type DatasetPreview = {
 export type DatasetDraftPreview = DatasetPreview & {
   dslHash: string; planHash: string; baseVersion: number
 }
+export type DatasetCandidatePreview = DatasetPreview & { dslHash: string; planHash: string }
 export type AssetTablePreview = { columns: string[]; rows: unknown[][] }
 export type DatasetDSL = Record<string, unknown> & {
   dslVersion: string; dataset: { code: string; name: string; description?: string; type: string }
@@ -174,31 +175,52 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
 
   const groups = Array.isArray(designer.groups) ? designer.groups : []
   const endInput = designer.end?.input
-  const globalGroup = endInput?.kind === 'GROUP'
-    ? groups.find(group => group.id === endInput.id)
-    : undefined
+  const globalGroup = (() => {
+    let input = endInput
+    const visited = new Set<string>()
+    while (input?.kind === 'TRANSFORM' && !visited.has(input.id)) {
+      visited.add(input.id)
+      input = designer.transforms?.find(transform => transform.id === input!.id)?.input
+    }
+    return input?.kind === 'GROUP' ? groups.find(group => group.id === input.id) : undefined
+  })()
   const globalDimensions = new Map((globalGroup?.dimensions ?? []).map(item => [graphItemKey(item), item]))
   const globalMetrics = new Map((globalGroup?.metrics ?? []).map(item => [graphItemKey(item), item]))
   if (globalGroup && (!globalDimensions.size || !globalMetrics.size)) throw new Error('结束节点前的分组组件需要同时配置分组字段和指标字段')
-  const producedByKey = new Map(graphProducedFields(endInput, designer, draft.nodes, draft.fields).map(item => [item.key, item]))
-
+  const preAggregatedGroupIDs = new Set<string>()
   const preAggregations = groups.flatMap(group => {
-    if (globalGroup?.id === group.id || group.input?.kind !== 'NODE') return []
+    if (globalGroup?.id === group.id || !group.input) return []
     const consumer = designer.joins.find(join => join.left?.kind === 'GROUP' && join.left.id === group.id || join.right?.kind === 'GROUP' && join.right.id === group.id)
     if (!consumer) return []
-    const sourcePrefix = `${group.input.id}.`
-    const dimensions = (group.dimensions ?? []).map(item => ({
-      field: graphItemKey(item).startsWith(sourcePrefix) ? graphItemKey(item).slice(sourcePrefix.length) : '',
-      ...(graphItemText(item, 'unit', 'grouping') ? { unit: graphItemText(item, 'unit', 'grouping') } : {}),
-    })).filter(item => item.field)
-    const metrics = (group.metrics ?? []).map(item => ({
-      field: graphItemKey(item).startsWith(sourcePrefix) ? graphItemKey(item).slice(sourcePrefix.length) : '',
-      function: graphItemText(item, 'function', 'aggregation'),
-    })).filter(item => item.field && item.function)
+    const containsJoin = designer.joins.some(item => graphContains(group.input!, { kind: 'JOIN', id: item.id }, designer))
+    const containsGroup = designer.groups.some(item => item.id !== group.id && graphContains(group.input!, { kind: 'GROUP', id: item.id }, designer))
+    const leaves = graphLeaves(group.input, designer)
+    if (containsJoin || containsGroup || leaves.length !== 1) return []
+    const nodeId = leaves[0]
+    const upstream = new Map(graphProducedFields(group.input, designer, draft.nodes, draft.fields).map(item => [item.key, item]))
+    const outputAlias = (key: string, fallback: string) => identifier(key.includes('.') ? key.slice(key.indexOf('.') + 1) : fallback)
+    const sourceExpression = (key: string, source: ReturnType<typeof graphProducedFields>[number]) => {
+      const plainPhysical = key === `${nodeId}.${source.binding.field}` && source.expression?.type === 'FIELD_REF' && source.expression.nodeId === nodeId && source.expression.field === source.binding.field
+      return plainPhysical ? {} : { expression: source.expression ?? { type: 'FIELD_REF', nodeId, field: source.binding.field } }
+    }
+    const dimensions = (group.dimensions ?? []).flatMap(item => {
+      const key = graphItemKey(item), source = upstream.get(key)
+      return key && source ? [{
+        field: outputAlias(key, source.binding.field),
+        ...(graphItemText(item, 'unit', 'grouping') ? { unit: graphItemText(item, 'unit', 'grouping') } : {}),
+        ...sourceExpression(key, source),
+      }] : []
+    })
+    const metrics = (group.metrics ?? []).flatMap(item => {
+      const key = graphItemKey(item), source = upstream.get(key), fn = graphItemText(item, 'function', 'aggregation')
+      return key && source && fn ? [{ field: outputAlias(key, source.binding.field), function: fn, ...sourceExpression(key, source) }] : []
+    })
     if (!dimensions.length || !metrics.length) throw new Error(`请完成分组组件“${group.name || group.id}”的分组字段和指标配置`)
+    const aliases = [...dimensions, ...metrics].map(item => item.field)
+    if (new Set(aliases).size !== aliases.length) throw new Error(`分组组件“${group.name || group.id}”的输出字段编码重复，请调整字段处理产物编码`)
+    preAggregatedGroupIDs.add(group.id)
     return [{
-      id: group.id,
-      nodeId: group.input.id,
+      id: group.id, nodeId,
       joinId: consumer.id,
       joinSide: consumer.left?.kind === 'GROUP' && consumer.left.id === group.id ? 'LEFT' : 'RIGHT',
       groupBy: dimensions,
@@ -213,9 +235,19 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
     if (!preAggregations.some(item => item.id === group.id)) throw new Error(`分组组件“${group.name || group.id}”需要连接到关联节点或结束节点`)
   }
 
+  const groupProduced = globalGroup ? graphProducedFields({ kind: 'GROUP', id: globalGroup.id }, designer, draft.nodes, draft.fields, new Set(), globalGroup.id, preAggregatedGroupIDs) : []
+  const producedByKey = new Map([
+    ...groupProduced,
+    ...graphProducedFields(endInput, designer, draft.nodes, draft.fields, new Set(), globalGroup?.id ?? '', preAggregatedGroupIDs),
+  ].map(item => [item.key, item]))
+
   // 结束节点控制“对外可见字段”，不能反向改变上游分组口径。未勾选的根分组
   // 维度仍以 invisible 字段进入 DSL/groupBy，确保指标粒度与画布配置一致。
   const visibleKeys = new Set(endOutputs.map(output => output.key))
+  const visibleCodes = new Set(endOutputs.map(output => {
+    const produced = producedByKey.get(output.key)
+    return identifier(graphItemText(output.value, 'code') || produced?.code || output.key)
+  }))
   const outputSpecs = [
     ...endOutputs.map(output => ({ ...output, visible: true })),
     ...(globalGroup?.dimensions ?? []).flatMap(value => {
@@ -224,31 +256,30 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
     }),
   ]
   const fields = outputSpecs.map(({ value, key, visible }) => {
-    const sourceValue = selectedByKey.get(key)
-    if (!sourceValue) throw new Error(`结束节点输出字段 ${key} 已不可用`)
     const produced = producedByKey.get(key)
     if (!produced) throw new Error(`结束节点输出字段 ${key} 不属于上游组件产物`)
+    const sourceBinding = produced.sourceBinding ?? produced.binding
+    const sourceValue = selectedByKey.get(key) ?? selectedByKey.get(`${sourceBinding.nodeId}.${sourceBinding.field}`)
+    if (!sourceValue) throw new Error(`结束节点输出字段 ${key} 已不可用`)
     const { node, column } = sourceValue
     const option = options.get(key)
     const dimension = globalDimensions.get(key)
     const metric = globalMetrics.get(key)
-    if (globalGroup && !dimension && !metric) throw new Error(`结束节点字段 ${key} 不是上游分组组件的产出`)
-    const source = { type: 'FIELD_REF', nodeId: node.id, field: column.columnName }
-    const aggregation = metric ? graphItemText(metric, 'function', 'aggregation') : ''
-    const unit = dimension ? graphItemText(dimension, 'unit', 'grouping') : ''
-    const expression = aggregation
-      ? { type: 'AGGREGATE', function: aggregation, argument: source }
-      : unit ? { type: 'DATE_TRUNC', unit, argument: source } : source
-    const configuredCode = graphItemText(value, 'code') || graphItemText(metric ?? dimension, 'code') || option?.code || fieldCode(node, column, draft.nodes.length > 1)
+    const source = produced.expression ?? { type: 'FIELD_REF', nodeId: node.id, field: column.columnName }
+    const expression = source
+    const preferredCode = identifier(graphItemText(value, 'code') || graphItemText(metric ?? dimension, 'code') || option?.code || fieldCode(node, column, draft.nodes.length > 1))
+    const configuredCode = !visible && visibleCodes.has(preferredCode) && globalGroup
+      ? identifier(`group_${globalGroup.id}_${preferredCode}`)
+      : preferredCode
     const configuredName = graphItemText(value, 'name') || graphItemText(metric ?? dimension, 'name') || option?.name || column.businessName || column.columnName
     return {
-      id: fieldID(node, column),
+      id: selectedByKey.has(key) ? fieldID(node, column) : `field_${identifier(key)}`,
       code: identifier(configuredCode),
       name: configuredName,
-      role: aggregation || produced.kind === 'METRIC' ? 'MEASURE' : graphItemText(value, 'role') || (dimension || produced.kind === 'DIMENSION' ? 'DIMENSION' : option?.role || 'ATTRIBUTE'),
+      role: produced.kind === 'METRIC' ? 'MEASURE' : graphItemText(value, 'role') || (dimension || produced.kind === 'DIMENSION' ? 'DIMENSION' : option?.role || 'ATTRIBUTE'),
       expression,
-      canonicalType: (aggregation || produced.aggregation) === 'COUNT' || (aggregation || produced.aggregation) === 'COUNT_DISTINCT' ? 'INTEGER' : canonicalType(column.canonicalType),
-      nullable: column.nullable,
+      canonicalType: produced.aggregation === 'COUNT' || produced.aggregation === 'COUNT_DISTINCT' ? 'INTEGER' : canonicalType(produced.canonicalType || column.canonicalType),
+      nullable: selectedByKey.has(key) ? column.nullable : true,
       visible,
     }
   })
@@ -403,6 +434,84 @@ export function buildDatasetDSL(draft: DatasetDraft): DatasetDSL {
   }
 }
 
+/**
+ * 只物化目标组件及其上游子图，并临时把目标连接到预览结束节点。这样每个组件
+ * 都按“输入数据集 -> 组件处理 -> 输出数据集”的同一合同执行，且不会把下游未
+ * 完成的配置混入当前组件预览。
+ */
+export function buildComponentPreviewDSL(draft: DatasetDraft, target: GraphInput): DatasetDSL {
+  const designer = draft.designer
+  if (!designer) throw new Error('当前画布缺少组件拓扑，无法生成预览')
+
+  const nodeIDs = new Set<string>()
+  const joinIDs = new Set<string>()
+  const groupIDs = new Set<string>()
+  const transformIDs = new Set<string>()
+  const visiting = new Set<string>()
+  const visit = (input: GraphInput | undefined) => {
+    if (!input) return
+    const visitKey = `${input.kind}:${input.id}`
+    if (visiting.has(visitKey)) throw new Error('组件拓扑存在循环，无法生成预览')
+    visiting.add(visitKey)
+    if (input.kind === 'NODE') nodeIDs.add(input.id)
+    else if (input.kind === 'JOIN') {
+      const join = designer.joins.find(item => item.id === input.id)
+      if (!join) throw new Error('关联组件已失效，无法生成预览')
+      joinIDs.add(join.id); visit(join.left); visit(join.right)
+    } else if (input.kind === 'GROUP') {
+      const group = designer.groups.find(item => item.id === input.id)
+      if (!group) throw new Error('分组组件已失效，无法生成预览')
+      groupIDs.add(group.id); visit(group.input)
+    } else {
+      const transform = designer.transforms?.find(item => item.id === input.id)
+      if (!transform) throw new Error('字段处理组件已失效，无法生成预览')
+      transformIDs.add(transform.id); visit(transform.input)
+    }
+    visiting.delete(visitKey)
+  }
+  visit(target)
+  if (!nodeIDs.size) throw new Error('请先连接包含数据节点的上游组件')
+
+  const previewNodes = draft.nodes.filter(node => nodeIDs.has(node.id))
+  const produced = graphProducedFields(target, designer, draft.nodes, draft.fields)
+  if (!produced.length) throw new Error('当前组件还没有可预览的输出字段')
+  const usedCodes = new Set<string>()
+  const outputs = [...new Map(produced.map(field => [field.key, field])).values()].map((field, index) => {
+    const base = identifier(field.code || `field_${index + 1}`)
+    let code = base
+    let suffix = 2
+    while (usedCodes.has(code)) code = identifier(`${base}_${suffix++}`)
+    usedCodes.add(code)
+    return { key: field.key, name: field.name || code, code }
+  })
+  const positions = Object.fromEntries(Object.entries(designer.nodePositions).filter(([id]) => nodeIDs.has(id)))
+  const previewDesigner: DesignerGraphV1 = {
+    version: '1.0',
+    nodePositions: positions,
+    nodeNames: Object.fromEntries(Object.entries(designer.nodeNames ?? {}).filter(([id]) => nodeIDs.has(id))),
+    joins: designer.joins.filter(join => joinIDs.has(join.id)),
+    groups: designer.groups.filter(group => groupIDs.has(group.id)),
+    transforms: (designer.transforms ?? []).filter(transform => transformIDs.has(transform.id)),
+    end: { id: 'end_1', name: '组件数据预览', input: target, position: { x: 0, y: 0 }, outputs },
+  }
+  const parameterCodes = new Set(draft.filters.filter(filter => nodeIDs.has(filter.nodeId)).map(filter => filter.parameterCode).filter(Boolean))
+  return buildDatasetDSL({
+    ...draft,
+    code: identifier(draft.code || 'component_preview'),
+    name: draft.name.trim() || '组件数据预览',
+    nodes: previewNodes,
+    fields: draft.fields.filter(field => nodeIDs.has(field.key.split('.')[0])),
+    joins: draft.joins.filter(join => joinIDs.has(join.id)),
+    filters: draft.filters.filter(filter => nodeIDs.has(filter.nodeId)),
+    parameters: draft.parameters.filter(parameter => parameterCodes.has(parameter.code)),
+    calculations: [],
+    sorts: [],
+    grainKeys: outputs.map(output => output.code).slice(0, 1),
+    grainDescription: '每行代表一条组件预览记录',
+    designer: previewDesigner,
+  })
+}
+
 /** 将设计器文本输入转换为后端参数校验可识别的标量或多值数组。 */
 export function buildPreviewParameters(parameters: ParameterOption[], values: Record<string, string>): Record<string, unknown> {
   // 前端只拆分多值文本并做必填提示；整数、日期等真实类型转换统一由服务端完成，
@@ -458,6 +567,7 @@ export const datasetAPI = {
   },
   getRevision: (id: string, revisionId: string) => apiRequest<DatasetRevisionRecord>(`${datasetPath(id)}/revisions/${encodeURIComponent(revisionId)}`, { cache: 'no-store' }),
   previewRevision: (id: string, revisionId: string, queryId: string, parameters: Record<string, unknown>, maxRows = 5) => apiRequest<DatasetPreview>(`${datasetPath(id)}/revisions/${encodeURIComponent(revisionId)}/preview`, { method: 'POST', cache: 'no-store', body: JSON.stringify({ queryId, parameters, maxRows }) }),
+  previewCandidate: (dsl: DatasetDSL, queryId: string, parameters: Record<string, unknown>, maxRows = 5) => apiRequest<DatasetCandidatePreview>('/v1/datasets/candidate/preview', { method: 'POST', cache: 'no-store', body: JSON.stringify({ queryId, dsl, parameters, maxRows }) }),
   rollbackRevision: (id: string, revisionId: string, expectedVersion: number) => apiRequest<DatasetRecord>(`${datasetPath(id)}/revisions/${encodeURIComponent(revisionId)}/rollback`, { method: 'POST', body: JSON.stringify({ expectedVersion }) }),
   validate: (dsl: DatasetDSL) => apiRequest<{ valid: boolean; dslHash: string; planHash: string; logicalPlan: unknown }>('/v1/datasets/validate', { method: 'POST', body: JSON.stringify({ dsl }) }),
   create: (dsl: DatasetDSL) => apiRequest<DatasetRecord>('/v1/datasets', { method: 'POST', body: JSON.stringify({ code: dsl.dataset.code, name: dsl.dataset.name, description: dsl.dataset.description ?? '', type: dsl.dataset.type, dsl }) }),

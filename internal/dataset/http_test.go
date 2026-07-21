@@ -302,17 +302,28 @@ func (v *httpPublicationValidator) ValidatePublication(_ context.Context, _, _ s
 
 // httpPreviewer 记录版本预览是否绑定到请求中的精确版本。
 type httpPreviewer struct {
-	result      PreviewResult
-	draftResult DraftPreviewResult
-	err         error
-	tenantID    string
-	actorID     string
-	datasetID   string
-	versionID   string
-	revisionID  string
-	input       PreviewInput
-	draftInput  DraftPreviewInput
-	draftCalls  int
+	result          PreviewResult
+	draftResult     DraftPreviewResult
+	candidateResult CandidatePreviewResult
+	err             error
+	tenantID        string
+	actorID         string
+	datasetID       string
+	versionID       string
+	revisionID      string
+	input           PreviewInput
+	draftInput      DraftPreviewInput
+	candidateInput  CandidatePreviewInput
+	draftCalls      int
+	candidateCalls  int
+}
+
+func (p *httpPreviewer) PreviewCandidate(_ context.Context, tenantID, actorID string, input CandidatePreviewInput) (CandidatePreviewResult, error) {
+	p.candidateCalls++
+	p.tenantID = tenantID
+	p.actorID = actorID
+	p.candidateInput = input
+	return p.candidateResult, p.err
 }
 
 func (p *httpPreviewer) Preview(context.Context, string, string, string, PreviewInput) (PreviewResult, error) {
@@ -483,6 +494,38 @@ func TestDraftPreviewRouteUsesCandidateContractAndAllRequiredPermissions(t *test
 		got := harness.permissions.checks[index]
 		if got.ResourceType != want.ResourceType || got.Action != want.Action || got.ObjectID != want.ObjectID {
 			t.Fatalf("permission check[%d]=%#v want=%#v", index, got, want)
+		}
+	}
+}
+
+func TestCandidatePreviewRouteDoesNotRequirePersistedDatasetIdentity(t *testing.T) {
+	prepared, err := Prepare(readExample(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewer := &httpPreviewer{candidateResult: CandidatePreviewResult{
+		PreviewResult: PreviewResult{QueryID: "d7567ac1-dd36-4d16-aac4-65d48d491d74", Columns: []string{"region"}, Rows: [][]any{{"华东"}}, RowCount: 1},
+		DSLHash:       prepared.DSLHash, PlanHash: prepared.PlanHash,
+	}}
+	harness := newDatasetHTTPHarness(t, &httpDatasetStore{}, previewer, func(check access.Check) bool {
+		return check.ObjectID == "" && (check.ResourceType == "DATASET" && check.Action == "MANAGE" || check.ResourceType == "DATA_ASSET" && check.Action == "READ")
+	})
+	input := CandidatePreviewInput{QueryID: "d7567ac1-dd36-4d16-aac4-65d48d491d74", DSL: prepared.DSLJSON, Parameters: map[string]any{}, MaxRows: 5}
+	response := performDatasetHTTPRequest(t, harness, http.MethodPost, "/api/v1/datasets/candidate/preview", mustDatasetJSON(t, input), nil)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	if previewer.candidateCalls != 1 || previewer.datasetID != "" || previewer.tenantID != httpTestTenantID || previewer.actorID != httpTestUserID || string(previewer.candidateInput.DSL) != string(prepared.DSLJSON) {
+		t.Fatalf("previewer=%#v", previewer)
+	}
+	wantChecks := []access.Check{{ResourceType: "DATASET", Action: "MANAGE"}, {ResourceType: "DATA_ASSET", Action: "READ"}}
+	if len(harness.permissions.checks) != len(wantChecks) {
+		t.Fatalf("checks=%#v", harness.permissions.checks)
+	}
+	for index, want := range wantChecks {
+		got := harness.permissions.checks[index]
+		if got.ResourceType != want.ResourceType || got.Action != want.Action || got.ObjectID != "" {
+			t.Fatalf("check[%d]=%#v want=%#v", index, got, want)
 		}
 	}
 }

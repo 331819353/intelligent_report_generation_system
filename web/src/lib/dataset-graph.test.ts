@@ -296,6 +296,154 @@ describe('dataset graph', () => {
     expect(regionOutputs.every(item => item.producerName === '区域汇总结果')).toBe(true)
   })
 
+  it('字段处理组件保留上游字段并生成可串联的结构化表达式', () => {
+    const graph: DesignerGraphV1 = {
+      version: '1.0',
+      nodePositions: { customer: { x: 0, y: 0 } },
+      nodeNames: { customer: '客户数据节点' },
+      joins: [],
+      groups: [],
+      transforms: [
+        {
+          id: 'transform_amount', name: '金额换算', family: 'NUMBER', componentType: 'NUMBER_ARITHMETIC', input: { kind: 'NODE', id: 'customer' }, position: { x: 300, y: 0 },
+          rules: [{ id: 'rule_double', operation: 'ADD', inputKeys: ['customer.amount', 'customer.amount'], output: { id: 'double_amount', name: '双倍金额', code: 'double_amount', canonicalType: 'DECIMAL' } }],
+        },
+        {
+          id: 'transform_cast', name: '金额文本化', family: 'CAST', componentType: 'CAST', input: { kind: 'TRANSFORM', id: 'transform_amount' }, position: { x: 600, y: 0 },
+          rules: [{ id: 'rule_cast', operation: 'CAST', inputKeys: ['transform_amount.double_amount'], targetType: 'STRING', output: { id: 'amount_text', name: '金额文本', code: 'amount_text', canonicalType: 'STRING' } }],
+        },
+      ],
+      end: { id: 'end_1', name: '最终输出', input: { kind: 'TRANSFORM', id: 'transform_cast' }, position: { x: 900, y: 0 }, outputs: [] },
+    }
+
+    const outputs = graphProducedFields(graph.end?.input, graph, nodes, fields)
+
+    expect(outputs.map(item => item.key)).toEqual(['customer.customer_id', 'customer.amount', 'transform_amount.double_amount', 'transform_cast.amount_text'])
+    expect(outputs.at(-1)?.expression).toEqual({
+      type: 'CAST', targetType: 'STRING', argument: {
+        type: 'ADD',
+        arguments: [
+          { type: 'FIELD_REF', nodeId: 'customer', field: 'amount' },
+          { type: 'FIELD_REF', nodeId: 'customer', field: 'amount' },
+        ],
+      },
+    })
+    expect(validateDesignerGraph(graph, ['customer']).valid).toBe(true)
+    const hydrated = hydrateDesignerGraph(emptyDSL(serializeDesignerGraph(graph)), nodes.slice(0, 1), [], fields.filter(field => field.key.startsWith('customer.')))
+    expect(hydrated).toEqual(serializeDesignerGraph(graph))
+    expect(hydrated.transforms?.map(transform => transform.componentType)).toEqual(['NUMBER_ARITHMETIC', 'CAST'])
+  })
+
+  it('日期处理生成字符串格式化表达式，并把旧日期组件从截断语义迁移为年月编码', () => {
+    const dateNode = node('orders', '订单表', [column('table_orders', 'created_at', '下单时间', 'DATETIME')])
+    const dateFields: FieldOption[] = [{ key: 'orders.created_at', name: '下单时间', code: 'created_at', role: 'ATTRIBUTE', aggregation: '', output: true }]
+    const graph: DesignerGraphV1 = {
+      version: '1.0', nodePositions: { orders: { x: 0, y: 0 } }, nodeNames: { orders: '订单表' }, joins: [], groups: [],
+      transforms: [{
+        id: 'transform_date', name: '日期处理 1', family: 'DATE', input: { kind: 'NODE', id: 'orders' }, position: { x: 300, y: 0 },
+        rules: [{ id: 'rule_1', operation: 'DATE_FORMAT', inputKeys: ['orders.created_at'], unit: 'MONTH', output: { id: 'output_1', name: '下单时间年月', code: 'created_at_yyyymm', canonicalType: 'STRING' } }],
+      }],
+    }
+
+    const formatted = graphProducedFields({ kind: 'TRANSFORM', id: 'transform_date' }, graph, [dateNode], dateFields).at(-1)
+    expect(formatted).toMatchObject({ code: 'created_at_yyyymm', canonicalType: 'STRING', grouping: undefined })
+    expect(formatted?.expression).toEqual({
+      type: 'DATE_FORMAT', unit: 'MONTH', argument: { type: 'FIELD_REF', nodeId: 'orders', field: 'created_at' },
+    })
+
+    const legacy = structuredClone(graph)
+    legacy.transforms![0].rules[0] = {
+      ...legacy.transforms![0].rules[0], operation: 'DATE_TRUNC',
+      output: { id: 'output_1', name: '下单时间日期处理结果', code: 'created_at_day', canonicalType: 'DATETIME' },
+    }
+    const migrated = hydrateDesignerGraph(emptyDSL(legacy), [dateNode], [], dateFields)
+    expect(migrated.transforms?.[0].rules[0]).toMatchObject({
+      operation: 'DATE_FORMAT', unit: 'MONTH',
+      output: { name: '下单时间年月', code: 'created_at_yyyymm', canonicalType: 'STRING' },
+    })
+  })
+
+  it('文本处理生成带受控参数的 Unicode 截取与替换表达式', () => {
+    const graph: DesignerGraphV1 = {
+      version: '1.0', nodePositions: { customer: { x: 0, y: 0 } }, nodeNames: { customer: '客户数据节点' }, joins: [], groups: [],
+      transforms: [{
+        id: 'transform_text', name: '客户编码清理', family: 'TEXT', input: { kind: 'NODE', id: 'customer' }, position: { x: 300, y: 0 },
+        rules: [
+          { id: 'rule_slice', operation: 'SUBSTRING', inputKeys: ['customer.customer_id'], start: 2, length: 4, output: { id: 'customer_slice', name: '客户编码片段', code: 'customer_slice', canonicalType: 'STRING' } },
+          { id: 'rule_replace', operation: 'REPLACE', inputKeys: ['customer.customer_id'], searchValue: '-', replacementValue: '', output: { id: 'customer_clean', name: '清理后编码', code: 'customer_clean', canonicalType: 'STRING' } },
+        ],
+      }],
+      end: { id: 'end_1', name: '最终输出', input: { kind: 'TRANSFORM', id: 'transform_text' }, position: { x: 600, y: 0 }, outputs: [] },
+    }
+
+    const outputs = graphProducedFields(graph.end?.input, graph, nodes, fields)
+    expect(outputs.find(item => item.key === 'transform_text.customer_slice')?.expression).toEqual({
+      type: 'SUBSTRING', arguments: [
+        { type: 'FIELD_REF', nodeId: 'customer', field: 'customer_id' },
+        { type: 'LITERAL', value: 2 },
+        { type: 'LITERAL', value: 4 },
+      ],
+    })
+    expect(outputs.find(item => item.key === 'transform_text.customer_clean')?.expression).toEqual({
+      type: 'REPLACE', arguments: [
+        { type: 'FIELD_REF', nodeId: 'customer', field: 'customer_id' },
+        { type: 'LITERAL', value: '-' },
+        { type: 'LITERAL', value: '' },
+      ],
+    })
+  })
+
+  it('数值、条件、空值和字段合并生成类型安全且可执行的表达式', () => {
+    const graph: DesignerGraphV1 = {
+      version: '1.0', nodePositions: { customer: { x: 0, y: 0 } }, nodeNames: { customer: '客户数据节点' }, joins: [], groups: [],
+      transforms: [
+        {
+          id: 'transform_number', name: '金额取整', family: 'NUMBER', input: { kind: 'NODE', id: 'customer' }, position: { x: 300, y: 0 },
+          rules: [{ id: 'rule_round', operation: 'ROUND', inputKeys: ['customer.amount'], precision: 1, output: { id: 'amount_round', name: '取整金额', code: 'amount_round', canonicalType: 'DECIMAL' } }],
+        },
+        {
+          id: 'transform_condition', name: '金额分档', family: 'CONDITION', input: { kind: 'NODE', id: 'customer' }, position: { x: 300, y: 120 },
+          rules: [
+            { id: 'rule_gt', operation: 'CASE', inputKeys: ['customer.amount'], conditionOperator: 'GT', matchValue: '100', thenValue: '大额', elseValue: '普通', output: { id: 'amount_level', name: '金额档位', code: 'amount_level', canonicalType: 'STRING' } },
+            { id: 'rule_contains', operation: 'CASE', inputKeys: ['customer.amount'], conditionOperator: 'CONTAINS', matchValue: '12', thenValue: '包含', elseValue: '不包含', output: { id: 'amount_contains', name: '金额包含判断', code: 'amount_contains', canonicalType: 'STRING' } },
+          ],
+        },
+        {
+          id: 'transform_null', name: '金额补空', family: 'NULL', input: { kind: 'NODE', id: 'customer' }, position: { x: 300, y: 240 },
+          rules: [{ id: 'rule_fill', operation: 'COALESCE', inputKeys: ['customer.amount'], fallbackMode: 'LITERAL', fallbackValue: '0', output: { id: 'amount_filled', name: '补空金额', code: 'amount_filled', canonicalType: 'DECIMAL' } }],
+        },
+        {
+          id: 'transform_merge', name: '客户金额编码', family: 'SPLIT_MERGE', input: { kind: 'NODE', id: 'customer' }, position: { x: 300, y: 360 },
+          rules: [{ id: 'rule_merge', operation: 'CONCAT', inputKeys: ['customer.customer_id', 'customer.amount'], separator: '-', output: { id: 'customer_amount', name: '客户金额编码', code: 'customer_amount', canonicalType: 'STRING' } }],
+        },
+      ],
+    }
+
+    expect(graphProducedFields({ kind: 'TRANSFORM', id: 'transform_number' }, graph, nodes, fields).at(-1)?.expression).toEqual({
+      type: 'ROUND', arguments: [{ type: 'FIELD_REF', nodeId: 'customer', field: 'amount' }, { type: 'LITERAL', value: 1 }],
+    })
+    const conditions = graphProducedFields({ kind: 'TRANSFORM', id: 'transform_condition' }, graph, nodes, fields)
+    expect(conditions.find(field => field.code === 'amount_level')?.expression).toEqual({
+      type: 'CASE',
+      whens: [{ when: { type: 'GT', left: { type: 'FIELD_REF', nodeId: 'customer', field: 'amount' }, right: { type: 'LITERAL', value: 100 } }, then: { type: 'LITERAL', value: '大额' } }],
+      else: { type: 'LITERAL', value: '普通' },
+    })
+    expect(conditions.find(field => field.code === 'amount_contains')?.expression).toMatchObject({
+      whens: [{ when: { type: 'CONTAINS', left: { type: 'CAST', targetType: 'STRING' }, right: { type: 'LITERAL', value: '12' } } }],
+    })
+    expect(graphProducedFields({ kind: 'TRANSFORM', id: 'transform_null' }, graph, nodes, fields).at(-1)?.expression).toEqual({
+      type: 'COALESCE', arguments: [{ type: 'FIELD_REF', nodeId: 'customer', field: 'amount' }, { type: 'LITERAL', value: 0 }],
+    })
+    expect(graphProducedFields({ kind: 'TRANSFORM', id: 'transform_merge' }, graph, nodes, fields).at(-1)?.expression).toEqual({
+      type: 'CONCAT',
+      arguments: [
+        { type: 'COALESCE', arguments: [{ type: 'FIELD_REF', nodeId: 'customer', field: 'customer_id' }, { type: 'LITERAL', value: '' }] },
+        { type: 'LITERAL', value: '-' },
+        { type: 'COALESCE', arguments: [{ type: 'CAST', targetType: 'STRING', argument: { type: 'FIELD_REF', nodeId: 'customer', field: 'amount' } }, { type: 'LITERAL', value: '' }] },
+      ],
+    })
+  })
+
   it('循环拓扑会被递归保护，不产生伪叶子、伪根或堆栈溢出', () => {
     const cyclic: DesignerGraphV1 = {
       version: '1.0',

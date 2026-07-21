@@ -116,6 +116,45 @@ func (s *Service) PreviewDraft(ctx context.Context, tenantID, actorID, datasetID
 	}, nil
 }
 
+const candidatePolicyObjectID = "00000000-0000-0000-0000-000000000000"
+
+// PreviewCandidate 执行尚未保存的数据集候选。候选没有 DATASET 对象身份，因此只
+// 使用当前用户属性和资产访问权限，不继承任何已保存数据集的行列策略。
+func (s *Service) PreviewCandidate(ctx context.Context, tenantID, actorID string, input dataset.CandidatePreviewInput) (dataset.CandidatePreviewResult, error) {
+	if tenantID == "" || actorID == "" || input.MaxRows < 0 || input.MaxRows > 5 {
+		return dataset.CandidatePreviewResult{}, dataset.ErrPreviewInvalid
+	}
+	prepared, err := dataset.Prepare(input.DSL)
+	if err != nil {
+		return dataset.CandidatePreviewResult{}, err
+	}
+	fieldCodes := make([]string, 0, len(prepared.Document.Fields))
+	for _, field := range prepared.Document.Fields {
+		fieldCodes = append(fieldCodes, field.Code)
+	}
+	if err := s.policies.ValidateDefinitions(ctx, tenantID, "DATASET", candidatePolicyObjectID, fieldCodes); err != nil {
+		return dataset.CandidatePreviewResult{}, dataset.ErrPreviewInvalid
+	}
+	maxRows := input.MaxRows
+	if maxRows == 0 {
+		maxRows = min(prepared.Document.ExecutionPolicy.PreviewLimit, 5)
+	}
+	if maxRows < 1 || maxRows > 5 {
+		return dataset.CandidatePreviewResult{}, dataset.ErrPreviewInvalid
+	}
+	parameters := input.Parameters
+	if parameters == nil {
+		parameters = map[string]any{}
+	}
+	result, err := s.previewSnapshot(ctx, tenantID, actorID, runtimeSnapshot{
+		CandidateCode: prepared.Document.Dataset.Code, PlanHash: prepared.PlanHash, DSL: prepared.DSLJSON,
+	}, dataset.PreviewInput{QueryID: input.QueryID, Parameters: parameters, MaxRows: maxRows}, "COMPONENT_PREVIEW")
+	if err != nil {
+		return dataset.CandidatePreviewResult{}, err
+	}
+	return dataset.CandidatePreviewResult{PreviewResult: result, DSLHash: prepared.DSLHash, PlanHash: prepared.PlanHash}, nil
+}
+
 // PreviewVersion 只执行 URL 中指定的发布版本，绝不回退到当前发布指针或可变草稿。
 func (s *Service) PreviewVersion(ctx context.Context, tenantID, actorID, datasetID, versionID string, input dataset.PreviewInput) (dataset.PreviewResult, error) {
 	if tenantID == "" || actorID == "" || datasetID == "" || versionID == "" {
@@ -242,6 +281,7 @@ func (s *Service) ValidatePublication(ctx context.Context, tenantID, actorID str
 type runtimeSnapshot struct {
 	DatasetID          string
 	VersionID          string
+	CandidateCode      string
 	MetricID           string
 	MetricVersionID    string
 	PlanHash           string
@@ -277,7 +317,11 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
-	scope, rowPolicies, columnPolicies, err := s.policies.Load(ctx, tenantID, actorID, "DATASET", snapshot.DatasetID)
+	policyObjectID := snapshot.DatasetID
+	if policyObjectID == "" {
+		policyObjectID = candidatePolicyObjectID
+	}
+	scope, rowPolicies, columnPolicies, err := s.policies.Load(ctx, tenantID, actorID, "DATASET", policyObjectID)
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
@@ -301,7 +345,8 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	// 数据库和文件路径共用同一审计记录与生命周期；分支只负责生成各自的执行计划。
 	baseRun := RunRecord{
 		ID: queryID, TenantID: tenantID, DatasetID: snapshot.DatasetID, DatasetVersionID: snapshot.VersionID,
-		MetricID: snapshot.MetricID, MetricVersionID: snapshot.MetricVersionID,
+		CandidateCode: snapshot.CandidateCode,
+		MetricID:      snapshot.MetricID, MetricVersionID: snapshot.MetricVersionID,
 		ActorID: actorID, SourceID: resolved.SourceID, RunType: runType,
 	}
 	baseRun.Sources = resolvedRunSources(queryID, document.Dataset.Type, resolved)

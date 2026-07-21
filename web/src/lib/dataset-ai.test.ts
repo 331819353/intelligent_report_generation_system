@@ -59,6 +59,105 @@ const planWithGroupsBeforeAndAfterJoin = (): DatasetAIGraphPlan => {
 }
 
 describe('dataset AI editor conversion', () => {
+  it('materializes and round-trips AI generated fine-grained transforms', async () => {
+    const transformPlan: DatasetAIGraphPlan = {
+      dataset: { name: '客户区域映射', description: '使用候选值数组映射客户区域' },
+      nodes: [{ id: 'node_1', tableId: customers.id, alias: 'customers', selectedColumns: ['customer_id', 'region'] }],
+      joins: [], groups: [],
+      transforms: [{
+        id: 'transform_1', name: '区域条件映射', family: 'CONDITION', componentType: 'CONDITION', input: { kind: 'NODE', id: 'node_1' },
+        rules: [{
+          id: 'rule_1', operation: 'CASE', inputKeys: ['node_1.region'], conditionOperator: 'IN', thenValue: '目标区域', elseValue: '其他区域',
+          conditionValues: [{ id: 'value_1', mode: 'LITERAL', value: '华东' }, { id: 'value_2', mode: 'FIELD', value: 'node_1.customer_id' }],
+          output: { id: 'region_group', name: '区域分组', code: 'region_group', canonicalType: 'STRING' },
+        }],
+      }],
+      end: { name: '最终输出', input: { kind: 'TRANSFORM', id: 'transform_1' }, outputs: [{ nodeId: 'node_1', column: 'region', key: 'transform_1.region_group', name: '区域分组', code: 'region_group' }] },
+    }
+    const result = await materializeDatasetAIPlan(transformPlan, [customers], async tableID => columns[tableID], empty, 'dataset_ai_transform')
+    expect(result.graph.transforms).toHaveLength(1)
+    expect(result.graph.end?.input).toEqual({ kind: 'TRANSFORM', id: 'transform_1' })
+    expect(buildDatasetDSL(result.draft).fields[0]).toMatchObject({
+      code: 'region_group',
+      expression: { type: 'CASE', whens: [{ when: { type: 'IN', right: { type: 'ARRAY' } } }] },
+    })
+    expect(datasetAIPlanFromEditor(result.draft, result.graph, result.metadata)).toMatchObject({
+      transforms: [{ id: 'transform_1', componentType: 'CONDITION' }],
+      end: { input: { kind: 'TRANSFORM', id: 'transform_1' }, outputs: [{ key: 'transform_1.region_group' }] },
+    })
+  })
+
+  it('materializes the complete transform-group-join-group-transform workflow', async () => {
+    const workflowPlan: DatasetAIGraphPlan = {
+      dataset: { name: '地区订单完整加工', description: '关联前加工与汇总，关联后再次汇总并加工输出' },
+      nodes: [
+        { id: 'node_1', tableId: customers.id, alias: 'customers', selectedColumns: ['customer_id', 'region', 'customer_name'] },
+        { id: 'node_2', tableId: orders.id, alias: 'orders', selectedColumns: ['customer_id', 'amount'] },
+      ],
+      transforms: [
+        {
+          id: 'transform_1', name: '地区转大写', family: 'TEXT', componentType: 'TEXT_UPPER', input: { kind: 'NODE', id: 'node_1' },
+          rules: [{ id: 'rule_1', operation: 'UPPER', inputKeys: ['node_1.region'], output: { id: 'region_upper', name: '大写地区', code: 'region_upper', canonicalType: 'STRING' } }],
+        },
+        {
+          id: 'transform_2', name: '地区转小写', family: 'TEXT', componentType: 'TEXT_LOWER', input: { kind: 'GROUP', id: 'group_3' },
+          rules: [{ id: 'rule_2', operation: 'LOWER', inputKeys: ['transform_1.region_upper'], output: { id: 'region_lower', name: '小写地区', code: 'region_lower', canonicalType: 'STRING' } }],
+        },
+      ],
+      groups: [
+        {
+          id: 'group_1', name: '客户预汇总', input: { kind: 'TRANSFORM', id: 'transform_1' },
+          dimensions: [
+            { nodeId: 'node_1', column: 'customer_id', grouping: '' },
+            { nodeId: 'transform_1', column: 'region_upper', grouping: '' },
+          ],
+          metrics: [{ nodeId: 'node_1', column: 'customer_name', aggregation: 'COUNT' }],
+        },
+        {
+          id: 'group_2', name: '订单预汇总', input: { kind: 'NODE', id: 'node_2' },
+          dimensions: [{ nodeId: 'node_2', column: 'customer_id', grouping: '' }],
+          metrics: [{ nodeId: 'node_2', column: 'amount', aggregation: 'SUM' }],
+        },
+        {
+          id: 'group_3', name: '地区订单汇总', input: { kind: 'JOIN', id: 'join_1' },
+          dimensions: [{ nodeId: 'transform_1', column: 'region_upper', grouping: '' }],
+          metrics: [{ nodeId: 'node_2', column: 'amount', aggregation: 'SUM' }],
+        },
+      ],
+      joins: [{
+        id: 'join_1', name: '客户订单关联', left: { kind: 'GROUP', id: 'group_1' }, right: { kind: 'GROUP', id: 'group_2' }, joinType: 'LEFT',
+        conditions: [{ leftNodeId: 'node_1', leftColumn: 'customer_id', rightNodeId: 'node_2', rightColumn: 'customer_id' }],
+      }],
+      end: {
+        name: '最终输出', input: { kind: 'TRANSFORM', id: 'transform_2' }, outputs: [
+          { nodeId: 'node_1', column: 'region', key: 'transform_2.region_lower', name: '小写地区', code: 'region_lower' },
+          { nodeId: 'node_2', column: 'amount', key: 'node_2.amount', name: '订单金额', code: 'order_amount' },
+        ],
+      },
+    }
+
+    const result = await materializeDatasetAIPlan(workflowPlan, [orders, customers], async tableID => columns[tableID], empty, 'dataset_ai_workflow')
+    expect(result.graph.groups.find(group => group.id === 'group_1')?.dimensions.map(item => item.key)).toContain('transform_1.region_upper')
+    expect(result.graph.end?.input).toEqual({ kind: 'TRANSFORM', id: 'transform_2' })
+
+    const dsl = buildDatasetDSL(result.draft)
+    expect(dsl.preAggregations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'group_1', nodeId: 'node_1',
+        groupBy: expect.arrayContaining([expect.objectContaining({ field: 'region_upper', expression: expect.objectContaining({ type: 'UPPER' }) })]),
+      }),
+      expect.objectContaining({ id: 'group_2', nodeId: 'node_2' }),
+    ]))
+    expect(dsl.fields).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'region_lower', expression: expect.objectContaining({ type: 'LOWER', argument: expect.objectContaining({ type: 'FIELD_REF', nodeId: 'node_1', field: 'region_upper' }) }) }),
+      expect.objectContaining({ code: 'order_amount', expression: expect.objectContaining({ type: 'AGGREGATE', function: 'SUM' }) }),
+    ]))
+    expect(datasetAIPlanFromEditor(result.draft, result.graph, result.metadata)).toMatchObject({
+      groups: expect.arrayContaining([expect.objectContaining({ id: 'group_1', dimensions: expect.arrayContaining([expect.objectContaining({ nodeId: 'transform_1', column: 'region_upper' })]) })]),
+      end: { input: { kind: 'TRANSFORM', id: 'transform_2' }, outputs: [{ key: 'transform_2.region_lower' }, { key: 'node_2.amount' }] },
+    })
+  })
+
   it('materializes a complete proposal and still produces the existing strict DSL', async () => {
     const result = await materializeDatasetAIPlan(plan(), [orders, customers], async tableID => columns[tableID], empty, 'dataset_ai_1')
     expect(result.draft.nodes).toHaveLength(2)

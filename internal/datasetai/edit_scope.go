@@ -75,19 +75,21 @@ func classifyPromptGroupRoles(current GraphPlan) []promptGroupRole {
 }
 
 var componentFields = map[string][]string{
-	"DATASET": {"name", "description"},
-	"NODE":    {"tableId", "alias", "selectedColumns"},
-	"JOIN":    {"name", "left", "right", "joinType", "conditions"},
-	"GROUP":   {"name", "input", "dimensions", "metrics"},
-	"END":     {"name", "input", "outputs"},
+	"DATASET":   {"name", "description"},
+	"NODE":      {"tableId", "alias", "selectedColumns"},
+	"JOIN":      {"name", "left", "right", "joinType", "conditions"},
+	"GROUP":     {"name", "input", "dimensions", "metrics"},
+	"TRANSFORM": {"name", "input", "family", "componentType", "rules"},
+	"END":       {"name", "input", "outputs"},
 }
 
 var componentKindOrder = map[string]int{
-	"DATASET": 0,
-	"NODE":    1,
-	"JOIN":    2,
-	"GROUP":   3,
-	"END":     4,
+	"DATASET":   0,
+	"NODE":      1,
+	"JOIN":      2,
+	"GROUP":     3,
+	"TRANSFORM": 4,
+	"END":       5,
 }
 
 type componentSnapshot struct {
@@ -307,9 +309,8 @@ func normalizeAndValidateChangeSet(current GraphPlan, components map[string]comp
 
 func normalizeOperationFields(op ChangeOperation) ([]string, error) {
 	if op.Action == "ADD" || op.Action == "REMOVE" {
-		if len(op.Fields) != 0 {
-			return nil, invalidOutput(fmt.Sprintf("%s %s:%s must have empty fields", op.Action, op.ComponentKind, op.ComponentID))
-		}
+		// ADD/REMOVE 已经锁定整个组件；模型偶尔重复列出新建或删除组件的
+		// 内部字段。丢弃这些冗余声明不会扩大修改范围。
 		return []string{}, nil
 	}
 	if len(op.Fields) == 0 {
@@ -338,9 +339,8 @@ func normalizeOperationFields(op ChangeOperation) ([]string, error) {
 
 func normalizeOperationInputChanges(current componentSnapshot, op ChangeOperation) ([]InputChange, error) {
 	if op.Action != "UPDATE" {
-		if len(op.InputChanges) != 0 {
-			return nil, invalidOutput(fmt.Sprintf("%s %s:%s must have empty inputChanges", op.Action, op.ComponentKind, op.ComponentID))
-		}
+		// 新增/删除组件不通过 inputChanges 授权改线；真实消费者变化仍须由
+		// 独立 UPDATE 声明，因此清空冗余值不会掩盖拓扑变化。
 		return []InputChange{}, nil
 	}
 
@@ -1113,6 +1113,19 @@ func fieldAvailableAtInput(plan GraphPlan, input PlanInput, binding FieldBinding
 				}
 			}
 		}
+	case "TRANSFORM":
+		for _, transform := range plan.Transforms {
+			if transform.ID != input.ID || !fieldAvailableAtInput(plan, transform.Input, binding, visiting) {
+				continue
+			}
+			physicalKey := fieldKey(binding.NodeID, binding.Column)
+			for _, rule := range transform.Rules {
+				if rule.ReplaceSourceKey == physicalKey {
+					return false
+				}
+			}
+			return true
+		}
 	case "JOIN":
 		for _, join := range plan.Joins {
 			if join.ID == input.ID {
@@ -1129,6 +1142,12 @@ func fieldAvailableAtInput(plan GraphPlan, input PlanInput, binding FieldBinding
 func validateAndCanonicalizePlanChanges(current, proposal GraphPlan, expected ChangeSet, catalogs ...[]CatalogTable) (ChangeSet, error) {
 	current = normalizeGraphPlan(cloneGraphPlan(current))
 	proposal = normalizeGraphPlan(cloneGraphPlan(proposal))
+	// 新建画布在用户填写保存信息前也走 MODIFY 两阶段协议。空名称不是一个
+	// 需要保护的既有业务值；用候选名称补齐比较基线，避免把必需初始化误报
+	// 为未授权 DATASET 更新。已有非空名称仍按原值严格比较。
+	if current.Dataset.Name == "" {
+		current.Dataset.Name = proposal.Dataset.Name
+	}
 	currentComponents, err := indexPlanComponents(current)
 	if err != nil {
 		return ChangeSet{}, err
@@ -1320,6 +1339,11 @@ func indexPlanComponents(plan GraphPlan) (map[string]componentSnapshot, error) {
 			return nil, err
 		}
 	}
+	for _, transform := range plan.Transforms {
+		if err := add(componentSnapshot{Kind: "TRANSFORM", ID: transform.ID, Name: transform.Name, Value: transform}); err != nil {
+			return nil, err
+		}
+	}
 	if err := add(componentSnapshot{Kind: "END", ID: endComponentID, Name: plan.End.Name, Value: plan.End}); err != nil {
 		return nil, err
 	}
@@ -1382,6 +1406,20 @@ func componentFieldEqual(before, after componentSnapshot, field string) bool {
 		case "metrics":
 			return reflect.DeepEqual(left.Metrics, right.Metrics)
 		}
+	case "TRANSFORM":
+		left, right := before.Value.(PlanTransform), after.Value.(PlanTransform)
+		switch field {
+		case "name":
+			return left.Name == right.Name
+		case "input":
+			return left.Input == right.Input
+		case "family":
+			return left.Family == right.Family
+		case "componentType":
+			return left.ComponentType == right.ComponentType
+		case "rules":
+			return reflect.DeepEqual(left.Rules, right.Rules)
+		}
 	case "END":
 		left, right := before.Value.(PlanEnd), after.Value.(PlanEnd)
 		switch field {
@@ -1421,6 +1459,10 @@ func componentInputField(component componentSnapshot, field string) (PlanInput, 
 		if field == "input" {
 			return normalizeInput(value.Input), true
 		}
+	case PlanTransform:
+		if field == "input" {
+			return normalizeInput(value.Input), true
+		}
 	case PlanEnd:
 		if field == "input" {
 			return normalizeInput(value.Input), true
@@ -1439,6 +1481,9 @@ func directConsumerEdges(plan GraphPlan) []consumerEdge {
 	}
 	for _, group := range plan.Groups {
 		result = append(result, consumerEdge{ConsumerKind: "GROUP", ConsumerID: group.ID, Field: "input", Input: normalizeInput(group.Input)})
+	}
+	for _, transform := range plan.Transforms {
+		result = append(result, consumerEdge{ConsumerKind: "TRANSFORM", ConsumerID: transform.ID, Field: "input", Input: normalizeInput(transform.Input)})
 	}
 	result = append(result, consumerEdge{ConsumerKind: "END", ConsumerID: endComponentID, Field: "input", Input: normalizeInput(plan.End.Input)})
 	return result
@@ -1460,8 +1505,8 @@ func componentKey(kind, id string) (string, error) {
 }
 
 func validatePlanInputReference(value PlanInput) error {
-	if value.Kind != "NODE" && value.Kind != "JOIN" && value.Kind != "GROUP" {
-		return invalidOutput("input reference kind must be NODE, JOIN, or GROUP")
+	if value.Kind != "NODE" && value.Kind != "JOIN" && value.Kind != "GROUP" && value.Kind != "TRANSFORM" {
+		return invalidOutput("input reference kind must be NODE, JOIN, GROUP, or TRANSFORM")
 	}
 	if !validIdentifier(value.ID) {
 		return invalidOutput(fmt.Sprintf("input reference %s:%s has an invalid id", value.Kind, value.ID))
@@ -1473,7 +1518,7 @@ func inputFieldsForKind(kind string) []string {
 	switch kind {
 	case "JOIN":
 		return []string{"left", "right"}
-	case "GROUP", "END":
+	case "GROUP", "TRANSFORM", "END":
 		return []string{"input"}
 	default:
 		return []string{}
@@ -1946,6 +1991,15 @@ func cloneGraphPlan(value GraphPlan) GraphPlan {
 	for index := range result.Groups {
 		result.Groups[index].Dimensions = append([]PlanDimension(nil), value.Groups[index].Dimensions...)
 		result.Groups[index].Metrics = append([]PlanMetric(nil), value.Groups[index].Metrics...)
+	}
+	result.Transforms = append([]PlanTransform(nil), value.Transforms...)
+	for index := range result.Transforms {
+		result.Transforms[index].Rules = append([]PlanTransformRule(nil), value.Transforms[index].Rules...)
+		for ruleIndex := range result.Transforms[index].Rules {
+			rule := &result.Transforms[index].Rules[ruleIndex]
+			rule.InputKeys = append([]string(nil), value.Transforms[index].Rules[ruleIndex].InputKeys...)
+			rule.ConditionValues = append([]PlanConditionValue(nil), value.Transforms[index].Rules[ruleIndex].ConditionValues...)
+		}
 	}
 	result.End.Outputs = append([]PlanOutput(nil), value.End.Outputs...)
 	return result

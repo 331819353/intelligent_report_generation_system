@@ -64,14 +64,16 @@ type PreAggregation struct {
 
 // PreAggregationGroup 描述关联前分组的维度字段及可选日期粒度。
 type PreAggregationGroup struct {
-	Field string `json:"field"`
-	Unit  string `json:"unit,omitempty"`
+	Field      string      `json:"field"`
+	Unit       string      `json:"unit,omitempty"`
+	Expression *Expression `json:"expression,omitempty"`
 }
 
 // PreAggregationMetric 描述关联前产生的指标；结果继续使用原字段名供 Join 引用。
 type PreAggregationMetric struct {
-	Field    string `json:"field"`
-	Function string `json:"function"`
+	Field      string      `json:"field"`
+	Function   string      `json:"function"`
+	Expression *Expression `json:"expression,omitempty"`
 }
 
 // Descriptor 保存 DSL 内可移植的数据集基本信息。
@@ -468,6 +470,15 @@ type DraftPreviewInput struct {
 	MaxRows         int             `json:"maxRows,omitempty"`
 }
 
+// CandidatePreviewInput 用于新建画布在尚无持久化数据集身份时执行受控小样本。
+// 候选不会保存为数据集；运行时使用独立审计记录，避免伪造数据集版本身份。
+type CandidatePreviewInput struct {
+	QueryID    string          `json:"queryId,omitempty"`
+	DSL        json.RawMessage `json:"dsl"`
+	Parameters map[string]any  `json:"parameters"`
+	MaxRows    int             `json:"maxRows,omitempty"`
+}
+
 // PreviewResult 返回小样本数据和运行摘要，不暴露生成 SQL。
 type PreviewResult struct {
 	QueryID    string           `json:"queryId"`
@@ -484,6 +495,13 @@ type DraftPreviewResult struct {
 	DSLHash     string `json:"dslHash"`
 	PlanHash    string `json:"planHash"`
 	BaseVersion int64  `json:"baseVersion"`
+}
+
+// CandidatePreviewResult 返回未保存候选的规范摘要，供前端丢弃过期响应。
+type CandidatePreviewResult struct {
+	PreviewResult
+	DSLHash  string `json:"dslHash"`
+	PlanHash string `json:"planHash"`
 }
 
 // PreviewWarning 向设计器返回不含源数据值的 Join 语义与性能风险。

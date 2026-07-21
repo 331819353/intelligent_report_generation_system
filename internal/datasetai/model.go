@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	SchemaVersion       = "2.2"
-	PromptVersion       = "dataset-dag-planner-v7"
-	IntentPromptVersion = "dataset-dag-intent-v6"
+	SchemaVersion       = "2.3"
+	PromptVersion       = "dataset-dag-planner-v10"
+	IntentPromptVersion = "dataset-dag-intent-v8"
 
 	maxInstructionRunes = 4000
 	maxPlanNodes        = 16
@@ -36,6 +36,7 @@ const (
 	InvalidOutputReasonAggregationField  = "AGGREGATION_FIELD_INVALID"
 	InvalidOutputReasonJoin              = "JOIN_INVALID"
 	InvalidOutputReasonGroup             = "GROUP_INVALID"
+	InvalidOutputReasonTransform         = "TRANSFORM_REQUIRED"
 	InvalidOutputReasonOutput            = "OUTPUT_INVALID"
 	InvalidOutputReasonChangeScope       = "CHANGE_SCOPE_INVALID"
 	InvalidOutputReasonUnknown           = "INVALID_OUTPUT"
@@ -93,6 +94,14 @@ type PlanHints struct {
 	TimeField         *PlanFieldHint  `json:"timeField,omitempty"`
 	DimensionFields   []PlanFieldHint `json:"dimensionFields"`
 	TimeGrain         string          `json:"timeGrain"`
+}
+
+// TransformRequirement is a deterministic CREATE-mode constraint derived from explicit
+// transformation language in the user's instruction. It is sent to the planner and checked
+// again after generation so a valid JSON response cannot silently omit required components.
+type TransformRequirement struct {
+	ComponentType string `json:"componentType"`
+	Reason        string `json:"reason"`
 }
 
 type PlanFieldHint struct {
@@ -198,11 +207,12 @@ type PlanResult struct {
 }
 
 type GraphPlan struct {
-	Dataset PlanDataset `json:"dataset"`
-	Nodes   []PlanNode  `json:"nodes"`
-	Joins   []PlanJoin  `json:"joins"`
-	Groups  []PlanGroup `json:"groups"`
-	End     PlanEnd     `json:"end"`
+	Dataset    PlanDataset     `json:"dataset"`
+	Nodes      []PlanNode      `json:"nodes"`
+	Joins      []PlanJoin      `json:"joins"`
+	Groups     []PlanGroup     `json:"groups"`
+	Transforms []PlanTransform `json:"transforms"`
+	End        PlanEnd         `json:"end"`
 }
 
 type PlanDataset struct {
@@ -264,9 +274,55 @@ type PlanGroup struct {
 	Metrics    []PlanMetric    `json:"metrics"`
 }
 
+type PlanTransformOutput struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Code          string `json:"code"`
+	CanonicalType string `json:"canonicalType"`
+}
+
+type PlanConditionValue struct {
+	ID    string `json:"id"`
+	Mode  string `json:"mode"`
+	Value string `json:"value"`
+}
+
+type PlanTransformRule struct {
+	ID                string               `json:"id"`
+	Operation         string               `json:"operation"`
+	InputKeys         []string             `json:"inputKeys"`
+	Output            PlanTransformOutput  `json:"output"`
+	Unit              string               `json:"unit,omitempty"`
+	TargetType        string               `json:"targetType,omitempty"`
+	MatchValue        string               `json:"matchValue,omitempty"`
+	ThenValue         string               `json:"thenValue,omitempty"`
+	ElseValue         string               `json:"elseValue,omitempty"`
+	ConditionOperator string               `json:"conditionOperator,omitempty"`
+	ConditionValues   []PlanConditionValue `json:"conditionValues,omitempty"`
+	FallbackMode      string               `json:"fallbackMode,omitempty"`
+	FallbackValue     string               `json:"fallbackValue,omitempty"`
+	Separator         string               `json:"separator,omitempty"`
+	Precision         *int                 `json:"precision,omitempty"`
+	Start             *int                 `json:"start,omitempty"`
+	Length            *int                 `json:"length,omitempty"`
+	SearchValue       string               `json:"searchValue,omitempty"`
+	ReplacementValue  string               `json:"replacementValue,omitempty"`
+	ReplaceSourceKey  string               `json:"replaceSourceKey,omitempty"`
+}
+
+type PlanTransform struct {
+	ID            string              `json:"id"`
+	Name          string              `json:"name"`
+	Family        string              `json:"family"`
+	ComponentType string              `json:"componentType"`
+	Input         PlanInput           `json:"input"`
+	Rules         []PlanTransformRule `json:"rules"`
+}
+
 type PlanOutput struct {
 	NodeID string `json:"nodeId"`
 	Column string `json:"column"`
+	Key    string `json:"key,omitempty"`
 	Name   string `json:"name"`
 	Code   string `json:"code"`
 }
@@ -300,12 +356,13 @@ type CatalogColumn struct {
 }
 
 type plannerPromptEnvelope struct {
-	Instruction string         `json:"instruction"`
-	Mode        string         `json:"mode"`
-	Current     *GraphPlan     `json:"current,omitempty"`
-	Hints       *PlanHints     `json:"hints,omitempty"`
-	ChangeSet   ChangeSet      `json:"changeSet"`
-	Assets      []CatalogTable `json:"assets"`
+	Instruction           string                 `json:"instruction"`
+	Mode                  string                 `json:"mode"`
+	Current               *GraphPlan             `json:"current,omitempty"`
+	Hints                 *PlanHints             `json:"hints,omitempty"`
+	TransformRequirements []TransformRequirement `json:"transformRequirements"`
+	ChangeSet             ChangeSet              `json:"changeSet"`
+	Assets                []CatalogTable         `json:"assets"`
 }
 
 type intentPromptEnvelope struct {
@@ -433,6 +490,9 @@ func normalizeProposal(value Proposal, mode string) Proposal {
 		value.ChangeSet.FieldChanges = []FieldChange{}
 	}
 	value.Plan = normalizeGraphPlan(value.Plan)
+	if mode == "CREATE" {
+		value.Plan = canonicalizeEndOutputKeys(value.Plan)
+	}
 	return value
 }
 
@@ -476,11 +536,46 @@ func normalizeGraphPlan(value GraphPlan) GraphPlan {
 			metric.Aggregation = strings.ToUpper(strings.TrimSpace(metric.Aggregation))
 		}
 	}
+	if value.Transforms == nil {
+		value.Transforms = []PlanTransform{}
+	}
+	for i := range value.Transforms {
+		transform := &value.Transforms[i]
+		transform.ID = strings.TrimSpace(transform.ID)
+		transform.Name = strings.TrimSpace(transform.Name)
+		transform.Family = strings.ToUpper(strings.TrimSpace(transform.Family))
+		transform.ComponentType = strings.ToUpper(strings.TrimSpace(transform.ComponentType))
+		transform.Input = normalizeInput(transform.Input)
+		if transform.Rules == nil {
+			transform.Rules = []PlanTransformRule{}
+		}
+		for j := range transform.Rules {
+			rule := &transform.Rules[j]
+			rule.ID = strings.TrimSpace(rule.ID)
+			rule.Operation = strings.ToUpper(strings.TrimSpace(rule.Operation))
+			rule.InputKeys = normalizeTextList(rule.InputKeys)
+			rule.Output.ID = strings.TrimSpace(rule.Output.ID)
+			rule.Output.Name = strings.TrimSpace(rule.Output.Name)
+			rule.Output.Code = strings.TrimSpace(rule.Output.Code)
+			rule.Output.CanonicalType = strings.ToUpper(strings.TrimSpace(rule.Output.CanonicalType))
+			rule.Unit = strings.ToUpper(strings.TrimSpace(rule.Unit))
+			rule.TargetType = strings.ToUpper(strings.TrimSpace(rule.TargetType))
+			rule.ConditionOperator = strings.ToUpper(strings.TrimSpace(rule.ConditionOperator))
+			rule.FallbackMode = strings.ToUpper(strings.TrimSpace(rule.FallbackMode))
+			rule.ReplaceSourceKey = strings.TrimSpace(rule.ReplaceSourceKey)
+			for k := range rule.ConditionValues {
+				rule.ConditionValues[k].ID = strings.TrimSpace(rule.ConditionValues[k].ID)
+				rule.ConditionValues[k].Mode = strings.ToUpper(strings.TrimSpace(rule.ConditionValues[k].Mode))
+				rule.ConditionValues[k].Value = strings.TrimSpace(rule.ConditionValues[k].Value)
+			}
+		}
+	}
 	value.End.Name = strings.TrimSpace(value.End.Name)
 	value.End.Input = normalizeInput(value.End.Input)
 	for i := range value.End.Outputs {
 		value.End.Outputs[i].NodeID = strings.TrimSpace(value.End.Outputs[i].NodeID)
 		value.End.Outputs[i].Column = strings.TrimSpace(value.End.Outputs[i].Column)
+		value.End.Outputs[i].Key = strings.TrimSpace(value.End.Outputs[i].Key)
 		value.End.Outputs[i].Name = strings.TrimSpace(value.End.Outputs[i].Name)
 		value.End.Outputs[i].Code = strings.TrimSpace(value.End.Outputs[i].Code)
 	}
@@ -531,7 +626,7 @@ func validateGraphShape(value GraphPlan) error {
 	if !boundedText(value.Dataset.Name, 0, 200) || !boundedText(value.Dataset.Description, 0, 2000) {
 		return errors.New("dataset metadata exceeds limits")
 	}
-	if len(value.Nodes) > maxPlanNodes || len(value.Joins)+len(value.Groups) > maxPlanComponents {
+	if len(value.Nodes) > maxPlanNodes || len(value.Joins)+len(value.Groups)+len(value.Transforms) > maxPlanComponents {
 		return errors.New("graph exceeds component limits")
 	}
 	for _, node := range value.Nodes {
@@ -549,10 +644,84 @@ func validateGraphShape(value GraphPlan) error {
 			return errors.New("group identity or fields are invalid")
 		}
 	}
+	for _, transform := range value.Transforms {
+		if !validIdentifier(transform.ID) || !boundedText(transform.Name, 1, 200) || len(transform.Rules) < 1 || len(transform.Rules) > 64 || !validTransformComponent(transform) {
+			return errors.New("transform identity, type, or rules are invalid")
+		}
+		for _, rule := range transform.Rules {
+			if !validIdentifier(rule.ID) || !validIdentifier(rule.Output.ID) || !validIdentifier(rule.Output.Code) || !boundedText(rule.Output.Name, 1, 200) || len(rule.InputKeys) < 1 || len(rule.InputKeys) > 16 || !validTransformRule(transform.ComponentType, rule) {
+				return errors.New("transform rule is invalid")
+			}
+		}
+	}
 	if !boundedText(value.End.Name, 0, 200) || len(value.End.Outputs) > 512 {
 		return errors.New("end component exceeds limits")
 	}
 	return nil
+}
+
+func validTransformComponent(value PlanTransform) bool {
+	families := map[string]string{
+		"TEXT_UPPER": "TEXT", "TEXT_TRIM": "TEXT", "TEXT_REPLACE": "TEXT", "TEXT_LOWER": "TEXT", "TEXT_SUBSTRING": "TEXT", "TEXT_CONCAT": "TEXT",
+		"NUMBER_ABSOLUTE": "NUMBER", "NUMBER_ROUNDING": "NUMBER", "NUMBER_ARITHMETIC": "NUMBER", "DATE_FORMAT": "DATE",
+		"NULL": "NULL", "CAST": "CAST", "CONDITION": "CONDITION",
+	}
+	return families[value.ComponentType] == value.Family
+}
+
+func validTransformRule(componentType string, rule PlanTransformRule) bool {
+	operations := map[string]map[string]bool{
+		"TEXT_UPPER": {"UPPER": true}, "TEXT_TRIM": {"TRIM": true}, "TEXT_REPLACE": {"REPLACE": true}, "TEXT_LOWER": {"LOWER": true},
+		"TEXT_SUBSTRING": {"SUBSTRING": true}, "TEXT_CONCAT": {"CONCAT": true}, "NUMBER_ABSOLUTE": {"ABS": true},
+		"NUMBER_ROUNDING": {"ROUND": true, "FLOOR": true, "CEIL": true}, "NUMBER_ARITHMETIC": {"ADD": true, "SUBTRACT": true, "MULTIPLY": true, "DIVIDE": true},
+		"DATE_FORMAT": {"DATE_FORMAT": true}, "NULL": {"COALESCE": true}, "CAST": {"CAST": true}, "CONDITION": {"CASE": true},
+	}
+	if !operations[componentType][rule.Operation] || !oneOf(rule.Output.CanonicalType, "STRING", "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "DATETIME") {
+		return false
+	}
+	requiredInputs := 1
+	if oneOf(rule.Operation, "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "CONCAT") || rule.Operation == "COALESCE" && rule.FallbackMode == "FIELD" {
+		requiredInputs = 2
+	}
+	if len(rule.InputKeys) != requiredInputs {
+		return false
+	}
+	if rule.Operation == "DATE_FORMAT" && !oneOf(rule.Unit, "YEAR", "MONTH", "QUARTER", "DAY") {
+		return false
+	}
+	if rule.Operation == "CAST" && !oneOf(rule.TargetType, "STRING", "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "DATETIME") {
+		return false
+	}
+	if rule.Operation == "CASE" {
+		if !oneOf(rule.ConditionOperator, "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "CONTAINS", "NOT_CONTAINS", "IN", "IS_NULL", "IS_NOT_NULL") {
+			return false
+		}
+		if rule.ConditionOperator == "IN" {
+			if len(rule.ConditionValues) == 0 || len(rule.ConditionValues) > 64 {
+				return false
+			}
+			for _, item := range rule.ConditionValues {
+				if !validIdentifier(item.ID) || !oneOf(item.Mode, "LITERAL", "FIELD") || strings.TrimSpace(item.Value) == "" {
+					return false
+				}
+			}
+		} else if !oneOf(rule.ConditionOperator, "IS_NULL", "IS_NOT_NULL") && strings.TrimSpace(rule.MatchValue) == "" {
+			return false
+		}
+	}
+	if rule.Operation == "COALESCE" && !oneOf(rule.FallbackMode, "LITERAL", "FIELD") {
+		return false
+	}
+	if rule.Operation == "ROUND" && (rule.Precision == nil || *rule.Precision < -10 || *rule.Precision > 10) {
+		return false
+	}
+	if rule.Operation == "SUBSTRING" && (rule.Start == nil || rule.Length == nil || *rule.Start < 1 || *rule.Length < 0) {
+		return false
+	}
+	if rule.Operation == "REPLACE" && rule.SearchValue == "" {
+		return false
+	}
+	return true
 }
 
 func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
@@ -574,7 +743,7 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 
 	nodes := make(map[string]PlanNode, len(value.Nodes))
 	aliases := make(map[string]bool, len(value.Nodes))
-	componentIDs := make(map[string]bool, len(value.Nodes)+len(value.Joins)+len(value.Groups)+1)
+	componentIDs := make(map[string]bool, len(value.Nodes)+len(value.Joins)+len(value.Groups)+len(value.Transforms)+1)
 	selected := make(map[string]map[string]bool, len(value.Nodes))
 	for _, node := range value.Nodes {
 		if componentIDs[node.ID] || aliases[node.Alias] {
@@ -617,12 +786,20 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 		componentIDs[group.ID] = true
 		groups[group.ID] = group
 	}
+	transforms := make(map[string]PlanTransform, len(value.Transforms))
+	for _, transform := range value.Transforms {
+		if componentIDs[transform.ID] || !validTransformComponent(transform) || len(transform.Rules) < 1 {
+			return invalidOutput("transform identity, type, or rules are invalid")
+		}
+		componentIDs[transform.ID] = true
+		transforms[transform.ID] = transform
+	}
 	if componentIDs["end_1"] {
 		return invalidOutput("end component id conflicts with another component")
 	}
-	consumers := make(map[string]int, len(joins)+len(groups))
+	consumers := make(map[string]int, len(joins)+len(groups)+len(transforms))
 	countConsumer := func(input PlanInput) {
-		if input.Kind == "JOIN" || input.Kind == "GROUP" {
+		if input.Kind == "JOIN" || input.Kind == "GROUP" || input.Kind == "TRANSFORM" {
 			consumers[input.Kind+":"+input.ID]++
 		}
 	}
@@ -632,14 +809,21 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 		for _, input := range []PlanInput{join.Left, join.Right} {
 			if input.Kind == "GROUP" {
 				group, ok := groups[input.ID]
-				if !ok || group.Input.Kind != "NODE" {
-					return invalidOutput("only a node-level group can feed a join")
+				if !ok {
+					return invalidOutput("a pre-join group references an unknown component")
+				}
+				leaves := leavesForInput(group.Input, nodes, joins, groups, transforms, map[string]bool{})
+				if len(leaves) != 1 || inputContainsComponentKind(group.Input, "JOIN", joins, groups, transforms, map[string]bool{}) || inputContainsComponentKind(group.Input, "GROUP", joins, groups, transforms, map[string]bool{}) {
+					return invalidOutput("a pre-join group must consume one node branch with optional transforms only")
 				}
 			}
 		}
 	}
 	for _, group := range groups {
 		countConsumer(group.Input)
+	}
+	for _, transform := range transforms {
+		countConsumer(transform.Input)
 	}
 	countConsumer(value.End.Input)
 	for id := range joins {
@@ -652,6 +836,11 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 			return invalidOutput("every group must have exactly one downstream consumer")
 		}
 	}
+	for id := range transforms {
+		if consumers["TRANSFORM:"+id] != 1 {
+			return invalidOutput("every transform must have exactly one downstream consumer")
+		}
+	}
 
 	type fieldSet map[string]bool
 	producedMemo := make(map[string]fieldSet)
@@ -660,7 +849,7 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 	produced = func(input PlanInput) (fieldSet, map[string]bool, error) {
 		key := input.Kind + ":" + input.ID
 		if fields, ok := producedMemo[key]; ok {
-			return cloneSet(fields), leavesForInput(input, nodes, joins, groups, map[string]bool{}), nil
+			return cloneSet(fields), leavesForInput(input, nodes, joins, groups, transforms, map[string]bool{}), nil
 		}
 		if visiting[key] {
 			return nil, nil, errors.New("graph contains a cycle")
@@ -690,41 +879,77 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 			fields := fieldSet{}
 			for _, dimension := range group.Dimensions {
 				field := fieldKey(dimension.NodeID, dimension.Column)
-				if !leaves[dimension.NodeID] || !upstream[field] {
+				if !upstream[field] {
 					available := map[string]CatalogColumn{}
 					if node, ok := nodes[dimension.NodeID]; ok {
 						available = catalogColumns[node.TableID]
 					}
-					return nil, nil, invalidOutputWithReason(invalidColumnReason(dimension.Column, available), "group dimension references an unavailable or case-mismatched field")
+					return nil, nil, invalidOutputWithReason(invalidColumnReason(dimension.Column, available), "group dimension references an unavailable physical or transform-produced field")
 				}
 				if !oneOf(dimension.Grouping, "", "DAY", "WEEK", "MONTH", "QUARTER", "YEAR") || fields[field] {
 					return nil, nil, errors.New("group dimension is duplicated or has invalid granularity")
 				}
-				node := nodes[dimension.NodeID]
-				column := catalogColumns[node.TableID][dimension.Column]
-				if dimension.Grouping != "" && !isDateGroupingType(column.CanonicalType) {
+				canonicalType := producedFieldCanonicalType(group.Input, dimension.NodeID, dimension.Column, nodes, joins, groups, transforms, catalogColumns, map[string]bool{})
+				if dimension.Grouping != "" && !isDateGroupingType(canonicalType) {
 					return nil, nil, errors.New("date grouping requires a DATE or DATETIME field")
 				}
 				fields[field] = true
 			}
 			for _, metric := range group.Metrics {
 				field := fieldKey(metric.NodeID, metric.Column)
-				if !leaves[metric.NodeID] || !upstream[field] {
+				if !upstream[field] {
 					available := map[string]CatalogColumn{}
 					if node, ok := nodes[metric.NodeID]; ok {
 						available = catalogColumns[node.TableID]
 					}
-					return nil, nil, invalidOutputWithReason(invalidColumnReason(metric.Column, available), "group metric references an unavailable, case-mismatched, or synthetic field")
+					return nil, nil, invalidOutputWithReason(invalidColumnReason(metric.Column, available), "group metric references an unavailable physical or transform-produced field")
 				}
 				if !oneOf(metric.Aggregation, "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "MIN", "MAX") || fields[field] {
 					return nil, nil, errors.New("group metric is duplicated or has invalid aggregation")
 				}
-				node := nodes[metric.NodeID]
-				column := catalogColumns[node.TableID][metric.Column]
-				if oneOf(metric.Aggregation, "SUM", "AVG") && !isNumericCanonicalType(column.CanonicalType) {
+				canonicalType := producedFieldCanonicalType(group.Input, metric.NodeID, metric.Column, nodes, joins, groups, transforms, catalogColumns, map[string]bool{})
+				if oneOf(metric.Aggregation, "SUM", "AVG") && !isNumericCanonicalType(canonicalType) {
 					return nil, nil, errors.New("SUM and AVG require a numeric field")
 				}
 				fields[field] = true
+			}
+			producedMemo[key] = cloneSet(fields)
+			return fields, leaves, nil
+		case "TRANSFORM":
+			transform, ok := transforms[input.ID]
+			if !ok {
+				return nil, nil, errors.New("input references an unknown transform")
+			}
+			upstream, leaves, err := produced(transform.Input)
+			if err != nil {
+				return nil, nil, err
+			}
+			fields := cloneSet(upstream)
+			for _, rule := range transform.Rules {
+				if !validTransformRule(transform.ComponentType, rule) {
+					return nil, nil, errors.New("transform rule is invalid")
+				}
+				for _, inputKey := range rule.InputKeys {
+					if !upstream[inputKey] {
+						return nil, nil, errors.New("transform rule references an unavailable input field")
+					}
+				}
+				for _, item := range rule.ConditionValues {
+					if item.Mode == "FIELD" && !upstream[item.Value] {
+						return nil, nil, errors.New("transform condition references an unavailable field")
+					}
+				}
+				if rule.ReplaceSourceKey != "" {
+					if !upstream[rule.ReplaceSourceKey] {
+						return nil, nil, errors.New("transform replacement references an unavailable field")
+					}
+					delete(fields, rule.ReplaceSourceKey)
+				}
+				outputKey := fieldKey(transform.ID, rule.Output.ID)
+				if fields[outputKey] {
+					return nil, nil, errors.New("transform output field is duplicated")
+				}
+				fields[outputKey] = true
 			}
 			producedMemo[key] = cloneSet(fields)
 			return fields, leaves, nil
@@ -753,8 +978,8 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 				if !leftLeaves[condition.LeftNodeID] || !rightLeaves[condition.RightNodeID] || !leftFields[leftKey] || !rightFields[rightKey] {
 					return nil, nil, errors.New("join condition references a field outside its side")
 				}
-				leftType := producedFieldCanonicalType(join.Left, condition.LeftNodeID, condition.LeftColumn, nodes, joins, groups, catalogColumns, map[string]bool{})
-				rightType := producedFieldCanonicalType(join.Right, condition.RightNodeID, condition.RightColumn, nodes, joins, groups, catalogColumns, map[string]bool{})
+				leftType := producedFieldCanonicalType(join.Left, condition.LeftNodeID, condition.LeftColumn, nodes, joins, groups, transforms, catalogColumns, map[string]bool{})
+				rightType := producedFieldCanonicalType(join.Right, condition.RightNodeID, condition.RightColumn, nodes, joins, groups, transforms, catalogColumns, map[string]bool{})
 				if !compatibleJoinTypes(leftType, rightType) {
 					return nil, nil, errors.New("join condition fields have incompatible canonical types")
 				}
@@ -775,7 +1000,7 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 			producedMemo[key] = cloneSet(fields)
 			return fields, leaves, nil
 		default:
-			return nil, nil, errors.New("input kind must be NODE, JOIN, or GROUP")
+			return nil, nil, errors.New("input kind must be NODE, JOIN, GROUP, or TRANSFORM")
 		}
 	}
 
@@ -795,9 +1020,24 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 	outputCodes := map[string]bool{}
 	outputFields := map[string]bool{}
 	for _, output := range value.End.Outputs {
-		field := fieldKey(output.NodeID, output.Column)
-		if !rootFields[field] || outputFields[field] || !validIdentifier(output.Code) || outputCodes[output.Code] || !boundedText(output.Name, 1, 200) {
-			return invalidOutput("end output is unavailable, duplicated, or has invalid name/code")
+		field := output.Key
+		if field == "" {
+			field = fieldKey(output.NodeID, output.Column)
+		}
+		if !rootFields[field] {
+			return invalidOutputWithReason(InvalidOutputReasonOutput, fmt.Sprintf("end output key %s is unavailable at end input; group dimensions and metrics keep their physical nodeId.column key", field))
+		}
+		if outputFields[field] {
+			return invalidOutputWithReason(InvalidOutputReasonOutput, fmt.Sprintf("end output key %s is duplicated", field))
+		}
+		if !validIdentifier(output.Code) {
+			return invalidOutputWithReason(InvalidOutputReasonOutput, fmt.Sprintf("end output key %s has invalid code", field))
+		}
+		if outputCodes[output.Code] {
+			return invalidOutputWithReason(InvalidOutputReasonOutput, fmt.Sprintf("end output code %s is duplicated", output.Code))
+		}
+		if !boundedText(output.Name, 1, 200) {
+			return invalidOutputWithReason(InvalidOutputReasonOutput, fmt.Sprintf("end output key %s has an invalid name", field))
 		}
 		outputFields[field] = true
 		outputCodes[output.Code] = true
@@ -805,14 +1045,14 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 
 	// Every declared intermediate component must participate in the end-to-end graph.
 	reachable := map[string]bool{}
-	collectReachable(value.End.Input, joins, groups, reachable)
-	if len(reachable) != len(joins)+len(groups) {
-		return invalidOutput("graph contains an orphan join or group")
+	collectReachable(value.End.Input, joins, groups, transforms, reachable)
+	if len(reachable) != len(joins)+len(groups)+len(transforms) {
+		return invalidOutput("graph contains an orphan join, group, or transform")
 	}
 	return nil
 }
 
-func leavesForInput(input PlanInput, nodes map[string]PlanNode, joins map[string]PlanJoin, groups map[string]PlanGroup, visiting map[string]bool) map[string]bool {
+func leavesForInput(input PlanInput, nodes map[string]PlanNode, joins map[string]PlanJoin, groups map[string]PlanGroup, transforms map[string]PlanTransform, visiting map[string]bool) map[string]bool {
 	key := input.Kind + ":" + input.ID
 	if visiting[key] {
 		return map[string]bool{}
@@ -826,12 +1066,16 @@ func leavesForInput(input PlanInput, nodes map[string]PlanNode, joins map[string
 		}
 	case "GROUP":
 		if group, ok := groups[input.ID]; ok {
-			return leavesForInput(group.Input, nodes, joins, groups, visiting)
+			return leavesForInput(group.Input, nodes, joins, groups, transforms, visiting)
+		}
+	case "TRANSFORM":
+		if transform, ok := transforms[input.ID]; ok {
+			return leavesForInput(transform.Input, nodes, joins, groups, transforms, visiting)
 		}
 	case "JOIN":
 		if join, ok := joins[input.ID]; ok {
-			result := leavesForInput(join.Left, nodes, joins, groups, visiting)
-			for id := range leavesForInput(join.Right, nodes, joins, groups, visiting) {
+			result := leavesForInput(join.Left, nodes, joins, groups, transforms, visiting)
+			for id := range leavesForInput(join.Right, nodes, joins, groups, transforms, visiting) {
 				result[id] = true
 			}
 			return result
@@ -840,7 +1084,34 @@ func leavesForInput(input PlanInput, nodes map[string]PlanNode, joins map[string
 	return map[string]bool{}
 }
 
-func collectReachable(input PlanInput, joins map[string]PlanJoin, groups map[string]PlanGroup, result map[string]bool) {
+func inputContainsComponentKind(input PlanInput, kind string, joins map[string]PlanJoin, groups map[string]PlanGroup, transforms map[string]PlanTransform, visiting map[string]bool) bool {
+	key := input.Kind + ":" + input.ID
+	if visiting[key] {
+		return false
+	}
+	visiting[key] = true
+	defer delete(visiting, key)
+	if input.Kind == kind {
+		return true
+	}
+	switch input.Kind {
+	case "GROUP":
+		if group, ok := groups[input.ID]; ok {
+			return inputContainsComponentKind(group.Input, kind, joins, groups, transforms, visiting)
+		}
+	case "TRANSFORM":
+		if transform, ok := transforms[input.ID]; ok {
+			return inputContainsComponentKind(transform.Input, kind, joins, groups, transforms, visiting)
+		}
+	case "JOIN":
+		if join, ok := joins[input.ID]; ok {
+			return inputContainsComponentKind(join.Left, kind, joins, groups, transforms, visiting) || inputContainsComponentKind(join.Right, kind, joins, groups, transforms, visiting)
+		}
+	}
+	return false
+}
+
+func collectReachable(input PlanInput, joins map[string]PlanJoin, groups map[string]PlanGroup, transforms map[string]PlanTransform, result map[string]bool) {
 	key := input.Kind + ":" + input.ID
 	if result[key] || input.Kind == "NODE" {
 		return
@@ -848,13 +1119,19 @@ func collectReachable(input PlanInput, joins map[string]PlanJoin, groups map[str
 	result[key] = true
 	if input.Kind == "GROUP" {
 		if group, ok := groups[input.ID]; ok {
-			collectReachable(group.Input, joins, groups, result)
+			collectReachable(group.Input, joins, groups, transforms, result)
+		}
+		return
+	}
+	if input.Kind == "TRANSFORM" {
+		if transform, ok := transforms[input.ID]; ok {
+			collectReachable(transform.Input, joins, groups, transforms, result)
 		}
 		return
 	}
 	if join, ok := joins[input.ID]; ok {
-		collectReachable(join.Left, joins, groups, result)
-		collectReachable(join.Right, joins, groups, result)
+		collectReachable(join.Left, joins, groups, transforms, result)
+		collectReachable(join.Right, joins, groups, transforms, result)
 	}
 }
 
@@ -919,7 +1196,7 @@ func compatibleJoinTypes(left, right string) bool {
 	return left != "" && left == right
 }
 
-func producedFieldCanonicalType(input PlanInput, nodeID, column string, nodes map[string]PlanNode, joins map[string]PlanJoin, groups map[string]PlanGroup, catalog map[string]map[string]CatalogColumn, visiting map[string]bool) string {
+func producedFieldCanonicalType(input PlanInput, nodeID, column string, nodes map[string]PlanNode, joins map[string]PlanJoin, groups map[string]PlanGroup, transforms map[string]PlanTransform, catalog map[string]map[string]CatalogColumn, visiting map[string]bool) string {
 	key := input.Kind + ":" + input.ID
 	if visiting[key] {
 		return ""
@@ -941,10 +1218,10 @@ func producedFieldCanonicalType(input PlanInput, nodeID, column string, nodes ma
 		if !ok {
 			return ""
 		}
-		if value := producedFieldCanonicalType(join.Left, nodeID, column, nodes, joins, groups, catalog, visiting); value != "" {
+		if value := producedFieldCanonicalType(join.Left, nodeID, column, nodes, joins, groups, transforms, catalog, visiting); value != "" {
 			return value
 		}
-		return producedFieldCanonicalType(join.Right, nodeID, column, nodes, joins, groups, catalog, visiting)
+		return producedFieldCanonicalType(join.Right, nodeID, column, nodes, joins, groups, transforms, catalog, visiting)
 	case "GROUP":
 		group, ok := groups[input.ID]
 		if !ok {
@@ -952,7 +1229,7 @@ func producedFieldCanonicalType(input PlanInput, nodeID, column string, nodes ma
 		}
 		for _, dimension := range group.Dimensions {
 			if dimension.NodeID == nodeID && dimension.Column == column {
-				return producedFieldCanonicalType(group.Input, nodeID, column, nodes, joins, groups, catalog, visiting)
+				return producedFieldCanonicalType(group.Input, nodeID, column, nodes, joins, groups, transforms, catalog, visiting)
 			}
 		}
 		for _, metric := range group.Metrics {
@@ -965,8 +1242,19 @@ func producedFieldCanonicalType(input PlanInput, nodeID, column string, nodes ma
 			case "SUM", "AVG":
 				return "DECIMAL"
 			default:
-				return producedFieldCanonicalType(group.Input, nodeID, column, nodes, joins, groups, catalog, visiting)
+				return producedFieldCanonicalType(group.Input, nodeID, column, nodes, joins, groups, transforms, catalog, visiting)
 			}
+		}
+	case "TRANSFORM":
+		if transform, ok := transforms[input.ID]; ok {
+			if transform.ID == nodeID {
+				for _, rule := range transform.Rules {
+					if rule.Output.ID == column {
+						return rule.Output.CanonicalType
+					}
+				}
+			}
+			return producedFieldCanonicalType(transform.Input, nodeID, column, nodes, joins, groups, transforms, catalog, visiting)
 		}
 	}
 	return ""
@@ -999,7 +1287,7 @@ func invalidOutputWithReason(reasonCode, detail string) error {
 func classifyInvalidOutputReason(detail string) string {
 	normalized := strings.ToLower(detail)
 	switch {
-	case strings.Contains(normalized, "changeset"), strings.Contains(normalized, "fieldchange"), strings.Contains(normalized, "locked"), strings.Contains(normalized, "outside locked"), strings.Contains(normalized, "change operation"), strings.Contains(normalized, "undeclared"), strings.Contains(normalized, "plan changed fields"), strings.Contains(normalized, "plan changes differ"):
+	case strings.Contains(normalized, "changeset"), strings.Contains(normalized, "fieldchange"), strings.Contains(normalized, "locked"), strings.Contains(normalized, "outside locked"), strings.Contains(normalized, "change operation"), strings.Contains(normalized, "inputchange"), strings.Contains(normalized, "input change"), strings.Contains(normalized, "must have empty fields"), strings.Contains(normalized, "requires at least one field"), strings.Contains(normalized, "contains invalid field"), strings.Contains(normalized, "undeclared"), strings.Contains(normalized, "plan changed fields"), strings.Contains(normalized, "plan changes differ"):
 		return InvalidOutputReasonChangeScope
 	case strings.Contains(normalized, "count(*)"), strings.Contains(normalized, "count_distinct("), strings.Contains(normalized, "count("):
 		return InvalidOutputReasonAggregationField
@@ -1015,6 +1303,8 @@ func classifyInvalidOutputReason(detail string) string {
 		return InvalidOutputReasonJoin
 	case strings.Contains(normalized, "group"):
 		return InvalidOutputReasonGroup
+	case strings.Contains(normalized, "transform"):
+		return InvalidOutputReasonTransform
 	case strings.Contains(normalized, "end"), strings.Contains(normalized, "output"):
 		return InvalidOutputReasonOutput
 	default:

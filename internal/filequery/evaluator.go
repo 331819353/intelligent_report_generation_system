@@ -673,6 +673,29 @@ func evaluateExpression(expression dataset.Expression, row sourceRow, group []so
 			return fmt.Sprintf("%04d-01-01", parsed.Year()), nil
 		}
 		return nil, ErrUnsupportedExpression
+	case "DATE_FORMAT":
+		if expression.Argument == nil {
+			return nil, errors.New("DATE_FORMAT requires an argument")
+		}
+		value, err := evaluateExpression(*expression.Argument, row, group, parameters)
+		if err != nil || value == nil {
+			return value, err
+		}
+		parsed, ok := parseTime(value)
+		if !ok {
+			return nil, errors.New("DATE_FORMAT requires a date value")
+		}
+		switch expression.Unit {
+		case "YEAR":
+			return parsed.Format("2006"), nil
+		case "MONTH":
+			return parsed.Format("200601"), nil
+		case "QUARTER":
+			return fmt.Sprintf("%04dQ%d", parsed.Year(), (int(parsed.Month())-1)/3+1), nil
+		case "DAY":
+			return parsed.Format("20060102"), nil
+		}
+		return nil, ErrUnsupportedExpression
 	case "CAST":
 		if expression.Argument == nil {
 			return nil, errors.New("CAST requires an argument")
@@ -684,6 +707,44 @@ func evaluateExpression(expression dataset.Expression, row sourceRow, group []so
 		return castValue(value, expression.TargetType)
 	case "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE":
 		return arithmetic(expression, row, group, parameters)
+	case "ABS", "FLOOR", "CEIL":
+		if expression.Argument == nil {
+			return nil, errors.New(expression.Type + " requires an argument")
+		}
+		value, err := evaluateExpression(*expression.Argument, row, group, parameters)
+		if err != nil || value == nil {
+			return value, err
+		}
+		number, ok := toFloat(value)
+		if !ok {
+			return nil, errors.New(expression.Type + " requires a numeric value")
+		}
+		if expression.Type == "ABS" {
+			return math.Abs(number), nil
+		}
+		if expression.Type == "FLOOR" {
+			return math.Floor(number), nil
+		}
+		return math.Ceil(number), nil
+	case "ROUND":
+		if len(expression.Arguments) != 2 {
+			return nil, errors.New("ROUND requires a value and precision")
+		}
+		value, err := evaluateExpression(expression.Arguments[0], row, group, parameters)
+		if err != nil || value == nil {
+			return value, err
+		}
+		precisionValue, err := evaluateExpression(expression.Arguments[1], row, group, parameters)
+		if err != nil {
+			return nil, err
+		}
+		number, numberOK := toFloat(value)
+		precision, precisionOK := exactInteger(precisionValue)
+		if !numberOK || !precisionOK || precision < -10 || precision > 10 {
+			return nil, errors.New("ROUND requires a numeric value and precision from -10 to 10")
+		}
+		factor := math.Pow10(int(precision))
+		return math.Round(number*factor) / factor, nil
 	case "CONCAT", "COALESCE":
 		values := make([]any, 0, len(expression.Arguments))
 		for _, argument := range expression.Arguments {
@@ -706,7 +767,92 @@ func evaluateExpression(expression dataset.Expression, row sourceRow, group []so
 			parts[index] = fmt.Sprint(value)
 		}
 		return strings.Join(parts, ""), nil
-	case "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "LIKE", "IN", "NOT_IN":
+	case "TRIM", "UPPER", "LOWER":
+		if expression.Argument == nil {
+			return nil, errors.New(expression.Type + " requires an argument")
+		}
+		value, err := evaluateExpression(*expression.Argument, row, group, parameters)
+		if err != nil || value == nil {
+			return value, err
+		}
+		text, ok := value.(string)
+		if !ok {
+			return nil, errors.New(expression.Type + " requires a string value")
+		}
+		if expression.Type == "TRIM" {
+			return strings.TrimSpace(text), nil
+		}
+		if expression.Type == "UPPER" {
+			return strings.ToUpper(text), nil
+		}
+		return strings.ToLower(text), nil
+	case "SUBSTRING":
+		if len(expression.Arguments) != 3 {
+			return nil, errors.New("SUBSTRING requires text, start and length")
+		}
+		values := make([]any, 3)
+		for index, argument := range expression.Arguments {
+			value, err := evaluateExpression(argument, row, group, parameters)
+			if err != nil {
+				return nil, err
+			}
+			values[index] = value
+		}
+		if values[0] == nil {
+			return nil, nil
+		}
+		text, ok := values[0].(string)
+		start, startOK := exactInteger(values[1])
+		length, lengthOK := exactInteger(values[2])
+		if !ok || !startOK || !lengthOK || start < 1 || length < 0 {
+			return nil, errors.New("SUBSTRING requires a string, positive start and non-negative length")
+		}
+		runes := []rune(text)
+		from := start - 1
+		if from >= int64(len(runes)) || length == 0 {
+			return "", nil
+		}
+		to := int64(len(runes))
+		if length < to-from {
+			to = from + length
+		}
+		return string(runes[int(from):int(to)]), nil
+	case "REPLACE":
+		if len(expression.Arguments) != 3 {
+			return nil, errors.New("REPLACE requires text, search and replacement")
+		}
+		values := make([]any, 3)
+		for index, argument := range expression.Arguments {
+			value, err := evaluateExpression(argument, row, group, parameters)
+			if err != nil {
+				return nil, err
+			}
+			values[index] = value
+		}
+		if values[0] == nil || values[1] == nil || values[2] == nil {
+			return nil, nil
+		}
+		text, textOK := values[0].(string)
+		search, searchOK := values[1].(string)
+		replacement, replacementOK := values[2].(string)
+		if !textOK || !searchOK || !replacementOK || search == "" {
+			return nil, errors.New("REPLACE requires string values and a non-empty search value")
+		}
+		return strings.ReplaceAll(text, search, replacement), nil
+	case "ARRAY":
+		if len(expression.Arguments) == 0 {
+			return nil, errors.New("ARRAY requires at least one value")
+		}
+		values := make([]any, 0, len(expression.Arguments))
+		for _, argument := range expression.Arguments {
+			value, err := evaluateExpression(argument, row, group, parameters)
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, value)
+		}
+		return values, nil
+	case "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "LIKE", "CONTAINS", "NOT_CONTAINS", "IN", "NOT_IN":
 		return evaluateComparison(expression, row, group, parameters)
 	case "BETWEEN":
 		if expression.Left == nil || expression.Lower == nil || expression.Upper == nil {
@@ -946,6 +1092,13 @@ func evaluateComparison(expression dataset.Expression, row sourceRow, group []so
 		pattern := regexp.QuoteMeta(fmt.Sprint(right))
 		pattern = strings.ReplaceAll(strings.ReplaceAll(pattern, "%", ".*"), "_", ".")
 		return regexp.MatchString("^(?s:"+pattern+")$", fmt.Sprint(left))
+	}
+	if expression.Type == "CONTAINS" || expression.Type == "NOT_CONTAINS" {
+		matched := strings.Contains(fmt.Sprint(left), fmt.Sprint(right))
+		if expression.Type == "NOT_CONTAINS" {
+			matched = !matched
+		}
+		return matched, nil
 	}
 	comparison, comparable := compare(left, right)
 	if !comparable {
@@ -1284,6 +1437,14 @@ func toFloat(value any) (float64, bool) {
 	return 0, false
 }
 
+func exactInteger(value any) (int64, bool) {
+	number, ok := toFloat(value)
+	if !ok || math.Trunc(number) != number || number < math.MinInt64 || number > math.MaxInt64 {
+		return 0, false
+	}
+	return int64(number), true
+}
+
 func castValue(value any, target string) (any, error) {
 	if value == nil {
 		return nil, nil
@@ -1327,7 +1488,14 @@ func parseTime(value any) (time.Time, bool) {
 		return parsed, true
 	}
 	text := fmt.Sprint(value)
-	for _, layout := range []string{time.RFC3339, "2006-01-02", "2006/01/02", "2006-01-02 15:04:05"} {
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		"2006-01-02T15:04:05.999999999",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02",
+		"2006/01/02",
+		"2006-01-02 15:04:05",
+	} {
 		if parsed, err := time.Parse(layout, text); err == nil {
 			return parsed, true
 		}

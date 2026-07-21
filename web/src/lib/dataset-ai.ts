@@ -3,6 +3,7 @@ import {
   graphContains,
   graphLeaves,
   graphOutputKeys,
+  graphProducedFields,
   graphRoot,
   layoutDesignerGraph,
   validateDesignerGraph,
@@ -10,6 +11,10 @@ import {
   type GraphInput,
   type GraphJoin,
   type GraphGroup,
+  type GraphTransform,
+  type GraphTransformComponentType,
+  type GraphTransformFamily,
+  type GraphTransformRule,
 } from './dataset-graph'
 import type {
   AssetColumn,
@@ -20,7 +25,7 @@ import type {
   JoinOption,
 } from './datasets'
 
-export type DatasetAIInput = { kind: 'NODE' | 'JOIN' | 'GROUP'; id: string }
+export type DatasetAIInput = { kind: 'NODE' | 'JOIN' | 'GROUP' | 'TRANSFORM'; id: string }
 export type DatasetAIPlanNode = { id: string; tableId: string; alias: string; selectedColumns: string[] }
 export type DatasetAIJoinCondition = {
   leftNodeId: string; leftColumn: string; rightNodeId: string; rightColumn: string
@@ -35,17 +40,22 @@ export type DatasetAIPlanGroup = {
   id: string; name: string; input: DatasetAIInput
   dimensions: DatasetAIPlanDimension[]; metrics: DatasetAIPlanMetric[]
 }
-export type DatasetAIPlanOutput = { nodeId: string; column: string; name: string; code: string }
+export type DatasetAIPlanTransform = {
+  id: string; name: string; input: DatasetAIInput
+  family: GraphTransformFamily; componentType: GraphTransformComponentType; rules: GraphTransformRule[]
+}
+export type DatasetAIPlanOutput = { nodeId: string; column: string; key?: string; name: string; code: string }
 export type DatasetAIGraphPlan = {
   dataset: { name: string; description: string }
   nodes: DatasetAIPlanNode[]
   joins: DatasetAIPlanJoin[]
   groups: DatasetAIPlanGroup[]
+  transforms?: DatasetAIPlanTransform[]
   end: { name: string; input: DatasetAIInput; outputs: DatasetAIPlanOutput[] }
 }
 export type DatasetAIChangeOperation = {
   action: 'ADD' | 'UPDATE' | 'REMOVE'
-  componentKind: 'DATASET' | 'NODE' | 'JOIN' | 'GROUP' | 'END'
+  componentKind: 'DATASET' | 'NODE' | 'JOIN' | 'GROUP' | 'TRANSFORM' | 'END'
   componentId: string
   componentName: string
   fields: string[]
@@ -68,7 +78,7 @@ export type DatasetAIFieldChange = {
 }
 export type DatasetAIChangeSet = { operations: DatasetAIChangeOperation[]; fieldChanges: DatasetAIFieldChange[] }
 export type DatasetAIProposal = {
-  schemaVersion: '2.2'
+  schemaVersion: '2.3'
   mode: 'CREATE' | 'MODIFY'
   summary: string
   assumptions: string[]
@@ -150,6 +160,16 @@ export type MaterializedDatasetAIPlan = {
 }
 
 const identifier = (value: string) => value.trim().replace(/[^A-Za-z0-9_]/g, '_').replace(/^[^A-Za-z]+/, '') || 'field'
+const transformComponentType = (transform: Pick<GraphTransform, 'family' | 'componentType' | 'rules'>): GraphTransformComponentType => {
+  if (transform.componentType) return transform.componentType
+  const operation = transform.rules[0]?.operation
+  if (transform.family === 'DATE') return 'DATE_FORMAT'
+  if (transform.family === 'CAST') return 'CAST'
+  if (transform.family === 'CONDITION') return 'CONDITION'
+  if (transform.family === 'NULL') return 'NULL'
+  if (transform.family === 'NUMBER') return operation === 'ABS' ? 'NUMBER_ABSOLUTE' : ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'].includes(operation) ? 'NUMBER_ARITHMETIC' : 'NUMBER_ROUNDING'
+  return operation === 'UPPER' ? 'TEXT_UPPER' : operation === 'LOWER' ? 'TEXT_LOWER' : operation === 'TRIM' ? 'TEXT_TRIM' : operation === 'REPLACE' ? 'TEXT_REPLACE' : operation === 'SUBSTRING' ? 'TEXT_SUBSTRING' : 'TEXT_CONCAT'
+}
 const fieldKey = (nodeId: string, column: string) => `${nodeId}.${column}`
 const keyParts = (key: string) => {
   const dot = key.indexOf('.')
@@ -166,8 +186,8 @@ const editorFieldOption = (node: DesignerNode, column: AssetColumn, selected: bo
   finalOutput: selected, finalGroupBy: false, finalGrouping: '', finalMetric: false, finalAggregation: '',
 })
 
-const inputExists = (value: DatasetAIInput | undefined, nodes: Set<string>, joins: Set<string>, groups: Set<string>) => Boolean(value && (
-  value.kind === 'NODE' ? nodes.has(value.id) : value.kind === 'JOIN' ? joins.has(value.id) : groups.has(value.id)
+const inputExists = (value: DatasetAIInput | undefined, nodes: Set<string>, joins: Set<string>, groups: Set<string>, transforms: Set<string> = new Set()) => Boolean(value && (
+  value.kind === 'NODE' ? nodes.has(value.id) : value.kind === 'JOIN' ? joins.has(value.id) : value.kind === 'GROUP' ? groups.has(value.id) : transforms.has(value.id)
 ))
 const sameInput = (left: GraphInput | undefined, right: GraphInput | undefined) => Boolean(left && right && left.kind === right.kind && left.id === right.id)
 
@@ -184,9 +204,10 @@ export function datasetAIPlanFromEditor(
   const nodeIDs = new Set(draft.nodes.map(node => node.id))
   const joinIDs = new Set(graph.joins.map(join => join.id))
   const groupIDs = new Set(graph.groups.map(group => group.id))
+  const transformIDs = new Set((graph.transforms ?? []).map(transform => transform.id))
   const joins = graph.joins.flatMap((box): DatasetAIPlanJoin[] => {
     const configured = draft.joins.find(join => join.id === box.id)
-    if (!configured || !inputExists(box.left as DatasetAIInput | undefined, nodeIDs, joinIDs, groupIDs) || !inputExists(box.right as DatasetAIInput | undefined, nodeIDs, joinIDs, groupIDs)) return []
+    if (!configured || !inputExists(box.left as DatasetAIInput | undefined, nodeIDs, joinIDs, groupIDs, transformIDs) || !inputExists(box.right as DatasetAIInput | undefined, nodeIDs, joinIDs, groupIDs, transformIDs)) return []
     const conditions = configured.conditions?.length
       ? configured.conditions
       : [{ id: `${configured.id}_condition_1`, leftField: configured.leftField, rightField: configured.rightField }]
@@ -202,7 +223,7 @@ export function datasetAIPlanFromEditor(
   })
   const includedJoinIDs = new Set(joins.map(join => join.id))
   const groups = graph.groups.flatMap((group): DatasetAIPlanGroup[] => {
-    if (!group.input || !inputExists(group.input as DatasetAIInput, nodeIDs, includedJoinIDs, groupIDs)) return []
+    if (!group.input || !inputExists(group.input as DatasetAIInput, nodeIDs, includedJoinIDs, groupIDs, transformIDs)) return []
     return [{
       id: group.id, name: group.name, input: group.input as DatasetAIInput,
       dimensions: group.dimensions.flatMap(item => {
@@ -216,25 +237,46 @@ export function datasetAIPlanFromEditor(
     }]
   })
   const includedGroupIDs = new Set(groups.map(group => group.id))
-  const compactGraph = { joins: joins.map(join => ({ ...join, position: { x: 0, y: 0 }, outputKeys: [] })), groups: groups.map(group => ({ ...group, position: { x: 0, y: 0 }, dimensions: [], metrics: [] })) }
-  const fallbackInput = graphRoot([...nodeIDs], compactGraph as Pick<DesignerGraphV1, 'joins' | 'groups'>) ?? { kind: 'NODE' as const, id: draft.nodes[0].id }
-  const endInput = inputExists(graph.end?.input as DatasetAIInput | undefined, nodeIDs, includedJoinIDs, includedGroupIDs)
+  const transforms: DatasetAIPlanTransform[] = (graph.transforms ?? []).flatMap(transform => transform.input && inputExists(transform.input as DatasetAIInput, nodeIDs, includedJoinIDs, includedGroupIDs, transformIDs) && transform.rules.length
+    ? [{
+      id: transform.id, name: transform.name, input: transform.input as DatasetAIInput,
+      family: transform.family, componentType: transformComponentType(transform),
+      rules: transform.rules.map(rule => ({ ...rule, inputKeys: [...rule.inputKeys], output: { ...rule.output }, ...(rule.conditionValues ? { conditionValues: rule.conditionValues.map(value => ({ ...value })) } : {}) })),
+    }]
+    : [])
+  const includedTransformIDs = new Set(transforms.map(transform => transform.id))
+  const compactGraph = {
+    joins: joins.map(join => ({ ...join, position: { x: 0, y: 0 }, outputKeys: [] })),
+    groups: groups.map(group => {
+      const configured = graph.groups.find(item => item.id === group.id)
+      return {
+        id: group.id, name: group.name, input: group.input as GraphInput, position: { x: 0, y: 0 },
+        dimensions: configured?.dimensions.map(item => ({ ...item })) ?? [],
+        metrics: configured?.metrics.map(item => ({ ...item })) ?? [],
+      }
+    }),
+    transforms: transforms.map(transform => ({ ...transform, position: { x: 0, y: 0 } })),
+  }
+  const fallbackInput = graphRoot([...nodeIDs], compactGraph) ?? { kind: 'NODE' as const, id: draft.nodes[0].id }
+  const endInput = inputExists(graph.end?.input as DatasetAIInput | undefined, nodeIDs, includedJoinIDs, includedGroupIDs, includedTransformIDs)
     ? graph.end!.input as DatasetAIInput
     : fallbackInput as DatasetAIInput
+  const endFields = new Map(graphProducedFields(endInput as GraphInput, compactGraph, draft.nodes, draft.fields).map(field => [field.key, field]))
   const outputs = (graph.end?.outputs ?? []).flatMap(output => {
-    const parts = keyParts(output.key)
-    return parts.nodeId && nodeIDs.has(parts.nodeId) ? [{ nodeId: parts.nodeId, column: parts.column, name: output.name, code: output.code }] : []
+    const produced = endFields.get(output.key)
+    return produced ? [{ nodeId: produced.binding.nodeId, column: produced.binding.field, key: output.key, name: output.name, code: output.code }] : []
   })
   const fallbackOutput = (() => {
     const node = draft.nodes[0]
     const column = node.columns.find(item => node.selected.includes(item.columnName))
-    return column ? [{ nodeId: node.id, column: column.columnName, name: column.businessName || column.columnName, code: identifier(column.columnName) }] : []
+    return column ? [{ nodeId: node.id, column: column.columnName, key: fieldKey(node.id, column.columnName), name: column.businessName || column.columnName, code: identifier(column.columnName) }] : []
   })()
   return {
     dataset: { name: metadata.name || draft.name, description: metadata.description || draft.description },
     nodes: draft.nodes.map(node => ({ id: node.id, tableId: node.table.id, alias: node.alias, selectedColumns: [...node.selected] })),
     joins,
     groups,
+    transforms,
     end: { name: graph.end?.name || '最终输出', input: endInput, outputs: outputs.length ? outputs : fallbackOutput },
   }
 }
@@ -315,8 +357,10 @@ export async function materializeDatasetAIPlan(
   })
   const fieldName = (nodeId: string, columnName: string) => {
     const column = nodeByID.get(nodeId)?.columns.find(item => item.columnName === columnName)
-    if (!column) throw new Error(`AI 方案引用的字段 ${nodeId}.${columnName} 已不可用`)
-    return column.businessName || column.columnName
+    if (column) return column.businessName || column.columnName
+    const transformOutput = (plan.transforms ?? []).find(item => item.id === nodeId)?.rules.find(rule => rule.output.id === columnName)?.output
+    if (transformOutput) return transformOutput.name
+    throw new Error(`AI 方案引用的字段 ${nodeId}.${columnName} 已不可用`)
   }
   const baseGraphGroupByID = new Map((baseGraph?.groups ?? []).map(group => [group.id, group]))
   const graphGroups: GraphGroup[] = plan.groups.map(group => {
@@ -345,8 +389,20 @@ export async function materializeDatasetAIPlan(
       }),
     }
   })
+  const baseGraphTransformByID = new Map((baseGraph?.transforms ?? []).map(transform => [transform.id, transform]))
+  const graphTransforms: GraphTransform[] = (plan.transforms ?? []).map(transform => {
+    const previous = baseGraphTransformByID.get(transform.id)
+    const sameTopology = Boolean(previous && sameInput(previous.input, transform.input as GraphInput))
+    return {
+      id: transform.id, name: transform.name, input: transform.input as GraphInput,
+      family: transform.family, componentType: transform.componentType,
+      position: sameTopology ? previous!.position : { x: 0, y: 0 },
+      rules: transform.rules.map(rule => ({ ...rule, inputKeys: [...rule.inputKeys], output: { ...rule.output }, ...(rule.conditionValues ? { conditionValues: rule.conditionValues.map(value => ({ ...value })) } : {}) })),
+    }
+  })
   const outputFilterGraph: DesignerGraphV1 = {
     version: '1.0', nodePositions: {}, nodeNames: {}, groups: graphGroups,
+    transforms: graphTransforms,
     joins: graphJoins.map(join => ({ ...join, outputKeys: [] })),
   }
   graphJoins = graphJoins.map(join => {
@@ -370,12 +426,20 @@ export async function materializeDatasetAIPlan(
       for (const dimension of group.dimensions) required.add(fieldKey(dimension.nodeId, dimension.column))
       for (const metric of group.metrics) required.add(fieldKey(metric.nodeId, metric.column))
     }
+    for (const transform of plan.transforms ?? []) {
+      if (!graphContains(transform.input as GraphInput, target, outputFilterGraph)) continue
+      for (const rule of transform.rules) {
+        for (const key of rule.inputKeys) required.add(key)
+        for (const value of rule.conditionValues ?? []) if (value.mode === 'FIELD') required.add(value.value)
+        if (rule.replaceSourceKey) required.add(rule.replaceSourceKey)
+      }
+    }
     if (graphContains(plan.end.input as GraphInput, target, outputFilterGraph)) {
-      for (const output of plan.end.outputs) required.add(fieldKey(output.nodeId, output.column))
+      for (const output of plan.end.outputs) required.add(output.key || fieldKey(output.nodeId, output.column))
     }
     // A downstream field only needs to pass through joins whose branch contains its source node.
     // This avoids requiring a sibling branch's output from every nested join in a larger DAG.
-    const downstreamRequired = [...required].filter(key => leafNodeIDs.has(keyParts(key).nodeId))
+    const downstreamRequired = [...required].filter(key => allowed.has(key) || leafNodeIDs.has(keyParts(key).nodeId))
     const missing = downstreamRequired.filter(key => !allowed.has(key))
     if (missing.length) throw new Error(`AI 方案中的关联“${join.name}”无法向下游提供字段 ${missing.join('、')}，请重新生成`)
     // An empty outputKeys list means "pass every field through" and must stay empty. When the
@@ -385,12 +449,16 @@ export async function materializeDatasetAIPlan(
     for (const key of downstreamRequired) outputKeys.add(key)
     return { ...join, outputKeys: [...outputKeys] }
   })
+  const finalPlanGraph: DesignerGraphV1 = { ...outputFilterGraph, joins: graphJoins }
+  const availableEndKeys = new Set(graphOutputKeys(plan.end.input as GraphInput, finalPlanGraph, nodes, fields))
+  const missingEndKeys = plan.end.outputs.map(output => output.key || fieldKey(output.nodeId, output.column)).filter(key => !availableEndKeys.has(key))
+  if (missingEndKeys.length) throw new Error(`AI 方案的最终输出引用了不可用字段 ${missingEndKeys.join('、')}，请重新生成`)
   const generatedGraph = layoutDesignerGraph({
     version: '1.0', nodePositions: {}, nodeNames: Object.fromEntries(nodes.map(node => [node.id, node.table.businessName || node.table.tableName])),
-    joins: graphJoins, groups: graphGroups,
+    joins: graphJoins, groups: graphGroups, transforms: graphTransforms,
     end: {
       id: 'end_1', name: plan.end.name, input: plan.end.input as GraphInput, position: { x: 0, y: 0 },
-      outputs: plan.end.outputs.map(output => ({ key: fieldKey(output.nodeId, output.column), name: output.name, code: identifier(output.code) })),
+      outputs: plan.end.outputs.map(output => ({ key: output.key || fieldKey(output.nodeId, output.column), name: output.name, code: identifier(output.code) })),
     },
   }, nodes.map(node => node.id))
   const stableNodeIDs = new Set(plan.nodes.flatMap(spec => baseNodeByID.get(spec.id)?.table.id === spec.tableId ? [spec.id] : []))
@@ -402,11 +470,16 @@ export async function materializeDatasetAIPlan(
     const previous = baseGraphGroupByID.get(group.id)
     return previous && sameInput(previous.input, group.input) ? [group.id] : []
   }))
+  const stableTransformIDs = new Set(graphTransforms.flatMap(transform => {
+    const previous = baseGraphTransformByID.get(transform.id)
+    return previous && sameInput(previous.input, transform.input) ? [transform.id] : []
+  }))
   const graph: DesignerGraphV1 = {
     ...generatedGraph,
     nodePositions: Object.fromEntries(Object.entries(generatedGraph.nodePositions).map(([id, position]) => [id, stableNodeIDs.has(id) ? baseGraph?.nodePositions[id] ?? position : position])),
     joins: generatedGraph.joins.map(join => stableJoinIDs.has(join.id) ? { ...join, position: baseGraphJoinByID.get(join.id)!.position } : join),
     groups: generatedGraph.groups.map(group => stableGroupIDs.has(group.id) ? { ...group, position: baseGraphGroupByID.get(group.id)!.position } : group),
+    transforms: (generatedGraph.transforms ?? []).map(transform => stableTransformIDs.has(transform.id) ? { ...transform, position: baseGraphTransformByID.get(transform.id)!.position } : transform),
     ...(generatedGraph.end ? { end: { ...generatedGraph.end, position: baseGraph?.end?.id === generatedGraph.end.id ? baseGraph.end.position : generatedGraph.end.position } } : {}),
   }
   const validation = validateDesignerGraph(graph, nodes.map(node => node.id))
