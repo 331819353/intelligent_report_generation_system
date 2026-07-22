@@ -40,7 +40,7 @@ func (s *Service) Audit(ctx context.Context, tenantID, actorID, action, resource
 // Create 在租户配额内创建草稿状态的数据源。
 func (s *Service) Create(ctx context.Context, source Source) (Source, error) {
 	if err := source.Validate(); err != nil {
-		return Source{}, err
+		return Source{}, fmt.Errorf("%w: %v", ErrInvalidConfiguration, err)
 	}
 	quota, err := s.repo.Quota(ctx, source.TenantID)
 	if err != nil {
@@ -51,7 +51,7 @@ func (s *Service) Create(ctx context.Context, source Source) (Source, error) {
 		return Source{}, err
 	}
 	if count >= quota.MaxDataSources {
-		return Source{}, errors.New("tenant data source quota exceeded")
+		return Source{}, ErrQuotaExceeded
 	}
 	source.Status = StatusDraft
 	return s.repo.Create(ctx, source)

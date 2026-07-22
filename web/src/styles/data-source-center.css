@@ -70,6 +70,16 @@
 .excel-source-upload > header small, .excel-source-next-step { color: #475467; font-size: 11px; line-height: 1.6; }
 .excel-source-upload > header > span { flex: none; border-radius: 999px; padding: 4px 8px; background: #dcfce7; color: #047857; font-size: 10px; font-weight: 800; }
 .excel-source-file-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
+.excel-source-file-picker { min-width: 0; min-height: 46px; display: flex; align-items: center; gap: 12px; box-sizing: border-box; padding: 5px; border: 1px solid #d0d5dd; border-radius: 10px; background: white; box-shadow: 0 1px 2px #1018280d; transition: border-color .16s ease, box-shadow .16s ease; }
+.excel-source-file-picker:focus-within { border-color: #34d399; box-shadow: 0 0 0 3px #a7f3d066; }
+.excel-source-file-button { position: relative; overflow: hidden; flex: none; min-height: 34px; display: inline-flex !important; grid-template-columns: none !important; flex-direction: row; align-items: center; gap: 6px !important; box-sizing: border-box; padding: 0 13px; border-radius: 7px; background: #059669; color: white !important; box-shadow: 0 2px 6px #04785724; cursor: pointer; font-size: 11px !important; font-weight: 800 !important; white-space: nowrap; }
+.excel-source-file-button:hover { background: #047857; }
+.excel-source-file-button > span { font-size: 16px; font-weight: 500; line-height: 1; }
+.excel-source-file-input { position: absolute; inset: 0; width: 100% !important; height: 100%; margin: 0; padding: 0 !important; border: 0 !important; opacity: 0; cursor: pointer; }
+.excel-source-file-name { min-width: 0; display: grid; gap: 2px; color: #667085; }
+.excel-source-file-name strong { overflow: hidden; color: #344054; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.excel-source-file-name small { overflow: hidden; color: #98a2b3; font-size: 10px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.excel-source-file-name.selected strong { color: #047857; }
 .excel-source-file-row button { min-height: 41px; border: 1px solid #86efac; border-radius: 8px; padding: 0 14px; background: white; color: #047857; font-size: 11px; font-weight: 800; }
 .excel-source-file-row button:disabled { opacity: .5; }
 .excel-sheet-plans { display: grid; gap: 8px; }
@@ -210,4 +220,6 @@
   .data-source-card-facts { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .data-source-refresh-mode { margin-left: 0; }
   .data-source-refresh-mode select { width: 164px; min-width: 164px; padding-right: 24px; }
+  .excel-source-file-row { grid-template-columns: 1fr; }
+  .excel-source-file-row > button { width: 100%; }
 }

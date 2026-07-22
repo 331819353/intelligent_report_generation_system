@@ -460,7 +460,12 @@ test('新建 Excel 数据源先验证每个 Sheet 前十行，再依次提交映
 	await user.type(within(dialog).getByLabelText('数据源编码'), 'excel_analysis')
 	await user.selectOptions(within(dialog).getByLabelText('数据源类型'), 'EXCEL')
 	const file = new File(['workbook'], 'analysis.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
-	await user.upload(within(dialog).getByLabelText('Excel 文件'), file)
+	const fileInput = within(dialog).getByLabelText('Excel 文件')
+	expect(fileInput).toHaveClass('excel-source-file-input')
+	expect(within(dialog).getByText('尚未选择文件', { selector: 'strong' })).toBeInTheDocument()
+	await user.upload(fileInput, file)
+	expect(within(dialog).getByText('analysis.xlsx', { selector: 'strong' })).toBeInTheDocument()
+	expect(within(dialog).getByText('重新选择文件')).toBeInTheDocument()
 	await user.click(within(dialog).getByRole('button', { name: '分析前 10 行' }))
 
 	expect(upload).toHaveBeenCalledWith(file)

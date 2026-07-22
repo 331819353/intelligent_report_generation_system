@@ -3,8 +3,10 @@ package datasource
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"intelligent-report-generation-system/internal/platform/database"
 )
@@ -47,7 +49,18 @@ func (r *PostgresRepository) Create(ctx context.Context, s Source) (Source, erro
 	err = database.WithTenantTx(ctx, r.pool, s.TenantID, func(tx pgx.Tx) error {
 		return scanSource(tx.QueryRow(ctx, `INSERT INTO platform.data_sources(tenant_id,code,name,source_type,status,config,secret_ref,file_asset_id) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),NULLIF($8,'')::uuid) RETURNING `+sourceColumns, s.TenantID, s.Code, s.Name, s.Type, s.Status, config, s.SecretRef, s.FileAssetID), &s)
 	})
+	if dataSourceCodeConflict(err) {
+		return Source{}, ErrCodeConflict
+	}
 	return s, err
+}
+
+func dataSourceCodeConflict(err error) bool {
+	var databaseError *pgconn.PgError
+	if !errors.As(err, &databaseError) || databaseError.Code != "23505" {
+		return false
+	}
+	return databaseError.ConstraintName == "data_sources_tenant_code_active_key" || databaseError.ConstraintName == "data_sources_tenant_id_code_key"
 }
 
 // List 查询租户下未软删除的数据源。

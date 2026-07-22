@@ -48,7 +48,17 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		}
 		created, err := service.Create(r.Context(), source)
 		if err != nil {
-			writeDSError(w, 400, "DATA_SOURCE_CREATE_FAILED", "invalid data source configuration or quota exceeded")
+			switch {
+			case errors.Is(err, ErrCodeConflict):
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_CODE_CONFLICT", "数据源编码已存在，请更换编码后重试")
+			case errors.Is(err, ErrQuotaExceeded):
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_QUOTA_EXCEEDED", "数据源数量已达到租户上限，请先删除不再使用的数据源")
+			case errors.Is(err, ErrInvalidConfiguration):
+				writeDSError(w, http.StatusBadRequest, "DATA_SOURCE_CONFIGURATION_INVALID", "数据源配置无效，请检查名称、编码和文件后重试")
+			default:
+				slog.ErrorContext(r.Context(), "data source create failed", "type", source.Type, "error", err)
+				writeDSError(w, http.StatusInternalServerError, "DATA_SOURCE_CREATE_FAILED", "数据源创建失败，请稍后重试")
+			}
 			return
 		}
 		auditDS(r, service, c.TenantID, c.Subject, "CREATE", created.ID, map[string]any{"type": created.Type, "status": created.Status})

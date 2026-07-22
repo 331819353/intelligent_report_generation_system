@@ -62,6 +62,7 @@ const columnDraftChanged = (draft: ColumnDraft) => draft.businessName.trim() !==
   || draft.sensitivityLevel !== draft.original.sensitivityLevel
   || draft.manualLocked !== draft.original.manualLocked
 const normalizedTags = (value: string) => value.split(',').map(tag => tag.trim()).filter(Boolean)
+const formatFileSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
 const tableDraftChanged = (draft: TableDraft, table: DataSourceTableRecord) => draft.businessName.trim() !== table.businessName
   || draft.businessDescription.trim() !== table.businessDescription
   || normalizedTags(draft.tags).join('\u001f') !== table.tags.join('\u001f')
@@ -723,7 +724,13 @@ export function DataSourceCenterPage() {
           </div>
 			{draft.type === 'EXCEL' && <section className="excel-source-upload" aria-label="Excel 文件结构验证">
 				<header><div><strong>上传并验证工作簿</strong><small>系统会先读取每个 Sheet 的前 10 行，独立确定表头、空行策略和字段类型。</small></div><span>.xlsx / .xls / .csv</span></header>
-				<div className="excel-source-file-row"><label>选择文件<input key={draft.type} aria-label="Excel 文件" type="file" accept=".xlsx,.xls,.csv" onChange={event => { setExcelFile(event.target.files?.[0] || null); setExcelAsset(null); setFormError('') }} /></label><button type="button" disabled={!excelFile || actionBusy} onClick={() => void inspectExcelFile()}>{busyAction === 'inspect-excel' ? '正在检查每个 Sheet…' : '分析前 10 行'}</button></div>
+				<div className="excel-source-file-row">
+					<div className="excel-source-file-picker">
+						<label className="excel-source-file-button"><span aria-hidden="true">＋</span>{excelFile ? '重新选择文件' : '选择文件'}<input className="excel-source-file-input" key={draft.type} aria-label="Excel 文件" type="file" accept=".xlsx,.xls,.csv" onChange={event => { setExcelFile(event.target.files?.[0] || null); setExcelAsset(null); setFormError('') }} /></label>
+						<span className={`excel-source-file-name${excelFile ? ' selected' : ''}`}><strong>{excelFile?.name || '尚未选择文件'}</strong><small>{excelFile ? `${formatFileSize(excelFile.size)} · 可重新选择其他文件` : '支持 Excel 工作簿或单个 CSV 文件'}</small></span>
+					</div>
+					<button type="button" disabled={!excelFile || actionBusy} onClick={() => void inspectExcelFile()}>{busyAction === 'inspect-excel' ? '正在检查每个 Sheet…' : '分析前 10 行'}</button>
+				</div>
 				{excelAsset?.inspection && <div className="excel-sheet-plans" aria-label="Sheet 解析方案">
 					<div className="excel-sheet-plan-summary" role="status"><strong>结构验证通过</strong><span>{excelAsset.filename} · {excelAsset.inspection.sheets.length} 个 Sheet · 每个最多 {excelAsset.inspection.sampleLimit} 行</span></div>
 					{excelAsset.inspection.sheets.map(sheet => <details key={sheet.name} open><summary><strong>{sheet.name}</strong><span>表头第 {sheet.headerRow} 行 · {sheet.columns.length} 字段 · {sheet.skipEmptyRows ? '跳过空行' : '保留空行'}</span></summary><div className="excel-sheet-preview"><table><thead><tr>{sheet.columns.map(column => <th key={column.name}><strong>{column.name}</strong><small>{column.canonicalType}{column.nullable ? ' · 可空' : ''}</small></th>)}</tr></thead><tbody>{sheet.rows.map((row, rowIndex) => <tr key={rowIndex}>{sheet.columns.map((column, columnIndex) => <td key={column.name}>{row[columnIndex] || '—'}</td>)}</tr>)}</tbody></table></div></details>)}

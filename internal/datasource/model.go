@@ -5,6 +5,12 @@ import (
 	"errors"
 )
 
+var (
+	ErrInvalidConfiguration = errors.New("invalid data source configuration")
+	ErrQuotaExceeded        = errors.New("tenant data source quota exceeded")
+	ErrCodeConflict         = errors.New("data source code already exists")
+)
+
 type Type string
 
 const (

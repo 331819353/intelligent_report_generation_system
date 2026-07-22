@@ -143,8 +143,16 @@ func TestLifecycleAndQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.count = 1
-	if _, err := s.Create(context.Background(), source); err == nil {
-		t.Fatal("quota was not enforced")
+	if _, err := s.Create(context.Background(), source); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("quota error=%v", err)
+	}
+}
+
+func TestCreateClassifiesInvalidConfiguration(t *testing.T) {
+	r := &repo{quota: Quota{MaxDataSources: 1}}
+	s := NewService(r)
+	if _, err := s.Create(context.Background(), Source{TenantID: "t", Type: TypeExcel}); !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("validation error=%v", err)
 	}
 }
 
