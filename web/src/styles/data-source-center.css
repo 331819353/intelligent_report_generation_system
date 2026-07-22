@@ -81,6 +81,7 @@
 .excel-source-file-name strong { overflow: hidden; color: #344054; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .excel-source-file-name small { overflow: hidden; color: #98a2b3; font-size: 10px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .excel-source-file-name.selected strong { color: #047857; }
+.excel-source-replace-note { padding: 9px 11px; border: 1px solid #bfdbfe; border-radius: 8px; background: #eff6ff; color: #1d4ed8; font-size: 11px; line-height: 1.5; }
 .excel-source-file-row button { min-height: 41px; border: 1px solid #86efac; border-radius: 8px; padding: 0 14px; background: white; color: #047857; font-size: 11px; font-weight: 800; }
 .excel-source-file-row button:disabled { opacity: .5; }
 .excel-sheet-plans { display: grid; gap: 8px; }
@@ -193,14 +194,14 @@
 .file-inspection-summary strong { font-size: 12px; }
 .file-sheet-selection-list { max-height: 520px; overflow: auto; display: grid; gap: 10px; padding-right: 2px; }
 .file-sheet-selection-card { overflow: hidden; border: 1px solid #d1fae5; border-radius: 10px; background: white; }
-.file-sheet-selection-card.imported { background: #f8fafc; opacity: .7; }
+.file-sheet-selection-card.imported { border-color: #bfdbfe; background: #f8fbff; }
 .file-sheet-selection-card > label { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 11px 12px; background: #f7fef9; }
 .file-sheet-selection-card > label input { width: 16px; height: 16px; }
 .file-sheet-selection-card > label > span { display: grid; gap: 3px; }
 .file-sheet-selection-card > label strong { color: #065f46; font-size: 12px; }
 .file-sheet-selection-card > label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .file-sheet-selection-card > label em { border-radius: 999px; padding: 3px 7px; background: #dcfce7; color: #047857; font-size: 10px; font-style: normal; font-weight: 800; }
-.file-sheet-selection-card.imported > label em { background: #e4e7ec; color: #667085; }
+.file-sheet-selection-card.imported > label em { background: #dbeafe; color: #1d4ed8; }
 .data-source-table-picker footer { display: flex; justify-content: flex-end; gap: 10px; }
 .data-source-checkbox { display: flex !important; grid-template-columns: auto 1fr; align-items: center; }
 .data-source-field-mapping { display: grid; gap: 10px; padding-top: 4px; }

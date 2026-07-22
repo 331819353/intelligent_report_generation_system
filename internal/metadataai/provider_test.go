@@ -47,6 +47,9 @@ func (i *providerInvoker) Invoke(_ context.Context, invocation aiplatform.Invoca
 
 func TestOrchestratedProviderBuildsMinimalRequestAndParsesUsage(t *testing.T) {
 	input, output := validCompletion()
+	input.Table.Name = "销售订单"
+	input.Columns[0].Name, input.Columns[1].Name = "客户名称", "订单金额"
+	input.SampleRows = []map[string]any{{"客户名称": "华东智造有限公司", "订单金额": 16320}}
 	content, _ := json.Marshal(output)
 	invoker := &providerInvoker{configured: true, result: aiplatform.InvocationResult{ProviderResult: aiplatform.ProviderResult{
 		Content: content, Model: "model-v1", Usage: aiplatform.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
@@ -64,6 +67,12 @@ func TestOrchestratedProviderBuildsMinimalRequestAndParsesUsage(t *testing.T) {
 	}
 	if len(invoker.invocation.Request.Messages) != 2 || invoker.invocation.Request.ResponseSchema.Name != "metadata_completion" {
 		t.Fatalf("模型请求未保持最小结构化合同: %#v", invoker.invocation.Request)
+	}
+	if !messageContains(invoker.invocation.Request.Messages[0], "真实表头") || !messageContains(invoker.invocation.Request.Messages[0], "字段业务描述") {
+		t.Fatalf("系统提示未要求结合 Sheet 表头和内容完成映射: %#v", invoker.invocation.Request.Messages[0])
+	}
+	if !messageContains(invoker.invocation.Request.Messages[1], "客户名称") || !messageContains(invoker.invocation.Request.Messages[1], "华东智造有限公司") {
+		t.Fatalf("Sheet 表头或真实内容未进入模型用户消息: %#v", invoker.invocation.Request.Messages[1])
 	}
 	if err := aiplatform.ValidateProviderRequest(invoker.invocation.Request); err != nil {
 		t.Fatalf("元数据输出 Schema 不满足通用严格合同: %v", err)

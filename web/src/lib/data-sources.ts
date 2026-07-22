@@ -188,6 +188,12 @@ export const dataSourceAPI = {
     body.set('config', JSON.stringify({ skipEmptyRows: true }))
     return apiRequest<ExcelFileAsset>('/v1/excel-files', { method: 'POST', body })
   },
+  uploadExcelVersion: (fileAssetId: string, file: File) => {
+    const body = new FormData()
+    body.set('file', file)
+    body.set('config', JSON.stringify({ skipEmptyRows: true }))
+    return apiRequest<ExcelFileAsset>(`/v1/excel-files/${encodeURIComponent(fileAssetId)}/versions`, { method: 'POST', body })
+  },
   inspectExcelSource: (id: string) => apiRequest<ExcelWorkbookInspection>(`/v1/data-sources/${encodeURIComponent(id)}/file-inspection`, { method: 'POST', body: '{}' }),
   update: (id: string, input: DataSourceConnectionInput) => apiRequest<DataSourceRecord>(`/v1/data-sources/${encodeURIComponent(id)}`, {
     method: 'PUT',

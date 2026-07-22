@@ -64,6 +64,14 @@ const columnDraftChanged = (draft: ColumnDraft) => draft.businessName.trim() !==
   || draft.manualLocked !== draft.original.manualLocked
 const normalizedTags = (value: string) => value.split(',').map(tag => tag.trim()).filter(Boolean)
 const formatFileSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
+const fileSourceIdentity = (filename: string) => {
+  const extensionMatch = filename.match(/\.([^.]+)$/)
+  const extension = extensionMatch?.[1]?.toLocaleLowerCase() || 'file'
+  const stem = filename.slice(0, extensionMatch?.index ?? filename.length).trim() || '文件数据源'
+  const normalizedStem = stem.normalize('NFKC').toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '') || 'file'
+  return { name: stem, code: `${normalizedStem}_${extension}` }
+}
 const tableDraftChanged = (draft: TableDraft, table: DataSourceTableRecord) => draft.businessName.trim() !== table.businessName
   || draft.businessDescription.trim() !== table.businessDescription
   || normalizedTags(draft.tags).join('\u001f') !== table.tags.join('\u001f')
@@ -151,6 +159,11 @@ export function DataSourceCenterPage() {
       return matchesKeyword && (typeFilter === 'ALL' || source.type === typeFilter) && (statusFilter === 'ALL' || source.status === statusFilter)
     })
   }, [keyword, sources, statusFilter, typeFilter])
+  const replacingFileSource = useMemo(() => {
+    if (draft.type !== 'EXCEL' || !draft.code.trim()) return null
+    const code = draft.code.trim().toLocaleLowerCase()
+    return sources.find(source => source.type === 'EXCEL' && source.code.toLocaleLowerCase() === code && source.fileAssetId) || null
+  }, [draft.code, draft.type, sources])
 
   const loadSources = useCallback(async () => {
     try {
@@ -541,11 +554,25 @@ export function DataSourceCenterPage() {
 			setFormError('')
 			let saved: DataSourceRecord | null = null
 			try {
+				if (replacingFileSource) {
+					const asset = excelAsset && excelAsset.id === replacingFileSource.fileAssetId
+						? excelAsset
+						: await dataSourceAPI.uploadExcelVersion(replacingFileSource.fileAssetId!, excelFile!)
+					setExcelAsset(asset)
+					await dataSourceAPI.test(replacingFileSource.id)
+					const active = await dataSourceAPI.get(replacingFileSource.id)
+					setSources(current => current.map(source => source.id === active.id ? active : source))
+					viewedSourceIdRef.current = active.id
+					setDialog({ mode: 'view', source: active })
+					void loadTableStructures(active.id)
+					setNotice({ tone: 'success', message: `已覆盖“${active.name}”的源文件并生成版本 ${asset.version}；请点击“新增数据表”重新解析并映射 Sheet` })
+					return
+				}
 				const asset = excelAsset || await dataSourceAPI.uploadExcel(excelFile!)
 				if (!excelAsset) setExcelAsset(asset)
 				saved = await dataSourceAPI.create({ code: draft.code.trim(), name: draft.name.trim(), type: 'EXCEL', fileAssetId: asset.id })
 				await dataSourceAPI.test(saved.id)
-				const active = { ...saved, status: 'ACTIVE' as const }
+				const active = await dataSourceAPI.get(saved.id)
 				setSources(current => [active, ...current.filter(source => source.id !== active.id)])
 				viewedSourceIdRef.current = active.id
 				setDialog({ mode: 'view', source: active })
@@ -558,6 +585,7 @@ export function DataSourceCenterPage() {
 					setNotice({ tone: 'error', message: `文件数据源已创建，但文件对象验证失败：${message}。请在数据源清单中重新测试连接` })
 					setDialog(null)
 				} else {
+					if (replacingFileSource) void loadSources()
 					setFormError(message)
 				}
 			} finally {
@@ -662,6 +690,9 @@ export function DataSourceCenterPage() {
   const visibleMetadataJobFailures = visibleMetadataJob && (visibleMetadataJob.status === 'FAILED' || visibleMetadataJob.status === 'PARTIAL')
     ? visibleMetadataJob.failures || []
     : []
+  const selectableDiscoveredTables = dialog?.mode === 'select-tables'
+    ? discoveredTables.filter(table => dialog.source?.type === 'EXCEL' || !metadataTables.some(asset => assetTableKey(asset) === discoveredTableKey(table)))
+    : []
   return (
     <AppShell title="数据源配置中心" eyebrow="工作栏" actions={<button className="primary-button" type="button" disabled={actionBusy} onClick={openCreate}>新建数据源</button>}>
       {notice && <div className={`data-source-toast ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'} aria-live="polite">
@@ -727,17 +758,27 @@ export function DataSourceCenterPage() {
 			</>}
           </div>
 			{draft.type === 'EXCEL' && <section className="excel-source-upload" aria-label="Excel 文件上传">
-				<header><div><strong>上传文件并创建数据源</strong><small>此步骤只保存原始文件并登记数据源，不解析 Sheet，也不会自动创建映射表。</small></div><span>.xlsx / .xls / .csv</span></header>
+				<header><div><strong>{replacingFileSource ? '覆盖数据源文件' : '上传文件并创建数据源'}</strong><small>选择文件后自动填写数据源名称和稳定编码；相同编码会覆盖当前源文件并保留历史版本。</small></div><span>.xlsx / .xls / .csv</span></header>
 				<div className="excel-source-file-row upload-only">
 					<div className="excel-source-file-picker">
-						<label className="excel-source-file-button"><span aria-hidden="true">＋</span>{excelFile ? '重新选择文件' : '选择文件'}<input className="excel-source-file-input" key={draft.type} aria-label="Excel 文件" type="file" accept=".xlsx,.xls,.csv" onChange={event => { setExcelFile(event.target.files?.[0] || null); setExcelAsset(null); setFormError('') }} /></label>
+						<label className="excel-source-file-button"><span aria-hidden="true">＋</span>{excelFile ? '重新选择文件' : '选择文件'}<input className="excel-source-file-input" key={draft.type} aria-label="Excel 文件" type="file" accept=".xlsx,.xls,.csv" onChange={event => {
+							const file = event.target.files?.[0] || null
+							setExcelFile(file)
+							setExcelAsset(null)
+							setFormError('')
+							if (file) {
+								const identity = fileSourceIdentity(file.name)
+								setDraft(current => ({ ...current, name: identity.name, code: identity.code }))
+							}
+						}} /></label>
 						<span className={`excel-source-file-name${excelFile ? ' selected' : ''}`}><strong>{excelFile?.name || '尚未选择文件'}</strong><small>{excelFile ? `${formatFileSize(excelFile.size)} · 可重新选择其他文件` : '支持 Excel 工作簿或单个 CSV 文件'}</small></span>
 					</div>
 				</div>
-				<small className="excel-source-next-step">创建成功后进入“数据表资产”，点击“新增数据表”才会解析每个 Sheet 的前 10 行并展示映射预览。</small>
+				{replacingFileSource && <div className="excel-source-replace-note" role="status">已识别已有数据源“{replacingFileSource.name}”。提交后会将文件资产切换到新版本，不会重复创建数据源。</div>}
+				<small className="excel-source-next-step">完成后进入“数据表资产”，点击“新增数据表”解析每个 Sheet；LLM 映射会同时使用 Sheet 名称、真实表头和最多 3 行内容样本。</small>
 			</section>}
           {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
-			<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="primary-button" type="submit" disabled={actionBusy}>{actionBusy ? draft.type === 'EXCEL' ? '正在上传并创建…' : '正在保存…' : dialog.mode === 'edit' ? '保存修改' : draft.type === 'EXCEL' ? '上传并创建数据源' : '创建数据源'}</button></footer>
+			<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="primary-button" type="submit" disabled={actionBusy}>{actionBusy ? draft.type === 'EXCEL' ? replacingFileSource ? '正在覆盖源文件…' : '正在上传并创建…' : '正在保存…' : dialog.mode === 'edit' ? '保存修改' : draft.type === 'EXCEL' ? replacingFileSource ? '覆盖并更新源文件' : '上传并创建数据源' : '创建数据源'}</button></footer>
         </form>
       </Dialog>}
 
@@ -783,13 +824,13 @@ export function DataSourceCenterPage() {
 
       {dialog?.mode === 'select-tables' && dialog.source && <Dialog title="新增数据表" wide onClose={closeDialog}>
         <div className="data-source-table-picker">
-          <header><div><strong>{dialog.source.name}</strong><span>{dialog.source.type === 'EXCEL' ? '解析并选择需要映射的 Sheet' : '从源库选择需要完善并纳入管理的数据表'}</span></div><small>{dialog.source.type === 'EXCEL' ? '此步骤读取每个 Sheet 的前 10 行，确认表头、字段类型和数据预览；选中后才提交 LLM 映射。' : '选中后采集表结构与 3 行样本，经 LLM 完善后存入 PostgreSQL。'}</small></header>
+          <header><div><strong>{dialog.source.name}</strong><span>{dialog.source.type === 'EXCEL' ? '解析并选择需要映射的 Sheet' : '从源库选择需要完善并纳入管理的数据表'}</span></div><small>{dialog.source.type === 'EXCEL' ? '此处预览每个 Sheet 的前 10 行；提交后 LLM 会逐 Sheet 使用名称、真实表头、字段类型和最多 3 行内容判断表名、字段名及字段描述。' : '选中后采集表结构与 3 行样本，经 LLM 完善后存入 PostgreSQL。'}</small></header>
           {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
           {discoveryLoading ? <div className="data-source-structure-state" role="status">{dialog.source.type === 'EXCEL' ? '正在解析 Sheet 前 10 行并生成预览…' : '正在从数据源刷新表清单…'}</div> : <>
             {dialog.source.type === 'EXCEL' && fileInspection && <div className="file-inspection-summary" role="status"><strong>Sheet 结构解析完成</strong><span>{fileInspection.sheets.length} 个 Sheet · 每个最多预览 {fileInspection.sampleLimit} 行</span></div>}
             <div className="data-source-table-picker-toolbar">
-              <label><input type="checkbox" checked={discoveredTables.filter(table => !metadataTables.some(asset => assetTableKey(asset) === discoveredTableKey(table))).length > 0 && selectedTableKeys.length === discoveredTables.filter(table => !metadataTables.some(asset => assetTableKey(asset) === discoveredTableKey(table))).length} onChange={event => {
-                if (event.target.checked) setSelectedTableKeys(discoveredTables.filter(table => !metadataTables.some(asset => assetTableKey(asset) === discoveredTableKey(table))).map(discoveredTableKey))
+              <label><input type="checkbox" checked={selectableDiscoveredTables.length > 0 && selectedTableKeys.length === selectableDiscoveredTables.length} onChange={event => {
+                if (event.target.checked) setSelectedTableKeys(selectableDiscoveredTables.map(discoveredTableKey))
                 else setSelectedTableKeys([])
               }} />{dialog.source.type === 'EXCEL' ? '全选可映射 Sheet' : '全选可新增表'}</label><span>已选择 {selectedTableKeys.length} / {discoveredTables.length}</span>
             </div>
@@ -799,7 +840,7 @@ export function DataSourceCenterPage() {
               const key = discoveredTableKey(table)
               const imported = metadataTables.some(asset => assetTableKey(asset) === key)
               return <article className={`file-sheet-selection-card${imported ? ' imported' : ''}`} key={key}>
-                <label><input type="checkbox" disabled={imported || actionBusy} checked={selectedTableKeys.includes(key)} onChange={() => setSelectedTableKeys(current => current.includes(key) ? current.filter(item => item !== key) : [...current, key])} /><span><strong>{sheet.name}</strong><small>表头第 {sheet.headerRow} 行 · {sheet.columns.length} 字段 · {sheet.skipEmptyRows ? '跳过空行' : '保留空行'}</small></span><em>{imported ? '已映射' : '待映射'}</em></label>
+                <label><input type="checkbox" disabled={actionBusy} checked={selectedTableKeys.includes(key)} onChange={() => setSelectedTableKeys(current => current.includes(key) ? current.filter(item => item !== key) : [...current, key])} /><span><strong>{sheet.name}</strong><small>表头第 {sheet.headerRow} 行 · {sheet.columns.length} 字段 · {sheet.skipEmptyRows ? '跳过空行' : '保留空行'}</small></span><em>{imported ? '可重新映射' : '待映射'}</em></label>
                 <div className="excel-sheet-preview"><table><thead><tr>{sheet.columns.map(column => <th key={column.name}><strong>{column.name}</strong><small>{column.canonicalType}{column.nullable ? ' · 可空' : ''}</small></th>)}</tr></thead><tbody>{sheet.rows.map((row, rowIndex) => <tr key={rowIndex}>{sheet.columns.map((column, columnIndex) => <td key={`${column.name}:${columnIndex}`}>{row[columnIndex] || '—'}</td>)}</tr>)}</tbody></table></div>
               </article>
             })}</div> : <div className="data-source-discovery-list">{discoveredTables.map(table => {

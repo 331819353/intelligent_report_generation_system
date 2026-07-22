@@ -22,7 +22,8 @@ func (r *PostgresRepository) NextFileVersion(ctx context.Context, tenantID, asse
 	return
 }
 
-// SaveFileVersion 在事务中登记新版本并切换当前版本指针。
+// SaveFileVersion 在事务中登记新版本并切换当前版本指针。覆盖已有文件时，所有
+// 引用该文件资产的数据源会回到待验证状态并推进版本，阻止旧文件上的后台任务落库。
 func (r *PostgresRepository) SaveFileVersion(ctx context.Context, asset FileAsset, bucket, key string, config map[string]any) error {
 	configJSON, err := json.Marshal(config)
 	if err != nil {
@@ -46,8 +47,16 @@ func (r *PostgresRepository) SaveFileVersion(ctx context.Context, asset FileAsse
 				return errors.New("concurrent file version update")
 			}
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO platform.file_asset_versions(id,tenant_id,file_asset_id,version,filename,mime_type,size_bytes,sha256,storage_bucket,storage_key,parse_config,workbook_summary) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, asset.VersionID, asset.TenantID, asset.ID, asset.CurrentVersion, asset.Filename, asset.MimeType, asset.SizeBytes, asset.SHA256, bucket, key, configJSON, summaryJSON)
-		return err
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.file_asset_versions(id,tenant_id,file_asset_id,version,filename,mime_type,size_bytes,sha256,storage_bucket,storage_key,parse_config,workbook_summary) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, asset.VersionID, asset.TenantID, asset.ID, asset.CurrentVersion, asset.Filename, asset.MimeType, asset.SizeBytes, asset.SHA256, bucket, key, configJSON, summaryJSON); err != nil {
+			return err
+		}
+		if asset.CurrentVersion > 1 {
+			_, err := tx.Exec(ctx, `UPDATE platform.data_sources
+				SET status='DRAFT'::platform.data_source_status,last_error=NULL,version=version+1
+				WHERE tenant_id=$1 AND file_asset_id=$2 AND deleted_at IS NULL`, asset.TenantID, asset.ID)
+			return err
+		}
+		return nil
 	})
 }
 

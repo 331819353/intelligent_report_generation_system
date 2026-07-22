@@ -418,15 +418,15 @@ func TestRefreshMetadataJobDoesNotOverwriteSupersedingStructure(t *testing.T) {
 }
 
 func TestImportMetadataJobKeepsReimportSemantics(t *testing.T) {
-	table := MetadataTable{SchemaName: "sales", Name: "orders", Columns: []MetadataColumn{{Name: "id", CanonicalType: "INTEGER"}}}
-	source := Source{ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive, Config: map[string]any{"host": "db"}, SecretRef: "encrypted://source"}
+	table := MetadataTable{SchemaName: "WORKBOOK", Name: "销售订单", Columns: []MetadataColumn{{Name: "客户名称", CanonicalType: "TEXT"}, {Name: "订单金额", CanonicalType: "DECIMAL"}}}
+	source := Source{ID: "source-1", TenantID: "tenant-1", Type: TypeExcel, Status: StatusActive, Config: map[string]any{}, FileAssetID: "file-1"}
 	sourceHash, _ := metadataJobSourceHash(source)
 	baseRepo := &repo{source: source, quota: Quota{MaxDataSources: 10}, managedMissing: true, selectedIDs: map[string]string{metadataTableKey(table): "table-1"}}
-	connector := importConnector{connector: connector{kind: TypeMySQL}, discovered: SyncResult{Tables: []MetadataTable{table}}, sample: SampleResult{Columns: []string{"id"}, Rows: [][]any{{1}, {2}, {3}}}}
+	connector := importConnector{connector: connector{kind: TypeExcel}, discovered: SyncResult{Tables: []MetadataTable{table}}, sample: SampleResult{Columns: []string{"客户名称", "订单金额"}, Rows: [][]any{{"华东智造有限公司", 16320}, {"南方自动化科技", 15360}}}}
 	completer := &completingRecorder{}
 	jobs := &metadataJobRepo{
 		claim: &metadataJobClaim{MetadataJob: MetadataJob{ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobImport, Mode: MetadataRefreshFull}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
-		items: []metadataJobItem{{ID: "item-1", SchemaName: "sales", TableName: "orders", Status: "QUEUED"}},
+		items: []metadataJobItem{{ID: "item-1", SchemaName: "WORKBOOK", TableName: "销售订单", Status: "QUEUED"}},
 	}
 	service := NewService(baseRepo, connector)
 	service.SetTableCompleter(completer)
@@ -442,6 +442,9 @@ func TestImportMetadataJobKeepsReimportSemantics(t *testing.T) {
 	}
 	if len(baseRepo.selectedBatches) != 1 || len(baseRepo.managedBatches) != 0 || len(completer.tableIDs) != 1 {
 		t.Fatalf("selected=%d managed=%d LLM=%#v", len(baseRepo.selectedBatches), len(baseRepo.managedBatches), completer.tableIDs)
+	}
+	if len(completer.rows) != 2 || completer.rows[0]["客户名称"] != "华东智造有限公司" || completer.rows[0]["订单金额"] != 16320 {
+		t.Fatalf("Sheet 表头或真实内容未进入 LLM 映射输入: %#v", completer.rows)
 	}
 }
 

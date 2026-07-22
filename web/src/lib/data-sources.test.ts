@@ -42,6 +42,26 @@ test('数据源管理 API 使用结构化连接字段和明确生命周期端点
   expect(String(requests[0].init?.body)).not.toContain('secretRef')
 })
 
+test('文件首次上传与覆盖上传使用不同版本端点', async () => {
+  sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'access', refreshToken: 'refresh' }))
+  const requests: Array<{ url: string; init?: RequestInit }> = []
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    requests.push({ url: String(input), init })
+    return new Response(JSON.stringify({ id: 'file-1', version: 2 }), { status: 201, headers: { 'Content-Type': 'application/json' } })
+  }))
+  const file = new File(['workbook'], 'analysis.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+
+  await dataSourceAPI.uploadExcel(file)
+  await dataSourceAPI.uploadExcelVersion('file/id', file)
+
+  expect(requests.map(request => [request.url, request.init?.method])).toEqual([
+    ['/api/v1/excel-files', 'POST'],
+    ['/api/v1/excel-files/file%2Fid/versions', 'POST'],
+  ])
+  expect(requests[0].init?.body).toBeInstanceOf(FormData)
+  expect(requests[1].init?.body).toBeInstanceOf(FormData)
+})
+
 test('按数据源分页读取全部活动表结构', async () => {
   sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'access', refreshToken: 'refresh' }))
   const urls: string[] = []

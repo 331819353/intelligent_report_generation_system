@@ -10,7 +10,7 @@ import (
 
 const (
 	SchemaVersion = "1.1"
-	PromptVersion = "metadata-completion-v4"
+	PromptVersion = "metadata-completion-v5"
 )
 
 var (

@@ -74,6 +74,13 @@ func TestExcelUploadVersionSyncAndRemovedColumn(t *testing.T) {
 	if err != nil || version2.CurrentVersion != 2 {
 		t.Fatalf("version=%#v err=%v", version2, err)
 	}
+	replacedSource, err := service.Get(ctx, tenantID, source.ID)
+	if err != nil || replacedSource.Status != datasource.StatusDraft || replacedSource.Version <= source.Version {
+		t.Fatalf("replaced source=%#v err=%v", replacedSource, err)
+	}
+	if _, err := service.Test(ctx, tenantID, source.ID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := manager.Inspect(ctx, tenantID, asset.ID, 50<<20); err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +90,12 @@ func TestExcelUploadVersionSyncAndRemovedColumn(t *testing.T) {
 	version3, err := manager.Upload(ctx, tenantID, asset.ID, "sales.xlsx", asset.MimeType, bytes.NewReader(first), int64(len(first)), map[string]any{"headerRow": float64(1), "selectedSheets": []any{"Sales"}})
 	if err != nil || version3.CurrentVersion != 3 {
 		t.Fatalf("version=%#v err=%v", version3, err)
+	}
+	if replacedSource, err = service.Get(ctx, tenantID, source.ID); err != nil || replacedSource.Status != datasource.StatusDraft {
+		t.Fatalf("second replaced source=%#v err=%v", replacedSource, err)
+	}
+	if _, err := service.Test(ctx, tenantID, source.ID); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := manager.Inspect(ctx, tenantID, asset.ID, 50<<20); err != nil {
 		t.Fatal(err)
