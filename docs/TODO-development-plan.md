@@ -314,13 +314,14 @@ make frontend-build
 - [x] 增加非法/缺失/虚构资产 ID、非法标签与语义类型、超时、人工锁定、低置信度、跨租户隔离和建议决策测试；PostgreSQL 迁移与集成测试已通过。
 - [x] 使用真实受控 `deepseek-v3` 完成 Oracle `ORDERS` 的连通性、动态 Schema 兼容性、单次超时和提示词质量验收；4 个字段均生成并保存为可用资产。
 - [x] 对 JSON Schema 无法表达的字段 ID 一一映射约束增加领域级纠错：首次输出出现重复、缺失或未知 `targetId` 等非法结果时，携带安全校验原因和准确目标 ID 清单定向重试一次；纠错仍非法则失败关闭且不写建议，成功时累计两次 Token 用量，网络、超时、配额和鉴权错误不误入纠错。
+- [x] 为 CSV 元数据补全增加来源格式上下文和 `metadata-completion-v6` 合同：映射字段 `businessName` 必须为小写英文 `snake_case`，`businessDescription` 必须包含中文；提示词、动态 JSON Schema 字段说明、ASCII 规范化和本地领域校验共同失败关闭，避免依赖 deepseek-v3 不稳定的 `pattern` 方言，原始 CSV 表头继续用于读取与血缘且不被模型覆盖。Excel 工作簿和数据库字段保持现有业务名称规则。
 - [ ] 扩展真实模型多样本质量评估，并建立生产 Token/费用预算、租户限额与限流策略。
 - [x] 将按表同步调用扩展为 PostgreSQL 持久化异步批量任务，以任务项、结构哈希、数据源版本、Worker 租约和恢复 fence 收口重复执行；API 与页面关闭不再中止采样和模型加工。任务取消、失败项人工重试、Provider 级幂等键和有界多租户 Worker Pool 继续由 T0201 未完成项跟踪。
 - [ ] 将内置基础标签枚举扩展为租户可配置标签字典，同时保持输出 Schema 白名单约束和历史结果兼容。
 
 验收：模型输出非法、超时或虚构内容时不会污染正式资产。
 
-验收证据：`internal/metadataai` 单元测试覆盖严格结构化输出、动态表/字段约束、标签去重、未知/缺失/重复字段 ID 拒绝、一次定向纠错、二次非法失败关闭、取消与网络错误边界、Token 累计和锁/版本/置信度分流；`internal/datasource` 覆盖后台任务进度、字段级增量、恢复 fence、逐表失败摘要及真实失败阶段，`test/integration/metadata_ai_test.go` 与 `test/integration/metadata_job_test.go` 覆盖正式资产应用、待确认、人工决策、任务恢复、Token/审计记录与 RLS 隔离。迁移 `000029` 修复已登记 `000024` 的早期开发库审计结构漂移。2026-07-17 使用真实 `deepseek-v3` 重新导入 Oracle `ORDERS`，任务 `a52e85da-320b-4df9-97b4-d95ff1b0889e` 以 `metadata-completion-v4` 成功完成，4 个当前活动字段均生成完整业务映射，历史删除字段仅保留为停用记录；多样本质量和运营限额仍待验收。
+验收证据：`internal/metadataai` 单元测试覆盖严格结构化输出、动态表/字段约束、标签去重、未知/缺失/重复字段 ID 拒绝、一次定向纠错、二次非法失败关闭、取消与网络错误边界、Token 累计和锁/版本/置信度分流；`internal/datasource` 覆盖后台任务进度、字段级增量、恢复 fence、逐表失败摘要及真实失败阶段，`test/integration/metadata_ai_test.go` 与 `test/integration/metadata_job_test.go` 覆盖正式资产应用、待确认、人工决策、任务恢复、Token/审计记录与 RLS 隔离。迁移 `000029` 修复已登记 `000024` 的早期开发库审计结构漂移。2026-07-17 使用真实 `deepseek-v3` 重新导入 Oracle `ORDERS`，任务 `a52e85da-320b-4df9-97b4-d95ff1b0889e` 以 `metadata-completion-v4` 成功完成，4 个当前活动字段均生成完整业务映射，历史删除字段仅保留为停用记录。2026-07-22 使用真实三字段中文表头 CSV 验收：导入任务 `55515225-4bed-4fea-82d4-4e199d9958a9` 和元数据任务 `f794f03b-4ab7-428c-93ea-9243908e1979` 均成功，`metadata-completion-v6` 耗时 16491 ms，活动字段 3/3 生成英文 `snake_case` 业务名称且 3/3 生成中文描述，原始中文表头保持不变；多样本质量和运营限额仍待验收。
 
 ### T0207 实现元数据标签向量检索（已完成）
 

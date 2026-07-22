@@ -118,6 +118,61 @@ func TestNormalizeOutputTrimsAndDeduplicatesProviderTags(t *testing.T) {
 	}
 }
 
+func TestValidateOutputAcceptsCSVEnglishSnakeCaseNamesAndChineseDescriptions(t *testing.T) {
+	input, output := validCompletion()
+	input.SourceFormat = SourceFormatCSV
+	output.Columns[0].BusinessName = "order_id"
+	output.Columns[1].BusinessName = "order_amount"
+
+	if err := ValidateOutput(input, output); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateOutputRejectsInvalidCSVFieldMetadata(t *testing.T) {
+	tests := []struct {
+		name        string
+		business    string
+		description string
+	}{
+		{name: "中文字段名称", business: "订单编号", description: "订单唯一标识"},
+		{name: "包含空格", business: "order id", description: "订单唯一标识"},
+		{name: "大写字母", business: "Order_ID", description: "订单唯一标识"},
+		{name: "连续下划线", business: "order__id", description: "订单唯一标识"},
+		{name: "英文描述", business: "order_id", description: "Unique order identifier"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input, output := validCompletion()
+			input.SourceFormat = SourceFormatCSV
+			output.Columns[0].BusinessName = test.business
+			output.Columns[0].BusinessDescription = test.description
+			output.Columns[1].BusinessName = "order_amount"
+			if err := ValidateOutput(input, output); !errors.Is(err, ErrInvalidOutput) {
+				t.Fatalf("error=%v, want ErrInvalidOutput", err)
+			}
+		})
+	}
+}
+
+func TestNormalizeOutputForCSVCanonicalizesASCIINamesWithoutInventingChineseTranslations(t *testing.T) {
+	input, output := validCompletion()
+	input.SourceFormat = SourceFormatCSV
+	output.Columns[0].BusinessName = "Customer Name"
+	output.Columns[1].BusinessName = "HTTPOrder-ID"
+
+	normalized := normalizeOutputForInput(input, output)
+	if normalized.Columns[0].BusinessName != "customer_name" || normalized.Columns[1].BusinessName != "http_order_id" {
+		t.Fatalf("normalized names=%q, %q", normalized.Columns[0].BusinessName, normalized.Columns[1].BusinessName)
+	}
+
+	output.Columns[0].BusinessName = "客户名称"
+	normalized = normalizeOutputForInput(input, output)
+	if normalized.Columns[0].BusinessName != "客户名称" {
+		t.Fatalf("non-ASCII name was silently rewritten: %q", normalized.Columns[0].BusinessName)
+	}
+}
+
 func TestSuggestionDispositionProtectsLockedAndChangedAssets(t *testing.T) {
 	tests := []struct {
 		name                   string

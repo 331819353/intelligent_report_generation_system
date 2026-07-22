@@ -47,9 +47,11 @@ func (i *providerInvoker) Invoke(_ context.Context, invocation aiplatform.Invoca
 
 func TestOrchestratedProviderBuildsMinimalRequestAndParsesUsage(t *testing.T) {
 	input, output := validCompletion()
+	input.SourceFormat = SourceFormatCSV
 	input.Table.Name = "销售订单"
 	input.Columns[0].Name, input.Columns[1].Name = "客户名称", "订单金额"
 	input.SampleRows = []map[string]any{{"客户名称": "华东智造有限公司", "订单金额": 16320}}
+	output.Columns[0].BusinessName, output.Columns[1].BusinessName = "customer_name", "order_amount"
 	content, _ := json.Marshal(output)
 	invoker := &providerInvoker{configured: true, result: aiplatform.InvocationResult{ProviderResult: aiplatform.ProviderResult{
 		Content: content, Model: "model-v1", Usage: aiplatform.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
@@ -68,7 +70,8 @@ func TestOrchestratedProviderBuildsMinimalRequestAndParsesUsage(t *testing.T) {
 	if len(invoker.invocation.Request.Messages) != 2 || invoker.invocation.Request.ResponseSchema.Name != "metadata_completion" {
 		t.Fatalf("模型请求未保持最小结构化合同: %#v", invoker.invocation.Request)
 	}
-	if !messageContains(invoker.invocation.Request.Messages[0], "真实表头") || !messageContains(invoker.invocation.Request.Messages[0], "字段业务描述") {
+	if !messageContains(invoker.invocation.Request.Messages[0], "真实表头") || !messageContains(invoker.invocation.Request.Messages[0], "字段业务描述") ||
+		!messageContains(invoker.invocation.Request.Messages[0], "sourceFormat=CSV") || !messageContains(invoker.invocation.Request.Messages[0], "下划线") || !messageContains(invoker.invocation.Request.Messages[0], "中文描述") {
 		t.Fatalf("系统提示未要求结合 Sheet 表头和内容完成映射: %#v", invoker.invocation.Request.Messages[0])
 	}
 	if !messageContains(invoker.invocation.Request.Messages[1], "客户名称") || !messageContains(invoker.invocation.Request.Messages[1], "华东智造有限公司") {
@@ -85,6 +88,8 @@ func TestOrchestratedProviderBuildsMinimalRequestAndParsesUsage(t *testing.T) {
 		[]byte(`"enum":["column-1","column-2"]`),
 		[]byte(`"minItems":2`),
 		[]byte(`"maxItems":2`),
+		[]byte(`"description":"CSV 字段映射名称：小写英文 snake_case，多个单词使用下划线分隔"`),
+		[]byte(`"description":"CSV 字段中文业务描述，可包含 ID、SKU 等英文缩写"`),
 	} {
 		if !bytes.Contains(invoker.invocation.Request.ResponseSchema.Schema, fragment) {
 			t.Fatalf("元数据输出 Schema 缺少动态约束 %s: %s", fragment, invoker.invocation.Request.ResponseSchema.Schema)

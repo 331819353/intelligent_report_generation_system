@@ -47,3 +47,25 @@ func TestEnsureMappedDatasetTxAllowsMissingSink(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func TestMetadataSourceFormatDistinguishesCSVFromWorkbookAndDatabase(t *testing.T) {
+	tests := []struct {
+		name       string
+		sourceType string
+		filename   string
+		want       string
+	}{
+		{name: "CSV 小写扩展名", sourceType: "EXCEL", filename: "经营分析.csv", want: SourceFormatCSV},
+		{name: "CSV 大写扩展名", sourceType: "excel", filename: "SALES.CSV", want: SourceFormatCSV},
+		{name: "Excel 工作簿", sourceType: "EXCEL", filename: "销售明细.xlsx", want: SourceFormatExcel},
+		{name: "MySQL", sourceType: "MYSQL", filename: "", want: SourceFormatDatabase},
+		{name: "Oracle", sourceType: "ORACLE", filename: "", want: SourceFormatDatabase},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := metadataSourceFormat(test.sourceType, test.filename); got != test.want {
+				t.Fatalf("metadataSourceFormat(%q, %q)=%q, want %q", test.sourceType, test.filename, got, test.want)
+			}
+		})
+	}
+}

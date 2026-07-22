@@ -168,7 +168,7 @@ func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID strin
 	job.PromptTokens = providerResult.Usage.PromptTokens
 	job.CompletionTokens = providerResult.Usage.CompletionTokens
 	job.TotalTokens = providerResult.Usage.TotalTokens
-	providerResult.Output = normalizeOutput(providerResult.Output)
+	providerResult.Output = normalizeOutputForInput(input, providerResult.Output)
 	// 不信任外部模型输出；在任何数据库写入前再次执行领域级校验。
 	if err := ValidateOutput(input, providerResult.Output); err != nil {
 		job, err = s.recordFailure(ctx, tenantID, actorID, job, "INVALID_OUTPUT", err)

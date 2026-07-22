@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -45,18 +46,24 @@ func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string)
 	input.SchemaVersion = SchemaVersion
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		var primaryKeys, constraints, indexes []byte
-		err := tx.QueryRow(ctx, `SELECT id::text,structure_hash,catalog_name,schema_name,table_name,table_type,source_comment,
-			primary_key_columns,constraints_json,indexes_json,business_name,business_description,tags,sensitivity_level::text,manual_locked,business_version
-			FROM platform.metadata_tables WHERE id=$1 AND asset_status='ACTIVE'`, tableID).
+		var sourceType, sourceFilename string
+		err := tx.QueryRow(ctx, `SELECT t.id::text,t.structure_hash,t.catalog_name,t.schema_name,t.table_name,t.table_type,t.source_comment,
+			t.primary_key_columns,t.constraints_json,t.indexes_json,t.business_name,t.business_description,t.tags,t.sensitivity_level::text,t.manual_locked,t.business_version,
+			d.source_type::text,COALESCE(f.filename,'')
+			FROM platform.metadata_tables t
+			JOIN platform.data_sources d ON d.id=t.data_source_id AND d.tenant_id=t.tenant_id
+			LEFT JOIN platform.file_assets f ON f.id=d.file_asset_id AND f.tenant_id=d.tenant_id
+			WHERE t.id=$1 AND t.asset_status='ACTIVE'`, tableID).
 			Scan(&input.Table.ID, &input.StructureHash, &input.Table.CatalogName, &input.Table.SchemaName, &input.Table.Name, &input.Table.TableType,
 				&input.Table.SourceComment, &primaryKeys, &constraints, &indexes, &input.Table.CurrentBusinessName, &input.Table.CurrentDescription,
-				&input.Table.CurrentTags, &input.Table.CurrentSensitivity, &input.Table.ManualLocked, &input.Table.BusinessVersion)
+				&input.Table.CurrentTags, &input.Table.CurrentSensitivity, &input.Table.ManualLocked, &input.Table.BusinessVersion, &sourceType, &sourceFilename)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
 		if err != nil {
 			return err
 		}
+		input.SourceFormat = metadataSourceFormat(sourceType, sourceFilename)
 		input.Table.Kind = "TABLE"
 		input.Table.StructureHash = input.StructureHash
 		if err := json.Unmarshal(primaryKeys, &input.Table.PrimaryKeyColumns); err != nil {
@@ -87,6 +94,17 @@ func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string)
 		return rows.Err()
 	})
 	return
+}
+
+// metadataSourceFormat 只向模型公开安全的格式枚举；CSV 需由文件扩展名与 EXCEL 数据源类型共同确认。
+func metadataSourceFormat(sourceType, filename string) string {
+	if strings.EqualFold(strings.TrimSpace(sourceType), SourceFormatExcel) {
+		if strings.EqualFold(filepath.Ext(strings.TrimSpace(filename)), ".csv") {
+			return SourceFormatCSV
+		}
+		return SourceFormatExcel
+	}
+	return SourceFormatDatabase
 }
 
 // CreateJob 创建运行中任务，并在同一事务内记录启动审计。

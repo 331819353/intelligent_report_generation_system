@@ -4,14 +4,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 )
 
 const (
-	SchemaVersion = "1.1"
-	PromptVersion = "metadata-completion-v5"
+	SchemaVersion          = "1.1"
+	PromptVersion          = "metadata-completion-v6"
+	SourceFormatCSV        = "CSV"
+	SourceFormatExcel      = "EXCEL"
+	SourceFormatDatabase   = "DATABASE"
+	csvBusinessNamePattern = `^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$`
 )
+
+var csvBusinessNameRegexp = regexp.MustCompile(csvBusinessNamePattern)
 
 var (
 	ErrProviderUnavailable = errors.New("AI metadata provider is not configured")
@@ -53,6 +60,8 @@ type Target struct {
 
 type CompletionInput struct {
 	SchemaVersion string `json:"schemaVersion"`
+	// SourceFormat 只描述本次资产来自 CSV、Excel 工作簿还是数据库，不包含文件名或连接信息。
+	SourceFormat string `json:"sourceFormat,omitempty"`
 	// StructureHash 只用于数据库并发栅栏，不发送给外部模型，也不混入提示词输入哈希。
 	StructureHash string           `json:"-"`
 	TargetTable   bool             `json:"targetTable"`
@@ -152,7 +161,7 @@ func ValidateOutput(input CompletionInput, output CompletionOutput) error {
 		if output.Table == nil || output.Table.TargetID != input.Table.ID {
 			return invalid("table targetId does not match the requested table")
 		}
-		if err := validateValue(*output.Table, false); err != nil {
+		if err := validateValue(*output.Table, false, false); err != nil {
 			return fmt.Errorf("%w: table: %v", ErrInvalidOutput, err)
 		}
 	} else if output.Table != nil {
@@ -171,7 +180,7 @@ func ValidateOutput(input CompletionInput, output CompletionOutput) error {
 			return invalid("columns[%d] duplicates targetId", i)
 		}
 		seen[column.TargetID] = true
-		if err := validateValue(column, true); err != nil {
+		if err := validateValue(column, true, input.SourceFormat == SourceFormatCSV); err != nil {
 			return fmt.Errorf("%w: columns[%d]: %v", ErrInvalidOutput, i, err)
 		}
 	}
@@ -182,7 +191,7 @@ func ValidateOutput(input CompletionInput, output CompletionOutput) error {
 }
 
 // validateValue 校验单条表或字段建议的名称、标签、敏感级别与置信度。
-func validateValue(value SuggestionValue, column bool) error {
+func validateValue(value SuggestionValue, column, csvColumn bool) error {
 	if strings.TrimSpace(value.TargetID) == "" {
 		return errors.New("targetId is required")
 	}
@@ -191,6 +200,12 @@ func validateValue(value SuggestionValue, column bool) error {
 	}
 	if err := validateText("businessDescription", value.BusinessDescription, 1000); err != nil {
 		return err
+	}
+	if csvColumn && !csvBusinessNameRegexp.MatchString(value.BusinessName) {
+		return errors.New("businessName must use lowercase English snake_case for CSV columns")
+	}
+	if csvColumn && !containsChinese(value.BusinessDescription) {
+		return errors.New("businessDescription must contain Chinese text for CSV columns")
 	}
 	if value.Confidence <= 0 || value.Confidence > 1 {
 		return errors.New("confidence must be greater than zero and at most one")
@@ -234,6 +249,66 @@ func normalizeOutput(output CompletionOutput) CompletionOutput {
 		output.Columns[i] = normalizeValue(output.Columns[i])
 	}
 	return output
+}
+
+// normalizeOutputForInput 在通用清理后，对 CSV 字段名称执行可逆、无猜测的 ASCII snake_case 规范化。
+// 中文或其他非 ASCII 名称不会被静默丢弃，仍由 ValidateOutput 拒绝并触发一次模型纠错。
+func normalizeOutputForInput(input CompletionInput, output CompletionOutput) CompletionOutput {
+	output = normalizeOutput(output)
+	if input.SourceFormat != SourceFormatCSV {
+		return output
+	}
+	for i := range output.Columns {
+		output.Columns[i].BusinessName = normalizeASCIISnakeCase(output.Columns[i].BusinessName)
+	}
+	return output
+}
+
+// normalizeASCIISnakeCase 将空格、连字符、点号和驼峰形式统一为小写下划线形式。
+func normalizeASCIISnakeCase(value string) string {
+	value = strings.TrimSpace(value)
+	for _, r := range value {
+		if r > unicode.MaxASCII {
+			return value
+		}
+	}
+	runes := []rune(value)
+	var builder strings.Builder
+	lastSeparator := false
+	appendSeparator := func() {
+		if builder.Len() > 0 && !lastSeparator {
+			builder.WriteByte('_')
+			lastSeparator = true
+		}
+	}
+	for index, r := range runes {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			previousLowerOrDigit := index > 0 && ((runes[index-1] >= 'a' && runes[index-1] <= 'z') || (runes[index-1] >= '0' && runes[index-1] <= '9'))
+			acronymBoundary := index > 0 && runes[index-1] >= 'A' && runes[index-1] <= 'Z' && index+1 < len(runes) && runes[index+1] >= 'a' && runes[index+1] <= 'z'
+			if previousLowerOrDigit || acronymBoundary {
+				appendSeparator()
+			}
+			builder.WriteRune(r + ('a' - 'A'))
+			lastSeparator = false
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			builder.WriteRune(r)
+			lastSeparator = false
+		default:
+			appendSeparator()
+		}
+	}
+	return strings.Trim(builder.String(), "_")
+}
+
+// containsChinese 允许描述中保留 ID、SKU 等英文缩写，但至少要有一个中文字符。
+func containsChinese(value string) bool {
+	for _, r := range value {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeValue 规范化单条建议的文本字段与标签。

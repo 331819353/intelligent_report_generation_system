@@ -10,6 +10,13 @@ func outputSchema(input CompletionInput) map[string]any {
 		columnIDs = append(columnIDs, column.ID)
 	}
 	column := valueSchema(true)
+	if input.SourceFormat == SourceFormatCSV {
+		properties := column["properties"].(map[string]any)
+		// deepseek-v3 的严格 Schema 方言对 pattern 的兼容性不稳定；Schema 负责向模型说明合同，
+		// 最终格式强制由 ValidateOutput 的 Go 正则和中文字符检查完成。
+		properties["businessName"].(map[string]any)["description"] = "CSV 字段映射名称：小写英文 snake_case，多个单词使用下划线分隔"
+		properties["businessDescription"].(map[string]any)["description"] = "CSV 字段中文业务描述，可包含 ID、SKU 等英文缩写"
+	}
 	// 仅表头变化时 columns 必须是空数组；空 enum 不符合 JSON Schema，因此无需再约束不可出现的 item。
 	if len(columnIDs) > 0 {
 		column["properties"].(map[string]any)["targetId"] = map[string]any{"type": "string", "enum": columnIDs}
