@@ -80,6 +80,43 @@ test('点击数据源卡片展示全部表结构并提供管理操作', async ()
   expect(within(tableActions).getByRole('button', { name: '删除' })).toBeEnabled()
 })
 
+test('文件数据源以重新上传替代数据库表结构刷新', async () => {
+  const fileSource = source({
+    id: 'source-excel', code: 'sales_xlsx', name: '销售工作簿', type: 'EXCEL', config: {}, fileAssetId: 'file-asset-1', version: 4,
+  })
+  const activeSource = { ...fileSource, version: 5 }
+  vi.spyOn(dataSourceAPI, 'list').mockResolvedValue({ items: [fileSource] })
+  vi.spyOn(dataSourceAPI, 'tables').mockResolvedValue({ items: [{ ...metadataTable, id: 'excel-table-1', dataSourceId: fileSource.id }], total: 1 })
+  const uploadVersion = vi.spyOn(dataSourceAPI, 'uploadExcelVersion').mockResolvedValue({
+    id: 'file-asset-1', filename: '销售工作簿.xlsx', version: 2, versionId: 'file-version-2', sizeBytes: 2048, workbookSummary: {},
+  })
+  const testConnection = vi.spyOn(dataSourceAPI, 'test').mockResolvedValue({ serverVersion: 'FILE/2', latencyMs: 3 })
+  const getSource = vi.spyOn(dataSourceAPI, 'get').mockResolvedValue(activeSource)
+  const user = userEvent.setup()
+  renderPage()
+
+  await screen.findByText('销售工作簿')
+  await user.click(within(cardFor('销售工作簿')).getByRole('button', { name: '管理销售工作簿的数据表资产' }))
+  const dialog = await screen.findByRole('dialog', { name: '数据表资产' })
+
+  expect(within(dialog).getByLabelText('重新上传源文件')).toHaveAttribute('accept', '.xlsx,.xls,.csv')
+  expect(within(dialog).getByLabelText('重新上传源文件')).toBeEnabled()
+  expect(within(dialog).getByText('重新上传文件')).toBeInTheDocument()
+  expect(within(dialog).queryByLabelText('元数据刷新方式')).not.toBeInTheDocument()
+  expect(within(dialog).queryByRole('button', { name: /开始.+刷新/ })).not.toBeInTheDocument()
+  expect(within(dialog).queryByRole('button', { name: '刷新结构' })).not.toBeInTheDocument()
+  expect(within(dialog).getByRole('note')).toHaveTextContent('重新上传会复用当前文件资产并生成不可变新版本')
+  expect(within(dialog).getByRole('note')).toHaveTextContent('已发布数据集继续引用原固定文件版本')
+
+  const file = new File(['workbook'], '销售工作簿.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+  await user.upload(within(dialog).getByLabelText('重新上传源文件'), file)
+
+  await waitFor(() => expect(uploadVersion).toHaveBeenCalledWith('file-asset-1', file))
+  await waitFor(() => expect(testConnection).toHaveBeenCalledWith('source-excel'))
+  await waitFor(() => expect(getSource).toHaveBeenCalledWith('source-excel'))
+  expect(await screen.findByText('已重新上传“销售工作簿.xlsx”并生成文件版本 2；请点击“新增数据表”重新解析并映射 Sheet')).toBeInTheDocument()
+})
+
 test('新增数据表时可发现源库表并全选后导入', async () => {
   vi.spyOn(dataSourceAPI, 'list').mockResolvedValue({ items: [source()] })
   vi.spyOn(dataSourceAPI, 'tables').mockResolvedValue({ items: [], total: 0 })

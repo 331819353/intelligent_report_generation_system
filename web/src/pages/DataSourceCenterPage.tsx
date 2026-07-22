@@ -522,6 +522,41 @@ export function DataSourceCenterPage() {
     }
   }
 
+  const reuploadSourceFile = async (source: DataSourceRecord, file: File) => {
+    if (!source.fileAssetId) {
+      setNotice({ tone: 'error', message: '当前文件数据源缺少文件资产，请删除后重新创建数据源' })
+      return
+    }
+    setBusyAction(`reupload-file:${source.id}`)
+    setNotice(null)
+    let uploadedAsset: ExcelFileAsset | null = null
+    try {
+      uploadedAsset = await dataSourceAPI.uploadExcelVersion(source.fileAssetId, file)
+      await dataSourceAPI.test(source.id)
+      const active = await dataSourceAPI.get(source.id)
+      setSources(current => current.map(item => item.id === active.id ? active : item))
+      setDialog(current => current?.mode === 'view' && current.source?.id === active.id ? { ...current, source: active } : current)
+      setFileInspection(null)
+      setDiscoveredTables([])
+      setSelectedTableKeys([])
+      await loadTableStructures(active.id)
+      setNotice({ tone: 'success', message: `已重新上传“${file.name}”并生成文件版本 ${uploadedAsset.version}；请点击“新增数据表”重新解析并映射 Sheet` })
+    } catch (cause) {
+      const latest = await loadSources()
+      const updated = latest?.find(item => item.id === source.id)
+      if (updated) setDialog(current => current?.mode === 'view' && current.source?.id === updated.id ? { ...current, source: updated } : current)
+      const message = cause instanceof Error ? cause.message : '重新上传源文件失败'
+      setNotice({
+        tone: 'error',
+        message: uploadedAsset
+          ? `文件版本 ${uploadedAsset.version} 已保存，但数据源验证失败：${message}。请重新测试连接后再解析 Sheet`
+          : `重新上传源文件失败：${message}`,
+      })
+    } finally {
+      setBusyAction('')
+    }
+  }
+
   const deleteTableAsset = async () => {
     const source = dialog?.source
     const table = dialog?.table
@@ -674,6 +709,8 @@ export function DataSourceCenterPage() {
   const visibleMetadataJob = dialog?.source?.id === metadataJobSourceId ? metadataJob : null
   const metadataTaskActive = metadataJobActive(visibleMetadataJob)
   const metadataTaskBusy = metadataTaskActive || metadataJobLoading
+  const fileReuploadDisabled = actionBusy || !dialog?.source?.fileAssetId
+    || dialog.source.status === 'DISABLED' || dialog.source.status === 'SYNCING' || dialog.source.status === 'DELETING'
   const visibleMetadataJobTitle = visibleMetadataJob ? metadataJobTitle || metadataJobLabel(visibleMetadataJob) : ''
   const metadataProgressMax = Math.max(visibleMetadataJob?.total || 0, 1)
   const metadataProgressValue = visibleMetadataJob
@@ -786,10 +823,19 @@ export function DataSourceCenterPage() {
         <div className="data-source-detail">
           <div className="data-source-detail-actions" aria-label="表资产操作">
             <button className="action-add-table" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void openTableSelection(dialog.source!)}>新增数据表</button>
-            <label className="data-source-refresh-mode"><span>刷新方式</span><select aria-label="元数据刷新方式" value={refreshMode} disabled={actionBusy || metadataTaskBusy} onChange={event => setRefreshMode(event.target.value as MetadataRefreshMode)}><option value="INCREMENTAL">增量刷新（仅变化字段）</option><option value="FULL">全量刷新（全部重新处理）</option></select></label>
-            <button className="action-refresh-all" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void refreshAllTableAssets(dialog.source!)}>{busyAction === `refresh-tables:${dialog.source.id}` ? '正在提交…' : `开始${refreshMode === 'INCREMENTAL' ? '增量' : '全量'}刷新`}</button>
+            {dialog.source.type === 'EXCEL'
+              ? <label className={`data-source-file-reupload${fileReuploadDisabled ? ' disabled' : ''}`}><span aria-hidden="true">↻</span>{busyAction === `reupload-file:${dialog.source.id}` ? '正在重新上传…' : '重新上传文件'}<input aria-label="重新上传源文件" type="file" accept=".xlsx,.xls,.csv" disabled={fileReuploadDisabled} onChange={event => {
+                const input = event.currentTarget
+                const file = input.files?.[0]
+                input.value = ''
+                if (file) void reuploadSourceFile(dialog.source!, file)
+              }} /></label>
+              : <><label className="data-source-refresh-mode"><span>刷新方式</span><select aria-label="元数据刷新方式" value={refreshMode} disabled={actionBusy || metadataTaskBusy} onChange={event => setRefreshMode(event.target.value as MetadataRefreshMode)}><option value="INCREMENTAL">增量刷新（仅变化字段）</option><option value="FULL">全量刷新（全部重新处理）</option></select></label>
+                <button className="action-refresh-all" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void refreshAllTableAssets(dialog.source!)}>{busyAction === `refresh-tables:${dialog.source.id}` ? '正在提交…' : `开始${refreshMode === 'INCREMENTAL' ? '增量' : '全量'}刷新`}</button></>}
           </div>
-          <div className="data-source-job-state" role="note">增量刷新仅调用 LLM 处理新增或结构发生变化的字段，未变化字段保留现有完善结果；源表被删除时停用对应资产。全量刷新会重新处理全部活动表和字段。</div>
+          <div className="data-source-job-state" role="note">{dialog.source.type === 'EXCEL'
+            ? '重新上传会复用当前文件资产并生成不可变新版本；完成后请点击“新增数据表”重新解析并映射 Sheet。已发布数据集继续引用原固定文件版本。'
+            : '增量刷新仅调用 LLM 处理新增或结构发生变化的字段，未变化字段保留现有完善结果；源表被删除时停用对应资产。全量刷新会重新处理全部活动表和字段。'}</div>
           {metadataJobLoading && <div className="data-source-job-state" role="status">正在读取后台元数据任务…</div>}
           {visibleMetadataJob && <section className={`data-source-job-progress ${visibleMetadataJob.status.toLowerCase()}`} aria-label="元数据后台任务">
             <header><div><strong>{visibleMetadataJobTitle}</strong><span>{metadataStageLabels[visibleMetadataJob.stage] || visibleMetadataJob.stage || '处理中'}</span></div><em>{metadataProgressPercent}%</em></header>
@@ -809,7 +855,7 @@ export function DataSourceCenterPage() {
                   <summary><span><strong>{table.businessName || table.tableName}</strong><small>{[table.catalogName, table.schemaName, table.tableName].filter(Boolean).join('.')}</small></span><span><em className={`table-management-status ${table.managementStatus.toLowerCase()}`}>{table.managementStatus === 'DISABLED' ? '已停用' : '可用'}</em>{table.tableType || 'TABLE'} · {table.columnCount} 字段</span></summary>
                   <div className="data-source-table-actions" aria-label={`${table.businessName || table.tableName}操作`}>
                     <button className="action-edit" type="button" disabled={actionBusy || metadataTaskBusy} onClick={() => void openTableEditor(dialog.source!, table)}>修改</button>
-                    <button className="action-refresh" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source!.status !== 'ACTIVE'} onClick={() => void refreshTableAsset(dialog.source!, table)}>{busyAction === `refresh-table:${table.id}` ? '正在提交…' : '刷新结构'}</button>
+                    {dialog.source!.type !== 'EXCEL' && <button className="action-refresh" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source!.status !== 'ACTIVE'} onClick={() => void refreshTableAsset(dialog.source!, table)}>{busyAction === `refresh-table:${table.id}` ? '正在提交…' : '刷新结构'}</button>}
                     <button className={table.managementStatus === 'DISABLED' ? 'action-resume' : 'action-pause'} type="button" disabled={actionBusy} onClick={() => void changeTableStatus(dialog.source!, table)}>{table.managementStatus === 'DISABLED' ? '恢复' : '停用'}</button>
                     <button className="action-delete" type="button" disabled={actionBusy} onClick={() => { setFormError(''); setDialog({ mode: 'delete-table', source: dialog.source!, table }) }}>删除</button>
                   </div>
