@@ -431,6 +431,58 @@ test('新建数据源使用结构化连接字段而非 JDBC 或 secretRef', asyn
   expect(await screen.findByText('财务分析库')).toBeInTheDocument()
 })
 
+test('新建 Excel 数据源先验证每个 Sheet 前十行，再依次提交映射表和数据集任务', async () => {
+	vi.spyOn(dataSourceAPI, 'list').mockResolvedValue({ items: [] })
+	vi.spyOn(dataSourceAPI, 'tables').mockResolvedValue({ items: [], total: 0 })
+	const upload = vi.spyOn(dataSourceAPI, 'uploadExcel').mockResolvedValue({
+		id: 'file-1', filename: 'analysis.xlsx', version: 1, versionId: 'version-1', sizeBytes: 1024,
+		workbookSummary: { sheetCount: 2, sheets: ['Sales', 'Customers'] },
+		inspection: { sampleLimit: 10, sheets: [
+			{ name: 'Sales', headerRow: 1, skipEmptyRows: true, columns: [{ name: 'month', canonicalType: 'DATE', nullable: false }, { name: 'amount', canonicalType: 'DECIMAL', nullable: false }], rows: [['2026-01-01', '12.50']] },
+			{ name: 'Customers', headerRow: 2, skipEmptyRows: true, columns: [{ name: 'customer_id', canonicalType: 'NUMBER', nullable: false }], rows: [['1']] },
+		] },
+	})
+	const created = source({ id: 'source-excel', code: 'excel_analysis', name: 'Excel 经营分析', type: 'EXCEL', status: 'DRAFT', config: {}, fileAssetId: 'file-1', version: 1 })
+	const create = vi.spyOn(dataSourceAPI, 'create').mockResolvedValue(created)
+	const testConnection = vi.spyOn(dataSourceAPI, 'test').mockResolvedValue({ serverVersion: 'Excel xlsx', latencyMs: 1 })
+	const discover = vi.spyOn(dataSourceAPI, 'discoverTables').mockResolvedValue({ items: [
+		{ catalogName: '', schemaName: 'WORKBOOK', name: 'Sales', type: 'SHEET', sourceComment: '', columns: [] },
+		{ catalogName: '', schemaName: 'WORKBOOK', name: 'Customers', type: 'SHEET', sourceComment: '', columns: [] },
+	], total: 2 })
+	const importTables = vi.spyOn(dataSourceAPI, 'importTables').mockResolvedValue(job({ id: 'job-excel', dataSourceId: 'source-excel', total: 2 }))
+	const user = userEvent.setup()
+	renderPage()
+
+	await screen.findByText('还没有数据源')
+	await user.click(screen.getByRole('button', { name: '新建数据源' }))
+	const dialog = screen.getByRole('dialog', { name: '新建数据源' })
+	await user.type(within(dialog).getByLabelText('数据源名称'), 'Excel 经营分析')
+	await user.type(within(dialog).getByLabelText('数据源编码'), 'excel_analysis')
+	await user.selectOptions(within(dialog).getByLabelText('数据源类型'), 'EXCEL')
+	const file = new File(['workbook'], 'analysis.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+	await user.upload(within(dialog).getByLabelText('Excel 文件'), file)
+	await user.click(within(dialog).getByRole('button', { name: '分析前 10 行' }))
+
+	expect(upload).toHaveBeenCalledWith(file)
+	expect(await within(dialog).findByText('结构验证通过')).toBeInTheDocument()
+	expect(within(dialog).getByText('表头第 2 行 · 1 字段 · 跳过空行')).toBeInTheDocument()
+	expect(within(dialog).getByText('DECIMAL')).toBeInTheDocument()
+	await user.click(within(dialog).getByRole('button', { name: '确认方案并创建' }))
+
+	await waitFor(() => expect(importTables).toHaveBeenCalled())
+	expect(create).toHaveBeenCalledWith({ code: 'excel_analysis', name: 'Excel 经营分析', type: 'EXCEL', fileAssetId: 'file-1' })
+	expect(testConnection).toHaveBeenCalledWith('source-excel')
+	expect(discover).toHaveBeenCalledWith('source-excel')
+	expect(importTables).toHaveBeenCalledWith('source-excel', [
+		{ catalogName: '', schemaName: 'WORKBOOK', tableName: 'Sales' },
+		{ catalogName: '', schemaName: 'WORKBOOK', tableName: 'Customers' },
+	])
+	expect(create.mock.invocationCallOrder[0]).toBeLessThan(testConnection.mock.invocationCallOrder[0])
+	expect(testConnection.mock.invocationCallOrder[0]).toBeLessThan(discover.mock.invocationCallOrder[0])
+	expect(discover.mock.invocationCallOrder[0]).toBeLessThan(importTables.mock.invocationCallOrder[0])
+	expect(await screen.findByText(/LLM 完善后将生成映射表和默认数据集/)).toBeInTheDocument()
+})
+
 test('修改数据源时连接信息预填且密码可留空保留', async () => {
   vi.spyOn(dataSourceAPI, 'list').mockResolvedValue({ items: [source()] })
   const update = vi.spyOn(dataSourceAPI, 'update').mockResolvedValue(source({ name: '销售主库', status: 'DRAFT', version: 4 }))

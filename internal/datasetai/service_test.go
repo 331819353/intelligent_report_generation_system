@@ -504,14 +504,14 @@ func TestServicePlanRepairsFieldAddedOnlyToUpstreamHalf(t *testing.T) {
 	partial.Plan = cloneGraphPlan(current)
 	partial.Plan.Nodes[1].SelectedColumns = append(partial.Plan.Nodes[1].SelectedColumns, "order_date")
 	partial.Plan.Groups[0].Dimensions = append(partial.Plan.Groups[0].Dimensions, PlanDimension{
-		NodeID: "node_2", Column: "order_date", Grouping: "DAY",
+		NodeID: "node_2", Column: "order_date", Grouping: "",
 	})
 
 	complete := partial
 	complete.Summary = "订单日期贯穿前后分组并加入最终输出"
 	complete.Plan = cloneGraphPlan(partial.Plan)
 	complete.Plan.Groups[1].Dimensions = append(complete.Plan.Groups[1].Dimensions, PlanDimension{
-		NodeID: "node_2", Column: "order_date", Grouping: "DAY",
+		NodeID: "node_2", Column: "order_date", Grouping: "",
 	})
 	complete.Plan.End.Outputs = append(complete.Plan.End.Outputs, PlanOutput{
 		NodeID: "node_2", Column: "order_date", Name: "订单日期", Code: "order_date",
@@ -519,15 +519,15 @@ func TestServicePlanRepairsFieldAddedOnlyToUpstreamHalf(t *testing.T) {
 
 	intent := readyIntent(
 		changeOperation("UPDATE", "NODE", "node_2", "orders", []string{"selectedColumns"}, nil, "选择订单日期"),
-		changeOperation("UPDATE", "GROUP", "group_before", "关联前订单汇总", []string{"dimensions"}, nil, "关联前按日保留订单日期"),
+		changeOperation("UPDATE", "GROUP", "group_before", "关联前订单汇总", []string{"dimensions"}, nil, "关联前保留原始订单日期"),
 		changeOperation("UPDATE", "GROUP", "group_after", "关联后地区汇总", []string{"dimensions"}, nil, "关联后继续保留订单日期"),
 		changeOperation("UPDATE", "END", endComponentID, "最终输出", []string{"outputs"}, nil, "在最终结果展示订单日期"),
 	)
 	intent.ChangeSet.FieldChanges = []FieldChange{{
 		Field: FieldBinding{NodeID: "node_2", TableID: "table-orders", Column: "order_date"}, SelectionAction: "ADD", Purpose: "FINAL_OUTPUT",
 		GroupUses: []FieldGroupUse{
-			{GroupID: "group_before", Role: "DIMENSION", Grouping: "DAY"},
-			{GroupID: "group_after", Role: "DIMENSION", Grouping: "DAY"},
+			{GroupID: "group_before", Role: "DIMENSION", Grouping: ""},
+			{GroupID: "group_after", Role: "DIMENSION", Grouping: ""},
 		},
 		JoinUses:   []FieldJoinUse{},
 		OutputUses: []FieldOutputUse{{EndID: endComponentID, Name: "订单日期", Code: "order_date"}},
@@ -539,7 +539,7 @@ func TestServicePlanRepairsFieldAddedOnlyToUpstreamHalf(t *testing.T) {
 		plannerResult(t, complete, "request-complete"),
 	}}
 	result, err := NewService(catalog, invoker).Plan(context.Background(), "tenant-1", "actor-1", "dataset-1", PlanRequest{
-		Instruction: "新增订单日期字段，按天分组并展示到最终结果",
+		Instruction: "新增订单日期字段，作为原始日期维度并展示到最终结果",
 		Current:     &current,
 	})
 	if err != nil {
@@ -576,7 +576,7 @@ func TestServicePlanRepairsFieldAddedOnlyToUpstreamHalf(t *testing.T) {
 				continue
 			}
 			for _, dimension := range group.Dimensions {
-				if dimension.NodeID == "node_2" && dimension.Column == "order_date" && dimension.Grouping == "DAY" {
+				if dimension.NodeID == "node_2" && dimension.Column == "order_date" && dimension.Grouping == "" {
 					found = true
 				}
 			}

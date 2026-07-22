@@ -83,6 +83,20 @@ func deriveCreateTransformRequirements(instruction string) []TransformRequiremen
 	return result
 }
 
+// deriveModificationTransformRequirements applies the same component-role guarantee to
+// multi-turn edits while staying out of explicit removal requests. Component-level scope still
+// comes from the locked intent; this check only prevents the planner from silently folding a
+// requested transformation into GROUP or END metadata.
+func deriveModificationTransformRequirements(instruction string) []TransformRequirement {
+	text := strings.ToLower(strings.TrimSpace(instruction))
+	for _, removal := range []string{"删除", "移除", "去掉", "取消", "不再使用", "不要使用", "remove", "delete"} {
+		if strings.Contains(text, removal) {
+			return []TransformRequirement{}
+		}
+	}
+	return deriveCreateTransformRequirements(instruction)
+}
+
 func validateTransformRequirements(plan GraphPlan, requirements []TransformRequirement) error {
 	if len(requirements) == 0 {
 		return nil

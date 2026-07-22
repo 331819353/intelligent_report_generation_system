@@ -84,7 +84,7 @@ func NewExcelHandler(authService *auth.Service, permissions *access.Service, man
 func safeFileError(err error) string {
 	message := err.Error()
 	// 仅透出可操作的校验错误，存储和数据库错误统一隐藏内部细节。
-	for _, allowed := range []string{"exceeds tenant quota", "unsupported excel extension", "invalid csv", "unsupported csv encoding", "csv content is not valid", "csv GBK decoding failed", "csv GB18030 decoding failed", "csvOptions", "csv encoding", "csv delimiter", "csv quote", "csv file is empty", "formula error", "row limit", "column limit", "header row", "no worksheet selected", "file asset not found"} {
+	for _, allowed := range []string{"exceeds tenant quota", "unsupported excel extension", "invalid csv", "unsupported csv encoding", "csv content is not valid", "csv GBK decoding failed", "csv GB18030 decoding failed", "csvOptions", "csv encoding", "csv delimiter", "csv quote", "csv file is empty", "formula error", "row limit", "column limit", "header row", "non-empty header", "more columns than its header", "no worksheet selected", "file asset not found"} {
 		if strings.Contains(message, allowed) {
 			return message
 		}

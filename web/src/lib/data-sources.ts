@@ -27,6 +27,33 @@ export type DataSourceConnectionInput = {
   config?: Record<string, unknown>
 }
 
+export type ExcelDataSourceInput = {
+  code: string
+  name: string
+  type: 'EXCEL'
+  fileAssetId: string
+}
+
+export type DataSourceInput = DataSourceConnectionInput | ExcelDataSourceInput
+
+export type ExcelColumnInspection = { name: string; canonicalType: string; nullable: boolean }
+export type ExcelSheetInspection = {
+  name: string
+  headerRow: number
+  skipEmptyRows: boolean
+  columns: ExcelColumnInspection[]
+  rows: string[][]
+}
+export type ExcelFileAsset = {
+  id: string
+  filename: string
+  version: number
+  versionId: string
+  sizeBytes: number
+  workbookSummary: { sheetCount: number; sheets: string[] }
+  inspection?: { sampleLimit: number; sheets: ExcelSheetInspection[] }
+}
+
 export type DataSourceTestResult = {
   serverVersion: string
   latencyMs: number
@@ -150,10 +177,16 @@ export const dataSourceAPI = {
   // 数据源状态会被测试、同步等后台操作改变，目录读取不复用缓存。
   list: () => apiRequest<{ items: DataSourceRecord[] }>('/v1/data-sources', { cache: 'no-store' }),
   get: (id: string) => apiRequest<DataSourceRecord>(`/v1/data-sources/${encodeURIComponent(id)}`, { cache: 'no-store' }),
-  create: (input: DataSourceConnectionInput) => apiRequest<DataSourceRecord>('/v1/data-sources', {
+  create: (input: DataSourceInput) => apiRequest<DataSourceRecord>('/v1/data-sources', {
     method: 'POST',
     body: JSON.stringify(input),
   }),
+  uploadExcel: (file: File) => {
+    const body = new FormData()
+    body.set('file', file)
+    body.set('config', JSON.stringify({ skipEmptyRows: true }))
+    return apiRequest<ExcelFileAsset>('/v1/excel-files', { method: 'POST', body })
+  },
   update: (id: string, input: DataSourceConnectionInput) => apiRequest<DataSourceRecord>(`/v1/data-sources/${encodeURIComponent(id)}`, {
     method: 'PUT',
     body: JSON.stringify(input),

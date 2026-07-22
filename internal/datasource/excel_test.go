@@ -1,6 +1,8 @@
 package datasource
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	spikeexcel "intelligent-report-generation-system/internal/spike/excel"
@@ -37,5 +39,41 @@ func TestInferWorkbookRejectsMissingHeaderAndEmptySelection(t *testing.T) {
 	}
 	if _, err := inferWorkbook(book, map[string]any{"selectedSheets": []any{"Other"}}); err == nil {
 		t.Fatal("expected empty selection error")
+	}
+}
+
+func TestInspectWorkbookLocksIndependentSheetPlansFromFirstTenRows(t *testing.T) {
+	rows := [][]string{{"report title"}, {}, {"id", "amount"}}
+	for index := 1; index <= 11; index++ {
+		rows = append(rows, []string{fmt.Sprintf("%d", index), fmt.Sprintf("%d.50", index)})
+	}
+	// The eleventh value is intentionally incompatible. The upload inspection contract
+	// determines the parse type from the first ten data rows, not from an unbounded scan.
+	rows[len(rows)-1][1] = "late text"
+	book := spikeexcel.Workbook{Sheets: []spikeexcel.Sheet{
+		{Name: "Sales", Rows: rows},
+		{Name: "Customers", Rows: [][]string{{"customer_id", "region"}, {"1", "East"}}},
+	}}
+	metadata, inspection, plans, err := inspectWorkbook(book, map[string]any{"sheetPlans": map[string]any{
+		"Sales": map[string]any{"headerRow": 3.0},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata) != 2 || metadata[0].Columns[1].CanonicalType != "DECIMAL" {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+	if inspection.SampleLimit != 10 || len(inspection.Sheets[0].Rows) != 10 || inspection.Sheets[0].HeaderRow != 3 || inspection.Sheets[1].HeaderRow != 1 {
+		t.Fatalf("inspection = %#v", inspection)
+	}
+	if sales, ok := plans["Sales"].(map[string]any); !ok || sales["headerRow"] != 3 {
+		t.Fatalf("plans = %#v", plans)
+	}
+}
+
+func TestInspectWorkbookRejectsRowsWiderThanValidatedHeader(t *testing.T) {
+	book := spikeexcel.Workbook{Sheets: []spikeexcel.Sheet{{Name: "Bad", Rows: [][]string{{"id"}, {"1", "unexpected"}}}}}
+	if _, _, _, err := inspectWorkbook(book, nil); err == nil || !strings.Contains(err.Error(), "more columns") {
+		t.Fatalf("error = %v", err)
 	}
 }

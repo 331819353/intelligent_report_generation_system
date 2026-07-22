@@ -302,9 +302,152 @@ func normalizeAndValidateChangeSet(current GraphPlan, components map[string]comp
 		return ChangeSet{}, err
 	}
 	value.FieldChanges = fieldChanges
+	value.Operations, err = completeFieldBearingOperations(current, components, value.Operations, fieldChanges)
+	if err != nil {
+		return ChangeSet{}, err
+	}
+	operations = indexChangeOperations(value.Operations)
+	for _, fieldChange := range fieldChanges {
+		if err := validateFieldUseOperationCoverage(current, fieldChange, operations); err != nil {
+			return ChangeSet{}, err
+		}
+	}
 
 	sort.Slice(value.Operations, func(i, j int) bool { return changeOperationLess(value.Operations[i], value.Operations[j]) })
 	return value, nil
+}
+
+// completeFieldBearingOperations removes a fragile redundancy from the model contract.
+// fieldChanges already lock the exact physical field and its complete final join/group/output
+// propagation, so the matching top-level component fields can be derived deterministically.
+// This does not authorize an additional semantic change: validatePlanFieldChanges still checks
+// every nested entry, its order, and its final propagation against the locked fieldChanges.
+func completeFieldBearingOperations(current GraphPlan, components map[string]componentSnapshot, values []ChangeOperation, fieldChanges []FieldChange) ([]ChangeOperation, error) {
+	result := append([]ChangeOperation(nil), values...)
+	indexes := map[string]int{}
+	for index, operation := range result {
+		key, _ := componentKey(operation.ComponentKind, operation.ComponentID)
+		indexes[key] = index
+	}
+	ensureField := func(kind, id, field, description string) error {
+		key, err := componentKey(kind, id)
+		if err != nil {
+			return err
+		}
+		if index, exists := indexes[key]; exists {
+			operation := &result[index]
+			if operation.Action == "ADD" || operation.Action == "REMOVE" || containsString(operation.Fields, field) {
+				return nil
+			}
+			if operation.Action != "UPDATE" {
+				return invalidOutput(fmt.Sprintf("field propagation conflicts with %s %s:%s", operation.Action, kind, id))
+			}
+			operation.Fields = append(operation.Fields, field)
+			operation.Fields = orderedComponentFields(kind, operation.Fields)
+			return nil
+		}
+		component, exists := components[key]
+		if !exists {
+			return invalidOutput(fmt.Sprintf("field propagation references unavailable %s:%s", kind, id))
+		}
+		result = append(result, ChangeOperation{
+			Action: "UPDATE", ComponentKind: kind, ComponentID: id, ComponentName: component.Name,
+			Fields: []string{field}, InputChanges: []InputChange{}, Description: description,
+		})
+		indexes[key] = len(result) - 1
+		return nil
+	}
+
+	for _, desired := range fieldChanges {
+		// A table identity migration changes the physical binding carried by otherwise
+		// identical nested arrays. The NODE.tableId operation is the complete component
+		// diff; fieldChanges still lock the old/new physical identities.
+		if operationMigratesNodeTable(indexChangeOperations(result), desired.Field.NodeID) {
+			continue
+		}
+		if desired.SelectionAction == "ADD" || desired.SelectionAction == "REMOVE" {
+			if err := ensureField("NODE", desired.Field.NodeID, "selectedColumns", "按字段传播声明同步数据节点选列"); err != nil {
+				return nil, err
+			}
+		}
+
+		currentGroups, currentJoins, currentOutputs := planFieldUses(current, desired.Field)
+		currentGroupByID := map[string]FieldGroupUse{}
+		desiredGroupByID := map[string]FieldGroupUse{}
+		for _, use := range currentGroups {
+			currentGroupByID[use.GroupID] = use
+		}
+		for _, use := range desired.GroupUses {
+			desiredGroupByID[use.GroupID] = use
+		}
+		for _, id := range unionStringKeys(currentGroupByID, desiredGroupByID) {
+			before, beforeOK := currentGroupByID[id]
+			after, afterOK := desiredGroupByID[id]
+			if beforeOK == afterOK && (!beforeOK || before == after) {
+				continue
+			}
+			fields := []string{}
+			if beforeOK {
+				fields = appendUniqueString(fields, groupUseComponentField(before))
+			}
+			if afterOK {
+				fields = appendUniqueString(fields, groupUseComponentField(after))
+			}
+			for _, field := range fields {
+				if err := ensureField("GROUP", id, field, "按字段传播声明同步分组字段"); err != nil {
+					return nil, err
+				}
+			}
+		}
+
+		joinIDs := map[string]bool{}
+		for _, use := range currentJoins {
+			joinIDs[use.JoinID] = true
+		}
+		for _, use := range desired.JoinUses {
+			joinIDs[use.JoinID] = true
+		}
+		for id := range joinIDs {
+			if reflect.DeepEqual(joinUsesForID(currentJoins, id), joinUsesForID(desired.JoinUses, id)) {
+				continue
+			}
+			if err := ensureField("JOIN", id, "conditions", "按字段传播声明同步关联条件"); err != nil {
+				return nil, err
+			}
+		}
+		if !reflect.DeepEqual(currentOutputs, desired.OutputUses) {
+			if err := ensureField("END", endComponentID, "outputs", "按字段传播声明同步最终输出"); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if len(result) > maxChangeOperations {
+		return nil, invalidOutput("completed changeSet contains too many operations")
+	}
+	return result, nil
+}
+
+func orderedComponentFields(kind string, values []string) []string {
+	seen := map[string]bool{}
+	for _, value := range values {
+		seen[value] = true
+	}
+	result := make([]string, 0, len(seen))
+	for _, field := range componentFields[kind] {
+		if seen[field] {
+			result = append(result, field)
+		}
+	}
+	return result
+}
+
+func indexChangeOperations(values []ChangeOperation) map[string]ChangeOperation {
+	result := make(map[string]ChangeOperation, len(values))
+	for _, operation := range values {
+		key, _ := componentKey(operation.ComponentKind, operation.ComponentID)
+		result[key] = operation
+	}
+	return result
 }
 
 func normalizeOperationFields(op ChangeOperation) ([]string, error) {
@@ -312,9 +455,6 @@ func normalizeOperationFields(op ChangeOperation) ([]string, error) {
 		// ADD/REMOVE 已经锁定整个组件；模型偶尔重复列出新建或删除组件的
 		// 内部字段。丢弃这些冗余声明不会扩大修改范围。
 		return []string{}, nil
-	}
-	if len(op.Fields) == 0 {
-		return nil, invalidOutput(fmt.Sprintf("UPDATE %s:%s requires at least one field", op.ComponentKind, op.ComponentID))
 	}
 	allowed := componentFields[op.ComponentKind]
 	seen := map[string]bool{}
@@ -327,6 +467,19 @@ func normalizeOperationFields(op ChangeOperation) ([]string, error) {
 			return nil, invalidOutput(fmt.Sprintf("UPDATE %s:%s duplicates field %s", op.ComponentKind, op.ComponentID, field))
 		}
 		seen[field] = true
+	}
+	// inputChanges is already an exact, fail-closed topology declaration. Complete
+	// the redundant top-level input field when the model omitted it; the subsequent
+	// validator still verifies from against the current graph and to against the
+	// available non-removed components.
+	for _, change := range op.InputChanges {
+		field := strings.TrimSpace(change.Field)
+		if containsString(inputFieldsForKind(op.ComponentKind), field) {
+			seen[field] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil, invalidOutput(fmt.Sprintf("UPDATE %s:%s requires at least one field", op.ComponentKind, op.ComponentID))
 	}
 	result := make([]string, 0, len(seen))
 	for _, field := range allowed {
@@ -508,9 +661,6 @@ func normalizeAndValidateFieldChanges(current GraphPlan, values []FieldChange, o
 			if currentlySelected {
 				return nil, invalidOutput(fmt.Sprintf("fieldChange ADD %s is already selected in current", fieldBindingLabel(value.Field)))
 			}
-			if !operationAllowsField(operations, "NODE", value.Field.NodeID, "selectedColumns") && !tableMigration {
-				return nil, invalidOutput(fmt.Sprintf("fieldChange ADD %s requires ADD/UPDATE NODE:%s selectedColumns", fieldBindingLabel(value.Field), value.Field.NodeID))
-			}
 		case "KEEP":
 			if !currentlySelected && !(tableMigration && planNodeSelectsColumn(current, value.Field.NodeID, value.Field.Column)) {
 				return nil, invalidOutput(fmt.Sprintf("fieldChange KEEP %s is not selected in current", fieldBindingLabel(value.Field)))
@@ -518,9 +668,6 @@ func normalizeAndValidateFieldChanges(current GraphPlan, values []FieldChange, o
 		case "REMOVE":
 			if !currentlySelected {
 				return nil, invalidOutput(fmt.Sprintf("fieldChange REMOVE %s is not selected in current", fieldBindingLabel(value.Field)))
-			}
-			if !operationAllowsField(operations, "NODE", value.Field.NodeID, "selectedColumns") && !tableMigration {
-				return nil, invalidOutput(fmt.Sprintf("fieldChange REMOVE %s requires UPDATE NODE:%s selectedColumns", key, value.Field.NodeID))
 			}
 			if len(value.GroupUses)+len(value.JoinUses)+len(value.OutputUses) != 0 {
 				return nil, invalidOutput(fmt.Sprintf("fieldChange REMOVE %s must have empty final uses", key))
@@ -544,9 +691,6 @@ func normalizeAndValidateFieldChanges(current GraphPlan, values []FieldChange, o
 			}
 		} else if value.Purpose == "SELECTED_ONLY" {
 			return nil, invalidOutput(fmt.Sprintf("fieldChange REMOVE %s cannot use SELECTED_ONLY", fieldBindingLabel(value.Field)))
-		}
-		if err := validateFieldUseOperationCoverage(current, value, operations); err != nil {
-			return nil, err
 		}
 		result = append(result, value)
 	}
@@ -1057,28 +1201,36 @@ func planFieldUses(plan GraphPlan, binding FieldBinding) ([]FieldGroupUse, []Fie
 	}
 	for _, group := range plan.Groups {
 		for _, dimension := range group.Dimensions {
-			if dimension.NodeID == binding.NodeID && dimension.Column == binding.Column {
+			if fieldBindingEqual(planFieldBinding(plan, dimension.NodeID, dimension.Column), binding) {
 				groups = append(groups, FieldGroupUse{GroupID: group.ID, Role: "DIMENSION", Grouping: dimension.Grouping, Aggregation: ""})
 			}
 		}
 		for _, metric := range group.Metrics {
-			if metric.NodeID == binding.NodeID && metric.Column == binding.Column {
+			if fieldBindingEqual(planFieldBinding(plan, metric.NodeID, metric.Column), binding) {
 				groups = append(groups, FieldGroupUse{GroupID: group.ID, Role: "METRIC", Grouping: "", Aggregation: metric.Aggregation})
 			}
 		}
 	}
 	for _, join := range plan.Joins {
 		for _, condition := range join.Conditions {
-			if condition.LeftNodeID == binding.NodeID && condition.LeftColumn == binding.Column {
+			if fieldBindingEqual(planFieldBinding(plan, condition.LeftNodeID, condition.LeftColumn), binding) {
 				joins = append(joins, FieldJoinUse{JoinID: join.ID, Side: "LEFT", Peer: planFieldBinding(plan, condition.RightNodeID, condition.RightColumn)})
 			}
-			if condition.RightNodeID == binding.NodeID && condition.RightColumn == binding.Column {
+			if fieldBindingEqual(planFieldBinding(plan, condition.RightNodeID, condition.RightColumn), binding) {
 				joins = append(joins, FieldJoinUse{JoinID: join.ID, Side: "RIGHT", Peer: planFieldBinding(plan, condition.LeftNodeID, condition.LeftColumn)})
 			}
 		}
 	}
 	for _, output := range plan.End.Outputs {
-		if output.NodeID == binding.NodeID && output.Column == binding.Column {
+		outputBinding := planFieldBinding(plan, output.NodeID, output.Column)
+		if strings.TrimSpace(output.Key) != "" {
+			if separator := strings.IndexByte(output.Key, '.'); separator > 0 && separator < len(output.Key)-1 {
+				if derived := planFieldBinding(plan, output.Key[:separator], output.Key[separator+1:]); derived.TableID != "" {
+					outputBinding = derived
+				}
+			}
+		}
+		if fieldBindingEqual(outputBinding, binding) {
 			outputs = append(outputs, FieldOutputUse{EndID: endComponentID, Name: output.Name, Code: output.Code})
 		}
 	}
@@ -1103,12 +1255,12 @@ func fieldAvailableAtInput(plan GraphPlan, input PlanInput, binding FieldBinding
 				continue
 			}
 			for _, dimension := range group.Dimensions {
-				if dimension.NodeID == binding.NodeID && dimension.Column == binding.Column {
+				if fieldBindingEqual(planFieldBinding(plan, dimension.NodeID, dimension.Column), binding) {
 					return true
 				}
 			}
 			for _, metric := range group.Metrics {
-				if metric.NodeID == binding.NodeID && metric.Column == binding.Column {
+				if fieldBindingEqual(planFieldBinding(plan, metric.NodeID, metric.Column), binding) {
 					return true
 				}
 			}
@@ -1136,6 +1288,10 @@ func fieldAvailableAtInput(plan GraphPlan, input PlanInput, binding FieldBinding
 	return false
 }
 
+func fieldBindingEqual(left, right FieldBinding) bool {
+	return normalizeFieldBinding(left) == normalizeFieldBinding(right)
+}
+
 // validateAndCanonicalizePlanChanges independently computes the actual graph diff and requires it
 // to match the locked change set exactly. Human-readable names come from trusted graph structures;
 // intent descriptions are preserved only after the scope matches.
@@ -1161,6 +1317,7 @@ func validateAndCanonicalizePlanChanges(current, proposal GraphPlan, expected Ch
 		return ChangeSet{}, err
 	}
 	actual := calculatePlanChanges(currentComponents, proposalComponents)
+	actual = ignoreAuthorizedTransformRoutingDiffs(current, proposal, actual, expected)
 	if !equalChangeOperationScope(actual, expected) {
 		return ChangeSet{}, changeSetMismatchError(actual, expected)
 	}
@@ -1177,6 +1334,134 @@ func validateAndCanonicalizePlanChanges(current, proposal GraphPlan, expected Ch
 		actual.Operations[index].Description = descriptions[operationScopeKey(actual.Operations[index])]
 	}
 	return actual, nil
+}
+
+// ignoreAuthorizedTransformRoutingDiffs removes only technical key substitutions caused by a
+// TRANSFORM that is itself locked by this changeSet. The physical lineage, array order, grouping,
+// aggregation, output name and output code must remain identical. Any semantic field change stays
+// in the diff and therefore still requires an explicit fieldChange-derived component operation.
+func ignoreAuthorizedTransformRoutingDiffs(current, proposal GraphPlan, actual, expected ChangeSet) ChangeSet {
+	authorized := map[string]bool{}
+	expectedFields := map[string]map[string]bool{}
+	for _, operation := range expected.Operations {
+		key, _ := componentKey(operation.ComponentKind, operation.ComponentID)
+		fields := map[string]bool{}
+		for _, field := range operation.Fields {
+			fields[field] = true
+		}
+		expectedFields[key] = fields
+		if operation.ComponentKind == "TRANSFORM" && (operation.Action == "ADD" || operation.Action == "UPDATE") {
+			authorized[operation.ComponentID] = true
+		}
+	}
+	if len(authorized) == 0 {
+		return actual
+	}
+	currentGroups := map[string]PlanGroup{}
+	proposalGroups := map[string]PlanGroup{}
+	for _, group := range current.Groups {
+		currentGroups[group.ID] = group
+	}
+	for _, group := range proposal.Groups {
+		proposalGroups[group.ID] = group
+	}
+
+	operations := make([]ChangeOperation, 0, len(actual.Operations))
+	for _, operation := range actual.Operations {
+		if operation.Action != "UPDATE" {
+			operations = append(operations, operation)
+			continue
+		}
+		key, _ := componentKey(operation.ComponentKind, operation.ComponentID)
+		kept := make([]string, 0, len(operation.Fields))
+		for _, field := range operation.Fields {
+			ignore := false
+			if !expectedFields[key][field] {
+				switch {
+				case operation.ComponentKind == "GROUP" && field == "dimensions":
+					before, beforeOK := currentGroups[operation.ComponentID]
+					after, afterOK := proposalGroups[operation.ComponentID]
+					ignore = beforeOK && afterOK && transformRoutedDimensionsEqual(current, proposal, before.Dimensions, after.Dimensions, authorized)
+				case operation.ComponentKind == "GROUP" && field == "metrics":
+					before, beforeOK := currentGroups[operation.ComponentID]
+					after, afterOK := proposalGroups[operation.ComponentID]
+					ignore = beforeOK && afterOK && transformRoutedMetricsEqual(current, proposal, before.Metrics, after.Metrics, authorized)
+				case operation.ComponentKind == "END" && field == "outputs":
+					ignore = transformRoutedOutputsEqual(current, proposal, current.End.Outputs, proposal.End.Outputs, authorized)
+				}
+			}
+			if !ignore {
+				kept = append(kept, field)
+			}
+		}
+		operation.Fields = kept
+		if len(operation.Fields) > 0 {
+			operations = append(operations, operation)
+		}
+	}
+	actual.Operations = operations
+	return actual
+}
+
+func transformRoutedDimensionsEqual(current, proposal GraphPlan, before, after []PlanDimension, authorized map[string]bool) bool {
+	if len(before) != len(after) {
+		return false
+	}
+	for index := range before {
+		if before[index] == after[index] {
+			continue
+		}
+		if !authorized[after[index].NodeID] || before[index].Grouping != after[index].Grouping ||
+			!fieldBindingEqual(planFieldBinding(current, before[index].NodeID, before[index].Column), planFieldBinding(proposal, after[index].NodeID, after[index].Column)) {
+			return false
+		}
+	}
+	return true
+}
+
+func transformRoutedMetricsEqual(current, proposal GraphPlan, before, after []PlanMetric, authorized map[string]bool) bool {
+	if len(before) != len(after) {
+		return false
+	}
+	for index := range before {
+		if before[index] == after[index] {
+			continue
+		}
+		if !authorized[after[index].NodeID] || before[index].Aggregation != after[index].Aggregation ||
+			!fieldBindingEqual(planFieldBinding(current, before[index].NodeID, before[index].Column), planFieldBinding(proposal, after[index].NodeID, after[index].Column)) {
+			return false
+		}
+	}
+	return true
+}
+
+func transformRoutedOutputsEqual(current, proposal GraphPlan, before, after []PlanOutput, authorized map[string]bool) bool {
+	if len(before) != len(after) {
+		return false
+	}
+	for index := range before {
+		if before[index] == after[index] {
+			continue
+		}
+		afterTransformID := after[index].NodeID
+		if separator := strings.IndexByte(after[index].Key, '.'); separator > 0 {
+			afterTransformID = after[index].Key[:separator]
+		}
+		if !authorized[afterTransformID] || before[index].Name != after[index].Name || before[index].Code != after[index].Code ||
+			!fieldBindingEqual(planOutputBinding(current, before[index]), planOutputBinding(proposal, after[index])) {
+			return false
+		}
+	}
+	return true
+}
+
+func planOutputBinding(plan GraphPlan, output PlanOutput) FieldBinding {
+	if separator := strings.IndexByte(output.Key, '.'); separator > 0 && separator < len(output.Key)-1 {
+		if derived := planFieldBinding(plan, output.Key[:separator], output.Key[separator+1:]); derived.TableID != "" {
+			return derived
+		}
+	}
+	return planFieldBinding(plan, output.NodeID, output.Column)
 }
 
 func calculatePlanChanges(current, proposal map[string]componentSnapshot) ChangeSet {
@@ -1802,7 +2087,50 @@ func planFieldBinding(plan GraphPlan, nodeID, column string) FieldBinding {
 			return normalizeFieldBinding(FieldBinding{NodeID: nodeID, TableID: node.TableID, Column: column})
 		}
 	}
+	// TRANSFORM outputs deliberately keep their physical lineage. The exact derived
+	// key remains protected by the component-level dimensions/metrics/outputs diff,
+	// while fieldChanges continue to authorize only real catalog fields. Without this
+	// projection a legitimate "insert transform before group" edit is treated as an
+	// invented physical field and can never satisfy the locked change set.
+	if lineage, ok := transformOutputPhysicalBinding(plan, nodeID, column, map[string]bool{}); ok {
+		return normalizeFieldBinding(lineage)
+	}
 	return normalizeFieldBinding(FieldBinding{NodeID: nodeID, Column: column})
+}
+
+func transformOutputPhysicalBinding(plan GraphPlan, transformID, outputID string, visiting map[string]bool) (FieldBinding, bool) {
+	key := fieldKey(transformID, outputID)
+	if visiting[key] {
+		return FieldBinding{}, false
+	}
+	visiting[key] = true
+	defer delete(visiting, key)
+	for _, transform := range plan.Transforms {
+		if transform.ID != transformID {
+			continue
+		}
+		for _, rule := range transform.Rules {
+			if rule.Output.ID != outputID || len(rule.InputKeys) == 0 {
+				continue
+			}
+			inputKey := strings.TrimSpace(rule.InputKeys[0])
+			separator := strings.IndexByte(inputKey, '.')
+			if separator <= 0 || separator == len(inputKey)-1 {
+				return FieldBinding{}, false
+			}
+			return planFieldBindingWithVisiting(plan, inputKey[:separator], inputKey[separator+1:], visiting)
+		}
+	}
+	return FieldBinding{}, false
+}
+
+func planFieldBindingWithVisiting(plan GraphPlan, nodeID, column string, visiting map[string]bool) (FieldBinding, bool) {
+	for _, node := range plan.Nodes {
+		if node.ID == nodeID {
+			return normalizeFieldBinding(FieldBinding{NodeID: nodeID, TableID: node.TableID, Column: column}), true
+		}
+	}
+	return transformOutputPhysicalBinding(plan, nodeID, column, visiting)
 }
 
 func planHasBindingTable(plan GraphPlan, binding FieldBinding) bool {

@@ -18,16 +18,17 @@ import (
 )
 
 type FileAsset struct {
-	ID              string         `json:"id"`
-	TenantID        string         `json:"tenantId"`
-	Filename        string         `json:"filename"`
-	MimeType        string         `json:"mimeType"`
-	CurrentVersion  int            `json:"currentVersion"`
-	Version         int            `json:"version"`
-	VersionID       string         `json:"versionId"`
-	SizeBytes       int64          `json:"sizeBytes"`
-	SHA256          string         `json:"sha256"`
-	WorkbookSummary map[string]any `json:"workbookSummary"`
+	ID              string                   `json:"id"`
+	TenantID        string                   `json:"tenantId"`
+	Filename        string                   `json:"filename"`
+	MimeType        string                   `json:"mimeType"`
+	CurrentVersion  int                      `json:"currentVersion"`
+	Version         int                      `json:"version"`
+	VersionID       string                   `json:"versionId"`
+	SizeBytes       int64                    `json:"sizeBytes"`
+	SHA256          string                   `json:"sha256"`
+	WorkbookSummary map[string]any           `json:"workbookSummary"`
+	Inspection      *ExcelWorkbookInspection `json:"inspection,omitempty"`
 }
 type FileVersion struct {
 	FileAsset
@@ -42,6 +43,29 @@ type FileTableData struct {
 	Columns []string
 	Types   map[string]string
 	Rows    [][]string
+}
+
+const excelStructureSampleRows = 10
+
+// ExcelWorkbookInspection is returned only by the upload request. Sample rows are never
+// persisted in workbook_summary; the saved version retains only the deterministic parse plan.
+type ExcelWorkbookInspection struct {
+	SampleLimit int                    `json:"sampleLimit"`
+	Sheets      []ExcelSheetInspection `json:"sheets"`
+}
+
+type ExcelSheetInspection struct {
+	Name          string                  `json:"name"`
+	HeaderRow     int                     `json:"headerRow"`
+	SkipEmptyRows bool                    `json:"skipEmptyRows"`
+	Columns       []ExcelColumnInspection `json:"columns"`
+	Rows          [][]string              `json:"rows"`
+}
+
+type ExcelColumnInspection struct {
+	Name          string `json:"name"`
+	CanonicalType string `json:"canonicalType"`
+	Nullable      bool   `json:"nullable"`
 }
 
 type ObjectStorage interface {
@@ -89,10 +113,14 @@ func (m *ExcelManager) Upload(ctx context.Context, tenantID, assetID, filename, 
 	if err != nil {
 		return FileAsset{}, err
 	}
-	metadata, err := inferWorkbook(book, config)
+	metadata, inspection, parsePlans, err := inspectWorkbook(book, config)
 	if err != nil {
 		return FileAsset{}, err
 	}
+	if config == nil {
+		config = map[string]any{}
+	}
+	config["sheetPlans"] = parsePlans
 	isNew := assetID == ""
 	if isNew {
 		assetID = uuid.NewString()
@@ -112,7 +140,7 @@ func (m *ExcelManager) Upload(ctx context.Context, tenantID, assetID, filename, 
 		return FileAsset{}, err
 	}
 	sum := sha256.Sum256(data)
-	asset := FileAsset{ID: assetID, TenantID: tenantID, Filename: filename, MimeType: mimeType, CurrentVersion: version, Version: version, VersionID: versionID, SizeBytes: size, SHA256: hex.EncodeToString(sum[:]), WorkbookSummary: workbookSummary(metadata)}
+	asset := FileAsset{ID: assetID, TenantID: tenantID, Filename: filename, MimeType: mimeType, CurrentVersion: version, Version: version, VersionID: versionID, SizeBytes: size, SHA256: hex.EncodeToString(sum[:]), WorkbookSummary: workbookSummary(metadata), Inspection: &inspection}
 	if err := m.repo.SaveFileVersion(ctx, asset, m.bucket, key, config); err != nil {
 		_ = m.storage.Delete(ctx, m.bucket, key)
 		return FileAsset{}, err
@@ -274,10 +302,13 @@ func (c *ExcelConnector) Sample(ctx context.Context, source Source, table Metada
 	if err != nil {
 		return SampleResult{}, err
 	}
-	headerRow := intConfig(version.ParseConfig, "headerRow", 1)
 	for _, sheet := range book.Sheets {
 		if sheet.Name != table.Name {
 			continue
+		}
+		headerRow, skipEmptyRows, err := excelSheetParseOptions(version.ParseConfig, sheet)
+		if err != nil {
+			return SampleResult{}, err
 		}
 		if headerRow < 1 || len(sheet.Rows) < headerRow {
 			return SampleResult{}, fmt.Errorf("sheet %s does not contain header row", sheet.Name)
@@ -285,7 +316,7 @@ func (c *ExcelConnector) Sample(ctx context.Context, source Source, table Metada
 		headers := deduplicateHeaders(sheet.Rows[headerRow-1])
 		rows := make([][]any, 0, maxRows)
 		for _, row := range sheet.Rows[headerRow:] {
-			if boolConfig(version.ParseConfig, "skipEmptyRows", true) && emptyRow(row) {
+			if skipEmptyRows && emptyRow(row) {
 				continue
 			}
 			values := make([]any, len(headers))
@@ -368,26 +399,37 @@ func csvRune(value string, aliases map[string]rune) (rune, error) {
 
 // inferWorkbook 把工作簿内容推断为统一的技术元数据，供后续资产同步复用。
 func inferWorkbook(book spikeexcel.Workbook, config map[string]any) ([]MetadataTable, error) {
-	// 元数据推断与运行时 prepareFileTables 共用表头、空行和类型规则。同步阶段
-	// 发布的列白名单因此能在固定版本查询时被完全复现。
-	headerRow := intConfig(config, "headerRow", 1)
-	if headerRow < 1 {
-		return nil, errors.New("headerRow must be greater than zero")
-	}
+	metadata, _, _, err := inspectWorkbook(book, config)
+	return metadata, err
+}
+
+// inspectWorkbook validates every selected sheet independently, using at most the first ten
+// non-empty data rows to lock column types. The returned parse plan is stored with the immutable
+// file version so sync, sampling, and query execution all replay the same sheet decisions.
+func inspectWorkbook(book spikeexcel.Workbook, config map[string]any) ([]MetadataTable, ExcelWorkbookInspection, map[string]any, error) {
 	selected := stringSet(config["selectedSheets"])
 	overrides, _ := config["columnOverrides"].(map[string]any)
 	var tables []MetadataTable
+	inspection := ExcelWorkbookInspection{SampleLimit: excelStructureSampleRows, Sheets: []ExcelSheetInspection{}}
+	parsePlans := map[string]any{}
 	for _, sheet := range book.Sheets {
 		if len(selected) > 0 && !selected[sheet.Name] {
 			continue
 		}
+		headerRow, skipEmptyRows, err := excelSheetParseOptions(config, sheet)
+		if err != nil {
+			return nil, ExcelWorkbookInspection{}, nil, err
+		}
 		if len(sheet.Rows) < headerRow {
-			return nil, fmt.Errorf("sheet %s does not contain header row", sheet.Name)
+			return nil, ExcelWorkbookInspection{}, nil, fmt.Errorf("sheet %s does not contain header row", sheet.Name)
 		}
 		headers := deduplicateHeaders(sheet.Rows[headerRow-1])
+		if len(headers) == 0 || emptyRow(sheet.Rows[headerRow-1]) {
+			return nil, ExcelWorkbookInspection{}, nil, fmt.Errorf("sheet %s header row is empty", sheet.Name)
+		}
 		dataRows := sheet.Rows[headerRow:]
-		if boolConfig(config, "skipEmptyRows", true) {
-			filtered := dataRows[:0]
+		if skipEmptyRows {
+			filtered := make([][]string, 0, len(dataRows))
 			for _, row := range dataRows {
 				if !emptyRow(row) {
 					filtered = append(filtered, row)
@@ -395,15 +437,27 @@ func inferWorkbook(book spikeexcel.Workbook, config map[string]any) ([]MetadataT
 			}
 			dataRows = filtered
 		}
+		for rowIndex, row := range dataRows {
+			if len(row) > len(headers) {
+				return nil, ExcelWorkbookInspection{}, nil, fmt.Errorf("sheet %s row %d contains more columns than its header", sheet.Name, headerRow+rowIndex+1)
+			}
+			for _, value := range row {
+				if isExcelError(strings.TrimSpace(value)) {
+					return nil, ExcelWorkbookInspection{}, nil, fmt.Errorf("sheet %s row %d contains formula error %s", sheet.Name, headerRow+rowIndex+1, strings.TrimSpace(value))
+				}
+			}
+		}
+		sampleRows := dataRows
+		if len(sampleRows) > excelStructureSampleRows {
+			sampleRows = sampleRows[:excelStructureSampleRows]
+		}
 		columns := make([]MetadataColumn, 0, len(headers))
+		inspectionColumns := make([]ExcelColumnInspection, 0, len(headers))
 		for index, name := range headers {
 			values := make([]string, 0)
-			for _, row := range dataRows {
+			for _, row := range sampleRows {
 				if index < len(row) && strings.TrimSpace(row[index]) != "" {
 					value := strings.TrimSpace(row[index])
-					if isExcelError(value) {
-						return nil, fmt.Errorf("sheet %s column %s contains formula error %s", sheet.Name, name, value)
-					}
 					values = append(values, value)
 				}
 			}
@@ -411,14 +465,50 @@ func inferWorkbook(book spikeexcel.Workbook, config map[string]any) ([]MetadataT
 			if override, ok := overrides[sheet.Name+"."+name].(string); ok && validCanonical(override) {
 				canonical = override
 			}
-			columns = append(columns, MetadataColumn{Name: name, OrdinalPosition: index + 1, NativeType: canonical, CanonicalType: canonical, Nullable: len(values) < len(dataRows)})
+			nullable := len(values) < len(sampleRows)
+			columns = append(columns, MetadataColumn{Name: name, OrdinalPosition: index + 1, NativeType: canonical, CanonicalType: canonical, Nullable: nullable})
+			inspectionColumns = append(inspectionColumns, ExcelColumnInspection{Name: name, CanonicalType: canonical, Nullable: nullable})
 		}
 		tables = append(tables, MetadataTable{CatalogName: "", SchemaName: "WORKBOOK", Name: sheet.Name, Type: "SHEET", Columns: columns, PrimaryKeyColumns: []string{}, Constraints: []MetadataConstraint{}, Indexes: []MetadataIndex{}})
+		previewRows := make([][]string, len(sampleRows))
+		for index, row := range sampleRows {
+			previewRows[index] = make([]string, len(headers))
+			copy(previewRows[index], row)
+		}
+		inspection.Sheets = append(inspection.Sheets, ExcelSheetInspection{Name: sheet.Name, HeaderRow: headerRow, SkipEmptyRows: skipEmptyRows, Columns: inspectionColumns, Rows: previewRows})
+		parsePlans[sheet.Name] = map[string]any{"headerRow": headerRow, "skipEmptyRows": skipEmptyRows, "sampleRows": excelStructureSampleRows}
 	}
 	if len(tables) == 0 {
-		return nil, errors.New("no worksheet selected")
+		return nil, ExcelWorkbookInspection{}, nil, errors.New("no worksheet selected")
 	}
-	return tables, nil
+	return tables, inspection, parsePlans, nil
+}
+
+func excelSheetParseOptions(config map[string]any, sheet spikeexcel.Sheet) (int, bool, error) {
+	headerRow := intConfig(config, "headerRow", 0)
+	skipEmptyRows := boolConfig(config, "skipEmptyRows", true)
+	if rawPlans, ok := config["sheetPlans"].(map[string]any); ok {
+		if rawPlan, ok := rawPlans[sheet.Name].(map[string]any); ok {
+			headerRow = intConfig(rawPlan, "headerRow", headerRow)
+			skipEmptyRows = boolConfig(rawPlan, "skipEmptyRows", skipEmptyRows)
+		}
+	}
+	if headerRow == 0 {
+		limit := len(sheet.Rows)
+		if limit > excelStructureSampleRows {
+			limit = excelStructureSampleRows
+		}
+		for index := 0; index < limit; index++ {
+			if !emptyRow(sheet.Rows[index]) {
+				headerRow = index + 1
+				break
+			}
+		}
+	}
+	if headerRow < 1 {
+		return 0, false, fmt.Errorf("sheet %s does not contain a non-empty header in its first %d rows", sheet.Name, excelStructureSampleRows)
+	}
+	return headerRow, skipEmptyRows, nil
 }
 
 // prepareFileTables 使用与元数据同步相同的表头、空行和类型规则生成执行输入。
@@ -433,12 +523,15 @@ func prepareFileTables(book spikeexcel.Workbook, config map[string]any) ([]FileT
 	for _, table := range metadata {
 		metadataByName[table.Name] = table
 	}
-	headerRow := intConfig(config, "headerRow", 1)
 	selected := stringSet(config["selectedSheets"])
 	result := make([]FileTableData, 0, len(metadata))
 	for _, sheet := range book.Sheets {
 		if len(selected) > 0 && !selected[sheet.Name] {
 			continue
+		}
+		headerRow, skipEmptyRows, err := excelSheetParseOptions(config, sheet)
+		if err != nil {
+			return nil, err
 		}
 		definition, ok := metadataByName[sheet.Name]
 		if !ok || len(sheet.Rows) < headerRow {
@@ -446,7 +539,7 @@ func prepareFileTables(book spikeexcel.Workbook, config map[string]any) ([]FileT
 		}
 		columns := deduplicateHeaders(sheet.Rows[headerRow-1])
 		rows := append([][]string(nil), sheet.Rows[headerRow:]...)
-		if boolConfig(config, "skipEmptyRows", true) {
+		if skipEmptyRows {
 			filtered := make([][]string, 0, len(rows))
 			for _, row := range rows {
 				if !emptyRow(row) {

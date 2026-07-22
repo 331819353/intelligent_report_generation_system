@@ -63,6 +63,26 @@
 .data-source-dialog textarea { resize: vertical; font: inherit; }
 .data-source-dialog label small { color: var(--muted); font-weight: 400; }
 .data-source-dialog footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
+.excel-source-upload { display: grid; gap: 12px; padding: 16px; border: 1px solid #bbf7d0; border-radius: 11px; background: #f7fef9; }
+.excel-source-upload > header { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.excel-source-upload > header > div { display: grid; gap: 4px; }
+.excel-source-upload > header strong { color: #065f46; font-size: 14px; }
+.excel-source-upload > header small, .excel-source-next-step { color: #475467; font-size: 11px; line-height: 1.6; }
+.excel-source-upload > header > span { flex: none; border-radius: 999px; padding: 4px 8px; background: #dcfce7; color: #047857; font-size: 10px; font-weight: 800; }
+.excel-source-file-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
+.excel-source-file-row button { min-height: 41px; border: 1px solid #86efac; border-radius: 8px; padding: 0 14px; background: white; color: #047857; font-size: 11px; font-weight: 800; }
+.excel-source-file-row button:disabled { opacity: .5; }
+.excel-sheet-plans { display: grid; gap: 8px; }
+.excel-sheet-plan-summary { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 8px; background: #dcfce7; color: #047857; font-size: 11px; }
+.excel-sheet-plans details { overflow: hidden; border: 1px solid #d1fae5; border-radius: 9px; background: white; }
+.excel-sheet-plans summary { display: flex; justify-content: space-between; gap: 14px; padding: 9px 11px; color: #344054; cursor: pointer; }
+.excel-sheet-plans summary span { color: var(--muted); font-size: 10px; }
+.excel-sheet-preview { max-height: 210px; overflow: auto; border-top: 1px solid #d1fae5; }
+.excel-sheet-preview table { width: 100%; border-collapse: collapse; font-size: 10px; }
+.excel-sheet-preview th { position: sticky; top: 0; background: #ecfdf3; color: #065f46; text-align: left; }
+.excel-sheet-preview th, .excel-sheet-preview td { min-width: 110px; padding: 7px 9px; border-bottom: 1px solid #edf0f3; white-space: nowrap; }
+.excel-sheet-preview th strong, .excel-sheet-preview th small { display: block; }
+.excel-sheet-preview th small { margin-top: 2px; color: #047857; font-weight: 500; }
 .data-source-detail, .data-source-delete { display: grid; gap: 18px; padding: 22px 24px 24px; }
 .data-source-detail > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .data-source-detail > header > div { display: grid; gap: 4px; }

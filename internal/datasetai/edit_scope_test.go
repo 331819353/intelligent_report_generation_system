@@ -108,6 +108,9 @@ func TestBuildPromptEditContextContainsOnlyDerivedTopology(t *testing.T) {
 
 func TestNormalizeAndValidateReadyIntentCanonicalizesTrustedStructure(t *testing.T) {
 	intent := ChangeIntent{Status: " ready ", Question: "", Candidates: nil, ChangeSet: scopePostRemovalSet()}
+	// inputChanges already locks the exact topology. The redundant top-level input
+	// field may be omitted by the model and is completed deterministically.
+	intent.ChangeSet.Operations[1].Fields = []string{}
 	normalized, err := normalizeAndValidateChangeIntent(scopeTestPlan(), intent)
 	if err != nil {
 		t.Fatalf("normalize intent: %v", err)
@@ -126,6 +129,9 @@ func TestNormalizeAndValidateReadyIntentCanonicalizesTrustedStructure(t *testing
 	}
 	if removed.ComponentName != "关联后地区汇总" || rewired.ComponentName != "最终输出" {
 		t.Fatalf("trusted names = %#v / %#v", removed, rewired)
+	}
+	if !reflect.DeepEqual(rewired.Fields, []string{"input"}) {
+		t.Fatalf("completed input fields = %#v", rewired.Fields)
 	}
 }
 
@@ -218,6 +224,79 @@ func TestValidateAndCanonicalizePlanChangesAcceptsExactLockedDiff(t *testing.T) 
 		if operation.Description != "执行用户明确要求的修改" || operation.ComponentName == "模型提供的名称" {
 			t.Fatalf("canonical review metadata = %#v", operation)
 		}
+	}
+}
+
+func TestValidateAndCanonicalizePlanChangesAcceptsTransformOutputWithPhysicalLineage(t *testing.T) {
+	current := scopeTestPlan()
+	current.Nodes[1].SelectedColumns = append(current.Nodes[1].SelectedColumns, "order_date")
+	current.Groups[0].Dimensions = append(current.Groups[0].Dimensions, PlanDimension{NodeID: "node_2", Column: "order_date"})
+	current.Groups[1].Dimensions = append(current.Groups[1].Dimensions, PlanDimension{NodeID: "node_2", Column: "order_date"})
+	current.End.Outputs = append(current.End.Outputs, PlanOutput{NodeID: "node_2", Column: "order_date", Name: "下单日期", Code: "order_date"})
+
+	proposal := cloneGraphPlan(current)
+	proposal.Transforms = []PlanTransform{{
+		ID: "transform_1", Name: "下单月份转换", Family: "DATE", ComponentType: "DATE_FORMAT", Input: PlanInput{Kind: "JOIN", ID: "join_1"},
+		Rules: []PlanTransformRule{{
+			ID: "rule_1", Operation: "DATE_FORMAT", InputKeys: []string{"node_2.order_date"}, Unit: "MONTH",
+			Output: PlanTransformOutput{ID: "order_month", Name: "下单月份", Code: "order_month", CanonicalType: "STRING"},
+		}},
+	}}
+	proposal.Groups[1].Input = PlanInput{Kind: "TRANSFORM", ID: "transform_1"}
+	proposal.Groups[1].Dimensions[1] = PlanDimension{NodeID: "transform_1", Column: "order_month"}
+	proposal.End.Outputs[2] = PlanOutput{NodeID: "node_2", Column: "order_date", Key: "transform_1.order_month", Name: "下单月份", Code: "order_month"}
+
+	expected := ChangeSet{
+		Operations: []ChangeOperation{
+			scopeOperation("ADD", "TRANSFORM", "transform_1", nil, nil),
+			// The intent model only has to lock the semantic field propagation once in
+			// fieldChanges. Missing redundant GROUP.dimensions and END.outputs operation
+			// fields are completed deterministically before the planner is invoked.
+			scopeOperation("UPDATE", "GROUP", "group_after", []string{"input"}, []InputChange{{
+				Field: "input", From: PlanInput{Kind: "JOIN", ID: "join_1"}, To: PlanInput{Kind: "TRANSFORM", ID: "transform_1"},
+			}}),
+		},
+		FieldChanges: []FieldChange{{
+			Field: FieldBinding{NodeID: "node_2", TableID: "table-orders", Column: "order_date"}, SelectionAction: "KEEP", Purpose: "FINAL_OUTPUT",
+			GroupUses: []FieldGroupUse{
+				{GroupID: "group_after", Role: "DIMENSION", Grouping: ""},
+				{GroupID: "group_before", Role: "DIMENSION", Grouping: ""},
+			},
+			JoinUses:   []FieldJoinUse{},
+			OutputUses: []FieldOutputUse{{EndID: endComponentID, Name: "下单月份", Code: "order_month"}},
+		}},
+	}
+	if binding := planFieldBinding(proposal, "transform_1", "order_month"); binding != (FieldBinding{NodeID: "node_2", TableID: "table-orders", Column: "order_date"}) {
+		t.Fatalf("transform output lineage = %#v", binding)
+	}
+	if !fieldAvailableAtInput(proposal, proposal.End.Input, expected.FieldChanges[0].Field, map[string]bool{}) {
+		t.Fatal("transformed physical field must remain available at END")
+	}
+
+	// Simulate the common provider defect where the transform is inserted and wired,
+	// but the GROUP dimension still points at the inherited physical date field.
+	unrouted := cloneGraphPlan(proposal)
+	unrouted.Groups[1].Dimensions[1] = current.Groups[1].Dimensions[1]
+	routed := materializeLockedTransformRouting(unrouted, expected, []TransformRequirement{{ComponentType: "DATE_FORMAT"}})
+	if routed.Groups[1].Dimensions[1] != (PlanDimension{NodeID: "transform_1", Column: "order_month", Grouping: ""}) {
+		t.Fatalf("materialized transform routing = %#v", routed.Groups[1].Dimensions[1])
+	}
+
+	canonical, err := validateAndCanonicalizePlanChanges(current, routed, expected, fieldChangeTestCatalog())
+	if err != nil {
+		t.Fatalf("date transform insertion must retain trusted physical scope: %v", err)
+	}
+	var groupFields, endFields []string
+	for _, operation := range canonical.Operations {
+		if operation.ComponentKind == "GROUP" && operation.ComponentID == "group_after" {
+			groupFields = operation.Fields
+		}
+		if operation.ComponentKind == "END" && operation.ComponentID == endComponentID {
+			endFields = operation.Fields
+		}
+	}
+	if !reflect.DeepEqual(groupFields, []string{"input"}) || !reflect.DeepEqual(endFields, []string{"outputs"}) {
+		t.Fatalf("completed operation fields = GROUP %v / END %v", groupFields, endFields)
 	}
 }
 

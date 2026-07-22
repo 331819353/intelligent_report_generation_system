@@ -113,6 +113,15 @@ func TestDeriveCreateTransformRequirementsMaterializesDateGroupingBeforeGroup(t 
 	}
 }
 
+func TestDeriveModificationTransformRequirementsKeepsRequestedRolesButAllowsRemoval(t *testing.T) {
+	if requirements := deriveModificationTransformRequirements("关联与分组之间需要一个日期转换，将日期转换为年月"); len(requirements) != 1 || requirements[0].ComponentType != "DATE_FORMAT" {
+		t.Fatalf("modification requirements = %#v", requirements)
+	}
+	if requirements := deriveModificationTransformRequirements("删除日期转换组件"); len(requirements) != 0 {
+		t.Fatalf("removal requirements = %#v", requirements)
+	}
+}
+
 func TestNormalizeProposalCanonicalizesUniqueTransformOutputKey(t *testing.T) {
 	raw := proposalWithUsedUpperTransform()
 	raw.Plan.End.Outputs[0].NodeID = "transform_1"

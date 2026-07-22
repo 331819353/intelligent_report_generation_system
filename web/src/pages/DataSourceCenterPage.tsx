@@ -9,6 +9,7 @@ import {
   type DataSourceTableRecord,
   type DataSourceType,
   type DiscoveredTableRecord,
+	type ExcelFileAsset,
   type MetadataJob,
   type MetadataJobFailure,
   type MetadataRefreshMode,
@@ -18,8 +19,7 @@ const statusLabels: Record<DataSourceStatus, string> = {
   DRAFT: '待验证', ACTIVE: '运行中', DISABLED: '已暂停', SYNCING: '同步中', ERROR: '异常', DELETING: '删除中',
 }
 const typeLabels: Record<DataSourceType, string> = { MYSQL: 'MySQL', ORACLE: 'Oracle', EXCEL: 'Excel / CSV' }
-type DatabaseType = DataSourceConnectionInput['type']
-type ConnectionDraft = Omit<DataSourceConnectionInput, 'port' | 'config'> & { port: string }
+type ConnectionDraft = Omit<DataSourceConnectionInput, 'port' | 'config' | 'type'> & { port: string; type: DataSourceType }
 type DialogState = { mode: 'create' | 'view' | 'edit' | 'delete' | 'select-tables' | 'edit-table' | 'delete-table'; source?: DataSourceRecord; table?: DataSourceTableRecord }
 type Notice = { tone: 'success' | 'error'; message: string }
 type TableDraft = { businessName: string; businessDescription: string; tags: string; sensitivityLevel: string; visibility: string; manualLocked: boolean }
@@ -94,6 +94,8 @@ export function DataSourceCenterPage() {
   const [notice, setNotice] = useState<Notice | null>(null)
   const [dialog, setDialog] = useState<DialogState | null>(null)
   const [draft, setDraft] = useState<ConnectionDraft>(emptyDraft)
+	const [excelFile, setExcelFile] = useState<File | null>(null)
+	const [excelAsset, setExcelAsset] = useState<ExcelFileAsset | null>(null)
   const [busyAction, setBusyAction] = useState('')
   const [formError, setFormError] = useState('')
   const [keyword, setKeyword] = useState('')
@@ -285,12 +287,16 @@ export function DataSourceCenterPage() {
 
   const openCreate = () => {
     setDraft(emptyDraft())
+		setExcelFile(null)
+		setExcelAsset(null)
     setFormError('')
     setDialog({ mode: 'create' })
   }
   const openExisting = (mode: DialogState['mode'], source: DataSourceRecord) => {
     setFormError('')
     setDraft(draftFromSource(source))
+		setExcelFile(null)
+		setExcelAsset(null)
     setDialog({ mode, source })
     if (mode === 'view') {
       setRefreshMode('INCREMENTAL')
@@ -500,8 +506,60 @@ export function DataSourceCenterPage() {
     }
   }
 
+	const inspectExcelFile = async () => {
+		if (!excelFile) {
+			setFormError('请先选择 .xlsx、.xls 或 .csv 文件')
+			return
+		}
+		setBusyAction('inspect-excel')
+		setFormError('')
+		try {
+			const asset = await dataSourceAPI.uploadExcel(excelFile)
+			if (!asset.inspection?.sheets.length) throw new Error('文件中没有可用的 Sheet 解析方案')
+			setExcelAsset(asset)
+		} catch (cause) {
+			setExcelAsset(null)
+			setFormError(cause instanceof Error ? cause.message : 'Excel 文件结构验证失败')
+		} finally {
+			setBusyAction('')
+		}
+	}
+
   const submitConnection = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+		if (draft.type === 'EXCEL') {
+			if (!draft.name.trim() || !draft.code.trim()) {
+				setFormError('请填写数据源名称和编码')
+				return
+			}
+			if (!excelAsset) {
+				setFormError('请先上传文件并完成每个 Sheet 前 10 行的结构验证')
+				return
+			}
+			setBusyAction('create-excel')
+			setFormError('')
+			let saved: DataSourceRecord | null = null
+			try {
+				saved = await dataSourceAPI.create({ code: draft.code.trim(), name: draft.name.trim(), type: 'EXCEL', fileAssetId: excelAsset.id })
+				await dataSourceAPI.test(saved.id)
+				const discovery = await dataSourceAPI.discoverTables(saved.id)
+				if (!discovery.items.length) throw new Error('没有发现可用的 Sheet')
+				const selections = discovery.items.map(table => ({ catalogName: table.catalogName, schemaName: table.schemaName, tableName: table.name }))
+				const job = await dataSourceAPI.importTables(saved.id, selections)
+				const active = { ...saved, status: 'ACTIVE' as const }
+				setSources(current => [active, ...current.filter(source => source.id !== active.id)])
+				viewedSourceIdRef.current = active.id
+				setDialog({ mode: 'view', source: active })
+				void loadTableStructures(active.id)
+				await acceptMetadataJob(job, active.id, 'Excel Sheet 映射', `已按解析方案依次提交 ${selections.length} 个 Sheet；LLM 完善后将生成映射表和默认数据集`)
+			} catch (cause) {
+				if (saved) setSources(current => [saved!, ...current.filter(source => source.id !== saved!.id)])
+				setFormError(`${saved ? 'Excel 数据源已创建，但后续解析或映射任务未完成：' : ''}${cause instanceof Error ? cause.message : '新建 Excel 数据源失败'}`)
+			} finally {
+				setBusyAction('')
+			}
+			return
+		}
     const port = Number(draft.port)
     const editing = dialog?.mode === 'edit' && dialog.source
     if (!draft.name.trim() || !draft.code.trim() || !draft.host.trim() || !draft.database.trim() || !draft.username.trim() || !Number.isInteger(port) || port < 1 || port > 65535 || (!editing && !draft.password)) {
@@ -643,23 +701,37 @@ export function DataSourceCenterPage() {
             })}</div>}
       </section>
 
-      {(dialog?.mode === 'create' || dialog?.mode === 'edit') && <Dialog title={dialog.mode === 'edit' ? '修改数据源' : '新建数据源'} onClose={closeDialog}>
+		{(dialog?.mode === 'create' || dialog?.mode === 'edit') && <Dialog title={dialog.mode === 'edit' ? '修改数据源' : '新建数据源'} wide={draft.type === 'EXCEL'} onClose={closeDialog}>
         <form className="data-source-form" onSubmit={submitConnection}>
           <div className="data-source-form-grid">
             <label>数据源名称<input autoFocus value={draft.name} onChange={event => updateDraft('name', event.target.value)} placeholder="例如：销售业务库" /></label>
             <label>数据源编码<input value={draft.code} onChange={event => updateDraft('code', event.target.value)} placeholder="例如：sales_mysql" /></label>
             <label>数据源类型<select value={draft.type} onChange={event => {
-              const type = event.target.value as DatabaseType
+				const type = event.target.value as DataSourceType
+				setExcelFile(null)
+				setExcelAsset(null)
+				setFormError('')
               setDraft(current => ({ ...current, type, port: current.port === '3306' || current.port === '1521' ? (type === 'ORACLE' ? '1521' : '3306') : current.port }))
-            }}><option value="MYSQL">MySQL</option><option value="ORACLE">Oracle</option></select></label>
+			}}><option value="MYSQL">MySQL</option><option value="ORACLE">Oracle</option>{dialog.mode === 'create' && <option value="EXCEL">Excel / CSV</option>}</select></label>
+			{draft.type !== 'EXCEL' && <>
             <label>Host<input value={draft.host} onChange={event => updateDraft('host', event.target.value)} placeholder="db.example.internal" /></label>
             <label>Port<input inputMode="numeric" value={draft.port} onChange={event => updateDraft('port', event.target.value)} placeholder={draft.type === 'ORACLE' ? '1521' : '3306'} /></label>
             <label>Database<input value={draft.database} onChange={event => updateDraft('database', event.target.value)} placeholder={draft.type === 'ORACLE' ? 'FREEPDB1' : 'sales'} /></label>
             <label>Username<input autoComplete="username" value={draft.username} onChange={event => updateDraft('username', event.target.value)} placeholder="report_reader" /></label>
             <label>Password<input aria-label="Password" type="password" autoComplete="new-password" value={draft.password} onChange={event => updateDraft('password', event.target.value)} placeholder={dialog.mode === 'edit' ? '留空表示保留原密码' : '请输入数据库密码'} /><small>{dialog.mode === 'edit' ? '密码不会回显；仅在需要更换时填写。' : '密码由服务端加密保存，不使用 JDBC 连接串。'}</small></label>
+			</>}
           </div>
+			{draft.type === 'EXCEL' && <section className="excel-source-upload" aria-label="Excel 文件结构验证">
+				<header><div><strong>上传并验证工作簿</strong><small>系统会先读取每个 Sheet 的前 10 行，独立确定表头、空行策略和字段类型。</small></div><span>.xlsx / .xls / .csv</span></header>
+				<div className="excel-source-file-row"><label>选择文件<input key={draft.type} aria-label="Excel 文件" type="file" accept=".xlsx,.xls,.csv" onChange={event => { setExcelFile(event.target.files?.[0] || null); setExcelAsset(null); setFormError('') }} /></label><button type="button" disabled={!excelFile || actionBusy} onClick={() => void inspectExcelFile()}>{busyAction === 'inspect-excel' ? '正在检查每个 Sheet…' : '分析前 10 行'}</button></div>
+				{excelAsset?.inspection && <div className="excel-sheet-plans" aria-label="Sheet 解析方案">
+					<div className="excel-sheet-plan-summary" role="status"><strong>结构验证通过</strong><span>{excelAsset.filename} · {excelAsset.inspection.sheets.length} 个 Sheet · 每个最多 {excelAsset.inspection.sampleLimit} 行</span></div>
+					{excelAsset.inspection.sheets.map(sheet => <details key={sheet.name} open><summary><strong>{sheet.name}</strong><span>表头第 {sheet.headerRow} 行 · {sheet.columns.length} 字段 · {sheet.skipEmptyRows ? '跳过空行' : '保留空行'}</span></summary><div className="excel-sheet-preview"><table><thead><tr>{sheet.columns.map(column => <th key={column.name}><strong>{column.name}</strong><small>{column.canonicalType}{column.nullable ? ' · 可空' : ''}</small></th>)}</tr></thead><tbody>{sheet.rows.map((row, rowIndex) => <tr key={rowIndex}>{sheet.columns.map((column, columnIndex) => <td key={column.name}>{row[columnIndex] || '—'}</td>)}</tr>)}</tbody></table></div></details>)}
+				</div>}
+				<small className="excel-source-next-step">确认后将按 Sheet 顺序生成映射表；LLM 完善表名、字段和标签后，每张映射表会自动生成并发布一个默认数据集。</small>
+			</section>}
           {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
-          <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="primary-button" type="submit" disabled={actionBusy}>{actionBusy ? '正在保存…' : dialog.mode === 'edit' ? '保存修改' : '创建数据源'}</button></footer>
+			<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="primary-button" type="submit" disabled={actionBusy}>{actionBusy ? draft.type === 'EXCEL' ? '正在创建并提交 Sheet…' : '正在保存…' : dialog.mode === 'edit' ? '保存修改' : draft.type === 'EXCEL' ? '确认方案并创建' : '创建数据源'}</button></footer>
         </form>
       </Dialog>}
 

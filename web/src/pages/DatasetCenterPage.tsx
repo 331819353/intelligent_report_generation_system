@@ -94,6 +94,7 @@ type DatasetAIErrorView = {
   repairAttempted?: boolean
   status?: number
   requestId?: string
+  diagnosticCode?: string
 }
 
 const statusLabels: Record<string, string> = {
@@ -226,8 +227,8 @@ function datasetAIRequestIssue(cause: unknown, phase: 'GENERATE' | 'APPLY'): Dat
     title: invalidOutput
       ? detail.repairAttempted ? '系统已自动修复一次仍失败' : '方案未通过安全校验'
       : phase === 'APPLY' ? '方案未能应用' : '方案暂未生成',
-    message: invalidOutput ? 'AI 方案仍未通过数据集安全校验，原画布没有发生变化。' : cause.message,
-    suggestion: invalidOutput ? datasetAIReasonSuggestion(reasonCode) : phase === 'APPLY'
+		message: invalidOutput ? detail.message || 'AI 方案仍未通过数据集安全校验，原画布没有发生变化。' : cause.message,
+		suggestion: invalidOutput ? detail.suggestion || datasetAIReasonSuggestion(reasonCode) : phase === 'APPLY'
       ? '可以重新应用；若仍失败，请修改要求后重新生成，原画布不会被覆盖。'
       : '请按原要求重试；也可以修改上方要求，补充表、字段和聚合方式后重新生成。',
     code: detail.code,
@@ -236,6 +237,7 @@ function datasetAIRequestIssue(cause: unknown, phase: 'GENERATE' | 'APPLY'): Dat
     repairAttempted: detail.repairAttempted,
     status: cause.status,
     requestId: detail.requestId,
+    diagnosticCode: detail.diagnosticCode,
   }
 }
 
@@ -1961,11 +1963,12 @@ export function DatasetCenterPage() {
         setAIRetryAction(aiLastInstruction.trim() ? 'GENERATE' : null)
         return
       }
+      const appliedTransforms = materialized.graph.transforms ?? []
       const appliedSnapshot: DatasetEditorSnapshot = {
         draft: materialized.draft,
         relationBoxes: materialized.graph.joins,
         groupBoxes: materialized.graph.groups,
-        transformBoxes: [],
+        transformBoxes: appliedTransforms,
         endBox: materialized.graph.end ?? null,
         nodePositions: materialized.graph.nodePositions,
         metadata: materialized.metadata,
@@ -1974,7 +1977,7 @@ export function DatasetCenterPage() {
       setDraft(materialized.draft)
       setRelationBoxes(materialized.graph.joins)
       setGroupBoxes(materialized.graph.groups)
-      setTransformBoxes([])
+      setTransformBoxes(appliedTransforms)
       setEndBox(materialized.graph.end ?? null)
       setNodePositions(materialized.graph.nodePositions)
       setMetadata(materialized.metadata)
@@ -2252,8 +2255,9 @@ function DatasetAIComposer({ prompt, lastInstruction, result, labels, error, bus
         <strong>{error.title}</strong>
         <p>{error.message}</p>
         <small><b>处理建议</b>{error.suggestion}</small>
-        {(error.code || error.reasonCode || error.stage || error.repairAttempted !== undefined || error.status || error.requestId) && <dl aria-label="错误诊断信息">
+		{(error.code || error.diagnosticCode || error.reasonCode || error.stage || error.repairAttempted !== undefined || error.status || error.requestId) && <dl aria-label="错误诊断信息">
           {error.code && <div><dt>错误码</dt><dd>{error.code}</dd></div>}
+			{error.diagnosticCode && <div><dt>校验规则</dt><dd>{error.diagnosticCode}</dd></div>}
           {error.reasonCode && <div><dt>原因码</dt><dd>{error.reasonCode}</dd></div>}
           {error.stage && <div><dt>失败阶段</dt><dd>{error.stage}</dd></div>}
           {error.repairAttempted !== undefined && <div><dt>自动修复</dt><dd>{error.repairAttempted ? '已尝试' : '未尝试'}</dd></div>}

@@ -5,6 +5,8 @@ export type APIError = {
   reasonCode?: string
   stage?: string
   repairAttempted?: boolean
+  diagnosticCode?: string
+  suggestion?: string
   details?: Array<{ path: string; code?: string; reason: string }>
   /** 乐观锁冲突返回服务端最新基线，页面仍需显式让用户选择是否加载。 */
   currentRevision?: number
@@ -55,9 +57,10 @@ async function refreshTokens(): Promise<StoredTokens> {
 
 /** 发送统一 API 请求；遇到 401 时仅刷新一次并重放原请求。 */
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const isMultipart = typeof FormData !== 'undefined' && init.body instanceof FormData
   const request = async (accessToken?: string) => fetch(`/api${path}`, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}), ...init.headers },
+    headers: { ...(!isMultipart ? { 'Content-Type': 'application/json' } : {}), ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}), ...init.headers },
   })
   let current = tokens()
   let response = await request(current?.accessToken)

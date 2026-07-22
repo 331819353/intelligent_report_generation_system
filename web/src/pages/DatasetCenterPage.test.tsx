@@ -1677,6 +1677,54 @@ test('AI 可以从空画布生成方案，校验后原子应用并一键撤销',
   within(toolbar).getAllByRole('button').forEach(button => expect(button).toBeDisabled())
 })
 
+test('AI 方案中的字段处理组件会随候选图一起应用到画布', async () => {
+  vi.spyOn(datasetAPI, 'list').mockResolvedValue(page([]))
+  vi.spyOn(datasetAPI, 'mappingTables').mockResolvedValue({ items: [table] })
+  vi.spyOn(datasetAPI, 'columns').mockResolvedValue({ items: columns })
+  vi.spyOn(datasetAPI, 'validate').mockResolvedValue({ valid: true, dslHash: 'a'.repeat(64), planHash: 'b'.repeat(64), logicalPlan: {} })
+  const transformProposal = aiProposal({
+    summary: '将订单编号转为大写后输出',
+    plan: {
+      dataset: { name: 'AI 订单编号', description: '验证字段处理组件应用到画布' },
+      nodes: [{ id: 'node_1', tableId: table.id, alias: 'orders', selectedColumns: ['order_id', 'amount'] }],
+      joins: [], groups: [],
+      transforms: [{
+        id: 'transform_1', name: '订单编号大写', family: 'TEXT', componentType: 'TEXT_UPPER', input: { kind: 'NODE', id: 'node_1' },
+        rules: [{
+          id: 'rule_1', operation: 'UPPER', inputKeys: ['node_1.order_id'],
+          output: { id: 'order_id_upper', name: '大写订单编号', code: 'order_id_upper', canonicalType: 'STRING' },
+        }],
+      }],
+      end: {
+        name: '最终输出', input: { kind: 'TRANSFORM', id: 'transform_1' },
+        outputs: [
+          { nodeId: 'node_1', column: 'order_id', key: 'transform_1.order_id_upper', name: '大写订单编号', code: 'order_id_upper' },
+          { nodeId: 'node_1', column: 'amount', name: '订单金额', code: 'amount' },
+        ],
+      },
+    },
+  })
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    ok: true, status: 200, json: async () => ({ requestId: 'ai-transform-request', proposal: transformProposal }),
+  }))
+  const user = userEvent.setup()
+  renderPage()
+
+  await screen.findByText('还没有数据集')
+  await user.click(screen.getByRole('button', { name: '新建数据集' }))
+  const dialog = await screen.findByRole('dialog', { name: '新建数据集' })
+  await user.type(within(dialog).getByLabelText('描述数据集生成或修改目标'), '将订单编号转为大写后输出')
+  await user.click(within(dialog).getByRole('button', { name: 'AI 生成流程' }))
+  await within(dialog).findByRole('heading', { level: 3, name: '将订单编号转为大写后输出' })
+  await user.click(within(dialog).getByRole('button', { name: '应用' }))
+
+  expect(await within(dialog).findByText(/1 个数据节点 · 0 个关联 · 0 个分组 · 1 个结束节点 · 1 个字段处理/)).toBeInTheDocument()
+  expect(within(dialog).getByRole('button', { name: '打开大写转换 1 配置' })).toHaveTextContent('订单编号大写')
+  await user.click(within(dialog).getByRole('button', { name: '撤销' }))
+  expect(await within(dialog).findByText('已撤销本次 AI 方案，恢复到应用前的画布')).toBeInTheDocument()
+  expect(within(dialog).queryByRole('button', { name: '打开大写转换 1 配置' })).not.toBeInTheDocument()
+})
+
 test('AI 生成期间继续手工编辑时拒绝展示过期方案', async () => {
   vi.spyOn(datasetAPI, 'list').mockResolvedValue(page([]))
   vi.spyOn(datasetAPI, 'mappingTables').mockResolvedValue({ items: [table] })

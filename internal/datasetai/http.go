@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
 	"intelligent-report-generation-system/internal/access"
 	aiplatform "intelligent-report-generation-system/internal/ai"
@@ -86,13 +87,16 @@ func writePlanError(w http.ResponseWriter, err error) {
 		writePlanJSON(w, http.StatusGatewayTimeout, map[string]string{"code": "AI_TIMEOUT", "message": "AI 生成超时，原画布未发生变化，请重试"})
 	case errors.Is(err, ErrInvalidOutput):
 		metadata := invalidOutputMetadata(err)
+		diagnostic := publicInvalidOutputDiagnostic(metadata)
 		writePlanJSON(w, http.StatusBadGateway, planInvalidOutputResponse{
 			Code:            "DATASET_AI_INVALID_OUTPUT",
-			Message:         "AI 方案未通过数据集安全校验，原画布未发生变化，请修改要求后重试",
+			Message:         diagnostic.Message,
 			ReasonCode:      safeInvalidOutputReason(metadata.ReasonCode),
 			Stage:           safeInvalidOutputStage(metadata.Stage),
 			RepairAttempted: metadata.RepairAttempted,
 			RequestID:       metadata.RequestID,
+			DiagnosticCode:  diagnostic.Code,
+			Suggestion:      diagnostic.Suggestion,
 		})
 	default:
 		writePlanJSON(w, http.StatusBadGateway, map[string]string{"code": "AI_COMPLETION_FAILED", "message": "AI 方案生成失败，原画布未发生变化，请稍后重试"})
@@ -106,6 +110,50 @@ type planInvalidOutputResponse struct {
 	Stage           string `json:"stage"`
 	RepairAttempted bool   `json:"repairAttempted"`
 	RequestID       string `json:"requestId,omitempty"`
+	DiagnosticCode  string `json:"diagnosticCode"`
+	Suggestion      string `json:"suggestion"`
+}
+
+type invalidOutputDiagnostic struct {
+	Code       string
+	Message    string
+	Suggestion string
+}
+
+// publicInvalidOutputDiagnostic maps trusted local validator categories to safe, actionable
+// copy. It never returns the raw detail, which can contain catalog identifiers or model text.
+func publicInvalidOutputDiagnostic(metadata InvalidOutputError) invalidOutputDiagnostic {
+	detail := strings.ToLower(metadata.Detail)
+	base := invalidOutputDiagnostic{
+		Code:       "PLAN_VALIDATION_FAILED",
+		Message:    "AI 方案未通过数据集安全校验，原画布未发生变化。",
+		Suggestion: "请写明要修改的组件、输入字段和期望输出，然后按原要求重试。",
+	}
+	switch {
+	case strings.Contains(detail, "clarify requires"):
+		return invalidOutputDiagnostic{"CLARIFICATION_QUESTION_MISSING", "AI 判断需要补充信息，但没有生成可回答的问题，原画布已保留。", "请按原要求重试；若仍出现此提示，请补充目标组件和要处理的字段。"}
+	case strings.Contains(detail, "plan contains undeclared"):
+		return invalidOutputDiagnostic{"UNDECLARED_COMPONENT_CHANGE", "AI 方案额外改动了本次要求之外的组件或字段，已为你拦截。", "请把多个修改拆成两次提问，并点明本次只改哪个组件。"}
+	case strings.Contains(detail, "outside locked scope"):
+		return invalidOutputDiagnostic{"COMPONENT_FIELDS_MISMATCH", "AI 方案修改了目标组件中未授权的配置项，原画布已保留。", "请明确该组件只允许调整哪些配置，例如“只改上游输入和分组维度”。"}
+	case strings.Contains(detail, "did not realize locked"):
+		return invalidOutputDiagnostic{"REQUESTED_CHANGE_MISSING", "AI 方案没有完整落实本次要求中的组件修改，原画布已保留。", "请明确写出要新增、修改或删除的组件，以及它应连接到哪个上下游。"}
+	case strings.Contains(detail, "input rewiring differs"):
+		return invalidOutputDiagnostic{"INPUT_CONNECTION_MISMATCH", "AI 方案的组件连线与你的要求不一致，已阻止应用。", "请按“上游组件 → 新组件 → 下游组件”的方式写明期望连线后重试。"}
+	case strings.Contains(detail, "field propagation") || strings.Contains(detail, "does not reach end"):
+		return invalidOutputDiagnostic{"FIELD_LINEAGE_INCOMPLETE", "AI 方案中有字段没有从上游完整传递到分组或最终输出。", "请写明该字段是分组维度、聚合指标还是仅用于最终展示。"}
+	case metadata.ReasonCode == InvalidOutputReasonTransform:
+		return invalidOutputDiagnostic{"TRANSFORM_COMPONENT_REQUIRED", "当前要求需要字段处理组件，但 AI 方案没有正确生成或使用该产物。", "请写明输入字段、处理方式和下游用途，例如“将支付时间转为年月，再进入分组组件”。"}
+	case metadata.ReasonCode == InvalidOutputReasonJoin:
+		return invalidOutputDiagnostic{"JOIN_CONFIGURATION_INVALID", "AI 方案的关联输入或关联字段不可用。", "请指明左右两张表、关联字段和 INNER/LEFT 关联方式。"}
+	case metadata.ReasonCode == InvalidOutputReasonGroup || metadata.ReasonCode == InvalidOutputReasonAggregationField:
+		return invalidOutputDiagnostic{"GROUP_CONFIGURATION_INVALID", "AI 方案的分组维度或聚合指标不完整。", "请分别写明分组维度、指标字段和 SUM/COUNT 等聚合方式；日期粒度请使用独立日期转换组件。"}
+	case metadata.ReasonCode == InvalidOutputReasonFieldReference || metadata.ReasonCode == InvalidOutputReasonFieldCaseMismatch:
+		return invalidOutputDiagnostic{"FIELD_REFERENCE_INVALID", "AI 方案引用了当前映射表中不可用的字段。", "请在要求中选用画布上已有的字段名，或先在数据节点中勾选该字段。"}
+	case metadata.ReasonCode == InvalidOutputReasonOutput:
+		return invalidOutputDiagnostic{"FINAL_OUTPUT_INVALID", "AI 方案的最终输出中包含上游未产生的字段。", "请明确最终保留哪些字段，并确保它们已由上游数据、分组或字段处理组件产生。"}
+	}
+	return base
 }
 
 func safeInvalidOutputReason(value string) string {

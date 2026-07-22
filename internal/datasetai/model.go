@@ -9,8 +9,8 @@ import (
 
 const (
 	SchemaVersion       = "2.3"
-	PromptVersion       = "dataset-dag-planner-v11"
-	IntentPromptVersion = "dataset-dag-intent-v8"
+	PromptVersion       = "dataset-dag-planner-v12"
+	IntentPromptVersion = "dataset-dag-intent-v9"
 
 	maxInstructionRunes = 4000
 	maxPlanNodes        = 16
@@ -368,11 +368,12 @@ type plannerPromptEnvelope struct {
 }
 
 type intentPromptEnvelope struct {
-	Instruction string             `json:"instruction"`
-	Current     GraphPlan          `json:"current"`
-	Hints       *PlanHints         `json:"hints,omitempty"`
-	EditContext *promptEditContext `json:"editContext,omitempty"`
-	Assets      []CatalogTable     `json:"assets"`
+	Instruction           string                 `json:"instruction"`
+	Current               GraphPlan              `json:"current"`
+	Hints                 *PlanHints             `json:"hints,omitempty"`
+	EditContext           *promptEditContext     `json:"editContext,omitempty"`
+	TransformRequirements []TransformRequirement `json:"transformRequirements"`
+	Assets                []CatalogTable         `json:"assets"`
 }
 
 func normalizePlanRequest(input PlanRequest) (PlanRequest, error) {

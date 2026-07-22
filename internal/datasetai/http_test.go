@@ -127,8 +127,54 @@ func TestWritePlanErrorReturnsStableRepairMetadataWithoutValidationDetail(t *tes
 	if body.Code != "DATASET_AI_INVALID_OUTPUT" || body.ReasonCode != InvalidOutputReasonFieldCaseMismatch || body.Stage != InvalidOutputStagePlanValidation || !body.RepairAttempted || body.RequestID != "request-case-invalid" {
 		t.Fatalf("body = %#v", body)
 	}
+	if body.DiagnosticCode != "FIELD_REFERENCE_INVALID" || body.Suggestion == "" {
+		t.Fatalf("actionable diagnostic = %#v", body)
+	}
 	if strings.Contains(recorder.Body.String(), "secret_table") || strings.Contains(recorder.Body.String(), "ORDER_ID") {
 		t.Fatalf("HTTP response leaked local validation detail: %s", recorder.Body.String())
+	}
+}
+
+func TestWritePlanErrorClassifiesChangeScopeFailureWithoutLeakingDetail(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writePlanError(recorder, &InvalidOutputError{
+		ReasonCode: InvalidOutputReasonChangeScope,
+		Stage:      InvalidOutputStageChangeSetValidation,
+		Detail:     "plan input rewiring differs from locked scope for GROUP:private_group",
+	})
+	var body planInvalidOutputResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.DiagnosticCode != "INPUT_CONNECTION_MISMATCH" || body.Suggestion == "" {
+		t.Fatalf("body = %#v", body)
+	}
+	if strings.Contains(recorder.Body.String(), "private_group") {
+		t.Fatalf("HTTP response leaked local validation detail: %s", recorder.Body.String())
+	}
+}
+
+func TestWritePlanErrorDistinguishesComponentFieldAndClarificationFailures(t *testing.T) {
+	tests := []struct {
+		detail string
+		code   string
+	}{
+		{"plan changed fields outside locked scope for UPDATE GROUP:private_group", "COMPONENT_FIELDS_MISMATCH"},
+		{"CLARIFY requires a question containing 1 to 500 characters", "CLARIFICATION_QUESTION_MISSING"},
+	}
+	for _, test := range tests {
+		recorder := httptest.NewRecorder()
+		writePlanError(recorder, &InvalidOutputError{ReasonCode: InvalidOutputReasonChangeScope, Stage: InvalidOutputStageIntentValidation, Detail: test.detail})
+		var body planInvalidOutputResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.DiagnosticCode != test.code || body.Message == "" || body.Suggestion == "" {
+			t.Fatalf("detail %q body = %#v", test.detail, body)
+		}
+		if strings.Contains(recorder.Body.String(), "private_group") || strings.Contains(recorder.Body.String(), "CLARIFY requires") {
+			t.Fatalf("HTTP response leaked local validation detail: %s", recorder.Body.String())
+		}
 	}
 }
 
