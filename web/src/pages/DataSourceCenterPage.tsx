@@ -1,5 +1,6 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AppShell } from '../components/AppShell'
+import { md5Hex } from '../lib/md5'
 import {
   dataSourceAPI,
   type DataSourceConnectionInput,
@@ -63,6 +64,7 @@ const columnDraftChanged = (draft: ColumnDraft) => draft.businessName.trim() !==
   || draft.sensitivityLevel !== draft.original.sensitivityLevel
   || draft.manualLocked !== draft.original.manualLocked
 const normalizedTags = (value: string) => value.split(',').map(tag => tag.trim()).filter(Boolean)
+const dataSourceCodePattern = /^[A-Za-z][A-Za-z0-9_]{0,127}$/
 const formatFileSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
 const fileSourceIdentity = (filename: string) => {
   const extensionMatch = filename.match(/\.([^.]+)$/)
@@ -70,7 +72,8 @@ const fileSourceIdentity = (filename: string) => {
   const stem = filename.slice(0, extensionMatch?.index ?? filename.length).trim() || '文件数据源'
   const normalizedStem = stem.normalize('NFKC').toLocaleLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '') || 'file'
-  return { name: stem, code: `${normalizedStem}_${extension}` }
+  const readableCode = `${normalizedStem}_${extension}`
+  return { name: stem, code: dataSourceCodePattern.test(readableCode) ? readableCode : `file_${md5Hex(readableCode)}` }
 }
 const tableDraftChanged = (draft: TableDraft, table: DataSourceTableRecord) => draft.businessName.trim() !== table.businessName
   || draft.businessDescription.trim() !== table.businessDescription
@@ -576,6 +579,10 @@ export function DataSourceCenterPage() {
 
   const submitConnection = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+		if (!dataSourceCodePattern.test(draft.code.trim())) {
+			setFormError('数据源编码必须以英文字母开头，且只能包含英文字母、数字和下划线，最长 128 位')
+			return
+		}
 		if (draft.type === 'EXCEL') {
 			if (!draft.name.trim() || !draft.code.trim()) {
 				setFormError('请填写数据源名称和编码')
@@ -778,7 +785,7 @@ export function DataSourceCenterPage() {
         <form className="data-source-form" onSubmit={submitConnection}>
           <div className="data-source-form-grid">
             <label>数据源名称<input autoFocus value={draft.name} onChange={event => updateDraft('name', event.target.value)} placeholder="例如：销售业务库" /></label>
-            <label>数据源编码<input value={draft.code} onChange={event => updateDraft('code', event.target.value)} placeholder="例如：sales_mysql" /></label>
+            <label>数据源编码<input aria-label="数据源编码" maxLength={128} value={draft.code} onChange={event => updateDraft('code', event.target.value)} placeholder="例如：sales_mysql" /><small>以英文字母开头，仅支持英文字母、数字和下划线；中文文件名会自动转换为 MD5 编码。</small></label>
             <label>数据源类型<select value={draft.type} onChange={event => {
 				const type = event.target.value as DataSourceType
 				setExcelFile(null)

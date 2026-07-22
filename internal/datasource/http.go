@@ -41,6 +41,10 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		if !decodeDS(w, r, &in) {
 			return
 		}
+		if !dataSourceCodePattern.MatchString(strings.TrimSpace(in.Code)) {
+			writeDSError(w, http.StatusBadRequest, "DATA_SOURCE_CODE_INVALID", "数据源编码必须以英文字母开头，且只能包含英文字母、数字和下划线，最长 128 位")
+			return
+		}
 		source, err := sourceFromInput(r.Context(), service, credentials, c.TenantID, "", in, false)
 		if err != nil {
 			writeDSError(w, 400, "DATA_SOURCE_CREATE_FAILED", "invalid data source connection configuration")
@@ -68,6 +72,10 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		c, _ := auth.ClaimsFromContext(r.Context())
 		var in dataSourceInput
 		if !decodeDS(w, r, &in) {
+			return
+		}
+		if !dataSourceCodePattern.MatchString(strings.TrimSpace(in.Code)) {
+			writeDSError(w, http.StatusBadRequest, "DATA_SOURCE_CODE_INVALID", "数据源编码必须以英文字母开头，且只能包含英文字母、数字和下划线，最长 128 位")
 			return
 		}
 		source, err := sourceFromInput(r.Context(), service, credentials, c.TenantID, r.PathValue("id"), in, true)

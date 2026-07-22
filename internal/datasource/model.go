@@ -3,6 +3,7 @@ package datasource
 import (
 	"context"
 	"errors"
+	"regexp"
 )
 
 var (
@@ -10,6 +11,8 @@ var (
 	ErrQuotaExceeded        = errors.New("tenant data source quota exceeded")
 	ErrCodeConflict         = errors.New("data source code already exists")
 )
+
+var dataSourceCodePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}$`)
 
 type Type string
 
@@ -200,6 +203,9 @@ type Repository interface {
 func (s Source) Validate() error {
 	if s.TenantID == "" || s.Code == "" || s.Name == "" {
 		return errors.New("tenant, code and name are required")
+	}
+	if !dataSourceCodePattern.MatchString(s.Code) {
+		return errors.New("data source code must start with an ASCII letter and contain only ASCII letters, digits, and underscores (maximum 128 characters)")
 	}
 	switch s.Type {
 	case TypeExcel:
