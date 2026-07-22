@@ -199,7 +199,7 @@
 
 `expectedVersion` 必须等于最近一次加载结果的 `version`。更新成功后版本加一；冲突返回 `409 DATASET_VERSION_CONFLICT`。`code` 不允许通过草稿更新改变；`type` 是由草稿节点实际引用的数据源数量派生的摘要，增删跨源节点时会随规范 DSL 在 `SINGLE_SOURCE` 与 `CROSS_SOURCE` 之间自动切换。
 
-画布中的“数据节点 → 分组组件 → 关联槽位”使用 DSL 顶层 `preAggregations` 保存，不再退化为 Join 完成后的全局 `groupBy`。每项通过 `nodeId`、`joinId` 和 `joinSide` 固定分组组件的输入节点与下游槽位，`groupBy` 保存维度/日期粒度，`metrics` 保存字段与 `SUM/AVG/COUNT/COUNT_DISTINCT/MIN/MAX`。领域校验要求关联条件只能引用该分组组件实际产出的字段；规范逻辑计划按 `SCAN → PRE_AGGREGATE → JOIN` 排序。单源编译器使用分组派生表后再 Join，跨源与文件执行器在内存 Join 前对对应节点分组，因此保存回显与实际预览采用相同拓扑。
+画布中的“数据节点 → 分组组件 → 关联槽位”使用 DSL 顶层 `preAggregations` 保存，不再退化为 Join 完成后的全局 `groupBy`。每项通过 `nodeId`、`joinId` 和 `joinSide` 固定分组组件的输入节点与下游槽位，`groupBy` 只保存已经由上游产出的维度，`metrics` 保存字段与 `SUM/AVG/COUNT/COUNT_DISTINCT/MIN/MAX`。日期年、年月、年季或年月日必须由独立 `DATE_FORMAT` 转换组件先产出字符串维度，分组组件不再承担日期转换。领域校验要求关联条件只能引用该分组组件实际产出的字段；规范逻辑计划按 `SCAN → TRANSFORM → PRE_AGGREGATE → JOIN` 排序。单源编译器使用分组派生表后再 Join，跨源与文件执行器在内存 Join 前对对应节点分组，因此保存回显与实际预览采用相同拓扑。
 
 创建和每次成功保存都会在同一数据库事务中追加一份不可变草稿修订。保存失败时，当前草稿、派生索引和修订目录全部回滚，不会出现只有部分内容进入历史的状态。
 

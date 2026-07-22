@@ -324,7 +324,7 @@ func TestServicePlanBuildsAuditedProposalWithoutSamples(t *testing.T) {
 	for _, expected := range []string{
 		"数据节点 → 源字段处理 → 关联前分组 → 关联 → 关联后分组 → 输出字段处理 → 结束节点",
 		"每个阶段可以是 0 个、1 个或多个组件",
-		"默认只在 GROUP 的日期维度使用 grouping=MONTH",
+		"必须在 GROUP 前生成独立 DATE_FORMAT TRANSFORM",
 		"从 END 逆向遍历到每个 NODE",
 	} {
 		if !strings.Contains(systemText, expected) {

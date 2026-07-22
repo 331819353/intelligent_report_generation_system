@@ -621,6 +621,15 @@ func validateProposal(value Proposal, catalog []CatalogTable) error {
 			}
 		}
 	}
+	if value.Mode == "CREATE" {
+		for _, group := range value.Plan.Groups {
+			for _, dimension := range group.Dimensions {
+				if dimension.Grouping != "" {
+					return invalidOutputWithReason(InvalidOutputReasonTransform, "group dimensions cannot perform date conversion; use a DATE_FORMAT transform before GROUP")
+				}
+			}
+		}
+	}
 	return validateGraphPlan(value.Plan, catalog)
 }
 

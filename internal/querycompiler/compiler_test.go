@@ -92,10 +92,10 @@ func TestDateFormatCompilesExactCodesForMySQLAndOracle(t *testing.T) {
 	for _, test := range []struct {
 		name, unit, mysql, oracle string
 	}{
-		{name: "year", unit: "YEAR", mysql: "DATE_FORMAT(`o`.`order_date`, '%Y')", oracle: `TO_CHAR("O"."ORDER_DATE", 'YYYY')`},
-		{name: "month", unit: "MONTH", mysql: "DATE_FORMAT(`o`.`order_date`, '%Y%m')", oracle: `TO_CHAR("O"."ORDER_DATE", 'YYYYMM')`},
-		{name: "quarter", unit: "QUARTER", mysql: "CONCAT(DATE_FORMAT(`o`.`order_date`, '%Y'), 'Q', QUARTER(`o`.`order_date`))", oracle: `TO_CHAR("O"."ORDER_DATE", 'YYYY') || 'Q' || TO_CHAR("O"."ORDER_DATE", 'Q')`},
-		{name: "day", unit: "DAY", mysql: "DATE_FORMAT(`o`.`order_date`, '%Y%m%d')", oracle: `TO_CHAR("O"."ORDER_DATE", 'YYYYMMDD')`},
+		{name: "year", unit: "YEAR", mysql: "DATE_FORMAT(`o`.`order_date`, '%%Y')", oracle: `TO_CHAR("O"."ORDER_DATE", 'YYYY')`},
+		{name: "month", unit: "MONTH", mysql: "DATE_FORMAT(`o`.`order_date`, '%%Y%%m')", oracle: `TO_CHAR("O"."ORDER_DATE", 'YYYYMM')`},
+		{name: "quarter", unit: "QUARTER", mysql: "CONCAT(DATE_FORMAT(`o`.`order_date`, '%%Y'), 'Q', QUARTER(`o`.`order_date`))", oracle: `TO_CHAR("O"."ORDER_DATE", 'YYYY') || 'Q' || TO_CHAR("O"."ORDER_DATE", 'Q')`},
+		{name: "day", unit: "DAY", mysql: "DATE_FORMAT(`o`.`order_date`, '%%Y%%m%%d')", oracle: `TO_CHAR("O"."ORDER_DATE", 'YYYYMMDD')`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, dialect := range []Dialect{MySQL, Oracle} {

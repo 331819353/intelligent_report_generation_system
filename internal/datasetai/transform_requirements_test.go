@@ -102,10 +102,10 @@ func TestDeriveCreateTransformRequirementsRecognizesFineGrainedComponents(t *tes
 	}
 }
 
-func TestDeriveCreateTransformRequirementsDoesNotConfuseDateGroupingWithFormatting(t *testing.T) {
+func TestDeriveCreateTransformRequirementsMaterializesDateGroupingBeforeGroup(t *testing.T) {
 	for _, instruction := range []string{"按月汇总订单金额", "按季度统计客户数量", "生成按年分组的趋势"} {
-		if requirements := deriveCreateTransformRequirements(instruction); len(requirements) != 0 {
-			t.Fatalf("deriveCreateTransformRequirements(%q) = %#v", instruction, requirements)
+		if requirements := deriveCreateTransformRequirements(instruction); len(requirements) != 1 || requirements[0].ComponentType != "DATE_FORMAT" {
+			t.Fatalf("deriveCreateTransformRequirements(%q) = %#v, want DATE_FORMAT", instruction, requirements)
 		}
 	}
 	if requirements := deriveCreateTransformRequirements("将日期字段类型转换为字符串"); len(requirements) != 1 || requirements[0].ComponentType != "CAST" {

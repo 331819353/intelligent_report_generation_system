@@ -8,9 +8,9 @@ type transformRequirementRule struct {
 	match         func(string) bool
 }
 
-// deriveCreateTransformRequirements turns explicit, user-facing transformation language into
-// trusted planner constraints. The matcher deliberately avoids broad business words such as
-// “统计” or “按月汇总”: those describe GROUP semantics and must not manufacture a DATE_FORMAT.
+// deriveCreateTransformRequirements turns user-facing transformation and time-bucket language
+// into trusted planner constraints. Time buckets are materialized by a DATE_FORMAT component;
+// GROUP only consumes the resulting dimension and never performs date conversion itself.
 func deriveCreateTransformRequirements(instruction string) []TransformRequirement {
 	text := strings.ToLower(strings.TrimSpace(instruction))
 	if text == "" {
@@ -26,6 +26,9 @@ func deriveCreateTransformRequirements(instruction string) []TransformRequiremen
 	}
 	dateConversion := func() bool {
 		if contains("日期转换", "日期格式", "格式化日期", "时间格式化", "yyyy-mm", "yyyymm", "yyyy年", "年月字段", "年季字段", "季度字段") {
+			return true
+		}
+		if contains("每个月", "每月", "月度", "按月", "每季度", "季度", "按季度", "每年", "年度", "按年", "每天", "每日", "按天", "按日") {
 			return true
 		}
 		return contains("转为", "转成", "转换成", "转换为", "提取") && contains("年份", "年月", "年季", "季度", "年月日")

@@ -159,15 +159,6 @@ const transformColorClass = (transform: Pick<GraphTransform, 'family' | 'compone
   const category = transformComponentMetaFor(transform)?.category || 'RULE'
   return transformCategoryMeta.find(item => item.category === category)?.className || 'component-rule'
 }
-const dateGrainLabels: Record<NonNullable<GraphTransformRule['unit']>, string> = {
-  YEAR: '年', MONTH: '年月', QUARTER: '年季', DAY: '年月日', WEEK: '周',
-}
-const dateGrainOptions: Array<{ value: NonNullable<GraphTransformRule['unit']>; label: string }> = [
-  { value: 'YEAR', label: '年' },
-  { value: 'MONTH', label: '年月' },
-  { value: 'QUARTER', label: '年季' },
-  { value: 'DAY', label: '年月日' },
-]
 type DateFormatUnit = 'YEAR' | 'MONTH' | 'QUARTER' | 'DAY'
 const dateFormatMeta: Record<DateFormatUnit, { label: string; format: string; example: string; suffix: string }> = {
   YEAR: { label: '年', format: 'YYYY', example: '2026', suffix: 'yyyy' },
@@ -1182,13 +1173,11 @@ export function DatasetCenterPage() {
     }
   }
 
-  const updateGroupDimension = (groupID: string, field: ProducedField, enabled: boolean, patch: { grouping?: string } = {}) => commitGroupFields(groupID, group => {
+  const updateGroupDimension = (groupID: string, field: ProducedField, enabled: boolean) => commitGroupFields(groupID, group => {
     const existing = group.dimensions.find(item => item.key === field.key)
     const generated = generatedGraphFieldIdentity(field)
-    const rawDate = ['DATE', 'DATETIME', 'TIMESTAMP'].includes(field.canonicalType.toUpperCase()) && !field.grouping
-    const grouping = 'grouping' in patch ? patch.grouping : existing?.grouping ?? (!existing && rawDate ? 'DAY' : undefined)
     const dimensions = enabled
-      ? [...group.dimensions.filter(item => item.key !== field.key), { key: field.key, name: existing?.name || generated.name, code: existing?.code || generated.code, grouping }]
+      ? [...group.dimensions.filter(item => item.key !== field.key), { key: field.key, name: existing?.name || generated.name, code: existing?.code || generated.code }]
       : group.dimensions.filter(item => item.key !== field.key)
     return { ...group, dimensions, metrics: enabled ? group.metrics.filter(item => item.key !== field.key) : group.metrics }
   })
@@ -2118,7 +2107,7 @@ export function DatasetCenterPage() {
           </div>}
           {activeNode && <NodeConfigDrawer node={activeNode} fields={draft.fields.filter(field => field.key.startsWith(`${activeNode.id}.`))} onFieldPatch={updateOutputField} onDone={closeCanvasEditor} />}
           {activeRelationBox && <JoinConfigDrawer box={activeRelationBox} join={activeJoin} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} nodes={draft.nodes} leftOutputFields={activeLeftOutputFields} rightOutputFields={activeRightOutputFields} onNameChange={name => setRelationBoxes(current => current.map(box => box.id === activeRelationBox.id ? { ...box, name } : box))} onJoinPatch={patch => activeJoin && updateJoin(activeJoin.id, { ...patch, manualConfirmed: false })} onConditionPatch={(conditionID, patch) => activeJoin && updateJoinCondition(activeJoin.id, conditionID, patch)} onAddCondition={() => activeJoin && addJoinCondition(activeJoin.id)} onRemoveCondition={conditionID => activeJoin && removeJoinCondition(activeJoin.id, conditionID)} onOutputChange={(key, checked) => updateRelationOutput(activeRelationBox.id, key, checked)} onDone={closeCanvasEditor} />}
-          {activeGroup && <GroupingConfigDrawer box={activeGroup} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} nodes={draft.nodes} availableFields={groupInputFields} error={formError} onNameChange={name => updateGroupName(activeGroup.id, name)} onDimensionChange={(field, enabled, patch) => updateGroupDimension(activeGroup.id, field, enabled, patch)} onMetricChange={(field, enabled, patch) => updateGroupMetric(activeGroup.id, field, enabled, patch)} onDone={closeCanvasEditor} />}
+          {activeGroup && <GroupingConfigDrawer box={activeGroup} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} nodes={draft.nodes} availableFields={groupInputFields} error={formError} onNameChange={name => updateGroupName(activeGroup.id, name)} onDimensionChange={(field, enabled) => updateGroupDimension(activeGroup.id, field, enabled)} onMetricChange={(field, enabled, patch) => updateGroupMetric(activeGroup.id, field, enabled, patch)} onDone={closeCanvasEditor} />}
           {activeTransform && <TransformConfigDrawer transform={activeTransform} inputs={transformInputFields} nodes={draft.nodes} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} error={formError} onNameChange={name => updateTransformName(activeTransform.id, name)} onRuleChange={(ruleID, patch) => updateTransformRule(activeTransform.id, ruleID, patch)} onAddRule={() => addTransformRule(activeTransform.id)} onRemoveRule={ruleID => removeTransformRule(activeTransform.id, ruleID)} onDone={closeCanvasEditor} />}
           {activeEnd && endBox && <EndConfigDrawer end={endBox} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} nodes={draft.nodes} availableFields={endInputFields} onNameChange={name => setEndBox(current => current ? { ...current, name } : current)} onOutputChange={updateEndOutput} onDone={closeCanvasEditor} />}
           {formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}
@@ -2665,7 +2654,7 @@ function NodeConfigDrawer({ node, fields, onFieldPatch, onDone }: {
 function GroupingConfigDrawer({ box, boxes, groups, transforms, nodes, availableFields, error, onNameChange, onDimensionChange, onMetricChange, onDone }: {
   box: GroupBox; boxes: RelationBox[]; groups: GroupBox[]; transforms: TransformBox[]; nodes: DesignerNode[]; availableFields: ProducedField[]
   error: string; onNameChange: (name: string) => void
-  onDimensionChange: (field: ProducedField, enabled: boolean, patch?: { grouping?: string }) => void
+  onDimensionChange: (field: ProducedField, enabled: boolean) => void
   onMetricChange: (field: ProducedField, enabled: boolean, patch?: { aggregation?: string }) => void
   onDone: () => void
 }) {
@@ -2673,7 +2662,7 @@ function GroupingConfigDrawer({ box, boxes, groups, transforms, nodes, available
   return <aside className="dataset-canvas-drawer output" aria-label="配置分组组件" onClick={event => event.stopPropagation()}>
     <header><div><span>分组组件</span><strong>{box.name}</strong><small>先定义输入粒度，再为下游自动生成带稳定别名的维度和指标</small></div><button type="button" aria-label="保存并关闭分组配置" onClick={onDone}>×</button></header>
     <section><h3>组件与产物</h3><div className="dataset-group-input"><label><span>产物名称</span><input aria-label="分组产物名称" value={box.name} onChange={event => onNameChange(event.target.value)} placeholder="例如：客户月度汇总" /></label><div aria-label="分组组件输入" className={`dataset-connected-input ${box.input ? 'connected' : 'empty'}`}><span>输入组件</span><strong>{relationInputLabel(box.input, nodes, boxes, groups, transforms)}</strong><small>{box.input ? '输入由画布连线确定；删除连线后可重新连接' : '请回到画布，从上游组件拖线到该组件输入端口'}</small></div></div></section>
-    <section><div className="dataset-drawer-title"><div><h3>分组字段</h3><p>可多选；勾选后按上游稳定编码自动生成字段别名。</p></div><span>{box.dimensions.length} 已选</span></div><div className="dataset-drawer-field-list configured">{availableFields.map(field => { const configured = box.dimensions.find(item => item.key === field.key); const time = ['DATE', 'DATETIME', 'TIMESTAMP'].includes(field.canonicalType.toUpperCase()); const processedGrain = field.grouping as GraphTransformRule['unit']; return <div className={configured ? 'selected' : ''} key={field.key}><label><input aria-label={`分组维度 ${field.code}`} type="checkbox" checked={Boolean(configured)} onChange={event => onDimensionChange(field, event.target.checked)} /><span><strong>{field.name}</strong><small>{graphProducedFieldLabel(field)}</small></span></label>{configured && <div className="dataset-product-fields generated"><output className="dataset-generated-field-alias" aria-label={`${field.code} 字段别名`}><small>字段别名</small><strong>{configured.code}</strong></output>{time && processedGrain ? <output className="dataset-generated-field-alias" aria-label={`${field.code} 已处理日期粒度`}><small>日期粒度</small><strong>{dateGrainLabels[processedGrain]}</strong></output> : time && <select aria-label={`${field.code} 分组粒度`} value={configured.grouping || 'DAY'} onChange={event => onDimensionChange(field, true, { grouping: event.target.value })}>{dateGrainOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select>}</div>}</div> })}</div></section>
+    <section><div className="dataset-drawer-title"><div><h3>分组字段</h3><p>可多选；这里只确定分组维度，日期年月日请先连接独立日期转换组件。</p></div><span>{box.dimensions.length} 已选</span></div><div className="dataset-drawer-field-list configured">{availableFields.map(field => { const configured = box.dimensions.find(item => item.key === field.key); return <div className={configured ? 'selected' : ''} key={field.key}><label><input aria-label={`分组维度 ${field.code}`} type="checkbox" checked={Boolean(configured)} onChange={event => onDimensionChange(field, event.target.checked)} /><span><strong>{field.name}</strong><small>{graphProducedFieldLabel(field)}</small></span></label>{configured && <div className="dataset-product-fields generated"><output className="dataset-generated-field-alias" aria-label={`${field.code} 字段别名`}><small>字段别名</small><strong>{configured.code}</strong></output></div>}</div> })}</div></section>
     <section><div className="dataset-drawer-title"><div><h3>聚合指标</h3><p>选择字段与计算逻辑；字段别名由规则自动生成并保持稳定。</p></div><span>{box.metrics.length} 已选</span></div><div className="dataset-drawer-field-list configured metrics">{availableFields.map(field => { const configured = box.metrics.find(item => item.key === field.key); const numeric = ['NUMBER', 'INT', 'INTEGER', 'DECIMAL', 'FLOAT', 'DOUBLE'].includes(field.canonicalType.toUpperCase()); return <div className={configured ? 'selected' : ''} key={field.key}><label><input aria-label={`聚合指标 ${field.code}`} type="checkbox" checked={Boolean(configured)} onChange={event => onMetricChange(field, event.target.checked)} /><span><strong>{field.name}</strong><small>{graphProducedFieldLabel(field)}</small></span></label>{configured && <div className="dataset-product-fields generated"><select aria-label={`${field.code} 聚合逻辑`} value={configured.aggregation} onChange={event => onMetricChange(field, true, { aggregation: event.target.value })}><option value="">选择逻辑</option>{numeric && <><option>SUM</option><option>AVG</option></>}<option>COUNT</option><option>COUNT_DISTINCT</option><option>MIN</option><option>MAX</option></select><output className="dataset-generated-field-alias" aria-label={`${field.code} 字段别名`}><small>字段别名</small><strong>{configured.code}</strong></output></div>}</div> })}</div></section>
     <footer>{error && <span className="dataset-drawer-error" role="alert">{error}</span>}<small>{graphLeaves({ kind: 'GROUP', id: box.id }, shape).length ? '该分组产物可继续连接关联组件或结束节点' : '请先连接输入组件'}</small><button type="button" onClick={onDone}>完成</button></footer>
   </aside>

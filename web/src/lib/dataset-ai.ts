@@ -382,11 +382,10 @@ export async function materializeDatasetAIPlan(
       position: sameTopology ? previous!.position : { x: 0, y: 0 },
       dimensions: group.dimensions.map(dimension => {
         const key = fieldKey(dimension.nodeId, dimension.column)
-        const old = previous?.dimensions.find(item => item.key === key && (item.grouping || '') === dimension.grouping)
+        const old = previous?.dimensions.find(item => item.key === key)
         return {
           key, name: old?.name || fieldName(dimension.nodeId, dimension.column),
           code: old?.code || identifier(`${nodeByID.get(dimension.nodeId)?.alias || dimension.nodeId}_${dimension.column}`),
-          ...(dimension.grouping ? { grouping: dimension.grouping } : {}),
         }
       }),
       metrics: group.metrics.map(metric => {

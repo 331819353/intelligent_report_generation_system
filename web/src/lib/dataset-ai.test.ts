@@ -72,6 +72,14 @@ describe('dataset AI editor conversion', () => {
     expect(datasetAIRequestContext(undefined, staged, { forceLiveCanvas: true, stagedProposalApplied: false })).toBeUndefined()
   })
 
+  it('does not materialize date conversion metadata inside a group dimension', async () => {
+    const candidate = plan()
+    candidate.groups[0].dimensions[0].grouping = 'MONTH'
+    const result = await materializeDatasetAIPlan(candidate, [orders, customers], async tableID => columns[tableID], empty, 'dataset_ai_group')
+    expect(result.graph.groups[0].dimensions[0]).toEqual(expect.objectContaining({ key: 'node_1.region' }))
+    expect(result.graph.groups[0].dimensions[0]).not.toHaveProperty('grouping')
+  })
+
   it('materializes and round-trips AI generated fine-grained transforms', async () => {
     const transformPlan: DatasetAIGraphPlan = {
       dataset: { name: '客户区域映射', description: '使用候选值数组映射客户区域' },

@@ -243,16 +243,23 @@ func monthlyRegionalOrderCountProposal() Proposal {
 				ID: "join_1", Name: "订单客户关联", Left: PlanInput{Kind: "NODE", ID: "node_1"}, Right: PlanInput{Kind: "NODE", ID: "node_2"}, JoinType: "LEFT",
 				Conditions: []PlanJoinCondition{{LeftNodeID: "node_1", LeftColumn: "CUSTOMER_ID", RightNodeID: "node_2", RightColumn: "customer_id"}},
 			}},
+			Transforms: []PlanTransform{{
+				ID: "transform_1", Name: "下单月份转换", Family: "DATE", ComponentType: "DATE_FORMAT", Input: PlanInput{Kind: "JOIN", ID: "join_1"},
+				Rules: []PlanTransformRule{{
+					ID: "rule_1", Operation: "DATE_FORMAT", InputKeys: []string{"node_1.CREATED_AT"}, Unit: "MONTH",
+					Output: PlanTransformOutput{ID: "order_month", Name: "下单月份", Code: "order_month", CanonicalType: "STRING"},
+				}},
+			}},
 			Groups: []PlanGroup{{
-				ID: "group_1", Name: "月度地区汇总", Input: PlanInput{Kind: "JOIN", ID: "join_1"},
+				ID: "group_1", Name: "月度地区汇总", Input: PlanInput{Kind: "TRANSFORM", ID: "transform_1"},
 				Dimensions: []PlanDimension{
-					{NodeID: "node_1", Column: "CREATED_AT", Grouping: "MONTH"},
+					{NodeID: "transform_1", Column: "order_month", Grouping: ""},
 					{NodeID: "node_2", Column: "region_code", Grouping: ""},
 				},
 				Metrics: []PlanMetric{{NodeID: "node_1", Column: "ORDER_ID", Aggregation: "COUNT"}},
 			}},
 			End: PlanEnd{Name: "最终输出", Input: PlanInput{Kind: "GROUP", ID: "group_1"}, Outputs: []PlanOutput{
-				{NodeID: "node_1", Column: "CREATED_AT", Name: "月份", Code: "order_month"},
+				{NodeID: "node_1", Column: "CREATED_AT", Key: "transform_1.order_month", Name: "月份", Code: "order_month"},
 				{NodeID: "node_2", Column: "region_code", Name: "地区", Code: "region_code"},
 				{NodeID: "node_1", Column: "ORDER_ID", Name: "订单量", Code: "order_count"},
 			}},
@@ -263,6 +270,18 @@ func monthlyRegionalOrderCountProposal() Proposal {
 func TestValidateProposalAcceptsExactCaseCountFieldAcrossMixedCaseTables(t *testing.T) {
 	if err := validateProposal(monthlyRegionalOrderCountProposal(), monthlyRegionalOrderCountCatalog()); err != nil {
 		t.Fatalf("validateProposal() error = %v", err)
+	}
+}
+
+func TestValidateProposalRejectsDateConversionInsideCreateGroup(t *testing.T) {
+	proposal := monthlyRegionalOrderCountProposal()
+	proposal.Plan.Groups[0].Dimensions[0] = PlanDimension{NodeID: "node_1", Column: "CREATED_AT", Grouping: "MONTH"}
+	proposal.Plan.Groups[0].Input = PlanInput{Kind: "JOIN", ID: "join_1"}
+	proposal.Plan.Transforms = []PlanTransform{}
+	err := validateProposal(proposal, monthlyRegionalOrderCountCatalog())
+	var invalid *InvalidOutputError
+	if !errors.As(err, &invalid) || invalid.ReasonCode != InvalidOutputReasonTransform {
+		t.Fatalf("validateProposal() error = %#v, want transform rejection", err)
 	}
 }
 

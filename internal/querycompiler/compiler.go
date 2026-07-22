@@ -691,11 +691,11 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 			return "TRUNC(" + argument + ", '" + map[string]string{"DAY": "DD", "WEEK": "IW", "MONTH": "MM", "QUARTER": "Q", "YEAR": "YYYY"}[expression.Unit] + "')", nil
 		}
 		if expression.Unit == "QUARTER" {
-			return "STR_TO_DATE(CONCAT(YEAR(" + argument + "),'-',LPAD((QUARTER(" + argument + ")-1)*3+1,2,'0'),'-01'),'%Y-%m-%d')", nil
+			return "STR_TO_DATE(CONCAT(YEAR(" + argument + "),'-',LPAD((QUARTER(" + argument + ")-1)*3+1,2,'0'),'-01'),'%%Y-%%m-%%d')", nil
 		}
-		format := map[string]string{"DAY": "%Y-%m-%d", "WEEK": "%x-%v", "MONTH": "%Y-%m-01"}[expression.Unit]
+		format := map[string]string{"DAY": "%%Y-%%m-%%d", "WEEK": "%%x-%%v", "MONTH": "%%Y-%%m-01"}[expression.Unit]
 		if expression.Unit == "YEAR" {
-			format = "%Y-01-01"
+			format = "%%Y-01-01"
 		}
 		if format == "" {
 			return "", errors.New("unsupported date truncation unit")
@@ -719,12 +719,12 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 			}
 			return "", errors.New("unsupported date format unit")
 		}
-		format := map[string]string{"YEAR": "%Y", "MONTH": "%Y%m", "DAY": "%Y%m%d"}[expression.Unit]
+		format := map[string]string{"YEAR": "%%Y", "MONTH": "%%Y%%m", "DAY": "%%Y%%m%%d"}[expression.Unit]
 		if format != "" {
 			return "DATE_FORMAT(" + argument + ", '" + format + "')", nil
 		}
 		if expression.Unit == "QUARTER" {
-			return "CONCAT(DATE_FORMAT(" + argument + ", '%Y'), 'Q', QUARTER(" + argument + "))", nil
+			return "CONCAT(DATE_FORMAT(" + argument + ", '%%Y'), 'Q', QUARTER(" + argument + "))", nil
 		}
 		return "", errors.New("unsupported date format unit")
 	case "CAST":
