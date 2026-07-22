@@ -98,8 +98,29 @@ func TestCompleteTableRejectsStaleExpectedStructureBeforeProviderCall(t *testing
 	if !errors.Is(err, ErrStructureChanged) {
 		t.Fatalf("error=%v", err)
 	}
+	var classified interface{ MetadataCompletionFailureCode() string }
+	if !errors.As(err, &classified) || classified.MetadataCompletionFailureCode() != "STRUCTURE_CHANGED" {
+		t.Fatalf("classification=%v", err)
+	}
 	if store.createdJob.TableID != "" || captured.Table.ID != "" {
 		t.Fatal("stale structure reached job creation or provider")
+	}
+}
+
+func TestCompleteTableClassifiesSourceChangeAtPersistence(t *testing.T) {
+	input, output := validCompletion()
+	input.StructureHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	store := &serviceStore{input: input, saveErr: ErrSourceChanged}
+	service := NewService(store, serviceProvider{output: output}, time.Second, 0.8)
+
+	err := service.CompleteTable(context.Background(), "tenant", "actor", "table-1", nil,
+		true, nil, input.StructureHash, "item-1", "worker-1", 2)
+	if !errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("error=%v", err)
+	}
+	var classified interface{ MetadataCompletionFailureCode() string }
+	if !errors.As(err, &classified) || classified.MetadataCompletionFailureCode() != "SOURCE_CHANGED" {
+		t.Fatalf("classification=%v", err)
 	}
 }
 

@@ -17,9 +17,10 @@ import (
 var identifierPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}$`)
 
 // physicalIdentifierPattern 与查询编译器的物理白名单保持一致。DSL 自身的
-// code/id 仍使用更严格的 identifierPattern；projection 和 FIELD_REF 则必须
-// 能无损表达 Oracle 允许的 $/# 字段名。
-var physicalIdentifierPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_$#]{0,127}$`)
+// code/id 仍使用更严格的 ASCII identifierPattern；projection 和 FIELD_REF
+// 允许安全的 Unicode 字母/数字，从而无损表达 Excel 中文表头以及数据库中的
+// Unicode 标识符。空格、引号、点号和操作符仍被拒绝。
+var physicalIdentifierPattern = regexp.MustCompile(`^[\p{L}][\p{L}\p{N}_$#]{0,127}$`)
 
 // MaxNodes 限制单个数据集的节点数量，避免校验与跨源预览出现无界扇出。
 const MaxNodes = 16

@@ -2,6 +2,7 @@ package datasource
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -68,6 +69,61 @@ func TestInspectWorkbookLocksIndependentSheetPlansFromFirstTenRows(t *testing.T)
 	}
 	if sales, ok := plans["Sales"].(map[string]any); !ok || sales["headerRow"] != 3 {
 		t.Fatalf("plans = %#v", plans)
+	}
+}
+
+func TestInspectWorkbookDetectsLeafHeaderAfterTitlesAndMergedGroups(t *testing.T) {
+	book := spikeexcel.Workbook{Sheets: []spikeexcel.Sheet{{Name: "销售订单", Rows: [][]string{
+		{"销售订单明细"},
+		{"示例数据｜金额列由数量 × 单价自动计算｜表头共两层"},
+		{"订单信息", "", "客户信息", "", "商品信息", "", "交易金额"},
+		{"订单编号", "订单日期", "客户名称", "区域", "商品名称", "品类", "数量", "单价", "订单金额"},
+		{"SO-001", "2026-07-01", "华东智造有限公司", "华东", "工业传感器", "传感器", "24", "680", "16320"},
+	}}}}
+	metadata, inspection, plans, err := inspectWorkbook(book, map[string]any{"skipEmptyRows": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata) != 1 || len(metadata[0].Columns) != 9 || metadata[0].Columns[0].Name != "订单编号" {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+	if len(inspection.Sheets) != 1 || inspection.Sheets[0].HeaderRow != 4 || len(inspection.Sheets[0].Rows) != 1 {
+		t.Fatalf("inspection = %#v", inspection)
+	}
+	plan, ok := plans["销售订单"].(map[string]any)
+	if !ok || plan["headerRow"] != 4 {
+		t.Fatalf("plans = %#v", plans)
+	}
+}
+
+func TestSheetHeadersBackfillsVerticalMergeAndInfersFormattedNumbers(t *testing.T) {
+	book := spikeexcel.Workbook{Sheets: []spikeexcel.Sheet{{Name: "库存", Rows: [][]string{
+		{"库存台账"},
+		{"商品信息", "", "", "仓库", "库存金额", "回款率"},
+		{"SKU", "商品名称", "品类", "", "金额", "完成率"},
+		{"SKU-1", "工业传感器", "传感器", "上海一仓", "¥16,320.00", "65.1%"},
+	}}}}
+	metadata, inspection, _, err := inspectWorkbook(book, map[string]any{"headerRow": 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNames := []string{"SKU", "商品名称", "品类", "仓库", "金额", "完成率"}
+	for index, want := range wantNames {
+		if metadata[0].Columns[index].Name != want {
+			t.Fatalf("column %d = %#v", index, metadata[0].Columns[index])
+		}
+	}
+	if metadata[0].Columns[4].CanonicalType != "DECIMAL" || metadata[0].Columns[5].CanonicalType != "DECIMAL" {
+		t.Fatalf("columns = %#v", metadata[0].Columns)
+	}
+	if inspection.Sheets[0].Columns[3].Name != "仓库" {
+		t.Fatalf("inspection = %#v", inspection)
+	}
+	if amount, ok := ParseSpreadsheetNumber("(￥1,234.50)"); !ok || amount != -1234.5 {
+		t.Fatalf("amount=%v ok=%v", amount, ok)
+	}
+	if ratio, ok := ParseSpreadsheetNumber("65.1%"); !ok || math.Abs(ratio-0.651) > 1e-12 {
+		t.Fatalf("ratio=%v ok=%v", ratio, ok)
 	}
 }
 

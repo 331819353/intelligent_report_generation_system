@@ -464,7 +464,8 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 		}
 		if err := s.completer.CompleteTable(ctx, claim.TenantID, claim.RequestedBy, tableID, rows, targetTable, targetColumnIDs, structureHash, item.ID, workerID, source.Version); err != nil {
 			slog.ErrorContext(ctx, "metadata job LLM completion failed", "job_id", claim.ID, "table", item.TableName, "error", err)
-			if err := s.failMetadataJobItem(ctx, claim, item, workerID, lease, "LLM", "LLM_COMPLETION_FAILED", "LLM 表结构完善失败"); err != nil {
+			failureCode, failureMessage := metadataCompletionJobFailure(err)
+			if err := s.failMetadataJobItem(ctx, claim, item, workerID, lease, "LLM", failureCode, failureMessage); err != nil {
 				return err
 			}
 			continue
@@ -474,6 +475,38 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 		}
 	}
 	return nil
+}
+
+type metadataCompletionFailureCoder interface {
+	MetadataCompletionFailureCode() string
+}
+
+func metadataCompletionJobFailure(err error) (string, string) {
+	code := "COMPLETION_FAILED"
+	var classified metadataCompletionFailureCoder
+	if errors.As(err, &classified) {
+		code = classified.MetadataCompletionFailureCode()
+	}
+	switch code {
+	case "SOURCE_CHANGED":
+		return "SOURCE_CHANGED_DURING_LLM", "LLM 处理期间数据源配置或运行状态发生变化，请重新提交映射任务"
+	case "STRUCTURE_CHANGED":
+		return "STRUCTURE_CHANGED_DURING_LLM", "LLM 处理期间表结构已更新，请重新读取文件结构后再提交"
+	case "PROCESSING_LEASE_LOST":
+		return "TASK_LEASE_LOST", "后台任务执行权已转移，系统会保留新任务结果；请刷新进度"
+	case "PROVIDER_UNAVAILABLE":
+		return "LLM_NOT_CONFIGURED", "LLM 服务未配置或当前不可用，请检查模型配置"
+	case "TENANT_AI_FORBIDDEN":
+		return "LLM_ACCESS_DENIED", "当前租户未启用 LLM 元数据完善能力"
+	case "QUOTA_EXCEEDED":
+		return "LLM_QUOTA_EXCEEDED", "LLM 调用额度已用完，请补充额度后重新提交"
+	case "TIMEOUT":
+		return "LLM_TIMEOUT", "LLM 表结构完善超时，请稍后重新提交"
+	case "INVALID_OUTPUT":
+		return "LLM_OUTPUT_INVALID", "LLM 返回的表名、字段或标签不完整，请重试或改为手工完善"
+	default:
+		return "LLM_COMPLETION_FAILED", "LLM 表结构完善失败，请重试；若持续失败可先手工完善表名、字段和标签"
+	}
 }
 
 // authoritativeMetadataSnapshot 只允许完整且可审计的发现快照驱动“源表已删除”判断。

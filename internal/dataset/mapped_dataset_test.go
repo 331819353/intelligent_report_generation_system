@@ -97,6 +97,29 @@ func TestBuildMappedDatasetDocumentCreatesDirectSingleTableGraph(t *testing.T) {
 	}
 }
 
+func TestBuildMappedDatasetDocumentSupportsSafeUnicodePhysicalColumns(t *testing.T) {
+	table := MappedDatasetTable{
+		ID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", DataSourceID: "source-1", TableName: "CSV", BusinessName: "销售订单明细表",
+	}
+	document, err := BuildMappedDatasetDocument(table, []MappedDatasetColumn{
+		{ColumnName: "订单编号", BusinessName: "订单编号", CanonicalType: "TEXT"},
+		{ColumnName: "订单金额", BusinessName: "订单金额", CanonicalType: "DECIMAL", SemanticType: "AMOUNT"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(document.Nodes[0].Projection, []string{"订单编号", "订单金额"}) || document.Fields[0].Expression.Field != "订单编号" {
+		t.Fatalf("document = %#v", document)
+	}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Prepare(raw); err != nil {
+		t.Fatalf("unicode physical fields did not pass Prepare: %v", err)
+	}
+}
+
 func TestBuildMappedDatasetDocumentUsesStableCollisionSuffixesAndFirstColumnGrain(t *testing.T) {
 	table := MappedDatasetTable{
 		ID: "33333333-3333-4333-8333-333333333333", DataSourceID: "source-1", TableName: "raw_orders",

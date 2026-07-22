@@ -29,6 +29,19 @@ func compilerInput(t *testing.T) Input {
 	}
 }
 
+func TestPhysicalIdentifierWhitelistSupportsUnicodeWithoutAllowingSQLSyntax(t *testing.T) {
+	for _, value := range []string{"订单编号", "客户ID", "amount_金额", "字段$1"} {
+		if !safeIdentifier.MatchString(value) {
+			t.Fatalf("safe identifier rejected: %q", value)
+		}
+	}
+	for _, value := range []string{"订单 金额", "订单金额`", "订单金额;DROP", "schema.column", "1号字段"} {
+		if safeIdentifier.MatchString(value) {
+			t.Fatalf("unsafe identifier accepted: %q", value)
+		}
+	}
+}
+
 func TestCompileBindsValuesAndInjectsPolicies(t *testing.T) {
 	compiled, err := Compile(compilerInput(t))
 	if err != nil {

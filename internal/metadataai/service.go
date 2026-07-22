@@ -37,6 +37,18 @@ type Service struct {
 	now       func() time.Time
 }
 
+type metadataCompletionFailure struct {
+	code  string
+	cause error
+}
+
+func (e metadataCompletionFailure) Error() string { return e.cause.Error() }
+func (e metadataCompletionFailure) Unwrap() error { return e.cause }
+
+// MetadataCompletionFailureCode exposes only a stable local category to the data-source
+// worker. Raw provider output and database details remain confined to server-side logs.
+func (e metadataCompletionFailure) MetadataCompletionFailureCode() string { return e.code }
+
 type GenerateResult struct {
 	Job         Job          `json:"job"`
 	Suggestions []Suggestion `json:"suggestions"`
@@ -66,7 +78,33 @@ func (s *Service) CompleteTable(ctx context.Context, tenantID, actorID, tableID 
 		samples = samples[:3]
 	}
 	_, err := s.generate(ctx, tenantID, actorID, tableID, samples, targetTable, targetColumnIDs, expectedStructureHash, processingItemID, processingWorkerID, processingSourceVersion)
-	return err
+	if err == nil {
+		return nil
+	}
+	return metadataCompletionFailure{code: metadataCompletionFailureCode(err), cause: err}
+}
+
+func metadataCompletionFailureCode(err error) string {
+	switch {
+	case errors.Is(err, ErrSourceChanged):
+		return "SOURCE_CHANGED"
+	case errors.Is(err, ErrStructureChanged):
+		return "STRUCTURE_CHANGED"
+	case errors.Is(err, ErrProcessingLeaseLost):
+		return "PROCESSING_LEASE_LOST"
+	case errors.Is(err, ErrProviderUnavailable):
+		return "PROVIDER_UNAVAILABLE"
+	case errors.Is(err, ErrInvalidOutput):
+		return "INVALID_OUTPUT"
+	case errors.Is(err, aiplatform.ErrTenantAIForbidden):
+		return "TENANT_AI_FORBIDDEN"
+	case errors.Is(err, aiplatform.ErrQuotaExceeded):
+		return "QUOTA_EXCEEDED"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "TIMEOUT"
+	default:
+		return "COMPLETION_FAILED"
+	}
 }
 
 func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID string, samples []map[string]any, targetTable bool, targetColumnIDs []string, expectedStructureHash, processingItemID, processingWorkerID string, processingSourceVersion int64) (GenerateResult, error) {

@@ -23,7 +23,7 @@ const (
 	Oracle Dialect = "ORACLE"
 )
 
-var safeIdentifier = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_$#]{0,127}$`)
+var safeIdentifier = regexp.MustCompile(`^[\p{L}][\p{L}\p{N}_$#]{0,127}$`)
 var safeMaskCharacter = regexp.MustCompile(`^[\p{L}\p{N}*•]$`)
 
 // TableRef 是从控制库加载的可信物理表白名单。

@@ -1367,7 +1367,10 @@ func parseCell(value, canonicalType string) (any, error) {
 	case "NUMBER", "INTEGER":
 		return strconv.ParseInt(value, 10, 64)
 	case "DECIMAL":
-		return strconv.ParseFloat(value, 64)
+		if parsed, ok := datasource.ParseSpreadsheetNumber(value); ok {
+			return parsed, nil
+		}
+		return nil, errors.New("invalid decimal")
 	case "BOOLEAN":
 		switch strings.ToLower(value) {
 		case "true", "yes", "1":

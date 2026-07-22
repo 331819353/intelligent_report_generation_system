@@ -90,10 +90,12 @@ func (r *PostgresRepository) Update(ctx context.Context, s Source) (Source, erro
 	return s, err
 }
 
-// UpdateStatus 原子更新生命周期状态、错误信息和版本号。
+// UpdateStatus 原子更新生命周期状态和探测信息。只有生命周期状态真正变化时才
+// 推进版本；对 ACTIVE 数据源重复执行成功的连通性测试只更新 last_tested_at，
+// 不应让正在进行的元数据 LLM 任务误判为配置已发生变化。
 func (r *PostgresRepository) UpdateStatus(ctx context.Context, tenantID, id string, status Status, message string) error {
 	return database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE platform.data_sources SET status=$1::platform.data_source_status,last_error=NULLIF($2,''),last_tested_at=CASE WHEN $1::platform.data_source_status IN ('ACTIVE','ERROR') THEN now() ELSE last_tested_at END,last_synced_at=CASE WHEN $1::platform.data_source_status='ACTIVE' AND status='SYNCING' THEN now() ELSE last_synced_at END,deleted_at=CASE WHEN $1::platform.data_source_status='DELETED' THEN now() ELSE deleted_at END,version=version+1 WHERE id=$3`, status, message, id)
+		tag, err := tx.Exec(ctx, `UPDATE platform.data_sources SET status=$1::platform.data_source_status,last_error=NULLIF($2,''),last_tested_at=CASE WHEN $1::platform.data_source_status IN ('ACTIVE','ERROR') THEN now() ELSE last_tested_at END,last_synced_at=CASE WHEN $1::platform.data_source_status='ACTIVE' AND status='SYNCING' THEN now() ELSE last_synced_at END,deleted_at=CASE WHEN $1::platform.data_source_status='DELETED' THEN now() ELSE deleted_at END,version=version+CASE WHEN status IS DISTINCT FROM $1::platform.data_source_status THEN 1 ELSE 0 END WHERE id=$3`, status, message, id)
 		if err != nil {
 			return err
 		}

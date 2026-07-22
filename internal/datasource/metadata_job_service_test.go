@@ -584,3 +584,19 @@ func TestFailMetadataJobItemKeepsActualFailureStage(t *testing.T) {
 		t.Fatalf("update=%#v", update)
 	}
 }
+
+type classifiedMetadataCompletionError struct{ code string }
+
+func (e classifiedMetadataCompletionError) Error() string                         { return "private completion detail" }
+func (e classifiedMetadataCompletionError) MetadataCompletionFailureCode() string { return e.code }
+
+func TestMetadataCompletionJobFailureReturnsActionableSafeMessage(t *testing.T) {
+	code, message := metadataCompletionJobFailure(classifiedMetadataCompletionError{code: "SOURCE_CHANGED"})
+	if code != "SOURCE_CHANGED_DURING_LLM" || !strings.Contains(message, "重新提交映射任务") || strings.Contains(message, "private") {
+		t.Fatalf("code=%q message=%q", code, message)
+	}
+	code, message = metadataCompletionJobFailure(classifiedMetadataCompletionError{code: "INVALID_OUTPUT"})
+	if code != "LLM_OUTPUT_INVALID" || !strings.Contains(message, "手工完善") {
+		t.Fatalf("code=%q message=%q", code, message)
+	}
+}

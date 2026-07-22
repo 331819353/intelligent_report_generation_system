@@ -313,7 +313,7 @@ func (c *ExcelConnector) Sample(ctx context.Context, source Source, table Metada
 		if headerRow < 1 || len(sheet.Rows) < headerRow {
 			return SampleResult{}, fmt.Errorf("sheet %s does not contain header row", sheet.Name)
 		}
-		headers := deduplicateHeaders(sheet.Rows[headerRow-1])
+		headers := sheetHeaders(sheet, headerRow)
 		rows := make([][]any, 0, maxRows)
 		for _, row := range sheet.Rows[headerRow:] {
 			if skipEmptyRows && emptyRow(row) {
@@ -423,7 +423,7 @@ func inspectWorkbook(book spikeexcel.Workbook, config map[string]any) ([]Metadat
 		if len(sheet.Rows) < headerRow {
 			return nil, ExcelWorkbookInspection{}, nil, fmt.Errorf("sheet %s does not contain header row", sheet.Name)
 		}
-		headers := deduplicateHeaders(sheet.Rows[headerRow-1])
+		headers := sheetHeaders(sheet, headerRow)
 		if len(headers) == 0 || emptyRow(sheet.Rows[headerRow-1]) {
 			return nil, ExcelWorkbookInspection{}, nil, fmt.Errorf("sheet %s header row is empty", sheet.Name)
 		}
@@ -494,21 +494,59 @@ func excelSheetParseOptions(config map[string]any, sheet spikeexcel.Sheet) (int,
 		}
 	}
 	if headerRow == 0 {
-		limit := len(sheet.Rows)
-		if limit > excelStructureSampleRows {
-			limit = excelStructureSampleRows
-		}
-		for index := 0; index < limit; index++ {
-			if !emptyRow(sheet.Rows[index]) {
-				headerRow = index + 1
-				break
-			}
-		}
+		headerRow = detectExcelHeaderRow(sheet)
 	}
 	if headerRow < 1 {
 		return 0, false, fmt.Errorf("sheet %s does not contain a non-empty header in its first %d rows", sheet.Name, excelStructureSampleRows)
 	}
 	return headerRow, skipEmptyRows, nil
+}
+
+// detectExcelHeaderRow identifies the leaf header in the first ten rows. Real workbooks
+// commonly start with a merged title, a note and one or more sparse grouping-header rows;
+// choosing the first non-empty row turns those decorative cells into a one-column schema.
+// A leaf header is expected to cover most of the observed sheet width and to be primarily
+// textual. If the sample is genuinely ambiguous (for example, a single-column sheet), the
+// original first-non-empty fallback keeps the result deterministic and lets later validation
+// report any inconsistent row width instead of silently treating a data row as the header.
+func detectExcelHeaderRow(sheet spikeexcel.Sheet) int {
+	limit := len(sheet.Rows)
+	if limit > excelStructureSampleRows {
+		limit = excelStructureSampleRows
+	}
+	observedWidth := 0
+	for index := 0; index < limit; index++ {
+		if len(sheet.Rows[index]) > observedWidth {
+			observedWidth = len(sheet.Rows[index])
+		}
+	}
+	minimumCells := 2
+	if observedWidth <= 1 {
+		minimumCells = 1
+	}
+	for index := 0; index < limit; index++ {
+		nonEmpty, textual := 0, 0
+		for _, raw := range sheet.Rows[index] {
+			value := strings.TrimSpace(raw)
+			if value == "" {
+				continue
+			}
+			nonEmpty++
+			if inferType([]string{value}) == "TEXT" {
+				textual++
+			}
+		}
+		if nonEmpty < minimumCells || nonEmpty*5 < observedWidth*3 || textual*5 < nonEmpty*4 {
+			continue
+		}
+		return index + 1
+	}
+	for index := 0; index < limit; index++ {
+		if !emptyRow(sheet.Rows[index]) {
+			return index + 1
+		}
+	}
+	return 0
 }
 
 // prepareFileTables 使用与元数据同步相同的表头、空行和类型规则生成执行输入。
@@ -537,7 +575,7 @@ func prepareFileTables(book spikeexcel.Workbook, config map[string]any) ([]FileT
 		if !ok || len(sheet.Rows) < headerRow {
 			continue
 		}
-		columns := deduplicateHeaders(sheet.Rows[headerRow-1])
+		columns := sheetHeaders(sheet, headerRow)
 		rows := append([][]string(nil), sheet.Rows[headerRow:]...)
 		if skipEmptyRows {
 			filtered := make([][]string, 0, len(rows))
@@ -577,6 +615,30 @@ func deduplicateHeaders(row []string) []string {
 	return out
 }
 
+// sheetHeaders builds the final leaf-header row. A vertically merged header is represented by
+// spreadsheet readers only at the merge's top-left cell, so a blank leaf cell inherits the
+// nearest non-empty value in the same column from preceding header/title rows. Horizontal group
+// labels do not bleed into adjacent columns because their merged follower cells remain empty.
+func sheetHeaders(sheet spikeexcel.Sheet, headerRow int) []string {
+	leaf := append([]string(nil), sheet.Rows[headerRow-1]...)
+	for column, value := range leaf {
+		if strings.TrimSpace(value) != "" {
+			continue
+		}
+		for row := headerRow - 2; row >= 0; row-- {
+			if column >= len(sheet.Rows[row]) {
+				continue
+			}
+			candidate := strings.TrimSpace(sheet.Rows[row][column])
+			if candidate != "" {
+				leaf[column] = candidate
+				break
+			}
+		}
+	}
+	return deduplicateHeaders(leaf)
+}
+
 // inferType 按布尔、整数、小数、日期时间的优先级推断规范类型。
 func inferType(values []string) string {
 	// 采用“全部非空样本都能解析”的最窄共同类型；只要出现混合值就回退 TEXT，
@@ -593,7 +655,7 @@ func inferType(values []string) string {
 		if _, err := strconv.ParseInt(value, 10, 64); err != nil {
 			allInt = false
 		}
-		if _, err := strconv.ParseFloat(value, 64); err != nil {
+		if _, ok := ParseSpreadsheetNumber(value); !ok {
 			allDecimal = false
 		}
 		allDate = allDate && parsesAny(value, []string{"2006-01-02", "2006/01/02", "01/02/2006"})
@@ -619,6 +681,44 @@ func inferType(values []string) string {
 		return "TIME"
 	}
 	return "TEXT"
+}
+
+// ParseSpreadsheetNumber accepts the formatted numeric strings returned by Excel readers while
+// keeping the accepted grammar deliberately narrow. Currency symbols and grouping separators are
+// presentation only; percentages are converted to their numeric ratio so aggregations use the
+// same value users see in Excel formulas.
+func ParseSpreadsheetNumber(value string) (float64, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	negative := strings.HasPrefix(value, "(") && strings.HasSuffix(value, ")")
+	if negative {
+		value = strings.TrimSpace(value[1 : len(value)-1])
+	}
+	percentage := strings.HasSuffix(value, "%")
+	if percentage {
+		value = strings.TrimSpace(strings.TrimSuffix(value, "%"))
+	}
+	for len(value) > 0 {
+		first := []rune(value)[0]
+		if !strings.ContainsRune("¥￥$€£", first) {
+			break
+		}
+		value = strings.TrimSpace(strings.TrimPrefix(value, string(first)))
+	}
+	value = strings.NewReplacer(",", "", "，", "", " ", "").Replace(value)
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, false
+	}
+	if negative {
+		parsed = -parsed
+	}
+	if percentage {
+		parsed /= 100
+	}
+	return parsed, true
 }
 
 // validCanonical 判断字符串是否属于支持的规范数据类型。

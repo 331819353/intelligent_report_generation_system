@@ -178,6 +178,17 @@ func TestComparisonKeepsSQLNullSemantics(t *testing.T) {
 	}
 }
 
+func TestParseCellAcceptsExcelCurrencyAndPercentageFormatting(t *testing.T) {
+	amount, err := parseCell("¥16,320.00", "DECIMAL")
+	if err != nil || amount != 16320.0 {
+		t.Fatalf("amount=%#v err=%v", amount, err)
+	}
+	ratio, err := parseCell("65.1%", "DECIMAL")
+	if err != nil || math.Abs(ratio.(float64)-0.651) > 1e-12 {
+		t.Fatalf("ratio=%#v err=%v", ratio, err)
+	}
+}
+
 func TestTextExpressionsUseUnicodeCharacterPositions(t *testing.T) {
 	field := dataset.Expression{Type: "FIELD_REF", NodeID: "source", Field: "name"}
 	substring := dataset.Expression{Type: "SUBSTRING", Arguments: []dataset.Expression{{Type: "TRIM", Argument: &field}, {Type: "LITERAL", Value: 2}, {Type: "LITERAL", Value: 3}}}
