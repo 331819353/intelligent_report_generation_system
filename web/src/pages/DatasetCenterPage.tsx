@@ -5,6 +5,7 @@ import { AppShell } from '../components/AppShell'
 import { RequestError } from '../lib/api'
 import {
   datasetAIPlanFromEditor,
+  datasetAIRequestContext,
   materializeDatasetAIPlan,
   normalizeDatasetAIPlanHints,
   requestDatasetAIProposal,
@@ -1867,9 +1868,13 @@ export function DatasetCenterPage() {
     const requestID = ++aiRequest.current
     const baseFingerprint = editorFingerprintRef.current
     const actualCurrent = datasetAIPlanFromEditor(draft, currentDesignerGraph, metadata)
-    const current = !useActualCanvas && !aiApplied && aiResult
-      ? aiResult.proposal.plan
-      : actualCurrent
+    // Once the canvas contains nodes it is the single source of truth for every AI
+    // modification. A staged proposal is only reusable while a brand-new canvas is
+    // still empty; this prevents a follow-up prompt from silently ignoring manual edits.
+    const current = datasetAIRequestContext(actualCurrent, aiResult?.proposal.plan, {
+      forceLiveCanvas: useActualCanvas,
+      stagedProposalApplied: aiApplied,
+    })
     setAILastInstruction(instruction)
     setAIRetryAction(null)
     setAIBusy(true)

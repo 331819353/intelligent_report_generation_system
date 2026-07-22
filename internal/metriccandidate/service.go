@@ -117,9 +117,18 @@ type JobStore interface {
 }
 
 // Worker 运行纯规则提取器。LLM 不在此路径上，因此数据集发布不依赖模型可用性。
-type Worker struct{ store JobStore }
+type Worker struct {
+	store    JobStore
+	enricher *Enricher
+}
 
-func NewWorker(store JobStore) *Worker { return &Worker{store: store} }
+func NewWorker(store JobStore, enrichers ...*Enricher) *Worker {
+	worker := &Worker{store: store}
+	if len(enrichers) > 0 {
+		worker.enricher = enrichers[0]
+	}
+	return worker
+}
 
 func (w *Worker) TenantIDs(ctx context.Context) ([]string, error) {
 	return w.store.ListJobTenantIDs(ctx)
@@ -135,6 +144,15 @@ func (w *Worker) ProcessNext(ctx context.Context, tenantID, workerID string, lea
 		var result ExtractionResult
 		result, err = Extract(version)
 		if err == nil {
+			if w.enricher != nil {
+				var enrichmentErr error
+				result, enrichmentErr = w.enricher.Enrich(ctx, claim.TenantID, claim.RequestedBy, version, result)
+				if enrichmentErr != nil {
+					result.Warnings = append(result.Warnings, "LLM 语义补全暂不可用，本次已使用规则生成的口径、血缘和标签，后续可重试补全。")
+				}
+			} else {
+				result = attachDefaultSemantics(version, result)
+			}
 			err = w.store.FinishJob(ctx, *claim, workerID, result)
 		}
 	}

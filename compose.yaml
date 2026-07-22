@@ -3,7 +3,7 @@ name: intelligent-report-system
 services:
   # 平台控制面数据库，初始化脚本只创建最小权限应用账号。
   postgres:
-    image: postgres:17-alpine
+    image: pgvector/pgvector:pg17
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-intelligent_report}

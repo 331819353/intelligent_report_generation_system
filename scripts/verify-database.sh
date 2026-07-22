@@ -56,7 +56,18 @@ DECLARE
   metric_a uuid;
   metric_version_a uuid;
   metric_visible integer;
+  metric_semantic_visible integer;
+  metric_semantic_shape_rejected boolean := false;
   metric_cross_tenant_rejected boolean := false;
+  asset_source_a uuid;
+  asset_table_a uuid;
+  asset_column_a uuid;
+  asset_embedding_visible integer;
+  asset_outbox_visible integer;
+  table_event_version_before bigint;
+  column_event_version_before bigint;
+  table_event_version_after bigint;
+  column_event_version_after bigint;
 BEGIN
   -- 构造两个租户的最小数据集，验证跨租户访问始终被拒绝。
   INSERT INTO platform.tenants(code, name) VALUES ('verify-a', 'Verify Tenant A') RETURNING id INTO tenant_a;
@@ -106,6 +117,84 @@ BEGIN
   SELECT count(*) INTO metric_visible FROM platform.metrics;
   IF metric_visible <> 1 THEN
     RAISE EXCEPTION 'metric draft was not visible in its tenant';
+  END IF;
+  INSERT INTO platform.metric_semantic_documents(
+    tenant_id,subject_type,metric_id,metric_version_id,dataset_id,dataset_version_id,
+    name,description,caliber,dimensions,period,period_description,lineage,lineage_summary,
+    tags,document,semantic_source,prompt_version,semantic_input_hash
+  ) VALUES (
+    tenant_a,'METRIC_VERSION',metric_a,metric_version_a,metric_dataset_a,metric_dataset_version_a,
+    'Verify Metric','verification document','SUM verification caliber','{}','NONE',
+    'no fixed period','{}','verification lineage',ARRAY['verify','metric'],
+    'metric verification document','RULE','verify-semantic-v1',repeat('4',64)
+  );
+  SELECT count(*) INTO metric_semantic_visible FROM platform.metric_semantic_documents;
+  IF metric_semantic_visible <> 1 THEN
+    RAISE EXCEPTION 'metric semantic document was not visible in its tenant';
+  END IF;
+  BEGIN
+    INSERT INTO platform.metric_semantic_documents(
+      tenant_id,subject_type,metric_id,metric_version_id,dataset_id,dataset_version_id,
+      name,caliber,period_description,lineage,lineage_summary,document,
+      semantic_source,prompt_version,semantic_input_hash
+    ) VALUES (
+      tenant_a,'CANDIDATE',metric_a,metric_version_a,metric_dataset_a,metric_dataset_version_a,
+      'Invalid Shape','invalid','none','{}','invalid','invalid',
+      'RULE','verify-semantic-v1',repeat('5',64)
+    );
+  EXCEPTION WHEN check_violation THEN
+    metric_semantic_shape_rejected := true;
+  END;
+  IF NOT metric_semantic_shape_rejected THEN
+    RAISE EXCEPTION 'invalid metric semantic subject shape was accepted';
+  END IF;
+
+  -- 构造已完成补全的映射表，验证事务 outbox 合并、选择性重建和向量文档 RLS。
+  INSERT INTO platform.data_sources(tenant_id,code,name,source_type,status,config,secret_ref)
+  VALUES (tenant_a,'verify_asset_source','Verify Asset Source','MYSQL','ACTIVE','{}','env://VERIFY_ASSET_SECRET')
+  RETURNING id INTO asset_source_a;
+  INSERT INTO platform.metadata_tables(
+    tenant_id,data_source_id,schema_name,table_name,table_type,structure_hash,last_sync_at,
+    business_name,business_description,tags,table_structure_hash,last_enriched_table_structure_hash,
+    last_enriched_structure_hash
+  ) VALUES (
+    tenant_a,asset_source_a,'verify','orders','TABLE',repeat('6',64),now(),
+    '验证订单表','仅用于回滚事务内验证',ARRAY['订单','销售'],repeat('7',64),repeat('7',64),repeat('6',64)
+  ) RETURNING id INTO asset_table_a;
+  INSERT INTO platform.metadata_columns(
+    tenant_id,table_id,column_name,ordinal_position,native_type,canonical_type,nullable,
+    structure_hash,last_sync_at,business_name,business_description,tags,semantic_type,
+    last_enriched_structure_hash
+  ) VALUES (
+    tenant_a,asset_table_a,'amount',1,'decimal(18,2)','DECIMAL',false,
+    repeat('8',64),now(),'销售额','订单销售金额',ARRAY['销售','金额'],'AMOUNT',repeat('8',64)
+  ) RETURNING id INTO asset_column_a;
+  SELECT count(*) INTO asset_outbox_visible FROM platform.asset_embedding_outbox;
+  IF asset_outbox_visible <> 2 THEN
+    RAISE EXCEPTION 'asset outbox did not merge table and column events: %', asset_outbox_visible;
+  END IF;
+  SELECT event_version INTO table_event_version_before FROM platform.asset_embedding_outbox
+  WHERE asset_type='TABLE' AND asset_id=asset_table_a;
+  SELECT event_version INTO column_event_version_before FROM platform.asset_embedding_outbox
+  WHERE asset_type='COLUMN' AND asset_id=asset_column_a;
+  UPDATE platform.metadata_columns SET tags=ARRAY['金额','销售','经营分析'] WHERE id=asset_column_a;
+  SELECT event_version INTO table_event_version_after FROM platform.asset_embedding_outbox
+  WHERE asset_type='TABLE' AND asset_id=asset_table_a;
+  SELECT event_version INTO column_event_version_after FROM platform.asset_embedding_outbox
+  WHERE asset_type='COLUMN' AND asset_id=asset_column_a;
+  SELECT count(*) INTO asset_outbox_visible FROM platform.asset_embedding_outbox;
+  IF asset_outbox_visible <> 2 OR table_event_version_after <> table_event_version_before+1
+     OR column_event_version_after <> column_event_version_before+1 THEN
+    RAISE EXCEPTION 'asset tag update was not limited to its table and column';
+  END IF;
+  INSERT INTO platform.asset_embeddings(
+    tenant_id,asset_type,asset_id,table_id,document_version,document,input_hash,status
+  ) VALUES (
+    tenant_a,'TABLE',asset_table_a,asset_table_a,'verify-v1','verification asset document',repeat('9',64),'PENDING'
+  );
+  SELECT count(*) INTO asset_embedding_visible FROM platform.asset_embeddings;
+  IF asset_embedding_visible <> 1 THEN
+    RAISE EXCEPTION 'asset embedding document was not visible in its tenant';
   END IF;
 
   -- 新租户必须保持默认禁用且只预置元数据用途；数据集 DAG 能力必须显式授权。
@@ -260,6 +349,15 @@ BEGIN
   IF metric_visible <> 0 THEN
     RAISE EXCEPTION 'metric draft leaked across tenants';
   END IF;
+  SELECT count(*) INTO metric_semantic_visible FROM platform.metric_semantic_documents;
+  IF metric_semantic_visible <> 0 THEN
+    RAISE EXCEPTION 'metric semantic document leaked across tenants';
+  END IF;
+  SELECT count(*) INTO asset_embedding_visible FROM platform.asset_embeddings;
+  SELECT count(*) INTO asset_outbox_visible FROM platform.asset_embedding_outbox;
+  IF asset_embedding_visible <> 0 OR asset_outbox_visible <> 0 THEN
+    RAISE EXCEPTION 'asset embedding state leaked across tenants';
+  END IF;
   BEGIN
     INSERT INTO platform.metrics(tenant_id,dataset_id,code,name,metric_type)
     VALUES (tenant_b,metric_dataset_a,'verify_cross_metric','Invalid Cross Metric','ATOMIC');
@@ -303,6 +401,15 @@ BEGIN
   SELECT count(*) INTO metric_visible FROM platform.metrics;
   IF metric_visible <> 0 THEN
     RAISE EXCEPTION 'RLS without tenant context exposed metric rows';
+  END IF;
+  SELECT count(*) INTO metric_semantic_visible FROM platform.metric_semantic_documents;
+  IF metric_semantic_visible <> 0 THEN
+    RAISE EXCEPTION 'RLS without tenant context exposed metric semantic rows';
+  END IF;
+  SELECT count(*) INTO asset_embedding_visible FROM platform.asset_embeddings;
+  SELECT count(*) INTO asset_outbox_visible FROM platform.asset_embedding_outbox;
+  IF asset_embedding_visible <> 0 OR asset_outbox_visible <> 0 THEN
+    RAISE EXCEPTION 'RLS without tenant context exposed asset embedding state';
   END IF;
 END
 $$;

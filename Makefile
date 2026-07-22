@@ -1,4 +1,4 @@
-.PHONY: fmt lint test test-integration test-source-integration connector-test build ci-check run-api run-worker seed-dev frontend-lint frontend-test frontend-build infra-config infra-up source-infra-up source-infra-status infra-down infra-reset infra-status infra-logs db-migrate db-verify db-shell clean
+.PHONY: fmt lint test test-integration test-source-integration connector-test build ci-check run-api run-worker seed-dev verify-asset-retrieval frontend-lint frontend-test frontend-build infra-config infra-up source-infra-up source-infra-status infra-down infra-reset infra-status infra-logs db-migrate db-verify db-shell clean
 
 export GOCACHE ?= $(CURDIR)/.cache/go-build
 
@@ -85,6 +85,9 @@ run-worker:
 
 seed-dev:
 	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; go run ./cmd/seed
+
+verify-asset-retrieval:
+	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; go run ./cmd/asset-retrieval-eval
 
 clean:
 	@rm -rf bin .cache coverage.out

@@ -345,7 +345,11 @@ export function MetricCatalogPage() {
   const filteredCandidates = useMemo(() => {
     const keyword = query.trim().toLocaleLowerCase('zh-CN')
     return candidates.filter(candidate => {
-      const matchesQuery = !keyword || [candidate.name, candidate.code, candidate.description]
+      const matchesQuery = !keyword || [
+        candidate.name, candidate.code, candidate.description,
+        candidate.semantic?.name, candidate.semantic?.description, candidate.semantic?.caliber,
+        candidate.semantic?.lineageSummary, ...(candidate.semantic?.dimensions ?? []), ...(candidate.semantic?.tags ?? []),
+      ].filter((value): value is string => Boolean(value))
         .some(value => value.toLocaleLowerCase('zh-CN').includes(keyword))
       return matchesQuery &&
         (candidateStatus === 'ALL' || candidate.status === candidateStatus) &&
@@ -547,6 +551,7 @@ function CandidateDetailDialog({ candidate, datasetName, datasetVersion, loading
           {!loading && error && <div className="metric-detail-notice" role="alert">{error}。候选依据仍可查看，但在来源恢复前不能接受。</div>}
           {!loading && tab === 'proposal' && <div className="metric-candidate-proposal">
             <section className="metric-formula-card"><span className="eyebrow">待确认业务口径</span><h4>{definition.metric.name}</h4><div className="metric-formula"><FunctionIcon size={22} weight="bold" /><code>{formulaLabel(definition, fields)}</code></div><p>{definition.metric.description || candidate.description || '暂无口径说明'}</p></section>
+            {candidate.semantic && <section className="metric-detail-section"><span className="eyebrow">LLM 检索语义</span><h4>{candidate.semantic.name}</h4><p>{candidate.semantic.description}</p><dl className="metric-fact-grid"><div><dt>统计口径</dt><dd>{candidate.semantic.caliber}</dd></div><div><dt>统计周期</dt><dd>{candidate.semantic.periodDescription}（{candidate.semantic.period}）</dd></div><div><dt>分析维度</dt><dd>{candidate.semantic.dimensions.join('、') || '无'}</dd></div><div><dt>数据血缘</dt><dd>{candidate.semantic.lineageSummary}</dd></div><div><dt>补全来源</dt><dd>{candidate.semantic.source === 'HYBRID' ? '规则事实 + LLM 补全' : candidate.semantic.source === 'RULE_FALLBACK' ? '规则降级' : '确定性规则'}</dd></div><div><dt>向量标签</dt><dd>{candidate.semantic.tags.join('、') || '无'}</dd></div></dl></section>}
             <section className="metric-detail-section"><span className="eyebrow">执行语义</span><h4>接受后写入指标草稿</h4><dl className="metric-semantics-grid"><div><dt>指标类型</dt><dd>{typeLabels[definition.metric.type] ?? definition.metric.type}</dd></div><div><dt>可加性</dt><dd>{additivityLabels[definition.additivity] ?? definition.additivity}</dd></div><div><dt>单位 / 格式</dt><dd>{definition.unit || '—'} · {definition.numberFormat}</dd></div><div><dt>精度 / 舍入</dt><dd>{definition.decimalScale} 位 · {definition.roundingMode}</dd></div></dl></section>
             <section className="metric-source-hero candidate-source-hero"><div className="metric-source-icon"><DatabaseIcon size={24} weight="bold" /></div><div><span className="eyebrow">候选来源</span><h4>{datasetName || datasetVersion?.dsl.dataset.name || shortId(candidate.datasetId)}</h4><p>{datasetVersion ? `V${datasetVersion.versionNo} · ${datasetVersion.status}` : '精确版本元数据不可用'}</p></div><dl><div><dt>数据集版本</dt><dd title={candidate.datasetVersionId}>{shortId(candidate.datasetVersionId)}</dd></div><div><dt>DSL 摘要</dt><dd title={candidate.dslHash}>{shortId(candidate.dslHash)}</dd></div><div><dt>来源字段</dt><dd>{candidate.sourceFieldIds.length}</dd></div></dl></section>
             <section className="metric-detail-section candidate-dimension-summary"><span className="eyebrow">建议分组范围</span><h4>{definition.allowedDimensions.length} 个允许维度</h4><p>{definition.allowedDimensions.length ? definition.allowedDimensions.map(dimension => `${dimension.name}（${fieldName(fields, dimension.fieldId)}）`).join('、') : '当前候选未开放分组维度。'}</p></section>

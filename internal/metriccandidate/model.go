@@ -78,6 +78,37 @@ type CandidateDraft struct {
 	Evidence         []Evidence        `json:"evidence"`
 	Warnings         []string          `json:"warnings"`
 	BlockReasons     []string          `json:"blockReasons"`
+	Semantic         SemanticMetadata  `json:"semantic"`
+}
+
+// SemanticMetadata is the searchable business document derived from authoritative metric facts.
+// Calculation, dimensions, period and lineage remain rule-owned; the LLM may only improve their
+// human-facing wording and tags.
+type SemanticMetadata struct {
+	Name              string          `json:"name"`
+	Description       string          `json:"description"`
+	Caliber           string          `json:"caliber"`
+	Dimensions        []string        `json:"dimensions"`
+	Period            string          `json:"period"`
+	PeriodDescription string          `json:"periodDescription"`
+	Lineage           LineageMetadata `json:"lineage"`
+	LineageSummary    string          `json:"lineageSummary"`
+	Tags              []string        `json:"tags"`
+	Source            string          `json:"source"`
+	Model             string          `json:"model,omitempty"`
+	PromptVersion     string          `json:"promptVersion,omitempty"`
+	InputHash         string          `json:"inputHash"`
+	RequestID         string          `json:"requestId,omitempty"`
+	ErrorCode         string          `json:"errorCode,omitempty"`
+}
+
+type LineageMetadata struct {
+	DatasetID                  string   `json:"datasetId"`
+	DatasetVersionID           string   `json:"datasetVersionId"`
+	SourceFieldID              string   `json:"sourceFieldId"`
+	Aggregation                string   `json:"aggregation"`
+	DimensionFieldIDs          []string `json:"dimensionFieldIds"`
+	DependencyMetricVersionIDs []string `json:"dependencyMetricVersionIds"`
 }
 
 // ExtractionResult is the complete deterministic output for one exact dataset version.
@@ -124,6 +155,7 @@ type Candidate struct {
 	DecisionReason     string              `json:"decisionReason,omitempty"`
 	CreatedAt          string              `json:"createdAt"`
 	UpdatedAt          string              `json:"updatedAt"`
+	Semantic           SemanticMetadata    `json:"semantic"`
 }
 
 type ListFilter struct {

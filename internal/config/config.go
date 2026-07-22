@@ -36,6 +36,12 @@ type Config struct {
 	AIInputCostMicrosPerMTokens  int64
 	AIOutputCostMicrosPerMTokens int64
 	AIConfidenceThreshold        float64
+	AIEmbeddingBaseURL           string
+	AIEmbeddingModel             string
+	AIEmbeddingAPIKey            string
+	AIEmbeddingDimensions        int
+	AIEmbeddingTimeout           time.Duration
+	DatasetAIRetrievalMode       string
 	DatabaseURL                  string
 	RedisURL                     string
 	MinIOEndpoint                string
@@ -55,6 +61,13 @@ type Config struct {
 
 // Load 从环境变量构建运行配置，并在返回前完成完整校验。
 func Load() (Config, error) {
+	aiBaseURL := envOrDefault("AI_BASE_URL", "https://mgallery.haier.net/v1/")
+	aiAPIKey := os.Getenv("AI_API_KEY")
+	embeddingBaseURL := envOrDefault("AI_EMBEDDING_BASE_URL", aiBaseURL)
+	embeddingAPIKey := os.Getenv("AI_EMBEDDING_API_KEY")
+	if strings.TrimSpace(embeddingAPIKey) == "" {
+		embeddingAPIKey = aiAPIKey
+	}
 	cfg := Config{
 		Environment:             envOrDefault("APP_ENV", "development"),
 		LogLevel:                envOrDefault("APP_LOG_LEVEL", "info"),
@@ -65,9 +78,9 @@ func Load() (Config, error) {
 		IdleTimeout:             60 * time.Second,
 		ShutdownTimeout:         10 * time.Second,
 		WorkerPollInterval:      2 * time.Second,
-		AIBaseURL:               envOrDefault("AI_BASE_URL", "https://mgallery.haier.net/v1/"),
+		AIBaseURL:               aiBaseURL,
 		AIModel:                 envOrDefault("AI_MODEL", "deepseek-v3"),
-		AIAPIKey:                os.Getenv("AI_API_KEY"),
+		AIAPIKey:                aiAPIKey,
 		AIRequestTimeout:        25 * time.Second,
 		AIAttemptTimeout:        8 * time.Second,
 		AIRetryBaseDelay:        200 * time.Millisecond,
@@ -75,6 +88,12 @@ func Load() (Config, error) {
 		AIMaxAttempts:           3,
 		AIMaxInputBytes:         256 << 10,
 		AIConfidenceThreshold:   0.8,
+		AIEmbeddingBaseURL:      embeddingBaseURL,
+		AIEmbeddingModel:        envOrDefault("AI_EMBEDDING_MODEL", "Qwen3-Embedding-4B"),
+		AIEmbeddingAPIKey:       embeddingAPIKey,
+		AIEmbeddingDimensions:   2560,
+		AIEmbeddingTimeout:      15 * time.Second,
+		DatasetAIRetrievalMode:  strings.ToUpper(envOrDefault("DATASET_AI_RETRIEVAL_MODE", "HYBRID")),
 		DatabaseURL:             envOrDefault("DATABASE_URL", "postgres://report_app:local_report_password@127.0.0.1:5432/intelligent_report?sslmode=disable"),
 		RedisURL:                envOrDefault("REDIS_URL", "redis://:local_redis_password@127.0.0.1:6379/0"),
 		MinIOEndpoint:           envOrDefault("MINIO_ENDPOINT", "127.0.0.1:9000"),
@@ -106,6 +125,7 @@ func Load() (Config, error) {
 		{"AI_ATTEMPT_TIMEOUT", &cfg.AIAttemptTimeout},
 		{"AI_RETRY_BASE_DELAY", &cfg.AIRetryBaseDelay},
 		{"AI_RETRY_MAX_DELAY", &cfg.AIRetryMaxDelay},
+		{"AI_EMBEDDING_TIMEOUT", &cfg.AIEmbeddingTimeout},
 		{"AUTH_ACCESS_TOKEN_TTL", &cfg.AuthAccessTTL},
 		{"AUTH_REFRESH_TOKEN_TTL", &cfg.AuthRefreshTTL},
 	}
@@ -129,6 +149,7 @@ func Load() (Config, error) {
 	}{
 		{"AI_MAX_ATTEMPTS", &cfg.AIMaxAttempts},
 		{"AI_MAX_INPUT_BYTES", &cfg.AIMaxInputBytes},
+		{"AI_EMBEDDING_DIMENSIONS", &cfg.AIEmbeddingDimensions},
 	}
 	for _, item := range integerOptions {
 		if value := os.Getenv(item.key); value != "" {
@@ -210,6 +231,23 @@ func (c Config) Validate() error {
 		if !validAIBaseURL(c.AIBaseURL) || strings.TrimSpace(c.AIModel) == "" {
 			return errors.New("AI_BASE_URL or AI_MODEL is invalid")
 		}
+	}
+	if c.AIEmbeddingTimeout <= 0 || c.AIEmbeddingTimeout > 2*time.Minute {
+		return errors.New("AI_EMBEDDING_TIMEOUT must be greater than zero and at most 2 minutes")
+	}
+	// The current pgvector migration uses halfvec(2560). A model dimension change needs a
+	// versioned column/index migration and a full backfill; accepting another value here would
+	// defer the mismatch to an asynchronous SQL cast failure.
+	if c.AIEmbeddingDimensions != 2560 {
+		return errors.New("AI_EMBEDDING_DIMENSIONS must be 2560 for the current semantic vector schemas")
+	}
+	if strings.TrimSpace(c.AIEmbeddingAPIKey) != "" {
+		if !validAIBaseURL(c.AIEmbeddingBaseURL) || strings.TrimSpace(c.AIEmbeddingModel) == "" {
+			return errors.New("AI_EMBEDDING_BASE_URL or AI_EMBEDDING_MODEL is invalid")
+		}
+	}
+	if c.DatasetAIRetrievalMode != "LEXICAL" && c.DatasetAIRetrievalMode != "SHADOW" && c.DatasetAIRetrievalMode != "HYBRID" {
+		return errors.New("DATASET_AI_RETRIEVAL_MODE must be LEXICAL, SHADOW or HYBRID")
 	}
 	if len(c.AuthAccessSecret) < 32 {
 		return errors.New("AUTH_ACCESS_TOKEN_SECRET must be at least 32 characters")

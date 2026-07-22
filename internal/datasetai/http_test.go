@@ -148,6 +148,26 @@ func TestWritePlanErrorNormalizesUnknownInvalidOutputMetadata(t *testing.T) {
 	}
 }
 
+func TestWritePlanErrorExposesStableTransformReasonWithoutDetail(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writePlanError(recorder, &InvalidOutputError{
+		ReasonCode: InvalidOutputReasonTransform,
+		Stage:      InvalidOutputStagePlanValidation,
+		Detail:     "transform_1 references a private field",
+	})
+
+	var body planInvalidOutputResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.ReasonCode != InvalidOutputReasonTransform {
+		t.Fatalf("body = %#v", body)
+	}
+	if strings.Contains(recorder.Body.String(), "transform_1") || strings.Contains(recorder.Body.String(), "private field") {
+		t.Fatalf("HTTP response leaked local validation detail: %s", recorder.Body.String())
+	}
+}
+
 func TestDatasetAIHTTPReturnsProposalAfterAutomaticRepair(t *testing.T) {
 	invalid := monthlyRegionalOrderCountProposal()
 	invalid.Plan.Nodes[0].SelectedColumns[0] = "COUNT(*)"

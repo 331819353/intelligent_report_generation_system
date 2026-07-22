@@ -9,7 +9,7 @@ import (
 
 const (
 	SchemaVersion       = "2.3"
-	PromptVersion       = "dataset-dag-planner-v10"
+	PromptVersion       = "dataset-dag-planner-v11"
 	IntentPromptVersion = "dataset-dag-intent-v8"
 
 	maxInstructionRunes = 4000
@@ -343,16 +343,18 @@ type CatalogTable struct {
 	TableName           string          `json:"tableName"`
 	BusinessName        string          `json:"businessName"`
 	BusinessDescription string          `json:"businessDescription"`
+	Tags                []string        `json:"tags"`
 	Columns             []CatalogColumn `json:"columns"`
 }
 
 type CatalogColumn struct {
-	Name                string `json:"name"`
-	BusinessName        string `json:"businessName"`
-	BusinessDescription string `json:"businessDescription"`
-	CanonicalType       string `json:"canonicalType"`
-	SemanticType        string `json:"semanticType"`
-	Nullable            bool   `json:"nullable"`
+	Name                string   `json:"name"`
+	BusinessName        string   `json:"businessName"`
+	BusinessDescription string   `json:"businessDescription"`
+	Tags                []string `json:"tags"`
+	CanonicalType       string   `json:"canonicalType"`
+	SemanticType        string   `json:"semanticType"`
+	Nullable            bool     `json:"nullable"`
 }
 
 type plannerPromptEnvelope struct {
@@ -645,12 +647,18 @@ func validateGraphShape(value GraphPlan) error {
 		}
 	}
 	for _, transform := range value.Transforms {
-		if !validIdentifier(transform.ID) || !boundedText(transform.Name, 1, 200) || len(transform.Rules) < 1 || len(transform.Rules) > 64 || !validTransformComponent(transform) {
-			return errors.New("transform identity, type, or rules are invalid")
+		if !validIdentifier(transform.ID) || !boundedText(transform.Name, 1, 200) || len(transform.Rules) < 1 || len(transform.Rules) > 64 {
+			return fmt.Errorf("transform %s identity or rule count is invalid", transform.ID)
+		}
+		if !validTransformComponent(transform) {
+			return fmt.Errorf("transform %s family %s does not match component type %s", transform.ID, transform.Family, transform.ComponentType)
 		}
 		for _, rule := range transform.Rules {
-			if !validIdentifier(rule.ID) || !validIdentifier(rule.Output.ID) || !validIdentifier(rule.Output.Code) || !boundedText(rule.Output.Name, 1, 200) || len(rule.InputKeys) < 1 || len(rule.InputKeys) > 16 || !validTransformRule(transform.ComponentType, rule) {
-				return errors.New("transform rule is invalid")
+			if !validIdentifier(rule.ID) || !validIdentifier(rule.Output.ID) || !validIdentifier(rule.Output.Code) || !boundedText(rule.Output.Name, 1, 200) || len(rule.InputKeys) < 1 || len(rule.InputKeys) > 16 {
+				return fmt.Errorf("transform %s rule %s identity, output metadata, or input count is invalid", transform.ID, rule.ID)
+			}
+			if detail := transformRuleValidationDetail(transform.ComponentType, rule); detail != "" {
+				return fmt.Errorf("transform %s rule %s is invalid: %s", transform.ID, rule.ID, detail)
 			}
 		}
 	}
@@ -670,6 +678,12 @@ func validTransformComponent(value PlanTransform) bool {
 }
 
 func validTransformRule(componentType string, rule PlanTransformRule) bool {
+	return transformRuleValidationDetail(componentType, rule) == ""
+}
+
+// transformRuleValidationDetail gives the repair model a precise, locally derived reason
+// without including provider prose or source-row values.
+func transformRuleValidationDetail(componentType string, rule PlanTransformRule) string {
 	operations := map[string]map[string]bool{
 		"TEXT_UPPER": {"UPPER": true}, "TEXT_TRIM": {"TRIM": true}, "TEXT_REPLACE": {"REPLACE": true}, "TEXT_LOWER": {"LOWER": true},
 		"TEXT_SUBSTRING": {"SUBSTRING": true}, "TEXT_CONCAT": {"CONCAT": true}, "NUMBER_ABSOLUTE": {"ABS": true},
@@ -677,51 +691,51 @@ func validTransformRule(componentType string, rule PlanTransformRule) bool {
 		"DATE_FORMAT": {"DATE_FORMAT": true}, "NULL": {"COALESCE": true}, "CAST": {"CAST": true}, "CONDITION": {"CASE": true},
 	}
 	if !operations[componentType][rule.Operation] || !oneOf(rule.Output.CanonicalType, "STRING", "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "DATETIME") {
-		return false
+		return fmt.Sprintf("operation %s is not allowed for %s or output canonical type %s is unsupported", rule.Operation, componentType, rule.Output.CanonicalType)
 	}
 	requiredInputs := 1
 	if oneOf(rule.Operation, "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "CONCAT") || rule.Operation == "COALESCE" && rule.FallbackMode == "FIELD" {
 		requiredInputs = 2
 	}
 	if len(rule.InputKeys) != requiredInputs {
-		return false
+		return fmt.Sprintf("operation %s requires %d input keys but received %d", rule.Operation, requiredInputs, len(rule.InputKeys))
 	}
 	if rule.Operation == "DATE_FORMAT" && !oneOf(rule.Unit, "YEAR", "MONTH", "QUARTER", "DAY") {
-		return false
+		return fmt.Sprintf("DATE_FORMAT unit %s must be YEAR, MONTH, QUARTER, or DAY", rule.Unit)
 	}
 	if rule.Operation == "CAST" && !oneOf(rule.TargetType, "STRING", "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "DATETIME") {
-		return false
+		return fmt.Sprintf("CAST target type %s is unsupported", rule.TargetType)
 	}
 	if rule.Operation == "CASE" {
 		if !oneOf(rule.ConditionOperator, "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "CONTAINS", "NOT_CONTAINS", "IN", "IS_NULL", "IS_NOT_NULL") {
-			return false
+			return fmt.Sprintf("CASE condition operator %s is unsupported", rule.ConditionOperator)
 		}
 		if rule.ConditionOperator == "IN" {
 			if len(rule.ConditionValues) == 0 || len(rule.ConditionValues) > 64 {
-				return false
+				return "CASE IN requires between 1 and 64 condition values"
 			}
 			for _, item := range rule.ConditionValues {
 				if !validIdentifier(item.ID) || !oneOf(item.Mode, "LITERAL", "FIELD") || strings.TrimSpace(item.Value) == "" {
-					return false
+					return fmt.Sprintf("CASE IN condition value %s has an invalid id, mode, or empty value", item.ID)
 				}
 			}
 		} else if !oneOf(rule.ConditionOperator, "IS_NULL", "IS_NOT_NULL") && strings.TrimSpace(rule.MatchValue) == "" {
-			return false
+			return fmt.Sprintf("CASE operator %s requires a non-empty match value", rule.ConditionOperator)
 		}
 	}
 	if rule.Operation == "COALESCE" && !oneOf(rule.FallbackMode, "LITERAL", "FIELD") {
-		return false
+		return fmt.Sprintf("COALESCE fallback mode %s must be LITERAL or FIELD", rule.FallbackMode)
 	}
 	if rule.Operation == "ROUND" && (rule.Precision == nil || *rule.Precision < -10 || *rule.Precision > 10) {
-		return false
+		return "ROUND precision must be present and between -10 and 10"
 	}
 	if rule.Operation == "SUBSTRING" && (rule.Start == nil || rule.Length == nil || *rule.Start < 1 || *rule.Length < 0) {
-		return false
+		return "SUBSTRING start must be at least 1 and length must be non-negative"
 	}
 	if rule.Operation == "REPLACE" && rule.SearchValue == "" {
-		return false
+		return "REPLACE search value must not be empty"
 	}
-	return true
+	return ""
 }
 
 func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
@@ -884,7 +898,10 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 					if node, ok := nodes[dimension.NodeID]; ok {
 						available = catalogColumns[node.TableID]
 					}
-					return nil, nil, invalidOutputWithReason(invalidColumnReason(dimension.Column, available), "group dimension references an unavailable physical or transform-produced field")
+					return nil, nil, invalidOutputWithReason(
+						invalidColumnReason(dimension.Column, available),
+						fmt.Sprintf("group %s dimension %s references an unavailable physical or transform-produced field at input %s:%s", group.ID, field, group.Input.Kind, group.Input.ID),
+					)
 				}
 				if !oneOf(dimension.Grouping, "", "DAY", "WEEK", "MONTH", "QUARTER", "YEAR") || fields[field] {
 					return nil, nil, errors.New("group dimension is duplicated or has invalid granularity")
@@ -902,7 +919,10 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 					if node, ok := nodes[metric.NodeID]; ok {
 						available = catalogColumns[node.TableID]
 					}
-					return nil, nil, invalidOutputWithReason(invalidColumnReason(metric.Column, available), "group metric references an unavailable physical or transform-produced field")
+					return nil, nil, invalidOutputWithReason(
+						invalidColumnReason(metric.Column, available),
+						fmt.Sprintf("group %s metric %s references an unavailable physical or transform-produced field at input %s:%s", group.ID, field, group.Input.Kind, group.Input.ID),
+					)
 				}
 				if !oneOf(metric.Aggregation, "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "MIN", "MAX") || fields[field] {
 					return nil, nil, errors.New("group metric is duplicated or has invalid aggregation")
@@ -926,8 +946,8 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 			}
 			fields := cloneSet(upstream)
 			for _, rule := range transform.Rules {
-				if !validTransformRule(transform.ComponentType, rule) {
-					return nil, nil, errors.New("transform rule is invalid")
+				if detail := transformRuleValidationDetail(transform.ComponentType, rule); detail != "" {
+					return nil, nil, fmt.Errorf("transform %s rule %s is invalid: %s", transform.ID, rule.ID, detail)
 				}
 				for _, inputKey := range rule.InputKeys {
 					if !upstream[inputKey] {

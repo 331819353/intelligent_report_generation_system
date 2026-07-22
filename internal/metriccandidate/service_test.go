@@ -246,7 +246,7 @@ func TestWorkerFinishesSuccessfulExtraction(t *testing.T) {
 		t.Fatalf("worker calls: load=%d finish=%d fail=%d results=%d", store.loadCalls, store.finishCalls, store.failCalls, len(store.results))
 	}
 	result := store.results[0]
-	if result.DatasetVersionID != version.ID || len(result.Candidates) == 0 || result.Status != TaskStatusPartial {
+	if result.DatasetVersionID != version.ID || len(result.Candidates) == 0 || result.Status != TaskStatusSucceeded {
 		t.Fatalf("finished extraction result = %#v", result)
 	}
 }

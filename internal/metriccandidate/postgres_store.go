@@ -2,6 +2,8 @@ package metriccandidate
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,7 +36,7 @@ func (s *PostgresStore) EnqueueDatasetMetricExtractionTx(
 		tenant_id,dataset_id,dataset_version_id,dsl_hash,requested_by,extractor_version
 	) VALUES($1,$2,$3,$4,NULLIF($5,'')::uuid,$6)
 	ON CONFLICT(tenant_id,dataset_version_id,extractor_version) DO NOTHING`,
-		tenantID, version.DatasetID, version.ID, version.DSLHash, actorID, ExtractorVersion)
+		tenantID, version.DatasetID, version.ID, version.DSLHash, actorID, JobVersion)
 	return err
 }
 
@@ -133,8 +135,11 @@ type persistedDraft struct {
 	draft       CandidateDraft
 	definition  json.RawMessage
 	evidence    json.RawMessage
+	lineage     json.RawMessage
+	document    string
 	confidence  float64
 	assumptions []string
+	method      string
 }
 
 // FinishJob 在一个事务内保存全部候选并收口任务；worker 崩溃不会留下部分候选批次。
@@ -146,6 +151,7 @@ func (s *PostgresStore) FinishJob(ctx context.Context, claim JobClaim, workerID 
 	persisted := make([]persistedDraft, 0, len(result.Candidates))
 	ready, review, blocked := 0, 0, 0
 	for _, draft := range result.Candidates {
+		draft.Semantic = normalizeSemanticForPersistence(draft, claim)
 		definition, err := json.Marshal(draft.Definition)
 		if err != nil {
 			return err
@@ -157,6 +163,14 @@ func (s *PostgresStore) FinishJob(ctx context.Context, claim JobClaim, workerID 
 		evidence, err := json.Marshal(evidenceItems)
 		if err != nil {
 			return err
+		}
+		lineage, err := json.Marshal(draft.Semantic.Lineage)
+		if err != nil {
+			return err
+		}
+		method := "RULE"
+		if draft.Semantic.Source == "HYBRID" {
+			method = "HYBRID"
 		}
 		assumptions := []string{}
 		switch draft.Status {
@@ -171,7 +185,8 @@ func (s *PostgresStore) FinishJob(ctx context.Context, claim JobClaim, workerID 
 			return ErrInvalidRequest
 		}
 		persisted = append(persisted, persistedDraft{
-			draft: draft, definition: definition, evidence: evidence,
+			draft: draft, definition: definition, evidence: evidence, lineage: lineage,
+			document: EmbeddingDocument(draft.Semantic), method: method,
 			confidence: confidenceScore(draft.Confidence), assumptions: assumptions,
 		})
 	}
@@ -199,13 +214,43 @@ func (s *PostgresStore) FinishJob(ctx context.Context, claim JobClaim, workerID 
 				tenant_id,job_id,dataset_id,dataset_version_id,dsl_hash,name,code,description,
 				status,method,confidence,proposed_definition,source_field_ids,evidence,
 				assumptions,warnings,block_reasons,fingerprint
-			) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'RULE',$10,$11,$12,$13,$14,$15,$16,$17)
+			) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 			ON CONFLICT(tenant_id,fingerprint) DO NOTHING`,
 				claim.TenantID, claim.ID, claim.DatasetID, claim.DatasetVersionID, claim.DSLHash,
 				definition.Metric.Name, definition.Metric.Code, definition.Metric.Description,
-				item.draft.Status, item.confidence, item.definition, []string{item.draft.SourceFieldID},
+				item.draft.Status, item.method, item.confidence, item.definition, []string{item.draft.SourceFieldID},
 				item.evidence, item.assumptions, item.draft.Warnings, item.draft.BlockReasons,
 				item.draft.Fingerprint); err != nil {
+				return err
+			}
+			var candidateID string
+			if err := tx.QueryRow(ctx, `SELECT id::text FROM platform.metric_candidates
+				WHERE tenant_id=$1 AND fingerprint=$2`, claim.TenantID, item.draft.Fingerprint).Scan(&candidateID); err != nil {
+				return err
+			}
+			semantic := item.draft.Semantic
+			if _, err := tx.Exec(ctx, `INSERT INTO platform.metric_semantic_documents(
+				tenant_id,subject_type,candidate_id,dataset_id,dataset_version_id,name,description,
+				caliber,dimensions,period,period_description,lineage,lineage_summary,tags,document,
+				semantic_source,llm_model,prompt_version,semantic_input_hash,ai_request_id,enrichment_error_code
+			) VALUES($1,'CANDIDATE',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NULLIF($19,'')::uuid,$20)
+			ON CONFLICT(tenant_id,candidate_id) WHERE subject_type='CANDIDATE' DO UPDATE SET
+				name=EXCLUDED.name,description=EXCLUDED.description,caliber=EXCLUDED.caliber,
+				dimensions=EXCLUDED.dimensions,period=EXCLUDED.period,
+				period_description=EXCLUDED.period_description,lineage=EXCLUDED.lineage,
+				lineage_summary=EXCLUDED.lineage_summary,tags=EXCLUDED.tags,document=EXCLUDED.document,
+				semantic_source=EXCLUDED.semantic_source,llm_model=EXCLUDED.llm_model,
+				prompt_version=EXCLUDED.prompt_version,semantic_input_hash=EXCLUDED.semantic_input_hash,
+				ai_request_id=EXCLUDED.ai_request_id,enrichment_error_code=EXCLUDED.enrichment_error_code,
+				embedding=NULL,embedding_model='',embedding_input_hash='',embedding_status='PENDING',
+				embedding_attempt=0,embedding_error_code='',next_attempt_at=now(),lease_owner='',
+				lease_expires_at=NULL,embedded_at=NULL,updated_at=now()
+			WHERE platform.metric_semantic_documents.semantic_source<>'HYBRID'`,
+				claim.TenantID, candidateID, claim.DatasetID, claim.DatasetVersionID,
+				semantic.Name, semantic.Description, semantic.Caliber, semantic.Dimensions,
+				semantic.Period, semantic.PeriodDescription, item.lineage, semantic.LineageSummary,
+				semantic.Tags, item.document, semantic.Source, semantic.Model, semantic.PromptVersion,
+				semantic.InputHash, semantic.RequestID, semantic.ErrorCode); err != nil {
 				return err
 			}
 		}
@@ -262,7 +307,19 @@ const candidateSelect = `candidate.id::text,candidate.dataset_id::text,candidate
 	candidate.evidence,candidate.assumptions,candidate.warnings,candidate.block_reasons,candidate.fingerprint,
 	candidate.version,COALESCE(candidate.accepted_metric_id::text,''),candidate.decision_reason,
 	to_char(candidate.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
-	to_char(candidate.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
+	to_char(candidate.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+	COALESCE(semantic.name,candidate.name),COALESCE(semantic.description,candidate.description),
+	COALESCE(semantic.caliber,''),COALESCE(semantic.dimensions,'{}'::text[]),
+	COALESCE(semantic.period,'NONE'),COALESCE(semantic.period_description,'无固定统计周期'),
+	COALESCE(semantic.lineage,'{}'::jsonb),COALESCE(semantic.lineage_summary,''),
+	COALESCE(semantic.tags,'{}'::text[]),COALESCE(semantic.semantic_source,'RULE'),
+	COALESCE(semantic.llm_model,''),COALESCE(semantic.prompt_version,''),
+	COALESCE(semantic.semantic_input_hash,''),COALESCE(semantic.ai_request_id::text,''),
+	COALESCE(semantic.enrichment_error_code,'')`
+
+const candidateSemanticJoin = ` LEFT JOIN platform.metric_semantic_documents AS semantic
+	ON semantic.tenant_id=candidate.tenant_id AND semantic.subject_type='CANDIDATE'
+	AND semantic.candidate_id=candidate.id `
 
 func (s *PostgresStore) List(ctx context.Context, tenantID string, filter ListFilter) (items []Candidate, total int, err error) {
 	items = []Candidate{}
@@ -271,7 +328,7 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, filter ListFi
 			WHERE ($1='' OR status=$1) AND ($2='' OR dataset_id::text=$2)`, filter.Status, filter.DatasetID).Scan(&total); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT `+candidateSelect+` FROM platform.metric_candidates AS candidate
+		rows, err := tx.Query(ctx, `SELECT `+candidateSelect+` FROM platform.metric_candidates AS candidate`+candidateSemanticJoin+`
 			WHERE ($1='' OR candidate.status=$1) AND ($2='' OR candidate.dataset_id::text=$2)
 			ORDER BY candidate.updated_at DESC,candidate.id LIMIT $3 OFFSET $4`,
 			filter.Status, filter.DatasetID, filter.Limit, filter.Offset)
@@ -293,7 +350,7 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, filter ListFi
 
 func (s *PostgresStore) Get(ctx context.Context, tenantID, id string) (candidate Candidate, err error) {
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		return scanCandidate(tx.QueryRow(ctx, `SELECT `+candidateSelect+` FROM platform.metric_candidates AS candidate WHERE candidate.id::text=$1`, id), &candidate)
+		return scanCandidate(tx.QueryRow(ctx, `SELECT `+candidateSelect+` FROM platform.metric_candidates AS candidate`+candidateSemanticJoin+`WHERE candidate.id::text=$1`, id), &candidate)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Candidate{}, ErrNotFound
@@ -315,7 +372,7 @@ func (s *PostgresStore) Reject(ctx context.Context, tenantID, actorID, id string
 			return err
 		}
 		if status == string(CandidateStatusRejected) && priorReason == input.Reason {
-			return scanCandidate(tx.QueryRow(ctx, `SELECT `+candidateSelect+` FROM platform.metric_candidates AS candidate WHERE candidate.id::text=$1`, id), &candidate)
+			return scanCandidate(tx.QueryRow(ctx, `SELECT `+candidateSelect+` FROM platform.metric_candidates AS candidate`+candidateSemanticJoin+`WHERE candidate.id::text=$1`, id), &candidate)
 		}
 		if status == string(CandidateStatusAccepted) || status == string(CandidateStatusRejected) {
 			return ErrNotReviewable
@@ -334,7 +391,7 @@ func (s *PostgresStore) Reject(ctx context.Context, tenantID, actorID, id string
 			tenantID, actorID, id, input.Reason, version); err != nil {
 			return err
 		}
-		return scanCandidate(tx.QueryRow(ctx, `SELECT `+candidateSelect+` FROM platform.metric_candidates AS candidate WHERE candidate.id::text=$1`, id), &candidate)
+		return scanCandidate(tx.QueryRow(ctx, `SELECT `+candidateSelect+` FROM platform.metric_candidates AS candidate`+candidateSemanticJoin+`WHERE candidate.id::text=$1`, id), &candidate)
 	})
 	return candidate, err
 }
@@ -342,6 +399,7 @@ func (s *PostgresStore) Reject(ctx context.Context, tenantID, actorID, id string
 func scanCandidate(row interface{ Scan(...any) error }, candidate *Candidate) error {
 	var status string
 	var evidenceRaw json.RawMessage
+	var lineageRaw json.RawMessage
 	if err := row.Scan(
 		&candidate.ID, &candidate.DatasetID, &candidate.DatasetVersionID, &candidate.DSLHash,
 		&candidate.Name, &candidate.Code, &candidate.Description, &status, &candidate.Method,
@@ -349,11 +407,19 @@ func scanCandidate(row interface{ Scan(...any) error }, candidate *Candidate) er
 		&evidenceRaw, &candidate.Assumptions, &candidate.Warnings, &candidate.BlockReasons,
 		&candidate.Fingerprint, &candidate.Version, &candidate.AcceptedMetricID,
 		&candidate.DecisionReason, &candidate.CreatedAt, &candidate.UpdatedAt,
+		&candidate.Semantic.Name, &candidate.Semantic.Description, &candidate.Semantic.Caliber,
+		&candidate.Semantic.Dimensions, &candidate.Semantic.Period, &candidate.Semantic.PeriodDescription,
+		&lineageRaw, &candidate.Semantic.LineageSummary, &candidate.Semantic.Tags,
+		&candidate.Semantic.Source, &candidate.Semantic.Model, &candidate.Semantic.PromptVersion,
+		&candidate.Semantic.InputHash, &candidate.Semantic.RequestID, &candidate.Semantic.ErrorCode,
 	); err != nil {
 		return err
 	}
 	candidate.Status = CandidateStatus(status)
 	if err := json.Unmarshal(evidenceRaw, &candidate.Evidence); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(lineageRaw, &candidate.Semantic.Lineage); err != nil {
 		return err
 	}
 	if candidate.SourceFieldIDs == nil {
@@ -371,7 +437,67 @@ func scanCandidate(row interface{ Scan(...any) error }, candidate *Candidate) er
 	if candidate.BlockReasons == nil {
 		candidate.BlockReasons = []string{}
 	}
+	if candidate.Semantic.Dimensions == nil {
+		candidate.Semantic.Dimensions = []string{}
+	}
+	if candidate.Semantic.Tags == nil {
+		candidate.Semantic.Tags = []string{}
+	}
 	return nil
+}
+
+func normalizeSemanticForPersistence(draft CandidateDraft, claim JobClaim) SemanticMetadata {
+	semantic := draft.Semantic
+	if strings.TrimSpace(semantic.Name) == "" {
+		semantic.Name = draft.Definition.Metric.Name
+	}
+	if strings.TrimSpace(semantic.Description) == "" {
+		semantic.Description = draft.Definition.Metric.Description
+	}
+	if strings.TrimSpace(semantic.Caliber) == "" {
+		semantic.Caliber = fmt.Sprintf("基于字段 %s，按 %s 聚合；空值处理为 %s", draft.SourceFieldCode, draft.Definition.Aggregation, draft.Definition.NullHandling)
+	}
+	if semantic.Dimensions == nil {
+		semantic.Dimensions = []string{}
+		for _, dimension := range draft.Definition.AllowedDimensions {
+			semantic.Dimensions = append(semantic.Dimensions, dimension.Name)
+		}
+	}
+	if semantic.Period == "" {
+		semantic.Period = draft.Definition.TimeGrain
+		if semantic.Period == "" {
+			semantic.Period = "NONE"
+		}
+	}
+	if semantic.PeriodDescription == "" {
+		semantic.PeriodDescription = periodDescription(semantic.Period)
+	}
+	if semantic.Lineage.DatasetID == "" {
+		semantic.Lineage = LineageMetadata{
+			DatasetID: claim.DatasetID, DatasetVersionID: claim.DatasetVersionID,
+			SourceFieldID: draft.SourceFieldID, Aggregation: draft.Definition.Aggregation,
+			DimensionFieldIDs: []string{}, DependencyMetricVersionIDs: []string{},
+		}
+		for _, dimension := range draft.Definition.AllowedDimensions {
+			semantic.Lineage.DimensionFieldIDs = append(semantic.Lineage.DimensionFieldIDs, dimension.FieldID)
+		}
+	}
+	if semantic.LineageSummary == "" {
+		semantic.LineageSummary = fmt.Sprintf("来自发布数据集版本 %s 的字段 %s，按 %s 聚合", claim.DatasetVersionID, draft.SourceFieldCode, draft.Definition.Aggregation)
+	}
+	semantic.Tags = nonEmptyUnique(append(semantic.Tags, semantic.Name, draft.Definition.Metric.Code, draft.Definition.Aggregation), 16, 32)
+	if semantic.Source == "" {
+		semantic.Source = "RULE"
+	}
+	if semantic.PromptVersion == "" {
+		semantic.PromptVersion = MetricEnrichmentPromptVersion
+	}
+	if semantic.InputHash == "" {
+		document := EmbeddingDocument(semantic)
+		sum := sha256.Sum256([]byte(document))
+		semantic.InputHash = hex.EncodeToString(sum[:])
+	}
+	return semantic
 }
 
 func confidenceScore(confidence Confidence) float64 {

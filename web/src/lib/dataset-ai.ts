@@ -281,6 +281,17 @@ export function datasetAIPlanFromEditor(
   }
 }
 
+/** Resolve the only graph the next AI request may treat as its modification baseline. */
+export function datasetAIRequestContext(
+  liveCanvas: DatasetAIGraphPlan | undefined,
+  stagedProposal: DatasetAIGraphPlan | undefined,
+  options: { forceLiveCanvas: boolean; stagedProposalApplied: boolean },
+): DatasetAIGraphPlan | undefined {
+  if (liveCanvas) return liveCanvas
+  if (!options.forceLiveCanvas && !options.stagedProposalApplied) return stagedProposal
+  return undefined
+}
+
 export async function requestDatasetAIProposal(
   datasetId: string | undefined,
   instruction: string,

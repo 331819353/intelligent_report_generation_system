@@ -7,13 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	aiplatform "intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/asset"
+	"intelligent-report-generation-system/internal/assetembedding"
 )
 
 const (
@@ -21,6 +24,7 @@ const (
 	maxCatalogColumns         = 160
 	catalogSearchPageSize     = 200
 	maxCatalogCandidateTables = 1000
+	maxRetrievedCatalogTables = 12
 	maxRepairContentBytes     = 64 << 10
 	maxPlannerOutputTokens    = 8192
 	// The generic AI boundary permits at most 32768 output tokens. Use the full
@@ -53,6 +57,10 @@ type AssetCatalog interface {
 	ListColumns(context.Context, string, string) ([]asset.Column, error)
 }
 
+type AssetRetriever interface {
+	Retrieve(context.Context, string, string, []string, int, int) (assetembedding.RetrievalResult, error)
+}
+
 type Planner interface {
 	Plan(context.Context, string, string, string, PlanRequest) (PlanResult, error)
 }
@@ -62,6 +70,8 @@ type Planner interface {
 type ServiceOptions struct {
 	Timeout               time.Duration
 	MaxProviderInputBytes int
+	Retriever             AssetRetriever
+	RetrievalMode         string
 }
 
 type Service struct {
@@ -69,6 +79,8 @@ type Service struct {
 	invoker               Invoker
 	timeout               time.Duration
 	maxProviderInputBytes int
+	retriever             AssetRetriever
+	retrievalMode         string
 }
 
 // NewService accepts an optional options value to preserve the package's existing test and
@@ -82,8 +94,18 @@ func NewService(catalog AssetCatalog, invoker Invoker, configured ...ServiceOpti
 		if configured[0].MaxProviderInputBytes > 0 {
 			options.MaxProviderInputBytes = configured[0].MaxProviderInputBytes
 		}
+		options.Retriever = configured[0].Retriever
+		options.RetrievalMode = configured[0].RetrievalMode
 	}
-	return &Service{catalog: catalog, invoker: invoker, timeout: options.Timeout, maxProviderInputBytes: options.MaxProviderInputBytes}
+	mode := strings.ToUpper(strings.TrimSpace(options.RetrievalMode))
+	if mode != "SHADOW" && mode != "HYBRID" {
+		mode = "LEXICAL"
+	}
+	return &Service{
+		catalog: catalog, invoker: invoker, timeout: options.Timeout,
+		maxProviderInputBytes: options.MaxProviderInputBytes,
+		retriever:             options.Retriever, retrievalMode: mode,
+	}
 }
 
 const changeIntentSystemPrompt = `你是企业数据集 DAG 修改意图解析器。你只把用户自然语言转换成结构化 changeSet，不生成候选图，不执行保存、发布或查询，也绝不生成 SQL。
@@ -135,8 +157,9 @@ const plannerSystemPrompt = `你是企业数据集 DAG 配置助手，服务对�
 18. 生成候选图前必须在内部逐阶段审视完整工作流，顺序为：数据节点 → 源字段处理 → 关联前分组 → 关联 → 关联后分组 → 输出字段处理 → 结束节点。每个阶段可以是 0 个、1 个或多个组件；只能按 instruction 的真实计算需要取舍，禁止为了凑齐流程添加空组件，也禁止因为流程复杂而跳过必要组件。
 19. 阶段取舍规则：只有多表或多分支组合才使用 JOIN；只有改变输出粒度或计算聚合指标才使用 GROUP；日期、文本、数值、类型、空值或条件转换必须使用相应 TRANSFORM。多种处理类型必须拆成对应的细粒度组件，并按字段依赖顺序串联；同类型多字段可以在同一组件使用多条 rules。
 20. 组件放置规则：字段必须先产生、后使用。影响关联键、分组维度或指标计算的处理放在对应 JOIN/GROUP 之前；仅用于最终展示的格式化放在最后一次 JOIN/GROUP 之后。多方明细需要先降粒度再关联时，在各自数据分支使用关联前 GROUP；跨表组合后的统一口径使用关联后 GROUP。每个必需的转换产物必须被下游规则、分组或最终输出真实引用，不能只连接组件却丢弃其结果。
-21. 最终自检：从 END 逆向遍历到每个 NODE，确认所有节点均被唯一主流程覆盖、每个中间组件都有且只有一个下游消费者、所有字段在被引用前已产生、最终输出 key 来自 END.input 的实际产物。summary 必须用简短中文概括最终采用的组件链路及省略阶段的业务原因，不输出内部思考过程。
-22. 输出只包含响应 Schema 要求的候选方案字段。changeSet 由服务端持有，不要在响应中重复、改写或解释。`
+21. “每月”“月度”“按月”或其他按时间粒度汇总的要求，默认只在 GROUP 的日期维度使用 grouping=MONTH（或对应粒度），并直接保留物理日期字段 key；这不是日期格式转换。只有 transformRequirements 明确要求 DATE_FORMAT，或 instruction 明确要求“日期转换/格式化/提取年月”等字段加工时，才生成 DATE_FORMAT TRANSFORM。
+22. 最终自检：从 END 逆向遍历到每个 NODE，确认所有节点均被唯一主流程覆盖、每个中间组件都有且只有一个下游消费者、所有字段在被引用前已产生、最终输出 key 来自 END.input 的实际产物。summary 必须用简短中文概括最终采用的组件链路及省略阶段的业务原因，不输出内部思考过程。
+23. 输出只包含响应 Schema 要求的候选方案字段。changeSet 由服务端持有，不要在响应中重复、改写或解释。`
 
 // Plan returns a validated proposal only. The existing dataset validation and save endpoints
 // remain the sole persistence boundary.
@@ -464,6 +487,22 @@ func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRe
 			columns[column] = true
 		}
 	}
+	retrieval := assetembedding.RetrievalResult{TableScores: map[string]float64{}, ColumnScores: map[string]float64{}, Degraded: true}
+	if s.retrievalMode != "LEXICAL" && s.retriever != nil {
+		startedAt := time.Now()
+		loaded, retrievalErr := s.retriever.Retrieve(ctx, tenantID, input.Instruction, requiredOrder, maxRetrievedCatalogTables, maxCatalogColumns)
+		if retrievalErr != nil {
+			slog.WarnContext(ctx, "dataset AI asset retrieval degraded", "mode", s.retrievalMode,
+				"duration_ms", time.Since(startedAt).Milliseconds(), "error", retrievalErr)
+		} else {
+			retrieval = loaded
+			slog.InfoContext(ctx, "dataset AI asset retrieval", "mode", s.retrievalMode,
+				"duration_ms", time.Since(startedAt).Milliseconds(), "degraded", loaded.Degraded,
+				"degraded_reason", loaded.DegradedReason,
+				"embedding_ready", loaded.EmbeddingReady, "table_ids", loaded.TableIDs,
+				"table_scores", loaded.TableScores)
+		}
+	}
 	hashes := make(map[string]string, maxCatalogTables)
 	requiredCandidates := make([]catalogCandidate, 0, len(requiredOrder))
 	for _, tableID := range requiredOrder {
@@ -474,7 +513,7 @@ func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRe
 			}
 			return catalogLoadResult{}, fmt.Errorf("%w: a hinted table is unavailable", ErrInvalidRequest)
 		}
-		candidate, err := s.loadCatalogCandidate(ctx, tenantID, table, requiredColumns[tableID], input.Instruction)
+		candidate, err := s.loadCatalogCandidate(ctx, tenantID, table, requiredColumns[tableID], input.Instruction, retrieval.ColumnScores)
 		if err != nil {
 			return catalogLoadResult{}, err
 		}
@@ -493,12 +532,19 @@ func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRe
 		return catalogLoadResult{}, err
 	}
 	rankedTables := rankCatalogTables(searched, requiredSet, input.Instruction)
-	optionalCandidates := make([]catalogCandidate, 0, maxCatalogTables-len(requiredCandidates))
+	if s.retrievalMode == "HYBRID" && len(retrieval.TableIDs) > 0 {
+		rankedTables = rankCatalogTablesByRetrieval(searched, retrieval.TableIDs, requiredSet, input.Instruction)
+	}
+	optionalLimit := max(0, maxRetrievedCatalogTables-len(requiredCandidates))
+	optionalCandidates := make([]catalogCandidate, 0, optionalLimit)
 	for _, table := range rankedTables {
+		if len(optionalCandidates) >= optionalLimit {
+			break
+		}
 		if requiredSet[table.ID] || !availableCatalogTable(table) {
 			continue
 		}
-		candidate, err := s.loadCatalogCandidate(ctx, tenantID, table, nil, input.Instruction)
+		candidate, err := s.loadCatalogCandidate(ctx, tenantID, table, nil, input.Instruction, retrieval.ColumnScores)
 		if err != nil {
 			return catalogLoadResult{}, err
 		}
@@ -506,9 +552,6 @@ func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRe
 			continue
 		}
 		optionalCandidates = append(optionalCandidates, candidate)
-		if len(optionalCandidates) >= maxCatalogTables-len(requiredCandidates) {
-			break
-		}
 	}
 	if len(requiredCandidates) == 0 && len(optionalCandidates) == 0 {
 		return catalogLoadResult{}, ErrNoAssets
@@ -720,7 +763,7 @@ func rankCatalogTables(tables []asset.Table, current map[string]bool, instructio
 				score += 1000
 			}
 		}
-		haystack := strings.ToLower(strings.Join([]string{table.BusinessName, table.TableName, table.BusinessDescription}, " "))
+		haystack := strings.ToLower(strings.Join(append([]string{table.BusinessName, table.TableName, table.BusinessDescription}, table.Tags...), " "))
 		for _, token := range tokens {
 			if strings.Contains(haystack, token) {
 				score += 50
@@ -741,7 +784,30 @@ func rankCatalogTables(tables []asset.Table, current map[string]bool, instructio
 	return result
 }
 
-func (s *Service) loadCatalogCandidate(ctx context.Context, tenantID string, table asset.Table, required map[string]bool, instruction string) (catalogCandidate, error) {
+func rankCatalogTablesByRetrieval(tables []asset.Table, retrievedIDs []string, current map[string]bool, instruction string) []asset.Table {
+	byID := make(map[string]asset.Table, len(tables))
+	for _, table := range tables {
+		byID[table.ID] = table
+	}
+	result := make([]asset.Table, 0, len(tables))
+	seen := map[string]bool{}
+	for _, tableID := range retrievedIDs {
+		if table, exists := byID[tableID]; exists && !seen[tableID] {
+			seen[tableID] = true
+			result = append(result, table)
+		}
+	}
+	// Incomplete vector coverage must degrade to the improved lexical ordering, never to no assets.
+	for _, table := range rankCatalogTables(tables, current, instruction) {
+		if !seen[table.ID] {
+			seen[table.ID] = true
+			result = append(result, table)
+		}
+	}
+	return result
+}
+
+func (s *Service) loadCatalogCandidate(ctx context.Context, tenantID string, table asset.Table, required map[string]bool, instruction string, semanticScores map[string]float64) (catalogCandidate, error) {
 	columns, err := s.catalog.ListColumns(ctx, tenantID, table.ID)
 	if err != nil {
 		return catalogCandidate{}, err
@@ -775,7 +841,7 @@ func (s *Service) loadCatalogCandidate(ctx context.Context, tenantID string, tab
 				value += 1000
 			}
 		}
-		haystack := strings.ToLower(strings.Join([]string{column.BusinessName, column.ColumnName, column.BusinessDescription, column.SemanticType}, " "))
+		haystack := strings.ToLower(strings.Join(append([]string{column.BusinessName, column.ColumnName, column.BusinessDescription, column.SemanticType}, column.Tags...), " "))
 		for _, token := range tokens {
 			if strings.Contains(haystack, token) {
 				value += 50
@@ -787,6 +853,10 @@ func (s *Service) loadCatalogCandidate(ctx context.Context, tenantID string, tab
 		leftRequired, rightRequired := required[active[i].ColumnName], required[active[j].ColumnName]
 		if leftRequired != rightRequired {
 			return leftRequired
+		}
+		leftSemantic, rightSemantic := semanticScores[active[i].ID], semanticScores[active[j].ID]
+		if leftSemantic != rightSemantic {
+			return leftSemantic > rightSemantic
 		}
 		left, right := score(active[i]), score(active[j])
 		if left != right {
@@ -800,10 +870,26 @@ func (s *Service) loadCatalogCandidate(ctx context.Context, tenantID string, tab
 }
 
 func meaningfulTokens(value string) []string {
+	chunks := strings.FieldsFunc(strings.ToLower(value), func(character rune) bool {
+		return unicode.IsSpace(character) || unicode.IsPunct(character) || unicode.IsSymbol(character)
+	})
 	result := []string{}
-	for _, token := range strings.Fields(value) {
-		if utf8.RuneCountInString(token) >= 2 {
-			result = append(result, token)
+	seen := map[string]bool{}
+	add := func(token string) {
+		token = strings.TrimSpace(token)
+		if utf8.RuneCountInString(token) < 2 || seen[token] || len(result) >= 64 {
+			return
+		}
+		seen[token] = true
+		result = append(result, token)
+	}
+	for _, chunk := range chunks {
+		add(chunk)
+		runes := []rune(chunk)
+		for index := 0; index+1 < len(runes); index++ {
+			if unicode.Is(unicode.Han, runes[index]) && unicode.Is(unicode.Han, runes[index+1]) {
+				add(string(runes[index : index+2]))
+			}
 		}
 	}
 	return result
@@ -819,13 +905,14 @@ func catalogTable(candidate catalogCandidate, columnCount int) CatalogTable {
 		ID: candidate.table.ID, DataSourceID: candidate.table.DataSourceID, DataSourceName: candidate.table.DataSourceName,
 		DataSourceType: candidate.table.DataSourceType, SchemaName: candidate.table.SchemaName, TableName: candidate.table.TableName,
 		BusinessName: candidate.table.BusinessName, BusinessDescription: candidate.table.BusinessDescription,
+		Tags:    append([]string(nil), candidate.table.Tags...),
 		Columns: make([]CatalogColumn, 0, columnCount),
 	}
 	for _, column := range candidate.columns[:columnCount] {
 		result.Columns = append(result.Columns, CatalogColumn{
 			Name: column.ColumnName, BusinessName: column.BusinessName,
 			BusinessDescription: column.BusinessDescription, CanonicalType: column.CanonicalType,
-			SemanticType: column.SemanticType, Nullable: column.Nullable,
+			Tags: append([]string(nil), column.Tags...), SemanticType: column.SemanticType, Nullable: column.Nullable,
 		})
 	}
 	return result
@@ -840,7 +927,11 @@ func cloneCatalog(value []CatalogTable) []CatalogTable {
 	result := make([]CatalogTable, len(value))
 	for index, table := range value {
 		result[index] = table
+		result[index].Tags = append([]string(nil), table.Tags...)
 		result[index].Columns = append([]CatalogColumn(nil), table.Columns...)
+		for columnIndex := range result[index].Columns {
+			result[index].Columns[columnIndex].Tags = append([]string(nil), table.Columns[columnIndex].Tags...)
+		}
 	}
 	return result
 }
@@ -1017,7 +1108,7 @@ func repairInstruction(validationErr error) string {
 	case InvalidOutputReasonFieldCaseMismatch:
 		guidance = "字段名大小写不匹配；请从 assets 逐字复制 tableId 和 column，并同步修正 selectedColumns、分组、关联及输出中的全部 binding。"
 	case InvalidOutputReasonFieldReference:
-		guidance = "所有 column 必须来自对应 node.tableId 的 assets.columns，且先出现在该 node.selectedColumns 中；不得虚构字段或跨表绑定。"
+		guidance = "根据本地校验详情定位具体组件和 field key。所有 column 必须来自对应 node.tableId 的 assets.columns，且先出现在该 node.selectedColumns 中；GROUP 只能引用其 input 实际产生的字段，若上游 GROUP 已改变字段集合，则删除无关维度或把目标维度放在它仍可用的正确分组层级；不得虚构字段或跨表绑定。"
 	case InvalidOutputReasonTableReference:
 		guidance = "每个 node.tableId 必须使用 assets 中存在的精确 id，不得引用目录外数据。"
 	case InvalidOutputReasonJoin:

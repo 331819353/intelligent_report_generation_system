@@ -11,11 +11,14 @@ import (
 
 	"github.com/google/uuid"
 	aiplatform "intelligent-report-generation-system/internal/ai"
+	"intelligent-report-generation-system/internal/assetembedding"
 	"intelligent-report-generation-system/internal/config"
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasource"
+	"intelligent-report-generation-system/internal/embedding"
 	"intelligent-report-generation-system/internal/metadataai"
 	"intelligent-report-generation-system/internal/metriccandidate"
+	"intelligent-report-generation-system/internal/metricsemantic"
 	"intelligent-report-generation-system/internal/observability"
 	"intelligent-report-generation-system/internal/platform/database"
 )
@@ -28,6 +31,7 @@ func main() {
 		os.Exit(1)
 	}
 	logger := observability.NewLogger(cfg.LogLevel)
+	slog.SetDefault(logger)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -89,9 +93,48 @@ func main() {
 
 	workerID := uuid.NewString()
 	logger.Info("worker starting", "worker_id", workerID, "poll_interval", cfg.WorkerPollInterval.String(), "environment", cfg.Environment)
+	embeddingProvider := embedding.NewOpenAICompatibleProvider(
+		cfg.AIEmbeddingBaseURL, cfg.AIEmbeddingAPIKey, cfg.AIEmbeddingModel, cfg.AIEmbeddingDimensions,
+		&http.Client{Timeout: cfg.AIEmbeddingTimeout},
+	)
 	go runMetadataJobWorker(ctx, logger, dataSourceService, workerID, cfg.WorkerPollInterval)
-	runMetricExtractionWorker(ctx, logger, metriccandidate.NewWorker(metricCandidateStore), workerID, cfg.WorkerPollInterval)
+	go runAssetEmbeddingWorker(ctx, logger, assetembedding.NewWorker(assetembedding.NewPostgresStore(pool), embeddingProvider), workerID, cfg.WorkerPollInterval)
+	go runMetricEmbeddingWorker(ctx, logger, metricsemantic.NewWorker(metricsemantic.NewPostgresStore(pool), embeddingProvider), workerID, cfg.WorkerPollInterval)
+	runMetricExtractionWorker(ctx, logger, metriccandidate.NewWorker(
+		metricCandidateStore, metriccandidate.NewEnricher(aiService, cfg.AIRequestTimeout),
+	), workerID, cfg.WorkerPollInterval)
 	logger.Info("worker stopped")
+}
+
+func runAssetEmbeddingWorker(ctx context.Context, logger *slog.Logger, worker *assetembedding.Worker, workerID string, pollInterval time.Duration) {
+	const lease = 2 * time.Minute
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		processed := 0
+		tenantIDs, err := worker.TenantIDs(ctx)
+		if err != nil {
+			logger.Error("list asset embedding tenants", "error", err)
+		} else {
+			for _, tenantID := range tenantIDs {
+				count, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
+				if runErr != nil {
+					logger.Error("process asset embeddings", "tenant_id", tenantID, "error", runErr)
+				}
+				processed += count
+			}
+		}
+		if processed > 0 {
+			timer.Reset(10 * time.Millisecond)
+		} else {
+			timer.Reset(pollInterval)
+		}
+	}
 }
 
 func runMetadataJobWorker(ctx context.Context, logger *slog.Logger, service *datasource.Service, workerID string, pollInterval time.Duration) {
@@ -146,6 +189,39 @@ func runMetricExtractionWorker(ctx context.Context, logger *slog.Logger, worker 
 				didProcess, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
 				if runErr != nil {
 					logger.Error("process metric extraction job", "tenant_id", tenantID, "error", runErr)
+				}
+				if didProcess {
+					processed = true
+				}
+			}
+		}
+		if processed {
+			timer.Reset(10 * time.Millisecond)
+		} else {
+			timer.Reset(pollInterval)
+		}
+	}
+}
+
+func runMetricEmbeddingWorker(ctx context.Context, logger *slog.Logger, worker *metricsemantic.Worker, workerID string, pollInterval time.Duration) {
+	const lease = 2 * time.Minute
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		processed := false
+		tenantIDs, err := worker.TenantIDs(ctx)
+		if err != nil {
+			logger.Error("list metric embedding tenants", "error", err)
+		} else {
+			for _, tenantID := range tenantIDs {
+				didProcess, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
+				if runErr != nil {
+					logger.Error("process metric embedding", "tenant_id", tenantID, "error", runErr)
 				}
 				if didProcess {
 					processed = true

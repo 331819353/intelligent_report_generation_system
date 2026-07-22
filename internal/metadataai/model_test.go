@@ -140,3 +140,12 @@ func TestSuggestionDispositionProtectsLockedAndChangedAssets(t *testing.T) {
 		})
 	}
 }
+
+func TestSuggestionDispositionRejectsIncompatibleSemanticType(t *testing.T) {
+	target := Target{Kind: "COLUMN", CanonicalType: "STRING", BusinessVersion: 3}
+	value := SuggestionValue{SemanticType: "PERCENTAGE", Confidence: 0.99}
+	status, reason := suggestionDispositionForTarget(target, value, false, 3, 0.8)
+	if status != "PENDING" || reason != "SEMANTIC_TYPE_INCOMPATIBLE" {
+		t.Fatalf("status=%q reason=%q", status, reason)
+	}
+}

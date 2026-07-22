@@ -13,6 +13,7 @@ import (
 
 	aiplatform "intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/asset"
+	"intelligent-report-generation-system/internal/assetembedding"
 )
 
 type fakeCatalog struct {
@@ -69,6 +70,16 @@ type fakeInvoker struct {
 	errors     []error
 	inputs     []aiplatform.Invocation
 	invoke     func(context.Context, aiplatform.Invocation, int) (aiplatform.InvocationResult, error)
+}
+
+type fakeAssetRetriever struct {
+	result assetembedding.RetrievalResult
+	calls  int
+}
+
+func (f *fakeAssetRetriever) Retrieve(_ context.Context, _, _ string, _ []string, _, _ int) (assetembedding.RetrievalResult, error) {
+	f.calls++
+	return f.result, nil
 }
 
 func (f *fakeInvoker) Configured() bool     { return f.configured }
@@ -313,6 +324,7 @@ func TestServicePlanBuildsAuditedProposalWithoutSamples(t *testing.T) {
 	for _, expected := range []string{
 		"数据节点 → 源字段处理 → 关联前分组 → 关联 → 关联后分组 → 输出字段处理 → 结束节点",
 		"每个阶段可以是 0 个、1 个或多个组件",
+		"默认只在 GROUP 的日期维度使用 grouping=MONTH",
 		"从 END 逆向遍历到每个 NODE",
 	} {
 		if !strings.Contains(systemText, expected) {
@@ -1052,5 +1064,53 @@ func TestServicePlanCapsServerCatalogWarning(t *testing.T) {
 	}
 	if len(result.Proposal.Warnings) != maxProposalWarnings || !strings.Contains(result.Proposal.Warnings[maxProposalWarnings-1], "控制模型上下文") {
 		t.Fatalf("warnings = %#v", result.Proposal.Warnings)
+	}
+}
+
+func TestHybridCatalogOrderingAndTags(t *testing.T) {
+	tables := []asset.Table{
+		{ID: "orders", TableName: "orders", BusinessName: "销售订单", Tags: []string{"销售", "订单"}},
+		{ID: "regions", TableName: "regions", BusinessName: "区域", Tags: []string{"区域", "维度"}},
+		{ID: "stores", TableName: "stores", BusinessName: "门店", Tags: []string{"门店", "区域"}},
+	}
+	ranked := rankCatalogTablesByRetrieval(tables, []string{"regions", "stores", "orders"}, nil, "每个月各区域销售")
+	if got := []string{ranked[0].ID, ranked[1].ID, ranked[2].ID}; !reflect.DeepEqual(got, []string{"regions", "stores", "orders"}) {
+		t.Fatalf("hybrid order=%#v", got)
+	}
+	tokenSet := map[string]bool{}
+	for _, token := range meaningfulTokens("每个月各区域的销售情况") {
+		tokenSet[token] = true
+	}
+	if !tokenSet["区域"] || !tokenSet["销售"] {
+		t.Fatalf("Chinese retrieval tokens=%#v", tokenSet)
+	}
+	candidate := catalogCandidate{table: tables[0], columns: []asset.Column{{ID: "amount", ColumnName: "amount", Tags: []string{"销售额", "金额"}}}}
+	catalog := catalogTable(candidate, 1)
+	if !reflect.DeepEqual(catalog.Tags, tables[0].Tags) || !reflect.DeepEqual(catalog.Columns[0].Tags, candidate.columns[0].Tags) {
+		t.Fatalf("catalog tags were not propagated: %#v", catalog)
+	}
+}
+
+func TestServiceWiresHybridRetrieverIntoCatalogLoading(t *testing.T) {
+	retriever := &fakeAssetRetriever{result: assetembedding.RetrievalResult{
+		TableIDs: []string{"table-orders", "table-customers"}, TableScores: map[string]float64{"table-orders": 0.03},
+		ColumnScores: map[string]float64{}, EmbeddingReady: true,
+	}}
+	invoker := &fakeInvoker{configured: true, results: []aiplatform.InvocationResult{
+		plannerResult(t, singleTableProposal("table-orders", "amount"), "request-hybrid"),
+	}}
+	service := NewService(plannerCatalog(), invoker, ServiceOptions{
+		Timeout: time.Second, MaxProviderInputBytes: defaultProviderInputBytes,
+		Retriever: retriever, RetrievalMode: "HYBRID",
+	})
+	if _, err := service.Plan(context.Background(), "tenant-1", "actor-1", "", PlanRequest{Instruction: "生成订单金额数据集"}); err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if retriever.calls != 1 {
+		t.Fatalf("retriever calls = %d, want 1", retriever.calls)
+	}
+	envelope := requestEnvelope(t, invoker.inputs[0])
+	if len(envelope.Assets) == 0 || envelope.Assets[0].ID != "table-orders" {
+		t.Fatalf("hybrid catalog order = %#v", envelope.Assets)
 	}
 }

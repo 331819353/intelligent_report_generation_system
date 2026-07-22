@@ -77,6 +77,29 @@ func TestLoadRejectsUnsafeAIOrchestrationLimits(t *testing.T) {
 	}
 }
 
+func TestLoadLocksEmbeddingDimensionsToVectorSchema(t *testing.T) {
+	t.Setenv("AI_EMBEDDING_DIMENSIONS", "1536")
+	if _, err := Load(); err == nil {
+		t.Fatal("embedding dimensions incompatible with halfvec schema were accepted")
+	}
+	t.Setenv("AI_EMBEDDING_DIMENSIONS", "2560")
+	if _, err := Load(); err != nil {
+		t.Fatalf("current metric vector dimensions were rejected: %v", err)
+	}
+}
+
+func TestLoadValidatesDatasetAIRetrievalMode(t *testing.T) {
+	t.Setenv("DATASET_AI_RETRIEVAL_MODE", "shadow")
+	cfg, err := Load()
+	if err != nil || cfg.DatasetAIRetrievalMode != "SHADOW" {
+		t.Fatalf("cfg=%#v err=%v", cfg, err)
+	}
+	t.Setenv("DATASET_AI_RETRIEVAL_MODE", "vector-only")
+	if _, err := Load(); err == nil {
+		t.Fatal("invalid dataset AI retrieval mode was accepted")
+	}
+}
+
 func TestLoadRejectsRemotePlaintextAIEndpoint(t *testing.T) {
 	t.Setenv("AI_API_KEY", "configured-secret")
 	t.Setenv("AI_BASE_URL", "http://provider.example.test/v1")

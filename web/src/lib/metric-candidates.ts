@@ -10,6 +10,31 @@ export type MetricCandidateEvidence = {
   detail: string
 }
 
+export type MetricCandidateSemantic = {
+  name: string
+  description: string
+  caliber: string
+  dimensions: string[]
+  period: string
+  periodDescription: string
+  lineage: {
+    datasetId: string
+    datasetVersionId: string
+    sourceFieldId: string
+    aggregation: string
+    dimensionFieldIds: string[]
+    dependencyMetricVersionIds: string[]
+  }
+  lineageSummary: string
+  tags: string[]
+  source: 'RULE' | 'HYBRID' | 'RULE_FALLBACK'
+  model?: string
+  promptVersion?: string
+  inputHash: string
+  requestId?: string
+  errorCode?: string
+}
+
 export type MetricCandidate = {
   id: string
   datasetId: string
@@ -27,6 +52,7 @@ export type MetricCandidate = {
   assumptions: string[]
   warnings: string[]
   blockReasons: string[]
+  semantic?: MetricCandidateSemantic
   fingerprint: string
   version: number
   acceptedMetricId?: string

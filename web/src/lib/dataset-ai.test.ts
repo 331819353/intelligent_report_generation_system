@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { datasetAIPlanFromEditor, materializeDatasetAIPlan, type DatasetAIGraphPlan } from './dataset-ai'
+import { datasetAIPlanFromEditor, datasetAIRequestContext, materializeDatasetAIPlan, type DatasetAIGraphPlan } from './dataset-ai'
 import { buildDatasetDSL, type AssetColumn, type AssetTable, type DatasetDraft } from './datasets'
 
 const orders: AssetTable = { id: 'orders-table', dataSourceId: 'source-1', dataSourceName: '销售库', dataSourceType: 'MYSQL', tableName: 'orders', schemaName: 'sales', businessName: '订单表', columnCount: 3 }
@@ -59,6 +59,19 @@ const planWithGroupsBeforeAndAfterJoin = (): DatasetAIGraphPlan => {
 }
 
 describe('dataset AI editor conversion', () => {
+  it('omits current context for the first request on a blank new canvas', () => {
+    expect(datasetAIPlanFromEditor(empty, { version: '1.0', nodePositions: {}, nodeNames: {}, joins: [], groups: [], transforms: [] }, { name: '', description: '' })).toBeUndefined()
+  })
+
+  it('always prefers the live canvas over a staged AI proposal', () => {
+    const live = plan()
+    const staged = plan()
+    staged.dataset.name = '尚未应用的候选'
+    expect(datasetAIRequestContext(live, staged, { forceLiveCanvas: false, stagedProposalApplied: false })).toBe(live)
+    expect(datasetAIRequestContext(undefined, staged, { forceLiveCanvas: false, stagedProposalApplied: false })).toBe(staged)
+    expect(datasetAIRequestContext(undefined, staged, { forceLiveCanvas: true, stagedProposalApplied: false })).toBeUndefined()
+  })
+
   it('materializes and round-trips AI generated fine-grained transforms', async () => {
     const transformPlan: DatasetAIGraphPlan = {
       dataset: { name: '客户区域映射', description: '使用候选值数组映射客户区域' },

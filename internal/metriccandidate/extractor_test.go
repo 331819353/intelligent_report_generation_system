@@ -27,10 +27,10 @@ func TestExtractDerivesDeterministicCandidatesFromExplicitFacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Extract() second error = %v", err)
 	}
-	if first.Status != TaskStatusPartial {
-		t.Fatalf("task status = %s, want %s", first.Status, TaskStatusPartial)
+	if first.Status != TaskStatusSucceeded {
+		t.Fatalf("task status = %s, want %s", first.Status, TaskStatusSucceeded)
 	}
-	if len(first.Candidates) != 4 {
+	if len(first.Candidates) != 3 {
 		t.Fatalf("candidates = %#v", first.Candidates)
 	}
 	if !reflect.DeepEqual(first, second) {
@@ -56,7 +56,9 @@ func TestExtractDerivesDeterministicCandidatesFromExplicitFacts(t *testing.T) {
 	assertCandidate(t, byField["field_amount"], "SUM", ConfidenceHigh, CandidateStatusReady, "ADDITIVE")
 	assertCandidate(t, byField["field_quantity"], "SUM", ConfidenceMedium, CandidateStatusReady, "ADDITIVE")
 	assertCandidate(t, byField["field_rate"], "AVG", ConfidenceMedium, CandidateStatusReady, "NON_ADDITIVE")
-	assertCandidate(t, byField["field_score"], "SUM", ConfidenceLow, CandidateStatusNeedsReview, "ADDITIVE")
+	if _, exists := byField["field_score"]; exists {
+		t.Fatal("unclassified numeric attribute unexpectedly became a metric candidate")
+	}
 
 	amount := byField["field_amount"]
 	if amount.Definition.TimeFieldID != "field_order_date" || amount.Definition.TimeGrain != "MONTH" {

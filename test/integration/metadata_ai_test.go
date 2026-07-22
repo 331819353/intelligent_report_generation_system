@@ -99,7 +99,7 @@ func TestMetadataAICompletionAppliesOnlySafeSuggestions(t *testing.T) {
 	if statuses[tableID].Status != "APPLIED" || statuses[highColumnID].Status != "APPLIED" {
 		t.Fatalf("high confidence suggestions not applied: %#v", statuses)
 	}
-	if statuses[lowColumnID].PendingReason != "LOW_CONFIDENCE" || statuses[lockedColumnID].PendingReason != "MANUAL_LOCKED" {
+	if statuses[lowColumnID].PendingReason != "SEMANTIC_TYPE_INCOMPATIBLE" || statuses[lockedColumnID].PendingReason != "MANUAL_LOCKED" {
 		t.Fatalf("pending reasons=%#v", statuses)
 	}
 
@@ -154,7 +154,10 @@ func TestMetadataAICompletionAppliesOnlySafeSuggestions(t *testing.T) {
 		t.Fatalf("stale pending suggestion err=%v", err)
 	}
 	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE platform.metadata_columns SET structure_hash=repeat('c',64) WHERE id=$1`, lowColumnID)
+		// 恢复建议绑定的结构版本，并把规范类型更正为可承载金额的数值类型。
+		// 接受时必须基于当前技术类型重新通过语义相容性门禁。
+		_, err := tx.Exec(ctx, `UPDATE platform.metadata_columns
+			SET structure_hash=repeat('c',64),canonical_type='DECIMAL' WHERE id=$1`, lowColumnID)
 		return err
 	})
 	if err != nil {

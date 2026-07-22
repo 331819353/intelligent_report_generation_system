@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"intelligent-report-generation-system/internal/platform/database"
+	"intelligent-report-generation-system/internal/semanticquality"
 )
 
 type Repository struct{ pool *pgxpool.Pool }
@@ -113,6 +114,14 @@ func (r *Repository) UpdateColumn(ctx context.Context, tenantID, actorID, id str
 	}
 	var item Column
 	err := database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
+		var canonicalType string
+		if err := tx.QueryRow(ctx, `SELECT canonical_type FROM platform.metadata_columns
+			WHERE id=$1 AND business_version=$2 AND asset_status='ACTIVE' FOR UPDATE`, id, m.ExpectedVersion).Scan(&canonicalType); err != nil {
+			return errors.New("asset version conflict or asset not found")
+		}
+		if !semanticquality.Compatible(canonicalType, m.SemanticType) {
+			return errors.New("semantic type is incompatible with canonical type")
+		}
 		tag, err := tx.Exec(ctx, `UPDATE platform.metadata_columns SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,semantic_type=$5,manual_locked=$6,business_version=business_version+1 WHERE id=$7 AND business_version=$8`, strings.TrimSpace(m.BusinessName), strings.TrimSpace(m.BusinessDescription), m.Tags, m.SensitivityLevel, strings.TrimSpace(m.SemanticType), m.ManualLocked, id, m.ExpectedVersion)
 		if err != nil {
 			return err

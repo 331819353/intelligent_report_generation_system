@@ -148,7 +148,7 @@ func TestDatasetPublicationApprovalCommitsDecisionAndVersionAtomically(t *testin
 		return tx.QueryRow(ctx, `SELECT count(*) FROM platform.metric_extraction_jobs
 			WHERE dataset_id=$1 AND dataset_version_id=$2 AND dsl_hash=$3
 			  AND extractor_version=$4 AND status='PENDING'`, created.ID, result.PublishedVersion.ID,
-			result.PublishedVersion.DSLHash, metriccandidate.ExtractorVersion).Scan(&extractionJobCount)
+			result.PublishedVersion.DSLHash, metriccandidate.JobVersion).Scan(&extractionJobCount)
 	})
 	if err != nil || approvedCount != 1 || versionCount != 1 || approvalAuditCount != 1 ||
 		publishAuditCount != 1 || extractionJobCount != 1 {
@@ -170,7 +170,7 @@ func TestDatasetPublicationApprovalCommitsDecisionAndVersionAtomically(t *testin
 	if err := database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT count(*) FROM platform.metric_extraction_jobs
 			WHERE dataset_version_id=$1 AND extractor_version=$2`, result.PublishedVersion.ID,
-			metriccandidate.ExtractorVersion).Scan(&extractionJobCount)
+			metriccandidate.JobVersion).Scan(&extractionJobCount)
 	}); err != nil || extractionJobCount != 1 {
 		t.Fatalf("approval replay extraction jobs=%d err=%v, want one", extractionJobCount, err)
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"intelligent-report-generation-system/internal/platform/database"
+	"intelligent-report-generation-system/internal/semanticquality"
 )
 
 // EnrichmentCommitSink 在元数据表完成整表补全的同一事务内提交下游产物。
@@ -286,7 +287,7 @@ func (s *PostgresStore) persistSuggestion(ctx context.Context, tx pgx.Tx, tenant
 	if target.StructureHash == "" || currentStructureHash != target.StructureHash {
 		return Suggestion{}, ErrStructureChanged
 	}
-	status, reason := suggestionDisposition(locked, currentVersion, target.BusinessVersion, value.Confidence, threshold)
+	status, reason := suggestionDispositionForTarget(target, value, locked, currentVersion, threshold)
 	if status == "APPLIED" {
 		var command string
 		if table {
@@ -331,6 +332,13 @@ func suggestionDisposition(locked bool, currentVersion, expectedVersion int64, c
 		return "PENDING", "LOW_CONFIDENCE"
 	}
 	return "APPLIED", ""
+}
+
+func suggestionDispositionForTarget(target Target, value SuggestionValue, locked bool, currentVersion int64, threshold float64) (string, string) {
+	if target.Kind == "COLUMN" && !semanticquality.Compatible(target.CanonicalType, value.SemanticType) {
+		return "PENDING", "SEMANTIC_TYPE_INCOMPATIBLE"
+	}
+	return suggestionDisposition(locked, currentVersion, target.BusinessVersion, value.Confidence, threshold)
 }
 
 // pgconnCommandTag 抽象受影响行数，简化表与字段更新的统一处理。
@@ -398,6 +406,15 @@ func (s *PostgresStore) DecideSuggestion(ctx context.Context, tenantID, actorID,
 					WHERE id=$5 AND business_version=$6 AND structure_hash=$7 AND asset_status='ACTIVE' AND manual_locked=false`
 				args = []any{item.Value.BusinessName, item.Value.BusinessDescription, item.Value.Tags, item.Value.SensitivityLevel, item.TargetID, expectedVersion, expectedStructureHash}
 			} else {
+				var canonicalType string
+				if err := tx.QueryRow(ctx, `SELECT canonical_type FROM platform.metadata_columns
+					WHERE id=$1 AND business_version=$2 AND structure_hash=$3 AND asset_status='ACTIVE' FOR UPDATE`,
+					item.TargetID, expectedVersion, expectedStructureHash).Scan(&canonicalType); err != nil {
+					return ErrConflict
+				}
+				if !semanticquality.Compatible(canonicalType, item.Value.SemanticType) {
+					return ErrConflict
+				}
 				command = `UPDATE platform.metadata_columns SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,semantic_type=$5,business_version=business_version+1
 					WHERE id=$6 AND business_version=$7 AND structure_hash=$8 AND asset_status='ACTIVE' AND manual_locked=false`
 				args = []any{item.Value.BusinessName, item.Value.BusinessDescription, item.Value.Tags, item.Value.SensitivityLevel, item.Value.SemanticType, item.TargetID, expectedVersion, expectedStructureHash}

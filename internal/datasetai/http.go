@@ -120,6 +120,7 @@ func safeInvalidOutputReason(value string) string {
 		InvalidOutputReasonAggregationField,
 		InvalidOutputReasonJoin,
 		InvalidOutputReasonGroup,
+		InvalidOutputReasonTransform,
 		InvalidOutputReasonOutput,
 		InvalidOutputReasonChangeScope:
 		return value

@@ -13,11 +13,13 @@ import (
 	"intelligent-report-generation-system/internal/access"
 	aiplatform "intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/asset"
+	"intelligent-report-generation-system/internal/assetembedding"
 	"intelligent-report-generation-system/internal/auth"
 	"intelligent-report-generation-system/internal/config"
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasetai"
 	"intelligent-report-generation-system/internal/datasource"
+	"intelligent-report-generation-system/internal/embedding"
 	"intelligent-report-generation-system/internal/federation"
 	"intelligent-report-generation-system/internal/filequery"
 	"intelligent-report-generation-system/internal/httpserver"
@@ -25,6 +27,7 @@ import (
 	"intelligent-report-generation-system/internal/metric"
 	"intelligent-report-generation-system/internal/metricai"
 	"intelligent-report-generation-system/internal/metriccandidate"
+	"intelligent-report-generation-system/internal/metricsemantic"
 	"intelligent-report-generation-system/internal/observability"
 	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/policy"
@@ -40,6 +43,7 @@ func main() {
 		os.Exit(1)
 	}
 	logger := observability.NewLogger(cfg.LogLevel)
+	slog.SetDefault(logger)
 	// 数据库和对象存储属于进程级资源，初始化失败时直接终止启动。
 	startupCtx, startupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	pool, err := database.Open(startupCtx, cfg.DatabaseURL)
@@ -110,8 +114,15 @@ func main() {
 	dataSourceService.SetTableCompleter(metadataAIService)
 	dataSourceHandler := datasource.NewHandler(authService, accessService, dataSourceService, credentialManager)
 	metadataAIHandler := metadataai.NewHandler(authService, accessService, metadataAIService)
+	embeddingProvider := embedding.NewOpenAICompatibleProvider(
+		cfg.AIEmbeddingBaseURL, cfg.AIEmbeddingAPIKey, cfg.AIEmbeddingModel, cfg.AIEmbeddingDimensions,
+		&http.Client{Timeout: cfg.AIEmbeddingTimeout},
+	)
+	assetEmbeddingStore := assetembedding.NewPostgresStore(pool)
 	datasetAIService := datasetai.NewService(assetRepository, aiService, datasetai.ServiceOptions{
 		Timeout: cfg.AIRequestTimeout, MaxProviderInputBytes: cfg.AIMaxInputBytes,
+		Retriever:     assetembedding.NewRetriever(assetEmbeddingStore, embeddingProvider),
+		RetrievalMode: cfg.DatasetAIRetrievalMode,
 	})
 	datasetAIHandler := datasetai.NewHandler(authService, accessService, datasetAIService)
 	datasetService := dataset.NewService(datasetStore)
@@ -140,6 +151,8 @@ func main() {
 	metricAIHandler := metricai.NewHandler(authService, accessService, metricAIService)
 	metricCandidateService := metriccandidate.NewService(metricCandidateStore, metricService)
 	metricCandidateHandler := metriccandidate.NewHandler(authService, accessService, metricCandidateService)
+	metricSemanticService := metricsemantic.NewService(metricsemantic.NewPostgresStore(pool), embeddingProvider)
+	metricSemanticHandler := metricsemantic.NewHandler(authService, accessService, metricSemanticService)
 	reportService := report.NewService(report.NewPostgresStore(pool))
 	reportHandler := report.NewHandler(authService, accessService, reportService)
 	api := http.NewServeMux()
@@ -169,6 +182,7 @@ func main() {
 	api.Handle("/api/v1/datasets", datasetHandler)
 	api.Handle("/api/v1/datasets/", datasetHandler)
 	api.Handle("POST /api/v1/metrics/ai/proposals", metricAIHandler)
+	api.Handle("GET /api/v1/metrics/semantic-search", metricSemanticHandler)
 	api.Handle("/api/v1/metrics", metricHandler)
 	api.Handle("/api/v1/metrics/", metricHandler)
 	api.Handle("/api/v1/metric-candidates", metricCandidateHandler)

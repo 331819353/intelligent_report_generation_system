@@ -153,6 +153,21 @@ func TestValidateProposalExplainsThatGroupedOutputsKeepPhysicalKeys(t *testing.T
 	}
 }
 
+func TestValidateProposalIdentifiesUnavailableGroupFieldForRepair(t *testing.T) {
+	proposal := testProposal()
+	proposal.Plan.Groups[0].Dimensions[0].Column = "missing_region"
+	err := validateProposal(proposal, testCatalog())
+	var invalid *InvalidOutputError
+	if !errors.As(err, &invalid) || invalid.ReasonCode != InvalidOutputReasonFieldReference {
+		t.Fatalf("group dimension error = %#v (%v)", invalid, err)
+	}
+	for _, expected := range []string{"group_1", "node_1.missing_region", "JOIN:join_1"} {
+		if !strings.Contains(invalid.Detail, expected) {
+			t.Fatalf("group dimension detail %q does not contain %q", invalid.Detail, expected)
+		}
+	}
+}
+
 func TestValidateProposalRejectsIncompatibleJoinTypes(t *testing.T) {
 	proposal := testProposal()
 	proposal.Plan.Joins[0].Conditions[0].RightColumn = "amount"

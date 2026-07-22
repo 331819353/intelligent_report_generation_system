@@ -19,6 +19,10 @@ import (
 // reconciled again without rewriting prior audit evidence.
 const ExtractorVersion = "metric-candidate-v1"
 
+// JobVersion advances the durable post-publication workflow without changing the deterministic
+// candidate identity. V2 backfills searchable semantics and embeddings for V1 candidates.
+const JobVersion = "metric-candidate-semantic-v2"
+
 var ErrInvalidDatasetVersion = errors.New("metric candidate extraction requires an exact published dataset version")
 
 const (
@@ -58,6 +62,9 @@ func Extract(version dataset.VersionRecord) (ExtractionResult, error) {
 
 	for index, field := range document.Fields {
 		if field.CanonicalType != "INTEGER" && field.CanonicalType != "DECIMAL" {
+			continue
+		}
+		if field.Role != "MEASURE" && field.SemanticType != "AMOUNT" && field.SemanticType != "QUANTITY" && field.SemanticType != "PERCENTAGE" {
 			continue
 		}
 		candidate, err := buildCandidate(version, document, field, index, dimensions, timeFieldID, timeGrain, globalBlocks, timeWarnings)

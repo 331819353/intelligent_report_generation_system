@@ -19,6 +19,8 @@ type MappedDatasetTable struct {
 	ID                  string
 	DataSourceID        string
 	FileVersionID       string
+	MetadataVersion     int64
+	StructureHash       string
 	TableName           string
 	BusinessName        string
 	BusinessDescription string
@@ -63,6 +65,7 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 	endOutputs := make([]map[string]any, 0, len(columns))
 	usedCodes, usedIDs := map[string]bool{}, map[string]bool{}
 	grainCodes := []string{}
+	defaultTimeField := ""
 
 	for index, column := range columns {
 		physicalName := strings.TrimSpace(column.ColumnName)
@@ -100,6 +103,9 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 		if column.PrimaryKey {
 			grainCodes = append(grainCodes, fieldCode)
 		}
+		if role == "TIME" && defaultTimeField == "" {
+			defaultTimeField = fieldCode
+		}
 	}
 	if len(grainCodes) == 0 {
 		grainCodes = []string{fields[0].Code}
@@ -134,6 +140,13 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 		OutputGrain: OutputGrain{
 			Description: "每行代表" + name + "中的一条记录",
 			KeyFields:   grainCodes,
+			TimeField:   defaultTimeField,
+			DefaultTimeGrain: func() string {
+				if defaultTimeField != "" {
+					return "DAY"
+				}
+				return ""
+			}(),
 		},
 		ExecutionPolicy: ExecutionPolicy{
 			Mode:            "REALTIME",
@@ -200,8 +213,9 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 	if err != nil {
 		return false, err
 	}
-	// 软删除、显式停用、已经发布或被人工编辑过的存量对象都不由后台恢复或覆盖。
-	if exists && (state.Deleted || state.Status == "DISABLED" || state.PublishedCount > 0) {
+	// 软删除和显式停用对象不由后台恢复。已发布映射数据集由系统刷新路径
+	// 创建新的不可变版本，不会原地改写旧发布快照。
+	if exists && (state.Deleted || state.Status == "DISABLED") {
 		return false, nil
 	}
 
@@ -212,7 +226,7 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 			JOIN platform.file_asset_versions fv
 			  ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version
 			WHERE fa.id=source.file_asset_id),''),
-		t.table_name,t.business_name,t.business_description
+		t.table_name,t.metadata_version,t.structure_hash,t.business_name,t.business_description
 		FROM platform.metadata_tables t
 		JOIN platform.data_sources source ON source.id=t.data_source_id AND source.tenant_id=t.tenant_id
 		WHERE t.id::text=$1 AND t.tenant_id::text=$2
@@ -227,6 +241,7 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 			  AND (c.last_enriched_structure_hash='' OR c.last_enriched_structure_hash<>c.structure_hash))
 		FOR SHARE OF t`, tableID, tenantID).Scan(
 		&table.ID, &table.DataSourceID, &table.FileVersionID, &table.TableName,
+		&table.MetadataVersion, &table.StructureHash,
 		&table.BusinessName, &table.BusinessDescription,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -280,6 +295,9 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 	if err != nil {
 		return false, err
 	}
+	if exists && state.PublishedCount > 0 {
+		return s.refreshMappedDatasetTx(ctx, tx, tenantID, actorID, table, state, prepared)
+	}
 	input := CreateInput{
 		Code: document.Dataset.Code, Name: document.Dataset.Name,
 		Description: document.Dataset.Description, Type: document.Dataset.Type, DSL: raw,
@@ -301,6 +319,98 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 		return false, nil
 	}
 	return s.publishMappedDatasetDefaultTx(ctx, tx, tenantID, actorID, table.ID, state, prepared)
+}
+
+// refreshMappedDatasetTx advances only a system-owned mapped dataset. It writes a new draft
+// revision and a new immutable publication whenever the authoritative table snapshot changed.
+func (s *PostgresStore) refreshMappedDatasetTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, actorID string,
+	table MappedDatasetTable,
+	state mappedDatasetState,
+	prepared Prepared,
+) (bool, error) {
+	if state.Status != "PUBLISHED" || state.DraftVersionID == "" || table.MetadataVersion < 1 || table.StructureHash == "" {
+		return false, nil
+	}
+	var publishedVersionID, publishedDSLHash string
+	if err := tx.QueryRow(ctx, `SELECT version.id::text,version.schema_hash
+		FROM platform.datasets AS dataset
+		JOIN platform.dataset_versions AS version
+		  ON version.id=dataset.current_published_version_id
+		 AND version.dataset_id=dataset.id AND version.tenant_id=dataset.tenant_id
+		WHERE dataset.id=$1 AND dataset.tenant_id=$2 AND version.status='PUBLISHED'
+		FOR SHARE OF version`, state.ID, tenantID).Scan(&publishedVersionID, &publishedDSLHash); err != nil {
+		return false, err
+	}
+	if publishedDSLHash == prepared.DSLHash {
+		if err := validateDependencySnapshotsTx(ctx, tx, publishedVersionID); err == nil {
+			return false, nil
+		}
+	}
+
+	var draftRecordVersion int64
+	if err := tx.QueryRow(ctx, `UPDATE platform.dataset_versions SET
+		dsl_json=$1,schema_hash=$2,logical_plan_json=$3,plan_hash=$4,
+		record_version=record_version+1,updated_by=$5
+		WHERE id=$6 AND dataset_id=$7 AND tenant_id=$8 AND status='DRAFT'
+		RETURNING record_version`, prepared.DSLJSON, prepared.DSLHash, prepared.LogicalPlanJSON,
+		prepared.PlanHash, actorID, state.DraftVersionID, state.ID, tenantID).Scan(&draftRecordVersion); err != nil {
+		return false, err
+	}
+	var datasetVersion int64
+	if err := tx.QueryRow(ctx, `UPDATE platform.datasets SET
+		name=$1,description=$2,dataset_type=$3,version=version+1,updated_by=$4,updated_at=now()
+		WHERE id=$5 AND tenant_id=$6 AND origin_table_id=$7 AND status='PUBLISHED'
+		RETURNING version`, prepared.Document.Dataset.Name, prepared.Document.Dataset.Description,
+		prepared.Document.Dataset.Type, actorID, state.ID, tenantID, table.ID).Scan(&datasetVersion); err != nil {
+		return false, err
+	}
+	if err := replaceDerived(ctx, tx, tenantID, state.ID, state.DraftVersionID, prepared.Document, true); err != nil {
+		return false, err
+	}
+	if err := insertDraftRevisionTx(ctx, tx, tenantID, state.ID, actorID, state.DraftVersionID,
+		datasetVersion, draftRecordVersion, "SAVE", "", prepared); err != nil {
+		return false, err
+	}
+	input := PublishInput{
+		DraftVersionID: state.DraftVersionID, ExpectedVersion: datasetVersion,
+		ExpectedDraftRecordVersion: draftRecordVersion, ExpectedDSLHash: prepared.DSLHash,
+		ValidationParameters: map[string]any{},
+	}
+	requestHash, err := publicationRequestHash(state.ID, input)
+	if err != nil {
+		return false, err
+	}
+	structurePrefix := table.StructureHash
+	if len(structurePrefix) > 16 {
+		structurePrefix = structurePrefix[:16]
+	}
+	dslPrefix := prepared.DSLHash
+	if len(dslPrefix) > 16 {
+		dslPrefix = dslPrefix[:16]
+	}
+	plan := PublishPlan{
+		IdempotencyKey: fmt.Sprintf("system-mapped-refresh-%d-%s-%s", table.MetadataVersion, structurePrefix, dslPrefix),
+		RequestHash:    requestHash, ExpectedVersion: datasetVersion, DraftVersionID: state.DraftVersionID,
+		ExpectedDraftRecordVersion: draftRecordVersion, ExpectedDSLHash: prepared.DSLHash, Prepared: prepared,
+	}
+	var published VersionRecord
+	if err := s.publishTx(ctx, tx, tenantID, actorID, state.ID, plan, &published); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+		tenant_id,actor_user_id,action,resource_type,resource_id,detail
+	) VALUES($1,$2,'AUTO_REFRESH_MAPPED_DATASET','DATASET',$3,
+		jsonb_build_object('publicationSource','SYSTEM_MAPPED_REFRESH','originTableId',$4::text,
+			'metadataVersion',$5::bigint,'structureHash',$6::text,'previousPublishedVersionId',$7::text,
+			'publishedVersionId',$8::text,'versionNo',$9::int,'dslHash',$10::text,'planHash',$11::text))`,
+		tenantID, actorID, state.ID, table.ID, table.MetadataVersion, table.StructureHash,
+		publishedVersionID, published.ID, published.VersionNo, published.DSLHash, published.PlanHash); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func loadMappedDatasetStateTx(ctx context.Context, tx pgx.Tx, tenantID, tableID string) (state mappedDatasetState, exists bool, err error) {
@@ -391,8 +501,10 @@ func mappedDatasetFieldRole(column MappedDatasetColumn) string {
 		return "IDENTIFIER"
 	case "DATE", "TIME", "DATETIME":
 		return "TIME"
+	case "AMOUNT", "QUANTITY", "PERCENTAGE":
+		return "MEASURE"
 	default:
-		return "ATTRIBUTE"
+		return "DIMENSION"
 	}
 }
 

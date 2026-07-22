@@ -116,27 +116,6 @@ func listMappedDatasetCandidates(ctx context.Context, tx pgx.Tx) ([]mappedDatase
 			WHERE c.tenant_id=t.tenant_id AND c.table_id=t.id AND c.asset_status='ACTIVE'
 			  AND (c.last_enriched_structure_hash='' OR c.last_enriched_structure_hash<>c.structure_hash)
 		  )
-		  AND (
-			NOT EXISTS (
-				SELECT 1 FROM platform.datasets AS dataset
-				WHERE dataset.tenant_id=t.tenant_id AND dataset.origin_table_id=t.id
-			)
-			OR EXISTS (
-				SELECT 1
-				FROM platform.datasets AS dataset
-				JOIN platform.dataset_versions AS draft
-				  ON draft.id=dataset.current_draft_version_id
-				 AND draft.dataset_id=dataset.id AND draft.tenant_id=dataset.tenant_id
-				WHERE dataset.tenant_id=t.tenant_id AND dataset.origin_table_id=t.id
-				  AND dataset.deleted_at IS NULL AND dataset.status='DRAFT' AND dataset.version=1
-				  AND draft.status='DRAFT' AND draft.version_no=1 AND draft.record_version=1
-				  AND NOT EXISTS (
-					SELECT 1 FROM platform.dataset_versions AS published
-					WHERE published.dataset_id=dataset.id AND published.tenant_id=dataset.tenant_id
-					  AND published.status IN ('PUBLISHED','STALE','DEPRECATED')
-				  )
-			)
-		  )
 		ORDER BY t.id`)
 	if err != nil {
 		return nil, fmt.Errorf("list mapped dataset candidates: %w", err)
