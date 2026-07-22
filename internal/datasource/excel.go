@@ -47,7 +47,7 @@ type FileTableData struct {
 
 const excelStructureSampleRows = 10
 
-// ExcelWorkbookInspection is returned only by the upload request. Sample rows are never
+// ExcelWorkbookInspection is produced in the explicit "add tables" step. Sample rows are never
 // persisted in workbook_summary; the saved version retains only the deterministic parse plan.
 type ExcelWorkbookInspection struct {
 	SampleLimit int                    `json:"sampleLimit"`
@@ -85,10 +85,9 @@ func NewExcelManager(repo *PostgresRepository, storage ObjectStorage, bucket str
 	return &ExcelManager{repo: repo, storage: storage, bucket: bucket}
 }
 
-// Upload 校验配额与文件格式，上传新版本，并在失败时回滚已写入对象。
+// Upload 校验配额和基础文件参数后保存原始版本，不在创建数据源阶段解析 Sheet。
+// 结构推断、前十行预览和解析方案固化由 Inspect 在“新增数据表”步骤完成。
 func (m *ExcelManager) Upload(ctx context.Context, tenantID, assetID, filename, mimeType string, input io.Reader, size int64, config map[string]any) (FileAsset, error) {
-	// 在写对象存储前完整读取并解析文件：只有能按租户限制安全解析、且能生成稳定
-	// 元数据的内容才会成为版本。请求声明的 size 也必须与实际字节数一致。
 	quota, err := m.repo.Quota(ctx, tenantID)
 	if err != nil {
 		return FileAsset{}, err
@@ -103,24 +102,17 @@ func (m *ExcelManager) Upload(ctx context.Context, tenantID, assetID, filename, 
 	if int64(len(data)) != size || int64(len(data)) > quota.MaxExcelFileBytes {
 		return FileAsset{}, errors.New("excel file size is invalid")
 	}
-	limits := spikeexcel.DefaultLimits()
-	limits.MaxFileBytes = quota.MaxExcelFileBytes
-	csvOptions, err := parseCSVOptions(config)
-	if err != nil {
-		return FileAsset{}, err
+	switch strings.ToLower(filepath.Ext(filename)) {
+	case ".xlsx", ".xls", ".csv":
+	default:
+		return FileAsset{}, errors.New("unsupported excel extension")
 	}
-	book, err := spikeexcel.ReadWithOptions(filename, bytes.NewReader(data), size, limits, csvOptions)
-	if err != nil {
-		return FileAsset{}, err
-	}
-	metadata, inspection, parsePlans, err := inspectWorkbook(book, config)
-	if err != nil {
+	if _, err := parseCSVOptions(config); err != nil {
 		return FileAsset{}, err
 	}
 	if config == nil {
 		config = map[string]any{}
 	}
-	config["sheetPlans"] = parsePlans
 	isNew := assetID == ""
 	if isNew {
 		assetID = uuid.NewString()
@@ -140,12 +132,48 @@ func (m *ExcelManager) Upload(ctx context.Context, tenantID, assetID, filename, 
 		return FileAsset{}, err
 	}
 	sum := sha256.Sum256(data)
-	asset := FileAsset{ID: assetID, TenantID: tenantID, Filename: filename, MimeType: mimeType, CurrentVersion: version, Version: version, VersionID: versionID, SizeBytes: size, SHA256: hex.EncodeToString(sum[:]), WorkbookSummary: workbookSummary(metadata), Inspection: &inspection}
+	asset := FileAsset{ID: assetID, TenantID: tenantID, Filename: filename, MimeType: mimeType, CurrentVersion: version, Version: version, VersionID: versionID, SizeBytes: size, SHA256: hex.EncodeToString(sum[:]), WorkbookSummary: map[string]any{"inspectionStatus": "PENDING"}}
 	if err := m.repo.SaveFileVersion(ctx, asset, m.bucket, key, config); err != nil {
 		_ = m.storage.Delete(ctx, m.bucket, key)
 		return FileAsset{}, err
 	}
 	return asset, nil
+}
+
+// Inspect 读取当前原始文件版本，在新增数据表时生成逐 Sheet 前十行预览，并把
+// 确定性解析方案写入与该版本一对一关联的 inspection 记录，供采样和查询一致重放。
+func (m *ExcelManager) Inspect(ctx context.Context, tenantID, assetID string, maxFileBytes int64) (ExcelWorkbookInspection, error) {
+	version, err := m.repo.CurrentFileVersion(ctx, tenantID, assetID)
+	if err != nil {
+		return ExcelWorkbookInspection{}, err
+	}
+	data, err := m.readVersionBytes(ctx, version, maxFileBytes)
+	if err != nil {
+		return ExcelWorkbookInspection{}, err
+	}
+	limits := spikeexcel.DefaultLimits()
+	limits.MaxFileBytes = maxFileBytes
+	csvOptions, err := parseCSVOptions(version.ParseConfig)
+	if err != nil {
+		return ExcelWorkbookInspection{}, err
+	}
+	book, err := spikeexcel.ReadWithOptions(version.Filename, bytes.NewReader(data), version.SizeBytes, limits, csvOptions)
+	if err != nil {
+		return ExcelWorkbookInspection{}, err
+	}
+	metadata, inspection, parsePlans, err := inspectWorkbook(book, version.ParseConfig)
+	if err != nil {
+		return ExcelWorkbookInspection{}, err
+	}
+	config := make(map[string]any, len(version.ParseConfig)+1)
+	for key, value := range version.ParseConfig {
+		config[key] = value
+	}
+	config["sheetPlans"] = parsePlans
+	if err := m.repo.SaveFileInspection(ctx, tenantID, assetID, version.VersionID, config, workbookSummary(metadata)); err != nil {
+		return ExcelWorkbookInspection{}, err
+	}
+	return inspection, nil
 }
 
 // Current 返回文件资产当前生效版本的对象位置和解析配置。
@@ -161,26 +189,9 @@ func (m *ExcelManager) ReadVersionTables(ctx context.Context, tenantID, versionI
 	if err != nil {
 		return FileVersion{}, nil, err
 	}
-	if maxFileBytes <= 0 || version.SizeBytes <= 0 || version.SizeBytes > maxFileBytes {
-		return FileVersion{}, nil, errors.New("file version exceeds execution quota")
-	}
-	body, err := m.storage.Get(ctx, version.StorageBucket, version.StorageKey)
+	data, err := m.readVersionBytes(ctx, version, maxFileBytes)
 	if err != nil {
 		return FileVersion{}, nil, err
-	}
-	defer body.Close()
-	// 以元数据声明大小而不是租户总配额作为读取边界；对象若被异常放大，只多读
-	// 一个字节即可失败，避免小文件元数据对应的大对象占满进程内存。
-	data, err := io.ReadAll(io.LimitReader(body, version.SizeBytes+1))
-	if err != nil {
-		return FileVersion{}, nil, err
-	}
-	if int64(len(data)) != version.SizeBytes || int64(len(data)) > maxFileBytes {
-		return FileVersion{}, nil, errors.New("file version object size does not match metadata")
-	}
-	sum := sha256.Sum256(data)
-	if hex.EncodeToString(sum[:]) != version.SHA256 {
-		return FileVersion{}, nil, errors.New("file version checksum verification failed")
 	}
 	limits := spikeexcel.DefaultLimits()
 	limits.MaxFileBytes = maxFileBytes
@@ -197,6 +208,31 @@ func (m *ExcelManager) ReadVersionTables(ctx context.Context, tenantID, versionI
 		return FileVersion{}, nil, err
 	}
 	return version, tables, nil
+}
+
+func (m *ExcelManager) readVersionBytes(ctx context.Context, version FileVersion, maxFileBytes int64) ([]byte, error) {
+	if maxFileBytes <= 0 || version.SizeBytes <= 0 || version.SizeBytes > maxFileBytes {
+		return nil, errors.New("file version exceeds execution quota")
+	}
+	body, err := m.storage.Get(ctx, version.StorageBucket, version.StorageKey)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	// 以元数据声明大小而不是租户总配额作为读取边界；对象若被异常放大，只多读
+	// 一个字节即可失败，避免小文件元数据对应的大对象占满进程内存。
+	data, err := io.ReadAll(io.LimitReader(body, version.SizeBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) != version.SizeBytes || int64(len(data)) > maxFileBytes {
+		return nil, errors.New("file version object size does not match metadata")
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != version.SHA256 {
+		return nil, errors.New("file version checksum verification failed")
+	}
+	return data, nil
 }
 
 // Versions 按新到旧列出文件资产的历史版本。
@@ -225,28 +261,22 @@ func NewExcelConnector(manager *ExcelManager) *ExcelConnector {
 // Type 返回 Excel/CSV 文件连接器类型。
 func (c *ExcelConnector) Type() Type { return TypeExcel }
 
-// Test 读取当前文件版本，验证格式、配额和解析参数。
+// Test 只验证当前原始文件对象可读、大小和摘要一致；Sheet 解析由新增数据表触发。
 func (c *ExcelConnector) Test(ctx context.Context, source Source) (TestResult, error) {
 	started := time.Now()
 	version, err := c.manager.Current(ctx, source.TenantID, source.FileAssetID)
 	if err != nil {
 		return TestResult{}, err
 	}
-	body, err := c.manager.storage.Get(ctx, version.StorageBucket, version.StorageKey)
-	if err != nil {
-		return TestResult{}, err
-	}
-	defer body.Close()
-	limits := spikeexcel.DefaultLimits()
-	limits.MaxFileBytes = source.RuntimeQuota.MaxExcelFileBytes
-	csvOptions, err := parseCSVOptions(version.ParseConfig)
-	if err != nil {
-		return TestResult{}, err
-	}
-	if _, err := spikeexcel.ReadWithOptions(version.Filename, body, version.SizeBytes, limits, csvOptions); err != nil {
+	if _, err := c.manager.readVersionBytes(ctx, version, source.RuntimeQuota.MaxExcelFileBytes); err != nil {
 		return TestResult{}, err
 	}
 	return TestResult{ServerVersion: "Excel " + strings.TrimPrefix(strings.ToLower(filepath.Ext(version.Filename)), "."), LatencyMS: time.Since(started).Milliseconds()}, nil
+}
+
+// Inspect implements the file-only structure inspection capability used by the add-table step.
+func (c *ExcelConnector) Inspect(ctx context.Context, source Source) (ExcelWorkbookInspection, error) {
+	return c.manager.Inspect(ctx, source.TenantID, source.FileAssetID, source.RuntimeQuota.MaxExcelFileBytes)
 }
 
 // Sync 读取工作簿并推断表、字段和数据类型等技术元数据。

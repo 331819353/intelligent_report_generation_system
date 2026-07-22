@@ -175,6 +175,9 @@ type Connector interface {
 type MetadataSampler interface {
 	Sample(context.Context, Source, MetadataTable, int) (SampleResult, error)
 }
+type FileStructureInspector interface {
+	Inspect(context.Context, Source) (ExcelWorkbookInspection, error)
+}
 type TableCompleter interface {
 	// targetTable=false 且 targetColumnIDs 非空时只完善指定变化字段；nil 字段集合表示处理全部活动字段。
 	CompleteTable(context.Context, string, string, string, []map[string]any, bool, []string, string, string, string, int64) error

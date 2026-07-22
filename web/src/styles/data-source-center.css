@@ -70,6 +70,7 @@
 .excel-source-upload > header small, .excel-source-next-step { color: #475467; font-size: 11px; line-height: 1.6; }
 .excel-source-upload > header > span { flex: none; border-radius: 999px; padding: 4px 8px; background: #dcfce7; color: #047857; font-size: 10px; font-weight: 800; }
 .excel-source-file-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
+.excel-source-file-row.upload-only { grid-template-columns: minmax(0, 1fr); }
 .excel-source-file-picker { min-width: 0; min-height: 46px; display: flex; align-items: center; gap: 12px; box-sizing: border-box; padding: 5px; border: 1px solid #d0d5dd; border-radius: 10px; background: white; box-shadow: 0 1px 2px #1018280d; transition: border-color .16s ease, box-shadow .16s ease; }
 .excel-source-file-picker:focus-within { border-color: #34d399; box-shadow: 0 0 0 3px #a7f3d066; }
 .excel-source-file-button { position: relative; overflow: hidden; flex: none; min-height: 34px; display: inline-flex !important; grid-template-columns: none !important; flex-direction: row; align-items: center; gap: 6px !important; box-sizing: border-box; padding: 0 13px; border-radius: 7px; background: #059669; color: white !important; box-shadow: 0 2px 6px #04785724; cursor: pointer; font-size: 11px !important; font-weight: 800 !important; white-space: nowrap; }
@@ -188,6 +189,18 @@
 .data-source-discovery-list label strong { color: var(--ink); }
 .data-source-discovery-list label small { color: var(--muted); font-weight: 500; }
 .data-source-discovery-list label em { color: var(--muted); font-size: 10px; font-style: normal; }
+.file-inspection-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid #bbf7d0; border-radius: 9px; background: #f0fdf4; color: #047857; font-size: 11px; }
+.file-inspection-summary strong { font-size: 12px; }
+.file-sheet-selection-list { max-height: 520px; overflow: auto; display: grid; gap: 10px; padding-right: 2px; }
+.file-sheet-selection-card { overflow: hidden; border: 1px solid #d1fae5; border-radius: 10px; background: white; }
+.file-sheet-selection-card.imported { background: #f8fafc; opacity: .7; }
+.file-sheet-selection-card > label { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 11px 12px; background: #f7fef9; }
+.file-sheet-selection-card > label input { width: 16px; height: 16px; }
+.file-sheet-selection-card > label > span { display: grid; gap: 3px; }
+.file-sheet-selection-card > label strong { color: #065f46; font-size: 12px; }
+.file-sheet-selection-card > label small { color: var(--muted); font-size: 10px; font-weight: 500; }
+.file-sheet-selection-card > label em { border-radius: 999px; padding: 3px 7px; background: #dcfce7; color: #047857; font-size: 10px; font-style: normal; font-weight: 800; }
+.file-sheet-selection-card.imported > label em { background: #e4e7ec; color: #667085; }
 .data-source-table-picker footer { display: flex; justify-content: flex-end; gap: 10px; }
 .data-source-checkbox { display: flex !important; grid-template-columns: auto 1fr; align-items: center; }
 .data-source-field-mapping { display: grid; gap: 10px; padding-top: 4px; }

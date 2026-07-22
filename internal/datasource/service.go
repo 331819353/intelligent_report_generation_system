@@ -189,6 +189,23 @@ func (s *Service) DiscoverTables(ctx context.Context, tenantID, id string) (Sync
 	return connector.Sync(ctx, source)
 }
 
+// InspectFileSource 在“新增数据表”阶段解析文件结构并固化当前版本的解析方案。
+// 新建文件数据源只负责上传和登记，不提前读取 Sheet 或产生映射任务。
+func (s *Service) InspectFileSource(ctx context.Context, tenantID, id string) (ExcelWorkbookInspection, error) {
+	source, connector, err := s.load(ctx, tenantID, id)
+	if err != nil {
+		return ExcelWorkbookInspection{}, err
+	}
+	if source.Status != StatusActive {
+		return ExcelWorkbookInspection{}, fmt.Errorf("cannot inspect file source in %s status", source.Status)
+	}
+	inspector, ok := connector.(FileStructureInspector)
+	if !ok {
+		return ExcelWorkbookInspection{}, errors.New("data source does not support file structure inspection")
+	}
+	return inspector.Inspect(ctx, source)
+}
+
 // ImportTables 对用户选中的源表采样三行，经 LLM 完善后形成 PostgreSQL 表资产。
 func (s *Service) ImportTables(ctx context.Context, tenantID, actorID, id string, selections []TableSelection) ([]ImportedTable, error) {
 	if len(selections) == 0 || len(selections) > 100 {

@@ -44,14 +44,15 @@ export type ExcelSheetInspection = {
   columns: ExcelColumnInspection[]
   rows: string[][]
 }
+export type ExcelWorkbookInspection = { sampleLimit: number; sheets: ExcelSheetInspection[] }
 export type ExcelFileAsset = {
   id: string
   filename: string
   version: number
   versionId: string
   sizeBytes: number
-  workbookSummary: { sheetCount: number; sheets: string[] }
-  inspection?: { sampleLimit: number; sheets: ExcelSheetInspection[] }
+  workbookSummary: Record<string, unknown>
+  inspection?: ExcelWorkbookInspection
 }
 
 export type DataSourceTestResult = {
@@ -187,6 +188,7 @@ export const dataSourceAPI = {
     body.set('config', JSON.stringify({ skipEmptyRows: true }))
     return apiRequest<ExcelFileAsset>('/v1/excel-files', { method: 'POST', body })
   },
+  inspectExcelSource: (id: string) => apiRequest<ExcelWorkbookInspection>(`/v1/data-sources/${encodeURIComponent(id)}/file-inspection`, { method: 'POST', body: '{}' }),
   update: (id: string, input: DataSourceConnectionInput) => apiRequest<DataSourceRecord>(`/v1/data-sources/${encodeURIComponent(id)}`, {
     method: 'PUT',
     body: JSON.stringify(input),

@@ -89,12 +89,42 @@ type importConnector struct {
 	sample     SampleResult
 }
 
+type fileInspectConnector struct {
+	connector
+	inspection ExcelWorkbookInspection
+	err        error
+}
+
+func (c fileInspectConnector) Inspect(context.Context, Source) (ExcelWorkbookInspection, error) {
+	return c.inspection, c.err
+}
+
 func (c importConnector) Sync(context.Context, Source) (SyncResult, error) {
 	return c.discovered, nil
 }
 
 func (c importConnector) Sample(context.Context, Source, MetadataTable, int) (SampleResult, error) {
 	return c.sample, nil
+}
+
+func TestInspectFileSourceRequiresActiveInspectorAndReturnsPreview(t *testing.T) {
+	inspection := ExcelWorkbookInspection{SampleLimit: 10, Sheets: []ExcelSheetInspection{{Name: "Sales", HeaderRow: 2}}}
+	r := &repo{source: Source{ID: "source-1", TenantID: "tenant-1", Type: TypeExcel, Status: StatusActive, FileAssetID: "file-1"}, quota: Quota{MaxDataSources: 10, MaxExcelFileBytes: 1024}}
+	service := NewService(r, fileInspectConnector{connector: connector{kind: TypeExcel}, inspection: inspection})
+
+	result, err := service.InspectFileSource(context.Background(), "tenant-1", "source-1")
+	if err != nil || len(result.Sheets) != 1 || result.Sheets[0].HeaderRow != 2 {
+		t.Fatalf("inspection=%#v err=%v", result, err)
+	}
+	r.source.Status = StatusDraft
+	if _, err := service.InspectFileSource(context.Background(), "tenant-1", "source-1"); err == nil {
+		t.Fatal("draft file source was inspected")
+	}
+	r.source.Status, r.source.Type = StatusActive, TypeMySQL
+	service = NewService(r, connector{kind: TypeMySQL})
+	if _, err := service.InspectFileSource(context.Background(), "tenant-1", "source-1"); err == nil {
+		t.Fatal("database source was treated as a file inspector")
+	}
 }
 
 type completingRecorder struct {

@@ -101,6 +101,17 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		}
 		writeDSJSON(w, 200, map[string]any{"items": result.Tables, "total": len(result.Tables)})
 	})))
+	mux.Handle("POST /api/v1/data-sources/{id}/file-inspection", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		inspection, err := service.InspectFileSource(r.Context(), c.TenantID, r.PathValue("id"))
+		if err != nil {
+			slog.ErrorContext(r.Context(), "file data source inspection failed", "source_id", r.PathValue("id"), "error", err)
+			writeDSError(w, http.StatusUnprocessableEntity, "DATA_SOURCE_FILE_INSPECTION_FAILED", safeFileError(err))
+			return
+		}
+		auditDS(r, service, c.TenantID, c.Subject, "INSPECT_FILE_STRUCTURE", r.PathValue("id"), map[string]any{"sheets": len(inspection.Sheets), "sampleLimit": inspection.SampleLimit})
+		writeDSJSON(w, http.StatusOK, inspection)
+	})))
 	mux.Handle("POST /api/v1/data-sources/{id}/tables/import", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		var input struct {
