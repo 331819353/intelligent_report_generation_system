@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -35,6 +36,9 @@ func NewHandler(authService *auth.Service, permissions *access.Service, planner 
 			}
 			result, err := planner.Plan(r.Context(), claims.TenantID, claims.Subject, resourceID, input)
 			if err != nil {
+				if errors.Is(err, ErrInvalidOutput) {
+					slog.WarnContext(r.Context(), "dataset AI proposal failed validation", "resource_id", resourceID, "error", err)
+				}
 				writePlanError(w, err)
 				return
 			}
@@ -127,19 +131,21 @@ func publicInvalidOutputDiagnostic(metadata InvalidOutputError) invalidOutputDia
 	base := invalidOutputDiagnostic{
 		Code:       "PLAN_VALIDATION_FAILED",
 		Message:    "AI 方案未通过数据集安全校验，原画布未发生变化。",
-		Suggestion: "请写明要修改的组件、输入字段和期望输出，然后按原要求重试。",
+		Suggestion: "请按原要求重试；系统会重新分析完整画布，无需提供组件 ID。若存在多个同等合理目标，界面会继续向你确认。",
 	}
 	switch {
 	case strings.Contains(detail, "clarify requires"):
 		return invalidOutputDiagnostic{"CLARIFICATION_QUESTION_MISSING", "AI 判断需要补充信息，但没有生成可回答的问题，原画布已保留。", "请按原要求重试；若仍出现此提示，请补充目标组件和要处理的字段。"}
 	case strings.Contains(detail, "plan contains undeclared"):
-		return invalidOutputDiagnostic{"UNDECLARED_COMPONENT_CHANGE", "AI 方案额外改动了本次要求之外的组件或字段，已为你拦截。", "请把多个修改拆成两次提问，并点明本次只改哪个组件。"}
+		return invalidOutputDiagnostic{"UNDECLARED_COMPONENT_CHANGE", "AI 方案额外改动了本次要求之外的组件或字段，已为你拦截。", "请按原要求重试；系统会从完整画布重新推断必要修改，不需要指定技术组件名。"}
 	case strings.Contains(detail, "outside locked scope"):
-		return invalidOutputDiagnostic{"COMPONENT_FIELDS_MISMATCH", "AI 方案修改了目标组件中未授权的配置项，原画布已保留。", "请明确该组件只允许调整哪些配置，例如“只改上游输入和分组维度”。"}
+		return invalidOutputDiagnostic{"COMPONENT_FIELDS_MISMATCH", "AI 方案修改了目标范围之外的配置，原画布已保留。", "请按原要求重试；系统只会应用与你的业务目标直接相关的变化。"}
 	case strings.Contains(detail, "did not realize locked"):
-		return invalidOutputDiagnostic{"REQUESTED_CHANGE_MISSING", "AI 方案没有完整落实本次要求中的组件修改，原画布已保留。", "请明确写出要新增、修改或删除的组件，以及它应连接到哪个上下游。"}
+		return invalidOutputDiagnostic{"REQUESTED_CHANGE_MISSING", "AI 方案没有完整落实本次要求，原画布已保留。", "请按原要求重试；系统会重新检查所有上下游并补全必要连线。"}
 	case strings.Contains(detail, "input rewiring differs"):
-		return invalidOutputDiagnostic{"INPUT_CONNECTION_MISMATCH", "AI 方案的组件连线与你的要求不一致，已阻止应用。", "请按“上游组件 → 新组件 → 下游组件”的方式写明期望连线后重试。"}
+		return invalidOutputDiagnostic{"INPUT_CONNECTION_MISMATCH", "AI 方案的组件连线与你的业务要求不一致，已阻止应用。", "请按原要求重试；系统会基于完整链路重新确定上下游。"}
+	case strings.Contains(detail, "downstream consumer") || strings.Contains(detail, "downstream input change"):
+		return invalidOutputDiagnostic{"COMPONENT_NOT_CONNECTED", "AI 生成的处理步骤没有完整接入数据链路，原画布已保留。", "请按原要求重试；系统会自动定位最近的有效下游，无需提供组件名称或 ID。"}
 	case strings.Contains(detail, "field propagation") || strings.Contains(detail, "does not reach end"):
 		return invalidOutputDiagnostic{"FIELD_LINEAGE_INCOMPLETE", "AI 方案中有字段没有从上游完整传递到分组或最终输出。", "请写明该字段是分组维度、聚合指标还是仅用于最终展示。"}
 	case metadata.ReasonCode == InvalidOutputReasonTransform:

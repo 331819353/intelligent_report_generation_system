@@ -17,11 +17,11 @@ import (
 // ExtractorVersion identifies the deterministic rule contract used for job deduplication.
 // Changing extraction semantics requires a new value so exact dataset versions can be
 // reconciled again without rewriting prior audit evidence.
-const ExtractorVersion = "metric-candidate-v1"
+const ExtractorVersion = "metric-candidate-v2"
 
 // JobVersion advances the durable post-publication workflow without changing the deterministic
 // candidate identity. V2 backfills searchable semantics and embeddings for V1 candidates.
-const JobVersion = "metric-candidate-semantic-v2"
+const JobVersion = "metric-candidate-semantic-v3"
 
 var ErrInvalidDatasetVersion = errors.New("metric candidate extraction requires an exact published dataset version")
 
@@ -29,13 +29,14 @@ const (
 	BlockReasonAggregatedDataset   = "AGGREGATED_DATASET_UNSUPPORTED"
 	BlockReasonPreAggregation      = "PRE_AGGREGATION_UNSUPPORTED"
 	BlockReasonAggregateExpression = "AGGREGATE_EXPRESSION_UNSUPPORTED"
+	BlockReasonDatasetUnavailable  = "DATASET_DEPENDENCY_UNAVAILABLE"
 )
 
 var supportedAggregations = map[string]bool{
 	"SUM": true, "AVG": true, "MIN": true, "MAX": true, "COUNT": true, "COUNT_DISTINCT": true,
 }
 
-// Extract derives one candidate for every numeric output field in an exact immutable dataset
+// Extract derives every structurally supportable atomic candidate from an exact immutable dataset
 // version. It never reads mutable pointers, calls an LLM, persists state, or publishes metrics.
 func Extract(version dataset.VersionRecord) (ExtractionResult, error) {
 	result := ExtractionResult{
@@ -59,15 +60,10 @@ func Extract(version dataset.VersionRecord) (ExtractionResult, error) {
 	timeFieldID, timeGrain, timeWarnings := extractTimeSemantics(document, dimensions)
 	globalBlocks := datasetBlockReasons(document)
 	partial := false
+	rules := deriveCandidateRules(document, len(globalBlocks) == 0)
 
-	for index, field := range document.Fields {
-		if field.CanonicalType != "INTEGER" && field.CanonicalType != "DECIMAL" {
-			continue
-		}
-		if field.Role != "MEASURE" && field.SemanticType != "AMOUNT" && field.SemanticType != "QUANTITY" && field.SemanticType != "PERCENTAGE" {
-			continue
-		}
-		candidate, err := buildCandidate(version, document, field, index, dimensions, timeFieldID, timeGrain, globalBlocks, timeWarnings)
+	for _, rule := range rules {
+		candidate, err := buildCandidate(version, document, rule, dimensions, timeFieldID, timeGrain, globalBlocks, timeWarnings)
 		if err != nil {
 			return result, err
 		}
@@ -77,7 +73,9 @@ func Extract(version dataset.VersionRecord) (ExtractionResult, error) {
 		result.Candidates = append(result.Candidates, candidate)
 	}
 	if len(result.Candidates) == 0 {
-		result.Warnings = append(result.Warnings, "数据集发布版本没有可提取的数值输出字段。")
+		result.Warnings = append(result.Warnings, "数据集发布版本没有可由输出粒度、标识符或数值字段确定的原子指标候选。")
+	} else if len(globalBlocks) == 0 && !hasRecordCountRule(rules) {
+		result.Warnings = append(result.Warnings, "数据集没有非空输出字段，无法安全生成明细记录数候选。")
 	}
 	result.Status = TaskStatusSucceeded
 	if partial {
@@ -86,16 +84,137 @@ func Extract(version dataset.VersionRecord) (ExtractionResult, error) {
 	return result, nil
 }
 
+type candidateRule struct {
+	Field       dataset.Field
+	FieldIndex  int
+	Aggregation string
+	Confidence  Confidence
+	Status      CandidateStatus
+	Name        string
+	Description string
+	CodeSeed    string
+	Evidence    []Evidence
+	Warnings    []string
+	Kind        string
+}
+
+func deriveCandidateRules(document dataset.Document, detailCompatible bool) []candidateRule {
+	rules := []candidateRule{}
+	seen := map[string]bool{}
+	add := func(rule candidateRule) {
+		key := rule.Field.ID + "\x1f" + rule.Aggregation
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		rules = append(rules, rule)
+	}
+	if detailCompatible {
+		if field, index, evidence, ok := recordCountField(document); ok {
+			add(candidateRule{
+				Field: field, FieldIndex: index, Aggregation: "COUNT", Confidence: ConfidenceHigh,
+				Status: CandidateStatusReady, Name: safeText(document.Dataset.Name+"记录数", "记录数", 200),
+				Description: safeText(fmt.Sprintf("按数据集“%s”的发布输出粒度统计明细记录数。", document.Dataset.Name), "明细记录数", 2000),
+				CodeSeed:    "record", Evidence: evidence, Kind: "RECORD_COUNT",
+			})
+		}
+	}
+	grainKeys := map[string]bool{}
+	for _, code := range document.OutputGrain.KeyFields {
+		grainKeys[strings.TrimSpace(code)] = true
+	}
+	for index, field := range document.Fields {
+		isIdentifier := field.Role == "IDENTIFIER" || field.SemanticType == "IDENTIFIER" || grainKeys[field.Code]
+		if isIdentifier && field.CanonicalType != "DATE" && field.CanonicalType != "DATETIME" && field.CanonicalType != "TIMESTAMP" {
+			confidence := ConfidenceMedium
+			evidenceCode := "IDENTIFIER_COUNT_DISTINCT"
+			if grainKeys[field.Code] {
+				confidence = ConfidenceHigh
+				evidenceCode = "OUTPUT_GRAIN_KEY_COUNT_DISTINCT"
+			}
+			warnings := []string{}
+			if field.Nullable {
+				warnings = append(warnings, "标识符字段允许为空，去重计数会忽略空值。")
+			}
+			add(candidateRule{
+				Field: field, FieldIndex: index, Aggregation: "COUNT_DISTINCT", Confidence: confidence,
+				Status: CandidateStatusReady, Name: identifierCountName(field),
+				Description: safeText(fmt.Sprintf("基于数据集“%s”的标识符“%s”统计去重实体数。", document.Dataset.Name, field.Name), "标识符去重数", 2000),
+				CodeSeed:    field.Code, Evidence: []Evidence{{Code: evidenceCode, Path: fmt.Sprintf("dsl.fields[%d]", index), Value: field.Code}},
+				Warnings: warnings, Kind: "IDENTIFIER_COUNT",
+			})
+		}
+
+		isNumeric := field.CanonicalType == "INTEGER" || field.CanonicalType == "DECIMAL"
+		isNumericFact := isNumeric && field.Role != "IDENTIFIER" && field.Role != "DIMENSION" && field.Role != "TIME" &&
+			field.SemanticType != "IDENTIFIER" && !grainKeys[field.Code] &&
+			(field.Role == "MEASURE" || field.Role == "ATTRIBUTE" || field.SemanticType == "AMOUNT" || field.SemanticType == "QUANTITY" || field.SemanticType == "PERCENTAGE")
+		isExplicitCount := field.Role == "MEASURE" && (strings.EqualFold(field.Aggregation, "COUNT") || strings.EqualFold(field.Aggregation, "COUNT_DISTINCT"))
+		if !isNumericFact && !isExplicitCount {
+			continue
+		}
+		aggregation, confidence, status, evidence, warnings := classifyAggregation(field, index)
+		add(candidateRule{
+			Field: field, FieldIndex: index, Aggregation: aggregation, Confidence: confidence, Status: status,
+			Name: safeText(field.Name, field.Code, 200), Description: candidateDescription(document, field),
+			CodeSeed: field.Code, Evidence: evidence, Warnings: warnings, Kind: "VALUE_METRIC",
+		})
+	}
+	return rules
+}
+
+func recordCountField(document dataset.Document) (dataset.Field, int, []Evidence, bool) {
+	visibleAndNonNull := func(field dataset.Field) bool { return !field.Nullable && (field.Visible == nil || *field.Visible) }
+	for _, code := range document.OutputGrain.KeyFields {
+		for index, field := range document.Fields {
+			if field.Code == strings.TrimSpace(code) && visibleAndNonNull(field) {
+				return field, index, []Evidence{{Code: "RECORD_COUNT_FROM_GRAIN_KEY", Path: "dsl.outputGrain.keyFields", Value: field.Code}}, true
+			}
+		}
+	}
+	for index, field := range document.Fields {
+		if visibleAndNonNull(field) && (field.Role == "IDENTIFIER" || field.SemanticType == "IDENTIFIER") {
+			return field, index, []Evidence{{Code: "RECORD_COUNT_FROM_NONNULL_IDENTIFIER", Path: fmt.Sprintf("dsl.fields[%d].nullable", index), Value: field.Code + ":false"}}, true
+		}
+	}
+	for index, field := range document.Fields {
+		if visibleAndNonNull(field) {
+			return field, index, []Evidence{{Code: "RECORD_COUNT_FROM_NONNULL_FIELD", Path: fmt.Sprintf("dsl.fields[%d].nullable", index), Value: field.Code + ":false"}}, true
+		}
+	}
+	return dataset.Field{}, 0, nil, false
+}
+
+func hasRecordCountRule(rules []candidateRule) bool {
+	for _, rule := range rules {
+		if rule.Kind == "RECORD_COUNT" {
+			return true
+		}
+	}
+	return false
+}
+
+func identifierCountName(field dataset.Field) string {
+	name := safeText(field.Name, field.Code, 180)
+	for _, suffix := range []string{"标识符", "编号", "编码", "标识", "ID", "Id", "id"} {
+		if trimmed := strings.TrimSpace(strings.TrimSuffix(name, suffix)); trimmed != "" && trimmed != name {
+			return safeText(trimmed+"数", name+"去重数", 200)
+		}
+	}
+	return safeText(name+"去重数", "实体去重数", 200)
+}
+
 func buildCandidate(
 	version dataset.VersionRecord,
 	document dataset.Document,
-	field dataset.Field,
-	fieldIndex int,
+	rule candidateRule,
 	dimensions []metric.Dimension,
 	timeFieldID, timeGrain string,
 	globalBlocks, timeWarnings []string,
 ) (CandidateDraft, error) {
-	aggregation, confidence, status, ruleEvidence, warnings := classifyAggregation(field, fieldIndex)
+	field, fieldIndex := rule.Field, rule.FieldIndex
+	aggregation, confidence, status := rule.Aggregation, rule.Confidence, rule.Status
+	ruleEvidence, warnings := append([]Evidence(nil), rule.Evidence...), append([]string(nil), rule.Warnings...)
 	blockReasons := append([]string{}, globalBlocks...)
 	if expressionContainsAggregate(field.Expression) && !containsString(blockReasons, BlockReasonAggregateExpression) {
 		blockReasons = append(blockReasons, BlockReasonAggregateExpression)
@@ -109,6 +228,9 @@ func buildCandidate(
 	}
 
 	unit := strings.TrimSpace(field.Unit)
+	if aggregation == "COUNT" || aggregation == "COUNT_DISTINCT" {
+		unit = ""
+	}
 	if !validBoundedText(unit, 32) {
 		unit = ""
 		warnings = append(warnings, "源字段单位超出指标定义边界，候选未自动携带单位。")
@@ -124,9 +246,9 @@ func buildCandidate(
 	definition := metric.Definition{
 		SchemaVersion: metric.DefinitionVersion,
 		Metric: metric.Descriptor{
-			Code:        metricCode(document.Dataset.Code, field.Code, aggregation),
-			Name:        safeText(field.Name, field.Code, 200),
-			Description: candidateDescription(document, field),
+			Code:        metricCode(document.Dataset.Code, rule.CodeSeed, aggregation),
+			Name:        rule.Name,
+			Description: rule.Description,
 			Type:        "ATOMIC",
 		},
 		DatasetID:                    version.DatasetID,
@@ -158,7 +280,7 @@ func buildCandidate(
 	evidence := []Evidence{
 		{Code: "EXACT_DATASET_VERSION", Path: "datasetVersion.id", Value: version.ID},
 		{Code: "DATASET_DSL_HASH", Path: "datasetVersion.dslHash", Value: version.DSLHash},
-		{Code: "NUMERIC_OUTPUT_FIELD", Path: fmt.Sprintf("dsl.fields[%d].canonicalType", fieldIndex), Value: field.CanonicalType},
+		{Code: "OUTPUT_FIELD_TYPE", Path: fmt.Sprintf("dsl.fields[%d].canonicalType", fieldIndex), Value: field.CanonicalType},
 		{Code: "FIELD_ROLE", Path: fmt.Sprintf("dsl.fields[%d].role", fieldIndex), Value: field.Role},
 		{Code: "FIELD_EXPRESSION", Path: fmt.Sprintf("dsl.fields[%d].expression", fieldIndex), Value: expressionEvidence(field.Expression)},
 	}

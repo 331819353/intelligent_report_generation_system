@@ -99,16 +99,21 @@ func TestBuildMappedDatasetDocumentCreatesDirectSingleTableGraph(t *testing.T) {
 
 func TestBuildMappedDatasetDocumentSupportsSafeUnicodePhysicalColumns(t *testing.T) {
 	table := MappedDatasetTable{
-		ID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", DataSourceID: "source-1", TableName: "CSV", BusinessName: "销售订单明细表",
+		ID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", DataSourceID: "source-1", DataSourceName: "销售订单明细表",
+		FileVersionID: "file-version-1", TableName: "CSV", BusinessName: "sales_order",
 	}
 	document, err := BuildMappedDatasetDocument(table, []MappedDatasetColumn{
-		{ColumnName: "订单编号", BusinessName: "订单编号", CanonicalType: "TEXT"},
-		{ColumnName: "订单金额", BusinessName: "订单金额", CanonicalType: "DECIMAL", SemanticType: "AMOUNT"},
+		{ColumnName: "订单编号", BusinessName: "order_id", BusinessDescription: "订单唯一编号", CanonicalType: "TEXT"},
+		{ColumnName: "订单金额", BusinessName: "order_amount", BusinessDescription: "订单金额", CanonicalType: "DECIMAL", SemanticType: "AMOUNT"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(document.Nodes[0].Projection, []string{"订单编号", "订单金额"}) || document.Fields[0].Expression.Field != "订单编号" {
+	if document.Dataset.Name != "销售订单明细表" ||
+		!reflect.DeepEqual(document.Nodes[0].Projection, []string{"订单编号", "订单金额"}) ||
+		document.Fields[0].Expression.Field != "订单编号" ||
+		!reflect.DeepEqual([]string{document.Fields[0].Code, document.Fields[1].Code}, []string{"order_id", "order_amount"}) ||
+		!reflect.DeepEqual([]string{document.Fields[0].Name, document.Fields[1].Name}, []string{"订单编号", "订单金额"}) {
 		t.Fatalf("document = %#v", document)
 	}
 	raw, err := json.Marshal(document)
@@ -117,6 +122,19 @@ func TestBuildMappedDatasetDocumentSupportsSafeUnicodePhysicalColumns(t *testing
 	}
 	if _, err := Prepare(raw); err != nil {
 		t.Fatalf("unicode physical fields did not pass Prepare: %v", err)
+	}
+}
+
+func TestBuildMappedDatasetDocumentPrefersChineseSheetNameForFileDataset(t *testing.T) {
+	document, err := BuildMappedDatasetDocument(MappedDatasetTable{
+		ID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", DataSourceID: "source-1", DataSourceName: "经营分析工作簿",
+		FileVersionID: "file-version-1", TableName: "销售订单", BusinessName: "sales_order",
+	}, []MappedDatasetColumn{{ColumnName: "order_id", BusinessName: "order_id", CanonicalType: "TEXT"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Dataset.Name != "销售订单" {
+		t.Fatalf("dataset name=%q, want Chinese sheet name", document.Dataset.Name)
 	}
 }
 

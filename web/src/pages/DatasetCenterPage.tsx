@@ -1685,7 +1685,7 @@ export function DatasetCenterPage() {
       await refreshPublication(publicationRecord.id)
       setPublicationDecisionNote('')
       setSelectedPublicationRequestID(result.request.id)
-      setNotice({ tone: 'success', message: `“${publicationRecord.name}”审批通过并发布为 V${result.publishedVersion.versionNo}；度量字段指标候选正在自动提取` })
+      setNotice({ tone: 'success', message: `“${publicationRecord.name}”审批通过并发布为 V${result.publishedVersion.versionNo}；内部原子度量事实正在自动提取` })
     } catch (cause) {
       setFormError(cause instanceof Error ? cause.message : '审批并发布数据集失败')
     } finally {
@@ -2093,7 +2093,7 @@ export function DatasetCenterPage() {
       {loading ? <Empty>正在加载数据集…</Empty> : !datasets.length ? <Empty title="还没有数据集">点击右上角“新建数据集”开始配置。</Empty> : !filtered.length ? <Empty title="没有符合条件的数据集">请调整搜索词或筛选条件。</Empty> :
         <div className="dataset-asset-list" role="list" aria-label="数据集资产清单">{filtered.map(dataset => <article key={dataset.id} role="listitem" className="dataset-asset-card">
           <div className="dataset-asset-icon" aria-hidden="true">DS</div>
-          <div className="dataset-asset-main"><div><h3>{dataset.name}</h3><span className={`dataset-asset-status ${dataset.status.toLowerCase()}`}>{statusLabels[dataset.status] ?? dataset.status}</span>{dataset.originTableId && <span className="dataset-asset-origin" title="由已完成映射的数据资产自动创建">映射表数据集</span>}</div><p>{dataset.description || '暂无说明'}</p><small>{dataset.code}</small></div>
+          <div className="dataset-asset-main"><div><h3>{dataset.name}</h3><span className={`dataset-asset-status ${dataset.status.toLowerCase()}`}>{statusLabels[dataset.status] ?? dataset.status}</span>{dataset.originTableId && <span className="dataset-asset-origin" title="由已完成映射的数据资产自动创建">映射表数据集</span>}</div><p>{dataset.description || '暂无说明'}</p><small>{dataset.originDataSourceName ? `${dataset.originDataSourceName} · ` : ''}{dataset.code}</small></div>
           <dl><div><dt>类型</dt><dd>{typeLabels[dataset.type] ?? dataset.type}</dd></div><div><dt>版本</dt><dd>V{dataset.version}</dd></div><div><dt>更新时间</dt><dd>{new Date(dataset.updatedAt).toLocaleString('zh-CN', { hour12: false })}</dd></div></dl>
           <div className="dataset-asset-actions"><button className="action-view" type="button" disabled={actionBusy} onClick={() => void openView(dataset)}>查看</button><button className="action-edit" type="button" disabled={actionBusy} onClick={() => void openEdit(dataset)}>修改</button><button className="action-publish" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title={dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED' ? '请先恢复可用状态再提交发布审批' : '冻结当前草稿并提交发布审批'} onClick={() => void openPublication(dataset)}>发布</button><button className="action-history" type="button" disabled={actionBusy} onClick={() => void openHistory(dataset)}>历史版本</button>{dataset.status === 'DISABLED' ? <button className="action-resume" type="button" disabled={actionBusy} title="恢复到停用前的数据集状态" onClick={() => { setFormError(''); setDialog({ mode: 'restore', dataset }) }}>恢复</button> : <button className="action-pause" type="button" disabled={actionBusy || dataset.status === 'DEPRECATED'} title={dataset.status === 'DEPRECATED' ? '已废弃数据集不能再次停用' : '停用后将阻止新的查询绑定'} onClick={() => { setFormError(''); setDialog({ mode: 'disable', dataset }) }}>停用</button>}<button className="action-delete" type="button" disabled={actionBusy} onClick={() => { setFormError(''); setDialog({ mode: 'delete', dataset }) }}>删除</button></div>
         </article>)}</div>}
@@ -2131,7 +2131,7 @@ export function DatasetCenterPage() {
           <section className="dataset-publication-current" aria-label="当前发布候选">
             <div><span>当前草稿</span><strong>草稿 V{publicationRecord.draftVersionNo}</strong><small>{publicationRecord.dslHash.slice(0, 12)}…</small></div>
             <div><span>数据集聚合版本</span><strong>V{publicationRecord.version}</strong><small>提交时会冻结当前精确版本</small></div>
-            <div><span>当前草稿审批</span><strong className={currentDraftPublicationRequest?.status.toLowerCase()}>{currentDraftPublicationRequest ? publicationStatusLabels[currentDraftPublicationRequest.status] : '未提交'}</strong><small>{currentDraftPublicationRequest?.publishedVersionId ? `已发布版本 ${currentDraftPublicationRequest.publishedVersionId} · 指标候选自动提取中` : '指标不会读取未审批草稿'}</small></div>
+            <div><span>当前草稿审批</span><strong className={currentDraftPublicationRequest?.status.toLowerCase()}>{currentDraftPublicationRequest ? publicationStatusLabels[currentDraftPublicationRequest.status] : '未提交'}</strong><small>{currentDraftPublicationRequest?.publishedVersionId ? `已发布版本 ${currentDraftPublicationRequest.publishedVersionId} · 内部原子度量事实提取中` : '指标不会读取未审批草稿'}</small></div>
           </section>
 
           <div className="dataset-publication-layout">

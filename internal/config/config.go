@@ -74,7 +74,7 @@ func Load() (Config, error) {
 		HTTPAddr:                envOrDefault("API_HTTP_ADDR", ":8080"),
 		ReadHeaderTimeout:       5 * time.Second,
 		ReadTimeout:             15 * time.Second,
-		WriteTimeout:            30 * time.Second,
+		WriteTimeout:            60 * time.Second,
 		IdleTimeout:             60 * time.Second,
 		ShutdownTimeout:         10 * time.Second,
 		WorkerPollInterval:      2 * time.Second,
@@ -209,8 +209,8 @@ func (c Config) Validate() error {
 	if c.WorkerPollInterval <= 0 {
 		return errors.New("WORKER_POLL_INTERVAL must be greater than zero")
 	}
-	if c.AIRequestTimeout <= 0 || c.AIRequestTimeout >= c.WriteTimeout {
-		return errors.New("AI_REQUEST_TIMEOUT must be greater than zero and less than API_WRITE_TIMEOUT")
+	if c.AIRequestTimeout <= 0 || c.AIRequestTimeout*2 >= c.WriteTimeout {
+		return errors.New("AI_REQUEST_TIMEOUT must be greater than zero and twice its value must be less than API_WRITE_TIMEOUT")
 	}
 	if c.AIAttemptTimeout <= 0 || c.AIAttemptTimeout > c.AIRequestTimeout {
 		return errors.New("AI_ATTEMPT_TIMEOUT must be greater than zero and at most AI_REQUEST_TIMEOUT")

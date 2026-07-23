@@ -68,7 +68,7 @@ func TestProposalSchemaKeepsAggregatedDraftAsEvidenceOnly(t *testing.T) {
 	}
 }
 
-func TestProposalSchemaSupportsCreateDatasetAndMappedDirectMetric(t *testing.T) {
+func TestProposalSchemaKeepsMappedDatasetsAsCreateDatasetEvidenceOnly(t *testing.T) {
 	retrieval := mappedRetrievalContext()
 	root := proposalOutputSchema(retrieval)
 	properties := root["properties"].(map[string]any)
@@ -76,17 +76,22 @@ func TestProposalSchemaSupportsCreateDatasetAndMappedDirectMetric(t *testing.T) 
 	if !slices.Contains(strategies, StrategyCreateDataset) {
 		t.Fatalf("CREATE_DATASET missing from strategy enum: %#v", strategies)
 	}
-	// A mapped published snapshot remains a valid CREATE_ON_DATASET target when no structural
-	// change is needed. Local validation, not this shared target enum, fences MODIFY_DATASET.
 	targetIDs := properties["targetDatasetId"].(map[string]any)["enum"].([]string)
-	if !slices.Contains(targetIDs, testDatasetID) {
-		t.Fatalf("mapped published dataset cannot support direct metric creation: %#v", targetIDs)
+	if slices.Contains(targetIDs, testDatasetID) {
+		t.Fatalf("mapped dataset leaked into a direct action target: %#v", targetIDs)
+	}
+	evidence := properties["retrievalEvidence"].(map[string]any)["items"].(map[string]any)
+	evidenceIDs := evidence["properties"].(map[string]any)["datasetId"].(map[string]any)["enum"].([]string)
+	if !slices.Contains(evidenceIDs, testDatasetID) {
+		t.Fatalf("mapped dataset missing from CREATE_DATASET evidence: %#v", evidenceIDs)
 	}
 	promptRequest, err := buildProviderRequest(validRequest(), retrieval)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(promptRequest.Messages[0].Parts[0].Text, "mapped=true") ||
+	if !strings.Contains(promptRequest.Messages[0].Parts[0].Text, "retrieval.mappedDatasets/mappedFields") ||
+		!strings.Contains(promptRequest.Messages[0].Parts[0].Text, "retrieval.atomicFacts") ||
+		!strings.Contains(promptRequest.Messages[0].Parts[0].Text, "不能直接绑定报表") ||
 		!strings.Contains(promptRequest.Messages[0].Parts[0].Text, "不得把这些内部标识当作说明文字") {
 		t.Fatalf("system prompt is missing mapped safety or readability rules: %s", promptRequest.Messages[0].Parts[0].Text)
 	}

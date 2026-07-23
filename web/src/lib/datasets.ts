@@ -41,7 +41,7 @@ export type DatasetRecord = {
 }
 export type DatasetSummary = {
   id: string; code: string; name: string; description: string; type: string; status: string
-  originTableId?: string
+  originTableId?: string; originTableName?: string; originDataSourceName?: string
   version: number; dslHash: string; currentPublishedVersionId?: string; updatedAt: string
 }
 export type DatasetPage = {

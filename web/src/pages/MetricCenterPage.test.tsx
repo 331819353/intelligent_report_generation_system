@@ -175,6 +175,36 @@ describe('指标中心原子指标编辑', () => {
     expect(proposeSpy).not.toHaveBeenCalled()
   })
 
+  test('原子指标编辑器允许对字符串标识符计数，并在切回数值聚合时清除非法字段', async () => {
+    const user = userEvent.setup()
+    const countVersion = datasetVersion({
+      dsl: {
+        ...datasetDSL,
+        fields: [
+          ...datasetDSL.fields,
+          { id: 'field_order_id', code: 'order_id', name: '订单编号', role: 'IDENTIFIER', canonicalType: 'STRING', visible: true },
+        ],
+      },
+    })
+    mockMetricCenter({ dataVersion: countVersion })
+    renderMetricCenter('/metrics/metric-1/edit')
+
+    const aggregation = await screen.findByLabelText('指标聚合')
+    await user.selectOptions(aggregation, 'COUNT')
+    const atomicField = screen.getByLabelText('原子指标字段')
+    expect(within(atomicField).getByRole('option', { name: '订单编号 · IDENTIFIER · STRING' })).toBeInTheDocument()
+    await user.selectOptions(atomicField, 'field_order_id')
+    expect(atomicField).toHaveValue('field_order_id')
+    expect(screen.getByLabelText('单位')).toHaveValue('')
+    expect(screen.getByLabelText('数字格式')).toHaveValue('#,##0')
+    expect(screen.getByLabelText('小数位数')).toHaveValue(0)
+    expect(screen.getByLabelText('可加性')).toHaveValue('ADDITIVE')
+
+    await user.selectOptions(aggregation, 'SUM')
+    expect(screen.getByLabelText('原子指标字段')).toHaveValue('')
+    expect(within(screen.getByLabelText('原子指标字段')).queryByRole('option', { name: '订单编号 · IDENTIFIER · STRING' })).not.toBeInTheDocument()
+  })
+
   test('READ、MANAGE、PUBLISH 分离时发布者无需暗中保存草稿', async () => {
     const user = userEvent.setup()
     const definition = metricDefinition()

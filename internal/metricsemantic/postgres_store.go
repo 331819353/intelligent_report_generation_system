@@ -119,15 +119,15 @@ func (s *PostgresStore) Fail(ctx context.Context, claim EmbeddingClaim, workerID
 	})
 }
 
-func (s *PostgresStore) Search(ctx context.Context, tenantID, query string, vector []float32, limit int, includeCandidates bool) (items []SearchResult, err error) {
+func (s *PostgresStore) Search(ctx context.Context, tenantID, query string, vector []float32, limit int) (items []SearchResult, err error) {
 	items = []SearchResult{}
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		var rows pgx.Rows
 		var queryErr error
 		if len(vector) > 0 {
-			rows, queryErr = tx.Query(ctx, semanticVectorSearchSQL, query, formatVector(vector), includeCandidates, limit)
+			rows, queryErr = tx.Query(ctx, semanticVectorSearchSQL, query, formatVector(vector), limit)
 		} else {
-			rows, queryErr = tx.Query(ctx, semanticLexicalSearchSQL, query, includeCandidates, limit)
+			rows, queryErr = tx.Query(ctx, semanticLexicalSearchSQL, query, limit)
 		}
 		if queryErr != nil {
 			return queryErr
@@ -137,7 +137,7 @@ func (s *PostgresStore) Search(ctx context.Context, tenantID, query string, vect
 			var item SearchResult
 			var lineage json.RawMessage
 			if err := rows.Scan(
-				&item.SubjectType, &item.CandidateID, &item.MetricID, &item.MetricVersionID,
+				&item.SubjectType, &item.MetricID, &item.MetricVersionID,
 				&item.DatasetID, &item.DatasetVersionID, &item.Name, &item.Description, &item.Caliber,
 				&item.Dimensions, &item.Period, &item.PeriodDescription, &lineage,
 				&item.LineageSummary, &item.Tags, &item.SemanticScore, &item.KeywordScore,
@@ -169,37 +169,28 @@ const semanticBaseCTE = `WITH eligible AS (
 	    ELSE 0.0
 	  END AS keyword_score
 	FROM platform.metric_semantic_documents AS document
-	LEFT JOIN platform.metric_versions AS version
+	JOIN platform.metric_versions AS version
 	  ON version.tenant_id=document.tenant_id AND version.id=document.metric_version_id
-	LEFT JOIN platform.metrics AS metric
+	JOIN platform.metrics AS metric
 	  ON metric.tenant_id=document.tenant_id AND metric.id=document.metric_id
-	LEFT JOIN platform.metric_candidates AS candidate
-	  ON candidate.tenant_id=document.tenant_id AND candidate.id=document.candidate_id
-	LEFT JOIN platform.datasets AS candidate_dataset
-	  ON candidate_dataset.tenant_id=document.tenant_id AND candidate_dataset.id=document.dataset_id
-	WHERE document.tenant_id=platform.current_tenant_id() AND (
-	  (document.subject_type='METRIC_VERSION' AND version.status='PUBLISHED'
-	    AND metric.status='PUBLISHED' AND metric.current_published_version_id=version.id
-	    AND metric.deleted_at IS NULL)
-	  OR ($2::boolean AND document.subject_type='CANDIDATE'
-	    AND candidate.status IN ('READY','NEEDS_REVIEW')
-	    AND candidate_dataset.status='PUBLISHED' AND candidate_dataset.deleted_at IS NULL
-	    AND candidate_dataset.current_published_version_id=document.dataset_version_id)
-	)
+	WHERE document.tenant_id=platform.current_tenant_id()
+	  AND document.subject_type='METRIC_VERSION' AND version.status='PUBLISHED'
+	  AND metric.status='PUBLISHED' AND metric.current_published_version_id=version.id
+	  AND metric.deleted_at IS NULL
 ) `
 
-const semanticSelectColumns = `subject_type,COALESCE(candidate_id::text,''),COALESCE(metric_id::text,''),
+const semanticSelectColumns = `subject_type,COALESCE(metric_id::text,''),
 	COALESCE(metric_version_id::text,''),dataset_id::text,dataset_version_id::text,
 	name,description,caliber,dimensions,period,period_description,lineage,lineage_summary,tags`
 
 const semanticLexicalSearchSQL = semanticBaseCTE + `
 SELECT ` + semanticSelectColumns + `,0::float8 AS semantic_score,keyword_score::float8,
-	keyword_score::float8 AS score,(subject_type='METRIC_VERSION') AS binding_allowed,
+	keyword_score::float8 AS score,true AS binding_allowed,
 	(embedding_status='SUCCEEDED') AS embedding_ready
 FROM eligible
 WHERE keyword_score>0
 ORDER BY score DESC,name,id
-LIMIT $3`
+LIMIT $2`
 
 const semanticVectorSearchSQL = `WITH eligible AS (
 	SELECT document.*,
@@ -213,31 +204,22 @@ const semanticVectorSearchSQL = `WITH eligible AS (
 	  CASE WHEN document.embedding_status='SUCCEEDED'
 	    THEN GREATEST(0.0,1.0-(document.embedding <=> $2::halfvec)) ELSE 0.0 END AS semantic_score
 	FROM platform.metric_semantic_documents AS document
-	LEFT JOIN platform.metric_versions AS version
+	JOIN platform.metric_versions AS version
 	  ON version.tenant_id=document.tenant_id AND version.id=document.metric_version_id
-	LEFT JOIN platform.metrics AS metric
+	JOIN platform.metrics AS metric
 	  ON metric.tenant_id=document.tenant_id AND metric.id=document.metric_id
-	LEFT JOIN platform.metric_candidates AS candidate
-	  ON candidate.tenant_id=document.tenant_id AND candidate.id=document.candidate_id
-	LEFT JOIN platform.datasets AS candidate_dataset
-	  ON candidate_dataset.tenant_id=document.tenant_id AND candidate_dataset.id=document.dataset_id
-	WHERE document.tenant_id=platform.current_tenant_id() AND (
-	  (document.subject_type='METRIC_VERSION' AND version.status='PUBLISHED'
-	    AND metric.status='PUBLISHED' AND metric.current_published_version_id=version.id
-	    AND metric.deleted_at IS NULL)
-	  OR ($3::boolean AND document.subject_type='CANDIDATE'
-	    AND candidate.status IN ('READY','NEEDS_REVIEW')
-	    AND candidate_dataset.status='PUBLISHED' AND candidate_dataset.deleted_at IS NULL
-	    AND candidate_dataset.current_published_version_id=document.dataset_version_id)
-	)
+	WHERE document.tenant_id=platform.current_tenant_id()
+	  AND document.subject_type='METRIC_VERSION' AND version.status='PUBLISHED'
+	  AND metric.status='PUBLISHED' AND metric.current_published_version_id=version.id
+	  AND metric.deleted_at IS NULL
 )
 SELECT ` + semanticSelectColumns + `,semantic_score::float8,keyword_score::float8,
 	(semantic_score*0.75+keyword_score*0.25)::float8 AS score,
-	(subject_type='METRIC_VERSION') AS binding_allowed,(embedding_status='SUCCEEDED') AS embedding_ready
+	true AS binding_allowed,(embedding_status='SUCCEEDED') AS embedding_ready
 FROM eligible
 WHERE semantic_score>0 OR keyword_score>0
 ORDER BY score DESC,name,id
-LIMIT $4`
+LIMIT $3`
 
 func formatVector(values []float32) string {
 	var builder strings.Builder

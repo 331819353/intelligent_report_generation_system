@@ -20,7 +20,8 @@ const (
 )
 
 type promptEditContext struct {
-	GroupRoles []promptGroupRole `json:"groupRoles,omitempty"`
+	GroupRoles    []promptGroupRole    `json:"groupRoles,omitempty"`
+	DerivedFields []promptDerivedField `json:"derivedFields,omitempty"`
 }
 
 type promptGroupRole struct {
@@ -30,13 +31,123 @@ type promptGroupRole struct {
 	Consumers []string  `json:"consumers"`
 }
 
+// promptDerivedField is a trusted semantic index over a transform output. It lets the
+// intent model resolve business language such as "不再关注清洗后的客户名称" without
+// treating a transform output as a catalog column or asking the user for a component id.
+// PhysicalField remains the only binding accepted by fieldChanges; References and Consumers
+// describe the exact graph locations that may also need an operation.
+type promptDerivedField struct {
+	TransformID   string                   `json:"transformId"`
+	TransformName string                   `json:"transformName"`
+	ComponentType string                   `json:"componentType"`
+	Input         PlanInput                `json:"input"`
+	RuleID        string                   `json:"ruleId"`
+	Output        PlanTransformOutput      `json:"output"`
+	Key           string                   `json:"key"`
+	PhysicalField FieldBinding             `json:"physicalField"`
+	References    []promptDerivedReference `json:"references,omitempty"`
+	Consumers     []string                 `json:"consumers,omitempty"`
+}
+
+type promptDerivedReference struct {
+	ComponentKind string `json:"componentKind"`
+	ComponentID   string `json:"componentId"`
+	Field         string `json:"field"`
+	Role          string `json:"role,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Code          string `json:"code,omitempty"`
+}
+
 // buildPromptEditContext exposes only topology derived from the trusted graph. Natural-language
 // interpretation belongs to the intent model and must never be duplicated by local keywords.
 func buildPromptEditContext(current *GraphPlan) *promptEditContext {
-	if current == nil || len(current.Groups) == 0 {
+	if current == nil {
 		return nil
 	}
-	return &promptEditContext{GroupRoles: classifyPromptGroupRoles(*current)}
+	return &promptEditContext{
+		GroupRoles:    classifyPromptGroupRoles(*current),
+		DerivedFields: classifyPromptDerivedFields(*current),
+	}
+}
+
+func classifyPromptDerivedFields(current GraphPlan) []promptDerivedField {
+	result := []promptDerivedField{}
+	for _, transform := range current.Transforms {
+		consumers := []string{}
+		for _, edge := range directConsumerEdges(current) {
+			if edge.Input == (PlanInput{Kind: "TRANSFORM", ID: transform.ID}) {
+				consumers = append(consumers, edge.ConsumerKind+":"+edge.ConsumerID+"."+edge.Field)
+			}
+		}
+		sort.Strings(consumers)
+		for _, rule := range transform.Rules {
+			lineage := planFieldBinding(current, transform.ID, rule.Output.ID)
+			if fieldBindingKey(lineage) == "" || lineage.TableID == "" {
+				continue
+			}
+			result = append(result, promptDerivedField{
+				TransformID: transform.ID, TransformName: transform.Name,
+				ComponentType: transform.ComponentType, Input: normalizeInput(transform.Input),
+				RuleID: rule.ID, Output: rule.Output, Key: fieldKey(transform.ID, rule.Output.ID),
+				PhysicalField: lineage,
+				References:    derivedOutputReferences(current, transform, rule),
+				Consumers:     append([]string(nil), consumers...),
+			})
+		}
+	}
+	return result
+}
+
+func derivedOutputReferences(current GraphPlan, transform PlanTransform, rule PlanTransformRule) []promptDerivedReference {
+	result := []promptDerivedReference{}
+	key := fieldKey(transform.ID, rule.Output.ID)
+	matches := func(nodeID, column string) bool {
+		return nodeID == transform.ID && (column == rule.Output.ID || column == rule.Output.Code)
+	}
+	for _, group := range current.Groups {
+		for _, dimension := range group.Dimensions {
+			if matches(dimension.NodeID, dimension.Column) {
+				result = append(result, promptDerivedReference{ComponentKind: "GROUP", ComponentID: group.ID, Field: "dimensions", Role: "DIMENSION"})
+			}
+		}
+		for _, metric := range group.Metrics {
+			if matches(metric.NodeID, metric.Column) {
+				result = append(result, promptDerivedReference{ComponentKind: "GROUP", ComponentID: group.ID, Field: "metrics", Role: "METRIC"})
+			}
+		}
+	}
+	for _, join := range current.Joins {
+		for _, condition := range join.Conditions {
+			if matches(condition.LeftNodeID, condition.LeftColumn) {
+				result = append(result, promptDerivedReference{ComponentKind: "JOIN", ComponentID: join.ID, Field: "conditions", Role: "LEFT"})
+			}
+			if matches(condition.RightNodeID, condition.RightColumn) {
+				result = append(result, promptDerivedReference{ComponentKind: "JOIN", ComponentID: join.ID, Field: "conditions", Role: "RIGHT"})
+			}
+		}
+	}
+	for _, downstream := range current.Transforms {
+		for _, downstreamRule := range downstream.Rules {
+			if containsString(downstreamRule.InputKeys, key) || downstreamRule.ReplaceSourceKey == key {
+				result = append(result, promptDerivedReference{ComponentKind: "TRANSFORM", ComponentID: downstream.ID, Field: "rules", Role: "INPUT"})
+				break
+			}
+		}
+	}
+	for _, output := range current.End.Outputs {
+		if output.Key == key || matches(output.NodeID, output.Column) {
+			result = append(result, promptDerivedReference{
+				ComponentKind: "END", ComponentID: endComponentID, Field: "outputs", Role: "FINAL_OUTPUT",
+				Name: output.Name, Code: output.Code,
+			})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left := result[i].ComponentKind + "\x00" + result[i].ComponentID + "\x00" + result[i].Field + "\x00" + result[i].Role
+		right := result[j].ComponentKind + "\x00" + result[j].ComponentID + "\x00" + result[j].Field + "\x00" + result[j].Role
+		return left < right
+	})
+	return result
 }
 
 func classifyPromptGroupRoles(current GraphPlan) []promptGroupRole {
@@ -132,9 +243,11 @@ func normalizeAndValidateChangeIntent(current GraphPlan, intent ChangeIntent, ca
 		if !boundedText(intent.Question, 1, 500) {
 			return ChangeIntent{}, invalidOutput("CLARIFY requires a question containing 1 to 500 characters")
 		}
-		if len(intent.ChangeSet.Operations) != 0 || len(intent.ChangeSet.FieldChanges) != 0 {
-			return ChangeIntent{}, invalidOutput("CLARIFY must not contain change operations or field changes")
-		}
+		// A clarification response never reaches the planner or persistence path.
+		// Some providers nevertheless populate tentative changeSet entries because
+		// the structured schema includes them. Discarding that unusable draft scope
+		// is fail-closed and lets the caller receive the model's actual question.
+		intent.ChangeSet = ChangeSet{Operations: []ChangeOperation{}, FieldChanges: []FieldChange{}}
 		if len(intent.Candidates) > maxClarifyCandidates {
 			return ChangeIntent{}, invalidOutput("CLARIFY contains too many candidates")
 		}
@@ -254,21 +367,40 @@ func normalizeAndValidateChangeSet(current GraphPlan, components map[string]comp
 		if !boundedText(op.Description, 1, maxChangeDescription) {
 			return ChangeSet{}, invalidOutput(fmt.Sprintf("change operation %s:%s has an invalid description", op.ComponentKind, op.ComponentID))
 		}
-		if exists {
-			op.ComponentName = currentComponent.Name
-		}
 
 		fields, err := normalizeOperationFields(*op)
 		if err != nil {
 			return ChangeSet{}, err
 		}
+		// componentName is required review metadata for every operation. Models commonly
+		// repeat the current name and also list "name" while changing dimensions or
+		// outputs. An identical trusted value is a no-op, not an authorization that the
+		// planner must manufacture. Pruning it narrows scope and prevents a valid semantic
+		// edit from failing because the complete graph correctly kept the name unchanged.
+		if exists && op.Action == "UPDATE" && containsString(fields, "name") && op.ComponentName == currentComponent.Name {
+			fields = removeString(fields, "name")
+		}
 		op.Fields = fields
+		if exists && !(op.Action == "UPDATE" && containsString(op.Fields, "name")) {
+			// componentName normally identifies the trusted current component. When
+			// name itself is the locked field, it instead carries the desired final
+			// value so the server can materialize that scalar change deterministically.
+			op.ComponentName = currentComponent.Name
+		}
 		changes, err := normalizeOperationInputChanges(currentComponent, *op)
 		if err != nil {
 			return ChangeSet{}, err
 		}
 		op.InputChanges = changes
 	}
+	filteredOperations := make([]ChangeOperation, 0, len(value.Operations))
+	for _, op := range value.Operations {
+		if op.Action == "UPDATE" && len(op.Fields) == 0 && len(op.InputChanges) == 0 {
+			continue
+		}
+		filteredOperations = append(filteredOperations, op)
+	}
+	value.Operations = filteredOperations
 
 	added := map[string]bool{}
 	removed := map[string]bool{}
@@ -306,7 +438,21 @@ func normalizeAndValidateChangeSet(current GraphPlan, components map[string]comp
 	if err != nil {
 		return ChangeSet{}, err
 	}
+	value.Operations, err = completeSingleAddedTransformAnchor(current, components, value.Operations, fieldChanges)
+	if err != nil {
+		return ChangeSet{}, err
+	}
+	value.Operations, err = completeUnusedDerivedTransformRemovals(current, components, value.Operations, fieldChanges)
+	if err != nil {
+		return ChangeSet{}, err
+	}
 	operations = indexChangeOperations(value.Operations)
+	if err := validateRemovalConsumerUpdates(current, removedComponentKeys(value.Operations), operations); err != nil {
+		return ChangeSet{}, err
+	}
+	if err := validateAddedComponentAnchorDeclarations(value.Operations); err != nil {
+		return ChangeSet{}, err
+	}
 	for _, fieldChange := range fieldChanges {
 		if err := validateFieldUseOperationCoverage(current, fieldChange, operations); err != nil {
 			return ChangeSet{}, err
@@ -317,6 +463,332 @@ func normalizeAndValidateChangeSet(current GraphPlan, components map[string]comp
 	return value, nil
 }
 
+// completeSingleAddedTransformAnchor derives the one safe insertion edge that is already
+// implied by the structured final field uses. It never reads user wording. When exactly one new
+// transform exists and exactly one current JOIN/GROUP/END is the nearest declared consumer, the
+// server adds the missing input rewire. Multiple candidates remain ambiguous and are rejected by
+// validateAddedComponentAnchorDeclarations so the intent phase can repair or ask a question.
+func completeSingleAddedTransformAnchor(current GraphPlan, components map[string]componentSnapshot, values []ChangeOperation, fieldChanges []FieldChange) ([]ChangeOperation, error) {
+	transformID := ""
+	for _, operation := range values {
+		if operation.Action != "ADD" || operation.ComponentKind != "TRANSFORM" {
+			continue
+		}
+		if transformID != "" {
+			return values, nil
+		}
+		transformID = operation.ComponentID
+	}
+	if transformID == "" || inputChangesTarget(values, PlanInput{Kind: "TRANSFORM", ID: transformID}) {
+		return values, nil
+	}
+
+	type anchor struct{ kind, id, field string }
+	joinAnchors := map[string]anchor{}
+	groupAnchors := map[string]anchor{}
+	endAnchors := map[string]anchor{}
+	for _, change := range fieldChanges {
+		for _, use := range change.JoinUses {
+			field := strings.ToLower(use.Side)
+			if field != "left" && field != "right" {
+				continue
+			}
+			key, _ := componentKey("JOIN", use.JoinID)
+			joinAnchors[key+"\x00"+field] = anchor{kind: "JOIN", id: use.JoinID, field: field}
+		}
+		for _, use := range change.GroupUses {
+			key, _ := componentKey("GROUP", use.GroupID)
+			groupAnchors[key] = anchor{kind: "GROUP", id: use.GroupID, field: "input"}
+		}
+		for _, use := range change.OutputUses {
+			if use.EndID == endComponentID {
+				key, _ := componentKey("END", endComponentID)
+				endAnchors[key] = anchor{kind: "END", id: endComponentID, field: "input"}
+			}
+		}
+	}
+	candidates := joinAnchors
+	if len(candidates) == 0 {
+		candidates = groupAnchors
+	}
+	if len(candidates) == 0 {
+		candidates = endAnchors
+	}
+	if len(candidates) != 1 {
+		return values, nil
+	}
+	var target anchor
+	for _, candidate := range candidates {
+		target = candidate
+	}
+	key, err := componentKey(target.kind, target.id)
+	if err != nil {
+		return nil, err
+	}
+	component, exists := components[key]
+	if !exists {
+		return values, nil
+	}
+	from, exists := componentInputField(component, target.field)
+	if !exists {
+		return nil, invalidOutput(fmt.Sprintf("cannot derive input anchor for %s:%s.%s", target.kind, target.id, target.field))
+	}
+	change := InputChange{Field: target.field, From: from, To: PlanInput{Kind: "TRANSFORM", ID: transformID}}
+	result := append([]ChangeOperation(nil), values...)
+	for index := range result {
+		operation := &result[index]
+		if operation.ComponentKind != target.kind || operation.ComponentID != target.id {
+			continue
+		}
+		if operation.Action != "UPDATE" {
+			return nil, invalidOutput(fmt.Sprintf("added transform anchor conflicts with %s %s:%s", operation.Action, operation.ComponentKind, operation.ComponentID))
+		}
+		for _, existing := range operation.InputChanges {
+			if existing.Field == target.field && existing != change {
+				return nil, invalidOutput(fmt.Sprintf("added transform anchor conflicts with input change on %s:%s.%s", target.kind, target.id, target.field))
+			}
+			if existing == change {
+				return result, nil
+			}
+		}
+		operation.Fields = orderedComponentFields(operation.ComponentKind, appendUniqueString(operation.Fields, target.field))
+		operation.InputChanges = append(operation.InputChanges, change)
+		operation.InputChanges = canonicalScopeOperations([]ChangeOperation{*operation})[0].InputChanges
+		return result, nil
+	}
+	result = append(result, ChangeOperation{
+		Action: "UPDATE", ComponentKind: target.kind, ComponentID: target.id, ComponentName: component.Name,
+		Fields: []string{target.field}, InputChanges: []InputChange{change}, Description: "将新增字段处理组件接入已声明的最近下游",
+	})
+	if len(result) > maxChangeOperations {
+		return nil, invalidOutput("completed changeSet contains too many operations")
+	}
+	return result, nil
+}
+
+func inputChangesTarget(values []ChangeOperation, target PlanInput) bool {
+	for _, operation := range values {
+		for _, change := range operation.InputChanges {
+			if change.To == target {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func validateAddedComponentAnchorDeclarations(values []ChangeOperation) error {
+	added := map[string]PlanInput{}
+	for _, operation := range values {
+		if operation.Action != "ADD" {
+			continue
+		}
+		key, _ := componentKey(operation.ComponentKind, operation.ComponentID)
+		added[key] = PlanInput{Kind: operation.ComponentKind, ID: operation.ComponentID}
+	}
+	if len(added) == 0 {
+		return nil
+	}
+	for _, target := range added {
+		if inputChangesTarget(values, target) {
+			return nil
+		}
+	}
+	return invalidOutput("added components require an exact downstream input change")
+}
+
+// completeUnusedDerivedTransformRemovals derives component cleanup from the already validated
+// final field-use contract. When every output of a current transform loses every exact semantic
+// reference, keeping that transform in the main path is a no-op. The server can safely remove it
+// and bypass it for its direct consumers without interpreting the user's natural language.
+func completeUnusedDerivedTransformRemovals(current GraphPlan, components map[string]componentSnapshot, values []ChangeOperation, fieldChanges []FieldChange) ([]ChangeOperation, error) {
+	result := append([]ChangeOperation(nil), values...)
+	operations := indexChangeOperations(result)
+	candidates := map[string]bool{}
+	for _, operation := range values {
+		if operation.Action == "REMOVE" && operation.ComponentKind == "TRANSFORM" {
+			candidates[operation.ComponentID] = true
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, transform := range current.Transforms {
+			if candidates[transform.ID] {
+				continue
+			}
+			key, _ := componentKey("TRANSFORM", transform.ID)
+			if _, exists := operations[key]; exists || len(transform.Rules) == 0 {
+				continue
+			}
+			allOutputsRemoved := true
+			for _, rule := range transform.Rules {
+				lineage := planFieldBinding(current, transform.ID, rule.Output.ID)
+				change, exists := fieldChangeForBinding(fieldChanges, lineage)
+				references := derivedOutputReferences(current, transform, rule)
+				if !exists || len(references) == 0 || !allDerivedReferencesRemoved(references, change, operations, candidates) {
+					allOutputsRemoved = false
+					break
+				}
+			}
+			if allOutputsRemoved {
+				candidates[transform.ID] = true
+				changed = true
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return result, nil
+	}
+
+	indexes := map[string]int{}
+	for index, operation := range result {
+		key, _ := componentKey(operation.ComponentKind, operation.ComponentID)
+		indexes[key] = index
+	}
+	for _, transform := range current.Transforms {
+		if !candidates[transform.ID] {
+			continue
+		}
+		transformKey, _ := componentKey("TRANSFORM", transform.ID)
+		if _, exists := indexes[transformKey]; !exists {
+			component := components[transformKey]
+			result = append(result, ChangeOperation{
+				Action: "REMOVE", ComponentKind: "TRANSFORM", ComponentID: transform.ID, ComponentName: component.Name,
+				Fields: []string{}, InputChanges: []InputChange{}, Description: "移除已无任何语义引用的字段处理组件",
+			})
+			indexes[transformKey] = len(result) - 1
+		}
+		for _, edge := range directConsumerEdges(current) {
+			if edge.Input != (PlanInput{Kind: "TRANSFORM", ID: transform.ID}) || candidates[edge.ConsumerID] && edge.ConsumerKind == "TRANSFORM" {
+				continue
+			}
+			consumerKey, _ := componentKey(edge.ConsumerKind, edge.ConsumerID)
+			if operation, exists := operations[consumerKey]; exists && operation.Action == "REMOVE" {
+				continue
+			}
+			target := bypassRemovedTransformInputs(current, transform.Input, candidates)
+			change := InputChange{Field: edge.Field, From: normalizeInput(edge.Input), To: target}
+			if index, exists := indexes[consumerKey]; exists {
+				operation := &result[index]
+				if operation.Action != "UPDATE" {
+					return nil, invalidOutput(fmt.Sprintf("unused transform cleanup conflicts with %s %s:%s", operation.Action, operation.ComponentKind, operation.ComponentID))
+				}
+				matched := false
+				for _, currentChange := range operation.InputChanges {
+					if currentChange.Field != edge.Field {
+						continue
+					}
+					if currentChange != change {
+						return nil, invalidOutput(fmt.Sprintf("unused transform cleanup conflicts with input change on %s:%s.%s", edge.ConsumerKind, edge.ConsumerID, edge.Field))
+					}
+					matched = true
+				}
+				if !matched {
+					operation.InputChanges = append(operation.InputChanges, change)
+					operation.InputChanges = canonicalScopeOperations([]ChangeOperation{*operation})[0].InputChanges
+				}
+				operation.Fields = orderedComponentFields(operation.ComponentKind, appendUniqueString(operation.Fields, edge.Field))
+				continue
+			}
+			component := components[consumerKey]
+			result = append(result, ChangeOperation{
+				Action: "UPDATE", ComponentKind: edge.ConsumerKind, ComponentID: edge.ConsumerID, ComponentName: component.Name,
+				Fields: []string{edge.Field}, InputChanges: []InputChange{change}, Description: "绕过已无用途的字段处理组件并保持原数据链路",
+			})
+			indexes[consumerKey] = len(result) - 1
+		}
+	}
+	if len(result) > maxChangeOperations {
+		return nil, invalidOutput("completed changeSet contains too many operations")
+	}
+	return result, nil
+}
+
+func fieldChangeForBinding(values []FieldChange, binding FieldBinding) (FieldChange, bool) {
+	for _, value := range values {
+		if fieldBindingEqual(value.Field, binding) {
+			return value, true
+		}
+	}
+	return FieldChange{}, false
+}
+
+func allDerivedReferencesRemoved(references []promptDerivedReference, change FieldChange, operations map[string]ChangeOperation, removedTransforms map[string]bool) bool {
+	for _, reference := range references {
+		key, _ := componentKey(reference.ComponentKind, reference.ComponentID)
+		operation, exists := operations[key]
+		if exists && operation.Action == "REMOVE" {
+			continue
+		}
+		if reference.ComponentKind == "TRANSFORM" && removedTransforms[reference.ComponentID] {
+			continue
+		}
+		if !exists || operation.Action != "UPDATE" || !containsString(operation.Fields, reference.Field) {
+			return false
+		}
+		switch reference.ComponentKind {
+		case "GROUP":
+			for _, use := range change.GroupUses {
+				if use.GroupID == reference.ComponentID && use.Role == reference.Role {
+					return false
+				}
+			}
+		case "JOIN":
+			for _, use := range change.JoinUses {
+				if use.JoinID == reference.ComponentID && use.Side == reference.Role {
+					return false
+				}
+			}
+		case "END":
+			if len(change.OutputUses) != 0 {
+				return false
+			}
+		case "TRANSFORM":
+			// A downstream rule has no field-level final-use representation. Only removing
+			// that downstream component proves the exact derived reference disappears. The
+			// fixed-point caller supplies those downstream removals in removedTransforms.
+			return false
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func bypassRemovedTransformInputs(current GraphPlan, input PlanInput, removed map[string]bool) PlanInput {
+	input = normalizeInput(input)
+	visited := map[string]bool{}
+	for input.Kind == "TRANSFORM" && removed[input.ID] && !visited[input.ID] {
+		visited[input.ID] = true
+		found := false
+		for _, transform := range current.Transforms {
+			if transform.ID == input.ID {
+				input = normalizeInput(transform.Input)
+				found = true
+				break
+			}
+		}
+		if !found {
+			break
+		}
+	}
+	return input
+}
+
+func removedComponentKeys(values []ChangeOperation) map[string]bool {
+	result := map[string]bool{}
+	for _, operation := range values {
+		if operation.Action != "REMOVE" {
+			continue
+		}
+		key, err := componentKey(operation.ComponentKind, operation.ComponentID)
+		if err == nil {
+			result[key] = true
+		}
+	}
+	return result
+}
+
 // completeFieldBearingOperations removes a fragile redundancy from the model contract.
 // fieldChanges already lock the exact physical field and its complete final join/group/output
 // propagation, so the matching top-level component fields can be derived deterministically.
@@ -325,6 +797,7 @@ func normalizeAndValidateChangeSet(current GraphPlan, components map[string]comp
 func completeFieldBearingOperations(current GraphPlan, components map[string]componentSnapshot, values []ChangeOperation, fieldChanges []FieldChange) ([]ChangeOperation, error) {
 	result := append([]ChangeOperation(nil), values...)
 	indexes := map[string]int{}
+	requiredFields := map[string]map[string]bool{}
 	for index, operation := range result {
 		key, _ := componentKey(operation.ComponentKind, operation.ComponentID)
 		indexes[key] = index
@@ -334,6 +807,10 @@ func completeFieldBearingOperations(current GraphPlan, components map[string]com
 		if err != nil {
 			return err
 		}
+		if requiredFields[key] == nil {
+			requiredFields[key] = map[string]bool{}
+		}
+		requiredFields[key][field] = true
 		if index, exists := indexes[key]; exists {
 			operation := &result[index]
 			if operation.Action == "ADD" || operation.Action == "REMOVE" || containsString(operation.Fields, field) {
@@ -421,10 +898,58 @@ func completeFieldBearingOperations(current GraphPlan, components map[string]com
 			}
 		}
 	}
+
+	// fieldChanges are the exact final-state contract for physical field use. An
+	// intent model may still redundantly declare a field-bearing UPDATE for a use
+	// that remains unchanged (for example, selectedColumns for a KEEP field). If
+	// kept, the planner would be forced to manufacture a meaningless diff merely
+	// to satisfy the top-level operation. Remove only those redundant fields that
+	// are not required by the before-to-desired field-use comparison above.
+	//
+	// With no fieldChanges, explicit field-only operations (including a deliberate
+	// reorder) remain untouched and continue to be checked against the actual diff.
+	if len(fieldChanges) > 0 {
+		filtered := make([]ChangeOperation, 0, len(result))
+		for _, operation := range result {
+			if operation.Action != "UPDATE" {
+				filtered = append(filtered, operation)
+				continue
+			}
+			key, _ := componentKey(operation.ComponentKind, operation.ComponentID)
+			fields := make([]string, 0, len(operation.Fields))
+			for _, field := range operation.Fields {
+				if isFieldBearingOperationField(operation.ComponentKind, field) && !requiredFields[key][field] {
+					continue
+				}
+				fields = append(fields, field)
+			}
+			operation.Fields = fields
+			if len(operation.Fields) == 0 && len(operation.InputChanges) == 0 {
+				continue
+			}
+			filtered = append(filtered, operation)
+		}
+		result = filtered
+	}
 	if len(result) > maxChangeOperations {
 		return nil, invalidOutput("completed changeSet contains too many operations")
 	}
 	return result, nil
+}
+
+func isFieldBearingOperationField(kind, field string) bool {
+	switch kind {
+	case "NODE":
+		return field == "selectedColumns"
+	case "JOIN":
+		return field == "conditions"
+	case "GROUP":
+		return field == "dimensions" || field == "metrics"
+	case "END":
+		return field == "outputs"
+	default:
+		return false
+	}
 }
 
 func orderedComponentFields(kind string, values []string) []string {
@@ -571,6 +1096,7 @@ func normalizeAndValidateFieldChanges(current GraphPlan, values []FieldChange, o
 	if values == nil {
 		return []FieldChange{}, nil
 	}
+	values = collapseTransformLineageFieldChanges(current, values)
 	if len(values) > maxFieldChanges {
 		return nil, invalidOutput("changeSet contains too many fieldChanges")
 	}
@@ -606,6 +1132,7 @@ func normalizeAndValidateFieldChanges(current GraphPlan, values []FieldChange, o
 	for _, raw := range values {
 		value := raw
 		value.Field = normalizeFieldBinding(value.Field)
+		value.Field = canonicalizeUnavailableBindingNode(current, value.Field)
 		value.SelectionAction = strings.ToUpper(strings.TrimSpace(value.SelectionAction))
 		value.Purpose = strings.ToUpper(strings.TrimSpace(value.Purpose))
 		if value.GroupUses == nil {
@@ -653,6 +1180,20 @@ func normalizeAndValidateFieldChanges(current GraphPlan, values []FieldChange, o
 		if err != nil {
 			return nil, err
 		}
+		value = preserveUndeclaredFieldUses(current, value, operations)
+		if value.SelectionAction != "REMOVE" {
+			// purpose is a redundant label over the locked final-state arrays. Derive
+			// it deterministically so a model cannot contradict otherwise valid uses
+			// (for example SELECTED_ONLY while preserving an upstream group use).
+			switch {
+			case len(value.OutputUses) > 0:
+				value.Purpose = "FINAL_OUTPUT"
+			case len(value.GroupUses)+len(value.JoinUses) > 0:
+				value.Purpose = "INTERNAL_ONLY"
+			default:
+				value.Purpose = "SELECTED_ONLY"
+			}
+		}
 
 		currentlySelected := planSelectsField(current, value.Field)
 		tableMigration := operationMigratesNodeTable(operations, value.Field.NodeID)
@@ -696,6 +1237,120 @@ func normalizeAndValidateFieldChanges(current GraphPlan, values []FieldChange, o
 	}
 	sort.Slice(result, func(i, j int) bool { return fieldBindingLess(result[i].Field, result[j].Field) })
 	return result, nil
+}
+
+// collapseTransformLineageFieldChanges handles the paired declaration commonly emitted for a
+// transform replacement: one entry for the physical source plus one for transformId.derivedName.
+// FieldChange represents physical lineage, so when both canonicalize to the same binding and use
+// the same selection action, the transform-side entry is the final-use declaration. Any other
+// duplicate remains untouched and is rejected by the normal duplicate guard.
+func collapseTransformLineageFieldChanges(current GraphPlan, values []FieldChange) []FieldChange {
+	result := make([]FieldChange, 0, len(values))
+	indexes := map[string]int{}
+	fromTransform := map[string]bool{}
+	for _, raw := range values {
+		value := raw
+		value.Field = canonicalizeUnavailableBindingNode(current, normalizeFieldBinding(value.Field))
+		key := fieldBindingKey(value.Field)
+		isTransform := strings.HasPrefix(strings.TrimSpace(raw.Field.NodeID), "transform_")
+		index, exists := indexes[key]
+		if !exists || key == "" {
+			indexes[key] = len(result)
+			fromTransform[key] = isTransform
+			result = append(result, value)
+			continue
+		}
+		if fromTransform[key] == isTransform || !strings.EqualFold(strings.TrimSpace(result[index].SelectionAction), strings.TrimSpace(value.SelectionAction)) {
+			if strings.EqualFold(strings.TrimSpace(result[index].SelectionAction), strings.TrimSpace(value.SelectionAction)) {
+				priorEmpty := len(result[index].GroupUses)+len(result[index].JoinUses)+len(result[index].OutputUses) == 0
+				valueEmpty := len(value.GroupUses)+len(value.JoinUses)+len(value.OutputUses) == 0
+				sameUses := reflect.DeepEqual(result[index].GroupUses, value.GroupUses) &&
+					reflect.DeepEqual(result[index].JoinUses, value.JoinUses) && reflect.DeepEqual(result[index].OutputUses, value.OutputUses)
+				switch {
+				case priorEmpty && !valueEmpty:
+					result[index] = value
+					fromTransform[key] = isTransform
+					continue
+				case valueEmpty && !priorEmpty, sameUses:
+					continue
+				}
+			}
+			result = append(result, value)
+			continue
+		}
+		if isTransform {
+			result[index] = value
+			fromTransform[key] = true
+		}
+	}
+	return result
+}
+
+// preserveUndeclaredFieldUses completes KEEP as a true final-state declaration.
+// Existing group, join, and output uses are protected unless the intent explicitly
+// authorizes changing the corresponding component field. This prevents an omitted
+// current joinUse in an otherwise additive metric request from being interpreted as
+// a request to delete the join condition.
+func preserveUndeclaredFieldUses(current GraphPlan, value FieldChange, operations map[string]ChangeOperation) FieldChange {
+	if value.SelectionAction != "KEEP" || operationMigratesNodeTable(operations, value.Field.NodeID) {
+		return value
+	}
+	currentGroups, currentJoins, currentOutputs := planFieldUses(current, value.Field)
+	for _, use := range currentGroups {
+		if operationAuthorizesComponentField(operations, "GROUP", use.GroupID, groupUseComponentField(use)) || hasFieldGroupUseForID(value.GroupUses, use.GroupID) {
+			continue
+		}
+		value.GroupUses = append(value.GroupUses, use)
+	}
+	protectedJoins := map[string]bool{}
+	for _, use := range currentJoins {
+		if !operationAuthorizesComponentField(operations, "JOIN", use.JoinID, "conditions") && !hasFieldJoinUseForID(value.JoinUses, use.JoinID) {
+			protectedJoins[use.JoinID] = true
+		}
+	}
+	for joinID := range protectedJoins {
+		for _, use := range currentJoins {
+			if use.JoinID == joinID {
+				value.JoinUses = append(value.JoinUses, use)
+			}
+		}
+	}
+	if len(value.OutputUses) == 0 && !operationAuthorizesComponentField(operations, "END", endComponentID, "outputs") {
+		value.OutputUses = append([]FieldOutputUse(nil), currentOutputs...)
+	}
+	sort.Slice(value.GroupUses, func(i, j int) bool { return value.GroupUses[i].GroupID < value.GroupUses[j].GroupID })
+	sort.Slice(value.JoinUses, func(i, j int) bool { return fieldJoinUseLess(value.JoinUses[i], value.JoinUses[j]) })
+	return value
+}
+
+func operationAuthorizesComponentField(operations map[string]ChangeOperation, kind, id, field string) bool {
+	key, err := componentKey(kind, id)
+	if err != nil {
+		return false
+	}
+	operation, exists := operations[key]
+	if !exists {
+		return false
+	}
+	return operation.Action == "ADD" || operation.Action == "REMOVE" || containsString(operation.Fields, field)
+}
+
+func hasFieldGroupUseForID(values []FieldGroupUse, groupID string) bool {
+	for _, value := range values {
+		if value.GroupID == groupID {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFieldJoinUseForID(values []FieldJoinUse, joinID string) bool {
+	for _, value := range values {
+		if value.JoinID == joinID {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeFieldGroupUses(current GraphPlan, fieldChange FieldChange, column CatalogColumn, operations map[string]ChangeOperation) ([]FieldGroupUse, error) {
@@ -742,6 +1397,7 @@ func normalizeFieldJoinUses(current GraphPlan, fieldChange FieldChange, catalog 
 		use.JoinID = strings.TrimSpace(use.JoinID)
 		use.Side = strings.ToUpper(strings.TrimSpace(use.Side))
 		use.Peer = normalizeFieldBinding(use.Peer)
+		use.Peer = canonicalizeUnavailableBindingNode(current, use.Peer)
 		key := use.JoinID + "\x00" + use.Side + "\x00" + fieldBindingKey(use.Peer)
 		if !validIdentifier(use.JoinID) || (use.Side != "LEFT" && use.Side != "RIGHT") || seen[key] || !componentExistsOrAdded(current, operations, "JOIN", use.JoinID) {
 			return nil, invalidOutput(fmt.Sprintf("fieldChange %s has an invalid or duplicate joinUse", fieldBindingKey(fieldChange.Field)))
@@ -756,6 +1412,86 @@ func normalizeFieldJoinUses(current GraphPlan, fieldChange FieldChange, catalog 
 	}
 	sort.Slice(result, func(i, j int) bool { return fieldJoinUseLess(result[i], result[j]) })
 	return result, nil
+}
+
+// canonicalizeUnavailableBindingNode repairs a bounded structured-output defect:
+// intent models sometimes put a current or newly proposed transform id into
+// FieldBinding.nodeId even though FieldBinding always represents physical lineage. Current
+// transform outputs are resolved from the trusted graph first, by output id/code and exact
+// physical lineage. A table id + selected column is used only as a unique fallback. Ambiguous
+// or genuinely unavailable bindings remain unchanged and fail the normal catalog validation.
+func canonicalizeUnavailableBindingNode(current GraphPlan, binding FieldBinding) FieldBinding {
+	binding = normalizeFieldBinding(binding)
+	for _, node := range current.Nodes {
+		if node.ID == binding.NodeID {
+			return binding
+		}
+	}
+	if !strings.HasPrefix(binding.NodeID, "transform_") {
+		return binding
+	}
+	if lineage, ok := currentDerivedPhysicalBinding(current, binding); ok {
+		return lineage
+	}
+	matchedNode, matchedColumn := "", ""
+	for _, node := range current.Nodes {
+		if node.TableID != binding.TableID {
+			continue
+		}
+		for _, column := range node.SelectedColumns {
+			if column != binding.Column && binding.Column != column+"_trimmed" && binding.Column != column+"_trim" {
+				continue
+			}
+			if matchedNode != "" {
+				return binding
+			}
+			matchedNode, matchedColumn = node.ID, column
+		}
+	}
+	if matchedNode != "" {
+		binding.NodeID = matchedNode
+		binding.Column = matchedColumn
+	}
+	return binding
+}
+
+func currentDerivedPhysicalBinding(current GraphPlan, binding FieldBinding) (FieldBinding, bool) {
+	type match struct {
+		lineage FieldBinding
+		key     string
+	}
+	matches := []match{}
+	for _, transform := range current.Transforms {
+		// Prefer an exact current transform id. A non-existent transform id can still be
+		// recovered by a unique output code plus table id, which is a common provider
+		// representation when describing a replacement transform.
+		if transform.ID != binding.NodeID && transformExists(current, binding.NodeID) {
+			continue
+		}
+		for _, rule := range transform.Rules {
+			if binding.Column != rule.Output.ID && binding.Column != rule.Output.Code {
+				continue
+			}
+			lineage := planFieldBinding(current, transform.ID, rule.Output.ID)
+			if lineage.TableID == "" || (binding.TableID != "" && binding.TableID != lineage.TableID) {
+				continue
+			}
+			matches = append(matches, match{lineage: lineage, key: fieldKey(transform.ID, rule.Output.ID)})
+		}
+	}
+	if len(matches) != 1 {
+		return FieldBinding{}, false
+	}
+	return matches[0].lineage, true
+}
+
+func transformExists(current GraphPlan, id string) bool {
+	for _, transform := range current.Transforms {
+		if transform.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeFieldOutputUses(fieldChange FieldChange) ([]FieldOutputUse, error) {
@@ -1581,7 +2317,7 @@ func changeSetMismatchError(actual, expected ChangeSet) error {
 		case actualExists && !expectedExists:
 			return invalidOutput(fmt.Sprintf("plan contains undeclared %s %s:%s", actualOp.Action, actualOp.ComponentKind, actualOp.ComponentID))
 		case !actualExists && expectedExists:
-			return invalidOutput(fmt.Sprintf("plan did not realize locked %s %s:%s", expectedOp.Action, expectedOp.ComponentKind, expectedOp.ComponentID))
+			return invalidOutput(fmt.Sprintf("plan did not realize locked %s %s:%s fields=%v", expectedOp.Action, expectedOp.ComponentKind, expectedOp.ComponentID, expectedOp.Fields))
 		case !reflect.DeepEqual(actualOp.Fields, expectedOp.Fields):
 			return invalidOutput(fmt.Sprintf("plan changed fields outside locked scope for %s %s:%s: actual=%v expected=%v", actualOp.Action, actualOp.ComponentKind, actualOp.ComponentID, actualOp.Fields, expectedOp.Fields))
 		case !reflect.DeepEqual(actualOp.InputChanges, expectedOp.InputChanges):

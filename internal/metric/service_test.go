@@ -120,13 +120,14 @@ func baseDatasetVersion(t *testing.T) dataset.VersionRecord {
 		Dataset:    dataset.Descriptor{Code: "sales_detail", Name: "销售明细", Type: "SINGLE_SOURCE"},
 		Nodes: []dataset.Node{{
 			ID: "sales", Type: "TABLE", DataSourceID: testDataSource, TableID: testTableID, Alias: "s",
-			Projection: []string{"amount", "region", "sold_at"}, SourceFilters: []dataset.SourceFilter{},
+			Projection: []string{"amount", "region", "sold_at", "order_id"}, SourceFilters: []dataset.SourceFilter{},
 		}},
 		Joins: []dataset.Join{},
 		Fields: []dataset.Field{
 			{ID: "field_amount", Code: "amount", Name: "金额", Role: "MEASURE", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "sales", Field: "amount"}, CanonicalType: "DECIMAL", Nullable: false},
 			{ID: "field_region", Code: "region", Name: "地区", Role: "DIMENSION", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "sales", Field: "region"}, CanonicalType: "STRING", Nullable: false},
 			{ID: "field_time", Code: "sold_at", Name: "销售时间", Role: "TIME", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "sales", Field: "sold_at"}, CanonicalType: "DATETIME", Nullable: false},
+			{ID: "field_order_id", Code: "order_id", Name: "订单编号", Role: "IDENTIFIER", SemanticType: "IDENTIFIER", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "sales", Field: "order_id"}, CanonicalType: "STRING", Nullable: false},
 		},
 		Filters: []dataset.Filter{}, GroupBy: []string{}, Having: []dataset.Filter{}, Sorts: []dataset.Sort{}, Parameters: []dataset.Parameter{},
 		OutputGrain: dataset.OutputGrain{Description: "每行一条销售明细", KeyFields: []string{"region"}},
@@ -147,6 +148,28 @@ func baseDatasetVersion(t *testing.T) dataset.VersionRecord {
 		ID: testDatasetVersionID, DatasetID: testDatasetID, VersionNo: 1, Status: "PUBLISHED",
 		DSLVersion: dataset.DSLVersion, DSLHash: prepared.DSLHash, PlanHash: prepared.PlanHash,
 		DSL: prepared.DSLJSON, LogicalPlan: prepared.LogicalPlanJSON,
+	}
+}
+
+func TestServiceCreateAllowsDirectCountOnIdentifierButNotNumericAggregation(t *testing.T) {
+	store := &fakeStore{record: baseRecord(t), datasetVersion: baseDatasetVersion(t), versionsByID: map[string]VersionRecord{}}
+	service := NewService(store)
+
+	count := validDefinition()
+	count.Metric.Code, count.Metric.Name = "order_count", "订单数"
+	count.Expression = Expression{Type: "FIELD_REF", FieldID: "field_order_id"}
+	count.Aggregation, count.Additivity = "COUNT_DISTINCT", "NON_ADDITIVE"
+	count.NumberFormat, count.DecimalScale, count.Unit = "#,##0", 0, ""
+	if _, err := service.Create(context.Background(), testTenantID, testActorID, CreateInput{Definition: definitionJSON(t, count)}); err != nil {
+		t.Fatalf("create identifier count metric: %v", err)
+	}
+
+	sum := count
+	sum.Metric.Code, sum.Aggregation, sum.Additivity = "order_id_sum", "SUM", "ADDITIVE"
+	_, err := service.Create(context.Background(), testTenantID, testActorID, CreateInput{Definition: definitionJSON(t, sum)})
+	var validation *ValidationError
+	if !errors.As(err, &validation) || len(validation.Issues) == 0 || validation.Issues[0].Code != "METRIC_NUMERIC_FIELD_REQUIRED" {
+		t.Fatalf("string identifier SUM must be rejected, error=%v", err)
 	}
 }
 

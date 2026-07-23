@@ -151,6 +151,16 @@ function datasetPhysicalTableIDs(version: PublishedVersionRecord | null): string
   return valueAsList(version?.dsl.nodes).map(valueAsRecord).map(node => valueAsText(node.tableId)).filter(Boolean)
 }
 
+function metricAtomicFieldEligible(field: DatasetField, aggregation: MetricDefinition['aggregation']): boolean {
+  const numeric = field.canonicalType === 'INTEGER' || field.canonicalType === 'DECIMAL'
+  if (aggregation === 'COUNT') return !['DATE', 'DATETIME', 'TIMESTAMP'].includes(field.canonicalType)
+  if (aggregation === 'COUNT_DISTINCT') {
+    return !['DATE', 'DATETIME', 'TIMESTAMP'].includes(field.canonicalType) &&
+      (['IDENTIFIER', 'DIMENSION', 'ATTRIBUTE'].includes(field.role) || numeric)
+  }
+  return numeric
+}
+
 /** 试算参数只从当前精确数据集版本读取，不能复用其他版本或可变草稿。 */
 function datasetParameters(version: PublishedVersionRecord | null): ParameterOption[] {
   return valueAsList(version?.dsl.parameters).map(valueAsRecord).map(parameter => ({
@@ -223,7 +233,7 @@ export function MetricCenterPage() {
 
   const fingerprint = useMemo(() => definitionFingerprint(definition), [definition])
   const fields = useMemo(() => datasetFields(selectedDatasetVersion), [selectedDatasetVersion])
-  const numericFields = useMemo(() => fields.filter(field => field.canonicalType === 'INTEGER' || field.canonicalType === 'DECIMAL'), [fields])
+  const atomicFields = useMemo(() => fields.filter(field => metricAtomicFieldEligible(field, definition.aggregation)), [definition.aggregation, fields])
   const dimensionFields = useMemo(() => fields.filter(field => ['DIMENSION', 'TIME', 'ATTRIBUTE', 'IDENTIFIER'].includes(field.role)), [fields])
   const timeFields = useMemo(() => fields.filter(field => field.role === 'TIME' && (field.canonicalType === 'DATE' || field.canonicalType === 'DATETIME')), [fields])
   const parameters = useMemo(() => datasetParameters(selectedDatasetVersion), [selectedDatasetVersion])
@@ -493,6 +503,20 @@ export function MetricCenterPage() {
   function updateDimension(fieldId: string, patch: Partial<MetricDimension>) {
     updateDefinition({
       allowedDimensions: definition.allowedDimensions.map(item => item.fieldId === fieldId ? { ...item, ...patch } : item),
+    })
+  }
+
+  function updateAggregation(aggregation: MetricDefinition['aggregation']) {
+    const currentFieldId = definition.expression.type === 'FIELD_REF' ? definition.expression.fieldId : ''
+    const currentField = fields.find(field => field.id === currentFieldId)
+    const fieldRemainsEligible = currentField && metricAtomicFieldEligible(currentField, aggregation)
+    const count = aggregation === 'COUNT' || aggregation === 'COUNT_DISTINCT'
+    updateDefinition({
+      aggregation,
+      ...(definition.expression.type === 'FIELD_REF' && !fieldRemainsEligible ? { expression: { type: 'FIELD_REF' as const, fieldId: '' } } : {}),
+      ...(count ? { decimalScale: 0, numberFormat: '#,##0', unit: '' } : {}),
+      ...(aggregation === 'COUNT_DISTINCT' || aggregation === 'AVG' ? { additivity: 'NON_ADDITIVE' as const } : {}),
+      ...(aggregation === 'COUNT' || aggregation === 'SUM' ? { additivity: 'ADDITIVE' as const } : {}),
     })
   }
 
@@ -835,8 +859,8 @@ export function MetricCenterPage() {
 
             <section className="metric-panel metric-expression">
               <header><span className="eyebrow">结构化口径</span><h2>表达式与聚合</h2></header>
-              {advancedExpression ? <div className="advanced-expression"><strong>高级表达式只读</strong><p>派生、比率和指标引用的可视化编辑器将在后续增强；本页面不会执行或改写该表达式。</p><pre>{JSON.stringify(definition.expression, null, 2)}</pre></div> : <label>原子字段<select aria-label="原子指标字段" value={atomicFieldId} onChange={event => updateDefinition({ expression: { type: 'FIELD_REF', fieldId: event.target.value } })}><option value="">请选择数值字段</option>{numericFields.map(field => <option key={field.id} value={field.id}>{field.name} · {field.role} · {field.canonicalType}</option>)}</select></label>}
-              <label>聚合<select aria-label="指标聚合" value={definition.aggregation} onChange={event => updateDefinition({ aggregation: event.target.value as MetricDefinition['aggregation'] })}>{['NONE', 'SUM', 'AVG', 'MIN', 'MAX', 'COUNT', 'COUNT_DISTINCT'].map(value => <option key={value}>{value}</option>)}</select></label>
+              {advancedExpression ? <div className="advanced-expression"><strong>高级表达式只读</strong><p>派生、比率和指标引用的可视化编辑器将在后续增强；本页面不会执行或改写该表达式。</p><pre>{JSON.stringify(definition.expression, null, 2)}</pre></div> : <label>原子字段<select aria-label="原子指标字段" value={atomicFieldId} onChange={event => updateDefinition({ expression: { type: 'FIELD_REF', fieldId: event.target.value } })}><option value="">{definition.aggregation === 'COUNT' || definition.aggregation === 'COUNT_DISTINCT' ? '请选择计数字段' : '请选择数值字段'}</option>{atomicFields.map(field => <option key={field.id} value={field.id}>{field.name} · {field.role} · {field.canonicalType}</option>)}</select></label>}
+              <label>聚合<select aria-label="指标聚合" value={definition.aggregation} onChange={event => updateAggregation(event.target.value as MetricDefinition['aggregation'])}>{['NONE', 'SUM', 'AVG', 'MIN', 'MAX', 'COUNT', 'COUNT_DISTINCT'].map(value => <option key={value}>{value}</option>)}</select></label>
               <label>单位<input aria-label="指标单位" value={definition.unit} onChange={event => updateDefinition({ unit: event.target.value })} /></label>
               <label>数字格式<input aria-label="指标数字格式" value={definition.numberFormat} onChange={event => updateDefinition({ numberFormat: event.target.value })} /></label>
               <label>小数位数<input aria-label="指标小数位数" type="number" min={0} max={12} value={definition.decimalScale} onChange={event => updateDefinition({ decimalScale: Number(event.target.value) })} /></label>

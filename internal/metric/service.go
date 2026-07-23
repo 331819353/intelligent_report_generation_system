@@ -454,12 +454,16 @@ func metricDependencyDepth(root Prepared, loaded map[string]Prepared) int {
 
 func validateDefinitionFields(definition Definition, fields map[string]dataset.Field) error {
 	var fieldIssue error
+	directCountField := (definition.Aggregation == "COUNT" || definition.Aggregation == "COUNT_DISTINCT") &&
+		definition.Expression.Type == "FIELD_REF"
 	visitMetricExpression(definition.Expression, func(expression Expression) {
 		if fieldIssue != nil || expression.Type != "FIELD_REF" {
 			return
 		}
 		field, exists := fields[expression.FieldID]
-		if !exists || field.CanonicalType != "INTEGER" && field.CanonicalType != "DECIMAL" {
+		isNumeric := exists && (field.CanonicalType == "INTEGER" || field.CanonicalType == "DECIMAL")
+		isDirectCountTarget := exists && directCountField && expression.FieldID == definition.Expression.FieldID
+		if !isNumeric && !isDirectCountTarget {
 			fieldIssue = invalid("expression.fieldId", "METRIC_NUMERIC_FIELD_REQUIRED", "指标表达式只能引用当前数据集版本的数值字段")
 		}
 	})

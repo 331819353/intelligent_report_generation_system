@@ -111,9 +111,14 @@ func validDecisionReason(value string) bool {
 type JobStore interface {
 	ListJobTenantIDs(context.Context) ([]string, error)
 	ClaimJob(context.Context, string, string, time.Duration) (*JobClaim, error)
-	LoadExactDatasetVersion(context.Context, JobClaim) (dataset.VersionRecord, error)
+	LoadExactDatasetVersion(context.Context, JobClaim) (LoadedDatasetVersion, error)
 	FinishJob(context.Context, JobClaim, string, ExtractionResult) error
 	FailJob(context.Context, JobClaim, string, string, string) error
+}
+
+type LoadedDatasetVersion struct {
+	Version               dataset.VersionRecord
+	DependencyUnavailable bool
 }
 
 // Worker 运行纯规则提取器。LLM 不在此路径上，因此数据集发布不依赖模型可用性。
@@ -139,11 +144,15 @@ func (w *Worker) ProcessNext(ctx context.Context, tenantID, workerID string, lea
 	if err != nil || claim == nil {
 		return false, err
 	}
-	version, err := w.store.LoadExactDatasetVersion(ctx, *claim)
+	loaded, err := w.store.LoadExactDatasetVersion(ctx, *claim)
+	version := loaded.Version
 	if err == nil {
 		var result ExtractionResult
 		result, err = Extract(version)
 		if err == nil {
+			if loaded.DependencyUnavailable {
+				result = blockUnavailableDatasetCandidates(result)
+			}
 			if w.enricher != nil {
 				var enrichmentErr error
 				result, enrichmentErr = w.enricher.Enrich(ctx, claim.TenantID, claim.RequestedBy, version, result)
@@ -164,4 +173,31 @@ func (w *Worker) ProcessNext(ctx context.Context, tenantID, workerID string, lea
 		return true, errors.Join(err, failErr)
 	}
 	return true, err
+}
+
+func blockUnavailableDatasetCandidates(result ExtractionResult) ExtractionResult {
+	for index := range result.Candidates {
+		result.Candidates[index].Status = CandidateStatusBlocked
+		if !containsString(result.Candidates[index].BlockReasons, BlockReasonDatasetUnavailable) {
+			result.Candidates[index].BlockReasons = append(result.Candidates[index].BlockReasons, BlockReasonDatasetUnavailable)
+		}
+		if !containsString(result.Candidates[index].Warnings, "数据集发布快照的运行依赖当前不可用，修复依赖并重新发布前不能接受该候选。") {
+			result.Candidates[index].Warnings = append(result.Candidates[index].Warnings, "数据集发布快照的运行依赖当前不可用，修复依赖并重新发布前不能接受该候选。")
+		}
+	}
+	result.Status = TaskStatusPartial
+	result.Warnings = append(result.Warnings, "数据集发布快照的运行依赖当前不可用；已保留事实候选并全部标记为阻塞。")
+	return result
+}
+
+func extractionBlockedByUnavailable(result ExtractionResult) bool {
+	if len(result.Candidates) == 0 {
+		return false
+	}
+	for _, candidate := range result.Candidates {
+		if candidate.Status != CandidateStatusBlocked || !containsString(candidate.BlockReasons, BlockReasonDatasetUnavailable) {
+			return false
+		}
+	}
+	return true
 }

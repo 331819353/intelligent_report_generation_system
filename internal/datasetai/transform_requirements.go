@@ -1,6 +1,9 @@
 package datasetai
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 type transformRequirementRule struct {
 	componentType string
@@ -83,20 +86,6 @@ func deriveCreateTransformRequirements(instruction string) []TransformRequiremen
 	return result
 }
 
-// deriveModificationTransformRequirements applies the same component-role guarantee to
-// multi-turn edits while staying out of explicit removal requests. Component-level scope still
-// comes from the locked intent; this check only prevents the planner from silently folding a
-// requested transformation into GROUP or END metadata.
-func deriveModificationTransformRequirements(instruction string) []TransformRequirement {
-	text := strings.ToLower(strings.TrimSpace(instruction))
-	for _, removal := range []string{"删除", "移除", "去掉", "取消", "不再使用", "不要使用", "remove", "delete"} {
-		if strings.Contains(text, removal) {
-			return []TransformRequirement{}
-		}
-	}
-	return deriveCreateTransformRequirements(instruction)
-}
-
 func validateTransformRequirements(plan GraphPlan, requirements []TransformRequirement) error {
 	if len(requirements) == 0 {
 		return nil
@@ -119,6 +108,50 @@ func validateTransformRequirements(plan GraphPlan, requirements []TransformRequi
 	}
 	if len(missing) > 0 {
 		return invalidOutputWithReason(InvalidOutputReasonTransform, "plan is missing required transform component types or their outputs are unused: "+strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// validateLockedTransformUsage is the MODIFY-mode counterpart to CREATE transform requirements.
+// It depends only on the normalized semantic changeSet, never on matching user wording. Every
+// added transform and every transform whose computation changes must have a real downstream use;
+// name-only edits and pure topology moves do not manufacture a new semantic requirement.
+func validateLockedTransformUsage(plan GraphPlan, locked ChangeSet) error {
+	required := map[string]bool{}
+	for _, operation := range locked.Operations {
+		if operation.ComponentKind != "TRANSFORM" || operation.Action == "REMOVE" {
+			continue
+		}
+		if operation.Action == "ADD" || containsString(operation.Fields, "family") ||
+			containsString(operation.Fields, "componentType") || containsString(operation.Fields, "rules") {
+			required[operation.ComponentID] = true
+		}
+	}
+	if len(required) == 0 {
+		return nil
+	}
+	consumed := transformConsumedKeys(plan)
+	found := map[string]bool{}
+	for _, transform := range plan.Transforms {
+		if !required[transform.ID] {
+			continue
+		}
+		for _, rule := range transform.Rules {
+			if consumed[fieldKey(transform.ID, rule.Output.ID)] {
+				found[transform.ID] = true
+				break
+			}
+		}
+	}
+	missing := []string{}
+	for transformID := range required {
+		if !found[transformID] {
+			missing = append(missing, transformID)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return invalidOutputWithReason(InvalidOutputReasonTransform, "locked transforms have no consumed output: "+strings.Join(missing, ", "))
 	}
 	return nil
 }

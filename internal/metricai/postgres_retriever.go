@@ -16,8 +16,13 @@ import (
 )
 
 const (
-	postgresMetricMatchLimit  = 24
-	postgresDatasetMatchLimit = maxDatasets
+	postgresMetricMatchLimit = 24
+	// Fetch one extra row so the host can fail closed instead of silently claiming that every
+	// authorized ordinary dataset was inspected after truncating the catalog.
+	postgresDatasetMatchLimit = maxDatasets + 1
+	// Atomic facts are internal authoring evidence, never metric-center assets. Fetching one extra
+	// row preserves the same fail-closed bounded-context guarantee used for datasets.
+	postgresAtomicFactLimit = maxAtomicFacts + 1
 )
 
 // retrievalRows and retrievalQueryer keep the Postgres implementation unit-testable without
@@ -80,6 +85,15 @@ type metricSnapshot struct {
 	Dataset                               datasetSnapshot
 }
 
+type atomicFactSnapshot struct {
+	DatasetID, DatasetVersionID string
+	SourceFieldIDs              []string
+	Name, Description, Caliber  string
+	Aggregation, Period         string
+	Dimensions, Tags            []string
+	Confidence                  float64
+}
+
 // Retrieve builds a minimal semantic snapshot. Dataset DSL is parsed only inside the trusted
 // process; the returned context contains logical dataset/field/metric metadata and exact hashes,
 // never the DSL's physical nodes, filter literals, parameters, or source identifiers.
@@ -99,6 +113,7 @@ func (r *PostgresRetriever) Retrieve(ctx context.Context, tenantID, actorID stri
 	metricRows := []metricSnapshot{}
 	datasetRows := []datasetSnapshot{}
 	draftDatasetRows := []datasetSnapshot{}
+	atomicFactRows := []atomicFactSnapshot{}
 	err = r.runTenant(ctx, tenantID, func(queryer retrievalQueryer) error {
 		var queryErr error
 		metricRows, queryErr = queryAuthorizedMetrics(ctx, queryer, tenantID, actorID, searchText, searchText)
@@ -113,6 +128,10 @@ func (r *PostgresRetriever) Retrieve(ctx context.Context, tenantID, actorID stri
 		if queryErr != nil {
 			return queryErr
 		}
+		atomicFactRows, queryErr = queryAuthorizedAtomicFacts(ctx, queryer, tenantID, actorID, searchText, searchText)
+		if queryErr != nil {
+			return queryErr
+		}
 		// Dependency validation is a publication contract. A current DRAFT is instead
 		// validated locally from its canonical DSL and exact hashes below.
 		metricRows, datasetRows, queryErr = retainUsableDatasetVersions(ctx, queryer, metricRows, datasetRows)
@@ -121,7 +140,7 @@ func (r *PostgresRetriever) Retrieve(ctx context.Context, tenantID, actorID stri
 	if err != nil {
 		return RetrievalContext{}, err
 	}
-	return buildRetrievalContext(metricRows, datasetRows, draftDatasetRows)
+	return buildRetrievalContext(metricRows, datasetRows, draftDatasetRows, atomicFactRows)
 }
 
 func retainUsableDatasetVersions(ctx context.Context, queryer retrievalQueryer, metricRows []metricSnapshot, datasetRows []datasetSnapshot) ([]metricSnapshot, []datasetSnapshot, error) {
@@ -221,21 +240,49 @@ func queryAuthorizedMetrics(ctx context.Context, queryer retrievalQueryer, tenan
 	return result, rows.Err()
 }
 
-func buildRetrievalContext(metricRows []metricSnapshot, datasetRows, draftDatasetRows []datasetSnapshot) (RetrievalContext, error) {
+func queryAuthorizedAtomicFacts(ctx context.Context, queryer retrievalQueryer, tenantID, actorID, name, searchText string) ([]atomicFactSnapshot, error) {
+	rows, err := queryer.Query(ctx, authorizedAtomicFactsSQL, tenantID, actorID, name, searchText, postgresAtomicFactLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []atomicFactSnapshot{}
+	for rows.Next() {
+		var item atomicFactSnapshot
+		if err := rows.Scan(
+			&item.DatasetID, &item.DatasetVersionID, &item.SourceFieldIDs,
+			&item.Name, &item.Description, &item.Caliber, &item.Aggregation,
+			&item.Dimensions, &item.Period, &item.Tags, &item.Confidence,
+		); err != nil {
+			return nil, err
+		}
+		item.SourceFieldIDs = append([]string(nil), item.SourceFieldIDs...)
+		item.Dimensions = append([]string(nil), item.Dimensions...)
+		item.Tags = append([]string(nil), item.Tags...)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func buildRetrievalContext(metricRows []metricSnapshot, datasetRows, draftDatasetRows []datasetSnapshot, atomicFactGroups ...[]atomicFactSnapshot) (RetrievalContext, error) {
 	publishedOrder := []string{}
 	draftOrder := []string{}
+	mappedOrder := []string{}
 	byPair := map[string]datasetSnapshot{}
-	draftByPair := map[string]bool{}
-	addDataset := func(value datasetSnapshot, draft bool) error {
-		if draft && (value.Status != "DRAFT" || !value.Manageable) {
+	categoryByPair := map[string]string{}
+	addDataset := func(value datasetSnapshot, category string) error {
+		if category == "draft" && (value.Status != "DRAFT" || !value.Manageable || value.Mapped) {
 			return fmt.Errorf("%w: modifiable dataset snapshot is not a manageable draft", ErrInvalidRetrievalContext)
 		}
-		if !draft && value.Status != "PUBLISHED" {
+		if category != "draft" && value.Status != "PUBLISHED" {
 			return fmt.Errorf("%w: published dataset snapshot has invalid status", ErrInvalidRetrievalContext)
+		}
+		if category == "mapped" && !value.Mapped || category == "published" && value.Mapped {
+			return fmt.Errorf("%w: dataset snapshot is in the wrong authoring tier", ErrInvalidRetrievalContext)
 		}
 		key := datasetKey(value.ID, value.VersionID)
 		if existing, found := byPair[key]; found {
-			if draftByPair[key] != draft || existing.VersionNo != value.VersionNo || existing.Status != value.Status ||
+			if categoryByPair[key] != category || existing.VersionNo != value.VersionNo || existing.Status != value.Status ||
 				existing.Manageable != value.Manageable || existing.Mapped != value.Mapped ||
 				existing.DSLHash != value.DSLHash || existing.PlanHash != value.PlanHash ||
 				!bytes.Equal(existing.DSL, value.DSL) {
@@ -243,14 +290,17 @@ func buildRetrievalContext(metricRows []metricSnapshot, datasetRows, draftDatase
 			}
 			return nil
 		}
-		if len(publishedOrder)+len(draftOrder) >= maxDatasets {
-			return nil
+		if len(publishedOrder)+len(draftOrder)+len(mappedOrder) >= maxDatasets {
+			return fmt.Errorf("%w: authorized datasets exceed complete-search budget", ErrInvalidRetrievalContext)
 		}
 		byPair[key] = value
-		draftByPair[key] = draft
-		if draft {
+		categoryByPair[key] = category
+		switch category {
+		case "draft":
 			draftOrder = append(draftOrder, key)
-		} else {
+		case "mapped":
+			mappedOrder = append(mappedOrder, key)
+		default:
 			publishedOrder = append(publishedOrder, key)
 		}
 		return nil
@@ -258,17 +308,35 @@ func buildRetrievalContext(metricRows []metricSnapshot, datasetRows, draftDatase
 	// Metric matches are added first so an exact reusable metric cannot lose its dataset merely
 	// because the tenant has more than the bounded number of recently edited datasets.
 	for _, item := range metricRows {
-		if err := addDataset(item.Dataset, false); err != nil {
+		category := "published"
+		if item.Dataset.Mapped {
+			category = "mapped"
+		}
+		if err := addDataset(item.Dataset, category); err != nil {
 			return RetrievalContext{}, err
 		}
 	}
 	for _, item := range datasetRows {
-		if err := addDataset(item, false); err != nil {
+		if item.Mapped {
+			continue
+		}
+		if err := addDataset(item, "published"); err != nil {
 			return RetrievalContext{}, err
 		}
 	}
 	for _, item := range draftDatasetRows {
-		if err := addDataset(item, true); err != nil {
+		if item.Mapped {
+			continue
+		}
+		if err := addDataset(item, "draft"); err != nil {
+			return RetrievalContext{}, err
+		}
+	}
+	for _, item := range datasetRows {
+		if !item.Mapped {
+			continue
+		}
+		if err := addDataset(item, "mapped"); err != nil {
 			return RetrievalContext{}, err
 		}
 	}
@@ -276,14 +344,17 @@ func buildRetrievalContext(metricRows []metricSnapshot, datasetRows, draftDatase
 	result := RetrievalContext{
 		Datasets: []AuthorizedDataset{}, Fields: []AuthorizedField{}, ExistingMetrics: []AuthorizedMetric{},
 		ModifiableDraftDatasets: []AuthorizedDataset{}, ModifiableDraftFields: []AuthorizedField{},
+		MappedDatasets: []AuthorizedDataset{}, MappedFields: []AuthorizedField{}, AtomicFacts: []AuthorizedAtomicFact{},
 	}
-	appendDataset := func(key string, draft bool) error {
+	appendDataset := func(key, category string) error {
 		snapshot := byPair[key]
 		prepared, err := dataset.Prepare(snapshot.DSL)
 		if err != nil || prepared.DSLHash != snapshot.DSLHash || prepared.PlanHash != snapshot.PlanHash {
 			kind := "published"
-			if draft {
+			if category == "draft" {
 				kind = "draft"
+			} else if category == "mapped" {
+				kind = "mapped"
 			}
 			return fmt.Errorf("%w: %s dataset snapshot failed hash validation", ErrInvalidRetrievalContext, kind)
 		}
@@ -294,7 +365,7 @@ func buildRetrievalContext(metricRows []metricSnapshot, datasetRows, draftDatase
 				visibleFieldCount++
 			}
 		}
-		if len(result.Fields)+len(result.ModifiableDraftFields)+visibleFieldCount > maxFields {
+		if len(result.Fields)+len(result.ModifiableDraftFields)+len(result.MappedFields)+visibleFieldCount > maxFields {
 			return fmt.Errorf("%w: authorized dataset fields exceed bounded context", ErrInvalidRetrievalContext)
 		}
 		datasetValue := AuthorizedDataset{
@@ -302,9 +373,12 @@ func buildRetrievalContext(metricRows []metricSnapshot, datasetRows, draftDatase
 			Name: document.Dataset.Name, Description: document.Dataset.Description, Status: snapshot.Status,
 			DSLHash: snapshot.DSLHash, Aggregated: datasetDocumentAggregated(document), Mapped: snapshot.Mapped, Manageable: snapshot.Manageable,
 		}
-		if draft {
+		switch category {
+		case "draft":
 			result.ModifiableDraftDatasets = append(result.ModifiableDraftDatasets, datasetValue)
-		} else {
+		case "mapped":
+			result.MappedDatasets = append(result.MappedDatasets, datasetValue)
+		default:
 			result.Datasets = append(result.Datasets, datasetValue)
 		}
 		for _, field := range document.Fields {
@@ -316,28 +390,67 @@ func buildRetrievalContext(metricRows []metricSnapshot, datasetRows, draftDatase
 				ID: field.ID, Code: field.Code, Name: field.Name, Description: field.Description,
 				CanonicalType: field.CanonicalType, Role: field.Role, SemanticType: field.SemanticType,
 			}
-			if draft {
+			switch category {
+			case "draft":
 				result.ModifiableDraftFields = append(result.ModifiableDraftFields, fieldValue)
-			} else {
+			case "mapped":
+				result.MappedFields = append(result.MappedFields, fieldValue)
+			default:
 				result.Fields = append(result.Fields, fieldValue)
 			}
 		}
 		return nil
 	}
 	for _, key := range publishedOrder {
-		if err := appendDataset(key, false); err != nil {
+		if err := appendDataset(key, "published"); err != nil {
 			return RetrievalContext{}, err
 		}
 	}
 	for _, key := range draftOrder {
-		if err := appendDataset(key, true); err != nil {
+		if err := appendDataset(key, "draft"); err != nil {
+			return RetrievalContext{}, err
+		}
+	}
+	for _, key := range mappedOrder {
+		if err := appendDataset(key, "mapped"); err != nil {
 			return RetrievalContext{}, err
 		}
 	}
 
-	authorizedFields := make(map[string]bool, len(result.Fields))
+	authorizedFields := make(map[string]bool, len(result.Fields)+len(result.MappedFields))
 	for _, field := range result.Fields {
 		authorizedFields[fieldKey(field.DatasetID, field.DatasetVersionID, field.ID)] = true
+	}
+	for _, field := range result.MappedFields {
+		authorizedFields[fieldKey(field.DatasetID, field.DatasetVersionID, field.ID)] = true
+	}
+	if len(atomicFactGroups) > 1 || len(atomicFactGroups) == 1 && len(atomicFactGroups[0]) > maxAtomicFacts {
+		return RetrievalContext{}, fmt.Errorf("%w: authorized atomic facts exceed bounded context", ErrInvalidRetrievalContext)
+	}
+	if len(atomicFactGroups) == 1 {
+		for _, snapshot := range atomicFactGroups[0] {
+			pair := datasetKey(snapshot.DatasetID, snapshot.DatasetVersionID)
+			if _, found := byPair[pair]; !found || categoryByPair[pair] == "draft" {
+				continue
+			}
+			authorized := len(snapshot.SourceFieldIDs) > 0
+			for _, fieldID := range snapshot.SourceFieldIDs {
+				if !authorizedFields[fieldKey(snapshot.DatasetID, snapshot.DatasetVersionID, fieldID)] {
+					authorized = false
+					break
+				}
+			}
+			if !authorized {
+				continue
+			}
+			result.AtomicFacts = append(result.AtomicFacts, AuthorizedAtomicFact{
+				DatasetID: snapshot.DatasetID, DatasetVersionID: snapshot.DatasetVersionID,
+				SourceFieldIDs: append([]string(nil), snapshot.SourceFieldIDs...),
+				Name:           snapshot.Name, Description: snapshot.Description, Caliber: snapshot.Caliber,
+				Aggregation: snapshot.Aggregation, Dimensions: append([]string(nil), snapshot.Dimensions...),
+				Period: snapshot.Period, Tags: append([]string(nil), snapshot.Tags...), Confidence: snapshot.Confidence,
+			})
+		}
 	}
 	seenMetrics := map[string]bool{}
 	for _, snapshot := range metricRows {
@@ -543,7 +656,8 @@ JOIN platform.dataset_versions AS version
 WHERE d.tenant_id=$1 AND d.deleted_at IS NULL AND d.status='PUBLISHED' AND version.status='PUBLISHED'
   AND ` + datasetReadPredicate + `
   AND ` + noApplicableDataPolicyPredicate + `
-ORDER BY CASE
+ORDER BY CASE WHEN d.origin_table_id IS NULL THEN 0 ELSE 1 END,
+  CASE
   WHEN lower(d.name)=lower($3) OR lower(d.code::text)=lower($3) THEN 0
   WHEN strpos(lower($4),lower(d.name))>0 OR strpos(lower($4),lower(d.code::text))>0 THEN 1
   WHEN strpos(lower(d.name),lower($3))>0
@@ -565,6 +679,7 @@ JOIN platform.dataset_versions AS version
   ON version.tenant_id=d.tenant_id AND version.dataset_id=d.id
  AND version.id=d.current_draft_version_id
 WHERE d.tenant_id=$1 AND d.deleted_at IS NULL AND d.status<>'DISABLED' AND version.status='DRAFT'
+	  AND d.origin_table_id IS NULL
   AND ` + datasetReadPredicate + `
   AND ` + datasetManageExpression + `
   AND ` + noApplicableDataPolicyPredicate + `
@@ -608,6 +723,37 @@ ORDER BY CASE
     OR (m.description<>'' AND strpos(lower(m.description),lower($3))>0) THEN 2
   ELSE 3 END,
   m.updated_at DESC,m.id
+LIMIT $5`
+
+// Atomic facts are derived from immutable dataset DAGs and semantic enrichment. They are exposed
+// only to the metric-authoring prompt, constrained by the same dataset authorization and policy
+// fences as fields, and must still belong to the dataset's current published version.
+const authorizedAtomicFactsSQL = authorizationCTE + `
+SELECT candidate.dataset_id::text,candidate.dataset_version_id::text,candidate.source_field_ids,
+       semantic.name,semantic.description,semantic.caliber,
+       COALESCE(candidate.proposed_definition->>'aggregation',''),
+       semantic.dimensions,semantic.period,semantic.tags,candidate.confidence::float8
+FROM platform.metric_candidates AS candidate
+JOIN platform.metric_semantic_documents AS semantic
+  ON semantic.tenant_id=candidate.tenant_id AND semantic.subject_type='CANDIDATE'
+ AND semantic.candidate_id=candidate.id
+JOIN platform.datasets AS d
+  ON d.tenant_id=candidate.tenant_id AND d.id=candidate.dataset_id
+ AND d.deleted_at IS NULL AND d.current_published_version_id=candidate.dataset_version_id
+JOIN platform.dataset_versions AS version
+  ON version.tenant_id=d.tenant_id AND version.dataset_id=d.id
+ AND version.id=candidate.dataset_version_id
+WHERE candidate.tenant_id=$1 AND candidate.status IN ('READY','NEEDS_REVIEW')
+  AND d.status='PUBLISHED' AND version.status='PUBLISHED'
+  AND ` + datasetReadPredicate + `
+  AND ` + noApplicableDataPolicyPredicate + `
+ORDER BY CASE
+  WHEN lower(semantic.name)=lower($3) THEN 0
+  WHEN strpos(lower($4),lower(semantic.name))>0 OR strpos(lower($4),lower(d.name))>0 THEN 1
+  WHEN strpos(lower(semantic.name),lower($3))>0
+    OR (semantic.description<>'' AND strpos(lower(semantic.description),lower($3))>0) THEN 2
+  ELSE 3 END,
+  candidate.confidence DESC,candidate.id
 LIMIT $5`
 
 var _ Retriever = (*PostgresRetriever)(nil)

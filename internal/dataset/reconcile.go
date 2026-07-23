@@ -37,7 +37,7 @@ func (s *PostgresStore) ReconcileMappedDatasets(ctx context.Context) (int, error
 			changed := false
 			err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 				var err error
-				changed, err = s.ensureMappedDatasetTx(ctx, tx, tenantID, candidate.actorID, candidate.tableID)
+				changed, err = s.ensureMappedDatasetTx(ctx, tx, tenantID, candidate.actorID, candidate.tableID, false)
 				if err != nil {
 					return fmt.Errorf("ensure mapped dataset for table %s: %w", candidate.tableID, err)
 				}
@@ -103,7 +103,10 @@ func listMappedDatasetCandidates(ctx context.Context, tx pgx.Tx) ([]mappedDatase
 			''
 		)
 		FROM platform.metadata_tables t
+		JOIN platform.data_sources source
+		  ON source.id=t.data_source_id AND source.tenant_id=t.tenant_id
 		WHERE t.asset_status='ACTIVE'
+		  AND source.status='ACTIVE' AND source.deleted_at IS NULL
 		  AND t.management_status='ENABLED'
 		  AND t.last_enriched_structure_hash<>''
 		  AND t.last_enriched_structure_hash=t.structure_hash

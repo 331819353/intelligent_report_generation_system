@@ -244,6 +244,48 @@ describe('dataset AI editor conversion', () => {
     expect(result.graph.end?.position).toEqual({ x: 777, y: 222 })
   })
 
+  it('materializes component replacement and topology moves as complete editor snapshots', async () => {
+    const initialPlan = plan()
+    initialPlan.transforms = [{
+      id: 'transform_1', name: '地区大写', family: 'TEXT', componentType: 'TEXT_UPPER', input: { kind: 'NODE', id: 'node_1' },
+      rules: [{ id: 'rule_upper', operation: 'UPPER', inputKeys: ['node_1.region'], output: { id: 'region_upper', name: '大写地区', code: 'region_upper', canonicalType: 'STRING' } }],
+    }]
+    initialPlan.joins[0].left = { kind: 'TRANSFORM', id: 'transform_1' }
+    initialPlan.groups[0].dimensions = [{ nodeId: 'transform_1', column: 'region_upper', grouping: '' }]
+    initialPlan.end.outputs[0] = { nodeId: 'node_1', column: 'region', key: 'transform_1.region_upper', name: '大写地区', code: 'region_upper' }
+    const initial = await materializeDatasetAIPlan(initialPlan, [orders, customers], async tableID => columns[tableID], empty, 'dataset_ai_1')
+
+    const movedAndReplaced = plan()
+    movedAndReplaced.transforms = [{
+      ...initialPlan.transforms![0],
+      input: { kind: 'JOIN', id: 'join_1' },
+    }]
+    movedAndReplaced.joins[0].left = { kind: 'NODE', id: 'node_1' }
+    movedAndReplaced.groups = [{
+      id: 'group_2', name: '替换后的地区汇总', input: { kind: 'TRANSFORM', id: 'transform_1' },
+      dimensions: [{ nodeId: 'transform_1', column: 'region_upper', grouping: '' }],
+      metrics: [{ nodeId: 'node_2', column: 'amount', aggregation: 'SUM' }],
+    }]
+    movedAndReplaced.end.input = { kind: 'GROUP', id: 'group_2' }
+    movedAndReplaced.end.outputs[0] = { nodeId: 'node_1', column: 'region', key: 'transform_1.region_upper', name: '大写地区', code: 'region_upper' }
+
+    const result = await materializeDatasetAIPlan(movedAndReplaced, [orders, customers], async tableID => columns[tableID], initial.draft, 'dataset_ai_1', initial.graph)
+    expect(result.graph.transforms).toEqual([expect.objectContaining({ id: 'transform_1', input: { kind: 'JOIN', id: 'join_1' } })])
+    expect(result.graph.joins[0].left).toEqual({ kind: 'NODE', id: 'node_1' })
+    expect(result.graph.groups).toEqual([expect.objectContaining({ id: 'group_2', input: { kind: 'TRANSFORM', id: 'transform_1' } })])
+    expect(result.graph.end?.input).toEqual({ kind: 'GROUP', id: 'group_2' })
+    expect(datasetAIPlanFromEditor(result.draft, result.graph, result.metadata)).toMatchObject({
+      transforms: [{ id: 'transform_1', input: { kind: 'JOIN', id: 'join_1' } }],
+      joins: [{ id: 'join_1', left: { kind: 'NODE', id: 'node_1' } }],
+      groups: [{ id: 'group_2', input: { kind: 'TRANSFORM', id: 'transform_1' } }],
+      end: { input: { kind: 'GROUP', id: 'group_2' } },
+    })
+    expect(buildDatasetDSL(result.draft).fields).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'region_upper', expression: expect.objectContaining({ type: 'UPPER' }) }),
+      expect.objectContaining({ code: 'order_amount', expression: expect.objectContaining({ type: 'AGGREGATE', function: 'SUM' }) }),
+    ]))
+  })
+
   it('只移除关联后分组时保留关联前分组的身份、连线和布局', async () => {
     const initialPlan = planWithGroupsBeforeAndAfterJoin()
     const initial = await materializeDatasetAIPlan(initialPlan, [orders, customers], async tableID => columns[tableID], empty, 'dataset_ai_1')

@@ -178,6 +178,25 @@ func TestWritePlanErrorDistinguishesComponentFieldAndClarificationFailures(t *te
 	}
 }
 
+func TestWritePlanErrorDoesNotRequireTechnicalComponentNamesForTopologyFailure(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writePlanError(recorder, &InvalidOutputError{
+		ReasonCode: InvalidOutputReasonGraph,
+		Stage:      InvalidOutputStagePlanValidation,
+		Detail:     "every transform must have exactly one downstream consumer",
+	})
+	var body planInvalidOutputResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.DiagnosticCode != "COMPONENT_NOT_CONNECTED" || !strings.Contains(body.Suggestion, "无需提供组件名称或 ID") {
+		t.Fatalf("topology diagnostic = %#v", body)
+	}
+	if strings.Contains(body.Suggestion, "请写明要修改的组件") {
+		t.Fatalf("topology diagnostic shifted technical work to the user: %#v", body)
+	}
+}
+
 func TestWritePlanErrorNormalizesUnknownInvalidOutputMetadata(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	writePlanError(recorder, &InvalidOutputError{ReasonCode: "MODEL_TEXT", Stage: "PRIVATE_STAGE", Detail: "raw model output"})

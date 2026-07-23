@@ -11,7 +11,7 @@ import (
 
 const (
 	SchemaVersion          = "1.1"
-	PromptVersion          = "metadata-completion-v6"
+	PromptVersion          = "metadata-completion-v7"
 	SourceFormatCSV        = "CSV"
 	SourceFormatExcel      = "EXCEL"
 	SourceFormatDatabase   = "DATABASE"
@@ -164,6 +164,9 @@ func ValidateOutput(input CompletionInput, output CompletionOutput) error {
 		if err := validateValue(*output.Table, false, false); err != nil {
 			return fmt.Errorf("%w: table: %v", ErrInvalidOutput, err)
 		}
+		if isFileSourceFormat(input.SourceFormat) && !containsChinese(output.Table.BusinessName) {
+			return invalid("table businessName must contain Chinese text for file sources")
+		}
 	} else if output.Table != nil {
 		return invalid("table suggestion was not requested")
 	}
@@ -180,7 +183,7 @@ func ValidateOutput(input CompletionInput, output CompletionOutput) error {
 			return invalid("columns[%d] duplicates targetId", i)
 		}
 		seen[column.TargetID] = true
-		if err := validateValue(column, true, input.SourceFormat == SourceFormatCSV); err != nil {
+		if err := validateValue(column, true, isFileSourceFormat(input.SourceFormat)); err != nil {
 			return fmt.Errorf("%w: columns[%d]: %v", ErrInvalidOutput, i, err)
 		}
 	}
@@ -191,7 +194,7 @@ func ValidateOutput(input CompletionInput, output CompletionOutput) error {
 }
 
 // validateValue 校验单条表或字段建议的名称、标签、敏感级别与置信度。
-func validateValue(value SuggestionValue, column, csvColumn bool) error {
+func validateValue(value SuggestionValue, column, fileColumn bool) error {
 	if strings.TrimSpace(value.TargetID) == "" {
 		return errors.New("targetId is required")
 	}
@@ -201,11 +204,11 @@ func validateValue(value SuggestionValue, column, csvColumn bool) error {
 	if err := validateText("businessDescription", value.BusinessDescription, 1000); err != nil {
 		return err
 	}
-	if csvColumn && !csvBusinessNameRegexp.MatchString(value.BusinessName) {
-		return errors.New("businessName must use lowercase English snake_case for CSV columns")
+	if fileColumn && !csvBusinessNameRegexp.MatchString(value.BusinessName) {
+		return errors.New("businessName must use lowercase English snake_case for file columns")
 	}
-	if csvColumn && !containsChinese(value.BusinessDescription) {
-		return errors.New("businessDescription must contain Chinese text for CSV columns")
+	if fileColumn && !containsChinese(value.BusinessDescription) {
+		return errors.New("businessDescription must contain Chinese text for file columns")
 	}
 	if value.Confidence <= 0 || value.Confidence > 1 {
 		return errors.New("confidence must be greater than zero and at most one")
@@ -251,17 +254,21 @@ func normalizeOutput(output CompletionOutput) CompletionOutput {
 	return output
 }
 
-// normalizeOutputForInput 在通用清理后，对 CSV 字段名称执行可逆、无猜测的 ASCII snake_case 规范化。
+// normalizeOutputForInput 在通用清理后，对文件字段名称执行可逆、无猜测的 ASCII snake_case 规范化。
 // 中文或其他非 ASCII 名称不会被静默丢弃，仍由 ValidateOutput 拒绝并触发一次模型纠错。
 func normalizeOutputForInput(input CompletionInput, output CompletionOutput) CompletionOutput {
 	output = normalizeOutput(output)
-	if input.SourceFormat != SourceFormatCSV {
+	if !isFileSourceFormat(input.SourceFormat) {
 		return output
 	}
 	for i := range output.Columns {
 		output.Columns[i].BusinessName = normalizeASCIISnakeCase(output.Columns[i].BusinessName)
 	}
 	return output
+}
+
+func isFileSourceFormat(value string) bool {
+	return value == SourceFormatCSV || value == SourceFormatExcel
 }
 
 // normalizeASCIISnakeCase 将空格、连字符、点号和驼峰形式统一为小写下划线形式。

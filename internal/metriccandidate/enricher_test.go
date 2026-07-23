@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	aiplatform "intelligent-report-generation-system/internal/ai"
+	"intelligent-report-generation-system/internal/dataset"
 )
 
 type enrichmentInvokerStub struct {
@@ -87,3 +89,25 @@ func TestEnricherFallsBackToRuleSemantics(t *testing.T) {
 		}
 	}
 }
+
+func TestRuleSemanticsPreserveDatasetFilterScopeWithoutExposingValues(t *testing.T) {
+	document := candidateDatasetDocument()
+	document.Nodes[0].SourceFilters = []dataset.SourceFilter{{Field: "channel", Operator: "EQUALS", Value: "PAID"}}
+	document.Filters = []dataset.Filter{{
+		ID: "optional_region", Stage: "PRE_AGGREGATION", Optional: true,
+		Expression: dataset.Expression{Type: "EQUALS", Left: ptrExpression(fieldRef("region")), Right: ptrExpression(dataset.Expression{Type: "PARAM_REF", Code: "region"})},
+	}}
+	document.Parameters = []dataset.Parameter{{Code: "region", Name: "地区", DataType: "STRING"}}
+	version := publishedDatasetVersion(t, document)
+	base, err := Extract(version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := attachDefaultSemantics(version, base)
+	if len(result.Candidates) == 0 || !strings.Contains(result.Candidates[0].Semantic.Caliber, "1 个固定过滤条件") ||
+		!strings.Contains(result.Candidates[0].Semantic.Caliber, "1 个运行时可选过滤条件") || strings.Contains(result.Candidates[0].Semantic.Caliber, "PAID") {
+		t.Fatalf("filter scope was not preserved safely: %#v", result.Candidates)
+	}
+}
+
+func ptrExpression(value dataset.Expression) *dataset.Expression { return &value }

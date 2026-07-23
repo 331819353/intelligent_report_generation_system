@@ -116,19 +116,25 @@ func (s *PostgresStore) ClaimJob(ctx context.Context, tenantID, workerID string,
 	return claim, err
 }
 
-func (s *PostgresStore) LoadExactDatasetVersion(ctx context.Context, claim JobClaim) (dataset.VersionRecord, error) {
+func (s *PostgresStore) LoadExactDatasetVersion(ctx context.Context, claim JobClaim) (LoadedDatasetVersion, error) {
 	datasetStore := dataset.NewPostgresStore(s.pool)
-	if err := datasetStore.ValidateVersionDependencies(ctx, claim.TenantID, claim.DatasetID, claim.DatasetVersionID); err != nil {
-		return dataset.VersionRecord{}, err
-	}
 	version, err := datasetStore.GetVersion(ctx, claim.TenantID, claim.DatasetID, claim.DatasetVersionID)
 	if err != nil {
-		return dataset.VersionRecord{}, err
+		return LoadedDatasetVersion{}, fmt.Errorf("load immutable dataset snapshot: %w", err)
 	}
 	if version.DSLHash != claim.DSLHash {
-		return dataset.VersionRecord{}, fmt.Errorf("metric extraction job dataset hash drift")
+		return LoadedDatasetVersion{}, fmt.Errorf("metric extraction job dataset hash drift")
 	}
-	return version, nil
+	if err := datasetStore.ValidateVersionDependencies(ctx, claim.TenantID, claim.DatasetID, claim.DatasetVersionID); err != nil {
+		// Preserve the immutable DSL for fact extraction when only runtime dependencies are
+		// unavailable. The worker will persist candidates as BLOCKED instead of dropping the
+		// published dataset from the metric-center inventory.
+		if errors.Is(err, dataset.ErrVersionUnavailable) {
+			return LoadedDatasetVersion{Version: version, DependencyUnavailable: true}, nil
+		}
+		return LoadedDatasetVersion{}, fmt.Errorf("validate dataset runtime dependencies: %w", err)
+	}
+	return LoadedDatasetVersion{Version: version}, nil
 }
 
 type persistedDraft struct {
@@ -149,6 +155,7 @@ func (s *PostgresStore) FinishJob(ctx context.Context, claim JobClaim, workerID 
 		return ErrInvalidRequest
 	}
 	persisted := make([]persistedDraft, 0, len(result.Candidates))
+	dependencyBlocked := extractionBlockedByUnavailable(result)
 	ready, review, blocked := 0, 0, 0
 	for _, draft := range result.Candidates {
 		draft.Semantic = normalizeSemanticForPersistence(draft, claim)
@@ -204,9 +211,12 @@ func (s *PostgresStore) FinishJob(ctx context.Context, claim JobClaim, workerID 
 			return errors.New("metric extraction job lease was lost")
 		}
 		// The source can be disabled or made stale after extraction begins. Revalidate under
-		// row locks in the persistence transaction so an unavailable version never enters review.
+		// row locks. A snapshot already known to be unavailable may enter the inventory only
+		// when every candidate is explicitly dependency-blocked and therefore unreviewable.
 		if err := dataset.ValidateVersionDependenciesInTx(ctx, tx, claim.DatasetID, claim.DatasetVersionID); err != nil {
-			return err
+			if !errors.Is(err, dataset.ErrVersionUnavailable) || !dependencyBlocked {
+				return err
+			}
 		}
 		for _, item := range persisted {
 			definition := item.draft.Definition

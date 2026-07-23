@@ -18,6 +18,7 @@ var errMappedDatasetUnsupportedColumn = errors.New("mapped dataset contains an u
 type MappedDatasetTable struct {
 	ID                  string
 	DataSourceID        string
+	DataSourceName      string
 	FileVersionID       string
 	MetadataVersion     int64
 	StructureHash       string
@@ -52,10 +53,7 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 		return Document{}, errors.New("mapped dataset requires at least one active column")
 	}
 
-	name := strings.TrimSpace(table.BusinessName)
-	if name == "" {
-		name = strings.TrimSpace(table.TableName)
-	}
+	name := mappedDatasetDisplayName(table)
 	if name == "" {
 		return Document{}, errors.New("mapped dataset table name is required")
 	}
@@ -75,10 +73,16 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 			return Document{}, fmt.Errorf("%w: column %d", errMappedDatasetUnsupportedColumn, index+1)
 		}
 		projection = append(projection, physicalName)
-		fieldCode := uniqueMappedIdentifier(physicalName, fmt.Sprintf("field_%d", index+1), usedCodes)
+		logicalName := physicalName
+		if table.FileVersionID != "" && identifierPattern.MatchString(strings.TrimSpace(column.BusinessName)) {
+			logicalName = strings.TrimSpace(column.BusinessName)
+		}
+		fieldCode := uniqueMappedIdentifier(logicalName, fmt.Sprintf("field_%d", index+1), usedCodes)
 		fieldID := uniqueMappedIdentifier("field_t1_"+fieldCode, fmt.Sprintf("field_t1_%d", index+1), usedIDs)
 		fieldName := strings.TrimSpace(column.BusinessName)
-		if fieldName == "" {
+		if table.FileVersionID != "" && containsHan(physicalName) {
+			fieldName = physicalName
+		} else if fieldName == "" {
 			fieldName = physicalName
 		}
 		role := mappedDatasetFieldRole(column)
@@ -189,16 +193,17 @@ type mappedDatasetState struct {
 	RevisionCount        int
 	ExactCreateCount     int
 	PendingApprovalCount int
+	MappedAfterDeletion  bool
 }
 
 // EnsureMappedDatasetTx 在已有租户事务内幂等创建并默认发布映射表数据集。
 // 公开签名供元数据完善事务复用；启动对账通过内部返回值区分真实变更和安全跳过。
 func (s *PostgresStore) EnsureMappedDatasetTx(ctx context.Context, tx pgx.Tx, tenantID, actorID, tableID string) error {
-	_, err := s.ensureMappedDatasetTx(ctx, tx, tenantID, actorID, tableID)
+	_, err := s.ensureMappedDatasetTx(ctx, tx, tenantID, actorID, tableID, true)
 	return err
 }
 
-func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, tenantID, actorID, tableID string) (bool, error) {
+func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, tenantID, actorID, tableID string, regenerateDeleted bool) (bool, error) {
 	if tx == nil || strings.TrimSpace(tenantID) == "" || strings.TrimSpace(tableID) == "" {
 		return false, errors.New("mapped dataset transaction, tenant ID, and table ID are required")
 	}
@@ -213,14 +218,17 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 	if err != nil {
 		return false, err
 	}
-	// 软删除和显式停用对象不由后台恢复。已发布映射数据集由系统刷新路径
-	// 创建新的不可变版本，不会原地改写旧发布快照。
-	if exists && (state.Deleted || state.Status == "DISABLED") {
+	// 显式停用对象始终尊重人工生命周期操作。软删除对象只有在删除后再次完成
+	// 映射时才复用原主对象生成新发布版本，避免来源表唯一约束让后续映射静默无结果。
+	if exists && state.Status == "DISABLED" {
+		return false, nil
+	}
+	if exists && state.Deleted && !regenerateDeleted && !state.MappedAfterDeletion {
 		return false, nil
 	}
 
 	table := MappedDatasetTable{}
-	err = tx.QueryRow(ctx, `SELECT t.id::text,t.data_source_id::text,
+	err = tx.QueryRow(ctx, `SELECT t.id::text,t.data_source_id::text,source.name,
 		COALESCE((SELECT fv.id::text
 			FROM platform.file_assets fa
 			JOIN platform.file_asset_versions fv
@@ -230,6 +238,7 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 		FROM platform.metadata_tables t
 		JOIN platform.data_sources source ON source.id=t.data_source_id AND source.tenant_id=t.tenant_id
 		WHERE t.id::text=$1 AND t.tenant_id::text=$2
+		  AND source.status='ACTIVE' AND source.deleted_at IS NULL
 		  AND t.asset_status='ACTIVE' AND t.management_status='ENABLED'
 		  AND t.last_enriched_structure_hash<>''
 		  AND t.last_enriched_structure_hash=t.structure_hash
@@ -240,7 +249,7 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 			WHERE c.table_id=t.id AND c.tenant_id=t.tenant_id AND c.asset_status='ACTIVE'
 			  AND (c.last_enriched_structure_hash='' OR c.last_enriched_structure_hash<>c.structure_hash))
 		FOR SHARE OF t`, tableID, tenantID).Scan(
-		&table.ID, &table.DataSourceID, &table.FileVersionID, &table.TableName,
+		&table.ID, &table.DataSourceID, &table.DataSourceName, &table.FileVersionID, &table.TableName,
 		&table.MetadataVersion, &table.StructureHash,
 		&table.BusinessName, &table.BusinessDescription,
 	)
@@ -295,6 +304,9 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 	if err != nil {
 		return false, err
 	}
+	if exists && state.Deleted {
+		return s.regenerateDeletedMappedDatasetTx(ctx, tx, tenantID, actorID, table, state, prepared)
+	}
 	if exists && state.PublishedCount > 0 {
 		return s.refreshMappedDatasetTx(ctx, tx, tenantID, actorID, table, state, prepared)
 	}
@@ -319,6 +331,80 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 		return false, nil
 	}
 	return s.publishMappedDatasetDefaultTx(ctx, tx, tenantID, actorID, table.ID, state, prepared)
+}
+
+// regenerateDeletedMappedDatasetTx 在来源表重新完成映射时恢复同一个数据集主对象，
+// 保留已废弃的历史发布快照，并从现有可变草稿生成一个新的不可变发布版本。
+func (s *PostgresStore) regenerateDeletedMappedDatasetTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, actorID string,
+	table MappedDatasetTable,
+	state mappedDatasetState,
+	prepared Prepared,
+) (bool, error) {
+	if !state.Deleted || state.Status == "DISABLED" || state.DraftVersionID == "" || state.DraftRecordVersion < 1 {
+		return false, nil
+	}
+	var draftRecordVersion int64
+	if err := tx.QueryRow(ctx, `UPDATE platform.dataset_versions SET
+		dsl_json=$1,schema_hash=$2,logical_plan_json=$3,plan_hash=$4,
+		record_version=record_version+1,updated_by=$5
+		WHERE id=$6 AND dataset_id=$7 AND tenant_id=$8 AND status='DRAFT'
+		RETURNING record_version`, prepared.DSLJSON, prepared.DSLHash, prepared.LogicalPlanJSON,
+		prepared.PlanHash, actorID, state.DraftVersionID, state.ID, tenantID).Scan(&draftRecordVersion); err != nil {
+		return false, err
+	}
+	var datasetVersion int64
+	if err := tx.QueryRow(ctx, `UPDATE platform.datasets SET
+		name=$1,description=$2,dataset_type=$3,status='DRAFT',current_published_version_id=NULL,
+		disabled_from_status=NULL,disabled_published_version_id=NULL,deleted_at=NULL,
+		version=version+1,updated_by=$4,updated_at=now()
+		WHERE id=$5 AND tenant_id=$6 AND origin_table_id=$7 AND deleted_at IS NOT NULL
+		RETURNING version`, prepared.Document.Dataset.Name, prepared.Document.Dataset.Description,
+		prepared.Document.Dataset.Type, actorID, state.ID, tenantID, table.ID).Scan(&datasetVersion); err != nil {
+		return false, err
+	}
+	if err := replaceDerived(ctx, tx, tenantID, state.ID, state.DraftVersionID, prepared.Document, true); err != nil {
+		return false, err
+	}
+	if err := insertDraftRevisionTx(ctx, tx, tenantID, state.ID, actorID, state.DraftVersionID,
+		datasetVersion, draftRecordVersion, "SAVE", "", prepared); err != nil {
+		return false, err
+	}
+	input := PublishInput{
+		DraftVersionID: state.DraftVersionID, ExpectedVersion: datasetVersion,
+		ExpectedDraftRecordVersion: draftRecordVersion, ExpectedDSLHash: prepared.DSLHash,
+		ValidationParameters: map[string]any{},
+	}
+	requestHash, err := publicationRequestHash(state.ID, input)
+	if err != nil {
+		return false, err
+	}
+	dslPrefix := prepared.DSLHash
+	if len(dslPrefix) > 16 {
+		dslPrefix = dslPrefix[:16]
+	}
+	plan := PublishPlan{
+		IdempotencyKey: fmt.Sprintf("system-mapped-regenerate-%d-%d-%s", state.Version, draftRecordVersion, dslPrefix),
+		RequestHash:    requestHash, ExpectedVersion: datasetVersion, DraftVersionID: state.DraftVersionID,
+		ExpectedDraftRecordVersion: draftRecordVersion, ExpectedDSLHash: prepared.DSLHash, Prepared: prepared,
+	}
+	var published VersionRecord
+	if err := s.publishTx(ctx, tx, tenantID, actorID, state.ID, plan, &published); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+		tenant_id,actor_user_id,action,resource_type,resource_id,detail
+	) VALUES($1,$2,'AUTO_REGENERATE_MAPPED_DATASET','DATASET',$3,
+		jsonb_build_object('publicationSource','SYSTEM_MAPPED_REGENERATE','originTableId',$4::text,
+			'metadataVersion',$5::bigint,'structureHash',$6::text,'publishedVersionId',$7::text,
+			'versionNo',$8::int,'dslHash',$9::text,'planHash',$10::text))`,
+		tenantID, actorID, state.ID, table.ID, table.MetadataVersion, table.StructureHash,
+		published.ID, published.VersionNo, published.DSLHash, published.PlanHash); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // refreshMappedDatasetTx advances only a system-owned mapped dataset. It writes a new draft
@@ -428,7 +514,11 @@ func loadMappedDatasetStateTx(ctx context.Context, tx pgx.Tx, tenantID, tableID 
 		   AND revision.draft_record_version=draft.record_version
 		   AND revision.schema_hash=draft.schema_hash AND revision.plan_hash=draft.plan_hash),
 		(SELECT count(*) FROM platform.dataset_publication_requests AS request
-		 WHERE request.dataset_id=dataset.id AND request.tenant_id=dataset.tenant_id AND request.status='PENDING')
+		 WHERE request.dataset_id=dataset.id AND request.tenant_id=dataset.tenant_id AND request.status='PENDING'),
+		EXISTS(SELECT 1 FROM platform.ai_metadata_jobs AS job
+		 WHERE job.tenant_id=dataset.tenant_id AND job.table_id=dataset.origin_table_id
+		   AND job.status='SUCCEEDED' AND dataset.deleted_at IS NOT NULL
+		   AND job.completed_at>dataset.deleted_at)
 		FROM platform.datasets AS dataset
 		JOIN platform.dataset_versions AS draft
 		  ON draft.id=dataset.current_draft_version_id AND draft.dataset_id=dataset.id AND draft.tenant_id=dataset.tenant_id
@@ -438,11 +528,40 @@ func loadMappedDatasetStateTx(ctx context.Context, tx pgx.Tx, tenantID, tableID 
 		&state.DraftVersionID, &state.DraftVersionNo, &state.DraftRecordVersion,
 		&state.DSLHash, &state.PlanHash, &state.PublishedCount,
 		&state.RevisionCount, &state.ExactCreateCount, &state.PendingApprovalCount,
+		&state.MappedAfterDeletion,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return mappedDatasetState{}, false, nil
 	}
 	return state, err == nil, err
+}
+
+func mappedDatasetDisplayName(table MappedDatasetTable) string {
+	businessName := strings.TrimSpace(table.BusinessName)
+	tableName := strings.TrimSpace(table.TableName)
+	dataSourceName := strings.TrimSpace(table.DataSourceName)
+	if table.FileVersionID != "" {
+		for _, candidate := range []string{businessName, tableName, dataSourceName} {
+			if containsHan(candidate) {
+				return candidate
+			}
+		}
+	}
+	for _, candidate := range []string{businessName, tableName, dataSourceName} {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func containsHan(value string) bool {
+	for _, character := range value {
+		if character >= '\u3400' && character <= '\u4dbf' || character >= '\u4e00' && character <= '\u9fff' || character >= '\uf900' && character <= '\ufaff' {
+			return true
+		}
+	}
+	return false
 }
 
 func (state mappedDatasetState) canDefaultPublish(prepared Prepared) bool {

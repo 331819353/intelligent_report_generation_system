@@ -27,19 +27,19 @@ func TestExtractDerivesDeterministicCandidatesFromExplicitFacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Extract() second error = %v", err)
 	}
-	if first.Status != TaskStatusSucceeded {
-		t.Fatalf("task status = %s, want %s", first.Status, TaskStatusSucceeded)
+	if first.Status != TaskStatusPartial {
+		t.Fatalf("task status = %s, want %s", first.Status, TaskStatusPartial)
 	}
-	if len(first.Candidates) != 3 {
+	if len(first.Candidates) != 6 {
 		t.Fatalf("candidates = %#v", first.Candidates)
 	}
 	if !reflect.DeepEqual(first, second) {
 		t.Fatal("the same immutable version produced different candidates")
 	}
 
-	byField := map[string]CandidateDraft{}
+	byDefinition := map[string]CandidateDraft{}
 	for _, candidate := range first.Candidates {
-		byField[candidate.SourceFieldID] = candidate
+		byDefinition[candidate.SourceFieldID+":"+candidate.Definition.Aggregation] = candidate
 		raw, marshalErr := json.Marshal(candidate.Definition)
 		if marshalErr != nil {
 			t.Fatal(marshalErr)
@@ -53,14 +53,14 @@ func TestExtractDerivesDeterministicCandidatesFromExplicitFacts(t *testing.T) {
 		}
 	}
 
-	assertCandidate(t, byField["field_amount"], "SUM", ConfidenceHigh, CandidateStatusReady, "ADDITIVE")
-	assertCandidate(t, byField["field_quantity"], "SUM", ConfidenceMedium, CandidateStatusReady, "ADDITIVE")
-	assertCandidate(t, byField["field_rate"], "AVG", ConfidenceMedium, CandidateStatusReady, "NON_ADDITIVE")
-	if _, exists := byField["field_score"]; exists {
-		t.Fatal("unclassified numeric attribute unexpectedly became a metric candidate")
-	}
+	assertCandidate(t, byDefinition["field_id:COUNT"], "COUNT", ConfidenceHigh, CandidateStatusReady, "ADDITIVE")
+	assertCandidate(t, byDefinition["field_id:COUNT_DISTINCT"], "COUNT_DISTINCT", ConfidenceHigh, CandidateStatusReady, "NON_ADDITIVE")
+	assertCandidate(t, byDefinition["field_amount:SUM"], "SUM", ConfidenceHigh, CandidateStatusReady, "ADDITIVE")
+	assertCandidate(t, byDefinition["field_quantity:SUM"], "SUM", ConfidenceMedium, CandidateStatusReady, "ADDITIVE")
+	assertCandidate(t, byDefinition["field_rate:AVG"], "AVG", ConfidenceMedium, CandidateStatusReady, "NON_ADDITIVE")
+	assertCandidate(t, byDefinition["field_score:SUM"], "SUM", ConfidenceLow, CandidateStatusNeedsReview, "ADDITIVE")
 
-	amount := byField["field_amount"]
+	amount := byDefinition["field_amount:SUM"]
 	if amount.Definition.TimeFieldID != "field_order_date" || amount.Definition.TimeGrain != "MONTH" {
 		t.Fatalf("exact time semantics were not extracted: %#v", amount.Definition)
 	}
@@ -69,8 +69,8 @@ func TestExtractDerivesDeterministicCandidatesFromExplicitFacts(t *testing.T) {
 	if !reflect.DeepEqual(gotDimensions, wantDimensions) {
 		t.Fatalf("dimensions = %v, want %v", gotDimensions, wantDimensions)
 	}
-	if _, exists := byField["field_id"]; exists {
-		t.Fatal("non-numeric identifier unexpectedly became a metric candidate")
+	if got := byDefinition["field_id:COUNT_DISTINCT"].Definition.Metric.Name; got != "订单数" {
+		t.Fatalf("identifier count name = %q, want 订单数", got)
 	}
 }
 

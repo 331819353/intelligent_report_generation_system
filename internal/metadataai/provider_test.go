@@ -71,7 +71,8 @@ func TestOrchestratedProviderBuildsMinimalRequestAndParsesUsage(t *testing.T) {
 		t.Fatalf("模型请求未保持最小结构化合同: %#v", invoker.invocation.Request)
 	}
 	if !messageContains(invoker.invocation.Request.Messages[0], "真实表头") || !messageContains(invoker.invocation.Request.Messages[0], "字段业务描述") ||
-		!messageContains(invoker.invocation.Request.Messages[0], "sourceFormat=CSV") || !messageContains(invoker.invocation.Request.Messages[0], "下划线") || !messageContains(invoker.invocation.Request.Messages[0], "中文描述") {
+		!messageContains(invoker.invocation.Request.Messages[0], "sourceFormat=CSV 或 EXCEL") || !messageContains(invoker.invocation.Request.Messages[0], "中文业务名称") ||
+		!messageContains(invoker.invocation.Request.Messages[0], "下划线") || !messageContains(invoker.invocation.Request.Messages[0], "中文描述") {
 		t.Fatalf("系统提示未要求结合 Sheet 表头和内容完成映射: %#v", invoker.invocation.Request.Messages[0])
 	}
 	if !messageContains(invoker.invocation.Request.Messages[1], "客户名称") || !messageContains(invoker.invocation.Request.Messages[1], "华东智造有限公司") {
@@ -88,8 +89,9 @@ func TestOrchestratedProviderBuildsMinimalRequestAndParsesUsage(t *testing.T) {
 		[]byte(`"enum":["column-1","column-2"]`),
 		[]byte(`"minItems":2`),
 		[]byte(`"maxItems":2`),
-		[]byte(`"description":"CSV 字段映射名称：小写英文 snake_case，多个单词使用下划线分隔"`),
-		[]byte(`"description":"CSV 字段中文业务描述，可包含 ID、SKU 等英文缩写"`),
+		[]byte(`"description":"文件表中文业务名称"`),
+		[]byte(`"description":"文件字段映射名称：小写英文 snake_case，多个单词使用下划线分隔"`),
+		[]byte(`"description":"文件字段中文业务描述，可包含 ID、SKU 等英文缩写"`),
 	} {
 		if !bytes.Contains(invoker.invocation.Request.ResponseSchema.Schema, fragment) {
 			t.Fatalf("元数据输出 Schema 缺少动态约束 %s: %s", fragment, invoker.invocation.Request.ResponseSchema.Schema)

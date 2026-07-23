@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"intelligent-report-generation-system/internal/access"
 	"intelligent-report-generation-system/internal/auth"
@@ -25,8 +24,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 			}
 			limit = parsed
 		}
-		includeCandidates := strings.EqualFold(request.URL.Query().Get("includeCandidates"), "true")
-		result, err := service.Search(request.Context(), claims.TenantID, query, limit, includeCandidates)
+		result, err := service.Search(request.Context(), claims.TenantID, query, limit)
 		if err != nil {
 			if errors.Is(err, ErrInvalidRequest) {
 				writeJSON(writer, http.StatusBadRequest, map[string]string{"code": "INVALID_REQUEST", "message": "请输入 1 至 1000 个字符的指标检索要求"})

@@ -16,6 +16,7 @@ import (
 const MetricEnrichmentPromptVersion = "metric-candidate-enrichment-v1"
 
 func attachDefaultSemantics(version dataset.VersionRecord, result ExtractionResult) ExtractionResult {
+	fixedFilters, optionalFilters := datasetFilterScope(version)
 	for index := range result.Candidates {
 		draft := &result.Candidates[index]
 		definition := draft.Definition
@@ -33,6 +34,12 @@ func attachDefaultSemantics(version dataset.VersionRecord, result ExtractionResu
 		if definition.Unit != "" {
 			caliber += "；单位为 " + definition.Unit
 		}
+		if fixedFilters > 0 {
+			caliber += fmt.Sprintf("；继承数据集的 %d 个固定过滤条件", fixedFilters)
+		}
+		if optionalFilters > 0 {
+			caliber += fmt.Sprintf("；另有 %d 个运行时可选过滤条件，不属于指标固定口径", optionalFilters)
+		}
 		lineage := LineageMetadata{
 			DatasetID: version.DatasetID, DatasetVersionID: version.ID, SourceFieldID: draft.SourceFieldID,
 			Aggregation: definition.Aggregation, DimensionFieldIDs: dimensionIDs,
@@ -40,6 +47,9 @@ func attachDefaultSemantics(version dataset.VersionRecord, result ExtractionResu
 		}
 		lineageSummary := fmt.Sprintf("来自发布数据集“%s”的字段 %s，按 %s 聚合", versionName(version), draft.SourceFieldCode, definition.Aggregation)
 		tags := []string{definition.Metric.Name, definition.Metric.Code, "原子指标", definition.Aggregation}
+		if fixedFilters > 0 {
+			tags = append(tags, "固定过滤口径")
+		}
 		if definition.Unit != "" {
 			tags = append(tags, definition.Unit)
 		}
@@ -56,6 +66,24 @@ func attachDefaultSemantics(version dataset.VersionRecord, result ExtractionResu
 		draft.Semantic.InputHash = semanticInputHash(*draft, version)
 	}
 	return result
+}
+
+func datasetFilterScope(version dataset.VersionRecord) (fixed, optional int) {
+	prepared, err := dataset.Prepare(version.DSL)
+	if err != nil {
+		return 0, 0
+	}
+	for _, node := range prepared.Document.Nodes {
+		fixed += len(node.SourceFilters)
+	}
+	for _, filter := range append(append([]dataset.Filter(nil), prepared.Document.Filters...), prepared.Document.Having...) {
+		if filter.Optional {
+			optional++
+		} else {
+			fixed++
+		}
+	}
+	return fixed, optional
 }
 
 func versionName(version dataset.VersionRecord) string {

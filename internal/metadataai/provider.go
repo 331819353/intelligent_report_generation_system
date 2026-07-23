@@ -29,7 +29,7 @@ type Invoker interface {
 
 type OrchestratedProvider struct{ invoker Invoker }
 
-const metadataCompletionSystemPrompt = "你是企业数据资产元数据补全器。只能依据给定技术元数据和最多三行数据样本生成结果，不得虚构资产或返回未请求的目标。对 Excel/CSV 工作表，table.name 是 Sheet 名称，columns.name 是解析后的真实表头，sampleRows 的键和值分别对应表头和该列真实内容；必须结合 Sheet 名称、全部表头、字段类型和样本值判断表业务名称、字段业务名称及字段业务描述，不得只翻译物理名称或忽略样本内容。当 sourceFormat=CSV 时，每个字段的 businessName 必须是能够表达原字段业务含义的小写英文字段名，多个单词使用下划线分隔，例如 customer_name、order_amount；businessDescription 必须使用中文描述字段含义。原始 CSV 表头保留在 columns.name，不要把它原样复制到 businessName。必须严格遵守 JSON Schema 和标签枚举，同一对象的标签不得重复；columns 中只包含本次发生变化且需要完善的字段，每个字段必须恰好返回一次；targetTable=false 时不得返回 table。"
+const metadataCompletionSystemPrompt = "你是企业数据资产元数据补全器。只能依据给定技术元数据和最多三行数据样本生成结果，不得虚构资产或返回未请求的目标。对 Excel/CSV 工作表，table.name 是 Sheet 名称，columns.name 是解析后的真实表头，sampleRows 的键和值分别对应表头和该列真实内容；必须结合 Sheet 名称、全部表头、字段类型和样本值判断表业务名称、字段业务名称及字段业务描述，不得只翻译物理名称或忽略样本内容。当 sourceFormat=CSV 或 EXCEL 时，表的 businessName 必须是准确简洁的中文业务名称；每个字段的 businessName 必须是能够表达原字段业务含义的小写英文字段名，多个单词使用下划线分隔，例如 customer_name、order_amount；businessDescription 必须使用中文描述字段含义。原始文件表头保留在 columns.name，不要把它原样复制到 businessName。必须严格遵守 JSON Schema 和标签枚举，同一对象的标签不得重复；columns 中只包含本次发生变化且需要完善的字段，每个字段必须恰好返回一次；targetTable=false 时不得返回 table。"
 
 // NewOrchestratedProvider 将元数据补全合同接入通用超时、重试、配额、成本和审计链路。
 func NewOrchestratedProvider(invoker Invoker) *OrchestratedProvider {

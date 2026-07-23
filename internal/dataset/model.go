@@ -301,6 +301,8 @@ type Record struct {
 type Summary struct {
 	ID                        string `json:"id"`
 	OriginTableID             string `json:"originTableId,omitempty"`
+	OriginTableName           string `json:"originTableName,omitempty"`
+	OriginDataSourceName      string `json:"originDataSourceName,omitempty"`
 	Code                      string `json:"code"`
 	Name                      string `json:"name"`
 	Description               string `json:"description"`

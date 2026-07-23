@@ -19,7 +19,7 @@ func NewService(store Store, provider embedding.Provider) *Service {
 	return &Service{store: store, provider: provider}
 }
 
-func (s *Service) Search(ctx context.Context, tenantID, query string, limit int, includeCandidates bool) (SearchResponse, error) {
+func (s *Service) Search(ctx context.Context, tenantID, query string, limit int) (SearchResponse, error) {
 	query = strings.TrimSpace(query)
 	if s == nil || s.store == nil || tenantID == "" || !validSearchText(query) || limit < 1 || limit > 50 {
 		return SearchResponse{}, ErrInvalidRequest
@@ -35,7 +35,7 @@ func (s *Service) Search(ctx context.Context, tenantID, query string, limit int,
 			degraded = false
 		}
 	}
-	items, err := s.store.Search(ctx, tenantID, query, vector, limit, includeCandidates)
+	items, err := s.store.Search(ctx, tenantID, query, vector, limit)
 	if err != nil {
 		return SearchResponse{}, err
 	}

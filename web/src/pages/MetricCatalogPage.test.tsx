@@ -3,7 +3,6 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { datasetAPI, type DatasetDSL, type DatasetSummary, type PublishedVersionRecord } from '../lib/datasets'
-import { metricCandidateAPI, type MetricCandidate } from '../lib/metric-candidates'
 import {
   metricAPI,
   type MetricDefinition,
@@ -108,88 +107,13 @@ describe('指标资产目录', () => {
     expect(datasetVersionSpy).not.toHaveBeenCalled()
   })
 
-  test('候选页签支持状态、提取方式和来源筛选并展示字段级生成依据', async () => {
-    const user = userEvent.setup()
-    const ready = metricCandidate()
-    const blocked = metricCandidate({
-      id: 'candidate-2', name: '客户数', code: 'customer_count', datasetId: 'dataset-2', datasetVersionId: 'dataset-version-2',
-      status: 'BLOCKED', method: 'RULE', confidence: 0.68, blockReasons: ['当前数据集版本包含预聚合'],
-    })
-    mockCatalog([], [ready, blocked])
-    vi.spyOn(datasetAPI, 'getVersion').mockResolvedValue(datasetVersion)
+  test('自动提取的原子度量事实不进入指标中心', async () => {
+    mockCatalog([])
     renderCatalog()
 
-    await user.click(await screen.findByRole('tab', { name: /候选指标/ }))
-    expect(screen.getByText('订单金额')).toBeInTheDocument()
-    expect(screen.getByText('客户数')).toBeInTheDocument()
-
-    await user.selectOptions(screen.getByLabelText('候选状态'), 'BLOCKED')
-    await user.selectOptions(screen.getByLabelText('提取方式'), 'RULE')
-    await user.selectOptions(screen.getByLabelText('来源数据集'), 'dataset-2')
-    expect(screen.getByText('客户数')).toBeInTheDocument()
-    expect(screen.queryByText('订单金额')).not.toBeInTheDocument()
-    expect(screen.getByText('显示 1 / 2')).toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: '重置' }))
-    const row = screen.getByText('订单金额').closest('article')
-    await user.click(within(row as HTMLElement).getByRole('button', { name: '审核详情' }))
-    const dialog = await screen.findByRole('dialog', { name: '候选指标详情' })
-    expect(await within(dialog).findByText('SUM(营业收入（revenue）)')).toBeInTheDocument()
-    await user.click(within(dialog).getByRole('tab', { name: '生成依据' }))
-    expect(within(dialog).getByText('字段级证据')).toBeInTheDocument()
-    expect(within(dialog).getByText('字段 semanticType=AMOUNT，规则建议使用 SUM')).toBeInTheDocument()
-    expect(within(dialog).getByText('需要业务负责人确认是否包含退款订单')).toBeInTheDocument()
-  })
-
-  test('接受候选时使用当前版本并将服务端创建的指标草稿加入正式目录', async () => {
-    const user = userEvent.setup()
-    const candidate = metricCandidate()
-    const accepted = metricCandidate({ ...candidate, status: 'ACCEPTED', version: 4, acceptedMetricId: 'metric-created' })
-    const createdMetric = metricRecord({ id: 'metric-created', code: candidate.code, name: candidate.name, description: candidate.description, status: 'DRAFT', currentPublishedVersionId: undefined })
-    mockCatalog([], [candidate])
-    vi.spyOn(datasetAPI, 'getVersion').mockResolvedValue(datasetVersion)
-    const accept = vi.spyOn(metricCandidateAPI, 'accept').mockResolvedValue({ candidate: accepted, metric: createdMetric })
-    renderCatalog()
-
-    await user.click(await screen.findByRole('tab', { name: /候选指标/ }))
-    const row = screen.getByText('订单金额').closest('article')
-    await user.click(within(row as HTMLElement).getByRole('button', { name: '审核详情' }))
-    const dialog = await screen.findByRole('dialog', { name: '候选指标详情' })
-    expect(await within(dialog).findByText('企业收入数据集')).toBeInTheDocument()
-    await user.click(within(dialog).getByRole('button', { name: '接受并创建草稿' }))
-
-    expect(accept).toHaveBeenCalledWith(candidate.id, candidate.version)
-    expect(await screen.findByText('已接受“订单金额”，指标草稿已创建')).toBeInTheDocument()
-    expect(within(dialog).getByRole('button', { name: '编辑指标草稿' })).toBeInTheDocument()
-
-    await user.click(within(dialog).getByRole('button', { name: '关闭' }))
-    await user.click(screen.getByRole('tab', { name: /正式指标/ }))
-    const metricRow = screen.getByText('订单金额').closest('article')
-    expect(within(metricRow as HTMLElement).getByText('草稿')).toBeInTheDocument()
-  })
-
-  test('拒绝候选必须填写原因并提交当前乐观锁版本', async () => {
-    const user = userEvent.setup()
-    const candidate = metricCandidate({ status: 'NEEDS_REVIEW' })
-    const rejected = metricCandidate({ ...candidate, status: 'REJECTED', version: 4 })
-    mockCatalog([], [candidate])
-    vi.spyOn(datasetAPI, 'getVersion').mockResolvedValue(datasetVersion)
-    const reject = vi.spyOn(metricCandidateAPI, 'reject').mockResolvedValue(rejected)
-    renderCatalog()
-
-    await user.click(await screen.findByRole('tab', { name: /候选指标/ }))
-    const row = screen.getByText('订单金额').closest('article')
-    await user.click(within(row as HTMLElement).getByRole('button', { name: '审核详情' }))
-    const dialog = await screen.findByRole('dialog', { name: '候选指标详情' })
-    await user.click(within(dialog).getByRole('button', { name: '拒绝候选' }))
-    const confirm = within(dialog).getByRole('button', { name: '确认拒绝' })
-    expect(confirm).toBeDisabled()
-    await user.type(within(dialog).getByLabelText('拒绝原因'), '该字段包含税前金额，不符合经营口径')
-    await user.click(confirm)
-
-    expect(reject).toHaveBeenCalledWith(candidate.id, candidate.version, '该字段包含税前金额，不符合经营口径')
-    expect(await screen.findByText('已拒绝候选“订单金额”')).toBeInTheDocument()
-    expect(within(dialog).getByText('候选已由人工拒绝')).toBeInTheDocument()
+    expect(await screen.findByText('还没有指标')).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /候选指标/ })).not.toBeInTheDocument()
+    expect(screen.getByText(/数据集自动提取的原子度量事实作为内部构件，不进入指标目录/)).toBeInTheDocument()
   })
 })
 
@@ -197,10 +121,9 @@ function renderCatalog() {
   return render(<MemoryRouter><MetricCatalogPage /></MemoryRouter>)
 }
 
-function mockCatalog(metrics: MetricSummary[], candidates: MetricCandidate[] = []) {
+function mockCatalog(metrics: MetricSummary[]) {
   vi.spyOn(metricAPI, 'list').mockResolvedValue({ items: metrics, total: metrics.length, limit: 200, offset: 0 })
   vi.spyOn(datasetAPI, 'list').mockResolvedValue({ items: datasets, total: datasets.length, limit: 200, offset: 0 })
-  vi.spyOn(metricCandidateAPI, 'list').mockResolvedValue({ items: candidates, total: candidates.length, limit: 200, offset: 0 })
 }
 
 const datasets: DatasetSummary[] = [
@@ -240,18 +163,6 @@ function metricVersion(overrides: Partial<MetricVersionRecord> = {}): MetricVers
     id: 'metric-version-1', metricId: 'metric-1', metricRecordVersion: 5, datasetId: definition.datasetId, datasetVersionId: definition.datasetVersionId,
     draftVersionId: 'metric-draft-1', draftRecordVersion: 4, versionNo: 3, status: 'PUBLISHED', definitionHash: 'd'.repeat(64), definition,
     publishedAt: '2026-07-19T04:00:00Z', publishedBy: 'user-1', ...overrides,
-  }
-}
-
-function metricCandidate(overrides: Partial<MetricCandidate> = {}): MetricCandidate {
-  return {
-    id: 'candidate-1', datasetId: 'dataset-1', datasetVersionId: 'dataset-version-1', dslHash: 'e'.repeat(64),
-    name: '订单金额', code: 'order_amount_sum', description: '已确认订单金额之和', status: 'READY', method: 'HYBRID', confidence: 0.92,
-    proposedDefinition: metricDefinition({ metric: { code: 'order_amount_sum', name: '订单金额', description: '已确认订单金额之和', type: 'ATOMIC' } }),
-    sourceFieldIds: ['field_revenue'],
-    evidence: [{ property: 'aggregation', source: 'SEMANTIC_TYPE_RULE', detail: '字段 semanticType=AMOUNT，规则建议使用 SUM' }],
-    assumptions: ['需要业务负责人确认是否包含退款订单'], warnings: [], blockReasons: [], fingerprint: 'f'.repeat(64), version: 3,
-    createdAt: '2026-07-20T01:00:00Z', updatedAt: '2026-07-20T02:00:00Z', ...overrides,
   }
 }
 

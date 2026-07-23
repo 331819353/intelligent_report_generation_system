@@ -378,6 +378,40 @@ func TestServicePlanUsesCurrentGraphAndObjectAuditForModification(t *testing.T) 
 	}
 }
 
+func TestModificationLanguageAlwaysUsesTheSemanticIntentModel(t *testing.T) {
+	current := scopeTestPlan()
+	catalog := fieldChangeTestCatalog()
+	instructions := []string{
+		"新增一个处理后再汇总",
+		"把现有步骤换成另一个",
+		"不想要这个维度了",
+		"把日期处理挪到关联之后",
+		"关联方式改一下",
+		"先移除旧处理，再新增数值处理，并调整输出",
+		"normalize it and keep the rest unchanged",
+		"按业务含义调整这条链路",
+	}
+	for _, instruction := range instructions {
+		t.Run(instruction, func(t *testing.T) {
+			invoker := &fakeInvoker{configured: true, results: []aiplatform.InvocationResult{
+				intentResult(t, readyIntent(), "intent-generic"),
+			}}
+			service := NewService(plannerCatalog(), invoker)
+			intent, err := service.extractChangeIntent(context.Background(), "tenant-1", "actor-1", "dataset-1", PlanRequest{Instruction: instruction, Current: &current}, catalog)
+			if err != nil || intent.Status != "READY" {
+				t.Fatalf("extract generic intent: intent=%#v err=%v", intent, err)
+			}
+			if len(invoker.inputs) != 1 {
+				t.Fatalf("instruction bypassed or duplicated semantic model calls: %d", len(invoker.inputs))
+			}
+			envelope := intentRequestEnvelope(t, invoker.inputs[0])
+			if envelope.Instruction != instruction || len(envelope.TransformRequirements) != 0 {
+				t.Fatalf("intent envelope used wording-specific constraints: %#v", envelope)
+			}
+		})
+	}
+}
+
 func TestServicePlanRepairsOverBroadPostJoinGroupRemoval(t *testing.T) {
 	currentProposal := proposalWithGroupsBeforeAndAfterJoin()
 	current := currentProposal.Plan
@@ -395,7 +429,7 @@ func TestServicePlanRepairsOverBroadPostJoinGroupRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan() error = %v", err)
 	}
-	if result.RequestID != "request-precise" || len(invoker.inputs) != 3 {
+	if result.RequestID != "request-over-broad" || len(invoker.inputs) != 2 {
 		t.Fatalf("repair result = %#v, calls = %d", result, len(invoker.inputs))
 	}
 	if len(result.Proposal.Plan.Groups) != 1 || result.Proposal.Plan.Groups[0].ID != "group_before" {
@@ -418,10 +452,6 @@ func TestServicePlanRepairsOverBroadPostJoinGroupRemoval(t *testing.T) {
 	}
 	if strings.Contains(prompt, "取消关联后的分组") {
 		t.Fatalf("planner prompt retained natural-language instruction: %s", prompt)
-	}
-	repairMessage := invoker.inputs[2].Request.Messages[len(invoker.inputs[2].Request.Messages)-1].Parts[0].Text
-	if !strings.Contains(repairMessage, "group_before") {
-		t.Fatalf("repair message does not identify undeclared change: %s", repairMessage)
 	}
 	if len(result.Proposal.ChangeSet.Operations) != 2 {
 		t.Fatalf("canonical change review = %#v", result.Proposal.ChangeSet)
@@ -545,7 +575,7 @@ func TestServicePlanRepairsFieldAddedOnlyToUpstreamHalf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan() error = %v", err)
 	}
-	if result.RequestID != "request-complete" || len(invoker.inputs) != 3 {
+	if result.RequestID != "request-upstream-only" || len(invoker.inputs) != 2 {
 		t.Fatalf("repair result/calls = %#v/%d", result, len(invoker.inputs))
 	}
 	intentEnvelope := intentRequestEnvelope(t, invoker.inputs[0])
@@ -616,7 +646,7 @@ func TestServicePlanRepairsOverBroadPreJoinGroupRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan() error = %v", err)
 	}
-	if len(invoker.inputs) != 3 || len(result.Proposal.Plan.Groups) != 1 || result.Proposal.Plan.Groups[0].ID != "group_after" {
+	if len(invoker.inputs) != 2 || len(result.Proposal.Plan.Groups) != 1 || result.Proposal.Plan.Groups[0].ID != "group_after" {
 		t.Fatalf("repair result = %#v, calls = %d", result, len(invoker.inputs))
 	}
 	if result.Proposal.Plan.Joins[0].Right != (PlanInput{Kind: "NODE", ID: "node_2"}) {
@@ -624,7 +654,7 @@ func TestServicePlanRepairsOverBroadPreJoinGroupRemoval(t *testing.T) {
 	}
 }
 
-func TestServicePlanFailsClosedWhenRepairStillDeletesProtectedGroup(t *testing.T) {
+func TestServicePlanRestoresProtectedGroupWithoutNeedingModelRepair(t *testing.T) {
 	currentProposal := proposalWithGroupsBeforeAndAfterJoin()
 	current := currentProposal.Plan
 	invoker := &fakeInvoker{configured: true, results: []aiplatform.InvocationResult{
@@ -634,9 +664,9 @@ func TestServicePlanFailsClosedWhenRepairStillDeletesProtectedGroup(t *testing.T
 	}}
 	service := NewService(plannerCatalog(), invoker)
 
-	_, err := service.Plan(context.Background(), "tenant-1", "actor-1", "dataset-1", PlanRequest{Instruction: "移除关联后汇总", Current: &current})
-	if !errors.Is(err, ErrInvalidOutput) || len(invoker.inputs) != 3 {
-		t.Fatalf("Plan() error = %v, calls = %d; want closed failure after one repair", err, len(invoker.inputs))
+	result, err := service.Plan(context.Background(), "tenant-1", "actor-1", "dataset-1", PlanRequest{Instruction: "移除关联后汇总", Current: &current})
+	if err != nil || len(invoker.inputs) != 2 || len(result.Proposal.Plan.Groups) != 1 || result.Proposal.Plan.Groups[0].ID != "group_before" {
+		t.Fatalf("protected materialization: result=%#v error=%v calls=%d", result, err, len(invoker.inputs))
 	}
 }
 
@@ -756,6 +786,47 @@ func TestDecodePlannerResultRejectsPlannerChangeSetOverride(t *testing.T) {
 	_, err = decodePlannerResult(aiplatform.InvocationResult{ProviderResult: aiplatform.ProviderResult{Content: payload}}, "MODIFY", testCatalog(), nil)
 	if !errors.Is(err, ErrInvalidOutput) {
 		t.Fatalf("planner changeSet override error = %v", err)
+	}
+}
+
+func TestDecodeModifyDefersGraphValidationUntilLockedMaterialization(t *testing.T) {
+	current := derivedSemanticTestPlan()
+	intent := ChangeIntent{Status: "READY", ChangeSet: ChangeSet{
+		Operations: []ChangeOperation{
+			scopeOperation("UPDATE", "GROUP", "group_1", []string{"dimensions"}, nil),
+			scopeOperation("UPDATE", "END", endComponentID, []string{"outputs"}, nil),
+		},
+		FieldChanges: []FieldChange{{
+			Field:           FieldBinding{NodeID: "transform_2", TableID: "table-facts", Column: "clean_label"},
+			SelectionAction: "KEEP", Purpose: "SELECTED_ONLY",
+			GroupUses: []FieldGroupUse{}, JoinUses: []FieldJoinUse{}, OutputUses: []FieldOutputUse{},
+		}},
+	}}
+	normalized, err := normalizeAndValidateChangeIntent(current, intent, derivedSemanticTestCatalog())
+	if err != nil {
+		t.Fatalf("normalize intent: %v", err)
+	}
+
+	// This is the common transient planner shape: the dimension was removed from GROUP,
+	// but its now-unavailable END output remains. The locked field contract can repair
+	// it deterministically before the complete graph is validated.
+	raw := cloneGraphPlan(current)
+	raw.Groups[0].Dimensions = raw.Groups[0].Dimensions[:1]
+	result := plannerResult(t, Proposal{
+		SchemaVersion: SchemaVersion, Mode: "MODIFY", Summary: "移除文本派生维度",
+		Assumptions: []string{}, Warnings: []string{}, Plan: raw,
+	}, "request-transient-modify")
+	decoded, err := decodePlannerResult(result, "MODIFY", derivedSemanticTestCatalog(), nil)
+	if err != nil {
+		t.Fatalf("decode transient modify: %v", err)
+	}
+	decoded.Plan = materializeLockedFieldChanges(current, decoded.Plan, normalized.ChangeSet)
+	decoded.Plan = materializeLockedTransformRemovals(decoded.Plan, normalized.ChangeSet)
+	if err := validateProposal(decoded, derivedSemanticTestCatalog()); err != nil {
+		t.Fatalf("validate materialized modify: %v", err)
+	}
+	if _, err := validateAndCanonicalizePlanChanges(current, decoded.Plan, normalized.ChangeSet, derivedSemanticTestCatalog()); err != nil {
+		t.Fatalf("validate materialized scope: %v", err)
 	}
 }
 
@@ -1029,6 +1100,33 @@ func TestServicePlanUsesOneDeadlineAcrossRepair(t *testing.T) {
 	}
 }
 
+func TestServicePlanGivesIntentAndGraphPlanningIndependentDeadlines(t *testing.T) {
+	proposal := testProposal()
+	current := proposal.Plan
+	intentResponse := intentResult(t, readyIntent(), "request-intent")
+	plannerResponse := plannerResult(t, proposal, "request-plan")
+	invoker := &fakeInvoker{configured: true}
+	invoker.invoke = func(ctx context.Context, _ aiplatform.Invocation, index int) (aiplatform.InvocationResult, error) {
+		select {
+		case <-time.After(30 * time.Millisecond):
+			if index == 0 {
+				return intentResponse, nil
+			}
+			return plannerResponse, nil
+		case <-ctx.Done():
+			return aiplatform.InvocationResult{}, ctx.Err()
+		}
+	}
+	service := NewService(plannerCatalog(), invoker, ServiceOptions{Timeout: 50 * time.Millisecond, MaxProviderInputBytes: defaultProviderInputBytes})
+
+	result, err := service.Plan(context.Background(), "tenant-1", "actor-1", "dataset-1", PlanRequest{
+		Instruction: "按当前业务语义调整流程", Current: &current,
+	})
+	if err != nil || result.RequestID != "request-plan" || len(invoker.inputs) != 2 {
+		t.Fatalf("independent phase deadlines: result=%#v error=%v calls=%d", result, err, len(invoker.inputs))
+	}
+}
+
 func TestServicePlanOmitsRawInvalidBodyWhenRepairWouldExceedBudget(t *testing.T) {
 	invalid := testProposal()
 	invalid.Summary = strings.Repeat("x", 12000)
@@ -1112,5 +1210,147 @@ func TestServiceWiresHybridRetrieverIntoCatalogLoading(t *testing.T) {
 	envelope := requestEnvelope(t, invoker.inputs[0])
 	if len(envelope.Assets) == 0 || envelope.Assets[0].ID != "table-orders" {
 		t.Fatalf("hybrid catalog order = %#v", envelope.Assets)
+	}
+}
+
+func TestServiceRoutesEveryModificationThroughSemanticIntent(t *testing.T) {
+	current := testProposal().Plan
+	instructions := []string{
+		"把关联支付和订单改成 FULL JOIN，其他保持不变",
+		"不要使用 FULL JOIN，保留现有配置",
+		"把数据集名称改为新名称，其他保持不变",
+		"move whatever is needed after the join",
+		"我想让这个结果更适合后续分析",
+	}
+	for _, instruction := range instructions {
+		t.Run(instruction, func(t *testing.T) {
+			clarify := ChangeIntent{
+				Status: "CLARIFY", Question: "请确认希望调整哪一段业务结果。",
+				Candidates: []ComponentRef{{ComponentKind: "JOIN", ComponentID: "join_1"}},
+				ChangeSet:  ChangeSet{Operations: []ChangeOperation{}, FieldChanges: []FieldChange{}},
+			}
+			invoker := &fakeInvoker{configured: true, results: []aiplatform.InvocationResult{intentResult(t, clarify, "intent-generic")}}
+			_, err := NewService(plannerCatalog(), invoker).Plan(context.Background(), "tenant-1", "actor-1", "dataset-1", PlanRequest{
+				Instruction: instruction, Current: &current,
+			})
+			var clarification *ClarificationRequiredError
+			if !errors.As(err, &clarification) || len(invoker.inputs) != 1 {
+				t.Fatalf("semantic route: error=%v calls=%d", err, len(invoker.inputs))
+			}
+			if got := intentRequestEnvelope(t, invoker.inputs[0]).Instruction; got != instruction {
+				t.Fatalf("instruction changed before semantic analysis: got=%q want=%q", got, instruction)
+			}
+		})
+	}
+}
+
+func TestMaterializeLockedOutputRemovalAndRename(t *testing.T) {
+	current := scopeTestPlan()
+	region := FieldBinding{NodeID: "node_1", TableID: "table-customers", Column: "region"}
+	groupUse := FieldGroupUse{GroupID: "group_after", Role: "DIMENSION"}
+
+	remove := ChangeSet{
+		Operations: []ChangeOperation{scopeOperation("UPDATE", "END", endComponentID, []string{"outputs"}, nil)},
+		FieldChanges: []FieldChange{{
+			Field: region, SelectionAction: "KEEP", Purpose: "INTERNAL_ONLY",
+			GroupUses: []FieldGroupUse{groupUse}, JoinUses: []FieldJoinUse{}, OutputUses: []FieldOutputUse{},
+		}},
+	}
+	removed := materializeLockedFieldChanges(current, current, remove)
+	if len(removed.End.Outputs) != 1 || removed.End.Outputs[0].Code != "amount" {
+		t.Fatalf("removed outputs = %#v", removed.End.Outputs)
+	}
+	if _, err := validateAndCanonicalizePlanChanges(current, removed, remove, fieldChangeTestCatalog()); err != nil {
+		t.Fatalf("validate removed output: %v", err)
+	}
+
+	rename := ChangeSet{
+		Operations: []ChangeOperation{scopeOperation("UPDATE", "END", endComponentID, []string{"outputs"}, nil)},
+		FieldChanges: []FieldChange{{
+			Field: region, SelectionAction: "KEEP", Purpose: "FINAL_OUTPUT",
+			GroupUses: []FieldGroupUse{groupUse}, JoinUses: []FieldJoinUse{},
+			OutputUses: []FieldOutputUse{{EndID: endComponentID, Name: "销售区域", Code: "sales_region"}},
+		}},
+	}
+	renamed := materializeLockedFieldChanges(current, current, rename)
+	if renamed.End.Outputs[0].Name != "销售区域" || renamed.End.Outputs[0].Code != "sales_region" {
+		t.Fatalf("renamed outputs = %#v", renamed.End.Outputs)
+	}
+	if _, err := validateAndCanonicalizePlanChanges(current, renamed, rename, fieldChangeTestCatalog()); err != nil {
+		t.Fatalf("validate renamed output: %v", err)
+	}
+}
+
+func TestMaterializeLockedGroupAggregationAndDatasetName(t *testing.T) {
+	current := scopeTestPlan()
+	amount := FieldBinding{NodeID: "node_2", TableID: "table-orders", Column: "amount"}
+	locked := ChangeSet{
+		Operations: []ChangeOperation{
+			scopeOperation("UPDATE", "GROUP", "group_after", []string{"metrics"}, nil),
+			{Action: "UPDATE", ComponentKind: "DATASET", ComponentID: datasetComponentID,
+				ComponentName: "客户月度订单分析", Fields: []string{"name"}, InputChanges: []InputChange{}, Description: "修改数据集名称"},
+		},
+		FieldChanges: []FieldChange{{
+			Field: amount, SelectionAction: "KEEP", Purpose: "FINAL_OUTPUT",
+			GroupUses: []FieldGroupUse{
+				{GroupID: "group_before", Role: "METRIC", Aggregation: "SUM"},
+				{GroupID: "group_after", Role: "METRIC", Aggregation: "AVG"},
+			},
+			JoinUses: []FieldJoinUse{}, OutputUses: []FieldOutputUse{{EndID: endComponentID, Name: "金额", Code: "amount"}},
+		}},
+	}
+	proposal := materializeLockedScalarChanges(current, locked)
+	proposal = materializeLockedFieldChanges(current, proposal, locked)
+	if proposal.Dataset.Name != "客户月度订单分析" || proposal.Groups[1].Metrics[0].Aggregation != "AVG" {
+		t.Fatalf("proposal = %#v", proposal)
+	}
+	if _, err := validateAndCanonicalizePlanChanges(current, proposal, locked, fieldChangeTestCatalog()); err != nil {
+		t.Fatalf("validate materialized changes: %v", err)
+	}
+}
+
+func TestMaterializeLockedComponentStateDropsUnrequestedComponentsAndRestoresProtectedOnes(t *testing.T) {
+	current := derivedSemanticTestPlan()
+	proposal := cloneGraphPlan(current)
+	proposal.Transforms = proposal.Transforms[:1]
+	proposal.Transforms = append(proposal.Transforms, PlanTransform{
+		ID: "transform_extra", Name: "模型额外组件", Family: "TEXT", ComponentType: "TEXT_TRIM",
+		Input: PlanInput{Kind: "NODE", ID: "node_1"}, Rules: []PlanTransformRule{{
+			ID: "rule_extra", Operation: "TRIM", InputKeys: []string{"node_1.label"},
+			Output: PlanTransformOutput{ID: "extra", Name: "额外字段", Code: "extra", CanonicalType: "STRING"},
+		}},
+	})
+	proposal.Groups = nil
+
+	materialized := materializeLockedComponentState(current, proposal, ChangeSet{Operations: []ChangeOperation{}, FieldChanges: []FieldChange{}})
+	if !reflect.DeepEqual(materialized.Transforms, current.Transforms) || !reflect.DeepEqual(materialized.Groups, current.Groups) {
+		t.Fatalf("protected inventory was not restored: transforms=%#v groups=%#v", materialized.Transforms, materialized.Groups)
+	}
+}
+
+func TestMaterializeLockedComponentStateMergesOnlyAuthorizedFields(t *testing.T) {
+	current := scopeTestPlan()
+	proposal := cloneGraphPlan(current)
+	proposal.Joins[0].JoinType = "INNER"
+	proposal.Joins[0].Name = "未授权改名"
+	proposal.Joins[0].Left = PlanInput{Kind: "NODE", ID: "node_2"}
+	proposal.Transforms = append(proposal.Transforms, PlanTransform{
+		ID: "transform_extra", Name: "未授权额外组件", Family: "NUMBER", ComponentType: "NUMBER_ABSOLUTE",
+		Input: PlanInput{Kind: "JOIN", ID: "join_1"}, Rules: []PlanTransformRule{{
+			ID: "rule_extra", Operation: "ABS", InputKeys: []string{"node_2.amount"},
+			Output: PlanTransformOutput{ID: "absolute_amount", Name: "绝对金额", Code: "absolute_amount", CanonicalType: "DECIMAL"},
+		}},
+	})
+	locked := ChangeSet{Operations: []ChangeOperation{scopeOperation("UPDATE", "JOIN", "join_1", []string{"joinType"}, nil)}, FieldChanges: []FieldChange{}}
+
+	materialized := materializeLockedComponentState(current, proposal, locked)
+	if materialized.Joins[0].JoinType != "INNER" || materialized.Joins[0].Name != current.Joins[0].Name || materialized.Joins[0].Left != current.Joins[0].Left {
+		t.Fatalf("authorized field merge changed protected values: %#v", materialized.Joins[0])
+	}
+	if len(materialized.Transforms) != 0 {
+		t.Fatalf("unrequested component survived materialization: %#v", materialized.Transforms)
+	}
+	if _, err := validateAndCanonicalizePlanChanges(current, materialized, locked, fieldChangeTestCatalog()); err != nil {
+		t.Fatalf("exact diff after locked merge: %v", err)
 	}
 }

@@ -50,7 +50,7 @@
 
 | `type` | 必填载荷 | 说明 |
 | --- | --- | --- |
-| `FIELD_REF` | `fieldId` | 引用精确数据集版本中的字段。仅 `INTEGER`、`DECIMAL` 字段可作为指标值。 |
+| `FIELD_REF` | `fieldId` | 引用精确数据集版本中的字段。数值聚合和算术表达式只允许 `INTEGER`、`DECIMAL`；根表达式直接使用 `COUNT` 或 `COUNT_DISTINCT` 时可引用非数值标识符或其他输出字段。 |
 | `METRIC_REF` | `metricVersionId` | 引用同一精确数据集版本上的已发布指标版本。 |
 | `LITERAL` | `value` | 使用字符串表达的规范十进制数，总数字位数不超过 38。 |
 | `ADD` | 两个 `arguments` | 二元加法。 |

@@ -9,7 +9,7 @@ func TestLoadDefaults(t *testing.T) {
 	for _, key := range []string{
 		"APP_ENV", "APP_LOG_LEVEL", "API_HTTP_ADDR", "API_READ_HEADER_TIMEOUT",
 		"API_READ_TIMEOUT", "API_WRITE_TIMEOUT", "API_IDLE_TIMEOUT",
-		"SHUTDOWN_TIMEOUT", "WORKER_POLL_INTERVAL",
+		"SHUTDOWN_TIMEOUT", "WORKER_POLL_INTERVAL", "AI_REQUEST_TIMEOUT", "AI_ATTEMPT_TIMEOUT",
 	} {
 		t.Setenv(key, "")
 	}
@@ -23,6 +23,22 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.ShutdownTimeout != 10*time.Second {
 		t.Fatalf("ShutdownTimeout = %s, want 10s", cfg.ShutdownTimeout)
+	}
+	if cfg.WriteTimeout != 60*time.Second {
+		t.Fatalf("WriteTimeout = %s, want 60s", cfg.WriteTimeout)
+	}
+}
+
+func TestLoadRequiresHTTPWindowForBothDatasetAIPhases(t *testing.T) {
+	t.Setenv("AI_API_KEY", "")
+	t.Setenv("AI_REQUEST_TIMEOUT", "25s")
+	t.Setenv("API_WRITE_TIMEOUT", "50s")
+	if _, err := Load(); err == nil {
+		t.Fatal("HTTP window equal to two AI phases was accepted")
+	}
+	t.Setenv("API_WRITE_TIMEOUT", "51s")
+	if _, err := Load(); err != nil {
+		t.Fatalf("HTTP window covering both AI phases was rejected: %v", err)
 	}
 }
 

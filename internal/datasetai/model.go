@@ -9,8 +9,8 @@ import (
 
 const (
 	SchemaVersion       = "2.3"
-	PromptVersion       = "dataset-dag-planner-v12"
-	IntentPromptVersion = "dataset-dag-intent-v9"
+	PromptVersion       = "dataset-dag-planner-v13"
+	IntentPromptVersion = "dataset-dag-intent-v12"
 
 	maxInstructionRunes = 4000
 	maxPlanNodes        = 16
@@ -609,6 +609,22 @@ func normalizeTextList(values []string) []string {
 }
 
 func validateProposal(value Proposal, catalog []CatalogTable) error {
+	if err := validateProposalEnvelope(value); err != nil {
+		return err
+	}
+	if value.Mode == "CREATE" {
+		for _, group := range value.Plan.Groups {
+			for _, dimension := range group.Dimensions {
+				if dimension.Grouping != "" {
+					return invalidOutputWithReason(InvalidOutputReasonTransform, "group dimensions cannot perform date conversion; use a DATE_FORMAT transform before GROUP")
+				}
+			}
+		}
+	}
+	return validateGraphPlan(value.Plan, catalog)
+}
+
+func validateProposalEnvelope(value Proposal) error {
 	if value.SchemaVersion != SchemaVersion || (value.Mode != "CREATE" && value.Mode != "MODIFY") {
 		return invalidOutput("schemaVersion or mode is invalid")
 	}
@@ -622,16 +638,7 @@ func validateProposal(value Proposal, catalog []CatalogTable) error {
 			}
 		}
 	}
-	if value.Mode == "CREATE" {
-		for _, group := range value.Plan.Groups {
-			for _, dimension := range group.Dimensions {
-				if dimension.Grouping != "" {
-					return invalidOutputWithReason(InvalidOutputReasonTransform, "group dimensions cannot perform date conversion; use a DATE_FORMAT transform before GROUP")
-				}
-			}
-		}
-	}
-	return validateGraphPlan(value.Plan, catalog)
+	return nil
 }
 
 func validateGraphShape(value GraphPlan) error {

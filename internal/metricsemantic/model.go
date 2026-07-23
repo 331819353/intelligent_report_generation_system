@@ -18,7 +18,6 @@ type EmbeddingClaim struct {
 
 type SearchResult struct {
 	SubjectType       string          `json:"subjectType"`
-	CandidateID       string          `json:"candidateId,omitempty"`
 	MetricID          string          `json:"metricId,omitempty"`
 	MetricVersionID   string          `json:"metricVersionId,omitempty"`
 	DatasetID         string          `json:"datasetId"`
@@ -51,5 +50,5 @@ type Store interface {
 	Claim(context.Context, string, string, time.Duration) (*EmbeddingClaim, error)
 	Complete(context.Context, EmbeddingClaim, string, string, []float32) error
 	Fail(context.Context, EmbeddingClaim, string, string) error
-	Search(context.Context, string, string, []float32, int, bool) ([]SearchResult, error)
+	Search(context.Context, string, string, []float32, int) ([]SearchResult, error)
 }

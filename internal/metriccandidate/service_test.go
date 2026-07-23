@@ -189,17 +189,18 @@ func TestServiceAcceptMapsAtomicOptimisticLockConflict(t *testing.T) {
 }
 
 type jobStoreStub struct {
-	claims      []*JobClaim
-	loadVersion dataset.VersionRecord
-	loadErr     error
-	finishErr   error
-	claimCalls  int
-	loadCalls   int
-	finishCalls int
-	failCalls   int
-	results     []ExtractionResult
-	failCodes   []string
-	failReasons []string
+	claims                    []*JobClaim
+	loadVersion               dataset.VersionRecord
+	loadDependencyUnavailable bool
+	loadErr                   error
+	finishErr                 error
+	claimCalls                int
+	loadCalls                 int
+	finishCalls               int
+	failCalls                 int
+	results                   []ExtractionResult
+	failCodes                 []string
+	failReasons               []string
 }
 
 func (store *jobStoreStub) ListJobTenantIDs(context.Context) ([]string, error) {
@@ -215,9 +216,9 @@ func (store *jobStoreStub) ClaimJob(context.Context, string, string, time.Durati
 	return claim, nil
 }
 
-func (store *jobStoreStub) LoadExactDatasetVersion(context.Context, JobClaim) (dataset.VersionRecord, error) {
+func (store *jobStoreStub) LoadExactDatasetVersion(context.Context, JobClaim) (LoadedDatasetVersion, error) {
 	store.loadCalls++
-	return store.loadVersion, store.loadErr
+	return LoadedDatasetVersion{Version: store.loadVersion, DependencyUnavailable: store.loadDependencyUnavailable}, store.loadErr
 }
 
 func (store *jobStoreStub) FinishJob(_ context.Context, _ JobClaim, _ string, result ExtractionResult) error {
@@ -246,7 +247,7 @@ func TestWorkerFinishesSuccessfulExtraction(t *testing.T) {
 		t.Fatalf("worker calls: load=%d finish=%d fail=%d results=%d", store.loadCalls, store.finishCalls, store.failCalls, len(store.results))
 	}
 	result := store.results[0]
-	if result.DatasetVersionID != version.ID || len(result.Candidates) == 0 || result.Status != TaskStatusSucceeded {
+	if result.DatasetVersionID != version.ID || len(result.Candidates) == 0 || result.Status != TaskStatusPartial {
 		t.Fatalf("finished extraction result = %#v", result)
 	}
 }
@@ -281,6 +282,36 @@ func TestWorkerReportsEachStoreManagedRetryFailure(t *testing.T) {
 		if store.failCodes[index] != "METRIC_EXTRACTION_FAILED" || store.failReasons[index] != loadErr.Error() {
 			t.Fatalf("failure %d = (%q, %q)", index+1, store.failCodes[index], store.failReasons[index])
 		}
+	}
+}
+
+func TestWorkerPersistsBlockedCandidatesWhenPublishedDatasetDependencyIsUnavailable(t *testing.T) {
+	version := publishedDatasetVersion(t, candidateDatasetDocument())
+	claim := claimForVersion(version)
+	store := &jobStoreStub{
+		claims:                    []*JobClaim{&claim},
+		loadVersion:               version,
+		loadDependencyUnavailable: true,
+	}
+
+	handled, err := NewWorker(store).ProcessNext(context.Background(), testTenantID, "worker-1", time.Minute)
+	if err != nil || !handled {
+		t.Fatalf("ProcessNext() handled=%v error=%v", handled, err)
+	}
+	if store.finishCalls != 1 || store.failCalls != 0 || len(store.results) != 1 {
+		t.Fatalf("worker calls: finish=%d fail=%d results=%d", store.finishCalls, store.failCalls, len(store.results))
+	}
+	result := store.results[0]
+	if result.Status != TaskStatusPartial || len(result.Candidates) == 0 {
+		t.Fatalf("blocked extraction result = %#v", result)
+	}
+	for _, candidate := range result.Candidates {
+		if candidate.Status != CandidateStatusBlocked || !containsString(candidate.BlockReasons, BlockReasonDatasetUnavailable) {
+			t.Fatalf("candidate was not dependency-blocked: %#v", candidate)
+		}
+	}
+	if !extractionBlockedByUnavailable(result) {
+		t.Fatal("dependency-blocked result was not recognized by persistence guard")
 	}
 }
 

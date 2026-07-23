@@ -115,10 +115,16 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.datasets WHERE deleted_at IS NULL`).Scan(&total); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT d.id::text,COALESCE(d.origin_table_id::text,''),d.code::text,d.name,d.description,d.dataset_type,d.status,d.version,v.schema_hash,
+		rows, err := tx.Query(ctx, `SELECT d.id::text,COALESCE(d.origin_table_id::text,''),
+			COALESCE(origin_table.table_name,''),COALESCE(origin_source.name,''),
+			d.code::text,d.name,d.description,d.dataset_type,d.status,d.version,v.schema_hash,
 			COALESCE(d.current_published_version_id::text,''),d.updated_at::text
 			FROM platform.datasets d JOIN platform.dataset_versions v
 			ON v.id=d.current_draft_version_id AND v.tenant_id=d.tenant_id AND v.dataset_id=d.id
+			LEFT JOIN platform.metadata_tables origin_table
+			  ON origin_table.id=d.origin_table_id AND origin_table.tenant_id=d.tenant_id
+			LEFT JOIN platform.data_sources origin_source
+			  ON origin_source.id=origin_table.data_source_id AND origin_source.tenant_id=origin_table.tenant_id
 			WHERE d.deleted_at IS NULL ORDER BY d.updated_at DESC,d.id LIMIT $1 OFFSET $2`, limit, offset)
 		if err != nil {
 			return err
@@ -126,7 +132,9 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 		defer rows.Close()
 		for rows.Next() {
 			var item Summary
-			if err := rows.Scan(&item.ID, &item.OriginTableID, &item.Code, &item.Name, &item.Description, &item.Type, &item.Status, &item.Version, &item.DSLHash, &item.CurrentPublishedVersionID, &item.UpdatedAt); err != nil {
+			if err := rows.Scan(&item.ID, &item.OriginTableID, &item.OriginTableName, &item.OriginDataSourceName,
+				&item.Code, &item.Name, &item.Description, &item.Type, &item.Status, &item.Version,
+				&item.DSLHash, &item.CurrentPublishedVersionID, &item.UpdatedAt); err != nil {
 				return err
 			}
 			items = append(items, item)

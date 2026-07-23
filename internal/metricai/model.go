@@ -10,7 +10,7 @@ import (
 
 const (
 	SchemaVersion = "1.0"
-	PromptVersion = "metric-authoring-v5"
+	PromptVersion = "metric-authoring-v7"
 	Purpose       = aiplatform.PurposeMetricAuthoring
 )
 
@@ -43,9 +43,9 @@ type AuthoringRequest struct {
 // AuthorizedDataset is one exact logical snapshot supplied by the host after permission checks.
 // Its retrieval collection and Status distinguish published snapshots from modifiable drafts.
 // Aggregated datasets may be included as evidence, but are ineligible as action targets in V1.
-// Mapped identifies the system-maintained one-table projection backed by origin_table_id. A
-// mapped dataset can support a metric directly when its published fields are sufficient, but it
-// is immutable from the metric-authoring flow and must never be a MODIFY_DATASET target.
+// Mapped identifies the system-maintained one-table projection backed by origin_table_id. Mapped
+// snapshots are isolated into RetrievalContext.MappedDatasets and are immutable source evidence
+// for CREATE_DATASET; they are never direct metric or in-place modification targets.
 type AuthorizedDataset struct {
 	ID          string `json:"id"`
 	VersionID   string `json:"versionId"`
@@ -88,16 +88,37 @@ type AuthorizedMetric struct {
 	Definition       metric.Definition `json:"definition"`
 }
 
+// AuthorizedAtomicFact is an internal, non-bindable measurement building block extracted from
+// a published dataset DAG. It helps authoring choose fields and aggregations but is never a
+// reusable metric, action target, or user-visible metric-center asset.
+type AuthorizedAtomicFact struct {
+	DatasetID        string   `json:"datasetId"`
+	DatasetVersionID string   `json:"datasetVersionId"`
+	SourceFieldIDs   []string `json:"sourceFieldIds"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description"`
+	Caliber          string   `json:"caliber"`
+	Aggregation      string   `json:"aggregation"`
+	Dimensions       []string `json:"dimensions"`
+	Period           string   `json:"period"`
+	Tags             []string `json:"tags"`
+	Confidence       float64  `json:"confidence"`
+}
+
 // RetrievalContext is produced by a trusted, permission-aware host implementation. Datasets and
-// Fields contain published snapshots that may support direct metric creation. ModifiableDraft*
-// contain separately authorized draft snapshots that may only support dataset modification.
+// Fields contain ordinary published snapshots that may support direct metric creation.
+// ModifiableDraft* contain ordinary, separately authorized drafts that may only support dataset
+// modification. Mapped* are read-only fallback sources for creating a new ordinary dataset.
 // Manageable is a separately evaluated DATASET/MANAGE capability, never inferred from READ.
 type RetrievalContext struct {
-	Datasets                []AuthorizedDataset `json:"datasets"`
-	Fields                  []AuthorizedField   `json:"fields"`
-	ModifiableDraftDatasets []AuthorizedDataset `json:"modifiableDraftDatasets"`
-	ModifiableDraftFields   []AuthorizedField   `json:"modifiableDraftFields"`
-	ExistingMetrics         []AuthorizedMetric  `json:"existingMetrics"`
+	Datasets                []AuthorizedDataset    `json:"datasets"`
+	Fields                  []AuthorizedField      `json:"fields"`
+	ModifiableDraftDatasets []AuthorizedDataset    `json:"modifiableDraftDatasets"`
+	ModifiableDraftFields   []AuthorizedField      `json:"modifiableDraftFields"`
+	MappedDatasets          []AuthorizedDataset    `json:"mappedDatasets"`
+	MappedFields            []AuthorizedField      `json:"mappedFields"`
+	AtomicFacts             []AuthorizedAtomicFact `json:"atomicFacts"`
+	ExistingMetrics         []AuthorizedMetric     `json:"existingMetrics"`
 }
 
 // Retriever is the only discovery boundary. The model never receives a database connection or

@@ -34,11 +34,19 @@ func proposalOutputSchema(retrieval RetrievalContext) map[string]any {
 			targetDatasetVersionIDs = append(targetDatasetVersionIDs, dataset.VersionID)
 		}
 	}
+	for _, dataset := range retrieval.MappedDatasets {
+		evidenceDatasetIDs = append(evidenceDatasetIDs, dataset.ID)
+		evidenceDatasetVersionIDs = append(evidenceDatasetVersionIDs, dataset.VersionID)
+		evidenceSourceIDs = append(evidenceSourceIDs, dataset.ID)
+	}
 	for _, field := range retrieval.Fields {
 		publishedFieldIDs = append(publishedFieldIDs, field.ID)
 		evidenceSourceIDs = append(evidenceSourceIDs, field.ID)
 	}
 	for _, field := range retrieval.ModifiableDraftFields {
+		evidenceSourceIDs = append(evidenceSourceIDs, field.ID)
+	}
+	for _, field := range retrieval.MappedFields {
 		evidenceSourceIDs = append(evidenceSourceIDs, field.ID)
 	}
 	for _, existing := range retrieval.ExistingMetrics {

@@ -129,6 +129,24 @@ func TestValidateOutputAcceptsCSVEnglishSnakeCaseNamesAndChineseDescriptions(t *
 	}
 }
 
+func TestValidateOutputRequiresChineseTableAndEnglishFieldsForAllFileSources(t *testing.T) {
+	for _, sourceFormat := range []string{SourceFormatCSV, SourceFormatExcel} {
+		t.Run(sourceFormat, func(t *testing.T) {
+			input, output := validCompletion()
+			input.SourceFormat = sourceFormat
+			output.Columns[0].BusinessName = "order_id"
+			output.Columns[1].BusinessName = "order_amount"
+			if err := ValidateOutput(input, output); err != nil {
+				t.Fatalf("valid file metadata rejected: %v", err)
+			}
+			output.Table.BusinessName = "sales_order"
+			if err := ValidateOutput(input, output); !errors.Is(err, ErrInvalidOutput) {
+				t.Fatalf("English file table name error=%v, want ErrInvalidOutput", err)
+			}
+		})
+	}
+}
+
 func TestValidateOutputRejectsInvalidCSVFieldMetadata(t *testing.T) {
 	tests := []struct {
 		name        string

@@ -76,15 +76,45 @@ func validRetrievalContext() RetrievalContext {
 		}},
 		Fields: []AuthorizedField{
 			{DatasetID: testDatasetID, DatasetVersionID: testDatasetVersionID, ID: "field_amount", Code: "amount", Name: "订单金额", Description: "含税订单金额", CanonicalType: "DECIMAL", Role: "ATTRIBUTE", SemanticType: "AMOUNT"},
+			{DatasetID: testDatasetID, DatasetVersionID: testDatasetVersionID, ID: "field_order_id", Code: "order_id", Name: "订单编号", Description: "订单业务标识", CanonicalType: "STRING", Role: "IDENTIFIER", SemanticType: "IDENTIFIER"},
 			{DatasetID: testDatasetID, DatasetVersionID: testDatasetVersionID, ID: "field_region", Code: "region", Name: "地区", Description: "订单所属地区", CanonicalType: "STRING", Role: "DIMENSION", SemanticType: "REGION"},
 			{DatasetID: testDatasetID, DatasetVersionID: testDatasetVersionID, ID: "field_paid_at", Code: "paid_at", Name: "支付时间", Description: "支付完成时间", CanonicalType: "DATETIME", Role: "TIME", SemanticType: "DATETIME"},
 		},
+		AtomicFacts: []AuthorizedAtomicFact{{
+			DatasetID: testDatasetID, DatasetVersionID: testDatasetVersionID,
+			SourceFieldIDs: []string{"field_amount"}, Name: "订单金额", Description: "订单明细中的含税金额",
+			Caliber: "订单金额按行求和", Aggregation: "SUM", Dimensions: []string{"地区"},
+			Period: "MONTH", Tags: []string{"销售", "金额"}, Confidence: 0.96,
+		}},
 		ExistingMetrics: []AuthorizedMetric{{
 			ID: testMetricID, VersionID: testMetricVersionID, Code: "paid_sales", Name: "已支付销售额",
 			Description: "已支付订单金额", Status: "PUBLISHED", DatasetID: testDatasetID,
 			DatasetVersionID: testDatasetVersionID, DefinitionHash: preparedExisting.DefinitionHash,
 			Definition: preparedExisting.Definition,
 		}},
+	}
+}
+
+func TestProposeAllowsDirectDistinctCountOnStringIdentifier(t *testing.T) {
+	proposal := validCreateProposal()
+	definition := proposal.CandidateMetricDefinition
+	definition.Metric.Code, definition.Metric.Name = "order_count", "订单数"
+	definition.Expression = metric.Expression{Type: "FIELD_REF", FieldID: "field_order_id"}
+	definition.Aggregation, definition.Additivity = "COUNT_DISTINCT", "NON_ADDITIVE"
+	definition.NumberFormat, definition.DecimalScale, definition.Unit = "#,##0", 0, ""
+	proposal.RetrievalEvidence = append(proposal.RetrievalEvidence, fieldEvidence("field_order_id"))
+
+	service := NewService(
+		&retrieverStub{value: validRetrievalContext()},
+		&invokerStub{configured: true, content: proposalJSON(t, proposal)},
+	)
+	result, err := service.Propose(context.Background(), "tenant-1", "actor-1", AuthoringRequest{Requirement: "增加订单数量这一指标"})
+	if err != nil {
+		t.Fatalf("Propose() error = %v", err)
+	}
+	if result.Proposal.CandidateMetricDefinition == nil || result.Proposal.CandidateMetricDefinition.Expression.FieldID != "field_order_id" ||
+		result.Proposal.CandidateMetricDefinition.Aggregation != "COUNT_DISTINCT" {
+		t.Fatalf("identifier count candidate was not retained: %#v", result.Proposal)
 	}
 }
 
@@ -109,6 +139,10 @@ func retrievalWithModifiableDraft() RetrievalContext {
 func mappedRetrievalContext() RetrievalContext {
 	value := validRetrievalContext()
 	value.Datasets[0].Mapped = true
+	value.MappedDatasets = value.Datasets
+	value.MappedFields = value.Fields
+	value.Datasets = []AuthorizedDataset{}
+	value.Fields = []AuthorizedField{}
 	return value
 }
 
@@ -260,21 +294,17 @@ func TestProposeCreatesNewDatasetFromAuthorizedMappedEvidence(t *testing.T) {
 	}
 }
 
-func TestProposeAllowsDirectMetricOnPublishedMappedDataset(t *testing.T) {
+func TestProposeRejectsDirectMetricOnPublishedMappedDataset(t *testing.T) {
 	service := NewService(
 		&retrieverStub{value: mappedRetrievalContext()},
 		&invokerStub{configured: true, content: proposalJSON(t, validCreateProposal())},
 	)
-	result, err := service.Propose(context.Background(), "tenant-1", "actor-1", validRequest())
-	if err != nil {
-		t.Fatalf("Propose() error = %v", err)
-	}
-	if result.Proposal.Strategy != StrategyCreateOnDataset {
-		t.Fatalf("strategy = %q", result.Proposal.Strategy)
+	if _, err := service.Propose(context.Background(), "tenant-1", "actor-1", validRequest()); !errors.Is(err, ErrInvalidOutput) {
+		t.Fatalf("mapped dataset direct metric error = %v, want ErrInvalidOutput", err)
 	}
 }
 
-func TestProposeNormalizesMappedDatasetModificationToCreateDataset(t *testing.T) {
+func TestProposeRejectsMappedDatasetModification(t *testing.T) {
 	instruction := "在订单明细中关联地区信息。"
 	proposal := MetricAuthoringProposal{
 		SchemaVersion: SchemaVersion, Strategy: StrategyModifyDataset, Summary: "需要补充地区字段。",
@@ -287,17 +317,8 @@ func TestProposeNormalizesMappedDatasetModificationToCreateDataset(t *testing.T)
 		&retrieverStub{value: mappedRetrievalContext()},
 		&invokerStub{configured: true, content: proposalJSON(t, proposal)},
 	)
-	result, err := service.Propose(context.Background(), "tenant-1", "actor-1", validRequest())
-	if err != nil {
-		t.Fatalf("Propose() error = %v", err)
-	}
-	got := result.Proposal
-	if got.Strategy != StrategyCreateDataset || got.TargetDatasetID != "" || got.TargetDatasetVersionID != "" || got.DatasetInstruction != instruction {
-		t.Fatalf("mapped modification was not safely normalized: %#v", got)
-	}
-	if len(got.RetrievalEvidence) != 1 || got.RetrievalEvidence[0].SourceType != "DATASET" ||
-		got.RetrievalEvidence[0].SourceID != testDatasetID || got.RetrievalEvidence[0].DatasetVersionID != testDatasetVersionID {
-		t.Fatalf("mapped target evidence was not synthesized: %#v", got.RetrievalEvidence)
+	if _, err := service.Propose(context.Background(), "tenant-1", "actor-1", validRequest()); !errors.Is(err, ErrInvalidOutput) {
+		t.Fatalf("mapped modification error = %v, want ErrInvalidOutput", err)
 	}
 }
 
@@ -599,6 +620,9 @@ func TestNormalizeRetrievalContextEnforcesDraftBoundary(t *testing.T) {
 		"dataset cannot repeat across collections": func(value *RetrievalContext) {
 			value.ModifiableDraftDatasets[0].ID = testDatasetID
 			value.ModifiableDraftDatasets[0].VersionID = testDatasetVersionID
+		},
+		"atomic fact source must be an authorized published field": func(value *RetrievalContext) {
+			value.AtomicFacts[0].SourceFieldIDs = []string{"field_secret"}
 		},
 	}
 	for name, mutate := range tests {

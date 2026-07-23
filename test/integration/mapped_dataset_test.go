@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -38,7 +39,7 @@ func TestMappedDatasetIsCreatedWithIndependentPublishedV1(t *testing.T) {
 			tenant_id,code,name,source_type,status,config,secret_ref
 		) VALUES($1,$2,'Mapped Source','MYSQL','ACTIVE',
 			'{"host":"db.internal","port":3306,"database":"sales","username":"reader"}',
-			'encrypted://mapped-default') RETURNING id::text`, tenantID, "mapped-source-"+suffix).Scan(&sourceID); err != nil {
+			'encrypted://mapped-default') RETURNING id::text`, tenantID, "mapped_source_"+suffix).Scan(&sourceID); err != nil {
 			return err
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(
@@ -118,5 +119,94 @@ func TestMappedDatasetIsCreatedWithIndependentPublishedV1(t *testing.T) {
 	})
 	if err != nil || publishedCount != 1 || autoPublishAuditCount != 1 {
 		t.Fatalf("idempotency published=%d audit=%d err=%v", publishedCount, autoPublishAuditCount, err)
+	}
+
+	// 删除后重新完成映射必须恢复同一个来源数据集主对象，并创建新的不可变 V2；
+	// 否则来源表唯一约束会让文件重新映射成功但目录中没有数据集。
+	if err := store.Delete(ctx, tenantID, actorID, datasetID, dataset.LifecycleInput{ExpectedVersion: ownerVersion}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(ctx, tenantID, datasetID); !errors.Is(err, dataset.ErrNotFound) {
+		t.Fatalf("deleted mapped dataset Get error=%v, want ErrNotFound", err)
+	}
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		return store.EnsureMappedDatasetTx(ctx, tx, tenantID, actorID, tableID)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var regeneratedID, regeneratedStatus, regeneratedPublishedID, oldPublishedStatus string
+	var regeneratedVersion int64
+	var regeneratedPublishedNo, regenerateAuditCount int
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT dataset.id::text,dataset.status,dataset.version,
+			published.id::text,published.version_no,old_published.status
+			FROM platform.datasets AS dataset
+			JOIN platform.dataset_versions AS published ON published.id=dataset.current_published_version_id
+			JOIN platform.dataset_versions AS old_published ON old_published.id=$2
+			WHERE dataset.origin_table_id=$1 AND dataset.deleted_at IS NULL`, tableID, publishedID).Scan(
+			&regeneratedID, &regeneratedStatus, &regeneratedVersion,
+			&regeneratedPublishedID, &regeneratedPublishedNo, &oldPublishedStatus,
+		); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT count(*) FROM platform.audit_logs
+			WHERE resource_type='DATASET' AND resource_id=$1 AND action='AUTO_REGENERATE_MAPPED_DATASET'`, datasetID).
+			Scan(&regenerateAuditCount)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if regeneratedID != datasetID || regeneratedStatus != "PUBLISHED" || regeneratedVersion != 5 ||
+		regeneratedPublishedID == publishedID || regeneratedPublishedNo != 2 || oldPublishedStatus != "DEPRECATED" || regenerateAuditCount != 1 {
+		t.Fatalf("regenerated dataset=%s status=%s ownerV=%d published=%s/V%d oldStatus=%s audit=%d",
+			regeneratedID, regeneratedStatus, regeneratedVersion, regeneratedPublishedID,
+			regeneratedPublishedNo, oldPublishedStatus, regenerateAuditCount)
+	}
+
+	var secondSourceID, secondTableID string
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `INSERT INTO platform.data_sources(
+			tenant_id,code,name,source_type,status,config,secret_ref
+		) VALUES($1,$2,'Mapped Source Copy','MYSQL','ACTIVE',
+			'{"host":"db-copy.internal","port":3306,"database":"sales","username":"reader"}',
+			'encrypted://mapped-default-copy') RETURNING id::text`, tenantID, "mapped_source_copy_"+suffix).Scan(&secondSourceID); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(
+			tenant_id,data_source_id,schema_name,table_name,table_type,structure_hash,table_structure_hash,
+			last_enriched_structure_hash,last_enriched_table_structure_hash,business_name,business_description,last_sync_at
+		) VALUES($1,$2,'sales','orders_copy','TABLE',repeat('d',64),repeat('e',64),repeat('d',64),repeat('e',64),
+			'订单事实表','另一个数据源中的同名订单表',now()) RETURNING id::text`, tenantID, secondSourceID).Scan(&secondTableID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO platform.metadata_columns(
+			tenant_id,table_id,column_name,ordinal_position,native_type,canonical_type,nullable,structure_hash,
+			last_enriched_structure_hash,business_name,business_description,semantic_type,is_primary_key,last_sync_at
+		) VALUES($1,$2,'order_id',1,'bigint','INTEGER',false,repeat('f',64),repeat('f',64),
+			'订单编号','订单业务主键','IDENTIFIER',true,now())`, tenantID, secondTableID)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		return store.EnsureMappedDatasetTx(ctx, tx, tenantID, actorID, secondTableID)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, total, err := store.List(ctx, tenantID, 20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameNameSources := map[string]bool{}
+	for _, item := range items {
+		if item.Name == "订单事实表" {
+			sameNameSources[item.OriginDataSourceName] = true
+		}
+	}
+	if total != 2 || len(sameNameSources) != 2 || !sameNameSources["Mapped Source"] || !sameNameSources["Mapped Source Copy"] {
+		t.Fatalf("same-name datasets total=%d sources=%#v items=%#v", total, sameNameSources, items)
 	}
 }

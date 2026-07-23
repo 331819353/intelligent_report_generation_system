@@ -3,6 +3,7 @@ package metricsemantic
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -44,7 +45,7 @@ func (s *semanticStoreStub) Fail(context.Context, EmbeddingClaim, string, string
 	s.failed = true
 	return nil
 }
-func (s *semanticStoreStub) Search(_ context.Context, _ string, _ string, vector []float32, _ int, _ bool) ([]SearchResult, error) {
+func (s *semanticStoreStub) Search(_ context.Context, _ string, _ string, vector []float32, _ int) ([]SearchResult, error) {
 	s.searchVector = append([]float32(nil), vector...)
 	return []SearchResult{{SubjectType: "METRIC_VERSION", Name: "销售额", BindingAllowed: true}}, nil
 }
@@ -52,12 +53,12 @@ func (s *semanticStoreStub) Search(_ context.Context, _ string, _ string, vector
 func TestSearchUsesVectorAndDegradesWithoutProvider(t *testing.T) {
 	store := &semanticStoreStub{}
 	service := NewService(store, embeddingProviderStub{configured: true, vector: []float32{0.1, 0.2, 0.3}})
-	response, err := service.Search(context.Background(), "tenant-1", "月度销售", 10, false)
+	response, err := service.Search(context.Background(), "tenant-1", "月度销售", 10)
 	if err != nil || response.Degraded || len(store.searchVector) != 3 || len(response.Items) != 1 {
 		t.Fatalf("vector response=%#v err=%v vector=%v", response, err, store.searchVector)
 	}
 	service = NewService(store, embeddingProviderStub{configured: true, err: errors.New("temporary")})
-	response, err = service.Search(context.Background(), "tenant-1", "月度销售", 10, false)
+	response, err = service.Search(context.Background(), "tenant-1", "月度销售", 10)
 	if err != nil || !response.Degraded || len(store.searchVector) != 0 {
 		t.Fatalf("fallback response=%#v err=%v vector=%v", response, err, store.searchVector)
 	}
@@ -69,5 +70,23 @@ func TestEmbeddingWorkerCompletesClaim(t *testing.T) {
 	handled, err := worker.ProcessNext(context.Background(), "tenant-1", "worker-1", time.Minute)
 	if err != nil || !handled || !store.completed || store.failed {
 		t.Fatalf("handled=%v err=%v completed=%v failed=%v", handled, err, store.completed, store.failed)
+	}
+}
+
+func TestPublicSearchSQLOnlyReturnsCurrentPublishedMetrics(t *testing.T) {
+	for name, sql := range map[string]string{"lexical": semanticLexicalSearchSQL, "vector": semanticVectorSearchSQL} {
+		for _, expected := range []string{
+			"document.subject_type='METRIC_VERSION'", "metric.current_published_version_id=version.id",
+			"version.status='PUBLISHED'", "metric.status='PUBLISHED'", "true AS binding_allowed",
+		} {
+			if !strings.Contains(sql, expected) {
+				t.Fatalf("%s search is missing %q", name, expected)
+			}
+		}
+		for _, forbidden := range []string{"platform.metric_candidates", "document.subject_type='CANDIDATE'", "candidate_id"} {
+			if strings.Contains(sql, forbidden) {
+				t.Fatalf("%s search still exposes internal atomic facts through %q", name, forbidden)
+			}
+		}
 	}
 }

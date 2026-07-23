@@ -113,12 +113,30 @@ func TestDeriveCreateTransformRequirementsMaterializesDateGroupingBeforeGroup(t 
 	}
 }
 
-func TestDeriveModificationTransformRequirementsKeepsRequestedRolesButAllowsRemoval(t *testing.T) {
-	if requirements := deriveModificationTransformRequirements("关联与分组之间需要一个日期转换，将日期转换为年月"); len(requirements) != 1 || requirements[0].ComponentType != "DATE_FORMAT" {
-		t.Fatalf("modification requirements = %#v", requirements)
+func TestValidateLockedTransformUsageUsesSemanticChangeSetInsteadOfInstructionPatterns(t *testing.T) {
+	proposal := normalizeProposal(proposalWithUsedUpperTransform(), "MODIFY")
+	proposal.Plan.End.Outputs[0].Key = "transform_1.output_1"
+	locked := ChangeSet{Operations: []ChangeOperation{{
+		Action: "ADD", ComponentKind: "TRANSFORM", ComponentID: "transform_1", ComponentName: "地区处理",
+		Fields: []string{}, InputChanges: []InputChange{}, Description: "按用户语义新增字段处理",
+	}}}
+	for _, instruction := range []string{"把地区处理一下", "normalize the region", "新增字段处理", "随便一种不依赖关键词的表达"} {
+		if err := validateLockedTransformUsage(proposal.Plan, locked); err != nil {
+			t.Fatalf("semantic locked usage for %q: %v", instruction, err)
+		}
 	}
-	if requirements := deriveModificationTransformRequirements("删除日期转换组件"); len(requirements) != 0 {
-		t.Fatalf("removal requirements = %#v", requirements)
+	unused := proposal.Plan
+	unused.End.Input = PlanInput{Kind: "GROUP", ID: "group_1"}
+	unused.End.Outputs[0] = PlanOutput{NodeID: "node_1", Column: "region", Key: "node_1.region", Name: "地区", Code: "region"}
+	if err := validateLockedTransformUsage(unused, locked); err == nil || !strings.Contains(err.Error(), "no consumed output") {
+		t.Fatalf("unused locked transform error = %v", err)
+	}
+	nameOnly := ChangeSet{Operations: []ChangeOperation{{
+		Action: "UPDATE", ComponentKind: "TRANSFORM", ComponentID: "transform_1", ComponentName: "新名称",
+		Fields: []string{"name"}, InputChanges: []InputChange{}, Description: "仅修改名称",
+	}}}
+	if err := validateLockedTransformUsage(unused, nameOnly); err != nil {
+		t.Fatalf("name-only edit invented transform usage requirement: %v", err)
 	}
 }
 
