@@ -25,15 +25,18 @@ type memoryStore struct {
 	resolveSourceDataset       string
 	resolveSourceVersion       string
 	rollbackCalls              int
+	publishedVersion           VersionRecord
 }
 
 func (s *memoryStore) Create(_ context.Context, _, _ string, input CreateInput, prepared Prepared) (Record, error) {
-	s.record = Record{ID: "dataset-1", Code: input.Code, Name: input.Name, Description: input.Description, Type: input.Type, Status: "DRAFT", Version: 1, DSL: prepared.DSLJSON, LogicalPlan: prepared.LogicalPlanJSON, DSLHash: prepared.DSLHash, PlanHash: prepared.PlanHash}
+	s.record = Record{ID: "dataset-1", Code: input.Code, Name: input.Name, Description: input.Description,
+		Type: input.Type, Layer: prepared.Document.Dataset.Layer, Status: "DRAFT", Version: 1,
+		DSL: prepared.DSLJSON, LogicalPlan: prepared.LogicalPlanJSON, DSLHash: prepared.DSLHash, PlanHash: prepared.PlanHash}
 	return s.record, nil
 }
 func (s *memoryStore) Get(_ context.Context, _, _ string) (Record, error) { return s.record, nil }
 func (s *memoryStore) List(_ context.Context, _ string, _, _ int) ([]Summary, int, error) {
-	items := []Summary{{ID: s.record.ID, Code: s.record.Code, Name: s.record.Name}}
+	items := []Summary{{ID: s.record.ID, Code: s.record.Code, Name: s.record.Name, Layer: s.record.Layer}}
 	return items, len(items), nil
 }
 func (s *memoryStore) Update(_ context.Context, _, _, _ string, input UpdateInput, prepared Prepared) (Record, error) {
@@ -41,6 +44,7 @@ func (s *memoryStore) Update(_ context.Context, _, _, _ string, input UpdateInpu
 		return Record{}, ErrConflict
 	}
 	s.record.Name, s.record.Description, s.record.Type, s.record.Version = input.Name, input.Description, prepared.Document.Dataset.Type, s.record.Version+1
+	s.record.Layer = prepared.Document.Dataset.Layer
 	s.record.DSL, s.record.LogicalPlan, s.record.DSLHash, s.record.PlanHash = prepared.DSLJSON, prepared.LogicalPlanJSON, prepared.DSLHash, prepared.PlanHash
 	return s.record, nil
 }
@@ -88,7 +92,8 @@ func (s *memoryStore) Publish(_ context.Context, _, _, datasetID string, plan Pu
 	s.record.Version++
 	return VersionRecord{ID: "22222222-2222-4222-8222-222222222222", DatasetID: datasetID, DatasetRecordVersion: s.record.Version,
 		DraftVersionID: plan.DraftVersionID, DraftRecordVersion: plan.ExpectedDraftRecordVersion,
-		VersionNo: 1, Status: "PUBLISHED", DSLVersion: DSLVersion, DSLHash: plan.Prepared.DSLHash, PlanHash: plan.Prepared.PlanHash,
+		VersionNo: 1, Status: "PUBLISHED", Layer: plan.Prepared.Document.Dataset.Layer,
+		DSLVersion: DSLVersion, DSLHash: plan.Prepared.DSLHash, PlanHash: plan.Prepared.PlanHash,
 		DSL: plan.Prepared.DSLJSON, LogicalPlan: plan.Prepared.LogicalPlanJSON}, nil
 }
 
@@ -102,7 +107,10 @@ func (v *memoryPublicationValidator) ValidatePublication(_ context.Context, _, _
 	v.candidate = candidate
 	return v.result, v.err
 }
-func (s *memoryStore) GetVersion(context.Context, string, string, string) (VersionRecord, error) {
+func (s *memoryStore) GetVersion(_ context.Context, _, datasetID, versionID string) (VersionRecord, error) {
+	if s.publishedVersion.ID == versionID && s.publishedVersion.DatasetID == datasetID {
+		return s.publishedVersion, nil
+	}
 	return VersionRecord{}, ErrVersionNotFound
 }
 func (s *memoryStore) ResolveVersionSourceRevision(_ context.Context, tenantID, datasetID, versionID string) (RevisionRecord, error) {
@@ -159,6 +167,7 @@ func (s *memoryStore) RollbackRevision(_ context.Context, _, _ string, datasetID
 	s.record.Name = prepared.Document.Dataset.Name
 	s.record.Description = prepared.Document.Dataset.Description
 	s.record.Type = prepared.Document.Dataset.Type
+	s.record.Layer = prepared.Document.Dataset.Layer
 	s.record.DSL = prepared.DSLJSON
 	s.record.LogicalPlan = prepared.LogicalPlanJSON
 	s.record.DSLHash = prepared.DSLHash
@@ -386,6 +395,42 @@ func TestServiceAllowsDerivedDatasetTypeToChangeWithDraftNodes(t *testing.T) {
 	}
 	if updated.Type != "CROSS_SOURCE" || updated.Version != created.Version+1 {
 		t.Fatalf("updated record = %#v", updated)
+	}
+}
+
+func TestServiceRejectsLayerChangeAfterFirstPublication(t *testing.T) {
+	store := &memoryStore{}
+	service := NewService(store)
+	created, err := service.Create(context.Background(), "tenant-1", "user-1", CreateInput{
+		Code: "monthly_orders", Name: "月度订单数据集",
+		Description: "按月份汇总有效订单金额", Type: "SINGLE_SOURCE", DSL: readExample(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const publishedVersionID = "22222222-2222-4222-8222-222222222222"
+	store.record.CurrentPublishedVersionID = publishedVersionID
+	store.publishedVersion = VersionRecord{
+		ID: publishedVersionID, DatasetID: created.ID, Layer: LayerDWS, Status: "PUBLISHED",
+	}
+
+	ods := layerTestODS(t)
+	ods.Dataset.Code = created.Code
+	ods.Dataset.Name = created.Name
+	ods.Dataset.Description = created.Description
+	odsJSON, err := json.Marshal(ods)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Update(context.Background(), "tenant-1", "user-1", created.ID, UpdateInput{
+		Name: created.Name, Description: created.Description,
+		ExpectedVersion: created.Version, DSL: odsJSON,
+	})
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("layer migration error=%v, want ErrInvalidTransition", err)
+	}
+	if store.record.Layer != LayerDWS || store.record.Version != created.Version {
+		t.Fatalf("rejected layer migration mutated the draft: %#v", store.record)
 	}
 }
 

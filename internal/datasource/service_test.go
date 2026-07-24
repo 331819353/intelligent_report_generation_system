@@ -69,6 +69,88 @@ func (r *repo) UpdateStatus(_ context.Context, _, _ string, status Status, _ str
 }
 func (r *repo) Quota(context.Context, string) (Quota, error) { return r.quota, nil }
 
+type versionedRepo struct {
+	repo
+	draft       Source
+	published   Source
+	testRuns    []ConnectionTestRun
+	publishErr  error
+	publishedAt time.Time
+}
+
+func (r *versionedRepo) Get(_ context.Context, _, _ string) (Source, error) {
+	if r.published.ID != "" {
+		return r.published, nil
+	}
+	return r.draft, nil
+}
+
+func (r *versionedRepo) GetDraft(context.Context, string, string) (Source, error) {
+	return r.draft, nil
+}
+
+func (r *versionedRepo) Update(_ context.Context, source Source) (Source, error) {
+	source.ConfigVersion++
+	source.Version++
+	source.ConfigVersionID = "draft-version-next"
+	hash, err := sourceConfigurationHash(source)
+	if err != nil {
+		return Source{}, err
+	}
+	source.ConfigHash = hash
+	source.ValidationStatus = ValidationUntested
+	source.PublishedVersionID = r.published.ConfigVersionID
+	source.PublicationStatus = r.draft.PublicationStatus
+	source.HasUnpublishedChanges = source.PublishedVersionID != source.ConfigVersionID
+	if r.published.ID != "" {
+		source.Status = r.published.Status
+	}
+	r.draft = source
+	return source, nil
+}
+
+func (r *versionedRepo) RecordConnectionTest(_ context.Context, _, _ string, run ConnectionTestRun) (ConnectionTestRun, error) {
+	if run.ConfigVersion != r.draft.ConfigVersionID || run.ConfigHash != r.draft.ConfigHash {
+		return ConnectionTestRun{}, ErrSourceVersionChanged
+	}
+	r.testRuns = append(r.testRuns, run)
+	r.draft.ValidationStatus = run.Status
+	r.draft.LastTestedAt = &run.CompletedAt
+	r.draft.TestExpiresAt = run.ExpiresAt
+	return run, nil
+}
+
+func (r *versionedRepo) Publish(_ context.Context, _, _, _, versionID, configHash string, now time.Time) (Source, error) {
+	r.publishedAt = now
+	if r.publishErr != nil {
+		return Source{}, r.publishErr
+	}
+	if versionID != r.draft.ConfigVersionID || configHash != r.draft.ConfigHash {
+		return Source{}, ErrSourceVersionChanged
+	}
+	var passed *ConnectionTestRun
+	for index := len(r.testRuns) - 1; index >= 0; index-- {
+		run := &r.testRuns[index]
+		if run.Status == ValidationPassed && run.ConfigVersion == versionID && run.ConfigHash == configHash {
+			passed = run
+			break
+		}
+	}
+	if passed == nil {
+		return Source{}, ErrTestRequired
+	}
+	if passed.ExpiresAt == nil || !passed.ExpiresAt.After(now) {
+		return Source{}, ErrTestExpired
+	}
+	r.draft.Status = StatusActive
+	r.draft.PublicationStatus = PublicationPublished
+	r.draft.PublishedVersionID = r.draft.ConfigVersionID
+	r.draft.PublishedConfigVersion = r.draft.ConfigVersion
+	r.draft.HasUnpublishedChanges = false
+	r.published = r.draft
+	return r.draft, nil
+}
+
 type connector struct {
 	kind    Type
 	testErr error
@@ -85,17 +167,22 @@ func (c connector) Close(context.Context, Source) error { return nil }
 
 type importConnector struct {
 	connector
-	discovered SyncResult
-	sample     SampleResult
+	discovered  SyncResult
+	sample      SampleResult
+	sampleLimit *int
 }
 
 type fileInspectConnector struct {
 	connector
 	inspection ExcelWorkbookInspection
 	err        error
+	seen       *Source
 }
 
-func (c fileInspectConnector) Inspect(context.Context, Source) (ExcelWorkbookInspection, error) {
+func (c fileInspectConnector) Inspect(_ context.Context, source Source) (ExcelWorkbookInspection, error) {
+	if c.seen != nil {
+		*c.seen = source
+	}
 	return c.inspection, c.err
 }
 
@@ -103,7 +190,10 @@ func (c importConnector) Sync(context.Context, Source) (SyncResult, error) {
 	return c.discovered, nil
 }
 
-func (c importConnector) Sample(context.Context, Source, MetadataTable, int) (SampleResult, error) {
+func (c importConnector) Sample(_ context.Context, _ Source, _ MetadataTable, maxRows int) (SampleResult, error) {
+	if c.sampleLimit != nil {
+		*c.sampleLimit = maxRows
+	}
 	return c.sample, nil
 }
 
@@ -124,6 +214,41 @@ func TestInspectFileSourceRequiresActiveInspectorAndReturnsPreview(t *testing.T)
 	service = NewService(r, connector{kind: TypeMySQL})
 	if _, err := service.InspectFileSource(context.Background(), "tenant-1", "source-1"); err == nil {
 		t.Fatal("database source was treated as a file inspector")
+	}
+}
+
+func TestInspectFileSourcePinsPublishedFileVersionWhileNewDraftWaitsForPublish(t *testing.T) {
+	published := Source{
+		ID: "source-1", TenantID: "tenant-1", Type: TypeExcel, Status: StatusActive,
+		FileAssetID: "file-1", FileVersionID: "file-version-1",
+		ConfigVersionID: "config-version-1", PublishedVersionID: "config-version-1",
+		PublicationStatus: PublicationPublished,
+	}
+	draft := published
+	draft.FileVersionID = "file-version-2"
+	draft.ConfigVersionID = "config-version-2"
+	draft.ValidationStatus = ValidationPassed
+	draft.HasUnpublishedChanges = true
+	r := &versionedRepo{
+		repo:      repo{quota: Quota{MaxDataSources: 10, MaxExcelFileBytes: 1024}},
+		published: published,
+		draft:     draft,
+	}
+	var inspected Source
+	service := NewService(r, fileInspectConnector{
+		connector: connector{kind: TypeExcel},
+		inspection: ExcelWorkbookInspection{
+			SampleLimit: 10,
+			Sheets:      []ExcelSheetInspection{{Name: "Published"}},
+		},
+		seen: &inspected,
+	})
+
+	if _, err := service.InspectFileSource(context.Background(), "tenant-1", "source-1"); err != nil {
+		t.Fatal(err)
+	}
+	if inspected.ConfigVersionID != "config-version-1" || inspected.FileVersionID != "file-version-1" {
+		t.Fatalf("inspection did not use published snapshot: %#v", inspected)
 	}
 }
 
@@ -197,12 +322,12 @@ func TestSampleTableUsesRegisteredMetadataSamplerAndCapsRows(t *testing.T) {
 	if len(result.Rows) != 2 || result.Rows[1][0] != 2 {
 		t.Fatalf("sample=%#v", result)
 	}
-	if _, err := service.SampleTable(context.Background(), "tenant-1", "source-1", MetadataTable{Name: "orders"}, 6); err == nil {
-		t.Fatal("sample limit above five was accepted")
+	if _, err := service.SampleTable(context.Background(), "tenant-1", "source-1", MetadataTable{Name: "orders"}, 11); err == nil {
+		t.Fatal("sample limit above ten was accepted")
 	}
 }
 
-func TestImportTablesPersistsOnlySelectionAndCompletesWithThreeSamples(t *testing.T) {
+func TestLegacyImportTablesUsesTechnicalMetadataOnly(t *testing.T) {
 	orders := MetadataTable{SchemaName: "sales", Name: "orders", Columns: []MetadataColumn{{Name: "id"}, {Name: "amount"}}}
 	customers := MetadataTable{SchemaName: "sales", Name: "customers", Columns: []MetadataColumn{{Name: "id"}}}
 	tableKey := metadataTableKey(orders)
@@ -211,9 +336,11 @@ func TestImportTablesPersistsOnlySelectionAndCompletesWithThreeSamples(t *testin
 		quota:       Quota{MaxDataSources: 10},
 		selectedIDs: map[string]string{tableKey: "table-1"},
 	}
+	requestedLimit := 0
 	connector := importConnector{
-		connector:  connector{kind: TypeMySQL},
-		discovered: SyncResult{Tables: []MetadataTable{orders, customers}},
+		connector:   connector{kind: TypeMySQL},
+		discovered:  SyncResult{Tables: []MetadataTable{orders, customers}},
+		sampleLimit: &requestedLimit,
 		sample: SampleResult{
 			Columns: []string{"id", "amount"},
 			Rows:    [][]any{{1, 12.5}, {2, 19.0}, {3, 8.5}},
@@ -233,8 +360,8 @@ func TestImportTablesPersistsOnlySelectionAndCompletesWithThreeSamples(t *testin
 	if len(imported) != 1 || imported[0].ID != "table-1" || completer.tableID != "table-1" {
 		t.Fatalf("imported=%#v completedTable=%s", imported, completer.tableID)
 	}
-	if len(completer.rows) != 3 || completer.rows[0]["id"] != 1 || completer.rows[2]["amount"] != 8.5 {
-		t.Fatalf("sample rows=%#v", completer.rows)
+	if completer.rows != nil || imported[0].Samples != nil || requestedLimit != 0 {
+		t.Fatalf("legacy path leaked samples: completer=%#v imported=%#v sampleLimit=%d", completer.rows, imported[0].Samples, requestedLimit)
 	}
 }
 
@@ -341,11 +468,126 @@ func TestEnableAndSyncRequireValidatedState(t *testing.T) {
 }
 
 func TestUpdateKeepsCurrentSecretWhenPasswordIsNotReentered(t *testing.T) {
-	r := &repo{source: Source{ID: "source-1", TenantID: "t", Code: "old", Name: "Old", Type: TypeMySQL, Status: StatusActive, SecretRef: "encrypted://current"}}
+	r := &repo{source: Source{ID: "source-1", TenantID: "t", Code: "old", Name: "Old", Type: TypeMySQL, Status: StatusActive, SecretRef: "encrypted://current", Version: 3}}
 	s := NewService(r, connector{kind: TypeMySQL})
-	updated, err := s.Update(context.Background(), Source{ID: "source-1", TenantID: "t", Code: "new", Name: "New", Type: TypeMySQL, Config: map[string]any{"host": "db"}})
+	updated, err := s.Update(context.Background(), Source{ID: "source-1", TenantID: "t", Code: "new", Name: "New", Type: TypeMySQL, Config: map[string]any{"host": "db"}, Version: 3})
 	if err != nil || updated.SecretRef != "encrypted://current" || updated.Status != StatusDraft {
 		t.Fatalf("updated=%#v err=%v", updated, err)
+	}
+}
+
+func TestUpdateRejectsStaleExpectedVersion(t *testing.T) {
+	r := &repo{source: Source{
+		ID: "source-1", TenantID: "t", Code: "current", Name: "Current",
+		Type: TypeMySQL, Status: StatusActive, SecretRef: "encrypted://current", Version: 4,
+	}}
+	s := NewService(r, connector{kind: TypeMySQL})
+
+	_, err := s.Update(context.Background(), Source{
+		ID: "source-1", TenantID: "t", Code: "stale", Name: "Stale",
+		Type: TypeMySQL, Config: map[string]any{"host": "db"}, Version: 3,
+	})
+	if !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("err=%v want=%v", err, ErrVersionConflict)
+	}
+	if r.source.Code != "current" {
+		t.Fatalf("stale edit overwrote source: %#v", r.source)
+	}
+}
+
+func TestVersionedConnectionTestBindsDraftAndRequiresExplicitPublish(t *testing.T) {
+	fixedNow := time.Date(2026, 7, 24, 8, 0, 0, 0, time.UTC)
+	draft := Source{
+		ID: "source-1", TenantID: "tenant-1", Code: "sales", Name: "Sales", Type: TypeMySQL,
+		Status: StatusDraft, SecretRef: "encrypted://draft", Config: map[string]any{"host": "draft-db"},
+		ConfigVersionID: "draft-version-2", ConfigVersion: 2,
+		ValidationStatus: ValidationUntested, PublicationStatus: PublicationUnpublished,
+	}
+	draft.ConfigHash, _ = sourceConfigurationHash(draft)
+	r := &versionedRepo{repo: repo{quota: Quota{MaxDataSources: 10}}, draft: draft}
+	service := NewService(r, connector{kind: TypeMySQL})
+	service.now = func() time.Time { return fixedNow }
+
+	result, err := service.Test(context.Background(), draft.TenantID, draft.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.draft.Status != StatusDraft || r.draft.ValidationStatus != ValidationPassed || len(r.testRuns) != 1 {
+		t.Fatalf("draft=%#v runs=%#v", r.draft, r.testRuns)
+	}
+	if result.ConfigVersionID != draft.ConfigVersionID || result.ConfigHash != draft.ConfigHash ||
+		result.ExpiresAt == nil || !result.ExpiresAt.Equal(fixedNow.Add(30*time.Minute)) {
+		t.Fatalf("test result=%#v", result)
+	}
+
+	published, err := service.Publish(context.Background(), draft.TenantID, "actor-1", draft.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published.Status != StatusActive || published.PublishedVersionID != draft.ConfigVersionID ||
+		published.PublicationStatus != PublicationPublished || published.HasUnpublishedChanges {
+		t.Fatalf("published=%#v", published)
+	}
+}
+
+func TestVersionedDraftEditAndFailedTestKeepPublishedRuntime(t *testing.T) {
+	published := Source{
+		ID: "source-1", TenantID: "tenant-1", Code: "sales", Name: "Sales", Type: TypeMySQL,
+		Status: StatusActive, SecretRef: "encrypted://published", Config: map[string]any{"host": "online-db"},
+		ConfigVersionID: "published-version-1", PublishedVersionID: "published-version-1",
+		ConfigVersion: 1, PublishedConfigVersion: 1, Version: 1,
+		ValidationStatus: ValidationPassed, PublicationStatus: PublicationPublished,
+	}
+	published.ConfigHash, _ = sourceConfigurationHash(published)
+	r := &versionedRepo{repo: repo{quota: Quota{MaxDataSources: 10}}, draft: published, published: published}
+	service := NewService(r, connector{kind: TypeMySQL, testErr: errors.New("draft database is offline")})
+
+	updated, err := service.Update(context.Background(), Source{
+		ID: published.ID, TenantID: published.TenantID, Code: published.Code, Name: published.Name,
+		Type: TypeMySQL, SecretRef: "encrypted://draft", Config: map[string]any{"host": "draft-db"},
+		Version: published.Version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.HasUnpublishedChanges || updated.Status != StatusActive {
+		t.Fatalf("updated=%#v", updated)
+	}
+	if _, err := service.Test(context.Background(), published.TenantID, published.ID); err == nil {
+		t.Fatal("failed draft connection test unexpectedly succeeded")
+	}
+	runtime, err := r.Get(context.Background(), published.TenantID, published.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Config["host"] != "online-db" || runtime.Status != StatusActive ||
+		r.draft.ValidationStatus != ValidationFailed {
+		t.Fatalf("runtime=%#v draft=%#v", runtime, r.draft)
+	}
+}
+
+func TestVersionedPublishRejectsExpiredTest(t *testing.T) {
+	fixedNow := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
+	expiredAt := fixedNow.Add(-time.Minute)
+	draft := Source{
+		ID: "source-1", TenantID: "tenant-1", Code: "sales", Name: "Sales", Type: TypeMySQL,
+		Status: StatusDraft, SecretRef: "encrypted://draft", Config: map[string]any{"host": "draft-db"},
+		ConfigVersionID: "draft-version-1", ConfigVersion: 1,
+		ValidationStatus: ValidationPassed, TestExpiresAt: &expiredAt,
+	}
+	draft.ConfigHash, _ = sourceConfigurationHash(draft)
+	r := &versionedRepo{
+		repo:  repo{quota: Quota{MaxDataSources: 10}},
+		draft: draft,
+		testRuns: []ConnectionTestRun{{
+			ConfigVersion: draft.ConfigVersionID, ConfigHash: draft.ConfigHash,
+			Status: ValidationPassed, ExpiresAt: &expiredAt,
+		}},
+	}
+	service := NewService(r, connector{kind: TypeMySQL})
+	service.now = func() time.Time { return fixedNow }
+	if _, err := service.Publish(context.Background(), draft.TenantID, "actor-1", draft.ID); !errors.Is(err, ErrTestExpired) {
+		t.Fatalf("publish error=%v", err)
 	}
 }
 

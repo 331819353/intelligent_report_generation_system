@@ -70,6 +70,18 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		}
 		writeMetricJSON(writer, http.StatusOK, record)
 	})))
+	mux.Handle("DELETE /api/v1/metrics/{id}", protect("MANAGE", objectID, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		claims, _ := auth.ClaimsFromContext(request.Context())
+		var input DeleteInput
+		if !decodeMetricRequest(writer, request, &input) {
+			return
+		}
+		if err := service.Delete(request.Context(), claims.TenantID, claims.Subject, request.PathValue("id"), input); err != nil {
+			writeMetricError(writer, err)
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	})))
 	mux.Handle("POST /api/v1/metrics/{id}/validate", protect("MANAGE", objectID, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if !decodeMetricRequest(writer, request, &struct{}{}) {
 			return
@@ -225,6 +237,8 @@ func writeMetricError(writer http.ResponseWriter, err error) {
 		writeMetricJSON(writer, http.StatusConflict, map[string]string{"code": "METRIC_VERSION_TRANSITION_INVALID", "message": "指标版本状态迁移无效"})
 	case errors.Is(err, ErrVersionInUse):
 		writeMetricJSON(writer, http.StatusConflict, map[string]string{"code": "METRIC_VERSION_IN_USE", "message": "仍有可运行的已发布下游指标依赖该版本，请先处理下游版本"})
+	case errors.Is(err, ErrInUse):
+		writeMetricJSON(writer, http.StatusConflict, map[string]string{"code": "METRIC_IN_USE", "message": "指标仍被报告、下游指标或运行中查询占用，请先解除引用"})
 	case errors.Is(err, ErrPreviewUnavailable):
 		writeMetricJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": "METRIC_PREVIEW_UNAVAILABLE", "message": "指标试算服务暂时不可用"})
 	case errors.Is(err, dataset.ErrPreviewInvalid):

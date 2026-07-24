@@ -28,13 +28,14 @@ func TestAssetEmbeddingRetrievalUsesEmptyScopeAndTenantRLS(t *testing.T) {
 	foreignTenantID := insertTenant(t, ctx, pool, "asset-embedding-foreign-"+suffix)
 	t.Cleanup(func() { cleanupTenant(pool, tenantID); cleanupTenant(pool, foreignTenantID) })
 
-	var tableID string
+	var sourceID, tableID string
 	if err := database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
-		var sourceID string
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.data_sources(
-			tenant_id,code,name,source_type,status,config,secret_ref
-		) VALUES($1,$2,'Asset Retrieval','MYSQL','ACTIVE','{}','env://ASSET_IT') RETURNING id::text`,
-			tenantID, "asset-source-"+suffix).Scan(&sourceID); err != nil {
+		var err error
+		sourceID, _, err = insertVersionedDataSourceTx(
+			ctx, tx, tenantID, "asset-source-"+suffix, "Asset Retrieval", "MYSQL",
+			"env://ASSET_IT", "ACTIVE", "{}",
+		)
+		if err != nil {
 			return err
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(
@@ -52,7 +53,7 @@ func TestAssetEmbeddingRetrievalUsesEmptyScopeAndTenantRLS(t *testing.T) {
 			'销售额','订单销售金额',ARRAY['销售','金额'],'AMOUNT',$3)`, tenantID, tableID, repeatHex('c')); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO platform.asset_embeddings(
+		_, err = tx.Exec(ctx, `INSERT INTO platform.asset_embeddings(
 			tenant_id,asset_type,asset_id,table_id,document_version,document,input_hash,embedding,
 			embedding_model,model_version,status,embedded_at
 		) VALUES($1,'TABLE',$2,$2,'asset-search-document-v1','销售订单 订单事实 销售 金额',$3,$4::halfvec,
@@ -65,6 +66,7 @@ func TestAssetEmbeddingRetrievalUsesEmptyScopeAndTenantRLS(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	attestAndPublishDataSourceFixture(t, ctx, pool, tenantID, "", sourceID)
 
 	store := assetembedding.NewPostgresStore(pool)
 	vector := make([]float32, 2560)

@@ -1,4 +1,4 @@
-import type { BlockSticky, ComponentSticky, ComponentType, Grid, ReportComponent, ReportDocument, ReportPage, ReportValidationIssue, Sticky } from './report-contract'
+import type { BlockSticky, ComponentSticky, ComponentType, Grid, ReportBlock, ReportComponent, ReportDocument, ReportPage, ReportValidationIssue, Sticky } from './report-contract'
 import { createReportComponentDefaults, isFormalReportComponentType, reportComponentCatalog } from './report-component-catalog'
 
 export const LOGICAL_CANVAS_WIDTH = 1920
@@ -111,6 +111,25 @@ export function updateBlockSticky(document: ReportDocument, pageID: string, bloc
   const result = normalizeSticky(candidate, `${path}.sticky`, ['PAGE', 'CONTAINER'], [pageID])
   if (!result.sticky) return { issue: result.issue }
   const nextBlock = { ...block, sticky: result.sticky }
+  const nextPage = { ...page, blocks: page.blocks.map((item, index) => index === blockIndex ? nextBlock : item) }
+  return { document: { ...document, pages: document.pages.map((item, index) => index === pageIndex ? nextPage : item) } }
+}
+
+/** 更新分块的展示语义；菜单比例、区域显隐等属性与其他编辑一样进入统一历史。 */
+export function updateBlockDefinition(document: ReportDocument, pageID: string, blockID: string, update: (block: ReportBlock) => ReportBlock): LayoutUpdateResult {
+  const pageIndex = document.pages.findIndex(page => page.id === pageID)
+  if (pageIndex < 0) return { issue: { path: 'pages', reason: `页面 ${pageID} 不存在` } }
+  const page = document.pages[pageIndex]
+  const blockIndex = page.blocks.findIndex(block => block.id === blockID)
+  if (blockIndex < 0) return { issue: { path: `pages[${pageIndex}].blocks`, reason: `分块 ${blockID} 不存在` } }
+  const block = page.blocks[blockIndex]
+  if (block.locks.config) {
+    return { issue: { path: `pages[${pageIndex}].blocks[${blockIndex}].locks.config`, reason: '分块配置已锁定' } }
+  }
+  const nextBlock = update(structuredClone(block))
+  if (nextBlock.id !== block.id) {
+    return { issue: { path: `pages[${pageIndex}].blocks[${blockIndex}].id`, reason: '分块标识不能通过属性面板修改' } }
+  }
   const nextPage = { ...page, blocks: page.blocks.map((item, index) => index === blockIndex ? nextBlock : item) }
   return { document: { ...document, pages: document.pages.map((item, index) => index === pageIndex ? nextPage : item) } }
 }

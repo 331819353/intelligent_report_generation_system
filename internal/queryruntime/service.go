@@ -32,12 +32,17 @@ type Service struct {
 	connectors map[datasource.Type]QueryConnector
 	files      FileExecutor
 	federated  FederatedExecutor
+	warehouse  WarehouseExecutor
 	mu         sync.Mutex
 	active     map[string]activeQuery
 }
 
 // SetFederatedExecutor 在进程启动装配阶段注册跨源执行器。
 func (s *Service) SetFederatedExecutor(executor FederatedExecutor) { s.federated = executor }
+
+// SetWarehouseExecutor registers the API role's read-only PostgreSQL execution
+// path for governed warehouse_published views.
+func (s *Service) SetWarehouseExecutor(executor WarehouseExecutor) { s.warehouse = executor }
 
 // NewService 创建安全查询运行时；文件执行器是可选依赖，未注册时拒绝 Excel/CSV 预览。
 func NewService(datasets DatasetStore, sources SourceStore, policies PolicyStore, store RuntimeStore, connectors map[datasource.Type]QueryConnector, fileExecutors ...FileExecutor) *Service {
@@ -220,6 +225,18 @@ func (s *Service) PreviewMetric(ctx context.Context, tenantID, actorID string, c
 	if err != nil || !sameMetricSourceEnvelope(original, derived) {
 		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
 	}
+	materializedRoot := false
+	if version.Layer == dataset.LayerDWS {
+		derived, err = materializedMetricDocument(original, derived, candidate.DatasetVersionID)
+		if err != nil {
+			return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
+		}
+		materializedRoot = true
+	}
+	derivedDSL, err := json.Marshal(derived)
+	if err != nil {
+		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+	}
 	runType := "PREVIEW"
 	if validation {
 		runType = "VALIDATION"
@@ -227,7 +244,8 @@ func (s *Service) PreviewMetric(ctx context.Context, tenantID, actorID string, c
 	return s.previewSnapshot(ctx, tenantID, actorID, runtimeSnapshot{
 		DatasetID: candidate.DatasetID, VersionID: candidate.DatasetVersionID,
 		MetricID: candidate.MetricID, MetricVersionID: candidate.MetricVersionID,
-		PlanHash: candidate.PlanHash, DSL: candidate.DSL, ExactVersion: true, MetricDatabaseOnly: true,
+		PlanHash: candidate.PlanHash, DSL: derivedDSL, ExactVersion: true,
+		MetricExecution: true, MaterializedRoot: materializedRoot,
 	}, input, runType)
 }
 
@@ -246,14 +264,6 @@ func (s *Service) ValidatePublication(ctx context.Context, tenantID, actorID str
 	document, err := dataset.DecodeAndNormalize(candidate.DSL)
 	if err != nil {
 		return dataset.PreviewResult{}, &dataset.PublicationValidationError{Issues: []dataset.PublicationIssue{{Path: "dsl", Code: "PUBLISH_DSL_INVALID", Reason: "发布草稿无法解析"}}}
-	}
-	// 首阶段只允许物理表节点进入查询试跑；嵌套数据集必须在实现递归边界后显式开放。
-	for index, node := range document.Nodes {
-		if node.Type != "TABLE" {
-			return dataset.PreviewResult{}, &dataset.PublicationValidationError{Issues: []dataset.PublicationIssue{{
-				Path: fmt.Sprintf("nodes[%d]", index), Code: "PUBLISH_DATASET_NODE_UNSUPPORTED", Reason: "当前发布试跑只支持物理表节点",
-			}}}
-		}
 	}
 	// 当前基数探测只对等值键有确定语义；其他操作符必须在进入查询前按 DSL 路径失败关闭。
 	for joinIndex, join := range document.Joins {
@@ -279,15 +289,16 @@ func (s *Service) ValidatePublication(ctx context.Context, tenantID, actorID str
 }
 
 type runtimeSnapshot struct {
-	DatasetID          string
-	VersionID          string
-	CandidateCode      string
-	MetricID           string
-	MetricVersionID    string
-	PlanHash           string
-	DSL                json.RawMessage
-	ExactVersion       bool
-	MetricDatabaseOnly bool
+	DatasetID        string
+	VersionID        string
+	CandidateCode    string
+	MetricID         string
+	MetricVersionID  string
+	PlanHash         string
+	DSL              json.RawMessage
+	ExactVersion     bool
+	MetricExecution  bool
+	MaterializedRoot bool
 }
 
 func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string, snapshot runtimeSnapshot, input dataset.PreviewInput, runType string) (dataset.PreviewResult, error) {
@@ -298,7 +309,11 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	// DSL 中只有资产 ID；每次执行都从控制库重新解析物理白名单并加载当前策略，
 	// 因而草稿不能缓存旧表名或旧权限来绕过撤权。
 	var resolved ResolvedPlan
-	if snapshot.ExactVersion {
+	if snapshot.MaterializedRoot {
+		resolved, err = s.store.ResolveMaterializedVersion(
+			ctx, tenantID, snapshot.DatasetID, snapshot.VersionID, document,
+		)
+	} else if snapshot.ExactVersion {
 		resolved, err = s.store.ResolveVersion(ctx, tenantID, snapshot.DatasetID, snapshot.VersionID, document)
 	} else {
 		resolved, err = s.store.Resolve(ctx, tenantID, document)
@@ -306,16 +321,11 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
-	if snapshot.MetricDatabaseOnly && (document.Dataset.Type != "SINGLE_SOURCE" || resolved.SourceType == datasource.TypeExcel) {
-		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
-	}
-	quota, err := s.sources.Quota(ctx, tenantID)
-	if err != nil {
-		return dataset.PreviewResult{}, err
-	}
-	sources, err := s.loadSources(ctx, tenantID, resolved, quota)
-	if err != nil {
-		return dataset.PreviewResult{}, err
+	if resolved.Engine == "" {
+		// Compatibility for in-process resolvers compiled before the warehouse
+		// path existed. Production PostgreSQL resolution always sets this
+		// explicitly.
+		resolved.Engine = ExecutionSource
 	}
 	policyObjectID := snapshot.DatasetID
 	if policyObjectID == "" {
@@ -327,7 +337,7 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	}
 	// 现有策略编译层位于聚合之后；指标若直接复用会导致行策略过晚生效，
 	// 因此首阶段对带数据策略的数据集失败关闭。
-	if snapshot.MetricDatabaseOnly && (len(rowPolicies) > 0 || len(columnPolicies) > 0) {
+	if snapshot.MetricExecution && (len(rowPolicies) > 0 || len(columnPolicies) > 0) {
 		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
 	}
 	maxRows := input.MaxRows
@@ -347,7 +357,22 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 		ID: queryID, TenantID: tenantID, DatasetID: snapshot.DatasetID, DatasetVersionID: snapshot.VersionID,
 		CandidateCode: snapshot.CandidateCode,
 		MetricID:      snapshot.MetricID, MetricVersionID: snapshot.MetricVersionID,
-		ActorID: actorID, SourceID: resolved.SourceID, RunType: runType,
+		ActorID: actorID, SourceID: resolved.SourceID, ExecutionEngine: resolved.Engine,
+		RunType: runType, Materializations: append([]ResolvedMaterialization(nil), resolved.Materializations...),
+	}
+	if resolved.Engine == ExecutionPostgreSQL {
+		return s.previewWarehouse(
+			ctx, tenantID, document, resolved, input.Parameters, scope,
+			rowPolicies, columnPolicies, maxRows, baseRun,
+		)
+	}
+	quota, err := s.sources.Quota(ctx, tenantID)
+	if err != nil {
+		return dataset.PreviewResult{}, err
+	}
+	sources, err := s.loadSources(ctx, tenantID, resolved, quota)
+	if err != nil {
+		return dataset.PreviewResult{}, err
 	}
 	baseRun.Sources = resolvedRunSources(queryID, document.Dataset.Type, resolved)
 	if document.Dataset.Type == "CROSS_SOURCE" {
@@ -469,6 +494,61 @@ func (s *Service) previewDatabase(ctx context.Context, source datasource.Source,
 		}
 		return result, nil
 	})
+}
+
+func (s *Service) previewWarehouse(
+	ctx context.Context,
+	tenantID string,
+	document dataset.Document,
+	resolved ResolvedPlan,
+	parameters map[string]any,
+	scope policy.UserScope,
+	rowPolicies []policy.RowPolicy,
+	columnPolicies []policy.ColumnPolicy,
+	maxRows int,
+	run RunRecord,
+) (dataset.PreviewResult, error) {
+	if s.warehouse == nil || resolved.Engine != ExecutionPostgreSQL ||
+		len(resolved.Materializations) == 0 || len(resolved.Tables) == 0 {
+		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
+	}
+	normalized, err := querycompiler.NormalizeParameters(document.Parameters, parameters)
+	if err != nil {
+		return dataset.PreviewResult{}, fmt.Errorf("%w: %v", dataset.ErrPreviewInvalid, err)
+	}
+	// Audit the structured plan and immutable materialization identities rather
+	// than retaining generated SQL or parameter values.
+	planJSON, err := json.Marshal(struct {
+		Document         dataset.Document
+		Tables           map[string]querycompiler.TableRef
+		Materializations []ResolvedMaterialization
+		Rows             []policy.RowPolicy
+		Columns          []policy.ColumnPolicy
+	}{
+		Document: document, Tables: resolved.Tables,
+		Materializations: resolved.Materializations,
+		Rows:             rowPolicies, Columns: columnPolicies,
+	})
+	if err != nil {
+		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+	}
+	bindingJSON, err := json.Marshal(struct {
+		Parameters map[string]any
+		Scope      policy.UserScope
+	}{Parameters: normalized, Scope: scope})
+	if err != nil {
+		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+	}
+	run.PlanHash, run.ParameterHash = hash(planJSON), hash(bindingJSON)
+	return s.execute(
+		ctx, document, run, maxRows, s.warehouse,
+		func(queryContext context.Context) (datasource.QueryResult, error) {
+			return s.warehouse.Execute(
+				queryContext, tenantID, run.ID, document, resolved, normalized,
+				scope, rowPolicies, columnPolicies, maxRows,
+			)
+		},
+	)
 }
 
 type joinProbeStats struct {

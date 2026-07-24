@@ -158,6 +158,9 @@ export const metricAPI = {
   update: (id: string, input: UpdateMetricInput) => apiRequest<MetricRecord>(`${metricPath(id)}/draft`, {
     method: 'PUT', body: JSON.stringify(input),
   }),
+  delete: (id: string, expectedVersion: number) => apiRequest<void>(metricPath(id), {
+    method: 'DELETE', body: JSON.stringify({ expectedVersion }),
+  }),
   validate: (id: string) => apiRequest<{
     valid: boolean; definition?: MetricDefinition; definitionHash?: string
   }>(`${metricPath(id)}/validate`, {

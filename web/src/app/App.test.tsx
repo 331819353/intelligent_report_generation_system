@@ -75,7 +75,7 @@ test('legacy new-dataset route also opens the configuration-center canvas', asyn
   expect(within(dialog).getByRole('button', { name: '配置关联 1' })).toBeInTheDocument()
 })
 
-test('renders the protected metric center route and navigation entry', async () => {
+test('renders the protected asset management metric route and navigation entry', async () => {
   sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
@@ -85,13 +85,14 @@ test('renders the protected metric center route and navigation entry', async () 
     return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
   }))
 
-  render(<MemoryRouter initialEntries={['/metrics']}><App /></MemoryRouter>)
+  render(<MemoryRouter initialEntries={['/assets/metrics']}><App /></MemoryRouter>)
 
-  expect(screen.getByRole('heading', { level: 1, name: '指标中心' })).toBeInTheDocument()
-  expect(screen.getByRole('link', { name: '指标中心' })).toHaveClass('active')
-  expect(await screen.findByLabelText('搜索指标')).toBeEnabled()
-  expect(screen.getByText('还没有指标')).toBeInTheDocument()
-  expect(screen.getAllByRole('button', { name: '新建指标' })).toHaveLength(2)
+  expect(screen.getByRole('heading', { level: 1, name: '资产管理中心' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: '资产管理中心' })).toHaveClass('active')
+  expect(screen.getByRole('link', { name: '指标资产' })).toHaveClass('active')
+  expect(await screen.findByLabelText('搜索数据集或指标')).toBeEnabled()
+  expect(screen.getByText('还没有可展示的普通数据集')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '新建指标' })).not.toBeInTheDocument()
 })
 
 test('renders the protected data source center route and navigation entry', async () => {
@@ -115,4 +116,36 @@ test('renders the dataset configuration center route and renamed navigation entr
   expect(screen.getByRole('heading', { level: 1, name: '数据集配置中心' })).toBeInTheDocument()
   expect(screen.getByRole('link', { name: '数据集配置中心' })).toHaveClass('active')
   expect(await screen.findByText('还没有数据集')).toBeInTheDocument()
+})
+
+test('renders the protected asset management semantic route and navigation entry', async () => {
+  sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const body = String(input).includes('/permissions/evaluate')
+      ? { allowed: true }
+      : { items: [], total: 0, limit: 200, offset: 0 }
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }))
+
+  render(<MemoryRouter initialEntries={['/assets/semantics']}><App /></MemoryRouter>)
+
+  expect(screen.getByRole('heading', { level: 1, name: '资产管理中心' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: '资产管理中心' })).toHaveClass('active')
+  expect(screen.getByRole('link', { name: '语义资产' })).toHaveClass('active')
+  expect(await screen.findByText('当前筛选下没有维度候选')).toBeInTheDocument()
+})
+
+test('opens dimension value mapping directly on the formal dimension directory', async () => {
+  sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const body = String(input).includes('/permissions/evaluate')
+      ? { allowed: true }
+      : { items: [], total: 0, limit: 200, offset: 0 }
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }))
+
+  render(<MemoryRouter initialEntries={['/assets/dimension-values']}><App /></MemoryRouter>)
+
+  expect(await screen.findByRole('tab', { name: '正式维度与成员' })).toHaveAttribute('aria-selected', 'true')
+  expect(screen.getByRole('link', { name: '维度值映射' })).toHaveClass('active')
 })

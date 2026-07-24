@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasource"
+	"intelligent-report-generation-system/internal/materialization"
 	"intelligent-report-generation-system/internal/metric"
 	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/querycompiler"
@@ -26,7 +27,7 @@ func (s *PostgresStore) Resolve(ctx context.Context, tenantID string, document d
 	var result ResolvedPlan
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		var err error
-		result, err = resolveTx(ctx, tx, document)
+		result, err = resolveTx(ctx, tx, tenantID, document)
 		return err
 	})
 	return result, err
@@ -40,7 +41,7 @@ func (s *PostgresStore) ResolveVersion(ctx context.Context, tenantID, datasetID,
 			return err
 		}
 		var err error
-		result, err = resolveTx(ctx, tx, document)
+		result, err = resolveTx(ctx, tx, tenantID, document)
 		if errors.Is(err, dataset.ErrInvalidDocument) || errors.Is(err, dataset.ErrPreviewUnsupported) {
 			return dataset.ErrVersionUnavailable
 		}
@@ -49,8 +50,72 @@ func (s *PostgresStore) ResolveVersion(ctx context.Context, tenantID, datasetID,
 	return result, err
 }
 
-func resolveTx(ctx context.Context, tx pgx.Tx, document dataset.Document) (ResolvedPlan, error) {
-	result := ResolvedPlan{Tables: map[string]querycompiler.TableRef{}, Nodes: map[string]ResolvedNode{}}
+// ResolveMaterializedVersion resolves an execution-only one-node document to
+// the exact current DWS version's ACTIVE materialization. It is used by metric
+// preview/publication so metrics read the governed DWS output instead of
+// replaying the DWS DAG against mutable upstream contents.
+func (s *PostgresStore) ResolveMaterializedVersion(
+	ctx context.Context,
+	tenantID, datasetID, versionID string,
+	document dataset.Document,
+) (result ResolvedPlan, err error) {
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		if len(document.Nodes) != 1 ||
+			document.Nodes[0].Type != "DATASET" ||
+			document.Nodes[0].DatasetVersionID != versionID {
+			return dataset.ErrPreviewUnsupported
+		}
+		if err := dataset.ValidateVersionDependenciesInTx(
+			ctx, tx, datasetID, versionID,
+		); err != nil {
+			return err
+		}
+		binding, table, err := resolveActiveMaterializationTx(
+			ctx, tx, tenantID, document.Nodes[0],
+			string(dataset.LayerDWS), datasetID,
+		)
+		if err != nil {
+			if errors.Is(err, dataset.ErrInvalidDocument) ||
+				errors.Is(err, dataset.ErrPreviewUnsupported) {
+				return dataset.ErrVersionUnavailable
+			}
+			return err
+		}
+		result = ResolvedPlan{
+			Engine: ExecutionPostgreSQL,
+			Tables: map[string]querycompiler.TableRef{
+				document.Nodes[0].ID: table,
+			},
+			Nodes:            map[string]ResolvedNode{},
+			Materializations: []ResolvedMaterialization{binding},
+		}
+		return nil
+	})
+	return result, err
+}
+
+func resolveTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID string,
+	document dataset.Document,
+) (ResolvedPlan, error) {
+	hasTable, hasDataset := false, false
+	for _, node := range document.Nodes {
+		hasTable = hasTable || node.Type == "TABLE"
+		hasDataset = hasDataset || node.Type == "DATASET"
+	}
+	if hasDataset {
+		if hasTable {
+			return ResolvedPlan{}, dataset.ErrPreviewUnsupported
+		}
+		return resolveDatasetNodesTx(ctx, tx, tenantID, document)
+	}
+	result := ResolvedPlan{
+		Engine: ExecutionSource,
+		Tables: map[string]querycompiler.TableRef{},
+		Nodes:  map[string]ResolvedNode{},
+	}
 	fileVersionsBySource := map[string]string{}
 	for _, node := range document.Nodes {
 		if node.Type != "TABLE" {
@@ -150,12 +215,204 @@ func resolveTx(ctx context.Context, tx pgx.Tx, document dataset.Document) (Resol
 	return result, nil
 }
 
+func resolveDatasetNodesTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID string,
+	document dataset.Document,
+) (ResolvedPlan, error) {
+	expectedLayer := ""
+	switch document.Dataset.Layer {
+	case dataset.LayerDWD:
+		expectedLayer = string(dataset.LayerODS)
+	case dataset.LayerDWS:
+		expectedLayer = string(dataset.LayerDWD)
+	default:
+		return ResolvedPlan{}, dataset.ErrPreviewUnsupported
+	}
+	result := ResolvedPlan{
+		Engine: ExecutionPostgreSQL,
+		Tables: map[string]querycompiler.TableRef{},
+		Nodes:  map[string]ResolvedNode{},
+	}
+	for _, node := range document.Nodes {
+		binding, table, err := resolveActiveMaterializationTx(
+			ctx, tx, tenantID, node, expectedLayer, "",
+		)
+		if err != nil {
+			return ResolvedPlan{}, err
+		}
+		result.Tables[node.ID] = table
+		result.Materializations = append(result.Materializations, binding)
+	}
+	if len(result.Materializations) == 0 {
+		return ResolvedPlan{}, dataset.ErrPreviewUnsupported
+	}
+	return result, nil
+}
+
+func resolveActiveMaterializationTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID string,
+	node dataset.Node,
+	expectedLayer string,
+	expectedDatasetID string,
+) (ResolvedMaterialization, querycompiler.TableRef, error) {
+	if node.Type != "DATASET" || node.DatasetVersionID == "" ||
+		len(node.Projection) == 0 {
+		return ResolvedMaterialization{}, querycompiler.TableRef{}, dataset.ErrInvalidDocument
+	}
+	var binding ResolvedMaterialization
+	binding.NodeID = node.ID
+	var versionLayer, versionHash, buildRunID, materializationLayer string
+	var physicalSchema, physicalName, relationKind string
+	err := tx.QueryRow(ctx, `SELECT owner.id::text,version.id::text,
+			version.layer,version.schema_hash,
+			materialization.id::text,materialization.build_run_id::text,
+			materialization.layer,materialization.relation_kind,
+			materialization.physical_schema,materialization.physical_name,
+			materialization.published_schema,materialization.published_name,
+			materialization.schema_hash,materialization.snapshot_hash
+		FROM platform.dataset_versions AS version
+		JOIN platform.datasets AS owner
+		  ON owner.id=version.dataset_id AND owner.tenant_id=version.tenant_id
+		JOIN platform.dataset_materializations AS materialization
+		  ON materialization.dataset_id=owner.id
+		 AND materialization.dataset_version_id=version.id
+		 AND materialization.tenant_id=owner.tenant_id
+		 AND materialization.status='ACTIVE'
+		WHERE version.id::text=$1
+		  AND version.status='PUBLISHED'
+		  AND owner.status='PUBLISHED'
+		  AND owner.current_published_version_id=version.id
+		  AND owner.deleted_at IS NULL
+		FOR SHARE OF version,owner,materialization`,
+		node.DatasetVersionID).
+		Scan(
+			&binding.DatasetID, &binding.DatasetVersionID,
+			&versionLayer, &versionHash,
+			&binding.MaterializationID, &buildRunID,
+			&materializationLayer, &relationKind,
+			&physicalSchema, &physicalName,
+			&binding.PublishedSchema, &binding.PublishedName,
+			&binding.SchemaHash, &binding.SnapshotHash,
+		)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ResolvedMaterialization{}, querycompiler.TableRef{}, dataset.ErrPreviewUnsupported
+	}
+	if err != nil {
+		return ResolvedMaterialization{}, querycompiler.TableRef{}, err
+	}
+	binding.Layer = versionLayer
+	if versionLayer != expectedLayer ||
+		materializationLayer != expectedLayer ||
+		expectedDatasetID != "" && binding.DatasetID != expectedDatasetID ||
+		binding.SchemaHash != versionHash ||
+		relationKind != "TABLE" && relationKind != "PARTITIONED_TABLE" {
+		return ResolvedMaterialization{}, querycompiler.TableRef{}, dataset.ErrPreviewUnsupported
+	}
+	identifier := materialization.PhysicalIdentifier{
+		Schema: physicalSchema, Name: physicalName,
+		PublishedSchema: binding.PublishedSchema,
+		PublishedName:   binding.PublishedName,
+	}
+	if err := materialization.ValidatePhysicalIdentifier(
+		identifier, tenantID, binding.DatasetID, buildRunID,
+		materialization.Layer(binding.Layer),
+	); err != nil {
+		return ResolvedMaterialization{}, querycompiler.TableRef{}, dataset.ErrPreviewUnsupported
+	}
+	var publishedKind string
+	if err := tx.QueryRow(ctx, `SELECT class.relkind::text
+		FROM pg_class AS class
+		JOIN pg_namespace AS namespace ON namespace.oid=class.relnamespace
+		WHERE namespace.nspname=$1 AND class.relname=$2`,
+		binding.PublishedSchema, binding.PublishedName).Scan(&publishedKind); errors.Is(err, pgx.ErrNoRows) {
+		return ResolvedMaterialization{}, querycompiler.TableRef{}, dataset.ErrPreviewUnsupported
+	} else if err != nil {
+		return ResolvedMaterialization{}, querycompiler.TableRef{}, err
+	}
+	if publishedKind != "v" {
+		return ResolvedMaterialization{}, querycompiler.TableRef{}, dataset.ErrPreviewUnsupported
+	}
+
+	available, types, err := loadMaterializedColumnsTx(
+		ctx, tx, binding.DatasetVersionID,
+	)
+	if err != nil {
+		return ResolvedMaterialization{}, querycompiler.TableRef{}, err
+	}
+	columns := make(map[string]bool, len(node.Projection))
+	columnTypes := make(map[string]string, len(node.Projection))
+	for _, projected := range node.Projection {
+		canonicalType, found := types[projected]
+		if !found || !available[projected] {
+			return ResolvedMaterialization{}, querycompiler.TableRef{}, dataset.ErrInvalidDocument
+		}
+		columns[projected] = true
+		columnTypes[projected] = canonicalType
+	}
+	return binding, querycompiler.TableRef{
+		NodeID: node.ID, Schema: binding.PublishedSchema,
+		Name: binding.PublishedName, Columns: columns, ColumnTypes: columnTypes,
+	}, nil
+}
+
+func loadMaterializedColumnsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	versionID string,
+) (map[string]bool, map[string]string, error) {
+	rows, err := tx.Query(ctx, `SELECT field_code,canonical_type
+		FROM platform.dataset_fields
+		WHERE dataset_version_id::text=$1
+		ORDER BY ordinal_position`, versionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	types := map[string]string{}
+	for rows.Next() {
+		var code, canonicalType string
+		if err := rows.Scan(&code, &canonicalType); err != nil {
+			return nil, nil, err
+		}
+		columns[code] = true
+		types[code] = canonicalType
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	if len(columns) == 0 {
+		return nil, nil, dataset.ErrPreviewUnsupported
+	}
+	return columns, types, nil
+}
+
 // Start 创建 RUNNING 审计记录，哈希字段用于关联相同执行计划但不泄露敏感值。
 func (s *PostgresStore) Start(ctx context.Context, run RunRecord) error {
 	if run.RunType == "" {
 		run.RunType = "PREVIEW"
 	}
 	if run.RunType != "PREVIEW" && run.RunType != "VALIDATION" && run.RunType != "COMPONENT_PREVIEW" {
+		return dataset.ErrPreviewInvalid
+	}
+	if run.ExecutionEngine == "" {
+		run.ExecutionEngine = ExecutionSource
+	}
+	switch run.ExecutionEngine {
+	case ExecutionSource:
+		if run.SourceID == "" || len(run.Materializations) != 0 {
+			return dataset.ErrPreviewInvalid
+		}
+	case ExecutionPostgreSQL:
+		if run.SourceID != "" || len(run.Sources) != 0 ||
+			len(run.Materializations) == 0 {
+			return dataset.ErrPreviewInvalid
+		}
+	default:
 		return dataset.ErrPreviewInvalid
 	}
 	if run.CandidateCode != "" {
@@ -165,10 +422,18 @@ func (s *PostgresStore) Start(ctx context.Context, run RunRecord) error {
 		return s.startCandidate(ctx, run)
 	}
 	err := database.WithTenantTx(ctx, s.pool, run.TenantID, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO platform.query_runs(id,tenant_id,dataset_id,dataset_version_id,metric_id,metric_version_id,actor_user_id,data_source_id,run_type,plan_hash,parameter_hash,status)
-			VALUES($1,$2,$3,$4,NULLIF($5,'')::uuid,NULLIF($6,'')::uuid,$7,$8,$9,$10,$11,'RUNNING')`,
+		_, err := tx.Exec(ctx, `INSERT INTO platform.query_runs(
+				id,tenant_id,dataset_id,dataset_version_id,
+				metric_id,metric_version_id,actor_user_id,data_source_id,
+				execution_engine,run_type,plan_hash,parameter_hash,status
+			)
+			VALUES(
+				$1,$2,$3,$4,NULLIF($5,'')::uuid,NULLIF($6,'')::uuid,
+				$7,NULLIF($8,'')::uuid,$9,$10,$11,$12,'RUNNING'
+			)`,
 			run.ID, run.TenantID, run.DatasetID, run.DatasetVersionID, run.MetricID, run.MetricVersionID,
-			run.ActorID, run.SourceID, run.RunType, run.PlanHash, run.ParameterHash)
+			run.ActorID, run.SourceID, run.ExecutionEngine, run.RunType,
+			run.PlanHash, run.ParameterHash)
 		if err != nil {
 			return err
 		}
@@ -178,7 +443,9 @@ func (s *PostgresStore) Start(ctx context.Context, run RunRecord) error {
 				return err
 			}
 		}
-		return nil
+		return insertMaterializationSnapshotsTx(
+			ctx, tx, "platform.query_run_materializations", run,
+		)
 	})
 	var pgError *pgconn.PgError
 	if errors.As(err, &pgError) && pgError.Code == "23505" {
@@ -193,8 +460,14 @@ func (s *PostgresStore) Start(ctx context.Context, run RunRecord) error {
 
 func (s *PostgresStore) startCandidate(ctx context.Context, run RunRecord) error {
 	err := database.WithTenantTx(ctx, s.pool, run.TenantID, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO platform.query_candidate_runs(id,tenant_id,candidate_code,actor_user_id,data_source_id,run_type,plan_hash,parameter_hash,status)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,'RUNNING')`, run.ID, run.TenantID, run.CandidateCode, run.ActorID, run.SourceID, run.RunType, run.PlanHash, run.ParameterHash); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.query_candidate_runs(
+				id,tenant_id,candidate_code,actor_user_id,data_source_id,
+				execution_engine,run_type,plan_hash,parameter_hash,status
+			)
+			VALUES($1,$2,$3,$4,NULLIF($5,'')::uuid,$6,$7,$8,$9,'RUNNING')`,
+			run.ID, run.TenantID, run.CandidateCode, run.ActorID,
+			run.SourceID, run.ExecutionEngine, run.RunType,
+			run.PlanHash, run.ParameterHash); err != nil {
 			return err
 		}
 		for _, source := range run.Sources {
@@ -203,13 +476,72 @@ func (s *PostgresStore) startCandidate(ctx context.Context, run RunRecord) error
 				return err
 			}
 		}
-		return nil
+		return insertMaterializationSnapshotsTx(
+			ctx, tx, "platform.query_candidate_run_materializations", run,
+		)
 	})
 	var pgError *pgconn.PgError
 	if errors.As(err, &pgError) && pgError.Code == "23505" {
 		return dataset.ErrQueryConflict
 	}
 	return err
+}
+
+func insertMaterializationSnapshotsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	table string,
+	run RunRecord,
+) error {
+	if table != "platform.query_run_materializations" &&
+		table != "platform.query_candidate_run_materializations" {
+		return dataset.ErrPreviewInvalid
+	}
+	for _, binding := range run.Materializations {
+		tag, err := tx.Exec(ctx, `INSERT INTO `+table+`(
+				query_run_id,tenant_id,node_id,dataset_id,dataset_version_id,
+				materialization_id,layer,published_schema,published_name,
+				schema_hash,snapshot_hash
+			)
+			SELECT $1,$2,$3,materialization.dataset_id,
+				materialization.dataset_version_id,materialization.id,
+				materialization.layer,materialization.published_schema,
+				materialization.published_name,materialization.schema_hash,
+				materialization.snapshot_hash
+			FROM platform.dataset_materializations AS materialization
+			JOIN platform.dataset_versions AS version
+			  ON version.id=materialization.dataset_version_id
+			 AND version.dataset_id=materialization.dataset_id
+			 AND version.tenant_id=materialization.tenant_id
+			JOIN platform.datasets AS owner
+			  ON owner.id=version.dataset_id
+			 AND owner.tenant_id=version.tenant_id
+			WHERE materialization.id=$4
+			  AND materialization.dataset_id=$5
+			  AND materialization.dataset_version_id=$6
+			  AND materialization.layer=$7
+			  AND materialization.published_schema=$8
+			  AND materialization.published_name=$9
+			  AND materialization.schema_hash=$10
+			  AND materialization.snapshot_hash=$11
+			  AND materialization.status='ACTIVE'
+			  AND version.status='PUBLISHED'
+			  AND owner.status='PUBLISHED'
+			  AND owner.current_published_version_id=version.id
+			  AND owner.deleted_at IS NULL`,
+			run.ID, run.TenantID, binding.NodeID,
+			binding.MaterializationID, binding.DatasetID,
+			binding.DatasetVersionID, binding.Layer,
+			binding.PublishedSchema, binding.PublishedName,
+			binding.SchemaHash, binding.SnapshotHash)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return dataset.ErrVersionUnavailable
+		}
+	}
+	return nil
 }
 
 // Finish 只允许结束仍在运行的记录，取消和原请求回写并发时不会互相覆盖。
@@ -273,7 +605,11 @@ func (s *PostgresStore) Finish(ctx context.Context, tenantID, queryID, status st
 func (s *PostgresStore) CancellableSources(ctx context.Context, tenantID, actorID, datasetID, queryID string) (out []RunSourceRecord, err error) {
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		var primarySourceID string
-		if err := tx.QueryRow(ctx, `SELECT data_source_id::text FROM platform.query_runs WHERE id::text=$1 AND actor_user_id::text=$2 AND dataset_id::text=$3 AND status='RUNNING'`, queryID, actorID, datasetID).Scan(&primarySourceID); errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(data_source_id::text,'')
+			FROM platform.query_runs
+			WHERE id::text=$1 AND actor_user_id::text=$2
+			  AND dataset_id::text=$3 AND status='RUNNING'`,
+			queryID, actorID, datasetID).Scan(&primarySourceID); errors.Is(err, pgx.ErrNoRows) {
 			return dataset.ErrQueryNotFound
 		} else if err != nil {
 			return err
@@ -297,7 +633,7 @@ func (s *PostgresStore) CancellableSources(ctx context.Context, tenantID, actorI
 			return err
 		}
 		rows.Close()
-		if len(out) == 0 {
+		if len(out) == 0 && primarySourceID != "" {
 			// 兼容迁移前以及直接写入的单源运行记录。
 			var item RunSourceRecord
 			if err := tx.QueryRow(ctx, `SELECT d.id::text,d.source_type,d.version,COALESCE(d.last_synced_at::text,'') FROM platform.data_sources d WHERE d.id::text=$1`, primarySourceID).

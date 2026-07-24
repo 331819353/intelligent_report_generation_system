@@ -102,6 +102,9 @@ const statusLabels: Record<string, string> = {
 }
 const typeLabels: Record<string, string> = { SINGLE_SOURCE: '单数据源', CROSS_SOURCE: '跨数据源' }
 const publicationStatusLabels: Record<string, string> = { PENDING: '待审批', APPROVED: '已通过', REJECTED: '已拒绝' }
+const metricCandidateGenerationLabels: Record<string, string> = {
+  LEGACY: '审批后生成', PENDING: '后台生成中', SUCCEEDED: '已生成', PARTIAL: '已生成，部分待复核', FAILED: '生成失败',
+}
 type TransformPaletteCategory = 'TEXT' | 'NUMBER' | 'DATE' | 'RULE'
 type TransformComponentMeta = {
   componentType: GraphTransformComponentType
@@ -665,11 +668,18 @@ export function DatasetCenterPage() {
     ? publicationRequests.find(item => item.draftVersionId === publicationRecord.draftVersionId &&
       item.expectedDraftRecordVersion === publicationRecord.draftRecordVersion) ?? null
     : null
-  const metricFlowState = location.state as { returnTo?: unknown; metricAIRequirement?: unknown } | null
+  const metricFlowState = location.state as {
+    returnTo?: unknown
+    metricAIRequirement?: unknown
+    preferredDatasetId?: unknown
+    safeDatasetExtension?: unknown
+  } | null
   const metricReturnTo = typeof metricFlowState?.returnTo === 'string' && metricFlowState.returnTo.startsWith('/')
     ? metricFlowState.returnTo
     : ''
   const metricAIRequirement = typeof metricFlowState?.metricAIRequirement === 'string' ? metricFlowState.metricAIRequirement : ''
+  const metricPreferredDatasetId = typeof metricFlowState?.preferredDatasetId === 'string' ? metricFlowState.preferredDatasetId : ''
+  const metricSafeDatasetExtension = metricFlowState?.safeDatasetExtension === true && Boolean(metricPreferredDatasetId)
 
   const currentEditorSnapshot = useMemo<DatasetEditorSnapshot>(() => ({
     draft, relationBoxes, groupBoxes, transformBoxes, endBox, nodePositions, metadata,
@@ -1638,7 +1648,7 @@ export function DatasetCenterPage() {
     setBusyAction('')
   }
 
-  const refreshPublication = async (datasetID: string) => {
+  const refreshPublication = useCallback(async (datasetID: string, refreshCatalog = true) => {
     const [record, requests] = await Promise.all([
       datasetAPI.get(datasetID),
       datasetAPI.listPublicationRequests(datasetID, 50, 0),
@@ -1648,8 +1658,25 @@ export function DatasetCenterPage() {
     setSelectedPublicationRequestID(current => requests.items.some(item => item.id === current)
       ? current
       : requests.items.find(item => item.status === 'PENDING')?.id ?? requests.items[0]?.id ?? '')
-    await loadDatasets()
-  }
+    if (refreshCatalog) await loadDatasets()
+  }, [loadDatasets])
+
+  useEffect(() => {
+    const datasetID = dialog?.mode === 'publish' ? publicationRecord?.id : ''
+    const waiting = publicationRequests.some(request =>
+      request.status === 'PENDING' && request.metricCandidateStatus === 'PENDING')
+    if (!datasetID || !waiting) return
+    let active = true
+    const timer = window.setInterval(() => {
+      void refreshPublication(datasetID, false).catch(cause => {
+        if (active) setFormError(cause instanceof Error ? cause.message : '刷新后台指标候选状态失败')
+      })
+    }, 2000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [dialog?.mode, publicationRecord?.id, publicationRequests, refreshPublication])
 
   const submitPublicationRequest = async () => {
     if (!publicationRecord || !publicationCapabilities.manage || busyAction) return
@@ -1666,7 +1693,12 @@ export function DatasetCenterPage() {
       await refreshPublication(publicationRecord.id)
       setSelectedPublicationRequestID(request.id)
       setPublicationNote('')
-      setNotice({ tone: 'success', message: request.status === 'PENDING' ? `“${publicationRecord.name}”已提交发布审批` : `当前草稿已有${publicationStatusLabels[request.status] ?? request.status}记录` })
+      setNotice({
+        tone: 'success',
+        message: request.status === 'PENDING'
+          ? `“${publicationRecord.name}”已提交发布审批，指标候选正在后台生成`
+          : `当前草稿已有${publicationStatusLabels[request.status] ?? request.status}记录`,
+      })
     } catch (cause) {
       setFormError(cause instanceof Error ? cause.message : '提交发布审批失败')
     } finally {
@@ -2131,17 +2163,17 @@ export function DatasetCenterPage() {
           <section className="dataset-publication-current" aria-label="当前发布候选">
             <div><span>当前草稿</span><strong>草稿 V{publicationRecord.draftVersionNo}</strong><small>{publicationRecord.dslHash.slice(0, 12)}…</small></div>
             <div><span>数据集聚合版本</span><strong>V{publicationRecord.version}</strong><small>提交时会冻结当前精确版本</small></div>
-            <div><span>当前草稿审批</span><strong className={currentDraftPublicationRequest?.status.toLowerCase()}>{currentDraftPublicationRequest ? publicationStatusLabels[currentDraftPublicationRequest.status] : '未提交'}</strong><small>{currentDraftPublicationRequest?.publishedVersionId ? `已发布版本 ${currentDraftPublicationRequest.publishedVersionId} · 内部原子度量事实提取中` : '指标不会读取未审批草稿'}</small></div>
+            <div><span>当前草稿审批</span><strong className={currentDraftPublicationRequest?.status.toLowerCase()}>{currentDraftPublicationRequest ? publicationStatusLabels[currentDraftPublicationRequest.status] : '未提交'}</strong><small>{currentDraftPublicationRequest?.publishedVersionId ? `已发布版本 ${currentDraftPublicationRequest.publishedVersionId} · 候选正在进入资产管理中心` : currentDraftPublicationRequest ? `${metricCandidateGenerationLabels[currentDraftPublicationRequest.metricCandidateStatus] ?? currentDraftPublicationRequest.metricCandidateStatus} · 审批前不展示候选` : '指标不会读取未审批草稿'}</small></div>
           </section>
 
           <div className="dataset-publication-layout">
             <section className="dataset-publication-submit" aria-label="提交发布审批">
               <header><div><span>申请人操作</span><h3>提交当前草稿</h3></div><small>{publicationCapabilities.manage ? '具备提交权限' : '仅可查看'}</small></header>
-              <p>系统将冻结当前草稿版本、DSL 与校验参数。后续修改会形成新草稿，不会悄悄改变本次申请。</p>
+              <p>系统将立即冻结当前草稿版本、DSL 与校验参数；指标事实提取与 LLM 语义补全在后台执行。候选仅暂存，审批通过后才进入资产管理中心。</p>
               <label>申请说明（选填）<textarea value={publicationNote} onChange={event => setPublicationNote(event.target.value)} placeholder="例如：订单与客户区域关联已由 AI 完成，请审批用于指标设计" /></label>
               {currentDraftPublicationRequest?.status === 'PENDING' && <div className="dataset-publication-hint">当前精确草稿已经在审批中，无需重复提交。</div>}
               {currentDraftPublicationRequest?.status === 'APPROVED' && <div className="dataset-publication-hint success">当前精确草稿已审批发布。再次修改并保存后可提交新的审批。</div>}
-              <button className="primary-button" type="button" disabled={actionBusy || !publicationCapabilities.manage || currentDraftPublicationRequest?.status === 'PENDING' || currentDraftPublicationRequest?.status === 'APPROVED'} onClick={() => void submitPublicationRequest()}>{busyAction === 'publication-submit' ? '正在提交…' : '提交发布审批'}</button>
+              <button className="primary-button" type="button" disabled={actionBusy || !publicationCapabilities.manage || currentDraftPublicationRequest?.status === 'APPROVED' || currentDraftPublicationRequest?.status === 'PENDING' && currentDraftPublicationRequest.metricCandidateStatus !== 'FAILED'} onClick={() => void submitPublicationRequest()}>{busyAction === 'publication-submit' ? '正在提交审批…' : currentDraftPublicationRequest?.status === 'PENDING' ? '重试后台生成' : '提交审批并后台生成候选'}</button>
             </section>
 
             <section className="dataset-publication-review" aria-label="审批发布申请">
@@ -2152,19 +2184,20 @@ export function DatasetCenterPage() {
                   <div><dt>申请状态</dt><dd><span className={`dataset-publication-status ${selectedPublicationRequest.status.toLowerCase()}`}>{publicationStatusLabels[selectedPublicationRequest.status]}</span></dd></div>
                   <div><dt>冻结草稿</dt><dd>{selectedPublicationRequest.draftVersionId}</dd></div>
                   <div><dt>DSL 摘要</dt><dd>{selectedPublicationRequest.expectedDslHash.slice(0, 16)}…</dd></div>
+                  <div><dt>指标候选</dt><dd>{metricCandidateGenerationLabels[selectedPublicationRequest.metricCandidateStatus] ?? selectedPublicationRequest.metricCandidateStatus} · 共 {selectedPublicationRequest.metricCandidateTotal ?? 0} 项</dd></div>
                   <div><dt>申请说明</dt><dd>{selectedPublicationRequest.requestNote || '未填写'}</dd></div>
                   {selectedPublicationRequest.reviewNote && <div><dt>审批意见</dt><dd>{selectedPublicationRequest.reviewNote}</dd></div>}
                   {selectedPublicationRequest.publishedVersionId && <div><dt>发布版本</dt><dd>{selectedPublicationRequest.publishedVersionId}</dd></div>}
                 </dl>}
                 {selectedPublicationRequest?.status === 'PENDING' && <>
                   <label>审批意见<textarea value={publicationDecisionNote} onChange={event => setPublicationDecisionNote(event.target.value)} placeholder="通过时可选；拒绝时必须说明原因" /></label>
-                  <div className="dataset-publication-review-actions"><button className="dataset-publication-reject" type="button" disabled={actionBusy || !publicationCapabilities.publish || !publicationDecisionNote.trim()} onClick={() => void rejectPublicationRequest()}>{busyAction === 'publication-reject' ? '正在拒绝…' : '拒绝'}</button><button className="primary-button" type="button" disabled={actionBusy || !publicationCapabilities.publish} onClick={() => void approvePublicationRequest()}>{busyAction === 'publication-approve' ? '正在校验并发布…' : '审批通过并发布'}</button></div>
+                  <div className="dataset-publication-review-actions"><button className="dataset-publication-reject" type="button" disabled={actionBusy || !publicationCapabilities.publish || !publicationDecisionNote.trim()} onClick={() => void rejectPublicationRequest()}>{busyAction === 'publication-reject' ? '正在拒绝…' : '拒绝'}</button><button className="primary-button" type="button" disabled={actionBusy || !publicationCapabilities.publish || !['LEGACY', 'SUCCEEDED', 'PARTIAL'].includes(selectedPublicationRequest.metricCandidateStatus)} title={!['LEGACY', 'SUCCEEDED', 'PARTIAL'].includes(selectedPublicationRequest.metricCandidateStatus) ? '指标候选尚未生成完成' : ''} onClick={() => void approvePublicationRequest()}>{busyAction === 'publication-approve' ? '正在校验并发布…' : '审批通过并发布'}</button></div>
                 </>}
               </>}
             </section>
           </div>
 
-          {metricReturnTo && currentDraftPublicationRequest?.status === 'APPROVED' && <section className="dataset-publication-metric-return" aria-label="继续指标设计"><div><strong>数据集已可用于指标设计</strong><small>指标 AI 将只读取本次审批生成的精确已发布版本。</small></div><button className="primary-button" type="button" onClick={() => navigate(metricReturnTo, { state: { metricAIRequirement } })}>返回指标中心继续生成</button></section>}
+          {metricReturnTo && currentDraftPublicationRequest?.status === 'APPROVED' && <section className="dataset-publication-metric-return" aria-label="继续指标设计"><div><strong>数据集已可用于指标设计</strong><small>指标 AI 将只读取本次审批生成的精确已发布版本。</small></div><button className="primary-button" type="button" onClick={() => navigate(metricReturnTo, { state: { metricAIRequirement, ...(metricPreferredDatasetId ? { preferredDatasetId: metricPreferredDatasetId } : {}), ...(metricSafeDatasetExtension ? { safeDatasetExtension: true } : {}) } })}>返回资产管理中心继续生成</button></section>}
           {formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}
           <footer className="dataset-publication-footer"><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>关闭</button></footer>
         </> : <div className="dataset-center-feedback error" role="alert">{formError || '无法加载数据集发布信息'}</div>}

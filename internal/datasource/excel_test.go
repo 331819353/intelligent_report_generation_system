@@ -9,6 +9,26 @@ import (
 	spikeexcel "intelligent-report-generation-system/internal/spike/excel"
 )
 
+func TestFileMaterializationReadLimitsBoundCompressedAndExpandedBytes(t *testing.T) {
+	safeReadBytes, limits, err := fileMaterializationReadLimits(50<<20, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if safeReadBytes != 1<<20 || limits.MaxFileBytes != 1<<20 ||
+		limits.UnzipBytes != 1<<20 ||
+		limits.WorksheetMemoryBytes != 1<<20 {
+		t.Fatalf(
+			"safe=%d limits=%#v",
+			safeReadBytes, limits,
+		)
+	}
+	if _, _, err := fileMaterializationReadLimits(
+		50<<20, 0,
+	); err == nil {
+		t.Fatal("non-positive expansion limit must fail closed")
+	}
+}
+
 func TestInferWorkbookTypesHeadersSelectionAndOverrides(t *testing.T) {
 	book := spikeexcel.Workbook{Sheets: []spikeexcel.Sheet{
 		{Name: "Sales", Rows: [][]string{{"id", "amount", "active", "date", "id", ""}, {"1", "12.50", "true", "2026-07-15", "A", "x"}, {"2", "3.25", "false", "2026-07-16", "B", "y"}}},

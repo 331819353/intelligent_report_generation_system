@@ -429,7 +429,7 @@ export function DatasetDesignerPage() {
       const request = await datasetAPI.requestPublication(attempt.datasetId, attempt.input)
       publishAttempt.current = null
       setPublishOutcomeUnknown(false)
-      setMessage(`发布审批已提交 · ${request.id} · 当前状态：${request.status}`)
+      setMessage(`发布审批已提交 · ${request.id} · 指标候选正在后台生成`)
     } catch (cause) {
       publishAttempt.current = null
       setPublishOutcomeUnknown(false)
@@ -462,7 +462,7 @@ export function DatasetDesignerPage() {
   }
 
   return (
-    <AppShell title={draft.name || '新建数据集'} eyebrow="数据集配置中心" actions={<><button className="quiet-button" onClick={validate} disabled={busy || versionBusy || !permissionsResolved || !capabilities.manage || publishOutcomeUnknown || reconciliationRequired}>校验 DSL</button>{activeQuery ? <button className="danger-button" onClick={cancelPreview}>取消查询</button> : <button className="quiet-button" onClick={runPreview} disabled={busy || versionBusy || !permissionsResolved || !capabilities.read || publishOutcomeUnknown || reconciliationRequired}>数据预览</button>}{reconciliationRequired && <button className="quiet-button" onClick={reloadCurrentDataset} disabled={busy || versionBusy}>重新加载草稿</button>}<button className="quiet-button" onClick={save} disabled={busy || versionBusy || !permissionsResolved || !capabilities.manage || publishOutcomeUnknown || reconciliationRequired}>保存草稿</button><button className="primary-button" onClick={publishDataset} disabled={busy || versionBusy || !permissionsResolved || !capabilities.manage || reconciliationRequired}>提交发布审批</button></>}>
+    <AppShell title={draft.name || '新建数据集'} eyebrow="数据集配置中心" actions={<><button className="quiet-button" onClick={validate} disabled={busy || versionBusy || !permissionsResolved || !capabilities.manage || publishOutcomeUnknown || reconciliationRequired}>校验 DSL</button>{activeQuery ? <button className="danger-button" onClick={cancelPreview}>取消查询</button> : <button className="quiet-button" onClick={runPreview} disabled={busy || versionBusy || !permissionsResolved || !capabilities.read || publishOutcomeUnknown || reconciliationRequired}>数据预览</button>}{reconciliationRequired && <button className="quiet-button" onClick={reloadCurrentDataset} disabled={busy || versionBusy}>重新加载草稿</button>}<button className="quiet-button" onClick={save} disabled={busy || versionBusy || !permissionsResolved || !capabilities.manage || publishOutcomeUnknown || reconciliationRequired}>保存草稿</button><button className="primary-button" onClick={publishDataset} disabled={busy || versionBusy || !permissionsResolved || !capabilities.manage || reconciliationRequired}>{busy ? '正在提交审批…' : '提交审批并后台生成候选'}</button></>}>
       <div className="dataset-status" aria-live="polite">{error && <span className="designer-error">{error}</span>}{message && <span className="designer-success">{message}</span>}<small>预览会先保存草稿；发布只使用最近保存的确定版本，并应用参数绑定、权限、超时与行数限制</small></div>
       {datasetId && datasetId !== 'new' && <PublishedVersionManager
         permissionsReady={permissionsResolved} canRead={capabilities.read} canPublish={capabilities.publish}

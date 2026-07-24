@@ -26,7 +26,7 @@ type JoinProbeQuery struct {
 
 // CompileJoinProbes 为每条等值 Join 生成一行聚合统计查询。
 func CompileJoinProbes(input JoinProbeInput) ([]JoinProbeQuery, error) {
-	if input.Dialect != MySQL && input.Dialect != Oracle {
+	if input.Dialect != MySQL && input.Dialect != Oracle && input.Dialect != PostgreSQL {
 		return nil, errors.New("unsupported query dialect")
 	}
 	if err := dataset.Validate(input.Document); err != nil {

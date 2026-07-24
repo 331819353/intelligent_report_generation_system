@@ -47,9 +47,13 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		}
 		source, err := sourceFromInput(r.Context(), service, credentials, c.TenantID, "", in, false)
 		if err != nil {
-			writeDSError(w, 400, "DATA_SOURCE_CREATE_FAILED", "invalid data source connection configuration")
+			writeDSError(w, 400, "DATA_SOURCE_CONNECTION_CONFIGURATION_INVALID", connectionConfigurationMessage(err))
 			return
 		}
+		if source.OwnerID == "" {
+			source.OwnerID = c.Subject
+		}
+		source.CreatedBy, source.UpdatedBy = c.Subject, c.Subject
 		created, err := service.Create(r.Context(), source)
 		if err != nil {
 			switch {
@@ -74,18 +78,31 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		if !decodeDS(w, r, &in) {
 			return
 		}
+		if in.ExpectedVersion < 1 {
+			writeDSError(w, http.StatusBadRequest, "DATA_SOURCE_EXPECTED_VERSION_REQUIRED", "expectedVersion must be a positive data source version")
+			return
+		}
 		if !dataSourceCodePattern.MatchString(strings.TrimSpace(in.Code)) {
 			writeDSError(w, http.StatusBadRequest, "DATA_SOURCE_CODE_INVALID", "数据源编码必须以英文字母开头，且只能包含英文字母、数字和下划线，最长 128 位")
 			return
 		}
 		source, err := sourceFromInput(r.Context(), service, credentials, c.TenantID, r.PathValue("id"), in, true)
 		if err != nil {
-			writeDSError(w, 400, "DATA_SOURCE_UPDATE_FAILED", "invalid data source connection configuration")
+			writeDSError(w, 400, "DATA_SOURCE_CONNECTION_CONFIGURATION_INVALID", connectionConfigurationMessage(err))
 			return
 		}
+		source.UpdatedBy = c.Subject
 		updated, err := service.Update(r.Context(), source)
 		if err != nil {
-			writeDSError(w, 400, "DATA_SOURCE_UPDATE_FAILED", "invalid data source configuration or state")
+			if errors.Is(err, ErrVersionConflict) {
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_VERSION_CONFLICT", "data source changed; reload the latest version before saving")
+				return
+			}
+			if errors.Is(err, ErrReviewPending) {
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_REVIEW_PENDING", "数据源正在审核中；请先撤销申请或等待审核完成")
+				return
+			}
+			writeDSError(w, http.StatusBadRequest, "DATA_SOURCE_UPDATE_FAILED", "invalid data source configuration or state")
 			return
 		}
 		auditDS(r, service, c.TenantID, c.Subject, "UPDATE", updated.ID, map[string]any{"type": updated.Type, "status": updated.Status})
@@ -123,15 +140,23 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 	mux.Handle("POST /api/v1/data-sources/{id}/tables/import", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		var input struct {
-			Tables []TableSelection `json:"tables"`
+			Tables         []TableSelection   `json:"tables"`
+			SampleDataMode MetadataSampleMode `json:"sampleDataMode"`
 		}
 		if !decodeDS(w, r, &input) {
 			return
 		}
-		job, err := service.QueueImportTables(r.Context(), c.TenantID, c.Subject, r.PathValue("id"), input.Tables)
+		job, err := service.QueueImportTablesWithSampleMode(
+			r.Context(), c.TenantID, c.Subject, r.PathValue("id"),
+			input.SampleDataMode, input.Tables,
+		)
 		if err != nil {
 			if errors.Is(err, ErrMetadataJobActive) {
 				writeDSError(w, http.StatusConflict, "DATA_SOURCE_METADATA_JOB_ACTIVE", "a metadata job is already active for this data source")
+				return
+			}
+			if errors.Is(err, ErrSamplePolicyDenied) {
+				writeDSError(w, http.StatusForbidden, "METADATA_SAMPLE_POLICY_DENIED", "requested sample mode is not allowed by the tenant policy")
 				return
 			}
 			slog.ErrorContext(r.Context(), "data source table import enqueue failed", "source_id", r.PathValue("id"), "error", err)
@@ -139,22 +164,33 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 			return
 		}
 		w.Header().Set("Location", "/api/v1/data-sources/"+r.PathValue("id")+"/metadata-jobs/"+job.ID)
-		auditDS(r, service, c.TenantID, c.Subject, "QUEUE_IMPORT_TABLE_ASSETS", r.PathValue("id"), map[string]any{"jobId": job.ID, "count": len(input.Tables)})
+		auditDS(r, service, c.TenantID, c.Subject, "QUEUE_IMPORT_TABLE_ASSETS", r.PathValue("id"), map[string]any{
+			"jobId": job.ID, "count": len(input.Tables),
+			"sampleDataMode": job.SampleDataMode, "samplePolicyVersion": job.SamplePolicyVersion,
+		})
 		writeDSJSON(w, http.StatusAccepted, job)
 	})))
 	mux.Handle("POST /api/v1/data-sources/{id}/tables/refresh", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		var input struct {
-			Mode     MetadataRefreshMode `json:"mode"`
-			TableIDs []string            `json:"tableIds"`
+			Mode           MetadataRefreshMode `json:"mode"`
+			TableIDs       []string            `json:"tableIds"`
+			SampleDataMode MetadataSampleMode  `json:"sampleDataMode"`
 		}
 		if !decodeDS(w, r, &input) {
 			return
 		}
-		job, err := service.QueueRefreshTables(r.Context(), c.TenantID, c.Subject, r.PathValue("id"), input.Mode, input.TableIDs...)
+		job, err := service.QueueRefreshTablesWithSampleMode(
+			r.Context(), c.TenantID, c.Subject, r.PathValue("id"),
+			input.Mode, input.SampleDataMode, input.TableIDs...,
+		)
 		if err != nil {
 			if errors.Is(err, ErrMetadataJobActive) {
 				writeDSError(w, http.StatusConflict, "DATA_SOURCE_METADATA_JOB_ACTIVE", "a metadata job is already active for this data source")
+				return
+			}
+			if errors.Is(err, ErrSamplePolicyDenied) {
+				writeDSError(w, http.StatusForbidden, "METADATA_SAMPLE_POLICY_DENIED", "requested sample mode is not allowed by the tenant policy")
 				return
 			}
 			slog.ErrorContext(r.Context(), "data source table refresh enqueue failed", "source_id", r.PathValue("id"), "error", err)
@@ -162,7 +198,11 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 			return
 		}
 		w.Header().Set("Location", "/api/v1/data-sources/"+r.PathValue("id")+"/metadata-jobs/"+job.ID)
-		auditDS(r, service, c.TenantID, c.Subject, "QUEUE_REFRESH_TABLE_ASSETS", r.PathValue("id"), map[string]any{"jobId": job.ID, "mode": job.Mode, "total": job.Total, "targeted": len(input.TableIDs) > 0})
+		auditDS(r, service, c.TenantID, c.Subject, "QUEUE_REFRESH_TABLE_ASSETS", r.PathValue("id"), map[string]any{
+			"jobId": job.ID, "mode": job.Mode, "total": job.Total,
+			"targeted":       len(input.TableIDs) > 0,
+			"sampleDataMode": job.SampleDataMode, "samplePolicyVersion": job.SamplePolicyVersion,
+		})
 		writeDSJSON(w, http.StatusAccepted, job)
 	})))
 	mux.Handle("GET /api/v1/data-sources/{id}/metadata-jobs/latest-active", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -223,14 +263,70 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 	}))
 	mux.Handle("POST /api/v1/data-sources/{id}/test", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
-		result, err := service.Test(r.Context(), c.TenantID, r.PathValue("id"))
+		job, err := service.QueueConnectionTest(
+			r.Context(), c.TenantID, c.Subject, r.PathValue("id"),
+			r.Header.Get("Idempotency-Key"),
+		)
 		if err != nil {
-			slog.ErrorContext(r.Context(), "data source connection test failed", "source_id", r.PathValue("id"), "error", err)
-			writeDSError(w, 502, "DATA_SOURCE_TEST_FAILED", "connection test failed")
+			if errors.Is(err, ErrIdempotencyKeyInvalid) {
+				writeDSError(w, http.StatusBadRequest, "DATA_SOURCE_TEST_IDEMPOTENCY_KEY_INVALID", "Idempotency-Key must contain at most 256 bytes")
+				return
+			}
+			if errors.Is(err, ErrReviewPending) {
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_REVIEW_PENDING", "数据源正在审核中；撤销申请后才能重新测试")
+				return
+			}
+			slog.ErrorContext(r.Context(), "data source connection test enqueue failed", "source_id", r.PathValue("id"), "error", err)
+			writeDSError(w, http.StatusInternalServerError, "DATA_SOURCE_TEST_ENQUEUE_FAILED", "failed to enqueue connection test")
 			return
 		}
-		auditDS(r, service, c.TenantID, c.Subject, "TEST", r.PathValue("id"), map[string]any{"serverVersion": result.ServerVersion, "latencyMs": result.LatencyMS})
-		writeDSJSON(w, 200, result)
+		w.Header().Set("Location", "/api/v1/data-sources/"+r.PathValue("id")+"/connection-tests/"+job.ID)
+		auditDS(r, service, c.TenantID, c.Subject, "QUEUE_CONNECTION_TEST", r.PathValue("id"), map[string]any{
+			"jobId": job.ID, "configVersionId": job.ConfigVersionID,
+		})
+		writeDSJSON(w, http.StatusAccepted, job)
+	})))
+	mux.Handle("GET /api/v1/data-sources/{id}/connection-tests/{jobId}", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		job, err := service.GetConnectionTest(
+			r.Context(), c.TenantID, r.PathValue("id"), r.PathValue("jobId"),
+		)
+		if errors.Is(err, ErrConnectionTestNotFound) {
+			writeDSError(w, http.StatusNotFound, "DATA_SOURCE_CONNECTION_TEST_NOT_FOUND", "connection test job was not found")
+			return
+		}
+		if err != nil {
+			slog.ErrorContext(r.Context(), "data source connection test query failed", "source_id", r.PathValue("id"), "error", err)
+			writeDSError(w, http.StatusInternalServerError, "DATA_SOURCE_CONNECTION_TEST_QUERY_FAILED", "failed to query connection test")
+			return
+		}
+		writeDSJSON(w, http.StatusOK, job)
+	})))
+	mux.Handle("POST /api/v1/data-sources/{id}/publish", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		published, err := service.Publish(r.Context(), c.TenantID, c.Subject, r.PathValue("id"))
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrConnectionTestPending):
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_TEST_PENDING", "connection test is still running")
+			case errors.Is(err, ErrConnectionTestFailed):
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_TEST_FAILED", "current data source version failed its connection test")
+			case errors.Is(err, ErrTestRequired):
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_TEST_REQUIRED", "current data source version must pass a connection test before publication")
+			case errors.Is(err, ErrTestExpired):
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_TEST_EXPIRED", "connection test has expired; test the current version again")
+			case errors.Is(err, ErrSourceVersionChanged):
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_VERSION_CHANGED", "data source configuration changed; test the current version again")
+			default:
+				slog.ErrorContext(r.Context(), "data source publication failed", "source_id", r.PathValue("id"), "error", err)
+				writeDSError(w, http.StatusBadRequest, "DATA_SOURCE_PUBLISH_FAILED", "data source could not be published")
+			}
+			return
+		}
+		auditDS(r, service, c.TenantID, c.Subject, "PUBLISH", published.ID, map[string]any{
+			"configVersionId": published.ConfigVersionID,
+		})
+		writeDSJSON(w, http.StatusOK, publicDataSource(r.Context(), published, credentials))
 	})))
 	mux.Handle("POST /api/v1/data-sources/{id}/sync", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
@@ -246,23 +342,51 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 	return mux
 }
 
+func connectionConfigurationMessage(err error) string {
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "host is forbidden"):
+		return "Host 不能填写 127.0.0.1、localhost 或受限元数据地址；如果配置服务运行在 Docker 中、数据库运行在宿主机，请填写 host.docker.internal"
+	case strings.Contains(message, "host is invalid"):
+		return "Host 只填写主机名或 IP，不要包含 http://、jdbc:、端口、路径或空格"
+	case strings.Contains(message, "host, port, database and username are required"):
+		return "请完整填写 Host、Port、Database/Service 和 Username；Port 必须是 1–65535 的整数"
+	case strings.Contains(message, "password is required"):
+		return "新建数据源必须填写密码；修改时留空会保留原密码"
+	case strings.Contains(message, "unsupported data source type"):
+		return "当前仅支持 MySQL、Oracle 和 Excel/CSV 数据源"
+	case strings.Contains(message, "sensitive fields are forbidden"):
+		return "请在 Password 输入框填写密码，不要把 password、secretRef 或连接串放入高级配置"
+	default:
+		return "连接配置无法保存，请检查必填项、Host 格式、端口范围和数据库类型后重试"
+	}
+}
+
 type dataSourceInput struct {
-	Code        string         `json:"code"`
-	Name        string         `json:"name"`
-	Type        Type           `json:"type"`
-	Host        string         `json:"host"`
-	Port        int            `json:"port"`
-	Database    string         `json:"database"`
-	Username    string         `json:"username"`
-	Password    string         `json:"password"`
-	Config      map[string]any `json:"config"`
-	SecretRef   string         `json:"secretRef"`
-	FileAssetID string         `json:"fileAssetId"`
+	Code            string         `json:"code"`
+	Name            string         `json:"name"`
+	Description     string         `json:"description"`
+	OwnerID         string         `json:"ownerId"`
+	Visibility      Visibility     `json:"visibility"`
+	Type            Type           `json:"type"`
+	Host            string         `json:"host"`
+	Port            int            `json:"port"`
+	Database        string         `json:"database"`
+	Username        string         `json:"username"`
+	Password        string         `json:"password"`
+	Config          map[string]any `json:"config"`
+	FileAssetID     string         `json:"fileAssetId"`
+	ExpectedVersion int64          `json:"expectedVersion"`
 }
 
 // sourceFromInput 将可展示配置与敏感凭据分流；密码只进入加密管理器，不写入 config。
 func sourceFromInput(ctx context.Context, service *Service, credentials CredentialManager, tenantID, id string, in dataSourceInput, update bool) (Source, error) {
-	source := Source{ID: id, TenantID: tenantID, Code: strings.TrimSpace(in.Code), Name: strings.TrimSpace(in.Name), Type: in.Type, FileAssetID: strings.TrimSpace(in.FileAssetID)}
+	source := Source{
+		ID: id, TenantID: tenantID, Code: strings.TrimSpace(in.Code), Name: strings.TrimSpace(in.Name),
+		Description: strings.TrimSpace(in.Description), OwnerID: strings.TrimSpace(in.OwnerID),
+		Visibility: in.Visibility, Type: in.Type, FileAssetID: strings.TrimSpace(in.FileAssetID),
+		Version: in.ExpectedVersion,
+	}
 	config := make(map[string]any, len(in.Config)+4)
 	for key, value := range in.Config {
 		if strings.EqualFold(key, "password") || strings.EqualFold(key, "secretRef") {
@@ -281,12 +405,15 @@ func sourceFromInput(ctx context.Context, service *Service, credentials Credenti
 	host, database, username := strings.TrimSpace(in.Host), strings.TrimSpace(in.Database), strings.TrimSpace(in.Username)
 	connectionProvided := host != "" || in.Port != 0 || database != "" || username != "" || in.Password != ""
 	if !connectionProvided {
-		// 保留旧 secretRef 客户端兼容性；新页面始终走结构化连接字段。
-		source.SecretRef = strings.TrimSpace(in.SecretRef)
+		// 更新时由 Service 按租户和 source ID 延用当前内部引用；创建时缺少
+		// 结构化连接字段会在领域校验中失败。公网请求永不接受 secretRef。
 		return source, nil
 	}
-	if credentials == nil || host == "" || strings.Contains(host, "://") || in.Port < 1 || in.Port > 65535 || database == "" || username == "" {
+	if credentials == nil || host == "" || in.Port < 1 || in.Port > 65535 || database == "" || username == "" {
 		return Source{}, errors.New("host, port, database and username are required")
+	}
+	if err := validateConnectorHost(host); err != nil {
+		return Source{}, err
 	}
 	password := in.Password
 	if update && password == "" {

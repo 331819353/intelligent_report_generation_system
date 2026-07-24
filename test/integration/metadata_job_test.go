@@ -101,12 +101,18 @@ func TestMetadataJobPersistsProgressAndSkipsUnchangedTables(t *testing.T) {
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.users(tenant_id,email,display_name,password_hash) VALUES($1,$2,'metadata job','integration-hash') RETURNING id`, tenantID, "metadata-job-"+suffix+"@it.test").Scan(&actorID); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, `INSERT INTO platform.data_sources(tenant_id,code,name,source_type,status,config,secret_ref)
-			VALUES($1,$2,'Metadata Job','MYSQL','ACTIVE','{"host":"db.internal","port":3306,"database":"sales","username":"reader"}','encrypted://metadata-job') RETURNING id`, tenantID, "metadata-job-"+suffix).Scan(&sourceID)
+		var err error
+		sourceID, _, err = insertVersionedDataSourceTx(
+			ctx, tx, tenantID, "metadata-job-"+suffix, "Metadata Job", "MYSQL",
+			"encrypted://metadata-job", "ACTIVE",
+			`{"host":"db.internal","port":3306,"database":"sales","username":"reader"}`,
+		)
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	attestAndPublishDataSourceFixture(t, ctx, pool, tenantID, actorID, sourceID)
 
 	connector := &metadataJobConnector{table: datasource.MetadataTable{
 		SchemaName: "sales", Name: "orders", Type: "TABLE",
@@ -133,8 +139,26 @@ func TestMetadataJobPersistsProgressAndSkipsUnchangedTables(t *testing.T) {
 	if err != nil || completed.Status != "SUCCEEDED" || completed.Completed != 1 || completed.Succeeded != 1 {
 		t.Fatalf("completed=%#v err=%v", completed, err)
 	}
-	if connector.sampleCalls != 1 || provider.calls != 1 {
+	if completed.SampleDataMode != datasource.MetadataSampleDeny || completed.SamplePolicyVersion < 1 {
+		t.Fatalf("default sample authorization was not frozen closed: %#v", completed)
+	}
+	if connector.sampleCalls != 0 || provider.calls != 1 {
 		t.Fatalf("sample=%d complete=%d", connector.sampleCalls, provider.calls)
+	}
+	if _, err := service.QueueImportTablesWithSampleMode(
+		ctx, tenantID, actorID, sourceID, datasource.MetadataSampleRaw,
+		[]datasource.TableSelection{{SchemaName: "sales", TableName: "orders"}},
+	); !errors.Is(err, datasource.ErrSamplePolicyDenied) {
+		t.Fatalf("RAW task exceeded default tenant policy: %v", err)
+	}
+	immutabilityErr := database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		_, updateErr := tx.Exec(ctx, `UPDATE platform.data_source_metadata_jobs
+			SET sample_data_mode='RAW',sample_consent_by=$2,sample_consent_at=now()
+			WHERE id=$1`, job.ID, actorID)
+		return updateErr
+	})
+	if immutabilityErr == nil {
+		t.Fatal("frozen metadata sample authorization was mutable")
 	}
 	if _, err := service.GetMetadataJob(ctx, foreignTenantID, sourceID, job.ID); !errors.Is(err, datasource.ErrMetadataJobNotFound) {
 		t.Fatalf("cross-tenant job query err=%v", err)
@@ -182,7 +206,7 @@ func TestMetadataJobPersistsProgressAndSkipsUnchangedTables(t *testing.T) {
 		t.Fatalf("recovery processed=%v err=%v", processed, err)
 	}
 	recovery, err = service.GetMetadataJob(ctx, tenantID, sourceID, recovery.ID)
-	if err != nil || recovery.Status != "SUCCEEDED" || recovery.Succeeded != 1 || connector.sampleCalls != 1 || provider.calls != 1 {
+	if err != nil || recovery.Status != "SUCCEEDED" || recovery.Succeeded != 1 || connector.sampleCalls != 0 || provider.calls != 1 {
 		t.Fatalf("recovery=%#v sample=%d complete=%d err=%v", recovery, connector.sampleCalls, provider.calls, err)
 	}
 
@@ -198,7 +222,7 @@ func TestMetadataJobPersistsProgressAndSkipsUnchangedTables(t *testing.T) {
 	if err != nil || refresh.Status != "SUCCEEDED" || refresh.Skipped != 1 || refresh.Succeeded != 0 {
 		t.Fatalf("refresh=%#v err=%v", refresh, err)
 	}
-	if connector.sampleCalls != 1 || provider.calls != 1 {
+	if connector.sampleCalls != 0 || provider.calls != 1 {
 		t.Fatalf("unchanged table was reprocessed: sample=%d complete=%d", connector.sampleCalls, provider.calls)
 	}
 
@@ -257,12 +281,23 @@ func TestIncrementalMetadataRefreshOnlyCompletesChangedFieldsAndHandlesRemoval(t
 			VALUES($1,$2,'metadata field delta','integration-hash') RETURNING id`, tenantID, "metadata-field-delta-"+suffix+"@it.test").Scan(&actorID); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, `INSERT INTO platform.data_sources(tenant_id,code,name,source_type,status,config,secret_ref)
-			VALUES($1,$2,'Metadata Field Delta','MYSQL','ACTIVE','{"host":"db.internal","port":3306,"database":"sales","username":"reader"}','encrypted://metadata-field-delta') RETURNING id`, tenantID, "metadata-field-delta-"+suffix).Scan(&sourceID)
+		var err error
+		sourceID, _, err = insertVersionedDataSourceTx(
+			ctx, tx, tenantID, "metadata-field-delta-"+suffix, "Metadata Field Delta", "MYSQL",
+			"encrypted://metadata-field-delta", "ACTIVE",
+			`{"host":"db.internal","port":3306,"database":"sales","username":"reader"}`,
+		)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE platform.ai_tenant_policies
+			SET metadata_sample_mode='RAW' WHERE tenant_id=$1`, tenantID)
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	attestAndPublishDataSourceFixture(t, ctx, pool, tenantID, actorID, sourceID)
 
 	connector := &metadataJobConnector{table: datasource.MetadataTable{
 		SchemaName: "sales", Name: "orders", Type: "TABLE",
@@ -273,7 +308,10 @@ func TestIncrementalMetadataRefreshOnlyCompletesChangedFieldsAndHandlesRemoval(t
 	service.SetTableCompleter(metadataai.NewService(metadataai.NewPostgresStore(pool), provider, 5*time.Second, 0.8))
 	service.SetMetadataJobRepository(datasource.NewPostgresMetadataJobRepository(pool))
 
-	job, err := service.QueueImportTables(ctx, tenantID, actorID, sourceID, []datasource.TableSelection{{SchemaName: "sales", TableName: "orders"}})
+	job, err := service.QueueImportTablesWithSampleMode(
+		ctx, tenantID, actorID, sourceID, datasource.MetadataSampleRaw,
+		[]datasource.TableSelection{{SchemaName: "sales", TableName: "orders"}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +346,10 @@ func TestIncrementalMetadataRefreshOnlyCompletesChangedFieldsAndHandlesRemoval(t
 		Columns: []string{"order_id", "email"},
 		Rows:    [][]any{{1, "first@example.com"}, {2, "second@example.com"}},
 	}
-	refresh, err := service.QueueRefreshTables(ctx, tenantID, actorID, sourceID, datasource.MetadataRefreshIncremental)
+	refresh, err := service.QueueRefreshTablesWithSampleMode(
+		ctx, tenantID, actorID, sourceID,
+		datasource.MetadataRefreshIncremental, datasource.MetadataSampleRaw,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +404,10 @@ func TestIncrementalMetadataRefreshOnlyCompletesChangedFieldsAndHandlesRemoval(t
 	// 字段从源表消失时只软停用该字段，不再采样，也不调用 LLM。
 	connector.table.Columns = connector.table.Columns[:1]
 	sampleCallsBeforeRemoval, providerCallsBeforeRemoval := connector.sampleCalls, provider.calls
-	removal, err := service.QueueRefreshTables(ctx, tenantID, actorID, sourceID, datasource.MetadataRefreshIncremental)
+	removal, err := service.QueueRefreshTablesWithSampleMode(
+		ctx, tenantID, actorID, sourceID,
+		datasource.MetadataRefreshIncremental, datasource.MetadataSampleRaw,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +432,10 @@ func TestIncrementalMetadataRefreshOnlyCompletesChangedFieldsAndHandlesRemoval(t
 
 	// 整个源表从权威快照中消失时停用 PostgreSQL 资产，且不触发 LLM。
 	connector.missing = true
-	tableRemoval, err := service.QueueRefreshTables(ctx, tenantID, actorID, sourceID, datasource.MetadataRefreshIncremental)
+	tableRemoval, err := service.QueueRefreshTablesWithSampleMode(
+		ctx, tenantID, actorID, sourceID,
+		datasource.MetadataRefreshIncremental, datasource.MetadataSampleRaw,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,12 +473,21 @@ func TestManagedMetadataRefreshDoesNotReactivateDeletedAsset(t *testing.T) {
 	var sourceID string
 	var sourceVersion int64
 	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `INSERT INTO platform.data_sources(tenant_id,code,name,source_type,status,config,secret_ref)
-			VALUES($1,$2,'Managed Refresh','MYSQL','ACTIVE','{"host":"db.internal","port":3306,"database":"sales","username":"reader"}','encrypted://managed-refresh') RETURNING id,version`, tenantID, "managed-refresh-"+suffix).Scan(&sourceID, &sourceVersion)
+		var err error
+		sourceID, sourceVersion, err = insertVersionedDataSourceTx(
+			ctx, tx, tenantID, "managed-refresh-"+suffix, "Managed Refresh", "MYSQL",
+			"encrypted://managed-refresh", "ACTIVE",
+			`{"host":"db.internal","port":3306,"database":"sales","username":"reader"}`,
+		)
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	publishedSource := attestAndPublishDataSourceFixture(
+		t, ctx, pool, tenantID, "", sourceID,
+	)
+	sourceVersion = publishedSource.Version
 	source := datasource.Source{ID: sourceID, TenantID: tenantID, Type: datasource.TypeMySQL, Status: datasource.StatusActive, Version: sourceVersion}
 	repository := datasource.NewPostgresRepository(pool)
 	initialTable := datasource.MetadataTable{

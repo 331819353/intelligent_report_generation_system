@@ -81,6 +81,15 @@ func TestTenantPolicyAllowsMetricAuthoringWithoutPurposeOptIn(t *testing.T) {
 	}
 }
 
+func TestTenantPolicyAllowsDatasetTagSuggestionWithoutPurposeOptIn(t *testing.T) {
+	if !tenantPolicyAllowsPurpose(true, nil, PurposeDatasetTagSuggestion) {
+		t.Fatal("enabled tenant policy must allow governed dataset tag suggestions")
+	}
+	if tenantPolicyAllowsPurpose(false, nil, PurposeDatasetTagSuggestion) {
+		t.Fatal("disabled tenant policy must reject dataset tag suggestions")
+	}
+}
+
 func TestTenantPolicyKeepsExplicitAllowlistForOtherPurposes(t *testing.T) {
 	if tenantPolicyAllowsPurpose(true, nil, PurposeReportGeneration) {
 		t.Fatal("report generation must remain forbidden when it is absent from allowed purposes")

@@ -90,6 +90,20 @@ func TestValidateOutputRejectsUnsafeOrOutOfTaxonomyValues(t *testing.T) {
 	}
 }
 
+func TestValidateOutputDoesNotImposeAnArbitraryTagCountLimit(t *testing.T) {
+	input, output := validCompletion()
+	output.Table.Tags = make([]string, 0, len(allowedTags))
+	for tag := range allowedTags {
+		output.Table.Tags = append(output.Table.Tags, tag)
+	}
+	if len(output.Table.Tags) <= 12 {
+		t.Fatal("test taxonomy does not exercise the removed legacy limit")
+	}
+	if err := ValidateOutput(input, output); err != nil {
+		t.Fatalf("all distinct controlled tags should be accepted: %v", err)
+	}
+}
+
 func TestValidateOutputRejectsMissingRequiredCollectionsAndConfidence(t *testing.T) {
 	input, output := validCompletion()
 	output.Table.Tags = nil

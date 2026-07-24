@@ -51,18 +51,116 @@ func (r *PostgresRepository) SaveFileVersion(ctx context.Context, asset FileAsse
 			return err
 		}
 		if asset.CurrentVersion > 1 {
-			_, err := tx.Exec(ctx, `UPDATE platform.data_sources
-				SET status='DRAFT'::platform.data_source_status,last_error=NULL,version=version+1
-				WHERE tenant_id=$1 AND file_asset_id=$2 AND deleted_at IS NULL`, asset.TenantID, asset.ID)
-			return err
+			drafts, err := lockFileSourceDrafts(ctx, tx, asset.TenantID, asset.ID)
+			if err != nil {
+				return err
+			}
+			for _, draft := range drafts {
+				configHash, err := fileSourceVersionConfigurationHash(draft.Source, asset.VersionID)
+				if err != nil {
+					return err
+				}
+				var versionID string
+				if err := tx.QueryRow(ctx, `INSERT INTO platform.data_source_versions(
+						tenant_id,data_source_id,version_no,source_type,config,secret_ref,file_asset_id,
+						file_version_id,config_hash,created_by)
+					VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8,$9,NULLIF($10,'')::uuid)
+					RETURNING id::text`,
+					asset.TenantID, draft.Source.ID, draft.NextVersion, draft.Source.Type,
+					draft.ConfigJSON, draft.Source.SecretRef, draft.Source.FileAssetID,
+					asset.VersionID, configHash, draft.CreatedBy).Scan(&versionID); err != nil {
+					return err
+				}
+				tag, err := tx.Exec(ctx, `UPDATE platform.data_sources AS source SET
+					current_draft_version_id=version.id,validation_status='UNTESTED',
+					last_tested_at=NULL,last_tested_version_id=NULL,last_tested_config_hash=NULL,test_expires_at=NULL,
+					status=CASE WHEN source.current_published_version_id IS NULL
+						THEN 'DRAFT'::platform.data_source_status ELSE source.status END,
+					last_error=CASE WHEN source.current_published_version_id IS NULL THEN NULL ELSE source.last_error END,
+					version=source.version+1
+					FROM platform.data_source_versions AS version
+					WHERE source.id=$1 AND source.current_draft_version_id=$2
+					  AND source.deleted_at IS NULL AND version.id=$3
+					  AND version.data_source_id=source.id`,
+					draft.Source.ID, draft.DraftVersionID, versionID)
+				if err != nil {
+					return err
+				}
+				if tag.RowsAffected() != 1 {
+					return errors.New("concurrent data source draft update")
+				}
+			}
 		}
 		return nil
 	})
 }
 
-// SaveFileInspection finalizes the deterministic parse plan beside the current raw file version.
-// file_asset_versions stays immutable; a concurrent re-upload prevents a stale inspection from
-// being attached as the new current version's plan.
+func fileSourceVersionConfigurationHash(source Source, fileVersionID string) (string, error) {
+	source.FileVersionID = fileVersionID
+	return sourceConfigurationHash(source)
+}
+
+type fileSourceDraft struct {
+	Source         Source
+	DraftVersionID string
+	ConfigJSON     []byte
+	CreatedBy      string
+	NextVersion    int64
+}
+
+// lockFileSourceDrafts 固定所有引用当前文件资产的数据源草稿。配置摘要必须在
+// Go 中复用 sourceConfigurationHash；PostgreSQL jsonb 的键顺序和空白表示与
+// encoding/json 不同，不能在 SQL 中重新实现同名摘要。
+func lockFileSourceDrafts(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, assetID string,
+) ([]fileSourceDraft, error) {
+	rows, err := tx.Query(ctx, `SELECT
+			source.id::text,draft.id::text,draft.source_type::text,draft.config,
+			COALESCE(draft.secret_ref,''),draft.file_asset_id::text,
+			COALESCE(source.updated_by::text,''),
+			(SELECT COALESCE(max(existing.version_no),0)+1
+			 FROM platform.data_source_versions AS existing
+			 WHERE existing.data_source_id=source.id)
+		FROM platform.data_sources AS source
+		JOIN platform.data_source_versions AS draft
+		  ON draft.id=source.current_draft_version_id
+		WHERE source.tenant_id=$1 AND draft.file_asset_id=$2
+		  AND source.deleted_at IS NULL
+		ORDER BY source.id
+		FOR UPDATE OF source`, tenantID, assetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	drafts := make([]fileSourceDraft, 0)
+	for rows.Next() {
+		var draft fileSourceDraft
+		draft.Source.TenantID = tenantID
+		if err := rows.Scan(
+			&draft.Source.ID, &draft.DraftVersionID, &draft.Source.Type, &draft.ConfigJSON,
+			&draft.Source.SecretRef, &draft.Source.FileAssetID, &draft.CreatedBy,
+			&draft.NextVersion,
+		); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(draft.ConfigJSON, &draft.Source.Config); err != nil {
+			return nil, err
+		}
+		drafts = append(drafts, draft)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return drafts, nil
+}
+
+// SaveFileInspection finalizes the deterministic parse plan beside one exact immutable
+// file version. A concurrent re-upload cannot misattach the plan because versionID and
+// assetID are both checked; retaining inspections for older published versions is required
+// while a newer draft is still waiting for publication.
 func (r *PostgresRepository) SaveFileInspection(ctx context.Context, tenantID, assetID, versionID string, config, summary map[string]any) error {
 	configJSON, err := json.Marshal(config)
 	if err != nil {
@@ -75,7 +173,7 @@ func (r *PostgresRepository) SaveFileInspection(ctx context.Context, tenantID, a
 	return database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `INSERT INTO platform.file_asset_inspections(file_version_id,tenant_id,parse_config,workbook_summary)
 			SELECT v.id,v.tenant_id,$1,$2 FROM platform.file_asset_versions AS v JOIN platform.file_assets AS a ON a.id=v.file_asset_id AND a.tenant_id=v.tenant_id
-			WHERE v.id=$3 AND v.file_asset_id=$4 AND a.current_version=v.version AND a.deleted_at IS NULL
+			WHERE v.id=$3 AND v.file_asset_id=$4 AND a.deleted_at IS NULL
 			ON CONFLICT(file_version_id) DO UPDATE SET parse_config=EXCLUDED.parse_config,workbook_summary=EXCLUDED.workbook_summary`, configJSON, summaryJSON, versionID, assetID)
 		if err != nil {
 			return err

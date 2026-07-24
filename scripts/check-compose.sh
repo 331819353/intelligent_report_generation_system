@@ -4,7 +4,7 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 COMPOSE_FILE="$ROOT_DIR/compose.yaml"
 
-required_services="postgres redis minio minio-init"
+required_services="postgres postgres-warehouse redis minio minio-init"
 # 检查开发环境依赖服务是否全部声明。
 for service in $required_services; do
   if ! grep -q "^  $service:" "$COMPOSE_FILE"; then

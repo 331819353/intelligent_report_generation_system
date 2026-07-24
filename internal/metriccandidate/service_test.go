@@ -120,6 +120,57 @@ func TestServiceAcceptUsesAtomicMetricCreationAndReturnsAcceptedState(t *testing
 	}
 }
 
+func TestServiceAcceptMaterializesEnrichedBusinessDescription(t *testing.T) {
+	reviewable := reviewCandidate(t, CandidateStatusReady)
+	reviewable.Semantic.Name = "付款订单数量"
+	reviewable.Semantic.Description = "统计每位客户付款订单的数量。"
+	accepted := reviewable
+	accepted.Status = CandidateStatusAccepted
+	accepted.Version++
+	accepted.AcceptedMetricID = testMetricID
+
+	getCalls := 0
+	store := &candidateStoreStub{getFn: func(context.Context, string, string) (Candidate, error) {
+		getCalls++
+		if getCalls == 1 {
+			return reviewable, nil
+		}
+		return accepted, nil
+	}}
+	creator := &metricCreatorStub{createFn: func(
+		_ context.Context,
+		_, _, _ string,
+		_ int64,
+		input metric.CreateInput,
+	) (metric.Record, error) {
+		prepared, err := metric.Prepare(input.Definition)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if prepared.Definition.Metric.Name != reviewable.Semantic.Name ||
+			prepared.Definition.Metric.Description != reviewable.Semantic.Description {
+			t.Fatalf("materialized definition = %#v", prepared.Definition.Metric)
+		}
+		return metric.Record{
+			ID: testMetricID, Code: prepared.Definition.Metric.Code,
+			Name: prepared.Definition.Metric.Name, Description: prepared.Definition.Metric.Description,
+			DatasetID: reviewable.DatasetID, DatasetVersionID: reviewable.DatasetVersionID,
+			Definition: input.Definition,
+		}, nil
+	}}
+
+	result, err := NewService(store, creator).Accept(
+		context.Background(), testTenantID, testActorID, testCandidateID,
+		AcceptInput{ExpectedVersion: reviewable.Version},
+	)
+	if err != nil {
+		t.Fatalf("Accept() error = %v", err)
+	}
+	if result.Metric.Name != reviewable.Semantic.Name || result.Metric.Description != reviewable.Semantic.Description {
+		t.Fatalf("accepted metric = %#v", result.Metric)
+	}
+}
+
 func TestServiceAcceptRejectsBlockedCandidateBeforeMetricCreation(t *testing.T) {
 	blocked := reviewCandidate(t, CandidateStatusBlocked)
 	blocked.BlockReasons = []string{BlockReasonAggregatedDataset}
@@ -249,6 +300,38 @@ func TestWorkerFinishesSuccessfulExtraction(t *testing.T) {
 	result := store.results[0]
 	if result.DatasetVersionID != version.ID || len(result.Candidates) == 0 || result.Status != TaskStatusPartial {
 		t.Fatalf("finished extraction result = %#v", result)
+	}
+}
+
+func TestWorkerConsumesSynchronousPublicationResultWithoutCallingLLMAgain(t *testing.T) {
+	version := publishedDatasetVersion(t, candidateDatasetDocument())
+	result, err := Extract(version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result = attachDefaultSemantics(version, result)
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := claimForVersion(version)
+	claim.PreparedResult = raw
+	store := &jobStoreStub{
+		claims:  []*JobClaim{&claim},
+		loadErr: errors.New("prepared result must not reload or regenerate"),
+	}
+
+	handled, err := NewWorker(store).ProcessNext(
+		context.Background(), testTenantID, "worker-1", time.Minute,
+	)
+	if err != nil || !handled {
+		t.Fatalf("ProcessNext() handled=%v error=%v", handled, err)
+	}
+	if store.loadCalls != 0 || store.finishCalls != 1 || store.failCalls != 0 {
+		t.Fatalf("calls: load=%d finish=%d fail=%d", store.loadCalls, store.finishCalls, store.failCalls)
+	}
+	if len(store.results) != 1 || store.results[0].DatasetVersionID != version.ID {
+		t.Fatalf("results=%#v", store.results)
 	}
 }
 

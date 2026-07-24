@@ -366,10 +366,13 @@ func preparePublishedMetricDataset(t *testing.T, ctx context.Context, pool *pgxp
 			VALUES($1,$2,'metric second tester','integration-hash') RETURNING id::text`, tenantID, "metric-second-"+suffix+"@it.test").Scan(&secondActorID); err != nil {
 			return err
 		}
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.data_sources(
-			tenant_id,code,name,source_type,secret_ref,status,last_synced_at
-		) VALUES($1,'metric_orders','Metric Orders','MYSQL','env://METRIC_IT','ACTIVE',now()) RETURNING id::text`, tenantID).Scan(&sourceID); err != nil {
-			return err
+		var sourceErr error
+		sourceID, _, sourceErr = insertVersionedDataSourceTx(
+			ctx, tx, tenantID, "metric_orders", "Metric Orders", "MYSQL",
+			"env://METRIC_IT", "ACTIVE", "{}",
+		)
+		if sourceErr != nil {
+			return sourceErr
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(
 			tenant_id,data_source_id,schema_name,table_name,table_type,structure_hash,last_sync_at
@@ -393,6 +396,7 @@ func preparePublishedMetricDataset(t *testing.T, ctx context.Context, pool *pgxp
 	if err != nil {
 		t.Fatal(err)
 	}
+	attestAndPublishDataSourceFixture(t, ctx, pool, tenantID, actorID, sourceID)
 
 	raw := metricDatasetDefinition(t, sourceID, tableID)
 	validator := &publicationValidatorStub{result: dataset.PreviewResult{QueryID: uuid.NewString()}}

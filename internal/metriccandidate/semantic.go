@@ -13,9 +13,11 @@ import (
 	"intelligent-report-generation-system/internal/metric"
 )
 
-const MetricEnrichmentPromptVersion = "metric-candidate-enrichment-v1"
+const MetricEnrichmentPromptVersion = "metric-candidate-enrichment-v2"
 
 func attachDefaultSemantics(version dataset.VersionRecord, result ExtractionResult) ExtractionResult {
+	prepared, _ := dataset.Prepare(version.DSL)
+	document := prepared.Document
 	fixedFilters, optionalFilters := datasetFilterScope(version)
 	for index := range result.Candidates {
 		draft := &result.Candidates[index]
@@ -30,7 +32,16 @@ func attachDefaultSemantics(version dataset.VersionRecord, result ExtractionResu
 		if period == "" {
 			period = "NONE"
 		}
-		caliber := fmt.Sprintf("基于字段 %s，按 %s 聚合；空值处理为 %s", draft.SourceFieldCode, definition.Aggregation, definition.NullHandling)
+		businessAggregation := effectiveBusinessAggregation(*draft)
+		sourceField := dataset.Field{}
+		for _, field := range document.Fields {
+			if field.ID == draft.SourceFieldID {
+				sourceField = field
+				break
+			}
+		}
+		objectName := metricObjectName(sourceField)
+		caliber := businessCaliber(objectName, businessAggregation, definition.NullHandling)
 		if definition.Unit != "" {
 			caliber += "；单位为 " + definition.Unit
 		}
@@ -45,8 +56,14 @@ func attachDefaultSemantics(version dataset.VersionRecord, result ExtractionResu
 			Aggregation: definition.Aggregation, DimensionFieldIDs: dimensionIDs,
 			DependencyMetricVersionIDs: append([]string(nil), definitionDependencyIDs(definition.Expression)...),
 		}
-		lineageSummary := fmt.Sprintf("来自发布数据集“%s”的字段 %s，按 %s 聚合", versionName(version), draft.SourceFieldCode, definition.Aggregation)
-		tags := []string{definition.Metric.Name, definition.Metric.Code, "原子指标", definition.Aggregation}
+		lineageSummary := fmt.Sprintf("来自发布数据集“%s”的业务输出“%s”，计算方式为 %s", versionName(version), sourceField.Name, businessAggregation)
+		metricTypeLabel := "原子指标"
+		if definition.Metric.Type == "DERIVED" {
+			metricTypeLabel = "派生指标"
+		} else if definition.Metric.Type == "RATIO" {
+			metricTypeLabel = "复合指标"
+		}
+		tags := []string{definition.Metric.Name, definition.Metric.Code, metricTypeLabel, businessAggregation}
 		if fixedFilters > 0 {
 			tags = append(tags, "固定过滤口径")
 		}
@@ -66,6 +83,44 @@ func attachDefaultSemantics(version dataset.VersionRecord, result ExtractionResu
 		draft.Semantic.InputHash = semanticInputHash(*draft, version)
 	}
 	return result
+}
+
+func effectiveBusinessAggregation(draft CandidateDraft) string {
+	for _, evidence := range draft.Evidence {
+		if evidence.Code == "DAG_AGGREGATE_OUTPUT" && supportedAggregations[strings.ToUpper(strings.TrimSpace(evidence.Value))] {
+			return strings.ToUpper(strings.TrimSpace(evidence.Value))
+		}
+	}
+	if aggregation := strings.ToUpper(strings.TrimSpace(draft.Definition.Aggregation)); aggregation != "" {
+		return aggregation
+	}
+	return "NONE"
+}
+
+func businessCaliber(objectName, aggregation, nullHandling string) string {
+	if objectName == "" {
+		objectName = "业务对象"
+	}
+	nullRule := "忽略空值"
+	if strings.ToUpper(strings.TrimSpace(nullHandling)) != "IGNORE" {
+		nullRule = "按指标定义处理空值"
+	}
+	switch aggregation {
+	case "COUNT_DISTINCT":
+		return fmt.Sprintf("对%s去重计数，重复对象只计算一次；%s", objectName, nullRule)
+	case "COUNT":
+		return fmt.Sprintf("统计%s记录数量；%s", objectName, nullRule)
+	case "SUM":
+		return fmt.Sprintf("汇总%s；%s", objectName, nullRule)
+	case "AVG":
+		return fmt.Sprintf("计算%s平均值；%s", objectName, nullRule)
+	case "MIN":
+		return fmt.Sprintf("取%s最小值；%s", objectName, nullRule)
+	case "MAX":
+		return fmt.Sprintf("取%s最大值；%s", objectName, nullRule)
+	default:
+		return fmt.Sprintf("直接使用已发布业务输出%s；%s", objectName, nullRule)
+	}
 }
 
 func datasetFilterScope(version dataset.VersionRecord) (fixed, optional int) {

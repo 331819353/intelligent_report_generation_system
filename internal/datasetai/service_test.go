@@ -897,6 +897,39 @@ func TestServicePlanRepairsSyntheticCountFieldUsingExactAuthorizedIdentifier(t *
 	}
 }
 
+func TestServicePlanRepairsCreateProposalThatSilentlyDropsStructuredGroupingHints(t *testing.T) {
+	detail := singleTableProposal("table-orders", "ORDER_ID")
+	detail.Summary = "按明细粒度保留业务记录，不使用分组"
+	repaired := monthlyRegionalOrderCountProposal()
+	invoker := &fakeInvoker{configured: true, results: []aiplatform.InvocationResult{
+		plannerResult(t, detail, "request-detail-without-group"),
+		plannerResult(t, repaired, "request-group-repaired"),
+	}}
+	result, err := NewService(monthlyRegionalOrderCountAssetCatalog(), invoker).Plan(
+		context.Background(),
+		"tenant-1",
+		"actor-1",
+		"",
+		PlanRequest{
+			Instruction: "构建销售订单业务数据集",
+			Hints:       monthlyRegionalOrderCountHints(),
+		},
+	)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if result.RequestID != "request-group-repaired" || len(invoker.inputs) != 2 ||
+		len(result.Proposal.Plan.Groups) != 1 || result.Proposal.Plan.Groups[0].Metrics[0].Aggregation != "COUNT" {
+		t.Fatalf("repair result/calls = %#v/%d", result, len(invoker.inputs))
+	}
+	repairMessage := invoker.inputs[1].Request.Messages[len(invoker.inputs[1].Request.Messages)-1].Parts[0].Text
+	for _, expected := range []string{InvalidOutputReasonGroup, "CREATE hints", "aggregation"} {
+		if !strings.Contains(repairMessage, expected) {
+			t.Fatalf("repair message does not contain %q: %s", expected, repairMessage)
+		}
+	}
+}
+
 func TestServicePlanReturnsFinalRepairClassificationAndRequestID(t *testing.T) {
 	first := monthlyRegionalOrderCountProposal()
 	first.Plan.Nodes[0].SelectedColumns[0] = "COUNT(*)"

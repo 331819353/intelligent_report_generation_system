@@ -21,6 +21,101 @@ type PostgresStore struct{ pool *pgxpool.Pool }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
+// LoadMetricSemanticContext returns reviewed catalog metadata for the exact physical
+// tables and projected columns used by a dataset. It deliberately excludes samples,
+// credentials and connection details.
+func (s *PostgresStore) LoadMetricSemanticContext(
+	ctx context.Context,
+	tenantID string,
+	requests []SemanticContextRequest,
+) (items []SemanticTableContext, err error) {
+	if tenantID == "" || len(requests) > 16 {
+		return nil, ErrInvalidRequest
+	}
+	requestedColumns := map[string]map[string]bool{}
+	tableIDs := make([]string, 0, len(requests))
+	for _, request := range requests {
+		tableID := strings.TrimSpace(request.TableID)
+		if !canonicalUUID(tableID) {
+			return nil, ErrInvalidRequest
+		}
+		if _, exists := requestedColumns[tableID]; exists {
+			continue
+		}
+		columns := map[string]bool{}
+		for _, column := range request.ColumnNames {
+			column = strings.TrimSpace(column)
+			if column != "" && len([]rune(column)) <= 128 {
+				columns[column] = true
+			}
+		}
+		requestedColumns[tableID] = columns
+		tableIDs = append(tableIDs, tableID)
+	}
+	if len(tableIDs) == 0 {
+		return []SemanticTableContext{}, nil
+	}
+	items = []SemanticTableContext{}
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		rows, queryErr := tx.Query(ctx, `SELECT
+			table_asset.id::text,
+			COALESCE(NULLIF(table_asset.business_name,''),table_asset.table_name),
+			COALESCE(table_asset.business_description,''),
+			column_asset.column_name,
+			COALESCE(NULLIF(column_asset.business_name,''),column_asset.column_name),
+			COALESCE(column_asset.business_description,''),
+			COALESCE(column_asset.semantic_type,''),
+			COALESCE(column_asset.canonical_type,'')
+		FROM platform.metadata_tables AS table_asset
+		LEFT JOIN platform.metadata_columns AS column_asset
+		  ON column_asset.tenant_id=table_asset.tenant_id AND column_asset.table_id=table_asset.id
+		WHERE table_asset.id=ANY($1::uuid[])
+		ORDER BY table_asset.id,column_asset.ordinal_position
+		LIMIT 512`, tableIDs)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		index := map[string]int{}
+		for rows.Next() {
+			var tableID, tableName, tableDescription string
+			var columnCode, columnName, columnDescription, semanticType, canonicalType *string
+			if scanErr := rows.Scan(
+				&tableID, &tableName, &tableDescription, &columnCode, &columnName,
+				&columnDescription, &semanticType, &canonicalType,
+			); scanErr != nil {
+				return scanErr
+			}
+			position, exists := index[tableID]
+			if !exists {
+				position = len(items)
+				index[tableID] = position
+				items = append(items, SemanticTableContext{
+					TableID: tableID, Name: tableName, Description: tableDescription,
+					Columns: []SemanticColumnContext{},
+				})
+			}
+			if columnCode == nil || !requestedColumns[tableID][*columnCode] {
+				continue
+			}
+			items[position].Columns = append(items[position].Columns, SemanticColumnContext{
+				Code: *columnCode, Name: dereferenceText(columnName),
+				Description: dereferenceText(columnDescription), SemanticType: dereferenceText(semanticType),
+				CanonicalType: dereferenceText(canonicalType),
+			})
+		}
+		return rows.Err()
+	})
+	return items, err
+}
+
+func dereferenceText(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
 // EnqueueDatasetMetricExtractionTx 与数据集发布复用同一事务，避免出现“发布成功但
 // 未提取”或“未发布版本被提取”的双写裂缝。
 func (s *PostgresStore) EnqueueDatasetMetricExtractionTx(
@@ -33,8 +128,15 @@ func (s *PostgresStore) EnqueueDatasetMetricExtractionTx(
 		return ErrInvalidRequest
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO platform.metric_extraction_jobs(
-		tenant_id,dataset_id,dataset_version_id,dsl_hash,requested_by,extractor_version
-	) VALUES($1,$2,$3,$4,NULLIF($5,'')::uuid,$6)
+		tenant_id,dataset_id,dataset_version_id,dsl_hash,requested_by,extractor_version,prepared_result
+	) VALUES($1,$2,$3,$4,NULLIF($5,'')::uuid,$6,(
+		SELECT request.metric_candidate_result
+		FROM platform.dataset_publication_requests AS request
+		WHERE request.tenant_id=$1 AND request.dataset_id=$2
+		  AND request.reserved_published_version_id=$3
+		  AND request.status='PENDING'
+		  AND request.metric_candidate_generation_status IN ('SUCCEEDED','PARTIAL')
+	))
 	ON CONFLICT(tenant_id,dataset_version_id,extractor_version) DO NOTHING`,
 		tenantID, version.DatasetID, version.ID, version.DSLHash, actorID, JobVersion)
 	return err
@@ -48,6 +150,7 @@ type JobClaim struct {
 	DatasetVersionID string
 	DSLHash          string
 	RequestedBy      string
+	PreparedResult   json.RawMessage
 }
 
 // ListJobTenantIDs 只读取未启用 RLS 的租户目录；实际 claim 和写入仍逐租户进入 RLS 事务。
@@ -101,8 +204,10 @@ func (s *PostgresStore) ClaimJob(ctx context.Context, tenantID, workerID string,
 			error_code='',error_message=''
 		FROM candidate WHERE job.id=candidate.id
 		RETURNING job.id::text,job.dataset_id::text,job.dataset_version_id::text,
-			job.dsl_hash,COALESCE(job.requested_by::text,'')`, workerID, int64(lease/time.Second)).
-			Scan(&item.ID, &item.DatasetID, &item.DatasetVersionID, &item.DSLHash, &item.RequestedBy)
+			job.dsl_hash,COALESCE(job.requested_by::text,''),COALESCE(job.prepared_result,'null'::jsonb)`,
+			workerID, int64(lease/time.Second)).
+			Scan(&item.ID, &item.DatasetID, &item.DatasetVersionID, &item.DSLHash,
+				&item.RequestedBy, &item.PreparedResult)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -227,7 +332,7 @@ func (s *PostgresStore) FinishJob(ctx context.Context, claim JobClaim, workerID 
 			) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 			ON CONFLICT(tenant_id,fingerprint) DO NOTHING`,
 				claim.TenantID, claim.ID, claim.DatasetID, claim.DatasetVersionID, claim.DSLHash,
-				definition.Metric.Name, definition.Metric.Code, definition.Metric.Description,
+				item.draft.Semantic.Name, definition.Metric.Code, item.draft.Semantic.Description,
 				item.draft.Status, item.method, item.confidence, item.definition, []string{item.draft.SourceFieldID},
 				item.evidence, item.assumptions, item.draft.Warnings, item.draft.BlockReasons,
 				item.draft.Fingerprint); err != nil {
@@ -335,11 +440,20 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, filter ListFi
 	items = []Candidate{}
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.metric_candidates
-			WHERE ($1='' OR status=$1) AND ($2='' OR dataset_id::text=$2)`, filter.Status, filter.DatasetID).Scan(&total); err != nil {
+			WHERE ($1='' OR status=$1) AND ($2='' OR dataset_id::text=$2)
+			  AND proposed_definition#>>'{metric,type}' IN ('DERIVED','RATIO')
+			  AND NOT(status='BLOCKED' AND block_reasons &&
+			    ARRAY['AGGREGATED_DATASET_UNSUPPORTED','PRE_AGGREGATION_UNSUPPORTED',
+			          'AGGREGATE_EXPRESSION_UNSUPPORTED']::text[])`,
+			filter.Status, filter.DatasetID).Scan(&total); err != nil {
 			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT `+candidateSelect+` FROM platform.metric_candidates AS candidate`+candidateSemanticJoin+`
 			WHERE ($1='' OR candidate.status=$1) AND ($2='' OR candidate.dataset_id::text=$2)
+			  AND candidate.proposed_definition#>>'{metric,type}' IN ('DERIVED','RATIO')
+			  AND NOT(candidate.status='BLOCKED' AND candidate.block_reasons &&
+			    ARRAY['AGGREGATED_DATASET_UNSUPPORTED','PRE_AGGREGATION_UNSUPPORTED',
+			          'AGGREGATE_EXPRESSION_UNSUPPORTED']::text[])
 			ORDER BY candidate.updated_at DESC,candidate.id LIMIT $3 OFFSET $4`,
 			filter.Status, filter.DatasetID, filter.Limit, filter.Offset)
 		if err != nil {

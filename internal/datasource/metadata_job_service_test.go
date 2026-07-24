@@ -17,6 +17,8 @@ type metadataJobRepo struct {
 	finished         bool
 	heartbeatStarted chan struct{}
 	heartbeatRelease chan struct{}
+	samplePolicyErr  error
+	policyChecks     int
 }
 
 type countingMetadataJobConnector struct {
@@ -31,7 +33,11 @@ func (c *countingMetadataJobConnector) Sample(context.Context, Source, MetadataT
 
 func (r *metadataJobRepo) EnqueueMetadataJob(_ context.Context, request metadataJobRequest) (MetadataJob, error) {
 	r.enqueued = request
-	return MetadataJob{ID: "job-1", DataSourceID: request.DataSourceID, Kind: request.Kind, Mode: request.Mode, Status: "QUEUED", Stage: "QUEUED", Total: len(request.Tables)}, nil
+	return MetadataJob{
+		ID: "job-1", DataSourceID: request.DataSourceID, Kind: request.Kind, Mode: request.Mode,
+		SampleDataMode: request.SampleDataMode, SamplePolicyVersion: 1,
+		Status: "QUEUED", Stage: "QUEUED", Total: len(request.Tables),
+	}, nil
 }
 func (r *metadataJobRepo) GetMetadataJob(context.Context, string, string, string) (MetadataJob, error) {
 	return MetadataJob{}, nil
@@ -55,6 +61,10 @@ func (r *metadataJobRepo) IsMetadataTableEnriched(_ context.Context, _, tableID,
 }
 func (r *metadataJobRepo) IsMetadataJobItemCompleted(_ context.Context, _, itemID, tableID, structureHash string) (bool, error) {
 	return r.completed[itemID+"\x1f"+tableID+"\x1f"+structureHash], nil
+}
+func (r *metadataJobRepo) ValidateMetadataSamplePolicy(context.Context, string, string, MetadataSampleMode, int64) error {
+	r.policyChecks++
+	return r.samplePolicyErr
 }
 
 func (r *metadataJobRepo) HeartbeatMetadataJob(ctx context.Context, _ string, _ string, _ string, _ time.Duration) error {
@@ -104,6 +114,9 @@ func TestQueueImportTablesReturnsBeforeSamplingOrLLM(t *testing.T) {
 	}
 	if job.Status != "QUEUED" || job.Total != 1 || jobs.enqueued.Kind != MetadataJobImport || jobs.enqueued.Mode != MetadataRefreshFull {
 		t.Fatalf("job=%#v request=%#v", job, jobs.enqueued)
+	}
+	if jobs.enqueued.SampleDataMode != MetadataSampleDeny {
+		t.Fatalf("default sample mode=%q, want DENY", jobs.enqueued.SampleDataMode)
 	}
 	if len(baseRepo.selectedBatches) != 0 || len(completer.tableIDs) != 0 {
 		t.Fatal("HTTP enqueue path performed sampling, persistence or LLM work")
@@ -183,7 +196,10 @@ func TestIncrementalMetadataJobDoesNotTrustStaleLatestEnrichmentStatus(t *testin
 	connector := importConnector{connector: connector{kind: TypeMySQL}, discovered: SyncResult{Tables: []MetadataTable{table}}, sample: SampleResult{Columns: []string{"id"}, Rows: [][]any{{1}, {2}, {3}}}}
 	completer := &completingRecorder{}
 	jobs := &metadataJobRepo{
-		claim: &metadataJobClaim{MetadataJob: MetadataJob{ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobRefresh, Mode: MetadataRefreshIncremental}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
+		claim: &metadataJobClaim{MetadataJob: MetadataJob{
+			ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobRefresh, Mode: MetadataRefreshIncremental,
+			SampleDataMode: MetadataSampleRaw, SamplePolicyVersion: 1,
+		}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
 		// 入队快照中的旧任务状态看似成功，但精确结构完善查询未命中时必须重新加工。
 		items: []metadataJobItem{{ID: "item-1", SchemaName: "sales", TableName: "orders", TableID: "table-1", PreviousStructureHash: structureHash, PreviousEnrichmentStatus: "SUCCEEDED", Status: "QUEUED"}},
 	}
@@ -233,7 +249,10 @@ func TestIncrementalMetadataJobCompletesOnlyChangedColumnsWithFilteredSamples(t 
 	}}
 	completer := &completingRecorder{}
 	jobs := &metadataJobRepo{
-		claim: &metadataJobClaim{MetadataJob: MetadataJob{ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobRefresh, Mode: MetadataRefreshIncremental}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
+		claim: &metadataJobClaim{MetadataJob: MetadataJob{
+			ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobRefresh, Mode: MetadataRefreshIncremental,
+			SampleDataMode: MetadataSampleRaw, SamplePolicyVersion: 1,
+		}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
 		items: []metadataJobItem{{ID: "item-1", SchemaName: "sales", TableName: "orders", TableID: "table-1", PreviousStructureHash: "previous-structure", Status: "QUEUED"}},
 	}
 	service := NewService(baseRepo, connector)
@@ -422,10 +441,14 @@ func TestImportMetadataJobKeepsReimportSemantics(t *testing.T) {
 	source := Source{ID: "source-1", TenantID: "tenant-1", Type: TypeExcel, Status: StatusActive, Config: map[string]any{}, FileAssetID: "file-1"}
 	sourceHash, _ := metadataJobSourceHash(source)
 	baseRepo := &repo{source: source, quota: Quota{MaxDataSources: 10}, managedMissing: true, selectedIDs: map[string]string{metadataTableKey(table): "table-1"}}
-	connector := importConnector{connector: connector{kind: TypeExcel}, discovered: SyncResult{Tables: []MetadataTable{table}}, sample: SampleResult{Columns: []string{"客户名称", "订单金额"}, Rows: [][]any{{"华东智造有限公司", 16320}, {"南方自动化科技", 15360}}}}
+	requestedLimit := 0
+	connector := importConnector{connector: connector{kind: TypeExcel}, discovered: SyncResult{Tables: []MetadataTable{table}}, sample: SampleResult{Columns: []string{"客户名称", "订单金额"}, Rows: [][]any{{"华东智造有限公司", 16320}, {"南方自动化科技", 15360}}}, sampleLimit: &requestedLimit}
 	completer := &completingRecorder{}
 	jobs := &metadataJobRepo{
-		claim: &metadataJobClaim{MetadataJob: MetadataJob{ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobImport, Mode: MetadataRefreshFull}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
+		claim: &metadataJobClaim{MetadataJob: MetadataJob{
+			ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobImport, Mode: MetadataRefreshFull,
+			SampleDataMode: MetadataSampleRaw, SamplePolicyVersion: 1,
+		}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
 		items: []metadataJobItem{{ID: "item-1", SchemaName: "WORKBOOK", TableName: "销售订单", Status: "QUEUED"}},
 	}
 	service := NewService(baseRepo, connector)
@@ -445,6 +468,9 @@ func TestImportMetadataJobKeepsReimportSemantics(t *testing.T) {
 	}
 	if len(completer.rows) != 2 || completer.rows[0]["客户名称"] != "华东智造有限公司" || completer.rows[0]["订单金额"] != 16320 {
 		t.Fatalf("Sheet 表头或真实内容未进入 LLM 映射输入: %#v", completer.rows)
+	}
+	if requestedLimit != 10 {
+		t.Fatalf("worker sample limit=%d, want 10", requestedLimit)
 	}
 }
 
@@ -482,7 +508,10 @@ func TestFullMetadataRefreshReprocessesAlreadyEnrichedStructure(t *testing.T) {
 	}}
 	completer := &completingRecorder{}
 	jobs := &metadataJobRepo{
-		claim:    &metadataJobClaim{MetadataJob: MetadataJob{ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobRefresh, Mode: MetadataRefreshFull}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
+		claim: &metadataJobClaim{MetadataJob: MetadataJob{
+			ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobRefresh, Mode: MetadataRefreshFull,
+			SampleDataMode: MetadataSampleRaw, SamplePolicyVersion: 1,
+		}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
 		items:    []metadataJobItem{{ID: "item-1", SchemaName: "sales", TableName: "orders", TableID: "table-1", PreviousStructureHash: structureHash, Status: "QUEUED"}},
 		enriched: map[string]bool{"table-1\x1f" + structureHash: true},
 	}
@@ -601,5 +630,135 @@ func TestMetadataCompletionJobFailureReturnsActionableSafeMessage(t *testing.T) 
 	code, message = metadataCompletionJobFailure(classifiedMetadataCompletionError{code: "INVALID_OUTPUT"})
 	if code != "LLM_OUTPUT_INVALID" || !strings.Contains(message, "手工完善") {
 		t.Fatalf("code=%q message=%q", code, message)
+	}
+}
+
+func TestMetadataJobDenyNeverReadsBusinessSamples(t *testing.T) {
+	table := MetadataTable{
+		SchemaName: "sales", Name: "orders",
+		Columns: []MetadataColumn{{Name: "email", CanonicalType: "STRING"}},
+	}
+	source := Source{
+		ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive,
+		Config: map[string]any{"host": "db"}, SecretRef: "encrypted://source",
+	}
+	sourceHash, _ := metadataJobSourceHash(source)
+	baseRepo := &repo{
+		source: source, quota: Quota{MaxDataSources: 10},
+		selectedIDs: map[string]string{metadataTableKey(table): "table-1"},
+	}
+	connector := &countingMetadataJobConnector{importConnector: importConnector{
+		connector:  connector{kind: TypeMySQL},
+		discovered: SyncResult{Tables: []MetadataTable{table}},
+		sample: SampleResult{
+			Columns: []string{"email"},
+			Rows:    [][]any{{"raw@example.com"}},
+		},
+	}}
+	completer := &completingRecorder{}
+	jobs := &metadataJobRepo{
+		claim: &metadataJobClaim{MetadataJob: MetadataJob{
+			ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobImport, Mode: MetadataRefreshFull,
+			SampleDataMode: MetadataSampleDeny, SamplePolicyVersion: 1,
+		}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
+		items: []metadataJobItem{{ID: "item-1", SchemaName: "sales", TableName: "orders", Status: "QUEUED"}},
+	}
+	service := NewService(baseRepo, connector)
+	service.SetTableCompleter(completer)
+	service.SetMetadataJobRepository(jobs)
+
+	processed, err := service.ProcessNextMetadataJob(context.Background(), "tenant-1", "worker-1", time.Hour)
+	if err != nil || !processed {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	if connector.sampleCalls != 0 || completer.rows != nil || jobs.policyChecks != 1 {
+		t.Fatalf("DENY sampleCalls=%d rows=%#v policyChecks=%d", connector.sampleCalls, completer.rows, jobs.policyChecks)
+	}
+}
+
+func TestMetadataJobMaskRemovesRawValuesBeforeLLM(t *testing.T) {
+	table := MetadataTable{
+		SchemaName: "sales", Name: "orders",
+		Columns: []MetadataColumn{
+			{Name: "customer", CanonicalType: "STRING"},
+			{Name: "email", CanonicalType: "STRING"},
+			{Name: "amount", CanonicalType: "DECIMAL"},
+		},
+	}
+	source := Source{
+		ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive,
+		Config: map[string]any{"host": "db"}, SecretRef: "encrypted://source",
+	}
+	sourceHash, _ := metadataJobSourceHash(source)
+	baseRepo := &repo{
+		source: source, quota: Quota{MaxDataSources: 10},
+		selectedIDs: map[string]string{metadataTableKey(table): "table-1"},
+	}
+	connector := &countingMetadataJobConnector{importConnector: importConnector{
+		connector:  connector{kind: TypeMySQL},
+		discovered: SyncResult{Tables: []MetadataTable{table}},
+		sample: SampleResult{
+			Columns: []string{"customer", "email", "amount"},
+			Rows:    [][]any{{"华东智造有限公司", "alice@example.com", 16320.55}},
+		},
+	}}
+	completer := &completingRecorder{}
+	jobs := &metadataJobRepo{
+		claim: &metadataJobClaim{MetadataJob: MetadataJob{
+			ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobImport, Mode: MetadataRefreshFull,
+			SampleDataMode: MetadataSampleMask, SamplePolicyVersion: 7,
+		}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
+		items: []metadataJobItem{{ID: "item-1", SchemaName: "sales", TableName: "orders", Status: "QUEUED"}},
+	}
+	service := NewService(baseRepo, connector)
+	service.SetTableCompleter(completer)
+	service.SetMetadataJobRepository(jobs)
+
+	processed, err := service.ProcessNextMetadataJob(context.Background(), "tenant-1", "worker-1", time.Hour)
+	if err != nil || !processed {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	if connector.sampleCalls != 1 || jobs.policyChecks != 3 || len(completer.rows) != 1 {
+		t.Fatalf("sampleCalls=%d policyChecks=%d rows=%#v", connector.sampleCalls, jobs.policyChecks, completer.rows)
+	}
+	row := completer.rows[0]
+	if row["customer"] == "华东智造有限公司" || row["email"] == "alice@example.com" || row["amount"] == 16320.55 {
+		t.Fatalf("MASK leaked raw values: %#v", row)
+	}
+	if row["email"] != "XXXXX@XXXXXXX.XXX" || row["amount"] != float64(0) {
+		t.Fatalf("MASK did not preserve safe format: %#v", row)
+	}
+}
+
+func TestMetadataJobPolicyRevocationStopsBeforeSampling(t *testing.T) {
+	source := Source{
+		ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive,
+		Config: map[string]any{"host": "db"}, SecretRef: "encrypted://source",
+	}
+	sourceHash, _ := metadataJobSourceHash(source)
+	connector := &countingMetadataJobConnector{importConnector: importConnector{
+		connector: connector{kind: TypeMySQL},
+		sample: SampleResult{
+			Columns: []string{"email"}, Rows: [][]any{{"raw@example.com"}},
+		},
+	}}
+	jobs := &metadataJobRepo{
+		claim: &metadataJobClaim{MetadataJob: MetadataJob{
+			ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobImport, Mode: MetadataRefreshFull,
+			SampleDataMode: MetadataSampleRaw, SamplePolicyVersion: 3,
+		}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
+		samplePolicyErr: ErrSamplePolicyChanged,
+	}
+	completer := &completingRecorder{}
+	service := NewService(&repo{source: source, quota: Quota{MaxDataSources: 10}}, connector)
+	service.SetTableCompleter(completer)
+	service.SetMetadataJobRepository(jobs)
+
+	processed, err := service.ProcessNextMetadataJob(context.Background(), "tenant-1", "worker-1", time.Hour)
+	if !processed || err == nil || !strings.Contains(err.Error(), "SAMPLE_POLICY_CHANGED") {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	if connector.sampleCalls != 0 || len(completer.tableIDs) != 0 || jobs.policyChecks != 1 {
+		t.Fatalf("revoked task progressed: sampleCalls=%d LLM=%#v policyChecks=%d", connector.sampleCalls, completer.tableIDs, jobs.policyChecks)
 	}
 }

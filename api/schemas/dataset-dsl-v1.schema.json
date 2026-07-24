@@ -32,7 +32,11 @@
         "code": { "$ref": "#/$defs/identifier" },
         "name": { "type": "string", "minLength": 1, "maxLength": 200 },
         "description": { "type": "string", "maxLength": 2000 },
-        "type": { "enum": ["SINGLE_SOURCE", "CROSS_SOURCE"] }
+        "type": { "enum": ["SINGLE_SOURCE", "CROSS_SOURCE"] },
+        "layer": {
+          "description": "数仓加工层级；历史 DSL 可省略并由服务端确定性推断",
+          "enum": ["ODS", "DWD", "DWS"]
+        }
       }
     },
     "node": {

@@ -38,9 +38,11 @@ func TestDatasetPublicationApprovalCommitsDecisionAndVersionAtomically(t *testin
 			VALUES($1,$2,'approval reviewer','integration-hash') RETURNING id`, tenantID, "reviewer-"+suffix+"@it.test").Scan(&reviewerID); err != nil {
 			return err
 		}
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.data_sources(
-			tenant_id,code,name,source_type,secret_ref,status,last_synced_at
-		) VALUES($1,'orders','Orders','MYSQL','env://DATASET_APPROVAL_IT','ACTIVE',now()) RETURNING id`, tenantID).Scan(&sourceID); err != nil {
+		sourceID, _, err = insertVersionedDataSourceTx(
+			ctx, tx, tenantID, "orders", "Orders", "MYSQL",
+			"env://DATASET_APPROVAL_IT", "ACTIVE", "{}",
+		)
+		if err != nil {
 			return err
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(
@@ -60,6 +62,9 @@ func TestDatasetPublicationApprovalCommitsDecisionAndVersionAtomically(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	attestAndPublishDataSourceFixture(
+		t, ctx, pool, tenantID, requesterID, sourceID,
+	)
 
 	validator := &publicationValidatorStub{result: dataset.PreviewResult{
 		QueryID: "3cbbad54-8ee8-49b8-881c-13e1c7da2a13", Columns: []string{"stat_month", "valid_order_amount"},
@@ -101,6 +106,22 @@ func TestDatasetPublicationApprovalCommitsDecisionAndVersionAtomically(t *testin
 	}
 	if request.Status != dataset.PublicationRequestPending || request.ExpectedPlanHash != created.PlanHash {
 		t.Fatalf("submitted request=%#v", request)
+	}
+	preparationWorker := metriccandidate.NewPublicationPreparationWorker(
+		candidateStore,
+		metriccandidate.NewPublicationGenerator(nil),
+	)
+	preparationProcessed, err := preparationWorker.ProcessNext(
+		ctx, tenantID, "dataset-approval-integration-worker", time.Minute,
+	)
+	if err != nil || !preparationProcessed {
+		t.Fatalf("publication candidate preparation processed=%t err=%v", preparationProcessed, err)
+	}
+	request, err = store.GetPublicationRequest(ctx, tenantID, created.ID, request.ID)
+	if err != nil ||
+		(request.MetricCandidateStatus != dataset.PublicationCandidateSucceeded &&
+			request.MetricCandidateStatus != dataset.PublicationCandidatePartial) {
+		t.Fatalf("prepared publication request=%#v err=%v", request, err)
 	}
 	beforeApproval, err := datasetService.Get(ctx, tenantID, created.ID)
 	if err != nil || beforeApproval.CurrentPublishedVersionID != "" || beforeApproval.Status != "DRAFT" {
@@ -186,13 +207,12 @@ func TestDatasetPublicationApprovalCommitsDecisionAndVersionAtomically(t *testin
 	}
 	candidate := candidates[0]
 	if candidate.DatasetID != created.ID || candidate.DatasetVersionID != result.PublishedVersion.ID ||
-		candidate.DSLHash != result.PublishedVersion.DSLHash || candidate.Status != metriccandidate.CandidateStatusBlocked ||
+		candidate.DSLHash != result.PublishedVersion.DSLHash || candidate.Status != metriccandidate.CandidateStatusReady ||
 		candidate.Method != "RULE" || len(candidate.SourceFieldIDs) != 1 || candidate.SourceFieldIDs[0] != "field_revenue" {
 		t.Fatalf("generated candidate=%#v", candidate)
 	}
-	if len(candidate.BlockReasons) != 2 || candidate.BlockReasons[0] != metriccandidate.BlockReasonAggregatedDataset ||
-		candidate.BlockReasons[1] != metriccandidate.BlockReasonAggregateExpression {
-		t.Fatalf("blocked candidate reasons=%#v", candidate.BlockReasons)
+	if len(candidate.BlockReasons) != 0 {
+		t.Fatalf("ready candidate unexpectedly blocked: %#v", candidate.BlockReasons)
 	}
 	var metricCount, completedJobCount int
 	if err := database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
@@ -200,7 +220,7 @@ func TestDatasetPublicationApprovalCommitsDecisionAndVersionAtomically(t *testin
 			return err
 		}
 		return tx.QueryRow(ctx, `SELECT count(*) FROM platform.metric_extraction_jobs
-			WHERE dataset_version_id=$1 AND status='PARTIAL' AND total=1 AND blocked_count=1`,
+			WHERE dataset_version_id=$1 AND status='SUCCEEDED' AND total=1 AND ready_count=1`,
 			result.PublishedVersion.ID).Scan(&completedJobCount)
 	}); err != nil || metricCount != 0 || completedJobCount != 1 {
 		t.Fatalf("post-extraction metrics=%d completed_jobs=%d err=%v", metricCount, completedJobCount, err)

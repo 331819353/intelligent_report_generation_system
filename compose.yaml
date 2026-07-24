@@ -1,7 +1,7 @@
 name: intelligent-report-system
 
 services:
-  # 平台控制面数据库，初始化脚本只创建最小权限应用账号。
+  # 平台控制面数据库：只保存账号、权限、数据源/数据集/指标和治理元数据。
   postgres:
     image: pgvector/pgvector:pg17
     restart: unless-stopped
@@ -11,12 +11,42 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_admin_password}
       POSTGRES_APP_USER: ${POSTGRES_APP_USER:-report_app}
       POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-local_report_password}
+      POSTGRES_WORKER_USER: ${POSTGRES_WORKER_USER:-report_worker}
+      POSTGRES_WORKER_PASSWORD: ${POSTGRES_WORKER_PASSWORD:-local_worker_password}
+      POSTGRES_CONNECTION_TEST_USER: ${POSTGRES_CONNECTION_TEST_USER:-report_connection_tester}
+      POSTGRES_CONNECTION_TEST_PASSWORD: ${POSTGRES_CONNECTION_TEST_PASSWORD:-local_connection_test_password}
       TZ: Asia/Shanghai
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_control_data:/var/lib/postgresql/data
       - ./deployments/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks: [report_net]
+
+  # 数据仓库数据库：只保存 ODS/DWD/DWS 物理表和稳定发布视图。
+  postgres-warehouse:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}
+      POSTGRES_USER: ${WAREHOUSE_POSTGRES_USER:-warehouse_admin}
+      POSTGRES_PASSWORD: ${WAREHOUSE_POSTGRES_PASSWORD:-local_warehouse_admin_password}
+      WAREHOUSE_READER_USER: ${WAREHOUSE_READER_USER:-report_warehouse_reader}
+      WAREHOUSE_READER_PASSWORD: ${WAREHOUSE_READER_PASSWORD:-local_warehouse_reader_password}
+      WAREHOUSE_WORKER_USER: ${WAREHOUSE_WORKER_USER:-report_warehouse_worker}
+      WAREHOUSE_WORKER_PASSWORD: ${WAREHOUSE_WORKER_PASSWORD:-local_warehouse_worker_password}
+      TZ: Asia/Shanghai
+    ports:
+      - "${WAREHOUSE_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_warehouse_data:/var/lib/postgresql/data
+      - ./deployments/postgres-warehouse/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -91,68 +121,36 @@ services:
     restart: "no"
     networks: [report_net]
 
-  # 本地数据源联调实例，业务账号仅授予读取权限。
-  mysql:
-    image: mysql:8.4
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-local_mysql_root_password}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-report_source}
-      MYSQL_USER: ${MYSQL_USER:-report_reader}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-local_mysql_reader_password}
-      TZ: Asia/Shanghai
-    ports:
-      - "${MYSQL_PORT:-3306}:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
-      - ./deployments/mysql/init:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 20s
-    networks: [report_net]
-
-  # 本地 Oracle 数据源联调实例。
-  oracle:
-    image: gvenzl/oracle-free:23.26.2-slim-faststart
-    restart: unless-stopped
-    environment:
-      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-local_oracle_system_password}
-      APP_USER: ${ORACLE_USER:-report_reader}
-      APP_USER_PASSWORD: ${ORACLE_PASSWORD_APP:-local_oracle_reader_password}
-    ports:
-      - "${ORACLE_PORT:-1521}:1521"
-    volumes:
-      - oracle_data:/opt/oracle/oradata
-      - ./deployments/oracle/init:/container-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD", "healthcheck.sh"]
-      interval: 15s
-      timeout: 10s
-      retries: 40
-      start_period: 60s
-    shm_size: 1gb
-    networks: [report_net]
-
   # 隔离数据库驱动与外部查询执行的 Python 服务。
   connector-service:
     build:
       context: ./connector_service
     restart: unless-stopped
     environment:
+      APP_ENV: ${APP_ENV:-development}
       CONNECTOR_INTERNAL_TOKEN: ${CONNECTOR_INTERNAL_TOKEN:-local_connector_token_change_me}
+      CONNECTOR_CONNECTION_TEST_TOKEN: ${CONNECTOR_CONNECTION_TEST_TOKEN:-local_connector_connection_test_token_change_me}
       CONNECTOR_MAX_CONNECTIONS_PER_SOURCE: ${CONNECTOR_MAX_CONNECTIONS_PER_SOURCE:-5}
       CONNECTOR_MAX_CONCURRENT_QUERIES: ${CONNECTOR_MAX_CONCURRENT_QUERIES:-10}
+      # 生产环境必须显式注入，使用 ${VAR-} 保留空值并让 Connector 失败关闭。
+      CONNECTOR_MAX_POOLS: ${CONNECTOR_MAX_POOLS-}
+      CONNECTOR_MAX_TOTAL_CONNECTIONS: ${CONNECTOR_MAX_TOTAL_CONNECTIONS-}
       CONNECTOR_POOL_IDLE_TTL_SECONDS: ${CONNECTOR_POOL_IDLE_TTL_SECONDS:-300}
+      CONNECTOR_HTTP_MAX_REQUEST_BYTES: ${CONNECTOR_HTTP_MAX_REQUEST_BYTES-}
+      CONNECTOR_JSON_MAX_RESPONSE_BYTES: ${CONNECTOR_JSON_MAX_RESPONSE_BYTES-}
+      CONNECTOR_METADATA_SYNC_MAX_ROWS: ${CONNECTOR_METADATA_SYNC_MAX_ROWS-}
+      CONNECTOR_METADATA_SAMPLE_MAX_CELL_BYTES: ${CONNECTOR_METADATA_SAMPLE_MAX_CELL_BYTES-}
+      CONNECTOR_METADATA_SAMPLE_MAX_ROW_BYTES: ${CONNECTOR_METADATA_SAMPLE_MAX_ROW_BYTES-}
+      CONNECTOR_METADATA_SAMPLE_MAX_RESPONSE_BYTES: ${CONNECTOR_METADATA_SAMPLE_MAX_RESPONSE_BYTES-}
+      CONNECTOR_STREAM_MAX_CELL_BYTES: ${CONNECTOR_STREAM_MAX_CELL_BYTES-}
+      CONNECTOR_STREAM_MAX_ROW_BYTES: ${CONNECTOR_STREAM_MAX_ROW_BYTES-}
+      CONNECTOR_STREAM_MAX_BYTES: ${CONNECTOR_STREAM_MAX_BYTES-}
+      # 开发网络按服务名授权。production 启动会拒绝 hostname 规则，必须改为
+      # IP/CIDR:port，并另行提供平台控制面 CIDR denylist。
+      CONNECTOR_EGRESS_ALLOWLIST: ${CONNECTOR_EGRESS_ALLOWLIST-}
+      CONNECTOR_EGRESS_DENYLIST: ${CONNECTOR_EGRESS_DENYLIST-}
     ports:
-      - "${CONNECTOR_PORT:-8090}:8090"
-    depends_on:
-      mysql:
-        condition: service_healthy
-      oracle:
-        condition: service_healthy
+      - "127.0.0.1:${CONNECTOR_PORT:-8090}:8090"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health/live', timeout=2)"]
       interval: 10s
@@ -162,11 +160,10 @@ services:
     networks: [report_net]
 
 volumes:
-  postgres_data:
+  postgres_control_data:
+  postgres_warehouse_data:
   redis_data:
   minio_data:
-  mysql_data:
-  oracle_data:
 
 networks:
   report_net:

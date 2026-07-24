@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -19,8 +20,28 @@ type managedMetadataRepository interface {
 
 // QueueImportTables 只校验并持久化用户选择，采样和 LLM 完善由 worker 执行。
 func (s *Service) QueueImportTables(ctx context.Context, tenantID, actorID, sourceID string, selections []TableSelection) (MetadataJob, error) {
+	return s.QueueImportTablesWithSampleMode(
+		ctx, tenantID, actorID, sourceID, MetadataSampleDeny, selections,
+	)
+}
+
+// QueueImportTablesWithSampleMode 冻结本次任务的样本授权；未显式选择时调用方
+// 必须走上面的 DENY 包装，不能因租户允许 RAW 就自动扩大本次请求。
+func (s *Service) QueueImportTablesWithSampleMode(
+	ctx context.Context,
+	tenantID, actorID, sourceID string,
+	sampleMode MetadataSampleMode,
+	selections []TableSelection,
+) (MetadataJob, error) {
+	if err := s.ensureReviewAllowsTableConfiguration(ctx, tenantID, sourceID); err != nil {
+		return MetadataJob{}, err
+	}
 	if len(selections) == 0 || len(selections) > 100 {
 		return MetadataJob{}, errors.New("between 1 and 100 tables must be selected")
+	}
+	sampleMode = normalizeMetadataSampleMode(sampleMode)
+	if !sampleMode.Valid() {
+		return MetadataJob{}, errors.New("invalid metadata sample mode")
 	}
 	seen := make(map[string]struct{}, len(selections))
 	for _, selection := range selections {
@@ -43,17 +64,37 @@ func (s *Service) QueueImportTables(ctx context.Context, tenantID, actorID, sour
 	}
 	return s.jobs.EnqueueMetadataJob(ctx, metadataJobRequest{
 		TenantID: tenantID, DataSourceID: sourceID, RequestedBy: actorID, Kind: MetadataJobImport,
-		Mode: MetadataRefreshFull, SourceConfigHash: hash, Tables: selections,
+		Mode: MetadataRefreshFull, SampleDataMode: sampleMode,
+		SourceConfigHash: hash, Tables: selections,
 	})
 }
 
 // QueueRefreshTables 对已纳管表创建后台刷新任务；可选 tableIDs 用于安全限定单表或小批量刷新。
 func (s *Service) QueueRefreshTables(ctx context.Context, tenantID, actorID, sourceID string, mode MetadataRefreshMode, tableIDs ...string) (MetadataJob, error) {
+	return s.QueueRefreshTablesWithSampleMode(
+		ctx, tenantID, actorID, sourceID, mode, MetadataSampleDeny, tableIDs...,
+	)
+}
+
+func (s *Service) QueueRefreshTablesWithSampleMode(
+	ctx context.Context,
+	tenantID, actorID, sourceID string,
+	mode MetadataRefreshMode,
+	sampleMode MetadataSampleMode,
+	tableIDs ...string,
+) (MetadataJob, error) {
+	if err := s.ensureReviewAllowsTableConfiguration(ctx, tenantID, sourceID); err != nil {
+		return MetadataJob{}, err
+	}
 	if mode == "" {
 		mode = MetadataRefreshIncremental
 	}
 	if mode != MetadataRefreshIncremental && mode != MetadataRefreshFull {
 		return MetadataJob{}, errors.New("invalid metadata refresh mode")
+	}
+	sampleMode = normalizeMetadataSampleMode(sampleMode)
+	if !sampleMode.Valid() {
+		return MetadataJob{}, errors.New("invalid metadata sample mode")
 	}
 	source, err := s.metadataJobSource(ctx, tenantID, sourceID)
 	if err != nil {
@@ -95,8 +136,35 @@ func (s *Service) QueueRefreshTables(ctx context.Context, tenantID, actorID, sou
 	}
 	return s.jobs.EnqueueMetadataJob(ctx, metadataJobRequest{
 		TenantID: tenantID, DataSourceID: sourceID, RequestedBy: actorID, Kind: MetadataJobRefresh,
-		Mode: mode, SourceConfigHash: hash, Tables: selections,
+		Mode: mode, SampleDataMode: sampleMode,
+		SourceConfigHash: hash, Tables: selections,
 	})
+}
+
+func normalizeMetadataSampleMode(mode MetadataSampleMode) MetadataSampleMode {
+	if mode == "" {
+		return MetadataSampleDeny
+	}
+	return MetadataSampleMode(strings.ToUpper(strings.TrimSpace(string(mode))))
+}
+
+func (mode MetadataSampleMode) Valid() bool {
+	return mode == MetadataSampleDeny ||
+		mode == MetadataSampleMask ||
+		mode == MetadataSampleRaw
+}
+
+func metadataSampleModeRank(mode MetadataSampleMode) int {
+	switch normalizeMetadataSampleMode(mode) {
+	case MetadataSampleDeny:
+		return 0
+	case MetadataSampleMask:
+		return 1
+	case MetadataSampleRaw:
+		return 2
+	default:
+		return -1
+	}
 }
 
 func (s *Service) GetMetadataJob(ctx context.Context, tenantID, sourceID, jobID string) (MetadataJob, error) {
@@ -226,6 +294,22 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 	}
 	if claim.RequestedBy == "" {
 		return metadataJobExecutionError{code: "REQUESTER_UNAVAILABLE", message: "任务提交人已不可用，请重新提交任务"}
+	}
+	claim.SampleDataMode = normalizeMetadataSampleMode(claim.SampleDataMode)
+	if !claim.SampleDataMode.Valid() {
+		return metadataJobExecutionError{code: "SAMPLE_POLICY_INVALID", message: "任务样本授权无效，请重新提交任务"}
+	}
+	if err := s.jobs.ValidateMetadataSamplePolicy(
+		ctx, claim.TenantID, claim.ID, claim.SampleDataMode, claim.SamplePolicyVersion,
+	); err != nil {
+		if errors.Is(err, ErrSamplePolicyChanged) || errors.Is(err, ErrSamplePolicyDenied) {
+			return metadataJobExecutionError{
+				code:    "SAMPLE_POLICY_CHANGED",
+				message: "租户样本策略或授权人状态已变化；任务未读取业务样本，请重新提交",
+				cause:   err,
+			}
+		}
+		return err
 	}
 	source, connector, err := s.load(ctx, claim.TenantID, claim.DataSourceID)
 	if err != nil {
@@ -438,7 +522,8 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 			continue
 		}
 		var rows []map[string]any
-		shouldSample := claim.Kind == MetadataJobImport || claim.Mode == MetadataRefreshFull || len(targetColumnNames) > 0
+		shouldSample := claim.SampleDataMode != MetadataSampleDeny &&
+			(claim.Kind == MetadataJobImport || claim.Mode == MetadataRefreshFull || len(targetColumnNames) > 0)
 		if shouldSample {
 			if err := s.jobs.UpdateMetadataJobItem(ctx, claim.TenantID, claim.ID, item.ID, workerID, metadataJobItemUpdate{Status: "RUNNING", Stage: "SAMPLE", TableID: tableID}, lease); err != nil {
 				return err
@@ -446,7 +531,21 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 			if err := s.ensureMetadataJobSourceCurrent(ctx, claim); err != nil {
 				return err
 			}
-			sample, sampleErr := sampler.Sample(ctx, source, table, 3)
+			// 发现与技术元数据持久化可能耗时较长；紧邻源表读取再次校验，
+			// 使管理员撤权在下一个样本读取前生效。
+			if err := s.jobs.ValidateMetadataSamplePolicy(
+				ctx, claim.TenantID, claim.ID, claim.SampleDataMode, claim.SamplePolicyVersion,
+			); err != nil {
+				if errors.Is(err, ErrSamplePolicyChanged) || errors.Is(err, ErrSamplePolicyDenied) {
+					return metadataJobExecutionError{
+						code:    "SAMPLE_POLICY_CHANGED",
+						message: "租户样本策略或授权人状态已变化；任务未继续读取业务样本，请重新提交",
+						cause:   err,
+					}
+				}
+				return err
+			}
+			sample, sampleErr := sampler.Sample(ctx, source, table, 10)
 			if sampleErr != nil {
 				slog.ErrorContext(ctx, "metadata job table sampling failed", "job_id", claim.ID, "table", item.TableName, "error", sampleErr)
 				if err := s.failMetadataJobItem(ctx, claim, item, workerID, lease, "SAMPLE", "SAMPLE_FAILED", "读取表样本失败"); err != nil {
@@ -455,12 +554,31 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 				continue
 			}
 			rows = sampleRowsForColumns(sample, targetColumnNames)
+			if claim.SampleDataMode == MetadataSampleMask {
+				rows = maskMetadataSampleRows(rows)
+			}
 		}
 		if err := s.jobs.UpdateMetadataJobItem(ctx, claim.TenantID, claim.ID, item.ID, workerID, metadataJobItemUpdate{Status: "RUNNING", Stage: "LLM", TableID: tableID}, lease); err != nil {
 			return err
 		}
 		if err := s.ensureMetadataJobSourceCurrent(ctx, claim); err != nil {
 			return err
+		}
+		// Sample() 可能是一次慢查询；在任何样本进入 LLM 调用前做最后一次撤权
+		// 栅栏，避免采样期间策略从 RAW/MASK 被管理员收紧后仍继续出域。
+		if claim.SampleDataMode != MetadataSampleDeny {
+			if err := s.jobs.ValidateMetadataSamplePolicy(
+				ctx, claim.TenantID, claim.ID, claim.SampleDataMode, claim.SamplePolicyVersion,
+			); err != nil {
+				if errors.Is(err, ErrSamplePolicyChanged) || errors.Is(err, ErrSamplePolicyDenied) {
+					return metadataJobExecutionError{
+						code:    "SAMPLE_POLICY_CHANGED",
+						message: "租户样本策略或授权人状态已变化；样本未发送给 LLM，请重新提交",
+						cause:   err,
+					}
+				}
+				return err
+			}
 		}
 		if err := s.completer.CompleteTable(ctx, claim.TenantID, claim.RequestedBy, tableID, rows, targetTable, targetColumnIDs, structureHash, item.ID, workerID, source.Version); err != nil {
 			slog.ErrorContext(ctx, "metadata job LLM completion failed", "job_id", claim.ID, "table", item.TableName, "error", err)
@@ -562,12 +680,19 @@ func (s *Service) failMetadataJobItem(ctx context.Context, claim *metadataJobCla
 }
 
 func metadataJobSourceHash(source Source) (string, error) {
+	return sourceConfigurationHash(source)
+}
+
+// sourceConfigurationHash 固定连接配置及文件不可变版本；测试、发布和后台任务
+// 共用同一摘要算法，避免新文件或新凭据沿用旧版本证据。
+func sourceConfigurationHash(source Source) (string, error) {
 	payload, err := json.Marshal(struct {
-		Type        Type           `json:"type"`
-		Config      map[string]any `json:"config"`
-		SecretRef   string         `json:"secretRef"`
-		FileAssetID string         `json:"fileAssetId"`
-	}{source.Type, source.Config, source.SecretRef, source.FileAssetID})
+		Type          Type           `json:"type"`
+		Config        map[string]any `json:"config"`
+		SecretRef     string         `json:"secretRef"`
+		FileAssetID   string         `json:"fileAssetId"`
+		FileVersionID string         `json:"fileVersionId"`
+	}{source.Type, source.Config, source.SecretRef, source.FileAssetID, source.FileVersionID})
 	if err != nil {
 		return "", err
 	}

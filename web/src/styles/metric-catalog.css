@@ -72,6 +72,24 @@
 .metric-directory-resultbar span, .metric-directory-resultbar small { color: var(--muted); font-size: 10px; }
 
 .metric-directory-list { display: grid; }
+.metric-dataset-zones { display: grid; gap: 16px; padding: 0 28px 28px; }
+.metric-dataset-zone { overflow: hidden; border: 1px solid #dce4ef; border-radius: 14px; background: white; box-shadow: 0 8px 24px #1720330a; }
+.metric-dataset-zone > header { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 98px; padding: 18px 20px; background: linear-gradient(135deg, #f7faff 0%, #fff 72%); }
+.metric-dataset-identity { display: flex; align-items: center; gap: 13px; min-width: 0; }
+.metric-dataset-identity > span { display: grid; flex: 0 0 auto; width: 44px; height: 44px; place-items: center; border: 1px solid #c9d9fa; border-radius: 12px; background: #eaf2ff; color: #245dcc; }
+.metric-dataset-identity > div { min-width: 0; }
+.metric-dataset-identity h3 { margin: 0; color: #1e2c43; font-size: 17px; }
+.metric-dataset-identity p { overflow: hidden; margin: 5px 0; color: #6d7b90; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.metric-dataset-identity small { color: #8794a7; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.metric-dataset-zone-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 12px; }
+.metric-dataset-zone-actions > span { color: #7e8b9d; font-size: 10px; font-weight: 750; }
+.metric-dataset-zone-actions button { display: inline-flex; align-items: center; gap: 6px; min-height: 38px; padding: 0 14px; font-size: 11px; }
+.metric-dataset-zone-actions button:disabled { cursor: not-allowed; opacity: .5; }
+.metric-dataset-safety { display: flex; align-items: center; gap: 8px; padding: 9px 20px; border-top: 1px solid #e7edf5; border-bottom: 1px solid #e7edf5; background: #f2f7ff; color: #4d6895; font-size: 9px; line-height: 1.5; }
+.metric-dataset-zone .metric-directory-row:first-child { border-top: 0; }
+.metric-dataset-empty { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 104px; padding: 20px; color: #91a4c3; text-align: left; }
+.metric-dataset-empty strong { color: #48566c; font-size: 12px; }
+.metric-dataset-empty p { margin: 4px 0 0; color: #8591a2; font-size: 10px; }
 .metric-directory-row {
   display: grid;
   grid-template-columns: 52px minmax(220px, 1.25fr) minmax(470px, 1.5fr) auto;
@@ -87,6 +105,7 @@
 .metric-asset-main > div { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .metric-asset-main > div > button { overflow: hidden; min-width: 0; border: 0; padding: 0; background: transparent; color: #1d2a40; font-size: 15px; font-weight: 800; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .metric-asset-main > div > button:hover { color: var(--blue); }
+.metric-asset-main > div > strong { overflow: hidden; min-width: 0; color: #1d2a40; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
 .metric-asset-main p { overflow: hidden; margin: 6px 0 5px; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .metric-asset-main small { color: #8290a6; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .metric-status { display: inline-flex; flex: 0 0 auto; align-items: center; border-radius: 999px; padding: 4px 8px; font-size: 9px; font-weight: 850; white-space: nowrap; }
@@ -94,6 +113,11 @@
 .metric-status.status-draft { background: #e0ecff; color: #2456aa; }
 .metric-status.status-stale { background: #ffedd5; color: #9a3412; }
 .metric-status.status-deprecated { background: #eef1f5; color: #647084; }
+.metric-status.candidate-ready { background: #dcfce7; color: #047857; }
+.metric-status.candidate-needs_review { background: #fff1cc; color: #8a5a00; }
+.metric-status.candidate-blocked { background: #fee2e2; color: #a52a2a; }
+.metric-status.candidate-accepted { background: #e0ecff; color: #2456aa; }
+.metric-status.candidate-rejected { background: #eef1f5; color: #647084; }
 .metric-directory-row > dl { display: grid; grid-template-columns: .7fr 1.2fr 1fr 1.15fr; gap: 14px; margin: 0; }
 .metric-directory-row > dl > div { min-width: 0; }
 .metric-directory-row dt { margin-bottom: 4px; color: #8a94a5; font-size: 9px; }
@@ -102,7 +126,32 @@
 .metric-asset-actions button { border-radius: 7px; padding: 7px 10px; font-size: 10px; font-weight: 800; }
 .metric-asset-actions .action-view { border: 1px solid #b9cae6; background: #f5f8fd; color: #315582; }
 .metric-asset-actions .action-edit { border: 1px solid #a8c2fb; background: #eef4ff; color: #2456b3; }
+.metric-asset-actions .action-delete { border: 1px solid #efb0aa; background: #fff3f2; color: #b42318; }
 .metric-asset-actions button:hover { filter: brightness(.98); }
+.metric-candidate-batchbar { min-height: 62px; }
+.metric-candidate-batch-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
+.metric-candidate-batch-actions button { min-height: 36px; padding: 0 13px; font-size: 11px; }
+.metric-candidate-row.is-selected { background: #f4f8ff; box-shadow: inset 3px 0 #2764ff; }
+.metric-candidate-selector { display: grid; grid-template-columns: 22px 22px; grid-template-rows: 22px 22px; place-content: center; place-items: center; color: #7892b5; cursor: pointer; }
+.metric-candidate-selector input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.metric-candidate-selector > svg:first-of-type { grid-row: 1; grid-column: 1 / -1; color: #9aa8ba; }
+.metric-candidate-selector > svg:last-of-type { grid-row: 2; grid-column: 1 / -1; color: #4269b0; }
+.metric-candidate-selector:has(input:checked) > svg:first-of-type { color: #2764ff; }
+.metric-candidate-selector:has(input:disabled) { cursor: not-allowed; opacity: .5; }
+.metric-candidate-selector:focus-within { border-radius: 8px; outline: 2px solid #7aa2ff; outline-offset: 2px; }
+.metric-candidate-state { max-width: 132px; color: #7a8799; font-size: 10px; line-height: 1.45; text-align: right; }
+
+.metric-delete-backdrop { position: fixed; z-index: 1200; inset: 0; display: grid; place-items: center; padding: 24px; background: #17255499; }
+.metric-delete-dialog { width: min(480px, 100%); border: 1px solid #efb1ac; border-radius: 14px; padding: 26px; background: white; box-shadow: 0 24px 70px #0f172a4d; }
+.metric-delete-dialog > span { color: #b42318; font-size: 10px; font-weight: 850; letter-spacing: .12em; }
+.metric-delete-dialog h2 { margin: 7px 0 12px; color: #273348; font-size: 22px; }
+.metric-delete-dialog p { margin: 0 0 8px; color: #536077; font-size: 13px; line-height: 1.7; }
+.metric-delete-dialog small { display: block; color: #7b8798; font-size: 11px; line-height: 1.6; }
+.metric-delete-dialog footer { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
+.metric-delete-dialog footer button { min-width: 92px; }
+.metric-delete-dialog .danger-button { border: 1px solid #b42318; border-radius: 8px; padding: 10px 16px; background: #b42318; color: white; font-weight: 750; }
+.metric-delete-dialog button:disabled { cursor: not-allowed; opacity: .55; }
+.metric-delete-error { margin-top: 14px; border: 1px solid #efb0aa; border-radius: 8px; padding: 10px 12px; background: #fff3f2; color: #b42318; font-size: 11px; line-height: 1.5; }
 
 .metric-directory-empty { display: grid; min-height: 260px; place-content: center; justify-items: center; gap: 8px; padding: 30px; color: #7b899d; text-align: center; }
 .metric-directory-empty > svg { color: #8ea9d7; }

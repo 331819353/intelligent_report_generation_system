@@ -10,7 +10,7 @@ import (
 
 const (
 	SchemaVersion = "1.0"
-	PromptVersion = "metric-authoring-v7"
+	PromptVersion = "metric-authoring-v9"
 	Purpose       = aiplatform.PurposeMetricAuthoring
 )
 
@@ -38,6 +38,24 @@ type AuthoringRequest struct {
 	Name             string `json:"name,omitempty"`
 	DefinitionIntent string `json:"definitionIntent,omitempty"`
 	TimeIntent       string `json:"timeIntent,omitempty"`
+}
+
+// MetricIntent is the deterministic first-stage interpretation of the user's requirement and
+// optional UI hints. It is produced before catalog retrieval so dataset ranking is driven by the
+// business goal, statistical object, aggregation, time, and dimensions rather than one raw
+// sentence alone. The proposal LLM receives both this interpretation and the complete authorized
+// catalog snapshot and may refine non-binding inferences without overriding explicit hints.
+type MetricIntent struct {
+	BusinessGoal               string   `json:"businessGoal"`
+	PreferredDatasetReferences []string `json:"preferredDatasetReferences"`
+	StatisticalObjects         []string `json:"statisticalObjects"`
+	Aggregation                string   `json:"aggregation"`
+	DateReferences             []string `json:"dateReferences"`
+	Dimensions                 []string `json:"dimensions"`
+	TimeGrain                  string   `json:"timeGrain"`
+	NeedsGrouping              bool     `json:"needsGrouping"`
+	NeedsJoin                  bool     `json:"needsJoin"`
+	SearchTerms                []string `json:"searchTerms"`
 }
 
 // AuthorizedDataset is one exact logical snapshot supplied by the host after permission checks.
@@ -73,8 +91,9 @@ type AuthorizedField struct {
 	SemanticType     string `json:"semanticType"`
 }
 
-// AuthorizedMetric is a published metric version the caller may read. It can only drive
-// REUSE_METRIC in this atomic-only MVP; candidate definitions may not reference it.
+// AuthorizedMetric is a published metric version the caller may read. Atomic, DAG-derived, and
+// ratio metrics can all drive REUSE_METRIC; candidate definitions produced by this flow still do
+// not invent or expand metric dependencies.
 type AuthorizedMetric struct {
 	ID               string            `json:"id"`
 	VersionID        string            `json:"versionId"`
@@ -124,7 +143,7 @@ type RetrievalContext struct {
 // Retriever is the only discovery boundary. The model never receives a database connection or
 // an open-ended tool and therefore cannot expand its own authorization scope.
 type Retriever interface {
-	Retrieve(context.Context, string, string, AuthoringRequest) (RetrievalContext, error)
+	Retrieve(context.Context, string, string, AuthoringRequest, MetricIntent) (RetrievalContext, error)
 }
 
 // RetrievalEvidence makes every cited dataset, field, or metric version independently
@@ -157,5 +176,6 @@ type MetricAuthoringProposal struct {
 type ProposalResult struct {
 	RequestID            string                  `json:"requestId"`
 	RetrievalContextHash string                  `json:"retrievalContextHash"`
+	Intent               MetricIntent            `json:"intent"`
 	Proposal             MetricAuthoringProposal `json:"proposal"`
 }

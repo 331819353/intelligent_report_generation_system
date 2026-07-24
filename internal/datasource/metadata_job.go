@@ -9,10 +9,13 @@ import (
 var (
 	ErrMetadataJobNotFound = errors.New("metadata job not found")
 	ErrMetadataJobActive   = errors.New("a metadata job is already active for this data source")
+	ErrSamplePolicyDenied  = errors.New("metadata sample mode is not allowed by the tenant policy")
+	ErrSamplePolicyChanged = errors.New("metadata sample policy changed after the job was queued")
 )
 
 type MetadataJobKind string
 type MetadataRefreshMode string
+type MetadataSampleMode string
 
 const (
 	MetadataJobImport  MetadataJobKind = "IMPORT"
@@ -20,28 +23,34 @@ const (
 
 	MetadataRefreshFull        MetadataRefreshMode = "FULL"
 	MetadataRefreshIncremental MetadataRefreshMode = "INCREMENTAL"
+
+	MetadataSampleDeny MetadataSampleMode = "DENY"
+	MetadataSampleMask MetadataSampleMode = "MASK"
+	MetadataSampleRaw  MetadataSampleMode = "RAW"
 )
 
 // MetadataJob 是页面轮询使用的批任务摘要；进度只来自已落库的逐表终态。
 type MetadataJob struct {
-	ID           string               `json:"id"`
-	DataSourceID string               `json:"dataSourceId"`
-	Kind         MetadataJobKind      `json:"kind"`
-	Mode         MetadataRefreshMode  `json:"mode"`
-	Status       string               `json:"status"`
-	Stage        string               `json:"stage"`
-	Total        int                  `json:"total"`
-	Completed    int                  `json:"completed"`
-	Succeeded    int                  `json:"succeeded"`
-	Skipped      int                  `json:"skipped"`
-	Failed       int                  `json:"failed"`
-	CurrentTable string               `json:"currentTable"`
-	ErrorCode    string               `json:"errorCode,omitempty"`
-	ErrorMessage string               `json:"errorMessage,omitempty"`
-	Failures     []MetadataJobFailure `json:"failures,omitempty"`
-	CreatedAt    string               `json:"createdAt"`
-	StartedAt    string               `json:"startedAt,omitempty"`
-	CompletedAt  string               `json:"completedAt,omitempty"`
+	ID                  string               `json:"id"`
+	DataSourceID        string               `json:"dataSourceId"`
+	Kind                MetadataJobKind      `json:"kind"`
+	Mode                MetadataRefreshMode  `json:"mode"`
+	SampleDataMode      MetadataSampleMode   `json:"sampleDataMode"`
+	SamplePolicyVersion int64                `json:"samplePolicyVersion"`
+	Status              string               `json:"status"`
+	Stage               string               `json:"stage"`
+	Total               int                  `json:"total"`
+	Completed           int                  `json:"completed"`
+	Succeeded           int                  `json:"succeeded"`
+	Skipped             int                  `json:"skipped"`
+	Failed              int                  `json:"failed"`
+	CurrentTable        string               `json:"currentTable"`
+	ErrorCode           string               `json:"errorCode,omitempty"`
+	ErrorMessage        string               `json:"errorMessage,omitempty"`
+	Failures            []MetadataJobFailure `json:"failures,omitempty"`
+	CreatedAt           string               `json:"createdAt"`
+	StartedAt           string               `json:"startedAt,omitempty"`
+	CompletedAt         string               `json:"completedAt,omitempty"`
 }
 
 // MetadataJobFailure 是页面可展示的逐表失败摘要，只包含任务项中已脱敏的错误信息。
@@ -59,6 +68,7 @@ type metadataJobRequest struct {
 	RequestedBy      string
 	Kind             MetadataJobKind
 	Mode             MetadataRefreshMode
+	SampleDataMode   MetadataSampleMode
 	SourceConfigHash string
 	Tables           []TableSelection
 }
@@ -99,6 +109,7 @@ type MetadataJobRepository interface {
 	ListMetadataJobItems(context.Context, string, string) ([]metadataJobItem, error)
 	IsMetadataTableEnriched(context.Context, string, string, string) (bool, error)
 	IsMetadataJobItemCompleted(context.Context, string, string, string, string) (bool, error)
+	ValidateMetadataSamplePolicy(context.Context, string, string, MetadataSampleMode, int64) error
 	HeartbeatMetadataJob(context.Context, string, string, string, time.Duration) error
 	UpdateMetadataJobStage(context.Context, string, string, string, string, time.Duration) error
 	UpdateMetadataJobItem(context.Context, string, string, string, string, metadataJobItemUpdate, time.Duration) error

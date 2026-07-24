@@ -11,7 +11,7 @@ import (
 
 const (
 	SchemaVersion          = "1.1"
-	PromptVersion          = "metadata-completion-v7"
+	PromptVersion          = "metadata-completion-v8"
 	SourceFormatCSV        = "CSV"
 	SourceFormatExcel      = "EXCEL"
 	SourceFormatDatabase   = "DATABASE"
@@ -139,6 +139,10 @@ var allowedTags = map[string]bool{
 	"产业:制造业": true, "产业:服务业": true, "产业:信息产业": true,
 	"主题:经营分析": true, "主题:风险监控": true, "主题:企业画像": true,
 	"作用:维度表": true, "作用:事实表": true, "作用:主数据": true, "作用:指标来源": true, "作用:辅助信息": true,
+	"功能:交易明细": true, "功能:业务流水": true, "功能:周期快照": true, "功能:汇总结果": true, "功能:代码映射": true,
+	"范围:运营分析": true, "范围:财务分析": true, "范围:风险分析": true, "范围:客户分析": true, "范围:供应链分析": true,
+	"粒度:事件": true, "粒度:订单": true, "粒度:客户": true, "粒度:产品": true, "粒度:组织": true, "粒度:日": true, "粒度:月": true,
+	"关联:主键": true, "关联:外键": true, "关联:业务键": true, "关联:桥接键": true,
 }
 
 var allowedSemanticTypes = map[string]bool{
@@ -218,9 +222,6 @@ func validateValue(value SuggestionValue, column, fileColumn bool) error {
 	}
 	if value.Tags == nil {
 		return errors.New("tags is required and must be an array")
-	}
-	if len(value.Tags) > 12 {
-		return errors.New("too many tags")
 	}
 	seen := map[string]bool{}
 	for _, tag := range value.Tags {

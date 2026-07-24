@@ -22,3 +22,32 @@ func TestSourceValidateCodeFormat(t *testing.T) {
 		}
 	}
 }
+
+func TestSourceConfigurationHashIncludesImmutableFileVersion(t *testing.T) {
+	source := Source{
+		Type: TypeExcel, Config: map[string]any{"headerRow": 1},
+		FileAssetID: "file-1", FileVersionID: "file-version-1",
+	}
+	first, err := sourceConfigurationHash(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.FileVersionID = "file-version-2"
+	second, err := sourceConfigurationHash(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || len(first) != 64 || len(second) != 64 {
+		t.Fatalf("hashes do not bind file version: first=%q second=%q", first, second)
+	}
+}
+
+func TestSourceValidateRejectsUnknownVisibility(t *testing.T) {
+	source := Source{
+		TenantID: "tenant-1", Code: "sales", Name: "Sales", Type: TypeExcel,
+		FileAssetID: "file-1", Visibility: Visibility("PUBLIC_INTERNET"),
+	}
+	if err := source.Validate(); err == nil {
+		t.Fatal("unknown visibility was accepted")
+	}
+}

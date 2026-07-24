@@ -16,9 +16,54 @@ set -a
 . "$ENV_FILE"
 set +a
 
+APP_ROLE=${POSTGRES_APP_USER:-report_app}
+WORKER_ROLE=${POSTGRES_WORKER_USER:-report_worker}
+CONNECTION_TEST_ROLE=${POSTGRES_CONNECTION_TEST_USER:-report_connection_tester}
+ADMIN_ROLE=${POSTGRES_USER:-report_admin}
+if [ "$APP_ROLE" = "$WORKER_ROLE" ] ||
+  [ "$APP_ROLE" = "$CONNECTION_TEST_ROLE" ] ||
+  [ "$WORKER_ROLE" = "$CONNECTION_TEST_ROLE" ] ||
+  [ "$APP_ROLE" = "$ADMIN_ROLE" ] ||
+  [ "$WORKER_ROLE" = "$ADMIN_ROLE" ] ||
+  [ "$CONNECTION_TEST_ROLE" = "$ADMIN_ROLE" ]; then
+  echo "admin and all runtime database roles must be distinct" >&2
+  exit 1
+fi
+
+docker compose --env-file "$ENV_FILE" exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-report_admin}" -d "${POSTGRES_DB:-intelligent_report_control}" \
+  --set=app_user="$APP_ROLE" \
+  --set=worker_user="$WORKER_ROLE" \
+  --set=connection_test_user="$CONNECTION_TEST_ROLE" <<'SQL'
+SELECT (
+  count(*)=3
+  AND bool_and(
+    rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole
+    AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit
+  )
+  AND NOT EXISTS(
+    SELECT 1
+    FROM pg_auth_members AS membership
+    JOIN pg_roles AS member_role ON member_role.oid=membership.member
+    WHERE member_role.rolname IN (
+      :'app_user',:'worker_user',:'connection_test_user'
+    )
+  )
+) AS dedicated_roles_secure
+FROM pg_roles
+WHERE rolname IN (:'app_user',:'worker_user',:'connection_test_user')
+\gset
+\if :dedicated_roles_secure
+\else
+  \echo 'dedicated database role attributes or memberships are unsafe'
+  \quit 1
+\endif
+SELECT 'dedicated database role attributes passed' AS result;
+SQL
+
 # 使用应用账号运行事务化验证，覆盖 RLS、审计不可变性与策略隔离。
 docker compose --env-file "$ENV_FILE" exec -T postgres \
-  psql -v ON_ERROR_STOP=1 -U "${POSTGRES_APP_USER:-report_app}" -d "${POSTGRES_DB:-intelligent_report}" <<'SQL'
+  psql -v ON_ERROR_STOP=1 -U "${POSTGRES_APP_USER:-report_app}" -d "${POSTGRES_DB:-intelligent_report_control}" <<'SQL'
 BEGIN;
 
 DO $$
@@ -60,6 +105,8 @@ DECLARE
   metric_semantic_shape_rejected boolean := false;
   metric_cross_tenant_rejected boolean := false;
   asset_source_a uuid;
+  asset_source_version_a uuid;
+  asset_source_version_b uuid;
   asset_table_a uuid;
   asset_column_a uuid;
   asset_embedding_visible integer;
@@ -68,7 +115,63 @@ DECLARE
   column_event_version_before bigint;
   table_event_version_after bigint;
   column_event_version_after bigint;
+  data_source_publish_guard boolean := false;
+  protected_write_denied boolean := false;
 BEGIN
+  IF to_regnamespace('warehouse_dws') IS NOT NULL
+    OR to_regnamespace('warehouse_ods') IS NOT NULL
+    OR to_regnamespace('warehouse_published') IS NOT NULL THEN
+    RAISE EXCEPTION 'control database must not contain warehouse schemas';
+  END IF;
+  IF has_table_privilege(
+      current_user,'platform.data_source_connection_test_jobs','INSERT,UPDATE,DELETE'
+    )
+    OR has_table_privilege(
+      current_user,'platform.data_source_connection_test_attestations','INSERT,UPDATE,DELETE'
+    )
+    OR has_table_privilege(
+      current_user,'platform.data_source_test_runs','INSERT,UPDATE,DELETE'
+    ) THEN
+    RAISE EXCEPTION 'API role can directly mutate protected connection-test facts';
+  END IF;
+  IF NOT has_function_privilege(
+      current_user,
+      'platform.enqueue_data_source_connection_test(uuid,uuid,text)',
+      'EXECUTE'
+    )
+    OR has_function_privilege(
+      current_user,
+      'platform.complete_data_source_connection_test(uuid,uuid,text,bigint)',
+      'EXECUTE'
+    ) THEN
+    RAISE EXCEPTION 'API connection-test function grants are invalid';
+  END IF;
+  IF has_function_privilege(
+      current_user,
+      'platform.dataset_publication_origin_facts_match(platform.dataset_versions)',
+      'EXECUTE'
+    ) THEN
+    RAISE EXCEPTION 'API role can directly execute publication-origin fact helper';
+  END IF;
+  IF NOT EXISTS(
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema='platform' AND table_name='dataset_versions'
+      AND column_name='publication_origin' AND is_nullable='NO'
+  ) THEN
+    RAISE EXCEPTION 'dataset publication_origin is missing or nullable';
+  END IF;
+  BEGIN
+    PERFORM platform.complete_data_source_connection_test(
+      gen_random_uuid(),gen_random_uuid(),'forged',0
+    );
+  EXCEPTION WHEN insufficient_privilege THEN
+    protected_write_denied := true;
+  END;
+  IF NOT protected_write_denied THEN
+    RAISE EXCEPTION 'API role executed the protected connection-test completion function';
+  END IF;
+
   -- 构造两个租户的最小数据集，验证跨租户访问始终被拒绝。
   INSERT INTO platform.tenants(code, name) VALUES ('verify-a', 'Verify Tenant A') RETURNING id INTO tenant_a;
   INSERT INTO platform.tenants(code, name) VALUES ('verify-b', 'Verify Tenant B') RETURNING id INTO tenant_b;
@@ -90,14 +193,14 @@ BEGIN
   END IF;
 
   -- 构造最小指标草稿，验证数据集归属复合外键、草稿指针和指标表 RLS。
-  INSERT INTO platform.datasets(tenant_id,code,name,dataset_type,created_by,updated_by)
-  VALUES (tenant_a,'verify_metric_dataset','Verify Metric Dataset','SINGLE_SOURCE',user_a,user_a)
+  INSERT INTO platform.datasets(tenant_id,code,name,dataset_type,layer,created_by,updated_by)
+  VALUES (tenant_a,'verify_metric_dataset','Verify Metric Dataset','SINGLE_SOURCE','ODS',user_a,user_a)
   RETURNING id INTO metric_dataset_a;
   INSERT INTO platform.dataset_versions(
-    tenant_id,dataset_id,version_no,status,dsl_version,dsl_json,schema_hash,
+    tenant_id,dataset_id,version_no,status,layer,dsl_version,dsl_json,schema_hash,
     logical_plan_json,plan_hash,created_by,updated_by
   ) VALUES (
-    tenant_a,metric_dataset_a,1,'DRAFT','1.0','{}',repeat('1',64),'{}',repeat('2',64),user_a,user_a
+    tenant_a,metric_dataset_a,1,'DRAFT','ODS','1.0','{}',repeat('1',64),'{}',repeat('2',64),user_a,user_a
   ) RETURNING id INTO metric_dataset_version_a;
   UPDATE platform.datasets SET current_draft_version_id=metric_dataset_version_a
   WHERE id=metric_dataset_a;
@@ -150,9 +253,45 @@ BEGIN
   END IF;
 
   -- 构造已完成补全的映射表，验证事务 outbox 合并、选择性重建和向量文档 RLS。
-  INSERT INTO platform.data_sources(tenant_id,code,name,source_type,status,config,secret_ref)
-  VALUES (tenant_a,'verify_asset_source','Verify Asset Source','MYSQL','ACTIVE','{}','env://VERIFY_ASSET_SECRET')
-  RETURNING id INTO asset_source_a;
+  asset_source_a := gen_random_uuid();
+  asset_source_version_a := gen_random_uuid();
+  asset_source_version_b := gen_random_uuid();
+  INSERT INTO platform.data_sources(
+    id,tenant_id,code,name,source_type,status,config,secret_ref,
+    current_draft_version_id,current_published_version_id,
+    validation_status,publication_status,last_synced_at
+  ) VALUES (
+    asset_source_a,tenant_a,'verify_asset_source','Verify Asset Source','MYSQL','DRAFT',
+    '{}','env://VERIFY_ASSET_SECRET',asset_source_version_a,NULL,
+    'UNTESTED','UNPUBLISHED',NULL
+  );
+  INSERT INTO platform.data_source_versions(
+    id,tenant_id,data_source_id,version_no,source_type,config,secret_ref,config_hash
+  ) VALUES (
+    asset_source_version_a,tenant_a,asset_source_a,1,'MYSQL','{}',
+    'env://VERIFY_ASSET_SECRET',repeat('0',64)
+  );
+  INSERT INTO platform.data_source_versions(
+    id,tenant_id,data_source_id,version_no,source_type,config,secret_ref,config_hash
+  ) VALUES (
+    asset_source_version_b,tenant_a,asset_source_a,2,'MYSQL',
+    '{"database":"verify_v2"}','env://VERIFY_ASSET_SECRET',repeat('f',64)
+  );
+  UPDATE platform.data_sources SET
+    current_draft_version_id=asset_source_version_b,
+    validation_status='UNTESTED',last_tested_version_id=NULL,
+    last_tested_config_hash=NULL,test_expires_at=NULL
+  WHERE id=asset_source_a;
+  BEGIN
+    UPDATE platform.data_sources
+    SET current_published_version_id=asset_source_version_b
+    WHERE id=asset_source_a;
+  EXCEPTION WHEN check_violation THEN
+    data_source_publish_guard := true;
+  END;
+  IF NOT data_source_publish_guard THEN
+    RAISE EXCEPTION 'data source publication pointer accepted without exact test evidence';
+  END IF;
   INSERT INTO platform.metadata_tables(
     tenant_id,data_source_id,schema_name,table_name,table_type,structure_hash,last_sync_at,
     business_name,business_description,tags,table_structure_hash,last_enriched_table_structure_hash,
@@ -416,4 +555,147 @@ $$;
 
 ROLLBACK;
 SELECT 'database verification passed' AS result;
+SQL
+
+# 通用 worker 不得写入连接测试控制事实，也不能调用入队或完成函数。
+docker compose --env-file "$ENV_FILE" exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U "${POSTGRES_WORKER_USER:-report_worker}" -d "${POSTGRES_DB:-intelligent_report_control}" <<'SQL'
+DO $$
+DECLARE
+  denied boolean;
+BEGIN
+  IF has_table_privilege(
+      current_user,'platform.data_source_connection_test_jobs','INSERT,UPDATE,DELETE'
+    )
+    OR has_table_privilege(
+      current_user,'platform.data_source_connection_test_attestations','INSERT,UPDATE,DELETE'
+    )
+    OR has_table_privilege(
+      current_user,'platform.data_source_test_runs','INSERT,UPDATE,DELETE'
+    ) THEN
+    RAISE EXCEPTION 'generic worker can directly mutate protected connection-test facts';
+  END IF;
+  IF has_function_privilege(
+      current_user,
+      'platform.enqueue_data_source_connection_test(uuid,uuid,text)',
+      'EXECUTE'
+    )
+    OR has_function_privilege(
+      current_user,
+      'platform.complete_data_source_connection_test(uuid,uuid,text,bigint)',
+      'EXECUTE'
+    ) THEN
+    RAISE EXCEPTION 'generic worker received connection-test control functions';
+  END IF;
+
+  denied := false;
+  BEGIN
+    UPDATE platform.data_source_connection_test_jobs
+    SET status='SUCCEEDED' WHERE false;
+  EXCEPTION WHEN insufficient_privilege THEN denied := true;
+  END;
+  IF NOT denied THEN
+    RAISE EXCEPTION 'generic worker direct job update was accepted';
+  END IF;
+
+  denied := false;
+  BEGIN
+    INSERT INTO platform.data_source_connection_test_attestations DEFAULT VALUES;
+  EXCEPTION WHEN insufficient_privilege THEN denied := true;
+  END;
+  IF NOT denied THEN
+    RAISE EXCEPTION 'generic worker direct attestation insert was accepted';
+  END IF;
+
+  denied := false;
+  BEGIN
+    INSERT INTO platform.data_source_test_runs DEFAULT VALUES;
+  EXCEPTION WHEN insufficient_privilege THEN denied := true;
+  END;
+  IF NOT denied THEN
+    RAISE EXCEPTION 'generic worker direct legacy test-run insert was accepted';
+  END IF;
+END
+$$;
+SELECT 'generic worker connection-test permissions passed' AS result;
+SQL
+
+# 专用 tester 只能使用 claim/heartbeat/complete/fail；它不能自行入队，也不能
+# 绕开数据库时间和租约函数直接写任务或证明。
+docker compose --env-file "$ENV_FILE" exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U "${POSTGRES_CONNECTION_TEST_USER:-report_connection_tester}" -d "${POSTGRES_DB:-intelligent_report_control}" <<'SQL'
+DO $$
+DECLARE
+  denied boolean;
+BEGIN
+  IF has_table_privilege(
+      current_user,'platform.data_source_connection_test_jobs','INSERT,UPDATE,DELETE'
+    )
+    OR has_table_privilege(
+      current_user,'platform.data_source_connection_test_attestations','INSERT,UPDATE,DELETE'
+    )
+    OR has_table_privilege(
+      current_user,'platform.data_source_test_runs','INSERT,UPDATE,DELETE'
+    ) THEN
+    RAISE EXCEPTION 'connection-test worker can directly mutate protected facts';
+  END IF;
+  IF has_function_privilege(
+      current_user,
+      'platform.enqueue_data_source_connection_test(uuid,uuid,text)',
+      'EXECUTE'
+    )
+    OR NOT has_function_privilege(
+      current_user,
+      'platform.claim_data_source_connection_test(text,integer)',
+      'EXECUTE'
+    )
+    OR NOT has_function_privilege(
+      current_user,
+      'platform.complete_data_source_connection_test(uuid,uuid,text,bigint)',
+      'EXECUTE'
+    ) THEN
+    RAISE EXCEPTION 'connection-test worker function grants are invalid';
+  END IF;
+
+  denied := false;
+  BEGIN
+    PERFORM platform.enqueue_data_source_connection_test(
+      gen_random_uuid(),NULL,NULL
+    );
+  EXCEPTION WHEN insufficient_privilege THEN denied := true;
+  END;
+  IF NOT denied THEN
+    RAISE EXCEPTION 'connection-test worker was allowed to enqueue its own job';
+  END IF;
+
+  denied := false;
+  BEGIN
+    UPDATE platform.data_source_connection_test_jobs
+    SET status='SUCCEEDED' WHERE false;
+  EXCEPTION WHEN insufficient_privilege THEN denied := true;
+  END;
+  IF NOT denied THEN
+    RAISE EXCEPTION 'connection-test worker direct job update was accepted';
+  END IF;
+
+  denied := false;
+  BEGIN
+    INSERT INTO platform.data_source_connection_test_attestations DEFAULT VALUES;
+  EXCEPTION WHEN insufficient_privilege THEN denied := true;
+  END;
+  IF NOT denied THEN
+    RAISE EXCEPTION 'connection-test worker direct attestation insert was accepted';
+  END IF;
+
+  denied := false;
+  BEGIN
+    INSERT INTO platform.data_source_test_runs DEFAULT VALUES;
+  EXCEPTION WHEN insufficient_privilege THEN denied := true;
+  END;
+  IF NOT denied THEN
+    RAISE EXCEPTION 'connection-test worker direct legacy test-run insert was accepted';
+  END IF;
+END
+$$;
+SELECT 'connection-test worker permissions passed' AS result;
 SQL

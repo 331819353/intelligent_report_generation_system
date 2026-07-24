@@ -217,8 +217,8 @@ func validate(definition Definition) ([]ValidationIssue, []string, []string) {
 	if definition.Metric.Type == "ATOMIC" && expressionStats.metricRefs > 0 {
 		add("expression", "METRIC_ATOMIC_REFERENCE_FORBIDDEN", "原子指标不能引用其他指标版本")
 	}
-	if definition.Metric.Type != "ATOMIC" && expressionStats.metricRefs == 0 {
-		add("expression", "METRIC_DERIVED_REFERENCE_REQUIRED", "派生或比率指标必须引用至少一个精确指标版本")
+	if definition.Metric.Type == "RATIO" && expressionStats.metricRefs == 0 {
+		add("expression", "METRIC_DERIVED_REFERENCE_REQUIRED", "比率指标必须引用至少一个精确指标版本")
 	}
 	if expressionStats.metricRefs > 0 && expressionStats.fieldRefs > 0 {
 		add("expression", "METRIC_REFERENCE_FIELD_MIXED", "同一指标不能混用已聚合指标引用和明细字段")
@@ -226,8 +226,8 @@ func validate(definition Definition) ([]ValidationIssue, []string, []string) {
 	if expressionStats.metricRefs > 0 && definition.Aggregation != "NONE" {
 		add("aggregation", "METRIC_NESTED_AGGREGATION_FORBIDDEN", "引用指标版本时不能再次聚合")
 	}
-	if expressionStats.fieldRefs > 0 && definition.Aggregation == "NONE" {
-		add("aggregation", "METRIC_FIELD_AGGREGATION_REQUIRED", "直接引用数据集字段时必须声明聚合")
+	if expressionStats.fieldRefs > 0 && definition.Aggregation == "NONE" && definition.Metric.Type != "DERIVED" {
+		add("aggregation", "METRIC_FIELD_AGGREGATION_REQUIRED", "明细字段指标必须声明聚合；DAG 已聚合输出应声明为派生指标")
 	}
 	if definition.Metric.Type == "RATIO" && !expressionStats.hasDivision {
 		add("expression", "METRIC_RATIO_DIVISION_REQUIRED", "比率指标表达式必须包含除法")

@@ -155,6 +155,22 @@ func TestMetricHTTPRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestMetricHTTPDeleteRequiresManageAndUsesNoContent(t *testing.T) {
+	store := &fakeStore{record: baseRecord(t), versionsByID: map[string]VersionRecord{}}
+	harness := newMetricHTTPHarness(t, store, &fakePreviewer{}, func(check access.Check) bool {
+		return check.ResourceType == "METRIC" && check.Action == "MANAGE" && check.ObjectID == testMetricID
+	})
+	response := metricRequest(t, harness, http.MethodDelete, "/api/v1/metrics/"+testMetricID, `{"expectedVersion":3}`)
+	if response.Code != http.StatusNoContent || store.deleteCalls != 1 ||
+		store.deleteInput.ExpectedVersion != 3 {
+		t.Fatalf("delete response=%d body=%s calls=%d input=%#v",
+			response.Code, response.Body.String(), store.deleteCalls, store.deleteInput)
+	}
+	if len(harness.permissions.checks) != 1 || harness.permissions.checks[0].Action != "MANAGE" {
+		t.Fatalf("delete permission checks=%#v", harness.permissions.checks)
+	}
+}
+
 func TestMetricHTTPVersionUsageIsNoStore(t *testing.T) {
 	store := &fakeStore{record: baseRecord(t), versionsByID: map[string]VersionRecord{}}
 	harness := newMetricHTTPHarness(t, store, &fakePreviewer{}, nil)
@@ -195,5 +211,13 @@ func TestWriteMetricErrorMapsActiveDownstreamUsage(t *testing.T) {
 	writeMetricError(response, ErrVersionInUse)
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "METRIC_VERSION_IN_USE") {
 		t.Fatalf("下游占用错误映射异常: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestWriteMetricErrorMapsMetricUsage(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeMetricError(response, ErrInUse)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "METRIC_IN_USE") {
+		t.Fatalf("metric usage error mapping: status=%d body=%s", response.Code, response.Body.String())
 	}
 }

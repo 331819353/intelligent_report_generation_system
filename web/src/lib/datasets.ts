@@ -97,6 +97,9 @@ export type DatasetPublicationRequest = {
   expectedDslHash: string; expectedPlanHash: string; requesterId: string; requestNote: string
   reviewerId?: string; reviewNote?: string; publishedVersionId?: string
   submittedAt: string; reviewedAt?: string; updatedAt: string
+  metricCandidateStatus: 'LEGACY' | 'PENDING' | 'SUCCEEDED' | 'PARTIAL' | 'FAILED'
+  metricCandidateTotal: number; metricCandidateReady: number; metricCandidateReview: number; metricCandidateBlocked: number
+  metricCandidateWarning?: string; metricCandidateErrorCode?: string; metricCandidateGeneratedAt?: string
 }
 export type DatasetPublicationRequestPage = {
   items: DatasetPublicationRequest[]; total: number; limit: number; offset: number

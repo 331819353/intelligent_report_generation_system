@@ -7,6 +7,30 @@ import (
 
 const DSLVersion = "1.0"
 
+// Layer 是数据资产在数仓加工链路中的稳定层级。它与 SINGLE_SOURCE/CROSS_SOURCE
+// 的物理来源分类正交：前者描述加工语义，后者描述执行时涉及的数据源数量。
+type Layer string
+
+const (
+	LayerODS Layer = "ODS"
+	LayerDWD Layer = "DWD"
+	LayerDWS Layer = "DWS"
+)
+
+// PublicationOrigin 是数据库持久化的不可变发布来源。调用方不能在请求或
+// PublishPlan 中提供它；各服务端提交路径在进入 package-private publishTx 时固定。
+type PublicationOrigin string
+
+const (
+	PublicationOriginUnpublished            PublicationOrigin = "UNPUBLISHED"
+	PublicationOriginDirect                 PublicationOrigin = "DIRECT"
+	PublicationOriginHumanApproval          PublicationOrigin = "HUMAN_APPROVAL"
+	PublicationOriginSystemMappedDefault    PublicationOrigin = "SYSTEM_MAPPED_DEFAULT"
+	PublicationOriginSystemMappedRefresh    PublicationOrigin = "SYSTEM_MAPPED_REFRESH"
+	PublicationOriginSystemMappedRegenerate PublicationOrigin = "SYSTEM_MAPPED_REGENERATE"
+	PublicationOriginLegacy                 PublicationOrigin = "LEGACY"
+)
+
 var (
 	ErrNotFound                   = errors.New("dataset not found")
 	ErrVersionNotFound            = errors.New("dataset version not found")
@@ -28,6 +52,7 @@ var (
 	ErrPreviewUnsupported         = errors.New("dataset preview source is unsupported")
 	ErrQueryNotFound              = errors.New("query run not found")
 	ErrQueryConflict              = errors.New("query run already exists")
+	ErrLayerDependencyUnavailable = errors.New("dataset layer dependency is unavailable")
 )
 
 // Document 是数据集 DSL V1 的完整、可版本化定义。
@@ -49,6 +74,24 @@ type Document struct {
 	// 使用开放对象让设计器可以向后兼容地扩展交互信息；领域校验仍会约束版本、
 	// 组件身份以及坐标，避免把无效画布写入不可变修订。
 	Designer map[string]any `json:"designer,omitempty"`
+
+	// layerInferred 只标记输入兼容路径，不进入 JSON。历史 DSL 的正文和哈希必须
+	// 保持稳定，层级会单独持久化到 datasets/dataset_versions。
+	layerInferred  bool
+	layerSpecified bool
+	inferredLayer  Layer
+}
+
+// MarshalJSON 保留历史 DSL 的“未声明 layer”形状。旧调用方常见的
+// DecodeAndNormalize -> 修改 DAG -> Marshal 流程会据新 DAG 重新推断层级，而不会把
+// 上一次兼容推断误升级成用户显式声明；新文档的显式 layer 则正常进入正文和哈希。
+func (document Document) MarshalJSON() ([]byte, error) {
+	type documentJSON Document
+	copy := document
+	if copy.layerInferred && copy.Dataset.Layer == copy.inferredLayer {
+		copy.Dataset.Layer = ""
+	}
+	return json.Marshal(documentJSON(copy))
 }
 
 // PreAggregation 描述一个发生在 Join 槽位之前的显式分组组件。
@@ -82,6 +125,7 @@ type Descriptor struct {
 	Name        string       `json:"name"`
 	Description string       `json:"description,omitempty"`
 	Type        string       `json:"type"`
+	Layer       Layer        `json:"layer,omitempty"`
 	Grain       *OutputGrain `json:"grain,omitempty"`
 }
 
@@ -282,6 +326,7 @@ type Record struct {
 	Name                      string          `json:"name"`
 	Description               string          `json:"description"`
 	Type                      string          `json:"type"`
+	Layer                     Layer           `json:"layer"`
 	Status                    string          `json:"status"`
 	Version                   int64           `json:"version"`
 	DraftVersionID            string          `json:"draftVersionId"`
@@ -307,6 +352,7 @@ type Summary struct {
 	Name                      string `json:"name"`
 	Description               string `json:"description"`
 	Type                      string `json:"type"`
+	Layer                     Layer  `json:"layer"`
 	Status                    string `json:"status"`
 	Version                   int64  `json:"version"`
 	DSLHash                   string `json:"dslHash"`
@@ -316,34 +362,38 @@ type Summary struct {
 
 // VersionRecord 是按精确版本 ID 加载的不可变发布快照。
 type VersionRecord struct {
-	ID                   string          `json:"id"`
-	DatasetID            string          `json:"datasetId"`
-	DatasetRecordVersion int64           `json:"datasetRecordVersion"`
-	DraftVersionID       string          `json:"draftVersionId"`
-	DraftRecordVersion   int64           `json:"draftRecordVersion"`
-	VersionNo            int             `json:"versionNo"`
-	Status               string          `json:"status"`
-	DSLVersion           string          `json:"dslVersion"`
-	DSLHash              string          `json:"dslHash"`
-	PlanHash             string          `json:"planHash"`
-	DSL                  json.RawMessage `json:"dsl"`
-	LogicalPlan          json.RawMessage `json:"logicalPlan"`
-	PublishedAt          string          `json:"publishedAt"`
-	PublishedBy          string          `json:"publishedBy"`
+	ID                   string            `json:"id"`
+	DatasetID            string            `json:"datasetId"`
+	DatasetRecordVersion int64             `json:"datasetRecordVersion"`
+	DraftVersionID       string            `json:"draftVersionId"`
+	DraftRecordVersion   int64             `json:"draftRecordVersion"`
+	VersionNo            int               `json:"versionNo"`
+	Status               string            `json:"status"`
+	PublicationOrigin    PublicationOrigin `json:"publicationOrigin"`
+	Layer                Layer             `json:"layer"`
+	DSLVersion           string            `json:"dslVersion"`
+	DSLHash              string            `json:"dslHash"`
+	PlanHash             string            `json:"planHash"`
+	DSL                  json.RawMessage   `json:"dsl"`
+	LogicalPlan          json.RawMessage   `json:"logicalPlan"`
+	PublishedAt          string            `json:"publishedAt"`
+	PublishedBy          string            `json:"publishedBy"`
 }
 
 // VersionSummary 是版本目录使用的轻量发布快照。
 type VersionSummary struct {
-	ID                 string `json:"id"`
-	DatasetID          string `json:"datasetId"`
-	VersionNo          int    `json:"versionNo"`
-	Status             string `json:"status"`
-	DSLVersion         string `json:"dslVersion"`
-	DSLHash            string `json:"dslHash"`
-	PlanHash           string `json:"planHash"`
-	DraftRecordVersion int64  `json:"draftRecordVersion"`
-	PublishedAt        string `json:"publishedAt"`
-	PublishedBy        string `json:"publishedBy"`
+	ID                 string            `json:"id"`
+	DatasetID          string            `json:"datasetId"`
+	VersionNo          int               `json:"versionNo"`
+	Status             string            `json:"status"`
+	PublicationOrigin  PublicationOrigin `json:"publicationOrigin"`
+	Layer              Layer             `json:"layer"`
+	DSLVersion         string            `json:"dslVersion"`
+	DSLHash            string            `json:"dslHash"`
+	PlanHash           string            `json:"planHash"`
+	DraftRecordVersion int64             `json:"draftRecordVersion"`
+	PublishedAt        string            `json:"publishedAt"`
+	PublishedBy        string            `json:"publishedBy"`
 }
 
 // RevisionSummary 是草稿历史目录中的不可变快照摘要。VersionNo 使用产生该
@@ -395,6 +445,7 @@ type CreateInput struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Type        string          `json:"type"`
+	Layer       Layer           `json:"layer,omitempty"`
 	DSL         json.RawMessage `json:"dsl"`
 }
 
@@ -439,6 +490,7 @@ type PublishPlan struct {
 	DraftVersionID             string
 	ExpectedDraftRecordVersion int64
 	ExpectedDSLHash            string
+	ReservedPublishedVersionID string
 	Prepared                   Prepared
 }
 

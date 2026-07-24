@@ -39,6 +39,14 @@ type publicationApprovalStoreStub struct {
 	getDataset string
 	getRequest string
 
+	saveResult      PublicationRequest
+	saveErr         error
+	saveCalls       int
+	saveTenant      string
+	saveDataset     string
+	saveRequest     PublicationRequest
+	savePreparation PublicationCandidatePreparation
+
 	approveRequest         PublicationRequest
 	approvePublished       VersionRecord
 	approveErr             error
@@ -59,6 +67,28 @@ type publicationApprovalStoreStub struct {
 	rejectDataset   string
 	rejectRequestID string
 	rejectInput     RejectPublicationInput
+}
+
+func (s *publicationApprovalStoreStub) SavePublicationCandidatePreparation(
+	_ context.Context,
+	tenantID, datasetID string,
+	request PublicationRequest,
+	preparation PublicationCandidatePreparation,
+) (PublicationRequest, error) {
+	s.saveCalls++
+	s.saveTenant, s.saveDataset = tenantID, datasetID
+	s.saveRequest, s.savePreparation = request, preparation
+	if s.saveResult.ID != "" || s.saveErr != nil {
+		return s.saveResult, s.saveErr
+	}
+	request.MetricCandidateStatus = preparation.Status
+	request.MetricCandidateTotal = preparation.Total
+	request.MetricCandidateReady = preparation.Ready
+	request.MetricCandidateReview = preparation.Review
+	request.MetricCandidateBlocked = preparation.Blocked
+	request.MetricCandidateWarning = preparation.Warning
+	request.MetricCandidateErrorCode = preparation.ErrorCode
+	return request, nil
 }
 
 func (s *publicationApprovalStoreStub) SubmitPublicationRequest(
@@ -138,8 +168,29 @@ func pendingPublicationRequest(prepared Prepared) PublicationRequest {
 		DraftVersionID: httpTestDraftID, ExpectedDatasetVersion: 3,
 		ExpectedDraftRecordVersion: 2, ExpectedDSLHash: prepared.DSLHash,
 		ExpectedPlanHash: prepared.PlanHash, RequesterID: "requester-1",
-		ValidationParameters: map[string]any{"start_date": "2026-01-01"},
+		ValidationParameters:       map[string]any{"start_date": "2026-01-01"},
+		ReservedPublishedVersionID: httpTestVersionID,
+		MetricCandidateStatus:      PublicationCandidateLegacy,
 	}
+}
+
+type publicationCandidateGeneratorStub struct {
+	calls       int
+	preparation PublicationCandidatePreparation
+	err         error
+	request     PublicationRequest
+	draft       Record
+}
+
+func (s *publicationCandidateGeneratorStub) GeneratePublicationCandidates(
+	_ context.Context,
+	_, _ string,
+	request PublicationRequest,
+	draft Record,
+) (PublicationCandidatePreparation, error) {
+	s.calls++
+	s.request, s.draft = request, draft
+	return s.preparation, s.err
 }
 
 func submitPublicationInput(prepared Prepared) SubmitPublicationInput {
@@ -183,6 +234,28 @@ func TestPublicationApprovalServiceSubmitsFrozenDraftAndRejectsStaleEnvelope(t *
 	}
 	if store.submitCalls != 1 {
 		t.Fatalf("stale submission reached store: calls=%d", store.submitCalls)
+	}
+}
+
+func TestPublicationApprovalServiceReturnsPendingRequestWithoutGeneratingCandidates(t *testing.T) {
+	_, _, store, service, prepared := publicationApprovalFixture(t)
+	pending := pendingPublicationRequest(prepared)
+	pending.MetricCandidateStatus = PublicationCandidatePending
+	store.submitResult = pending
+
+	result, err := service.Submit(
+		context.Background(), "tenant-1", "requester-1", httpTestDatasetID,
+		submitPublicationInput(prepared),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.saveCalls != 0 {
+		t.Fatalf("submission generated candidates in request path: store=%#v", store)
+	}
+	if result.MetricCandidateStatus != PublicationCandidatePending ||
+		result.MetricCandidateTotal != 0 {
+		t.Fatalf("result=%#v", result)
 	}
 }
 
@@ -247,6 +320,22 @@ func TestPublicationApprovalServiceRejectsStaleApprovalBeforeCommit(t *testing.T
 	)
 	if !errors.Is(err, ErrConflict) || store.approveCalls != 0 || validator.candidate.DatasetID != "" {
 		t.Fatalf("stale draft err=%v approveCalls=%d candidate=%#v", err, store.approveCalls, validator.candidate)
+	}
+}
+
+func TestPublicationApprovalServiceDoesNotApproveBeforeCandidatesAreReady(t *testing.T) {
+	_, validator, store, service, prepared := publicationApprovalFixture(t)
+	pending := pendingPublicationRequest(prepared)
+	pending.MetricCandidateStatus = PublicationCandidatePending
+	store.request = pending
+
+	_, err := service.Approve(
+		context.Background(), "tenant-1", "reviewer-1", httpTestDatasetID, approvalTestRequestID,
+		ApprovePublicationInput{ExpectedVersion: 1},
+	)
+	if !errors.Is(err, ErrPublicationCandidatesPending) || store.approveCalls != 0 ||
+		validator.candidate.DatasetID != "" {
+		t.Fatalf("err=%v approveCalls=%d candidate=%#v", err, store.approveCalls, validator.candidate)
 	}
 }
 

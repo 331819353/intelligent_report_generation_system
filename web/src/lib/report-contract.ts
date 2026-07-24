@@ -86,8 +86,47 @@ export type ReportComponent = {
   extensions?: Record<string, unknown>
 }
 
+export type ReportMenuRatios = {
+  /** 第一行：Logo+总标题 / 功能区，默认 3:1。 */
+  topColumns: [number, number]
+  /** 第二行：全局筛选 / 导航区，默认 1:1。 */
+  bottomColumns: [number, number]
+  /** 上下两行，默认 2:1。 */
+  rowHeights: [number, number]
+}
+
+export type ReportMenuLayout = {
+  visible: boolean
+  defaultRatios: ReportMenuRatios
+  ratios: ReportMenuRatios
+  usesDefaultRatios: boolean
+  cells: {
+    logoTitle: { visible: boolean; logoText: string; title: string; subtitle?: string }
+    actions: { visible: boolean; items: string[] }
+    globalFilters: { visible: boolean; parameterIds: string[] }
+    navigation: { visible: boolean; items: Array<{ label: string; targetBlockId?: string }> }
+  }
+}
+
+export type ReportContentArea = {
+  visible: boolean
+  componentIds: string[]
+}
+
+export type ReportContentLayout = {
+  visible: boolean
+  areas: {
+    title: ReportContentArea
+    conclusion: ReportContentArea
+    components: ReportContentArea
+  }
+}
+
 export type ReportBlock = {
   id: string
+  kind?: 'MENU' | 'CONTENT'
+  name?: string
+  visible?: boolean
   grid: Grid
   innerGrid: { columns: number; rows: number }
   zIndex?: number
@@ -95,6 +134,8 @@ export type ReportBlock = {
   sticky: BlockSticky
   style?: Record<string, unknown>
   permissionPolicy?: Record<string, unknown>
+  menuLayout?: ReportMenuLayout
+  contentLayout?: ReportContentLayout
   components: ReportComponent[]
 }
 

@@ -59,7 +59,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 			return
 		}
 		writeDatasetJSON(w, http.StatusOK, map[string]any{
-			"valid": true, "dsl": prepared.Document, "dslHash": prepared.DSLHash,
+			"valid": true, "dsl": prepared.DSLJSON, "layer": prepared.Document.Dataset.Layer, "dslHash": prepared.DSLHash,
 			"logicalPlan": prepared.LogicalPlan, "planHash": prepared.PlanHash,
 		})
 	})))
@@ -380,6 +380,10 @@ func writeDatasetError(w http.ResponseWriter, err error) {
 		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_PUBLICATION_REQUEST_CONFLICT", "message": "发布审批申请已被其他请求处理，请重新加载"})
 	case errors.Is(err, ErrPublicationRequestNotPending):
 		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_PUBLICATION_REQUEST_NOT_PENDING", "message": "发布审批申请当前状态不能执行该操作"})
+	case errors.Is(err, ErrPublicationCandidatesPending):
+		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_METRIC_CANDIDATES_NOT_READY", "message": "指标候选尚未同步生成完成，暂时不能审批发布"})
+	case errors.Is(err, ErrPublicationCandidatesFailed):
+		writeDatasetJSON(w, http.StatusBadGateway, map[string]string{"code": "DATASET_METRIC_CANDIDATES_FAILED", "message": "指标候选生成失败，请重新提交发布审批"})
 	case errors.Is(err, ErrVersionRollbackUnavailable):
 		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_VERSION_ROLLBACK_UNAVAILABLE", "message": "发布版本缺少唯一且可验证的源草稿修订，无法安全回滚"})
 	case errors.Is(err, ErrVersionUnavailable):

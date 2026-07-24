@@ -67,6 +67,7 @@ func (s *Service) Create(ctx context.Context, tenantID, actorID string, input Cr
 	}
 	input.Code, input.Name = strings.TrimSpace(input.Code), strings.TrimSpace(input.Name)
 	input.Description, input.Type = strings.TrimSpace(input.Description), strings.ToUpper(strings.TrimSpace(input.Type))
+	input.Layer = Layer(strings.ToUpper(strings.TrimSpace(string(input.Layer))))
 	prepared, err := Prepare(input.DSL)
 	if err != nil {
 		return Record{}, err
@@ -79,6 +80,11 @@ func (s *Service) Create(ctx context.Context, tenantID, actorID string, input Cr
 	}
 	if input.Description != prepared.Document.Dataset.Description {
 		return Record{}, fmt.Errorf("%w: description must match DSL dataset description", ErrInvalidDocument)
+	}
+	if input.Layer == "" {
+		input.Layer = prepared.Document.Dataset.Layer
+	} else if input.Layer != prepared.Document.Dataset.Layer {
+		return Record{}, fmt.Errorf("%w: layer must match DSL dataset layer", ErrInvalidDocument)
 	}
 	return s.store.Create(ctx, tenantID, actorID, input, prepared)
 }
@@ -124,6 +130,25 @@ func (s *Service) Update(ctx context.Context, tenantID, actorID, id string, inpu
 	}
 	if current.Code != prepared.Document.Dataset.Code {
 		return Record{}, fmt.Errorf("%w: dataset code cannot be changed through draft update", ErrInvalidDocument)
+	}
+	// 首次发布后，层级成为数据集身份的一部分。跨层改造必须新建数据集并
+	// 显式建立血缘，否则稳定视图、上游合同和历史物化会在同一 ID 下冲突。
+	if current.CurrentPublishedVersionID != "" {
+		published, err := s.store.GetVersion(
+			ctx,
+			tenantID,
+			id,
+			current.CurrentPublishedVersionID,
+		)
+		if err != nil {
+			return Record{}, err
+		}
+		if published.Layer != prepared.Document.Dataset.Layer {
+			return Record{}, fmt.Errorf(
+				"%w: published dataset layer is immutable; create a new dataset for cross-layer migration",
+				ErrInvalidTransition,
+			)
+		}
 	}
 	// 数据集类型由当前草稿引用的数据源数量派生。设计器增删跨源节点时会在
 	// SINGLE_SOURCE 与 CROSS_SOURCE 之间切换，不能把这个派生属性当作不可变编码。

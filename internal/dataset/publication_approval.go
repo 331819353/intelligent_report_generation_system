@@ -12,6 +12,8 @@ var (
 	ErrPublicationRequestNotFound   = errors.New("dataset publication request not found")
 	ErrPublicationRequestConflict   = errors.New("dataset publication request version conflict")
 	ErrPublicationRequestNotPending = errors.New("dataset publication request is not pending")
+	ErrPublicationCandidatesFailed  = errors.New("dataset publication metric candidate generation failed")
+	ErrPublicationCandidatesPending = errors.New("dataset publication metric candidates are not ready")
 )
 
 const (
@@ -24,24 +26,34 @@ const (
 // are stored server-side but deliberately omitted from the response because they may contain
 // business filter values; reviewers see the exact hashes and draft identity instead.
 type PublicationRequest struct {
-	ID                         string         `json:"id"`
-	DatasetID                  string         `json:"datasetId"`
-	Status                     string         `json:"status"`
-	Version                    int64          `json:"version"`
-	DraftVersionID             string         `json:"draftVersionId"`
-	ExpectedDatasetVersion     int64          `json:"expectedDatasetVersion"`
-	ExpectedDraftRecordVersion int64          `json:"expectedDraftRecordVersion"`
-	ExpectedDSLHash            string         `json:"expectedDslHash"`
-	ExpectedPlanHash           string         `json:"expectedPlanHash"`
-	RequesterID                string         `json:"requesterId"`
-	RequestNote                string         `json:"requestNote"`
-	ReviewerID                 string         `json:"reviewerId,omitempty"`
-	ReviewNote                 string         `json:"reviewNote,omitempty"`
-	PublishedVersionID         string         `json:"publishedVersionId,omitempty"`
-	SubmittedAt                string         `json:"submittedAt"`
-	ReviewedAt                 string         `json:"reviewedAt,omitempty"`
-	UpdatedAt                  string         `json:"updatedAt"`
-	ValidationParameters       map[string]any `json:"-"`
+	ID                         string          `json:"id"`
+	DatasetID                  string          `json:"datasetId"`
+	Status                     string          `json:"status"`
+	Version                    int64           `json:"version"`
+	DraftVersionID             string          `json:"draftVersionId"`
+	ExpectedDatasetVersion     int64           `json:"expectedDatasetVersion"`
+	ExpectedDraftRecordVersion int64           `json:"expectedDraftRecordVersion"`
+	ExpectedDSLHash            string          `json:"expectedDslHash"`
+	ExpectedPlanHash           string          `json:"expectedPlanHash"`
+	RequesterID                string          `json:"requesterId"`
+	RequestNote                string          `json:"requestNote"`
+	ReviewerID                 string          `json:"reviewerId,omitempty"`
+	ReviewNote                 string          `json:"reviewNote,omitempty"`
+	PublishedVersionID         string          `json:"publishedVersionId,omitempty"`
+	SubmittedAt                string          `json:"submittedAt"`
+	ReviewedAt                 string          `json:"reviewedAt,omitempty"`
+	UpdatedAt                  string          `json:"updatedAt"`
+	ValidationParameters       map[string]any  `json:"-"`
+	ReservedPublishedVersionID string          `json:"-"`
+	MetricCandidateResult      json.RawMessage `json:"-"`
+	MetricCandidateStatus      string          `json:"metricCandidateStatus"`
+	MetricCandidateTotal       int             `json:"metricCandidateTotal"`
+	MetricCandidateReady       int             `json:"metricCandidateReady"`
+	MetricCandidateReview      int             `json:"metricCandidateReview"`
+	MetricCandidateBlocked     int             `json:"metricCandidateBlocked"`
+	MetricCandidateWarning     string          `json:"metricCandidateWarning,omitempty"`
+	MetricCandidateErrorCode   string          `json:"metricCandidateErrorCode,omitempty"`
+	MetricCandidateGeneratedAt string          `json:"metricCandidateGeneratedAt,omitempty"`
 }
 
 type PublicationRequestPage struct {
@@ -83,12 +95,32 @@ type SubmitPublicationPlan struct {
 	ParametersJSON   json.RawMessage
 }
 
+const (
+	PublicationCandidateLegacy    = "LEGACY"
+	PublicationCandidatePending   = "PENDING"
+	PublicationCandidateSucceeded = "SUCCEEDED"
+	PublicationCandidatePartial   = "PARTIAL"
+	PublicationCandidateFailed    = "FAILED"
+)
+
+type PublicationCandidatePreparation struct {
+	Status    string
+	Result    json.RawMessage
+	Total     int
+	Ready     int
+	Review    int
+	Blocked   int
+	Warning   string
+	ErrorCode string
+}
+
 // PublicationApprovalStore keeps request state and the final publication commit in one
 // transaction. ApproveAndPublish is the only approval path allowed to move the published pointer.
 type PublicationApprovalStore interface {
 	SubmitPublicationRequest(context.Context, string, string, string, SubmitPublicationPlan) (PublicationRequest, error)
 	ListPublicationRequests(context.Context, string, string, int, int) ([]PublicationRequest, int, error)
 	GetPublicationRequest(context.Context, string, string, string) (PublicationRequest, error)
+	SavePublicationCandidatePreparation(context.Context, string, string, PublicationRequest, PublicationCandidatePreparation) (PublicationRequest, error)
 	ApproveAndPublish(context.Context, string, string, string, string, int64, string, PublishPlan) (PublicationRequest, VersionRecord, error)
 	RejectPublicationRequest(context.Context, string, string, string, string, RejectPublicationInput) (PublicationRequest, error)
 }
@@ -170,6 +202,11 @@ func (s *PublicationApprovalService) Approve(
 	if request.Status != PublicationRequestPending {
 		return PublicationApprovalResult{}, ErrPublicationRequestNotPending
 	}
+	if request.MetricCandidateStatus != PublicationCandidateSucceeded &&
+		request.MetricCandidateStatus != PublicationCandidatePartial &&
+		request.MetricCandidateStatus != PublicationCandidateLegacy {
+		return PublicationApprovalResult{}, ErrPublicationCandidatesPending
+	}
 	if request.Version != input.ExpectedVersion {
 		return PublicationApprovalResult{}, ErrPublicationRequestConflict
 	}
@@ -182,6 +219,7 @@ func (s *PublicationApprovalService) Approve(
 	if err != nil {
 		return PublicationApprovalResult{}, err
 	}
+	plan.ReservedPublishedVersionID = request.ReservedPublishedVersionID
 	approved, published, err := s.store.ApproveAndPublish(
 		ctx, tenantID, actorID, datasetID, requestID, input.ExpectedVersion, input.Note, plan,
 	)

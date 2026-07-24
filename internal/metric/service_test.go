@@ -33,6 +33,9 @@ type fakeStore struct {
 	published      PublishPlan
 	createCalls    int
 	publishCalls   int
+	deleteCalls    int
+	deleteInput    DeleteInput
+	deleteErr      error
 }
 
 func (store *fakeStore) Create(_ context.Context, _, _ string, prepared Prepared) (Record, error) {
@@ -49,6 +52,11 @@ func (store *fakeStore) List(context.Context, string, int, int) ([]Summary, int,
 func (store *fakeStore) Update(_ context.Context, _, _, _ string, _ UpdateInput, prepared Prepared) (Record, error) {
 	store.updated = prepared
 	return store.record, nil
+}
+func (store *fakeStore) Delete(_ context.Context, _, _, _ string, input DeleteInput) error {
+	store.deleteCalls++
+	store.deleteInput = input
+	return store.deleteErr
 }
 func (store *fakeStore) GetDatasetVersion(context.Context, string, string, string) (dataset.VersionRecord, error) {
 	return store.datasetVersion, nil
@@ -113,6 +121,26 @@ func (previewer *fakePreviewer) Cancel(context.Context, string, string, string, 
 	return nil
 }
 
+func TestServiceDeleteUsesMetricOptimisticLock(t *testing.T) {
+	store := &fakeStore{}
+	service := NewService(store, nil)
+	if err := service.Delete(
+		context.Background(), testTenantID, testActorID, testMetricID,
+		DeleteInput{ExpectedVersion: 3},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if store.deleteCalls != 1 || store.deleteInput.ExpectedVersion != 3 {
+		t.Fatalf("delete calls=%d input=%#v", store.deleteCalls, store.deleteInput)
+	}
+	if err := service.Delete(
+		context.Background(), testTenantID, testActorID, testMetricID,
+		DeleteInput{},
+	); !errors.Is(err, ErrInvalidDefinition) {
+		t.Fatalf("invalid delete error=%v", err)
+	}
+}
+
 func baseDatasetVersion(t *testing.T) dataset.VersionRecord {
 	t.Helper()
 	document := dataset.Document{
@@ -170,6 +198,42 @@ func TestServiceCreateAllowsDirectCountOnIdentifierButNotNumericAggregation(t *t
 	var validation *ValidationError
 	if !errors.As(err, &validation) || len(validation.Issues) == 0 || validation.Issues[0].Code != "METRIC_NUMERIC_FIELD_REQUIRED" {
 		t.Fatalf("string identifier SUM must be rejected, error=%v", err)
+	}
+}
+
+func TestServiceCreateAllowsDAGAggregatedOutputWithoutNestedAggregation(t *testing.T) {
+	version := baseDatasetVersion(t)
+	document, err := dataset.DecodeAndNormalize(version.DSL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	amount := document.Fields[0].Expression
+	document.Fields[0].Expression = dataset.Expression{Type: "AGGREGATE", Function: "SUM", Argument: &amount}
+	// A grouped dataset can only expose its aggregate and declared grouping
+	// dimensions; retaining the detail-only time/order fields would be invalid SQL.
+	document.Fields = document.Fields[:2]
+	document.GroupBy = []string{"field_region"}
+	document.OutputGrain = dataset.OutputGrain{Description: "每行一个地区", KeyFields: []string{"region"}}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedDataset, err := dataset.Prepare(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version.DSL, version.LogicalPlan = preparedDataset.DSLJSON, preparedDataset.LogicalPlanJSON
+	version.DSLHash, version.PlanHash = preparedDataset.DSLHash, preparedDataset.PlanHash
+
+	store := &fakeStore{record: baseRecord(t), datasetVersion: version, versionsByID: map[string]VersionRecord{}}
+	service := NewService(store)
+	definition := validDefinition()
+	definition.Metric.Code, definition.Metric.Name, definition.Metric.Type = "regional_revenue", "地区收入", "DERIVED"
+	definition.Aggregation, definition.Additivity = "NONE", "NON_ADDITIVE"
+	if _, err := service.Create(context.Background(), testTenantID, testActorID, CreateInput{
+		Definition: definitionJSON(t, definition),
+	}); err != nil {
+		t.Fatalf("create DAG-derived metric: %v", err)
 	}
 }
 

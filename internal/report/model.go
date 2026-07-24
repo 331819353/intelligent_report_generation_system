@@ -40,6 +40,7 @@ var allowedOperationTypes = map[string]bool{
 	"BLOCK_CLEAR":             true,
 	"BLOCK_DELETE":            true,
 	"BLOCK_STICKY_UPDATE":     true,
+	"BLOCK_CONFIG_UPDATE":     true,
 	"COMPONENT_MOVE":          true,
 	"COMPONENT_RESIZE":        true,
 	"COMPONENT_CREATE":        true,

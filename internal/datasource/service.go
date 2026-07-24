@@ -11,10 +11,13 @@ import (
 )
 
 type Service struct {
-	repo       Repository
-	connectors map[Type]Connector
-	completer  TableCompleter
-	jobs       MetadataJobRepository
+	repo            Repository
+	connectors      map[Type]Connector
+	completer       TableCompleter
+	jobs            MetadataJobRepository
+	connectionTests ConnectionTestJobRepository
+	now             func() time.Time
+	testTTL         time.Duration
 }
 
 // SetTableCompleter 注入 LLM 元数据完善器，保持数据源领域对具体 AI 实现解耦。
@@ -23,13 +26,19 @@ func (s *Service) SetTableCompleter(completer TableCompleter) { s.completer = co
 // SetMetadataJobRepository 注入持久化任务仓储，使 HTTP 只负责入队、worker 负责采样和完善。
 func (s *Service) SetMetadataJobRepository(jobs MetadataJobRepository) { s.jobs = jobs }
 
+// SetConnectionTestJobRepository 注入异步连接测试控制面。API 只能通过该仓储
+// 入队和读取任务；成功证明由使用独立数据库身份的 worker 形成。
+func (s *Service) SetConnectionTestJobRepository(tests ConnectionTestJobRepository) {
+	s.connectionTests = tests
+}
+
 // NewService 按数据源类型注册连接器，使业务状态机与具体数据库驱动解耦。
 func NewService(repo Repository, connectors ...Connector) *Service {
 	m := map[Type]Connector{}
 	for _, c := range connectors {
 		m[c.Type()] = c
 	}
-	return &Service{repo: repo, connectors: m}
+	return &Service{repo: repo, connectors: m, now: time.Now, testTTL: 30 * time.Minute}
 }
 
 // Audit 将数据源操作审计转交给仓储层持久化。
@@ -39,6 +48,9 @@ func (s *Service) Audit(ctx context.Context, tenantID, actorID, action, resource
 
 // Create 在租户配额内创建草稿状态的数据源。
 func (s *Service) Create(ctx context.Context, source Source) (Source, error) {
+	if source.Visibility == "" {
+		source.Visibility = VisibilityPrivate
+	}
 	if err := source.Validate(); err != nil {
 		return Source{}, fmt.Errorf("%w: %v", ErrInvalidConfiguration, err)
 	}
@@ -59,18 +71,38 @@ func (s *Service) Create(ctx context.Context, source Source) (Source, error) {
 
 // List 返回租户下未删除的数据源。
 func (s *Service) List(ctx context.Context, tenantID string) ([]Source, error) {
-	return s.repo.List(ctx, tenantID)
+	items, err := s.repo.List(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	for index := range items {
+		items[index], err = s.withPublicationReview(ctx, tenantID, items[index])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
 }
 
 // Get 在租户边界内返回单个数据源，供详情和编辑基线读取。
 func (s *Service) Get(ctx context.Context, tenantID, id string) (Source, error) {
-	return s.repo.Get(ctx, tenantID, id)
+	var source Source
+	var err error
+	if versioned, ok := s.repo.(VersionedRepository); ok {
+		source, err = versioned.GetDraft(ctx, tenantID, id)
+	} else {
+		source, err = s.repo.Get(ctx, tenantID, id)
+	}
+	if err != nil {
+		return Source{}, err
+	}
+	return s.withPublicationReview(ctx, tenantID, source)
 }
 
 // SampleTable 通过受控元数据采样接口读取少量真实数据，不接受调用方传入 SQL。
 func (s *Service) SampleTable(ctx context.Context, tenantID, sourceID string, table MetadataTable, maxRows int) (SampleResult, error) {
-	if maxRows < 1 || maxRows > 5 {
-		return SampleResult{}, errors.New("sample row limit must be between 1 and 5")
+	if maxRows < 1 || maxRows > 10 {
+		return SampleResult{}, errors.New("sample row limit must be between 1 and 10")
 	}
 	source, connector, err := s.load(ctx, tenantID, sourceID)
 	if err != nil {
@@ -85,23 +117,39 @@ func (s *Service) SampleTable(ctx context.Context, tenantID, sourceID string, ta
 
 // Update 仅允许修改非同步、非删除状态的数据源，并重置为待验证草稿。
 func (s *Service) Update(ctx context.Context, source Source) (Source, error) {
-	current, err := s.repo.Get(ctx, source.TenantID, source.ID)
+	current, err := s.Get(ctx, source.TenantID, source.ID)
 	if err != nil {
 		return Source{}, err
+	}
+	if source.Version < 1 || source.Version != current.Version {
+		return Source{}, ErrVersionConflict
 	}
 	if current.Status == StatusSyncing || current.Status == StatusDeleting || current.Status == StatusDeleted {
 		return Source{}, fmt.Errorf("cannot update source in %s status", current.Status)
 	}
-	// 更新前释放旧配置对应的连接池；即使后续写入失败，下一次查询也会按当前配置安全重建。
-	if connector := s.connectors[current.Type]; connector != nil {
-		if err := connector.Close(ctx, current); err != nil {
-			return Source{}, fmt.Errorf("close current source connection: %w", err)
+	if current.ReviewStatus == ReviewPending {
+		return Source{}, ErrReviewPending
+	}
+	// 版本化仓储会让旧发布配置继续服务，编辑草稿时不能提前关闭线上连接池。
+	// 旧仓储仍维持原有“覆盖配置前关闭连接”的行为。
+	if _, versioned := s.repo.(VersionedRepository); !versioned {
+		if connector := s.connectors[current.Type]; connector != nil {
+			if err := connector.Close(ctx, current); err != nil {
+				return Source{}, fmt.Errorf("close current source connection: %w", err)
+			}
 		}
 	}
 	// 编辑表单不回显密码；未提交新密码时沿用当前内部引用，避免迫使浏览器获取秘密。
 	if source.SecretRef == "" && (source.Type == TypeMySQL || source.Type == TypeOracle) {
 		source.SecretRef = current.SecretRef
 	}
+	if source.OwnerID == "" {
+		source.OwnerID = current.OwnerID
+	}
+	if source.Visibility == "" {
+		source.Visibility = current.Visibility
+	}
+	source.CreatedBy = current.CreatedBy
 	source.Status = StatusDraft
 	if err := source.Validate(); err != nil {
 		return Source{}, err
@@ -111,6 +159,9 @@ func (s *Service) Update(ctx context.Context, source Source) (Source, error) {
 
 // Enable 将已禁用数据源恢复为可同步状态。
 func (s *Service) Enable(ctx context.Context, tenantID, id string) error {
+	if err := s.ensureReviewAllowsManagement(ctx, tenantID, id); err != nil {
+		return err
+	}
 	source, err := s.repo.Get(ctx, tenantID, id)
 	if err != nil {
 		return err
@@ -123,6 +174,9 @@ func (s *Service) Enable(ctx context.Context, tenantID, id string) error {
 
 // Disable 暂停当前活跃数据源的同步能力。
 func (s *Service) Disable(ctx context.Context, tenantID, id string) error {
+	if err := s.ensureReviewAllowsManagement(ctx, tenantID, id); err != nil {
+		return err
+	}
 	source, err := s.repo.Get(ctx, tenantID, id)
 	if err != nil {
 		return err
@@ -133,22 +187,139 @@ func (s *Service) Disable(ctx context.Context, tenantID, id string) error {
 	return s.repo.UpdateStatus(ctx, tenantID, id, StatusDisabled, "")
 }
 
-// Test 调用对应连接器验证连通性，并据结果更新数据源状态。
+// Test 调用对应连接器验证当前草稿，并把结果绑定到精确版本和配置摘要。
+// 版本化仓储中的成功测试不会自动发布；旧仓储保留原状态流转以兼容测试替身和外部实现。
 func (s *Service) Test(ctx context.Context, tenantID, id string) (TestResult, error) {
-	source, connector, err := s.load(ctx, tenantID, id)
+	source, connector, err := s.loadDraft(ctx, tenantID, id)
 	if err != nil {
 		return TestResult{}, err
 	}
+	startedAt := s.now().UTC()
 	result, err := connector.Test(ctx, source)
+	completedAt := s.now().UTC()
+	versioned, supportsVersioning := s.repo.(VersionedRepository)
 	if err != nil {
-		// 测试失败必须落为 ERROR，避免未经验证的数据源进入同步流程。
-		_ = s.repo.UpdateStatus(ctx, tenantID, id, StatusError, err.Error())
+		if supportsVersioning {
+			_, _ = versioned.RecordConnectionTest(ctx, tenantID, id, ConnectionTestRun{
+				DataSourceID: id, ConfigVersion: source.ConfigVersionID, ConfigHash: source.ConfigHash,
+				Status: ValidationFailed, ErrorMessage: "connection test failed",
+				StartedAt: startedAt, CompletedAt: completedAt,
+			})
+		} else {
+			// 旧仓储测试失败仍落为 ERROR。
+			_ = s.repo.UpdateStatus(ctx, tenantID, id, StatusError, err.Error())
+		}
 		return TestResult{}, err
+	}
+	if supportsVersioning {
+		expiresAt := completedAt.Add(s.testTTL)
+		if _, err := versioned.RecordConnectionTest(ctx, tenantID, id, ConnectionTestRun{
+			DataSourceID: id, ConfigVersion: source.ConfigVersionID, ConfigHash: source.ConfigHash,
+			Status: ValidationPassed, ServerVersion: result.ServerVersion, LatencyMS: result.LatencyMS,
+			StartedAt: startedAt, CompletedAt: completedAt, ExpiresAt: &expiresAt,
+		}); err != nil {
+			return TestResult{}, err
+		}
+		result.ConfigVersionID, result.ConfigHash = source.ConfigVersionID, source.ConfigHash
+		result.TestedAt, result.ExpiresAt = &completedAt, &expiresAt
+		return result, nil
 	}
 	if err := s.repo.UpdateStatus(ctx, tenantID, id, StatusActive, ""); err != nil {
 		return TestResult{}, err
 	}
 	return result, nil
+}
+
+// QueueConnectionTest 把当前草稿的精确版本交给数据库冻结并入队。幂等键只保存
+// SHA-256 摘要，避免把调用方可能携带业务信息的原值写入控制库。
+func (s *Service) QueueConnectionTest(
+	ctx context.Context,
+	tenantID, actorID, id, idempotencyKey string,
+) (ConnectionTestJob, error) {
+	if s.connectionTests == nil {
+		return ConnectionTestJob{}, ErrConnectionTestQueueUnavailable
+	}
+	if err := s.ensureReviewAllowsManagement(ctx, tenantID, id); err != nil {
+		return ConnectionTestJob{}, err
+	}
+	if len(idempotencyKey) > 256 {
+		return ConnectionTestJob{}, ErrIdempotencyKeyInvalid
+	}
+	idempotencyKeyHash := ""
+	if idempotencyKey != "" {
+		sum := sha256.Sum256([]byte(idempotencyKey))
+		idempotencyKeyHash = hex.EncodeToString(sum[:])
+	}
+	return s.connectionTests.EnqueueConnectionTest(
+		ctx, tenantID, id, actorID, idempotencyKeyHash,
+	)
+}
+
+// GetConnectionTest 返回租户和数据源边界内的安全任务快照。
+func (s *Service) GetConnectionTest(
+	ctx context.Context,
+	tenantID, sourceID, jobID string,
+) (ConnectionTestJob, error) {
+	if s.connectionTests == nil {
+		return ConnectionTestJob{}, ErrConnectionTestQueueUnavailable
+	}
+	return s.connectionTests.GetConnectionTest(ctx, tenantID, sourceID, jobID)
+}
+
+// Publish 将当前草稿切换为运行时版本。只有同版本、同摘要且未过期的成功测试可发布。
+func (s *Service) Publish(ctx context.Context, tenantID, actorID, id string) (Source, error) {
+	versioned, ok := s.repo.(VersionedRepository)
+	if !ok {
+		return Source{}, ErrVersioningRequired
+	}
+	draft, err := versioned.GetDraft(ctx, tenantID, id)
+	if err != nil {
+		return Source{}, err
+	}
+	if draft.ConfigVersionID == "" || draft.ConfigHash == "" {
+		return Source{}, ErrSourceVersionChanged
+	}
+	if draft.PublicationStatus == PublicationPublished && draft.PublishedVersionID == draft.ConfigVersionID {
+		return draft, nil
+	}
+	now := s.now().UTC()
+	if s.connectionTests != nil {
+		latest, latestErr := s.connectionTests.LatestConnectionTest(
+			ctx, tenantID, id, draft.ConfigVersionID, draft.ConfigHash,
+		)
+		if latestErr != nil {
+			return Source{}, latestErr
+		}
+		if latest != nil {
+			switch latest.Status {
+			case ConnectionTestQueued, ConnectionTestRunning:
+				return Source{}, ErrConnectionTestPending
+			case ConnectionTestFailed:
+				return Source{}, ErrConnectionTestFailed
+			case ConnectionTestCancelled:
+				return Source{}, ErrSourceVersionChanged
+			}
+		}
+	}
+	if draft.ValidationStatus != ValidationPassed {
+		return Source{}, ErrTestRequired
+	}
+	if draft.TestExpiresAt == nil || !draft.TestExpiresAt.After(now) {
+		return Source{}, ErrTestExpired
+	}
+	// 发布切换前关闭旧发布版本的连接池；失败时旧指针未变，后续请求可按旧快照重建。
+	if draft.PublishedVersionID != "" && draft.PublishedVersionID != draft.ConfigVersionID {
+		current, err := s.repo.Get(ctx, tenantID, id)
+		if err != nil {
+			return Source{}, err
+		}
+		if connector := s.connectors[current.Type]; connector != nil {
+			if err := connector.Close(ctx, current); err != nil {
+				return Source{}, fmt.Errorf("close published source connection: %w", err)
+			}
+		}
+	}
+	return versioned.Publish(ctx, tenantID, id, actorID, draft.ConfigVersionID, draft.ConfigHash, now)
 }
 
 // Sync 执行元数据采集、事务入库和状态回写的完整流程。
@@ -179,6 +350,9 @@ func (s *Service) Sync(ctx context.Context, tenantID, id string) (SyncResult, er
 
 // DiscoverTables 只读取源库技术元数据，不写入 PostgreSQL 资产表。
 func (s *Service) DiscoverTables(ctx context.Context, tenantID, id string) (SyncResult, error) {
+	if err := s.ensureReviewAllowsTableConfiguration(ctx, tenantID, id); err != nil {
+		return SyncResult{}, err
+	}
 	source, connector, err := s.load(ctx, tenantID, id)
 	if err != nil {
 		return SyncResult{}, err
@@ -192,6 +366,11 @@ func (s *Service) DiscoverTables(ctx context.Context, tenantID, id string) (Sync
 // InspectFileSource 在“新增数据表”阶段解析文件结构并固化当前版本的解析方案。
 // 新建文件数据源只负责上传和登记，不提前读取 Sheet 或产生映射任务。
 func (s *Service) InspectFileSource(ctx context.Context, tenantID, id string) (ExcelWorkbookInspection, error) {
+	if err := s.ensureReviewAllowsTableConfiguration(ctx, tenantID, id); err != nil {
+		return ExcelWorkbookInspection{}, err
+	}
+	// Sheet 解析属于运行面操作，必须固定到已发布配置。已发布数据源重新
+	// 上传文件后，新草稿在上线前不能通过此接口提前解析或映射。
 	source, connector, err := s.load(ctx, tenantID, id)
 	if err != nil {
 		return ExcelWorkbookInspection{}, err
@@ -206,7 +385,8 @@ func (s *Service) InspectFileSource(ctx context.Context, tenantID, id string) (E
 	return inspector.Inspect(ctx, source)
 }
 
-// ImportTables 对用户选中的源表采样三行，经 LLM 完善后形成 PostgreSQL 表资产。
+// ImportTables 是兼容旧调用方的同步入口，只发送技术元数据，不读取业务样本。
+// 需要样本时必须使用带逐任务授权的 QueueImportTablesWithSampleMode。
 func (s *Service) ImportTables(ctx context.Context, tenantID, actorID, id string, selections []TableSelection) ([]ImportedTable, error) {
 	if len(selections) == 0 || len(selections) > 100 {
 		return nil, errors.New("between 1 and 100 tables must be selected")
@@ -214,7 +394,7 @@ func (s *Service) ImportTables(ctx context.Context, tenantID, actorID, id string
 	return s.importTables(ctx, tenantID, actorID, id, selections)
 }
 
-// RefreshTables 按已纳管范围逐表执行采样、技术结构更新和 LLM 完善，单表失败不阻断后续表。
+// RefreshTables 是兼容旧调用方的同步入口，只发送技术元数据；单表失败不阻断后续表。
 func (s *Service) RefreshTables(ctx context.Context, tenantID, actorID, id string) (TableRefreshResult, error) {
 	result := TableRefreshResult{Items: []TableRefreshItem{}}
 	source, connector, err := s.load(ctx, tenantID, id)
@@ -226,10 +406,6 @@ func (s *Service) RefreshTables(ctx context.Context, tenantID, actorID, id strin
 	}
 	if s.completer == nil {
 		return result, errors.New("metadata AI completer is not configured")
-	}
-	sampler, ok := connector.(MetadataSampler)
-	if !ok {
-		return result, errors.New("connector does not support metadata sampling")
 	}
 	selections, err := s.repo.ListActiveTableSelections(ctx, tenantID, id)
 	if err != nil {
@@ -258,13 +434,6 @@ func (s *Service) RefreshTables(ctx context.Context, tenantID, actorID, id strin
 			result.Failed++
 			continue
 		}
-		sample, err := sampler.Sample(ctx, source, table, 3)
-		if err != nil {
-			item.Stage, item.Code, item.Cause = "SAMPLE", "SAMPLE_FAILED", err
-			result.Items = append(result.Items, item)
-			result.Failed++
-			continue
-		}
 		metadata, err := selectedMetadataResult([]MetadataTable{table})
 		if err != nil {
 			item.Stage, item.Code, item.Cause = "PERSISTENCE", "METADATA_BUILD_FAILED", err
@@ -288,7 +457,7 @@ func (s *Service) RefreshTables(ctx context.Context, tenantID, actorID, id strin
 			result.Failed++
 			continue
 		}
-		if err := s.completer.CompleteTable(ctx, tenantID, actorID, item.ID, sampleRows(sample), true, nil, structureHash, "", "", 0); err != nil {
+		if err := s.completer.CompleteTable(ctx, tenantID, actorID, item.ID, nil, true, nil, structureHash, "", "", 0); err != nil {
 			item.Stage, item.Code, item.Cause = "LLM", "LLM_COMPLETION_FAILED", err
 			result.Items = append(result.Items, item)
 			result.Failed++
@@ -320,10 +489,6 @@ func (s *Service) importTables(ctx context.Context, tenantID, actorID, id string
 	if s.completer == nil {
 		return nil, errors.New("metadata AI completer is not configured")
 	}
-	sampler, ok := connector.(MetadataSampler)
-	if !ok {
-		return nil, errors.New("connector does not support metadata sampling")
-	}
 	discovered, err := connector.Sync(ctx, source)
 	if err != nil {
 		return nil, err
@@ -353,20 +518,15 @@ func (s *Service) importTables(ctx context.Context, tenantID, actorID, id string
 	}
 	imported := make([]ImportedTable, 0, len(selected))
 	for _, table := range selected {
-		sample, err := sampler.Sample(ctx, source, table, 3)
-		if err != nil {
-			return nil, fmt.Errorf("sample table %s: %w", table.Name, err)
-		}
-		rows := sampleRows(sample)
 		tableID := ids[metadataTableKey(table)]
 		structureHash, _, err := metadataTableHash(table)
 		if err != nil {
 			return nil, fmt.Errorf("hash metadata for table %s: %w", table.Name, err)
 		}
-		if err := s.completer.CompleteTable(ctx, tenantID, actorID, tableID, rows, true, nil, structureHash, "", "", 0); err != nil {
+		if err := s.completer.CompleteTable(ctx, tenantID, actorID, tableID, nil, true, nil, structureHash, "", "", 0); err != nil {
 			return nil, fmt.Errorf("complete metadata for table %s: %w", table.Name, err)
 		}
-		imported = append(imported, ImportedTable{ID: tableID, Table: table, Samples: rows})
+		imported = append(imported, ImportedTable{ID: tableID, Table: table})
 	}
 	return imported, nil
 }
@@ -419,6 +579,9 @@ func sampleRowsForColumns(sample SampleResult, columns []string) []map[string]an
 
 // Delete 先关闭连接器资源，再将数据源软删除。
 func (s *Service) Delete(ctx context.Context, tenantID, id string) error {
+	if err := s.ensureReviewAllowsManagement(ctx, tenantID, id); err != nil {
+		return err
+	}
 	source, connector, err := s.load(ctx, tenantID, id)
 	if err != nil {
 		return err
@@ -433,9 +596,68 @@ func (s *Service) Delete(ctx context.Context, tenantID, id string) error {
 	return s.repo.UpdateStatus(ctx, tenantID, id, StatusDeleted, "")
 }
 
+func (s *Service) withPublicationReview(ctx context.Context, tenantID string, source Source) (Source, error) {
+	source.ReviewStatus = ReviewNotSubmitted
+	store, ok := s.repo.(interface {
+		LatestPublicationRequest(context.Context, string, string) (*PublicationRequest, error)
+	})
+	if !ok {
+		return source, nil
+	}
+	request, err := store.LatestPublicationRequest(ctx, tenantID, source.ID)
+	if err != nil {
+		return Source{}, err
+	}
+	return applyPublicationReview(source, request), nil
+}
+
+func (s *Service) ensureReviewAllowsManagement(ctx context.Context, tenantID, sourceID string) error {
+	source, err := s.Get(ctx, tenantID, sourceID)
+	if err != nil {
+		return err
+	}
+	if source.ReviewStatus == ReviewPending {
+		return ErrReviewPending
+	}
+	return nil
+}
+
+func (s *Service) ensureReviewAllowsTableConfiguration(ctx context.Context, tenantID, sourceID string) error {
+	source, err := s.Get(ctx, tenantID, sourceID)
+	if err != nil {
+		return err
+	}
+	switch source.ReviewStatus {
+	case ReviewPending:
+		return ErrReviewPending
+	case ReviewRejected:
+		return ErrReviewRejected
+	default:
+		return nil
+	}
+}
+
 // load 加载数据源、匹配连接器并注入租户运行配额。
 func (s *Service) load(ctx context.Context, tenantID, id string) (Source, Connector, error) {
 	source, err := s.repo.Get(ctx, tenantID, id)
+	if err != nil {
+		return Source{}, nil, err
+	}
+	connector := s.connectors[source.Type]
+	if connector == nil {
+		return Source{}, nil, errors.New("connector is not registered")
+	}
+	quota, err := s.repo.Quota(ctx, tenantID)
+	if err != nil {
+		return Source{}, nil, err
+	}
+	source.RuntimeQuota = quota
+	return source, connector, nil
+}
+
+// loadDraft 仅用于连接测试等管理面操作；运行时 load 始终优先使用已发布快照。
+func (s *Service) loadDraft(ctx context.Context, tenantID, id string) (Source, Connector, error) {
+	source, err := s.Get(ctx, tenantID, id)
 	if err != nil {
 		return Source{}, nil, err
 	}

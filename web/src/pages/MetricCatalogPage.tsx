@@ -1,23 +1,28 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   ArrowRightIcon,
+  CheckSquareIcon,
   DatabaseIcon,
   FunctionIcon,
   GitBranchIcon,
+  MagicWandIcon,
   MagnifyingGlassIcon,
   PlusIcon,
+  SquareIcon,
   StackIcon,
   TableIcon,
   XIcon,
 } from '@phosphor-icons/react'
 import { useNavigate } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
+import { AssetManagementTabs } from '../components/AssetManagementTabs'
 import {
   datasetAPI,
   type DatasetSummary,
   type PublishedVersionRecord,
 } from '../lib/datasets'
 import {
+  createMetricPublishIdempotencyKey,
   metricAPI,
   type MetricDefinition,
   type MetricExpression,
@@ -26,12 +31,23 @@ import {
   type MetricUsage,
   type MetricVersionRecord,
 } from '../lib/metrics'
+import {
+  metricCandidateAPI,
+  type MetricCandidate,
+  type MetricCandidateStatus,
+} from '../lib/metric-candidates'
 
 const catalogPageSize = 200
 const statusLabels: Record<string, string> = {
   DRAFT: '草稿', PUBLISHED: '已发布', STALE: '已失效', DEPRECATED: '已废弃',
 }
-const typeLabels: Record<string, string> = { ATOMIC: '原子指标', DERIVED: '派生指标', RATIO: '比率指标' }
+const typeLabels: Record<string, string> = { ATOMIC: '原子指标', DERIVED: '派生指标', RATIO: '复合指标' }
+const candidateStatusLabels: Record<MetricCandidateStatus, string> = {
+  READY: '可发布', NEEDS_REVIEW: '待复核', BLOCKED: '已阻塞', ACCEPTED: '已接收', REJECTED: '已拒绝',
+}
+const candidateMethodLabels: Record<string, string> = {
+  RULE: '规则生成', LLM: 'LLM 生成', HYBRID: '规则 + LLM',
+}
 const aggregationLabels: Record<string, string> = {
   NONE: '不聚合', SUM: '求和', AVG: '平均值', MIN: '最小值', MAX: '最大值', COUNT: '计数', COUNT_DISTINCT: '去重计数',
 }
@@ -49,6 +65,7 @@ const emptyUsage = (): MetricUsage => ({
 })
 
 type DetailTab = 'overview' | 'definition' | 'dimensions' | 'source' | 'lineage'
+type DirectoryView = 'datasets' | 'candidates'
 type MetricDetail = {
   record: MetricRecord
   publishedVersion: MetricVersionRecord | null
@@ -88,6 +105,16 @@ async function loadAllDatasets(): Promise<DatasetSummary[]> {
   const items: DatasetSummary[] = []
   for (let offset = 0; ;) {
     const page = await datasetAPI.list(catalogPageSize, offset)
+    items.push(...page.items)
+    if (!page.items.length || items.length >= page.total) return items
+    offset += page.items.length
+  }
+}
+
+async function loadAllCandidates(): Promise<MetricCandidate[]> {
+  const items: MetricCandidate[] = []
+  for (let offset = 0; ;) {
+    const page = await metricCandidateAPI.list(catalogPageSize, offset)
     items.push(...page.items)
     if (!page.items.length || items.length >= page.total) return items
     offset += page.items.length
@@ -147,19 +174,30 @@ function formatDate(value: string): string {
 export function MetricCatalogPage() {
   const navigate = useNavigate()
   const [metrics, setMetrics] = useState<MetricSummary[]>([])
+  const [candidates, setCandidates] = useState<MetricCandidate[]>([])
   const [datasets, setDatasets] = useState<DatasetSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [candidateError, setCandidateError] = useState('')
   const [reloadKey, setReloadKey] = useState(0)
+  const [view, setView] = useState<DirectoryView>('datasets')
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState('ALL')
   const [type, setType] = useState('ALL')
+  const [candidateStatus, setCandidateStatus] = useState('ALL')
+  const [candidateMethod, setCandidateMethod] = useState('ALL')
   const [datasetId, setDatasetId] = useState('ALL')
+  const [selectedCandidateIDs, setSelectedCandidateIDs] = useState<string[]>([])
+  const [candidatePublishing, setCandidatePublishing] = useState(false)
+  const [candidateNotice, setCandidateNotice] = useState('')
   const [selected, setSelected] = useState<MetricSummary | null>(null)
   const [detail, setDetail] = useState<MetricDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState('')
   const [tab, setTab] = useState<DetailTab>('overview')
+  const [deletingMetric, setDeletingMetric] = useState<MetricSummary | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
 
   useEffect(() => {
     let active = true
@@ -168,7 +206,7 @@ export function MetricCatalogPage() {
       setLoading(true)
       setError('')
     })
-    Promise.allSettled([loadAllMetrics(), loadAllDatasets()]).then(([metricResult, datasetResult]) => {
+    Promise.allSettled([loadAllMetrics(), loadAllDatasets(), loadAllCandidates()]).then(([metricResult, datasetResult, candidateResult]) => {
       if (!active) return
       if (metricResult.status === 'rejected') {
         setMetrics([])
@@ -177,6 +215,13 @@ export function MetricCatalogPage() {
         setMetrics(metricResult.value)
       }
       if (datasetResult.status === 'fulfilled') setDatasets(datasetResult.value)
+      if (candidateResult.status === 'fulfilled') {
+        setCandidates(candidateResult.value)
+        setCandidateError('')
+      } else {
+        setCandidates([])
+        setCandidateError(candidateResult.reason instanceof Error ? `加载候选指标失败：${candidateResult.reason.message}` : '加载候选指标失败')
+      }
     }).finally(() => { if (active) setLoading(false) })
     return () => { active = false }
   }, [reloadKey])
@@ -238,9 +283,11 @@ export function MetricCatalogPage() {
   }, [selected])
 
   const datasetById = useMemo(() => new Map(datasets.map(dataset => [dataset.id, dataset])), [datasets])
+  const ordinaryDatasets = useMemo(() => datasets.filter(dataset => !dataset.originTableId), [datasets])
+  const displayMetrics = useMemo(() => metrics.filter(metric => metric.type === 'DERIVED' || metric.type === 'RATIO'), [metrics])
   const filteredMetrics = useMemo(() => {
     const keyword = query.trim().toLocaleLowerCase('zh-CN')
-    return metrics.filter(metric => {
+    return displayMetrics.filter(metric => {
       const matchesQuery = !keyword || [metric.name, metric.code, metric.description]
         .some(value => value.toLocaleLowerCase('zh-CN').includes(keyword))
       return matchesQuery &&
@@ -248,18 +295,60 @@ export function MetricCatalogPage() {
         (type === 'ALL' || metric.type === type) &&
         (datasetId === 'ALL' || metric.datasetId === datasetId)
     })
-  }, [datasetId, metrics, query, status, type])
+  }, [datasetId, displayMetrics, query, status, type])
+  const datasetSections = useMemo(() => {
+    const keyword = query.trim().toLocaleLowerCase('zh-CN')
+    const metricsByDataset = new Map<string, MetricSummary[]>()
+    for (const metric of filteredMetrics) {
+      const current = metricsByDataset.get(metric.datasetId) ?? []
+      current.push(metric)
+      metricsByDataset.set(metric.datasetId, current)
+    }
+    return ordinaryDatasets.flatMap(dataset => {
+      if (datasetId !== 'ALL' && dataset.id !== datasetId) return []
+      const datasetMatches = !keyword || [dataset.name, dataset.code, dataset.description]
+        .some(value => value.toLocaleLowerCase('zh-CN').includes(keyword))
+      const datasetMetrics = metricsByDataset.get(dataset.id) ?? []
+      if (keyword && !datasetMatches && !datasetMetrics.length) return []
+      if ((status !== 'ALL' || type !== 'ALL') && !datasetMetrics.length) return []
+      return [{ dataset, metrics: datasetMetrics }]
+    })
+  }, [datasetId, filteredMetrics, ordinaryDatasets, query, status, type])
+  const filteredCandidates = useMemo(() => {
+    const keyword = query.trim().toLocaleLowerCase('zh-CN')
+    return candidates.filter(candidate => {
+      const values = [
+        candidate.name, candidate.code, candidate.description,
+        candidate.semantic?.name ?? '', candidate.semantic?.description ?? '',
+        candidate.semantic?.caliber ?? '', ...(candidate.semantic?.tags ?? []),
+      ]
+      return (!keyword || values.some(value => value.toLocaleLowerCase('zh-CN').includes(keyword))) &&
+        (candidateStatus === 'ALL' || candidate.status === candidateStatus) &&
+        (candidateMethod === 'ALL' || candidate.method === candidateMethod) &&
+        (datasetId === 'ALL' || candidate.datasetId === datasetId)
+    })
+  }, [candidateMethod, candidateStatus, candidates, datasetId, query])
+  const publishableCandidates = useMemo(() => filteredCandidates.filter(candidate =>
+    (candidate.status === 'READY' || candidate.status === 'NEEDS_REVIEW') && !candidate.blockReasons.length
+  ), [filteredCandidates])
   const counts = useMemo(() => ({
-    published: metrics.filter(metric => metric.status === 'PUBLISHED').length,
-    draft: metrics.filter(metric => metric.status === 'DRAFT').length,
-    attention: metrics.filter(metric => metric.status === 'STALE' || metric.status === 'DEPRECATED').length,
-  }), [metrics])
-  const filterActive = Boolean(query.trim()) || datasetId !== 'ALL' || status !== 'ALL' || type !== 'ALL'
+    published: displayMetrics.filter(metric => metric.status === 'PUBLISHED').length,
+    draft: displayMetrics.filter(metric => metric.status === 'DRAFT').length,
+    attention: displayMetrics.filter(metric => metric.status === 'STALE' || metric.status === 'DEPRECATED').length,
+  }), [displayMetrics])
+  const pendingCandidateCount = useMemo(() => candidates.filter(candidate =>
+    candidate.status === 'READY' || candidate.status === 'NEEDS_REVIEW'
+  ).length, [candidates])
+  const filterActive = Boolean(query.trim()) || datasetId !== 'ALL' || (view === 'datasets'
+    ? status !== 'ALL' || type !== 'ALL'
+    : candidateStatus !== 'ALL' || candidateMethod !== 'ALL')
 
   function resetFilters() {
     setQuery('')
     setStatus('ALL')
     setType('ALL')
+    setCandidateStatus('ALL')
+    setCandidateMethod('ALL')
     setDatasetId('ALL')
   }
 
@@ -267,47 +356,178 @@ export function MetricCatalogPage() {
     setTab('overview')
     setSelected(metric)
   }
-  return <AppShell title="指标中心" eyebrow="语义资产" actions={<button className="primary-button metric-create-button" type="button" onClick={() => navigate('/metrics/new')}><PlusIcon size={17} weight="bold" />新建指标</button>}>
+  function createMetricForDataset(dataset: DatasetSummary) {
+    if (!dataset.currentPublishedVersionId) return
+    navigate('/metrics/new', {
+      state: {
+        preferredDatasetId: dataset.id,
+        safeDatasetExtension: true,
+      },
+    })
+  }
+  function requestMetricDeletion(metric: MetricSummary) {
+    setDeleteError('')
+    setDeletingMetric(metric)
+  }
+  async function deleteMetric() {
+    if (!deletingMetric || deleteBusy) return
+    setDeleteBusy(true)
+    setDeleteError('')
+    try {
+      await metricAPI.delete(deletingMetric.id, deletingMetric.version)
+      setMetrics(current => current.filter(metric => metric.id !== deletingMetric.id))
+      if (selected?.id === deletingMetric.id) setSelected(null)
+      setDeletingMetric(null)
+    } catch (cause) {
+      setDeleteError(cause instanceof Error ? cause.message : '删除指标失败')
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+  function toggleCandidate(candidateID: string) {
+    setSelectedCandidateIDs(current => current.includes(candidateID)
+      ? current.filter(id => id !== candidateID)
+      : [...current, candidateID])
+  }
+
+  function toggleAllCandidates() {
+    const visibleIDs = publishableCandidates.map(candidate => candidate.id)
+    const allSelected = visibleIDs.length > 0 && visibleIDs.every(id => selectedCandidateIDs.includes(id))
+    setSelectedCandidateIDs(current => allSelected
+      ? current.filter(id => !visibleIDs.includes(id))
+      : [...new Set([...current, ...visibleIDs])])
+  }
+
+  async function publishSelectedCandidates() {
+    const selectedCandidates = candidates.filter(candidate => selectedCandidateIDs.includes(candidate.id))
+    if (!selectedCandidates.length || candidatePublishing) return
+    setCandidatePublishing(true)
+    setCandidateError('')
+    setCandidateNotice('')
+    let published = 0
+    const failures: string[] = []
+    for (const candidate of selectedCandidates) {
+      try {
+        const accepted = await metricCandidateAPI.accept(candidate.id, candidate.version)
+        const metric = accepted.metric
+        await metricAPI.publish(metric.id, {
+          draftVersionId: metric.draftVersionId,
+          expectedVersion: metric.version,
+          expectedDraftRecordVersion: metric.draftRecordVersion,
+          expectedDefinitionHash: metric.definitionHash,
+          validationParameters: {},
+        }, createMetricPublishIdempotencyKey())
+        published++
+      } catch (cause) {
+        failures.push(`${candidate.name}：${cause instanceof Error ? cause.message : '发布失败'}`)
+      }
+    }
+    setSelectedCandidateIDs([])
+    setCandidatePublishing(false)
+    if (failures.length) {
+      setCandidateError(`已发布 ${published} 项，${failures.length} 项失败。${failures.join('；')}`)
+    } else {
+      setCandidateNotice(`已成功发布 ${published} 个指标`)
+    }
+    setReloadKey(value => value + 1)
+  }
+
+  const selectedPublishableCount = selectedCandidateIDs.filter(id =>
+    candidates.some(candidate => candidate.id === id &&
+      (candidate.status === 'READY' || candidate.status === 'NEEDS_REVIEW') &&
+      !candidate.blockReasons.length)
+  ).length
+
+  return <AppShell title="资产管理中心" eyebrow="指标 · 语义 · 维度值">
+    <AssetManagementTabs />
     <section className="metric-directory" aria-label="指标资产目录">
       <header className="metric-directory-summary">
-        <div><span className="eyebrow">统一口径目录</span><h2>发现、理解并追溯每一个业务指标</h2><p>这里只展示由业务需求创建并经过治理的指标；数据集自动提取的原子度量事实作为内部构件，不进入指标目录。</p></div>
+        <div><span className="eyebrow">按数据集组织</span><h2>一个数据集，一个指标展示区</h2><p>这里只展示派生指标和复合指标。原子指标与映射数据集保留为 DAG 内部构成，不进入展示中心。</p></div>
         <dl aria-label="指标目录统计">
-          <div><dt>全部</dt><dd>{metrics.length}</dd></div>
+          <div><dt>普通数据集</dt><dd>{ordinaryDatasets.length}</dd></div>
+          <div><dt>展示指标</dt><dd>{displayMetrics.length}</dd></div>
           <div><dt>已发布</dt><dd>{counts.published}</dd></div>
-          <div><dt>草稿</dt><dd>{counts.draft}</dd></div>
           <div><dt>需关注</dt><dd>{counts.attention}</dd></div>
+          <div><dt>候选待发布</dt><dd>{pendingCandidateCount}</dd></div>
         </dl>
       </header>
 
-      <div className="metric-directory-filters" aria-label="指标筛选">
-        <label className="metric-search-field"><span>搜索指标</span><span className="metric-search-input"><MagnifyingGlassIcon size={17} /><input aria-label="搜索指标" value={query} placeholder="搜索名称、编码或说明" onChange={event => setQuery(event.target.value)} /></span></label>
-        <label><span>指标状态</span><select aria-label="指标状态" value={status} onChange={event => setStatus(event.target.value)}><option value="ALL">全部状态</option>{Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-        <label><span>指标类型</span><select aria-label="指标类型筛选" value={type} onChange={event => setType(event.target.value)}><option value="ALL">全部类型</option>{Object.entries(typeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-        <label><span>来源数据集</span><select aria-label="来源数据集" value={datasetId} onChange={event => setDatasetId(event.target.value)}><option value="ALL">全部数据集</option>{datasets.map(dataset => <option key={dataset.id} value={dataset.id}>{dataset.name}</option>)}</select></label>
+      <div className="metric-directory-modes" role="tablist" aria-label="指标展示分区">
+        <button type="button" role="tab" aria-selected={view === 'datasets'} onClick={() => { setView('datasets'); setSelectedCandidateIDs([]) }}>数据集指标 <span>{displayMetrics.length}</span></button>
+        <button type="button" role="tab" aria-selected={view === 'candidates'} onClick={() => setView('candidates')}>候选区 <span>{pendingCandidateCount}</span></button>
+      </div>
+
+      <div className="metric-directory-filters" aria-label={view === 'datasets' ? '数据集指标筛选' : '候选指标筛选'}>
+        <label className="metric-search-field"><span>{view === 'datasets' ? '搜索数据集或指标' : '搜索候选'}</span><span className="metric-search-input"><MagnifyingGlassIcon size={17} /><input aria-label={view === 'datasets' ? '搜索数据集或指标' : '搜索候选指标'} value={query} placeholder="搜索名称、编码或说明" onChange={event => setQuery(event.target.value)} /></span></label>
+        {view === 'datasets' ? <>
+          <label><span>指标状态</span><select aria-label="指标状态" value={status} onChange={event => setStatus(event.target.value)}><option value="ALL">全部状态</option>{Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+          <label><span>指标类型</span><select aria-label="指标类型筛选" value={type} onChange={event => setType(event.target.value)}><option value="ALL">全部类型</option><option value="DERIVED">派生指标</option><option value="RATIO">复合指标</option></select></label>
+        </> : <>
+          <label><span>候选状态</span><select aria-label="候选状态" value={candidateStatus} onChange={event => setCandidateStatus(event.target.value)}><option value="ALL">全部状态</option>{Object.entries(candidateStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+          <label><span>生成方式</span><select aria-label="候选生成方式" value={candidateMethod} onChange={event => setCandidateMethod(event.target.value)}><option value="ALL">全部方式</option>{Object.entries(candidateMethodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        </>}
+        <label><span>来源数据集</span><select aria-label="来源数据集" value={datasetId} onChange={event => setDatasetId(event.target.value)}><option value="ALL">全部数据集</option>{ordinaryDatasets.map(dataset => <option key={dataset.id} value={dataset.id}>{dataset.name}</option>)}</select></label>
         <button className="metric-reset-filters" type="button" disabled={!filterActive} onClick={resetFilters}>重置</button>
       </div>
 
-      <div className="metric-directory-resultbar"><div><strong>业务指标资产</strong><span>按最近更新时间排序</span></div><small>显示 {filteredMetrics.length} / {metrics.length}</small></div>
-      {error && <div className="metric-directory-error" role="alert"><span>{error}</span><button type="button" onClick={() => setReloadKey(value => value + 1)}>重新加载</button></div>}
-      {loading ? <div className="metric-directory-empty" role="status"><FunctionIcon size={34} /><strong>正在加载指标目录…</strong></div> : filteredMetrics.length ? <div className="metric-directory-list">
-        {filteredMetrics.map(metric => {
-          const dataset = datasetById.get(metric.datasetId)
-          return <article className="metric-directory-row" key={metric.id}>
-            <div className="metric-asset-icon" aria-hidden="true"><FunctionIcon size={22} weight="bold" /></div>
-            <div className="metric-asset-main"><div><button type="button" onClick={() => openDetail(metric)}>{metric.name}</button><span className={`metric-status status-${metric.status.toLowerCase()}`}>{statusLabels[metric.status] ?? metric.status}</span></div><p>{metric.description || '暂无指标说明'}</p><small>{metric.code}</small></div>
-            <dl><div><dt>类型</dt><dd>{typeLabels[metric.type] ?? metric.type}</dd></div><div><dt>来源数据集</dt><dd title={dataset?.name || metric.datasetId}>{dataset?.name || shortId(metric.datasetId)}</dd></div><div><dt>当前版本</dt><dd>{metric.currentPublishedVersionId ? '已发布精确版本' : `草稿 V${metric.version}`}</dd></div><div><dt>更新时间</dt><dd>{formatDate(metric.updatedAt)}</dd></div></dl>
-            <div className="metric-asset-actions"><button className="action-view" type="button" onClick={() => openDetail(metric)}>查看</button><button className="action-edit" type="button" onClick={() => navigate(`/metrics/${metric.id}/edit`)}>编辑</button></div>
-          </article>
-        })}
-      </div> : <DirectoryEmpty hasItems={metrics.length > 0} filterActive={filterActive} onReset={resetFilters} onCreate={() => navigate('/metrics/new')} />}
+      {view === 'datasets' ? <div className="metric-directory-resultbar"><div><strong>数据集指标展示区</strong><span>新建指标默认以所在数据集的当前发布 DAG 为基线</span></div><small>显示 {datasetSections.length} / {ordinaryDatasets.length} 个数据集</small></div> :
+        <div className="metric-directory-resultbar metric-candidate-batchbar"><div><strong>待审批候选</strong><span>多选后将逐项创建指标、试算并正式发布</span></div><div className="metric-candidate-batch-actions"><button type="button" className="quiet-button" disabled={!publishableCandidates.length || candidatePublishing} onClick={toggleAllCandidates}>{publishableCandidates.length > 0 && publishableCandidates.every(candidate => selectedCandidateIDs.includes(candidate.id)) ? '取消全选' : '全选可发布项'}</button><button type="button" className="primary-button" disabled={!selectedPublishableCount || candidatePublishing} onClick={() => void publishSelectedCandidates()}>{candidatePublishing ? '正在批量发布…' : `发布选中指标（${selectedPublishableCount}）`}</button><small>显示 {filteredCandidates.length} / {candidates.length}</small></div></div>}
+      {candidateNotice && view === 'candidates' && <div className="metric-directory-toast" role="status"><span>{candidateNotice}</span><button type="button" aria-label="关闭提示" onClick={() => setCandidateNotice('')}>×</button></div>}
+      {(view === 'datasets' ? error : candidateError) && <div className="metric-directory-error" role="alert"><span>{view === 'datasets' ? error : candidateError}</span><button type="button" onClick={() => setReloadKey(value => value + 1)}>重新加载</button></div>}
+      {loading ? <div className="metric-directory-empty" role="status"><FunctionIcon size={34} /><strong>正在加载指标展示区…</strong></div> : view === 'datasets' ? datasetSections.length ? <div className="metric-dataset-zones">
+        {datasetSections.map(({ dataset, metrics: datasetMetrics }) => <section className="metric-dataset-zone" key={dataset.id} aria-label={`${dataset.name}指标展示区`}>
+          <header>
+            <div className="metric-dataset-identity"><span aria-hidden="true"><DatabaseIcon size={21} weight="duotone" /></span><div><h3>{dataset.name}</h3><p>{dataset.description || '暂无数据集说明'}</p><small>{dataset.code} · {dataset.status === 'PUBLISHED' ? '已发布 DAG' : statusLabels[dataset.status] ?? dataset.status}</small></div></div>
+            <div className="metric-dataset-zone-actions"><span>{datasetMetrics.length} 个指标</span><button className="primary-button" type="button" disabled={!dataset.currentPublishedVersionId} title={dataset.currentPublishedVersionId ? '基于该数据集 DAG 新建指标' : '数据集发布后才可新建指标'} onClick={() => createMetricForDataset(dataset)}><PlusIcon size={16} weight="bold" />新建指标</button></div>
+          </header>
+          <div className="metric-dataset-safety"><GitBranchIcon size={15} weight="bold" /><span>拓展只会产生新的数据集/指标版本；既有指标继续引用原精确发布版本，原实现逻辑不会被覆盖。</span></div>
+          {datasetMetrics.length ? <div className="metric-directory-list">
+            {datasetMetrics.map(metric => <article className="metric-directory-row" key={metric.id}>
+              <div className="metric-asset-icon" aria-hidden="true"><FunctionIcon size={22} weight="bold" /></div>
+              <div className="metric-asset-main"><div><button type="button" onClick={() => openDetail(metric)}>{metric.name}</button><span className={`metric-status status-${metric.status.toLowerCase()}`}>{statusLabels[metric.status] ?? metric.status}</span></div><p>{metric.description || '暂无指标说明'}</p><small>{metric.code}</small></div>
+              <dl><div><dt>类型</dt><dd>{typeLabels[metric.type] ?? metric.type}</dd></div><div><dt>绑定版本</dt><dd title={metric.datasetVersionId}>{shortId(metric.datasetVersionId)}</dd></div><div><dt>指标版本</dt><dd>{metric.currentPublishedVersionId ? '已发布精确版本' : `草稿 V${metric.version}`}</dd></div><div><dt>更新时间</dt><dd>{formatDate(metric.updatedAt)}</dd></div></dl>
+              <div className="metric-asset-actions"><button className="action-view" type="button" onClick={() => openDetail(metric)}>查看</button><button className="action-edit" type="button" onClick={() => navigate(`/metrics/${metric.id}/edit`)}>编辑</button><button className="action-delete" type="button" onClick={() => requestMetricDeletion(metric)}>删除</button></div>
+            </article>)}
+          </div> : <div className="metric-dataset-empty"><FunctionIcon size={25} /><div><strong>暂无派生或复合指标</strong><p>{dataset.currentPublishedVersionId ? '可从该数据集的当前发布 DAG 开始创建。' : '先发布数据集，再基于其 DAG 创建指标。'}</p></div></div>}
+        </section>)}
+      </div> : <DirectoryEmpty hasItems={ordinaryDatasets.length > 0} filterActive={filterActive} onReset={resetFilters} /> :
+        filteredCandidates.length ? <div className="metric-directory-list" aria-label="候选指标列表">
+          {filteredCandidates.map(candidate => {
+            const dataset = datasetById.get(candidate.datasetId)
+            const publishable = (candidate.status === 'READY' || candidate.status === 'NEEDS_REVIEW') && !candidate.blockReasons.length
+            const checked = selectedCandidateIDs.includes(candidate.id)
+            return <article className={`metric-directory-row metric-candidate-row ${checked ? 'is-selected' : ''}`} key={candidate.id}>
+              <label className="metric-candidate-selector" title={publishable ? '选择候选指标' : '当前候选不可发布'}>
+                <input type="checkbox" aria-label={`选择候选指标 ${candidate.name}`} checked={checked} disabled={!publishable || candidatePublishing} onChange={() => toggleCandidate(candidate.id)} />
+                {checked ? <CheckSquareIcon size={21} weight="fill" /> : <SquareIcon size={21} />}
+                <MagicWandIcon size={20} weight="bold" />
+              </label>
+              <div className="metric-asset-main"><div><strong>{candidate.name}</strong><span className={`metric-status candidate-${candidate.status.toLowerCase()}`}>{candidateStatusLabels[candidate.status]}</span></div><p>{candidate.semantic?.description || candidate.description || '暂无候选说明'}</p><small>{candidate.code}</small></div>
+              <dl><div><dt>生成方式</dt><dd>{candidateMethodLabels[candidate.method] ?? candidate.method}</dd></div><div><dt>来源数据集</dt><dd title={dataset?.name || candidate.datasetId}>{dataset?.name || shortId(candidate.datasetId)}</dd></div><div><dt>置信度</dt><dd>{Math.round(candidate.confidence * 100)}%</dd></div><div><dt>更新时间</dt><dd>{formatDate(candidate.updatedAt)}</dd></div></dl>
+              <div className="metric-asset-actions">{candidate.acceptedMetricId ? <button className="action-edit" type="button" onClick={() => navigate(`/metrics/${candidate.acceptedMetricId}/edit`)}>查看指标</button> : <span className="metric-candidate-state">{publishable ? '可加入批量发布' : candidate.blockReasons[0] || '不可发布'}</span>}</div>
+            </article>
+          })}
+        </div> : <div className="metric-directory-empty"><MagicWandIcon size={38} /><strong>{candidates.length ? '没有符合条件的候选指标' : '还没有候选指标'}</strong><p>{candidates.length ? '调整搜索词或筛选条件后再试。' : '提交数据集发布审批时会同步生成；审批通过后才会在这里展示。'}</p>{filterActive && <button className="quiet-button" type="button" onClick={resetFilters}>清除筛选</button>}</div>}
     </section>
 
+    {deletingMetric && <div className="metric-delete-backdrop" role="presentation" onMouseDown={event => {
+      if (event.target === event.currentTarget && !deleteBusy) setDeletingMetric(null)
+    }}>
+      <section className="metric-delete-dialog" role="dialog" aria-modal="true" aria-labelledby="metric-delete-title">
+        <span>危险操作</span>
+        <h2 id="metric-delete-title">删除指标</h2>
+        <p>确认删除“<strong>{deletingMetric.name}</strong>”吗？指标会从展示中心移除，历史版本和审计记录仍会保留。</p>
+        <small>仍被报告、下游指标或运行中查询占用时，系统会拒绝删除。删除后可以重新创建相同编码的指标。</small>
+        {deleteError && <div className="metric-delete-error" role="alert">{deleteError}</div>}
+        <footer><button className="quiet-button" type="button" disabled={deleteBusy} onClick={() => setDeletingMetric(null)}>取消</button><button className="danger-button" type="button" disabled={deleteBusy} onClick={() => void deleteMetric()}>{deleteBusy ? '正在删除…' : '确认删除'}</button></footer>
+      </section>
+    </div>}
     {selected && <MetricDetailDialog summary={selected} detail={detail} loading={detailLoading} error={detailError} tab={tab} datasetName={datasetById.get((detail?.publishedVersion?.definition ?? detail?.record.definition)?.datasetId ?? selected.datasetId)?.name ?? ''} onTab={setTab} onClose={() => setSelected(null)} onEdit={() => navigate(`/metrics/${selected.id}/edit`)} />}
   </AppShell>
 }
 
-function DirectoryEmpty({ hasItems, filterActive, onReset, onCreate }: { hasItems: boolean; filterActive: boolean; onReset: () => void; onCreate: () => void }) {
-  return <div className="metric-directory-empty"><MagnifyingGlassIcon size={38} /><strong>{hasItems ? '没有符合条件的指标' : '还没有指标'}</strong><p>{hasItems ? '调整搜索词或筛选条件后再试。' : '创建第一个指标，开始统一业务口径。'}</p>{filterActive ? <button className="quiet-button" type="button" onClick={onReset}>清除筛选</button> : <button className="primary-button" type="button" onClick={onCreate}>新建指标</button>}</div>
+function DirectoryEmpty({ hasItems, filterActive, onReset }: { hasItems: boolean; filterActive: boolean; onReset: () => void }) {
+  return <div className="metric-directory-empty"><MagnifyingGlassIcon size={38} /><strong>{hasItems ? '没有符合条件的数据集或指标' : '还没有可展示的普通数据集'}</strong><p>{hasItems ? '调整搜索词或筛选条件后再试。' : '先创建并发布普通数据集，再从数据集展示区新建指标。'}</p>{filterActive && <button className="quiet-button" type="button" onClick={onReset}>清除筛选</button>}</div>
 }
 
 function MetricDetailDialog({ summary, detail, loading, error, tab, datasetName, onTab, onClose, onEdit }: {

@@ -13,6 +13,7 @@ export type ReportOperationType =
   | 'BLOCK_CLEAR'
   | 'BLOCK_DELETE'
   | 'BLOCK_STICKY_UPDATE'
+  | 'BLOCK_CONFIG_UPDATE'
   | 'COMPONENT_MOVE'
   | 'COMPONENT_RESIZE'
   | 'COMPONENT_CREATE'

@@ -85,7 +85,8 @@ func TestProposalSchemaKeepsMappedDatasetsAsCreateDatasetEvidenceOnly(t *testing
 	if !slices.Contains(evidenceIDs, testDatasetID) {
 		t.Fatalf("mapped dataset missing from CREATE_DATASET evidence: %#v", evidenceIDs)
 	}
-	promptRequest, err := buildProviderRequest(validRequest(), retrieval)
+	request := validRequest()
+	promptRequest, err := buildProviderRequest(request, analyzeMetricIntent(request), retrieval)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +125,8 @@ func TestProposalSchemaPassesGenericOrchestrationValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	providerRequest, err := buildProviderRequest(validRequest(), RetrievalContext{Datasets: []AuthorizedDataset{}, Fields: []AuthorizedField{}, ExistingMetrics: []AuthorizedMetric{}})
+	request := validRequest()
+	providerRequest, err := buildProviderRequest(request, analyzeMetricIntent(request), RetrievalContext{Datasets: []AuthorizedDataset{}, Fields: []AuthorizedField{}, ExistingMetrics: []AuthorizedMetric{}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -65,3 +65,26 @@ func TestSourceFromInputRejectsJDBCAndPasswordInConfig(t *testing.T) {
 		t.Fatal("password in public config was accepted")
 	}
 }
+
+func TestSourceFromInputRejectsDangerousAndMalformedHosts(t *testing.T) {
+	manager := testCredentialManager(t, nil)
+	for _, host := range []string{
+		"127.0.0.1",
+		"169.254.169.254",
+		"metadata.google.internal",
+		"db.internal/path",
+		"user@db.internal",
+		"db..internal",
+	} {
+		input := dataSourceInput{
+			Code: "sales", Name: "Sales", Type: TypeMySQL,
+			Host: host, Port: 3306, Database: "sales",
+			Username: "reader", Password: "secret",
+		}
+		if _, err := sourceFromInput(
+			context.Background(), nil, manager, "tenant-1", "", input, false,
+		); err == nil {
+			t.Fatalf("host %q was accepted", host)
+		}
+	}
+}

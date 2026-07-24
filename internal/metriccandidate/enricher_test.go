@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,7 +15,9 @@ import (
 )
 
 type enrichmentInvokerStub struct {
-	err error
+	err         error
+	description string
+	inspect     func(enrichmentInput)
 }
 
 func (s enrichmentInvokerStub) Configured() bool { return true }
@@ -27,17 +30,36 @@ func (s enrichmentInvokerStub) Invoke(_ context.Context, invocation aiplatform.I
 	if err := json.Unmarshal([]byte(invocation.Request.Messages[1].Parts[0].Text), &input); err != nil {
 		return aiplatform.InvocationResult{}, err
 	}
+	if s.inspect != nil {
+		s.inspect(input)
+	}
 	output := enrichmentOutput{Items: make([]enrichmentItem, 0, len(input.Candidates))}
 	for _, candidate := range input.Candidates {
+		description := s.description
+		if description == "" {
+			description = "用于经营分析的指标说明"
+		}
 		output.Items = append(output.Items, enrichmentItem{
 			Fingerprint: candidate.Fingerprint, Name: candidate.Name + "指标",
-			Description: "用于经营分析的指标说明", Caliber: candidate.DeterministicRule,
+			Description: description, Caliber: candidate.DeterministicRule,
 			PeriodDescription: "按月", LineageSummary: "来自已发布数据集的逻辑字段",
 			Tags: []string{"销售", "月度", "经营分析"},
 		})
 	}
 	raw, _ := json.Marshal(output)
 	return aiplatform.InvocationResult{RequestID: "55555555-5555-4555-8555-555555555555", ProviderResult: aiplatform.ProviderResult{Content: raw}}, nil
+}
+
+type semanticContextLoaderStub struct {
+	loadFn func(context.Context, string, []SemanticContextRequest) ([]SemanticTableContext, error)
+}
+
+func (loader semanticContextLoaderStub) LoadMetricSemanticContext(
+	ctx context.Context,
+	tenantID string,
+	requests []SemanticContextRequest,
+) ([]SemanticTableContext, error) {
+	return loader.loadFn(ctx, tenantID, requests)
 }
 
 func TestEnricherImprovesWordingWithoutChangingMetricFacts(t *testing.T) {
@@ -86,6 +108,117 @@ func TestEnricherFallsBackToRuleSemantics(t *testing.T) {
 	for _, candidate := range result.Candidates {
 		if candidate.Semantic.Source != "RULE_FALLBACK" || candidate.Semantic.Caliber == "" || candidate.Semantic.Lineage.DatasetVersionID != version.ID {
 			t.Fatalf("fallback semantic metadata = %#v", candidate.Semantic)
+		}
+	}
+}
+
+func TestEnricherReceivesReviewedMetadataActualAggregationAndLockedUnit(t *testing.T) {
+	version := publishedDatasetVersion(t, monthlyPaymentsDocument())
+	base, err := Extract(version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader := semanticContextLoaderStub{loadFn: func(
+		_ context.Context,
+		tenantID string,
+		requests []SemanticContextRequest,
+	) ([]SemanticTableContext, error) {
+		if tenantID != testTenantID || len(requests) != 1 ||
+			requests[0].TableID != "44444444-4444-4444-8444-444444444444" {
+			t.Fatalf("context requests = (%q, %#v)", tenantID, requests)
+		}
+		return []SemanticTableContext{{
+			TableID: requests[0].TableID, Name: "订单支付事实表",
+			Description: "记录订单支付事实。",
+			Columns: []SemanticColumnContext{{
+				Code: "paid_at", Name: "支付完成时间", Description: "支付完成的精确时间点",
+			}},
+		}}, nil
+	}}
+	invoker := enrichmentInvokerStub{
+		description: "统计每位客户付款订单的数量。",
+		inspect: func(input enrichmentInput) {
+			if len(input.SourceTables) != 1 || input.SourceTables[0].Name != "订单支付事实表" {
+				t.Fatalf("source metadata missing: %#v", input.SourceTables)
+			}
+			found := false
+			for _, candidate := range input.Candidates {
+				if candidate.SourceFieldCode != "order_count" {
+					continue
+				}
+				found = true
+				if candidate.Aggregation != "COUNT_DISTINCT" || candidate.Unit != "笔" ||
+					candidate.SourceFieldName != "订单数量" {
+					t.Fatalf("locked candidate facts = %#v", candidate)
+				}
+			}
+			if !found {
+				t.Fatalf("order candidate missing: %#v", input.Candidates)
+			}
+		},
+	}
+	result, err := NewEnricher(invoker, time.Second, loader).Enrich(
+		context.Background(), testTenantID, testActorID, version, base,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range result.Candidates {
+		if candidate.Semantic.Source != "HYBRID" || candidate.Semantic.Description != "统计每位客户付款订单的数量。" {
+			t.Fatalf("semantic enrichment = %#v", candidate.Semantic)
+		}
+	}
+}
+
+func TestEnricherRejectsTechnicalDescriptionAndKeepsBusinessFallback(t *testing.T) {
+	version := publishedDatasetVersion(t, monthlyPaymentsDocument())
+	base, err := Extract(version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := NewEnricher(enrichmentInvokerStub{
+		description: "由数据集的 DAG 按 COUNT_DISTINCT 计算输出。",
+	}, time.Second).Enrich(context.Background(), testTenantID, testActorID, version, base)
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("error = %v", err)
+	}
+	for _, candidate := range result.Candidates {
+		if candidate.Semantic.Source != "RULE_FALLBACK" ||
+			strings.Contains(candidate.Semantic.Description, "DAG") ||
+			strings.Contains(candidate.Semantic.Description, "COUNT_DISTINCT") {
+			t.Fatalf("unprofessional wording escaped the quality gate: %#v", candidate.Semantic)
+		}
+	}
+}
+
+func TestEnricherBatchesEveryCandidateInsteadOfSkippingLargeDatasets(t *testing.T) {
+	version := publishedDatasetVersion(t, candidateDatasetDocument())
+	base, err := Extract(version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := base.Candidates[0]
+	base.Candidates = make([]CandidateDraft, maxEnrichmentCandidates+1)
+	for index := range base.Candidates {
+		base.Candidates[index] = template
+		base.Candidates[index].Fingerprint = fmt.Sprintf("%064x", index+1)
+	}
+	batchSizes := []int{}
+	invoker := enrichmentInvokerStub{inspect: func(input enrichmentInput) {
+		batchSizes = append(batchSizes, len(input.Candidates))
+	}}
+	result, err := NewEnricher(invoker, time.Second).Enrich(
+		context.Background(), testTenantID, testActorID, version, base,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(batchSizes, []int{maxEnrichmentCandidates, 1}) {
+		t.Fatalf("batch sizes = %v", batchSizes)
+	}
+	for index, candidate := range result.Candidates {
+		if candidate.Semantic.Source != "HYBRID" {
+			t.Fatalf("candidate %d was not enriched: %#v", index, candidate.Semantic)
 		}
 	}
 }

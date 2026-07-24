@@ -123,7 +123,11 @@ func TestPostgresRBACAndObjectPermissionMatrix(t *testing.T) {
 	}
 	var sourceID, tableID string
 	err = database.WithTenantTx(ctx, pool, tenantA, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.data_sources(tenant_id,code,name,source_type,secret_ref) VALUES($1,'asset-it','Asset IT','MYSQL','env://ASSET_IT') RETURNING id`, tenantA).Scan(&sourceID); err != nil {
+		var err error
+		sourceID, _, err = insertVersionedDataSourceTx(
+			ctx, tx, tenantA, "asset-it", "Asset IT", "MYSQL", "env://ASSET_IT", "DRAFT", "{}",
+		)
+		if err != nil {
 			return err
 		}
 		return tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(tenant_id,data_source_id,schema_name,table_name,table_type,structure_hash,last_sync_at) VALUES($1,$2,'sales','orders','TABLE','hash',now()) RETURNING id`, tenantA, sourceID).Scan(&tableID)

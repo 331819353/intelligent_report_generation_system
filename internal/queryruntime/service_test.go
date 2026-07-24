@@ -27,7 +27,11 @@ func (f fakeDatasets) Get(context.Context, string, string) (dataset.Record, erro
 	return f.record, nil
 }
 func (f fakeDatasets) GetVersion(context.Context, string, string, string) (dataset.VersionRecord, error) {
-	return dataset.VersionRecord{ID: f.record.DraftVersionID, DatasetID: f.record.ID, Status: "PUBLISHED", DSL: f.record.DSL, PlanHash: f.record.PlanHash}, nil
+	return dataset.VersionRecord{
+		ID: f.record.DraftVersionID, DatasetID: f.record.ID,
+		Status: "PUBLISHED", Layer: f.record.Layer,
+		DSL: f.record.DSL, PlanHash: f.record.PlanHash,
+	}, nil
 }
 func (f fakeDatasets) GetRevision(context.Context, string, string, string) (dataset.RevisionRecord, error) {
 	if f.revisionErr != nil {
@@ -98,20 +102,23 @@ func (p *recordingDraftPolicies) ValidateDefinitions(_ context.Context, tenantID
 }
 
 type fakeRuntimeStore struct {
-	mu                  sync.Mutex
-	resolved            ResolvedPlan
-	resolveCalls        int
-	resolveDocument     dataset.Document
-	resolveErr          error
-	resolveVersionCalls int
-	resolveVersionErr   error
-	resolvedDatasetID   string
-	resolvedVersionID   string
-	run                 RunRecord
-	status              string
-	error               string
-	warnings            []datasource.QueryWarning
-	stats               []datasource.QuerySourceStat
+	mu                          sync.Mutex
+	resolved                    ResolvedPlan
+	resolveCalls                int
+	resolveDocument             dataset.Document
+	resolveErr                  error
+	resolveVersionCalls         int
+	resolveVersionErr           error
+	resolveMaterializedCalls    int
+	resolveMaterializedDocument dataset.Document
+	resolveMaterializedErr      error
+	resolvedDatasetID           string
+	resolvedVersionID           string
+	run                         RunRecord
+	status                      string
+	error                       string
+	warnings                    []datasource.QueryWarning
+	stats                       []datasource.QuerySourceStat
 }
 
 func (f *fakeRuntimeStore) Resolve(_ context.Context, _ string, document dataset.Document) (ResolvedPlan, error) {
@@ -123,6 +130,12 @@ func (f *fakeRuntimeStore) ResolveVersion(_ context.Context, _, datasetID, versi
 	f.resolveVersionCalls++
 	f.resolvedDatasetID, f.resolvedVersionID = datasetID, versionID
 	return f.resolved, f.resolveVersionErr
+}
+func (f *fakeRuntimeStore) ResolveMaterializedVersion(_ context.Context, _, datasetID, versionID string, document dataset.Document) (ResolvedPlan, error) {
+	f.resolveMaterializedCalls++
+	f.resolvedDatasetID, f.resolvedVersionID = datasetID, versionID
+	f.resolveMaterializedDocument = document
+	return f.resolved, f.resolveMaterializedErr
 }
 func (f *fakeRuntimeStore) Start(_ context.Context, run RunRecord) error {
 	f.mu.Lock()
@@ -174,6 +187,35 @@ type fakeFederatedExecutor struct {
 	sources    map[string]datasource.Source
 	result     datasource.QueryResult
 	err        error
+}
+
+type fakeWarehouseExecutor struct {
+	called     bool
+	tenantID   string
+	document   dataset.Document
+	resolved   ResolvedPlan
+	parameters map[string]any
+	result     datasource.QueryResult
+	err        error
+}
+
+func (f *fakeWarehouseExecutor) Execute(
+	_ context.Context,
+	tenantID, _ string,
+	document dataset.Document,
+	resolved ResolvedPlan,
+	_ map[string]any,
+	_ policy.UserScope,
+	_ []policy.RowPolicy,
+	_ []policy.ColumnPolicy,
+	_ int,
+) (datasource.QueryResult, error) {
+	f.called, f.tenantID, f.document, f.resolved = true, tenantID, document, resolved
+	return f.result, f.err
+}
+
+func (*fakeWarehouseExecutor) Cancel(context.Context, string) (bool, error) {
+	return false, nil
 }
 
 func (f *fakeFederatedExecutor) Execute(_ context.Context, queryID string, _ dataset.Document, _ ResolvedPlan, sources map[string]datasource.Source, parameters map[string]any, _ policy.UserScope, _ []policy.RowPolicy, _ []policy.ColumnPolicy, _ int) (datasource.QueryResult, error) {
@@ -520,9 +562,9 @@ func TestPreviewVersionFailsWhenAtomicResolutionDetectsDependencyDrift(t *testin
 	}
 }
 
-func TestValidatePublicationRejectsDatasetNodeWithStablePath(t *testing.T) {
+func TestValidatePublicationExecutesDatasetNodeThroughGovernedWarehouse(t *testing.T) {
 	service, store := runtimeFixture(t, &fakeConnector{query: func(context.Context, string, []any, int) (datasource.QueryResult, error) {
-		t.Fatal("不支持的嵌套数据集节点不应进入查询执行")
+		t.Fatal("DATASET 节点不得回退到外部数据源 Connector")
 		return datasource.QueryResult{}, nil
 	}})
 	document, err := dataset.DecodeAndNormalize(storeDocument(t))
@@ -538,17 +580,46 @@ func TestValidatePublicationRejectsDatasetNodeWithStablePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	_, err = service.ValidatePublication(context.Background(), "tenant-1", "actor-1", dataset.PublicationCandidate{
-		DatasetID: "dataset-1", DraftVersionID: "draft-1", DSL: raw,
-	})
-	var validation *dataset.PublicationValidationError
-	if !errors.As(err, &validation) || len(validation.Issues) != 1 {
-		t.Fatalf("validation error=%v details=%#v", err, validation)
+	binding := ResolvedMaterialization{
+		NodeID: "orders", DatasetID: "upstream-dataset",
+		DatasetVersionID:  "22222222-2222-4222-8222-222222222222",
+		MaterializationID: "33333333-3333-4333-8333-333333333333",
+		Layer:             "DWD", PublishedSchema: "warehouse_published",
+		PublishedName: "dwd_t111111111111_d222222222222",
+		SchemaHash:    strings.Repeat("a", 64), SnapshotHash: strings.Repeat("b", 64),
 	}
-	issue := validation.Issues[0]
-	if issue.Path != "nodes[0]" || issue.Code != "PUBLISH_DATASET_NODE_UNSUPPORTED" || store.run.ID != "" {
-		t.Fatalf("issue=%#v run=%#v", issue, store.run)
+	store.resolved = ResolvedPlan{
+		Engine: ExecutionPostgreSQL,
+		Tables: map[string]querycompiler.TableRef{
+			"orders": {
+				NodeID: "orders", Schema: binding.PublishedSchema,
+				Name: binding.PublishedName,
+				Columns: map[string]bool{
+					"order_date": true, "order_amount": true,
+					"order_status": true,
+				},
+			},
+		},
+		Materializations: []ResolvedMaterialization{binding},
+	}
+	warehouse := &fakeWarehouseExecutor{result: datasource.QueryResult{
+		Columns: []string{"stat_month", "revenue"},
+		Rows:    [][]any{{"2026-01-01", 12}}, RowCount: 1,
+	}}
+	service.SetWarehouseExecutor(warehouse)
+
+	result, err := service.ValidatePublication(context.Background(), "tenant-1", "actor-1", dataset.PublicationCandidate{
+		DatasetID: "dataset-1", DraftVersionID: "draft-1", DSL: raw,
+		Parameters: map[string]any{"start_date": "2026-01-01"},
+	})
+	if err != nil || result.RowCount != 1 || !warehouse.called ||
+		store.run.ExecutionEngine != ExecutionPostgreSQL ||
+		len(store.run.Materializations) != 1 ||
+		store.run.Materializations[0] != binding {
+		t.Fatalf(
+			"result=%#v err=%v warehouse=%#v run=%#v",
+			result, err, warehouse, store.run,
+		)
 	}
 }
 

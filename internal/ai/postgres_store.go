@@ -260,7 +260,10 @@ func tenantPolicyAllowsPurpose(enabled bool, allowedPurposes []string, purpose s
 	if !enabled {
 		return false
 	}
-	return purpose == PurposeMetricAuthoring || containsPurpose(allowedPurposes, purpose)
+	// 指标起草与数据集标签建议都只产生待人工治理的提案；它们不会直接发布
+	// 指标或批准标签，因此沿用租户总 AI 开关而不静默扩张历史用途白名单。
+	return purpose == PurposeMetricAuthoring || purpose == PurposeDatasetTagSuggestion ||
+		containsPurpose(allowedPurposes, purpose)
 }
 
 // exceedsQuota 使用减法比较避免 used+reserved 在极端输入下发生整数溢出。

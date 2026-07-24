@@ -122,6 +122,7 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 			Name:        name,
 			Description: strings.TrimSpace(table.BusinessDescription),
 			Type:        "SINGLE_SOURCE",
+			Layer:       LayerODS,
 		},
 		Nodes: []Node{{
 			ID:            "node_1",
@@ -153,12 +154,14 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 			}(),
 		},
 		ExecutionPolicy: ExecutionPolicy{
-			Mode:            "REALTIME",
+			Mode:            "MATERIALIZED_PREFERRED",
 			TimeoutMS:       5000,
 			PreviewLimit:    200,
 			ResultLimit:     10000,
 			CacheTTLSeconds: 300,
-			Materialization: MaterializationPolicy{Enabled: false},
+			Materialization: MaterializationPolicy{
+				Enabled: true, RefreshMode: "ON_DEMAND",
+			},
 		},
 		Designer: map[string]any{
 			"version":       "1.0",
@@ -194,6 +197,14 @@ type mappedDatasetState struct {
 	ExactCreateCount     int
 	PendingApprovalCount int
 	MappedAfterDeletion  bool
+}
+
+type mappedDatasetPublicationFence struct {
+	VersionID                string
+	SourceDraftVersionID     string
+	SourceDraftRecordVersion int64
+	SchemaHash               string
+	PlanHash                 string
 }
 
 // EnsureMappedDatasetTx 在已有租户事务内幂等创建并默认发布映射表数据集。
@@ -346,23 +357,36 @@ func (s *PostgresStore) regenerateDeletedMappedDatasetTx(
 	if !state.Deleted || state.Status == "DISABLED" || state.DraftVersionID == "" || state.DraftRecordVersion < 1 {
 		return false, nil
 	}
+	publication, exists, err := loadMappedDatasetPublicationFenceTx(
+		ctx, tx, tenantID, state.ID, true,
+	)
+	if err != nil {
+		return false, err
+	}
+	if !exists || !state.canSystemAdvance(publication) {
+		// 删除不会授权系统丢弃用户已经保存或提交审批的草稿。只有当前草稿仍是
+		// 最近一次不可变发布所使用的精确修订时，重新映射才可恢复并发布。
+		return false, nil
+	}
 	var draftRecordVersion int64
 	if err := tx.QueryRow(ctx, `UPDATE platform.dataset_versions SET
-		dsl_json=$1,schema_hash=$2,logical_plan_json=$3,plan_hash=$4,
-		record_version=record_version+1,updated_by=$5
-		WHERE id=$6 AND dataset_id=$7 AND tenant_id=$8 AND status='DRAFT'
-		RETURNING record_version`, prepared.DSLJSON, prepared.DSLHash, prepared.LogicalPlanJSON,
-		prepared.PlanHash, actorID, state.DraftVersionID, state.ID, tenantID).Scan(&draftRecordVersion); err != nil {
+			layer=$1,dsl_json=$2,schema_hash=$3,logical_plan_json=$4,plan_hash=$5,
+			record_version=record_version+1,updated_by=$6
+			WHERE id=$7 AND dataset_id=$8 AND tenant_id=$9 AND status='DRAFT'
+			RETURNING record_version`, prepared.Document.Dataset.Layer, prepared.DSLJSON, prepared.DSLHash,
+		prepared.LogicalPlanJSON, prepared.PlanHash, actorID, state.DraftVersionID, state.ID,
+		tenantID).Scan(&draftRecordVersion); err != nil {
 		return false, err
 	}
 	var datasetVersion int64
 	if err := tx.QueryRow(ctx, `UPDATE platform.datasets SET
-		name=$1,description=$2,dataset_type=$3,status='DRAFT',current_published_version_id=NULL,
-		disabled_from_status=NULL,disabled_published_version_id=NULL,deleted_at=NULL,
-		version=version+1,updated_by=$4,updated_at=now()
-		WHERE id=$5 AND tenant_id=$6 AND origin_table_id=$7 AND deleted_at IS NOT NULL
-		RETURNING version`, prepared.Document.Dataset.Name, prepared.Document.Dataset.Description,
-		prepared.Document.Dataset.Type, actorID, state.ID, tenantID, table.ID).Scan(&datasetVersion); err != nil {
+			name=$1,description=$2,dataset_type=$3,layer=$4,status='DRAFT',current_published_version_id=NULL,
+			disabled_from_status=NULL,disabled_published_version_id=NULL,deleted_at=NULL,
+			version=version+1,updated_by=$5,updated_at=now()
+			WHERE id=$6 AND tenant_id=$7 AND origin_table_id=$8 AND deleted_at IS NOT NULL
+			RETURNING version`, prepared.Document.Dataset.Name, prepared.Document.Dataset.Description,
+		prepared.Document.Dataset.Type, prepared.Document.Dataset.Layer, actorID, state.ID, tenantID,
+		table.ID).Scan(&datasetVersion); err != nil {
 		return false, err
 	}
 	if err := replaceDerived(ctx, tx, tenantID, state.ID, state.DraftVersionID, prepared.Document, true); err != nil {
@@ -391,7 +415,13 @@ func (s *PostgresStore) regenerateDeletedMappedDatasetTx(
 		ExpectedDraftRecordVersion: draftRecordVersion, ExpectedDSLHash: prepared.DSLHash, Prepared: prepared,
 	}
 	var published VersionRecord
-	if err := s.publishTx(ctx, tx, tenantID, actorID, state.ID, plan, &published); err != nil {
+	if err := s.publishTx(
+		ctx, tx, tenantID, actorID, state.ID,
+		PublicationOriginSystemMappedRegenerate, plan, &published,
+	); err != nil {
+		return false, err
+	}
+	if err := s.enqueueMappedMaterializationTx(ctx, tx, tenantID, published); err != nil {
 		return false, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
@@ -420,37 +450,51 @@ func (s *PostgresStore) refreshMappedDatasetTx(
 	if state.Status != "PUBLISHED" || state.DraftVersionID == "" || table.MetadataVersion < 1 || table.StructureHash == "" {
 		return false, nil
 	}
-	var publishedVersionID, publishedDSLHash string
-	if err := tx.QueryRow(ctx, `SELECT version.id::text,version.schema_hash
-		FROM platform.datasets AS dataset
-		JOIN platform.dataset_versions AS version
-		  ON version.id=dataset.current_published_version_id
-		 AND version.dataset_id=dataset.id AND version.tenant_id=dataset.tenant_id
-		WHERE dataset.id=$1 AND dataset.tenant_id=$2 AND version.status='PUBLISHED'
-		FOR SHARE OF version`, state.ID, tenantID).Scan(&publishedVersionID, &publishedDSLHash); err != nil {
+	publication, exists, err := loadMappedDatasetPublicationFenceTx(
+		ctx, tx, tenantID, state.ID, false,
+	)
+	if err != nil {
 		return false, err
 	}
-	if publishedDSLHash == prepared.DSLHash {
-		if err := validateDependencySnapshotsTx(ctx, tx, publishedVersionID); err == nil {
+	if !exists || !state.canSystemAdvance(publication) {
+		// 自动刷新不是第二条人工发布旁路。草稿只要偏离当前发布来源修订，或已有
+		// 待审批申请，就保持草稿、发布指针、build 和审计事实完全不变。
+		return false, nil
+	}
+	if publication.SchemaHash == prepared.DSLHash {
+		if err := validateDependencySnapshotsTx(ctx, tx, publication.VersionID); err == nil {
+			var published VersionRecord
+			if err := scanVersionTx(ctx, tx, state.ID, publication.VersionID, &published); err != nil {
+				return false, err
+			}
+			// 启动对账也经过这里：若发布已提交而旧版本尚未登记 build，
+			// sink 会按冻结输入生成确定幂等键；已有任务则保持原 requested_by。
+			if err := s.enqueueMappedMaterializationTx(
+				ctx, tx, tenantID, published,
+			); err != nil {
+				return false, err
+			}
 			return false, nil
 		}
 	}
 
 	var draftRecordVersion int64
 	if err := tx.QueryRow(ctx, `UPDATE platform.dataset_versions SET
-		dsl_json=$1,schema_hash=$2,logical_plan_json=$3,plan_hash=$4,
-		record_version=record_version+1,updated_by=$5
-		WHERE id=$6 AND dataset_id=$7 AND tenant_id=$8 AND status='DRAFT'
-		RETURNING record_version`, prepared.DSLJSON, prepared.DSLHash, prepared.LogicalPlanJSON,
-		prepared.PlanHash, actorID, state.DraftVersionID, state.ID, tenantID).Scan(&draftRecordVersion); err != nil {
+			layer=$1,dsl_json=$2,schema_hash=$3,logical_plan_json=$4,plan_hash=$5,
+			record_version=record_version+1,updated_by=$6
+			WHERE id=$7 AND dataset_id=$8 AND tenant_id=$9 AND status='DRAFT'
+			RETURNING record_version`, prepared.Document.Dataset.Layer, prepared.DSLJSON, prepared.DSLHash,
+		prepared.LogicalPlanJSON, prepared.PlanHash, actorID, state.DraftVersionID, state.ID,
+		tenantID).Scan(&draftRecordVersion); err != nil {
 		return false, err
 	}
 	var datasetVersion int64
 	if err := tx.QueryRow(ctx, `UPDATE platform.datasets SET
-		name=$1,description=$2,dataset_type=$3,version=version+1,updated_by=$4,updated_at=now()
-		WHERE id=$5 AND tenant_id=$6 AND origin_table_id=$7 AND status='PUBLISHED'
-		RETURNING version`, prepared.Document.Dataset.Name, prepared.Document.Dataset.Description,
-		prepared.Document.Dataset.Type, actorID, state.ID, tenantID, table.ID).Scan(&datasetVersion); err != nil {
+			name=$1,description=$2,dataset_type=$3,layer=$4,version=version+1,updated_by=$5,updated_at=now()
+			WHERE id=$6 AND tenant_id=$7 AND origin_table_id=$8 AND status='PUBLISHED'
+			RETURNING version`, prepared.Document.Dataset.Name, prepared.Document.Dataset.Description,
+		prepared.Document.Dataset.Type, prepared.Document.Dataset.Layer, actorID, state.ID, tenantID,
+		table.ID).Scan(&datasetVersion); err != nil {
 		return false, err
 	}
 	if err := replaceDerived(ctx, tx, tenantID, state.ID, state.DraftVersionID, prepared.Document, true); err != nil {
@@ -483,7 +527,13 @@ func (s *PostgresStore) refreshMappedDatasetTx(
 		ExpectedDraftRecordVersion: draftRecordVersion, ExpectedDSLHash: prepared.DSLHash, Prepared: prepared,
 	}
 	var published VersionRecord
-	if err := s.publishTx(ctx, tx, tenantID, actorID, state.ID, plan, &published); err != nil {
+	if err := s.publishTx(
+		ctx, tx, tenantID, actorID, state.ID,
+		PublicationOriginSystemMappedRefresh, plan, &published,
+	); err != nil {
+		return false, err
+	}
+	if err := s.enqueueMappedMaterializationTx(ctx, tx, tenantID, published); err != nil {
 		return false, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
@@ -493,7 +543,7 @@ func (s *PostgresStore) refreshMappedDatasetTx(
 			'metadataVersion',$5::bigint,'structureHash',$6::text,'previousPublishedVersionId',$7::text,
 			'publishedVersionId',$8::text,'versionNo',$9::int,'dslHash',$10::text,'planHash',$11::text))`,
 		tenantID, actorID, state.ID, table.ID, table.MetadataVersion, table.StructureHash,
-		publishedVersionID, published.ID, published.VersionNo, published.DSLHash, published.PlanHash); err != nil {
+		publication.VersionID, published.ID, published.VersionNo, published.DSLHash, published.PlanHash); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -513,8 +563,6 @@ func loadMappedDatasetStateTx(ctx context.Context, tx pgx.Tx, tenantID, tableID 
 		   AND revision.operation_type='CREATE' AND revision.draft_version_id=draft.id
 		   AND revision.draft_record_version=draft.record_version
 		   AND revision.schema_hash=draft.schema_hash AND revision.plan_hash=draft.plan_hash),
-		(SELECT count(*) FROM platform.dataset_publication_requests AS request
-		 WHERE request.dataset_id=dataset.id AND request.tenant_id=dataset.tenant_id AND request.status='PENDING'),
 		EXISTS(SELECT 1 FROM platform.ai_metadata_jobs AS job
 		 WHERE job.tenant_id=dataset.tenant_id AND job.table_id=dataset.origin_table_id
 		   AND job.status='SUCCEEDED' AND dataset.deleted_at IS NOT NULL
@@ -527,13 +575,77 @@ func loadMappedDatasetStateTx(ctx context.Context, tx pgx.Tx, tenantID, tableID 
 		&state.ID, &state.Deleted, &state.Status, &state.Version,
 		&state.DraftVersionID, &state.DraftVersionNo, &state.DraftRecordVersion,
 		&state.DSLHash, &state.PlanHash, &state.PublishedCount,
-		&state.RevisionCount, &state.ExactCreateCount, &state.PendingApprovalCount,
-		&state.MappedAfterDeletion,
+		&state.RevisionCount, &state.ExactCreateCount, &state.MappedAfterDeletion,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return mappedDatasetState{}, false, nil
 	}
-	return state, err == nil, err
+	if err != nil {
+		return mappedDatasetState{}, false, err
+	}
+	// dataset/draft 已由上一条语句 FOR UPDATE。审批提交需要 FOR SHARE 同一组行，
+	// 因此此处的新 READ COMMITTED 语句既能看见锁等待期间刚提交的申请，也能阻止
+	// 新申请在本事务完成资格复核后插入，避免单语句旧快照漏掉 PENDING。
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.dataset_publication_requests
+		WHERE dataset_id=$1 AND tenant_id=$2 AND status='PENDING'`,
+		state.ID, tenantID).Scan(&state.PendingApprovalCount); err != nil {
+		return mappedDatasetState{}, false, err
+	}
+	return state, true, nil
+}
+
+func loadMappedDatasetPublicationFenceTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, datasetID string,
+	deleted bool,
+) (fence mappedDatasetPublicationFence, exists bool, err error) {
+	query := `SELECT version.id::text,version.source_draft_version_id::text,
+			version.source_draft_record_version,version.schema_hash,version.plan_hash
+		FROM platform.datasets AS dataset
+		JOIN platform.dataset_versions AS version
+		  ON version.id=dataset.current_published_version_id
+		 AND version.dataset_id=dataset.id AND version.tenant_id=dataset.tenant_id
+			WHERE dataset.id=$1 AND dataset.tenant_id=$2 AND dataset.deleted_at IS NULL
+			  AND version.status='PUBLISHED'
+			  AND version.publication_origin IN (
+				'SYSTEM_MAPPED_DEFAULT',
+				'SYSTEM_MAPPED_REFRESH',
+				'SYSTEM_MAPPED_REGENERATE'
+			  )
+			FOR SHARE OF version`
+	if deleted {
+		// 软删除会清空 current_published_version_id 并把历史发布版本标为
+		// DEPRECATED；最近版本是唯一可用于证明草稿仍未被人工修改的基线。
+		query = `SELECT version.id::text,version.source_draft_version_id::text,
+				version.source_draft_record_version,version.schema_hash,version.plan_hash
+			FROM platform.dataset_versions AS version
+			WHERE version.dataset_id=$1 AND version.tenant_id=$2
+			  AND version.status IN ('PUBLISHED','STALE','DEPRECATED')
+			  AND version.version_no=(
+				SELECT max(latest.version_no)
+				FROM platform.dataset_versions AS latest
+				WHERE latest.dataset_id=version.dataset_id
+				  AND latest.tenant_id=version.tenant_id
+					  AND latest.status IN ('PUBLISHED','STALE','DEPRECATED')
+				  )
+				  AND version.publication_origin IN (
+					'SYSTEM_MAPPED_DEFAULT',
+					'SYSTEM_MAPPED_REFRESH',
+					'SYSTEM_MAPPED_REGENERATE'
+				  )
+			ORDER BY version.version_no DESC,version.id DESC
+			LIMIT 1
+			FOR SHARE OF version`
+	}
+	err = tx.QueryRow(ctx, query, datasetID, tenantID).Scan(
+		&fence.VersionID, &fence.SourceDraftVersionID, &fence.SourceDraftRecordVersion,
+		&fence.SchemaHash, &fence.PlanHash,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return mappedDatasetPublicationFence{}, false, nil
+	}
+	return fence, err == nil, err
 }
 
 func mappedDatasetDisplayName(table MappedDatasetTable) string {
@@ -571,6 +683,16 @@ func (state mappedDatasetState) canDefaultPublish(prepared Prepared) bool {
 		state.PendingApprovalCount == 0 && state.DSLHash == prepared.DSLHash && state.PlanHash == prepared.PlanHash
 }
 
+func (state mappedDatasetState) canSystemAdvance(publication mappedDatasetPublicationFence) bool {
+	return state.PendingApprovalCount == 0 &&
+		state.DraftVersionID != "" &&
+		state.DraftVersionID == publication.SourceDraftVersionID &&
+		state.DraftRecordVersion > 0 &&
+		state.DraftRecordVersion == publication.SourceDraftRecordVersion &&
+		state.DSLHash != "" && state.DSLHash == publication.SchemaHash &&
+		state.PlanHash != "" && state.PlanHash == publication.PlanHash
+}
+
 // publishMappedDatasetDefaultTx 是人工审批发布边界之外唯一允许移动发布指针的系统路径。
 // 它只接受 canDefaultPublish 验证过的初始映射草稿，并用额外审计明确记录系统来源。
 func (s *PostgresStore) publishMappedDatasetDefaultTx(
@@ -596,7 +718,13 @@ func (s *PostgresStore) publishMappedDatasetDefaultTx(
 		Prepared: prepared,
 	}
 	var published VersionRecord
-	if err := s.publishTx(ctx, tx, tenantID, actorID, state.ID, plan, &published); err != nil {
+	if err := s.publishTx(
+		ctx, tx, tenantID, actorID, state.ID,
+		PublicationOriginSystemMappedDefault, plan, &published,
+	); err != nil {
+		return false, err
+	}
+	if err := s.enqueueMappedMaterializationTx(ctx, tx, tenantID, published); err != nil {
 		return false, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
@@ -609,6 +737,24 @@ func (s *PostgresStore) publishMappedDatasetDefaultTx(
 		return false, err
 	}
 	return true, nil
+}
+
+func (s *PostgresStore) enqueueMappedMaterializationTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID string,
+	published VersionRecord,
+) error {
+	if s.mappedPublicationSink == nil {
+		return errors.New("mapped dataset materialization commit sink is not configured")
+	}
+	requestedBy := strings.TrimSpace(published.PublishedBy)
+	if _, err := uuid.Parse(requestedBy); err != nil {
+		return errors.New("mapped dataset published version has no valid publisher")
+	}
+	return s.mappedPublicationSink.EnqueueMappedDatasetMaterializationTx(
+		ctx, tx, tenantID, requestedBy, published,
+	)
 }
 
 func mappedDatasetFieldRole(column MappedDatasetColumn) string {

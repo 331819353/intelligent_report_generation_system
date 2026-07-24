@@ -32,6 +32,14 @@ type FederatedExecutor interface {
 	Cancel(context.Context, string) (bool, error)
 }
 
+// WarehouseExecutor executes only a server-resolved PostgreSQL document. The
+// boundary deliberately accepts structured DSL plus trusted relation bindings,
+// never caller-authored SQL or physical relation names.
+type WarehouseExecutor interface {
+	Execute(context.Context, string, string, dataset.Document, ResolvedPlan, map[string]any, policy.UserScope, []policy.RowPolicy, []policy.ColumnPolicy, int) (datasource.QueryResult, error)
+	Cancel(context.Context, string) (bool, error)
+}
+
 // DatasetStore 读取当前草稿或精确发布版本定义；精确版本的依赖复核由物理解析事务完成。
 type DatasetStore interface {
 	Get(context.Context, string, string) (dataset.Record, error)
@@ -53,12 +61,19 @@ type PolicyStore interface {
 
 // ResolvedPlan 是控制库白名单解析后的单数据源物理计划。
 type ResolvedPlan struct {
-	SourceID      string
-	SourceType    datasource.Type
-	FileVersionID string
-	Tables        map[string]querycompiler.TableRef
-	Nodes         map[string]ResolvedNode
+	Engine           string
+	SourceID         string
+	SourceType       datasource.Type
+	FileVersionID    string
+	Tables           map[string]querycompiler.TableRef
+	Nodes            map[string]ResolvedNode
+	Materializations []ResolvedMaterialization
 }
+
+const (
+	ExecutionSource     = "SOURCE"
+	ExecutionPostgreSQL = "POSTGRES"
+)
 
 // ResolvedNode 固定一个 DSL 节点的可信物理源、版本和数据水位。
 type ResolvedNode struct {
@@ -66,6 +81,21 @@ type ResolvedNode struct {
 	SourceType                                 datasource.Type
 	SourceVersion                              int64
 	Table                                      querycompiler.TableRef
+}
+
+// ResolvedMaterialization freezes the exact ACTIVE materialization metadata
+// selected for one logical DATASET node. The executor revalidates this snapshot
+// under tenant RLS immediately before querying the stable published view.
+type ResolvedMaterialization struct {
+	NodeID            string
+	DatasetID         string
+	DatasetVersionID  string
+	MaterializationID string
+	Layer             string
+	PublishedSchema   string
+	PublishedName     string
+	SchemaHash        string
+	SnapshotHash      string
 }
 
 // RunSourceRecord 保存一次查询所触达的节点来源，不包含连接凭据。
@@ -80,15 +110,18 @@ type RunRecord struct {
 	ID, TenantID, DatasetID, DatasetVersionID, ActorID, SourceID string
 	CandidateCode                                                string
 	MetricID, MetricVersionID                                    string
+	ExecutionEngine                                              string
 	RunType                                                      string
 	PlanHash, ParameterHash                                      string
 	Sources                                                      []RunSourceRecord
+	Materializations                                             []ResolvedMaterialization
 }
 
 // RuntimeStore 解析物理白名单并持久化可审计的查询生命周期。
 type RuntimeStore interface {
 	Resolve(context.Context, string, dataset.Document) (ResolvedPlan, error)
 	ResolveVersion(context.Context, string, string, string, dataset.Document) (ResolvedPlan, error)
+	ResolveMaterializedVersion(context.Context, string, string, string, dataset.Document) (ResolvedPlan, error)
 	Start(context.Context, RunRecord) error
 	Finish(context.Context, string, string, string, int, int64, string, []datasource.QueryWarning, []datasource.QuerySourceStat) error
 	CancellableSources(context.Context, string, string, string, string) ([]RunSourceRecord, error)

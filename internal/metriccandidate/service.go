@@ -2,6 +2,7 @@ package metriccandidate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -11,7 +12,7 @@ import (
 	"intelligent-report-generation-system/internal/metric"
 )
 
-// Service 编排候选读取、人工拒绝及“接受后创建草稿”的安全边界。
+// Service 编排候选读取、人工拒绝及“接受后创建或迭代草稿”的安全边界。
 type Service struct {
 	store   Store
 	metrics MetricCreator
@@ -61,13 +62,17 @@ func (s *Service) Accept(ctx context.Context, tenantID, actorID, id string, inpu
 	if candidate.Status != CandidateStatusAccepted && candidate.Version != input.ExpectedVersion {
 		return AcceptResult{}, ErrConflict
 	}
-	prepared, err := metric.Prepare(candidate.ProposedDefinition)
-	if err != nil || prepared.Definition.DatasetID != candidate.DatasetID ||
-		prepared.Definition.DatasetVersionID != candidate.DatasetVersionID ||
-		prepared.Definition.Metric.Code != candidate.Code || prepared.Definition.Metric.Name != candidate.Name {
+	enrichedDefinition, err := acceptedCandidateDefinition(candidate)
+	if err != nil {
 		return AcceptResult{}, ErrInvalidRequest
 	}
-	record, err := s.metrics.CreateFromCandidate(ctx, tenantID, actorID, candidate.ID, input.ExpectedVersion, metric.CreateInput{Definition: candidate.ProposedDefinition})
+	prepared, err := metric.Prepare(enrichedDefinition)
+	if err != nil || prepared.Definition.DatasetID != candidate.DatasetID ||
+		prepared.Definition.DatasetVersionID != candidate.DatasetVersionID ||
+		prepared.Definition.Metric.Code != candidate.Code {
+		return AcceptResult{}, ErrInvalidRequest
+	}
+	record, err := s.metrics.CreateFromCandidate(ctx, tenantID, actorID, candidate.ID, input.ExpectedVersion, metric.CreateInput{Definition: enrichedDefinition})
 	if err != nil {
 		if errors.Is(err, metric.ErrOriginCandidateConflict) {
 			return AcceptResult{}, ErrConflict
@@ -85,6 +90,29 @@ func (s *Service) Accept(ctx context.Context, tenantID, actorID, id string, inpu
 		return AcceptResult{}, ErrConflict
 	}
 	return AcceptResult{Candidate: accepted, Metric: record}, nil
+}
+
+func acceptedCandidateDefinition(candidate Candidate) (json.RawMessage, error) {
+	var definition metric.Definition
+	decoder := json.NewDecoder(strings.NewReader(string(candidate.ProposedDefinition)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&definition); err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(candidate.Semantic.Name)
+	if name == "" {
+		name = strings.TrimSpace(candidate.Name)
+	}
+	description := strings.TrimSpace(candidate.Semantic.Description)
+	if description == "" {
+		description = strings.TrimSpace(candidate.Description)
+	}
+	if name == "" || description == "" {
+		return nil, ErrInvalidRequest
+	}
+	definition.Metric.Name = name
+	definition.Metric.Description = description
+	return json.Marshal(definition)
 }
 
 func validCandidateStatusFilter(value string) bool {
@@ -144,25 +172,37 @@ func (w *Worker) ProcessNext(ctx context.Context, tenantID, workerID string, lea
 	if err != nil || claim == nil {
 		return false, err
 	}
-	loaded, err := w.store.LoadExactDatasetVersion(ctx, *claim)
-	version := loaded.Version
-	if err == nil {
-		var result ExtractionResult
-		result, err = Extract(version)
+	var result ExtractionResult
+	if len(claim.PreparedResult) > 0 && string(claim.PreparedResult) != "null" {
+		err = json.Unmarshal(claim.PreparedResult, &result)
+		if err == nil && (result.DatasetID != claim.DatasetID ||
+			result.DatasetVersionID != claim.DatasetVersionID || result.DSLHash != claim.DSLHash) {
+			err = ErrInvalidRequest
+		}
 		if err == nil {
-			if loaded.DependencyUnavailable {
-				result = blockUnavailableDatasetCandidates(result)
-			}
-			if w.enricher != nil {
-				var enrichmentErr error
-				result, enrichmentErr = w.enricher.Enrich(ctx, claim.TenantID, claim.RequestedBy, version, result)
-				if enrichmentErr != nil {
-					result.Warnings = append(result.Warnings, "LLM 语义补全暂不可用，本次已使用规则生成的口径、血缘和标签，后续可重试补全。")
-				}
-			} else {
-				result = attachDefaultSemantics(version, result)
-			}
 			err = w.store.FinishJob(ctx, *claim, workerID, result)
+		}
+	} else {
+		var loaded LoadedDatasetVersion
+		loaded, err = w.store.LoadExactDatasetVersion(ctx, *claim)
+		version := loaded.Version
+		if err == nil {
+			result, err = Extract(version)
+			if err == nil {
+				if loaded.DependencyUnavailable {
+					result = blockUnavailableDatasetCandidates(result)
+				}
+				if w.enricher != nil {
+					var enrichmentErr error
+					result, enrichmentErr = w.enricher.Enrich(ctx, claim.TenantID, claim.RequestedBy, version, result)
+					if enrichmentErr != nil {
+						result.Warnings = append(result.Warnings, "LLM 语义补全暂不可用，本次已使用规则生成的口径、血缘和标签，后续可重试补全。")
+					}
+				} else {
+					result = attachDefaultSemantics(version, result)
+				}
+				err = w.store.FinishJob(ctx, *claim, workerID, result)
+			}
 		}
 	}
 	if err == nil {

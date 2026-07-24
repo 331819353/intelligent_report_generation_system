@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -42,6 +43,11 @@ func TestBuildMappedDatasetDocumentCreatesDirectSingleTableGraph(t *testing.T) {
 	}
 	if len(document.Joins) != 0 || len(document.PreAggregations) != 0 || len(document.GroupBy) != 0 {
 		t.Fatalf("default mapped dataset contains an intermediate component: joins=%#v groups=%#v groupBy=%#v", document.Joins, document.PreAggregations, document.GroupBy)
+	}
+	if document.ExecutionPolicy.Mode != "MATERIALIZED_PREFERRED" ||
+		!document.ExecutionPolicy.Materialization.Enabled ||
+		document.ExecutionPolicy.Materialization.RefreshMode != "ON_DEMAND" {
+		t.Fatalf("mapped ODS materialization policy = %#v", document.ExecutionPolicy)
 	}
 	if len(document.Fields) != len(columns) {
 		t.Fatalf("fields = %#v", document.Fields)
@@ -238,6 +244,79 @@ func TestMappedDatasetStateDefaultPublicationRequiresPristineUnpublishedDraft(t 
 			test.mutate(&candidate)
 			if candidate.canDefaultPublish(prepared) {
 				t.Fatalf("unsafe mapped dataset remained eligible: %#v", candidate)
+			}
+		})
+	}
+}
+
+func TestMappedDatasetStateSystemAdvanceRequiresExactPublishedDraft(t *testing.T) {
+	state := mappedDatasetState{
+		DraftVersionID:       "11111111-1111-4111-8111-111111111111",
+		DraftRecordVersion:   7,
+		DSLHash:              strings.Repeat("a", 64),
+		PlanHash:             strings.Repeat("b", 64),
+		PendingApprovalCount: 0,
+	}
+	publication := mappedDatasetPublicationFence{
+		VersionID:                "22222222-2222-4222-8222-222222222222",
+		SourceDraftVersionID:     state.DraftVersionID,
+		SourceDraftRecordVersion: state.DraftRecordVersion,
+		SchemaHash:               state.DSLHash,
+		PlanHash:                 state.PlanHash,
+	}
+	if !state.canSystemAdvance(publication) {
+		t.Fatalf("exact published source revision was not eligible: state=%#v publication=%#v", state, publication)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*mappedDatasetState, *mappedDatasetPublicationFence)
+	}{
+		{
+			name: "草稿身份已变化",
+			mutate: func(state *mappedDatasetState, _ *mappedDatasetPublicationFence) {
+				state.DraftVersionID = "33333333-3333-4333-8333-333333333333"
+			},
+		},
+		{
+			name: "草稿记录已变化",
+			mutate: func(state *mappedDatasetState, _ *mappedDatasetPublicationFence) {
+				state.DraftRecordVersion++
+			},
+		},
+		{
+			name: "草稿结构已变化",
+			mutate: func(state *mappedDatasetState, _ *mappedDatasetPublicationFence) {
+				state.DSLHash = strings.Repeat("c", 64)
+			},
+		},
+		{
+			name: "草稿计划已变化",
+			mutate: func(state *mappedDatasetState, _ *mappedDatasetPublicationFence) {
+				state.PlanHash = strings.Repeat("d", 64)
+			},
+		},
+		{
+			name: "存在待审批申请",
+			mutate: func(state *mappedDatasetState, _ *mappedDatasetPublicationFence) {
+				state.PendingApprovalCount = 1
+			},
+		},
+		{
+			name: "发布来源草稿缺失",
+			mutate: func(_ *mappedDatasetState, publication *mappedDatasetPublicationFence) {
+				publication.SourceDraftVersionID = ""
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidateState := state
+			candidatePublication := publication
+			test.mutate(&candidateState, &candidatePublication)
+			if candidateState.canSystemAdvance(candidatePublication) {
+				t.Fatalf("unsafe system advance remained eligible: state=%#v publication=%#v",
+					candidateState, candidatePublication)
 			}
 		})
 	}

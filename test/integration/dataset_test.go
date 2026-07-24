@@ -15,10 +15,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	aiplatform "intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/dataset"
+	"intelligent-report-generation-system/internal/datasettagsuggestion"
 	"intelligent-report-generation-system/internal/datasource"
 	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/queryruntime"
+	"intelligent-report-generation-system/internal/semanticmanagement"
 )
 
 func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
@@ -51,7 +54,10 @@ func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.users(tenant_id,email,display_name,password_hash) VALUES($1,$2,'dataset second tester','integration-hash') RETURNING id`, tenantID, "dataset-second-"+suffix+"@it.test").Scan(&secondActorID); err != nil {
 			return err
 		}
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.data_sources(tenant_id,code,name,source_type,secret_ref,status,last_synced_at) VALUES($1,'orders','Orders','MYSQL','env://DATASET_IT','ACTIVE',now()) RETURNING id`, tenantID).Scan(&sourceID); err != nil {
+		sourceID, _, err = insertVersionedDataSourceTx(
+			ctx, tx, tenantID, "orders", "Orders", "MYSQL", "env://DATASET_IT", "ACTIVE", "{}",
+		)
+		if err != nil {
 			return err
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(tenant_id,data_source_id,schema_name,table_name,table_type,structure_hash,last_sync_at) VALUES($1,$2,'sales','orders','TABLE',repeat('1',64),now()) RETURNING id`, tenantID, sourceID).Scan(&tableID); err != nil {
@@ -62,7 +68,11 @@ func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
 				return err
 			}
 		}
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.data_sources(tenant_id,code,name,source_type,secret_ref,status,last_synced_at) VALUES($1,'customers','Customers','ORACLE','env://DATASET_ORACLE_IT','ACTIVE',now()) RETURNING id`, tenantID).Scan(&customerSourceID); err != nil {
+		customerSourceID, _, err = insertVersionedDataSourceTx(
+			ctx, tx, tenantID, "customers", "Customers", "ORACLE",
+			"env://DATASET_ORACLE_IT", "ACTIVE", "{}",
+		)
+		if err != nil {
 			return err
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(tenant_id,data_source_id,schema_name,table_name,table_type,structure_hash,last_sync_at) VALUES($1,$2,'crm','customers','TABLE',repeat('2',64),now()) RETURNING id`, tenantID, customerSourceID).Scan(&customerTableID); err != nil {
@@ -78,7 +88,11 @@ func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw := datasetExampleForAssets(t, sourceID, tableID)
+	attestAndPublishDataSourceFixture(t, ctx, pool, tenantID, actorID, sourceID)
+	attestAndPublishDataSourceFixture(
+		t, ctx, pool, tenantID, actorID, customerSourceID,
+	)
+	raw := datasetODSExampleForAssets(t, sourceID, tableID)
 	validator := &publicationValidatorStub{result: dataset.PreviewResult{
 		QueryID: "3cbbad54-8ee8-49b8-881c-13e1c7da2a13", Columns: []string{"stat_month", "valid_order_amount"},
 		Rows: [][]any{{"2026-01", 100}}, RowCount: 1, DurationMS: 3,
@@ -194,6 +208,10 @@ func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
 	// 跨源解析必须为每个节点固定可信的物理表、源版本和同步水位。
 	crossDocument := document
 	crossDocument.Dataset.Type = "CROSS_SOURCE"
+	// 本段只验证迁移前“物理表直连”草稿的兼容读取与审计，因此刻意保留为
+	// 未声明 layer 的历史正文。新建的显式 DWD 必须走 ODS DATASET 上游，
+	// 严格分层合同由下方独立的 ODS -> DWD 发布用例覆盖。
+	crossDocument.Dataset.Layer = ""
 	crossDocument.Nodes = append(append([]dataset.Node(nil), document.Nodes...), dataset.Node{
 		ID: "customers", Type: "TABLE", DataSourceID: customerSourceID, TableID: customerTableID, Alias: "c",
 		Projection: []string{"customer_id", "customer_name"}, SourceFilters: []dataset.SourceFilter{},
@@ -357,8 +375,9 @@ func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
 		t.Fatalf("dataset after publish=%#v", afterPublish)
 	}
 	var persistedDatasetStatus, persistedVersionStatus, persistedPointer, persistedSourceHash, persistedSourcePlanHash string
+	var tagJobStatus, tagJobSchemaHash, tagJobLayer, tagJobPromptVersion, tagJobSourceSnapshot string
 	var persistedDatasetVersion int64
-	var persistedDraftVersionNo, publishedFields, publishedParameters, publishedDependencies, idempotencyRows, publishAudits int
+	var persistedDraftVersionNo, publishedFields, publishedParameters, publishedDependencies, idempotencyRows, publishAudits, tagJobCount int
 	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `SELECT d.status,d.version,d.current_published_version_id::text,draft.version_no,published.status
 			FROM platform.datasets d
@@ -380,12 +399,26 @@ func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.dataset_publish_idempotency WHERE dataset_id::text=$1 AND idempotency_key=$2 AND published_version_id::text=$3`, created.ID, publishKey, published.ID).Scan(&idempotencyRows); err != nil {
 			return err
 		}
+		if err := tx.QueryRow(ctx, `SELECT count(*)::int,min(status),min(schema_hash),min(layer),
+				min(prompt_version),min(source_version_snapshot::text)
+				FROM platform.dataset_tag_suggestion_jobs
+				WHERE dataset_id::text=$1 AND dataset_version_id::text=$2`,
+			created.ID, published.ID,
+		).Scan(
+			&tagJobCount, &tagJobStatus, &tagJobSchemaHash, &tagJobLayer,
+			&tagJobPromptVersion, &tagJobSourceSnapshot,
+		); err != nil {
+			return err
+		}
 		return tx.QueryRow(ctx, `SELECT count(*) FROM platform.audit_logs WHERE resource_type='DATASET' AND resource_id=$1 AND action='PUBLISH'`, created.ID).Scan(&publishAudits)
 	})
 	if err != nil || persistedDatasetStatus != "PUBLISHED" || persistedVersionStatus != "PUBLISHED" ||
 		persistedDatasetVersion != afterPublish.Version || persistedPointer != published.ID || persistedDraftVersionNo != 2 ||
 		publishedFields != 2 || publishedParameters != 1 || publishedDependencies != 1 ||
-		persistedSourceHash != strings.Repeat("1", 64) || persistedSourcePlanHash != "" || idempotencyRows != 1 || publishAudits != 1 {
+		persistedSourceHash != strings.Repeat("1", 64) || persistedSourcePlanHash != "" || idempotencyRows != 1 || publishAudits != 1 ||
+		tagJobCount != 1 || tagJobStatus != "PENDING" || tagJobSchemaHash != published.DSLHash ||
+		tagJobLayer != "ODS" || tagJobPromptVersion != datasettagsuggestion.PromptVersion ||
+		!strings.Contains(tagJobSourceSnapshot, sourceID) {
 		t.Fatalf("published transaction dataset=%s/%d pointer=%s draft_no=%d version=%s indexes=%d/%d/%d dependency=%s/%s idempotency=%d audits=%d err=%v",
 			persistedDatasetStatus, persistedDatasetVersion, persistedPointer, persistedDraftVersionNo, persistedVersionStatus,
 			publishedFields, publishedParameters, publishedDependencies, persistedSourceHash, persistedSourcePlanHash, idempotencyRows, publishAudits, err)
@@ -419,6 +452,14 @@ func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
 	if err != nil || versionTotal != 1 || len(versions) != 1 || versions[0].ID != published.ID || versions[0].VersionNo != 1 {
 		t.Fatalf("ListVersions() versions=%#v total=%d err=%v", versions, versionTotal, err)
 	}
+	tagSuggestionStore := datasettagsuggestion.NewPostgresStore(pool)
+	tagSuggestionClaim, err := tagSuggestionStore.ClaimNext(
+		ctx, tenantID, "dataset-integration-tag-worker", 10*time.Minute,
+	)
+	if err != nil || tagSuggestionClaim == nil ||
+		tagSuggestionClaim.DatasetVersionID != published.ID {
+		t.Fatalf("claim published dataset tag job=%+v err=%v", tagSuggestionClaim, err)
+	}
 
 	// 占用统计只返回聚合数量：同一报告的多条 JSON 路径按报告去重，下游草稿和发布版本分别计数。
 	downstreamValidator := &publicationValidatorStub{result: dataset.PreviewResult{QueryID: uuid.NewString()}}
@@ -435,6 +476,7 @@ func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
 			VALUES($1,'USER',$2,'DATASET',$3,'PUBLISH',$2)`, tenantID, actorID, downstream.ID); err != nil {
 			return err
 		}
+
 		var reportID string
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.reports(tenant_id,code,name,report_type,created_by,updated_by)
 			VALUES($1,$2,'数据集占用测试报告','REPORT',$3,$3) RETURNING id::text`, tenantID, "dataset-usage-"+suffix, actorID).Scan(&reportID); err != nil {
@@ -561,6 +603,164 @@ func TestDatasetDraftPersistenceAndTenantIsolation(t *testing.T) {
 	}
 	if validator.calls != 2 {
 		t.Fatalf("publication validator calls=%d, want 2", validator.calls)
+	}
+	if _, err := tagSuggestionStore.LoadInput(
+		ctx, *tagSuggestionClaim, "dataset-integration-tag-worker",
+	); !errors.Is(err, datasettagsuggestion.ErrSubjectChanged) {
+		t.Fatalf("superseded published version tag input error=%v", err)
+	}
+	if err := tagSuggestionStore.Skip(
+		ctx, *tagSuggestionClaim, "dataset-integration-tag-worker", "SUBJECT_CHANGED",
+	); err != nil {
+		t.Fatalf("skip superseded tag job: %v", err)
+	}
+	var oldTagJobStatus string
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT status
+			FROM platform.dataset_tag_suggestion_jobs WHERE id=$1`,
+			tagSuggestionClaim.ID,
+		).Scan(&oldTagJobStatus)
+	})
+	if err != nil || oldTagJobStatus != "SKIPPED" {
+		t.Fatalf("old tag job status=%q err=%v", oldTagJobStatus, err)
+	}
+	tagID := uuid.NewString()
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE platform.ai_tenant_policies
+			SET enabled=true WHERE tenant_id=$1`, tenantID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO platform.semantic_tags(
+			id,tenant_id,code,name,description,category,governance,status,
+			created_by,updated_by
+		) VALUES(
+			$1,$2,'order_detail_fact','订单明细事实表',
+			'保存订单粒度业务事实','TABLE_FUNCTION','CONTROLLED','ACTIVE',$3,$3
+		)`, tagID, tenantID, actorID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("prepare controlled taxonomy: %v", err)
+	}
+	aiService, err := aiplatform.NewService(
+		aiplatform.NewPostgresStore(pool),
+		&datasetTagSuggestionProvider{tagID: tagID},
+		aiplatform.ServiceOptions{
+			Timeout: time.Second, AttemptTimeout: time.Second,
+			MaxAttempts: 1, BaseRetryDelay: time.Millisecond,
+			MaxRetryDelay: time.Millisecond, MaxInputBytes: 256 << 10,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tagWorker := datasettagsuggestion.NewWorker(
+		tagSuggestionStore,
+		datasettagsuggestion.NewGenerator(aiService, time.Second),
+	)
+	tagJobStatus = ""
+	for attempt := 0; attempt < 4 && tagJobStatus != "SUCCEEDED"; attempt++ {
+		processed, processErr := tagWorker.ProcessNext(
+			ctx, tenantID, "dataset-integration-tag-worker-v2", 2*time.Minute,
+		)
+		if processErr != nil {
+			t.Fatalf("process dataset tag suggestion: %v", processErr)
+		}
+		if !processed {
+			t.Fatal("expected a pending dataset tag suggestion job")
+		}
+		err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT status
+				FROM platform.dataset_tag_suggestion_jobs
+				WHERE dataset_version_id=$1`,
+				publishedV2.ID,
+			).Scan(&tagJobStatus)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if tagJobStatus != "SUCCEEDED" {
+		t.Fatalf("current tag job status=%q", tagJobStatus)
+	}
+	var bindingID, bindingStatus, bindingOrigin, bindingRecordVersion string
+	var bindingEvidence json.RawMessage
+	var bindingConfidence *float64
+	var suggestionItems, suggestionRowsInEvidence, outboxVersionBefore int
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT id::text,status,origin,xmin::text,
+			evidence_json,confidence
+			FROM platform.asset_tag_bindings
+			WHERE tag_id=$1 AND dataset_id=$2 AND dataset_version_id=$3`,
+			tagID, created.ID, publishedV2.ID,
+		).Scan(
+			&bindingID, &bindingStatus, &bindingOrigin, &bindingRecordVersion,
+			&bindingEvidence, &bindingConfidence,
+		); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT count(*)::int
+			FROM platform.dataset_tag_suggestion_items AS item
+			JOIN platform.dataset_tag_suggestion_jobs AS job ON job.id=item.job_id
+			WHERE job.dataset_version_id=$1 AND item.binding_id=$2`,
+			publishedV2.ID, bindingID,
+		).Scan(&suggestionItems); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT count(*)::int
+			FROM platform.asset_tag_bindings
+			WHERE id=$1 AND (
+			  evidence_json ? 'rows'
+			  OR evidence_json ? 'sampleRows'
+			  OR evidence_json ? 'rawData'
+			)`, bindingID).Scan(&suggestionRowsInEvidence); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT event_version
+			FROM platform.semantic_change_outbox
+			WHERE subject_type='DATASET_VERSION' AND subject_ref=$1`,
+			publishedV2.ID,
+		).Scan(&outboxVersionBefore)
+	})
+	if err != nil || bindingStatus != "SUGGESTED" || bindingOrigin != "LLM" ||
+		bindingConfidence == nil || suggestionItems != 1 ||
+		suggestionRowsInEvidence != 0 {
+		t.Fatalf(
+			"binding=%s status=%s origin=%s confidence=%v items=%d rowEvidence=%d evidence=%s err=%v",
+			bindingID, bindingStatus, bindingOrigin, bindingConfidence,
+			suggestionItems, suggestionRowsInEvidence, bindingEvidence, err,
+		)
+	}
+	semanticService := semanticmanagement.NewService(
+		semanticmanagement.NewPostgresStore(pool),
+	)
+	approvedBinding, err := semanticService.UpdateAssetTagBinding(
+		ctx, tenantID, actorID, bindingID,
+		semanticmanagement.UpdateAssetTagBindingInput{
+			ExpectedRecordVersion: bindingRecordVersion,
+			Origin:                "LLM",
+			Status:                "APPROVED",
+			Confidence:            bindingConfidence,
+			Evidence:              bindingEvidence,
+		},
+	)
+	if err != nil || approvedBinding.Status != "APPROVED" ||
+		approvedBinding.ApprovedBy != actorID {
+		t.Fatalf("approve suggested binding=%+v err=%v", approvedBinding, err)
+	}
+	var outboxVersionAfter int
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT event_version
+			FROM platform.semantic_change_outbox
+			WHERE subject_type='DATASET_VERSION' AND subject_ref=$1`,
+			publishedV2.ID,
+		).Scan(&outboxVersionAfter)
+	})
+	if err != nil || outboxVersionAfter <= outboxVersionBefore {
+		t.Fatalf(
+			"approval semantic outbox before=%d after=%d err=%v",
+			outboxVersionBefore, outboxVersionAfter, err,
+		)
 	}
 
 	// 并发停用可能发生在保存的首次可用性检查之后。保存事务在固定依赖快照时必须
@@ -787,6 +987,30 @@ func datasetExampleForAssets(t *testing.T, sourceID, tableID string) []byte {
 	return raw
 }
 
+func datasetODSExampleForAssets(t *testing.T, sourceID, tableID string) []byte {
+	t.Helper()
+	raw := datasetExampleForAssets(t, sourceID, tableID)
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	// 本用例后续会构造 DATASET 下游并验证依赖锁；按 ODS -> DWD 的层级合同，
+	// 先把通用 DWS 示例收敛为单物理表、无聚合的 ODS fixture。
+	document["dataset"].(map[string]any)["layer"] = "ODS"
+	document["groupBy"] = []any{}
+	document["having"] = []any{}
+	document["preAggregations"] = []any{}
+	fields := document["fields"].([]any)
+	fields[1].(map[string]any)["expression"] = map[string]any{
+		"type": "FIELD_REF", "nodeId": "orders", "field": "order_amount",
+	}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 func datasetExampleForPublishedVersion(t *testing.T, versionID string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile("../../api/examples/dataset-dsl-v1.json")
@@ -801,10 +1025,14 @@ func datasetExampleForPublishedVersion(t *testing.T, versionID string) []byte {
 	descriptor["code"] = "monthly_orders_consumer"
 	descriptor["name"] = "月度订单消费数据集"
 	descriptor["description"] = "引用精确发布版本"
+	descriptor["layer"] = "DWD"
 	document["nodes"] = []any{map[string]any{
 		"id": "upstream", "type": "DATASET", "datasetVersionId": versionID, "alias": "u",
 		"projection": []any{"stat_month", "revenue"}, "sourceFilters": []any{},
 	}}
+	document["groupBy"] = []any{}
+	document["having"] = []any{}
+	document["preAggregations"] = []any{}
 	fields := document["fields"].([]any)
 	fields[0].(map[string]any)["expression"] = map[string]any{"type": "FIELD_REF", "nodeId": "upstream", "field": "stat_month"}
 	fields[1].(map[string]any)["expression"] = map[string]any{"type": "FIELD_REF", "nodeId": "upstream", "field": "revenue"}
@@ -821,6 +1049,33 @@ type publicationValidatorStub struct {
 	result    dataset.PreviewResult
 	candidate dataset.PublicationCandidate
 	calls     int
+}
+
+type datasetTagSuggestionProvider struct {
+	tagID string
+}
+
+func (*datasetTagSuggestionProvider) Name() string     { return "integration-provider" }
+func (*datasetTagSuggestionProvider) Model() string    { return "integration-model" }
+func (*datasetTagSuggestionProvider) Configured() bool { return true }
+func (provider *datasetTagSuggestionProvider) Complete(
+	_ context.Context,
+	_ aiplatform.ProviderRequest,
+) (aiplatform.ProviderResult, error) {
+	content, err := json.Marshal(map[string]any{"items": []map[string]any{{
+		"tagId": provider.tagID, "confidence": 0.97,
+		"rationale": "数据集说明、输出粒度和字段元数据共同支持该表功能",
+	}}})
+	if err != nil {
+		return aiplatform.ProviderResult{}, err
+	}
+	return aiplatform.ProviderResult{
+		Content: content, Model: "ignored-provider-model",
+		FinishReason: "stop", RequestID: "integration-dataset-tag-request",
+		Usage: aiplatform.Usage{
+			PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120,
+		},
+	}, nil
 }
 
 func (stub *publicationValidatorStub) ValidatePublication(_ context.Context, _, _ string, candidate dataset.PublicationCandidate) (dataset.PreviewResult, error) {

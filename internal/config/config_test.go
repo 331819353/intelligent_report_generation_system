@@ -1,9 +1,31 @@
 package config
 
 import (
+	"os"
 	"testing"
 	"time"
 )
+
+func setProductionConnectorByteLimits(t *testing.T) {
+	t.Helper()
+	t.Setenv(
+		"WAREHOUSE_DATABASE_URL",
+		"postgres://report_warehouse_reader:secret@warehouse.internal:5432/report_warehouse?sslmode=require",
+	)
+	for key, value := range map[string]string{
+		"CONNECTOR_HTTP_MAX_REQUEST_BYTES":             "1048576",
+		"CONNECTOR_JSON_MAX_RESPONSE_BYTES":            "67108864",
+		"CONNECTOR_METADATA_SAMPLE_MAX_CELL_BYTES":     "16384",
+		"CONNECTOR_METADATA_SAMPLE_MAX_ROW_BYTES":      "65536",
+		"CONNECTOR_METADATA_SAMPLE_MAX_RESPONSE_BYTES": "524288",
+		"CONNECTOR_STREAM_MAX_CELL_BYTES":              "1048576",
+		"CONNECTOR_STREAM_MAX_ROW_BYTES":               "4194304",
+		"CONNECTOR_STREAM_MAX_BYTES":                   "1073741824",
+		"WAREHOUSE_STAGE_MAX_BYTES":                    "536870912",
+	} {
+		t.Setenv(key, value)
+	}
+}
 
 func TestLoadDefaults(t *testing.T) {
 	for _, key := range []string{
@@ -137,8 +159,230 @@ func TestLoadRejectsInvalidDataSourceCredentialKey(t *testing.T) {
 
 func TestLoadRejectsDevelopmentCredentialKeyInProduction(t *testing.T) {
 	t.Setenv("APP_ENV", "production")
+	t.Setenv(
+		"DATABASE_URL",
+		"postgres://report_app:secret@db.internal:5432/report?sslmode=require",
+	)
 	t.Setenv("DATA_SOURCE_CREDENTIAL_KEY", defaultDataSourceCredentialKey)
 	if _, err := Load(); err == nil {
 		t.Fatal("production accepted the development data source credential key")
+	}
+}
+
+func TestLoadRejectsDevelopmentConnectorTokenInProduction(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	setProductionConnectorByteLimits(t)
+	t.Setenv(
+		"DATABASE_URL",
+		"postgres://report_app:secret@db.internal:5432/report?sslmode=require",
+	)
+	t.Setenv(
+		"DATA_SOURCE_CREDENTIAL_KEY",
+		"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+	)
+	t.Setenv("CONNECTOR_INTERNAL_TOKEN", defaultConnectorToken)
+	if _, err := LoadAPI(); err == nil {
+		t.Fatal("production accepted the development connector token")
+	}
+	t.Setenv("CONNECTOR_INTERNAL_TOKEN", "production-general-connector-token")
+	if _, err := LoadAPI(); err != nil {
+		t.Fatalf("production rejected an explicit connector token: %v", err)
+	}
+}
+
+func TestLoadRejectsRemotePlaintextConnectorInProduction(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	setProductionConnectorByteLimits(t)
+	t.Setenv(
+		"DATABASE_URL",
+		"postgres://report_app:secret@db.internal:5432/report?sslmode=require",
+	)
+	t.Setenv(
+		"DATA_SOURCE_CREDENTIAL_KEY",
+		"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+	)
+	t.Setenv("CONNECTOR_INTERNAL_TOKEN", "production-general-connector-token")
+	t.Setenv("CONNECTOR_SERVICE_URL", "http://connector.internal:8090")
+	if _, err := LoadAPI(); err == nil {
+		t.Fatal("production accepted a remote plaintext connector endpoint")
+	}
+	t.Setenv("CONNECTOR_SERVICE_URL", "https://connector.internal")
+	if _, err := LoadAPI(); err != nil {
+		t.Fatalf("production rejected an HTTPS connector endpoint: %v", err)
+	}
+}
+
+func TestLoadRejectsRemotePlaintextMinIOInProduction(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	setProductionConnectorByteLimits(t)
+	t.Setenv(
+		"DATABASE_URL",
+		"postgres://report_app:secret@db.internal:5432/report?sslmode=require",
+	)
+	t.Setenv(
+		"DATA_SOURCE_CREDENTIAL_KEY",
+		"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+	)
+	t.Setenv("CONNECTOR_INTERNAL_TOKEN", "production-general-connector-token")
+	t.Setenv("CONNECTOR_SERVICE_URL", "https://connector.internal")
+	t.Setenv("MINIO_ENDPOINT", "minio.internal:9000")
+	t.Setenv("MINIO_USE_SSL", "false")
+	if _, err := LoadAPI(); err == nil {
+		t.Fatal("production accepted a remote plaintext MinIO endpoint")
+	}
+	t.Setenv("MINIO_USE_SSL", "true")
+	if _, err := LoadAPI(); err != nil {
+		t.Fatalf("production rejected TLS-enabled MinIO: %v", err)
+	}
+}
+
+func TestProcessLoadersRemoveForeignDatabaseCredentials(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("DATABASE_URL", "postgres://report_app:one@127.0.0.1:5432/report?sslmode=disable")
+	t.Setenv("WORKER_DATABASE_URL", "postgres://report_worker:two@127.0.0.1:5432/report?sslmode=disable")
+	t.Setenv("CONNECTION_TEST_DATABASE_URL", "postgres://report_connection_tester:three@127.0.0.1:5432/report?sslmode=disable")
+	t.Setenv("POSTGRES_WORKER_PASSWORD", "worker-secret")
+	t.Setenv("POSTGRES_CONNECTION_TEST_PASSWORD", "tester-secret")
+	t.Setenv("CONNECTOR_CONNECTION_TEST_TOKEN", "test-only-connector-secret")
+	t.Setenv("CONNECTION_TEST_MINIO_SECRET_KEY", "test-only-minio-secret")
+	api, err := LoadAPI()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.DatabaseURL == "" || os.Getenv("WORKER_DATABASE_URL") != "" ||
+		os.Getenv("CONNECTION_TEST_DATABASE_URL") != "" ||
+		os.Getenv("POSTGRES_WORKER_PASSWORD") != "" ||
+		os.Getenv("POSTGRES_CONNECTION_TEST_PASSWORD") != "" ||
+		os.Getenv("CONNECTOR_CONNECTION_TEST_TOKEN") != "" ||
+		os.Getenv("CONNECTION_TEST_MINIO_SECRET_KEY") != "" {
+		t.Fatalf("API process retained foreign credentials: %#v", api)
+	}
+
+	t.Setenv("DATABASE_URL", "postgres://report_app:one@127.0.0.1:5432/report?sslmode=disable")
+	t.Setenv("WORKER_DATABASE_URL", "postgres://worker:two@127.0.0.1:5432/report?sslmode=disable")
+	t.Setenv("POSTGRES_WORKER_USER", "worker")
+	t.Setenv("POSTGRES_WORKER_PASSWORD", "worker-secret")
+	t.Setenv("CONNECTION_TEST_DATABASE_URL", "postgres://report_connection_tester:three@127.0.0.1:5432/report?sslmode=disable")
+	t.Setenv("POSTGRES_APP_PASSWORD", "app-secret")
+	t.Setenv("POSTGRES_CONNECTION_TEST_PASSWORD", "tester-secret")
+	t.Setenv("CONNECTOR_CONNECTION_TEST_TOKEN", "test-only-connector-secret")
+	t.Setenv("CONNECTION_TEST_MINIO_SECRET_KEY", "test-only-minio-secret")
+	worker, err := LoadWorker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.DatabaseURL == "" || os.Getenv("DATABASE_URL") != "" ||
+		os.Getenv("CONNECTION_TEST_DATABASE_URL") != "" ||
+		os.Getenv("POSTGRES_APP_PASSWORD") != "" ||
+		os.Getenv("POSTGRES_CONNECTION_TEST_PASSWORD") != "" ||
+		os.Getenv("CONNECTOR_CONNECTION_TEST_TOKEN") != "" ||
+		os.Getenv("CONNECTION_TEST_MINIO_SECRET_KEY") != "" {
+		t.Fatalf("generic worker retained foreign credentials: %#v", worker)
+	}
+
+	t.Setenv("DATABASE_URL", "postgres://report_app:one@127.0.0.1:5432/report?sslmode=disable")
+	t.Setenv("WORKER_DATABASE_URL", "postgres://worker:two@127.0.0.1:5432/report?sslmode=disable")
+	t.Setenv("POSTGRES_APP_PASSWORD", "app-secret")
+	t.Setenv("POSTGRES_WORKER_PASSWORD", "worker-secret")
+	t.Setenv("CONNECTION_TEST_DATABASE_URL", "postgres://connection_tester:three@127.0.0.1:5432/report?sslmode=disable")
+	t.Setenv("POSTGRES_CONNECTION_TEST_USER", "connection_tester")
+	tester, err := LoadConnectionTestWorker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tester.DatabaseURL == "" || os.Getenv("DATABASE_URL") != "" ||
+		os.Getenv("WORKER_DATABASE_URL") != "" ||
+		os.Getenv("POSTGRES_APP_PASSWORD") != "" ||
+		os.Getenv("POSTGRES_WORKER_PASSWORD") != "" {
+		t.Fatalf("connection-test worker retained foreign credentials: %#v", tester)
+	}
+}
+
+func TestProcessDatabaseRoleParsingSupportsKeywordDSN(t *testing.T) {
+	t.Setenv(
+		"DATABASE_URL",
+		"host=127.0.0.1 port=5432 dbname=report user=report_app password=secret sslmode=disable",
+	)
+	if _, err := LoadAPI(); err != nil {
+		t.Fatalf("keyword/value PostgreSQL DSN was rejected: %v", err)
+	}
+	t.Setenv(
+		"DATABASE_URL",
+		"host=127.0.0.1 dbname=report user=report_worker password=secret sslmode=disable",
+	)
+	if _, err := LoadAPI(); err == nil {
+		t.Fatal("API loader accepted the worker database principal")
+	}
+}
+
+func TestProductionProcessDatabaseURLsHaveNoDefaults(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("DATABASE_URL", "")
+	if _, err := LoadAPI(); err == nil {
+		t.Fatal("production API accepted a missing DATABASE_URL")
+	}
+	t.Setenv("WORKER_DATABASE_URL", "")
+	if _, err := LoadWorker(); err == nil {
+		t.Fatal("production worker accepted a missing WORKER_DATABASE_URL")
+	}
+	t.Setenv("CONNECTION_TEST_DATABASE_URL", "")
+	if _, err := LoadConnectionTestWorker(); err == nil {
+		t.Fatal("production connection tester accepted a missing database URL")
+	}
+}
+
+func TestLoadConnectionTestWorkerValidatesTimeoutAndLease(t *testing.T) {
+	t.Setenv("CONNECTION_TEST_TIMEOUT", "30s")
+	t.Setenv("CONNECTION_TEST_LEASE", "35s")
+	if _, err := LoadConnectionTestWorker(); err == nil {
+		t.Fatal("connection-test lease without fencing margin was accepted")
+	}
+	t.Setenv("CONNECTION_TEST_LEASE", "45s")
+	if _, err := LoadConnectionTestWorker(); err != nil {
+		t.Fatalf("valid connection-test timing was rejected: %v", err)
+	}
+}
+
+func TestProductionConnectionTestWorkerRequiresScopedResources(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv(
+		"CONNECTION_TEST_DATABASE_URL",
+		"postgres://report_connection_tester:secret@db.internal:5432/report?sslmode=require",
+	)
+	t.Setenv(
+		"DATA_SOURCE_CREDENTIAL_KEY",
+		"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+	)
+	t.Setenv(
+		"CONNECTOR_CONNECTION_TEST_TOKEN",
+		"production-connection-test-token",
+	)
+	t.Setenv("CONNECTOR_INTERNAL_TOKEN", "production-general-connector-token")
+	t.Setenv("CONNECTION_TEST_MINIO_ENDPOINT", "minio.internal:9000")
+	t.Setenv("CONNECTION_TEST_MINIO_ACCESS_KEY", "connection-test-reader")
+	t.Setenv("CONNECTION_TEST_MINIO_BUCKET_UPLOADS", "uploads")
+	t.Setenv("CONNECTION_TEST_MINIO_USE_SSL", "true")
+	t.Setenv("CONNECTION_TEST_MINIO_SECRET_KEY", "")
+	if _, err := LoadConnectionTestWorker(); err == nil {
+		t.Fatal("production tester accepted missing scoped MinIO secret")
+	}
+	t.Setenv("CONNECTION_TEST_MINIO_SECRET_KEY", "connection-test-reader-secret")
+	t.Setenv("CONNECTION_TEST_MINIO_USE_SSL", "false")
+	if _, err := LoadConnectionTestWorker(); err == nil {
+		t.Fatal("production tester accepted remote plaintext MinIO")
+	}
+	t.Setenv("CONNECTION_TEST_MINIO_USE_SSL", "true")
+	cfg, err := LoadConnectionTestWorker()
+	if err != nil {
+		t.Fatalf("production tester rejected scoped resources: %v", err)
+	}
+	if cfg.ConnectorToken != "production-connection-test-token" ||
+		cfg.MinIOAccessKey != "connection-test-reader" {
+		t.Fatalf("tester loaded unscoped resources: %#v", cfg)
+	}
+	if os.Getenv("CONNECTOR_INTERNAL_TOKEN") != "" ||
+		os.Getenv("MINIO_ACCESS_KEY") != "" ||
+		os.Getenv("MINIO_SECRET_KEY") != "" {
+		t.Fatal("tester retained general connector or MinIO credentials")
 	}
 }

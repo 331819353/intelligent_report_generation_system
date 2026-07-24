@@ -41,7 +41,7 @@ func TestMetricAIDraftDatasetRetrievalRequiresReadAndManage(t *testing.T) {
 
 	retriever := metricai.NewPostgresRetriever(pool)
 	requirement := metricai.AuthoringRequest{Requirement: "基于订单表和客户表，创建一个月度各区域销售额的指标"}
-	modifiable, err := retriever.Retrieve(ctx, tenantID, actorID, requirement)
+	modifiable, err := retriever.Retrieve(ctx, tenantID, actorID, requirement, metricai.MetricIntent{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestMetricAIDraftDatasetRetrievalRequiresReadAndManage(t *testing.T) {
 		}
 	}
 
-	readOnly, err := retriever.Retrieve(ctx, tenantID, readerID, requirement)
+	readOnly, err := retriever.Retrieve(ctx, tenantID, readerID, requirement, metricai.MetricIntent{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,10 +86,13 @@ func prepareMetricAIDraftActorsAndTable(t *testing.T, ctx context.Context, pool 
 			tenantID, "metric-ai-draft-reader-"+suffix+"@it.test").Scan(&readerID); err != nil {
 			return err
 		}
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.data_sources(
-			tenant_id,code,name,source_type,secret_ref,status,last_synced_at
-		) VALUES($1,'metric_ai_draft_orders','Metric AI Draft Orders','MYSQL','env://METRIC_AI_DRAFT_IT','ACTIVE',now()) RETURNING id::text`, tenantID).Scan(&sourceID); err != nil {
-			return err
+		var sourceErr error
+		sourceID, _, sourceErr = insertVersionedDataSourceTx(
+			ctx, tx, tenantID, "metric_ai_draft_orders", "Metric AI Draft Orders", "MYSQL",
+			"env://METRIC_AI_DRAFT_IT", "ACTIVE", "{}",
+		)
+		if sourceErr != nil {
+			return sourceErr
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(
 			tenant_id,data_source_id,schema_name,table_name,table_type,structure_hash,last_sync_at
@@ -113,6 +116,7 @@ func prepareMetricAIDraftActorsAndTable(t *testing.T, ctx context.Context, pool 
 	if err != nil {
 		t.Fatal(err)
 	}
+	attestAndPublishDataSourceFixture(t, ctx, pool, tenantID, actorID, sourceID)
 	return actorID, readerID, sourceID, tableID
 }
 

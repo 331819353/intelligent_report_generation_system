@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import reportExample from '../../../api/examples/report-json-v1.json'
 import { AppShell } from '../components/AppShell'
-import { ComponentPalette } from '../components/report/ComponentPalette'
 import { ReportDesignerCanvas, type ReportDesignerTransition } from '../components/report/ReportDesignerCanvas'
 import { RequestError } from '../lib/api'
 import type { ComponentType, ReportDocument, ReportRuntimeContext } from '../lib/report-contract'
@@ -18,6 +16,7 @@ import {
 import { applyReportJSONPatch, createReportJSONPatch } from '../lib/report-json-patch'
 import { validateReportDocument } from '../lib/report-schema'
 import { demoReportRuntime } from '../lib/demo-report-runtime'
+import { createReportDesignerTemplate } from '../lib/report-designer-template'
 
 type DesignerPhase = 'LOADING' | 'READY' | 'SAVING' | 'CONFLICT' | 'ERROR' | 'READ_ONLY'
 
@@ -362,11 +361,18 @@ export function DesignerPage() {
       {!seed && phase !== 'LOADING' && <section className="panel"><p>{message || '无法加载报告草稿。'}</p><button type="button" onClick={() => void loadExisting(reportId)}>重新加载</button></section>}
       {phase === 'LOADING' && !seed && <section className="panel" role="status">正在加载报告草稿…</section>}
       {seed && (
-        <div className="designer-layout">
-          <aside className="tool-panel"><span className="eyebrow">组件</span><h2>内容组件</h2><p className="component-palette-help">拖入分块，或选择后点击空白处</p><ComponentPalette selectedType={pendingComponentType} onSelect={setPendingComponentType} /></aside>
-          <section className="canvas-wrap"><div className="canvas-toolbar"><span>1920 × 1080 首屏基准 · 方向键移动 · Shift + 方向键缩放</span><strong>自动适应宽度</strong></div><div className="canvas"><ReportDesignerCanvas source={seed.definition} runtime={runtime} initialEditorState={seed.editorState} initialPendingChanges={seed.pendingChanges} loadGeneration={seed.generation} acknowledgedClientOperationIds={acknowledgedOperationIds} onTransition={handleTransition} pendingComponentType={pendingComponentType} onPendingComponentConsumed={() => setPendingComponentType(undefined)} /></div></section>
-          <aside className="property-panel"><span className="eyebrow">属性</span><h2>选择与设置</h2><p className="component-palette-help">点击或聚焦画布中的分块、组件，可在画布上方配置浏览态冻结；修改会进入统一撤销历史。</p><p className="component-palette-help">分块配置锁开启时，冻结设置只读；空白基础单元仍可直接选择。</p></aside>
-        </div>
+        <ReportDesignerCanvas
+          source={seed.definition}
+          runtime={runtime}
+          initialEditorState={seed.editorState}
+          initialPendingChanges={seed.pendingChanges}
+          loadGeneration={seed.generation}
+          acknowledgedClientOperationIds={acknowledgedOperationIds}
+          onTransition={handleTransition}
+          pendingComponentType={pendingComponentType}
+          onPendingComponentTypeChange={setPendingComponentType}
+          onPendingComponentConsumed={() => setPendingComponentType(undefined)}
+        />
       )}
     </AppShell>
   )
@@ -408,7 +414,7 @@ function buildUpdateCandidate(baseline: ReportDraftRecord, transition: ReportDes
 }
 
 function createNewReportSeed(): CanvasSeed {
-  const definition = structuredClone(reportExample) as ReportDocument
+  const definition = createReportDesignerTemplate()
   delete definition.report.id
   definition.report.status = 'DRAFT'
   definition.report.code = `${definition.report.code}_${createIdempotencyKey().slice(0, 8)}`

@@ -1,35 +1,58 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AppShell } from '../components/AppShell'
+import { RequestError } from '../lib/api'
+import { currentSubject } from '../lib/auth'
 import { md5Hex } from '../lib/md5'
 import {
   dataSourceAPI,
   type DataSourceConnectionInput,
   type DataSourceColumnRecord,
   type DataSourceRecord,
+  type DataSourceReviewStatus,
   type DataSourceStatus,
   type DataSourceTableRecord,
+  type DataSourceTestResult,
   type DataSourceType,
+  type DataSourceVisibility,
   type DiscoveredTableRecord,
 	type ExcelFileAsset,
   type ExcelWorkbookInspection,
   type MetadataJob,
   type MetadataJobFailure,
   type MetadataRefreshMode,
+  type MetadataSampleMode,
 } from '../lib/data-sources'
 
 const statusLabels: Record<DataSourceStatus, string> = {
   DRAFT: '待验证', ACTIVE: '运行中', DISABLED: '已暂停', SYNCING: '同步中', ERROR: '异常', DELETING: '删除中',
 }
 const typeLabels: Record<DataSourceType, string> = { MYSQL: 'MySQL', ORACLE: 'Oracle', EXCEL: 'Excel / CSV' }
-type ConnectionDraft = Omit<DataSourceConnectionInput, 'port' | 'config' | 'type'> & { port: string; type: DataSourceType }
+type ConnectionDraft = {
+  code: string
+  name: string
+  description: string
+  visibility: DataSourceVisibility
+  type: DataSourceType
+  host: string
+  port: string
+  database: string
+  username: string
+  password: string
+}
 type DialogState = { mode: 'create' | 'view' | 'edit' | 'delete' | 'select-tables' | 'edit-table' | 'delete-table'; source?: DataSourceRecord; table?: DataSourceTableRecord }
 type Notice = { tone: 'success' | 'error'; message: string }
 type TableDraft = { businessName: string; businessDescription: string; tags: string; sensitivityLevel: string; visibility: string; manualLocked: boolean }
 type MetadataJobSnapshot = { job: MetadataJob; title: string }
 type MetadataJobPoller = { jobId: string; timeout: number; stopped: boolean }
+type ConnectionTestPoller = {
+  controller: AbortController
+  promise: Promise<DataSourceTestResult>
+}
 type ColumnDraft = {
   original: DataSourceColumnRecord
   businessName: string
+  businessDescription: string
+  tags: string
   semanticType: string
   sensitivityLevel: DataSourceColumnRecord['sensitivityLevel']
   manualLocked: boolean
@@ -42,8 +65,17 @@ const metadataStageLabels: Record<string, string> = {
   QUEUED: '等待后台执行', DISCOVERY: '读取源库结构', DIFF: '比对结构变化', SAMPLE: '采集样本', PERSISTENCE: '保存技术元数据', LLM: 'LLM 完善', COMPLETE: '已完成', FAILED: '执行失败',
 }
 const metadataJobLabel = (job: MetadataJob) => job.kind === 'IMPORT' ? '新增数据表' : job.mode === 'INCREMENTAL' ? '增量刷新' : '全量刷新'
+const metadataSampleDescription = (mode: MetadataSampleMode) => mode === 'DENY'
+  ? '仅技术元数据，不读取业务行'
+  : mode === 'MASK'
+    ? '读取最多 10 行并在本地格式脱敏后发送'
+    : '读取最多 10 行原值并发送（高风险）'
 const metadataJobFailureTable = (failure: MetadataJobFailure) => [failure.schemaName || failure.catalogName, failure.tableName].filter(Boolean).join('.')
 const metadataJobFailureMessage = (failure: MetadataJobFailure) => failure.errorMessage?.trim() || failure.errorCode?.trim() || '处理失败'
+const connectionTestStillCurrent = (
+  source: DataSourceRecord,
+  result: { configVersionId?: string },
+) => !result.configVersionId || source.configVersionId === result.configVersionId
 const metadataJobCompletionNotice = (job: MetadataJob, title: string): Notice => {
   if (job.status === 'SUCCEEDED' && job.total === 0) return { tone: 'success', message: '当前没有可刷新的数据表资产' }
   if (job.status === 'SUCCEEDED') {
@@ -55,16 +87,36 @@ const metadataJobCompletionNotice = (job: MetadataJob, title: string): Notice =>
 const columnDraftFromRecord = (column: DataSourceColumnRecord): ColumnDraft => ({
   original: column,
   businessName: column.businessName,
+  businessDescription: column.businessDescription,
+  tags: column.tags.join(', '),
   semanticType: column.semanticType,
   sensitivityLevel: column.sensitivityLevel,
   manualLocked: column.manualLocked,
 })
 const columnDraftChanged = (draft: ColumnDraft) => draft.businessName.trim() !== draft.original.businessName
+  || draft.businessDescription.trim() !== draft.original.businessDescription
+  || normalizedTags(draft.tags).join('\u001f') !== draft.original.tags.join('\u001f')
   || draft.semanticType !== draft.original.semanticType
   || draft.sensitivityLevel !== draft.original.sensitivityLevel
   || draft.manualLocked !== draft.original.manualLocked
-const normalizedTags = (value: string) => value.split(',').map(tag => tag.trim()).filter(Boolean)
+const normalizedTags = (value: string) => [...new Set(value.split(',').map(tag => tag.trim()).filter(Boolean))]
 const dataSourceCodePattern = /^[A-Za-z][A-Za-z0-9_]{0,127}$/
+const validationLabels = { UNTESTED: '未测试', PASSED: '测试通过', FAILED: '测试失败' } as const
+const publicationLabels = { UNPUBLISHED: '未上线', PUBLISHED: '已上线' } as const
+const validationStatusOf = (source: DataSourceRecord) => source.validationStatus
+  ?? (source.status === 'ACTIVE' || source.status === 'DISABLED' || source.status === 'SYNCING' ? 'PASSED' : source.status === 'ERROR' ? 'FAILED' : 'UNTESTED')
+const publicationStatusOf = (source: DataSourceRecord) => source.publicationStatus
+  ?? (source.status === 'ACTIVE' || source.status === 'DISABLED' || source.status === 'SYNCING' ? 'PUBLISHED' : 'UNPUBLISHED')
+const hasUnpublishedDraft = (source: DataSourceRecord) => source.hasUnpublishedChanges
+  ?? publicationStatusOf(source) === 'UNPUBLISHED'
+const reviewStatusOf = (source: DataSourceRecord): DataSourceReviewStatus => source.reviewStatus || 'NOT_SUBMITTED'
+const lifecycleLabel = (source: DataSourceRecord) => reviewStatusOf(source) === 'PENDING'
+  ? '审核中'
+  : reviewStatusOf(source) === 'REJECTED'
+    ? '审核失败'
+    : source.status === 'DRAFT' && validationStatusOf(source) === 'PASSED'
+  ? '待上线'
+  : statusLabels[source.status]
 const formatFileSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
 const fileSourceIdentity = (filename: string) => {
   const extensionMatch = filename.match(/\.([^.]+)$/)
@@ -82,7 +134,10 @@ const tableDraftChanged = (draft: TableDraft, table: DataSourceTableRecord) => d
   || draft.visibility !== table.visibility
   || draft.manualLocked !== table.manualLocked
 
-const emptyDraft = (): ConnectionDraft => ({ code: '', name: '', type: 'MYSQL', host: '', port: '3306', database: '', username: '', password: '' })
+const emptyDraft = (): ConnectionDraft => ({
+  code: '', name: '', description: '', visibility: 'PRIVATE',
+  type: 'MYSQL', host: '', port: '3306', database: '', username: '', password: '',
+})
 const configText = (source: DataSourceRecord, key: string) => {
   const value = source.config?.[key]
   return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
@@ -96,6 +151,8 @@ const inspectionTables = (inspection: ExcelWorkbookInspection): DiscoveredTableR
 const draftFromSource = (source: DataSourceRecord): ConnectionDraft => ({
   code: source.code,
   name: source.name,
+  description: source.description || '',
+  visibility: source.visibility || 'PRIVATE',
   type: source.type === 'ORACLE' ? 'ORACLE' : 'MYSQL',
   host: configText(source, 'host'),
   port: configText(source, 'port') || (source.type === 'ORACLE' ? '1521' : '3306'),
@@ -103,6 +160,52 @@ const draftFromSource = (source: DataSourceRecord): ConnectionDraft => ({
   username: configText(source, 'username'),
   password: '',
 })
+const normalizedDraft = (draft: ConnectionDraft) => ({
+  code: draft.code.trim(),
+  name: draft.name.trim(),
+  description: draft.description.trim(),
+  visibility: draft.visibility,
+  type: draft.type,
+  host: draft.host.trim(),
+  port: draft.port.trim(),
+  database: draft.database.trim(),
+  username: draft.username.trim(),
+})
+const draftMatchesSource = (draft: ConnectionDraft, source?: DataSourceRecord) => {
+  if (!source || draft.password) return false
+  const saved = draftFromSource(source)
+  return JSON.stringify(normalizedDraft(draft)) === JSON.stringify(normalizedDraft(saved))
+}
+const connectionDraftError = (draft: ConnectionDraft, editing: boolean) => {
+  if (!dataSourceCodePattern.test(draft.code.trim())) {
+    return '数据源编码必须以英文字母开头，且只能包含英文字母、数字和下划线，最长 128 位'
+  }
+  const port = Number(draft.port)
+  if (!draft.name.trim() || !draft.host.trim() || !draft.database.trim() || !draft.username.trim() || !Number.isInteger(port) || port < 1 || port > 65535 || (!editing && !draft.password)) {
+    return `请完整填写连接信息${editing ? '' : '和密码'}，端口需为 1–65535 的整数`
+  }
+  const host = draft.host.trim().toLocaleLowerCase()
+  if (host === '127.0.0.1' || host === 'localhost' || host.endsWith('.localhost') || host === '::1') {
+    return 'Host 不能填写 127.0.0.1 或 localhost；如果配置服务在 Docker 中、数据库在宿主机，请填写 host.docker.internal'
+  }
+  if (host.includes('://') || /[/\\@%\s]/.test(host)) {
+    return 'Host 只填写主机名或 IP，不要包含 http://、jdbc:、端口、路径或空格'
+  }
+  return ''
+}
+const friendlyConnectionError = (cause: unknown) => {
+  if (cause instanceof RequestError) {
+    if (cause.detail.code === 'DATA_SOURCE_CONNECTION_CONFIGURATION_INVALID') return cause.detail.message
+    if (cause.detail.code.includes('AUTH')) return '用户名或密码校验失败，请确认账号可登录目标数据库'
+    if (cause.detail.code.includes('REFUSED')) return '目标地址拒绝连接，请确认 Host、Port、Docker 端口映射和数据库服务状态'
+    if (cause.detail.code.includes('TIMEOUT')) return '连接目标数据库超时，请检查网络、防火墙和 Host 是否可从配置服务所在容器访问'
+  }
+  const message = cause instanceof Error ? cause.message : '测试数据源连接失败'
+  if (/access denied|authentication|password/i.test(message)) return `认证失败：${message}`
+  if (/connection refused|connect: refused/i.test(message)) return `目标地址拒绝连接：${message}`
+  if (/timeout|deadline exceeded/i.test(message)) return `连接超时：${message}`
+  return message
+}
 
 /** 提供数据源目录、结构化连接配置和完整生命周期操作，浏览器永不接收已保存密码。 */
 export function DataSourceCenterPage() {
@@ -131,6 +234,7 @@ export function DataSourceCenterPage() {
   const [columnDrafts, setColumnDrafts] = useState<ColumnDraft[]>([])
   const [tableEditorLoading, setTableEditorLoading] = useState(false)
   const [refreshMode, setRefreshMode] = useState<MetadataRefreshMode>('INCREMENTAL')
+  const [sampleDataMode, setSampleDataMode] = useState<MetadataSampleMode>('MASK')
   const [metadataJob, setMetadataJob] = useState<MetadataJob | null>(null)
   const [metadataJobSourceId, setMetadataJobSourceId] = useState('')
   const [metadataJobTitle, setMetadataJobTitle] = useState('')
@@ -139,11 +243,13 @@ export function DataSourceCenterPage() {
   const metadataJobRequests = useRef(new Map<string, number>())
   const metadataJobCache = useRef(new Map<string, MetadataJobSnapshot>())
   const metadataJobPollers = useRef(new Map<string, MetadataJobPoller>())
+  const connectionTestPollers = useRef(new Map<string, ConnectionTestPoller>())
   const metadataJobSourceIdRef = useRef('')
   const tableEditorRequest = useRef(0)
   const discoveryRequest = useRef(0)
   const notifiedMetadataJobs = useRef(new Set<string>())
   const viewedSourceIdRef = useRef(dialog?.mode === 'view' ? dialog.source?.id || '' : '')
+  const signedInSubject = currentSubject()
 
   useEffect(() => {
     viewedSourceIdRef.current = dialog?.mode === 'view' ? dialog.source?.id || '' : ''
@@ -171,14 +277,34 @@ export function DataSourceCenterPage() {
   const loadSources = useCallback(async () => {
     try {
       const page = await dataSourceAPI.list()
-      setSources(page.items)
-      return page.items
+      const items = Array.isArray(page.items) ? page.items : []
+      setSources(items)
+      return items
     } catch (cause) {
       setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '加载数据源失败' })
       return null
     } finally {
       setLoading(false)
     }
+  }, [])
+
+  const runConnectionTest = useCallback((sourceId: string) => {
+    const existing = connectionTestPollers.current.get(sourceId)
+    if (existing) return existing.promise
+    const controller = new AbortController()
+    const tracker: ConnectionTestPoller = {
+      controller,
+      promise: Promise.resolve({ serverVersion: '', latencyMs: 0 }),
+    }
+    tracker.promise = dataSourceAPI.test(
+      sourceId, { signal: controller.signal },
+    ).finally(() => {
+      if (connectionTestPollers.current.get(sourceId) === tracker) {
+        connectionTestPollers.current.delete(sourceId)
+      }
+    })
+    connectionTestPollers.current.set(sourceId, tracker)
+    return tracker.promise
   }, [])
 
   const loadTableStructures = useCallback(async (sourceId: string) => {
@@ -273,12 +399,15 @@ export function DataSourceCenterPage() {
 
   useEffect(() => {
     const pollers = metadataJobPollers.current
+    const testPollers = connectionTestPollers.current
     return () => {
       pollers.forEach(poller => {
         poller.stopped = true
         window.clearTimeout(poller.timeout)
       })
       pollers.clear()
+      testPollers.forEach(poller => poller.controller.abort())
+      testPollers.clear()
     }
   }, [])
 
@@ -299,14 +428,34 @@ export function DataSourceCenterPage() {
     let active = true
     dataSourceAPI.list().then(page => {
       if (!active) return
-      setSources(page.items)
+      const items = Array.isArray(page.items) ? page.items : []
+      setSources(items)
+      const resumable = new Set(
+        dataSourceAPI.pendingConnectionTestSourceIds(),
+      )
+      items.filter(source => resumable.has(source.id)).forEach(source => {
+        void runConnectionTest(source.id).then(async result => {
+          if (!active) return
+          const current = await dataSourceAPI.get(source.id)
+          if (!active) return
+          setSources(items => items.map(item => item.id === current.id ? current : item))
+          if (!connectionTestStillCurrent(current, result)) {
+            setNotice({ tone: 'error', message: `“${source.name}”后台测试对应的草稿已变化，请重新测试` })
+            return
+          }
+          setNotice({ tone: 'success', message: `“${source.name}”后台连接测试已完成${hasUnpublishedDraft(current) ? '；当前草稿可以上线' : ''}` })
+        }).catch(cause => {
+          if (!active || (cause instanceof Error && cause.name === 'AbortError')) return
+          setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : `恢复“${source.name}”后台连接测试失败` })
+        })
+      })
     }).catch(cause => {
       if (active) setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '加载数据源失败' })
     }).finally(() => {
       if (active) setLoading(false)
     })
     return () => { active = false }
-  }, [])
+  }, [runConnectionTest])
 
   const openCreate = () => {
     setDraft(emptyDraft())
@@ -317,6 +466,15 @@ export function DataSourceCenterPage() {
     setDialog({ mode: 'create' })
   }
   const openExisting = (mode: DialogState['mode'], source: DataSourceRecord) => {
+    if (mode === 'view' && (reviewStatusOf(source) === 'PENDING' || reviewStatusOf(source) === 'REJECTED')) {
+      setNotice({
+        tone: 'error',
+        message: reviewStatusOf(source) === 'PENDING'
+          ? '该数据源正在审核中，审核完成前不能配置数据表'
+          : `该数据源审核失败，修改配置并重新测试提交后才能配置数据表${source.reviewNote ? `；原因：${source.reviewNote}` : ''}`,
+      })
+      return
+    }
     setFormError('')
     setDraft(draftFromSource(source))
 		setExcelFile(null)
@@ -325,6 +483,7 @@ export function DataSourceCenterPage() {
     setDialog({ mode, source })
     if (mode === 'view') {
       setRefreshMode('INCREMENTAL')
+      setSampleDataMode('MASK')
       void loadTableStructures(source.id)
       viewedSourceIdRef.current = source.id
       metadataJobSourceIdRef.current = source.id
@@ -342,6 +501,7 @@ export function DataSourceCenterPage() {
     setDiscoveredTables([])
     setFileInspection(null)
     setSelectedTableKeys([])
+    setSampleDataMode('MASK')
     setDiscoveryLoading(true)
     setFormError('')
     try {
@@ -431,9 +591,12 @@ export function DataSourceCenterPage() {
     setBusyAction('import-tables')
     setFormError('')
     try {
-      const job = await dataSourceAPI.importTables(source.id, tables)
+      const job = await dataSourceAPI.importTables(source.id, tables, sampleDataMode)
       const fileSource = source.type === 'EXCEL'
-      await acceptMetadataJob(job, source.id, fileSource ? 'Sheet 映射' : '新增数据表', fileSource ? `已提交 ${tables.length} 个 Sheet 的后台采样与 LLM 映射任务，可关闭当前弹窗` : `已提交 ${tables.length} 张表的后台采样与 LLM 完善任务，可关闭当前弹窗`)
+      const queuedMessage = fileSource
+        ? `已提交 ${tables.length} 个 Sheet 的 LLM 元数据完善任务（${metadataSampleDescription(sampleDataMode)}），可关闭当前弹窗`
+        : `已提交 ${tables.length} 张表的 LLM 元数据完善任务（${metadataSampleDescription(sampleDataMode)}），可关闭当前弹窗`
+      await acceptMetadataJob(job, source.id, fileSource ? 'Sheet 映射' : '新增数据表', queuedMessage)
       setDialog({ mode: 'view', source })
     } catch (cause) {
       setFormError(cause instanceof Error ? cause.message : '新增数据表资产失败')
@@ -467,8 +630,8 @@ export function DataSourceCenterPage() {
       for (const column of columnDrafts.filter(columnDraftChanged)) {
         saving = `字段“${column.original.columnName}”`
         const updated = await dataSourceAPI.updateColumn(column.original.id, {
-          businessName: column.businessName.trim(), businessDescription: column.original.businessDescription,
-          tags: column.original.tags, sensitivityLevel: column.sensitivityLevel, semanticType: column.semanticType,
+          businessName: column.businessName.trim(), businessDescription: column.businessDescription.trim(),
+          tags: normalizedTags(column.tags), sensitivityLevel: column.sensitivityLevel, semanticType: column.semanticType,
           manualLocked: column.manualLocked, expectedVersion: column.original.businessVersion,
         })
         saved += 1
@@ -503,7 +666,7 @@ export function DataSourceCenterPage() {
   const refreshTableAsset = async (source: DataSourceRecord, table: DataSourceTableRecord) => {
     setBusyAction(`refresh-table:${table.id}`)
     try {
-      const job = await dataSourceAPI.refreshTables(source.id, 'FULL', [table.id])
+      const job = await dataSourceAPI.refreshTables(source.id, 'FULL', [table.id], sampleDataMode)
       await acceptMetadataJob(job, source.id, '刷新表结构', `已提交表资产“${table.businessName || table.tableName}”的后台刷新任务`)
     } catch (cause) {
       setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '刷新表结构失败' })
@@ -515,7 +678,7 @@ export function DataSourceCenterPage() {
   const refreshAllTableAssets = async (source: DataSourceRecord) => {
     setBusyAction(`refresh-tables:${source.id}`)
     try {
-      const job = await dataSourceAPI.refreshTables(source.id, refreshMode)
+      const job = await dataSourceAPI.refreshTables(source.id, refreshMode, undefined, sampleDataMode)
       const title = refreshMode === 'INCREMENTAL' ? '增量刷新' : '全量刷新'
       await acceptMetadataJob(job, source.id, title, `已提交${refreshMode === 'INCREMENTAL' ? '增量' : '全量'}元数据后台刷新任务，可关闭当前弹窗`)
     } catch (cause) {
@@ -535,15 +698,18 @@ export function DataSourceCenterPage() {
     let uploadedAsset: ExcelFileAsset | null = null
     try {
       uploadedAsset = await dataSourceAPI.uploadExcelVersion(source.fileAssetId, file)
-      await dataSourceAPI.test(source.id)
+      const testResult = await runConnectionTest(source.id)
       const active = await dataSourceAPI.get(source.id)
+      if (!connectionTestStillCurrent(active, testResult)) {
+        throw new Error('测试完成后数据源配置已变化，请重新测试当前草稿')
+      }
       setSources(current => current.map(item => item.id === active.id ? active : item))
       setDialog(current => current?.mode === 'view' && current.source?.id === active.id ? { ...current, source: active } : current)
       setFileInspection(null)
       setDiscoveredTables([])
       setSelectedTableKeys([])
       await loadTableStructures(active.id)
-      setNotice({ tone: 'success', message: `已重新上传“${file.name}”并生成文件版本 ${uploadedAsset.version}；请点击“新增数据表”重新解析并映射 Sheet` })
+      setNotice({ tone: 'success', message: `已重新上传“${file.name}”并生成文件版本 ${uploadedAsset.version}，新草稿测试通过；上线后再重新解析并映射 Sheet` })
     } catch (cause) {
       const latest = await loadSources()
       const updated = latest?.find(item => item.id === source.id)
@@ -577,6 +743,74 @@ export function DataSourceCenterPage() {
     }
   }
 
+  const saveConnectionDraft = async () => {
+    const editing = dialog?.mode === 'edit' ? dialog.source : undefined
+    const validationError = connectionDraftError(draft, Boolean(editing))
+    if (validationError) throw new Error(validationError)
+    const input: DataSourceConnectionInput = {
+      code: draft.code.trim(), name: draft.name.trim(), description: draft.description.trim(), visibility: draft.visibility,
+      type: draft.type as 'MYSQL' | 'ORACLE', host: draft.host.trim(), port: Number(draft.port),
+      database: draft.database.trim(), username: draft.username.trim(), password: draft.password,
+    }
+    return editing
+      ? dataSourceAPI.update(editing.id, { ...input, expectedVersion: editing.version })
+      : dataSourceAPI.create(input)
+  }
+
+  const testDraftConnection = async () => {
+    const editing = dialog?.mode === 'edit' ? dialog.source : undefined
+    setBusyAction(editing ? `form-test:${editing.id}` : 'form-test:create')
+    setFormError('')
+    try {
+      const saved = await saveConnectionDraft()
+      setSources(current => editing
+        ? current.map(source => source.id === saved.id ? saved : source)
+        : [saved, ...current.filter(source => source.id !== saved.id)])
+      setDialog({ mode: 'edit', source: saved })
+      setDraft(draftFromSource(saved))
+      const result = await runConnectionTest(saved.id)
+      const active = await dataSourceAPI.get(saved.id)
+      if (!connectionTestStillCurrent(active, result)) {
+        throw new Error('测试完成后配置已经变化，请重新测试当前表单')
+      }
+      setSources(current => current.map(source => source.id === active.id ? active : source))
+      setDialog({ mode: 'edit', source: active })
+      setDraft(draftFromSource(active))
+      setNotice({ tone: 'success', message: `“${active.name}”连接成功 · ${result.serverVersion || '版本未知'} · ${result.latencyMs} ms；现在可以提交发布审核` })
+    } catch (cause) {
+      setFormError(friendlyConnectionError(cause))
+      const sourceID = editing?.id
+      if (sourceID) {
+        const latest = await loadSources()
+        const updated = latest?.find(source => source.id === sourceID)
+        if (updated) setDialog({ mode: 'edit', source: updated })
+      }
+    } finally {
+      setBusyAction('')
+    }
+  }
+
+  const submitDraftForReview = async () => {
+    const source = dialog?.mode === 'edit' ? dialog.source : undefined
+    if (!source || !draftMatchesSource(draft, source) || validationStatusOf(source) !== 'PASSED') {
+      setFormError('发布前必须先用当前表单完成一次成功的连接测试；修改任一字段后需要重新测试')
+      return
+    }
+    setBusyAction(`review-submit:${source.id}`)
+    setFormError('')
+    try {
+      await dataSourceAPI.submitPublicationRequest(source.id)
+      const latest = await loadSources()
+      const updated = latest?.find(item => item.id === source.id)
+      setDialog(null)
+      setNotice({ tone: 'success', message: `“${updated?.name || source.name}”已提交审核；审核完成前仅可撤销申请` })
+    } catch (cause) {
+      setFormError(cause instanceof Error ? cause.message : '提交数据源审核失败')
+    } finally {
+      setBusyAction('')
+    }
+  }
+
   const submitConnection = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 		if (!dataSourceCodePattern.test(draft.code.trim())) {
@@ -601,25 +835,30 @@ export function DataSourceCenterPage() {
 						? excelAsset
 						: await dataSourceAPI.uploadExcelVersion(replacingFileSource.fileAssetId!, excelFile!)
 					setExcelAsset(asset)
-					await dataSourceAPI.test(replacingFileSource.id)
+					const testResult = await runConnectionTest(replacingFileSource.id)
 					const active = await dataSourceAPI.get(replacingFileSource.id)
+					if (!connectionTestStillCurrent(active, testResult)) {
+						throw new Error('测试完成后数据源配置已变化，请重新测试当前草稿')
+					}
 					setSources(current => current.map(source => source.id === active.id ? active : source))
-					viewedSourceIdRef.current = active.id
-					setDialog({ mode: 'view', source: active })
-					void loadTableStructures(active.id)
-					setNotice({ tone: 'success', message: `已覆盖“${active.name}”的源文件并生成版本 ${asset.version}；请点击“新增数据表”重新解析并映射 Sheet` })
+						setDialog(null)
+						setNotice({ tone: 'success', message: `已覆盖“${active.name}”的源文件并生成版本 ${asset.version}，新草稿测试通过；请从数据源卡片提交发布审核` })
 					return
 				}
 				const asset = excelAsset || await dataSourceAPI.uploadExcel(excelFile!)
 				if (!excelAsset) setExcelAsset(asset)
-				saved = await dataSourceAPI.create({ code: draft.code.trim(), name: draft.name.trim(), type: 'EXCEL', fileAssetId: asset.id })
-				await dataSourceAPI.test(saved.id)
+				saved = await dataSourceAPI.create({
+          code: draft.code.trim(), name: draft.name.trim(), description: draft.description.trim(),
+          visibility: draft.visibility, type: 'EXCEL', fileAssetId: asset.id,
+        })
+				const testResult = await runConnectionTest(saved.id)
 				const active = await dataSourceAPI.get(saved.id)
+				if (!connectionTestStillCurrent(active, testResult)) {
+					throw new Error('测试完成后数据源配置已变化，请重新测试当前草稿')
+				}
 				setSources(current => [active, ...current.filter(source => source.id !== active.id)])
-				viewedSourceIdRef.current = active.id
-				setDialog({ mode: 'view', source: active })
-				void loadTableStructures(active.id)
-				setNotice({ tone: 'success', message: `已上传并创建“${active.name}”；请点击“新增数据表”解析、预览并选择需要映射的 Sheet` })
+					setDialog(null)
+					setNotice({ tone: 'success', message: `已上传并创建“${active.name}”，文件草稿测试通过；请从数据源卡片提交发布审核` })
 			} catch (cause) {
 				const message = cause instanceof Error ? cause.message : '新建文件数据源失败'
 				if (saved) {
@@ -635,29 +874,8 @@ export function DataSourceCenterPage() {
 			}
 			return
 		}
-    const port = Number(draft.port)
-    const editing = dialog?.mode === 'edit' && dialog.source
-    if (!draft.name.trim() || !draft.code.trim() || !draft.host.trim() || !draft.database.trim() || !draft.username.trim() || !Number.isInteger(port) || port < 1 || port > 65535 || (!editing && !draft.password)) {
-      setFormError(`请完整填写连接信息${editing ? '' : '和密码'}，端口需为 1–65535 的整数`)
-      return
-    }
-    const input: DataSourceConnectionInput = {
-      code: draft.code.trim(), name: draft.name.trim(), type: draft.type, host: draft.host.trim(), port,
-      database: draft.database.trim(), username: draft.username.trim(), password: draft.password,
-    }
-    setBusyAction(editing ? `edit:${editing.id}` : 'create')
-    setFormError('')
-    try {
-      const saved = editing ? await dataSourceAPI.update(editing.id, input) : await dataSourceAPI.create(input)
-      setSources(current => editing ? current.map(source => source.id === saved.id ? saved : source) : [saved, ...current])
-      setNotice({ tone: 'success', message: editing ? `已更新“${saved.name}”，请重新测试连接后启用` : `已创建“${saved.name}”` })
-      setDialog(null)
-    } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : editing ? '更新数据源失败' : '新建数据源失败')
-    } finally {
-      setBusyAction('')
-    }
-  }
+	    await testDraftConnection()
+	  }
 
   const changeStatus = async (source: DataSourceRecord) => {
     const resume = source.status === 'DISABLED'
@@ -681,15 +899,56 @@ export function DataSourceCenterPage() {
     setBusyAction(`test:${source.id}`)
     setNotice(null)
     try {
-      const result = await dataSourceAPI.test(source.id)
+      const result = await runConnectionTest(source.id)
       const latest = await loadSources()
       const updated = latest?.find(item => item.id === source.id)
       if (updated) setDialog(current => current?.mode === 'view' && current.source?.id === updated.id ? { ...current, source: updated } : current)
-      setNotice({ tone: 'success', message: `“${source.name}”连接成功 · ${result.serverVersion || '版本未知'} · ${result.latencyMs} ms` })
+      if (updated && !connectionTestStillCurrent(updated, result)) {
+        setNotice({ tone: 'error', message: '测试完成后数据源配置已变化，请重新测试当前草稿' })
+        return
+      }
+      const publishRequired = updated ? hasUnpublishedDraft(updated) : Boolean(result.configVersionId)
+      setNotice({
+        tone: 'success',
+        message: `“${source.name}”连接成功 · ${result.serverVersion || '版本未知'} · ${result.latencyMs} ms${publishRequired ? '；当前配置仍是草稿，可以提交发布审核' : ''}`,
+      })
     } catch (cause) {
       // 测试失败后服务端会把数据源标记为异常，先刷新状态再保留错误原因。
       await loadSources()
-      setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '测试数据源连接失败' })
+      setNotice({ tone: 'error', message: friendlyConnectionError(cause) })
+    } finally {
+      setBusyAction('')
+    }
+  }
+
+  const publishSource = async (source: DataSourceRecord) => {
+    setBusyAction(`review-submit:${source.id}`)
+    setNotice(null)
+    try {
+      await dataSourceAPI.submitPublicationRequest(source.id)
+      const latest = await loadSources()
+      const updated = latest?.find(item => item.id === source.id)
+      if (updated) setDialog(current => current?.source?.id === updated.id ? { ...current, source: updated } : current)
+      setNotice({ tone: 'success', message: `“${source.name}”已提交发布审核；审核完成前仅可撤销申请` })
+    } catch (cause) {
+      const latest = await loadSources()
+      const updated = latest?.find(item => item.id === source.id)
+      if (updated) setDialog(current => current?.source?.id === updated.id ? { ...current, source: updated } : current)
+      setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '提交数据源审核失败' })
+    } finally {
+      setBusyAction('')
+    }
+  }
+
+  const withdrawReview = async (source: DataSourceRecord) => {
+    if (!source.reviewRequestId || !source.reviewRequestVersion) return
+    setBusyAction(`review-withdraw:${source.id}`)
+    try {
+      await dataSourceAPI.withdrawPublicationRequest(source.id, source.reviewRequestId, source.reviewRequestVersion)
+      await loadSources()
+      setNotice({ tone: 'success', message: `已撤销“${source.name}”的发布审核申请，可以继续修改配置` })
+    } catch (cause) {
+      setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '撤销审核申请失败' })
     } finally {
       setBusyAction('')
     }
@@ -713,6 +972,11 @@ export function DataSourceCenterPage() {
   }
 
   const actionBusy = Boolean(busyAction)
+  const editableFormSource = dialog?.mode === 'edit' ? dialog.source : undefined
+  const currentDraftTested = draft.type !== 'EXCEL'
+    && draftMatchesSource(draft, editableFormSource)
+    && validationStatusOf(editableFormSource!) === 'PASSED'
+    && reviewStatusOf(editableFormSource!) !== 'PENDING'
   const visibleMetadataJob = dialog?.source?.id === metadataJobSourceId ? metadataJob : null
   const metadataTaskActive = metadataJobActive(visibleMetadataJob)
   const metadataTaskBusy = metadataTaskActive || metadataJobLoading
@@ -754,30 +1018,40 @@ export function DataSourceCenterPage() {
         </div>
         {loading ? <div className="data-source-empty">正在加载数据源…</div> : sources.length === 0
           ? <div className="data-source-empty"><strong>还没有数据源</strong><span>点击右上角“新建数据源”开始配置。</span></div>
-          : filteredSources.length === 0 ? <div className="data-source-empty"><strong>没有符合条件的数据源</strong><span>请调整搜索词或筛选条件。</span></div>
-          : <div className="data-source-list" role="list" aria-label="已有数据源清单">{filteredSources.map(source => {
-              const canToggle = source.status === 'ACTIVE' || source.status === 'DISABLED'
-              const unavailable = source.status === 'SYNCING' || source.status === 'DELETING'
-              const canTest = !unavailable && source.status !== 'DISABLED'
-              return <article className="data-source-card" role="listitem" key={source.id}>
-                <button className="data-source-card-open" type="button" aria-label={`管理${source.name}的数据表资产`} onClick={() => openExisting('view', source)}>
-                  <span className={`data-source-icon ${source.type.toLowerCase()}`}>{source.type === 'EXCEL' ? 'XL' : 'DB'}</span>
-                  <span className="data-source-main"><span><strong role="heading" aria-level={3}>{source.name}</strong><span className={`data-source-status ${source.status.toLowerCase()}`}>{statusLabels[source.status]}</span></span><span className="data-source-subtitle">{typeLabels[source.type]} · {source.code}</span></span>
-                  <span className="data-source-card-facts">
+	          : filteredSources.length === 0 ? <div className="data-source-empty"><strong>没有符合条件的数据源</strong><span>请调整搜索词或筛选条件。</span></div>
+	          : <div className="data-source-list" role="list" aria-label="已有数据源清单">{filteredSources.map(source => {
+	              const reviewStatus = reviewStatusOf(source)
+	              const reviewLocked = reviewStatus === 'PENDING' || reviewStatus === 'REJECTED'
+	              const isRequester = !signedInSubject || source.reviewRequesterId === signedInSubject
+	              const canToggle = reviewStatus !== 'PENDING' && reviewStatus !== 'REJECTED' && (source.status === 'ACTIVE' || source.status === 'DISABLED')
+	              const unavailable = source.status === 'SYNCING' || source.status === 'DELETING'
+	              const canTest = !unavailable && reviewStatus !== 'PENDING'
+	              const pendingDraft = hasUnpublishedDraft(source)
+	              const canPublish = !unavailable && pendingDraft && reviewStatus !== 'PENDING' && validationStatusOf(source) === 'PASSED'
+	              return <article className={`data-source-card${reviewLocked ? ' review-locked' : ''}`} role="listitem" key={source.id}>
+	                <button className="data-source-card-open" type="button" disabled={reviewLocked} title={reviewStatus === 'PENDING' ? '审核完成前不能配置数据表' : reviewStatus === 'REJECTED' ? '修改并重新提交审核后才能配置数据表' : undefined} aria-label={`管理${source.name}的数据表资产`} onClick={() => openExisting('view', source)}>
+	                  <span className={`data-source-icon ${source.type.toLowerCase()}`}>{source.type === 'EXCEL' ? 'XL' : 'DB'}</span>
+	                  <span className="data-source-main"><span><strong role="heading" aria-level={3}>{source.name}</strong><span className={`data-source-status ${reviewStatus === 'PENDING' ? 'review-pending' : reviewStatus === 'REJECTED' ? 'review-rejected' : source.status.toLowerCase()}`}>{lifecycleLabel(source)}</span>{pendingDraft && reviewStatus !== 'PENDING' && reviewStatus !== 'REJECTED' && <span className={`data-source-status validation-${validationStatusOf(source).toLowerCase()}`}>{validationLabels[validationStatusOf(source)]}</span>}</span><span className="data-source-subtitle">{typeLabels[source.type]} · {source.code}{source.description ? ` · ${source.description}` : ''} · {publicationLabels[publicationStatusOf(source)]}</span>{reviewStatus === 'REJECTED' && <span className="data-source-review-reason">驳回原因：{source.reviewNote || '审核人未填写原因'}</span>}</span>
+	                  <span className="data-source-card-facts">
                     <span><small>Host</small><strong>{configText(source, 'host') || (source.type === 'EXCEL' ? '文件数据源' : '—')}</strong></span>
                     <span><small>Port</small><strong>{configText(source, 'port') || '—'}</strong></span>
                     <span><small>Database</small><strong>{configText(source, 'database') || '—'}</strong></span>
                     <span><small>Username</small><strong>{configText(source, 'username') || '—'}</strong></span>
                   </span>
-                </button>
-                <div className="data-source-actions">
-                  <button className="action-view" type="button" onClick={event => { event.stopPropagation(); openExisting('view', source) }}>查看</button>
-                  <button className="action-edit" type="button" disabled={actionBusy || unavailable || source.type === 'EXCEL'} onClick={event => { event.stopPropagation(); openExisting('edit', source) }}>修改</button>
-                  <button className="action-test" type="button" disabled={actionBusy || !canTest} onClick={event => { event.stopPropagation(); void testConnection(source) }}>{busyAction === `test:${source.id}` ? '测试中…' : '测试连接'}</button>
-                  <button className={source.status === 'DISABLED' ? 'action-resume' : 'action-pause'} type="button" disabled={actionBusy || !canToggle} onClick={event => { event.stopPropagation(); void changeStatus(source) }}>{source.status === 'DISABLED' ? '恢复' : '暂停'}</button>
-                  <button className="action-delete" type="button" disabled={actionBusy || unavailable} onClick={event => { event.stopPropagation(); openExisting('delete', source) }}>删除</button>
-                </div>
-              </article>
+	                </button>
+	                <div className="data-source-actions">
+	                  {reviewStatus === 'PENDING' ? <>
+	                    {isRequester && <button className="action-withdraw" type="button" disabled={actionBusy} onClick={event => { event.stopPropagation(); void withdrawReview(source) }}>{busyAction === `review-withdraw:${source.id}` ? '撤销中…' : '撤销申请'}</button>}
+	                  </> : <>
+	                    <button className="action-view" type="button" disabled={reviewStatus === 'REJECTED'} onClick={event => { event.stopPropagation(); openExisting('view', source) }}>查看</button>
+	                    <button className="action-edit" type="button" disabled={actionBusy || unavailable || source.type === 'EXCEL'} onClick={event => { event.stopPropagation(); openExisting('edit', source) }}>修改</button>
+	                    <button className="action-test" type="button" disabled={actionBusy || !canTest} onClick={event => { event.stopPropagation(); void testConnection(source) }}>{busyAction === `test:${source.id}` ? '测试中…' : '测试连接'}</button>
+	                    {pendingDraft && <button className="action-publish" type="button" disabled={actionBusy || !canPublish} title={canPublish ? '提交当前测试版本进入发布审核' : '当前草稿必须先通过连接测试'} onClick={event => { event.stopPropagation(); void publishSource(source) }}>{busyAction === `review-submit:${source.id}` ? '提交中…' : reviewStatus === 'REJECTED' ? '重新提交' : '发布'}</button>}
+	                    <button className={source.status === 'DISABLED' ? 'action-resume' : 'action-pause'} type="button" disabled={actionBusy || !canToggle} onClick={event => { event.stopPropagation(); void changeStatus(source) }}>{source.status === 'DISABLED' ? '恢复' : '暂停'}</button>
+	                    <button className="action-delete" type="button" disabled={actionBusy || unavailable} onClick={event => { event.stopPropagation(); openExisting('delete', source) }}>删除</button>
+	                  </>}
+	                </div>
+	              </article>
             })}</div>}
       </section>
 
@@ -786,6 +1060,8 @@ export function DataSourceCenterPage() {
           <div className="data-source-form-grid">
             <label>数据源名称<input autoFocus value={draft.name} onChange={event => updateDraft('name', event.target.value)} placeholder="例如：销售业务库" /></label>
             <label>数据源编码<input aria-label="数据源编码" maxLength={128} value={draft.code} onChange={event => updateDraft('code', event.target.value)} placeholder="例如：sales_mysql" /><small>以英文字母开头，仅支持英文字母、数字和下划线；中文文件名会自动转换为 MD5 编码。</small></label>
+            <label>数据源描述<input value={draft.description} onChange={event => updateDraft('description', event.target.value)} placeholder="说明数据范围、用途和使用边界" /></label>
+            <label>分享状态<select value={draft.visibility} onChange={event => setDraft(current => ({ ...current, visibility: event.target.value as DataSourceVisibility }))}><option value="PRIVATE">仅所属人及授权用户</option><option value="TENANT_PUBLIC">租户内共享</option></select></label>
             <label>数据源类型<select value={draft.type} onChange={event => {
 				const type = event.target.value as DataSourceType
 				setExcelFile(null)
@@ -819,11 +1095,20 @@ export function DataSourceCenterPage() {
 					</div>
 				</div>
 				{replacingFileSource && <div className="excel-source-replace-note" role="status">已识别已有数据源“{replacingFileSource.name}”。提交后会将文件资产切换到新版本，不会重复创建数据源。</div>}
-				<small className="excel-source-next-step">完成后进入“数据表资产”，点击“新增数据表”解析每个 Sheet；LLM 映射会同时使用 Sheet 名称、真实表头和最多 3 行内容样本。</small>
-			</section>}
-          {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
-			<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="primary-button" type="submit" disabled={actionBusy}>{actionBusy ? draft.type === 'EXCEL' ? replacingFileSource ? '正在覆盖源文件…' : '正在上传并创建…' : '正在保存…' : dialog.mode === 'edit' ? '保存修改' : draft.type === 'EXCEL' ? replacingFileSource ? '覆盖并更新源文件' : '上传并创建数据源' : '创建数据源'}</button></footer>
-        </form>
+				<small className="excel-source-next-step">完成后先测试并上线，再进入“数据表资产”解析每个 Sheet；LLM 默认只使用技术元数据，业务样本必须在任务中另行明确授权。</small>
+				</section>}
+	          {draft.type !== 'EXCEL' && <div className={`data-source-test-readiness${currentDraftTested ? ' ready' : ''}`} role="status">
+	            <span aria-hidden="true">{currentDraftTested ? '✓' : '1'}</span>
+	            <div><strong>{currentDraftTested ? '当前配置已通过连接测试' : '先测试当前配置，再提交发布审核'}</strong><small>{currentDraftTested ? '发布按钮已启用；提交后数据源进入审核中状态。' : '测试会先保存表单草稿；修改任何连接字段后，需要重新测试。'}</small></div>
+	          </div>}
+	          {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
+				{draft.type === 'EXCEL'
+				  ? <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="primary-button" type="submit" disabled={actionBusy}>{actionBusy ? replacingFileSource ? '正在覆盖源文件…' : '正在上传并创建…' : replacingFileSource ? '覆盖并更新源文件' : '上传并创建数据源'}</button></footer>
+				  : <footer className="data-source-config-footer">
+				      <button className="test-connection-button" type="submit" disabled={actionBusy}>{busyAction.startsWith('form-test:') ? '正在保存并测试…' : '测试连接'}</button>
+				      <span><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="primary-button" type="button" disabled={actionBusy || !currentDraftTested} title={currentDraftTested ? '提交当前测试版本进入发布审核' : '请先测试当前表单并确保连接成功'} onClick={() => void submitDraftForReview()}>{busyAction.startsWith('review-submit:') ? '正在提交…' : '发布'}</button></span>
+				    </footer>}
+	        </form>
       </Dialog>}
 
       {dialog?.mode === 'view' && dialog.source && <Dialog title="数据表资产" wide onClose={closeDialog}>
@@ -837,7 +1122,8 @@ export function DataSourceCenterPage() {
                 input.value = ''
                 if (file) void reuploadSourceFile(dialog.source!, file)
               }} /></label>
-              : <><label className="data-source-refresh-mode"><span>刷新方式</span><select aria-label="元数据刷新方式" value={refreshMode} disabled={actionBusy || metadataTaskBusy} onChange={event => setRefreshMode(event.target.value as MetadataRefreshMode)}><option value="INCREMENTAL">增量刷新（仅变化字段）</option><option value="FULL">全量刷新（全部重新处理）</option></select></label>
+              : <><label className="data-source-sample-mode"><span>LLM 样本</span><select aria-label="LLM 样本授权" value={sampleDataMode} disabled={actionBusy || metadataTaskBusy} onChange={event => setSampleDataMode(event.target.value as MetadataSampleMode)}><option value="MASK">默认读取 10 行（格式脱敏）</option><option value="DENY">不读取业务行</option><option value="RAW">10 行原始样本（高风险）</option></select></label>
+                <label className="data-source-refresh-mode"><span>刷新方式</span><select aria-label="元数据刷新方式" value={refreshMode} disabled={actionBusy || metadataTaskBusy} onChange={event => setRefreshMode(event.target.value as MetadataRefreshMode)}><option value="INCREMENTAL">增量刷新（仅变化字段）</option><option value="FULL">全量刷新（全部重新处理）</option></select></label>
                 <button className="action-refresh-all" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void refreshAllTableAssets(dialog.source!)}>{busyAction === `refresh-tables:${dialog.source.id}` ? '正在提交…' : `开始${refreshMode === 'INCREMENTAL' ? '增量' : '全量'}刷新`}</button></>}
           </div>
           <div className="data-source-job-state" role="note">{dialog.source.type === 'EXCEL'
@@ -877,10 +1163,11 @@ export function DataSourceCenterPage() {
 
       {dialog?.mode === 'select-tables' && dialog.source && <Dialog title="新增数据表" wide onClose={closeDialog}>
         <div className="data-source-table-picker">
-          <header><div><strong>{dialog.source.name}</strong><span>{dialog.source.type === 'EXCEL' ? '解析并选择需要映射的 Sheet' : '从源库选择需要完善并纳入管理的数据表'}</span></div><small>{dialog.source.type === 'EXCEL' ? '此处预览每个 Sheet 的前 10 行；提交后 LLM 会逐 Sheet 使用名称、真实表头、字段类型和最多 3 行内容判断表名、字段名及字段描述。' : '选中后采集表结构与 3 行样本，经 LLM 完善后存入 PostgreSQL。'}</small></header>
+          <header><div><strong>{dialog.source.name}</strong><span>{dialog.source.type === 'EXCEL' ? '解析并选择需要映射的 Sheet' : '从源库选择需要完善并纳入管理的数据表'}</span></div><small>LLM 默认读取最多 10 行格式脱敏样本辅助识别；可按本次任务改为不读取或使用原始样本，所有选择均写入审计并受租户策略约束。</small></header>
           {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
           {discoveryLoading ? <div className="data-source-structure-state" role="status">{dialog.source.type === 'EXCEL' ? '正在解析 Sheet 前 10 行并生成预览…' : '正在从数据源刷新表清单…'}</div> : <>
             {dialog.source.type === 'EXCEL' && fileInspection && <div className="file-inspection-summary" role="status"><strong>Sheet 结构解析完成</strong><span>{fileInspection.sheets.length} 个 Sheet · 每个最多预览 {fileInspection.sampleLimit} 行</span></div>}
+            <label className="data-source-task-sample-mode"><span><strong>本次 LLM 样本授权</strong><small>{metadataSampleDescription(sampleDataMode)}。管理员在执行前撤权时任务会安全终止。</small></span><select aria-label="本次 LLM 样本授权" value={sampleDataMode} disabled={actionBusy} onChange={event => setSampleDataMode(event.target.value as MetadataSampleMode)}><option value="MASK">MASK · 默认读取 10 行格式脱敏样本</option><option value="DENY">DENY · 仅技术元数据</option><option value="RAW">RAW · 10 行原始样本（高风险）</option></select></label>
             <div className="data-source-table-picker-toolbar">
               <label><input type="checkbox" checked={selectableDiscoveredTables.length > 0 && selectedTableKeys.length === selectableDiscoveredTables.length} onChange={event => {
                 if (event.target.checked) setSelectedTableKeys(selectableDiscoveredTables.map(discoveredTableKey))
@@ -902,7 +1189,7 @@ export function DataSourceCenterPage() {
               return <label className={imported ? 'imported' : ''} key={key}><input type="checkbox" disabled={imported || actionBusy} checked={selectedTableKeys.includes(key)} onChange={() => setSelectedTableKeys(current => current.includes(key) ? current.filter(item => item !== key) : [...current, key])} /><span><strong>{table.name}</strong><small>{[table.catalogName, table.schemaName, table.name].filter(Boolean).join('.')} · {table.columns.length} 字段</small></span><em>{imported ? '已入库' : table.type}</em></label>
             })}</div>}
           </>}
-          <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => returnToTableAssets(dialog.source!)}>取消</button><button className="primary-button" type="button" disabled={actionBusy || discoveryLoading || selectedTableKeys.length === 0} onClick={() => void importSelectedTables()}>{actionBusy ? dialog.source.type === 'EXCEL' ? '正在提交映射…' : '正在采样并完善…' : dialog.source.type === 'EXCEL' ? `提交 ${selectedTableKeys.length} 个 Sheet 映射` : `新增 ${selectedTableKeys.length} 张表`}</button></footer>
+          <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => returnToTableAssets(dialog.source!)}>取消</button><button className="primary-button" type="button" disabled={actionBusy || discoveryLoading || selectedTableKeys.length === 0} onClick={() => void importSelectedTables()}>{actionBusy ? '正在提交完善任务…' : dialog.source.type === 'EXCEL' ? `提交 ${selectedTableKeys.length} 个 Sheet 映射` : `新增 ${selectedTableKeys.length} 张表`}</button></footer>
         </div>
       </Dialog>}
 
@@ -914,13 +1201,15 @@ export function DataSourceCenterPage() {
           <div className="data-source-form-grid"><label>敏感级别<select value={tableDraft.sensitivityLevel} onChange={event => setTableDraft(current => ({ ...current, sensitivityLevel: event.target.value }))}><option value="PUBLIC">公开</option><option value="INTERNAL">内部</option><option value="CONFIDENTIAL">机密</option><option value="RESTRICTED">严格限制</option></select></label><label>可见范围<select value={tableDraft.visibility} onChange={event => setTableDraft(current => ({ ...current, visibility: event.target.value }))}><option value="PRIVATE">私有</option><option value="TENANT_PUBLIC">租户公开</option></select></label></div>
           <label className="data-source-checkbox"><input type="checkbox" checked={tableDraft.manualLocked} onChange={event => setTableDraft(current => ({ ...current, manualLocked: event.target.checked }))} />锁定人工修改，后续 LLM 刷新不自动覆盖</label>
           <section className="data-source-field-mapping" aria-label="字段映射">
-            <header><div><span className="eyebrow">字段映射</span><strong>源字段与业务字段</strong></div><small>{columnDrafts.length} 个字段</small></header>
+            <header><div><span className="eyebrow">字段映射</span><strong>源字段与业务字段</strong><small id="field-tag-contract">人工编辑支持自由标签；LLM 自动完善只使用受控词表。多个标签用英文逗号分隔，保存时自动去空、去重（最多 30 个，每个不超过 50 字符）。</small></div><small>{columnDrafts.length} 个字段</small></header>
             {tableEditorLoading ? <div className="data-source-column-state" role="status">正在加载字段映射…</div>
               : columnDrafts.length === 0 ? <div className="data-source-column-state">暂无可修改字段</div>
-              : <div className="data-source-field-mapping-scroll"><table><thead><tr><th>源字段</th><th>技术类型</th><th>业务字段名称</th><th>语义类型</th><th>敏感级别</th><th>人工锁定</th></tr></thead><tbody>{columnDrafts.map(column => <tr key={column.original.id}>
+              : <div className="data-source-field-mapping-scroll"><table><thead><tr><th>源字段</th><th>技术类型</th><th>业务字段名称</th><th>业务说明</th><th>标签</th><th>语义类型</th><th>敏感级别</th><th>人工锁定</th></tr></thead><tbody>{columnDrafts.map(column => <tr key={column.original.id}>
                   <td><strong>{column.original.columnName}</strong><small>#{column.original.ordinalPosition}</small></td>
                   <td><strong>{column.original.nativeType || '—'}</strong><small>{column.original.canonicalType || '—'}</small></td>
                   <td><input aria-label={`${column.original.columnName}业务字段名称`} value={column.businessName} onChange={event => updateColumnDraft(column.original.id, { businessName: event.target.value })} /></td>
+                  <td><textarea aria-label={`${column.original.columnName}业务说明`} rows={2} value={column.businessDescription} onChange={event => updateColumnDraft(column.original.id, { businessDescription: event.target.value })} /></td>
+                  <td><input aria-label={`${column.original.columnName}标签`} aria-describedby="field-tag-contract" value={column.tags} onChange={event => updateColumnDraft(column.original.id, { tags: event.target.value })} placeholder="英文逗号分隔" /></td>
                   <td><select aria-label={`${column.original.columnName}语义类型`} value={column.semanticType} onChange={event => updateColumnDraft(column.original.id, { semanticType: event.target.value })}><option value="">未设置</option>{semanticTypes.map(value => <option value={value} key={value}>{value}</option>)}</select></td>
                   <td><select aria-label={`${column.original.columnName}敏感级别`} value={column.sensitivityLevel} onChange={event => updateColumnDraft(column.original.id, { sensitivityLevel: event.target.value as DataSourceColumnRecord['sensitivityLevel'] })}><option value="PUBLIC">公开</option><option value="INTERNAL">内部</option><option value="CONFIDENTIAL">机密</option><option value="RESTRICTED">严格限制</option></select></td>
                   <td><input aria-label={`${column.original.columnName}人工锁定`} type="checkbox" checked={column.manualLocked} onChange={event => updateColumnDraft(column.original.id, { manualLocked: event.target.checked })} /></td>

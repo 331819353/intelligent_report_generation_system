@@ -186,6 +186,9 @@
       "required": ["id", "grid", "innerGrid", "locks", "sticky", "components"],
       "properties": {
         "id": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["MENU", "CONTENT"]},
+        "name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "visible": {"type": "boolean"},
         "grid": {"$ref": "#/$defs/grid"},
         "innerGrid": {"$ref": "#/$defs/innerGrid"},
         "zIndex": {"type": "integer", "minimum": 0},
@@ -193,7 +196,124 @@
         "sticky": {"$ref": "#/$defs/blockSticky"},
         "style": {"type": "object"},
         "permissionPolicy": {"$ref": "#/$defs/permissionPolicy"},
+        "menuLayout": {"$ref": "#/$defs/menuLayout"},
+        "contentLayout": {"$ref": "#/$defs/contentLayout"},
         "components": {"type": "array", "items": {"$ref": "#/$defs/component"}}
+      }
+    },
+    "ratioPair": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "number", "exclusiveMinimum": 0, "maximum": 12},
+        {"type": "number", "exclusiveMinimum": 0, "maximum": 12}
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "menuRatios": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["topColumns", "bottomColumns", "rowHeights"],
+      "properties": {
+        "topColumns": {"$ref": "#/$defs/ratioPair"},
+        "bottomColumns": {"$ref": "#/$defs/ratioPair"},
+        "rowHeights": {"$ref": "#/$defs/ratioPair"}
+      }
+    },
+    "menuCellLogoTitle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["visible", "logoText", "title"],
+      "properties": {
+        "visible": {"type": "boolean"},
+        "logoText": {"type": "string", "maxLength": 20},
+        "title": {"type": "string", "maxLength": 200},
+        "subtitle": {"type": "string", "maxLength": 200}
+      }
+    },
+    "menuCellItems": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["visible", "items"],
+      "properties": {
+        "visible": {"type": "boolean"},
+        "items": {"type": "array", "maxItems": 20, "items": {"type": "string", "minLength": 1, "maxLength": 100}}
+      }
+    },
+    "menuCellFilters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["visible", "parameterIds"],
+      "properties": {
+        "visible": {"type": "boolean"},
+        "parameterIds": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/id"}}
+      }
+    },
+    "menuCellNavigation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["visible", "items"],
+      "properties": {
+        "visible": {"type": "boolean"},
+        "items": {"type": "array", "maxItems": 20, "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["label"],
+          "properties": {
+            "label": {"type": "string", "minLength": 1, "maxLength": 100},
+            "targetBlockId": {"$ref": "#/$defs/id"}
+          }
+        }}
+      }
+    },
+    "menuLayout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["visible", "defaultRatios", "ratios", "usesDefaultRatios", "cells"],
+      "properties": {
+        "visible": {"type": "boolean"},
+        "defaultRatios": {"$ref": "#/$defs/menuRatios"},
+        "ratios": {"$ref": "#/$defs/menuRatios"},
+        "usesDefaultRatios": {"type": "boolean"},
+        "cells": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["logoTitle", "actions", "globalFilters", "navigation"],
+          "properties": {
+            "logoTitle": {"$ref": "#/$defs/menuCellLogoTitle"},
+            "actions": {"$ref": "#/$defs/menuCellItems"},
+            "globalFilters": {"$ref": "#/$defs/menuCellFilters"},
+            "navigation": {"$ref": "#/$defs/menuCellNavigation"}
+          }
+        }
+      }
+    },
+    "contentArea": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["visible", "componentIds"],
+      "properties": {
+        "visible": {"type": "boolean"},
+        "componentIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      }
+    },
+    "contentLayout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["visible", "areas"],
+      "properties": {
+        "visible": {"type": "boolean"},
+        "areas": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "conclusion", "components"],
+          "properties": {
+            "title": {"$ref": "#/$defs/contentArea"},
+            "conclusion": {"$ref": "#/$defs/contentArea"},
+            "components": {"$ref": "#/$defs/contentArea"}
+          }
+        }
       }
     },
     "grid": {

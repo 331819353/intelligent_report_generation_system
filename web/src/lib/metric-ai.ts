@@ -39,6 +39,18 @@ export type MetricAuthoringProposal = {
 export type MetricAuthoringProposalResult = {
   requestId: string
   retrievalContextHash: string
+  intent?: {
+    businessGoal: string
+    preferredDatasetReferences: string[]
+    statisticalObjects: string[]
+    aggregation: string
+    dateReferences: string[]
+    dimensions: string[]
+    timeGrain: string
+    needsGrouping: boolean
+    needsJoin: boolean
+    searchTerms: string[]
+  }
   proposal: MetricAuthoringProposal
 }
 

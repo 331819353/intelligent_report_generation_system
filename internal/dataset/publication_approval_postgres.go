@@ -17,7 +17,12 @@ const publicationRequestSelect = `request.id::text,request.dataset_id::text,requ
 	to_char(request.submitted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
 	COALESCE(to_char(request.reviewed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),''),
 	to_char(request.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
-	request.validation_parameters`
+	request.validation_parameters,request.reserved_published_version_id::text,
+	request.metric_candidate_result,request.metric_candidate_generation_status,
+	request.metric_candidate_total,request.metric_candidate_ready_count,
+	request.metric_candidate_review_count,request.metric_candidate_blocked_count,
+	request.metric_candidate_warning,request.metric_candidate_error_code,
+	COALESCE(to_char(request.metric_candidate_generated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),'')`
 
 func (s *PostgresStore) SubmitPublicationRequest(
 	ctx context.Context,
@@ -73,6 +78,28 @@ func (s *PostgresStore) SubmitPublicationRequest(
 				datasetID, input.DraftVersionID, input.ExpectedDraftRecordVersion).Scan(&requestID)
 		}
 		if err != nil {
+			return err
+		}
+		// Submission only freezes the exact draft and registers durable background work.
+		// Retrying the same frozen request requeues a terminal preparation failure without
+		// changing any publication facts.
+		if _, err := tx.Exec(ctx, `UPDATE platform.dataset_publication_requests SET
+			metric_candidate_generation_status='PENDING',
+			metric_candidate_error_code='',updated_at=now()
+			WHERE id::text=$1 AND status='PENDING'
+			  AND metric_candidate_generation_status='FAILED'
+			  AND metric_candidate_result IS NULL`, requestID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.metric_candidate_preparation_jobs(
+			tenant_id,publication_request_id,dataset_id,status
+		) VALUES($1,$2,$3,'PENDING')
+		ON CONFLICT(tenant_id,publication_request_id) DO UPDATE SET
+			status='PENDING',attempt=0,next_attempt_at=now(),
+			lease_owner='',lease_expires_at=NULL,error_code='',error_message='',
+			started_at=NULL,completed_at=NULL,updated_at=now()
+		WHERE platform.metric_candidate_preparation_jobs.status='FAILED'`,
+			tenantID, requestID, datasetID); err != nil {
 			return err
 		}
 		if inserted {
@@ -142,6 +169,73 @@ func (s *PostgresStore) GetPublicationRequest(
 	return request, err
 }
 
+func (s *PostgresStore) SavePublicationCandidatePreparation(
+	ctx context.Context,
+	tenantID, datasetID string,
+	request PublicationRequest,
+	preparation PublicationCandidatePreparation,
+) (saved PublicationRequest, err error) {
+	if preparation.Status != PublicationCandidateSucceeded &&
+		preparation.Status != PublicationCandidatePartial &&
+		preparation.Status != PublicationCandidateFailed {
+		return PublicationRequest{}, ErrInvalidDocument
+	}
+	if preparation.Total < 0 || preparation.Ready < 0 || preparation.Review < 0 || preparation.Blocked < 0 ||
+		preparation.Ready+preparation.Review+preparation.Blocked > preparation.Total {
+		return PublicationRequest{}, ErrInvalidDocument
+	}
+	if preparation.Status == PublicationCandidateFailed {
+		preparation.Result = nil
+		if preparation.ErrorCode == "" {
+			preparation.ErrorCode = "METRIC_CANDIDATE_GENERATION_FAILED"
+		}
+	} else if len(preparation.Result) == 0 || !json.Valid(preparation.Result) {
+		return PublicationRequest{}, ErrInvalidDocument
+	}
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE platform.dataset_publication_requests SET
+			metric_candidate_generation_status=$1,
+			metric_candidate_result=$2,
+			metric_candidate_total=$3,
+			metric_candidate_ready_count=$4,
+			metric_candidate_review_count=$5,
+			metric_candidate_blocked_count=$6,
+			metric_candidate_warning=$7,
+			metric_candidate_error_code=$8,
+			metric_candidate_generated_at=CASE WHEN $1='FAILED' THEN NULL ELSE now() END,
+			updated_at=now()
+			WHERE id::text=$9 AND dataset_id::text=$10 AND status='PENDING'
+			  AND version=$11 AND draft_version_id::text=$12
+			  AND expected_draft_record_version=$13 AND expected_dsl_hash=$14
+			  AND reserved_published_version_id::text=$15
+			  AND metric_candidate_generation_status IN ('PENDING','FAILED')`,
+			preparation.Status, preparation.Result, preparation.Total, preparation.Ready,
+			preparation.Review, preparation.Blocked, preparation.Warning, preparation.ErrorCode,
+			request.ID, datasetID, request.Version, request.DraftVersionID,
+			request.ExpectedDraftRecordVersion, request.ExpectedDSLHash, request.ReservedPublishedVersionID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			var current PublicationRequest
+			if getErr := scanPublicationRequest(tx.QueryRow(ctx, `SELECT `+publicationRequestSelect+`
+				FROM platform.dataset_publication_requests AS request
+				WHERE request.id::text=$1 AND request.dataset_id::text=$2`, request.ID, datasetID), &current); getErr != nil {
+				return getErr
+			}
+			if current.MetricCandidateStatus != PublicationCandidateSucceeded &&
+				current.MetricCandidateStatus != PublicationCandidatePartial {
+				return ErrPublicationRequestConflict
+			}
+			saved = current
+			return nil
+		}
+		return scanPublicationRequest(tx.QueryRow(ctx, `SELECT `+publicationRequestSelect+`
+			FROM platform.dataset_publication_requests AS request WHERE request.id::text=$1`, request.ID), &saved)
+	})
+	return saved, err
+}
+
 func (s *PostgresStore) ApproveAndPublish(
 	ctx context.Context,
 	tenantID, actorID, datasetID, requestID string,
@@ -190,7 +284,10 @@ func (s *PostgresStore) ApproveAndPublish(
 			plan.IdempotencyKey != requestID {
 			return ErrPublicationRequestConflict
 		}
-		err = s.publishTx(ctx, tx, tenantID, actorID, datasetID, plan, &published)
+		err = s.publishTx(
+			ctx, tx, tenantID, actorID, datasetID,
+			PublicationOriginHumanApproval, plan, &published,
+		)
 		if err != nil {
 			return err
 		}
@@ -282,6 +379,11 @@ func scanPublicationRequest(row interface{ Scan(...any) error }, request *Public
 		&request.ExpectedDSLHash, &request.ExpectedPlanHash, &request.RequesterID, &request.RequestNote,
 		&request.ReviewerID, &request.ReviewNote, &request.PublishedVersionID,
 		&request.SubmittedAt, &request.ReviewedAt, &request.UpdatedAt, &parameters,
+		&request.ReservedPublishedVersionID, &request.MetricCandidateResult,
+		&request.MetricCandidateStatus, &request.MetricCandidateTotal,
+		&request.MetricCandidateReady, &request.MetricCandidateReview,
+		&request.MetricCandidateBlocked, &request.MetricCandidateWarning,
+		&request.MetricCandidateErrorCode, &request.MetricCandidateGeneratedAt,
 	); err != nil {
 		return err
 	}

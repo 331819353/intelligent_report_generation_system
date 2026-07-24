@@ -113,6 +113,9 @@ type Page struct {
 
 type Block struct {
 	ID               string            `json:"id"`
+	Kind             string            `json:"kind,omitempty"`
+	Name             string            `json:"name,omitempty"`
+	Visible          *bool             `json:"visible,omitempty"`
 	Grid             Grid              `json:"grid"`
 	InnerGrid        InnerGrid         `json:"innerGrid"`
 	ZIndex           int               `json:"zIndex,omitempty"`
@@ -120,7 +123,75 @@ type Block struct {
 	Sticky           *Sticky           `json:"sticky"`
 	Style            map[string]any    `json:"style,omitempty"`
 	PermissionPolicy *PermissionPolicy `json:"permissionPolicy,omitempty"`
+	MenuLayout       *MenuLayout       `json:"menuLayout,omitempty"`
+	ContentLayout    *ContentLayout    `json:"contentLayout,omitempty"`
 	Components       []Component       `json:"components"`
+}
+
+type RatioPair [2]float64
+
+type MenuRatios struct {
+	TopColumns    RatioPair `json:"topColumns"`
+	BottomColumns RatioPair `json:"bottomColumns"`
+	RowHeights    RatioPair `json:"rowHeights"`
+}
+
+type MenuLogoTitleCell struct {
+	Visible  bool   `json:"visible"`
+	LogoText string `json:"logoText"`
+	Title    string `json:"title"`
+	Subtitle string `json:"subtitle,omitempty"`
+}
+
+type MenuItemsCell struct {
+	Visible bool     `json:"visible"`
+	Items   []string `json:"items"`
+}
+
+type MenuFiltersCell struct {
+	Visible      bool     `json:"visible"`
+	ParameterIDs []string `json:"parameterIds"`
+}
+
+type MenuNavigationItem struct {
+	Label         string `json:"label"`
+	TargetBlockID string `json:"targetBlockId,omitempty"`
+}
+
+type MenuNavigationCell struct {
+	Visible bool                 `json:"visible"`
+	Items   []MenuNavigationItem `json:"items"`
+}
+
+type MenuCells struct {
+	LogoTitle     MenuLogoTitleCell  `json:"logoTitle"`
+	Actions       MenuItemsCell      `json:"actions"`
+	GlobalFilters MenuFiltersCell    `json:"globalFilters"`
+	Navigation    MenuNavigationCell `json:"navigation"`
+}
+
+type MenuLayout struct {
+	Visible           bool       `json:"visible"`
+	DefaultRatios     MenuRatios `json:"defaultRatios"`
+	Ratios            MenuRatios `json:"ratios"`
+	UsesDefaultRatios bool       `json:"usesDefaultRatios"`
+	Cells             MenuCells  `json:"cells"`
+}
+
+type ContentArea struct {
+	Visible      bool     `json:"visible"`
+	ComponentIDs []string `json:"componentIds"`
+}
+
+type ContentAreas struct {
+	Title      ContentArea `json:"title"`
+	Conclusion ContentArea `json:"conclusion"`
+	Components ContentArea `json:"components"`
+}
+
+type ContentLayout struct {
+	Visible bool         `json:"visible"`
+	Areas   ContentAreas `json:"areas"`
 }
 
 type Grid struct {

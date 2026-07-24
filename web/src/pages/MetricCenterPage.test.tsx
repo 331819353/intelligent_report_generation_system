@@ -25,7 +25,7 @@ import { MetricCenterPage } from './MetricCenterPage'
 
 afterEach(() => vi.restoreAllMocks())
 
-describe('指标中心原子指标编辑', () => {
+describe('指标配置中心原子指标编辑', () => {
   test('新建页提供可选 AI 参考条件，但不展示手工指标配置', async () => {
     const user = userEvent.setup()
     const mocks = mockMetricCenter()
@@ -34,6 +34,8 @@ describe('指标中心原子指标编辑', () => {
     const requirement = await screen.findByLabelText('指标创建需求')
     const generate = screen.getByRole('button', { name: '生成指标配置' })
     expect(generate).toHaveClass('metric-ai-generate-button')
+    expect(requirement.parentElement).toHaveClass('metric-ai-request-row')
+    expect(generate.parentElement).toBe(requirement.parentElement)
     expect(generate).toBeDisabled()
     expect(screen.queryByLabelText('指标编码')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('指标数据集')).not.toBeInTheDocument()
@@ -51,6 +53,77 @@ describe('指标中心原子指标编辑', () => {
 
     await user.type(requirement, '统计已支付订单销售额，按支付月份汇总。')
     expect(generate).toBeEnabled()
+  })
+
+  test('生成完成后自动弹窗展示方案，关闭后可再次打开', async () => {
+    const user = userEvent.setup()
+    mockMetricCenter()
+    vi.spyOn(metricAIAPI, 'propose').mockResolvedValue(metricAIResult({
+      strategy: 'DATA_GAP',
+      summary: '当前授权数据缺少退款金额。',
+    }))
+    renderMetricCenter('/metrics/new')
+
+    await user.type(await screen.findByLabelText('指标创建需求'), '创建净销售额指标。')
+    await user.click(screen.getByRole('button', { name: '生成指标配置' }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveAttribute('aria-modal', 'true')
+    expect(within(dialog).getByRole('article', { name: 'AI 指标审核提案' })).toBeInTheDocument()
+    expect(document.body.style.overflow).toBe('hidden')
+
+    await user.click(within(dialog).getByRole('button', { name: '关闭指标提案' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(document.body.style.overflow).toBe('')
+
+    await user.click(screen.getByRole('button', { name: '查看生成结果' }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+  })
+
+  test('同名映射数据集展示数据源和源表，并把来源信息传给 AI', async () => {
+    const user = userEvent.setup()
+    const mocks = mockMetricCenter()
+    const oracleDataset: DatasetSummary = {
+      ...dataset,
+      id: 'order-items-oracle',
+      name: '销售订单明细表',
+      type: 'MAPPED_TABLE',
+      originTableId: 'oracle-order-items',
+      originTableName: 'SALES_ORDER_ITEMS',
+      originDataSourceName: '经营分析 Oracle 主题库',
+      currentPublishedVersionId: 'oracle-order-items-version',
+    }
+    const workbookDataset: DatasetSummary = {
+      ...dataset,
+      id: 'order-items-workbook',
+      name: '销售订单明细表',
+      type: 'MAPPED_TABLE',
+      originTableId: 'workbook-order-items',
+      originTableName: '销售订单',
+      originDataSourceName: '多工作表多级表头示例',
+      currentPublishedVersionId: 'workbook-order-items-version',
+    }
+    mocks.datasetListSpy.mockResolvedValue({
+      items: [oracleDataset, workbookDataset], total: 2, limit: 200, offset: 0,
+    })
+    vi.spyOn(metricAIAPI, 'propose').mockResolvedValue(metricAIResult({
+      strategy: 'DATA_GAP', summary: '测试来源信息。',
+    }))
+    renderMetricCenter('/metrics/new')
+
+    const oracleChoice = await screen.findByLabelText('优先使用数据集 销售订单明细表（数据源：经营分析 Oracle 主题库；源表：SALES_ORDER_ITEMS）')
+    const workbookChoice = screen.getByLabelText('优先使用数据集 销售订单明细表（数据源：多工作表多级表头示例；源表：销售订单）')
+    expect(screen.getByText('经营分析 Oracle 主题库 · SALES_ORDER_ITEMS')).toBeInTheDocument()
+    expect(screen.getByText('多工作表多级表头示例 · 销售订单')).toBeInTheDocument()
+
+    await user.click(oracleChoice)
+    await user.click(workbookChoice)
+    await user.type(screen.getByLabelText('指标创建需求'), '创建销售订单金额指标。')
+    await user.click(screen.getByRole('button', { name: '生成指标配置' }))
+
+    expect(metricAIAPI.propose).toHaveBeenCalledWith({
+      requirement: '创建销售订单金额指标。\n\n【AI 参考条件】\n以下条件由用户选择；未指定的内容请由 AI 基于授权资产补全：\n- 优先参考的已发布数据集：销售订单明细表（数据源：经营分析 Oracle 主题库；源表：SALES_ORDER_ITEMS）、销售订单明细表（数据源：多工作表多级表头示例；源表：销售订单）',
+    })
   })
 
   test('选择已发布数据集后按其字段提供日期和维度，并稳定合并为自然语言需求', async () => {
@@ -173,6 +246,46 @@ describe('指标中心原子指标编辑', () => {
     expect(await screen.findByLabelText('指标创建需求')).toHaveValue(requirement)
     expect(screen.getByRole('button', { name: '生成指标配置' })).toBeEnabled()
     expect(proposeSpy).not.toHaveBeenCalled()
+  })
+
+  test('从数据集展示区进入时预选拓展基线，并把追加式 DAG 约束传给后续改造流程', async () => {
+    const user = userEvent.setup()
+    mockMetricCenter()
+    vi.spyOn(metricAIAPI, 'propose').mockResolvedValue(metricAIResult({
+      strategy: 'MODIFY_DATASET',
+      summary: '需要在当前数据集追加月度聚合输出',
+      targetDatasetId: dataset.id,
+      targetDatasetVersionId: dataVersion.id,
+      datasetInstruction: '追加月度销售额输出。',
+    }))
+    render(<MemoryRouter initialEntries={[{
+      pathname: '/metrics/new',
+      state: { preferredDatasetId: dataset.id, safeDatasetExtension: true },
+    }]}><Routes>
+      <Route path="/metrics/new" element={<MetricCenterPage />} />
+      <Route path="/datasets/:datasetId/edit" element={<LocationProbe />} />
+    </Routes></MemoryRouter>)
+
+    expect(await screen.findByText(`正在基于“${dataset.name}”拓展指标`)).toBeInTheDocument()
+    expect(screen.getByLabelText(`优先使用数据集 ${dataset.name}`)).toBeChecked()
+    const requirement = '创建月度销售额指标。'
+    await user.type(screen.getByLabelText('指标创建需求'), requirement)
+    await user.click(screen.getByRole('button', { name: '生成指标配置' }))
+
+    expect(metricAIAPI.propose).toHaveBeenCalledWith({
+      requirement: expect.stringContaining('【数据集 DAG 安全拓展约束】'),
+    })
+    await user.click(await screen.findByRole('button', { name: '确认方案并继续改造' }))
+    const route = JSON.parse((await screen.findByLabelText('当前路由')).textContent || '{}')
+    expect(route.pathname).toBe(`/datasets/${dataset.id}/edit`)
+    expect(route.state).toMatchObject({
+      metricAIRequirement: requirement,
+      preferredDatasetId: dataset.id,
+      safeDatasetExtension: true,
+      returnTo: '/metrics/new',
+    })
+    expect(route.state.metricAIInstruction).toContain('追加月度销售额输出。')
+    expect(route.state.metricAIInstruction).toContain('不得删除、改名或改变现有输出、过滤、关联、分组与聚合逻辑')
   })
 
   test('原子指标编辑器允许对字符串标识符计数，并在切回数值聚合时清除非法字段', async () => {
@@ -450,7 +563,7 @@ test('路由切换后丢弃旧指标迟到的聚合响应', async () => {
   expect(screen.getByDisplayValue('新指标')).toBeInTheDocument()
 })
 
-describe('指标中心 AI 审核提案', () => {
+describe('指标配置中心 AI 审核提案', () => {
   test('CREATE_ON_DATASET 展示完整只读配置，确认后直接创建草稿', async () => {
     const user = userEvent.setup()
     const mocks = mockMetricCenter()

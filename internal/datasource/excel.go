@@ -147,6 +147,31 @@ func (m *ExcelManager) Inspect(ctx context.Context, tenantID, assetID string, ma
 	if err != nil {
 		return ExcelWorkbookInspection{}, err
 	}
+	return m.inspectVersion(ctx, version, maxFileBytes)
+}
+
+// InspectVersion 固定读取调用方已经解析出的不可变文件版本。运行态数据源必须
+// 通过此入口检查发布快照，不能在有待发布重传版本时跟随 file_assets.current_version。
+func (m *ExcelManager) InspectVersion(
+	ctx context.Context,
+	tenantID, assetID, versionID string,
+	maxFileBytes int64,
+) (ExcelWorkbookInspection, error) {
+	version, err := m.repo.FileVersionByID(ctx, tenantID, versionID)
+	if err != nil {
+		return ExcelWorkbookInspection{}, err
+	}
+	if version.ID != assetID {
+		return ExcelWorkbookInspection{}, errors.New("file version does not belong to the published asset")
+	}
+	return m.inspectVersion(ctx, version, maxFileBytes)
+}
+
+func (m *ExcelManager) inspectVersion(
+	ctx context.Context,
+	version FileVersion,
+	maxFileBytes int64,
+) (ExcelWorkbookInspection, error) {
 	data, err := m.readVersionBytes(ctx, version, maxFileBytes)
 	if err != nil {
 		return ExcelWorkbookInspection{}, err
@@ -170,7 +195,14 @@ func (m *ExcelManager) Inspect(ctx context.Context, tenantID, assetID string, ma
 		config[key] = value
 	}
 	config["sheetPlans"] = parsePlans
-	if err := m.repo.SaveFileInspection(ctx, tenantID, assetID, version.VersionID, config, workbookSummary(metadata)); err != nil {
+	if err := m.repo.SaveFileInspection(
+		ctx,
+		version.TenantID,
+		version.ID,
+		version.VersionID,
+		config,
+		workbookSummary(metadata),
+	); err != nil {
 		return ExcelWorkbookInspection{}, err
 	}
 	return inspection, nil
@@ -182,19 +214,43 @@ func (m *ExcelManager) Current(ctx context.Context, tenantID, assetID string) (F
 }
 
 // ReadVersionTables 精确读取不可变文件版本，并验证对象大小、摘要和原始解析配置。
-func (m *ExcelManager) ReadVersionTables(ctx context.Context, tenantID, versionID string, maxFileBytes int64) (FileVersion, []FileTableData, error) {
+func (m *ExcelManager) ReadVersionTables(
+	ctx context.Context,
+	tenantID, versionID string,
+	maxFileBytes int64,
+) (FileVersion, []FileTableData, error) {
+	return m.ReadVersionTablesWithExpansionLimit(
+		ctx,
+		tenantID,
+		versionID,
+		maxFileBytes,
+		spikeexcel.DefaultLimits().UnzipBytes,
+	)
+}
+
+// ReadVersionTablesWithExpansionLimit 在不可变版本校验之外，把调用方的逻辑
+// 落库预算下传为压缩工作簿展开硬边界。普通预览仍使用解析器默认上限。
+func (m *ExcelManager) ReadVersionTablesWithExpansionLimit(
+	ctx context.Context,
+	tenantID, versionID string,
+	maxFileBytes, maxExpandedBytes int64,
+) (FileVersion, []FileTableData, error) {
 	// 运行时必须按 versionID 读取不可变对象，不能回退到资产“当前版本”；否则
 	// 已保存数据集会在文件替换后静默改变含义。
 	version, err := m.repo.FileVersionByID(ctx, tenantID, versionID)
 	if err != nil {
 		return FileVersion{}, nil, err
 	}
-	data, err := m.readVersionBytes(ctx, version, maxFileBytes)
+	safeReadBytes, limits, err := fileMaterializationReadLimits(
+		maxFileBytes, maxExpandedBytes,
+	)
 	if err != nil {
 		return FileVersion{}, nil, err
 	}
-	limits := spikeexcel.DefaultLimits()
-	limits.MaxFileBytes = maxFileBytes
+	data, err := m.readVersionBytes(ctx, version, safeReadBytes)
+	if err != nil {
+		return FileVersion{}, nil, err
+	}
 	csvOptions, err := parseCSVOptions(version.ParseConfig)
 	if err != nil {
 		return FileVersion{}, nil, err
@@ -208,6 +264,29 @@ func (m *ExcelManager) ReadVersionTables(ctx context.Context, tenantID, versionI
 		return FileVersion{}, nil, err
 	}
 	return version, tables, nil
+}
+
+func fileMaterializationReadLimits(
+	maxFileBytes, maxExpandedBytes int64,
+) (int64, spikeexcel.Limits, error) {
+	if maxFileBytes <= 0 || maxExpandedBytes <= 0 {
+		return 0, spikeexcel.Limits{}, errors.New(
+			"file materialization limits must be positive",
+		)
+	}
+	safeReadBytes := maxFileBytes
+	if safeReadBytes > maxExpandedBytes {
+		safeReadBytes = maxExpandedBytes
+	}
+	limits := spikeexcel.DefaultLimits()
+	limits.MaxFileBytes = safeReadBytes
+	if limits.UnzipBytes > maxExpandedBytes {
+		limits.UnzipBytes = maxExpandedBytes
+	}
+	if limits.WorksheetMemoryBytes > maxExpandedBytes {
+		limits.WorksheetMemoryBytes = maxExpandedBytes
+	}
+	return safeReadBytes, limits, nil
 }
 
 func (m *ExcelManager) readVersionBytes(ctx context.Context, version FileVersion, maxFileBytes int64) ([]byte, error) {
@@ -264,7 +343,7 @@ func (c *ExcelConnector) Type() Type { return TypeExcel }
 // Test 只验证当前原始文件对象可读、大小和摘要一致；Sheet 解析由新增数据表触发。
 func (c *ExcelConnector) Test(ctx context.Context, source Source) (TestResult, error) {
 	started := time.Now()
-	version, err := c.manager.Current(ctx, source.TenantID, source.FileAssetID)
+	version, err := c.version(ctx, source)
 	if err != nil {
 		return TestResult{}, err
 	}
@@ -276,12 +355,22 @@ func (c *ExcelConnector) Test(ctx context.Context, source Source) (TestResult, e
 
 // Inspect implements the file-only structure inspection capability used by the add-table step.
 func (c *ExcelConnector) Inspect(ctx context.Context, source Source) (ExcelWorkbookInspection, error) {
-	return c.manager.Inspect(ctx, source.TenantID, source.FileAssetID, source.RuntimeQuota.MaxExcelFileBytes)
+	version, err := c.version(ctx, source)
+	if err != nil {
+		return ExcelWorkbookInspection{}, err
+	}
+	return c.manager.InspectVersion(
+		ctx,
+		source.TenantID,
+		source.FileAssetID,
+		version.VersionID,
+		source.RuntimeQuota.MaxExcelFileBytes,
+	)
 }
 
 // Sync 读取工作簿并推断表、字段和数据类型等技术元数据。
 func (c *ExcelConnector) Sync(ctx context.Context, source Source) (SyncResult, error) {
-	version, err := c.manager.Current(ctx, source.TenantID, source.FileAssetID)
+	version, err := c.version(ctx, source)
 	if err != nil {
 		return SyncResult{}, err
 	}
@@ -313,7 +402,7 @@ func (c *ExcelConnector) Sync(ctx context.Context, source Source) (SyncResult, e
 
 // Sample 读取指定工作表的少量真实行；表名来自已同步资产，调用方不能指定文件路径。
 func (c *ExcelConnector) Sample(ctx context.Context, source Source, table MetadataTable, maxRows int) (SampleResult, error) {
-	version, err := c.manager.Current(ctx, source.TenantID, source.FileAssetID)
+	version, err := c.version(ctx, source)
 	if err != nil {
 		return SampleResult{}, err
 	}
@@ -367,6 +456,15 @@ func (c *ExcelConnector) Sample(ctx context.Context, source Source, table Metada
 
 // Close 无需释放持久连接，保留接口一致性。
 func (c *ExcelConnector) Close(context.Context, Source) error { return nil }
+
+// version 优先读取数据源配置快照固定的不可变文件版本；旧记录没有快照字段时
+// 才回退到文件资产当前版本。
+func (c *ExcelConnector) version(ctx context.Context, source Source) (FileVersion, error) {
+	if source.FileVersionID != "" {
+		return c.manager.repo.FileVersionByID(ctx, source.TenantID, source.FileVersionID)
+	}
+	return c.manager.Current(ctx, source.TenantID, source.FileAssetID)
+}
 
 // parseCSVOptions 将持久化的 JSON 配置转换成读取器参数。Excel 文件会忽略这些参数。
 func parseCSVOptions(config map[string]any) (spikeexcel.CSVOptions, error) {

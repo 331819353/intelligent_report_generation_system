@@ -9,7 +9,7 @@ import (
 
 const (
 	SchemaVersion       = "2.3"
-	PromptVersion       = "dataset-dag-planner-v13"
+	PromptVersion       = "dataset-dag-planner-v14"
 	IntentPromptVersion = "dataset-dag-intent-v12"
 
 	maxInstructionRunes = 4000
@@ -84,9 +84,11 @@ type PlanRequest struct {
 	Hints       *PlanHints `json:"hints,omitempty"`
 }
 
-// PlanHints are optional, user-supplied planning preferences. They are never trusted as an
-// asset grant: loadCatalog resolves every referenced table and field again under the caller's
-// tenant before the hints are sent to the model.
+// PlanHints are optional, structured planning constraints supplied by the user or the preceding
+// metric-authoring flow. They are never trusted as an asset grant: loadCatalog resolves every
+// referenced table and field again under the caller's tenant before the hints are sent to the
+// model. PreferredTableIDs remain ranking preferences; non-empty aggregation, field, and time
+// settings are checked again against the generated CREATE plan so they cannot be silently ignored.
 type PlanHints struct {
 	PreferredTableIDs []string        `json:"preferredTableIds"`
 	Aggregation       string          `json:"aggregation"`

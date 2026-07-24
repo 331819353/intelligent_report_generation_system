@@ -6,6 +6,7 @@ import {
   DatabaseIcon,
   EraserIcon,
   FunctionIcon,
+  GitBranchIcon,
   SquareIcon,
   StackIcon,
 } from '@phosphor-icons/react'
@@ -187,15 +188,21 @@ function versionSummary(version: PublishedVersionRecord): PublishedVersionSummar
   }
 }
 
-/** 指标中心只提供原子字段引用编辑，所有业务计算统一交由服务端验证与试算。 */
+/** 资产管理中心的指标编辑页只提供受控定义编辑，所有业务计算统一交由服务端验证与试算。 */
 export function MetricCenterPage() {
   const { metricId } = useParams()
   const navigate = useNavigate()
   const location = useLocation()
   const routeMetricId = metricId ?? ''
   const isNew = !routeMetricId
-  const routeState = location.state as { metricAIRequirement?: unknown } | null
+  const routeState = location.state as {
+    metricAIRequirement?: unknown
+    preferredDatasetId?: unknown
+    safeDatasetExtension?: unknown
+  } | null
   const initialAIRequirement = typeof routeState?.metricAIRequirement === 'string' ? routeState.metricAIRequirement : ''
+  const preferredDatasetId = typeof routeState?.preferredDatasetId === 'string' ? routeState.preferredDatasetId : ''
+  const safeDatasetExtension = routeState?.safeDatasetExtension === true && Boolean(preferredDatasetId)
   const [definition, setDefinition] = useState<MetricDefinition>(emptyDefinition)
   const [record, setRecord] = useState<MetricRecord | null>(null)
   const [savedFingerprint, setSavedFingerprint] = useState('')
@@ -476,6 +483,8 @@ export function MetricCenterPage() {
         metricAIRequirement: requirement,
         ...(hints ? { metricAIHints: hints } : {}),
         returnTo: '/metrics/new',
+        ...(preferredDatasetId ? { preferredDatasetId } : {}),
+        ...(safeDatasetExtension ? { safeDatasetExtension: true } : {}),
       },
     })
   }
@@ -803,7 +812,7 @@ export function MetricCenterPage() {
     }
   }
 
-  const title = isNew ? 'AI 新建指标' : record?.name || definition.metric.name || '指标中心'
+  const title = isNew ? 'AI 新建指标' : record?.name || definition.metric.name || '资产管理中心'
   const actions = <>
     <button className="quiet-button" type="button" onClick={() => navigate('/metrics')}>返回目录</button>
     {record && <>
@@ -818,7 +827,7 @@ export function MetricCenterPage() {
     </>}
   </>
 
-  return <AppShell title={title} eyebrow="指标中心" actions={actions}>
+  return <AppShell title={title} eyebrow="资产管理中心 · 指标资产" actions={actions}>
     {(!isNew || error || message) && <div className="metric-feedback" aria-live="polite">
       {error && <span className="designer-error">{error}</span>}
       {message && <span className="designer-success">{message}</span>}
@@ -830,6 +839,8 @@ export function MetricCenterPage() {
           {!permissionsReady || (!isNew && !capabilities.read) ? <section className="metric-panel">当前账号没有读取该指标的权限。</section> : <>
             {isNew && (capabilities.manage ? <MetricAIAssistant
               initialRequirement={initialAIRequirement}
+              preferredDatasetId={preferredDatasetId}
+              safeDatasetExtension={safeDatasetExtension}
               datasets={datasets.filter(dataset => dataset.status === 'PUBLISHED' && Boolean(dataset.currentPublishedVersionId))}
               onConfirm={createAIMetricDraft}
               onModifyDataset={openDatasetAI}
@@ -1062,6 +1073,25 @@ function metricAIHintStatisticalFieldQualifier(aggregation: string): string {
   return '候选统计对象，最终由 AI 判断'
 }
 
+function metricAIDatasetReferenceLabel(dataset: DatasetSummary): string {
+  const sourceName = dataset.originDataSourceName?.trim()
+  const tableName = dataset.originTableName?.trim()
+  const sourceParts = [
+    sourceName ? `数据源：${sourceName}` : '',
+    tableName ? `源表：${tableName}` : '',
+  ].filter(Boolean)
+  return sourceParts.length ? `${dataset.name}（${sourceParts.join('；')}）` : dataset.name
+}
+
+function metricAIDatasetSourceLabel(dataset: DatasetSummary): string {
+  const sourceName = dataset.originDataSourceName?.trim()
+  const tableName = dataset.originTableName?.trim()
+  if (sourceName && tableName) return `${sourceName} · ${tableName}`
+  if (sourceName) return sourceName
+  if (tableName) return `源表 · ${tableName}`
+  return dataset.originTableId ? '映射表数据集' : '普通数据集'
+}
+
 /** 把可选控件稳定翻译为自然语言，保持现有只接收 requirement 的后端契约。 */
 function metricAIRequirementWithHints(
   requirement: string,
@@ -1082,7 +1112,7 @@ function metricAIRequirementWithHints(
   const aggregation = metricAIHintAggregationOptions.find(option => option.value === selection.aggregation)
   const lines: string[] = []
   if (selectedDatasets.length) {
-    lines.push(`- 优先参考的已发布数据集：${selectedDatasets.map(dataset => dataset.name).join('、')}`)
+    lines.push(`- 优先参考的已发布数据集：${selectedDatasets.map(metricAIDatasetReferenceLabel).join('、')}`)
   }
   if (measures.length) {
     lines.push(`- 统计字段（${metricAIHintStatisticalFieldQualifier(selection.aggregation)}）：${measures.map(field => `${field.datasetName} / ${field.name}（${field.code}）`).join('、')}`)
@@ -1094,6 +1124,18 @@ function metricAIRequirementWithHints(
   if (aggregation?.value) lines.push(`- 统计口径与聚合：${aggregation.label}`)
   if (!lines.length) return rawRequirement
   return `${base}${metricAIHintBlockMarker}\n以下条件由用户选择；未指定的内容请由 AI 基于授权资产补全：\n${lines.join('\n')}`
+}
+
+function metricAISafeExtensionBlock(dataset: DatasetSummary | undefined): string {
+  if (!dataset) return ''
+  return [
+    '',
+    '【数据集 DAG 安全拓展约束】',
+    `- 拓展基线：${metricAIDatasetReferenceLabel(dataset)}`,
+    '- 优先直接使用该数据集当前发布版本生成指标。',
+    '- 只有当前 DAG 无法提供准确输出时才设计新版本；只允许追加组件、字段或输出，不得删除、改名或改变现有输出、过滤、关联、分组与聚合逻辑。',
+    '- 既有指标继续固定引用原精确发布版本；新指标只能引用通过审批的新精确发布版本。',
+  ].join('\n')
 }
 
 const metricDatasetAIHintAggregations = new Set<DatasetAIHintAggregation>(['', 'SUM', 'AVG', 'COUNT', 'COUNT_DISTINCT', 'MIN', 'MAX'])
@@ -1251,11 +1293,15 @@ async function buildMetricDatasetAIHints({
 
 function MetricAIAssistant({
   initialRequirement,
+  preferredDatasetId,
+  safeDatasetExtension,
   datasets,
   onConfirm,
   onModifyDataset,
 }: {
   initialRequirement: string
+  preferredDatasetId: string
+  safeDatasetExtension: boolean
   datasets: DatasetSummary[]
   onConfirm: (definition: MetricDefinition) => Promise<void>
   onModifyDataset: (
@@ -1268,6 +1314,7 @@ function MetricAIAssistant({
 }) {
   const [requirement, setRequirement] = useState(initialRequirement)
   const [proposal, setProposal] = useState<MetricAuthoringProposal | null>(null)
+  const [proposalOpen, setProposalOpen] = useState(false)
   const [requestID, setRequestID] = useState('')
   const [contextHash, setContextHash] = useState('')
   const [busy, setBusy] = useState(false)
@@ -1277,7 +1324,8 @@ function MetricAIAssistant({
   const [generationMode, setGenerationMode] = useState<'generate' | 'retry' | 'revise'>('generate')
   const [revisionOpen, setRevisionOpen] = useState(false)
   const [revision, setRevision] = useState('')
-  const [hintDatasetIds, setHintDatasetIds] = useState<string[]>([])
+  const [hintDatasetIds, setHintDatasetIds] = useState<string[]>(() =>
+    preferredDatasetId && datasets.some(dataset => dataset.id === preferredDatasetId) ? [preferredDatasetId] : [])
   const [hintSnapshots, setHintSnapshots] = useState<Record<string, PublishedVersionRecord>>({})
   const [hintMeasureFieldKeys, setHintMeasureFieldKeys] = useState<string[]>([])
   const [hintDateFieldKey, setHintDateFieldKey] = useState('')
@@ -1308,13 +1356,17 @@ function MetricAIAssistant({
   const hintDimensionFields = useMemo(() => hintFields.filter(field =>
     ['DIMENSION', 'IDENTIFIER'].includes(field.role) ||
     (field.role === 'ATTRIBUTE' && !['INTEGER', 'DECIMAL'].includes(field.canonicalType))), [hintFields])
-  const composedRequirement = useMemo(() => metricAIRequirementWithHints(requirement, datasets, hintFields, {
+  const extensionDataset = useMemo(
+    () => safeDatasetExtension ? datasets.find(dataset => dataset.id === preferredDatasetId) : undefined,
+    [datasets, preferredDatasetId, safeDatasetExtension],
+  )
+  const composedRequirement = useMemo(() => `${metricAIRequirementWithHints(requirement, datasets, hintFields, {
     datasetIds: hintDatasetIds,
     measureFieldKeys: hintMeasureFieldKeys,
     dateFieldKey: hintDateFieldKey,
     dimensionFieldKeys: hintDimensionFieldKeys,
     aggregation: hintAggregation,
-  }), [datasets, hintAggregation, hintDatasetIds, hintDateFieldKey, hintDimensionFieldKeys, hintFields, hintMeasureFieldKeys, requirement])
+  })}${metricAISafeExtensionBlock(extensionDataset)}`, [datasets, extensionDataset, hintAggregation, hintDatasetIds, hintDateFieldKey, hintDimensionFieldKeys, hintFields, hintMeasureFieldKeys, requirement])
 
   useEffect(() => {
     const request = ++hintSnapshotRequest.current
@@ -1362,8 +1414,23 @@ function MetricAIAssistant({
     })
   }, [hintFields, hintMeasureFields])
 
+  useEffect(() => {
+    if (!proposalOpen) return
+    const previousOverflow = document.body.style.overflow
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setProposalOpen(false)
+    }
+    document.body.style.overflow = 'hidden'
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [proposalOpen])
+
   function clearProposal() {
     setProposal(null)
+    setProposalOpen(false)
     setRequestID('')
     setContextHash('')
     setActivePrompt('')
@@ -1438,6 +1505,7 @@ function MetricAIAssistant({
     try {
       const result = await metricAIAPI.propose({ requirement: normalized })
       setProposal(result.proposal)
+      setProposalOpen(true)
       setRequestID(result.requestId)
       setContextHash(result.retrievalContextHash)
       setActivePrompt(normalized)
@@ -1498,9 +1566,10 @@ function MetricAIAssistant({
     setError('')
     try {
       const prompt = activePrompt || requirement.trim()
+      const datasetInstruction = `${proposal.datasetInstruction}${metricAISafeExtensionBlock(extensionDataset)}`.trim()
       const hints = await buildMetricDatasetAIHints({
         proposal,
-        instruction: `${proposal.datasetInstruction}\n${prompt}`,
+        instruction: `${datasetInstruction}\n${prompt}`,
         datasets,
         selectedDatasetIds: hintDatasetIds,
         selectedMeasureFieldKeys: hintMeasureFieldKeys,
@@ -1510,7 +1579,7 @@ function MetricAIAssistant({
         visibleFields: hintFields,
         loadedSnapshots: hintSnapshots,
       })
-      onModifyDataset(proposal.strategy, proposal.targetDatasetId, proposal.datasetInstruction, prompt, hints)
+      onModifyDataset(proposal.strategy, proposal.targetDatasetId, datasetInstruction, requirement.trim(), hints)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '准备数据集 AI 上下文失败，请重试')
       setConfirming(false)
@@ -1530,6 +1599,7 @@ function MetricAIAssistant({
     </header>
     <div className="metric-ai-body">
       <form className="metric-ai-intent" onSubmit={event => { event.preventDefault(); void generateProposal() }}>
+        {extensionDataset && <div className="metric-ai-extension-context" role="status"><GitBranchIcon size={18} weight="bold" /><div><strong>正在基于“{extensionDataset.name}”拓展指标</strong><span>当前发布 DAG 是只读基线；如需改造，只能追加能力并生成新版本，既有指标口径不会被覆盖。</span></div></div>}
         <section className="metric-ai-hints" aria-labelledby="metric-ai-hints-title">
           <header>
             <div>
@@ -1551,10 +1621,12 @@ function MetricAIAssistant({
               </header>
               {datasets.length ? <div className="metric-ai-check-tags">{datasets.map(dataset => {
                 const selected = hintDatasetIds.includes(dataset.id)
-                return <label key={dataset.id} className={`metric-ai-check-tag ${selected ? 'is-checked' : ''}`}>
-                  <input aria-label={`优先使用数据集 ${dataset.name}`} type="checkbox" checked={selected} disabled={locked} onChange={() => toggleHintDataset(dataset.id)} />
+                const referenceLabel = metricAIDatasetReferenceLabel(dataset)
+                const sourceLabel = metricAIDatasetSourceLabel(dataset)
+                return <label key={dataset.id} className={`metric-ai-check-tag metric-ai-dataset-tag ${selected ? 'is-checked' : ''}`}>
+                  <input aria-label={`优先使用数据集 ${referenceLabel}`} type="checkbox" checked={selected} disabled={locked} onChange={() => toggleHintDataset(dataset.id)} />
                   {selected ? <CheckSquareIcon size={17} weight="fill" aria-hidden="true" /> : <SquareIcon size={17} aria-hidden="true" />}
-                  <span><strong>{dataset.name}</strong><small>{dataset.originTableId ? '映射表数据集' : '普通数据集'}</small></span>
+                  <span className="metric-ai-dataset-label"><strong>{dataset.name}</strong><small title={sourceLabel}>{sourceLabel}</small></span>
                 </label>
               })}</div> : <div className="metric-ai-hint-empty">暂无已发布数据集，仍可直接描述需求让 AI 检索。</div>}
             </section>
@@ -1622,17 +1694,23 @@ function MetricAIAssistant({
           {hintFieldsError && <div className="metric-ai-hint-warning" role="status">{hintFieldsError}</div>}
           <footer aria-live="polite"><span>{composedRequirement.length > 4000 ? '合并内容超过接口限制，请精简需求或减少参考条件。' : hintDatasetIds.length || hintMeasureFieldKeys.length || hintDateFieldKey || hintDimensionFieldKeys.length || hintAggregation ? '已选择的条件会作为固定参考区块提交。' : '当前由 AI 自动判断全部条件。'}</span><strong className={composedRequirement.length > 4000 ? 'over-limit' : ''}>合并后 {composedRequirement.length} / 4000 字</strong></footer>
         </section>
-        <label>需求描述
-          <textarea aria-label="指标创建需求" maxLength={4000} value={requirement} disabled={locked} onChange={event => updateRequirement(event.target.value)} placeholder="例如：创建已支付销售额指标，统计已支付且未退款订单的含税金额，按支付完成月份汇总，并支持按地区查看。" />
+        <section className="metric-ai-requirement">
+          <label htmlFor="metric-ai-requirement">需求描述</label>
+          <div className="metric-ai-request-row">
+            <textarea id="metric-ai-requirement" aria-label="指标创建需求" maxLength={4000} value={requirement} disabled={locked} onChange={event => updateRequirement(event.target.value)} placeholder="例如：创建已支付销售额指标，统计已支付且未退款订单的含税金额，按支付完成月份汇总，并支持按地区查看。" />
+            <button className="primary-button metric-ai-generate-button" type="submit" disabled={!requirement.trim() || composedRequirement.length > 4000 || locked}>{busy ? '正在生成…' : '生成指标配置'}</button>
+          </div>
           <small>不需要填写配置项。描述业务目标即可，缺少的信息由 AI 从你有权限的数据资产中查找和补全。</small>
-        </label>
-        <button className="primary-button metric-ai-generate-button" type="submit" disabled={!requirement.trim() || composedRequirement.length > 4000 || locked}>{busy ? '正在生成…' : '生成指标配置'}</button>
+        </section>
       </form>
       {busy && <div className="metric-ai-progress" role="status"><strong>{generationMode === 'retry' ? '正在重新生成方案' : generationMode === 'revise' ? '正在根据意见调整方案' : '正在匹配内部语义资产'}</strong><span>AI 正在选择精确数据集版本并补全指标配置。</span></div>}
       {confirming && <div className="metric-ai-progress" role="status"><strong>正在创建指标草稿</strong><span>系统会再次校验 AI 引用的精确数据集版本。</span></div>}
       {error && <div className="metric-ai-error" role="alert">{error}</div>}
-      {proposal && <article className="metric-ai-proposal" aria-label="AI 指标审核提案">
-        <header><div><span>{metricAIStrategyLabels[proposal.strategy]}</span><h3>{proposalHeading(proposal)}</h3><p>请审核下面的业务方案，技术主键已收起。</p></div></header>
+      {proposal && !proposalOpen && <div className="metric-ai-result-ready" role="status"><span>指标配置已经生成，可以随时打开查看和确认。</span><button className="quiet-button" type="button" onClick={() => setProposalOpen(true)}>查看生成结果</button></div>}
+      {proposal && proposalOpen && <div className="metric-ai-proposal-overlay">
+        <div className="metric-ai-proposal-dialog" role="dialog" aria-modal="true" aria-labelledby="metric-ai-proposal-title">
+          <article className="metric-ai-proposal" aria-label="AI 指标审核提案">
+        <header><div><span>{metricAIStrategyLabels[proposal.strategy]}</span><h3 id="metric-ai-proposal-title">{proposalHeading(proposal)}</h3><p>请审核下面的业务方案，技术主键已收起。</p></div><button className="metric-ai-proposal-close" type="button" autoFocus aria-label="关闭指标提案" onClick={() => setProposalOpen(false)}>×</button></header>
         {summaryItems.length > 0 && <section className="metric-ai-overview" aria-label="方案概览"><h4>方案概览</h4><ul>{summaryItems.map((item, index) => <li key={`${index}:${item}`}>{item}</li>)}</ul></section>}
         {proposal.strategy === 'CREATE_ON_DATASET' && proposal.candidateMetricDefinition && <section className="metric-ai-decision create">
           <ReadonlyMetricConfiguration definition={proposal.candidateMetricDefinition} />
@@ -1640,7 +1718,7 @@ function MetricAIAssistant({
         {datasetStrategy && <section className={`metric-ai-decision modify ${datasetStrategy === 'CREATE_DATASET' ? 'create-dataset' : ''}`} aria-label="数据集执行方案">
           <header><strong>{datasetStrategy === 'CREATE_DATASET' ? '新数据集构建计划' : '现有数据集调整计划'}</strong><small>{datasetStrategy === 'CREATE_DATASET' ? '不会修改作为来源的映射表数据集' : '只调整 AI 已确认可管理的普通数据集草稿'}</small></header>
           {instructionSteps.length > 0 ? <ol>{instructionSteps.map((step, index) => <li key={`${index}:${step}`}><span>{index + 1}</span><p>{step}</p></li>)}</ol> : <p>AI 尚未生成可执行的数据集步骤，请重新生成或提供修改意见。</p>}
-          <div className="metric-ai-next-step"><strong>完成后</strong><span>保存并提交数据集发布审批；审批通过后返回指标中心，AI 将基于精确发布版本创建指标。</span></div>
+          <div className="metric-ai-next-step"><strong>完成后</strong><span>保存并提交数据集发布审批；审批通过后返回资产管理中心，AI 将基于精确发布版本创建指标。</span></div>
         </section>}
         {proposal.strategy === 'REUSE_METRIC' && <section className="metric-ai-decision reuse"><strong>已有指标已经覆盖该口径</strong><p>建议直接复用已匹配的发布指标，本页不会重复创建同义指标。</p></section>}
         {proposal.strategy === 'DATA_GAP' && <section className="metric-ai-decision gap"><strong>当前不能安全创建</strong><p>授权目录中没有足以支撑该口径的数据，模型没有猜测字段或扩张检索范围。</p></section>}
@@ -1658,7 +1736,9 @@ function MetricAIAssistant({
           {proposal.strategy === 'CREATE_ON_DATASET' && proposal.candidateMetricDefinition && <button className="primary-button" type="button" disabled={locked} onClick={() => void confirmProposal()}>{confirming ? '正在创建草稿…' : '确认方案并创建草稿'}</button>}
           {datasetStrategy && <button className="primary-button" type="button" disabled={locked || !proposal.datasetInstruction || (datasetStrategy === 'MODIFY_DATASET' && !proposal.targetDatasetId)} onClick={() => void continueDatasetProposal()}>{confirming ? '正在准备数据集…' : datasetStrategy === 'CREATE_DATASET' ? '确认方案并新建数据集' : '确认方案并继续改造'}</button>}
         </footer>
-      </article>}
+          </article>
+        </div>
+      </div>}
     </div>
   </section>
 }

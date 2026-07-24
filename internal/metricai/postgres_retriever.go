@@ -97,7 +97,12 @@ type atomicFactSnapshot struct {
 // Retrieve builds a minimal semantic snapshot. Dataset DSL is parsed only inside the trusted
 // process; the returned context contains logical dataset/field/metric metadata and exact hashes,
 // never the DSL's physical nodes, filter literals, parameters, or source identifiers.
-func (r *PostgresRetriever) Retrieve(ctx context.Context, tenantID, actorID string, raw AuthoringRequest) (RetrievalContext, error) {
+func (r *PostgresRetriever) Retrieve(
+	ctx context.Context,
+	tenantID, actorID string,
+	raw AuthoringRequest,
+	intent MetricIntent,
+) (RetrievalContext, error) {
 	if r == nil || r.runTenant == nil {
 		return RetrievalContext{}, errors.New("metric AI Postgres retriever is not configured")
 	}
@@ -108,7 +113,14 @@ func (r *PostgresRetriever) Retrieve(ctx context.Context, tenantID, actorID stri
 	if err != nil {
 		return RetrievalContext{}, err
 	}
-	searchText := request.Requirement
+	searchText := intentSearchText(request, intent)
+	searchName := strings.TrimSpace(intent.BusinessGoal)
+	if len(intent.StatisticalObjects) > 0 {
+		searchName = intent.StatisticalObjects[0]
+	}
+	if searchName == "" {
+		searchName = request.Requirement
+	}
 
 	metricRows := []metricSnapshot{}
 	datasetRows := []datasetSnapshot{}
@@ -116,19 +128,19 @@ func (r *PostgresRetriever) Retrieve(ctx context.Context, tenantID, actorID stri
 	atomicFactRows := []atomicFactSnapshot{}
 	err = r.runTenant(ctx, tenantID, func(queryer retrievalQueryer) error {
 		var queryErr error
-		metricRows, queryErr = queryAuthorizedMetrics(ctx, queryer, tenantID, actorID, searchText, searchText)
+		metricRows, queryErr = queryAuthorizedMetrics(ctx, queryer, tenantID, actorID, searchName, searchText)
 		if queryErr != nil {
 			return queryErr
 		}
-		datasetRows, queryErr = queryAuthorizedDatasets(ctx, queryer, tenantID, actorID, searchText, searchText)
+		datasetRows, queryErr = queryAuthorizedDatasets(ctx, queryer, tenantID, actorID, searchName, searchText)
 		if queryErr != nil {
 			return queryErr
 		}
-		draftDatasetRows, queryErr = queryAuthorizedDraftDatasets(ctx, queryer, tenantID, actorID, searchText, searchText)
+		draftDatasetRows, queryErr = queryAuthorizedDraftDatasets(ctx, queryer, tenantID, actorID, searchName, searchText)
 		if queryErr != nil {
 			return queryErr
 		}
-		atomicFactRows, queryErr = queryAuthorizedAtomicFacts(ctx, queryer, tenantID, actorID, searchText, searchText)
+		atomicFactRows, queryErr = queryAuthorizedAtomicFacts(ctx, queryer, tenantID, actorID, searchName, searchText)
 		if queryErr != nil {
 			return queryErr
 		}
@@ -462,7 +474,6 @@ func buildRetrievalContext(metricRows []metricSnapshot, datasetRows, draftDatase
 		}
 		prepared, err := metric.Prepare(snapshot.Definition)
 		if err != nil || prepared.DefinitionHash != snapshot.DefinitionHash ||
-			prepared.Definition.Metric.Type != "ATOMIC" || len(prepared.DependencyVersionIDs) != 0 ||
 			prepared.Definition.DatasetID != snapshot.Dataset.ID || prepared.Definition.DatasetVersionID != snapshot.Dataset.VersionID {
 			return RetrievalContext{}, fmt.Errorf("%w: published metric snapshot failed definition validation", ErrInvalidRetrievalContext)
 		}
@@ -710,7 +721,8 @@ JOIN platform.dataset_versions AS dataset_version
  AND dataset_version.id=d.current_published_version_id
  AND metric_version.dataset_id=d.id
  AND metric_version.dataset_version_id=dataset_version.id
-WHERE m.tenant_id=$1 AND m.deleted_at IS NULL AND m.status='PUBLISHED' AND m.metric_type='ATOMIC'
+WHERE m.tenant_id=$1 AND m.deleted_at IS NULL AND m.status='PUBLISHED'
+  AND m.metric_type IN ('ATOMIC','DERIVED','RATIO')
   AND d.status='PUBLISHED'
   AND metric_version.status='PUBLISHED' AND dataset_version.status='PUBLISHED'
   AND ` + datasetReadPredicate + `

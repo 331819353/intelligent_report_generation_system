@@ -34,9 +34,19 @@ export const demoReportRuntime: ReportRuntimeContext = {
       data: { points: monthlyRevenuePoints },
       updatedAt: '2026-07-15T10:30:00+08:00',
     },
+    chart_revenue_trend_growth: {
+      status: 'READY',
+      data: { points: quarterRevenuePoints },
+      updatedAt: '2026-07-15T10:30:00+08:00',
+    },
     conclusion_overview: {
       status: 'READY',
       data: { summary: '营业收入连续三个月增长，二季度增长动能较一季度明显增强。' },
+      updatedAt: '2026-07-15T10:30:00+08:00',
+    },
+    conclusion_overview_growth: {
+      status: 'READY',
+      data: { summary: '二季度营业收入较一季度提升 41.2%，增长动能持续增强。' },
       updatedAt: '2026-07-15T10:30:00+08:00',
     },
     source_note: {

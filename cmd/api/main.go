@@ -23,6 +23,7 @@ import (
 	"intelligent-report-generation-system/internal/federation"
 	"intelligent-report-generation-system/internal/filequery"
 	"intelligent-report-generation-system/internal/httpserver"
+	"intelligent-report-generation-system/internal/materialization"
 	"intelligent-report-generation-system/internal/metadataai"
 	"intelligent-report-generation-system/internal/metric"
 	"intelligent-report-generation-system/internal/metricai"
@@ -33,11 +34,12 @@ import (
 	"intelligent-report-generation-system/internal/policy"
 	"intelligent-report-generation-system/internal/queryruntime"
 	"intelligent-report-generation-system/internal/report"
+	"intelligent-report-generation-system/internal/semanticmanagement"
 )
 
 // main 装配 API 服务依赖，并负责启动、信号监听与优雅停机。
 func main() {
-	cfg, err := config.Load()
+	cfg, err := config.LoadAPI()
 	if err != nil {
 		slog.Error("load configuration", "error", err)
 		os.Exit(1)
@@ -53,6 +55,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+	warehouseStartupCtx, warehouseStartupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	warehousePool, err := database.Open(warehouseStartupCtx, cfg.WarehouseDatabaseURL)
+	warehouseStartupCancel()
+	if err != nil {
+		logger.Error("connect warehouse database", "error", err)
+		os.Exit(1)
+	}
+	defer warehousePool.Close()
 	passwords := auth.NewPasswordManager(cfg.AuthBcryptCost)
 	tokens := auth.NewTokenManager(cfg.AuthTokenIssuer, cfg.AuthAccessSecret, cfg.AuthAccessTTL)
 	authService := auth.NewService(auth.NewPostgresStore(pool), passwords, tokens, cfg.AuthRefreshTTL)
@@ -71,8 +81,24 @@ func main() {
 		os.Exit(1)
 	}
 	// 连接器按数据源类型注册：数据库走隔离的 Python 服务，文件走本地解析器。
-	mysqlConnector := datasource.NewPythonConnector(datasource.TypeMySQL, cfg.ConnectorURL, cfg.ConnectorToken, credentialManager)
-	oracleConnector := datasource.NewPythonConnector(datasource.TypeOracle, cfg.ConnectorURL, cfg.ConnectorToken, credentialManager)
+	connectorLimits := datasource.ConnectorLimits{
+		MaxRequestBytes:        cfg.ConnectorHTTPMaxRequestBytes,
+		MaxJSONResponseBytes:   cfg.ConnectorJSONMaxResponseBytes,
+		MaxSampleResponseBytes: cfg.ConnectorSampleMaxResponseBytes,
+		MaxSampleCellBytes:     cfg.ConnectorSampleMaxCellBytes,
+		MaxSampleRowBytes:      cfg.ConnectorSampleMaxRowBytes,
+		MaxStreamBytes:         cfg.ConnectorStreamMaxBytes,
+		MaxStreamCellBytes:     cfg.ConnectorStreamMaxCellBytes,
+		MaxStreamRowBytes:      cfg.ConnectorStreamMaxRowBytes,
+	}
+	mysqlConnector := datasource.NewPythonConnectorWithLimits(
+		datasource.TypeMySQL, cfg.ConnectorURL, cfg.ConnectorToken,
+		credentialManager, connectorLimits,
+	)
+	oracleConnector := datasource.NewPythonConnectorWithLimits(
+		datasource.TypeOracle, cfg.ConnectorURL, cfg.ConnectorToken,
+		credentialManager, connectorLimits,
+	)
 	dataSourceService := datasource.NewService(
 		dataSourceRepo,
 		mysqlConnector,
@@ -80,6 +106,7 @@ func main() {
 		datasource.NewExcelConnector(excelManager),
 	)
 	dataSourceService.SetMetadataJobRepository(datasource.NewPostgresMetadataJobRepository(pool))
+	dataSourceService.SetConnectionTestJobRepository(datasource.NewPostgresConnectionTestRepository(pool))
 	excelHandler := datasource.NewExcelHandler(authService, accessService, excelManager)
 	assetRepository := asset.NewRepository(pool)
 	assetHandler := asset.NewHandler(authService, accessService, assetRepository, dataSourceService)
@@ -96,7 +123,9 @@ func main() {
 	}
 	datasetStore := dataset.NewPostgresStore(pool)
 	metricCandidateStore := metriccandidate.NewPostgresStore(pool)
+	materializationStore := materialization.NewPostgresStoreWithWarehouse(pool, warehousePool)
 	datasetStore.SetPublicationCommitSink(metricCandidateStore)
+	datasetStore.SetMappedPublicationCommitSink(materializationStore)
 	metadataAIStore := metadataai.NewPostgresStore(pool)
 	metadataAIStore.SetEnrichmentCommitSink(datasetStore)
 	reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -113,6 +142,10 @@ func main() {
 	metadataAIService := metadataai.NewService(metadataAIStore, metadataAIProvider, cfg.AIRequestTimeout, cfg.AIConfidenceThreshold)
 	dataSourceService.SetTableCompleter(metadataAIService)
 	dataSourceHandler := datasource.NewHandler(authService, accessService, dataSourceService, credentialManager)
+	dataSourcePublicationApprovalService := datasource.NewPublicationApprovalService(dataSourceRepo, dataSourceService)
+	dataSourcePublicationApprovalHandler := datasource.NewPublicationApprovalHandler(
+		authService, accessService, dataSourcePublicationApprovalService, credentialManager,
+	)
 	metadataAIHandler := metadataai.NewHandler(authService, accessService, metadataAIService)
 	embeddingProvider := embedding.NewOpenAICompatibleProvider(
 		cfg.AIEmbeddingBaseURL, cfg.AIEmbeddingAPIKey, cfg.AIEmbeddingModel, cfg.AIEmbeddingDimensions,
@@ -139,18 +172,33 @@ func main() {
 		filequery.NewExecutor(excelManager),
 	)
 	queryService.SetFederatedExecutor(federation.NewExecutor(queryConnectors, excelManager))
+	queryService.SetWarehouseExecutor(queryruntime.NewSeparatedPostgresWarehouseExecutor(pool, warehousePool))
 	datasetService.SetPublicationValidator(queryService)
 	datasetHandler := dataset.NewHandler(authService, accessService, datasetService, queryService)
+	materializationHandler := materialization.NewControlHandler(
+		authService,
+		accessService,
+		materialization.NewControlService(materializationStore),
+	)
 	datasetPublicationApprovalService := dataset.NewPublicationApprovalService(datasetStore, datasetService)
 	datasetPublicationApprovalHandler := dataset.NewPublicationApprovalHandler(authService, accessService, datasetPublicationApprovalService)
 	metricStore := metric.NewPostgresStore(pool)
 	metricService := metric.NewService(metricStore, queryService)
 	metricService.SetPermissionChecker(accessService)
 	metricHandler := metric.NewHandler(authService, accessService, metricService)
+	metricCandidateHandler := metriccandidate.NewHandler(
+		authService, accessService, metriccandidate.NewService(metricCandidateStore, metricService),
+	)
 	metricAIService := metricai.NewService(metricai.NewPostgresRetriever(pool), aiService, metricai.ServiceOptions{Timeout: cfg.AIRequestTimeout})
 	metricAIHandler := metricai.NewHandler(authService, accessService, metricAIService)
 	metricSemanticService := metricsemantic.NewService(metricsemantic.NewPostgresStore(pool), embeddingProvider)
 	metricSemanticHandler := metricsemantic.NewHandler(authService, accessService, metricSemanticService)
+	semanticManagementStore := semanticmanagement.NewPostgresStoreWithWarehouse(pool, warehousePool)
+	semanticManagementService := semanticmanagement.NewService(semanticManagementStore)
+	semanticDimensionService := semanticmanagement.NewDimensionService(semanticManagementStore)
+	semanticManagementHandler := semanticmanagement.NewHandler(
+		authService, accessService, semanticManagementService, semanticDimensionService,
+	)
 	reportService := report.NewService(report.NewPostgresStore(pool))
 	reportHandler := report.NewHandler(authService, accessService, reportService)
 	api := http.NewServeMux()
@@ -161,6 +209,14 @@ func main() {
 	api.Handle("/api/v1/users/", accessAdminHandler)
 	api.Handle("/api/v1/object-permissions", accessAdminHandler)
 	api.Handle("/api/v1/object-permissions/", accessAdminHandler)
+	// Exact review routes take precedence over the general data-source subtree. The legacy
+	// /publish path now submits a review request instead of switching the runtime pointer.
+	api.Handle("POST /api/v1/data-sources/{id}/publish", dataSourcePublicationApprovalHandler)
+	api.Handle("POST /api/v1/data-sources/{id}/publish-requests", dataSourcePublicationApprovalHandler)
+	api.Handle("GET /api/v1/data-sources/{id}/publish-requests", dataSourcePublicationApprovalHandler)
+	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/withdraw", dataSourcePublicationApprovalHandler)
+	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/approve", dataSourcePublicationApprovalHandler)
+	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/reject", dataSourcePublicationApprovalHandler)
 	api.Handle("/api/v1/data-sources", dataSourceHandler)
 	api.Handle("/api/v1/data-sources/", dataSourceHandler)
 	api.Handle("/api/v1/excel-files", excelHandler)
@@ -177,10 +233,15 @@ func main() {
 	api.Handle("GET /api/v1/datasets/{id}/publish-requests", datasetPublicationApprovalHandler)
 	api.Handle("POST /api/v1/datasets/{id}/publish-requests/{requestId}/approve", datasetPublicationApprovalHandler)
 	api.Handle("POST /api/v1/datasets/{id}/publish-requests/{requestId}/reject", datasetPublicationApprovalHandler)
+	api.Handle("/api/v1/datasets/{id}/materializations/builds", materializationHandler)
+	api.Handle("/api/v1/datasets/{id}/materializations/builds/", materializationHandler)
 	api.Handle("/api/v1/datasets", datasetHandler)
 	api.Handle("/api/v1/datasets/", datasetHandler)
 	api.Handle("POST /api/v1/metrics/ai/proposals", metricAIHandler)
 	api.Handle("GET /api/v1/metrics/semantic-search", metricSemanticHandler)
+	api.Handle("/api/v1/semantic/", semanticManagementHandler)
+	api.Handle("/api/v1/metric-candidates", metricCandidateHandler)
+	api.Handle("/api/v1/metric-candidates/", metricCandidateHandler)
 	api.Handle("/api/v1/metrics", metricHandler)
 	api.Handle("/api/v1/metrics/", metricHandler)
 	api.Handle("/api/v1/reports", reportHandler)

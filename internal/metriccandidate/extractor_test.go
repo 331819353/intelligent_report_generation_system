@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"intelligent-report-generation-system/internal/dataset"
@@ -74,32 +75,84 @@ func TestExtractDerivesDeterministicCandidatesFromExplicitFacts(t *testing.T) {
 	}
 }
 
-func TestExtractBlocksAggregatedDatasetsAndAggregateExpressions(t *testing.T) {
+func TestExtractTreatsAggregatedDAGOutputAsDerivedMetric(t *testing.T) {
 	document := candidateDatasetDocument()
+	region := document.Fields[4]
 	document.GroupBy = []string{"field_region"}
 	source := document.Fields[0].Expression
 	document.Fields[0].Expression = dataset.Expression{Type: "AGGREGATE", Function: "SUM", Argument: &source}
+	document.Fields = []dataset.Field{document.Fields[0], region}
+	document.OutputGrain = dataset.OutputGrain{
+		Description: "每行代表一个地区的订单金额汇总",
+		KeyFields:   []string{"region"},
+	}
 	version := publishedDatasetVersion(t, document)
 
 	result, err := Extract(version)
 	if err != nil {
 		t.Fatalf("Extract() error = %v", err)
 	}
-	if result.Status != TaskStatusPartial || len(result.Candidates) == 0 {
+	if result.Status != TaskStatusSucceeded || len(result.Candidates) != 1 {
 		t.Fatalf("unexpected aggregate extraction result: %#v", result)
 	}
+	candidate := result.Candidates[0]
+	if candidate.SourceFieldID != "field_amount" || candidate.Status != CandidateStatusReady ||
+		candidate.Definition.Metric.Type != "DERIVED" || candidate.Definition.Aggregation != "NONE" ||
+		len(candidate.BlockReasons) != 0 {
+		t.Fatalf("derived DAG candidate = %#v", candidate)
+	}
+}
+
+func TestExtractBuildsBusinessSemanticsAndCommonUnitsForAggregateOutputs(t *testing.T) {
+	version := publishedDatasetVersion(t, monthlyPaymentsDocument())
+
+	result, err := Extract(version)
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
+	if len(result.Candidates) != 2 {
+		t.Fatalf("candidates = %#v", result.Candidates)
+	}
+	var orderCount CandidateDraft
 	for _, candidate := range result.Candidates {
-		if candidate.Status != CandidateStatusBlocked {
-			t.Fatalf("candidate %s status = %s", candidate.SourceFieldID, candidate.Status)
+		if candidate.SourceFieldID == "field_order_count" {
+			orderCount = candidate
+			break
 		}
-		if !containsString(candidate.BlockReasons, BlockReasonAggregatedDataset) ||
-			!containsString(candidate.BlockReasons, BlockReasonAggregateExpression) {
-			t.Fatalf("candidate %s block reasons = %v", candidate.SourceFieldID, candidate.BlockReasons)
+	}
+	if orderCount.SourceFieldID == "" {
+		t.Fatalf("order count candidate missing: %#v", result.Candidates)
+	}
+	if orderCount.Definition.Metric.Type != "DERIVED" || orderCount.Definition.Aggregation != "NONE" {
+		t.Fatalf("aggregate output facts = %#v", orderCount.Definition)
+	}
+	if orderCount.Status != CandidateStatusNeedsReview || orderCount.Confidence != ConfidenceMedium {
+		t.Fatalf("grain mismatch review state = (%s, %s)", orderCount.Status, orderCount.Confidence)
+	}
+	if orderCount.Definition.Unit != "笔" {
+		t.Fatalf("order count unit = %q, want 笔", orderCount.Definition.Unit)
+	}
+	description := orderCount.Definition.Metric.Description
+	if !strings.Contains(description, "订单数量") || strings.Contains(description, "DAG") ||
+		strings.Contains(description, "COUNT_DISTINCT") || strings.Contains(description, "由数据集") {
+		t.Fatalf("description is not business-facing: %q", description)
+	}
+	enriched := attachDefaultSemantics(version, result)
+	for _, candidate := range enriched.Candidates {
+		if candidate.SourceFieldID != "field_order_count" {
+			continue
+		}
+		if !strings.Contains(candidate.Semantic.Caliber, "去重计数") ||
+			!strings.Contains(candidate.Semantic.Caliber, "单位为 笔") {
+			t.Fatalf("deterministic caliber = %q", candidate.Semantic.Caliber)
+		}
+		if !containsWarning(candidate.Warnings, "MONTH") {
+			t.Fatalf("monthly business intent mismatch was not surfaced: %#v", candidate.Warnings)
 		}
 	}
 }
 
-func TestExtractBlocksPreAggregatedDataset(t *testing.T) {
+func TestExtractTreatsPreAggregationAsDerivedDatasetLineage(t *testing.T) {
 	document := candidateDatasetDocument()
 	document.Nodes = append(document.Nodes, dataset.Node{
 		ID: "targets", Type: "TABLE", DataSourceID: "33333333-3333-4333-8333-333333333333",
@@ -131,11 +184,69 @@ func TestExtractBlocksPreAggregatedDataset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Extract() error = %v", err)
 	}
+	if len(result.Candidates) == 0 {
+		t.Fatal("pre-aggregated dataset produced no candidates")
+	}
 	for _, candidate := range result.Candidates {
-		if candidate.Status != CandidateStatusBlocked || !containsString(candidate.BlockReasons, BlockReasonPreAggregation) {
-			t.Fatalf("pre-aggregation candidate was not blocked: %#v", candidate)
+		if candidate.Status == CandidateStatusBlocked || candidate.Definition.Metric.Type != "DERIVED" {
+			t.Fatalf("pre-aggregation candidate was not treated as DAG-derived: %#v", candidate)
 		}
 	}
+}
+
+func monthlyPaymentsDocument() dataset.Document {
+	visible := true
+	return dataset.Document{
+		DSLVersion: dataset.DSLVersion,
+		Dataset: dataset.Descriptor{
+			Code: "customer_monthly_payments", Name: "客户每月支付金额详情",
+			Description: "按客户和月份汇总支付金额与付款订单。",
+			Type:        "SINGLE_SOURCE",
+		},
+		Nodes: []dataset.Node{{
+			ID: "payments", Type: "TABLE", DataSourceID: "33333333-3333-4333-8333-333333333333",
+			TableID: "44444444-4444-4444-8444-444444444444", Alias: "p",
+			Projection: []string{"customer_id", "order_id", "paid_at", "paid_amount"}, SourceFilters: []dataset.SourceFilter{},
+		}},
+		Joins:           []dataset.Join{},
+		PreAggregations: []dataset.PreAggregation{},
+		Fields: []dataset.Field{
+			{
+				ID: "field_customer_id", Code: "customer_id", Name: "客户编号", Role: "DIMENSION",
+				Expression:    dataset.Expression{Type: "FIELD_REF", NodeID: "payments", Field: "customer_id"},
+				CanonicalType: "STRING", Nullable: false, Visible: &visible,
+			},
+			{
+				ID: "field_order_count", Code: "order_count", Name: "订单数量", Role: "MEASURE",
+				Expression:    dataset.Expression{Type: "AGGREGATE", Function: "COUNT_DISTINCT", Argument: ptrExpression(dataset.Expression{Type: "FIELD_REF", NodeID: "payments", Field: "order_id"})},
+				CanonicalType: "INTEGER", Nullable: false, Visible: &visible,
+			},
+			{
+				ID: "field_paid_amount", Code: "monthly_paid_amount", Name: "月支付金额", Role: "MEASURE",
+				Unit: "元", SemanticType: "AMOUNT",
+				Expression:    dataset.Expression{Type: "AGGREGATE", Function: "SUM", Argument: ptrExpression(dataset.Expression{Type: "FIELD_REF", NodeID: "payments", Field: "paid_amount"})},
+				CanonicalType: "DECIMAL", Nullable: false, Visible: &visible,
+			},
+		},
+		Filters: []dataset.Filter{}, GroupBy: []string{"field_customer_id"},
+		Having: []dataset.Filter{}, Sorts: []dataset.Sort{}, Parameters: []dataset.Parameter{},
+		OutputGrain: dataset.OutputGrain{
+			Description: "每行代表一个客户的每月支付汇总", KeyFields: []string{"customer_id"},
+		},
+		ExecutionPolicy: dataset.ExecutionPolicy{
+			Mode: "REALTIME", TimeoutMS: 5000, PreviewLimit: 200, ResultLimit: 10000, CacheTTLSeconds: 300,
+			Materialization: dataset.MaterializationPolicy{Enabled: false},
+		},
+	}
+}
+
+func containsWarning(values []string, expected string) bool {
+	for _, value := range values {
+		if strings.Contains(value, expected) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestExtractRejectsAnythingOtherThanTheExactPublishedEnvelope(t *testing.T) {
@@ -219,7 +330,7 @@ func publishedDatasetVersion(t *testing.T, document dataset.Document) dataset.Ve
 	}
 	prepared, err := dataset.Prepare(raw)
 	if err != nil {
-		t.Fatalf("prepare dataset fixture: %v", err)
+		t.Fatalf("prepare dataset fixture: %#v", err)
 	}
 	return dataset.VersionRecord{
 		ID: testDatasetVersionID, DatasetID: testDatasetID, Status: "PUBLISHED", VersionNo: 1,

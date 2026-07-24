@@ -162,6 +162,29 @@ func TestServiceUpdateAppliesSemanticChangeAndRejectsMismatchedDefinition(t *tes
 	}
 }
 
+func TestServiceUpdateAppliesBlockConfigChange(t *testing.T) {
+	store, service, created := createReport(t)
+	definition := mutateDocument(t, created.Definition, func(document map[string]any) {
+		document["pages"].([]any)[0].(map[string]any)["blocks"].([]any)[0].(map[string]any)["name"] = "经营概览内容区"
+	})
+	change := DraftChange{
+		ClientOperationID: uuid.NewString(), OperationType: "BLOCK_CONFIG_UPDATE", Source: "USER",
+		Target: ChangeTarget{PageID: "page_overview", BlockID: "block_overview"},
+		Patch:  []PatchOperation{{Op: "add", Path: "/pages/0/blocks/0/name", Value: json.RawMessage(`"经营概览内容区"`)}},
+	}
+	updated, err := service.Update(context.Background(), "tenant-1", "actor-1", created.ID, "block-config", UpdateInput{
+		ExpectedRevision: 1,
+		Definition:       definition,
+		Changes:          []DraftChange{change},
+	})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if updated.Revision != 2 || len(store.lastUpdate.Changes) != 1 || store.lastUpdate.Changes[0].OperationType != "BLOCK_CONFIG_UPDATE" {
+		t.Fatalf("updated=%#v plan=%#v", updated, store.lastUpdate)
+	}
+}
+
 func TestServiceRejectsManualLockAndUnlockThenModifyBatch(t *testing.T) {
 	_, service, created := createReport(t)
 	definition := mutateDocument(t, created.Definition, func(document map[string]any) {

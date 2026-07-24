@@ -4,12 +4,20 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"time"
 )
 
 var (
 	ErrInvalidConfiguration = errors.New("invalid data source configuration")
 	ErrQuotaExceeded        = errors.New("tenant data source quota exceeded")
 	ErrCodeConflict         = errors.New("data source code already exists")
+	ErrTestRequired         = errors.New("a successful connection test is required for the current data source version")
+	ErrTestExpired          = errors.New("the successful connection test for the current data source version has expired")
+	ErrSourceVersionChanged = errors.New("data source configuration changed during the operation")
+	ErrVersionConflict      = errors.New("data source was modified by another request")
+	ErrVersioningRequired   = errors.New("data source versioned publication is not supported by the repository")
+	ErrReviewPending        = errors.New("data source publication review is pending")
+	ErrReviewRejected       = errors.New("data source publication review was rejected")
 )
 
 var dataSourceCodePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}$`)
@@ -34,27 +42,103 @@ const (
 	StatusDeleted  Status = "DELETED"
 )
 
+type ValidationStatus string
+
+const (
+	ValidationUntested ValidationStatus = "UNTESTED"
+	ValidationPassed   ValidationStatus = "PASSED"
+	ValidationFailed   ValidationStatus = "FAILED"
+)
+
+type PublicationStatus string
+
+const (
+	PublicationUnpublished PublicationStatus = "UNPUBLISHED"
+	PublicationPublished   PublicationStatus = "PUBLISHED"
+)
+
+type ReviewStatus string
+
+const (
+	ReviewNotSubmitted ReviewStatus = "NOT_SUBMITTED"
+	ReviewPending      ReviewStatus = "PENDING"
+	ReviewApproved     ReviewStatus = "APPROVED"
+	ReviewRejected     ReviewStatus = "REJECTED"
+	ReviewWithdrawn    ReviewStatus = "WITHDRAWN"
+)
+
+type Visibility string
+
+const (
+	VisibilityPrivate      Visibility = "PRIVATE"
+	VisibilityTenantPublic Visibility = "TENANT_PUBLIC"
+)
+
 type Source struct {
-	ID       string         `json:"id"`
-	TenantID string         `json:"tenantId"`
-	Code     string         `json:"code"`
-	Name     string         `json:"name"`
-	Type     Type           `json:"type"`
-	Status   Status         `json:"status"`
-	Config   map[string]any `json:"config"`
+	ID          string         `json:"id"`
+	TenantID    string         `json:"tenantId"`
+	Code        string         `json:"code"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	OwnerID     string         `json:"ownerId,omitempty"`
+	Visibility  Visibility     `json:"visibility"`
+	Type        Type           `json:"type"`
+	Status      Status         `json:"status"`
+	Config      map[string]any `json:"config"`
 	// SecretRef 只在服务端解析，任何数据源响应都不得把加密值或外部密钥引用返回浏览器。
-	SecretRef    string `json:"-"`
-	FileAssetID  string `json:"fileAssetId,omitempty"`
-	Version      int64  `json:"version"`
-	RuntimeQuota Quota  `json:"-"`
+	SecretRef              string            `json:"-"`
+	FileAssetID            string            `json:"fileAssetId,omitempty"`
+	FileVersionID          string            `json:"fileVersionId,omitempty"`
+	ConfigVersionID        string            `json:"configVersionId,omitempty"`
+	PublishedVersionID     string            `json:"publishedVersionId,omitempty"`
+	ConfigVersion          int64             `json:"configVersion"`
+	PublishedConfigVersion int64             `json:"publishedConfigVersion,omitempty"`
+	ConfigHash             string            `json:"configHash,omitempty"`
+	ValidationStatus       ValidationStatus  `json:"validationStatus"`
+	PublicationStatus      PublicationStatus `json:"publicationStatus"`
+	HasUnpublishedChanges  bool              `json:"hasUnpublishedChanges"`
+	LastTestedAt           *time.Time        `json:"lastTestedAt,omitempty"`
+	TestExpiresAt          *time.Time        `json:"testExpiresAt,omitempty"`
+	ReviewStatus           ReviewStatus      `json:"reviewStatus"`
+	ReviewRequestID        string            `json:"reviewRequestId,omitempty"`
+	ReviewRequestVersion   int64             `json:"reviewRequestVersion,omitempty"`
+	ReviewNote             string            `json:"reviewNote,omitempty"`
+	ReviewRequesterID      string            `json:"reviewRequesterId,omitempty"`
+	ReviewReviewerID       string            `json:"reviewReviewerId,omitempty"`
+	ReviewSubmittedAt      *time.Time        `json:"reviewSubmittedAt,omitempty"`
+	ReviewReviewedAt       *time.Time        `json:"reviewReviewedAt,omitempty"`
+	CreatedBy              string            `json:"createdBy,omitempty"`
+	UpdatedBy              string            `json:"updatedBy,omitempty"`
+	CreatedAt              time.Time         `json:"createdAt"`
+	UpdatedAt              time.Time         `json:"updatedAt"`
+	Version                int64             `json:"version"`
+	RuntimeQuota           Quota             `json:"-"`
 }
 type Quota struct {
 	MaxDataSources, MaxConnectionsPerSource, MaxConcurrentQueries int
 	MaxExcelFileBytes                                             int64
 }
 type TestResult struct {
-	ServerVersion string `json:"serverVersion"`
-	LatencyMS     int64  `json:"latencyMs"`
+	ServerVersion   string     `json:"serverVersion"`
+	LatencyMS       int64      `json:"latencyMs"`
+	ConfigVersionID string     `json:"configVersionId,omitempty"`
+	ConfigHash      string     `json:"configHash,omitempty"`
+	TestedAt        *time.Time `json:"testedAt,omitempty"`
+	ExpiresAt       *time.Time `json:"expiresAt,omitempty"`
+}
+
+type ConnectionTestRun struct {
+	ID            string
+	DataSourceID  string
+	ConfigVersion string
+	ConfigHash    string
+	Status        ValidationStatus
+	ServerVersion string
+	LatencyMS     int64
+	ErrorMessage  string
+	StartedAt     time.Time
+	CompletedAt   time.Time
+	ExpiresAt     *time.Time
 }
 type QueryResult struct {
 	Columns     []string          `json:"columns"`
@@ -88,8 +172,9 @@ type SyncResult struct {
 	Tables       []MetadataTable `json:"tables,omitempty"`
 }
 type SampleResult struct {
-	Columns []string `json:"columns"`
-	Rows    [][]any  `json:"rows"`
+	Columns  []string `json:"columns"`
+	Rows     [][]any  `json:"rows"`
+	RowCount int      `json:"rowCount"`
 }
 type TableSelection struct {
 	CatalogName            string `json:"catalogName"`
@@ -199,10 +284,21 @@ type Repository interface {
 	Quota(context.Context, string) (Quota, error)
 }
 
+// VersionedRepository 是兼容旧仓储的增量能力。管理页读取草稿版本，运行时沿用
+// Repository.Get 返回的已发布版本；测试和发布均绑定精确版本及配置摘要。
+type VersionedRepository interface {
+	GetDraft(context.Context, string, string) (Source, error)
+	RecordConnectionTest(context.Context, string, string, ConnectionTestRun) (ConnectionTestRun, error)
+	Publish(context.Context, string, string, string, string, string, time.Time) (Source, error)
+}
+
 // Validate 校验数据源标识、类型、连接配置与生命周期状态。
 func (s Source) Validate() error {
 	if s.TenantID == "" || s.Code == "" || s.Name == "" {
 		return errors.New("tenant, code and name are required")
+	}
+	if s.Visibility != "" && s.Visibility != VisibilityPrivate && s.Visibility != VisibilityTenantPublic {
+		return errors.New("unsupported data source visibility")
 	}
 	if !dataSourceCodePattern.MatchString(s.Code) {
 		return errors.New("data source code must start with an ASCII letter and contain only ASCII letters, digits, and underscores (maximum 128 characters)")

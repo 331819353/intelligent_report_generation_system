@@ -67,18 +67,21 @@ func (p serviceProvider) Complete(ctx context.Context, _, _ string, input Comple
 	return ProviderResult{Output: p.output}, p.err
 }
 
-func TestGenerateWithSamplesForwardsAtMostThreeRowsToProvider(t *testing.T) {
+func TestGenerateWithSamplesForwardsAtMostTenRowsToProvider(t *testing.T) {
 	input, output := validCompletion()
 	input.StructureHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	store := &serviceStore{input: input}
 	var captured CompletionInput
 	service := NewService(store, serviceProvider{output: output, input: &captured}, time.Second, 0.8)
-	samples := []map[string]any{{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}}
+	samples := []map[string]any{
+		{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}, {"id": 6},
+		{"id": 7}, {"id": 8}, {"id": 9}, {"id": 10}, {"id": 11},
+	}
 
 	if _, err := service.GenerateWithSamples(context.Background(), "tenant", "actor", "table-1", samples); err != nil {
 		t.Fatal(err)
 	}
-	if len(captured.SampleRows) != 3 || captured.SampleRows[0]["id"] != 1 || captured.SampleRows[2]["id"] != 3 {
+	if len(captured.SampleRows) != 10 || captured.SampleRows[0]["id"] != 1 || captured.SampleRows[9]["id"] != 10 {
 		t.Fatalf("sample rows=%#v", captured.SampleRows)
 	}
 	if store.createdJob.StructureHash != input.StructureHash {

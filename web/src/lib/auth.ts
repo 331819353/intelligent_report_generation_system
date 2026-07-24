@@ -27,6 +27,20 @@ export function currentTokens(): TokenPair | null {
   try { return JSON.parse(value) as TokenPair } catch { return null }
 }
 
+/** 仅解析令牌中的当前用户标识用于界面约束；服务端仍执行最终授权。 */
+export function currentSubject() {
+  const token = currentTokens()?.accessToken
+  const payload = token?.split('.')[1]
+  if (!payload) return ''
+  try {
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const claims = JSON.parse(atob(normalized)) as { sub?: string }
+    return typeof claims.sub === 'string' ? claims.sub : ''
+  } catch {
+    return ''
+  }
+}
+
 /** 清除当前标签页保存的认证信息。 */
 export function clearTokens() { sessionStorage.removeItem(sessionKey) }
 

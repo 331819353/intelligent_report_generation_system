@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from 'react'
+import { ArrowClockwise, CaretDown, DotsThree, DownloadSimple } from '@phosphor-icons/react'
 import type { ComponentType, Grid, ReportBlock, ReportComponent, ReportComponentInteractionEvent, ReportDocument, ReportParameter, ReportRendererMode, ReportRuntimeContext, ReportSelection, ReportValidationIssue } from '../../lib/report-contract'
 import { buildReportInteractionCommand, type ReportInteractionExecutor } from '../../lib/report-interactions'
 import { calculateCanvasScale, deriveEmptyGridCells, LOGICAL_CANVAS_WIDTH, LOGICAL_ROW_HEIGHT, pointerDeltaToGrid, pointerDeltaToInnerGrid, pointerPositionToInnerGrid, type BlockResetMode, type EmptyGridCell } from '../../lib/report-layout'
@@ -202,10 +203,10 @@ function ReportRendererSession({ document, runtime, mode, registry, warnings = [
   const contentRows = mode === 'designer' ? Math.max(activePage.contentGridRows, designerContentRows?.[activePage.id] ?? 10) : activePage.contentGridRows
   const logicalHeight = contentRows * LOGICAL_ROW_HEIGHT
   const emptyCells = mode === 'designer' && onEmptyCellActivate ? deriveEmptyGridCells(activePage.blocks, contentRows) : []
-  const renderedBlocks = activePage.blocks.filter(block => canView(block.permissionPolicy, interactiveRuntime))
+  const renderedBlocks = activePage.blocks.filter(block => blockIsVisible(block) && canView(block.permissionPolicy, interactiveRuntime))
   const renderedBlockIDs = renderedBlocks.map(block => block.id)
-  const renderedComponentIDs = renderedBlocks.flatMap(block => block.components
-    .filter(component => component.visible && canView(component.permissionPolicy, interactiveRuntime))
+  const renderedComponentIDs = renderedBlocks.flatMap(block => visibleComponentsForBlock(block)
+    .filter(component => canView(component.permissionPolicy, interactiveRuntime))
     .map(component => component.id))
   const stickyPlan = mode === 'viewer'
     ? calculateReportStickyPlacements({ page: activePage, viewportTop: stickyViewportTop, scale, renderedBlockIDs, renderedComponentIDs, pageIndex: document.pages.indexOf(activePage) })
@@ -243,7 +244,7 @@ function ReportRendererSession({ document, runtime, mode, registry, warnings = [
             {onEmptyCellActivate && emptyCells.map(cell => (
               <EmptyGridCellButton key={`${cell.x}-${cell.y}`} pageID={activePage.id} cell={cell} scale={scale} pendingComponentType={pendingComponentType} onActivate={onEmptyCellActivate} onDrop={onEmptyCellDrop} onPendingComponentConsumed={onPendingComponentConsumed} />
             ))}
-            {activePage.blocks.map(block => canView(block.permissionPolicy, interactiveRuntime)
+            {activePage.blocks.map(block => mode === 'viewer' && !blockIsVisible(block) ? null : canView(block.permissionPolicy, interactiveRuntime)
               ? <ReportBlockView key={block.id} pageID={activePage.id} block={block} mode={mode} runtime={interactiveRuntime} parameters={document.parameters ?? []} registry={renderers} scale={scale} onBlockGridChange={onBlockGridChange} onComponentGridChange={onComponentGridChange} onComponentDrop={onComponentDrop} onComponentDuplicate={onComponentDuplicate} onComponentDelete={onComponentDelete} pendingComponentType={pendingComponentType} onPendingComponentConsumed={onPendingComponentConsumed} onBlockReset={onBlockReset} onComponentInteraction={handleComponentInteraction} busyComponentIDs={busyComponentIDs} drillLevels={drillLevels} selection={selection} onSelectionChange={onSelectionChange} stickyPlacements={stickyPlacements} />
               : <PermissionDeniedBlock key={block.id} block={block} />)}
           </div>
@@ -376,7 +377,7 @@ function ReportBlockView({ pageID, block, mode, runtime, parameters, registry, s
 
   return (
     <article
-      className={`report-block${editable ? ' report-block--editable' : ''}${interaction ? ' report-block--interacting' : ''}${selected ? ' report-block--selected' : ''}${stickyPlacement?.enabled ? ' report-block--sticky' : ''}${stickyPlacement?.stuck ? ' report-block--stuck' : ''}${pageScopedChildSticky ? ' report-block--sticky-host' : ''}`}
+      className={`report-block report-block--${(block.kind ?? 'GENERIC').toLowerCase()}${editable ? ' report-block--editable' : ''}${interaction ? ' report-block--interacting' : ''}${selected ? ' report-block--selected' : ''}${stickyPlacement?.enabled ? ' report-block--sticky' : ''}${stickyPlacement?.stuck ? ' report-block--stuck' : ''}${pageScopedChildSticky ? ' report-block--sticky-host' : ''}${!blockIsVisible(block) ? ' report-block--hidden' : ''}`}
       data-block-id={block.id}
       data-selected={selected ? 'true' : undefined}
       data-sticky-state={stickyState(stickyPlacement)}
@@ -394,21 +395,113 @@ function ReportBlockView({ pageID, block, mode, runtime, parameters, registry, s
       onDrop={handleDrop}
       onClick={handleClick}
     >
-      {mode === 'designer' && <span className="report-block-label">{displayGrid.w} × {displayGrid.h}</span>}
+      {mode === 'designer' && <span className="report-block-label">{block.name ?? block.id} · {displayGrid.w} × {displayGrid.h}</span>}
       {resettable && (
         <div className="report-block-actions" aria-label={`分块 ${block.id} 操作`}>
           <button type="button" aria-label={`清空分块 ${block.id}`} onPointerDown={event => event.stopPropagation()} onClick={() => onBlockReset(pageID, block.id, 'CLEAR')}>清空</button>
           <button type="button" aria-label={`删除分块 ${block.id}`} onPointerDown={event => event.stopPropagation()} onClick={() => onBlockReset(pageID, block.id, 'DELETE')}>删除</button>
         </div>
       )}
-      <div className="report-inner-grid" style={{ '--inner-columns': block.innerGrid.columns, '--inner-rows': block.innerGrid.rows } as CSSProperties}>
-        {block.components.filter(component => component.visible).map(component => (
-          <ReportComponentView key={component.id} pageID={pageID} block={block} component={component} mode={mode} runtime={runtime} parameters={parameters} registry={registry} scale={scale} onComponentGridChange={onComponentGridChange} onComponentDuplicate={onComponentDuplicate} onComponentDelete={onComponentDelete} onInteraction={event => onComponentInteraction(component.id, event)} interactionBusy={busyComponentIDs.has(component.id)} drillLevel={drillLevels[component.id] ?? -1} selected={selection?.kind === 'COMPONENT' && selection.pageID === pageID && selection.blockID === block.id && selection.componentID === component.id} onSelectionChange={onSelectionChange} stickyPlacement={stickyPlacements.get(reportStickyPlacementKey('COMPONENT', component.id, block.id))} />
-        ))}
-      </div>
+      {block.kind === 'MENU' && block.menuLayout
+        ? <ReportMenuView block={block} mode={mode} runtime={runtime} parameters={parameters} />
+        : (
+          <div className="report-inner-grid" style={{ '--inner-columns': block.innerGrid.columns, '--inner-rows': block.innerGrid.rows } as CSSProperties}>
+            {visibleComponentsForBlock(block).map(component => (
+              <ReportComponentView key={component.id} pageID={pageID} block={block} component={component} mode={mode} runtime={runtime} parameters={parameters} registry={registry} scale={scale} onComponentGridChange={onComponentGridChange} onComponentDuplicate={onComponentDuplicate} onComponentDelete={onComponentDelete} onInteraction={event => onComponentInteraction(component.id, event)} interactionBusy={busyComponentIDs.has(component.id)} drillLevel={drillLevels[component.id] ?? -1} selected={selection?.kind === 'COMPONENT' && selection.pageID === pageID && selection.blockID === block.id && selection.componentID === component.id} onSelectionChange={onSelectionChange} stickyPlacement={stickyPlacements.get(reportStickyPlacementKey('COMPONENT', component.id, block.id))} />
+            ))}
+            {mode === 'designer' && block.contentLayout && Object.entries(block.contentLayout.areas)
+              .filter(([, area]) => !area.visible)
+              .map(([areaName, area]) => <HiddenContentArea key={areaName} name={areaName} componentIDs={area.componentIds} block={block} />)}
+          </div>
+        )}
       {editable && <button className="report-resize-handle" type="button" aria-label={`调整分块 ${block.id} 尺寸`} onPointerDown={event => { event.stopPropagation(); startInteraction(event, 'resize') }}>↘</button>}
     </article>
   )
+}
+
+function ReportMenuView({ block, mode, runtime, parameters }: { block: ReportBlock; mode: ReportRendererMode; runtime: ReportRuntimeContext; parameters: ReportParameter[] }) {
+  const layout = block.menuLayout!
+  const topVisible = [layout.cells.logoTitle.visible, layout.cells.actions.visible]
+  const bottomVisible = [layout.cells.globalFilters.visible, layout.cells.navigation.visible]
+  const bottomEmpty = !bottomVisible[0] && !bottomVisible[1]
+  const rowStyle = {
+    gridTemplateRows: bottomEmpty ? '1fr 0fr' : `${layout.ratios.rowHeights[0]}fr ${layout.ratios.rowHeights[1]}fr`,
+  }
+  const topStyle = {
+    gridTemplateColumns: topVisible.every(Boolean) ? `${layout.ratios.topColumns[0]}fr ${layout.ratios.topColumns[1]}fr` : '1fr',
+  }
+  const bottomStyle = {
+    gridTemplateColumns: bottomVisible.every(Boolean) ? `${layout.ratios.bottomColumns[0]}fr ${layout.ratios.bottomColumns[1]}fr` : '1fr',
+  }
+  // 隐藏宫格不保留占位节点，否则单个可见宫格无法真正横向填满该行。
+  const hiddenCell = null
+  return (
+    <div className="report-menu-layout" style={rowStyle} data-default-ratios={layout.usesDefaultRatios ? 'true' : 'false'}>
+      <div className="report-menu-row report-menu-row--top" style={topStyle}>
+        {layout.cells.logoTitle.visible ? (
+          <div className="report-menu-cell report-menu-brand">
+            <strong>{layout.cells.logoTitle.logoText}</strong>
+            <div><h2>{layout.cells.logoTitle.title}</h2>{layout.cells.logoTitle.subtitle && <span>{layout.cells.logoTitle.subtitle}</span>}</div>
+          </div>
+        ) : hiddenCell}
+        {layout.cells.actions.visible ? (
+          <div className="report-menu-cell report-menu-actions">
+            {layout.cells.actions.items.map(item => <button key={item} type="button" disabled={mode === 'designer'}>{menuActionIcon(item)}<span>{item}</span></button>)}
+          </div>
+        ) : hiddenCell}
+      </div>
+      {!bottomEmpty || mode === 'designer' ? (
+        <div className={`report-menu-row report-menu-row--bottom${bottomEmpty ? ' report-menu-row--collapsed' : ''}`} style={bottomStyle}>
+          {layout.cells.globalFilters.visible ? (
+            <div className="report-menu-cell report-menu-filters">
+              {layout.cells.globalFilters.parameterIds.map(parameterID => {
+                const parameter = parameters.find(item => item.id === parameterID)
+                if (!parameter) return <span key={parameterID}>未找到筛选参数</span>
+                const options = runtime.parameterOptions?.[parameter.code]?.options ?? []
+                return <label key={parameterID}><span>{parameter.name}</span><select value={String(runtime.parameters[parameter.code] ?? '')} disabled aria-label={`全局筛选 ${parameter.name}`}><option value="">全部</option>{options.map(option => <option key={String(option.value)} value={String(option.value)}>{option.label}</option>)}</select><CaretDown size={13} /></label>
+              })}
+            </div>
+          ) : hiddenCell}
+          {layout.cells.navigation.visible ? (
+            <nav className="report-menu-cell report-menu-navigation" aria-label="报告导航">
+              {layout.cells.navigation.items.map((item, index) => <button key={`${index}-${item.label}`} type="button" className={index === 0 ? 'is-active' : ''}>{item.label}</button>)}
+            </nav>
+          ) : hiddenCell}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function menuActionIcon(label: string) {
+  if (label.includes('刷新')) return <ArrowClockwise size={16} />
+  if (label.includes('导出')) return <DownloadSimple size={16} />
+  return <DotsThree size={18} />
+}
+
+function HiddenContentArea({ name, componentIDs, block }: { name: string; componentIDs: string[]; block: ReportBlock }) {
+  const components = block.components.filter(component => componentIDs.includes(component.id))
+  if (components.length === 0) return null
+  const left = Math.min(...components.map(component => component.grid.x))
+  const top = Math.min(...components.map(component => component.grid.y))
+  const right = Math.max(...components.map(component => component.grid.x + component.grid.w))
+  const bottom = Math.max(...components.map(component => component.grid.y + component.grid.h))
+  const labels: Record<string, string> = { title: '标题区（标题 + 筛选）', conclusion: '结论区', components: '组件图' }
+  return <div className="report-content-area-hidden" style={gridStyle({ x: left, y: top, w: right - left, h: bottom - top })}><span>{labels[name] ?? name}已隐藏</span></div>
+}
+
+function visibleComponentsForBlock(block: ReportBlock): ReportComponent[] {
+  const hiddenIDs = new Set(Object.values(block.contentLayout?.areas ?? {})
+    .filter(area => !area.visible)
+    .flatMap(area => area.componentIds))
+  return block.components.filter(component => component.visible && !hiddenIDs.has(component.id))
+}
+
+function blockIsVisible(block: ReportBlock): boolean {
+  if (block.visible === false) return false
+  if (block.kind === 'MENU') return block.menuLayout?.visible !== false
+  if (block.kind === 'CONTENT') return block.contentLayout?.visible !== false
+  return true
 }
 
 function EmptyGridCellButton({ pageID, cell, scale, pendingComponentType, onActivate, onDrop, onPendingComponentConsumed }: { pageID: string; cell: EmptyGridCell; scale: number; pendingComponentType?: ComponentType; onActivate: NonNullable<ReportRendererProps['onEmptyCellActivate']>; onDrop?: ReportRendererProps['onEmptyCellDrop']; onPendingComponentConsumed?: () => void }) {

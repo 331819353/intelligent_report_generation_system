@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -24,14 +25,10 @@ func (s *PostgresStore) Create(ctx context.Context, tenantID, actorID string, pr
 	return s.create(ctx, tenantID, actorID, "", 0, prepared)
 }
 
-// CreateFromCandidate 在同一事务内锁定候选版本、创建指标草稿并把候选置为
-// ACCEPTED。origin_candidate_id 同时让提交后丢失响应的重试返回同一草稿。
+// CreateFromCandidate 在同一事务内锁定候选版本：同数据集同编码指标已存在时
+// 迭代其当前草稿，否则创建新的指标主对象。旧发布版本始终保持不可变。
 func (s *PostgresStore) CreateFromCandidate(ctx context.Context, tenantID, actorID, candidateID string, expectedCandidateVersion int64, prepared Prepared) (Record, error) {
 	if existing, err := s.GetByOriginCandidate(ctx, tenantID, candidateID); err == nil {
-		existingPrepared, prepareErr := Prepare(existing.Definition)
-		if prepareErr != nil || existingPrepared.DefinitionHash != prepared.DefinitionHash {
-			return Record{}, ErrOriginCandidateUnavailable
-		}
 		return existing, nil
 	} else if !errors.Is(err, ErrNotFound) {
 		return Record{}, err
@@ -71,14 +68,38 @@ func (s *PostgresStore) create(ctx context.Context, tenantID, actorID, candidate
 				return ErrOriginCandidateUnavailable
 			}
 			candidatePrepared, err := Prepare(candidateDefinition)
-			if err != nil || candidatePrepared.DefinitionHash != prepared.DefinitionHash {
+			if err != nil || !sameCandidateCalculation(candidatePrepared.Definition, prepared.Definition) {
 				return ErrOriginCandidateUnavailable
+			}
+		}
+		definition := prepared.Definition
+		if candidateID != "" {
+			var existingMetricID, existingDatasetID string
+			err := tx.QueryRow(ctx, `SELECT id::text,dataset_id::text
+				FROM platform.metrics
+				WHERE code=$1 AND deleted_at IS NULL
+				FOR UPDATE`, definition.Metric.Code).Scan(&existingMetricID, &existingDatasetID)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if err == nil {
+				if existingDatasetID != definition.DatasetID {
+					return ErrAlreadyExists
+				}
+				metricID = existingMetricID
+				if err := iterateMetricDraftFromCandidateTx(
+					ctx, tx, tenantID, actorID, metricID, candidateID, prepared,
+				); err != nil {
+					return err
+				}
+				return acceptMetricCandidateTx(
+					ctx, tx, tenantID, actorID, candidateID, metricID, expectedCandidateVersion,
+				)
 			}
 		}
 		if err := validatePreparedReferencesTx(ctx, tx, "", prepared); err != nil {
 			return err
 		}
-		definition := prepared.Definition
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.metrics(
 			tenant_id,dataset_id,code,name,description,metric_type,origin_candidate_id,created_by,updated_by
 		) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,'')::uuid,$8,$8) RETURNING id::text`,
@@ -101,22 +122,9 @@ func (s *PostgresStore) create(ctx context.Context, tenantID, actorID, candidate
 			return err
 		}
 		if candidateID != "" {
-			tag, err := tx.Exec(ctx, `UPDATE platform.metric_candidates SET
-				status='ACCEPTED',accepted_metric_id=$1,decision_reason='',reviewed_by=$2,reviewed_at=now(),
-				version=version+1,updated_at=now()
-				WHERE id::text=$3 AND version=$4 AND status IN ('READY','NEEDS_REVIEW')`,
-				metricID, actorID, candidateID, expectedCandidateVersion)
-			if err != nil {
-				return err
-			}
-			if tag.RowsAffected() != 1 {
-				return ErrOriginCandidateConflict
-			}
-			if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
-				tenant_id,actor_user_id,action,resource_type,resource_id,detail
-			) VALUES($1,$2,'ACCEPT','METRIC_CANDIDATE',$3,
-				jsonb_build_object('metricId',$4::text,'fromVersion',$5::bigint))`,
-				tenantID, actorID, candidateID, metricID, expectedCandidateVersion); err != nil {
+			if err := acceptMetricCandidateTx(
+				ctx, tx, tenantID, actorID, candidateID, metricID, expectedCandidateVersion,
+			); err != nil {
 				return err
 			}
 		}
@@ -138,12 +146,122 @@ func (s *PostgresStore) create(ctx context.Context, tenantID, actorID, candidate
 	return s.Get(ctx, tenantID, metricID)
 }
 
-// GetByOriginCandidate 按候选幂等身份读取已经创建的指标草稿。
+func iterateMetricDraftFromCandidateTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, actorID, metricID, candidateID string,
+	prepared Prepared,
+) error {
+	var metricVersion, draftRecordVersion int64
+	var draftVersionID, currentDatasetVersionID string
+	err := tx.QueryRow(ctx, `SELECT
+		metric.version,draft.id::text,draft.record_version,draft.dataset_version_id::text
+		FROM platform.metrics AS metric
+		JOIN platform.metric_versions AS draft
+		  ON draft.id=metric.current_draft_version_id
+		 AND draft.metric_id=metric.id
+		 AND draft.tenant_id=metric.tenant_id
+		WHERE metric.id::text=$1 AND metric.deleted_at IS NULL
+		FOR UPDATE OF metric,draft`, metricID).Scan(
+		&metricVersion, &draftVersionID, &draftRecordVersion, &currentDatasetVersionID,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if err := validatePreparedReferencesTx(ctx, tx, metricID, prepared); err != nil {
+		return err
+	}
+	// dataset_version_id 是维度与依赖复合外键的一部分；先清理旧草稿索引，
+	// 再切换版本并按候选中的完整维度集合重建。
+	if err := clearDerivedTx(ctx, tx, draftVersionID); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE platform.metric_versions SET
+		dataset_version_id=$1,definition_json=$2,definition_hash=$3,
+		record_version=record_version+1,updated_by=$4
+		WHERE id=$5 AND status='DRAFT' AND record_version=$6`,
+		prepared.Definition.DatasetVersionID, prepared.DefinitionJSON, prepared.DefinitionHash,
+		actorID, draftVersionID, draftRecordVersion)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	definition := prepared.Definition
+	if _, err := tx.Exec(ctx, `UPDATE platform.metrics SET
+		name=$1,description=$2,metric_type=$3,version=version+1,updated_by=$4
+		WHERE id::text=$5`, definition.Metric.Name, definition.Metric.Description,
+		definition.Metric.Type, actorID, metricID); err != nil {
+		return err
+	}
+	if err := replaceDerivedTx(ctx, tx, tenantID, metricID, draftVersionID, prepared); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+		tenant_id,actor_user_id,action,resource_type,resource_id,detail
+	) VALUES($1,$2,'ITERATE_FROM_CANDIDATE','METRIC',$3,jsonb_build_object(
+		'candidateId',$4::text,'fromVersion',$5::bigint,
+		'fromDatasetVersionId',$6::text,'toDatasetVersionId',$7::text,
+		'draftRecordVersion',$8::bigint,'definitionHash',$9::text
+	))`, tenantID, actorID, metricID, candidateID, metricVersion,
+		currentDatasetVersionID, definition.DatasetVersionID, draftRecordVersion,
+		prepared.DefinitionHash)
+	return err
+}
+
+func acceptMetricCandidateTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, actorID, candidateID, metricID string,
+	expectedCandidateVersion int64,
+) error {
+	tag, err := tx.Exec(ctx, `UPDATE platform.metric_candidates SET
+		status='ACCEPTED',accepted_metric_id=$1,decision_reason='',reviewed_by=$2,reviewed_at=now(),
+		version=version+1,updated_at=now()
+		WHERE id::text=$3 AND version=$4 AND status IN ('READY','NEEDS_REVIEW')`,
+		metricID, actorID, candidateID, expectedCandidateVersion)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrOriginCandidateConflict
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+		tenant_id,actor_user_id,action,resource_type,resource_id,detail
+	) VALUES($1,$2,'ACCEPT','METRIC_CANDIDATE',$3,
+		jsonb_build_object('metricId',$4::text,'fromVersion',$5::bigint))`,
+		tenantID, actorID, candidateID, metricID, expectedCandidateVersion)
+	return err
+}
+
+func sameCandidateCalculation(candidate, accepted Definition) bool {
+	// LLM enrichment may improve only the human-facing name and description after
+	// deterministic extraction. Every executable and formatting fact, including unit,
+	// remains byte-for-byte equivalent after normalization.
+	candidate.Metric.Name = accepted.Metric.Name
+	candidate.Metric.Description = accepted.Metric.Description
+	candidateRaw, candidateErr := json.Marshal(candidate)
+	acceptedRaw, acceptedErr := json.Marshal(accepted)
+	return candidateErr == nil && acceptedErr == nil && string(candidateRaw) == string(acceptedRaw)
+}
+
+// GetByOriginCandidate 按首个来源候选或后续迭代候选读取同一指标草稿。
 func (s *PostgresStore) GetByOriginCandidate(ctx context.Context, tenantID, candidateID string) (Record, error) {
 	var metricID string
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT id::text FROM platform.metrics
-			WHERE origin_candidate_id::text=$1 AND deleted_at IS NULL`, candidateID).Scan(&metricID)
+		return tx.QueryRow(ctx, `SELECT metric.id::text
+			FROM platform.metric_candidates AS candidate
+			JOIN platform.metrics AS metric
+			  ON metric.tenant_id=candidate.tenant_id
+			 AND (metric.id=candidate.accepted_metric_id OR metric.origin_candidate_id=candidate.id)
+			 AND metric.deleted_at IS NULL
+			WHERE candidate.id::text=$1
+			ORDER BY (metric.id=candidate.accepted_metric_id) DESC
+			LIMIT 1`, candidateID).Scan(&metricID)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Record{}, ErrNotFound
@@ -215,6 +333,81 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 		return rows.Err()
 	})
 	return items, total, err
+}
+
+// Delete 将指标从活动资产目录中软删除，同时保留不可变版本和审计事实。
+// 软删除时释放租户内业务编码，使用户可以从头创建同编码的新指标。
+func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string, input DeleteInput) error {
+	return database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		var version int64
+		var code string
+		err := tx.QueryRow(ctx, `SELECT version,code::text
+			FROM platform.metrics
+			WHERE id::text=$1 AND deleted_at IS NULL
+			FOR UPDATE`, id).Scan(&version, &code)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if version != input.ExpectedVersion {
+			return ErrConflict
+		}
+		var inUse bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1
+			FROM platform.report_draft_dependencies AS dependency
+			JOIN platform.reports AS report
+			  ON report.id=dependency.report_id
+			 AND report.tenant_id=dependency.tenant_id
+			 AND report.deleted_at IS NULL
+			WHERE (dependency.dependency_type='METRIC' AND dependency.dependency_id=$1)
+			   OR (dependency.dependency_type='METRIC_VERSION' AND dependency.dependency_id IN (
+			     SELECT version.id::text FROM platform.metric_versions AS version
+			     WHERE version.metric_id::text=$1
+			   ))
+			UNION ALL
+			SELECT 1
+			FROM platform.metric_dependencies AS dependency
+			JOIN platform.metric_versions AS downstream
+			  ON downstream.id=dependency.metric_version_id
+			 AND downstream.tenant_id=dependency.tenant_id
+			JOIN platform.metrics AS downstream_metric
+			  ON downstream_metric.id=downstream.metric_id
+			 AND downstream_metric.tenant_id=downstream.tenant_id
+			 AND downstream_metric.deleted_at IS NULL
+			WHERE dependency.dependency_metric_id::text=$1
+			  AND downstream.status IN ('DRAFT','PUBLISHED','STALE')
+			UNION ALL
+			SELECT 1 FROM platform.query_runs AS run
+			WHERE run.metric_id::text=$1 AND run.status='RUNNING'
+		)`, id).Scan(&inUse); err != nil {
+			return err
+		}
+		if inUse {
+			return ErrInUse
+		}
+		tombstoneCode := "deleted_" + strings.ReplaceAll(id, "-", "")
+		tag, err := tx.Exec(ctx, `UPDATE platform.metrics SET
+			code=$1,status='DEPRECATED',current_draft_version_id=NULL,
+			current_published_version_id=NULL,deleted_at=now(),
+			version=version+1,updated_by=$2
+			WHERE id::text=$3 AND version=$4 AND deleted_at IS NULL`,
+			tombstoneCode, actorID, id, version)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return ErrConflict
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+			tenant_id,actor_user_id,action,resource_type,resource_id,detail
+		) VALUES($1,$2,'DELETE','METRIC',$3,jsonb_build_object(
+			'code',$4::text,'fromVersion',$5::bigint
+		))`, tenantID, actorID, id, code, version)
+		return err
+	})
 }
 
 // Update 在主对象和草稿行锁内复核三重并发条件，再重建派生索引。

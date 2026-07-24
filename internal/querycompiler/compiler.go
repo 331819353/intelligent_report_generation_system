@@ -19,8 +19,9 @@ import (
 type Dialect string
 
 const (
-	MySQL  Dialect = "MYSQL"
-	Oracle Dialect = "ORACLE"
+	MySQL      Dialect = "MYSQL"
+	Oracle     Dialect = "ORACLE"
+	PostgreSQL Dialect = "POSTGRESQL"
 )
 
 var safeIdentifier = regexp.MustCompile(`^[\p{L}][\p{L}\p{N}_$#]{0,127}$`)
@@ -59,11 +60,16 @@ type compiler struct {
 
 // Compile 仅从结构化 DSL 生成 SQL，并对全部标识符和值执行失败关闭校验。
 func Compile(input Input) (CompiledQuery, error) {
-	if input.Dialect != MySQL && input.Dialect != Oracle {
+	if input.Dialect != MySQL && input.Dialect != Oracle && input.Dialect != PostgreSQL {
 		return CompiledQuery{}, errors.New("unsupported query dialect")
 	}
 	if err := dataset.Validate(input.Document); err != nil {
 		return CompiledQuery{}, fmt.Errorf("invalid dataset document: %w", err)
+	}
+	if input.Dialect == PostgreSQL {
+		if err := validatePostgreSQLDocumentIdentifiers(input.Document); err != nil {
+			return CompiledQuery{}, err
+		}
 	}
 	if input.Document.Dataset.Type != "SINGLE_SOURCE" || len(input.Document.Nodes) == 0 {
 		return CompiledQuery{}, errors.New("secure compiler currently requires a single-source dataset")
@@ -690,6 +696,13 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 		if c.input.Dialect == Oracle {
 			return "TRUNC(" + argument + ", '" + map[string]string{"DAY": "DD", "WEEK": "IW", "MONTH": "MM", "QUARTER": "Q", "YEAR": "YYYY"}[expression.Unit] + "')", nil
 		}
+		if c.input.Dialect == PostgreSQL {
+			unit := map[string]string{"DAY": "day", "WEEK": "week", "MONTH": "month", "QUARTER": "quarter", "YEAR": "year"}[expression.Unit]
+			if unit == "" {
+				return "", errors.New("unsupported date truncation unit")
+			}
+			return "DATE_TRUNC('" + unit + "', " + argument + ")", nil
+		}
 		if expression.Unit == "QUARTER" {
 			return "STR_TO_DATE(CONCAT(YEAR(" + argument + "),'-',LPAD((QUARTER(" + argument + ")-1)*3+1,2,'0'),'-01'),'%%Y-%%m-%%d')", nil
 		}
@@ -709,7 +722,7 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 		if err != nil {
 			return "", err
 		}
-		if c.input.Dialect == Oracle {
+		if c.input.Dialect == Oracle || c.input.Dialect == PostgreSQL {
 			format := map[string]string{"YEAR": "YYYY", "MONTH": "YYYYMM", "DAY": "YYYYMMDD"}[expression.Unit]
 			if format != "" {
 				return "TO_CHAR(" + argument + ", '" + format + "')", nil
@@ -736,8 +749,9 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 			return "", err
 		}
 		types := map[Dialect]map[string]string{
-			MySQL:  {"STRING": "CHAR", "INTEGER": "SIGNED", "DECIMAL": "DECIMAL(38,10)", "BOOLEAN": "UNSIGNED", "DATE": "DATE", "DATETIME": "DATETIME"},
-			Oracle: {"STRING": "VARCHAR2(4000)", "INTEGER": "NUMBER(38)", "DECIMAL": "NUMBER", "BOOLEAN": "NUMBER(1)", "DATE": "DATE", "DATETIME": "TIMESTAMP"},
+			MySQL:      {"STRING": "CHAR", "INTEGER": "SIGNED", "DECIMAL": "DECIMAL(38,10)", "BOOLEAN": "UNSIGNED", "DATE": "DATE", "DATETIME": "DATETIME"},
+			Oracle:     {"STRING": "VARCHAR2(4000)", "INTEGER": "NUMBER(38)", "DECIMAL": "NUMBER", "BOOLEAN": "NUMBER(1)", "DATE": "DATE", "DATETIME": "TIMESTAMP"},
+			PostgreSQL: {"STRING": "TEXT", "INTEGER": "BIGINT", "DECIMAL": "NUMERIC(38,10)", "BOOLEAN": "BOOLEAN", "DATE": "DATE", "DATETIME": "TIMESTAMP"},
 		}
 		target := types[c.input.Dialect][expression.TargetType]
 		if target == "" {
@@ -883,9 +897,15 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 			return "", err
 		}
 		if expression.Type == "CONTAINS" {
+			if c.input.Dialect == PostgreSQL {
+				return "(STRPOS(" + left + "," + right + ") > 0)", nil
+			}
 			return "(INSTR(" + left + "," + right + ") > 0)", nil
 		}
 		if expression.Type == "NOT_CONTAINS" {
+			if c.input.Dialect == PostgreSQL {
+				return "(STRPOS(" + left + "," + right + ") = 0)", nil
+			}
 			return "(INSTR(" + left + "," + right + ") = 0)", nil
 		}
 		op, err := comparison(expression.Type)
@@ -1089,6 +1109,8 @@ func (c *compiler) compileColumns() ([]string, error) {
 			case "HASH":
 				if c.input.Dialect == MySQL {
 					projection = "SHA2(CAST(" + base + " AS CHAR), 256)"
+				} else if c.input.Dialect == PostgreSQL {
+					projection = "ENCODE(DIGEST(CAST(" + base + " AS TEXT), 'sha256'), 'hex')"
 				} else {
 					projection = "STANDARD_HASH(TO_CHAR(" + base + "), 'SHA256')"
 				}
@@ -1140,7 +1162,7 @@ func (c *compiler) compileSorts() (string, error) {
 			parts = append(parts, "("+quoted+" IS NULL) "+nullDirection)
 		}
 		part := quoted + " " + item.Direction
-		if c.input.Dialect == Oracle && item.Nulls != "" {
+		if (c.input.Dialect == Oracle || c.input.Dialect == PostgreSQL) && item.Nulls != "" {
 			part += " NULLS " + item.Nulls
 		}
 		parts = append(parts, part)
@@ -1156,6 +1178,9 @@ func (c *compiler) mask(base string, rule policy.MaskRule) string {
 	if c.input.Dialect == MySQL {
 		return fmt.Sprintf("CONCAT(LEFT(%s,%d),REPEAT('%s',GREATEST(CHAR_LENGTH(%s)-%d,0)),RIGHT(%s,%d))", base, rule.PrefixLength, strings.ReplaceAll(maskChar, "'", "''"), base, rule.PrefixLength+rule.SuffixLength, base, rule.SuffixLength)
 	}
+	if c.input.Dialect == PostgreSQL {
+		return fmt.Sprintf("CONCAT(LEFT(CAST(%s AS TEXT),%d),REPEAT('%s',GREATEST(LENGTH(CAST(%s AS TEXT))-%d,0)),RIGHT(CAST(%s AS TEXT),%d))", base, rule.PrefixLength, strings.ReplaceAll(maskChar, "'", "''"), base, rule.PrefixLength+rule.SuffixLength, base, rule.SuffixLength)
+	}
 	return fmt.Sprintf("SUBSTR(%s,1,%d)||RPAD('%s',GREATEST(LENGTH(%s)-%d,0),'%s')||SUBSTR(%s,-%d)", base, rule.PrefixLength, strings.ReplaceAll(maskChar, "'", "''"), base, rule.PrefixLength+rule.SuffixLength, strings.ReplaceAll(maskChar, "'", "''"), base, rule.SuffixLength)
 }
 
@@ -1164,6 +1189,9 @@ func (c *compiler) bind(value any) string {
 	c.args = append(c.args, value)
 	if c.input.Dialect == Oracle {
 		return fmt.Sprintf(":%d", len(c.args))
+	}
+	if c.input.Dialect == PostgreSQL {
+		return fmt.Sprintf("$%d", len(c.args))
 	}
 	return "%s"
 }
@@ -1186,6 +1214,9 @@ func (c *compiler) quote(value string) string {
 	if c.input.Dialect == MySQL {
 		return "`" + value + "`"
 	}
+	if c.input.Dialect == PostgreSQL {
+		return `"` + value + `"`
+	}
 	return `"` + strings.ToUpper(value) + `"`
 }
 
@@ -1202,9 +1233,37 @@ func (c *compiler) validateTable(ref TableRef) error {
 	if !safeIdentifier.MatchString(ref.Name) || (ref.Schema != "" && !safeIdentifier.MatchString(ref.Schema)) {
 		return errors.New("physical table identifier is invalid")
 	}
+	if c.input.Dialect == PostgreSQL && (len(ref.Name) > 63 || len(ref.Schema) > 63) {
+		return errors.New("PostgreSQL physical identifiers cannot exceed 63 bytes")
+	}
 	for name := range ref.Columns {
 		if !safeIdentifier.MatchString(name) {
 			return errors.New("physical column identifier is invalid")
+		}
+		if c.input.Dialect == PostgreSQL && len(name) > 63 {
+			return errors.New("PostgreSQL physical identifiers cannot exceed 63 bytes")
+		}
+	}
+	return nil
+}
+
+// PostgreSQL silently truncates identifiers after 63 bytes. Rejecting aliases
+// and output names before compilation prevents two distinct DSL identifiers
+// from collapsing to the same physical name (especially with multibyte text).
+func validatePostgreSQLDocumentIdentifiers(document dataset.Document) error {
+	for _, node := range document.Nodes {
+		if len(node.Alias) > 63 {
+			return errors.New("PostgreSQL node aliases cannot exceed 63 bytes")
+		}
+		for _, field := range node.Projection {
+			if len(field) > 63 {
+				return errors.New("PostgreSQL projected identifiers cannot exceed 63 bytes")
+			}
+		}
+	}
+	for _, field := range document.Fields {
+		if len(field.Code) > 63 {
+			return errors.New("PostgreSQL output identifiers cannot exceed 63 bytes")
 		}
 	}
 	return nil

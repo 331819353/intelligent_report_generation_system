@@ -4,13 +4,16 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/metric"
 	"intelligent-report-generation-system/internal/metriccandidate"
 	"intelligent-report-generation-system/internal/platform/database"
@@ -45,11 +48,19 @@ func TestMetricCandidateExtractionAtomicAcceptanceAndRetryBudget(t *testing.T) {
 	if err != nil || !processed {
 		t.Fatalf("ProcessNext() processed=%v err=%v", processed, err)
 	}
-	items, total, err := candidateStore.List(ctx, tenantID, metriccandidate.ListFilter{Limit: 20})
-	if err != nil || total != 1 || len(items) != 1 {
-		t.Fatalf("List() items=%#v total=%d err=%v", items, total, err)
+	var candidateID string
+	if err := database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT id::text FROM platform.metric_candidates
+			WHERE dataset_version_id=$1
+			  AND source_field_ids @> ARRAY['field_revenue']::text[]
+			ORDER BY id LIMIT 1`, datasetVersion.ID).Scan(&candidateID)
+	}); err != nil {
+		t.Fatal(err)
 	}
-	candidate := items[0]
+	candidate, err := candidateStore.Get(ctx, tenantID, candidateID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if candidate.DatasetID != datasetRecord.ID || candidate.DatasetVersionID != datasetVersion.ID ||
 		candidate.DSLHash != datasetVersion.DSLHash || candidate.Status != metriccandidate.CandidateStatusNeedsReview {
 		t.Fatalf("extracted candidate=%#v", candidate)
@@ -81,6 +92,132 @@ func TestMetricCandidateExtractionAtomicAcceptanceAndRetryBudget(t *testing.T) {
 			WHERE origin_candidate_id=$1 AND dataset_id=$2`, candidate.ID, datasetRecord.ID).Scan(&linkedMetrics)
 	}); err != nil || linkedMetrics != 1 {
 		t.Fatalf("origin candidate metric count=%d err=%v", linkedMetrics, err)
+	}
+
+	// 发布 V1 后给同一数据集增加维度并重新提取。新候选必须迭代原指标草稿，
+	// 而不是因稳定指标编码的唯一约束尝试创建第二个指标主对象。
+	metricStore := metric.NewPostgresStore(pool)
+	grantMetricPublish(t, ctx, pool, tenantID, actorID, "", accepted.Metric.ID)
+	initialPrepared, err := metric.Prepare(accepted.Metric.Definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishedV1, err := metricStore.Publish(ctx, tenantID, actorID, accepted.Metric.ID,
+		metricPublishPlan(accepted.Metric, initialPrepared, "metric-candidate-v1-"+suffix, strings.Repeat("7", 64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	datasetService := dataset.NewService(dataset.NewPostgresStore(pool), &publicationValidatorStub{
+		result: dataset.PreviewResult{QueryID: uuid.NewString()},
+	})
+	currentDataset, err := datasetService.Get(ctx, tenantID, datasetRecord.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := dataset.DecodeAndNormalize(currentDataset.DSL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := true
+	document.Fields = append(document.Fields, dataset.Field{
+		ID: "field_order_month", Code: "order_month", Name: "下单年月", Role: "DIMENSION",
+		Expression:    dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_date"},
+		CanonicalType: "DATE", Nullable: false, Visible: &visible,
+	})
+	changedDSL, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentDataset, err = datasetService.Update(ctx, tenantID, actorID, datasetRecord.ID, dataset.UpdateInput{
+		Name: currentDataset.Name, Description: currentDataset.Description,
+		ExpectedVersion: currentDataset.Version, DSL: changedDSL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	datasetVersionV2, err := datasetService.Publish(ctx, tenantID, actorID, datasetRecord.ID,
+		"metric-candidate-dataset-v2-"+suffix, dataset.PublishInput{
+			DraftVersionID: currentDataset.DraftVersionID, ExpectedVersion: currentDataset.Version,
+			ExpectedDraftRecordVersion: currentDataset.DraftRecordVersion, ExpectedDSLHash: currentDataset.DSLHash,
+			ValidationParameters: map[string]any{},
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		return candidateStore.EnqueueDatasetMetricExtractionTx(ctx, tx, tenantID, actorID, datasetVersionV2)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	processed, err = worker.ProcessNext(ctx, tenantID, "metric-candidate-integration-v2", 2*time.Minute)
+	if err != nil || !processed {
+		t.Fatalf("ProcessNext(V2) processed=%v err=%v", processed, err)
+	}
+	var candidateV2ID string
+	if err := database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT id::text FROM platform.metric_candidates
+			WHERE dataset_version_id=$1 AND code=$2 ORDER BY created_at DESC LIMIT 1`,
+			datasetVersionV2.ID, candidate.Code).Scan(&candidateV2ID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	candidateV2, err := candidateStore.Get(ctx, tenantID, candidateV2ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	iterated, err := reviewService.Accept(ctx, tenantID, actorID, candidateV2.ID,
+		metriccandidate.AcceptInput{ExpectedVersion: candidateV2.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if iterated.Metric.ID != accepted.Metric.ID ||
+		iterated.Metric.CurrentPublishedVersionID != publishedV1.ID ||
+		iterated.Metric.DatasetVersionID != datasetVersionV2.ID ||
+		iterated.Metric.DraftRecordVersion != accepted.Metric.DraftRecordVersion+1 {
+		t.Fatalf("iterated metric=%#v initial=%#v publishedV1=%#v", iterated.Metric, accepted.Metric, publishedV1)
+	}
+	var draftDimensions []string
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		rows, queryErr := tx.Query(ctx, `SELECT field_id FROM platform.metric_dimensions
+			WHERE metric_version_id::text=$1 ORDER BY ordinal_position`, iterated.Metric.DraftVersionID)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var fieldID string
+			if scanErr := rows.Scan(&fieldID); scanErr != nil {
+				return scanErr
+			}
+			draftDimensions = append(draftDimensions, fieldID)
+		}
+		return rows.Err()
+	})
+	if err != nil || !containsIntegrationString(draftDimensions, "field_order_month") {
+		t.Fatalf("iterated draft dimensions=%v err=%v", draftDimensions, err)
+	}
+	unchangedV1, err := metricStore.GetVersion(ctx, tenantID, accepted.Metric.ID, publishedV1.ID)
+	if err != nil || unchangedV1.DatasetVersionID != datasetVersion.ID ||
+		unchangedV1.DefinitionHash != publishedV1.DefinitionHash {
+		t.Fatalf("published V1 changed after iteration: %#v err=%v", unchangedV1, err)
+	}
+	iteratedPrepared, err := metric.Prepare(iterated.Metric.Definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishedV2, err := metricStore.Publish(ctx, tenantID, actorID, accepted.Metric.ID,
+		metricPublishPlan(iterated.Metric, iteratedPrepared, "metric-candidate-v2-"+suffix, strings.Repeat("8", 64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publishedV2.VersionNo != 2 || publishedV2.DatasetVersionID != datasetVersionV2.ID {
+		t.Fatalf("published V2=%#v", publishedV2)
+	}
+	replayedV2, err := reviewService.Accept(ctx, tenantID, actorID, candidateV2.ID,
+		metriccandidate.AcceptInput{ExpectedVersion: candidateV2.Version})
+	if err != nil || replayedV2.Metric.ID != accepted.Metric.ID {
+		t.Fatalf("replay V2=%#v err=%v", replayedV2, err)
 	}
 
 	var expiredJobID string
@@ -144,4 +281,13 @@ func TestMetricCandidateExtractionAtomicAcceptanceAndRetryBudget(t *testing.T) {
 	if err == nil {
 		t.Fatal("metric extraction job accepted a DSL hash that does not belong to the exact dataset version")
 	}
+}
+
+func containsIntegrationString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

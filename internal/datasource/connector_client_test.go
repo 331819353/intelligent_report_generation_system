@@ -3,8 +3,10 @@ package datasource
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -84,5 +86,137 @@ func TestQueryAndCancelUseConnectorContract(t *testing.T) {
 	}
 	if len(paths) != 2 || paths[0] != "/v1/query" || paths[1] != "/v1/query/cancel" {
 		t.Fatalf("paths=%#v", paths)
+	}
+}
+
+func TestMetadataSampleProjectsOnlyBoundedScalarColumns(t *testing.T) {
+	var projected []any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		projected, _ = input["columns"].([]any)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(
+			`{"columns":["id","note"],"rows":[[1,"safe"]],"rowCount":1}`,
+		))
+	}))
+	defer server.Close()
+
+	connector := NewPythonConnector(
+		TypeOracle, server.URL, "internal-token",
+		staticSecrets{
+			"host": "oracle.internal", "port": "1521",
+			"database": "FREEPDB1", "username": "reader", "password": "secret",
+		},
+	)
+	result, err := connector.Sample(
+		context.Background(),
+		Source{
+			ID: "source-1", TenantID: "tenant-1", Type: TypeOracle,
+			SecretRef: "env://ORACLE",
+		},
+		MetadataTable{
+			SchemaName: "APP", Name: "ORDERS",
+			Columns: []MetadataColumn{
+				{Name: "id", NativeType: "NUMBER(18)", CanonicalType: "NUMBER"},
+				{Name: "payload", NativeType: "BLOB", CanonicalType: "BINARY"},
+				{Name: "legacy_text", NativeType: "LONG", CanonicalType: "TEXT"},
+				{Name: "xml_payload", NativeType: "XMLTYPE", CanonicalType: "TEXT"},
+				{Name: "json_payload", NativeType: "JSON", CanonicalType: "TEXT"},
+				{Name: "note", NativeType: "VARCHAR2(100)", CanonicalType: "TEXT"},
+			},
+		},
+		10,
+	)
+	if err != nil || len(result.Rows) != 1 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if len(projected) != 2 || projected[0] != "id" || projected[1] != "note" {
+		t.Fatalf("unsafe sample projection=%#v", projected)
+	}
+}
+
+func TestConnectorRejectsOversizedResponseBeforeJSONDecode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"columns":["value"],"rows":[["` + strings.Repeat("x", 512) + `"]],"rowCount":1}`))
+	}))
+	defer server.Close()
+	limits := DefaultConnectorLimits()
+	limits.MaxSampleResponseBytes = 128
+	connector := NewPythonConnectorWithLimits(
+		TypeMySQL, server.URL, "internal-token",
+		staticSecrets{
+			"host": "mysql.internal", "port": "3306", "database": "app",
+			"username": "reader", "password": "secret",
+		},
+		limits,
+	)
+	_, err := connector.Sample(
+		context.Background(),
+		Source{
+			ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL,
+			SecretRef: "env://MYSQL",
+		},
+		MetadataTable{
+			SchemaName: "app", Name: "orders",
+			Columns: []MetadataColumn{
+				{Name: "value", NativeType: "varchar(1000)", CanonicalType: "TEXT"},
+			},
+		},
+		10,
+	)
+	if !errors.Is(err, ErrConnectorResponseBytesExceeded) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestConnectorRejectsDangerousLiteralBeforeSendingCredential(t *testing.T) {
+	connector := NewPythonConnector(
+		TypeMySQL, "http://connector.invalid", "internal-token",
+		staticSecrets{
+			"host": "169.254.169.254", "port": "3306", "database": "app",
+			"username": "reader", "password": "must-not-be-sent",
+		},
+	)
+	_, err := connector.Test(
+		context.Background(),
+		Source{
+			ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL,
+			SecretRef: "env://MYSQL",
+		},
+	)
+	if err == nil || strings.Contains(err.Error(), "must-not-be-sent") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestQueryRejectsInconsistentRemoteShapeWithinByteLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(
+			`{"columns":["value"],"rows":[[1],[2]],"rowCount":1,"durationMs":1}`,
+		))
+	}))
+	defer server.Close()
+	connector := NewPythonConnector(
+		TypeMySQL, server.URL, "internal-token",
+		staticSecrets{
+			"host": "mysql.internal", "port": "3306", "database": "app",
+			"username": "reader", "password": "secret",
+		},
+	)
+	_, err := connector.Query(
+		context.Background(),
+		Source{
+			ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL,
+			SecretRef: "env://MYSQL",
+		},
+		"query-1", "SELECT value FROM items", nil, 10,
+	)
+	if !errors.Is(err, ErrConnectorResourceLimitExceeded) {
+		t.Fatalf("err=%v", err)
 	}
 }

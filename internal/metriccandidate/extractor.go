@@ -17,11 +17,11 @@ import (
 // ExtractorVersion identifies the deterministic rule contract used for job deduplication.
 // Changing extraction semantics requires a new value so exact dataset versions can be
 // reconciled again without rewriting prior audit evidence.
-const ExtractorVersion = "metric-candidate-v2"
+const ExtractorVersion = "metric-candidate-v4"
 
-// JobVersion advances the durable post-publication workflow without changing the deterministic
-// candidate identity. V2 backfills searchable semantics and embeddings for V1 candidates.
-const JobVersion = "metric-candidate-semantic-v3"
+// JobVersion advances the durable publication workflow whenever extraction or semantic
+// enrichment changes, while keeping prior jobs and audit evidence immutable.
+const JobVersion = "metric-candidate-semantic-v5"
 
 var ErrInvalidDatasetVersion = errors.New("metric candidate extraction requires an exact published dataset version")
 
@@ -60,7 +60,14 @@ func Extract(version dataset.VersionRecord) (ExtractionResult, error) {
 	timeFieldID, timeGrain, timeWarnings := extractTimeSemantics(document, dimensions)
 	globalBlocks := datasetBlockReasons(document)
 	partial := false
-	rules := deriveCandidateRules(document, len(globalBlocks) == 0)
+	detailCompatible := len(document.GroupBy) == 0 && len(document.Having) == 0
+	for _, field := range document.Fields {
+		if expressionContainsAggregate(field.Expression) {
+			detailCompatible = false
+			break
+		}
+	}
+	rules := deriveCandidateRules(document, detailCompatible)
 
 	for _, rule := range rules {
 		candidate, err := buildCandidate(version, document, rule, dimensions, timeFieldID, timeGrain, globalBlocks, timeWarnings)
@@ -73,8 +80,8 @@ func Extract(version dataset.VersionRecord) (ExtractionResult, error) {
 		result.Candidates = append(result.Candidates, candidate)
 	}
 	if len(result.Candidates) == 0 {
-		result.Warnings = append(result.Warnings, "数据集发布版本没有可由输出粒度、标识符或数值字段确定的原子指标候选。")
-	} else if len(globalBlocks) == 0 && !hasRecordCountRule(rules) {
+		result.Warnings = append(result.Warnings, "数据集发布版本没有可由输出粒度、标识符、数值字段或聚合输出确定的指标候选。")
+	} else if detailCompatible && len(globalBlocks) == 0 && !hasRecordCountRule(rules) {
 		result.Warnings = append(result.Warnings, "数据集没有非空输出字段，无法安全生成明细记录数候选。")
 	}
 	result.Status = TaskStatusSucceeded
@@ -96,12 +103,25 @@ type candidateRule struct {
 	Evidence    []Evidence
 	Warnings    []string
 	Kind        string
+	MetricType  string
+	// BusinessAggregation keeps the aggregation already executed by an aggregate DAG
+	// output. The metric definition uses NONE to avoid nesting the aggregation, while
+	// descriptions, units and semantic caliber must still describe the real business
+	// calculation.
+	BusinessAggregation string
 }
 
 func deriveCandidateRules(document dataset.Document, detailCompatible bool) []candidateRule {
 	rules := []candidateRule{}
 	seen := map[string]bool{}
 	add := func(rule candidateRule) {
+		if rule.MetricType == "" {
+			if len(document.Joins) > 0 || len(document.PreAggregations) > 0 {
+				rule.MetricType = "DERIVED"
+			} else {
+				rule.MetricType = "ATOMIC"
+			}
+		}
 		key := rule.Field.ID + "\x1f" + rule.Aggregation
 		if seen[key] {
 			return
@@ -109,12 +129,33 @@ func deriveCandidateRules(document dataset.Document, detailCompatible bool) []ca
 		seen[key] = true
 		rules = append(rules, rule)
 	}
+	if !detailCompatible {
+		for index, field := range document.Fields {
+			aggregateFunction, ok := topLevelAggregateFunction(field.Expression)
+			if !ok || field.Role != "MEASURE" {
+				continue
+			}
+			add(candidateRule{
+				Field: field, FieldIndex: index, Aggregation: "NONE",
+				Confidence: ConfidenceHigh, Status: CandidateStatusReady,
+				Name:        safeText(field.Name, field.Code, 200),
+				Description: businessMetricDescription(document, field, aggregateFunction),
+				CodeSeed:    field.Code,
+				Evidence: []Evidence{{
+					Code: "DAG_AGGREGATE_OUTPUT", Path: fmt.Sprintf("dsl.fields[%d].expression.function", index),
+					Value: aggregateFunction,
+				}},
+				Kind: "DAG_DERIVED_METRIC", MetricType: "DERIVED", BusinessAggregation: aggregateFunction,
+			})
+		}
+		return rules
+	}
 	if detailCompatible {
 		if field, index, evidence, ok := recordCountField(document); ok {
 			add(candidateRule{
 				Field: field, FieldIndex: index, Aggregation: "COUNT", Confidence: ConfidenceHigh,
 				Status: CandidateStatusReady, Name: safeText(document.Dataset.Name+"记录数", "记录数", 200),
-				Description: safeText(fmt.Sprintf("按数据集“%s”的发布输出粒度统计明细记录数。", document.Dataset.Name), "明细记录数", 2000),
+				Description: safeText(fmt.Sprintf("统计%s的明细记录数量。", businessContextName(document)), "统计明细记录数量。", 2000),
 				CodeSeed:    "record", Evidence: evidence, Kind: "RECORD_COUNT",
 			})
 		}
@@ -139,7 +180,7 @@ func deriveCandidateRules(document dataset.Document, detailCompatible bool) []ca
 			add(candidateRule{
 				Field: field, FieldIndex: index, Aggregation: "COUNT_DISTINCT", Confidence: confidence,
 				Status: CandidateStatusReady, Name: identifierCountName(field),
-				Description: safeText(fmt.Sprintf("基于数据集“%s”的标识符“%s”统计去重实体数。", document.Dataset.Name, field.Name), "标识符去重数", 2000),
+				Description: safeText(fmt.Sprintf("统计%s数量，重复%s只计算一次。", metricObjectName(field), metricObjectName(field)), "统计去重业务对象数量。", 2000),
 				CodeSeed:    field.Code, Evidence: []Evidence{{Code: evidenceCode, Path: fmt.Sprintf("dsl.fields[%d]", index), Value: field.Code}},
 				Warnings: warnings, Kind: "IDENTIFIER_COUNT",
 			})
@@ -216,20 +257,29 @@ func buildCandidate(
 	aggregation, confidence, status := rule.Aggregation, rule.Confidence, rule.Status
 	ruleEvidence, warnings := append([]Evidence(nil), rule.Evidence...), append([]string(nil), rule.Warnings...)
 	blockReasons := append([]string{}, globalBlocks...)
-	if expressionContainsAggregate(field.Expression) && !containsString(blockReasons, BlockReasonAggregateExpression) {
-		blockReasons = append(blockReasons, BlockReasonAggregateExpression)
-	}
 	if len(blockReasons) > 0 {
 		status = CandidateStatusBlocked
 	}
 	warnings = append(warnings, timeWarnings...)
+	grainWarnings := semanticGrainWarnings(document)
+	warnings = append(warnings, grainWarnings...)
+	if len(grainWarnings) > 0 && status == CandidateStatusReady {
+		status = CandidateStatusNeedsReview
+		if confidence == ConfidenceHigh {
+			confidence = ConfidenceMedium
+		}
+	}
 	if field.Visible != nil && !*field.Visible {
 		warnings = append(warnings, "源字段在数据集输出中不可见，应用候选前需要复核展示范围。")
 	}
 
 	unit := strings.TrimSpace(field.Unit)
-	if aggregation == "COUNT" || aggregation == "COUNT_DISTINCT" {
-		unit = ""
+	businessAggregation := rule.BusinessAggregation
+	if businessAggregation == "" {
+		businessAggregation = aggregation
+	}
+	if unit == "" && (businessAggregation == "COUNT" || businessAggregation == "COUNT_DISTINCT") {
+		unit = inferredCountUnit(field, rule.Kind)
 	}
 	if !validBoundedText(unit, 32) {
 		unit = ""
@@ -249,7 +299,7 @@ func buildCandidate(
 			Code:        metricCode(document.Dataset.Code, rule.CodeSeed, aggregation),
 			Name:        rule.Name,
 			Description: rule.Description,
-			Type:        "ATOMIC",
+			Type:        rule.MetricType,
 		},
 		DatasetID:                    version.DatasetID,
 		DatasetVersionID:             version.ID,
@@ -367,22 +417,24 @@ func extractTimeSemantics(document dataset.Document, dimensions []metric.Dimensi
 }
 
 func datasetBlockReasons(document dataset.Document) []string {
+	// Grouped DAG outputs are valid derived metric sources. Their aggregate expressions are
+	// reused with aggregation=NONE and must not be treated as atomic detail fields.
 	reasons := []string{}
 	if len(document.GroupBy) > 0 || len(document.Having) > 0 {
-		reasons = append(reasons, BlockReasonAggregatedDataset)
+		return reasons
 	}
 	if len(document.PreAggregations) > 0 {
-		reasons = append(reasons, BlockReasonPreAggregation)
-	}
-	for _, field := range document.Fields {
-		if expressionContainsAggregate(field.Expression) {
-			if !containsString(reasons, BlockReasonAggregateExpression) {
-				reasons = append(reasons, BlockReasonAggregateExpression)
-			}
-			break
-		}
+		return reasons
 	}
 	return reasons
+}
+
+func topLevelAggregateFunction(expression dataset.Expression) (string, bool) {
+	if expression.Type != "AGGREGATE" {
+		return "", false
+	}
+	function := strings.ToUpper(strings.TrimSpace(expression.Function))
+	return function, supportedAggregations[function]
 }
 
 func expressionContainsAggregate(expression dataset.Expression) bool {
@@ -432,7 +484,110 @@ func candidateDescription(document dataset.Document, field dataset.Field) string
 	if description := safeText(field.Description, "", 2000); description != "" {
 		return description
 	}
-	return safeText(fmt.Sprintf("基于数据集“%s”的字段“%s”确定性提取的指标候选。", document.Dataset.Name, field.Name), "指标候选", 2000)
+	return safeText(fmt.Sprintf("统计%s。", field.Name), "统计业务度量。", 2000)
+}
+
+func businessMetricDescription(document dataset.Document, field dataset.Field, aggregation string) string {
+	contextName := businessContextName(document)
+	objectName := metricObjectName(field)
+	switch aggregation {
+	case "COUNT", "COUNT_DISTINCT":
+		if strings.HasSuffix(contextName, "金额") {
+			contextName = strings.TrimSpace(strings.TrimSuffix(contextName, "金额"))
+		}
+		if contextName == "" {
+			return safeText(fmt.Sprintf("统计%s数量。", objectName), "统计业务对象数量。", 2000)
+		}
+		return safeText(fmt.Sprintf("统计%s场景下的%s数量。", contextName, objectName), "统计业务对象数量。", 2000)
+	case "SUM":
+		return safeText(fmt.Sprintf("统计%s口径下的%s合计。", contextName, field.Name), "统计业务金额或数量合计。", 2000)
+	case "AVG":
+		return safeText(fmt.Sprintf("统计%s口径下的%s平均值。", contextName, field.Name), "统计业务度量平均值。", 2000)
+	case "MIN":
+		return safeText(fmt.Sprintf("统计%s口径下的%s最小值。", contextName, field.Name), "统计业务度量最小值。", 2000)
+	case "MAX":
+		return safeText(fmt.Sprintf("统计%s口径下的%s最大值。", contextName, field.Name), "统计业务度量最大值。", 2000)
+	default:
+		return candidateDescription(document, field)
+	}
+}
+
+func businessContextName(document dataset.Document) string {
+	contextName := safeText(document.Dataset.Name, "当前业务", 160)
+	for _, suffix := range []string{"数据集", "明细表", "详情表", "明细", "详情"} {
+		contextName = strings.TrimSpace(strings.TrimSuffix(contextName, suffix))
+	}
+	return contextName
+}
+
+func metricObjectName(field dataset.Field) string {
+	name := safeText(field.Name, field.Code, 160)
+	for _, suffix := range []string{"总数量", "数量", "总数", "去重数", "数"} {
+		if trimmed := strings.TrimSpace(strings.TrimSuffix(name, suffix)); trimmed != "" && trimmed != name {
+			return trimmed
+		}
+	}
+	source := aggregateSourceField(field.Expression)
+	for _, suffix := range []string{"_id", "_no", "_code", "Id", "ID", "编号", "编码"} {
+		if trimmed := strings.TrimSpace(strings.TrimSuffix(source, suffix)); trimmed != "" && trimmed != source {
+			return trimmed
+		}
+	}
+	return name
+}
+
+func aggregateSourceField(expression dataset.Expression) string {
+	if expression.Type == "AGGREGATE" && expression.Argument != nil {
+		return strings.TrimSpace(expression.Argument.Field)
+	}
+	return strings.TrimSpace(expression.Field)
+}
+
+func inferredCountUnit(field dataset.Field, kind string) string {
+	if kind == "RECORD_COUNT" {
+		return "条"
+	}
+	search := strings.ToLower(strings.Join([]string{
+		field.Name, field.Code, metricObjectName(field), aggregateSourceField(field.Expression),
+	}, " "))
+	transactionWords := []string{
+		"订单", "交易", "支付", "付款", "退款", "发票", "账单", "结算", "流水", "工单",
+		"order", "transaction", "payment", "refund", "invoice", "bill", "settlement", "ticket",
+	}
+	for _, word := range transactionWords {
+		if strings.Contains(search, word) {
+			return "笔"
+		}
+	}
+	return "个"
+}
+
+func semanticGrainWarnings(document dataset.Document) []string {
+	businessText := strings.Join([]string{
+		document.Dataset.Name, document.Dataset.Description, document.OutputGrain.Description,
+		strings.Join(designerBusinessHints(document.Designer), " "),
+	}, " ")
+	expected := ""
+	switch {
+	case strings.Contains(businessText, "每月") || strings.Contains(businessText, "月度") || strings.Contains(strings.ToLower(businessText), "monthly"):
+		expected = "MONTH"
+	case strings.Contains(businessText, "每日") || strings.Contains(businessText, "按日") || strings.Contains(strings.ToLower(businessText), "daily"):
+		expected = "DAY"
+	case strings.Contains(businessText, "每周") || strings.Contains(businessText, "周度") || strings.Contains(strings.ToLower(businessText), "weekly"):
+		expected = "WEEK"
+	case strings.Contains(businessText, "季度") || strings.Contains(strings.ToLower(businessText), "quarterly"):
+		expected = "QUARTER"
+	case strings.Contains(businessText, "每年") || strings.Contains(businessText, "年度") || strings.Contains(strings.ToLower(businessText), "yearly"):
+		expected = "YEAR"
+	}
+	if expected == "" {
+		return nil
+	}
+	actual := strings.ToUpper(strings.TrimSpace(document.OutputGrain.DefaultTimeGrain))
+	if strings.TrimSpace(document.OutputGrain.TimeField) == "" || actual != expected {
+		return []string{fmt.Sprintf("业务名称或粒度说明包含 %s 周期，但输出粒度未声明对应时间字段和时间粒度；LLM 不会把该周期写成已实现口径，接受候选前应复核 DAG。", expected)}
+	}
+	return nil
 }
 
 func defaultAdditivity(aggregation string) string {

@@ -65,8 +65,9 @@ func (s *Service) Create(ctx context.Context, tenantID, actorID string, input Cr
 	return s.store.Create(ctx, tenantID, actorID, prepared)
 }
 
-// CreateFromCandidate 执行与普通创建相同的授权和精确版本校验，但要求仓储用
-// candidateID 做持久幂等。该入口只创建草稿，不会验证试算或发布指标。
+// CreateFromCandidate 执行与普通创建相同的授权和精确版本校验，并要求仓储用
+// candidateID 做持久幂等。同数据集同编码时迭代现有草稿，否则创建首个草稿；
+// 该入口不会验证试算或发布指标。
 func (s *Service) CreateFromCandidate(ctx context.Context, tenantID, actorID, candidateID string, expectedCandidateVersion int64, input CreateInput) (Record, error) {
 	if tenantID == "" || actorID == "" || !canonicalUUID(candidateID) || expectedCandidateVersion < 1 {
 		return Record{}, ErrInvalidDefinition
@@ -126,6 +127,14 @@ func (s *Service) Update(ctx context.Context, tenantID, actorID, id string, inpu
 		return Record{}, err
 	}
 	return s.store.Update(ctx, tenantID, actorID, id, input, prepared)
+}
+
+// Delete 删除当前指标资产；仓储会在同一事务内复核报告、下游指标和运行中查询占用。
+func (s *Service) Delete(ctx context.Context, tenantID, actorID, id string, input DeleteInput) error {
+	if tenantID == "" || actorID == "" || !canonicalUUID(id) || input.ExpectedVersion < 1 {
+		return ErrInvalidDefinition
+	}
+	return s.store.Delete(ctx, tenantID, actorID, id, input)
 }
 
 // ValidateCurrent 对当前草稿重新执行全部数据集、字段、依赖和扇出校验。
@@ -335,14 +344,8 @@ func (s *Service) validatePrepared(ctx context.Context, tenantID, actorID, metri
 	if err != nil || version.DatasetID != prepared.Definition.DatasetID {
 		return validatedDefinition{}, invalid("datasetVersionId", "METRIC_DATASET_VERSION_INVALID", "数据集版本定义无法解析或不属于指定数据集")
 	}
-	if len(document.GroupBy) > 0 || len(document.Having) > 0 || len(document.PreAggregations) > 0 {
-		return validatedDefinition{}, invalid("datasetVersionId", "METRIC_AGGREGATED_DATASET_UNSUPPORTED", "首阶段指标只能基于未预聚合的数据集版本")
-	}
 	fields := make(map[string]dataset.Field, len(document.Fields))
-	for index, field := range document.Fields {
-		if expressionContainsAggregate(field.Expression) {
-			return validatedDefinition{}, invalid(fmt.Sprintf("datasetVersion.fields[%d]", index), "METRIC_AGGREGATED_DATASET_UNSUPPORTED", "首阶段指标不能再次聚合数据集中的聚合字段")
-		}
+	for _, field := range document.Fields {
 		fields[field.ID] = field
 	}
 	dependencies, err := s.loadDependencies(ctx, tenantID, actorID, metricID, prepared,
@@ -354,6 +357,9 @@ func (s *Service) validatePrepared(ctx context.Context, tenantID, actorID, metri
 	for _, candidate := range allDefinitions {
 		if candidate.Definition.DatasetID != prepared.Definition.DatasetID || candidate.Definition.DatasetVersionID != prepared.Definition.DatasetVersionID {
 			return validatedDefinition{}, invalid("expression.metricVersionId", "METRIC_REFERENCE_DATASET_MISMATCH", "所有指标依赖必须固定同一数据集版本")
+		}
+		if err := validateDatasetComputationShape(candidate.Definition, document, fields); err != nil {
+			return validatedDefinition{}, err
 		}
 		if err := validateDefinitionFields(candidate.Definition, fields); err != nil {
 			return validatedDefinition{}, err
@@ -378,6 +384,52 @@ func (s *Service) validatePrepared(ctx context.Context, tenantID, actorID, metri
 		prepared: prepared, datasetVersion: version, datasetDocument: document,
 		dependencies: dependencies, duplicateSensitive: duplicateSensitive,
 	}, nil
+}
+
+// validateDatasetComputationShape distinguishes a metric aggregation over detail fields from a
+// value already computed by the dataset DAG. The latter is represented as DERIVED + NONE so the
+// query planner reuses the DAG aggregate expression instead of nesting a second SUM/COUNT around
+// it. Field-based DERIVED metrics are only valid when the dataset itself contains an observable
+// join, grouping, pre-aggregation, or calculated expression.
+func validateDatasetComputationShape(
+	definition Definition,
+	document dataset.Document,
+	fields map[string]dataset.Field,
+) error {
+	fieldIDs := []string{}
+	visitMetricExpression(definition.Expression, func(expression Expression) {
+		if expression.Type == "FIELD_REF" {
+			fieldIDs = append(fieldIDs, expression.FieldID)
+		}
+	})
+	if len(fieldIDs) == 0 {
+		return nil
+	}
+	dagDerived := len(document.Joins) > 0 || len(document.GroupBy) > 0 ||
+		len(document.Having) > 0 || len(document.PreAggregations) > 0
+	for _, fieldID := range fieldIDs {
+		field, exists := fields[fieldID]
+		if !exists {
+			continue
+		}
+		if field.Expression.Type != "FIELD_REF" {
+			dagDerived = true
+		}
+		aggregated := expressionContainsAggregate(field.Expression)
+		if definition.Aggregation != "NONE" && aggregated {
+			return invalid("expression.fieldId", "METRIC_NESTED_AGGREGATION_FORBIDDEN",
+				"数据集 DAG 已聚合该输出字段，指标不能再次聚合")
+		}
+		if definition.Aggregation == "NONE" && !aggregated {
+			return invalid("aggregation", "METRIC_DAG_AGGREGATION_REQUIRED",
+				"只有数据集 DAG 已聚合的输出字段才能使用 NONE")
+		}
+	}
+	if definition.Metric.Type == "DERIVED" && !dagDerived {
+		return invalid("metric.type", "METRIC_DERIVED_DATASET_REQUIRED",
+			"字段型派生指标必须来自包含关联、分组或计算的普通数据集 DAG")
+	}
+	return nil
 }
 
 func (s *Service) loadDependencies(ctx context.Context, tenantID, actorID, rootMetricID string, root Prepared, state map[string]int, loaded map[string]Prepared, requirePublished bool) (map[string]Prepared, error) {

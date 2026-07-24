@@ -242,6 +242,58 @@ func TestValidateReturnsPreciseReferencePaths(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidAggregatePlacementAndGrain(t *testing.T) {
+	prepared, err := Prepare(readExample(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := Expression{Type: "AGGREGATE", Function: "COUNT"}
+	one := Expression{Type: "LITERAL", Value: json.Number("1")}
+
+	t.Run("aggregate in pre-filter", func(t *testing.T) {
+		document := prepared.Document
+		document.Filters = []Filter{{
+			ID: "invalid_count_filter", Stage: "PRE_AGGREGATION",
+			Expression: Expression{
+				Type: "GT", Left: &count, Right: &one,
+			},
+		}}
+		if err := Validate(document); !validationHasReason(err, "聚合前过滤不能包含聚合表达式") {
+			t.Fatalf("Validate() error=%v", err)
+		}
+	})
+
+	t.Run("detail output missing from group by", func(t *testing.T) {
+		document := prepared.Document
+		document.GroupBy = []string{}
+		if err := Validate(document); !validationHasReason(err, "所有非聚合明细输出字段都必须出现在 groupBy") {
+			t.Fatalf("Validate() error=%v", err)
+		}
+	})
+
+	t.Run("aggregate output used as group key", func(t *testing.T) {
+		document := prepared.Document
+		document.GroupBy = []string{"field_revenue"}
+		if err := Validate(document); !validationHasReason(err, "分组字段不能引用聚合输出") {
+			t.Fatalf("Validate() error=%v", err)
+		}
+	})
+
+	t.Run("aggregate mixed with ungrouped detail in one output", func(t *testing.T) {
+		document := prepared.Document
+		document.Fields[1].Expression = Expression{
+			Type: "ADD",
+			Arguments: []Expression{
+				document.Fields[1].Expression,
+				{Type: "FIELD_REF", NodeID: "orders", Field: "order_amount"},
+			},
+		}
+		if err := Validate(document); !validationHasReason(err, "聚合输出不能混用聚合外的明细字段") {
+			t.Fatalf("Validate() error=%v", err)
+		}
+	})
+}
+
 func TestValidateTextExpressionShapes(t *testing.T) {
 	field := Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_status"}
 	valid := Expression{Type: "REPLACE", Arguments: []Expression{
@@ -455,7 +507,11 @@ func TestValidateRejectsUnsafeSourceFilterExpression(t *testing.T) {
 }
 
 func TestSchemaAndExampleAreValidJSON(t *testing.T) {
-	for _, path := range []string{"../../api/schemas/dataset-dsl-v1.schema.json", "../../api/examples/dataset-dsl-v1.json"} {
+	for _, path := range []string{
+		"../../api/schemas/dataset-dsl-v1.schema.json",
+		"../../api/examples/dataset-dsl-v1.json",
+		"../../api/examples/dataset-dsl-dws-v1.json",
+	} {
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -463,6 +519,17 @@ func TestSchemaAndExampleAreValidJSON(t *testing.T) {
 		var value any
 		if err := json.Unmarshal(raw, &value); err != nil {
 			t.Fatalf("%s is invalid JSON: %v", path, err)
+		}
+		if strings.HasSuffix(path, "dataset-dsl-dws-v1.json") {
+			prepared, err := Prepare(raw)
+			if err != nil {
+				t.Fatalf("%s violates the strict DSL contract: %v", path, err)
+			}
+			if prepared.Document.Dataset.Layer != LayerDWS ||
+				len(prepared.Document.Nodes) != 1 ||
+				prepared.Document.Nodes[0].Type != "DATASET" {
+				t.Fatalf("%s is not a strict DWS example", path)
+			}
 		}
 	}
 }

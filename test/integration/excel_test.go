@@ -28,6 +28,17 @@ func TestExcelUploadVersionSyncAndRemovedColumn(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 	tenantID := insertTenant(t, ctx, pool, fmt.Sprintf("excel-it-%d", time.Now().UnixNano()))
+	var actorID string
+	if err := database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `INSERT INTO platform.users(
+				tenant_id,email,display_name,password_hash
+			) VALUES($1,$2,'excel integration publisher','integration-hash')
+			RETURNING id::text`,
+			tenantID, "excel-publisher-"+fmt.Sprint(time.Now().UnixNano())+"@it.test",
+		).Scan(&actorID)
+	}); err != nil {
+		t.Fatal(err)
+	}
 	storage, err := datasource.NewMinIOStorage(env("MINIO_ENDPOINT", "127.0.0.1:9000"), env("MINIO_ACCESS_KEY", "report_minio"), env("MINIO_SECRET_KEY", "local_minio_password"), false)
 	if err != nil {
 		t.Fatal(err)
@@ -36,14 +47,55 @@ func TestExcelUploadVersionSyncAndRemovedColumn(t *testing.T) {
 	manager := datasource.NewExcelManager(repo, storage, env("MINIO_BUCKET_UPLOADS", "uploads"))
 	connector := datasource.NewExcelConnector(manager)
 	service := datasource.NewService(repo, connector)
+	service.SetConnectionTestJobRepository(
+		datasource.NewPostgresConnectionTestRepository(pool),
+	)
+	testerPool := connectionTestPool(
+		t, ctx, env(
+			"CONNECTION_TEST_DATABASE_URL",
+			"postgres://report_connection_tester:local_connection_test_password@127.0.0.1:5432/intelligent_report?sslmode=disable",
+		),
+	)
+	testerRepository := datasource.NewPostgresConnectionTestRepository(testerPool)
+	testerExcelManager := datasource.NewExcelManager(
+		datasource.NewPostgresRepository(testerPool),
+		storage,
+		env("MINIO_BUCKET_UPLOADS", "uploads"),
+	)
+	connectionTestWorker := datasource.NewConnectionTestWorker(
+		testerRepository,
+		5*time.Second,
+		datasource.NewExcelConnector(testerExcelManager),
+	)
+	runConnectionTest := func(sourceID string) {
+		t.Helper()
+		job, err := service.QueueConnectionTest(
+			ctx, tenantID, actorID, sourceID,
+			fmt.Sprintf("excel-integration-%s-%d", sourceID, time.Now().UnixNano()),
+		)
+		if err != nil {
+			t.Fatalf("queue Excel connection test: %v", err)
+		}
+		processed, err := connectionTestWorker.ProcessNext(
+			ctx, tenantID, "excel-integration-worker", 20*time.Second,
+		)
+		if err != nil || !processed {
+			t.Fatalf("process Excel connection test: processed=%t err=%v", processed, err)
+		}
+		finished, err := service.GetConnectionTest(
+			ctx, tenantID, sourceID, job.ID,
+		)
+		if err != nil || finished.Status != datasource.ConnectionTestSucceeded {
+			t.Fatalf("Excel connection test=%#v err=%v", finished, err)
+		}
+	}
 	var keys []string
 	t.Cleanup(func() {
 		for _, key := range keys {
 			_ = storage.Delete(context.Background(), env("MINIO_BUCKET_UPLOADS", "uploads"), key)
 		}
-		if err := cleanupExcelTenant(pool, tenantID); err != nil {
-			t.Errorf("cleanup excel tenant: %v", err)
-		}
+		// 数据源配置版本和文件版本是刻意不可变的审计事实；一次性集成数据库
+		// 统一回收，测试不能通过禁用约束来伪造逐行清理。
 	})
 
 	first := excelBytes(t, false)
@@ -58,12 +110,17 @@ func TestExcelUploadVersionSyncAndRemovedColumn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Test(ctx, tenantID, source.ID); err != nil {
+	runConnectionTest(source.ID)
+	source, err = service.Publish(ctx, tenantID, actorID, source.ID)
+	if err != nil || source.PublicationStatus != datasource.PublicationPublished ||
+		source.PublishedVersionID != source.ConfigVersionID {
+		t.Fatalf("initial publish=%#v err=%v", source, err)
+	}
+	inspectionV1, err := service.InspectFileSource(ctx, tenantID, source.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if inspection, err := manager.Inspect(ctx, tenantID, asset.ID, 50<<20); err != nil || len(inspection.Sheets) != 1 {
-		t.Fatalf("inspection=%#v err=%v", inspection, err)
-	}
+	assertExcelInspection(t, inspectionV1, 4, "date", "2026-07-15")
 	result, err := service.Sync(ctx, tenantID, source.ID)
 	if err != nil || result.Assets != 1 {
 		t.Fatalf("sync=%#v err=%v", result, err)
@@ -75,15 +132,35 @@ func TestExcelUploadVersionSyncAndRemovedColumn(t *testing.T) {
 		t.Fatalf("version=%#v err=%v", version2, err)
 	}
 	replacedSource, err := service.Get(ctx, tenantID, source.ID)
-	if err != nil || replacedSource.Status != datasource.StatusDraft || replacedSource.Version <= source.Version {
+	if err != nil || replacedSource.Status != datasource.StatusActive ||
+		!replacedSource.HasUnpublishedChanges ||
+		replacedSource.ValidationStatus != datasource.ValidationUntested ||
+		replacedSource.Version <= source.Version {
 		t.Fatalf("replaced source=%#v err=%v", replacedSource, err)
 	}
-	if _, err := service.Test(ctx, tenantID, source.ID); err != nil {
+	// 运行面 inspection 必须固定已发布配置快照。即使 file_assets.current_version
+	// 已经推进到 v2，草稿上线前仍读取并把解析计划保存回不可变的 v1。
+	inspectionWhileV2Draft, err := service.InspectFileSource(ctx, tenantID, source.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Inspect(ctx, tenantID, asset.ID, 50<<20); err != nil {
+	assertExcelInspection(t, inspectionWhileV2Draft, 4, "date", "2026-07-15")
+	runConnectionTest(source.ID)
+	inspectionAfterV2Test, err := service.InspectFileSource(ctx, tenantID, source.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
+	assertExcelInspection(t, inspectionAfterV2Test, 4, "date", "2026-07-15")
+	if replacedSource, err = service.Publish(ctx, tenantID, actorID, source.ID); err != nil ||
+		replacedSource.HasUnpublishedChanges ||
+		replacedSource.PublishedVersionID != replacedSource.ConfigVersionID {
+		t.Fatalf("version 2 publish=%#v err=%v", replacedSource, err)
+	}
+	inspectionV2, err := service.InspectFileSource(ctx, tenantID, source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertExcelInspection(t, inspectionV2, 5, "region", "CN-SH")
 	if _, err := service.Sync(ctx, tenantID, source.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -91,14 +168,20 @@ func TestExcelUploadVersionSyncAndRemovedColumn(t *testing.T) {
 	if err != nil || version3.CurrentVersion != 3 {
 		t.Fatalf("version=%#v err=%v", version3, err)
 	}
-	if replacedSource, err = service.Get(ctx, tenantID, source.ID); err != nil || replacedSource.Status != datasource.StatusDraft {
+	if replacedSource, err = service.Get(ctx, tenantID, source.ID); err != nil ||
+		replacedSource.Status != datasource.StatusActive ||
+		!replacedSource.HasUnpublishedChanges ||
+		replacedSource.ValidationStatus != datasource.ValidationUntested {
 		t.Fatalf("second replaced source=%#v err=%v", replacedSource, err)
 	}
-	if _, err := service.Test(ctx, tenantID, source.ID); err != nil {
-		t.Fatal(err)
-	}
+	runConnectionTest(source.ID)
 	if _, err := manager.Inspect(ctx, tenantID, asset.ID, 50<<20); err != nil {
 		t.Fatal(err)
+	}
+	if replacedSource, err = service.Publish(ctx, tenantID, actorID, source.ID); err != nil ||
+		replacedSource.HasUnpublishedChanges ||
+		replacedSource.PublishedVersionID != replacedSource.ConfigVersionID {
+		t.Fatalf("version 3 publish=%#v err=%v", replacedSource, err)
 	}
 	if _, err := service.Sync(ctx, tenantID, source.ID); err != nil {
 		t.Fatal(err)
@@ -129,8 +212,10 @@ func TestExcelUploadVersionSyncAndRemovedColumn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Test(ctx, tenantID, csvSource.ID); err != nil {
-		t.Fatal(err)
+	runConnectionTest(csvSource.ID)
+	if csvSource, err = service.Publish(ctx, tenantID, actorID, csvSource.ID); err != nil ||
+		csvSource.PublicationStatus != datasource.PublicationPublished {
+		t.Fatalf("csv publish=%#v err=%v", csvSource, err)
 	}
 	if _, err := manager.Inspect(ctx, tenantID, csvAsset.ID, 50<<20); err != nil {
 		t.Fatal(err)
@@ -209,19 +294,21 @@ func excelBytes(t *testing.T, includeRegion bool) []byte {
 	return output.Bytes()
 }
 
-func cleanupExcelTenant(pool *pgxpool.Pool, tenantID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
-		for _, table := range []string{"ai_metadata_suggestions", "ai_metadata_jobs", "asset_dependencies", "metadata_diffs", "metadata_snapshots", "metadata_columns", "metadata_tables", "data_sources", "file_asset_versions", "file_assets", "tenant_data_source_quotas"} {
-			if _, err := tx.Exec(ctx, "DELETE FROM platform."+table+" WHERE tenant_id=$1", tenantID); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		return err
+func assertExcelInspection(
+	t *testing.T,
+	inspection datasource.ExcelWorkbookInspection,
+	columnCount int,
+	lastColumn, lastValue string,
+) {
+	t.Helper()
+	if len(inspection.Sheets) != 1 {
+		t.Fatalf("inspection sheets=%#v", inspection.Sheets)
 	}
-	_, err := pool.Exec(ctx, `DELETE FROM platform.tenants WHERE id=$1`, tenantID)
-	return err
+	sheet := inspection.Sheets[0]
+	if sheet.Name != "Sales" || len(sheet.Columns) != columnCount ||
+		sheet.Columns[columnCount-1].Name != lastColumn ||
+		len(sheet.Rows) != 1 || len(sheet.Rows[0]) != columnCount ||
+		sheet.Rows[0][columnCount-1] != lastValue {
+		t.Fatalf("unexpected inspection=%#v", inspection)
+	}
 }

@@ -19,19 +19,67 @@ export type ReportValidationResult = {
  */
 export function validateReportDocument(source: unknown): ReportValidationResult {
   if (validateSchema(source)) {
-    const semanticErrors = validateStickyContainerReferences(source)
+    const semanticErrors = [
+      ...validateStickyContainerReferences(source),
+      ...validateDesignerBlockSemantics(source),
+    ]
     return { document: semanticErrors.length === 0 ? source : undefined, errors: semanticErrors, warnings: [] }
   }
   const errors = validateSchema.errors ?? []
   const unknownComponents = errors.filter(isUnknownComponentType)
   const fatalErrors = errors.filter(error => !isUnknownComponentType(error))
   const structuralErrors = fatalErrors.map(formatIssue)
-  const semanticErrors = fatalErrors.length === 0 ? validateStickyContainerReferences(source as ReportDocument) : []
+  const semanticErrors = fatalErrors.length === 0
+    ? [
+        ...validateStickyContainerReferences(source as ReportDocument),
+        ...validateDesignerBlockSemantics(source as ReportDocument),
+      ]
+    : []
   return {
     document: structuralErrors.length === 0 && semanticErrors.length === 0 ? source as ReportDocument : undefined,
     errors: [...structuralErrors, ...semanticErrors],
     warnings: unknownComponents.map(formatIssue),
   }
+}
+
+/** 菜单唯一性、固定占位和内容区引用属于跨对象约束，由语义层校验。 */
+function validateDesignerBlockSemantics(document: ReportDocument): ReportValidationIssue[] {
+  const issues: ReportValidationIssue[] = []
+  document.pages.forEach((page, pageIndex) => {
+    const menus = page.blocks
+      .map((block, blockIndex) => ({ block, blockIndex }))
+      .filter(item => item.block.kind === 'MENU')
+    if (menus.length > 1) {
+      issues.push({ path: `pages[${pageIndex}].blocks`, reason: '每个页面只能有一个菜单区' })
+    }
+    menus.forEach(({ block, blockIndex }) => {
+      const path = `pages[${pageIndex}].blocks[${blockIndex}]`
+      if (block.grid.x !== 0 || block.grid.y !== 0 || block.grid.w !== 12 || block.grid.h !== 2) {
+        issues.push({ path: `${path}.grid`, reason: '菜单区必须占据页面顶部 12×2 分格' })
+      }
+      if (!block.menuLayout) issues.push({ path: `${path}.menuLayout`, reason: '菜单区必须声明四宫格布局' })
+    })
+    page.blocks.forEach((block, blockIndex) => {
+      if (block.kind !== 'CONTENT') return
+      const path = `pages[${pageIndex}].blocks[${blockIndex}]`
+      if (!block.contentLayout) {
+        issues.push({ path: `${path}.contentLayout`, reason: '内容区必须声明标题、结论和组件图区域' })
+        return
+      }
+      const componentIDs = new Set(block.components.map(component => component.id))
+      Object.entries(block.contentLayout.areas).forEach(([areaName, area]) => {
+        area.componentIds.forEach((componentID, componentIndex) => {
+          if (!componentIDs.has(componentID)) {
+            issues.push({
+              path: `${path}.contentLayout.areas.${areaName}.componentIds[${componentIndex}]`,
+              reason: '必须引用所属内容区内的组件',
+            })
+          }
+        })
+      })
+    })
+  })
+  return issues
 }
 
 /** Schema 无法表达跨对象祖先关系，因此在渲染入口补一次确定性的引用校验。 */

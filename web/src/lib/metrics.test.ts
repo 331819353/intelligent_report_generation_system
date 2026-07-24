@@ -67,6 +67,18 @@ describe('指标 API 合同', () => {
       queryId: 'query-1', parameters: {}, dimensionFieldIds: ['field_region'], maxRows: 100,
     })
   })
+
+  test('删除提交主对象乐观锁且不拼接未编码标识', async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await metricAPI.delete('metric/id', 7)
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('/api/v1/metrics/metric%2Fid')
+    expect(init.method).toBe('DELETE')
+    expect(JSON.parse(String(init.body))).toEqual({ expectedVersion: 7 })
+  })
 })
 
 const definition: MetricDefinition = {

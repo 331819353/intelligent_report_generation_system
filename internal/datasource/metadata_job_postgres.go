@@ -11,14 +11,15 @@ import (
 	"intelligent-report-generation-system/internal/platform/database"
 )
 
-// PostgresMetadataJobRepository 保存批任务和逐表进度；三行样本只在 worker 内存中短暂存在。
+// PostgresMetadataJobRepository 保存批任务和逐表进度；最多十行样本只在 worker 内存中短暂存在。
 type PostgresMetadataJobRepository struct{ pool *pgxpool.Pool }
 
 func NewPostgresMetadataJobRepository(pool *pgxpool.Pool) *PostgresMetadataJobRepository {
 	return &PostgresMetadataJobRepository{pool: pool}
 }
 
-const metadataJobSelect = `j.id::text,j.data_source_id::text,j.kind,j.refresh_mode,j.status,j.stage,j.total,
+const metadataJobSelect = `j.id::text,j.data_source_id::text,j.kind,j.refresh_mode,
+	j.sample_data_mode,j.sample_policy_version,j.status,j.stage,j.total,
 	(SELECT count(*)::integer FROM platform.data_source_metadata_job_items i WHERE i.job_id=j.id AND i.status IN ('SUCCEEDED','SKIPPED','FAILED')),
 	(SELECT count(*)::integer FROM platform.data_source_metadata_job_items i WHERE i.job_id=j.id AND i.status='SUCCEEDED'),
 	(SELECT count(*)::integer FROM platform.data_source_metadata_job_items i WHERE i.job_id=j.id AND i.status='SKIPPED'),
@@ -28,15 +29,45 @@ const metadataJobSelect = `j.id::text,j.data_source_id::text,j.kind,j.refresh_mo
 
 func (r *PostgresMetadataJobRepository) EnqueueMetadataJob(ctx context.Context, request metadataJobRequest) (job MetadataJob, err error) {
 	err = database.WithTenantTx(ctx, r.pool, request.TenantID, func(tx pgx.Tx) error {
+		request.SampleDataMode = normalizeMetadataSampleMode(request.SampleDataMode)
+		if !request.SampleDataMode.Valid() {
+			return ErrSamplePolicyDenied
+		}
+		var policyMode MetadataSampleMode
+		var policyVersion int64
+		if err := tx.QueryRow(ctx, `SELECT metadata_sample_mode,version
+			FROM platform.ai_tenant_policies
+			WHERE tenant_id=platform.current_tenant_id()
+			FOR SHARE`).Scan(&policyMode, &policyVersion); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrSamplePolicyDenied
+			}
+			return err
+		}
+		if metadataSampleModeRank(request.SampleDataMode) >
+			metadataSampleModeRank(policyMode) {
+			return ErrSamplePolicyDenied
+		}
 		status, stage := "QUEUED", "QUEUED"
 		if len(request.Tables) == 0 {
 			status, stage = "SUCCEEDED", "COMPLETE"
 		}
+		var consentBy, consentAt any
+		if request.SampleDataMode != MetadataSampleDeny {
+			consentBy = request.RequestedBy
+			consentAt = time.Now().UTC()
+		}
 		var jobID string
 		err := tx.QueryRow(ctx, `INSERT INTO platform.data_source_metadata_jobs(
-			tenant_id,data_source_id,requested_by,kind,refresh_mode,source_config_hash,status,stage,total,completed_at)
-			VALUES($1,$2,NULLIF($3,'')::uuid,$4,$5,$6,$7,$8,$9,CASE WHEN $9=0 THEN now() END)
-			RETURNING id::text`, request.TenantID, request.DataSourceID, request.RequestedBy, request.Kind, request.Mode, request.SourceConfigHash, status, stage, len(request.Tables)).Scan(&jobID)
+			tenant_id,data_source_id,requested_by,kind,refresh_mode,source_config_hash,
+			sample_data_mode,sample_policy_version,sample_consent_by,sample_consent_at,
+			status,stage,total,completed_at)
+			VALUES($1,$2,NULLIF($3,'')::uuid,$4,$5,$6,$7,$8,$9::uuid,$10,
+				$11,$12,$13,CASE WHEN $13=0 THEN now() END)
+			RETURNING id::text`, request.TenantID, request.DataSourceID,
+			request.RequestedBy, request.Kind, request.Mode, request.SourceConfigHash,
+			request.SampleDataMode, policyVersion, consentBy, consentAt,
+			status, stage, len(request.Tables)).Scan(&jobID)
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -215,6 +246,63 @@ func (r *PostgresMetadataJobRepository) IsMetadataJobItemCompleted(ctx context.C
 	return completed, err
 }
 
+// ValidateMetadataSamplePolicy 在访问业务样本前重新检查冻结授权。DENY 任务从不读取
+// 样本，因此租户后续策略变化不应阻断纯技术元数据处理；MASK/RAW 则失败关闭。
+func (r *PostgresMetadataJobRepository) ValidateMetadataSamplePolicy(
+	ctx context.Context,
+	tenantID, jobID string,
+	mode MetadataSampleMode,
+	policyVersion int64,
+) (err error) {
+	mode = normalizeMetadataSampleMode(mode)
+	if !mode.Valid() || policyVersion < 1 {
+		return ErrSamplePolicyChanged
+	}
+	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
+		var frozenMode, currentMode MetadataSampleMode
+		var frozenVersion, currentVersion int64
+		var consentValid bool
+		queryErr := tx.QueryRow(ctx, `SELECT
+				job.sample_data_mode,job.sample_policy_version,
+				policy.metadata_sample_mode,policy.version,
+				(job.sample_data_mode='DENY' OR (
+					job.sample_consent_by=job.requested_by
+					AND job.sample_consent_at IS NOT NULL
+					AND EXISTS(
+						SELECT 1 FROM platform.users AS actor
+						WHERE actor.id=job.sample_consent_by
+						  AND actor.tenant_id=job.tenant_id
+						  AND actor.status='ACTIVE' AND actor.deleted_at IS NULL
+					)
+				))
+			FROM platform.data_source_metadata_jobs AS job
+			JOIN platform.ai_tenant_policies AS policy
+			  ON policy.tenant_id=job.tenant_id
+			WHERE job.id=$1
+			FOR SHARE OF job,policy`, jobID).Scan(
+			&frozenMode, &frozenVersion, &currentMode, &currentVersion, &consentValid,
+		)
+		if errors.Is(queryErr, pgx.ErrNoRows) {
+			return ErrSamplePolicyChanged
+		}
+		if queryErr != nil {
+			return queryErr
+		}
+		if frozenMode != mode || frozenVersion != policyVersion || !consentValid {
+			return ErrSamplePolicyChanged
+		}
+		if mode == MetadataSampleDeny {
+			return nil
+		}
+		if currentVersion != policyVersion ||
+			metadataSampleModeRank(currentMode) < metadataSampleModeRank(mode) {
+			return ErrSamplePolicyChanged
+		}
+		return nil
+	})
+	return err
+}
+
 func (r *PostgresMetadataJobRepository) HeartbeatMetadataJob(ctx context.Context, tenantID, jobID, workerID string, lease time.Duration) error {
 	return database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `UPDATE platform.data_source_metadata_jobs SET heartbeat_at=now(),lease_expires_at=now()+($1 * interval '1 second')
@@ -324,7 +412,8 @@ func (r *PostgresMetadataJobRepository) updateJobHeartbeat(ctx context.Context, 
 }
 
 func scanMetadataJob(row rowScanner, job *MetadataJob) error {
-	return row.Scan(&job.ID, &job.DataSourceID, &job.Kind, &job.Mode, &job.Status, &job.Stage, &job.Total,
+	return row.Scan(&job.ID, &job.DataSourceID, &job.Kind, &job.Mode,
+		&job.SampleDataMode, &job.SamplePolicyVersion, &job.Status, &job.Stage, &job.Total,
 		&job.Completed, &job.Succeeded, &job.Skipped, &job.Failed, &job.CurrentTable, &job.ErrorCode, &job.ErrorMessage,
 		&job.CreatedAt, &job.StartedAt, &job.CompletedAt)
 }

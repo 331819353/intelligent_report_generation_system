@@ -403,6 +403,12 @@ func validateChangeSemantics(before, after reportjson.Document, change DraftChan
 		if blockTargetHasComponentFields(target) || !oldOK || !nextOK || old.PageID != target.PageID || next.PageID != target.PageID || !onlyTouchedBlock(delta, target.BlockID) || !blockOnlyStickyChanged(old.Block, next.Block) {
 			return semanticTargetError(change.OperationType)
 		}
+	case "BLOCK_CONFIG_UPDATE":
+		old, oldOK := beforeBlocks[target.BlockID]
+		next, nextOK := afterBlocks[target.BlockID]
+		if blockTargetHasComponentFields(target) || !oldOK || !nextOK || old.PageID != target.PageID || next.PageID != target.PageID || !onlyTouchedBlock(delta, target.BlockID) || !blockOnlyConfigChanged(old.Block, next.Block) {
+			return semanticTargetError(change.OperationType)
+		}
 	case "COMPONENT_MOVE", "COMPONENT_RESIZE":
 		old, oldOK := beforeComponents[target.ComponentID]
 		next, nextOK := afterComponents[target.ComponentID]
@@ -493,7 +499,7 @@ func validateCompensatingSemantics(before, after reportjson.Document, change Dra
 	}
 	for blockID := range delta.ChangedBlocks {
 		located := afterBlocks[blockID]
-		for _, operationType := range []string{"BLOCK_MOVE", "BLOCK_RESIZE", "BLOCK_STICKY_UPDATE"} {
+		for _, operationType := range []string{"BLOCK_MOVE", "BLOCK_RESIZE", "BLOCK_STICKY_UPDATE", "BLOCK_CONFIG_UPDATE"} {
 			candidates = append(candidates, struct {
 				operationType string
 				target        ChangeTarget
@@ -601,6 +607,21 @@ func blockOnlyStickyChanged(old, next reportjson.Block) bool {
 	oldSticky, nextSticky := old.Sticky, next.Sticky
 	old.Sticky, next.Sticky = nil, nil
 	return !reflect.DeepEqual(oldSticky, nextSticky) && reflect.DeepEqual(old, next)
+}
+
+func blockOnlyConfigChanged(old, next reportjson.Block) bool {
+	oldKind, nextKind := old.Kind, next.Kind
+	oldName, nextName := old.Name, next.Name
+	oldVisible, nextVisible := old.Visible, next.Visible
+	oldMenu, nextMenu := old.MenuLayout, next.MenuLayout
+	oldContent, nextContent := old.ContentLayout, next.ContentLayout
+	old.Kind, next.Kind = "", ""
+	old.Name, next.Name = "", ""
+	old.Visible, next.Visible = nil, nil
+	old.MenuLayout, next.MenuLayout = nil, nil
+	old.ContentLayout, next.ContentLayout = nil, nil
+	configChanged := oldKind != nextKind || oldName != nextName || !reflect.DeepEqual(oldVisible, nextVisible) || !reflect.DeepEqual(oldMenu, nextMenu) || !reflect.DeepEqual(oldContent, nextContent)
+	return configChanged && reflect.DeepEqual(old, next)
 }
 
 func componentOnlyStickyChanged(old, next reportjson.Component) bool {

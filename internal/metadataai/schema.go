@@ -55,8 +55,9 @@ func valueSchema(column bool) map[string]any {
 		"businessName":        map[string]any{"type": "string", "minLength": 1, "maxLength": 120},
 		"businessDescription": map[string]any{"type": "string", "minLength": 1, "maxLength": 1000},
 		"tags": map[string]any{
-			// deepseek-v3 的严格 Schema 语法不支持 uniqueItems；重复标签仍由 ValidateOutput 拒绝。
-			"type": "array", "maxItems": 12,
+			// 不设置人为数量上限；受控词表本身、输出 Token 预算和本地去重共同
+			// 提供有界保护。deepseek-v3 不支持的 uniqueItems 由 Go 校验兜底。
+			"type":  "array",
 			"items": map[string]any{"type": "string", "enum": mapKeys(allowedTags)},
 		},
 		"sensitivityLevel": map[string]any{"type": "string", "enum": mapKeys(allowedSensitivity)},

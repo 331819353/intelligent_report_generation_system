@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"intelligent-report-generation-system/internal/dataset"
@@ -98,7 +99,7 @@ func TestPreviewMetricRejectsTamperedSourceEnvelope(t *testing.T) {
 	}
 }
 
-func TestPreviewMetricFailsClosedForUnsupportedExecutionBoundary(t *testing.T) {
+func TestPreviewMetricFailsClosedForUnsupportedPolicyBoundary(t *testing.T) {
 	singleSource := metricSingleSourceDocument(t)
 	tests := []struct {
 		name     string
@@ -106,14 +107,6 @@ func TestPreviewMetricFailsClosedForUnsupportedExecutionBoundary(t *testing.T) {
 		resolved ResolvedPlan
 		policies metricPreviewPolicies
 	}{
-		{
-			name: "跨源数据集", document: crossSourceRuntimeDocument(),
-			resolved: ResolvedPlan{SourceID: "source-1", SourceType: datasource.TypeMySQL},
-		},
-		{
-			name: "Excel 数据集", document: singleSource,
-			resolved: ResolvedPlan{SourceID: "source-file", SourceType: datasource.TypeExcel},
-		},
 		{
 			name: "行级策略", document: singleSource, resolved: metricSingleSourceResolvedPlan(),
 			policies: metricPreviewPolicies{rows: []policy.RowPolicy{{ID: "row-policy"}}},
@@ -142,6 +135,74 @@ func TestPreviewMetricFailsClosedForUnsupportedExecutionBoundary(t *testing.T) {
 	}
 }
 
+func TestPreviewMetricExecutesCrossSourceExactVersionThroughFederation(t *testing.T) {
+	original := crossSourceRuntimeDocument()
+	derived := derivedMetricDocument(t, original)
+	raw, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordersTable := querycompiler.TableRef{
+		NodeID: "orders", Schema: "sales", Name: "orders",
+		Columns: map[string]bool{"customer_id": true, "amount": true},
+	}
+	customersTable := querycompiler.TableRef{
+		NodeID: "customers", Schema: "crm", Name: "customers",
+		Columns: map[string]bool{"customer_id": true, "customer_name": true},
+	}
+	store := &fakeRuntimeStore{resolved: ResolvedPlan{
+		SourceID: "source-orders", SourceType: datasource.TypeOracle,
+		Tables: map[string]querycompiler.TableRef{
+			"orders": ordersTable, "customers": customersTable,
+		},
+		Nodes: map[string]ResolvedNode{
+			"orders": {
+				NodeID: "orders", SourceID: "source-orders", SourceType: datasource.TypeOracle,
+				SourceVersion: 2, Watermark: "2026-07-23T08:00:00Z", Table: ordersTable,
+			},
+			"customers": {
+				NodeID: "customers", SourceID: "source-customers", SourceType: datasource.TypeMySQL,
+				SourceVersion: 3, Watermark: "2026-07-23T08:01:00Z", Table: customersTable,
+			},
+		},
+	}}
+	federated := &fakeFederatedExecutor{result: datasource.QueryResult{
+		Columns: []string{"metric_revenue"}, Rows: [][]any{{"120.50"}}, RowCount: 1,
+	}}
+	service := NewService(
+		fakeDatasets{record: dataset.Record{
+			ID: "dataset-1", DraftVersionID: "dataset-version-1", PlanHash: "dataset-plan", DSL: raw,
+		}},
+		fakeSources{sources: map[string]datasource.Source{
+			"source-orders": {
+				ID: "source-orders", Type: datasource.TypeOracle, Status: datasource.StatusActive,
+			},
+			"source-customers": {
+				ID: "source-customers", Type: datasource.TypeMySQL, Status: datasource.StatusActive,
+			},
+		}},
+		metricPreviewPolicies{}, store, nil,
+	)
+	service.SetFederatedExecutor(federated)
+	candidate := metricQueryCandidate(t, "dataset-version-1", derived)
+
+	result, err := service.PreviewMetric(
+		context.Background(), "tenant-1", "actor-1", candidate,
+		dataset.PreviewInput{MaxRows: 1}, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !federated.called || len(federated.sources) != 2 || result.RowCount != 1 ||
+		store.resolveVersionCalls != 1 || store.status != "SUCCEEDED" {
+		t.Fatalf("federated=%#v result=%#v store=%#v", federated, result, store)
+	}
+	if store.run.RunType != "VALIDATION" || store.run.MetricID != candidate.MetricID ||
+		store.run.MetricVersionID != candidate.MetricVersionID || len(store.run.Sources) != 2 {
+		t.Fatalf("metric federated audit=%#v", store.run)
+	}
+}
+
 func TestPreviewMetricValidationUsesPublicationRunType(t *testing.T) {
 	original := metricSingleSourceDocument(t)
 	connectorCalls := 0
@@ -163,6 +224,111 @@ func TestPreviewMetricValidationUsesPublicationRunType(t *testing.T) {
 	if connectorCalls != 1 || result.RowCount != 1 || store.run.RunType != "VALIDATION" ||
 		store.run.MetricID != candidate.MetricID || store.run.MetricVersionID != candidate.MetricVersionID {
 		t.Fatalf("calls=%d result=%#v run=%#v", connectorCalls, result, store.run)
+	}
+}
+
+func TestPreviewDWSMetricReadsExactActiveMaterialization(t *testing.T) {
+	original := metricSingleSourceDocument(t)
+	original.Parameters = []dataset.Parameter{}
+	original.Filters = []dataset.Filter{}
+	for index := range original.Nodes {
+		original.Nodes[index].SourceFilters = []dataset.SourceFilter{}
+	}
+	raw, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := ResolvedMaterialization{
+		NodeID:    materializedMetricNodeID,
+		DatasetID: "dataset-1", DatasetVersionID: "dataset-version-1",
+		MaterializationID: "33333333-3333-4333-8333-333333333333",
+		Layer:             "DWS", PublishedSchema: "warehouse_published",
+		PublishedName: "dws_t111111111111_d222222222222",
+		SchemaHash:    strings.Repeat("a", 64), SnapshotHash: strings.Repeat("b", 64),
+	}
+	store := &fakeRuntimeStore{resolved: ResolvedPlan{
+		Engine: ExecutionPostgreSQL,
+		Tables: map[string]querycompiler.TableRef{
+			materializedMetricNodeID: {
+				NodeID: materializedMetricNodeID,
+				Schema: binding.PublishedSchema, Name: binding.PublishedName,
+				Columns: map[string]bool{"stat_month": true, "revenue": true},
+			},
+		},
+		Materializations: []ResolvedMaterialization{binding},
+	}}
+	warehouse := &fakeWarehouseExecutor{result: datasource.QueryResult{
+		Columns: []string{"metric_revenue"},
+		Rows:    [][]any{{"120.50"}}, RowCount: 1,
+	}}
+	service := NewService(
+		fakeDatasets{record: dataset.Record{
+			ID: "dataset-1", DraftVersionID: "dataset-version-1",
+			Layer: dataset.LayerDWS, PlanHash: "dataset-plan", DSL: raw,
+		}},
+		fakeSources{}, metricPreviewPolicies{}, store, nil,
+	)
+	service.SetWarehouseExecutor(warehouse)
+
+	candidate := metricQueryCandidate(
+		t, "dataset-version-1", derivedMetricDocument(t, original),
+	)
+	result, err := service.PreviewMetric(
+		context.Background(), "tenant-1", "actor-1", candidate,
+		dataset.PreviewInput{MaxRows: 1}, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RowCount != 1 || !warehouse.called ||
+		store.resolveVersionCalls != 0 || store.resolveMaterializedCalls != 1 ||
+		store.run.ExecutionEngine != ExecutionPostgreSQL ||
+		len(store.run.Materializations) != 1 {
+		t.Fatalf("result=%#v warehouse=%#v store=%#v", result, warehouse, store)
+	}
+	document := warehouse.document
+	if len(document.Nodes) != 1 ||
+		document.Nodes[0].DatasetVersionID != "dataset-version-1" ||
+		len(document.Fields) != 1 ||
+		document.Fields[0].Expression.Type != "AGGREGATE" ||
+		document.Fields[0].Expression.Function != "SUM" ||
+		document.Fields[0].Expression.Argument == nil ||
+		document.Fields[0].Expression.Argument.NodeID != materializedMetricNodeID ||
+		document.Fields[0].Expression.Argument.Field != "revenue" {
+		t.Fatalf("materialized metric document=%#v", document)
+	}
+}
+
+func TestPreviewDWSMetricRejectsNonDecomposableMaterializedMeasure(t *testing.T) {
+	original := metricSingleSourceDocument(t)
+	original.Parameters = []dataset.Parameter{}
+	original.Filters = []dataset.Filter{}
+	for index := range original.Nodes {
+		original.Nodes[index].SourceFilters = []dataset.SourceFilter{}
+	}
+	original.Fields[1].Expression.Function = "AVG"
+	raw, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeRuntimeStore{}
+	service := NewService(
+		fakeDatasets{record: dataset.Record{
+			ID: "dataset-1", DraftVersionID: "dataset-version-1",
+			Layer: dataset.LayerDWS, DSL: raw,
+		}},
+		fakeSources{}, metricPreviewPolicies{}, store, nil,
+	)
+	candidate := metricQueryCandidate(
+		t, "dataset-version-1", derivedMetricDocument(t, original),
+	)
+	_, err = service.PreviewMetric(
+		context.Background(), "tenant-1", "actor-1", candidate,
+		dataset.PreviewInput{MaxRows: 1}, false,
+	)
+	if !errors.Is(err, dataset.ErrPreviewUnsupported) ||
+		store.resolveMaterializedCalls != 0 || store.run.ID != "" {
+		t.Fatalf("error=%v store=%#v", err, store)
 	}
 }
 

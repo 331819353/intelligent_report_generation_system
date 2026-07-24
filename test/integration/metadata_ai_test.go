@@ -52,7 +52,11 @@ func TestMetadataAICompletionAppliesOnlySafeSuggestions(t *testing.T) {
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.users(tenant_id,email,display_name,password_hash) VALUES($1,'metadata-ai@it.test','metadata ai','integration-hash') RETURNING id`, tenantID).Scan(&actorID); err != nil {
 			return err
 		}
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.data_sources(tenant_id,code,name,source_type,secret_ref) VALUES($1,'metadata-ai','Metadata AI','MYSQL','env://METADATA_AI') RETURNING id`, tenantID).Scan(&sourceID); err != nil {
+		sourceID, _, err = insertVersionedDataSourceTx(
+			ctx, tx, tenantID, "metadata-ai", "Metadata AI", "MYSQL",
+			"env://METADATA_AI", "DRAFT", "{}",
+		)
+		if err != nil {
 			return err
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(tenant_id,data_source_id,schema_name,table_name,table_type,structure_hash,last_sync_at) VALUES($1,$2,'sales','orders','TABLE',repeat('a',64),now()) RETURNING id`, tenantID, sourceID).Scan(&tableID); err != nil {

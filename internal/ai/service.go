@@ -20,6 +20,7 @@ const (
 	PurposeConclusion           = "CONCLUSION_GENERATION"
 	PurposeDatasetDAGGeneration = "DATASET_DAG_GENERATION"
 	PurposeMetricAuthoring      = "METRIC_AUTHORING"
+	PurposeDatasetTagSuggestion = "DATASET_TAG_SUGGESTION"
 )
 
 var (
@@ -281,7 +282,8 @@ func validateServiceOptions(options ServiceOptions) error {
 
 func allowedPurpose(purpose string) bool {
 	switch purpose {
-	case PurposeMetadataCompletion, PurposeReportGeneration, PurposeBlockEdit, PurposeConclusion, PurposeDatasetDAGGeneration, PurposeMetricAuthoring:
+	case PurposeMetadataCompletion, PurposeReportGeneration, PurposeBlockEdit, PurposeConclusion,
+		PurposeDatasetDAGGeneration, PurposeMetricAuthoring, PurposeDatasetTagSuggestion:
 		return true
 	default:
 		return false

@@ -20,6 +20,7 @@ var (
 	ErrInvalidDefinition          = errors.New("metric definition is invalid")
 	ErrInvalidTransition          = errors.New("metric version transition is invalid")
 	ErrVersionInUse               = errors.New("metric version is used by an active published dependency")
+	ErrInUse                      = errors.New("metric is still in use")
 	ErrIdempotencyConflict        = errors.New("metric idempotency key conflict")
 	ErrPreviewUnavailable         = errors.New("metric preview is unavailable")
 	ErrPreviewFailed              = errors.New("metric preview failed")
@@ -185,6 +186,11 @@ type UpdateInput struct {
 	Definition                 json.RawMessage `json:"definition"`
 }
 
+// DeleteInput 使用主对象乐观锁，避免把用户刚刚更新的指标误删。
+type DeleteInput struct {
+	ExpectedVersion int64 `json:"expectedVersion"`
+}
+
 // PublishInput 固定发布所依据的草稿事实和试算参数。
 type PublishInput struct {
 	DraftVersionID             string         `json:"draftVersionId"`
@@ -235,6 +241,7 @@ type Store interface {
 	Get(context.Context, string, string) (Record, error)
 	List(context.Context, string, int, int) ([]Summary, int, error)
 	Update(context.Context, string, string, string, UpdateInput, Prepared) (Record, error)
+	Delete(context.Context, string, string, string, DeleteInput) error
 	GetDatasetVersion(context.Context, string, string, string) (dataset.VersionRecord, error)
 	GetVersionByID(context.Context, string, string) (VersionRecord, error)
 	ReplayPublication(context.Context, string, string, string, string, string) (VersionRecord, bool, error)

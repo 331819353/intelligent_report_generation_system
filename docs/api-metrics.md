@@ -177,7 +177,7 @@ Content-Type: application/json
 
 只允许对状态为 `PUBLISHED` 的精确版本试算；`STALE`、`DEPRECATED` 或依赖不可用的版本返回 `409 METRIC_VERSION_UNAVAILABLE`，不会自动改用其他版本。
 
-查询审计会固定 `metricId`、`metricVersionId`、当次执行的 `datasetVersionId` 和派生 `planHash`。写入时数据库会锁定并复核三者关系；草稿后续升级数据集版本不会级联改写既有查询审计。发布版本本身不可变，可由精确版本 ID 重放口径；草稿版本仍可修改，当前审计尚未保存可恢复的草稿定义快照，不能仅凭草稿版本 ID 还原历史定义。
+查询审计会固定 `metricId`、`metricVersionId`、当次执行的 `datasetVersionId`、执行引擎和派生 `planHash`。写入时数据库会锁定并复核三者关系；DWS 的 PostgreSQL 路径还会在 `query_run_materializations` 保存实际读取的精确 ACTIVE materialization、稳定视图及 schema/snapshot hash。草稿后续升级数据集版本不会级联改写既有查询审计。发布版本本身不可变，可由精确版本 ID 重放口径；草稿版本仍可修改，当前审计尚未保存可恢复的草稿定义快照，不能仅凭草稿版本 ID 还原历史定义。
 
 取消接口当前先读取路径中的指标以确定 `datasetId`，再由统一查询运行时按 `tenantId`、调用者、`datasetId` 和 `queryId` 复核并取消。它尚未把查询审计中的 `metricId` 或精确 `metricVersionId` 与路径参数交叉校验，因此不能把该端点当作精确指标版本归属合同。调用方只能取消自己在同一数据集下启动且仍在运行的查询；补齐精确指标/版本绑定与对应失败关闭校验属于后续工作。
 
@@ -206,7 +206,9 @@ Content-Type: application/json
 
 同一租户、指标和 `Idempotency-Key` 只能绑定同一发布请求。网络结果不确定时，客户端必须使用完全相同的键和请求体重试；服务端会重放已成功结果。相同键配不同请求返回 `409 METRIC_IDEMPOTENCY_CONFLICT`。
 
-第一阶段发布试算仅支持精确绑定的已发布单源数据库数据集。以下情况均失败关闭：`CROSS_SOURCE`、Excel、存在行级或列级数据策略、预聚合数据集，以及失效或不精确的数据集版本。预聚合数据集通常会在更早的定义语义校验阶段被拒绝。
+非 DWS 的源查询发布试算仍只支持精确绑定的已发布单源 MySQL/Oracle 数据集；`CROSS_SOURCE`、Excel 或存在行列策略时失败关闭。精确 DWS 指标使用另一条受治理路径：目标版本必须仍是所属数据集的当前 `PUBLISHED` 版本，并有 schema hash 一致的当前 `ACTIVE` DWS 物化；运行时直接读取其 `warehouse_published` 稳定视图，不重放 DWS DAG，也不受原始来源是否跨库/Excel 影响。
+
+DWS 聚合字段必须以 `DERIVED + NONE` 使用，当前只允许可证明安全的再汇总：DAG `SUM/MIN/MAX` 保持同名聚合，DAG `COUNT` 按 `SUM` 汇总。DAG `AVG`、`COUNT_DISTINCT`、非聚合计算度量、带数据集运行参数的 DWS、缺失/漂移的 ACTIVE 物化，以及任何行列策略都失败关闭。服务端不会切换到其他版本或物化来凑出结果。
 
 ## 6. 版本读取、占用和状态迁移
 
@@ -287,7 +289,12 @@ Content-Type: application/json
 
 ## 8. 尚未开放的客户端能力
 
-API 中出现定义或持久化字段不代表以下端到端能力已经完成：一级维度对象、派生指标可视化编辑、`STALE` 自动传播、报告精确 `metricVersionId` 绑定，以及 `decimalScale`/`HALF_UP` 的跨引擎统一精确实现。客户端必须按失败关闭边界展示能力，不得静默降级到其他数据集或指标版本。
+一级维度对象、成员刷新、历史别名和维度—指标兼容关系已经由语义管理 API
+提供；DWS 维度勘测候选只有经过人工接受后才成为正式维度，成员索引和兼容关系也
+必须分别达到可用状态后才能参与倒排检索。API 中出现定义或持久化字段仍不代表以下
+端到端能力已经完成：派生指标可视化编辑、`STALE` 自动传播、报告精确
+`metricVersionId` 绑定，以及 `decimalScale`/`HALF_UP` 的跨引擎统一精确实现。
+客户端必须按失败关闭边界展示能力，不得静默降级到其他数据集或指标版本。
 
 ## 9. 数据集发布后的内部原子度量事实
 

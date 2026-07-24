@@ -27,13 +27,29 @@ type ScanAggregateProjection struct {
 
 // CompileScan 下推当前节点投影、源过滤、可证明为单节点的前置过滤及受控预聚合。
 func CompileScan(input ScanInput) (CompiledQuery, error) {
-	if input.Dialect != MySQL && input.Dialect != Oracle {
+	return compileScan(input, 100_000, true)
+}
+
+// CompileExtractionScan 为跨源构建生成不带 SQL LIMIT 的安全源端扫描。
+// 总行数由流式 Connector 在读取过程中强制执行；这样超过上限时会显式失败，
+// 不会把恰好达到 LIMIT 的截断结果误认为完整物化。
+func CompileExtractionScan(input ScanInput) (CompiledQuery, error) {
+	return compileScan(input, 5_000_000, false)
+}
+
+func compileScan(input ScanInput, maximumRows int, sqlLimit bool) (CompiledQuery, error) {
+	if input.Dialect != MySQL && input.Dialect != Oracle && input.Dialect != PostgreSQL {
 		return CompiledQuery{}, errors.New("unsupported query dialect")
 	}
 	if err := dataset.Validate(input.Document); err != nil {
 		return CompiledQuery{}, fmt.Errorf("invalid dataset document: %w", err)
 	}
-	if input.MaxRows < 1 || input.MaxRows > 100000 {
+	if input.Dialect == PostgreSQL {
+		if err := validatePostgreSQLDocumentIdentifiers(input.Document); err != nil {
+			return CompiledQuery{}, err
+		}
+	}
+	if input.MaxRows < 1 || input.MaxRows > maximumRows {
 		return CompiledQuery{}, errors.New("source scan row limit is invalid")
 	}
 	var node *dataset.Node
@@ -120,11 +136,14 @@ func CompileScan(input ScanInput) (CompiledQuery, error) {
 	if len(groups) > 0 {
 		sql += " GROUP BY " + strings.Join(groups, ", ")
 	}
-	// 多取一行用于让联邦执行器发现源端截断，不能把不完整 Join 静默当成完整结果。
-	if input.Dialect == Oracle {
-		sql += " FETCH FIRST " + c.bind(input.MaxRows) + " ROWS ONLY"
-	} else {
-		sql += " LIMIT " + c.bind(input.MaxRows)
+	if sqlLimit {
+		// 预览多取一行，让联邦执行器发现源端截断，不能把不完整 Join 静默
+		// 当成完整结果；构建流则由 Connector 逐批检测上限。
+		if input.Dialect == Oracle {
+			sql += " FETCH FIRST " + c.bind(input.MaxRows) + " ROWS ONLY"
+		} else {
+			sql += " LIMIT " + c.bind(input.MaxRows)
+		}
 	}
 	if strings.ContainsAny(sql, ";\x00") || strings.Contains(sql, "--") || strings.Contains(sql, "/*") {
 		return CompiledQuery{}, errors.New("compiled source scan contains a forbidden token")

@@ -33,7 +33,8 @@ func DecodeAndNormalize(raw []byte) (Document, error) {
 	// 先只读取版本号，再用目标结构严格解码。这样既能识别需要迁移的旧文档，
 	// 又不会因为旧版本允许的默认值而放宽 1.0 对未知字段的拒绝策略。
 	var version struct {
-		DSLVersion string `json:"dslVersion"`
+		DSLVersion string                     `json:"dslVersion"`
+		Dataset    map[string]json.RawMessage `json:"dataset"`
 	}
 	if err := json.Unmarshal(raw, &version); err != nil {
 		return Document{}, fmt.Errorf("decode DSL version: %w", err)
@@ -51,6 +52,9 @@ func DecodeAndNormalize(raw []byte) (Document, error) {
 	if err := decoder.Decode(&document); err != nil {
 		return Document{}, fmt.Errorf("decode DSL: %w", err)
 	}
+	_, layerSpecified := version.Dataset["layer"]
+	document.layerInferred = !layerSpecified
+	document.layerSpecified = layerSpecified
 	if err := ensureJSONEOF(decoder); err != nil {
 		return Document{}, err
 	}
@@ -65,6 +69,21 @@ func DecodeAndNormalize(raw []byte) (Document, error) {
 	return normalize(document), nil
 }
 
+// InferLayer 为没有 layer 的历史 DSL 提供确定性迁移。推断只依赖可版本化 DSL，
+// 不读取数据库状态，因此同一份历史文档在 API、worker 和回滚路径中结果一致。
+//
+// 含分组或聚合语义的文档归为 DWS；单个物理表且没有 Join 的文档归为 ODS；
+// 其余清洗、转换或关联文档归为 DWD。
+func InferLayer(document Document) Layer {
+	if documentHasGroupingOrAggregation(document) {
+		return LayerDWS
+	}
+	if len(document.Nodes) == 1 && document.Nodes[0].Type == "TABLE" && len(document.Joins) == 0 {
+		return LayerODS
+	}
+	return LayerDWD
+}
+
 // Prepare 生成可持久化的规范 DSL、逻辑计划及两个稳定哈希。
 func Prepare(raw []byte) (Prepared, error) {
 	document, err := DecodeAndNormalize(raw)
@@ -74,7 +93,13 @@ func Prepare(raw []byte) (Prepared, error) {
 	if err := Validate(document); err != nil {
 		return Prepared{}, err
 	}
-	dslJSON, err := json.Marshal(document)
+	// 缺少 layer 的历史正文继续按原形状计算哈希；推断结果由 Prepared.Document
+	// 传给独立层级列。新 DSL 一旦显式声明 layer，就会把它纳入不可变正文和摘要。
+	storedDocument := document
+	if document.layerInferred {
+		storedDocument.Dataset.Layer = ""
+	}
+	dslJSON, err := json.Marshal(storedDocument)
 	if err != nil {
 		return Prepared{}, err
 	}
@@ -97,6 +122,11 @@ func Prepare(raw []byte) (Prepared, error) {
 func Validate(document Document) error {
 	issues := make([]ValidationIssue, 0)
 	add := func(path, reason string) { issues = append(issues, ValidationIssue{Path: path, Reason: reason}) }
+	// 直接构造 Document 的旧调用方没有 JSON 字段存在性信息，也按历史 DSL 处理；
+	// DecodeAndNormalize 会把显式空 layer 标记为 specified，使其继续严格失败。
+	if document.Dataset.Layer == "" && !document.layerSpecified {
+		document.Dataset.Layer = InferLayer(document)
+	}
 	// 校验会尽量收集完整问题集合，而不是遇到第一个错误就返回；设计器因此可以
 	// 一次标出所有错误字段。后续各索引也只用于检查引用，不代表对象已经合法。
 	if document.DSLVersion != DSLVersion {
@@ -108,6 +138,11 @@ func Validate(document Document) error {
 	}
 	if !oneOf(document.Dataset.Type, "SINGLE_SOURCE", "CROSS_SOURCE") {
 		add("dataset.type", "必须为 SINGLE_SOURCE 或 CROSS_SOURCE")
+	}
+	if !document.Dataset.Layer.Valid() {
+		add("dataset.layer", "必须为 ODS、DWD 或 DWS")
+	} else {
+		validateLayerContract(&issues, document)
 	}
 	validateDesigner(&issues, document.Designer)
 	if len(document.Nodes) == 0 {
@@ -296,6 +331,9 @@ func Validate(document Document) error {
 				validateExpression(&issues, fieldPath+".expression", *group.Expression, nodeIDs, parameterRefs)
 				validateExpressionProjection(&issues, fieldPath+".expression", *group.Expression, projections)
 				validatePreAggregationSourceExpression(&issues, fieldPath+".expression", *group.Expression, item.NodeID)
+				if expressionHasAggregate(*group.Expression) {
+					add(fieldPath+".expression", "关联前分组字段不能包含聚合表达式")
+				}
 			}
 			if outputs[group.Field] {
 				add(fieldPath+".field", "分组输出字段重复")
@@ -314,6 +352,9 @@ func Validate(document Document) error {
 				validateExpression(&issues, fieldPath+".expression", *metric.Expression, nodeIDs, parameterRefs)
 				validateExpressionProjection(&issues, fieldPath+".expression", *metric.Expression, projections)
 				validatePreAggregationSourceExpression(&issues, fieldPath+".expression", *metric.Expression, item.NodeID)
+				if expressionHasAggregate(*metric.Expression) {
+					add(fieldPath+".expression", "关联前聚合指标的输入不能再次包含聚合表达式")
+				}
 			}
 			if outputs[metric.Field] {
 				add(fieldPath+".field", "分组组件的输出字段不能重名")
@@ -378,6 +419,8 @@ func Validate(document Document) error {
 
 	fieldIDs := map[string]bool{}
 	fieldCodes := map[string]bool{}
+	fieldAggregations := make([]expressionAggregation, len(document.Fields))
+	hasOutputAggregation := false
 	for i, field := range document.Fields {
 		path := fmt.Sprintf("fields[%d]", i)
 		validateIdentifier(&issues, path+".id", field.ID)
@@ -399,6 +442,15 @@ func Validate(document Document) error {
 			add(path+".canonicalType", "不支持的规范类型")
 		}
 		validateExpression(&issues, path+".expression", field.Expression, nodeIDs, parameterCodes)
+		aggregation := analyzeExpressionAggregation(field.Expression, 0)
+		fieldAggregations[i] = aggregation
+		hasOutputAggregation = hasOutputAggregation || aggregation.hasAggregate
+		if aggregation.nestedAggregate {
+			add(path+".expression", "输出字段不允许嵌套聚合")
+		}
+		if aggregation.hasAggregate && aggregation.hasFreeField {
+			add(path+".expression", "聚合输出不能混用聚合外的明细字段")
+		}
 	}
 	if len(document.Fields) == 0 {
 		add("fields", "至少需要一个输出字段")
@@ -428,6 +480,16 @@ func Validate(document Document) error {
 			add(fmt.Sprintf("groupBy[%d]", i), "分组字段重复")
 		}
 		groupFields[fieldID] = true
+	}
+	for i, field := range document.Fields {
+		aggregation := fieldAggregations[i]
+		if groupFields[field.ID] && aggregation.hasAggregate {
+			add(fmt.Sprintf("groupBy[%d]", groupByIndex(document.GroupBy, field.ID)), "分组字段不能引用聚合输出")
+		}
+		if hasOutputAggregation && !aggregation.hasAggregate &&
+			aggregation.hasFreeField && !groupFields[field.ID] {
+			add(fmt.Sprintf("fields[%d].expression", i), "存在聚合输出时，所有非聚合明细输出字段都必须出现在 groupBy")
+		}
 	}
 	sortFields := map[string]bool{}
 	for i, item := range document.Sorts {
@@ -474,6 +536,140 @@ func Validate(document Document) error {
 		return &ValidationError{Issues: issues}
 	}
 	return nil
+}
+
+// Valid 把层级枚举校验集中在领域类型上，避免 API、仓储和后续物化器各自维护字符串集合。
+func (layer Layer) Valid() bool {
+	return layer == LayerODS || layer == LayerDWD || layer == LayerDWS
+}
+
+// validateLayerContract 校验仅依赖当前 DSL 的层级合同。跨数据集版本的上游层级
+// 由 ValidateLayerDependencies 在仓储解析精确发布版本后补充校验。
+func validateLayerContract(issues *[]ValidationIssue, document Document) {
+	add := func(path, reason string) {
+		*issues = append(*issues, ValidationIssue{Path: path, Reason: reason})
+	}
+	hasAggregation := documentHasBusinessAggregation(document)
+	hasGrouping := len(document.GroupBy) > 0 || len(document.Having) > 0 || len(document.PreAggregations) > 0
+	switch document.Dataset.Layer {
+	case LayerODS:
+		if len(document.Nodes) != 1 || document.Nodes[0].Type != "TABLE" {
+			add("nodes", "ODS 只能包含一个物理 TABLE 节点")
+		}
+		if len(document.Joins) > 0 {
+			add("joins", "ODS 不允许 Join")
+		}
+		if hasGrouping || hasAggregation {
+			add("dataset.layer", "ODS 不允许分组或聚合")
+		}
+	case LayerDWD:
+		if document.layerSpecified {
+			for index, node := range document.Nodes {
+				if node.Type != "DATASET" {
+					add(fmt.Sprintf("nodes[%d].type", index), "显式 DWD 只能引用已发布 ODS 数据集版本")
+				}
+			}
+		}
+		if hasGrouping || hasAggregation {
+			add("dataset.layer", "DWD 必须保持明细粒度，不允许业务分组或聚合")
+		}
+	case LayerDWS:
+		if document.layerSpecified {
+			for index, node := range document.Nodes {
+				if node.Type != "DATASET" {
+					add(fmt.Sprintf("nodes[%d].type", index), "显式 DWS 只能引用已发布 DWD 数据集版本")
+				}
+			}
+		}
+		if document.OutputGrain.Description == "" || len(document.OutputGrain.KeyFields) == 0 {
+			add("outputGrain", "DWS 必须显式声明输出业务粒度和粒度键")
+		}
+		if !hasAggregation {
+			add("dataset.layer", "DWS 至少需要一个聚合指标")
+		}
+	}
+}
+
+// documentHasBusinessAggregation 只识别合法承载业务聚合的位置：关联前分组指标和
+// 最终输出字段。WHERE、JOIN、GROUP BY 辅助表达式或 HAVING 中夹带 AGGREGATE
+// 不能反向把错误 DSL 伪装成 DWS；这些位置由各自的上下文校验失败关闭。
+func documentHasBusinessAggregation(document Document) bool {
+	for _, item := range document.PreAggregations {
+		if len(item.Metrics) > 0 {
+			return true
+		}
+	}
+	found := false
+	visit := func(expression Expression) {
+		if expression.Type == "AGGREGATE" {
+			found = true
+		}
+	}
+	for _, field := range document.Fields {
+		visitDatasetExpression(field.Expression, visit)
+	}
+	return found
+}
+
+type expressionAggregation struct {
+	hasAggregate, hasFreeField, nestedAggregate bool
+}
+
+func expressionHasAggregate(expression Expression) bool {
+	return analyzeExpressionAggregation(expression, 0).hasAggregate
+}
+
+func analyzeExpressionAggregation(
+	expression Expression,
+	aggregateDepth int,
+) expressionAggregation {
+	result := expressionAggregation{}
+	if expression.Type == "AGGREGATE" {
+		result.hasAggregate = true
+		if aggregateDepth > 0 {
+			result.nestedAggregate = true
+		}
+		aggregateDepth++
+	}
+	if expression.Type == "FIELD_REF" && aggregateDepth == 0 {
+		result.hasFreeField = true
+	}
+	merge := func(child Expression) {
+		next := analyzeExpressionAggregation(child, aggregateDepth)
+		result.hasAggregate = result.hasAggregate || next.hasAggregate
+		result.hasFreeField = result.hasFreeField || next.hasFreeField
+		result.nestedAggregate = result.nestedAggregate || next.nestedAggregate
+	}
+	for _, child := range []*Expression{
+		expression.Argument, expression.Left, expression.Right,
+		expression.Lower, expression.Upper, expression.Else,
+	} {
+		if child != nil {
+			merge(*child)
+		}
+	}
+	for _, child := range expression.Arguments {
+		merge(child)
+	}
+	for _, branch := range expression.Whens {
+		merge(branch.When)
+		merge(branch.Then)
+	}
+	return result
+}
+
+func groupByIndex(groupBy []string, fieldID string) int {
+	for index, candidate := range groupBy {
+		if candidate == fieldID {
+			return index
+		}
+	}
+	return 0
+}
+
+func documentHasGroupingOrAggregation(document Document) bool {
+	return len(document.GroupBy) > 0 || len(document.Having) > 0 ||
+		len(document.PreAggregations) > 0 || documentHasBusinessAggregation(document)
 }
 
 // validateDesigner 只校验画布元数据的稳定边界，不把展示配置提升为查询语义。
@@ -932,6 +1128,7 @@ func normalize(document Document) Document {
 	document.Dataset.Name = strings.TrimSpace(document.Dataset.Name)
 	document.Dataset.Description = strings.TrimSpace(document.Dataset.Description)
 	document.Dataset.Type = upper(document.Dataset.Type)
+	document.Dataset.Layer = Layer(upper(string(document.Dataset.Layer)))
 	for i := range document.Nodes {
 		node := &document.Nodes[i]
 		node.ID, node.Type, node.Alias = strings.TrimSpace(node.ID), upper(node.Type), strings.TrimSpace(node.Alias)
@@ -1020,6 +1217,10 @@ func normalize(document Document) Document {
 	}
 	if document.ExecutionPolicy.ResultLimit == 0 {
 		document.ExecutionPolicy.ResultLimit = 10000
+	}
+	if document.Dataset.Layer == "" && document.layerInferred {
+		document.Dataset.Layer = InferLayer(document)
+		document.inferredLayer = document.Dataset.Layer
 	}
 	// 空集合统一编码为 []，防止 nil 与空数组产生不同哈希。
 	normalizeSlices(&document)
@@ -1214,6 +1415,11 @@ func validateFilter(issues *[]ValidationIssue, path string, filter Filter, expec
 		*issues = append(*issues, ValidationIssue{Path: path + ".stage", Reason: "过滤阶段与所在集合不一致"})
 	}
 	validateExpression(issues, path+".expression", filter.Expression, nodes, parameters)
+	if expectedStage == "PRE_AGGREGATION" && expressionHasAggregate(filter.Expression) {
+		*issues = append(*issues, ValidationIssue{
+			Path: path + ".expression", Reason: "聚合前过滤不能包含聚合表达式",
+		})
+	}
 }
 
 func validateExpression(issues *[]ValidationIssue, path string, expression Expression, nodes, parameters map[string]bool) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -18,6 +19,8 @@ const (
 	testMetricVersionID       = "44444444-4444-4444-8444-444444444444"
 	testServiceDraftDatasetID = "55555555-5555-4555-8555-555555555555"
 	testServiceDraftVersionID = "66666666-6666-4666-8666-666666666666"
+	testMappedDatasetID       = "77777777-7777-4777-8777-777777777777"
+	testMappedVersionID       = "88888888-8888-4888-8888-888888888888"
 )
 
 type retrieverStub struct {
@@ -26,7 +29,7 @@ type retrieverStub struct {
 	got   AuthoringRequest
 }
 
-func (s *retrieverStub) Retrieve(_ context.Context, tenantID, actorID string, request AuthoringRequest) (RetrievalContext, error) {
+func (s *retrieverStub) Retrieve(_ context.Context, tenantID, actorID string, request AuthoringRequest, _ MetricIntent) (RetrievalContext, error) {
 	if tenantID == "" || actorID == "" {
 		return RetrievalContext{}, errors.New("missing identity")
 	}
@@ -37,8 +40,10 @@ func (s *retrieverStub) Retrieve(_ context.Context, tenantID, actorID string, re
 type invokerStub struct {
 	configured bool
 	content    json.RawMessage
+	contents   []json.RawMessage
 	err        error
 	got        aiplatform.Invocation
+	calls      []aiplatform.Invocation
 }
 
 func (s *invokerStub) Configured() bool     { return s.configured }
@@ -46,10 +51,16 @@ func (s *invokerStub) ProviderName() string { return "stub" }
 func (s *invokerStub) Model() string        { return "stub-model" }
 func (s *invokerStub) Invoke(_ context.Context, value aiplatform.Invocation) (aiplatform.InvocationResult, error) {
 	s.got = value
+	callIndex := len(s.calls)
+	s.calls = append(s.calls, value)
+	content := s.content
+	if callIndex < len(s.contents) {
+		content = s.contents[callIndex]
+	}
 	return aiplatform.InvocationResult{
-		RequestID: "ai-request-1",
+		RequestID: fmt.Sprintf("ai-request-%d", callIndex+1),
 		ProviderResult: aiplatform.ProviderResult{
-			Content: s.content, Model: "stub-model",
+			Content: content, Model: "stub-model",
 			Usage: aiplatform.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
 		},
 	}, s.err
@@ -143,6 +154,22 @@ func mappedRetrievalContext() RetrievalContext {
 	value.MappedFields = value.Fields
 	value.Datasets = []AuthorizedDataset{}
 	value.Fields = []AuthorizedField{}
+	return value
+}
+
+func unmanageableAndMappedRetrievalContext() RetrievalContext {
+	value := validRetrievalContext()
+	value.Datasets[0].Manageable = false
+	value.MappedDatasets = []AuthorizedDataset{{
+		ID: testMappedDatasetID, VersionID: testMappedVersionID, VersionNo: 1,
+		Name: "支付明细映射表", Description: "支付业务只读映射来源", Status: "PUBLISHED",
+		DSLHash: strings.Repeat("c", 64), Mapped: true,
+	}}
+	value.MappedFields = []AuthorizedField{{
+		DatasetID: testMappedDatasetID, DatasetVersionID: testMappedVersionID,
+		ID: "mapped_paid_amount", Code: "paid_amount", Name: "实付金额", Description: "订单实付金额",
+		CanonicalType: "DECIMAL", Role: "MEASURE", SemanticType: "AMOUNT",
+	}}
 	return value
 }
 
@@ -304,7 +331,7 @@ func TestProposeRejectsDirectMetricOnPublishedMappedDataset(t *testing.T) {
 	}
 }
 
-func TestProposeRejectsMappedDatasetModification(t *testing.T) {
+func TestProposeSafelyDowngradesMappedDatasetModification(t *testing.T) {
 	instruction := "在订单明细中关联地区信息。"
 	proposal := MetricAuthoringProposal{
 		SchemaVersion: SchemaVersion, Strategy: StrategyModifyDataset, Summary: "需要补充地区字段。",
@@ -313,12 +340,128 @@ func TestProposeRejectsMappedDatasetModification(t *testing.T) {
 		DatasetInstruction:     instruction,
 		ClarificationQuestions: []string{}, Assumptions: []string{}, Warnings: []string{},
 	}
-	service := NewService(
-		&retrieverStub{value: mappedRetrievalContext()},
-		&invokerStub{configured: true, content: proposalJSON(t, proposal)},
-	)
+	retrieval, err := normalizeRetrievalContext(mappedRetrievalContext())
+	if err != nil {
+		t.Fatalf("normalize retrieval error = %v", err)
+	}
+	result, err := validateProposal(validRequest(), retrieval, proposal)
+	if err != nil {
+		t.Fatalf("mapped modification downgrade error = %v", err)
+	}
+	if result.Strategy != StrategyCreateDataset || result.TargetDatasetID != "" ||
+		result.TargetDatasetVersionID != "" || result.DatasetInstruction != instruction {
+		t.Fatalf("unexpected downgraded proposal: %#v", result)
+	}
+	if len(result.RetrievalEvidence) != 1 ||
+		result.RetrievalEvidence[0].SourceID != testDatasetID ||
+		result.RetrievalEvidence[0].DatasetVersionID != testDatasetVersionID {
+		t.Fatalf("mapped source evidence was not synthesized: %#v", result.RetrievalEvidence)
+	}
+	if !strings.Contains(strings.Join(result.Warnings, "\n"), "已安全调整为基于映射表新建普通数据集") {
+		t.Fatalf("downgrade warning = %#v", result.Warnings)
+	}
+}
+
+func TestProposeSafelyDowngradesInvalidModificationWhenMappedEvidenceIsGrounded(t *testing.T) {
+	proposal := MetricAuthoringProposal{
+		SchemaVersion: SchemaVersion, Strategy: StrategyModifyDataset, Summary: "需要从支付明细构建客户月支付数据。",
+		// This ordinary dataset is readable but not manageable, so it cannot be modified.
+		TargetDatasetID: testDatasetID, TargetDatasetVersionID: testDatasetVersionID,
+		RetrievalEvidence: []RetrievalEvidence{{
+			SourceType: "FIELD", SourceID: "mapped_paid_amount",
+			DatasetID: testMappedDatasetID, DatasetVersionID: testMappedVersionID,
+			Reason: "支付金额来源",
+		}},
+		DatasetInstruction:     "以支付明细映射表为输入，保留客户、支付时间和实付金额，新建普通支付分析数据集。",
+		ClarificationQuestions: []string{}, Assumptions: []string{}, Warnings: []string{},
+	}
+	invoker := &invokerStub{configured: true, content: proposalJSON(t, proposal)}
+	service := NewService(&retrieverStub{value: unmanageableAndMappedRetrievalContext()}, invoker)
+
+	result, err := service.Propose(context.Background(), "tenant-1", "actor-1", validRequest())
+	if err != nil {
+		t.Fatalf("grounded mapped evidence downgrade error = %v", err)
+	}
+	if result.Proposal.Strategy != StrategyCreateDataset || result.Proposal.TargetDatasetID != "" ||
+		len(result.Proposal.RetrievalEvidence) != 1 ||
+		result.Proposal.RetrievalEvidence[0].SourceID != "mapped_paid_amount" ||
+		result.Proposal.RetrievalEvidence[0].DatasetID != testMappedDatasetID {
+		t.Fatalf("unexpected grounded evidence downgrade: %#v", result.Proposal)
+	}
+	if len(invoker.calls) != 1 {
+		t.Fatalf("grounded deterministic downgrade should use one call: %d", len(invoker.calls))
+	}
+}
+
+func TestProposeRepairsMappedDatasetModificationIntoSafeCreateDataset(t *testing.T) {
+	invalid := MetricAuthoringProposal{
+		SchemaVersion: SchemaVersion, Strategy: StrategyModifyDataset, Summary: "需要补充客户和月份。",
+		TargetDatasetID: testDatasetID, TargetDatasetVersionID: testDatasetVersionID,
+		CandidateMetricDefinition: func() *metric.Definition {
+			value := validDefinition()
+			return &value
+		}(),
+		RetrievalEvidence:      []RetrievalEvidence{datasetEvidence()},
+		DatasetInstruction:     "在支付明细中补充客户与月份后汇总金额。",
+		ClarificationQuestions: []string{}, Assumptions: []string{}, Warnings: []string{},
+	}
+	repaired := MetricAuthoringProposal{
+		SchemaVersion: SchemaVersion, Strategy: StrategyCreateDataset, Summary: "需要基于映射表新建普通分析数据集。",
+		RetrievalEvidence: []RetrievalEvidence{
+			datasetEvidence(), fieldEvidence("field_amount"), fieldEvidence("field_paid_at"),
+		},
+		DatasetInstruction:     "以支付明细映射表为只读来源，新建普通数据集，保留客户、支付时间和支付金额，并按客户与月份输出可聚合明细。",
+		ClarificationQuestions: []string{}, Assumptions: []string{}, Warnings: []string{},
+	}
+	invoker := &invokerStub{
+		configured: true,
+		contents: []json.RawMessage{
+			proposalJSON(t, invalid),
+			proposalJSON(t, repaired),
+		},
+	}
+	service := NewService(&retrieverStub{value: mappedRetrievalContext()}, invoker)
+
+	result, err := service.Propose(context.Background(), "tenant-1", "actor-1", validRequest())
+	if err != nil {
+		t.Fatalf("Propose() repair error = %v", err)
+	}
+	if result.RequestID != "ai-request-2" || result.Proposal.Strategy != StrategyCreateDataset {
+		t.Fatalf("unexpected repaired result: %#v", result)
+	}
+	if len(invoker.calls) != 2 {
+		t.Fatalf("invocation count = %d, want 2", len(invoker.calls))
+	}
+	messages := invoker.calls[1].Request.Messages
+	if len(messages) != 4 || messages[2].Role != aiplatform.MessageRoleAssistant || messages[3].Role != aiplatform.MessageRoleUser {
+		t.Fatalf("repair messages = %#v", messages)
+	}
+	if !strings.Contains(messages[3].Parts[0].Text, "mappedDatasets/mappedFields") ||
+		!strings.Contains(messages[3].Parts[0].Text, "FIELD 证据的三个标识必须来自同一个字段对象") {
+		t.Fatalf("repair instruction = %q", messages[3].Parts[0].Text)
+	}
+}
+
+func TestProposeFailsClosedWhenRepairRemainsUnsafe(t *testing.T) {
+	invalid := MetricAuthoringProposal{
+		SchemaVersion: SchemaVersion, Strategy: StrategyModifyDataset, Summary: "直接修改映射表。",
+		TargetDatasetID: testDatasetID, TargetDatasetVersionID: testDatasetVersionID,
+		CandidateMetricDefinition: func() *metric.Definition {
+			value := validDefinition()
+			return &value
+		}(),
+		RetrievalEvidence:      []RetrievalEvidence{datasetEvidence()},
+		DatasetInstruction:     "直接修改映射表。",
+		ClarificationQuestions: []string{}, Assumptions: []string{}, Warnings: []string{},
+	}
+	invoker := &invokerStub{configured: true, content: proposalJSON(t, invalid)}
+	service := NewService(&retrieverStub{value: mappedRetrievalContext()}, invoker)
+
 	if _, err := service.Propose(context.Background(), "tenant-1", "actor-1", validRequest()); !errors.Is(err, ErrInvalidOutput) {
-		t.Fatalf("mapped modification error = %v, want ErrInvalidOutput", err)
+		t.Fatalf("error = %v, want ErrInvalidOutput", err)
+	}
+	if len(invoker.calls) != 2 {
+		t.Fatalf("invocation count = %d, want one bounded repair", len(invoker.calls))
 	}
 }
 
@@ -457,6 +600,54 @@ func TestProposeRepairsUniqueDraftPairsAndDeduplicatesEvidence(t *testing.T) {
 		if evidence.DatasetID != testServiceDraftDatasetID || evidence.DatasetVersionID != testServiceDraftVersionID {
 			t.Fatalf("evidence owner pair was not repaired: %#v", evidence)
 		}
+	}
+}
+
+func TestProposeRepairsAmbiguousFieldOwnerFromDatasetHint(t *testing.T) {
+	retrieval := retrievalWithModifiableDraft()
+	retrieval.ModifiableDraftFields[0].ID = "field_amount"
+	proposal := MetricAuthoringProposal{
+		SchemaVersion: SchemaVersion, Strategy: StrategyNeedsClarification, Summary: "需要确认金额口径。",
+		RetrievalEvidence: []RetrievalEvidence{{
+			SourceType: "FIELD", SourceID: "field_amount",
+			DatasetID: testServiceDraftDatasetID, DatasetVersionID: testDatasetVersionID,
+			Reason: "候选销售金额字段",
+		}},
+		ClarificationQuestions: []string{"应使用订单金额还是支付金额？"}, Assumptions: []string{}, Warnings: []string{},
+	}
+	invoker := &invokerStub{configured: true, content: proposalJSON(t, proposal)}
+	service := NewService(&retrieverStub{value: retrieval}, invoker)
+
+	result, err := service.Propose(context.Background(), "tenant-1", "actor-1", validRequest())
+	if err != nil {
+		t.Fatalf("Propose() owner repair error = %v", err)
+	}
+	evidence := result.Proposal.RetrievalEvidence[0]
+	if evidence.DatasetID != testServiceDraftDatasetID || evidence.DatasetVersionID != testServiceDraftVersionID {
+		t.Fatalf("field owner was not safely repaired: %#v", evidence)
+	}
+	if len(invoker.calls) != 1 {
+		t.Fatalf("safe deterministic repair should not invoke model twice: %d", len(invoker.calls))
+	}
+}
+
+func TestValidateEvidenceDropsFieldThatCannotBeGroundedToOneOwner(t *testing.T) {
+	fields := map[string]AuthorizedField{}
+	for _, field := range []AuthorizedField{
+		{DatasetID: testDatasetID, DatasetVersionID: testDatasetVersionID, ID: "shared_amount"},
+		{DatasetID: testMappedDatasetID, DatasetVersionID: testMappedVersionID, ID: "shared_amount"},
+	} {
+		fields[fieldKey(field.DatasetID, field.DatasetVersionID, field.ID)] = field
+	}
+	result, err := validateEvidence([]RetrievalEvidence{{
+		SourceType: "FIELD", SourceID: "shared_amount", DatasetID: "", DatasetVersionID: "",
+		Reason: "模型未能给出唯一字段归属",
+	}}, map[string]AuthorizedDataset{}, fields, map[string]AuthorizedMetric{}, nil)
+	if err != nil {
+		t.Fatalf("validateEvidence() error = %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("ambiguous evidence should be discarded, got %#v", result)
 	}
 }
 

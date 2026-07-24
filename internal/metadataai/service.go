@@ -37,6 +37,8 @@ type Service struct {
 	now       func() time.Time
 }
 
+const maxMetadataSampleRows = 10
+
 type metadataCompletionFailure struct {
 	code  string
 	cause error
@@ -64,18 +66,18 @@ func (s *Service) Generate(ctx context.Context, tenantID, actorID, tableID strin
 	return s.generate(ctx, tenantID, actorID, tableID, nil, true, nil, "", "", "", 0)
 }
 
-// GenerateWithSamples 在不持久化样本行的前提下，将最多三行数据加入本次元数据完善输入。
+// GenerateWithSamples 在不持久化样本行的前提下，将最多十行数据加入本次元数据完善输入。
 func (s *Service) GenerateWithSamples(ctx context.Context, tenantID, actorID, tableID string, samples []map[string]any) (GenerateResult, error) {
-	if len(samples) > 3 {
-		samples = samples[:3]
+	if len(samples) > maxMetadataSampleRows {
+		samples = samples[:maxMetadataSampleRows]
 	}
 	return s.generate(ctx, tenantID, actorID, tableID, samples, true, nil, "", "", "", 0)
 }
 
 // CompleteTable 使用 worker 已持久化的结构哈希和目标范围作为并发栅栏；nil 字段集合表示全量活动字段。
 func (s *Service) CompleteTable(ctx context.Context, tenantID, actorID, tableID string, samples []map[string]any, targetTable bool, targetColumnIDs []string, expectedStructureHash, processingItemID, processingWorkerID string, processingSourceVersion int64) error {
-	if len(samples) > 3 {
-		samples = samples[:3]
+	if len(samples) > maxMetadataSampleRows {
+		samples = samples[:maxMetadataSampleRows]
 	}
 	_, err := s.generate(ctx, tenantID, actorID, tableID, samples, targetTable, targetColumnIDs, expectedStructureHash, processingItemID, processingWorkerID, processingSourceVersion)
 	if err == nil {

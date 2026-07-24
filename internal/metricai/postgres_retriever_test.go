@@ -231,7 +231,8 @@ func TestPostgresRetrieverReturnsPermissionScopedMinimalExactContext(t *testing.
 		return work(queryer)
 	}}
 
-	result, err := retriever.Retrieve(context.Background(), testTenantID, testActorID, validRequest())
+	request := validRequest()
+	result, err := retriever.Retrieve(context.Background(), testTenantID, testActorID, request, analyzeMetricIntent(request))
 	if err != nil {
 		t.Fatalf("Retrieve() error = %v", err)
 	}
@@ -271,8 +272,10 @@ func TestPostgresRetrieverReturnsPermissionScopedMinimalExactContext(t *testing.
 		if arguments[0] != testTenantID || arguments[1] != testActorID {
 			t.Fatalf("query identity = %#v", arguments[:2])
 		}
-		if arguments[2] != validRequest().Requirement || arguments[3] != validRequest().Requirement {
-			t.Fatalf("retrieval did not use the single requirement: %#v", arguments[2:4])
+		if arguments[2] != validRequest().Requirement ||
+			!strings.Contains(arguments[3].(string), validRequest().Requirement) ||
+			!strings.Contains(arguments[3].(string), "SUM") {
+			t.Fatalf("retrieval did not use the analyzed requirement: %#v", arguments[2:4])
 		}
 	}
 }
@@ -287,7 +290,8 @@ func TestPostgresRetrieverMarksMappedDatasetFromOriginTableFlag(t *testing.T) {
 	retriever := &PostgresRetriever{runTenant: func(_ context.Context, _ string, work func(retrievalQueryer) error) error {
 		return work(queryer)
 	}}
-	result, err := retriever.Retrieve(context.Background(), testTenantID, testActorID, validRequest())
+	request := validRequest()
+	result, err := retriever.Retrieve(context.Background(), testTenantID, testActorID, request, analyzeMetricIntent(request))
 	if err != nil {
 		t.Fatalf("Retrieve() error = %v", err)
 	}
@@ -307,7 +311,8 @@ func TestPostgresRetrieverReturnsManageableDraftWithoutPublishedDependencyValida
 		return work(queryer)
 	}}
 
-	result, err := retriever.Retrieve(context.Background(), testTenantID, testActorID, validRequest())
+	request := validRequest()
+	result, err := retriever.Retrieve(context.Background(), testTenantID, testActorID, request, analyzeMetricIntent(request))
 	if err != nil {
 		t.Fatalf("Retrieve() error = %v", err)
 	}
@@ -346,7 +351,8 @@ func TestPostgresRetrieverDropsPublishedEnvelopeWithUnavailableDependencies(t *t
 		validationErrors: map[string]error{key: dataset.ErrVersionUnavailable},
 	}
 	retriever := &PostgresRetriever{runTenant: func(_ context.Context, _ string, work func(retrievalQueryer) error) error { return work(queryer) }}
-	result, err := retriever.Retrieve(context.Background(), testTenantID, testActorID, validRequest())
+	request := validRequest()
+	result, err := retriever.Retrieve(context.Background(), testTenantID, testActorID, request, analyzeMetricIntent(request))
 	if err != nil {
 		t.Fatalf("Retrieve() error = %v", err)
 	}

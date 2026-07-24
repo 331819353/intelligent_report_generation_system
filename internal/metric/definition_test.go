@@ -64,6 +64,20 @@ func TestPrepareNormalizesAndHashesDefinition(t *testing.T) {
 	}
 }
 
+func TestCandidateMaterializationAllowsOnlyBusinessCopyChanges(t *testing.T) {
+	candidate := validDefinition()
+	accepted := candidate
+	accepted.Metric.Name = "付款订单数量"
+	accepted.Metric.Description = "统计每位客户付款订单的数量。"
+	if !sameCandidateCalculation(candidate, accepted) {
+		t.Fatal("name and description enrichment should preserve the candidate calculation")
+	}
+	accepted.Unit = "笔"
+	if sameCandidateCalculation(candidate, accepted) {
+		t.Fatal("unit changes must not bypass deterministic candidate validation")
+	}
+}
+
 func TestPrepareRejectsAmbiguousJSON(t *testing.T) {
 	base := string(definitionJSON(t, validDefinition()))
 	cases := map[string]string{

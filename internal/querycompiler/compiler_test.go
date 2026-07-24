@@ -343,6 +343,88 @@ func TestOracleUsesNumberedBindVariables(t *testing.T) {
 	}
 }
 
+func TestPostgreSQLUsesNumberedBindVariablesAndNativeFunctions(t *testing.T) {
+	input := compilerInput(t)
+	input.Dialect = PostgreSQL
+	input.Document.Sorts[0].Nulls = "LAST"
+	input.ColumnPolicies = []policy.ColumnPolicy{{FieldCode: "revenue", PolicyType: "HASH"}}
+	compiled, err := Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		`DATE_TRUNC('month', "o"."order_date")`,
+		`ENCODE(DIGEST(CAST("secure_base"."revenue" AS TEXT), 'sha256'), 'hex')`,
+		`ORDER BY "stat_month" ASC NULLS LAST`,
+	} {
+		if !strings.Contains(compiled.SQL, expected) {
+			t.Fatalf("PostgreSQL query missing %q: %s", expected, compiled.SQL)
+		}
+	}
+	if strings.Contains(compiled.SQL, "%s") || !strings.HasSuffix(compiled.SQL, "LIMIT $4") ||
+		len(compiled.Args) != 4 || compiled.Args[3] != 100 {
+		t.Fatalf("unexpected PostgreSQL placeholders: sql=%s args=%#v", compiled.SQL, compiled.Args)
+	}
+}
+
+func TestPostgreSQLDateFormattingAndCasts(t *testing.T) {
+	dateField := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_date"}
+	amountField := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_amount"}
+	compiler := compiler{input: Input{
+		Dialect: PostgreSQL,
+		Tables: map[string]TableRef{"orders": {
+			NodeID: "orders", Columns: map[string]bool{"order_date": true, "order_amount": true},
+		}},
+	}}
+	formatted, err := compiler.expression(dataset.Expression{Type: "DATE_FORMAT", Unit: "QUARTER", Argument: &dateField}, map[string]string{"orders": "o"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if formatted != `TO_CHAR("o"."order_date", 'YYYY') || 'Q' || TO_CHAR("o"."order_date", 'Q')` {
+		t.Fatalf("quarter format=%s", formatted)
+	}
+	casted, err := compiler.expression(dataset.Expression{Type: "CAST", TargetType: "DECIMAL", Argument: &amountField}, map[string]string{"orders": "o"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if casted != `CAST("o"."order_amount" AS NUMERIC(38,10))` {
+		t.Fatalf("decimal cast=%s", casted)
+	}
+}
+
+func TestPostgreSQLUsesNativeSubstringSearch(t *testing.T) {
+	field := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_status"}
+	literal := dataset.Expression{Type: "LITERAL", Value: "PAID"}
+	compiler := compiler{input: Input{
+		Dialect: PostgreSQL,
+		Tables: map[string]TableRef{"orders": {
+			NodeID: "orders", Columns: map[string]bool{"order_status": true},
+		}},
+	}, args: []any{}}
+	contains, err := compiler.expression(
+		dataset.Expression{Type: "CONTAINS", Left: &field, Right: &literal},
+		map[string]string{"orders": "o"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contains != `(STRPOS("o"."order_status",$1) > 0)` {
+		t.Fatalf("contains=%s", contains)
+	}
+}
+
+func TestPostgreSQLRejectsIdentifiersOver63Bytes(t *testing.T) {
+	input := compilerInput(t)
+	input.Dialect = PostgreSQL
+	// 32 个中文字符少于 DSL 的 128 字符上限，但在 UTF-8 下有 96 字节。
+	table := input.Tables["orders"]
+	table.Name = strings.Repeat("订", 32)
+	input.Tables["orders"] = table
+	if _, err := Compile(input); err == nil || !strings.Contains(err.Error(), "63 bytes") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestCompileSkipsOptionalFilterWhenParameterIsAbsent(t *testing.T) {
 	input := compilerInput(t)
 	input.Document.Parameters[0].Required = false
@@ -372,6 +454,27 @@ func TestCompileScanPushesNodeFiltersAndAppliesBoundLimit(t *testing.T) {
 	}
 	if len(compiled.Args) != 3 || compiled.Args[2] != 101 {
 		t.Fatalf("scan args=%#v", compiled.Args)
+	}
+}
+
+func TestCompileExtractionScanLeavesTruncationDetectionToStream(t *testing.T) {
+	input := compilerInput(t)
+	compiled, err := CompileExtractionScan(ScanInput{
+		Document: input.Document, NodeID: "orders", Dialect: MySQL, Table: input.Tables["orders"],
+		Parameters: input.Parameters, MaxRows: 1_000_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(compiled.SQL, " LIMIT ") || compiled.MaxRows != 1_000_000 {
+		t.Fatalf("extraction scan must be unbounded SQL with a streamed cap: %#v", compiled)
+	}
+	// 过滤仍应留在源库执行，只有跨源汇总进入 PostgreSQL。
+	if !strings.Contains(compiled.SQL, "`o`.`order_status` = %s") || !strings.Contains(compiled.SQL, "`o`.`order_date` >= %s") {
+		t.Fatalf("source pushdown is incomplete: %s", compiled.SQL)
+	}
+	if len(compiled.Args) != 2 {
+		t.Fatalf("extraction scan unexpectedly bound a SQL limit: %#v", compiled.Args)
 	}
 }
 
