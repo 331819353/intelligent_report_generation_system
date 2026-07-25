@@ -200,8 +200,9 @@ type PublishInput struct {
 	ValidationParameters       map[string]any `json:"validationParameters"`
 }
 
-// DimensionFilter 是指标运行时唯一允许追加的维度值过滤。
-// 字段必须属于指标已发布定义的 allowedDimensions，值始终通过参数绑定传递。
+// DimensionFilter 是指标运行时唯一允许追加的受控过滤。
+// 字段必须属于指标已发布定义的 allowedDimensions，值始终通过参数绑定传递；
+// 普通维度仅支持 EQUALS，DATE/DATETIME 额外支持半开区间所需的 GTE/LT。
 type DimensionFilter struct {
 	FieldID  string `json:"fieldId"`
 	Operator string `json:"operator"`
@@ -210,11 +211,12 @@ type DimensionFilter struct {
 
 // PreviewInput 只允许选择定义声明的维度、添加受控维度过滤并传入数据集参数。
 type PreviewInput struct {
-	QueryID           string            `json:"queryId,omitempty"`
-	Parameters        map[string]any    `json:"parameters"`
-	DimensionFieldIDs []string          `json:"dimensionFieldIds"`
-	DimensionFilters  []DimensionFilter `json:"dimensionFilters,omitempty"`
-	MaxRows           int               `json:"maxRows,omitempty"`
+	QueryID             string            `json:"queryId,omitempty"`
+	Parameters          map[string]any    `json:"parameters"`
+	DimensionFieldIDs   []string          `json:"dimensionFieldIds"`
+	DimensionFilters    []DimensionFilter `json:"dimensionFilters,omitempty"`
+	MetricSortDirection string            `json:"metricSortDirection,omitempty"`
+	MaxRows             int               `json:"maxRows,omitempty"`
 }
 
 type VersionTransitionInput struct {
@@ -252,6 +254,7 @@ type QueryFilterBinding struct {
 	FilterID      string
 	ParameterCode string
 	DataType      string
+	Operator      string
 }
 
 // Store 定义指标草稿、不可变版本和精确依赖解析的持久化边界。

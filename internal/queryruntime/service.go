@@ -252,7 +252,7 @@ func (s *Service) PreviewMetric(ctx context.Context, tenantID, actorID string, c
 }
 
 // sameMetricSourceEnvelope 禁止指标派生计划扩张精确版本的来源边界。
-// 唯一例外是指标服务声明并可逐项复核的参数化维度等值过滤。
+// 唯一例外是指标服务声明并可逐项复核的参数化维度过滤。
 func sameMetricSourceEnvelope(
 	original, derived dataset.Document,
 	candidate metric.QueryCandidate,
@@ -280,18 +280,23 @@ func sameMetricSourceEnvelope(
 	for _, field := range original.Fields {
 		fields[field.ID] = field
 	}
-	seenFields := map[string]bool{}
+	seenBindings := map[string]bool{}
 	seenFilters := map[string]bool{}
 	seenParameters := map[string]bool{}
 	for index, binding := range candidate.FilterBindings {
 		field, exists := fields[binding.FieldID]
-		if !exists || seenFields[binding.FieldID] ||
+		bindingKey := binding.FieldID + "\x00" + binding.Operator
+		if !exists || seenBindings[bindingKey] ||
 			binding.FilterID == "" || seenFilters[binding.FilterID] ||
 			binding.ParameterCode == "" || seenParameters[binding.ParameterCode] ||
-			binding.DataType != field.CanonicalType {
+			binding.DataType != field.CanonicalType ||
+			(binding.Operator != "EQUALS" &&
+				!((binding.Operator == "GTE" || binding.Operator == "LT") &&
+					(field.CanonicalType == "DATE" ||
+						field.CanonicalType == "DATETIME"))) {
 			return false
 		}
-		seenFields[binding.FieldID] = true
+		seenBindings[bindingKey] = true
 		seenFilters[binding.FilterID] = true
 		seenParameters[binding.ParameterCode] = true
 		parameter := derived.Parameters[len(original.Parameters)+index]
@@ -303,7 +308,7 @@ func sameMetricSourceEnvelope(
 			parameter.DefaultValue != nil ||
 			filter.ID != binding.FilterID ||
 			filter.Stage != "PRE_AGGREGATION" || filter.Optional ||
-			filter.Expression.Type != "EQUALS" ||
+			filter.Expression.Type != binding.Operator ||
 			filter.Expression.Left == nil ||
 			filter.Expression.Right == nil ||
 			!reflect.DeepEqual(*filter.Expression.Left, field.Expression) ||

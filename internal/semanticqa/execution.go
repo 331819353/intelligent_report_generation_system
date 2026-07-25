@@ -2,6 +2,7 @@ package semanticqa
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -22,7 +23,7 @@ func (store *PostgresStore) GetQueryPlan(
 func (store *PostgresStore) PrepareQueryPlanExecution(
 	ctx context.Context,
 	tenantID, id, expectedGenerationID, expectedPathHash string,
-) (plan QueryPlan, dimensionFieldID, memberKey string, err error) {
+) (plan QueryPlan, binding QueryExecutionBinding, err error) {
 	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
 		if err := loadQueryPlan(ctx, tx, id, &plan); err != nil {
 			return err
@@ -32,8 +33,12 @@ func (store *PostgresStore) PrepareQueryPlanExecution(
 			plan.PathHash != expectedPathHash {
 			return ErrConflict
 		}
+		var normalizedRequest []byte
 		err := tx.QueryRow(ctx, `SELECT COALESCE(dimension.field_id,''),
-				COALESCE(selected_member.member_key,'')
+				COALESCE(selected_member.member_key,''),
+				COALESCE(metric_version.definition_json->>'timeFieldId',''),
+				COALESCE(time_field.canonical_type,''),
+				query_plan.normalized_request_json
 			FROM platform.semantic_query_plans AS query_plan
 			JOIN platform.semantic_graph_projection_state AS graph_state
 			  ON graph_state.tenant_id=query_plan.tenant_id
@@ -73,6 +78,11 @@ func (store *PostgresStore) PrepareQueryPlanExecution(
 			 AND dimension.id=query_plan.selected_dimension_id
 			 AND dimension.dataset_version_id=dataset_version.id
 			 AND dimension.status='PUBLISHED'
+			LEFT JOIN platform.dataset_fields AS time_field
+			  ON time_field.tenant_id=dataset_version.tenant_id
+			 AND time_field.dataset_version_id=dataset_version.id
+			 AND time_field.field_id=
+			   COALESCE(metric_version.definition_json->>'timeFieldId','')
 			LEFT JOIN LATERAL (
 			  SELECT member.member_key
 			  FROM platform.semantic_query_plan_evidence AS evidence
@@ -116,13 +126,50 @@ func (store *PostgresStore) PrepareQueryPlanExecution(
 			      )
 			    )
 			  )`, id, expectedGenerationID, expectedPathHash).
-			Scan(&dimensionFieldID, &memberKey)
+			Scan(
+				&binding.DimensionFieldID, &binding.MemberKey,
+				&binding.TimeFieldID, &binding.TimeFieldType,
+				&normalizedRequest,
+			)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrUnprovenPath
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		var normalized struct {
+			TimeRange      *QueryTimeRange `json:"timeRange"`
+			TopN           int             `json:"topN"`
+			SortDirection  string          `json:"sortDirection"`
+			HasMemberValue bool            `json:"hasMemberValue"`
+		}
+		if err := json.Unmarshal(normalizedRequest, &normalized); err != nil {
+			return ErrUnprovenPath
+		}
+		if normalized.TopN < 0 || normalized.TopN > 500 ||
+			!oneOf(normalized.SortDirection, "", "ASC", "DESC") ||
+			(normalized.SortDirection != "" && normalized.TopN == 0) ||
+			normalized.HasMemberValue != (binding.MemberKey != "") {
+			return ErrUnprovenPath
+		}
+		if normalized.TimeRange != nil {
+			timeRange, err := normalizeQueryTimeRange(*normalized.TimeRange)
+			if err != nil || binding.TimeFieldID == "" {
+				return ErrUnprovenPath
+			}
+			_, dateOnly, err := parseQueryBoundary(timeRange.Start)
+			if err != nil ||
+				(binding.TimeFieldType == "DATE") != dateOnly ||
+				!oneOf(binding.TimeFieldType, "DATE", "DATETIME") {
+				return ErrUnprovenPath
+			}
+			binding.TimeRange = &timeRange
+		}
+		binding.TopN = normalized.TopN
+		binding.SortDirection = normalized.SortDirection
+		return nil
 	})
-	return plan, dimensionFieldID, memberKey, err
+	return plan, binding, err
 }
 
 func (store *PostgresStore) FinishQueryPlanExecution(

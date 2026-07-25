@@ -6,13 +6,14 @@ type AppShellProps = {
   eyebrow: string
   children: ReactNode
   actions?: ReactNode
+  className?: string
 }
 
 /** 为后台业务页面提供统一侧栏、顶栏和内容容器。 */
-export function AppShell({ title, eyebrow, children, actions }: AppShellProps) {
+export function AppShell({ title, eyebrow, children, actions, className = '' }: AppShellProps) {
   const location = useLocation()
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${className}`.trim()}>
       <aside className="sidebar">
         <div className="brand-mark">IR</div>
         <div className="brand-copy"><strong>智能报告</strong><span>Insight Studio</span></div>

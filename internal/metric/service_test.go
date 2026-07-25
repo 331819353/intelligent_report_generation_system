@@ -404,6 +404,61 @@ func TestServicePreviewBindsDimensionMemberWithoutEmbeddingValueInDSL(t *testing
 	}
 }
 
+func TestServicePreviewBuildsBoundedTimeRankingPlan(t *testing.T) {
+	definition := validDefinition()
+	definition.TimeFieldID, definition.TimeGrain = "field_time", "DAY"
+	definition.AllowedDimensions = append(definition.AllowedDimensions, Dimension{
+		FieldID: "field_time", Name: "销售日期",
+		HierarchyFieldIDs: []string{}, SortDirection: "ASC", NullLabel: "未知",
+	})
+	prepared, err := Prepare(definitionJSON(t, definition))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := baseRecord(t)
+	record.Definition, record.DefinitionHash = prepared.DefinitionJSON, prepared.DefinitionHash
+	store := &fakeStore{
+		record: record, datasetVersion: baseDatasetVersion(t),
+		versionsByID: map[string]VersionRecord{},
+	}
+	previewer := &fakePreviewer{result: dataset.PreviewResult{RowCount: 2}}
+	service := NewService(store, previewer)
+	_, err = service.Preview(
+		context.Background(), testTenantID, testActorID, testMetricID,
+		PreviewInput{
+			DimensionFieldIDs: []string{"field_region"},
+			DimensionFilters: []DimensionFilter{
+				{FieldID: "field_time", Operator: "GTE", Value: "2026-07-01T00:00:00Z"},
+				{FieldID: "field_time", Operator: "LT", Value: "2026-08-01T00:00:00Z"},
+			},
+			MetricSortDirection: "DESC",
+			MaxRows:             10,
+		},
+	)
+	if err != nil {
+		t.Fatalf("preview bounded ranking: %v", err)
+	}
+	if len(previewer.candidate.FilterBindings) != 2 ||
+		previewer.candidate.FilterBindings[0].Operator != "GTE" ||
+		previewer.candidate.FilterBindings[1].Operator != "LT" {
+		t.Fatalf("filter bindings=%#v", previewer.candidate.FilterBindings)
+	}
+	document, err := dataset.DecodeAndNormalize(previewer.candidate.DSL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Sorts) < 1 || len(document.Fields) != 2 ||
+		document.Sorts[0].FieldID != document.Fields[1].ID ||
+		document.Sorts[0].Direction != "DESC" {
+		t.Fatalf("sorts=%#v fields=%#v", document.Sorts, document.Fields)
+	}
+	if len(document.Filters) != 2 ||
+		document.Filters[0].Expression.Type != "GTE" ||
+		document.Filters[1].Expression.Type != "LT" {
+		t.Fatalf("filters=%#v", document.Filters)
+	}
+}
+
 func TestServicePreviewVersionMapsUnavailableDependencyToVersionConflict(t *testing.T) {
 	definition := validDefinition()
 	definition.Metric.Code, definition.Metric.Name = "published_derived", "已发布派生指标"

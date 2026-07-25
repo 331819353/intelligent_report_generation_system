@@ -32,6 +32,7 @@ func buildQueryCandidate(
 	validated validatedDefinition,
 	requestedDimensions []string,
 	requestedFilters []DimensionFilter,
+	metricSortDirection string,
 ) (QueryCandidate, map[string]any, error) {
 	definition := validated.prepared.Definition
 	fieldsByID := make(map[string]dataset.Field, len(validated.datasetDocument.Fields))
@@ -81,6 +82,18 @@ func buildQueryCandidate(
 		Expression: metricExpression, CanonicalType: metricType, Format: definition.NumberFormat,
 		Unit: definition.Unit, Nullable: true,
 	})
+	if metricSortDirection != "" {
+		if metricSortDirection != "ASC" && metricSortDirection != "DESC" {
+			return QueryCandidate{}, nil, invalid(
+				"metricSortDirection", "METRIC_PREVIEW_SORT_INVALID",
+				"指标排序方向仅支持 ASC 或 DESC",
+			)
+		}
+		sorts = append(
+			[]dataset.Sort{{FieldID: metricFieldID, Direction: metricSortDirection}},
+			sorts...,
+		)
+	}
 	if len(grainCodes) == 0 {
 		grainCodes = []string{definition.Metric.Code}
 	}
@@ -132,27 +145,32 @@ func appendDimensionFilters(
 	for _, filter := range document.Filters {
 		usedFilterIDs[filter.ID] = true
 	}
-	seenFields := map[string]bool{}
+	seenBindings := map[string]bool{}
 	bindings := make([]QueryFilterBinding, 0, len(requested))
 	parameters := make(map[string]any, len(requested))
 	for index, requestedFilter := range requested {
 		field, fieldExists := fieldsByID[requestedFilter.FieldID]
 		_, allowedField := allowed[requestedFilter.FieldID]
-		if !fieldExists || !allowedField || seenFields[requestedFilter.FieldID] {
+		operator := requestedFilter.Operator
+		bindingKey := requestedFilter.FieldID + "\x00" + operator
+		if !fieldExists || !allowedField || seenBindings[bindingKey] {
 			return nil, nil, invalid(
 				fmt.Sprintf("dimensionFilters[%d].fieldId", index),
 				"METRIC_PREVIEW_FILTER_DIMENSION_INVALID",
-				"过滤字段不在指标允许维度内或发生重复",
+				"过滤字段不在指标允许维度内或同一操作发生重复",
 			)
 		}
-		if requestedFilter.Operator != "EQUALS" || requestedFilter.Value == nil {
+		if !oneOf(operator, "EQUALS", "GTE", "LT") ||
+			requestedFilter.Value == nil ||
+			(operator != "EQUALS" &&
+				!oneOf(field.CanonicalType, "DATE", "DATETIME")) {
 			return nil, nil, invalid(
 				fmt.Sprintf("dimensionFilters[%d]", index),
 				"METRIC_PREVIEW_FILTER_UNSUPPORTED",
-				"维度过滤仅支持非空的 EQUALS 参数绑定",
+				"维度过滤仅支持非空的 EQUALS，时间字段额外支持 GTE 和 LT",
 			)
 		}
-		seenFields[requestedFilter.FieldID] = true
+		seenBindings[bindingKey] = true
 		parameterCode := uniqueDimensionFilterParameter(usedParameters, index)
 		usedParameters[parameterCode] = true
 		filterID := uniqueDimensionFilterID(usedFilterIDs, index)
@@ -167,7 +185,7 @@ func appendDimensionFilters(
 			ID:    filterID,
 			Stage: "PRE_AGGREGATION", Optional: false,
 			Expression: dataset.Expression{
-				Type: "EQUALS", Left: &left, Right: &right,
+				Type: operator, Left: &left, Right: &right,
 			},
 		})
 		bindings = append(bindings, QueryFilterBinding{
@@ -175,6 +193,7 @@ func appendDimensionFilters(
 			FilterID:      filterID,
 			ParameterCode: parameterCode,
 			DataType:      field.CanonicalType,
+			Operator:      operator,
 		})
 		parameters[parameterCode] = requestedFilter.Value
 	}

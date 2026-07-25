@@ -162,12 +162,34 @@ type WarehouseBuildDAG struct {
 }
 
 type QueryPlanInput struct {
-	Question        string `json:"question"`
-	Intent          string `json:"intent"`
-	MemberValue     string `json:"memberValue,omitempty"`
-	DimensionCode   string `json:"dimensionCode,omitempty"`
-	MetricCode      string `json:"metricCode"`
-	MaximumPathHops int    `json:"maximumPathHops,omitempty"`
+	Question        string          `json:"question"`
+	Intent          string          `json:"intent"`
+	MemberValue     string          `json:"memberValue,omitempty"`
+	DimensionCode   string          `json:"dimensionCode,omitempty"`
+	MetricCode      string          `json:"metricCode"`
+	TimeRange       *QueryTimeRange `json:"timeRange,omitempty"`
+	TopN            int             `json:"topN,omitempty"`
+	SortDirection   string          `json:"sortDirection,omitempty"`
+	MaximumPathHops int             `json:"maximumPathHops,omitempty"`
+}
+
+// QueryTimeRange is a half-open, caller-controlled time boundary. Values must
+// be RFC3339 instants or ISO dates; the runtime never derives SQL from them.
+type QueryTimeRange struct {
+	Start        string `json:"start"`
+	EndExclusive string `json:"endExclusive"`
+}
+
+// QueryExecutionBinding is reloaded from governed metadata immediately before
+// execution so a persisted plan cannot smuggle fields or filter expressions.
+type QueryExecutionBinding struct {
+	DimensionFieldID string
+	MemberKey        string
+	TimeFieldID      string
+	TimeFieldType    string
+	TimeRange        *QueryTimeRange
+	TopN             int
+	SortDirection    string
 }
 
 type QueryEvidence struct {

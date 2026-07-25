@@ -108,6 +108,13 @@ type DatasetAIErrorView = {
 const statusLabels: Record<string, string> = {
   DRAFT: '草稿', VALIDATING: '校验中', PUBLISHED: '已发布', STALE: '已失效', DEPRECATED: '已废弃', DISABLED: '已停用',
 }
+const layerOverview: Array<{ layer: DatasetLayer; name: string; description: string }> = [
+  { layer: 'ODS', name: '源映射', description: '物理表映射' },
+  { layer: 'DIM', name: '维度', description: '实体说明' },
+  { layer: 'DWD', name: '事实明细', description: '动作与维度' },
+  { layer: 'DWS', name: '主题汇总', description: '分析视角' },
+  { layer: 'ADS', name: '应用数据', description: '按需交付' },
+]
 const typeLabels: Record<string, string> = { SINGLE_SOURCE: '单数据源', CROSS_SOURCE: '跨数据源' }
 const publicationStatusLabels: Record<string, string> = { PENDING: '待审批', APPROVED: '已通过', REJECTED: '已拒绝' }
 const metricCandidateGenerationLabels: Record<string, string> = {
@@ -734,6 +741,13 @@ export function DatasetCenterPage() {
       (layerFilter === 'ALL' || dataset.layer === layerFilter) &&
       (statusFilter === 'ALL' || dataset.status === statusFilter))
   }, [dataSourceFilter, datasets, keyword, layerFilter, statusFilter])
+  const layerCounts = useMemo(
+    () => Object.fromEntries(layerOverview.map(item => [
+      item.layer,
+      datasets.reduce((total, dataset) => total + Number(dataset.layer === item.layer), 0),
+    ])) as Record<DatasetLayer, number>,
+    [datasets],
+  )
   const selectedDatasets = useMemo(
     () => datasets.filter(dataset => selectedDatasetIDs.has(dataset.id)),
     [datasets, selectedDatasetIDs],
@@ -2289,10 +2303,18 @@ export function DatasetCenterPage() {
   const editingCanvas = Boolean(editingRecord || busyAction.startsWith('edit:') || dialog?.mode === 'create' && dialog.dataset)
   const completeDetailFields = detail ? datasetDetailFields(detail) : []
 
-  return <AppShell title="数据集配置中心" eyebrow="数据资产" actions={<button className="primary-button" type="button" disabled={actionBusy} onClick={() => void openCreate()}>新建数据集</button>}>
+  return <AppShell className="dataset-center-shell" title="数据集配置中心" eyebrow="数据资产" actions={<button className="primary-button" type="button" disabled={actionBusy} onClick={() => void openCreate()}>新建数据集</button>}>
     {notice && <div className={`dataset-center-toast ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}><strong>{notice.tone === 'success' ? '✓' : '!'}</strong><span>{notice.message}</span><button type="button" aria-label="关闭消息" onClick={() => setNotice(null)}>×</button></div>}
     <section className="dataset-center" aria-label="数据集配置中心内容">
-      <header className="dataset-center-summary"><div><span className="eyebrow">数据集资产</span><h2>全部数据集</h2><p>集中查看、修改和管理当前租户的数据集资产。</p></div><strong>{datasets.length}<small> 个数据集</small></strong></header>
+      <header className="dataset-center-summary">
+        <div><span className="eyebrow">资产目录</span><h2>全部数据集</h2><p>从数据源映射到分析交付，统一管理模型、版本与发布状态。</p></div>
+        <div className="dataset-center-total"><strong>{datasets.length}</strong><span>数据集总数</span></div>
+      </header>
+      <nav className="dataset-layer-overview" aria-label="按数据分层浏览">
+        {layerOverview.map(item => <button key={item.layer} type="button" className={layerFilter === item.layer ? 'active' : ''} aria-pressed={layerFilter === item.layer} onClick={() => setLayerFilter(current => current === item.layer ? 'ALL' : item.layer)}>
+          <span>{item.layer}</span><strong>{item.name}</strong><small>{item.description}</small><b>{layerCounts[item.layer]}</b>
+        </button>)}
+      </nav>
       <div className="dataset-center-filters" aria-label="数据集筛选">
         <label><span>搜索</span><input aria-label="搜索数据集" type="search" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="名称或编码" /></label>
         <label><span>数据源</span><select aria-label="按数据源筛选" value={dataSourceFilter} onChange={event => setDataSourceFilter(event.target.value)}><option value="ALL">全部数据源</option>{dataSourceOptions.map(name => <option key={name} value={name}>{name}</option>)}</select></label>

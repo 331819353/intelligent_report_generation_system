@@ -176,6 +176,7 @@ func (s *Service) Preview(ctx context.Context, tenantID, actorID, id string, inp
 	candidate, parameters, err := buildQueryCandidate(
 		id, record.DraftVersionID, validated,
 		input.DimensionFieldIDs, input.DimensionFilters,
+		input.MetricSortDirection,
 	)
 	if err != nil {
 		return dataset.PreviewResult{}, err
@@ -220,6 +221,7 @@ func (s *Service) PreviewVersion(ctx context.Context, tenantID, actorID, id, ver
 	candidate, parameters, err := buildQueryCandidate(
 		id, version.ID, validated,
 		input.DimensionFieldIDs, input.DimensionFilters,
+		input.MetricSortDirection,
 	)
 	if err != nil {
 		return dataset.PreviewResult{}, err
@@ -307,7 +309,9 @@ func (s *Service) Publish(ctx context.Context, tenantID, actorID, id, idempotenc
 	if err != nil {
 		return VersionRecord{}, err
 	}
-	candidate, _, err := buildQueryCandidate(id, current.DraftVersionID, validated, nil, nil)
+	candidate, _, err := buildQueryCandidate(
+		id, current.DraftVersionID, validated, nil, nil, "",
+	)
 	if err != nil {
 		return VersionRecord{}, err
 	}

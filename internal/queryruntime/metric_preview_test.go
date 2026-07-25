@@ -128,6 +128,7 @@ func TestMetricSourceEnvelopeAllowsOnlyDeclaredParameterizedDimensionFilter(t *t
 		FieldID: field.ID, FilterID: "semantic_dimension_filter_1",
 		ParameterCode: parameterCode,
 		DataType:      field.CanonicalType,
+		Operator:      "EQUALS",
 	}}}
 	if !sameMetricSourceEnvelope(original, derived, candidate) {
 		t.Fatal("declared parameterized filter should preserve the source envelope")
@@ -136,6 +137,63 @@ func TestMetricSourceEnvelopeAllowsOnlyDeclaredParameterizedDimensionFilter(t *t
 		&dataset.Expression{Type: "LITERAL", Value: "华东"}
 	if sameMetricSourceEnvelope(original, derived, candidate) {
 		t.Fatal("literal member value must fail the source-envelope check")
+	}
+}
+
+func TestMetricSourceEnvelopeAllowsExactParameterizedTimeWindow(t *testing.T) {
+	original := singleSourceJoinRuntimeDocument()
+	original.Nodes[0].Projection = append(
+		original.Nodes[0].Projection, "created_at",
+	)
+	timeField := dataset.Field{
+		ID: "field_time", Code: "created_at", Name: "创建时间",
+		Role: "TIME", CanonicalType: "DATETIME",
+		Expression: dataset.Expression{
+			Type: "FIELD_REF", NodeID: "orders", Field: "created_at",
+		},
+	}
+	original.Fields = append(original.Fields, timeField)
+	raw, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err = dataset.DecodeAndNormalize(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	derived := derivedMetricDocument(t, original)
+	bindings := make([]metric.QueryFilterBinding, 0, 2)
+	parameterCodes := []string{
+		"semantic_dimension_filter_1", "semantic_dimension_filter_2",
+	}
+	for index, operator := range []string{"GTE", "LT"} {
+		parameterCode := parameterCodes[index]
+		filterID := parameterCode
+		derived.Parameters = append(derived.Parameters, dataset.Parameter{
+			Code: parameterCode, Name: "语义维度过滤",
+			DataType: "DATETIME", Required: true,
+		})
+		left := timeField.Expression
+		right := dataset.Expression{Type: "PARAM_REF", Code: parameterCode}
+		derived.Filters = append(derived.Filters, dataset.Filter{
+			ID: filterID, Stage: "PRE_AGGREGATION",
+			Expression: dataset.Expression{
+				Type: operator, Left: &left, Right: &right,
+			},
+		})
+		bindings = append(bindings, metric.QueryFilterBinding{
+			FieldID: timeField.ID, FilterID: filterID,
+			ParameterCode: parameterCode, DataType: "DATETIME",
+			Operator: operator,
+		})
+	}
+	candidate := metric.QueryCandidate{FilterBindings: bindings}
+	if !sameMetricSourceEnvelope(original, derived, candidate) {
+		t.Fatal("declared half-open time window should preserve the source envelope")
+	}
+	candidate.FilterBindings[1].Operator = "LTE"
+	if sameMetricSourceEnvelope(original, derived, candidate) {
+		t.Fatal("undeclared time operator must fail the source-envelope check")
 	}
 }
 
@@ -330,6 +388,7 @@ func TestPreviewDWSMetricReadsExactActiveMaterialization(t *testing.T) {
 		FieldID: filterField.ID, FilterID: "semantic_dimension_filter_1",
 		ParameterCode: parameterCode,
 		DataType:      filterField.CanonicalType,
+		Operator:      "EQUALS",
 	}}
 	result, err := service.PreviewMetric(
 		context.Background(), "tenant-1", "actor-1", candidate,

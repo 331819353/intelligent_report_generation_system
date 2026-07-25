@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"intelligent-report-generation-system/internal/dataset"
@@ -40,7 +41,7 @@ type Store interface {
 	RecordGoldenQuestionReplay(context.Context, string, string, GoldenQuestion, QueryPlan, string, string) (GoldenQuestionReplay, error)
 	ListMaterializationRecommendations(context.Context, string, int, int) ([]MaterializationRecommendation, error)
 	GetQueryPlan(context.Context, string, string) (QueryPlan, error)
-	PrepareQueryPlanExecution(context.Context, string, string, string, string) (QueryPlan, string, string, error)
+	PrepareQueryPlanExecution(context.Context, string, string, string, string) (QueryPlan, QueryExecutionBinding, error)
 	FinishQueryPlanExecution(context.Context, string, string, string, string, bool, string, int64, int) (QueryPlan, error)
 }
 
@@ -493,6 +494,20 @@ func (service *Service) PlanQuery(
 	input.MemberValue = strings.TrimSpace(input.MemberValue)
 	input.DimensionCode = strings.TrimSpace(input.DimensionCode)
 	input.MetricCode = strings.TrimSpace(input.MetricCode)
+	input.SortDirection = strings.ToUpper(strings.TrimSpace(input.SortDirection))
+	if input.TimeRange != nil {
+		normalized, err := normalizeQueryTimeRange(*input.TimeRange)
+		if err != nil {
+			return QueryPlan{}, ErrInvalidRequest
+		}
+		input.TimeRange = &normalized
+	}
+	if input.Intent == "RANKING" && input.TopN == 0 {
+		input.TopN = 10
+	}
+	if input.TopN > 0 && input.SortDirection == "" {
+		input.SortDirection = "DESC"
+	}
 	if len(input.Question) < 1 || len(input.Question) > 4000 ||
 		len(input.MemberValue) > 1024 || len(input.DimensionCode) > 128 ||
 		len(input.MetricCode) > 128 ||
@@ -500,7 +515,10 @@ func (service *Service) PlanQuery(
 			"LOOKUP", "METRIC", "TREND", "COMPARISON", "RANKING",
 			"DRILLDOWN", "DISTRIBUTION", "FUNNEL", "RETENTION",
 			"ANOMALY", "UNKNOWN",
-		) || input.MaximumPathHops < 0 || input.MaximumPathHops > 16 {
+		) || input.MaximumPathHops < 0 || input.MaximumPathHops > 16 ||
+		input.TopN < 0 || input.TopN > 500 ||
+		!oneOf(input.SortDirection, "", "ASC", "DESC") ||
+		(input.SortDirection != "" && input.TopN == 0) {
 		return QueryPlan{}, ErrInvalidRequest
 	}
 	if service.interpreter != nil &&
@@ -523,12 +541,50 @@ func (service *Service) PlanQuery(
 			}
 		}
 	}
+	if input.Intent == "RANKING" && input.TopN == 0 {
+		input.TopN, input.SortDirection = 10, "DESC"
+	}
 	if input.MetricCode == "" {
 		return QueryPlan{}, ErrUnprovenPath
 	}
 	questionHash := hashText(input.Question)
 	input.Question = ""
 	return service.store.PlanQuery(ctx, tenantID, actorID, input, questionHash)
+}
+
+func normalizeQueryTimeRange(value QueryTimeRange) (QueryTimeRange, error) {
+	value.Start = strings.TrimSpace(value.Start)
+	value.EndExclusive = strings.TrimSpace(value.EndExclusive)
+	start, startDateOnly, err := parseQueryBoundary(value.Start)
+	if err != nil {
+		return QueryTimeRange{}, err
+	}
+	end, endDateOnly, err := parseQueryBoundary(value.EndExclusive)
+	if err != nil || !start.Before(end) {
+		return QueryTimeRange{}, ErrInvalidRequest
+	}
+	if startDateOnly != endDateOnly {
+		return QueryTimeRange{}, ErrInvalidRequest
+	}
+	if startDateOnly {
+		value.Start = start.Format(time.DateOnly)
+		value.EndExclusive = end.Format(time.DateOnly)
+	} else {
+		value.Start = start.UTC().Format(time.RFC3339)
+		value.EndExclusive = end.UTC().Format(time.RFC3339)
+	}
+	return value, nil
+}
+
+func parseQueryBoundary(value string) (time.Time, bool, error) {
+	if parsed, err := time.Parse(time.DateOnly, value); err == nil {
+		return parsed.UTC(), true, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, false, ErrInvalidRequest
+	}
+	return parsed, false, nil
 }
 
 func (service *Service) GetQueryPlan(
@@ -559,7 +615,7 @@ func (service *Service) ExecuteQueryPlan(
 	if input.Parameters == nil {
 		input.Parameters = map[string]any{}
 	}
-	plan, dimensionFieldID, memberKey, err := service.store.PrepareQueryPlanExecution(
+	plan, binding, err := service.store.PrepareQueryPlanExecution(
 		ctx, tenantID, id,
 		input.ExpectedGraphGenerationID, input.ExpectedPathHash,
 	)
@@ -567,22 +623,45 @@ func (service *Service) ExecuteQueryPlan(
 		return QueryPlanExecution{}, err
 	}
 	dimensionFields := []string{}
-	if dimensionFieldID != "" {
-		dimensionFields = append(dimensionFields, dimensionFieldID)
+	if binding.DimensionFieldID != "" {
+		dimensionFields = append(dimensionFields, binding.DimensionFieldID)
+	}
+	if plan.Intent == "TREND" && binding.TimeFieldID != "" &&
+		binding.TimeFieldID != binding.DimensionFieldID {
+		dimensionFields = append(dimensionFields, binding.TimeFieldID)
 	}
 	dimensionFilters := []metric.DimensionFilter{}
-	if memberKey != "" {
+	if binding.MemberKey != "" {
 		dimensionFilters = append(dimensionFilters, metric.DimensionFilter{
-			FieldID: dimensionFieldID, Operator: "EQUALS", Value: memberKey,
+			FieldID:  binding.DimensionFieldID,
+			Operator: "EQUALS", Value: binding.MemberKey,
 		})
+	}
+	if binding.TimeRange != nil {
+		dimensionFilters = append(dimensionFilters,
+			metric.DimensionFilter{
+				FieldID:  binding.TimeFieldID,
+				Operator: "GTE", Value: binding.TimeRange.Start,
+			},
+			metric.DimensionFilter{
+				FieldID:  binding.TimeFieldID,
+				Operator: "LT", Value: binding.TimeRange.EndExclusive,
+			},
+		)
+	}
+	maxRows := input.MaxRows
+	if binding.TopN > 0 && (maxRows == 0 || maxRows > binding.TopN) {
+		maxRows = binding.TopN
 	}
 	result, executeErr := service.metricExecutor.PreviewVersion(
 		ctx, tenantID, actorID, plan.SelectedMetricID,
 		plan.SelectedMetricVersionID,
 		metric.PreviewInput{
 			QueryID: input.QueryID, Parameters: input.Parameters,
-			DimensionFieldIDs: dimensionFields,
-			DimensionFilters:  dimensionFilters, MaxRows: input.MaxRows,
+			DimensionFieldIDs:   dimensionFields,
+			DimensionFilters:    dimensionFilters,
+			MetricSortDirection: binding.SortDirection,
+			MaxRows:             maxRows,
 		},
 	)
 	if executeErr != nil {

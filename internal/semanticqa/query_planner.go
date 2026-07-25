@@ -94,6 +94,21 @@ func (store *PostgresStore) PlanQuery(
 		plan.SelectedMetricID = metricPayload.MetricID
 		plan.SelectedMetricVersionID = metricPayload.MetricVersionID
 		plan.SelectedDatasetVersionID = metricPayload.DatasetVersionID
+		var metricTimeFieldID string
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(definition_json->>'timeFieldId','')
+			FROM platform.metric_versions
+			WHERE id=$1::uuid AND metric_id=$2::uuid
+			  AND dataset_version_id=$3::uuid AND status='PUBLISHED'`,
+			metricPayload.MetricVersionID, metricPayload.MetricID,
+			metricPayload.DatasetVersionID,
+		).Scan(&metricTimeFieldID); err != nil {
+			return err
+		}
+		if (input.TimeRange != nil || input.Intent == "TREND") &&
+			metricTimeFieldID == "" {
+			plan.Status, plan.FailureCode = "GAP", "METRIC_TIME_FIELD_NOT_AVAILABLE"
+			return persistQueryPlan(ctx, tx, actorID, input, &plan)
+		}
 
 		var memberNode, dimensionNode *resolvedGraphNode
 		if input.MemberValue != "" {
@@ -145,6 +160,10 @@ func (store *PostgresStore) PlanQuery(
 			}
 			dimensionNode = &dimensionCandidates[0]
 			plan.SelectedDimensionID = dimensionNode.SubjectRef
+		}
+		if input.TopN > 0 && dimensionNode == nil {
+			plan.Status, plan.FailureCode = "GAP", "TOP_N_DIMENSION_REQUIRED"
+			return persistQueryPlan(ctx, tx, actorID, input, &plan)
 		}
 
 		if memberNode != nil {
@@ -491,6 +510,11 @@ func persistQueryPlan(
 		"dimensionCode":   input.DimensionCode,
 		"hasMemberValue":  input.MemberValue != "",
 		"maximumPathHops": input.MaximumPathHops,
+		"topN":            input.TopN,
+		"sortDirection":   input.SortDirection,
+	}
+	if input.TimeRange != nil {
+		normalizedRequest["timeRange"] = input.TimeRange
 	}
 	var createdAt time.Time
 	err := tx.QueryRow(ctx, `INSERT INTO platform.semantic_query_plans(
