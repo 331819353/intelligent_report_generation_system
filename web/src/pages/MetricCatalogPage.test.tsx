@@ -178,6 +178,16 @@ describe('指标资产目录', () => {
     })
   })
 
+  test('统一审批中心深链会直接打开指标候选区', async () => {
+    mockCatalog([], [metricCandidate()])
+    render(<MemoryRouter initialEntries={['/assets/metrics?view=candidates']}><MetricCatalogPage /></MemoryRouter>)
+
+    const candidateTab = await screen.findByRole('tab', { name: /候选区/ })
+    expect(candidateTab).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByText('待审批候选')).toBeInTheDocument()
+    expect(screen.getByText('订单金额')).toBeInTheDocument()
+  })
+
   test('二次确认后按乐观锁删除指标并保留数据集展示区', async () => {
     const user = userEvent.setup()
     const metric = metricSummary()
@@ -221,9 +231,9 @@ function metricCandidate(overrides: Partial<MetricCandidate> = {}): MetricCandid
 }
 
 const datasets: DatasetSummary[] = [
-  { id: 'dataset-1', code: 'enterprise_revenue', name: '企业收入数据集', description: '', type: 'SINGLE_SOURCE', status: 'PUBLISHED', version: 3, dslHash: 'a'.repeat(64), currentPublishedVersionId: 'dataset-version-1', updatedAt: '2026-07-16T00:00:00Z' },
-  { id: 'dataset-2', code: 'customer_profile', name: '客户主题数据集', description: '', type: 'SINGLE_SOURCE', status: 'PUBLISHED', version: 2, dslHash: 'b'.repeat(64), currentPublishedVersionId: 'dataset-version-2', updatedAt: '2026-07-16T00:00:00Z' },
-  { id: 'dataset-3', code: 'mapped_orders', name: '订单映射表', description: '', type: 'MAPPED_TABLE', status: 'PUBLISHED', originTableId: 'table-orders', version: 1, dslHash: 'c'.repeat(64), currentPublishedVersionId: 'dataset-version-3', updatedAt: '2026-07-16T00:00:00Z' },
+  { id: 'dataset-1', code: 'enterprise_revenue', name: '企业收入数据集', description: '', type: 'SINGLE_SOURCE', layer: 'DWS', tags: [], status: 'PUBLISHED', version: 3, dslHash: 'a'.repeat(64), currentPublishedVersionId: 'dataset-version-1', updatedAt: '2026-07-16T00:00:00Z' },
+  { id: 'dataset-2', code: 'customer_profile', name: '客户主题数据集', description: '', type: 'SINGLE_SOURCE', layer: 'DWD', tags: [], status: 'PUBLISHED', version: 2, dslHash: 'b'.repeat(64), currentPublishedVersionId: 'dataset-version-2', updatedAt: '2026-07-16T00:00:00Z' },
+  { id: 'dataset-3', code: 'mapped_orders', name: '订单映射表', description: '', type: 'MAPPED_TABLE', layer: 'ODS', tags: [], status: 'PUBLISHED', originTableId: 'table-orders', version: 1, dslHash: 'c'.repeat(64), currentPublishedVersionId: 'dataset-version-3', updatedAt: '2026-07-16T00:00:00Z' },
 ]
 
 function CatalogLocationProbe() {

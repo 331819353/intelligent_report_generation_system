@@ -74,7 +74,8 @@ func TestOrchestratedProviderBuildsMinimalRequestAndParsesUsage(t *testing.T) {
 		!messageContains(invoker.invocation.Request.Messages[0], "sourceFormat=CSV 或 EXCEL") || !messageContains(invoker.invocation.Request.Messages[0], "中文业务名称") ||
 		!messageContains(invoker.invocation.Request.Messages[0], "下划线") || !messageContains(invoker.invocation.Request.Messages[0], "中文描述") ||
 		!messageContains(invoker.invocation.Request.Messages[0], "最多十行") || !messageContains(invoker.invocation.Request.Messages[0], "候选关联键") ||
-		!messageContains(invoker.invocation.Request.Messages[0], "适用范围") {
+		!messageContains(invoker.invocation.Request.Messages[0], "适用范围") ||
+		!messageContains(invoker.invocation.Request.Messages[0], "semanticType 必须与输入 canonicalType 兼容") {
 		t.Fatalf("系统提示未要求结合 Sheet 表头和内容完成映射: %#v", invoker.invocation.Request.Messages[0])
 	}
 	if !messageContains(invoker.invocation.Request.Messages[1], "客户名称") || !messageContains(invoker.invocation.Request.Messages[1], "华东智造有限公司") {
@@ -155,13 +156,30 @@ func TestOrchestratedProviderRepairsDuplicateTargetIDWithCorrectionContext(t *te
 	}
 }
 
-func TestOrchestratedProviderRepairsSchemaInvalidOutputWithoutRawAssistantMessage(t *testing.T) {
+func TestOrchestratedProviderRepairsSchemaInvalidOutputWithSafeValidationContext(t *testing.T) {
 	input, validOutput := validCompletion()
 	validContent, err := json.Marshal(validOutput)
 	if err != nil {
 		t.Fatal(err)
 	}
-	invalidErr := &aiplatform.ProviderError{Code: aiplatform.ErrorCodeInvalidOutput, Message: "safe invalid output"}
+	invalidOutput := validOutput
+	invalidOutput.Columns = append([]SuggestionValue(nil), validOutput.Columns...)
+	invalidOutput.Columns[0].SemanticType = "PHONE"
+	invalidContent, err := json.Marshal(invalidOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema, err := json.Marshal(outputSchema(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, invalidErr := aiplatform.ValidateStructuredOutput(
+		aiplatform.JSONSchema{Name: "metadata_completion", Schema: schema},
+		invalidContent,
+	)
+	if invalidErr == nil {
+		t.Fatal("测试前置条件错误：非法语义类型通过了 Schema")
+	}
 	invoker := &providerInvoker{
 		configured: true,
 		results: []aiplatform.InvocationResult{
@@ -183,11 +201,16 @@ func TestOrchestratedProviderRepairsSchemaInvalidOutputWithoutRawAssistantMessag
 	}
 	firstMessages := invoker.invocations[0].Request.Messages
 	secondMessages := invoker.invocations[1].Request.Messages
-	if len(secondMessages) != len(firstMessages)+1 || secondMessages[len(firstMessages)].Role != aiplatform.MessageRoleUser {
-		t.Fatalf("无可用原始输出时不应伪造 assistant 消息: %#v", secondMessages)
+	if len(secondMessages) != len(firstMessages)+2 || secondMessages[len(firstMessages)].Role != aiplatform.MessageRoleAssistant {
+		t.Fatalf("纠错请求未携带内存中的非法原始输出: %#v", secondMessages)
 	}
-	if !messageContains(secondMessages[len(firstMessages)], "每个 ID 恰好出现一次") {
-		t.Fatalf("纠错请求未明确完整 targetId 约束: %#v", secondMessages[len(firstMessages)])
+	if secondMessages[len(firstMessages)].Parts[0].Text != string(invalidContent) {
+		t.Fatalf("纠错请求非法输出不匹配: %#v", secondMessages[len(firstMessages)])
+	}
+	correction := secondMessages[len(firstMessages)+1]
+	if !messageContains(correction, "$.columns[0].semanticType is outside enum") ||
+		!messageContains(correction, "每个 ID 恰好出现一次") {
+		t.Fatalf("纠错请求未携带精确校验原因和完整 targetId 约束: %#v", correction)
 	}
 }
 
@@ -212,6 +235,112 @@ func TestOrchestratedProviderReturnsInvalidOutputWhenRepairIsStillInvalid(t *tes
 	}
 	if len(invoker.invocations) != 2 {
 		t.Fatalf("调用次数=%d, want 2", len(invoker.invocations))
+	}
+}
+
+func TestOrchestratedProviderReturnsOnlyValidTargetsFromPartialRepair(t *testing.T) {
+	input, output := validCompletion()
+	invalid := output
+	invalid.Columns = append([]SuggestionValue(nil), output.Columns...)
+	invalid.Columns[1].TargetID = invalid.Columns[0].TargetID
+	invalidContent, err := json.Marshal(invalid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial := output
+	partial.Columns = append([]SuggestionValue(nil), output.Columns[:1]...)
+	partialContent, err := json.Marshal(partial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoker := &providerInvoker{
+		configured: true,
+		results: []aiplatform.InvocationResult{
+			{ProviderResult: aiplatform.ProviderResult{Content: invalidContent}},
+			{ProviderResult: aiplatform.ProviderResult{Content: partialContent}},
+		},
+	}
+
+	result, err := NewOrchestratedProvider(invoker).Complete(
+		context.Background(), "tenant-1", "actor-1", input,
+	)
+	var partialErr *PartialOutputError
+	if !errors.As(err, &partialErr) || partialErr.MissingTargets != 1 {
+		t.Fatalf("error=%v, want one missing target", err)
+	}
+	if result.Output.Table == nil || len(result.Output.Columns) != 1 ||
+		result.Output.Columns[0].TargetID != input.Columns[0].ID {
+		t.Fatalf("partial result=%#v", result.Output)
+	}
+}
+
+func TestPartialCompletionMergesValidPropertiesThenTargetsOnlyWhatRemains(t *testing.T) {
+	input := CompletionInput{
+		SchemaVersion: SchemaVersion,
+		TargetTable:   false,
+		Columns: []Target{{
+			ID:                 "column-1",
+			Kind:               "COLUMN",
+			CanonicalType:      "TEXT",
+			CurrentSensitivity: "INTERNAL",
+		}},
+	}
+	firstContent := json.RawMessage(`{
+		"schemaVersion":"1.1",
+		"columns":[{
+			"targetId":"column-1",
+			"businessName":"客户类型",
+			"businessDescription":"用于区分客户所属业务分类",
+			"tags":null,
+			"sensitivityLevel":"INTERNAL",
+			"semanticType":"CATEGORY",
+			"confidence":0.93
+		}]
+	}`)
+	first, missing, ok := decodePartialCompletion(input, firstContent)
+	if !ok || missing != 1 || len(first.Columns) != 1 {
+		t.Fatalf("first partial ok=%v missing=%d output=%#v", ok, missing, first)
+	}
+	if first.Columns[0].Complete ||
+		first.Columns[0].BusinessName != "客户类型" ||
+		first.Columns[0].BusinessDescription == "" ||
+		first.Columns[0].SemanticType != "CATEGORY" {
+		t.Fatalf("first merged value=%#v", first.Columns[0])
+	}
+
+	input.Columns[0].CurrentBusinessName = first.Columns[0].BusinessName
+	input.Columns[0].CurrentDescription = first.Columns[0].BusinessDescription
+	input.Columns[0].CurrentSensitivity = first.Columns[0].SensitivityLevel
+	input.Columns[0].CurrentSemanticType = first.Columns[0].SemanticType
+	input.Columns[0].MissingFields = completionMissingFields(
+		input, input.Columns[0], suggestionFromTarget(input.Columns[0]), true,
+	)
+	if len(input.Columns[0].MissingFields) != 1 ||
+		input.Columns[0].MissingFields[0] != "tags" {
+		t.Fatalf("remaining fields=%#v", input.Columns[0].MissingFields)
+	}
+	secondContent := json.RawMessage(`{
+		"schemaVersion":"1.1",
+		"columns":[{
+			"targetId":"column-1",
+			"businessName":"",
+			"businessDescription":"",
+			"tags":["作用:维度表"],
+			"sensitivityLevel":"",
+			"semanticType":"",
+			"confidence":0.95
+		}]
+	}`)
+	second, missing, ok := decodePartialCompletion(input, secondContent)
+	if !ok || missing != 0 || len(second.Columns) != 1 ||
+		!second.Columns[0].Complete {
+		t.Fatalf("second partial ok=%v missing=%d output=%#v", ok, missing, second)
+	}
+	if second.Columns[0].BusinessName != "客户类型" ||
+		second.Columns[0].BusinessDescription == "" ||
+		second.Columns[0].SemanticType != "CATEGORY" ||
+		len(second.Columns[0].Tags) != 1 {
+		t.Fatalf("confirmed fields were not preserved: %#v", second.Columns[0])
 	}
 }
 
@@ -275,7 +404,7 @@ func TestOrchestratedProviderDoesNotRepairTransportFailures(t *testing.T) {
 	}
 }
 
-func TestOrchestratedProviderReturnsRepairTransportFailureWithoutThirdAttempt(t *testing.T) {
+func TestOrchestratedProviderPreservesSafePartialOutputWhenRepairTransportFails(t *testing.T) {
 	input, output := validCompletion()
 	output.Columns[1].TargetID = output.Columns[0].TargetID
 	invalidContent, err := json.Marshal(output)
@@ -294,12 +423,13 @@ func TestOrchestratedProviderReturnsRepairTransportFailureWithoutThirdAttempt(t 
 		errs: []error{nil, upstreamErr},
 	}
 
-	_, err = NewOrchestratedProvider(invoker).Complete(context.Background(), "tenant-1", "actor-1", input)
-	if !errors.Is(err, upstreamErr) {
-		t.Fatalf("error=%v, want 第二次调用错误 %v", err, upstreamErr)
+	result, err := NewOrchestratedProvider(invoker).Complete(context.Background(), "tenant-1", "actor-1", input)
+	var partial *PartialOutputError
+	if !errors.As(err, &partial) || partial.MissingTargets != 2 {
+		t.Fatalf("error=%v, want 缺少 2 个目标的部分输出", err)
 	}
-	if errors.Is(err, ErrInvalidOutput) {
-		t.Fatalf("第二次网络错误被首次校验错误污染: %v", err)
+	if result.Output.Table == nil || len(result.Output.Columns) != 0 {
+		t.Fatalf("safe partial output=%#v", result.Output)
 	}
 	if len(invoker.invocations) != 2 {
 		t.Fatalf("调用次数=%d, want 2", len(invoker.invocations))

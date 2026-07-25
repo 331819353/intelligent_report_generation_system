@@ -75,6 +75,7 @@ Oracle 的非敏感连接选项放在 `config` 中：
 - `POST /api/v1/data-sources/{id}/publish-requests/{requestId}/withdraw`：申请人撤销审核中的申请。
 - `POST /api/v1/data-sources/{id}/publish-requests/{requestId}/approve`：需要 `DATA_SOURCE:PUBLISH`；审批通过并在同一事务中切换发布指针。
 - `POST /api/v1/data-sources/{id}/publish-requests/{requestId}/reject`：需要 `DATA_SOURCE:PUBLISH`；必须填写驳回原因。
+- 具备 `DATA_SOURCE:PUBLISH` 权限的管理员可以审核自己提交的申请；审批人身份与结果仍完整写入不可变审核记录。
 - `POST /api/v1/data-sources/{id}/sync`：同步元数据摘要。
 - `GET /api/v1/data-sources/{id}/tables/discovery`：只读取源库中当前可见的表清单，不创建资产。
 - `POST /api/v1/data-sources/{id}/tables/import`：把用户选择的表提交为后台采样与完善任务，返回 `202 Accepted`。
@@ -83,7 +84,10 @@ Oracle 的非敏感连接选项放在 `config` 中：
 - `GET /api/v1/data-sources/{id}/metadata-jobs/latest-active`：恢复该数据源最近的活动任务；无任务时返回 `{"job":null}`。
 - `POST /api/v1/data-sources/{id}/enable`：恢复已暂停数据源。
 - `POST /api/v1/data-sources/{id}/disable`：暂停运行中数据源。
-- `DELETE /api/v1/data-sources/{id}`：逻辑删除。
+- `DELETE /api/v1/data-sources/{id}`：逻辑删除。删除事务会锁定数据源并检查未删除数据集的
+  `originTableId` 和活动数据集版本中的 `TABLE` 依赖；存在任一引用时返回
+  `409 DATA_SOURCE_DATASET_REFERENCED`，数据源状态保持不变。数据集保存会对来源数据源
+  加共享锁并要求其仍为 `ACTIVE`，因此不能在删除检查后并发补入新引用。
 
 连接测试入队响应示例：
 
@@ -179,17 +183,19 @@ PostgreSQL 事务中提交。
 
 租户策略 `ai_tenant_policies.metadata_sample_mode` 是能力上限，按 `DENY < MASK < RAW` 排序；产品默认使用 `MASK`，即读取最多 10 行并在应用进程内完成格式脱敏后再发送给 LLM。请求不能超过租户策略上限。`MASK/RAW` 还会把当前操作者和策略版本冻结到任务中，响应返回 `sampleDataMode` 与 `samplePolicyVersion`。worker 在任务开始、读取源表前以及调用 LLM 前重新验证授权；管理员撤权、策略版本变化或授权人失效时以 `SAMPLE_POLICY_CHANGED` 失败关闭，样本不会继续发送。样本值、脱敏结果和授权正文均不落任务、元数据或审计表。
 
-刷新单表结构复用同一后台流程；配置中心只展示当前技术结构已经完成元数据完善的活动资产，旧结构的成功记录不会让未完善的新结构提前进入清单。整表映射完成时会在同一租户事务内确保其默认单表数据集存在，拓扑仅为“数据节点 → 结束节点”；数据集创建失败会连同本次映射完成标记一起回滚，避免产生不可预览的半成品。
+刷新单表结构复用同一后台流程；配置中心始终展示已经保存的活动物理表结构，并单独标记业务元数据完善状态。LLM 输出不再采用“整表全有或全无”：本地可信边界先按目标及属性发现 `businessName`、`businessDescription`、`tags`、`sensitivityLevel`、`semanticType` 中的缺口，逐属性保留安全结果并与 PostgreSQL 当前值合并；只有目标完整且结果已经应用时才推进当前结构 marker。下一轮重新读取 PostgreSQL，只发送尚未完成的表/字段，并通过 `missingFields` 要求模型只生成仍缺属性、原样保留已确认值。初始调用之外最多执行三轮增量重试，每轮仍遵守最多五张表并发且整轮完成后才重试的屏障。
+
+整表映射完成时会在同一租户事务内确保其默认单表数据集存在并执行受控系统发布，拓扑仅为“数据节点 → 结束节点”。若三轮增量重试后仍有缺失，系统使用物理字段和已应用的 LLM 结果创建 `DRAFT / ODS` 降级草稿，不移动发布指针；用户可立即进入数据集中心修改，也可在失败明细或表资产操作中进入“手工完善”。系统只自动刷新从未被人工保存、回滚或提交审批的降级草稿，不覆盖用户修改；系统草稿被增量刷新后仍可依据精确草稿修订、哈希、零审批和零发布历史事实安全升级为首个发布版本。
 
 刷新请求体为 `{"mode":"INCREMENTAL","sampleDataMode":"MASK"}` 或 `{"mode":"FULL","sampleDataMode":"DENY"}`，`mode` 缺省为增量，Web 产品层 `sampleDataMode` 缺省为 `MASK`；服务端兼容调用未显式传值时仍按 `DENY` 失败关闭。两种模式都只处理 PostgreSQL 中已纳管且未删除的表，不会自动导入源库中的其他表，也不会复活用户已经删除的资产。
 
-`INCREMENTAL` 是字段级增量刷新。worker 先同步当前技术结构，再逐字段比较已落库的结构版本：仅新增字段、结构发生变化的字段，以及此前尚未成功完善的字段会进入 LLM 请求；只有任务冻结的 `sampleDataMode` 为 `MASK` 或 `RAW` 时，这些字段才会同时进入最多 10 行的数据采样流程。未变化字段不采样、不调用 LLM，也不会被本次模型结果覆盖，其业务名称、说明、标签、语义类型、敏感级别、人工锁定状态和版本保持原值。只有表级技术信息本身发生变化时，才重新完善表级业务信息。字段从源表中消失时保留历史记录并标记为 `INACTIVE`，不调用 LLM；只有 Connector 返回表数量一致、时间水位和快照哈希有效且业务键无重复的权威完整快照时，源表缺失才会停用 PostgreSQL 中对应的表资产及其字段；更晚的同结构同步会阻止旧任务停用资产。所有删除均不物理清除历史数据。
+`INCREMENTAL` 是字段级增量刷新。worker 先同步当前技术结构，再逐字段比较已落库的结构版本：仅新增字段、结构发生变化的字段，以及此前尚未成功完善的字段会进入 LLM 请求；同一批任务的后续重试还会排除前一轮已经成功保存的目标。只有任务冻结的 `sampleDataMode` 为 `MASK` 或 `RAW` 时，这些字段才会同时进入最多 10 行的数据采样流程。未变化字段不采样、不调用 LLM，也不会被本次模型结果覆盖，其业务名称、说明、标签、语义类型、敏感级别、人工锁定状态和版本保持原值。只有表级技术信息本身发生变化时，才重新完善表级业务信息。字段从源表中消失时保留历史记录并标记为 `INACTIVE`，不调用 LLM；只有 Connector 返回表数量一致、时间水位和快照哈希有效且业务键无重复的权威完整快照时，源表缺失才会停用 PostgreSQL 中对应的表资产及其字段；更晚的同结构同步会阻止旧任务停用资产。所有删除均不物理清除历史数据。
 
 `FULL` 会对目标范围内的全部活动表和活动字段执行完整 LLM 完善，不使用字段级未变化跳过规则；只有任务明确选择 `MASK/RAW` 时才采样。无论哪种模式，任务都会把模型结果合并到本次明确处理的目标范围，不能用局部响应覆盖其他已落库字段。
 
 任务状态可取 `QUEUED`、`RUNNING`、`SUCCEEDED`、`PARTIAL` 或 `FAILED`。查询响应返回 `total`、`completed`、`succeeded`、`skipped`、`failed`、`stage` 和 `currentTable`；存在失败项时还会返回可选的 `failures`，逐项包含库/Schema、表名、稳定错误码和安全文案。`completed` 是成功、跳过和失败之和，页面进度条使用 `completed / total`，不按时间伪造进度。单表失败不会阻断后续表，响应和审计不包含样本数据、连接器原始错误或模型正文。worker 使用租户 RLS 事务、数据库租约和独立心跳领取任务；AI 成功与任务项及结构哈希绑定，租约恢复可直接收口已提交结果，API 或页面关闭不会中止任务。
 
-数据源的修改、测试、暂停/恢复和删除操作管理连接本身；表资产的修改、字段映射、刷新、停用/恢复和删除操作管理 PostgreSQL 中的资产记录，两组生命周期相互独立。字段映射只允许修改业务名称、说明、标签、语义类型、敏感级别和人工锁定，不改写源库物理字段名或技术类型。
+数据源的修改、测试、暂停/恢复和删除操作管理连接本身；表资产的修改、字段映射、刷新、停用/恢复和删除操作管理 PostgreSQL 中的资产记录，两组生命周期相互独立。字段映射只允许修改业务名称、说明、标签、语义类型、敏感级别和人工锁定，不改写源库物理字段名或技术类型。`POST /api/v1/assets/tables/{id}/manual-completion` 使用 `expectedVersion + expectedStructureHash` 做乐观校验，要求表和全部活动字段的业务名称、说明、标签完整且字段语义类型已设置；成功后锁定人工结果、推进当前结构 marker，并创建或刷新对应 ODS 数据集。
 
 Python Connector 按数据源维护有界连接池，并同时执行每租户查询并发上限和服务进程
 全局上限。Go 核心从租户配额表下发单源连接数和租户并发限制，但不会向 Python 服务

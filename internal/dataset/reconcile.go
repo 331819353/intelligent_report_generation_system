@@ -36,11 +36,19 @@ func (s *PostgresStore) ReconcileMappedDatasets(ctx context.Context) (int, error
 		for _, candidate := range candidates {
 			changed := false
 			err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-				var err error
-				changed, err = s.ensureMappedDatasetTx(ctx, tx, tenantID, candidate.actorID, candidate.tableID, false)
+				draftChanged, err := s.ensureMappedDatasetDraftTx(
+					ctx, tx, tenantID, candidate.actorID, candidate.tableID,
+				)
+				if err != nil {
+					return fmt.Errorf("ensure mapped dataset draft for table %s: %w", candidate.tableID, err)
+				}
+				publishChanged, err := s.ensureMappedDatasetTx(
+					ctx, tx, tenantID, candidate.actorID, candidate.tableID, false,
+				)
 				if err != nil {
 					return fmt.Errorf("ensure mapped dataset for table %s: %w", candidate.tableID, err)
 				}
+				changed = draftChanged || publishChanged
 				return nil
 			})
 			if err != nil {
@@ -108,16 +116,9 @@ func listMappedDatasetCandidates(ctx context.Context, tx pgx.Tx) ([]mappedDatase
 		WHERE t.asset_status='ACTIVE'
 		  AND source.status='ACTIVE' AND source.deleted_at IS NULL
 		  AND t.management_status='ENABLED'
-		  AND t.last_enriched_structure_hash<>''
-		  AND t.last_enriched_structure_hash=t.structure_hash
 		  AND EXISTS (
 			SELECT 1 FROM platform.metadata_columns c
 			WHERE c.tenant_id=t.tenant_id AND c.table_id=t.id AND c.asset_status='ACTIVE'
-		  )
-		  AND NOT EXISTS (
-			SELECT 1 FROM platform.metadata_columns c
-			WHERE c.tenant_id=t.tenant_id AND c.table_id=t.id AND c.asset_status='ACTIVE'
-			  AND (c.last_enriched_structure_hash='' OR c.last_enriched_structure_hash<>c.structure_hash)
 		  )
 		ORDER BY t.id`)
 	if err != nil {

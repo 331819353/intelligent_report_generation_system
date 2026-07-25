@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { StrictMode } from 'react'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
@@ -25,7 +25,7 @@ afterEach(() => {
 
 const summary = (overrides: Partial<DatasetSummary> = {}): DatasetSummary => ({
   id: 'dataset-1', code: 'orders_detail', name: '订单明细', description: '订单业务明细数据', type: 'SINGLE_SOURCE',
-  status: 'PUBLISHED', version: 4, dslHash: 'a'.repeat(64), currentPublishedVersionId: 'version-1', updatedAt: '2026-07-17T01:00:00Z', ...overrides,
+  layer: 'ODS', tags: ['交易事实', '经营分析'], status: 'PUBLISHED', version: 4, dslHash: 'a'.repeat(64), currentPublishedVersionId: 'version-1', updatedAt: '2026-07-17T01:00:00Z', ...overrides,
 })
 const table: AssetTable = { id: 'table-1', dataSourceId: 'source-1', dataSourceName: '销售业务库', dataSourceType: 'MYSQL', tableName: 'orders', schemaName: 'sales', businessName: '订单表', columnCount: 2 }
 const customerTable: AssetTable = { id: 'table-2', dataSourceId: 'source-2', dataSourceName: '客户业务库', dataSourceType: 'ORACLE', tableName: 'customers', schemaName: 'crm', businessName: '客户表', columnCount: 2 }
@@ -125,8 +125,8 @@ async function addRelationBox(dialog: HTMLElement, user: ReturnType<typeof userE
 
 test('展示全部数据集并支持组合筛选', async () => {
   vi.spyOn(datasetAPI, 'list').mockResolvedValue(page([
-    summary(),
-    summary({ id: 'dataset-2', code: 'customer_summary', name: '客户汇总', type: 'CROSS_SOURCE', status: 'DRAFT' }),
+    summary({ originDataSourceName: '销售业务库' }),
+    summary({ id: 'dataset-2', code: 'customer_summary', name: '客户汇总', type: 'CROSS_SOURCE', layer: 'DWS', status: 'DRAFT', originDataSourceName: '客户业务库' }),
   ]))
   const user = userEvent.setup()
   renderPage()
@@ -137,9 +137,65 @@ test('展示全部数据集并支持组合筛选', async () => {
   expect(screen.getByRole('heading', { level: 3, name: '客户汇总' })).toBeInTheDocument()
   expect(screen.queryByRole('heading', { level: 3, name: '订单明细' })).not.toBeInTheDocument()
   await user.clear(screen.getByLabelText('搜索数据集'))
-  await user.selectOptions(screen.getByLabelText('按数据集类型筛选'), 'CROSS_SOURCE')
+  expect(within(screen.getByLabelText('按数据源筛选')).getByRole('option', { name: '销售业务库' })).toBeInTheDocument()
+  expect(within(screen.getByLabelText('按数据源筛选')).getByRole('option', { name: '客户业务库' })).toBeInTheDocument()
+  await user.selectOptions(screen.getByLabelText('按数据源筛选'), '客户业务库')
+  await user.selectOptions(screen.getByLabelText('按数据层级筛选'), 'DWS')
+  expect(screen.getByRole('heading', { level: 3, name: '客户汇总' })).toBeInTheDocument()
+  expect(screen.queryByRole('heading', { level: 3, name: '订单明细' })).not.toBeInTheDocument()
   await user.selectOptions(screen.getByLabelText('按数据集状态筛选'), 'PUBLISHED')
   expect(screen.getByText('没有符合条件的数据集')).toBeInTheDocument()
+})
+
+test('数据集支持多选后批量提交发布、停用下架和删除', async () => {
+  const items = [
+    summary(),
+    summary({ id: 'dataset-2', code: 'customer_detail', name: '客户明细', version: 7 }),
+  ]
+  vi.spyOn(datasetAPI, 'list').mockResolvedValue(page(items))
+  vi.spyOn(datasetAPI, 'get').mockImplementation(async id => record({
+    id,
+    code: id === 'dataset-1' ? 'orders_detail' : 'customer_detail',
+    name: id === 'dataset-1' ? '订单明细' : '客户明细',
+    version: id === 'dataset-1' ? 4 : 7,
+    draftVersionId: `draft-${id}`,
+  }))
+  const publish = vi.spyOn(datasetAPI, 'requestPublication').mockImplementation(async id => publicationRequest({
+    id: `request-${id}`, datasetId: id, draftVersionId: `draft-${id}`,
+  }))
+  const disable = vi.spyOn(datasetAPI, 'disable').mockImplementation(async id => record({ id, status: 'DISABLED' }))
+  const remove = vi.spyOn(datasetAPI, 'delete').mockResolvedValue(undefined)
+  const user = userEvent.setup()
+  renderPage()
+
+  await screen.findByRole('list', { name: '数据集资产清单' })
+  const selectBoth = async () => {
+    await user.click(screen.getByLabelText('选择数据集 订单明细'))
+    await user.click(screen.getByLabelText('选择数据集 客户明细'))
+    expect(screen.getByText('已选择 2 个')).toBeInTheDocument()
+  }
+
+  await selectBoth()
+  await user.click(screen.getByRole('button', { name: '批量提交发布' }))
+  const publishDialog = screen.getByRole('dialog', { name: '批量提交发布审批' })
+  expect(within(publishDialog).getByText(/不会绕过审批直接上线/)).toBeInTheDocument()
+  await user.click(within(publishDialog).getByRole('button', { name: '确认执行' }))
+  await waitFor(() => expect(publish).toHaveBeenCalledTimes(2))
+  expect(screen.getByText(/批量提交发布审批完成，共处理 2 个数据集/)).toBeInTheDocument()
+
+  await selectBoth()
+  await user.click(screen.getByRole('button', { name: '批量停用（下架）' }))
+  const disableDialog = screen.getByRole('dialog', { name: '批量停用（下架）' })
+  expect(within(disableDialog).getByText(/停用即从可查询目录下架/)).toBeInTheDocument()
+  await user.click(within(disableDialog).getByRole('button', { name: '确认执行' }))
+  await waitFor(() => expect(disable).toHaveBeenCalledTimes(2))
+
+  await selectBoth()
+  await user.click(screen.getByRole('button', { name: '批量删除' }))
+  const deleteDialog = screen.getByRole('dialog', { name: '批量删除数据集' })
+  expect(within(deleteDialog).getByText(/被占用的数据集会保留/)).toBeInTheDocument()
+  await user.click(within(deleteDialog).getByRole('button', { name: '确认执行' }))
+  await waitFor(() => expect(remove).toHaveBeenCalledTimes(2))
 })
 
 test('同名数据集按独立 ID 全部展示并标明来源数据源', async () => {
@@ -154,20 +210,44 @@ test('同名数据集按独立 ID 全部展示并标明来源数据源', async (
   expect(screen.getByText('销售文件 · mapped_file')).toBeInTheDocument()
 })
 
-test('映射表默认数据集在目录和详情中展示来源标识', async () => {
+test('ODS 数据集在目录展示层级与标签，详情展示完整 LLM 元数据', async () => {
   vi.spyOn(datasetAPI, 'list').mockResolvedValue(page([summary({ originTableId: table.id })]))
-  vi.spyOn(datasetAPI, 'get').mockResolvedValue(record({ originTableId: table.id }))
+  vi.spyOn(datasetAPI, 'get').mockResolvedValue(record({
+    originTableId: table.id,
+    dsl: {
+      ...record().dsl,
+      fields: [{
+        id: 'field_order_id', code: 'order_id', name: '订单编号', description: '订单唯一编号',
+        role: 'DIMENSION', canonicalType: 'STRING', semanticType: 'IDENTIFIER', nullable: false,
+        visible: true, expression: { type: 'FIELD_REF', nodeId: 'node_1', field: 'order_id' },
+      }],
+    },
+  }))
+  vi.spyOn(datasetAPI, 'table').mockResolvedValue({
+    ...table, catalogName: 'sales', businessDescription: '订单交易明细', tags: ['经营分析'],
+    sensitivityLevel: 'INTERNAL', visibility: 'PRIVATE', enrichmentStatus: 'SUCCEEDED',
+  })
+  vi.spyOn(datasetAPI, 'allColumns').mockResolvedValue({
+    items: [{ ...columns[0], businessDescription: '订单唯一编号', tags: ['主键', '关联字段'], sensitivityLevel: 'INTERNAL', nativeType: 'varchar(64)', ordinalPosition: 1 }],
+  })
   vi.spyOn(datasetAPI, 'preview').mockResolvedValue({ queryId: 'query-1', columns: ['order_id'], rows: [['O001']], rowCount: 1, durationMs: 5 })
   const user = userEvent.setup()
   renderPage()
 
   await screen.findByRole('heading', { level: 3, name: '订单明细' })
   const card = cardFor('订单明细')
-  expect(await within(card).findByText('映射表数据集')).toHaveAttribute('title', '由已完成映射的数据资产自动创建')
-  await user.click(within(card).getByRole('button', { name: '查看' }))
+  expect(await within(card).findByText('ODS')).toBeInTheDocument()
+  expect(within(card).getByText('交易事实')).toBeInTheDocument()
+  expect(within(card).queryByText('映射表数据集')).not.toBeInTheDocument()
+  expect(within(card).queryByRole('button', { name: '查看' })).not.toBeInTheDocument()
+  await user.click(within(card).getByRole('button', { name: '打开数据集 订单明细' }))
 
   const detailDialog = await screen.findByRole('dialog', { name: '数据集详情' })
-  expect(await within(detailDialog).findByText('映射表数据集')).toBeInTheDocument()
+  expect(await within(detailDialog).findByRole('region', { name: 'LLM 生成的完整元数据' })).toBeInTheDocument()
+  expect(within(detailDialog).getByText('sales.sales.orders')).toBeInTheDocument()
+  expect(within(detailDialog).getByText('订单唯一编号')).toBeInTheDocument()
+  expect(within(detailDialog).getByText('关联字段')).toBeInTheDocument()
+  expect(within(detailDialog).queryByText('映射表数据集')).not.toBeInTheDocument()
 })
 
 test('新建弹窗通过拖拽或点选增加多表节点，确认关系后再要求名称与说明', async () => {
@@ -1424,7 +1504,7 @@ test('后端判定发布版本源草稿快照歧义时展示错误且保持发�
   expect(within(publishedVersionList).getAllByRole('button')).toHaveLength(1)
 })
 
-test('可查看、停用、恢复并二次确认删除数据集', async () => {
+test('可点击条目查看、停用、恢复并二次确认删除数据集', async () => {
   vi.spyOn(datasetAPI, 'list')
     .mockResolvedValueOnce(page([summary()]))
     .mockResolvedValueOnce(page([summary({ status: 'DISABLED', version: 5, currentPublishedVersionId: undefined })]))
@@ -1440,19 +1520,19 @@ test('可查看、停用、恢复并二次确认删除数据集', async () => {
   renderPage()
 
   await screen.findByText('订单明细')
-  await user.click(within(cardFor('订单明细')).getByRole('button', { name: '查看' }))
+  await user.click(within(cardFor('订单明细')).getByRole('button', { name: '打开数据集 订单明细' }))
   const detailDialog = await screen.findByRole('dialog', { name: '数据集详情' })
   expect(detailDialog).toHaveTextContent('订单业务明细数据')
   expect(preview).toHaveBeenCalledWith('dataset-1', expect.any(String), {}, 5)
-  expect(within(detailDialog).getAllByRole('row')).toHaveLength(6)
+  expect(within(within(detailDialog).getByRole('region', { name: '预览数据' })).getAllByRole('row')).toHaveLength(6)
   expect(within(detailDialog).queryByText('A006')).not.toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: '关闭' }))
-  await user.click(within(cardFor('订单明细')).getByRole('button', { name: '停用' }))
-  const disableDialog = screen.getByRole('dialog', { name: '停用数据集' })
+  await user.click(within(cardFor('订单明细')).getByRole('button', { name: '停用（下架）' }))
+  const disableDialog = screen.getByRole('dialog', { name: '停用（下架）数据集' })
   await user.click(within(disableDialog).getByRole('button', { name: '确认停用' }))
   expect(disable).toHaveBeenCalledWith('dataset-1', 4)
   expect(await within(cardFor('订单明细')).findByText('已停用')).toBeInTheDocument()
-  expect(within(cardFor('订单明细')).queryByRole('button', { name: '停用' })).not.toBeInTheDocument()
+  expect(within(cardFor('订单明细')).queryByRole('button', { name: '停用（下架）' })).not.toBeInTheDocument()
   await user.click(within(cardFor('订单明细')).getByRole('button', { name: '恢复' }))
   const restoreDialog = screen.getByRole('dialog', { name: '恢复数据集' })
   expect(restoreDialog).toHaveTextContent('优先恢复到停用前')
@@ -1488,7 +1568,7 @@ test('发布按钮冻结当前草稿，审批通过后才生成精确发布版�
   await user.click(within(cardFor('订单明细')).getByRole('button', { name: '发布' }))
   const dialog = await screen.findByRole('dialog', { name: '订单明细 · 发布审批' })
   await user.type(within(dialog).getByLabelText('申请说明（选填）'), pending.requestNote)
-  await user.click(within(dialog).getByRole('button', { name: '提交审批并后台生成候选' }))
+  await user.click(within(dialog).getByRole('button', { name: '提交发布审批' }))
 
   expect(submit).toHaveBeenCalledWith('dataset-1', {
     draftVersionId: 'draft-1', expectedVersion: 4, expectedDraftRecordVersion: 2,
@@ -1496,11 +1576,11 @@ test('发布按钮冻结当前草稿，审批通过后才生成精确发布版�
   }, pending.requestNote)
   expect(await within(dialog).findByText('当前精确草稿已经在审批中，无需重复提交。')).toBeInTheDocument()
   await user.type(within(dialog).getByLabelText('审批意见'), '校验通过')
-  await user.click(within(dialog).getByRole('button', { name: '审批通过并发布' }))
+  await user.click(within(dialog).getByRole('button', { name: '审批通过并启动加工' }))
 
   expect(approve).toHaveBeenCalledWith('dataset-1', pending.id, pending.version, '校验通过')
   expect(await within(dialog).findByText('当前精确草稿已审批发布。再次修改并保存后可提交新的审批。')).toBeInTheDocument()
-  expect(within(dialog).getByText(/候选正在进入资产管理中心/)).toBeInTheDocument()
+  expect(within(dialog).getByText(/后台加工已启动/)).toBeInTheDocument()
   expect(within(dialog).getByText('published-version-2')).toBeInTheDocument()
 })
 
@@ -2068,8 +2148,8 @@ test('指标新建数据集提案预填 AI 目标，保存后保留返回信息�
   await user.click(within(metadataDialog).getByRole('button', { name: '创建数据集' }))
 
   const publicationDialog = await screen.findByRole('dialog', { name: `${saved.name} · 发布审批` })
-  expect(within(publicationDialog).getByRole('button', { name: '提交审批并后台生成候选' })).toBeEnabled()
-  expect(JSON.parse(screen.getByLabelText('数据集流程路由').textContent || '{}')).toEqual({ pathname: '/datasets', state: routeState })
+  expect(within(publicationDialog).getByRole('button', { name: '提交发布审批' })).toBeEnabled()
+  await waitFor(() => expect(JSON.parse(screen.getByLabelText('数据集流程路由').textContent || '{}')).toEqual({ pathname: '/datasets', state: routeState }))
 })
 
 test('修改数据集加载完成前禁用 AI，完成后携带当前 DAG 调用对象级提案接口', async () => {

@@ -15,6 +15,7 @@ import (
 	"intelligent-report-generation-system/internal/asset"
 	"intelligent-report-generation-system/internal/assetembedding"
 	"intelligent-report-generation-system/internal/auth"
+	"intelligent-report-generation-system/internal/backgroundtask"
 	"intelligent-report-generation-system/internal/config"
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasetai"
@@ -126,6 +127,9 @@ func main() {
 	materializationStore := materialization.NewPostgresStoreWithWarehouse(pool, warehousePool)
 	datasetStore.SetPublicationCommitSink(metricCandidateStore)
 	datasetStore.SetMappedPublicationCommitSink(materializationStore)
+	datasetStore.SetGovernedPublicationCommitSink(materializationStore)
+	datasetStore.SetMaterializationDeletionSink(materializationStore)
+	assetRepository.SetManualCompletionSink(datasetStore)
 	metadataAIStore := metadataai.NewPostgresStore(pool)
 	metadataAIStore.SetEnrichmentCommitSink(datasetStore)
 	reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -141,6 +145,7 @@ func main() {
 	metadataAIProvider := metadataai.NewOrchestratedProvider(aiService)
 	metadataAIService := metadataai.NewService(metadataAIStore, metadataAIProvider, cfg.AIRequestTimeout, cfg.AIConfidenceThreshold)
 	dataSourceService.SetTableCompleter(metadataAIService)
+	dataSourceService.SetMappedDatasetDraftEnsurer(datasetStore)
 	dataSourceHandler := datasource.NewHandler(authService, accessService, dataSourceService, credentialManager)
 	dataSourcePublicationApprovalService := datasource.NewPublicationApprovalService(dataSourceRepo, dataSourceService)
 	dataSourcePublicationApprovalHandler := datasource.NewPublicationApprovalHandler(
@@ -152,7 +157,8 @@ func main() {
 		&http.Client{Timeout: cfg.AIEmbeddingTimeout},
 	)
 	assetEmbeddingStore := assetembedding.NewPostgresStore(pool)
-	datasetAIService := datasetai.NewService(assetRepository, aiService, datasetai.ServiceOptions{
+	datasetAICatalog := datasetai.NewVersionAwareAssetCatalog(pool, assetRepository)
+	datasetAIService := datasetai.NewService(datasetAICatalog, aiService, datasetai.ServiceOptions{
 		Timeout: cfg.AIRequestTimeout, MaxProviderInputBytes: cfg.AIMaxInputBytes,
 		Retriever:     assetembedding.NewRetriever(assetEmbeddingStore, embeddingProvider),
 		RetrievalMode: cfg.DatasetAIRetrievalMode,
@@ -201,6 +207,11 @@ func main() {
 	)
 	reportService := report.NewService(report.NewPostgresStore(pool))
 	reportHandler := report.NewHandler(authService, accessService, reportService)
+	backgroundTaskHandler := backgroundtask.NewHandler(
+		authService,
+		accessService,
+		backgroundtask.NewService(backgroundtask.NewPostgresStore(pool)),
+	)
 	api := http.NewServeMux()
 	api.Handle("/api/v1/auth/", auth.NewHandler(authService))
 	api.Handle("POST /api/v1/permissions/evaluate", auth.RequireAccessToken(authService, access.EvaluateHandler(accessService)))
@@ -209,6 +220,8 @@ func main() {
 	api.Handle("/api/v1/users/", accessAdminHandler)
 	api.Handle("/api/v1/object-permissions", accessAdminHandler)
 	api.Handle("/api/v1/object-permissions/", accessAdminHandler)
+	api.Handle("/api/v1/background-tasks", backgroundTaskHandler)
+	api.Handle("/api/v1/background-tasks/", backgroundTaskHandler)
 	// Exact review routes take precedence over the general data-source subtree. The legacy
 	// /publish path now submits a review request instead of switching the runtime pointer.
 	api.Handle("POST /api/v1/data-sources/{id}/publish", dataSourcePublicationApprovalHandler)

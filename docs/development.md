@@ -102,13 +102,46 @@ export AI_CONFIDENCE_THRESHOLD="0.8"
 
 上述超时用于本地 `deepseek-v3` 验收；应按实际 Provider 延迟调整，并始终保持 `2 × AI_REQUEST_TIMEOUT < API_WRITE_TIMEOUT`。批量加工仍应使用持久化异步任务，不能通过无限放大同步 HTTP 超时替代。未设置 `AI_API_KEY` 时，元数据补全和数据集 DAG 提案等 AI 接口明确降级为不可用，非 AI 功能继续运行。元数据 AI API、数据集 API、结构化输出约束和审计字段分别见 `docs/api-metadata-ai.md`、`docs/api-datasets.md` 和 `docs/ai-orchestration.md`。
 
-## 启动 API
+## 一键启动本地服务
+
+推荐使用持久化开发服务入口。它会启动并等待双 PostgreSQL、Redis、MinIO、
+Connector、API、通用 Worker、连接测试 Worker 和 Web，自动执行数据库迁移及应用
+镜像构建。所有服务均由 Docker Compose 托管并使用 `restart: unless-stopped`，不依赖
+当前终端会话存活：
+
+```bash
+make dev-up
+make dev-status
+```
+
+访问地址：
+
+- Web：`http://127.0.0.1:5173`
+- API：`http://127.0.0.1:8080`
+- Connector：`http://127.0.0.1:8090`
+
+维护命令：
+
+```bash
+make dev-restart
+make dev-logs
+make dev-stop
+```
+
+`dev-stop` 只停止 API、两个 Worker 和 Web，不删除数据，也不停止基础设施容器；
+需要停止全部容器时另行执行 `make infra-down`。重复执行 `make dev-up` 是幂等的，
+Compose 会复用健康容器，并只重建发生变化的应用镜像。
+
+## 单独启动 API
 
 ```bash
 make run-api
 ```
 
-当前配置直接从进程环境变量读取；本地 `run-api`、`run-worker` 和 `seed-dev` 目标先加载示例默认值，再由忽略提交的 `.env` 覆盖模型密钥和 Provider 专属超时。生产环境不使用这些本地目标，应由密钥系统或容器编排注入变量。
+单独调试时可使用前台命令。当前配置直接从进程环境变量读取；本地 `run-api`、
+`run-worker`、`dev-up` 和 `seed-dev` 目标先加载示例默认值，再由忽略提交的 `.env`
+覆盖模型密钥和 Provider 专属超时。生产环境不使用这些本地目标，应由密钥系统或
+容器编排注入变量。
 
 API 默认监听 `:8080`：
 
@@ -117,7 +150,7 @@ curl http://localhost:8080/health/live
 curl http://localhost:8080/health/ready
 ```
 
-## 启动 Worker
+## 单独启动 Worker
 
 ```bash
 make run-worker

@@ -327,6 +327,7 @@ type Record struct {
 	Description               string          `json:"description"`
 	Type                      string          `json:"type"`
 	Layer                     Layer           `json:"layer"`
+	Tags                      []string        `json:"tags"`
 	Status                    string          `json:"status"`
 	Version                   int64           `json:"version"`
 	DraftVersionID            string          `json:"draftVersionId"`
@@ -344,20 +345,21 @@ type Record struct {
 
 // Summary 是数据集目录使用的轻量摘要，不返回完整 DSL。
 type Summary struct {
-	ID                        string `json:"id"`
-	OriginTableID             string `json:"originTableId,omitempty"`
-	OriginTableName           string `json:"originTableName,omitempty"`
-	OriginDataSourceName      string `json:"originDataSourceName,omitempty"`
-	Code                      string `json:"code"`
-	Name                      string `json:"name"`
-	Description               string `json:"description"`
-	Type                      string `json:"type"`
-	Layer                     Layer  `json:"layer"`
-	Status                    string `json:"status"`
-	Version                   int64  `json:"version"`
-	DSLHash                   string `json:"dslHash"`
-	CurrentPublishedVersionID string `json:"currentPublishedVersionId,omitempty"`
-	UpdatedAt                 string `json:"updatedAt"`
+	ID                        string   `json:"id"`
+	OriginTableID             string   `json:"originTableId,omitempty"`
+	OriginTableName           string   `json:"originTableName,omitempty"`
+	OriginDataSourceName      string   `json:"originDataSourceName,omitempty"`
+	Code                      string   `json:"code"`
+	Name                      string   `json:"name"`
+	Description               string   `json:"description"`
+	Type                      string   `json:"type"`
+	Layer                     Layer    `json:"layer"`
+	Tags                      []string `json:"tags"`
+	Status                    string   `json:"status"`
+	Version                   int64    `json:"version"`
+	DSLHash                   string   `json:"dslHash"`
+	CurrentPublishedVersionID string   `json:"currentPublishedVersionId,omitempty"`
+	UpdatedAt                 string   `json:"updatedAt"`
 }
 
 // VersionRecord 是按精确版本 ID 加载的不可变发布快照。

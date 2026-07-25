@@ -7,11 +7,13 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"intelligent-report-generation-system/internal/semanticquality"
 )
 
 const (
 	SchemaVersion          = "1.1"
-	PromptVersion          = "metadata-completion-v8"
+	PromptVersion          = "metadata-completion-v9"
 	SourceFormatCSV        = "CSV"
 	SourceFormatExcel      = "EXCEL"
 	SourceFormatDatabase   = "DATABASE"
@@ -25,6 +27,18 @@ var (
 	ErrInvalidOutput       = errors.New("AI metadata output is invalid")
 	ErrInvalidDecision     = errors.New("metadata AI decision is invalid")
 )
+
+// PartialOutputError 表示模型返回中至少有一个可信目标可保存，但没有覆盖当前
+// 请求的全部目标。上层保存有效部分后会只针对剩余目标继续重试。
+type PartialOutputError struct {
+	MissingTargets int
+}
+
+func (e *PartialOutputError) Error() string {
+	return fmt.Sprintf("%v: %d target(s) still require completion", ErrInvalidOutput, e.MissingTargets)
+}
+
+func (e *PartialOutputError) Unwrap() error { return ErrInvalidOutput }
 
 type Target struct {
 	ID                  string          `json:"id"`
@@ -53,9 +67,12 @@ type Target struct {
 	CurrentTags         []string        `json:"currentTags"`
 	CurrentSemanticType string          `json:"currentSemanticType,omitempty"`
 	CurrentSensitivity  string          `json:"currentSensitivity"`
+	MissingFields       []string        `json:"missingFields,omitempty"`
 	ManualLocked        bool            `json:"manualLocked"`
 	BusinessVersion     int64           `json:"-"`
 	StructureHash       string          `json:"-"`
+	NeedsCompletion     bool            `json:"-"`
+	CompletionTracked   bool            `json:"-"`
 }
 
 type CompletionInput struct {
@@ -78,6 +95,9 @@ type SuggestionValue struct {
 	SensitivityLevel    string   `json:"sensitivityLevel"`
 	SemanticType        string   `json:"semanticType,omitempty"`
 	Confidence          float64  `json:"confidence"`
+	// Complete 与 ProvidedFields 只在本地增量合并链路中使用，不进入模型合同或审计快照。
+	Complete       bool     `json:"-"`
+	ProvidedFields []string `json:"-"`
 }
 
 type CompletionOutput struct {
@@ -174,13 +194,14 @@ func ValidateOutput(input CompletionInput, output CompletionOutput) error {
 	} else if output.Table != nil {
 		return invalid("table suggestion was not requested")
 	}
-	expected := make(map[string]bool, len(input.Columns))
+	expected := make(map[string]Target, len(input.Columns))
 	for _, column := range input.Columns {
-		expected[column.ID] = true
+		expected[column.ID] = column
 	}
 	seen := make(map[string]bool, len(output.Columns))
 	for i, column := range output.Columns {
-		if !expected[column.TargetID] {
+		target, exists := expected[column.TargetID]
+		if !exists {
 			return invalid("columns[%d] references an unknown targetId", i)
 		}
 		if seen[column.TargetID] {
@@ -189,6 +210,13 @@ func ValidateOutput(input CompletionInput, output CompletionOutput) error {
 		seen[column.TargetID] = true
 		if err := validateValue(column, true, isFileSourceFormat(input.SourceFormat)); err != nil {
 			return fmt.Errorf("%w: columns[%d]: %v", ErrInvalidOutput, i, err)
+		}
+		if strings.TrimSpace(target.CanonicalType) != "" &&
+			!semanticquality.Compatible(target.CanonicalType, column.SemanticType) {
+			return invalid(
+				"columns[%d] semanticType %q is incompatible with canonicalType %q",
+				i, column.SemanticType, target.CanonicalType,
+			)
 		}
 	}
 	if len(seen) != len(expected) {
@@ -222,6 +250,9 @@ func validateValue(value SuggestionValue, column, fileColumn bool) error {
 	}
 	if value.Tags == nil {
 		return errors.New("tags is required and must be an array")
+	}
+	if len(value.Tags) == 0 {
+		return errors.New("tags must contain at least one controlled tag")
 	}
 	seen := map[string]bool{}
 	for _, tag := range value.Tags {

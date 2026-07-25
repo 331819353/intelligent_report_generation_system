@@ -39,6 +39,7 @@ type sourceTableSnapshot struct {
 
 var _ ControlStore = (*PostgresStore)(nil)
 var _ dataset.MappedPublicationCommitSink = (*PostgresStore)(nil)
+var _ dataset.GovernedPublicationCommitSink = (*PostgresStore)(nil)
 
 // RegisterCurrent loads the target and every upstream under one tenant-scoped
 // transaction, derives an immutable plan and inserts the run, input snapshots,
@@ -95,6 +96,30 @@ func (store *PostgresStore) EnqueueMappedDatasetMaterializationTx(
 		return err
 	}
 	if !mapped {
+		return ErrInvalidRequest
+	}
+	_, _, err := store.registerCurrentTx(
+		ctx, tx, tenantID, actorID, version.DatasetID, version.ID,
+		RegisterCurrentRequest{Mode: RunModeFull, MaxAttempts: 3},
+		true,
+	)
+	return err
+}
+
+// EnqueueGovernedDatasetMaterializationTx freezes the exact DWD/DWS version
+// approved in the caller's transaction and registers its PostgreSQL build.
+// The worker performs all physical computation after the approval commits.
+func (store *PostgresStore) EnqueueGovernedDatasetMaterializationTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, actorID string,
+	version dataset.VersionRecord,
+) error {
+	if store == nil || tx == nil ||
+		!validUUID(tenantID) || !validUUID(actorID) ||
+		!validUUID(version.DatasetID) || !validUUID(version.ID) ||
+		version.Status != "PUBLISHED" ||
+		(version.Layer != dataset.LayerDWD && version.Layer != dataset.LayerDWS) {
 		return ErrInvalidRequest
 	}
 	_, _, err := store.registerCurrentTx(

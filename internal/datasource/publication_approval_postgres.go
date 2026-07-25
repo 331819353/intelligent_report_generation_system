@@ -216,7 +216,7 @@ func (r *PostgresRepository) RejectPublicationRequest(
 			status='REJECTED',version=version+1,reviewer_user_id=$1,
 			review_note=$2,reviewed_at=now(),updated_at=now()
 			WHERE id::text=$3 AND data_source_id::text=$4
-			  AND status='PENDING' AND version=$5 AND requester_user_id<>$1`,
+			  AND status='PENDING' AND version=$5`,
 			actorID, input.Reason, requestID, sourceID, input.ExpectedVersion)
 		if err != nil {
 			return err
@@ -246,12 +246,11 @@ func (r *PostgresRepository) ApproveAndPublish(
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
 		var status ReviewStatus
 		var version int64
-		var requesterID, configVersionID, configHash string
-		if err := tx.QueryRow(ctx, `SELECT status,version,requester_user_id::text,
-			data_source_version_id::text,config_hash
+		var configVersionID, configHash string
+		if err := tx.QueryRow(ctx, `SELECT status,version,data_source_version_id::text,config_hash
 			FROM platform.data_source_publication_requests
 			WHERE id::text=$1 AND data_source_id::text=$2 FOR UPDATE`, requestID, sourceID).
-			Scan(&status, &version, &requesterID, &configVersionID, &configHash); errors.Is(err, pgx.ErrNoRows) {
+			Scan(&status, &version, &configVersionID, &configHash); errors.Is(err, pgx.ErrNoRows) {
 			return ErrReviewRequestNotFound
 		} else if err != nil {
 			return err
@@ -261,9 +260,6 @@ func (r *PostgresRepository) ApproveAndPublish(
 		}
 		if version != input.ExpectedVersion {
 			return ErrReviewRequestConflict
-		}
-		if requesterID == actorID {
-			return ErrReviewSelfApproval
 		}
 		var currentVersionID, currentHash string
 		if err := tx.QueryRow(ctx, `SELECT source.current_draft_version_id::text,version.config_hash

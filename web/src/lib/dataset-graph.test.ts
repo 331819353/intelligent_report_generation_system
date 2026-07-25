@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   generatedGraphFieldIdentity,
+  expandSystemDWDDesignerGraph,
   graphContains,
   graphConnectionError,
   graphLeaves,
@@ -70,6 +71,98 @@ const emptyDSL = (designer: DesignerGraphV1): DatasetDSL => ({
   nodes: [],
   fields: [],
   designer,
+})
+
+it('按依赖阶段合并 DWD 多字段规则且不限制组件数量和类型', () => {
+  const source = node('fact', '事实表', [
+    column('table_fact', 'name_a', '名称 A'),
+    column('table_fact', 'name_b', '名称 B'),
+    column('table_fact', 'amount', '金额', 'DECIMAL'),
+    column('table_fact', 'tax', '税额', 'DECIMAL'),
+    column('table_fact', 'event_date', '业务日期', 'DATE'),
+  ])
+  const fieldOptions: FieldOption[] = [
+    {
+      key: 'fact.name_a', role: 'ATTRIBUTE', aggregation: '', finalOutput: true,
+      code: 'name_a', name: '名称 A', canonicalType: 'STRING',
+      persistedExpression: {
+        type: 'LOWER',
+        argument: {
+          type: 'UPPER',
+          argument: { type: 'TRIM', argument: { type: 'FIELD_REF', nodeId: 'fact', field: 'name_a' } },
+        },
+      },
+    },
+    {
+      key: 'fact.name_b', role: 'ATTRIBUTE', aggregation: '', finalOutput: true,
+      code: 'name_b', name: '名称 B', canonicalType: 'STRING',
+      persistedExpression: {
+        type: 'UPPER',
+        argument: { type: 'TRIM', argument: { type: 'FIELD_REF', nodeId: 'fact', field: 'name_b' } },
+      },
+    },
+    {
+      key: 'fact.amount', role: 'MEASURE', aggregation: '', finalOutput: true,
+      code: 'amount', name: '金额', canonicalType: 'DECIMAL',
+      persistedExpression: {
+        type: 'ABS',
+        argument: {
+          type: 'ROUND',
+          arguments: [
+            {
+              type: 'ADD',
+              arguments: [
+                { type: 'FIELD_REF', nodeId: 'fact', field: 'amount' },
+                { type: 'FIELD_REF', nodeId: 'fact', field: 'tax' },
+              ],
+            },
+            { type: 'LITERAL', value: 2 },
+          ],
+        },
+      },
+    },
+    {
+      key: 'fact.event_date', role: 'TIME', aggregation: '', finalOutput: true,
+      code: 'event_month', name: '业务月份', canonicalType: 'STRING',
+      persistedExpression: {
+        type: 'DATE_FORMAT', unit: 'MONTH',
+        argument: {
+          type: 'DATE_TRUNC', unit: 'MONTH',
+          argument: { type: 'FIELD_REF', nodeId: 'fact', field: 'event_date' },
+        },
+      },
+    },
+  ]
+  const graph = expandSystemDWDDesignerGraph({
+    version: '1.0',
+    nodePositions: { fact: { x: 42, y: 48 } },
+    nodeNames: { fact: 'fact' },
+    joins: [],
+    groups: [],
+    transforms: [],
+    end: {
+      id: 'end_1', name: '最终输出', input: { kind: 'NODE', id: 'fact' },
+      position: { x: 342, y: 48 },
+      outputs: fieldOptions.map(field => ({
+        key: field.key, name: field.name || '', code: field.code || '',
+      })),
+    },
+  }, [source], fieldOptions)
+
+  const transforms = graph.transforms ?? []
+  expect(transforms.length).toBeGreaterThan(3)
+  expect(transforms.map(transform => transform.name)).toEqual(
+    transforms.map((_, index) => `c${index + 1}`),
+  )
+  const rules = transforms.flatMap(transform => transform.rules)
+  expect(rules.filter(rule => rule.operation === 'TRIM')).toHaveLength(2)
+  expect(rules.filter(rule => rule.operation === 'UPPER')).toHaveLength(2)
+  expect(new Set(rules.map(rule => rule.operation))).toEqual(new Set([
+    'TRIM', 'UPPER', 'LOWER', 'ADD', 'ROUND', 'ABS', 'DATE_TRUNC', 'DATE_FORMAT',
+  ]))
+  expect(graph.end?.input).toEqual({
+    kind: 'TRANSFORM', id: transforms.at(-1)?.id,
+  })
 })
 
 describe('dataset graph', () => {

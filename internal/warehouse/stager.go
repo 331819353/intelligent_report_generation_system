@@ -390,12 +390,34 @@ func normalizeStageValue(value any, canonicalType string) (any, error) {
 			return nil, errors.New("expected boolean")
 		}
 	case "DATE":
+		// Oracle DATE 由驱动返回 datetime，Connector 因而会输出
+		// `YYYY-MM-DDTHH:mm:ss`；业务合同声明为 DATE 时只保留原始日历日期，
+		// 不做时区换算。
+		if text, ok := value.(string); ok {
+			parsed, err := parseStageDate(text)
+			if err != nil {
+				return nil, err
+			}
+			value = parsed
+		}
 		var date pgtype.Date
 		if err := date.Scan(value); err != nil || !date.Valid || date.InfinityModifier != pgtype.Finite {
 			return nil, errors.New("expected finite date")
 		}
 		return date, nil
 	case "DATETIME", "TIMESTAMP":
+		// Connector 对 MySQL DATETIME 和 Oracle TIMESTAMP 统一使用 Python
+		// isoformat()，因此实际值通常包含 `T`，并可能带小数秒或时区。
+		// pgtype.Timestamp.Scan 只覆盖 PostgreSQL 自己接受的文本形态；先把
+		// ISO-8601 文本解析成 time.Time，避免含时间字段的 ODS 在 COPY 前
+		// 被误判为类型漂移。
+		if text, ok := value.(string); ok {
+			parsed, err := parseStageTimestamp(text)
+			if err != nil {
+				return nil, err
+			}
+			value = parsed
+		}
 		var timestamp pgtype.Timestamp
 		if err := timestamp.Scan(value); err != nil || !timestamp.Valid || timestamp.InfinityModifier != pgtype.Finite {
 			return nil, errors.New("expected finite timestamp")
@@ -413,6 +435,34 @@ func normalizeStageValue(value any, canonicalType string) (any, error) {
 	default:
 		return nil, errors.New("unsupported canonical type")
 	}
+}
+
+func parseStageDate(value string) (time.Time, error) {
+	if parsed, err := time.Parse("2006-01-02", value); err == nil {
+		return parsed, nil
+	}
+	parsed, err := parseStageTimestamp(value)
+	if err != nil {
+		return time.Time{}, errors.New("expected finite date")
+	}
+	year, month, day := parsed.Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC), nil
+}
+
+func parseStageTimestamp(value string) (time.Time, error) {
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		"2006-01-02T15:04:05.999999999",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+	} {
+		parsed, err := time.Parse(layout, value)
+		if err == nil {
+			return parsed, nil
+		}
+	}
+	return time.Time{}, errors.New("expected finite timestamp")
 }
 
 func numericText(value any) (string, error) {

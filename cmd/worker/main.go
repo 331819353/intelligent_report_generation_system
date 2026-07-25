@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -108,6 +109,8 @@ func main() {
 	materializationStore := materialization.NewPostgresStoreWithWarehouse(pool, warehousePool)
 	datasetStore.SetPublicationCommitSink(metricCandidateStore)
 	datasetStore.SetMappedPublicationCommitSink(materializationStore)
+	datasetStore.SetGovernedPublicationCommitSink(materializationStore)
+	datasetStore.SetMaterializationDeletionSink(materializationStore)
 	metadataAIStore := metadataai.NewPostgresStore(pool)
 	metadataAIStore.SetEnrichmentCommitSink(datasetStore)
 	reconcileCtx, reconcileCancel := context.WithTimeout(ctx, 30*time.Second)
@@ -122,6 +125,7 @@ func main() {
 	}
 	metadataAIService := metadataai.NewService(metadataAIStore, metadataai.NewOrchestratedProvider(aiService), cfg.AIRequestTimeout, cfg.AIConfidenceThreshold)
 	dataSourceService.SetTableCompleter(metadataAIService)
+	dataSourceService.SetMappedDatasetDraftEnsurer(datasetStore)
 
 	workerID := uuid.NewString()
 	logger.Info("worker starting", "worker_id", workerID, "poll_interval", cfg.WorkerPollInterval.String(), "environment", cfg.Environment)
@@ -134,10 +138,6 @@ func main() {
 	go runMetricEmbeddingWorker(ctx, logger, metricsemantic.NewWorker(metricsemantic.NewPostgresStore(pool), embeddingProvider), workerID, cfg.WorkerPollInterval)
 	go runSemanticCatalogWorker(ctx, logger, semanticcatalog.NewWorker(
 		semanticcatalog.NewPostgresStore(pool), embeddingProvider,
-	), workerID, cfg.WorkerPollInterval)
-	go runPublicationPreparationWorker(ctx, logger, metriccandidate.NewPublicationPreparationWorker(
-		metricCandidateStore,
-		metriccandidate.NewPublicationGenerator(metriccandidate.NewEnricher(aiService, cfg.AIRequestTimeout, metricCandidateStore)),
 	), workerID, cfg.WorkerPollInterval)
 	go runMaterializationWorker(ctx, logger, materializationworker.NewWorker(
 		materializationStore,
@@ -158,6 +158,9 @@ func main() {
 		),
 		warehouse.NewExecutor(warehousePool),
 	), workerID, cfg.WorkerPollInterval)
+	go runDatasetMaterializationCleanupWorker(
+		ctx, logger, materializationStore, workerID, cfg.WorkerPollInterval,
+	)
 	go runDimensionMemberRefreshWorker(ctx, logger, semanticmanagement.NewDimensionRefreshWorker(
 		semanticmanagement.NewPostgresStoreWithWarehouse(pool, warehousePool),
 	), workerID, cfg.WorkerPollInterval)
@@ -167,6 +170,10 @@ func main() {
 	go runDatasetTagSuggestionWorker(ctx, logger, datasettagsuggestion.NewWorker(
 		datasettagsuggestion.NewPostgresStore(pool),
 		datasettagsuggestion.NewGenerator(aiService, cfg.AIRequestTimeout),
+	), workerID, cfg.WorkerPollInterval)
+	go runDWDModelingWorker(ctx, logger, dataset.NewDWDModelingWorker(
+		datasetStore,
+		dataset.NewOrchestratedDWDModelingPlanner(aiService, cfg.AIRequestTimeout),
 	), workerID, cfg.WorkerPollInterval)
 	runMetricExtractionWorker(ctx, logger, metriccandidate.NewWorker(
 		metricCandidateStore, metriccandidate.NewEnricher(aiService, cfg.AIRequestTimeout, metricCandidateStore),
@@ -253,6 +260,64 @@ func runDatasetTagSuggestionWorker(
 					logger.Error(
 						"process dataset tag suggestion",
 						"tenant_id", tenantID,
+						"error", runErr,
+					)
+				}
+				if didProcess {
+					processed = true
+				}
+			}
+		}
+		if processed {
+			timer.Reset(10 * time.Millisecond)
+		} else {
+			timer.Reset(pollInterval)
+		}
+	}
+}
+
+func runDWDModelingWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	worker *dataset.DWDModelingWorker,
+	workerID string,
+	pollInterval time.Duration,
+) {
+	// A claim includes an initial LLM design plus at most one directed repair.
+	// Twelve minutes leaves headroom over two configured five-minute calls while
+	// still allowing a crashed worker's ownership to expire.
+	const lease = 12 * time.Minute
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		processed := false
+		tenantIDs, err := worker.TenantIDs(ctx)
+		if err != nil {
+			logger.Error("list DWD modeling tenants", "error", err)
+		} else {
+			for _, tenantID := range tenantIDs {
+				didProcess, runErr := worker.ProcessNext(
+					ctx, tenantID, workerID, lease,
+				)
+				if runErr != nil {
+					var providerError *aiplatform.ProviderError
+					errors.As(runErr, &providerError)
+					providerStatus := 0
+					providerCode := ""
+					if providerError != nil {
+						providerStatus = providerError.StatusCode
+						providerCode = string(providerError.Code)
+					}
+					logger.Error(
+						"process LLM DWD modeling",
+						"tenant_id", tenantID,
+						"provider_status", providerStatus,
+						"provider_code", providerCode,
 						"error", runErr,
 					)
 				}
@@ -357,6 +422,51 @@ func runMaterializationWorker(
 	}
 }
 
+func runDatasetMaterializationCleanupWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	store *materialization.PostgresStore,
+	workerID string,
+	pollInterval time.Duration,
+) {
+	const lease = 2 * time.Minute
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		processed := false
+		tenantIDs, err := store.ListTenantIDs(ctx)
+		if err != nil {
+			logger.Error("list materialization cleanup tenants", "error", err)
+		} else {
+			for _, tenantID := range tenantIDs {
+				didProcess, runErr := store.ProcessNextDatasetMaterializationCleanup(
+					ctx, tenantID, workerID, lease,
+				)
+				if runErr != nil {
+					logger.Error(
+						"cleanup dataset warehouse materializations",
+						"tenant_id", tenantID,
+						"error", runErr,
+					)
+				}
+				if didProcess {
+					processed = true
+				}
+			}
+		}
+		if processed {
+			timer.Reset(10 * time.Millisecond)
+		} else {
+			timer.Reset(pollInterval)
+		}
+	}
+}
+
 func runSemanticCatalogWorker(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -393,45 +503,6 @@ func runSemanticCatalogWorker(
 			}
 		}
 		if processed > 0 {
-			timer.Reset(10 * time.Millisecond)
-		} else {
-			timer.Reset(pollInterval)
-		}
-	}
-}
-
-func runPublicationPreparationWorker(
-	ctx context.Context,
-	logger *slog.Logger,
-	worker *metriccandidate.PublicationPreparationWorker,
-	workerID string,
-	pollInterval time.Duration,
-) {
-	const lease = 5 * time.Minute
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-		processed := false
-		tenantIDs, err := worker.TenantIDs(ctx)
-		if err != nil {
-			logger.Error("list publication metric preparation tenants", "error", err)
-		} else {
-			for _, tenantID := range tenantIDs {
-				didProcess, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
-				if runErr != nil {
-					logger.Error("prepare publication metric candidates", "tenant_id", tenantID, "error", runErr)
-				}
-				if didProcess {
-					processed = true
-				}
-			}
-		}
-		if processed {
 			timer.Reset(10 * time.Millisecond)
 		} else {
 			timer.Reset(pollInterval)

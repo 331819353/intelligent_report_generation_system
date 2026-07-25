@@ -18,6 +18,7 @@ import (
 // 实现方不得自行提交或回滚 tx。
 type EnrichmentCommitSink interface {
 	EnsureMappedDatasetTx(ctx context.Context, tx pgx.Tx, tenantID, actorID, tableID string) error
+	EnsureMappedDatasetDraftTx(ctx context.Context, tx pgx.Tx, tenantID, actorID, tableID string) error
 }
 
 type PostgresStore struct {
@@ -41,6 +42,15 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 	return s.enrichmentCommitSink.EnsureMappedDatasetTx(ctx, tx, tenantID, actorID, tableID)
 }
 
+func (s *PostgresStore) ensureMappedDatasetDraftTx(ctx context.Context, tx pgx.Tx, tenantID, actorID, tableID string) error {
+	if s.enrichmentCommitSink == nil {
+		return nil
+	}
+	return s.enrichmentCommitSink.EnsureMappedDatasetDraftTx(
+		ctx, tx, tenantID, actorID, tableID,
+	)
+}
+
 // LoadInput 加载目标表及字段的技术元数据、业务版本和人工锁定状态。
 func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string) (input CompletionInput, err error) {
 	input.SchemaVersion = SchemaVersion
@@ -49,6 +59,7 @@ func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string)
 		var sourceType, sourceFilename string
 		err := tx.QueryRow(ctx, `SELECT t.id::text,t.structure_hash,t.catalog_name,t.schema_name,t.table_name,t.table_type,t.source_comment,
 			t.primary_key_columns,t.constraints_json,t.indexes_json,t.business_name,t.business_description,t.tags,t.sensitivity_level::text,t.manual_locked,t.business_version,
+			t.last_enriched_table_structure_hash<>t.table_structure_hash,
 			d.source_type::text,COALESCE(f.filename,'')
 			FROM platform.metadata_tables t
 			JOIN platform.data_sources d ON d.id=t.data_source_id AND d.tenant_id=t.tenant_id
@@ -56,7 +67,8 @@ func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string)
 			WHERE t.id=$1 AND t.asset_status='ACTIVE'`, tableID).
 			Scan(&input.Table.ID, &input.StructureHash, &input.Table.CatalogName, &input.Table.SchemaName, &input.Table.Name, &input.Table.TableType,
 				&input.Table.SourceComment, &primaryKeys, &constraints, &indexes, &input.Table.CurrentBusinessName, &input.Table.CurrentDescription,
-				&input.Table.CurrentTags, &input.Table.CurrentSensitivity, &input.Table.ManualLocked, &input.Table.BusinessVersion, &sourceType, &sourceFilename)
+				&input.Table.CurrentTags, &input.Table.CurrentSensitivity, &input.Table.ManualLocked, &input.Table.BusinessVersion,
+				&input.Table.NeedsCompletion, &sourceType, &sourceFilename)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -66,6 +78,10 @@ func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string)
 		input.SourceFormat = metadataSourceFormat(sourceType, sourceFilename)
 		input.Table.Kind = "TABLE"
 		input.Table.StructureHash = input.StructureHash
+		input.Table.CompletionTracked = true
+		input.Table.MissingFields = completionMissingFields(
+			input, input.Table, suggestionFromTarget(input.Table), false,
+		)
 		if err := json.Unmarshal(primaryKeys, &input.Table.PrimaryKeyColumns); err != nil {
 			return err
 		}
@@ -74,6 +90,7 @@ func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string)
 		rows, err := tx.Query(ctx, `SELECT id::text,column_name,ordinal_position,source_comment,native_type,canonical_type,
 			length,numeric_precision,numeric_scale,nullable,default_value,is_primary_key,is_foreign_key,is_unique,
 			business_name,business_description,tags,semantic_type,sensitivity_level::text,manual_locked,business_version,structure_hash
+			,last_enriched_structure_hash<>structure_hash
 			FROM platform.metadata_columns WHERE table_id=$1 AND asset_status='ACTIVE' ORDER BY ordinal_position,id`, tableID)
 		if err != nil {
 			return err
@@ -86,9 +103,13 @@ func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string)
 			if err := rows.Scan(&target.ID, &target.Name, &target.OrdinalPosition, &target.SourceComment, &target.NativeType, &target.CanonicalType,
 				&target.Length, &target.NumericPrecision, &target.NumericScale, &target.Nullable, &target.DefaultValue, &target.PrimaryKey, &target.ForeignKey, &target.Unique,
 				&target.CurrentBusinessName, &target.CurrentDescription, &target.CurrentTags, &target.CurrentSemanticType, &target.CurrentSensitivity,
-				&target.ManualLocked, &target.BusinessVersion, &target.StructureHash); err != nil {
+				&target.ManualLocked, &target.BusinessVersion, &target.StructureHash, &target.NeedsCompletion); err != nil {
 				return err
 			}
+			target.CompletionTracked = true
+			target.MissingFields = completionMissingFields(
+				input, target, suggestionFromTarget(target), true,
+			)
 			input.Columns = append(input.Columns, target)
 		}
 		return rows.Err()
@@ -286,6 +307,280 @@ func (s *PostgresStore) SaveResult(ctx context.Context, tenantID, actorID string
 	return job, suggestions, err
 }
 
+// SavePartialResult 保存结构化输出中能够独立通过校验的目标，并只推进这些目标
+// 的 scoped marker。整表完成 marker 与自动发布保持不动；下一次重试会据此只
+// 请求尚未完成的目标，同时创建或刷新一个可人工编辑的 ODS 草稿。
+func (s *PostgresStore) SavePartialResult(
+	ctx context.Context,
+	tenantID, actorID string,
+	job Job,
+	input CompletionInput,
+	result ProviderResult,
+	threshold float64,
+) (Job, []Suggestion, error) {
+	if err := validatePartialOutput(input, result.Output); err != nil {
+		return job, nil, err
+	}
+	parsed, err := json.Marshal(result.Output)
+	if err != nil {
+		return job, nil, err
+	}
+	suggestions := []Suggestion{}
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		if job.ProcessingItemID != "" {
+			var valid bool
+			err := tx.QueryRow(ctx, `SELECT true FROM platform.data_source_metadata_job_items i
+				JOIN platform.data_source_metadata_jobs j ON j.id=i.job_id AND j.tenant_id=i.tenant_id
+				WHERE i.id=$1 AND i.status='RUNNING' AND j.status='RUNNING'
+				AND j.lease_owner=$2 AND j.lease_expires_at>now()
+				FOR UPDATE OF i,j`, job.ProcessingItemID, job.ProcessingWorkerID).Scan(&valid)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrProcessingLeaseLost
+			}
+			if err != nil {
+				return err
+			}
+		}
+		var currentStructureHash string
+		query := `SELECT t.structure_hash FROM platform.metadata_tables t
+			WHERE t.id=$1 AND t.asset_status='ACTIVE' FOR UPDATE OF t`
+		args := []any{job.TableID}
+		if job.ProcessingItemID != "" {
+			query = `SELECT t.structure_hash FROM platform.metadata_tables t
+				JOIN platform.data_sources d ON d.id=t.data_source_id AND d.tenant_id=t.tenant_id
+				WHERE t.id=$1 AND t.asset_status='ACTIVE' AND d.status='ACTIVE' AND d.deleted_at IS NULL
+				AND ($2::bigint=0 OR d.version=$2) FOR UPDATE OF t,d`
+			args = append(args, job.ProcessingSourceVersion)
+		}
+		if err := tx.QueryRow(ctx, query, args...).Scan(&currentStructureHash); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				if job.ProcessingItemID != "" {
+					return ErrSourceChanged
+				}
+				return ErrStructureChanged
+			}
+			return err
+		}
+		if job.StructureHash == "" || input.StructureHash != job.StructureHash ||
+			currentStructureHash != job.StructureHash {
+			return ErrStructureChanged
+		}
+		byID := make(map[string]Target, len(input.Columns))
+		for _, target := range input.Columns {
+			byID[target.ID] = target
+		}
+		applied, pending := 0, 0
+		completedTargets := 0
+		if result.Output.Table != nil {
+			suggestion, err := s.persistSuggestion(
+				ctx, tx, tenantID, job.ID, input.Table, *result.Output.Table, threshold,
+			)
+			if err != nil {
+				return err
+			}
+			suggestions = append(suggestions, suggestion)
+			if suggestion.Status == "APPLIED" {
+				applied++
+			} else {
+				pending++
+			}
+			if suggestion.Status == "APPLIED" && result.Output.Table.Complete {
+				tag, err := tx.Exec(ctx, `UPDATE platform.metadata_tables
+					SET last_enriched_table_structure_hash=table_structure_hash
+					WHERE id=$1 AND structure_hash=$2 AND asset_status='ACTIVE'`,
+					job.TableID, job.StructureHash)
+				if err != nil {
+					return err
+				}
+				if tag.RowsAffected() != 1 {
+					return ErrStructureChanged
+				}
+				completedTargets++
+			}
+		}
+		columnIDs := make([]string, 0, len(result.Output.Columns))
+		for _, value := range result.Output.Columns {
+			target := byID[value.TargetID]
+			suggestion, err := s.persistSuggestion(
+				ctx, tx, tenantID, job.ID, target, value, threshold,
+			)
+			if err != nil {
+				return err
+			}
+			suggestions = append(suggestions, suggestion)
+			if suggestion.Status == "APPLIED" {
+				applied++
+				if value.Complete {
+					columnIDs = append(columnIDs, value.TargetID)
+					completedTargets++
+				}
+			} else {
+				pending++
+			}
+		}
+		if len(columnIDs) > 0 {
+			tag, err := tx.Exec(ctx, `UPDATE platform.metadata_columns
+				SET last_enriched_structure_hash=structure_hash
+				WHERE table_id=$1 AND id=ANY($2::uuid[]) AND asset_status='ACTIVE'`,
+				job.TableID, columnIDs)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != int64(len(columnIDs)) {
+				return ErrStructureChanged
+			}
+		}
+		if err := s.ensureMappedDatasetDraftTx(
+			ctx, tx, tenantID, actorID, job.TableID,
+		); err != nil {
+			return err
+		}
+		job.Status = "FAILED"
+		job.ErrorCode = "PARTIAL_OUTPUT"
+		if err := tx.QueryRow(ctx, `UPDATE platform.ai_metadata_jobs SET
+			status='FAILED',error_code='PARTIAL_OUTPUT',model_name=$1,model_version=$2,
+			parsed_result=$3,prompt_tokens=$4,completion_tokens=$5,total_tokens=$6,
+			latency_ms=$7,completed_at=now()
+			WHERE id=$8 AND status='RUNNING' RETURNING completed_at::text`,
+			job.Model, job.ModelVersion, parsed, job.PromptTokens,
+			job.CompletionTokens, job.TotalTokens, job.LatencyMS, job.ID,
+		).Scan(&job.CompletedAt); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrConflict
+			}
+			return err
+		}
+		return insertAudit(
+			ctx, tx, tenantID, actorID, "COMPLETE_METADATA_AI_COMPLETION",
+			"AI_METADATA_JOB", job.ID, "FAILURE", map[string]any{
+				"errorCode": "PARTIAL_OUTPUT", "provider": job.Provider,
+				"model": job.Model, "inputHash": job.InputHash,
+				"latencyMs": job.LatencyMS, "tokenUsage": usageMap(job),
+				"applied": applied, "pending": pending,
+				"completedTargets": completedTargets,
+				"requestedTargets": len(input.Columns) + boolCount(input.TargetTable),
+			},
+		)
+	})
+	return job, suggestions, err
+}
+
+func validatePartialOutput(input CompletionInput, output CompletionOutput) error {
+	if output.SchemaVersion != SchemaVersion || output.Columns == nil {
+		return ErrInvalidOutput
+	}
+	count := 0
+	complete := 0
+	if output.Table != nil {
+		if !input.TargetTable || output.Table.TargetID != input.Table.ID {
+			return ErrInvalidOutput
+		}
+		if err := validatePartialSuggestionForTarget(
+			input, input.Table, *output.Table, false,
+		); err != nil {
+			return err
+		}
+		count++
+		if output.Table.Complete {
+			complete++
+		}
+	}
+	expected := make(map[string]Target, len(input.Columns))
+	for _, target := range input.Columns {
+		expected[target.ID] = target
+	}
+	seen := make(map[string]bool, len(output.Columns))
+	for _, value := range output.Columns {
+		target, exists := expected[value.TargetID]
+		if !exists || seen[value.TargetID] {
+			return ErrInvalidOutput
+		}
+		if err := validatePartialSuggestionForTarget(
+			input, target, value, true,
+		); err != nil {
+			return err
+		}
+		seen[value.TargetID] = true
+		count++
+		if value.Complete {
+			complete++
+		}
+	}
+	if count == 0 || complete >= len(input.Columns)+boolCount(input.TargetTable) {
+		return ErrInvalidOutput
+	}
+	return nil
+}
+
+func validatePartialSuggestionForTarget(
+	input CompletionInput,
+	target Target,
+	value SuggestionValue,
+	column bool,
+) error {
+	if value.TargetID != target.ID ||
+		value.Confidence <= 0 || value.Confidence > 1 ||
+		len(value.ProvidedFields) == 0 {
+		return ErrInvalidOutput
+	}
+	for _, field := range value.ProvidedFields {
+		switch field {
+		case "businessName":
+			if err := validateText("businessName", value.BusinessName, 120); err != nil {
+				return err
+			}
+			if column && isFileSourceFormat(input.SourceFormat) &&
+				!csvBusinessNameRegexp.MatchString(value.BusinessName) {
+				return ErrInvalidOutput
+			}
+			if !column && isFileSourceFormat(input.SourceFormat) &&
+				!containsChinese(value.BusinessName) {
+				return ErrInvalidOutput
+			}
+		case "businessDescription":
+			if err := validateText(
+				"businessDescription", value.BusinessDescription, 1000,
+			); err != nil {
+				return err
+			}
+			if column && isFileSourceFormat(input.SourceFormat) &&
+				!containsChinese(value.BusinessDescription) {
+				return ErrInvalidOutput
+			}
+		case "tags":
+			if !validControlledTags(value.Tags) {
+				return ErrInvalidOutput
+			}
+		case "sensitivityLevel":
+			if !allowedSensitivity[value.SensitivityLevel] {
+				return ErrInvalidOutput
+			}
+		case "semanticType":
+			if !column || !allowedSemanticTypes[value.SemanticType] ||
+				(strings.TrimSpace(target.CanonicalType) != "" &&
+					!semanticquality.Compatible(
+						target.CanonicalType, value.SemanticType,
+					)) {
+				return ErrInvalidOutput
+			}
+		default:
+			return ErrInvalidOutput
+		}
+	}
+	complete := len(completionMissingFields(input, target, value, column)) == 0
+	if value.Complete != complete {
+		return ErrInvalidOutput
+	}
+	return nil
+}
+
+func boolCount(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 // persistSuggestion 锁定目标记录，决定自动应用或转人工确认，并保存建议快照。
 func (s *PostgresStore) persistSuggestion(ctx context.Context, tx pgx.Tx, tenantID, jobID string, target Target, value SuggestionValue, threshold float64) (Suggestion, error) {
 	var locked bool
@@ -353,7 +648,8 @@ func suggestionDisposition(locked bool, currentVersion, expectedVersion int64, c
 }
 
 func suggestionDispositionForTarget(target Target, value SuggestionValue, locked bool, currentVersion int64, threshold float64) (string, string) {
-	if target.Kind == "COLUMN" && !semanticquality.Compatible(target.CanonicalType, value.SemanticType) {
+	if target.Kind == "COLUMN" && strings.TrimSpace(value.SemanticType) != "" &&
+		!semanticquality.Compatible(target.CanonicalType, value.SemanticType) {
 		return "PENDING", "SEMANTIC_TYPE_INCOMPATIBLE"
 	}
 	return suggestionDisposition(locked, currentVersion, target.BusinessVersion, value.Confidence, threshold)

@@ -853,7 +853,7 @@ describe('指标配置中心 AI 审核提案', () => {
 
 const dataset: DatasetSummary = {
   id: 'dataset-1', code: 'enterprise_revenue', name: '企业收入数据集', description: '', type: 'SINGLE_SOURCE',
-  status: 'PUBLISHED', version: 4, dslHash: 'a'.repeat(64), currentPublishedVersionId: 'dataset-version-1', updatedAt: '2026-07-16T00:00:00Z',
+  layer: 'DWS', tags: [], status: 'PUBLISHED', version: 4, dslHash: 'a'.repeat(64), currentPublishedVersionId: 'dataset-version-1', updatedAt: '2026-07-16T00:00:00Z',
 }
 
 const datasetDSL: DatasetDSL = {

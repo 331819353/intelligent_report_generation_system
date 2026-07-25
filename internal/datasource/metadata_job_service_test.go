@@ -2,7 +2,10 @@ package datasource
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -19,11 +22,111 @@ type metadataJobRepo struct {
 	heartbeatRelease chan struct{}
 	samplePolicyErr  error
 	policyChecks     int
+	terminalUpdates  chan metadataJobItemUpdate
 }
 
 type countingMetadataJobConnector struct {
 	importConnector
 	sampleCalls int
+}
+
+type classifiedCompletionError struct{ code string }
+
+func (e classifiedCompletionError) Error() string { return e.code }
+func (e classifiedCompletionError) MetadataCompletionFailureCode() string {
+	return e.code
+}
+
+type progressiveCompleter struct {
+	slowStarted chan struct{}
+	slowRelease chan struct{}
+}
+
+type mappedDraftRecorder struct {
+	mu       sync.Mutex
+	tableIDs []string
+	err      error
+}
+
+func (r *mappedDraftRecorder) EnsureMappedDatasetDraft(
+	_ context.Context,
+	_, _, tableID string,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tableIDs = append(r.tableIDs, tableID)
+	return r.err
+}
+
+func (c *progressiveCompleter) CompleteTable(
+	_ context.Context,
+	_, _, tableID string,
+	_ []map[string]any,
+	_ bool,
+	_ []string,
+	_, _, _ string,
+	_ int64,
+) error {
+	if tableID == "table-2" {
+		close(c.slowStarted)
+		<-c.slowRelease
+	}
+	return nil
+}
+
+type roundBarrierCompleter struct {
+	mu                 sync.Mutex
+	attempts           map[string]int
+	active             int
+	maxActive          int
+	initialCompleted   int
+	total              int
+	retryBeforeBarrier bool
+	firstStarted       chan string
+	releaseFirst       chan struct{}
+}
+
+func (c *roundBarrierCompleter) CompleteTable(
+	_ context.Context,
+	_, _, tableID string,
+	_ []map[string]any,
+	_ bool,
+	_ []string,
+	_, _, _ string,
+	_ int64,
+) error {
+	c.mu.Lock()
+	if c.attempts == nil {
+		c.attempts = map[string]int{}
+	}
+	c.attempts[tableID]++
+	attempt := c.attempts[tableID]
+	c.active++
+	if c.active > c.maxActive {
+		c.maxActive = c.active
+	}
+	if attempt > 1 && c.initialCompleted != c.total {
+		c.retryBeforeBarrier = true
+	}
+	c.mu.Unlock()
+
+	if attempt == 1 {
+		c.firstStarted <- tableID
+		<-c.releaseFirst
+	}
+
+	c.mu.Lock()
+	c.active--
+	if attempt == 1 {
+		c.initialCompleted++
+	}
+	c.mu.Unlock()
+
+	// table-1 在初次调用和全部三次重试中均失败；table-2 只在初次调用失败。
+	if tableID == "table-1" || tableID == "table-2" && attempt == 1 {
+		return classifiedCompletionError{code: "TIMEOUT"}
+	}
+	return nil
 }
 
 func (c *countingMetadataJobConnector) Sample(context.Context, Source, MetadataTable, int) (SampleResult, error) {
@@ -88,6 +191,9 @@ func (r *metadataJobRepo) UpdateMetadataJobStage(context.Context, string, string
 }
 func (r *metadataJobRepo) UpdateMetadataJobItem(_ context.Context, _, _, _, _ string, update metadataJobItemUpdate, _ time.Duration) error {
 	r.updates = append(r.updates, update)
+	if r.terminalUpdates != nil && (update.Status == "SUCCEEDED" || update.Status == "SKIPPED" || update.Status == "FAILED") {
+		r.terminalUpdates <- update
+	}
 	return nil
 }
 func (r *metadataJobRepo) FinishMetadataJob(context.Context, string, string, string) (MetadataJob, error) {
@@ -146,6 +252,181 @@ func TestQueueRefreshTablesCanTargetOneManagedTable(t *testing.T) {
 	}
 	if _, err := service.QueueRefreshTables(context.Background(), "tenant-1", "actor-1", "source-1", MetadataRefreshFull, "other-source-table"); err == nil {
 		t.Fatal("foreign or inactive managed table id was accepted")
+	}
+}
+
+func TestMetadataJobUsesFiveConcurrentLLMCallsAndRoundBarrierRetries(t *testing.T) {
+	const tableCount = 7
+	tables := make([]MetadataTable, 0, tableCount)
+	items := make([]metadataJobItem, 0, tableCount)
+	selectedIDs := make(map[string]string, tableCount)
+	for index := 1; index <= tableCount; index++ {
+		name := "table_" + string(rune('a'+index-1))
+		table := MetadataTable{
+			SchemaName: "sales", Name: name,
+			Columns: []MetadataColumn{{Name: "id", CanonicalType: "INTEGER"}},
+		}
+		tables = append(tables, table)
+		items = append(items, metadataJobItem{
+			ID: "item-" + string(rune('0'+index)), SchemaName: "sales",
+			TableName: name, Status: "QUEUED",
+		})
+		selectedIDs[metadataTableKey(table)] = "table-" + string(rune('0'+index))
+	}
+	source := Source{
+		ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive,
+		Config: map[string]any{"host": "db"}, SecretRef: "encrypted://source",
+	}
+	sourceHash, err := metadataJobSourceHash(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseRepo := &repo{
+		source: source, quota: Quota{MaxDataSources: 10}, selectedIDs: selectedIDs,
+	}
+	connector := importConnector{
+		connector: connector{kind: TypeMySQL}, discovered: SyncResult{Tables: tables},
+	}
+	completer := &roundBarrierCompleter{
+		total: tableCount, firstStarted: make(chan string, tableCount),
+		releaseFirst: make(chan struct{}),
+	}
+	jobs := &metadataJobRepo{
+		claim: &metadataJobClaim{MetadataJob: MetadataJob{
+			ID: "job-1", DataSourceID: "source-1", Kind: MetadataJobImport,
+			Mode: MetadataRefreshFull, SampleDataMode: MetadataSampleDeny,
+			SamplePolicyVersion: 1,
+		}, TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash},
+		items: items,
+	}
+	service := NewService(baseRepo, connector)
+	service.SetTableCompleter(completer)
+	drafts := &mappedDraftRecorder{}
+	service.SetMappedDatasetDraftEnsurer(drafts)
+	service.SetMetadataJobRepository(jobs)
+
+	done := make(chan error, 1)
+	go func() {
+		processed, processErr := service.ProcessNextMetadataJob(
+			context.Background(), "tenant-1", "worker-1", time.Hour,
+		)
+		if !processed && processErr == nil {
+			processErr = errors.New("metadata job was not processed")
+		}
+		done <- processErr
+	}()
+
+	for started := 0; started < metadataCompletionConcurrency; started++ {
+		select {
+		case <-completer.firstStarted:
+		case <-time.After(time.Second):
+			t.Fatal("five initial LLM calls did not start concurrently")
+		}
+	}
+	select {
+	case tableID := <-completer.firstStarted:
+		t.Fatalf("LLM concurrency exceeded five; unexpected initial call for %s", tableID)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(completer.releaseFirst)
+	select {
+	case processErr := <-done:
+		if processErr != nil {
+			t.Fatal(processErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("metadata job did not finish")
+	}
+
+	completer.mu.Lock()
+	defer completer.mu.Unlock()
+	if completer.maxActive != metadataCompletionConcurrency {
+		t.Fatalf("max concurrent LLM calls=%d, want %d", completer.maxActive, metadataCompletionConcurrency)
+	}
+	if completer.retryBeforeBarrier {
+		t.Fatal("a retry started before every initial LLM call completed")
+	}
+	if completer.attempts["table-1"] != 4 {
+		t.Fatalf("persistent failure attempts=%d, want initial call plus three retries", completer.attempts["table-1"])
+	}
+	if completer.attempts["table-2"] != 2 {
+		t.Fatalf("transient failure attempts=%d, want one retry", completer.attempts["table-2"])
+	}
+	failed := 0
+	for _, update := range jobs.updates {
+		if update.Status == "FAILED" && update.ErrorCode == "LLM_TIMEOUT" {
+			failed++
+		}
+	}
+	if failed != 1 || !jobs.finished {
+		t.Fatalf("failed terminal updates=%d finished=%v updates=%#v", failed, jobs.finished, jobs.updates)
+	}
+	drafts.mu.Lock()
+	defer drafts.mu.Unlock()
+	if !reflect.DeepEqual(drafts.tableIDs, []string{"table-1"}) {
+		t.Fatalf("incomplete ODS drafts=%v, want persistent failure table", drafts.tableIDs)
+	}
+}
+
+func TestMetadataJobPersistsSuccessfulTableProgressBeforeRoundFinishes(t *testing.T) {
+	source := Source{
+		ID: "source-1", TenantID: "tenant-1", Type: TypeMySQL, Status: StatusActive,
+		Config: map[string]any{"host": "db"}, SecretRef: "encrypted://source",
+	}
+	sourceHash, err := metadataJobSourceHash(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completer := &progressiveCompleter{
+		slowStarted: make(chan struct{}),
+		slowRelease: make(chan struct{}),
+	}
+	jobs := &metadataJobRepo{terminalUpdates: make(chan metadataJobItemUpdate, 2)}
+	service := NewService(&repo{source: source, quota: Quota{MaxDataSources: 10}}, importConnector{connector: connector{kind: TypeMySQL}})
+	service.SetTableCompleter(completer)
+	service.SetMetadataJobRepository(jobs)
+	claim := &metadataJobClaim{
+		MetadataJob: MetadataJob{
+			ID: "job-1", DataSourceID: source.ID, Kind: MetadataJobImport,
+			SampleDataMode: MetadataSampleDeny, SamplePolicyVersion: 1,
+		},
+		TenantID: "tenant-1", RequestedBy: "actor-1", SourceConfigHash: sourceHash,
+	}
+	works := []metadataCompletionWork{
+		{item: metadataJobItem{ID: "item-1", TableName: "fast"}, tableID: "table-1", structureHash: "hash-1", sourceVersion: source.Version},
+		{item: metadataJobItem{ID: "item-2", TableName: "slow"}, tableID: "table-2", structureHash: "hash-2", sourceVersion: source.Version},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- service.completeMetadataWorks(context.Background(), claim, "worker-1", time.Hour, works)
+	}()
+	select {
+	case <-completer.slowStarted:
+	case <-time.After(time.Second):
+		t.Fatal("slow LLM call did not start")
+	}
+	select {
+	case update := <-jobs.terminalUpdates:
+		if update.Status != "SUCCEEDED" || update.TableID != "table-1" {
+			t.Fatalf("first terminal update=%#v, want fast table success", update)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fast table success was not persisted while the slow table was still running")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("round finished before slow LLM release: %v", err)
+	default:
+	}
+	close(completer.slowRelease)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("metadata completion round did not finish")
 	}
 }
 
@@ -266,6 +547,9 @@ func TestIncrementalMetadataJobCompletesOnlyChangedColumnsWithFilteredSamples(t 
 	last := jobs.updates[len(jobs.updates)-1]
 	if last.Status != "SUCCEEDED" || connector.sampleCalls != 1 || len(completer.tableIDs) != 1 {
 		t.Fatalf("last=%#v sampleCalls=%d LLM=%#v", last, connector.sampleCalls, completer.tableIDs)
+	}
+	if len(baseRepo.managedResets) != 1 || baseRepo.managedResets[0] {
+		t.Fatalf("incremental refresh reset all completion markers: %#v", baseRepo.managedResets)
 	}
 	if completer.targetTables[0] || len(completer.targetColumnIDs[0]) != 1 || completer.targetColumnIDs[0][0] != "column-email" {
 		t.Fatalf("targetTable=%v targetColumnIDs=%#v", completer.targetTables[0], completer.targetColumnIDs[0])
@@ -526,6 +810,9 @@ func TestFullMetadataRefreshReprocessesAlreadyEnrichedStructure(t *testing.T) {
 	last := jobs.updates[len(jobs.updates)-1]
 	if last.Status != "SUCCEEDED" || len(baseRepo.managedBatches) != 1 || connector.sampleCalls != 1 || len(completer.tableIDs) != 1 {
 		t.Fatalf("last=%#v managed=%d sampleCalls=%d LLM=%#v", last, len(baseRepo.managedBatches), connector.sampleCalls, completer.tableIDs)
+	}
+	if len(baseRepo.managedResets) != 1 || !baseRepo.managedResets[0] {
+		t.Fatalf("FULL refresh did not reset completion markers: %#v", baseRepo.managedResets)
 	}
 	if !completer.targetTables[0] || completer.targetColumnIDs[0] != nil {
 		t.Fatalf("FULL refresh was narrowed: targetTable=%v targetColumnIDs=%#v", completer.targetTables[0], completer.targetColumnIDs[0])

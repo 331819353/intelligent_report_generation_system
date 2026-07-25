@@ -1246,6 +1246,67 @@ func TestServiceWiresHybridRetrieverIntoCatalogLoading(t *testing.T) {
 	}
 }
 
+func TestDatasetVersionCatalogContextSkipsPhysicalRetrievalAndSearch(t *testing.T) {
+	const tableID = "dataset-version:11111111-1111-4111-8111-111111111111"
+	catalog := &fakeCatalog{
+		tables: []asset.Table{{
+			ID: tableID, DataSourceID: "dataset-layer:ODS",
+			DataSourceName: "ODS 数据集", DataSourceType: "DATASET",
+			SchemaName: "ODS", TableName: "ods_orders", BusinessName: "订单 ODS",
+			AssetStatus: "ACTIVE", ManagementStatus: "ENABLED",
+			EnrichmentStatus: "SUCCEEDED", StructureHash: "version-hash",
+		}},
+		columns: map[string][]asset.Column{
+			tableID: {{
+				TableID: tableID, ColumnName: "order_id",
+				OrdinalPosition: 1, CanonicalType: "STRING",
+				SemanticType: "IDENTIFIER", AssetStatus: "ACTIVE",
+			}},
+		},
+	}
+	current := singleTableProposal(tableID, "order_id").Plan
+	retriever := &fakeAssetRetriever{}
+	service := NewService(catalog, &fakeInvoker{configured: true}, ServiceOptions{
+		Retriever: retriever, RetrievalMode: "HYBRID",
+	})
+	loaded, err := service.loadCatalog(
+		context.Background(), "tenant-1",
+		PlanRequest{Instruction: "修改订单 DWD", Current: &current},
+		"MODIFY", ChangeSet{},
+	)
+	if err != nil {
+		t.Fatalf("load virtual dataset catalog: %v", err)
+	}
+	if len(loaded.tables) != 1 || loaded.tables[0].ID != tableID {
+		t.Fatalf("loaded virtual catalog = %#v", loaded.tables)
+	}
+	if retriever.calls != 0 || len(catalog.searches) != 0 {
+		t.Fatalf("physical retrieval/search calls = %d/%d, want 0/0", retriever.calls, len(catalog.searches))
+	}
+	if err := service.ensureCatalogFresh(
+		context.Background(), "tenant-1", current, loaded.hashes,
+	); err != nil {
+		t.Fatalf("revalidate virtual dataset catalog: %v", err)
+	}
+}
+
+func TestDatasetVersionCatalogIDRequiresCanonicalUUID(t *testing.T) {
+	if versionID, ok := datasetVersionID(
+		"dataset-version:11111111-1111-4111-8111-111111111111",
+	); !ok || versionID != "11111111-1111-4111-8111-111111111111" {
+		t.Fatalf("canonical dataset version ID = %q/%v", versionID, ok)
+	}
+	for _, invalid := range []string{
+		"11111111-1111-4111-8111-111111111111",
+		"dataset-version:not-a-uuid",
+		"dataset-version:11111111111141118111111111111111",
+	} {
+		if _, ok := datasetVersionID(invalid); ok {
+			t.Fatalf("invalid dataset version ID accepted: %s", invalid)
+		}
+	}
+}
+
 func TestServiceRoutesEveryModificationThroughSemanticIntent(t *testing.T) {
 	current := testProposal().Plan
 	instructions := []string{

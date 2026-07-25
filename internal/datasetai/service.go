@@ -1282,9 +1282,16 @@ func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRe
 		}
 	}
 	retrieval := assetembedding.RetrievalResult{TableScores: map[string]float64{}, ColumnScores: map[string]float64{}, Degraded: true}
-	if s.retrievalMode != "LEXICAL" && s.retriever != nil {
+	physicalRequiredOrder := make([]string, 0, len(requiredOrder))
+	for _, tableID := range requiredOrder {
+		if !isDatasetVersionCatalogID(tableID) {
+			physicalRequiredOrder = append(physicalRequiredOrder, tableID)
+		}
+	}
+	if s.retrievalMode != "LEXICAL" && s.retriever != nil &&
+		(len(requiredOrder) == 0 || len(physicalRequiredOrder) > 0) {
 		startedAt := time.Now()
-		loaded, retrievalErr := s.retriever.Retrieve(ctx, tenantID, input.Instruction, requiredOrder, maxRetrievedCatalogTables, maxCatalogColumns)
+		loaded, retrievalErr := s.retriever.Retrieve(ctx, tenantID, input.Instruction, physicalRequiredOrder, maxRetrievedCatalogTables, maxCatalogColumns)
 		if retrievalErr != nil {
 			slog.WarnContext(ctx, "dataset AI asset retrieval degraded", "mode", s.retrievalMode,
 				"duration_ms", time.Since(startedAt).Milliseconds(), "error", retrievalErr)
@@ -1321,9 +1328,17 @@ func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRe
 		hashes[table.ID] = table.StructureHash
 	}
 
-	searched, totalTables, searchTruncated, err := s.searchCatalogTables(ctx, tenantID)
-	if err != nil {
-		return catalogLoadResult{}, err
+	searched := []asset.Table{}
+	totalTables, searchTruncated := 0, false
+	// A DWD/DWS editor is pinned to immutable dataset-version inputs. Physical
+	// metadata tables are not compatible replacement candidates and exposing
+	// them here lets the model silently downgrade the layer contract.
+	if len(currentOrder) == 0 || len(physicalRequiredOrder) > 0 {
+		var err error
+		searched, totalTables, searchTruncated, err = s.searchCatalogTables(ctx, tenantID)
+		if err != nil {
+			return catalogLoadResult{}, err
+		}
 	}
 	rankedTables := rankCatalogTables(searched, requiredSet, input.Instruction)
 	if s.retrievalMode == "HYBRID" && len(retrieval.TableIDs) > 0 {

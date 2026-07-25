@@ -37,9 +37,9 @@ describe('数据集发布审批', () => {
     await user.click(screen.getByRole('button', { name: '保存草稿' }))
     await screen.findByText('草稿已保存 · 版本 5')
     await user.type(screen.getByLabelText('预览参数 start_date'), '2026-01-01')
-    await user.click(screen.getByRole('button', { name: '提交审批并后台生成候选' }))
+    await user.click(screen.getByRole('button', { name: '提交发布审批' }))
 
-    expect(await screen.findByText('发布审批已提交 · publication-request-1 · 指标候选正在后台生成')).toBeInTheDocument()
+    expect(await screen.findByText('发布审批已提交 · publication-request-1 · 审批通过后启动加工')).toBeInTheDocument()
     expect(requestPublicationSpy).toHaveBeenCalledWith(saved.id, {
       draftVersionId: saved.draftVersionId,
       expectedVersion: saved.version,
@@ -58,7 +58,7 @@ describe('数据集发布审批', () => {
     const name = await screen.findByLabelText('数据集名称')
     await user.clear(name)
     await user.type(name, '尚未保存的新名称')
-    await user.click(screen.getByRole('button', { name: '提交审批并后台生成候选' }))
+    await user.click(screen.getByRole('button', { name: '提交发布审批' }))
 
     expect(await screen.findByText('当前草稿有未保存修改，请先保存草稿后再提交发布审批')).toBeInTheDocument()
     expect(updateSpy).not.toHaveBeenCalled()
@@ -73,10 +73,10 @@ describe('数据集发布审批', () => {
     renderDesigner()
 
     await user.type(await screen.findByLabelText('预览参数 start_date'), '2026-07-01')
-    await user.click(screen.getByRole('button', { name: '提交审批并后台生成候选' }))
+    await user.click(screen.getByRole('button', { name: '提交发布审批' }))
 
     expect(await screen.findByText('当前草稿已有待审批申请')).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByRole('button', { name: '提交审批并后台生成候选' })).toBeEnabled())
+    await waitFor(() => expect(screen.getByRole('button', { name: '提交发布审批' })).toBeEnabled())
   })
 })
 
@@ -209,7 +209,7 @@ describe('已发布版本管理', () => {
     const manager = await screen.findByRole('region', { name: '已发布版本管理' })
     await within(manager).findByText(published.id)
     expect(screen.getByRole('button', { name: '保存草稿' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '提交审批并后台生成候选' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '提交发布审批' })).toBeDisabled()
     expect(within(manager).getByRole('button', { name: '标记为失效' })).toBeDisabled()
     expect(within(manager).getByRole('button', { name: '废弃版本' })).toBeDisabled()
     expect(within(manager).getByRole('button', { name: '预览精确版本' })).toBeEnabled()
@@ -266,7 +266,7 @@ const dsl: DatasetDSL = {
 function datasetRecord(overrides: Partial<DatasetRecord> = {}): DatasetRecord {
   return {
     id: 'dataset-1', code: 'monthly_orders', name: '月度订单数据集', description: '订单汇总',
-    type: 'SINGLE_SOURCE', status: 'DRAFT', version: 4, draftVersionId: 'draft-version-1', draftVersionNo: 1,
+    type: 'SINGLE_SOURCE', layer: 'DWS', tags: [], status: 'DRAFT', version: 4, draftVersionId: 'draft-version-1', draftVersionNo: 1,
     draftRecordVersion: 3, dslHash: 'a'.repeat(64), planHash: 'd'.repeat(64), dsl,
     logicalPlan: {}, createdAt: '2026-07-16T00:00:00Z', updatedAt: '2026-07-16T01:00:00Z',
     ...overrides,

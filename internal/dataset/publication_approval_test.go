@@ -323,19 +323,28 @@ func TestPublicationApprovalServiceRejectsStaleApprovalBeforeCommit(t *testing.T
 	}
 }
 
-func TestPublicationApprovalServiceDoesNotApproveBeforeCandidatesAreReady(t *testing.T) {
-	_, validator, store, service, prepared := publicationApprovalFixture(t)
+func TestPublicationApprovalServiceApprovesBeforePostApprovalCandidateProcessing(t *testing.T) {
+	_, _, store, service, prepared := publicationApprovalFixture(t)
 	pending := pendingPublicationRequest(prepared)
 	pending.MetricCandidateStatus = PublicationCandidatePending
 	store.request = pending
+	approved := pending
+	approved.Status, approved.Version = PublicationRequestApproved, 2
+	approved.PublishedVersionID = httpTestVersionID
+	store.approveRequest = approved
+	store.approvePublished = VersionRecord{
+		ID: httpTestVersionID, DatasetID: httpTestDatasetID, Status: "PUBLISHED",
+		VersionNo: 1, DSLHash: prepared.DSLHash, PlanHash: prepared.PlanHash,
+	}
 
-	_, err := service.Approve(
+	result, err := service.Approve(
 		context.Background(), "tenant-1", "reviewer-1", httpTestDatasetID, approvalTestRequestID,
 		ApprovePublicationInput{ExpectedVersion: 1},
 	)
-	if !errors.Is(err, ErrPublicationCandidatesPending) || store.approveCalls != 0 ||
-		validator.candidate.DatasetID != "" {
-		t.Fatalf("err=%v approveCalls=%d candidate=%#v", err, store.approveCalls, validator.candidate)
+	if err != nil || store.approveCalls != 1 ||
+		result.Request.Status != PublicationRequestApproved ||
+		result.PublishedVersion.ID != httpTestVersionID {
+		t.Fatalf("result=%#v err=%v approveCalls=%d", result, err, store.approveCalls)
 	}
 }
 

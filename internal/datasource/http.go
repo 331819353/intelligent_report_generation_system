@@ -231,6 +231,10 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		return managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims, _ := auth.ClaimsFromContext(r.Context())
 			if err := run(contextClaims{claims.TenantID}, r, r.PathValue("id")); err != nil {
+				if errors.Is(err, ErrDatasetReferenced) {
+					writeDSError(w, http.StatusConflict, "DATA_SOURCE_DATASET_REFERENCED", "存在引用该数据源的数据集，请先删除或调整相关数据集")
+					return
+				}
 				writeDSError(w, 400, "DATA_SOURCE_ACTION_FAILED", "operation is not allowed for the current state")
 				return
 			}

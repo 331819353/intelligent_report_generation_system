@@ -57,8 +57,9 @@ func valueSchema(column bool) map[string]any {
 		"tags": map[string]any{
 			// 不设置人为数量上限；受控词表本身、输出 Token 预算和本地去重共同
 			// 提供有界保护。deepseek-v3 不支持的 uniqueItems 由 Go 校验兜底。
-			"type":  "array",
-			"items": map[string]any{"type": "string", "enum": mapKeys(allowedTags)},
+			"type":     "array",
+			"minItems": 1,
+			"items":    map[string]any{"type": "string", "enum": mapKeys(allowedTags)},
 		},
 		"sensitivityLevel": map[string]any{"type": "string", "enum": mapKeys(allowedSensitivity)},
 		"confidence":       map[string]any{"type": "number", "exclusiveMinimum": 0, "maximum": 1},

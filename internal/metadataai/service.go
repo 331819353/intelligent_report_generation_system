@@ -25,6 +25,7 @@ type Store interface {
 	CreateJob(context.Context, string, string, Job) (Job, error)
 	FailJob(context.Context, string, string, Job, string) (Job, error)
 	SaveResult(context.Context, string, string, Job, CompletionInput, ProviderResult, float64) (Job, []Suggestion, error)
+	SavePartialResult(context.Context, string, string, Job, CompletionInput, ProviderResult, float64) (Job, []Suggestion, error)
 	ListSuggestions(context.Context, string, string, string, int) ([]Suggestion, error)
 	DecideSuggestion(context.Context, string, string, string, string) (Suggestion, error)
 }
@@ -87,7 +88,10 @@ func (s *Service) CompleteTable(ctx context.Context, tenantID, actorID, tableID 
 }
 
 func metadataCompletionFailureCode(err error) string {
+	var partial *PartialOutputError
 	switch {
+	case errors.As(err, &partial):
+		return "PARTIAL_OUTPUT"
 	case errors.Is(err, ErrSourceChanged):
 		return "SOURCE_CHANGED"
 	case errors.Is(err, ErrStructureChanged):
@@ -124,6 +128,10 @@ func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID strin
 	if err != nil {
 		return GenerateResult{}, err
 	}
+	input = scopePendingCompletionInput(input)
+	if !input.TargetTable && len(input.Columns) == 0 {
+		return GenerateResult{}, ErrInvalidTargetScope
+	}
 	input.SampleRows = samples
 	hash, err := inputHash(input)
 	if err != nil {
@@ -151,6 +159,22 @@ func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID strin
 	cancel()
 	job.LatencyMS = s.now().Sub(started).Milliseconds()
 	if callErr != nil {
+		var partial *PartialOutputError
+		if errors.As(callErr, &partial) {
+			job.Model = firstNonBlank(providerResult.Model, job.Model)
+			job.ModelVersion = providerResult.ModelVersion
+			job.PromptTokens = providerResult.Usage.PromptTokens
+			job.CompletionTokens = providerResult.Usage.CompletionTokens
+			job.TotalTokens = providerResult.Usage.TotalTokens
+			providerResult.Output = normalizeOutputForInput(input, providerResult.Output)
+			job, suggestions, saveErr := s.store.SavePartialResult(
+				ctx, tenantID, actorID, job, input, providerResult, s.threshold,
+			)
+			if saveErr != nil {
+				return GenerateResult{Job: job, Suggestions: suggestions}, saveErr
+			}
+			return GenerateResult{Job: job, Suggestions: suggestions}, callErr
+		}
 		code := "PROVIDER_ERROR"
 		switch {
 		case errors.Is(callErr, aiplatform.ErrTenantAIForbidden):
@@ -190,6 +214,21 @@ func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID strin
 		return GenerateResult{Job: job, Suggestions: []Suggestion{}}, err
 	}
 	return GenerateResult{Job: job, Suggestions: suggestions}, nil
+}
+
+// scopePendingCompletionInput 让每次重试只包含尚未被当前结构 marker 覆盖的
+// 表或字段。部分结果保存后会推进对应 marker，下一轮自动缩小目标集合。
+func scopePendingCompletionInput(input CompletionInput) CompletionInput {
+	input.TargetTable = input.TargetTable &&
+		(!input.Table.CompletionTracked || input.Table.NeedsCompletion)
+	columns := make([]Target, 0, len(input.Columns))
+	for _, column := range input.Columns {
+		if !column.CompletionTracked || column.NeedsCompletion {
+			columns = append(columns, column)
+		}
+	}
+	input.Columns = columns
+	return input
 }
 
 // scopeCompletionInput 按稳定字段 ID 收缩模型输出目标；顺序仍沿用技术字段顺序以保持输入哈希稳定。

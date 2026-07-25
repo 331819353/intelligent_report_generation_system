@@ -314,9 +314,20 @@ export async function materializeDatasetAIPlan(
   code: string,
   baseGraph?: DesignerGraphV1,
 ): Promise<MaterializedDatasetAIPlan> {
-  const tableByID = new Map(tables.map(table => [table.id, table]))
+  // DWD/DWS 的当前节点引用的是不可变 dataset-version:* 虚拟资产，并不会出现在
+  // 物理元数据表列表中。修改方案必须优先复用编辑器已经精确解析的表和字段快照，
+  // 只有新引用的物理资产才调用 columns API。
+  const baseNodeByTableID = new Map(base.nodes.map(node => [node.table.id, node]))
+  const tableByID = new Map([
+    ...tables.map(table => [table.id, table] as const),
+    ...base.nodes.map(node => [node.table.id, node.table] as const),
+  ])
   const tableIDs = [...new Set(plan.nodes.map(node => node.tableId))]
-  const columnEntries = await Promise.all(tableIDs.map(async tableId => [tableId, (await loadColumns(tableId)).filter(column => !column.assetStatus || column.assetStatus === 'ACTIVE')] as const))
+  const columnEntries = await Promise.all(tableIDs.map(async tableId => {
+    const current = baseNodeByTableID.get(tableId)?.columns
+    const columns = current ?? await loadColumns(tableId)
+    return [tableId, columns.filter(column => !column.assetStatus || column.assetStatus === 'ACTIVE')] as const
+  }))
   const columnsByTable = new Map(columnEntries)
   const baseNodeByID = new Map(base.nodes.map(node => [node.id, node]))
   const baseFieldByKey = new Map(base.fields.map(field => [field.key, field]))

@@ -2,6 +2,10 @@
 .env
 bin/
 .cache/
+.runtime/
+.vite/
+artifacts/
+design-qa.md
 coverage.out
 *.log
 node_modules/

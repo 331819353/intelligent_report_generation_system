@@ -26,6 +26,14 @@ func (s *enrichmentCommitSinkStub) EnsureMappedDatasetTx(_ context.Context, _ pg
 	return s.err
 }
 
+func (s *enrichmentCommitSinkStub) EnsureMappedDatasetDraftTx(_ context.Context, _ pgx.Tx, tenantID, actorID, tableID string) error {
+	s.called++
+	s.tenantID = tenantID
+	s.actorID = actorID
+	s.tableID = tableID
+	return s.err
+}
+
 func TestEnsureMappedDatasetTxForwardsCommitContextAndFailure(t *testing.T) {
 	wantErr := errors.New("mapped dataset failed")
 	sink := &enrichmentCommitSinkStub{err: wantErr}

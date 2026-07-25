@@ -226,13 +226,27 @@ func TestPostgresControlPlaneDerivesCurrentBuilds(t *testing.T) {
 		t.Fatalf("activate ODS fixture: %v", err)
 	}
 
+	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		return store.EnqueueGovernedDatasetMaterializationTx(
+			ctx, tx, tenantID, actorID,
+			dataset.VersionRecord{
+				ID:        dwdVersionID,
+				DatasetID: dwdDatasetID,
+				Status:    "PUBLISHED",
+				Layer:     dataset.LayerDWD,
+			},
+		)
+	})
+	if err != nil {
+		t.Fatalf("enqueue approved DWD build: %v", err)
+	}
 	dwdRun, created, err := store.RegisterCurrent(
 		ctx, tenantID, actorID, dwdDatasetID,
 		materialization.RegisterCurrentRequest{
-			Mode: materialization.RunModeFull, MaxAttempts: 4,
+			Mode: materialization.RunModeFull, MaxAttempts: 3,
 		},
 	)
-	if err != nil || !created {
+	if err != nil || created {
 		t.Fatalf("register derived DWD: created=%v err=%v", created, err)
 	}
 	dwdDetail, err := store.GetBuild(ctx, tenantID, dwdDatasetID, dwdRun.ID)

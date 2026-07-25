@@ -292,6 +292,47 @@ describe('buildDatasetDSL', () => {
     expect(preview.fields).not.toEqual(expect.arrayContaining([expect.objectContaining({ code: 'amount_text' })]))
   })
 
+  test('数据集版本节点生成的组件预览保留 DWD 分层执行合同', () => {
+    const value = draft()
+    value.nodes = value.nodes.map(node => ({
+      ...node,
+      table: {
+        ...node.table,
+        id: 'dataset-version:ods-orders-v2',
+        dataSourceId: 'dataset-layer:ODS',
+        dataSourceType: 'DATASET',
+        sourceKind: 'DATASET',
+        datasetId: 'ods-orders',
+        datasetVersionId: 'ods-orders-v2',
+        datasetLayer: 'ODS',
+      },
+    }))
+    value.designer = {
+      version: '1.0',
+      nodePositions: { orders: { x: 20, y: 40 } },
+      nodeNames: { orders: '订单 ODS' },
+      joins: [],
+      groups: [],
+      transforms: [],
+      end: { id: 'end_1', name: '订单清洗结果', input: { kind: 'NODE', id: 'orders' }, position: { x: 320, y: 40 }, outputs: [
+        { key: 'orders.order_date', name: '订单日期', code: 'order_date' },
+        { key: 'orders.amount', name: '订单金额', code: 'amount' },
+      ] },
+    }
+
+    const preview = buildComponentPreviewDSL(value, { kind: 'NODE', id: 'orders' })
+
+    expect(preview.dataset.layer).toBe('DWD')
+    expect(preview.executionPolicy).toMatchObject({
+      mode: 'MATERIALIZED_PREFERRED',
+      materialization: { enabled: true, refreshMode: 'ON_DEMAND' },
+    })
+    expect(preview.nodes[0]).toMatchObject({
+      type: 'DATASET',
+      datasetVersionId: 'ods-orders-v2',
+    })
+  })
+
   test('结束节点隐藏根分组维度时仍保留真实聚合粒度并清理失效排序', () => {
     const value = draft()
     value.calculations = []

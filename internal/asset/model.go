@@ -1,6 +1,10 @@
 package asset
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
 type Table struct {
 	ID                  string   `json:"id"`
@@ -61,6 +65,18 @@ type BusinessMetadata struct {
 	ManualLocked        bool     `json:"manualLocked"`
 	ExpectedVersion     int64    `json:"expectedVersion"`
 }
+type ManualCompletionInput struct {
+	ExpectedVersion       int64  `json:"expectedVersion"`
+	ExpectedStructureHash string `json:"expectedStructureHash"`
+}
+type ManualCompletionIncompleteError struct {
+	Missing []string
+}
+
+func (e *ManualCompletionIncompleteError) Error() string {
+	return fmt.Sprintf("手工完善信息不完整：%s", strings.Join(e.Missing, "、"))
+}
+
 type Diff struct {
 	ID           string `json:"id"`
 	DataSourceID string `json:"dataSourceId"`
@@ -110,6 +126,16 @@ func (m BusinessMetadata) Validate(column bool) error {
 		if len(tag) == 0 || len(tag) > 50 {
 			return errors.New("invalid tag")
 		}
+	}
+	return nil
+}
+
+func (m ManualCompletionInput) Validate() error {
+	if m.ExpectedVersion <= 0 {
+		return errors.New("expectedVersion must be greater than zero")
+	}
+	if len(m.ExpectedStructureHash) != 64 {
+		return errors.New("expectedStructureHash must be a 64-character hash")
 	}
 	return nil
 }

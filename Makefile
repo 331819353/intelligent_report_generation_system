@@ -1,4 +1,4 @@
-.PHONY: fmt lint test test-integration connector-test build ci-check run-api run-worker run-connection-test-worker seed-dev verify-asset-retrieval frontend-lint frontend-test frontend-build infra-config infra-up connector-up connector-status infra-down infra-reset infra-status infra-logs db-migrate db-verify warehouse-verify db-shell warehouse-shell clean
+.PHONY: fmt lint test test-integration connector-test build ci-check run-api run-worker run-connection-test-worker dev-up dev-stop dev-restart dev-status dev-logs seed-dev verify-asset-retrieval frontend-lint frontend-test frontend-build infra-config infra-up connector-up connector-status infra-down infra-reset infra-status infra-logs db-migrate db-verify warehouse-verify db-shell warehouse-shell clean
 
 export GOCACHE ?= $(CURDIR)/.cache/go-build
 
@@ -89,6 +89,22 @@ run-worker:
 
 run-connection-test-worker:
 	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; env -u DATABASE_URL -u WORKER_DATABASE_URL -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_APP_USER -u POSTGRES_APP_PASSWORD -u POSTGRES_WORKER_USER -u POSTGRES_WORKER_PASSWORD -u POSTGRES_CONNECTION_TEST_PASSWORD -u CONNECTOR_INTERNAL_TOKEN -u MINIO_ACCESS_KEY -u MINIO_SECRET_KEY go run ./cmd/connection-test-worker
+
+# 由 Docker Compose 持久化应用与基础设施进程，不随调用终端退出。
+dev-up:
+	@./scripts/dev-services.sh start
+
+dev-stop:
+	@./scripts/dev-services.sh stop
+
+dev-restart:
+	@./scripts/dev-services.sh restart
+
+dev-status:
+	@./scripts/dev-services.sh status
+
+dev-logs:
+	@./scripts/dev-services.sh logs
 
 seed-dev:
 	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; go run ./cmd/seed

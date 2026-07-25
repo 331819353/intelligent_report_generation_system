@@ -400,7 +400,9 @@ func (r *PostgresMetadataJobRepository) FailMetadataJob(ctx context.Context, ten
 }
 
 func (r *PostgresMetadataJobRepository) updateJobHeartbeat(ctx context.Context, tx pgx.Tx, jobID, workerID, stage string, lease time.Duration) error {
-	tag, err := tx.Exec(ctx, `UPDATE platform.data_source_metadata_jobs SET stage=$1,heartbeat_at=now(),lease_expires_at=now()+($2 * interval '1 second')
+	tag, err := tx.Exec(ctx, `UPDATE platform.data_source_metadata_jobs SET
+			stage=CASE WHEN $1='COMPLETE' THEN stage ELSE $1 END,
+			heartbeat_at=now(),lease_expires_at=now()+($2 * interval '1 second')
 		WHERE id=$3 AND status='RUNNING' AND lease_owner=$4 AND lease_expires_at>now()`, stage, int64(lease/time.Second), jobID, workerID)
 	if err != nil {
 		return err

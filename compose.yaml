@@ -1,5 +1,15 @@
 name: intelligent-report-system
 
+x-app-env-files: &app-env-files
+  - path: ./.env.example
+  - path: ./.env
+    required: false
+
+x-backend-build: &backend-build
+  context: .
+  dockerfile: deployments/app/Dockerfile
+  provenance: false
+
 services:
   # 平台控制面数据库：只保存账号、权限、数据源/数据集/指标和治理元数据。
   postgres:
@@ -125,6 +135,7 @@ services:
   connector-service:
     build:
       context: ./connector_service
+      provenance: false
     restart: unless-stopped
     environment:
       APP_ENV: ${APP_ENV:-development}
@@ -157,6 +168,120 @@ services:
       timeout: 3s
       retries: 20
       start_period: 10s
+    networks: [report_net]
+
+  # 平台 API 使用控制库应用账号和仓库只读账号，不持有 worker 或测试账号。
+  api:
+    image: intelligent-report-system-backend:dev
+    build: *backend-build
+    restart: unless-stopped
+    env_file: *app-env-files
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_APP_USER:-report_app}:${POSTGRES_APP_PASSWORD:-local_report_password}@postgres:5432/${POSTGRES_DB:-intelligent_report_control}?sslmode=disable
+      WAREHOUSE_DATABASE_URL: postgres://${WAREHOUSE_READER_USER:-report_warehouse_reader}:${WAREHOUSE_READER_PASSWORD:-local_warehouse_reader_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:-local_redis_password}@redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_CONSOLE_ENDPOINT: http://minio:9001
+      CONNECTOR_SERVICE_URL: http://connector-service:8090
+    command: ["/app/api"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-warehouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      connector-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks: [report_net]
+
+  # 通用 Worker 使用控制库 worker 账号和仓库写入账号。
+  worker:
+    image: intelligent-report-system-backend:dev
+    restart: unless-stopped
+    env_file: *app-env-files
+    environment:
+      WORKER_DATABASE_URL: postgres://${POSTGRES_WORKER_USER:-report_worker}:${POSTGRES_WORKER_PASSWORD:-local_worker_password}@postgres:5432/${POSTGRES_DB:-intelligent_report_control}?sslmode=disable
+      WAREHOUSE_WORKER_DATABASE_URL: postgres://${WAREHOUSE_WORKER_USER:-report_warehouse_worker}:${WAREHOUSE_WORKER_PASSWORD:-local_warehouse_worker_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:-local_redis_password}@redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      CONNECTOR_SERVICE_URL: http://connector-service:8090
+    command: ["/app/worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-warehouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      connector-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    networks: [report_net]
+
+  # 连接测试 Worker 仅持有专用控制库、Connector 和 uploads 读取凭据。
+  connection-test-worker:
+    image: intelligent-report-system-backend:dev
+    restart: unless-stopped
+    env_file: *app-env-files
+    environment:
+      CONNECTION_TEST_DATABASE_URL: postgres://${POSTGRES_CONNECTION_TEST_USER:-report_connection_tester}:${POSTGRES_CONNECTION_TEST_PASSWORD:-local_connection_test_password}@postgres:5432/${POSTGRES_DB:-intelligent_report_control}?sslmode=disable
+      CONNECTION_TEST_MINIO_ENDPOINT: minio:9000
+      CONNECTOR_SERVICE_URL: http://connector-service:8090
+    command: ["/app/connection-test-worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      connector-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    networks: [report_net]
+
+  # Vite 开发服务器通过容器网络代理 API，避免依赖宿主终端进程。
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+      provenance: false
+    image: intelligent-report-system-web:dev
+    restart: unless-stopped
+    environment:
+      VITE_API_PROXY_TARGET: http://api:8080
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
     networks: [report_net]
 
 volumes:

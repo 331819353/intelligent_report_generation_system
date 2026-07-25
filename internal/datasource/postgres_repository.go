@@ -376,6 +376,61 @@ func (r *PostgresRepository) UpdateStatus(ctx context.Context, tenantID, id stri
 	})
 }
 
+// BeginDelete 在同一事务内锁定数据源、检查活动数据集依赖并切换到删除中，
+// 避免“先检查、后删除”期间新建数据集造成竞态。
+func (r *PostgresRepository) BeginDelete(ctx context.Context, tenantID, id string) error {
+	return database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
+		var sourceID string
+		if err := tx.QueryRow(ctx, `SELECT id::text
+			FROM platform.data_sources
+			WHERE id=$1 AND deleted_at IS NULL
+			FOR UPDATE`, id).Scan(&sourceID); err != nil {
+			return err
+		}
+		var referenced bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1
+			FROM platform.datasets dataset
+			JOIN platform.metadata_tables source_table
+			  ON source_table.id=dataset.origin_table_id
+			 AND source_table.tenant_id=dataset.tenant_id
+			WHERE source_table.data_source_id=$1
+			  AND dataset.deleted_at IS NULL
+			UNION ALL
+			SELECT 1
+			FROM platform.dataset_dependencies dependency
+			JOIN platform.metadata_tables source_table
+			  ON source_table.id::text=dependency.source_id
+			 AND source_table.tenant_id=dependency.tenant_id
+			JOIN platform.dataset_versions dataset_version
+			  ON dataset_version.id=dependency.dataset_version_id
+			 AND dataset_version.tenant_id=dependency.tenant_id
+			JOIN platform.datasets dataset
+			  ON dataset.id=dataset_version.dataset_id
+			 AND dataset.tenant_id=dataset_version.tenant_id
+			WHERE dependency.source_type='TABLE'
+			  AND source_table.data_source_id=$1
+			  AND dataset.deleted_at IS NULL
+			  AND dataset_version.status<>'DEPRECATED'
+		)`, id).Scan(&referenced); err != nil {
+			return err
+		}
+		if referenced {
+			return ErrDatasetReferenced
+		}
+		tag, err := tx.Exec(ctx, `UPDATE platform.data_sources
+			SET status='DELETING',last_error=NULL,version=version+1
+			WHERE id=$1 AND deleted_at IS NULL`, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return pgx.ErrNoRows
+		}
+		return nil
+	})
+}
+
 // Quota 加载租户的数据源数量、查询行数和文件大小限制。
 func (r *PostgresRepository) Quota(ctx context.Context, tenantID string) (q Quota, err error) {
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {

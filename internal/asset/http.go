@@ -3,6 +3,7 @@ package asset
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -121,6 +122,25 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 			return
 		}
 		writeJSON(w, 200, item)
+	})))
+	mux.Handle("POST /api/v1/assets/tables/{id}/manual-completion", protect("MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		var input ManualCompletionInput
+		if !decode(w, r, &input) {
+			return
+		}
+		item, err := repo.CompleteTableManually(r.Context(), c.TenantID, c.Subject, r.PathValue("id"), input)
+		var incomplete *ManualCompletionIncompleteError
+		if errors.As(err, &incomplete) {
+			writeError(w, http.StatusUnprocessableEntity, "ASSET_MANUAL_COMPLETION_INCOMPLETE", incomplete.Error())
+			return
+		}
+		if err != nil {
+			slog.ErrorContext(r.Context(), "complete table metadata manually", "table_id", r.PathValue("id"), "error", err)
+			writeError(w, http.StatusConflict, "ASSET_MANUAL_COMPLETION_FAILED", "手工完善提交失败，资产版本或结构可能已变化")
+			return
+		}
+		writeJSON(w, http.StatusOK, item)
 	})))
 	mux.Handle("POST /api/v1/assets/tables/{id}/disable", protect("MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())

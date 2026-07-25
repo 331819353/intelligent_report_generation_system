@@ -4,11 +4,15 @@ export type { CanvasPoint as GraphPosition, DesignerGraphV1, GraphDimension, Gra
 
 export type AssetTable = {
   id: string; dataSourceId: string; dataSourceName: string; dataSourceType: string
-  tableName: string; schemaName: string; businessName: string; businessDescription?: string; columnCount: number; fileVersionId?: string
-  managementStatus?: string; enrichmentStatus?: string
+  tableName: string; schemaName: string; catalogName?: string; tableType?: string; sourceComment?: string
+  businessName: string; businessDescription?: string; tags?: string[]; sensitivityLevel?: string; visibility?: string
+  columnCount: number; fileVersionId?: string; managementStatus?: string; enrichmentStatus?: string
+  metadataVersion?: number; businessVersion?: number; lastSyncAt?: string
+  sourceKind?: 'TABLE' | 'DATASET'; datasetId?: string; datasetVersionId?: string; datasetLayer?: 'ODS' | 'DWD' | 'DWS'
 }
 export type AssetColumn = {
   id: string; tableId: string; columnName: string; businessName: string
+  businessDescription?: string; tags?: string[]; sensitivityLevel?: string; nativeType?: string; ordinalPosition?: number
   canonicalType: string; nullable: boolean; semanticType: string; assetStatus?: string
 }
 export type DesignerNode = { id: string; alias: string; table: AssetTable; columns: AssetColumn[]; selected: string[]; groupingEnabled?: boolean }
@@ -16,6 +20,8 @@ export type FieldOption = {
   key: string; role: string; aggregation: string; code?: string; name?: string
   groupBy?: boolean; grouping?: string; output?: boolean; metric?: boolean
   finalOutput?: boolean; finalGroupBy?: boolean; finalGrouping?: string; finalMetric?: boolean; finalAggregation?: string
+  description?: string; canonicalType?: string; semanticType?: string; nullable?: boolean
+  persistedExpression?: Record<string, unknown>
 }
 export type JoinConditionOption = { id: string; leftField: string; rightField: string }
 export type JoinOption = { id: string; leftNodeId: string; rightNodeId: string; leftField: string; rightField: string; joinType: string; cardinality: string; manualConfirmed: boolean; conditions?: JoinConditionOption[] }
@@ -34,14 +40,14 @@ export type DatasetDraft = {
 }
 export type DatasetRecord = {
   id: string; code: string; name: string; description: string; type: string; status: string
-  originTableId?: string
+  originTableId?: string; layer: 'ODS' | 'DWD' | 'DWS'; tags: string[]
   version: number; draftVersionId: string; draftVersionNo: number; draftRecordVersion: number; currentPublishedVersionId?: string
   dslHash: string; planHash: string; dsl: DatasetDSL; logicalPlan: unknown
   createdAt: string; updatedAt: string
 }
 export type DatasetSummary = {
   id: string; code: string; name: string; description: string; type: string; status: string
-  originTableId?: string; originTableName?: string; originDataSourceName?: string
+  originTableId?: string; originTableName?: string; originDataSourceName?: string; layer: 'ODS' | 'DWD' | 'DWS'; tags: string[]
   version: number; dslHash: string; currentPublishedVersionId?: string; updatedAt: string
 }
 export type DatasetPage = {
@@ -118,7 +124,7 @@ export type DatasetDraftPreview = DatasetPreview & {
 export type DatasetCandidatePreview = DatasetPreview & { dslHash: string; planHash: string }
 export type AssetTablePreview = { columns: string[]; rows: unknown[][] }
 export type DatasetDSL = Record<string, unknown> & {
-  dslVersion: string; dataset: { code: string; name: string; description?: string; type: string }
+  dslVersion: string; dataset: { code: string; name: string; description?: string; type: string; layer?: 'ODS' | 'DWD' | 'DWS' }
   nodes: Array<Record<string, unknown>>; fields: Array<Record<string, unknown>>
   designer?: DesignerGraphV1
 }
@@ -140,6 +146,26 @@ const identifier = (value: string) => {
   const cleaned = value.trim().replace(/[^A-Za-z0-9_]/g, '_').replace(/^[^A-Za-z]+/, '')
   return cleaned || 'field'
 }
+const modeledDatasetLayer = (draft: DatasetDraft): 'ODS' | 'DWD' | 'DWS' => {
+  const datasetNodes = draft.nodes.filter(node => node.table.sourceKind === 'DATASET')
+  if (datasetNodes.length !== draft.nodes.length) return 'ODS'
+  const upstreamLayers = new Set(datasetNodes.map(node => node.table.datasetLayer).filter(Boolean))
+  if (upstreamLayers.size !== 1) throw new Error('同一个分层数据集不能混用不同上游层级')
+  const upstream = [...upstreamLayers][0]
+  if (upstream === 'ODS') return 'DWD'
+  if (upstream === 'DWD') return 'DWS'
+  throw new Error('DWS 数据集不能继续作为更高层级的数据节点')
+}
+const modeledExecutionPolicy = (layer: 'ODS' | 'DWD' | 'DWS') => layer === 'ODS'
+  ? { mode: 'REALTIME', timeoutMs: 5000, previewLimit: 200, resultLimit: 10000, cacheTtlSeconds: 300, materialization: { enabled: false } }
+  : {
+      mode: 'MATERIALIZED_PREFERRED',
+      timeoutMs: 30000,
+      previewLimit: 200,
+      resultLimit: 100000,
+      cacheTtlSeconds: 300,
+      materialization: { enabled: true, refreshMode: 'ON_DEMAND' },
+    }
 const fieldID = (node: DesignerNode, column: AssetColumn) => `field_${identifier(node.alias)}_${identifier(column.columnName)}`
 const fieldCode = (node: DesignerNode, column: AssetColumn, multiple: boolean) => identifier(multiple ? `${node.alias}_${column.columnName}` : column.columnName)
 
@@ -156,6 +182,26 @@ const graphItemText = (value: unknown, ...keys: string[]): string => {
   const candidate = keys.map(key => item[key]).find(entry => typeof entry === 'string')
   return typeof candidate === 'string' ? candidate.trim() : ''
 }
+
+const datasetNodeDSL = (node: DesignerNode) => node.table.sourceKind === 'DATASET' && node.table.datasetVersionId
+  ? {
+      id: node.id,
+      type: 'DATASET',
+      datasetVersionId: node.table.datasetVersionId,
+      alias: identifier(node.alias),
+      projection: [...node.selected],
+      sourceFilters: [],
+    }
+  : {
+      id: node.id,
+      type: 'TABLE',
+      datasourceId: node.table.dataSourceId,
+      tableId: node.table.id,
+      ...(node.table.fileVersionId ? { fileVersionId: node.table.fileVersionId } : {}),
+      alias: identifier(node.alias),
+      projection: [...node.selected],
+      sourceFilters: [],
+    }
 
 /**
  * Designer V1 是画布的持久化真值。执行 DSL 仍只使用结构化 FIELD_REF、Join 与
@@ -265,11 +311,15 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
     const sourceValue = selectedByKey.get(key) ?? selectedByKey.get(`${sourceBinding.nodeId}.${sourceBinding.field}`)
     if (!sourceValue) throw new Error(`结束节点输出字段 ${key} 已不可用`)
     const { node, column } = sourceValue
-    const option = options.get(key)
+    const directOption = options.get(key)
+    const option = directOption ?? options.get(`${sourceBinding.nodeId}.${sourceBinding.field}`)
     const dimension = globalDimensions.get(key)
     const metric = globalMetrics.get(key)
     const source = produced.expression ?? { type: 'FIELD_REF', nodeId: node.id, field: column.columnName }
-    const expression = source
+    // 后端自动生成的 DWD 会把 TRIM / COALESCE / CAST 保存为嵌套表达式。旧画布
+    // 尚未把这些操作拆成显式组件时，继续沿用精确持久化表达式，避免用户仅打开
+    // 并保存画布就把清洗逻辑降级成裸 FIELD_REF。
+    const expression = directOption?.persistedExpression ?? source
     const preferredCode = identifier(graphItemText(value, 'code') || graphItemText(metric ?? dimension, 'code') || option?.code || fieldCode(node, column, draft.nodes.length > 1))
     const configuredCode = !visible && visibleCodes.has(preferredCode) && globalGroup
       ? identifier(`group_${globalGroup.id}_${preferredCode}`)
@@ -279,10 +329,12 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
       id: selectedByKey.has(key) ? fieldID(node, column) : `field_${identifier(key)}`,
       code: identifier(configuredCode),
       name: configuredName,
+      ...(option?.description ? { description: option.description } : {}),
       role: produced.kind === 'METRIC' ? 'MEASURE' : graphItemText(value, 'role') || (dimension || produced.kind === 'DIMENSION' ? 'DIMENSION' : option?.role || 'ATTRIBUTE'),
       expression,
-      canonicalType: produced.aggregation === 'COUNT' || produced.aggregation === 'COUNT_DISTINCT' ? 'INTEGER' : canonicalType(produced.canonicalType || column.canonicalType),
-      nullable: selectedByKey.has(key) ? column.nullable : true,
+      canonicalType: option?.canonicalType || (produced.aggregation === 'COUNT' || produced.aggregation === 'COUNT_DISTINCT' ? 'INTEGER' : canonicalType(produced.canonicalType || column.canonicalType)),
+      ...(option?.semanticType ? { semanticType: option.semanticType } : {}),
+      nullable: option?.nullable ?? (selectedByKey.has(key) ? column.nullable : true),
       visible,
     }
   })
@@ -309,11 +361,12 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
     : [fields[0].code])
   const grainDescription = draft.grainDescription.trim() || '每行代表一条结束节点输出记录'
   const sourceCount = new Set(draft.nodes.map(node => node.table.dataSourceId)).size
+  const layer = modeledDatasetLayer(draft)
   return {
     dslVersion: '1.0',
-    dataset: { code: identifier(draft.code), name: draft.name.trim(), description: draft.description.trim(), type: sourceCount > 1 ? 'CROSS_SOURCE' : 'SINGLE_SOURCE' },
-    nodes: draft.nodes.map(node => ({ id: node.id, type: 'TABLE', datasourceId: node.table.dataSourceId, tableId: node.table.id, ...(node.table.fileVersionId ? { fileVersionId: node.table.fileVersionId } : {}), alias: identifier(node.alias), projection: [...node.selected], sourceFilters: [] })),
-    joins: draft.joins.map(join => ({ id: join.id, leftNodeId: join.leftNodeId, rightNodeId: join.rightNodeId, joinType: join.joinType, cardinality: 'UNKNOWN', manualConfirmed: join.manualConfirmed, conditions: (join.conditions && join.conditions.length > 1 ? join.conditions : [{ id: `${join.id}_condition_1`, leftField: join.leftField, rightField: join.rightField }]).map(condition => ({ leftExpression: { type: 'FIELD_REF', nodeId: join.leftNodeId, field: condition.leftField }, operator: 'EQUALS', rightExpression: { type: 'FIELD_REF', nodeId: join.rightNodeId, field: condition.rightField } })) })),
+    dataset: { code: identifier(draft.code), name: draft.name.trim(), description: draft.description.trim(), type: sourceCount > 1 ? 'CROSS_SOURCE' : 'SINGLE_SOURCE', layer },
+    nodes: draft.nodes.map(datasetNodeDSL),
+    joins: draft.joins.map(join => ({ id: join.id, leftNodeId: join.leftNodeId, rightNodeId: join.rightNodeId, joinType: join.joinType, cardinality: join.cardinality || 'UNKNOWN', manualConfirmed: join.manualConfirmed, conditions: (join.conditions && join.conditions.length > 1 ? join.conditions : [{ id: `${join.id}_condition_1`, leftField: join.leftField, rightField: join.rightField }]).map(condition => ({ leftExpression: { type: 'FIELD_REF', nodeId: join.leftNodeId, field: condition.leftField }, operator: 'EQUALS', rightExpression: { type: 'FIELD_REF', nodeId: join.rightNodeId, field: condition.rightField } })) })),
     preAggregations,
     fields,
     filters,
@@ -322,7 +375,7 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
     sorts: draft.sorts.flatMap(item => fieldIDs.get(item.fieldId) ? [{ fieldId: fieldIDs.get(item.fieldId)!, direction: item.direction }] : []),
     parameters: draft.parameters.map(item => ({ ...item, code: identifier(item.code) })),
     outputGrain: { description: grainDescription, keyFields: grainKeys },
-    executionPolicy: { mode: 'REALTIME', timeoutMs: 5000, previewLimit: 200, resultLimit: 10000, cacheTtlSeconds: 300, materialization: { enabled: false } },
+    executionPolicy: modeledExecutionPolicy(layer),
     designer: serializeDesignerGraph(designer),
   }
 }
@@ -416,11 +469,12 @@ export function buildDatasetDSL(draft: DatasetDraft): DatasetDSL {
   const grainKeys = draft.grainKeys.filter(code => fieldIDs.has(code))
   if (!draft.grainDescription.trim() || !grainKeys.length) throw new Error('请填写输出粒度并选择至少一个粒度键')
   const sourceCount = new Set(draft.nodes.map(node => node.table.dataSourceId)).size
+  const layer = modeledDatasetLayer(draft)
   return {
     dslVersion: '1.0',
-    dataset: { code: identifier(draft.code), name: draft.name.trim(), description: draft.description.trim(), type: sourceCount > 1 ? 'CROSS_SOURCE' : 'SINGLE_SOURCE' },
-    nodes: draft.nodes.map(node => ({ id: node.id, type: 'TABLE', datasourceId: node.table.dataSourceId, tableId: node.table.id, ...(node.table.fileVersionId ? { fileVersionId: node.table.fileVersionId } : {}), alias: identifier(node.alias), projection: [...node.selected], sourceFilters: [] })),
-    joins: draft.joins.map(join => ({ id: join.id, leftNodeId: join.leftNodeId, rightNodeId: join.rightNodeId, joinType: join.joinType, cardinality: 'UNKNOWN', manualConfirmed: join.manualConfirmed, conditions: (join.conditions && join.conditions.length > 1 ? join.conditions : [{ id: `${join.id}_condition_1`, leftField: join.leftField, rightField: join.rightField }]).map(condition => ({ leftExpression: { type: 'FIELD_REF', nodeId: join.leftNodeId, field: condition.leftField }, operator: 'EQUALS', rightExpression: { type: 'FIELD_REF', nodeId: join.rightNodeId, field: condition.rightField } })) })),
+    dataset: { code: identifier(draft.code), name: draft.name.trim(), description: draft.description.trim(), type: sourceCount > 1 ? 'CROSS_SOURCE' : 'SINGLE_SOURCE', layer },
+    nodes: draft.nodes.map(datasetNodeDSL),
+    joins: draft.joins.map(join => ({ id: join.id, leftNodeId: join.leftNodeId, rightNodeId: join.rightNodeId, joinType: join.joinType, cardinality: join.cardinality || 'UNKNOWN', manualConfirmed: join.manualConfirmed, conditions: (join.conditions && join.conditions.length > 1 ? join.conditions : [{ id: `${join.id}_condition_1`, leftField: join.leftField, rightField: join.rightField }]).map(condition => ({ leftExpression: { type: 'FIELD_REF', nodeId: join.leftNodeId, field: condition.leftField }, operator: 'EQUALS', rightExpression: { type: 'FIELD_REF', nodeId: join.rightNodeId, field: condition.rightField } })) })),
     preAggregations: preAggregation ? [{
       id: preAggregation.id,
       nodeId: preAggregation.nodeId,
@@ -433,7 +487,7 @@ export function buildDatasetDSL(draft: DatasetDraft): DatasetDSL {
     sorts: draft.sorts.filter(item => item.fieldId).map(item => ({ fieldId: fieldIDs.get(item.fieldId) ?? item.fieldId, direction: item.direction })),
     parameters: draft.parameters.map(item => ({ ...item, code: identifier(item.code) })),
     outputGrain: { description: draft.grainDescription.trim(), keyFields: grainKeys },
-    executionPolicy: { mode: 'REALTIME', timeoutMs: 5000, previewLimit: 200, resultLimit: 10000, cacheTtlSeconds: 300, materialization: { enabled: false } },
+    executionPolicy: modeledExecutionPolicy(layer),
   }
 }
 
@@ -550,12 +604,14 @@ export const datasetAPI = {
     const query = new URLSearchParams({ limit: String(limit), offset: String(offset), status: 'ACTIVE', managementStatus: 'ENABLED', enrichedOnly: 'true' })
     return apiRequest<{ items: AssetTable[]; total?: number; limit?: number; offset?: number }>(`/v1/assets/tables?${query}`, { cache: 'no-store' })
   },
+  table: (tableID: string) => apiRequest<AssetTable>(`/v1/assets/tables/${encodeURIComponent(tableID)}`, { cache: 'no-store' }),
   columns: async (tableID: string) => {
     const response = await apiRequest<{ items: AssetColumn[] }>(`/v1/assets/tables/${encodeURIComponent(tableID)}/columns`)
     // 资产详情会保留已失效字段供审计；数据集只能引用当前 ACTIVE 字段，否则保存时
     // 会在依赖快照阶段被服务端拒绝。
     return { ...response, items: response.items.filter(column => !column.assetStatus || column.assetStatus === 'ACTIVE') }
   },
+  allColumns: (tableID: string) => apiRequest<{ items: AssetColumn[] }>(`/v1/assets/tables/${encodeURIComponent(tableID)}/columns`, { cache: 'no-store' }),
   tablePreview: (tableID: string, maxRows = 5) => apiRequest<AssetTablePreview>(`/v1/assets/tables/${encodeURIComponent(tableID)}/preview?maxRows=${maxRows}`, { cache: 'no-store' }),
   // 指标等下游编辑器只能从租户内目录显式选择数据集，不能猜测或写死资源标识。
   list: (limit = 50, offset = 0) => {

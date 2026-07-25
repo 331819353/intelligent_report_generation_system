@@ -127,8 +127,6 @@ func writeDataSourceReviewError(writer http.ResponseWriter, request *http.Reques
 		writeDSError(writer, http.StatusConflict, "DATA_SOURCE_REVIEW_NOT_PENDING", "该审核申请已处理，不能重复操作")
 	case errors.Is(err, ErrReviewWithdrawForbidden):
 		writeDSError(writer, http.StatusForbidden, "DATA_SOURCE_REVIEW_WITHDRAW_FORBIDDEN", "只有提交申请的用户可以撤销")
-	case errors.Is(err, ErrReviewSelfApproval):
-		writeDSError(writer, http.StatusForbidden, "DATA_SOURCE_REVIEW_SELF_APPROVAL_FORBIDDEN", "提交人不能审核自己的发布申请")
 	case errors.Is(err, ErrInvalidConfiguration):
 		writeDSError(writer, http.StatusBadRequest, "DATA_SOURCE_REVIEW_INPUT_INVALID", "审核说明不符合要求；驳回原因不能为空且最多 1000 字")
 	default:

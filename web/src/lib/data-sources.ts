@@ -150,6 +150,7 @@ export type DataSourceTableRecord = {
   visibility: 'PRIVATE' | 'TENANT_PUBLIC'
   manualLocked: boolean
   businessVersion: number
+  structureHash: string
   managementStatus: 'ENABLED' | 'DISABLED'
   enrichmentStatus: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
   columnCount: number
@@ -244,7 +245,7 @@ const listAllTables = async (dataSourceId: string) => {
   const limit = 200
   let total: number
   do {
-    const query = new URLSearchParams({ dataSourceId, status: 'ACTIVE', enrichedOnly: 'true', limit: String(limit), offset: String(items.length) })
+    const query = new URLSearchParams({ dataSourceId, status: 'ACTIVE', limit: String(limit), offset: String(items.length) })
     const page = await apiRequest<DataSourceTablePage>(`/v1/assets/tables?${query}`, { cache: 'no-store' })
     items.push(...page.items)
     total = page.total
@@ -460,6 +461,10 @@ export const dataSourceAPI = {
   columns: (tableId: string) => apiRequest<{ items: DataSourceColumnRecord[] }>(`/v1/assets/tables/${encodeURIComponent(tableId)}/columns`, { cache: 'no-store' }),
   updateTable: (tableId: string, input: { businessName: string; businessDescription: string; tags: string[]; sensitivityLevel: string; visibility: string; manualLocked: boolean; expectedVersion: number }) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/business-metadata`, { method: 'PUT', body: JSON.stringify(input) }),
   updateColumn: (columnId: string, input: DataSourceColumnBusinessMetadataInput) => apiRequest<DataSourceColumnRecord>(`/v1/assets/columns/${encodeURIComponent(columnId)}/business-metadata`, { method: 'PUT', body: JSON.stringify(input) }),
+  completeTableManually: (tableId: string, expectedVersion: number, expectedStructureHash: string) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/manual-completion`, {
+    method: 'POST',
+    body: JSON.stringify({ expectedVersion, expectedStructureHash }),
+  }),
   disableTable: (tableId: string) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/disable`, { method: 'POST', body: '{}' }),
   enableTable: (tableId: string) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/enable`, { method: 'POST', body: '{}' }),
   deleteTable: (tableId: string) => apiRequest<void>(`/v1/assets/tables/${encodeURIComponent(tableId)}`, { method: 'DELETE' }),

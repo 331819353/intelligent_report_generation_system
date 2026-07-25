@@ -13,7 +13,6 @@ var (
 	ErrPublicationRequestConflict   = errors.New("dataset publication request version conflict")
 	ErrPublicationRequestNotPending = errors.New("dataset publication request is not pending")
 	ErrPublicationCandidatesFailed  = errors.New("dataset publication metric candidate generation failed")
-	ErrPublicationCandidatesPending = errors.New("dataset publication metric candidates are not ready")
 )
 
 const (
@@ -201,11 +200,6 @@ func (s *PublicationApprovalService) Approve(
 	}
 	if request.Status != PublicationRequestPending {
 		return PublicationApprovalResult{}, ErrPublicationRequestNotPending
-	}
-	if request.MetricCandidateStatus != PublicationCandidateSucceeded &&
-		request.MetricCandidateStatus != PublicationCandidatePartial &&
-		request.MetricCandidateStatus != PublicationCandidateLegacy {
-		return PublicationApprovalResult{}, ErrPublicationCandidatesPending
 	}
 	if request.Version != input.ExpectedVersion {
 		return PublicationApprovalResult{}, ErrPublicationRequestConflict

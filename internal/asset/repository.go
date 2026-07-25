@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -12,10 +13,22 @@ import (
 	"intelligent-report-generation-system/internal/semanticquality"
 )
 
-type Repository struct{ pool *pgxpool.Pool }
+type manualCompletionSink interface {
+	EnsureMappedDatasetTx(context.Context, pgx.Tx, string, string, string) error
+}
+
+type Repository struct {
+	pool                 *pgxpool.Pool
+	manualCompletionSink manualCompletionSink
+}
 
 // NewRepository 创建数据资产读写仓储。
 func NewRepository(pool *pgxpool.Pool) *Repository { return &Repository{pool: pool} }
+
+// SetManualCompletionSink 注入手工完善完成后的 ODS 数据集提交边界。
+func (r *Repository) SetManualCompletionSink(sink manualCompletionSink) {
+	r.manualCompletionSink = sink
+}
 
 const tableSelect = `t.id::text,t.data_source_id::text,d.name,d.source_type::text,COALESCE((SELECT fv.id::text FROM platform.file_assets fa JOIN platform.file_asset_versions fv ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version WHERE fa.id=d.file_asset_id),''),t.catalog_name,t.schema_name,t.table_name,t.table_type,t.source_comment,t.business_name,t.business_description,t.tags,t.sensitivity_level::text,t.visibility::text,t.manual_locked,t.asset_status::text,t.management_status,CASE WHEN t.last_enriched_structure_hash<>'' AND t.last_enriched_structure_hash=t.structure_hash THEN 'SUCCEEDED' ELSE COALESCE((SELECT j.status FROM platform.ai_metadata_jobs j WHERE j.table_id=t.id AND j.metadata_structure_hash=t.structure_hash ORDER BY j.created_at DESC LIMIT 1),'PENDING') END,t.structure_hash,t.metadata_version,t.business_version,(SELECT count(*) FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE'),t.last_sync_at::text`
 
@@ -135,6 +148,127 @@ func (r *Repository) UpdateColumn(ctx context.Context, tenantID, actorID, id str
 		return tx.QueryRow(ctx, `SELECT id::text,table_id::text,column_name,ordinal_position,source_comment,native_type,canonical_type,nullable,business_name,business_description,tags,sensitivity_level::text,semantic_type,manual_locked,asset_status::text,business_version FROM platform.metadata_columns WHERE id=$1`, id).Scan(&item.ID, &item.TableID, &item.ColumnName, &item.OrdinalPosition, &item.SourceComment, &item.NativeType, &item.CanonicalType, &item.Nullable, &item.BusinessName, &item.BusinessDescription, &item.Tags, &item.SensitivityLevel, &item.SemanticType, &item.ManualLocked, &item.AssetStatus, &item.BusinessVersion)
 	})
 	return item, err
+}
+
+// CompleteTableManually 对人工填写结果做完整性复核，原子推进当前结构的完善
+// marker，并创建或刷新系统维护的 ODS 数据集。手工完成的数据会自动锁定，避免
+// 后续 LLM 刷新覆盖已经确认的业务语义。
+func (r *Repository) CompleteTableManually(
+	ctx context.Context,
+	tenantID, actorID, id string,
+	input ManualCompletionInput,
+) (Table, error) {
+	if err := input.Validate(); err != nil {
+		return Table{}, err
+	}
+	if r.manualCompletionSink == nil {
+		return Table{}, errors.New("manual completion sink is not configured")
+	}
+	err := database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
+		var businessName, businessDescription, structureHash, tableStructureHash string
+		var tags []string
+		var version int64
+		if err := tx.QueryRow(ctx, `SELECT business_name,business_description,tags,
+				structure_hash,table_structure_hash,business_version
+			FROM platform.metadata_tables
+			WHERE id=$1 AND asset_status='ACTIVE' AND management_status='ENABLED'
+			FOR UPDATE`, id).Scan(
+			&businessName, &businessDescription, &tags,
+			&structureHash, &tableStructureHash, &version,
+		); err != nil {
+			return err
+		}
+		if version != input.ExpectedVersion || structureHash != input.ExpectedStructureHash {
+			return errors.New("asset version or structure changed")
+		}
+		missing := make([]string, 0)
+		if strings.TrimSpace(businessName) == "" {
+			missing = append(missing, "表业务名称")
+		}
+		if strings.TrimSpace(businessDescription) == "" {
+			missing = append(missing, "表业务说明")
+		}
+		if len(tags) == 0 {
+			missing = append(missing, "表标签")
+		}
+		type columnCompletion struct {
+			ID, Name, BusinessName, BusinessDescription, SemanticType, StructureHash string
+			Tags                                                                     []string
+		}
+		columns := make([]columnCompletion, 0)
+		rows, err := tx.Query(ctx, `SELECT id::text,column_name,business_name,
+				business_description,tags,semantic_type,structure_hash
+			FROM platform.metadata_columns
+			WHERE table_id=$1 AND asset_status='ACTIVE'
+			ORDER BY ordinal_position
+			FOR UPDATE`, id)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var column columnCompletion
+			if err := rows.Scan(
+				&column.ID, &column.Name, &column.BusinessName,
+				&column.BusinessDescription, &column.Tags, &column.SemanticType,
+				&column.StructureHash,
+			); err != nil {
+				rows.Close()
+				return err
+			}
+			columns = append(columns, column)
+			if strings.TrimSpace(column.BusinessName) == "" {
+				missing = append(missing, "字段 "+column.Name+" 的业务名称")
+			}
+			if strings.TrimSpace(column.BusinessDescription) == "" {
+				missing = append(missing, "字段 "+column.Name+" 的业务说明")
+			}
+			if len(column.Tags) == 0 {
+				missing = append(missing, "字段 "+column.Name+" 的标签")
+			}
+			if strings.TrimSpace(column.SemanticType) == "" {
+				missing = append(missing, "字段 "+column.Name+" 的语义类型")
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(columns) == 0 {
+			missing = append(missing, "活动字段")
+		}
+		if len(missing) > 0 {
+			if len(missing) > 12 {
+				missing = append(missing[:12], fmt.Sprintf("其余 %d 项", len(missing)-12))
+			}
+			return &ManualCompletionIncompleteError{Missing: missing}
+		}
+		if tableStructureHash == "" {
+			return errors.New("table structure hash is unavailable")
+		}
+		if _, err := tx.Exec(ctx, `UPDATE platform.metadata_tables
+			SET manual_locked=true,
+			    last_enriched_table_structure_hash=table_structure_hash,
+			    last_enriched_structure_hash=structure_hash
+			WHERE id=$1`, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE platform.metadata_columns
+			SET manual_locked=true,last_enriched_structure_hash=structure_hash
+			WHERE table_id=$1 AND asset_status='ACTIVE'`, id); err != nil {
+			return err
+		}
+		if err := r.manualCompletionSink.EnsureMappedDatasetTx(ctx, tx, tenantID, actorID, id); err != nil {
+			return err
+		}
+		return audit(ctx, tx, tenantID, actorID, "COMPLETE_MANUAL_METADATA", "TABLE_ASSET", id, map[string]any{
+			"structureHash": structureHash,
+			"columnCount":   len(columns),
+		})
+	})
+	if err != nil {
+		return Table{}, err
+	}
+	return r.GetTable(ctx, tenantID, id)
 }
 
 // SetTableManagementStatus 只改变 PostgreSQL 表资产可用性，不对源数据库执行任何操作。

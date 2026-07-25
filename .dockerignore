@@ -1,0 +1,14 @@
+.git
+.env
+.runtime
+.vite
+.cache
+artifacts
+bin
+coverage.out
+design-qa.md
+web/dist
+web/node_modules
+**/.DS_Store
+**/__pycache__
+**/.pytest_cache

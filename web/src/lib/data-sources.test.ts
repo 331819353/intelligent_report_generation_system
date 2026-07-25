@@ -185,6 +185,28 @@ test('字段业务元数据接口按数组格式提交说明和标签', async ()
   expect(JSON.parse(String(requests[0].init?.body))).toEqual(metadata)
 })
 
+test('手工完善完成接口绑定表业务版本和精确结构哈希', async () => {
+  sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'access', refreshToken: 'refresh' }))
+  const requests: Array<{ url: string; init?: RequestInit }> = []
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    requests.push({ url: String(input), init })
+    return new Response(JSON.stringify({ id: 'table-1', structureHash: 'a'.repeat(64) }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }))
+
+  await dataSourceAPI.completeTableManually('table/id', 7, 'a'.repeat(64))
+
+  expect(requests).toHaveLength(1)
+  expect(requests[0].url).toBe('/api/v1/assets/tables/table%2Fid/manual-completion')
+  expect(requests[0].init?.method).toBe('POST')
+  expect(JSON.parse(String(requests[0].init?.body))).toEqual({
+    expectedVersion: 7,
+    expectedStructureHash: 'a'.repeat(64),
+  })
+})
+
 test('按数据源分页读取全部活动表结构', async () => {
   sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'access', refreshToken: 'refresh' }))
   const urls: string[] = []
@@ -206,5 +228,6 @@ test('按数据源分页读取全部活动表结构', async () => {
   expect(urls[0]).toContain('/api/v1/assets/tables?')
   expect(urls[0]).toContain('dataSourceId=source%2Fid')
   expect(urls[0]).toContain('status=ACTIVE')
+  expect(urls[0]).not.toContain('enrichedOnly=true')
   expect(urls[0]).toContain('limit=200')
 })

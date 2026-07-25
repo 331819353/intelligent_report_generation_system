@@ -180,6 +180,47 @@ func TestStageStreamsTypedRowsIntoOnePostgreSQLTransaction(t *testing.T) {
 	}
 }
 
+func TestNormalizeStageTimestampAcceptsConnectorISOValues(t *testing.T) {
+	for _, value := range []string{
+		"2026-07-24T10:11:12",
+		"2026-07-24T10:11:12.123456",
+		"2026-07-24T10:11:12.123456+08:00",
+		"2026-07-24 10:11:12",
+	} {
+		normalized, err := normalizeStageValue(value, "DATETIME")
+		if err != nil {
+			t.Fatalf("value=%q err=%v", value, err)
+		}
+		timestamp, ok := normalized.(pgtype.Timestamp)
+		if !ok || !timestamp.Valid {
+			t.Fatalf("value=%q normalized=%#v", value, normalized)
+		}
+	}
+	if _, err := normalizeStageValue("not-a-timestamp", "TIMESTAMP"); err == nil {
+		t.Fatal("invalid timestamp must fail closed")
+	}
+}
+
+func TestNormalizeStageDateAcceptsOracleDatetimeValue(t *testing.T) {
+	for _, value := range []string{
+		"2026-07-24",
+		"2026-07-24T00:00:00",
+		"2026-07-24T23:59:59.123456+08:00",
+	} {
+		normalized, err := normalizeStageValue(value, "DATE")
+		if err != nil {
+			t.Fatalf("value=%q err=%v", value, err)
+		}
+		date, ok := normalized.(pgtype.Date)
+		if !ok || !date.Valid || date.Time.Format("2006-01-02") != "2026-07-24" {
+			t.Fatalf("value=%q normalized=%#v", value, normalized)
+		}
+	}
+	if _, err := normalizeStageValue("not-a-date", "DATE"); err == nil {
+		t.Fatal("invalid date must fail closed")
+	}
+}
+
 func TestStageFailsClosedBeforeCommitOnShapeOrTypeDrift(t *testing.T) {
 	tests := []fakeStreamReader{
 		{columns: []string{"id", "wrong", "created_at"}, rows: [][]any{{1, 2, "2026-07-24 10:11:12"}}},

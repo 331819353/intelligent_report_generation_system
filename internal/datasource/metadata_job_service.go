@@ -9,12 +9,20 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
+
+	aiplatform "intelligent-report-generation-system/internal/ai"
+)
+
+const (
+	metadataCompletionConcurrency = 5
+	metadataCompletionMaxRetries  = 3
 )
 
 // managedMetadataRepository 为刷新任务提供原子身份校验；导入仍使用 Repository 的可重新导入语义。
 type managedMetadataRepository interface {
-	ApplyManagedMetadata(context.Context, Source, string, string, SyncResult) (ManagedMetadataApplyResult, error)
+	ApplyManagedMetadata(context.Context, Source, string, string, bool, SyncResult) (ManagedMetadataApplyResult, error)
 	DeactivateManagedMetadata(context.Context, Source, TableSelection, time.Time) (bool, error)
 }
 
@@ -371,6 +379,7 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 			break
 		}
 	}
+	completionWorks := make([]metadataCompletionWork, 0, len(items))
 	for _, item := range items {
 		if item.Status == "SUCCEEDED" || item.Status == "SKIPPED" || item.Status == "FAILED" {
 			continue
@@ -469,7 +478,10 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 		var tableID string
 		if claim.Kind == MetadataJobRefresh {
 			var applied ManagedMetadataApplyResult
-			applied, err = refreshRepository.ApplyManagedMetadata(ctx, source, item.TableID, item.PreviousStructureHash, metadata)
+			applied, err = refreshRepository.ApplyManagedMetadata(
+				ctx, source, item.TableID, item.PreviousStructureHash,
+				claim.Mode == MetadataRefreshFull, metadata,
+			)
 			tableID, managed = applied.TableID, applied.Managed
 			if claim.Mode == MetadataRefreshIncremental {
 				targetTable = applied.TablePending
@@ -561,38 +573,200 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 		if err := s.jobs.UpdateMetadataJobItem(ctx, claim.TenantID, claim.ID, item.ID, workerID, metadataJobItemUpdate{Status: "RUNNING", Stage: "LLM", TableID: tableID}, lease); err != nil {
 			return err
 		}
-		if err := s.ensureMetadataJobSourceCurrent(ctx, claim); err != nil {
-			return err
+		completionWorks = append(completionWorks, metadataCompletionWork{
+			item: item, tableID: tableID, rows: rows, targetTable: targetTable,
+			targetColumnIDs: targetColumnIDs, structureHash: structureHash,
+			sourceVersion: source.Version,
+		})
+	}
+	return s.completeMetadataWorks(ctx, claim, workerID, lease, completionWorks)
+}
+
+// metadataCompletionWork 是技术元数据落库并完成样本治理后的不可变 LLM 输入。
+// 只有这一段远程模型调用并发执行，源库发现、采样和 PostgreSQL 技术元数据写入
+// 仍保持顺序，从而不放大源库连接和写入竞争。
+type metadataCompletionWork struct {
+	item            metadataJobItem
+	tableID         string
+	rows            []map[string]any
+	targetTable     bool
+	targetColumnIDs []string
+	structureHash   string
+	sourceVersion   int64
+}
+
+type metadataCompletionResult struct {
+	work     metadataCompletionWork
+	err      error
+	fatalErr error
+}
+
+type indexedMetadataCompletionResult struct {
+	index  int
+	result metadataCompletionResult
+}
+
+// completeMetadataWorks 使用“整轮屏障”重试：一轮内最多 5 个 LLM 调用并发，
+// 必须等待本轮所有表结束后，失败项才会进入下一轮。初次调用之外最多重试 3 次。
+func (s *Service) completeMetadataWorks(
+	ctx context.Context,
+	claim *metadataJobClaim,
+	workerID string,
+	lease time.Duration,
+	works []metadataCompletionWork,
+) error {
+	pending := append([]metadataCompletionWork(nil), works...)
+	for attempt := 0; len(pending) > 0 && attempt <= metadataCompletionMaxRetries; attempt++ {
+		results := s.completeMetadataRound(ctx, claim, workerID, lease, pending)
+		for _, result := range results {
+			if result.fatalErr != nil {
+				return result.fatalErr
+			}
 		}
-		// Sample() 可能是一次慢查询；在任何样本进入 LLM 调用前做最后一次撤权
-		// 栅栏，避免采样期间策略从 RAW/MASK 被管理员收紧后仍继续出域。
-		if claim.SampleDataMode != MetadataSampleDeny {
-			if err := s.jobs.ValidateMetadataSamplePolicy(
-				ctx, claim.TenantID, claim.ID, claim.SampleDataMode, claim.SamplePolicyVersion,
-			); err != nil {
-				if errors.Is(err, ErrSamplePolicyChanged) || errors.Is(err, ErrSamplePolicyDenied) {
-					return metadataJobExecutionError{
-						code:    "SAMPLE_POLICY_CHANGED",
-						message: "租户样本策略或授权人状态已变化；样本未发送给 LLM，请重新提交",
-						cause:   err,
+
+		retry := make([]metadataCompletionWork, 0, len(results))
+		for _, result := range results {
+			if result.err == nil {
+				continue
+			}
+			slog.ErrorContext(ctx, "metadata job LLM completion failed",
+				"job_id", claim.ID, "table", result.work.item.TableName,
+				"attempt", attempt+1, "error", result.err,
+				"output_diagnostic", aiplatform.InvalidOutputDiagnostic(result.err))
+			if attempt < metadataCompletionMaxRetries && metadataCompletionShouldRetry(result.err) {
+				retry = append(retry, result.work)
+				continue
+			}
+			if s.mappedDrafts != nil {
+				if err := s.mappedDrafts.EnsureMappedDatasetDraft(
+					ctx, claim.TenantID, claim.RequestedBy, result.work.tableID,
+				); err != nil {
+					slog.ErrorContext(ctx, "create incomplete mapped ODS draft",
+						"job_id", claim.ID, "table", result.work.item.TableName,
+						"table_id", result.work.tableID, "error", err)
+					if failErr := s.failMetadataJobItem(
+						ctx, claim, result.work.item, workerID, lease, "PERSISTENCE",
+						"ODS_DRAFT_CREATE_FAILED", "LLM 结果不完整，且创建可编辑 ODS 草稿失败，请重试",
+					); failErr != nil {
+						return failErr
 					}
+					continue
 				}
+			}
+			failureCode, failureMessage := metadataCompletionJobFailure(result.err)
+			if err := s.failMetadataJobItem(
+				ctx, claim, result.work.item, workerID, lease, "LLM",
+				failureCode, failureMessage,
+			); err != nil {
 				return err
 			}
 		}
-		if err := s.completer.CompleteTable(ctx, claim.TenantID, claim.RequestedBy, tableID, rows, targetTable, targetColumnIDs, structureHash, item.ID, workerID, source.Version); err != nil {
-			slog.ErrorContext(ctx, "metadata job LLM completion failed", "job_id", claim.ID, "table", item.TableName, "error", err)
-			failureCode, failureMessage := metadataCompletionJobFailure(err)
-			if err := s.failMetadataJobItem(ctx, claim, item, workerID, lease, "LLM", failureCode, failureMessage); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := s.jobs.UpdateMetadataJobItem(ctx, claim.TenantID, claim.ID, item.ID, workerID, metadataJobItemUpdate{Status: "SUCCEEDED", Stage: "COMPLETE", TableID: tableID}, lease); err != nil {
-			return err
-		}
+		pending = retry
 	}
 	return nil
+}
+
+func (s *Service) completeMetadataRound(
+	ctx context.Context,
+	claim *metadataJobClaim,
+	workerID string,
+	lease time.Duration,
+	works []metadataCompletionWork,
+) []metadataCompletionResult {
+	results := make([]metadataCompletionResult, len(works))
+	workIndexes := make(chan int)
+	completedResults := make(chan indexedMetadataCompletionResult, len(works))
+	workerCount := metadataCompletionConcurrency
+	if len(works) < workerCount {
+		workerCount = len(works)
+	}
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for worker := 0; worker < workerCount; worker++ {
+		go func() {
+			defer workers.Done()
+			for index := range workIndexes {
+				work := works[index]
+				result := metadataCompletionResult{work: work}
+				if err := ctx.Err(); err != nil {
+					result.fatalErr = err
+					completedResults <- indexedMetadataCompletionResult{index: index, result: result}
+					continue
+				}
+				if err := s.ensureMetadataJobSourceCurrent(ctx, claim); err != nil {
+					result.fatalErr = err
+					completedResults <- indexedMetadataCompletionResult{index: index, result: result}
+					continue
+				}
+				// Sample() 可能是一次慢查询；每次初次调用或重试真正进入 LLM 前
+				// 都重新执行撤权栅栏，避免排队期间授权被管理员收紧后仍继续出域。
+				if claim.SampleDataMode != MetadataSampleDeny {
+					if err := s.jobs.ValidateMetadataSamplePolicy(
+						ctx, claim.TenantID, claim.ID, claim.SampleDataMode,
+						claim.SamplePolicyVersion,
+					); err != nil {
+						if errors.Is(err, ErrSamplePolicyChanged) || errors.Is(err, ErrSamplePolicyDenied) {
+							result.fatalErr = metadataJobExecutionError{
+								code:    "SAMPLE_POLICY_CHANGED",
+								message: "租户样本策略或授权人状态已变化；样本未发送给 LLM，请重新提交",
+								cause:   err,
+							}
+						} else {
+							result.fatalErr = err
+						}
+						completedResults <- indexedMetadataCompletionResult{index: index, result: result}
+						continue
+					}
+				}
+				result.err = s.completer.CompleteTable(
+					ctx, claim.TenantID, claim.RequestedBy, work.tableID, work.rows,
+					work.targetTable, work.targetColumnIDs, work.structureHash,
+					work.item.ID, workerID, work.sourceVersion,
+				)
+				completedResults <- indexedMetadataCompletionResult{index: index, result: result}
+			}
+		}()
+	}
+	go func() {
+		for index := range works {
+			workIndexes <- index
+		}
+		close(workIndexes)
+	}()
+	// 成功表在本轮其他 LLM 请求仍执行时就落为终态，让页面轮询可以逐表推进；
+	// 失败表仍留在 LLM 阶段，只有等整轮结果齐备后才由上层决定是否重试。
+	for range works {
+		indexed := <-completedResults
+		result := indexed.result
+		if result.err == nil && result.fatalErr == nil {
+			if err := s.jobs.UpdateMetadataJobItem(
+				ctx, claim.TenantID, claim.ID, result.work.item.ID, workerID,
+				metadataJobItemUpdate{
+					Status: "SUCCEEDED", Stage: "COMPLETE", TableID: result.work.tableID,
+				}, lease,
+			); err != nil {
+				result.fatalErr = err
+			}
+		}
+		results[indexed.index] = result
+	}
+	workers.Wait()
+	return results
+}
+
+func metadataCompletionShouldRetry(err error) bool {
+	code := "COMPLETION_FAILED"
+	var classified metadataCompletionFailureCoder
+	if errors.As(err, &classified) {
+		code = classified.MetadataCompletionFailureCode()
+	}
+	switch code {
+	case "SOURCE_CHANGED", "STRUCTURE_CHANGED", "PROCESSING_LEASE_LOST",
+		"TENANT_AI_FORBIDDEN", "QUOTA_EXCEEDED":
+		return false
+	default:
+		return true
+	}
 }
 
 type metadataCompletionFailureCoder interface {
@@ -622,6 +796,8 @@ func metadataCompletionJobFailure(err error) (string, string) {
 		return "LLM_TIMEOUT", "LLM 表结构完善超时，请稍后重新提交"
 	case "INVALID_OUTPUT":
 		return "LLM_OUTPUT_INVALID", "LLM 返回的表名、字段或标签不完整，请重试或改为手工完善"
+	case "PARTIAL_OUTPUT":
+		return "LLM_OUTPUT_PARTIAL", "LLM 已保存可用的表名、字段和标签，剩余缺失项请在 ODS 数据集中手工完善"
 	default:
 		return "LLM_COMPLETION_FAILED", "LLM 表结构完善失败，请重试；若持续失败可先手工完善表名、字段和标签"
 	}

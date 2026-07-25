@@ -380,8 +380,6 @@ func writeDatasetError(w http.ResponseWriter, err error) {
 		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_PUBLICATION_REQUEST_CONFLICT", "message": "发布审批申请已被其他请求处理，请重新加载"})
 	case errors.Is(err, ErrPublicationRequestNotPending):
 		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_PUBLICATION_REQUEST_NOT_PENDING", "message": "发布审批申请当前状态不能执行该操作"})
-	case errors.Is(err, ErrPublicationCandidatesPending):
-		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_METRIC_CANDIDATES_NOT_READY", "message": "指标候选尚未同步生成完成，暂时不能审批发布"})
 	case errors.Is(err, ErrPublicationCandidatesFailed):
 		writeDatasetJSON(w, http.StatusBadGateway, map[string]string{"code": "DATASET_METRIC_CANDIDATES_FAILED", "message": "指标候选生成失败，请重新提交发布审批"})
 	case errors.Is(err, ErrVersionRollbackUnavailable):

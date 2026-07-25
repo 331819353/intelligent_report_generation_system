@@ -17,6 +17,7 @@ import (
 )
 
 var schemaNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+var quotedOutputDiagnosticPattern = regexp.MustCompile(`"[^"\r\n]*"`)
 
 var supportedSchemaKeywords = map[string]bool{
 	"$comment": true, "$defs": true, "$ref": true,
@@ -471,17 +472,17 @@ func validateJSONLiteral(value any, depth int) error {
 func validateStructuredOutput(schemaRoot map[string]any, content []byte) (json.RawMessage, error) {
 	value, err := decodeSingleJSONValue(content)
 	if err != nil {
-		return nil, invalidOutput(err)
+		return nil, invalidStructuredOutput(content, err)
 	}
 	if _, ok := value.(map[string]any); !ok {
-		return nil, invalidOutput(errors.New("structured output must be a JSON object"))
+		return nil, invalidStructuredOutput(content, errors.New("structured output must be a JSON object"))
 	}
 	if err := validateJSONValue(schemaRoot, schemaRoot, value, "$"); err != nil {
-		return nil, invalidOutput(err)
+		return nil, invalidStructuredOutput(content, err)
 	}
 	canonical, err := json.Marshal(value)
 	if err != nil {
-		return nil, invalidOutput(errors.New("structured output cannot be normalized"))
+		return nil, invalidStructuredOutput(content, errors.New("structured output cannot be normalized"))
 	}
 	return canonical, nil
 }
@@ -1046,4 +1047,84 @@ func invalidRequest(cause error) *ProviderError {
 // invalidOutput 构造不会回显模型正文的结构化输出错误。
 func invalidOutput(cause error) *ProviderError {
 	return newProviderError(ErrorCodeInvalidOutput, "AI structured output is invalid", 0, false, 0, cause)
+}
+
+// structuredOutputViolation 仅在当前进程内短暂保留非法候选，供领域层把原输出和
+// 精确校验规则交还同一模型纠错。Error 不展开正文，审计和普通日志不会泄露模型输出。
+type structuredOutputViolation struct {
+	content    json.RawMessage
+	diagnostic string
+	cause      error
+}
+
+func (e *structuredOutputViolation) Error() string {
+	return "structured output violated the response schema"
+}
+
+func (e *structuredOutputViolation) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func invalidStructuredOutput(content []byte, cause error) *ProviderError {
+	candidate := append(json.RawMessage(nil), content...)
+	violation := &structuredOutputViolation{
+		content: candidate, diagnostic: safeStructuredOutputDiagnostic(cause), cause: cause,
+	}
+	return invalidOutput(violation)
+}
+
+// InvalidOutputDetails 返回只在内存中存在的非法候选副本，以及不包含字段值的安全
+// 校验诊断。调用方不得持久化或记录 content；diagnostic 可用于服务端诊断日志。
+func InvalidOutputDetails(err error) (content json.RawMessage, diagnostic string, ok bool) {
+	var providerErr *ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Code != ErrorCodeInvalidOutput {
+		return nil, "", false
+	}
+	var violation *structuredOutputViolation
+	if !errors.As(providerErr, &violation) || violation == nil {
+		return nil, "", false
+	}
+	return append(json.RawMessage(nil), violation.content...), violation.diagnostic, true
+}
+
+// InvalidOutputDiagnostic 只返回可安全写入服务端日志的结构路径与失败规则。
+func InvalidOutputDiagnostic(err error) string {
+	_, diagnostic, ok := InvalidOutputDetails(err)
+	if !ok {
+		return ""
+	}
+	return diagnostic
+}
+
+func safeStructuredOutputDiagnostic(cause error) string {
+	if cause == nil {
+		return "structured output validation failed"
+	}
+	var syntaxErr *json.SyntaxError
+	if errors.As(cause, &syntaxErr) {
+		return fmt.Sprintf("invalid JSON syntax at byte %d", syntaxErr.Offset)
+	}
+	message := strings.TrimSpace(cause.Error())
+	switch {
+	case strings.HasPrefix(message, "$"):
+		// 属性名可能由模型自由生成；仅保留结构路径与规则，所有引号内容均脱敏。
+		message = quotedOutputDiagnosticPattern.ReplaceAllString(message, `"<redacted>"`)
+	case strings.Contains(message, "duplicate key"):
+		return "JSON object contains a duplicate key"
+	case strings.Contains(message, "invalid UTF-8"):
+		return "JSON contains invalid UTF-8"
+	case strings.Contains(message, "trailing"):
+		return "JSON contains trailing content"
+	case strings.Contains(message, "empty"):
+		return "JSON value is empty"
+	default:
+		return "structured output validation failed"
+	}
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	return message
 }

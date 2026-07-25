@@ -13,7 +13,7 @@ import {
   TableIcon,
   XIcon,
 } from '@phosphor-icons/react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { AssetManagementTabs } from '../components/AssetManagementTabs'
 import {
@@ -173,6 +173,7 @@ function formatDate(value: string): string {
 /** 指标目录负责发现与理解；高风险的编辑、试算和发布继续由独立编辑路由承载。 */
 export function MetricCatalogPage() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const [metrics, setMetrics] = useState<MetricSummary[]>([])
   const [candidates, setCandidates] = useState<MetricCandidate[]>([])
   const [datasets, setDatasets] = useState<DatasetSummary[]>([])
@@ -180,7 +181,9 @@ export function MetricCatalogPage() {
   const [error, setError] = useState('')
   const [candidateError, setCandidateError] = useState('')
   const [reloadKey, setReloadKey] = useState(0)
-  const [view, setView] = useState<DirectoryView>('datasets')
+  const [view, setView] = useState<DirectoryView>(
+    searchParams.get('view') === 'candidates' ? 'candidates' : 'datasets',
+  )
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState('ALL')
   const [type, setType] = useState('ALL')
@@ -507,7 +510,7 @@ export function MetricCatalogPage() {
               <div className="metric-asset-actions">{candidate.acceptedMetricId ? <button className="action-edit" type="button" onClick={() => navigate(`/metrics/${candidate.acceptedMetricId}/edit`)}>查看指标</button> : <span className="metric-candidate-state">{publishable ? '可加入批量发布' : candidate.blockReasons[0] || '不可发布'}</span>}</div>
             </article>
           })}
-        </div> : <div className="metric-directory-empty"><MagicWandIcon size={38} /><strong>{candidates.length ? '没有符合条件的候选指标' : '还没有候选指标'}</strong><p>{candidates.length ? '调整搜索词或筛选条件后再试。' : '提交数据集发布审批时会同步生成；审批通过后才会在这里展示。'}</p>{filterActive && <button className="quiet-button" type="button" onClick={resetFilters}>清除筛选</button>}</div>}
+        </div> : <div className="metric-directory-empty"><MagicWandIcon size={38} /><strong>{candidates.length ? '没有符合条件的候选指标' : '还没有候选指标'}</strong><p>{candidates.length ? '调整搜索词或筛选条件后再试。' : '数据集审批通过后会异步生成候选，完成后在这里展示。'}</p>{filterActive && <button className="quiet-button" type="button" onClick={resetFilters}>清除筛选</button>}</div>}
     </section>
 
     {deletingMetric && <div className="metric-delete-backdrop" role="presentation" onMouseDown={event => {

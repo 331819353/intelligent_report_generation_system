@@ -768,6 +768,296 @@ export function hydrateDesignerGraph(dsl: DatasetDSL, nodes: DesignerNode[], joi
   return applyLegacyDesignerLayout(legacyDSL.designer, layoutDesignerGraph(graph, nodes.map(node => node.id)))
 }
 
+type DWDTransformStep = {
+  operation: GraphTransformOperation
+  additionalInputKeys?: string[]
+  unit?: GraphTransformRule['unit']
+  targetType?: GraphTransformRule['targetType']
+  fallbackValue?: string
+  separator?: string
+  precision?: number
+  start?: number
+  length?: number
+  searchValue?: string
+  replacementValue?: string
+  matchValue?: string
+  thenValue?: string
+  elseValue?: string
+  conditionOperator?: GraphConditionOperator
+}
+
+const dwdLiteralText = (value: unknown): string | null => {
+  const literal = record(value)
+  if (text(literal.type).toUpperCase() !== 'LITERAL') return null
+  if (typeof literal.value === 'string') return literal.value
+  if (typeof literal.value === 'number' || typeof literal.value === 'boolean') return String(literal.value)
+  return null
+}
+
+const dwdExpressionSourceKey = (value: unknown): string => {
+  const expression = record(value)
+  const type = text(expression.type).toUpperCase()
+  if (type === 'FIELD_REF') {
+    const nodeID = text(expression.nodeId), field = text(expression.field)
+    return nodeID && field ? `${nodeID}.${field}` : ''
+  }
+  if (type === 'CAST') return dwdExpressionSourceKey(expression.argument)
+  if (type === 'COALESCE') {
+    const args = list(expression.arguments)
+    return dwdLiteralText(args[1]) === '' ? dwdExpressionSourceKey(args[0]) : ''
+  }
+  return ''
+}
+
+const dwdUnwrapNullSafeConcat = (value: unknown): unknown => {
+  const expression = record(value)
+  if (text(expression.type).toUpperCase() !== 'COALESCE') return value
+  const args = list(expression.arguments)
+  return dwdLiteralText(args[1]) === '' ? args[0] : value
+}
+
+function dwdTransformChain(value: unknown): { sourceKey: string; steps: DWDTransformStep[] } | null {
+  const expression = record(value)
+  const rawType = text(expression.type).toUpperCase()
+  if (rawType === 'FIELD_REF') {
+    const sourceKey = dwdExpressionSourceKey(expression)
+    return sourceKey ? { sourceKey, steps: [] } : null
+  }
+  const type = rawType as GraphTransformOperation
+  const unary = (step: DWDTransformStep) => {
+    const inner = dwdTransformChain(expression.argument)
+    return inner ? { ...inner, steps: [...inner.steps, step] } : null
+  }
+  if (type === 'TRIM' || type === 'UPPER' || type === 'LOWER' || type === 'ABS' || type === 'FLOOR' || type === 'CEIL') {
+    return unary({ operation: type })
+  }
+  if (type === 'DATE_FORMAT' || type === 'DATE_TRUNC') {
+    const unit = text(expression.unit).toUpperCase()
+    if (!['DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR'].includes(unit) || type === 'DATE_FORMAT' && unit === 'WEEK') return null
+    return unary({ operation: type, unit: unit as GraphTransformRule['unit'] })
+  }
+  if (type === 'CAST') {
+    const targetType = text(expression.targetType).toUpperCase()
+    if (!['STRING', 'INTEGER', 'DECIMAL', 'BOOLEAN', 'DATE', 'DATETIME'].includes(targetType)) return null
+    return unary({ operation: 'CAST', targetType: targetType as GraphTransformRule['targetType'] })
+  }
+  if (type === 'COALESCE') {
+    const args = list(expression.arguments)
+    const inner = dwdTransformChain(args[0])
+    const fallbackValue = dwdLiteralText(args[1])
+    if (!inner || fallbackValue === null) return null
+    return { ...inner, steps: [...inner.steps, { operation: 'COALESCE', fallbackValue }] }
+  }
+  if (type === 'REPLACE' || type === 'SUBSTRING' || type === 'ROUND') {
+    const args = list(expression.arguments)
+    const inner = dwdTransformChain(args[0])
+    if (!inner) return null
+    if (type === 'REPLACE') {
+      const searchValue = dwdLiteralText(args[1]), replacementValue = dwdLiteralText(args[2])
+      return searchValue !== null && replacementValue !== null
+        ? { ...inner, steps: [...inner.steps, { operation: type, searchValue, replacementValue }] }
+        : null
+    }
+    if (type === 'SUBSTRING') {
+      const start = Number(dwdLiteralText(args[1])), length = Number(dwdLiteralText(args[2]))
+      return Number.isInteger(start) && start >= 1 && Number.isInteger(length) && length >= 0
+        ? { ...inner, steps: [...inner.steps, { operation: type, start, length }] }
+        : null
+    }
+    const precision = Number(dwdLiteralText(args[1]))
+    return Number.isInteger(precision) && precision >= -10 && precision <= 10
+      ? { ...inner, steps: [...inner.steps, { operation: type, precision }] }
+      : null
+  }
+  if (type === 'ADD' || type === 'SUBTRACT' || type === 'MULTIPLY' || type === 'DIVIDE') {
+    const args = list(expression.arguments)
+    const inner = dwdTransformChain(args[0]), secondaryKey = dwdExpressionSourceKey(args[1])
+    return inner && secondaryKey
+      ? { ...inner, steps: [...inner.steps, { operation: type, additionalInputKeys: [secondaryKey] }] }
+      : null
+  }
+  if (type === 'CONCAT') {
+    const args = list(expression.arguments)
+    const separatorLiteral = args.length === 3 ? dwdLiteralText(args[1]) : undefined
+    if (separatorLiteral === null) return null
+    const separator = separatorLiteral
+    const secondaryIndex = separator === undefined ? 1 : 2
+    const inner = dwdTransformChain(dwdUnwrapNullSafeConcat(args[0]))
+    const secondaryKey = dwdExpressionSourceKey(args[secondaryIndex])
+    return inner && secondaryKey
+      ? { ...inner, steps: [...inner.steps, { operation: type, additionalInputKeys: [secondaryKey], ...(separator === undefined ? {} : { separator }) }] }
+      : null
+  }
+  if (type === 'CASE') {
+    const branches = list(expression.whens)
+    if (branches.length !== 1) return null
+    const branch = record(branches[0]), condition = record(branch.when)
+    const conditionOperator = text(condition.type).toUpperCase() as GraphConditionOperator
+    if (!['EQUALS', 'NOT_EQUALS', 'GT', 'GTE', 'LT', 'LTE', 'CONTAINS', 'NOT_CONTAINS', 'IS_NULL', 'IS_NOT_NULL'].includes(conditionOperator)) return null
+    const conditionExpression = conditionOperator === 'IS_NULL' || conditionOperator === 'IS_NOT_NULL' ? condition.argument : condition.left
+    const inner = dwdTransformChain(conditionExpression)
+    const matchValue = conditionOperator === 'IS_NULL' || conditionOperator === 'IS_NOT_NULL' ? '' : dwdLiteralText(condition.right)
+    const thenValue = dwdLiteralText(branch.then), elseValue = dwdLiteralText(expression.else)
+    if (!inner || matchValue === null || thenValue === null || elseValue === null) return null
+    return {
+      ...inner,
+      steps: [...inner.steps, {
+        operation: 'CASE', conditionOperator, matchValue, thenValue, elseValue,
+      }],
+    }
+  }
+  return null
+}
+
+/**
+ * 自动 DWD 把数据库侧处理保存为字段表达式。这里将全部现有处理能力还原为可编辑
+ * DAG：同一功能在同一依赖阶段的多字段规则合并到一个组件；只有确有先后依赖时，
+ * 才会生成下一个组件。结束节点引用最终转换产物，保存后仍回写等价表达式。
+ */
+export function expandSystemDWDDesignerGraph(
+  value: DesignerGraphV1,
+  nodes: DesignerNode[],
+  fields: FieldOption[],
+): DesignerGraphV1 {
+  let graph: DesignerGraphV1 = {
+    ...value,
+    nodeNames: Object.fromEntries(nodes.map((node, index) => [node.id, node.alias || `t${index + 1}`])),
+    joins: value.joins.map((join, index) => ({ ...join, name: `j${index + 1}` })),
+    groups: value.groups.map((group, index) => ({ ...group, name: `g${index + 1}` })),
+    transforms: [],
+    ...(value.end ? { end: { ...value.end, name: 'o1' } } : {}),
+  }
+  let root = graphRoot(nodes.map(node => node.id), graph)
+  if (!root || !graph.end) return layoutDesignerGraph(graph, nodes.map(node => node.id))
+
+  const fieldByKey = new Map(fields.map(field => [field.key, field]))
+  const pipelines = fields
+    .filter(item => item.finalOutput !== false && item.persistedExpression)
+    .flatMap(field => {
+      const chain = dwdTransformChain(field.persistedExpression)
+      return chain && chain.sourceKey === field.key && chain.steps.length
+        ? [{ field, sourceKey: chain.sourceKey, remaining: [...chain.steps] }]
+        : []
+    })
+  const finalKeyBySource = new Map<string, string>()
+  const currentKeyBySource = new Map(pipelines.map(({ sourceKey }) => [sourceKey, sourceKey]))
+  const canonicalTypeBySource = new Map(pipelines.map(({ field, sourceKey }) => [
+    sourceKey,
+    nodes
+      .find(node => node.id === keyParts(sourceKey).nodeId)
+      ?.columns.find(column => column.columnName === keyParts(sourceKey).field)
+      ?.canonicalType || field.canonicalType || 'STRING',
+  ]))
+  const transforms: GraphTransform[] = []
+  const componentIdentity = (operation: GraphTransformOperation): { family: GraphTransformFamily; componentType: GraphTransformComponentType } => {
+    if (operation === 'DATE_FORMAT' || operation === 'DATE_TRUNC') return { family: 'DATE', componentType: 'DATE_FORMAT' }
+    if (operation === 'CAST') return { family: 'CAST', componentType: 'CAST' }
+    if (operation === 'TRIM') return { family: 'TEXT', componentType: 'TEXT_TRIM' }
+    if (operation === 'UPPER') return { family: 'TEXT', componentType: 'TEXT_UPPER' }
+    if (operation === 'LOWER') return { family: 'TEXT', componentType: 'TEXT_LOWER' }
+    if (operation === 'REPLACE') return { family: 'TEXT', componentType: 'TEXT_REPLACE' }
+    if (operation === 'SUBSTRING') return { family: 'TEXT', componentType: 'TEXT_SUBSTRING' }
+    if (operation === 'CONCAT') return { family: 'SPLIT_MERGE', componentType: 'TEXT_CONCAT' }
+    if (operation === 'ABS') return { family: 'NUMBER', componentType: 'NUMBER_ABSOLUTE' }
+    if (operation === 'ROUND' || operation === 'FLOOR' || operation === 'CEIL') return { family: 'NUMBER', componentType: 'NUMBER_ROUNDING' }
+    if (operation === 'ADD' || operation === 'SUBTRACT' || operation === 'MULTIPLY' || operation === 'DIVIDE') return { family: 'NUMBER', componentType: 'NUMBER_ARITHMETIC' }
+    if (operation === 'CASE') return { family: 'CONDITION', componentType: 'CONDITION' }
+    return { family: 'NULL', componentType: 'NULL' }
+  }
+  const outputCanonicalType = (current: string, step: DWDTransformStep): string => {
+    if (step.operation === 'CAST') return step.targetType || current
+    if (['DATE_FORMAT', 'TRIM', 'UPPER', 'LOWER', 'REPLACE', 'SUBSTRING', 'CONCAT', 'CASE'].includes(step.operation)) return 'STRING'
+    if (['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'].includes(step.operation)) return 'DECIMAL'
+    return current
+  }
+  while (pipelines.some(pipeline => pipeline.remaining.length)) {
+    const nextSteps = pipelines.flatMap(pipeline => pipeline.remaining[0] ? [pipeline.remaining[0]] : [])
+    const operation = nextSteps.find(candidate => pipelines.every(pipeline => {
+      const nextIndex = pipeline.remaining.findIndex(step => step.operation === candidate.operation)
+      return nextIndex < 0 || nextIndex === 0
+    }))?.operation || nextSteps[0]?.operation
+    if (!operation) break
+    const componentIndex = transforms.length + 1
+    const id = `transform_${componentIndex}`
+    const rules: GraphTransformRule[] = []
+    const componentInputKeys = new Map(currentKeyBySource)
+    for (const pipeline of pipelines) {
+      const step = pipeline.remaining[0]
+      if (!step || step.operation !== operation) continue
+      const { field, sourceKey } = pipeline
+      const currentKey = componentInputKeys.get(sourceKey) || sourceKey
+      const canonicalType = outputCanonicalType(
+        canonicalTypeBySource.get(sourceKey) || field.canonicalType || 'STRING',
+        step,
+      )
+      const last = pipeline.remaining.length === 1
+      const ruleIndex = rules.length + 1
+      const outputID = 'value'
+      const stableOutputID = `${outputID}_${ruleIndex}`
+      const nextKey = `${id}.${stableOutputID}`
+      rules.push({
+        id: `${id}_rule_${ruleIndex}`,
+        operation: step.operation,
+        inputKeys: [
+          currentKey,
+          ...(step.additionalInputKeys ?? []).map(key => componentInputKeys.get(key) || key),
+        ],
+        output: {
+          id: stableOutputID,
+          name: last ? field.name || field.code || keyParts(field.key).field : `${field.name || field.code || keyParts(field.key).field}处理中`,
+          code: identifier(last ? field.code || keyParts(field.key).field : `${field.code || keyParts(field.key).field}_${componentIndex}_${ruleIndex}`),
+          canonicalType,
+        },
+        replaceSourceKey: currentKey,
+        ...(step.operation === 'COALESCE' ? { fallbackMode: 'LITERAL' as const, fallbackValue: step.fallbackValue } : {}),
+        ...(step.operation === 'CAST' ? { targetType: step.targetType } : {}),
+        ...(step.unit ? { unit: step.unit } : {}),
+        ...(step.separator !== undefined ? { separator: step.separator } : {}),
+        ...(step.precision !== undefined ? { precision: step.precision } : {}),
+        ...(step.start !== undefined ? { start: step.start } : {}),
+        ...(step.length !== undefined ? { length: step.length } : {}),
+        ...(step.searchValue !== undefined ? { searchValue: step.searchValue } : {}),
+        ...(step.replacementValue !== undefined ? { replacementValue: step.replacementValue } : {}),
+        ...(step.matchValue !== undefined ? { matchValue: step.matchValue } : {}),
+        ...(step.thenValue !== undefined ? { thenValue: step.thenValue } : {}),
+        ...(step.elseValue !== undefined ? { elseValue: step.elseValue } : {}),
+        ...(step.conditionOperator ? { conditionOperator: step.conditionOperator } : {}),
+      })
+      pipeline.remaining.shift()
+      canonicalTypeBySource.set(sourceKey, canonicalType)
+      currentKeyBySource.set(sourceKey, nextKey)
+      finalKeyBySource.set(sourceKey, nextKey)
+    }
+    if (!rules.length) continue
+    const identity = componentIdentity(operation)
+    transforms.push({
+      id,
+      name: `c${componentIndex}`,
+      ...identity,
+      input: root,
+      position: { x: 0, y: 0 },
+      rules,
+    })
+    root = { kind: 'TRANSFORM', id }
+  }
+  if (!transforms.length) return layoutDesignerGraph(graph, nodes.map(node => node.id))
+  graph = {
+    ...graph,
+    transforms,
+    end: {
+      ...graph.end,
+      input: root,
+      outputs: graph.end.outputs.map(output => ({
+        ...output,
+        key: finalKeyBySource.get(output.key) || output.key,
+        name: fieldByKey.get(output.key)?.name || output.name,
+        code: identifier(fieldByKey.get(output.key)?.code || output.code),
+      })),
+    },
+  }
+  return layoutDesignerGraph(graph, nodes.map(node => node.id))
+}
+
 export const serializeDesignerGraph = (graph: DesignerGraphV1): DesignerGraphV1 => ({
   version: '1.0',
   nodePositions: Object.fromEntries(Object.entries(graph.nodePositions).map(([id, value]) => [id, point(value, { x: 42, y: 48 })])),

@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"intelligent-report-generation-system/internal/platform/database"
 )
 
 var errMappedDatasetUnsupportedColumn = errors.New("mapped dataset contains an unsupported physical column name")
@@ -196,6 +197,8 @@ type mappedDatasetState struct {
 	RevisionCount        int
 	ExactCreateCount     int
 	PendingApprovalCount int
+	PublicationRequests  int
+	HumanDraftMutations  int
 	MappedAfterDeletion  bool
 }
 
@@ -211,6 +214,29 @@ type mappedDatasetPublicationFence struct {
 // 公开签名供元数据完善事务复用；启动对账通过内部返回值区分真实变更和安全跳过。
 func (s *PostgresStore) EnsureMappedDatasetTx(ctx context.Context, tx pgx.Tx, tenantID, actorID, tableID string) error {
 	_, err := s.ensureMappedDatasetTx(ctx, tx, tenantID, actorID, tableID, true)
+	return err
+}
+
+// EnsureMappedDatasetDraft 为 LLM 最终未能完整补全的物理表创建可编辑的 ODS
+// 草稿。该路径绝不发布数据集，也不会覆盖用户已经保存、回滚或提交审批的草稿。
+func (s *PostgresStore) EnsureMappedDatasetDraft(
+	ctx context.Context,
+	tenantID, actorID, tableID string,
+) error {
+	return database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		_, err := s.ensureMappedDatasetDraftTx(ctx, tx, tenantID, actorID, tableID)
+		return err
+	})
+}
+
+// EnsureMappedDatasetDraftTx 在已有租户事务内创建或刷新系统持有的 ODS
+// 降级草稿，供元数据 AI 保存部分结果时原子推进下游可编辑资产。
+func (s *PostgresStore) EnsureMappedDatasetDraftTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, actorID, tableID string,
+) error {
+	_, err := s.ensureMappedDatasetDraftTx(ctx, tx, tenantID, actorID, tableID)
 	return err
 }
 
@@ -259,7 +285,7 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 		  AND NOT EXISTS(SELECT 1 FROM platform.metadata_columns c
 			WHERE c.table_id=t.id AND c.tenant_id=t.tenant_id AND c.asset_status='ACTIVE'
 			  AND (c.last_enriched_structure_hash='' OR c.last_enriched_structure_hash<>c.structure_hash))
-		FOR SHARE OF t`, tableID, tenantID).Scan(
+		FOR SHARE OF t,source`, tableID, tenantID).Scan(
 		&table.ID, &table.DataSourceID, &table.DataSourceName, &table.FileVersionID, &table.TableName,
 		&table.MetadataVersion, &table.StructureHash,
 		&table.BusinessName, &table.BusinessDescription,
@@ -337,11 +363,239 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 		if !exists || state.ID != datasetID {
 			return false, errors.New("mapped dataset was not readable after creation")
 		}
+	} else if state.PublishedCount == 0 {
+		updated, updateErr := s.refreshSystemMappedDraftTx(
+			ctx, tx, tenantID, actorID, table, state, prepared,
+		)
+		if updateErr != nil {
+			return false, updateErr
+		}
+		if updated {
+			state, exists, err = loadMappedDatasetStateTx(ctx, tx, tenantID, table.ID)
+			if err != nil {
+				return false, err
+			}
+			if !exists {
+				return false, errors.New("mapped dataset disappeared after draft refresh")
+			}
+		}
 	}
 	if !state.canDefaultPublish(prepared) {
 		return false, nil
 	}
 	return s.publishMappedDatasetDefaultTx(ctx, tx, tenantID, actorID, table.ID, state, prepared)
+}
+
+func (s *PostgresStore) ensureMappedDatasetDraftTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, actorID, tableID string,
+) (bool, error) {
+	if tx == nil || strings.TrimSpace(tenantID) == "" || strings.TrimSpace(tableID) == "" {
+		return false, errors.New("mapped dataset draft transaction, tenant ID, and table ID are required")
+	}
+	if _, err := uuid.Parse(strings.TrimSpace(actorID)); err != nil {
+		return false, errors.New("mapped dataset draft requires a valid actor ID")
+	}
+	lockKey := "mapped_dataset:" + strings.TrimSpace(tenantID) + ":" + strings.TrimSpace(tableID)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))`, lockKey); err != nil {
+		return false, err
+	}
+	state, exists, err := loadMappedDatasetStateTx(ctx, tx, tenantID, tableID)
+	if err != nil {
+		return false, err
+	}
+	if exists && (state.Deleted || state.Status == "DISABLED" || state.PublishedCount > 0) {
+		return false, nil
+	}
+	table, columns, available, err := loadMappedDatasetInputTx(
+		ctx, tx, tenantID, tableID, false,
+	)
+	if err != nil || !available {
+		return false, err
+	}
+	prepared, err := prepareMappedDataset(table, columns)
+	if errors.Is(err, errMappedDatasetUnsupportedColumn) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		raw := prepared.DSLJSON
+		input := CreateInput{
+			Code: prepared.Document.Dataset.Code, Name: prepared.Document.Dataset.Name,
+			Description: prepared.Document.Dataset.Description,
+			Type:        prepared.Document.Dataset.Type,
+			DSL:         raw,
+		}
+		datasetID, createErr := createDatasetTx(
+			ctx, tx, tenantID, actorID, input, prepared, table.ID,
+		)
+		if createErr != nil {
+			return false, createErr
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+			tenant_id,actor_user_id,action,resource_type,resource_id,detail
+		) VALUES($1,$2,'CREATE_INCOMPLETE_MAPPED_DATASET_DRAFT','DATASET',$3,
+			jsonb_build_object('originTableId',$4::text,'metadataVersion',$5::bigint,
+				'structureHash',$6::text,'dslHash',$7::text,'planHash',$8::text))`,
+			tenantID, actorID, datasetID, table.ID, table.MetadataVersion,
+			table.StructureHash, prepared.DSLHash, prepared.PlanHash); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return s.refreshSystemMappedDraftTx(
+		ctx, tx, tenantID, actorID, table, state, prepared,
+	)
+}
+
+func loadMappedDatasetInputTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, tableID string,
+	requireComplete bool,
+) (MappedDatasetTable, []MappedDatasetColumn, bool, error) {
+	table := MappedDatasetTable{}
+	completionPredicate := ""
+	if requireComplete {
+		completionPredicate = `AND t.last_enriched_structure_hash<>''
+		  AND t.last_enriched_structure_hash=t.structure_hash
+		  AND t.last_enriched_table_structure_hash=t.table_structure_hash
+		  AND NOT EXISTS(SELECT 1 FROM platform.metadata_columns c
+			WHERE c.table_id=t.id AND c.tenant_id=t.tenant_id AND c.asset_status='ACTIVE'
+			  AND (c.last_enriched_structure_hash='' OR c.last_enriched_structure_hash<>c.structure_hash))`
+	}
+	query := `SELECT t.id::text,t.data_source_id::text,source.name,
+		COALESCE((SELECT fv.id::text
+			FROM platform.file_assets fa
+			JOIN platform.file_asset_versions fv
+			  ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version
+			WHERE fa.id=source.file_asset_id),''),
+		t.table_name,t.metadata_version,t.structure_hash,t.business_name,t.business_description
+		FROM platform.metadata_tables t
+		JOIN platform.data_sources source ON source.id=t.data_source_id AND source.tenant_id=t.tenant_id
+		WHERE t.id::text=$1 AND t.tenant_id::text=$2
+		  AND source.status='ACTIVE' AND source.deleted_at IS NULL
+		  AND t.asset_status='ACTIVE' AND t.management_status='ENABLED'
+		  AND EXISTS(SELECT 1 FROM platform.metadata_columns c
+			WHERE c.table_id=t.id AND c.tenant_id=t.tenant_id AND c.asset_status='ACTIVE')
+		  ` + completionPredicate + `
+		FOR SHARE OF t,source`
+	err := tx.QueryRow(ctx, query, tableID, tenantID).Scan(
+		&table.ID, &table.DataSourceID, &table.DataSourceName, &table.FileVersionID,
+		&table.TableName, &table.MetadataVersion, &table.StructureHash,
+		&table.BusinessName, &table.BusinessDescription,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return MappedDatasetTable{}, nil, false, nil
+	}
+	if err != nil {
+		return MappedDatasetTable{}, nil, false, err
+	}
+	rows, err := tx.Query(ctx, `SELECT column_name,business_name,business_description,
+		canonical_type,semantic_type,nullable,is_primary_key
+		FROM platform.metadata_columns
+		WHERE table_id=$1 AND tenant_id=$2 AND asset_status='ACTIVE'
+		ORDER BY ordinal_position,id
+		FOR SHARE`, table.ID, tenantID)
+	if err != nil {
+		return MappedDatasetTable{}, nil, false, err
+	}
+	columns := []MappedDatasetColumn{}
+	for rows.Next() {
+		var column MappedDatasetColumn
+		if err := rows.Scan(
+			&column.ColumnName, &column.BusinessName, &column.BusinessDescription,
+			&column.CanonicalType, &column.SemanticType, &column.Nullable,
+			&column.PrimaryKey,
+		); err != nil {
+			rows.Close()
+			return MappedDatasetTable{}, nil, false, err
+		}
+		columns = append(columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return MappedDatasetTable{}, nil, false, err
+	}
+	rows.Close()
+	return table, columns, len(columns) > 0, nil
+}
+
+func prepareMappedDataset(
+	table MappedDatasetTable,
+	columns []MappedDatasetColumn,
+) (Prepared, error) {
+	document, err := BuildMappedDatasetDocument(table, columns)
+	if err != nil {
+		return Prepared{}, err
+	}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		return Prepared{}, err
+	}
+	return Prepare(raw)
+}
+
+func (s *PostgresStore) refreshSystemMappedDraftTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, actorID string,
+	table MappedDatasetTable,
+	state mappedDatasetState,
+	prepared Prepared,
+) (bool, error) {
+	if !state.canSystemRefreshDraft() {
+		return false, nil
+	}
+	if state.DSLHash == prepared.DSLHash && state.PlanHash == prepared.PlanHash {
+		return false, nil
+	}
+	var draftRecordVersion int64
+	if err := tx.QueryRow(ctx, `UPDATE platform.dataset_versions SET
+		layer=$1,dsl_json=$2,schema_hash=$3,logical_plan_json=$4,plan_hash=$5,
+		record_version=record_version+1,updated_by=$6
+		WHERE id=$7 AND dataset_id=$8 AND tenant_id=$9 AND status='DRAFT'
+		RETURNING record_version`, prepared.Document.Dataset.Layer, prepared.DSLJSON,
+		prepared.DSLHash, prepared.LogicalPlanJSON, prepared.PlanHash, actorID,
+		state.DraftVersionID, state.ID, tenantID).Scan(&draftRecordVersion); err != nil {
+		return false, err
+	}
+	var datasetVersion int64
+	if err := tx.QueryRow(ctx, `UPDATE platform.datasets SET
+		name=$1,description=$2,dataset_type=$3,layer=$4,version=version+1,
+		updated_by=$5,updated_at=now()
+		WHERE id=$6 AND tenant_id=$7 AND origin_table_id=$8
+		  AND status='DRAFT' AND deleted_at IS NULL
+		RETURNING version`, prepared.Document.Dataset.Name,
+		prepared.Document.Dataset.Description, prepared.Document.Dataset.Type,
+		prepared.Document.Dataset.Layer, actorID, state.ID, tenantID,
+		table.ID).Scan(&datasetVersion); err != nil {
+		return false, err
+	}
+	if err := replaceDerived(
+		ctx, tx, tenantID, state.ID, state.DraftVersionID, prepared.Document, true,
+	); err != nil {
+		return false, err
+	}
+	if err := insertDraftRevisionTx(
+		ctx, tx, tenantID, state.ID, actorID, state.DraftVersionID,
+		datasetVersion, draftRecordVersion, "SAVE", "", prepared,
+	); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+		tenant_id,actor_user_id,action,resource_type,resource_id,detail
+	) VALUES($1,$2,'AUTO_REFRESH_INCOMPLETE_MAPPED_DATASET_DRAFT','DATASET',$3,
+		jsonb_build_object('originTableId',$4::text,'metadataVersion',$5::bigint,
+			'structureHash',$6::text,'dslHash',$7::text,'planHash',$8::text))`,
+		tenantID, actorID, state.ID, table.ID, table.MetadataVersion,
+		table.StructureHash, prepared.DSLHash, prepared.PlanHash); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // regenerateDeletedMappedDatasetTx 在来源表重新完成映射时恢复同一个数据集主对象，
@@ -560,13 +814,17 @@ func loadMappedDatasetStateTx(ctx context.Context, tx pgx.Tx, tenantID, tableID 
 		 WHERE revision.dataset_id=dataset.id AND revision.tenant_id=dataset.tenant_id),
 		(SELECT count(*) FROM platform.dataset_draft_revisions AS revision
 		 WHERE revision.dataset_id=dataset.id AND revision.tenant_id=dataset.tenant_id
-		   AND revision.operation_type='CREATE' AND revision.draft_version_id=draft.id
-		   AND revision.draft_record_version=draft.record_version
-		   AND revision.schema_hash=draft.schema_hash AND revision.plan_hash=draft.plan_hash),
+		   AND revision.operation_type='CREATE' AND revision.draft_version_id=draft.id),
 		EXISTS(SELECT 1 FROM platform.ai_metadata_jobs AS job
 		 WHERE job.tenant_id=dataset.tenant_id AND job.table_id=dataset.origin_table_id
 		   AND job.status='SUCCEEDED' AND dataset.deleted_at IS NOT NULL
-		   AND job.completed_at>dataset.deleted_at)
+		   AND job.completed_at>dataset.deleted_at),
+		(SELECT count(*) FROM platform.dataset_publication_requests AS request
+		 WHERE request.dataset_id=dataset.id AND request.tenant_id=dataset.tenant_id),
+		(SELECT count(*) FROM platform.audit_logs AS audit
+		 WHERE audit.tenant_id=dataset.tenant_id
+		   AND audit.resource_type='DATASET' AND audit.resource_id=dataset.id::text
+		   AND audit.action IN ('UPDATE_DRAFT','ROLLBACK_DRAFT'))
 		FROM platform.datasets AS dataset
 		JOIN platform.dataset_versions AS draft
 		  ON draft.id=dataset.current_draft_version_id AND draft.dataset_id=dataset.id AND draft.tenant_id=dataset.tenant_id
@@ -576,6 +834,7 @@ func loadMappedDatasetStateTx(ctx context.Context, tx pgx.Tx, tenantID, tableID 
 		&state.DraftVersionID, &state.DraftVersionNo, &state.DraftRecordVersion,
 		&state.DSLHash, &state.PlanHash, &state.PublishedCount,
 		&state.RevisionCount, &state.ExactCreateCount, &state.MappedAfterDeletion,
+		&state.PublicationRequests, &state.HumanDraftMutations,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return mappedDatasetState{}, false, nil
@@ -677,10 +936,23 @@ func containsHan(value string) bool {
 }
 
 func (state mappedDatasetState) canDefaultPublish(prepared Prepared) bool {
-	return !state.Deleted && state.Status == "DRAFT" && state.Version == 1 &&
-		state.DraftVersionID != "" && state.DraftVersionNo == 1 && state.DraftRecordVersion == 1 &&
-		state.PublishedCount == 0 && state.RevisionCount == 1 && state.ExactCreateCount == 1 &&
+	return !state.Deleted && state.Status == "DRAFT" && state.Version > 0 &&
+		state.DraftVersionID != "" && state.DraftVersionNo == 1 && state.DraftRecordVersion > 0 &&
+		state.Version == state.DraftRecordVersion &&
+		int64(state.RevisionCount) == state.DraftRecordVersion &&
+		state.PublishedCount == 0 && state.ExactCreateCount == 1 &&
+		state.PublicationRequests == 0 && state.HumanDraftMutations == 0 &&
 		state.PendingApprovalCount == 0 && state.DSLHash == prepared.DSLHash && state.PlanHash == prepared.PlanHash
+}
+
+func (state mappedDatasetState) canSystemRefreshDraft() bool {
+	return !state.Deleted && state.Status == "DRAFT" && state.Version > 0 &&
+		state.DraftVersionID != "" && state.DraftVersionNo == 1 &&
+		state.DraftRecordVersion > 0 && state.Version == state.DraftRecordVersion &&
+		int64(state.RevisionCount) == state.DraftRecordVersion &&
+		state.PublishedCount == 0 && state.ExactCreateCount == 1 &&
+		state.PendingApprovalCount == 0 && state.PublicationRequests == 0 &&
+		state.HumanDraftMutations == 0
 }
 
 func (state mappedDatasetState) canSystemAdvance(publication mappedDatasetPublicationFence) bool {

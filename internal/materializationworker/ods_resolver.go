@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -724,6 +725,9 @@ func mapODSStageError(
 	if errors.Is(err, context.Canceled) {
 		return err
 	}
+	// 持久化错误只保留稳定代码，避免把源库细节暴露到控制面；内部日志记录
+	// 受控执行链的具体失败点，便于区分 SQL、流协议和类型规范化问题。
+	slog.ErrorContext(stage, "ODS source staging failed", "error", err)
 	return executionError(
 		CodeODSStagingFailed,
 		"the exact published ODS source could not be staged into PostgreSQL",

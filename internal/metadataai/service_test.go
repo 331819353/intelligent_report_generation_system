@@ -10,11 +10,12 @@ import (
 )
 
 type serviceStore struct {
-	input      CompletionInput
-	failedCode string
-	saveCalled bool
-	saveErr    error
-	createdJob Job
+	input             CompletionInput
+	failedCode        string
+	saveCalled        bool
+	partialSaveCalled bool
+	saveErr           error
+	createdJob        Job
 }
 
 func (s *serviceStore) LoadInput(context.Context, string, string) (CompletionInput, error) {
@@ -38,6 +39,60 @@ func (s *serviceStore) SaveResult(_ context.Context, _, _ string, job Job, _ Com
 	}
 	job.Status = "SUCCEEDED"
 	return job, []Suggestion{}, nil
+}
+func (s *serviceStore) SavePartialResult(_ context.Context, _, _ string, job Job, _ CompletionInput, _ ProviderResult, _ float64) (Job, []Suggestion, error) {
+	s.saveCalled = true
+	s.partialSaveCalled = true
+	if s.saveErr != nil {
+		return job, nil, s.saveErr
+	}
+	job.Status = "FAILED"
+	job.ErrorCode = "PARTIAL_OUTPUT"
+	return job, []Suggestion{}, nil
+}
+
+func TestGeneratePersistsSafePartialOutputForIncrementalRetry(t *testing.T) {
+	input, output := validCompletion()
+	input.StructureHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	output.Columns = output.Columns[:1]
+	store := &serviceStore{input: input}
+	service := NewService(store, serviceProvider{
+		output: output,
+		err:    &PartialOutputError{MissingTargets: 1},
+	}, time.Second, 0.8)
+
+	result, err := service.Generate(context.Background(), "tenant", "actor", "table-1")
+	var partial *PartialOutputError
+	if !errors.As(err, &partial) || partial.MissingTargets != 1 {
+		t.Fatalf("error=%v, want one missing target", err)
+	}
+	if !store.partialSaveCalled || store.failedCode != "" ||
+		result.Job.ErrorCode != "PARTIAL_OUTPUT" {
+		t.Fatalf("partial save state: store=%#v result=%#v", store, result)
+	}
+	var classified interface{ MetadataCompletionFailureCode() string }
+	completionErr := metadataCompletionFailure{code: metadataCompletionFailureCode(err), cause: err}
+	if !errors.As(completionErr, &classified) ||
+		classified.MetadataCompletionFailureCode() != "PARTIAL_OUTPUT" {
+		t.Fatalf("classification=%v", completionErr)
+	}
+}
+
+func TestScopePendingCompletionInputKeepsOnlyMissingTargets(t *testing.T) {
+	input, _ := validCompletion()
+	input.TargetTable = true
+	input.Table.CompletionTracked = true
+	input.Table.NeedsCompletion = false
+	input.Columns[0].CompletionTracked = true
+	input.Columns[0].NeedsCompletion = false
+	input.Columns[1].CompletionTracked = true
+	input.Columns[1].NeedsCompletion = true
+
+	scoped := scopePendingCompletionInput(input)
+	if scoped.TargetTable || len(scoped.Columns) != 1 ||
+		scoped.Columns[0].ID != input.Columns[1].ID {
+		t.Fatalf("pending scope=%#v", scoped)
+	}
 }
 func (*serviceStore) ListSuggestions(context.Context, string, string, string, int) ([]Suggestion, error) {
 	return nil, nil

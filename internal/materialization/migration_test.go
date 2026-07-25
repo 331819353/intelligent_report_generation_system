@@ -95,3 +95,29 @@ func TestSourceAndLayerGuardMigrationClosesDirectWriteBypasses(t *testing.T) {
 		}
 	}
 }
+
+func TestDatasetMaterializationCleanupMigrationUsesLeasedTenantOutbox(t *testing.T) {
+	raw, err := os.ReadFile("../../migrations/000082_dataset_materialization_cleanup.up.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	sql := string(raw)
+	for _, fragment := range []string{
+		"CREATE TABLE platform.dataset_materialization_cleanup_jobs(",
+		"layer text NOT NULL CHECK(layer IN ('DWD','DWS'))",
+		"status text NOT NULL DEFAULT 'QUEUED'",
+		"expected_count integer NOT NULL",
+		"lease_token uuid",
+		"dataset_materialization_cleanup_claim_idx",
+		"ENABLE ROW LEVEL SECURITY",
+		"FORCE ROW LEVEL SECURITY",
+		"dataset_materialization_cleanup_tenant_isolation",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Errorf("cleanup migration is missing %q", fragment)
+		}
+	}
+	if strings.Contains(sql, "warehouse_ods") {
+		t.Fatal("DWD/DWS cleanup outbox must not target ODS or external source tables")
+	}
+}

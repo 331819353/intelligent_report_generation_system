@@ -24,11 +24,28 @@ type MappedPublicationCommitSink interface {
 	EnqueueMappedDatasetMaterializationTx(context.Context, pgx.Tx, string, string, VersionRecord) error
 }
 
+// GovernedPublicationCommitSink 在 DWD/DWS 审批发布事务内登记精确发布版本的
+// PostgreSQL 物化任务。实现只能登记控制面 outbox，不能在审批请求内执行加工。
+type GovernedPublicationCommitSink interface {
+	EnqueueGovernedDatasetMaterializationTx(context.Context, pgx.Tx, string, string, VersionRecord) error
+}
+
+// MaterializationDeletionSink 在数据集软删除事务内登记仓库物理对象清理任务。
+// API 只持有仓库只读账号；实现只能写控制库 outbox，真正的 DROP 由仓库
+// worker 使用受限写账号异步执行。
+type MaterializationDeletionSink interface {
+	EnqueueDatasetMaterializationCleanupTx(
+		context.Context, pgx.Tx, string, string, string, string,
+	) (int, error)
+}
+
 // PostgresStore 使用事务和 RLS 保存数据集草稿及全部派生索引。
 type PostgresStore struct {
-	pool                  *pgxpool.Pool
-	publicationSink       PublicationCommitSink
-	mappedPublicationSink MappedPublicationCommitSink
+	pool                        *pgxpool.Pool
+	publicationSink             PublicationCommitSink
+	mappedPublicationSink       MappedPublicationCommitSink
+	governedPublicationSink     GovernedPublicationCommitSink
+	materializationDeletionSink MaterializationDeletionSink
 }
 
 // NewPostgresStore 创建数据集 PostgreSQL 仓储。
@@ -43,6 +60,18 @@ func (s *PostgresStore) SetPublicationCommitSink(sink PublicationCommitSink) {
 // 应只在进程启动装配阶段调用。
 func (s *PostgresStore) SetMappedPublicationCommitSink(sink MappedPublicationCommitSink) {
 	s.mappedPublicationSink = sink
+}
+
+// SetGovernedPublicationCommitSink 接入 DWD/DWS 审批后的 PostgreSQL 加工 outbox。
+// 应只在进程启动装配阶段调用。
+func (s *PostgresStore) SetGovernedPublicationCommitSink(sink GovernedPublicationCommitSink) {
+	s.governedPublicationSink = sink
+}
+
+// SetMaterializationDeletionSink 接入 DWD/DWS 仓库物理对象清理 outbox。
+// 应只在进程启动装配阶段调用。
+func (s *PostgresStore) SetMaterializationDeletionSink(sink MaterializationDeletionSink) {
+	s.materializationDeletionSink = sink
 }
 
 // Create 原子创建数据集、首个草稿版本、字段参数索引和审计记录。
@@ -118,9 +147,41 @@ func (s *PostgresStore) Get(ctx context.Context, tenantID, id string) (record Re
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
+		if err != nil {
+			return err
+		}
+		record.Tags, err = loadDatasetDisplayTags(
+			ctx, tx, record.ID, record.CurrentPublishedVersionID, record.OriginTableID,
+		)
 		return err
 	})
 	return record, err
+}
+
+// loadDatasetDisplayTags 优先展示当前发布版本的 LLM/人工治理语义标签；自动 ODS
+// 数据集尚未完成标签建议任务时，回退到来源表已经由 LLM 完善的表标签。
+func loadDatasetDisplayTags(
+	ctx context.Context,
+	tx pgx.Tx,
+	datasetID, publishedVersionID, originTableID string,
+) ([]string, error) {
+	tags := []string{}
+	err := tx.QueryRow(ctx, `SELECT COALESCE(
+			(SELECT array_agg(DISTINCT tag.name ORDER BY tag.name)
+			 FROM platform.asset_tag_bindings AS binding
+			 JOIN platform.semantic_tags AS tag
+			   ON tag.id=binding.tag_id AND tag.tenant_id=binding.tenant_id
+			 WHERE binding.asset_type='DATASET_VERSION'
+			   AND binding.dataset_id=$1::uuid
+			   AND binding.dataset_version_id=NULLIF($2,'')::uuid
+			   AND binding.status IN ('SUGGESTED','APPROVED')
+			   AND tag.status IN ('DRAFT','ACTIVE')),
+			(SELECT table_asset.tags
+			 FROM platform.metadata_tables AS table_asset
+			 WHERE table_asset.id=NULLIF($3,'')::uuid),
+			'{}'::text[]
+		)`, datasetID, publishedVersionID, originTableID).Scan(&tags)
+	return tags, err
 }
 
 // List 按更新时间倒序返回数据集摘要和租户内总数。
@@ -132,7 +193,9 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 		}
 		rows, err := tx.Query(ctx, `SELECT d.id::text,COALESCE(d.origin_table_id::text,''),
 			COALESCE(origin_table.table_name,''),COALESCE(origin_source.name,''),
-			d.code::text,d.name,d.description,d.dataset_type,d.layer,d.status,d.version,v.schema_hash,
+			d.code::text,d.name,d.description,d.dataset_type,d.layer,
+			COALESCE(dataset_tag_list.tags,origin_table.tags,'{}'::text[]),
+			d.status,d.version,v.schema_hash,
 			COALESCE(d.current_published_version_id::text,''),d.updated_at::text
 			FROM platform.datasets d JOIN platform.dataset_versions v
 			ON v.id=d.current_draft_version_id AND v.tenant_id=d.tenant_id AND v.dataset_id=d.id
@@ -140,6 +203,17 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 			  ON origin_table.id=d.origin_table_id AND origin_table.tenant_id=d.tenant_id
 			LEFT JOIN platform.data_sources origin_source
 			  ON origin_source.id=origin_table.data_source_id AND origin_source.tenant_id=origin_table.tenant_id
+			LEFT JOIN LATERAL (
+			  SELECT array_agg(DISTINCT tag.name ORDER BY tag.name) AS tags
+			  FROM platform.asset_tag_bindings AS binding
+			  JOIN platform.semantic_tags AS tag
+			    ON tag.id=binding.tag_id AND tag.tenant_id=binding.tenant_id
+			  WHERE binding.asset_type='DATASET_VERSION'
+			    AND binding.dataset_id=d.id
+			    AND binding.dataset_version_id=d.current_published_version_id
+			    AND binding.status IN ('SUGGESTED','APPROVED')
+			    AND tag.status IN ('DRAFT','ACTIVE')
+			) AS dataset_tag_list ON true
 			WHERE d.deleted_at IS NULL ORDER BY d.updated_at DESC,d.id LIMIT $1 OFFSET $2`, limit, offset)
 		if err != nil {
 			return err
@@ -148,7 +222,7 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 		for rows.Next() {
 			var item Summary
 			if err := rows.Scan(&item.ID, &item.OriginTableID, &item.OriginTableName, &item.OriginDataSourceName,
-				&item.Code, &item.Name, &item.Description, &item.Type, &item.Layer, &item.Status, &item.Version,
+				&item.Code, &item.Name, &item.Description, &item.Type, &item.Layer, &item.Tags, &item.Status, &item.Version,
 				&item.DSLHash, &item.CurrentPublishedVersionID, &item.UpdatedAt); err != nil {
 				return err
 			}
@@ -438,12 +512,43 @@ func (s *PostgresStore) Restore(ctx context.Context, tenantID, actorID, id strin
 	return s.Get(ctx, tenantID, id)
 }
 
+type datasetCommandExecutor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+// deactivateMappedODSAssetTx 只停用控制面 PostgreSQL 中的表/字段资产记录。
+// 该路径没有源库连接器，也不生成 DROP/DELETE 源表语句，因此不会修改物理源表。
+func deactivateMappedODSAssetTx(
+	ctx context.Context,
+	tx datasetCommandExecutor,
+	tenantID, originTableID, layer string,
+) (bool, error) {
+	if originTableID == "" || layer != string(LayerODS) {
+		return false, nil
+	}
+	if _, err := tx.Exec(ctx, `UPDATE platform.metadata_columns
+		SET asset_status='INACTIVE'
+		WHERE table_id=$1 AND tenant_id=$2 AND asset_status='ACTIVE'`, originTableID, tenantID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE platform.metadata_tables
+		SET asset_status='INACTIVE',management_status='DISABLED'
+		WHERE id=$1 AND tenant_id=$2 AND asset_status='ACTIVE'`, originTableID, tenantID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // Delete 只做软删除；检测全部精确版本的下游占用后再隐藏目录项并废弃发布版本。
+// 映射 ODS 同步停用其控制面元数据记录，使其重新出现在“新增数据表”候选中。
 func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string, input LifecycleInput) error {
-	return database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		var version int64
-		err := tx.QueryRow(ctx, `SELECT version FROM platform.datasets
-			WHERE id::text=$1 AND deleted_at IS NULL FOR UPDATE`, id).Scan(&version)
+		var originTableID, layer string
+		err := tx.QueryRow(ctx, `SELECT version,COALESCE(origin_table_id::text,''),layer
+			FROM platform.datasets
+			WHERE id::text=$1 AND deleted_at IS NULL FOR UPDATE`, id).
+			Scan(&version, &originTableID, &layer)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -463,31 +568,92 @@ func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string
 			JOIN platform.datasets downstream_dataset ON downstream_dataset.id=downstream_version.dataset_id AND downstream_dataset.deleted_at IS NULL
 			WHERE dependency.source_type='DATASET_VERSION' AND source_version.dataset_id::text=$1 AND downstream_version.status<>'DEPRECATED'
 			UNION ALL
+			SELECT 1 FROM platform.dataset_dependencies dependency
+			JOIN platform.dataset_versions source_version ON source_version.id::text=dependency.source_id
+			JOIN platform.dataset_versions downstream_version ON downstream_version.id=dependency.dataset_version_id
+			JOIN platform.datasets downstream_dataset ON downstream_dataset.id=downstream_version.dataset_id AND downstream_dataset.deleted_at IS NULL
+			WHERE dependency.source_type='DATASET_VERSION'
+			  AND source_version.dataset_id::text=$1
+			  AND $2='ODS'
+			  AND downstream_version.layer='DWD'
+			UNION ALL
 			SELECT 1 FROM platform.report_draft_dependencies dependency
 			JOIN platform.dataset_versions source_version ON source_version.id::text=dependency.dependency_id
 			JOIN platform.reports report ON report.id=dependency.report_id AND report.deleted_at IS NULL
 			WHERE dependency.dependency_type='DATASET_VERSION' AND source_version.dataset_id::text=$1
 			UNION ALL
 			SELECT 1 FROM platform.query_runs run WHERE run.dataset_id::text=$1 AND run.status='RUNNING'
-		)`, id).Scan(&inUse); err != nil {
+			UNION ALL
+			SELECT 1 FROM platform.dataset_build_runs run
+			WHERE run.dataset_id::text=$1 AND run.status IN ('QUEUED','RUNNING')
+		)`, id, layer).Scan(&inUse); err != nil {
 			return err
 		}
 		if inUse {
 			return ErrInUse
 		}
+		physicalMaterializationCount := 0
+		physicalCleanupQueued := false
+		if layer == string(LayerDWD) || layer == string(LayerDWS) {
+			if s.materializationDeletionSink == nil {
+				return errors.New("dataset materialization deletion sink is not configured")
+			}
+			physicalMaterializationCount, err = s.materializationDeletionSink.
+				EnqueueDatasetMaterializationCleanupTx(
+					ctx, tx, tenantID, actorID, id, layer,
+				)
+			if err != nil {
+				return err
+			}
+			physicalCleanupQueued = physicalMaterializationCount > 0
+		}
 		if _, err := tx.Exec(ctx, `UPDATE platform.dataset_versions SET status='DEPRECATED',updated_by=$1
 			WHERE dataset_id::text=$2 AND status IN ('PUBLISHED','STALE')`, actorID, id); err != nil {
 			return err
 		}
+		// 自动生成 DWD 使用“事实数据集 ID”派生稳定编码。软删除后必须同时释放
+		// 自动建模所有权映射和活动编码，否则下一次 ODS 发布触发重建时会被已删除
+		// 记录的全局唯一编码阻断，任务只能无意义重试。
+		if layer == string(LayerDWD) {
+			if _, err := tx.Exec(ctx, `DELETE FROM platform.dwd_modeling_outputs
+				WHERE tenant_id=$1 AND dwd_dataset_id::text=$2`, tenantID, id); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(ctx, `UPDATE platform.datasets SET status='DEPRECATED',current_published_version_id=NULL,
 			disabled_from_status=NULL,disabled_published_version_id=NULL,
+			code=CASE WHEN layer IN ('DWD','DWS')
+				THEN left(code,100)||'_deleted_'||substr(id::text,1,8)
+				ELSE code
+			END,
 			deleted_at=now(),version=version+1,updated_by=$1 WHERE id::text=$2`, actorID, id); err != nil {
 			return err
 		}
+		metadataAssetDeactivated, err := deactivateMappedODSAssetTx(
+			ctx, tx, tenantID, originTableID, layer,
+		)
+		if err != nil {
+			return err
+		}
 		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail)
-			VALUES($1,$2,'DELETE','DATASET',$3,jsonb_build_object('fromVersion',$4::bigint))`, tenantID, actorID, id, version)
+			VALUES($1,$2,'DELETE','DATASET',$3,jsonb_strip_nulls(jsonb_build_object(
+			  'fromVersion',$4::bigint,
+			  'originTableId',NULLIF($5,'')::text,
+			  'metadataAssetDeactivated',$6::boolean,
+			  'physicalCleanupQueued',$7::boolean,
+			  'physicalMaterializationCount',$8::integer,
+			  'sourceTableAffected',false
+			)))`, tenantID, actorID, id, version, originTableID, metadataAssetDeactivated,
+			physicalCleanupQueued, physicalMaterializationCount)
 		return err
 	})
+	var pgError *pgconn.PgError
+	if errors.As(err, &pgError) &&
+		pgError.Code == "23503" &&
+		pgError.ConstraintName == "datasets_ods_dwd_reference_guard" {
+		return ErrInUse
+	}
+	return err
 }
 
 // ReplayPublication 在当前发布权限仍有效时精确重放首次成功响应。
@@ -622,10 +788,8 @@ func (s *PostgresStore) publishTx(
 		tenantID, actorID, datasetID, publishedVersionID, draftVersionNo, draftVersionID, draftRecordVersion, plan.Prepared.DSLHash, plan.Prepared.PlanHash); err != nil {
 		return err
 	}
-	if s.publicationSink != nil {
-		if err := s.publicationSink.EnqueueDatasetMetricExtractionTx(ctx, tx, tenantID, actorID, *record); err != nil {
-			return err
-		}
+	if err := s.enqueuePublicationProcessing(ctx, tx, tenantID, actorID, *record); err != nil {
+		return err
 	}
 	responseJSON, err := json.Marshal(*record)
 	if err != nil {
@@ -635,6 +799,30 @@ func (s *PostgresStore) publishTx(
 			tenant_id,dataset_id,actor_user_id,idempotency_key,request_hash,published_version_id,response_json
 		) VALUES($1,$2,$3,$4,$5,$6,$7)`, tenantID, datasetID, actorID, plan.IdempotencyKey, plan.RequestHash, publishedVersionID, responseJSON)
 	return err
+}
+
+func (s *PostgresStore) enqueuePublicationProcessing(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, actorID string,
+	record VersionRecord,
+) error {
+	if s.publicationSink != nil {
+		if err := s.publicationSink.EnqueueDatasetMetricExtractionTx(
+			ctx, tx, tenantID, actorID, record,
+		); err != nil {
+			return err
+		}
+	}
+	if record.Layer != LayerDWD && record.Layer != LayerDWS {
+		return nil
+	}
+	if s.governedPublicationSink == nil {
+		return errors.New("governed dataset materialization sink is not configured")
+	}
+	return s.governedPublicationSink.EnqueueGovernedDatasetMaterializationTx(
+		ctx, tx, tenantID, actorID, record,
+	)
 }
 
 // GetVersion 按父数据集和版本 ID 精确读取发布快照。
@@ -992,8 +1180,14 @@ type dependencySnapshot struct {
 func loadDependencySnapshot(ctx context.Context, tx pgx.Tx, dependency DependencyRef) (snapshot dependencySnapshot, err error) {
 	switch dependency.Type {
 	case "TABLE":
-		err = tx.QueryRow(ctx, `SELECT metadata_version,structure_hash FROM platform.metadata_tables
-			WHERE id::text=$1 AND asset_status='ACTIVE' AND management_status='ENABLED' FOR SHARE`, dependency.ID).Scan(&snapshot.Version, &snapshot.Hash)
+		err = tx.QueryRow(ctx, `SELECT table_asset.metadata_version,table_asset.structure_hash
+			FROM platform.metadata_tables AS table_asset
+			JOIN platform.data_sources AS source
+			  ON source.id=table_asset.data_source_id AND source.tenant_id=table_asset.tenant_id
+			WHERE table_asset.id::text=$1
+			  AND table_asset.asset_status='ACTIVE' AND table_asset.management_status='ENABLED'
+			  AND source.status='ACTIVE' AND source.deleted_at IS NULL
+			FOR SHARE OF table_asset,source`, dependency.ID).Scan(&snapshot.Version, &snapshot.Hash)
 	case "FILE_VERSION":
 		err = tx.QueryRow(ctx, `SELECT version,sha256 FROM platform.file_asset_versions WHERE id::text=$1 FOR SHARE`, dependency.ID).
 			Scan(&snapshot.Version, &snapshot.Hash)
@@ -1150,11 +1344,19 @@ func validateUpstreams(ctx context.Context, tx pgx.Tx, document Document) error 
 	for i, node := range document.Nodes {
 		switch node.Type {
 		case "TABLE":
-			var exists bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM platform.metadata_tables WHERE id::text=$1 AND data_source_id::text=$2 AND asset_status='ACTIVE' AND management_status='ENABLED')`, node.TableID, node.DataSourceID).Scan(&exists); err != nil {
+			var available int
+			err := tx.QueryRow(ctx, `SELECT 1
+				FROM platform.metadata_tables AS table_asset
+				JOIN platform.data_sources AS source
+				  ON source.id=table_asset.data_source_id AND source.tenant_id=table_asset.tenant_id
+				WHERE table_asset.id::text=$1 AND source.id::text=$2
+				  AND table_asset.asset_status='ACTIVE' AND table_asset.management_status='ENABLED'
+				  AND source.status='ACTIVE' AND source.deleted_at IS NULL
+				FOR SHARE OF table_asset,source`, node.TableID, node.DataSourceID).Scan(&available)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return err
 			}
-			if !exists {
+			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("%w: nodes[%d] references an unavailable table asset", ErrInvalidDocument, i)
 			}
 			var projectedColumns int
@@ -1165,6 +1367,7 @@ func validateUpstreams(ctx context.Context, tx pgx.Tx, document Document) error 
 				return fmt.Errorf("%w: nodes[%d] projection contains unavailable columns", ErrInvalidDocument, i)
 			}
 			if node.FileVersionID != "" {
+				var exists bool
 				if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM platform.file_asset_versions fv JOIN platform.data_sources ds ON ds.file_asset_id=fv.file_asset_id AND ds.tenant_id=fv.tenant_id WHERE fv.id::text=$1 AND ds.id::text=$2)`, node.FileVersionID, node.DataSourceID).Scan(&exists); err != nil {
 					return err
 				}

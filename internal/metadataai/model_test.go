@@ -90,6 +90,18 @@ func TestValidateOutputRejectsUnsafeOrOutOfTaxonomyValues(t *testing.T) {
 	}
 }
 
+func TestValidateOutputRejectsSemanticTypeIncompatibleWithPhysicalType(t *testing.T) {
+	input, output := validCompletion()
+	input.Columns[0].CanonicalType = "TEXT"
+	output.Columns[0].SemanticType = "PERCENTAGE"
+	err := ValidateOutput(input, output)
+	if !errors.Is(err, ErrInvalidOutput) ||
+		err == nil ||
+		err.Error() != `AI metadata output is invalid: columns[0] semanticType "PERCENTAGE" is incompatible with canonicalType "TEXT"` {
+		t.Fatalf("incompatible semantic type error=%v", err)
+	}
+}
+
 func TestValidateOutputDoesNotImposeAnArbitraryTagCountLimit(t *testing.T) {
 	input, output := validCompletion()
 	output.Table.Tags = make([]string, 0, len(allowedTags))
@@ -114,6 +126,11 @@ func TestValidateOutputRejectsMissingRequiredCollectionsAndConfidence(t *testing
 	output.Columns[0].Confidence = 0
 	if err := ValidateOutput(input, output); !errors.Is(err, ErrInvalidOutput) {
 		t.Fatalf("missing confidence error = %v", err)
+	}
+	_, output = validCompletion()
+	output.Table.Tags = []string{}
+	if err := ValidateOutput(input, output); !errors.Is(err, ErrInvalidOutput) {
+		t.Fatalf("empty tags error = %v", err)
 	}
 	_, output = validCompletion()
 	output.Columns = nil
@@ -234,5 +251,10 @@ func TestSuggestionDispositionRejectsIncompatibleSemanticType(t *testing.T) {
 	status, reason := suggestionDispositionForTarget(target, value, false, 3, 0.8)
 	if status != "PENDING" || reason != "SEMANTIC_TYPE_INCOMPATIBLE" {
 		t.Fatalf("status=%q reason=%q", status, reason)
+	}
+	value.SemanticType = ""
+	status, reason = suggestionDispositionForTarget(target, value, false, 3, 0.8)
+	if status != "APPLIED" || reason != "" {
+		t.Fatalf("partial value status=%q reason=%q", status, reason)
 	}
 }

@@ -80,28 +80,9 @@ func (s *PostgresStore) SubmitPublicationRequest(
 		if err != nil {
 			return err
 		}
-		// Submission only freezes the exact draft and registers durable background work.
-		// Retrying the same frozen request requeues a terminal preparation failure without
-		// changing any publication facts.
-		if _, err := tx.Exec(ctx, `UPDATE platform.dataset_publication_requests SET
-			metric_candidate_generation_status='PENDING',
-			metric_candidate_error_code='',updated_at=now()
-			WHERE id::text=$1 AND status='PENDING'
-			  AND metric_candidate_generation_status='FAILED'
-			  AND metric_candidate_result IS NULL`, requestID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO platform.metric_candidate_preparation_jobs(
-			tenant_id,publication_request_id,dataset_id,status
-		) VALUES($1,$2,$3,'PENDING')
-		ON CONFLICT(tenant_id,publication_request_id) DO UPDATE SET
-			status='PENDING',attempt=0,next_attempt_at=now(),
-			lease_owner='',lease_expires_at=NULL,error_code='',error_message='',
-			started_at=NULL,completed_at=NULL,updated_at=now()
-		WHERE platform.metric_candidate_preparation_jobs.status='FAILED'`,
-			tenantID, requestID, datasetID); err != nil {
-			return err
-		}
+		// Submission freezes the exact draft only. Metric extraction and DWD/DWS
+		// materialization are publication outboxes and must not run before a human
+		// approval decision has committed.
 		if inserted {
 			if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
 				tenant_id,actor_user_id,action,resource_type,resource_id,detail

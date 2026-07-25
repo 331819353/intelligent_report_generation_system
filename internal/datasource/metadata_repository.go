@@ -81,9 +81,17 @@ func (r *PostgresRepository) ApplySelectedMetadata(ctx context.Context, source S
 	return ids, err
 }
 
-// ApplyManagedMetadata 仅刷新仍处于纳管状态的既有表资产。
+// ApplyManagedMetadata 仅刷新仍处于纳管状态的既有表资产。resetCompletion
+// 用于全量刷新：保留当前业务元数据值，但把表和全部活动字段重新标记为待完善，
+// 使 LLM 首轮处理全部目标，部分成功后的重试仍只处理尚未完成的目标。
 // 锁定、身份校验、快照和 upsert 必须位于同一租户事务，避免并发删除后被刷新任务重新激活。
-func (r *PostgresRepository) ApplyManagedMetadata(ctx context.Context, source Source, expectedTableID, expectedStructureHash string, result SyncResult) (applied ManagedMetadataApplyResult, err error) {
+func (r *PostgresRepository) ApplyManagedMetadata(
+	ctx context.Context,
+	source Source,
+	expectedTableID, expectedStructureHash string,
+	resetCompletion bool,
+	result SyncResult,
+) (applied ManagedMetadataApplyResult, err error) {
 	if len(result.Tables) != 1 {
 		return applied, errors.New("managed metadata refresh requires exactly one table")
 	}
@@ -157,8 +165,20 @@ func (r *PostgresRepository) ApplyManagedMetadata(ctx context.Context, source So
 		if id != lockedID || id != expectedTableID {
 			return errors.New("managed metadata table identity changed")
 		}
+		if resetCompletion {
+			if _, err := tx.Exec(ctx, `UPDATE platform.metadata_tables
+				SET last_enriched_structure_hash='',last_enriched_table_structure_hash=''
+				WHERE id=$1 AND tenant_id=$2 AND asset_status='ACTIVE'`, id, source.TenantID); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE platform.metadata_columns
+				SET last_enriched_structure_hash=''
+				WHERE table_id=$1 AND tenant_id=$2 AND asset_status='ACTIVE'`, id, source.TenantID); err != nil {
+				return err
+			}
+		}
 		// 迁移前已完成的表若表头没有变化，可在首次增量写入时安全补齐表头 marker。
-		if storedTableHash == "" && lastEnrichedHash != "" && lastEnrichedHash == currentStructureHash && currentTableHash == desiredTableHash {
+		if !resetCompletion && storedTableHash == "" && lastEnrichedHash != "" && lastEnrichedHash == currentStructureHash && currentTableHash == desiredTableHash {
 			if _, err := tx.Exec(ctx, `UPDATE platform.metadata_tables SET last_enriched_table_structure_hash=table_structure_hash WHERE id=$1`, id); err != nil {
 				return err
 			}

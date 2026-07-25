@@ -3,6 +3,7 @@ package datasource
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -17,6 +18,7 @@ type repo struct {
 	selectedIDs      map[string]string
 	managedBatches   []SyncResult
 	managedTableIDs  []string
+	managedResets    []bool
 	managedMissing   bool
 	managedErr       error
 	managedResult    ManagedMetadataApplyResult
@@ -24,6 +26,7 @@ type repo struct {
 	deactivateResult bool
 	deactivateErr    error
 	activeSelections []TableSelection
+	beginDeleteErr   error
 }
 
 func (r *repo) Count(context.Context, string) (int, error)              { return r.count, nil }
@@ -37,9 +40,10 @@ func (r *repo) ApplySelectedMetadata(_ context.Context, _ Source, result SyncRes
 	r.selectedBatches = append(r.selectedBatches, result)
 	return r.selectedIDs, nil
 }
-func (r *repo) ApplyManagedMetadata(_ context.Context, _ Source, expectedTableID, _ string, result SyncResult) (ManagedMetadataApplyResult, error) {
+func (r *repo) ApplyManagedMetadata(_ context.Context, _ Source, expectedTableID, _ string, resetCompletion bool, result SyncResult) (ManagedMetadataApplyResult, error) {
 	r.managedBatches = append(r.managedBatches, result)
 	r.managedTableIDs = append(r.managedTableIDs, expectedTableID)
+	r.managedResets = append(r.managedResets, resetCompletion)
 	if r.managedErr != nil {
 		return ManagedMetadataApplyResult{}, r.managedErr
 	}
@@ -62,6 +66,14 @@ func (r *repo) ListActiveTableSelections(context.Context, string, string) ([]Tab
 	return r.activeSelections, nil
 }
 func (r *repo) Audit(context.Context, string, string, string, string, any) error { return nil }
+func (r *repo) BeginDelete(context.Context, string, string) error {
+	if r.beginDeleteErr != nil {
+		return r.beginDeleteErr
+	}
+	r.source.Status = StatusDeleting
+	r.statuses = append(r.statuses, StatusDeleting)
+	return nil
+}
 func (r *repo) UpdateStatus(_ context.Context, _, _ string, status Status, _ string) error {
 	r.source.Status = status
 	r.statuses = append(r.statuses, status)
@@ -253,6 +265,7 @@ func TestInspectFileSourcePinsPublishedFileVersionWhileNewDraftWaitsForPublish(t
 }
 
 type completingRecorder struct {
+	mu              sync.Mutex
 	tableID         string
 	tableIDs        []string
 	rows            []map[string]any
@@ -263,6 +276,8 @@ type completingRecorder struct {
 }
 
 func (c *completingRecorder) CompleteTable(_ context.Context, _, _, tableID string, rows []map[string]any, targetTable bool, targetColumnIDs []string, structureHash, _, _ string, _ int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.tableID, c.rows = tableID, rows
 	c.tableIDs = append(c.tableIDs, tableID)
 	c.hashes = append(c.hashes, structureHash)
@@ -300,6 +315,27 @@ func TestLifecycleAndQuota(t *testing.T) {
 	r.count = 1
 	if _, err := s.Create(context.Background(), source); !errors.Is(err, ErrQuotaExceeded) {
 		t.Fatalf("quota error=%v", err)
+	}
+}
+
+func TestDeleteRejectsReferencedDataSourceBeforeClosingConnector(t *testing.T) {
+	r := &repo{
+		source:         Source{ID: "id", TenantID: "t", Type: TypeExcel, Status: StatusActive},
+		quota:          Quota{MaxDataSources: 1},
+		beginDeleteErr: ErrDatasetReferenced,
+	}
+	s := NewService(r, connector{kind: TypeExcel})
+
+	err := s.Delete(context.Background(), "t", "id")
+
+	if !errors.Is(err, ErrDatasetReferenced) {
+		t.Fatalf("delete error=%v", err)
+	}
+	if r.source.Status != StatusActive {
+		t.Fatalf("referenced source status=%s, want ACTIVE", r.source.Status)
+	}
+	if len(r.statuses) != 0 {
+		t.Fatalf("status updates=%v, want none", r.statuses)
 	}
 }
 

@@ -13,7 +13,6 @@ var (
 	ErrReviewRequestConflict   = errors.New("data source publication review request version conflict")
 	ErrReviewRequestNotPending = errors.New("data source publication review request is not pending")
 	ErrReviewWithdrawForbidden = errors.New("only the requester can withdraw the review request")
-	ErrReviewSelfApproval      = errors.New("requester cannot review their own publication request")
 )
 
 // PublicationRequest freezes one exact, successfully tested data-source draft for human review.
@@ -149,9 +148,6 @@ func (s *PublicationApprovalService) Approve(
 	if request.Version != input.ExpectedVersion {
 		return PublicationRequest{}, Source{}, ErrReviewRequestConflict
 	}
-	if request.RequesterUserID == actorID {
-		return PublicationRequest{}, Source{}, ErrReviewSelfApproval
-	}
 	// Close the old runtime pool before the atomic pointer switch. If the transaction loses
 	// a race, the next runtime request safely recreates the old pool from its immutable snapshot.
 	current, err := s.sources.repo.Get(ctx, tenantID, sourceID)
@@ -179,13 +175,6 @@ func (s *PublicationApprovalService) Reject(
 	}
 	if input.Reason == "" || len([]rune(input.Reason)) > 1000 {
 		return PublicationRequest{}, ErrInvalidConfiguration
-	}
-	request, err := s.store.GetPublicationRequest(ctx, tenantID, sourceID, requestID)
-	if err != nil {
-		return PublicationRequest{}, err
-	}
-	if request.RequesterUserID == actorID {
-		return PublicationRequest{}, ErrReviewSelfApproval
 	}
 	return s.store.RejectPublicationRequest(ctx, tenantID, actorID, sourceID, requestID, input)
 }

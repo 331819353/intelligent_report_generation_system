@@ -17,6 +17,7 @@ const source = (overrides: Partial<DataSourceRecord> = {}): DataSourceRecord => 
 
 const renderPage = () => render(<MemoryRouter><DataSourceCenterPage /></MemoryRouter>)
 const cardFor = (name: string) => screen.getByRole('heading', { level: 3, name }).closest('article') as HTMLElement
+const entryFor = (name: string) => within(cardFor(name)).getByRole('button', { name: `管理${name}的数据表资产` })
 const job = (overrides: Partial<MetadataJob> = {}): MetadataJob => ({
   id: 'job-1', dataSourceId: 'source-1', kind: 'IMPORT', mode: 'FULL',
   sampleDataMode: 'DENY', samplePolicyVersion: 1,
@@ -24,6 +25,7 @@ const job = (overrides: Partial<MetadataJob> = {}): MetadataJob => ({
 })
 const metadataTable: DataSourceTableRecord = {
   id: 'table-1', dataSourceId: 'source-1', catalogName: 'sales', schemaName: 'public', tableName: 'orders', tableType: 'TABLE', businessName: '订单表', businessDescription: '订单交易明细', tags: ['主题:经营分析'], sensitivityLevel: 'INTERNAL', visibility: 'PRIVATE', manualLocked: false, businessVersion: 2, managementStatus: 'ENABLED', enrichmentStatus: 'SUCCEEDED', columnCount: 2, metadataVersion: 3, lastSyncAt: '2026-07-17T01:00:00Z',
+  structureHash: 'a'.repeat(64),
 }
 const metadataColumns: DataSourceColumnRecord[] = [
   { id: 'column-1', tableId: 'table-1', columnName: 'order_id', ordinalPosition: 1, sourceComment: '主键', nativeType: 'bigint', canonicalType: 'INTEGER', nullable: false, businessName: '订单编号', businessDescription: '订单唯一编号', tags: ['作用:主数据'], sensitivityLevel: 'INTERNAL', semanticType: 'IDENTIFIER', manualLocked: false, assetStatus: 'ACTIVE', businessVersion: 3 },
@@ -52,7 +54,7 @@ test('数据源连接摘要只在卡片中展示，表资产弹窗不重复展�
   expect(card.getByText('sales')).toBeInTheDocument()
   expect(card.getByText('report_reader')).toBeInTheDocument()
   expect(card.queryByText(/password|secretRef/i)).not.toBeInTheDocument()
-  await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('销售业务库'))
 
   const dialog = screen.getByRole('dialog', { name: '数据表资产' })
   expect(dialog).not.toHaveTextContent('mysql.internal')
@@ -73,7 +75,7 @@ test('数据表资产弹窗不承载草稿发布或审批动作', async () => {
   renderPage()
 
   await screen.findByText('销售业务库')
-  await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('销售业务库'))
   const dialog = await screen.findByRole('dialog', { name: '数据表资产' })
 
   expect(dialog).not.toHaveTextContent('当前存在配置草稿')
@@ -100,11 +102,15 @@ test('点击数据源卡片展示全部表结构并提供管理操作', async ()
   expect(within(dialog).getByRole('note')).toHaveTextContent('未变化字段保留现有完善结果')
   expect(within(dialog).getByRole('note')).toHaveTextContent('源表被删除时停用对应资产')
   expect(within(dialog).queryByRole('button', { name: '测试连接' })).not.toBeInTheDocument()
-  await user.click(await within(dialog).findByText('订单表'))
+  expect(within(dialog).queryByText('订单表')).not.toBeInTheDocument()
+  expect(within(dialog).getByText('仅授权可见')).toBeInTheDocument()
+  await user.click(await within(dialog).findByText('orders'))
   expect(columns).toHaveBeenCalledWith('table-1')
-  expect(await within(dialog).findByText('订单金额')).toBeInTheDocument()
+  expect(await within(dialog).findByText('amount')).toBeInTheDocument()
+  expect(within(dialog).queryByText('订单金额')).not.toBeInTheDocument()
+  expect(within(dialog).getAllByText('可见')).toHaveLength(2)
   expect(within(dialog).getByText('decimal(18,2)')).toBeInTheDocument()
-  const tableActions = within(dialog).getByLabelText('订单表操作')
+  const tableActions = within(dialog).getByLabelText('orders操作')
   expect(within(tableActions).getByRole('button', { name: '修改' })).toBeEnabled()
   expect(within(tableActions).getByRole('button', { name: '刷新结构' })).toBeEnabled()
   expect(within(tableActions).getByRole('button', { name: '停用' })).toBeEnabled()
@@ -174,7 +180,8 @@ test('新增数据表时可发现源库表并全选后导入', async () => {
   ], 'MASK')
   expect(dataSourceAPI.discoverTables).toHaveBeenCalledWith('source-1')
   expect(await screen.findByText('已提交 2 张表的 LLM 元数据完善任务（读取最多 10 行并在本地格式脱敏后发送），可关闭当前弹窗')).toBeInTheDocument()
-  expect(screen.getByRole('progressbar', { name: '元数据任务进度' })).toHaveAttribute('value', '0')
+  expect(screen.getByRole('progressbar', { name: '元数据任务进度' })).not.toHaveAttribute('value')
+  expect(within(screen.getByRole('region', { name: '元数据后台任务' })).getByText('处理中')).toBeInTheDocument()
 })
 
 test('默认以增量模式提交后台刷新，也可切换为全量刷新', async () => {
@@ -185,7 +192,7 @@ test('默认以增量模式提交后台刷新，也可切换为全量刷新', as
   renderPage()
 
   await screen.findByText('销售业务库')
-  await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('销售业务库'))
   const dialog = await screen.findByRole('dialog', { name: '数据表资产' })
   expect(within(dialog).getByLabelText('元数据刷新方式')).toHaveValue('INCREMENTAL')
   expect(within(dialog).getByLabelText('LLM 样本授权')).toHaveValue('MASK')
@@ -206,7 +213,7 @@ test('没有可刷新表时立即展示完成态而不是无限等待', async ()
   renderPage()
 
   await screen.findByText('销售业务库')
-  await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('销售业务库'))
   const dialog = await screen.findByRole('dialog', { name: '数据表资产' })
   await user.click(within(dialog).getByRole('button', { name: '开始增量刷新' }))
 
@@ -231,10 +238,10 @@ test('单表刷新提交全量 REFRESH 任务且只包含当前表', async () =>
   renderPage()
 
   await screen.findByText('销售业务库')
-  await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('销售业务库'))
   const dialog = await screen.findByRole('dialog', { name: '数据表资产' })
-  await user.click(await within(dialog).findByText('订单表'))
-  await user.click(within(within(dialog).getByLabelText('订单表操作')).getByRole('button', { name: '刷新结构' }))
+  await user.click(await within(dialog).findByText('orders'))
+  await user.click(within(within(dialog).getByLabelText('orders操作')).getByRole('button', { name: '刷新结构' }))
 
   expect(refreshTables).toHaveBeenCalledWith('source-1', 'FULL', ['table-1'], 'MASK')
   expect(importTables).not.toHaveBeenCalled()
@@ -253,11 +260,11 @@ test('表资产修改支持字段业务映射且只提交发生变化的字段',
   renderPage()
 
   await screen.findByText('销售业务库')
-  await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('销售业务库'))
   const assetDialog = await screen.findByRole('dialog', { name: '数据表资产' })
-  await user.click(await within(assetDialog).findByText('订单表'))
-  await within(assetDialog).findByText('订单编号')
-  await user.click(within(within(assetDialog).getByLabelText('订单表操作')).getByRole('button', { name: '修改' }))
+  await user.click(await within(assetDialog).findByText('orders'))
+  await within(assetDialog).findByText('order_id')
+  await user.click(within(within(assetDialog).getByLabelText('orders操作')).getByRole('button', { name: '修改' }))
 
   const editDialog = await screen.findByRole('dialog', { name: '修改数据表资产' })
   const businessName = await within(editDialog).findByLabelText('order_id业务字段名称')
@@ -291,10 +298,10 @@ test('字段业务说明和自由标签可编辑，保存时标签去空并去�
   renderPage()
 
   await screen.findByText('销售业务库')
-  await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('销售业务库'))
   const assetDialog = await screen.findByRole('dialog', { name: '数据表资产' })
-  await user.click(await within(assetDialog).findByText('订单表'))
-  await user.click(within(within(assetDialog).getByLabelText('订单表操作')).getByRole('button', { name: '修改' }))
+  await user.click(await within(assetDialog).findByText('orders'))
+  await user.click(within(within(assetDialog).getByLabelText('orders操作')).getByRole('button', { name: '修改' }))
 
   const editDialog = await screen.findByRole('dialog', { name: '修改数据表资产' })
   const description = await within(editDialog).findByLabelText('order_id业务说明')
@@ -339,10 +346,10 @@ test('表与字段顺序保存，部分失败后重试不会重复提交已成�
   renderPage()
 
   await screen.findByText('销售业务库')
-  await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('销售业务库'))
   const assetDialog = await screen.findByRole('dialog', { name: '数据表资产' })
-  await user.click(await within(assetDialog).findByText('订单表'))
-  await user.click(within(within(assetDialog).getByLabelText('订单表操作')).getByRole('button', { name: '修改' }))
+  await user.click(await within(assetDialog).findByText('orders'))
+  await user.click(within(within(assetDialog).getByLabelText('orders操作')).getByRole('button', { name: '修改' }))
   const editDialog = await screen.findByRole('dialog', { name: '修改数据表资产' })
   await within(editDialog).findByLabelText('order_id业务字段名称')
 
@@ -375,19 +382,25 @@ test('恢复后台任务后展示真实进度并在终态刷新资产和消息',
   vi.spyOn(dataSourceAPI, 'list').mockResolvedValue({ items: [source()] })
   const tables = vi.spyOn(dataSourceAPI, 'tables').mockResolvedValue({ items: [metadataTable], total: 1 })
   vi.mocked(dataSourceAPI.latestActiveMetadataJob).mockResolvedValue({ job: job({ id: 'job-progress', kind: 'REFRESH', mode: 'INCREMENTAL', total: 3 }) })
-  vi.spyOn(dataSourceAPI, 'getMetadataJob').mockResolvedValue(job({ id: 'job-progress', kind: 'REFRESH', mode: 'INCREMENTAL', status: 'SUCCEEDED', stage: 'COMPLETE', total: 3, completed: 3, succeeded: 2, skipped: 1 }))
+  vi.spyOn(dataSourceAPI, 'getMetadataJob')
+    .mockResolvedValueOnce(job({ id: 'job-progress', kind: 'REFRESH', mode: 'INCREMENTAL', status: 'RUNNING', stage: 'LLM', total: 3, completed: 1, succeeded: 1, currentTable: 'customers' }))
+    .mockResolvedValueOnce(job({ id: 'job-progress', kind: 'REFRESH', mode: 'INCREMENTAL', status: 'SUCCEEDED', stage: 'COMPLETE', total: 3, completed: 3, succeeded: 2, skipped: 1 }))
   const user = userEvent.setup()
   renderPage()
 
   await screen.findByText('销售业务库')
-  await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('销售业务库'))
   const progress = await screen.findByRole('progressbar', { name: '元数据任务进度' })
   expect(progress).toHaveAttribute('max', '3')
-  expect(progress).toHaveAttribute('value', '0')
+  expect(progress).not.toHaveAttribute('value')
   expect(progress).toHaveAttribute('aria-valuetext', '已处理 0 / 3 张，等待后台执行')
   expect(within(screen.getByRole('region', { name: '元数据后台任务' })).getByRole('status')).toHaveAttribute('aria-live', 'polite')
 
-  expect(await screen.findByText('增量刷新完成：2 张成功，跳过 1 张未变化表', {}, { timeout: 2500 })).toBeInTheDocument()
+  await waitFor(() => expect(progress).toHaveAttribute('value', '1'), { timeout: 2500 })
+  expect(progress).toHaveAttribute('aria-valuetext', '已处理 1 / 3 张，LLM 完善，当前 customers')
+  expect(within(screen.getByRole('region', { name: '元数据后台任务' })).getByText('33%')).toBeInTheDocument()
+
+  expect(await screen.findByText('增量刷新完成：2 张成功，跳过 1 张未变化表', {}, { timeout: 3500 })).toBeInTheDocument()
   expect(progress).toHaveAttribute('value', '3')
   expect(progress).toHaveAttribute('aria-valuetext', '已处理 3 / 3 张，已完成')
   expect(dataSourceAPI.getMetadataJob).toHaveBeenCalledWith('source-1', 'job-progress')
@@ -417,12 +430,61 @@ test.each(['PARTIAL', 'FAILED'] as const)('%s 任务在进度卡内展示逐表�
   renderPage()
 
   await screen.findByText('销售业务库')
-  await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('销售业务库'))
 
   const progressCard = await screen.findByRole('region', { name: '元数据后台任务' })
   const failures = within(progressCard).getByRole('list', { name: '逐表失败明细' })
   expect(failures).toHaveTextContent('public.orders：LLM 表结构完善失败')
   expect(document.querySelector('.data-source-toast')).toBeNull()
+})
+
+test('LLM 不完整项可从失败明细进入手工完善并完成 ODS 映射', async () => {
+  const failedTable = { ...metadataTable, enrichmentStatus: 'FAILED' as const }
+  vi.spyOn(dataSourceAPI, 'list').mockResolvedValue({ items: [source()] })
+  vi.spyOn(dataSourceAPI, 'tables').mockResolvedValue({ items: [failedTable], total: 1 })
+  vi.spyOn(dataSourceAPI, 'columns').mockResolvedValue({ items: metadataColumns })
+  vi.mocked(dataSourceAPI.latestActiveMetadataJob).mockResolvedValue({ job: job({
+    id: 'job-partial-output',
+    status: 'PARTIAL',
+    stage: 'COMPLETE',
+    total: 1,
+    completed: 1,
+    failed: 1,
+    failures: [{
+      catalogName: 'sales',
+      schemaName: 'public',
+      tableName: 'orders',
+      errorCode: 'LLM_OUTPUT_PARTIAL',
+      errorMessage: 'LLM 已保存可用结果，剩余项请手工完善',
+    }],
+  }) })
+  const updatedTable = { ...failedTable, manualLocked: true, businessVersion: 3 }
+  vi.spyOn(dataSourceAPI, 'updateTable').mockResolvedValue(updatedTable)
+  vi.spyOn(dataSourceAPI, 'updateColumn')
+    .mockImplementation(async id => ({
+      ...metadataColumns.find(column => column.id === id)!,
+      manualLocked: true,
+      businessVersion: metadataColumns.find(column => column.id === id)!.businessVersion + 1,
+    }))
+  const complete = vi.spyOn(dataSourceAPI, 'completeTableManually').mockResolvedValue({
+    ...updatedTable,
+    enrichmentStatus: 'SUCCEEDED',
+  })
+  const user = userEvent.setup()
+  renderPage()
+
+  await screen.findByText('销售业务库')
+  await user.click(entryFor('销售业务库'))
+  const progress = await screen.findByRole('region', { name: '元数据后台任务' })
+  await user.click(within(progress).getByRole('button', { name: '手工完善' }))
+
+  const editor = await screen.findByRole('dialog', { name: '手工完善数据表' })
+  expect(within(editor).getByRole('note')).toHaveTextContent('补齐 LLM 未完成的业务元数据')
+  expect(within(editor).getByLabelText('order_id人工锁定')).toBeChecked()
+  await user.click(within(editor).getByRole('button', { name: '保存并完成手工完善' }))
+
+  expect(complete).toHaveBeenCalledWith('table-1', 3, 'a'.repeat(64))
+  expect(await screen.findByText(/并生成或刷新 ODS 数据集/)).toBeInTheDocument()
 })
 
 test('关闭弹窗后轮询临时失败仍自动重试并展示最终结果', async () => {
@@ -436,7 +498,7 @@ test('关闭弹窗后轮询临时失败仍自动重试并展示最终结果', as
   renderPage()
 
   await screen.findByText('销售业务库')
-  await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('销售业务库'))
   await screen.findByRole('progressbar', { name: '元数据任务进度' })
   await user.click(screen.getByRole('button', { name: '关闭数据表资产' }))
   expect(screen.queryByRole('dialog', { name: '数据表资产' })).not.toBeInTheDocument()
@@ -461,13 +523,13 @@ test('切换数据源不会让迟到的表发现结果覆盖当前清单', async
   renderPage()
 
   await screen.findByText('销售业务库')
-  await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('销售业务库'))
   await user.click(await screen.findByRole('button', { name: '新增数据表' }))
   await screen.findByText('正在从数据源刷新表清单…')
   await user.click(screen.getByRole('button', { name: '取消' }))
   await user.click(screen.getByRole('button', { name: '关闭数据表资产' }))
 
-  await user.click(within(cardFor('财务业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('财务业务库'))
   await user.click(await screen.findByRole('button', { name: '新增数据表' }))
   expect(await screen.findByText('accounts')).toBeInTheDocument()
   resolveFirstDiscovery({ items: [{ catalogName: 'sales', schemaName: 'public', name: 'late_orders', type: 'TABLE', sourceComment: '', columns: [] }], total: 1 })
@@ -489,10 +551,10 @@ test('查看另一数据源不会停止原数据源后台任务的完成通知',
   renderPage()
 
   await screen.findByText('销售业务库')
-  await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('销售业务库'))
   await screen.findByRole('progressbar', { name: '元数据任务进度' })
   await user.click(screen.getByRole('button', { name: '关闭数据表资产' }))
-  await user.click(within(cardFor('财务业务库')).getByRole('button', { name: '查看' }))
+  await user.click(entryFor('财务业务库'))
   const secondTask = await screen.findByRole('region', { name: '元数据后台任务' })
   expect(within(secondTask).getByText('全量刷新')).toBeInTheDocument()
 
@@ -513,8 +575,8 @@ test('删除数据表只调用资产删除接口而不删除数据源', async ()
   await screen.findByText('销售业务库')
   await user.click(within(cardFor('销售业务库')).getByRole('button', { name: '管理销售业务库的数据表资产' }))
   const dialog = await screen.findByRole('dialog', { name: '数据表资产' })
-  await user.click(await within(dialog).findByText('订单表'))
-  await user.click(within(within(dialog).getByLabelText('订单表操作')).getByRole('button', { name: '删除' }))
+  await user.click(await within(dialog).findByText('orders'))
+  await user.click(within(within(dialog).getByLabelText('orders操作')).getByRole('button', { name: '删除' }))
   const confirm = screen.getByRole('dialog', { name: '删除数据表资产' })
   expect(confirm).toHaveTextContent('不会删除或修改源数据库中的原表')
   await user.click(within(confirm).getByRole('button', { name: '确认删除资产' }))
@@ -874,7 +936,7 @@ test('审核失败展示原因并锁定数据表配置，可修改后重新提�
   const card = within(cardFor('销售业务库'))
   expect(card.getByText('驳回原因：请改用只读账号')).toBeInTheDocument()
   expect(card.getByRole('button', { name: '管理销售业务库的数据表资产' })).toBeDisabled()
-  expect(card.getByRole('button', { name: '查看' })).toBeDisabled()
+  expect(card.queryByRole('button', { name: '查看' })).not.toBeInTheDocument()
   expect(card.getByRole('button', { name: '修改' })).toBeEnabled()
   expect(card.getByRole('button', { name: '重新提交' })).toBeEnabled()
 })
@@ -901,17 +963,21 @@ test('本机回环 Host 给出 Docker 场景修复建议且不会保存', async 
   expect(create).not.toHaveBeenCalled()
 })
 
-test('查看、修改、测试、暂停和删除按钮使用不同语义颜色', async () => {
+test('点击数据源条目进入详情且不再展示查看按钮', async () => {
   vi.spyOn(dataSourceAPI, 'list').mockResolvedValue({ items: [source()] })
+  vi.spyOn(dataSourceAPI, 'tables').mockResolvedValue({ items: [], total: 0 })
+  const user = userEvent.setup()
   renderPage()
 
   await screen.findByText('销售业务库')
   const card = within(cardFor('销售业务库'))
-  expect(card.getByRole('button', { name: '查看' })).toHaveClass('action-view')
+  expect(card.queryByRole('button', { name: '查看' })).not.toBeInTheDocument()
   expect(card.getByRole('button', { name: '修改' })).toHaveClass('action-edit')
   expect(card.getByRole('button', { name: '测试连接' })).toHaveClass('action-test')
   expect(card.getByRole('button', { name: '暂停' })).toHaveClass('action-pause')
   expect(card.getByRole('button', { name: '删除' })).toHaveClass('action-delete')
+  await user.click(card.getByRole('button', { name: '管理销售业务库的数据表资产' }))
+  expect(await screen.findByRole('dialog', { name: '数据表资产' })).toBeInTheDocument()
 })
 
 test('删除前二次确认并从清单移除', async () => {

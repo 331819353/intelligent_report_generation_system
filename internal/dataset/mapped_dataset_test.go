@@ -224,6 +224,14 @@ func TestMappedDatasetStateDefaultPublicationRequiresPristineUnpublishedDraft(t 
 	if !pristine.canDefaultPublish(prepared) {
 		t.Fatalf("pristine mapped dataset was not eligible: %#v", pristine)
 	}
+	systemRefreshed := pristine
+	systemRefreshed.Version = 2
+	systemRefreshed.DraftRecordVersion = 2
+	systemRefreshed.RevisionCount = 2
+	if !systemRefreshed.canDefaultPublish(prepared) ||
+		!systemRefreshed.canSystemRefreshDraft() {
+		t.Fatalf("system-refreshed incomplete draft was not eligible: %#v", systemRefreshed)
+	}
 
 	tests := []struct {
 		name   string
@@ -233,6 +241,8 @@ func TestMappedDatasetStateDefaultPublicationRequiresPristineUnpublishedDraft(t 
 		{name: "草稿记录已变化", mutate: func(state *mappedDatasetState) { state.DraftRecordVersion = 2 }},
 		{name: "已有发布历史", mutate: func(state *mappedDatasetState) { state.PublishedCount = 1 }},
 		{name: "存在待审批申请", mutate: func(state *mappedDatasetState) { state.PendingApprovalCount = 1 }},
+		{name: "存在历史审批申请", mutate: func(state *mappedDatasetState) { state.PublicationRequests = 1 }},
+		{name: "存在人工草稿修改", mutate: func(state *mappedDatasetState) { state.HumanDraftMutations = 1 }},
 		{name: "修订不唯一", mutate: func(state *mappedDatasetState) { state.RevisionCount = 2 }},
 		{name: "创建修订不匹配", mutate: func(state *mappedDatasetState) { state.ExactCreateCount = 0 }},
 		{name: "DSL 已偏离映射默认值", mutate: func(state *mappedDatasetState) { state.DSLHash = "a" }},

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -121,6 +122,38 @@ func TestValidateStructuredOutputRejectsSchemaViolations(t *testing.T) {
 	}
 	_, err := ValidateStructuredOutput(validJSONSchema(), []byte{'{', '"', 'n', 'a', 'm', 'e', '"', ':', '"', 0xff, '"', '}'})
 	requireProviderError(t, err, ErrorCodeInvalidOutput)
+}
+
+func TestInvalidOutputDetailsRetainCandidateWithoutLeakingThroughError(t *testing.T) {
+	candidate := []byte(`{"name":"月报","count":2,"tags":["c"]}`)
+	_, err := ValidateStructuredOutput(validJSONSchema(), candidate)
+	if err == nil {
+		t.Fatal("非法枚举未被拒绝")
+	}
+	content, diagnostic, ok := InvalidOutputDetails(err)
+	if !ok || string(content) != string(candidate) {
+		t.Fatalf("invalid output details=%q %q %v", content, diagnostic, ok)
+	}
+	if diagnostic != "$.tags[0] is outside enum" {
+		t.Fatalf("diagnostic=%q", diagnostic)
+	}
+	if strings.Contains(err.Error(), "月报") || strings.Contains(err.Error(), `"c"`) {
+		t.Fatalf("公开错误泄露模型正文: %v", err)
+	}
+}
+
+func TestInvalidOutputDiagnosticRedactsModelInventedPropertyName(t *testing.T) {
+	candidate := []byte(`{"name":"月报","count":2,"tags":["a"],"private_customer_phone":true}`)
+	_, err := ValidateStructuredOutput(validJSONSchema(), candidate)
+	if err == nil {
+		t.Fatal("模型虚构字段未被拒绝")
+	}
+	if got, want := InvalidOutputDiagnostic(err), `$ contains unknown property "<redacted>"`; got != want {
+		t.Fatalf("diagnostic=%q, want %q", got, want)
+	}
+	if strings.Contains(InvalidOutputDiagnostic(err), "private_customer_phone") {
+		t.Fatal("安全诊断泄露模型虚构字段名")
+	}
 }
 
 func TestValidateStructuredOutputBoundsRecursiveReferences(t *testing.T) {

@@ -14,6 +14,7 @@ type Service struct {
 	repo            Repository
 	connectors      map[Type]Connector
 	completer       TableCompleter
+	mappedDrafts    MappedDatasetDraftEnsurer
 	jobs            MetadataJobRepository
 	connectionTests ConnectionTestJobRepository
 	now             func() time.Time
@@ -22,6 +23,11 @@ type Service struct {
 
 // SetTableCompleter 注入 LLM 元数据完善器，保持数据源领域对具体 AI 实现解耦。
 func (s *Service) SetTableCompleter(completer TableCompleter) { s.completer = completer }
+
+// SetMappedDatasetDraftEnsurer 注入 LLM 不完整时的 ODS 降级草稿边界。
+func (s *Service) SetMappedDatasetDraftEnsurer(ensurer MappedDatasetDraftEnsurer) {
+	s.mappedDrafts = ensurer
+}
 
 // SetMetadataJobRepository 注入持久化任务仓储，使 HTTP 只负责入队、worker 负责采样和完善。
 func (s *Service) SetMetadataJobRepository(jobs MetadataJobRepository) { s.jobs = jobs }
@@ -458,6 +464,13 @@ func (s *Service) RefreshTables(ctx context.Context, tenantID, actorID, id strin
 			continue
 		}
 		if err := s.completer.CompleteTable(ctx, tenantID, actorID, item.ID, nil, true, nil, structureHash, "", "", 0); err != nil {
+			if s.mappedDrafts != nil {
+				if draftErr := s.mappedDrafts.EnsureMappedDatasetDraft(
+					ctx, tenantID, actorID, item.ID,
+				); draftErr != nil {
+					err = errors.Join(err, fmt.Errorf("create editable ODS draft: %w", draftErr))
+				}
+			}
 			item.Stage, item.Code, item.Cause = "LLM", "LLM_COMPLETION_FAILED", err
 			result.Items = append(result.Items, item)
 			result.Failed++
@@ -524,6 +537,13 @@ func (s *Service) importTables(ctx context.Context, tenantID, actorID, id string
 			return nil, fmt.Errorf("hash metadata for table %s: %w", table.Name, err)
 		}
 		if err := s.completer.CompleteTable(ctx, tenantID, actorID, tableID, nil, true, nil, structureHash, "", "", 0); err != nil {
+			if s.mappedDrafts != nil {
+				if draftErr := s.mappedDrafts.EnsureMappedDatasetDraft(
+					ctx, tenantID, actorID, tableID,
+				); draftErr != nil {
+					err = errors.Join(err, fmt.Errorf("create editable ODS draft: %w", draftErr))
+				}
+			}
 			return nil, fmt.Errorf("complete metadata for table %s: %w", table.Name, err)
 		}
 		imported = append(imported, ImportedTable{ID: tableID, Table: table})
@@ -577,7 +597,7 @@ func sampleRowsForColumns(sample SampleResult, columns []string) []map[string]an
 	return rows
 }
 
-// Delete 先关闭连接器资源，再将数据源软删除。
+// Delete 先原子检查数据集引用并进入删除中，再关闭连接器资源和软删除。
 func (s *Service) Delete(ctx context.Context, tenantID, id string) error {
 	if err := s.ensureReviewAllowsManagement(ctx, tenantID, id); err != nil {
 		return err
@@ -586,7 +606,7 @@ func (s *Service) Delete(ctx context.Context, tenantID, id string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.repo.UpdateStatus(ctx, tenantID, id, StatusDeleting, ""); err != nil {
+	if err := s.repo.BeginDelete(ctx, tenantID, id); err != nil {
 		return err
 	}
 	if err := connector.Close(ctx, source); err != nil {

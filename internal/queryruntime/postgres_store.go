@@ -323,19 +323,10 @@ func resolveActiveMaterializationTx(
 	); err != nil {
 		return ResolvedMaterialization{}, querycompiler.TableRef{}, dataset.ErrPreviewUnsupported
 	}
-	var publishedKind string
-	if err := tx.QueryRow(ctx, `SELECT class.relkind::text
-		FROM pg_class AS class
-		JOIN pg_namespace AS namespace ON namespace.oid=class.relnamespace
-		WHERE namespace.nspname=$1 AND class.relname=$2`,
-		binding.PublishedSchema, binding.PublishedName).Scan(&publishedKind); errors.Is(err, pgx.ErrNoRows) {
-		return ResolvedMaterialization{}, querycompiler.TableRef{}, dataset.ErrPreviewUnsupported
-	} else if err != nil {
-		return ResolvedMaterialization{}, querycompiler.TableRef{}, err
-	}
-	if publishedKind != "v" {
-		return ResolvedMaterialization{}, querycompiler.TableRef{}, dataset.ErrPreviewUnsupported
-	}
+	// 控制库只锁定版本、ACTIVE 物化和不可变物理标识。系统库与数仓库物理
+	// 分离后，这里不能查询控制库的 pg_class 来判断数仓视图是否存在。
+	// PostgresWarehouseExecutor 会在真正的数仓只读事务中重新校验每个稳定
+	// 视图的 relkind 与当前执行账号 SELECT 权限，随后才编译并执行 SQL。
 
 	available, types, err := loadMaterializedColumnsTx(
 		ctx, tx, binding.DatasetVersionID,

@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import { hydrateDatasetDraft } from './dataset-draft'
-import { datasetAPI, type AssetTable, type DatasetRecord } from './datasets'
+import { buildDatasetDSL, datasetAPI, type AssetTable, type DatasetRecord, type DatasetSummary } from './datasets'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -65,6 +65,150 @@ test('重新打开时严格按节点 projection 还原输出字段', async () =>
   expect(draft.nodes[0].selected).toEqual(['customer_id'])
   expect(draft.fields.find(field => field.key === 'customers.customer_id')?.output).toBe(true)
   expect(draft.fields.find(field => field.key === 'customers.customer_name')?.output).toBe(false)
+})
+
+test('DWD 草稿按精确上游数据集版本恢复数据节点和可保存画布', async () => {
+  const upstream: DatasetSummary = {
+    id: 'ods-orders',
+    code: 'ods_orders',
+    name: '订单事实表',
+    description: '订单 ODS',
+    type: 'SINGLE_SOURCE',
+    status: 'PUBLISHED',
+    layer: 'ODS',
+    tags: [],
+    version: 2,
+    dslHash: 'c'.repeat(64),
+    currentPublishedVersionId: 'ods-orders-v2',
+    updatedAt: '',
+  }
+  const dimension: DatasetSummary = {
+    ...upstream,
+    id: 'ods-customers',
+    code: 'ods_customers',
+    name: '客户维度表',
+    currentPublishedVersionId: 'ods-customers-v2',
+  }
+  vi.spyOn(datasetAPI, 'getVersion').mockImplementation(async (_, versionID) => ({
+    id: versionID,
+    datasetId: versionID === 'ods-orders-v2' ? upstream.id : dimension.id,
+    versionNo: 2,
+    status: 'PUBLISHED',
+    dslVersion: '1.0',
+    dslHash: 'c'.repeat(64),
+    planHash: 'd'.repeat(64),
+    dsl: {
+      dslVersion: '1.0',
+      dataset: {
+        code: versionID === 'ods-orders-v2' ? 'ods_orders' : 'ods_customers',
+        name: versionID === 'ods-orders-v2' ? '订单事实表' : '客户维度表',
+        type: 'SINGLE_SOURCE',
+      },
+      nodes: [],
+      fields: versionID === 'ods-orders-v2' ? [
+        { id: 'order_id', code: 'order_id', name: '订单ID', role: 'IDENTIFIER', canonicalType: 'STRING', nullable: false, expression: { type: 'FIELD_REF', nodeId: 'source', field: 'order_id' } },
+        { id: 'customer_id', code: 'customer_id', name: '客户ID', role: 'DIMENSION', canonicalType: 'STRING', nullable: true, expression: { type: 'FIELD_REF', nodeId: 'source', field: 'customer_id' } },
+      ] : [
+        { id: 'customer_id', code: 'customer_id', name: '客户ID', role: 'IDENTIFIER', canonicalType: 'STRING', nullable: false, expression: { type: 'FIELD_REF', nodeId: 'source', field: 'customer_id' } },
+        { id: 'customer_name', code: 'customer_name', name: '客户名称', role: 'ATTRIBUTE', canonicalType: 'STRING', nullable: true, expression: { type: 'FIELD_REF', nodeId: 'source', field: 'customer_name' } },
+      ],
+    },
+    logicalPlan: {},
+    publishedAt: '',
+    publishedBy: 'admin',
+    datasetRecordVersion: 2,
+    draftVersionId: `${versionID}-draft`,
+    draftRecordVersion: 2,
+  }))
+  const record = {
+    id: 'dwd-orders',
+    code: 'dwd_auto_orders',
+    name: '订单明细 DWD',
+    description: '清洗订单字段',
+    type: 'SINGLE_SOURCE',
+    status: 'DRAFT',
+    layer: 'DWD',
+    tags: [],
+    version: 1,
+    draftVersionId: 'dwd-orders-draft',
+    draftVersionNo: 1,
+    draftRecordVersion: 1,
+    dslHash: 'a'.repeat(64),
+    planHash: 'b'.repeat(64),
+    logicalPlan: {},
+    createdAt: '',
+    updatedAt: '',
+    dsl: {
+      dslVersion: '1.0',
+      dataset: { code: 'dwd_orders', name: '订单明细 DWD', type: 'SINGLE_SOURCE' },
+      nodes: [
+        { id: 'node_fact', type: 'DATASET', datasetVersionId: 'ods-orders-v2', alias: 'fact', projection: ['order_id', 'customer_id'] },
+        { id: 'node_dim_1', type: 'DATASET', datasetVersionId: 'ods-customers-v2', alias: 'dim_1', projection: ['customer_id', 'customer_name'] },
+      ],
+      joins: [{
+        id: 'join_1',
+        leftNodeId: 'node_fact',
+        rightNodeId: 'node_dim_1',
+        joinType: 'LEFT',
+        cardinality: 'MANY_TO_ONE',
+        manualConfirmed: false,
+        conditions: [{
+          leftExpression: { type: 'FIELD_REF', nodeId: 'node_fact', field: 'customer_id' },
+          operator: 'EQUALS',
+          rightExpression: { type: 'FIELD_REF', nodeId: 'node_dim_1', field: 'customer_id' },
+        }],
+      }],
+      fields: [
+        { id: 'field_order_id', code: 'order_id', name: '订单ID', role: 'IDENTIFIER', canonicalType: 'STRING', nullable: false, expression: { type: 'TRIM', argument: { type: 'FIELD_REF', nodeId: 'node_fact', field: 'order_id' } } },
+        { id: 'field_customer_id', code: 'customer_id', name: '客户ID', role: 'DIMENSION', canonicalType: 'STRING', nullable: false, expression: { type: 'COALESCE', arguments: [{ type: 'TRIM', argument: { type: 'FIELD_REF', nodeId: 'node_fact', field: 'customer_id' } }, { type: 'LITERAL', value: 'UNKNOWN' }] } },
+      ],
+      groupBy: [],
+      filters: [],
+      parameters: [],
+      sorts: [],
+      outputGrain: { description: '每行一笔订单', keyFields: ['order_id'] },
+    },
+  } as unknown as DatasetRecord
+
+  const draft = await hydrateDatasetDraft(record, [], [upstream, dimension])
+  expect(draft.nodes).toHaveLength(2)
+  expect(draft.nodes[0].table).toMatchObject({
+    sourceKind: 'DATASET',
+    datasetId: upstream.id,
+    datasetVersionId: 'ods-orders-v2',
+  })
+  expect(draft.nodes[0].selected).toEqual(['order_id', 'customer_id'])
+  expect(draft.nodes.map(node => node.alias)).toEqual(['t1', 't2'])
+  expect(draft.joins[0]).toMatchObject({ manualConfirmed: true, cardinality: 'MANY_TO_ONE' })
+  expect(draft.designer?.nodeNames).toMatchObject({ node_fact: 't1', node_dim_1: 't2' })
+  expect(draft.designer?.joins[0].name).toBe('j1')
+  expect(draft.designer?.transforms?.map(transform => transform.name)).toEqual(['c1', 'c2'])
+  expect(draft.designer?.transforms?.map(transform => transform.rules.length)).toEqual([2, 1])
+  expect(draft.designer?.end).toMatchObject({
+    name: 'o1',
+    input: { kind: 'TRANSFORM', id: 'transform_2' },
+  })
+
+  const rebuilt = buildDatasetDSL(draft)
+  expect(rebuilt.nodes[0]).toMatchObject({
+    id: 'node_fact',
+    type: 'DATASET',
+    datasetVersionId: 'ods-orders-v2',
+    alias: 't1',
+  })
+  expect(rebuilt.nodes[1]).toMatchObject({ id: 'node_dim_1', alias: 't2' })
+  expect((rebuilt.joins as Array<Record<string, unknown>>)[0]).toMatchObject({ cardinality: 'MANY_TO_ONE', manualConfirmed: true })
+  expect(rebuilt.nodes[0]).not.toHaveProperty('tableId')
+  expect(rebuilt.fields.find(field => field.code === 'customer_id')).toMatchObject({
+    nullable: false,
+    expression: {
+      type: 'COALESCE',
+      arguments: [
+        { type: 'TRIM', argument: { type: 'FIELD_REF', nodeId: 'node_fact', field: 'customer_id' } },
+        { type: 'LITERAL', value: 'UNKNOWN' },
+      ],
+    },
+  })
 })
 
 test('重新打开时还原数据节点先分组再进入关联槽位的拓扑元数据', async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { datasetAIPlanFromEditor, datasetAIRequestContext, materializeDatasetAIPlan, type DatasetAIGraphPlan } from './dataset-ai'
 import { buildDatasetDSL, type AssetColumn, type AssetTable, type DatasetDraft } from './datasets'
 
@@ -70,6 +70,60 @@ describe('dataset AI editor conversion', () => {
     expect(datasetAIRequestContext(live, staged, { forceLiveCanvas: false, stagedProposalApplied: false })).toBe(live)
     expect(datasetAIRequestContext(undefined, staged, { forceLiveCanvas: false, stagedProposalApplied: false })).toBe(staged)
     expect(datasetAIRequestContext(undefined, staged, { forceLiveCanvas: true, stagedProposalApplied: false })).toBeUndefined()
+  })
+
+  it('reuses immutable dataset-version assets when modifying a DWD graph', async () => {
+    const virtualTable: AssetTable = {
+      id: 'dataset-version:11111111-1111-4111-8111-111111111111',
+      dataSourceId: 'dataset-layer:ODS',
+      dataSourceName: 'ODS 数据集',
+      dataSourceType: 'DATASET',
+      tableName: 'ods_orders',
+      schemaName: 'ODS',
+      businessName: '订单 ODS',
+      columnCount: 1,
+      sourceKind: 'DATASET',
+      datasetId: 'ods-orders',
+      datasetVersionId: '11111111-1111-4111-8111-111111111111',
+      datasetLayer: 'ODS',
+    }
+    const virtualColumn: AssetColumn = {
+      id: 'field-order-id',
+      tableId: virtualTable.id,
+      columnName: 'order_id',
+      businessName: '订单ID',
+      canonicalType: 'STRING',
+      nullable: false,
+      semanticType: 'IDENTIFIER',
+      assetStatus: 'ACTIVE',
+    }
+    const current: DatasetDraft = {
+      ...empty,
+      code: 'dwd_orders',
+      name: '订单 DWD',
+      nodes: [{ id: 'node_fact', alias: 't1', table: virtualTable, columns: [virtualColumn], selected: ['order_id'] }],
+      fields: [{ key: 'node_fact.order_id', role: 'IDENTIFIER', aggregation: '', code: 'order_id', name: '订单ID', output: true }],
+      grainDescription: '每行一笔订单',
+      grainKeys: ['order_id'],
+    }
+    const candidate: DatasetAIGraphPlan = {
+      dataset: { name: '订单 DWD', description: '保留订单明细' },
+      nodes: [{ id: 'node_fact', tableId: virtualTable.id, alias: 't1', selectedColumns: ['order_id'] }],
+      joins: [],
+      groups: [],
+      transforms: [],
+      end: {
+        name: 'o1',
+        input: { kind: 'NODE', id: 'node_fact' },
+        outputs: [{ nodeId: 'node_fact', column: 'order_id', name: '订单ID', code: 'order_id' }],
+      },
+    }
+    const loadColumns = vi.fn(async () => {
+      throw new Error('dataset-version must not call physical columns API')
+    })
+    const result = await materializeDatasetAIPlan(candidate, [], loadColumns, current, current.code)
+    expect(loadColumns).not.toHaveBeenCalled()
+    expect(result.draft.nodes[0].table).toEqual(virtualTable)
   })
 
   it('does not materialize date conversion metadata inside a group dimension', async () => {

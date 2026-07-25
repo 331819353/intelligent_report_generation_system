@@ -18,6 +18,7 @@ var (
 	ErrVersioningRequired   = errors.New("data source versioned publication is not supported by the repository")
 	ErrReviewPending        = errors.New("data source publication review is pending")
 	ErrReviewRejected       = errors.New("data source publication review was rejected")
+	ErrDatasetReferenced    = errors.New("data source is referenced by an active dataset")
 )
 
 var dataSourceCodePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}$`)
@@ -270,6 +271,9 @@ type TableCompleter interface {
 	// targetTable=false 且 targetColumnIDs 非空时只完善指定变化字段；nil 字段集合表示处理全部活动字段。
 	CompleteTable(context.Context, string, string, string, []map[string]any, bool, []string, string, string, string, int64) error
 }
+type MappedDatasetDraftEnsurer interface {
+	EnsureMappedDatasetDraft(context.Context, string, string, string) error
+}
 type Repository interface {
 	Count(context.Context, string) (int, error)
 	Create(context.Context, Source) (Source, error)
@@ -280,6 +284,7 @@ type Repository interface {
 	ApplySelectedMetadata(context.Context, Source, SyncResult) (map[string]string, error)
 	ListActiveTableSelections(context.Context, string, string) ([]TableSelection, error)
 	Audit(context.Context, string, string, string, string, any) error
+	BeginDelete(context.Context, string, string) error
 	UpdateStatus(context.Context, string, string, Status, string) error
 	Quota(context.Context, string) (Quota, error)
 }

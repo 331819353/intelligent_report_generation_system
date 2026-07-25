@@ -247,3 +247,27 @@ func TestDataSourceHTTPUpdateRejectsStaleExpectedVersion(t *testing.T) {
 		t.Fatalf("update status=%d body=%s", response.Code, response.Body.String())
 	}
 }
+
+func TestDataSourceHTTPDeleteMapsDatasetReferenceToConflict(t *testing.T) {
+	repository := &repo{
+		source: Source{
+			ID: dataSourceHTTPSourceID, TenantID: dataSourceHTPTenantID,
+			Code: "sales_file", Name: "Sales", Type: TypeExcel, Status: StatusActive,
+			FileAssetID: "44444444-4444-4444-8444-444444444444",
+		},
+		quota:          Quota{MaxDataSources: 10},
+		beginDeleteErr: ErrDatasetReferenced,
+	}
+	service := NewService(repository, connector{kind: TypeExcel})
+	handler, token := dataSourceHTTPHarness(t, service)
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/data-sources/"+dataSourceHTTPSourceID, nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "DATA_SOURCE_DATASET_REFERENCED") {
+		t.Fatalf("delete status=%d body=%s", response.Code, response.Body.String())
+	}
+}
