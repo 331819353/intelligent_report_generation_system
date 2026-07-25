@@ -494,13 +494,45 @@ func (service *Service) PlanQuery(
 	input.MemberValue = strings.TrimSpace(input.MemberValue)
 	input.DimensionCode = strings.TrimSpace(input.DimensionCode)
 	input.MetricCode = strings.TrimSpace(input.MetricCode)
+	memberFilters, err := normalizeQueryMemberFilters(
+		input.DimensionCode, input.MemberValue, input.MemberFilters,
+	)
+	if err != nil {
+		return QueryPlan{}, ErrInvalidRequest
+	}
+	input.MemberFilters = memberFilters
 	input.SortDirection = strings.ToUpper(strings.TrimSpace(input.SortDirection))
+	input.TimePreset = strings.ToUpper(strings.TrimSpace(input.TimePreset))
+	input.Timezone = strings.TrimSpace(input.Timezone)
+	input.ComparisonMode = strings.ToUpper(strings.TrimSpace(input.ComparisonMode))
+	if input.TimeRange == nil && input.TimePreset == "" {
+		input.TimePreset = inferQueryTimePreset(input.Question)
+	}
+	if input.ComparisonMode == "" {
+		input.ComparisonMode = inferQueryComparisonMode(input.Question)
+	}
+	if input.ComparisonRange != nil && input.ComparisonMode == "" {
+		input.ComparisonMode = "CUSTOM"
+	}
+	if input.TimePreset != "" && input.Timezone == "" {
+		input.Timezone = "UTC"
+	}
+	if input.ComparisonMode != "" && input.Timezone == "" {
+		input.Timezone = "UTC"
+	}
 	if input.TimeRange != nil {
 		normalized, err := normalizeQueryTimeRange(*input.TimeRange)
 		if err != nil {
 			return QueryPlan{}, ErrInvalidRequest
 		}
 		input.TimeRange = &normalized
+	}
+	if input.ComparisonRange != nil {
+		normalized, err := normalizeQueryTimeRange(*input.ComparisonRange)
+		if err != nil {
+			return QueryPlan{}, ErrInvalidRequest
+		}
+		input.ComparisonRange = &normalized
 	}
 	if input.Intent == "RANKING" && input.TopN == 0 {
 		input.TopN = 10
@@ -510,7 +542,8 @@ func (service *Service) PlanQuery(
 	}
 	if len(input.Question) < 1 || len(input.Question) > 4000 ||
 		len(input.MemberValue) > 1024 || len(input.DimensionCode) > 128 ||
-		len(input.MetricCode) > 128 ||
+		len(input.MetricCode) > 128 || len(input.Timezone) > 128 ||
+		len(input.MemberFilters) > 8 ||
 		!oneOf(input.Intent,
 			"LOOKUP", "METRIC", "TREND", "COMPARISON", "RANKING",
 			"DRILLDOWN", "DISTRIBUTION", "FUNNEL", "RETENTION",
@@ -518,8 +551,28 @@ func (service *Service) PlanQuery(
 		) || input.MaximumPathHops < 0 || input.MaximumPathHops > 16 ||
 		input.TopN < 0 || input.TopN > 500 ||
 		!oneOf(input.SortDirection, "", "ASC", "DESC") ||
-		(input.SortDirection != "" && input.TopN == 0) {
+		(input.SortDirection != "" && input.TopN == 0) ||
+		!oneOf(
+			input.TimePreset, "", "TODAY", "YESTERDAY", "LAST_7_DAYS",
+			"LAST_30_DAYS", "THIS_MONTH", "LAST_MONTH",
+			"THIS_YEAR", "LAST_YEAR",
+		) ||
+		(input.TimeRange != nil && input.TimePreset != "") ||
+		(input.TimePreset == "" && input.Timezone != "" &&
+			input.ComparisonMode == "") ||
+		!oneOf(
+			input.ComparisonMode, "", "PREVIOUS_PERIOD",
+			"YEAR_OVER_YEAR", "CUSTOM",
+		) ||
+		(input.ComparisonMode == "CUSTOM" && input.ComparisonRange == nil) ||
+		(input.ComparisonRange != nil &&
+			input.TimeRange == nil && input.TimePreset == "") {
 		return QueryPlan{}, ErrInvalidRequest
+	}
+	if input.TimePreset != "" {
+		if _, err := time.LoadLocation(input.Timezone); err != nil {
+			return QueryPlan{}, ErrInvalidRequest
+		}
 	}
 	if service.interpreter != nil &&
 		(input.MetricCode == "" || input.Intent == "UNKNOWN") {
@@ -543,6 +596,9 @@ func (service *Service) PlanQuery(
 	}
 	if input.Intent == "RANKING" && input.TopN == 0 {
 		input.TopN, input.SortDirection = 10, "DESC"
+	}
+	if input.ComparisonMode != "" && input.Intent != "COMPARISON" {
+		return QueryPlan{}, ErrInvalidRequest
 	}
 	if input.MetricCode == "" {
 		return QueryPlan{}, ErrUnprovenPath
@@ -576,6 +632,34 @@ func normalizeQueryTimeRange(value QueryTimeRange) (QueryTimeRange, error) {
 	return value, nil
 }
 
+func normalizeQueryMemberFilters(
+	primaryDimension, primaryMember string,
+	filters []QueryMemberFilterInput,
+) ([]QueryMemberFilterInput, error) {
+	if len(filters) > 8 {
+		return nil, ErrInvalidRequest
+	}
+	seenDimensions := map[string]bool{}
+	if primaryMember != "" && primaryDimension != "" {
+		seenDimensions[strings.ToLower(primaryDimension)] = true
+	}
+	result := make([]QueryMemberFilterInput, len(filters))
+	for index, memberFilter := range filters {
+		memberFilter.DimensionCode = strings.TrimSpace(memberFilter.DimensionCode)
+		memberFilter.MemberValue = strings.TrimSpace(memberFilter.MemberValue)
+		key := strings.ToLower(memberFilter.DimensionCode)
+		if memberFilter.DimensionCode == "" || memberFilter.MemberValue == "" ||
+			len(memberFilter.DimensionCode) > 128 ||
+			len(memberFilter.MemberValue) > 1024 ||
+			seenDimensions[key] {
+			return nil, ErrInvalidRequest
+		}
+		seenDimensions[key] = true
+		result[index] = memberFilter
+	}
+	return result, nil
+}
+
 func parseQueryBoundary(value string) (time.Time, bool, error) {
 	if parsed, err := time.Parse(time.DateOnly, value); err == nil {
 		return parsed.UTC(), true, nil
@@ -585,6 +669,162 @@ func parseQueryBoundary(value string) (time.Time, bool, error) {
 		return time.Time{}, false, ErrInvalidRequest
 	}
 	return parsed, false, nil
+}
+
+func inferQueryTimePreset(question string) string {
+	question = strings.ToLower(strings.TrimSpace(question))
+	compactQuestion := strings.Join(strings.Fields(question), "")
+	for _, candidate := range []struct {
+		preset  string
+		phrases []string
+	}{
+		{preset: "YESTERDAY", phrases: []string{"昨天", "昨日", "yesterday"}},
+		{preset: "LAST_7_DAYS", phrases: []string{"最近7天", "近7天", "过去7天", "last 7 days"}},
+		{preset: "LAST_30_DAYS", phrases: []string{"最近30天", "近30天", "过去30天", "last 30 days"}},
+		{preset: "LAST_MONTH", phrases: []string{"上个月", "上月", "last month"}},
+		{preset: "THIS_MONTH", phrases: []string{"这个月", "本月", "this month"}},
+		{preset: "LAST_YEAR", phrases: []string{"去年", "上年", "last year"}},
+		{preset: "THIS_YEAR", phrases: []string{"今年", "本年", "this year"}},
+		{preset: "TODAY", phrases: []string{"今天", "今日", "today"}},
+	} {
+		for _, phrase := range candidate.phrases {
+			if strings.Contains(question, phrase) ||
+				strings.Contains(
+					compactQuestion,
+					strings.Join(strings.Fields(phrase), ""),
+				) {
+				return candidate.preset
+			}
+		}
+	}
+	return ""
+}
+
+func inferQueryComparisonMode(question string) string {
+	question = strings.ToLower(strings.TrimSpace(question))
+	switch {
+	case strings.Contains(question, "同比"),
+		strings.Contains(question, "year over year"),
+		strings.Contains(question, "year-over-year"):
+		return "YEAR_OVER_YEAR"
+	case strings.Contains(question, "环比"),
+		strings.Contains(question, "较上期"),
+		strings.Contains(question, "previous period"):
+		return "PREVIOUS_PERIOD"
+	default:
+		return ""
+	}
+}
+
+func resolveQueryTimePreset(
+	preset, timezone, fieldType string,
+	now time.Time,
+) (QueryTimeRange, error) {
+	location, err := time.LoadLocation(timezone)
+	if err != nil || !oneOf(fieldType, "DATE", "DATETIME") {
+		return QueryTimeRange{}, ErrInvalidRequest
+	}
+	localNow := now.In(location)
+	today := time.Date(
+		localNow.Year(), localNow.Month(), localNow.Day(),
+		0, 0, 0, 0, location,
+	)
+	var start, end time.Time
+	switch preset {
+	case "TODAY":
+		start, end = today, today.AddDate(0, 0, 1)
+	case "YESTERDAY":
+		start, end = today.AddDate(0, 0, -1), today
+	case "LAST_7_DAYS":
+		start, end = today.AddDate(0, 0, -6), today.AddDate(0, 0, 1)
+	case "LAST_30_DAYS":
+		start, end = today.AddDate(0, 0, -29), today.AddDate(0, 0, 1)
+	case "THIS_MONTH":
+		start = time.Date(localNow.Year(), localNow.Month(), 1, 0, 0, 0, 0, location)
+		end = start.AddDate(0, 1, 0)
+	case "LAST_MONTH":
+		end = time.Date(localNow.Year(), localNow.Month(), 1, 0, 0, 0, 0, location)
+		start = end.AddDate(0, -1, 0)
+	case "THIS_YEAR":
+		start = time.Date(localNow.Year(), 1, 1, 0, 0, 0, 0, location)
+		end = start.AddDate(1, 0, 0)
+	case "LAST_YEAR":
+		end = time.Date(localNow.Year(), 1, 1, 0, 0, 0, 0, location)
+		start = end.AddDate(-1, 0, 0)
+	default:
+		return QueryTimeRange{}, ErrInvalidRequest
+	}
+	if fieldType == "DATE" {
+		return QueryTimeRange{
+			Start: start.Format(time.DateOnly), EndExclusive: end.Format(time.DateOnly),
+		}, nil
+	}
+	return QueryTimeRange{
+		Start:        start.UTC().Format(time.RFC3339),
+		EndExclusive: end.UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func deriveQueryComparisonRange(
+	current QueryTimeRange,
+	mode, preset, timezone, fieldType string,
+) (QueryTimeRange, error) {
+	if !oneOf(mode, "PREVIOUS_PERIOD", "YEAR_OVER_YEAR") {
+		return QueryTimeRange{}, ErrInvalidRequest
+	}
+	location, err := time.LoadLocation(timezone)
+	if err != nil || !oneOf(fieldType, "DATE", "DATETIME") {
+		return QueryTimeRange{}, ErrInvalidRequest
+	}
+	parse := func(value string) (time.Time, error) {
+		if fieldType == "DATE" {
+			return time.ParseInLocation(time.DateOnly, value, location)
+		}
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return parsed.In(location), nil
+	}
+	currentStart, err := parse(current.Start)
+	if err != nil {
+		return QueryTimeRange{}, ErrInvalidRequest
+	}
+	currentEnd, err := parse(current.EndExclusive)
+	if err != nil || !currentStart.Before(currentEnd) {
+		return QueryTimeRange{}, ErrInvalidRequest
+	}
+	var baselineStart, baselineEnd time.Time
+	if mode == "YEAR_OVER_YEAR" {
+		baselineStart = currentStart.AddDate(-1, 0, 0)
+		baselineEnd = currentEnd.AddDate(-1, 0, 0)
+	} else {
+		baselineEnd = currentStart
+		switch preset {
+		case "TODAY", "YESTERDAY":
+			baselineStart = baselineEnd.AddDate(0, 0, -1)
+		case "LAST_7_DAYS":
+			baselineStart = baselineEnd.AddDate(0, 0, -7)
+		case "LAST_30_DAYS":
+			baselineStart = baselineEnd.AddDate(0, 0, -30)
+		case "THIS_MONTH", "LAST_MONTH":
+			baselineStart = baselineEnd.AddDate(0, -1, 0)
+		case "THIS_YEAR", "LAST_YEAR":
+			baselineStart = baselineEnd.AddDate(-1, 0, 0)
+		default:
+			baselineStart = baselineEnd.Add(-currentEnd.Sub(currentStart))
+		}
+	}
+	if fieldType == "DATE" {
+		return QueryTimeRange{
+			Start:        baselineStart.Format(time.DateOnly),
+			EndExclusive: baselineEnd.Format(time.DateOnly),
+		}, nil
+	}
+	return QueryTimeRange{
+		Start:        baselineStart.UTC().Format(time.RFC3339),
+		EndExclusive: baselineEnd.UTC().Format(time.RFC3339),
+	}, nil
 }
 
 func (service *Service) GetQueryPlan(
@@ -630,40 +870,65 @@ func (service *Service) ExecuteQueryPlan(
 		binding.TimeFieldID != binding.DimensionFieldID {
 		dimensionFields = append(dimensionFields, binding.TimeFieldID)
 	}
-	dimensionFilters := []metric.DimensionFilter{}
-	if binding.MemberKey != "" {
-		dimensionFilters = append(dimensionFilters, metric.DimensionFilter{
-			FieldID:  binding.DimensionFieldID,
-			Operator: "EQUALS", Value: binding.MemberKey,
-		})
-	}
-	if binding.TimeRange != nil {
-		dimensionFilters = append(dimensionFilters,
-			metric.DimensionFilter{
-				FieldID:  binding.TimeFieldID,
-				Operator: "GTE", Value: binding.TimeRange.Start,
-			},
-			metric.DimensionFilter{
-				FieldID:  binding.TimeFieldID,
-				Operator: "LT", Value: binding.TimeRange.EndExclusive,
-			},
-		)
-	}
 	maxRows := input.MaxRows
 	if binding.TopN > 0 && (maxRows == 0 || maxRows > binding.TopN) {
 		maxRows = binding.TopN
 	}
-	result, executeErr := service.metricExecutor.PreviewVersion(
-		ctx, tenantID, actorID, plan.SelectedMetricID,
-		plan.SelectedMetricVersionID,
-		metric.PreviewInput{
-			QueryID: input.QueryID, Parameters: input.Parameters,
-			DimensionFieldIDs:   dimensionFields,
-			DimensionFilters:    dimensionFilters,
-			MetricSortDirection: binding.SortDirection,
-			MaxRows:             maxRows,
-		},
-	)
+	executeRange := func(
+		queryID string,
+		timeRange *QueryTimeRange,
+	) (dataset.PreviewResult, error) {
+		dimensionFilters := []metric.DimensionFilter{}
+		for _, memberFilter := range binding.MemberFilters {
+			dimensionFilters = append(dimensionFilters, metric.DimensionFilter{
+				FieldID:  memberFilter.FieldID,
+				Operator: "EQUALS", Value: memberFilter.MemberKey,
+			})
+		}
+		if timeRange != nil {
+			dimensionFilters = append(dimensionFilters,
+				metric.DimensionFilter{
+					FieldID:  binding.TimeFieldID,
+					Operator: "GTE", Value: timeRange.Start,
+				},
+				metric.DimensionFilter{
+					FieldID:  binding.TimeFieldID,
+					Operator: "LT", Value: timeRange.EndExclusive,
+				},
+			)
+		}
+		return service.metricExecutor.PreviewVersion(
+			ctx, tenantID, actorID, plan.SelectedMetricID,
+			plan.SelectedMetricVersionID,
+			metric.PreviewInput{
+				QueryID: queryID, Parameters: input.Parameters,
+				DimensionFieldIDs:   dimensionFields,
+				DimensionFilters:    dimensionFilters,
+				MetricSortDirection: binding.SortDirection,
+				MaxRows:             maxRows,
+			},
+		)
+	}
+	var baselineResult *dataset.PreviewResult
+	if binding.ComparisonRange != nil {
+		baselineQueryID := uuid.NewSHA1(
+			uuid.MustParse(input.QueryID),
+			[]byte("semantic-comparison-baseline"),
+		).String()
+		value, executeErr := executeRange(
+			baselineQueryID, binding.ComparisonRange,
+		)
+		if executeErr != nil {
+			_, _ = service.store.FinishQueryPlanExecution(
+				ctx, tenantID, id, baselineQueryID,
+				"METRIC_COMPARISON_EXECUTION_FAILED", false,
+				input.ExpectedGraphGenerationID, 0, 0,
+			)
+			return QueryPlanExecution{}, executeErr
+		}
+		baselineResult = &value
+	}
+	result, executeErr := executeRange(input.QueryID, binding.TimeRange)
 	if executeErr != nil {
 		_, _ = service.store.FinishQueryPlanExecution(
 			ctx, tenantID, id, input.QueryID,
@@ -681,7 +946,7 @@ func (service *Service) ExecuteQueryPlan(
 		// Discard the rows rather than presenting results with stale evidence.
 		return QueryPlanExecution{}, err
 	}
-	return QueryPlanExecution{
+	execution := QueryPlanExecution{
 		QueryPlan: plan,
 		Result:    result,
 		Evidence: AnswerEvidence{
@@ -699,7 +964,17 @@ func (service *Service) ExecuteQueryPlan(
 			CompatibilityDecision: "VERIFIED_NON_UNSAFE",
 			ExecutionRevalidated:  true,
 		},
-	}, nil
+	}
+	if baselineResult != nil &&
+		binding.TimeRange != nil && binding.ComparisonRange != nil {
+		execution.Comparison = &QueryComparisonExecution{
+			Mode:          binding.ComparisonMode,
+			CurrentRange:  *binding.TimeRange,
+			BaselineRange: *binding.ComparisonRange,
+			Baseline:      *baselineResult,
+		}
+	}
+	return execution, nil
 }
 
 func (service *Service) CreateQuestionTemplate(

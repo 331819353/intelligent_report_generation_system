@@ -162,15 +162,25 @@ type WarehouseBuildDAG struct {
 }
 
 type QueryPlanInput struct {
-	Question        string          `json:"question"`
-	Intent          string          `json:"intent"`
-	MemberValue     string          `json:"memberValue,omitempty"`
-	DimensionCode   string          `json:"dimensionCode,omitempty"`
-	MetricCode      string          `json:"metricCode"`
-	TimeRange       *QueryTimeRange `json:"timeRange,omitempty"`
-	TopN            int             `json:"topN,omitempty"`
-	SortDirection   string          `json:"sortDirection,omitempty"`
-	MaximumPathHops int             `json:"maximumPathHops,omitempty"`
+	Question        string                   `json:"question"`
+	Intent          string                   `json:"intent"`
+	MemberValue     string                   `json:"memberValue,omitempty"`
+	MemberFilters   []QueryMemberFilterInput `json:"memberFilters,omitempty"`
+	DimensionCode   string                   `json:"dimensionCode,omitempty"`
+	MetricCode      string                   `json:"metricCode"`
+	TimeRange       *QueryTimeRange          `json:"timeRange,omitempty"`
+	TimePreset      string                   `json:"timePreset,omitempty"`
+	Timezone        string                   `json:"timezone,omitempty"`
+	ComparisonMode  string                   `json:"comparisonMode,omitempty"`
+	ComparisonRange *QueryTimeRange          `json:"comparisonRange,omitempty"`
+	TopN            int                      `json:"topN,omitempty"`
+	SortDirection   string                   `json:"sortDirection,omitempty"`
+	MaximumPathHops int                      `json:"maximumPathHops,omitempty"`
+}
+
+type QueryMemberFilterInput struct {
+	DimensionCode string `json:"dimensionCode"`
+	MemberValue   string `json:"memberValue"`
 }
 
 // QueryTimeRange is a half-open, caller-controlled time boundary. Values must
@@ -185,11 +195,20 @@ type QueryTimeRange struct {
 type QueryExecutionBinding struct {
 	DimensionFieldID string
 	MemberKey        string
+	MemberFilters    []QueryMemberFilterBinding
 	TimeFieldID      string
 	TimeFieldType    string
 	TimeRange        *QueryTimeRange
+	ComparisonMode   string
+	ComparisonRange  *QueryTimeRange
 	TopN             int
 	SortDirection    string
+}
+
+type QueryMemberFilterBinding struct {
+	DimensionID string `json:"dimensionId"`
+	FieldID     string `json:"fieldId"`
+	MemberKey   string `json:"memberKey"`
 }
 
 type QueryEvidence struct {
@@ -252,9 +271,17 @@ type AnswerEvidence struct {
 }
 
 type QueryPlanExecution struct {
-	QueryPlan QueryPlan             `json:"queryPlan"`
-	Result    dataset.PreviewResult `json:"result"`
-	Evidence  AnswerEvidence        `json:"evidence"`
+	QueryPlan  QueryPlan                 `json:"queryPlan"`
+	Result     dataset.PreviewResult     `json:"result"`
+	Evidence   AnswerEvidence            `json:"evidence"`
+	Comparison *QueryComparisonExecution `json:"comparison,omitempty"`
+}
+
+type QueryComparisonExecution struct {
+	Mode          string                `json:"mode"`
+	CurrentRange  QueryTimeRange        `json:"currentRange"`
+	BaselineRange QueryTimeRange        `json:"baselineRange"`
+	Baseline      dataset.PreviewResult `json:"baseline"`
 }
 
 type CreateQuestionTemplateInput struct {

@@ -56,6 +56,9 @@ Content-Type: application/json
   "metricCode": "sales_amount",
   "dimensionCode": "region",
   "memberValue": "华东",
+  "memberFilters": [
+    {"dimensionCode": "channel", "memberValue": "APP"}
+  ],
   "timeRange": {
     "start": "2026-07-01T00:00:00Z",
     "endExclusive": "2026-08-01T00:00:00Z"
@@ -68,11 +71,41 @@ Content-Type: application/json
 
 `question` 原文只在本次解释过程中使用，持久化时仅保存 SHA-256。对象槽位为空时，解释器可以从租户内精确/文本/向量候选中选择；向量结果不会直接成为图关系。
 
+`memberFilters` 最多 8 个，只允许不同维度各一个等值成员。每个成员都要
+唯一命中有效成员/别名，并分别证明其维度与指标版本为 `VERIFIED` 且非
+`UNSAFE`。持久化计划只保存成员证据 ID 和过滤数量；执行时重新取得仍
+有效的 `member_key` 并参数绑定，原始成员值不会写入计划或日志。
+
 `timeRange` 是左闭右开的受控边界，只接受同精度的 `YYYY-MM-DD`
 或带时区 RFC3339；字段类型必须分别匹配 `DATE` 或 `DATETIME`。
 `topN` 范围为 1–500，必须有明确维度；`RANKING` 未指定时默认
 `topN=10, sortDirection=DESC`。时间边界始终转为参数绑定，Top N
 始终收紧执行行数，排序只能使用服务端派生的指标字段，均不接受 SQL。
+
+常见自然语言时间短语会先收敛为受控 `timePreset`。也可以由调用方显式提交：
+
+```json
+{
+  "question": "最近 7 天各区域销售排行",
+  "intent": "RANKING",
+  "metricCode": "sales_amount",
+  "dimensionCode": "region",
+  "timePreset": "LAST_7_DAYS",
+  "timezone": "Asia/Shanghai"
+}
+```
+
+允许的 preset 为 `TODAY / YESTERDAY / LAST_7_DAYS / LAST_30_DAYS /
+THIS_MONTH / LAST_MONTH / THIS_YEAR / LAST_YEAR`。未提供时区时使用
+`UTC`；计划创建时会依据指标时间字段的 `DATE / DATETIME` 类型和指定
+IANA 时区冻结为精确边界，因此执行重试不会因跨日或跨月而漂移。
+
+`COMPARISON` 支持 `PREVIOUS_PERIOD / YEAR_OVER_YEAR / CUSTOM` 三种
+模式。中文“环比/较上期”和“同比”会确定性映射到前两种；当前窗口必须
+来自 `timeRange` 或 `timePreset`。`CUSTOM` 还必须显式提供
+`comparisonRange`。计划会冻结当前与基准两个半开窗口，执行时使用两个
+独立查询 ID、同一指标版本和同一证据路径，响应的 `result` 是当前窗口，
+`comparison.baseline` 是基准窗口。
 
 计划状态：
 
@@ -91,7 +124,7 @@ Content-Type: application/json
 
 执行请求必须回传创建计划时的 `expectedGraphGenerationId` 和 `expectedPathHash`，并提供调用方生成的 UUID `queryId`。`maxRows` 范围为 0–500。
 
-成员查询在执行时从证据表重新取得仍有效的 `member_key`，由指标服务注入参数化等值过滤。时间范围由指标发布定义中的精确 `timeFieldId` 注入参数化 `GTE / LT` 过滤；趋势查询自动加入该时间维度，排名查询按指标排序并以 `topN` 收紧最大行数。运行时再次校验：
+单个或复合成员查询在执行时从证据表重新取得仍有效的 `member_key`，由指标服务注入参数化等值过滤。时间短语及比较窗口在计划阶段冻结为精确范围，再由指标发布定义中的 `timeFieldId` 注入参数化 `GTE / LT` 过滤；趋势查询自动加入该时间维度，排名查询按指标排序并以 `topN` 收紧最大行数。运行时再次校验：
 
 - current graph generation 与水位；
 - PUBLISHED 指标及精确版本；

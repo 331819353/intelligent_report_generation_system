@@ -94,20 +94,78 @@ func (store *PostgresStore) PlanQuery(
 		plan.SelectedMetricID = metricPayload.MetricID
 		plan.SelectedMetricVersionID = metricPayload.MetricVersionID
 		plan.SelectedDatasetVersionID = metricPayload.DatasetVersionID
-		var metricTimeFieldID string
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(definition_json->>'timeFieldId','')
-			FROM platform.metric_versions
-			WHERE id=$1::uuid AND metric_id=$2::uuid
-			  AND dataset_version_id=$3::uuid AND status='PUBLISHED'`,
+		var metricTimeFieldID, metricTimeFieldType string
+		if err := tx.QueryRow(ctx, `SELECT
+				COALESCE(metric_version.definition_json->>'timeFieldId',''),
+				COALESCE(time_field.canonical_type,'')
+			FROM platform.metric_versions AS metric_version
+			LEFT JOIN platform.dataset_fields AS time_field
+			  ON time_field.tenant_id=metric_version.tenant_id
+			 AND time_field.dataset_version_id=metric_version.dataset_version_id
+			 AND time_field.field_id=
+			   COALESCE(metric_version.definition_json->>'timeFieldId','')
+			WHERE metric_version.id=$1::uuid
+			  AND metric_version.metric_id=$2::uuid
+			  AND metric_version.dataset_version_id=$3::uuid
+			  AND metric_version.status='PUBLISHED'`,
 			metricPayload.MetricVersionID, metricPayload.MetricID,
 			metricPayload.DatasetVersionID,
-		).Scan(&metricTimeFieldID); err != nil {
+		).Scan(&metricTimeFieldID, &metricTimeFieldType); err != nil {
 			return err
 		}
-		if (input.TimeRange != nil || input.Intent == "TREND") &&
+		if (input.TimeRange != nil || input.TimePreset != "" ||
+			input.ComparisonMode != "" || input.ComparisonRange != nil ||
+			input.Intent == "TREND" || input.Intent == "COMPARISON") &&
 			metricTimeFieldID == "" {
 			plan.Status, plan.FailureCode = "GAP", "METRIC_TIME_FIELD_NOT_AVAILABLE"
 			return persistQueryPlan(ctx, tx, actorID, input, &plan)
+		}
+		if input.TimePreset != "" {
+			timeRange, err := resolveQueryTimePreset(
+				input.TimePreset, input.Timezone, metricTimeFieldType, time.Now(),
+			)
+			if err != nil {
+				plan.Status, plan.FailureCode = "GAP", "TIME_PRESET_NOT_APPLICABLE"
+				return persistQueryPlan(ctx, tx, actorID, input, &plan)
+			}
+			input.TimeRange = &timeRange
+		}
+		if input.TimeRange != nil {
+			_, dateOnly, err := parseQueryBoundary(input.TimeRange.Start)
+			if err != nil ||
+				(metricTimeFieldType == "DATE") != dateOnly ||
+				!oneOf(metricTimeFieldType, "DATE", "DATETIME") {
+				plan.Status, plan.FailureCode = "GAP", "TIME_RANGE_TYPE_MISMATCH"
+				return persistQueryPlan(ctx, tx, actorID, input, &plan)
+			}
+		}
+		if input.Intent == "COMPARISON" {
+			if input.TimeRange == nil {
+				plan.Status, plan.FailureCode = "GAP", "COMPARISON_CURRENT_WINDOW_REQUIRED"
+				return persistQueryPlan(ctx, tx, actorID, input, &plan)
+			}
+			if input.ComparisonMode == "" {
+				plan.Status, plan.FailureCode = "GAP", "COMPARISON_MODE_REQUIRED"
+				return persistQueryPlan(ctx, tx, actorID, input, &plan)
+			}
+			if input.ComparisonMode != "CUSTOM" {
+				comparisonRange, err := deriveQueryComparisonRange(
+					*input.TimeRange, input.ComparisonMode, input.TimePreset,
+					input.Timezone, metricTimeFieldType,
+				)
+				if err != nil {
+					plan.Status, plan.FailureCode = "GAP", "COMPARISON_WINDOW_NOT_APPLICABLE"
+					return persistQueryPlan(ctx, tx, actorID, input, &plan)
+				}
+				input.ComparisonRange = &comparisonRange
+			}
+			_, dateOnly, err := parseQueryBoundary(input.ComparisonRange.Start)
+			if err != nil ||
+				(metricTimeFieldType == "DATE") != dateOnly ||
+				!oneOf(metricTimeFieldType, "DATE", "DATETIME") {
+				plan.Status, plan.FailureCode = "GAP", "COMPARISON_RANGE_TYPE_MISMATCH"
+				return persistQueryPlan(ctx, tx, actorID, input, &plan)
+			}
 		}
 
 		var memberNode, dimensionNode *resolvedGraphNode
@@ -161,6 +219,63 @@ func (store *PostgresStore) PlanQuery(
 			dimensionNode = &dimensionCandidates[0]
 			plan.SelectedDimensionID = dimensionNode.SubjectRef
 		}
+		type resolvedMemberFilter struct {
+			member    resolvedGraphNode
+			dimension resolvedGraphNode
+		}
+		resolvedMemberFilters := make(
+			[]resolvedMemberFilter, 0, len(input.MemberFilters),
+		)
+		seenFilterDimensions := map[string]bool{}
+		if memberNode != nil && dimensionNode != nil {
+			seenFilterDimensions[dimensionNode.SubjectRef] = true
+		}
+		for _, memberFilter := range input.MemberFilters {
+			memberCandidates, err := graphMemberNodes(
+				ctx, tx, plan.GraphGenerationID,
+				strings.ToLower(strings.TrimSpace(memberFilter.MemberValue)),
+				memberFilter.DimensionCode,
+			)
+			if err != nil {
+				return err
+			}
+			if len(memberCandidates) > 1 {
+				plan.Status, plan.FailureCode = "AMBIGUOUS", "FILTER_MEMBER_AMBIGUOUS"
+				return persistQueryPlan(ctx, tx, actorID, input, &plan)
+			}
+			if len(memberCandidates) == 0 {
+				plan.Status, plan.FailureCode = "GAP", "FILTER_MEMBER_NOT_FOUND"
+				return persistQueryPlan(ctx, tx, actorID, input, &plan)
+			}
+			var payload struct {
+				DimensionID string `json:"dimensionId"`
+			}
+			if err := json.Unmarshal(
+				memberCandidates[0].Payload, &payload,
+			); err != nil {
+				return err
+			}
+			if payload.DimensionID == "" ||
+				seenFilterDimensions[payload.DimensionID] {
+				plan.Status, plan.FailureCode = "REJECTED", "FILTER_DIMENSION_DUPLICATED"
+				return persistQueryPlan(ctx, tx, actorID, input, &plan)
+			}
+			filterDimension, err := graphNodeByKey(
+				ctx, tx, plan.GraphGenerationID,
+				"dimension:"+payload.DimensionID,
+			)
+			if err != nil {
+				plan.Status, plan.FailureCode = "GAP", "FILTER_DIMENSION_NOT_FOUND"
+				return persistQueryPlan(ctx, tx, actorID, input, &plan)
+			}
+			seenFilterDimensions[payload.DimensionID] = true
+			resolvedMemberFilters = append(
+				resolvedMemberFilters,
+				resolvedMemberFilter{
+					member: memberCandidates[0], dimension: filterDimension,
+				},
+			)
+		}
 		if input.TopN > 0 && dimensionNode == nil {
 			plan.Status, plan.FailureCode = "GAP", "TOP_N_DIMENSION_REQUIRED"
 			return persistQueryPlan(ctx, tx, actorID, input, &plan)
@@ -175,36 +290,39 @@ func (store *PostgresStore) PlanQuery(
 			})
 		}
 		if dimensionNode != nil {
-			var confidence float64
-			var authority, evidenceHash string
-			err := tx.QueryRow(ctx, `SELECT confidence::float8,authority,evidence_hash
-				FROM platform.semantic_graph_edges
-				WHERE generation_id=$1::uuid
-				  AND from_node_key=$2 AND to_node_key=$3
-				  AND relation_type='METRIC_DIMENSION'
-				  AND confidence>=$4
-				ORDER BY confidence DESC,
-				  CASE authority
-				    WHEN 'CONTROL_PLANE' THEN 1 WHEN 'VERIFIED' THEN 2
-				    WHEN 'RULE' THEN 3 ELSE 4
-				  END
-				LIMIT 1`,
-				plan.GraphGenerationID, metricNode.NodeKey,
-				dimensionNode.NodeKey, minimumConfidence,
-			).Scan(&confidence, &authority, &evidenceHash)
-			if errors.Is(err, pgx.ErrNoRows) {
+			evidence, err := graphMetricDimensionEvidence(
+				ctx, tx, plan.GraphGenerationID, metricNode.NodeKey,
+				*dimensionNode, minimumConfidence,
+			)
+			if errors.Is(err, ErrNotFound) {
 				plan.Status, plan.FailureCode = "REJECTED", "UNPROVEN_DIMENSION_METRIC_PATH"
 				return persistQueryPlan(ctx, tx, actorID, input, &plan)
 			}
 			if err != nil {
 				return err
 			}
+			plan.Evidence = append(plan.Evidence, evidence)
+		}
+		for _, memberFilter := range resolvedMemberFilters {
 			plan.Evidence = append(plan.Evidence, QueryEvidence{
-				NodeKey: dimensionNode.NodeKey, RelationType: "METRIC_DIMENSION",
-				SubjectType: "DIMENSION", SubjectRef: dimensionNode.SubjectRef,
-				Label: dimensionNode.Label, Authority: authority,
-				Confidence: confidence, EvidenceHash: evidenceHash,
+				NodeKey: memberFilter.member.NodeKey, SubjectType: "MEMBER",
+				SubjectRef: memberFilter.member.SubjectRef,
+				Label:      "成员命中（值已脱敏）",
+				Authority:  "CONTROL_PLANE", Confidence: 1,
+				EvidenceHash: memberFilter.member.PayloadHash,
 			})
+			evidence, err := graphMetricDimensionEvidence(
+				ctx, tx, plan.GraphGenerationID, metricNode.NodeKey,
+				memberFilter.dimension, minimumConfidence,
+			)
+			if errors.Is(err, ErrNotFound) {
+				plan.Status, plan.FailureCode = "REJECTED", "UNPROVEN_FILTER_METRIC_PATH"
+				return persistQueryPlan(ctx, tx, actorID, input, &plan)
+			}
+			if err != nil {
+				return err
+			}
+			plan.Evidence = append(plan.Evidence, evidence)
 		}
 		plan.Evidence = append(plan.Evidence, QueryEvidence{
 			NodeKey: metricNode.NodeKey, SubjectType: "METRIC",
@@ -425,6 +543,42 @@ func graphMemberNodes(
 	return result, rows.Err()
 }
 
+func graphMetricDimensionEvidence(
+	ctx context.Context,
+	tx pgx.Tx,
+	generationID, metricNodeKey string,
+	dimension resolvedGraphNode,
+	minimumConfidence float64,
+) (QueryEvidence, error) {
+	var evidence QueryEvidence
+	err := tx.QueryRow(ctx, `SELECT confidence::float8,authority,evidence_hash
+		FROM platform.semantic_graph_edges
+		WHERE generation_id=$1::uuid
+		  AND from_node_key=$2 AND to_node_key=$3
+		  AND relation_type='METRIC_DIMENSION'
+		  AND confidence>=$4
+		ORDER BY confidence DESC,
+		  CASE authority
+		    WHEN 'CONTROL_PLANE' THEN 1 WHEN 'VERIFIED' THEN 2
+		    WHEN 'RULE' THEN 3 ELSE 4
+		  END
+		LIMIT 1`,
+		generationID, metricNodeKey, dimension.NodeKey, minimumConfidence,
+	).Scan(&evidence.Confidence, &evidence.Authority, &evidence.EvidenceHash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return QueryEvidence{}, ErrNotFound
+	}
+	if err != nil {
+		return QueryEvidence{}, err
+	}
+	evidence.NodeKey = dimension.NodeKey
+	evidence.RelationType = "METRIC_DIMENSION"
+	evidence.SubjectType = "DIMENSION"
+	evidence.SubjectRef = dimension.SubjectRef
+	evidence.Label = dimension.Label
+	return evidence, nil
+}
+
 func graphNodeByKey(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -505,16 +659,27 @@ func persistQueryPlan(
 	input QueryPlanInput,
 	plan *QueryPlan,
 ) error {
+	memberFilterCount := len(input.MemberFilters)
+	if input.MemberValue != "" {
+		memberFilterCount++
+	}
 	normalizedRequest := map[string]any{
 		"intent": input.Intent, "metricCode": input.MetricCode,
-		"dimensionCode":   input.DimensionCode,
-		"hasMemberValue":  input.MemberValue != "",
-		"maximumPathHops": input.MaximumPathHops,
-		"topN":            input.TopN,
-		"sortDirection":   input.SortDirection,
+		"dimensionCode":     input.DimensionCode,
+		"hasMemberValue":    input.MemberValue != "",
+		"memberFilterCount": memberFilterCount,
+		"maximumPathHops":   input.MaximumPathHops,
+		"topN":              input.TopN,
+		"sortDirection":     input.SortDirection,
+		"timePreset":        input.TimePreset,
+		"timezone":          input.Timezone,
+		"comparisonMode":    input.ComparisonMode,
 	}
 	if input.TimeRange != nil {
 		normalizedRequest["timeRange"] = input.TimeRange
+	}
+	if input.ComparisonRange != nil {
+		normalizedRequest["comparisonRange"] = input.ComparisonRange
 	}
 	var createdAt time.Time
 	err := tx.QueryRow(ctx, `INSERT INTO platform.semantic_query_plans(

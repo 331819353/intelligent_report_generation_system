@@ -33,12 +33,13 @@ func (store *PostgresStore) PrepareQueryPlanExecution(
 			plan.PathHash != expectedPathHash {
 			return ErrConflict
 		}
-		var normalizedRequest []byte
+		var normalizedRequest, memberFilterBindings []byte
 		err := tx.QueryRow(ctx, `SELECT COALESCE(dimension.field_id,''),
 				COALESCE(selected_member.member_key,''),
 				COALESCE(metric_version.definition_json->>'timeFieldId',''),
 				COALESCE(time_field.canonical_type,''),
-				query_plan.normalized_request_json
+				query_plan.normalized_request_json,
+				COALESCE(member_filter_bindings.value,'[]'::jsonb)
 			FROM platform.semantic_query_plans AS query_plan
 			JOIN platform.semantic_graph_projection_state AS graph_state
 			  ON graph_state.tenant_id=query_plan.tenant_id
@@ -99,6 +100,43 @@ func (store *PostgresStore) PrepareQueryPlanExecution(
 			  ORDER BY evidence.evidence_index
 			  LIMIT 1
 			) AS selected_member ON true
+			LEFT JOIN LATERAL (
+			  SELECT jsonb_agg(
+			    jsonb_build_object(
+			      'dimensionId',member.dimension_id::text,
+			      'fieldId',member_dimension.field_id,
+			      'memberKey',member.member_key
+			    )
+			    ORDER BY evidence.evidence_index
+			  ) AS value
+			  FROM platform.semantic_query_plan_evidence AS evidence
+			  JOIN platform.dimension_members AS member
+			    ON member.tenant_id=evidence.tenant_id
+			   AND member.id::text=evidence.subject_ref
+			   AND member.status='ACTIVE'
+			   AND (member.valid_from IS NULL OR member.valid_from<=now())
+			   AND (member.valid_to IS NULL OR member.valid_to>now())
+			  JOIN platform.semantic_dimensions AS member_dimension
+			    ON member_dimension.tenant_id=member.tenant_id
+			   AND member_dimension.id=member.dimension_id
+			   AND member_dimension.dataset_version_id=dataset_version.id
+			   AND member_dimension.status='PUBLISHED'
+			  WHERE evidence.tenant_id=query_plan.tenant_id
+			    AND evidence.query_plan_id=query_plan.id
+			    AND evidence.subject_type='MEMBER'
+			    AND EXISTS(
+			      SELECT 1
+			      FROM platform.dimension_metric_compatibility AS compatibility
+			      WHERE compatibility.tenant_id=query_plan.tenant_id
+			        AND compatibility.dimension_id=member_dimension.id
+			        AND compatibility.metric_id=metric.id
+			        AND compatibility.metric_version_id=metric_version.id
+			        AND compatibility.metric_dataset_version_id=
+			          dataset_version.id
+			        AND compatibility.status='VERIFIED'
+			        AND compatibility.fanout_policy<>'UNSAFE'
+			    )
+			) AS member_filter_bindings ON true
 			WHERE query_plan.id=$1::uuid AND query_plan.status='READY'
 			  AND query_plan.graph_generation_id=$2::uuid
 			  AND query_plan.path_hash=$3
@@ -129,7 +167,7 @@ func (store *PostgresStore) PrepareQueryPlanExecution(
 			Scan(
 				&binding.DimensionFieldID, &binding.MemberKey,
 				&binding.TimeFieldID, &binding.TimeFieldType,
-				&normalizedRequest,
+				&normalizedRequest, &memberFilterBindings,
 			)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrUnprovenPath
@@ -138,12 +176,40 @@ func (store *PostgresStore) PrepareQueryPlanExecution(
 			return err
 		}
 		var normalized struct {
-			TimeRange      *QueryTimeRange `json:"timeRange"`
-			TopN           int             `json:"topN"`
-			SortDirection  string          `json:"sortDirection"`
-			HasMemberValue bool            `json:"hasMemberValue"`
+			TimeRange         *QueryTimeRange `json:"timeRange"`
+			ComparisonMode    string          `json:"comparisonMode"`
+			ComparisonRange   *QueryTimeRange `json:"comparisonRange"`
+			MemberFilterCount *int            `json:"memberFilterCount"`
+			TopN              int             `json:"topN"`
+			SortDirection     string          `json:"sortDirection"`
+			HasMemberValue    bool            `json:"hasMemberValue"`
 		}
 		if err := json.Unmarshal(normalizedRequest, &normalized); err != nil {
+			return ErrUnprovenPath
+		}
+		if err := json.Unmarshal(
+			memberFilterBindings, &binding.MemberFilters,
+		); err != nil {
+			return ErrUnprovenPath
+		}
+		expectedMemberFilters := 0
+		if normalized.HasMemberValue {
+			expectedMemberFilters = 1
+		}
+		if normalized.MemberFilterCount != nil {
+			expectedMemberFilters = *normalized.MemberFilterCount
+		}
+		seenFilterFields := map[string]bool{}
+		for _, memberFilter := range binding.MemberFilters {
+			if memberFilter.DimensionID == "" ||
+				memberFilter.FieldID == "" ||
+				memberFilter.MemberKey == "" ||
+				seenFilterFields[memberFilter.FieldID] {
+				return ErrUnprovenPath
+			}
+			seenFilterFields[memberFilter.FieldID] = true
+		}
+		if expectedMemberFilters != len(binding.MemberFilters) {
 			return ErrUnprovenPath
 		}
 		if normalized.TopN < 0 || normalized.TopN > 500 ||
@@ -165,6 +231,30 @@ func (store *PostgresStore) PrepareQueryPlanExecution(
 			}
 			binding.TimeRange = &timeRange
 		}
+		if normalized.ComparisonRange != nil {
+			comparisonRange, err := normalizeQueryTimeRange(
+				*normalized.ComparisonRange,
+			)
+			if err != nil || binding.TimeFieldID == "" {
+				return ErrUnprovenPath
+			}
+			_, dateOnly, err := parseQueryBoundary(comparisonRange.Start)
+			if err != nil ||
+				(binding.TimeFieldType == "DATE") != dateOnly ||
+				!oneOf(binding.TimeFieldType, "DATE", "DATETIME") {
+				return ErrUnprovenPath
+			}
+			binding.ComparisonRange = &comparisonRange
+		}
+		if plan.Intent == "COMPARISON" &&
+			(binding.TimeRange == nil || binding.ComparisonRange == nil ||
+				!oneOf(
+					normalized.ComparisonMode,
+					"PREVIOUS_PERIOD", "YEAR_OVER_YEAR", "CUSTOM",
+				)) {
+			return ErrUnprovenPath
+		}
+		binding.ComparisonMode = normalized.ComparisonMode
 		binding.TopN = normalized.TopN
 		binding.SortDirection = normalized.SortDirection
 		return nil
