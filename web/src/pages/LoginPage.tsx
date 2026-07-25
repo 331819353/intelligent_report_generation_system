@@ -1,3 +1,4 @@
+import { CheckCircle, FlowArrow, Sparkle } from '@phosphor-icons/react'
 import { FormEvent, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { login } from '../lib/auth'
@@ -34,16 +35,24 @@ export function LoginPage() {
   return (
     <main className="login-page">
       <section className="login-story">
-        <span className="eyebrow light">INTELLIGENT REPORTING</span>
-        <h1>让数据，形成可以行动的结论。</h1>
-        <p>连接数据资产，组织指标口径，通过可视化画板与 AI 快速完成正式报告。</p>
-        <div className="story-metric"><strong>12 × 10</strong><span>首屏主网格 · 纵向自由延展</span></div>
+        <div className="login-brand"><div className="brand-mark">IR</div><div><strong>智能报告</strong><span>Insight Studio</span></div></div>
+        <div className="login-story-copy">
+          <span className="eyebrow">INTELLIGENT REPORTING</span>
+          <h1>把数据资产，转化为可信的分析结论。</h1>
+          <p>从数据接入、语义治理到报告交付，在一个清晰、可追溯的分析工作空间内完成。</p>
+          <ul className="login-benefits">
+            <li><CheckCircle aria-hidden="true" weight="fill" /><span><strong>统一资产语义</strong><small>维度、指标与数据表关系清晰可查</small></span></li>
+            <li><FlowArrow aria-hidden="true" weight="fill" /><span><strong>自动化数据流程</strong><small>由 LLM 设计，开发引擎稳定执行 DAG</small></span></li>
+            <li><Sparkle aria-hidden="true" weight="fill" /><span><strong>智能分析问答</strong><small>基于可信链路检索并生成可验证结论</small></span></li>
+          </ul>
+        </div>
+        <p className="login-story-footer">DATA · SEMANTICS · INSIGHT</p>
       </section>
       <section className="login-panel">
         <form onSubmit={submit}>
-          <div className="brand-mark large">IR</div>
           <span className="eyebrow">欢迎回来</span>
           <h2>登录智能报告平台</h2>
+          <p className="login-form-intro">使用组织账号进入你的数据分析工作空间。</p>
           <label>租户<input name="tenantCode" defaultValue="demo" placeholder="请输入租户编码" /></label>
           <label>账号<input name="email" type="email" placeholder="name@company.com" /></label>
           <label>密码<input name="password" type="password" placeholder="请输入密码" /></label>

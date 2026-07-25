@@ -1,18 +1,18 @@
 .data-source-center { display: grid; gap: 18px; }
-.data-source-summary { display: flex; align-items: center; justify-content: space-between; padding: 24px; border: 1px solid #e8ebef; border-radius: 12px; background: white; box-shadow: 0 8px 30px #18213a08; }
+.data-source-summary { display: flex; align-items: center; justify-content: space-between; padding: 24px; border: 1px solid #e5e7eb; border-radius: 12px; background: white; box-shadow: none; }
 .data-source-summary h2 { margin: 5px 0 6px; font-size: 22px; }
 .data-source-summary p { margin: 0; color: var(--muted); font-size: 13px; }
-.data-source-summary > strong { color: var(--navy); font: 34px Georgia, serif; }
+.data-source-summary > strong { color: var(--ink); font-size: 32px; font-weight: 720; letter-spacing: -.035em; }
 .data-source-summary > strong small { color: var(--muted); font: 12px Inter, sans-serif; }
-.data-source-filters { display: grid; grid-template-columns: minmax(240px, 1fr) 170px 170px auto; gap: 12px; align-items: end; padding: 16px 18px; border: 1px solid #e8ebef; border-radius: 12px; background: white; box-shadow: 0 8px 30px #18213a08; }
+.data-source-filters { display: grid; grid-template-columns: minmax(240px, 1fr) 170px 170px auto; gap: 12px; align-items: end; padding: 16px 18px; border: 1px solid #e5e7eb; border-radius: 12px; background: white; box-shadow: none; }
 .data-source-filters label { display: grid; gap: 6px; color: #475467; font-size: 11px; font-weight: 800; }
 .data-source-filters input, .data-source-filters select { box-sizing: border-box; width: 100%; height: 40px; border: 1px solid var(--line); border-radius: 8px; padding: 0 12px; background: white; color: var(--ink); font-size: 13px; font-weight: 600; line-height: 1; }
 .data-source-filters small { align-self: center; color: var(--muted); white-space: nowrap; }
 .data-source-list { display: grid; gap: 12px; }
-.data-source-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 18px 20px; border: 1px solid #e8ebef; border-radius: 12px; background: white; box-shadow: 0 8px 30px #18213a08; }
-.data-source-card:hover { border-color: #bfdbfe; box-shadow: 0 10px 34px #1d4ed812; cursor: pointer; }
+.data-source-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 18px 20px; border: 1px solid #e5e7eb; border-radius: 12px; background: white; box-shadow: none; }
+.data-source-card:hover { border-color: #cbd4e2; box-shadow: 0 6px 18px #202a3a0b; cursor: pointer; }
 .data-source-card.review-locked { border-color: #e4e7ec; background: #fcfcfd; }
-.data-source-card.review-locked:hover { border-color: #e4e7ec; box-shadow: 0 8px 30px #18213a08; cursor: default; }
+.data-source-card.review-locked:hover { border-color: #e4e7ec; box-shadow: none; cursor: default; }
 .data-source-card-open { width: 100%; min-width: 0; display: grid; grid-template-columns: 48px minmax(210px, .8fr) minmax(480px, 1.5fr); gap: 14px; align-items: center; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; }
 .data-source-card-open:disabled { cursor: not-allowed; }
 .data-source-card-open:focus-visible { border-radius: 8px; outline: 3px solid #93b4ff; outline-offset: 5px; }
@@ -190,7 +190,7 @@
 .data-source-structure { display: grid; gap: 12px; min-height: 180px; }
 .data-source-structure > header { display: flex; align-items: end; justify-content: space-between; }
 .data-source-structure h3 { margin: 4px 0 0; font-size: 17px; }
-.data-source-structure > header > strong { color: var(--navy); font: 24px Georgia, serif; }
+.data-source-structure > header > strong { color: var(--ink); font-size: 23px; font-weight: 720; letter-spacing: -.025em; }
 .data-source-structure > header > strong small { color: var(--muted); font: 11px Inter, sans-serif; }
 .data-source-structure-state { min-height: 130px; display: flex; align-items: center; justify-content: center; gap: 10px; border: 1px dashed #d0d5dd; border-radius: 10px; background: #f8fafc; color: var(--muted); font-size: 12px; text-align: center; }
 .data-source-structure-state.error { border-color: #fecaca; background: #fef2f2; color: #b42318; }

@@ -1,3 +1,11 @@
+import {
+  ChartBar,
+  Database,
+  House,
+  PresentationChart,
+  Stack,
+  TreeStructure,
+} from '@phosphor-icons/react'
 import type { ReactNode } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 
@@ -18,19 +26,24 @@ export function AppShell({ title, eyebrow, children, actions, className = '' }: 
         <div className="brand-mark">IR</div>
         <div className="brand-copy"><strong>智能报告</strong><span>Insight Studio</span></div>
         <nav aria-label="主导航">
-          <NavLink to="/admin">工作台</NavLink>
-          <NavLink to="/data-sources">数据源配置中心</NavLink>
-          <NavLink to="/datasets">数据集配置中心</NavLink>
+          <span className="sidebar-section-label">工作空间</span>
+          <NavLink to="/admin"><House aria-hidden="true" size={18} />工作台</NavLink>
+          <NavLink to="/data-sources"><Database aria-hidden="true" size={18} />数据源配置中心</NavLink>
+          <NavLink to="/datasets"><Stack aria-hidden="true" size={18} />数据集配置中心</NavLink>
           <NavLink
             to="/assets/metrics"
             className={({ isActive }) => isActive || location.pathname.startsWith('/assets/') ? 'active' : ''}
           >
-            资产管理中心
+            <TreeStructure aria-hidden="true" size={18} />资产管理中心
           </NavLink>
-          <NavLink to="/designer/draft">报告设计器</NavLink>
-          <NavLink to="/reports/demo">在线报告</NavLink>
+          <span className="sidebar-section-label reports">报告</span>
+          <NavLink to="/designer/draft"><ChartBar aria-hidden="true" size={18} />报告设计器</NavLink>
+          <NavLink to="/reports/demo"><PresentationChart aria-hidden="true" size={18} />在线报告</NavLink>
         </nav>
-        <div className="tenant-chip"><span>当前租户</span><strong>演示组织</strong></div>
+        <div className="tenant-chip">
+          <span className="tenant-avatar">演</span>
+          <span><small>当前租户</small><strong>演示组织</strong></span>
+        </div>
       </aside>
       <main className="main-stage">
         <header className="topbar">

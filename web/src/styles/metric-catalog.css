@@ -6,7 +6,7 @@
   border: 1px solid #e3e8ef;
   border-radius: 14px;
   background: white;
-  box-shadow: 0 18px 45px #1720330a;
+  box-shadow: none;
 }
 
 .metric-directory-summary {
@@ -17,7 +17,7 @@
   min-height: 142px;
   padding: 26px 28px;
   border-bottom: 1px solid #edf0f4;
-  background: #f7f9fd;
+  background: #fafbfc;
 }
 .metric-directory-summary h2 { margin: 5px 0 7px; color: #1c2940; font-size: 23px; }
 .metric-directory-summary p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
@@ -25,7 +25,7 @@
 .metric-directory-summary dl > div { display: grid; place-items: center; gap: 4px; padding: 14px 12px; border-left: 1px solid #e9edf2; }
 .metric-directory-summary dl > div:first-child { border-left: 0; }
 .metric-directory-summary dt { color: #7d899c; font-size: 10px; font-weight: 700; }
-.metric-directory-summary dd { margin: 0; color: #173b83; font: 26px Georgia, serif; }
+.metric-directory-summary dd { margin: 0; color: #263142; font-size: 25px; font-weight: 720; letter-spacing: -.035em; }
 
 .metric-directory-modes { display: flex; min-height: 52px; padding: 0 28px; border-bottom: 1px solid #e9edf2; background: white; }
 .metric-directory-modes button { position: relative; display: inline-flex; align-items: center; gap: 7px; border: 0; padding: 0 20px; background: transparent; color: #68758a; font-size: 13px; font-weight: 850; }
@@ -73,8 +73,8 @@
 
 .metric-directory-list { display: grid; }
 .metric-dataset-zones { display: grid; gap: 16px; padding: 0 28px 28px; }
-.metric-dataset-zone { overflow: hidden; border: 1px solid #dce4ef; border-radius: 14px; background: white; box-shadow: 0 8px 24px #1720330a; }
-.metric-dataset-zone > header { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 98px; padding: 18px 20px; background: linear-gradient(135deg, #f7faff 0%, #fff 72%); }
+.metric-dataset-zone { overflow: hidden; border: 1px solid #e1e5eb; border-radius: 12px; background: white; box-shadow: none; }
+.metric-dataset-zone > header { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 98px; padding: 18px 20px; background: #fafbfc; }
 .metric-dataset-identity { display: flex; align-items: center; gap: 13px; min-width: 0; }
 .metric-dataset-identity > span { display: grid; flex: 0 0 auto; width: 44px; height: 44px; place-items: center; border: 1px solid #c9d9fa; border-radius: 12px; background: #eaf2ff; color: #245dcc; }
 .metric-dataset-identity > div { min-width: 0; }
@@ -272,7 +272,7 @@
 .metric-lineage-downstream dl > div { padding: 13px 15px; border-left: 1px solid #e8edf3; }
 .metric-lineage-downstream dl > div:first-child { border-left: 0; }
 .metric-lineage-downstream dt { color: #7f8b9d; font-size: 9px; }
-.metric-lineage-downstream dd { margin: 4px 0 0; color: #253a60; font: 22px Georgia, serif; }
+.metric-lineage-downstream dd { margin: 4px 0 0; color: #253a60; font-size: 21px; font-weight: 720; letter-spacing: -.025em; }
 .metric-lineage-boundary { margin-top: 14px; border-left: 3px solid #d4a657; padding: 4px 0 4px 12px; }
 .metric-lineage-boundary strong { color: #72511b; font-size: 10px; }
 .metric-lineage-boundary p { margin: 4px 0 0; color: #78684f; font-size: 9px; line-height: 1.65; }

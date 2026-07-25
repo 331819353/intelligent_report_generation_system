@@ -60,3 +60,32 @@ body:has(.report-designer-workbench) .topbar-actions{gap:7px}
 body:has(.report-designer-workbench) .topbar-actions .primary-button,
 body:has(.report-designer-workbench) .topbar-actions .quiet-button{padding:7px 11px;font-size:11px}
 body:has(.report-designer-workbench) .report-designer-workbench{height:calc(100vh - 60px);min-height:640px;border:0;border-radius:0;box-shadow:none}
+
+/* 现代互联网风格覆盖：报告内容与设计器共享轻量、无衬线视觉基线。 */
+.report-page-canvas{box-shadow:0 8px 24px #202a3a12}
+.report-title-component h2{margin:5px 0 0;font-family:inherit;font-size:32px;font-weight:720;letter-spacing:-.035em}
+.report-kpi-component{background:#f6f8fc}
+.report-conclusion-component{border-left:4px solid #2864dc;background:#f0f5ff;color:#22304a}
+.report-conclusion-component>span{color:#2864dc}
+.report-conclusion-component h3{margin:22px 0 12px;font-family:inherit;font-size:24px;font-weight:720;letter-spacing:-.025em}
+.report-conclusion-component p{color:#596b86}
+.report-conclusion-component small{color:#8190a7}
+.report-block--menu{border-color:#dce2ea!important;background:#fff;color:#273142}
+.report-menu-layout{background:#fff}
+.report-menu-row--top{border-bottom-color:#e8ebef}
+.report-menu-row>.report-menu-cell+.report-menu-cell{border-left-color:#e8ebef}
+.report-menu-brand>strong{background:#2864dc;box-shadow:none}
+.report-menu-brand h2{color:#202632}
+.report-menu-brand span{color:#8a94a2}
+.report-menu-actions button{border-color:#dfe3e8;background:#fafbfc;color:#576273}
+.report-menu-filters label{color:#748092}
+.report-menu-filters select{border-color:#dfe3e8;background:#fafbfc;color:#343d4c}
+.report-menu-filters label>svg{color:#7e8998}
+.report-menu-navigation button{color:#697588}
+.report-menu-navigation button.is-active{background:#edf3ff;color:#2059c7}
+.report-menu-cell--empty{border-color:#dce2ea;color:#8a95a5}
+.report-block--content .report-conclusion-component{background:#f0f5ff}
+.report-designer-workbench{background:#edf0f4;box-shadow:none}
+.report-designer-canvas-scroll{background:#e9edf2}
+.report-structure-panel>header{color:#344054}
+.report-json-preview{background:#202735;color:#d7deea}

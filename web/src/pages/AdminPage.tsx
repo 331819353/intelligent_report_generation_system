@@ -4,6 +4,7 @@ import {
   ClockCounterClockwise,
   ClipboardText,
   Database,
+  Sparkle,
   SpinnerGap,
   Stack,
   StopCircle,
@@ -343,7 +344,10 @@ export function AdminPage() {
   return (
     <AppShell title="工作台" eyebrow="概览" actions={<button className="primary-button">新建报告</button>}>
       <section className="content-stack">
-        <div className="welcome-card"><div><span className="eyebrow light">数据工作空间</span><h2>下午好，报告设计师</h2><p>从数据源到正式归档，所有工作都在统一的租户边界内完成。</p></div><div className="orbit">AI</div></div>
+        <div className="welcome-card">
+          <div><span className="eyebrow">数据工作空间</span><h2>下午好，报告设计师</h2><p>从数据源到正式归档，所有工作都在统一的租户边界内完成。</p></div>
+          <div className="welcome-assistant"><Sparkle aria-hidden="true" size={22} weight="fill" /><span><strong>智能助手已就绪</strong><small>可基于当前租户资产开始分析</small></span></div>
+        </div>
         <div className="metric-grid workbench-metric-grid">
           <article className="metric-card"><span>数据源</span><strong>{sourceCount ?? '—'}</strong><small>{sourceCount ? '已接入当前租户' : '当前未配置'}</small></article>
           <article className="metric-card"><span>已发布报告</span><strong>0</strong><small>当前未发布</small></article>

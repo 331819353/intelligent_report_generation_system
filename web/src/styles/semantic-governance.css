@@ -10,14 +10,14 @@
 .semantic-notice.info { border-color: #bfdbfe; color: #1d4ed8; }
 .semantic-notice button { flex: none; border: 0; background: transparent; color: inherit; font-size: 20px; line-height: 1; }
 .semantic-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
-.semantic-summary article { display: grid; gap: 5px; padding: 18px 20px; border: 1px solid #e8ebef; border-radius: 12px; background: white; box-shadow: 0 8px 30px #18213a08; }
+.semantic-summary article { display: grid; gap: 5px; padding: 18px 20px; border: 1px solid #e5e7eb; border-radius: 12px; background: white; box-shadow: none; }
 .semantic-summary span, .semantic-summary small { color: var(--muted); }
 .semantic-summary span { font-size: 12px; font-weight: 700; }
-.semantic-summary strong { color: var(--navy); font: 30px Georgia, serif; }
+.semantic-summary strong { color: var(--ink); font-size: 29px; font-weight: 720; letter-spacing: -.035em; }
 .semantic-summary small { font-size: 10px; }
 .semantic-view-tabs { display: flex; width: fit-content; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: white; }
 .semantic-view-tabs button { border: 0; border-radius: 7px; padding: 9px 15px; background: transparent; color: #667085; font-size: 12px; font-weight: 800; }
-.semantic-view-tabs button[aria-selected="true"] { background: var(--navy); color: white; box-shadow: 0 4px 12px #17255426; }
+.semantic-view-tabs button[aria-selected="true"] { background: #edf3ff; color: #2059c7; box-shadow: none; }
 .semantic-directory { display: grid; gap: 16px; }
 .semantic-directory > header { display: flex; align-items: end; justify-content: space-between; gap: 20px; padding: 21px 23px; border: 1px solid #e8ebef; border-radius: 12px; background: white; }
 .semantic-directory > header h2 { margin: 5px 0 6px; font-size: 21px; }
@@ -35,7 +35,7 @@
 .semantic-empty strong { color: var(--ink); font-size: 17px; }
 .semantic-empty span { font-size: 12px; }
 .semantic-candidate-list { display: grid; gap: 12px; }
-.semantic-candidate-card { display: grid; gap: 14px; padding: 19px 21px; border: 1px solid #e8ebef; border-radius: 12px; background: white; box-shadow: 0 8px 26px #18213a08; }
+.semantic-candidate-card { display: grid; gap: 14px; padding: 19px 21px; border: 1px solid #e5e7eb; border-radius: 12px; background: white; box-shadow: none; }
 .semantic-candidate-card > header { display: flex; justify-content: space-between; gap: 20px; }
 .semantic-candidate-card > header > div:first-child { min-width: 0; }
 .semantic-candidate-card > header > div:first-child > div { display: flex; align-items: center; gap: 9px; }
@@ -79,7 +79,7 @@
 .semantic-candidate-card > footer { display: flex; flex-wrap: wrap; gap: 14px; padding-top: 12px; border-top: 1px solid #edf0f3; color: var(--muted); font-size: 10px; }
 .semantic-candidate-card > footer strong { color: #b42318; }
 .semantic-dimension-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.semantic-dimension-grid > article { display: grid; gap: 13px; padding: 19px 20px; border: 1px solid #e8ebef; border-radius: 12px; background: white; box-shadow: 0 8px 26px #18213a08; }
+.semantic-dimension-grid > article { display: grid; gap: 13px; padding: 19px 20px; border: 1px solid #e5e7eb; border-radius: 12px; background: white; box-shadow: none; }
 .semantic-dimension-grid > article > header { display: flex; justify-content: space-between; gap: 12px; }
 .semantic-dimension-grid h3 { margin: 0 0 3px; font-size: 17px; }
 .semantic-dimension-grid header div > span, .semantic-dimension-grid > article > p { color: var(--muted); font-size: 11px; }

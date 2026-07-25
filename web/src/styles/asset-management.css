@@ -3,14 +3,14 @@
   gap: 8px;
   margin: 0 0 18px;
   padding: 6px;
-  background: #e9edf3;
-  border: 1px solid #dce2ea;
-  border-radius: 12px;
+  background: #f1f3f6;
+  border: 1px solid #e3e6ea;
+  border-radius: 10px;
 }
 
 .asset-management-tabs a {
   padding: 10px 18px;
-  border-radius: 8px;
+  border-radius: 7px;
   color: #526078;
   text-decoration: none;
   font-size: 14px;
@@ -19,6 +19,6 @@
 
 .asset-management-tabs a.active {
   background: #fff;
-  color: #1746b8;
-  box-shadow: 0 3px 12px #17203312;
+  color: #2059c7;
+  box-shadow: none;
 }
