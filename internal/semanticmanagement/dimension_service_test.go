@@ -2,6 +2,7 @@ package semanticmanagement
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -202,6 +203,76 @@ func TestDimensionServiceRejectsExecutableJoinEvidenceAndNormalizesDecision(t *t
 	)
 	if err != nil || store.decision != "VERIFIED" {
 		t.Fatalf("decision=%q err=%v", store.decision, err)
+	}
+}
+
+func TestDimensionServiceNormalizesBoundedSemanticJoinPath(t *testing.T) {
+	store := &fakeDimensionStore{}
+	service := NewDimensionService(store)
+	nextVersionID := "11111111-1111-4111-8111-111111111111"
+	_, err := service.ProposeCompatibility(
+		context.Background(), testTenantID, testActorID,
+		ProposeCompatibilityInput{
+			DimensionID: testDimensionID, MetricID: testMetricID,
+			MetricVersionID:        testMetricVersionID,
+			MetricDatasetVersionID: nextVersionID,
+			CompatibilityType:      "direct", FanoutPolicy: "safe",
+			JoinPath: json.RawMessage(`[{
+				"fromDatasetVersionId":"` + testVersionID + `",
+				"fromFieldId":" customer_id ",
+				"toDatasetVersionId":"` + nextVersionID + `",
+				"toFieldId":"buyer_id",
+				"cardinality":"many_to_one"
+			}]`),
+			EvidenceSource: "llm",
+		},
+	)
+	if err != nil {
+		t.Fatalf("valid join path error=%v", err)
+	}
+	var hops []CompatibilityJoinHop
+	if err := json.Unmarshal(store.compatibility.JoinPath, &hops); err != nil ||
+		len(hops) != 1 || hops[0].FromFieldID != "customer_id" ||
+		hops[0].Cardinality != "MANY_TO_ONE" {
+		t.Fatalf("normalized join path=%s err=%v", store.compatibility.JoinPath, err)
+	}
+}
+
+func TestDimensionServiceRejectsBrokenOrUnsafeSemanticJoinPath(t *testing.T) {
+	service := NewDimensionService(&fakeDimensionStore{})
+	nextVersionID := "11111111-1111-4111-8111-111111111111"
+	input := ProposeCompatibilityInput{
+		DimensionID: testDimensionID, MetricID: testMetricID,
+		MetricVersionID:        testMetricVersionID,
+		MetricDatasetVersionID: nextVersionID,
+		CompatibilityType:      "DIRECT", FanoutPolicy: "SAFE",
+		JoinPath: json.RawMessage(`[{
+			"fromDatasetVersionId":"` + testVersionID + `",
+			"fromFieldId":"customer_id",
+			"toDatasetVersionId":"` + nextVersionID + `",
+			"toFieldId":"buyer_id",
+			"cardinality":"ONE_TO_MANY"
+		}]`),
+		EvidenceSource: "LLM",
+	}
+	if _, err := service.ProposeCompatibility(
+		context.Background(), testTenantID, testActorID, input,
+	); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("SAFE one-to-many error=%v", err)
+	}
+	input.FanoutPolicy = "DEDUPLICATE"
+	input.JoinPath = json.RawMessage(`[{
+		"fromDatasetVersionId":"` + testVersionID + `",
+		"fromFieldId":"customer_id",
+		"toDatasetVersionId":"` + nextVersionID + `",
+		"toFieldId":"buyer_id",
+		"cardinality":"ONE_TO_MANY",
+		"sql":"select 1"
+	}]`)
+	if _, err := service.ProposeCompatibility(
+		context.Background(), testTenantID, testActorID, input,
+	); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("unknown join hop field error=%v", err)
 	}
 }
 

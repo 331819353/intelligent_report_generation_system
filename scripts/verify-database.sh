@@ -119,6 +119,8 @@ DECLARE
   protected_write_denied boolean := false;
 BEGIN
   IF to_regnamespace('warehouse_dws') IS NOT NULL
+    OR to_regnamespace('warehouse_dim') IS NOT NULL
+    OR to_regnamespace('warehouse_ads') IS NOT NULL
     OR to_regnamespace('warehouse_ods') IS NOT NULL
     OR to_regnamespace('warehouse_published') IS NOT NULL THEN
     RAISE EXCEPTION 'control database must not contain warehouse schemas';

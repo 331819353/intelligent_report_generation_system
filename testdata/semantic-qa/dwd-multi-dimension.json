@@ -1,0 +1,121 @@
+{
+  "dslVersion": "1.0",
+  "dataset": {
+    "code": "dwd_order_purchase",
+    "name": "订单购买事实",
+    "description": "一个订单购买动作关联用户、商品和地域三个普通维度",
+    "type": "SINGLE_SOURCE",
+    "layer": "DWD",
+    "semanticContractVersion": "1.0"
+  },
+  "nodes": [
+    {
+      "id": "fact_orders",
+      "type": "DATASET",
+      "datasetVersionId": "10000000-0000-4000-8000-000000000001",
+      "alias": "orders",
+      "projection": ["order_id", "customer_key", "product_key", "region_key", "ordered_at", "amount"],
+      "sourceFilters": []
+    },
+    {
+      "id": "dim_customer",
+      "type": "DATASET",
+      "datasetVersionId": "20000000-0000-4000-8000-000000000001",
+      "alias": "customer",
+      "projection": ["customer_key", "customer_segment"],
+      "sourceFilters": []
+    },
+    {
+      "id": "dim_product",
+      "type": "DATASET",
+      "datasetVersionId": "20000000-0000-4000-8000-000000000002",
+      "alias": "product",
+      "projection": ["product_key", "product_name"],
+      "sourceFilters": []
+    },
+    {
+      "id": "dim_region",
+      "type": "DATASET",
+      "datasetVersionId": "20000000-0000-4000-8000-000000000003",
+      "alias": "region",
+      "projection": ["region_key", "region_name"],
+      "sourceFilters": []
+    }
+  ],
+  "joins": [
+    {
+      "id": "join_customer",
+      "leftNodeId": "fact_orders",
+      "rightNodeId": "dim_customer",
+      "joinType": "LEFT",
+      "cardinality": "MANY_TO_ONE",
+      "relationshipType": "ROLE_PLAYING",
+      "relationshipRole": "ORDERING_CUSTOMER",
+      "fanoutPolicy": "SAFE",
+      "conditions": [{
+        "leftExpression": {"type": "FIELD_REF", "nodeId": "fact_orders", "field": "customer_key"},
+        "operator": "EQUALS",
+        "rightExpression": {"type": "FIELD_REF", "nodeId": "dim_customer", "field": "customer_key"}
+      }],
+      "manualConfirmed": true
+    },
+    {
+      "id": "join_product",
+      "leftNodeId": "fact_orders",
+      "rightNodeId": "dim_product",
+      "joinType": "LEFT",
+      "cardinality": "MANY_TO_ONE",
+      "relationshipType": "DIRECT",
+      "fanoutPolicy": "SAFE",
+      "conditions": [{
+        "leftExpression": {"type": "FIELD_REF", "nodeId": "fact_orders", "field": "product_key"},
+        "operator": "EQUALS",
+        "rightExpression": {"type": "FIELD_REF", "nodeId": "dim_product", "field": "product_key"}
+      }],
+      "manualConfirmed": true
+    },
+    {
+      "id": "join_region",
+      "leftNodeId": "fact_orders",
+      "rightNodeId": "dim_region",
+      "joinType": "LEFT",
+      "cardinality": "MANY_TO_ONE",
+      "relationshipType": "ROLE_PLAYING",
+      "relationshipRole": "DELIVERY_REGION",
+      "fanoutPolicy": "SAFE",
+      "conditions": [{
+        "leftExpression": {"type": "FIELD_REF", "nodeId": "fact_orders", "field": "region_key"},
+        "operator": "EQUALS",
+        "rightExpression": {"type": "FIELD_REF", "nodeId": "dim_region", "field": "region_key"}
+      }],
+      "manualConfirmed": true
+    }
+  ],
+  "factContract": {
+    "businessAction": "客户购买商品",
+    "grainKeyFields": ["order_id"],
+    "eventTimeField": "ordered_at",
+    "atomicMeasures": [{
+      "field": "amount",
+      "additivity": "ADDITIVE",
+      "unit": "CNY",
+      "currency": "CNY",
+      "nullPolicy": "REJECT"
+    }]
+  },
+  "fields": [
+    {"id": "field_order_id", "code": "order_id", "name": "订单标识", "role": "IDENTIFIER", "expression": {"type": "FIELD_REF", "nodeId": "fact_orders", "field": "order_id"}, "canonicalType": "STRING", "nullable": false},
+    {"id": "field_ordered_at", "code": "ordered_at", "name": "下单时间", "role": "TIME", "expression": {"type": "FIELD_REF", "nodeId": "fact_orders", "field": "ordered_at"}, "canonicalType": "DATETIME", "nullable": false},
+    {"id": "field_customer_segment", "code": "customer_segment", "name": "客户分群", "role": "DIMENSION", "expression": {"type": "FIELD_REF", "nodeId": "dim_customer", "field": "customer_segment"}, "canonicalType": "STRING", "nullable": true},
+    {"id": "field_product_name", "code": "product_name", "name": "商品名称", "role": "DIMENSION", "expression": {"type": "FIELD_REF", "nodeId": "dim_product", "field": "product_name"}, "canonicalType": "STRING", "nullable": true},
+    {"id": "field_region_name", "code": "region_name", "name": "配送地域", "role": "DIMENSION", "expression": {"type": "FIELD_REF", "nodeId": "dim_region", "field": "region_name"}, "canonicalType": "STRING", "nullable": true},
+    {"id": "field_amount", "code": "amount", "name": "订单金额", "role": "MEASURE", "expression": {"type": "FIELD_REF", "nodeId": "fact_orders", "field": "amount"}, "canonicalType": "DECIMAL", "unit": "CNY", "nullable": false}
+  ],
+  "filters": [],
+  "groupBy": [],
+  "having": [],
+  "sorts": [],
+  "parameters": [],
+  "outputGrain": {"description": "每行一个订单购买动作", "keyFields": ["order_id"], "timeField": "ordered_at", "defaultTimeGrain": "DAY"},
+  "executionPolicy": {"mode": "REALTIME", "timeoutMs": 5000, "previewLimit": 100, "resultLimit": 10000, "cacheTtlSeconds": 0, "materialization": {"enabled": false}}
+}

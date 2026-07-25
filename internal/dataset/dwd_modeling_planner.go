@@ -15,15 +15,33 @@ import (
 )
 
 const (
-	dwdModelingPromptVersion      = "dwd-modeling-v7"
-	maxDWDModelingRepairContent   = 64 << 10
-	dwdModelingInvocationAttempts = 3
-	maxDWDValidationIssues        = 64
+	dwdModelingPromptVersion       = "warehouse-modeling-v9"
+	dwdClassificationPromptVersion = "warehouse-classification-v1"
+	dwdFactDesignPromptVersion     = "warehouse-fact-design-v1"
+	maxDWDModelingRepairContent    = 64 << 10
+	dwdModelingInvocationAttempts  = 3
+	dwdStageInvocationAttempts     = 2
+	maxDWDValidationIssues         = 64
 )
 
 type DWDModelingPlanner interface {
 	Configured() bool
 	Plan(context.Context, dwdPlanningInput) (dwdPlanningCompletion, error)
+}
+
+// resumableDWDModelingPlanner is implemented by planners that can persist the
+// classification and each FACT design independently. The public Plan method is
+// retained for compatibility and direct validation tests; the durable worker
+// prefers this staged contract so an interruption never discards prior stages.
+type resumableDWDModelingPlanner interface {
+	DWDModelingPlanner
+	Classify(context.Context, dwdPlanningInput) (dwdClassificationCompletion, error)
+	DesignFact(
+		context.Context,
+		dwdPlanningInput,
+		[]dwdLLMClassification,
+		string,
+	) (dwdFactDesignCompletion, error)
 }
 
 type dwdPlanningInput struct {
@@ -61,8 +79,21 @@ type dwdPlanningField struct {
 }
 
 type dwdPlanningCompletion struct {
+	AIRequestID           string
+	Plan                  dwdLLMPlan
+	CheckpointCount       int
+	ReusedCheckpointCount int
+}
+
+type dwdClassificationCompletion struct {
+	AIRequestID     string
+	Domain          string
+	Classifications []dwdLLMClassification
+}
+
+type dwdFactDesignCompletion struct {
 	AIRequestID string
-	Plan        dwdLLMPlan
+	Output      dwdLLMOutput
 }
 
 type dwdLLMPlan struct {
@@ -141,6 +172,8 @@ type OrchestratedDWDModelingPlanner struct {
 	timeout time.Duration
 }
 
+var _ resumableDWDModelingPlanner = (*OrchestratedDWDModelingPlanner)(nil)
+
 func NewOrchestratedDWDModelingPlanner(
 	invoker dwdAIInvoker,
 	timeout time.Duration,
@@ -155,18 +188,302 @@ func (planner *OrchestratedDWDModelingPlanner) Configured() bool {
 	return planner != nil && planner.invoker != nil && planner.invoker.Configured()
 }
 
-const dwdModelingSystemPrompt = `你是企业数据仓库 DWD 建模设计师。输入只包含同一业务领域内已发布 ODS 数据集的完整元数据，不包含业务数据行。
+const dwdClassificationSystemPrompt = `你是企业数据仓库 ODS 角色分类器。输入只包含同一业务领域内已发布 ODS 数据集的元数据，不包含业务数据行。
 
-你的职责是亲自完成 DWD 设计，而不是复述输入：
-1. 对每张 ODS 判断为 FACT、DIMENSION、MASTER 或 OTHER，并给出简短元数据依据。事实表描述业务事件/交易明细；维度表描述分析维度；主数据描述稳定核心实体；证据不足使用 OTHER。
+逐表判断为 FACT、DIMENSION、MASTER 或 OTHER：
+- FACT 是“谁在何时对什么做了什么”的事件或交易明细；
+- DIMENSION 是人物、商品、组织、区域等用于解释事实的分析实体；
+- MASTER 是稳定的核心实体主数据；
+- 证据不足时使用 OTHER。
+
+classifications 必须逐一覆盖输入表且不得重复，只能复制精确 datasetVersionId。理由应简短、基于表名、说明、标签、字段角色和粒度。不要设计字段、关联、SQL 或物理表。输出只能是 JSON Schema 指定的对象。`
+
+const dwdFactDesignSystemPrompt = `你是企业数据仓库 DWD 明细结构与 DAG 设计师。ODS 角色分类已经通过校验且不可更改；本次只设计指定的一张 FACT，输入只包含该事实表和同领域 DIMENSION/MASTER 元数据，不包含业务数据行。
+
+1. 生成且只生成指定 FACT 的一张 DWD，保持业务事实粒度，不得分组或聚合。
+2. 保留事实表全部字段。逐一检查标识/维度字段和以 _id/_key 结尾的字段；在 DIMENSION/MASTER 中存在唯一同名、类型兼容的键时必须 LEFT JOIN。复合业务键必须完整放入同一 join.conditions。
+3. 每个已关联维度至少扩充一个关联键之外的名称、分类、区域、状态等描述字段（只要存在）；维度侧关联键只用于 Join，不重复输出。
+4. 基础 cleaning：字符串维度/标识/属性去首尾空格；可空字符串用 UNKNOWN、可空数值用 -1；时间显式转换，字符串时间先 TRIM 再 CAST；度量和时间不得擅自补默认值。
+5. 真实需要时可使用 DATE_FORMAT、DATE_TRUNC、CAST、TRIM、UPPER、LOWER、REPLACE、SUBSTRING、CONCAT、COALESCE、ADD、SUBTRACT、MULTIPLY、DIVIDE、ROUND、ABS、FLOOR、CEIL、CASE。arguments 的每项都是字符串，二元处理只能引用已经加入输出的事实或维度字段。
+6. 只能复制输入中的精确 dataset version id 和字段 code，不得返回 SQL、DDL、表达式文本、物理表或调度命令。输出是交给受控 DAG 开发引擎的待审阅结构化设计。
+
+输出只能是 JSON Schema 指定的对象。`
+
+type dwdLLMClassificationPlan struct {
+	Domain          string                 `json:"domain"`
+	Classifications []dwdLLMClassification `json:"classifications"`
+}
+
+type dwdLLMFactDesign struct {
+	Output dwdLLMOutput `json:"output"`
+}
+
+func (planner *OrchestratedDWDModelingPlanner) Classify(
+	ctx context.Context,
+	input dwdPlanningInput,
+) (dwdClassificationCompletion, error) {
+	if !planner.Configured() || !validDWDPlanningInput(input) {
+		return dwdClassificationCompletion{}, errDWDModelingInvalid
+	}
+	raw, err := json.Marshal(struct {
+		Domain  string             `json:"domain"`
+		Trigger dwdPlanningTrigger `json:"trigger"`
+		Tables  []dwdPlanningTable `json:"tables"`
+	}{Domain: input.Domain, Trigger: input.Trigger, Tables: input.Tables})
+	if err != nil {
+		return dwdClassificationCompletion{}, err
+	}
+	if len(raw) > 256<<10 {
+		return dwdClassificationCompletion{}, fmt.Errorf(
+			"%w: classification context exceeds 256 KiB", errDWDModelingInvalid,
+		)
+	}
+	schema, err := dwdClassificationResponseSchema(input)
+	if err != nil {
+		return dwdClassificationCompletion{}, err
+	}
+	temperature := 0.0
+	request := aiplatform.ProviderRequest{
+		Messages: []aiplatform.Message{
+			{
+				Role: aiplatform.MessageRoleSystem,
+				Parts: []aiplatform.ContentPart{{
+					Type: aiplatform.ContentTypeText, Text: dwdClassificationSystemPrompt,
+				}},
+			},
+			{
+				Role: aiplatform.MessageRoleUser,
+				Parts: []aiplatform.ContentPart{{
+					Type: aiplatform.ContentTypeText, Text: string(raw),
+				}},
+			},
+		},
+		ResponseSchema:  schema,
+		Temperature:     &temperature,
+		MaxOutputTokens: 3000,
+	}
+	callCtx, cancel := context.WithTimeout(
+		ctx, planner.timeout*dwdStageInvocationAttempts,
+	)
+	defer cancel()
+	invocation := aiplatform.Invocation{
+		TenantID: input.TenantID, ActorID: input.ActorID,
+		Purpose:       aiplatform.PurposeDatasetDAGGeneration,
+		PromptVersion: dwdClassificationPromptVersion,
+		ResourceType:  "DATASET_VERSION", ResourceID: input.ResourceID,
+		Request: request,
+	}
+	baseMessages := append([]aiplatform.Message(nil), request.Messages...)
+	for attempt := 0; attempt < dwdStageInvocationAttempts; attempt++ {
+		result, invokeErr := planner.invoker.Invoke(callCtx, invocation)
+		if invokeErr == nil {
+			candidate, decodeErr := decodeDWDClassificationPlan(
+				result.ProviderResult.Content,
+			)
+			if decodeErr == nil {
+				candidate.Classifications = normalizeDWDClassifications(
+					input, candidate.Classifications,
+				)
+				decodeErr = validateDWDLLMClassifications(
+					input, candidate.Domain, candidate.Classifications,
+				)
+			}
+			if decodeErr == nil {
+				return dwdClassificationCompletion{
+					AIRequestID:     result.RequestID,
+					Domain:          candidate.Domain,
+					Classifications: candidate.Classifications,
+				}, nil
+			}
+			invokeErr = decodeErr
+		}
+		if !repairableDWDModelingError(invokeErr) ||
+			attempt == dwdStageInvocationAttempts-1 {
+			return dwdClassificationCompletion{}, invokeErr
+		}
+		if err := callCtx.Err(); err != nil {
+			return dwdClassificationCompletion{}, err
+		}
+		invocation.Request.Messages = dwdStageRepairMessages(
+			baseMessages, result, invokeErr,
+			`请只修复 ODS 角色分类：domain 必须等于输入；classifications 必须逐表覆盖且不重复，只能使用输入的精确 datasetVersionId；role 只能是 FACT、DIMENSION、MASTER、OTHER；rationale 保持简短。不要返回 outputs、SQL、Markdown 或解释。`,
+		)
+	}
+	return dwdClassificationCompletion{}, errDWDModelingInvalid
+}
+
+func (planner *OrchestratedDWDModelingPlanner) DesignFact(
+	ctx context.Context,
+	input dwdPlanningInput,
+	classifications []dwdLLMClassification,
+	factVersionID string,
+) (dwdFactDesignCompletion, error) {
+	if !planner.Configured() || !validDWDPlanningInput(input) {
+		return dwdFactDesignCompletion{}, errDWDModelingInvalid
+	}
+	scoped, scopedClassifications, err := dwdFactPlanningScope(
+		input, classifications, factVersionID,
+	)
+	if err != nil {
+		return dwdFactDesignCompletion{}, err
+	}
+	raw, err := json.Marshal(struct {
+		Domain               string                 `json:"domain"`
+		FactDatasetVersionID string                 `json:"factDatasetVersionId"`
+		Classifications      []dwdLLMClassification `json:"classifications"`
+		Tables               []dwdPlanningTable     `json:"tables"`
+	}{
+		Domain: scoped.Domain, FactDatasetVersionID: factVersionID,
+		Classifications: scopedClassifications, Tables: scoped.Tables,
+	})
+	if err != nil {
+		return dwdFactDesignCompletion{}, err
+	}
+	if len(raw) > 256<<10 {
+		return dwdFactDesignCompletion{}, fmt.Errorf(
+			"%w: fact design context exceeds 256 KiB", errDWDModelingInvalid,
+		)
+	}
+	schema, err := dwdFactDesignResponseSchema(scoped, factVersionID)
+	if err != nil {
+		return dwdFactDesignCompletion{}, err
+	}
+	temperature := 0.0
+	request := aiplatform.ProviderRequest{
+		Messages: []aiplatform.Message{
+			{
+				Role: aiplatform.MessageRoleSystem,
+				Parts: []aiplatform.ContentPart{{
+					Type: aiplatform.ContentTypeText, Text: dwdFactDesignSystemPrompt,
+				}},
+			},
+			{
+				Role: aiplatform.MessageRoleUser,
+				Parts: []aiplatform.ContentPart{{
+					Type: aiplatform.ContentTypeText, Text: string(raw),
+				}},
+			},
+		},
+		ResponseSchema:  schema,
+		Temperature:     &temperature,
+		MaxOutputTokens: 8000,
+	}
+	callCtx, cancel := context.WithTimeout(
+		ctx, planner.timeout*dwdStageInvocationAttempts,
+	)
+	defer cancel()
+	invocation := aiplatform.Invocation{
+		TenantID: input.TenantID, ActorID: input.ActorID,
+		Purpose:       aiplatform.PurposeDatasetDAGGeneration,
+		PromptVersion: dwdFactDesignPromptVersion,
+		ResourceType:  "DATASET_VERSION", ResourceID: factVersionID,
+		Request: request,
+	}
+	baseMessages := append([]aiplatform.Message(nil), request.Messages...)
+	for attempt := 0; attempt < dwdStageInvocationAttempts; attempt++ {
+		result, invokeErr := planner.invoker.Invoke(callCtx, invocation)
+		if invokeErr == nil {
+			candidate, decodeErr := decodeDWDFactDesign(
+				result.ProviderResult.Content,
+			)
+			if decodeErr == nil {
+				plan := dwdLLMPlan{
+					Domain:          scoped.Domain,
+					Classifications: scopedClassifications,
+					Outputs:         []dwdLLMOutput{candidate.Output},
+				}
+				plan = normalizeDWDJoinOutputProjection(plan)
+				plan = completeMandatoryDWDPolicyCleaning(scoped, plan)
+				decodeErr = validateDWDLLMPlan(scoped, plan)
+				if decodeErr == nil {
+					candidate.Output = plan.Outputs[0]
+				}
+			}
+			if decodeErr == nil {
+				return dwdFactDesignCompletion{
+					AIRequestID: result.RequestID,
+					Output:      candidate.Output,
+				}, nil
+			}
+			invokeErr = decodeErr
+		}
+		if !repairableDWDModelingError(invokeErr) ||
+			attempt == dwdStageInvocationAttempts-1 {
+			return dwdFactDesignCompletion{}, invokeErr
+		}
+		if err := callCtx.Err(); err != nil {
+			return dwdFactDesignCompletion{}, err
+		}
+		invocation.Request.Messages = dwdStageRepairMessages(
+			baseMessages, result, invokeErr,
+			dwdFactDesignRepairInstruction(invokeErr),
+		)
+	}
+	return dwdFactDesignCompletion{}, errDWDModelingInvalid
+}
+
+func dwdFactDesignRepairInstruction(validationErr error) string {
+	return fmt.Sprintf(`上一份单 FACT DWD 方案未通过结构或本地安全校验。原因：%s
+
+请只返回修复后的 {"output": ...}：
+1. factDatasetVersionId 必须是指定 FACT；保留全部事实字段且不聚合。
+2. 只能引用输入中的精确版本和字段；唯一可靠维度键必须 LEFT JOIN，复合键保持在同一个 conditions。
+3. 已关联维度存在说明字段时必须扩充至少一个，维度侧关联键不得重复输出。
+4. cleaning、processing、grainKeyOutputCodes 和 timeOutputCode 必须满足原始合同。
+5. 名称、说明和 rationale 保持简短，不返回 classifications、SQL、Markdown 或额外解释。`,
+		validationErr.Error(),
+	)
+}
+
+func validDWDPlanningInput(input dwdPlanningInput) bool {
+	return input.TenantID != "" && input.ActorID != "" &&
+		input.Domain != "" && len(input.Tables) > 0 && len(input.Tables) <= 48
+}
+
+func dwdStageRepairMessages(
+	base []aiplatform.Message,
+	result aiplatform.InvocationResult,
+	invokeErr error,
+	instruction string,
+) []aiplatform.Message {
+	repairContent := result.ProviderResult.Content
+	repairDiagnostic := ""
+	if candidate, diagnostic, ok := aiplatform.InvalidOutputDetails(invokeErr); ok {
+		repairContent = candidate
+		repairDiagnostic = diagnostic
+	}
+	messages := append([]aiplatform.Message(nil), base...)
+	if len(repairContent) > 0 && len(repairContent) <= maxDWDModelingRepairContent {
+		messages = append(messages, aiplatform.Message{
+			Role: aiplatform.MessageRoleAssistant,
+			Parts: []aiplatform.ContentPart{{
+				Type: aiplatform.ContentTypeText, Text: string(repairContent),
+			}},
+		})
+	}
+	if strings.TrimSpace(repairDiagnostic) != "" {
+		instruction += "\n结构诊断：" + strings.TrimSpace(repairDiagnostic)
+	}
+	return append(messages, aiplatform.Message{
+		Role: aiplatform.MessageRoleUser,
+		Parts: []aiplatform.ContentPart{{
+			Type: aiplatform.ContentTypeText, Text: instruction,
+		}},
+	})
+}
+
+const dwdModelingSystemPrompt = `你是企业数据仓库 DIM/DWD 建模设计师。输入只包含同一业务领域内已发布 ODS 数据集的完整元数据，不包含业务数据行。ODS 是源系统物理表的治理映射。
+
+你的职责是完成可交给开发引擎执行的分层结构和 DAG 设计，而不是复述输入或编写 SQL：
+1. 对每张 ODS 判断为 FACT、DIMENSION、MASTER 或 OTHER，并给出简短元数据依据。事实表描述“谁在何时对什么做了什么”的业务事件/交易明细；维度表描述人物、商品、组织、区域等分析维度；主数据描述稳定核心实体；证据不足使用 OTHER。平台会把每个 DIMENSION/MASTER 分类并行转换为一张保留实体粒度、关键字段和说明字段的 DIM 草稿，因此分类本身就是 DIM 设计决策。
 2. 每张 FACT 必须设计且只设计一张以事实明细为中心的 DWD 输出；不得分组、聚合或改变事实粒度。
 3. 必须逐一审视 FACT 中所有标识/维度字段以及 code 以 _id/_key 结尾的字段，并在全部 DIMENSION/MASTER 中按字段 code、业务名称、说明、标签和类型寻找关联键。事实字段与某个维度键 code 精确同名（忽略大小写）、类型兼容且候选唯一时，该 LEFT JOIN 是必选项，不得退化为 ODS 单表直出。关联若依赖两个或更多业务键，必须在同一个 join.conditions 中完整返回全部条件，不能拆成多个 Join，也不能只取其中一个条件。只有确实没有唯一可靠候选时才不关联，禁止仅凭字段位置猜测。
 4. DWD 必须保留事实表全部字段。对事实表的标识、维度、属性和时间字段设计基础清洗：字符串去首尾空格；非时间的可空维度字符串使用 UNKNOWN 补位；非时间的可空维度数值使用 -1 补位；日期/时间显式转换为 DATE 或 DATETIME。字符串时间先 TRIM 再 CAST，不得先补 UNKNOWN；度量空值和时间空值不得擅自补默认值。基础卫生操作进入 cleaning。
 5. 每个已关联的维度/主数据必须至少选择一个关联键之外的名称、分类、区域、状态等描述字段扩充到输出（只要输入存在此类字段），不能只关联而不扩维。所有维度侧关联键只用于 Join，不得再次放入 output.fields；最终结果只保留事实侧关联键，避免同一业务键输出两份。维度字符串同样去首尾空格；字段编码必须是稳定英文标识符且唯一。
 6. 除基础 cleaning 外，按真实元数据需要为每个字段设计 processing，可使用现有全部字段处理能力：DATE_FORMAT、DATE_TRUNC、CAST、TRIM、UPPER、LOWER、REPLACE、SUBSTRING、CONCAT、COALESCE、ADD、SUBTRACT、MULTIPLY、DIVIDE、ROUND、ABS、FLOOR、CEIL、CASE。不需要额外处理时返回空数组。不得为了展示而滥加操作；不得聚合或改变事实粒度。
 7. processing 每步使用紧凑参数，arguments 的每个元素都必须是字符串：DATE_FORMAT/DATE_TRUNC arguments=["MONTH"]；CAST=["DATE"]；REPLACE=["旧值","新值"]；SUBSTRING=["1","8"]；CONCAT=["-"]；COALESCE=["UNKNOWN"]；ROUND=["2"]；CASE=["EQUALS","A","有效","其他"]；其余操作 arguments=[]。同一处理功能、同一依赖阶段应用于多个字段时，平台会把多条规则合并进一个 DAG 组件。二元计算或拼接通过 secondarySourceDatasetVersionId/secondarySourceFieldCode 引用已加入当前输出的事实或维度字段；不用次字段时两个值均为空字符串。不得返回 SQL、自由表达式或虚构表字段。
-8. classifications 必须逐一覆盖输入中的每张表；outputs 必须逐一覆盖所有被分类为 FACT 的表，不得为其他角色生成输出。
-9. 只能使用输入给出的精确 dataset version id 和字段 code。结果是待审阅的设计方案，不代表自动发布。
+8. classifications 必须逐一覆盖输入中的每张表；outputs 必须逐一覆盖所有被分类为 FACT 的表，不得为其他角色生成 output。DIM 与 DWD 是当前可恢复流程的第一阶段；DWD 必须保留维度键和分析属性，后续 DWS 只允许使用一个或多个已发布 DWD。ADS 仅为明确消费场景预留，不自动组合。
+9. 只能使用输入给出的精确 dataset version id 和字段 code。结果是待审阅的结构化设计方案，不代表自动发布；物理表、SQL、调度和重试由底层 DAG 开发引擎负责。
 
 输出只能是 JSON Schema 指定的对象。`
 
@@ -428,6 +745,106 @@ func dwdModelingRepairInstruction(validationErr error, diagnostic string) string
 8. 为控制响应长度，名称、说明和 rationale 保持简短，不复述输入，不返回 SQL、Markdown 或解释。`, reason)
 }
 
+func dwdClassificationResponseSchema(
+	input dwdPlanningInput,
+) (aiplatform.JSONSchema, error) {
+	versionIDs := make([]string, 0, len(input.Tables))
+	for _, table := range input.Tables {
+		versionIDs = append(versionIDs, table.VersionID)
+	}
+	sort.Strings(versionIDs)
+	if len(versionIDs) == 0 {
+		return aiplatform.JSONSchema{}, errDWDModelingInvalid
+	}
+	schema := map[string]any{
+		"type": "object", "additionalProperties": false,
+		"required": []string{"domain", "classifications"},
+		"properties": map[string]any{
+			"domain": map[string]any{
+				"type": "string", "enum": []string{input.Domain},
+			},
+			"classifications": map[string]any{
+				"type":     "array",
+				"minItems": len(input.Tables), "maxItems": len(input.Tables),
+				"items": map[string]any{
+					"type": "object", "additionalProperties": false,
+					"required": []string{"datasetVersionId", "role", "rationale"},
+					"properties": map[string]any{
+						"datasetVersionId": map[string]any{
+							"type": "string", "enum": versionIDs,
+						},
+						"role": map[string]any{
+							"type": "string",
+							"enum": []string{"FACT", "DIMENSION", "MASTER", "OTHER"},
+						},
+						"rationale": map[string]any{
+							"type": "string", "maxLength": 1024,
+						},
+					},
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return aiplatform.JSONSchema{}, err
+	}
+	return aiplatform.JSONSchema{
+		Name:        "warehouse_ods_classification",
+		Description: "同领域 ODS 的事实、维度、主数据和其他角色分类",
+		Schema:      raw,
+	}, nil
+}
+
+func dwdFactDesignResponseSchema(
+	input dwdPlanningInput,
+	factVersionID string,
+) (aiplatform.JSONSchema, error) {
+	full, err := dwdModelingResponseSchema(input)
+	if err != nil {
+		return aiplatform.JSONSchema{}, err
+	}
+	var root map[string]any
+	if err := json.Unmarshal(full.Schema, &root); err != nil {
+		return aiplatform.JSONSchema{}, err
+	}
+	properties, ok := root["properties"].(map[string]any)
+	if !ok {
+		return aiplatform.JSONSchema{}, errDWDModelingInvalid
+	}
+	outputs, ok := properties["outputs"].(map[string]any)
+	if !ok {
+		return aiplatform.JSONSchema{}, errDWDModelingInvalid
+	}
+	output, ok := outputs["items"].(map[string]any)
+	if !ok {
+		return aiplatform.JSONSchema{}, errDWDModelingInvalid
+	}
+	outputProperties, ok := output["properties"].(map[string]any)
+	if !ok {
+		return aiplatform.JSONSchema{}, errDWDModelingInvalid
+	}
+	factProperty, ok := outputProperties["factDatasetVersionId"].(map[string]any)
+	if !ok {
+		return aiplatform.JSONSchema{}, errDWDModelingInvalid
+	}
+	factProperty["enum"] = []string{factVersionID}
+	schema := map[string]any{
+		"type": "object", "additionalProperties": false,
+		"required":   []string{"output"},
+		"properties": map[string]any{"output": output},
+	}
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return aiplatform.JSONSchema{}, err
+	}
+	return aiplatform.JSONSchema{
+		Name:        "warehouse_fact_dwd_design",
+		Description: "单个事实 ODS 的 DWD 明细结构与 DAG 设计",
+		Schema:      raw,
+	}, nil
+}
+
 func dwdModelingResponseSchema(input dwdPlanningInput) (aiplatform.JSONSchema, error) {
 	versionIDs := make([]string, 0, len(input.Tables))
 	maxFields := 0
@@ -578,31 +995,121 @@ func dwdModelingResponseSchema(input dwdPlanningInput) (aiplatform.JSONSchema, e
 		return aiplatform.JSONSchema{}, err
 	}
 	return aiplatform.JSONSchema{
-		Name:        "dwd_modeling_plan",
-		Description: "同领域 ODS 的事实/维度/主数据分类和事实中心 DWD 明细 DAG 设计",
+		Name:        "warehouse_modeling_plan",
+		Description: "同领域 ODS 的 DIM 分类决策与事实中心 DWD 明细 DAG 设计",
 		Schema:      raw,
 	}, nil
 }
 
-func decodeDWDModelingPlan(raw []byte) (dwdLLMPlan, error) {
-	if len(raw) == 0 || len(raw) > 2<<20 {
-		return dwdLLMPlan{}, errDWDModelingInvalid
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	var plan dwdLLMPlan
-	if err := decoder.Decode(&plan); err != nil {
-		return dwdLLMPlan{}, fmt.Errorf("%w: decode LLM DWD plan", errDWDModelingInvalid)
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return dwdLLMPlan{}, fmt.Errorf("%w: trailing LLM DWD content", errDWDModelingInvalid)
+func decodeDWDClassificationPlan(raw []byte) (dwdLLMClassificationPlan, error) {
+	var plan dwdLLMClassificationPlan
+	if err := decodeStrictDWDJSON(raw, &plan); err != nil {
+		return dwdLLMClassificationPlan{}, err
 	}
 	return plan, nil
 }
 
+func decodeDWDFactDesign(raw []byte) (dwdLLMFactDesign, error) {
+	var design dwdLLMFactDesign
+	if err := decodeStrictDWDJSON(raw, &design); err != nil {
+		return dwdLLMFactDesign{}, err
+	}
+	return design, nil
+}
+
+func decodeDWDModelingPlan(raw []byte) (dwdLLMPlan, error) {
+	var plan dwdLLMPlan
+	if err := decodeStrictDWDJSON(raw, &plan); err != nil {
+		return dwdLLMPlan{}, err
+	}
+	return plan, nil
+}
+
+func decodeStrictDWDJSON(raw []byte, destination any) error {
+	if len(raw) == 0 || len(raw) > 2<<20 {
+		return errDWDModelingInvalid
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return fmt.Errorf("%w: decode LLM warehouse plan", errDWDModelingInvalid)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("%w: trailing LLM warehouse content", errDWDModelingInvalid)
+	}
+	return nil
+}
+
+func normalizeDWDClassifications(
+	input dwdPlanningInput,
+	classifications []dwdLLMClassification,
+) []dwdLLMClassification {
+	byVersion := make(map[string]dwdLLMClassification, len(classifications))
+	for _, classification := range classifications {
+		byVersion[classification.DatasetVersionID] = classification
+	}
+	normalized := make([]dwdLLMClassification, 0, len(input.Tables))
+	for _, table := range input.Tables {
+		if classification, exists := byVersion[table.VersionID]; exists {
+			normalized = append(normalized, classification)
+		}
+	}
+	return normalized
+}
+
+func dwdFactPlanningScope(
+	input dwdPlanningInput,
+	classifications []dwdLLMClassification,
+	factVersionID string,
+) (dwdPlanningInput, []dwdLLMClassification, error) {
+	if err := validateDWDLLMClassifications(
+		input, input.Domain, classifications,
+	); err != nil {
+		return dwdPlanningInput{}, nil, err
+	}
+	roleByVersion := make(map[string]string, len(classifications))
+	classificationByVersion := make(
+		map[string]dwdLLMClassification, len(classifications),
+	)
+	for _, classification := range classifications {
+		roleByVersion[classification.DatasetVersionID] = classification.Role
+		classificationByVersion[classification.DatasetVersionID] = classification
+	}
+	if roleByVersion[factVersionID] != "FACT" {
+		return dwdPlanningInput{}, nil, fmt.Errorf(
+			"%w: requested fact is not classified as FACT", errDWDModelingInvalid,
+		)
+	}
+	scoped := input
+	scoped.ResourceID = factVersionID
+	scoped.Tables = make([]dwdPlanningTable, 0, len(input.Tables))
+	scopedClassifications := make(
+		[]dwdLLMClassification, 0, len(input.Tables),
+	)
+	for _, table := range input.Tables {
+		role := roleByVersion[table.VersionID]
+		if table.VersionID != factVersionID &&
+			role != "DIMENSION" && role != "MASTER" {
+			continue
+		}
+		scoped.Tables = append(scoped.Tables, table)
+		scopedClassifications = append(
+			scopedClassifications, classificationByVersion[table.VersionID],
+		)
+	}
+	if err := validateDWDLLMClassifications(
+		scoped, scoped.Domain, scopedClassifications,
+	); err != nil {
+		return dwdPlanningInput{}, nil, err
+	}
+	return scoped, scopedClassifications, nil
+}
+
 func validateDWDLLMPlan(input dwdPlanningInput, plan dwdLLMPlan) error {
-	if plan.Domain != input.Domain || len(plan.Classifications) != len(input.Tables) {
-		return fmt.Errorf("%w: LLM classification coverage is incomplete", errDWDModelingInvalid)
+	if err := validateDWDLLMClassifications(
+		input, plan.Domain, plan.Classifications,
+	); err != nil {
+		return err
 	}
 	tableByVersion := map[string]dwdPlanningTable{}
 	for _, table := range input.Tables {
@@ -610,16 +1117,7 @@ func validateDWDLLMPlan(input dwdPlanningInput, plan dwdLLMPlan) error {
 	}
 	roleByVersion := map[string]string{}
 	for _, classification := range plan.Classifications {
-		if _, ok := tableByVersion[classification.DatasetVersionID]; !ok ||
-			roleByVersion[classification.DatasetVersionID] != "" ||
-			!containsString([]string{"FACT", "DIMENSION", "MASTER", "OTHER"}, classification.Role) ||
-			strings.TrimSpace(classification.Rationale) == "" {
-			return fmt.Errorf("%w: LLM classification is invalid", errDWDModelingInvalid)
-		}
 		roleByVersion[classification.DatasetVersionID] = classification.Role
-	}
-	if len(roleByVersion) != len(tableByVersion) {
-		return fmt.Errorf("%w: LLM did not classify every ODS", errDWDModelingInvalid)
 	}
 	outputByFact := map[string]bool{}
 	issues := []string{}
@@ -648,6 +1146,47 @@ func validateDWDLLMPlan(input dwdPlanningInput, plan dwdLLMPlan) error {
 		}
 	}
 	return dwdValidationError(issues)
+}
+
+func validateDWDLLMClassifications(
+	input dwdPlanningInput,
+	domain string,
+	classifications []dwdLLMClassification,
+) error {
+	if domain != input.Domain || len(classifications) != len(input.Tables) {
+		return fmt.Errorf(
+			"%w: LLM classification coverage is incomplete",
+			errDWDModelingInvalid,
+		)
+	}
+	tableByVersion := make(map[string]bool, len(input.Tables))
+	for _, table := range input.Tables {
+		if table.VersionID == "" || tableByVersion[table.VersionID] {
+			return errDWDModelingInvalid
+		}
+		tableByVersion[table.VersionID] = true
+	}
+	roleByVersion := make(map[string]string, len(classifications))
+	for _, classification := range classifications {
+		if !tableByVersion[classification.DatasetVersionID] ||
+			roleByVersion[classification.DatasetVersionID] != "" ||
+			!containsString(
+				[]string{"FACT", "DIMENSION", "MASTER", "OTHER"},
+				classification.Role,
+			) ||
+			strings.TrimSpace(classification.Rationale) == "" {
+			return fmt.Errorf(
+				"%w: LLM classification is invalid", errDWDModelingInvalid,
+			)
+		}
+		roleByVersion[classification.DatasetVersionID] = classification.Role
+	}
+	if len(roleByVersion) != len(tableByVersion) {
+		return fmt.Errorf(
+			"%w: LLM did not classify every ODS", errDWDModelingInvalid,
+		)
+	}
+	return nil
 }
 
 func appendDWDValidationIssue(issues *[]string, format string, arguments ...any) {

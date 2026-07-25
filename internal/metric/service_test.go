@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -354,6 +355,52 @@ func TestServicePreviewBuildsServerSideAggregatePlan(t *testing.T) {
 	}
 	if len(document.GroupBy) != 1 || document.GroupBy[0] != "field_region" || len(document.Fields) != 2 || document.Fields[1].Expression.Type != "AGGREGATE" {
 		t.Fatalf("metric plan did not aggregate at source: %#v", document)
+	}
+}
+
+func TestServicePreviewBindsDimensionMemberWithoutEmbeddingValueInDSL(t *testing.T) {
+	store := &fakeStore{
+		record: baseRecord(t), datasetVersion: baseDatasetVersion(t),
+		versionsByID: map[string]VersionRecord{},
+	}
+	previewer := &fakePreviewer{
+		result: dataset.PreviewResult{Columns: []string{"region", "revenue"}},
+	}
+	service := NewService(store, previewer)
+	_, err := service.Preview(
+		context.Background(), testTenantID, testActorID, testMetricID,
+		PreviewInput{
+			DimensionFieldIDs: []string{"field_region"},
+			DimensionFilters: []DimensionFilter{{
+				FieldID: "field_region", Operator: "EQUALS", Value: "华东",
+			}},
+			MaxRows: 20,
+		},
+	)
+	if err != nil {
+		t.Fatalf("preview metric with member filter: %v", err)
+	}
+	if len(previewer.candidate.FilterBindings) != 1 ||
+		previewer.candidate.FilterBindings[0].FieldID != "field_region" {
+		t.Fatalf("filter binding=%#v", previewer.candidate.FilterBindings)
+	}
+	binding := previewer.candidate.FilterBindings[0]
+	if previewer.input.Parameters[binding.ParameterCode] != "华东" {
+		t.Fatalf("bound parameters=%#v", previewer.input.Parameters)
+	}
+	if string(previewer.candidate.DSL) == "" ||
+		strings.Contains(string(previewer.candidate.DSL), "华东") {
+		t.Fatalf("member value must not be embedded in derived DSL: %s", previewer.candidate.DSL)
+	}
+	document, err := dataset.DecodeAndNormalize(previewer.candidate.DSL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Filters) != 1 ||
+		document.Filters[0].Expression.Right == nil ||
+		document.Filters[0].Expression.Right.Type != "PARAM_REF" ||
+		document.Filters[0].Expression.Right.Code != binding.ParameterCode {
+		t.Fatalf("parameterized filter=%#v", document.Filters)
 	}
 }
 

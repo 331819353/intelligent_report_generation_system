@@ -20,10 +20,14 @@ func GeneratePhysicalIdentifier(tenantID, datasetID, runID string, layer Layer) 
 	switch layer {
 	case LayerODS:
 		schema = "warehouse_ods"
+	case LayerDIM:
+		schema = "warehouse_dim"
 	case LayerDWD:
 		schema = "warehouse_dwd"
 	case LayerDWS:
 		schema = "warehouse_dws"
+	case LayerADS:
+		schema = "warehouse_ads"
 	}
 	tenantHash := sha256Hex([]byte("tenant\x00" + tenantID))[:12]
 	datasetHash := sha256Hex([]byte("dataset\x00" + datasetID))[:12]

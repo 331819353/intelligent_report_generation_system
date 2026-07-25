@@ -142,7 +142,7 @@ WITH tasks AS (
     'DWD_MODELING',job.id::text,dataset.name::text,
     concat(
       dataset.code::text,' · ',
-      COALESCE(NULLIF(job.domain_key,''),'待识别领域'),' · LLM DWD 建模'
+      COALESCE(NULLIF(job.domain_key,''),'待识别领域'),' · LLM 分层建模'
     )::text,
     job.status::text,'DATASET',job.trigger_dataset_id::text,
     (job.generated_count+job.updated_count+job.skipped_count)::bigint,NULL::bigint,
@@ -151,6 +151,24 @@ WITH tasks AS (
   FROM platform.dwd_modeling_jobs AS job
   JOIN platform.datasets AS dataset
     ON dataset.id=job.trigger_dataset_id AND dataset.tenant_id=job.tenant_id
+
+  UNION ALL
+  SELECT
+    'DWS_MODELING',job.id::text,dataset.name::text,
+    concat(dataset.code::text,' · 市场通用 DWS 分析草稿')::text,
+    job.status::text,'DATASET',job.source_dwd_dataset_id::text,
+    (job.generated_count+job.updated_count+job.skipped_count)::bigint,
+    CASE WHEN jsonb_array_length(job.selection_json)=0
+      THEN NULL::bigint
+      ELSE jsonb_array_length(job.selection_json)::bigint END,
+    job.attempt,job.max_attempts,job.error_code::text,''::text,
+    job.created_at,
+    CASE WHEN job.attempt>0 THEN job.created_at ELSE NULL::timestamptz END,
+    job.updated_at,job.completed_at
+  FROM platform.dws_modeling_jobs AS job
+  JOIN platform.datasets AS dataset
+    ON dataset.id=job.source_dwd_dataset_id
+   AND dataset.tenant_id=job.tenant_id
 
   UNION ALL
   SELECT
@@ -183,9 +201,13 @@ func (store *PostgresStore) List(
 		filter := `true`
 		switch view {
 		case ViewActive:
-			filter = `source_status IN ('PENDING','QUEUED','RUNNING')`
+			filter = `source_status IN (
+				'PENDING','QUEUED','WAITING_DEPENDENCY','RUNNING'
+			)`
 		case ViewRecent:
-			filter = `source_status NOT IN ('PENDING','QUEUED','RUNNING')`
+			filter = `source_status NOT IN (
+				'PENDING','QUEUED','WAITING_DEPENDENCY','RUNNING'
+			)`
 		case ViewAll:
 		default:
 			return ErrInvalidRequest
@@ -195,7 +217,9 @@ func (store *PostgresStore) List(
 			WHERE `+filter+`
 			ORDER BY
 			  CASE WHEN source_status='RUNNING' THEN 0
-			       WHEN source_status IN ('PENDING','QUEUED') THEN 1 ELSE 2 END,
+			       WHEN source_status IN (
+			         'PENDING','QUEUED','WAITING_DEPENDENCY'
+			       ) THEN 1 ELSE 2 END,
 			  updated_at DESC,id DESC
 			LIMIT $1`, limit)
 		if queryErr != nil {
@@ -214,7 +238,9 @@ func (store *PostgresStore) List(
 		}
 		return tx.QueryRow(ctx, taskUnionSQL+`
 			SELECT count(*) FROM tasks
-			WHERE source_status IN ('PENDING','QUEUED','RUNNING')`,
+			WHERE source_status IN (
+			  'PENDING','QUEUED','WAITING_DEPENDENCY','RUNNING'
+			)`,
 		).Scan(&page.ActiveCount)
 	})
 	page.GeneratedAt = time.Now().UTC()
@@ -341,7 +367,7 @@ func normalizeStatus(sourceStatus, errorCode string) string {
 		return "CANCELLED"
 	}
 	switch sourceStatus {
-	case "PENDING", "QUEUED":
+	case "PENDING", "QUEUED", "WAITING_DEPENDENCY":
 		return "QUEUED"
 	case "RUNNING":
 		return "RUNNING"
@@ -371,8 +397,9 @@ var kindLabels = map[string]string{
 	"METRIC_CANDIDATE_PREPARATION":    "历史发布前指标准备",
 	"DIMENSION_MEMBER_REFRESH":        "维度值刷新",
 	"DIMENSION_PROFILE":               "DWS 维度画像",
-	"DWD_MODELING":                    "LLM DWD 建模",
-	"DATASET_MATERIALIZATION_CLEANUP": "DWD/DWS 仓库物理表清理",
+	"DWD_MODELING":                    "LLM DIM/DWD 分层建模",
+	"DWS_MODELING":                    "LLM 市场通用 DWS 建模",
+	"DATASET_MATERIALIZATION_CLEANUP": "DIM/DWD/DWS/ADS 仓库物理表清理",
 }
 
 var cancellableKinds = map[string]bool{

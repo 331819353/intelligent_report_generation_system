@@ -173,12 +173,19 @@ func (s *Service) Preview(ctx context.Context, tenantID, actorID, id string, inp
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
-	candidate, err := buildQueryCandidate(id, record.DraftVersionID, validated, input.DimensionFieldIDs)
+	candidate, parameters, err := buildQueryCandidate(
+		id, record.DraftVersionID, validated,
+		input.DimensionFieldIDs, input.DimensionFilters,
+	)
+	if err != nil {
+		return dataset.PreviewResult{}, err
+	}
+	parameters, err = mergePreviewParameters(input.Parameters, parameters)
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
 	return s.previewer.PreviewMetric(ctx, tenantID, actorID, candidate, dataset.PreviewInput{
-		QueryID: input.QueryID, Parameters: input.Parameters, MaxRows: input.MaxRows,
+		QueryID: input.QueryID, Parameters: parameters, MaxRows: input.MaxRows,
 	}, false)
 }
 
@@ -210,13 +217,41 @@ func (s *Service) PreviewVersion(ctx context.Context, tenantID, actorID, id, ver
 		}
 		return dataset.PreviewResult{}, err
 	}
-	candidate, err := buildQueryCandidate(id, version.ID, validated, input.DimensionFieldIDs)
+	candidate, parameters, err := buildQueryCandidate(
+		id, version.ID, validated,
+		input.DimensionFieldIDs, input.DimensionFilters,
+	)
+	if err != nil {
+		return dataset.PreviewResult{}, err
+	}
+	parameters, err = mergePreviewParameters(input.Parameters, parameters)
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
 	return s.previewer.PreviewMetric(ctx, tenantID, actorID, candidate, dataset.PreviewInput{
-		QueryID: input.QueryID, Parameters: input.Parameters, MaxRows: input.MaxRows,
+		QueryID: input.QueryID, Parameters: parameters, MaxRows: input.MaxRows,
 	}, false)
+}
+
+func mergePreviewParameters(
+	caller map[string]any,
+	generated map[string]any,
+) (map[string]any, error) {
+	merged := make(map[string]any, len(caller)+len(generated))
+	for code, value := range caller {
+		merged[code] = value
+	}
+	for code, value := range generated {
+		if _, collision := merged[code]; collision {
+			return nil, invalid(
+				"parameters."+code,
+				"METRIC_PREVIEW_PARAMETER_RESERVED",
+				"参数编码由语义维度过滤保留",
+			)
+		}
+		merged[code] = value
+	}
+	return merged, nil
 }
 
 func (s *Service) Publish(ctx context.Context, tenantID, actorID, id, idempotencyKey string, input PublishInput) (VersionRecord, error) {
@@ -272,7 +307,7 @@ func (s *Service) Publish(ctx context.Context, tenantID, actorID, id, idempotenc
 	if err != nil {
 		return VersionRecord{}, err
 	}
-	candidate, err := buildQueryCandidate(id, current.DraftVersionID, validated, nil)
+	candidate, _, err := buildQueryCandidate(id, current.DraftVersionID, validated, nil, nil)
 	if err != nil {
 		return VersionRecord{}, err
 	}

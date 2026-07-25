@@ -30,8 +30,10 @@ type Layer string
 
 const (
 	LayerODS Layer = "ODS"
+	LayerDIM Layer = "DIM"
 	LayerDWD Layer = "DWD"
 	LayerDWS Layer = "DWS"
+	LayerADS Layer = "ADS"
 )
 
 type RunMode string

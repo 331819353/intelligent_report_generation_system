@@ -118,6 +118,25 @@ WHERE rolname IN (:'app_user',:'worker_user',:'connection_test_user')
 COMMIT;
 SQL
 
+# 数仓使用独立 PostgreSQL，控制面迁移不会在该实例创建 schema。已有数据卷
+# 不会重放 docker-entrypoint-initdb.d，因此这里幂等补齐新分层数据面。
+docker compose --env-file "$ENV_FILE" exec -T postgres-warehouse \
+  psql -v ON_ERROR_STOP=1 \
+  -U "${WAREHOUSE_POSTGRES_USER:-warehouse_admin}" \
+  -d "${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}" \
+  --set=worker_user="${WAREHOUSE_WORKER_USER:-report_warehouse_worker}" <<'SQL'
+BEGIN;
+CREATE SCHEMA IF NOT EXISTS warehouse_dim;
+CREATE SCHEMA IF NOT EXISTS warehouse_ads;
+REVOKE ALL ON SCHEMA warehouse_dim,warehouse_ads FROM PUBLIC;
+GRANT USAGE,CREATE ON SCHEMA warehouse_dim,warehouse_ads TO :"worker_user";
+COMMENT ON SCHEMA warehouse_dim IS
+  '从 ODS 抽离并治理的人物、商品等实体说明信息';
+COMMENT ON SCHEMA warehouse_ads IS
+  '由 DWS 组合形成的应用、报表和交付场景数据';
+COMMIT;
+SQL
+
 docker compose --env-file "$ENV_FILE" exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-report_admin}" -d "${POSTGRES_DB:-intelligent_report_control}" \
   --set=app_user="${POSTGRES_APP_USER:-report_app}" \
@@ -139,6 +158,30 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA platform
   REVOKE INSERT, UPDATE, DELETE ON TABLES FROM :"worker_user";
 ALTER DEFAULT PRIVILEGES IN SCHEMA platform GRANT SELECT ON TABLES TO :"worker_user";
 ALTER DEFAULT PRIVILEGES IN SCHEMA platform GRANT USAGE, SELECT ON SEQUENCES TO :"worker_user";
+
+-- 版本化语义图只能由通用 worker 原子投影；API 可读取并写查询证据，但不能
+-- 伪造 generation、节点、边或投影水位。worker 不参与消费合同、人工
+-- ChangeSet 和问题计划的控制面写入。
+SELECT format(
+  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.semantic_graph_generations, platform.semantic_graph_nodes, platform.semantic_graph_edges, platform.semantic_graph_projection_state FROM %I',
+  :'app_user'
+)
+WHERE to_regclass('platform.semantic_graph_generations') IS NOT NULL
+\gexec
+
+SELECT format(
+  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.semantic_qa_settings, platform.semantic_consumer_contracts, platform.semantic_consumer_contract_inputs, platform.warehouse_dag_change_sets, platform.warehouse_dag_change_operations, platform.warehouse_dag_change_validations, platform.warehouse_dag_runs, platform.warehouse_dag_stage_runs, platform.semantic_query_plans, platform.semantic_query_plan_evidence, platform.semantic_question_templates, platform.semantic_golden_question_sets, platform.semantic_golden_questions, platform.semantic_golden_question_runs FROM %I',
+  :'worker_user'
+)
+WHERE to_regclass('platform.semantic_qa_settings') IS NOT NULL
+\gexec
+
+SELECT format(
+  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.dws_modeling_jobs, platform.dws_modeling_outputs FROM %I',
+  :'app_user'
+)
+WHERE to_regclass('platform.dws_modeling_jobs') IS NOT NULL
+\gexec
 
 -- 连接测试任务和证明是受保护控制事实。宽泛的平台 DML 授权必须在这里
 -- 显式收回；API 只可入队，通用 worker 没有写入或执行权限，专用 worker

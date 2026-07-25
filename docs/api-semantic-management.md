@@ -326,16 +326,44 @@ trim 后掩盖源数据质量问题。
 | `POST` | `/api/v1/semantic/dimension-metric-compatibilities/{id}/reject` | 拒绝；需要 `expectedVersion` |
 
 关系类型为 `DIRECT / BRIDGE / DERIVED`，扇出策略为
-`SAFE / DEDUPLICATE / UNSAFE`。Join 路径只能是有界结构化 JSON；含 SQL、
-query、凭据或原始样本等字段会被拒绝。`VERIFIED` 和 `REJECTED` 是终态。
-`UNSAFE` 永远不能进入 `VERIFIED`；验证时服务与数据库触发器都会重新确认维度、
-指标版本、DWS 数据集版本和两侧精确 `ACTIVE DWS` 物化仍然可用。
+`SAFE / DEDUPLICATE / UNSAFE`。Join 路径是最多 8 跳的严格数组，每跳只能包含：
+
+```json
+{
+  "fromDatasetVersionId": "<起点 DWS 精确版本 ID>",
+  "fromFieldId": "<起点维度/属性/时间/标识字段 ID>",
+  "toDatasetVersionId": "<终点 DWS 精确版本 ID>",
+  "toFieldId": "<终点维度/属性/时间/标识字段 ID>",
+  "cardinality": "MANY_TO_ONE"
+}
+```
+
+`cardinality` 只能是 `ONE_TO_ONE / MANY_TO_ONE / ONE_TO_MANY /
+MANY_TO_MANY`。`SAFE` 路径只接受 `ONE_TO_ONE / MANY_TO_ONE`；一对多或多对多
+必须显式进入 `DEDUPLICATE / UNSAFE`，其中 `UNSAFE` 永远不能验证。`DIRECT`
+最多一跳，`BRIDGE` 至少两跳；同一个 DWS 内的 `DIRECT / DERIVED` 可使用空数组。
+相邻 hop 的版本必须连续，首跳必须从语义维度的精确字段开始，末跳必须落到指标的
+精确 DWS 版本。服务端逐跳确认字段角色与规范类型相容；验证时每个中间 DWS 还必须
+存在 `ACTIVE` 物化。
+
+该结构由 API 严格解码和数据库 `CHECK` 双重封口；未知属性、SQL、表达式、物理表名、
+凭据或原始样本都会被拒绝。`VERIFIED` 和 `REJECTED` 是终态。验证时服务与数据库
+触发器还会重新确认维度、指标版本、DWS 数据集版本和两侧精确
+`ACTIVE DWS` 物化仍然可用。
+
+同一个精确 DWS 内，如果发布指标的 `allowedDimensions` 已经包含某个已发布一级
+语义维度字段，数据库会确定性创建 `DIRECT + SAFE + RULE + confidence=1` 的
+`PROPOSED` 关系；无论先发布指标还是先发布维度都能触发，迁移也会补齐历史组合。
+它仍需进入既有验证流程，人工拒绝的唯一关系不会被触发器重新创建。跨 DWS、
+`BRIDGE` 或 `DERIVED` 不做规则猜测，只接受 LLM/人工按上述 hop 合同提议。
 
 ## 成员值到指标检索
 
 `GET /api/v1/semantic/member-metric-search?q=690&limit=20`
 
-检索只做规范值或有效别名的精确匹配，然后沿以下小型索引链返回结果：
+检索先分别使用 `(tenant, normalized_value, dimension)` 和
+`(tenant, normalized_alias, dimension, member)` 索引生成有界候选，按成员去重后
+再关联语义关系和指标，避免先扫描全部成员再做别名判断。随后沿以下小型索引链返回结果：
 
 ```text
 成员值/别名 → PUBLISHED 维度 → VERIFIED 且非 UNSAFE 的兼容关系
@@ -343,14 +371,16 @@ query、凭据或原始样本等字段会被拒绝。`VERIFIED` 和 `REJECTED` �
            → warehouse_published 视图
 ```
 
-响应含匹配类型、规范成员、维度、指标、数据集版本及发布视图身份。它不执行指标
-SQL，也不物化“成员 × 指标”笛卡尔积。结果同时要求 actor 对维度数据集和指标
-数据集都有 `DATASET:READ`；每个未授权或策略受限维度都在 SQL 内被过滤，查询不会
-透露该成员或别名是否存在。
+响应含匹配类型、规范成员、维度侧精确数据集/版本/字段、指标、指标数据集版本、
+已验证的 `joinPath / evidenceSource` 及发布视图身份，足够让下游规划器继续使用
+同一冻结关系，而不必重新让 LLM 猜测表关系。它不执行指标 SQL，也不物化
+“成员 × 指标”笛卡尔积。结果同时要求 actor 对维度数据集和指标数据集都有
+`DATASET:READ`；每个未授权或策略受限维度都在 SQL 内被过滤，查询不会透露该成员
+或别名是否存在。
 
 ## 自动标签建议
 
-ODS、DWD、DWS 数据集版本进入 `PUBLISHED` 的同一事务会写入
+ODS、DIM、DWD、DWS、ADS 数据集版本进入 `PUBLISHED` 的同一事务会写入
 `dataset_tag_suggestion_jobs`。这张表是独立的 durable outbox，不复用成员刷新任务。
 任务固定 `tenantId + datasetId + datasetVersionId + layer + schemaHash`、源发布版本
 快照和 Prompt 版本；相同数据集版本及 Prompt 版本只会入队一次。
@@ -360,7 +390,7 @@ worker 的治理边界如下：
 1. 只处理仍是数据集当前 `PUBLISHED` 指针的精确版本，并同时验证 schema hash、
    层级、冻结依赖和 ODS 源发布版本；任一事实变化都以
    `SKIPPED / SUBJECT_CHANGED` 结束；
-2. ODS 输入只使用表、投影字段、键属性和已有业务元数据；DWD/DWS 使用精确上游
+2. ODS 输入只使用表、投影字段、键属性和已有业务元数据；DIM/DWD/DWS/ADS 使用精确上游
    发布版本的字段、粒度及已批准标签摘要，并结合当前版本的字段和 DAG；
 3. 不读取或发送业务样本行，不保存凭据、SQL、表达式字面值、Prompt 正文或模型
    正文；统一 AI 审计只记录摘要、状态和用量；

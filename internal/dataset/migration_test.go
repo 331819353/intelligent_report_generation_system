@@ -203,3 +203,40 @@ func TestPostApprovalProcessingMigrationCancelsOnlyLegacyPreApprovalWork(t *test
 		}
 	}
 }
+
+func TestResumableWarehouseModelingMigrationPersistsOnlyValidatedStages(t *testing.T) {
+	raw, err := os.ReadFile(
+		"../../migrations/000085_resumable_warehouse_modeling.up.sql",
+	)
+	if err != nil {
+		t.Fatalf("read resumable warehouse modeling migration: %v", err)
+	}
+	migration := string(raw)
+	for _, fragment := range []string{
+		"ADD COLUMN checkpoint_version",
+		"ADD COLUMN claimed_checkpoint_version",
+		"CREATE TABLE platform.dwd_modeling_checkpoints",
+		"'CLASSIFICATION','FACT_DESIGN'",
+		"snapshot_hash",
+		"prompt_version",
+		"payload_hash",
+		"materialization_json_is_safe(payload_json)",
+		"REFERENCES platform.ai_requests(id,tenant_id)",
+		"ENABLE ROW LEVEL SECURITY",
+		"FORCE ROW LEVEL SECURITY",
+	} {
+		if !strings.Contains(migration, fragment) {
+			t.Errorf("resumable modeling migration is missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"prompt_text", "response_text", "sample_rows", "physical_table",
+	} {
+		if strings.Contains(strings.ToLower(migration), forbidden) {
+			t.Fatalf(
+				"resumable modeling migration stores forbidden content %q",
+				forbidden,
+			)
+		}
+	}
+}

@@ -43,11 +43,13 @@ import {
 import {
   buildComponentPreviewDSL,
   buildDatasetDSL,
+  datasetLayerChoices,
   datasetAPI,
   type AssetColumn,
   type AssetTable,
   type AssetTablePreview,
   type DatasetDraft,
+  type DatasetLayer,
   type DatasetPreview,
   type DatasetPublicationRequest,
   type DatasetRecord,
@@ -203,7 +205,7 @@ const consumeMetricAIAutoRun = (key: string) => {
   try { sessionStorage.setItem(`${metricAIAutoRunStoragePrefix}${key}`, '1') } catch { /* in-memory ref still protects this mount */ }
 }
 const isTime = (column: AssetColumn) => ['DATE', 'DATETIME', 'TIMESTAMP'].includes(column.canonicalType.toUpperCase()) || column.semanticType.toUpperCase() === 'DATE'
-const emptyDraft = (): DatasetDraft => ({ code: '', name: '', description: '', nodes: [], fields: [], joins: [], filters: [], parameters: [], calculations: [], sorts: [], grainDescription: '', grainKeys: [], groupingEnabled: false, finalConfigured: false, finalGroupingEnabled: false })
+const emptyDraft = (): DatasetDraft => ({ code: '', name: '', description: '', layer: 'DWD', nodes: [], fields: [], joins: [], filters: [], parameters: [], calculations: [], sorts: [], grainDescription: '', grainKeys: [], groupingEnabled: false, finalConfigured: false, finalGroupingEnabled: false })
 const editorFingerprint = (snapshot: DatasetEditorSnapshot) => JSON.stringify(snapshot)
 
 type PreviewIssue = { reason: string; suggestion: string }
@@ -507,8 +509,8 @@ function relationCandidate(left: DesignerNode, right: DesignerNode, index: numbe
   const rightField = common ? rightByName.get(common.columnName.toLocaleLowerCase())?.columnName ?? '' : rightColumns.find(column => column.semanticType === 'IDENTIFIER')?.columnName ?? rightColumns[0]?.columnName ?? ''
   return {
     id: `join_${index}`, leftNodeId: left.id, rightNodeId: right.id, leftField, rightField,
-    joinType: 'LEFT', cardinality: '', manualConfirmed: false,
-    conditions: [{ id: `join_${index}_condition_1`, leftField, rightField }],
+    joinType: 'LEFT', cardinality: '', relationshipType: 'DIRECT', relationshipRole: '', fanoutPolicy: 'SAFE', manualConfirmed: false,
+    conditions: [{ id: `join_${index}_condition_1`, leftField, rightField, operator: 'EQUALS' }],
   }
 }
 
@@ -529,7 +531,7 @@ function relationForInputs(leftIDs: string[], rightIDs: string[], nodes: Designe
 
 const joinConditions = (join: JoinOption) => join.conditions?.length
   ? join.conditions
-  : [{ id: `${join.id}_condition_1`, leftField: join.leftField, rightField: join.rightField }]
+  : [{ id: `${join.id}_condition_1`, leftField: join.leftField, rightField: join.rightField, operator: 'EQUALS' as const }]
 
 function firstOutput(nodes: DesignerNode[]): { node: DesignerNode; column: AssetColumn } | null {
   for (const node of nodes) {
@@ -807,6 +809,13 @@ export function DatasetCenterPage() {
     preAggregation: undefined,
     finalOutputKeys: undefined,
   }), [currentDesignerGraph, draft, endBox, generatedCode, metadata])
+  const layerChoices = useMemo(() => {
+    try {
+      return draft.nodes.length ? datasetLayerChoices(draft) : ['DWD'] as DatasetLayer[]
+    } catch {
+      return ['DWD'] as DatasetLayer[]
+    }
+  }, [draft])
 
   const resetDatasetAI = useCallback(() => {
     aiRequest.current += 1
@@ -1204,9 +1213,9 @@ export function DatasetCenterPage() {
 
   const joinConditions = (join: JoinOption) => join.conditions?.length
     ? join.conditions
-    : [{ id: `${join.id}_condition_1`, leftField: join.leftField, rightField: join.rightField }]
+    : [{ id: `${join.id}_condition_1`, leftField: join.leftField, rightField: join.rightField, operator: 'EQUALS' as const }]
 
-  const updateJoinCondition = (joinID: string, conditionID: string, patch: { leftField?: string; rightField?: string }) => setDraft(current => ({
+  const updateJoinCondition = (joinID: string, conditionID: string, patch: { leftField?: string; rightField?: string; operator?: 'EQUALS' | 'NOT_EQUALS' | 'GT' | 'GTE' | 'LT' | 'LTE' }) => setDraft(current => ({
     ...current,
     joins: current.joins.map(join => {
       if (join.id !== joinID) return join
@@ -1225,7 +1234,7 @@ export function DatasetCenterPage() {
       const leftAllowed = new Set(relationOutputKeys(box?.left, relationBoxes, groupBoxes, current.nodes, current.fields))
       const rightAllowed = new Set(relationOutputKeys(box?.right, relationBoxes, groupBoxes, current.nodes, current.fields))
       const conditions = joinConditions(join)
-      return { ...join, conditions: [...conditions, { id: `${join.id}_condition_${Date.now().toString(36)}`, leftField: left ? availableNodeColumns(left, current.fields).find(column => leftAllowed.has(`${left.id}.${column.columnName}`))?.columnName ?? '' : '', rightField: right ? availableNodeColumns(right, current.fields).find(column => rightAllowed.has(`${right.id}.${column.columnName}`))?.columnName ?? '' : '' }], manualConfirmed: false }
+      return { ...join, conditions: [...conditions, { id: `${join.id}_condition_${Date.now().toString(36)}`, leftField: left ? availableNodeColumns(left, current.fields).find(column => leftAllowed.has(`${left.id}.${column.columnName}`))?.columnName ?? '' : '', rightField: right ? availableNodeColumns(right, current.fields).find(column => rightAllowed.has(`${right.id}.${column.columnName}`))?.columnName ?? '' : '', operator: 'EQUALS' as const }], manualConfirmed: false }
     }),
   }))
 
@@ -2287,7 +2296,7 @@ export function DatasetCenterPage() {
       <div className="dataset-center-filters" aria-label="数据集筛选">
         <label><span>搜索</span><input aria-label="搜索数据集" type="search" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="名称或编码" /></label>
         <label><span>数据源</span><select aria-label="按数据源筛选" value={dataSourceFilter} onChange={event => setDataSourceFilter(event.target.value)}><option value="ALL">全部数据源</option>{dataSourceOptions.map(name => <option key={name} value={name}>{name}</option>)}</select></label>
-        <label><span>类型</span><select aria-label="按数据层级筛选" value={layerFilter} onChange={event => setLayerFilter(event.target.value)}><option value="ALL">全部类型</option><option value="ODS">ODS</option><option value="DWD">DWD</option><option value="DWS">DWS</option></select></label>
+        <label><span>类型</span><select aria-label="按数据层级筛选" value={layerFilter} onChange={event => setLayerFilter(event.target.value)}><option value="ALL">全部类型</option><option value="ODS">ODS</option><option value="DIM">DIM</option><option value="DWD">DWD</option><option value="DWS">DWS</option><option value="ADS">ADS</option></select></label>
         <label><span>状态</span><select aria-label="按数据集状态筛选" value={statusFilter} onChange={event => setStatusFilter(event.target.value)}><option value="ALL">全部状态</option>{Object.entries(statusLabels).map(([status, label]) => <option key={status} value={status}>{label}</option>)}</select></label>
         <small>显示 {filtered.length} / {datasets.length}</small>
       </div>
@@ -2333,7 +2342,7 @@ export function DatasetCenterPage() {
       <footer className="dataset-dialog-footer"><button className="quiet-button" type="button" disabled={actionBusy || aiApplying} onClick={closeDialog}>取消</button><button className="primary-button" type="button" disabled={actionBusy || assetsLoading || aiBusy || aiApplying} onClick={openMetadata}>{busyAction.startsWith('asset:') ? '正在填充…' : aiBusy ? '正在生成 AI 方案…' : aiApplying ? '正在应用 AI 方案…' : '保存配置'}</button></footer>
     </Dialog>}
 
-    {dialog?.mode === 'metadata' && <Dialog title={editingRecord ? '保存数据集修改' : '完善数据集信息'} eyebrow="保存配置" onClose={() => { if (!busyAction) setDialog({ mode: 'create' }) }}><div className="dataset-metadata-form"><p>图形化配置已完成，请确认数据集名称和说明后保存。</p><label>数据集名称<input autoFocus value={metadata.name} onChange={event => setMetadata(current => ({ ...current, name: event.target.value }))} placeholder="例如：客户订单明细" /></label><label>数据集说明<textarea value={metadata.description} onChange={event => setMetadata(current => ({ ...current, description: event.target.value }))} placeholder="说明数据范围、业务口径和使用场景" /></label><small>{editingRecord ? `数据集编码保持不变：${generatedCode}` : `系统将自动生成唯一编码：${generatedCode}`}</small>{formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => setDialog({ mode: 'create' })}>返回配置</button><button className="primary-button" type="button" disabled={actionBusy} onClick={() => void saveDataset()}>{busyAction === 'update' ? '正在保存…' : busyAction === 'create' ? '正在创建…' : editingRecord ? '保存修改' : '创建数据集'}</button></footer></div></Dialog>}
+    {dialog?.mode === 'metadata' && <Dialog title={editingRecord ? '保存数据集修改' : '完善数据集信息'} eyebrow="保存配置" onClose={() => { if (!busyAction) setDialog({ mode: 'create' }) }}><div className="dataset-metadata-form"><p>图形化配置已完成，请确认数据集层级、名称和说明后保存。</p><label>数据集层级<select aria-label="数据集层级" value={layerChoices.includes(draft.layer as DatasetLayer) ? draft.layer : layerChoices[0]} disabled={Boolean(editingRecord?.currentPublishedVersionId) || layerChoices.length === 1} onChange={event => setDraft(current => ({ ...current, layer: event.target.value as DatasetLayer }))}>{layerChoices.map(layer => <option key={layer} value={layer}>{layer === 'ODS' ? 'ODS · 来源物理映射' : layer === 'DIM' ? 'DIM · 实体说明' : layer === 'DWD' ? 'DWD · 业务事实明细' : layer === 'DWS' ? 'DWS · 分析主题汇总' : 'ADS · 应用交付数据'}</option>)}</select></label><label>数据集名称<input autoFocus value={metadata.name} onChange={event => setMetadata(current => ({ ...current, name: event.target.value }))} placeholder="例如：客户订单明细" /></label><label>数据集说明<textarea value={metadata.description} onChange={event => setMetadata(current => ({ ...current, description: event.target.value }))} placeholder="说明数据范围、业务口径和使用场景" /></label><small>{editingRecord ? `数据集编码保持不变：${generatedCode}` : `系统将自动生成唯一编码：${generatedCode}`}</small>{formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => setDialog({ mode: 'create' })}>返回配置</button><button className="primary-button" type="button" disabled={actionBusy} onClick={() => void saveDataset()}>{busyAction === 'update' ? '正在保存…' : busyAction === 'create' ? '正在创建…' : editingRecord ? '保存修改' : '创建数据集'}</button></footer></div></Dialog>}
 
     {dialog?.mode === 'view' && dialog.dataset && <Dialog title="数据集详情" eyebrow="资产信息" wide onClose={closeDialog}>
       {busyAction.startsWith('view:') ? <Empty>正在加载完整元数据与预览数据…</Empty> : detail ? <div className="dataset-detail">
@@ -2377,7 +2386,7 @@ export function DatasetCenterPage() {
           <div className="dataset-publication-layout">
             <section className="dataset-publication-submit" aria-label="提交发布审批">
               <header><div><span>申请人操作</span><h3>提交当前草稿</h3></div><small>{publicationCapabilities.manage ? '具备提交权限' : '仅可查看'}</small></header>
-              <p>系统只冻结当前草稿版本、DSL 与校验参数。审批通过后才生成不可变发布版本，并启动指标提取或 DWD/DWS PostgreSQL 加工。</p>
+              <p>系统只冻结当前草稿版本、DSL 与校验参数。审批通过后才生成不可变发布版本，并启动指标提取或 DIM/DWD/DWS/ADS PostgreSQL 加工。</p>
               <label>申请说明（选填）<textarea value={publicationNote} onChange={event => setPublicationNote(event.target.value)} placeholder="例如：订单与客户区域关联已由 AI 完成，请审批用于指标设计" /></label>
               {currentDraftPublicationRequest?.status === 'PENDING' && <div className="dataset-publication-hint">当前精确草稿已经在审批中，无需重复提交。</div>}
               {currentDraftPublicationRequest?.status === 'APPROVED' && <div className="dataset-publication-hint success">当前精确草稿已审批发布。再次修改并保存后可提交新的审批。</div>}
@@ -3031,7 +3040,7 @@ function JoinConfigDrawer({ box, join, boxes, groups, transforms, nodes, leftOut
   box: RelationBox; join?: JoinOption; boxes: RelationBox[]; groups: GroupBox[]; transforms: TransformBox[]; nodes: DesignerNode[]
   leftOutputFields: ProducedField[]; rightOutputFields: ProducedField[]; onNameChange: (name: string) => void
   onJoinPatch: (patch: Partial<JoinOption>) => void
-  onConditionPatch: (conditionID: string, patch: { leftField?: string; rightField?: string }) => void
+  onConditionPatch: (conditionID: string, patch: { leftField?: string; rightField?: string; operator?: 'EQUALS' | 'NOT_EQUALS' | 'GT' | 'GTE' | 'LT' | 'LTE' }) => void
   onAddCondition: () => void; onRemoveCondition: (conditionID: string) => void
   onOutputChange: (key: string, checked: boolean) => void; onDone: () => void
 }) {
@@ -3041,13 +3050,35 @@ function JoinConfigDrawer({ box, join, boxes, groups, transforms, nodes, leftOut
   const leftFields = leftOutputFields.filter(field => (!join || field.binding.nodeId === join.leftNodeId) && physicalJoinField(field))
   const rightFields = rightOutputFields.filter(field => (!join || field.binding.nodeId === join.rightNodeId) && physicalJoinField(field))
   const conditions = join ? joinConditions(join) : []
+  const bridgeNodeId = join?.bridge?.bridgeNodeId || join?.rightNodeId || ''
+  const bridgeFields = bridgeNodeId === join?.leftNodeId ? leftFields : rightFields
+  const temporalEventNodeId = join?.temporal?.eventNodeId || join?.leftNodeId || ''
+  const temporalValidityNodeId = temporalEventNodeId === join?.leftNodeId ? join?.rightNodeId || '' : join?.leftNodeId || ''
+  const temporalEventFields = temporalEventNodeId === join?.leftNodeId ? leftFields : rightFields
+  const temporalValidityFields = temporalValidityNodeId === join?.leftNodeId ? leftFields : rightFields
   const outputItems = [...new Map([...leftOutputFields, ...rightOutputFields].map(field => [field.key, field])).values()]
   const selectedOutputs = new Set(box.outputKeys.length ? box.outputKeys : outputItems.map(field => field.key))
   return <aside className="dataset-canvas-drawer relation" aria-label="配置表关联" onClick={event => event.stopPropagation()}>
     <header><div><span>关联组件</span><strong>{box.name}</strong><small>关联接收两个上游数据集；转换结果会保留在关联产物中</small></div><button type="button" aria-label="保存并关闭关系配置" onClick={onDone}>×</button></header>
     <section><h3>组件与输入槽位</h3><div className="dataset-group-input"><label><span>产物名称</span><input aria-label="关联产物名称" value={box.name} onChange={event => onNameChange(event.target.value)} placeholder="例如：客户订单关联结果" /></label></div><div className="dataset-relation-inputs readonly"><div aria-label="关联槽位 1" className={`dataset-connected-input ${box.left ? 'connected' : 'empty'}`}><span>槽位 1</span><strong>{relationInputLabel(box.left, nodes, boxes, groups, transforms)}</strong></div><div aria-label="关联槽位 2" className={`dataset-connected-input ${box.right ? 'connected' : 'empty'}`}><span>槽位 2</span><strong>{relationInputLabel(box.right, nodes, boxes, groups, transforms)}</strong></div></div>{!join && <p className="dataset-relation-pending">请在画布中把两个上游组件分别连接到槽位 1 和槽位 2。</p>}</section>
     {join && <><section><h3>连接方式</h3><div className="dataset-join-types">{['INNER', 'LEFT', 'RIGHT', 'FULL'].map(type => <button key={type} type="button" className={join.joinType === type ? 'selected' : ''} aria-pressed={join.joinType === type} onClick={() => onJoinPatch({ joinType: type })}>{type === 'INNER' ? 'INNER JOIN' : `${type} JOIN`}</button>)}</div></section>
-      <section><div className="dataset-drawer-title"><div><h3>关联字段</h3><p>关联键使用两侧稳定的原始字段，避免把派生字段误当物理列；多个条件使用 AND。</p></div><span>{conditions.length} 个条件</span></div><div className="dataset-join-conditions">{conditions.map((condition, index) => <div key={condition.id}><span>{index + 1}</span><select aria-label={`条件 ${index + 1} 左字段`} value={condition.leftField} onChange={event => onConditionPatch(condition.id, { leftField: event.target.value })}><option value="">选择槽位 1 字段</option>{leftFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select><em>=</em><select aria-label={`条件 ${index + 1} 右字段`} value={condition.rightField} onChange={event => onConditionPatch(condition.id, { rightField: event.target.value })}><option value="">选择槽位 2 字段</option>{rightFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select><button type="button" disabled={conditions.length === 1} aria-label={`删除条件 ${index + 1}`} onClick={() => onRemoveCondition(condition.id)}>×</button></div>)}</div><button className="dataset-add-condition" type="button" onClick={onAddCondition}>＋ 添加关联字段</button></section>
+      <section><div className="dataset-drawer-title"><div><h3>关系语义</h3><p>多个普通维度分别使用 MANY_TO_ONE；真正的多值关系必须声明 Bridge 与扇出策略。</p></div></div><div className="dataset-group-input">
+        <label><span>关联基数</span><select aria-label="关联基数" value={join.cardinality} onChange={event => onJoinPatch({ cardinality: event.target.value })}><option value="">请选择</option><option value="ONE_TO_ONE">ONE_TO_ONE</option><option value="MANY_TO_ONE">MANY_TO_ONE</option><option value="ONE_TO_MANY">ONE_TO_MANY</option><option value="MANY_TO_MANY">MANY_TO_MANY</option></select></label>
+        <label><span>关系类型</span><select aria-label="关系类型" value={join.relationshipType || ''} onChange={event => { const relationshipType = event.target.value; onJoinPatch({ relationshipType, ...(relationshipType === 'BRIDGE' ? { fanoutPolicy: join.fanoutPolicy === 'UNSAFE' ? 'UNSAFE' : 'DEDUPLICATE', bridge: join.bridge || { bridgeNodeId: join.rightNodeId, relationshipTypeField: rightFields[0]?.binding.field || '' } } : { fanoutPolicy: 'SAFE', bridge: undefined }) }) }}><option value="">兼容旧合同</option><option value="DIRECT">普通维度</option><option value="ROLE_PLAYING">角色扮演维度</option><option value="BRIDGE">Bridge 多值关系</option></select></label>
+        {(join.relationshipType === 'ROLE_PLAYING' || join.relationshipType === 'BRIDGE') && <label><span>业务角色编码</span><input aria-label="关系业务角色编码" value={join.relationshipRole || ''} onChange={event => onJoinPatch({ relationshipRole: event.target.value })} placeholder="例如 ORDERING_USER" /></label>}
+        {join.relationshipType === 'BRIDGE' && <><label><span>指标扇出策略</span><select aria-label="指标扇出策略" value={join.fanoutPolicy || ''} onChange={event => onJoinPatch({ fanoutPolicy: event.target.value })}><option value="">请选择</option><option value="PRIMARY">PRIMARY · 只取主成员</option><option value="ALLOCATE">ALLOCATE · 权重分摊</option><option value="DEDUPLICATE">DEDUPLICATE · 去重后可用</option><option value="NON_ADDITIVE">NON_ADDITIVE · 禁止跨成员相加</option><option value="UNSAFE">UNSAFE · 禁止指标消费</option></select></label>
+          <label><span>Bridge 节点</span><select aria-label="Bridge 节点" value={bridgeNodeId} onChange={event => onJoinPatch({ bridge: { ...(join.bridge || { relationshipTypeField: '' }), bridgeNodeId: event.target.value } })}><option value={join.leftNodeId}>槽位 1</option><option value={join.rightNodeId}>槽位 2</option></select></label>
+          <label><span>关系类型字段</span><select aria-label="Bridge 关系类型字段" value={join.bridge?.relationshipTypeField || ''} onChange={event => onJoinPatch({ bridge: { ...(join.bridge || { bridgeNodeId }), relationshipTypeField: event.target.value } })}><option value="">请选择</option>{bridgeFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select></label>
+          {join.fanoutPolicy === 'PRIMARY' && <label><span>主成员标记字段</span><select aria-label="Bridge 主成员标记字段" value={join.bridge?.primaryFlagField || ''} onChange={event => onJoinPatch({ bridge: { ...(join.bridge || { bridgeNodeId, relationshipTypeField: '' }), primaryFlagField: event.target.value } })}><option value="">请选择</option>{bridgeFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select></label>}
+          {join.fanoutPolicy === 'ALLOCATE' && <label><span>分配权重字段</span><select aria-label="Bridge 分配权重字段" value={join.bridge?.allocationWeightField || ''} onChange={event => onJoinPatch({ bridge: { ...(join.bridge || { bridgeNodeId, relationshipTypeField: '' }), allocationWeightField: event.target.value } })}><option value="">请选择</option>{bridgeFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select></label>}</>}
+        <label><span>SCD2 时间关联</span><input aria-label="启用 SCD2 时间关联" type="checkbox" checked={Boolean(join.temporal)} onChange={event => onJoinPatch({ temporal: event.target.checked ? { eventNodeId: join.leftNodeId, eventTimeField: '', validityNodeId: join.rightNodeId, validFromField: '', validToField: '', validToInclusive: false } : undefined })} /></label>
+        {join.temporal && <><label><span>事件节点</span><select aria-label="SCD2 事件节点" value={temporalEventNodeId} onChange={event => { const eventNodeId = event.target.value; onJoinPatch({ temporal: { ...join.temporal!, eventNodeId, validityNodeId: eventNodeId === join.leftNodeId ? join.rightNodeId : join.leftNodeId, eventTimeField: '', validFromField: '', validToField: '' } }) }}><option value={join.leftNodeId}>槽位 1</option><option value={join.rightNodeId}>槽位 2</option></select></label>
+          <label><span>事件时间字段</span><select aria-label="SCD2 事件时间字段" value={join.temporal.eventTimeField} onChange={event => onJoinPatch({ temporal: { ...join.temporal!, eventTimeField: event.target.value } })}><option value="">请选择</option>{temporalEventFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select></label>
+          <label><span>有效开始字段</span><select aria-label="SCD2 有效开始字段" value={join.temporal.validFromField} onChange={event => onJoinPatch({ temporal: { ...join.temporal!, validFromField: event.target.value } })}><option value="">请选择</option>{temporalValidityFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select></label>
+          <label><span>有效结束字段</span><select aria-label="SCD2 有效结束字段" value={join.temporal.validToField} onChange={event => onJoinPatch({ temporal: { ...join.temporal!, validToField: event.target.value } })}><option value="">请选择</option>{temporalValidityFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select></label>
+          <label><span>结束时间包含边界</span><input aria-label="SCD2 结束时间包含边界" type="checkbox" checked={join.temporal.validToInclusive} onChange={event => onJoinPatch({ temporal: { ...join.temporal!, validToInclusive: event.target.checked } })} /></label></>}
+      </div></section>
+      <section><div className="dataset-drawer-title"><div><h3>关联字段</h3><p>关联键使用两侧稳定的原始字段；SCD2 使用 GTE 与 LT/LTE 明确有效区间。</p></div><span>{conditions.length} 个条件</span></div><div className="dataset-join-conditions">{conditions.map((condition, index) => <div key={condition.id}><span>{index + 1}</span><select aria-label={`条件 ${index + 1} 左字段`} value={condition.leftField} onChange={event => onConditionPatch(condition.id, { leftField: event.target.value })}><option value="">选择槽位 1 字段</option>{leftFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select><select aria-label={`条件 ${index + 1} 运算符`} value={condition.operator || 'EQUALS'} onChange={event => onConditionPatch(condition.id, { operator: event.target.value as 'EQUALS' | 'NOT_EQUALS' | 'GT' | 'GTE' | 'LT' | 'LTE' })}><option value="EQUALS">=</option><option value="NOT_EQUALS">≠</option><option value="GT">&gt;</option><option value="GTE">≥</option><option value="LT">&lt;</option><option value="LTE">≤</option></select><select aria-label={`条件 ${index + 1} 右字段`} value={condition.rightField} onChange={event => onConditionPatch(condition.id, { rightField: event.target.value })}><option value="">选择槽位 2 字段</option>{rightFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select><button type="button" disabled={conditions.length === 1} aria-label={`删除条件 ${index + 1}`} onClick={() => onRemoveCondition(condition.id)}>×</button></div>)}</div><button className="dataset-add-condition" type="button" onClick={onAddCondition}>＋ 添加关联字段</button></section>
       <section><div className="dataset-drawer-title"><div><h3>输出字段</h3><p>勾选字段组成“{box.name}”，并作为下游组件可识别的产物。</p></div><span>{selectedOutputs.size} 已选</span></div><div className="dataset-drawer-field-list">{outputItems.map(field => <label key={field.key}><input aria-label={`关联输出 ${field.code}`} type="checkbox" checked={selectedOutputs.has(field.key)} onChange={event => onOutputChange(field.key, event.target.checked)} /><span><strong>{field.name}</strong><small>{graphProducedFieldLabel(field)}</small></span></label>)}</div></section></>}
     <footer><small>点击画板空白处也会自动保存并收起</small><button type="button" onClick={onDone}>完成</button></footer>
   </aside>

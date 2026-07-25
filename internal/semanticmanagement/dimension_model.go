@@ -174,6 +174,17 @@ type DimensionMetricCompatibility struct {
 	UpdatedAt              time.Time       `json:"updatedAt"`
 }
 
+// CompatibilityJoinHop is a bounded logical relationship between immutable DWS
+// fields. SQL, expressions, physical names and business rows are intentionally
+// not part of the semantic contract.
+type CompatibilityJoinHop struct {
+	FromDatasetVersionID string `json:"fromDatasetVersionId"`
+	FromFieldID          string `json:"fromFieldId"`
+	ToDatasetVersionID   string `json:"toDatasetVersionId"`
+	ToFieldID            string `json:"toFieldId"`
+	Cardinality          string `json:"cardinality"`
+}
+
 type CompatibilityFilter struct {
 	Page
 	DimensionID     string
@@ -261,26 +272,31 @@ type DimensionRefreshClaim struct {
 }
 
 type MemberMetricSearchResult struct {
-	MatchedValue      string `json:"matchedValue"`
-	MatchType         string `json:"matchType"`
-	DimensionID       string `json:"dimensionId"`
-	DimensionCode     string `json:"dimensionCode"`
-	DimensionName     string `json:"dimensionName"`
-	DimensionMemberID string `json:"dimensionMemberId"`
-	MemberKey         string `json:"memberKey"`
-	CanonicalLabel    string `json:"canonicalLabel"`
-	MetricID          string `json:"metricId"`
-	MetricVersionID   string `json:"metricVersionId"`
-	MetricCode        string `json:"metricCode"`
-	MetricName        string `json:"metricName"`
-	DatasetID         string `json:"datasetId"`
-	DatasetVersionID  string `json:"datasetVersionId"`
-	DatasetCode       string `json:"datasetCode"`
-	DatasetName       string `json:"datasetName"`
-	CompatibilityType string `json:"compatibilityType"`
-	FanoutPolicy      string `json:"fanoutPolicy"`
-	PublishedSchema   string `json:"publishedSchema"`
-	PublishedName     string `json:"publishedName"`
+	MatchedValue              string          `json:"matchedValue"`
+	MatchType                 string          `json:"matchType"`
+	DimensionID               string          `json:"dimensionId"`
+	DimensionCode             string          `json:"dimensionCode"`
+	DimensionName             string          `json:"dimensionName"`
+	DimensionDatasetID        string          `json:"dimensionDatasetId"`
+	DimensionDatasetVersionID string          `json:"dimensionDatasetVersionId"`
+	DimensionFieldID          string          `json:"dimensionFieldId"`
+	DimensionMemberID         string          `json:"dimensionMemberId"`
+	MemberKey                 string          `json:"memberKey"`
+	CanonicalLabel            string          `json:"canonicalLabel"`
+	MetricID                  string          `json:"metricId"`
+	MetricVersionID           string          `json:"metricVersionId"`
+	MetricCode                string          `json:"metricCode"`
+	MetricName                string          `json:"metricName"`
+	DatasetID                 string          `json:"datasetId"`
+	DatasetVersionID          string          `json:"datasetVersionId"`
+	DatasetCode               string          `json:"datasetCode"`
+	DatasetName               string          `json:"datasetName"`
+	CompatibilityType         string          `json:"compatibilityType"`
+	FanoutPolicy              string          `json:"fanoutPolicy"`
+	JoinPath                  json.RawMessage `json:"joinPath"`
+	EvidenceSource            string          `json:"evidenceSource"`
+	PublishedSchema           string          `json:"publishedSchema"`
+	PublishedName             string          `json:"publishedName"`
 }
 
 type DimensionStore interface {

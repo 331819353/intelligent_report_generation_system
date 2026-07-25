@@ -40,15 +40,17 @@ SELECT format('GRANT CONNECT ON DATABASE %I TO %I',current_database(),:'worker_u
 
 CREATE SCHEMA IF NOT EXISTS warehouse_staging;
 CREATE SCHEMA IF NOT EXISTS warehouse_ods;
+CREATE SCHEMA IF NOT EXISTS warehouse_dim;
 CREATE SCHEMA IF NOT EXISTS warehouse_dwd;
 CREATE SCHEMA IF NOT EXISTS warehouse_dws;
+CREATE SCHEMA IF NOT EXISTS warehouse_ads;
 CREATE SCHEMA IF NOT EXISTS warehouse_published;
 
 REVOKE ALL ON SCHEMA
-  warehouse_staging,warehouse_ods,warehouse_dwd,warehouse_dws,warehouse_published
+  warehouse_staging,warehouse_ods,warehouse_dim,warehouse_dwd,warehouse_dws,warehouse_ads,warehouse_published
 FROM PUBLIC;
 GRANT USAGE,CREATE ON SCHEMA
-  warehouse_staging,warehouse_ods,warehouse_dwd,warehouse_dws,warehouse_published
+  warehouse_staging,warehouse_ods,warehouse_dim,warehouse_dwd,warehouse_dws,warehouse_ads,warehouse_published
 TO :"worker_user";
 GRANT USAGE ON SCHEMA warehouse_published TO :"reader_user";
 GRANT SELECT ON ALL TABLES IN SCHEMA warehouse_published TO :"reader_user";
@@ -57,8 +59,10 @@ ALTER DEFAULT PRIVILEGES FOR ROLE :"worker_user" IN SCHEMA warehouse_published
 
 COMMENT ON SCHEMA warehouse_staging IS '跨源导入的有界临时数据，仅供仓库 worker 使用';
 COMMENT ON SCHEMA warehouse_ods IS '外部源表或文件的不可变 ODS 物理快照';
-COMMENT ON SCHEMA warehouse_dwd IS '无分组聚合的清洗、转换和关联明细';
+COMMENT ON SCHEMA warehouse_dim IS '从 ODS 抽离并治理的人物、商品等实体说明信息';
+COMMENT ON SCHEMA warehouse_dwd IS '按业务动作组织的清洗转换事实明细';
 COMMENT ON SCHEMA warehouse_dws IS '在 PostgreSQL 内完成分组聚合的主题汇总';
+COMMENT ON SCHEMA warehouse_ads IS '由 DWS 组合形成的应用、报表和交付场景数据';
 COMMENT ON SCHEMA warehouse_published IS 'API 只读的稳定发布视图';
 COMMIT;
 SQL

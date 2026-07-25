@@ -36,6 +36,7 @@ import (
 	"intelligent-report-generation-system/internal/queryruntime"
 	"intelligent-report-generation-system/internal/report"
 	"intelligent-report-generation-system/internal/semanticmanagement"
+	"intelligent-report-generation-system/internal/semanticqa"
 )
 
 // main 装配 API 服务依赖，并负责启动、信号监听与优雅停机。
@@ -205,6 +206,20 @@ func main() {
 	semanticManagementHandler := semanticmanagement.NewHandler(
 		authService, accessService, semanticManagementService, semanticDimensionService,
 	)
+	semanticQAStore := semanticqa.NewPostgresStore(pool)
+	semanticQAService := semanticqa.NewService(
+		semanticQAStore,
+		datasetService,
+		semanticqa.NewSemanticInterpreter(
+			semanticQAStore, aiService, embeddingProvider,
+		),
+	)
+	semanticQAService.SetMetricExecutor(metricService)
+	semanticQAHandler := semanticqa.NewHandler(
+		authService,
+		accessService,
+		semanticQAService,
+	)
 	reportService := report.NewService(report.NewPostgresStore(pool))
 	reportHandler := report.NewHandler(authService, accessService, reportService)
 	backgroundTaskHandler := backgroundtask.NewHandler(
@@ -253,6 +268,7 @@ func main() {
 	api.Handle("POST /api/v1/metrics/ai/proposals", metricAIHandler)
 	api.Handle("GET /api/v1/metrics/semantic-search", metricSemanticHandler)
 	api.Handle("/api/v1/semantic/", semanticManagementHandler)
+	api.Handle("/api/v1/semantic-qa/", semanticQAHandler)
 	api.Handle("/api/v1/metric-candidates", metricCandidateHandler)
 	api.Handle("/api/v1/metric-candidates/", metricCandidateHandler)
 	api.Handle("/api/v1/metrics", metricHandler)

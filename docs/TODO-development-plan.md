@@ -3,9 +3,14 @@
 > 执行对象：Codex  
 > 需求基线：`docs/intelligent-report-system-design-v1.0.md`  
 > 核心业务后端：Go（Golang）；数据库连接层：独立 Python Connector Service  
-> 当前状态：工程基座、租户权限、版本化数据源、隔离连接测试、ODS/DWD/DWS 分层物化、一级维度/成员倒排、标签与向量治理、数据集/指标 v1、报告 JSON/渲染器/草稿及通用 AI 编排已落地；指标 v2、源亲和下推、增量/分区物化、生产级 RAW 样本审批、完整报告发布/在线运行、调度和归档仍待完成
-> 最近审计：2026-07-25，已按代码、迁移 1–81、自动化测试、本地 Docker 实际运行和安全边界复核
+> 当前状态：工程基座、租户权限、版本化数据源、隔离连接测试、ODS/DIM/DWD/DWS/ADS 分层物化、一级维度/成员倒排、语义关系合同、标签与向量治理、数据集/指标 v1、报告 JSON/渲染器/草稿及通用 AI 编排已落地；指标 v2、源亲和下推、增量/分区物化、生产级 RAW 样本审批、完整报告发布/在线运行、调度和归档仍待完成
+> 最近审计：2026-07-25，已按代码、迁移 1–95、自动化测试、本地 Docker 实际运行和安全边界复核
 > 计划原则：先打通可运行的纵向闭环，再扩展智能生成、跨源查询、调度和公开能力
+
+> 新一轮智能问答语义层改造已拆分为
+> [总体改造计划](./semantic-qa-retrofit-plan.md) 和
+> [专项优化 TODO](./TODO-semantic-qa-optimization.md)。核心仓库改造已经落地；
+> 生产规模压测、真实黄金问题、告警阈值和灾备演练仍须按 `OPS-*` 在目标环境验收。
 
 ---
 
@@ -23,11 +28,12 @@
   旧证明立即失效。
 - [x] API、通用 worker、连接测试 worker 使用不同 PostgreSQL 角色；测试任务、
   租约和证明表已收回宽泛 DML，只允许专用函数完成状态迁移。
-- [x] 数据集版本增加不可变 `ODS / DWD / DWS` 层级合同：ODS 只接受发布源表或
-  精确文件版本，DWD 只接受 ODS，DWS 只接受 DWD；非法混层、聚合位置和漂移输入
+- [x] 数据集版本增加不可变 `ODS / DIM / DWD / DWS / ADS` 层级合同：ODS 只接受发布源表或
+  精确文件版本，DIM 只接受 ODS，DWD 至少接受一个 ODS 并可关联 DIM，DWS 只接受 DWD；非法混层、聚合位置和漂移输入
   均失败关闭。
 - [x] 建立 PostgreSQL 数据面
-  `warehouse_staging / warehouse_ods / warehouse_dwd / warehouse_dws /
+  `warehouse_staging / warehouse_ods / warehouse_dim / warehouse_dwd / warehouse_dws /
+  warehouse_ads /
   warehouse_published`，实现运行级 shadow table、质量门和原子 ACTIVE 切换。
 - [x] 映射完成的表/Sheet 会生成系统 ODS 草稿、不可变发布版本和首个物化任务；
   后续自动刷新仅允许推进仍由系统维护、没有人工草稿或待审批申请的数据集。
@@ -78,11 +84,11 @@
 - [ ] `RAW` 样本外发目前仍复用通用 `DATA_SOURCE:MANAGE` 权限；在生产开放前应新增
   独立 `AI_DATA_EXPORT / RAW_SAMPLE` 高风险权限、双人审批，以及 provider、用途、
   保留期约束。`DENY/MASK` 可继续采用现有自助流程。
-- [ ] 跨全部维度按成员值检索已有功能，但当前主要索引以
-  `(tenant_id, dimension_id, normalized_value/alias)` 排序。大租户应补
+- [x] 跨全部维度按成员值检索已补
   `(tenant_id, normalized_value, dimension_id)` 和
-  `(tenant_id, normalized_alias, dimension_id, dimension_member_id)`，并将成员与
-  alias 候选改为 `UNION` 后关联指标，避免跨维度搜索扫描成员目录。
+  `(tenant_id, normalized_alias, dimension_id, dimension_member_id)` 精确索引；
+  成员与 alias 先用 `UNION ALL` 形成候选并按成员去重，再关联已验证指标，避免跨
+  维度搜索先扫描成员目录。
 - [ ] “690 → 智家生态圈”已经可通过租户级成员别名或受控标签别名配置，但没有写死
   或预置业务词典；正式内容仍需数据治理人员导入、审核并维护有效期。
 - [ ] ACTIVE 运行级物理表不变性目前以 `report_worker` 生命周期为可信边界；尚未把

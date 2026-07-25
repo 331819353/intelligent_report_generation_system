@@ -314,7 +314,7 @@ export async function materializeDatasetAIPlan(
   code: string,
   baseGraph?: DesignerGraphV1,
 ): Promise<MaterializedDatasetAIPlan> {
-  // DWD/DWS 的当前节点引用的是不可变 dataset-version:* 虚拟资产，并不会出现在
+  // DIM/DWD/DWS/ADS 的当前节点引用的是不可变 dataset-version:* 虚拟资产，并不会出现在
   // 物理元数据表列表中。修改方案必须优先复用编辑器已经精确解析的表和字段快照，
   // 只有新引用的物理资产才调用 columns API。
   const baseNodeByTableID = new Map(base.nodes.map(node => [node.table.id, node]))

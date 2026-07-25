@@ -95,6 +95,10 @@ func TestDimensionHTTPRefreshReplayAndSearchPermissionComposition(t *testing.T) 
 			MatchedValue: "690", MatchType: "MEMBER_ALIAS",
 			DimensionID: testDimensionID, DimensionMemberID: testDimensionMemberID,
 			MetricID: testMetricID, MetricVersionID: testMetricVersionID,
+			DimensionDatasetVersionID: testVersionID,
+			DimensionFieldID:          "field_circle",
+			JoinPath:                  []byte(`[]`),
+			EvidenceSource:            "RULE",
 		}},
 	}
 	harness = newDimensionHTTPHarness(t, searchStore, true)
@@ -104,6 +108,8 @@ func TestDimensionHTTPRefreshReplayAndSearchPermissionComposition(t *testing.T) 
 	)
 	if response.Code != http.StatusOK ||
 		!strings.Contains(response.Body.String(), `"matchedValue":"690"`) ||
+		!strings.Contains(response.Body.String(), `"joinPath":[]`) ||
+		!strings.Contains(response.Body.String(), `"evidenceSource":"RULE"`) ||
 		searchStore.searchQuery != "690" || searchStore.readActorID != testActorID {
 		t.Fatalf("status=%d actor=%q query=%q body=%s",
 			response.Code, searchStore.readActorID, searchStore.searchQuery, response.Body.String())

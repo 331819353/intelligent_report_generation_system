@@ -17,7 +17,7 @@ import (
 
 var _ dataset.MaterializationDeletionSink = (*PostgresStore)(nil)
 
-// CleanupClaim is a leased DWD/DWS warehouse cleanup outbox item.
+// CleanupClaim is a leased DIM/DWD/DWS/ADS warehouse cleanup outbox item.
 type CleanupClaim struct {
 	ID            string
 	TenantID      string
@@ -39,7 +39,7 @@ type cleanupTarget struct {
 }
 
 // EnqueueDatasetMaterializationCleanupTx captures the exact number of active or
-// retired DWD/DWS materializations in the same control-plane transaction that
+// retired DIM/DWD/DWS/ADS materializations in the same control-plane transaction that
 // soft-deletes the dataset. It never connects to the warehouse.
 func (store *PostgresStore) EnqueueDatasetMaterializationCleanupTx(
 	ctx context.Context,
@@ -48,7 +48,8 @@ func (store *PostgresStore) EnqueueDatasetMaterializationCleanupTx(
 ) (int, error) {
 	layer := Layer(layerValue)
 	if store == nil || tx == nil || !validUUID(tenantID) || !validUUID(actorID) ||
-		!validUUID(datasetID) || (layer != LayerDWD && layer != LayerDWS) {
+		!validUUID(datasetID) ||
+		(layer != LayerDIM && layer != LayerDWD && layer != LayerDWS && layer != LayerADS) {
 		return 0, ErrInvalidRequest
 	}
 	var expectedCount int

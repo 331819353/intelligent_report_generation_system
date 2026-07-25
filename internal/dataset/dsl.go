@@ -140,9 +140,17 @@ func Validate(document Document) error {
 		add("dataset.type", "必须为 SINGLE_SOURCE 或 CROSS_SOURCE")
 	}
 	if !document.Dataset.Layer.Valid() {
-		add("dataset.layer", "必须为 ODS、DWD 或 DWS")
+		add("dataset.layer", "必须为 ODS、DIM、DWD、DWS 或 ADS")
 	} else {
 		validateLayerContract(&issues, document)
+	}
+	if document.Dataset.SemanticContractVersion != "" &&
+		document.Dataset.SemanticContractVersion != "1.0" {
+		add("dataset.semanticContractVersion", "当前仅支持 1.0")
+	}
+	if document.Dataset.ConsumerContractID != "" &&
+		!canonicalUUID(document.Dataset.ConsumerContractID) {
+		add("dataset.consumerContractId", "必须为规范 UUID")
 	}
 	validateDesigner(&issues, document.Designer)
 	if len(document.Nodes) == 0 {
@@ -259,6 +267,31 @@ func Validate(document Document) error {
 		if !oneOf(join.Cardinality, "UNKNOWN", "ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_ONE", "MANY_TO_MANY") {
 			add(path+".cardinality", "不支持的 Join 基数")
 		}
+		if join.RelationshipType != "" && !oneOf(join.RelationshipType, "DIRECT", "ROLE_PLAYING", "BRIDGE") {
+			add(path+".relationshipType", "必须为 DIRECT、ROLE_PLAYING 或 BRIDGE")
+		}
+		if join.RelationshipRole != "" {
+			validateIdentifier(&issues, path+".relationshipRole", join.RelationshipRole)
+		}
+		if join.FanoutPolicy != "" && !oneOf(
+			join.FanoutPolicy,
+			"SAFE", "PRIMARY", "ALLOCATE", "DEDUPLICATE", "NON_ADDITIVE", "UNSAFE",
+		) {
+			add(path+".fanoutPolicy", "必须为 SAFE、PRIMARY、ALLOCATE、DEDUPLICATE、NON_ADDITIVE 或 UNSAFE")
+		}
+		if join.RelationshipType == "ROLE_PLAYING" && join.RelationshipRole == "" {
+			add(path+".relationshipRole", "角色扮演维度必须声明稳定的业务角色编码")
+		}
+		if join.RelationshipType == "BRIDGE" && join.RelationshipRole == "" {
+			add(path+".relationshipRole", "Bridge 关系必须声明稳定的业务角色编码")
+		}
+		if join.RelationshipType == "BRIDGE" && join.FanoutPolicy == "" {
+			add(path+".fanoutPolicy", "Bridge 关系必须声明指标扇出处理策略")
+		}
+		if join.RelationshipType != "" && join.RelationshipType != "BRIDGE" &&
+			join.FanoutPolicy != "" && join.FanoutPolicy != "SAFE" {
+			add(path+".fanoutPolicy", "非 Bridge 关系只能使用 SAFE 扇出策略")
+		}
 		if len(join.Conditions) == 0 {
 			add(path+".conditions", "至少需要一个 Join 条件")
 		}
@@ -276,6 +309,7 @@ func Validate(document Document) error {
 				add(conditionPath+".rightExpression", "必须引用 Join 右节点字段")
 			}
 		}
+		validateJoinSemanticContract(&issues, path, join, document.Nodes)
 	}
 	joinsByID := make(map[string]Join, len(document.Joins))
 	for _, join := range document.Joins {
@@ -531,6 +565,7 @@ func Validate(document Document) error {
 	if document.OutputGrain.DefaultTimeGrain != "" && !oneOf(document.OutputGrain.DefaultTimeGrain, "DAY", "WEEK", "MONTH", "QUARTER", "YEAR") {
 		add("outputGrain.defaultTimeGrain", "不支持的默认时间粒度")
 	}
+	validateSemanticContracts(&issues, document)
 	validateExecutionPolicy(&issues, document.ExecutionPolicy)
 	if len(issues) > 0 {
 		return &ValidationError{Issues: issues}
@@ -540,7 +575,8 @@ func Validate(document Document) error {
 
 // Valid 把层级枚举校验集中在领域类型上，避免 API、仓储和后续物化器各自维护字符串集合。
 func (layer Layer) Valid() bool {
-	return layer == LayerODS || layer == LayerDWD || layer == LayerDWS
+	return layer == LayerODS || layer == LayerDIM || layer == LayerDWD ||
+		layer == LayerDWS || layer == LayerADS
 }
 
 // validateLayerContract 校验仅依赖当前 DSL 的层级合同。跨数据集版本的上游层级
@@ -562,11 +598,43 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 		if hasGrouping || hasAggregation {
 			add("dataset.layer", "ODS 不允许分组或聚合")
 		}
+	case LayerDIM:
+		if document.layerSpecified {
+			for index, node := range document.Nodes {
+				if node.Type != "DATASET" {
+					add(fmt.Sprintf("nodes[%d].type", index), "显式 DIM 只能引用已发布 ODS 数据集版本")
+				}
+			}
+		}
+		if hasGrouping || hasAggregation {
+			add("dataset.layer", "DIM 保存实体说明信息，不允许业务分组或聚合")
+		}
+		if document.OutputGrain.Description == "" || len(document.OutputGrain.KeyFields) == 0 {
+			add("outputGrain", "DIM 必须显式声明实体粒度和业务键")
+		}
 	case LayerDWD:
 		if document.layerSpecified {
 			for index, node := range document.Nodes {
 				if node.Type != "DATASET" {
-					add(fmt.Sprintf("nodes[%d].type", index), "显式 DWD 只能引用已发布 ODS 数据集版本")
+					add(fmt.Sprintf("nodes[%d].type", index), "显式 DWD 只能引用已发布 ODS 或 DIM 数据集版本")
+				}
+			}
+			for index, join := range document.Joins {
+				path := fmt.Sprintf("joins[%d]", index)
+				switch join.Cardinality {
+				case "UNKNOWN":
+					add(path+".cardinality", "显式 DWD 必须证明 Join 基数，不能使用 UNKNOWN")
+				case "ONE_TO_MANY", "MANY_TO_MANY":
+					if join.RelationshipType != "BRIDGE" {
+						add(path+".relationshipType", "DWD 的多值关联必须显式建模为 BRIDGE，多个普通 DIM 应分别使用 MANY_TO_ONE 或 ONE_TO_ONE")
+					}
+					if !oneOf(join.FanoutPolicy, "PRIMARY", "ALLOCATE", "DEDUPLICATE", "NON_ADDITIVE", "UNSAFE") {
+						add(path+".fanoutPolicy", "DWD Bridge 必须选择 PRIMARY、ALLOCATE、DEDUPLICATE、NON_ADDITIVE 或 UNSAFE")
+					}
+				case "ONE_TO_ONE", "MANY_TO_ONE":
+					if join.RelationshipType == "BRIDGE" {
+						add(path+".relationshipType", "ONE_TO_ONE 或 MANY_TO_ONE 的普通维度关联不应标记为 BRIDGE")
+					}
 				}
 			}
 		}
@@ -586,6 +654,21 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 		}
 		if !hasAggregation {
 			add("dataset.layer", "DWS 至少需要一个聚合指标")
+		}
+	case LayerADS:
+		if document.layerSpecified {
+			for index, node := range document.Nodes {
+				if node.Type != "DATASET" {
+					add(fmt.Sprintf("nodes[%d].type", index), "显式 ADS 只能引用已发布 DWS 数据集版本")
+				}
+			}
+		}
+		if document.OutputGrain.Description == "" || len(document.OutputGrain.KeyFields) == 0 {
+			add("outputGrain", "ADS 必须显式声明面向消费场景的输出粒度和粒度键")
+		}
+		if document.Dataset.SemanticContractVersion == "1.0" &&
+			document.Dataset.ConsumerContractID == "" {
+			add("dataset.consumerContractId", "语义合同 1.0 的 ADS 必须绑定已发布消费合同")
 		}
 	}
 }
@@ -609,6 +692,296 @@ func documentHasBusinessAggregation(document Document) bool {
 		visitDatasetExpression(field.Expression, visit)
 	}
 	return found
+}
+
+func validateJoinSemanticContract(
+	issues *[]ValidationIssue,
+	path string,
+	join Join,
+	nodes []Node,
+) {
+	add := func(suffix, reason string) {
+		*issues = append(*issues, ValidationIssue{Path: path + suffix, Reason: reason})
+	}
+	projections := map[string]map[string]bool{}
+	for _, node := range nodes {
+		fields := map[string]bool{}
+		for _, field := range node.Projection {
+			fields[field] = true
+		}
+		projections[node.ID] = fields
+	}
+	if join.Bridge != nil {
+		bridge := join.Bridge
+		if join.RelationshipType != "BRIDGE" {
+			add(".bridge", "只有 BRIDGE 关系可以声明 Bridge 字段合同")
+		}
+		if bridge.BridgeNodeID != join.LeftNodeID && bridge.BridgeNodeID != join.RightNodeID {
+			add(".bridge.bridgeNodeId", "必须引用 Join 的左节点或右节点")
+		}
+		validateBridgeField := func(field, suffix string) {
+			if field == "" {
+				return
+			}
+			validatePhysicalIdentifier(issues, path+".bridge."+suffix, field)
+			if !projections[bridge.BridgeNodeID][field] {
+				add(".bridge."+suffix, "必须包含在 Bridge 节点 projection 中")
+			}
+		}
+		validateBridgeField(bridge.RelationshipTypeField, "relationshipTypeField")
+		validateBridgeField(bridge.AllocationWeightField, "allocationWeightField")
+		validateBridgeField(bridge.PrimaryFlagField, "primaryFlagField")
+		validateBridgeField(bridge.ValidFromField, "validFromField")
+		validateBridgeField(bridge.ValidToField, "validToField")
+		if (bridge.ValidFromField == "") != (bridge.ValidToField == "") {
+			add(".bridge", "Bridge 有效区间必须同时声明 validFromField 和 validToField")
+		}
+		if bridge.RelationshipTypeField == "" {
+			add(".bridge.relationshipTypeField", "Bridge 必须声明关系类型字段")
+		}
+		if join.FanoutPolicy == "ALLOCATE" && bridge.AllocationWeightField == "" {
+			add(".bridge.allocationWeightField", "ALLOCATE 策略必须声明分配权重字段")
+		}
+		if join.FanoutPolicy == "PRIMARY" && bridge.PrimaryFlagField == "" {
+			add(".bridge.primaryFlagField", "PRIMARY 策略必须声明主成员标记字段")
+		}
+	} else if join.RelationshipType == "BRIDGE" {
+		add(".bridge", "BRIDGE 关系必须声明结构化 Bridge 字段合同")
+	}
+
+	if join.Temporal == nil {
+		return
+	}
+	temporal := join.Temporal
+	if temporal.EventNodeID != join.LeftNodeID && temporal.EventNodeID != join.RightNodeID {
+		add(".temporal.eventNodeId", "必须引用 Join 的左节点或右节点")
+	}
+	if temporal.ValidityNodeID != join.LeftNodeID && temporal.ValidityNodeID != join.RightNodeID {
+		add(".temporal.validityNodeId", "必须引用 Join 的左节点或右节点")
+	}
+	if temporal.EventNodeID == temporal.ValidityNodeID {
+		add(".temporal", "事件时间节点和有效区间节点必须位于 Join 两侧")
+	}
+	for _, field := range []struct {
+		value  string
+		suffix string
+	}{
+		{value: temporal.EventTimeField, suffix: "eventTimeField"},
+		{value: temporal.ValidFromField, suffix: "validFromField"},
+		{value: temporal.ValidToField, suffix: "validToField"},
+	} {
+		validatePhysicalIdentifier(issues, path+".temporal."+field.suffix, field.value)
+	}
+	if !projections[temporal.EventNodeID][temporal.EventTimeField] {
+		add(".temporal.eventTimeField", "必须包含在事件节点 projection 中")
+	}
+	if !projections[temporal.ValidityNodeID][temporal.ValidFromField] {
+		add(".temporal.validFromField", "必须包含在有效区间节点 projection 中")
+	}
+	if !projections[temporal.ValidityNodeID][temporal.ValidToField] {
+		add(".temporal.validToField", "必须包含在有效区间节点 projection 中")
+	}
+	if !temporalJoinConditionsPresent(join) {
+		add(".temporal", "SCD2 Join conditions 必须包含 eventTime >= validFrom 且 eventTime < validTo")
+	}
+}
+
+func temporalJoinConditionsPresent(join Join) bool {
+	temporal := join.Temporal
+	if temporal == nil {
+		return false
+	}
+	fromFound, toFound := false, false
+	for _, condition := range join.Conditions {
+		left, right := condition.LeftExpression, condition.RightExpression
+		if left.Type != "FIELD_REF" || right.Type != "FIELD_REF" {
+			continue
+		}
+		eventOnLeft := left.NodeID == temporal.EventNodeID &&
+			left.Field == temporal.EventTimeField
+		eventOnRight := right.NodeID == temporal.EventNodeID &&
+			right.Field == temporal.EventTimeField
+		fromOnLeft := left.NodeID == temporal.ValidityNodeID &&
+			left.Field == temporal.ValidFromField
+		fromOnRight := right.NodeID == temporal.ValidityNodeID &&
+			right.Field == temporal.ValidFromField
+		toOnLeft := left.NodeID == temporal.ValidityNodeID &&
+			left.Field == temporal.ValidToField
+		toOnRight := right.NodeID == temporal.ValidityNodeID &&
+			right.Field == temporal.ValidToField
+		fromFound = fromFound ||
+			(eventOnLeft && fromOnRight && condition.Operator == "GTE") ||
+			(fromOnLeft && eventOnRight && condition.Operator == "LTE")
+		toOperator, inverseToOperator := "LT", "GT"
+		if temporal.ValidToInclusive {
+			toOperator, inverseToOperator = "LTE", "GTE"
+		}
+		toFound = toFound ||
+			(eventOnLeft && toOnRight && condition.Operator == toOperator) ||
+			(toOnLeft && eventOnRight && condition.Operator == inverseToOperator)
+	}
+	return fromFound && toFound
+}
+
+func validateSemanticContracts(issues *[]ValidationIssue, document Document) {
+	add := func(path, reason string) {
+		*issues = append(*issues, ValidationIssue{Path: path, Reason: reason})
+	}
+	fields := make(map[string]Field, len(document.Fields))
+	nodes := make(map[string]bool, len(document.Nodes))
+	for _, field := range document.Fields {
+		fields[field.Code] = field
+	}
+	for _, node := range document.Nodes {
+		nodes[node.ID] = true
+	}
+
+	if document.FactContract != nil {
+		contract := document.FactContract
+		if document.Dataset.Layer != LayerDWD {
+			add("factContract", "事实合同只能用于 DWD")
+		}
+		if strings.TrimSpace(contract.BusinessAction) == "" ||
+			len([]rune(contract.BusinessAction)) > 256 {
+			add("factContract.businessAction", "必须声明 1 至 256 字符的业务动作")
+		}
+		if !sameStringSet(contract.GrainKeyFields, document.OutputGrain.KeyFields) {
+			add("factContract.grainKeyFields", "必须与 outputGrain.keyFields 完全一致")
+		}
+		if contract.EventTimeField != "" {
+			field, exists := fields[contract.EventTimeField]
+			if !exists || field.Role != "TIME" {
+				add("factContract.eventTimeField", "必须引用 TIME 输出字段")
+			}
+		}
+		measureContracts := map[string]bool{}
+		for index, measure := range contract.AtomicMeasures {
+			path := fmt.Sprintf("factContract.atomicMeasures[%d]", index)
+			field, exists := fields[measure.Field]
+			if !exists || field.Role != "MEASURE" {
+				add(path+".field", "必须引用 MEASURE 输出字段")
+			}
+			if measureContracts[measure.Field] {
+				add(path+".field", "原子度量重复")
+			}
+			measureContracts[measure.Field] = true
+			if !oneOf(measure.Additivity, "ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE") {
+				add(path+".additivity", "必须为 ADDITIVE、SEMI_ADDITIVE 或 NON_ADDITIVE")
+			}
+			if !oneOf(measure.NullPolicy, "PRESERVE", "ZERO", "REJECT") {
+				add(path+".nullPolicy", "必须为 PRESERVE、ZERO 或 REJECT")
+			}
+			if len(measure.Unit) > 64 || len(measure.Currency) > 16 {
+				add(path, "单位或币种超出长度限制")
+			}
+		}
+		for _, field := range document.Fields {
+			if field.Role == "MEASURE" && !measureContracts[field.Code] {
+				add("factContract.atomicMeasures", "必须覆盖每一个 MEASURE 输出字段")
+			}
+		}
+	} else if document.Dataset.SemanticContractVersion == "1.0" &&
+		document.Dataset.Layer == LayerDWD {
+		add("factContract", "语义合同 1.0 的 DWD 必须声明事实粒度和原子度量")
+	}
+
+	if document.AnalysisContract != nil {
+		contract := document.AnalysisContract
+		if document.Dataset.Layer != LayerDWS {
+			add("analysisContract", "分析合同只能用于 DWS")
+		}
+		if !oneOf(
+			contract.Intent,
+			"TREND", "PERIOD_COMPARISON", "DISTRIBUTION", "RANKING", "TOP_N",
+			"DRILLDOWN", "FUNNEL", "RETENTION", "LIFECYCLE", "ANOMALY",
+			"CONTRIBUTION", "MULTI_FACT_COMPARISON",
+		) {
+			add("analysisContract.intent", "不支持的市场通用分析意图")
+		}
+		expectedMode := "SINGLE_FACT"
+		if len(document.Nodes) > 1 {
+			expectedMode = "MULTI_FACT"
+		}
+		if contract.InputMode != expectedMode {
+			add("analysisContract.inputMode", "必须与 DWD 输入数量一致")
+		}
+		if !sameStringSet(contract.CommonGrainFields, document.OutputGrain.KeyFields) {
+			add("analysisContract.commonGrainFields", "必须与 outputGrain.keyFields 完全一致")
+		}
+		for index, code := range contract.ConformedDimensions {
+			field, exists := fields[code]
+			if !exists || field.Role == "MEASURE" {
+				add(fmt.Sprintf("analysisContract.conformedDimensions[%d]", index), "必须引用非度量输出字段")
+			}
+		}
+		if contract.TimeField != "" {
+			field, exists := fields[contract.TimeField]
+			if !exists || field.Role != "TIME" {
+				add("analysisContract.timeField", "必须引用 TIME 输出字段")
+			}
+		}
+		if contract.TimeGrain != "" &&
+			!oneOf(contract.TimeGrain, "DAY", "WEEK", "MONTH", "QUARTER", "YEAR") {
+			add("analysisContract.timeGrain", "不支持的时间粒度")
+		}
+		for index, measure := range contract.Measures {
+			path := fmt.Sprintf("analysisContract.measures[%d]", index)
+			field, exists := fields[measure.Field]
+			if !exists || field.Role != "MEASURE" {
+				add(path+".field", "必须引用 MEASURE 输出字段")
+			}
+			if !oneOf(measure.Aggregation, "SUM", "MIN", "MAX", "COUNT", "COUNT_DISTINCT", "AVG") {
+				add(path+".aggregation", "不支持的分析聚合")
+			}
+			if !oneOf(measure.Additivity, "ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE") {
+				add(path+".additivity", "必须声明指标可加性")
+			}
+			if len(measure.SourceNodeIDs) == 0 {
+				add(path+".sourceNodeIds", "至少引用一个 DWD 输入节点")
+			}
+			for sourceIndex, nodeID := range measure.SourceNodeIDs {
+				if !nodes[nodeID] {
+					add(fmt.Sprintf("%s.sourceNodeIds[%d]", path, sourceIndex), "引用的 DWD 输入节点不存在")
+				}
+			}
+		}
+		if len(document.Nodes) > 1 {
+			preAggregated := map[string]bool{}
+			for _, item := range document.PreAggregations {
+				preAggregated[item.NodeID] = true
+			}
+			for index, node := range document.Nodes {
+				if !preAggregated[node.ID] {
+					add(fmt.Sprintf("nodes[%d]", index), "多事实 DWS 必须先把每个 DWD 聚合到共同粒度再 Join")
+				}
+			}
+		}
+	} else if document.Dataset.SemanticContractVersion == "1.0" &&
+		document.Dataset.Layer == LayerDWS {
+		add("analysisContract", "语义合同 1.0 的 DWS 必须声明分析意图和共同粒度")
+	}
+}
+
+func sameStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	values := make(map[string]int, len(left))
+	for _, value := range left {
+		values[value]++
+	}
+	for _, value := range right {
+		values[value]--
+		if values[value] < 0 {
+			return false
+		}
+	}
+	for _, count := range values {
+		if count != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 type expressionAggregation struct {
@@ -1129,6 +1502,8 @@ func normalize(document Document) Document {
 	document.Dataset.Description = strings.TrimSpace(document.Dataset.Description)
 	document.Dataset.Type = upper(document.Dataset.Type)
 	document.Dataset.Layer = Layer(upper(string(document.Dataset.Layer)))
+	document.Dataset.SemanticContractVersion = strings.TrimSpace(document.Dataset.SemanticContractVersion)
+	document.Dataset.ConsumerContractID = strings.TrimSpace(document.Dataset.ConsumerContractID)
 	for i := range document.Nodes {
 		node := &document.Nodes[i]
 		node.ID, node.Type, node.Alias = strings.TrimSpace(node.ID), upper(node.Type), strings.TrimSpace(node.Alias)
@@ -1147,6 +1522,23 @@ func normalize(document Document) Document {
 		join := &document.Joins[i]
 		join.ID, join.LeftNodeID, join.RightNodeID = strings.TrimSpace(join.ID), strings.TrimSpace(join.LeftNodeID), strings.TrimSpace(join.RightNodeID)
 		join.JoinType, join.Cardinality = upper(join.JoinType), upper(join.Cardinality)
+		join.RelationshipType, join.RelationshipRole = upper(join.RelationshipType), upper(join.RelationshipRole)
+		join.FanoutPolicy = upper(join.FanoutPolicy)
+		if join.Bridge != nil {
+			join.Bridge.BridgeNodeID = strings.TrimSpace(join.Bridge.BridgeNodeID)
+			join.Bridge.RelationshipTypeField = strings.TrimSpace(join.Bridge.RelationshipTypeField)
+			join.Bridge.AllocationWeightField = strings.TrimSpace(join.Bridge.AllocationWeightField)
+			join.Bridge.PrimaryFlagField = strings.TrimSpace(join.Bridge.PrimaryFlagField)
+			join.Bridge.ValidFromField = strings.TrimSpace(join.Bridge.ValidFromField)
+			join.Bridge.ValidToField = strings.TrimSpace(join.Bridge.ValidToField)
+		}
+		if join.Temporal != nil {
+			join.Temporal.EventNodeID = strings.TrimSpace(join.Temporal.EventNodeID)
+			join.Temporal.EventTimeField = strings.TrimSpace(join.Temporal.EventTimeField)
+			join.Temporal.ValidityNodeID = strings.TrimSpace(join.Temporal.ValidityNodeID)
+			join.Temporal.ValidFromField = strings.TrimSpace(join.Temporal.ValidFromField)
+			join.Temporal.ValidToField = strings.TrimSpace(join.Temporal.ValidToField)
+		}
 		for j := range join.Conditions {
 			join.Conditions[j].Operator = upper(join.Conditions[j].Operator)
 			normalizeExpression(&join.Conditions[j].LeftExpression)
@@ -1165,6 +1557,45 @@ func normalize(document Document) Document {
 			item.Metrics[j].Field = strings.TrimSpace(item.Metrics[j].Field)
 			item.Metrics[j].Function = upper(item.Metrics[j].Function)
 			normalizeExpression(item.Metrics[j].Expression)
+		}
+	}
+	if document.FactContract != nil {
+		document.FactContract.BusinessAction = strings.TrimSpace(document.FactContract.BusinessAction)
+		document.FactContract.EventTimeField = strings.TrimSpace(document.FactContract.EventTimeField)
+		for i := range document.FactContract.GrainKeyFields {
+			document.FactContract.GrainKeyFields[i] = strings.TrimSpace(document.FactContract.GrainKeyFields[i])
+		}
+		for i := range document.FactContract.AtomicMeasures {
+			measure := &document.FactContract.AtomicMeasures[i]
+			measure.Field = strings.TrimSpace(measure.Field)
+			measure.Additivity = upper(measure.Additivity)
+			measure.Unit = strings.TrimSpace(measure.Unit)
+			measure.Currency = upper(measure.Currency)
+			measure.NullPolicy = upper(measure.NullPolicy)
+		}
+	}
+	if document.AnalysisContract != nil {
+		contract := document.AnalysisContract
+		contract.Intent = upper(contract.Intent)
+		contract.InputMode = upper(contract.InputMode)
+		contract.TimeField = strings.TrimSpace(contract.TimeField)
+		contract.TimeGrain = upper(contract.TimeGrain)
+		for i := range contract.CommonGrainFields {
+			contract.CommonGrainFields[i] = strings.TrimSpace(contract.CommonGrainFields[i])
+		}
+		for i := range contract.ConformedDimensions {
+			contract.ConformedDimensions[i] = strings.TrimSpace(contract.ConformedDimensions[i])
+		}
+		for i := range contract.Measures {
+			measure := &contract.Measures[i]
+			measure.Field = strings.TrimSpace(measure.Field)
+			measure.Aggregation = upper(measure.Aggregation)
+			measure.Additivity = upper(measure.Additivity)
+			measure.Unit = strings.TrimSpace(measure.Unit)
+			measure.Currency = upper(measure.Currency)
+			for j := range measure.SourceNodeIDs {
+				measure.SourceNodeIDs[j] = strings.TrimSpace(measure.SourceNodeIDs[j])
+			}
 		}
 	}
 	for i := range document.Parameters {
@@ -1279,6 +1710,30 @@ func normalizeSlices(document *Document) {
 		}
 		if document.PreAggregations[i].Metrics == nil {
 			document.PreAggregations[i].Metrics = []PreAggregationMetric{}
+		}
+	}
+	if document.FactContract != nil {
+		if document.FactContract.GrainKeyFields == nil {
+			document.FactContract.GrainKeyFields = []string{}
+		}
+		if document.FactContract.AtomicMeasures == nil {
+			document.FactContract.AtomicMeasures = []AtomicMeasureContract{}
+		}
+	}
+	if document.AnalysisContract != nil {
+		if document.AnalysisContract.CommonGrainFields == nil {
+			document.AnalysisContract.CommonGrainFields = []string{}
+		}
+		if document.AnalysisContract.ConformedDimensions == nil {
+			document.AnalysisContract.ConformedDimensions = []string{}
+		}
+		if document.AnalysisContract.Measures == nil {
+			document.AnalysisContract.Measures = []AnalysisMeasureContract{}
+		}
+		for i := range document.AnalysisContract.Measures {
+			if document.AnalysisContract.Measures[i].SourceNodeIDs == nil {
+				document.AnalysisContract.Measures[i].SourceNodeIDs = []string{}
+			}
 		}
 	}
 }

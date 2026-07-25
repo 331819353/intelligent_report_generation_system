@@ -1,0 +1,55 @@
+{
+  "dslVersion": "1.0",
+  "dataset": {
+    "code": "dwd_order_line_action",
+    "name": "订单行购买事实",
+    "description": "订单头和订单行两个 ODS 还原同一个购买动作",
+    "type": "SINGLE_SOURCE",
+    "layer": "DWD",
+    "semanticContractVersion": "1.0"
+  },
+  "nodes": [
+    {"id": "order_header", "type": "DATASET", "datasetVersionId": "10000000-0000-4000-8000-000000000002", "alias": "header", "projection": ["order_id", "customer_key", "ordered_at"], "sourceFilters": []},
+    {"id": "order_line", "type": "DATASET", "datasetVersionId": "10000000-0000-4000-8000-000000000003", "alias": "line", "projection": ["order_id", "line_id", "product_key", "quantity", "line_amount"], "sourceFilters": []}
+  ],
+  "joins": [{
+    "id": "join_order_line",
+    "leftNodeId": "order_line",
+    "rightNodeId": "order_header",
+    "joinType": "INNER",
+    "cardinality": "MANY_TO_ONE",
+    "relationshipType": "DIRECT",
+    "fanoutPolicy": "SAFE",
+    "conditions": [{
+      "leftExpression": {"type": "FIELD_REF", "nodeId": "order_line", "field": "order_id"},
+      "operator": "EQUALS",
+      "rightExpression": {"type": "FIELD_REF", "nodeId": "order_header", "field": "order_id"}
+    }],
+    "manualConfirmed": true
+  }],
+  "factContract": {
+    "businessAction": "客户购买一个订单行商品",
+    "grainKeyFields": ["order_id", "line_id"],
+    "eventTimeField": "ordered_at",
+    "atomicMeasures": [
+      {"field": "quantity", "additivity": "ADDITIVE", "unit": "ITEM", "nullPolicy": "REJECT"},
+      {"field": "line_amount", "additivity": "ADDITIVE", "unit": "CNY", "currency": "CNY", "nullPolicy": "REJECT"}
+    ]
+  },
+  "fields": [
+    {"id": "field_order_id", "code": "order_id", "name": "订单标识", "role": "IDENTIFIER", "expression": {"type": "FIELD_REF", "nodeId": "order_line", "field": "order_id"}, "canonicalType": "STRING", "nullable": false},
+    {"id": "field_line_id", "code": "line_id", "name": "订单行标识", "role": "IDENTIFIER", "expression": {"type": "FIELD_REF", "nodeId": "order_line", "field": "line_id"}, "canonicalType": "STRING", "nullable": false},
+    {"id": "field_ordered_at", "code": "ordered_at", "name": "下单时间", "role": "TIME", "expression": {"type": "FIELD_REF", "nodeId": "order_header", "field": "ordered_at"}, "canonicalType": "DATETIME", "nullable": false},
+    {"id": "field_customer_key", "code": "customer_key", "name": "客户键", "role": "DIMENSION", "expression": {"type": "FIELD_REF", "nodeId": "order_header", "field": "customer_key"}, "canonicalType": "STRING", "nullable": false},
+    {"id": "field_product_key", "code": "product_key", "name": "商品键", "role": "DIMENSION", "expression": {"type": "FIELD_REF", "nodeId": "order_line", "field": "product_key"}, "canonicalType": "STRING", "nullable": false},
+    {"id": "field_quantity", "code": "quantity", "name": "购买数量", "role": "MEASURE", "expression": {"type": "FIELD_REF", "nodeId": "order_line", "field": "quantity"}, "canonicalType": "DECIMAL", "unit": "ITEM", "nullable": false},
+    {"id": "field_line_amount", "code": "line_amount", "name": "订单行金额", "role": "MEASURE", "expression": {"type": "FIELD_REF", "nodeId": "order_line", "field": "line_amount"}, "canonicalType": "DECIMAL", "unit": "CNY", "nullable": false}
+  ],
+  "filters": [],
+  "groupBy": [],
+  "having": [],
+  "sorts": [],
+  "parameters": [],
+  "outputGrain": {"description": "每行一个订单行购买动作", "keyFields": ["order_id", "line_id"], "timeField": "ordered_at", "defaultTimeGrain": "DAY"},
+  "executionPolicy": {"mode": "REALTIME", "timeoutMs": 5000, "previewLimit": 100, "resultLimit": 10000, "cacheTtlSeconds": 0, "materialization": {"enabled": false}}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -79,6 +80,38 @@ func TestValidateDWDLLMPlanCompilesFactCleaningAndDimensionExpansion(t *testing.
 	customerName, ok := dwdDocumentFieldByCode(prepared.Document, "customer_name")
 	if !ok || customerName.Expression.Type != "UPPER" {
 		t.Fatalf("customer_name processing=%+v", customerName.Expression)
+	}
+}
+
+func TestBuildLLMClassifiedDIMDocumentPreservesEntityContract(t *testing.T) {
+	input, assets, _ := validDWDPlanningFixture()
+	source := assets[input.Tables[1].VersionID]
+	document, inputHash, err := buildLLMClassifiedDIMDocument(input.Domain, source)
+	if err != nil {
+		t.Fatalf("build DIM document: %v", err)
+	}
+	if len(inputHash) != 64 || document.Dataset.Layer != LayerDIM ||
+		len(document.Nodes) != 1 ||
+		document.Nodes[0].DatasetVersionID != source.VersionID ||
+		len(document.Fields) != len(source.Document.Fields) {
+		t.Fatalf("unexpected DIM document: hash=%q document=%+v", inputHash, document)
+	}
+	if !reflect.DeepEqual(document.OutputGrain.KeyFields, []string{"customer_id"}) {
+		t.Fatalf("DIM keys=%v, want customer_id", document.OutputGrain.KeyFields)
+	}
+	prepared, err := Prepare(mustMarshalDWDDocument(document))
+	if err != nil {
+		t.Fatalf("prepare DIM document: %v", err)
+	}
+	customerName, exists := dwdDocumentFieldByCode(
+		prepared.Document, "customer_name",
+	)
+	if !exists || customerName.Expression.Type != "COALESCE" ||
+		len(customerName.Expression.Arguments) != 2 ||
+		customerName.Expression.Arguments[0].Type != "TRIM" ||
+		customerName.Nullable {
+		t.Fatalf("DIM description cleaning=%+v nullable=%v",
+			customerName.Expression, customerName.Nullable)
 	}
 }
 
@@ -243,6 +276,194 @@ func TestDWDModelingPlannerRepairsStructureThenDomainContract(t *testing.T) {
 	if len(lastMessages) != 4 ||
 		!strings.Contains(lastMessages[3].Parts[0].Text, "joined more than once") {
 		t.Fatalf("third invocation did not receive precise domain repair: %#v", lastMessages)
+	}
+}
+
+func TestDWDModelingClassifierUsesIndependentBoundedRepairStage(t *testing.T) {
+	input, _, validPlan := validDWDPlanningFixture()
+	validContent, err := json.Marshal(dwdLLMClassificationPlan{
+		Domain: input.Domain, Classifications: validPlan.Classifications,
+	})
+	if err != nil {
+		t.Fatalf("marshal classification: %v", err)
+	}
+	schema, err := dwdClassificationResponseSchema(input)
+	if err != nil {
+		t.Fatalf("classification schema: %v", err)
+	}
+	_, invalidErr := aiplatform.ValidateStructuredOutput(schema, []byte(`{}`))
+	if invalidErr == nil {
+		t.Fatal("empty classification unexpectedly passed")
+	}
+	invoker := &scriptedDWDPlannerInvoker{
+		results: []aiplatform.InvocationResult{
+			{},
+			{
+				RequestID:      uuid.NewString(),
+				ProviderResult: aiplatform.ProviderResult{Content: validContent},
+			},
+		},
+		errors: []error{invalidErr, nil},
+	}
+	planner := NewOrchestratedDWDModelingPlanner(invoker, time.Second)
+	completion, err := planner.Classify(context.Background(), input)
+	if err != nil {
+		t.Fatalf("classify ODS: %v", err)
+	}
+	if len(completion.Classifications) != len(input.Tables) ||
+		len(invoker.calls) != dwdStageInvocationAttempts {
+		t.Fatalf(
+			"classification/calls=%d/%d",
+			len(completion.Classifications), len(invoker.calls),
+		)
+	}
+	if invoker.calls[0].PromptVersion != dwdClassificationPromptVersion ||
+		invoker.calls[0].Request.MaxOutputTokens != 3000 {
+		t.Fatalf("unexpected classification invocation: %#v", invoker.calls[0])
+	}
+	lastMessages := invoker.calls[1].Request.Messages
+	if len(lastMessages) != 4 ||
+		!strings.Contains(lastMessages[3].Parts[0].Text, "不要返回 outputs") {
+		t.Fatalf("classification repair was not stage-specific: %#v", lastMessages)
+	}
+}
+
+func TestDWDModelingFactDesignerScopesOneFactAndValidatedDimensions(t *testing.T) {
+	input, _, validPlan := validDWDPlanningFixture()
+	otherVersionID := uuid.NewString()
+	input.Tables = append(input.Tables, dwdPlanningTable{
+		DatasetID: uuid.NewString(), VersionID: otherVersionID,
+		Name: "同步日志", Description: "技术同步状态",
+		Fields: []dwdPlanningField{{
+			Code: "log_id", Name: "日志编号", Role: "IDENTIFIER",
+			CanonicalType: "STRING",
+		}},
+	})
+	classifications := append(
+		append([]dwdLLMClassification(nil), validPlan.Classifications...),
+		dwdLLMClassification{
+			DatasetVersionID: otherVersionID, Role: "OTHER",
+			Rationale: "技术同步记录，不是业务事实或分析实体",
+		},
+	)
+	content, err := json.Marshal(dwdLLMFactDesign{
+		Output: validPlan.Outputs[0],
+	})
+	if err != nil {
+		t.Fatalf("marshal fact design: %v", err)
+	}
+	invoker := &scriptedDWDPlannerInvoker{
+		results: []aiplatform.InvocationResult{{
+			RequestID:      uuid.NewString(),
+			ProviderResult: aiplatform.ProviderResult{Content: content},
+		}},
+		errors: []error{nil},
+	}
+	planner := NewOrchestratedDWDModelingPlanner(invoker, time.Second)
+	completion, err := planner.DesignFact(
+		context.Background(), input, classifications,
+		validPlan.Outputs[0].FactDatasetVersionID,
+	)
+	if err != nil {
+		t.Fatalf("design one FACT: %v", err)
+	}
+	if completion.Output.FactDatasetVersionID !=
+		validPlan.Outputs[0].FactDatasetVersionID {
+		t.Fatalf("unexpected fact output: %#v", completion.Output)
+	}
+	call := invoker.calls[0]
+	if call.PromptVersion != dwdFactDesignPromptVersion ||
+		call.ResourceID != validPlan.Outputs[0].FactDatasetVersionID {
+		t.Fatalf("unexpected fact invocation identity: %#v", call)
+	}
+	if err := aiplatform.ValidateProviderRequest(call.Request); err != nil {
+		t.Fatalf("fact stage request rejected by common AI boundary: %v", err)
+	}
+	var request struct {
+		Tables []dwdPlanningTable `json:"tables"`
+	}
+	if err := json.Unmarshal(
+		[]byte(call.Request.Messages[1].Parts[0].Text), &request,
+	); err != nil {
+		t.Fatalf("decode fact request: %v", err)
+	}
+	if len(request.Tables) != 2 {
+		t.Fatalf("fact request table count=%d, want FACT + MASTER", len(request.Tables))
+	}
+	for _, table := range request.Tables {
+		if table.VersionID == otherVersionID {
+			t.Fatal("OTHER table leaked into the independent FACT design stage")
+		}
+	}
+}
+
+func TestDWDModelingCheckpointHashSurvivesJSONBNormalization(t *testing.T) {
+	input, _, validPlan := validDWDPlanningFixture()
+	raw, hash, err := marshalDWDCheckpoint(dwdLLMClassificationPlan{
+		Domain: input.Domain, Classifications: validPlan.Classifications,
+	})
+	if err != nil {
+		t.Fatalf("marshal checkpoint: %v", err)
+	}
+	var normalized any
+	if err := json.Unmarshal(raw, &normalized); err != nil {
+		t.Fatalf("decode checkpoint: %v", err)
+	}
+	jsonbStyle, err := json.Marshal(normalized)
+	if err != nil {
+		t.Fatalf("normalize checkpoint: %v", err)
+	}
+	if err := validateDWDCheckpointHash(jsonbStyle, hash); err != nil {
+		t.Fatalf("normalized checkpoint hash mismatch: %v", err)
+	}
+	jsonbStyle[len(jsonbStyle)-2] ^= 1
+	if err := validateDWDCheckpointHash(jsonbStyle, hash); err == nil {
+		t.Fatal("tampered checkpoint was accepted")
+	}
+}
+
+func TestDWDModelingFailureDecisionDoesNotRepeatPermanentCalls(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		terminal  bool
+		errorCode string
+	}{
+		{
+			name: "invalid local output", err: errDWDModelingInvalid,
+			terminal: true, errorCode: "WAREHOUSE_MODELING_INVALID_OUTPUT",
+		},
+		{
+			name: "provider authentication",
+			err: &aiplatform.ProviderError{
+				Code: aiplatform.ErrorCodeAuthentication, Retryable: false,
+			},
+			terminal: true, errorCode: string(aiplatform.ErrorCodeAuthentication),
+		},
+		{
+			name: "provider timeout",
+			err: &aiplatform.ProviderError{
+				Code: aiplatform.ErrorCodeTimeout, Retryable: true,
+			},
+		},
+		{
+			name: "worker cancellation",
+			err: &aiplatform.ProviderError{
+				Code: aiplatform.ErrorCodeCanceled, Retryable: false,
+			},
+		},
+		{name: "database transient", err: errors.New("database temporarily unavailable")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			terminal, errorCode := terminalDWDModelingFailure(test.err)
+			if terminal != test.terminal || errorCode != test.errorCode {
+				t.Fatalf(
+					"decision=(%v,%q), want (%v,%q)",
+					terminal, errorCode, test.terminal, test.errorCode,
+				)
+			}
+		})
 	}
 }
 

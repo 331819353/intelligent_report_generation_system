@@ -1330,7 +1330,7 @@ func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRe
 
 	searched := []asset.Table{}
 	totalTables, searchTruncated := 0, false
-	// A DWD/DWS editor is pinned to immutable dataset-version inputs. Physical
+	// A DIM/DWD/DWS/ADS editor is pinned to immutable dataset-version inputs. Physical
 	// metadata tables are not compatible replacement candidates and exposing
 	// them here lets the model silently downgrade the layer contract.
 	if len(currentOrder) == 0 || len(physicalRequiredOrder) > 0 {

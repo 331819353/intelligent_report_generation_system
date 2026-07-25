@@ -11,6 +11,8 @@
     "nodes": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/node" } },
     "joins": { "type": "array", "items": { "$ref": "#/$defs/join" } },
     "preAggregations": { "type": "array", "items": { "$ref": "#/$defs/preAggregation" } },
+    "factContract": { "$ref": "#/$defs/factContract" },
+    "analysisContract": { "$ref": "#/$defs/analysisContract" },
     "fields": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/field" } },
     "filters": { "type": "array", "items": { "$ref": "#/$defs/filter" } },
     "groupBy": { "type": "array", "items": { "$ref": "#/$defs/identifier" }, "uniqueItems": true },
@@ -35,8 +37,10 @@
         "type": { "enum": ["SINGLE_SOURCE", "CROSS_SOURCE"] },
         "layer": {
           "description": "数仓加工层级；历史 DSL 可省略并由服务端确定性推断",
-          "enum": ["ODS", "DWD", "DWS"]
-        }
+          "enum": ["ODS", "DIM", "DWD", "DWS", "ADS"]
+        },
+        "semanticContractVersion": { "const": "1.0" },
+        "consumerContractId": { "type": "string", "format": "uuid" }
       }
     },
     "node": {
@@ -79,8 +83,39 @@
         "rightNodeId": { "$ref": "#/$defs/identifier" },
         "joinType": { "enum": ["INNER", "LEFT", "RIGHT", "FULL"] },
         "cardinality": { "enum": ["UNKNOWN", "ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_ONE", "MANY_TO_MANY"] },
+        "relationshipType": { "enum": ["DIRECT", "ROLE_PLAYING", "BRIDGE"] },
+        "relationshipRole": { "$ref": "#/$defs/identifier" },
+        "fanoutPolicy": { "enum": ["SAFE", "PRIMARY", "ALLOCATE", "DEDUPLICATE", "NON_ADDITIVE", "UNSAFE"] },
+        "bridge": { "$ref": "#/$defs/bridgeContract" },
+        "temporal": { "$ref": "#/$defs/temporalJoinContract" },
         "conditions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/joinCondition" } },
         "manualConfirmed": { "type": "boolean" }
+      }
+    },
+    "bridgeContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bridgeNodeId", "relationshipTypeField"],
+      "properties": {
+        "bridgeNodeId": { "$ref": "#/$defs/identifier" },
+        "relationshipTypeField": { "$ref": "#/$defs/physicalIdentifier" },
+        "allocationWeightField": { "$ref": "#/$defs/physicalIdentifier" },
+        "primaryFlagField": { "$ref": "#/$defs/physicalIdentifier" },
+        "validFromField": { "$ref": "#/$defs/physicalIdentifier" },
+        "validToField": { "$ref": "#/$defs/physicalIdentifier" }
+      }
+    },
+    "temporalJoinContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eventNodeId", "eventTimeField", "validityNodeId", "validFromField", "validToField", "validToInclusive"],
+      "properties": {
+        "eventNodeId": { "$ref": "#/$defs/identifier" },
+        "eventTimeField": { "$ref": "#/$defs/physicalIdentifier" },
+        "validityNodeId": { "$ref": "#/$defs/identifier" },
+        "validFromField": { "$ref": "#/$defs/physicalIdentifier" },
+        "validToField": { "$ref": "#/$defs/physicalIdentifier" },
+        "validToInclusive": { "type": "boolean" }
       }
     },
     "joinCondition": {
@@ -124,6 +159,56 @@
         "field": { "$ref": "#/$defs/physicalIdentifier" },
         "function": { "enum": ["SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT"] },
         "expression": { "$ref": "#/$defs/expression" }
+      }
+    },
+    "factContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["businessAction", "grainKeyFields", "atomicMeasures"],
+      "properties": {
+        "businessAction": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "grainKeyFields": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/identifier" } },
+        "eventTimeField": { "$ref": "#/$defs/identifier" },
+        "atomicMeasures": { "type": "array", "items": { "$ref": "#/$defs/atomicMeasureContract" } }
+      }
+    },
+    "atomicMeasureContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "additivity", "nullPolicy"],
+      "properties": {
+        "field": { "$ref": "#/$defs/identifier" },
+        "additivity": { "enum": ["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"] },
+        "unit": { "type": "string", "maxLength": 64 },
+        "currency": { "type": "string", "maxLength": 16 },
+        "nullPolicy": { "enum": ["PRESERVE", "ZERO", "REJECT"] }
+      }
+    },
+    "analysisContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent", "inputMode", "commonGrainFields", "conformedDimensions", "measures"],
+      "properties": {
+        "intent": { "enum": ["TREND", "PERIOD_COMPARISON", "DISTRIBUTION", "RANKING", "TOP_N", "DRILLDOWN", "FUNNEL", "RETENTION", "LIFECYCLE", "ANOMALY", "CONTRIBUTION", "MULTI_FACT_COMPARISON"] },
+        "inputMode": { "enum": ["SINGLE_FACT", "MULTI_FACT"] },
+        "commonGrainFields": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/identifier" } },
+        "conformedDimensions": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/identifier" } },
+        "timeField": { "$ref": "#/$defs/identifier" },
+        "timeGrain": { "enum": ["DAY", "WEEK", "MONTH", "QUARTER", "YEAR"] },
+        "measures": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/analysisMeasureContract" } }
+      }
+    },
+    "analysisMeasureContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "sourceNodeIds", "aggregation", "additivity"],
+      "properties": {
+        "field": { "$ref": "#/$defs/identifier" },
+        "sourceNodeIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/identifier" } },
+        "aggregation": { "enum": ["SUM", "MIN", "MAX", "COUNT", "COUNT_DISTINCT", "AVG"] },
+        "additivity": { "enum": ["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"] },
+        "unit": { "type": "string", "maxLength": 64 },
+        "currency": { "type": "string", "maxLength": 16 }
       }
     },
     "field": {

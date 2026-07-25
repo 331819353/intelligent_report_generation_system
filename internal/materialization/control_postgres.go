@@ -106,7 +106,7 @@ func (store *PostgresStore) EnqueueMappedDatasetMaterializationTx(
 	return err
 }
 
-// EnqueueGovernedDatasetMaterializationTx freezes the exact DWD/DWS version
+// EnqueueGovernedDatasetMaterializationTx freezes the exact DIM/DWD/DWS/ADS version
 // approved in the caller's transaction and registers its PostgreSQL build.
 // The worker performs all physical computation after the approval commits.
 func (store *PostgresStore) EnqueueGovernedDatasetMaterializationTx(
@@ -119,7 +119,10 @@ func (store *PostgresStore) EnqueueGovernedDatasetMaterializationTx(
 		!validUUID(tenantID) || !validUUID(actorID) ||
 		!validUUID(version.DatasetID) || !validUUID(version.ID) ||
 		version.Status != "PUBLISHED" ||
-		(version.Layer != dataset.LayerDWD && version.Layer != dataset.LayerDWS) {
+		(version.Layer != dataset.LayerDIM &&
+			version.Layer != dataset.LayerDWD &&
+			version.Layer != dataset.LayerDWS &&
+			version.Layer != dataset.LayerADS) {
 		return ErrInvalidRequest
 	}
 	_, _, err := store.registerCurrentTx(
@@ -345,10 +348,14 @@ func deriveCurrentInputsTx(
 			return nil, nil, err
 		}
 		return []InputSnapshot{input}, []int{1}, nil
-	case LayerDWD, LayerDWS:
-		expectedLayer := LayerODS
-		if target.Layer == LayerDWS {
-			expectedLayer = LayerDWD
+	case LayerDIM, LayerDWD, LayerDWS, LayerADS:
+		allowedLayers := map[Layer]bool{LayerODS: true}
+		if target.Layer == LayerDWD {
+			allowedLayers = map[Layer]bool{LayerODS: true, LayerDIM: true}
+		} else if target.Layer == LayerDWS {
+			allowedLayers = map[Layer]bool{LayerDWD: true}
+		} else if target.Layer == LayerADS {
+			allowedLayers = map[Layer]bool{LayerDWS: true}
 		}
 		inputs := make([]InputSnapshot, 0, len(target.Document.Nodes))
 		ordinals := make([]int, len(target.Document.Nodes))
@@ -362,7 +369,7 @@ func deriveCurrentInputsTx(
 				continue
 			}
 			input, upstreamDatasetID, err := deriveDatasetInputTx(
-				ctx, tx, node.DatasetVersionID, expectedLayer,
+				ctx, tx, node.DatasetVersionID, allowedLayers,
 			)
 			if err != nil {
 				return nil, nil, err
@@ -377,6 +384,15 @@ func deriveCurrentInputsTx(
 		}
 		if len(inputs) == 0 {
 			return nil, nil, ErrInvalidRequest
+		}
+		if target.Layer == LayerDWD {
+			hasODSInput := false
+			for _, input := range inputs {
+				hasODSInput = hasODSInput || input.Layer == string(LayerODS)
+			}
+			if !hasODSInput {
+				return nil, nil, ErrInvalidRequest
+			}
 		}
 		return inputs, ordinals, nil
 	default:
@@ -511,7 +527,7 @@ func deriveDatasetInputTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	versionID string,
-	expectedLayer Layer,
+	allowedLayers map[Layer]bool,
 ) (InputSnapshot, string, error) {
 	var datasetID, storedVersionID, storedLayer, versionHash string
 	var materializationID, materializationLayer, materializationHash string
@@ -549,8 +565,8 @@ func deriveDatasetInputTx(
 	if err != nil {
 		return InputSnapshot{}, "", err
 	}
-	if storedLayer != string(expectedLayer) ||
-		materializationLayer != string(expectedLayer) ||
+	if !allowedLayers[Layer(storedLayer)] ||
+		materializationLayer != storedLayer ||
 		versionHash != materializationHash ||
 		!hashPattern.MatchString(versionHash) ||
 		!hashPattern.MatchString(snapshotHash) ||
@@ -567,7 +583,7 @@ func deriveDatasetInputTx(
 		return InputSnapshot{}, "", err
 	}
 	return InputSnapshot{
-		Type: InputMaterialization, Layer: string(expectedLayer),
+		Type: InputMaterialization, Layer: storedLayer,
 		MaterializationID: materializationID,
 		SourceVersion:     fmt.Sprintf("dataset-version:%d", versionNo),
 		SchemaHash:        versionHash, SnapshotHash: snapshotHash,
@@ -638,7 +654,8 @@ func deriveBuildPlan(
 	if hasFilter {
 		appendStep("filter", NodeFilter)
 	}
-	if target.Layer == LayerDWS {
+	if target.Layer == LayerDWS ||
+		(target.Layer == LayerADS && documentUsesAggregation(target.Document)) {
 		appendStep("aggregate", NodeAggregate)
 		if len(target.Document.Having) > 0 {
 			appendStep("having", NodeFilter)
@@ -647,6 +664,44 @@ func deriveBuildPlan(
 	appendStep("project", NodeProject)
 	appendStep("materialize", NodeMaterialize)
 	return plan, nil
+}
+
+func documentUsesAggregation(document dataset.Document) bool {
+	if len(document.GroupBy) > 0 || len(document.PreAggregations) > 0 ||
+		len(document.Having) > 0 {
+		return true
+	}
+	var containsAggregate func(dataset.Expression) bool
+	containsAggregate = func(expression dataset.Expression) bool {
+		if expression.Type == "AGGREGATE" {
+			return true
+		}
+		for _, child := range []*dataset.Expression{
+			expression.Argument, expression.Left, expression.Right,
+			expression.Lower, expression.Upper, expression.Else,
+		} {
+			if child != nil && containsAggregate(*child) {
+				return true
+			}
+		}
+		for _, child := range expression.Arguments {
+			if containsAggregate(child) {
+				return true
+			}
+		}
+		for _, branch := range expression.Whens {
+			if containsAggregate(branch.When) || containsAggregate(branch.Then) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, field := range document.Fields {
+		if containsAggregate(field.Expression) {
+			return true
+		}
+	}
+	return false
 }
 
 func (store *PostgresStore) ListBuilds(

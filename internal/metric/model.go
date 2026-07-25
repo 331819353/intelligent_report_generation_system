@@ -200,12 +200,21 @@ type PublishInput struct {
 	ValidationParameters       map[string]any `json:"validationParameters"`
 }
 
-// PreviewInput 只允许选择定义声明的维度并传入数据集参数。
+// DimensionFilter 是指标运行时唯一允许追加的维度值过滤。
+// 字段必须属于指标已发布定义的 allowedDimensions，值始终通过参数绑定传递。
+type DimensionFilter struct {
+	FieldID  string `json:"fieldId"`
+	Operator string `json:"operator"`
+	Value    any    `json:"value"`
+}
+
+// PreviewInput 只允许选择定义声明的维度、添加受控维度过滤并传入数据集参数。
 type PreviewInput struct {
-	QueryID           string         `json:"queryId,omitempty"`
-	Parameters        map[string]any `json:"parameters"`
-	DimensionFieldIDs []string       `json:"dimensionFieldIds"`
-	MaxRows           int            `json:"maxRows,omitempty"`
+	QueryID           string            `json:"queryId,omitempty"`
+	Parameters        map[string]any    `json:"parameters"`
+	DimensionFieldIDs []string          `json:"dimensionFieldIds"`
+	DimensionFilters  []DimensionFilter `json:"dimensionFilters,omitempty"`
+	MaxRows           int               `json:"maxRows,omitempty"`
 }
 
 type VersionTransitionInput struct {
@@ -233,6 +242,16 @@ type QueryCandidate struct {
 	DatasetVersionID string
 	DSL              json.RawMessage
 	PlanHash         string
+	FilterBindings   []QueryFilterBinding
+}
+
+// QueryFilterBinding 让查询运行时可独立复核派生 DSL 中新增过滤的确切形状。
+// 它不保存成员值，成员值只存在于本次执行的参数映射中。
+type QueryFilterBinding struct {
+	FieldID       string
+	FilterID      string
+	ParameterCode string
+	DataType      string
 }
 
 // Store 定义指标草稿、不可变版本和精确依赖解析的持久化边界。

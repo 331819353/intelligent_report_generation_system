@@ -51,7 +51,7 @@ async function resolveDatasetVersions(versionIDs: string[], datasets: DatasetSum
   const unresolved = () => [...targets].filter(versionID => !resolved.has(versionID))
   if (!unresolved().length) return resolved
 
-  // DWD/DWS 必须固定精确上游版本。当前发布指针已经推进时，按可见数据集的发布
+  // DIM/DWD/DWS/ADS 必须固定精确上游版本。当前发布指针已经推进时，按可见数据集的发布
   // 历史定位旧版本，避免把草稿悄悄切换到新的上游版本。
   const history = await Promise.all(datasets.map(async dataset => ({
     dataset,
@@ -204,10 +204,48 @@ export async function hydrateDatasetDraft(record: DatasetRecord, tables: AssetTa
   }
   const persistedOutputKeys = new Set(fields.map(field => field.key))
   const joins: JoinOption[] = list(dsl.joins).map(object).map(raw => {
-    const conditions = list(raw.conditions).map(object).map((condition, index) => ({ id: `${text(raw.id)}_condition_${index + 1}`, leftField: text(object(condition.leftExpression).field), rightField: text(object(condition.rightExpression).field) }))
+    const conditions = list(raw.conditions).map(object).map((condition, index) => ({
+      id: `${text(raw.id)}_condition_${index + 1}`,
+      leftField: text(object(condition.leftExpression).field),
+      rightField: text(object(condition.rightExpression).field),
+      operator: (text(condition.operator) || 'EQUALS') as 'EQUALS' | 'NOT_EQUALS' | 'GT' | 'GTE' | 'LT' | 'LTE',
+    }))
     const first = conditions[0] ?? { leftField: '', rightField: '' }
     const generatedJoinReady = systemGeneratedDWD && conditions.length > 0 && conditions.every(condition => condition.leftField && condition.rightField)
-    return { id: text(raw.id), leftNodeId: text(raw.leftNodeId), rightNodeId: text(raw.rightNodeId), leftField: first.leftField, rightField: first.rightField, joinType: text(raw.joinType), cardinality: text(raw.cardinality) || 'UNKNOWN', manualConfirmed: generatedJoinReady || Boolean(raw.manualConfirmed), conditions }
+    return {
+      id: text(raw.id),
+      leftNodeId: text(raw.leftNodeId),
+      rightNodeId: text(raw.rightNodeId),
+      leftField: first.leftField,
+      rightField: first.rightField,
+      joinType: text(raw.joinType),
+      cardinality: text(raw.cardinality) || 'UNKNOWN',
+      relationshipType: text(raw.relationshipType),
+      relationshipRole: text(raw.relationshipRole),
+      fanoutPolicy: text(raw.fanoutPolicy),
+      ...(raw.bridge && typeof raw.bridge === 'object' ? {
+        bridge: {
+          bridgeNodeId: text(object(raw.bridge).bridgeNodeId),
+          relationshipTypeField: text(object(raw.bridge).relationshipTypeField),
+          allocationWeightField: text(object(raw.bridge).allocationWeightField),
+          primaryFlagField: text(object(raw.bridge).primaryFlagField),
+          validFromField: text(object(raw.bridge).validFromField),
+          validToField: text(object(raw.bridge).validToField),
+        },
+      } : {}),
+      ...(raw.temporal && typeof raw.temporal === 'object' ? {
+        temporal: {
+          eventNodeId: text(object(raw.temporal).eventNodeId),
+          eventTimeField: text(object(raw.temporal).eventTimeField),
+          validityNodeId: text(object(raw.temporal).validityNodeId),
+          validFromField: text(object(raw.temporal).validFromField),
+          validToField: text(object(raw.temporal).validToField),
+          validToInclusive: Boolean(object(raw.temporal).validToInclusive),
+        },
+      } : {}),
+      manualConfirmed: generatedJoinReady || Boolean(raw.manualConfirmed),
+      conditions,
+    }
   })
   const configuredKeys = new Set(fields.map(field => field.key))
   for (const node of nodes) {
@@ -271,7 +309,13 @@ export async function hydrateDatasetDraft(record: DatasetRecord, tables: AssetTa
     ? expandSystemDWDDesignerGraph(hydratedDesigner, nodes, graphFields)
     : hydratedDesigner
   return {
-    code: record.code, name: record.name, description: record.description,
+    code: record.code, name: record.name, description: record.description, layer: record.layer,
+    semanticContractVersion: text(object(dsl.dataset).semanticContractVersion),
+    consumerContractId: text(object(dsl.dataset).consumerContractId),
+    ...(dsl.factContract && typeof dsl.factContract === 'object'
+      ? { factContract: object(dsl.factContract) } : {}),
+    ...(dsl.analysisContract && typeof dsl.analysisContract === 'object'
+      ? { analysisContract: object(dsl.analysisContract) } : {}),
     nodes: nodes.map(node => ({ ...node, groupingEnabled: groupedNodeIDs.has(node.id) })),
     fields: graphFields, joins, filters, parameters, calculations,
     sorts: list(dsl.sorts).map(object).map(raw => ({ fieldId: idToCode.get(text(raw.fieldId)) ?? text(raw.fieldId), direction: text(raw.direction) })),

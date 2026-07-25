@@ -2,6 +2,7 @@ package semanticmanagement
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/jackc/pgx/v5"
@@ -876,6 +877,12 @@ func (s *PostgresStore) ProposeCompatibility(
 			input.MetricVersionID, input.MetricDatasetVersionID, false); err != nil {
 			return err
 		}
+		if err := requireCompatibilityPath(
+			ctx, tx, input.DimensionID, input.MetricDatasetVersionID,
+			input.CompatibilityType, input.FanoutPolicy, input.JoinPath, false,
+		); err != nil {
+			return err
+		}
 		row := tx.QueryRow(ctx, `INSERT INTO platform.dimension_metric_compatibility(
 				tenant_id,dimension_id,metric_id,metric_version_id,metric_dataset_version_id,
 				compatibility_type,fanout_policy,join_path_json,evidence_source,confidence,
@@ -901,6 +908,37 @@ func (s *PostgresStore) UpdateCompatibility(
 ) (item DimensionMetricCompatibility, err error) {
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		if err := lockSemanticGovernanceWriteGate(ctx, tx); err != nil {
+			return err
+		}
+		var dimensionID, metricID, metricVersionID, metricDatasetVersionID, status string
+		var currentVersion int64
+		err := tx.QueryRow(ctx, `SELECT dimension_id::text,metric_id::text,
+				metric_version_id::text,metric_dataset_version_id::text,status,version
+			FROM platform.dimension_metric_compatibility
+			WHERE id=$1::uuid
+			FOR UPDATE`, id).Scan(
+			&dimensionID, &metricID, &metricVersionID,
+			&metricDatasetVersionID, &status, &currentVersion,
+		)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if status != "PROPOSED" || currentVersion != input.ExpectedVersion {
+			return ErrConflict
+		}
+		if err := requireCompatibilitySubjects(
+			ctx, tx, dimensionID, metricID, metricVersionID,
+			metricDatasetVersionID, false,
+		); err != nil {
+			return err
+		}
+		if err := requireCompatibilityPath(
+			ctx, tx, dimensionID, metricDatasetVersionID,
+			input.CompatibilityType, input.FanoutPolicy, input.JoinPath, false,
+		); err != nil {
 			return err
 		}
 		row := tx.QueryRow(ctx, `UPDATE platform.dimension_metric_compatibility SET
@@ -933,14 +971,15 @@ func (s *PostgresStore) DecideCompatibility(
 			return err
 		}
 		var dimensionID, metricID, metricVersionID, metricDatasetVersionID string
-		var fanout, status string
+		var compatibilityType, fanout, status string
+		var joinPath []byte
 		var version int64
 		err := tx.QueryRow(ctx, `SELECT dimension_id::text,metric_id::text,
 				metric_version_id::text,metric_dataset_version_id::text,
-				fanout_policy,status,version
+				compatibility_type,fanout_policy,join_path_json,status,version
 			FROM platform.dimension_metric_compatibility WHERE id=$1::uuid FOR UPDATE`, id).
 			Scan(&dimensionID, &metricID, &metricVersionID, &metricDatasetVersionID,
-				&fanout, &status, &version)
+				&compatibilityType, &fanout, &joinPath, &status, &version)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -956,6 +995,12 @@ func (s *PostgresStore) DecideCompatibility(
 			}
 			if err := requireCompatibilitySubjects(ctx, tx, dimensionID, metricID,
 				metricVersionID, metricDatasetVersionID, true); err != nil {
+				return err
+			}
+			if err := requireCompatibilityPath(
+				ctx, tx, dimensionID, metricDatasetVersionID,
+				compatibilityType, fanout, joinPath, true,
+			); err != nil {
 				return err
 			}
 		}
@@ -980,6 +1025,132 @@ const bareCompatibilityColumns = `id::text,dimension_id::text,metric_id::text,
 	fanout_policy,join_path_json,evidence_source,confidence,status,version,
 	COALESCE(verified_by::text,''),verified_at,COALESCE(created_by::text,''),
 	COALESCE(updated_by::text,''),created_at,updated_at`
+
+func requireCompatibilityPath(
+	ctx context.Context,
+	tx pgx.Tx,
+	dimensionID, metricDatasetVersionID, compatibilityType, fanoutPolicy string,
+	joinPath json.RawMessage,
+	requireActiveMaterializations bool,
+) error {
+	normalized, valid := normalizeCompatibilityJoinPath(
+		joinPath, compatibilityType, fanoutPolicy,
+	)
+	if !valid {
+		return ErrInvalidRequest
+	}
+	var hops []CompatibilityJoinHop
+	if err := json.Unmarshal(normalized, &hops); err != nil {
+		return ErrInvalidRequest
+	}
+	var dimensionDatasetVersionID, dimensionFieldID string
+	err := tx.QueryRow(ctx, `SELECT dataset_version_id::text,field_id
+		FROM platform.semantic_dimensions
+		WHERE id=$1::uuid AND status<>'DEPRECATED'`,
+		dimensionID,
+	).Scan(&dimensionDatasetVersionID, &dimensionFieldID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrConflict
+	}
+	if err != nil {
+		return err
+	}
+	if len(hops) == 0 {
+		if dimensionDatasetVersionID != metricDatasetVersionID {
+			return ErrInvalidRequest
+		}
+		return nil
+	}
+	if hops[0].FromDatasetVersionID != dimensionDatasetVersionID ||
+		hops[0].FromFieldID != dimensionFieldID ||
+		hops[len(hops)-1].ToDatasetVersionID != metricDatasetVersionID {
+		return ErrInvalidRequest
+	}
+	for _, hop := range hops {
+		var available bool
+		err := tx.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1
+			FROM platform.dataset_versions AS source_version
+			JOIN platform.datasets AS source_dataset
+			  ON source_dataset.tenant_id=source_version.tenant_id
+			  AND source_dataset.id=source_version.dataset_id
+			  AND source_dataset.layer='DWS'
+			  AND source_dataset.status='PUBLISHED'
+			  AND source_dataset.current_published_version_id=source_version.id
+			  AND source_dataset.deleted_at IS NULL
+			JOIN platform.dataset_fields AS source_field
+			  ON source_field.tenant_id=source_version.tenant_id
+			  AND source_field.dataset_version_id=source_version.id
+			  AND source_field.field_id=$2
+			  AND source_field.field_role IN (
+			    'DIMENSION','ATTRIBUTE','TIME','IDENTIFIER'
+			  )
+			JOIN platform.dataset_versions AS target_version
+			  ON target_version.tenant_id=source_version.tenant_id
+			  AND target_version.id=$3::uuid
+			  AND target_version.layer='DWS'
+			  AND target_version.status='PUBLISHED'
+			JOIN platform.datasets AS target_dataset
+			  ON target_dataset.tenant_id=target_version.tenant_id
+			  AND target_dataset.id=target_version.dataset_id
+			  AND target_dataset.layer='DWS'
+			  AND target_dataset.status='PUBLISHED'
+			  AND target_dataset.current_published_version_id=target_version.id
+			  AND target_dataset.deleted_at IS NULL
+			JOIN platform.dataset_fields AS target_field
+			  ON target_field.tenant_id=target_version.tenant_id
+			  AND target_field.dataset_version_id=target_version.id
+			  AND target_field.field_id=$4
+			  AND target_field.field_role IN (
+			    'DIMENSION','ATTRIBUTE','TIME','IDENTIFIER'
+			  )
+			WHERE source_version.id=$1::uuid
+			  AND source_version.layer='DWS'
+			  AND source_version.status='PUBLISHED'
+			  AND (
+			    source_field.canonical_type=target_field.canonical_type
+			    OR (
+			      source_field.canonical_type IN ('INTEGER','DECIMAL')
+			      AND target_field.canonical_type IN ('INTEGER','DECIMAL')
+			    )
+			  )
+			  AND (
+			    NOT $5
+			    OR (
+			      EXISTS(
+			        SELECT 1
+			        FROM platform.dataset_materializations AS materialization
+			        WHERE materialization.tenant_id=source_version.tenant_id
+			          AND materialization.dataset_id=source_version.dataset_id
+			          AND materialization.dataset_version_id=source_version.id
+			          AND materialization.layer='DWS'
+			          AND materialization.status='ACTIVE'
+			      )
+			      AND EXISTS(
+			        SELECT 1
+			        FROM platform.dataset_materializations AS materialization
+			        WHERE materialization.tenant_id=target_version.tenant_id
+			          AND materialization.dataset_id=target_version.dataset_id
+			          AND materialization.dataset_version_id=target_version.id
+			          AND materialization.layer='DWS'
+			          AND materialization.status='ACTIVE'
+			      )
+			    )
+			  )
+		)`,
+			hop.FromDatasetVersionID, hop.FromFieldID,
+			hop.ToDatasetVersionID, hop.ToFieldID,
+			requireActiveMaterializations,
+		).Scan(&available)
+		if err != nil {
+			return err
+		}
+		if !available {
+			return ErrConflict
+		}
+	}
+	return nil
+}
 
 func requireCompatibilitySubjects(
 	ctx context.Context,
@@ -1049,17 +1220,51 @@ func requireCompatibilitySubjects(
 func (s *PostgresStore) SearchMemberMetrics(ctx context.Context, tenantID, actorID, query string, limit int) (items []MemberMetricSearchResult, err error) {
 	items = []MemberMetricSearchResult{}
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		rows, queryErr := tx.Query(ctx, memberReadScopeCTE+` SELECT
-				COALESCE(matched_alias.alias,member.canonical_label),
-				CASE WHEN matched_alias.id IS NULL THEN 'MEMBER_VALUE' ELSE 'MEMBER_ALIAS' END,
+		rows, queryErr := tx.Query(ctx, memberReadScopeCTE+`,
+			matched_member_candidates AS MATERIALIZED (
+				SELECT member.tenant_id,member.id AS member_id,
+					member.canonical_label AS matched_value,
+					'MEMBER_VALUE'::text AS match_type,1 AS match_priority
+				FROM platform.dimension_members AS member
+				WHERE member.tenant_id=platform.current_tenant_id()
+				  AND member.status='ACTIVE'
+				  AND member.normalized_value=$2
+				UNION ALL
+				SELECT alias.tenant_id,alias.dimension_member_id,
+					alias.alias,'MEMBER_ALIAS'::text,0
+				FROM platform.dimension_member_aliases AS alias
+				JOIN platform.dimension_members AS member
+				  ON member.tenant_id=alias.tenant_id
+				  AND member.dimension_id=alias.dimension_id
+				  AND member.id=alias.dimension_member_id
+				  AND member.status='ACTIVE'
+				WHERE alias.tenant_id=platform.current_tenant_id()
+				  AND alias.normalized_alias=$2
+				  AND (alias.valid_from IS NULL OR alias.valid_from<=now())
+				  AND (alias.valid_to IS NULL OR alias.valid_to>now())
+			), matched_members AS MATERIALIZED (
+				SELECT DISTINCT ON (tenant_id,member_id)
+					tenant_id,member_id,matched_value,match_type,match_priority
+				FROM matched_member_candidates
+				ORDER BY tenant_id,member_id,match_priority,matched_value
+			)
+			SELECT
+				matched_member.matched_value,matched_member.match_type,
 				dimension.id::text,dimension.code::text,dimension.name,
+				dimension.dataset_id::text,dimension.dataset_version_id::text,
+				dimension.field_id,
 				member.id::text,member.member_key,member.canonical_label,
 				metric.id::text,version.id::text,metric.code::text,metric.name,
 				dataset.id::text,version.dataset_version_id::text,
 				dataset.code::text,dataset.name,compatibility.compatibility_type,
-				compatibility.fanout_policy,metric_materialization.published_schema,
+				compatibility.fanout_policy,compatibility.join_path_json,
+				compatibility.evidence_source,
+				metric_materialization.published_schema,
 				metric_materialization.published_name
-			FROM platform.dimension_members AS member
+			FROM matched_members AS matched_member
+			JOIN platform.dimension_members AS member
+			  ON member.tenant_id=matched_member.tenant_id
+			  AND member.id=matched_member.member_id
 			JOIN platform.semantic_dimensions AS dimension
 			  ON dimension.tenant_id=member.tenant_id AND dimension.id=member.dimension_id
 			JOIN platform.dataset_fields AS dimension_field
@@ -1080,17 +1285,6 @@ func (s *PostgresStore) SearchMemberMetrics(ctx context.Context, tenantID, actor
 			  AND dimension_dataset.current_published_version_id=
 			    dimension_version.id
 			  AND dimension_dataset.deleted_at IS NULL
-			LEFT JOIN LATERAL (
-				SELECT alias.id,alias.alias
-				FROM platform.dimension_member_aliases AS alias
-				WHERE alias.tenant_id=member.tenant_id
-				  AND alias.dimension_id=member.dimension_id
-				  AND alias.dimension_member_id=member.id
-				  AND alias.normalized_alias=$2
-				  AND (alias.valid_from IS NULL OR alias.valid_from<=now())
-				  AND (alias.valid_to IS NULL OR alias.valid_to>now())
-				ORDER BY alias.id LIMIT 1
-			) AS matched_alias ON true
 			JOIN platform.dimension_metric_compatibility AS compatibility
 			  ON compatibility.tenant_id=dimension.tenant_id
 			  AND compatibility.dimension_id=dimension.id
@@ -1167,10 +1361,9 @@ func (s *PostgresStore) SearchMemberMetrics(ctx context.Context, tenantID, actor
 			  AND member.last_refresh_job_id=dimension_refresh_job.id
 			  AND NOT dimension.sensitive
 			  AND dimension.member_index_policy='FULL'
-			  AND (member.normalized_value=$2 OR matched_alias.id IS NOT NULL)
 			`+authorizedDimensionMemberPredicate+authorizedMetricDatasetPredicate+`
 			ORDER BY
-			  CASE WHEN matched_alias.id IS NULL THEN 1 ELSE 0 END,
+			  matched_member.match_priority,
 			  metric.name,metric.id,member.id
 			LIMIT $3`, actorID, query, limit)
 		if queryErr != nil {
@@ -1181,12 +1374,14 @@ func (s *PostgresStore) SearchMemberMetrics(ctx context.Context, tenantID, actor
 			var item MemberMetricSearchResult
 			if err := rows.Scan(
 				&item.MatchedValue, &item.MatchType, &item.DimensionID,
-				&item.DimensionCode, &item.DimensionName, &item.DimensionMemberID,
-				&item.MemberKey, &item.CanonicalLabel, &item.MetricID,
-				&item.MetricVersionID, &item.MetricCode, &item.MetricName,
-				&item.DatasetID, &item.DatasetVersionID, &item.DatasetCode,
-				&item.DatasetName, &item.CompatibilityType, &item.FanoutPolicy,
-				&item.PublishedSchema, &item.PublishedName,
+				&item.DimensionCode, &item.DimensionName,
+				&item.DimensionDatasetID, &item.DimensionDatasetVersionID,
+				&item.DimensionFieldID, &item.DimensionMemberID, &item.MemberKey,
+				&item.CanonicalLabel, &item.MetricID, &item.MetricVersionID,
+				&item.MetricCode, &item.MetricName, &item.DatasetID,
+				&item.DatasetVersionID, &item.DatasetCode, &item.DatasetName,
+				&item.CompatibilityType, &item.FanoutPolicy, &item.JoinPath,
+				&item.EvidenceSource, &item.PublishedSchema, &item.PublishedName,
 			); err != nil {
 				return err
 			}

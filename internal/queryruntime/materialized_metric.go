@@ -68,9 +68,25 @@ func materializedMetricDocument(
 	}}
 	derived.Joins = []dataset.Join{}
 	derived.PreAggregations = []dataset.PreAggregation{}
-	derived.Filters = []dataset.Filter{}
+	derived.Filters = append(
+		[]dataset.Filter(nil),
+		derived.Filters[len(original.Filters):]...,
+	)
+	for index := range derived.Filters {
+		rewritten, err := rewriteMaterializedExpression(
+			derived.Filters[index].Expression,
+			replacements,
+		)
+		if err != nil {
+			return dataset.Document{}, err
+		}
+		derived.Filters[index].Expression = rewritten
+	}
 	derived.Having = []dataset.Filter{}
-	derived.Parameters = []dataset.Parameter{}
+	derived.Parameters = append(
+		[]dataset.Parameter(nil),
+		derived.Parameters[len(original.Parameters):]...,
+	)
 	derived.Designer = nil
 	if err := dataset.Validate(derived); err != nil {
 		return dataset.Document{}, err

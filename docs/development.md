@@ -19,7 +19,7 @@ npm --prefix web install
 | 服务 | 地址 | 用途 |
 |---|---|---|
 | PostgreSQL（控制面） | `127.0.0.1:5432` | 系统、数据源、数据集、指标、配置、版本和审计 |
-| PostgreSQL（数据面） | `127.0.0.1:5433` | ODS、DWD、DWS 物理表和发布视图 |
+| PostgreSQL（数据面） | `127.0.0.1:5433` | ODS、DIM、DWD、DWS、ADS 物理表和发布视图 |
 | Redis | `127.0.0.1:6379` | 查询缓存、分布式状态和短期任务协调 |
 | MinIO API | `127.0.0.1:9000` | 报告 JSON、Excel、附件、快照和 PDF |
 | MinIO Console | `http://127.0.0.1:9001` | 本地对象存储管理界面 |
@@ -200,6 +200,9 @@ make build
 make frontend-lint
 make frontend-test
 make frontend-build
+make db-verify
+make warehouse-verify
+make semantic-qa-verify
 ```
 
 集成测试将在本地基础设施任务完成后逐步增加：
@@ -207,6 +210,10 @@ make frontend-build
 ```bash
 make test-integration
 ```
+
+Semantic QA 的空库迁移、租户开关、graph generation、ChangeSet、查询证据和 DWS
+自动任务说明分别见 [自动建模规则](semantic-qa-automation-rules.md)、
+[API](api-semantic-qa.md) 和[运维手册](semantic-qa-operations.md)。
 
 ## 外部数据库连接
 

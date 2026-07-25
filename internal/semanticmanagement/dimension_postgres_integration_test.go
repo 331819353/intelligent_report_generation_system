@@ -716,8 +716,8 @@ func TestPostgresDimensionRefreshCompatibilityAnd690Search(t *testing.T) {
 		DimensionMemberFilter{
 			Page: Page{Limit: 20}, DimensionID: dimension.ID,
 		},
-	); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("cross-tenant dimension did not remain nonexistent: %v", err)
+	); !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrMemberAccessDenied) {
+		t.Fatalf("cross-tenant dimension existence was exposed: %v", err)
 	}
 
 	replayed, created, err := service.CreateRefreshJob(
@@ -1432,15 +1432,31 @@ func createSemanticPublishedDatasetFixture(
 		logicalPlan, actorID, layer); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO platform.dataset_versions(
+	publishedInsert := `INSERT INTO platform.dataset_versions(
 		id,tenant_id,dataset_id,version_no,status,dsl_version,dsl_json,
 		schema_hash,logical_plan_json,plan_hash,created_by,updated_by,
 		published_at,published_by,source_draft_version_id,
 		source_draft_record_version,layer
 	) VALUES($1,$2,$3,2,'PUBLISHING','1.0',$4,$5,$6,$5,$7,$7,
-		now(),$7,$8,1,$9)`,
+		now(),$7,$8,1,$9)`
+	hasPublicationOrigin, err := semanticFixtureHasPublicationOrigin(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if hasPublicationOrigin {
+		publishedInsert = `INSERT INTO platform.dataset_versions(
+			id,tenant_id,dataset_id,version_no,status,dsl_version,dsl_json,
+			schema_hash,logical_plan_json,plan_hash,created_by,updated_by,
+			published_at,published_by,source_draft_version_id,
+			source_draft_record_version,layer,publication_origin
+		) VALUES($1,$2,$3,2,'PUBLISHING','1.0',$4,$5,$6,$5,$7,$7,
+			now(),$7,$8,1,$9,'DIRECT')`
+	}
+	if _, err := tx.Exec(
+		ctx, publishedInsert,
 		publishedID, tenantID, datasetID, dsl, semanticDimensionTestSchemaHash,
-		logicalPlan, actorID, draftID, layer); err != nil {
+		logicalPlan, actorID, draftID, layer,
+	); err != nil {
 		return err
 	}
 	if includeSemanticFields {
@@ -1472,7 +1488,7 @@ func createSemanticPublishedDatasetFixture(
 		SET status='PUBLISHED' WHERE id=$1`, publishedID); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `UPDATE platform.datasets SET
+	_, err = tx.Exec(ctx, `UPDATE platform.datasets SET
 		current_draft_version_id=$1,current_published_version_id=$2
 		WHERE id=$3`, draftID, publishedID, datasetID)
 	return err
@@ -1659,14 +1675,28 @@ func assertOldPublishedVersionCannotReuseProfile(
 	err := database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
 		dsl := json.RawMessage(`{"dataset":{"code":"profile-fence"},"nodes":[]}`)
 		logicalPlan := json.RawMessage(`{"nodes":[]}`)
-		if _, err := tx.Exec(ctx, `INSERT INTO platform.dataset_versions(
+		publishedInsert := `INSERT INTO platform.dataset_versions(
 				id,tenant_id,dataset_id,version_no,status,dsl_version,dsl_json,
 				schema_hash,logical_plan_json,plan_hash,created_by,updated_by,
 				published_at,published_by,source_draft_version_id,
 				source_draft_record_version,layer
 			) VALUES($1,$2,$3,99,'PUBLISHING','1.0',$4,$5,$6,$5,$7,$7,
-				now(),$7,$8,1,'DWS')`,
-			newPublishedVersionID, tenantID, datasetID, dsl,
+				now(),$7,$8,1,'DWS')`
+		hasPublicationOrigin, err := semanticFixtureHasPublicationOrigin(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if hasPublicationOrigin {
+			publishedInsert = `INSERT INTO platform.dataset_versions(
+				id,tenant_id,dataset_id,version_no,status,dsl_version,dsl_json,
+				schema_hash,logical_plan_json,plan_hash,created_by,updated_by,
+				published_at,published_by,source_draft_version_id,
+				source_draft_record_version,layer,publication_origin
+			) VALUES($1,$2,$3,99,'PUBLISHING','1.0',$4,$5,$6,$5,$7,$7,
+				now(),$7,$8,1,'DWS','DIRECT')`
+		}
+		if _, err := tx.Exec(
+			ctx, publishedInsert, newPublishedVersionID, tenantID, datasetID, dsl,
 			semanticDimensionTestSchemaHash, logicalPlan, actorID, draftID,
 		); err != nil {
 			return err
@@ -1696,7 +1726,7 @@ func assertOldPublishedVersionCannotReuseProfile(
 			WHERE id=$2::uuid`, newPublishedVersionID, datasetID); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO platform.semantic_dimensions(
+		_, err = tx.Exec(ctx, `INSERT INTO platform.semantic_dimensions(
 				tenant_id,dataset_id,dataset_version_id,field_id,code,name,
 				description,dimension_type,member_index_policy,
 				high_cardinality,sensitive,status,definition_hash,
@@ -1716,6 +1746,21 @@ func assertOldPublishedVersionCannotReuseProfile(
 		return fmt.Errorf("old version fence returned unexpected error: %w", err)
 	}
 	return nil
+}
+
+func semanticFixtureHasPublicationOrigin(
+	ctx context.Context,
+	tx pgx.Tx,
+) (bool, error) {
+	var present bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1
+		FROM information_schema.columns
+		WHERE table_schema='platform'
+		  AND table_name='dataset_versions'
+		  AND column_name='publication_origin'
+	)`).Scan(&present)
+	return present, err
 }
 
 func postgresErrorCode(err error) string {

@@ -256,9 +256,14 @@ func (s *DimensionService) ListCompatibilities(ctx context.Context, tenantID str
 
 func (s *DimensionService) ProposeCompatibility(ctx context.Context, tenantID, actorID string, input ProposeCompatibilityInput) (DimensionMetricCompatibility, error) {
 	normalizeCompatibility(&input)
-	if s == nil || s.store == nil || !validActor(tenantID, actorID) || !validCompatibility(input) {
+	joinPath, joinPathValid := normalizeCompatibilityJoinPath(
+		input.JoinPath, input.CompatibilityType, input.FanoutPolicy,
+	)
+	if s == nil || s.store == nil || !validActor(tenantID, actorID) ||
+		!validCompatibility(input) || !joinPathValid {
 		return DimensionMetricCompatibility{}, ErrInvalidRequest
 	}
+	input.JoinPath = joinPath
 	return s.store.ProposeCompatibility(ctx, tenantID, actorID, input)
 }
 
@@ -266,13 +271,16 @@ func (s *DimensionService) UpdateCompatibility(ctx context.Context, tenantID, ac
 	input.CompatibilityType = strings.ToUpper(strings.TrimSpace(input.CompatibilityType))
 	input.FanoutPolicy = strings.ToUpper(strings.TrimSpace(input.FanoutPolicy))
 	input.EvidenceSource = strings.ToUpper(strings.TrimSpace(input.EvidenceSource))
-	input.JoinPath = normalizeJSONArray(input.JoinPath)
+	joinPath, joinPathValid := normalizeCompatibilityJoinPath(
+		input.JoinPath, input.CompatibilityType, input.FanoutPolicy,
+	)
 	if s == nil || s.store == nil || !validActor(tenantID, actorID) || !validUUID(id) ||
 		input.ExpectedVersion < 1 || !has(compatibilityTypes, input.CompatibilityType) ||
 		!has(fanoutPolicies, input.FanoutPolicy) || !has(evidenceSources, input.EvidenceSource) ||
-		!validConfidence(input.Confidence) || !validSafeJSONArray(input.JoinPath, 262144) {
+		!validConfidence(input.Confidence) || !joinPathValid {
 		return DimensionMetricCompatibility{}, ErrInvalidRequest
 	}
+	input.JoinPath = joinPath
 	return s.store.UpdateCompatibility(ctx, tenantID, actorID, id, input)
 }
 
@@ -300,8 +308,7 @@ func validCompatibility(input ProposeCompatibilityInput) bool {
 	return validUUID(input.DimensionID) && validUUID(input.MetricID) &&
 		validUUID(input.MetricVersionID) && validUUID(input.MetricDatasetVersionID) &&
 		has(compatibilityTypes, input.CompatibilityType) && has(fanoutPolicies, input.FanoutPolicy) &&
-		has(evidenceSources, input.EvidenceSource) && validConfidence(input.Confidence) &&
-		validSafeJSONArray(input.JoinPath, 262144)
+		has(evidenceSources, input.EvidenceSource) && validConfidence(input.Confidence)
 }
 
 func normalizeJSONArray(value json.RawMessage) json.RawMessage {
@@ -311,44 +318,63 @@ func normalizeJSONArray(value json.RawMessage) json.RawMessage {
 	return value
 }
 
-func validSafeJSONArray(value json.RawMessage, maximum int) bool {
-	if len(value) > maximum {
-		return false
+func normalizeCompatibilityJoinPath(
+	value json.RawMessage,
+	compatibilityType, fanoutPolicy string,
+) (json.RawMessage, bool) {
+	value = normalizeJSONArray(value)
+	if len(value) > 32<<10 {
+		return nil, false
 	}
-	var decoded []any
+	var decoded []CompatibilityJoinHop
 	decoder := json.NewDecoder(bytes.NewReader(value))
-	decoder.UseNumber()
+	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&decoded); err != nil || decoded == nil {
-		return false
+		return nil, false
 	}
 	if !errors.Is(decoder.Decode(&struct{}{}), io.EOF) {
-		return false
+		return nil, false
 	}
-	return safeSemanticJSON(decoded)
-}
-
-func safeSemanticJSON(value any) bool {
-	switch typed := value.(type) {
-	case []any:
-		for _, item := range typed {
-			if !safeSemanticJSON(item) {
-				return false
-			}
-		}
-	case map[string]any:
-		for key, item := range typed {
-			normalizedKey := strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(key))
-			switch normalizedKey {
-			case "sql", "rawsql", "query", "statement", "password", "secret",
-				"credentials", "rows", "samplerows", "rawdata":
-				return false
-			}
-			if !safeSemanticJSON(item) {
-				return false
-			}
-		}
+	if len(decoded) > 8 ||
+		(compatibilityType == "DIRECT" && len(decoded) > 1) ||
+		(compatibilityType == "BRIDGE" && len(decoded) < 2) ||
+		(len(decoded) == 0 &&
+			compatibilityType != "DIRECT" && compatibilityType != "DERIVED") {
+		return nil, false
 	}
-	return true
+	previousToVersionID := ""
+	cardinalities := values(
+		"ONE_TO_ONE", "MANY_TO_ONE", "ONE_TO_MANY", "MANY_TO_MANY",
+	)
+	for index := range decoded {
+		hop := &decoded[index]
+		hop.FromDatasetVersionID = strings.ToLower(strings.TrimSpace(
+			hop.FromDatasetVersionID,
+		))
+		hop.FromFieldID = strings.TrimSpace(hop.FromFieldID)
+		hop.ToDatasetVersionID = strings.ToLower(strings.TrimSpace(
+			hop.ToDatasetVersionID,
+		))
+		hop.ToFieldID = strings.TrimSpace(hop.ToFieldID)
+		hop.Cardinality = strings.ToUpper(strings.TrimSpace(hop.Cardinality))
+		if !validUUID(hop.FromDatasetVersionID) ||
+			!validUUID(hop.ToDatasetVersionID) ||
+			!validText(hop.FromFieldID, 1, 256) ||
+			!validText(hop.ToFieldID, 1, 256) ||
+			(hop.FromDatasetVersionID == hop.ToDatasetVersionID &&
+				hop.FromFieldID == hop.ToFieldID) ||
+			!has(cardinalities, hop.Cardinality) ||
+			(fanoutPolicy == "SAFE" &&
+				hop.Cardinality != "ONE_TO_ONE" &&
+				hop.Cardinality != "MANY_TO_ONE") ||
+			(previousToVersionID != "" &&
+				hop.FromDatasetVersionID != previousToVersionID) {
+			return nil, false
+		}
+		previousToVersionID = hop.ToDatasetVersionID
+	}
+	normalized, err := json.Marshal(decoded)
+	return normalized, err == nil
 }
 
 func (s *DimensionService) CreateRefreshJob(

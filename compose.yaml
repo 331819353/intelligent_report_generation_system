@@ -39,7 +39,7 @@ services:
       start_period: 5s
     networks: [report_net]
 
-  # 数据仓库数据库：只保存 ODS/DWD/DWS 物理表和稳定发布视图。
+  # 数据仓库数据库：只保存 ODS/DIM/DWD/DWS/ADS 物理表和稳定发布视图。
   postgres-warehouse:
     image: pgvector/pgvector:pg17
     restart: unless-stopped

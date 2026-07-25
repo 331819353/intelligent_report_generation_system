@@ -233,4 +233,38 @@ func TestDeriveBuildPlanUsesServerOwnedTopology(t *testing.T) {
 	if err := plan.Validate(); err != nil {
 		t.Fatalf("derived ODS plan invalid: %v", err)
 	}
+
+	adsTarget := publishedBuildTarget{
+		DatasetID: controlTestDatasetID, VersionID: controlTestVersionID,
+		Layer: LayerADS,
+		Document: dataset.Document{
+			Dataset: dataset.Descriptor{Layer: dataset.LayerADS},
+			Nodes:   []dataset.Node{{ID: "summary", Type: "DATASET"}},
+			Fields: []dataset.Field{{
+				Expression: dataset.Expression{
+					Type: "AGGREGATE", Function: "SUM",
+					Argument: &dataset.Expression{
+						Type: "FIELD_REF", NodeID: "summary", Field: "amount",
+					},
+				},
+			}},
+		},
+	}
+	plan, err = deriveBuildPlan(adsTarget, RunModeFull, []int{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasAggregate = false
+	for _, node := range plan.Nodes {
+		hasAggregate = hasAggregate || node.Kind == NodeAggregate
+		if node.Engine != EnginePostgres {
+			t.Fatalf("ADS node escaped PostgreSQL: %+v", node)
+		}
+	}
+	if !hasAggregate {
+		t.Fatalf("aggregated ADS plan has no aggregate node: %+v", plan.Nodes)
+	}
+	if err := plan.Validate(); err != nil {
+		t.Fatalf("derived ADS plan invalid: %v", err)
+	}
 }

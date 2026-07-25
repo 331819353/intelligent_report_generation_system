@@ -43,7 +43,9 @@
 .dataset-asset-status.deprecated, .dataset-asset-status.disabled { background: #eef1f5; color: #647084; }
 .dataset-asset-layer { display: inline-flex; align-items: center; border: 1px solid #9bb8ee; border-radius: 999px; padding: 3px 8px; background: #edf4ff; color: #2456aa; font-size: 10px; font-weight: 900; white-space: nowrap; }
 .dataset-asset-layer.dwd { border-color: #c4afe9; background: #f5f0ff; color: #6842a6; }
+.dataset-asset-layer.dim { border-color: #9fc9bc; background: #edf9f5; color: #286b59; }
 .dataset-asset-layer.dws { border-color: #efbd78; background: #fff7e8; color: #9a5b06; }
+.dataset-asset-layer.ads { border-color: #91b8df; background: #edf6ff; color: #245f96; }
 .dataset-asset-tag { display: inline-flex; align-items: center; max-width: 120px; overflow: hidden; border: 1px solid #dce3ec; border-radius: 999px; padding: 3px 7px; background: #f8fafc; color: #536077; font-size: 9px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
 .dataset-asset-tag.more { color: #2456aa; }
 .dataset-asset-card dl { display: grid; grid-template-columns: .8fr .6fr 1.5fr; gap: 14px; margin: 0; }

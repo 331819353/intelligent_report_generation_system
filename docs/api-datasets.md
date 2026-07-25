@@ -12,7 +12,7 @@
 { "dsl": { "dslVersion": "1.0" } }
 ```
 
-成功返回规范 DSL、`dslHash`、逻辑计划和 `planHash`。`dataset.layer` 支持 `ODS/DWD/DWS`；历史请求省略时由服务端根据 DAG 确定性推断。此接口不写数据库。
+成功返回规范 DSL、`dslHash`、逻辑计划和 `planHash`。`dataset.layer` 支持 `ODS/DIM/DWD/DWS/ADS`；历史请求省略时由服务端根据 DAG 确定性推断。此接口不写数据库。
 
 ## 创建草稿
 
@@ -35,7 +35,7 @@
 
 活动表及其全部活动字段完成当前技术结构的 LLM 映射后，系统会在保存映射结果的同一事务中自动创建并发布一张 `ODS` 默认数据集。LLM 输出按目标增量保存：已经通过校验的表或字段不会在下一轮重复请求，后续重试只补剩余目标。三轮增量重试后仍不完整时，系统也会用物理表结构和已应用结果创建一张可编辑的 `DRAFT / ODS`，但不会自动发布或物化；用户可直接进入数据集中心补充，或者通过表资产“手工完善”完成业务元数据。
 
-默认数据集通过只读的 `originTableId` 标识来源表，并与手工创建的数据集共用草稿、修订、预览和生命周期能力。默认 DSL 只包含一个 `TABLE` 数据节点和一个结束节点：`joins` 与 `preAggregations` 都为空，结束节点的输入直接指向该数据节点，默认输出为当前全部活动字段。该系统生成的 DSL 固定使用 `MATERIALIZED_PREFERRED`，并声明 `materialization.enabled=true`、`refreshMode=ON_DEMAND`；普通人工设计的 ODS/DWD/DWS 默认仍关闭物化，系统不会批量替它们开启。
+默认数据集通过只读的 `originTableId` 标识来源表，并与手工创建的数据集共用草稿、修订、预览和生命周期能力。默认 DSL 只包含一个 `TABLE` 数据节点和一个结束节点：`joins` 与 `preAggregations` 都为空，结束节点的输入直接指向该数据节点，默认输出为当前全部活动字段。该系统生成的 DSL 固定使用 `MATERIALIZED_PREFERRED`，并声明 `materialization.enabled=true`、`refreshMode=ON_DEMAND`；普通人工设计的数据集默认仍关闭物化，系统不会批量替它们开启。
 
 文件映射数据集使用 LLM 生成并通过本地规则校验的英文 `snake_case` 作为字段 `code`，因此查询和预览不会退化为 `field_1`、`field_2`；原始文件表头仍固定保存在 projection 与 `FIELD_REF` 中，中文表头同时作为字段显示名。文件数据集名称优先选择中文表业务名，其次为中文 Sheet 名或中文数据源名。目录不按名称去重，同名数据集按各自 ID 全部返回，并携带来源表及来源数据源名称用于区分。
 
@@ -47,7 +47,7 @@
 
 ### LLM 自动 DWD 设计
 
-ODS 版本首次进入 `PUBLISHED` 后，数据库事务内写入持久化 DWD 建模任务，`notBefore` 固定为发布时间后 5 分钟。Worker 到期后一次加载触发 ODS 所属领域下的全部当前已发布 ODS 元数据，由 LLM 统一完成 FACT、DIMENSION、MASTER、OTHER 分类，并围绕每个 FACT 设计一张保持事实明细粒度的 DWD DAG。若本次发布的是维度或主数据，仍会重新审视同领域事实表并更新受影响的系统 DWD 草稿；这使新增维度可以扩充既有事实模型，而不是生成孤立维度副本。
+ODS 版本首次进入 `PUBLISHED` 后，数据库事务内写入持久化 DWD 建模任务，`notBefore` 固定为发布时间后 5 分钟。Worker 到期后加载触发 ODS 所属领域下的全部当前已发布 ODS 元数据：LLM 先统一完成 FACT、DIMENSION、MASTER、OTHER 分类并保存校验后的检查点，再围绕每个 FACT 独立设计一张保持事实明细粒度的 DWD DAG。每张事实设计只接收自身及已经确认的维度/主数据元数据；每个成功结果单独落检查点。Worker 中断、取消或租约回收后只续跑缺失阶段，不重复请求已完成分类和事实设计。若本次发布的是维度或主数据，仍会重新审视同领域事实表并更新受影响的系统 DWD 草稿；这使新增维度可以扩充既有事实模型，而不是生成孤立维度副本。
 
 DWD 设计决策以 LLM 结果为准，服务端不使用字段名启发式替代模型分类、关联设计、扩充字段或字段角色。代码只执行失败关闭的安全校验和 DSL 编译：每张输入表必须恰好分类一次，每个 FACT 必须恰好对应一张输出；所有节点只能固定引用输入中的精确 ODS `PUBLISHED datasetVersionId`，只允许事实表到 DIMENSION/MASTER 的类型兼容 `LEFT JOIN`，禁止分组和聚合，必须保留事实表全部字段。LLM 同时指定字段级清洗和维度描述字段扩充；编译器会在不改变表、关联、字段和角色设计的前提下，补齐平台强制且无歧义的 `TRIM`、类型对应空值补位及原生 `DATE/DATETIME` 显式转换。度量空值和时间空值不允许擅自补默认值。模型虚构标识、遗漏事实字段、错误角色、危险清洗或不合法 DAG 都不会落库。
 
@@ -203,7 +203,7 @@ DWD 草稿和发布版本都记录对精确 ODS 版本的依赖。删除 ODS 时
 
 `GET /datasets/{id}`，需要 `DATASET:READ` 或对象级读取权限。跨租户 ID 在 RLS 下按不存在处理。该可变聚合响应携带 `Cache-Control: no-store`；客户端同样必须以 `cache: no-store` 读取，不能把浏览器或代理缓存中的旧 `version` 当作保存、发布后的并发基线。
 
-`GET /datasets?limit=50&offset=0` 返回当前租户的数据集摘要目录，不携带完整 DSL。摘要明确返回 `layer`（`ODS`、`DWD`、`DWS`）与 `tags`；`tags` 优先取当前发布版本已经建议或批准的语义标签，自动 ODS 数据集的标签任务尚未完成时回退到来源表的 LLM 标签。映射表自动生成的摘要仍包含 `originTableId` 供服务端编排与来源追踪，普通数据集省略该字段；客户端直接展示 `layer` 和 `tags`，不再以“映射表数据集”作为用户可见层级。`limit` 范围为 1–200。
+`GET /datasets?limit=50&offset=0` 返回当前租户的数据集摘要目录，不携带完整 DSL。摘要明确返回 `layer`（`ODS`、`DIM`、`DWD`、`DWS`、`ADS`）与 `tags`；`tags` 优先取当前发布版本已经建议或批准的语义标签，自动 ODS 数据集的标签任务尚未完成时回退到来源表的 LLM 标签。映射表自动生成的摘要仍包含 `originTableId` 供服务端编排与来源追踪，普通数据集省略该字段；客户端直接展示 `layer` 和 `tags`，不再以“映射表数据集”作为用户可见层级。`limit` 范围为 1–200。
 
 ## 更新草稿
 
@@ -218,7 +218,7 @@ DWD 草稿和发布版本都记录对精确 ODS 版本的依赖。删除 ODS 时
 }
 ```
 
-`expectedVersion` 必须等于最近一次加载结果的 `version`。更新成功后版本加一；冲突返回 `409 DATASET_VERSION_CONFLICT`。`code` 不允许通过草稿更新改变；`type` 是由草稿节点实际引用的数据源数量派生的摘要，增删跨源节点时会随规范 DSL 在 `SINGLE_SOURCE` 与 `CROSS_SOURCE` 之间自动切换。`layer` 与草稿版本同步保存：ODS 仅允许单物理表且无 Join/聚合；显式 DWD 只允许固定 ODS 精确发布版本的 `DATASET` 节点且禁止业务聚合；显式 DWS 只允许固定 DWD 精确发布版本的 `DATASET` 节点，要求明确输出粒度且至少一个聚合。DWD/DWS 不允许 `TABLE` 节点或 TABLE/DATASET 混用。
+`expectedVersion` 必须等于最近一次加载结果的 `version`。更新成功后版本加一；冲突返回 `409 DATASET_VERSION_CONFLICT`。`code` 不允许通过草稿更新改变；`type` 是由草稿节点实际引用的数据源数量派生的摘要，增删跨源节点时会随规范 DSL 在 `SINGLE_SOURCE` 与 `CROSS_SOURCE` 之间自动切换。`layer` 与草稿版本同步保存：ODS 仅允许单物理表且无 Join/聚合；DIM 只允许固定 ODS 精确发布版本；DWD 至少固定一个 ODS 事实输入并可附加任意数量 DIM，且禁止业务聚合；DWS 只允许一个或多个 DWD，要求明确输出粒度且至少一个聚合；ADS 只允许固定 DWS，可按消费场景投影、组合或再次聚合。DIM/DWD/DWS/ADS 不允许 `TABLE` 节点或 TABLE/DATASET 混用。
 
 迁移前未写入 DSL `dataset.layer` 的历史文档仍按 DAG 确定性推断并保留旧 TABLE 兼容，避免原地改写其 DSL/hash；新客户端必须始终显式发送层级。这个兼容不放宽 `DATASET` 节点的精确版本、上游层级、当前发布指针和 ACTIVE 物化校验。
 
@@ -293,7 +293,7 @@ DWD 草稿和发布版本都记录对精确 ODS 版本的依赖。删除 ODS 时
 
 恢复只接受 `DISABLED` 数据集。服务端在数据集行锁内优先还原停用前的 `PUBLISHED`、`STALE` 或 `DRAFT` 状态；恢复已发布状态时只重新挂接停用时保存的精确 `PUBLISHED` 版本，不反向改写版本快照。迁移前只有审计轨迹能够证明最近一次相关生命周期动作是 `DISABLE` 的旧记录才会进入可恢复状态；没有可靠停用快照的兼容记录按安全约定恢复为可编辑 `DRAFT`，真正的 `DEPRECATED` 数据集不会暴露恢复入口。成功返回更新后的数据集并把聚合版本加一；重复恢复或状态不匹配返回 `409 DATASET_VERSION_TRANSITION_INVALID`。
 
-`DELETE /datasets/{id}` 同样需要管理权限和上述请求体。控制面始终采用软删除：目录和普通加载不再返回该数据集，发布版本被废弃，历史版本和审计记录不做物理清除。ODS 删除只停用平台元数据记录，绝不向外部源库生成 `DROP/DELETE`。DWD/DWS 是平台 PostgreSQL 仓库中的派生表，删除事务会同时登记带租约和三次重试的物理清理 outbox；仓库 worker 随后删除该数据集的 `warehouse_published` 稳定视图、已退休历史视图和精确校验过的 DWD/DWS 物理表，并在工作台显示清理进度。API 仍只持有仓库只读账号，不因删除能力获得 DDL 权限。服务端会先检查该数据集全部精确版本；只要仍被活动指标、下游数据集、报告草稿、运行中查询或排队/运行中的物化构建占用，就返回 `409 DATASET_IN_USE` 且不修改任何状态。
+`DELETE /datasets/{id}` 同样需要管理权限和上述请求体。控制面始终采用软删除：目录和普通加载不再返回该数据集，发布版本被废弃，历史版本和审计记录不做物理清除。ODS 删除只停用平台元数据记录，绝不向外部源库生成 `DROP/DELETE`。DIM/DWD/DWS/ADS 是平台 PostgreSQL 仓库中的派生表，删除事务会同时登记带租约和三次重试的物理清理 outbox；仓库 worker 随后删除该数据集的 `warehouse_published` 稳定视图、已退休历史视图和精确校验过的派生层物理表，并在工作台显示清理进度。API 仍只持有仓库只读账号，不因删除能力获得 DDL 权限。服务端会先检查该数据集全部精确版本；只要仍被活动指标、下游数据集、报告草稿、运行中查询或排队/运行中的物化构建占用，就返回 `409 DATASET_IN_USE` 且不修改任何状态。
 
 ## 发布审批与不可变版本
 
@@ -408,12 +408,12 @@ DWD 草稿和发布版本都记录对精确 ODS 版本的依赖。删除 ODS 时
 }
 ```
 
-批准事务会复制已提交的数据集草稿生成独立 `PUBLISHED` 行，并把申请状态、审批人、不可变版本、`currentPublishedVersionId`、发布审计和后续任务 outbox 原子提交；任一步失败都会整体回滚。ODS 批准后登记指标候选提取，DWD/DWS 还会为本次刚批准的精确版本登记 PostgreSQL 物化 build。任务登记属于审批事务，真正的 LLM/规则提取和数据加工只由 Worker 在事务提交后执行。DWD/DWS 在对应 build 生成 `ACTIVE` 物化前不可查询，不会复用审批前任务或旧版本物理表；完成后查询运行时自动使用 `warehouse_published` 稳定视图。原草稿仍可继续编辑，首次正式发布版本号为 1。指标定义、指标 AI 的 `CREATE_ON_DATASET` 提案和后续报告绑定只能引用精确 `PUBLISHED` 版本；人工维护版本来自审批，映射表初始镜像可来自受控系统发布。它们都不能绑定 `PENDING` 申请、可变草稿或仅有数据集主对象 ID 的“当前版本”。普通草稿在指标创建流程中可作为 `MODIFY_DATASET` 的 AI 改造目标；映射表结构不足时改用 `CREATE_DATASET` 新建普通数据集，保存后再提交发布审批。
+批准事务会复制已提交的数据集草稿生成独立 `PUBLISHED` 行，并把申请状态、审批人、不可变版本、`currentPublishedVersionId`、发布审计和后续任务 outbox 原子提交；任一步失败都会整体回滚。ODS 批准后登记指标候选提取，DIM/DWD/DWS/ADS 还会为本次刚批准的精确版本登记 PostgreSQL 物化 build。任务登记属于审批事务，真正的 LLM/规则提取和数据加工只由 Worker 在事务提交后执行。派生层在对应 build 生成 `ACTIVE` 物化前不可查询，不会复用审批前任务或旧版本物理表；完成后查询运行时自动使用 `warehouse_published` 稳定视图。原草稿仍可继续编辑，首次正式发布版本号为 1。指标定义、指标 AI 的 `CREATE_ON_DATASET` 提案和后续报告绑定只能引用精确 `PUBLISHED` 版本；人工维护版本来自审批，映射表初始镜像可来自受控系统发布。它们都不能绑定 `PENDING` 申请、可变草稿或仅有数据集主对象 ID 的“当前版本”。普通草稿在指标创建流程中可作为 `MODIFY_DATASET` 的 AI 改造目标；映射表结构不足时改用 `CREATE_DATASET` 新建普通数据集，保存后再提交发布审批。
 
 审批发布试跑支持两条互斥路径：
 
 - ODS 与未显式声明层级的历史 TABLE 文档继续使用受控源查询/文件执行路径；
-- 显式 DWD/DWS 的全部 `DATASET` 节点使用 PostgreSQL 物化路径。DWD 上游必须是 ODS，DWS 上游必须是 DWD；每个节点固定的精确上游版本还必须是所属数据集的当前 `PUBLISHED` 版本，并拥有 schema hash 一致的当前 `ACTIVE` 物化及可读 `warehouse_published` 稳定视图。
+- 显式 DIM/DWD/DWS/ADS 的全部 `DATASET` 节点使用 PostgreSQL 物化路径。DIM 上游必须是 ODS；DWD 至少有一个 ODS 事实输入且可附加 DIM；DWS 只能包含一个或多个 DWD；ADS 上游必须是 DWS。每个节点固定的精确上游版本还必须是所属数据集的当前 `PUBLISHED` 版本，并拥有 schema hash 一致的当前 `ACTIVE` 物化及可读 `warehouse_published` 稳定视图。
 
 PostgreSQL 路径不会递归重放上游 DAG，也不会读取上游源库或在内存拼接。缺失 ACTIVE 物化、精确版本不再是当前发布版本、层级/摘要漂移、稳定关系不是视图、读取权限不足或混用 TABLE/DATASET 时均失败关闭，且不会回退到上游草稿、其他发布版本或任意物理表。
 
@@ -513,13 +513,13 @@ MySQL/Oracle 预览仅执行服务端从 DSL 生成的参数化 `SELECT`。物�
 
 Excel/CSV 预览使用 DSL TABLE 节点固定的 `fileVersionId`，不会回退到文件资产的可变“当前版本”。服务端先验证版本与数据源归属，再从对象存储读取对应版本，复核对象大小和 SHA-256，并用该版本的原始解析配置及真实表头执行过滤、同版本等值 Join、聚合、排序和行列策略。当前文件执行器最多保留 200,000 行中间结果；大文件流式/物化、非等值 Join 和跨源计划由 T0304 承担。
 
-显式 DWD/DWS 预览只读取 PostgreSQL 中由服务端解析的 `warehouse_published` 稳定视图。解析结果包含节点、精确上游数据集版本、精确 ACTIVE materialization ID、schema/snapshot hash 和允许列；客户端 DSL 不保存、也不能提交稳定视图或物理表名称。执行事务在编译后再次以租户 RLS 锁定并复核当前发布指针、版本状态、ACTIVE 物化、全部摘要、视图类型和 API 角色的 SELECT 权限，再执行参数化 PostgreSQL 查询，防止解析与执行之间发生激活切换。
+显式 DIM/DWD/DWS/ADS 预览只读取 PostgreSQL 中由服务端解析的 `warehouse_published` 稳定视图。解析结果包含节点、精确上游数据集版本、精确 ACTIVE materialization ID、schema/snapshot hash 和允许列；客户端 DSL 不保存、也不能提交稳定视图或物理表名称。执行事务在编译后再次以租户 RLS 锁定并复核当前发布指针、版本状态、ACTIVE 物化、全部摘要、视图类型和 API 角色的 SELECT 权限，再执行参数化 PostgreSQL 查询，防止解析与执行之间发生激活切换。
 
 `CROSS_SOURCE` 实时预览支持 MySQL↔Oracle、数据库↔Excel 和 Excel↔Excel 等值 Join。执行器只向各源读取 Join、显式关联前分组、过滤和输出所需字段，可证明只引用单节点的前置过滤会参数化下推；规范化后的数据先执行 `preAggregations`，再在网关完成 Join、最终聚合、排序和行列策略。单个数据集最多 16 个节点，每个源按预览行数放大读取且硬上限为 10,000 行；源返回超过上限时整次预览失败，不使用截断结果。当前不支持非等值 Join、缓存和物化。
 
 当数据库节点在参与的每条 Join 中都是声明基数的“多”侧，且度量仅以直接字段形式参与 `SUM/MIN/MAX/COUNT/AVG` 时，执行器会按所有仍需保留的 Join、过滤和维度字段在源端预聚合，再由网关归并部分结果。COUNT 对部分计数求和并保持整数类型，AVG 使用部分 SUM/COUNT 计算加权平均；空集合分别保持 0/NULL，纯整数求和溢出会失败关闭。出现 `COUNT(*)`、`COUNT_DISTINCT`、复杂聚合参数、`AGGREGATE_ONLY` 最小分组人数、COUNT/AVG 的直接聚合策略校验、度量字段被非聚合复用、ONE 侧节点或文件节点时，会自动回退原始扫描，避免改变行数、去重或权限语义。所有标识符仍来自物理白名单，过滤值和行数限制仍使用参数绑定。
 
-设计期无法判断 Join 基数时允许提交 `cardinality: "UNKNOWN"`。它不阻止草稿创建，但不会触发依赖明确“一侧/多侧”语义的预聚合优化；指标引用穿过该 Join 时按潜在扇出处理并失败关闭。`manualConfirmed` 只表示用户已核对连接方式和关联字段，不再要求用户猜测基数。
+历史 DSL 和非严格分层草稿在设计期无法判断 Join 基数时仍可使用 `cardinality: "UNKNOWN"`；它不会触发依赖明确“一侧/多侧”语义的预聚合优化，指标引用穿过该 Join 时按潜在扇出处理并失败关闭。新的显式 DWD 必须在保存前证明基数，不能使用 `UNKNOWN`。多个普通 DIM 各自使用 `MANY_TO_ONE / ONE_TO_ONE`；`ONE_TO_MANY / MANY_TO_MANY` 必须增加 `relationshipType: "BRIDGE"`、稳定 `relationshipRole` 和 `DEDUPLICATE / UNSAFE` 扇出策略。角色扮演 DIM 使用 `ROLE_PLAYING` 与如 `ORDERING_USER / PAYING_USER` 的角色编码。`manualConfirmed` 只表示用户已核对连接方式、关联字段和关系语义，不替代基数证据。
 
 跨源预览会对每条 Join 边检查 `manualConfirmed`、声明基数和两侧键重复情况，并返回 `JOIN_CONFIRMATION_REQUIRED`、`JOIN_CARDINALITY_MISMATCH`、`JOIN_MANY_TO_MANY` 或 `JOIN_FANOUT_RISK`。告警仅包含 Join ID 和计数，不包含业务键值。执行器按实际有向 Join 顺序精确传播预览样本的必要键值，任一阶段预计输出超过 200,000 行时会在分配该中间结果前失败；INNER Join 使用较小输入构建哈希索引，外连接不交换声明两侧。
 
@@ -529,7 +529,7 @@ Excel/CSV 预览使用 DSL TABLE 节点固定的 `fileVersionId`，不会回退�
 
 `POST /datasets/{id}/versions/{versionId}/preview`，需要同一数据集的 `DATASET:READ` 或对象级读取权限，请求与响应结构和草稿预览相同。
 
-服务端只执行 URL 中的精确发布版本。SOURCE 路径把版本状态、所属数据集状态、依赖摘要复核与可信物理计划解析放入同一个租户事务和锁定边界；严格 DWD/DWS 路径还要求每个固定上游版本仍为其当前发布版本并绑定当前 ACTIVE 物化，执行事务再次锁定复核该绑定后读取稳定视图。所属数据集为 `DISABLED`，版本为 `STALE`、`DEPRECATED`，或发布时固定的物理表结构摘要、文件版本 SHA-256、上游版本/当前指针/物化摘要已经漂移时，返回 `DATASET_VERSION_UNAVAILABLE`。当前依赖漂移只会拒绝本次执行，不会在请求内自动改写版本状态；基于影响分析幂等传播 `STALE` 仍归入 T0307。此接口不会回退到当前发布指针或当前草稿。查询审计的 `dataset_version_id` 固定为请求中的版本 ID，`run_type` 为 `PREVIEW`。
+服务端只执行 URL 中的精确发布版本。SOURCE 路径把版本状态、所属数据集状态、依赖摘要复核与可信物理计划解析放入同一个租户事务和锁定边界；严格 DIM/DWD/DWS/ADS 路径还要求每个固定上游版本仍为其当前发布版本并绑定当前 ACTIVE 物化，执行事务再次锁定复核该绑定后读取稳定视图。所属数据集为 `DISABLED`，版本为 `STALE`、`DEPRECATED`，或发布时固定的物理表结构摘要、文件版本 SHA-256、上游版本/当前指针/物化摘要已经漂移时，返回 `DATASET_VERSION_UNAVAILABLE`。当前依赖漂移只会拒绝本次执行，不会在请求内自动改写版本状态；基于影响分析幂等传播 `STALE` 仍归入 T0307。此接口不会回退到当前发布指针或当前草稿。查询审计的 `dataset_version_id` 固定为请求中的版本 ID，`run_type` 为 `PREVIEW`。
 
 ## 取消预览
 

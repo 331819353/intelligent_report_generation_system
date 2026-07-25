@@ -209,8 +209,13 @@ func validateTenantOwnedInputs(
 				warehouseStagingName.MatchString(table.Name)
 		case materialization.LayerDWD:
 			valid = warehouseLayerInput(table, "ods", "warehouse_ods", tenantFragment)
+		case materialization.LayerDIM:
+			valid = warehouseLayerInput(table, "ods", "warehouse_ods", tenantFragment)
 		case materialization.LayerDWS:
-			valid = warehouseLayerInput(table, "dwd", "warehouse_dwd", tenantFragment)
+			valid = warehouseLayerInput(table, "dwd", "warehouse_dwd", tenantFragment) ||
+				warehouseLayerInput(table, "dim", "warehouse_dim", tenantFragment)
+		case materialization.LayerADS:
+			valid = warehouseLayerInput(table, "dws", "warehouse_dws", tenantFragment)
 		}
 		if !valid {
 			return fmt.Errorf("%w: input relation is outside the tenant and layer boundary", ErrInvalidBuild)
@@ -220,8 +225,8 @@ func validateTenantOwnedInputs(
 }
 
 var (
-	warehousePhysicalName  = regexp.MustCompile(`^(ods|dwd|dws)_t[0-9a-f]{12}_d[0-9a-f]{12}_r[0-9a-f]{12}$`)
-	warehousePublishedName = regexp.MustCompile(`^(ods|dwd|dws)_t[0-9a-f]{12}_d[0-9a-f]{12}$`)
+	warehousePhysicalName  = regexp.MustCompile(`^(ods|dim|dwd|dws|ads)_t[0-9a-f]{12}_d[0-9a-f]{12}_r[0-9a-f]{12}$`)
+	warehousePublishedName = regexp.MustCompile(`^(ods|dim|dwd|dws|ads)_t[0-9a-f]{12}_d[0-9a-f]{12}$`)
 	warehouseStagingName   = regexp.MustCompile(`^stage_t[0-9a-f]{12}_r[0-9a-f]{12}_n[0-9a-f]{12}$`)
 )
 

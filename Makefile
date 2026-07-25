@@ -1,4 +1,4 @@
-.PHONY: fmt lint test test-integration connector-test build ci-check run-api run-worker run-connection-test-worker dev-up dev-stop dev-restart dev-status dev-logs seed-dev verify-asset-retrieval frontend-lint frontend-test frontend-build infra-config infra-up connector-up connector-status infra-down infra-reset infra-status infra-logs db-migrate db-verify warehouse-verify db-shell warehouse-shell clean
+.PHONY: fmt lint test test-integration connector-test build ci-check run-api run-worker run-connection-test-worker dev-up dev-stop dev-restart dev-status dev-logs seed-dev verify-asset-retrieval frontend-lint frontend-test frontend-build infra-config infra-up connector-up connector-status infra-down infra-reset infra-status infra-logs db-migrate db-verify warehouse-verify semantic-qa-verify db-shell warehouse-shell clean
 
 export GOCACHE ?= $(CURDIR)/.cache/go-build
 
@@ -73,6 +73,9 @@ db-verify:
 
 warehouse-verify:
 	@./scripts/verify-warehouse.sh
+
+semantic-qa-verify:
+	@./scripts/verify-semantic-qa.sh
 
 db-shell:
 	@docker compose --env-file .env.example exec postgres psql -U report_admin -d intelligent_report_control

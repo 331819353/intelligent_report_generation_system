@@ -674,8 +674,10 @@ func switchPublishedViewTx(
 	}
 	if previousBuildRunID != "" &&
 		(previousPhysicalSchema != "warehouse_ods" &&
+			previousPhysicalSchema != "warehouse_dim" &&
 			previousPhysicalSchema != "warehouse_dwd" &&
-			previousPhysicalSchema != "warehouse_dws") {
+			previousPhysicalSchema != "warehouse_dws" &&
+			previousPhysicalSchema != "warehouse_ads") {
 		return fmt.Errorf("%w: previous materialization schema is invalid", ErrConflict)
 	}
 

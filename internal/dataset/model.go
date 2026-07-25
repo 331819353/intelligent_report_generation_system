@@ -13,8 +13,10 @@ type Layer string
 
 const (
 	LayerODS Layer = "ODS"
+	LayerDIM Layer = "DIM"
 	LayerDWD Layer = "DWD"
 	LayerDWS Layer = "DWS"
+	LayerADS Layer = "ADS"
 )
 
 // PublicationOrigin 是数据库持久化的不可变发布来源。调用方不能在请求或
@@ -57,19 +59,21 @@ var (
 
 // Document 是数据集 DSL V1 的完整、可版本化定义。
 type Document struct {
-	DSLVersion      string           `json:"dslVersion"`
-	Dataset         Descriptor       `json:"dataset"`
-	Nodes           []Node           `json:"nodes"`
-	Joins           []Join           `json:"joins"`
-	PreAggregations []PreAggregation `json:"preAggregations,omitempty"`
-	Fields          []Field          `json:"fields"`
-	Filters         []Filter         `json:"filters"`
-	GroupBy         []string         `json:"groupBy"`
-	Having          []Filter         `json:"having"`
-	Sorts           []Sort           `json:"sorts"`
-	Parameters      []Parameter      `json:"parameters"`
-	OutputGrain     OutputGrain      `json:"outputGrain"`
-	ExecutionPolicy ExecutionPolicy  `json:"executionPolicy"`
+	DSLVersion       string            `json:"dslVersion"`
+	Dataset          Descriptor        `json:"dataset"`
+	Nodes            []Node            `json:"nodes"`
+	Joins            []Join            `json:"joins"`
+	PreAggregations  []PreAggregation  `json:"preAggregations,omitempty"`
+	FactContract     *FactContract     `json:"factContract,omitempty"`
+	AnalysisContract *AnalysisContract `json:"analysisContract,omitempty"`
+	Fields           []Field           `json:"fields"`
+	Filters          []Filter          `json:"filters"`
+	GroupBy          []string          `json:"groupBy"`
+	Having           []Filter          `json:"having"`
+	Sorts            []Sort            `json:"sorts"`
+	Parameters       []Parameter       `json:"parameters"`
+	OutputGrain      OutputGrain       `json:"outputGrain"`
+	ExecutionPolicy  ExecutionPolicy   `json:"executionPolicy"`
 	// Designer 保存不参与查询执行的画布元数据，例如组件位置、连线和展示名称。
 	// 使用开放对象让设计器可以向后兼容地扩展交互信息；领域校验仍会约束版本、
 	// 组件身份以及坐标，避免把无效画布写入不可变修订。
@@ -121,12 +125,14 @@ type PreAggregationMetric struct {
 
 // Descriptor 保存 DSL 内可移植的数据集基本信息。
 type Descriptor struct {
-	Code        string       `json:"code"`
-	Name        string       `json:"name"`
-	Description string       `json:"description,omitempty"`
-	Type        string       `json:"type"`
-	Layer       Layer        `json:"layer,omitempty"`
-	Grain       *OutputGrain `json:"grain,omitempty"`
+	Code                    string       `json:"code"`
+	Name                    string       `json:"name"`
+	Description             string       `json:"description,omitempty"`
+	Type                    string       `json:"type"`
+	Layer                   Layer        `json:"layer,omitempty"`
+	SemanticContractVersion string       `json:"semanticContractVersion,omitempty"`
+	ConsumerContractID      string       `json:"consumerContractId,omitempty"`
+	Grain                   *OutputGrain `json:"grain,omitempty"`
 }
 
 // Node 描述物理表、已发布数据集或只读 SQL 节点。
@@ -152,13 +158,77 @@ type SourceFilter struct {
 
 // Join 描述两个节点之间的关联；无法在设计期确认基数时使用 UNKNOWN，执行优化必须保守降级。
 type Join struct {
-	ID              string          `json:"id"`
-	LeftNodeID      string          `json:"leftNodeId"`
-	RightNodeID     string          `json:"rightNodeId"`
-	JoinType        string          `json:"joinType"`
-	Cardinality     string          `json:"cardinality"`
-	Conditions      []JoinCondition `json:"conditions"`
-	ManualConfirmed bool            `json:"manualConfirmed"`
+	ID               string                `json:"id"`
+	LeftNodeID       string                `json:"leftNodeId"`
+	RightNodeID      string                `json:"rightNodeId"`
+	JoinType         string                `json:"joinType"`
+	Cardinality      string                `json:"cardinality"`
+	RelationshipType string                `json:"relationshipType,omitempty"`
+	RelationshipRole string                `json:"relationshipRole,omitempty"`
+	FanoutPolicy     string                `json:"fanoutPolicy,omitempty"`
+	Bridge           *BridgeContract       `json:"bridge,omitempty"`
+	Temporal         *TemporalJoinContract `json:"temporal,omitempty"`
+	Conditions       []JoinCondition       `json:"conditions"`
+	ManualConfirmed  bool                  `json:"manualConfirmed"`
+}
+
+// BridgeContract 只声明受控字段身份，不允许 SQL 或自由表达式。BridgeNodeID
+// 必须是 Join 的一侧，字段必须来自该节点 projection。
+type BridgeContract struct {
+	BridgeNodeID          string `json:"bridgeNodeId"`
+	RelationshipTypeField string `json:"relationshipTypeField,omitempty"`
+	AllocationWeightField string `json:"allocationWeightField,omitempty"`
+	PrimaryFlagField      string `json:"primaryFlagField,omitempty"`
+	ValidFromField        string `json:"validFromField,omitempty"`
+	ValidToField          string `json:"validToField,omitempty"`
+}
+
+// TemporalJoinContract 将 SCD2 事件时间与有效区间绑定到 Join 两侧的白名单字段。
+// 实际比较仍由 conditions 表达，编译器不接受任意 SQL。
+type TemporalJoinContract struct {
+	EventNodeID      string `json:"eventNodeId"`
+	EventTimeField   string `json:"eventTimeField"`
+	ValidityNodeID   string `json:"validityNodeId"`
+	ValidFromField   string `json:"validFromField"`
+	ValidToField     string `json:"validToField"`
+	ValidToInclusive bool   `json:"validToInclusive"`
+}
+
+// FactContract 固定 DWD 的业务动作、事实粒度、事件时间和原子度量可加性。
+type FactContract struct {
+	BusinessAction string                  `json:"businessAction"`
+	GrainKeyFields []string                `json:"grainKeyFields"`
+	EventTimeField string                  `json:"eventTimeField,omitempty"`
+	AtomicMeasures []AtomicMeasureContract `json:"atomicMeasures"`
+}
+
+type AtomicMeasureContract struct {
+	Field      string `json:"field"`
+	Additivity string `json:"additivity"`
+	Unit       string `json:"unit,omitempty"`
+	Currency   string `json:"currency,omitempty"`
+	NullPolicy string `json:"nullPolicy"`
+}
+
+// AnalysisContract 描述 DWS 的市场通用分析意图和多事实共同粒度。它只保存
+// 逻辑语义；是否物化仍由独立构建策略决定。
+type AnalysisContract struct {
+	Intent              string                    `json:"intent"`
+	InputMode           string                    `json:"inputMode"`
+	CommonGrainFields   []string                  `json:"commonGrainFields"`
+	ConformedDimensions []string                  `json:"conformedDimensions"`
+	TimeField           string                    `json:"timeField,omitempty"`
+	TimeGrain           string                    `json:"timeGrain,omitempty"`
+	Measures            []AnalysisMeasureContract `json:"measures"`
+}
+
+type AnalysisMeasureContract struct {
+	Field         string   `json:"field"`
+	SourceNodeIDs []string `json:"sourceNodeIds"`
+	Aggregation   string   `json:"aggregation"`
+	Additivity    string   `json:"additivity"`
+	Unit          string   `json:"unit,omitempty"`
+	Currency      string   `json:"currency,omitempty"`
 }
 
 // JoinCondition 保存 Join 两侧表达式，禁止保存拼接后的 SQL。

@@ -39,8 +39,8 @@
    - ODS 只允许一个 `TABLE` 节点。数据库输入固定当前已发布的
      `data_source_version`、元数据表和 `structure_hash`；Excel 输入还必须与当前
      发布数据源版本的精确文件版本一致，`snapshotHash` 使用文件 SHA-256。
-   - DWD 只允许 `DATASET` 节点且上游必须为 ODS；DWS 只允许 `DATASET` 节点且
-     上游必须为 DWD。每个上游必须仍是其所属数据集的当前发布版本，并拥有精确
+   - DIM 只允许 ODS；DWD 至少包含一个 ODS 事实输入并可附加 DIM；
+     DWS 只允许一个或多个 DWD；ADS 只允许 DWS。每个上游必须仍是其所属数据集的当前发布版本，并拥有精确
      `ACTIVE` 物化。登记优先固定 `MATERIALIZATION` 身份，同时保存 schema hash、
      snapshot hash 和 row count。
 4. 原子写入运行、冻结输入、节点状态和
@@ -106,13 +106,13 @@ PostgreSQL staging；Excel/CSV 复核不可变文件版本、SHA-256、Sheet、�
 
 当前仅支持 `FULL + TABLE + 单 TABLE 节点`。`INCREMENTAL`、`BACKFILL`、
 `PARTITIONED_TABLE` 和非单表 ODS 失败关闭；数据源重新发布、结构/文件摘要漂移、
-流截断、类型错误、超时或租约丢失都不会产生 ACTIVE 物化。DWD/DWS 仍只接受由
+流截断、类型错误、超时或租约丢失都不会产生 ACTIVE 物化。DIM/DWD/DWS/ADS 仍只接受由
 上游活跃物化解析出的 PostgreSQL 输入，并全部在 PostgreSQL 执行。
 
 ## ACTIVE 物化的查询消费
 
-显式 DWD/DWS 的发布试跑与预览不会递归执行上游数据集，也不会接受客户端提供的
-物理标识。DWD 的每个 ODS 上游、DWS 的每个 DWD 上游都必须是所属数据集的当前
+显式 DIM/DWD/DWS/ADS 的发布试跑与预览不会递归执行上游数据集，也不会接受客户端提供的
+物理标识。DIM 的 ODS 上游、DWD 的 ODS/DIM 上游、DWS 的 DWD 上游、ADS 的 DWS 上游都必须是所属数据集的当前
 `PUBLISHED` 精确版本，并存在 schema hash 一致的 `ACTIVE` 物化；查询运行时只把
 其 `warehouse_published` 稳定视图作为允许表。DWS 指标则直接绑定指标定义中的
 精确 DWS 当前 ACTIVE 物化，不重放 DWS DAG。

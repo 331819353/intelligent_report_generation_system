@@ -80,7 +80,7 @@ func (s *PostgresStore) SubmitPublicationRequest(
 		if err != nil {
 			return err
 		}
-		// Submission freezes the exact draft only. Metric extraction and DWD/DWS
+		// Submission freezes the exact draft only. Metric extraction and derived-layer
 		// materialization are publication outboxes and must not run before a human
 		// approval decision has committed.
 		if inserted {

@@ -13,10 +13,12 @@ type LayerDependencyResolver interface {
 
 // ValidateLayerDependencies 校验显式 DATASET 上游的层级方向：
 //
-//	DWD <- ODS
+//	DIM <- ODS
+//	DWD <- at least one ODS + optional DIM
 //	DWS <- DWD
+//	ADS <- DWS
 //
-// 显式声明 layer 的新 DWD/DWS 文档由基础校验强制只使用 DATASET 节点；这里继续
+// 显式声明 layer 的新 DIM/DWD/DWS/ADS 文档由基础校验强制只使用 DATASET 节点；这里继续
 // 解析每个精确版本的实际层级。未声明 layer 的历史正文可按稳定推断结果
 // grandfather，但不会因此放宽它已声明的 DATASET 上游。
 func ValidateLayerDependencies(ctx context.Context, document Document, resolver LayerDependencyResolver) error {
@@ -33,18 +35,24 @@ func ValidateLayerDependencies(ctx context.Context, document Document, resolver 
 	if layer == "" {
 		layer = InferLayer(document)
 	}
-	var expected Layer
+	var expected map[Layer]bool
 	switch layer {
+	case LayerDIM:
+		expected = map[Layer]bool{LayerODS: true}
 	case LayerDWD:
-		expected = LayerODS
+		expected = map[Layer]bool{LayerODS: true, LayerDIM: true}
 	case LayerDWS:
-		expected = LayerDWD
+		expected = map[Layer]bool{LayerDWD: true}
+	case LayerADS:
+		expected = map[Layer]bool{LayerDWS: true}
 	default:
 		// ODS 的单物理表约束由 Validate 处理；非法枚举也由基础校验报告。
 		return nil
 	}
 
 	issues := make([]ValidationIssue, 0)
+	hasODSInput := false
+	hasDWDInput := false
 	for index, node := range document.Nodes {
 		if node.Type != "DATASET" {
 			continue
@@ -53,13 +61,39 @@ func ValidateLayerDependencies(ctx context.Context, document Document, resolver 
 		if err != nil {
 			return err
 		}
-		if upstream != expected {
+		if upstream == LayerODS {
+			hasODSInput = true
+		}
+		if upstream == LayerDWD {
+			hasDWDInput = true
+		}
+		if !expected[upstream] {
+			expectedText := "ODS"
+			if layer == LayerDWD {
+				expectedText = "ODS 或 DIM"
+			} else if layer == LayerDWS {
+				expectedText = "DWD"
+			} else if layer == LayerADS {
+				expectedText = "DWS"
+			}
 			issues = append(issues, ValidationIssue{
 				Path: fmt.Sprintf("nodes[%d].datasetVersionId", index),
 				Reason: fmt.Sprintf("%s 只能引用 %s 层的已发布数据集版本，实际为 %s",
-					layer, expected, upstream),
+					layer, expectedText, upstream),
 			})
 		}
+	}
+	if layer == LayerDWD && !hasODSInput {
+		issues = append(issues, ValidationIssue{
+			Path:   "nodes",
+			Reason: "DWD 至少需要一个已发布 ODS 数据集版本作为事实输入",
+		})
+	}
+	if layer == LayerDWS && !hasDWDInput {
+		issues = append(issues, ValidationIssue{
+			Path:   "nodes",
+			Reason: "DWS 至少需要一个已发布 DWD 数据集版本作为事实输入",
+		})
 	}
 	if len(issues) > 0 {
 		return &ValidationError{Issues: issues}

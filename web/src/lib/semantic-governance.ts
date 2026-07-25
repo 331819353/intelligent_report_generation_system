@@ -190,6 +190,14 @@ export type DimensionRefreshJob = {
   completedAt?: string
 }
 
+export type SemanticJoinHop = {
+  fromDatasetVersionId: string
+  fromFieldId: string
+  toDatasetVersionId: string
+  toFieldId: string
+  cardinality: 'ONE_TO_ONE' | 'MANY_TO_ONE' | 'ONE_TO_MANY' | 'MANY_TO_MANY'
+}
+
 export type DimensionMetricCompatibility = {
   id: string
   dimensionId: string
@@ -198,7 +206,7 @@ export type DimensionMetricCompatibility = {
   metricDatasetVersionId: string
   compatibilityType: 'DIRECT' | 'BRIDGE' | 'DERIVED'
   fanoutPolicy: 'SAFE' | 'DEDUPLICATE' | 'UNSAFE'
-  joinPath: unknown
+  joinPath: SemanticJoinHop[]
   evidenceSource: 'RULE' | 'PROFILE' | 'LLM' | 'HUMAN'
   confidence?: number
   status: 'PROPOSED' | 'VERIFIED' | 'REJECTED'

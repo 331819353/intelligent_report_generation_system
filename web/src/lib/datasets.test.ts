@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { RequestError } from './api'
-import { buildComponentPreviewDSL, buildDatasetDSL, buildPreviewParameters, createDatasetPublishIdempotencyKey, datasetAPI, type AssetColumn, type AssetTable, type DatasetDraft, type PublishedVersionRecord, type PublishDatasetInput } from './datasets'
+import { buildComponentPreviewDSL, buildDatasetDSL, buildPreviewParameters, createDatasetPublishIdempotencyKey, datasetAPI, datasetLayerChoices, type AssetColumn, type AssetTable, type DatasetDraft, type PublishedVersionRecord, type PublishDatasetInput } from './datasets'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -23,6 +23,26 @@ function draft(): DatasetDraft {
 }
 
 describe('buildDatasetDSL', () => {
+  test('按精确上游层级给出 DIM/DWD、DWS 和 ADS 选择', () => {
+    const value = draft()
+    const asDataset = (layer: 'ODS' | 'DIM' | 'DWD' | 'DWS') => ({
+      ...value.nodes[0],
+      table: {
+        ...value.nodes[0].table,
+        sourceKind: 'DATASET' as const,
+        datasetId: `dataset-${layer}`,
+        datasetVersionId: `version-${layer}`,
+        datasetLayer: layer,
+      },
+    })
+    value.nodes = [asDataset('ODS')]
+    expect(datasetLayerChoices(value)).toEqual(['DWD', 'DIM'])
+    value.nodes = [asDataset('DWD'), { ...asDataset('DIM'), id: 'dimension' }]
+    expect(datasetLayerChoices(value)).toEqual(['DWS'])
+    value.nodes = [asDataset('DWS')]
+    expect(datasetLayerChoices(value)).toEqual(['ADS'])
+  })
+
   test('生成包含参数过滤、聚合、计算、排序和粒度的 DSL', () => {
     const dsl = buildDatasetDSL(draft())
     expect(dsl.dataset.type).toBe('SINGLE_SOURCE')

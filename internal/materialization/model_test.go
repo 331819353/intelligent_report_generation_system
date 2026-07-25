@@ -138,11 +138,50 @@ func TestLayerPlanRulesAreEnforced(t *testing.T) {
 		}
 	})
 
-	t.Run("DWS only accepts DWD inputs", func(t *testing.T) {
+	t.Run("DWS rejects ODS inputs", func(t *testing.T) {
 		request := validDWSRequest()
 		request.Inputs[0].Layer = string(LayerODS)
 		if err := request.Validate(); !errors.Is(err, ErrInvalidRequest) {
 			t.Fatalf("expected wrong input layer rejection, got %v", err)
+		}
+	})
+
+	t.Run("DWS accepts only DWD inputs", func(t *testing.T) {
+		request := validDWSRequest()
+		request.Inputs[1].Layer = string(LayerDIM)
+		if err := request.Validate(); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("DWS with DIM input error=%v", err)
+		}
+	})
+
+	t.Run("DIM reads ODS DWD reads ODS plus DIM and ADS reads DWS", func(t *testing.T) {
+		dimension := validDWDRequest()
+		dimension.Plan.Layer = LayerDIM
+		if err := dimension.Validate(); err != nil {
+			t.Fatalf("DIM <- ODS rejected: %v", err)
+		}
+
+		dwd := validDWDRequest()
+		dwd.Inputs[1].Layer = string(LayerDIM)
+		if err := dwd.Validate(); err != nil {
+			t.Fatalf("DWD <- ODS + DIM rejected: %v", err)
+		}
+		dwd.Inputs[0].Layer = string(LayerDIM)
+		if err := dwd.Validate(); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("DWD without ODS fact input error=%v", err)
+		}
+
+		ads := validDWDRequest()
+		ads.Plan.Layer = LayerADS
+		for index := range ads.Inputs {
+			ads.Inputs[index].Layer = string(LayerDWS)
+		}
+		if err := ads.Validate(); err != nil {
+			t.Fatalf("ADS <- DWS rejected: %v", err)
+		}
+		ads.Inputs[0].Layer = string(LayerDWD)
+		if err := ads.Validate(); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("ADS accepted non-DWS input: %v", err)
 		}
 	})
 }
@@ -245,6 +284,18 @@ func TestPhysicalIdentifiersAreGeneratedAndFenced(t *testing.T) {
 		tampered, testTenantID, testDatasetID, testRunID, LayerDWD,
 	); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("tampered schema was accepted: %v", err)
+	}
+	for layer, expectedSchema := range map[Layer]string{
+		LayerDIM: "warehouse_dim",
+		LayerADS: "warehouse_ads",
+	} {
+		generated, err := GeneratePhysicalIdentifier(
+			testTenantID, testDatasetID, testRunID, layer,
+		)
+		if err != nil || generated.Schema != expectedSchema ||
+			!strings.HasPrefix(generated.PublishedName, strings.ToLower(string(layer))+"_") {
+			t.Fatalf("layer=%s identifier=%+v err=%v", layer, generated, err)
+		}
 	}
 
 	schema, staging, err := GenerateStagingIdentifier(testTenantID, testRunID, "extract_orders")

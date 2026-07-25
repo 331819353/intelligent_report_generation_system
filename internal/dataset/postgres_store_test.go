@@ -51,7 +51,7 @@ func (sink *recordingGovernedPublicationSink) EnqueueGovernedDatasetMaterializat
 }
 
 func TestPublicationProcessingStartsOnlyFromPublishedVersion(t *testing.T) {
-	for _, layer := range []Layer{LayerDWD, LayerDWS} {
+	for _, layer := range []Layer{LayerDIM, LayerDWD, LayerDWS, LayerADS} {
 		t.Run(string(layer), func(t *testing.T) {
 			metricSink := &recordingMetricPublicationSink{}
 			materializationSink := &recordingGovernedPublicationSink{}
@@ -140,8 +140,10 @@ func TestDeactivateMappedODSAssetIgnoresDerivedOrUnmappedDatasets(t *testing.T) 
 		originTableID string
 		layer         string
 	}{
+		{name: "DIM", originTableID: "table-1", layer: string(LayerDIM)},
 		{name: "DWD", originTableID: "table-1", layer: string(LayerDWD)},
 		{name: "DWS", originTableID: "table-1", layer: string(LayerDWS)},
+		{name: "ADS", originTableID: "table-1", layer: string(LayerADS)},
 		{name: "unmapped ODS", layer: string(LayerODS)},
 	} {
 		t.Run(test.name, func(t *testing.T) {

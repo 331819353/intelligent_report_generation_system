@@ -118,6 +118,34 @@ func TestDatasetMaterializationCleanupMigrationUsesLeasedTenantOutbox(t *testing
 		}
 	}
 	if strings.Contains(sql, "warehouse_ods") {
-		t.Fatal("DWD/DWS cleanup outbox must not target ODS or external source tables")
+		t.Fatal("derived-layer cleanup outbox must not target ODS or external source tables")
+	}
+}
+
+func TestDIMAndADSMigrationExtendsEveryMaterializationLayerFence(t *testing.T) {
+	raw, err := os.ReadFile("../../migrations/000084_dim_ads_layers.up.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	sql := string(raw)
+	for _, fragment := range []string{
+		"CHECK(layer IN ('ODS','DIM','DWD','DWS','ADS'))",
+		"'warehouse_ods','warehouse_dim','warehouse_dwd','warehouse_dws','warehouse_ads'",
+		"CHECK(input_layer IN ('SOURCE','ODS','DIM','DWD','DWS','ADS'))",
+		"target_layer='DIM' AND NEW.input_layer<>'ODS'",
+		"target_layer='DWD' AND NEW.input_layer NOT IN ('ODS','DIM')",
+		"target_layer='DWS' AND NEW.input_layer<>'DWD'",
+		"target_layer='ADS' AND NEW.input_layer<>'DWS'",
+		"CREATE CONSTRAINT TRIGGER build_run_inputs_require_layer",
+		"DEFERRABLE INITIALLY DEFERRED",
+		"downstream_version.layer IN ('DIM','DWD')",
+		"published_name ~ '^(ods|dim|dwd|dws|ads)_",
+		"CREATE TABLE platform.dim_modeling_outputs(",
+		"CONSTRAINT dim_modeling_outputs_source_key UNIQUE(tenant_id,source_dataset_id)",
+		"dim_modeling_outputs_tenant_isolation",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Errorf("DIM/ADS migration is missing %q", fragment)
+		}
 	}
 }

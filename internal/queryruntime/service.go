@@ -222,12 +222,14 @@ func (s *Service) PreviewMetric(ctx context.Context, tenantID, actorID string, c
 		return dataset.PreviewResult{}, dataset.ErrVersionUnavailable
 	}
 	derived, err := dataset.DecodeAndNormalize(candidate.DSL)
-	if err != nil || !sameMetricSourceEnvelope(original, derived) {
+	if err != nil || !sameMetricSourceEnvelope(original, derived, candidate) {
 		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
 	}
 	materializedRoot := false
 	if version.Layer == dataset.LayerDWS {
-		derived, err = materializedMetricDocument(original, derived, candidate.DatasetVersionID)
+		derived, err = materializedMetricDocument(
+			original, derived, candidate.DatasetVersionID,
+		)
 		if err != nil {
 			return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
 		}
@@ -249,14 +251,68 @@ func (s *Service) PreviewMetric(ctx context.Context, tenantID, actorID string, c
 	}, input, runType)
 }
 
-// sameMetricSourceEnvelope 禁止指标派生计划增加节点、字段投影、Join、过滤、参数或执行限额。
-func sameMetricSourceEnvelope(original, derived dataset.Document) bool {
-	return reflect.DeepEqual(original.Dataset, derived.Dataset) &&
-		reflect.DeepEqual(original.Nodes, derived.Nodes) &&
-		reflect.DeepEqual(original.Joins, derived.Joins) &&
-		reflect.DeepEqual(original.Filters, derived.Filters) &&
-		reflect.DeepEqual(original.Parameters, derived.Parameters) &&
-		reflect.DeepEqual(original.ExecutionPolicy, derived.ExecutionPolicy)
+// sameMetricSourceEnvelope 禁止指标派生计划扩张精确版本的来源边界。
+// 唯一例外是指标服务声明并可逐项复核的参数化维度等值过滤。
+func sameMetricSourceEnvelope(
+	original, derived dataset.Document,
+	candidate metric.QueryCandidate,
+) bool {
+	if !reflect.DeepEqual(original.Dataset, derived.Dataset) ||
+		!reflect.DeepEqual(original.Nodes, derived.Nodes) ||
+		!reflect.DeepEqual(original.Joins, derived.Joins) ||
+		!reflect.DeepEqual(original.PreAggregations, derived.PreAggregations) ||
+		!reflect.DeepEqual(original.FactContract, derived.FactContract) ||
+		!reflect.DeepEqual(original.AnalysisContract, derived.AnalysisContract) ||
+		!reflect.DeepEqual(original.ExecutionPolicy, derived.ExecutionPolicy) ||
+		len(derived.Filters) != len(original.Filters)+len(candidate.FilterBindings) ||
+		len(derived.Parameters) != len(original.Parameters)+len(candidate.FilterBindings) ||
+		!reflect.DeepEqual(
+			original.Filters,
+			derived.Filters[:len(original.Filters)],
+		) ||
+		!reflect.DeepEqual(
+			original.Parameters,
+			derived.Parameters[:len(original.Parameters)],
+		) {
+		return false
+	}
+	fields := make(map[string]dataset.Field, len(original.Fields))
+	for _, field := range original.Fields {
+		fields[field.ID] = field
+	}
+	seenFields := map[string]bool{}
+	seenFilters := map[string]bool{}
+	seenParameters := map[string]bool{}
+	for index, binding := range candidate.FilterBindings {
+		field, exists := fields[binding.FieldID]
+		if !exists || seenFields[binding.FieldID] ||
+			binding.FilterID == "" || seenFilters[binding.FilterID] ||
+			binding.ParameterCode == "" || seenParameters[binding.ParameterCode] ||
+			binding.DataType != field.CanonicalType {
+			return false
+		}
+		seenFields[binding.FieldID] = true
+		seenFilters[binding.FilterID] = true
+		seenParameters[binding.ParameterCode] = true
+		parameter := derived.Parameters[len(original.Parameters)+index]
+		filter := derived.Filters[len(original.Filters)+index]
+		if parameter.Code != binding.ParameterCode ||
+			parameter.Name != "语义维度过滤" ||
+			parameter.DataType != binding.DataType ||
+			parameter.MultiValue || !parameter.Required ||
+			parameter.DefaultValue != nil ||
+			filter.ID != binding.FilterID ||
+			filter.Stage != "PRE_AGGREGATION" || filter.Optional ||
+			filter.Expression.Type != "EQUALS" ||
+			filter.Expression.Left == nil ||
+			filter.Expression.Right == nil ||
+			!reflect.DeepEqual(*filter.Expression.Left, field.Expression) ||
+			filter.Expression.Right.Type != "PARAM_REF" ||
+			filter.Expression.Right.Code != binding.ParameterCode {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidatePublication 校验全部启用策略后执行一行试跑，结果样本只在进程内短暂存在并立即丢弃。

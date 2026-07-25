@@ -27,7 +27,8 @@ var (
 )
 
 func validLayer(layer Layer) bool {
-	return layer == LayerODS || layer == LayerDWD || layer == LayerDWS
+	return layer == LayerODS || layer == LayerDIM || layer == LayerDWD ||
+		layer == LayerDWS || layer == LayerADS
 }
 
 func validMode(mode RunMode) bool {
@@ -109,10 +110,11 @@ func (plan BuildPlan) Validate() error {
 		} else if len(node.DependsOn) == 0 || len(node.InputOrdinals) != 0 {
 			return ErrInvalidRequest
 		}
-		if plan.Layer == LayerDWS && node.Engine != EnginePostgres {
+		if (plan.Layer == LayerDWS || plan.Layer == LayerADS) &&
+			node.Engine != EnginePostgres {
 			return ErrInvalidRequest
 		}
-		if (plan.Layer == LayerODS || plan.Layer == LayerDWD) && node.Kind == NodeAggregate {
+		if (plan.Layer == LayerODS || plan.Layer == LayerDIM || plan.Layer == LayerDWD) && node.Kind == NodeAggregate {
 			return ErrInvalidRequest
 		}
 		if plan.Layer == LayerODS && node.Kind == NodeJoin {
@@ -178,6 +180,24 @@ func (request RegisterRequest) Validate() error {
 	}
 	if request.Plan.Layer == LayerODS && len(inputs) != 1 {
 		return ErrInvalidRequest
+	}
+	if request.Plan.Layer == LayerDWD {
+		hasODSInput := false
+		for _, input := range inputs {
+			hasODSInput = hasODSInput || input.Layer == string(LayerODS)
+		}
+		if !hasODSInput {
+			return ErrInvalidRequest
+		}
+	}
+	if request.Plan.Layer == LayerDWS {
+		hasDWDInput := false
+		for _, input := range inputs {
+			hasDWDInput = hasDWDInput || input.Layer == string(LayerDWD)
+		}
+		if !hasDWDInput {
+			return ErrInvalidRequest
+		}
 	}
 	for _, node := range request.Plan.Nodes {
 		for _, ordinal := range node.InputOrdinals {
@@ -249,12 +269,23 @@ func validateInput(input InputSnapshot, target Layer) error {
 		if input.Type != InputSourceTable && input.Type != InputFileVersion {
 			return ErrInvalidRequest
 		}
-	case LayerDWD:
+	case LayerDIM:
 		if (input.Type != InputDatasetVersion && input.Type != InputMaterialization) || input.Layer != string(LayerODS) {
 			return ErrInvalidRequest
 		}
+	case LayerDWD:
+		if (input.Type != InputDatasetVersion && input.Type != InputMaterialization) ||
+			(input.Layer != string(LayerODS) && input.Layer != string(LayerDIM)) {
+			return ErrInvalidRequest
+		}
 	case LayerDWS:
-		if (input.Type != InputDatasetVersion && input.Type != InputMaterialization) || input.Layer != string(LayerDWD) {
+		if (input.Type != InputDatasetVersion && input.Type != InputMaterialization) ||
+			input.Layer != string(LayerDWD) {
+			return ErrInvalidRequest
+		}
+	case LayerADS:
+		if (input.Type != InputDatasetVersion && input.Type != InputMaterialization) ||
+			input.Layer != string(LayerDWS) {
 			return ErrInvalidRequest
 		}
 	default:

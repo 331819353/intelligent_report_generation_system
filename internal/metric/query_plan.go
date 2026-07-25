@@ -27,7 +27,12 @@ type expandedMetricExpression struct {
 }
 
 // buildQueryCandidate 将逻辑指标字段引用展开为精确数据集版本上的受控派生 DSL。
-func buildQueryCandidate(metricID, metricVersionID string, validated validatedDefinition, requestedDimensions []string) (QueryCandidate, error) {
+func buildQueryCandidate(
+	metricID, metricVersionID string,
+	validated validatedDefinition,
+	requestedDimensions []string,
+	requestedFilters []DimensionFilter,
+) (QueryCandidate, map[string]any, error) {
 	definition := validated.prepared.Definition
 	fieldsByID := make(map[string]dataset.Field, len(validated.datasetDocument.Fields))
 	for _, field := range validated.datasetDocument.Fields {
@@ -47,7 +52,7 @@ func buildQueryCandidate(metricID, metricVersionID string, validated validatedDe
 		dimension, exists := allowed[fieldID]
 		field, fieldExists := fieldsByID[fieldID]
 		if !exists || !fieldExists || seen[fieldID] {
-			return QueryCandidate{}, invalid(fmt.Sprintf("dimensionFieldIds[%d]", index), "METRIC_PREVIEW_DIMENSION_INVALID", "试算维度不在指标允许范围内或发生重复")
+			return QueryCandidate{}, nil, invalid(fmt.Sprintf("dimensionFieldIds[%d]", index), "METRIC_PREVIEW_DIMENSION_INVALID", "试算维度不在指标允许范围内或发生重复")
 		}
 		seen[fieldID] = true
 		if fieldID == definition.TimeFieldID {
@@ -64,7 +69,7 @@ func buildQueryCandidate(metricID, metricVersionID string, validated validatedDe
 
 	metricExpression, err := expandMetricExpression(definition, fieldsByID, validated.dependencies, map[string]bool{})
 	if err != nil {
-		return QueryCandidate{}, err
+		return QueryCandidate{}, nil, err
 	}
 	metricFieldID := uniqueMetricFieldID(fieldsByID)
 	metricType := "DECIMAL"
@@ -88,19 +93,110 @@ func buildQueryCandidate(metricID, metricVersionID string, validated validatedDe
 		Description: "指标 " + definition.Metric.Name + " 的试算粒度",
 		KeyFields:   grainCodes, TimeField: timeFieldCode, DefaultTimeGrain: defaultTimeGrain,
 	}
+	filterBindings, boundParameters, err := appendDimensionFilters(
+		&document, fieldsByID, allowed, requestedFilters,
+	)
+	if err != nil {
+		return QueryCandidate{}, nil, err
+	}
 	raw, err := json.Marshal(document)
 	if err != nil {
-		return QueryCandidate{}, ErrInvalidDefinition
+		return QueryCandidate{}, nil, ErrInvalidDefinition
 	}
 	preparedDataset, err := dataset.Prepare(raw)
 	if err != nil {
-		return QueryCandidate{}, invalid("expression", "METRIC_QUERY_PLAN_INVALID", "指标定义无法生成安全查询计划")
+		return QueryCandidate{}, nil, invalid("expression", "METRIC_QUERY_PLAN_INVALID", "指标定义无法生成安全查询计划")
 	}
 	return QueryCandidate{
 		MetricID: metricID, MetricVersionID: metricVersionID,
 		DatasetID: definition.DatasetID, DatasetVersionID: definition.DatasetVersionID,
 		DSL: preparedDataset.DSLJSON, PlanHash: preparedDataset.PlanHash,
-	}, nil
+		FilterBindings: filterBindings,
+	}, boundParameters, nil
+}
+
+func appendDimensionFilters(
+	document *dataset.Document,
+	fieldsByID map[string]dataset.Field,
+	allowed map[string]Dimension,
+	requested []DimensionFilter,
+) ([]QueryFilterBinding, map[string]any, error) {
+	if len(requested) > 16 {
+		return nil, nil, invalid("dimensionFilters", "METRIC_PREVIEW_FILTER_LIMIT_EXCEEDED", "维度过滤不能超过 16 个")
+	}
+	usedParameters := make(map[string]bool, len(document.Parameters)+len(requested))
+	for _, parameter := range document.Parameters {
+		usedParameters[parameter.Code] = true
+	}
+	usedFilterIDs := make(map[string]bool, len(document.Filters)+len(requested))
+	for _, filter := range document.Filters {
+		usedFilterIDs[filter.ID] = true
+	}
+	seenFields := map[string]bool{}
+	bindings := make([]QueryFilterBinding, 0, len(requested))
+	parameters := make(map[string]any, len(requested))
+	for index, requestedFilter := range requested {
+		field, fieldExists := fieldsByID[requestedFilter.FieldID]
+		_, allowedField := allowed[requestedFilter.FieldID]
+		if !fieldExists || !allowedField || seenFields[requestedFilter.FieldID] {
+			return nil, nil, invalid(
+				fmt.Sprintf("dimensionFilters[%d].fieldId", index),
+				"METRIC_PREVIEW_FILTER_DIMENSION_INVALID",
+				"过滤字段不在指标允许维度内或发生重复",
+			)
+		}
+		if requestedFilter.Operator != "EQUALS" || requestedFilter.Value == nil {
+			return nil, nil, invalid(
+				fmt.Sprintf("dimensionFilters[%d]", index),
+				"METRIC_PREVIEW_FILTER_UNSUPPORTED",
+				"维度过滤仅支持非空的 EQUALS 参数绑定",
+			)
+		}
+		seenFields[requestedFilter.FieldID] = true
+		parameterCode := uniqueDimensionFilterParameter(usedParameters, index)
+		usedParameters[parameterCode] = true
+		filterID := uniqueDimensionFilterID(usedFilterIDs, index)
+		usedFilterIDs[filterID] = true
+		document.Parameters = append(document.Parameters, dataset.Parameter{
+			Code: parameterCode, Name: "语义维度过滤",
+			DataType: field.CanonicalType, Required: true,
+		})
+		left := cloneDatasetExpression(field.Expression)
+		right := dataset.Expression{Type: "PARAM_REF", Code: parameterCode}
+		document.Filters = append(document.Filters, dataset.Filter{
+			ID:    filterID,
+			Stage: "PRE_AGGREGATION", Optional: false,
+			Expression: dataset.Expression{
+				Type: "EQUALS", Left: &left, Right: &right,
+			},
+		})
+		bindings = append(bindings, QueryFilterBinding{
+			FieldID:       requestedFilter.FieldID,
+			FilterID:      filterID,
+			ParameterCode: parameterCode,
+			DataType:      field.CanonicalType,
+		})
+		parameters[parameterCode] = requestedFilter.Value
+	}
+	return bindings, parameters, nil
+}
+
+func uniqueDimensionFilterID(used map[string]bool, index int) string {
+	for suffix := index + 1; ; suffix++ {
+		candidate := fmt.Sprintf("semantic_dimension_filter_%d", suffix)
+		if !used[candidate] {
+			return candidate
+		}
+	}
+}
+
+func uniqueDimensionFilterParameter(used map[string]bool, index int) string {
+	for suffix := index + 1; ; suffix++ {
+		candidate := fmt.Sprintf("semantic_dimension_filter_%d", suffix)
+		if !used[candidate] {
+			return candidate
+		}
+	}
 }
 
 func expandMetricExpression(definition Definition, fields map[string]dataset.Field, dependencies map[string]Prepared, visiting map[string]bool) (dataset.Expression, error) {

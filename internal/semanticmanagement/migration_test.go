@@ -124,3 +124,36 @@ func TestDimensionProfileMigrationIsBoundedFencedAndAggregateOnly(t *testing.T) 
 		}
 	}
 }
+
+func TestSemanticRelationshipMigrationBoundsPathsAndIndexesExactLookup(t *testing.T) {
+	raw, err := os.ReadFile("../../migrations/000086_semantic_relationship_contracts.up.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	sql := string(raw)
+	for _, fragment := range []string{
+		"semantic_join_path_is_valid",
+		"path_length>8",
+		"'fromDatasetVersionId','fromFieldId'",
+		"'toDatasetVersionId','toFieldId','cardinality'",
+		"'ONE_TO_ONE','MANY_TO_ONE','ONE_TO_MANY','MANY_TO_MANY'",
+		"selected_fanout_policy='SAFE'",
+		"previous_to_dataset_version_id",
+		"dimension_metric_compatibility_join_path_contract_check",
+		"propose_metric_semantic_dimension_compatibility",
+		"metric_versions_propose_semantic_dimension_compatibility",
+		"propose_dimension_metric_compatibility",
+		"semantic_dimensions_propose_metric_compatibility",
+		"'DIRECT','SAFE','[]'::jsonb",
+		"'RULE',1.0000,'PROPOSED'",
+		"DIMENSION_METRIC_COMPATIBILITY_RULE_BACKFILL",
+		"dimension_members_tenant_normalized_dimension_active_idx",
+		"tenant_id,normalized_value,dimension_id,id",
+		"dimension_member_aliases_tenant_normalized_dimension_idx",
+		"tenant_id,normalized_alias,dimension_id,dimension_member_id,id",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Errorf("missing semantic relationship guard %q", fragment)
+		}
+	}
+}

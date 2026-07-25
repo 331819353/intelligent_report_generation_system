@@ -14,13 +14,14 @@ import (
 )
 
 const (
-	PurposeMetadataCompletion   = "METADATA_COMPLETION"
-	PurposeReportGeneration     = "REPORT_GENERATION"
-	PurposeBlockEdit            = "BLOCK_EDIT"
-	PurposeConclusion           = "CONCLUSION_GENERATION"
-	PurposeDatasetDAGGeneration = "DATASET_DAG_GENERATION"
-	PurposeMetricAuthoring      = "METRIC_AUTHORING"
-	PurposeDatasetTagSuggestion = "DATASET_TAG_SUGGESTION"
+	PurposeMetadataCompletion    = "METADATA_COMPLETION"
+	PurposeReportGeneration      = "REPORT_GENERATION"
+	PurposeBlockEdit             = "BLOCK_EDIT"
+	PurposeConclusion            = "CONCLUSION_GENERATION"
+	PurposeDatasetDAGGeneration  = "DATASET_DAG_GENERATION"
+	PurposeMetricAuthoring       = "METRIC_AUTHORING"
+	PurposeDatasetTagSuggestion  = "DATASET_TAG_SUGGESTION"
+	PurposeSemanticQueryPlanning = "SEMANTIC_QUERY_PLANNING"
 )
 
 var (
@@ -283,7 +284,8 @@ func validateServiceOptions(options ServiceOptions) error {
 func allowedPurpose(purpose string) bool {
 	switch purpose {
 	case PurposeMetadataCompletion, PurposeReportGeneration, PurposeBlockEdit, PurposeConclusion,
-		PurposeDatasetDAGGeneration, PurposeMetricAuthoring, PurposeDatasetTagSuggestion:
+		PurposeDatasetDAGGeneration, PurposeMetricAuthoring, PurposeDatasetTagSuggestion,
+		PurposeSemanticQueryPlanning:
 		return true
 	default:
 		return false

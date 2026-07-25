@@ -72,7 +72,7 @@ func (s *PostgresStore) ResolveMaterializedVersion(
 		}
 		binding, table, err := resolveActiveMaterializationTx(
 			ctx, tx, tenantID, document.Nodes[0],
-			string(dataset.LayerDWS), datasetID,
+			map[dataset.Layer]bool{dataset.LayerDWS: true}, datasetID,
 		)
 		if err != nil {
 			if errors.Is(err, dataset.ErrInvalidDocument) ||
@@ -221,15 +221,22 @@ func resolveDatasetNodesTx(
 	tenantID string,
 	document dataset.Document,
 ) (ResolvedPlan, error) {
-	expectedLayer := ""
+	expectedLayers := map[dataset.Layer]bool{}
 	switch document.Dataset.Layer {
+	case dataset.LayerDIM:
+		expectedLayers[dataset.LayerODS] = true
 	case dataset.LayerDWD:
-		expectedLayer = string(dataset.LayerODS)
+		expectedLayers[dataset.LayerODS] = true
+		expectedLayers[dataset.LayerDIM] = true
 	case dataset.LayerDWS:
-		expectedLayer = string(dataset.LayerDWD)
+		expectedLayers[dataset.LayerDWD] = true
+	case dataset.LayerADS:
+		expectedLayers[dataset.LayerDWS] = true
 	default:
 		return ResolvedPlan{}, dataset.ErrPreviewUnsupported
 	}
+	hasODSInput := false
+	hasDWDInput := false
 	result := ResolvedPlan{
 		Engine: ExecutionPostgreSQL,
 		Tables: map[string]querycompiler.TableRef{},
@@ -237,15 +244,23 @@ func resolveDatasetNodesTx(
 	}
 	for _, node := range document.Nodes {
 		binding, table, err := resolveActiveMaterializationTx(
-			ctx, tx, tenantID, node, expectedLayer, "",
+			ctx, tx, tenantID, node, expectedLayers, "",
 		)
 		if err != nil {
 			return ResolvedPlan{}, err
 		}
 		result.Tables[node.ID] = table
 		result.Materializations = append(result.Materializations, binding)
+		hasODSInput = hasODSInput || binding.Layer == string(dataset.LayerODS)
+		hasDWDInput = hasDWDInput || binding.Layer == string(dataset.LayerDWD)
 	}
 	if len(result.Materializations) == 0 {
+		return ResolvedPlan{}, dataset.ErrPreviewUnsupported
+	}
+	if document.Dataset.Layer == dataset.LayerDWD && !hasODSInput {
+		return ResolvedPlan{}, dataset.ErrPreviewUnsupported
+	}
+	if document.Dataset.Layer == dataset.LayerDWS && !hasDWDInput {
 		return ResolvedPlan{}, dataset.ErrPreviewUnsupported
 	}
 	return result, nil
@@ -256,7 +271,7 @@ func resolveActiveMaterializationTx(
 	tx pgx.Tx,
 	tenantID string,
 	node dataset.Node,
-	expectedLayer string,
+	expectedLayers map[dataset.Layer]bool,
 	expectedDatasetID string,
 ) (ResolvedMaterialization, querycompiler.TableRef, error) {
 	if node.Type != "DATASET" || node.DatasetVersionID == "" ||
@@ -305,8 +320,8 @@ func resolveActiveMaterializationTx(
 		return ResolvedMaterialization{}, querycompiler.TableRef{}, err
 	}
 	binding.Layer = versionLayer
-	if versionLayer != expectedLayer ||
-		materializationLayer != expectedLayer ||
+	if !expectedLayers[dataset.Layer(versionLayer)] ||
+		materializationLayer != versionLayer ||
 		expectedDatasetID != "" && binding.DatasetID != expectedDatasetID ||
 		binding.SchemaHash != versionHash ||
 		relationKind != "TABLE" && relationKind != "PARTITIONED_TABLE" {

@@ -1,6 +1,7 @@
 import { apiRequest } from './api'
 import { graphContains, graphLeaves, graphProducedFields, serializeDesignerGraph, type DesignerGraphV1, type GraphInput } from './dataset-graph'
 export type { CanvasPoint as GraphPosition, DesignerGraphV1, GraphDimension, GraphEnd, GraphEndOutput, GraphGroup, GraphInput, GraphJoin, GraphMetric } from './dataset-graph'
+export type DatasetLayer = 'ODS' | 'DIM' | 'DWD' | 'DWS' | 'ADS'
 
 export type AssetTable = {
   id: string; dataSourceId: string; dataSourceName: string; dataSourceType: string
@@ -8,7 +9,7 @@ export type AssetTable = {
   businessName: string; businessDescription?: string; tags?: string[]; sensitivityLevel?: string; visibility?: string
   columnCount: number; fileVersionId?: string; managementStatus?: string; enrichmentStatus?: string
   metadataVersion?: number; businessVersion?: number; lastSyncAt?: string
-  sourceKind?: 'TABLE' | 'DATASET'; datasetId?: string; datasetVersionId?: string; datasetLayer?: 'ODS' | 'DWD' | 'DWS'
+  sourceKind?: 'TABLE' | 'DATASET'; datasetId?: string; datasetVersionId?: string; datasetLayer?: DatasetLayer
 }
 export type AssetColumn = {
   id: string; tableId: string; columnName: string; businessName: string
@@ -23,31 +24,50 @@ export type FieldOption = {
   description?: string; canonicalType?: string; semanticType?: string; nullable?: boolean
   persistedExpression?: Record<string, unknown>
 }
-export type JoinConditionOption = { id: string; leftField: string; rightField: string }
-export type JoinOption = { id: string; leftNodeId: string; rightNodeId: string; leftField: string; rightField: string; joinType: string; cardinality: string; manualConfirmed: boolean; conditions?: JoinConditionOption[] }
+export type JoinConditionOption = {
+  id: string; leftField: string; rightField: string
+  operator?: 'EQUALS' | 'NOT_EQUALS' | 'GT' | 'GTE' | 'LT' | 'LTE'
+}
+export type BridgeContractOption = {
+  bridgeNodeId: string; relationshipTypeField: string
+  allocationWeightField?: string; primaryFlagField?: string
+  validFromField?: string; validToField?: string
+}
+export type TemporalJoinContractOption = {
+  eventNodeId: string; eventTimeField: string; validityNodeId: string
+  validFromField: string; validToField: string; validToInclusive: boolean
+}
+export type JoinOption = {
+  id: string; leftNodeId: string; rightNodeId: string; leftField: string; rightField: string
+  joinType: string; cardinality: string; manualConfirmed: boolean; conditions?: JoinConditionOption[]
+  relationshipType?: string; relationshipRole?: string; fanoutPolicy?: string
+  bridge?: BridgeContractOption; temporal?: TemporalJoinContractOption
+}
 export type FilterOption = { id: string; nodeId: string; field: string; operator: string; value: string; parameterCode: string }
 export type ParameterOption = { code: string; name: string; dataType: string; required: boolean; multiValue: boolean }
 export type CalculatedField = { id: string; code: string; name: string; operation: string; leftKey: string; rightKey: string; canonicalType: string; aggregation?: string }
 export type SortOption = { fieldId: string; direction: string }
 export type PreAggregationDraft = { id: string; nodeId: string; joinId: string; joinSide: 'LEFT' | 'RIGHT' }
 export type DatasetDraft = {
-  code: string; name: string; description: string; nodes: DesignerNode[]; fields: FieldOption[]
+  code: string; name: string; description: string; layer?: DatasetLayer; nodes: DesignerNode[]; fields: FieldOption[]
   joins: JoinOption[]; filters: FilterOption[]; parameters: ParameterOption[]; calculations: CalculatedField[]
   sorts: SortOption[]; grainDescription: string; grainKeys: string[]; groupingEnabled?: boolean
   finalConfigured?: boolean; finalGroupingEnabled?: boolean
   preAggregation?: PreAggregationDraft; preAggregations?: PreAggregationDraft[]; finalOutputKeys?: string[]
+  semanticContractVersion?: string; consumerContractId?: string
+  factContract?: Record<string, unknown>; analysisContract?: Record<string, unknown>
   designer?: DesignerGraphV1
 }
 export type DatasetRecord = {
   id: string; code: string; name: string; description: string; type: string; status: string
-  originTableId?: string; layer: 'ODS' | 'DWD' | 'DWS'; tags: string[]
+  originTableId?: string; layer: DatasetLayer; tags: string[]
   version: number; draftVersionId: string; draftVersionNo: number; draftRecordVersion: number; currentPublishedVersionId?: string
   dslHash: string; planHash: string; dsl: DatasetDSL; logicalPlan: unknown
   createdAt: string; updatedAt: string
 }
 export type DatasetSummary = {
   id: string; code: string; name: string; description: string; type: string; status: string
-  originTableId?: string; originTableName?: string; originDataSourceName?: string; layer: 'ODS' | 'DWD' | 'DWS'; tags: string[]
+  originTableId?: string; originTableName?: string; originDataSourceName?: string; layer: DatasetLayer; tags: string[]
   version: number; dslHash: string; currentPublishedVersionId?: string; updatedAt: string
 }
 export type DatasetPage = {
@@ -124,7 +144,10 @@ export type DatasetDraftPreview = DatasetPreview & {
 export type DatasetCandidatePreview = DatasetPreview & { dslHash: string; planHash: string }
 export type AssetTablePreview = { columns: string[]; rows: unknown[][] }
 export type DatasetDSL = Record<string, unknown> & {
-  dslVersion: string; dataset: { code: string; name: string; description?: string; type: string; layer?: 'ODS' | 'DWD' | 'DWS' }
+  dslVersion: string; dataset: {
+    code: string; name: string; description?: string; type: string; layer?: DatasetLayer
+    semanticContractVersion?: string; consumerContractId?: string
+  }
   nodes: Array<Record<string, unknown>>; fields: Array<Record<string, unknown>>
   designer?: DesignerGraphV1
 }
@@ -146,17 +169,24 @@ const identifier = (value: string) => {
   const cleaned = value.trim().replace(/[^A-Za-z0-9_]/g, '_').replace(/^[^A-Za-z]+/, '')
   return cleaned || 'field'
 }
-const modeledDatasetLayer = (draft: DatasetDraft): 'ODS' | 'DWD' | 'DWS' => {
+export const datasetLayerChoices = (draft: DatasetDraft): DatasetLayer[] => {
   const datasetNodes = draft.nodes.filter(node => node.table.sourceKind === 'DATASET')
-  if (datasetNodes.length !== draft.nodes.length) return 'ODS'
+  if (datasetNodes.length !== draft.nodes.length) return ['ODS']
   const upstreamLayers = new Set(datasetNodes.map(node => node.table.datasetLayer).filter(Boolean))
-  if (upstreamLayers.size !== 1) throw new Error('同一个分层数据集不能混用不同上游层级')
-  const upstream = [...upstreamLayers][0]
-  if (upstream === 'ODS') return 'DWD'
-  if (upstream === 'DWD') return 'DWS'
-  throw new Error('DWS 数据集不能继续作为更高层级的数据节点')
+  if (!upstreamLayers.size) throw new Error('无法识别上游数据集层级')
+  if ([...upstreamLayers].every(layer => layer === 'ODS')) {
+    // 保持既有 ODS 数据节点画布默认生成 DWD；用户可在保存前明确切换为 DIM。
+    return ['DWD', 'DIM']
+  }
+  if ([...upstreamLayers].every(layer => layer === 'DWD' || layer === 'DIM') && upstreamLayers.has('DWD')) return ['DWS']
+  if ([...upstreamLayers].every(layer => layer === 'DWS')) return ['ADS']
+  throw new Error('上游数据集层级不符合 ODS→DIM/DWD→DWS→ADS 合同')
 }
-const modeledExecutionPolicy = (layer: 'ODS' | 'DWD' | 'DWS') => layer === 'ODS'
+const modeledDatasetLayer = (draft: DatasetDraft): DatasetLayer => {
+  const choices = datasetLayerChoices(draft)
+  return draft.layer && choices.includes(draft.layer) ? draft.layer : choices[0]
+}
+const modeledExecutionPolicy = (layer: DatasetLayer) => layer === 'ODS'
   ? { mode: 'REALTIME', timeoutMs: 5000, previewLimit: 200, resultLimit: 10000, cacheTtlSeconds: 300, materialization: { enabled: false } }
   : {
       mode: 'MATERIALIZED_PREFERRED',
@@ -202,6 +232,28 @@ const datasetNodeDSL = (node: DesignerNode) => node.table.sourceKind === 'DATASE
       projection: [...node.selected],
       sourceFilters: [],
     }
+
+const datasetJoinDSL = (join: JoinOption) => ({
+  id: join.id,
+  leftNodeId: join.leftNodeId,
+  rightNodeId: join.rightNodeId,
+  joinType: join.joinType,
+  cardinality: join.cardinality || 'UNKNOWN',
+  ...(join.relationshipType ? { relationshipType: join.relationshipType } : {}),
+  ...(join.relationshipRole ? { relationshipRole: identifier(join.relationshipRole) } : {}),
+  ...(join.fanoutPolicy ? { fanoutPolicy: join.fanoutPolicy } : {}),
+  ...(join.bridge ? { bridge: join.bridge } : {}),
+  ...(join.temporal ? { temporal: join.temporal } : {}),
+  manualConfirmed: join.manualConfirmed,
+  conditions: (join.conditions && join.conditions.length > 1
+    ? join.conditions
+    : [{ id: `${join.id}_condition_1`, leftField: join.leftField, rightField: join.rightField }])
+    .map(condition => ({
+      leftExpression: { type: 'FIELD_REF', nodeId: join.leftNodeId, field: condition.leftField },
+      operator: condition.operator || 'EQUALS',
+      rightExpression: { type: 'FIELD_REF', nodeId: join.rightNodeId, field: condition.rightField },
+    })),
+})
 
 /**
  * Designer V1 是画布的持久化真值。执行 DSL 仍只使用结构化 FIELD_REF、Join 与
@@ -364,10 +416,17 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
   const layer = modeledDatasetLayer(draft)
   return {
     dslVersion: '1.0',
-    dataset: { code: identifier(draft.code), name: draft.name.trim(), description: draft.description.trim(), type: sourceCount > 1 ? 'CROSS_SOURCE' : 'SINGLE_SOURCE', layer },
+    dataset: {
+      code: identifier(draft.code), name: draft.name.trim(), description: draft.description.trim(),
+      type: sourceCount > 1 ? 'CROSS_SOURCE' : 'SINGLE_SOURCE', layer,
+      ...(draft.semanticContractVersion ? { semanticContractVersion: draft.semanticContractVersion } : {}),
+      ...(draft.consumerContractId ? { consumerContractId: draft.consumerContractId } : {}),
+    },
     nodes: draft.nodes.map(datasetNodeDSL),
-    joins: draft.joins.map(join => ({ id: join.id, leftNodeId: join.leftNodeId, rightNodeId: join.rightNodeId, joinType: join.joinType, cardinality: join.cardinality || 'UNKNOWN', manualConfirmed: join.manualConfirmed, conditions: (join.conditions && join.conditions.length > 1 ? join.conditions : [{ id: `${join.id}_condition_1`, leftField: join.leftField, rightField: join.rightField }]).map(condition => ({ leftExpression: { type: 'FIELD_REF', nodeId: join.leftNodeId, field: condition.leftField }, operator: 'EQUALS', rightExpression: { type: 'FIELD_REF', nodeId: join.rightNodeId, field: condition.rightField } })) })),
+    joins: draft.joins.map(datasetJoinDSL),
     preAggregations,
+    ...(draft.factContract ? { factContract: draft.factContract } : {}),
+    ...(draft.analysisContract ? { analysisContract: draft.analysisContract } : {}),
     fields,
     filters,
     groupBy: finalGroupBy,
@@ -472,9 +531,14 @@ export function buildDatasetDSL(draft: DatasetDraft): DatasetDSL {
   const layer = modeledDatasetLayer(draft)
   return {
     dslVersion: '1.0',
-    dataset: { code: identifier(draft.code), name: draft.name.trim(), description: draft.description.trim(), type: sourceCount > 1 ? 'CROSS_SOURCE' : 'SINGLE_SOURCE', layer },
+    dataset: {
+      code: identifier(draft.code), name: draft.name.trim(), description: draft.description.trim(),
+      type: sourceCount > 1 ? 'CROSS_SOURCE' : 'SINGLE_SOURCE', layer,
+      ...(draft.semanticContractVersion ? { semanticContractVersion: draft.semanticContractVersion } : {}),
+      ...(draft.consumerContractId ? { consumerContractId: draft.consumerContractId } : {}),
+    },
     nodes: draft.nodes.map(datasetNodeDSL),
-    joins: draft.joins.map(join => ({ id: join.id, leftNodeId: join.leftNodeId, rightNodeId: join.rightNodeId, joinType: join.joinType, cardinality: join.cardinality || 'UNKNOWN', manualConfirmed: join.manualConfirmed, conditions: (join.conditions && join.conditions.length > 1 ? join.conditions : [{ id: `${join.id}_condition_1`, leftField: join.leftField, rightField: join.rightField }]).map(condition => ({ leftExpression: { type: 'FIELD_REF', nodeId: join.leftNodeId, field: condition.leftField }, operator: 'EQUALS', rightExpression: { type: 'FIELD_REF', nodeId: join.rightNodeId, field: condition.rightField } })) })),
+    joins: draft.joins.map(datasetJoinDSL),
     preAggregations: preAggregation ? [{
       id: preAggregation.id,
       nodeId: preAggregation.nodeId,
@@ -483,6 +547,8 @@ export function buildDatasetDSL(draft: DatasetDraft): DatasetDSL {
       groupBy: draft.fields.filter(field => field.key.startsWith(`${preAggregation.nodeId}.`) && field.finalGroupBy).map(field => ({ field: field.key.slice(preAggregation.nodeId.length + 1), ...(field.finalGrouping ? { unit: field.finalGrouping } : {}) })),
       metrics: draft.fields.filter(field => field.key.startsWith(`${preAggregation.nodeId}.`) && field.finalMetric && field.finalAggregation).map(field => ({ field: field.key.slice(preAggregation.nodeId.length + 1), function: field.finalAggregation })),
     }] : [],
+    ...(draft.factContract ? { factContract: draft.factContract } : {}),
+    ...(draft.analysisContract ? { analysisContract: draft.analysisContract } : {}),
     fields, filters, groupBy, having: [],
     sorts: draft.sorts.filter(item => item.fieldId).map(item => ({ fieldId: fieldIDs.get(item.fieldId) ?? item.fieldId, direction: item.direction })),
     parameters: draft.parameters.map(item => ({ ...item, code: identifier(item.code) })),

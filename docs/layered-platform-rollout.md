@@ -1,6 +1,6 @@
 # 分层数据平台升级与灰度手册
 
-本文用于把已有环境升级到数据源不可变发布、ODS/DWD/DWS 物化和语义层。迁移必须先在数据库快照副本演练；不要把旧运行记录猜测性地绑定到当前数据源版本。
+本文用于把已有环境升级到数据源不可变发布、ODS/DIM/DWD/DWS/ADS 物化和语义层。迁移必须先在数据库快照副本演练；不要把旧运行记录猜测性地绑定到当前数据源版本。
 
 ## 1. 上线前检查
 
@@ -35,7 +35,7 @@ GROUP BY source_type;
 
 - `report_admin`：只用于迁移和受控运维；
 - `report_app`：API 控制面读写，不能在 `warehouse_*` 创建对象；
-- `report_worker`：后台任务和数据面执行，可在 staging/ODS/DWD/DWS 创建对象。
+- `report_worker`：后台任务和数据面执行，可在 staging/ODS/DIM/DWD/DWS/ADS 创建对象。
 - `report_connection_tester`：只执行冻结的数据源连接测试，只能调用受租约保护的
   claim/heartbeat/complete/fail 函数，不能入队或直接写任务与证明。
 
@@ -116,7 +116,7 @@ CIDR，驱动随后 pin 到已验证 IP。该应用层校验不能完全约束 O
   写入或删除对象；
 - 数据源更新的陈旧 `expectedVersion` 返回 409，不能覆盖较新草稿；
 - ODS 输入固定精确数据源版本及表结构/文件摘要；
-- DWD 只读 ODS，DWS 只读 DWD，且所有主计算在 PostgreSQL 完成；
+- DIM 只读 ODS；DWD 至少读取一个 ODS 事实并可关联 DIM；DWS 只读 DWD，且所有主计算在 PostgreSQL 完成；
 - 构建失败或丢失租约时稳定视图不切换；
 - 生产任一 Connector 池/物理连接上限或字节预算缺失、allowlist/denylist 为空，
   或 allowlist 含 hostname 时启动失败；DNS 名解析到“一个允许地址 + 一个未允许/

@@ -56,7 +56,7 @@ func NewODSResolver(
 	}
 }
 
-// CompositeResolver keeps PostgreSQL-only DWD/DWS resolution separate from
+// CompositeResolver keeps PostgreSQL-only DIM/DWD/DWS/ADS resolution separate from
 // source extraction. Layer identity is loaded again by each concrete resolver.
 type CompositeResolver struct {
 	ods      Resolver

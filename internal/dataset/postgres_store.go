@@ -24,7 +24,7 @@ type MappedPublicationCommitSink interface {
 	EnqueueMappedDatasetMaterializationTx(context.Context, pgx.Tx, string, string, VersionRecord) error
 }
 
-// GovernedPublicationCommitSink 在 DWD/DWS 审批发布事务内登记精确发布版本的
+// GovernedPublicationCommitSink 在 DIM/DWD/DWS/ADS 审批发布事务内登记精确发布版本的
 // PostgreSQL 物化任务。实现只能登记控制面 outbox，不能在审批请求内执行加工。
 type GovernedPublicationCommitSink interface {
 	EnqueueGovernedDatasetMaterializationTx(context.Context, pgx.Tx, string, string, VersionRecord) error
@@ -62,13 +62,13 @@ func (s *PostgresStore) SetMappedPublicationCommitSink(sink MappedPublicationCom
 	s.mappedPublicationSink = sink
 }
 
-// SetGovernedPublicationCommitSink 接入 DWD/DWS 审批后的 PostgreSQL 加工 outbox。
+// SetGovernedPublicationCommitSink 接入 DIM/DWD/DWS/ADS 审批后的 PostgreSQL 加工 outbox。
 // 应只在进程启动装配阶段调用。
 func (s *PostgresStore) SetGovernedPublicationCommitSink(sink GovernedPublicationCommitSink) {
 	s.governedPublicationSink = sink
 }
 
-// SetMaterializationDeletionSink 接入 DWD/DWS 仓库物理对象清理 outbox。
+// SetMaterializationDeletionSink 接入 DIM/DWD/DWS/ADS 仓库物理对象清理 outbox。
 // 应只在进程启动装配阶段调用。
 func (s *PostgresStore) SetMaterializationDeletionSink(sink MaterializationDeletionSink) {
 	s.materializationDeletionSink = sink
@@ -575,7 +575,7 @@ func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string
 			WHERE dependency.source_type='DATASET_VERSION'
 			  AND source_version.dataset_id::text=$1
 			  AND $2='ODS'
-			  AND downstream_version.layer='DWD'
+			  AND downstream_version.layer IN ('DIM','DWD')
 			UNION ALL
 			SELECT 1 FROM platform.report_draft_dependencies dependency
 			JOIN platform.dataset_versions source_version ON source_version.id::text=dependency.dependency_id
@@ -594,7 +594,8 @@ func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string
 		}
 		physicalMaterializationCount := 0
 		physicalCleanupQueued := false
-		if layer == string(LayerDWD) || layer == string(LayerDWS) {
+		if layer == string(LayerDIM) || layer == string(LayerDWD) ||
+			layer == string(LayerDWS) || layer == string(LayerADS) {
 			if s.materializationDeletionSink == nil {
 				return errors.New("dataset materialization deletion sink is not configured")
 			}
@@ -611,7 +612,7 @@ func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string
 			WHERE dataset_id::text=$2 AND status IN ('PUBLISHED','STALE')`, actorID, id); err != nil {
 			return err
 		}
-		// 自动生成 DWD 使用“事实数据集 ID”派生稳定编码。软删除后必须同时释放
+		// 自动生成 DIM/DWD 使用来源数据集 ID 派生稳定编码。软删除后必须同时释放
 		// 自动建模所有权映射和活动编码，否则下一次 ODS 发布触发重建时会被已删除
 		// 记录的全局唯一编码阻断，任务只能无意义重试。
 		if layer == string(LayerDWD) {
@@ -619,10 +620,15 @@ func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string
 				WHERE tenant_id=$1 AND dwd_dataset_id::text=$2`, tenantID, id); err != nil {
 				return err
 			}
+		} else if layer == string(LayerDIM) {
+			if _, err := tx.Exec(ctx, `DELETE FROM platform.dim_modeling_outputs
+				WHERE tenant_id=$1 AND dim_dataset_id::text=$2`, tenantID, id); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(ctx, `UPDATE platform.datasets SET status='DEPRECATED',current_published_version_id=NULL,
 			disabled_from_status=NULL,disabled_published_version_id=NULL,
-			code=CASE WHEN layer IN ('DWD','DWS')
+			code=CASE WHEN layer IN ('DIM','DWD','DWS','ADS')
 				THEN left(code,100)||'_deleted_'||substr(id::text,1,8)
 				ELSE code
 			END,
@@ -814,7 +820,8 @@ func (s *PostgresStore) enqueuePublicationProcessing(
 			return err
 		}
 	}
-	if record.Layer != LayerDWD && record.Layer != LayerDWS {
+	if record.Layer != LayerDIM && record.Layer != LayerDWD &&
+		record.Layer != LayerDWS && record.Layer != LayerADS {
 		return nil
 	}
 	if s.governedPublicationSink == nil {

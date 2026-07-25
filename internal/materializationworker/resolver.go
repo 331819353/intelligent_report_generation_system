@@ -91,7 +91,10 @@ func (resolver *PostgresResolver) Resolve(
 			nil,
 		)
 	}
-	if claim.Layer != materialization.LayerDWD && claim.Layer != materialization.LayerDWS {
+	if claim.Layer != materialization.LayerDIM &&
+		claim.Layer != materialization.LayerDWD &&
+		claim.Layer != materialization.LayerDWS &&
+		claim.Layer != materialization.LayerADS {
 		return ResolvedBuild{}, executionError(
 			CodeTrustedPlanInvalid,
 			"the registered build layer is invalid",
@@ -119,7 +122,7 @@ func (resolver *PostgresResolver) Resolve(
 		if node.Engine != materialization.EnginePostgres {
 			return ResolvedBuild{}, executionError(
 				CodePostgresExecutionRequired,
-				"DWD and DWS builds must execute entirely in PostgreSQL",
+				"DIM, DWD, DWS and ADS builds must execute entirely in PostgreSQL",
 				nil,
 			)
 		}
@@ -178,7 +181,7 @@ func (resolver *PostgresResolver) Resolve(
 			if node.Type != "DATASET" {
 				return executionError(
 					CodePostgresExecutionRequired,
-					"DWD and DWS materialization requires governed dataset inputs",
+					"DIM, DWD, DWS and ADS materialization requires governed dataset inputs",
 					nil,
 				)
 			}
@@ -191,11 +194,16 @@ func (resolver *PostgresResolver) Resolve(
 			if err != nil {
 				return err
 			}
-			expectedLayer := string(materialization.LayerODS)
-			if claim.Layer == materialization.LayerDWS {
-				expectedLayer = string(materialization.LayerDWD)
+			layerAllowed := upstream.Layer == string(materialization.LayerODS)
+			if claim.Layer == materialization.LayerDWD {
+				layerAllowed = upstream.Layer == string(materialization.LayerODS) ||
+					upstream.Layer == string(materialization.LayerDIM)
+			} else if claim.Layer == materialization.LayerDWS {
+				layerAllowed = upstream.Layer == string(materialization.LayerDWD)
+			} else if claim.Layer == materialization.LayerADS {
+				layerAllowed = upstream.Layer == string(materialization.LayerDWS)
 			}
-			if upstream.Layer != expectedLayer || input.Layer != expectedLayer ||
+			if !layerAllowed || input.Layer != upstream.Layer ||
 				upstream.VersionHash != upstream.SchemaHash ||
 				input.SchemaHash != upstream.SchemaHash {
 				return executionError(

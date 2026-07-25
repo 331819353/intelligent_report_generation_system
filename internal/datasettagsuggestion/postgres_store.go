@@ -589,12 +589,16 @@ func loadUpstreams(
 		); err != nil {
 			return nil, err
 		}
-		expectedLayer := "ODS"
-		if targetLayer == "DWS" {
-			expectedLayer = "DWD"
+		allowedLayers := map[string]bool{"ODS": true}
+		if targetLayer == "DWD" {
+			allowedLayers = map[string]bool{"ODS": true, "DIM": true}
+		} else if targetLayer == "DWS" {
+			allowedLayers = map[string]bool{"DWD": true}
+		} else if targetLayer == "ADS" {
+			allowedLayers = map[string]bool{"DWS": true}
 		}
 		if frozenVersion != currentVersion || frozenHash != upstream.SchemaHash ||
-			frozenPlanHash != currentPlanHash || upstream.Layer != expectedLayer {
+			frozenPlanHash != currentPlanHash || !allowedLayers[upstream.Layer] {
 			return nil, ErrSubjectChanged
 		}
 		prepared, err := dataset.Prepare(raw)
@@ -616,6 +620,21 @@ func loadUpstreams(
 		return nil, err
 	}
 	rows.Close()
+	if targetLayer != "ODS" {
+		hasRequiredInput := false
+		requiredLayer := "ODS"
+		if targetLayer == "DWS" {
+			requiredLayer = "DWD"
+		} else if targetLayer == "ADS" {
+			requiredLayer = "DWS"
+		}
+		for _, upstream := range upstreams {
+			hasRequiredInput = hasRequiredInput || upstream.Layer == requiredLayer
+		}
+		if !hasRequiredInput {
+			return nil, ErrSubjectChanged
+		}
+	}
 	for index := range upstreams {
 		upstreams[index].ApprovedTags, err = loadApprovedDatasetTags(
 			ctx, tx, upstreams[index].DatasetID, upstreams[index].VersionID,

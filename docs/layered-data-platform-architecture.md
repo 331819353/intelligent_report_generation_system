@@ -1,6 +1,11 @@
 # 分层数据平台与语义层技术方案
 
-本文定义数据源、ODS/DWD/DWS、物化执行、标签与语义检索的目标架构和本轮落地边界。核心原则是：控制面与数据面分离、所有运行版本不可变、测试不等于发布、跨源数据只以流式暂存进入 PostgreSQL、LLM 只生成候选语义而不获得执行权。
+本文定义数据源、ODS/DIM/DWD/DWS/ADS、LLM 建模编排、物化执行、标签与语义检索的目标架构和本轮落地边界。核心原则是：控制面与数据面分离、所有运行版本不可变、测试不等于发布、跨源数据只以流式暂存进入 PostgreSQL。LLM 负责分析元数据并生成表结构与结构化 DAG，不获得 SQL、DDL 或物理执行权；底层开发引擎负责把已治理 DAG 编译成物理过程。
+
+> 后续已批准的目标合同与实施顺序见
+> [智能问答语义层与分层建模改造计划](./semantic-qa-retrofit-plan.md) 和
+> [智能问答语义层优化 TODO](./TODO-semantic-qa-optimization.md)。在对应 TODO
+> 完成前，本文标注的“当前 worker 落地边界”仍代表实际运行行为。
 
 ## 1. 总体架构
 
@@ -23,15 +28,18 @@ flowchart LR
   subgraph Data["PostgreSQL 数据面"]
     Stage["warehouse_staging"]
     ODS["warehouse_ods"]
+    DIM["warehouse_dim"]
     DWD["warehouse_dwd"]
     DWS["warehouse_dws"]
+    ADS["warehouse_ads"]
     Published["warehouse_published 稳定视图"]
   end
 
   subgraph Worker["后台执行器"]
     Metadata["元数据发现"]
     TagSuggest["发布版本标签建议"]
-    Builder["DAG 编译 / 推送 / COPY / CTAS"]
+    Modeler["LLM 分层结构 / DAG 设计"]
+    Builder["开发引擎 · DAG 编译 / COPY / CTAS"]
     Embed["语义文档重建与向量化"]
   end
 
@@ -39,13 +47,24 @@ flowchart LR
   Oracle --> Metadata
   Excel --> Metadata
   Metadata --> Catalog
+  Catalog --> Modeler --> Catalog
   Catalog --> Builder
   MySQL --> Builder
   Oracle --> Builder
   Builder --> Stage --> DWD
   Builder --> ODS
+  Builder --> DIM
   Builder --> DWS
-  ODS --> DWD --> DWS --> Published
+  Builder --> ADS
+  ODS --> DIM
+  ODS --> DWD
+  DIM --> DWD
+  DWD --> DWS --> ADS
+  ODS --> Published
+  DIM --> Published
+  DWD --> Published
+  DWS --> Published
+  ADS --> Published
   Catalog --> TagSuggest
   Semantic --> TagSuggest
   TagSuggest --> Outbox
@@ -89,11 +108,47 @@ DRAFT / UNTESTED
 
 | 层级 | 合法输入 | 合法操作 | 明确禁止 |
 | --- | --- | --- | --- |
-| ODS | 一个已发布物理表或精确文件版本 | 字段选择、重命名、类型规范化、脱敏等非聚合转换 | Join、Group、业务聚合 |
-| DWD | 一个或多个已发布 ODS 精确版本/物化 | 投影、过滤、转换、Join | Group 和业务聚合 |
-| DWS | 一个或多个已发布 DWD 精确版本/物化 | PostgreSQL 内 Join、分组、聚合、派生汇总字段 | 直接引用外部源表、在内存完成主计算 |
+| ODS | 一个已发布物理表或精确文件版本 | 源表字段的治理映射、技术类型规范化和必要的非业务转换 | Join、Group、业务聚合 |
+| DIM | 一个已发布 ODS 精确版本/物化 | 抽离人物、商品、组织、区域等实体说明；保留实体键、名称、分类、状态等分析字段并做基础清洗 | 事实聚合、改变实体粒度、直接访问物理源 |
+| DWD | 至少一个已发布 ODS 事实版本/物化，可附加已发布 DIM | 清洗事实动作，保留“谁、何时、对什么、做了什么”的明细键，并扩充有分析价值的实体说明 | Group、业务聚合、缺少 ODS 事实根的 DIM-only 设计 |
+| DWS | 一个或多个已发布 DWD 精确版本/物化 | 按主题、主体、时间、商品等视角组合事实，执行 Join、分组、聚合并形成可解释分析结果 | 直接引用 DIM、ODS、外部源表或在内存完成主计算 |
+| ADS | 一个或多个已发布 DWS 精确版本/物化 | 面向报表、接口、看板或应用场景组合、裁剪、重命名和必要的二次汇总 | 直接越层引用 DIM、DWD、ODS 或外部源表 |
 
-历史 DSL 未声明 `layer` 时，服务端用确定性规则归类：含聚合为 DWS；单表、无 Join 为 ODS；其他为 DWD，并保留旧 TABLE 执行兼容以避免改写已发布正文/hash。显式声明层级的新 DSL 采用严格节点合同：ODS 只能是 TABLE，DWD 只能是 ODS DATASET，DWS 只能是 DWD DATASET，DWD/DWS 不能混入 TABLE。新客户端必须显式写入层级，不能依赖历史兼容绕过治理。
+历史 DSL 未声明 `layer` 时，服务端仍用确定性规则归类：含聚合为 DWS；单表、无 Join 为 ODS；其他为 DWD，并保留旧 TABLE 执行兼容以避免改写已发布正文/hash。显式声明层级的新 DSL 采用严格节点合同：`ODS <- SOURCE`、`DIM <- ODS`、`DWD <- 至少一个 ODS + 可选 DIM`、`DWS <- DWD[1..N]`、`ADS <- DWS`。DIM/DWD/DWS/ADS 只能固定精确 `DATASET` 发布版本，不能混入 `TABLE` 绕过治理。新客户端必须显式写入层级，不能依赖历史兼容绕过治理。
+
+### 3.1 LLM 建模与开发引擎边界
+
+分层建模不要求一次 LLM 调用完成。编排器可以按依赖拆成多个过程，并在同一阶段内并行：
+
+```mermaid
+flowchart LR
+  Meta["已发布 ODS 元数据、字段合同、标签与粒度"]
+  Classify["LLM 业务角色识别"]
+  ClassifyCheckpoint["分类检查点"]
+  DIMPlan["DIM 表结构与清洗 DAG"]
+  DWDPlan["逐 FACT 的 DWD 结构、关联与清洗 DAG"]
+  FactCheckpoint["逐 FACT 设计检查点"]
+  DWSPlan["DWS 分析视角与聚合 DAG"]
+  ADSPlan["ADS 消费场景组合 DAG"]
+  Consumer["已发布消费合同"]
+  Review["DSL 校验 / 人工评审 / 不可变发布"]
+  Engine["开发引擎：拓扑调度、SQL 编译、质量门、原子激活"]
+
+  Meta --> Classify
+  Classify --> ClassifyCheckpoint
+  ClassifyCheckpoint --> DIMPlan
+  ClassifyCheckpoint --> DWDPlan
+  DWDPlan --> FactCheckpoint
+  DIMPlan --> Review
+  FactCheckpoint --> Review
+  Review --> DWSPlan --> Review
+  Consumer -. "当前预留" .-> ADSPlan --> Review
+  Review --> Engine
+```
+
+第一阶段中，LLM 对同领域 ODS 逐表分类；分类结果通过本地合同后立即按不可变 ODS 快照保存。`DIMENSION/MASTER` 分支生成保留实体键与说明字段的 DIM 草稿；每张 `FACT` 分别只携带自身和已确认维度元数据，生成保持事实粒度的 DWD 草稿，并独立保存检查点。进程中断后只补缺失的事实设计，不重跑已经成功的分类或其他事实。每次新模型阶段前续租；有新检查点的中断不消耗连续失败额度，无进展失败仍保持有限重试。后续 DWD 可在正式 DIM 发布后通过 ChangeSet 重基为 DIM 精确版本；DWS 只在所需 DWD 已发布后规划。ADS 只保留消费合同接口，当前不自动生成。每个过程都输出同一受控 DSL：字段清单、粒度、精确上游版本、转换表达式、Join、过滤、聚合、质量和物化策略。LLM 不返回 SQL、物理 schema、物理表名或调度命令。
+
+开发引擎只接受通过层级、字段引用、表达式白名单和依赖校验的 DSL。它根据 DAG 拓扑并行执行无依赖节点，负责参数化 SQL 编译、COPY/CTAS、租约、重试、质量门和原子激活。由此允许建模过程拆分或并行，同时仍以精确版本、hash 和质量结果证明最终 DIM、DWD、DWS、ADS 一致。
 
 系统由完成映射的表/Sheet 自动生成 ODS 时，会固定
 `MATERIALIZED_PREFERRED + enabled=true + ON_DEMAND`。不可变发布版本和首个
@@ -128,7 +183,7 @@ DRAFT / UNTESTED
 结束，不把旧建议写回新版本。
 
 数据集自动标签建议链路有意不读取业务样本行。ODS 输入只包含已治理的数据源类型、表和
-投影字段技术元数据、已有业务说明、键属性和表标签；DWD/DWS 输入包含当前数据集的
+投影字段技术元数据、已有业务说明、键属性和表标签；DIM/DWD/DWS/ADS 输入包含当前数据集的
 字段、DAG、粒度，以及精确发布上游版本的字段和已批准标签摘要。任务、AI 审计、
 日志和错误信息均不保存凭据、SQL、表达式字面值或业务数据值。
 
@@ -166,7 +221,7 @@ JSON Schema，并以 tag ID 枚举约束输出；输入最多 192 KiB、taxonomy
 `semantic_change_outbox.event_version`，后台再重建文档及向量。因此编辑标签
 不会改写数据集 DSL，迟到 worker 也不能覆盖新版本结果。
 
-## 5. ODS 提取与 DWD/DWS 执行策略
+## 5. ODS 提取与 DIM/DWD/DWS/ADS 执行策略
 
 ODS 从 MySQL/Oracle 抽取时，把安全可证明的字段投影和源过滤编译为源库受限参数化
 查询，再使用 NDJSON 分批流传输。Go 执行器按规范类型校验每个值，并在同一个
@@ -176,9 +231,11 @@ Go 或 Python 内存。远端错误、字段漂移、类型错误、行数不一
 worksheet 内存和逻辑 staging 另有逐层硬预算，不把“只选小 Sheet”作为放宽大文件
 读取的理由。
 
-DWD 的输入已经是 PostgreSQL 中精确 ACTIVE 的 ODS 物化，DWS 的输入已经是精确
-ACTIVE 的 DWD 物化，因此无论上游最初来自同库还是跨库，Join、字段转换、DWD
-明细整合和 DWS 分组聚合都统一在 PostgreSQL 中执行。这避免了跨源内存 Join，也
+DIM 的输入是 PostgreSQL 中精确 ACTIVE 的 ODS 物化；DWD 至少包含一个 ODS 事实
+输入，并可附加正式 DIM；DWS 的输入只包含一个或多个精确 ACTIVE 的 DWD；ADS 的
+输入是精确 ACTIVE 的 DWS。因此无论
+上游最初来自同库还是跨库，Join、字段转换、明细整合、主题聚合和应用组合都统一在
+PostgreSQL 中执行。这避免了跨源内存 Join，也
 不会为“同源优化”重新绕过已经冻结的 ODS 版本。当前版本没有把 DWD DAG 重新下推
 到原始 MySQL/Oracle；后续若引入 source-affinity 优化，必须证明与冻结 ODS 快照
 语义等价后才能启用，不能以文档描述替代实现。
@@ -243,7 +300,7 @@ MySQL 技术元数据同步、普通查询和 ODS 都使用真正的 `SSCursor` 
 
 ### 当前 worker 落地边界
 
-本轮可执行 worker 已支持 ODS/DWD/DWS 的 PostgreSQL 闭环：
+本轮可执行 worker 已支持 ODS/DIM/DWD/DWS/ADS 的 PostgreSQL 闭环：
 
 - 只领取服务端已登记的不可变 build run，并持续用随机 lease token 心跳续租；
 - 重新加载仍为当前发布态的目标 `dataset_version`，严格校验规范 DSL 与 `schema_hash`；
@@ -258,7 +315,7 @@ MySQL 技术元数据同步、普通查询和 ODS 都使用真正的 `SSCursor` 
   展开/worksheet 内存和逻辑 staging 同时受上述更严格预算约束；
 - ODS staging 完成后再次检查数据源发布指针、资产状态、结构摘要和文件摘要，再由
   同一个可信 CTAS、质量门和原子激活链路生成 `warehouse_ods` 物理表及稳定视图；
-- DWD 只接受 ODS、DWS 只接受 DWD；每个冻结输入必须解析到同租户、同精确版本、当前 `ACTIVE` 的物化及其 `warehouse_published` 稳定视图；
+- DIM 只接受 ODS；DWD 至少接受一个 ODS 事实输入并可接受 DIM；DWS 只接受一个或多个 DWD；ADS 只接受 DWS。每个冻结输入必须解析到同租户、同精确版本、当前 `ACTIVE` 的物化及其 `warehouse_published` 稳定视图；
 - 解析时同时校验 ACTIVE 稳定视图和其不可变物理表；CTAS 读取冻结物化的运行级物理表，而不直接读取可能被下一次发布切换的稳定视图，避免“解析后、执行前”发生上游快照漂移；
 - 输入的 schema hash、snapshot hash 和可选 row count 必须与 ACTIVE 物化完全一致，DSL 中每个节点必须有且只能有可信输入；`sourceVersion` 仅作为审计标签，不参与物理定位；
 - 所有计划节点必须声明 PostgreSQL 执行；worker 按 DAG 拓扑记录节点运行，最终由受限 DSL 编译器和 CTAS 执行；
@@ -274,7 +331,7 @@ MySQL 技术元数据同步、普通查询和 ODS 都使用真正的 `SSCursor` 
 
 ### 发布试跑与指标查询读取路径
 
-构建路径和交互式读取路径使用不同的并发合同。worker 构建 DWD/DWS 时读取冻结
+构建路径和交互式读取路径使用不同的并发合同。worker 构建 DIM/DWD/DWS/ADS 时读取冻结
 materialization ID 对应的运行级不可变物理表；数据集发布试跑、草稿/版本预览和
 DWS 指标试算则读取当前 ACTIVE 物化对应的 `warehouse_published` 稳定视图：
 
@@ -287,9 +344,10 @@ DWS 指标试算则读取当前 ACTIVE 物化对应的 `warehouse_published` 稳
   → 查询审计 + 精确 materialization 绑定
 ```
 
-解析器不递归重放上游 DAG，也不接受客户端 SQL、稳定视图名或物理表名。DWD 节点
-只能绑定当前发布且 ACTIVE 的 ODS 精确版本，DWS 节点只能绑定同条件的 DWD 精确
-版本；任一节点缺失、失效、换版、换 ACTIVE 指针、摘要漂移或稳定关系异常都会在
+解析器不递归重放上游 DAG，也不接受客户端 SQL、稳定视图名或物理表名。DIM
+节点只能绑定当前发布且 ACTIVE 的 ODS 精确版本；DWD 节点至少绑定一个同条件的
+ODS，并可绑定 DIM；DWS 节点只能绑定一个或多个 DWD；ADS 节点只能绑定 DWS。任一节点缺失、失效、换版、换 ACTIVE
+指针、摘要漂移或稳定关系异常都会在
 执行前失败关闭。执行事务对 materialization、版本和所有者行加共享锁，阻止原子
 激活在查询中途切换指针；实际 SELECT 同时取得 PostgreSQL 视图关系锁。
 
@@ -306,7 +364,29 @@ DAG。可证明可分解的输出才允许再次汇总：SUM/MIN/MAX 保持聚�
 
 ## 7. 语义层和倒排检索
 
-DWS 发布版本上的维度成为一级对象。维度固定到精确 DWS 数据集版本和字段，记录类型、基数策略、敏感性、定义摘要和状态。维度成员由物化表去重扫描得到，存储规范值、归一化值、哈希、有效期与别名。
+物理 `DIM` 与一级“语义维度”不是同一个对象。`DIM` 是从 ODS 抽离的实体说明表，
+负责人物、商品、组织等实体键和描述属性；它通过 DWD/DWS DAG 被对齐到事实粒度。
+语义维度则是分析者最终可以切分指标的逻辑轴，固定到精确 DWS 发布版本和字段。
+这一边界保证成员检索、指标聚合和权限判断都发生在同一个已证明粒度的 DWS 上，
+不会绕过事实关系直接拿 DIM 与指标做不受控 Join。
+
+语义层的发布链路是：
+
+```text
+DIM/DWD 物理合同
+  → DWS 主题与粒度
+  → 一级语义维度 + 指标精确版本
+  → VERIFIED 维度—指标关系
+  → ADS / 报告 / API 消费
+```
+
+ADS 可以组合多个 DWS 的已发布结果，但不成为语义指标或维度的反向事实来源；需要
+新增业务口径时先在 DWS/语义层形成可复用定义，再由 ADS 裁剪和展示，避免同一指标
+在多个报表层重复定义。
+
+DWS 发布版本上的维度成为一级对象。维度固定到精确 DWS 数据集版本和字段，记录类型、
+基数策略、敏感性、定义摘要和状态。维度成员由物化表去重扫描得到，存储规范值、
+归一化值、哈希、有效期与别名。
 
 DWS 版本发布只登记待物化的维度勘测运行；精确 `ACTIVE DWS` 物化出现后，数据库
 根据非度量字段生成可审计、可编辑的 `SUGGESTED` 候选。候选证据冻结版本、schema、
@@ -385,7 +465,27 @@ stage，不污染新代际。临时表在连接归还池前删除，清理失败
 
 - `DIRECT / BRIDGE / DERIVED` 关系类型；
 - `SAFE / DEDUPLICATE / UNSAFE` 扇出策略；
-- 可审计 Join 路径、证据来源、置信度和人工验证状态。
+- 最多 8 跳的可审计 Join 路径、证据来源、置信度和人工验证状态。
+
+Join hop 只能声明起止 DWS 精确版本、起止字段和
+`ONE_TO_ONE / MANY_TO_ONE / ONE_TO_MANY / MANY_TO_MANY` 基数。相邻 hop
+必须拓扑连续，首跳从语义维度字段开始，末跳落到指标 DWS；字段必须是非度量角色且
+规范类型相容。`SAFE` 只接受不会放大事实的 `ONE_TO_ONE / MANY_TO_ONE`。
+API 严格解码后，服务再次读取当前发布指针和字段合同；关系验证还要求全部 hop
+版本都有 ACTIVE 物化。数据库约束承担最终结构封口，LLM 只能提议这种结构化关系，
+不能提交 SQL、表达式或物理表名。
+
+同一精确 DWS 中，指标 `allowedDimensions` 与已发布一级维度的字段交集是确定性
+事实。任一侧发布时，数据库直接产生
+`DIRECT + SAFE + RULE + confidence=1 + PROPOSED` 关系并保留人工验证门，不调用
+LLM；迁移会补齐历史交集，已存在或已拒绝的唯一关系不会被覆盖。LLM 只处理控制面
+不能确定的跨 DWS、桥接或派生路径，因而请求更小、失败重试更少，也不会对已知关系
+重复花费模型调用。
+
+成员值和成员别名先分别通过以 `(tenant_id, normalized_*)` 开头的精确索引形成
+候选集合，按成员优先保留别名命中后才关联关系和指标；不会为了跨维度搜索先扫描
+全部活动成员。命中结果同时返回维度侧精确版本/字段和已经验证的 Join hop，供下游
+规划器复用，不需要再让 LLM 从名称重新推断关系。
 
 只有已验证且非 `UNSAFE` 的关系可以用于自动回答。敏感维度被数据库约束为只能
 使用 `NONE`，高基数维度只能采用 `EXACT_ONLY` 或 `NONE`；敏感成员不会从

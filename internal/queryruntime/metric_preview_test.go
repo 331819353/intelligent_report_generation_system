@@ -99,6 +99,46 @@ func TestPreviewMetricRejectsTamperedSourceEnvelope(t *testing.T) {
 	}
 }
 
+func TestMetricSourceEnvelopeAllowsOnlyDeclaredParameterizedDimensionFilter(t *testing.T) {
+	original := singleSourceJoinRuntimeDocument()
+	originalRaw, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err = dataset.DecodeAndNormalize(originalRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	derived := derivedMetricDocument(t, original)
+	field := original.Fields[0]
+	parameterCode := "semantic_dimension_filter_1"
+	derived.Parameters = append(derived.Parameters, dataset.Parameter{
+		Code: parameterCode, Name: "语义维度过滤",
+		DataType: field.CanonicalType, Required: true,
+	})
+	left := field.Expression
+	right := dataset.Expression{Type: "PARAM_REF", Code: parameterCode}
+	derived.Filters = append(derived.Filters, dataset.Filter{
+		ID: "semantic_dimension_filter_1", Stage: "PRE_AGGREGATION",
+		Expression: dataset.Expression{
+			Type: "EQUALS", Left: &left, Right: &right,
+		},
+	})
+	candidate := metric.QueryCandidate{FilterBindings: []metric.QueryFilterBinding{{
+		FieldID: field.ID, FilterID: "semantic_dimension_filter_1",
+		ParameterCode: parameterCode,
+		DataType:      field.CanonicalType,
+	}}}
+	if !sameMetricSourceEnvelope(original, derived, candidate) {
+		t.Fatal("declared parameterized filter should preserve the source envelope")
+	}
+	derived.Filters[len(derived.Filters)-1].Expression.Right =
+		&dataset.Expression{Type: "LITERAL", Value: "华东"}
+	if sameMetricSourceEnvelope(original, derived, candidate) {
+		t.Fatal("literal member value must fail the source-envelope check")
+	}
+}
+
 func TestPreviewMetricFailsClosedForUnsupportedPolicyBoundary(t *testing.T) {
 	singleSource := metricSingleSourceDocument(t)
 	tests := []struct {
@@ -270,12 +310,33 @@ func TestPreviewDWSMetricReadsExactActiveMaterialization(t *testing.T) {
 	)
 	service.SetWarehouseExecutor(warehouse)
 
-	candidate := metricQueryCandidate(
-		t, "dataset-version-1", derivedMetricDocument(t, original),
-	)
+	derived := derivedMetricDocument(t, original)
+	filterField := original.Fields[0]
+	parameterCode := "semantic_dimension_filter_1"
+	derived.Parameters = append(derived.Parameters, dataset.Parameter{
+		Code: parameterCode, Name: "语义维度过滤",
+		DataType: filterField.CanonicalType, Required: true,
+	})
+	filterLeft := filterField.Expression
+	filterRight := dataset.Expression{Type: "PARAM_REF", Code: parameterCode}
+	derived.Filters = append(derived.Filters, dataset.Filter{
+		ID: "semantic_dimension_filter_1", Stage: "PRE_AGGREGATION",
+		Expression: dataset.Expression{
+			Type: "EQUALS", Left: &filterLeft, Right: &filterRight,
+		},
+	})
+	candidate := metricQueryCandidate(t, "dataset-version-1", derived)
+	candidate.FilterBindings = []metric.QueryFilterBinding{{
+		FieldID: filterField.ID, FilterID: "semantic_dimension_filter_1",
+		ParameterCode: parameterCode,
+		DataType:      filterField.CanonicalType,
+	}}
 	result, err := service.PreviewMetric(
 		context.Background(), "tenant-1", "actor-1", candidate,
-		dataset.PreviewInput{MaxRows: 1}, true,
+		dataset.PreviewInput{
+			Parameters: map[string]any{parameterCode: "2026-01-01"},
+			MaxRows:    1,
+		}, true,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -294,7 +355,13 @@ func TestPreviewDWSMetricReadsExactActiveMaterialization(t *testing.T) {
 		document.Fields[0].Expression.Function != "SUM" ||
 		document.Fields[0].Expression.Argument == nil ||
 		document.Fields[0].Expression.Argument.NodeID != materializedMetricNodeID ||
-		document.Fields[0].Expression.Argument.Field != "revenue" {
+		document.Fields[0].Expression.Argument.Field != "revenue" ||
+		len(document.Filters) != 1 ||
+		document.Filters[0].Expression.Left == nil ||
+		document.Filters[0].Expression.Left.NodeID != materializedMetricNodeID ||
+		document.Filters[0].Expression.Left.Field != filterField.Code ||
+		len(document.Parameters) != 1 ||
+		document.Parameters[0].Code != parameterCode {
 		t.Fatalf("materialized metric document=%#v", document)
 	}
 }

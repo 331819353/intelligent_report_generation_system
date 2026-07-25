@@ -151,6 +151,9 @@ test('DWD 草稿按精确上游数据集版本恢复数据节点和可保存画�
         rightNodeId: 'node_dim_1',
         joinType: 'LEFT',
         cardinality: 'MANY_TO_ONE',
+        relationshipType: 'ROLE_PLAYING',
+        relationshipRole: 'ORDERING_USER',
+        fanoutPolicy: 'SAFE',
         manualConfirmed: false,
         conditions: [{
           leftExpression: { type: 'FIELD_REF', nodeId: 'node_fact', field: 'customer_id' },
@@ -179,7 +182,13 @@ test('DWD 草稿按精确上游数据集版本恢复数据节点和可保存画�
   })
   expect(draft.nodes[0].selected).toEqual(['order_id', 'customer_id'])
   expect(draft.nodes.map(node => node.alias)).toEqual(['t1', 't2'])
-  expect(draft.joins[0]).toMatchObject({ manualConfirmed: true, cardinality: 'MANY_TO_ONE' })
+  expect(draft.joins[0]).toMatchObject({
+    manualConfirmed: true,
+    cardinality: 'MANY_TO_ONE',
+    relationshipType: 'ROLE_PLAYING',
+    relationshipRole: 'ORDERING_USER',
+    fanoutPolicy: 'SAFE',
+  })
   expect(draft.designer?.nodeNames).toMatchObject({ node_fact: 't1', node_dim_1: 't2' })
   expect(draft.designer?.joins[0].name).toBe('j1')
   expect(draft.designer?.transforms?.map(transform => transform.name)).toEqual(['c1', 'c2'])
@@ -197,7 +206,13 @@ test('DWD 草稿按精确上游数据集版本恢复数据节点和可保存画�
     alias: 't1',
   })
   expect(rebuilt.nodes[1]).toMatchObject({ id: 'node_dim_1', alias: 't2' })
-  expect((rebuilt.joins as Array<Record<string, unknown>>)[0]).toMatchObject({ cardinality: 'MANY_TO_ONE', manualConfirmed: true })
+  expect((rebuilt.joins as Array<Record<string, unknown>>)[0]).toMatchObject({
+    cardinality: 'MANY_TO_ONE',
+    relationshipType: 'ROLE_PLAYING',
+    relationshipRole: 'ORDERING_USER',
+    fanoutPolicy: 'SAFE',
+    manualConfirmed: true,
+  })
   expect(rebuilt.nodes[0]).not.toHaveProperty('tableId')
   expect(rebuilt.fields.find(field => field.code === 'customer_id')).toMatchObject({
     nullable: false,

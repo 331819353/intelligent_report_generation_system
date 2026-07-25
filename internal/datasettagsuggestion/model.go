@@ -218,7 +218,8 @@ func validClaim(claim Claim) bool {
 		uuid.Validate(claim.DatasetVersionID) == nil &&
 		uuid.Validate(claim.LeaseToken) == nil &&
 		sha256Pattern.MatchString(claim.SchemaHash) &&
-		(claim.Layer == "ODS" || claim.Layer == "DWD" || claim.Layer == "DWS") &&
+		(claim.Layer == "ODS" || claim.Layer == "DIM" || claim.Layer == "DWD" ||
+			claim.Layer == "DWS" || claim.Layer == "ADS") &&
 		strings.TrimSpace(claim.PromptVersion) == PromptVersion &&
 		claim.Attempt >= 1 && claim.Attempt <= claim.MaxAttempts &&
 		claim.MaxAttempts >= 1 && claim.MaxAttempts <= 5

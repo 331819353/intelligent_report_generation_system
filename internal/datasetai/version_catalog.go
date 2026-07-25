@@ -15,7 +15,7 @@ import (
 const datasetVersionCatalogPrefix = "dataset-version:"
 
 // VersionAwareAssetCatalog keeps the generic physical-asset catalog contract while
-// making immutable published dataset versions first-class inputs for DWD/DWS editing.
+// making immutable published dataset versions first-class inputs for DIM/DWD/DWS/ADS editing.
 // The synthetic identifier is deliberately namespaced so it can never be interpreted
 // as a metadata_tables UUID.
 type VersionAwareAssetCatalog struct {

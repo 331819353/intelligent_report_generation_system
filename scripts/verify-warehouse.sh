@@ -26,8 +26,8 @@ DECLARE
   schema_name text;
 BEGIN
   FOREACH schema_name IN ARRAY ARRAY[
-    'warehouse_staging','warehouse_ods','warehouse_dwd',
-    'warehouse_dws','warehouse_published'
+    'warehouse_staging','warehouse_ods','warehouse_dim','warehouse_dwd',
+    'warehouse_dws','warehouse_ads','warehouse_published'
   ] LOOP
     IF to_regnamespace(schema_name) IS NULL THEN
       RAISE EXCEPTION 'missing warehouse schema: %', schema_name;
@@ -37,12 +37,14 @@ END
 $verify$;
 
 SELECT has_schema_privilege(:'worker_user','warehouse_dwd','CREATE')
+  AND has_schema_privilege(:'worker_user','warehouse_dim','CREATE')
   AND has_schema_privilege(:'worker_user','warehouse_dws','CREATE')
+  AND has_schema_privilege(:'worker_user','warehouse_ads','CREATE')
   AS worker_can_build
 \gset
 \if :worker_can_build
 \else
-  \echo 'warehouse worker cannot create DWD/DWS relations'
+  \echo 'warehouse worker cannot create DIM/DWD/DWS/ADS relations'
   \quit 1
 \endif
 

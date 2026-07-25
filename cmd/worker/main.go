@@ -27,6 +27,7 @@ import (
 	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/semanticcatalog"
 	"intelligent-report-generation-system/internal/semanticmanagement"
+	"intelligent-report-generation-system/internal/semanticqa"
 	"intelligent-report-generation-system/internal/warehouse"
 )
 
@@ -105,6 +106,7 @@ func main() {
 		os.Exit(1)
 	}
 	datasetStore := dataset.NewPostgresStore(pool)
+	datasetService := dataset.NewService(datasetStore)
 	metricCandidateStore := metriccandidate.NewPostgresStore(pool)
 	materializationStore := materialization.NewPostgresStoreWithWarehouse(pool, warehousePool)
 	datasetStore.SetPublicationCommitSink(metricCandidateStore)
@@ -139,6 +141,20 @@ func main() {
 	go runSemanticCatalogWorker(ctx, logger, semanticcatalog.NewWorker(
 		semanticcatalog.NewPostgresStore(pool), embeddingProvider,
 	), workerID, cfg.WorkerPollInterval)
+	go semanticqa.RunGraphWorker(
+		ctx, logger,
+		semanticqa.NewGraphWorker(semanticqa.NewPostgresStore(pool)),
+		workerID, cfg.WorkerPollInterval,
+	)
+	go semanticqa.RunDWSModelingWorker(
+		ctx, logger,
+		semanticqa.NewDWSModelingWorker(
+			semanticqa.NewPostgresStore(pool),
+			datasetService,
+			semanticqa.NewOrchestratedDWSAnalysisSelector(aiService),
+		),
+		workerID, cfg.WorkerPollInterval,
+	)
 	go runMaterializationWorker(ctx, logger, materializationworker.NewWorker(
 		materializationStore,
 		materializationworker.NewCompositeResolver(
@@ -283,10 +299,11 @@ func runDWDModelingWorker(
 	workerID string,
 	pollInterval time.Duration,
 ) {
-	// A claim includes an initial LLM design plus at most one directed repair.
-	// Twelve minutes leaves headroom over two configured five-minute calls while
-	// still allowing a crashed worker's ownership to expire.
-	const lease = 12 * time.Minute
+	// Every classification/FACT stage renews this lease before its initial call
+	// and optional directed repair. Validated stages are checkpointed, so a
+	// crashed worker resumes only the missing stage shortly after ownership
+	// expires. Config validation keeps a two-call stage below one minute.
+	const lease = 2 * time.Minute
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {
@@ -298,7 +315,7 @@ func runDWDModelingWorker(
 		processed := false
 		tenantIDs, err := worker.TenantIDs(ctx)
 		if err != nil {
-			logger.Error("list DWD modeling tenants", "error", err)
+			logger.Error("list DIM/DWD modeling tenants", "error", err)
 		} else {
 			for _, tenantID := range tenantIDs {
 				didProcess, runErr := worker.ProcessNext(
@@ -314,7 +331,7 @@ func runDWDModelingWorker(
 						providerCode = string(providerError.Code)
 					}
 					logger.Error(
-						"process LLM DWD modeling",
+						"process LLM DIM/DWD modeling",
 						"tenant_id", tenantID,
 						"provider_status", providerStatus,
 						"provider_code", providerCode,
