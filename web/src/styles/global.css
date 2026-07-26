@@ -120,6 +120,7 @@ textarea:focus-visible {
   width: 68px;
   height: auto;
   flex: none;
+  align-self: center;
 }
 
 .login-brand .brand-logo { width: 98px; }
