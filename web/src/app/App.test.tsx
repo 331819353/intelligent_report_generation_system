@@ -8,7 +8,7 @@ afterEach(() => vi.unstubAllGlobals())
 
 test('renders login route', () => {
   render(<MemoryRouter initialEntries={['/login']}><App /></MemoryRouter>)
-  expect(screen.getByRole('heading', { name: '登录智能报告平台' })).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: '登录智能分析决策平台' })).toBeInTheDocument()
 })
 
 test('renders designer route', () => {
@@ -28,7 +28,7 @@ test('viewer uses the shared report renderer', () => {
 test('redirects anonymous users away from protected routes', () => {
   sessionStorage.clear()
   render(<MemoryRouter initialEntries={['/admin']}><App /></MemoryRouter>)
-  expect(screen.getByRole('heading', { name: '登录智能报告平台' })).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: '登录智能分析决策平台' })).toBeInTheDocument()
 })
 
 test('legacy new-dataset route also opens the configuration-center canvas', async () => {

@@ -35,9 +35,9 @@ export function LoginPage() {
   return (
     <main className="login-page">
       <section className="login-story">
-        <div className="login-brand"><div className="brand-mark">IR</div><div><strong>智能报告</strong><span>Insight Studio</span></div></div>
+        <div className="login-brand"><div className="brand-mark">DI</div><div><strong>智能分析决策平台</strong><span>Decision Intelligence</span></div></div>
         <div className="login-story-copy">
-          <span className="eyebrow">INTELLIGENT REPORTING</span>
+          <span className="eyebrow">DECISION INTELLIGENCE</span>
           <h1>把数据资产，转化为可信的分析结论。</h1>
           <p>从数据接入、语义治理到报告交付，在一个清晰、可追溯的分析工作空间内完成。</p>
           <ul className="login-benefits">
@@ -51,7 +51,7 @@ export function LoginPage() {
       <section className="login-panel">
         <form onSubmit={submit}>
           <span className="eyebrow">欢迎回来</span>
-          <h2>登录智能报告平台</h2>
+          <h2>登录智能分析决策平台</h2>
           <p className="login-form-intro">使用组织账号进入你的数据分析工作空间。</p>
           <label>租户<input name="tenantCode" defaultValue="demo" placeholder="请输入租户编码" /></label>
           <label>账号<input name="email" type="email" placeholder="name@company.com" /></label>

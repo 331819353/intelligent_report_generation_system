@@ -24,8 +24,8 @@ export function AppShell({ title, eyebrow, children, actions, className = '' }: 
   return (
     <div className={`app-shell ${className}`.trim()}>
       <aside className="sidebar">
-        <div className="brand-mark">IR</div>
-        <div className="brand-copy"><strong>智能报告</strong><span>Insight Studio</span></div>
+        <div className="brand-mark">DI</div>
+        <div className="brand-copy"><strong>智能分析决策平台</strong><span>Decision Intelligence</span></div>
         <nav aria-label="主导航">
           <span className="sidebar-section-label">工作空间</span>
           <NavLink to="/admin"><House aria-hidden="true" size={18} />工作台</NavLink>
