@@ -1,5 +1,6 @@
 import {
   ChartBar,
+  ChatCenteredDots,
   Database,
   House,
   PresentationChart,
@@ -36,6 +37,7 @@ export function AppShell({ title, eyebrow, children, actions, className = '' }: 
           >
             <TreeStructure aria-hidden="true" size={18} />资产管理中心
           </NavLink>
+          <NavLink to="/assistant"><ChatCenteredDots aria-hidden="true" size={18} />智能问答</NavLink>
           <span className="sidebar-section-label reports">报告</span>
           <NavLink to="/designer/draft"><ChartBar aria-hidden="true" size={18} />报告设计器</NavLink>
           <NavLink to="/reports/demo"><PresentationChart aria-hidden="true" size={18} />在线报告</NavLink>

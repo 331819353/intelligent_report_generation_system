@@ -5,6 +5,31 @@ import (
 	"time"
 )
 
+func TestInheritQueryContextOnlyFillsMissingSlots(t *testing.T) {
+	t.Run("follow-up inherits governed metric and dimension", func(t *testing.T) {
+		input := QueryPlanInput{Intent: "UNKNOWN"}
+		inheritQueryContext(&input, QuerySlots{
+			Intent: "METRIC", MetricCode: "sales_amount", DimensionCode: "region",
+		})
+		if input.Intent != "METRIC" || input.MetricCode != "sales_amount" ||
+			input.DimensionCode != "region" {
+			t.Fatalf("input=%#v", input)
+		}
+	})
+	t.Run("current turn wins over prior context", func(t *testing.T) {
+		input := QueryPlanInput{
+			Intent: "RANKING", MetricCode: "order_count", DimensionCode: "channel",
+		}
+		inheritQueryContext(&input, QuerySlots{
+			Intent: "METRIC", MetricCode: "sales_amount", DimensionCode: "region",
+		})
+		if input.Intent != "RANKING" || input.MetricCode != "order_count" ||
+			input.DimensionCode != "channel" {
+			t.Fatalf("input=%#v", input)
+		}
+	})
+}
+
 func TestNormalizeQueryTimeRange(t *testing.T) {
 	t.Run("date half open range", func(t *testing.T) {
 		value, err := normalizeQueryTimeRange(QueryTimeRange{

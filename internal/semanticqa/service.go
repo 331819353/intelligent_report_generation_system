@@ -30,6 +30,7 @@ type Store interface {
 	GetWarehouseDAG(context.Context, string, string) (WarehouseBuildDAG, error)
 	GetGraphStatus(context.Context, string) (GraphStatus, error)
 	PlanQuery(context.Context, string, string, QueryPlanInput, string) (QueryPlan, error)
+	ResolveQueryContext(context.Context, string, string) (QuerySlots, error)
 	CreateQuestionTemplate(context.Context, string, string, CreateQuestionTemplateInput) (QuestionTemplate, error)
 	ListQuestionTemplates(context.Context, string) ([]QuestionTemplate, error)
 	CreateGoldenQuestionSet(context.Context, string, string, CreateGoldenQuestionSetInput) (GoldenQuestionSet, error)
@@ -494,6 +495,7 @@ func (service *Service) PlanQuery(
 	input.MemberValue = strings.TrimSpace(input.MemberValue)
 	input.DimensionCode = strings.TrimSpace(input.DimensionCode)
 	input.MetricCode = strings.TrimSpace(input.MetricCode)
+	input.ContextQueryPlanID = strings.TrimSpace(input.ContextQueryPlanID)
 	memberFilters, err := normalizeQueryMemberFilters(
 		input.DimensionCode, input.MemberValue, input.MemberFilters,
 	)
@@ -594,6 +596,18 @@ func (service *Service) PlanQuery(
 			}
 		}
 	}
+	if input.ContextQueryPlanID != "" {
+		if uuid.Validate(input.ContextQueryPlanID) != nil {
+			return QueryPlan{}, ErrInvalidRequest
+		}
+		contextSlots, err := service.store.ResolveQueryContext(
+			ctx, tenantID, input.ContextQueryPlanID,
+		)
+		if err != nil {
+			return QueryPlan{}, err
+		}
+		inheritQueryContext(&input, contextSlots)
+	}
 	if input.Intent == "RANKING" && input.TopN == 0 {
 		input.TopN, input.SortDirection = 10, "DESC"
 	}
@@ -606,6 +620,18 @@ func (service *Service) PlanQuery(
 	questionHash := hashText(input.Question)
 	input.Question = ""
 	return service.store.PlanQuery(ctx, tenantID, actorID, input, questionHash)
+}
+
+func inheritQueryContext(input *QueryPlanInput, contextSlots QuerySlots) {
+	if input.MetricCode == "" {
+		input.MetricCode = contextSlots.MetricCode
+	}
+	if input.DimensionCode == "" {
+		input.DimensionCode = contextSlots.DimensionCode
+	}
+	if input.Intent == "UNKNOWN" && contextSlots.Intent != "" {
+		input.Intent = contextSlots.Intent
+	}
 }
 
 func normalizeQueryTimeRange(value QueryTimeRange) (QueryTimeRange, error) {

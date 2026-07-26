@@ -7,6 +7,7 @@ import { LoginPage } from '../pages/LoginPage'
 import { MetricCatalogPage } from '../pages/MetricCatalogPage'
 import { MetricCenterPage } from '../pages/MetricCenterPage'
 import { SemanticGovernancePage } from '../pages/SemanticGovernancePage'
+import { SemanticChatPage } from '../pages/SemanticChatPage'
 import { ViewerPage } from '../pages/ViewerPage'
 import { RequireAuth } from '../components/RequireAuth'
 
@@ -22,6 +23,7 @@ export function App() {
       <Route path="/assets/metrics" element={<RequireAuth><MetricCatalogPage /></RequireAuth>} />
       <Route path="/assets/semantics" element={<RequireAuth><SemanticGovernancePage key="semantic-assets" initialView="candidates" /></RequireAuth>} />
       <Route path="/assets/dimension-values" element={<RequireAuth><SemanticGovernancePage key="dimension-values" initialView="dimensions" /></RequireAuth>} />
+      <Route path="/assistant" element={<RequireAuth><SemanticChatPage /></RequireAuth>} />
       <Route path="/metrics" element={<Navigate to="/assets/metrics" replace />} />
       <Route path="/metrics/new" element={<RequireAuth><MetricCenterPage /></RequireAuth>} />
       <Route path="/metrics/:metricId/edit" element={<RequireAuth><MetricCenterPage /></RequireAuth>} />

@@ -69,6 +69,21 @@ Content-Type: application/json
 }
 ```
 
+多轮追问可以携带上一轮成功计划：
+
+```json
+{
+  "question": "那上个月呢？",
+  "intent": "UNKNOWN",
+  "metricCode": "",
+  "contextQueryPlanId": "上一轮 READY 或 EXECUTED 计划 UUID"
+}
+```
+
+服务端只从该计划继承已证明的指标和维度编码；不会继承成员原值、结果行、
+权限结论或旧图路径。当前追问仍会重新解析时间、成员和意图，并在 current
+generation 上重新规划和校验，因此多轮上下文不能绕过语义图门禁。
+
 `question` 原文只在本次解释过程中使用，持久化时仅保存 SHA-256。对象槽位为空时，解释器可以从租户内精确/文本/向量候选中选择；向量结果不会直接成为图关系。
 
 `memberFilters` 最多 8 个，只允许不同维度各一个等值成员。每个成员都要

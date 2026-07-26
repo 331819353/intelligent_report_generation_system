@@ -20,6 +20,35 @@ func (store *PostgresStore) GetQueryPlan(
 	return plan, err
 }
 
+// ResolveQueryContext exposes only governed semantic codes from a prior
+// successful plan. Raw member values and result rows are deliberately absent.
+func (store *PostgresStore) ResolveQueryContext(
+	ctx context.Context,
+	tenantID, id string,
+) (slots QuerySlots, err error) {
+	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
+		queryErr := tx.QueryRow(ctx, `SELECT query_plan.intent,
+				metric.code::text,COALESCE(dimension.code::text,'')
+			FROM platform.semantic_query_plans AS query_plan
+			JOIN platform.metrics AS metric
+			  ON metric.tenant_id=query_plan.tenant_id
+			 AND metric.id=query_plan.selected_metric_id
+			 AND metric.status='PUBLISHED' AND metric.deleted_at IS NULL
+			LEFT JOIN platform.semantic_dimensions AS dimension
+			  ON dimension.tenant_id=query_plan.tenant_id
+			 AND dimension.id=query_plan.selected_dimension_id
+			 AND dimension.status='PUBLISHED'
+			WHERE query_plan.id=$1::uuid
+			  AND query_plan.status IN ('READY','EXECUTED')`, id).
+			Scan(&slots.Intent, &slots.MetricCode, &slots.DimensionCode)
+		if errors.Is(queryErr, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return queryErr
+	})
+	return slots, err
+}
+
 func (store *PostgresStore) PrepareQueryPlanExecution(
 	ctx context.Context,
 	tenantID, id, expectedGenerationID, expectedPathHash string,

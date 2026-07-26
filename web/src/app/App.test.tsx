@@ -107,6 +107,24 @@ test('renders the protected data source center route and navigation entry', asyn
   expect(screen.getByRole('button', { name: '新建数据源' })).toBeEnabled()
 })
 
+test('renders the protected intelligent Q&A route and navigation entry', async () => {
+  sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    const body = url.includes('/graph/status')
+      ? { status: 'READY', currentGeneration: 1, requestedEventVersion: 1, appliedEventVersion: 1 }
+      : []
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }))
+
+  render(<MemoryRouter initialEntries={['/assistant']}><App /></MemoryRouter>)
+
+  expect(screen.getByRole('heading', { level: 1, name: '智能问答' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: '智能问答' })).toHaveClass('active')
+  expect(screen.getByLabelText('输入分析问题')).toBeEnabled()
+  expect(await screen.findByText('语义图已就绪')).toBeInTheDocument()
+})
+
 test('renders the dataset configuration center route and renamed navigation entry', async () => {
   sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
   vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ items: [], total: 0, limit: 200, offset: 0 }), { status: 200, headers: { 'Content-Type': 'application/json' } })))

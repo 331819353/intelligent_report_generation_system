@@ -162,20 +162,21 @@ type WarehouseBuildDAG struct {
 }
 
 type QueryPlanInput struct {
-	Question        string                   `json:"question"`
-	Intent          string                   `json:"intent"`
-	MemberValue     string                   `json:"memberValue,omitempty"`
-	MemberFilters   []QueryMemberFilterInput `json:"memberFilters,omitempty"`
-	DimensionCode   string                   `json:"dimensionCode,omitempty"`
-	MetricCode      string                   `json:"metricCode"`
-	TimeRange       *QueryTimeRange          `json:"timeRange,omitempty"`
-	TimePreset      string                   `json:"timePreset,omitempty"`
-	Timezone        string                   `json:"timezone,omitempty"`
-	ComparisonMode  string                   `json:"comparisonMode,omitempty"`
-	ComparisonRange *QueryTimeRange          `json:"comparisonRange,omitempty"`
-	TopN            int                      `json:"topN,omitempty"`
-	SortDirection   string                   `json:"sortDirection,omitempty"`
-	MaximumPathHops int                      `json:"maximumPathHops,omitempty"`
+	Question           string                   `json:"question"`
+	Intent             string                   `json:"intent"`
+	MemberValue        string                   `json:"memberValue,omitempty"`
+	MemberFilters      []QueryMemberFilterInput `json:"memberFilters,omitempty"`
+	DimensionCode      string                   `json:"dimensionCode,omitempty"`
+	MetricCode         string                   `json:"metricCode"`
+	ContextQueryPlanID string                   `json:"contextQueryPlanId,omitempty"`
+	TimeRange          *QueryTimeRange          `json:"timeRange,omitempty"`
+	TimePreset         string                   `json:"timePreset,omitempty"`
+	Timezone           string                   `json:"timezone,omitempty"`
+	ComparisonMode     string                   `json:"comparisonMode,omitempty"`
+	ComparisonRange    *QueryTimeRange          `json:"comparisonRange,omitempty"`
+	TopN               int                      `json:"topN,omitempty"`
+	SortDirection      string                   `json:"sortDirection,omitempty"`
+	MaximumPathHops    int                      `json:"maximumPathHops,omitempty"`
 }
 
 type QueryMemberFilterInput struct {
