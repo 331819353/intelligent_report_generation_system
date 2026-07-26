@@ -1,6 +1,6 @@
 .dataset-center-shell { grid-template-columns: 248px minmax(0, 1fr); background: #f7f8fb; }
-.dataset-center-shell .sidebar { width: 248px; grid-template-columns: 42px 1fr; gap: 14px; border-right: 1px solid #e9ebf0; padding: 24px 18px; background: #fff; color: #16181d; }
-.dataset-center-shell .brand-mark { width: 40px; height: 40px; border-radius: 11px; background: #2864dc; box-shadow: none; }
+.dataset-center-shell .sidebar { width: 248px; grid-template-columns: 68px 1fr; gap: 14px; border-right: 1px solid #e9ebf0; padding: 24px 18px; background: #fff; color: #16181d; }
+.dataset-center-shell .brand-logo { width: 68px; }
 .dataset-center-shell .brand-copy strong { color: #17191e; font-size: 15px; }
 .dataset-center-shell .brand-copy span { color: #9298a4; font-size: 10px; }
 .dataset-center-shell .sidebar nav { gap: 4px; margin-top: 22px; }

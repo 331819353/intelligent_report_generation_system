@@ -9,6 +9,7 @@ afterEach(() => vi.unstubAllGlobals())
 test('renders login route', () => {
   render(<MemoryRouter initialEntries={['/login']}><App /></MemoryRouter>)
   expect(screen.getByRole('heading', { name: '登录智能分析决策平台' })).toBeInTheDocument()
+  expect(screen.getByRole('img', { name: 'Haier 海尔' })).toHaveAttribute('src', '/haier-logo.svg')
 })
 
 test('renders designer route', () => {

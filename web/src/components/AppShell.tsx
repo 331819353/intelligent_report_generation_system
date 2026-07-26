@@ -24,7 +24,7 @@ export function AppShell({ title, eyebrow, children, actions, className = '' }: 
   return (
     <div className={`app-shell ${className}`.trim()}>
       <aside className="sidebar">
-        <div className="brand-mark">DI</div>
+        <img className="brand-logo" src="/haier-logo.svg" alt="Haier 海尔" />
         <div className="brand-copy"><strong>智能分析决策平台</strong><span>Decision Intelligence</span></div>
         <nav aria-label="主导航">
           <span className="sidebar-section-label">工作空间</span>

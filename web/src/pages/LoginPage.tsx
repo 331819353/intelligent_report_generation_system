@@ -35,7 +35,7 @@ export function LoginPage() {
   return (
     <main className="login-page">
       <section className="login-story">
-        <div className="login-brand"><div className="brand-mark">DI</div><div><strong>智能分析决策平台</strong><span>Decision Intelligence</span></div></div>
+        <div className="login-brand"><img className="brand-logo" src="/haier-logo.svg" alt="Haier 海尔" /><div><strong>智能分析决策平台</strong><span>Decision Intelligence</span></div></div>
         <div className="login-story-copy">
           <span className="eyebrow">DECISION INTELLIGENCE</span>
           <h1>把数据资产，转化为可信的分析结论。</h1>
