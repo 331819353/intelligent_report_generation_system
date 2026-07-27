@@ -60,3 +60,27 @@ func TestSemanticQAMigrationsContainAuthorityRecoveryAndPrivacyFences(t *testing
 		}
 	}
 }
+
+func TestLineageGraphDomainReindexRunsPerTenant(t *testing.T) {
+	raw, err := os.ReadFile(
+		"../../migrations/000127_lineage_graph_and_domain_reindex.up.sql",
+	)
+	if err != nil {
+		t.Fatalf("read lineage graph/domain reindex migration: %v", err)
+	}
+	sql := string(raw)
+	for _, fragment := range []string{
+		"FOR selected_tenant IN",
+		"set_config('app.tenant_id',selected_tenant.id::text,true)",
+		"platform.dataset_version_effective_domain(",
+		"document.tenant_id=selected_tenant.id",
+		"'领域:'||enriched.domain_name",
+		"embedding_status='PENDING'",
+		"platform.semantic_graph_projection_state",
+		"requested_event_version=",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Errorf("lineage/domain reindex migration is missing %q", fragment)
+		}
+	}
+}

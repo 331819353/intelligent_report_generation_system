@@ -17,6 +17,7 @@ var (
 	ErrNotFound       = errors.New("background task was not found")
 	ErrNotActive      = errors.New("background task is no longer active")
 	ErrNotCancellable = errors.New("background task cannot be cancelled")
+	ErrNotRetryable   = errors.New("background task cannot be retried")
 )
 
 type Task struct {
@@ -37,6 +38,8 @@ type Task struct {
 	MaxAttempts          int        `json:"maxAttempts"`
 	CanCancel            bool       `json:"canCancel"`
 	CancelDisabledReason string     `json:"cancelDisabledReason,omitempty"`
+	CanRetry             bool       `json:"canRetry"`
+	RetryDisabledReason  string     `json:"retryDisabledReason,omitempty"`
 	ErrorCode            string     `json:"errorCode,omitempty"`
 	ErrorMessage         string     `json:"errorMessage,omitempty"`
 	CreatedAt            time.Time  `json:"createdAt"`
@@ -55,4 +58,5 @@ type Store interface {
 	List(context.Context, string, string, int) (Page, error)
 	Find(context.Context, string, string, string) (Task, error)
 	Cancel(context.Context, string, string, string, string) error
+	Retry(context.Context, string, string, string, string) error
 }

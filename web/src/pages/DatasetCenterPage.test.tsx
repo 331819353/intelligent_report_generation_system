@@ -123,7 +123,7 @@ async function addRelationBox(dialog: HTMLElement, user: ReturnType<typeof userE
   connectByLine(dialog, right, slotTwo)
 }
 
-test('展示全部数据集并支持组合筛选', async () => {
+test('筛选区移除数据源和类型，并可通过分层概览筛选', async () => {
   vi.spyOn(datasetAPI, 'list').mockResolvedValue(page([
     summary({ originDataSourceName: '销售业务库' }),
     summary({ id: 'dataset-2', code: 'customer_summary', name: '客户汇总', type: 'CROSS_SOURCE', layer: 'DWS', status: 'DRAFT', originDataSourceName: '客户业务库' }),
@@ -137,14 +137,76 @@ test('展示全部数据集并支持组合筛选', async () => {
   expect(screen.getByRole('heading', { level: 3, name: '客户汇总' })).toBeInTheDocument()
   expect(screen.queryByRole('heading', { level: 3, name: '订单明细' })).not.toBeInTheDocument()
   await user.clear(screen.getByLabelText('搜索数据集'))
-  expect(within(screen.getByLabelText('按数据源筛选')).getByRole('option', { name: '销售业务库' })).toBeInTheDocument()
-  expect(within(screen.getByLabelText('按数据源筛选')).getByRole('option', { name: '客户业务库' })).toBeInTheDocument()
-  await user.selectOptions(screen.getByLabelText('按数据源筛选'), '客户业务库')
-  await user.selectOptions(screen.getByLabelText('按数据层级筛选'), 'DWS')
+  expect(screen.queryByLabelText('按数据源筛选')).not.toBeInTheDocument()
+  expect(screen.queryByLabelText('按数据层级筛选')).not.toBeInTheDocument()
+  const dwsFilter = screen.getByRole('button', { name: '筛选主题汇总数据集' })
+  await user.click(dwsFilter)
+  expect(dwsFilter).toHaveAttribute('aria-pressed', 'true')
   expect(screen.getByRole('heading', { level: 3, name: '客户汇总' })).toBeInTheDocument()
   expect(screen.queryByRole('heading', { level: 3, name: '订单明细' })).not.toBeInTheDocument()
+  await user.click(dwsFilter)
+  expect(dwsFilter).toHaveAttribute('aria-pressed', 'false')
   await user.selectOptions(screen.getByLabelText('按数据集状态筛选'), 'PUBLISHED')
-  expect(screen.getByText('没有符合条件的数据集')).toBeInTheDocument()
+  expect(screen.getByRole('heading', { level: 3, name: '订单明细' })).toBeInTheDocument()
+  expect(screen.queryByRole('heading', { level: 3, name: '客户汇总' })).not.toBeInTheDocument()
+})
+
+test('筛选区与智能建模区间隔展示并提供三个独立手动建模入口', async () => {
+  vi.spyOn(datasetAPI, 'list').mockResolvedValue(page([summary()]))
+  const trigger = vi.spyOn(datasetAPI, 'triggerLLM').mockImplementation(async kind => ({
+    trigger: kind, eligibleCount: 4, enqueuedCount: 3, existingCount: 1,
+  }))
+  const user = userEvent.setup()
+  renderPage()
+
+  await screen.findByRole('list', { name: '数据集资产清单' })
+  const filters = screen.getByLabelText('数据集筛选')
+  const controls = screen.getByLabelText('智能建模')
+  expect(filters.parentElement).toBe(controls.parentElement)
+  expect(filters.contains(controls)).toBe(false)
+  await user.click(within(controls).getByRole('button', { name: '维度建模' }))
+  await waitFor(() => expect(trigger).toHaveBeenCalledWith('DIM_MODELING'))
+  expect(screen.getByText(
+    '维度建模已为 3 个领域提交维度建模任务（每个领域依次执行领域分析与维度设计；符合条件 4 个领域）；1 个领域已有待处理或运行中任务',
+  )).toBeInTheDocument()
+
+  await user.click(within(controls).getByRole('button', { name: '明细建模' }))
+  await waitFor(() => expect(trigger).toHaveBeenCalledWith('DWD_MODELING'))
+  expect(screen.getByText(
+    '明细建模已为 3 个领域提交明细建模任务（只执行事实落地；符合条件 4 个领域）；1 个领域已有待处理或运行中任务',
+  )).toBeInTheDocument()
+
+  await user.click(within(controls).getByRole('button', { name: '主题建模' }))
+  await waitFor(() => expect(trigger).toHaveBeenCalledWith('DWS_MODELING'))
+  expect(screen.getByText(
+    '主题建模已提交 3 个主题任务（符合条件 4 个主题）；1 个主题已有待处理或运行中任务；主题规划通常会很快完成，任务中心将优先展示主题建模任务',
+  )).toBeInTheDocument()
+  expect(sessionStorage.getItem('intelligent-report-background-task-focus')).toBe(
+    'DWS_MODELING',
+  )
+  expect(within(controls).queryByRole('button', { name: '智能打标' })).not.toBeInTheDocument()
+  expect(trigger).toHaveBeenCalledTimes(3)
+})
+
+test('主题建模没有已发布 DWD 时展示可执行的前置条件而不是泛化不可用', async () => {
+  vi.spyOn(datasetAPI, 'list').mockResolvedValue(page([summary({ layer: 'DWD', status: 'DRAFT' })]))
+  vi.spyOn(datasetAPI, 'triggerLLM').mockResolvedValue({
+    trigger: 'DWS_MODELING',
+    eligibleCount: 0,
+    enqueuedCount: 0,
+    existingCount: 0,
+    blockedCount: 1,
+    blockedReason: 'DWD_PUBLICATION_REQUIRED',
+  })
+  const user = userEvent.setup()
+  renderPage()
+
+  const controls = await screen.findByLabelText('智能建模')
+  await user.click(within(controls).getByRole('button', { name: '主题建模' }))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    '主题建模尚未提交：1 个明细模型仍是草稿。请先提交发布并完成审批，发布后再触发主题建模。',
+  )
 })
 
 test('数据集支持多选后批量提交发布、停用下架和删除', async () => {
@@ -250,6 +312,51 @@ test('ODS 数据集在目录展示层级与标签，详情展示完整 LLM 元�
   expect(within(detailDialog).queryByText('映射表数据集')).not.toBeInTheDocument()
 })
 
+test('新建数据集按 ODS、DIM、DWD、DWS 展示当前精确发布版本', async () => {
+  const assets = [
+    summary({ id: 'dataset-ods', layer: 'ODS', code: 'ods_orders', name: '订单源映射', currentPublishedVersionId: 'version-ods' }),
+    summary({ id: 'dataset-dim', layer: 'DIM', code: 'dim_customer', name: '客户维度', currentPublishedVersionId: 'version-dim' }),
+    summary({ id: 'dataset-dwd', layer: 'DWD', code: 'dwd_order', name: '订单事实', currentPublishedVersionId: 'version-dwd' }),
+    summary({ id: 'dataset-dws', layer: 'DWS', code: 'dws_sales', name: '销售主题汇总', currentPublishedVersionId: 'version-dws' }),
+  ]
+  vi.spyOn(datasetAPI, 'list').mockResolvedValue(page(assets))
+  vi.spyOn(datasetAPI, 'mappingTables').mockResolvedValue({ items: [] })
+  const getVersion = vi.spyOn(datasetAPI, 'getVersion').mockImplementation(async (datasetID, versionID) => {
+    const asset = assets.find(item => item.id === datasetID)!
+    return publishedDatasetVersion({
+      id: versionID,
+      datasetId: datasetID,
+      dsl: {
+        ...record().dsl,
+        dataset: {
+          code: asset.code, name: asset.name, description: asset.description,
+          type: 'SINGLE_SOURCE', layer: asset.layer,
+        },
+        fields: [{
+          id: `field-${asset.layer.toLowerCase()}`, code: 'business_id', name: '业务标识',
+          role: 'IDENTIFIER', canonicalType: 'STRING', nullable: false, visible: true,
+          expression: { type: 'FIELD_REF', nodeId: 'node_1', field: 'business_id' },
+        }],
+      },
+    })
+  })
+  const user = userEvent.setup()
+  renderPage()
+
+  await screen.findByRole('heading', { level: 3, name: '客户维度' })
+  await user.click(screen.getByRole('button', { name: '新建数据集' }))
+  const dialog = await screen.findByRole('dialog', { name: '新建数据集' })
+
+  expect(within(dialog).getByRole('button', { name: /ODS 源映射.*1/ })).toBeInTheDocument()
+  expect(within(dialog).getByRole('button', { name: /DIM 维度.*1/ })).toBeInTheDocument()
+  expect(within(dialog).getByRole('button', { name: /DWD 事实明细.*1/ })).toBeInTheDocument()
+  expect(within(dialog).getByRole('button', { name: /DWS 主题汇总.*1/ })).toBeInTheDocument()
+  expect(getVersion).toHaveBeenCalledTimes(4)
+
+  await user.click(within(dialog).getByRole('button', { name: /DIM 维度.*1/ }))
+  expect(within(dialog).getByRole('button', { name: /客户维度.*DIM 已发布版本.*1 字段/ })).toBeInTheDocument()
+})
+
 test('新建弹窗通过拖拽或点选增加多表节点，确认关系后再要求名称与说明', async () => {
   vi.spyOn(datasetAPI, 'list').mockResolvedValueOnce(page([])).mockResolvedValueOnce(page([summary()]))
   vi.spyOn(datasetAPI, 'mappingTables').mockResolvedValue({ items: [table, customerTable] })
@@ -327,7 +434,8 @@ test('新建弹窗通过拖拽或点选增加多表节点，确认关系后再�
 
   const metadataDialog = screen.getByRole('dialog', { name: '完善数据集信息' })
   await user.click(within(metadataDialog).getByRole('button', { name: '创建数据集' }))
-  expect(within(metadataDialog).getByRole('alert')).toHaveTextContent('请填写数据集名称和说明')
+  expect(within(metadataDialog).getByRole('alert')).toHaveTextContent('请填写业务领域、数据集名称和说明')
+  await user.type(within(metadataDialog).getByLabelText('业务领域'), '运营')
   await user.type(within(metadataDialog).getByLabelText('数据集名称'), '订单经营汇总')
   await user.type(within(metadataDialog).getByLabelText('数据集说明'), '按订单维度汇总销售金额')
   await user.click(within(metadataDialog).getByRole('button', { name: '创建数据集' }))
@@ -518,6 +626,7 @@ test('单表可以直接保存且不会引用已失效字段', async () => {
   expect(createDialog.querySelectorAll('.dataset-component-lines > path')).toHaveLength(1)
   await user.click(within(createDialog).getByRole('button', { name: '保存配置' }))
   const metadataDialog = screen.getByRole('dialog', { name: '完善数据集信息' })
+  await user.type(within(metadataDialog).getByLabelText('业务领域'), '运营')
   await user.type(within(metadataDialog).getByLabelText('数据集名称'), '单表订单')
   await user.type(within(metadataDialog).getByLabelText('数据集说明'), '单表直接保存验证')
   await user.click(within(metadataDialog).getByRole('button', { name: '创建数据集' }))
@@ -571,6 +680,7 @@ test('数值运算组件支持整卡碰撞连线并生成可执行表达式', as
   expect(dialog.querySelectorAll('.dataset-component-lines > path')).toHaveLength(2)
   await user.click(within(dialog).getByRole('button', { name: '保存配置' }))
   const metadataDialog = screen.getByRole('dialog', { name: '完善数据集信息' })
+  await user.type(within(metadataDialog).getByLabelText('业务领域'), '运营')
   await user.type(within(metadataDialog).getByLabelText('数据集名称'), '订单字段计算')
   await user.type(within(metadataDialog).getByLabelText('数据集说明'), '验证字段处理组件生成可执行表达式')
   await user.click(within(metadataDialog).getByRole('button', { name: '创建数据集' }))
@@ -623,6 +733,7 @@ test('字段截取组件可选择数值上游字段并保存类型安全的截�
   await user.click(within(dialog).getByRole('button', { name: '保存配置' }))
 
   const metadataDialog = screen.getByRole('dialog', { name: '完善数据集信息' })
+  await user.type(within(metadataDialog).getByLabelText('业务领域'), '运营')
   await user.type(within(metadataDialog).getByLabelText('数据集名称'), '订单文本处理')
   await user.type(within(metadataDialog).getByLabelText('数据集说明'), '验证字段截取表达式')
   await user.click(within(metadataDialog).getByRole('button', { name: '创建数据集' }))
@@ -913,6 +1024,7 @@ test('同一张物理表可以作为独立别名多次引用', async () => {
   connectByLine(createDialog, { kind: 'JOIN', id: 'join_1' }, within(createDialog).getByRole('button', { name: '连接到结束节点输入槽位' }))
   await user.click(within(createDialog).getByRole('button', { name: '保存配置' }))
   const metadataDialog = screen.getByRole('dialog', { name: '完善数据集信息' })
+  await user.type(within(metadataDialog).getByLabelText('业务领域'), '运营')
   await user.type(within(metadataDialog).getByLabelText('数据集名称'), '订单自关联')
   await user.type(within(metadataDialog).getByLabelText('数据集说明'), '同一物理表的两个业务角色')
   await user.click(within(metadataDialog).getByRole('button', { name: '创建数据集' }))
@@ -1022,6 +1134,7 @@ test('画布支持按数据流层级整理并全屏显示', async () => {
   await user.click(within(dialog).getByRole('button', { name: '完成' }))
   await user.click(within(dialog).getByRole('button', { name: '保存配置' }))
   const metadataDialog = screen.getByRole('dialog', { name: '完善数据集信息' })
+  await user.type(within(metadataDialog).getByLabelText('业务领域'), '运营')
   await user.type(within(metadataDialog).getByLabelText('数据集名称'), '保存整理布局')
   await user.type(within(metadataDialog).getByLabelText('数据集说明'), '验证整理后的画布坐标写入版本')
   await user.click(within(metadataDialog).getByRole('button', { name: '创建数据集' }))
@@ -1169,6 +1282,7 @@ test('字段处理产物可作为关联输入且不会改变原有关联字段�
   connectByLine(dialog, { kind: 'JOIN', id: 'join_1' }, within(dialog).getByRole('button', { name: '打开结束节点配置' }))
   await user.click(within(dialog).getByRole('button', { name: '保存配置' }))
   const metadataDialog = screen.getByRole('dialog', { name: '完善数据集信息' })
+  await user.type(within(metadataDialog).getByLabelText('业务领域'), '运营')
   await user.type(within(metadataDialog).getByLabelText('数据集名称'), '字段处理后关联')
   await user.type(within(metadataDialog).getByLabelText('数据集说明'), '验证字段处理产物可继续进入关联组件')
   await user.click(within(metadataDialog).getByRole('button', { name: '创建数据集' }))
@@ -1213,6 +1327,7 @@ test('分组产物可以继续进入字段处理并保存聚合表达式', async
   connectByLine(dialog, { kind: 'TRANSFORM', id: 'transform_1' }, within(dialog).getByRole('button', { name: '连接到结束节点输入槽位' }))
   await user.click(within(dialog).getByRole('button', { name: '保存配置' }))
   const metadataDialog = screen.getByRole('dialog', { name: '完善数据集信息' })
+  await user.type(within(metadataDialog).getByLabelText('业务领域'), '运营')
   await user.type(within(metadataDialog).getByLabelText('数据集名称'), '订单分组后转换')
   await user.type(within(metadataDialog).getByLabelText('数据集说明'), '验证分组产物继续字段处理')
   await user.click(within(metadataDialog).getByRole('button', { name: '创建数据集' }))
@@ -1365,6 +1480,7 @@ test('支持多个命名分组产物并由结束节点定义最终输出', async
   await user.click(within(dialog).getByRole('button', { name: '保存配置' }))
 
   const metadataDialog = screen.getByRole('dialog', { name: '完善数据集信息' })
+  await user.type(within(metadataDialog).getByLabelText('业务领域'), '运营')
   await user.type(within(metadataDialog).getByLabelText('数据集名称'), '双侧聚合结果')
   await user.type(within(metadataDialog).getByLabelText('数据集说明'), '两张表分别聚合后再关联')
   await user.click(within(metadataDialog).getByRole('button', { name: '创建数据集' }))
@@ -1624,7 +1740,7 @@ test('修改数据集继续使用配置中心画板并保存当前版本', async
   const editable = record({
     dsl: {
       dslVersion: '1.0',
-      dataset: { code: 'orders_detail', name: '订单明细', description: '订单业务明细数据', type: 'SINGLE_SOURCE' },
+      dataset: { code: 'orders_detail', name: '订单明细', description: '订单业务明细数据', domain: '运营', subject: '订单履约', type: 'SINGLE_SOURCE' },
       nodes: [{ id: 'node_1', type: 'TABLE', dataSourceId: table.dataSourceId, tableId: table.id, alias: 't1', projection: ['order_id', 'amount'] }],
       fields: [
         { id: 'field_order_id', code: 'order_id', name: '订单编号', role: 'IDENTIFIER', expression: { type: 'FIELD_REF', nodeId: 'node_1', field: 'order_id' }, canonicalType: 'STRING', nullable: false, visible: true },
@@ -1689,11 +1805,19 @@ test('修改数据集继续使用配置中心画板并保存当前版本', async
 
   await user.click(within(editDialog).getByRole('button', { name: '保存配置' }))
   const metadataDialog = screen.getByRole('dialog', { name: '保存数据集修改' })
+  expect(within(metadataDialog).getByLabelText('业务领域')).toHaveValue('运营')
+  expect(within(metadataDialog).getByLabelText('业务主题')).toHaveValue('订单履约')
+  expect(within(metadataDialog).getByLabelText('数据集层级').querySelectorAll('option')).toHaveLength(5)
   await user.clear(within(metadataDialog).getByLabelText('数据集说明'))
   await user.type(within(metadataDialog).getByLabelText('数据集说明'), '更新后的订单业务说明')
   await user.click(within(metadataDialog).getByRole('button', { name: '保存修改' }))
 
-  expect(update).toHaveBeenCalledWith('dataset-1', 4, expect.objectContaining({ name: '订单明细', description: '更新后的订单业务说明', code: 'orders_detail' }), expect.any(Object))
+  expect(update).toHaveBeenCalledWith(
+    'dataset-1',
+    4,
+    expect.objectContaining({ name: '订单明细', description: '更新后的订单业务说明', domain: '运营', subject: '订单履约', code: 'orders_detail' }),
+    expect.objectContaining({ dataset: expect.objectContaining({ domain: '运营', subject: '订单履约' }) }),
+  )
   expect(datasetAPI.get).toHaveBeenCalledTimes(2)
   expect(await screen.findByRole('status')).toHaveTextContent('已保存“订单明细”的最新配置')
 })
@@ -2143,6 +2267,7 @@ test('指标新建数据集提案预填 AI 目标，保存后保留返回信息�
   await user.click(within(tableDrawer).getByRole('button', { name: '完成' }))
   await user.click(within(createDialog).getByRole('button', { name: '保存配置' }))
   const metadataDialog = await screen.findByRole('dialog', { name: '完善数据集信息' })
+  await user.type(within(metadataDialog).getByLabelText('业务领域'), '运营')
   await user.type(within(metadataDialog).getByLabelText('数据集名称'), saved.name)
   await user.type(within(metadataDialog).getByLabelText('数据集说明'), saved.description)
   await user.click(within(metadataDialog).getByRole('button', { name: '创建数据集' }))
@@ -2168,6 +2293,7 @@ test('修改数据集加载完成前禁用 AI，完成后携带当前 DAG 调用
   vi.spyOn(datasetAPI, 'list').mockResolvedValue(page([summary()]))
   vi.spyOn(datasetAPI, 'mappingTables').mockResolvedValue({ items: [table] })
   vi.spyOn(datasetAPI, 'columns').mockResolvedValue({ items: columns })
+  vi.spyOn(datasetAPI, 'getVersion').mockResolvedValue(publishedDatasetVersion())
   let resolveGet!: (value: DatasetRecord) => void
   vi.spyOn(datasetAPI, 'get').mockImplementation(() => new Promise(resolve => { resolveGet = resolve }))
   const fetchMock = vi.fn()

@@ -12,6 +12,14 @@ export type SemanticQueryEvidence = {
   evidenceHash: string
 }
 
+export type SemanticQueryResolutionStep = {
+  stage: 'INTENT_RECOGNITION' | 'DOMAIN_CATALOG' | 'METRIC_CATALOG' | 'DIMENSION_MEMBER' | 'DATASET_LOCK'
+  status: string
+  candidateCount?: number
+  selectedCode?: string
+  decision?: string
+}
+
 export type SemanticQueryPlan = {
   id: string
   graphGenerationId: string
@@ -28,6 +36,15 @@ export type SemanticQueryPlan = {
   pathHash?: string
   failureCode?: string
   evidence: SemanticQueryEvidence[]
+  resolution: SemanticQueryResolutionStep[]
+  conditions?: {
+    domain: string
+    metricCode: string
+    metricVersionId: string
+    datasetVersionId: string
+    dimensions: Array<{ dimensionCode: string; dimensionId: string; memberKey: string }>
+    timeRange?: { start: string; endExclusive: string }
+  }
   executedQueryId?: string
   executionErrorCode?: string
   executionDurationMs?: number

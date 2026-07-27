@@ -226,7 +226,10 @@ func (s *Service) PreviewMetric(ctx context.Context, tenantID, actorID string, c
 		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
 	}
 	materializedRoot := false
-	if version.Layer == dataset.LayerDWS {
+	if version.Layer == dataset.LayerDIM ||
+		version.Layer == dataset.LayerDWD ||
+		version.Layer == dataset.LayerDWS ||
+		version.Layer == dataset.LayerADS {
 		derived, err = materializedMetricDocument(
 			original, derived, candidate.DatasetVersionID,
 		)
@@ -257,12 +260,12 @@ func sameMetricSourceEnvelope(
 	original, derived dataset.Document,
 	candidate metric.QueryCandidate,
 ) bool {
-	if !reflect.DeepEqual(original.Dataset, derived.Dataset) ||
+	if !sameMetricDatasetIdentity(original.Dataset, derived.Dataset) ||
 		!reflect.DeepEqual(original.Nodes, derived.Nodes) ||
 		!reflect.DeepEqual(original.Joins, derived.Joins) ||
 		!reflect.DeepEqual(original.PreAggregations, derived.PreAggregations) ||
-		!reflect.DeepEqual(original.FactContract, derived.FactContract) ||
-		!reflect.DeepEqual(original.AnalysisContract, derived.AnalysisContract) ||
+		derived.FactContract != nil ||
+		derived.AnalysisContract != nil ||
 		!reflect.DeepEqual(original.ExecutionPolicy, derived.ExecutionPolicy) ||
 		len(derived.Filters) != len(original.Filters)+len(candidate.FilterBindings) ||
 		len(derived.Parameters) != len(original.Parameters)+len(candidate.FilterBindings) ||
@@ -318,6 +321,23 @@ func sameMetricSourceEnvelope(
 		}
 	}
 	return true
+}
+
+// sameMetricDatasetIdentity 只比较会标识数据资产和改变数据源解析方式的属性。
+// layer 与语义合同属于源数据集整表合同；指标派生计划会主动移除它们并按聚合
+// 结构推断为 DWS，不能因此被误判为扩张了数据访问边界。
+func sameMetricDatasetIdentity(
+	original, derived dataset.Descriptor,
+) bool {
+	return original.Code == derived.Code &&
+		original.Name == derived.Name &&
+		original.Description == derived.Description &&
+		original.Domain == derived.Domain &&
+		original.Subject == derived.Subject &&
+		original.Type == derived.Type &&
+		reflect.DeepEqual(original.Grain, derived.Grain) &&
+		derived.SemanticContractVersion == "" &&
+		derived.ConsumerContractID == ""
 }
 
 // ValidatePublication 校验全部启用策略后执行一行试跑，结果样本只在进程内短暂存在并立即丢弃。
@@ -809,6 +829,13 @@ func (s *Service) execute(ctx context.Context, document dataset.Document, run Ru
 	result, queryErr := executeQuery(queryContext)
 	durationMS := time.Since(started).Milliseconds()
 	if queryErr != nil {
+		slog.Error(
+			"query execution failed",
+			"query_id", run.ID,
+			"run_type", run.RunType,
+			"execution_engine", run.ExecutionEngine,
+			"error", queryErr,
+		)
 		status, code := "FAILED", "QUERY_EXECUTION_FAILED"
 		if errors.Is(queryContext.Err(), context.DeadlineExceeded) {
 			status, code = "TIMEOUT", "QUERY_TIMEOUT"

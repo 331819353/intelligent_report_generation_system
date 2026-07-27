@@ -26,6 +26,9 @@
 .metric-directory-summary dl > div:first-child { border-left: 0; }
 .metric-directory-summary dt { color: #7d899c; font-size: 10px; font-weight: 700; }
 .metric-directory-summary dd { margin: 0; color: #263142; font-size: 25px; font-weight: 720; letter-spacing: -.035em; }
+.metric-identify-button { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; margin-top: 13px; border: 1px solid #9ebcff; border-radius: 8px; padding: 0 13px; background: #edf4ff; color: #245dcc; font-size: 11px; font-weight: 850; }
+.metric-identify-button:hover:not(:disabled) { border-color: #6692ef; background: #e5efff; }
+.metric-identify-button:disabled { cursor: wait; opacity: .65; }
 
 .metric-directory-modes { display: flex; min-height: 52px; padding: 0 28px; border-bottom: 1px solid #e9edf2; background: white; }
 .metric-directory-modes button { position: relative; display: inline-flex; align-items: center; gap: 7px; border: 0; padding: 0 20px; background: transparent; color: #68758a; font-size: 13px; font-weight: 850; }
@@ -70,6 +73,25 @@
 .metric-directory-resultbar > div { display: flex; align-items: baseline; gap: 10px; }
 .metric-directory-resultbar strong { font-size: 14px; }
 .metric-directory-resultbar span, .metric-directory-resultbar small { color: var(--muted); font-size: 10px; }
+.metric-identification-summary { display: grid; gap: 10px; margin: 0 28px 14px; border: 1px solid #dce7fb; border-radius: 10px; padding: 12px 14px; background: #f7faff; }
+.metric-identification-summary > div:first-child { display: flex; align-items: baseline; gap: 9px; }
+.metric-identification-summary strong { color: #253956; font-size: 12px; }
+.metric-identification-summary > div:first-child span, .metric-identification-summary small { color: #74849a; font-size: 10px; }
+.metric-identification-summary > div:last-child { display: flex; flex-wrap: wrap; gap: 6px; }
+.metric-identification-summary > div:last-child > span { border-radius: 999px; padding: 4px 8px; background: #e8f0ff; color: #315fae; font-size: 9px; font-weight: 800; }
+.metric-identification-summary .metric-index-datasets { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; }
+.metric-index-datasets article { min-width: 0; border: 1px solid #dfe8f7; border-radius: 9px; padding: 11px; background: #fff; }
+.metric-index-datasets article > header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.metric-index-datasets article > header span, .metric-index-datasets article > p { color: #74849a; font-size: 9px; }
+.metric-index-datasets article > p { margin: 5px 0 8px; }
+.metric-index-datasets article > div { display: flex; flex-wrap: wrap; gap: 5px; }
+.metric-index-datasets article > div > span { border-radius: 999px; padding: 4px 7px; color: #2358ab; background: #edf3ff; font-size: 9px; font-weight: 750; }
+.metric-index-datasets article > div small { color: #7285a2; font-size: 8px; }
+.metric-index-datasets dl { display: grid; gap: 5px; margin: 9px 0 0; }
+.metric-index-datasets dl > div { display: grid; grid-template-columns: minmax(70px, .3fr) 1fr; gap: 8px; padding-top: 5px; border-top: 1px dashed #e5ebf5; }
+.metric-index-datasets dt { color: #304765; font-size: 9px; font-weight: 800; }
+.metric-index-datasets dt small { display: block; margin-top: 2px; color: #8795a9; font-size: 7px; font-weight: 650; }
+.metric-index-datasets dd { min-width: 0; margin: 0; color: #6d7d93; font-size: 9px; line-height: 1.5; overflow-wrap: anywhere; }
 
 .metric-directory-list { display: grid; }
 .metric-dataset-zones { display: grid; gap: 16px; padding: 0 28px 28px; }

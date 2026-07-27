@@ -50,6 +50,7 @@ import {
   type AssetTablePreview,
   type DatasetDraft,
   type DatasetLayer,
+  type DatasetLLMTrigger,
   type DatasetPreview,
   type DatasetPublicationRequest,
   type DatasetRecord,
@@ -60,6 +61,7 @@ import {
   type PublishedVersionRecord,
   type PublishedVersionSummary,
 } from '../lib/datasets'
+import { rememberBackgroundTaskFocus } from '../lib/background-tasks'
 
 type RelationInput = GraphInput
 type CurveGeometry = { path: string; midpoint: CanvasPoint }
@@ -79,6 +81,7 @@ type DatasetDetailField = {
   id: string; physicalName: string; code: string; name: string; description: string
   role: string; canonicalType: string; semanticType: string; nullable: boolean; visible: boolean
 }
+type DatasetMetadataForm = { name: string; description: string; domain: string; subject: string }
 type DatasetEditorSnapshot = {
   draft: DatasetDraft
   relationBoxes: RelationBox[]
@@ -86,7 +89,7 @@ type DatasetEditorSnapshot = {
   transformBoxes: TransformBox[]
   endBox: EndBox | null
   nodePositions: Record<string, CanvasPoint>
-  metadata: { name: string; description: string }
+  metadata: DatasetMetadataForm
 }
 type DatasetAIUndo = { before: DatasetEditorSnapshot; appliedFingerprint: string }
 type DatasetAIReviewLabels = { nodes: Record<string, string>; fields: Record<string, string> }
@@ -116,7 +119,12 @@ const layerOverview: Array<{ layer: DatasetLayer; name: string; description: str
   { layer: 'ADS', name: '应用数据', description: '按需交付' },
 ]
 const typeLabels: Record<string, string> = { SINGLE_SOURCE: '单数据源', CROSS_SOURCE: '跨数据源' }
-const publicationStatusLabels: Record<string, string> = { PENDING: '待审批', APPROVED: '已通过', REJECTED: '已拒绝' }
+const publicationStatusLabels: Record<string, string> = {
+  PENDING: '待审批',
+  APPROVED: '已通过',
+  REJECTED: '已拒绝',
+  CANCELLED: '已取消',
+}
 const metricCandidateGenerationLabels: Record<string, string> = {
   LEGACY: '历史流程', PENDING: '审批后加工', SUCCEEDED: '历史准备已完成', PARTIAL: '历史准备部分完成', FAILED: '历史准备失败',
 }
@@ -213,6 +221,14 @@ const consumeMetricAIAutoRun = (key: string) => {
 }
 const isTime = (column: AssetColumn) => ['DATE', 'DATETIME', 'TIMESTAMP'].includes(column.canonicalType.toUpperCase()) || column.semanticType.toUpperCase() === 'DATE'
 const emptyDraft = (): DatasetDraft => ({ code: '', name: '', description: '', layer: 'DWD', nodes: [], fields: [], joins: [], filters: [], parameters: [], calculations: [], sorts: [], grainDescription: '', grainKeys: [], groupingEnabled: false, finalConfigured: false, finalGroupingEnabled: false })
+const datasetLayers: DatasetLayer[] = ['ODS', 'DIM', 'DWD', 'DWS', 'ADS']
+const datasetLayerLabels: Record<DatasetLayer, string> = {
+  ODS: 'ODS · 来源物理映射',
+  DIM: 'DIM · 实体说明',
+  DWD: 'DWD · 业务事实明细',
+  DWS: 'DWS · 分析主题汇总',
+  ADS: 'ADS · 应用交付数据',
+}
 const editorFingerprint = (snapshot: DatasetEditorSnapshot) => JSON.stringify(snapshot)
 
 type PreviewIssue = { reason: string; suggestion: string }
@@ -379,6 +395,71 @@ async function loadAllTables(): Promise<AssetTable[]> {
     if (!page.items.length || page.total == null || items.length >= page.total) return items
     offset += page.items.length
   }
+}
+
+const designerAssetLayers: DatasetLayer[] = ['ODS', 'DIM', 'DWD', 'DWS']
+const designerLayerLabels: Record<DatasetLayer, { name: string; description: string }> = {
+  ODS: { name: 'ODS 源映射', description: '原始映射与标准落地' },
+  DIM: { name: 'DIM 维度', description: '统一业务实体说明' },
+  DWD: { name: 'DWD 事实明细', description: '标准业务过程明细' },
+  DWS: { name: 'DWS 主题汇总', description: '跨事实主题聚合' },
+  ADS: { name: 'ADS 应用数据', description: '面向应用的数据交付' },
+}
+
+function datasetVersionColumns(table: AssetTable, version: PublishedVersionRecord): AssetColumn[] {
+  return version.dsl.fields.flatMap((raw, index) => {
+    const field = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+    const code = typeof field.code === 'string' ? field.code : ''
+    if (!code) return []
+    const name = typeof field.name === 'string' ? field.name : code
+    return [{
+      id: `${version.id}:${typeof field.id === 'string' && field.id ? field.id : code}`,
+      tableId: table.id,
+      columnName: code,
+      businessName: name,
+      businessDescription: typeof field.description === 'string' ? field.description : '',
+      canonicalType: typeof field.canonicalType === 'string' && field.canonicalType ? field.canonicalType : 'STRING',
+      nullable: field.nullable === true,
+      semanticType: typeof field.semanticType === 'string' ? field.semanticType : '',
+      assetStatus: 'ACTIVE',
+      ordinalPosition: index + 1,
+    }]
+  })
+}
+
+function publishedDatasetAsset(dataset: DatasetSummary, version: PublishedVersionRecord): AssetTable {
+  return {
+    id: `dataset-version:${version.id}`,
+    dataSourceId: `dataset-layer:${dataset.layer}`,
+    dataSourceName: designerLayerLabels[dataset.layer].name,
+    dataSourceType: dataset.layer,
+    tableName: dataset.code,
+    schemaName: dataset.layer,
+    businessName: dataset.name,
+    businessDescription: dataset.description,
+    tags: dataset.tags,
+    columnCount: version.dsl.fields.length,
+    sourceKind: 'DATASET',
+    datasetId: dataset.id,
+    datasetVersionId: version.id,
+    datasetLayer: dataset.layer,
+  }
+}
+
+async function loadDesignerAssets(datasetItems: DatasetSummary[]): Promise<AssetTable[]> {
+  const rawTablesPromise = loadAllTables()
+  const published = datasetItems.filter(dataset =>
+    designerAssetLayers.includes(dataset.layer) && Boolean(dataset.currentPublishedVersionId),
+  )
+  const versionResults = await Promise.allSettled(published.map(async dataset => {
+    const version = await datasetAPI.getVersion(dataset.id, dataset.currentPublishedVersionId!)
+    return publishedDatasetAsset(dataset, version)
+  }))
+  const rawTables = await rawTablesPromise
+  return [
+    ...rawTables,
+    ...versionResults.flatMap(result => result.status === 'fulfilled' ? [result.value] : []),
+  ]
 }
 
 const nodeFieldCode = (node: DesignerNode, columnName: string, multiple: boolean) => multiple ? `${node.alias}_${columnName}` : columnName
@@ -623,9 +704,8 @@ export function DatasetCenterPage() {
   const [loading, setLoading] = useState(true)
   const [assetsLoading, setAssetsLoading] = useState(false)
   const [keyword, setKeyword] = useState('')
-  const [dataSourceFilter, setDataSourceFilter] = useState('ALL')
-  const [layerFilter, setLayerFilter] = useState('ALL')
   const [statusFilter, setStatusFilter] = useState('ALL')
+  const [layerFilter, setLayerFilter] = useState<DatasetLayer | 'ALL'>('ALL')
   const [notice, setNotice] = useState<Notice | null>(null)
   const [dialog, setDialog] = useState<DialogState | null>(null)
   const [selectedDatasetIDs, setSelectedDatasetIDs] = useState<Set<string>>(new Set())
@@ -638,7 +718,7 @@ export function DatasetCenterPage() {
   const [nodePreviews, setNodePreviews] = useState<Record<string, NodePreviewState>>({})
   const [nodePositions, setNodePositions] = useState<Record<string, CanvasPoint>>({})
   const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set())
-  const [metadata, setMetadata] = useState({ name: '', description: '' })
+  const [metadata, setMetadata] = useState<DatasetMetadataForm>({ name: '', description: '', domain: '', subject: '' })
   const [detail, setDetail] = useState<DatasetRecord | null>(null)
   const [detailAsset, setDetailAsset] = useState<AssetTable | null>(null)
   const [detailAssetColumns, setDetailAssetColumns] = useState<AssetColumn[]>([])
@@ -720,27 +800,48 @@ export function DatasetCenterPage() {
   }, [])
 
   const sourceGroups = useMemo(() => {
-    const groups = new Map<string, { id: string; name: string; type: string; tables: AssetTable[] }>()
-    for (const table of tables) {
-      const group = groups.get(table.dataSourceId) ?? { id: table.dataSourceId, name: table.dataSourceName, type: table.dataSourceType, tables: [] }
-      group.tables.push(table)
-      groups.set(table.dataSourceId, group)
-    }
-    return [...groups.values()]
-  }, [tables])
+    const publishedODSOrigins = new Set(datasets
+      .filter(dataset => dataset.layer === 'ODS' && dataset.currentPublishedVersionId && dataset.originTableId)
+      .map(dataset => dataset.originTableId!))
+    return designerAssetLayers.map(layer => {
+      const label = designerLayerLabels[layer]
+      const layerTables = tables.filter(table => {
+        if (table.sourceKind === 'DATASET') return table.datasetLayer === layer
+        return layer === 'ODS' && !publishedODSOrigins.has(table.id)
+      }).sort((left, right) => (left.businessName || left.tableName).localeCompare(
+        right.businessName || right.tableName, 'zh-CN',
+      ))
+      const physicalSourceGroups = new Map<string, {
+        id: string; name: string; type: string; tables: AssetTable[]
+      }>()
+      if (layer === 'ODS') {
+        for (const table of layerTables.filter(item => item.sourceKind !== 'DATASET')) {
+          const group = physicalSourceGroups.get(table.dataSourceId) ?? {
+            id: table.dataSourceId, name: table.dataSourceName,
+            type: table.dataSourceType, tables: [],
+          }
+          group.tables.push(table)
+          physicalSourceGroups.set(table.dataSourceId, group)
+        }
+      }
+      return {
+        id: `dataset-layer:${layer}`,
+        layer,
+        name: label.name,
+        type: label.description,
+        tables: layerTables,
+        datasetTables: layerTables.filter(table => table.sourceKind === 'DATASET'),
+        physicalSourceGroups: [...physicalSourceGroups.values()],
+      }
+    })
+  }, [datasets, tables])
 
-  const dataSourceOptions = useMemo(
-    () => [...new Set(datasets.map(dataset => dataset.originDataSourceName?.trim()).filter((name): name is string => Boolean(name)))]
-      .sort((left, right) => left.localeCompare(right, 'zh-CN')),
-    [datasets],
-  )
   const filtered = useMemo(() => {
     const query = keyword.trim().toLocaleLowerCase()
     return datasets.filter(dataset => (!query || dataset.name.toLocaleLowerCase().includes(query) || dataset.code.toLocaleLowerCase().includes(query)) &&
-      (dataSourceFilter === 'ALL' || dataset.originDataSourceName?.trim() === dataSourceFilter) &&
-      (layerFilter === 'ALL' || dataset.layer === layerFilter) &&
-      (statusFilter === 'ALL' || dataset.status === statusFilter))
-  }, [dataSourceFilter, datasets, keyword, layerFilter, statusFilter])
+      (statusFilter === 'ALL' || dataset.status === statusFilter) &&
+      (layerFilter === 'ALL' || dataset.layer === layerFilter))
+  }, [datasets, keyword, layerFilter, statusFilter])
   const layerCounts = useMemo(
     () => Object.fromEntries(layerOverview.map(item => [
       item.layer,
@@ -818,6 +919,8 @@ export function DatasetCenterPage() {
     code: generatedCode,
     name: metadata.name.trim(),
     description: metadata.description.trim(),
+    domain: metadata.domain.trim(),
+    subject: metadata.subject.trim(),
     grainKeys: configuredGrainKeys(draft, endBox),
     designer: serializeDesignerGraph(currentDesignerGraph),
     preAggregation: undefined,
@@ -830,6 +933,19 @@ export function DatasetCenterPage() {
       return ['DWD'] as DatasetLayer[]
     }
   }, [draft])
+  const classificationSuggestions = useMemo(() => {
+    const tags = [
+      ...(editingRecord?.tags ?? []),
+      ...draft.nodes.flatMap(node => node.table.tags ?? []),
+    ]
+    const values = (prefix: string) => [...new Set(tags.flatMap(tag => {
+      const normalized = tag.trim()
+      if (!normalized.startsWith(prefix)) return []
+      const value = normalized.slice(prefix.length).trim()
+      return value ? [value] : []
+    }))].sort((left, right) => left.localeCompare(right, 'zh-CN'))
+    return { domains: values('领域:'), subjects: values('主题:') }
+  }, [draft.nodes, editingRecord?.tags])
 
   const resetDatasetAI = useCallback(() => {
     aiRequest.current += 1
@@ -861,7 +977,7 @@ export function DatasetCenterPage() {
     setEndBox(null)
     setNodePreviews({})
     setNodePositions({})
-    setMetadata({ name: '', description: '' })
+    setMetadata({ name: '', description: '', domain: '', subject: '' })
     setGeneratedCode(`dataset_${Date.now().toString(36)}`)
     setActiveNodeID('')
     setActiveJoinID('')
@@ -881,12 +997,12 @@ export function DatasetCenterPage() {
       setCanvasNotice('已从指标提案带入新数据集构建目标，正在自动生成 AI 画布方案。')
       if (metricAIAutoRunKey) setPendingMetricAIAutoRun({ key: metricAIAutoRunKey, instruction })
     }
-    if (tables.length) return
     setAssetsLoading(true)
     try {
-      const items = await loadAllTables()
+      const items = await loadDesignerAssets(datasets)
       setTables(items)
-      setExpandedSources(new Set(items.slice(0, 1).map(table => table.dataSourceId)))
+      const firstPhysicalSource = items.find(item => item.sourceKind !== 'DATASET')?.dataSourceId
+      setExpandedSources(new Set(['dataset-layer:ODS', ...(firstPhysicalSource ? [firstPhysicalSource] : [])]))
     } catch (cause) {
       setFormError(cause instanceof Error ? cause.message : '加载资产模板失败')
     } finally {
@@ -921,16 +1037,27 @@ export function DatasetCenterPage() {
     setAssetsLoading(true)
     setBusyAction(`edit:${id}`)
     try {
-      const [record, availableTables, availableDatasets] = await Promise.all([
+      const [record, availableDatasets] = await Promise.all([
         datasetAPI.get(id),
-        tables.length ? Promise.resolve(tables) : loadAllTables(),
         datasets.length ? Promise.resolve(datasets) : loadAllDatasets(),
       ])
+      const availableTables = tables.length ? tables : await loadAllTables()
       const hydrated = await hydrateDatasetDraft(record, availableTables, availableDatasets)
       const graph = (hydrated as DatasetDraft & { designer?: DesignerGraphV1 }).designer ?? hydrateDesignerGraph(record.dsl, hydrated.nodes, hydrated.joins, hydrated.fields)
-      const loadedMetadata = { name: record.name, description: record.description }
+      const loadedMetadata: DatasetMetadataForm = {
+        name: record.name,
+        description: record.description,
+        domain: record.dsl.dataset.domain ?? '',
+        subject: record.dsl.dataset.subject ?? '',
+      }
       setTables(availableTables)
-      setExpandedSources(new Set(hydrated.nodes.map(node => node.table.dataSourceId)))
+      setExpandedSources(new Set(hydrated.nodes.map(node =>
+        node.table.sourceKind === 'DATASET'
+          ? `dataset-layer:${node.table.datasetLayer}`
+          : 'dataset-layer:ODS',
+      ).concat(hydrated.nodes
+        .filter(node => node.table.sourceKind !== 'DATASET')
+        .map(node => node.table.dataSourceId))))
       setDraft(hydrated)
       setRelationBoxes(graph.joins)
       setGroupBoxes(graph.groups)
@@ -1009,7 +1136,9 @@ export function DatasetCenterPage() {
     setFormError('')
     try {
       // 数据集只允许引用当前有效字段；资产接口中的失效字段只用于历史审计。
-      const columns = (await datasetAPI.columns(table.id)).items.filter(column => !column.assetStatus || column.assetStatus === 'ACTIVE')
+      const columns = table.sourceKind === 'DATASET' && table.datasetId && table.datasetVersionId
+        ? datasetVersionColumns(table, await datasetAPI.getVersion(table.datasetId, table.datasetVersionId))
+        : (await datasetAPI.columns(table.id)).items.filter(column => !column.assetStatus || column.assetStatus === 'ACTIVE')
       if (!columns.length) throw new Error('该数据表没有可用字段')
       setDraft(current => {
         // 同一物理表可作为不同业务角色多次引用，每次保留独立节点与别名。
@@ -1692,8 +1821,8 @@ export function DatasetCenterPage() {
   }
 
   const saveDataset = async () => {
-    if (!metadata.name.trim() || !metadata.description.trim()) {
-      setFormError('请填写数据集名称和说明')
+    if (!metadata.domain.trim() || !metadata.name.trim() || !metadata.description.trim()) {
+      setFormError('请填写业务领域、数据集名称和说明')
       return
     }
     setBusyAction(editingRecord ? 'update' : 'create')
@@ -1707,7 +1836,9 @@ export function DatasetCenterPage() {
         await datasetAPI.update(editingRecord.id, editingRecord.version, completed, dsl)
         const persisted = await datasetAPI.get(editingRecord.id)
         if (persisted.version <= editingRecord.version || persisted.dslHash !== validation.dslHash ||
-          persisted.name !== completed.name || persisted.description !== completed.description) {
+          persisted.name !== completed.name || persisted.description !== completed.description ||
+          (persisted.dsl.dataset.domain ?? '') !== completed.domain ||
+          (persisted.dsl.dataset.subject ?? '') !== completed.subject) {
           throw new Error('服务端未确认最新配置已保存，请保留当前页面后重试')
         }
         saved = persisted
@@ -2075,6 +2206,69 @@ export function DatasetCenterPage() {
     }
   }
 
+  const triggerDatasetLLM = async (trigger: DatasetLLMTrigger, label: string) => {
+    if (busyAction) return
+    setBusyAction(`llm:${trigger}`)
+    try {
+      const result = await datasetAPI.triggerLLM(trigger)
+      if (result.blockedReason === 'DWD_PUBLICATION_REQUIRED') {
+        setNotice({
+          tone: 'error',
+          message: `主题建模尚未提交：${result.blockedCount ?? 0} 个明细模型仍是草稿。请先提交发布并完成审批，发布后再触发主题建模。`,
+        })
+        return
+      }
+      if (result.blockedReason === 'DIM_MODELING_REQUIRED') {
+        setNotice({
+          tone: 'error',
+          message: `明细建模尚未提交：${result.blockedCount ?? 0} 个领域尚未完成本轮维度建模。请先执行“维度建模”，待任务完成并发布 DIM 后再试。`,
+        })
+        return
+      }
+      if (result.blockedReason === 'DIM_PUBLICATION_REQUIRED') {
+        setNotice({
+          tone: 'error',
+          message: `明细建模尚未提交：${result.blockedCount ?? 0} 个领域的 DIM 仍是草稿。请先提交发布并完成审批，再触发明细建模。`,
+        })
+        return
+      }
+      if (result.blockedReason === 'NO_FACT_MODEL_AVAILABLE') {
+        setNotice({
+          tone: 'error',
+          message: `明细建模没有可提交任务：${result.blockedCount ?? 0} 个领域经维度建模确认暂无事实表。`,
+        })
+        return
+      }
+      const unit = trigger === 'DWS_MODELING' ? '个主题' : '个领域'
+      const existing = result.existingCount
+        ? `；${result.existingCount} ${unit}已有待处理或运行中任务`
+        : ''
+      const noFact = trigger === 'DWD_MODELING' && result.blockedCount
+        ? `；${result.blockedCount} 个纯维度领域无需创建 DWD`
+        : ''
+      const submitted = trigger === 'DIM_MODELING'
+        ? `已为 ${result.enqueuedCount} 个领域提交维度建模任务（每个领域依次执行领域分析与维度设计；符合条件 ${result.eligibleCount} 个领域）`
+        : trigger === 'DWD_MODELING'
+          ? `已为 ${result.enqueuedCount} 个领域提交明细建模任务（只执行事实落地；符合条件 ${result.eligibleCount} 个领域）`
+          : `已提交 ${result.enqueuedCount} 个主题任务（符合条件 ${result.eligibleCount} 个主题）`
+      if (result.enqueuedCount > 0 || result.existingCount > 0) {
+        rememberBackgroundTaskFocus(trigger)
+      }
+      setNotice({
+        tone: 'success',
+        message: `${label}${submitted}${existing}${noFact}${
+          trigger === 'DWS_MODELING'
+            ? '；主题规划通常会很快完成，任务中心将优先展示主题建模任务'
+            : ''
+        }`,
+      })
+    } catch (cause) {
+      setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : `${label}触发失败` })
+    } finally {
+      setBusyAction('')
+    }
+  }
+
   const generateDatasetAIPlan = async (retryInstruction?: string, useActualCanvas = false) => {
     const instruction = (retryInstruction ?? aiPrompt).trim()
     if (!instruction || aiBusy || aiApplying || assetsLoading || busyAction) return
@@ -2186,6 +2380,7 @@ export function DatasetCenterPage() {
         return
       }
       const appliedTransforms = materialized.graph.transforms ?? []
+      const appliedMetadata = { ...metadata, ...materialized.metadata }
       const appliedSnapshot: DatasetEditorSnapshot = {
         draft: materialized.draft,
         relationBoxes: materialized.graph.joins,
@@ -2193,7 +2388,7 @@ export function DatasetCenterPage() {
         transformBoxes: appliedTransforms,
         endBox: materialized.graph.end ?? null,
         nodePositions: materialized.graph.nodePositions,
-        metadata: materialized.metadata,
+        metadata: appliedMetadata,
       }
       setAIUndo({ before: currentEditorSnapshot, appliedFingerprint: editorFingerprint(appliedSnapshot) })
       setDraft(materialized.draft)
@@ -2202,7 +2397,7 @@ export function DatasetCenterPage() {
       setTransformBoxes(appliedTransforms)
       setEndBox(materialized.graph.end ?? null)
       setNodePositions(materialized.graph.nodePositions)
-      setMetadata(materialized.metadata)
+      setMetadata(appliedMetadata)
       setActiveNodeID('')
       setActiveJoinID('')
       setActiveGroupID('')
@@ -2310,17 +2505,38 @@ export function DatasetCenterPage() {
         <div><span className="eyebrow">资产目录</span><h2>全部数据集</h2><p>从数据源映射到分析交付，统一管理模型、版本与发布状态。</p></div>
         <div className="dataset-center-total"><strong>{datasets.length}</strong><span>数据集总数</span></div>
       </header>
-      <nav className="dataset-layer-overview" aria-label="按数据分层浏览">
-        {layerOverview.map(item => <button key={item.layer} type="button" className={layerFilter === item.layer ? 'active' : ''} aria-pressed={layerFilter === item.layer} onClick={() => setLayerFilter(current => current === item.layer ? 'ALL' : item.layer)}>
+      <div className="dataset-layer-overview" aria-label="数据分层概览">
+        {layerOverview.map(item => <button
+          className={layerFilter === item.layer ? 'active' : ''}
+          type="button"
+          key={item.layer}
+          aria-label={`筛选${item.name}数据集`}
+          aria-pressed={layerFilter === item.layer}
+          onClick={() => setLayerFilter(current => current === item.layer ? 'ALL' : item.layer)}
+        >
           <span>{item.layer}</span><strong>{item.name}</strong><small>{item.description}</small><b>{layerCounts[item.layer]}</b>
         </button>)}
-      </nav>
-      <div className="dataset-center-filters" aria-label="数据集筛选">
-        <label><span>搜索</span><input aria-label="搜索数据集" type="search" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="名称或编码" /></label>
-        <label><span>数据源</span><select aria-label="按数据源筛选" value={dataSourceFilter} onChange={event => setDataSourceFilter(event.target.value)}><option value="ALL">全部数据源</option>{dataSourceOptions.map(name => <option key={name} value={name}>{name}</option>)}</select></label>
-        <label><span>类型</span><select aria-label="按数据层级筛选" value={layerFilter} onChange={event => setLayerFilter(event.target.value)}><option value="ALL">全部类型</option><option value="ODS">ODS</option><option value="DIM">DIM</option><option value="DWD">DWD</option><option value="DWS">DWS</option><option value="ADS">ADS</option></select></label>
-        <label><span>状态</span><select aria-label="按数据集状态筛选" value={statusFilter} onChange={event => setStatusFilter(event.target.value)}><option value="ALL">全部状态</option>{Object.entries(statusLabels).map(([status, label]) => <option key={status} value={status}>{label}</option>)}</select></label>
-        <small>显示 {filtered.length} / {datasets.length}</small>
+      </div>
+      <div className="dataset-center-controls">
+        <div className="dataset-center-filters" aria-label="数据集筛选">
+          <label><span>搜索</span><input aria-label="搜索数据集" type="search" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="名称或编码" /></label>
+          <label><span>状态</span><select aria-label="按数据集状态筛选" value={statusFilter} onChange={event => setStatusFilter(event.target.value)}><option value="ALL">全部状态</option>{Object.entries(statusLabels).map(([status, label]) => <option key={status} value={status}>{label}</option>)}</select></label>
+          <small>显示 {filtered.length} / {datasets.length}</small>
+        </div>
+        <section className="dataset-intelligent-modeling" aria-label="智能建模">
+          <span>智能建模</span>
+          <div>
+            <button type="button" disabled={actionBusy} title="按 ODS 领域分析业务实体并生成待审批的 DIM 草稿" onClick={() => void triggerDatasetLLM('DIM_MODELING', '维度建模')}>
+              {busyAction === 'llm:DIM_MODELING' ? '正在提交…' : '维度建模'}
+            </button>
+            <button type="button" disabled={actionBusy} title="基于已审批发布的 DIM 和同批次事实分类生成 DWD 草稿" onClick={() => void triggerDatasetLLM('DWD_MODELING', '明细建模')}>
+              {busyAction === 'llm:DWD_MODELING' ? '正在提交…' : '明细建模'}
+            </button>
+            <button type="button" disabled={actionBusy} title="基于已发布明细模型形成主题分析草稿；草稿需先完成发布审批" onClick={() => void triggerDatasetLLM('DWS_MODELING', '主题建模')}>
+              {busyAction === 'llm:DWS_MODELING' ? '正在提交…' : '主题建模'}
+            </button>
+          </div>
+        </section>
       </div>
       {!!datasets.length && <div className="dataset-bulk-toolbar" aria-label="数据集批量操作">
         <label><input ref={selectFilteredCheckbox} type="checkbox" checked={allFilteredSelected} disabled={actionBusy || !filtered.length} onChange={toggleFilteredSelection} /><span>选择当前结果</span></label>
@@ -2346,7 +2562,53 @@ export function DatasetCenterPage() {
 
     {dialog?.mode === 'create' && <Dialog title={editingCanvas ? '修改数据集' : '新建数据集'} eyebrow="图形化配置" wide closeDisabled={aiApplying} onClose={closeDialog}>
       <div className="dataset-create-layout">
-        <aside className="dataset-template-tree"><header><strong>数据资产节点</strong><small>已完成映射 / 可重复引用</small></header>{assetsLoading ? <p>正在加载映射表…</p> : !sourceGroups.length ? <p>暂无已完成 LLM 映射的启用表，请先完成资产映射。</p> : sourceGroups.map(source => <section key={source.id}><button className="source-tree-node" type="button" aria-expanded={expandedSources.has(source.id)} onClick={() => setExpandedSources(current => { const next = new Set(current); if (next.has(source.id)) next.delete(source.id); else next.add(source.id); return next })}><span>{expandedSources.has(source.id) ? '▾' : '▸'}</span><strong>{source.name}</strong><small>{source.type}</small></button>{expandedSources.has(source.id) && <div className="source-tree-children">{source.tables.map(table => { const instanceCount = draft.nodes.filter(node => node.table.id === table.id).length; return <button key={table.id} type="button" draggable onDragStart={event => event.dataTransfer.setData('text/dataset-table-id', table.id)} onClick={() => void selectTable(table)}><span>▦</span><span><strong>{table.businessName || table.tableName}</strong><small>已映射 · {table.schemaName}.{table.tableName} · {table.columnCount} 字段</small></span>{instanceCount > 0 && <em>已引用 {instanceCount} 次</em>}</button> })}</div>}</section>)}</aside>
+        <aside className="dataset-template-tree">
+          <header><strong>数据资产节点</strong><small>按数仓层级分组 / 固定精确发布版本</small></header>
+          {assetsLoading ? <p>正在加载分层数据资产…</p> : sourceGroups.map(source =>
+            <section key={source.id}>
+              <button className="source-tree-node" type="button" aria-expanded={expandedSources.has(source.id)} onClick={() => setExpandedSources(current => {
+                const next = new Set(current)
+                if (next.has(source.id)) next.delete(source.id)
+                else next.add(source.id)
+                return next
+              })}>
+                <span>{expandedSources.has(source.id) ? '▾' : '▸'}</span>
+                <strong>{source.name}</strong>
+                <small>{source.type} · {source.tables.length}</small>
+              </button>
+              {expandedSources.has(source.id) && <div className="source-tree-children">
+                {!source.tables.length && <p className="source-tree-empty">暂无可用数据集</p>}
+                {source.physicalSourceGroups.map(group => <section className="source-tree-physical-group" key={group.id}>
+                  <button className="source-tree-node" type="button" aria-expanded={expandedSources.has(group.id)} onClick={() => setExpandedSources(current => {
+                    const next = new Set(current)
+                    if (next.has(group.id)) next.delete(group.id)
+                    else next.add(group.id)
+                    return next
+                  })}>
+                    <span>{expandedSources.has(group.id) ? '▾' : '▸'}</span>
+                    <strong>{group.name}</strong><small>{group.type}</small>
+                  </button>
+                  {expandedSources.has(group.id) && <div className="source-tree-children">{group.tables.map(table => {
+                    const instanceCount = draft.nodes.filter(node => node.table.id === table.id).length
+                    return <button key={table.id} type="button" draggable onDragStart={event => event.dataTransfer.setData('text/dataset-table-id', table.id)} onClick={() => void selectTable(table)}>
+                      <span>▦</span>
+                      <span><strong>{table.businessName || table.tableName}</strong><small>已映射 · ODS 源映射 · {table.schemaName}.{table.tableName} · {table.columnCount} 字段</small></span>
+                      {instanceCount > 0 && <em>已引用 {instanceCount} 次</em>}
+                    </button>
+                  })}</div>}
+                </section>)}
+                {source.datasetTables.map(table => {
+                  const instanceCount = draft.nodes.filter(node => node.table.id === table.id).length
+                  return <button key={table.id} type="button" draggable onDragStart={event => event.dataTransfer.setData('text/dataset-table-id', table.id)} onClick={() => void selectTable(table)}>
+                    <span>▦</span>
+                    <span><strong>{table.businessName || table.tableName}</strong><small>{table.datasetLayer} 已发布版本 · {table.tableName} · {table.columnCount} 字段</small></span>
+                    {instanceCount > 0 && <em>已引用 {instanceCount} 次</em>}
+                  </button>
+                })}
+              </div>}
+            </section>,
+          )}
+        </aside>
         <main ref={canvasFullscreenTarget} className={`dataset-template-canvas ${canvasFullscreen ? 'is-fullscreen' : ''}`} onClick={closeCanvasEditor} onDragOver={event => event.preventDefault()} onDrop={(event: DragEvent<HTMLElement>) => { event.preventDefault(); const table = tables.find(item => item.id === event.dataTransfer.getData('text/dataset-table-id')); if (table) void selectTable(table) }}>
           <DatasetAIComposer prompt={aiPrompt} lastInstruction={aiLastInstruction} result={aiResult} labels={aiReviewLabels} error={aiError} busy={aiBusy} applying={aiApplying} applied={aiApplied} detailsExpanded={aiDetailsExpanded} ready={!assetsLoading && !busyAction} hasAssets={tables.length > 0} canUndo={Boolean(aiUndo)} canRetry={Boolean(aiRetryAction)} retryRequiresGeneration={aiRetryAction === 'GENERATE'} hasGraph={draft.nodes.length > 0} onPromptChange={setAIPrompt} onSubmit={() => void generateDatasetAIPlan()} onApply={() => void applyDatasetAIPlan()} onUndo={undoDatasetAIPlan} onRetryOriginal={() => retryDatasetAI('ORIGINAL')} onRetryModified={() => retryDatasetAI('MODIFIED')} onDismissError={dismissDatasetAIError} onDetailsExpandedChange={setAIDetailsExpanded} />
           {!draft.nodes.length ? <div className="dataset-canvas-empty"><strong>选择第一张映射表开始建模</strong><p>表会成为数据节点；点击节点可预览真实数据并选择输出字段。</p>{canvasNotice && <small role="status">{canvasNotice}</small>}</div> : <div className="dataset-node-graph">
@@ -2364,7 +2626,67 @@ export function DatasetCenterPage() {
       <footer className="dataset-dialog-footer"><button className="quiet-button" type="button" disabled={actionBusy || aiApplying} onClick={closeDialog}>取消</button><button className="primary-button" type="button" disabled={actionBusy || assetsLoading || aiBusy || aiApplying} onClick={openMetadata}>{busyAction.startsWith('asset:') ? '正在填充…' : aiBusy ? '正在生成 AI 方案…' : aiApplying ? '正在应用 AI 方案…' : '保存配置'}</button></footer>
     </Dialog>}
 
-    {dialog?.mode === 'metadata' && <Dialog title={editingRecord ? '保存数据集修改' : '完善数据集信息'} eyebrow="保存配置" onClose={() => { if (!busyAction) setDialog({ mode: 'create' }) }}><div className="dataset-metadata-form"><p>图形化配置已完成，请确认数据集层级、名称和说明后保存。</p><label>数据集层级<select aria-label="数据集层级" value={layerChoices.includes(draft.layer as DatasetLayer) ? draft.layer : layerChoices[0]} disabled={Boolean(editingRecord?.currentPublishedVersionId) || layerChoices.length === 1} onChange={event => setDraft(current => ({ ...current, layer: event.target.value as DatasetLayer }))}>{layerChoices.map(layer => <option key={layer} value={layer}>{layer === 'ODS' ? 'ODS · 来源物理映射' : layer === 'DIM' ? 'DIM · 实体说明' : layer === 'DWD' ? 'DWD · 业务事实明细' : layer === 'DWS' ? 'DWS · 分析主题汇总' : 'ADS · 应用交付数据'}</option>)}</select></label><label>数据集名称<input autoFocus value={metadata.name} onChange={event => setMetadata(current => ({ ...current, name: event.target.value }))} placeholder="例如：客户订单明细" /></label><label>数据集说明<textarea value={metadata.description} onChange={event => setMetadata(current => ({ ...current, description: event.target.value }))} placeholder="说明数据范围、业务口径和使用场景" /></label><small>{editingRecord ? `数据集编码保持不变：${generatedCode}` : `系统将自动生成唯一编码：${generatedCode}`}</small>{formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => setDialog({ mode: 'create' })}>返回配置</button><button className="primary-button" type="button" disabled={actionBusy} onClick={() => void saveDataset()}>{busyAction === 'update' ? '正在保存…' : busyAction === 'create' ? '正在创建…' : editingRecord ? '保存修改' : '创建数据集'}</button></footer></div></Dialog>}
+    {dialog?.mode === 'metadata' && <Dialog title={editingRecord ? '保存数据集修改' : '完善数据集信息'} eyebrow="保存配置" onClose={() => { if (!busyAction) setDialog({ mode: 'create' }) }}>
+      <div className="dataset-metadata-form">
+        <p>图形化配置已完成，请确认物理落层，并补充数据集的领域、主题、名称和说明后保存。</p>
+        <label>
+          数据集层级
+          <select
+            aria-label="数据集层级"
+            value={layerChoices.includes(draft.layer as DatasetLayer) ? draft.layer : layerChoices[0]}
+            disabled={Boolean(editingRecord?.currentPublishedVersionId)}
+            onChange={event => setDraft(current => ({ ...current, layer: event.target.value as DatasetLayer }))}
+          >
+            {datasetLayers.map(layer => <option key={layer} value={layer} disabled={!layerChoices.includes(layer)}>
+              {datasetLayerLabels[layer]}{layerChoices.includes(layer) ? '' : '（当前血缘不可用）'}
+            </option>)}
+          </select>
+          <small>完整展示五个数仓层级；单个物理数据集选择一个落地层级，系统按当前上游血缘校验可用范围。</small>
+        </label>
+        <div className="dataset-metadata-grid">
+          <label>
+            业务领域（必填）
+            <input
+              aria-label="业务领域"
+              autoComplete="off"
+              list="dataset-domain-options"
+              maxLength={128}
+              value={metadata.domain}
+              onChange={event => setMetadata(current => ({ ...current, domain: event.target.value }))}
+              placeholder="例如：企业、运营、订单"
+            />
+            <datalist id="dataset-domain-options">{classificationSuggestions.domains.map(value => <option key={value} value={value} />)}</datalist>
+          </label>
+          <label>
+            业务主题（可选）
+            <input
+              aria-label="业务主题"
+              autoComplete="off"
+              list="dataset-subject-options"
+              maxLength={128}
+              value={metadata.subject}
+              onChange={event => setMetadata(current => ({ ...current, subject: event.target.value }))}
+              placeholder="例如：企业画像、经营分析"
+            />
+            <datalist id="dataset-subject-options">{classificationSuggestions.subjects.map(value => <option key={value} value={value} />)}</datalist>
+          </label>
+        </div>
+        <label>
+          数据集名称
+          <input autoFocus value={metadata.name} onChange={event => setMetadata(current => ({ ...current, name: event.target.value }))} placeholder="例如：客户订单明细" />
+        </label>
+        <label>
+          数据集说明
+          <textarea value={metadata.description} onChange={event => setMetadata(current => ({ ...current, description: event.target.value }))} placeholder="说明数据范围、业务口径和使用场景" />
+        </label>
+        <small>{editingRecord ? `数据集编码保持不变：${generatedCode}` : `系统将自动生成唯一编码：${generatedCode}`}</small>
+        {formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}
+        <footer>
+          <button className="quiet-button" type="button" disabled={actionBusy} onClick={() => setDialog({ mode: 'create' })}>返回配置</button>
+          <button className="primary-button" type="button" disabled={actionBusy} onClick={() => void saveDataset()}>{busyAction === 'update' ? '正在保存…' : busyAction === 'create' ? '正在创建…' : editingRecord ? '保存修改' : '创建数据集'}</button>
+        </footer>
+      </div>
+    </Dialog>}
 
     {dialog?.mode === 'view' && dialog.dataset && <Dialog title="数据集详情" eyebrow="资产信息" wide onClose={closeDialog}>
       {busyAction.startsWith('view:') ? <Empty>正在加载完整元数据与预览数据…</Empty> : detail ? <div className="dataset-detail">
@@ -2372,7 +2694,7 @@ export function DatasetCenterPage() {
           <div><strong>{detail.name}</strong><span className={`dataset-asset-status ${detail.status.toLowerCase()}`}>{statusLabels[detail.status] ?? detail.status}</span><span className={`dataset-asset-layer ${detail.layer.toLowerCase()}`}>{detail.layer}</span>{(detail.tags || []).map(tag => <span className="dataset-asset-tag" key={tag}>{tag}</span>)}</div>
           <p>{detail.description || '暂无说明'}</p>
         </header>
-        <dl><div><dt>编码</dt><dd>{detail.code}</dd></div><div><dt>类型</dt><dd>{typeLabels[detail.type] ?? detail.type}</dd></div><div><dt>聚合版本</dt><dd>V{detail.version}</dd></div><div><dt>草稿版本</dt><dd>V{detail.draftVersionNo}</dd></div><div><dt>数据节点</dt><dd>{Array.isArray(detail.dsl.nodes) ? detail.dsl.nodes.length : 0}</dd></div><div><dt>输出字段</dt><dd>{completeDetailFields.length}</dd></div></dl>
+        <dl><div><dt>编码</dt><dd>{detail.code}</dd></div><div><dt>类型</dt><dd>{typeLabels[detail.type] ?? detail.type}</dd></div><div><dt>业务领域</dt><dd>{detail.dsl.dataset.domain || '未配置'}</dd></div><div><dt>业务主题</dt><dd>{detail.dsl.dataset.subject || '未配置'}</dd></div><div><dt>聚合版本</dt><dd>V{detail.version}</dd></div><div><dt>草稿版本</dt><dd>V{detail.draftVersionNo}</dd></div><div><dt>数据节点</dt><dd>{Array.isArray(detail.dsl.nodes) ? detail.dsl.nodes.length : 0}</dd></div><div><dt>输出字段</dt><dd>{completeDetailFields.length}</dd></div></dl>
         <section className="dataset-detail-metadata" aria-label="LLM 生成的完整元数据">
           <div className="dataset-detail-section-heading"><div><span className="eyebrow">LLM 元数据</span><h3>完整业务语义</h3></div><span>{detailAsset ? `${detailAsset.schemaName}.${detailAsset.tableName}` : `${detail.layer} 数据集`}</span></div>
           {detailAsset && <dl className="dataset-detail-table-summary">
@@ -2412,6 +2734,7 @@ export function DatasetCenterPage() {
               <label>申请说明（选填）<textarea value={publicationNote} onChange={event => setPublicationNote(event.target.value)} placeholder="例如：订单与客户区域关联已由 AI 完成，请审批用于指标设计" /></label>
               {currentDraftPublicationRequest?.status === 'PENDING' && <div className="dataset-publication-hint">当前精确草稿已经在审批中，无需重复提交。</div>}
               {currentDraftPublicationRequest?.status === 'APPROVED' && <div className="dataset-publication-hint success">当前精确草稿已审批发布。再次修改并保存后可提交新的审批。</div>}
+              {publicationRequests[0]?.status === 'CANCELLED' && !currentDraftPublicationRequest && <div className="dataset-publication-hint">上次申请已因草稿变更自动取消；当前草稿可重新提交审批。</div>}
               <button className="primary-button" type="button" disabled={actionBusy || !publicationCapabilities.manage || currentDraftPublicationRequest?.status === 'APPROVED' || currentDraftPublicationRequest?.status === 'PENDING'} onClick={() => void submitPublicationRequest()}>{busyAction === 'publication-submit' ? '正在提交审批…' : '提交发布审批'}</button>
             </section>
 

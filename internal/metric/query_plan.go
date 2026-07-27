@@ -1,6 +1,8 @@
 package metric
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
@@ -73,12 +75,13 @@ func buildQueryCandidate(
 		return QueryCandidate{}, nil, err
 	}
 	metricFieldID := uniqueMetricFieldID(fieldsByID)
+	metricOutputCode := portableMetricOutputCode(definition.Metric.Code)
 	metricType := "DECIMAL"
 	if definition.Aggregation == "COUNT" || definition.Aggregation == "COUNT_DISTINCT" {
 		metricType = "INTEGER"
 	}
 	selectedFields = append(selectedFields, dataset.Field{
-		ID: metricFieldID, Code: definition.Metric.Code, Name: definition.Metric.Name, Role: "MEASURE",
+		ID: metricFieldID, Code: metricOutputCode, Name: definition.Metric.Name, Role: "MEASURE",
 		Expression: metricExpression, CanonicalType: metricType, Format: definition.NumberFormat,
 		Unit: definition.Unit, Nullable: true,
 	})
@@ -95,9 +98,24 @@ func buildQueryCandidate(
 		)
 	}
 	if len(grainCodes) == 0 {
-		grainCodes = []string{definition.Metric.Code}
+		grainCodes = []string{metricOutputCode}
 	}
 	document := validated.datasetDocument
+	// 指标查询是从精确数据集版本派生出的临时分析计划，而不是该版本本身。
+	// 保留源节点、Join、预聚合和执行策略作为访问边界，但不能继续携带源
+	// DIM/DWD/DWS 的整表层级合同：派生计划只投影请求维度和一个指标，
+	// 原合同引用的其余字段会让合法指标无法通过 DSL 校验。省略 layer 后，
+	// dataset.Prepare 会根据派生计划中的聚合语义将其确定为 DWS。
+	document.Dataset.Layer = ""
+	document.Dataset.SemanticContractVersion = ""
+	document.Dataset.ConsumerContractID = ""
+	document.FactContract = nil
+	document.AnalysisContract = nil
+	// DIM 的 DISTINCT 已经属于精确发布版本的物化语义。指标派生计划随后会由
+	// queryruntime 改写为读取该版本的 ACTIVE 物化表，因此外层聚合不能继续
+	// 携带 DISTINCT；否则推断出的 DWS 计划既无法通过层级校验，也会把去重错误
+	// 地施加到最终聚合结果。
+	document.Distinct = false
 	document.Fields = selectedFields
 	document.GroupBy = groupBy
 	document.Having = []dataset.Filter{}
@@ -126,6 +144,18 @@ func buildQueryCandidate(
 		DSL: preparedDataset.DSLJSON, PlanHash: preparedDataset.PlanHash,
 		FilterBindings: filterBindings,
 	}, boundParameters, nil
+}
+
+// portableMetricOutputCode 将逻辑指标编码映射为 PostgreSQL 可完整保留的输出列名。
+// 指标编码的历史合同允许 64 个 ASCII 字符，而 PostgreSQL 标识符上限为 63
+// 字节；派生查询必须显式缩短并带摘要，不能依赖数据库静默截断。
+func portableMetricOutputCode(code string) string {
+	if len(code) <= 63 {
+		return code
+	}
+	digest := sha256.Sum256([]byte(code))
+	suffix := "_" + hex.EncodeToString(digest[:])[:12]
+	return code[:63-len(suffix)] + suffix
 }
 
 func appendDimensionFilters(

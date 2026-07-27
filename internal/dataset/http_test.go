@@ -81,6 +81,13 @@ type httpDatasetStore struct {
 	record Record
 	getErr error
 
+	llmTriggerResult LLMTriggerResult
+	llmTriggerErr    error
+	llmTriggerCalls  int
+	llmTriggerTenant string
+	llmTriggerActor  string
+	llmTriggerKind   LLMTriggerKind
+
 	replayRecord      VersionRecord
 	replayFound       bool
 	replayErr         error
@@ -179,6 +186,18 @@ func (s *httpDatasetStore) Get(context.Context, string, string) (Record, error) 
 
 func (s *httpDatasetStore) List(context.Context, string, int, int) ([]Summary, int, error) {
 	return nil, 0, nil
+}
+
+func (s *httpDatasetStore) TriggerLLM(
+	_ context.Context,
+	tenantID, actorID string,
+	kind LLMTriggerKind,
+) (LLMTriggerResult, error) {
+	s.llmTriggerCalls++
+	s.llmTriggerTenant = tenantID
+	s.llmTriggerActor = actorID
+	s.llmTriggerKind = kind
+	return s.llmTriggerResult, s.llmTriggerErr
 }
 
 func (s *httpDatasetStore) Update(context.Context, string, string, string, UpdateInput, Prepared) (Record, error) {
@@ -389,6 +408,7 @@ func newDatasetHTTPHarness(t *testing.T, store *httpDatasetStore, previewer Prev
 	permissionStore := &httpPermissionStore{allow: allow}
 	validator := &httpPublicationValidator{}
 	service := NewService(store, validator)
+	service.SetLLMTriggerStore(store)
 	var handler http.Handler
 	if previewer == nil {
 		handler = NewHandler(authService, access.NewService(permissionStore), service)
@@ -442,6 +462,79 @@ func TestGetDatasetDisablesIntermediateCaching(t *testing.T) {
 	}
 	if value := response.Header().Get("Cache-Control"); value != "no-store" {
 		t.Fatalf("Cache-Control=%q，期望 no-store", value)
+	}
+}
+
+func TestManualLLMTriggerUsesGlobalDatasetManagePermission(t *testing.T) {
+	store := &httpDatasetStore{llmTriggerResult: LLMTriggerResult{
+		Trigger: LLMTriggerDWSModeling, EligibleCount: 5, EnqueuedCount: 4, ExistingCount: 1,
+	}}
+	harness := newDatasetHTTPHarness(t, store, nil, func(check access.Check) bool {
+		return check.ResourceType == "DATASET" && check.Action == "MANAGE" && check.ObjectID == ""
+	})
+	response := performDatasetHTTPRequest(
+		t, harness, http.MethodPost,
+		"/api/v1/datasets/trigger-dws-modeling", nil, nil,
+	)
+	if response.Code != http.StatusAccepted ||
+		response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	var body LLMTriggerResult
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body != store.llmTriggerResult ||
+		store.llmTriggerCalls != 1 ||
+		store.llmTriggerTenant != httpTestTenantID ||
+		store.llmTriggerActor != httpTestUserID ||
+		store.llmTriggerKind != LLMTriggerDWSModeling {
+		t.Fatalf("body=%#v store=%#v", body, store)
+	}
+	if len(harness.permissions.checks) != 1 {
+		t.Fatalf("permission checks=%#v", harness.permissions.checks)
+	}
+	check := harness.permissions.checks[0]
+	if check.ResourceType != "DATASET" || check.Action != "MANAGE" || check.ObjectID != "" {
+		t.Fatalf("permission check=%#v", check)
+	}
+}
+
+func TestManualLLMTriggerFailsClosedWithoutGlobalManagePermission(t *testing.T) {
+	store := &httpDatasetStore{}
+	harness := newDatasetHTTPHarness(t, store, nil, func(access.Check) bool { return false })
+	response := performDatasetHTTPRequest(
+		t, harness, http.MethodPost,
+		"/api/v1/datasets/trigger-dim-modeling", nil, nil,
+	)
+	if response.Code != http.StatusForbidden ||
+		readDatasetErrorCode(t, response) != "PERMISSION_DENIED" ||
+		store.llmTriggerCalls != 0 {
+		t.Fatalf("status=%d body=%s store=%#v", response.Code, response.Body.String(), store)
+	}
+}
+
+func TestManualLLMTriggerRejectsBodyAndQueryParameters(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		target string
+		body   []byte
+	}{
+		{name: "body", target: "/api/v1/datasets/trigger-dws-modeling", body: []byte(`{}`)},
+		{name: "query", target: "/api/v1/datasets/trigger-dws-modeling?force=true"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &httpDatasetStore{}
+			harness := newDatasetHTTPHarness(t, store, nil, nil)
+			response := performDatasetHTTPRequest(
+				t, harness, http.MethodPost, test.target, test.body, nil,
+			)
+			if response.Code != http.StatusBadRequest ||
+				readDatasetErrorCode(t, response) != "DATASET_LLM_TRIGGER_INVALID" ||
+				store.llmTriggerCalls != 0 {
+				t.Fatalf("status=%d body=%s store=%#v", response.Code, response.Body.String(), store)
+			}
+		})
 	}
 }
 

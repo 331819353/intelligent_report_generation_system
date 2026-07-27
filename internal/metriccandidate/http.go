@@ -38,6 +38,15 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		writer.Header().Set("Cache-Control", "no-store")
 		writeCandidateJSON(writer, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
 	})))
+	mux.Handle("POST /api/v1/metric-candidates/identify", protect("MANAGE", http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		claims, _ := auth.ClaimsFromContext(request.Context())
+		result, err := service.Identify(request.Context(), claims.TenantID, claims.Subject)
+		if err != nil {
+			writeCandidateError(writer, err)
+			return
+		}
+		writeCandidateJSON(writer, http.StatusAccepted, result)
+	})))
 	mux.Handle("GET /api/v1/metric-candidates/{id}", protect("READ", http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		claims, _ := auth.ClaimsFromContext(request.Context())
 		candidate, err := service.Get(request.Context(), claims.TenantID, request.PathValue("id"))

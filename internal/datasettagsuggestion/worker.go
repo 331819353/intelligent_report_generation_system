@@ -29,7 +29,7 @@ func (worker *Worker) TenantIDs(ctx context.Context) ([]string, error) {
 	return worker.store.ListTenantIDs(ctx)
 }
 
-// ProcessNext processes one exact published-version job. An unconfigured
+// ProcessNext processes one exact current-version job. An unconfigured
 // provider leaves jobs pending so a later configuration change can recover
 // without manufacturing failed suggestions.
 func (worker *Worker) ProcessNext(

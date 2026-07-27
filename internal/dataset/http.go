@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"intelligent-report-generation-system/internal/access"
 	"intelligent-report-generation-system/internal/auth"
@@ -102,6 +103,30 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		}
 		writeDatasetJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
 	})))
+	registerLLMTrigger := func(path string, kind LLMTriggerKind) {
+		mux.Handle(path, protect("MANAGE", nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, bodyErr := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024))
+			if r.URL.RawQuery != "" || bodyErr != nil || strings.TrimSpace(string(body)) != "" {
+				writeDatasetJSON(w, http.StatusBadRequest, map[string]string{"code": "DATASET_LLM_TRIGGER_INVALID", "message": "LLM 手动触发请求不接受请求体或查询参数"})
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			result, err := service.TriggerLLM(
+				r.Context(), claims.TenantID, claims.Subject, kind,
+			)
+			if err != nil {
+				writeDatasetError(w, err)
+				return
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			writeDatasetJSON(w, http.StatusAccepted, result)
+		})))
+	}
+	registerLLMTrigger("POST /api/v1/datasets/trigger-dim-modeling", LLMTriggerDIMModeling)
+	registerLLMTrigger("POST /api/v1/datasets/trigger-dwd-modeling", LLMTriggerDWDModeling)
+	// 兼容旧客户端；组合入口不再隐式触发 DIM，只执行明细建模。
+	registerLLMTrigger("POST /api/v1/datasets/trigger-dim-dwd-modeling", LLMTriggerDWDModeling)
+	registerLLMTrigger("POST /api/v1/datasets/trigger-dws-modeling", LLMTriggerDWSModeling)
 	mux.Handle("GET /api/v1/datasets/{id}", protect("READ", objectID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, _ := auth.ClaimsFromContext(r.Context())
 		record, err := service.Get(r.Context(), claims.TenantID, r.PathValue("id"))
@@ -378,6 +403,8 @@ func writeDatasetError(w http.ResponseWriter, err error) {
 		writeDatasetJSON(w, http.StatusNotFound, map[string]string{"code": "DATASET_PUBLICATION_REQUEST_NOT_FOUND", "message": "数据集发布审批申请不存在"})
 	case errors.Is(err, ErrPublicationRequestConflict):
 		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_PUBLICATION_REQUEST_CONFLICT", "message": "发布审批申请已被其他请求处理，请重新加载"})
+	case errors.Is(err, ErrPublicationRequestCancelled):
+		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_PUBLICATION_REQUEST_CANCELLED", "message": "数据集草稿已变更，原发布审批申请已自动取消，请按最新草稿重新提交"})
 	case errors.Is(err, ErrPublicationRequestNotPending):
 		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_PUBLICATION_REQUEST_NOT_PENDING", "message": "发布审批申请当前状态不能执行该操作"})
 	case errors.Is(err, ErrPublicationCandidatesFailed):
@@ -396,6 +423,8 @@ func writeDatasetError(w http.ResponseWriter, err error) {
 		writeDatasetJSON(w, http.StatusForbidden, map[string]string{"code": "PERMISSION_DENIED", "message": "没有执行数据集操作的权限"})
 	case errors.Is(err, ErrPublishUnavailable):
 		writeDatasetJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "DATASET_PUBLISH_UNAVAILABLE", "message": "发布试跑服务暂时不可用"})
+	case errors.Is(err, ErrLLMTriggerUnavailable):
+		writeDatasetJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "DATASET_LLM_TRIGGER_UNAVAILABLE", "message": "数据集智能建模触发服务暂时不可用"})
 	case errors.Is(err, ErrInvalidTransition):
 		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_VERSION_TRANSITION_INVALID", "message": "数据集状态迁移无效"})
 	case errors.Is(err, ErrInUse):

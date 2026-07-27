@@ -127,7 +127,7 @@ func autoEligibleTemplateCodes(document dataset.Document) []string {
 	if document.Dataset.Layer != dataset.LayerDWD || document.FactContract == nil {
 		return nil
 	}
-	hasTime := document.FactContract.EventTimeField != ""
+	hasTime := effectiveFactTimeField(document) != ""
 	hasDimension := false
 	for _, field := range document.Fields {
 		hasDimension = hasDimension || field.Role == "DIMENSION"
@@ -175,8 +175,9 @@ func buildSingleFactDWSCandidate(
 			dimensions = append(dimensions, field)
 		}
 	}
-	timeField, hasTime := fieldsByCode[sourceDocument.FactContract.EventTimeField]
-	if template.RequiresTime && (!hasTime || timeField.Role != "TIME") {
+	timeField, hasTime := fieldsByCode[effectiveFactTimeField(sourceDocument)]
+	if template.RequiresTime &&
+		(!hasTime || !isTemporalCanonicalType(timeField.CanonicalType)) {
 		return dataset.Prepared{}, ErrUnprovenPath
 	}
 	if template.RequiresDimension && len(dimensions) == 0 {
@@ -272,6 +273,8 @@ func buildSingleFactDWSCandidate(
 		Dataset: dataset.Descriptor{
 			Code: code, Name: template.Name + " · " + source.Name,
 			Description: "基于精确 DWD 版本自动生成的可评审市场分析草稿",
+			Domain:      sourceDocument.Dataset.Domain,
+			Subject:     sourceDocument.Dataset.Subject,
 			Type:        "SINGLE_SOURCE", Layer: dataset.LayerDWS,
 			SemanticContractVersion: "1.0",
 		},
@@ -313,14 +316,342 @@ func buildSingleFactDWSCandidate(
 	return dataset.Prepare(raw)
 }
 
-func generatedDWSCode(templateCode, sourceCode string) string {
-	value := "auto_" + strings.ToLower(templateCode) + "_" + sourceCode
-	if len(value) <= 128 {
+// buildMultiFactDWSCandidate 把同一主题中的多张事实表分别聚合到共同月份后再
+// 关联。DIM 只参与上游 LLM 对实体与字段语义的判断，不会违反 DWS <- DWD 的
+// 物理分层合同。
+func buildMultiFactDWSCandidate(
+	sources []dwsPlanningAsset,
+	scope dwsModelingScope,
+	templateCode string,
+) (dataset.Prepared, error) {
+	if len(sources) < 2 ||
+		strings.ToUpper(strings.TrimSpace(templateCode)) != "MULTI_FACT_COMPARISON" {
+		return dataset.Prepared{}, ErrInvalidRequest
+	}
+	nodes := make([]dataset.Node, 0, len(sources))
+	preAggregations := make([]dataset.PreAggregation, 0, len(sources))
+	joins := make([]dataset.Join, 0, len(sources)-1)
+	outputFields := []dataset.Field{{
+		ID: "field_stat_month", Code: "stat_month", Name: "统计月份",
+		Role: "TIME", CanonicalType: "DATE", Nullable: false,
+		Expression: dataset.Expression{
+			Type: "FIELD_REF", NodeID: "fact_1", Field: "stat_month",
+		},
+	}}
+	measures := []dataset.AnalysisMeasureContract{}
+	for index, source := range sources {
+		document := source.Document
+		if document.Dataset.Layer != dataset.LayerDWD || document.FactContract == nil {
+			return dataset.Prepared{}, ErrUnprovenPath
+		}
+		fieldsByCode := map[string]dataset.Field{}
+		projection := make([]string, 0, len(document.Fields))
+		for _, field := range document.Fields {
+			fieldsByCode[field.Code] = field
+			projection = append(projection, field.Code)
+		}
+		timeFieldCode := effectiveFactTimeField(document)
+		timeField, exists := fieldsByCode[timeFieldCode]
+		if !exists || !isTemporalCanonicalType(timeField.CanonicalType) {
+			return dataset.Prepared{}, ErrUnprovenPath
+		}
+		nodeID := fmt.Sprintf("fact_%d", index+1)
+		nodes = append(nodes, dataset.Node{
+			ID: nodeID, Type: "DATASET", DatasetVersionID: source.VersionID,
+			Alias: nodeID, Projection: projection, SourceFilters: []dataset.SourceFilter{},
+		})
+		joinID, joinSide := "join_1", "LEFT"
+		if index > 0 {
+			joinID = fmt.Sprintf("join_%d", index)
+			joinSide = "RIGHT"
+			joins = append(joins, dataset.Join{
+				ID: joinID, LeftNodeID: "fact_1", RightNodeID: nodeID,
+				JoinType: "LEFT", Cardinality: "ONE_TO_ONE",
+				FanoutPolicy: "SAFE", ManualConfirmed: true,
+				Conditions: []dataset.JoinCondition{{
+					LeftExpression: dataset.Expression{
+						Type: "FIELD_REF", NodeID: "fact_1", Field: "stat_month",
+					},
+					Operator: "EQUALS",
+					RightExpression: dataset.Expression{
+						Type: "FIELD_REF", NodeID: nodeID, Field: "stat_month",
+					},
+				}},
+			})
+		}
+		timeExpression := dataset.Expression{
+			Type: "FIELD_REF", NodeID: nodeID, Field: timeField.Code,
+		}
+		preAggregation := dataset.PreAggregation{
+			ID: fmt.Sprintf("preagg_%d", index+1), NodeID: nodeID,
+			JoinID: joinID, JoinSide: joinSide,
+			GroupBy: []dataset.PreAggregationGroup{{
+				Field: "stat_month", Unit: "MONTH", Expression: &timeExpression,
+			}},
+			Metrics: []dataset.PreAggregationMetric{},
+		}
+		sourcePrefix := groupedMeasurePrefix(source.Record.Code, index)
+		added := 0
+		for _, contract := range document.FactContract.AtomicMeasures {
+			field, exists := fieldsByCode[contract.Field]
+			if !exists || field.Role != "MEASURE" ||
+				contract.Additivity == "NON_ADDITIVE" {
+				continue
+			}
+			aggregation := "SUM"
+			if contract.Additivity == "SEMI_ADDITIVE" {
+				aggregation = "MAX"
+			}
+			alias := boundedDWSFieldCode(sourcePrefix + "_" + field.Code)
+			expression := dataset.Expression{
+				Type: "FIELD_REF", NodeID: nodeID, Field: field.Code,
+			}
+			preAggregation.Metrics = append(preAggregation.Metrics,
+				dataset.PreAggregationMetric{
+					Field: alias, Function: aggregation, Expression: &expression,
+				},
+			)
+			outputFields = append(outputFields, dataset.Field{
+				ID: "field_" + alias, Code: alias,
+				Name:        source.Record.Name + " · " + field.Name,
+				Description: field.Description, Role: "MEASURE",
+				CanonicalType: field.CanonicalType, SemanticType: field.SemanticType,
+				Nullable: true, Unit: contract.Unit,
+				Expression: dataset.Expression{
+					Type: "FIELD_REF", NodeID: nodeID, Field: alias,
+				},
+			})
+			measures = append(measures, dataset.AnalysisMeasureContract{
+				Field: alias, SourceNodeIDs: []string{nodeID},
+				Aggregation: aggregation, Additivity: contract.Additivity,
+				Unit: contract.Unit, Currency: contract.Currency,
+			})
+			added++
+			if added == 3 {
+				break
+			}
+		}
+		if len(preAggregation.Metrics) == 0 {
+			return dataset.Prepared{}, ErrUnprovenPath
+		}
+		preAggregations = append(preAggregations, preAggregation)
+	}
+	if len(measures) < len(sources) {
+		return dataset.Prepared{}, ErrUnprovenPath
+	}
+	domainCode := safeDWSIdentifier(scope.DomainCode, "general")
+	subjectCode := safeDWSIdentifier(groupedSubjectCode(scope.SubjectCode), "general")
+	code := boundedDWSCode("dws_" + domainCode + "_" + subjectCode + "_multi_fact_summary")
+	name := strings.TrimSpace(scope.SubjectName)
+	if name == "" {
+		name = "综合分析"
+	}
+	domain := strings.TrimSpace(scope.DomainCode)
+	for _, source := range sources {
+		if inherited := strings.TrimSpace(source.Document.Dataset.Domain); inherited != "" {
+			domain = inherited
+			break
+		}
+	}
+	if domain == "" {
+		domain = "general"
+	}
+	document := dataset.Document{
+		DSLVersion: dataset.DSLVersion,
+		Dataset: dataset.Descriptor{
+			Code: code, Name: name + "主题汇总",
+			Description: fmt.Sprintf(
+				"基于 %d 张当前发布 DWD 的共同月份粒度生成的多事实主题汇总草稿",
+				len(sources),
+			),
+			Domain: domain, Subject: subjectCode,
+			// DATASET 节点不暴露底层物理数据源；DSL 的 CROSS_SOURCE 合同只适用
+			// 于直接引用多个 TABLE 数据源的场景。多事实由 AnalysisContract
+			// 的 MULTI_FACT 输入模式表达。
+			Type: "SINGLE_SOURCE", Layer: dataset.LayerDWS,
+			SemanticContractVersion: "1.0",
+		},
+		Nodes: nodes, Joins: joins, PreAggregations: preAggregations,
+		AnalysisContract: &dataset.AnalysisContract{
+			Intent: "MULTI_FACT_COMPARISON", InputMode: "MULTI_FACT",
+			CommonGrainFields:   []string{"stat_month"},
+			ConformedDimensions: []string{"stat_month"},
+			TimeField:           "stat_month", TimeGrain: "MONTH", Measures: measures,
+		},
+		Fields: outputFields, Filters: []dataset.Filter{}, GroupBy: []string{},
+		Having: []dataset.Filter{}, Sorts: []dataset.Sort{{
+			FieldID: "field_stat_month", Direction: "ASC",
+		}}, Parameters: []dataset.Parameter{},
+		OutputGrain: dataset.OutputGrain{
+			Description: "每行代表一个统计月份",
+			KeyFields:   []string{"stat_month"},
+			TimeField:   "stat_month", DefaultTimeGrain: "MONTH",
+		},
+		ExecutionPolicy: dataset.ExecutionPolicy{
+			Mode: "MATERIALIZED_PREFERRED", TimeoutMS: 5000,
+			PreviewLimit: 100, ResultLimit: 10000, CacheTTLSeconds: 300,
+			Materialization: dataset.MaterializationPolicy{
+				Enabled: true, RefreshMode: "MANUAL",
+			},
+		},
+	}
+	raw, err := jsonMarshal(document)
+	if err != nil {
+		return dataset.Prepared{}, err
+	}
+	return dataset.Prepare(raw)
+}
+
+func multiFactEligibleSources(sources []dwsPlanningAsset) []dwsPlanningAsset {
+	eligible := make([]dwsPlanningAsset, 0, len(sources))
+	for _, source := range sources {
+		document := source.Document
+		if document.Dataset.Layer != dataset.LayerDWD ||
+			document.FactContract == nil ||
+			effectiveFactTimeField(document) == "" {
+			continue
+		}
+		fieldsByCode := map[string]dataset.Field{}
+		for _, field := range document.Fields {
+			fieldsByCode[field.Code] = field
+		}
+		hasMeasure := false
+		for _, contract := range document.FactContract.AtomicMeasures {
+			field, exists := fieldsByCode[contract.Field]
+			if exists && field.Role == "MEASURE" &&
+				contract.Additivity != "NON_ADDITIVE" {
+				hasMeasure = true
+				break
+			}
+		}
+		if hasMeasure {
+			eligible = append(eligible, source)
+		}
+	}
+	return eligible
+}
+
+func effectiveFactTimeField(document dataset.Document) string {
+	fieldsByCode := map[string]dataset.Field{}
+	for _, field := range document.Fields {
+		fieldsByCode[field.Code] = field
+	}
+	candidates := []string{}
+	if document.FactContract != nil {
+		candidates = append(candidates, document.FactContract.EventTimeField)
+	}
+	candidates = append(candidates, document.OutputGrain.TimeField)
+	candidates = append(candidates, document.OutputGrain.KeyFields...)
+	for _, code := range candidates {
+		field, exists := fieldsByCode[code]
+		if code != "" && exists && isTemporalCanonicalType(field.CanonicalType) {
+			return code
+		}
+	}
+	return ""
+}
+
+func isTemporalCanonicalType(value string) bool {
+	return value == "DATE" || value == "DATETIME"
+}
+
+func groupedMeasurePrefix(code string, index int) string {
+	value := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(code)), "dwd_")
+	if value == "" {
+		value = fmt.Sprintf("fact_%d", index+1)
+	}
+	return safeDWSIdentifier(value, fmt.Sprintf("fact_%d", index+1))
+}
+
+func groupedSubjectCode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "business":
+		return "business_analysis"
+	case "fulfillment":
+		return "fulfillment_analysis"
+	case "operations":
+		return "operations_analysis"
+	case "customer":
+		return "customer_analysis"
+	case "product":
+		return "product_analysis"
+	default:
+		return value
+	}
+}
+
+func safeDWSIdentifier(value, fallback string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var builder strings.Builder
+	underscore := false
+	for _, character := range value {
+		valid := character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9'
+		if valid {
+			builder.WriteRune(character)
+			underscore = false
+		} else if builder.Len() > 0 && !underscore {
+			builder.WriteByte('_')
+			underscore = true
+		}
+	}
+	result := strings.Trim(builder.String(), "_")
+	if result == "" {
+		return fallback
+	}
+	return result
+}
+
+func boundedDWSFieldCode(value string) string {
+	if len(value) <= 120 {
 		return value
 	}
 	sum := sha256.Sum256([]byte(value))
-	suffix := hex.EncodeToString(sum[:])[:12]
-	return value[:115] + "_" + suffix
+	return value[:111] + "_" + hex.EncodeToString(sum[:])[:8]
+}
+
+func boundedDWSCode(value string) string {
+	if len(value) <= 63 {
+		return value
+	}
+	sum := sha256.Sum256([]byte(value))
+	return value[:54] + "_" + hex.EncodeToString(sum[:])[:8]
+}
+
+func generatedDWSCode(templateCode, sourceCode string) string {
+	sourceCode = strings.ToLower(strings.TrimSpace(sourceCode))
+	templateCode = dwsTemplatePhysicalCode(templateCode)
+	value := ""
+	if strings.HasPrefix(sourceCode, "dwd_") {
+		value = "dws_" + strings.TrimPrefix(sourceCode, "dwd_") + "_" + templateCode
+	} else {
+		value = "dws_general_general_" + sourceCode + "_" + templateCode
+	}
+	if len(value) <= 63 {
+		return value
+	}
+	sum := sha256.Sum256([]byte(value))
+	suffix := hex.EncodeToString(sum[:])[:8]
+	return value[:54] + "_" + suffix
+}
+
+func dwsTemplatePhysicalCode(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "TREND":
+		return "trend"
+	case "PERIOD_COMPARISON":
+		return "period_cmp"
+	case "DISTRIBUTION":
+		return "dist"
+	case "RANKING":
+		return "rank"
+	case "DRILLDOWN":
+		return "drill"
+	case "ANOMALY":
+		return "anomaly"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
 }
 
 func jsonMarshal(value any) ([]byte, error) {

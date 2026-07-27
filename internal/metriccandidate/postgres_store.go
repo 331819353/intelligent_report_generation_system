@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,6 +21,376 @@ import (
 type PostgresStore struct{ pool *pgxpool.Pool }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
+
+// TriggerManualIdentification compares the current governed dataset inventory with the
+// existing metric/candidate catalog and schedules only an explicit, user-initiated scan.
+// Only published DWS/ADS versions are query-serving semantic assets. DWD stays
+// an implementation layer and is therefore never mixed into this index build.
+func (s *PostgresStore) TriggerManualIdentification(
+	ctx context.Context,
+	tenantID, actorID string,
+) (result IdentificationResult, err error) {
+	if s == nil || tenantID == "" || !canonicalUUID(actorID) {
+		return IdentificationResult{}, ErrInvalidRequest
+	}
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*)
+			FROM platform.metrics
+			WHERE deleted_at IS NULL AND status<>'DELETED'`).Scan(
+			&result.HistoricalMetricCount,
+		); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT count(*)
+			FROM platform.metric_candidates`).Scan(
+			&result.ExistingCandidateCount,
+		); err != nil {
+			return err
+		}
+		rows, queryErr := tx.Query(ctx, `WITH candidates AS (
+				SELECT version.tenant_id,version.dataset_id,
+					version.id AS dataset_version_id,version.schema_hash
+				FROM platform.datasets AS dataset
+				JOIN platform.dataset_versions AS version
+				  ON version.tenant_id=dataset.tenant_id
+				 AND version.dataset_id=dataset.id
+				 AND version.id=dataset.current_published_version_id
+				WHERE dataset.status='PUBLISHED'
+				  AND dataset.deleted_at IS NULL
+				  AND version.status='PUBLISHED'
+				  AND version.layer IN ('DWS','ADS')
+			), activated AS (
+				INSERT INTO platform.metric_extraction_jobs(
+					tenant_id,dataset_id,dataset_version_id,dsl_hash,
+					requested_by,extractor_version
+				)
+				SELECT tenant_id,dataset_id,dataset_version_id,schema_hash,
+					$1::uuid,'metric-candidate-manual-v1'
+				FROM candidates
+				ON CONFLICT(tenant_id,dataset_version_id,extractor_version)
+				DO UPDATE SET
+					requested_by=EXCLUDED.requested_by,
+					status='PENDING',total=0,ready_count=0,review_count=0,
+					blocked_count=0,error_code='',error_message='',
+					lease_owner='',lease_expires_at=NULL,heartbeat_at=NULL,
+					attempt=0,next_attempt_at=now(),prepared_result=NULL,
+					started_at=NULL,completed_at=NULL
+				WHERE platform.metric_extraction_jobs.status IN (
+					'SUCCEEDED','PARTIAL','FAILED'
+				)
+				RETURNING id
+			)
+			SELECT
+				(SELECT count(*)::int FROM candidates),
+				(SELECT count(*)::int FROM activated)`,
+			actorID)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			return ErrInvalidRequest
+		}
+		if err := rows.Scan(
+			&result.EligibleDatasetCount, &result.EnqueuedJobCount,
+		); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		// Release the result set before writing the audit row. pgx keeps the
+		// transaction connection busy while Rows is open, even after its only
+		// row has been scanned; attempting the audit INSERT first therefore
+		// made every manual identification request fail with "conn busy" and
+		// rolled back the newly enqueued jobs.
+		rows.Close()
+		if err := tx.QueryRow(ctx, `SELECT eligible_count::int,profiled_count::int
+			FROM platform.trigger_manual_dws_dimension_identification($1::uuid)`,
+			actorID,
+		).Scan(
+			&result.DimensionDatasetCount,
+			&result.DimensionProfileCount,
+		); err != nil {
+			return err
+		}
+		result.Datasets, err = loadIdentificationDatasetIndexesTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+			tenant_id,actor_user_id,action,resource_type,resource_id,detail
+		) VALUES(
+			platform.current_tenant_id(),$1::uuid,
+			'TRIGGER_METRIC_IDENTIFICATION','METRIC_CATALOG',$1::uuid,
+			jsonb_build_object(
+				'eligibleDatasetCount',$2::int,
+				'enqueuedJobCount',$3::int,
+				'historicalMetricCount',$4::int,
+				'existingCandidateCount',$5::int
+				,'dimensionDatasetCount',$6::int
+				,'dimensionProfileCount',$7::int
+			)
+		)`, actorID, result.EligibleDatasetCount, result.EnqueuedJobCount,
+			result.HistoricalMetricCount, result.ExistingCandidateCount,
+			result.DimensionDatasetCount, result.DimensionProfileCount)
+		return err
+	})
+	return result, err
+}
+
+func loadIdentificationDatasetIndexesTx(
+	ctx context.Context,
+	tx pgx.Tx,
+) ([]IdentificationDatasetIndex, error) {
+	rows, err := tx.Query(ctx, `SELECT
+			dataset.id::text,version.id::text,dataset.code::text,dataset.name,
+			version.layer,platform.dataset_version_effective_domain(version.id)
+		FROM platform.datasets AS dataset
+		JOIN platform.dataset_versions AS version
+		  ON version.tenant_id=dataset.tenant_id
+		 AND version.dataset_id=dataset.id
+		 AND version.id=dataset.current_published_version_id
+		WHERE dataset.status='PUBLISHED'
+		  AND dataset.deleted_at IS NULL
+		  AND version.status='PUBLISHED'
+		  AND version.layer IN ('DWS','ADS')
+		ORDER BY version.layer,dataset.code,dataset.id`)
+	if err != nil {
+		return nil, err
+	}
+	items := []IdentificationDatasetIndex{}
+	byVersion := map[string]int{}
+	for rows.Next() {
+		var item IdentificationDatasetIndex
+		if err := rows.Scan(
+			&item.DatasetID, &item.DatasetVersionID, &item.Code, &item.Name,
+			&item.Layer, &item.Domain,
+		); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		item.Metrics = []IdentificationMetric{}
+		item.Dimensions = []IdentificationDimension{}
+		items = append(items, item)
+		byVersion[item.DatasetVersionID] = len(items) - 1
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(items) == 0 {
+		return items, nil
+	}
+
+	metricRows, err := tx.Query(ctx, `SELECT
+			version.dataset_version_id::text,metric.code::text,metric.name,
+			'PUBLISHED'::text,'METRIC_VERSION'::text,
+			COALESCE(ARRAY(
+			  SELECT dimension->>'fieldId'
+			  FROM jsonb_array_elements(
+			    COALESCE(version.definition_json->'allowedDimensions','[]'::jsonb)
+			  ) AS dimension
+			  WHERE COALESCE(dimension->>'fieldId','')<>''
+			  ORDER BY dimension->>'fieldId'
+			),'{}'::text[]),
+			COALESCE(document.embedding_status,'PENDING')
+		FROM platform.metric_versions AS version
+		JOIN platform.metrics AS metric
+		  ON metric.tenant_id=version.tenant_id
+		 AND metric.id=version.metric_id
+		 AND metric.current_published_version_id=version.id
+		 AND metric.status='PUBLISHED'
+		 AND metric.deleted_at IS NULL
+		LEFT JOIN platform.metric_semantic_documents AS document
+		  ON document.tenant_id=version.tenant_id
+		 AND document.subject_type='METRIC_VERSION'
+		 AND document.metric_version_id=version.id
+		JOIN platform.dataset_versions AS dataset_version
+		  ON dataset_version.tenant_id=version.tenant_id
+		 AND dataset_version.id=version.dataset_version_id
+		 AND dataset_version.status='PUBLISHED'
+		 AND dataset_version.layer IN ('DWS','ADS')
+		ORDER BY version.dataset_version_id,metric.code`)
+	if err != nil {
+		return nil, err
+	}
+	for metricRows.Next() {
+		var versionID string
+		var metric IdentificationMetric
+		if err := metricRows.Scan(
+			&versionID, &metric.Code, &metric.Name, &metric.Status,
+			&metric.Source, &metric.AllowedFieldIDs, &metric.VectorStatus,
+		); err != nil {
+			metricRows.Close()
+			return nil, err
+		}
+		if index, ok := byVersion[versionID]; ok {
+			items[index].Metrics = append(items[index].Metrics, metric)
+		}
+	}
+	if err := metricRows.Err(); err != nil {
+		metricRows.Close()
+		return nil, err
+	}
+	metricRows.Close()
+
+	candidateRows, err := tx.Query(ctx, `SELECT
+			candidate.dataset_version_id::text,candidate.code::text,candidate.name,
+			candidate.status,'CANDIDATE'::text,
+			COALESCE(ARRAY(
+			  SELECT dimension->>'fieldId'
+			  FROM jsonb_array_elements(
+			    COALESCE(candidate.proposed_definition->'allowedDimensions','[]'::jsonb)
+			  ) AS dimension
+			  WHERE COALESCE(dimension->>'fieldId','')<>''
+			  ORDER BY dimension->>'fieldId'
+			),'{}'::text[]),
+			COALESCE(document.embedding_status,'PENDING')
+		FROM platform.metric_candidates AS candidate
+		JOIN platform.dataset_versions AS dataset_version
+		  ON dataset_version.tenant_id=candidate.tenant_id
+		 AND dataset_version.id=candidate.dataset_version_id
+		 AND dataset_version.status='PUBLISHED'
+		 AND dataset_version.layer IN ('DWS','ADS')
+		LEFT JOIN platform.metric_semantic_documents AS document
+		  ON document.tenant_id=candidate.tenant_id
+		 AND document.subject_type='CANDIDATE'
+		 AND document.candidate_id=candidate.id
+		WHERE candidate.status IN ('READY','NEEDS_REVIEW','BLOCKED')
+		ORDER BY candidate.dataset_version_id,candidate.code,candidate.id`)
+	if err != nil {
+		return nil, err
+	}
+	for candidateRows.Next() {
+		var versionID string
+		var metric IdentificationMetric
+		if err := candidateRows.Scan(
+			&versionID, &metric.Code, &metric.Name, &metric.Status,
+			&metric.Source, &metric.AllowedFieldIDs, &metric.VectorStatus,
+		); err != nil {
+			candidateRows.Close()
+			return nil, err
+		}
+		if index, ok := byVersion[versionID]; ok {
+			items[index].Metrics = append(items[index].Metrics, metric)
+		}
+	}
+	if err := candidateRows.Err(); err != nil {
+		candidateRows.Close()
+		return nil, err
+	}
+	candidateRows.Close()
+
+	dimensionRows, err := tx.Query(ctx, `SELECT
+			field.dataset_version_id::text,field.field_id,field.field_code::text,
+			field.field_name,COALESCE(dimension.member_index_policy,'NONE'),
+			COALESCE(dimension.sensitive,false),
+			COALESCE(member_totals.total,0)::int,
+			COALESCE(member_totals.vectorized,0)::int,
+			COALESCE(member_values.values,'{}'::text[])
+		FROM platform.dataset_fields AS field
+		JOIN platform.dataset_versions AS version
+		  ON version.tenant_id=field.tenant_id
+		 AND version.id=field.dataset_version_id
+		 AND version.status='PUBLISHED'
+		 AND version.layer IN ('DWS','ADS')
+		LEFT JOIN platform.semantic_dimensions AS dimension
+		  ON dimension.tenant_id=field.tenant_id
+		 AND dimension.dataset_version_id=field.dataset_version_id
+		 AND dimension.field_id=field.field_id
+		 AND dimension.status='PUBLISHED'
+		LEFT JOIN LATERAL (
+		  SELECT count(DISTINCT member.normalized_value) AS total,
+		    count(DISTINCT semantic.dimension_member_id) FILTER(
+		      WHERE semantic.embedding_status='SUCCEEDED'
+		    ) AS vectorized
+		  FROM platform.dimension_members AS member
+		  LEFT JOIN platform.dimension_member_semantic_documents AS semantic
+		    ON semantic.tenant_id=member.tenant_id
+		   AND semantic.dimension_member_id=member.id
+		  WHERE member.tenant_id=dimension.tenant_id
+		    AND member.dimension_id=dimension.id
+		    AND member.status='ACTIVE'
+		    AND dimension.member_index_policy='FULL'
+		    AND NOT dimension.sensitive
+		    AND (member.valid_from IS NULL OR member.valid_from<=now())
+		    AND (member.valid_to IS NULL OR member.valid_to>now())
+		) AS member_totals ON true
+		LEFT JOIN LATERAL (
+		  SELECT array_agg(value.canonical_label ORDER BY value.canonical_label) AS values
+		  FROM (
+		    SELECT DISTINCT ON (member.normalized_value)
+		      member.normalized_value,member.canonical_label
+		    FROM platform.dimension_members AS member
+		    WHERE member.tenant_id=dimension.tenant_id
+		      AND member.dimension_id=dimension.id
+		      AND member.status='ACTIVE'
+		      AND dimension.member_index_policy='FULL'
+		      AND NOT dimension.sensitive
+		      AND (member.valid_from IS NULL OR member.valid_from<=now())
+		      AND (member.valid_to IS NULL OR member.valid_to>now())
+		    ORDER BY member.normalized_value,member.canonical_label
+		    LIMIT 200
+		  ) AS value
+		) AS member_values ON true
+		WHERE field.field_role IN ('DIMENSION','TIME')
+		ORDER BY field.dataset_version_id,field.ordinal_position`)
+	if err != nil {
+		return nil, err
+	}
+	for dimensionRows.Next() {
+		var versionID string
+		var dimension IdentificationDimension
+		if err := dimensionRows.Scan(
+			&versionID, &dimension.FieldID, &dimension.Code, &dimension.Name,
+			&dimension.MemberIndexPolicy, &dimension.Sensitive,
+			&dimension.MemberValueCount, &dimension.VectorizedMemberCount,
+			&dimension.MemberValues,
+		); err != nil {
+			dimensionRows.Close()
+			return nil, err
+		}
+		dimension.ValuesTruncated = dimension.MemberValueCount > len(dimension.MemberValues)
+		if index, ok := byVersion[versionID]; ok {
+			items[index].Dimensions = append(items[index].Dimensions, dimension)
+		}
+	}
+	if err := dimensionRows.Err(); err != nil {
+		dimensionRows.Close()
+		return nil, err
+	}
+	dimensionRows.Close()
+
+	for index := range items {
+		sort.Slice(items[index].Metrics, func(left, right int) bool {
+			if items[index].Metrics[left].Code != items[index].Metrics[right].Code {
+				return items[index].Metrics[left].Code < items[index].Metrics[right].Code
+			}
+			return items[index].Metrics[left].Source < items[index].Metrics[right].Source
+		})
+		document := struct {
+			Domain           string                    `json:"domain"`
+			DatasetVersionID string                    `json:"datasetVersionId"`
+			Metrics          []IdentificationMetric    `json:"metrics"`
+			Dimensions       []IdentificationDimension `json:"dimensions"`
+			Retrieval        []string                  `json:"retrieval"`
+		}{
+			Domain: items[index].Domain, DatasetVersionID: items[index].DatasetVersionID,
+			Metrics: items[index].Metrics, Dimensions: items[index].Dimensions,
+			Retrieval: []string{
+				"DOMAIN_PARTITION", "METRIC_VECTOR", "DIMENSION_MEMBER_INVERTED",
+			},
+		}
+		raw, marshalErr := json.Marshal(document)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		items[index].IndexDocument = raw
+	}
+	return items, nil
+}
 
 // LoadMetricSemanticContext returns reviewed catalog metadata for the exact physical
 // tables and projected columns used by a dataset. It deliberately excludes samples,
@@ -126,6 +497,9 @@ func (s *PostgresStore) EnqueueDatasetMetricExtractionTx(
 ) error {
 	if tenantID == "" || version.Status != "PUBLISHED" || version.DatasetID == "" || version.ID == "" || version.DSLHash == "" {
 		return ErrInvalidRequest
+	}
+	if version.Layer == dataset.LayerDWS || version.Layer == dataset.LayerADS {
+		return nil
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO platform.metric_extraction_jobs(
 		tenant_id,dataset_id,dataset_version_id,dsl_hash,requested_by,extractor_version,prepared_result
@@ -439,18 +813,33 @@ const candidateSemanticJoin = ` LEFT JOIN platform.metric_semantic_documents AS 
 func (s *PostgresStore) List(ctx context.Context, tenantID string, filter ListFilter) (items []Candidate, total int, err error) {
 	items = []Candidate{}
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.metric_candidates
-			WHERE ($1='' OR status=$1) AND ($2='' OR dataset_id::text=$2)
-			  AND proposed_definition#>>'{metric,type}' IN ('DERIVED','RATIO')
-			  AND NOT(status='BLOCKED' AND block_reasons &&
+		if err := tx.QueryRow(ctx, `SELECT count(*)
+			FROM platform.metric_candidates AS candidate
+			JOIN platform.metric_extraction_jobs AS job
+			  ON job.tenant_id=candidate.tenant_id AND job.id=candidate.job_id
+			JOIN platform.dataset_versions AS version
+			  ON version.tenant_id=candidate.tenant_id
+			 AND version.id=candidate.dataset_version_id
+			WHERE ($1='' OR candidate.status=$1)
+			  AND ($2='' OR candidate.dataset_id::text=$2)
+			  AND (version.layer IN ('DIM','DWD')
+			    OR job.extractor_version='metric-candidate-manual-v1')
+			  AND NOT(candidate.status='BLOCKED' AND candidate.block_reasons &&
 			    ARRAY['AGGREGATED_DATASET_UNSUPPORTED','PRE_AGGREGATION_UNSUPPORTED',
 			          'AGGREGATE_EXPRESSION_UNSUPPORTED']::text[])`,
 			filter.Status, filter.DatasetID).Scan(&total); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT `+candidateSelect+` FROM platform.metric_candidates AS candidate`+candidateSemanticJoin+`
+		rows, err := tx.Query(ctx, `SELECT `+candidateSelect+`
+			FROM platform.metric_candidates AS candidate
+			JOIN platform.metric_extraction_jobs AS job
+			  ON job.tenant_id=candidate.tenant_id AND job.id=candidate.job_id
+			JOIN platform.dataset_versions AS version
+			  ON version.tenant_id=candidate.tenant_id
+			 AND version.id=candidate.dataset_version_id`+candidateSemanticJoin+`
 			WHERE ($1='' OR candidate.status=$1) AND ($2='' OR candidate.dataset_id::text=$2)
-			  AND candidate.proposed_definition#>>'{metric,type}' IN ('DERIVED','RATIO')
+			  AND (version.layer IN ('DIM','DWD')
+			    OR job.extractor_version='metric-candidate-manual-v1')
 			  AND NOT(candidate.status='BLOCKED' AND candidate.block_reasons &&
 			    ARRAY['AGGREGATED_DATASET_UNSUPPORTED','PRE_AGGREGATION_UNSUPPORTED',
 			          'AGGREGATE_EXPRESSION_UNSUPPORTED']::text[])

@@ -126,7 +126,7 @@ func (s *PostgresStore) CreateRefreshJob(
 				  AND materialization.dataset_version_id=$2::uuid
 				  AND materialization.layer='DWS'
 				  AND materialization.status='ACTIVE'
-				FOR SHARE OF materialization,profile`,
+				FOR SHARE OF materialization`,
 				datasetID, datasetVersionID, fieldID).Scan(&id)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrConflict

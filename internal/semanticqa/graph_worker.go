@@ -24,12 +24,13 @@ func (worker *GraphWorker) TenantIDs(ctx context.Context) ([]string, error) {
 	if worker == nil || worker.store == nil || worker.store.pool == nil {
 		return nil, ErrInvalidRequest
 	}
-	rows, err := worker.store.pool.Query(ctx, `SELECT setting.tenant_id::text
-		FROM platform.semantic_qa_settings AS setting
-		JOIN platform.tenants AS tenant ON tenant.id=setting.tenant_id
-		WHERE setting.enabled AND setting.graph_projection_enabled
-		  AND tenant.status='ACTIVE' AND tenant.deleted_at IS NULL
-		ORDER BY setting.tenant_id`)
+	// 租户枚举发生在进入具体租户事务之前，不能直接读取强制 RLS 的
+	// semantic_qa_settings，否则 current_tenant_id 尚未设置时永远返回空集。
+	// claim 会在 tenant-scoped 事务内再次校验语义问答与图投影开关。
+	rows, err := worker.store.pool.Query(ctx, `SELECT tenant.id::text
+		FROM platform.tenants AS tenant
+		WHERE tenant.status='ACTIVE' AND tenant.deleted_at IS NULL
+		ORDER BY tenant.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -231,15 +232,38 @@ func insertGraphNodes(ctx context.Context, tx pgx.Tx, generationID string) error
 			tenant_id,generation_id,node_key,node_type,subject_ref,label,
 			normalized_label,payload_hash,payload_json
 		)
+		WITH RECURSIVE lineage AS (
+		  SELECT version.tenant_id,version.id
+		  FROM platform.dataset_versions AS version
+		  JOIN platform.datasets AS dataset
+		    ON dataset.tenant_id=version.tenant_id
+		   AND dataset.id=version.dataset_id
+		   AND dataset.current_published_version_id=version.id
+		  WHERE version.status='PUBLISHED'
+		    AND dataset.status='PUBLISHED' AND dataset.deleted_at IS NULL
+		  UNION
+		  SELECT dependency.tenant_id,
+		    dependency.source_id::uuid
+		  FROM lineage
+		  JOIN platform.dataset_dependencies AS dependency
+		    ON dependency.tenant_id=lineage.tenant_id
+		   AND dependency.dataset_version_id=lineage.id
+		   AND dependency.source_type='DATASET_VERSION'
+		  JOIN platform.dataset_versions AS upstream
+		    ON upstream.tenant_id=dependency.tenant_id
+		   AND upstream.id=dependency.source_id::uuid
+		   AND upstream.status='PUBLISHED'
+		)
 		SELECT version.tenant_id,$1::uuid,'dataset_version:'||version.id::text,
 			'DATASET_VERSION',version.id::text,
 			dataset.name||' ['||version.layer||']',
 			lower(btrim(dataset.name||' '||dataset.code::text||' '||version.layer)),
 			encode(digest(payload.value::text,'sha256'),'hex'),payload.value
-		FROM platform.dataset_versions AS version
+		FROM lineage
+		JOIN platform.dataset_versions AS version
+		  ON version.tenant_id=lineage.tenant_id AND version.id=lineage.id
 		JOIN platform.datasets AS dataset
 		  ON dataset.tenant_id=version.tenant_id AND dataset.id=version.dataset_id
-		 AND dataset.current_published_version_id=version.id
 		CROSS JOIN LATERAL (
 		  SELECT jsonb_build_object(
 		    'datasetId',dataset.id::text,'datasetVersionId',version.id::text,
@@ -247,8 +271,7 @@ func insertGraphNodes(ctx context.Context, tx pgx.Tx, generationID string) error
 		    'schemaHash',version.schema_hash
 		  ) AS value
 		) AS payload
-		WHERE version.status='PUBLISHED' AND dataset.status='PUBLISHED'
-		  AND dataset.deleted_at IS NULL`,
+		WHERE version.status='PUBLISHED'`,
 		`INSERT INTO platform.semantic_graph_nodes(
 			tenant_id,generation_id,node_key,node_type,subject_ref,label,
 			normalized_label,payload_hash,payload_json
@@ -423,9 +446,12 @@ func insertGraphNodes(ctx context.Context, tx pgx.Tx, generationID string) error
 			END)),
 			encode(digest(payload.value::text,'sha256'),'hex'),payload.value
 		FROM platform.dataset_dependencies AS dependency
-		JOIN platform.datasets AS dataset
-		  ON dataset.tenant_id=dependency.tenant_id
-		 AND dataset.current_published_version_id=dependency.dataset_version_id
+		JOIN platform.semantic_graph_nodes AS version_node
+		  ON version_node.tenant_id=dependency.tenant_id
+		 AND version_node.generation_id=$1::uuid
+		 AND version_node.node_key=
+		   'dataset_version:'||dependency.dataset_version_id::text
+		 AND version_node.node_type='DATASET_VERSION'
 		LEFT JOIN platform.metadata_tables AS metadata
 		  ON dependency.source_type='TABLE'
 		 AND metadata.tenant_id=dependency.tenant_id
@@ -444,8 +470,7 @@ func insertGraphNodes(ctx context.Context, tx pgx.Tx, generationID string) error
 		    'fileName',file_version.filename
 		  ) AS value
 		) AS payload
-		WHERE dependency.source_type IN ('TABLE','FILE_VERSION')
-		  AND dataset.status='PUBLISHED' AND dataset.deleted_at IS NULL`,
+		WHERE dependency.source_type IN ('TABLE','FILE_VERSION')`,
 	}
 	for _, query := range queries {
 		if _, err := tx.Exec(ctx, query, generationID); err != nil {

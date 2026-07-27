@@ -139,36 +139,105 @@ WITH tasks AS (
 
   UNION ALL
   SELECT
-    'DWD_MODELING',job.id::text,dataset.name::text,
+    CASE stage_job.stage
+      WHEN 'DOMAIN_CLASSIFICATION' THEN 'ODS_DOMAIN_CLASSIFICATION'
+      WHEN 'DIMENSION_MODELING' THEN 'DIM_MODELING'
+      ELSE 'DWD_FACT_MODELING'
+    END,
+    stage_job.id::text,
     concat(
-      dataset.code::text,' · ',
-      COALESCE(NULLIF(job.domain_key,''),'待识别领域'),' · LLM 分层建模'
+      COALESCE(
+        NULLIF(
+          btrim(
+            replace(
+              replace(workflow.domain_key,'领域:',''),
+              '领域：',''
+            )
+          ),
+          ''
+        ),
+        dataset.name
+      ),
+      CASE stage_job.stage
+        WHEN 'DOMAIN_CLASSIFICATION' THEN '领域结构分析'
+        WHEN 'DIMENSION_MODELING' THEN '领域维度设计'
+        ELSE '领域事实落地'
+      END
     )::text,
-    job.status::text,'DATASET',job.trigger_dataset_id::text,
-    (job.generated_count+job.updated_count+job.skipped_count)::bigint,NULL::bigint,
-    job.attempt,job.max_attempts,job.error_code::text,job.error_message::text,
-    job.created_at,job.started_at,job.updated_at,job.completed_at
-  FROM platform.dwd_modeling_jobs AS job
+    concat(
+      '触发源：',dataset.name,' · ',dataset.code::text,
+      CASE
+        WHEN jsonb_typeof(
+          COALESCE(
+            stage_job.result_json#>'{classificationSummary,factTableCount}',
+            classification.result_json#>'{classificationSummary,factTableCount}'
+          )
+        )='number'
+         AND jsonb_typeof(
+          COALESCE(
+            stage_job.result_json#>'{classificationSummary,dimensionTableCount}',
+            classification.result_json#>'{classificationSummary,dimensionTableCount}'
+          )
+        )='number'
+        THEN concat(
+          ' · 规划事实',
+          COALESCE(
+            stage_job.result_json#>>'{classificationSummary,factTableCount}',
+            classification.result_json#>>'{classificationSummary,factTableCount}'
+          ),
+          '张 / 维度',
+          COALESCE(
+            stage_job.result_json#>>'{classificationSummary,dimensionTableCount}',
+            classification.result_json#>>'{classificationSummary,dimensionTableCount}'
+          ),
+          '张'
+        )
+        ELSE ''
+      END
+    )::text,
+    stage_job.status::text,'DATASET',workflow.trigger_dataset_id::text,
+    (stage_job.generated_count+stage_job.updated_count+
+      stage_job.skipped_count)::bigint,NULL::bigint,
+    stage_job.attempt,stage_job.max_attempts,
+    stage_job.error_code::text,stage_job.error_message::text,
+    stage_job.requested_at,stage_job.started_at,
+    stage_job.updated_at,stage_job.completed_at
+  FROM platform.dwd_modeling_stage_jobs AS stage_job
+  JOIN platform.dwd_modeling_jobs AS workflow
+    ON workflow.id=stage_job.workflow_job_id
+   AND workflow.tenant_id=stage_job.tenant_id
+  LEFT JOIN platform.dwd_modeling_stage_jobs AS classification
+    ON classification.workflow_job_id=stage_job.workflow_job_id
+   AND classification.tenant_id=stage_job.tenant_id
+   AND classification.stage='DOMAIN_CLASSIFICATION'
   JOIN platform.datasets AS dataset
-    ON dataset.id=job.trigger_dataset_id AND dataset.tenant_id=job.tenant_id
+    ON dataset.id=workflow.trigger_dataset_id
+   AND dataset.tenant_id=workflow.tenant_id
+  WHERE stage_job.manual_enabled
 
   UNION ALL
   SELECT
-    'DWS_MODELING',job.id::text,dataset.name::text,
-    concat(dataset.code::text,' · 市场通用 DWS 分析草稿')::text,
+    'DWS_MODELING',job.id::text,
+    concat(COALESCE(NULLIF(job.source_scope->>'subjectName',''),'综合分析'),'主题建模')::text,
+    concat(
+      jsonb_array_length(job.source_scope->'dwd'),' 张 DWD · ',
+      jsonb_array_length(job.source_scope->'dim'),' 张 DIM 规划上下文 · ',
+      job.group_key
+    )::text,
     job.status::text,'DATASET',job.source_dwd_dataset_id::text,
     (job.generated_count+job.updated_count+job.skipped_count)::bigint,
     CASE WHEN jsonb_array_length(job.selection_json)=0
       THEN NULL::bigint
       ELSE jsonb_array_length(job.selection_json)::bigint END,
-    job.attempt,job.max_attempts,job.error_code::text,''::text,
-    job.created_at,
-    CASE WHEN job.attempt>0 THEN job.created_at ELSE NULL::timestamptz END,
+    job.attempt,job.max_attempts,job.error_code::text,job.error_message::text,
+    job.requested_at,
+    CASE WHEN job.attempt>0 THEN job.requested_at ELSE NULL::timestamptz END,
     job.updated_at,job.completed_at
   FROM platform.dws_modeling_jobs AS job
   JOIN platform.datasets AS dataset
     ON dataset.id=job.source_dwd_dataset_id
    AND dataset.tenant_id=job.tenant_id
+  WHERE job.group_key NOT LIKE 'legacy:%'
 
   UNION ALL
   SELECT
@@ -276,12 +345,45 @@ func (store *PostgresStore) Cancel(
 	}
 	return database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
 		var cancelled bool
-		if err := tx.QueryRow(ctx, `
-			SELECT platform.cancel_background_task($1,$2::uuid,$3::uuid)
-		`, kind, taskID, actorID).Scan(&cancelled); err != nil {
+		query := `SELECT platform.cancel_background_task($1,$2::uuid,$3::uuid)`
+		args := []any{kind, taskID, actorID}
+		if warehouseStageKinds[kind] {
+			query = `SELECT platform.cancel_dwd_modeling_stage_task(
+				$1::uuid,$2::uuid
+			)`
+			args = []any{taskID, actorID}
+		}
+		if err := tx.QueryRow(ctx, query, args...).Scan(&cancelled); err != nil {
 			return err
 		}
 		if !cancelled {
+			return ErrNotActive
+		}
+		return nil
+	})
+}
+
+func (store *PostgresStore) Retry(
+	ctx context.Context,
+	tenantID, actorID, kind, taskID string,
+) error {
+	if store == nil || store.pool == nil {
+		return ErrInvalidRequest
+	}
+	return database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
+		var retried bool
+		query := `SELECT platform.retry_background_task($1,$2::uuid,$3::uuid)`
+		args := []any{kind, taskID, actorID}
+		if warehouseStageKinds[kind] {
+			query = `SELECT platform.retry_dwd_modeling_stage_task(
+				$1::uuid,$2::uuid
+			)`
+			args = []any{taskID, actorID}
+		}
+		if err := tx.QueryRow(ctx, query, args...).Scan(&retried); err != nil {
+			return err
+		}
+		if !retried {
 			return ErrNotActive
 		}
 		return nil
@@ -330,6 +432,7 @@ func decorate(task *Task) {
 	if task.KindLabel == "" {
 		task.KindLabel = task.Kind
 	}
+	coalesced := task.ErrorCode == "DOMAIN_PLAN_COALESCED"
 	task.Status = normalizeStatus(task.SourceStatus, task.ErrorCode)
 	active := task.Status == "QUEUED" || task.Status == "RUNNING"
 	task.CanCancel = active && cancellableKinds[task.Kind]
@@ -337,6 +440,24 @@ func decorate(task *Task) {
 		task.CancelDisabledReason = "任务已经结束"
 	} else if !task.CanCancel {
 		task.CancelDisabledReason = "该任务当前不支持安全中止"
+	}
+	retryableTerminal := task.Status == "FAILED" || task.Status == "PARTIAL" ||
+		task.Status == "CANCELLED" || task.Status == "SKIPPED"
+	retryableBuild := task.Kind != "DATASET_BUILD" ||
+		task.ErrorCode == "TRUSTED_PLAN_INVALID"
+	task.CanRetry = retryableTerminal && retryableKinds[task.Kind] &&
+		retryableBuild && !coalesced
+	switch {
+	case coalesced:
+		task.RetryDisabledReason = "同领域方案已由代表任务统一完成，无需重试"
+	case active:
+		task.RetryDisabledReason = "任务仍在运行"
+	case !retryableTerminal:
+		task.RetryDisabledReason = "任务已成功结束，无需重试"
+	case !retryableBuild:
+		task.RetryDisabledReason = "该构建失败无法在原运行上安全重试"
+	case !retryableKinds[task.Kind]:
+		task.RetryDisabledReason = "该任务当前不支持安全重试"
 	}
 	if task.Total != nil && *task.Total > 0 && task.Processed != nil {
 		percent := int((*task.Processed * 100) / *task.Total)
@@ -358,6 +479,17 @@ func decorate(task *Task) {
 	}
 	if task.ProgressText == "" {
 		task.ProgressText = task.Status
+	}
+	if coalesced {
+		task.ErrorCode = ""
+		task.ErrorMessage = ""
+		task.ProgressText = "已合并到同领域代表任务"
+	}
+	if task.ErrorCode == "WAITING_DIM_PUBLICATION" ||
+		task.ErrorCode == "WAITING_ACTIVE_DWD_MATERIALIZATION" {
+		task.ProgressText = task.ErrorMessage
+		task.ErrorCode = ""
+		task.ErrorMessage = ""
 	}
 	task.Description = strings.TrimSpace(task.Description)
 }
@@ -397,7 +529,9 @@ var kindLabels = map[string]string{
 	"METRIC_CANDIDATE_PREPARATION":    "历史发布前指标准备",
 	"DIMENSION_MEMBER_REFRESH":        "维度值刷新",
 	"DIMENSION_PROFILE":               "DWS 维度画像",
-	"DWD_MODELING":                    "LLM DIM/DWD 分层建模",
+	"ODS_DOMAIN_CLASSIFICATION":       "领域分类",
+	"DIM_MODELING":                    "维度建模",
+	"DWD_FACT_MODELING":               "事实落地",
 	"DWS_MODELING":                    "LLM 市场通用 DWS 建模",
 	"DATASET_MATERIALIZATION_CLEANUP": "DIM/DWD/DWS/ADS 仓库物理表清理",
 }
@@ -411,7 +545,23 @@ var cancellableKinds = map[string]bool{
 	"METRIC_CANDIDATE_PREPARATION": true,
 	"DIMENSION_MEMBER_REFRESH":     true,
 	"DIMENSION_PROFILE":            true,
-	"DWD_MODELING":                 true,
+	"ODS_DOMAIN_CLASSIFICATION":    true,
+	"DIM_MODELING":                 true,
+	"DWD_FACT_MODELING":            true,
+}
+
+var retryableKinds = map[string]bool{
+	"ODS_DOMAIN_CLASSIFICATION": true,
+	"DIM_MODELING":              true,
+	"DWD_FACT_MODELING":         true,
+	"DWS_MODELING":              true,
+	"DATASET_BUILD":             true,
+}
+
+var warehouseStageKinds = map[string]bool{
+	"ODS_DOMAIN_CLASSIFICATION": true,
+	"DIM_MODELING":              true,
+	"DWD_FACT_MODELING":         true,
 }
 
 var statusLabels = map[string]string{

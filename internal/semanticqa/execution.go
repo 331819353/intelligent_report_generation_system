@@ -28,6 +28,7 @@ func (store *PostgresStore) ResolveQueryContext(
 ) (slots QuerySlots, err error) {
 	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
 		queryErr := tx.QueryRow(ctx, `SELECT query_plan.intent,
+				platform.dataset_version_effective_domain(dataset_version.id),
 				metric.code::text,COALESCE(dimension.code::text,'')
 			FROM platform.semantic_query_plans AS query_plan
 			JOIN platform.metrics AS metric
@@ -38,9 +39,12 @@ func (store *PostgresStore) ResolveQueryContext(
 			  ON dimension.tenant_id=query_plan.tenant_id
 			 AND dimension.id=query_plan.selected_dimension_id
 			 AND dimension.status='PUBLISHED'
+			JOIN platform.dataset_versions AS dataset_version
+			  ON dataset_version.tenant_id=query_plan.tenant_id
+			 AND dataset_version.id=query_plan.selected_dataset_version_id
 			WHERE query_plan.id=$1::uuid
 			  AND query_plan.status IN ('READY','EXECUTED')`, id).
-			Scan(&slots.Intent, &slots.MetricCode, &slots.DimensionCode)
+			Scan(&slots.Intent, &slots.Domain, &slots.MetricCode, &slots.DimensionCode)
 		if errors.Is(queryErr, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -353,10 +357,11 @@ func loadQueryPlan(
 	plan *QueryPlan,
 ) error {
 	var createdAt time.Time
+	var normalizedRequest []byte
 	err := tx.QueryRow(ctx, `SELECT query_plan.id::text,
 			query_plan.graph_generation_id::text,generation.generation,
 			query_plan.question_hash,query_plan.intent,query_plan.status,
-			query_plan.confidence::float8,
+			query_plan.confidence::float8,query_plan.normalized_request_json,
 			COALESCE(query_plan.selected_metric_id::text,''),
 			COALESCE(query_plan.selected_metric_version_id::text,''),
 			COALESCE(query_plan.selected_dimension_id::text,''),
@@ -373,6 +378,7 @@ func loadQueryPlan(
 		WHERE query_plan.id=$1::uuid`, id).Scan(
 		&plan.ID, &plan.GraphGenerationID, &plan.GraphGeneration,
 		&plan.QuestionHash, &plan.Intent, &plan.Status, &plan.Confidence,
+		&normalizedRequest,
 		&plan.SelectedMetricID, &plan.SelectedMetricVersionID,
 		&plan.SelectedDimensionID, &plan.SelectedDatasetVersionID,
 		&plan.SelectedMaterializationID, &plan.PathHash, &plan.FailureCode,
@@ -387,6 +393,18 @@ func loadQueryPlan(
 	}
 	plan.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 	plan.Evidence = []QueryEvidence{}
+	plan.Resolution = []QueryResolutionStep{}
+	var normalized struct {
+		Resolution []QueryResolutionStep  `json:"resolution"`
+		Conditions QueryConditionDocument `json:"conditions"`
+	}
+	if err := json.Unmarshal(normalizedRequest, &normalized); err != nil {
+		return ErrUnprovenPath
+	}
+	if normalized.Resolution != nil {
+		plan.Resolution = normalized.Resolution
+	}
+	plan.Conditions = normalized.Conditions
 	rows, err := tx.Query(ctx, `SELECT evidence.evidence_index,
 			evidence.node_key,evidence.relation_type,evidence.subject_type,
 			evidence.subject_ref,

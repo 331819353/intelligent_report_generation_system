@@ -34,6 +34,16 @@
         "code": { "$ref": "#/$defs/identifier" },
         "name": { "type": "string", "minLength": 1, "maxLength": 200 },
         "description": { "type": "string", "maxLength": 2000 },
+        "domain": {
+          "description": "数据集所属业务领域，作为版本化治理信息保存",
+          "type": "string",
+          "maxLength": 128
+        },
+        "subject": {
+          "description": "数据集所属分析或业务主题，作为版本化治理信息保存",
+          "type": "string",
+          "maxLength": 128
+        },
         "type": { "enum": ["SINGLE_SOURCE", "CROSS_SOURCE"] },
         "layer": {
           "description": "数仓加工层级；历史 DSL 可省略并由服务端确定性推断",

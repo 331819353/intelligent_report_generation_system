@@ -197,6 +197,31 @@ func TestMetricSourceEnvelopeAllowsExactParameterizedTimeWindow(t *testing.T) {
 	}
 }
 
+func TestMetricSourceEnvelopeAllowsDetachedWholeDatasetContracts(t *testing.T) {
+	original := metricSingleSourceDocument(t)
+	original.Dataset.Layer = dataset.LayerDWS
+	original.Dataset.SemanticContractVersion = "1.0"
+	original.AnalysisContract = &dataset.AnalysisContract{
+		Intent: "TREND", InputMode: "SINGLE_FACT",
+		CommonGrainFields:   []string{"region"},
+		ConformedDimensions: []string{"region"},
+		Measures: []dataset.AnalysisMeasureContract{{
+			Field: "revenue", SourceNodeIDs: []string{"orders"},
+			Aggregation: "SUM", Additivity: "ADDITIVE",
+		}},
+	}
+	derived := derivedMetricDocument(t, original)
+	derived.Dataset.SemanticContractVersion = ""
+	derived.AnalysisContract = nil
+	if !sameMetricSourceEnvelope(original, derived, metric.QueryCandidate{}) {
+		t.Fatal("detaching whole-dataset semantic contracts must preserve the source envelope")
+	}
+	derived.Nodes[0].Projection = append(derived.Nodes[0].Projection, "secret")
+	if sameMetricSourceEnvelope(original, derived, metric.QueryCandidate{}) {
+		t.Fatal("detached contracts must not allow expanding the source projection")
+	}
+}
+
 func TestPreviewMetricFailsClosedForUnsupportedPolicyBoundary(t *testing.T) {
 	singleSource := metricSingleSourceDocument(t)
 	tests := []struct {
@@ -456,6 +481,72 @@ func TestPreviewDWSMetricRejectsNonDecomposableMaterializedMeasure(t *testing.T)
 		store.resolveMaterializedCalls != 0 || store.run.ID != "" {
 		t.Fatalf("error=%v store=%#v", err, store)
 	}
+}
+
+func TestMaterializedMetricRewritesPreAggregatedMeasureWithoutNestedAggregate(t *testing.T) {
+	originalField := dataset.Field{
+		ID: "field_revenue", Code: "revenue", Name: "收入",
+		Role: "MEASURE", CanonicalType: "DECIMAL",
+		Expression: dataset.Expression{
+			Type: "FIELD_REF", NodeID: "fact_orders", Field: "revenue",
+		},
+	}
+	argument := originalField.Expression
+	rewritten, err := rewriteMaterializedExpression(
+		dataset.Expression{
+			Type: "AGGREGATE", Function: "SUM", Argument: &argument,
+		},
+		map[string]materializedFieldReplacement{
+			mustExpressionKey(t, originalField.Expression): {
+				field: originalField, rollupFunction: "SUM",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rewritten.Type != "AGGREGATE" ||
+		rewritten.Function != "SUM" ||
+		rewritten.Argument == nil ||
+		rewritten.Argument.Type != "FIELD_REF" ||
+		rewritten.Argument.NodeID != materializedMetricNodeID ||
+		rewritten.Argument.Field != "revenue" ||
+		rewritten.Argument.Argument != nil {
+		t.Fatalf("rewritten pre-aggregated metric=%#v", rewritten)
+	}
+}
+
+func TestMaterializedMetricRejectsWrongPreAggregationRollup(t *testing.T) {
+	originalField := dataset.Field{
+		ID: "field_minimum", Code: "minimum_value", Name: "最小值",
+		Role: "MEASURE", CanonicalType: "DECIMAL",
+		Expression: dataset.Expression{
+			Type: "FIELD_REF", NodeID: "fact_orders", Field: "minimum_value",
+		},
+	}
+	argument := originalField.Expression
+	_, err := rewriteMaterializedExpression(
+		dataset.Expression{
+			Type: "AGGREGATE", Function: "SUM", Argument: &argument,
+		},
+		map[string]materializedFieldReplacement{
+			mustExpressionKey(t, originalField.Expression): {
+				field: originalField, rollupFunction: "MIN",
+			},
+		},
+	)
+	if err == nil {
+		t.Fatal("SUM must not roll up a MIN pre-aggregation")
+	}
+}
+
+func mustExpressionKey(t *testing.T, expression dataset.Expression) string {
+	t.Helper()
+	key, err := expressionKey(expression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
 }
 
 func metricPreviewRuntimeFixture(t *testing.T, document dataset.Document, resolved ResolvedPlan, policies PolicyStore, connector QueryConnector) (*Service, *fakeRuntimeStore) {

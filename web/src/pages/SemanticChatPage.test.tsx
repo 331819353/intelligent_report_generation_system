@@ -49,7 +49,8 @@ test('keeps a verified plan as context for the next turn', async () => {
   const composer = screen.getByLabelText('输入分析问题')
   await userEvent.type(composer, '本月销售额是多少？')
   await userEvent.click(screen.getByRole('button', { name: '发送问题' }))
-  expect(await screen.findByText('查询结果：region为 华东，sales_amount为 128,000。')).toBeInTheDocument()
+  expect(await screen.findByText('查询结果：region为 华东，销售额为 128,000。')).toBeInTheDocument()
+  expect(screen.getByRole('columnheader', { name: '销售额' })).toBeInTheDocument()
 
   await userEvent.type(composer, '那上个月呢？')
   await userEvent.click(screen.getByRole('button', { name: '发送问题' }))
@@ -78,6 +79,12 @@ function plan(index: number) {
     selectedDatasetVersionId: 'dataset-version-1',
     selectedMaterializationId: 'materialization-1',
     pathHash: 'b'.repeat(64),
+    resolution: [
+      { stage: 'INTENT_RECOGNITION', status: 'RESOLVED', selectedCode: 'METRIC' },
+      { stage: 'METRIC_CATALOG', status: 'RESOLVED', candidateCount: 2, selectedCode: 'sales_amount' },
+      { stage: 'DIMENSION_MEMBER', status: 'RESOLVED', candidateCount: 1, selectedCode: 'region' },
+      { stage: 'DATASET_LOCK', status: 'RESOLVED', candidateCount: 1, selectedCode: 'dataset-version-1' },
+    ],
     evidence: [{
       index: 0,
       nodeKey: 'metric:sales_amount',

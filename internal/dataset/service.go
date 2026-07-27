@@ -41,8 +41,9 @@ type PublicationValidator interface {
 
 // Service 编排 DSL 校验、草稿持久化、发布试跑和不可变版本管理。
 type Service struct {
-	store     Store
-	validator PublicationValidator
+	store      Store
+	validator  PublicationValidator
+	llmTrigger LLMTriggerStore
 }
 
 // NewService 创建数据集领域服务。

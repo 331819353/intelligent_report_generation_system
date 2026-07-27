@@ -12,13 +12,15 @@ var (
 	ErrPublicationRequestNotFound   = errors.New("dataset publication request not found")
 	ErrPublicationRequestConflict   = errors.New("dataset publication request version conflict")
 	ErrPublicationRequestNotPending = errors.New("dataset publication request is not pending")
+	ErrPublicationRequestCancelled  = errors.New("dataset publication request was cancelled after draft change")
 	ErrPublicationCandidatesFailed  = errors.New("dataset publication metric candidate generation failed")
 )
 
 const (
-	PublicationRequestPending  = "PENDING"
-	PublicationRequestApproved = "APPROVED"
-	PublicationRequestRejected = "REJECTED"
+	PublicationRequestPending   = "PENDING"
+	PublicationRequestApproved  = "APPROVED"
+	PublicationRequestRejected  = "REJECTED"
+	PublicationRequestCancelled = "CANCELLED"
 )
 
 // PublicationRequest freezes one saved draft revision for human review. Validation parameters
@@ -116,6 +118,7 @@ type PublicationCandidatePreparation struct {
 // PublicationApprovalStore keeps request state and the final publication commit in one
 // transaction. ApproveAndPublish is the only approval path allowed to move the published pointer.
 type PublicationApprovalStore interface {
+	ValidateDWDPublicationDependencies(context.Context, string, string, string) error
 	SubmitPublicationRequest(context.Context, string, string, string, SubmitPublicationPlan) (PublicationRequest, error)
 	ListPublicationRequests(context.Context, string, string, int, int) ([]PublicationRequest, int, error)
 	GetPublicationRequest(context.Context, string, string, string) (PublicationRequest, error)
@@ -164,6 +167,11 @@ func (s *PublicationApprovalService) Submit(
 		current.DraftRecordVersion != input.ExpectedDraftRecordVersion || current.DSLHash != input.ExpectedDSLHash {
 		return PublicationRequest{}, ErrConflict
 	}
+	if err := s.store.ValidateDWDPublicationDependencies(
+		ctx, tenantID, datasetID, input.DraftVersionID,
+	); err != nil {
+		return PublicationRequest{}, err
+	}
 	return s.store.SubmitPublicationRequest(ctx, tenantID, actorID, datasetID, SubmitPublicationPlan{
 		Input: input, ExpectedPlanHash: current.PlanHash, ParametersJSON: parametersJSON,
 	})
@@ -198,11 +206,27 @@ func (s *PublicationApprovalService) Approve(
 		version, versionErr := s.datasets.GetVersion(ctx, tenantID, datasetID, request.PublishedVersionID)
 		return PublicationApprovalResult{Request: request, PublishedVersion: version}, versionErr
 	}
+	if request.Status == PublicationRequestCancelled {
+		return PublicationApprovalResult{}, ErrPublicationRequestCancelled
+	}
 	if request.Status != PublicationRequestPending {
 		return PublicationApprovalResult{}, ErrPublicationRequestNotPending
 	}
 	if request.Version != input.ExpectedVersion {
 		return PublicationApprovalResult{}, ErrPublicationRequestConflict
+	}
+	if err := s.store.ValidateDWDPublicationDependencies(
+		ctx, tenantID, datasetID, request.DraftVersionID,
+	); err != nil {
+		if errors.Is(err, ErrConflict) {
+			current, getErr := s.store.GetPublicationRequest(
+				ctx, tenantID, datasetID, requestID,
+			)
+			if getErr == nil && current.Status == PublicationRequestCancelled {
+				return PublicationApprovalResult{}, ErrPublicationRequestCancelled
+			}
+		}
+		return PublicationApprovalResult{}, err
 	}
 	publishInput := PublishInput{
 		DraftVersionID: request.DraftVersionID, ExpectedVersion: request.ExpectedDatasetVersion,
@@ -211,6 +235,14 @@ func (s *PublicationApprovalService) Approve(
 	}
 	plan, err := s.datasets.preparePublication(ctx, tenantID, actorID, datasetID, request.ID, publishInput)
 	if err != nil {
+		if errors.Is(err, ErrConflict) {
+			current, getErr := s.store.GetPublicationRequest(
+				ctx, tenantID, datasetID, requestID,
+			)
+			if getErr == nil && current.Status == PublicationRequestCancelled {
+				return PublicationApprovalResult{}, ErrPublicationRequestCancelled
+			}
+		}
 		return PublicationApprovalResult{}, err
 	}
 	plan.ReservedPublishedVersionID = request.ReservedPublishedVersionID

@@ -4,10 +4,84 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"intelligent-report-generation-system/internal/platform/database"
 )
+
+func (s *PostgresStore) ValidateDWDPublicationDependencies(
+	ctx context.Context,
+	tenantID, datasetID, draftVersionID string,
+) (err error) {
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		return validateDWDPublicationDependenciesTx(
+			ctx, tx, datasetID, draftVersionID,
+		)
+	})
+	return err
+}
+
+func validateDWDPublicationDependenciesTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	datasetID, draftVersionID string,
+) error {
+	var layer string
+	err := tx.QueryRow(ctx, `SELECT version.layer
+		FROM platform.dataset_versions AS version
+		JOIN platform.datasets AS dataset
+		  ON dataset.tenant_id=version.tenant_id
+		 AND dataset.id=version.dataset_id
+		 AND dataset.current_draft_version_id=version.id
+		WHERE dataset.id::text=$1
+		  AND version.id::text=$2
+		  AND version.status='DRAFT'
+		  AND dataset.deleted_at IS NULL
+		FOR SHARE OF dataset,version`,
+		datasetID, draftVersionID,
+	).Scan(&layer)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrConflict
+	}
+	if err != nil || layer != string(LayerDWD) {
+		return err
+	}
+
+	var unavailable int
+	err = tx.QueryRow(ctx, `SELECT count(*)
+		FROM platform.dataset_dependencies AS dependency
+		JOIN platform.dataset_versions AS dimension_version
+		  ON dimension_version.tenant_id=dependency.tenant_id
+		 AND dimension_version.id::text=dependency.source_id
+		JOIN platform.datasets AS dimension
+		  ON dimension.tenant_id=dimension_version.tenant_id
+		 AND dimension.id=dimension_version.dataset_id
+		WHERE dependency.dataset_version_id::text=$1
+		  AND dependency.source_type='DATASET_VERSION'
+		  AND dimension_version.layer='DIM'
+		  AND (
+		    dimension_version.status<>'PUBLISHED'
+		    OR dimension.status<>'PUBLISHED'
+		    OR dimension.deleted_at IS NOT NULL
+		    OR dimension.current_published_version_id IS DISTINCT FROM
+		       dimension_version.id
+		  )`, draftVersionID).Scan(&unavailable)
+	if err != nil {
+		return err
+	}
+	if unavailable == 0 {
+		return nil
+	}
+	return &PublicationValidationError{Issues: []PublicationIssue{{
+		Path: "nodes",
+		Code: "DIM_PUBLICATION_REQUIRED",
+		Reason: fmt.Sprintf(
+			"DWD 依赖的 %d 张 DIM 尚未发布；请先完成 DIM 审批发布，再提交或批准 DWD",
+			unavailable,
+		),
+	}}}
+}
 
 const publicationRequestSelect = `request.id::text,request.dataset_id::text,request.status,request.version,
 	request.draft_version_id::text,request.expected_dataset_version,request.expected_draft_record_version,
@@ -60,6 +134,11 @@ func (s *PostgresStore) SubmitPublicationRequest(
 			draftRecordVersion != input.ExpectedDraftRecordVersion || dslHash != input.ExpectedDSLHash ||
 			planHash != plan.ExpectedPlanHash {
 			return ErrConflict
+		}
+		if err := validateDWDPublicationDependenciesTx(
+			ctx, tx, datasetID, draftVersionID,
+		); err != nil {
+			return err
 		}
 		var requestID string
 		err = tx.QueryRow(ctx, `INSERT INTO platform.dataset_publication_requests(
@@ -253,6 +332,9 @@ func (s *PostgresStore) ApproveAndPublish(
 			return scanPublicationRequest(tx.QueryRow(ctx, `SELECT `+publicationRequestSelect+`
 				FROM platform.dataset_publication_requests AS request WHERE request.id::text=$1`, requestID), &request)
 		}
+		if status == PublicationRequestCancelled {
+			return ErrPublicationRequestCancelled
+		}
 		if status != PublicationRequestPending {
 			return ErrPublicationRequestNotPending
 		}
@@ -264,6 +346,11 @@ func (s *PostgresStore) ApproveAndPublish(
 			plan.ExpectedDSLHash != dslHash || plan.Prepared.DSLHash != dslHash || plan.Prepared.PlanHash != planHash ||
 			plan.IdempotencyKey != requestID {
 			return ErrPublicationRequestConflict
+		}
+		if err := validateDWDPublicationDependenciesTx(
+			ctx, tx, datasetID, draftVersionID,
+		); err != nil {
+			return err
 		}
 		err = s.publishTx(
 			ctx, tx, tenantID, actorID, datasetID,
@@ -324,6 +411,9 @@ func (s *PostgresStore) RejectPublicationRequest(
 		if status == PublicationRequestRejected && priorReason == input.Reason {
 			return scanPublicationRequest(tx.QueryRow(ctx, `SELECT `+publicationRequestSelect+`
 				FROM platform.dataset_publication_requests AS request WHERE request.id::text=$1`, requestID), &request)
+		}
+		if status == PublicationRequestCancelled {
+			return ErrPublicationRequestCancelled
 		}
 		if status != PublicationRequestPending {
 			return ErrPublicationRequestNotPending

@@ -28,6 +28,8 @@ export type BackgroundTask = {
   maxAttempts: number
   canCancel: boolean
   cancelDisabledReason?: string
+  canRetry: boolean
+  retryDisabledReason?: string
   errorCode?: string
   errorMessage?: string
   createdAt: string
@@ -43,6 +45,28 @@ export type BackgroundTaskPage = {
 }
 
 export type BackgroundTaskView = 'ACTIVE' | 'RECENT' | 'ALL'
+export type BackgroundTaskFocus = 'DIM_MODELING' | 'DWD_MODELING' | 'DWS_MODELING'
+
+const backgroundTaskFocusKey = 'intelligent-report-background-task-focus'
+
+export function rememberBackgroundTaskFocus(focus: BackgroundTaskFocus) {
+  try {
+    sessionStorage.setItem(backgroundTaskFocusKey, focus)
+  } catch {
+    // 受限浏览器环境不支持 sessionStorage 时，任务中心仍可使用全局视图。
+  }
+}
+
+export function takeBackgroundTaskFocus(): BackgroundTaskFocus | null {
+  try {
+    const value = sessionStorage.getItem(backgroundTaskFocusKey)
+    sessionStorage.removeItem(backgroundTaskFocusKey)
+    return value === 'DIM_MODELING' || value === 'DWD_MODELING' ||
+      value === 'DWS_MODELING' ? value : null
+  } catch {
+    return null
+  }
+}
 
 export const backgroundTaskAPI = {
   list(view: BackgroundTaskView = 'ACTIVE', limit = 100) {
@@ -52,6 +76,12 @@ export const backgroundTaskAPI = {
   cancel(task: Pick<BackgroundTask, 'kind' | 'id'>) {
     return apiRequest<BackgroundTask>(
       `/v1/background-tasks/${encodeURIComponent(task.kind)}/${encodeURIComponent(task.id)}/cancel`,
+      { method: 'POST' },
+    )
+  },
+  retry(task: Pick<BackgroundTask, 'kind' | 'id'>) {
+    return apiRequest<BackgroundTask>(
+      `/v1/background-tasks/${encodeURIComponent(task.kind)}/${encodeURIComponent(task.id)}/retry`,
       { method: 'POST' },
     )
   },

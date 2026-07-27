@@ -80,12 +80,27 @@ function formatValue(value: unknown) {
   return String(value)
 }
 
+function resultColumnLabels(execution: SemanticQueryExecution) {
+  const labels = [...execution.result.columns]
+  const metricEvidence = execution.evidence.lineage.find(item =>
+    item.subjectType === 'METRIC' &&
+    item.subjectRef === execution.evidence.metricVersionId,
+  ) ?? execution.evidence.lineage.find(item => item.subjectType === 'METRIC')
+  if (metricEvidence?.label && labels.length > 0) {
+    // 指标派生计划始终把指标列放在请求维度之后；物理列编码只用于安全
+    // 执行，面向业务用户的答案和表头必须展示语义图中的已发布指标名。
+    labels[labels.length - 1] = metricEvidence.label
+  }
+  return labels
+}
+
 function buildAnswer(execution: SemanticQueryExecution) {
   const { result, comparison } = execution
   if (result.rowCount === 0 || result.rows.length === 0) return '在当前筛选条件与数据权限范围内没有查询到结果。'
   const first = result.rows[0] ?? []
+  const columns = resultColumnLabels(execution)
   let answer = result.rowCount === 1
-    ? `查询结果：${result.columns.slice(0, 4).map((column, index) => `${column}为 ${formatValue(first[index])}`).join('，')}。`
+    ? `查询结果：${columns.slice(0, 4).map((column, index) => `${column}为 ${formatValue(first[index])}`).join('，')}。`
     : `已查询到 ${result.rowCount} 条结果，按当前分析口径展示前 ${Math.min(result.rows.length, 100)} 条。`
   if (comparison?.baseline.rows.length) {
     const currentValue = first.find(value => typeof value === 'number')
@@ -132,6 +147,27 @@ function statusLabel(status?: string) {
     REJECTED: '路径被拒绝', FAILED: '执行失败',
   }
   return status ? labels[status] ?? status : '等待验证'
+}
+
+function resolutionStageLabel(stage: string) {
+  const labels: Record<string, string> = {
+    INTENT_RECOGNITION: '意图识别',
+    DOMAIN_CATALOG: '领域定位',
+    METRIC_CATALOG: '指标定位',
+    DIMENSION_MEMBER: '维值匹配',
+    DATASET_LOCK: '数据集锁定',
+  }
+  return labels[stage] ?? stage
+}
+
+function resolutionStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    RESOLVED: '已完成',
+    SKIPPED: '无需筛选',
+    AMBIGUOUS: '待澄清',
+    NOT_FOUND: '未找到',
+  }
+  return labels[status] ?? status
 }
 
 export function SemanticChatPage() {
@@ -370,8 +406,8 @@ export function SemanticChatPage() {
                   {message.execution && message.execution.result.rows.length > 0 && (
                     <div className="semantic-chat-result">
                       <table>
-                        <thead><tr>{message.execution.result.columns.map(column => <th key={column}>{column}</th>)}</tr></thead>
-                        <tbody>{message.execution.result.rows.slice(0, 10).map((row, rowIndex) => <tr key={rowIndex}>{message.execution?.result.columns.map((column, columnIndex) => <td key={`${column}-${columnIndex}`}>{formatValue(row[columnIndex])}</td>)}</tr>)}</tbody>
+                        <thead><tr>{resultColumnLabels(message.execution).map((column, columnIndex) => <th key={`${column}-${columnIndex}`}>{column}</th>)}</tr></thead>
+                        <tbody>{message.execution.result.rows.slice(0, 10).map((row, rowIndex) => <tr key={rowIndex}>{resultColumnLabels(message.execution!).map((column, columnIndex) => <td key={`${column}-${columnIndex}`}>{formatValue(row[columnIndex])}</td>)}</tr>)}</tbody>
                       </table>
                     </div>
                   )}
@@ -411,11 +447,13 @@ export function SemanticChatPage() {
             <header><strong>当前答案</strong><span>{selectedMessage?.errorCode ? '可信拒答' : statusLabel(selectedMessage?.plan?.status)}</span></header>
             {!selectedMessage ? <p className="semantic-chat-empty-quality">发送问题后，这里会展示逐项验证结果。</p> : <>
               <div className="semantic-chat-confidence"><span>检索路径置信度</span><strong>{selectedMessage.plan ? `${Math.round(selectedMessage.plan.confidence * 100)}%` : '—'}</strong></div>
+              {selectedMessage.plan?.resolution?.length ? <ol className="semantic-chat-resolution" aria-label="问答定位链路">{selectedMessage.plan.resolution.map((step, index) => <li className={step.status === 'RESOLVED' || step.status === 'SKIPPED' ? 'pass' : ''} key={`${step.stage}-${index}`}><span>{index + 1}</span><div><strong>{resolutionStageLabel(step.stage)}</strong><small>{resolutionStatusLabel(step.status)}{step.candidateCount ? ` · ${step.candidateCount} 个候选` : ''}</small></div></li>)}</ol> : null}
               <ul>
                 <li className={selectedMessage.execution ? 'pass' : ''}><Database size={16} /><span><strong>查询执行</strong><small>{selectedMessage.execution ? '受控查询已完成' : '未执行或执行失败'}</small></span>{selectedMessage.execution ? <CheckCircle /> : <WarningCircle />}</li>
                 <li className={selectedMessage.execution?.evidence.executionRevalidated ? 'pass' : ''}><ShieldCheck size={16} /><span><strong>权限与版本</strong><small>{selectedMessage.execution ? '运行时已重新校验' : '等待可执行计划'}</small></span>{selectedMessage.execution?.evidence.executionRevalidated ? <CheckCircle /> : <WarningCircle />}</li>
                 <li className={selectedMessage.execution?.evidence.compatibilityDecision === 'VERIFIED_NON_UNSAFE' ? 'pass' : ''}><Graph size={16} /><span><strong>维度兼容</strong><small>{selectedMessage.execution?.evidence.compatibilityDecision === 'VERIFIED_NON_UNSAFE' ? '已验证且无扇出风险' : '尚未通过验证'}</small></span>{selectedMessage.execution?.evidence.compatibilityDecision === 'VERIFIED_NON_UNSAFE' ? <CheckCircle /> : <WarningCircle />}</li>
               </ul>
+              {selectedMessage.plan?.conditions?.metricVersionId ? <details><summary>查看查询条件 JSON</summary><pre className="semantic-chat-condition-json">{JSON.stringify(selectedMessage.plan.conditions, null, 2)}</pre></details> : null}
               {selectedMessage.plan?.evidence.length ? <details><summary>查看证据链（{selectedMessage.plan.evidence.length}）</summary><ol>{selectedMessage.plan.evidence.map(item => <li key={`${item.index}-${item.nodeKey}`}><span>{item.label}</span><small>{item.subjectType} · {item.authority} · {Math.round(item.confidence * 100)}%</small></li>)}</ol></details> : null}
               <div className="semantic-chat-feedback"><span>这个答案准确吗？</span><div><button className={selectedMessage.feedback === 'ACCURATE' ? 'active positive' : ''} type="button" onClick={() => rateSelected('ACCURATE')}><ThumbsUp size={15} />准确</button><button className={selectedMessage.feedback === 'INACCURATE' ? 'active negative' : ''} type="button" onClick={() => rateSelected('INACCURATE')}><ThumbsDown size={15} />不准确</button></div></div>
             </>}

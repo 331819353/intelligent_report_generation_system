@@ -35,6 +35,7 @@ import {
   metricCandidateAPI,
   type MetricCandidate,
   type MetricCandidateStatus,
+  type MetricIdentificationDatasetIndex,
 } from '../lib/metric-candidates'
 
 const catalogPageSize = 200
@@ -192,6 +193,8 @@ export function MetricCatalogPage() {
   const [datasetId, setDatasetId] = useState('ALL')
   const [selectedCandidateIDs, setSelectedCandidateIDs] = useState<string[]>([])
   const [candidatePublishing, setCandidatePublishing] = useState(false)
+  const [identifying, setIdentifying] = useState(false)
+  const [identificationIndexes, setIdentificationIndexes] = useState<MetricIdentificationDatasetIndex[]>([])
   const [candidateNotice, setCandidateNotice] = useState('')
   const [selected, setSelected] = useState<MetricSummary | null>(null)
   const [detail, setDetail] = useState<MetricDetail | null>(null)
@@ -220,7 +223,9 @@ export function MetricCatalogPage() {
       if (datasetResult.status === 'fulfilled') setDatasets(datasetResult.value)
       if (candidateResult.status === 'fulfilled') {
         setCandidates(candidateResult.value)
-        setCandidateError('')
+        setCandidateError(current =>
+          current.startsWith('加载候选指标失败') ? '' : current
+        )
       } else {
         setCandidates([])
         setCandidateError(candidateResult.reason instanceof Error ? `加载候选指标失败：${candidateResult.reason.message}` : '加载候选指标失败')
@@ -334,6 +339,17 @@ export function MetricCatalogPage() {
   const publishableCandidates = useMemo(() => filteredCandidates.filter(candidate =>
     (candidate.status === 'READY' || candidate.status === 'NEEDS_REVIEW') && !candidate.blockReasons.length
   ), [filteredCandidates])
+  const identifiedDimensions = useMemo(() => {
+    const values = new Map<string, string>()
+    for (const candidate of candidates) {
+      for (const dimension of candidate.proposedDefinition.allowedDimensions ?? []) {
+        const key = dimension.fieldId || dimension.name
+        if (key && !values.has(key)) values.set(key, dimension.name || key)
+      }
+    }
+    return [...values.entries()].map(([fieldId, name]) => ({ fieldId, name }))
+      .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
+  }, [candidates])
   const counts = useMemo(() => ({
     published: displayMetrics.filter(metric => metric.status === 'PUBLISHED').length,
     draft: displayMetrics.filter(metric => metric.status === 'DRAFT').length,
@@ -422,7 +438,9 @@ export function MetricCatalogPage() {
         }, createMetricPublishIdempotencyKey())
         published++
       } catch (cause) {
-        failures.push(`${candidate.name}：${cause instanceof Error ? cause.message : '发布失败'}`)
+        failures.push(
+          `${candidate.name}：${cause instanceof Error ? cause.message : '发布失败'}（候选已接收时可点击“查看指标”重试）`,
+        )
       }
     }
     setSelectedCandidateIDs([])
@@ -435,6 +453,31 @@ export function MetricCatalogPage() {
     setReloadKey(value => value + 1)
   }
 
+  async function identifyMetricAssets() {
+    if (identifying) return
+    setIdentifying(true)
+    setCandidateError('')
+    setCandidateNotice('')
+    try {
+      const result = await metricCandidateAPI.identify()
+      setIdentificationIndexes(result.datasets)
+      setView('candidates')
+      setCandidateNotice(
+        `已检查 ${result.historicalMetricCount} 个历史指标和 ${result.existingCandidateCount} 个历史候选，` +
+        `本次覆盖 ${result.eligibleDatasetCount} 个当前数据集，提交 ${result.enqueuedJobCount} 个指标任务，` +
+        `并为 ${result.dimensionProfileCount} 个 DWS 建立维度画像。`,
+      )
+      setReloadKey(value => value + 1)
+      window.setTimeout(() => setReloadKey(value => value + 1), 1800)
+      window.setTimeout(() => setReloadKey(value => value + 1), 5000)
+    } catch (cause) {
+      setCandidateError(cause instanceof Error ? cause.message : '自动识别提交失败')
+      setView('candidates')
+    } finally {
+      setIdentifying(false)
+    }
+  }
+
   const selectedPublishableCount = selectedCandidateIDs.filter(id =>
     candidates.some(candidate => candidate.id === id &&
       (candidate.status === 'READY' || candidate.status === 'NEEDS_REVIEW') &&
@@ -445,7 +488,13 @@ export function MetricCatalogPage() {
     <AssetManagementTabs />
     <section className="metric-directory" aria-label="指标资产目录">
       <header className="metric-directory-summary">
-        <div><span className="eyebrow">按数据集组织</span><h2>一个数据集，一个指标展示区</h2><p>这里只展示派生指标和复合指标。原子指标与映射数据集保留为 DAG 内部构成，不进入展示中心。</p></div>
+        <div>
+          <span className="eyebrow">按数据集组织</span><h2>一个数据集，一个指标展示区</h2>
+          <p>这里只展示派生指标和复合指标。原子指标与映射数据集保留为 DAG 内部构成，不进入展示中心。</p>
+          <button className="metric-identify-button" type="button" disabled={identifying} onClick={() => void identifyMetricAssets()}>
+            <MagicWandIcon size={16} weight="bold" />{identifying ? '正在检查历史与元数据…' : '自动识别指标与维度'}
+          </button>
+        </div>
         <dl aria-label="指标目录统计">
           <div><dt>普通数据集</dt><dd>{ordinaryDatasets.length}</dd></div>
           <div><dt>展示指标</dt><dd>{displayMetrics.length}</dd></div>
@@ -476,6 +525,24 @@ export function MetricCatalogPage() {
       {view === 'datasets' ? <div className="metric-directory-resultbar"><div><strong>数据集指标展示区</strong><span>新建指标默认以所在数据集的当前发布 DAG 为基线</span></div><small>显示 {datasetSections.length} / {ordinaryDatasets.length} 个数据集</small></div> :
         <div className="metric-directory-resultbar metric-candidate-batchbar"><div><strong>待审批候选</strong><span>多选后将逐项创建指标、试算并正式发布</span></div><div className="metric-candidate-batch-actions"><button type="button" className="quiet-button" disabled={!publishableCandidates.length || candidatePublishing} onClick={toggleAllCandidates}>{publishableCandidates.length > 0 && publishableCandidates.every(candidate => selectedCandidateIDs.includes(candidate.id)) ? '取消全选' : '全选可发布项'}</button><button type="button" className="primary-button" disabled={!selectedPublishableCount || candidatePublishing} onClick={() => void publishSelectedCandidates()}>{candidatePublishing ? '正在批量发布…' : `发布选中指标（${selectedPublishableCount}）`}</button><small>显示 {filteredCandidates.length} / {candidates.length}</small></div></div>}
       {candidateNotice && view === 'candidates' && <div className="metric-directory-toast" role="status"><span>{candidateNotice}</span><button type="button" aria-label="关闭提示" onClick={() => setCandidateNotice('')}>×</button></div>}
+      {view === 'candidates' && <section className="metric-identification-summary" aria-label="自动识别维度清单">
+        <div><strong>领域混合索引</strong><span>{identificationIndexes.length ? `${identificationIndexes.length} 个 DWS/ADS 数据集` : `${candidates.length} 个指标候选 · ${identifiedDimensions.length} 个维度`}</span></div>
+        {identificationIndexes.length ? <div className="metric-index-datasets">
+          {identificationIndexes.map(index => <article key={index.datasetVersionId}>
+            <header><strong>{index.name}</strong><span>{index.layer} · 领域：{index.domain}</span></header>
+            <p>{index.metrics.length} 个指标 · {index.dimensions.length} 个维度 · 指标向量 + 维度成员倒排</p>
+            <div>{index.metrics.map(metric => <span key={`${metric.source}:${metric.code}`}>{metric.name} <small>{metric.vectorStatus === 'SUCCEEDED' ? '向量就绪' : '向量构建中'}</small></span>)}</div>
+            <dl>{index.dimensions.map(dimension => <div key={dimension.fieldId}>
+              <dt>{dimension.name}<small>{dimension.vectorizedMemberCount}/{dimension.memberValueCount} 向量</small></dt>
+              <dd>{dimension.sensitive || dimension.memberIndexPolicy !== 'FULL'
+                ? '受策略保护，不枚举成员值'
+                : dimension.memberValues.length
+                  ? `${dimension.memberValues.join('、')}${dimension.valuesTruncated ? `…（共 ${dimension.memberValueCount} 项）` : ''}`
+                  : '暂无已刷新的去重维度值'}</dd>
+            </div>)}</dl>
+          </article>)}
+        </div> : <div>{identifiedDimensions.length ? identifiedDimensions.map(item => <span key={item.fieldId} title={item.fieldId}>{item.name}</span>) : <small>点击“自动识别指标与维度”后，这里会按 DWS/ADS、领域展示指标、维度及安全可枚举的去重维度值。</small>}</div>}
+      </section>}
       {(view === 'datasets' ? error : candidateError) && <div className="metric-directory-error" role="alert"><span>{view === 'datasets' ? error : candidateError}</span><button type="button" onClick={() => setReloadKey(value => value + 1)}>重新加载</button></div>}
       {loading ? <div className="metric-directory-empty" role="status"><FunctionIcon size={34} /><strong>正在加载指标展示区…</strong></div> : view === 'datasets' ? datasetSections.length ? <div className="metric-dataset-zones">
         {datasetSections.map(({ dataset, metrics: datasetMetrics }) => <section className="metric-dataset-zone" key={dataset.id} aria-label={`${dataset.name}指标展示区`}>
@@ -510,7 +577,7 @@ export function MetricCatalogPage() {
               <div className="metric-asset-actions">{candidate.acceptedMetricId ? <button className="action-edit" type="button" onClick={() => navigate(`/metrics/${candidate.acceptedMetricId}/edit`)}>查看指标</button> : <span className="metric-candidate-state">{publishable ? '可加入批量发布' : candidate.blockReasons[0] || '不可发布'}</span>}</div>
             </article>
           })}
-        </div> : <div className="metric-directory-empty"><MagicWandIcon size={38} /><strong>{candidates.length ? '没有符合条件的候选指标' : '还没有候选指标'}</strong><p>{candidates.length ? '调整搜索词或筛选条件后再试。' : '数据集审批通过后会异步生成候选，完成后在这里展示。'}</p>{filterActive && <button className="quiet-button" type="button" onClick={resetFilters}>清除筛选</button>}</div>}
+        </div> : <div className="metric-directory-empty"><MagicWandIcon size={38} /><strong>{candidates.length ? '没有符合条件的候选指标' : '还没有候选指标'}</strong><p>{candidates.length ? '调整搜索词或筛选条件后再试。' : '点击“自动识别指标与维度”，系统会先检查历史指标，再分析当前数据集元信息。'}</p>{filterActive && <button className="quiet-button" type="button" onClick={resetFilters}>清除筛选</button>}</div>}
     </section>
 
     {deletingMetric && <div className="metric-delete-backdrop" role="presentation" onMouseDown={event => {

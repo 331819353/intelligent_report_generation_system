@@ -178,6 +178,62 @@ describe('指标资产目录', () => {
     })
   })
 
+  test('候选已接收但指标发布失败时保留错误和重试指引', async () => {
+    const user = userEvent.setup()
+    const candidate = metricCandidate({ name: '骑手总数' })
+    mockCatalog([], [candidate])
+    vi.spyOn(metricCandidateAPI, 'accept').mockResolvedValue({
+      candidate: {
+        ...candidate, status: 'ACCEPTED', version: 2,
+        acceptedMetricId: 'metric-rider-count',
+      },
+      metric: metricRecord({
+        id: 'metric-rider-count', name: candidate.name,
+        status: 'DRAFT', currentPublishedVersionId: undefined,
+      }),
+    })
+    vi.spyOn(metricAPI, 'publish').mockRejectedValue(
+      new Error('指标定义无法生成安全查询计划'),
+    )
+    renderCatalog()
+
+    await user.click(await screen.findByRole('tab', { name: /候选区/ }))
+    await user.click(screen.getByLabelText('选择候选指标 骑手总数'))
+    await user.click(screen.getByRole('button', { name: '发布选中指标（1）' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '骑手总数：指标定义无法生成安全查询计划（候选已接收时可点击“查看指标”重试）',
+    )
+  })
+
+  test('自动识别先检查历史资产并进入指标与维度候选清单', async () => {
+    const user = userEvent.setup()
+    const candidate = metricCandidate()
+    mockCatalog([metricSummary()], [candidate])
+    const identify = vi.spyOn(metricCandidateAPI, 'identify').mockResolvedValue({
+      eligibleDatasetCount: 2,
+      enqueuedJobCount: 2,
+      historicalMetricCount: 1,
+      existingCandidateCount: 1,
+      dimensionDatasetCount: 2,
+      dimensionProfileCount: 2,
+      datasets: [],
+    })
+    renderCatalog()
+
+    await screen.findByText('营业收入')
+    await user.click(screen.getByRole('button', { name: '自动识别指标与维度' }))
+
+    expect(identify).toHaveBeenCalledTimes(1)
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      '已检查 1 个历史指标和 1 个历史候选，本次覆盖 2 个当前数据集，提交 2 个指标任务，并为 2 个 DWS 建立维度画像。',
+    )
+    expect(screen.getByRole('tab', { name: /候选区/ })).toHaveAttribute('aria-selected', 'true')
+    const list = screen.getByRole('region', { name: '自动识别维度清单' })
+    expect(within(list).getByText('1 个指标候选 · 1 个维度')).toBeInTheDocument()
+    expect(within(list).getByText('地区')).toBeInTheDocument()
+  })
+
   test('统一审批中心深链会直接打开指标候选区', async () => {
     mockCatalog([], [metricCandidate()])
     render(<MemoryRouter initialEntries={['/assets/metrics?view=candidates']}><MetricCatalogPage /></MemoryRouter>)

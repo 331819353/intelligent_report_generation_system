@@ -116,11 +116,18 @@ func TestGeneratorUsesControlledTaxonomyAndProducesDeterministicSuggestions(t *t
 	}
 	if invoker.invocation.Purpose != aiplatform.PurposeDatasetTagSuggestion ||
 		invoker.invocation.ResourceID != claim.DatasetVersionID ||
-		invoker.invocation.PromptVersion != PromptVersion {
+		invoker.invocation.PromptVersion != PromptVersion ||
+		invoker.invocation.Request.MaxOutputTokens != 4096 {
 		t.Fatalf("invocation=%+v", invoker.invocation)
 	}
 	if err := aiplatform.ValidateProviderRequest(invoker.invocation.Request); err != nil {
 		t.Fatalf("provider request must use a valid strict schema: %v", err)
+	}
+	if strings.Contains(
+		string(invoker.invocation.Request.ResponseSchema.Schema),
+		`"uniqueItems"`,
+	) {
+		t.Fatal("provider-incompatible uniqueItems keyword leaked into tag schema")
 	}
 	userPayload := invoker.invocation.Request.Messages[1].Parts[0].Text
 	for _, forbidden := range []string{`"rows"`, `"sampleRows"`, `"rawData"`, `"password"`} {

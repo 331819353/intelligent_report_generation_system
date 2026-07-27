@@ -208,7 +208,8 @@ func validateTenantOwnedInputs(
 				strings.HasPrefix(table.Name, "stage_t"+tenantFragment+"_") &&
 				warehouseStagingName.MatchString(table.Name)
 		case materialization.LayerDWD:
-			valid = warehouseLayerInput(table, "ods", "warehouse_ods", tenantFragment)
+			valid = warehouseLayerInput(table, "ods", "warehouse_ods", tenantFragment) ||
+				warehouseLayerInput(table, "dim", "warehouse_dim", tenantFragment)
 		case materialization.LayerDIM:
 			valid = warehouseLayerInput(table, "ods", "warehouse_ods", tenantFragment)
 		case materialization.LayerDWS:

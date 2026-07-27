@@ -177,6 +177,12 @@ type QueryPlanInput struct {
 	TopN               int                      `json:"topN,omitempty"`
 	SortDirection      string                   `json:"sortDirection,omitempty"`
 	MaximumPathHops    int                      `json:"maximumPathHops,omitempty"`
+	// The following fields are server-owned resolution metadata. They are
+	// populated by the governed catalog interpreter and must never be accepted
+	// from API callers.
+	MetricCandidateCount int    `json:"-"`
+	MetricMatchMethod    string `json:"-"`
+	Domain               string `json:"-"`
 }
 
 type QueryMemberFilterInput struct {
@@ -224,27 +230,55 @@ type QueryEvidence struct {
 	EvidenceHash string  `json:"evidenceHash"`
 }
 
+type QueryResolutionStep struct {
+	Stage          string `json:"stage"`
+	Status         string `json:"status"`
+	CandidateCount int    `json:"candidateCount,omitempty"`
+	SelectedCode   string `json:"selectedCode,omitempty"`
+	Decision       string `json:"decision,omitempty"`
+}
+
+// QueryConditionDocument is the canonical leaf produced by the dynamic
+// decision DAG. It contains governed identifiers and opaque member keys, never
+// executable SQL or untrusted expressions.
+type QueryConditionDocument struct {
+	Domain           string                 `json:"domain"`
+	MetricCode       string                 `json:"metricCode"`
+	MetricVersionID  string                 `json:"metricVersionId"`
+	DatasetVersionID string                 `json:"datasetVersionId"`
+	Dimensions       []QueryDimensionClause `json:"dimensions"`
+	TimeRange        *QueryTimeRange        `json:"timeRange,omitempty"`
+}
+
+type QueryDimensionClause struct {
+	DimensionCode string `json:"dimensionCode"`
+	DimensionID   string `json:"dimensionId"`
+	MemberKey     string `json:"memberKey"`
+}
+
 type QueryPlan struct {
-	ID                        string          `json:"id"`
-	GraphGenerationID         string          `json:"graphGenerationId"`
-	GraphGeneration           int64           `json:"graphGeneration"`
-	QuestionHash              string          `json:"questionHash"`
-	Intent                    string          `json:"intent"`
-	Status                    string          `json:"status"`
-	Confidence                float64         `json:"confidence"`
-	SelectedMetricID          string          `json:"selectedMetricId,omitempty"`
-	SelectedMetricVersionID   string          `json:"selectedMetricVersionId,omitempty"`
-	SelectedDimensionID       string          `json:"selectedDimensionId,omitempty"`
-	SelectedDatasetVersionID  string          `json:"selectedDatasetVersionId,omitempty"`
-	SelectedMaterializationID string          `json:"selectedMaterializationId,omitempty"`
-	PathHash                  string          `json:"pathHash,omitempty"`
-	FailureCode               string          `json:"failureCode,omitempty"`
-	Evidence                  []QueryEvidence `json:"evidence"`
-	ExecutedQueryID           string          `json:"executedQueryId,omitempty"`
-	ExecutionErrorCode        string          `json:"executionErrorCode,omitempty"`
-	ExecutionDurationMS       *int64          `json:"executionDurationMs,omitempty"`
-	ExecutionRowCount         *int            `json:"executionRowCount,omitempty"`
-	CreatedAt                 string          `json:"createdAt"`
+	ID                        string                 `json:"id"`
+	GraphGenerationID         string                 `json:"graphGenerationId"`
+	GraphGeneration           int64                  `json:"graphGeneration"`
+	QuestionHash              string                 `json:"questionHash"`
+	Intent                    string                 `json:"intent"`
+	Status                    string                 `json:"status"`
+	Confidence                float64                `json:"confidence"`
+	SelectedMetricID          string                 `json:"selectedMetricId,omitempty"`
+	SelectedMetricVersionID   string                 `json:"selectedMetricVersionId,omitempty"`
+	SelectedDimensionID       string                 `json:"selectedDimensionId,omitempty"`
+	SelectedDatasetVersionID  string                 `json:"selectedDatasetVersionId,omitempty"`
+	SelectedMaterializationID string                 `json:"selectedMaterializationId,omitempty"`
+	PathHash                  string                 `json:"pathHash,omitempty"`
+	FailureCode               string                 `json:"failureCode,omitempty"`
+	Evidence                  []QueryEvidence        `json:"evidence"`
+	Resolution                []QueryResolutionStep  `json:"resolution"`
+	Conditions                QueryConditionDocument `json:"conditions"`
+	ExecutedQueryID           string                 `json:"executedQueryId,omitempty"`
+	ExecutionErrorCode        string                 `json:"executionErrorCode,omitempty"`
+	ExecutionDurationMS       *int64                 `json:"executionDurationMs,omitempty"`
+	ExecutionRowCount         *int                   `json:"executionRowCount,omitempty"`
+	CreatedAt                 string                 `json:"createdAt"`
 }
 
 type ExecuteQueryPlanInput struct {

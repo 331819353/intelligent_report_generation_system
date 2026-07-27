@@ -95,6 +95,27 @@ func (s *PostgresStore) Create(ctx context.Context, tenantID, actorID string, in
 // createDatasetTx 是所有真实数据集创建的唯一事务路径。originTableID 仅用于
 // LLM 映射表自动产生的数据集；手工创建传空字符串。调用方负责事务提交。
 func createDatasetTx(ctx context.Context, tx pgx.Tx, tenantID, actorID string, input CreateInput, prepared Prepared, originTableID string) (string, error) {
+	return createDatasetTxWithOptions(
+		ctx, tx, tenantID, actorID, input, prepared, originTableID,
+		derivedWriteOptions{},
+	)
+}
+
+type derivedWriteOptions struct {
+	// allowDraftDatasetDependencies is reserved for system-generated warehouse
+	// drafts. User saves and every publication path keep the default false value.
+	allowDraftDatasetDependencies bool
+}
+
+func createDatasetTxWithOptions(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, actorID string,
+	input CreateInput,
+	prepared Prepared,
+	originTableID string,
+	options derivedWriteOptions,
+) (string, error) {
 	var datasetID, versionID string
 	if err := tx.QueryRow(ctx, `INSERT INTO platform.datasets(
 		tenant_id,code,name,description,dataset_type,layer,origin_table_id,created_by,updated_by
@@ -113,7 +134,10 @@ func createDatasetTx(ctx context.Context, tx pgx.Tx, tenantID, actorID string, i
 	if _, err := tx.Exec(ctx, `UPDATE platform.datasets SET current_draft_version_id=$1 WHERE id=$2`, versionID, datasetID); err != nil {
 		return "", err
 	}
-	if err := replaceDerived(ctx, tx, tenantID, datasetID, versionID, prepared.Document, true); err != nil {
+	if err := replaceDerivedWithOptions(
+		ctx, tx, tenantID, datasetID, versionID, prepared.Document, true,
+		options,
+	); err != nil {
 		return "", err
 	}
 	if err := insertDraftRevisionTx(ctx, tx, tenantID, datasetID, actorID, versionID, 1, 1, "CREATE", "", prepared); err != nil {
@@ -150,8 +174,12 @@ func (s *PostgresStore) Get(ctx context.Context, tenantID, id string) (record Re
 		if err != nil {
 			return err
 		}
+		displayVersionID := record.CurrentPublishedVersionID
+		if displayVersionID == "" {
+			displayVersionID = record.DraftVersionID
+		}
 		record.Tags, err = loadDatasetDisplayTags(
-			ctx, tx, record.ID, record.CurrentPublishedVersionID, record.OriginTableID,
+			ctx, tx, record.ID, displayVersionID, record.OriginTableID,
 		)
 		return err
 	})
@@ -163,7 +191,7 @@ func (s *PostgresStore) Get(ctx context.Context, tenantID, id string) (record Re
 func loadDatasetDisplayTags(
 	ctx context.Context,
 	tx pgx.Tx,
-	datasetID, publishedVersionID, originTableID string,
+	datasetID, displayVersionID, originTableID string,
 ) ([]string, error) {
 	tags := []string{}
 	err := tx.QueryRow(ctx, `SELECT COALESCE(
@@ -180,7 +208,7 @@ func loadDatasetDisplayTags(
 			 FROM platform.metadata_tables AS table_asset
 			 WHERE table_asset.id=NULLIF($3,'')::uuid),
 			'{}'::text[]
-		)`, datasetID, publishedVersionID, originTableID).Scan(&tags)
+		)`, datasetID, displayVersionID, originTableID).Scan(&tags)
 	return tags, err
 }
 
@@ -210,7 +238,9 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 			    ON tag.id=binding.tag_id AND tag.tenant_id=binding.tenant_id
 			  WHERE binding.asset_type='DATASET_VERSION'
 			    AND binding.dataset_id=d.id
-			    AND binding.dataset_version_id=d.current_published_version_id
+			    AND binding.dataset_version_id=COALESCE(
+			      d.current_published_version_id,d.current_draft_version_id
+			    )
 			    AND binding.status IN ('SUGGESTED','APPROVED')
 			    AND tag.status IN ('DRAFT','ACTIVE')
 			) AS dataset_tag_list ON true
@@ -611,6 +641,18 @@ func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string
 		if _, err := tx.Exec(ctx, `UPDATE platform.dataset_versions SET status='DEPRECATED',updated_by=$1
 			WHERE dataset_id::text=$2 AND status IN ('PUBLISHED','STALE')`, actorID, id); err != nil {
 			return err
+		}
+		// 删除自动建模产物代表用户要求重新设计，不应被当作普通失败重试继续
+		// 复用旧的 LLM 检查点。数据库函数会先以租约状态终止仍在运行的旧流程：
+		// DIM 删除使该领域的分类/DIM/FACT 设计全部失效；DWD 删除只使对应
+		// 事实源的 FACT 设计失效。人工创建的数据集没有输出映射，调用为空操作。
+		if layer == string(LayerDIM) || layer == string(LayerDWD) {
+			if _, err := tx.Exec(ctx, `SELECT invalidated_workflow_job_id
+				FROM platform.invalidate_deleted_modeled_dataset(
+					$1::uuid,$2,$3::uuid
+				)`, id, layer, actorID); err != nil {
+				return err
+			}
 		}
 		// 自动生成 DIM/DWD 使用来源数据集 ID 派生稳定编码。软删除后必须同时释放
 		// 自动建模所有权映射和活动编码，否则下一次 ODS 发布触发重建时会被已删除
@@ -1185,6 +1227,17 @@ type dependencySnapshot struct {
 }
 
 func loadDependencySnapshot(ctx context.Context, tx pgx.Tx, dependency DependencyRef) (snapshot dependencySnapshot, err error) {
+	return loadDependencySnapshotWithOptions(
+		ctx, tx, dependency, derivedWriteOptions{},
+	)
+}
+
+func loadDependencySnapshotWithOptions(
+	ctx context.Context,
+	tx pgx.Tx,
+	dependency DependencyRef,
+	options derivedWriteOptions,
+) (snapshot dependencySnapshot, err error) {
 	switch dependency.Type {
 	case "TABLE":
 		err = tx.QueryRow(ctx, `SELECT table_asset.metadata_version,table_asset.structure_hash
@@ -1199,13 +1252,20 @@ func loadDependencySnapshot(ctx context.Context, tx pgx.Tx, dependency Dependenc
 		err = tx.QueryRow(ctx, `SELECT version,sha256 FROM platform.file_asset_versions WHERE id::text=$1 FOR SHARE`, dependency.ID).
 			Scan(&snapshot.Version, &snapshot.Hash)
 	case "DATASET_VERSION":
+		statusClause := `version.status='PUBLISHED'
+			  AND owner.status='PUBLISHED'`
+		if options.allowDraftDatasetDependencies {
+			statusClause = `version.status IN ('DRAFT','PUBLISHED')
+			  AND owner.status IN ('DRAFT','PUBLISHED')`
+		}
 		err = tx.QueryRow(ctx, `SELECT version.version_no,version.schema_hash,version.plan_hash
 			FROM platform.dataset_versions AS version
 			JOIN platform.datasets AS owner
 			  ON owner.id=version.dataset_id AND owner.tenant_id=version.tenant_id
-			WHERE version.id::text=$1 AND version.status='PUBLISHED'
-			  AND owner.status='PUBLISHED' AND owner.deleted_at IS NULL
-			FOR SHARE OF version,owner`, dependency.ID).Scan(&snapshot.Version, &snapshot.Hash, &snapshot.PlanHash)
+			WHERE version.id::text=$1 AND `+statusClause+`
+			  AND owner.deleted_at IS NULL
+			FOR SHARE OF version,owner`, dependency.ID).
+			Scan(&snapshot.Version, &snapshot.Hash, &snapshot.PlanHash)
 	default:
 		return dependencySnapshot{}, fmt.Errorf("%w: unsupported dependency type", ErrInvalidDocument)
 	}
@@ -1274,9 +1334,23 @@ func mapPublicationPostgresError(err error) error {
 
 // replaceDerived 重建可由 DSL 派生的字段、参数和血缘索引，并校验上游租户归属。
 func replaceDerived(ctx context.Context, tx pgx.Tx, tenantID, datasetID, versionID string, document Document, replaceAssetLineage bool) error {
+	return replaceDerivedWithOptions(
+		ctx, tx, tenantID, datasetID, versionID, document,
+		replaceAssetLineage, derivedWriteOptions{},
+	)
+}
+
+func replaceDerivedWithOptions(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, datasetID, versionID string,
+	document Document,
+	replaceAssetLineage bool,
+	options derivedWriteOptions,
+) error {
 	// 字段、参数和血缘都能从规范 DSL 完整再生，因此在同一事务内采用删除后重建。
 	// 任一上游或插入失败都会连同 DSL 更新一起回滚，不会暴露半新半旧的索引。
-	if err := validateUpstreams(ctx, tx, document); err != nil {
+	if err := validateUpstreamsWithOptions(ctx, tx, document, options); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM platform.dataset_fields WHERE dataset_version_id=$1`, versionID); err != nil {
@@ -1324,7 +1398,9 @@ func replaceDerived(ctx context.Context, tx pgx.Tx, tenantID, datasetID, version
 		}
 	}
 	for _, dependency := range SortedDependencies(document) {
-		snapshot, err := loadDependencySnapshot(ctx, tx, dependency)
+		snapshot, err := loadDependencySnapshotWithOptions(
+			ctx, tx, dependency, options,
+		)
 		if err != nil {
 			return err
 		}
@@ -1343,9 +1419,22 @@ func replaceDerived(ctx context.Context, tx pgx.Tx, tenantID, datasetID, version
 
 // validateUpstreams 在保存前确认表、文件版本和上游数据集版本均属于当前 RLS 租户。
 func validateUpstreams(ctx context.Context, tx pgx.Tx, document Document) error {
+	return validateUpstreamsWithOptions(
+		ctx, tx, document, derivedWriteOptions{},
+	)
+}
+
+func validateUpstreamsWithOptions(
+	ctx context.Context,
+	tx pgx.Tx,
+	document Document,
+	options derivedWriteOptions,
+) error {
 	// 所有查询都运行在 WithTenantTx 设置的 RLS 上下文中；即使攻击者猜中其他租户
 	// 的 UUID，EXISTS 也只会返回 false，不会建立跨租户依赖。
-	if err := ValidateLayerDependencies(ctx, document, postgresLayerDependencyResolver{tx: tx}); err != nil {
+	if err := ValidateLayerDependencies(ctx, document, postgresLayerDependencyResolver{
+		tx: tx, allowDraftDatasetDependencies: options.allowDraftDatasetDependencies,
+	}); err != nil {
 		return err
 	}
 	for i, node := range document.Nodes {
@@ -1384,18 +1473,27 @@ func validateUpstreams(ctx context.Context, tx pgx.Tx, document Document) error 
 			}
 		case "DATASET":
 			var exists bool
+			statusClause := `version.status='PUBLISHED'
+				  AND owner.status='PUBLISHED'`
+			if options.allowDraftDatasetDependencies {
+				statusClause = `version.status IN ('DRAFT','PUBLISHED')
+				  AND owner.status IN ('DRAFT','PUBLISHED')`
+			}
 			if err := tx.QueryRow(ctx, `SELECT EXISTS(
 				SELECT 1
 				FROM platform.dataset_versions AS version
 				JOIN platform.datasets AS owner
 				  ON owner.id=version.dataset_id AND owner.tenant_id=version.tenant_id
-				WHERE version.id::text=$1 AND version.status='PUBLISHED'
-				  AND owner.status='PUBLISHED' AND owner.deleted_at IS NULL
+				WHERE version.id::text=$1 AND `+statusClause+`
+				  AND owner.deleted_at IS NULL
 			)`, node.DatasetVersionID).Scan(&exists); err != nil {
 				return err
 			}
 			if !exists {
-				return fmt.Errorf("%w: nodes[%d] references an unavailable published dataset version", ErrInvalidDocument, i)
+				return fmt.Errorf(
+					"%w: nodes[%d] references an unavailable dataset version",
+					ErrInvalidDocument, i,
+				)
 			}
 			var projectedFields int
 			if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.dataset_fields WHERE dataset_version_id::text=$1 AND field_code::text=ANY($2::text[])`, node.DatasetVersionID, node.Projection).Scan(&projectedFields); err != nil {
@@ -1409,19 +1507,28 @@ func validateUpstreams(ctx context.Context, tx pgx.Tx, document Document) error 
 	return nil
 }
 
-type postgresLayerDependencyResolver struct{ tx pgx.Tx }
+type postgresLayerDependencyResolver struct {
+	tx                            pgx.Tx
+	allowDraftDatasetDependencies bool
+}
 
 func (resolver postgresLayerDependencyResolver) ResolveDatasetVersionLayer(
 	ctx context.Context,
 	versionID string,
 ) (Layer, error) {
 	var layer Layer
+	statusClause := `version.status='PUBLISHED'
+		  AND owner.status='PUBLISHED'`
+	if resolver.allowDraftDatasetDependencies {
+		statusClause = `version.status IN ('DRAFT','PUBLISHED')
+		  AND owner.status IN ('DRAFT','PUBLISHED')`
+	}
 	err := resolver.tx.QueryRow(ctx, `SELECT version.layer
 		FROM platform.dataset_versions AS version
 		JOIN platform.datasets AS owner
 		  ON owner.id=version.dataset_id AND owner.tenant_id=version.tenant_id
-		WHERE version.id::text=$1 AND version.status='PUBLISHED'
-		  AND owner.status='PUBLISHED' AND owner.deleted_at IS NULL
+		WHERE version.id::text=$1 AND `+statusClause+`
+		  AND owner.deleted_at IS NULL
 		FOR SHARE OF version,owner`, versionID).Scan(&layer)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", fmt.Errorf("%w: nodes references an unavailable published dataset layer: %w",

@@ -1,4 +1,5 @@
 import {
+  ArrowClockwise,
   ChartBar,
   CheckCircle,
   ClockCounterClockwise,
@@ -15,6 +16,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
+import { RequestError } from '../lib/api'
 import {
   loadDataSourceApprovalTasks,
   loadDatasetApprovalTasks,
@@ -27,7 +29,9 @@ import {
 import { currentSubject } from '../lib/auth'
 import {
   backgroundTaskAPI,
+  takeBackgroundTaskFocus,
   type BackgroundTask,
+  type BackgroundTaskFocus,
   type BackgroundTaskPage,
   type BackgroundTaskStatus,
   type BackgroundTaskView,
@@ -112,6 +116,23 @@ const emptyBackgroundPage = (): BackgroundTaskPage => ({
   activeCount: 0,
   generatedAt: '',
 })
+const backgroundFocusCopy: Record<BackgroundTaskFocus, string> = {
+  DIM_MODELING: '维度建模任务',
+  DWD_MODELING: '明细建模任务',
+  DWS_MODELING: '主题建模任务',
+}
+const dimensionModelingKinds = new Set([
+  'ODS_DOMAIN_CLASSIFICATION',
+  'DIM_MODELING',
+])
+const matchesBackgroundFocus = (
+  task: BackgroundTask,
+  focus: BackgroundTaskFocus | null,
+) => !focus || (focus === 'DWS_MODELING'
+  ? task.kind === 'DWS_MODELING'
+  : focus === 'DWD_MODELING'
+    ? task.kind === 'DWD_FACT_MODELING'
+    : dimensionModelingKinds.has(task.kind))
 
 function taskIcon(category: ApprovalCategory) {
   if (category === 'DATA_SOURCE') return <Database size={20} weight="duotone" aria-hidden="true" />
@@ -148,7 +169,9 @@ export function AdminPage() {
   const [backgroundLoading, setBackgroundLoading] = useState(false)
   const [backgroundError, setBackgroundError] = useState('')
   const [backgroundNotice, setBackgroundNotice] = useState('')
+  const [backgroundFocus, setBackgroundFocus] = useState<BackgroundTaskFocus | null>(null)
   const [cancellingTaskId, setCancellingTaskId] = useState('')
+  const [retryingTaskId, setRetryingTaskId] = useState('')
 
   const loadApprovalTasks = useCallback(async () => {
     setTasksLoading(true)
@@ -217,6 +240,10 @@ export function AdminPage() {
     () => categoryOrder.reduce((total, category) => total + tasks[category].length, 0),
     [tasks],
   )
+  const visibleBackgroundTasks = useMemo(
+    () => backgroundPage.items.filter(task => matchesBackgroundFocus(task, backgroundFocus)),
+    [backgroundFocus, backgroundPage.items],
+  )
   const activeTasks = tasks[activeCategory]
   const selectedTask = useMemo(
     () => activeTasks.find(task => task.key === selectedTaskKey) || activeTasks[0],
@@ -249,13 +276,17 @@ export function AdminPage() {
   }
 
   const openBackgroundTasks = () => {
+    const focus = takeBackgroundTaskFocus()
+    const view: BackgroundTaskView = focus ? 'ALL' : 'ACTIVE'
     setBackgroundOpen(true)
-    setBackgroundView('ACTIVE')
+    setBackgroundFocus(focus)
+    setBackgroundView(view)
     setBackgroundNotice('')
-    void loadBackgroundTasks('ACTIVE')
+    void loadBackgroundTasks(view)
   }
 
   const chooseBackgroundView = (view: BackgroundTaskView) => {
+    setBackgroundFocus(null)
     setBackgroundView(view)
     setBackgroundNotice('')
     void loadBackgroundTasks(view)
@@ -274,6 +305,22 @@ export function AdminPage() {
       setBackgroundError(cause instanceof Error ? cause.message : '中止后台任务失败')
     } finally {
       setCancellingTaskId('')
+    }
+  }
+
+  const retryBackgroundTask = async (task: BackgroundTask) => {
+    if (!task.canRetry || !window.confirm(`确认重试“${task.name}”的${task.kindLabel}任务吗？`)) return
+    setRetryingTaskId(task.id)
+    setBackgroundError('')
+    setBackgroundNotice('')
+    try {
+      await backgroundTaskAPI.retry(task)
+      setBackgroundNotice(`“${task.name}”的${task.kindLabel}任务已重新提交`)
+      await loadBackgroundTasks(backgroundView, true)
+    } catch (cause) {
+      setBackgroundError(cause instanceof Error ? cause.message : '重试后台任务失败')
+    } finally {
+      setRetryingTaskId('')
     }
   }
 
@@ -305,7 +352,13 @@ export function AdminPage() {
         finishTask(selectedTask, `“${dataset.name}”已审批通过；不可变发布版本已生成，后台加工任务已启动`)
       }
     } catch (cause) {
-      setReviewError(cause instanceof Error ? cause.message : '审批通过失败')
+      if (cause instanceof RequestError &&
+          cause.detail.code === 'DATASET_PUBLICATION_REQUEST_CANCELLED') {
+        await loadApprovalTasks()
+        setReviewNotice('数据集草稿已变更，原审批申请已自动取消；请等待申请人按最新草稿重新提交')
+      } else {
+        setReviewError(cause instanceof Error ? cause.message : '审批通过失败')
+      }
     } finally {
       setBusyAction('')
     }
@@ -333,7 +386,13 @@ export function AdminPage() {
         finishTask(selectedTask, `已驳回“${dataset.name}”的数据集发布申请`)
       }
     } catch (cause) {
-      setReviewError(cause instanceof Error ? cause.message : '驳回审批失败')
+      if (cause instanceof RequestError &&
+          cause.detail.code === 'DATASET_PUBLICATION_REQUEST_CANCELLED') {
+        await loadApprovalTasks()
+        setReviewNotice('数据集草稿已变更，原审批申请已自动取消；无需再驳回')
+      } else {
+        setReviewError(cause instanceof Error ? cause.message : '驳回审批失败')
+      }
     } finally {
       setBusyAction('')
     }
@@ -445,11 +504,11 @@ export function AdminPage() {
         </section>
       </div>}
 
-      {backgroundOpen && <div className="workbench-review-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !cancellingTaskId) setBackgroundOpen(false) }}>
+      {backgroundOpen && <div className="workbench-review-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !cancellingTaskId && !retryingTaskId) setBackgroundOpen(false) }}>
         <section className="workbench-review-dialog workbench-background-dialog" role="dialog" aria-modal="true" aria-labelledby="workbench-background-title">
           <header>
             <div><span className="eyebrow">后台任务</span><h2 id="workbench-background-title">任务运行中心</h2><p>集中查看当前租户的业务后台任务、真实进度、失败原因并协作式中止。</p></div>
-            <button type="button" aria-label="关闭任务运行中心" disabled={Boolean(cancellingTaskId)} onClick={() => setBackgroundOpen(false)}><X size={20} /></button>
+            <button type="button" aria-label="关闭任务运行中心" disabled={Boolean(cancellingTaskId || retryingTaskId)} onClick={() => setBackgroundOpen(false)}><X size={20} /></button>
           </header>
 
           <div className="workbench-background-toolbar">
@@ -463,14 +522,18 @@ export function AdminPage() {
             </button>
           </div>
 
+          {backgroundFocus && <div className="workbench-background-focus" role="status">
+            <span>当前仅显示{backgroundFocusCopy[backgroundFocus]}，已隐藏无关的自动标签、指标提取等任务。</span>
+            <button className="quiet-button" type="button" onClick={() => setBackgroundFocus(null)}>显示全部任务</button>
+          </div>}
           {backgroundNotice && <div className="workbench-background-notice" role="status">{backgroundNotice}</div>}
           {backgroundError && <div className="workbench-background-error" role="alert">{backgroundError}<button className="quiet-button" type="button" onClick={() => void loadBackgroundTasks(backgroundView)}>重试</button></div>}
-          {backgroundLoading && backgroundPage.items.length === 0
+          {backgroundLoading && visibleBackgroundTasks.length === 0
             ? <div className="workbench-review-empty" role="status"><SpinnerGap className="spin" size={32} /><strong>正在读取后台任务…</strong></div>
-            : backgroundPage.items.length === 0
-              ? <div className="workbench-review-empty"><CheckCircle size={34} weight="duotone" aria-hidden="true" /><strong>{backgroundView === 'ACTIVE' ? '当前没有运行中的后台任务' : '当前范围没有任务记录'}</strong><span>任务启动后会自动出现在这里，并每 3 秒刷新一次。</span></div>
+            : visibleBackgroundTasks.length === 0
+              ? <div className="workbench-review-empty"><CheckCircle size={34} weight="duotone" aria-hidden="true" /><strong>{backgroundFocus ? `当前范围没有${backgroundFocusCopy[backgroundFocus]}` : backgroundView === 'ACTIVE' ? '当前没有运行中的后台任务' : '当前范围没有任务记录'}</strong><span>任务启动后会自动出现在这里，并每 3 秒刷新一次。</span></div>
               : <div className="workbench-background-list" aria-label="后台任务列表">
-                {backgroundPage.items.map(task => <article key={`${task.kind}:${task.id}`} className={`workbench-background-task status-${task.status.toLowerCase()}`}>
+                {visibleBackgroundTasks.map(task => <article key={`${task.kind}:${task.id}`} className={`workbench-background-task status-${task.status.toLowerCase()}`}>
                   <header>
                     <div><span>{task.kindLabel}</span><h3>{task.name}</h3><p>{task.description}</p></div>
                     <em>{backgroundStatusCopy[task.status] ?? task.status}</em>
@@ -487,11 +550,21 @@ export function AdminPage() {
                   </dl>
                   {(task.errorMessage || task.errorCode) && <div className="workbench-background-diagnostic"><strong>{task.errorCode || 'TASK_ERROR'}</strong><span>{task.errorMessage || '任务未返回详细错误信息'}</span></div>}
                   <footer>
-                    <small>{task.canCancel ? '中止会撤销任务租约并阻止结果写回，已完成结果保留。' : task.cancelDisabledReason}</small>
-                    {task.canCancel && <button className="workbench-stop-button" type="button" disabled={Boolean(cancellingTaskId)} onClick={() => void cancelBackgroundTask(task)}>
+                    <small>{task.canCancel
+                      ? '中止会撤销任务租约并阻止结果写回，已完成结果保留。'
+                      : task.canRetry
+                        ? '重试会保留有效检查点，只重新执行缺失或失败阶段。'
+                        : task.retryDisabledReason || task.cancelDisabledReason}</small>
+                    <div className="workbench-background-actions">
+                    {task.canRetry && <button className="workbench-retry-button" type="button" disabled={Boolean(cancellingTaskId || retryingTaskId)} onClick={() => void retryBackgroundTask(task)}>
+                      {retryingTaskId === task.id ? <SpinnerGap className="spin" size={17} /> : <ArrowClockwise size={17} weight="bold" />}
+                      {retryingTaskId === task.id ? '正在重试…' : '重试'}
+                    </button>}
+                    {task.canCancel && <button className="workbench-stop-button" type="button" disabled={Boolean(cancellingTaskId || retryingTaskId)} onClick={() => void cancelBackgroundTask(task)}>
                       {cancellingTaskId === task.id ? <SpinnerGap className="spin" size={17} /> : <StopCircle size={17} weight="bold" />}
                       {cancellingTaskId === task.id ? '正在中止…' : '中止'}
                     </button>}
+                    </div>
                   </footer>
                 </article>)}
               </div>}

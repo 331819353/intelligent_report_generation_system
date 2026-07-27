@@ -7,12 +7,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/metric"
+)
+
+var (
+	queryCutoffMonthPattern = regexp.MustCompile(
+		`(?:截至|截止(?:到)?|到)(?:([0-9]{4})年)?(1[0-2]|0?[1-9])月(?:底|末)?`,
+	)
+	queryCutoffPresetPattern = regexp.MustCompile(
+		`^THROUGH_(?:([0-9]{4})_)?(0[1-9]|1[0-2])$`,
+	)
 )
 
 type Store interface {
@@ -554,11 +565,7 @@ func (service *Service) PlanQuery(
 		input.TopN < 0 || input.TopN > 500 ||
 		!oneOf(input.SortDirection, "", "ASC", "DESC") ||
 		(input.SortDirection != "" && input.TopN == 0) ||
-		!oneOf(
-			input.TimePreset, "", "TODAY", "YESTERDAY", "LAST_7_DAYS",
-			"LAST_30_DAYS", "THIS_MONTH", "LAST_MONTH",
-			"THIS_YEAR", "LAST_YEAR",
-		) ||
+		!validQueryTimePreset(input.TimePreset) ||
 		(input.TimeRange != nil && input.TimePreset != "") ||
 		(input.TimePreset == "" && input.Timezone != "" &&
 			input.ComparisonMode == "") ||
@@ -584,6 +591,9 @@ func (service *Service) PlanQuery(
 		if err == nil {
 			if input.MetricCode == "" {
 				input.MetricCode = slots.MetricCode
+				input.MetricCandidateCount = slots.MetricCandidateCount
+				input.MetricMatchMethod = slots.MetricMatchMethod
+				input.Domain = slots.Domain
 			}
 			if input.DimensionCode == "" {
 				input.DimensionCode = slots.DimensionCode
@@ -617,14 +627,21 @@ func (service *Service) PlanQuery(
 	if input.MetricCode == "" {
 		return QueryPlan{}, ErrUnprovenPath
 	}
+	if input.MetricMatchMethod == "" {
+		input.MetricMatchMethod = "EXPLICIT_CODE"
+	}
 	questionHash := hashText(input.Question)
-	input.Question = ""
 	return service.store.PlanQuery(ctx, tenantID, actorID, input, questionHash)
 }
 
 func inheritQueryContext(input *QueryPlanInput, contextSlots QuerySlots) {
 	if input.MetricCode == "" {
 		input.MetricCode = contextSlots.MetricCode
+		if input.MetricCode != "" {
+			input.MetricCandidateCount = 1
+			input.MetricMatchMethod = "CONTEXT"
+			input.Domain = contextSlots.Domain
+		}
 	}
 	if input.DimensionCode == "" {
 		input.DimensionCode = contextSlots.DimensionCode
@@ -700,6 +717,15 @@ func parseQueryBoundary(value string) (time.Time, bool, error) {
 func inferQueryTimePreset(question string) string {
 	question = strings.ToLower(strings.TrimSpace(question))
 	compactQuestion := strings.Join(strings.Fields(question), "")
+	if match := queryCutoffMonthPattern.FindStringSubmatch(compactQuestion); len(match) == 3 {
+		month, err := strconv.Atoi(match[2])
+		if err == nil && month >= 1 && month <= 12 {
+			if match[1] != "" {
+				return fmt.Sprintf("THROUGH_%s_%02d", match[1], month)
+			}
+			return fmt.Sprintf("THROUGH_%02d", month)
+		}
+	}
 	for _, candidate := range []struct {
 		preset  string
 		phrases []string
@@ -724,6 +750,37 @@ func inferQueryTimePreset(question string) string {
 		}
 	}
 	return ""
+}
+
+func validQueryTimePreset(preset string) bool {
+	return oneOf(
+		preset, "", "TODAY", "YESTERDAY", "LAST_7_DAYS",
+		"LAST_30_DAYS", "THIS_MONTH", "LAST_MONTH",
+		"THIS_YEAR", "LAST_YEAR",
+	) || queryCutoffPresetPattern.MatchString(preset)
+}
+
+func parseQueryCutoffPreset(
+	preset string,
+	defaultYear int,
+) (year int, month time.Month, ok bool) {
+	match := queryCutoffPresetPattern.FindStringSubmatch(preset)
+	if len(match) != 3 {
+		return 0, 0, false
+	}
+	year = defaultYear
+	var err error
+	if match[1] != "" {
+		year, err = strconv.Atoi(match[1])
+		if err != nil || year < 1970 || year > 9999 {
+			return 0, 0, false
+		}
+	}
+	monthNumber, err := strconv.Atoi(match[2])
+	if err != nil || monthNumber < 1 || monthNumber > 12 {
+		return 0, 0, false
+	}
+	return year, time.Month(monthNumber), true
 }
 
 func inferQueryComparisonMode(question string) string {
@@ -756,29 +813,39 @@ func resolveQueryTimePreset(
 		0, 0, 0, 0, location,
 	)
 	var start, end time.Time
-	switch preset {
-	case "TODAY":
-		start, end = today, today.AddDate(0, 0, 1)
-	case "YESTERDAY":
-		start, end = today.AddDate(0, 0, -1), today
-	case "LAST_7_DAYS":
-		start, end = today.AddDate(0, 0, -6), today.AddDate(0, 0, 1)
-	case "LAST_30_DAYS":
-		start, end = today.AddDate(0, 0, -29), today.AddDate(0, 0, 1)
-	case "THIS_MONTH":
-		start = time.Date(localNow.Year(), localNow.Month(), 1, 0, 0, 0, 0, location)
-		end = start.AddDate(0, 1, 0)
-	case "LAST_MONTH":
-		end = time.Date(localNow.Year(), localNow.Month(), 1, 0, 0, 0, 0, location)
-		start = end.AddDate(0, -1, 0)
-	case "THIS_YEAR":
-		start = time.Date(localNow.Year(), 1, 1, 0, 0, 0, 0, location)
-		end = start.AddDate(1, 0, 0)
-	case "LAST_YEAR":
-		end = time.Date(localNow.Year(), 1, 1, 0, 0, 0, 0, location)
-		start = end.AddDate(-1, 0, 0)
-	default:
-		return QueryTimeRange{}, ErrInvalidRequest
+	if year, month, cutoff := parseQueryCutoffPreset(
+		preset, localNow.Year(),
+	); cutoff {
+		// “截至某月”是累计上限，不是“该月内”。平台业务数据的可移植
+		// 时间纪元固定为 1970-01-01，结束边界取目标月下一月首日。
+		start = time.Date(1970, 1, 1, 0, 0, 0, 0, location)
+		end = time.Date(year, month, 1, 0, 0, 0, 0, location).
+			AddDate(0, 1, 0)
+	} else {
+		switch preset {
+		case "TODAY":
+			start, end = today, today.AddDate(0, 0, 1)
+		case "YESTERDAY":
+			start, end = today.AddDate(0, 0, -1), today
+		case "LAST_7_DAYS":
+			start, end = today.AddDate(0, 0, -6), today.AddDate(0, 0, 1)
+		case "LAST_30_DAYS":
+			start, end = today.AddDate(0, 0, -29), today.AddDate(0, 0, 1)
+		case "THIS_MONTH":
+			start = time.Date(localNow.Year(), localNow.Month(), 1, 0, 0, 0, 0, location)
+			end = start.AddDate(0, 1, 0)
+		case "LAST_MONTH":
+			end = time.Date(localNow.Year(), localNow.Month(), 1, 0, 0, 0, 0, location)
+			start = end.AddDate(0, -1, 0)
+		case "THIS_YEAR":
+			start = time.Date(localNow.Year(), 1, 1, 0, 0, 0, 0, location)
+			end = start.AddDate(1, 0, 0)
+		case "LAST_YEAR":
+			end = time.Date(localNow.Year(), 1, 1, 0, 0, 0, 0, location)
+			start = end.AddDate(-1, 0, 0)
+		default:
+			return QueryTimeRange{}, ErrInvalidRequest
+		}
 	}
 	if fieldType == "DATE" {
 		return QueryTimeRange{

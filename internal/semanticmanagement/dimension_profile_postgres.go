@@ -889,15 +889,13 @@ func setDimensionProfileWarehouseLimits(
 	tx pgx.Tx,
 	claim DimensionProfileJob,
 ) error {
-	timeoutMS := fmt.Sprintf("%d", claim.TimeoutSeconds*1000)
-	workMem := fmt.Sprintf("%dkB", claim.WorkMemKB)
-	tempLimit := fmt.Sprintf("%dkB", claim.TempFileLimitKB)
-	_, err := tx.Exec(ctx, `SELECT
-		set_config('statement_timeout',$1,true),
-		set_config('lock_timeout','5000',true),
-		set_config('work_mem',$2,true),
-		set_config('temp_file_limit',$3,true)`,
-		timeoutMS, workMem, tempLimit)
+	_, err := tx.Exec(
+		ctx,
+		`SELECT warehouse_published.apply_dimension_profile_resource_limits(
+			$1,$2,$3
+		)`,
+		claim.TimeoutSeconds, claim.WorkMemKB, claim.TempFileLimitKB,
+	)
 	return err
 }
 

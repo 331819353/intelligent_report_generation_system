@@ -14,6 +14,7 @@ type EmbeddingClaim struct {
 	ID       string
 	TenantID string
 	Document string
+	Kind     string
 }
 
 type SearchResult struct {

@@ -179,11 +179,62 @@ type AcceptResult struct {
 	Metric    metric.Record `json:"metric"`
 }
 
+type IdentificationResult struct {
+	EligibleDatasetCount   int                          `json:"eligibleDatasetCount"`
+	EnqueuedJobCount       int                          `json:"enqueuedJobCount"`
+	HistoricalMetricCount  int                          `json:"historicalMetricCount"`
+	ExistingCandidateCount int                          `json:"existingCandidateCount"`
+	DimensionDatasetCount  int                          `json:"dimensionDatasetCount"`
+	DimensionProfileCount  int                          `json:"dimensionProfileCount"`
+	Datasets               []IdentificationDatasetIndex `json:"datasets"`
+}
+
+// IdentificationDatasetIndex is the bounded, review-facing projection of the
+// hybrid query index for one current DWS/ADS version. The authoritative member
+// postings remain in dimension_members; this response only exposes the first
+// safe page of deduplicated values.
+type IdentificationDatasetIndex struct {
+	DatasetID        string                    `json:"datasetId"`
+	DatasetVersionID string                    `json:"datasetVersionId"`
+	Code             string                    `json:"code"`
+	Name             string                    `json:"name"`
+	Layer            string                    `json:"layer"`
+	Domain           string                    `json:"domain"`
+	Metrics          []IdentificationMetric    `json:"metrics"`
+	Dimensions       []IdentificationDimension `json:"dimensions"`
+	IndexDocument    json.RawMessage           `json:"indexDocument"`
+}
+
+type IdentificationMetric struct {
+	Code            string   `json:"code"`
+	Name            string   `json:"name"`
+	Status          string   `json:"status"`
+	Source          string   `json:"source"`
+	AllowedFieldIDs []string `json:"allowedFieldIds"`
+	VectorStatus    string   `json:"vectorStatus"`
+}
+
+type IdentificationDimension struct {
+	FieldID               string   `json:"fieldId"`
+	Code                  string   `json:"code"`
+	Name                  string   `json:"name"`
+	MemberIndexPolicy     string   `json:"memberIndexPolicy"`
+	MemberValues          []string `json:"memberValues"`
+	MemberValueCount      int      `json:"memberValueCount"`
+	VectorizedMemberCount int      `json:"vectorizedMemberCount"`
+	ValuesTruncated       bool     `json:"valuesTruncated"`
+	Sensitive             bool     `json:"sensitive"`
+}
+
 // Store 是人工审核 API 所需的最小持久化边界。
 type Store interface {
 	List(context.Context, string, ListFilter) ([]Candidate, int, error)
 	Get(context.Context, string, string) (Candidate, error)
 	Reject(context.Context, string, string, string, RejectInput) (Candidate, error)
+}
+
+type IdentificationStore interface {
+	TriggerManualIdentification(context.Context, string, string) (IdentificationResult, error)
 }
 
 // MetricCreator 只允许把已审核候选物化为草稿；它不暴露发布能力。

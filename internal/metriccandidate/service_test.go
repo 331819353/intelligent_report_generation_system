@@ -20,9 +20,10 @@ const (
 )
 
 type candidateStoreStub struct {
-	getFn    func(context.Context, string, string) (Candidate, error)
-	listFn   func(context.Context, string, ListFilter) ([]Candidate, int, error)
-	rejectFn func(context.Context, string, string, string, RejectInput) (Candidate, error)
+	getFn      func(context.Context, string, string) (Candidate, error)
+	listFn     func(context.Context, string, ListFilter) ([]Candidate, int, error)
+	rejectFn   func(context.Context, string, string, string, RejectInput) (Candidate, error)
+	identifyFn func(context.Context, string, string) (IdentificationResult, error)
 }
 
 func (store *candidateStoreStub) List(ctx context.Context, tenantID string, filter ListFilter) ([]Candidate, int, error) {
@@ -44,6 +45,16 @@ func (store *candidateStoreStub) Reject(ctx context.Context, tenantID, actorID, 
 		return Candidate{}, errors.New("unexpected Reject call")
 	}
 	return store.rejectFn(ctx, tenantID, actorID, id, input)
+}
+
+func (store *candidateStoreStub) TriggerManualIdentification(
+	ctx context.Context,
+	tenantID, actorID string,
+) (IdentificationResult, error) {
+	if store.identifyFn == nil {
+		return IdentificationResult{}, errors.New("unexpected TriggerManualIdentification call")
+	}
+	return store.identifyFn(ctx, tenantID, actorID)
 }
 
 type metricCreatorStub struct {

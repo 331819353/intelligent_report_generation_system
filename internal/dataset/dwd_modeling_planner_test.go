@@ -38,7 +38,7 @@ func TestValidateDWDLLMPlanCompilesFactCleaningAndDimensionExpansion(t *testing.
 	}
 	fact := assets[input.Tables[0].VersionID]
 	document, inputHash, err := buildLLMDesignedDWDDocument(
-		input.Domain, fact, assets, plan.Outputs[0],
+		input.Domain, fact, assets, nil, plan.Outputs[0],
 	)
 	if err != nil {
 		t.Fatalf("build LLM document: %v", err)
@@ -46,6 +46,13 @@ func TestValidateDWDLLMPlanCompilesFactCleaningAndDimensionExpansion(t *testing.
 	if len(inputHash) != 64 || document.Dataset.Layer != LayerDWD ||
 		len(document.Joins) != 1 || document.Joins[0].JoinType != "LEFT" {
 		t.Fatalf("unexpected DWD document: hash=%q document=%+v", inputHash, document)
+	}
+	if document.Dataset.Name != "订单 DWD 明细" ||
+		document.Dataset.Code != "dwd_order_business_analysis_orders" {
+		t.Fatalf(
+			"DWD business identity=%q/%q",
+			document.Dataset.Code, document.Dataset.Name,
+		)
 	}
 	if len(document.Nodes) != 2 ||
 		document.Nodes[0].Alias != "t1" ||
@@ -83,9 +90,62 @@ func TestValidateDWDLLMPlanCompilesFactCleaningAndDimensionExpansion(t *testing.
 	}
 }
 
+func TestBuildLLMDesignedDWDDocumentUsesProcessedPublishedDIM(t *testing.T) {
+	input, assets, plan := validDWDPlanningFixture()
+	fact := assets[input.Tables[0].VersionID]
+	sourceDIM := assets[input.Tables[1].VersionID]
+	dimDocument, _, err := buildLLMClassifiedDIMDocument(
+		input.Domain, sourceDIM,
+	)
+	if err != nil {
+		t.Fatalf("build processed DIM: %v", err)
+	}
+	publishedDIMVersionID := uuid.NewString()
+	publishedDIM := sourceDIM
+	publishedDIM.DatasetID = uuid.NewString()
+	publishedDIM.VersionID = publishedDIMVersionID
+	publishedDIM.SchemaHash = strings.Repeat("a", 64)
+	publishedDIM.Document = dimDocument
+	publishedDIM.Code = dimDocument.Dataset.Code
+	publishedDIM.Name = dimDocument.Dataset.Name
+	publishedDIM.Description = dimDocument.Dataset.Description
+
+	document, _, err := buildLLMDesignedDWDDocument(
+		input.Domain, fact, assets,
+		map[string]dwdODSAsset{sourceDIM.VersionID: publishedDIM},
+		plan.Outputs[0],
+	)
+	if err != nil {
+		t.Fatalf("build DWD from processed DIM: %v", err)
+	}
+	if len(document.Nodes) != 2 ||
+		document.Nodes[1].DatasetVersionID != publishedDIMVersionID {
+		t.Fatalf(
+			"DWD dimension dependency=%+v, want published DIM %s",
+			document.Nodes, publishedDIMVersionID,
+		)
+	}
+	factInput := planningInputWithModeledDimensions(
+		input,
+		dwdDimensionStageResult{
+			AssetsBySourceVersion: map[string]dwdODSAsset{
+				sourceDIM.VersionID: publishedDIM,
+			},
+		},
+		plan.Classifications,
+	)
+	if factInput.Tables[1].VersionID != sourceDIM.VersionID ||
+		factInput.Tables[1].DimensionStage != "STANDARDIZED_DIM_CONTRACT" ||
+		factInput.Tables[1].Description != dimDocument.Dataset.Description {
+		t.Fatalf("fact planner did not receive processed DIM metadata: %+v",
+			factInput.Tables[1])
+	}
+}
+
 func TestBuildLLMClassifiedDIMDocumentPreservesEntityContract(t *testing.T) {
 	input, assets, _ := validDWDPlanningFixture()
 	source := assets[input.Tables[1].VersionID]
+	source.SourceTableName = "dim_customer"
 	document, inputHash, err := buildLLMClassifiedDIMDocument(input.Domain, source)
 	if err != nil {
 		t.Fatalf("build DIM document: %v", err)
@@ -99,6 +159,10 @@ func TestBuildLLMClassifiedDIMDocumentPreservesEntityContract(t *testing.T) {
 	if !reflect.DeepEqual(document.OutputGrain.KeyFields, []string{"customer_id"}) {
 		t.Fatalf("DIM keys=%v, want customer_id", document.OutputGrain.KeyFields)
 	}
+	if document.Dataset.Code != "dim_order_customer_customer" ||
+		document.Dataset.Name != "客户主数据" {
+		t.Fatalf("DIM business identity=%q/%q", document.Dataset.Code, document.Dataset.Name)
+	}
 	prepared, err := Prepare(mustMarshalDWDDocument(document))
 	if err != nil {
 		t.Fatalf("prepare DIM document: %v", err)
@@ -109,9 +173,226 @@ func TestBuildLLMClassifiedDIMDocumentPreservesEntityContract(t *testing.T) {
 	if !exists || customerName.Expression.Type != "COALESCE" ||
 		len(customerName.Expression.Arguments) != 2 ||
 		customerName.Expression.Arguments[0].Type != "TRIM" ||
-		customerName.Nullable {
+		customerName.Nullable || strings.TrimSpace(customerName.Description) == "" {
 		t.Fatalf("DIM description cleaning=%+v nullable=%v",
 			customerName.Expression, customerName.Nullable)
+	}
+}
+
+func TestBusinessModeledDatasetCodeUsesPhysicalBusinessIdentity(t *testing.T) {
+	_, assets, plan := validDWDPlanningFixture()
+	fact := assets[plan.Outputs[0].FactDatasetVersionID]
+	fact.SourceTableName = "FACT_ORDER_ITEM"
+	code, err := businessModeledDatasetCode(
+		LayerDWD, "领域:运营", fact, plan.Outputs[0].GrainKeyOutputCodes,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != "dwd_operations_business_analysis_order_item" {
+		t.Fatalf(
+			"DWD code=%q, want dwd_operations_business_analysis_order_item",
+			code,
+		)
+	}
+	fact.SourceTableName = "AGG_MERCHANT_DAILY_OPS"
+	code, err = businessModeledDatasetCode(
+		LayerDWD, "领域:运营", fact, plan.Outputs[0].GrainKeyOutputCodes,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != "dwd_operations_business_analysis_merchant_daily_ops" {
+		t.Fatalf(
+			"aggregate DWD code=%q, want dwd_operations_business_analysis_merchant_daily_ops",
+			code,
+		)
+	}
+	fact.SourceTableName = ""
+	fact.Code = "mapped_4af38f8ad5774bb7bdf7998030ca6a1a"
+	code, err = businessModeledDatasetCode(
+		LayerDIM, "领域:订单", fact, []string{"customer_id"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != "dim_order_business_analysis_customer" {
+		t.Fatalf(
+			"fallback DIM code=%q, want dim_order_business_analysis_customer",
+			code,
+		)
+	}
+}
+
+func TestNormalizeDWDSafeJoinAssociationsDropsTypeOnlyBusinessMismatch(t *testing.T) {
+	input, _, plan := validDWDPlanningFixture()
+	factVersionID := plan.Outputs[0].FactDatasetVersionID
+	dimensionVersionID := plan.Outputs[0].Joins[0].DimensionDatasetVersionID
+	input.Tables[0].Fields[0].Code = "order_id"
+	input.Tables[1].Fields[0].Code = "merchant_id"
+	output := &plan.Outputs[0]
+	output.Joins[0].Conditions[0] = dwdLLMJoinCondition{
+		FactFieldCode: "order_id", DimensionFieldCode: "merchant_id",
+	}
+	output.Fields[0].SourceFieldCode = "order_id"
+	output.Fields[0].OutputCode = "order_id"
+	output.Fields[3].SourceDatasetVersionID = dimensionVersionID
+	output.GrainKeyOutputCodes = []string{"order_id"}
+	normalized := normalizeDWDSafeJoinAssociations(input, plan)
+	if len(normalized.Outputs[0].Joins) != 0 {
+		t.Fatalf("unsafe joins were retained: %+v", normalized.Outputs[0].Joins)
+	}
+	for _, field := range normalized.Outputs[0].Fields {
+		if field.SourceDatasetVersionID != factVersionID {
+			t.Fatalf("unsafe dimension field was retained: %+v", field)
+		}
+	}
+	normalized = completeMandatoryDWDPolicyCleaning(input, normalized)
+	if err := validateDWDLLMPlan(input, normalized); err != nil {
+		t.Fatalf("safe fact-only fallback is invalid: %v", err)
+	}
+}
+
+func TestCompleteDWDOutputContractRepairsOmittedSafeMetadata(t *testing.T) {
+	input, _, plan := validDWDPlanningFixture()
+	factVersionID := plan.Outputs[0].FactDatasetVersionID
+	output := &plan.Outputs[0]
+	output.Joins = nil
+	output.Fields = []dwdLLMField{{
+		SourceDatasetVersionID: factVersionID,
+		SourceFieldCode:        "amount",
+		OutputCode:             "amount",
+		OutputName:             "订单金额",
+		OutputDescription:      "订单金额",
+		Role:                   "MEASURE",
+		Processing: []dwdLLMProcessingStep{{
+			Operation: "ROUND", Arguments: []string{},
+		}},
+	}}
+	output.GrainKeyOutputCodes = []string{"CUSTOMER_ID"}
+	output.TimeOutputCode = "ORDER_DATE"
+
+	completed := normalizeDWDSafeJoinAssociations(input, plan)
+	completed = completeDWDOutputContract(input, completed)
+	completed = normalizeDWDJoinOutputProjection(completed)
+	completed = completeMandatoryDWDPolicyCleaning(input, completed)
+	completed = dropInvalidDWDProcessing(input, completed)
+	if err := validateDWDLLMPlan(input, completed); err != nil {
+		t.Fatalf("completed DWD contract is invalid: %v", err)
+	}
+	result := completed.Outputs[0]
+	if len(result.Joins) != 1 || len(result.Fields) != 4 {
+		t.Fatalf("completed joins/fields=%d/%d, want 1/4: %+v",
+			len(result.Joins), len(result.Fields), result)
+	}
+	for _, code := range []string{"customer_id", "order_date", "amount", "customer_name"} {
+		found := false
+		for _, field := range result.Fields {
+			if field.OutputCode == code {
+				found = true
+				if code == "amount" && len(field.Processing) != 0 {
+					t.Fatalf("invalid amount processing was retained: %+v", field.Processing)
+				}
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("completed output is missing %s: %+v", code, result.Fields)
+		}
+	}
+	if !reflect.DeepEqual(result.GrainKeyOutputCodes, []string{"customer_id"}) ||
+		result.TimeOutputCode != "order_date" {
+		t.Fatalf("completed grain/time=%v/%q",
+			result.GrainKeyOutputCodes, result.TimeOutputCode)
+	}
+}
+
+func TestNormalizeDWDFactCheckpointRefreshesCaseSensitiveDSLReferences(t *testing.T) {
+	input, _, plan := validDWDPlanningFixture()
+	output := plan.Outputs[0]
+	output.GrainKeyOutputCodes = []string{"CUSTOMER_ID"}
+	output.TimeOutputCode = "ORDER_DATE"
+	normalized, err := normalizeDWDFactCheckpoint(
+		input, plan.Classifications, output.FactDatasetVersionID, output,
+	)
+	if err != nil {
+		t.Fatalf("normalize FACT checkpoint: %v", err)
+	}
+	if !reflect.DeepEqual(normalized.GrainKeyOutputCodes, []string{"customer_id"}) ||
+		normalized.TimeOutputCode != "order_date" {
+		t.Fatalf("normalized checkpoint grain/time=%v/%q",
+			normalized.GrainKeyOutputCodes, normalized.TimeOutputCode)
+	}
+}
+
+func TestIncrementalFactSelectionSkipsUnchangedAndRedesignsChangedSources(t *testing.T) {
+	input, _, plan := validDWDPlanningFixture()
+	fact := input.Tables[0]
+	dimension := input.Tables[1]
+	historical := dwdHistoricalOutput{
+		FactDatasetID:  fact.DatasetID,
+		DWDDatasetID:   uuid.NewString(),
+		DWDDatasetCode: "dwd_order_business_analysis_orders",
+		SourceVersionByDataset: map[string]string{
+			fact.DatasetID:      fact.VersionID,
+			dimension.DatasetID: dimension.VersionID,
+		},
+	}
+	input.History = dwdPlanningHistory{
+		OutputsByFactDataset: map[string]dwdHistoricalOutput{
+			fact.DatasetID: historical,
+		},
+		DomainVersionByDataset: map[string]string{
+			fact.DatasetID:      fact.VersionID,
+			dimension.DatasetID: dimension.VersionID,
+		},
+	}
+	design, unchanged := selectIncrementalDWDFacts(input, plan.Classifications)
+	if len(design) != 0 || len(unchanged) != 1 {
+		t.Fatalf("unchanged selection design=%v unchanged=%+v", design, unchanged)
+	}
+	codeDrift := historical
+	codeDrift.DWDDatasetCode = "dwd_fact_orders"
+	input.History.OutputsByFactDataset[fact.DatasetID] = codeDrift
+	design, unchanged = selectIncrementalDWDFacts(input, plan.Classifications)
+	if !reflect.DeepEqual(design, []string{fact.VersionID}) || len(unchanged) != 0 {
+		t.Fatalf("business-code drift selection design=%v unchanged=%+v", design, unchanged)
+	}
+	input.History.OutputsByFactDataset[fact.DatasetID] = dwdHistoricalOutput{
+		FactDatasetID:  fact.DatasetID,
+		DWDDatasetID:   historical.DWDDatasetID,
+		DWDDatasetCode: historical.DWDDatasetCode,
+		SourceVersionByDataset: map[string]string{
+			fact.DatasetID:      fact.VersionID,
+			dimension.DatasetID: uuid.NewString(),
+		},
+	}
+	design, unchanged = selectIncrementalDWDFacts(input, plan.Classifications)
+	if !reflect.DeepEqual(design, []string{fact.VersionID}) || len(unchanged) != 0 {
+		t.Fatalf("changed selection design=%v unchanged=%+v", design, unchanged)
+	}
+	input.History.OutputsByFactDataset[fact.DatasetID] = historical
+	newPublishedDIMVersionID := uuid.NewString()
+	design, unchanged = selectIncrementalDWDFacts(
+		input, plan.Classifications,
+		map[string]string{dimension.DatasetID: newPublishedDIMVersionID},
+	)
+	if !reflect.DeepEqual(design, []string{fact.VersionID}) || len(unchanged) != 0 {
+		t.Fatalf(
+			"new published DIM must redesign facts: design=%v unchanged=%+v",
+			design, unchanged,
+		)
+	}
+}
+
+func TestPartialDWDPlanAllowsOneFactFailureWithoutInvalidatingDomain(t *testing.T) {
+	input, _, plan := validDWDPlanningFixture()
+	plan.Outputs = nil
+	if err := validateDWDPartialLLMPlan(input, plan); err != nil {
+		t.Fatalf("partial plan should preserve valid classification: %v", err)
+	}
+	if err := validateDWDLLMPlan(input, plan); err == nil {
+		t.Fatal("full plan unexpectedly accepted missing FACT output")
 	}
 }
 
@@ -144,6 +425,48 @@ func TestDWDModelingResponseSchemaPassesCommonAIBoundary(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("common AI boundary rejected DWD schema: %v", err)
+	}
+}
+
+func TestDWDStageSchemasExcludeDeepSeekUnsupportedUniqueItems(t *testing.T) {
+	input, _, plan := validDWDPlanningFixture()
+	classificationSchema, err := dwdClassificationResponseSchema(input)
+	if err != nil {
+		t.Fatalf("build classification schema: %v", err)
+	}
+	dimensionTable, _, err := dwdDimensionPlanningScope(
+		input, plan.Classifications, input.Tables[1].VersionID,
+	)
+	if err != nil {
+		t.Fatalf("scope dimension schema: %v", err)
+	}
+	dimensionSchema, err := dwdDimensionDesignResponseSchema(dimensionTable)
+	if err != nil {
+		t.Fatalf("build dimension schema: %v", err)
+	}
+	factInput, _, err := dwdFactPlanningScope(
+		input, plan.Classifications, input.Tables[0].VersionID,
+	)
+	if err != nil {
+		t.Fatalf("scope fact schema: %v", err)
+	}
+	factSchema, err := dwdFactDesignResponseSchema(
+		factInput, input.Tables[0].VersionID,
+	)
+	if err != nil {
+		t.Fatalf("build fact schema: %v", err)
+	}
+	for name, schema := range map[string]aiplatform.JSONSchema{
+		"classification": classificationSchema,
+		"dimension":      dimensionSchema,
+		"fact":           factSchema,
+	} {
+		if bytes.Contains(schema.Schema, []byte(`"uniqueItems"`)) {
+			t.Fatalf(
+				"%s schema contains deepseek-v3 unsupported uniqueItems",
+				name,
+			)
+		}
 	}
 }
 
@@ -226,12 +549,8 @@ func TestDWDModelingPlannerReturnsInvalidCandidateAndSafeDiagnosticToRepair(t *t
 	}
 }
 
-func TestDWDModelingPlannerRepairsStructureThenDomainContract(t *testing.T) {
+func TestDWDModelingPlannerRepairsStructureThenNormalizesDuplicateJoin(t *testing.T) {
 	input, _, validPlan := validDWDPlanningFixture()
-	validContent, err := json.Marshal(validPlan)
-	if err != nil {
-		t.Fatalf("marshal valid plan: %v", err)
-	}
 	invalidDomainPlan := cloneDWDPlan(t, validPlan)
 	invalidDomainPlan.Outputs[0].Joins = append(
 		invalidDomainPlan.Outputs[0].Joins,
@@ -255,27 +574,19 @@ func TestDWDModelingPlannerRepairsStructureThenDomainContract(t *testing.T) {
 					Content: invalidDomainContent,
 				},
 			},
-			{
-				RequestID: "fully-repaired",
-				ProviderResult: aiplatform.ProviderResult{
-					Content: validContent,
-				},
-			},
 		},
-		errors: []error{invalidStructureErr, nil, nil},
+		errors: []error{invalidStructureErr, nil},
 	}
 	planner := NewOrchestratedDWDModelingPlanner(invoker, time.Second)
 	completion, err := planner.Plan(context.Background(), input)
 	if err != nil {
 		t.Fatalf("incrementally repair DWD plan: %v", err)
 	}
-	if completion.AIRequestID != "fully-repaired" || len(invoker.calls) != 3 {
+	if completion.AIRequestID != "domain-invalid" || len(invoker.calls) != 2 {
 		t.Fatalf("completion/calls=%#v/%d", completion, len(invoker.calls))
 	}
-	lastMessages := invoker.calls[2].Request.Messages
-	if len(lastMessages) != 4 ||
-		!strings.Contains(lastMessages[3].Parts[0].Text, "joined more than once") {
-		t.Fatalf("third invocation did not receive precise domain repair: %#v", lastMessages)
+	if len(completion.Plan.Outputs[0].Joins) != 1 {
+		t.Fatalf("duplicate join was not normalized: %+v", completion.Plan.Outputs[0].Joins)
 	}
 }
 
@@ -311,7 +622,7 @@ func TestDWDModelingClassifierUsesIndependentBoundedRepairStage(t *testing.T) {
 		t.Fatalf("classify ODS: %v", err)
 	}
 	if len(completion.Classifications) != len(input.Tables) ||
-		len(invoker.calls) != dwdStageInvocationAttempts {
+		len(invoker.calls) != 2 {
 		t.Fatalf(
 			"classification/calls=%d/%d",
 			len(completion.Classifications), len(invoker.calls),
@@ -321,10 +632,327 @@ func TestDWDModelingClassifierUsesIndependentBoundedRepairStage(t *testing.T) {
 		invoker.calls[0].Request.MaxOutputTokens != 3000 {
 		t.Fatalf("unexpected classification invocation: %#v", invoker.calls[0])
 	}
+	if !strings.Contains(
+		invoker.calls[0].Request.Messages[0].Parts[0].Text,
+		"订单商品/订单行项目",
+	) || !strings.Contains(
+		invoker.calls[0].Request.Messages[0].Parts[0].Text,
+		"同一 ODS 可以同时产生 DWD 与 DIM",
+	) || !strings.Contains(
+		invoker.calls[0].Request.Messages[0].Parts[0].Text,
+		"dimensionKeyFieldCodes",
+	) {
+		t.Fatalf(
+			"classification prompt lost multi-output grain contract: %#v",
+			invoker.calls[0].Request.Messages[0],
+		)
+	}
 	lastMessages := invoker.calls[1].Request.Messages
 	if len(lastMessages) != 4 ||
 		!strings.Contains(lastMessages[3].Parts[0].Text, "不要返回 outputs") {
 		t.Fatalf("classification repair was not stage-specific: %#v", lastMessages)
+	}
+}
+
+func TestDWDModelingDimensionDesignerAddsDescriptionsAndStandardization(t *testing.T) {
+	input, assets, validPlan := validDWDPlanningFixture()
+	dimensionTable := input.Tables[1]
+	designedFields := make(
+		[]dwdLLMDimensionFieldDesign, 0, len(dimensionTable.Fields),
+	)
+	for _, field := range dimensionTable.Fields {
+		designedFields = append(designedFields, dwdLLMDimensionFieldDesign{
+			SourceFieldCode:   field.Code,
+			OutputName:        "标准" + field.Name,
+			OutputDescription: "客户实体的" + field.Name + "标准说明",
+			Standardization: mandatoryDIMCleaning(
+				assets[dimensionTable.VersionID].Document.Fields[len(designedFields)],
+			),
+		})
+	}
+	content, err := json.Marshal(dwdLLMDimensionDesignPayload{
+		Output: dwdLLMDimensionDesign{
+			SourceDatasetVersionID: dimensionTable.VersionID,
+			Name:                   "客户维度",
+			Description:            "统一客户标识与说明属性",
+			GrainKeyFieldCodes: append(
+				[]string(nil), defaultDWDDimensionKeys(dimensionTable)...,
+			),
+			Fields:    designedFields,
+			Rationale: "客户表保持一客一行实体粒度",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal dimension design: %v", err)
+	}
+	invoker := &scriptedDWDPlannerInvoker{
+		results: []aiplatform.InvocationResult{{
+			RequestID: uuid.NewString(),
+			ProviderResult: aiplatform.ProviderResult{
+				Content: content,
+			},
+		}},
+		errors: []error{nil},
+	}
+	planner := NewOrchestratedDWDModelingPlanner(invoker, time.Second)
+	completion, err := planner.DesignDimension(
+		context.Background(), input, validPlan.Classifications,
+		dimensionTable.VersionID,
+	)
+	if err != nil {
+		t.Fatalf("design one DIM: %v", err)
+	}
+	if completion.Output.Name != "客户维度" ||
+		len(completion.Output.Fields) != len(dimensionTable.Fields) {
+		t.Fatalf("unexpected DIM design: %+v", completion.Output)
+	}
+	call := invoker.calls[0]
+	if call.PromptVersion != dwdDimensionDesignPromptVersion ||
+		call.ResourceID != dimensionTable.VersionID ||
+		!strings.Contains(
+			call.Request.Messages[0].Parts[0].Text,
+			"字段值标准化",
+		) {
+		t.Fatalf("unexpected DIM invocation: %#v", call)
+	}
+	if err := aiplatform.ValidateProviderRequest(call.Request); err != nil {
+		t.Fatalf("DIM stage request rejected by common AI boundary: %v", err)
+	}
+	document, _, err := buildLLMDesignedDIMDocument(
+		input.Domain, assets[dimensionTable.VersionID], completion.Output,
+	)
+	if err != nil {
+		t.Fatalf("compile designed DIM: %v", err)
+	}
+	if document.Dataset.Name != "客户维度" ||
+		document.Fields[0].Name != "标准客户编号" ||
+		!strings.Contains(document.Fields[0].Description, "标准说明") {
+		t.Fatalf("DIM design metadata was not compiled: %+v", document)
+	}
+}
+
+func TestOrderItemFactCanAlsoExtractProductDimension(t *testing.T) {
+	datasetID, versionID := uuid.NewString(), uuid.NewString()
+	fields := []Field{
+		{
+			ID: "field_item_id", Code: "item_id", Name: "订单商品行编号",
+			Role: "IDENTIFIER", CanonicalType: "STRING", Nullable: false,
+			Expression: Expression{Type: "FIELD_REF", NodeID: "source", Field: "item_id"},
+		},
+		{
+			ID: "field_order_id", Code: "order_id", Name: "订单编号",
+			Role: "IDENTIFIER", CanonicalType: "STRING", Nullable: false,
+			Expression: Expression{Type: "FIELD_REF", NodeID: "source", Field: "order_id"},
+		},
+		{
+			ID: "field_sku_id", Code: "sku_id", Name: "商品 SKU 编号",
+			Role: "IDENTIFIER", CanonicalType: "STRING", Nullable: false,
+			Expression: Expression{Type: "FIELD_REF", NodeID: "source", Field: "sku_id"},
+		},
+		{
+			ID: "field_item_name", Code: "item_name", Name: "商品名称",
+			Role: "ATTRIBUTE", CanonicalType: "STRING", Nullable: true,
+			Expression: Expression{Type: "FIELD_REF", NodeID: "source", Field: "item_name"},
+		},
+		{
+			ID: "field_category", Code: "category", Name: "商品分类",
+			Role: "ATTRIBUTE", CanonicalType: "STRING", Nullable: true,
+			Expression: Expression{Type: "FIELD_REF", NodeID: "source", Field: "category"},
+		},
+		{
+			ID: "field_quantity", Code: "quantity", Name: "购买数量",
+			Role: "MEASURE", CanonicalType: "INTEGER", SemanticType: "QUANTITY",
+			Nullable:   false,
+			Expression: Expression{Type: "FIELD_REF", NodeID: "source", Field: "quantity"},
+		},
+		{
+			ID: "field_line_amount", Code: "line_amount", Name: "行金额",
+			Role: "MEASURE", CanonicalType: "DECIMAL", SemanticType: "AMOUNT",
+			Nullable:   false,
+			Expression: Expression{Type: "FIELD_REF", NodeID: "source", Field: "line_amount"},
+		},
+	}
+	source := dwdODSAsset{
+		DatasetID: datasetID, VersionID: versionID,
+		SchemaHash: strings.Repeat("c", 64), Name: "订单商品明细事实表",
+		SourceTableName: "FACT_ORDER_ITEM",
+		Tags:            []string{"领域:运营", "主题:经营分析"},
+		Document: Document{
+			Dataset: Descriptor{Layer: LayerODS},
+			Fields:  fields,
+			OutputGrain: OutputGrain{
+				Description: "每行代表一条订单商品明细",
+				KeyFields:   []string{"item_id"},
+			},
+		},
+	}
+	input := dwdPlanningInput{
+		TenantID: uuid.NewString(), ActorID: uuid.NewString(),
+		ResourceID: versionID, Domain: "领域:运营",
+		Trigger: dwdPlanningTrigger{
+			DatasetID: datasetID, VersionID: versionID,
+		},
+		Tables: []dwdPlanningTable{planningTableFromAsset(source)},
+	}
+	classification := dwdLLMClassification{
+		DatasetVersionID:             versionID,
+		Role:                         "FACT",
+		DimensionKeyFieldCodes:       []string{"sku_id"},
+		DimensionAttributeFieldCodes: []string{"item_name", "category"},
+		Rationale:                    "订单商品行为事实粒度，同时包含可按 SKU 去重治理的商品属性",
+	}
+	classifications := []dwdLLMClassification{classification}
+	if err := validateDWDLLMClassifications(
+		input, input.Domain, classifications,
+	); err != nil {
+		t.Fatalf("validate multi-output classification: %v", err)
+	}
+	scoped, scopedClassification, err := dwdDimensionPlanningScope(
+		input, classifications, versionID,
+	)
+	if err != nil {
+		t.Fatalf("scope embedded product dimension: %v", err)
+	}
+	gotCodes := make([]string, 0, len(scoped.Fields))
+	for _, field := range scoped.Fields {
+		gotCodes = append(gotCodes, field.Code)
+	}
+	if !reflect.DeepEqual(
+		gotCodes, []string{"sku_id", "item_name", "category"},
+	) || !reflect.DeepEqual(
+		scoped.OutputGrain.KeyFields, []string{"sku_id"},
+	) {
+		t.Fatalf(
+			"embedded dimension scope=%v grain=%v",
+			gotCodes, scoped.OutputGrain.KeyFields,
+		)
+	}
+	designFields := make([]dwdLLMDimensionFieldDesign, 0, len(scoped.Fields))
+	for _, field := range scoped.Fields {
+		sourceField, exists := dwdDocumentFieldByCode(
+			source.Document, field.Code,
+		)
+		if !exists {
+			t.Fatalf("scoped field %s is missing from source", field.Code)
+		}
+		designFields = append(designFields, dwdLLMDimensionFieldDesign{
+			SourceFieldCode:   field.Code,
+			OutputName:        field.Name,
+			OutputDescription: "商品实体的" + field.Name,
+			Standardization:   mandatoryDIMCleaning(sourceField),
+		})
+	}
+	document, _, err := buildLLMDesignedDIMDocument(
+		input.Domain, source, dwdLLMDimensionDesign{
+			SourceDatasetVersionID: versionID,
+			Name:                   "商品维度",
+			Description:            "按 SKU 抽取并治理的商品说明属性",
+			GrainKeyFieldCodes: append(
+				[]string(nil), scopedClassification.DimensionKeyFieldCodes...,
+			),
+			Fields:    designFields,
+			Rationale: "商品维度保持一 SKU 一行",
+		},
+	)
+	if err != nil {
+		t.Fatalf("build embedded product dimension: %v", err)
+	}
+	if document.Dataset.Layer != LayerDIM ||
+		document.Dataset.Code != "dim_operations_business_analysis_sku" ||
+		!document.Distinct || len(document.Fields) != 3 {
+		t.Fatalf("unexpected product dimension document: %+v", document)
+	}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := Prepare(raw)
+	if err != nil {
+		t.Fatalf("prepare product dimension: %v", err)
+	}
+	hasDeduplicate := false
+	for _, step := range prepared.LogicalPlan.Steps {
+		hasDeduplicate = hasDeduplicate || step.Kind == "DEDUPLICATE"
+	}
+	if !hasDeduplicate {
+		t.Fatalf(
+			"product dimension plan lacks deduplication: %+v",
+			prepared.LogicalPlan.Steps,
+		)
+	}
+	dimensionIdentity := classificationDimensionIdentity(classification)
+	factInput := planningInputWithModeledDimensions(
+		input,
+		dwdDimensionStageResult{AssetsBySourceVersion: map[string]dwdODSAsset{
+			dimensionIdentity: {
+				DatasetID: uuid.NewString(), VersionID: uuid.NewString(),
+				SchemaHash: prepared.DSLHash, Code: document.Dataset.Code,
+				Name: document.Dataset.Name, Document: document,
+			},
+		}},
+		classifications,
+	)
+	expanded := expandedDWDClassifications(classifications)
+	factScope, factClassifications, err := dwdFactPlanningScope(
+		factInput, expanded, versionID,
+	)
+	if err != nil {
+		t.Fatalf("scope fact with extracted product dimension: %v", err)
+	}
+	if len(factScope.Tables) != 2 || len(factClassifications) != 2 ||
+		factClassifications[0].Role != "FACT" ||
+		factClassifications[1].Role != "DIMENSION" ||
+		factScope.Tables[1].VersionID != dimensionIdentity {
+		t.Fatalf(
+			"fact context did not retain both products: tables=%+v classifications=%+v",
+			factScope.Tables, factClassifications,
+		)
+	}
+}
+
+func TestClassificationAllowsNumericAttributesOnEntityODSButNotFactProjection(
+	t *testing.T,
+) {
+	input, _, plan := validDWDPlanningFixture()
+	dimension := &input.Tables[1]
+	dimension.Fields = append(dimension.Fields, dwdPlanningField{
+		Code: "credit_limit", Name: "信用额度", Role: "MEASURE",
+		CanonicalType: "DECIMAL", SemanticType: "AMOUNT", Nullable: true,
+	})
+	plan.Classifications[1].DimensionKeyFieldCodes =
+		[]string{"customer_id"}
+	plan.Classifications[1].DimensionAttributeFieldCodes =
+		[]string{"customer_name", "credit_limit"}
+	if err := validateDWDLLMClassifications(
+		input, input.Domain, plan.Classifications,
+	); err != nil {
+		t.Fatalf("entity ODS numeric attribute was rejected: %v", err)
+	}
+
+	invalid := append(
+		[]dwdLLMClassification(nil), plan.Classifications...,
+	)
+	invalid[0].DimensionKeyFieldCodes = []string{"customer_id"}
+	invalid[0].DimensionAttributeFieldCodes = []string{"amount"}
+	err := validateDWDLLMClassifications(input, input.Domain, invalid)
+	if err == nil || !strings.Contains(err.Error(), "amount") ||
+		!strings.Contains(err.Error(), input.Tables[0].VersionID) {
+		t.Fatalf("FACT transactional attribute lacks precise diagnostic: %v", err)
+	}
+
+	overlap := append(
+		[]dwdLLMClassification(nil), plan.Classifications...,
+	)
+	overlap[1].DimensionAttributeFieldCodes =
+		[]string{"customer_id", "customer_name"}
+	normalized := normalizeDWDClassifications(input, overlap)
+	if containsString(
+		normalized[1].DimensionAttributeFieldCodes, "customer_id",
+	) {
+		t.Fatalf(
+			"entity key was not removed from attributes: %+v",
+			normalized[1],
+		)
 	}
 }
 
@@ -594,7 +1222,7 @@ func TestValidateAndBuildDWDCompositeJoin(t *testing.T) {
 		t.Fatalf("validate composite join plan: %v", err)
 	}
 	document, _, err := buildLLMDesignedDWDDocument(
-		input.Domain, fact, assets, plan.Outputs[0],
+		input.Domain, fact, assets, nil, plan.Outputs[0],
 	)
 	if err != nil {
 		t.Fatalf("build composite join DWD: %v", err)
@@ -705,6 +1333,28 @@ func TestValidateDWDCleaningAllowsStringTimeCastWithoutInventedSentinel(t *testi
 		field, []string{"TRIM", "COALESCE_UNKNOWN", "CAST_DATETIME"},
 	); err == nil || !strings.Contains(err.Error(), "time field must not fill nulls") {
 		t.Fatalf("string time sentinel was not rejected precisely: %v", err)
+	}
+}
+
+func TestValidateDWDProcessingRejectsInvalidNumericCoalesceLiteral(
+	t *testing.T,
+) {
+	err := validateDWDProcessing(
+		dwdPlanningField{
+			Code: "rating", Role: "MEASURE",
+			CanonicalType: "DECIMAL", Nullable: true,
+		},
+		nil,
+		[]dwdLLMProcessingStep{{
+			Operation: "COALESCE",
+			Arguments: []string{"rating"},
+		}},
+		map[string]dwdPlanningTable{},
+		map[string]bool{},
+		map[string]map[string]bool{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "fallback literal") {
+		t.Fatalf("invalid numeric COALESCE fallback was accepted: %v", err)
 	}
 }
 
@@ -832,6 +1482,8 @@ func validDWDPlanningFixture() (
 	fact := dwdODSAsset{
 		DatasetID: factDatasetID, VersionID: factVersionID,
 		SchemaHash: strings.Repeat("a", 64), Name: "订单事实",
+		SourceTableName: "FACT_ORDERS",
+		Tags:            []string{"领域:订单", "主题:经营分析"},
 		Document: Document{
 			Dataset: Descriptor{Layer: LayerODS}, Fields: factFields,
 			OutputGrain: OutputGrain{
@@ -843,7 +1495,9 @@ func validDWDPlanningFixture() (
 	dimension := dwdODSAsset{
 		DatasetID: dimensionDatasetID, VersionID: dimensionVersionID,
 		SchemaHash: strings.Repeat("b", 64), Name: "客户主数据",
-		Document: Document{Dataset: Descriptor{Layer: LayerODS}, Fields: dimensionFields},
+		SourceTableName: "DIM_CUSTOMER",
+		Tags:            []string{"领域:订单", "主题:客户"},
+		Document:        Document{Dataset: Descriptor{Layer: LayerODS}, Fields: dimensionFields},
 	}
 	input := dwdPlanningInput{
 		TenantID: uuid.NewString(), ActorID: uuid.NewString(),
@@ -920,6 +1574,8 @@ func planningTableFromAsset(asset dwdODSAsset) dwdPlanningTable {
 	table := dwdPlanningTable{
 		DatasetID: asset.DatasetID, VersionID: asset.VersionID, Name: asset.Name,
 		Description: asset.Description, OutputGrain: asset.Document.OutputGrain,
+		SourceCode: asset.Code, SourceTableName: asset.SourceTableName,
+		Tags: append([]string(nil), asset.Tags...),
 	}
 	for _, field := range asset.Document.Fields {
 		table.Fields = append(table.Fields, dwdPlanningField{

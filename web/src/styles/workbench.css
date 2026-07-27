@@ -227,7 +227,7 @@
 }
 .workbench-background-toolbar nav button.active strong { background: #dbeafe; color: #1d4ed8; }
 .workbench-background-toolbar > button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; font-size: 11px; }
-.workbench-background-notice, .workbench-background-error {
+.workbench-background-focus, .workbench-background-notice, .workbench-background-error {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -237,6 +237,18 @@
   padding: 10px 12px;
   font-size: 11px;
   font-weight: 700;
+}
+.workbench-background-focus {
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.workbench-background-focus .quiet-button {
+  flex: none;
+  border-color: #93c5fd;
+  padding: 6px 10px;
+  color: #1d4ed8;
+  font-size: 10px;
 }
 .workbench-background-notice { border: 1px solid #a7f3d0; background: #f0fdf4; color: #047857; }
 .workbench-background-error { border: 1px solid #fecaca; background: #fef2f2; color: #b42318; }
@@ -333,6 +345,22 @@
 .workbench-background-diagnostic strong { font-size: 9px; }
 .workbench-background-task > footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .workbench-background-task > footer small { color: #7a8699; font-size: 9px; }
+.workbench-background-actions { display: inline-flex; flex: none; align-items: center; gap: 8px; }
+.workbench-retry-button {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  border: 1px solid #a9c4f8;
+  border-radius: 7px;
+  padding: 0 11px;
+  background: #f5f8ff;
+  color: #175cd3;
+  font-size: 10px;
+  font-weight: 900;
+}
+.workbench-retry-button:disabled { cursor: not-allowed; opacity: .5; }
 .workbench-stop-button {
   display: inline-flex;
   flex: none;

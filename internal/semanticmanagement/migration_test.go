@@ -125,6 +125,119 @@ func TestDimensionProfileMigrationIsBoundedFencedAndAggregateOnly(t *testing.T) 
 	}
 }
 
+func TestSeparatedWarehouseDimensionProfileLimitsAreScoped(t *testing.T) {
+	migrateRaw, err := os.ReadFile("../../scripts/migrate.sh")
+	if err != nil {
+		t.Fatalf("read migrate script: %v", err)
+	}
+	migrateSQL := string(migrateRaw)
+	for _, fragment := range []string{
+		"warehouse_published.apply_dimension_profile_resource_limits",
+		"SECURITY DEFINER",
+		"selected_timeout_seconds NOT BETWEEN 1 AND 300",
+		"selected_work_mem_kb NOT BETWEEN 64 AND 262144",
+		"selected_temp_file_limit_kb NOT BETWEEN 1024 AND 1048576",
+		"set_config('temp_file_limit',selected_temp_file_limit_kb::text,true)",
+		"REVOKE ALL ON FUNCTION",
+		"GRANT EXECUTE ON FUNCTION",
+	} {
+		if !strings.Contains(migrateSQL, fragment) {
+			t.Errorf("missing separated warehouse profile limit guard %q", fragment)
+		}
+	}
+
+	storeRaw, err := os.ReadFile("dimension_profile_postgres.go")
+	if err != nil {
+		t.Fatalf("read dimension profile store: %v", err)
+	}
+	store := string(storeRaw)
+	if !strings.Contains(
+		store,
+		"SELECT warehouse_published.apply_dimension_profile_resource_limits(",
+	) {
+		t.Error("separated warehouse profiling bypasses the bounded resource helper")
+	}
+	if strings.Contains(
+		store,
+		"set_config('temp_file_limit',$3,true)",
+	) {
+		t.Error("separated warehouse worker still sets superuser-only temp_file_limit directly")
+	}
+
+	for _, fragment := range []string{
+		"REVOKE ALL ON FUNCTION platform.dataset_version_effective_domain(uuid) FROM PUBLIC",
+		"GRANT EXECUTE ON FUNCTION platform.dataset_version_effective_domain(uuid)",
+		":'app_user'",
+		":'worker_user'",
+	} {
+		if !strings.Contains(migrateSQL, fragment) {
+			t.Errorf("missing effective domain function privilege %q", fragment)
+		}
+	}
+}
+
+func TestMemberRefreshDoesNotRequireProfileWritePrivilege(t *testing.T) {
+	raw, err := os.ReadFile("dimension_refresh_postgres.go")
+	if err != nil {
+		t.Fatalf("read member refresh store: %v", err)
+	}
+	store := string(raw)
+	if strings.Contains(store, "FOR SHARE OF materialization,profile") {
+		t.Fatal("API member refresh must not require UPDATE privilege on worker-owned profiles")
+	}
+	if !strings.Contains(store, "FOR SHARE OF materialization") {
+		t.Fatal("member refresh must fence the current physical materialization")
+	}
+}
+
+func TestManualDimensionIdentificationReplaysExhaustedProfiles(t *testing.T) {
+	raw, err := os.ReadFile(
+		"../../migrations/000125_manual_dimension_profile_replay.up.sql",
+	)
+	if err != nil {
+		t.Fatalf("read dimension profile replay migration: %v", err)
+	}
+	sql := string(raw)
+	for _, fragment := range []string{
+		"OLD.status='FAILED' AND NEW.status='QUEUED'",
+		"NEW.attempt<>0",
+		"NEW.started_at IS NOT NULL",
+		"UPDATE platform.dimension_profile_jobs AS profile",
+		"SET status='QUEUED',attempt=0,next_attempt_at=now()",
+		"profile.materialization_id=target.materialization_id",
+		"profile.status='FAILED'",
+		"'REPLAY_DIMENSION_PROFILE'",
+		"'MANUAL_IDENTIFICATION_REPLAY'",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Errorf("missing manual profile replay guard %q", fragment)
+		}
+	}
+}
+
+func TestRepeatedManualIdentificationReusesCurrentProfiles(t *testing.T) {
+	raw, err := os.ReadFile(
+		"../../migrations/000126_idempotent_manual_dimension_identification.up.sql",
+	)
+	if err != nil {
+		t.Fatalf("read idempotent manual identification migration: %v", err)
+	}
+	sql := string(raw)
+	for _, fragment := range []string{
+		"IF EXISTS(",
+		"AND NOT EXISTS(",
+		"profile.materialization_id=target.materialization_id",
+		"profile.profile_version='dws-dimension-profile-v1'",
+		"profile.policy_version='dimension-member-policy-v1'",
+		"PERFORM platform.enqueue_dws_dimension_profiles(",
+		"profile.status='FAILED'",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Errorf("missing idempotent manual identification guard %q", fragment)
+		}
+	}
+}
+
 func TestSemanticRelationshipMigrationBoundsPathsAndIndexesExactLookup(t *testing.T) {
 	raw, err := os.ReadFile("../../migrations/000086_semantic_relationship_contracts.up.sql")
 	if err != nil {

@@ -26,6 +26,7 @@ type MappedDatasetTable struct {
 	TableName           string
 	BusinessName        string
 	BusinessDescription string
+	Domain              string
 }
 
 // MappedDatasetColumn 保留真实物理字段名作为 projection/FIELD_REF，
@@ -122,6 +123,7 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 			Code:        code,
 			Name:        name,
 			Description: strings.TrimSpace(table.BusinessDescription),
+			Domain:      mappedDatasetDomain(table.Domain),
 			Type:        "SINGLE_SOURCE",
 			Layer:       LayerODS,
 		},
@@ -271,7 +273,12 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 			JOIN platform.file_asset_versions fv
 			  ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version
 			WHERE fa.id=source.file_asset_id),''),
-		t.table_name,t.metadata_version,t.structure_hash,t.business_name,t.business_description
+		t.table_name,t.metadata_version,t.structure_hash,t.business_name,t.business_description,
+		COALESCE((
+		  SELECT min(regexp_replace(tag,'^领域[：:]','','g'))
+		  FROM unnest(COALESCE(t.tags,'{}'::text[])) AS tag
+		  WHERE tag ~ '^领域[：:]'
+		),'')
 		FROM platform.metadata_tables t
 		JOIN platform.data_sources source ON source.id=t.data_source_id AND source.tenant_id=t.tenant_id
 		WHERE t.id::text=$1 AND t.tenant_id::text=$2
@@ -288,7 +295,7 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 		FOR SHARE OF t,source`, tableID, tenantID).Scan(
 		&table.ID, &table.DataSourceID, &table.DataSourceName, &table.FileVersionID, &table.TableName,
 		&table.MetadataVersion, &table.StructureHash,
-		&table.BusinessName, &table.BusinessDescription,
+		&table.BusinessName, &table.BusinessDescription, &table.Domain,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
@@ -473,7 +480,12 @@ func loadMappedDatasetInputTx(
 			JOIN platform.file_asset_versions fv
 			  ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version
 			WHERE fa.id=source.file_asset_id),''),
-		t.table_name,t.metadata_version,t.structure_hash,t.business_name,t.business_description
+		t.table_name,t.metadata_version,t.structure_hash,t.business_name,t.business_description,
+		COALESCE((
+		  SELECT min(regexp_replace(tag,'^领域[：:]','','g'))
+		  FROM unnest(COALESCE(t.tags,'{}'::text[])) AS tag
+		  WHERE tag ~ '^领域[：:]'
+		),'')
 		FROM platform.metadata_tables t
 		JOIN platform.data_sources source ON source.id=t.data_source_id AND source.tenant_id=t.tenant_id
 		WHERE t.id::text=$1 AND t.tenant_id::text=$2
@@ -486,7 +498,7 @@ func loadMappedDatasetInputTx(
 	err := tx.QueryRow(ctx, query, tableID, tenantID).Scan(
 		&table.ID, &table.DataSourceID, &table.DataSourceName, &table.FileVersionID,
 		&table.TableName, &table.MetadataVersion, &table.StructureHash,
-		&table.BusinessName, &table.BusinessDescription,
+		&table.BusinessName, &table.BusinessDescription, &table.Domain,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MappedDatasetTable{}, nil, false, nil
@@ -924,6 +936,16 @@ func mappedDatasetDisplayName(table MappedDatasetTable) string {
 		}
 	}
 	return ""
+}
+
+func mappedDatasetDomain(value string) string {
+	value = strings.TrimSpace(strings.TrimPrefix(
+		strings.ReplaceAll(value, "：", ":"), "领域:",
+	))
+	if value == "" {
+		return "general"
+	}
+	return value
 }
 
 func containsHan(value string) bool {

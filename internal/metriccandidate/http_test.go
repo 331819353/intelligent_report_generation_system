@@ -107,6 +107,47 @@ func candidateHTTPRequest(t *testing.T, harness candidateHTTPHarness, method, pa
 	return response
 }
 
+func TestCandidateHTTPManualIdentificationReturnsHistoricalComparisonSummary(t *testing.T) {
+	store := &candidateStoreStub{identifyFn: func(
+		_ context.Context,
+		tenantID, actorID string,
+	) (IdentificationResult, error) {
+		if tenantID != testTenantID || actorID != testActorID {
+			t.Fatalf("identification scope=(%q,%q)", tenantID, actorID)
+		}
+		return IdentificationResult{
+			EligibleDatasetCount:   3,
+			EnqueuedJobCount:       2,
+			HistoricalMetricCount:  4,
+			ExistingCandidateCount: 5,
+		}, nil
+	}}
+	harness := newCandidateHTTPHarness(t, store, nil)
+
+	response := candidateHTTPRequest(
+		t, harness, http.MethodPost,
+		"/api/v1/metric-candidates/identify", "",
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("identify status=%d body=%s", response.Code, response.Body.String())
+	}
+	var result IdentificationResult
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.EligibleDatasetCount != 3 || result.EnqueuedJobCount != 2 ||
+		result.HistoricalMetricCount != 4 || result.ExistingCandidateCount != 5 {
+		t.Fatalf("identify result=%#v", result)
+	}
+	if len(harness.permissions.checks) != 2 ||
+		harness.permissions.checks[0].ResourceType != "METRIC" ||
+		harness.permissions.checks[0].Action != "MANAGE" ||
+		harness.permissions.checks[1].ResourceType != "DATASET" ||
+		harness.permissions.checks[1].Action != "READ" {
+		t.Fatalf("identify permission checks=%#v", harness.permissions.checks)
+	}
+}
+
 func TestCandidateHTTPAcceptReturnsStrictCandidateAndMetricContract(t *testing.T) {
 	reviewable := reviewCandidate(t, CandidateStatusReady)
 	accepted := reviewable

@@ -37,6 +37,17 @@ func (s *Service) Get(ctx context.Context, tenantID, id string) (Candidate, erro
 	return s.store.Get(ctx, tenantID, id)
 }
 
+func (s *Service) Identify(
+	ctx context.Context,
+	tenantID, actorID string,
+) (IdentificationResult, error) {
+	store, ok := s.store.(IdentificationStore)
+	if !ok || tenantID == "" || actorID == "" {
+		return IdentificationResult{}, ErrInvalidRequest
+	}
+	return store.TriggerManualIdentification(ctx, tenantID, actorID)
+}
+
 func (s *Service) Reject(ctx context.Context, tenantID, actorID, id string, input RejectInput) (Candidate, error) {
 	input.Reason = strings.TrimSpace(input.Reason)
 	if tenantID == "" || actorID == "" || !canonicalUUID(id) || input.ExpectedVersion < 1 || !validDecisionReason(input.Reason) {

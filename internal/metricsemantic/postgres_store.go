@@ -50,7 +50,13 @@ func (s *PostgresStore) Claim(ctx context.Context, tenantID, workerID string, le
 			WHERE embedding_status='RUNNING' AND lease_expires_at<=now() AND embedding_attempt>=3`); err != nil {
 			return err
 		}
-		item := EmbeddingClaim{TenantID: tenantID}
+		if _, err := tx.Exec(ctx, `UPDATE platform.dimension_member_semantic_documents SET
+			embedding_status='FAILED',embedding_error_code='LEASE_EXPIRED',updated_at=now(),
+			lease_owner='',lease_expires_at=NULL
+			WHERE embedding_status='RUNNING' AND lease_expires_at<=now() AND embedding_attempt>=3`); err != nil {
+			return err
+		}
+		item := EmbeddingClaim{TenantID: tenantID, Kind: "METRIC"}
 		err := tx.QueryRow(ctx, `WITH candidate AS (
 			SELECT id FROM platform.metric_semantic_documents
 			WHERE embedding_attempt<3 AND (
@@ -64,7 +70,25 @@ func (s *PostgresStore) Claim(ctx context.Context, tenantID, workerID string, le
 		FROM candidate WHERE document.id=candidate.id
 		RETURNING document.id::text,document.document`, workerID, int64(lease/time.Second)).Scan(&item.ID, &item.Document)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
+			item.Kind = "DIMENSION_MEMBER"
+			err = tx.QueryRow(ctx, `WITH candidate AS (
+				SELECT id FROM platform.dimension_member_semantic_documents
+				WHERE embedding_attempt<3 AND (
+				  (embedding_status IN ('PENDING','FAILED') AND next_attempt_at<=now())
+				  OR (embedding_status='RUNNING' AND lease_expires_at<=now())
+				) ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1
+			) UPDATE platform.dimension_member_semantic_documents AS document SET
+				embedding_status='RUNNING',embedding=NULL,embedding_model='',
+				embedding_input_hash='',embedding_error_code='',embedded_at=NULL,
+				embedding_attempt=embedding_attempt+1,lease_owner=$1,
+				lease_expires_at=now()+($2*interval '1 second'),updated_at=now()
+			FROM candidate WHERE document.id=candidate.id
+			RETURNING document.id::text,document.document`,
+				workerID, int64(lease/time.Second),
+			).Scan(&item.ID, &item.Document)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
 		}
 		if err != nil {
 			return err
@@ -82,7 +106,13 @@ func (s *PostgresStore) Complete(ctx context.Context, claim EmbeddingClaim, work
 	vectorLiteral := formatVector(vector)
 	inputHash := documentHash(claim.Document)
 	return database.WithTenantTx(ctx, s.pool, claim.TenantID, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE platform.metric_semantic_documents SET
+		table := "platform.metric_semantic_documents"
+		if claim.Kind == "DIMENSION_MEMBER" {
+			table = "platform.dimension_member_semantic_documents"
+		} else if claim.Kind != "" && claim.Kind != "METRIC" {
+			return ErrInvalidRequest
+		}
+		tag, err := tx.Exec(ctx, `UPDATE `+table+` SET
 			embedding=$1::halfvec,embedding_model=$2,embedding_input_hash=$3,
 			embedding_status='SUCCEEDED',embedding_error_code='',embedded_at=now(),updated_at=now(),
 			lease_owner='',lease_expires_at=NULL
@@ -103,7 +133,13 @@ func (s *PostgresStore) Fail(ctx context.Context, claim EmbeddingClaim, workerID
 		return ErrInvalidRequest
 	}
 	return database.WithTenantTx(ctx, s.pool, claim.TenantID, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE platform.metric_semantic_documents SET
+		table := "platform.metric_semantic_documents"
+		if claim.Kind == "DIMENSION_MEMBER" {
+			table = "platform.dimension_member_semantic_documents"
+		} else if claim.Kind != "" && claim.Kind != "METRIC" {
+			return ErrInvalidRequest
+		}
+		tag, err := tx.Exec(ctx, `UPDATE `+table+` SET
 			embedding_status='FAILED',embedding_error_code=$1,
 			next_attempt_at=CASE WHEN embedding_attempt=1 THEN now()+interval '30 seconds'
 			  WHEN embedding_attempt=2 THEN now()+interval '2 minutes' ELSE next_attempt_at END,

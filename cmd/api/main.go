@@ -166,6 +166,7 @@ func main() {
 	})
 	datasetAIHandler := datasetai.NewHandler(authService, accessService, datasetAIService)
 	datasetService := dataset.NewService(datasetStore)
+	datasetService.SetLLMTriggerStore(datasetStore)
 	queryConnectors := map[datasource.Type]queryruntime.QueryConnector{
 		datasource.TypeMySQL:  mysqlConnector,
 		datasource.TypeOracle: oracleConnector,

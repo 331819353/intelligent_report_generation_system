@@ -135,6 +135,55 @@ func TestBuildRejectsCrossTenantOrWrongLayerInputRelation(t *testing.T) {
 	}
 }
 
+func TestDWDAllowsGovernedODSAndDIMInputs(t *testing.T) {
+	tenantID := "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	ods, err := materialization.GeneratePhysicalIdentifier(
+		tenantID,
+		"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+		"ffffffff-ffff-4fff-8fff-ffffffffffff",
+		materialization.LayerODS,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dimension, err := materialization.GeneratePhysicalIdentifier(
+		tenantID,
+		"11111111-1111-4111-8111-111111111111",
+		"22222222-2222-4222-8222-222222222222",
+		materialization.LayerDIM,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables := map[string]querycompiler.TableRef{
+		"fact": {NodeID: "fact", Schema: ods.Schema, Name: ods.Name},
+		"dim":  {NodeID: "dim", Schema: dimension.Schema, Name: dimension.Name},
+	}
+	if err := validateTenantOwnedInputs(
+		tenantID, materialization.LayerDWD, tables,
+	); err != nil {
+		t.Fatalf("governed DWD inputs rejected: %v", err)
+	}
+
+	dws, err := materialization.GeneratePhysicalIdentifier(
+		tenantID,
+		"33333333-3333-4333-8333-333333333333",
+		"44444444-4444-4444-8444-444444444444",
+		materialization.LayerDWS,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables["dim"] = querycompiler.TableRef{
+		NodeID: "dim", Schema: dws.Schema, Name: dws.Name,
+	}
+	if err := validateTenantOwnedInputs(
+		tenantID, materialization.LayerDWD, tables,
+	); !errors.Is(err, ErrInvalidBuild) {
+		t.Fatalf("DWS input must not be accepted by DWD: %v", err)
+	}
+}
+
 func TestBuildRejectsBusinessKeysThatDivergeFromDeclaredGrain(t *testing.T) {
 	input := warehouseInput(t)
 	input.BusinessKeyCode = []string{"revenue"}

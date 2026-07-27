@@ -120,6 +120,8 @@ func TestInferQueryTimePreset(t *testing.T) {
 		"上个月渠道转化":          "LAST_MONTH",
 		"今年累计成交额":          "THIS_YEAR",
 		"去年商户增长":           "LAST_YEAR",
+		"截止到6月所有的骑手数量是多少":  "THROUGH_06",
+		"截至2025年12月底的商户数":  "THROUGH_2025_12",
 		"all time revenue": "",
 	}
 	for question, expected := range tests {
@@ -151,6 +153,22 @@ func TestResolveQueryTimePresetUsesTimezoneAndFieldPrecision(t *testing.T) {
 		"LAST_MONTH", "Not/AZone", "DATETIME", now,
 	); err == nil {
 		t.Fatal("invalid timezone was accepted")
+	}
+	cutoffDateRange, err := resolveQueryTimePreset(
+		"THROUGH_06", "Asia/Shanghai", "DATE", now,
+	)
+	if err != nil ||
+		cutoffDateRange.Start != "1970-01-01" ||
+		cutoffDateRange.EndExclusive != "2026-07-01" {
+		t.Fatalf("cutoff date range=%#v error=%v", cutoffDateRange, err)
+	}
+	explicitCutoffRange, err := resolveQueryTimePreset(
+		"THROUGH_2025_12", "Asia/Shanghai", "DATETIME", now,
+	)
+	if err != nil ||
+		explicitCutoffRange.Start != "1969-12-31T16:00:00Z" ||
+		explicitCutoffRange.EndExclusive != "2025-12-31T16:00:00Z" {
+		t.Fatalf("explicit cutoff range=%#v error=%v", explicitCutoffRange, err)
 	}
 }
 

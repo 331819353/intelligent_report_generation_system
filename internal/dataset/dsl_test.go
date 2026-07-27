@@ -37,6 +37,58 @@ func TestPrepareIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestPreparePersistsVersionedDomainAndSubject(t *testing.T) {
+	baseline, err := Prepare(readExample(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input map[string]any
+	if err := json.Unmarshal(readExample(t), &input); err != nil {
+		t.Fatal(err)
+	}
+	datasetObject := input["dataset"].(map[string]any)
+	datasetObject["domain"] = "  企业  "
+	datasetObject["subject"] = " 企业画像 "
+	raw, _ := json.Marshal(input)
+
+	prepared, err := Prepare(raw)
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if prepared.Document.Dataset.Domain != "企业" || prepared.Document.Dataset.Subject != "企业画像" {
+		t.Fatalf("classification was not normalized: %#v", prepared.Document.Dataset)
+	}
+	if prepared.DSLHash == baseline.DSLHash {
+		t.Fatal("versioned classification did not change the DSL hash")
+	}
+	if prepared.PlanHash != baseline.PlanHash {
+		t.Fatal("governance classification unexpectedly changed the executable logical plan")
+	}
+}
+
+func TestPrepareRejectsInvalidDomainAndSubject(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "domain too long", field: "domain", value: strings.Repeat("域", 129)},
+		{name: "subject has control", field: "subject", value: "经营\n分析"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var input map[string]any
+			if err := json.Unmarshal(readExample(t), &input); err != nil {
+				t.Fatal(err)
+			}
+			input["dataset"].(map[string]any)[test.field] = test.value
+			raw, _ := json.Marshal(input)
+			if _, err := Prepare(raw); err == nil {
+				t.Fatalf("Prepare() accepted invalid dataset.%s", test.field)
+			}
+		})
+	}
+}
+
 func TestDecodeAndNormalizeMigratesLegacyGrain(t *testing.T) {
 	var input map[string]any
 	if err := json.Unmarshal(readExample(t), &input); err != nil {

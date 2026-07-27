@@ -472,7 +472,11 @@ func (c *compiler) compileInner() (string, error) {
 		}
 		where = append(where, expression)
 	}
-	sql := "SELECT " + strings.Join(projections, ", ") + " FROM " + from
+	selectPrefix := "SELECT "
+	if c.input.Document.Distinct {
+		selectPrefix = "SELECT DISTINCT "
+	}
+	sql := selectPrefix + strings.Join(projections, ", ") + " FROM " + from
 	if len(where) > 0 {
 		sql += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -568,7 +572,14 @@ func (c *compiler) nodeRelation(node dataset.Node, ref TableRef) (string, []any,
 			expression = *group.Expression
 		}
 		if group.Unit != "" {
-			expression = dataset.Expression{Type: "DATE_TRUNC", Unit: group.Unit, Argument: &expression}
+			// Keep the child in a distinct value before replacing expression.
+			// Taking &expression directly in the replacement literal makes
+			// Argument point back to the new DATE_TRUNC node itself and causes
+			// unbounded recursion during publication validation.
+			argument := expression
+			expression = dataset.Expression{
+				Type: "DATE_TRUNC", Unit: group.Unit, Argument: &argument,
+			}
 		}
 		value, err := sub.expression(expression, aliases)
 		if err != nil {

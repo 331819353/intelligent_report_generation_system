@@ -21,7 +21,9 @@ type DWSAnalysisSelector interface {
 		string,
 		string,
 		string,
-		dataset.Document,
+		dwsModelingScope,
+		[]dwsPlanningAsset,
+		[]dwsPlanningAsset,
 		[]string,
 	) ([]string, string, error)
 }
@@ -38,27 +40,47 @@ func NewOrchestratedDWSAnalysisSelector(
 
 func (selector *OrchestratedDWSAnalysisSelector) Select(
 	ctx context.Context,
-	tenantID, actorID, sourceVersionID string,
-	document dataset.Document,
+	tenantID, actorID, scopeHash string,
+	scope dwsModelingScope,
+	facts, dimensions []dwsPlanningAsset,
 	eligible []string,
 ) ([]string, string, error) {
 	fallback := boundedTemplateSelection(eligible)
 	if selector == nil || selector.ai == nil || !selector.ai.Configured() {
 		return fallback, "", nil
 	}
-	fields := make([]map[string]string, 0, len(document.Fields))
-	for _, field := range document.Fields {
-		fields = append(fields, map[string]string{
-			"code": field.Code, "name": field.Name, "role": field.Role,
-			"canonicalType": field.CanonicalType, "unit": field.Unit,
-		})
+	assetMetadata := func(assets []dwsPlanningAsset) []map[string]any {
+		result := make([]map[string]any, 0, len(assets))
+		for _, asset := range assets {
+			fields := make([]map[string]string, 0, min(48, len(asset.Document.Fields)))
+			for _, field := range asset.Document.Fields {
+				if len(fields) == 48 {
+					break
+				}
+				fields = append(fields, map[string]string{
+					"code": field.Code, "name": field.Name, "role": field.Role,
+					"canonicalType": field.CanonicalType, "unit": field.Unit,
+				})
+			}
+			item := map[string]any{
+				"datasetId": asset.Record.ID, "versionId": asset.VersionID,
+				"code": asset.Record.Code, "name": asset.Record.Name, "fields": fields,
+			}
+			if asset.Document.FactContract != nil {
+				item["businessAction"] = asset.Document.FactContract.BusinessAction
+				item["grainKeyFields"] = asset.Document.FactContract.GrainKeyFields
+				item["eventTimeField"] = asset.Document.FactContract.EventTimeField
+			}
+			result = append(result, item)
+		}
+		return result
 	}
 	payload, err := json.Marshal(map[string]any{
-		"businessAction": document.FactContract.BusinessAction,
-		"grainKeyFields": document.FactContract.GrainKeyFields,
-		"eventTimeField": document.FactContract.EventTimeField,
-		"fields":         fields, "eligibleTemplateCodes": eligible,
-		"maximumSelections": 3,
+		"groupKey": scope.GroupKey, "domainCode": scope.DomainCode,
+		"subjectCode": scope.SubjectCode, "subjectName": scope.SubjectName,
+		"dwdFacts": assetMetadata(facts), "dimensionContext": assetMetadata(dimensions),
+		"eligibleTemplateCodes": eligible,
+		"maximumSelections":     3,
 	})
 	if err != nil {
 		return fallback, "", nil
@@ -67,15 +89,15 @@ func (selector *OrchestratedDWSAnalysisSelector) Select(
 	result, err := selector.ai.Invoke(ctx, aiplatform.Invocation{
 		TenantID: tenantID, ActorID: actorID,
 		Purpose:       aiplatform.PurposeDatasetDAGGeneration,
-		PromptVersion: "dws-analysis-selection-v1",
-		ResourceType:  "DATASET_VERSION", ResourceID: sourceVersionID,
+		PromptVersion: "dws-group-planning-v2",
+		ResourceType:  "DATASET_MODELING_SCOPE", ResourceID: scopeHash,
 		Request: aiplatform.ProviderRequest{
 			Messages: []aiplatform.Message{
 				{
 					Role: aiplatform.MessageRoleSystem,
 					Parts: []aiplatform.ContentPart{{
 						Type: aiplatform.ContentTypeText,
-						Text: `你只负责从 eligibleTemplateCodes 中选择最多三个市场通用分析意图。不得创造新编码，不得输出 SQL、DDL、物理表名或数据值。缺少适用场景时返回空数组。`,
+						Text: `你负责基于本主题下全部 DWD 事实结构与全部 DIM 语义上下文规划 DWS。必须先判断哪些事实可以在共同粒度安全聚合，再从 eligibleTemplateCodes 中选择最多三个分析意图。多事实场景不得退化为逐表一对一设计。不得创造新编码，不得输出 SQL、DDL、物理表名或数据值；缺少共同粒度时返回空数组。`,
 					}},
 				},
 				{
@@ -94,7 +116,8 @@ func (selector *OrchestratedDWSAnalysisSelector) Select(
 						"type":"array","maxItems":3,"uniqueItems":true,
 						"items":{"enum":[
 							"TREND","PERIOD_COMPARISON","DISTRIBUTION",
-							"RANKING","DRILLDOWN","ANOMALY"
+							"RANKING","DRILLDOWN","ANOMALY",
+							"MULTI_FACT_COMPARISON"
 						]}
 					}}
 				}`),
@@ -168,9 +191,41 @@ func NewDWSModelingWorker(
 
 type dwsModelingClaim struct {
 	ID, TenantID, SourceDatasetID, SourceVersionID string
-	ActorID, LeaseToken, InputHash                 string
+	ActorID, LeaseToken, InputHash, GroupKey       string
+	ScopeHash                                      string
+	Scope                                          dwsModelingScope
 	Selections                                     []string
 	Attempt, MaxAttempts                           int
+}
+
+type dwsScopeAsset struct {
+	DatasetID string          `json:"datasetId"`
+	VersionID string          `json:"versionId"`
+	DSLHash   string          `json:"dslHash"`
+	Code      string          `json:"code"`
+	Name      string          `json:"name"`
+	DSL       json.RawMessage `json:"dsl"`
+}
+
+type dwsModelingScope struct {
+	GroupKey    string          `json:"groupKey"`
+	DomainCode  string          `json:"domainCode"`
+	SubjectCode string          `json:"subjectCode"`
+	SubjectName string          `json:"subjectName"`
+	DWD         []dwsScopeAsset `json:"dwd"`
+	DIM         []dwsScopeAsset `json:"dim"`
+}
+
+type dwsPlanningAsset struct {
+	Record    dataset.Record
+	VersionID string
+	DSLHash   string
+	Document  dataset.Document
+}
+
+type dwsSourceReadiness struct {
+	Ready          bool
+	TerminalFailed bool
 }
 
 type dwsModelingResult struct {
@@ -286,6 +341,7 @@ func (worker *DWSModelingWorker) claim(
 		if _, err := tx.Exec(ctx, `UPDATE platform.dws_modeling_jobs
 			SET status='PENDING',attempt=0,next_attempt_at=now(),
 				error_code='RESUMING_FROM_SELECTION',
+				error_message='检测到已保存的分析选择，正在恢复 DWS 建模任务',
 				lease_owner='',lease_token=NULL,lease_expires_at=NULL,
 				updated_at=now()
 			WHERE status='RUNNING' AND lease_expires_at<=now()
@@ -294,6 +350,7 @@ func (worker *DWSModelingWorker) claim(
 		}
 		if _, err := tx.Exec(ctx, `UPDATE platform.dws_modeling_jobs
 			SET status='FAILED',error_code='LEASE_EXPIRED',
+				error_message='任务租约已过期且达到最大尝试次数，请人工重试',
 				lease_owner='',lease_token=NULL,lease_expires_at=NULL,
 				completed_at=now(),updated_at=now()
 			WHERE status='RUNNING' AND lease_expires_at<=now()
@@ -302,7 +359,7 @@ func (worker *DWSModelingWorker) claim(
 			return err
 		}
 		item := dwsModelingClaim{TenantID: tenantID}
-		var selectionJSON []byte
+		var selectionJSON, scopeJSON []byte
 		err := tx.QueryRow(ctx, `WITH candidate AS (
 				SELECT id FROM platform.dws_modeling_jobs
 				WHERE (
@@ -316,7 +373,8 @@ func (worker *DWSModelingWorker) claim(
 				FOR UPDATE SKIP LOCKED LIMIT 1
 			)
 			UPDATE platform.dws_modeling_jobs AS job
-			SET status='RUNNING',attempt=attempt+1,error_code='',
+			SET status='RUNNING',attempt=attempt+1,
+				error_code='',error_message='',
 				lease_owner=$1,lease_token=public.gen_random_uuid(),
 				lease_expires_at=now()+($2*interval '1 second'),
 				updated_at=now()
@@ -324,12 +382,14 @@ func (worker *DWSModelingWorker) claim(
 			RETURNING job.id::text,job.source_dwd_dataset_id::text,
 				job.source_dwd_version_id::text,job.requested_by::text,
 				job.lease_token::text,job.input_hash,job.selection_json,
+				job.group_key,job.source_scope,job.scope_hash,
 				job.attempt,job.max_attempts`,
 			workerID, int64(lease/time.Second),
 		).Scan(
 			&item.ID, &item.SourceDatasetID, &item.SourceVersionID,
 			&item.ActorID, &item.LeaseToken, &item.InputHash,
-			&selectionJSON, &item.Attempt, &item.MaxAttempts,
+			&selectionJSON, &item.GroupKey, &scopeJSON, &item.ScopeHash,
+			&item.Attempt, &item.MaxAttempts,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -338,6 +398,9 @@ func (worker *DWSModelingWorker) claim(
 			return err
 		}
 		if err := json.Unmarshal(selectionJSON, &item.Selections); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(scopeJSON, &item.Scope); err != nil {
 			return err
 		}
 		claim = &item
@@ -351,45 +414,49 @@ func (worker *DWSModelingWorker) process(
 	claim dwsModelingClaim,
 	workerID string,
 ) error {
-	source, err := worker.datasets.Get(
-		ctx, claim.TenantID, claim.SourceDatasetID,
-	)
+	facts, dimensions, current, err := worker.loadPlanningScope(ctx, claim)
 	if err != nil {
 		return worker.finish(
 			ctx, claim, workerID, "FAILED", "SOURCE_DATASET_UNAVAILABLE", nil,
 		)
 	}
-	version, err := worker.datasets.GetVersion(
-		ctx, claim.TenantID, claim.SourceDatasetID, claim.SourceVersionID,
-	)
-	if err != nil || version.Status != "PUBLISHED" ||
-		version.Layer != dataset.LayerDWD ||
-		source.CurrentPublishedVersionID != claim.SourceVersionID {
+	if !current {
 		return worker.finish(
 			ctx, claim, workerID, "SKIPPED", "SUBJECT_CHANGED", nil,
 		)
 	}
-	ready, err := worker.sourceReady(ctx, claim)
+	readiness, err := worker.sourceReady(ctx, claim, facts)
 	if err != nil {
 		return err
 	}
-	if !ready {
+	if readiness.TerminalFailed {
+		return worker.finish(
+			ctx, claim, workerID, "FAILED", "DWD_MATERIALIZATION_FAILED", nil,
+		)
+	}
+	if !readiness.Ready {
 		return worker.waitForDependency(ctx, claim, workerID)
 	}
-	document, err := dataset.DecodeAndNormalize(version.DSL)
-	if err != nil || document.FactContract == nil ||
-		document.Dataset.SemanticContractVersion != "1.0" {
+	if len(facts) == 0 {
 		return worker.finish(
 			ctx, claim, workerID, "SKIPPED", "FACT_CONTRACT_MISSING", nil,
 		)
 	}
-	eligible := autoEligibleTemplateCodes(document)
+	modelingFacts := multiFactEligibleSources(facts)
+	eligible := []string{}
+	if len(modelingFacts) == 1 {
+		eligible = autoEligibleTemplateCodes(modelingFacts[0].Document)
+	} else {
+		if len(modelingFacts) > 1 {
+			eligible = []string{"MULTI_FACT_COMPARISON"}
+		}
+	}
 	if len(eligible) == 0 {
 		return worker.finish(
 			ctx, claim, workerID, "SKIPPED", "NO_SAFE_TEMPLATE", nil,
 		)
 	}
-	if claim.InputHash != "" && claim.InputHash != version.DSLHash {
+	if claim.InputHash != "" && claim.InputHash != claim.ScopeHash {
 		return worker.finish(
 			ctx, claim, workerID, "SKIPPED", "SUBJECT_CHANGED", nil,
 		)
@@ -399,8 +466,8 @@ func (worker *DWSModelingWorker) process(
 		requestID := ""
 		if worker.selector != nil {
 			selected, selectedRequestID, _ := worker.selector.Select(
-				ctx, claim.TenantID, claim.ActorID, claim.SourceVersionID,
-				document, eligible,
+				ctx, claim.TenantID, claim.ActorID, claim.ScopeHash,
+				claim.Scope, facts, dimensions, eligible,
 			)
 			selections, requestID = selected, selectedRequestID
 		}
@@ -410,20 +477,27 @@ func (worker *DWSModelingWorker) process(
 			)
 		}
 		if err := worker.saveSelection(
-			ctx, claim, workerID, version.DSLHash, requestID, selections,
+			ctx, claim, workerID, claim.ScopeHash, requestID, selections,
 		); err != nil {
 			return err
 		}
 		claim.Selections = selections
-		claim.InputHash = version.DSLHash
+		claim.InputHash = claim.ScopeHash
 	}
-	source.DSL = version.DSL
 	results := make([]dwsModelingResult, 0, len(claim.Selections))
 	generated, updated, skipped := 0, 0, 0
 	for _, templateCode := range claim.Selections {
-		prepared, buildErr := buildSingleFactDWSCandidate(
-			source, claim.SourceVersionID, templateCode,
-		)
+		var prepared dataset.Prepared
+		var buildErr error
+		if len(modelingFacts) > 1 {
+			prepared, buildErr = buildMultiFactDWSCandidate(
+				modelingFacts, claim.Scope, templateCode,
+			)
+		} else {
+			prepared, buildErr = buildSingleFactDWSCandidate(
+				modelingFacts[0].Record, modelingFacts[0].VersionID, templateCode,
+			)
+		}
 		if buildErr != nil {
 			skipped++
 			results = append(results, dwsModelingResult{
@@ -467,30 +541,142 @@ func (worker *DWSModelingWorker) process(
 	)
 }
 
+func (worker *DWSModelingWorker) loadPlanningScope(
+	ctx context.Context,
+	claim dwsModelingClaim,
+) (facts, dimensions []dwsPlanningAsset, current bool, err error) {
+	load := func(reference dwsScopeAsset, layer dataset.Layer) (dwsPlanningAsset, bool, error) {
+		record, loadErr := worker.datasets.Get(ctx, claim.TenantID, reference.DatasetID)
+		if loadErr != nil {
+			return dwsPlanningAsset{}, false, loadErr
+		}
+		version, loadErr := worker.datasets.GetVersion(
+			ctx, claim.TenantID, reference.DatasetID, reference.VersionID,
+		)
+		if loadErr != nil {
+			return dwsPlanningAsset{}, false, loadErr
+		}
+		if version.Status != "PUBLISHED" || version.Layer != layer ||
+			record.CurrentPublishedVersionID != reference.VersionID ||
+			reference.DSLHash != "" && reference.DSLHash != version.DSLHash {
+			return dwsPlanningAsset{}, false, nil
+		}
+		document, decodeErr := dataset.DecodeAndNormalize(version.DSL)
+		if decodeErr != nil {
+			return dwsPlanningAsset{}, false, nil
+		}
+		if strings.TrimSpace(document.Dataset.Domain) == "" {
+			domainErr := database.WithTenantTx(
+				ctx, worker.store.pool, claim.TenantID,
+				func(tx pgx.Tx) error {
+					return tx.QueryRow(ctx, `SELECT
+							platform.dataset_version_effective_domain($1::uuid)`,
+						reference.VersionID,
+					).Scan(&document.Dataset.Domain)
+				},
+			)
+			if domainErr != nil {
+				return dwsPlanningAsset{}, false, domainErr
+			}
+		}
+		if layer == dataset.LayerDWD && (document.FactContract == nil ||
+			document.Dataset.SemanticContractVersion != "1.0") {
+			return dwsPlanningAsset{}, false, nil
+		}
+		record.DSL = version.DSL
+		return dwsPlanningAsset{
+			Record: record, VersionID: version.ID,
+			DSLHash: version.DSLHash, Document: document,
+		}, true, nil
+	}
+	for _, reference := range claim.Scope.DWD {
+		asset, valid, loadErr := load(reference, dataset.LayerDWD)
+		if loadErr != nil || !valid {
+			return nil, nil, false, loadErr
+		}
+		facts = append(facts, asset)
+	}
+	domain := ""
+	for _, fact := range facts {
+		currentDomain := strings.TrimSpace(fact.Document.Dataset.Domain)
+		if currentDomain == "" {
+			return nil, nil, false, nil
+		}
+		if domain == "" {
+			domain = currentDomain
+		} else if !strings.EqualFold(domain, currentDomain) {
+			return nil, nil, false, nil
+		}
+	}
+	for _, reference := range claim.Scope.DIM {
+		asset, valid, loadErr := load(reference, dataset.LayerDIM)
+		if loadErr != nil || !valid {
+			return nil, nil, false, loadErr
+		}
+		// The SQL trigger deliberately provides the complete DIM inventory so a
+		// planner can inspect conformed dimensions. Only dimensions in the fact
+		// domain may become physical inputs of this DWS candidate.
+		if !strings.EqualFold(
+			strings.TrimSpace(asset.Document.Dataset.Domain), domain,
+		) {
+			continue
+		}
+		dimensions = append(dimensions, asset)
+	}
+	return facts, dimensions, len(facts) > 0, nil
+}
+
 func (worker *DWSModelingWorker) sourceReady(
 	ctx context.Context,
 	claim dwsModelingClaim,
-) (ready bool, err error) {
+	facts []dwsPlanningAsset,
+) (readiness dwsSourceReadiness, err error) {
 	err = database.WithTenantTx(ctx, worker.store.pool, claim.TenantID, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT EXISTS(
-			SELECT 1
-			FROM platform.dataset_versions AS version
-			JOIN platform.datasets AS dataset
-			  ON dataset.tenant_id=version.tenant_id
-			 AND dataset.id=version.dataset_id
-			 AND dataset.current_published_version_id=version.id
-			 AND dataset.status='PUBLISHED' AND dataset.deleted_at IS NULL
-			JOIN platform.dataset_materializations AS materialization
-			  ON materialization.tenant_id=version.tenant_id
-			 AND materialization.dataset_id=version.dataset_id
-			 AND materialization.dataset_version_id=version.id
-			 AND materialization.status='ACTIVE'
-			 AND materialization.schema_hash=version.schema_hash
-			WHERE version.id=$1::uuid AND version.dataset_id=$2::uuid
-			  AND version.status='PUBLISHED' AND version.layer='DWD'
-		)`, claim.SourceVersionID, claim.SourceDatasetID).Scan(&ready)
+		readiness.Ready = true
+		for _, fact := range facts {
+			var available bool
+			var latestBuildStatus string
+			if err := tx.QueryRow(ctx, `SELECT
+				EXISTS(
+					SELECT 1
+					FROM platform.dataset_versions AS version
+					JOIN platform.datasets AS dataset
+					  ON dataset.tenant_id=version.tenant_id
+					 AND dataset.id=version.dataset_id
+					 AND dataset.current_published_version_id=version.id
+					 AND dataset.status='PUBLISHED' AND dataset.deleted_at IS NULL
+					JOIN platform.dataset_materializations AS materialization
+					  ON materialization.tenant_id=version.tenant_id
+					 AND materialization.dataset_id=version.dataset_id
+					 AND materialization.dataset_version_id=version.id
+					 AND materialization.status='ACTIVE'
+					 AND materialization.schema_hash=version.schema_hash
+					WHERE version.id=$1::uuid AND version.dataset_id=$2::uuid
+					  AND version.status='PUBLISHED' AND version.layer='DWD'
+				),
+				COALESCE((
+					SELECT run.status
+					FROM platform.dataset_build_runs AS run
+					WHERE run.dataset_version_id=$1::uuid
+					  AND run.dataset_id=$2::uuid
+					ORDER BY run.created_at DESC,run.id DESC
+					LIMIT 1
+				),'')`,
+				fact.VersionID, fact.Record.ID,
+			).Scan(&available, &latestBuildStatus); err != nil {
+				return err
+			}
+			if !available {
+				readiness.Ready = false
+				if latestBuildStatus == "FAILED" ||
+					latestBuildStatus == "CANCELLED" {
+					readiness.TerminalFailed = true
+				}
+			}
+		}
+		return nil
 	})
-	return ready, err
+	return readiness, err
 }
 
 func (worker *DWSModelingWorker) waitForDependency(
@@ -502,6 +688,7 @@ func (worker *DWSModelingWorker) waitForDependency(
 		tag, err := tx.Exec(ctx, `UPDATE platform.dws_modeling_jobs
 			SET status='WAITING_DEPENDENCY',attempt=GREATEST(attempt-1,0),
 				error_code='WAITING_ACTIVE_DWD_MATERIALIZATION',
+				error_message='等待全部 DWD 发布版本完成物化；物化转为可用后，主题建模会自动继续',
 				next_attempt_at=now()+interval '1 minute',
 				lease_owner='',lease_token=NULL,lease_expires_at=NULL,
 				updated_at=now()
@@ -558,7 +745,7 @@ func (worker *DWSModelingWorker) upsertDWS(
 	prepared dataset.Prepared,
 ) (string, string, error) {
 	output, found, err := worker.getOutput(
-		ctx, claim.TenantID, claim.SourceDatasetID, templateCode,
+		ctx, claim.TenantID, claim.GroupKey, templateCode,
 	)
 	if err != nil {
 		return "", "", err
@@ -669,14 +856,29 @@ func (worker *DWSModelingWorker) recoverUnlinkedGeneratedDWS(
 
 func (worker *DWSModelingWorker) getOutput(
 	ctx context.Context,
-	tenantID, sourceDatasetID, templateCode string,
+	tenantID, groupKey, templateCode string,
 ) (item dwsOutput, found bool, err error) {
 	err = database.WithTenantTx(ctx, worker.store.pool, tenantID, func(tx pgx.Tx) error {
+		// Dataset deletion is intentionally soft, while modeling outputs keep
+		// their foreign-key row. A later manual modeling run must not treat
+		// that tombstoned dataset as the current generated output: discard the
+		// stale link so the deterministic create/recovery path can rebuild it.
+		if _, err := tx.Exec(ctx, `DELETE FROM platform.dws_modeling_outputs AS output
+			USING platform.datasets AS generated
+			WHERE output.group_key=$1
+			  AND output.template_code=$2
+			  AND generated.tenant_id=output.tenant_id
+			  AND generated.id=output.dws_dataset_id
+			  AND generated.deleted_at IS NOT NULL`,
+			groupKey, templateCode,
+		); err != nil {
+			return err
+		}
 		err := tx.QueryRow(ctx, `SELECT dws_dataset_id::text,
 				last_generated_dsl_hash
 			FROM platform.dws_modeling_outputs
-			WHERE source_dwd_dataset_id=$1::uuid AND template_code=$2`,
-			sourceDatasetID, templateCode,
+			WHERE group_key=$1 AND template_code=$2`,
+			groupKey, templateCode,
 		).Scan(&item.DatasetID, &item.LastGeneratedHash)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -698,13 +900,14 @@ func (worker *DWSModelingWorker) saveOutput(
 		tag, err := tx.Exec(ctx, `INSERT INTO platform.dws_modeling_outputs(
 				tenant_id,source_dwd_dataset_id,template_code,dws_dataset_id,
 				last_source_dwd_version_id,last_job_id,
-				last_generated_dsl_hash,last_action
+				last_generated_dsl_hash,last_action,group_key
 			) VALUES(
 				platform.current_tenant_id(),$1::uuid,$2,$3::uuid,
-				$4::uuid,$5::uuid,$6,$7
+				$4::uuid,$5::uuid,$6,$7,$8
 			)
-			ON CONFLICT(tenant_id,source_dwd_dataset_id,template_code)
+			ON CONFLICT(tenant_id,group_key,template_code)
 			DO UPDATE SET
+				source_dwd_dataset_id=EXCLUDED.source_dwd_dataset_id,
 				last_source_dwd_version_id=EXCLUDED.last_source_dwd_version_id,
 				last_job_id=EXCLUDED.last_job_id,
 				last_generated_dsl_hash=EXCLUDED.last_generated_dsl_hash,
@@ -712,7 +915,7 @@ func (worker *DWSModelingWorker) saveOutput(
 			WHERE platform.dws_modeling_outputs.dws_dataset_id=
 				EXCLUDED.dws_dataset_id`,
 			claim.SourceDatasetID, templateCode, dwsDatasetID,
-			claim.SourceVersionID, claim.ID, dslHash, action)
+			claim.SourceVersionID, claim.ID, dslHash, action, claim.GroupKey)
 		if err != nil {
 			return err
 		}
@@ -746,13 +949,28 @@ func (worker *DWSModelingWorker) finishCounts(
 	}
 	resultJSON, err := json.Marshal(map[string]any{
 		"outputs": results, "sourceVersionId": claim.SourceVersionID,
+		"groupKey": claim.GroupKey, "scopeHash": claim.ScopeHash,
+		"sourceVersionIds": func() []string {
+			values := make([]string, 0, len(claim.Scope.DWD))
+			for _, item := range claim.Scope.DWD {
+				values = append(values, item.VersionID)
+			}
+			return values
+		}(),
 	})
 	if err != nil {
 		return err
 	}
 	return database.WithTenantTx(ctx, worker.store.pool, claim.TenantID, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `UPDATE platform.dws_modeling_jobs
-			SET status=$1,error_code=$2,result_json=$3,
+			SET status=$1,error_code=$2,
+				error_message=CASE
+				  WHEN $2='' THEN ''
+				  WHEN $2='DWD_MATERIALIZATION_FAILED'
+				    THEN '上游 DWD 物化已失败，请先在任务运行中心重试数据集构建'
+				  ELSE 'DWS 建模执行失败，请在任务运行中心重试'
+				END,
+				result_json=$3,
 				generated_count=$4,updated_count=$5,skipped_count=$6,
 				lease_owner='',lease_token=NULL,lease_expires_at=NULL,
 				completed_at=now(),updated_at=now()

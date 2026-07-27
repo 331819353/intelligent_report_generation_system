@@ -49,7 +49,7 @@ export type CalculatedField = { id: string; code: string; name: string; operatio
 export type SortOption = { fieldId: string; direction: string }
 export type PreAggregationDraft = { id: string; nodeId: string; joinId: string; joinSide: 'LEFT' | 'RIGHT' }
 export type DatasetDraft = {
-  code: string; name: string; description: string; layer?: DatasetLayer; nodes: DesignerNode[]; fields: FieldOption[]
+  code: string; name: string; description: string; domain?: string; subject?: string; layer?: DatasetLayer; nodes: DesignerNode[]; fields: FieldOption[]
   joins: JoinOption[]; filters: FilterOption[]; parameters: ParameterOption[]; calculations: CalculatedField[]
   sorts: SortOption[]; grainDescription: string; grainKeys: string[]; groupingEnabled?: boolean
   finalConfigured?: boolean; finalGroupingEnabled?: boolean
@@ -116,7 +116,7 @@ export type PublishDatasetInput = {
   expectedDslHash: string
   validationParameters: Record<string, unknown>
 }
-export type DatasetPublicationRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED'
+export type DatasetPublicationRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED'
 export type DatasetPublicationRequest = {
   id: string; datasetId: string; status: DatasetPublicationRequestStatus; version: number
   draftVersionId: string; expectedDatasetVersion: number; expectedDraftRecordVersion: number
@@ -145,7 +145,7 @@ export type DatasetCandidatePreview = DatasetPreview & { dslHash: string; planHa
 export type AssetTablePreview = { columns: string[]; rows: unknown[][] }
 export type DatasetDSL = Record<string, unknown> & {
   dslVersion: string; dataset: {
-    code: string; name: string; description?: string; type: string; layer?: DatasetLayer
+    code: string; name: string; description?: string; domain?: string; subject?: string; type: string; layer?: DatasetLayer
     semanticContractVersion?: string; consumerContractId?: string
   }
   nodes: Array<Record<string, unknown>>; fields: Array<Record<string, unknown>>
@@ -418,6 +418,8 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
     dslVersion: '1.0',
     dataset: {
       code: identifier(draft.code), name: draft.name.trim(), description: draft.description.trim(),
+      ...(draft.domain?.trim() ? { domain: draft.domain.trim() } : {}),
+      ...(draft.subject?.trim() ? { subject: draft.subject.trim() } : {}),
       type: sourceCount > 1 ? 'CROSS_SOURCE' : 'SINGLE_SOURCE', layer,
       ...(draft.semanticContractVersion ? { semanticContractVersion: draft.semanticContractVersion } : {}),
       ...(draft.consumerContractId ? { consumerContractId: draft.consumerContractId } : {}),
@@ -533,6 +535,8 @@ export function buildDatasetDSL(draft: DatasetDraft): DatasetDSL {
     dslVersion: '1.0',
     dataset: {
       code: identifier(draft.code), name: draft.name.trim(), description: draft.description.trim(),
+      ...(draft.domain?.trim() ? { domain: draft.domain.trim() } : {}),
+      ...(draft.subject?.trim() ? { subject: draft.subject.trim() } : {}),
       type: sourceCount > 1 ? 'CROSS_SOURCE' : 'SINGLE_SOURCE', layer,
       ...(draft.semanticContractVersion ? { semanticContractVersion: draft.semanticContractVersion } : {}),
       ...(draft.consumerContractId ? { consumerContractId: draft.consumerContractId } : {}),
@@ -660,6 +664,17 @@ export function createDatasetPublishIdempotencyKey(): string {
 
 const datasetPath = (id: string) => `/v1/datasets/${encodeURIComponent(id)}`
 
+export type DatasetLLMTrigger = 'DIM_MODELING' | 'DWD_MODELING' | 'DWS_MODELING'
+export type DatasetLLMTriggerResult = {
+  trigger: DatasetLLMTrigger
+  eligibleCount: number
+  enqueuedCount: number
+  existingCount: number
+  blockedCount?: number
+  blockedReason?: 'DIM_MODELING_REQUIRED' | 'DIM_PUBLICATION_REQUIRED' |
+    'NO_FACT_MODEL_AVAILABLE' | 'DWD_PUBLICATION_REQUIRED' | string
+}
+
 export const datasetAPI = {
   tables: (limit = 200, offset = 0) => {
     const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
@@ -683,6 +698,17 @@ export const datasetAPI = {
   list: (limit = 50, offset = 0) => {
     const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
     return apiRequest<DatasetPage>(`/v1/datasets?${query}`, { cache: 'no-store' })
+  },
+  triggerLLM: (trigger: DatasetLLMTrigger) => {
+    const paths: Record<DatasetLLMTrigger, string> = {
+      DIM_MODELING: 'trigger-dim-modeling',
+      DWD_MODELING: 'trigger-dwd-modeling',
+      DWS_MODELING: 'trigger-dws-modeling',
+    }
+    return apiRequest<DatasetLLMTriggerResult>(
+      `/v1/datasets/${paths[trigger]}`,
+      { method: 'POST', cache: 'no-store' },
+    )
   },
   // 数据集聚合版本会在发布和协作保存时变化，读取时禁止复用浏览器或代理缓存。
   get: (id: string) => apiRequest<DatasetRecord>(datasetPath(id), { cache: 'no-store' }),

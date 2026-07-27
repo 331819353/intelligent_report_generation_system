@@ -1,6 +1,6 @@
-// Package datasettagsuggestion creates governed tag proposals for exact
-// published dataset versions. It never approves tags and never reads source
-// business rows.
+// Package datasettagsuggestion creates governed tag proposals for exact current
+// dataset versions. Generated non-ODS drafts can be tagged before publication;
+// suggestions are never auto-approved and source business rows are never read.
 package datasettagsuggestion
 
 import (
@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	PromptVersion      = "dataset-tag-suggestion-v1"
+	PromptVersion      = "dataset-tag-suggestion-v5"
 	MaxSuggestions     = 256
 	MaxTaxonomyTags    = 1024
 	MaxTaxonomyAliases = 4096

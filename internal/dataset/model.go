@@ -55,6 +55,7 @@ var (
 	ErrQueryNotFound              = errors.New("query run not found")
 	ErrQueryConflict              = errors.New("query run already exists")
 	ErrLayerDependencyUnavailable = errors.New("dataset layer dependency is unavailable")
+	ErrLLMTriggerUnavailable      = errors.New("dataset LLM trigger is unavailable")
 )
 
 // Document 是数据集 DSL V1 的完整、可版本化定义。
@@ -67,6 +68,7 @@ type Document struct {
 	FactContract     *FactContract     `json:"factContract,omitempty"`
 	AnalysisContract *AnalysisContract `json:"analysisContract,omitempty"`
 	Fields           []Field           `json:"fields"`
+	Distinct         bool              `json:"distinct,omitempty"`
 	Filters          []Filter          `json:"filters"`
 	GroupBy          []string          `json:"groupBy"`
 	Having           []Filter          `json:"having"`
@@ -128,6 +130,8 @@ type Descriptor struct {
 	Code                    string       `json:"code"`
 	Name                    string       `json:"name"`
 	Description             string       `json:"description,omitempty"`
+	Domain                  string       `json:"domain,omitempty"`
+	Subject                 string       `json:"subject,omitempty"`
 	Type                    string       `json:"type"`
 	Layer                   Layer        `json:"layer,omitempty"`
 	SemanticContractVersion string       `json:"semanticContractVersion,omitempty"`

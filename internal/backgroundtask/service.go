@@ -50,3 +50,25 @@ func (service *Service) Cancel(
 	}
 	return service.store.Find(ctx, tenantID, kind, taskID)
 }
+
+func (service *Service) Retry(
+	ctx context.Context,
+	tenantID, actorID, kind, taskID string,
+) (Task, error) {
+	if service == nil || service.store == nil ||
+		strings.TrimSpace(tenantID) == "" || strings.TrimSpace(actorID) == "" ||
+		strings.TrimSpace(kind) == "" || strings.TrimSpace(taskID) == "" {
+		return Task{}, ErrInvalidRequest
+	}
+	current, err := service.store.Find(ctx, tenantID, kind, taskID)
+	if err != nil {
+		return Task{}, err
+	}
+	if !current.CanRetry {
+		return Task{}, ErrNotRetryable
+	}
+	if err := service.store.Retry(ctx, tenantID, actorID, kind, taskID); err != nil {
+		return Task{}, err
+	}
+	return service.store.Find(ctx, tenantID, kind, taskID)
+}

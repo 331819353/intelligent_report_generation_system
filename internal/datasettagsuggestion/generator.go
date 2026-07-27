@@ -21,7 +21,7 @@ import (
 
 const systemPrompt = `你是企业数据治理中的数据集标签建议助手。你只能从输入的 controlledTaxonomy 中选择标签，不能创建、改写或批准标签。
 请依据数据集说明、字段语义、DAG/粒度、技术元数据和精确上游语义摘要选择所有有充分证据的标签，重点覆盖 TABLE_FUNCTION、USAGE_SCOPE、DATA_GRAIN、JOIN_ROLE、BUSINESS_DOMAIN、BUSINESS_ENTITY。
-ODS 的 sourceTables 只包含技术/业务元数据，不包含样本行；DIM/DWD/DWS/ADS 的 upstreams 绑定精确发布版本。不得猜测输入未提供的业务事实，不得从字段编码臆造敏感含义。
+ODS 的 sourceTables 只包含技术/业务元数据，不包含样本行；DIM/DWD/DWS/ADS 的 upstreams 绑定精确的当前草稿或发布版本。同批次 DWD 在 DIM 发布前可以引用当前 DIM 草稿，但不得把草稿状态推断成业务事实。不得猜测输入未提供的业务事实，不得从字段编码臆造敏感含义。
 每个 tagId 最多返回一次。confidence 表示现有证据对该标签的支持程度；rationale 只简述元数据证据，不得包含业务数据值、凭据、SQL 或原始行。
 标签数量由证据决定，可以返回空数组；不要为了凑数输出弱相关标签。输出只能是 JSON Schema 指定的对象。`
 
@@ -89,8 +89,10 @@ func (generator *Generator) Generate(
 			Description: "从当前租户 ACTIVE CONTROLLED taxonomy 选择数据集标签建议",
 			Schema:      schema,
 		},
-		Temperature:     &temperature,
-		MaxOutputTokens: 32768,
+		Temperature: &temperature,
+		// 本地 OpenAI-compatible deepseek-v3 端点拒绝超过单次输出上限的
+		// 请求。标签只会选取少量受控词条，4096 足够容纳结构化理由。
+		MaxOutputTokens: 4096,
 	}
 	callCtx, cancel := context.WithTimeout(ctx, generator.timeout)
 	defer cancel()
@@ -150,10 +152,9 @@ func suggestionSchema(tags []TaxonomyTag) (json.RawMessage, error) {
 		"required":             []string{"items"},
 		"properties": map[string]any{
 			"items": map[string]any{
-				"type":        "array",
-				"minItems":    0,
-				"maxItems":    maxItems,
-				"uniqueItems": true,
+				"type":     "array",
+				"minItems": 0,
+				"maxItems": maxItems,
 				"items": map[string]any{
 					"type":                 "object",
 					"additionalProperties": false,

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}$`)
@@ -136,6 +137,8 @@ func Validate(document Document) error {
 	if document.Dataset.Name == "" {
 		add("dataset.name", "不能为空")
 	}
+	validateClassification(&issues, "dataset.domain", document.Dataset.Domain)
+	validateClassification(&issues, "dataset.subject", document.Dataset.Subject)
 	if !oneOf(document.Dataset.Type, "SINGLE_SOURCE", "CROSS_SOURCE") {
 		add("dataset.type", "必须为 SINGLE_SOURCE 或 CROSS_SOURCE")
 	}
@@ -589,6 +592,9 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 	hasGrouping := len(document.GroupBy) > 0 || len(document.Having) > 0 || len(document.PreAggregations) > 0
 	switch document.Dataset.Layer {
 	case LayerODS:
+		if document.Distinct {
+			add("distinct", "ODS 不允许改变源表行粒度")
+		}
 		if len(document.Nodes) != 1 || document.Nodes[0].Type != "TABLE" {
 			add("nodes", "ODS 只能包含一个物理 TABLE 节点")
 		}
@@ -613,6 +619,9 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 			add("outputGrain", "DIM 必须显式声明实体粒度和业务键")
 		}
 	case LayerDWD:
+		if document.Distinct {
+			add("distinct", "DWD 必须保留事实明细，不能去重")
+		}
 		if document.layerSpecified {
 			for index, node := range document.Nodes {
 				if node.Type != "DATASET" {
@@ -642,6 +651,9 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 			add("dataset.layer", "DWD 必须保持明细粒度，不允许业务分组或聚合")
 		}
 	case LayerDWS:
+		if document.Distinct {
+			add("distinct", "DWS 使用显式聚合合同，不能使用 DIM 去重开关")
+		}
 		if document.layerSpecified {
 			for index, node := range document.Nodes {
 				if node.Type != "DATASET" {
@@ -656,6 +668,9 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 			add("dataset.layer", "DWS 至少需要一个聚合指标")
 		}
 	case LayerADS:
+		if document.Distinct {
+			add("distinct", "ADS 不允许使用 DIM 去重开关")
+		}
 		if document.layerSpecified {
 			for index, node := range document.Nodes {
 				if node.Type != "DATASET" {
@@ -1477,6 +1492,9 @@ func BuildLogicalPlan(document Document) LogicalPlan {
 	if len(document.Having) > 0 {
 		plan.Steps = append(plan.Steps, PlanStep{ID: "post_aggregation_filters", Kind: "HAVING"})
 	}
+	if document.Distinct {
+		plan.Steps = append(plan.Steps, PlanStep{ID: "output_deduplication", Kind: "DEDUPLICATE"})
+	}
 	if len(document.Sorts) > 0 {
 		fields := make([]string, 0, len(document.Sorts))
 		for _, item := range document.Sorts {
@@ -1500,6 +1518,8 @@ func normalize(document Document) Document {
 	document.Dataset.Code = strings.TrimSpace(document.Dataset.Code)
 	document.Dataset.Name = strings.TrimSpace(document.Dataset.Name)
 	document.Dataset.Description = strings.TrimSpace(document.Dataset.Description)
+	document.Dataset.Domain = strings.TrimSpace(document.Dataset.Domain)
+	document.Dataset.Subject = strings.TrimSpace(document.Dataset.Subject)
 	document.Dataset.Type = upper(document.Dataset.Type)
 	document.Dataset.Layer = Layer(upper(string(document.Dataset.Layer)))
 	document.Dataset.SemanticContractVersion = strings.TrimSpace(document.Dataset.SemanticContractVersion)
@@ -2075,6 +2095,22 @@ func validateExecutionPolicy(issues *[]ValidationIssue, policy ExecutionPolicy) 
 func validateIdentifier(issues *[]ValidationIssue, path, value string) {
 	if !identifierPattern.MatchString(value) {
 		*issues = append(*issues, ValidationIssue{Path: path, Reason: "必须以字母开头且只能包含字母、数字和下划线，长度不超过 128"})
+	}
+}
+
+func validateClassification(issues *[]ValidationIssue, path, value string) {
+	if value == "" {
+		return
+	}
+	if len([]rune(value)) > 128 {
+		*issues = append(*issues, ValidationIssue{Path: path, Reason: "长度不能超过 128 个字符"})
+		return
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			*issues = append(*issues, ValidationIssue{Path: path, Reason: "不能包含控制字符"})
+			return
+		}
 	}
 }
 

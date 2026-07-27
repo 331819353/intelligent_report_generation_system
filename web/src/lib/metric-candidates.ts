@@ -53,9 +53,61 @@ export type AcceptMetricCandidateResult = {
   metric: MetricRecord
 }
 
+export type MetricIdentificationResult = {
+  eligibleDatasetCount: number
+  enqueuedJobCount: number
+  historicalMetricCount: number
+  existingCandidateCount: number
+  dimensionDatasetCount: number
+  dimensionProfileCount: number
+  datasets: MetricIdentificationDatasetIndex[]
+}
+
+export type MetricIdentificationMetric = {
+  code: string
+  name: string
+  status: string
+  source: 'METRIC_VERSION' | 'CANDIDATE'
+  allowedFieldIds: string[]
+  vectorStatus: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
+}
+
+export type MetricIdentificationDimension = {
+  fieldId: string
+  code: string
+  name: string
+  memberIndexPolicy: 'FULL' | 'EXACT_ONLY' | 'NONE'
+  memberValues: string[]
+  memberValueCount: number
+  vectorizedMemberCount: number
+  valuesTruncated: boolean
+  sensitive: boolean
+}
+
+export type MetricIdentificationDatasetIndex = {
+  datasetId: string
+  datasetVersionId: string
+  code: string
+  name: string
+  layer: 'DWS' | 'ADS'
+  domain: string
+  metrics: MetricIdentificationMetric[]
+  dimensions: MetricIdentificationDimension[]
+  indexDocument: {
+    domain: string
+    datasetVersionId: string
+    metrics: MetricIdentificationMetric[]
+    dimensions: MetricIdentificationDimension[]
+    retrieval: string[]
+  }
+}
+
 const candidatePath = (id: string) => `/v1/metric-candidates/${encodeURIComponent(id)}`
 
 export const metricCandidateAPI = {
+  identify: () => apiRequest<MetricIdentificationResult>('/v1/metric-candidates/identify', {
+    method: 'POST', cache: 'no-store',
+  }),
   list: (limit = 200, offset = 0) => {
     const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
     return apiRequest<MetricCandidatePage>(`/v1/metric-candidates?${query}`, { cache: 'no-store' })

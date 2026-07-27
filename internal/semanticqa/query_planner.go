@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"intelligent-report-generation-system/internal/platform/database"
@@ -17,6 +20,28 @@ type resolvedGraphNode struct {
 	Label       string
 	PayloadHash string
 	Payload     json.RawMessage
+}
+
+type metricGraphPayload struct {
+	MetricID         string `json:"metricId"`
+	MetricVersionID  string `json:"metricVersionId"`
+	DatasetVersionID string `json:"datasetVersionId"`
+}
+
+type scopedMemberMatch struct {
+	MemberValue   string
+	DimensionID   string
+	DimensionCode string
+	DimensionName string
+	MatchedValue  string
+}
+
+type metricScopedQuestionResolution struct {
+	DimensionCode  string
+	MemberValue    string
+	MemberFilters  []QueryMemberFilterInput
+	CandidateCount int
+	FailureCode    string
 }
 
 func (store *PostgresStore) PlanQuery(
@@ -68,6 +93,22 @@ func (store *PostgresStore) PlanQuery(
 		plan.Status = "GAP"
 		plan.FailureCode = "METRIC_NOT_FOUND"
 		plan.Evidence = []QueryEvidence{}
+		if input.MetricMatchMethod == "" {
+			input.MetricMatchMethod = "EXPLICIT_CODE"
+		}
+		intentDecision := "DETERMINISTIC_INTENT"
+		switch input.MetricMatchMethod {
+		case "CATALOG_RERANK":
+			intentDecision = "CATALOG_CONSTRAINED_INTERPRETATION"
+		case "EXPLICIT_CODE":
+			intentDecision = "CALLER_STRUCTURED_INTENT"
+		case "CONTEXT":
+			intentDecision = "CONTEXT_WITH_CURRENT_TURN_INTENT"
+		}
+		plan.Resolution = []QueryResolutionStep{{
+			Stage: "INTENT_RECOGNITION", Status: "RESOLVED",
+			SelectedCode: input.Intent, Decision: intentDecision,
+		}}
 
 		metricCandidates, err := graphNodesByCode(
 			ctx, tx, plan.GraphGenerationID, "METRIC", input.MetricCode,
@@ -76,24 +117,102 @@ func (store *PostgresStore) PlanQuery(
 			return err
 		}
 		if len(metricCandidates) > 1 {
+			plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+				Stage: "METRIC_CATALOG", Status: "AMBIGUOUS",
+				CandidateCount: len(metricCandidates), Decision: "EXACT_PUBLISHED_CODE",
+			})
 			plan.Status, plan.FailureCode = "AMBIGUOUS", "METRIC_AMBIGUOUS"
 			return persistQueryPlan(ctx, tx, actorID, input, &plan)
 		}
 		if len(metricCandidates) == 0 {
+			plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+				Stage: "METRIC_CATALOG", Status: "NOT_FOUND",
+				CandidateCount: input.MetricCandidateCount,
+				Decision:       input.MetricMatchMethod,
+			})
 			return persistQueryPlan(ctx, tx, actorID, input, &plan)
 		}
 		metricNode := metricCandidates[0]
-		var metricPayload struct {
-			MetricID         string `json:"metricId"`
-			MetricVersionID  string `json:"metricVersionId"`
-			DatasetVersionID string `json:"datasetVersionId"`
+		metricCandidateCount := input.MetricCandidateCount
+		if metricCandidateCount == 0 {
+			metricCandidateCount = len(metricCandidates)
 		}
+		plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+			Stage: "METRIC_CATALOG", Status: "RESOLVED",
+			CandidateCount: metricCandidateCount, SelectedCode: input.MetricCode,
+			Decision: input.MetricMatchMethod,
+		})
+		var metricPayload metricGraphPayload
 		if err := json.Unmarshal(metricNode.Payload, &metricPayload); err != nil {
 			return err
 		}
 		plan.SelectedMetricID = metricPayload.MetricID
 		plan.SelectedMetricVersionID = metricPayload.MetricVersionID
 		plan.SelectedDatasetVersionID = metricPayload.DatasetVersionID
+		var selectedDomain string
+		if err := tx.QueryRow(ctx, `SELECT
+				platform.dataset_version_effective_domain(id)
+			FROM platform.dataset_versions
+			WHERE id=$1::uuid AND status='PUBLISHED'`,
+			metricPayload.DatasetVersionID,
+		).Scan(&selectedDomain); err != nil {
+			return err
+		}
+		domainStep := QueryResolutionStep{
+			Stage: "DOMAIN_CATALOG", Status: "RESOLVED",
+			CandidateCount: 1, SelectedCode: selectedDomain,
+			Decision: "DOMAIN_SCOPED_HYBRID_RECALL",
+		}
+		if input.Domain != "" && !strings.EqualFold(input.Domain, selectedDomain) {
+			domainStep.Status = "REJECTED"
+			domainStep.Decision = "METRIC_DOMAIN_MISMATCH"
+			plan.Resolution = append(
+				plan.Resolution[:1],
+				append([]QueryResolutionStep{domainStep}, plan.Resolution[1:]...)...,
+			)
+			plan.Status, plan.FailureCode = "REJECTED", "METRIC_DOMAIN_MISMATCH"
+			return persistQueryPlan(ctx, tx, actorID, input, &plan)
+		}
+		input.Domain = selectedDomain
+		plan.Resolution = append(
+			plan.Resolution[:1],
+			append([]QueryResolutionStep{domainStep}, plan.Resolution[1:]...)...,
+		)
+		plan.Conditions = QueryConditionDocument{
+			Domain: selectedDomain, MetricCode: input.MetricCode,
+			MetricVersionID:  metricPayload.MetricVersionID,
+			DatasetVersionID: metricPayload.DatasetVersionID,
+			Dimensions:       []QueryDimensionClause{}, TimeRange: input.TimeRange,
+		}
+		autoMemberCandidateCount := 0
+		if input.MemberValue == "" && len(input.MemberFilters) == 0 &&
+			strings.TrimSpace(input.Question) != "" {
+			scoped, err := resolveMetricScopedQuestion(
+				ctx, tx, plan.GraphGenerationID, metricNode,
+				metricPayload, input.Question, input.DimensionCode,
+				minimumConfidence,
+			)
+			if err != nil {
+				return err
+			}
+			autoMemberCandidateCount = scoped.CandidateCount
+			if scoped.FailureCode != "" {
+				plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+					Stage: "DIMENSION_MEMBER", Status: "AMBIGUOUS",
+					CandidateCount: scoped.CandidateCount,
+					Decision:       "METRIC_SCOPED_EXACT_MATCH",
+				})
+				plan.Status, plan.FailureCode = "AMBIGUOUS", scoped.FailureCode
+				return persistQueryPlan(ctx, tx, actorID, input, &plan)
+			}
+			if scoped.MemberValue != "" {
+				input.DimensionCode = scoped.DimensionCode
+				input.MemberValue = scoped.MemberValue
+				input.MemberFilters = scoped.MemberFilters
+			} else if input.DimensionCode == "" {
+				input.DimensionCode = scoped.DimensionCode
+			}
+		}
 		var metricTimeFieldID, metricTimeFieldType string
 		if err := tx.QueryRow(ctx, `SELECT
 				COALESCE(metric_version.definition_json->>'timeFieldId',''),
@@ -173,16 +292,26 @@ func (store *PostgresStore) PlanQuery(
 			memberCandidates, err := graphMemberNodes(
 				ctx, tx, plan.GraphGenerationID,
 				strings.ToLower(strings.TrimSpace(input.MemberValue)),
-				input.DimensionCode,
+				input.DimensionCode, metricNode.NodeKey,
+				metricPayload.DatasetVersionID, minimumConfidence,
 			)
 			if err != nil {
 				return err
 			}
 			if len(memberCandidates) > 1 {
+				plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+					Stage: "DIMENSION_MEMBER", Status: "AMBIGUOUS",
+					CandidateCount: len(memberCandidates),
+					Decision:       "METRIC_SCOPED_EXACT_MATCH",
+				})
 				plan.Status, plan.FailureCode = "AMBIGUOUS", "MEMBER_AMBIGUOUS"
 				return persistQueryPlan(ctx, tx, actorID, input, &plan)
 			}
 			if len(memberCandidates) == 0 {
+				plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+					Stage: "DIMENSION_MEMBER", Status: "NOT_FOUND",
+					Decision: "METRIC_SCOPED_EXACT_MATCH",
+				})
 				plan.Status, plan.FailureCode = "GAP", "MEMBER_NOT_FOUND"
 				return persistQueryPlan(ctx, tx, actorID, input, &plan)
 			}
@@ -202,17 +331,30 @@ func (store *PostgresStore) PlanQuery(
 			dimensionNode = &dimension
 			plan.SelectedDimensionID = payload.DimensionID
 		} else if input.DimensionCode != "" {
-			dimensionCandidates, err := graphNodesByCode(
-				ctx, tx, plan.GraphGenerationID, "DIMENSION", input.DimensionCode,
+			dimensionCandidates, err := graphMetricDimensionNodesByCode(
+				ctx, tx, plan.GraphGenerationID, metricNode.NodeKey,
+				metricPayload.DatasetVersionID, input.DimensionCode,
+				minimumConfidence,
 			)
 			if err != nil {
 				return err
 			}
 			if len(dimensionCandidates) > 1 {
+				plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+					Stage: "DIMENSION_MEMBER", Status: "AMBIGUOUS",
+					CandidateCount: len(dimensionCandidates),
+					SelectedCode:   input.DimensionCode,
+					Decision:       "METRIC_SCOPED_DIMENSION",
+				})
 				plan.Status, plan.FailureCode = "AMBIGUOUS", "DIMENSION_AMBIGUOUS"
 				return persistQueryPlan(ctx, tx, actorID, input, &plan)
 			}
 			if len(dimensionCandidates) == 0 {
+				plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+					Stage: "DIMENSION_MEMBER", Status: "NOT_FOUND",
+					SelectedCode: input.DimensionCode,
+					Decision:     "METRIC_SCOPED_DIMENSION",
+				})
 				plan.Status, plan.FailureCode = "GAP", "DIMENSION_NOT_FOUND"
 				return persistQueryPlan(ctx, tx, actorID, input, &plan)
 			}
@@ -234,16 +376,28 @@ func (store *PostgresStore) PlanQuery(
 			memberCandidates, err := graphMemberNodes(
 				ctx, tx, plan.GraphGenerationID,
 				strings.ToLower(strings.TrimSpace(memberFilter.MemberValue)),
-				memberFilter.DimensionCode,
+				memberFilter.DimensionCode, metricNode.NodeKey,
+				metricPayload.DatasetVersionID, minimumConfidence,
 			)
 			if err != nil {
 				return err
 			}
 			if len(memberCandidates) > 1 {
+				plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+					Stage: "DIMENSION_MEMBER", Status: "AMBIGUOUS",
+					CandidateCount: len(memberCandidates),
+					SelectedCode:   memberFilter.DimensionCode,
+					Decision:       "METRIC_SCOPED_FILTER",
+				})
 				plan.Status, plan.FailureCode = "AMBIGUOUS", "FILTER_MEMBER_AMBIGUOUS"
 				return persistQueryPlan(ctx, tx, actorID, input, &plan)
 			}
 			if len(memberCandidates) == 0 {
+				plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+					Stage: "DIMENSION_MEMBER", Status: "NOT_FOUND",
+					SelectedCode: memberFilter.DimensionCode,
+					Decision:     "METRIC_SCOPED_FILTER",
+				})
 				plan.Status, plan.FailureCode = "GAP", "FILTER_MEMBER_NOT_FOUND"
 				return persistQueryPlan(ctx, tx, actorID, input, &plan)
 			}
@@ -280,6 +434,54 @@ func (store *PostgresStore) PlanQuery(
 			plan.Status, plan.FailureCode = "GAP", "TOP_N_DIMENSION_REQUIRED"
 			return persistQueryPlan(ctx, tx, actorID, input, &plan)
 		}
+		memberFilterCount := len(resolvedMemberFilters)
+		if memberNode != nil {
+			memberFilterCount++
+		}
+		switch {
+		case memberFilterCount > 0:
+			if autoMemberCandidateCount == 0 {
+				autoMemberCandidateCount = memberFilterCount
+			}
+			plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+				Stage: "DIMENSION_MEMBER", Status: "RESOLVED",
+				CandidateCount: autoMemberCandidateCount,
+				SelectedCode:   input.DimensionCode,
+				Decision:       "METRIC_SCOPED_EXACT_MATCH",
+			})
+		case dimensionNode != nil:
+			plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+				Stage: "DIMENSION_MEMBER", Status: "RESOLVED",
+				CandidateCount: 1, SelectedCode: input.DimensionCode,
+				Decision: "METRIC_SCOPED_DIMENSION",
+			})
+		default:
+			plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+				Stage: "DIMENSION_MEMBER", Status: "SKIPPED",
+				Decision: "NO_DIMENSION_CONSTRAINT",
+			})
+		}
+		if memberNode != nil && dimensionNode != nil {
+			clause, err := queryConditionClause(*dimensionNode, *memberNode)
+			if err != nil {
+				return err
+			}
+			plan.Conditions.Dimensions = append(plan.Conditions.Dimensions, clause)
+		}
+		for _, memberFilter := range resolvedMemberFilters {
+			clause, err := queryConditionClause(
+				memberFilter.dimension, memberFilter.member,
+			)
+			if err != nil {
+				return err
+			}
+			plan.Conditions.Dimensions = append(plan.Conditions.Dimensions, clause)
+		}
+		sort.Slice(plan.Conditions.Dimensions, func(left, right int) bool {
+			return plan.Conditions.Dimensions[left].DimensionCode <
+				plan.Conditions.Dimensions[right].DimensionCode
+		})
+		plan.Conditions.TimeRange = input.TimeRange
 
 		if memberNode != nil {
 			plan.Evidence = append(plan.Evidence, QueryEvidence{
@@ -335,18 +537,33 @@ func (store *PostgresStore) PlanQuery(
 			"dataset_version:"+metricPayload.DatasetVersionID,
 		)
 		if err != nil {
+			plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+				Stage: "DATASET_LOCK", Status: "NOT_FOUND",
+				SelectedCode: metricPayload.DatasetVersionID,
+				Decision:     "PUBLISHED_METRIC_VERSION_BINDING",
+			})
 			plan.Status, plan.FailureCode = "GAP", "DATASET_NOT_FOUND"
 			return persistQueryPlan(ctx, tx, actorID, input, &plan)
 		}
 		var datasetEdgeHash, datasetEdgeAuthority string
 		var datasetConfidence float64
-		if err := tx.QueryRow(ctx, `SELECT evidence_hash,authority,confidence::float8
+		err = tx.QueryRow(ctx, `SELECT evidence_hash,authority,confidence::float8
 			FROM platform.semantic_graph_edges
 			WHERE generation_id=$1::uuid AND from_node_key=$2 AND to_node_key=$3
 			  AND relation_type='METRIC_DATASET'`,
 			plan.GraphGenerationID, metricNode.NodeKey, datasetNode.NodeKey,
-		).Scan(&datasetEdgeHash, &datasetEdgeAuthority, &datasetConfidence); err != nil {
-			return ErrUnprovenPath
+		).Scan(&datasetEdgeHash, &datasetEdgeAuthority, &datasetConfidence)
+		if errors.Is(err, pgx.ErrNoRows) {
+			plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+				Stage: "DATASET_LOCK", Status: "NOT_FOUND",
+				SelectedCode: metricPayload.DatasetVersionID,
+				Decision:     "METRIC_DATASET_EDGE_NOT_PROVEN",
+			})
+			plan.Status, plan.FailureCode = "REJECTED", "METRIC_DATASET_NOT_PROVEN"
+			return persistQueryPlan(ctx, tx, actorID, input, &plan)
+		}
+		if err != nil {
+			return err
 		}
 		plan.Evidence = append(plan.Evidence, QueryEvidence{
 			NodeKey: datasetNode.NodeKey, RelationType: "METRIC_DATASET",
@@ -359,6 +576,11 @@ func (store *PostgresStore) PlanQuery(
 		)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
+				plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+					Stage: "DATASET_LOCK", Status: "NOT_FOUND",
+					SelectedCode: metricPayload.DatasetVersionID,
+					Decision:     "ACTIVE_MATERIALIZATION_NOT_PROVEN",
+				})
 				plan.Status, plan.FailureCode = "REJECTED", "ACTIVE_MATERIALIZATION_NOT_PROVEN"
 				return persistQueryPlan(ctx, tx, actorID, input, &plan)
 			}
@@ -366,6 +588,11 @@ func (store *PostgresStore) PlanQuery(
 		}
 		plan.SelectedMaterializationID = materializationNode.SubjectRef
 		plan.Evidence = append(plan.Evidence, materializationEvidence)
+		plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+			Stage: "DATASET_LOCK", Status: "RESOLVED",
+			CandidateCount: 1, SelectedCode: metricPayload.DatasetVersionID,
+			Decision: "PUBLISHED_METRIC_VERSION_BINDING",
+		})
 		lineage, err := graphLineageEvidence(
 			ctx, tx, plan.GraphGenerationID, datasetNode.NodeKey, maximumHops,
 		)
@@ -395,6 +622,36 @@ func (store *PostgresStore) PlanQuery(
 		return persistQueryPlan(ctx, tx, actorID, input, &plan)
 	})
 	return plan, err
+}
+
+func queryConditionClause(
+	dimension resolvedGraphNode,
+	member resolvedGraphNode,
+) (QueryDimensionClause, error) {
+	var dimensionPayload struct {
+		DimensionID string `json:"dimensionId"`
+		Code        string `json:"code"`
+	}
+	var memberPayload struct {
+		DimensionID string `json:"dimensionId"`
+		MemberKey   string `json:"memberKey"`
+	}
+	if err := json.Unmarshal(dimension.Payload, &dimensionPayload); err != nil {
+		return QueryDimensionClause{}, err
+	}
+	if err := json.Unmarshal(member.Payload, &memberPayload); err != nil {
+		return QueryDimensionClause{}, err
+	}
+	if dimensionPayload.DimensionID == "" ||
+		dimensionPayload.DimensionID != memberPayload.DimensionID ||
+		dimensionPayload.Code == "" || memberPayload.MemberKey == "" {
+		return QueryDimensionClause{}, ErrUnprovenPath
+	}
+	return QueryDimensionClause{
+		DimensionCode: dimensionPayload.Code,
+		DimensionID:   dimensionPayload.DimensionID,
+		MemberKey:     memberPayload.MemberKey,
+	}, nil
 }
 
 func graphMaterializationEvidence(
@@ -483,10 +740,426 @@ func graphNodesByCode(
 	return result, rows.Err()
 }
 
+func graphMetricDimensionNodesByCode(
+	ctx context.Context,
+	tx pgx.Tx,
+	generationID, metricNodeKey, datasetVersionID, code string,
+	minimumConfidence float64,
+) ([]resolvedGraphNode, error) {
+	rows, err := tx.Query(ctx, `SELECT dimension.node_key,
+			dimension.subject_ref,dimension.label,
+			dimension.payload_hash,dimension.payload_json
+		FROM platform.semantic_graph_edges AS compatibility
+		JOIN platform.semantic_graph_nodes AS dimension
+		  ON dimension.tenant_id=compatibility.tenant_id
+		 AND dimension.generation_id=compatibility.generation_id
+		 AND dimension.node_key=compatibility.to_node_key
+		 AND dimension.node_type='DIMENSION'
+		WHERE compatibility.generation_id=$1::uuid
+		  AND compatibility.from_node_key=$2
+		  AND compatibility.relation_type='METRIC_DIMENSION'
+		  AND compatibility.confidence>=$5
+		  AND dimension.payload_json->>'datasetVersionId'=$3
+		  AND lower(dimension.payload_json->>'code')=lower($4)
+		ORDER BY dimension.node_key
+		LIMIT 2`,
+		generationID, metricNodeKey, datasetVersionID, code, minimumConfidence,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []resolvedGraphNode{}
+	for rows.Next() {
+		var node resolvedGraphNode
+		var payload []byte
+		if err := rows.Scan(
+			&node.NodeKey, &node.SubjectRef, &node.Label,
+			&node.PayloadHash, &payload,
+		); err != nil {
+			return nil, err
+		}
+		node.Payload = append(json.RawMessage(nil), payload...)
+		result = append(result, node)
+	}
+	return result, rows.Err()
+}
+
+func resolveMetricScopedQuestion(
+	ctx context.Context,
+	tx pgx.Tx,
+	generationID string,
+	metricNode resolvedGraphNode,
+	metric metricGraphPayload,
+	question, requestedDimensionCode string,
+	minimumConfidence float64,
+) (metricScopedQuestionResolution, error) {
+	result := metricScopedQuestionResolution{MemberFilters: []QueryMemberFilterInput{}}
+	tokens := memberLookupTokens(question, metricNode.Label)
+	if len(tokens) > 0 {
+		matches, err := metricScopedMemberMatches(
+			ctx, tx, generationID, metricNode.NodeKey,
+			metric.DatasetVersionID, requestedDimensionCode,
+			minimumConfidence, tokens,
+		)
+		if err != nil {
+			return result, err
+		}
+		result.CandidateCount = len(matches)
+		if len(matches) > 33 {
+			result.FailureCode = "MEMBER_AMBIGUOUS"
+			return result, nil
+		}
+		selected, ambiguous := selectMetricScopedMemberMatches(matches, question)
+		if ambiguous {
+			result.FailureCode = "MEMBER_AMBIGUOUS"
+			return result, nil
+		}
+		if len(selected) > 9 {
+			result.FailureCode = "MEMBER_AMBIGUOUS"
+			return result, nil
+		}
+		if len(selected) > 0 {
+			result.DimensionCode = selected[0].DimensionCode
+			result.MemberValue = selected[0].MemberValue
+			for _, item := range selected[1:] {
+				result.MemberFilters = append(
+					result.MemberFilters,
+					QueryMemberFilterInput{
+						DimensionCode: item.DimensionCode,
+						MemberValue:   item.MemberValue,
+					},
+				)
+			}
+			return result, nil
+		}
+	}
+	if requestedDimensionCode != "" {
+		result.DimensionCode = requestedDimensionCode
+		return result, nil
+	}
+	dimensions, err := metricScopedDimensionsMentioned(
+		ctx, tx, generationID, metricNode.NodeKey,
+		metric.DatasetVersionID, question, minimumConfidence,
+	)
+	if err != nil {
+		return result, err
+	}
+	result.CandidateCount = len(dimensions)
+	if len(dimensions) > 1 {
+		result.FailureCode = "DIMENSION_AMBIGUOUS"
+		return result, nil
+	}
+	if len(dimensions) == 1 {
+		var payload struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(dimensions[0].Payload, &payload); err != nil {
+			return result, err
+		}
+		result.DimensionCode = payload.Code
+	}
+	return result, nil
+}
+
+func metricScopedMemberMatches(
+	ctx context.Context,
+	tx pgx.Tx,
+	generationID, metricNodeKey, datasetVersionID, dimensionCode string,
+	minimumConfidence float64,
+	tokens []string,
+) ([]scopedMemberMatch, error) {
+	rows, err := tx.Query(ctx, `WITH tokens(value) AS (
+			SELECT unnest($6::text[])
+		), compatible_dimensions AS (
+			SELECT dimension.id,dimension.code::text AS code,
+				dimension.name
+			FROM platform.semantic_dimensions AS dimension
+			JOIN platform.semantic_graph_nodes AS graph_dimension
+			  ON graph_dimension.tenant_id=dimension.tenant_id
+			 AND graph_dimension.generation_id=$1::uuid
+			 AND graph_dimension.node_key='dimension:'||dimension.id::text
+			JOIN platform.semantic_graph_edges AS compatibility
+			  ON compatibility.tenant_id=dimension.tenant_id
+			 AND compatibility.generation_id=graph_dimension.generation_id
+			 AND compatibility.from_node_key=$2
+			 AND compatibility.to_node_key=graph_dimension.node_key
+			 AND compatibility.relation_type='METRIC_DIMENSION'
+			 AND compatibility.confidence>=$5
+			WHERE dimension.status='PUBLISHED'
+			  AND dimension.dataset_version_id=$3::uuid
+			  AND ($4='' OR lower(dimension.code::text)=lower($4))
+		), matches AS (
+			SELECT member.id,member.normalized_value,dimension.id AS dimension_id,
+				dimension.code,dimension.name,tokens.value AS matched_value
+			FROM tokens
+			JOIN platform.dimension_members AS member
+			  ON member.normalized_value=tokens.value
+			JOIN compatible_dimensions AS dimension
+			  ON dimension.id=member.dimension_id
+			WHERE member.status='ACTIVE'
+			  AND (member.valid_from IS NULL OR member.valid_from<=now())
+			  AND (member.valid_to IS NULL OR member.valid_to>now())
+			UNION ALL
+			SELECT member.id,member.normalized_value,dimension.id AS dimension_id,
+				dimension.code,dimension.name,tokens.value AS matched_value
+			FROM tokens
+			JOIN platform.dimension_member_aliases AS alias
+			  ON alias.normalized_alias=tokens.value
+			 AND (alias.valid_from IS NULL OR alias.valid_from<=now())
+			 AND (alias.valid_to IS NULL OR alias.valid_to>now())
+			JOIN platform.dimension_members AS member
+			  ON member.id=alias.dimension_member_id
+			 AND member.dimension_id=alias.dimension_id
+			JOIN compatible_dimensions AS dimension
+			  ON dimension.id=member.dimension_id
+			WHERE member.status='ACTIVE'
+			  AND (member.valid_from IS NULL OR member.valid_from<=now())
+			  AND (member.valid_to IS NULL OR member.valid_to>now())
+		)
+		SELECT DISTINCT ON(id) normalized_value,dimension_id::text,
+			code,name,matched_value
+		FROM matches
+		WHERE lower(matched_value)<>lower(name)
+		  AND lower(matched_value)<>lower(code)
+		ORDER BY id,char_length(matched_value) DESC,matched_value
+		LIMIT 34`,
+		generationID, metricNodeKey, datasetVersionID, dimensionCode,
+		minimumConfidence, tokens,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []scopedMemberMatch{}
+	for rows.Next() {
+		var item scopedMemberMatch
+		if err := rows.Scan(
+			&item.MemberValue, &item.DimensionID, &item.DimensionCode,
+			&item.DimensionName, &item.MatchedValue,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func selectMetricScopedMemberMatches(
+	matches []scopedMemberMatch,
+	question string,
+) ([]scopedMemberMatch, bool) {
+	if len(matches) == 0 {
+		return nil, false
+	}
+	question = strings.ToLower(question)
+	byDimension := map[string][]scopedMemberMatch{}
+	for _, match := range matches {
+		byDimension[match.DimensionID] = append(
+			byDimension[match.DimensionID], match,
+		)
+	}
+	selected := make([]scopedMemberMatch, 0, len(byDimension))
+	for _, candidates := range byDimension {
+		sort.Slice(candidates, func(left, right int) bool {
+			leftLength := utf8.RuneCountInString(candidates[left].MatchedValue)
+			rightLength := utf8.RuneCountInString(candidates[right].MatchedValue)
+			if leftLength != rightLength {
+				return leftLength > rightLength
+			}
+			return candidates[left].MemberValue < candidates[right].MemberValue
+		})
+		if len(candidates) > 1 &&
+			utf8.RuneCountInString(candidates[0].MatchedValue) ==
+				utf8.RuneCountInString(candidates[1].MatchedValue) &&
+			candidates[0].MemberValue != candidates[1].MemberValue {
+			// Multiple values from one dimension require an explicit set
+			// contract. Selecting just one would silently change the question.
+			return nil, true
+		}
+		for _, candidate := range candidates[1:] {
+			if candidate.MemberValue != candidates[0].MemberValue &&
+				!strings.Contains(
+					candidates[0].MatchedValue, candidate.MatchedValue,
+				) &&
+				!strings.Contains(
+					candidate.MatchedValue, candidates[0].MatchedValue,
+				) {
+				return nil, true
+			}
+		}
+		selected = append(selected, candidates[0])
+	}
+	byMatchedValue := map[string][]scopedMemberMatch{}
+	for _, match := range selected {
+		byMatchedValue[match.MatchedValue] = append(
+			byMatchedValue[match.MatchedValue], match,
+		)
+	}
+	filtered := make([]scopedMemberMatch, 0, len(selected))
+	for _, candidates := range byMatchedValue {
+		if len(candidates) == 1 {
+			filtered = append(filtered, candidates[0])
+			continue
+		}
+		named := []scopedMemberMatch{}
+		for _, candidate := range candidates {
+			if strings.Contains(question, strings.ToLower(candidate.DimensionName)) ||
+				strings.Contains(question, strings.ToLower(candidate.DimensionCode)) {
+				named = append(named, candidate)
+			}
+		}
+		if len(named) != 1 {
+			return nil, true
+		}
+		filtered = append(filtered, named[0])
+	}
+	sort.Slice(filtered, func(left, right int) bool {
+		return strings.ToLower(filtered[left].DimensionCode) <
+			strings.ToLower(filtered[right].DimensionCode)
+	})
+	return filtered, false
+}
+
+func metricScopedDimensionsMentioned(
+	ctx context.Context,
+	tx pgx.Tx,
+	generationID, metricNodeKey, datasetVersionID, question string,
+	minimumConfidence float64,
+) ([]resolvedGraphNode, error) {
+	rows, err := tx.Query(ctx, `SELECT dimension.node_key,
+			dimension.subject_ref,dimension.label,
+			dimension.payload_hash,dimension.payload_json
+		FROM platform.semantic_graph_edges AS compatibility
+		JOIN platform.semantic_graph_nodes AS dimension
+		  ON dimension.tenant_id=compatibility.tenant_id
+		 AND dimension.generation_id=compatibility.generation_id
+		 AND dimension.node_key=compatibility.to_node_key
+		 AND dimension.node_type='DIMENSION'
+		WHERE compatibility.generation_id=$1::uuid
+		  AND compatibility.from_node_key=$2
+		  AND compatibility.relation_type='METRIC_DIMENSION'
+		  AND compatibility.confidence>=$4
+		  AND dimension.payload_json->>'datasetVersionId'=$3
+		ORDER BY char_length(dimension.label) DESC,dimension.node_key
+		LIMIT 32`,
+		generationID, metricNodeKey, datasetVersionID, minimumConfidence,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	question = strings.ToLower(question)
+	result := []resolvedGraphNode{}
+	longest := 0
+	for rows.Next() {
+		var node resolvedGraphNode
+		var payload []byte
+		if err := rows.Scan(
+			&node.NodeKey, &node.SubjectRef, &node.Label,
+			&node.PayloadHash, &payload,
+		); err != nil {
+			return nil, err
+		}
+		node.Payload = append(json.RawMessage(nil), payload...)
+		var value struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(node.Payload, &value); err != nil {
+			return nil, err
+		}
+		matchLength := 0
+		if strings.Contains(question, strings.ToLower(node.Label)) {
+			matchLength = utf8.RuneCountInString(node.Label)
+		}
+		if strings.Contains(question, strings.ToLower(value.Code)) {
+			if codeLength := utf8.RuneCountInString(value.Code); codeLength > matchLength {
+				matchLength = codeLength
+			}
+		}
+		if matchLength == 0 || matchLength < longest {
+			continue
+		}
+		if matchLength > longest {
+			longest = matchLength
+			result = result[:0]
+		}
+		result = append(result, node)
+	}
+	return result, rows.Err()
+}
+
+func memberLookupTokens(question, metricLabel string) []string {
+	question = strings.ToLower(strings.TrimSpace(question))
+	metricLabel = strings.ToLower(strings.TrimSpace(metricLabel))
+	if question == "" {
+		return nil
+	}
+	stop := map[string]bool{
+		"多少": true, "所有": true, "全部": true, "截至": true,
+		"截止": true, "今年": true, "去年": true, "本月": true,
+		"上月": true, "数量": true, "总数": true, "趋势": true,
+		"排名": true, "同比": true, "环比": true, "是多少": true,
+		"是什么": true, "哪些": true, "怎么": true, "所有的": true,
+		"有多少": true, "查询": true, "查看": true, "分析": true,
+		"请问": true, "给我": true, "按照": true, "根据": true,
+	}
+	seen := map[string]bool{}
+	result := make([]string, 0, 128)
+	segments := strings.FieldsFunc(question, func(character rune) bool {
+		return unicode.IsSpace(character) || unicode.IsPunct(character) ||
+			unicode.IsSymbol(character)
+	})
+	for _, segment := range segments {
+		runes := []rune(segment)
+		if len(runes) > 64 {
+			runes = runes[:64]
+		}
+		maximumLength := len(runes)
+		if maximumLength > 16 {
+			maximumLength = 16
+		}
+		for length := maximumLength; length >= 2; length-- {
+			for start := 0; start+length <= len(runes); start++ {
+				token := string(runes[start : start+length])
+				if stop[token] || isTimeLookupToken(token) || seen[token] ||
+					(metricLabel != "" && strings.Contains(metricLabel, token)) {
+					continue
+				}
+				seen[token] = true
+				result = append(result, token)
+				if len(result) >= 512 {
+					return result
+				}
+			}
+		}
+	}
+	return result
+}
+
+func isTimeLookupToken(value string) bool {
+	runes := []rune(value)
+	if len(runes) < 2 {
+		return false
+	}
+	unit := runes[len(runes)-1]
+	if unit != '年' && unit != '月' && unit != '日' && unit != '号' {
+		return false
+	}
+	for _, character := range runes[:len(runes)-1] {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func graphMemberNodes(
 	ctx context.Context,
 	tx pgx.Tx,
-	generationID, normalizedValue, dimensionCode string,
+	generationID, normalizedValue, dimensionCode, metricNodeKey,
+	datasetVersionID string,
+	minimumConfidence float64,
 ) ([]resolvedGraphNode, error) {
 	rows, err := tx.Query(ctx, `SELECT graph_member.node_key,
 			graph_member.subject_ref,graph_member.label,
@@ -500,11 +1173,18 @@ func graphMemberNodes(
 		  ON graph_member.tenant_id=member.tenant_id
 		 AND graph_member.generation_id=$1::uuid
 		 AND graph_member.node_key='member:'||member.id::text
-		JOIN platform.semantic_graph_nodes AS graph_dimension
+			JOIN platform.semantic_graph_nodes AS graph_dimension
 		  ON graph_dimension.tenant_id=dimension.tenant_id
-		 AND graph_dimension.generation_id=graph_member.generation_id
-		 AND graph_dimension.node_key='dimension:'||dimension.id::text
-		WHERE member.status='ACTIVE'
+			 AND graph_dimension.generation_id=graph_member.generation_id
+			 AND graph_dimension.node_key='dimension:'||dimension.id::text
+			JOIN platform.semantic_graph_edges AS compatibility
+			  ON compatibility.tenant_id=dimension.tenant_id
+			 AND compatibility.generation_id=graph_dimension.generation_id
+			 AND compatibility.from_node_key=$4
+			 AND compatibility.to_node_key=graph_dimension.node_key
+			 AND compatibility.relation_type='METRIC_DIMENSION'
+			 AND compatibility.confidence>=$6
+			WHERE member.status='ACTIVE'
 		  AND (member.valid_from IS NULL OR member.valid_from<=now())
 		  AND (member.valid_to IS NULL OR member.valid_to>now())
 		  AND (
@@ -518,11 +1198,13 @@ func graphMemberNodes(
 		        AND alias.normalized_alias=$2
 		        AND (alias.valid_from IS NULL OR alias.valid_from<=now())
 		        AND (alias.valid_to IS NULL OR alias.valid_to>now())
-		    )
-		  )
-		  AND ($3='' OR lower(dimension.code::text)=lower($3))
-		ORDER BY graph_member.node_key LIMIT 2`,
-		generationID, normalizedValue, dimensionCode)
+			  )
+			)
+			  AND ($3='' OR lower(dimension.code::text)=lower($3))
+			  AND dimension.dataset_version_id=$5::uuid
+			ORDER BY graph_member.node_key LIMIT 2`,
+		generationID, normalizedValue, dimensionCode, metricNodeKey,
+		datasetVersionID, minimumConfidence)
 	if err != nil {
 		return nil, err
 	}
@@ -674,6 +1356,8 @@ func persistQueryPlan(
 		"timePreset":        input.TimePreset,
 		"timezone":          input.Timezone,
 		"comparisonMode":    input.ComparisonMode,
+		"resolution":        plan.Resolution,
+		"conditions":        plan.Conditions,
 	}
 	if input.TimeRange != nil {
 		normalizedRequest["timeRange"] = input.TimeRange

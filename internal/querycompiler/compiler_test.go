@@ -1,6 +1,7 @@
 package querycompiler
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"strings"
@@ -72,6 +73,35 @@ func TestCompileWithoutBusinessParametersStillBindsRowLimit(t *testing.T) {
 	}
 	if compiled.Args == nil || len(compiled.Args) != 1 || compiled.Args[0] != 100 || !strings.HasSuffix(compiled.SQL, "LIMIT %s") {
 		t.Fatalf("无业务参数查询仍须绑定服务端行数上限: sql=%s args=%#v", compiled.SQL, compiled.Args)
+	}
+}
+
+func TestCompileDistinctDimensionProjection(t *testing.T) {
+	input := compilerInput(t)
+	input.Document.Distinct = true
+	input.Document.Dataset.Layer = dataset.LayerDIM
+	input.Document.Parameters = nil
+	input.Document.Filters = nil
+	input.Document.GroupBy = nil
+	input.Document.Having = nil
+	input.Document.Sorts = nil
+	input.Document.Nodes[0].SourceFilters = nil
+	input.Document.Fields = input.Document.Fields[:1]
+	input.Document.Fields[0].Role = "IDENTIFIER"
+	input.Document.OutputGrain = dataset.OutputGrain{
+		Description: "每行代表一个月份实体",
+		KeyFields:   []string{"stat_month"},
+		TimeField:   "stat_month",
+	}
+	input.Parameters = nil
+	input.RowPolicies = nil
+	input.ColumnPolicies = nil
+	compiled, err := Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(compiled.SQL, "SELECT DISTINCT ") {
+		t.Fatalf("dimension extraction did not compile output deduplication: %s", compiled.SQL)
 	}
 }
 
@@ -231,6 +261,112 @@ func TestCompileBuildsGroupedDerivedTableBeforeJoin(t *testing.T) {
 	}
 	if !strings.Contains(compiled.SQL, "UPPER(`pre_source`.`customer_name`) AS `region_upper`") || !strings.Contains(compiled.SQL, "COUNT(`pre_source`.`customer_name`) AS `customer_count`") || !strings.Contains(compiled.SQL, "`c`.`region_upper` AS `region_upper`") {
 		t.Fatalf("transformed pre-join aggregation SQL=%s", compiled.SQL)
+	}
+}
+
+func TestCompileBuildsDateTruncatedPreAggregationWithoutSelfReference(t *testing.T) {
+	document := dataset.Document{
+		DSLVersion: "1.0",
+		Dataset: dataset.Descriptor{
+			Code: "monthly_orders", Name: "月度订单",
+			Type: "SINGLE_SOURCE", Layer: dataset.LayerDWS,
+		},
+		Nodes: []dataset.Node{
+			{
+				ID: "orders", Type: "TABLE", DataSourceID: "source-a",
+				TableID: "table-a", Alias: "o",
+				Projection:    []string{"order_time", "amount"},
+				SourceFilters: []dataset.SourceFilter{},
+			},
+			{
+				ID: "calendar", Type: "TABLE", DataSourceID: "source-a",
+				TableID: "table-b", Alias: "c", Projection: []string{"day"},
+				SourceFilters: []dataset.SourceFilter{},
+			},
+		},
+		Joins: []dataset.Join{{
+			ID: "join_1", LeftNodeID: "orders", RightNodeID: "calendar",
+			JoinType: "LEFT", Cardinality: "MANY_TO_ONE",
+			FanoutPolicy: "SAFE", ManualConfirmed: true,
+			Conditions: []dataset.JoinCondition{{
+				LeftExpression: dataset.Expression{
+					Type: "FIELD_REF", NodeID: "orders", Field: "stat_month",
+				},
+				Operator: "EQUALS",
+				RightExpression: dataset.Expression{
+					Type: "FIELD_REF", NodeID: "calendar", Field: "day",
+				},
+			}},
+		}},
+		PreAggregations: []dataset.PreAggregation{{
+			ID: "monthly", NodeID: "orders", JoinID: "join_1", JoinSide: "LEFT",
+			GroupBy: []dataset.PreAggregationGroup{{
+				Field: "stat_month", Unit: "MONTH",
+				Expression: &dataset.Expression{
+					Type: "FIELD_REF", NodeID: "orders", Field: "order_time",
+				},
+			}},
+			Metrics: []dataset.PreAggregationMetric{{
+				Field: "amount_sum", Function: "SUM",
+				Expression: &dataset.Expression{
+					Type: "FIELD_REF", NodeID: "orders", Field: "amount",
+				},
+			}},
+		}},
+		Fields: []dataset.Field{
+			{
+				ID: "field_stat_month", Code: "stat_month", Name: "统计月份",
+				Role: "TIME", CanonicalType: "DATE",
+				Expression: dataset.Expression{
+					Type: "FIELD_REF", NodeID: "orders", Field: "stat_month",
+				},
+			},
+			{
+				ID: "field_amount_sum", Code: "amount_sum", Name: "订单金额",
+				Role: "MEASURE", CanonicalType: "DECIMAL",
+				Expression: dataset.Expression{
+					Type: "FIELD_REF", NodeID: "orders", Field: "amount_sum",
+				},
+			},
+		},
+		Filters: []dataset.Filter{}, GroupBy: []string{},
+		Having: []dataset.Filter{}, Sorts: []dataset.Sort{},
+		Parameters: []dataset.Parameter{},
+		OutputGrain: dataset.OutputGrain{
+			Description: "每行一个统计月份", KeyFields: []string{"stat_month"},
+			TimeField: "stat_month", DefaultTimeGrain: "MONTH",
+		},
+		ExecutionPolicy: dataset.ExecutionPolicy{
+			Mode: "REALTIME", TimeoutMS: 5000, PreviewLimit: 100,
+			ResultLimit:     1000,
+			Materialization: dataset.MaterializationPolicy{Enabled: false},
+		},
+	}
+	compiled, err := Compile(Input{
+		Document: document, Dialect: PostgreSQL, MaxRows: 10,
+		Tables: map[string]TableRef{
+			"orders": {
+				NodeID: "orders", Schema: "sales", Name: "orders",
+				Columns: map[string]bool{"order_time": true, "amount": true},
+			},
+			"calendar": {
+				NodeID: "calendar", Schema: "sales", Name: "calendar",
+				Columns: map[string]bool{"day": true},
+			},
+		},
+	})
+	if err != nil {
+		var validationError *dataset.ValidationError
+		if errors.As(err, &validationError) {
+			t.Fatalf("validation issues: %#v", validationError.Issues)
+		}
+		t.Fatal(err)
+	}
+	if !strings.Contains(
+		compiled.SQL,
+		`DATE_TRUNC('month', "pre_source"."order_time") AS "stat_month"`,
+	) {
+		t.Fatalf("date-truncated pre-aggregation SQL=%s", compiled.SQL)
 	}
 }
 

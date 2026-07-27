@@ -13,6 +13,7 @@ test('plans a follow-up question against the previous governed query plan', asyn
     status: 'READY',
     confidence: 0.98,
     pathHash: 'b'.repeat(64),
+    resolution: [],
     evidence: [],
     createdAt: '2026-07-26T00:00:00Z',
   }), { status: 201, headers: { 'Content-Type': 'application/json' } }))
@@ -49,6 +50,7 @@ test('executes only the frozen generation and path returned by planning', async 
     status: 'READY',
     confidence: 0.98,
     pathHash: 'b'.repeat(64),
+    resolution: [],
     evidence: [],
     createdAt: '2026-07-26T00:00:00Z',
   } satisfies SemanticQueryPlan

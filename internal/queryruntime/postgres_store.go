@@ -51,9 +51,9 @@ func (s *PostgresStore) ResolveVersion(ctx context.Context, tenantID, datasetID,
 }
 
 // ResolveMaterializedVersion resolves an execution-only one-node document to
-// the exact current DWS version's ACTIVE materialization. It is used by metric
-// preview/publication so metrics read the governed DWS output instead of
-// replaying the DWS DAG against mutable upstream contents.
+// the exact current warehouse version's ACTIVE materialization. It is used by
+// metric preview/publication so metrics read governed DIM/DWD/DWS/ADS output
+// instead of replaying the source DAG against mutable upstream contents.
 func (s *PostgresStore) ResolveMaterializedVersion(
 	ctx context.Context,
 	tenantID, datasetID, versionID string,
@@ -72,7 +72,11 @@ func (s *PostgresStore) ResolveMaterializedVersion(
 		}
 		binding, table, err := resolveActiveMaterializationTx(
 			ctx, tx, tenantID, document.Nodes[0],
-			map[dataset.Layer]bool{dataset.LayerDWS: true}, datasetID,
+			map[dataset.Layer]bool{
+				dataset.LayerDIM: true, dataset.LayerDWD: true,
+				dataset.LayerDWS: true, dataset.LayerADS: true,
+			},
+			datasetID,
 		)
 		if err != nil {
 			if errors.Is(err, dataset.ErrInvalidDocument) ||

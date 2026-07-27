@@ -309,7 +309,9 @@ export async function hydrateDatasetDraft(record: DatasetRecord, tables: AssetTa
     ? expandSystemDWDDesignerGraph(hydratedDesigner, nodes, graphFields)
     : hydratedDesigner
   return {
-    code: record.code, name: record.name, description: record.description, layer: record.layer,
+    code: record.code, name: record.name, description: record.description,
+    domain: text(object(dsl.dataset).domain), subject: text(object(dsl.dataset).subject),
+    layer: record.layer,
     semanticContractVersion: text(object(dsl.dataset).semanticContractVersion),
     consumerContractId: text(object(dsl.dataset).consumerContractId),
     ...(dsl.factContract && typeof dsl.factContract === 'object'

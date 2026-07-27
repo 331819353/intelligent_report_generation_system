@@ -54,6 +54,14 @@ describe('buildDatasetDSL', () => {
     expect(dsl.outputGrain).toEqual({ description: '每一行代表一个订单日期', keyFields: ['order_date'] })
   })
 
+  test('领域和主题作为版本化数据集配置写入 DSL', () => {
+    const value = draft()
+    value.domain = ' 企业 '
+    value.subject = ' 企业画像 '
+    const dsl = buildDatasetDSL(value)
+    expect(dsl.dataset).toMatchObject({ domain: '企业', subject: '企业画像' })
+  })
+
   test('缺少输出粒度时拒绝生成', () => {
     const value = draft()
     value.grainKeys = []
@@ -430,6 +438,29 @@ describe('数据集发布版本 API', () => {
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe('/api/v1/datasets?limit=25&offset=50')
     expect(init.cache).toBe('no-store')
+  })
+
+  test('人工智能建模入口映射到三个固定 POST 路由', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      trigger: 'DWS_MODELING', eligibleCount: 0, enqueuedCount: 0, existingCount: 0,
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await datasetAPI.triggerLLM('DIM_MODELING')
+    await datasetAPI.triggerLLM('DWD_MODELING')
+    await datasetAPI.triggerLLM('DWS_MODELING')
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>
+    expect(calls.map(([url]) => url)).toEqual([
+      '/api/v1/datasets/trigger-dim-modeling',
+      '/api/v1/datasets/trigger-dwd-modeling',
+      '/api/v1/datasets/trigger-dws-modeling',
+    ])
+    for (const [, init] of calls) {
+      expect(init.method).toBe('POST')
+      expect(init.cache).toBe('no-store')
+      expect(init.body).toBeUndefined()
+    }
   })
 
   test('读取可变数据集聚合时禁用缓存', async () => {

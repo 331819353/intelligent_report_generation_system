@@ -134,6 +134,44 @@ COMMENT ON SCHEMA warehouse_dim IS
   '从 ODS 抽离并治理的人物、商品等实体说明信息';
 COMMENT ON SCHEMA warehouse_ads IS
   '由 DWS 组合形成的应用、报表和交付场景数据';
+
+-- 维度画像在独立数仓的只读事务中执行。temp_file_limit 只能由超级用户
+-- 设置，因此用严格限幅的 SECURITY DEFINER 函数代替画像 worker 直接
+-- set_config。函数不访问数据，也不能扩大到系统允许范围之外。
+CREATE OR REPLACE FUNCTION warehouse_published.apply_dimension_profile_resource_limits(
+  selected_timeout_seconds integer,
+  selected_work_mem_kb integer,
+  selected_temp_file_limit_kb integer
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path=pg_catalog
+AS $profile_limits$
+BEGIN
+  IF selected_timeout_seconds NOT BETWEEN 1 AND 300
+    OR selected_work_mem_kb NOT BETWEEN 64 AND 262144
+    OR selected_temp_file_limit_kb NOT BETWEEN 1024 AND 1048576 THEN
+    RAISE EXCEPTION '维度画像资源预算越界' USING ERRCODE='23514';
+  END IF;
+  PERFORM set_config(
+    'statement_timeout',(selected_timeout_seconds*1000)::text,true
+  );
+  PERFORM set_config(
+    'lock_timeout',least(selected_timeout_seconds*1000,5000)::text,true
+  );
+  PERFORM set_config('work_mem',selected_work_mem_kb::text||'kB',true);
+  PERFORM set_config('temp_file_limit',selected_temp_file_limit_kb::text,true);
+  PERFORM set_config('max_parallel_workers_per_gather','0',true);
+  PERFORM set_config('enable_hashagg','off',true);
+END
+$profile_limits$;
+REVOKE ALL ON FUNCTION warehouse_published.apply_dimension_profile_resource_limits(
+  integer,integer,integer
+) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION warehouse_published.apply_dimension_profile_resource_limits(
+  integer,integer,integer
+) TO :"worker_user";
 COMMIT;
 SQL
 
@@ -181,6 +219,71 @@ SELECT format(
   :'app_user'
 )
 WHERE to_regclass('platform.dws_modeling_jobs') IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.dwd_modeling_stage_jobs FROM %I',
+  :'app_user'
+)
+WHERE to_regclass('platform.dwd_modeling_stage_jobs') IS NOT NULL
+\gexec
+
+-- 人工智能建模由租户隔离的 SECURITY DEFINER 入口登记 durable outbox。
+-- API 仍不能直接写 worker 表，只能执行三个有界函数。
+SELECT format(
+  'REVOKE ALL ON FUNCTION platform.trigger_manual_dim_modeling(uuid) FROM PUBLIC, %I, %I',
+  :'worker_user',
+  :'connection_test_user'
+)
+WHERE to_regprocedure('platform.trigger_manual_dim_modeling(uuid)') IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.trigger_manual_dim_modeling(uuid) TO %I',
+  :'app_user'
+)
+WHERE to_regprocedure('platform.trigger_manual_dim_modeling(uuid)') IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE ALL ON FUNCTION platform.trigger_manual_dwd_modeling(uuid) FROM PUBLIC, %I, %I',
+  :'worker_user',
+  :'connection_test_user'
+)
+WHERE to_regprocedure('platform.trigger_manual_dwd_modeling(uuid)') IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.trigger_manual_dwd_modeling(uuid) TO %I',
+  :'app_user'
+)
+WHERE to_regprocedure('platform.trigger_manual_dwd_modeling(uuid)') IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE ALL ON FUNCTION platform.trigger_manual_dws_modeling(uuid) FROM PUBLIC, %I, %I',
+  :'worker_user',
+  :'connection_test_user'
+)
+WHERE to_regprocedure('platform.trigger_manual_dws_modeling(uuid)') IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.trigger_manual_dws_modeling(uuid) TO %I',
+  :'app_user'
+)
+WHERE to_regprocedure('platform.trigger_manual_dws_modeling(uuid)') IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE ALL ON FUNCTION platform.cancel_dwd_modeling_stage_task(uuid,uuid), platform.retry_dwd_modeling_stage_task(uuid,uuid) FROM PUBLIC, %I, %I',
+  :'worker_user',
+  :'connection_test_user'
+)
+WHERE to_regprocedure(
+  'platform.cancel_dwd_modeling_stage_task(uuid,uuid)'
+) IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.cancel_dwd_modeling_stage_task(uuid,uuid), platform.retry_dwd_modeling_stage_task(uuid,uuid) TO %I',
+  :'app_user'
+)
+WHERE to_regprocedure(
+  'platform.cancel_dwd_modeling_stage_task(uuid,uuid)'
+) IS NOT NULL
 \gexec
 
 -- 连接测试任务和证明是受保护控制事实。宽泛的平台 DML 授权必须在这里
@@ -270,6 +373,36 @@ SELECT format(
 )
 WHERE to_regprocedure(
   'platform.dataset_publication_origin_facts_match(platform.dataset_versions)'
+) IS NOT NULL
+\gexec
+
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.trigger_manual_dws_dimension_identification(uuid) TO %I',
+  :'app_user'
+)
+WHERE to_regprocedure(
+  'platform.trigger_manual_dws_dimension_identification(uuid)'
+) IS NOT NULL
+\gexec
+
+-- 有效领域解析只返回一个规范化领域名，用于 API 清单和 worker 的领域隔离。
+-- 保持 PUBLIC/连接测试角色不可执行，仅开放给业务 API 与后台 worker。
+SELECT format(
+  'REVOKE ALL ON FUNCTION platform.dataset_version_effective_domain(uuid) FROM PUBLIC, %I',
+  :'connection_test_user'
+)
+WHERE to_regprocedure(
+  'platform.dataset_version_effective_domain(uuid)'
+) IS NOT NULL
+\gexec
+
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.dataset_version_effective_domain(uuid) TO %I, %I',
+  :'app_user',
+  :'worker_user'
+)
+WHERE to_regprocedure(
+  'platform.dataset_version_effective_domain(uuid)'
 ) IS NOT NULL
 \gexec
 COMMIT;

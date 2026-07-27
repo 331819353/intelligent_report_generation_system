@@ -299,10 +299,10 @@ func runDWDModelingWorker(
 	workerID string,
 	pollInterval time.Duration,
 ) {
-	// Every classification/FACT stage renews this lease before its initial call
-	// and optional directed repair. Validated stages are checkpointed, so a
-	// crashed worker resumes only the missing stage shortly after ownership
-	// expires. Config validation keeps a two-call stage below one minute.
+	// The worker keeps a heartbeat for the whole domain plan, including provider
+	// calls whose configured timeout can exceed the base lease. FACT branches run
+	// with bounded concurrency and checkpoint independently, so a crashed worker
+	// resumes only missing stages after ownership expires.
 	const lease = 2 * time.Minute
 	timer := time.NewTimer(0)
 	defer timer.Stop()
@@ -592,7 +592,9 @@ func runMetadataJobWorker(ctx context.Context, logger *slog.Logger, service *dat
 }
 
 func runMetricExtractionWorker(ctx context.Context, logger *slog.Logger, worker *metriccandidate.Worker, workerID string, pollInterval time.Duration) {
-	const lease = 5 * time.Minute
+	// 本地配置允许一次语义补全占用五分钟。租约必须覆盖 provider 超时、
+	// 规则提取和最终事务写入，不能与 provider 截止时间相同而在收口时丢租约。
+	const lease = 10 * time.Minute
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {

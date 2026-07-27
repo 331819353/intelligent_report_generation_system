@@ -15,13 +15,18 @@ import (
 const approvalTestRequestID = "55555555-5555-4555-8555-555555555555"
 
 type publicationApprovalStoreStub struct {
-	submitResult  PublicationRequest
-	submitErr     error
-	submitCalls   int
-	submitTenant  string
-	submitActor   string
-	submitDataset string
-	submitPlan    SubmitPublicationPlan
+	validateErr     error
+	validateCalls   int
+	validateTenant  string
+	validateDataset string
+	validateDraft   string
+	submitResult    PublicationRequest
+	submitErr       error
+	submitCalls     int
+	submitTenant    string
+	submitActor     string
+	submitDataset   string
+	submitPlan      SubmitPublicationPlan
 
 	listResult  []PublicationRequest
 	listTotal   int
@@ -67,6 +72,16 @@ type publicationApprovalStoreStub struct {
 	rejectDataset   string
 	rejectRequestID string
 	rejectInput     RejectPublicationInput
+}
+
+func (s *publicationApprovalStoreStub) ValidateDWDPublicationDependencies(
+	_ context.Context,
+	tenantID, datasetID, draftVersionID string,
+) error {
+	s.validateCalls++
+	s.validateTenant, s.validateDataset, s.validateDraft =
+		tenantID, datasetID, draftVersionID
+	return s.validateErr
 }
 
 func (s *publicationApprovalStoreStub) SavePublicationCandidatePreparation(
@@ -214,6 +229,7 @@ func TestPublicationApprovalServiceSubmitsFrozenDraftAndRejectsStaleEnvelope(t *
 		t.Fatal(err)
 	}
 	if result.ID != approvalTestRequestID || store.submitCalls != 1 ||
+		store.validateCalls != 1 ||
 		store.submitTenant != "tenant-1" || store.submitActor != "requester-1" || store.submitDataset != httpTestDatasetID {
 		t.Fatalf("result=%#v store=%#v", result, store)
 	}
@@ -234,6 +250,62 @@ func TestPublicationApprovalServiceSubmitsFrozenDraftAndRejectsStaleEnvelope(t *
 	}
 	if store.submitCalls != 1 {
 		t.Fatalf("stale submission reached store: calls=%d", store.submitCalls)
+	}
+}
+
+func TestPublicationApprovalServiceBlocksDWDWhenDIMIsNotPublished(t *testing.T) {
+	_, validator, store, service, prepared := publicationApprovalFixture(t)
+	store.validateErr = &PublicationValidationError{Issues: []PublicationIssue{{
+		Path: "nodes", Code: "DIM_PUBLICATION_REQUIRED",
+		Reason: "请先发布 DIM",
+	}}}
+
+	_, err := service.Submit(
+		context.Background(), "tenant-1", "requester-1", httpTestDatasetID,
+		submitPublicationInput(prepared),
+	)
+	var validation *PublicationValidationError
+	if !errors.As(err, &validation) || store.submitCalls != 0 ||
+		store.validateCalls != 1 {
+		t.Fatalf(
+			"submit err=%v validationCalls=%d submitCalls=%d",
+			err, store.validateCalls, store.submitCalls,
+		)
+	}
+
+	store.request = pendingPublicationRequest(prepared)
+	_, err = service.Approve(
+		context.Background(), "tenant-1", "reviewer-1",
+		httpTestDatasetID, approvalTestRequestID,
+		ApprovePublicationInput{ExpectedVersion: 1},
+	)
+	if !errors.As(err, &validation) || store.approveCalls != 0 ||
+		validator.candidate.DatasetID != "" {
+		t.Fatalf(
+			"approve err=%v approveCalls=%d candidate=%#v",
+			err, store.approveCalls, validator.candidate,
+		)
+	}
+}
+
+func TestPublicationApprovalServiceExplainsAutomaticallyCancelledRequest(t *testing.T) {
+	_, _, store, service, prepared := publicationApprovalFixture(t)
+	request := pendingPublicationRequest(prepared)
+	request.Status = PublicationRequestCancelled
+	request.ReviewNote = "数据集草稿已变更，原发布审批申请已自动取消"
+	store.request = request
+
+	_, err := service.Approve(
+		context.Background(), "tenant-1", "reviewer-1",
+		httpTestDatasetID, approvalTestRequestID,
+		ApprovePublicationInput{ExpectedVersion: 2},
+	)
+	if !errors.Is(err, ErrPublicationRequestCancelled) ||
+		store.validateCalls != 0 || store.approveCalls != 0 {
+		t.Fatalf(
+			"err=%v validationCalls=%d approveCalls=%d",
+			err, store.validateCalls, store.approveCalls,
+		)
 	}
 }
 
@@ -525,6 +597,27 @@ func TestPublicationApprovalHTTPMapsConflictWithoutMutation(t *testing.T) {
 	if response.Code != http.StatusConflict || readDatasetErrorCode(t, response) != "DATASET_PUBLICATION_REQUEST_CONFLICT" ||
 		datasetStore.publishCalls != 0 {
 		t.Fatalf("status=%d body=%s directPublishCalls=%d", response.Code, response.Body.String(), datasetStore.publishCalls)
+	}
+}
+
+func TestPublicationApprovalHTTPMapsAutomaticallyCancelledRequest(t *testing.T) {
+	datasetStore, _, store, _, prepared := publicationApprovalFixture(t)
+	store.request = pendingPublicationRequest(prepared)
+	store.request.Status = PublicationRequestCancelled
+	harness := newPublicationApprovalHTTPHarness(t, datasetStore, store, func(check access.Check) bool {
+		return check.Action == "PUBLISH"
+	})
+
+	response := performDatasetHTTPRequest(t, harness, http.MethodPost,
+		"/api/v1/datasets/"+httpTestDatasetID+"/publish-requests/"+approvalTestRequestID+"/approve",
+		mustDatasetJSON(t, ApprovePublicationInput{ExpectedVersion: 2}), nil)
+	if response.Code != http.StatusConflict ||
+		readDatasetErrorCode(t, response) != "DATASET_PUBLICATION_REQUEST_CANCELLED" ||
+		datasetStore.publishCalls != 0 {
+		t.Fatalf(
+			"status=%d body=%s directPublishCalls=%d",
+			response.Code, response.Body.String(), datasetStore.publishCalls,
+		)
 	}
 }
 

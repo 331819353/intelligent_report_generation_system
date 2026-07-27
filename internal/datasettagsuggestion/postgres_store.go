@@ -161,6 +161,7 @@ type rootSnapshot struct {
 	Name                  string
 	Description           string
 	DatasetType           string
+	Status                string
 	Layer                 string
 	SchemaHash            string
 	DSL                   json.RawMessage
@@ -230,7 +231,7 @@ func (store *PostgresStore) loadInputTx(
 	}
 
 	tables, upstreams, err := loadAndValidateDependencies(
-		ctx, tx, claim, root.SourceVersionSnapshot, prepared.Document,
+		ctx, tx, claim, root.Status, root.SourceVersionSnapshot, prepared.Document,
 	)
 	if err != nil {
 		return Input{}, err
@@ -266,7 +267,7 @@ func loadRoot(
 	}
 	query := `SELECT
 			dataset.code::text,dataset.name,dataset.description,dataset.dataset_type,
-			version.layer,version.schema_hash,version.dsl_json,
+			version.status,version.layer,version.schema_hash,version.dsl_json,
 			job.source_version_snapshot
 		FROM platform.dataset_tag_suggestion_jobs AS job
 		JOIN platform.dataset_versions AS version
@@ -288,11 +289,21 @@ func loadRoot(
 		  AND job.lease_expires_at>now()
 		  AND job.source_version_snapshot_hash=
 		    encode(public.digest(job.source_version_snapshot::text,'sha256'),'hex')
-		  AND version.status='PUBLISHED'
+		  AND (
+		    (
+		      version.status='PUBLISHED'
+		      AND dataset.current_published_version_id=version.id
+		      AND dataset.status='PUBLISHED'
+		    )
+		    OR (
+		      version.status='DRAFT'
+		      AND version.layer IN ('DIM','DWD','DWS','ADS')
+		      AND dataset.current_draft_version_id=version.id
+		      AND dataset.status IN ('DRAFT','PUBLISHED')
+		    )
+		  )
 		  AND version.schema_hash=job.schema_hash
 		  AND version.layer=job.layer
-		  AND dataset.current_published_version_id=version.id
-		  AND dataset.status='PUBLISHED'
 		  AND dataset.deleted_at IS NULL
 		` + lock
 	err = tx.QueryRow(
@@ -301,7 +312,8 @@ func loadRoot(
 		claim.Layer, claim.PromptVersion, workerID, claim.LeaseToken,
 	).Scan(
 		&root.Code, &root.Name, &root.Description, &root.DatasetType,
-		&root.Layer, &root.SchemaHash, &root.DSL, &root.SourceVersionSnapshot,
+		&root.Status, &root.Layer, &root.SchemaHash, &root.DSL,
+		&root.SourceVersionSnapshot,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var leaseOwned bool
@@ -325,6 +337,7 @@ func loadAndValidateDependencies(
 	ctx context.Context,
 	tx pgx.Tx,
 	claim Claim,
+	targetStatus string,
 	sourceSnapshot json.RawMessage,
 	document dataset.Document,
 ) ([]SourceTableContext, []UpstreamContext, error) {
@@ -359,7 +372,9 @@ func loadAndValidateDependencies(
 	if fileCount != fileExpected {
 		return nil, nil, ErrSubjectChanged
 	}
-	upstreams, err := loadUpstreams(ctx, tx, claim.DatasetVersionID, claim.Layer)
+	upstreams, err := loadUpstreams(
+		ctx, tx, claim.DatasetVersionID, claim.Layer, targetStatus,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -547,6 +562,7 @@ func loadUpstreams(
 	tx pgx.Tx,
 	versionID string,
 	targetLayer string,
+	targetStatus string,
 ) ([]UpstreamContext, error) {
 	rows, err := tx.Query(ctx, `SELECT
 		dependency.source_id,dependency.source_version,dependency.source_hash,
@@ -558,17 +574,27 @@ func loadUpstreams(
 		JOIN platform.dataset_versions AS version
 		  ON version.id::text=dependency.source_id
 		 AND version.tenant_id=dependency.tenant_id
-		 AND version.status='PUBLISHED'
 		JOIN platform.datasets AS dataset
 		  ON dataset.id=version.dataset_id
 		 AND dataset.tenant_id=version.tenant_id
-		 AND dataset.current_published_version_id=version.id
-		 AND dataset.status='PUBLISHED'
 		 AND dataset.deleted_at IS NULL
+		 AND (
+		   (
+		     version.status='PUBLISHED'
+		     AND dataset.current_published_version_id=version.id
+		     AND dataset.status='PUBLISHED'
+		   )
+		   OR (
+		     $2='DRAFT'
+		     AND version.status='DRAFT'
+		     AND dataset.current_draft_version_id=version.id
+		     AND dataset.status IN ('DRAFT','PUBLISHED')
+		   )
+		 )
 		WHERE dependency.dataset_version_id=$1::uuid
 		  AND dependency.source_type='DATASET_VERSION'
 		ORDER BY dependency.source_id
-		FOR SHARE OF dependency,version,dataset`, versionID)
+		FOR SHARE OF dependency,version,dataset`, versionID, targetStatus)
 	if err != nil {
 		return nil, err
 	}
