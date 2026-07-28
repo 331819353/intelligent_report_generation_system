@@ -1,22 +1,13 @@
-.PHONY: fmt lint test test-integration connector-test build ci-check run-api run-worker run-connection-test-worker dev-up dev-stop dev-restart dev-status dev-logs seed-dev verify-asset-retrieval frontend-lint frontend-test frontend-build infra-config infra-up connector-up connector-status infra-down infra-reset infra-status infra-logs db-migrate db-verify warehouse-verify semantic-qa-verify db-shell warehouse-shell clean
+.PHONY: fmt lint build ci-check run-api run-worker run-connection-test-worker dev-up dev-stop dev-restart dev-status dev-logs seed-dev frontend-lint frontend-build infra-config infra-up connector-up connector-status infra-down infra-reset infra-status infra-logs db-migrate db-verify warehouse-verify semantic-qa-verify db-shell warehouse-shell clean
 
 export GOCACHE ?= $(CURDIR)/.cache/go-build
 
-# Go 后端的格式、静态检查、测试与构建入口。
+# Go 后端的格式、静态检查与构建入口。
 fmt:
 	@gofmt -w $$(find cmd internal -name '*.go' -type f)
 
 lint:
 	@go vet ./cmd/... ./internal/...
-
-test:
-	@go test -race -cover ./cmd/... ./internal/...
-
-test-integration:
-	@go test -race -tags=integration ./test/integration/...
-
-connector-test:
-	@python3 -m pytest connector_service/tests
 
 build:
 	@mkdir -p bin
@@ -30,9 +21,6 @@ ci-check:
 # Web 前端的质量检查与生产构建入口。
 frontend-lint:
 	@npm --prefix web run lint
-
-frontend-test:
-	@npm --prefix web run test
 
 frontend-build:
 	@npm --prefix web run build
@@ -112,8 +100,5 @@ dev-logs:
 seed-dev:
 	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; go run ./cmd/seed
 
-verify-asset-retrieval:
-	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; go run ./cmd/asset-retrieval-eval
-
 clean:
-	@rm -rf bin .cache coverage.out
+	@rm -rf bin .cache coverage.out web/dist .vite

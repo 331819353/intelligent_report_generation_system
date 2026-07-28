@@ -12,16 +12,12 @@
 4. 首期跨源预览优先采用 Go 查询网关：源端过滤/投影后拉取受限结果，在网关执行有输出上限的 Hash Join。正式发布的复杂跨源报告使用物化结果。数据规模或 SQL 能力超过阈值后再评估独立联邦引擎，当前不引入 Trino 类运维面。
 5. 设计器、查看器和 PDF 必须消费同一版本化报告 JSON。当前已验证合同校验和规范哈希一致；真实浏览器与 PDF 像素/分页一致性等待导出 Worker。
 
-## 可复现结果
+## 历史验证结果
 
-运行：
-
-```bash
-go test ./internal/spike/...
-go test -run '^$' -bench BenchmarkHashJoin10K -benchmem ./internal/spike/federation
-```
-
-当前 Apple M5 Pro 结果：10,000×10,000 等值一对一 Hash Join 约 `0.61 ms/op`，约 `1.53 MB/op`、`10,051 allocs/op`。真实源测试使用 MySQL 8.4 的客户表和 Oracle Free 23.26.2 的订单表，Go 网关成功得到 3 行关联结果；该小样本不代表生产网络延迟。
+早期原型在 Apple M5 Pro 上完成过 10,000×10,000 等值一对一 Hash Join 验证，
+约 `0.61 ms/op`、`1.53 MB/op` 和 `10,051 allocs/op`。原型代码已在正式
+`internal/federation` 实现稳定后移除。真实源验证曾使用 MySQL 8.4 客户表和
+Oracle Free 23.26.2 订单表得到 3 行关联结果；该小样本不代表生产网络延迟。
 
 Excel 原型验证：多工作表枚举、流式行读取、公式缓存值、日期格式值、文件/行/列/解压限制。`.xls` 适配器已编译，但复杂公式、合并单元格、代码页和日期样本尚未形成自动化样本集。
 

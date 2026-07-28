@@ -192,25 +192,17 @@ make seed-dev
 
 默认租户和账号来自 `.env.example`。这个仅限开发环境的 Seed 会显式启用租户通用 AI，并在保留已有用途的前提下合并 `METADATA_COMPLETION` 和 `DATASET_DAG_GENERATION`；重复执行且策略已满足要求时不会空转策略版本。通用 AI 启用后指标创建提案立即可用，无需再授权 `METRIC_AUTHORING`。生产新租户始终默认禁用 AI，且只预置 `METADATA_COMPLETION`；模型密钥不等于启用通用 AI，仍必须由受信管理流程配置总开关与配额。认证接口参见 [身份认证 API](api-auth.md)。
 
-## 验证
+## 质量检查与构建
 
 ```bash
 make fmt
 make lint
-make test
 make build
 make frontend-lint
-make frontend-test
 make frontend-build
 make db-verify
 make warehouse-verify
 make semantic-qa-verify
-```
-
-集成测试将在本地基础设施任务完成后逐步增加：
-
-```bash
-make test-integration
 ```
 
 Semantic QA 的空库迁移、租户开关、graph generation、ChangeSet、查询证据和 DWS

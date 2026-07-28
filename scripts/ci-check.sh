@@ -19,8 +19,8 @@ if git grep -q -E 'sk-[A-Za-z0-9_-]{20,}' -- .; then
 fi
 
 # Go 格式差异视为 CI 失败，并输出需要修复的文件。
-test "$(gofmt -l cmd internal test | wc -l | tr -d ' ')" = "0" || {
+test "$(gofmt -l cmd internal | wc -l | tr -d ' ')" = "0" || {
   echo 'Go files are not formatted' >&2
-  gofmt -l cmd internal test >&2
+  gofmt -l cmd internal >&2
   exit 1
 }

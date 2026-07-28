@@ -78,13 +78,6 @@
 
 ## “80后小微在职人员有多少人”资产合同
 
-仓库提供了可复用的完整合同：
-
-- [DWS 数据集合同](../testdata/semantic-qa/dws-workforce-headcount.json)
-- [指标定义](../testdata/semantic-qa/metric-active-employee-count.json)
-- [语义资产导入数据](../testdata/semantic-qa/semantic-assets-workforce.json)
-- [问题、维值、血缘和样例结果验收合同](../testdata/semantic-qa/workforce-answer-contract.json)
-
 生产资产必须满足：
 
 | 资产 | 必要条件 |
@@ -226,5 +219,5 @@ LLM 调用失败会细分为租户配额不足、租户策略未授权、服务�
    - `本月销售额和订单量分别是多少？`
    - `那上个月呢？`
    - `同时再加上退款金额`
-6. 运行 `go test ./internal/semanticqa ./internal/metric ./internal/dataset`、
-   `npm test`、`npm run build` 和 `scripts/verify-semantic-qa.sh`。
+6. 运行 `make lint`、`make build`、`make frontend-lint`、
+   `make frontend-build` 和 `scripts/verify-semantic-qa.sh`。

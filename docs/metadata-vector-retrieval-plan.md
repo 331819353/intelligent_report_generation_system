@@ -89,7 +89,7 @@
 |---|---|
 | 存量回填 | 8 条 `TABLE` 和 45 条当前合格活动 `COLUMN` 向量均为 `SUCCEEDED`；28 条失活/未完成资产被明确 `SKIPPED`。 |
 | 指定语句 | top 10 包含销售订单、Oracle 门店和 Oracle 区域；生成 3 节点、2 Join、1 Group 的 MySQL + Oracle 跨源 DAG，日期粒度为 `MONTH`，本地安全校验通过。 |
-| 50 条中文基准 | 107/107 目标表命中，table recall@10 = 100%。数据集位于 `testdata/asset-retrieval-zh.json`，可用 `make verify-asset-retrieval` 重跑。 |
+| 50 条中文基准 | 2026-07-22 历史验收为 107/107 目标表命中，table recall@10 = 100%。一次性评测数据和命令已在仓库精简时移除。 |
 | 幂等与局部重建 | 数据库验证证明字段标签变更只提升所属表和该字段的 `event_version`，outbox 仍只有两条唯一事件；未变 `input_hash + model` 时 Worker 直接确认而不再调 Provider。 |
 | 质量与隔离 | 语义类型单元测试、LLM 建议分流、手工接受复核、跨租户 RLS 与无租户 RLS 均通过；检索 SQL 在查询阶段再次过滤停用/失活/未补全资产。 |
 | 降级 | Provider 失败会记录稳定错误码并重试；Retriever 自动使用中文关键词召回，DAG 目录层仍会以改进关键词排序补齐，不返回虚假“无资产”。 |

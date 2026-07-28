@@ -6,8 +6,6 @@
 - 可执行样例：`api/examples/report-json-v1.json`
 - Go 严格解析与领域校验：`internal/reportjson`
 
-`internal/spike/reportjson` 仅保留为早期技术对照，不得被业务链路引用。
-
 ## 固定布局语义
 
 - `logicalWidth` 固定为 `1920`，`viewportHeight` 固定为 `1080`。
