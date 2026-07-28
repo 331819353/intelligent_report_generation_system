@@ -187,6 +187,19 @@ func NewHandler(
 			writeResponse(w, http.StatusCreated, item, err)
 		},
 	)))
+	mux.Handle("POST /api/v1/semantic-qa/query-turns", protect("READ", http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var input QueryTurnInput
+			if !decodeRequest(w, r, &input) {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.PlanQueryTurn(
+				r.Context(), claims.TenantID, claims.Subject, input,
+			)
+			writeResponse(w, http.StatusCreated, item, err)
+		},
+	)))
 	mux.Handle("GET /api/v1/semantic-qa/query-plans/{id}", protect("READ", http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			claims, _ := auth.ClaimsFromContext(r.Context())

@@ -44,10 +44,10 @@ func TestBuildMappedDatasetDocumentCreatesDirectSingleTableGraph(t *testing.T) {
 	if len(document.Joins) != 0 || len(document.PreAggregations) != 0 || len(document.GroupBy) != 0 {
 		t.Fatalf("default mapped dataset contains an intermediate component: joins=%#v groups=%#v groupBy=%#v", document.Joins, document.PreAggregations, document.GroupBy)
 	}
-	if document.ExecutionPolicy.Mode != "MATERIALIZED_PREFERRED" ||
-		!document.ExecutionPolicy.Materialization.Enabled ||
-		document.ExecutionPolicy.Materialization.RefreshMode != "ON_DEMAND" {
-		t.Fatalf("mapped ODS materialization policy = %#v", document.ExecutionPolicy)
+	if document.ExecutionPolicy.Mode != "REALTIME" ||
+		document.ExecutionPolicy.PreviewLimit != 100 ||
+		document.ExecutionPolicy.Materialization.Enabled {
+		t.Fatalf("virtual mapped ODS policy = %#v", document.ExecutionPolicy)
 	}
 	if len(document.Fields) != len(columns) {
 		t.Fatalf("fields = %#v", document.Fields)
@@ -55,7 +55,7 @@ func TestBuildMappedDatasetDocumentCreatesDirectSingleTableGraph(t *testing.T) {
 	if got := []string{document.Fields[0].Code, document.Fields[1].Code, document.Fields[2].Code}; !reflect.DeepEqual(got, []string{"customer_id", "order_id", "amount"}) {
 		t.Fatalf("field codes = %v", got)
 	}
-	if document.Fields[0].CanonicalType != "STRING" || document.Fields[1].CanonicalType != "INTEGER" || document.Fields[2].CanonicalType != "DECIMAL" {
+	if document.Fields[0].CanonicalType != "STRING" || document.Fields[1].CanonicalType != "STRING" || document.Fields[2].CanonicalType != "DECIMAL" {
 		t.Fatalf("canonical types = %q, %q, %q", document.Fields[0].CanonicalType, document.Fields[1].CanonicalType, document.Fields[2].CanonicalType)
 	}
 	if document.Fields[1].Name != "订单编号" || document.Fields[1].Description != "业务主键" ||
@@ -131,6 +131,36 @@ func TestBuildMappedDatasetDocumentSupportsSafeUnicodePhysicalColumns(t *testing
 	}
 }
 
+func TestBuildMappedDatasetDocumentSeparatesChineseDisplayNamesFromTechnicalCodes(t *testing.T) {
+	table := MappedDatasetTable{
+		ID: "abababab-abab-4bab-8bab-abababababab", DataSourceID: "source-1",
+		FileVersionID: "file-version-1", TableName: "员工列表", BusinessName: "员工列表",
+	}
+	document, err := BuildMappedDatasetDocument(table, []MappedDatasetColumn{
+		{ColumnName: "员工编号", BusinessName: "员工编号", BusinessDescription: "员工的唯一编号", CanonicalType: "TEXT"},
+		{ColumnName: "department_name", BusinessName: "部门名称", BusinessDescription: "员工所属部门名称", CanonicalType: "TEXT"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := []string{document.Fields[0].Code, document.Fields[1].Code}; !reflect.DeepEqual(got, []string{"field_1", "department_name"}) {
+		t.Fatalf("technical codes=%v", got)
+	}
+	if got := []string{document.Fields[0].Name, document.Fields[1].Name}; !reflect.DeepEqual(got, []string{"员工编号", "部门名称"}) {
+		t.Fatalf("display names=%v", got)
+	}
+	if got := []string{document.Fields[0].Expression.Field, document.Fields[1].Expression.Field}; !reflect.DeepEqual(got, []string{"员工编号", "department_name"}) {
+		t.Fatalf("physical references=%v", got)
+	}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Prepare(raw); err != nil {
+		t.Fatalf("generated DSL did not pass Prepare: %v", err)
+	}
+}
+
 func TestBuildMappedDatasetDocumentPrefersChineseSheetNameForFileDataset(t *testing.T) {
 	document, err := BuildMappedDatasetDocument(MappedDatasetTable{
 		ID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", DataSourceID: "source-1", DataSourceName: "经营分析工作簿",
@@ -144,7 +174,7 @@ func TestBuildMappedDatasetDocumentPrefersChineseSheetNameForFileDataset(t *test
 	}
 }
 
-func TestBuildMappedDatasetDocumentUsesStableCollisionSuffixesAndFirstColumnGrain(t *testing.T) {
+func TestBuildMappedDatasetDocumentUsesStableCollisionSuffixesWithoutInventingGrain(t *testing.T) {
 	table := MappedDatasetTable{
 		ID: "33333333-3333-4333-8333-333333333333", DataSourceID: "source-1", TableName: "raw_orders",
 	}
@@ -170,8 +200,9 @@ func TestBuildMappedDatasetDocumentUsesStableCollisionSuffixesAndFirstColumnGrai
 	if first.Fields[0].ID == first.Fields[1].ID || first.Fields[1].ID == first.Fields[2].ID {
 		t.Fatalf("field IDs collided: %#v", first.Fields)
 	}
-	if !reflect.DeepEqual(first.OutputGrain.KeyFields, []string{"item_id"}) {
-		t.Fatalf("fallback grain = %#v", first.OutputGrain)
+	if len(first.OutputGrain.KeyFields) != 0 ||
+		!strings.Contains(first.OutputGrain.Description, "未声明业务主键") {
+		t.Fatalf("undeclared source grain = %#v", first.OutputGrain)
 	}
 }
 
@@ -195,8 +226,28 @@ func TestBuildMappedDatasetDocumentRejectsUnexecutablePhysicalColumnWithoutRewri
 	_, err := BuildMappedDatasetDocument(MappedDatasetTable{
 		ID: "33333333-3333-4333-8333-333333333333", DataSourceID: "source-1", TableName: "raw_orders",
 	}, []MappedDatasetColumn{{ColumnName: "unsafe column", CanonicalType: "TEXT"}})
-	if !errors.Is(err, errMappedDatasetUnsupportedColumn) {
+	if !errors.Is(err, ErrMappedDatasetUnsupportedColumn) {
 		t.Fatalf("error = %v, want unsupported physical column", err)
+	}
+}
+
+func TestBuildMappedDatasetDocumentSupportsParentheticalSpreadsheetColumn(t *testing.T) {
+	document, err := BuildMappedDatasetDocument(MappedDatasetTable{
+		ID: "33333333-3333-4333-8333-333333333333", DataSourceID: "source-1", TableName: "员工列表",
+	}, []MappedDatasetColumn{{ColumnName: "单价值(分析)", CanonicalType: "TEXT"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Nodes[0].Projection[0] != "单价值(分析)" ||
+		document.Fields[0].Expression.Field != "单价值(分析)" {
+		t.Fatalf("physical column was rewritten: %#v", document)
+	}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Prepare(raw); err != nil {
+		t.Fatalf("parenthetical physical field did not pass Prepare: %v", err)
 	}
 }
 

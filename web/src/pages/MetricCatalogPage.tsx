@@ -1,28 +1,28 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   ArrowRightIcon,
-  CheckSquareIcon,
   DatabaseIcon,
   FunctionIcon,
   GitBranchIcon,
   MagicWandIcon,
   MagnifyingGlassIcon,
   PlusIcon,
-  SquareIcon,
   StackIcon,
   TableIcon,
   XIcon,
 } from '@phosphor-icons/react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { AssetManagementTabs } from '../components/AssetManagementTabs'
 import {
   datasetAPI,
+  type AssetTable,
   type DatasetSummary,
   type PublishedVersionRecord,
+  type WarehouseLineage,
+  type WarehouseLineageNode,
 } from '../lib/datasets'
 import {
-  createMetricPublishIdempotencyKey,
   metricAPI,
   type MetricDefinition,
   type MetricExpression,
@@ -31,24 +31,13 @@ import {
   type MetricUsage,
   type MetricVersionRecord,
 } from '../lib/metrics'
-import {
-  metricCandidateAPI,
-  type MetricCandidate,
-  type MetricCandidateStatus,
-  type MetricIdentificationDatasetIndex,
-} from '../lib/metric-candidates'
+import { metricCandidateAPI } from '../lib/metric-candidates'
 
 const catalogPageSize = 200
 const statusLabels: Record<string, string> = {
   DRAFT: '草稿', PUBLISHED: '已发布', STALE: '已失效', DEPRECATED: '已废弃',
 }
 const typeLabels: Record<string, string> = { ATOMIC: '原子指标', DERIVED: '派生指标', RATIO: '复合指标' }
-const candidateStatusLabels: Record<MetricCandidateStatus, string> = {
-  READY: '可发布', NEEDS_REVIEW: '待复核', BLOCKED: '已阻塞', ACCEPTED: '已接收', REJECTED: '已拒绝',
-}
-const candidateMethodLabels: Record<string, string> = {
-  RULE: '规则生成', LLM: 'LLM 生成', HYBRID: '规则 + LLM',
-}
 const aggregationLabels: Record<string, string> = {
   NONE: '不聚合', SUM: '求和', AVG: '平均值', MIN: '最小值', MAX: '最大值', COUNT: '计数', COUNT_DISTINCT: '去重计数',
 }
@@ -66,14 +55,16 @@ const emptyUsage = (): MetricUsage => ({
 })
 
 type DetailTab = 'overview' | 'definition' | 'dimensions' | 'source' | 'lineage'
-type DirectoryView = 'datasets' | 'candidates'
 type MetricDetail = {
   record: MetricRecord
   publishedVersion: MetricVersionRecord | null
   datasetVersion: PublishedVersionRecord | null
+  lineage: WarehouseLineage | null
+  sourceAssets: AssetTable[]
   usage: MetricUsage
   publishedUnavailable: boolean
   sourceUnavailable: boolean
+  lineageUnavailable: boolean
   usageUnavailable: boolean
 }
 type DatasetField = { id: string; code: string; name: string; expression: Record<string, unknown> }
@@ -112,16 +103,6 @@ async function loadAllDatasets(): Promise<DatasetSummary[]> {
   }
 }
 
-async function loadAllCandidates(): Promise<MetricCandidate[]> {
-  const items: MetricCandidate[] = []
-  for (let offset = 0; ;) {
-    const page = await metricCandidateAPI.list(catalogPageSize, offset)
-    items.push(...page.items)
-    if (!page.items.length || items.length >= page.total) return items
-    offset += page.items.length
-  }
-}
-
 function datasetFields(version: PublishedVersionRecord | null): DatasetField[] {
   if (!version) return []
   return version.dsl.fields.map(asRecord).map(field => ({
@@ -138,7 +119,7 @@ function sourceNodes(version: PublishedVersionRecord | null): SourceNode[] {
     id: asText(node.id),
     type: asText(node.type),
     alias: asText(node.alias),
-    datasourceId: asText(node.datasourceId),
+    datasourceId: asText(node.datasourceId) || asText(node.dataSourceId),
     tableId: asText(node.tableId),
     datasetVersionId: asText(node.datasetVersionId),
     fileVersionId: asText(node.fileVersionId),
@@ -174,28 +155,18 @@ function formatDate(value: string): string {
 /** 指标目录负责发现与理解；高风险的编辑、试算和发布继续由独立编辑路由承载。 */
 export function MetricCatalogPage() {
   const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
   const [metrics, setMetrics] = useState<MetricSummary[]>([])
-  const [candidates, setCandidates] = useState<MetricCandidate[]>([])
   const [datasets, setDatasets] = useState<DatasetSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [candidateError, setCandidateError] = useState('')
+  const [assetSyncError, setAssetSyncError] = useState('')
   const [reloadKey, setReloadKey] = useState(0)
-  const [view, setView] = useState<DirectoryView>(
-    searchParams.get('view') === 'candidates' ? 'candidates' : 'datasets',
-  )
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState('ALL')
   const [type, setType] = useState('ALL')
-  const [candidateStatus, setCandidateStatus] = useState('ALL')
-  const [candidateMethod, setCandidateMethod] = useState('ALL')
   const [datasetId, setDatasetId] = useState('ALL')
-  const [selectedCandidateIDs, setSelectedCandidateIDs] = useState<string[]>([])
-  const [candidatePublishing, setCandidatePublishing] = useState(false)
   const [identifying, setIdentifying] = useState(false)
-  const [identificationIndexes, setIdentificationIndexes] = useState<MetricIdentificationDatasetIndex[]>([])
-  const [candidateNotice, setCandidateNotice] = useState('')
+  const [assetSyncNotice, setAssetSyncNotice] = useState('')
   const [selected, setSelected] = useState<MetricSummary | null>(null)
   const [detail, setDetail] = useState<MetricDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
@@ -212,7 +183,7 @@ export function MetricCatalogPage() {
       setLoading(true)
       setError('')
     })
-    Promise.allSettled([loadAllMetrics(), loadAllDatasets(), loadAllCandidates()]).then(([metricResult, datasetResult, candidateResult]) => {
+    Promise.allSettled([loadAllMetrics(), loadAllDatasets()]).then(([metricResult, datasetResult]) => {
       if (!active) return
       if (metricResult.status === 'rejected') {
         setMetrics([])
@@ -221,15 +192,6 @@ export function MetricCatalogPage() {
         setMetrics(metricResult.value)
       }
       if (datasetResult.status === 'fulfilled') setDatasets(datasetResult.value)
-      if (candidateResult.status === 'fulfilled') {
-        setCandidates(candidateResult.value)
-        setCandidateError(current =>
-          current.startsWith('加载候选指标失败') ? '' : current
-        )
-      } else {
-        setCandidates([])
-        setCandidateError(candidateResult.reason instanceof Error ? `加载候选指标失败：${candidateResult.reason.message}` : '加载候选指标失败')
-      }
     }).finally(() => { if (active) setLoading(false) })
     return () => { active = false }
   }, [reloadKey])
@@ -260,18 +222,25 @@ export function MetricCatalogPage() {
         }
       }
       const definition = publishedVersion?.definition ?? (record.currentPublishedVersionId ? null : record.definition)
-      const [datasetResult, usageResult] = await Promise.allSettled([
+      const [datasetResult, lineageResult, usageResult] = await Promise.allSettled([
         definition ? datasetAPI.getVersion(definition.datasetId, definition.datasetVersionId) : Promise.resolve(null),
+        definition ? datasetAPI.getWarehouseLineage(definition.datasetVersionId) : Promise.resolve(null),
         publishedVersion ? metricAPI.getVersionUsage(record.id, publishedVersion.id) : Promise.resolve(emptyUsage()),
       ])
+      const exactDatasetVersion = datasetResult.status === 'fulfilled' ? datasetResult.value : null
+      const tableIDs = [...new Set(sourceNodes(exactDatasetVersion).map(node => node.tableId).filter(Boolean))]
+      const tableResults = await Promise.allSettled(tableIDs.map(tableID => datasetAPI.table(tableID)))
       if (!active) return
       setDetail({
         record,
         publishedVersion,
-        datasetVersion: datasetResult.status === 'fulfilled' ? datasetResult.value : null,
+        datasetVersion: exactDatasetVersion,
+        lineage: lineageResult.status === 'fulfilled' ? lineageResult.value : null,
+        sourceAssets: tableResults.flatMap(result => result.status === 'fulfilled' ? [result.value] : []),
         usage: usageResult.status === 'fulfilled' ? usageResult.value : emptyUsage(),
         publishedUnavailable,
         sourceUnavailable: Boolean(definition) && datasetResult.status === 'rejected',
+        lineageUnavailable: Boolean(definition) && lineageResult.status === 'rejected',
         usageUnavailable: usageResult.status === 'rejected',
       })
     }).catch(cause => {
@@ -292,7 +261,10 @@ export function MetricCatalogPage() {
 
   const datasetById = useMemo(() => new Map(datasets.map(dataset => [dataset.id, dataset])), [datasets])
   const ordinaryDatasets = useMemo(() => datasets.filter(dataset => !dataset.originTableId), [datasets])
-  const displayMetrics = useMemo(() => metrics.filter(metric => metric.type === 'DERIVED' || metric.type === 'RATIO'), [metrics])
+  const displayMetrics = useMemo(() => metrics.filter(metric =>
+    metric.type === 'DERIVED' || metric.type === 'RATIO' ||
+    datasetById.get(metric.datasetId)?.layer === 'DWS'
+  ), [datasetById, metrics])
   const filteredMetrics = useMemo(() => {
     const keyword = query.trim().toLocaleLowerCase('zh-CN')
     return displayMetrics.filter(metric => {
@@ -322,52 +294,17 @@ export function MetricCatalogPage() {
       return [{ dataset, metrics: datasetMetrics }]
     })
   }, [datasetId, filteredMetrics, ordinaryDatasets, query, status, type])
-  const filteredCandidates = useMemo(() => {
-    const keyword = query.trim().toLocaleLowerCase('zh-CN')
-    return candidates.filter(candidate => {
-      const values = [
-        candidate.name, candidate.code, candidate.description,
-        candidate.semantic?.name ?? '', candidate.semantic?.description ?? '',
-        candidate.semantic?.caliber ?? '', ...(candidate.semantic?.tags ?? []),
-      ]
-      return (!keyword || values.some(value => value.toLocaleLowerCase('zh-CN').includes(keyword))) &&
-        (candidateStatus === 'ALL' || candidate.status === candidateStatus) &&
-        (candidateMethod === 'ALL' || candidate.method === candidateMethod) &&
-        (datasetId === 'ALL' || candidate.datasetId === datasetId)
-    })
-  }, [candidateMethod, candidateStatus, candidates, datasetId, query])
-  const publishableCandidates = useMemo(() => filteredCandidates.filter(candidate =>
-    (candidate.status === 'READY' || candidate.status === 'NEEDS_REVIEW') && !candidate.blockReasons.length
-  ), [filteredCandidates])
-  const identifiedDimensions = useMemo(() => {
-    const values = new Map<string, string>()
-    for (const candidate of candidates) {
-      for (const dimension of candidate.proposedDefinition.allowedDimensions ?? []) {
-        const key = dimension.fieldId || dimension.name
-        if (key && !values.has(key)) values.set(key, dimension.name || key)
-      }
-    }
-    return [...values.entries()].map(([fieldId, name]) => ({ fieldId, name }))
-      .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
-  }, [candidates])
   const counts = useMemo(() => ({
     published: displayMetrics.filter(metric => metric.status === 'PUBLISHED').length,
     draft: displayMetrics.filter(metric => metric.status === 'DRAFT').length,
     attention: displayMetrics.filter(metric => metric.status === 'STALE' || metric.status === 'DEPRECATED').length,
   }), [displayMetrics])
-  const pendingCandidateCount = useMemo(() => candidates.filter(candidate =>
-    candidate.status === 'READY' || candidate.status === 'NEEDS_REVIEW'
-  ).length, [candidates])
-  const filterActive = Boolean(query.trim()) || datasetId !== 'ALL' || (view === 'datasets'
-    ? status !== 'ALL' || type !== 'ALL'
-    : candidateStatus !== 'ALL' || candidateMethod !== 'ALL')
+  const filterActive = Boolean(query.trim()) || datasetId !== 'ALL' || status !== 'ALL' || type !== 'ALL'
 
   function resetFilters() {
     setQuery('')
     setStatus('ALL')
     setType('ALL')
-    setCandidateStatus('ALL')
-    setCandidateMethod('ALL')
     setDatasetId('ALL')
   }
 
@@ -403,86 +340,26 @@ export function MetricCatalogPage() {
       setDeleteBusy(false)
     }
   }
-  function toggleCandidate(candidateID: string) {
-    setSelectedCandidateIDs(current => current.includes(candidateID)
-      ? current.filter(id => id !== candidateID)
-      : [...current, candidateID])
-  }
-
-  function toggleAllCandidates() {
-    const visibleIDs = publishableCandidates.map(candidate => candidate.id)
-    const allSelected = visibleIDs.length > 0 && visibleIDs.every(id => selectedCandidateIDs.includes(id))
-    setSelectedCandidateIDs(current => allSelected
-      ? current.filter(id => !visibleIDs.includes(id))
-      : [...new Set([...current, ...visibleIDs])])
-  }
-
-  async function publishSelectedCandidates() {
-    const selectedCandidates = candidates.filter(candidate => selectedCandidateIDs.includes(candidate.id))
-    if (!selectedCandidates.length || candidatePublishing) return
-    setCandidatePublishing(true)
-    setCandidateError('')
-    setCandidateNotice('')
-    let published = 0
-    const failures: string[] = []
-    for (const candidate of selectedCandidates) {
-      try {
-        const accepted = await metricCandidateAPI.accept(candidate.id, candidate.version)
-        const metric = accepted.metric
-        await metricAPI.publish(metric.id, {
-          draftVersionId: metric.draftVersionId,
-          expectedVersion: metric.version,
-          expectedDraftRecordVersion: metric.draftRecordVersion,
-          expectedDefinitionHash: metric.definitionHash,
-          validationParameters: {},
-        }, createMetricPublishIdempotencyKey())
-        published++
-      } catch (cause) {
-        failures.push(
-          `${candidate.name}：${cause instanceof Error ? cause.message : '发布失败'}（候选已接收时可点击“查看指标”重试）`,
-        )
-      }
-    }
-    setSelectedCandidateIDs([])
-    setCandidatePublishing(false)
-    if (failures.length) {
-      setCandidateError(`已发布 ${published} 项，${failures.length} 项失败。${failures.join('；')}`)
-    } else {
-      setCandidateNotice(`已成功发布 ${published} 个指标`)
-    }
-    setReloadKey(value => value + 1)
-  }
-
   async function identifyMetricAssets() {
     if (identifying) return
     setIdentifying(true)
-    setCandidateError('')
-    setCandidateNotice('')
+    setAssetSyncError('')
+    setAssetSyncNotice('')
     try {
       const result = await metricCandidateAPI.identify()
-      setIdentificationIndexes(result.datasets)
-      setView('candidates')
-      setCandidateNotice(
-        `已检查 ${result.historicalMetricCount} 个历史指标和 ${result.existingCandidateCount} 个历史候选，` +
-        `本次覆盖 ${result.eligibleDatasetCount} 个当前数据集，提交 ${result.enqueuedJobCount} 个指标任务，` +
-        `并为 ${result.dimensionProfileCount} 个 DWS 建立维度画像。`,
+      setAssetSyncNotice(
+        `已同步 ${result.eligibleDatasetCount} 个 DWS：提交 ${result.enqueuedJobCount} 个指标入库任务，` +
+        `新增 ${result.dimensionAssetCount} 个正式维度资产。`,
       )
       setReloadKey(value => value + 1)
       window.setTimeout(() => setReloadKey(value => value + 1), 1800)
       window.setTimeout(() => setReloadKey(value => value + 1), 5000)
     } catch (cause) {
-      setCandidateError(cause instanceof Error ? cause.message : '自动识别提交失败')
-      setView('candidates')
+      setAssetSyncError(cause instanceof Error ? cause.message : 'DWS 资产同步失败')
     } finally {
       setIdentifying(false)
     }
   }
-
-  const selectedPublishableCount = selectedCandidateIDs.filter(id =>
-    candidates.some(candidate => candidate.id === id &&
-      (candidate.status === 'READY' || candidate.status === 'NEEDS_REVIEW') &&
-      !candidate.blockReasons.length)
-  ).length
 
   return <AppShell title="资产管理中心" eyebrow="指标 · 语义 · 维度值">
     <AssetManagementTabs />
@@ -490,9 +367,9 @@ export function MetricCatalogPage() {
       <header className="metric-directory-summary">
         <div>
           <span className="eyebrow">按数据集组织</span><h2>一个数据集，一个指标展示区</h2>
-          <p>这里只展示派生指标和复合指标。原子指标与映射数据集保留为 DAG 内部构成，不进入展示中心。</p>
+          <p>DWS 已分类的度量字段直接作为原子指标展示；其他数据集的原子指标与映射数据集仍保留为 DAG 内部构成。</p>
           <button className="metric-identify-button" type="button" disabled={identifying} onClick={() => void identifyMetricAssets()}>
-            <MagicWandIcon size={16} weight="bold" />{identifying ? '正在检查历史与元数据…' : '自动识别指标与维度'}
+            <MagicWandIcon size={16} weight="bold" />{identifying ? '正在同步 DWS 资产…' : '同步 DWS 指标与维度'}
           </button>
         </div>
         <dl aria-label="指标目录统计">
@@ -500,51 +377,21 @@ export function MetricCatalogPage() {
           <div><dt>展示指标</dt><dd>{displayMetrics.length}</dd></div>
           <div><dt>已发布</dt><dd>{counts.published}</dd></div>
           <div><dt>需关注</dt><dd>{counts.attention}</dd></div>
-          <div><dt>候选待发布</dt><dd>{pendingCandidateCount}</dd></div>
         </dl>
       </header>
 
-      <div className="metric-directory-modes" role="tablist" aria-label="指标展示分区">
-        <button type="button" role="tab" aria-selected={view === 'datasets'} onClick={() => { setView('datasets'); setSelectedCandidateIDs([]) }}>数据集指标 <span>{displayMetrics.length}</span></button>
-        <button type="button" role="tab" aria-selected={view === 'candidates'} onClick={() => setView('candidates')}>候选区 <span>{pendingCandidateCount}</span></button>
-      </div>
-
-      <div className="metric-directory-filters" aria-label={view === 'datasets' ? '数据集指标筛选' : '候选指标筛选'}>
-        <label className="metric-search-field"><span>{view === 'datasets' ? '搜索数据集或指标' : '搜索候选'}</span><span className="metric-search-input"><MagnifyingGlassIcon size={17} /><input aria-label={view === 'datasets' ? '搜索数据集或指标' : '搜索候选指标'} value={query} placeholder="搜索名称、编码或说明" onChange={event => setQuery(event.target.value)} /></span></label>
-        {view === 'datasets' ? <>
-          <label><span>指标状态</span><select aria-label="指标状态" value={status} onChange={event => setStatus(event.target.value)}><option value="ALL">全部状态</option>{Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-          <label><span>指标类型</span><select aria-label="指标类型筛选" value={type} onChange={event => setType(event.target.value)}><option value="ALL">全部类型</option><option value="DERIVED">派生指标</option><option value="RATIO">复合指标</option></select></label>
-        </> : <>
-          <label><span>候选状态</span><select aria-label="候选状态" value={candidateStatus} onChange={event => setCandidateStatus(event.target.value)}><option value="ALL">全部状态</option>{Object.entries(candidateStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-          <label><span>生成方式</span><select aria-label="候选生成方式" value={candidateMethod} onChange={event => setCandidateMethod(event.target.value)}><option value="ALL">全部方式</option>{Object.entries(candidateMethodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-        </>}
+      <div className="metric-directory-filters" aria-label="数据集指标筛选">
+        <label className="metric-search-field"><span>搜索数据集或指标</span><span className="metric-search-input"><MagnifyingGlassIcon size={17} /><input aria-label="搜索数据集或指标" value={query} placeholder="搜索名称、编码或说明" onChange={event => setQuery(event.target.value)} /></span></label>
+        <label><span>指标状态</span><select aria-label="指标状态" value={status} onChange={event => setStatus(event.target.value)}><option value="ALL">全部状态</option>{Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        <label><span>指标类型</span><select aria-label="指标类型筛选" value={type} onChange={event => setType(event.target.value)}><option value="ALL">全部类型</option><option value="ATOMIC">原子指标</option><option value="DERIVED">派生指标</option><option value="RATIO">复合指标</option></select></label>
         <label><span>来源数据集</span><select aria-label="来源数据集" value={datasetId} onChange={event => setDatasetId(event.target.value)}><option value="ALL">全部数据集</option>{ordinaryDatasets.map(dataset => <option key={dataset.id} value={dataset.id}>{dataset.name}</option>)}</select></label>
         <button className="metric-reset-filters" type="button" disabled={!filterActive} onClick={resetFilters}>重置</button>
       </div>
 
-      {view === 'datasets' ? <div className="metric-directory-resultbar"><div><strong>数据集指标展示区</strong><span>新建指标默认以所在数据集的当前发布 DAG 为基线</span></div><small>显示 {datasetSections.length} / {ordinaryDatasets.length} 个数据集</small></div> :
-        <div className="metric-directory-resultbar metric-candidate-batchbar"><div><strong>待审批候选</strong><span>多选后将逐项创建指标、试算并正式发布</span></div><div className="metric-candidate-batch-actions"><button type="button" className="quiet-button" disabled={!publishableCandidates.length || candidatePublishing} onClick={toggleAllCandidates}>{publishableCandidates.length > 0 && publishableCandidates.every(candidate => selectedCandidateIDs.includes(candidate.id)) ? '取消全选' : '全选可发布项'}</button><button type="button" className="primary-button" disabled={!selectedPublishableCount || candidatePublishing} onClick={() => void publishSelectedCandidates()}>{candidatePublishing ? '正在批量发布…' : `发布选中指标（${selectedPublishableCount}）`}</button><small>显示 {filteredCandidates.length} / {candidates.length}</small></div></div>}
-      {candidateNotice && view === 'candidates' && <div className="metric-directory-toast" role="status"><span>{candidateNotice}</span><button type="button" aria-label="关闭提示" onClick={() => setCandidateNotice('')}>×</button></div>}
-      {view === 'candidates' && <section className="metric-identification-summary" aria-label="自动识别维度清单">
-        <div><strong>领域混合索引</strong><span>{identificationIndexes.length ? `${identificationIndexes.length} 个 DWS/ADS 数据集` : `${candidates.length} 个指标候选 · ${identifiedDimensions.length} 个维度`}</span></div>
-        {identificationIndexes.length ? <div className="metric-index-datasets">
-          {identificationIndexes.map(index => <article key={index.datasetVersionId}>
-            <header><strong>{index.name}</strong><span>{index.layer} · 领域：{index.domain}</span></header>
-            <p>{index.metrics.length} 个指标 · {index.dimensions.length} 个维度 · 指标向量 + 维度成员倒排</p>
-            <div>{index.metrics.map(metric => <span key={`${metric.source}:${metric.code}`}>{metric.name} <small>{metric.vectorStatus === 'SUCCEEDED' ? '向量就绪' : '向量构建中'}</small></span>)}</div>
-            <dl>{index.dimensions.map(dimension => <div key={dimension.fieldId}>
-              <dt>{dimension.name}<small>{dimension.vectorizedMemberCount}/{dimension.memberValueCount} 向量</small></dt>
-              <dd>{dimension.sensitive || dimension.memberIndexPolicy !== 'FULL'
-                ? '受策略保护，不枚举成员值'
-                : dimension.memberValues.length
-                  ? `${dimension.memberValues.join('、')}${dimension.valuesTruncated ? `…（共 ${dimension.memberValueCount} 项）` : ''}`
-                  : '暂无已刷新的去重维度值'}</dd>
-            </div>)}</dl>
-          </article>)}
-        </div> : <div>{identifiedDimensions.length ? identifiedDimensions.map(item => <span key={item.fieldId} title={item.fieldId}>{item.name}</span>) : <small>点击“自动识别指标与维度”后，这里会按 DWS/ADS、领域展示指标、维度及安全可枚举的去重维度值。</small>}</div>}
-      </section>}
-      {(view === 'datasets' ? error : candidateError) && <div className="metric-directory-error" role="alert"><span>{view === 'datasets' ? error : candidateError}</span><button type="button" onClick={() => setReloadKey(value => value + 1)}>重新加载</button></div>}
-      {loading ? <div className="metric-directory-empty" role="status"><FunctionIcon size={34} /><strong>正在加载指标展示区…</strong></div> : view === 'datasets' ? datasetSections.length ? <div className="metric-dataset-zones">
+      <div className="metric-directory-resultbar"><div><strong>数据集指标展示区</strong><span>新建指标默认以所在数据集的当前发布 DAG 为基线</span></div><small>显示 {datasetSections.length} / {ordinaryDatasets.length} 个数据集</small></div>
+      {assetSyncNotice && <div className="metric-directory-toast" role="status"><span>{assetSyncNotice}</span><button type="button" aria-label="关闭提示" onClick={() => setAssetSyncNotice('')}>×</button></div>}
+      {(error || assetSyncError) && <div className="metric-directory-error" role="alert"><span>{error || assetSyncError}</span><button type="button" onClick={() => setReloadKey(value => value + 1)}>重新加载</button></div>}
+      {loading ? <div className="metric-directory-empty" role="status"><FunctionIcon size={34} /><strong>正在加载指标展示区…</strong></div> : datasetSections.length ? <div className="metric-dataset-zones">
         {datasetSections.map(({ dataset, metrics: datasetMetrics }) => <section className="metric-dataset-zone" key={dataset.id} aria-label={`${dataset.name}指标展示区`}>
           <header>
             <div className="metric-dataset-identity"><span aria-hidden="true"><DatabaseIcon size={21} weight="duotone" /></span><div><h3>{dataset.name}</h3><p>{dataset.description || '暂无数据集说明'}</p><small>{dataset.code} · {dataset.status === 'PUBLISHED' ? '已发布 DAG' : statusLabels[dataset.status] ?? dataset.status}</small></div></div>
@@ -558,26 +405,9 @@ export function MetricCatalogPage() {
               <dl><div><dt>类型</dt><dd>{typeLabels[metric.type] ?? metric.type}</dd></div><div><dt>绑定版本</dt><dd title={metric.datasetVersionId}>{shortId(metric.datasetVersionId)}</dd></div><div><dt>指标版本</dt><dd>{metric.currentPublishedVersionId ? '已发布精确版本' : `草稿 V${metric.version}`}</dd></div><div><dt>更新时间</dt><dd>{formatDate(metric.updatedAt)}</dd></div></dl>
               <div className="metric-asset-actions"><button className="action-view" type="button" onClick={() => openDetail(metric)}>查看</button><button className="action-edit" type="button" onClick={() => navigate(`/metrics/${metric.id}/edit`)}>编辑</button><button className="action-delete" type="button" onClick={() => requestMetricDeletion(metric)}>删除</button></div>
             </article>)}
-          </div> : <div className="metric-dataset-empty"><FunctionIcon size={25} /><div><strong>暂无派生或复合指标</strong><p>{dataset.currentPublishedVersionId ? '可从该数据集的当前发布 DAG 开始创建。' : '先发布数据集，再基于其 DAG 创建指标。'}</p></div></div>}
+          </div> : <div className="metric-dataset-empty"><FunctionIcon size={25} /><div><strong>暂无可展示指标</strong><p>{dataset.currentPublishedVersionId ? '可从该数据集的当前发布 DAG 开始创建。' : '先发布数据集，再基于其 DAG 创建指标。'}</p></div></div>}
         </section>)}
-      </div> : <DirectoryEmpty hasItems={ordinaryDatasets.length > 0} filterActive={filterActive} onReset={resetFilters} /> :
-        filteredCandidates.length ? <div className="metric-directory-list" aria-label="候选指标列表">
-          {filteredCandidates.map(candidate => {
-            const dataset = datasetById.get(candidate.datasetId)
-            const publishable = (candidate.status === 'READY' || candidate.status === 'NEEDS_REVIEW') && !candidate.blockReasons.length
-            const checked = selectedCandidateIDs.includes(candidate.id)
-            return <article className={`metric-directory-row metric-candidate-row ${checked ? 'is-selected' : ''}`} key={candidate.id}>
-              <label className="metric-candidate-selector" title={publishable ? '选择候选指标' : '当前候选不可发布'}>
-                <input type="checkbox" aria-label={`选择候选指标 ${candidate.name}`} checked={checked} disabled={!publishable || candidatePublishing} onChange={() => toggleCandidate(candidate.id)} />
-                {checked ? <CheckSquareIcon size={21} weight="fill" /> : <SquareIcon size={21} />}
-                <MagicWandIcon size={20} weight="bold" />
-              </label>
-              <div className="metric-asset-main"><div><strong>{candidate.name}</strong><span className={`metric-status candidate-${candidate.status.toLowerCase()}`}>{candidateStatusLabels[candidate.status]}</span></div><p>{candidate.semantic?.description || candidate.description || '暂无候选说明'}</p><small>{candidate.code}</small></div>
-              <dl><div><dt>生成方式</dt><dd>{candidateMethodLabels[candidate.method] ?? candidate.method}</dd></div><div><dt>来源数据集</dt><dd title={dataset?.name || candidate.datasetId}>{dataset?.name || shortId(candidate.datasetId)}</dd></div><div><dt>置信度</dt><dd>{Math.round(candidate.confidence * 100)}%</dd></div><div><dt>更新时间</dt><dd>{formatDate(candidate.updatedAt)}</dd></div></dl>
-              <div className="metric-asset-actions">{candidate.acceptedMetricId ? <button className="action-edit" type="button" onClick={() => navigate(`/metrics/${candidate.acceptedMetricId}/edit`)}>查看指标</button> : <span className="metric-candidate-state">{publishable ? '可加入批量发布' : candidate.blockReasons[0] || '不可发布'}</span>}</div>
-            </article>
-          })}
-        </div> : <div className="metric-directory-empty"><MagicWandIcon size={38} /><strong>{candidates.length ? '没有符合条件的候选指标' : '还没有候选指标'}</strong><p>{candidates.length ? '调整搜索词或筛选条件后再试。' : '点击“自动识别指标与维度”，系统会先检查历史指标，再分析当前数据集元信息。'}</p>{filterActive && <button className="quiet-button" type="button" onClick={resetFilters}>清除筛选</button>}</div>}
+      </div> : <DirectoryEmpty hasItems={ordinaryDatasets.length > 0} filterActive={filterActive} onReset={resetFilters} />}
     </section>
 
     {deletingMetric && <div className="metric-delete-backdrop" role="presentation" onMouseDown={event => {
@@ -674,16 +504,70 @@ function MetricDimensionsView({ definition, fields }: { definition: MetricDefini
 
 function MetricSourceView({ detail, definition, datasetName, fields, nodes }: { detail: MetricDetail; definition: MetricDefinition; datasetName: string; fields: DatasetField[]; nodes: SourceNode[] }) {
   const atomicFieldId = definition.expression.type === 'FIELD_REF' ? definition.expression.fieldId : ''
+  const atomicField = fields.find(field => field.id === atomicFieldId)
+  const lineageByVersion = new Map((detail.lineage?.nodes ?? []).map(node => [node.datasetVersionId, node]))
+  const tableByID = new Map(detail.sourceAssets.map(table => [table.id, table]))
   return <div className="metric-source-view">
     {detail.sourceUnavailable && <div className="metric-detail-notice" role="note">当前账号无法读取精确数据集快照；指标保存的来源 ID 仍会保留展示，字段或表不会被替换成其他版本。</div>}
     <section className="metric-source-hero"><div className="metric-source-icon"><DatabaseIcon size={24} weight="bold" /></div><div><span className="eyebrow">精确数据集版本</span><h4>{datasetName || detail.datasetVersion?.dsl.dataset.name || shortId(definition.datasetId)}</h4><p>{detail.datasetVersion ? `V${detail.datasetVersion.versionNo} · ${detail.datasetVersion.status}` : '版本元数据不可用'}</p></div><dl><div><dt>数据集 ID</dt><dd title={definition.datasetId}>{shortId(definition.datasetId)}</dd></div><div><dt>版本 ID</dt><dd title={definition.datasetVersionId}>{shortId(definition.datasetVersionId)}</dd></div><div><dt>DSL 摘要</dt><dd>{detail.datasetVersion ? shortId(detail.datasetVersion.dslHash) : '—'}</dd></div></dl></section>
-    <section className="metric-detail-section"><span className="eyebrow">指标取值字段</span><h4>{atomicFieldId ? fieldName(fields, atomicFieldId) : '派生指标表达式'}</h4>{atomicFieldId && <p>字段 ID：<code>{atomicFieldId}</code></p>}</section>
-    <section className="metric-source-nodes"><header><div><span className="eyebrow">上游节点</span><h4>{nodes.length} 个登记来源</h4></div><p>名称不可用时展示不可变 ID，避免推断未授权资产信息。</p></header>{nodes.length ? <div>{nodes.map(node => <article key={node.id}><TableIcon size={20} weight="bold" /><div><strong>{node.alias || node.type || '数据节点'}</strong><small>{node.type || 'SOURCE'} · {node.id}</small></div><dl><div><dt>数据源</dt><dd title={node.datasourceId}>{shortId(node.datasourceId)}</dd></div><div><dt>表 / 上游版本</dt><dd title={node.tableId || node.datasetVersionId || node.fileVersionId}>{shortId(node.tableId || node.datasetVersionId || node.fileVersionId)}</dd></div></dl></article>)}</div> : <div className="metric-detail-state compact"><TableIcon size={30} /><strong>暂无可读取的上游节点</strong></div>}</section>
+    <section className="metric-detail-section"><span className="eyebrow">指标取值字段</span><h4>{atomicFieldId ? fieldName(fields, atomicFieldId) : '派生指标表达式'}</h4>{atomicFieldId && <p>字段编码：<code>{atomicField?.code || atomicFieldId}</code></p>}</section>
+    <section className="metric-source-nodes"><header><div><span className="eyebrow">上游节点</span><h4>{nodes.length} 个登记来源</h4></div><p>来源名称取自已登记业务资产；精确版本和物理标识仅用于审计。</p></header>{nodes.length ? <div>{nodes.map(node => {
+      const upstreamDataset = node.datasetVersionId ? lineageByVersion.get(node.datasetVersionId) : undefined
+      const sourceTable = node.tableId ? tableByID.get(node.tableId) : undefined
+      const sourceName = upstreamDataset?.name || sourceTable?.businessName || sourceTable?.tableName ||
+        (node.datasetVersionId ? `上游数据集 ${shortId(node.datasetVersionId)}` : `源表 ${shortId(node.tableId || node.fileVersionId || node.id)}`)
+      const sourceKind = upstreamDataset ? `${upstreamDataset.layer} 数据集` : sourceTable ? '业务源表' : node.type === 'DATASET' ? '数据集' : '源表'
+      return <article key={node.id} title={upstreamDataset ? `精确版本 ${node.datasetVersionId}` : sourceTable?.tableName || node.tableId}>
+        {upstreamDataset ? <StackIcon size={20} weight="bold" /> : <TableIcon size={20} weight="bold" />}
+        <div><strong>{sourceName}</strong><small>{sourceKind} · 已登记业务资产</small></div>
+        <dl>
+          <div><dt>{upstreamDataset ? '来源层级' : '数据源'}</dt><dd>{upstreamDataset?.layer || sourceTable?.dataSourceName || shortId(node.datasourceId)}</dd></div>
+          <div><dt>{upstreamDataset ? '上游精确版本' : '物理表 / 文件版本'}</dt><dd title={node.datasetVersionId || node.tableId || node.fileVersionId}>{shortId(node.datasetVersionId || (sourceTable ? [sourceTable.schemaName, sourceTable.tableName].filter(Boolean).join('.') : '') || node.tableId || node.fileVersionId)}</dd></div>
+        </dl>
+      </article>
+    })}</div> : <div className="metric-detail-state compact"><TableIcon size={30} /><strong>暂无可读取的上游节点</strong></div>}</section>
   </div>
 }
 
-function MetricLineageView({ detail, definition, datasetName, fields, nodes }: { detail: MetricDetail; definition: MetricDefinition; datasetName: string; fields: DatasetField[]; nodes: SourceNode[] }) {
+function warehouseLineagePaths(lineage: WarehouseLineage): WarehouseLineageNode[][] {
+  const byID = new Map(lineage.nodes.map(node => [node.datasetVersionId, node]))
+  const outgoing = new Map<string, string[]>()
+  const incoming = new Set<string>()
+  for (const edge of lineage.edges) {
+    if (!byID.has(edge.fromDatasetVersionId) || !byID.has(edge.toDatasetVersionId)) continue
+    outgoing.set(edge.fromDatasetVersionId, [
+      ...(outgoing.get(edge.fromDatasetVersionId) ?? []),
+      edge.toDatasetVersionId,
+    ])
+    incoming.add(edge.toDatasetVersionId)
+  }
+  const sources = lineage.nodes
+    .filter(node => !incoming.has(node.datasetVersionId))
+    .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
+  const paths: WarehouseLineageNode[][] = []
+  const visit = (id: string, path: WarehouseLineageNode[], visited: Set<string>) => {
+    const node = byID.get(id)
+    if (!node || visited.has(id) || paths.length >= 32) return
+    const nextPath = [...path, node]
+    if (id === lineage.rootDatasetVersionId) {
+      paths.push(nextPath)
+      return
+    }
+    const next = (outgoing.get(id) ?? []).sort()
+    for (const downstreamID of next) visit(downstreamID, nextPath, new Set([...visited, id]))
+  }
+  for (const source of sources) visit(source.datasetVersionId, [], new Set())
+  if (!paths.length) {
+    const root = byID.get(lineage.rootDatasetVersionId)
+    if (root) paths.push([root])
+  }
+  return paths
+}
+
+function MetricLineageView({ detail, definition, fields }: { detail: MetricDetail; definition: MetricDefinition; datasetName: string; fields: DatasetField[]; nodes: SourceNode[] }) {
   const atomicFieldId = definition.expression.type === 'FIELD_REF' ? definition.expression.fieldId : ''
+  const paths = detail.lineage ? warehouseLineagePaths(detail.lineage) : []
+  const completeToODS = paths.length > 0 && paths.every(path => path[0]?.layer === 'ODS')
   const downstream = [
     { label: '报告草稿引用', value: detail.usage.reportDraftReferences },
     { label: '下游指标草稿', value: detail.usage.downstreamDraftReferences },
@@ -691,17 +575,23 @@ function MetricLineageView({ detail, definition, datasetName, fields, nodes }: {
     { label: '运行中查询', value: detail.usage.activeQueryRuns },
   ]
   return <div className="metric-lineage-view">
-    <header><div><span className="eyebrow">版本级登记血缘</span><h4>从可信来源到当前指标版本</h4></div><span>{detail.publishedVersion ? `发布 V${detail.publishedVersion.versionNo}` : '草稿口径'}</span></header>
+    <header><div><span className="eyebrow">精确版本数据血缘</span><h4>ODS → DWD / DIM → DWS → 取值口径 → 指标版本</h4></div><span>{completeToODS ? '已追溯至 ODS' : detail.lineageUnavailable ? '血缘读取失败' : '血缘待完善'}</span></header>
     <div className="metric-lineage-flow" aria-label="指标上游血缘">
-      <div className="metric-lineage-source-group">{nodes.length ? nodes.map(node => <article className="metric-lineage-node source" key={node.id}><DatabaseIcon size={19} weight="bold" /><span><small>{node.type || 'SOURCE'}</small><strong>{node.alias || shortId(node.tableId || node.id)}</strong></span></article>) : <article className="metric-lineage-node muted"><DatabaseIcon size={19} /><span><small>来源</small><strong>元数据不可读</strong></span></article>}</div>
-      <ArrowRightIcon className="metric-lineage-arrow" size={24} weight="bold" />
-      <article className="metric-lineage-node dataset"><StackIcon size={19} weight="bold" /><span><small>数据集版本</small><strong>{datasetName || shortId(definition.datasetVersionId)}</strong></span></article>
-      <ArrowRightIcon className="metric-lineage-arrow" size={24} weight="bold" />
-      <article className="metric-lineage-node field"><TableIcon size={19} weight="bold" /><span><small>取值口径</small><strong>{atomicFieldId ? fieldName(fields, atomicFieldId) : '指标表达式'}</strong></span></article>
-      <ArrowRightIcon className="metric-lineage-arrow" size={24} weight="bold" />
-      <article className="metric-lineage-node metric"><FunctionIcon size={19} weight="bold" /><span><small>指标版本</small><strong>{definition.metric.name}</strong></span></article>
+      {paths.length ? paths.map((path, pathIndex) => <div className="metric-lineage-path" key={path.map(node => node.datasetVersionId).join(':')}>
+        {path.flatMap((node, nodeIndex) => [
+          <article className={`metric-lineage-node dataset layer-${node.layer.toLowerCase()}`} key={node.datasetVersionId} title={`精确版本 ${node.datasetVersionId}`}>
+            <StackIcon size={19} weight="bold" />
+            <span><small>{node.layer} 数据集</small><strong>{node.name}</strong><em>{node.status === 'PUBLISHED' ? '已发布' : statusLabels[node.status] ?? node.status} · 精确版本</em></span>
+          </article>,
+          <ArrowRightIcon className="metric-lineage-arrow" size={24} weight="bold" key={`${node.datasetVersionId}:arrow:${nodeIndex}`} />,
+        ])}
+        <article className="metric-lineage-node field"><TableIcon size={19} weight="bold" /><span><small>取值口径</small><strong>{atomicFieldId ? fieldName(fields, atomicFieldId) : '指标表达式'}</strong></span></article>
+        <ArrowRightIcon className="metric-lineage-arrow" size={24} weight="bold" />
+        <article className="metric-lineage-node metric"><FunctionIcon size={19} weight="bold" /><span><small>指标版本</small><strong>{definition.metric.name}</strong><em>{detail.publishedVersion ? `发布 V${detail.publishedVersion.versionNo}` : '当前草稿'}</em></span></article>
+        {paths.length > 1 && <span className="metric-lineage-path-index">路径 {pathIndex + 1}</span>}
+      </div>) : <div className="metric-lineage-empty"><DatabaseIcon size={26} /><strong>无法读取数据集版本血缘</strong><p>当前指标仍固定到精确数据集版本，重新加载后可再次追溯到 ODS。</p></div>}
     </div>
     <section className="metric-lineage-downstream"><header><div><GitBranchIcon size={21} weight="bold" /><span><strong>下游占用汇总</strong><small>只展示有权限的聚合计数</small></span></div></header><dl>{downstream.map(item => <div key={item.label}><dt>{item.label}</dt><dd>{detail.usageUnavailable ? '—' : item.value}</dd></div>)}</dl></section>
-    <div className="metric-lineage-boundary" role="note"><strong>当前血缘覆盖边界</strong><p>已展示精确数据集版本、来源节点和下游占用汇总。对象级“源字段 → 组件 → 报告版本”链路尚未由服务端开放，页面不会推断或暴露无权限对象名称。</p></div>
+    <div className={`metric-lineage-boundary ${completeToODS ? 'complete' : 'incomplete'}`} role="note"><strong>{completeToODS ? '血缘完整性已通过' : '血缘完整性待处理'}</strong><p>{completeToODS ? '已沿真实数据集版本依赖完整追溯至 ODS；所有节点均使用已发布资产的业务名称，不展示 DSL 内部别名。' : '当前精确版本尚未形成可验证的 ODS 起点，请检查上游版本依赖或读取权限。'}</p></div>
   </div>
 }

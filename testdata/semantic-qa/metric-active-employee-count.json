@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0",
+  "metric": {
+    "code": "metric_dws_employee_profile_regenerated_20260727_em_904c04ae2441",
+    "name": "员工总人数",
+    "description": "按员工画像属性组合汇总的员工总人数；“在职”通过人员状态成员映射为“在岗”",
+    "type": "DERIVED"
+  },
+  "datasetId": "41000000-0000-4000-8000-000000000010",
+  "datasetVersionId": "42000000-0000-4000-8000-000000000010",
+  "expression": {
+    "type": "FIELD_REF",
+    "fieldId": "field_employee_total_count"
+  },
+  "aggregation": "NONE",
+  "unit": "人",
+  "numberFormat": "#,##0",
+  "timeGrain": "NONE",
+  "additivity": "ADDITIVE",
+  "nonAdditiveDimensionFieldIds": [],
+  "allowedDimensions": [
+    {
+      "fieldId": "field_birth_cohort",
+      "name": "出生年代段",
+      "hierarchyFieldIds": [],
+      "sortDirection": "ASC",
+      "nullLabel": "未知年代"
+    },
+    {
+      "fieldId": "field_xiaowei_code",
+      "name": "小微编码",
+      "hierarchyFieldIds": [],
+      "sortDirection": "ASC",
+      "nullLabel": "未知小微"
+    },
+    {
+      "fieldId": "field_employee_status",
+      "name": "人员状态",
+      "hierarchyFieldIds": [],
+      "sortDirection": "ASC",
+      "nullLabel": "未知状态"
+    }
+  ],
+  "decimalScale": 0,
+  "roundingMode": "HALF_UP",
+  "nullHandling": "IGNORE",
+  "divisionByZero": "NULL"
+}

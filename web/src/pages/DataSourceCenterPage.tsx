@@ -73,6 +73,18 @@ const metadataSampleDescription = (mode: MetadataSampleMode) => mode === 'DENY'
     : '读取最多 10 行原值并发送（高风险）'
 const metadataJobFailureTable = (failure: MetadataJobFailure) => [failure.schemaName || failure.catalogName, failure.tableName].filter(Boolean).join('.')
 const metadataJobFailureMessage = (failure: MetadataJobFailure) => failure.errorMessage?.trim() || failure.errorCode?.trim() || '处理失败'
+const metadataJobLogTime = (value: string) => {
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime())
+    ? value
+    : parsed.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+const metadataJobLogDuration = (durationMs?: number) => {
+  if (!durationMs) return ''
+  if (durationMs < 1000) return `${durationMs} 毫秒`
+  const seconds = durationMs / 1000
+  return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} 秒`
+}
 const connectionTestStillCurrent = (
   source: DataSourceRecord,
   result: { configVersionId?: string },
@@ -251,6 +263,7 @@ export function DataSourceCenterPage() {
   const metadataJobPollers = useRef(new Map<string, MetadataJobPoller>())
   const connectionTestPollers = useRef(new Map<string, ConnectionTestPoller>())
   const metadataJobSourceIdRef = useRef('')
+  const metadataJobLogRef = useRef<HTMLDivElement>(null)
   const tableEditorRequest = useRef(0)
   const discoveryRequest = useRef(0)
   const notifiedMetadataJobs = useRef(new Set<string>())
@@ -1027,6 +1040,11 @@ export function DataSourceCenterPage() {
   const visibleMetadataJobFailures = visibleMetadataJob && (visibleMetadataJob.status === 'FAILED' || visibleMetadataJob.status === 'PARTIAL')
     ? visibleMetadataJob.failures || []
     : []
+  const visibleMetadataJobLogs = visibleMetadataJob?.logs || []
+  useEffect(() => {
+    const log = metadataJobLogRef.current
+    if (log) log.scrollTop = log.scrollHeight
+  }, [visibleMetadataJob?.id, visibleMetadataJob?.status, visibleMetadataJobLogs.length])
   const selectableDiscoveredTables = dialog?.mode === 'select-tables'
     ? discoveredTables.filter(table => dialog.source?.type === 'EXCEL' || !metadataTables.some(asset => assetTableKey(asset) === discoveredTableKey(table)))
     : []
@@ -1172,6 +1190,18 @@ export function DataSourceCenterPage() {
                 </li>
               })}
             </ul>}
+          </section>}
+          {visibleMetadataJob && <section className="data-source-processing-log" aria-label="处理日志">
+            <header><div><strong>处理日志</strong><span>仅显示安全运行摘要，不包含业务样本和模型原文</span></div><em>{metadataJobActive(visibleMetadataJob) ? '实时刷新' : `${visibleMetadataJobLogs.length} 条`}</em></header>
+            <div className="data-source-processing-log-list" ref={metadataJobLogRef} role="log" aria-live="polite">
+              {visibleMetadataJobLogs.length === 0
+                ? <div className="data-source-processing-log-empty">任务日志正在初始化…</div>
+                : visibleMetadataJobLogs.map((entry, index) => <div className={`data-source-processing-log-entry ${entry.level.toLowerCase()}`} key={`${entry.timestamp}:${entry.stage}:${entry.message}:${index}`}>
+                    <time dateTime={entry.timestamp}>{metadataJobLogTime(entry.timestamp)}</time>
+                    <i aria-hidden="true" />
+                    <span>{entry.tableName && <b>{entry.tableName}</b>}<strong>{entry.message}</strong>{entry.model && <small>{entry.model}</small>}{entry.durationMs ? <small>{metadataJobLogDuration(entry.durationMs)}</small> : null}</span>
+                  </div>)}
+            </div>
           </section>}
           <section className="data-source-structure" aria-label="表结构">
             <header><div><span className="eyebrow">物理元数据</span><h3>表结构</h3></div><strong>{metadataTables.length}<small> 张表</small></strong></header>

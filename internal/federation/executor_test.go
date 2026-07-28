@@ -26,6 +26,7 @@ func TestNormalizeValuePreservesDecimalOracleNumber(t *testing.T) {
 type fakeConnector struct {
 	mu        sync.Mutex
 	queries   []string
+	maxRows   []int
 	result    datasource.QueryResult
 	err       error
 	wait      bool
@@ -33,9 +34,10 @@ type fakeConnector struct {
 	cancelled []string
 }
 
-func (f *fakeConnector) Query(ctx context.Context, _ datasource.Source, _ string, sql string, _ []any, _ int) (datasource.QueryResult, error) {
+func (f *fakeConnector) Query(ctx context.Context, _ datasource.Source, _ string, sql string, _ []any, maxRows int) (datasource.QueryResult, error) {
 	f.mu.Lock()
 	f.queries = append(f.queries, sql)
+	f.maxRows = append(f.maxRows, maxRows)
 	f.mu.Unlock()
 	if f.wait {
 		if f.started != nil {
@@ -51,6 +53,47 @@ func (f *fakeConnector) Query(ctx context.Context, _ datasource.Source, _ string
 		return datasource.QueryResult{}, f.err
 	}
 	return f.result, nil
+}
+
+func TestExecutorTruncatesEveryVirtualODSSourceToOneHundredRows(t *testing.T) {
+	orders := &fakeConnector{result: datasource.QueryResult{
+		Columns:  []string{"customer_id", "partial_sum_1"},
+		Rows:     [][]any{{1.0, 12.5}},
+		RowCount: 1,
+	}}
+	customers := &fakeConnector{result: datasource.QueryResult{
+		Columns:  []string{"customer_id", "customer_name"},
+		Rows:     [][]any{{1.0, "A"}},
+		RowCount: 1,
+	}}
+	plan := crossPlan(datasource.TypeOracle, datasource.TypeMySQL)
+	plan.SourceSampleLimit = 100
+	executor := NewExecutor(
+		map[datasource.Type]queryruntime.QueryConnector{
+			datasource.TypeOracle: orders,
+			datasource.TypeMySQL:  customers,
+		},
+		fileReader(),
+	)
+	result, err := executor.Execute(
+		context.Background(),
+		"79d39206-c899-40f8-866c-5ad933b035f2",
+		crossDocument(), plan,
+		crossSources(datasource.TypeOracle, datasource.TypeMySQL),
+		map[string]any{}, policy.UserScope{Attributes: map[string]any{}},
+		nil, nil, 10,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RowCount != 1 ||
+		len(orders.maxRows) != 1 || orders.maxRows[0] != 100 ||
+		len(customers.maxRows) != 1 || customers.maxRows[0] != 100 {
+		t.Fatalf(
+			"result=%#v order limits=%#v customer limits=%#v",
+			result, orders.maxRows, customers.maxRows,
+		)
+	}
 }
 
 func (f *fakeConnector) Cancel(_ context.Context, queryID string) (bool, error) {

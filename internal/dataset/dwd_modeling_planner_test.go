@@ -307,6 +307,21 @@ func TestCompleteDWDOutputContractRepairsOmittedSafeMetadata(t *testing.T) {
 	}
 }
 
+func TestCompleteDWDOutputContractDoesNotInventKeyForKeylessFact(t *testing.T) {
+	input, _, plan := validDWDPlanningFixture()
+	input.Tables[0].OutputGrain.KeyFields = nil
+	plan.Outputs[0].GrainKeyOutputCodes = nil
+
+	completed := completeDWDOutputContract(input, plan)
+	if len(completed.Outputs[0].GrainKeyOutputCodes) != 0 {
+		t.Fatalf("keyless fact received invented grain keys: %v",
+			completed.Outputs[0].GrainKeyOutputCodes)
+	}
+	if err := validateDWDLLMPlan(input, completed); err != nil {
+		t.Fatalf("keyless fact contract is invalid: %v", err)
+	}
+}
+
 func TestNormalizeDWDFactCheckpointRefreshesCaseSensitiveDSLReferences(t *testing.T) {
 	input, _, plan := validDWDPlanningFixture()
 	output := plan.Outputs[0]
@@ -1118,7 +1133,7 @@ func TestValidateDWDLLMPlanRejectsFabricationDroppedFactsAndMeasureNullFilling(t
 			edit: func(plan *dwdLLMPlan) {
 				for index := range plan.Outputs[0].Fields {
 					if plan.Outputs[0].Fields[index].SourceFieldCode == "amount" {
-						plan.Outputs[0].Fields[index].Cleaning = []string{"COALESCE_NEGATIVE_ONE"}
+						plan.Outputs[0].Fields[index].Cleaning = []string{"COALESCE_DEFAULT"}
 					}
 				}
 			},
@@ -1330,9 +1345,62 @@ func TestValidateDWDCleaningAllowsStringTimeCastWithoutInventedSentinel(t *testi
 		t.Fatalf("valid string time cleaning was rejected: %v", err)
 	}
 	if err := validateDWDCleaning(
-		field, []string{"TRIM", "COALESCE_UNKNOWN", "CAST_DATETIME"},
+		field, []string{"TRIM", "CAST_DATETIME", "COALESCE_DEFAULT"},
 	); err == nil || !strings.Contains(err.Error(), "time field must not fill nulls") {
 		t.Fatalf("string time sentinel was not rejected precisely: %v", err)
+	}
+}
+
+func TestApplyLLMDWDCleaningUsesTypedDefaultNullValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		canonical  string
+		operations []string
+		want       any
+	}{
+		{name: "text", canonical: "STRING", operations: []string{"COALESCE_DEFAULT"}, want: "UNKNOWN"},
+		{name: "date", canonical: "DATE", operations: []string{"CAST_DATE", "COALESCE_DEFAULT"}, want: "1970-01-01"},
+		{name: "number", canonical: "DECIMAL", operations: []string{"COALESCE_DEFAULT"}, want: 999999999},
+		{name: "boolean", canonical: "BOOLEAN", operations: []string{"COALESCE_DEFAULT"}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			expression, _, nullable, err := applyLLMDWDCleaning(
+				"node_1",
+				Field{Code: "value", CanonicalType: test.canonical, Nullable: true},
+				test.operations,
+			)
+			if err != nil {
+				t.Fatalf("apply cleaning: %v", err)
+			}
+			if nullable || expression.Type != "COALESCE" ||
+				len(expression.Arguments) != 2 ||
+				!reflect.DeepEqual(expression.Arguments[1].Value, test.want) {
+				t.Fatalf("expression=%+v nullable=%v", expression, nullable)
+			}
+		})
+	}
+}
+
+func TestMandatoryDWDFieldCleaningUsesDefaultsWithoutFillingMeasuresOrTime(t *testing.T) {
+	tests := []struct {
+		name  string
+		field dwdPlanningField
+		want  []string
+	}{
+		{name: "text dimension", field: dwdPlanningField{CanonicalType: "STRING", Role: "DIMENSION", Nullable: true}, want: []string{"TRIM", "COALESCE_DEFAULT"}},
+		{name: "date attribute", field: dwdPlanningField{CanonicalType: "DATE", Role: "ATTRIBUTE", Nullable: true}, want: []string{"CAST_DATE", "COALESCE_DEFAULT"}},
+		{name: "numeric dimension", field: dwdPlanningField{CanonicalType: "DECIMAL", Role: "DIMENSION", Nullable: true}, want: []string{"COALESCE_DEFAULT"}},
+		{name: "boolean attribute", field: dwdPlanningField{CanonicalType: "BOOLEAN", Role: "ATTRIBUTE", Nullable: true}, want: []string{"COALESCE_DEFAULT"}},
+		{name: "date time", field: dwdPlanningField{CanonicalType: "DATE", Role: "TIME", Nullable: true}, want: []string{"CAST_DATE"}},
+		{name: "numeric measure", field: dwdPlanningField{CanonicalType: "DECIMAL", Role: "MEASURE", Nullable: true}, want: []string{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := mandatoryDWDFieldCleaning(test.field, nil); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("cleaning=%v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
@@ -1409,11 +1477,11 @@ func TestCompleteMandatoryDWDPolicyCleaningDoesNotPlanJoinsOrFields(t *testing.T
 			plan.Outputs[0].Fields[index].Cleaning = []string{}
 		case "amount":
 			plan.Outputs[0].Fields[index].Cleaning = []string{
-				"TRIM", "COALESCE_UNKNOWN",
+				"TRIM", "COALESCE_DEFAULT",
 			}
 		case "order_date":
 			plan.Outputs[0].Fields[index].Cleaning = []string{
-				"TRIM", "COALESCE_UNKNOWN",
+				"TRIM", "COALESCE_DEFAULT",
 			}
 		}
 	}
@@ -1423,7 +1491,7 @@ func TestCompleteMandatoryDWDPolicyCleaningDoesNotPlanJoinsOrFields(t *testing.T
 		t.Fatal("mandatory cleaning completion changed the LLM graph design")
 	}
 	customerID := completed.Outputs[0].Fields[0]
-	if strings.Join(customerID.Cleaning, ",") != "TRIM,COALESCE_UNKNOWN" {
+	if strings.Join(customerID.Cleaning, ",") != "TRIM,COALESCE_DEFAULT" {
 		t.Fatalf("mandatory customer cleaning = %#v", customerID.Cleaning)
 	}
 	for _, field := range completed.Outputs[0].Fields {
@@ -1530,7 +1598,7 @@ func validDWDPlanningFixture() (
 					SourceDatasetVersionID: factVersionID, SourceFieldCode: "customer_id",
 					OutputCode: "customer_id", OutputName: "客户编号",
 					OutputDescription: "清洗后的客户关联编号", Role: "IDENTIFIER",
-					Cleaning: []string{"TRIM", "COALESCE_UNKNOWN"},
+					Cleaning: []string{"TRIM", "COALESCE_DEFAULT"},
 				},
 				{
 					SourceDatasetVersionID: factVersionID, SourceFieldCode: "order_date",
@@ -1555,7 +1623,7 @@ func validDWDPlanningFixture() (
 					SourceDatasetVersionID: dimensionVersionID, SourceFieldCode: "customer_name",
 					OutputCode: "customer_name", OutputName: "客户名称",
 					OutputDescription: "由客户主数据扩充", Role: "ATTRIBUTE",
-					Cleaning: []string{"TRIM", "COALESCE_UNKNOWN"},
+					Cleaning: []string{"TRIM", "COALESCE_DEFAULT"},
 					Processing: []dwdLLMProcessingStep{
 						{Operation: "UPPER", Arguments: []string{}},
 					},

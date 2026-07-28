@@ -89,7 +89,9 @@ func TestODSResolverRoutesDatabaseSourceToExactConnector(t *testing.T) {
 			claim, plan := odsStagePlan(materialization.InputSourceTable)
 			plan.source.Type = test.sourceType
 
-			result, err := resolver.stage(context.Background(), claim, plan)
+			result, err := resolver.stage(
+				context.Background(), claim, plan, odsPreviewRows, true,
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -102,7 +104,7 @@ func TestODSResolverRoutesDatabaseSourceToExactConnector(t *testing.T) {
 			}
 			if selected.input.Source.ConfigVersionID != plan.input.DataSourceVersionID ||
 				selected.input.Scan.Dialect != test.wantDialect ||
-				selected.input.Scan.MaxRows != warehouse.MaxODSRows ||
+				selected.input.Scan.MaxRows != odsPreviewRows ||
 				selected.input.Scan.Table.Name != "orders" ||
 				selected.input.Scan.Table.Schema != "sales" ||
 				selected.input.BatchSize != odsStageBatchSize {
@@ -122,7 +124,9 @@ func TestODSResolverRoutesPublishedFileVersionToFileStager(t *testing.T) {
 	resolver := NewODSResolver(nil, nil, nil, file)
 	claim, plan := odsStagePlan(materialization.InputFileVersion)
 
-	result, err := resolver.stage(context.Background(), claim, plan)
+	result, err := resolver.stage(
+		context.Background(), claim, plan, odsPreviewRows, true,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +136,8 @@ func TestODSResolverRoutesPublishedFileVersionToFileStager(t *testing.T) {
 		file.input.ExpectedFileAssetID != plan.fileAssetID ||
 		file.input.ExpectedSHA256 != plan.fileSHA256 ||
 		file.input.TableName != "Orders" ||
-		file.input.MaxRows != warehouse.MaxODSRows ||
+		file.input.MaxRows != odsPreviewRows ||
+		!file.input.AllowTruncate ||
 		result.RowCount != 2 {
 		t.Fatalf("calls=%d input=%#v result=%#v", file.calls, file.input, result)
 	}
@@ -142,7 +147,9 @@ func TestODSResolverConvertsStagingFailuresToStableExecutionErrors(t *testing.T)
 	mysql := &recordingDatabaseStager{err: errors.New("remote connection failed")}
 	resolver := NewODSResolver(nil, mysql, nil, nil)
 	claim, plan := odsStagePlan(materialization.InputSourceTable)
-	_, stageErr := resolver.stage(context.Background(), claim, plan)
+	_, stageErr := resolver.stage(
+		context.Background(), claim, plan, odsPreviewRows, true,
+	)
 	err := mapODSStageError(context.Background(), context.Background(), stageErr)
 	var execution *ExecutionError
 	if !errors.As(err, &execution) || execution.Code != CodeODSStagingFailed {
@@ -150,7 +157,9 @@ func TestODSResolverConvertsStagingFailuresToStableExecutionErrors(t *testing.T)
 	}
 
 	plan.source.Type = datasource.TypeOracle
-	_, err = resolver.stage(context.Background(), claim, plan)
+	_, err = resolver.stage(
+		context.Background(), claim, plan, odsPreviewRows, true,
+	)
 	if !errors.As(err, &execution) ||
 		execution.Code != CodeODSSourceStagingNotConfigured {
 		t.Fatalf("error=%v", err)
@@ -169,7 +178,9 @@ func TestODSResolverPropagatesLeaseCancellationIntoSourceStager(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := resolver.stage(ctx, claim, plan)
+		_, err := resolver.stage(
+			ctx, claim, plan, odsPreviewRows, true,
+		)
 		done <- err
 	}()
 	<-started
@@ -179,7 +190,7 @@ func TestODSResolverPropagatesLeaseCancellationIntoSourceStager(t *testing.T) {
 	}
 }
 
-func TestCompositeResolverSeparatesODSAndPostgresLayers(t *testing.T) {
+func TestCompositeResolverRejectsODSBuildsAndRoutesWarehouseLayers(t *testing.T) {
 	odsCalls, postgresCalls := 0, 0
 	ods := resolverFunc(func(context.Context, materialization.Claim) (ResolvedBuild, error) {
 		odsCalls++
@@ -193,13 +204,16 @@ func TestCompositeResolverSeparatesODSAndPostgresLayers(t *testing.T) {
 	claim := testDWDClaim()
 	claim.Layer = materialization.LayerODS
 	result, err := resolver.Resolve(context.Background(), claim)
-	if err != nil || result.VersionNo != 1 {
+	var execution *ExecutionError
+	if !errors.As(err, &execution) ||
+		execution.Code != CodeODSUnsupported ||
+		result.VersionNo != 0 {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
 	claim.Layer = materialization.LayerDWS
 	result, err = resolver.Resolve(context.Background(), claim)
 	if err != nil || result.VersionNo != 2 ||
-		odsCalls != 1 || postgresCalls != 1 {
+		odsCalls != 0 || postgresCalls != 1 {
 		t.Fatalf(
 			"result=%#v err=%v ods=%d postgres=%d",
 			result, err, odsCalls, postgresCalls,

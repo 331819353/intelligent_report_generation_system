@@ -2,6 +2,9 @@ package excel
 
 import (
 	"bytes"
+	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,5 +103,93 @@ func TestReadXLSXSheetsFormulaDateAndLimits(t *testing.T) {
 	}
 	if _, err := Read("sample.xlsx", bytes.NewReader(buf.Bytes()), limits.MaxFileBytes+1, limits); err == nil {
 		t.Fatal("file limit was not enforced")
+	}
+}
+
+func TestReadXLSXPreviewDoesNotExpandOversizedWorksheetTail(t *testing.T) {
+	f := excelize.NewFile()
+	defer f.Close()
+	_ = f.SetCellValue("Sheet1", "A1", "编号")
+	_ = f.SetCellValue("Sheet1", "B1", "名称")
+	for row := 2; row <= 2500; row++ {
+		_ = f.SetCellInt("Sheet1", "A"+fmt.Sprint(row), int64(row-1))
+		_ = f.SetCellValue(
+			"Sheet1", "B"+fmt.Sprint(row), strings.Repeat("样本", 16),
+		)
+	}
+	var buf bytes.Buffer
+	if err := f.Write(&buf); err != nil {
+		t.Fatal(err)
+	}
+	limits := DefaultLimits()
+	limits.MaxFileBytes = int64(buf.Len()) + 1
+	limits.UnzipBytes = 64 << 10
+	limits.WorksheetMemoryBytes = 32 << 10
+	if _, err := Read(
+		"sample.xlsx", bytes.NewReader(buf.Bytes()), int64(buf.Len()), limits,
+	); err == nil {
+		t.Fatal("full read should reject the expanded worksheet")
+	}
+	book, err := ReadPreviewWithOptions(
+		"sample.xlsx",
+		buf.Bytes(),
+		int64(buf.Len()),
+		limits,
+		DefaultCSVOptions(),
+		3,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(book.Sheets) != 1 || len(book.Sheets[0].Rows) != 3 {
+		t.Fatalf("unexpected preview workbook: %#v", book)
+	}
+	if got := book.Sheets[0].Rows[2][0]; got != "2" {
+		t.Fatalf("last preview value=%q, want 2", got)
+	}
+}
+
+func TestStreamSheetRowsReadsLargeWorksheetWithoutWorkbookAccumulation(t *testing.T) {
+	file := excelize.NewFile()
+	defer file.Close()
+	_ = file.SetCellValue("Sheet1", "A1", "编号")
+	_ = file.SetCellValue("Sheet1", "B1", "单价值(分析)")
+	for row := 2; row <= 2500; row++ {
+		_ = file.SetCellInt("Sheet1", "A"+fmt.Sprint(row), int64(row-1))
+		_ = file.SetCellValue("Sheet1", "B"+fmt.Sprint(row), "正常")
+	}
+	var buffer bytes.Buffer
+	if err := file.Write(&buffer); err != nil {
+		t.Fatal(err)
+	}
+	expanded, err := XLSXExpandedSize(buffer.Bytes())
+	if err != nil || expanded <= int64(buffer.Len()) {
+		t.Fatalf("expanded=%d compressed=%d err=%v", expanded, buffer.Len(), err)
+	}
+	limits := DefaultLimits()
+	limits.MaxFileBytes = int64(buffer.Len()) + 1
+	limits.MaxRows = 2500
+	limits.UnzipBytes = expanded
+	limits.WorksheetMemoryBytes = 32 << 10
+	rows := 0
+	err = StreamSheetRows(
+		context.Background(),
+		"sample.xlsx",
+		buffer.Bytes(),
+		int64(buffer.Len()),
+		limits,
+		DefaultCSVOptions(),
+		"Sheet1",
+		2500,
+		func(row []string) error {
+			rows++
+			if rows == 1 && (len(row) != 2 || row[1] != "单价值(分析)") {
+				t.Fatalf("header=%#v", row)
+			}
+			return nil
+		},
+	)
+	if err != nil || rows != 2500 {
+		t.Fatalf("rows=%d err=%v", rows, err)
 	}
 }

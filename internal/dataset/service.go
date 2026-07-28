@@ -39,11 +39,27 @@ type PublicationValidator interface {
 	ValidatePublication(context.Context, string, string, PublicationCandidate) (PreviewResult, error)
 }
 
+// SemanticNamer performs save-time semantic naming for DWD/DWS/ADS drafts. The
+// implementation may read governed metadata and call an LLM, but may only
+// return a rewritten logical descriptor/field vocabulary and controlled tags.
+type SemanticNamer interface {
+	Configured() bool
+	Enrich(context.Context, string, string, string, Document, bool) (SemanticNamingResult, error)
+}
+
+type SemanticNamingResult struct {
+	Document      Document
+	AIRequestID   string
+	PromptVersion string
+	Tags          []SemanticTagSuggestion
+}
+
 // Service 编排 DSL 校验、草稿持久化、发布试跑和不可变版本管理。
 type Service struct {
-	store      Store
-	validator  PublicationValidator
-	llmTrigger LLMTriggerStore
+	store         Store
+	validator     PublicationValidator
+	llmTrigger    LLMTriggerStore
+	semanticNamer SemanticNamer
 }
 
 // NewService 创建数据集领域服务。
@@ -57,6 +73,10 @@ func NewService(store Store, validators ...PublicationValidator) *Service {
 
 // SetPublicationValidator 在 API 依赖完成装配后注册查询运行时，避免领域层依赖具体执行器。
 func (s *Service) SetPublicationValidator(validator PublicationValidator) { s.validator = validator }
+
+// SetSemanticNamer registers the mandatory production save-time naming path
+// for DWD/DWS/ADS. Tests and non-API internal services may leave it unset.
+func (s *Service) SetSemanticNamer(namer SemanticNamer) { s.semanticNamer = namer }
 
 // Validate 仅校验 DSL 并返回规范结构和逻辑计划，不产生持久化副作用。
 func (s *Service) Validate(raw []byte) (Prepared, error) { return Prepare(raw) }
@@ -87,6 +107,18 @@ func (s *Service) Create(ctx context.Context, tenantID, actorID string, input Cr
 	} else if input.Layer != prepared.Document.Dataset.Layer {
 		return Record{}, fmt.Errorf("%w: layer must match DSL dataset layer", ErrInvalidDocument)
 	}
+	prepared, err = s.applySemanticNaming(
+		ctx, tenantID, actorID, input.Code, prepared, false,
+	)
+	if err != nil {
+		return Record{}, err
+	}
+	input.Code = prepared.Document.Dataset.Code
+	input.Name = prepared.Document.Dataset.Name
+	input.Description = prepared.Document.Dataset.Description
+	input.Type = prepared.Document.Dataset.Type
+	input.Layer = prepared.Document.Dataset.Layer
+	input.DSL = prepared.DSLJSON
 	return s.store.Create(ctx, tenantID, actorID, input, prepared)
 }
 
@@ -151,9 +183,62 @@ func (s *Service) Update(ctx context.Context, tenantID, actorID, id string, inpu
 			)
 		}
 	}
+	prepared, err = s.applySemanticNaming(
+		ctx, tenantID, actorID, id, prepared, true,
+	)
+	if err != nil {
+		return Record{}, err
+	}
+	input.Name = prepared.Document.Dataset.Name
+	input.Description = prepared.Document.Dataset.Description
+	input.DSL = prepared.DSLJSON
 	// 数据集类型由当前草稿引用的数据源数量派生。设计器增删跨源节点时会在
 	// SINGLE_SOURCE 与 CROSS_SOURCE 之间切换，不能把这个派生属性当作不可变编码。
 	return s.store.Update(ctx, tenantID, actorID, id, input, prepared)
+}
+
+func (s *Service) applySemanticNaming(
+	ctx context.Context,
+	tenantID, actorID, resourceID string,
+	prepared Prepared,
+	lockDatasetCode bool,
+) (Prepared, error) {
+	layer := prepared.Document.Dataset.Layer
+	if layer != LayerDWD && layer != LayerDWS && layer != LayerADS {
+		return prepared, nil
+	}
+	if s.semanticNamer == nil {
+		// Internal services and unit tests that do not assemble an AI provider
+		// retain the historical behavior. The production API always registers
+		// this dependency and therefore fails closed when it is unavailable.
+		return prepared, nil
+	}
+	if !s.semanticNamer.Configured() {
+		return Prepared{}, ErrSemanticNamingUnavailable
+	}
+	result, err := s.semanticNamer.Enrich(
+		ctx, tenantID, actorID, resourceID, prepared.Document, lockDatasetCode,
+	)
+	if err != nil {
+		return Prepared{}, err
+	}
+	raw, err := json.Marshal(result.Document)
+	if err != nil {
+		return Prepared{}, fmt.Errorf("%w: semantic document encoding failed", ErrSemanticNamingInvalid)
+	}
+	enriched, err := Prepare(raw)
+	if err != nil {
+		return Prepared{}, fmt.Errorf("%w: %v", ErrSemanticNamingInvalid, err)
+	}
+	if enriched.Document.Dataset.Layer != layer ||
+		enriched.Document.Dataset.Type != prepared.Document.Dataset.Type {
+		return Prepared{}, fmt.Errorf("%w: dataset identity changed", ErrSemanticNamingInvalid)
+	}
+	enriched.SemanticNaming = &SemanticNamingEvidence{
+		AIRequestID: result.AIRequestID, PromptVersion: result.PromptVersion,
+		Tags: append([]SemanticTagSuggestion(nil), result.Tags...),
+	}
+	return enriched, nil
 }
 
 // Disable 把数据集切换为可恢复的目录级停用状态；草稿和发布快照均保持不变。

@@ -38,13 +38,52 @@ Schema 负责结构和基础类型校验；服务端领域校验额外检查标�
 - 参数值只能通过 `PARAM_REF` 引用；表达式不接受 SQL 片段。
 - 表达式型 `sourceFilters` 必须是布尔谓词，只能引用所属节点字段且不能包含聚合；跨节点过滤在 Join 后执行。
 - 日期格式化使用独立的 `DATE_FORMAT` 表达式并返回字符串：`YEAR` 输出 `YYYY`、`MONTH` 输出 `YYYYMM`、`QUARTER` 输出 `YYYYQn`、`DAY` 输出 `YYYYMMDD`。`DATE_TRUNC` 仍只表示日期截断，供分组粒度使用；两种语义不得混用。
-- 数值处理支持 `ROUND`、`ABS`、`FLOOR`、`CEIL` 及四则运算；条件映射支持 `CONTAINS`、`NOT_CONTAINS` 和 `IN(left, ARRAY(...))`，其中数组元素可以是安全绑定的字面量或白名单字段引用，数据库与文件执行器保持一致。空值填充使用 `COALESCE(输入字段, 固定值或补值字段)`，默认不要求第二字段。
+- 日期计算使用 `CURRENT_DATE`、`DATE_DIFF`、`DATE_EXTRACT`、`DATE_START` 和 `DATE_END`。`CURRENT_DATE` 是无参数结构化表达式：保存和组装查询时不得替换成日期字面量，数据库执行路径分别编译为 MySQL `CURRENT_DATE()`、Oracle `TRUNC(CURRENT_DATE)`、PostgreSQL `CURRENT_DATE`。`DATE_DIFF` 的开始、结束日期都可独立选择字段或 `CURRENT_DATE`，并固定按“结束日期 - 开始日期”返回自然年/月/日差；`DATE_EXTRACT` 支持年、季度、月、ISO 周、日、星期和年内第几天；周期首末日支持周、月、季度和年，其中 ISO 周从周一开始。所有日期计算对 NULL 输入返回 NULL。
+- 字段处理组件必须正式写入顶层 `transforms[]`，不能只存在于 `designer.transforms[]`。每项包含 `id / name / family / componentType / input / rules`；每条规则包含稳定输入输出身份和结构化 `expression`。例如日期计算组件保存为 `componentType: "DATE_CALCULATION"`，并在逻辑计划中生成 `TRANSFORM_DATE_CALCULATION` 步骤。
+- 数值处理支持 `ROUND`、`ABS`、`FLOOR`、`CEIL` 及四则运算；条件映射支持 `CONTAINS`、`NOT_CONTAINS` 和 `IN(left, ARRAY(...))`，其中数组元素可以是安全绑定的字面量或白名单字段引用，命中/未命中分支可输出字面量或 `CURRENT_DATE`。空值填充使用 `COALESCE(输入字段, 固定值/补值字段/CURRENT_DATE)`；三种路径都保存结构化表达式，数据库与文件执行器保持一致。
 - 文本表达式支持 `SUBSTRING`、`TRIM`、`UPPER`、`LOWER` 和 `REPLACE`。`SUBSTRING` 的位置从 1 开始并按 Unicode 字符计数，长度必须是非负整数；超出末尾返回剩余文本，起始位置越界返回空字符串。`REPLACE` 替换全部普通文本匹配，查找文本不能为空；这些参数均为受控字面量并在数据库查询中绑定，不拼接为 SQL。
+- 窗口计算使用顶层 `WINDOW` 表达式，`function` 允许 `ROW_NUMBER / RANK / DENSE_RANK / SUM / AVG / COUNT / MIN / MAX`，并要求非空的 `partitionBy[]` 与有序 `orderBy[]`；组内聚合还必须提供 `argument`。每个排序项只接受结构化表达式及 `ASC / DESC`，数据库安全编译为 `OVER (PARTITION BY … ORDER BY …)`，文件执行器采用相同的分区、排序、并列排名和组内聚合语义；过滤、关联前分组和嵌套表达式不得包含窗口函数。
 - 上述文本表达式对 `NULL` 输入统一返回 `NULL`；MySQL、Oracle、Excel/CSV 文件执行器使用同一结构化表达式，数据库分别安全编译为方言函数，文件路径按平台规范语义求值。
 - 关联前 `preAggregations.groupBy/metrics` 可以通过可选 `expression` 先计算字段处理产物，再分别执行分组或聚合；`field` 是派生表对下游公开的安全别名。表达式只能引用该预聚合所属节点且必须落在节点 projection 白名单内，不能嵌套聚合或跨分支取字段。未提供 `expression` 时保持原有物理字段语义，兼容既有 DSL。
-- `outputGrain.description` 和至少一个 `keyFields` 必填，键引用字段编码。
+- `outputGrain.description` 必填。DIM/DWS/ADS 至少需要一个引用输出字段编码的
+  `keyFields`；ODS 以及保持源行粒度、且上游明确未声明业务主键的 DWD 可以保留空数组，
+  不能用首列或任意标识字段猜测唯一键。
 - TABLE 节点保存时校验数据源和表资产属于当前租户；Excel/CSV 节点必须通过 `fileVersionId` 固定不可变文件版本后才可执行预览。
 - 默认查询超时 5 秒、预览 500 行、正式结果 10000 行；服务端同时设定硬上限。
+
+日期计算组件在 DSL 中的结构示例：
+
+```json
+{
+  "transforms": [
+    {
+      "id": "transform_date_calc",
+      "name": "日期计算 1",
+      "family": "DATE",
+      "componentType": "DATE_CALCULATION",
+      "input": { "kind": "NODE", "id": "orders" },
+      "rules": [
+        {
+          "id": "extract_year",
+          "operation": "DATE_EXTRACT",
+          "inputKeys": ["orders.order_date"],
+          "output": {
+            "id": "order_year",
+            "name": "订单年份",
+            "code": "order_year",
+            "canonicalType": "INTEGER"
+          },
+          "expression": {
+            "type": "DATE_EXTRACT",
+            "unit": "YEAR",
+            "argument": { "type": "FIELD_REF", "nodeId": "orders", "field": "order_date" }
+          }
+        }
+      ]
+    }
+  ]
+}
+```
 
 ## 数据库存储
 
@@ -60,6 +99,6 @@ Schema 负责结构和基础类型校验；服务端领域校验额外检查标�
 
 发布前重新执行 DSL 规范化、派生哈希、物理资产、固定文件版本、全部启用行列策略、人工 Join 确认和最小查询试跑。跨源执行器根据受限节点输入返回基数和扇出风险；单数据源 MySQL/Oracle 为每条等值 Join 在源数据库内按键分组，只返回两侧重复键组数、最大重复度和双侧重复键组数，不返回业务键值。探测会应用节点源过滤和可证明只引用单节点的聚合前过滤；跨节点过滤尚不参与两侧基础键集合裁剪，因此结果是保守上界。非等值 Join 当前返回稳定操作符路径并失败关闭。必填且没有默认值的参数由发布请求显式提供，只参与类型校验、受控查询和不可逆摘要，不进入发布版本、幂等响应或错误正文。校验失败使用稳定 `path/code/reason` 指向 DSL 位置，并且不创建半份版本或移动发布指针。
 
-严格 DIM/DWD/DWS/ADS 的 `DATASET` 节点不递归重放上游 DAG。发布试跑、草稿预览和精确版本预览会逐节点解析 DSL 中固定的 `datasetVersionId`，并要求它仍是合法上游层级的当前 `PUBLISHED` 版本，且存在同一精确版本、schema hash 一致的当前 `ACTIVE` PostgreSQL 物化。执行器只读取服务端解析出的 `warehouse_published` 稳定视图；缺少物化、指针漂移、版本失效、层级不符、稳定视图异常或 SELECT 权限不足都会失败关闭，不会改读草稿、其他发布版本或源表。
+严格 DIM/DWD/DWS/ADS 的 `DATASET` 节点只按层级解析服务端可信输入。DIM/DWD 的 ODS 节点要求固定版本仍是当前 `PUBLISHED`，随后展开为该 ODS 合同中的精确物理来源；交互预览对每个来源最多采样 100 行后执行目标 DAG，正式构建则全量回源、投影 ODS 字段合同并把结果首次落入数仓。DWD 的 DIM 上游以及 DWS/ADS 的上游不递归重放 DAG，必须存在同一精确版本、schema hash 一致的当前 `ACTIVE` PostgreSQL 物化，执行器只读取服务端解析出的 `warehouse_published` 稳定视图。指针漂移、版本失效、来源摘要变化、层级不符、物化或稳定视图异常都会失败关闭，不会改读草稿或其他发布版本。
 
-运行时不会保存或信任客户端 SQL。MySQL/Oracle 由 T0303 安全编译器生成参数化只读查询；Excel/CSV 按固定文件版本在受限内存执行器中解释同一 DSL；跨源实时预览按节点裁剪并读取后在网关执行等值 Join；严格 DIM/DWD/DWS/ADS 则由 PostgreSQL 方言编译器从同一结构化 DSL 生成参数化查询。PostgreSQL 执行事务会再次锁定并复核精确版本、当前发布指针、ACTIVE 物化、摘要、稳定视图和读取权限。发布试跑的 Join 风险探测与最终查询共用超时、取消和审计生命周期，风险告警不包含实际业务键。各路径统一执行参数规范化、行列权限、结果上限和不含明文的查询审计；PostgreSQL 路径另保存本次实际使用的精确 materialization ID 与摘要。
+运行时不会保存或信任客户端 SQL。MySQL/Oracle 由 T0303 安全编译器生成参数化只读查询；Excel/CSV 按固定文件版本在受限执行器中解释同一 DSL；ODS 与 DIM/DWD 的来源预览按节点裁剪、每源最多读取 100 行，并在网关执行受控 DAG。DWD/DIM 正式构建的来源阶段全量抽取，目标加工以及 DWS/ADS 执行由 PostgreSQL 方言编译器从同一结构化 DSL 生成参数化查询。PostgreSQL 执行事务会再次锁定并复核精确版本、当前发布指针、ACTIVE 物化、摘要、稳定视图和读取权限。发布试跑的 Join 风险探测与最终查询共用超时、取消和审计生命周期，风险告警不包含实际业务键。各路径统一执行参数规范化、行列权限、结果上限和不含明文的查询审计；PostgreSQL 路径另保存本次实际使用的精确 materialization ID 与摘要。

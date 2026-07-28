@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { datasetAIPlanFromEditor, datasetAIRequestContext, materializeDatasetAIPlan, type DatasetAIGraphPlan } from './dataset-ai'
+import { datasetAIPlanFromEditor, datasetAIRequestContext, materializeDatasetAIPlan, requestDatasetAIProposal, type DatasetAIGraphPlan, type DatasetAIProgressEvent } from './dataset-ai'
 import { buildDatasetDSL, type AssetColumn, type AssetTable, type DatasetDraft } from './datasets'
 
 const orders: AssetTable = { id: 'orders-table', dataSourceId: 'source-1', dataSourceName: '销售库', dataSourceType: 'MYSQL', tableName: 'orders', schemaName: 'sales', businessName: '订单表', columnCount: 3 }
@@ -59,6 +59,42 @@ const planWithGroupsBeforeAndAfterJoin = (): DatasetAIGraphPlan => {
 }
 
 describe('dataset AI editor conversion', () => {
+  it('consumes server-generated NDJSON progress before the final proposal', async () => {
+    const current = plan()
+    const proposal = {
+      schemaVersion: '2.4' as const,
+      mode: 'MODIFY' as const,
+      summary: '保留当前未保存画布',
+      assumptions: [],
+      warnings: [],
+      changeSet: { operations: [], fieldChanges: [] },
+      plan: current,
+    }
+    const frames = [
+      { type: 'progress', progress: { timestamp: '2026-07-27T09:00:00Z', stage: 'CONTEXT', status: 'SUCCEEDED', message: '已读取当前未保存画布：2 个数据节点、2 个流程组件' } },
+      { type: 'progress', progress: { timestamp: '2026-07-27T09:00:01Z', stage: 'PLANNER', status: 'RUNNING', message: '正在调用模型生成结构化 DAG 候选方案' } },
+      { type: 'result', result: { requestId: 'stream-request-1', proposal } },
+    ].map(frame => JSON.stringify(frame)).join('\n') + '\n'
+    const fetchMock = vi.fn().mockResolvedValue(new Response(frames, {
+      status: 200,
+      headers: { 'Content-Type': 'application/x-ndjson' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const progress: DatasetAIProgressEvent[] = []
+    try {
+      const result = await requestDatasetAIProposal(undefined, '调整当前流程', current, undefined, event => progress.push(event))
+      expect(result).toEqual({ requestId: 'stream-request-1', proposal })
+      expect(progress.map(event => event.stage)).toEqual(['CONTEXT', 'PLANNER'])
+      expect(progress[0].message).toContain('当前未保存画布')
+      expect(fetchMock).toHaveBeenCalledWith('/api/v1/datasets/ai/proposals', expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Accept: 'application/x-ndjson' }),
+      }))
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('omits current context for the first request on a blank new canvas', () => {
     expect(datasetAIPlanFromEditor(empty, { version: '1.0', nodePositions: {}, nodeNames: {}, joins: [], groups: [], transforms: [] }, { name: '', description: '' })).toBeUndefined()
   })

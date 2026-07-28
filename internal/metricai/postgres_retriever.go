@@ -546,6 +546,16 @@ func datasetExpressionAggregated(expression dataset.Expression) bool {
 			return true
 		}
 	}
+	for _, child := range expression.PartitionBy {
+		if datasetExpressionAggregated(child) {
+			return true
+		}
+	}
+	for _, item := range expression.OrderBy {
+		if datasetExpressionAggregated(item.Expression) {
+			return true
+		}
+	}
 	return false
 }
 

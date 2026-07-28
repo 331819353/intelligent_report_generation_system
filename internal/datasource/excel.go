@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"intelligent-report-generation-system/internal/fieldtype"
 	spikeexcel "intelligent-report-generation-system/internal/spike/excel"
 )
 
@@ -45,7 +46,21 @@ type FileTableData struct {
 	Rows    [][]string
 }
 
-const excelStructureSampleRows = 10
+// FileTableStreamBatch carries an immutable header contract and a bounded group
+// of source rows into warehouse staging.
+type FileTableStreamBatch struct {
+	Columns []string
+	Rows    [][]string
+}
+
+type FileTableStreamSummary struct {
+	RowCount int
+}
+
+const (
+	excelStructureSampleRows     = 10
+	excelControlPlanePreviewRows = excelStructureSampleRows * 2
+)
 
 // ExcelWorkbookInspection is produced in the explicit "add tables" step. Sample rows are never
 // persisted in workbook_summary; the saved version retains only the deterministic parse plan.
@@ -95,13 +110,6 @@ func (m *ExcelManager) Upload(ctx context.Context, tenantID, assetID, filename, 
 	if size <= 0 || size > quota.MaxExcelFileBytes {
 		return FileAsset{}, errors.New("excel file size exceeds tenant quota")
 	}
-	data, err := io.ReadAll(io.LimitReader(input, quota.MaxExcelFileBytes+1))
-	if err != nil {
-		return FileAsset{}, err
-	}
-	if int64(len(data)) != size || int64(len(data)) > quota.MaxExcelFileBytes {
-		return FileAsset{}, errors.New("excel file size is invalid")
-	}
 	switch strings.ToLower(filepath.Ext(filename)) {
 	case ".xlsx", ".xls", ".csv":
 	default:
@@ -128,11 +136,24 @@ func (m *ExcelManager) Upload(ctx context.Context, tenantID, assetID, filename, 
 	key := fmt.Sprintf("%s/%s/v%d/%s/%s", tenantID, assetID, version, versionID, filepath.Base(filename))
 	// 先写对象再登记版本；数据库失败时删除孤立对象以保持一致性。控制库提交后，
 	// 对象键包含 versionID，后续版本不会覆盖这份不可变内容。
-	if err := m.storage.Put(ctx, m.bucket, key, bytes.NewReader(data), size, mimeType); err != nil {
+	hasher := sha256.New()
+	limited := &io.LimitedReader{R: input, N: size + 1}
+	if err := m.storage.Put(
+		ctx,
+		m.bucket,
+		key,
+		io.TeeReader(io.LimitReader(limited, size), hasher),
+		size,
+		mimeType,
+	); err != nil {
 		return FileAsset{}, err
 	}
-	sum := sha256.Sum256(data)
-	asset := FileAsset{ID: assetID, TenantID: tenantID, Filename: filename, MimeType: mimeType, CurrentVersion: version, Version: version, VersionID: versionID, SizeBytes: size, SHA256: hex.EncodeToString(sum[:]), WorkbookSummary: map[string]any{"inspectionStatus": "PENDING"}}
+	var trailing [1]byte
+	if count, readErr := limited.Read(trailing[:]); count != 0 || (readErr != nil && !errors.Is(readErr, io.EOF)) {
+		_ = m.storage.Delete(ctx, m.bucket, key)
+		return FileAsset{}, errors.New("excel file size is invalid")
+	}
+	asset := FileAsset{ID: assetID, TenantID: tenantID, Filename: filename, MimeType: mimeType, CurrentVersion: version, Version: version, VersionID: versionID, SizeBytes: size, SHA256: hex.EncodeToString(hasher.Sum(nil)), WorkbookSummary: map[string]any{"inspectionStatus": "PENDING"}}
 	if err := m.repo.SaveFileVersion(ctx, asset, m.bucket, key, config); err != nil {
 		_ = m.storage.Delete(ctx, m.bucket, key)
 		return FileAsset{}, err
@@ -182,7 +203,14 @@ func (m *ExcelManager) inspectVersion(
 	if err != nil {
 		return ExcelWorkbookInspection{}, err
 	}
-	book, err := spikeexcel.ReadWithOptions(version.Filename, bytes.NewReader(data), version.SizeBytes, limits, csvOptions)
+	book, err := spikeexcel.ReadPreviewWithOptions(
+		version.Filename,
+		data,
+		version.SizeBytes,
+		limits,
+		csvOptions,
+		excelControlPlanePreviewRows,
+	)
 	if err != nil {
 		return ExcelWorkbookInspection{}, err
 	}
@@ -228,6 +256,91 @@ func (m *ExcelManager) ReadVersionTables(
 	)
 }
 
+// ReadVersionTablesPreview reads only the configured header and the first
+// maxRows source records from each requested worksheet. It preserves the exact
+// immutable file version but never expands the complete worksheet merely to
+// serve an ODS/DWD design-time preview.
+func (m *ExcelManager) ReadVersionTablesPreview(
+	ctx context.Context,
+	tenantID, versionID string,
+	maxFileBytes int64,
+	tableNames []string,
+	maxRows int,
+) (FileVersion, []FileTableData, error) {
+	if maxRows < 1 || maxRows > 10_000 || len(tableNames) == 0 {
+		return FileVersion{}, nil, errors.New("file preview limits are invalid")
+	}
+	version, err := m.repo.FileVersionByID(ctx, tenantID, versionID)
+	if err != nil {
+		return FileVersion{}, nil, err
+	}
+	data, err := m.readVersionBytes(ctx, version, maxFileBytes)
+	if err != nil {
+		return FileVersion{}, nil, err
+	}
+	requested := make(map[string]bool, len(tableNames))
+	maxHeaderRow := 0
+	for _, tableName := range tableNames {
+		if tableName == "" || requested[tableName] {
+			return FileVersion{}, nil, errors.New(
+				"file preview worksheet list is invalid",
+			)
+		}
+		headerRow, _, err := storedExcelSheetParseOptions(
+			version.ParseConfig, tableName,
+		)
+		if err != nil {
+			return FileVersion{}, nil, err
+		}
+		requested[tableName] = true
+		maxHeaderRow = max(maxHeaderRow, headerRow)
+	}
+	limits := spikeexcel.DefaultLimits()
+	limits.MaxFileBytes = maxFileBytes
+	csvOptions, err := parseCSVOptions(version.ParseConfig)
+	if err != nil {
+		return FileVersion{}, nil, err
+	}
+	book, err := spikeexcel.ReadPreviewWithOptions(
+		version.Filename,
+		data,
+		version.SizeBytes,
+		limits,
+		csvOptions,
+		maxHeaderRow+maxRows,
+	)
+	if err != nil {
+		return FileVersion{}, nil, err
+	}
+	tables, err := prepareFileTables(book, version.ParseConfig)
+	if err != nil {
+		return FileVersion{}, nil, err
+	}
+	result := make([]FileTableData, 0, len(requested))
+	found := map[string]bool{}
+	for _, table := range tables {
+		if !requested[table.Name] {
+			continue
+		}
+		if found[table.Name] {
+			return FileVersion{}, nil, fmt.Errorf(
+				"immutable file contains duplicate table %s", table.Name,
+			)
+		}
+		found[table.Name] = true
+		if len(table.Rows) > maxRows {
+			table.Rows = table.Rows[:maxRows]
+		}
+		result = append(result, table)
+	}
+	if len(result) != len(requested) {
+		return FileVersion{}, nil, errors.New(
+			"one or more preview worksheets are unavailable",
+		)
+	}
+	return version, result, nil
+}
+
 // ReadVersionTablesWithExpansionLimit 在不可变版本校验之外，把调用方的逻辑
 // 落库预算下传为压缩工作簿展开硬边界。普通预览仍使用解析器默认上限。
 func (m *ExcelManager) ReadVersionTablesWithExpansionLimit(
@@ -264,6 +377,290 @@ func (m *ExcelManager) ReadVersionTablesWithExpansionLimit(
 		return FileVersion{}, nil, err
 	}
 	return version, tables, nil
+}
+
+const (
+	excelMaterializationExpansionRatio = int64(8)
+	excelMaterializationMaxExpanded    = int64(2 << 30)
+)
+
+// StreamVersionTable reads an exact immutable worksheet in bounded batches.
+// The ZIP central directory must stay within both an 8x compression ratio and
+// a 2 GiB absolute expansion cap; the same cap is enforced again by Excelize.
+func (m *ExcelManager) StreamVersionTable(
+	ctx context.Context,
+	tenantID, versionID, expectedFileAssetID, expectedSHA256 string,
+	maxFileBytes int64,
+	tableName string,
+	maxRows, batchSize int,
+	allowTruncate bool,
+	consume func(FileTableStreamBatch) error,
+) (FileVersion, FileTableStreamSummary, error) {
+	if maxRows < 1 || batchSize < 1 || batchSize > 5000 || consume == nil {
+		return FileVersion{}, FileTableStreamSummary{}, errors.New(
+			"file table stream limits are invalid",
+		)
+	}
+	version, err := m.repo.FileVersionByID(ctx, tenantID, versionID)
+	if err != nil {
+		return FileVersion{}, FileTableStreamSummary{}, err
+	}
+	if version.ID != expectedFileAssetID ||
+		version.VersionID != versionID ||
+		version.SHA256 != expectedSHA256 ||
+		version.SizeBytes <= 0 ||
+		version.SizeBytes > maxFileBytes {
+		return FileVersion{}, FileTableStreamSummary{}, errors.New(
+			"immutable file identity or checksum changed",
+		)
+	}
+	data, err := m.readVersionBytes(ctx, version, maxFileBytes)
+	if err != nil {
+		return FileVersion{}, FileTableStreamSummary{}, err
+	}
+	headerRow, skipEmptyRows, err := storedExcelSheetParseOptions(
+		version.ParseConfig, tableName,
+	)
+	if err != nil {
+		return FileVersion{}, FileTableStreamSummary{}, err
+	}
+	if maxRows > int(^uint(0)>>1)-headerRow {
+		return FileVersion{}, FileTableStreamSummary{}, errors.New(
+			"file table stream row limit overflows",
+		)
+	}
+	limits := spikeexcel.DefaultLimits()
+	limits.MaxFileBytes = maxFileBytes
+	limits.MaxRows = maxRows + headerRow
+	csvOptions, err := parseCSVOptions(version.ParseConfig)
+	if err != nil {
+		return FileVersion{}, FileTableStreamSummary{}, err
+	}
+	if allowTruncate {
+		return streamVersionTablePreview(
+			ctx, version, data, limits, csvOptions, tableName,
+			headerRow, skipEmptyRows, maxRows, batchSize, consume,
+		)
+	}
+	if strings.EqualFold(filepath.Ext(version.Filename), ".xlsx") {
+		expandedBytes, err := spikeexcel.XLSXExpandedSize(data)
+		if err != nil {
+			return FileVersion{}, FileTableStreamSummary{}, err
+		}
+		expansionLimit := version.SizeBytes * excelMaterializationExpansionRatio
+		if version.SizeBytes > excelMaterializationMaxExpanded/excelMaterializationExpansionRatio ||
+			expansionLimit > excelMaterializationMaxExpanded {
+			expansionLimit = excelMaterializationMaxExpanded
+		}
+		if expandedBytes <= 0 || expandedBytes > expansionLimit {
+			return FileVersion{}, FileTableStreamSummary{}, errors.New(
+				"XLSX expansion exceeds the materialization safety limit",
+			)
+		}
+		limits.UnzipBytes = expansionLimit
+	}
+
+	prefix := make([][]string, 0, headerRow)
+	var headers []string
+	batch := make([][]string, 0, batchSize)
+	summary := FileTableStreamSummary{}
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		rows := batch
+		batch = make([][]string, 0, batchSize)
+		return consume(FileTableStreamBatch{Columns: headers, Rows: rows})
+	}
+	rawRow := 0
+	err = spikeexcel.StreamSheetRows(
+		ctx,
+		version.Filename,
+		data,
+		version.SizeBytes,
+		limits,
+		csvOptions,
+		tableName,
+		maxRows+headerRow,
+		func(row []string) error {
+			rawRow++
+			if rawRow <= headerRow {
+				prefix = append(prefix, row)
+				if rawRow == headerRow {
+					headers = sheetHeaders(
+						spikeexcel.Sheet{Name: tableName, Rows: prefix},
+						headerRow,
+					)
+					if len(headers) == 0 || emptyRow(prefix[headerRow-1]) {
+						return fmt.Errorf("sheet %s header row is empty", tableName)
+					}
+				}
+				return nil
+			}
+			if skipEmptyRows && emptyRow(row) {
+				return nil
+			}
+			if summary.RowCount >= maxRows {
+				return fmt.Errorf("sheet %s exceeds row limit", tableName)
+			}
+			summary.RowCount++
+			batch = append(batch, row)
+			if len(batch) == batchSize {
+				return flush()
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return FileVersion{}, FileTableStreamSummary{}, err
+	}
+	if len(headers) == 0 {
+		return FileVersion{}, FileTableStreamSummary{}, fmt.Errorf(
+			"sheet %s does not contain its configured header row",
+			tableName,
+		)
+	}
+	if summary.RowCount == 0 {
+		if err := consume(FileTableStreamBatch{Columns: headers, Rows: [][]string{}}); err != nil {
+			return FileVersion{}, FileTableStreamSummary{}, err
+		}
+	}
+	if err := flush(); err != nil {
+		return FileVersion{}, FileTableStreamSummary{}, err
+	}
+	return version, summary, nil
+}
+
+func streamVersionTablePreview(
+	ctx context.Context,
+	version FileVersion,
+	data []byte,
+	limits spikeexcel.Limits,
+	csvOptions spikeexcel.CSVOptions,
+	tableName string,
+	headerRow int,
+	skipEmptyRows bool,
+	maxRows int,
+	batchSize int,
+	consume func(FileTableStreamBatch) error,
+) (FileVersion, FileTableStreamSummary, error) {
+	previewRows := headerRow + maxRows
+	var (
+		book spikeexcel.Workbook
+		err  error
+	)
+	if strings.EqualFold(filepath.Ext(version.Filename), ".xlsx") {
+		book, err = spikeexcel.ReadPreviewWithOptions(
+			version.Filename,
+			data,
+			version.SizeBytes,
+			limits,
+			csvOptions,
+			previewRows,
+		)
+	} else {
+		// CSV/XLS do not have an independently compressed worksheet XML. Keep
+		// their existing bounded parser, then truncate the selected table below.
+		fallbackLimits := limits
+		fallbackLimits.MaxRows = 5_000_000
+		book, err = spikeexcel.ReadWithOptions(
+			version.Filename,
+			bytes.NewReader(data),
+			version.SizeBytes,
+			fallbackLimits,
+			csvOptions,
+		)
+	}
+	if err != nil {
+		return FileVersion{}, FileTableStreamSummary{}, err
+	}
+	var selected *spikeexcel.Sheet
+	for index := range book.Sheets {
+		if book.Sheets[index].Name == tableName {
+			if selected != nil {
+				return FileVersion{}, FileTableStreamSummary{}, fmt.Errorf(
+					"immutable file contains duplicate table %s", tableName,
+				)
+			}
+			selected = &book.Sheets[index]
+		}
+	}
+	if selected == nil {
+		return FileVersion{}, FileTableStreamSummary{}, fmt.Errorf(
+			"sheet %s was not found", tableName,
+		)
+	}
+	if len(selected.Rows) < headerRow {
+		return FileVersion{}, FileTableStreamSummary{}, fmt.Errorf(
+			"sheet %s does not contain its configured header row", tableName,
+		)
+	}
+	headers := sheetHeaders(*selected, headerRow)
+	if len(headers) == 0 || emptyRow(selected.Rows[headerRow-1]) {
+		return FileVersion{}, FileTableStreamSummary{}, fmt.Errorf(
+			"sheet %s header row is empty", tableName,
+		)
+	}
+	summary := FileTableStreamSummary{}
+	batch := make([][]string, 0, batchSize)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		rows := batch
+		batch = make([][]string, 0, batchSize)
+		return consume(FileTableStreamBatch{Columns: headers, Rows: rows})
+	}
+	for _, row := range selected.Rows[headerRow:] {
+		if err := ctx.Err(); err != nil {
+			return FileVersion{}, FileTableStreamSummary{}, err
+		}
+		if skipEmptyRows && emptyRow(row) {
+			continue
+		}
+		if summary.RowCount >= maxRows {
+			break
+		}
+		summary.RowCount++
+		batch = append(batch, row)
+		if len(batch) == batchSize {
+			if err := flush(); err != nil {
+				return FileVersion{}, FileTableStreamSummary{}, err
+			}
+		}
+	}
+	if summary.RowCount == 0 {
+		if err := consume(FileTableStreamBatch{
+			Columns: headers, Rows: [][]string{},
+		}); err != nil {
+			return FileVersion{}, FileTableStreamSummary{}, err
+		}
+	}
+	if err := flush(); err != nil {
+		return FileVersion{}, FileTableStreamSummary{}, err
+	}
+	return version, summary, nil
+}
+
+func storedExcelSheetParseOptions(
+	config map[string]any,
+	sheetName string,
+) (int, bool, error) {
+	headerRow := intConfig(config, "headerRow", 0)
+	skipEmptyRows := boolConfig(config, "skipEmptyRows", true)
+	if rawPlans, ok := config["sheetPlans"].(map[string]any); ok {
+		if rawPlan, ok := rawPlans[sheetName].(map[string]any); ok {
+			headerRow = intConfig(rawPlan, "headerRow", headerRow)
+			skipEmptyRows = boolConfig(rawPlan, "skipEmptyRows", skipEmptyRows)
+		}
+	}
+	if headerRow < 1 {
+		return 0, false, fmt.Errorf(
+			"sheet %s has no persisted parse plan",
+			sheetName,
+		)
+	}
+	return headerRow, skipEmptyRows, nil
 }
 
 func fileMaterializationReadLimits(
@@ -374,18 +771,26 @@ func (c *ExcelConnector) Sync(ctx context.Context, source Source) (SyncResult, e
 	if err != nil {
 		return SyncResult{}, err
 	}
-	body, err := c.manager.storage.Get(ctx, version.StorageBucket, version.StorageKey)
+	limits := spikeexcel.DefaultLimits()
+	limits.MaxFileBytes = source.RuntimeQuota.MaxExcelFileBytes
+	data, err := c.manager.readVersionBytes(
+		ctx, version, source.RuntimeQuota.MaxExcelFileBytes,
+	)
 	if err != nil {
 		return SyncResult{}, err
 	}
-	defer body.Close()
-	limits := spikeexcel.DefaultLimits()
-	limits.MaxFileBytes = source.RuntimeQuota.MaxExcelFileBytes
 	csvOptions, err := parseCSVOptions(version.ParseConfig)
 	if err != nil {
 		return SyncResult{}, err
 	}
-	book, err := spikeexcel.ReadWithOptions(version.Filename, body, version.SizeBytes, limits, csvOptions)
+	book, err := spikeexcel.ReadPreviewWithOptions(
+		version.Filename,
+		data,
+		version.SizeBytes,
+		limits,
+		csvOptions,
+		excelControlPlanePreviewRows,
+	)
 	if err != nil {
 		return SyncResult{}, err
 	}
@@ -406,18 +811,26 @@ func (c *ExcelConnector) Sample(ctx context.Context, source Source, table Metada
 	if err != nil {
 		return SampleResult{}, err
 	}
-	body, err := c.manager.storage.Get(ctx, version.StorageBucket, version.StorageKey)
+	limits := spikeexcel.DefaultLimits()
+	limits.MaxFileBytes = source.RuntimeQuota.MaxExcelFileBytes
+	data, err := c.manager.readVersionBytes(
+		ctx, version, source.RuntimeQuota.MaxExcelFileBytes,
+	)
 	if err != nil {
 		return SampleResult{}, err
 	}
-	defer body.Close()
-	limits := spikeexcel.DefaultLimits()
-	limits.MaxFileBytes = source.RuntimeQuota.MaxExcelFileBytes
 	csvOptions, err := parseCSVOptions(version.ParseConfig)
 	if err != nil {
 		return SampleResult{}, err
 	}
-	book, err := spikeexcel.ReadWithOptions(version.Filename, body, version.SizeBytes, limits, csvOptions)
+	book, err := spikeexcel.ReadPreviewWithOptions(
+		version.Filename,
+		data,
+		version.SizeBytes,
+		limits,
+		csvOptions,
+		excelControlPlanePreviewRows,
+	)
 	if err != nil {
 		return SampleResult{}, err
 	}
@@ -589,7 +1002,7 @@ func inspectWorkbook(book spikeexcel.Workbook, config map[string]any) ([]Metadat
 					values = append(values, value)
 				}
 			}
-			canonical := inferType(values)
+			canonical := inferColumnType(name, values)
 			if override, ok := overrides[sheet.Name+"."+name].(string); ok && validCanonical(override) {
 				canonical = override
 			}
@@ -765,6 +1178,28 @@ func sheetHeaders(sheet spikeexcel.Sheet, headerRow int) []string {
 		}
 	}
 	return deduplicateHeaders(leaf)
+}
+
+// inferColumnType keeps business codes textual even when a small preview happens
+// to contain digits only. Treating codes as integers would discard leading zeros
+// and makes a later alphanumeric code impossible to materialize.
+func inferColumnType(name string, values []string) string {
+	canonical := inferType(values)
+	if canonical != "NUMBER" {
+		return canonical
+	}
+	normalizedName := strings.ToLower(strings.TrimSpace(name))
+	if fieldtype.IsCodeLike(normalizedName) {
+		return "TEXT"
+	}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		unsigned := strings.TrimPrefix(strings.TrimPrefix(value, "+"), "-")
+		if len(unsigned) > 1 && strings.HasPrefix(unsigned, "0") {
+			return "TEXT"
+		}
+	}
+	return canonical
 }
 
 // inferType 按布尔、整数、小数、日期时间的优先级推断规范类型。

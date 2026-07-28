@@ -182,7 +182,7 @@ describe('buildDatasetDSL', () => {
       nodeNames: { orders: '订单明细', customers: '客户明细' },
       groups: [
         { id: 'group_orders', name: '订单月汇总', input: { kind: 'NODE', id: 'orders' }, position: { x: 330, y: 44 }, dimensions: [{ key: 'orders.order_date', name: '订单月份', code: 'order_month', grouping: 'MONTH' }], metrics: [{ key: 'orders.amount', name: '交易金额', code: 'sales_amount', aggregation: 'SUM' }] },
-        { id: 'group_customers', name: '客户汇总', input: { kind: 'NODE', id: 'customers' }, position: { x: 330, y: 244 }, dimensions: [{ key: 'customers.customer_id', name: '客户编号', code: 'customer_id' }], metrics: [{ key: 'customers.customer_name', name: '客户名称数', code: 'customer_name_count', aggregation: 'COUNT' }] },
+        { id: 'group_customers', name: '客户汇总', input: { kind: 'NODE', id: 'customers' }, position: { x: 330, y: 244 }, dimensions: [{ key: 'customers.customer_id', name: '客户编号', code: 'customer_id' }], metrics: [{ key: '*', outputKey: 'group_customers.metric_row_count', name: '客户总数', code: 'customer_count', aggregation: 'COUNT', countRows: true }] },
       ],
       joins: [{ id: 'join_1', name: '月度客户关联', left: { kind: 'GROUP', id: 'group_orders' }, right: { kind: 'GROUP', id: 'group_customers' }, position: { x: 630, y: 144 }, outputKeys: ['orders.order_date', 'orders.amount', 'customers.customer_id'] }],
       end: { id: 'end_1', name: '月度客户结果', input: { kind: 'JOIN', id: 'join_1' }, position: { x: 930, y: 144 }, outputs: [
@@ -196,7 +196,7 @@ describe('buildDatasetDSL', () => {
 
     expect(dsl.preAggregations).toEqual([
       { id: 'group_orders', nodeId: 'orders', joinId: 'join_1', joinSide: 'LEFT', groupBy: [{ field: 'order_date', unit: 'MONTH' }], metrics: [{ field: 'amount', function: 'SUM' }] },
-      { id: 'group_customers', nodeId: 'customers', joinId: 'join_1', joinSide: 'RIGHT', groupBy: [{ field: 'customer_id' }], metrics: [{ field: 'customer_name', function: 'COUNT' }] },
+      { id: 'group_customers', nodeId: 'customers', joinId: 'join_1', joinSide: 'RIGHT', groupBy: [{ field: 'customer_id' }], metrics: [{ field: 'customer_count', function: 'COUNT', countRows: true }] },
     ])
     expect(dsl.fields.map(field => ({ code: field.code, name: field.name, role: field.role, expression: field.expression }))).toEqual([
       { code: 'order_month', name: '月份', role: 'DIMENSION', expression: { type: 'FIELD_REF', nodeId: 'orders', field: 'order_date' } },
@@ -223,6 +223,70 @@ describe('buildDatasetDSL', () => {
     expect(dsl.groupBy).toEqual(['field_o_order_date'])
     expect(dsl.fields[0]).toMatchObject({ code: 'order_month', name: '月份', expression: { type: 'DATE_TRUNC', unit: 'MONTH' } })
     expect(dsl.fields[1]).toMatchObject({ code: 'monthly_sales', name: '成交额', role: 'MEASURE', expression: { type: 'AGGREGATE', function: 'SUM' } })
+  })
+
+  test('根分组将自定义 GROUPING SETS 映射为最终字段 ID', () => {
+    const value = draft()
+    const status: AssetColumn = {
+      ...columns[0],
+      id: 'column-status',
+      columnName: 'order_status',
+      businessName: '订单状态',
+      canonicalType: 'STRING',
+      nullable: false,
+    }
+    value.nodes[0].columns.push(status)
+    value.nodes[0].selected.push('order_status')
+    value.fields.push({ key: 'orders.order_status', role: 'ATTRIBUTE', aggregation: '', code: 'order_status', name: '订单状态' })
+    value.calculations = []
+    value.grainKeys = ['order_month', 'order_status']
+    value.designer = {
+      version: '1.0',
+      nodePositions: { orders: { x: 20, y: 40 } },
+      nodeNames: { orders: '订单' },
+      joins: [],
+      groups: [{
+        id: 'group_final',
+        name: '自定义汇总',
+        input: { kind: 'NODE', id: 'orders' },
+        position: { x: 320, y: 40 },
+        groupByMode: 'GROUPING_SETS',
+        groupingSets: [
+          ['orders.order_date', 'orders.order_status'],
+          ['orders.order_status'],
+          [],
+        ],
+        dimensions: [
+          { key: 'orders.order_date', name: '订单月份', code: 'order_month', grouping: 'MONTH' },
+          { key: 'orders.order_status', name: '订单状态', code: 'order_status' },
+        ],
+        metrics: [{ key: 'orders.amount', name: '成交额', code: 'sales_amount', aggregation: 'SUM' }],
+      }],
+      end: {
+        id: 'end_1',
+        name: '自定义汇总结果',
+        input: { kind: 'GROUP', id: 'group_final' },
+        position: { x: 620, y: 40 },
+        outputs: [
+          { key: 'orders.order_date', name: '月份', code: 'order_month' },
+          { key: 'orders.order_status', name: '状态', code: 'order_status' },
+          { key: 'orders.amount', name: '成交额', code: 'sales_amount' },
+        ],
+      },
+    }
+
+    const dsl = buildDatasetDSL(value)
+
+    expect(dsl.groupByMode).toBe('GROUPING_SETS')
+    expect(dsl.groupBy).toEqual(['field_o_order_date', 'field_o_order_status'])
+    expect(dsl.groupingSets).toEqual([
+      ['field_o_order_date', 'field_o_order_status'],
+      ['field_o_order_status'],
+      [],
+    ])
+    expect((dsl.fields as Array<Record<string, unknown>>)
+      .filter(field => field.role === 'DIMENSION')
+      .every(field => field.nullable === true)).toBe(true)
   })
 
   test('结束节点前的字段处理组件把结构化表达式写入可执行字段', () => {
@@ -259,6 +323,168 @@ describe('buildDatasetDSL', () => {
     expect(dsl.designer?.transforms).toHaveLength(2)
   })
 
+  test('日期计算以正式 transforms 组件写入 DSL，而不只保存在 designer', () => {
+    const value = draft()
+    value.calculations = []
+    value.filters = []
+    value.parameters = []
+    value.sorts = []
+    value.grainKeys = ['order_year']
+    value.designer = {
+      version: '1.0', nodePositions: { orders: { x: 20, y: 40 } }, nodeNames: { orders: '订单' }, joins: [], groups: [],
+      transforms: [{
+        id: 'transform_date_calc',
+        name: '日期计算 1',
+        family: 'DATE',
+        componentType: 'DATE_CALCULATION',
+        input: { kind: 'NODE', id: 'orders' },
+        position: { x: 320, y: 40 },
+        rules: [
+          { id: 'extract_year', operation: 'DATE_EXTRACT', inputKeys: ['orders.order_date'], unit: 'YEAR', dateSource: 'FIELD', output: { id: 'order_year', name: '订单年份', code: 'order_year', canonicalType: 'INTEGER' } },
+          { id: 'current_year_end', operation: 'DATE_END', inputKeys: [], unit: 'YEAR', dateSource: 'CURRENT_DATE', output: { id: 'current_year_end', name: '本年最后一天', code: 'current_year_end', canonicalType: 'DATE' } },
+        ],
+      }],
+      end: {
+        id: 'end_1',
+        name: '日期计算结果',
+        input: { kind: 'TRANSFORM', id: 'transform_date_calc' },
+        position: { x: 620, y: 40 },
+        outputs: [
+          { key: 'transform_date_calc.order_year', name: '订单年份', code: 'order_year' },
+          { key: 'transform_date_calc.current_year_end', name: '本年最后一天', code: 'current_year_end' },
+        ],
+      },
+    }
+
+    const dsl = buildDatasetDSL(value)
+
+    expect(dsl.transforms).toEqual([{
+      id: 'transform_date_calc',
+      name: '日期计算 1',
+      family: 'DATE',
+      componentType: 'DATE_CALCULATION',
+      input: { kind: 'NODE', id: 'orders' },
+      rules: [
+        {
+          id: 'extract_year',
+          operation: 'DATE_EXTRACT',
+          inputKeys: ['orders.order_date'],
+          output: { id: 'order_year', name: '订单年份', code: 'order_year', canonicalType: 'INTEGER' },
+          expression: { type: 'DATE_EXTRACT', unit: 'YEAR', argument: { type: 'FIELD_REF', nodeId: 'orders', field: 'order_date' } },
+        },
+        {
+          id: 'current_year_end',
+          operation: 'DATE_END',
+          inputKeys: [],
+          output: { id: 'current_year_end', name: '本年最后一天', code: 'current_year_end', canonicalType: 'DATE' },
+          expression: { type: 'DATE_END', unit: 'YEAR', argument: { type: 'CURRENT_DATE' } },
+        },
+      ],
+    }])
+    expect(dsl.fields).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'order_year', expression: { type: 'DATE_EXTRACT', unit: 'YEAR', argument: expect.any(Object) } }),
+      expect.objectContaining({ code: 'current_year_end', expression: { type: 'DATE_END', unit: 'YEAR', argument: { type: 'CURRENT_DATE' } } }),
+    ]))
+  })
+
+  test('过滤组件透传字段并生成带类型值的 WHERE 谓词', () => {
+    const value = draft()
+    value.nodes[0].columns.push({
+      id: 'column-3',
+      tableId: table.id,
+      columnName: 'expected_amount',
+      businessName: '预期金额',
+      canonicalType: 'DECIMAL',
+      nullable: true,
+      semanticType: 'AMOUNT',
+    })
+    value.nodes[0].selected.push('expected_amount')
+    value.fields.push({ key: 'orders.expected_amount', role: 'ATTRIBUTE', aggregation: '' })
+    value.calculations = []
+    value.filters = []
+    value.parameters = []
+    value.grainKeys = ['order_date']
+    value.designer = {
+      version: '1.0',
+      nodePositions: { orders: { x: 20, y: 40 } },
+      nodeNames: { orders: '订单' },
+      joins: [],
+      groups: [],
+      transforms: [{
+        id: 'filter_1',
+        name: '高金额订单',
+        family: 'CONDITION',
+        componentType: 'FILTER',
+        input: { kind: 'NODE', id: 'orders' },
+        position: { x: 320, y: 40 },
+        rules: [],
+        conditions: [
+          { id: 'filter_1_condition_1', inputKey: 'orders.amount', operator: 'GTE', value: '100.50' },
+          { id: 'filter_1_condition_2', inputKey: 'orders.order_date', operator: 'IN', value: '2026-07-01, 2026-07-02' },
+          { id: 'filter_1_condition_3', inputKey: 'orders.amount', operator: 'GTE', valueMode: 'FIELD', value: 'orders.expected_amount' },
+        ],
+      }],
+      end: {
+        id: 'end_1',
+        name: '过滤结果',
+        input: { kind: 'TRANSFORM', id: 'filter_1' },
+        position: { x: 620, y: 40 },
+        outputs: [
+          { key: 'orders.order_date', name: '订单日期', code: 'order_date' },
+          { key: 'orders.amount', name: '订单金额', code: 'amount' },
+          { key: 'orders.expected_amount', name: '预期金额', code: 'expected_amount' },
+        ],
+      },
+    }
+
+    const dsl = buildDatasetDSL(value)
+
+    expect(dsl.fields.map(field => field.code)).toEqual(['order_date', 'amount', 'expected_amount'])
+    expect(dsl.filters).toEqual([
+      {
+        id: 'filter_1_condition_1',
+        stage: 'PRE_AGGREGATION',
+        optional: false,
+        expression: {
+          type: 'GTE',
+          left: { type: 'FIELD_REF', nodeId: 'orders', field: 'amount' },
+          right: { type: 'LITERAL', value: 100.5 },
+        },
+      },
+      {
+        id: 'filter_1_condition_2',
+        stage: 'PRE_AGGREGATION',
+        optional: false,
+        expression: {
+          type: 'IN',
+          left: { type: 'FIELD_REF', nodeId: 'orders', field: 'order_date' },
+          right: {
+            type: 'ARRAY',
+            arguments: [
+              { type: 'LITERAL', value: '2026-07-01' },
+              { type: 'LITERAL', value: '2026-07-02' },
+            ],
+          },
+        },
+      },
+      {
+        id: 'filter_1_condition_3',
+        stage: 'PRE_AGGREGATION',
+        optional: false,
+        expression: {
+          type: 'GTE',
+          left: { type: 'FIELD_REF', nodeId: 'orders', field: 'amount' },
+          right: { type: 'FIELD_REF', nodeId: 'orders', field: 'expected_amount' },
+        },
+      },
+    ])
+    expect(dsl.designer?.transforms?.[0]?.componentType).toBe('FILTER')
+    expect(dsl.designer?.transforms?.[0]?.conditions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ inputKey: 'orders.amount', operator: 'GTE', value: '100.50' }),
+      expect.objectContaining({ inputKey: 'orders.amount', operator: 'GTE', valueMode: 'FIELD', value: 'orders.expected_amount' }),
+    ]))
+  })
+
   test('根分组产物可以继续字段处理且不会丢失聚合口径', () => {
     const value = draft()
     value.calculations = []
@@ -288,6 +514,37 @@ describe('buildDatasetDSL', () => {
     })
     expect(hiddenDimension).toMatchObject({ code: 'order_month', role: 'DIMENSION', expression: { type: 'DATE_TRUNC', unit: 'MONTH' } })
     expect(dsl.groupBy).toEqual([hiddenDimension?.id])
+  })
+
+  test('同一输入字段可以同时生成分组维度和聚合指标', () => {
+    const value = draft()
+    value.calculations = []
+    value.grainKeys = ['amount_dimension']
+    value.designer = {
+      version: '1.0', nodePositions: { orders: { x: 20, y: 40 } }, nodeNames: { orders: '订单' }, joins: [],
+      groups: [{
+        id: 'group_final', name: '金额汇总', input: { kind: 'NODE', id: 'orders' }, position: { x: 320, y: 40 },
+        dimensions: [{ key: 'orders.amount', name: '金额维度', code: 'amount_dimension' }],
+        metrics: [{ key: 'orders.amount', outputKey: 'group_final.metric_amount', name: '金额记录数', code: 'amount_count', aggregation: 'COUNT' }],
+      }],
+      transforms: [],
+      end: {
+        id: 'end_1', name: '金额汇总结果', input: { kind: 'GROUP', id: 'group_final' }, position: { x: 620, y: 40 },
+        outputs: [
+          { key: 'orders.amount', name: '金额维度', code: 'amount_dimension' },
+          { key: 'group_final.metric_amount', name: '金额记录数', code: 'amount_count' },
+        ],
+      },
+    }
+
+    const dsl = buildDatasetDSL(value)
+    const dimension = dsl.fields.find(field => field.code === 'amount_dimension')
+    const metric = dsl.fields.find(field => field.code === 'amount_count')
+
+    expect(dimension).toMatchObject({ role: 'DIMENSION', expression: { type: 'FIELD_REF', field: 'amount' } })
+    expect(metric).toMatchObject({ role: 'MEASURE', expression: { type: 'AGGREGATE', function: 'COUNT', argument: { type: 'FIELD_REF', field: 'amount' } } })
+    expect(dsl.groupBy).toEqual([dimension?.id])
+    expect(dimension?.id).not.toBe(metric?.id)
   })
 
   test('组件预览只物化目标组件及其上游子图', () => {

@@ -27,8 +27,9 @@ func validateDWDPublicationDependenciesTx(
 	tx pgx.Tx,
 	datasetID, draftVersionID string,
 ) error {
-	var layer string
-	err := tx.QueryRow(ctx, `SELECT version.layer
+	var layer, targetDomain string
+	err := tx.QueryRow(ctx, `SELECT version.layer,
+			btrim(COALESCE(version.dsl_json#>>'{dataset,domain}',''))
 		FROM platform.dataset_versions AS version
 		JOIN platform.datasets AS dataset
 		  ON dataset.tenant_id=version.tenant_id
@@ -40,12 +41,54 @@ func validateDWDPublicationDependenciesTx(
 		  AND dataset.deleted_at IS NULL
 		FOR SHARE OF dataset,version`,
 		datasetID, draftVersionID,
-	).Scan(&layer)
+	).Scan(&layer, &targetDomain)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrConflict
 	}
-	if err != nil || layer != string(LayerDWD) {
+	if err != nil {
 		return err
+	}
+
+	if targetDomain == "" {
+		return &PublicationValidationError{Issues: []PublicationIssue{{
+			Path:   "dataset.domain",
+			Code:   "DATASET_DOMAIN_REQUIRED",
+			Reason: "发布数据集必须填写业务领域",
+		}}}
+	}
+	if layer != string(LayerODS) {
+		var dependencyCount, mismatchedCount int
+		err = tx.QueryRow(ctx, `SELECT count(*)::integer,
+				count(*) FILTER(
+				  WHERE upstream.id IS NULL
+				     OR lower(platform.dataset_version_effective_domain(upstream.id))
+				          <> lower($2)
+				)::integer
+			FROM platform.dataset_versions AS draft
+			CROSS JOIN LATERAL jsonb_array_elements(
+			  COALESCE(draft.dsl_json->'nodes','[]'::jsonb)
+			) AS node
+			LEFT JOIN platform.dataset_versions AS upstream
+			  ON upstream.tenant_id=draft.tenant_id
+			 AND upstream.id=(node->>'datasetVersionId')::uuid
+			 AND upstream.status='PUBLISHED'
+			WHERE draft.id::text=$1
+			  AND node->>'type'='DATASET'`,
+			draftVersionID, targetDomain,
+		).Scan(&dependencyCount, &mismatchedCount)
+		if err != nil {
+			return err
+		}
+		if dependencyCount == 0 || mismatchedCount > 0 {
+			return &PublicationValidationError{Issues: []PublicationIssue{{
+				Path:   "dataset.domain",
+				Code:   "DATASET_DOMAIN_LINEAGE_MISMATCH",
+				Reason: "数据集业务领域必须与所有已发布上游一致；请修正领域后重新提交审批",
+			}}}
+		}
+	}
+	if layer != string(LayerDWD) {
+		return nil
 	}
 
 	var unavailable int

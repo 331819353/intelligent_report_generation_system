@@ -55,8 +55,8 @@ async function refreshTokens(): Promise<StoredTokens> {
   return refreshRequest
 }
 
-/** 发送统一 API 请求；遇到 401 时仅刷新一次并重放原请求。 */
-export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** 发送统一 API 请求并保留原始响应，供流式接口读取响应体。 */
+export async function apiResponse(path: string, init: RequestInit = {}): Promise<Response> {
   const isMultipart = typeof FormData !== 'undefined' && init.body instanceof FormData
   const request = async (accessToken?: string) => fetch(`/api${path}`, {
     ...init,
@@ -73,6 +73,12 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
     const detail = await response.json().catch(() => fallback) as APIError
     throw new RequestError(detail, response.status)
   }
+  return response
+}
+
+/** 发送统一 JSON API 请求；遇到 401 时仅刷新一次并重放原请求。 */
+export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await apiResponse(path, init)
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
 }

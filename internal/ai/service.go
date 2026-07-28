@@ -22,6 +22,7 @@ const (
 	PurposeMetricAuthoring       = "METRIC_AUTHORING"
 	PurposeDatasetTagSuggestion  = "DATASET_TAG_SUGGESTION"
 	PurposeSemanticQueryPlanning = "SEMANTIC_QUERY_PLANNING"
+	PurposeDatasetSemanticNaming = "DATASET_SEMANTIC_NAMING"
 )
 
 var (
@@ -41,7 +42,11 @@ type Invocation struct {
 	PromptVersion string
 	ResourceType  string
 	ResourceID    string
-	Request       ProviderRequest
+	// PreferredModel is an internal routing hint. It is used only for an
+	// explicitly configured fallback and never lets callers bypass the provider
+	// allowlist.
+	PreferredModel string
+	Request        ProviderRequest
 }
 
 // InvocationResult 返回结构化模型结果和可审计但不含业务正文的运行摘要。
@@ -149,6 +154,30 @@ func (s *Service) Invoke(ctx context.Context, input Invocation) (InvocationResul
 	if !s.Configured() {
 		return InvocationResult{}, newProviderError(ErrorCodeProviderUnavailable, "AI Provider 未配置", 0, false, 0, nil)
 	}
+	input.PreferredModel = strings.TrimSpace(input.PreferredModel)
+	provider := s.provider
+	if input.PreferredModel != "" {
+		selector, ok := provider.(ModelProviderSelector)
+		if !ok {
+			if !strings.EqualFold(provider.Model(), input.PreferredModel) {
+				return InvocationResult{}, newProviderError(
+					ErrorCodeProviderUnavailable,
+					"请求的 AI 模型未配置",
+					0,
+					false,
+					0,
+					nil,
+				)
+			}
+		} else {
+			provider = selector.SelectProviderModel(input.PreferredModel)
+		}
+	} else if selector, ok := provider.(ProviderSelector); ok {
+		provider = selector.SelectProvider()
+	}
+	if provider == nil || !provider.Configured() {
+		return InvocationResult{}, newProviderError(ErrorCodeProviderUnavailable, "AI Provider 未配置", 0, false, 0, nil)
+	}
 	input.Purpose = strings.ToUpper(strings.TrimSpace(input.Purpose))
 	input.PromptVersion = strings.TrimSpace(input.PromptVersion)
 	if strings.TrimSpace(input.TenantID) == "" || strings.TrimSpace(input.ActorID) == "" || !allowedPurpose(input.Purpose) || input.PromptVersion == "" || len(input.PromptVersion) > 128 {
@@ -171,7 +200,7 @@ func (s *Service) Invoke(ctx context.Context, input Invocation) (InvocationResul
 	reservedCost := saturatingMultiplyInt64(perAttemptCost, int64(s.options.MaxAttempts))
 	record, err := s.store.Start(ctx, StartRequest{
 		TenantID: input.TenantID, ActorID: input.ActorID, Purpose: input.Purpose,
-		PromptVersion: input.PromptVersion, Provider: s.provider.Name(), Model: s.provider.Model(),
+		PromptVersion: input.PromptVersion, Provider: provider.Name(), Model: provider.Model(),
 		InputHash: inputHash, ResourceType: strings.TrimSpace(input.ResourceType), ResourceID: strings.TrimSpace(input.ResourceID),
 		InputBytes: inputBytes, RedactionCount: redactionCount, ReservedTokens: reservedTokens, ReservedCostMicros: reservedCost,
 		MaxAttempts: s.options.MaxAttempts,
@@ -189,7 +218,7 @@ func (s *Service) Invoke(ctx context.Context, input Invocation) (InvocationResul
 	for attempts < s.options.MaxAttempts {
 		attempts++
 		attemptCtx, attemptCancel := context.WithTimeout(callCtx, s.options.AttemptTimeout)
-		result, callErr = s.provider.Complete(attemptCtx, request)
+		result, callErr = provider.Complete(attemptCtx, request)
 		attemptErr := attemptCtx.Err()
 		attemptCancel()
 		if callErr == nil && attemptErr != nil {
@@ -214,7 +243,7 @@ func (s *Service) Invoke(ctx context.Context, input Invocation) (InvocationResul
 		}
 	}
 	if callErr == nil {
-		result, callErr = validateProviderResult(request, result, s.provider.Model())
+		result, callErr = validateProviderResult(request, result, provider.Model())
 	}
 	latency := nonNegativeMilliseconds(s.now().Sub(started))
 	if callErr != nil {
@@ -285,7 +314,7 @@ func allowedPurpose(purpose string) bool {
 	switch purpose {
 	case PurposeMetadataCompletion, PurposeReportGeneration, PurposeBlockEdit, PurposeConclusion,
 		PurposeDatasetDAGGeneration, PurposeMetricAuthoring, PurposeDatasetTagSuggestion,
-		PurposeSemanticQueryPlanning:
+		PurposeSemanticQueryPlanning, PurposeDatasetSemanticNaming:
 		return true
 	default:
 		return false

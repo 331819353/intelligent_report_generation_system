@@ -1,4 +1,4 @@
-import { apiRequest } from './api'
+import { apiRequest, apiResponse, RequestError, type APIError } from './api'
 import {
   graphContains,
   graphLeaves,
@@ -78,7 +78,7 @@ export type DatasetAIFieldChange = {
 }
 export type DatasetAIChangeSet = { operations: DatasetAIChangeOperation[]; fieldChanges: DatasetAIFieldChange[] }
 export type DatasetAIProposal = {
-  schemaVersion: '2.3'
+  schemaVersion: '2.4'
   mode: 'CREATE' | 'MODIFY'
   summary: string
   assumptions: string[]
@@ -87,6 +87,12 @@ export type DatasetAIProposal = {
   plan: DatasetAIGraphPlan
 }
 export type DatasetAIPlanResult = { requestId: string; proposal: DatasetAIProposal }
+export type DatasetAIProgressEvent = {
+  timestamp: string
+  stage: 'CONTEXT' | 'CATALOG' | 'INTENT' | 'PLANNER' | 'VALIDATION' | 'REPAIR' | 'COMPLETE'
+  status: 'RUNNING' | 'SUCCEEDED' | 'WARN'
+  message: string
+}
 
 export type DatasetAIFieldHint = { tableId: string; column: string }
 export type DatasetAIHintAggregation = '' | 'SUM' | 'AVG' | 'COUNT' | 'COUNT_DISTINCT' | 'MIN' | 'MAX'
@@ -251,6 +257,8 @@ export function datasetAIPlanFromEditor(
       const configured = graph.groups.find(item => item.id === group.id)
       return {
         id: group.id, name: group.name, input: group.input as GraphInput, position: { x: 0, y: 0 },
+        ...(configured?.groupByMode ? { groupByMode: configured.groupByMode } : {}),
+        ...(configured?.groupingSets ? { groupingSets: configured.groupingSets.map(groupingSet => [...groupingSet]) } : {}),
         dimensions: configured?.dimensions.map(item => ({ ...item })) ?? [],
         metrics: configured?.metrics.map(item => ({ ...item })) ?? [],
       }
@@ -297,12 +305,51 @@ export async function requestDatasetAIProposal(
   instruction: string,
   current?: DatasetAIGraphPlan,
   hints?: DatasetAIPlanHints,
+  onProgress?: (event: DatasetAIProgressEvent) => void,
 ): Promise<DatasetAIPlanResult> {
   const path = datasetId ? `/v1/datasets/${encodeURIComponent(datasetId)}/ai/proposals` : '/v1/datasets/ai/proposals'
-  return apiRequest<DatasetAIPlanResult>(path, {
+  const init: RequestInit = {
     method: 'POST',
     body: JSON.stringify({ instruction, ...(current ? { current } : {}), ...(hints ? { hints } : {}) }),
+  }
+  if (!onProgress) return apiRequest<DatasetAIPlanResult>(path, init)
+
+  const response = await apiResponse(path, {
+    ...init,
+    headers: { Accept: 'application/x-ndjson' },
   })
+  if (!response.body || !response.headers?.get('Content-Type')?.includes('application/x-ndjson')) {
+    return response.json() as Promise<DatasetAIPlanResult>
+  }
+
+  type StreamFrame =
+    | { type: 'progress'; progress: DatasetAIProgressEvent }
+    | { type: 'result'; result: DatasetAIPlanResult }
+    | { type: 'error'; status: number; error: APIError }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result: DatasetAIPlanResult | undefined
+  const consume = (line: string) => {
+    if (!line.trim()) return
+    const frame = JSON.parse(line) as StreamFrame
+    if (frame.type === 'progress') onProgress(frame.progress)
+    if (frame.type === 'result') result = frame.result
+    if (frame.type === 'error') throw new RequestError(frame.error, frame.status)
+  }
+  while (true) {
+    const chunk = await reader.read()
+    buffer += decoder.decode(chunk.value, { stream: !chunk.done })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) consume(line)
+    if (chunk.done) break
+  }
+  consume(buffer)
+  if (!result) {
+    throw new RequestError({ code: 'AI_STREAM_INCOMPLETE', message: 'AI 生成连接提前结束，请重试' }, 502)
+  }
+  return result
 }
 
 /** Convert a reviewed proposal into one atomic editor snapshot; no partial state is applied. */
@@ -391,6 +438,8 @@ export async function materializeDatasetAIPlan(
     return {
       id: group.id, name: group.name, input: group.input as GraphInput,
       position: sameTopology ? previous!.position : { x: 0, y: 0 },
+      ...(previous?.groupByMode ? { groupByMode: previous.groupByMode } : {}),
+      ...(previous?.groupingSets ? { groupingSets: previous.groupingSets.map(groupingSet => [...groupingSet]) } : {}),
       dimensions: group.dimensions.map(dimension => {
         const key = fieldKey(dimension.nodeId, dimension.column)
         const old = previous?.dimensions.find(item => item.key === key)

@@ -137,11 +137,10 @@ func TestBuildRejectsCrossTenantOrWrongLayerInputRelation(t *testing.T) {
 
 func TestDWDAllowsGovernedODSAndDIMInputs(t *testing.T) {
 	tenantID := "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
-	ods, err := materialization.GeneratePhysicalIdentifier(
+	stageSchema, stageName, err := materialization.GenerateStagingIdentifier(
 		tenantID,
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 		"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
-		"ffffffff-ffff-4fff-8fff-ffffffffffff",
-		materialization.LayerODS,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -156,11 +155,15 @@ func TestDWDAllowsGovernedODSAndDIMInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	tables := map[string]querycompiler.TableRef{
-		"fact": {NodeID: "fact", Schema: ods.Schema, Name: ods.Name},
-		"dim":  {NodeID: "dim", Schema: dimension.Schema, Name: dimension.Name},
+		"fact": {
+			NodeID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+			Schema: stageSchema, Name: stageName,
+		},
+		"dim": {NodeID: "dim", Schema: dimension.Schema, Name: dimension.Name},
 	}
 	if err := validateTenantOwnedInputs(
-		tenantID, materialization.LayerDWD, tables,
+		tenantID, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		materialization.LayerDWD, tables,
 	); err != nil {
 		t.Fatalf("governed DWD inputs rejected: %v", err)
 	}
@@ -178,7 +181,8 @@ func TestDWDAllowsGovernedODSAndDIMInputs(t *testing.T) {
 		NodeID: "dim", Schema: dws.Schema, Name: dws.Name,
 	}
 	if err := validateTenantOwnedInputs(
-		tenantID, materialization.LayerDWD, tables,
+		tenantID, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		materialization.LayerDWD, tables,
 	); !errors.Is(err, ErrInvalidBuild) {
 		t.Fatalf("DWS input must not be accepted by DWD: %v", err)
 	}

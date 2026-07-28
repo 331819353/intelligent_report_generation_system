@@ -161,7 +161,7 @@ const plannerSystemPrompt = `你是企业数据集 DAG 配置助手，服务对�
 12. 删除组件后的每条直接改线必须由 changeSet 中消费者的 UPDATE 明确授权；不得自行改变其他关联、分组或结束节点。修复输出也只能修正 plan，不能新增或扩大 changeSet。
 13. changeSet.fieldChanges 是字段传播的完整最终状态，field.nodeId/tableId/column 必须与最终 node 及 assets 一致。ADD/KEEP 字段必须严格落实 selectionAction、全部 groupUses/joinUses/outputUses；REMOVE 必须取消选中并清除其用途。FINAL_OUTPUT 必须真实到达 end，INTERNAL_ONLY 不得出现在 end.outputs，SELECTED_ONLY 必须保留选列且完全没有下游用途。不得只把字段加到上游节点后停止。
 14. UPDATE NODE.tableId 时，旧表 binding 与新表 binding 是同一 node 的物理身份迁移；最终 node.tableId 必须等于新 binding.tableId。若 selectedColumns 和下游字段数组在结构上不需变化，保持它们逐值、逐序不变，不要为迁移制造虚假的数组修改。
-15. transforms 必须使用 Schema 中的细粒度 componentType：TEXT_UPPER、TEXT_TRIM、TEXT_REPLACE、TEXT_LOWER、TEXT_SUBSTRING、TEXT_CONCAT、NUMBER_ABSOLUTE、NUMBER_ROUNDING、NUMBER_ARITHMETIC、DATE_FORMAT、NULL、CAST、CONDITION；每条规则的 operation 必须与组件类型匹配。inputKeys 引用上游实际产物 key，派生字段 key 固定为 transformId.outputId。条件“在…中”必须使用 CASE + conditionOperator=IN，conditionValues 的每项 mode 只能是 LITERAL 或 FIELD。
+15. transforms 必须使用 Schema 中的细粒度 componentType：TEXT_UPPER、TEXT_TRIM、TEXT_REPLACE、TEXT_LOWER、TEXT_SUBSTRING、TEXT_CONCAT、NUMBER_ABSOLUTE、NUMBER_ROUNDING、NUMBER_ARITHMETIC、DATE_CALCULATION、DATE_FORMAT、NULL、CAST、CONDITION；每条规则的 operation 必须与组件类型匹配。CURRENT_DATE 表示生成 SQL 时使用数据库原生 CURRENT_DATE，禁止替换成规划时的日期字面量。DATE_CALCULATION 支持 CURRENT_DATE、DATE_DIFF、DATE_EXTRACT、DATE_START、DATE_END；DATE_DIFF 的 startDateSource/endDateSource、DATE_EXTRACT/DATE_START/DATE_END 的 dateSource 可为 FIELD 或 CURRENT_DATE，inputKeys 只按开始、结束顺序保存实际 FIELD 来源。NULL 的 fallbackMode、CONDITION 的 thenMode/elseMode 均可选择 CURRENT_DATE。inputKeys 引用上游实际产物 key，派生字段 key 固定为 transformId.outputId。条件“在…中”必须使用 CASE + conditionOperator=IN，conditionValues 的每项 mode 只能是 LITERAL 或 FIELD；不适用的来源字段使用空字符串。
 16. 字段 key 必须沿组件链保持稳定：物理字段使用 nodeId.column；转换产物使用 transformId.outputId。GROUP.dimensions/metrics 若消费转换产物，分别把 transformId 和 outputId 填入 nodeId/column；若消费物理字段则仍填物理 nodeId/column。GROUP 不会把 key 改成 groupId.结果名。END 输出转换产物时 key 继续使用 transformId.outputId，同时 nodeId/column 保留该产物继承的物理血缘；原字段和物理分组结果使用物理 nodeId.column。绝不能自行构造聚合 key。
 17. CREATE 的 transformRequirements 是服务端推导的强制组件约束；MODIFY 则以锁定 changeSet 中的 TRANSFORM 操作为准。新增或修改的转换必须位于真实数据路径上且至少一个产物被下游消费；不得用字段改名、GROUP 日期粒度或 END 名称代替字段处理，也不要添加无关转换。
 18. 生成候选图前必须在内部逐阶段审视完整工作流，顺序为：数据节点 → 源字段处理 → 关联前分组 → 关联 → 关联后分组 → 输出字段处理 → 结束节点。每个阶段可以是 0 个、1 个或多个组件；只能按 instruction 的真实计算需要取舍，禁止为了凑齐流程添加空组件，也禁止因为流程复杂而跳过必要组件。
@@ -190,9 +190,21 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 	transformRequirements := []TransformRequirement{}
 	if input.Current != nil {
 		mode = "MODIFY"
+		reportPlanProgress(
+			ctx,
+			ProgressStageContext,
+			ProgressStatusSucceeded,
+			fmt.Sprintf(
+				"已读取当前未保存画布：%d 个数据节点、%d 个流程组件",
+				len(input.Current.Nodes),
+				len(input.Current.Joins)+len(input.Current.Groups)+len(input.Current.Transforms),
+			),
+		)
 	} else {
 		transformRequirements = deriveCreateTransformRequirements(input.Instruction)
+		reportPlanProgress(ctx, ProgressStageContext, ProgressStatusSucceeded, "当前为空画布，将生成新的 DAG 流程")
 	}
+	reportPlanProgress(ctx, ProgressStageCatalog, ProgressStatusRunning, "正在读取授权范围内的数据表与字段元数据")
 	loaded, err := s.loadCatalog(ctx, tenantID, input, mode, lockedChangeSet)
 	if err != nil {
 		return PlanResult{}, err
@@ -200,7 +212,14 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 	if len(loaded.tables) == 0 {
 		return PlanResult{}, ErrNoAssets
 	}
+	reportPlanProgress(
+		ctx,
+		ProgressStageCatalog,
+		ProgressStatusSucceeded,
+		fmt.Sprintf("已加载 %d 张授权数据表、%d 个字段", len(loaded.tables), catalogColumnCount(loaded.tables)),
+	)
 	if mode == "MODIFY" {
+		reportPlanProgress(ctx, ProgressStageIntent, ProgressStatusRunning, "正在解析修改范围并锁定当前 DAG 基线")
 		intentCtx, cancelIntent := context.WithTimeout(ctx, s.timeout)
 		intent, err := s.extractChangeIntent(intentCtx, tenantID, actorID, resourceID, input, loaded.tables)
 		cancelIntent()
@@ -208,6 +227,7 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 			return PlanResult{}, err
 		}
 		lockedChangeSet = intent.ChangeSet
+		reportPlanProgress(ctx, ProgressStageIntent, ProgressStatusSucceeded, "已识别修改范围，未声明的当前画布组件将保持不变")
 	}
 	providerRequest, err := buildProviderRequest(input, mode, lockedChangeSet, loaded.tables)
 	if err != nil {
@@ -232,9 +252,13 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 	// but successful intent extraction cannot starve graph generation.
 	plannerCtx, cancelPlanner := context.WithTimeout(ctx, s.timeout)
 	defer cancelPlanner()
+	reportPlanProgress(ctx, ProgressStagePlanner, ProgressStatusRunning, "正在调用模型生成结构化 DAG 候选方案")
 	result, invokeErr := s.invoker.Invoke(plannerCtx, invocation)
 	initialRequestID := result.RequestID
 	repairAttempted := false
+	if invokeErr == nil {
+		reportPlanProgress(ctx, ProgressStageValidation, ProgressStatusRunning, "模型已返回候选方案，正在校验拓扑、字段血缘与修改边界")
+	}
 	proposal, validationErr := decodePlannerResult(result, mode, loaded.tables, invokeErr)
 	if validationErr == nil && mode == "MODIFY" {
 		proposal.Plan = materializeLockedComponentState(*input.Current, proposal.Plan, lockedChangeSet)
@@ -270,6 +294,7 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 			return PlanResult{}, err
 		}
 		repairAttempted = true
+		reportPlanProgress(ctx, ProgressStageRepair, ProgressStatusWarn, "候选方案未通过本地校验，正在执行一次受限自动修复")
 		repair := invocation
 		repairInstructionMessage := aiplatform.Message{Role: aiplatform.MessageRoleUser, Parts: []aiplatform.ContentPart{{Type: aiplatform.ContentTypeText, Text: repairInstruction(validationErr)}}}
 		repairMessages := append(append([]aiplatform.Message(nil), invocation.Request.Messages...), repairInstructionMessage)
@@ -296,6 +321,9 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 			}
 		}
 		result, invokeErr = s.invoker.Invoke(plannerCtx, repair)
+		if invokeErr == nil {
+			reportPlanProgress(ctx, ProgressStageValidation, ProgressStatusRunning, "修复方案已返回，正在重新执行完整安全校验")
+		}
 		proposal, validationErr = decodePlannerResult(result, mode, loaded.tables, invokeErr)
 		if validationErr == nil && mode == "MODIFY" {
 			proposal.Plan = materializeLockedComponentState(*input.Current, proposal.Plan, lockedChangeSet)
@@ -363,6 +391,8 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 		}
 		proposal.ChangeSet = canonical
 	}
+	reportPlanProgress(ctx, ProgressStageValidation, ProgressStatusSucceeded, "候选 DAG 已通过拓扑、字段血缘与修改范围校验")
+	reportPlanProgress(ctx, ProgressStageComplete, ProgressStatusSucceeded, "DAG 候选方案生成完成，等待前端确认")
 	return PlanResult{RequestID: result.RequestID, Proposal: proposal}, nil
 }
 

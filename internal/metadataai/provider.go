@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
+	"time"
 
 	aiplatform "intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/semanticquality"
@@ -29,13 +31,40 @@ type Invoker interface {
 	Invoke(context.Context, aiplatform.Invocation) (aiplatform.InvocationResult, error)
 }
 
-type OrchestratedProvider struct{ invoker Invoker }
+type OrchestratedProvider struct {
+	invoker          Invoker
+	batchColumns     int
+	batchConcurrency int
+	batchSemaphore   chan struct{}
+	primaryFailover  time.Duration
+}
 
-const metadataCompletionSystemPrompt = "你是企业数据资产元数据补全器。只能依据给定技术元数据和最多十行数据样本生成结果，不得虚构资产或返回未请求的目标。每个目标的 missingFields 是本轮唯一需要新增或修复的属性；不在 missingFields 中的属性已经确认，必须原样复用对应 currentBusinessName、currentDescription、currentTags、currentSemanticType、currentSensitivity，不得重写。表级描述和标签必须优先说明该表的业务功能、适用范围与一行数据的粒度。对主键、外键、唯一键、业务编号或其他可能参与关联的字段，businessDescription 必须结合 constraints、字段属性和样本说明它关联的业务实体、键角色、方向、唯一性与可空性；无法从证据确定目标表时应明确写“候选关联键”，不得编造目标。每个字段的 semanticType 必须与输入 canonicalType 兼容：AMOUNT、PERCENTAGE、QUANTITY 只能用于数值类型，DATE、TIME、DATETIME 只能用于相应日期时间类型，BOOLEAN 只能用于布尔类型；TEXT 字段不得标为上述数值、日期时间或布尔语义，应从 TEXT、CATEGORY、IDENTIFIER、REGION、COMPANY_NAME 中选择。对 Excel/CSV 工作表，table.name 是 Sheet 名称，columns.name 是解析后的真实表头，sampleRows 的键和值分别对应表头和该列真实内容；必须结合 Sheet 名称、全部表头、字段类型和样本值判断表业务名称、字段业务名称及字段业务描述，不得只翻译物理名称或忽略样本内容。当 sourceFormat=CSV 或 EXCEL 时，表的 businessName 必须是准确简洁的中文业务名称；每个字段的 businessName 必须是能够表达原字段业务含义的小写英文字段名，多个单词使用下划线分隔，例如 customer_name、order_amount；businessDescription 必须使用中文描述字段含义。原始文件表头保留在 columns.name，不要把它原样复制到 businessName。标签应覆盖适用的领域、主题、作用、功能、范围、粒度和关联角色；标签数量不设固定上限，但至少返回一个标签，只能使用 JSON Schema 中的受控词表且不得重复。columns 中只包含本次发生变化且需要完善的字段，每个字段必须恰好返回一次；targetTable=false 时不得返回 table。"
+const (
+	metadataCompletionBatchColumns     = 5
+	metadataCompletionBatchConcurrency = 4
+)
+
+const metadataCompletionSystemPrompt = "你是企业数据资产元数据补全器。只能依据给定技术元数据和最多十行数据样本生成结果，不得虚构资产或返回未请求的目标。每次最多处理五个字段；每个目标的 missingFields 是本轮唯一需要新增或修复的属性；不在 missingFields 中的属性已经确认，必须原样复用对应 currentBusinessName、currentDescription、currentTags、currentSemanticType、currentSensitivity，不得重写。contextColumns 是分批处理时提供的全表紧凑字段上下文，仅用于理解表和字段之间的关系；columns 才是本批唯一允许输出的字段目标，不得为 contextColumns 中未出现在 columns 的字段生成结果。表级描述和标签必须优先说明该表的业务功能、适用范围与一行数据的粒度。对主键、外键、唯一键、业务编号或其他可能参与关联的字段，businessDescription 必须结合 constraints、字段属性和样本说明它关联的业务实体、键角色、方向、唯一性与可空性；无法从证据确定目标表时应明确写“候选关联键”，不得编造目标。每个字段的 semanticType 必须与输入 canonicalType 兼容：AMOUNT、PERCENTAGE、QUANTITY 只能用于数值类型，DATE、TIME、DATETIME 只能用于相应日期时间类型，BOOLEAN 只能用于布尔类型；TEXT 字段不得标为上述数值、日期时间或布尔语义，应从 TEXT、CATEGORY、IDENTIFIER、REGION、COMPANY_NAME 中选择。对 Excel/CSV 工作表，table.name 是 Sheet 名称，columns.name 是本批解析后的真实表头，contextColumns 包含全表字段概览，sampleRows 的键和值分别对应本批表头和该列真实内容；必须结合 Sheet 名称、全表字段概览、本批字段类型和样本值判断表业务名称、字段业务名称及字段业务描述，不得只翻译物理名称或忽略样本内容。当 sourceFormat=CSV 或 EXCEL 时，表的 businessName 必须是准确简洁的中文业务名称；每个字段的 businessName 必须使用中文业务名称：原表头含中文时保持其中文含义，不得翻译成英文；原表头为英文时翻译为准确简洁的中文名称。businessDescription 必须继续使用中文描述字段含义。原始文件表头保留在 columns.name，不要用英文技术编码覆盖中文业务名称。标签应覆盖适用的领域、主题、作用、功能、范围、粒度和关联角色；标签数量不设固定上限，但至少返回一个标签，只能使用 JSON Schema 中的受控词表且不得重复。columns 中只包含本次发生变化且需要完善的字段，每个字段必须恰好返回一次；targetTable=false 时不得返回 table。"
 
 // NewOrchestratedProvider 将元数据补全合同接入通用超时、重试、配额、成本和审计链路。
 func NewOrchestratedProvider(invoker Invoker) *OrchestratedProvider {
-	return &OrchestratedProvider{invoker: invoker}
+	return NewOrchestratedProviderWithPrimaryFailover(invoker, 0)
+}
+
+// NewOrchestratedProviderWithPrimaryFailover creates an ordered primary/fallback
+// workflow. The primary deadline applies only when a second configured model is
+// available; the fallback receives the remaining outer task budget.
+func NewOrchestratedProviderWithPrimaryFailover(
+	invoker Invoker,
+	primaryFailover time.Duration,
+) *OrchestratedProvider {
+	return &OrchestratedProvider{
+		invoker:          invoker,
+		batchColumns:     metadataCompletionBatchColumns,
+		batchConcurrency: metadataCompletionBatchConcurrency,
+		batchSemaphore:   make(chan struct{}, metadataCompletionBatchConcurrency),
+		primaryFailover:  primaryFailover,
+	}
 }
 
 func (p *OrchestratedProvider) Name() string {
@@ -61,6 +90,299 @@ func (p *OrchestratedProvider) Complete(ctx context.Context, tenantID, actorID s
 	if !p.Configured() {
 		return ProviderResult{}, ErrProviderUnavailable
 	}
+	batchColumns := p.batchColumns
+	if batchColumns <= 0 {
+		batchColumns = metadataCompletionBatchColumns
+	}
+	if len(input.Columns) <= batchColumns {
+		if err := p.acquireBatchSlot(ctx); err != nil {
+			return ProviderResult{}, err
+		}
+		defer p.releaseBatchSlot()
+		return p.completeBatch(ctx, tenantID, actorID, input)
+	}
+	batches := splitCompletionInput(input, batchColumns)
+	slog.InfoContext(ctx, "metadata AI completion split into batches",
+		"table_id", input.Table.ID,
+		"column_count", len(input.Columns),
+		"batch_count", len(batches),
+		"batch_columns", batchColumns,
+		"batch_concurrency", p.batchConcurrency,
+	)
+	results := p.completeBatches(ctx, tenantID, actorID, batches)
+	return mergeCompletionBatchResults(input, results)
+}
+
+type completionBatchResult struct {
+	result ProviderResult
+	err    error
+}
+
+func splitCompletionInput(input CompletionInput, batchColumns int) []CompletionInput {
+	batches := make([]CompletionInput, 0, (len(input.Columns)+batchColumns-1)/batchColumns)
+	contextColumns := input.ContextColumns
+	if len(contextColumns) == 0 {
+		contextColumns = completionColumnContexts(input.Columns)
+	}
+	for start := 0; start < len(input.Columns); start += batchColumns {
+		end := start + batchColumns
+		if end > len(input.Columns) {
+			end = len(input.Columns)
+		}
+		batch := input
+		batch.TargetTable = input.TargetTable && start == 0
+		batch.ContextColumns = contextColumns
+		batch.Columns = append([]Target(nil), input.Columns[start:end]...)
+		batch.SampleRows = projectCompletionSamples(input.SampleRows, batch.Columns)
+		batches = append(batches, batch)
+	}
+	return batches
+}
+
+func projectCompletionSamples(
+	rows []map[string]any,
+	columns []Target,
+) []map[string]any {
+	if len(rows) == 0 {
+		return nil
+	}
+	projected := make([]map[string]any, len(rows))
+	for rowIndex, row := range rows {
+		values := make(map[string]any, len(columns))
+		for _, column := range columns {
+			if value, exists := row[column.Name]; exists {
+				values[column.Name] = value
+			}
+		}
+		projected[rowIndex] = values
+	}
+	return projected
+}
+
+func (p *OrchestratedProvider) completeBatches(
+	ctx context.Context,
+	tenantID, actorID string,
+	batches []CompletionInput,
+) []completionBatchResult {
+	results := make([]completionBatchResult, len(batches))
+	indexes := make(chan int)
+	workerCount := p.batchConcurrency
+	if workerCount <= 0 {
+		workerCount = metadataCompletionBatchConcurrency
+	}
+	if workerCount > len(batches) {
+		workerCount = len(batches)
+	}
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for worker := 0; worker < workerCount; worker++ {
+		go func() {
+			defer workers.Done()
+			for index := range indexes {
+				if err := p.acquireBatchSlot(ctx); err != nil {
+					results[index].err = err
+					continue
+				}
+				results[index].result, results[index].err = p.completeBatch(
+					ctx, tenantID, actorID, batches[index],
+				)
+				p.releaseBatchSlot()
+			}
+		}()
+	}
+	for index := range batches {
+		select {
+		case indexes <- index:
+		case <-ctx.Done():
+			close(indexes)
+			workers.Wait()
+			for remaining := index; remaining < len(results); remaining++ {
+				if results[remaining].err == nil {
+					results[remaining].err = ctx.Err()
+				}
+			}
+			return results
+		}
+	}
+	close(indexes)
+	workers.Wait()
+	return results
+}
+
+func (p *OrchestratedProvider) acquireBatchSlot(ctx context.Context) error {
+	if p.batchSemaphore == nil {
+		p.batchSemaphore = make(chan struct{}, metadataCompletionBatchConcurrency)
+	}
+	select {
+	case p.batchSemaphore <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *OrchestratedProvider) releaseBatchSlot() {
+	<-p.batchSemaphore
+}
+
+func mergeCompletionBatchResults(
+	input CompletionInput,
+	batches []completionBatchResult,
+) (ProviderResult, error) {
+	merged := ProviderResult{
+		Output: CompletionOutput{
+			SchemaVersion: SchemaVersion,
+			Columns:       []SuggestionValue{},
+		},
+	}
+	columns := make(map[string]SuggestionValue, len(input.Columns))
+	var firstErr, fatalErr error
+	for _, batch := range batches {
+		result := batch.result
+		merged.Model = mergeProviderModels(merged.Model, result.Model)
+		if merged.ModelVersion == "" {
+			merged.ModelVersion = result.ModelVersion
+		}
+		merged.Usage.PromptTokens += result.Usage.PromptTokens
+		merged.Usage.CompletionTokens += result.Usage.CompletionTokens
+		merged.Usage.TotalTokens += result.Usage.TotalTokens
+		if result.Output.Table != nil {
+			if merged.Output.Table != nil {
+				return ProviderResult{}, fmt.Errorf(
+					"%w: batched output contains duplicate table target",
+					ErrInvalidOutput,
+				)
+			}
+			table := *result.Output.Table
+			merged.Output.Table = &table
+		}
+		for _, column := range result.Output.Columns {
+			if _, duplicate := columns[column.TargetID]; duplicate {
+				return ProviderResult{}, fmt.Errorf(
+					"%w: batched output contains duplicate column target",
+					ErrInvalidOutput,
+				)
+			}
+			columns[column.TargetID] = column
+		}
+		if batch.err != nil && firstErr == nil {
+			firstErr = batch.err
+		}
+		if batch.err != nil && batchCompletionFatal(batch.err) && fatalErr == nil {
+			fatalErr = batch.err
+		}
+	}
+	if fatalErr != nil {
+		return merged, fatalErr
+	}
+	missing := 0
+	if input.TargetTable && merged.Output.Table == nil {
+		missing++
+	}
+	for _, target := range input.Columns {
+		column, exists := columns[target.ID]
+		if !exists {
+			missing++
+			continue
+		}
+		merged.Output.Columns = append(merged.Output.Columns, column)
+		delete(columns, target.ID)
+	}
+	if len(columns) != 0 {
+		return ProviderResult{}, fmt.Errorf(
+			"%w: batched output contains an unknown column target",
+			ErrInvalidOutput,
+		)
+	}
+	if missing == 0 {
+		if err := ValidateOutput(input, merged.Output); err != nil {
+			return ProviderResult{}, err
+		}
+		return merged, nil
+	}
+	completed := len(merged.Output.Columns) + boolCount(merged.Output.Table != nil)
+	if completed > 0 {
+		partial, err := markBatchedPartialOutput(input, merged.Output)
+		if err != nil {
+			return ProviderResult{}, err
+		}
+		merged.Output = partial
+		return merged, &PartialOutputError{MissingTargets: missing}
+	}
+	if firstErr != nil {
+		return merged, firstErr
+	}
+	return merged, ErrInvalidOutput
+}
+
+func mergeProviderModels(current, next string) string {
+	models := make([]string, 0, 2)
+	seen := make(map[string]struct{})
+	for _, value := range []string{current, next} {
+		for _, candidate := range strings.Split(value, ",") {
+			model := strings.TrimSpace(candidate)
+			if model == "" {
+				continue
+			}
+			key := strings.ToLower(model)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			models = append(models, model)
+		}
+	}
+	return strings.Join(models, ",")
+}
+
+func markBatchedPartialOutput(
+	input CompletionInput,
+	output CompletionOutput,
+) (CompletionOutput, error) {
+	partial := CompletionOutput{
+		SchemaVersion: SchemaVersion,
+		Columns:       []SuggestionValue{},
+	}
+	if output.Table != nil {
+		value, _, accepted := mergePartialSuggestion(
+			input, input.Table, *output.Table, false,
+		)
+		if !accepted {
+			return CompletionOutput{}, ErrInvalidOutput
+		}
+		partial.Table = &value
+	}
+	targets := make(map[string]Target, len(input.Columns))
+	for _, target := range input.Columns {
+		targets[target.ID] = target
+	}
+	for _, candidate := range output.Columns {
+		target, exists := targets[candidate.TargetID]
+		if !exists {
+			return CompletionOutput{}, ErrInvalidOutput
+		}
+		value, _, accepted := mergePartialSuggestion(
+			input, target, candidate, true,
+		)
+		if !accepted {
+			return CompletionOutput{}, ErrInvalidOutput
+		}
+		partial.Columns = append(partial.Columns, value)
+	}
+	return partial, nil
+}
+
+func batchCompletionFatal(err error) bool {
+	return errors.Is(err, aiplatform.ErrTenantAIForbidden) ||
+		errors.Is(err, aiplatform.ErrQuotaExceeded) ||
+		errors.Is(err, ErrProviderUnavailable)
+}
+
+func (p *OrchestratedProvider) completeBatch(
+	ctx context.Context,
+	tenantID, actorID string,
+	input CompletionInput,
+) (ProviderResult, error) {
 	inputJSON, err := json.Marshal(input)
 	if err != nil {
 		return ProviderResult{}, err
@@ -82,13 +404,21 @@ func (p *OrchestratedProvider) Complete(ctx context.Context, tenantID, actorID s
 			Temperature:    &temperature, MaxOutputTokens: 4096,
 		},
 	}
-	result, err := p.invoker.Invoke(ctx, invocation)
+	fallbackModel := configuredFallbackModel(p.invoker.Model())
+	primaryCtx := ctx
+	primaryCancel := func() {}
+	if fallbackModel != "" && p.primaryFailover > 0 {
+		primaryCtx, primaryCancel = context.WithTimeout(ctx, p.primaryFailover)
+	}
+	result, err := p.invoker.Invoke(primaryCtx, invocation)
+	primaryCancel()
 	var validationErr error
 	previousUsage := Usage{}
 	var invalidContent json.RawMessage
 	if err != nil {
 		validationErr = translateOrchestrationError(err)
-		if !errors.Is(validationErr, ErrInvalidOutput) {
+		if !errors.Is(validationErr, ErrInvalidOutput) &&
+			(fallbackModel == "" || !metadataFallbackEligible(ctx, err)) {
 			return ProviderResult{}, validationErr
 		}
 		if content, diagnostic, ok := aiplatform.InvalidOutputDetails(err); ok {
@@ -115,14 +445,23 @@ func (p *OrchestratedProvider) Complete(ctx context.Context, tenantID, actorID s
 	}
 
 	// JSON Schema 无法表达 targetId “各出现且只出现一次”等跨数组约束。
-	// 首次非法输出时，将可用的模型原输出和安全校验原因带回同一上下文，仅纠错重试一次。
+	// 首次非法输出时，将可用的模型原输出和安全校验原因交给后备模型；
+	// 未配置后备模型时仍由原模型仅纠错重试一次。
 	repairInvocation := invocation
-	repairMessages := append([]aiplatform.Message(nil), invocation.Request.Messages...)
-	if len(invalidContent) > 0 {
-		repairMessages = append(repairMessages, aiplatform.Message{Role: aiplatform.MessageRoleAssistant, Parts: []aiplatform.ContentPart{{Type: aiplatform.ContentTypeText, Text: string(invalidContent)}}})
+	if fallbackModel != "" {
+		repairInvocation.PreferredModel = fallbackModel
 	}
-	repairMessages = append(repairMessages, aiplatform.Message{Role: aiplatform.MessageRoleUser, Parts: []aiplatform.ContentPart{{Type: aiplatform.ContentTypeText, Text: repairInstruction(input, validationErr)}}})
-	repairInvocation.Request.Messages = repairMessages
+	if errors.Is(validationErr, ErrInvalidOutput) {
+		repairMessages := append(
+			[]aiplatform.Message(nil),
+			invocation.Request.Messages...,
+		)
+		if len(invalidContent) > 0 {
+			repairMessages = append(repairMessages, aiplatform.Message{Role: aiplatform.MessageRoleAssistant, Parts: []aiplatform.ContentPart{{Type: aiplatform.ContentTypeText, Text: string(invalidContent)}}})
+		}
+		repairMessages = append(repairMessages, aiplatform.Message{Role: aiplatform.MessageRoleUser, Parts: []aiplatform.ContentPart{{Type: aiplatform.ContentTypeText, Text: repairInstruction(input, validationErr)}}})
+		repairInvocation.Request.Messages = repairMessages
+	}
 	repairResult, err := p.invoker.Invoke(ctx, repairInvocation)
 	if err != nil {
 		translated := translateOrchestrationError(err)
@@ -140,6 +479,7 @@ func (p *OrchestratedProvider) Complete(ctx context.Context, tenantID, actorID s
 			if partial, missing, ok := decodePartialCompletion(input, candidate.content); ok {
 				partialResult := completionProviderResult(
 					candidate.result, partial, previousUsage,
+					result.ProviderResult.Model,
 				)
 				if missing == 0 {
 					return partialResult, nil
@@ -156,6 +496,7 @@ func (p *OrchestratedProvider) Complete(ctx context.Context, tenantID, actorID s
 		); ok {
 			partialResult := completionProviderResult(
 				repairResult, partial, previousUsage,
+				result.ProviderResult.Model,
 			)
 			if missing == 0 {
 				return partialResult, nil
@@ -173,7 +514,42 @@ func (p *OrchestratedProvider) Complete(ctx context.Context, tenantID, actorID s
 		}
 		return ProviderResult{}, fmt.Errorf("%w: 纠错重试仍未通过: %v", ErrInvalidOutput, repairErr)
 	}
-	return completionProviderResult(repairResult, repairedOutput, previousUsage), nil
+	return completionProviderResult(
+		repairResult,
+		repairedOutput,
+		previousUsage,
+		result.ProviderResult.Model,
+	), nil
+}
+
+func configuredFallbackModel(models string) string {
+	parts := strings.Split(models, ",")
+	if len(parts) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+func metadataFallbackEligible(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(err, aiplatform.ErrTenantAIForbidden) ||
+		errors.Is(err, aiplatform.ErrQuotaExceeded) {
+		return false
+	}
+	var providerErr *aiplatform.ProviderError
+	if !errors.As(err, &providerErr) {
+		return errors.Is(err, context.DeadlineExceeded)
+	}
+	switch providerErr.Code {
+	case aiplatform.ErrorCodeCanceled,
+		aiplatform.ErrorCodeInvalidRequest,
+		aiplatform.ErrorCodeAuthentication:
+		return false
+	default:
+		return true
+	}
 }
 
 // decodeAndValidateCompletion 在 Provider JSON Schema 校验后继续执行领域级一一映射校验。
@@ -293,7 +669,7 @@ func mergePartialSuggestion(
 	if err := validateText("businessName", candidate.BusinessName, 120); err == nil {
 		valid := true
 		if column && isFileSourceFormat(input.SourceFormat) {
-			valid = csvBusinessNameRegexp.MatchString(candidate.BusinessName)
+			valid = containsChinese(candidate.BusinessName)
 		}
 		if !column && isFileSourceFormat(input.SourceFormat) {
 			valid = containsChinese(candidate.BusinessName)
@@ -352,7 +728,7 @@ func completionMissingFields(
 	missing := make([]string, 0, 5)
 	if err := validateText("businessName", value.BusinessName, 120); err != nil ||
 		(column && isFileSourceFormat(input.SourceFormat) &&
-			!csvBusinessNameRegexp.MatchString(value.BusinessName)) ||
+			!containsChinese(value.BusinessName)) ||
 		(!column && isFileSourceFormat(input.SourceFormat) &&
 			!containsChinese(value.BusinessName)) {
 		missing = append(missing, "businessName")
@@ -435,12 +811,21 @@ func repairInstruction(input CompletionInput, validationErr error) string {
 }
 
 // completionProviderResult 合并纠错前后的令牌用量，确保元数据任务审计覆盖真实消耗。
-func completionProviderResult(result aiplatform.InvocationResult, output CompletionOutput, previous Usage) ProviderResult {
+func completionProviderResult(
+	result aiplatform.InvocationResult,
+	output CompletionOutput,
+	previous Usage,
+	previousModels ...string,
+) ProviderResult {
 	usage := invocationUsage(result)
 	usage.PromptTokens += previous.PromptTokens
 	usage.CompletionTokens += previous.CompletionTokens
 	usage.TotalTokens += previous.TotalTokens
-	return ProviderResult{Output: output, Model: result.ProviderResult.Model, Usage: usage}
+	model := result.ProviderResult.Model
+	for _, previousModel := range previousModels {
+		model = mergeProviderModels(previousModel, model)
+	}
+	return ProviderResult{Output: output, Model: model, Usage: usage}
 }
 
 func invocationUsage(result aiplatform.InvocationResult) Usage {

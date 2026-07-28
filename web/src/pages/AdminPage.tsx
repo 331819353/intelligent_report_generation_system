@@ -1,6 +1,5 @@
 import {
   ArrowClockwise,
-  ChartBar,
   CheckCircle,
   ClockCounterClockwise,
   ClipboardText,
@@ -9,19 +8,15 @@ import {
   SpinnerGap,
   Stack,
   StopCircle,
-  Tag,
   X,
   XCircle,
 } from '@phosphor-icons/react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { RequestError } from '../lib/api'
 import {
   loadDataSourceApprovalTasks,
   loadDatasetApprovalTasks,
-  loadDimensionApprovalTasks,
-  loadMetricApprovalTasks,
   type ApprovalCategory,
   type ApprovalTask,
   type ApprovalTaskBatch,
@@ -40,7 +35,7 @@ import { dataSourceAPI, type DataSourceRecord } from '../lib/data-sources'
 import { datasetAPI } from '../lib/datasets'
 
 const sourceTypeLabels = { MYSQL: 'MySQL', ORACLE: 'Oracle', EXCEL: 'Excel / CSV' } as const
-const categoryOrder: ApprovalCategory[] = ['DATA_SOURCE', 'DATASET', 'METRIC', 'DIMENSION']
+const categoryOrder: ApprovalCategory[] = ['DATA_SOURCE', 'DATASET']
 const categoryCopy: Record<ApprovalCategory, { label: string; empty: string; description: string }> = {
   DATA_SOURCE: {
     label: '数据源',
@@ -52,22 +47,10 @@ const categoryCopy: Record<ApprovalCategory, { label: string; empty: string; des
     empty: '当前没有待审批的数据集发布申请',
     description: '审核冻结的精确草稿与执行计划；批准后再启动加工。',
   },
-  METRIC: {
-    label: '指标',
-    empty: '当前没有待审核的指标候选',
-    description: '审核系统提取的指标候选，并在资产管理中心完成试算与发布。',
-  },
-  DIMENSION: {
-    label: '维度',
-    empty: '当前没有待治理的维度候选',
-    description: '审核 DWS 维度勘测结果、成员索引策略与敏感性。',
-  },
 }
 const emptyTasks = (): Record<ApprovalCategory, ApprovalTask[]> => ({
   DATA_SOURCE: [],
   DATASET: [],
-  METRIC: [],
-  DIMENSION: [],
 })
 
 const formatSubmittedAt = (value?: string) => {
@@ -96,10 +79,6 @@ const candidatePreparationLabel: Record<string, string> = {
   SUCCEEDED: '历史准备已完成',
   PARTIAL: '历史准备部分完成',
   FAILED: '历史准备失败',
-}
-const metricCandidateStatusLabel: Record<string, string> = {
-  READY: '规则校验通过',
-  NEEDS_REVIEW: '需要人工复核',
 }
 const backgroundStatusCopy: Record<BackgroundTaskStatus, string> = {
   QUEUED: '等待执行',
@@ -136,20 +115,15 @@ const matchesBackgroundFocus = (
 
 function taskIcon(category: ApprovalCategory) {
   if (category === 'DATA_SOURCE') return <Database size={20} weight="duotone" aria-hidden="true" />
-  if (category === 'DATASET') return <Stack size={20} weight="duotone" aria-hidden="true" />
-  if (category === 'METRIC') return <ChartBar size={20} weight="duotone" aria-hidden="true" />
-  return <Tag size={20} weight="duotone" aria-hidden="true" />
+  return <Stack size={20} weight="duotone" aria-hidden="true" />
 }
 
 function isOwnSubmission(task?: ApprovalTask) {
-  return Boolean(task
-    && (task.category === 'DATA_SOURCE' || task.category === 'DATASET')
-    && task.submittedByCurrentUser)
+  return Boolean(task?.submittedByCurrentUser)
 }
 
-/** 展示租户工作台，并把所有人工审批与治理入口收敛到分类任务中心。 */
+/** 展示租户工作台；指标与维度由程序直接入库，不进入审批中心。 */
 export function AdminPage() {
-  const navigate = useNavigate()
   const subject = currentSubject()
   const [sourceCount, setSourceCount] = useState<number | null>(null)
   const [datasetCount, setDatasetCount] = useState<number | null>(null)
@@ -179,8 +153,6 @@ export function AdminPage() {
     const results = await Promise.allSettled([
       loadDataSourceApprovalTasks(subject),
       loadDatasetApprovalTasks(subject),
-      loadMetricApprovalTasks(),
-      loadDimensionApprovalTasks(),
     ])
     const nextTasks = emptyTasks()
     const nextErrors: Partial<Record<ApprovalCategory, string>> = {}
@@ -334,7 +306,7 @@ export function AdminPage() {
   }
 
   const approve = async () => {
-    if (!selectedTask || selectedTask.category === 'METRIC' || selectedTask.category === 'DIMENSION') return
+    if (!selectedTask) return
     setBusyAction('approve')
     setReviewError('')
     try {
@@ -365,7 +337,7 @@ export function AdminPage() {
   }
 
   const reject = async () => {
-    if (!selectedTask || selectedTask.category === 'METRIC' || selectedTask.category === 'DIMENSION') return
+    if (!selectedTask) return
     if (!reviewNote.trim()) {
       setReviewError('驳回时必须填写明确原因，便于申请人修改后重新提交')
       return
@@ -426,7 +398,7 @@ export function AdminPage() {
       {queueOpen && <div className="workbench-review-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !busyAction) setQueueOpen(false) }}>
         <section className="workbench-review-dialog" role="dialog" aria-modal="true" aria-labelledby="workbench-review-title">
           <header>
-            <div><span className="eyebrow">待处理任务</span><h2 id="workbench-review-title">统一审批中心</h2><p>数据源、数据集、指标和维度治理任务按业务类型集中展示。</p></div>
+            <div><span className="eyebrow">待处理任务</span><h2 id="workbench-review-title">统一审批中心</h2><p>数据源和数据集发布申请按业务类型集中展示。</p></div>
             <button type="button" aria-label="关闭统一审批中心" disabled={Boolean(busyAction)} onClick={() => setQueueOpen(false)}><X size={20} /></button>
           </header>
 
@@ -444,7 +416,7 @@ export function AdminPage() {
             </button>)}
           </nav>
 
-          {tasksLoading ? <div className="workbench-review-empty" role="status">正在加载全部审批分类…</div>
+          {tasksLoading ? <div className="workbench-review-empty" role="status">正在加载审批分类…</div>
             : taskErrors[activeCategory] ? <div className="workbench-review-empty error" role="alert"><strong>{categoryCopy[activeCategory].label}任务加载失败</strong><span>{taskErrors[activeCategory]}</span><button className="quiet-button" type="button" onClick={() => void loadApprovalTasks()}>重新加载全部分类</button></div>
             : activeTasks.length === 0 ? <div className="workbench-review-empty"><CheckCircle size={34} weight="duotone" aria-hidden="true" /><strong>{categoryCopy[activeCategory].empty}</strong><span>{categoryCopy[activeCategory].description}</span>{reviewNotice && <p role="status">{reviewNotice}</p>}</div>
             : <div className="workbench-review-layout">
@@ -476,30 +448,6 @@ export function AdminPage() {
                 onApprove={approve}
                 onReject={reject}
               />}
-              {selectedTask?.category === 'METRIC' && <article className="workbench-review-detail">
-                <div className="workbench-review-heading"><div><span>指标候选审核</span><h3>{selectedTask.candidate.name}</h3></div><em>{metricCandidateStatusLabel[selectedTask.candidate.status] ?? selectedTask.candidate.status}</em></div>
-                <dl>
-                  <div><dt>指标编码</dt><dd>{selectedTask.candidate.code}</dd></div>
-                  <div><dt>生成方式</dt><dd>{selectedTask.candidate.method}</dd></div>
-                  <div><dt>置信度</dt><dd>{Math.round(selectedTask.candidate.confidence * 100)}%</dd></div>
-                  <div><dt>来源字段</dt><dd>{selectedTask.candidate.sourceFieldIds.length} 个</dd></div>
-                </dl>
-                <section className="workbench-review-summary"><strong>业务口径</strong><p>{selectedTask.candidate.semantic?.caliber || selectedTask.candidate.description || '暂无业务口径说明'}</p></section>
-                {selectedTask.candidate.warnings.length > 0 && <section className="workbench-review-summary warning"><strong>复核提示</strong><p>{selectedTask.candidate.warnings.join('；')}</p></section>}
-                <footer><button className="primary-button" type="button" onClick={() => navigate('/assets/metrics?view=candidates')}>前往指标审批</button></footer>
-              </article>}
-              {selectedTask?.category === 'DIMENSION' && <article className="workbench-review-detail">
-                <div className="workbench-review-heading"><div><span>维度候选治理</span><h3>{selectedTask.candidate.proposedName}</h3></div><em>待治理</em></div>
-                <dl>
-                  <div><dt>字段编码</dt><dd>{selectedTask.candidate.fieldCode}</dd></div>
-                  <div><dt>字段用途</dt><dd>{selectedTask.candidate.fieldRole}</dd></div>
-                  <div><dt>维度类型</dt><dd>{selectedTask.candidate.proposedDimensionType}</dd></div>
-                  <div><dt>成员索引</dt><dd>{selectedTask.candidate.proposedMemberIndexPolicy}</dd></div>
-                </dl>
-                <section className="workbench-review-summary"><strong>候选说明</strong><p>{selectedTask.candidate.proposedDescription || '暂无候选说明'}</p></section>
-                {(selectedTask.candidate.riskSensitive || selectedTask.candidate.riskHighCardinality) && <section className="workbench-review-summary warning"><strong>风险标记</strong><p>{[selectedTask.candidate.riskSensitive && '敏感字段', selectedTask.candidate.riskHighCardinality && '高基数字段'].filter(Boolean).join('；')}</p></section>}
-                <footer><button className="primary-button" type="button" onClick={() => navigate('/assets/semantics')}>前往维度治理</button></footer>
-              </article>}
             </div>}
         </section>
       </div>}

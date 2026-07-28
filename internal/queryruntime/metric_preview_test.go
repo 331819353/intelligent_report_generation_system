@@ -140,6 +140,54 @@ func TestMetricSourceEnvelopeAllowsOnlyDeclaredParameterizedDimensionFilter(t *t
 	}
 }
 
+func TestMetricSourceEnvelopeAllowsDeclaredSemanticSetFilter(t *testing.T) {
+	original := singleSourceJoinRuntimeDocument()
+	originalRaw, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err = dataset.DecodeAndNormalize(originalRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	derived := derivedMetricDocument(t, original)
+	field := original.Fields[0]
+	parameterCodes := []string{
+		"semantic_dimension_filter_1", "semantic_dimension_filter_2",
+	}
+	arguments := make([]dataset.Expression, 0, len(parameterCodes))
+	for _, parameterCode := range parameterCodes {
+		derived.Parameters = append(derived.Parameters, dataset.Parameter{
+			Code: parameterCode, Name: "语义维度集合过滤",
+			DataType: field.CanonicalType, Required: true,
+		})
+		arguments = append(arguments, dataset.Expression{
+			Type: "PARAM_REF", Code: parameterCode,
+		})
+	}
+	left := field.Expression
+	right := dataset.Expression{Type: "ARRAY", Arguments: arguments}
+	derived.Filters = append(derived.Filters, dataset.Filter{
+		ID: "semantic_dimension_filter_1", Stage: "PRE_AGGREGATION",
+		Expression: dataset.Expression{
+			Type: "IN", Left: &left, Right: &right,
+		},
+	})
+	candidate := metric.QueryCandidate{FilterBindings: []metric.QueryFilterBinding{{
+		FieldID: field.ID, FilterID: "semantic_dimension_filter_1",
+		ParameterCode: parameterCodes[0], ParameterCodes: parameterCodes,
+		DataType: field.CanonicalType, Operator: "IN",
+	}}}
+	if !sameMetricSourceEnvelope(original, derived, candidate) {
+		t.Fatal("declared semantic set should preserve the source envelope")
+	}
+	candidate.FilterBindings[0].ParameterCodes =
+		append(parameterCodes, "unbound_parameter")
+	if sameMetricSourceEnvelope(original, derived, candidate) {
+		t.Fatal("unbound semantic set parameter must fail the envelope check")
+	}
+}
+
 func TestMetricSourceEnvelopeAllowsExactParameterizedTimeWindow(t *testing.T) {
 	original := singleSourceJoinRuntimeDocument()
 	original.Nodes[0].Projection = append(

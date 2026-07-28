@@ -140,8 +140,11 @@ test('renders the dataset configuration center route and renamed navigation entr
 test('renders the protected asset management semantic route and navigation entry', async () => {
   sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
-    const body = String(input).includes('/permissions/evaluate')
+    const url = String(input)
+    const body = url.includes('/permissions/evaluate')
       ? { allowed: true }
+      : url.includes('/semantic-assets/types')
+      ? { items: ['平台'] }
       : { items: [], total: 0, limit: 200, offset: 0 }
     return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
   }))
@@ -151,10 +154,25 @@ test('renders the protected asset management semantic route and navigation entry
   expect(screen.getByRole('heading', { level: 1, name: '资产管理中心' })).toBeInTheDocument()
   expect(screen.getByRole('link', { name: '资产管理中心' })).toHaveClass('active')
   expect(screen.getByRole('link', { name: '语义资产' })).toHaveClass('active')
-  expect(await screen.findByText('当前筛选下没有维度候选')).toBeInTheDocument()
+  expect(await screen.findByText('当前筛选下没有语义资产')).toBeInTheDocument()
 })
 
-test('opens dimension value mapping directly on the formal dimension directory', async () => {
+test('opens the renamed dimension asset directory', async () => {
+  sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const body = String(input).includes('/permissions/evaluate')
+      ? { allowed: true }
+      : { items: [], total: 0, limit: 200, offset: 0 }
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }))
+
+  render(<MemoryRouter initialEntries={['/assets/dimensions']}><App /></MemoryRouter>)
+
+  expect(screen.getByRole('link', { name: '维度资产' })).toHaveClass('active')
+  expect(await screen.findByText('当前筛选下没有正式维度')).toBeInTheDocument()
+})
+
+test('opens dimension value mapping as a decision graph', async () => {
   sessionStorage.setItem('intelligent-report-auth', JSON.stringify({ accessToken: 'test-access', refreshToken: 'test-refresh' }))
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const body = String(input).includes('/permissions/evaluate')
@@ -165,6 +183,7 @@ test('opens dimension value mapping directly on the formal dimension directory',
 
   render(<MemoryRouter initialEntries={['/assets/dimension-values']}><App /></MemoryRouter>)
 
-  expect(await screen.findByRole('tab', { name: '正式维度与成员' })).toHaveAttribute('aria-selected', 'true')
+  expect(await screen.findByRole('heading', { name: '维度值决策图' })).toBeInTheDocument()
+  expect(screen.getByText(/自动加载当前已发布 DWS 的全部非空治理维度值/)).toBeInTheDocument()
   expect(screen.getByRole('link', { name: '维度值映射' })).toHaveClass('active')
 })

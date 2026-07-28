@@ -74,6 +74,26 @@ func TestMetadataSampleDefaultMigrationUsesTenMaskedRowsWithoutOpeningRawValues(
 	}
 }
 
+func TestExcelUploadQuotaMigrationSeedsExistingAndFutureTenants(t *testing.T) {
+	raw, err := os.ReadFile("../../migrations/000128_excel_upload_default_quota.up.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	sql := string(raw)
+	for _, fragment := range []string{
+		"SET DEFAULT 268435456",
+		"create_default_tenant_data_source_quota",
+		"AFTER INSERT ON platform.tenants",
+		"INSERT INTO platform.tenant_data_source_quotas(tenant_id)",
+		"ON CONFLICT (tenant_id) DO NOTHING",
+		"默认 256 MiB",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Errorf("missing Excel upload quota migration contract %q", fragment)
+		}
+	}
+}
+
 func TestConnectionTestEvidenceMigrationFixesThirtyMinuteTTL(t *testing.T) {
 	raw, err := os.ReadFile("../../migrations/000069_data_source_test_evidence_ttl.up.sql")
 	if err != nil {

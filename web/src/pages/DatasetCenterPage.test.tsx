@@ -15,6 +15,7 @@ beforeEach(() => {
   vi.spyOn(datasetAPI, 'previewCandidate').mockResolvedValue({
     queryId: 'component-preview', dslHash: 'c'.repeat(64), planHash: 'd'.repeat(64),
     columns: ['preview_value'], rows: [['组件预览样本']], rowCount: 1, durationMs: 3,
+    columnMetadata: [{ code: 'preview_value', name: '组件业务字段', nullable: false }],
   })
 })
 afterEach(() => {
@@ -40,7 +41,7 @@ const customerColumns: AssetColumn[] = [
   { id: 'column-hidden-2', tableId: customerTable.id, columnName: 'customer_region', businessName: '客户区域', canonicalType: 'STRING', nullable: true, semanticType: 'REGION' },
 ]
 const aiProposal = (overrides: Partial<DatasetAIProposal> = {}): DatasetAIProposal => ({
-  schemaVersion: '2.3',
+  schemaVersion: '2.4',
   mode: 'CREATE',
   summary: '使用订单表生成可直接预览的明细数据集',
   assumptions: ['订单编号可作为结果主键。'],
@@ -238,12 +239,12 @@ test('数据集支持多选后批量提交发布、停用下架和删除', async
   }
 
   await selectBoth()
-  await user.click(screen.getByRole('button', { name: '批量提交发布' }))
-  const publishDialog = screen.getByRole('dialog', { name: '批量提交发布审批' })
+  await user.click(screen.getByRole('button', { name: '批量提交发布申请' }))
+  const publishDialog = screen.getByRole('dialog', { name: '批量提交发布申请' })
   expect(within(publishDialog).getByText(/不会绕过审批直接上线/)).toBeInTheDocument()
   await user.click(within(publishDialog).getByRole('button', { name: '确认执行' }))
   await waitFor(() => expect(publish).toHaveBeenCalledTimes(2))
-  expect(screen.getByText(/批量提交发布审批完成，共处理 2 个数据集/)).toBeInTheDocument()
+  expect(screen.getByText(/批量提交发布申请完成，共处理 2 个数据集/)).toBeInTheDocument()
 
   await selectBoth()
   await user.click(screen.getByRole('button', { name: '批量停用（下架）' }))
@@ -292,7 +293,15 @@ test('ODS 数据集在目录展示层级与标签，详情展示完整 LLM 元�
   vi.spyOn(datasetAPI, 'allColumns').mockResolvedValue({
     items: [{ ...columns[0], businessDescription: '订单唯一编号', tags: ['主键', '关联字段'], sensitivityLevel: 'INTERNAL', nativeType: 'varchar(64)', ordinalPosition: 1 }],
   })
-  vi.spyOn(datasetAPI, 'preview').mockResolvedValue({ queryId: 'query-1', columns: ['order_id'], rows: [['O001']], rowCount: 1, durationMs: 5 })
+  vi.spyOn(datasetAPI, 'preview').mockResolvedValue({
+    queryId: 'query-1', columns: ['field_1'],
+    columnMetadata: [{
+      fieldId: 'field_order_id', code: 'field_1', name: '订单编号', description: '订单唯一编号',
+      physicalName: 'order_id', canonicalType: 'STRING', semanticType: 'IDENTIFIER', role: 'DIMENSION', nullable: true,
+      groupingPlaceholder: 'ALL',
+    }],
+    rows: [[null]], rowCount: 1, durationMs: 5,
+  })
   const user = userEvent.setup()
   renderPage()
 
@@ -309,6 +318,11 @@ test('ODS 数据集在目录展示层级与标签，详情展示完整 LLM 元�
   expect(within(detailDialog).getByText('sales.sales.orders')).toBeInTheDocument()
   expect(within(detailDialog).getByText('订单唯一编号')).toBeInTheDocument()
   expect(within(detailDialog).getByText('关联字段')).toBeInTheDocument()
+  const previewRegion = within(detailDialog).getByRole('region', { name: '预览数据' })
+  const previewHeader = within(previewRegion).getByRole('columnheader')
+  expect(previewHeader).toHaveTextContent('订单编号')
+  expect(previewHeader).toHaveTextContent('order_id · field_1')
+  expect(within(previewRegion).getByRole('cell')).toHaveTextContent('ALL')
   expect(within(detailDialog).queryByText('映射表数据集')).not.toBeInTheDocument()
 })
 
@@ -414,8 +428,41 @@ test('新建弹窗通过拖拽或点选增加多表节点，确认关系后再�
   const groupingDrawer = within(createDialog).getByLabelText('配置分组组件')
   expect(within(groupingDrawer).getByLabelText('分组组件输入')).toHaveTextContent('关联结果 1')
   expect(within(groupingDrawer).getByLabelText('分组组件输入').tagName).toBe('DIV')
+  expect(within(groupingDrawer).getByLabelText('分组方式')).toHaveValue('STANDARD')
+  expect(within(groupingDrawer).getByLabelText('分组方式')).toHaveTextContent('逐级汇总（GROUP BY ROLLUP）')
+  expect(within(groupingDrawer).getByLabelText('分组方式')).toHaveTextContent('自定义组合（GROUPING SETS）')
+  await user.click(within(groupingDrawer).getByRole('button', { name: '全选分组字段' }))
+  expect(within(groupingDrawer).getByLabelText('分组维度 t1_order_id')).toBeChecked()
+  expect(within(groupingDrawer).getByLabelText('分组维度 t2_customer_id')).toBeChecked()
+  await user.click(within(groupingDrawer).getByRole('button', { name: '取消全选分组字段' }))
+  expect(within(groupingDrawer).getByLabelText('分组维度 t1_order_id')).not.toBeChecked()
+  const metricCheckboxes = within(groupingDrawer).getAllByRole('checkbox', { name: /^聚合指标 / })
+  expect(metricCheckboxes[0]).toHaveAccessibleName('聚合指标 *')
+  await user.click(metricCheckboxes[0])
+  expect(within(groupingDrawer).getByLabelText('* 聚合逻辑')).toHaveValue('COUNT')
+  expect(within(groupingDrawer).queryByLabelText(/统计输入总行数/)).not.toBeInTheDocument()
+  await user.click(metricCheckboxes[0])
+  await user.click(within(groupingDrawer).getByRole('button', { name: '全选聚合指标' }))
+  expect(within(groupingDrawer).getByLabelText('聚合指标 t1_amount')).toBeChecked()
+  expect(within(groupingDrawer).getByLabelText('t1_amount 聚合逻辑')).toHaveValue('SUM')
+  expect(within(groupingDrawer).getByLabelText('t2_customer_name 聚合逻辑')).toHaveValue('COUNT')
+  await user.click(within(groupingDrawer).getByRole('button', { name: '取消全选聚合指标' }))
+  expect(within(groupingDrawer).getByLabelText('聚合指标 t1_amount')).not.toBeChecked()
   await user.click(within(groupingDrawer).getByLabelText('分组维度 t1_order_id'))
   await user.click(within(groupingDrawer).getByLabelText('分组维度 t2_customer_id'))
+  await user.click(within(groupingDrawer).getByLabelText('聚合指标 t1_order_id'))
+  expect(within(groupingDrawer).getByLabelText('分组维度 t1_order_id')).toBeChecked()
+  expect(within(groupingDrawer).getByLabelText('聚合指标 t1_order_id')).toBeChecked()
+  await user.click(within(groupingDrawer).getByLabelText('聚合指标 t1_order_id'))
+  expect(within(groupingDrawer).getByLabelText('分组维度 t1_order_id')).toBeChecked()
+  await user.selectOptions(within(groupingDrawer).getByLabelText('分组方式'), 'GROUPING_SETS')
+  expect(within(groupingDrawer).getByLabelText('分组集 1 维度 t1_order_id')).toBeChecked()
+  expect(within(groupingDrawer).getByLabelText('分组集 1 维度 t2_customer_id')).toBeChecked()
+  await user.click(within(groupingDrawer).getByRole('button', { name: '添加分组集' }))
+  expect(within(groupingDrawer).getByText('总计（空分组集）')).toBeInTheDocument()
+  await user.click(within(groupingDrawer).getByLabelText('分组集 2 维度 t2_customer_id'))
+  await user.selectOptions(within(groupingDrawer).getByLabelText('分组方式'), 'CUBE')
+  expect(within(groupingDrawer).getByText(/明细、小计与总计/)).toBeInTheDocument()
   expect(within(groupingDrawer).getByLabelText('t1_order_id 字段别名')).toHaveTextContent('t1_order_id')
   expect(within(groupingDrawer).getByLabelText('t1_order_id 字段别名').tagName).toBe('OUTPUT')
   expect(within(groupingDrawer).queryByLabelText('t1_order_id 维度名称')).not.toBeInTheDocument()
@@ -452,9 +499,12 @@ test('新建弹窗通过拖拽或点选增加多表节点，确认关系后再�
   expect(((dsl.joins as Array<Record<string, unknown>>)[0].conditions as unknown[])).toHaveLength(2)
   expect(dsl.fields).toHaveLength(4)
   expect(dsl.groupBy).toEqual(['field_t1_order_id', 'field_t2_customer_id'])
+  expect(dsl.groupByMode).toBe('CUBE')
+  expect(dsl.designer?.groups[0]).toMatchObject({ groupByMode: 'CUBE' })
+  expect((dsl.fields as Array<Record<string, unknown>>).filter(field => ['t1_order_id', 't2_customer_id'].includes(String(field.code))).every(field => field.nullable === true)).toBe(true)
   expect((dsl.fields as Array<Record<string, unknown>>).find(field => field.code === 't1_amount')).toMatchObject({ role: 'MEASURE', expression: { type: 'AGGREGATE', function: 'SUM' } })
   expect((dsl.fields as Array<Record<string, unknown>>).find(field => field.code === 't2_customer_name')).toMatchObject({ role: 'MEASURE', expression: { type: 'AGGREGATE', function: 'COUNT' } })
-  expect(await screen.findByRole('status')).toHaveTextContent('已创建“订单明细”')
+  expect(await screen.findByRole('status')).toHaveTextContent('已保存“订单明细”')
 })
 
 test('组件栏位于画布左侧且每个已放置组件都可从卡片下方预览最多五行', async () => {
@@ -477,18 +527,20 @@ test('组件栏位于画布左侧且每个已放置组件都可从卡片下方�
 
   const palette = within(dialog).getByLabelText('画布组件栏')
   expect(palette.tagName).toBe('ASIDE')
-  expect(within(palette).getAllByRole('button')).toHaveLength(16)
+  expect(within(palette).getAllByRole('button')).toHaveLength(19)
   const buttonLabels = (groupName: string) => within(within(palette).getByLabelText(groupName)).getAllByRole('button').map(button => button.querySelector('strong')?.textContent)
   expect(buttonLabels('流程组件')).toEqual(['分组组件', '关联组件', '结束节点'])
   expect(buttonLabels('文本组件')).toEqual(['大写转换', '空格清理', '文本替换', '小写转换', '字段截取', '字段拼接'])
   expect(buttonLabels('数值组件')).toEqual(['取绝对值', '数值取整', '数值运算'])
-  expect(buttonLabels('日期组件')).toEqual(['日期转换'])
-  expect(buttonLabels('规则组件')).toEqual(['空值填充', '类型转换', '条件映射'])
+  expect(buttonLabels('日期组件')).toEqual(['日期计算', '日期转换'])
+  expect(buttonLabels('分析组件')).toEqual(['窗口计算'])
+  expect(buttonLabels('规则组件')).toEqual(['过滤组件', '空值填充', '类型转换', '条件映射'])
   expect(Array.from(palette.querySelectorAll<SVGElement>('button > svg[data-component-icon]')).map(icon => icon.dataset.componentIcon)).toEqual([
     'GROUP', 'JOIN', 'END',
+    'DATE_CALCULATION', 'DATE_FORMAT',
     'TEXT_UPPER', 'TEXT_TRIM', 'TEXT_REPLACE', 'TEXT_LOWER', 'TEXT_SUBSTRING', 'TEXT_CONCAT',
     'NUMBER_ABSOLUTE', 'NUMBER_ROUNDING', 'NUMBER_ARITHMETIC',
-    'DATE_FORMAT', 'NULL', 'CAST', 'CONDITION',
+    'WINDOW_FUNCTION', 'FILTER', 'NULL', 'CAST', 'CONDITION',
   ])
   expect(within(palette).getByLabelText('文本组件')).toHaveClass('component-text')
   expect(within(palette).getByLabelText('数值组件')).toHaveClass('component-number')
@@ -524,6 +576,9 @@ test('组件栏位于画布左侧且每个已放置组件都可从卡片下方�
   const previewDialog = await within(dialog).findByRole('dialog', { name: /订单表.*数据预览/ })
   expect(await within(previewDialog).findByText('R005')).toBeInTheDocument()
   expect(within(previewDialog).queryByText('R006')).not.toBeInTheDocument()
+  const previewHeader = within(previewDialog).getByRole('columnheader')
+  expect(previewHeader).toHaveTextContent('订单编号')
+  expect(previewHeader).toHaveTextContent('order_id')
 })
 
 test('细粒度文本与数值组件各自只暴露对应处理逻辑并沿用同类颜色', async () => {
@@ -561,6 +616,165 @@ test('细粒度文本与数值组件各自只暴露对应处理逻辑并沿用�
     else expect(within(drawer).getByLabelText('规则 1 处理逻辑')).toBeEnabled()
     await user.click(within(drawer).getByRole('button', { name: '完成' }))
   }
+})
+
+test('条件映射、空值填充和日期计算均提供 SQL CURRENT_DATE 数据来源', async () => {
+  const dateColumns: AssetColumn[] = [
+    ...columns,
+    { id: 'column-date', tableId: table.id, columnName: 'created_at', businessName: '创建日期', canonicalType: 'DATE', nullable: true, semanticType: 'DATE' },
+  ]
+  vi.spyOn(datasetAPI, 'list').mockResolvedValue(page([]))
+  vi.spyOn(datasetAPI, 'mappingTables').mockResolvedValue({ items: [table] })
+  vi.spyOn(datasetAPI, 'columns').mockResolvedValue({ items: dateColumns })
+  const user = userEvent.setup()
+  renderPage()
+
+  await screen.findByText('还没有数据集')
+  await user.click(screen.getByRole('button', { name: '新建数据集' }))
+  const dialog = await screen.findByRole('dialog', { name: '新建数据集' })
+  await user.click(within(dialog).getByRole('button', { name: /订单表.*已映射/ }))
+  await user.click(within(await within(dialog).findByLabelText('配置表 订单表')).getByRole('button', { name: '完成' }))
+
+  await user.click(within(dialog).getByRole('button', { name: /日期计算日期差、CURRENT_DATE 与周期首末日/ }))
+  const dateCard = within(dialog).getByRole('button', { name: '打开日期计算 1 配置' })
+  connectByLine(dialog, { kind: 'NODE', id: 'node_1' }, dateCard)
+  const dateDrawer = within(dialog).getByLabelText('配置日期计算')
+  expect(within(dateDrawer).getByLabelText('规则 1 开始日期来源')).toHaveTextContent('SQL CURRENT_DATE')
+  expect(within(dateDrawer).getByLabelText('规则 1 结束日期来源')).toHaveTextContent('SQL CURRENT_DATE')
+  await user.selectOptions(within(dateDrawer).getByLabelText('规则 1 结束日期来源'), 'CURRENT_DATE')
+  expect(within(dateDrawer).queryByLabelText('规则 1 结束日期字段')).not.toBeInTheDocument()
+  await user.click(within(dateDrawer).getByRole('button', { name: '完成' }))
+
+  await user.click(within(dialog).getByRole('button', { name: /空值填充为空时补固定值、字段或 CURRENT_DATE/ }))
+  const nullCard = within(dialog).getByRole('button', { name: '打开空值填充 2 配置' })
+  connectByLine(dialog, { kind: 'NODE', id: 'node_1' }, nullCard)
+  const nullDrawer = within(dialog).getByLabelText('配置空值填充')
+  await user.selectOptions(within(nullDrawer).getByLabelText('规则 1 输入字段 1'), 'node_1.created_at')
+  expect(within(nullDrawer).getByLabelText('规则 1 补值来源')).toHaveTextContent('SQL CURRENT_DATE')
+  await user.selectOptions(within(nullDrawer).getByLabelText('规则 1 补值来源'), 'CURRENT_DATE')
+  expect(within(nullDrawer).queryByLabelText('规则 1 空值填充值')).not.toBeInTheDocument()
+  expect(within(nullDrawer).getByText('生成 SQL 时使用数据库原生 CURRENT_DATE')).toBeInTheDocument()
+  await user.click(within(nullDrawer).getByRole('button', { name: '完成' }))
+
+  await user.click(within(dialog).getByRole('button', { name: /条件映射按条件输出固定值、原字段或 CURRENT_DATE/ }))
+  const conditionCard = within(dialog).getByRole('button', { name: '打开条件映射 3 配置' })
+  connectByLine(dialog, { kind: 'NODE', id: 'node_1' }, conditionCard)
+  const conditionDrawer = within(dialog).getByLabelText('配置条件映射')
+  expect(within(conditionDrawer).getByLabelText('规则 1 命中值来源')).toHaveTextContent('SQL CURRENT_DATE')
+  expect(within(conditionDrawer).getByLabelText('规则 1 未命中值来源')).toHaveTextContent('SQL CURRENT_DATE')
+  await user.selectOptions(within(conditionDrawer).getByLabelText('规则 1 命中值来源'), 'CURRENT_DATE')
+  expect(within(conditionDrawer).queryByLabelText('规则 1 命中值')).not.toBeInTheDocument()
+})
+
+test('窗口计算组件配置 OVER 的分区、排序与排名函数', async () => {
+  vi.spyOn(datasetAPI, 'list').mockResolvedValue(page([]))
+  vi.spyOn(datasetAPI, 'mappingTables').mockResolvedValue({ items: [table] })
+  vi.spyOn(datasetAPI, 'columns').mockResolvedValue({ items: columns })
+  const user = userEvent.setup()
+  renderPage()
+
+  await screen.findByText('还没有数据集')
+  await user.click(screen.getByRole('button', { name: '新建数据集' }))
+  const dialog = await screen.findByRole('dialog', { name: '新建数据集' })
+  await user.click(within(dialog).getByRole('button', { name: /订单表.*已映射/ }))
+  await user.click(within(await within(dialog).findByLabelText('配置表 订单表')).getByRole('button', { name: '完成' }))
+  await user.click(within(dialog).getByRole('button', { name: /窗口计算按分区与排序排名或聚合/ }))
+
+  const card = within(dialog).getByRole('button', { name: '打开窗口计算 1 配置' })
+  expect(card).toHaveClass('component-window')
+  connectByLine(dialog, { kind: 'NODE', id: 'node_1' }, card)
+  const drawer = within(dialog).getByLabelText('配置窗口计算')
+  expect(drawer).toHaveClass('component-window')
+  expect(within(drawer).getByLabelText('规则 1 处理逻辑')).toHaveValue('WINDOW')
+  expect(within(drawer).getByLabelText('规则 1 窗口函数')).toHaveValue('ROW_NUMBER')
+  expect(within(drawer).getByLabelText('规则 1 分区字段 t1_order_id')).toBeChecked()
+  expect(within(drawer).getByLabelText('规则 1 排序字段 1')).toHaveValue('node_1.amount')
+
+  await user.selectOptions(within(drawer).getByLabelText('规则 1 窗口函数'), 'SUM')
+  expect(within(drawer).getByLabelText('规则 1 窗口计算字段')).toHaveValue('node_1.amount')
+  expect(within(drawer).getByText(/SUM\(字段\) OVER \(PARTITION BY/)).toBeInTheDocument()
+  expect(within(drawer).getByLabelText('规则 1 输出名称')).toHaveValue('分区合计')
+  await user.selectOptions(within(drawer).getByLabelText('规则 1 窗口函数'), 'DENSE_RANK')
+  await user.selectOptions(within(drawer).getByLabelText('规则 1 排序方向 1'), 'DESC')
+  expect(within(drawer).getByText(/DENSE_RANK\(\) OVER \(PARTITION BY/)).toBeInTheDocument()
+  expect(within(drawer).getByLabelText('规则 1 输出名称')).toHaveValue('分区密集排名')
+  expect(within(drawer).getByLabelText('规则 1 输出编码')).toHaveValue('partition_dense_rank')
+  await user.click(within(drawer).getByRole('button', { name: '完成' }))
+  expect(within(dialog).getByRole('button', { name: '从窗口计算 1 拖出连接' })).toHaveAttribute('aria-disabled', 'false')
+})
+
+test('过滤组件支持固定值和字段关系 WHERE 过滤并透传原字段', async () => {
+  vi.spyOn(datasetAPI, 'list').mockResolvedValueOnce(page([])).mockResolvedValueOnce(page([summary()]))
+  vi.spyOn(datasetAPI, 'mappingTables').mockResolvedValue({ items: [table] })
+  vi.spyOn(datasetAPI, 'columns').mockResolvedValue({ items: columns })
+  vi.spyOn(datasetAPI, 'validate').mockResolvedValue({ valid: true, dslHash: 'a'.repeat(64), planHash: 'b'.repeat(64), logicalPlan: {} })
+  const create = vi.spyOn(datasetAPI, 'create').mockResolvedValue(record())
+  const user = userEvent.setup()
+  renderPage()
+
+  await screen.findByText('还没有数据集')
+  await user.click(screen.getByRole('button', { name: '新建数据集' }))
+  const dialog = await screen.findByRole('dialog', { name: '新建数据集' })
+  await user.click(within(dialog).getByRole('button', { name: /订单表.*已映射/ }))
+  await user.click(within(await within(dialog).findByLabelText('配置表 订单表')).getByRole('button', { name: '完成' }))
+  await user.click(within(dialog).getByRole('button', { name: /过滤组件按固定值或字段关系筛选数据行/ }))
+
+  const card = within(dialog).getByRole('button', { name: '打开过滤组件 1 配置' })
+  connectByLine(dialog, { kind: 'NODE', id: 'node_1' }, card)
+  const drawer = within(dialog).getByLabelText('配置过滤组件')
+  expect(within(drawer).getByLabelText('过滤组件输入')).toHaveTextContent('订单表 (t1)')
+  await user.selectOptions(within(drawer).getByLabelText('过滤条件 1 字段'), 'node_1.amount')
+  await user.selectOptions(within(drawer).getByLabelText('过滤条件 1 运算符'), 'GTE')
+  await user.type(within(drawer).getByLabelText('过滤条件 1 值'), '100.50')
+  await user.click(within(drawer).getByRole('button', { name: '添加过滤条件' }))
+  await user.selectOptions(within(drawer).getByLabelText('过滤条件 2 字段'), 'node_1.order_id')
+  await user.selectOptions(within(drawer).getByLabelText('过滤条件 2 运算符'), 'NOT_EQUALS')
+  await user.selectOptions(within(drawer).getByLabelText('过滤条件 2 比较对象'), 'FIELD')
+  await user.selectOptions(within(drawer).getByLabelText('过滤条件 2 比较字段'), 'node_1.order_note')
+  await user.click(within(drawer).getByRole('button', { name: '完成' }))
+
+  connectByLine(dialog, { kind: 'TRANSFORM', id: 'transform_1' }, within(dialog).getByRole('button', { name: '连接到结束节点输入槽位' }))
+  expect(within(dialog).getByRole('button', { name: '从过滤组件 1 拖出连接' })).toHaveAttribute('aria-disabled', 'false')
+  await user.click(within(dialog).getByRole('button', { name: '保存配置' }))
+  const metadataDialog = screen.getByRole('dialog', { name: '完善数据集信息' })
+  await user.type(within(metadataDialog).getByLabelText('业务领域'), '交易')
+  await user.type(within(metadataDialog).getByLabelText('数据集名称'), '高金额订单')
+  await user.type(within(metadataDialog).getByLabelText('数据集说明'), '只保留金额不低于一百元的订单')
+  await user.click(within(metadataDialog).getByRole('button', { name: '创建数据集' }))
+
+  const dsl = create.mock.calls[0][0]
+  expect(dsl.filters).toEqual([
+    expect.objectContaining({
+      id: 'transform_1_condition_1',
+      stage: 'PRE_AGGREGATION',
+      expression: {
+        type: 'GTE',
+        left: { type: 'FIELD_REF', nodeId: 'node_1', field: 'amount' },
+        right: { type: 'LITERAL', value: 100.5 },
+      },
+    }),
+    expect.objectContaining({
+      id: 'transform_1_condition_2',
+      stage: 'PRE_AGGREGATION',
+      expression: {
+        type: 'NOT_EQUALS',
+        left: { type: 'FIELD_REF', nodeId: 'node_1', field: 'order_id' },
+        right: { type: 'FIELD_REF', nodeId: 'node_1', field: 'order_note' },
+      },
+    }),
+  ])
+  expect(dsl.designer?.transforms?.[0]).toMatchObject({
+    componentType: 'FILTER',
+    input: { kind: 'NODE', id: 'node_1' },
+    conditions: [
+      { inputKey: 'node_1.amount', operator: 'GTE', value: '100.50' },
+      { inputKey: 'node_1.order_id', operator: 'NOT_EQUALS', valueMode: 'FIELD', value: 'node_1.order_note' },
+    ],
+  })
+  expect(dsl.fields.map(field => field.expression)).toEqual(expect.arrayContaining([
+    { type: 'FIELD_REF', nodeId: 'node_1', field: 'order_id' },
+    { type: 'FIELD_REF', nodeId: 'node_1', field: 'amount' },
+  ]))
 })
 
 test('组件左右半区分别承担接收与拖出连线，点击热区仍打开组件配置', async () => {
@@ -755,7 +969,11 @@ test('字段截取组件可选择数值上游字段并保存类型安全的截�
 test('条件映射、空值填充、字段拼接与字段截取提供完整且符合直觉的配置', async () => {
   vi.spyOn(datasetAPI, 'list').mockResolvedValue(page([]))
   vi.spyOn(datasetAPI, 'mappingTables').mockResolvedValue({ items: [table] })
-  vi.spyOn(datasetAPI, 'columns').mockResolvedValue({ items: columns })
+  vi.spyOn(datasetAPI, 'columns').mockResolvedValue({ items: [
+    ...columns,
+    { id: 'column-date-default', tableId: table.id, columnName: 'created_at', businessName: '创建日期', canonicalType: 'DATE', nullable: true, semanticType: 'DATE' },
+    { id: 'column-bool-default', tableId: table.id, columnName: 'is_active', businessName: '是否有效', canonicalType: 'BOOLEAN', nullable: true, semanticType: 'FLAG' },
+  ] })
   const user = userEvent.setup()
   renderPage()
 
@@ -765,7 +983,7 @@ test('条件映射、空值填充、字段拼接与字段截取提供完整且�
   await user.click(within(dialog).getByRole('button', { name: /订单表.*已映射/ }))
   await user.click(within(await within(dialog).findByLabelText('配置表 订单表')).getByRole('button', { name: '完成' }))
 
-  await user.click(within(dialog).getByRole('button', { name: /条件映射按比较条件输出新值/ }))
+  await user.click(within(dialog).getByRole('button', { name: /条件映射按条件输出固定值、原字段或 CURRENT_DATE/ }))
   connectByLine(dialog, { kind: 'NODE', id: 'node_1' }, within(dialog).getByRole('button', { name: '打开条件映射 1 配置' }))
   let drawer = within(dialog).getByLabelText('配置条件映射')
   const operator = within(drawer).getByLabelText('规则 1 判断条件')
@@ -810,16 +1028,20 @@ test('条件映射、空值填充、字段拼接与字段截取提供完整且�
   await user.click(within(dialog).getByRole('button', { name: '关闭组件数据预览' }))
   await user.click(within(drawer).getByRole('button', { name: '完成' }))
 
-  await user.click(within(dialog).getByRole('button', { name: /空值填充仅为空时补固定值或字段/ }))
+  await user.click(within(dialog).getByRole('button', { name: /空值填充为空时补固定值、字段或 CURRENT_DATE/ }))
   connectByLine(dialog, { kind: 'NODE', id: 'node_1' }, within(dialog).getByRole('button', { name: '打开空值填充 2 配置' }))
   drawer = within(dialog).getByLabelText('配置空值填充')
   expect(within(drawer).getByLabelText('规则 1 补值来源')).toHaveValue('LITERAL')
-  expect(within(drawer).getByLabelText('规则 1 空值填充值')).toHaveValue('-')
+  expect(within(drawer).getByLabelText('规则 1 空值填充值')).toHaveValue('UNKNOWN')
   expect(within(drawer).queryByLabelText('规则 1 输入字段 2')).not.toBeInTheDocument()
   await user.selectOptions(within(drawer).getByLabelText('规则 1 输入字段 1'), 'node_1.amount')
-  expect(within(drawer).getByLabelText('规则 1 空值填充值')).toHaveValue('0')
+  expect(within(drawer).getByLabelText('规则 1 空值填充值')).toHaveValue('999999999')
+  await user.selectOptions(within(drawer).getByLabelText('规则 1 输入字段 1'), 'node_1.created_at')
+  expect(within(drawer).getByLabelText('规则 1 空值填充值')).toHaveValue('1970-01-01')
+  await user.selectOptions(within(drawer).getByLabelText('规则 1 输入字段 1'), 'node_1.is_active')
+  expect(within(drawer).getByLabelText('规则 1 空值填充值')).toHaveValue('False')
   await user.selectOptions(within(drawer).getByLabelText('规则 1 补值来源'), 'FIELD')
-  expect(within(drawer).getByLabelText('规则 1 输入字段 2')).toHaveValue('node_1.amount')
+  expect(within(drawer).getByLabelText('规则 1 输入字段 2')).toHaveValue('node_1.is_active')
   await user.selectOptions(within(drawer).getByLabelText('规则 1 补值来源'), 'LITERAL')
   expect(within(drawer).queryByLabelText('规则 1 输入字段 2')).not.toBeInTheDocument()
   await user.clear(within(drawer).getByLabelText('规则 1 空值填充值'))
@@ -1473,6 +1695,9 @@ test('支持多个命名分组产物并由结束节点定义最终输出', async
   await user.click(within(dialog).getByRole('button', { name: '预览结束节点数据' }))
   const endPreview = await within(dialog).findByRole('dialog', { name: '最终输出数据预览' })
   expect(await within(endPreview).findByText('组件预览样本')).toBeInTheDocument()
+  const previewHeader = within(endPreview).getByRole('columnheader')
+  expect(previewHeader).toHaveTextContent('组件业务字段')
+  expect(previewHeader).toHaveTextContent('preview_value')
   expect(datasetAPI.previewCandidate).toHaveBeenCalledWith(expect.objectContaining({
     designer: expect.objectContaining({ end: expect.objectContaining({ input: { kind: 'JOIN', id: 'join_1' } }) }),
   }), expect.any(String), {}, 5)
@@ -1662,7 +1887,7 @@ test('可点击条目查看、停用、恢复并二次确认删除数据集', as
   expect(await screen.findByText('还没有数据集')).toBeInTheDocument()
 })
 
-test('发布按钮冻结当前草稿，审批通过后才生成精确发布版本', async () => {
+test('发布申请与发布审批使用独立窗口，审批通过后才生成精确发布版本', async () => {
   const pending = publicationRequest({ requestNote: '用于月度区域销售额指标' })
   const approved = publicationRequest({
     status: 'APPROVED', version: 2, requestNote: pending.requestNote, reviewerId: 'approver-1',
@@ -1674,6 +1899,7 @@ test('发布按钮冻结当前草稿，审批通过后才生成精确发布版�
   vi.spyOn(datasetAPI, 'listPublicationRequests')
     .mockResolvedValueOnce({ items: [], total: 0, limit: 50, offset: 0 })
     .mockResolvedValueOnce({ items: [pending], total: 1, limit: 50, offset: 0 })
+    .mockResolvedValueOnce({ items: [pending], total: 1, limit: 50, offset: 0 })
     .mockResolvedValueOnce({ items: [approved], total: 1, limit: 50, offset: 0 })
   const submit = vi.spyOn(datasetAPI, 'requestPublication').mockResolvedValue(pending)
   const approve = vi.spyOn(datasetAPI, 'approvePublication').mockResolvedValue({ request: approved, publishedVersion: publishedDatasetVersion() })
@@ -1681,23 +1907,28 @@ test('发布按钮冻结当前草稿，审批通过后才生成精确发布版�
   renderPage()
 
   await screen.findByRole('heading', { level: 3, name: '订单明细' })
-  await user.click(within(cardFor('订单明细')).getByRole('button', { name: '发布' }))
-  const dialog = await screen.findByRole('dialog', { name: '订单明细 · 发布审批' })
-  await user.type(within(dialog).getByLabelText('申请说明（选填）'), pending.requestNote)
-  await user.click(within(dialog).getByRole('button', { name: '提交发布审批' }))
+  await user.click(within(cardFor('订单明细')).getByRole('button', { name: '发布申请' }))
+  const requestDialog = await screen.findByRole('dialog', { name: '订单明细 · 发布申请' })
+  expect(within(requestDialog).queryByRole('button', { name: '审批通过并启动加工' })).not.toBeInTheDocument()
+  await user.type(within(requestDialog).getByLabelText('申请说明（选填）'), pending.requestNote)
+  await user.click(within(requestDialog).getByRole('button', { name: '提交发布申请' }))
 
   expect(submit).toHaveBeenCalledWith('dataset-1', {
     draftVersionId: 'draft-1', expectedVersion: 4, expectedDraftRecordVersion: 2,
     expectedDslHash: 'a'.repeat(64), validationParameters: {},
   }, pending.requestNote)
-  expect(await within(dialog).findByText('当前精确草稿已经在审批中，无需重复提交。')).toBeInTheDocument()
-  await user.type(within(dialog).getByLabelText('审批意见'), '校验通过')
-  await user.click(within(dialog).getByRole('button', { name: '审批通过并启动加工' }))
+  expect(await within(requestDialog).findByText('当前精确草稿已经在审批中，无需重复提交。')).toBeInTheDocument()
+  await user.click(within(requestDialog).getByRole('button', { name: '关闭' }))
+
+  await user.click(within(cardFor('订单明细')).getByRole('button', { name: '发布审批' }))
+  const reviewDialog = await screen.findByRole('dialog', { name: '订单明细 · 发布审批' })
+  expect(within(reviewDialog).queryByRole('button', { name: '提交发布申请' })).not.toBeInTheDocument()
+  await user.type(within(reviewDialog).getByLabelText('审批意见'), '校验通过')
+  await user.click(within(reviewDialog).getByRole('button', { name: '审批通过并启动加工' }))
 
   expect(approve).toHaveBeenCalledWith('dataset-1', pending.id, pending.version, '校验通过')
-  expect(await within(dialog).findByText('当前精确草稿已审批发布。再次修改并保存后可提交新的审批。')).toBeInTheDocument()
-  expect(within(dialog).getByText(/后台加工已启动/)).toBeInTheDocument()
-  expect(within(dialog).getByText('published-version-2')).toBeInTheDocument()
+  expect(await within(reviewDialog).findByText(/后台加工已启动/)).toBeInTheDocument()
+  expect(within(reviewDialog).getByText('published-version-2')).toBeInTheDocument()
 })
 
 test('指标改造数据集审批完成后可带回原始需求继续生成', async () => {
@@ -1721,8 +1952,8 @@ test('指标改造数据集审批完成后可带回原始需求继续生成', as
   </Routes></MemoryRouter>)
 
   await screen.findByRole('heading', { level: 3, name: '订单明细' })
-  await user.click(within(cardFor('订单明细')).getByRole('button', { name: '发布' }))
-  const dialog = await screen.findByRole('dialog', { name: '订单明细 · 发布审批' })
+  await user.click(within(cardFor('订单明细')).getByRole('button', { name: '发布申请' }))
+  const dialog = await screen.findByRole('dialog', { name: '订单明细 · 发布申请' })
   await user.click(await within(dialog).findByRole('button', { name: '返回资产管理中心继续生成' }))
 
   const route = JSON.parse((await screen.findByLabelText('当前路由')).textContent || '{}')
@@ -1759,7 +1990,7 @@ test('修改数据集继续使用配置中心画板并保存当前版本', async
       dataset: { ...editable.dsl.dataset, description: '更新后的订单业务说明' },
     },
   })
-  vi.spyOn(datasetAPI, 'get').mockResolvedValueOnce(editable).mockResolvedValueOnce(persisted)
+  vi.spyOn(datasetAPI, 'get').mockResolvedValueOnce(editable)
   vi.spyOn(datasetAPI, 'mappingTables').mockResolvedValue({ items: [table] })
   vi.spyOn(datasetAPI, 'columns').mockResolvedValue({ items: columns })
   vi.spyOn(datasetAPI, 'validate').mockResolvedValue({ valid: true, dslHash: 'a'.repeat(64), planHash: 'b'.repeat(64), logicalPlan: {} })
@@ -1768,7 +1999,7 @@ test('修改数据集继续使用配置中心画板并保存当前版本', async
     rows: [['P001', 10], ['P002', 20], ['P003', 30], ['P004', 40], ['P005', 50], ['P006', 60]],
     rowCount: 6, durationMs: 5,
   })
-  const update = vi.spyOn(datasetAPI, 'update').mockResolvedValue(editable)
+  const update = vi.spyOn(datasetAPI, 'update').mockResolvedValue(persisted)
   const user = userEvent.setup()
   renderPage()
 
@@ -1818,7 +2049,7 @@ test('修改数据集继续使用配置中心画板并保存当前版本', async
     expect.objectContaining({ name: '订单明细', description: '更新后的订单业务说明', domain: '运营', subject: '订单履约', code: 'orders_detail' }),
     expect.objectContaining({ dataset: expect.objectContaining({ domain: '运营', subject: '订单履约' }) }),
   )
-  expect(datasetAPI.get).toHaveBeenCalledTimes(2)
+  expect(datasetAPI.get).toHaveBeenCalledTimes(1)
   expect(await screen.findByRole('status')).toHaveTextContent('已保存“订单明细”的最新配置')
 })
 
@@ -1976,7 +2207,11 @@ test('AI 生成期间继续手工编辑时拒绝展示过期方案', async () =>
   const dialog = await screen.findByRole('dialog', { name: '新建数据集' })
   await user.type(within(dialog).getByLabelText('描述数据集生成或修改目标'), '生成订单数据集')
   await user.click(within(dialog).getByRole('button', { name: 'AI 生成流程' }))
-  expect(within(dialog).getByRole('status')).toHaveTextContent('正在理解业务目标并规划 DAG')
+  const progress = within(dialog).getByRole('status')
+  expect(progress).toHaveTextContent('正在理解业务目标并规划 DAG')
+  const generationLog = within(progress).getByRole('log', { name: 'AI 生成日志' })
+  expect(generationLog).toHaveTextContent('正在建立后端进度通道')
+  expect(generationLog).not.toHaveTextContent('已接收数据结果生成要求')
 
   await user.click(within(dialog).getByRole('button', { name: /订单表.*已映射/ }))
   expect(await within(dialog).findByLabelText('配置表 订单表')).toBeInTheDocument()
@@ -2000,6 +2235,81 @@ test('AI 生成期间继续手工编辑时拒绝展示过期方案', async () =>
   expect(retryBody.instruction).toBe('基于当前画布重新生成订单数据集')
   expect(retryBody.current.nodes).toEqual([expect.objectContaining({ id: 'node_1', tableId: table.id })])
   expect(retry).toBeDisabled()
+})
+
+test('新建但未保存的完整画布作为 AI 修改基线提交', async () => {
+  vi.spyOn(datasetAPI, 'list').mockResolvedValue(page([]))
+  vi.spyOn(datasetAPI, 'mappingTables').mockResolvedValue({ items: [table] })
+  vi.spyOn(datasetAPI, 'columns').mockResolvedValue({ items: columns })
+  const fetchMock = vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: async () => ({ requestId: 'ai-unsaved-current', proposal: aiProposal({ mode: 'MODIFY' }) }),
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  const user = userEvent.setup()
+  renderPage()
+
+  await screen.findByText('还没有数据集')
+  await user.click(screen.getByRole('button', { name: '新建数据集' }))
+  const dialog = await screen.findByRole('dialog', { name: '新建数据集' })
+  await user.click(within(dialog).getByRole('button', { name: /订单表.*已映射/ }))
+  await user.click(within(await within(dialog).findByLabelText('配置表 订单表')).getByRole('button', { name: '完成' }))
+  await user.click(within(dialog).getByRole('button', { name: /分组组件可添加多个/ }))
+  connectByLine(dialog, { kind: 'NODE', id: 'node_1' }, within(dialog).getByRole('button', { name: '连接到分组组件 1 输入槽位' }))
+  const groupDrawer = within(dialog).getByLabelText('配置分组组件')
+  await user.click(within(groupDrawer).getByLabelText('分组维度 t1_order_id'))
+  await user.click(within(groupDrawer).getByLabelText('聚合指标 t1_amount'))
+  await user.selectOptions(within(groupDrawer).getByLabelText('t1_amount 聚合逻辑'), 'SUM')
+  await user.click(within(groupDrawer).getByRole('button', { name: '完成' }))
+  connectByLine(dialog, { kind: 'GROUP', id: 'group_1' }, within(dialog).getByRole('button', { name: '连接到结束节点输入槽位' }))
+
+  await user.type(within(dialog).getByLabelText('描述数据集生成或修改目标'), '在当前流程中增加空值处理')
+  await user.click(within(dialog).getByRole('button', { name: 'AI 修改流程' }))
+  await within(dialog).findByRole('heading', { level: 3, name: '使用订单表生成可直接预览的明细数据集' })
+
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+  expect(path).toBe('/api/v1/datasets/ai/proposals')
+  const body = JSON.parse(String(init.body)) as {
+    current: {
+      nodes: Array<{ id: string; tableId: string }>
+      groups: Array<{ id: string; input: TestGraphInput; dimensions: unknown[]; metrics: unknown[] }>
+      end: { input: TestGraphInput }
+    }
+  }
+  expect(body.current.nodes).toEqual([expect.objectContaining({ id: 'node_1', tableId: table.id })])
+  expect(body.current.groups).toEqual([expect.objectContaining({
+    id: 'group_1',
+    input: { kind: 'NODE', id: 'node_1' },
+    dimensions: [expect.objectContaining({ nodeId: 'node_1', column: 'order_id' })],
+    metrics: [expect.objectContaining({ nodeId: 'node_1', column: 'amount', aggregation: 'SUM' })],
+  })])
+  expect(body.current.end.input).toEqual({ kind: 'GROUP', id: 'group_1' })
+})
+
+test('未保存画布包含未配置组件时不静默丢弃后提交 AI', async () => {
+  vi.spyOn(datasetAPI, 'list').mockResolvedValue(page([]))
+  vi.spyOn(datasetAPI, 'mappingTables').mockResolvedValue({ items: [table] })
+  vi.spyOn(datasetAPI, 'columns').mockResolvedValue({ items: columns })
+  const fetchMock = vi.fn()
+  vi.stubGlobal('fetch', fetchMock)
+  const user = userEvent.setup()
+  renderPage()
+
+  await screen.findByText('还没有数据集')
+  await user.click(screen.getByRole('button', { name: '新建数据集' }))
+  const dialog = await screen.findByRole('dialog', { name: '新建数据集' })
+  await user.click(within(dialog).getByRole('button', { name: /订单表.*已映射/ }))
+  await user.click(within(await within(dialog).findByLabelText('配置表 订单表')).getByRole('button', { name: '完成' }))
+  await user.click(within(dialog).getByRole('button', { name: /空值填充为空时补固定值、字段或 CURRENT_DATE/ }))
+
+  await user.type(within(dialog).getByLabelText('描述数据集生成或修改目标'), '调整当前流程')
+  await user.click(within(dialog).getByRole('button', { name: 'AI 修改流程' }))
+
+  expect(within(dialog).getByRole('alert')).toHaveTextContent('当前未保存画布中存在尚未完成配置或连线的组件')
+  expect(within(dialog).getByRole('alert')).toHaveTextContent('完整画布会作为 current 基线发送')
+  expect(fetchMock).not.toHaveBeenCalled()
 })
 
 test('AI 方案应用后结束节点按点击执行当前候选 DSL 并展示新预览', async () => {
@@ -2223,7 +2533,7 @@ test('同一指标路由返回后不会再次自动生成方案', async () => {
   expect(fetchMock).toHaveBeenCalledTimes(1)
 })
 
-test('指标新建数据集提案预填 AI 目标，保存后保留返回信息并直接进入发布审批', async () => {
+test('指标新建数据集提案预填 AI 目标，保存后保留返回信息并直接进入发布申请', async () => {
   const user = userEvent.setup()
   const instruction = '以订单映射表为来源新建普通数据集，输出订单编号与销售额。'
   const requirement = '创建月度各区域销售额指标。'
@@ -2272,8 +2582,8 @@ test('指标新建数据集提案预填 AI 目标，保存后保留返回信息�
   await user.type(within(metadataDialog).getByLabelText('数据集说明'), saved.description)
   await user.click(within(metadataDialog).getByRole('button', { name: '创建数据集' }))
 
-  const publicationDialog = await screen.findByRole('dialog', { name: `${saved.name} · 发布审批` })
-  expect(within(publicationDialog).getByRole('button', { name: '提交发布审批' })).toBeEnabled()
+  const publicationDialog = await screen.findByRole('dialog', { name: `${saved.name} · 发布申请` })
+  expect(within(publicationDialog).getByRole('button', { name: '提交发布申请' })).toBeEnabled()
   await waitFor(() => expect(JSON.parse(screen.getByLabelText('数据集流程路由').textContent || '{}')).toEqual({ pathname: '/datasets', state: routeState }))
 })
 

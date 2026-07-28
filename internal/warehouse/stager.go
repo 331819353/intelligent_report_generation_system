@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,12 +18,11 @@ import (
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasource"
 	"intelligent-report-generation-system/internal/materialization"
+	"intelligent-report-generation-system/internal/physicalname"
 	"intelligent-report-generation-system/internal/querycompiler"
 )
 
-var stageIdentifier = regexp.MustCompile(`^[\p{L}][\p{L}\p{N}_$#]{0,127}$`)
-
-const DefaultStageMaxBytes int64 = 512 << 20
+const DefaultStageMaxBytes int64 = 1 << 30
 
 var ErrStageBytesExceeded = errors.New("warehouse staging byte limit exceeded")
 
@@ -54,6 +52,7 @@ type StageResult struct {
 
 type stagingTransaction interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
 	CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromSource) (int64, error)
 	Commit(context.Context) error
 	Rollback(context.Context) error
@@ -273,7 +272,7 @@ func validateStageColumns(columns []StageColumn) ([]string, []string, []string, 
 	seen := map[string]bool{}
 	for index, column := range columns {
 		key := strings.ToLower(column.Name)
-		if !stageIdentifier.MatchString(column.Name) ||
+		if !physicalname.ValidColumn(column.Name) ||
 			len(column.Name) > 63 ||
 			seen[key] {
 			return nil, nil, nil, fmt.Errorf("%w: staging column %q is invalid", ErrInvalidBuild, column.Name)

@@ -4,15 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasource"
+	"intelligent-report-generation-system/internal/fieldtype"
 	"intelligent-report-generation-system/internal/materialization"
 	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/querycompiler"
@@ -20,6 +24,8 @@ import (
 )
 
 const odsStageBatchSize = 1000
+const odsPreviewRows = 100
+const odsStageTimeout = 30 * time.Minute
 
 type databaseStager interface {
 	Stage(context.Context, warehouse.StageInput) (warehouse.StageResult, error)
@@ -29,6 +35,13 @@ type fileStager interface {
 	Stage(context.Context, warehouse.FileStageInput) (warehouse.StageResult, error)
 }
 
+type odsProjector interface {
+	Project(
+		context.Context,
+		warehouse.ODSProjectionInput,
+	) (warehouse.StageResult, error)
+}
+
 // ODSResolver reloads a published single-table ODS contract, validates its
 // frozen SOURCE input and stages the exact remote/file version into PostgreSQL.
 // It never accepts physical names, SQL or connection details from the claim.
@@ -36,6 +49,13 @@ type ODSResolver struct {
 	pool            *pgxpool.Pool
 	databaseStagers map[datasource.Type]databaseStager
 	fileStager      fileStager
+	projector       odsProjector
+}
+
+func (resolver *ODSResolver) SetFullProjector(projector odsProjector) {
+	if resolver != nil {
+		resolver.projector = projector
+	}
 }
 
 func NewODSResolver(
@@ -75,14 +95,11 @@ func (resolver *CompositeResolver) Resolve(
 		return ResolvedBuild{}, errors.New("materialization resolver is not configured")
 	}
 	if claim.Layer == materialization.LayerODS {
-		if resolver.ods == nil {
-			return ResolvedBuild{}, executionError(
-				CodeODSSourceStagingNotConfigured,
-				"ODS source staging is not configured for this worker",
-				nil,
-			)
-		}
-		return resolver.ods.Resolve(ctx, claim)
+		return ResolvedBuild{}, executionError(
+			CodeODSUnsupported,
+			"ODS is a virtual source mapping and cannot be materialized",
+			nil,
+		)
 	}
 	if resolver.postgres == nil {
 		return ResolvedBuild{}, errors.New("PostgreSQL materialization resolver is not configured")
@@ -120,12 +137,15 @@ func (resolver *ODSResolver) Resolve(
 		return ResolvedBuild{}, err
 	}
 
-	stageCtx, cancel := context.WithTimeout(
-		ctx,
-		time.Duration(plan.document.ExecutionPolicy.TimeoutMS)*time.Millisecond,
-	)
+	// executionPolicy.timeoutMs governs interactive query execution and is
+	// intentionally capped at two minutes. ODS extraction is a bounded
+	// background build with independent row, byte, lease, and retry guards; a
+	// large immutable workbook therefore receives a separate worker deadline.
+	stageCtx, cancel := context.WithTimeout(ctx, odsStageTimeout)
 	defer cancel()
-	result, err := resolver.stage(stageCtx, claim, plan)
+	result, err := resolver.stage(
+		stageCtx, claim, plan, odsPreviewRows, true,
+	)
 	if err != nil {
 		return ResolvedBuild{}, mapODSStageError(ctx, stageCtx, err)
 	}
@@ -273,7 +293,6 @@ func (resolver *ODSResolver) loadPlan(
 		if storedLayer != string(materialization.LayerODS) ||
 			prepared.DSLHash != plan.schemaHash ||
 			prepared.Document.Dataset.Layer != dataset.LayerODS ||
-			!prepared.Document.ExecutionPolicy.Materialization.Enabled ||
 			len(prepared.Document.Nodes) != 1 ||
 			prepared.Document.Nodes[0].Type != "TABLE" {
 			return executionError(
@@ -357,7 +376,7 @@ func loadODSSourceTx(
 			COALESCE(quota.max_data_sources,20),
 			COALESCE(quota.max_connections_per_source,5),
 			COALESCE(quota.max_concurrent_queries,10),
-			COALESCE(quota.max_excel_file_bytes,52428800)
+			COALESCE(quota.max_excel_file_bytes,$3)
 		FROM platform.data_sources AS source
 		JOIN platform.data_source_versions AS version
 		  ON version.id=source.current_published_version_id
@@ -373,6 +392,7 @@ func loadODSSourceTx(
 		FOR SHARE OF source,version`,
 		plan.input.DataSourceID,
 		plan.input.DataSourceVersionID,
+		datasource.DefaultMaxExcelFileBytes,
 	).Scan(
 		&plan.source.ID, &plan.source.TenantID,
 		&plan.source.Code, &plan.source.Name, &plan.source.Description,
@@ -486,7 +506,7 @@ func loadODSMetadataTableTx(
 		)
 	}
 
-	rows, err := tx.Query(ctx, `SELECT column_name,canonical_type
+	rows, err := tx.Query(ctx, `SELECT column_name,business_name,canonical_type
 		FROM platform.metadata_columns
 		WHERE table_id=$1 AND asset_status='ACTIVE'
 		ORDER BY ordinal_position,column_name
@@ -497,9 +517,12 @@ func loadODSMetadataTableTx(
 	defer rows.Close()
 	available := make(map[string]string)
 	for rows.Next() {
-		var name, canonicalType string
-		if err := rows.Scan(&name, &canonicalType); err != nil {
+		var name, businessName, canonicalType string
+		if err := rows.Scan(&name, &businessName, &canonicalType); err != nil {
 			return err
+		}
+		if fieldtype.IsCodeLike(name, businessName) {
+			canonicalType = "TEXT"
 		}
 		if _, duplicate := available[name]; duplicate {
 			return executionError(
@@ -575,6 +598,8 @@ func (resolver *ODSResolver) stage(
 	ctx context.Context,
 	claim materialization.Claim,
 	plan odsSourcePlan,
+	maxRows int,
+	allowTruncate bool,
 ) (warehouse.StageResult, error) {
 	switch plan.input.Type {
 	case materialization.InputSourceTable:
@@ -599,7 +624,7 @@ func (resolver *ODSResolver) stage(
 				NodeID:   plan.node.ID,
 				Dialect:  dialect,
 				Table:    plan.sourceTable,
-				MaxRows:  warehouse.MaxODSRows,
+				MaxRows:  maxRows,
 			},
 			BatchSize: odsStageBatchSize,
 			Columns:   plan.stageColumns,
@@ -622,8 +647,9 @@ func (resolver *ODSResolver) stage(
 			ExpectedSHA256:      plan.fileSHA256,
 			TableName:           plan.tableName,
 			MaxFileBytes:        plan.maxExcelFileSize,
-			MaxRows:             warehouse.MaxODSRows,
+			MaxRows:             maxRows,
 			BatchSize:           odsStageBatchSize,
+			AllowTruncate:       allowTruncate,
 			Columns:             plan.stageColumns,
 		})
 	default:
@@ -693,6 +719,203 @@ func (resolver *ODSResolver) revalidateSource(
 		}
 		return nil
 	})
+}
+
+// Rehydrate stages the full immutable source behind an active ODS preview and
+// reapplies the published ODS projection into a DWD-run-scoped staging table.
+// The DWD still freezes and validates the governed ODS materialization; it does
+// not read an arbitrary current source version.
+func (resolver *ODSResolver) Rehydrate(
+	ctx context.Context,
+	claim materialization.Claim,
+	upstream upstreamMaterialization,
+	frozenInput materialization.InputSnapshot,
+	targetNodeID string,
+) (warehouse.StageResult, error) {
+	if resolver == nil || resolver.pool == nil || resolver.projector == nil {
+		return warehouse.StageResult{}, executionError(
+			CodeODSSourceStagingNotConfigured,
+			"full ODS source replay is not configured for warehouse materialization",
+			nil,
+		)
+	}
+	if (claim.Layer != materialization.LayerDIM &&
+		claim.Layer != materialization.LayerDWD) ||
+		strings.TrimSpace(targetNodeID) == "" {
+		return warehouse.StageResult{}, executionError(
+			CodeTrustedPlanInvalid,
+			"the full ODS replay request is invalid",
+			nil,
+		)
+	}
+	var sourceInput materialization.InputSnapshot
+	var err error
+	if upstream.ID == "" {
+		var snapshot virtualODSSourceSnapshot
+		if unmarshalErr := json.Unmarshal(
+			frozenInput.SnapshotJSON, &snapshot,
+		); unmarshalErr != nil ||
+			snapshot.Contract != "virtual-ods-source-v1" ||
+			snapshot.DatasetID != upstream.DatasetID ||
+			snapshot.DatasetVersionID != upstream.DatasetVersionID ||
+			snapshot.SourceInput.SnapshotHash != frozenInput.SnapshotHash {
+			return warehouse.StageResult{}, executionError(
+				CodeUpstreamContractInvalid,
+				"the virtual ODS source snapshot is invalid",
+				unmarshalErr,
+			)
+		}
+		sourceInput = snapshot.SourceInput
+	} else {
+		sourceInput, err = resolver.loadFrozenSourceInput(
+			ctx, claim, upstream,
+		)
+		if err != nil {
+			return warehouse.StageResult{}, err
+		}
+	}
+	sourceRunID := uuid.NewSHA1(
+		uuid.NameSpaceOID,
+		[]byte(
+			strings.ToLower(string(claim.Layer))+"-full-ods\x00"+claim.ID+"\x00"+
+				upstream.DatasetVersionID,
+		),
+	).String()
+	sourceClaim := materialization.Claim{
+		Run: materialization.Run{
+			ID: sourceRunID, TenantID: claim.TenantID,
+			DatasetID:        upstream.DatasetID,
+			DatasetVersionID: upstream.DatasetVersionID,
+			Layer:            materialization.LayerODS,
+			Mode:             materialization.RunModeFull,
+		},
+		Inputs: []materialization.InputSnapshot{sourceInput},
+	}
+	plan, err := resolver.loadPlan(ctx, sourceClaim)
+	if err != nil {
+		return warehouse.StageResult{}, err
+	}
+	stageCtx, cancel := context.WithTimeout(ctx, odsStageTimeout)
+	defer cancel()
+	staged, err := resolver.stage(
+		stageCtx, sourceClaim, plan, warehouse.MaxODSRows, false,
+	)
+	if err != nil {
+		return warehouse.StageResult{}, mapODSStageError(ctx, stageCtx, err)
+	}
+	if err := resolver.revalidateSource(
+		stageCtx, sourceClaim, plan,
+	); err != nil {
+		return warehouse.StageResult{}, mapODSStageError(ctx, stageCtx, err)
+	}
+	columns := make(map[string]bool, len(plan.stageColumns))
+	columnTypes := make(map[string]string, len(plan.stageColumns))
+	for _, column := range plan.stageColumns {
+		columns[column.Name] = true
+		columnTypes[column.Name] = column.CanonicalType
+	}
+	projected, err := resolver.projector.Project(
+		stageCtx,
+		warehouse.ODSProjectionInput{
+			TenantID:    claim.TenantID,
+			SourceRunID: sourceRunID, TargetRunID: claim.ID,
+			TargetNodeID: targetNodeID,
+			Document:     plan.document,
+			Source: querycompiler.TableRef{
+				NodeID: plan.node.ID,
+				Schema: staged.Schema, Name: staged.Table,
+				Columns: columns, ColumnTypes: columnTypes,
+			},
+		},
+	)
+	if err != nil {
+		return warehouse.StageResult{}, executionError(
+			CodeWarehouseBuildFailed,
+			"the full ODS source could not be projected for warehouse materialization",
+			err,
+		)
+	}
+	return projected, nil
+}
+
+func (resolver *ODSResolver) loadFrozenSourceInput(
+	ctx context.Context,
+	claim materialization.Claim,
+	upstream upstreamMaterialization,
+) (materialization.InputSnapshot, error) {
+	var (
+		input      materialization.InputSnapshot
+		sourceType string
+		snapshot   []byte
+		rowCount   pgtype.Int8
+	)
+	err := database.WithTenantTx(
+		ctx, resolver.pool, claim.TenantID,
+		func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT input.ordinal_position,
+					input.source_type,input.input_layer,
+					COALESCE(input.input_data_source_id::text,''),
+					COALESCE(input.input_data_source_version_id::text,''),
+					COALESCE(input.metadata_table_id::text,''),
+					COALESCE(input.file_version_id::text,''),
+					input.source_version,input.schema_hash,input.snapshot_hash,
+					input.snapshot_json,input.row_count
+				FROM platform.dataset_materializations AS active
+				JOIN platform.dataset_versions AS version
+				  ON version.id=active.dataset_version_id
+				 AND version.dataset_id=active.dataset_id
+				 AND version.tenant_id=active.tenant_id
+				JOIN platform.datasets AS owner
+				  ON owner.id=version.dataset_id
+				 AND owner.tenant_id=version.tenant_id
+				JOIN platform.build_run_inputs AS input
+				  ON input.build_run_id=active.build_run_id
+				 AND input.tenant_id=active.tenant_id
+				 AND input.ordinal_position=1
+				WHERE active.id=$1
+				  AND active.dataset_id=$2
+				  AND active.dataset_version_id=$3
+				  AND active.status='ACTIVE'
+				  AND active.layer='ODS'
+				  AND version.status='PUBLISHED'
+				  AND owner.status='PUBLISHED'
+				  AND owner.current_published_version_id=version.id
+				  AND owner.deleted_at IS NULL
+				  AND input.source_type IN ('SOURCE_TABLE','FILE_VERSION')
+				FOR SHARE OF active,version,owner,input`,
+				upstream.ID, upstream.DatasetID,
+				upstream.DatasetVersionID,
+			).Scan(
+				&input.Ordinal, &sourceType, &input.Layer,
+				&input.DataSourceID, &input.DataSourceVersionID,
+				&input.MetadataTableID, &input.FileVersionID,
+				&input.SourceVersion, &input.SchemaHash,
+				&input.SnapshotHash, &snapshot, &rowCount,
+			)
+		},
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return materialization.InputSnapshot{}, executionError(
+			CodeUpstreamContractInvalid,
+			"the active ODS preview has no frozen source lineage",
+			err,
+		)
+	}
+	if err != nil {
+		return materialization.InputSnapshot{}, err
+	}
+	input.Type = materialization.InputType(sourceType)
+	input.SnapshotJSON = json.RawMessage(snapshot)
+	if rowCount.Valid {
+		value := rowCount.Int64
+		input.RowCount = &value
+	}
+	if input.Ordinal != 1 {
+		return materialization.InputSnapshot{}, fmt.Errorf(
+			"active ODS source input ordinal is invalid",
+		)
+	}
+	return input, nil
 }
 
 func nullableUUID(value string) any {

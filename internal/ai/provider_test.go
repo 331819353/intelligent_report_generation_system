@@ -129,6 +129,47 @@ func TestOpenAICompatibleProviderClassifiesHTTPFailuresWithoutLeakingBody(t *tes
 	}
 }
 
+func TestNormalizeStructuredOutputEnvelopeSupportsBoundedReasoningWrappers(t *testing.T) {
+	valid := `{"tags":["a"],"name":"月报","count":2}`
+	tests := map[string]string{
+		"reasoning":  `<think>private chain of thought</think>` + valid,
+		"json fence": "```json\n" + valid + "\n```",
+		"combined":   "<think>private chain of thought</think>\n```JSON\n" + valid + "\n```",
+	}
+	for name, wrapped := range tests {
+		t.Run(name, func(t *testing.T) {
+			content := normalizeStructuredOutputEnvelope([]byte(wrapped))
+			result, err := ValidateStructuredOutput(validJSONSchema(), content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(result) != `{"count":2,"name":"月报","tags":["a"]}` {
+				t.Fatalf("result=%s", result)
+			}
+		})
+	}
+}
+
+func TestNormalizeStructuredOutputEnvelopeDoesNotExtractArbitraryProse(t *testing.T) {
+	content := normalizeStructuredOutputEnvelope([]byte(
+		`Here is the result: {"tags":["a"],"name":"月报","count":2}`,
+	))
+	if _, err := ValidateStructuredOutput(validJSONSchema(), content); err == nil {
+		t.Fatal("arbitrary prose around structured output was accepted")
+	}
+	for _, malformed := range []string{
+		`<think>unterminated {"tags":["a"],"name":"月报","count":2}`,
+		"```typescript\n" + `{"tags":["a"],"name":"月报","count":2}` + "\n```",
+	} {
+		if _, err := ValidateStructuredOutput(
+			validJSONSchema(),
+			normalizeStructuredOutputEnvelope([]byte(malformed)),
+		); err == nil {
+			t.Fatalf("malformed wrapper was accepted: %q", malformed)
+		}
+	}
+}
+
 func TestOpenAICompatibleProviderRejectsRefusalAndInvalidOutput(t *testing.T) {
 	tests := []struct {
 		name    string

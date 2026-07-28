@@ -682,6 +682,9 @@ func (s *PostgresStore) CompleteDimensionProfile(
 		type changedDimension struct {
 			id              string
 			previousVersion int64
+			currentVersion  int64
+			action          string
+			memberRefresh   bool
 		}
 		changedDimensions := []changedDimension{}
 		for dimensionRows.Next() {
@@ -690,6 +693,8 @@ func (s *PostgresStore) CompleteDimensionProfile(
 				dimensionRows.Close()
 				return err
 			}
+			item.currentVersion = item.previousVersion + 1
+			item.action = "DIMENSION_PROFILE_POLICY_TIGHTEN"
 			changedDimensions = append(changedDimensions, item)
 		}
 		if err := dimensionRows.Err(); err != nil {
@@ -697,6 +702,145 @@ func (s *PostgresStore) CompleteDimensionProfile(
 			return err
 		}
 		dimensionRows.Close()
+
+		// 程序字段分类创建的正式维度没有人工策略决策。画像明确推荐 FULL
+		// 时可按同一程序化审批链放开成员索引；人工创建或人工收紧为 NONE 的
+		// 维度没有 PROGRAM_APPROVE_DWS_DIMENSION 审计证据，不会被自动放宽。
+		if recommended == "FULL" && !sensitive && !observation.RiskHighCardinality {
+			promotionRows, promoteErr := tx.Query(ctx, `UPDATE platform.semantic_dimensions AS dimension
+				SET member_index_policy='FULL',
+				    member_refresh_generation=NULL,
+				    member_count=NULL,
+				    member_refreshed_at=NULL,
+				    last_member_refresh_job_id=NULL,
+				    definition_hash=encode(public.digest(
+				      convert_to(
+				        concat_ws(E'\x1f',
+				          dimension.dataset_id::text,
+				          dimension.dataset_version_id::text,
+				          dimension.field_id,
+				          dimension.code::text,
+				          dimension.name,
+				          dimension.description,
+				          dimension.dimension_type,
+				          'FULL',
+				          dimension.high_cardinality::text,
+				          dimension.sensitive::text,
+				          dimension.status
+				        ),
+				        'UTF8'
+				      ),
+				      'sha256'
+				    ),'hex'),
+				    version=dimension.version+1,
+				    updated_by=$1,
+				    updated_at=clock_timestamp()
+				WHERE dimension.dataset_id=$2::uuid
+				  AND dimension.dataset_version_id=$3::uuid
+				  AND dimension.field_id=$4
+				  AND dimension.status='PUBLISHED'
+				  AND dimension.member_index_policy='NONE'
+				  AND NOT dimension.high_cardinality
+				  AND NOT dimension.sensitive
+				  AND EXISTS(
+				    SELECT 1
+				    FROM platform.audit_logs AS approval
+				    WHERE approval.tenant_id=dimension.tenant_id
+				      AND approval.resource_type='SEMANTIC_DIMENSION'
+				      AND approval.resource_id=dimension.id::text
+				      AND approval.action='PROGRAM_APPROVE_DWS_DIMENSION'
+				  )
+				RETURNING dimension.id::text,dimension.version-1,dimension.version`,
+				claim.RequestedBy, claim.DatasetID, claim.DatasetVersionID,
+				claim.FieldID)
+			if promoteErr != nil {
+				return promoteErr
+			}
+			for promotionRows.Next() {
+				item := changedDimension{
+					action:        "PROGRAM_ENABLE_DWS_DIMENSION_MEMBER_INDEX",
+					memberRefresh: true,
+				}
+				if err := promotionRows.Scan(
+					&item.id, &item.previousVersion, &item.currentVersion,
+				); err != nil {
+					promotionRows.Close()
+					return err
+				}
+				changedDimensions = append(changedDimensions, item)
+			}
+			if err := promotionRows.Err(); err != nil {
+				promotionRows.Close()
+				return err
+			}
+			promotionRows.Close()
+		}
+
+		for index := range changedDimensions {
+			dimension := &changedDimensions[index]
+			if !dimension.memberRefresh {
+				continue
+			}
+			idempotencyKey := hashBytes([]byte(fmt.Sprintf(
+				"program-dws-member-refresh-v1:%s:%d:%s",
+				dimension.id, dimension.currentVersion, claim.MaterializationID,
+			)))
+			requestHash := hashBytes([]byte(fmt.Sprintf(
+				"%s:%d:%d:%d", dimension.id, dimension.currentVersion,
+				defaultRefreshMaxMembers, defaultRefreshTimeout,
+			)))
+			tag, enqueueErr := tx.Exec(ctx, `INSERT INTO platform.dimension_member_refresh_jobs(
+					tenant_id,dimension_id,dimension_version,dataset_id,
+					dataset_version_id,field_id,field_code,member_index_policy,
+					materialization_id,status,max_members,timeout_seconds,
+					request_hash,idempotency_key,requested_by
+				)
+				SELECT dimension.tenant_id,dimension.id,dimension.version,
+					dimension.dataset_id,dimension.dataset_version_id,
+					dimension.field_id,field.field_code::text,'FULL',
+					materialization.id,'QUEUED',$2,$3,$4,$5,$6
+				FROM platform.semantic_dimensions AS dimension
+				JOIN platform.dataset_fields AS field
+				  ON field.tenant_id=dimension.tenant_id
+				  AND field.dataset_version_id=dimension.dataset_version_id
+				  AND field.field_id=dimension.field_id
+				JOIN platform.dataset_materializations AS materialization
+				  ON materialization.tenant_id=dimension.tenant_id
+				  AND materialization.dataset_id=dimension.dataset_id
+				  AND materialization.dataset_version_id=dimension.dataset_version_id
+				  AND materialization.layer='DWS'
+				  AND materialization.status='ACTIVE'
+				JOIN platform.dimension_profile_jobs AS profile
+				  ON profile.tenant_id=materialization.tenant_id
+				  AND profile.id=$7::uuid
+				  AND profile.dataset_id=materialization.dataset_id
+				  AND profile.dataset_version_id=materialization.dataset_version_id
+				  AND profile.materialization_id=materialization.id
+				  AND profile.materialization_snapshot_hash=materialization.snapshot_hash
+				  AND profile.field_id=dimension.field_id
+				  AND profile.status='SUCCEEDED'
+				  AND profile.recommended_member_index_policy='FULL'
+				WHERE dimension.id=$1::uuid
+				  AND dimension.version=$8
+				  AND dimension.status='PUBLISHED'
+				  AND dimension.member_index_policy='FULL'
+				  AND NOT dimension.sensitive
+				  AND NOT EXISTS(
+				    SELECT 1
+				    FROM platform.dimension_member_refresh_jobs AS active_job
+				    WHERE active_job.tenant_id=dimension.tenant_id
+				      AND active_job.dimension_id=dimension.id
+				      AND active_job.status IN ('QUEUED','RUNNING')
+				  )
+				ON CONFLICT DO NOTHING`,
+				dimension.id, defaultRefreshMaxMembers, defaultRefreshTimeout,
+				requestHash, idempotencyKey, claim.RequestedBy, claim.ID,
+				dimension.currentVersion)
+			if enqueueErr != nil {
+				return enqueueErr
+			}
+			dimension.memberRefresh = tag.RowsAffected() == 1
+		}
 
 		profileDetail := map[string]any{
 			"datasetVersionId":             claim.DatasetVersionID,
@@ -741,12 +885,14 @@ func (s *PostgresStore) CompleteDimensionProfile(
 		for _, dimension := range changedDimensions {
 			if err := auditMutation(
 				ctx, tx, claim.RequestedBy,
-				"DIMENSION_PROFILE_POLICY_TIGHTEN",
+				dimension.action,
 				"SEMANTIC_DIMENSION", dimension.id,
 				map[string]any{
-					"profileJobId":    claim.ID,
-					"previousVersion": dimension.previousVersion,
-					"policy":          recommended,
+					"profileJobId":        claim.ID,
+					"previousVersion":     dimension.previousVersion,
+					"currentVersion":      dimension.currentVersion,
+					"policy":              recommended,
+					"memberRefreshQueued": dimension.memberRefresh,
 				},
 			); err != nil {
 				return err

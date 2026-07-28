@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"intelligent-report-generation-system/internal/access"
+	aiplatform "intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/auth"
 )
 
@@ -258,6 +259,52 @@ func TestDatasetAIHTTPReturnsProposalAfterAutomaticRepair(t *testing.T) {
 	}
 	if result.RequestID != "request-http-repaired" || result.Proposal.Plan.Groups[0].Metrics[0].Column != "ORDER_ID" || len(invoker.inputs) != 2 {
 		t.Fatalf("repaired HTTP result/calls = %#v/%d", result, len(invoker.inputs))
+	}
+}
+
+func TestDatasetAIHTTPStreamsServerGeneratedProgressAndResult(t *testing.T) {
+	invoker := &fakeInvoker{configured: true, results: []aiplatform.InvocationResult{
+		plannerResult(t, monthlyRegionalOrderCountProposal(), "request-http-stream"),
+	}}
+	handler, token := newDatasetAIHTTPHarness(t, NewService(monthlyRegionalOrderCountAssetCatalog(), invoker))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/datasets/ai/proposals", strings.NewReader(`{"instruction":"统计月度各区域订单量"}`))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/x-ndjson")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Header().Get("Content-Type"), "application/x-ndjson") {
+		t.Fatalf("status/content-type = %d/%q", recorder.Code, recorder.Header().Get("Content-Type"))
+	}
+	lines := strings.Split(strings.TrimSpace(recorder.Body.String()), "\n")
+	if len(lines) < 5 {
+		t.Fatalf("stream frames = %q", recorder.Body.String())
+	}
+	progressStages := map[string]bool{}
+	resultSeen := false
+	for _, line := range lines {
+		var envelope struct {
+			Type     string            `json:"type"`
+			Progress PlanProgressEvent `json:"progress"`
+			Result   PlanResult        `json:"result"`
+		}
+		if err := json.Unmarshal([]byte(line), &envelope); err != nil {
+			t.Fatalf("invalid NDJSON frame %q: %v", line, err)
+		}
+		if envelope.Type == "progress" {
+			progressStages[envelope.Progress.Stage] = true
+		}
+		if envelope.Type == "result" && envelope.Result.RequestID == "request-http-stream" {
+			resultSeen = true
+		}
+	}
+	for _, stage := range []string{ProgressStageContext, ProgressStageCatalog, ProgressStagePlanner, ProgressStageValidation, ProgressStageComplete} {
+		if !progressStages[stage] {
+			t.Fatalf("missing progress stage %s in %q", stage, recorder.Body.String())
+		}
+	}
+	if !resultSeen {
+		t.Fatalf("stream did not include final result: %q", recorder.Body.String())
 	}
 }
 

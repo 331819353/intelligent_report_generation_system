@@ -219,6 +219,65 @@ export type DimensionMetricCompatibility = {
   updatedAt: string
 }
 
+export type DimensionWhereDecision = {
+  id: string
+  vectorKey: string
+  vectorKeyHash: string
+  embeddingModel: string
+  dimensionId: string
+  dimensionName: string
+  dimensionFieldId: string
+  dimensionFieldName: string
+  dimensionDescription: string
+  canonicalValue: string
+  aliases: string[]
+  selectedMemberCount: number
+  metricId: string
+  metricVersionId: string
+  datasetVersionId: string
+  metricCode: string
+  metricName: string
+  metricFieldId: string
+  materializationId: string
+  tableSchema: string
+  tableName: string
+  predicateOperator: 'EQUALS' | 'IN' | 'CONTAINS'
+  whereCondition: string
+  compiledCondition: string
+  llmModel: string
+  llmPromptVersion: string
+  llmReason: string
+  latestQueryPlanId: string
+  dimensionMemberId?: string
+  sourceType: 'QUERY_OBSERVED' | 'DWS_PRECOMPUTED'
+  sourceInputHash?: string
+  observationCount: number
+  firstSeenAt: string
+  lastSeenAt: string
+}
+
+export type DimensionWhereDecisionGroup = {
+  dimensionId: string
+  dimensionName: string
+  dimensionFieldName: string
+  dimensionDescription: string
+  memberIndexPolicy: 'FULL' | 'EXACT_ONLY' | 'NONE'
+  memberCount: number
+  decisionCount: number
+  pendingVectorCount: number
+  metricCount: number
+  tableCount: number
+  buildStatus:
+    | 'READY'
+    | 'BUILDING'
+    | 'RUNNING'
+    | 'PENDING'
+    | 'FAILED'
+    | 'EXACT_ONLY'
+    | 'EMPTY'
+  lastBuiltAt?: string
+}
+
 export type DimensionSurveyAcceptance = {
   candidate: DimensionSurveyCandidate
   dimension: Dimension
@@ -361,6 +420,20 @@ export const semanticGovernanceAPI = {
       `${semanticPath('dimension-metric-compatibilities')}?${queryString({
         dimensionId, status, limit, offset,
       })}`,
+      { cache: 'no-store' },
+    ),
+
+  listWhereDecisions: (q = '', tableName = '', dimensionId = '', limit = 200, offset = 0) =>
+    apiRequest<SemanticPage<DimensionWhereDecision>>(
+      `${semanticPath('dimension-where-decisions')}?${queryString({
+        q, tableName, dimensionId, limit, offset,
+      })}`,
+      { cache: 'no-store' },
+    ),
+
+  listWhereDecisionGroups: () =>
+    apiRequest<{ items: DimensionWhereDecisionGroup[]; total: number }>(
+      semanticPath('dimension-where-decision-groups'),
       { cache: 'no-store' },
     ),
 

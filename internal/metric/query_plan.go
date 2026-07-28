@@ -20,6 +20,7 @@ type validatedDefinition struct {
 const (
 	maxExpandedMetricNodes = 2048
 	maxExpandedMetricDepth = 64
+	maxSemanticSetValues   = 128
 )
 
 type expandedMetricExpression struct {
@@ -190,27 +191,56 @@ func appendDimensionFilters(
 				"过滤字段不在指标允许维度内或同一操作发生重复",
 			)
 		}
-		if !oneOf(operator, "EQUALS", "GTE", "LT") ||
+		setValues, setValuesValid := dimensionFilterSetValues(
+			requestedFilter.Value,
+		)
+		if !oneOf(operator, "EQUALS", "IN", "GTE", "LT") ||
 			requestedFilter.Value == nil ||
-			(operator != "EQUALS" &&
+			(operator == "IN" && !setValuesValid) ||
+			(operator != "EQUALS" && operator != "IN" &&
 				!oneOf(field.CanonicalType, "DATE", "DATETIME")) {
 			return nil, nil, invalid(
 				fmt.Sprintf("dimensionFilters[%d]", index),
 				"METRIC_PREVIEW_FILTER_UNSUPPORTED",
-				"维度过滤仅支持非空的 EQUALS，时间字段额外支持 GTE 和 LT",
+				"维度过滤仅支持非空的 EQUALS/IN，时间字段额外支持 GTE 和 LT",
 			)
 		}
 		seenBindings[bindingKey] = true
-		parameterCode := uniqueDimensionFilterParameter(usedParameters, index)
-		usedParameters[parameterCode] = true
 		filterID := uniqueDimensionFilterID(usedFilterIDs, index)
 		usedFilterIDs[filterID] = true
-		document.Parameters = append(document.Parameters, dataset.Parameter{
-			Code: parameterCode, Name: "语义维度过滤",
-			DataType: field.CanonicalType, Required: true,
-		})
 		left := cloneDatasetExpression(field.Expression)
-		right := dataset.Expression{Type: "PARAM_REF", Code: parameterCode}
+		parameterCodes := []string{}
+		var right dataset.Expression
+		if operator == "IN" {
+			right = dataset.Expression{Type: "ARRAY", Arguments: []dataset.Expression{}}
+			for valueIndex, value := range setValues {
+				parameterCode := uniqueDimensionFilterParameter(
+					usedParameters, index*maxSemanticSetValues+valueIndex,
+				)
+				usedParameters[parameterCode] = true
+				document.Parameters = append(document.Parameters, dataset.Parameter{
+					Code: parameterCode, Name: "语义维度集合过滤",
+					DataType: field.CanonicalType, Required: true,
+				})
+				right.Arguments = append(right.Arguments, dataset.Expression{
+					Type: "PARAM_REF", Code: parameterCode,
+				})
+				parameterCodes = append(parameterCodes, parameterCode)
+				parameters[parameterCode] = value
+			}
+		} else {
+			parameterCode := uniqueDimensionFilterParameter(
+				usedParameters, index,
+			)
+			usedParameters[parameterCode] = true
+			document.Parameters = append(document.Parameters, dataset.Parameter{
+				Code: parameterCode, Name: "语义维度过滤",
+				DataType: field.CanonicalType, Required: true,
+			})
+			right = dataset.Expression{Type: "PARAM_REF", Code: parameterCode}
+			parameterCodes = append(parameterCodes, parameterCode)
+			parameters[parameterCode] = requestedFilter.Value
+		}
 		document.Filters = append(document.Filters, dataset.Filter{
 			ID:    filterID,
 			Stage: "PRE_AGGREGATION", Optional: false,
@@ -219,15 +249,39 @@ func appendDimensionFilters(
 			},
 		})
 		bindings = append(bindings, QueryFilterBinding{
-			FieldID:       requestedFilter.FieldID,
-			FilterID:      filterID,
-			ParameterCode: parameterCode,
-			DataType:      field.CanonicalType,
-			Operator:      operator,
+			FieldID:        requestedFilter.FieldID,
+			FilterID:       filterID,
+			ParameterCode:  parameterCodes[0],
+			ParameterCodes: parameterCodes,
+			DataType:       field.CanonicalType,
+			Operator:       operator,
 		})
-		parameters[parameterCode] = requestedFilter.Value
 	}
 	return bindings, parameters, nil
+}
+
+func dimensionFilterSetValues(value any) ([]any, bool) {
+	var result []any
+	switch values := value.(type) {
+	case []string:
+		result = make([]any, 0, len(values))
+		for _, item := range values {
+			result = append(result, item)
+		}
+	case []any:
+		result = append([]any(nil), values...)
+	default:
+		return nil, false
+	}
+	if len(result) < 2 || len(result) > maxSemanticSetValues {
+		return nil, false
+	}
+	for _, item := range result {
+		if item == nil {
+			return nil, false
+		}
+	}
+	return result, true
 }
 
 func uniqueDimensionFilterID(used map[string]bool, index int) string {

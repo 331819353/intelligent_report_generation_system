@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	SchemaVersion       = "2.3"
-	PromptVersion       = "dataset-dag-planner-v14"
+	SchemaVersion       = "2.4"
+	PromptVersion       = "dataset-dag-planner-v15"
 	IntentPromptVersion = "dataset-dag-intent-v12"
 
 	maxInstructionRunes = 4000
@@ -295,9 +295,14 @@ type PlanTransformRule struct {
 	InputKeys         []string             `json:"inputKeys"`
 	Output            PlanTransformOutput  `json:"output"`
 	Unit              string               `json:"unit,omitempty"`
+	DateSource        string               `json:"dateSource,omitempty"`
+	StartDateSource   string               `json:"startDateSource,omitempty"`
+	EndDateSource     string               `json:"endDateSource,omitempty"`
 	TargetType        string               `json:"targetType,omitempty"`
 	MatchValue        string               `json:"matchValue,omitempty"`
+	ThenMode          string               `json:"thenMode,omitempty"`
 	ThenValue         string               `json:"thenValue,omitempty"`
+	ElseMode          string               `json:"elseMode,omitempty"`
 	ElseValue         string               `json:"elseValue,omitempty"`
 	ConditionOperator string               `json:"conditionOperator,omitempty"`
 	ConditionValues   []PlanConditionValue `json:"conditionValues,omitempty"`
@@ -564,8 +569,13 @@ func normalizeGraphPlan(value GraphPlan) GraphPlan {
 			rule.Output.Code = strings.TrimSpace(rule.Output.Code)
 			rule.Output.CanonicalType = strings.ToUpper(strings.TrimSpace(rule.Output.CanonicalType))
 			rule.Unit = strings.ToUpper(strings.TrimSpace(rule.Unit))
+			rule.DateSource = strings.ToUpper(strings.TrimSpace(rule.DateSource))
+			rule.StartDateSource = strings.ToUpper(strings.TrimSpace(rule.StartDateSource))
+			rule.EndDateSource = strings.ToUpper(strings.TrimSpace(rule.EndDateSource))
 			rule.TargetType = strings.ToUpper(strings.TrimSpace(rule.TargetType))
 			rule.ConditionOperator = strings.ToUpper(strings.TrimSpace(rule.ConditionOperator))
+			rule.ThenMode = strings.ToUpper(strings.TrimSpace(rule.ThenMode))
+			rule.ElseMode = strings.ToUpper(strings.TrimSpace(rule.ElseMode))
 			rule.FallbackMode = strings.ToUpper(strings.TrimSpace(rule.FallbackMode))
 			rule.ReplaceSourceKey = strings.TrimSpace(rule.ReplaceSourceKey)
 			for k := range rule.ConditionValues {
@@ -673,7 +683,7 @@ func validateGraphShape(value GraphPlan) error {
 			return fmt.Errorf("transform %s family %s does not match component type %s", transform.ID, transform.Family, transform.ComponentType)
 		}
 		for _, rule := range transform.Rules {
-			if !validIdentifier(rule.ID) || !validIdentifier(rule.Output.ID) || !validIdentifier(rule.Output.Code) || !boundedText(rule.Output.Name, 1, 200) || len(rule.InputKeys) < 1 || len(rule.InputKeys) > 16 {
+			if !validIdentifier(rule.ID) || !validIdentifier(rule.Output.ID) || !validIdentifier(rule.Output.Code) || !boundedText(rule.Output.Name, 1, 200) || len(rule.InputKeys) > 16 {
 				return fmt.Errorf("transform %s rule %s identity, output metadata, or input count is invalid", transform.ID, rule.ID)
 			}
 			if detail := transformRuleValidationDetail(transform.ComponentType, rule); detail != "" {
@@ -690,7 +700,7 @@ func validateGraphShape(value GraphPlan) error {
 func validTransformComponent(value PlanTransform) bool {
 	families := map[string]string{
 		"TEXT_UPPER": "TEXT", "TEXT_TRIM": "TEXT", "TEXT_REPLACE": "TEXT", "TEXT_LOWER": "TEXT", "TEXT_SUBSTRING": "TEXT", "TEXT_CONCAT": "TEXT",
-		"NUMBER_ABSOLUTE": "NUMBER", "NUMBER_ROUNDING": "NUMBER", "NUMBER_ARITHMETIC": "NUMBER", "DATE_FORMAT": "DATE",
+		"NUMBER_ABSOLUTE": "NUMBER", "NUMBER_ROUNDING": "NUMBER", "NUMBER_ARITHMETIC": "NUMBER", "DATE_CALCULATION": "DATE", "DATE_FORMAT": "DATE",
 		"NULL": "NULL", "CAST": "CAST", "CONDITION": "CONDITION",
 	}
 	return families[value.ComponentType] == value.Family
@@ -707,13 +717,24 @@ func transformRuleValidationDetail(componentType string, rule PlanTransformRule)
 		"TEXT_UPPER": {"UPPER": true}, "TEXT_TRIM": {"TRIM": true}, "TEXT_REPLACE": {"REPLACE": true}, "TEXT_LOWER": {"LOWER": true},
 		"TEXT_SUBSTRING": {"SUBSTRING": true}, "TEXT_CONCAT": {"CONCAT": true}, "NUMBER_ABSOLUTE": {"ABS": true},
 		"NUMBER_ROUNDING": {"ROUND": true, "FLOOR": true, "CEIL": true}, "NUMBER_ARITHMETIC": {"ADD": true, "SUBTRACT": true, "MULTIPLY": true, "DIVIDE": true},
-		"DATE_FORMAT": {"DATE_FORMAT": true}, "NULL": {"COALESCE": true}, "CAST": {"CAST": true}, "CONDITION": {"CASE": true},
+		"DATE_CALCULATION": {"CURRENT_DATE": true, "DATE_DIFF": true, "DATE_EXTRACT": true, "DATE_START": true, "DATE_END": true},
+		"DATE_FORMAT":      {"DATE_FORMAT": true}, "NULL": {"COALESCE": true}, "CAST": {"CAST": true}, "CONDITION": {"CASE": true},
 	}
 	if !operations[componentType][rule.Operation] || !oneOf(rule.Output.CanonicalType, "STRING", "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "DATETIME") {
 		return fmt.Sprintf("operation %s is not allowed for %s or output canonical type %s is unsupported", rule.Operation, componentType, rule.Output.CanonicalType)
 	}
 	requiredInputs := 1
-	if oneOf(rule.Operation, "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "CONCAT") || rule.Operation == "COALESCE" && rule.FallbackMode == "FIELD" {
+	if rule.Operation == "CURRENT_DATE" || oneOf(rule.Operation, "DATE_EXTRACT", "DATE_START", "DATE_END") && rule.DateSource == "CURRENT_DATE" {
+		requiredInputs = 0
+	} else if rule.Operation == "DATE_DIFF" {
+		requiredInputs = 0
+		if rule.StartDateSource != "CURRENT_DATE" {
+			requiredInputs++
+		}
+		if rule.EndDateSource != "CURRENT_DATE" {
+			requiredInputs++
+		}
+	} else if oneOf(rule.Operation, "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "CONCAT") || rule.Operation == "COALESCE" && rule.FallbackMode == "FIELD" {
 		requiredInputs = 2
 	}
 	if len(rule.InputKeys) != requiredInputs {
@@ -722,10 +743,38 @@ func transformRuleValidationDetail(componentType string, rule PlanTransformRule)
 	if rule.Operation == "DATE_FORMAT" && !oneOf(rule.Unit, "YEAR", "MONTH", "QUARTER", "DAY") {
 		return fmt.Sprintf("DATE_FORMAT unit %s must be YEAR, MONTH, QUARTER, or DAY", rule.Unit)
 	}
+	if rule.Operation == "DATE_DIFF" && !oneOf(rule.Unit, "YEAR", "MONTH", "DAY") {
+		return fmt.Sprintf("DATE_DIFF unit %s must be YEAR, MONTH, or DAY", rule.Unit)
+	}
+	if rule.Operation == "DATE_EXTRACT" && !oneOf(rule.Unit, "YEAR", "QUARTER", "MONTH", "WEEK", "DAY", "WEEKDAY", "DAY_OF_YEAR") {
+		return fmt.Sprintf("DATE_EXTRACT unit %s is unsupported", rule.Unit)
+	}
+	if oneOf(rule.Operation, "DATE_START", "DATE_END") && !oneOf(rule.Unit, "WEEK", "MONTH", "QUARTER", "YEAR") {
+		return fmt.Sprintf("%s unit %s is unsupported", rule.Operation, rule.Unit)
+	}
+	if oneOf(rule.Operation, "DATE_EXTRACT", "DATE_START", "DATE_END") && !oneOf(rule.DateSource, "FIELD", "CURRENT_DATE") {
+		return fmt.Sprintf("%s dateSource %s must be FIELD or CURRENT_DATE", rule.Operation, rule.DateSource)
+	}
+	if !oneOf(rule.Operation, "DATE_EXTRACT", "DATE_START", "DATE_END") && rule.DateSource != "" {
+		return fmt.Sprintf("%s does not accept dateSource", rule.Operation)
+	}
+	if rule.Operation == "DATE_DIFF" {
+		if !oneOf(rule.StartDateSource, "", "FIELD", "CURRENT_DATE") || !oneOf(rule.EndDateSource, "", "FIELD", "CURRENT_DATE") {
+			return "DATE_DIFF startDateSource and endDateSource must be FIELD or CURRENT_DATE"
+		}
+	} else if rule.StartDateSource != "" || rule.EndDateSource != "" {
+		return fmt.Sprintf("%s does not accept startDateSource or endDateSource", rule.Operation)
+	}
 	if rule.Operation == "CAST" && !oneOf(rule.TargetType, "STRING", "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "DATETIME") {
 		return fmt.Sprintf("CAST target type %s is unsupported", rule.TargetType)
 	}
 	if rule.Operation == "CASE" {
+		if !oneOf(rule.ThenMode, "", "LITERAL", "CURRENT_DATE") || !oneOf(rule.ElseMode, "", "LITERAL", "CURRENT_DATE") {
+			return "CASE thenMode and elseMode must be LITERAL or CURRENT_DATE"
+		}
+		if (rule.ThenMode == "CURRENT_DATE" || rule.ElseMode == "CURRENT_DATE") && rule.Output.CanonicalType != "DATE" {
+			return "CASE with CURRENT_DATE output must use DATE canonical type"
+		}
 		if !oneOf(rule.ConditionOperator, "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "CONTAINS", "NOT_CONTAINS", "IN", "IS_NULL", "IS_NOT_NULL") {
 			return fmt.Sprintf("CASE condition operator %s is unsupported", rule.ConditionOperator)
 		}
@@ -742,8 +791,11 @@ func transformRuleValidationDetail(componentType string, rule PlanTransformRule)
 			return fmt.Sprintf("CASE operator %s requires a non-empty match value", rule.ConditionOperator)
 		}
 	}
-	if rule.Operation == "COALESCE" && !oneOf(rule.FallbackMode, "LITERAL", "FIELD") {
-		return fmt.Sprintf("COALESCE fallback mode %s must be LITERAL or FIELD", rule.FallbackMode)
+	if rule.Operation == "COALESCE" && !oneOf(rule.FallbackMode, "LITERAL", "FIELD", "CURRENT_DATE") {
+		return fmt.Sprintf("COALESCE fallback mode %s must be LITERAL, FIELD, or CURRENT_DATE", rule.FallbackMode)
+	}
+	if rule.Operation == "COALESCE" && rule.FallbackMode == "CURRENT_DATE" && !oneOf(rule.Output.CanonicalType, "DATE", "DATETIME") {
+		return "COALESCE with CURRENT_DATE must produce DATE or DATETIME"
 	}
 	if rule.Operation == "ROUND" && (rule.Precision == nil || *rule.Precision < -10 || *rule.Precision > 10) {
 		return "ROUND precision must be present and between -10 and 10"

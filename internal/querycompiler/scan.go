@@ -184,7 +184,7 @@ func expressionOnlyReferencesNode(expression dataset.Expression, nodeID string) 
 	found := false
 	valid := true
 	visitExpression(expression, func(item dataset.Expression) {
-		if item.Type == "AGGREGATE" {
+		if item.Type == "AGGREGATE" || item.Type == "WINDOW" {
 			valid = false
 		}
 		if item.Type == "FIELD_REF" {
@@ -208,5 +208,11 @@ func visitExpression(expression dataset.Expression, visit func(dataset.Expressio
 	for _, branch := range expression.Whens {
 		visitExpression(branch.When, visit)
 		visitExpression(branch.Then, visit)
+	}
+	for _, child := range expression.PartitionBy {
+		visitExpression(child, visit)
+	}
+	for _, item := range expression.OrderBy {
+		visitExpression(item.Expression, visit)
 	}
 }

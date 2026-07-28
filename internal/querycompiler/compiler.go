@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"intelligent-report-generation-system/internal/dataset"
+	"intelligent-report-generation-system/internal/physicalname"
 	"intelligent-report-generation-system/internal/policy"
 )
 
@@ -406,13 +407,15 @@ func (c *compiler) compileInner() (string, error) {
 		remaining = next
 	}
 	fieldExpressions := map[string]string{}
+	fieldIndexes := map[string]int{}
 	projections := make([]string, 0, len(c.input.Document.Fields))
-	for _, field := range c.input.Document.Fields {
+	for index, field := range c.input.Document.Fields {
 		expression, err := c.expression(field.Expression, aliases)
 		if err != nil {
 			return "", fmt.Errorf("field %s: %w", field.Code, err)
 		}
 		fieldExpressions[field.ID] = expression
+		fieldIndexes[field.ID] = index
 		projections = append(projections, expression+" AS "+c.quote(field.Code))
 	}
 	// SELECT 表达式的绑定值在 SQL 文本中先于 FROM 派生表，因此关联前分组的
@@ -476,20 +479,69 @@ func (c *compiler) compileInner() (string, error) {
 	if c.input.Document.Distinct {
 		selectPrefix = "SELECT DISTINCT "
 	}
-	sql := selectPrefix + strings.Join(projections, ", ") + " FROM " + from
-	if len(where) > 0 {
-		sql += " WHERE " + strings.Join(where, " AND ")
-	}
+	groups := make([]string, 0, len(c.input.Document.GroupBy))
+	groupAliases := make([]string, 0, len(c.input.Document.GroupBy))
+	groupExpressions := make(map[string]dataset.Expression, len(c.input.Document.GroupBy))
 	if len(c.input.Document.GroupBy) > 0 {
-		groups := make([]string, 0, len(c.input.Document.GroupBy))
 		for _, id := range c.input.Document.GroupBy {
-			value, ok := fieldExpressions[id]
+			_, ok := fieldExpressions[id]
 			if !ok {
 				return "", errors.New("groupBy references an unknown field")
 			}
-			groups = append(groups, value)
+			field := c.input.Document.Fields[fieldIndexes[id]]
+			groupAliases = append(groupAliases, c.quote(field.Code))
+			groupExpressions[id] = field.Expression
+			// GROUP BY occurs after WHERE in SQL text. Compile native grouping
+			// expressions again here so any bound literals are appended in the
+			// same order as their second appearance in the query.
+			if c.input.Document.GroupByMode == dataset.GroupByModeSets {
+				continue
+			}
+			if c.input.Dialect != MySQL ||
+				(c.input.Document.GroupByMode != dataset.GroupByModeCube &&
+					c.input.Document.GroupByMode != dataset.GroupByModeRollup) {
+				value, err := c.expression(field.Expression, aliases)
+				if err != nil {
+					return "", err
+				}
+				groups = append(groups, value)
+			} else {
+				groups = append(groups, fieldExpressions[id])
+			}
 		}
-		sql += " GROUP BY " + strings.Join(groups, ", ")
+	}
+	groupClause := strings.Join(groups, ", ")
+	switch c.input.Document.GroupByMode {
+	case dataset.GroupByModeCube:
+		if c.input.Dialect != MySQL {
+			groupClause = "CUBE (" + groupClause + ")"
+		}
+	case dataset.GroupByModeRollup:
+		if c.input.Dialect == MySQL {
+			groupClause = strings.Join(groupAliases, ", ") + " WITH ROLLUP"
+		} else {
+			groupClause = "ROLLUP (" + groupClause + ")"
+		}
+	case dataset.GroupByModeSets:
+		if c.input.Dialect != MySQL {
+			sets := make([]string, 0, len(c.input.Document.GroupingSets))
+			for _, groupingSet := range c.input.Document.GroupingSets {
+				expressions := make([]string, 0, len(groupingSet))
+				for _, id := range groupingSet {
+					expression, ok := groupExpressions[id]
+					if !ok {
+						return "", errors.New("groupingSets references an unknown groupBy field")
+					}
+					value, err := c.expression(expression, aliases)
+					if err != nil {
+						return "", err
+					}
+					expressions = append(expressions, value)
+				}
+				sets = append(sets, "("+strings.Join(expressions, ", ")+")")
+			}
+			groupClause = "GROUPING SETS (" + strings.Join(sets, ", ") + ")"
+		}
 	}
 	having := []string{}
 	if len(c.input.Document.Having) > 0 {
@@ -513,10 +565,58 @@ func (c *compiler) compileInner() (string, error) {
 		}
 		having = append(having, "COUNT(*) >= "+c.bind(minimumGroupSize))
 	}
-	if len(having) > 0 {
-		sql += " HAVING " + strings.Join(having, " AND ")
+	buildSelect := func(branchProjections []string, groupClause string) string {
+		sql := selectPrefix + strings.Join(branchProjections, ", ") + " FROM " + from
+		if len(where) > 0 {
+			sql += " WHERE " + strings.Join(where, " AND ")
+		}
+		if groupClause != "" {
+			sql += " GROUP BY " + groupClause
+		}
+		if len(having) > 0 {
+			sql += " HAVING " + strings.Join(having, " AND ")
+		}
+		return sql
 	}
-	return sql, nil
+	if c.input.Dialect == MySQL &&
+		(c.input.Document.GroupByMode == dataset.GroupByModeCube ||
+			c.input.Document.GroupByMode == dataset.GroupByModeSets) {
+		// MySQL has ROLLUP but no CUBE or GROUPING SETS. Expand the requested
+		// grouping sets as UNION ALL;
+		// including the bit mask in branch construction preserves distinct rows
+		// when source dimensions themselves contain NULL.
+		groupingSelections, err := groupingSelectionsForFields(
+			c.input.Document.GroupByMode,
+			c.input.Document.GroupBy,
+			c.input.Document.GroupingSets,
+		)
+		if err != nil {
+			return "", err
+		}
+		branches := make([]string, 0, len(groupingSelections))
+		for _, selected := range groupingSelections {
+			branchProjections := append([]string(nil), projections...)
+			activeGroups := make([]string, 0, len(groupAliases))
+			for index, fieldID := range c.input.Document.GroupBy {
+				if selected[index] {
+					activeGroups = append(activeGroups, groupAliases[index])
+					continue
+				}
+				fieldIndex := fieldIndexes[fieldID]
+				field := c.input.Document.Fields[fieldIndex]
+				branchProjections[fieldIndex] = "CASE WHEN 1 = 1 THEN NULL ELSE " +
+					fieldExpressions[fieldID] + " END AS " + c.quote(field.Code)
+			}
+			branches = append(branches, buildSelect(branchProjections, strings.Join(activeGroups, ", ")))
+		}
+		templateArgs := append([]any(nil), c.args...)
+		c.args = make([]any, 0, len(templateArgs)*len(branches))
+		for range branches {
+			c.args = append(c.args, templateArgs...)
+		}
+		return strings.Join(branches, " UNION ALL "), nil
+	}
+	return buildSelect(projections, groupClause), nil
 }
 
 func (c *compiler) documentNode(nodeID string) dataset.Node {
@@ -566,6 +666,8 @@ func (c *compiler) nodeRelation(node dataset.Node, ref TableRef) (string, []any,
 	aliases := map[string]string{node.ID: "pre_source"}
 	projections := make([]string, 0, len(item.GroupBy)+len(item.Metrics))
 	groups := make([]string, 0, len(item.GroupBy))
+	groupAliases := make([]string, 0, len(item.GroupBy))
+	groupExpressions := make([]dataset.Expression, 0, len(item.GroupBy))
 	for _, group := range item.GroupBy {
 		expression := dataset.Expression{Type: "FIELD_REF", NodeID: node.ID, Field: group.Field}
 		if group.Expression != nil {
@@ -587,13 +689,19 @@ func (c *compiler) nodeRelation(node dataset.Node, ref TableRef) (string, []any,
 		}
 		projections = append(projections, value+" AS "+c.quote(group.Field))
 		groups = append(groups, value)
+		groupAliases = append(groupAliases, c.quote(group.Field))
+		groupExpressions = append(groupExpressions, expression)
 	}
 	for _, metric := range item.Metrics {
-		argument := dataset.Expression{Type: "FIELD_REF", NodeID: node.ID, Field: metric.Field}
-		if metric.Expression != nil {
-			argument = *metric.Expression
+		aggregate := dataset.Expression{Type: "AGGREGATE", Function: metric.Function}
+		if !metric.CountRows {
+			argument := dataset.Expression{Type: "FIELD_REF", NodeID: node.ID, Field: metric.Field}
+			if metric.Expression != nil {
+				argument = *metric.Expression
+			}
+			aggregate.Argument = &argument
 		}
-		value, err := sub.expression(dataset.Expression{Type: "AGGREGATE", Function: metric.Function, Argument: &argument}, aliases)
+		value, err := sub.expression(aggregate, aliases)
 		if err != nil {
 			return "", nil, err
 		}
@@ -607,12 +715,137 @@ func (c *compiler) nodeRelation(node dataset.Node, ref TableRef) (string, []any,
 		}
 		where = append(where, value)
 	}
-	sql := "(SELECT " + strings.Join(projections, ", ") + " FROM " + c.tableName(ref) + " " + c.quote("pre_source")
-	if len(where) > 0 {
-		sql += " WHERE " + strings.Join(where, " AND ")
+	if item.GroupByMode != dataset.GroupByModeSets &&
+		(c.input.Dialect != MySQL ||
+			(item.GroupByMode != dataset.GroupByModeCube &&
+				item.GroupByMode != dataset.GroupByModeRollup)) {
+		groups = groups[:0]
+		for _, expression := range groupExpressions {
+			value, err := sub.expression(expression, aliases)
+			if err != nil {
+				return "", nil, err
+			}
+			groups = append(groups, value)
+		}
 	}
-	sql += " GROUP BY " + strings.Join(groups, ", ") + ")"
-	return sql, sub.args, nil
+	groupClause := strings.Join(groups, ", ")
+	switch item.GroupByMode {
+	case dataset.GroupByModeCube:
+		if c.input.Dialect != MySQL {
+			groupClause = "CUBE (" + groupClause + ")"
+		}
+	case dataset.GroupByModeRollup:
+		if c.input.Dialect == MySQL {
+			groupClause = strings.Join(groupAliases, ", ") + " WITH ROLLUP"
+		} else {
+			groupClause = "ROLLUP (" + groupClause + ")"
+		}
+	case dataset.GroupByModeSets:
+		if c.input.Dialect != MySQL {
+			expressionsByField := make(map[string]dataset.Expression, len(item.GroupBy))
+			for index, group := range item.GroupBy {
+				expressionsByField[group.Field] = groupExpressions[index]
+			}
+			sets := make([]string, 0, len(item.GroupingSets))
+			for _, groupingSet := range item.GroupingSets {
+				expressions := make([]string, 0, len(groupingSet))
+				for _, field := range groupingSet {
+					expression, ok := expressionsByField[field]
+					if !ok {
+						return "", nil, errors.New("preAggregation groupingSets references an unknown groupBy field")
+					}
+					value, err := sub.expression(expression, aliases)
+					if err != nil {
+						return "", nil, err
+					}
+					expressions = append(expressions, value)
+				}
+				sets = append(sets, "("+strings.Join(expressions, ", ")+")")
+			}
+			groupClause = "GROUPING SETS (" + strings.Join(sets, ", ") + ")"
+		}
+	}
+	buildSelect := func(branchProjections []string, groupClause string) string {
+		sql := "SELECT " + strings.Join(branchProjections, ", ") + " FROM " + c.tableName(ref) + " " + c.quote("pre_source")
+		if len(where) > 0 {
+			sql += " WHERE " + strings.Join(where, " AND ")
+		}
+		if groupClause != "" {
+			sql += " GROUP BY " + groupClause
+		}
+		return sql
+	}
+	if c.input.Dialect == MySQL &&
+		(item.GroupByMode == dataset.GroupByModeCube ||
+			item.GroupByMode == dataset.GroupByModeSets) {
+		dimensions := make([]string, len(item.GroupBy))
+		for index, group := range item.GroupBy {
+			dimensions[index] = group.Field
+		}
+		groupingSelections, err := groupingSelectionsForFields(item.GroupByMode, dimensions, item.GroupingSets)
+		if err != nil {
+			return "", nil, err
+		}
+		branches := make([]string, 0, len(groupingSelections))
+		for _, selected := range groupingSelections {
+			branchProjections := append([]string(nil), projections...)
+			activeGroups := make([]string, 0, len(groupAliases))
+			for index, group := range item.GroupBy {
+				if selected[index] {
+					activeGroups = append(activeGroups, groupAliases[index])
+					continue
+				}
+				branchProjections[index] = "CASE WHEN 1 = 1 THEN NULL ELSE " + groups[index] +
+					" END AS " + c.quote(group.Field)
+			}
+			branches = append(branches, buildSelect(branchProjections, strings.Join(activeGroups, ", ")))
+		}
+		templateArgs := append([]any(nil), sub.args...)
+		sub.args = make([]any, 0, len(templateArgs)*len(branches))
+		for range branches {
+			sub.args = append(sub.args, templateArgs...)
+		}
+		return "(" + strings.Join(branches, " UNION ALL ") + ")", sub.args, nil
+	}
+	return "(" + buildSelect(projections, groupClause) + ")", sub.args, nil
+}
+
+func groupingSelectionsForFields(mode dataset.GroupByMode, dimensions []string, groupingSets [][]string) ([][]bool, error) {
+	if mode == dataset.GroupByModeCube {
+		selections := make([][]bool, 0, 1<<len(dimensions))
+		for mask := (1 << len(dimensions)) - 1; mask >= 0; mask-- {
+			selected := make([]bool, len(dimensions))
+			for index := range dimensions {
+				selected[index] = mask&(1<<index) != 0
+			}
+			selections = append(selections, selected)
+		}
+		return selections, nil
+	}
+	if mode != dataset.GroupByModeSets {
+		selected := make([]bool, len(dimensions))
+		for index := range selected {
+			selected[index] = true
+		}
+		return [][]bool{selected}, nil
+	}
+	indexes := make(map[string]int, len(dimensions))
+	for index, dimension := range dimensions {
+		indexes[dimension] = index
+	}
+	selections := make([][]bool, 0, len(groupingSets))
+	for _, groupingSet := range groupingSets {
+		selected := make([]bool, len(dimensions))
+		for _, dimension := range groupingSet {
+			index, ok := indexes[dimension]
+			if !ok {
+				return nil, errors.New("groupingSets references an unknown groupBy field")
+			}
+			selected[index] = true
+		}
+		selections = append(selections, selected)
+	}
+	return selections, nil
 }
 
 func (c *compiler) sourceFilterExpression(node dataset.Node, filter dataset.SourceFilter, aliases map[string]string) (string, error) {
@@ -696,6 +929,123 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 			return "", errors.New("unsupported aggregate")
 		}
 		return function + "(" + argument + ")", nil
+	case "WINDOW":
+		if !oneOf(expression.Function, "ROW_NUMBER", "RANK", "DENSE_RANK", "SUM", "AVG", "COUNT", "MIN", "MAX") {
+			return "", errors.New("unsupported window function")
+		}
+		if len(expression.PartitionBy) == 0 || len(expression.OrderBy) == 0 {
+			return "", errors.New("window function requires PARTITION BY and ORDER BY")
+		}
+		partitions := make([]string, 0, len(expression.PartitionBy))
+		for _, partition := range expression.PartitionBy {
+			value, err := c.expression(partition, aliases)
+			if err != nil {
+				return "", err
+			}
+			partitions = append(partitions, value)
+		}
+		orders := make([]string, 0, len(expression.OrderBy))
+		for _, item := range expression.OrderBy {
+			value, err := c.expression(item.Expression, aliases)
+			if err != nil {
+				return "", err
+			}
+			if !oneOf(item.Direction, "ASC", "DESC") {
+				return "", errors.New("unsupported window order direction")
+			}
+			orders = append(orders, value+" "+item.Direction)
+		}
+		call := expression.Function + "()"
+		frame := ""
+		if oneOf(expression.Function, "SUM", "AVG", "COUNT", "MIN", "MAX") {
+			if expression.Argument == nil {
+				return "", errors.New("aggregate window function requires an argument")
+			}
+			argument, err := c.expression(*expression.Argument, aliases)
+			if err != nil {
+				return "", err
+			}
+			call = expression.Function + "(" + argument + ")"
+			// 明确整分区窗口，避免带 ORDER BY 时数据库采用默认“截至当前行”
+			// frame 而把组内聚合悄悄变成累计值。
+			frame = " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING"
+		}
+		return call + " OVER (PARTITION BY " + strings.Join(partitions, ", ") + " ORDER BY " + strings.Join(orders, ", ") + frame + ")", nil
+	case "CURRENT_DATE":
+		switch c.input.Dialect {
+		case Oracle:
+			return "TRUNC(CURRENT_DATE)", nil
+		case PostgreSQL:
+			return "CURRENT_DATE", nil
+		default:
+			return "CURRENT_DATE()", nil
+		}
+	case "DATE_DIFF":
+		if len(expression.Arguments) != 2 {
+			return "", errors.New("DATE_DIFF requires start and end arguments")
+		}
+		start, err := c.expression(expression.Arguments[0], aliases)
+		if err != nil {
+			return "", err
+		}
+		end, err := c.expression(expression.Arguments[1], aliases)
+		if err != nil {
+			return "", err
+		}
+		if expression.Unit == "DAY" {
+			switch c.input.Dialect {
+			case Oracle:
+				return "(TRUNC(" + end + ") - TRUNC(" + start + "))", nil
+			case PostgreSQL:
+				return "(CAST(" + end + " AS DATE) - CAST(" + start + " AS DATE))", nil
+			default:
+				return "DATEDIFF(" + end + ", " + start + ")", nil
+			}
+		}
+		startYear, err := c.datePartExpression("YEAR", start)
+		if err != nil {
+			return "", err
+		}
+		endYear, err := c.datePartExpression("YEAR", end)
+		if err != nil {
+			return "", err
+		}
+		if expression.Unit == "YEAR" {
+			return "((" + endYear + ") - (" + startYear + "))", nil
+		}
+		if expression.Unit != "MONTH" {
+			return "", errors.New("unsupported date difference unit")
+		}
+		startMonth, err := c.datePartExpression("MONTH", start)
+		if err != nil {
+			return "", err
+		}
+		endMonth, err := c.datePartExpression("MONTH", end)
+		if err != nil {
+			return "", err
+		}
+		return "(((" + endYear + ") - (" + startYear + ")) * 12 + ((" + endMonth + ") - (" + startMonth + ")))", nil
+	case "DATE_EXTRACT":
+		if expression.Argument == nil {
+			return "", errors.New("DATE_EXTRACT requires an argument")
+		}
+		argument, err := c.expression(*expression.Argument, aliases)
+		if err != nil {
+			return "", err
+		}
+		return c.datePartExpression(expression.Unit, argument)
+	case "DATE_START", "DATE_END":
+		if expression.Argument == nil {
+			return "", errors.New(expression.Type + " requires an argument")
+		}
+		argument, err := c.expression(*expression.Argument, aliases)
+		if err != nil {
+			return "", err
+		}
+		if expression.Type == "DATE_START" {
+			return c.dateBoundaryStartExpression(expression.Unit, argument)
+		}
+		return c.dateBoundaryEndExpression(expression.Unit, argument)
 	case "DATE_TRUNC":
 		if expression.Argument == nil {
 			return "", errors.New("DATE_TRUNC requires an argument")
@@ -992,6 +1342,107 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 	}
 }
 
+func (c *compiler) datePartExpression(unit, argument string) (string, error) {
+	switch c.input.Dialect {
+	case Oracle:
+		switch unit {
+		case "YEAR", "MONTH", "DAY":
+			return "EXTRACT(" + unit + " FROM " + argument + ")", nil
+		case "QUARTER":
+			return "TO_NUMBER(TO_CHAR(" + argument + ", 'Q'))", nil
+		case "WEEK":
+			return "TO_NUMBER(TO_CHAR(" + argument + ", 'IW'))", nil
+		case "WEEKDAY":
+			return "(TRUNC(" + argument + ") - TRUNC(" + argument + ", 'IW') + 1)", nil
+		case "DAY_OF_YEAR":
+			return "TO_NUMBER(TO_CHAR(" + argument + ", 'DDD'))", nil
+		}
+	case PostgreSQL:
+		part := map[string]string{
+			"YEAR": "YEAR", "QUARTER": "QUARTER", "MONTH": "MONTH", "WEEK": "WEEK",
+			"DAY": "DAY", "WEEKDAY": "ISODOW", "DAY_OF_YEAR": "DOY",
+		}[unit]
+		if part != "" {
+			return "EXTRACT(" + part + " FROM " + argument + ")", nil
+		}
+	default:
+		function := map[string]string{
+			"YEAR": "YEAR", "QUARTER": "QUARTER", "MONTH": "MONTH", "DAY": "DAY", "DAY_OF_YEAR": "DAYOFYEAR",
+		}[unit]
+		if function != "" {
+			return function + "(" + argument + ")", nil
+		}
+		if unit == "WEEK" {
+			return "WEEK(" + argument + ", 3)", nil
+		}
+		if unit == "WEEKDAY" {
+			return "(WEEKDAY(" + argument + ") + 1)", nil
+		}
+	}
+	return "", errors.New("unsupported date extraction unit")
+}
+
+func (c *compiler) dateBoundaryStartExpression(unit, argument string) (string, error) {
+	switch c.input.Dialect {
+	case Oracle:
+		format := map[string]string{"WEEK": "IW", "MONTH": "MM", "QUARTER": "Q", "YEAR": "YYYY"}[unit]
+		if format != "" {
+			return "TRUNC(" + argument + ", '" + format + "')", nil
+		}
+	case PostgreSQL:
+		part := map[string]string{"WEEK": "week", "MONTH": "month", "QUARTER": "quarter", "YEAR": "year"}[unit]
+		if part != "" {
+			return "CAST(DATE_TRUNC('" + part + "', " + argument + ") AS DATE)", nil
+		}
+	default:
+		switch unit {
+		case "WEEK":
+			return "DATE_SUB(DATE(" + argument + "), INTERVAL WEEKDAY(" + argument + ") DAY)", nil
+		case "MONTH":
+			return "DATE_SUB(DATE(" + argument + "), INTERVAL (DAYOFMONTH(" + argument + ") - 1) DAY)", nil
+		case "QUARTER":
+			return "DATE_ADD(MAKEDATE(YEAR(" + argument + "), 1), INTERVAL ((QUARTER(" + argument + ") - 1) * 3) MONTH)", nil
+		case "YEAR":
+			return "MAKEDATE(YEAR(" + argument + "), 1)", nil
+		}
+	}
+	return "", errors.New("unsupported date boundary unit")
+}
+
+func (c *compiler) dateBoundaryEndExpression(unit, argument string) (string, error) {
+	switch c.input.Dialect {
+	case Oracle:
+		switch unit {
+		case "WEEK":
+			return "(TRUNC(" + argument + ", 'IW') + 6)", nil
+		case "MONTH":
+			return "(ADD_MONTHS(TRUNC(" + argument + ", 'MM'), 1) - 1)", nil
+		case "QUARTER":
+			return "(ADD_MONTHS(TRUNC(" + argument + ", 'Q'), 3) - 1)", nil
+		case "YEAR":
+			return "(ADD_MONTHS(TRUNC(" + argument + ", 'YYYY'), 12) - 1)", nil
+		}
+	case PostgreSQL:
+		part := map[string]string{"WEEK": "week", "MONTH": "month", "QUARTER": "quarter", "YEAR": "year"}[unit]
+		interval := map[string]string{"WEEK": "1 week", "MONTH": "1 month", "QUARTER": "3 months", "YEAR": "1 year"}[unit]
+		if part != "" {
+			return "CAST(DATE_TRUNC('" + part + "', " + argument + ") + INTERVAL '" + interval + "' - INTERVAL '1 day' AS DATE)", nil
+		}
+	default:
+		switch unit {
+		case "WEEK":
+			return "DATE_ADD(DATE_SUB(DATE(" + argument + "), INTERVAL WEEKDAY(" + argument + ") DAY), INTERVAL 6 DAY)", nil
+		case "MONTH":
+			return "LAST_DAY(" + argument + ")", nil
+		case "QUARTER":
+			return "LAST_DAY(DATE_ADD(MAKEDATE(YEAR(" + argument + "), 1), INTERVAL (QUARTER(" + argument + ") * 3 - 1) MONTH))", nil
+		case "YEAR":
+			return "DATE(CONCAT(YEAR(" + argument + "), '-12-31'))", nil
+		}
+	}
+	return "", errors.New("unsupported date boundary unit")
+}
+
 func (c *compiler) compileRows() (string, error) {
 	if len(c.input.RowPolicies) == 0 {
 		return "", nil
@@ -1248,7 +1699,7 @@ func (c *compiler) validateTable(ref TableRef) error {
 		return errors.New("PostgreSQL physical identifiers cannot exceed 63 bytes")
 	}
 	for name := range ref.Columns {
-		if !safeIdentifier.MatchString(name) {
+		if !physicalname.ValidColumn(name) {
 			return errors.New("physical column identifier is invalid")
 		}
 		if c.input.Dialect == PostgreSQL && len(name) > 63 {
@@ -1316,6 +1767,16 @@ func hasNilParameter(expression dataset.Expression, parameters map[string]any) b
 	}
 	for _, branch := range expression.Whens {
 		if hasNilParameter(branch.When, parameters) || hasNilParameter(branch.Then, parameters) {
+			return true
+		}
+	}
+	for _, child := range expression.PartitionBy {
+		if hasNilParameter(child, parameters) {
+			return true
+		}
+	}
+	for _, item := range expression.OrderBy {
+		if hasNilParameter(item.Expression, parameters) {
 			return true
 		}
 	}

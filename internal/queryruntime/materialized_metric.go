@@ -197,6 +197,24 @@ func rewriteMaterializedExpressionForLayer(
 		expression.Whens[index].When = when
 		expression.Whens[index].Then = then
 	}
+	for index := range expression.PartitionBy {
+		rewritten, err := rewriteMaterializedExpressionForLayer(
+			expression.PartitionBy[index], replacements, sourceLayer,
+		)
+		if err != nil {
+			return dataset.Expression{}, err
+		}
+		expression.PartitionBy[index] = rewritten
+	}
+	for index := range expression.OrderBy {
+		rewritten, err := rewriteMaterializedExpressionForLayer(
+			expression.OrderBy[index].Expression, replacements, sourceLayer,
+		)
+		if err != nil {
+			return dataset.Expression{}, err
+		}
+		expression.OrderBy[index].Expression = rewritten
+	}
 	return expression, nil
 }
 
@@ -297,6 +315,16 @@ func rejectNonMaterializedFieldReferences(fields []dataset.Field) error {
 				return err
 			}
 			if err := visit(branch.Then); err != nil {
+				return err
+			}
+		}
+		for _, child := range expression.PartitionBy {
+			if err := visit(child); err != nil {
+				return err
+			}
+		}
+		for _, item := range expression.OrderBy {
+			if err := visit(item.Expression); err != nil {
 				return err
 			}
 		}

@@ -104,6 +104,10 @@ func expressionShape(expression dataset.Expression, depth int) string {
 	for _, branch := range expression.Whens {
 		children = append(children, branch.When, branch.Then)
 	}
+	children = append(children, expression.PartitionBy...)
+	for _, item := range expression.OrderBy {
+		children = append(children, item.Expression)
+	}
 	if expression.Else != nil {
 		children = append(children, *expression.Else)
 	}

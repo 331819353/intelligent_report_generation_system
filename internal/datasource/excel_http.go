@@ -2,6 +2,8 @@ package datasource
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -24,9 +26,7 @@ func NewExcelHandler(authService *auth.Service, permissions *access.Service, man
 				writeDSError(w, 500, "EXCEL_QUOTA_FAILED", "failed to load upload quota")
 				return
 			}
-			r.Body = http.MaxBytesReader(w, r.Body, maxBytes+(1<<20))
-			if err := r.ParseMultipartForm(8 << 20); err != nil {
-				writeDSError(w, 400, "INVALID_EXCEL_UPLOAD", "invalid multipart upload")
+			if !parseExcelMultipartForm(w, r, maxBytes) {
 				return
 			}
 			file, header, err := r.FormFile("file")
@@ -35,6 +35,10 @@ func NewExcelHandler(authService *auth.Service, permissions *access.Service, man
 				return
 			}
 			defer file.Close()
+			if header.Size > maxBytes {
+				writeExcelFileTooLarge(w, maxBytes)
+				return
+			}
 			extension := strings.ToLower(header.Filename[strings.LastIndex(header.Filename, ".")+1:])
 			if extension != "xlsx" && extension != "xls" && extension != "csv" {
 				writeDSError(w, 400, "UNSUPPORTED_FILE_FORMAT", "only .xlsx, .xls and .csv are supported")
@@ -78,6 +82,45 @@ func NewExcelHandler(authService *auth.Service, permissions *access.Service, man
 		writeDSJSON(w, 200, map[string]any{"items": versions})
 	})))
 	return mux
+}
+
+const excelMultipartOverheadBytes int64 = 1 << 20
+
+// parseExcelMultipartForm 为文件配额预留有限的 multipart 头和配置开销，并把
+// 请求体超限与真正的表单损坏区分开，避免向用户误报协议错误。
+func parseExcelMultipartForm(w http.ResponseWriter, r *http.Request, maxFileBytes int64) bool {
+	r.Body = http.MaxBytesReader(
+		w,
+		r.Body,
+		maxFileBytes+excelMultipartOverheadBytes,
+	)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeExcelFileTooLarge(w, maxFileBytes)
+			return false
+		}
+		writeDSError(
+			w,
+			http.StatusBadRequest,
+			"INVALID_EXCEL_UPLOAD",
+			"上传表单格式无效，请重新选择文件后重试",
+		)
+		return false
+	}
+	return true
+}
+
+func writeExcelFileTooLarge(w http.ResponseWriter, maxFileBytes int64) {
+	writeDSError(
+		w,
+		http.StatusRequestEntityTooLarge,
+		"EXCEL_FILE_TOO_LARGE",
+		fmt.Sprintf(
+			"文件大小超过租户上传限额（最多 %.0f MiB），请拆分文件或联系管理员调整配额",
+			float64(maxFileBytes)/(1<<20),
+		),
+	)
 }
 
 // safeFileError 将内部存储错误收敛为可安全返回客户端的消息。

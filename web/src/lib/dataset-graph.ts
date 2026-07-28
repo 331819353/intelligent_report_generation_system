@@ -6,14 +6,20 @@ export type GraphJoin = {
   id: string; name: string; left?: GraphInput; right?: GraphInput
   position: CanvasPoint; outputKeys: string[]
 }
-export type GraphDimension = { key: string; name: string; code: string; grouping?: string }
-export type GraphMetric = { key: string; name: string; code: string; aggregation: string }
+export type GraphDimension = { key: string; outputKey?: string; name: string; code: string; grouping?: string }
+export type GraphMetric = { key: string; outputKey?: string; name: string; code: string; aggregation: string; countRows?: boolean }
+export type GraphGroupByMode = 'STANDARD' | 'CUBE' | 'ROLLUP' | 'GROUPING_SETS'
 export type GraphGroup = {
   id: string; name: string; input?: GraphInput; position: CanvasPoint
+  groupByMode?: GraphGroupByMode
+  groupingSets?: string[][]
   dimensions: GraphDimension[]; metrics: GraphMetric[]
 }
-export type GraphTransformFamily = 'DATE' | 'TEXT' | 'CAST' | 'NUMBER' | 'CONDITION' | 'NULL' | 'SPLIT_MERGE'
+export type GraphTransformFamily = 'DATE' | 'TEXT' | 'CAST' | 'NUMBER' | 'CONDITION' | 'NULL' | 'WINDOW' | 'SPLIT_MERGE'
 export type GraphTransformComponentType =
+  | 'FILTER'
+  | 'WINDOW_FUNCTION'
+  | 'DATE_CALCULATION'
   | 'DATE_FORMAT'
   | 'TEXT_UPPER'
   | 'TEXT_TRIM'
@@ -27,23 +33,40 @@ export type GraphTransformComponentType =
   | 'CAST'
   | 'CONDITION'
   | 'NULL'
-export type GraphTransformOperation = 'DATE_FORMAT' | 'DATE_TRUNC' | 'CAST' | 'ADD' | 'SUBTRACT' | 'MULTIPLY' | 'DIVIDE' | 'ROUND' | 'ABS' | 'FLOOR' | 'CEIL' | 'CONCAT' | 'COALESCE' | 'CASE' | 'SUBSTRING' | 'TRIM' | 'UPPER' | 'LOWER' | 'REPLACE'
-export type GraphConditionOperator = 'EQUALS' | 'NOT_EQUALS' | 'GT' | 'GTE' | 'LT' | 'LTE' | 'CONTAINS' | 'NOT_CONTAINS' | 'IN' | 'IS_NULL' | 'IS_NOT_NULL'
+export type GraphTransformOperation = 'WINDOW' | 'CURRENT_DATE' | 'DATE_DIFF' | 'DATE_EXTRACT' | 'DATE_START' | 'DATE_END' | 'DATE_FORMAT' | 'DATE_TRUNC' | 'CAST' | 'ADD' | 'SUBTRACT' | 'MULTIPLY' | 'DIVIDE' | 'ROUND' | 'ABS' | 'FLOOR' | 'CEIL' | 'CONCAT' | 'COALESCE' | 'CASE' | 'SUBSTRING' | 'TRIM' | 'UPPER' | 'LOWER' | 'REPLACE'
+export type GraphDateUnit = 'DAY' | 'WEEK' | 'MONTH' | 'QUARTER' | 'YEAR' | 'WEEKDAY' | 'DAY_OF_YEAR'
+export type GraphDateSource = 'FIELD' | 'CURRENT_DATE'
+export type GraphValueSource = 'LITERAL' | 'FIELD' | 'CURRENT_DATE'
+export type GraphConditionOperator = 'EQUALS' | 'NOT_EQUALS' | 'GT' | 'GTE' | 'LT' | 'LTE' | 'CONTAINS' | 'NOT_CONTAINS' | 'IN' | 'NOT_IN' | 'IS_NULL' | 'IS_NOT_NULL'
 export type GraphConditionValue = { id: string; mode: 'LITERAL' | 'FIELD'; value: string }
+export type GraphWindowFunction = 'ROW_NUMBER' | 'RANK' | 'DENSE_RANK' | 'SUM' | 'AVG' | 'COUNT' | 'MIN' | 'MAX'
+export type GraphWindowOrder = { id: string; key: string; direction: 'ASC' | 'DESC' }
+export type GraphFilterCondition = {
+  id: string
+  inputKey: string
+  operator: GraphConditionOperator
+  valueMode?: 'LITERAL' | 'FIELD'
+  value: string
+}
 export type GraphTransformOutput = { id: string; name: string; code: string; canonicalType: string }
 export type GraphTransformRule = {
   id: string
   operation: GraphTransformOperation
   inputKeys: string[]
   output: GraphTransformOutput
-  unit?: 'DAY' | 'WEEK' | 'MONTH' | 'QUARTER' | 'YEAR'
+  unit?: GraphDateUnit
+  dateSource?: GraphDateSource
+  startDateSource?: GraphDateSource
+  endDateSource?: GraphDateSource
   targetType?: 'STRING' | 'INTEGER' | 'DECIMAL' | 'BOOLEAN' | 'DATE' | 'DATETIME'
   matchValue?: string
+  thenMode?: GraphValueSource
   thenValue?: string
+  elseMode?: GraphValueSource
   elseValue?: string
   conditionOperator?: GraphConditionOperator
   conditionValues?: GraphConditionValue[]
-  fallbackMode?: 'LITERAL' | 'FIELD'
+  fallbackMode?: 'LITERAL' | 'FIELD' | 'CURRENT_DATE'
   fallbackValue?: string
   separator?: string
   precision?: number
@@ -52,10 +75,15 @@ export type GraphTransformRule = {
   searchValue?: string
   replacementValue?: string
   replaceSourceKey?: string
+  windowFunction?: GraphWindowFunction
+  windowValueKey?: string
+  partitionByKeys?: string[]
+  orderBy?: GraphWindowOrder[]
 }
 export type GraphTransform = {
   id: string; name: string; family: GraphTransformFamily; componentType?: GraphTransformComponentType; input?: GraphInput; position: CanvasPoint
   rules: GraphTransformRule[]
+  conditions?: GraphFilterCondition[]
 }
 export type GraphEndOutput = { key: string; name: string; code: string }
 export type GraphEnd = {
@@ -110,6 +138,11 @@ type LegacyDSL = DatasetDSL & { designer?: unknown; joins?: unknown; preAggregat
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const list = (value: unknown): unknown[] => Array.isArray(value) ? value : []
 const text = (value: unknown): string => typeof value === 'string' ? value : ''
+const groupByMode = (value: unknown): Exclude<GraphGroupByMode, 'STANDARD'> | undefined => {
+  const mode = text(value).toUpperCase()
+  return mode === 'CUBE' || mode === 'ROLLUP' || mode === 'GROUPING_SETS' ? mode : undefined
+}
+const groupingSets = (value: unknown): string[][] => list(value).map(item => list(item).map(text).filter(Boolean))
 const finite = (value: unknown, fallback: number): number => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback
 const point = (value: unknown, fallback: CanvasPoint): CanvasPoint => {
   const raw = record(value)
@@ -385,6 +418,9 @@ function nodeFields(node: DesignerNode, fields: FieldOption[]): ProducedField[] 
   })
 }
 
+/** key 绑定分组输入；outputKey 用于区分同一输入产生的维度和指标。 */
+export const graphGroupOutputKey = (item: GraphDimension | GraphMetric) => item.outputKey?.trim() || item.key
+
 /** 返回一个组件对下游公开的稳定产物；展示名称与物理字段绑定分离。 */
 export function graphProducedFields(value: GraphInput | undefined, graph: Pick<DesignerGraphV1, 'joins' | 'groups' | 'transforms'> & { nodeNames?: Record<string, string> }, nodes: DesignerNode[], fields: FieldOption[], visited = new Set<string>(), materializedGroupID = '', preAggregatedGroupIDs: ReadonlySet<string> = new Set()): ProducedField[] {
   if (!value) return []
@@ -405,9 +441,11 @@ export function graphProducedFields(value: GraphInput | undefined, graph: Pick<D
         const source = upstream.get(item.key)
         if (!source) return []
         const argument = source.expression ?? { type: 'FIELD_REF', nodeId: source.binding.nodeId, field: source.binding.field }
-        const outputField = keyParts(item.key).field || source.binding.field
+        const outputField = item.outputKey
+          ? identifier(item.code || keyParts(item.key).field || source.binding.field)
+          : keyParts(item.key).field || source.binding.field
         return [{
-          ...source, name: item.name, code: item.code, producerName: group.name, kind: 'DIMENSION' as const,
+          ...source, key: graphGroupOutputKey(item), name: item.name, code: item.code, producerName: group.name, kind: 'DIMENSION' as const,
           binding: preAggregated ? { nodeId: source.binding.nodeId, field: outputField } : source.binding,
           sourceBinding: source.sourceBinding ?? source.binding,
           grouping: item.grouping, aggregation: undefined,
@@ -417,19 +455,28 @@ export function graphProducedFields(value: GraphInput | undefined, graph: Pick<D
         }]
       }),
       ...group.metrics.flatMap(item => {
-        const source = upstream.get(item.key)
+        const countRows = item.aggregation === 'COUNT' && (item.key === '*' || item.countRows)
+        // COUNT(*) 不绑定某个业务字段；这里只借用首个上游字段承载节点与类型元数据，
+        // 真正的表达式没有 argument，因此不会退化成 COUNT(field)。
+        const source = countRows ? upstream.values().next().value : upstream.get(item.key)
         if (!source) return []
         const argument = source.expression ?? { type: 'FIELD_REF', nodeId: source.binding.nodeId, field: source.binding.field }
-        const outputField = keyParts(item.key).field || source.binding.field
+        const outputField = item.outputKey
+          ? identifier(item.code || keyParts(item.key).field || source.binding.field)
+          : countRows ? identifier(item.code || 'row_count') : keyParts(item.key).field || source.binding.field
         return [{
-          ...source, name: item.name, code: item.code, producerName: group.name, kind: 'METRIC' as const,
+          ...source, key: graphGroupOutputKey(item), name: item.name, code: item.code, producerName: group.name, kind: 'METRIC' as const,
           binding: preAggregated ? { nodeId: source.binding.nodeId, field: outputField } : source.binding,
           sourceBinding: source.sourceBinding ?? source.binding,
           aggregation: item.aggregation, grouping: undefined,
           canonicalType: item.aggregation === 'COUNT' || item.aggregation === 'COUNT_DISTINCT' ? 'INTEGER' : source.canonicalType,
           expression: preAggregated
             ? { type: 'FIELD_REF', nodeId: source.binding.nodeId, field: outputField }
-            : materializedGroupID === group.id ? { type: 'AGGREGATE', function: item.aggregation, argument } : argument,
+            : materializedGroupID === group.id
+              ? countRows
+                ? { type: 'AGGREGATE', function: 'COUNT' }
+                : { type: 'AGGREGATE', function: item.aggregation, argument }
+              : argument,
         }]
       }),
     ]
@@ -438,16 +485,52 @@ export function graphProducedFields(value: GraphInput | undefined, graph: Pick<D
     const transform = graph.transforms?.find(item => item.id === value.id)
     if (!transform) return []
     const upstream = graphProducedFields(transform.input, graph, nodes, fields, next, materializedGroupID, preAggregatedGroupIDs)
+    // 过滤组件只改变行集合，不改变字段集合；实际布尔表达式由 datasets.ts
+    // 转换到 DSL filters，确保执行层统一生成参数化 WHERE。
+    if (transform.componentType === 'FILTER') {
+      return upstream.map(item => ({ ...item, producerName: transform.name }))
+    }
     const upstreamByKey = new Map(upstream.map(item => [item.key, item]))
-    const replaced = new Set(transform.rules.map(rule => rule.replaceSourceKey).filter((key): key is string => Boolean(key)))
+    const replaced = new Set(transform.rules.flatMap(rule =>
+      rule.inputKeys[0] && rule.replaceSourceKey === rule.inputKeys[0] ? [rule.replaceSourceKey] : [],
+    ))
     const derived = transform.rules.flatMap(rule => {
-      const inputs = rule.inputKeys.map(key => upstreamByKey.get(key)).filter((field): field is ProducedField => Boolean(field))
-      if (!inputs.length || inputs.length !== rule.inputKeys.length) return []
+      const referencedKeys = rule.operation === 'WINDOW'
+        ? [...new Set([...(rule.windowValueKey ? [rule.windowValueKey] : []), ...(rule.partitionByKeys ?? []), ...(rule.orderBy ?? []).map(item => item.key)])]
+        : rule.inputKeys
+      const inputs = referencedKeys.map(key => upstreamByKey.get(key)).filter((field): field is ProducedField => Boolean(field))
+      const permitsNoFieldInput = rule.operation === 'CURRENT_DATE' ||
+        rule.operation === 'DATE_DIFF' && rule.startDateSource === 'CURRENT_DATE' && rule.endDateSource === 'CURRENT_DATE' ||
+        (rule.operation === 'DATE_EXTRACT' || rule.operation === 'DATE_START' || rule.operation === 'DATE_END') && rule.dateSource === 'CURRENT_DATE'
+      if ((!inputs.length && !permitsNoFieldInput) || inputs.length !== referencedKeys.length) return []
       const expressions = inputs.map(field => field.expression ?? { type: 'FIELD_REF', nodeId: field.binding.nodeId, field: field.binding.field })
+      const expressionByKey = new Map(referencedKeys.map((key, index) => [key, expressions[index]]))
       const textExpressions = expressions.map((expression, index) => stringExpression(expression, inputs[index]))
       const mergeExpressions = textExpressions.map(expression => ({ type: 'COALESCE', arguments: [expression, { type: 'LITERAL', value: '' }] }))
       let expression: Record<string, unknown>
-      if (rule.operation === 'DATE_FORMAT') expression = { type: 'DATE_FORMAT', unit: rule.unit || 'DAY', argument: expressions[0] }
+      if (rule.operation === 'WINDOW') expression = {
+        type: 'WINDOW',
+        function: rule.windowFunction || 'ROW_NUMBER',
+        ...(rule.windowValueKey && expressionByKey.get(rule.windowValueKey) ? { argument: expressionByKey.get(rule.windowValueKey)! } : {}),
+        partitionBy: (rule.partitionByKeys ?? []).flatMap(key => expressionByKey.get(key) ? [expressionByKey.get(key)!] : []),
+        orderBy: (rule.orderBy ?? []).flatMap(item => expressionByKey.get(item.key)
+          ? [{ expression: expressionByKey.get(item.key)!, direction: item.direction || 'ASC' }]
+          : []),
+      }
+      else if (rule.operation === 'CURRENT_DATE') expression = { type: 'CURRENT_DATE' }
+      else if (rule.operation === 'DATE_DIFF') {
+        let fieldIndex = 0
+        const dateArgument = (source: GraphDateSource | undefined) =>
+          source === 'CURRENT_DATE' ? { type: 'CURRENT_DATE' } : expressions[fieldIndex++]
+        expression = {
+          type: 'DATE_DIFF',
+          unit: rule.unit || 'DAY',
+          arguments: [dateArgument(rule.startDateSource), dateArgument(rule.endDateSource)],
+        }
+      }
+      else if (rule.operation === 'DATE_EXTRACT') expression = { type: 'DATE_EXTRACT', unit: rule.unit || 'YEAR', argument: rule.dateSource === 'CURRENT_DATE' ? { type: 'CURRENT_DATE' } : expressions[0] }
+      else if (rule.operation === 'DATE_START' || rule.operation === 'DATE_END') expression = { type: rule.operation, unit: rule.unit || 'MONTH', argument: rule.dateSource === 'CURRENT_DATE' ? { type: 'CURRENT_DATE' } : expressions[0] }
+      else if (rule.operation === 'DATE_FORMAT') expression = { type: 'DATE_FORMAT', unit: rule.unit || 'DAY', argument: expressions[0] }
       else if (rule.operation === 'DATE_TRUNC') expression = { type: 'DATE_TRUNC', unit: rule.unit || 'DAY', argument: expressions[0] }
       else if (rule.operation === 'CAST') expression = { type: 'CAST', targetType: rule.targetType || rule.output.canonicalType, argument: expressions[0] }
       else if (rule.operation === 'SUBSTRING') expression = { type: 'SUBSTRING', arguments: [textExpressions[0], { type: 'LITERAL', value: rule.start || 1 }, { type: 'LITERAL', value: rule.length ?? 10 }] }
@@ -457,7 +540,14 @@ export function graphProducedFields(value: GraphInput | undefined, graph: Pick<D
       else if (rule.operation === 'ABS' || rule.operation === 'FLOOR' || rule.operation === 'CEIL') expression = { type: rule.operation, argument: expressions[0] }
       else if (rule.operation === 'COALESCE') expression = {
         type: 'COALESCE',
-        arguments: [expressions[0], rule.fallbackMode === 'FIELD' ? expressions[1] : { type: 'LITERAL', value: typedLiteral(rule.fallbackValue ?? '', inputs[0].canonicalType) }],
+        arguments: [
+          expressions[0],
+          rule.fallbackMode === 'FIELD'
+            ? expressions[1]
+            : rule.fallbackMode === 'CURRENT_DATE'
+              ? { type: 'CURRENT_DATE' }
+              : { type: 'LITERAL', value: typedLiteral(rule.fallbackValue ?? '', inputs[0].canonicalType) },
+        ],
       }
       else if (rule.operation === 'CASE') {
         const operator = rule.conditionOperator || 'EQUALS'
@@ -475,7 +565,22 @@ export function graphProducedFields(value: GraphInput | undefined, graph: Pick<D
           : operator === 'IN'
             ? { type: 'IN', left: expressions[0], right: { type: 'ARRAY', arguments: collection } }
             : { type: operator, left: contains ? textExpressions[0] : expressions[0], right: { type: 'LITERAL', value: contains ? rule.matchValue ?? '' : typedLiteral(rule.matchValue ?? '', inputs[0].canonicalType) } }
-        expression = { type: 'CASE', whens: [{ when, then: { type: 'LITERAL', value: rule.thenValue ?? '' } }], else: { type: 'LITERAL', value: rule.elseValue ?? '' } }
+        expression = {
+          type: 'CASE',
+          whens: [{
+            when,
+            then: rule.thenMode === 'CURRENT_DATE'
+              ? { type: 'CURRENT_DATE' }
+              : rule.thenMode === 'FIELD'
+                ? expressions[0]
+                : { type: 'LITERAL', value: rule.thenValue ?? '' },
+          }],
+          else: rule.elseMode === 'CURRENT_DATE'
+            ? { type: 'CURRENT_DATE' }
+            : rule.elseMode === 'FIELD'
+              ? expressions[0]
+              : { type: 'LITERAL', value: rule.elseValue ?? '' },
+        }
       }
       else if (rule.operation === 'CONCAT') expression = { type: 'CONCAT', arguments: rule.separator === undefined ? mergeExpressions : [mergeExpressions[0], { type: 'LITERAL', value: rule.separator }, mergeExpressions[1]] }
       else expression = { type: rule.operation, arguments: expressions }
@@ -484,9 +589,9 @@ export function graphProducedFields(value: GraphInput | undefined, graph: Pick<D
         name: rule.output.name,
         code: identifier(rule.output.code),
         producerName: transform.name,
-        kind: inputs.some(field => field.kind === 'METRIC') ? 'METRIC' as const : inputs.every(field => field.kind === 'DIMENSION') ? 'DIMENSION' as const : 'ATTRIBUTE' as const,
-        binding: inputs[0].binding,
-        sourceBinding: inputs[0].sourceBinding ?? inputs[0].binding,
+        kind: rule.operation === 'WINDOW' || !inputs.length ? 'ATTRIBUTE' as const : inputs.some(field => field.kind === 'METRIC') ? 'METRIC' as const : inputs.every(field => field.kind === 'DIMENSION') ? 'DIMENSION' as const : 'ATTRIBUTE' as const,
+        binding: (inputs[0] ?? upstream[0]).binding,
+        sourceBinding: inputs[0]?.sourceBinding ?? inputs[0]?.binding ?? upstream[0].sourceBinding ?? upstream[0].binding,
         canonicalType: rule.output.canonicalType,
         grouping: rule.operation === 'DATE_TRUNC' ? rule.unit || 'DAY' : undefined,
         expression,
@@ -587,35 +692,64 @@ function parseExistingDesigner(rawValue: unknown, fallback: DesignerGraphV1): De
   const groups: GraphGroup[] = list(raw.groups).flatMap((value, index) => {
     const item = record(value), id = text(item.id)
     if (!id) return []
-    const dimensions = list(item.dimensions).flatMap(value => { const field = record(value), key = text(field.key); return key ? [{ key, name: text(field.name) || key, code: identifier(text(field.code) || keyParts(key).field), grouping: text(field.grouping) || undefined }] : [] })
-    const metrics = list(item.metrics).flatMap(value => { const field = record(value), key = text(field.key), aggregation = text(field.aggregation); return key && aggregation ? [{ key, name: text(field.name) || key, code: identifier(text(field.code) || `${aggregation.toLowerCase()}_${keyParts(key).field}`), aggregation }] : [] })
-    return [{ id, name: text(item.name) || `分组结果 ${index + 1}`, input: input(item.input), position: point(item.position, { x: 342, y: 48 + index * 150 }), dimensions, metrics }]
+    const mode = groupByMode(item.groupByMode)
+    const dimensions = list(item.dimensions).flatMap(value => {
+      const field = record(value), key = text(field.key), outputKey = text(field.outputKey)
+      return key ? [{ key, ...(outputKey ? { outputKey } : {}), name: text(field.name) || key, code: identifier(text(field.code) || keyParts(key).field), grouping: text(field.grouping) || undefined }] : []
+    })
+    const metrics = list(item.metrics).flatMap(value => {
+      const field = record(value), key = text(field.key), outputKey = text(field.outputKey), aggregation = text(field.aggregation)
+      const countRows = aggregation === 'COUNT' && (key === '*' || field.countRows === true)
+      return key && aggregation ? [{
+        key: countRows ? '*' : key,
+        ...(outputKey ? { outputKey } : {}),
+        name: text(field.name) || key,
+        code: identifier(text(field.code) || (countRows ? 'row_count' : `${aggregation.toLowerCase()}_${keyParts(key).field}`)),
+        aggregation,
+        ...(countRows ? { countRows: true } : {}),
+      }] : []
+    })
+    return [{
+      id, name: text(item.name) || `分组结果 ${index + 1}`, input: input(item.input),
+      position: point(item.position, { x: 342, y: 48 + index * 150 }),
+      ...(mode ? { groupByMode: mode } : {}),
+      ...(mode === 'GROUPING_SETS' ? { groupingSets: groupingSets(item.groupingSets) } : {}),
+      dimensions, metrics,
+    }]
   })
   const transforms: GraphTransform[] = list(raw.transforms).flatMap((value, index) => {
     const item = record(value), id = text(item.id), family = text(item.family) as GraphTransformFamily
     const componentType = text(item.componentType) as GraphTransformComponentType
-    if (!id || !['DATE', 'TEXT', 'CAST', 'NUMBER', 'CONDITION', 'NULL', 'SPLIT_MERGE'].includes(family)) return []
+    if (!id || !['DATE', 'TEXT', 'CAST', 'NUMBER', 'CONDITION', 'NULL', 'WINDOW', 'SPLIT_MERGE'].includes(family)) return []
     const rules: GraphTransformRule[] = list(item.rules).flatMap((value, ruleIndex) => {
       const rule = record(value), output = record(rule.output), persistedOperation = text(rule.operation) as GraphTransformOperation
       const legacyDateFormat = family === 'DATE' && persistedOperation === 'DATE_TRUNC'
       const operation: GraphTransformOperation = legacyDateFormat ? 'DATE_FORMAT' : persistedOperation
       const outputID = text(output.id), outputName = text(output.name), outputCode = text(output.code), canonicalType = text(output.canonicalType)
-      if (!text(rule.id) || !['DATE_FORMAT', 'DATE_TRUNC', 'CAST', 'ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'ROUND', 'ABS', 'FLOOR', 'CEIL', 'CONCAT', 'COALESCE', 'CASE', 'SUBSTRING', 'TRIM', 'UPPER', 'LOWER', 'REPLACE'].includes(operation) || !outputID || !outputCode || !canonicalType) return []
-      const unit = dateFormatUnit(rule.unit)
+      if (!text(rule.id) || !['WINDOW', 'CURRENT_DATE', 'DATE_DIFF', 'DATE_EXTRACT', 'DATE_START', 'DATE_END', 'DATE_FORMAT', 'DATE_TRUNC', 'CAST', 'ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'ROUND', 'ABS', 'FLOOR', 'CEIL', 'CONCAT', 'COALESCE', 'CASE', 'SUBSTRING', 'TRIM', 'UPPER', 'LOWER', 'REPLACE'].includes(operation) || !outputID || !outputCode || !canonicalType) return []
+      const persistedUnit = text(rule.unit).toUpperCase()
+      const allowedUnits: GraphDateUnit[] = ['DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR', 'WEEKDAY', 'DAY_OF_YEAR']
+      const unit = (allowedUnits.includes(persistedUnit as GraphDateUnit) ? persistedUnit : 'DAY') as GraphDateUnit
+      const legacyUnit = dateFormatUnit(rule.unit)
       return [{
         id: text(rule.id) || `rule_${ruleIndex + 1}`,
         operation,
         inputKeys: list(rule.inputKeys).map(text).filter(Boolean),
         output: {
           id: outputID,
-          name: legacyDateFormat ? migrateLegacyDateOutputName(outputName || outputCode, unit) : outputName || outputCode,
-          code: legacyDateFormat ? migrateLegacyDateOutputCode(outputCode, unit) : identifier(outputCode),
+          name: legacyDateFormat ? migrateLegacyDateOutputName(outputName || outputCode, legacyUnit) : outputName || outputCode,
+          code: legacyDateFormat ? migrateLegacyDateOutputCode(outputCode, legacyUnit) : identifier(outputCode),
           canonicalType: legacyDateFormat ? 'STRING' : canonicalType,
         },
         ...(text(rule.unit) ? { unit } : {}),
+        ...(text(rule.dateSource) === 'CURRENT_DATE' ? { dateSource: 'CURRENT_DATE' as const } : text(rule.dateSource) === 'FIELD' ? { dateSource: 'FIELD' as const } : {}),
+        ...(text(rule.startDateSource) === 'CURRENT_DATE' ? { startDateSource: 'CURRENT_DATE' as const } : text(rule.startDateSource) === 'FIELD' ? { startDateSource: 'FIELD' as const } : {}),
+        ...(text(rule.endDateSource) === 'CURRENT_DATE' ? { endDateSource: 'CURRENT_DATE' as const } : text(rule.endDateSource) === 'FIELD' ? { endDateSource: 'FIELD' as const } : {}),
         ...(text(rule.targetType) ? { targetType: text(rule.targetType) as GraphTransformRule['targetType'] } : {}),
         ...('matchValue' in rule ? { matchValue: text(rule.matchValue) } : {}),
+        ...(text(rule.thenMode) === 'CURRENT_DATE' ? { thenMode: 'CURRENT_DATE' as const } : text(rule.thenMode) === 'FIELD' ? { thenMode: 'FIELD' as const } : text(rule.thenMode) === 'LITERAL' ? { thenMode: 'LITERAL' as const } : {}),
         ...('thenValue' in rule ? { thenValue: text(rule.thenValue) } : {}),
+        ...(text(rule.elseMode) === 'CURRENT_DATE' ? { elseMode: 'CURRENT_DATE' as const } : text(rule.elseMode) === 'FIELD' ? { elseMode: 'FIELD' as const } : text(rule.elseMode) === 'LITERAL' ? { elseMode: 'LITERAL' as const } : {}),
         ...('elseValue' in rule ? { elseValue: text(rule.elseValue) } : {}),
         ...(text(rule.conditionOperator) ? { conditionOperator: text(rule.conditionOperator) as GraphConditionOperator } : {}),
         ...('conditionValues' in rule ? { conditionValues: list(rule.conditionValues).flatMap((value, valueIndex) => {
@@ -623,7 +757,15 @@ function parseExistingDesigner(rawValue: unknown, fallback: DesignerGraphV1): De
           const itemValue = text(item.value)
           return itemValue || mode === 'LITERAL' ? [{ id: text(item.id) || `condition_value_${valueIndex + 1}`, mode, value: itemValue }] : []
         }) } : {}),
-        ...(text(rule.fallbackMode) ? { fallbackMode: text(rule.fallbackMode) as GraphTransformRule['fallbackMode'] } : operation === 'COALESCE' ? { fallbackMode: list(rule.inputKeys).length > 1 ? 'FIELD' as const : 'LITERAL' as const } : {}),
+        ...(text(rule.fallbackMode) === 'CURRENT_DATE'
+          ? { fallbackMode: 'CURRENT_DATE' as const }
+          : text(rule.fallbackMode) === 'FIELD'
+            ? { fallbackMode: 'FIELD' as const }
+            : text(rule.fallbackMode) === 'LITERAL'
+              ? { fallbackMode: 'LITERAL' as const }
+              : operation === 'COALESCE'
+                ? { fallbackMode: list(rule.inputKeys).length > 1 ? 'FIELD' as const : 'LITERAL' as const }
+                : {}),
         ...('fallbackValue' in rule ? { fallbackValue: text(rule.fallbackValue) } : {}),
         ...('separator' in rule ? { separator: text(rule.separator) } : {}),
         ...(typeof rule.precision === 'number' ? { precision: Math.trunc(rule.precision) } : {}),
@@ -632,16 +774,41 @@ function parseExistingDesigner(rawValue: unknown, fallback: DesignerGraphV1): De
         ...('searchValue' in rule ? { searchValue: text(rule.searchValue) } : {}),
         ...('replacementValue' in rule ? { replacementValue: text(rule.replacementValue) } : {}),
         ...(text(rule.replaceSourceKey) ? { replaceSourceKey: text(rule.replaceSourceKey) } : {}),
+        ...(operation === 'WINDOW' ? {
+          windowFunction: (['ROW_NUMBER', 'RANK', 'DENSE_RANK', 'SUM', 'AVG', 'COUNT', 'MIN', 'MAX'].includes(text(rule.windowFunction).toUpperCase()) ? text(rule.windowFunction).toUpperCase() : 'ROW_NUMBER') as GraphWindowFunction,
+          ...(text(rule.windowValueKey) ? { windowValueKey: text(rule.windowValueKey) } : {}),
+          partitionByKeys: list(rule.partitionByKeys).map(text).filter(Boolean),
+          orderBy: list(rule.orderBy).flatMap((value, orderIndex) => {
+            const item = record(value), key = text(item.key), direction = text(item.direction).toUpperCase()
+            return key ? [{ id: text(item.id) || `window_order_${orderIndex + 1}`, key, direction: direction === 'DESC' ? 'DESC' as const : 'ASC' as const }] : []
+          }),
+        } : {}),
       }]
+    })
+    const conditions: GraphFilterCondition[] = list(item.conditions).flatMap((value, conditionIndex) => {
+      const condition = record(value)
+      const id = text(condition.id)
+      const inputKey = text(condition.inputKey)
+      const operator = text(condition.operator) as GraphConditionOperator
+      return id && inputKey && ['EQUALS', 'NOT_EQUALS', 'GT', 'GTE', 'LT', 'LTE', 'CONTAINS', 'NOT_CONTAINS', 'IN', 'NOT_IN', 'IS_NULL', 'IS_NOT_NULL'].includes(operator)
+        ? [{
+            id: id || `filter_condition_${conditionIndex + 1}`,
+            inputKey,
+            operator,
+            ...(text(condition.valueMode).toUpperCase() === 'FIELD' ? { valueMode: 'FIELD' as const } : {}),
+            value: text(condition.value),
+          }]
+        : []
     })
     return [{
       id,
       name: text(item.name) || `字段处理 ${index + 1}`,
       family,
-      ...(['DATE_FORMAT', 'TEXT_UPPER', 'TEXT_TRIM', 'TEXT_REPLACE', 'TEXT_LOWER', 'TEXT_SUBSTRING', 'TEXT_CONCAT', 'NUMBER_ABSOLUTE', 'NUMBER_ROUNDING', 'NUMBER_ARITHMETIC', 'CAST', 'CONDITION', 'NULL'].includes(componentType) ? { componentType } : {}),
+      ...(['FILTER', 'WINDOW_FUNCTION', 'DATE_CALCULATION', 'DATE_FORMAT', 'TEXT_UPPER', 'TEXT_TRIM', 'TEXT_REPLACE', 'TEXT_LOWER', 'TEXT_SUBSTRING', 'TEXT_CONCAT', 'NUMBER_ABSOLUTE', 'NUMBER_ROUNDING', 'NUMBER_ARITHMETIC', 'CAST', 'CONDITION', 'NULL'].includes(componentType) ? { componentType } : {}),
       input: input(item.input),
       position: point(item.position, { x: 642, y: 48 + index * 150 }),
       rules,
+      ...(componentType === 'FILTER' ? { conditions } : {}),
     }]
   })
   const endRaw = record(raw.end), endID = text(endRaw.id)
@@ -743,10 +910,26 @@ export function hydrateDesignerGraph(dsl: DatasetDSL, nodes: DesignerNode[], joi
       return field ? [{ key, name: option?.name || column?.businessName || field, code: identifier(option?.code || field), grouping: text(item.unit) || undefined }] : []
     })
     const metrics = list(raw.metrics).flatMap(value => {
-      const item = record(value), field = text(item.field), aggregation = text(item.function), key = `${nodeId}.${field}`, column = source?.columns.find(value => value.columnName === field), option = optionMap.get(key)
-      return field && aggregation ? [{ key, name: `${option?.name || column?.businessName || field} ${aggregation}`, code: identifier(`${aggregation.toLowerCase()}_${option?.code || field}`), aggregation }] : []
+      const item = record(value), field = text(item.field), aggregation = text(item.function), countRows = aggregation === 'COUNT' && item.countRows === true
+      const key = countRows ? '*' : `${nodeId}.${field}`, column = source?.columns.find(value => value.columnName === field), option = optionMap.get(key)
+      return field && aggregation ? [{
+        key,
+        ...(countRows ? { outputKey: `${id}.${field}` } : {}),
+        name: countRows ? '总行数' : `${option?.name || column?.businessName || field} ${aggregation}`,
+        code: identifier(countRows ? field : `${aggregation.toLowerCase()}_${option?.code || field}`),
+        aggregation,
+        ...(countRows ? { countRows: true } : {}),
+      }] : []
     })
-    graph.groups.push({ id, name: `${source?.table.businessName || source?.table.tableName || '数据'}汇总`, input: { kind: 'NODE', id: nodeId }, position: { x: 342, y: 48 + index * 150 }, dimensions, metrics })
+    graph.groups.push({
+      id, name: `${source?.table.businessName || source?.table.tableName || '数据'}汇总`,
+      input: { kind: 'NODE', id: nodeId }, position: { x: 342, y: 48 + index * 150 },
+      ...(groupByMode(raw.groupByMode) ? { groupByMode: groupByMode(raw.groupByMode) } : {}),
+      ...(groupByMode(raw.groupByMode) === 'GROUPING_SETS'
+        ? { groupingSets: groupingSets(raw.groupingSets).map(groupingSet => groupingSet.map(field => `${nodeId}.${field}`)) }
+        : {}),
+      dimensions, metrics,
+    })
     graph.joins = graph.joins.map(join => join.id === joinId ? { ...join, ...(side === 'RIGHT' ? { right: { kind: 'GROUP' as const, id } } : { left: { kind: 'GROUP' as const, id } }) } : join)
   }
 
@@ -755,8 +938,21 @@ export function hydrateDesignerGraph(dsl: DatasetDSL, nodes: DesignerNode[], joi
   if (hasLegacyFinalGroup && root) {
     const dimensions = fields.filter(field => field.finalGroupBy).map(field => ({ key: field.key, name: field.name || keyParts(field.key).field, code: identifier(field.code || keyParts(field.key).field), grouping: field.finalGrouping || undefined }))
     const metrics = fields.filter(field => field.finalMetric && field.finalAggregation).map(field => ({ key: field.key, name: field.name || keyParts(field.key).field, code: identifier(field.code || `${field.finalAggregation!.toLowerCase()}_${keyParts(field.key).field}`), aggregation: field.finalAggregation! }))
+    const persistedFieldKeys = new Map(list(legacyDSL.fields).flatMap(value => {
+      const raw = record(value), id = text(raw.id), code = text(raw.code)
+      const field = fields.find(item => item.code === code)
+      return id && field ? [[id, field.key] as const] : []
+    }))
+    const mode = groupByMode(legacyDSL.groupByMode)
     const id = `group_${graph.groups.length + 1}`
-    graph.groups.push({ id, name: '最终汇总', input: root, position: { x: 642, y: 123 }, dimensions, metrics })
+    graph.groups.push({
+      id, name: '最终汇总', input: root, position: { x: 642, y: 123 },
+      ...(mode ? { groupByMode: mode } : {}),
+      ...(mode === 'GROUPING_SETS'
+        ? { groupingSets: groupingSets(legacyDSL.groupingSets).map(groupingSet => groupingSet.flatMap(fieldID => persistedFieldKeys.get(fieldID) ?? [])) }
+        : {}),
+      dimensions, metrics,
+    })
     root = { kind: 'GROUP', id }
   } else root = graphRoot(nodes.map(node => node.id), graph)
   const upstream = graphProducedFields(root, graph, nodes, fields)
@@ -773,6 +969,7 @@ type DWDTransformStep = {
   additionalInputKeys?: string[]
   unit?: GraphTransformRule['unit']
   targetType?: GraphTransformRule['targetType']
+  fallbackMode?: GraphTransformRule['fallbackMode']
   fallbackValue?: string
   separator?: string
   precision?: number
@@ -781,7 +978,9 @@ type DWDTransformStep = {
   searchValue?: string
   replacementValue?: string
   matchValue?: string
+  thenMode?: GraphTransformRule['thenMode']
   thenValue?: string
+  elseMode?: GraphTransformRule['elseMode']
   elseValue?: string
   conditionOperator?: GraphConditionOperator
 }
@@ -793,6 +992,12 @@ const dwdLiteralText = (value: unknown): string | null => {
   if (typeof literal.value === 'number' || typeof literal.value === 'boolean') return String(literal.value)
   return null
 }
+
+const dwdIsCurrentDate = (value: unknown): boolean =>
+  text(record(value).type).toUpperCase() === 'CURRENT_DATE'
+
+const dwdExpressionsEqual = (left: unknown, right: unknown): boolean =>
+  JSON.stringify(left) === JSON.stringify(right)
 
 const dwdExpressionSourceKey = (value: unknown): string => {
   const expression = record(value)
@@ -845,8 +1050,13 @@ function dwdTransformChain(value: unknown): { sourceKey: string; steps: DWDTrans
     const args = list(expression.arguments)
     const inner = dwdTransformChain(args[0])
     const fallbackValue = dwdLiteralText(args[1])
-    if (!inner || fallbackValue === null) return null
-    return { ...inner, steps: [...inner.steps, { operation: 'COALESCE', fallbackValue }] }
+    if (!inner || fallbackValue === null && !dwdIsCurrentDate(args[1])) return null
+    return {
+      ...inner,
+      steps: [...inner.steps, dwdIsCurrentDate(args[1])
+        ? { operation: 'COALESCE', fallbackMode: 'CURRENT_DATE' }
+        : { operation: 'COALESCE', fallbackMode: 'LITERAL', fallbackValue: fallbackValue! }],
+    }
   }
   if (type === 'REPLACE' || type === 'SUBSTRING' || type === 'ROUND') {
     const args = list(expression.arguments)
@@ -898,11 +1108,13 @@ function dwdTransformChain(value: unknown): { sourceKey: string; steps: DWDTrans
     const inner = dwdTransformChain(conditionExpression)
     const matchValue = conditionOperator === 'IS_NULL' || conditionOperator === 'IS_NOT_NULL' ? '' : dwdLiteralText(condition.right)
     const thenValue = dwdLiteralText(branch.then), elseValue = dwdLiteralText(expression.else)
-    if (!inner || matchValue === null || thenValue === null || elseValue === null) return null
+    const thenMode = dwdIsCurrentDate(branch.then) ? 'CURRENT_DATE' as const : dwdExpressionsEqual(branch.then, conditionExpression) ? 'FIELD' as const : 'LITERAL' as const
+    const elseMode = dwdIsCurrentDate(expression.else) ? 'CURRENT_DATE' as const : dwdExpressionsEqual(expression.else, conditionExpression) ? 'FIELD' as const : 'LITERAL' as const
+    if (!inner || matchValue === null || thenValue === null && thenMode === 'LITERAL' || elseValue === null && elseMode === 'LITERAL') return null
     return {
       ...inner,
       steps: [...inner.steps, {
-        operation: 'CASE', conditionOperator, matchValue, thenValue, elseValue,
+        operation: 'CASE', conditionOperator, matchValue, thenMode, thenValue: thenValue ?? '', elseMode, elseValue: elseValue ?? '',
       }],
     }
   }
@@ -966,6 +1178,7 @@ export function expandSystemDWDDesignerGraph(
   }
   const outputCanonicalType = (current: string, step: DWDTransformStep): string => {
     if (step.operation === 'CAST') return step.targetType || current
+    if (step.operation === 'CASE' && (step.thenMode === 'CURRENT_DATE' || step.elseMode === 'CURRENT_DATE')) return 'DATE'
     if (['DATE_FORMAT', 'TRIM', 'UPPER', 'LOWER', 'REPLACE', 'SUBSTRING', 'CONCAT', 'CASE'].includes(step.operation)) return 'STRING'
     if (['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'].includes(step.operation)) return 'DECIMAL'
     return current
@@ -1009,7 +1222,7 @@ export function expandSystemDWDDesignerGraph(
           canonicalType,
         },
         replaceSourceKey: currentKey,
-        ...(step.operation === 'COALESCE' ? { fallbackMode: 'LITERAL' as const, fallbackValue: step.fallbackValue } : {}),
+        ...(step.operation === 'COALESCE' ? { fallbackMode: step.fallbackMode || 'LITERAL', fallbackValue: step.fallbackValue } : {}),
         ...(step.operation === 'CAST' ? { targetType: step.targetType } : {}),
         ...(step.unit ? { unit: step.unit } : {}),
         ...(step.separator !== undefined ? { separator: step.separator } : {}),
@@ -1019,7 +1232,9 @@ export function expandSystemDWDDesignerGraph(
         ...(step.searchValue !== undefined ? { searchValue: step.searchValue } : {}),
         ...(step.replacementValue !== undefined ? { replacementValue: step.replacementValue } : {}),
         ...(step.matchValue !== undefined ? { matchValue: step.matchValue } : {}),
+        ...(step.thenMode ? { thenMode: step.thenMode } : {}),
         ...(step.thenValue !== undefined ? { thenValue: step.thenValue } : {}),
+        ...(step.elseMode ? { elseMode: step.elseMode } : {}),
         ...(step.elseValue !== undefined ? { elseValue: step.elseValue } : {}),
         ...(step.conditionOperator ? { conditionOperator: step.conditionOperator } : {}),
       })
@@ -1063,7 +1278,25 @@ export const serializeDesignerGraph = (graph: DesignerGraphV1): DesignerGraphV1 
   nodePositions: Object.fromEntries(Object.entries(graph.nodePositions).map(([id, value]) => [id, point(value, { x: 42, y: 48 })])),
   nodeNames: { ...graph.nodeNames },
   joins: graph.joins.map(item => ({ ...item, position: point(item.position, { x: 342, y: 48 }), outputKeys: [...item.outputKeys] })),
-  groups: graph.groups.map(item => ({ ...item, position: point(item.position, { x: 342, y: 48 }), dimensions: item.dimensions.map(value => ({ ...value })), metrics: item.metrics.map(value => ({ ...value })) })),
-  transforms: (graph.transforms ?? []).map(item => ({ ...item, position: point(item.position, { x: 642, y: 48 }), rules: item.rules.map(rule => ({ ...rule, inputKeys: [...rule.inputKeys], output: { ...rule.output }, ...(rule.conditionValues ? { conditionValues: rule.conditionValues.map(value => ({ ...value })) } : {}) })) })),
+  groups: graph.groups.map(item => ({
+    ...item,
+    position: point(item.position, { x: 342, y: 48 }),
+    ...(item.groupingSets ? { groupingSets: item.groupingSets.map(groupingSet => [...groupingSet]) } : {}),
+    dimensions: item.dimensions.map(value => ({ ...value })),
+    metrics: item.metrics.map(value => ({ ...value })),
+  })),
+  transforms: (graph.transforms ?? []).map(item => ({
+    ...item,
+    position: point(item.position, { x: 642, y: 48 }),
+    rules: item.rules.map(rule => ({
+      ...rule,
+      inputKeys: [...rule.inputKeys],
+      output: { ...rule.output },
+      ...(rule.conditionValues ? { conditionValues: rule.conditionValues.map(value => ({ ...value })) } : {}),
+      ...(rule.partitionByKeys ? { partitionByKeys: [...rule.partitionByKeys] } : {}),
+      ...(rule.orderBy ? { orderBy: rule.orderBy.map(value => ({ ...value })) } : {}),
+    })),
+    ...(item.conditions ? { conditions: item.conditions.map(condition => ({ ...condition })) } : {}),
+  })),
   ...(graph.end ? { end: { ...graph.end, position: point(graph.end.position, { x: 642, y: 48 }), outputs: graph.end.outputs.map(value => ({ ...value })) } } : {}),
 })

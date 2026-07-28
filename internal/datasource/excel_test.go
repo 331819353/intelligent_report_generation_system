@@ -45,11 +45,34 @@ func TestInferWorkbookTypesHeadersSelectionAndOverrides(t *testing.T) {
 		t.Fatalf("unexpected tables: %#v", tables)
 	}
 	wantNames := []string{"id", "amount", "active", "date", "id_2", "column_6"}
-	wantTypes := []string{"NUMBER", "TEXT", "BOOLEAN", "DATE", "TEXT", "TEXT"}
+	wantTypes := []string{"TEXT", "TEXT", "BOOLEAN", "DATE", "TEXT", "TEXT"}
 	for index, column := range tables[0].Columns {
 		if column.Name != wantNames[index] || column.CanonicalType != wantTypes[index] {
 			t.Fatalf("column %d: %#v", index, column)
 		}
+	}
+}
+
+func TestInspectWorkbookKeepsBusinessCodesAsText(t *testing.T) {
+	book := spikeexcel.Workbook{Sheets: []spikeexcel.Sheet{{
+		Name: "组织",
+		Rows: [][]string{
+			{"节点组织编码", "legacy_code", "数量"},
+			{"00000", "10001", "12"},
+			{"00000000", "10002", "18"},
+		},
+	}}}
+	metadata, _, _, err := inspectWorkbook(book, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata) != 1 || len(metadata[0].Columns) != 3 {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+	if metadata[0].Columns[0].CanonicalType != "TEXT" ||
+		metadata[0].Columns[1].CanonicalType != "TEXT" ||
+		metadata[0].Columns[2].CanonicalType != "NUMBER" {
+		t.Fatalf("columns = %#v", metadata[0].Columns)
 	}
 }
 

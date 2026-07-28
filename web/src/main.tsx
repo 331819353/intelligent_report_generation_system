@@ -8,10 +8,12 @@ import './styles/dataset-designer.css'
 import './styles/metric-center.css'
 import './styles/metric-catalog.css'
 import './styles/semantic-governance.css'
+import './styles/semantic-assets.css'
 import './styles/semantic-chat.css'
 import './styles/asset-management.css'
 import './styles/data-source-center.css'
 import './styles/dataset-center.css'
+import './styles/dimension-value-graph.css'
 import './styles/report-renderer.css'
 
 // 在严格模式和浏览器路由上下文中挂载应用根组件。

@@ -283,8 +283,92 @@ func TestPreviewCompilesParametersAndCompletesAudit(t *testing.T) {
 	if result.RowCount != 1 || result.QueryID == "" || store.status != "SUCCEEDED" {
 		t.Fatalf("result=%#v status=%s", result, store.status)
 	}
+	if len(result.ColumnMetadata) != 2 ||
+		result.ColumnMetadata[0].Code != "stat_month" ||
+		result.ColumnMetadata[0].Name != "统计月份" ||
+		result.ColumnMetadata[0].FieldID != "field_stat_month" ||
+		result.ColumnMetadata[0].CanonicalType != "DATE" ||
+		result.ColumnMetadata[1].Code != "revenue" ||
+		result.ColumnMetadata[1].Name != "订单金额" ||
+		result.ColumnMetadata[1].Role != "MEASURE" {
+		t.Fatalf("preview column metadata=%#v", result.ColumnMetadata)
+	}
 	if len(store.run.PlanHash) != 64 || len(store.run.ParameterHash) != 64 {
 		t.Fatalf("audit hashes are missing: %#v", store.run)
+	}
+}
+
+func TestPreviewColumnMetadataPreservesExcelFieldMeaning(t *testing.T) {
+	document := dataset.Document{Fields: []dataset.Field{{
+		ID: "field_t1_1", Code: "field_1", Name: "性别",
+		Description: "员工的生理性别，用于人口统计和人力资源分析。",
+		Role:        "DIMENSION", CanonicalType: "STRING", SemanticType: "CATEGORY",
+		Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "node_1", Field: "性别"},
+	}}}
+
+	metadata := previewColumnMetadata(document, []string{"field_1"})
+	if len(metadata) != 1 ||
+		metadata[0].Code != "field_1" ||
+		metadata[0].Name != "性别" ||
+		metadata[0].PhysicalName != "性别" ||
+		metadata[0].Description == "" ||
+		metadata[0].SemanticType != "CATEGORY" {
+		t.Fatalf("metadata=%#v", metadata)
+	}
+}
+
+func TestPreviewColumnMetadataMarksAdvancedGroupingPlaceholder(t *testing.T) {
+	document := dataset.Document{
+		Fields: []dataset.Field{
+			{
+				ID: "field_month", Code: "month", Name: "月份", Role: "DIMENSION",
+				CanonicalType: "DATE", Nullable: true,
+				Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "month"},
+			},
+			{
+				ID: "field_region", Code: "region", Name: "区域", Role: "DIMENSION",
+				CanonicalType: "STRING", Nullable: true,
+				Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "region"},
+			},
+			{
+				ID: "field_quantity", Code: "quantity", Name: "数量", Role: "DIMENSION",
+				CanonicalType: "DECIMAL", Nullable: true,
+				Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "quantity"},
+			},
+			{
+				ID: "field_active", Code: "active", Name: "有效", Role: "DIMENSION",
+				CanonicalType: "BOOLEAN", Nullable: true,
+				Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "active"},
+			},
+			{
+				ID: "field_revenue", Code: "revenue", Name: "收入", Role: "MEASURE",
+				CanonicalType: "DECIMAL", Nullable: true,
+				Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "revenue"},
+			},
+		},
+		GroupBy:     []string{"field_month", "field_quantity", "field_active"},
+		GroupByMode: dataset.GroupByModeRollup,
+		PreAggregations: []dataset.PreAggregation{{
+			NodeID: "customers", GroupByMode: dataset.GroupByModeSets,
+			GroupBy: []dataset.PreAggregationGroup{{Field: "region"}},
+		}},
+	}
+
+	metadata := previewColumnMetadata(document, []string{"month", "region", "quantity", "active", "revenue"})
+	if len(metadata) != 5 ||
+		metadata[0].GroupingPlaceholder != "ALL" ||
+		metadata[1].GroupingPlaceholder != "ALL" ||
+		metadata[2].GroupingPlaceholder != "ALL" ||
+		metadata[3].GroupingPlaceholder != "ALL" ||
+		metadata[4].GroupingPlaceholder != "" {
+		t.Fatalf("metadata=%#v", metadata)
+	}
+
+	document.GroupByMode = dataset.GroupByModeStandard
+	document.PreAggregations[0].GroupByMode = dataset.GroupByModeStandard
+	metadata = previewColumnMetadata(document, []string{"month", "region"})
+	if metadata[0].GroupingPlaceholder != "" || metadata[1].GroupingPlaceholder != "" {
+		t.Fatalf("STANDARD grouping metadata=%#v", metadata)
 	}
 }
 

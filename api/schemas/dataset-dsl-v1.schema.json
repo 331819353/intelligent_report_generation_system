@@ -10,12 +10,21 @@
     "dataset": { "$ref": "#/$defs/dataset" },
     "nodes": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/node" } },
     "joins": { "type": "array", "items": { "$ref": "#/$defs/join" } },
+    "transforms": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/transform" } },
     "preAggregations": { "type": "array", "items": { "$ref": "#/$defs/preAggregation" } },
     "factContract": { "$ref": "#/$defs/factContract" },
     "analysisContract": { "$ref": "#/$defs/analysisContract" },
     "fields": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/field" } },
     "filters": { "type": "array", "items": { "$ref": "#/$defs/filter" } },
     "groupBy": { "type": "array", "items": { "$ref": "#/$defs/identifier" }, "uniqueItems": true },
+    "groupByMode": { "enum": ["STANDARD", "CUBE", "ROLLUP", "GROUPING_SETS"] },
+    "groupingSets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "type": "array", "items": { "$ref": "#/$defs/identifier" }, "uniqueItems": true },
+      "uniqueItems": true
+    },
     "having": { "type": "array", "items": { "$ref": "#/$defs/filter" } },
     "sorts": { "type": "array", "items": { "$ref": "#/$defs/sort" } },
     "parameters": { "type": "array", "items": { "$ref": "#/$defs/parameter" } },
@@ -148,6 +157,14 @@
         "joinId": { "$ref": "#/$defs/identifier" },
         "joinSide": { "enum": ["LEFT", "RIGHT"] },
         "groupBy": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/preAggregationGroup" } },
+        "groupByMode": { "enum": ["STANDARD", "CUBE", "ROLLUP", "GROUPING_SETS"] },
+        "groupingSets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "type": "array", "items": { "$ref": "#/$defs/physicalIdentifier" }, "uniqueItems": true },
+          "uniqueItems": true
+        },
         "metrics": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/preAggregationMetric" } }
       }
     },
@@ -168,7 +185,58 @@
       "properties": {
         "field": { "$ref": "#/$defs/physicalIdentifier" },
         "function": { "enum": ["SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT"] },
+        "countRows": { "type": "boolean" },
         "expression": { "$ref": "#/$defs/expression" }
+      }
+    },
+    "transformInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "enum": ["NODE", "JOIN", "GROUP", "TRANSFORM"] },
+        "id": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "transformOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "code", "canonicalType"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "code": { "$ref": "#/$defs/identifier" },
+        "canonicalType": { "$ref": "#/$defs/dataType" }
+      }
+    },
+    "transformRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "operation", "inputKeys", "output", "expression"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "operation": { "enum": ["WINDOW", "CURRENT_DATE", "DATE_DIFF", "DATE_EXTRACT", "DATE_START", "DATE_END", "DATE_FORMAT", "CAST", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "ROUND", "ABS", "FLOOR", "CEIL", "CONCAT", "COALESCE", "CASE", "SUBSTRING", "TRIM", "UPPER", "LOWER", "REPLACE"] },
+        "inputKeys": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}\\.[A-Za-z][A-Za-z0-9_$#]{0,127}$" }
+        },
+        "output": { "$ref": "#/$defs/transformOutput" },
+        "expression": { "$ref": "#/$defs/expression" },
+        "replaceSourceKey": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}\\.[A-Za-z][A-Za-z0-9_$#]{0,127}$" }
+      }
+    },
+    "transform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "family", "componentType", "input", "rules"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "family": { "enum": ["DATE", "TEXT", "CAST", "NUMBER", "CONDITION", "NULL", "WINDOW", "SPLIT_MERGE"] },
+        "componentType": { "enum": ["FILTER", "WINDOW_FUNCTION", "DATE_CALCULATION", "DATE_FORMAT", "TEXT_UPPER", "TEXT_TRIM", "TEXT_REPLACE", "TEXT_LOWER", "TEXT_SUBSTRING", "TEXT_CONCAT", "NUMBER_ABSOLUTE", "NUMBER_ROUNDING", "NUMBER_ARITHMETIC", "CAST", "CONDITION", "NULL"] },
+        "input": { "$ref": "#/$defs/transformInput" },
+        "rules": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/transformRule" } }
       }
     },
     "factContract": {
@@ -314,16 +382,29 @@
       "additionalProperties": false,
       "required": ["type"],
       "properties": {
-        "type": { "enum": ["FIELD_REF", "PARAM_REF", "LITERAL", "ARRAY", "DATE_TRUNC", "DATE_FORMAT", "AGGREGATE", "CAST", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "ROUND", "ABS", "FLOOR", "CEIL", "CONCAT", "COALESCE", "SUBSTRING", "TRIM", "UPPER", "LOWER", "REPLACE", "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "LIKE", "CONTAINS", "NOT_CONTAINS", "IN", "NOT_IN", "BETWEEN", "IS_NULL", "IS_NOT_NULL", "AND", "OR", "NOT", "CASE"] },
+        "type": { "enum": ["FIELD_REF", "PARAM_REF", "LITERAL", "ARRAY", "CURRENT_DATE", "DATE_DIFF", "DATE_EXTRACT", "DATE_START", "DATE_END", "DATE_TRUNC", "DATE_FORMAT", "AGGREGATE", "WINDOW", "CAST", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "ROUND", "ABS", "FLOOR", "CEIL", "CONCAT", "COALESCE", "SUBSTRING", "TRIM", "UPPER", "LOWER", "REPLACE", "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "LIKE", "CONTAINS", "NOT_CONTAINS", "IN", "NOT_IN", "BETWEEN", "IS_NULL", "IS_NOT_NULL", "AND", "OR", "NOT", "CASE"] },
         "nodeId": { "$ref": "#/$defs/identifier" },
         "field": { "$ref": "#/$defs/physicalIdentifier" },
         "code": { "$ref": "#/$defs/identifier" },
-        "function": { "enum": ["SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT"] },
-        "unit": { "enum": ["DAY", "WEEK", "MONTH", "QUARTER", "YEAR"] },
+        "function": { "enum": ["SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT", "ROW_NUMBER", "RANK", "DENSE_RANK"] },
+        "unit": { "enum": ["DAY", "WEEK", "MONTH", "QUARTER", "YEAR", "WEEKDAY", "DAY_OF_YEAR"] },
         "targetType": { "$ref": "#/$defs/dataType" },
         "value": true,
         "argument": { "$ref": "#/$defs/expression" },
         "arguments": { "type": "array", "items": { "$ref": "#/$defs/expression" } },
+        "partitionBy": { "type": "array", "items": { "$ref": "#/$defs/expression" } },
+        "orderBy": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["expression", "direction"],
+            "properties": {
+              "expression": { "$ref": "#/$defs/expression" },
+              "direction": { "enum": ["ASC", "DESC"] }
+            }
+          }
+        },
         "left": { "$ref": "#/$defs/expression" },
         "right": { "$ref": "#/$defs/expression" },
         "lower": { "$ref": "#/$defs/expression" },

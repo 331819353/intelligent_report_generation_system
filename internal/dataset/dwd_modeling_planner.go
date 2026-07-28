@@ -256,8 +256,8 @@ const dwdDimensionDesignSystemPrompt = `你是企业数据仓库 DIM 设计师�
 
 1. 保持输入声明的实体粒度并逐字段覆盖当前收窄后的字段，不得新增、删除或臆造字段；grainKeyFieldCodes 必须原样返回输入 outputGrain.keyFields。
 2. 为 DIM 提供简洁明确的中文业务名称与说明；逐字段补充可维护的中文名称和业务说明，不能只复述字段编码。
-3. 逐字段给出字段值标准化：字符串标识、维度和属性使用 TRIM，可空字符串使用 COALESCE_UNKNOWN；可空数值标识、维度和属性使用 COALESCE_NEGATIVE_ONE；DATE/DATETIME 显式转换；字符串时间先 TRIM 再按语义选择 CAST_DATE 或 CAST_DATETIME。度量与时间不得填充哨兵值。
-4. standardization 只能使用 TRIM、COALESCE_UNKNOWN、COALESCE_NEGATIVE_ONE、CAST_DATE、CAST_DATETIME。只能复制输入的精确 datasetVersionId 和字段 code。
+3. 逐字段给出字段值标准化：字符串标识、维度和属性使用 TRIM；可空标识、维度和属性使用 COALESCE_DEFAULT，其固定值按规范类型统一为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；DATE/DATETIME 显式转换；字符串时间先 TRIM 再按语义选择 CAST_DATE 或 CAST_DATETIME。度量与时间不得填充哨兵值。
+4. standardization 只能使用 TRIM、COALESCE_DEFAULT、CAST_DATE、CAST_DATETIME。只能复制输入的精确 datasetVersionId 和字段 code。
 5. 不返回 SQL、DDL、物理表名、自由表达式、样例值、Markdown 或额外解释。
 
 输出只能是 JSON Schema 指定的对象。`
@@ -267,7 +267,7 @@ const dwdFactDesignSystemPrompt = `你是企业数据仓库 DWD 明细结构与 
 1. 生成且只生成指定 FACT 的一张 DWD，保持业务事实粒度，不得分组或聚合。
 2. 保留事实表全部字段。逐一检查标识/维度字段和以 _id/_key 结尾的字段；只有事实字段与维度字段 code 忽略大小写后完全同名、类型兼容，且在 DIMENSION/MASTER 中唯一时才能 LEFT JOIN。禁止仅因类型相同就关联不同业务键。复合业务键必须完整放入同一 join.conditions。
 3. 每个已关联维度至少扩充一个关联键之外的名称、分类、区域、状态等描述字段（只要存在）；维度侧关联键只用于 Join，不重复输出。
-4. 基础 cleaning：字符串维度/标识/属性去首尾空格；可空字符串用 UNKNOWN、可空数值用 -1；时间显式转换，字符串时间先 TRIM 再 CAST；度量和时间不得擅自补默认值。
+4. 基础 cleaning：字符串维度/标识/属性去首尾空格；可空标识、维度和属性使用 COALESCE_DEFAULT，按类型固定为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；时间显式转换，字符串时间先 TRIM 再 CAST；度量和时间不得擅自补默认值。
 5. 真实需要时可使用 DATE_FORMAT、DATE_TRUNC、CAST、TRIM、UPPER、LOWER、REPLACE、SUBSTRING、CONCAT、COALESCE、ADD、SUBTRACT、MULTIPLY、DIVIDE、ROUND、ABS、FLOOR、CEIL、CASE。arguments 的每项都是字符串，二元处理只能引用已经加入输出的事实或维度字段。
 6. 只能复制输入中的精确 dataset version id 和字段 code，不得返回 SQL、DDL、表达式文本、物理表或调度命令。输出是交给受控 DAG 开发引擎的待审阅结构化设计。
 
@@ -671,7 +671,7 @@ const dwdModelingSystemPrompt = `你是企业数据仓库 DIM/DWD 建模设计�
 1. 对每张 ODS 判断为 FACT、DIMENSION、MASTER 或 OTHER，并给出简短元数据依据。事实表描述“谁在何时对什么做了什么”的业务事件/交易明细；维度表描述人物、商品、组织、区域等分析维度；主数据描述稳定核心实体；证据不足使用 OTHER。必须按实际行粒度而非名称判断：一行一个订单商品项且含数量、价格、折扣、行金额等交易度量的是 FACT；一行稳定代表一个商品/SKU且以名称、品牌、分类等说明属性为主的商品目录才是 DIMENSION/MASTER。没有独立商品实体来源时不得把订单行项目误当商品维度或臆造商品维度。平台会把每个 DIMENSION/MASTER 分类并行转换为一张保留实体粒度、关键字段和说明字段的 DIM 草稿，因此分类本身就是 DIM 设计决策。
 2. 每张 FACT 必须设计且只设计一张以事实明细为中心的 DWD 输出；不得分组、聚合或改变事实粒度。
 3. 必须逐一审视 FACT 中所有标识/维度字段以及 code 以 _id/_key 结尾的字段，并在全部 DIMENSION/MASTER 中按字段 code、业务名称、说明、标签和类型寻找关联键。事实字段与某个维度键 code 精确同名（忽略大小写）、类型兼容且候选唯一时，该 LEFT JOIN 是必选项，不得退化为 ODS 单表直出。关联若依赖两个或更多业务键，必须在同一个 join.conditions 中完整返回全部条件，不能拆成多个 Join，也不能只取其中一个条件。只有确实没有唯一可靠候选时才不关联，禁止仅凭字段位置猜测。
-4. DWD 必须保留事实表全部字段。对事实表的标识、维度、属性和时间字段设计基础清洗：字符串去首尾空格；非时间的可空维度字符串使用 UNKNOWN 补位；非时间的可空维度数值使用 -1 补位；日期/时间显式转换为 DATE 或 DATETIME。字符串时间先 TRIM 再 CAST，不得先补 UNKNOWN；度量空值和时间空值不得擅自补默认值。基础卫生操作进入 cleaning。
+4. DWD 必须保留事实表全部字段。对事实表的标识、维度、属性和时间字段设计基础清洗：字符串去首尾空格；非时间的可空标识、维度和属性使用 COALESCE_DEFAULT，按规范类型固定为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；日期/时间显式转换为 DATE 或 DATETIME。字符串时间先 TRIM 再 CAST；度量空值和时间空值不得擅自补默认值。基础卫生操作进入 cleaning。
 5. 每个已关联的维度/主数据必须至少选择一个关联键之外的名称、分类、区域、状态等描述字段扩充到输出（只要输入存在此类字段），不能只关联而不扩维。所有维度侧关联键只用于 Join，不得再次放入 output.fields；最终结果只保留事实侧关联键，避免同一业务键输出两份。维度字符串同样去首尾空格；字段编码必须是稳定英文标识符且唯一。
 6. 除基础 cleaning 外，按真实元数据需要为每个字段设计 processing，可使用现有全部字段处理能力：DATE_FORMAT、DATE_TRUNC、CAST、TRIM、UPPER、LOWER、REPLACE、SUBSTRING、CONCAT、COALESCE、ADD、SUBTRACT、MULTIPLY、DIVIDE、ROUND、ABS、FLOOR、CEIL、CASE。不需要额外处理时返回空数组。不得为了展示而滥加操作；不得聚合或改变事实粒度。
 7. processing 每步使用紧凑参数，arguments 的每个元素都必须是字符串：DATE_FORMAT/DATE_TRUNC arguments=["MONTH"]；CAST=["DATE"]；REPLACE=["旧值","新值"]；SUBSTRING=["1","8"]；CONCAT=["-"]；COALESCE=["UNKNOWN"]；ROUND=["2"]；CASE=["EQUALS","A","有效","其他"]；其余操作 arguments=[]。同一处理功能、同一依赖阶段应用于多个字段时，平台会把多条规则合并进一个 DAG 组件。二元计算或拼接通过 secondarySourceDatasetVersionId/secondarySourceFieldCode 引用已加入当前输出的事实或维度字段；不用次字段时两个值均为空字符串。不得返回 SQL、自由表达式或虚构表字段。
@@ -997,20 +997,6 @@ func completeDWDOutputContract(
 				}
 			}
 		}
-		if len(validGrain) == 0 {
-			for _, source := range fact.Fields {
-				code := strings.ToLower(source.Code)
-				if strings.EqualFold(source.Role, "IDENTIFIER") ||
-					strings.HasSuffix(code, "_id") ||
-					strings.HasSuffix(code, "_key") {
-					validGrain = append(validGrain, sourceToOutput[code])
-					break
-				}
-			}
-		}
-		if len(validGrain) == 0 && len(completedFields) > 0 {
-			validGrain = []string{completedFields[0].OutputCode}
-		}
 		output.GrainKeyOutputCodes = validGrain
 
 		validTimeCode := ""
@@ -1214,59 +1200,63 @@ func completeMandatoryDWDPolicyCleaning(
 			if !exists {
 				continue
 			}
-			canonical := strings.ToUpper(source.CanonicalType)
-			role := strings.ToUpper(field.Role)
-			dimensionRelated := role == "IDENTIFIER" || role == "DIMENSION" ||
-				role == "ATTRIBUTE" || role == "TIME"
-			nullFillEligible := role == "IDENTIFIER" || role == "DIMENSION" ||
-				role == "ATTRIBUTE"
 			// 基础卫生策略完全由可信元数据决定。模型可能把字符串清洗误配给
 			// 数值/日期字段；若在此保留这些建议，一条错误规则会使整份领域方案
 			// 失败。LLM 的业务判断保留在 processing，cleaning 只保留平台合同。
-			operations := make(map[string]bool, 3)
-			if canonical == "STRING" && dimensionRelated {
-				operations["TRIM"] = true
-			}
-			if source.Nullable && nullFillEligible {
-				switch canonical {
-				case "STRING":
-					operations["COALESCE_UNKNOWN"] = true
-				case "INTEGER", "DECIMAL":
-					operations["COALESCE_NEGATIVE_ONE"] = true
-				}
-			}
-			switch canonical {
-			case "DATE":
-				operations["CAST_DATE"] = true
-			case "DATETIME":
-				operations["CAST_DATETIME"] = true
-			case "STRING":
-				if role == "TIME" {
-					switch {
-					case containsString(field.Cleaning, "CAST_DATE"):
-						operations["CAST_DATE"] = true
-					case containsString(field.Cleaning, "CAST_DATETIME"):
-						operations["CAST_DATETIME"] = true
-					case strings.EqualFold(source.SemanticType, "DATE") ||
-						strings.Contains(strings.ToLower(source.Code), "date"):
-						operations["CAST_DATE"] = true
-					default:
-						operations["CAST_DATETIME"] = true
-					}
-				}
-			}
-			field.Cleaning = field.Cleaning[:0]
-			for _, operation := range []string{
-				"TRIM", "COALESCE_UNKNOWN", "COALESCE_NEGATIVE_ONE",
-				"CAST_DATE", "CAST_DATETIME",
-			} {
-				if operations[operation] {
-					field.Cleaning = append(field.Cleaning, operation)
-				}
-			}
+			source.Role = field.Role
+			field.Cleaning = mandatoryDWDFieldCleaning(source, field.Cleaning)
 		}
 	}
 	return plan
+}
+
+func mandatoryDWDFieldCleaning(
+	field dwdPlanningField,
+	proposed []string,
+) []string {
+	canonical := strings.ToUpper(strings.TrimSpace(field.CanonicalType))
+	role := strings.ToUpper(strings.TrimSpace(field.Role))
+	dimensionRelated := role == "IDENTIFIER" || role == "DIMENSION" ||
+		role == "ATTRIBUTE" || role == "TIME"
+	nullFillEligible := role == "IDENTIFIER" || role == "DIMENSION" ||
+		role == "ATTRIBUTE"
+	operations := make([]string, 0, 3)
+	if canonical == "STRING" && dimensionRelated {
+		operations = append(operations, "TRIM")
+	}
+	switch canonical {
+	case "DATE":
+		operations = append(operations, "CAST_DATE")
+	case "DATETIME":
+		operations = append(operations, "CAST_DATETIME")
+	case "STRING":
+		if role == "TIME" {
+			switch {
+			case containsString(proposed, "CAST_DATE"):
+				operations = append(operations, "CAST_DATE")
+			case containsString(proposed, "CAST_DATETIME"):
+				operations = append(operations, "CAST_DATETIME")
+			case strings.EqualFold(field.SemanticType, "DATE") ||
+				strings.Contains(strings.ToLower(field.Code), "date"):
+				operations = append(operations, "CAST_DATE")
+			default:
+				operations = append(operations, "CAST_DATETIME")
+			}
+		}
+	}
+	if field.Nullable && nullFillEligible &&
+		dwdDefaultNullValueSupported(canonical) {
+		// CAST 先于 COALESCE，确保日期默认值进入目标日期类型，而不是保留成文本。
+		operations = append(operations, "COALESCE_DEFAULT")
+	}
+	return operations
+}
+
+func dwdDefaultNullValueSupported(canonicalType string) bool {
+	return containsString(
+		[]string{"STRING", "DATE", "DATETIME", "INTEGER", "DECIMAL", "BOOLEAN"},
+		strings.ToUpper(strings.TrimSpace(canonicalType)),
+	)
 }
 
 // normalizeDWDSafeJoinAssociations removes dimension enrichment that cannot be
@@ -1403,7 +1393,7 @@ func dwdModelingRepairInstruction(validationErr error, diagnostic string) string
 2. 只能复制输入中的精确 datasetVersionId 和字段 code；维度关联只允许 LEFT JOIN，且关联键类型兼容。
 3. 每个 FACT 的全部字段都必须出现在其 output.fields 中；逐一检查标识/维度及 _id/_key 字段，存在唯一同名且类型兼容的 DIMENSION/MASTER 键时必须 LEFT JOIN；复合业务键必须放入同一个 join.conditions 并完整覆盖。
 4. 每个已关联维度必须至少输出一个关联键之外的描述字段（只要该表存在），维度扩充字段必须来自该 output 已关联的 DIMENSION/MASTER；维度侧所有关联键不得出现在 output.fields。
-5. 非时间的字符串维度相关字段依次使用 TRIM 和必要的 COALESCE_UNKNOWN；可空数值维度相关字段使用 COALESCE_NEGATIVE_ONE；字符串时间先 TRIM 再 CAST_DATE/CAST_DATETIME 且不得补 UNKNOWN；DATE/DATETIME 使用对应 CAST；度量和时间不得补默认值。
+5. 非时间的字符串维度相关字段使用 TRIM；可空标识、维度和属性使用 COALESCE_DEFAULT，按类型固定为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；字符串时间先 TRIM 再 CAST_DATE/CAST_DATETIME；DATE/DATETIME 使用对应 CAST；度量和时间不得补默认值。
 6. processing 可按实际需要使用全部已声明处理操作；每步只按原始提示规定填写紧凑 arguments，同类多字段分别声明规则即可，平台会合并组件。二元操作的次字段必须来自已关联输入。
 7. grainKeyOutputCodes 和 timeOutputCode 只能引用 output.fields 的 outputCode。
 8. 为控制响应长度，名称、说明和 rationale 保持简短，不复述输入，不返回 SQL、Markdown 或解释。`, reason)
@@ -1542,8 +1532,7 @@ func dwdDimensionDesignResponseSchema(
 							"items": map[string]any{
 								"type": "string",
 								"enum": []string{
-									"TRIM", "COALESCE_UNKNOWN",
-									"COALESCE_NEGATIVE_ONE",
+									"TRIM", "COALESCE_DEFAULT",
 									"CAST_DATE", "CAST_DATETIME",
 								},
 							},
@@ -1713,7 +1702,7 @@ func dwdModelingResponseSchema(input dwdPlanningInput) (aiplatform.JSONSchema, e
 										"items": map[string]any{
 											"type": "string",
 											"enum": []string{
-												"TRIM", "COALESCE_UNKNOWN", "COALESCE_NEGATIVE_ONE",
+												"TRIM", "COALESCE_DEFAULT",
 												"CAST_DATE", "CAST_DATETIME",
 											},
 										},
@@ -1753,7 +1742,7 @@ func dwdModelingResponseSchema(input dwdPlanningInput) (aiplatform.JSONSchema, e
 							},
 						},
 						"grainKeyOutputCodes": map[string]any{
-							"type": "array", "minItems": 1, "maxItems": 32,
+							"type": "array", "minItems": 0, "maxItems": 32,
 							"items": stringProperty(128),
 						},
 						"timeOutputCode": stringProperty(128),
@@ -2093,6 +2082,9 @@ func normalizeDWDDimensionDesign(
 		if planned.Standardization == nil {
 			planned.Standardization = []string{}
 		}
+		planned.Standardization = mandatoryDWDFieldCleaning(
+			source, planned.Standardization,
+		)
 		if err := validateDWDCleaning(
 			source, planned.Standardization,
 		); err != nil {
@@ -2503,7 +2495,8 @@ func validateDWDLLMOutput(
 	if len(output.Fields) == 0 {
 		appendDWDValidationIssue(&issues, "output fields are empty")
 	}
-	if len(output.GrainKeyOutputCodes) == 0 {
+	if len(output.GrainKeyOutputCodes) == 0 &&
+		len(fact.OutputGrain.KeyFields) > 0 {
 		appendDWDValidationIssue(&issues, "output grain keys are empty")
 	}
 	factFields := planningFieldsByCode(fact)
@@ -2677,7 +2670,8 @@ func validateDWDLLMOutput(
 					field.OutputCode, err,
 				)
 			}
-			if sourceMeasure && (containsString(field.Cleaning, "COALESCE_UNKNOWN") ||
+			if sourceMeasure && (containsString(field.Cleaning, "COALESCE_DEFAULT") ||
+				containsString(field.Cleaning, "COALESCE_UNKNOWN") ||
 				containsString(field.Cleaning, "COALESCE_NEGATIVE_ONE")) {
 				appendDWDValidationIssue(
 					&issues, "measure field %s must not fill nulls", field.OutputCode,
@@ -2816,7 +2810,9 @@ func validateDWDCleaning(field dwdPlanningField, cleaning []string) error {
 	seen := map[string]bool{}
 	for _, operation := range cleaning {
 		if !containsString([]string{
-			"TRIM", "COALESCE_UNKNOWN", "COALESCE_NEGATIVE_ONE",
+			"TRIM", "COALESCE_DEFAULT",
+			// 旧检查点仍可被读取和编译；新方案只生成 COALESCE_DEFAULT。
+			"COALESCE_UNKNOWN", "COALESCE_NEGATIVE_ONE",
 			"CAST_DATE", "CAST_DATETIME",
 		}, operation) {
 			return fmt.Errorf("unsupported operation %s", operation)
@@ -2832,16 +2828,16 @@ func validateDWDCleaning(field dwdPlanningField, cleaning []string) error {
 		role == "ATTRIBUTE" || role == "TIME"
 	nullFillEligible := role == "IDENTIFIER" || role == "DIMENSION" ||
 		role == "ATTRIBUTE"
+	hasTypedDefault := seen["COALESCE_DEFAULT"] ||
+		(canonical == "STRING" && seen["COALESCE_UNKNOWN"]) ||
+		((canonical == "INTEGER" || canonical == "DECIMAL") &&
+			seen["COALESCE_NEGATIVE_ONE"])
 	if canonical == "STRING" && dimensionRelated && !seen["TRIM"] {
 		return errors.New("STRING dimension/time field requires TRIM")
 	}
-	if canonical == "STRING" && nullFillEligible && field.Nullable &&
-		!seen["COALESCE_UNKNOWN"] {
-		return errors.New("nullable STRING dimension field requires COALESCE_UNKNOWN")
-	}
-	if (canonical == "INTEGER" || canonical == "DECIMAL") &&
-		nullFillEligible && field.Nullable && !seen["COALESCE_NEGATIVE_ONE"] {
-		return errors.New("nullable numeric dimension field requires COALESCE_NEGATIVE_ONE")
+	if nullFillEligible && field.Nullable &&
+		dwdDefaultNullValueSupported(canonical) && !hasTypedDefault {
+		return errors.New("nullable dimension field requires COALESCE_DEFAULT")
 	}
 	if canonical == "DATE" && !seen["CAST_DATE"] {
 		return errors.New("DATE field requires CAST_DATE")
@@ -2853,12 +2849,12 @@ func validateDWDCleaning(field dwdPlanningField, cleaning []string) error {
 		!seen["CAST_DATE"] && !seen["CAST_DATETIME"] {
 		return errors.New("STRING time field requires CAST_DATE or CAST_DATETIME")
 	}
-	if !dimensionRelated &&
-		(seen["COALESCE_UNKNOWN"] || seen["COALESCE_NEGATIVE_ONE"]) {
+	hasNullFill := seen["COALESCE_DEFAULT"] ||
+		seen["COALESCE_UNKNOWN"] || seen["COALESCE_NEGATIVE_ONE"]
+	if !dimensionRelated && hasNullFill {
 		return errors.New("non-dimension field must not fill nulls")
 	}
-	if role == "TIME" &&
-		(seen["COALESCE_UNKNOWN"] || seen["COALESCE_NEGATIVE_ONE"]) {
+	if role == "TIME" && hasNullFill {
 		return errors.New("time field must not fill nulls with a sentinel")
 	}
 	if seen["TRIM"] || seen["COALESCE_UNKNOWN"] {
@@ -2869,6 +2865,9 @@ func validateDWDCleaning(field dwdPlanningField, cleaning []string) error {
 	if seen["COALESCE_NEGATIVE_ONE"] &&
 		canonical != "INTEGER" && canonical != "DECIMAL" {
 		return errors.New("COALESCE_NEGATIVE_ONE requires numeric input")
+	}
+	if seen["COALESCE_DEFAULT"] && !dwdDefaultNullValueSupported(canonical) {
+		return errors.New("COALESCE_DEFAULT requires a supported canonical type")
 	}
 	if seen["CAST_DATE"] && canonical != "DATE" &&
 		!(canonical == "STRING" && role == "TIME") {

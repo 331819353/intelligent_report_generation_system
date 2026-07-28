@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -21,10 +22,12 @@ import (
 	"intelligent-report-generation-system/internal/materialization"
 	"intelligent-report-generation-system/internal/materializationworker"
 	"intelligent-report-generation-system/internal/metadataai"
+	"intelligent-report-generation-system/internal/metric"
 	"intelligent-report-generation-system/internal/metriccandidate"
 	"intelligent-report-generation-system/internal/metricsemantic"
 	"intelligent-report-generation-system/internal/observability"
 	"intelligent-report-generation-system/internal/platform/database"
+	"intelligent-report-generation-system/internal/semanticasset"
 	"intelligent-report-generation-system/internal/semanticcatalog"
 	"intelligent-report-generation-system/internal/semanticmanagement"
 	"intelligent-report-generation-system/internal/semanticqa"
@@ -94,7 +97,10 @@ func main() {
 	dataSourceService := datasource.NewService(dataSourceRepo, mysqlConnector, oracleConnector, datasource.NewExcelConnector(excelManager))
 	dataSourceService.SetMetadataJobRepository(jobRepo)
 
-	modelProvider := aiplatform.NewOpenAICompatibleProvider(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel, &http.Client{Timeout: cfg.AIAttemptTimeout})
+	modelProvider := aiplatform.NewOpenAICompatibleProviderPool(
+		cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModels,
+		&http.Client{Timeout: cfg.AIAttemptTimeout},
+	)
 	aiService, err := aiplatform.NewService(aiplatform.NewPostgresStore(pool), modelProvider, aiplatform.ServiceOptions{
 		Timeout: cfg.AIRequestTimeout, AttemptTimeout: cfg.AIAttemptTimeout,
 		MaxAttempts: cfg.AIMaxAttempts, BaseRetryDelay: cfg.AIRetryBaseDelay, MaxRetryDelay: cfg.AIRetryMaxDelay,
@@ -125,7 +131,14 @@ func main() {
 	if reconciledDatasets > 0 {
 		logger.Info("mapped table datasets reconciled", "count", reconciledDatasets)
 	}
-	metadataAIService := metadataai.NewService(metadataAIStore, metadataai.NewOrchestratedProvider(aiService), cfg.AIRequestTimeout, cfg.AIConfidenceThreshold)
+	metadataAIService := metadataai.NewService(
+		metadataAIStore,
+		metadataai.NewOrchestratedProviderWithPrimaryFailover(
+			aiService, cfg.AIPrimaryFailoverTimeout,
+		),
+		cfg.AIRequestTimeout,
+		cfg.AIConfidenceThreshold,
+	)
 	dataSourceService.SetTableCompleter(metadataAIService)
 	dataSourceService.SetMappedDatasetDraftEnsurer(datasetStore)
 
@@ -137,10 +150,26 @@ func main() {
 	)
 	go runMetadataJobWorker(ctx, logger, dataSourceService, workerID, cfg.WorkerPollInterval)
 	go runAssetEmbeddingWorker(ctx, logger, assetembedding.NewWorker(assetembedding.NewPostgresStore(pool), embeddingProvider), workerID, cfg.WorkerPollInterval)
-	go runMetricEmbeddingWorker(ctx, logger, metricsemantic.NewWorker(metricsemantic.NewPostgresStore(pool), embeddingProvider), workerID, cfg.WorkerPollInterval)
+	metricEmbeddingWorker := metricsemantic.NewWorker(
+		metricsemantic.NewPostgresStore(pool), embeddingProvider,
+	)
+	for index := 1; index <= 8; index++ {
+		go runMetricEmbeddingWorker(
+			ctx, logger, metricEmbeddingWorker,
+			workerID+"-metric-vector-"+strconv.Itoa(index),
+			cfg.WorkerPollInterval,
+		)
+	}
 	go runSemanticCatalogWorker(ctx, logger, semanticcatalog.NewWorker(
 		semanticcatalog.NewPostgresStore(pool), embeddingProvider,
 	), workerID, cfg.WorkerPollInterval)
+	go runSemanticAssetEmbeddingWorker(
+		ctx, logger,
+		semanticasset.NewEmbeddingWorker(
+			semanticasset.NewPostgresStore(pool), embeddingProvider,
+		),
+		workerID, cfg.WorkerPollInterval,
+	)
 	go semanticqa.RunGraphWorker(
 		ctx, logger,
 		semanticqa.NewGraphWorker(semanticqa.NewPostgresStore(pool)),
@@ -155,34 +184,56 @@ func main() {
 		),
 		workerID, cfg.WorkerPollInterval,
 	)
+	odsResolver := materializationworker.NewODSResolver(
+		pool,
+		warehouse.NewStagerWithMaxBytes(
+			warehousePool, mysqlConnector, cfg.WarehouseStageMaxBytes,
+		),
+		warehouse.NewStagerWithMaxBytes(
+			warehousePool, oracleConnector, cfg.WarehouseStageMaxBytes,
+		),
+		warehouse.NewFileStagerWithMaxBytes(
+			warehousePool, excelManager, cfg.WarehouseStageMaxBytes,
+		),
+	)
+	odsResolver.SetFullProjector(warehouse.NewODSProjector(warehousePool))
+	postgresResolver := materializationworker.NewSeparatedPostgresResolver(
+		pool, warehousePool,
+	)
+	postgresResolver.SetODSRehydrator(odsResolver)
 	go runMaterializationWorker(ctx, logger, materializationworker.NewWorker(
 		materializationStore,
 		materializationworker.NewCompositeResolver(
-			materializationworker.NewODSResolver(
-				pool,
-				warehouse.NewStagerWithMaxBytes(
-					warehousePool, mysqlConnector, cfg.WarehouseStageMaxBytes,
-				),
-				warehouse.NewStagerWithMaxBytes(
-					warehousePool, oracleConnector, cfg.WarehouseStageMaxBytes,
-				),
-				warehouse.NewFileStagerWithMaxBytes(
-					warehousePool, excelManager, cfg.WarehouseStageMaxBytes,
-				),
-			),
-			materializationworker.NewSeparatedPostgresResolver(pool, warehousePool),
+			odsResolver, postgresResolver,
 		),
 		warehouse.NewExecutor(warehousePool),
 	), workerID, cfg.WorkerPollInterval)
 	go runDatasetMaterializationCleanupWorker(
 		ctx, logger, materializationStore, workerID, cfg.WorkerPollInterval,
 	)
+	dimensionStore := semanticmanagement.NewPostgresStoreWithWarehouse(
+		pool, warehousePool,
+	)
 	go runDimensionMemberRefreshWorker(ctx, logger, semanticmanagement.NewDimensionRefreshWorker(
-		semanticmanagement.NewPostgresStoreWithWarehouse(pool, warehousePool),
+		dimensionStore,
 	), workerID, cfg.WorkerPollInterval)
 	go runDimensionProfileWorker(ctx, logger, semanticmanagement.NewDimensionProfileWorker(
-		semanticmanagement.NewPostgresStoreWithWarehouse(pool, warehousePool),
+		dimensionStore,
 	), workerID, cfg.WorkerPollInterval)
+	dimensionDecisionWorker :=
+		semanticmanagement.NewDimensionWhereDecisionWorker(
+			dimensionStore,
+			semanticmanagement.NewOrchestratedDimensionWherePolicyDesigner(
+				aiService, cfg.AIRequestTimeout,
+			),
+		)
+	for index := 1; index <= 2; index++ {
+		go runDimensionWhereDecisionWorker(
+			ctx, logger, dimensionDecisionWorker,
+			workerID+"-where-policy-"+strconv.Itoa(index),
+			cfg.WorkerPollInterval,
+		)
+	}
 	go runDatasetTagSuggestionWorker(ctx, logger, datasettagsuggestion.NewWorker(
 		datasettagsuggestion.NewPostgresStore(pool),
 		datasettagsuggestion.NewGenerator(aiService, cfg.AIRequestTimeout),
@@ -191,9 +242,17 @@ func main() {
 		datasetStore,
 		dataset.NewOrchestratedDWDModelingPlanner(aiService, cfg.AIRequestTimeout),
 	), workerID, cfg.WorkerPollInterval)
-	runMetricExtractionWorker(ctx, logger, metriccandidate.NewWorker(
-		metricCandidateStore, metriccandidate.NewEnricher(aiService, cfg.AIRequestTimeout, metricCandidateStore),
-	), workerID, cfg.WorkerPollInterval)
+	metricCandidateWorker := metriccandidate.NewWorker(metricCandidateStore)
+	metricCandidateWorker.SetAutomaticApprover(metriccandidate.NewAutomaticApprover(
+		metricCandidateStore,
+		metriccandidate.NewService(
+			metricCandidateStore,
+			metric.NewService(metric.NewPostgresStore(pool)),
+		),
+	))
+	runMetricExtractionWorker(
+		ctx, logger, metricCandidateWorker, workerID, cfg.WorkerPollInterval,
+	)
 	logger.Info("worker stopped")
 }
 
@@ -446,7 +505,7 @@ func runDatasetMaterializationCleanupWorker(
 	workerID string,
 	pollInterval time.Duration,
 ) {
-	const lease = 2 * time.Minute
+	const lease = 8 * time.Minute
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {
@@ -527,6 +586,49 @@ func runSemanticCatalogWorker(
 	}
 }
 
+func runSemanticAssetEmbeddingWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	worker *semanticasset.EmbeddingWorker,
+	workerID string,
+	pollInterval time.Duration,
+) {
+	const lease = 2 * time.Minute
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		processed := 0
+		tenantIDs, err := worker.TenantIDs(ctx)
+		if err != nil {
+			logger.Error("list semantic asset tenants", "error", err)
+		} else {
+			for _, tenantID := range tenantIDs {
+				count, runErr := worker.ProcessNext(
+					ctx, tenantID, workerID, lease,
+				)
+				if runErr != nil {
+					logger.Error(
+						"process semantic asset embeddings",
+						"tenant_id", tenantID,
+						"error", runErr,
+					)
+				}
+				processed += count
+			}
+		}
+		if processed > 0 {
+			timer.Reset(10 * time.Millisecond)
+		} else {
+			timer.Reset(pollInterval)
+		}
+	}
+}
+
 func runAssetEmbeddingWorker(ctx context.Context, logger *slog.Logger, worker *assetembedding.Worker, workerID string, pollInterval time.Duration) {
 	const lease = 2 * time.Minute
 	timer := time.NewTimer(0)
@@ -592,8 +694,8 @@ func runMetadataJobWorker(ctx context.Context, logger *slog.Logger, service *dat
 }
 
 func runMetricExtractionWorker(ctx context.Context, logger *slog.Logger, worker *metriccandidate.Worker, workerID string, pollInterval time.Duration) {
-	// 本地配置允许一次语义补全占用五分钟。租约必须覆盖 provider 超时、
-	// 规则提取和最终事务写入，不能与 provider 截止时间相同而在收口时丢租约。
+	// 规则提取、候选持久化和程序审批共用同一轮 worker 调度；租约覆盖
+	// 精确版本读取与候选批量写入，审批步骤本身仍使用指标事务边界。
 	const lease = 10 * time.Minute
 	timer := time.NewTimer(0)
 	defer timer.Stop()
@@ -645,6 +747,53 @@ func runMetricEmbeddingWorker(ctx context.Context, logger *slog.Logger, worker *
 				didProcess, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
 				if runErr != nil {
 					logger.Error("process metric embedding", "tenant_id", tenantID, "error", runErr)
+				}
+				if didProcess {
+					processed = true
+				}
+			}
+		}
+		if processed {
+			timer.Reset(10 * time.Millisecond)
+		} else {
+			timer.Reset(pollInterval)
+		}
+	}
+}
+
+func runDimensionWhereDecisionWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	worker *semanticmanagement.DimensionWhereDecisionWorker,
+	workerID string,
+	pollInterval time.Duration,
+) {
+	const lease = 2 * time.Minute
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		processed := false
+		tenantIDs, err := worker.TenantIDs(ctx)
+		if err != nil {
+			logger.Error(
+				"list dimension WHERE decision tenants",
+				"error", err,
+			)
+		} else {
+			for _, tenantID := range tenantIDs {
+				didProcess, runErr := worker.ProcessNext(
+					ctx, tenantID, workerID, lease,
+				)
+				if runErr != nil {
+					logger.Error(
+						"process dimension WHERE decision",
+						"tenant_id", tenantID, "error", runErr,
+					)
 				}
 				if didProcess {
 					processed = true

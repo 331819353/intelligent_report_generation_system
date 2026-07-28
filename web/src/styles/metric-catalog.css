@@ -273,17 +273,25 @@
 .metric-source-nodes article dd { overflow: hidden; margin: 3px 0 0; color: #4e5c70; font: 8px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
 
 .metric-lineage-view > header > span { border: 1px solid #b8c9e5; border-radius: 999px; padding: 6px 10px; background: #f3f7ff; color: #315fae; font-size: 9px; font-weight: 800; }
-.metric-lineage-flow { display: grid; grid-template-columns: minmax(155px, .9fr) 34px minmax(155px, 1fr) 34px minmax(170px, 1.1fr) 34px minmax(170px, 1.1fr); gap: 7px; align-items: center; min-height: 210px; overflow-x: auto; border: 1px solid #dce4ee; border-radius: 12px; padding: 24px; background: #f4f7fb; }
-.metric-lineage-source-group { display: grid; gap: 8px; }
-.metric-lineage-node { display: flex; align-items: center; gap: 10px; min-width: 0; border: 1px solid #cbd6e5; border-radius: 10px; padding: 12px; background: white; color: #53729f; box-shadow: 0 8px 18px #1720330c; }
+.metric-lineage-flow { display: grid; gap: 12px; min-height: 210px; overflow-x: auto; border: 1px solid #dce4ee; border-radius: 12px; padding: 24px; background: #f4f7fb; }
+.metric-lineage-path { display: flex; align-items: center; gap: 8px; min-width: max-content; }
+.metric-lineage-node { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 70px; border: 1px solid #cbd6e5; border-radius: 10px; padding: 10px; background: white; color: #53729f; box-shadow: 0 8px 18px #1720330c; }
 .metric-lineage-node > span { display: grid; min-width: 0; gap: 3px; }
 .metric-lineage-node small { color: #8591a2; font-size: 8px; font-weight: 800; }
-.metric-lineage-node strong { overflow: hidden; color: #2e3d53; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.metric-lineage-node.dataset { border-color: #a9c0e8; background: #f1f6ff; color: #245dcc; }
-.metric-lineage-node.field { border-color: #b7d9cf; background: #f0faf6; color: #167256; }
-.metric-lineage-node.metric { border-color: #9ab9ef; background: #eaf2ff; color: #174ea8; }
+.metric-lineage-node strong { display: -webkit-box; overflow: hidden; color: #2e3d53; font-size: 10px; line-height: 1.3; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.metric-lineage-node em { overflow: hidden; color: #7b899d; font-size: 8px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.metric-lineage-node.dataset { flex: 0 0 160px; width: 160px; border-color: #a9c0e8; background: #f1f6ff; color: #245dcc; }
+.metric-lineage-node.dataset.layer-ods { border-color: #9bc9bc; background: #effaf5; color: #147458; }
+.metric-lineage-node.dataset.layer-dwd, .metric-lineage-node.dataset.layer-dim { border-color: #a9c0e8; background: #f1f6ff; color: #245dcc; }
+.metric-lineage-node.dataset.layer-dws, .metric-lineage-node.dataset.layer-ads { border-color: #a69ce8; background: #f5f2ff; color: #5b45bb; }
+.metric-lineage-node.field { flex: 0 0 220px; width: 220px; border-color: #b7d9cf; background: #f0faf6; color: #167256; }
+.metric-lineage-node.metric { flex: 0 0 145px; width: 145px; border-color: #9ab9ef; background: #eaf2ff; color: #174ea8; }
 .metric-lineage-node.muted { color: #8996a8; }
 .metric-lineage-arrow { justify-self: center; color: #7892b5; }
+.metric-lineage-path-index { color: #7a8799; font-size: 8px; font-weight: 800; }
+.metric-lineage-empty { display: grid; place-items: center; align-content: center; min-height: 160px; color: #7c8aa0; text-align: center; }
+.metric-lineage-empty strong { margin-top: 8px; color: #42536b; font-size: 11px; }
+.metric-lineage-empty p { margin: 5px 0 0; font-size: 9px; }
 .metric-lineage-downstream { margin-top: 14px; overflow: hidden; border: 1px solid #dfe5ed; border-radius: 11px; background: white; }
 .metric-lineage-downstream > header { display: flex; align-items: center; padding: 12px 15px; border-bottom: 1px solid #e6ebf1; background: #f7f9fc; }
 .metric-lineage-downstream > header > div { display: flex; align-items: center; gap: 9px; color: #315fae; }
@@ -298,6 +306,9 @@
 .metric-lineage-boundary { margin-top: 14px; border-left: 3px solid #d4a657; padding: 4px 0 4px 12px; }
 .metric-lineage-boundary strong { color: #72511b; font-size: 10px; }
 .metric-lineage-boundary p { margin: 4px 0 0; color: #78684f; font-size: 9px; line-height: 1.65; }
+.metric-lineage-boundary.complete { border-left-color: #45a782; }
+.metric-lineage-boundary.complete strong { color: #17684f; }
+.metric-lineage-boundary.complete p { color: #4e6d62; }
 
 @media (max-width: 1380px) {
   .metric-directory-summary dl { min-width: 420px; }

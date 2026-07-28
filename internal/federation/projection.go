@@ -31,7 +31,11 @@ func pruneNodeProjections(document dataset.Document) dataset.Document {
 			required[item.NodeID][group.Field] = true
 		}
 		for _, metric := range item.Metrics {
-			required[item.NodeID][metric.Field] = true
+			if metric.Expression != nil {
+				collectExpressionFields(*metric.Expression, required)
+			} else if !metric.CountRows {
+				required[item.NodeID][metric.Field] = true
+			}
 		}
 	}
 	for _, field := range document.Fields {
@@ -71,5 +75,11 @@ func collectExpressionFields(expression dataset.Expression, required map[string]
 	for _, branch := range expression.Whens {
 		collectExpressionFields(branch.When, required)
 		collectExpressionFields(branch.Then, required)
+	}
+	for _, child := range expression.PartitionBy {
+		collectExpressionFields(child, required)
+	}
+	for _, item := range expression.OrderBy {
+		collectExpressionFields(item.Expression, required)
 	}
 }

@@ -308,6 +308,13 @@ func TestPostgresResolverFailsClosedForDatabaseODSWithoutDatabase(t *testing.T) 
 	}
 }
 
+func TestSuccessfulQualityOmitsUndeclaredGrainRule(t *testing.T) {
+	results := successfulQuality("materialize", 12, nil)
+	if len(results) != 1 || results[0].RuleCode != "ROW_COUNT_NONNEGATIVE" {
+		t.Fatalf("quality results = %#v", results)
+	}
+}
+
 func testDWDClaim() materialization.Claim {
 	// Intentionally reverse declaration order to exercise stable topological
 	// execution rather than relying on caller-provided array order.

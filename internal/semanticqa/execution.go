@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -20,16 +21,25 @@ func (store *PostgresStore) GetQueryPlan(
 	return plan, err
 }
 
-// ResolveQueryContext exposes only governed semantic codes from a prior
-// successful plan. Raw member values and result rows are deliberately absent.
+// ResolveQueryContext exposes only governed semantic identifiers from a prior
+// successful plan. Member keys come from the persisted, graph-validated
+// condition document; raw question text and result rows are deliberately
+// absent. This lets a conversational follow-up narrow the prior population
+// without silently dropping its filters.
 func (store *PostgresStore) ResolveQueryContext(
 	ctx context.Context,
 	tenantID, id string,
 ) (slots QuerySlots, err error) {
 	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
+		var conditionsJSON, planningTraceJSON []byte
 		queryErr := tx.QueryRow(ctx, `SELECT query_plan.intent,
 				platform.dataset_version_effective_domain(dataset_version.id),
-				metric.code::text,COALESCE(dimension.code::text,'')
+				metric.code::text,COALESCE(dimension.code::text,''),
+				query_plan.normalized_request_json->'conditions',
+				COALESCE(
+				  query_plan.normalized_request_json->'planningTrace',
+				  '[]'::jsonb
+				)
 			FROM platform.semantic_query_plans AS query_plan
 			JOIN platform.metrics AS metric
 			  ON metric.tenant_id=query_plan.tenant_id
@@ -44,11 +54,51 @@ func (store *PostgresStore) ResolveQueryContext(
 			 AND dataset_version.id=query_plan.selected_dataset_version_id
 			WHERE query_plan.id=$1::uuid
 			  AND query_plan.status IN ('READY','EXECUTED')`, id).
-			Scan(&slots.Intent, &slots.Domain, &slots.MetricCode, &slots.DimensionCode)
+			Scan(
+				&slots.Intent, &slots.Domain, &slots.MetricCode,
+				&slots.DimensionCode, &conditionsJSON, &planningTraceJSON,
+			)
 		if errors.Is(queryErr, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
-		return queryErr
+		if queryErr != nil {
+			return queryErr
+		}
+		var conditions QueryConditionDocument
+		if err := json.Unmarshal(conditionsJSON, &conditions); err != nil {
+			return ErrUnprovenPath
+		}
+		if err := json.Unmarshal(
+			planningTraceJSON, &slots.DimensionValueLookups,
+		); err != nil {
+			return ErrUnprovenPath
+		}
+		for index := range slots.DimensionValueLookups {
+			slots.DimensionValueLookups[index].Source = "CONTEXT_PLAN"
+		}
+		slots.TimeRange = conditions.TimeRange
+		slots.MemberFilters = make(
+			[]QueryMemberFilterInput, 0, len(conditions.Dimensions),
+		)
+		for _, dimension := range conditions.Dimensions {
+			values := append([]string(nil), dimension.MemberKeys...)
+			if dimension.MemberKey != "" {
+				values = append(values, dimension.MemberKey)
+			}
+			if dimension.DimensionCode == "" || len(values) == 0 {
+				continue
+			}
+			filter := QueryMemberFilterInput{
+				DimensionCode: dimension.DimensionCode,
+			}
+			if len(values) == 1 {
+				filter.MemberValue = values[0]
+			} else {
+				filter.MemberValues = values
+			}
+			slots.MemberFilters = append(slots.MemberFilters, filter)
+		}
+		return nil
 	})
 	return slots, err
 }
@@ -225,6 +275,49 @@ func (store *PostgresStore) PrepareQueryPlanExecution(
 		); err != nil {
 			return ErrUnprovenPath
 		}
+		groupedFilters := make([]QueryMemberFilterBinding, 0, len(binding.MemberFilters))
+		groupIndex := map[string]int{}
+		for _, memberFilter := range binding.MemberFilters {
+			groupKey := memberFilter.DimensionID + "\x00" + memberFilter.FieldID
+			index, exists := groupIndex[groupKey]
+			if !exists {
+				index = len(groupedFilters)
+				groupIndex[groupKey] = index
+				groupedFilters = append(groupedFilters, QueryMemberFilterBinding{
+					DimensionID: memberFilter.DimensionID,
+					FieldID:     memberFilter.FieldID,
+					MemberKeys:  []string{},
+				})
+			}
+			key := memberFilter.MemberKey
+			if key == "" && len(memberFilter.MemberKeys) == 1 {
+				key = memberFilter.MemberKeys[0]
+			}
+			if key == "" {
+				return ErrUnprovenPath
+			}
+			alreadyPresent := false
+			for _, existing := range groupedFilters[index].MemberKeys {
+				if existing == key {
+					alreadyPresent = true
+					break
+				}
+			}
+			if !alreadyPresent {
+				groupedFilters[index].MemberKeys = append(
+					groupedFilters[index].MemberKeys, key,
+				)
+			}
+		}
+		for index := range groupedFilters {
+			sort.Strings(groupedFilters[index].MemberKeys)
+			if len(groupedFilters[index].MemberKeys) == 1 {
+				groupedFilters[index].MemberKey =
+					groupedFilters[index].MemberKeys[0]
+				groupedFilters[index].MemberKeys = nil
+			}
+		}
+		binding.MemberFilters = groupedFilters
 		expectedMemberFilters := 0
 		if normalized.HasMemberValue {
 			expectedMemberFilters = 1
@@ -234,9 +327,13 @@ func (store *PostgresStore) PrepareQueryPlanExecution(
 		}
 		seenFilterFields := map[string]bool{}
 		for _, memberFilter := range binding.MemberFilters {
+			memberKeyCount := len(memberFilter.MemberKeys)
+			if memberFilter.MemberKey != "" {
+				memberKeyCount++
+			}
 			if memberFilter.DimensionID == "" ||
 				memberFilter.FieldID == "" ||
-				memberFilter.MemberKey == "" ||
+				memberKeyCount == 0 ||
 				seenFilterFields[memberFilter.FieldID] {
 				return ErrUnprovenPath
 			}

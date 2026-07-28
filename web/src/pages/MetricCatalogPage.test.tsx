@@ -2,7 +2,13 @@ import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { datasetAPI, type DatasetDSL, type DatasetSummary, type PublishedVersionRecord } from '../lib/datasets'
+import {
+  datasetAPI,
+  type DatasetDSL,
+  type DatasetSummary,
+  type PublishedVersionRecord,
+  type WarehouseLineage,
+} from '../lib/datasets'
 import {
   metricAPI,
   type MetricDefinition,
@@ -10,7 +16,7 @@ import {
   type MetricSummary,
   type MetricVersionRecord,
 } from '../lib/metrics'
-import { metricCandidateAPI, type MetricCandidate } from '../lib/metric-candidates'
+import { metricCandidateAPI } from '../lib/metric-candidates'
 import { MetricCatalogPage } from './MetricCatalogPage'
 
 afterEach(() => vi.restoreAllMocks())
@@ -59,6 +65,7 @@ describe('指标资产目录', () => {
     vi.spyOn(metricAPI, 'getVersion').mockResolvedValue(published)
     vi.spyOn(metricAPI, 'getVersionUsage').mockResolvedValue({ reportDraftReferences: 3, downstreamDraftReferences: 2, downstreamPublishedReferences: 1, activeQueryRuns: 4 })
     vi.spyOn(datasetAPI, 'getVersion').mockResolvedValue(datasetVersion)
+    vi.spyOn(datasetAPI, 'getWarehouseLineage').mockResolvedValue(datasetLineage)
     renderCatalog()
 
     const row = (await screen.findByText('营业收入')).closest('article')
@@ -78,11 +85,19 @@ describe('指标资产目录', () => {
 
     await user.click(within(dialog).getByRole('tab', { name: '来源' }))
     expect(within(dialog).getByText('企业收入数据集')).toBeInTheDocument()
-    expect(within(dialog).getByText('orders')).toBeInTheDocument()
+    expect(within(dialog).getByText('订单明细标准层')).toBeInTheDocument()
+    expect(within(dialog).getByText('DWD 数据集 · 已登记业务资产')).toBeInTheDocument()
+    expect(within(dialog).queryByText('t1')).not.toBeInTheDocument()
+    expect(within(dialog).getByText('字段编码：')).toBeInTheDocument()
+    expect(within(dialog).queryByText('field_revenue')).not.toBeInTheDocument()
 
     await user.click(within(dialog).getByRole('tab', { name: '血缘' }))
-    expect(within(dialog).getByText('从可信来源到当前指标版本')).toBeInTheDocument()
-    expect(within(dialog).getByText('对象级“源字段 → 组件 → 报告版本”链路尚未由服务端开放', { exact: false })).toBeInTheDocument()
+    expect(within(dialog).getByText('ODS → DWD / DIM → DWS → 取值口径 → 指标版本')).toBeInTheDocument()
+    expect(within(dialog).getByText('订单业务源表')).toBeInTheDocument()
+    expect(within(dialog).getByText('订单明细标准层')).toBeInTheDocument()
+    expect(within(dialog).getByText('企业收入数据集')).toBeInTheDocument()
+    expect(within(dialog).getByText('血缘完整性已通过')).toBeInTheDocument()
+    expect(within(dialog).getByText('不展示 DSL 内部别名', { exact: false })).toBeInTheDocument()
     expect(within(dialog).getByText('报告草稿引用')).toBeInTheDocument()
     expect(within(dialog).getByText('3')).toBeInTheDocument()
   })
@@ -108,20 +123,22 @@ describe('指标资产目录', () => {
     expect(datasetVersionSpy).not.toHaveBeenCalled()
   })
 
-  test('按普通数据集展示指标并保留候选分区', async () => {
+  test('按普通数据集展示正式指标且不再提供候选区', async () => {
     mockCatalog([])
     renderCatalog()
 
     expect(await screen.findByRole('region', { name: '企业收入数据集指标展示区' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: '客户主题数据集指标展示区' })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: /候选区/ })).toBeInTheDocument()
-    expect(screen.getByText(/原子指标与映射数据集保留为 DAG 内部构成/)).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /识别记录/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('程序识别记录')).not.toBeInTheDocument()
+    expect(screen.getByText(/DWS 已分类的度量字段直接作为原子指标展示/)).toBeInTheDocument()
   })
 
-  test('不展示原子指标和映射数据集，并从数据集展示区携带安全拓展上下文新建指标', async () => {
+  test('展示 DWS 原子指标但隐藏其他分层原子指标和映射数据集，并携带安全拓展上下文新建指标', async () => {
     const user = userEvent.setup()
     mockCatalog([
-      metricSummary({ id: 'metric-atomic', name: '内部订单金额', type: 'ATOMIC' }),
+      metricSummary({ id: 'metric-atomic', name: 'DWS 订单金额', type: 'ATOMIC' }),
+      metricSummary({ id: 'metric-dwd-atomic', name: 'DWD 内部金额', type: 'ATOMIC', datasetId: 'dataset-2', datasetVersionId: 'dataset-version-2' }),
       metricSummary({ id: 'metric-derived', name: '月订单金额', type: 'DERIVED' }),
     ])
     render(<MemoryRouter initialEntries={['/metrics']}><Routes>
@@ -130,8 +147,9 @@ describe('指标资产目录', () => {
     </Routes></MemoryRouter>)
 
     const zone = await screen.findByRole('region', { name: '企业收入数据集指标展示区' })
+    expect(within(zone).getByText('DWS 订单金额')).toBeInTheDocument()
     expect(within(zone).getByText('月订单金额')).toBeInTheDocument()
-    expect(screen.queryByText('内部订单金额')).not.toBeInTheDocument()
+    expect(screen.queryByText('DWD 内部金额')).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: '订单映射表指标展示区' })).not.toBeInTheDocument()
 
     await user.click(within(zone).getByRole('button', { name: '新建指标' }))
@@ -141,107 +159,38 @@ describe('指标资产目录', () => {
     })
   })
 
-  test('候选区支持多选并逐项创建和发布指标', async () => {
+  test('同步 DWS 后只提示正式资产入库结果并停留在资产目录', async () => {
     const user = userEvent.setup()
-    const candidates = [
-      metricCandidate({ id: 'candidate-1', name: '订单金额', code: 'order_amount' }),
-      metricCandidate({ id: 'candidate-2', name: '客户数', code: 'customer_count', status: 'NEEDS_REVIEW' }),
-      metricCandidate({ id: 'candidate-3', name: '阻塞候选', code: 'blocked_metric', status: 'BLOCKED', blockReasons: ['来源不可用'] }),
-    ]
-    mockCatalog([], candidates)
-    const accept = vi.spyOn(metricCandidateAPI, 'accept').mockImplementation(async id => ({
-      candidate: { ...candidates.find(candidate => candidate.id === id)!, status: 'ACCEPTED', version: 2, acceptedMetricId: `metric-${id}` },
-      metric: metricRecord({
-        id: `metric-${id}`, code: candidates.find(candidate => candidate.id === id)!.code,
-        name: candidates.find(candidate => candidate.id === id)!.name,
-        status: 'DRAFT', currentPublishedVersionId: undefined,
-      }),
-    }))
-    const publish = vi.spyOn(metricAPI, 'publish').mockResolvedValue(metricVersion())
-    renderCatalog()
-
-    await user.click(await screen.findByRole('tab', { name: /候选区/ }))
-    await user.click(screen.getByLabelText('选择候选指标 订单金额'))
-    await user.click(screen.getByLabelText('选择候选指标 客户数'))
-    expect(screen.getByLabelText('选择候选指标 阻塞候选')).toBeDisabled()
-    await user.click(screen.getByRole('button', { name: '发布选中指标（2）' }))
-
-    expect(await screen.findByText('已成功发布 2 个指标')).toBeInTheDocument()
-    expect(accept).toHaveBeenCalledTimes(2)
-    expect(publish).toHaveBeenCalledTimes(2)
-    expect(publish.mock.calls[0][1]).toMatchObject({
-      draftVersionId: 'metric-draft-1',
-      expectedVersion: 5,
-      expectedDraftRecordVersion: 4,
-      expectedDefinitionHash: 'c'.repeat(64),
-      validationParameters: {},
-    })
-  })
-
-  test('候选已接收但指标发布失败时保留错误和重试指引', async () => {
-    const user = userEvent.setup()
-    const candidate = metricCandidate({ name: '骑手总数' })
-    mockCatalog([], [candidate])
-    vi.spyOn(metricCandidateAPI, 'accept').mockResolvedValue({
-      candidate: {
-        ...candidate, status: 'ACCEPTED', version: 2,
-        acceptedMetricId: 'metric-rider-count',
-      },
-      metric: metricRecord({
-        id: 'metric-rider-count', name: candidate.name,
-        status: 'DRAFT', currentPublishedVersionId: undefined,
-      }),
-    })
-    vi.spyOn(metricAPI, 'publish').mockRejectedValue(
-      new Error('指标定义无法生成安全查询计划'),
-    )
-    renderCatalog()
-
-    await user.click(await screen.findByRole('tab', { name: /候选区/ }))
-    await user.click(screen.getByLabelText('选择候选指标 骑手总数'))
-    await user.click(screen.getByRole('button', { name: '发布选中指标（1）' }))
-
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      '骑手总数：指标定义无法生成安全查询计划（候选已接收时可点击“查看指标”重试）',
-    )
-  })
-
-  test('自动识别先检查历史资产并进入指标与维度候选清单', async () => {
-    const user = userEvent.setup()
-    const candidate = metricCandidate()
-    mockCatalog([metricSummary()], [candidate])
+    mockCatalog([metricSummary()])
     const identify = vi.spyOn(metricCandidateAPI, 'identify').mockResolvedValue({
       eligibleDatasetCount: 2,
       enqueuedJobCount: 2,
       historicalMetricCount: 1,
       existingCandidateCount: 1,
       dimensionDatasetCount: 2,
-      dimensionProfileCount: 2,
+      dimensionAssetCount: 2,
       datasets: [],
     })
     renderCatalog()
 
     await screen.findByText('营业收入')
-    await user.click(screen.getByRole('button', { name: '自动识别指标与维度' }))
+    await user.click(screen.getByRole('button', { name: '同步 DWS 指标与维度' }))
 
     expect(identify).toHaveBeenCalledTimes(1)
     expect(await screen.findByRole('status')).toHaveTextContent(
-      '已检查 1 个历史指标和 1 个历史候选，本次覆盖 2 个当前数据集，提交 2 个指标任务，并为 2 个 DWS 建立维度画像。',
+      '已同步 2 个 DWS：提交 2 个指标入库任务，新增 2 个正式维度资产。',
     )
-    expect(screen.getByRole('tab', { name: /候选区/ })).toHaveAttribute('aria-selected', 'true')
-    const list = screen.getByRole('region', { name: '自动识别维度清单' })
-    expect(within(list).getByText('1 个指标候选 · 1 个维度')).toBeInTheDocument()
-    expect(within(list).getByText('地区')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '企业收入数据集指标展示区' })).toBeInTheDocument()
+    expect(screen.queryByText('程序识别记录')).not.toBeInTheDocument()
   })
 
-  test('统一审批中心深链会直接打开指标候选区', async () => {
-    mockCatalog([], [metricCandidate()])
+  test('历史候选深链参数被忽略且不会重新打开候选区', async () => {
+    mockCatalog([])
     render(<MemoryRouter initialEntries={['/assets/metrics?view=candidates']}><MetricCatalogPage /></MemoryRouter>)
 
-    const candidateTab = await screen.findByRole('tab', { name: /候选区/ })
-    expect(candidateTab).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByText('待审批候选')).toBeInTheDocument()
-    expect(screen.getByText('订单金额')).toBeInTheDocument()
+    expect(await screen.findByRole('region', { name: '企业收入数据集指标展示区' })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /识别记录/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('程序识别记录')).not.toBeInTheDocument()
   })
 
   test('二次确认后按乐观锁删除指标并保留数据集展示区', async () => {
@@ -261,7 +210,7 @@ describe('指标资产目录', () => {
     expect(screen.queryByText('营业收入')).not.toBeInTheDocument()
     const zone = screen.getByRole('region', { name: '企业收入数据集指标展示区' })
     expect(zone).toBeInTheDocument()
-    expect(within(zone).getByText('暂无派生或复合指标')).toBeInTheDocument()
+    expect(within(zone).getByText('暂无可展示指标')).toBeInTheDocument()
   })
 })
 
@@ -269,21 +218,9 @@ function renderCatalog() {
   return render(<MemoryRouter><MetricCatalogPage /></MemoryRouter>)
 }
 
-function mockCatalog(metrics: MetricSummary[], candidates: MetricCandidate[] = []) {
+function mockCatalog(metrics: MetricSummary[]) {
   vi.spyOn(metricAPI, 'list').mockResolvedValue({ items: metrics, total: metrics.length, limit: 200, offset: 0 })
   vi.spyOn(datasetAPI, 'list').mockResolvedValue({ items: datasets, total: datasets.length, limit: 200, offset: 0 })
-  vi.spyOn(metricCandidateAPI, 'list').mockResolvedValue({ items: candidates, total: candidates.length, limit: 200, offset: 0 })
-}
-
-function metricCandidate(overrides: Partial<MetricCandidate> = {}): MetricCandidate {
-  return {
-    id: 'candidate-1', datasetId: 'dataset-1', datasetVersionId: 'dataset-version-1',
-    dslHash: 'e'.repeat(64), name: '订单金额', code: 'order_amount', description: '订单金额合计',
-    status: 'READY', method: 'HYBRID', confidence: .95, proposedDefinition: metricDefinition(),
-    sourceFieldIds: ['field_revenue'], evidence: [], assumptions: [], warnings: [], blockReasons: [],
-    fingerprint: 'f'.repeat(64), version: 1, createdAt: '2026-07-20T00:00:00Z', updatedAt: '2026-07-20T00:00:00Z',
-    ...overrides,
-  }
 }
 
 const datasets: DatasetSummary[] = [
@@ -334,7 +271,7 @@ function metricVersion(overrides: Partial<MetricVersionRecord> = {}): MetricVers
 
 const datasetDSL: DatasetDSL = {
   dslVersion: '1.0', dataset: { code: 'enterprise_revenue', name: '企业收入数据集', type: 'SINGLE_SOURCE' },
-  nodes: [{ id: 'orders', type: 'TABLE', datasourceId: 'source-orders', tableId: 'table-orders', alias: 'orders' }],
+  nodes: [{ id: 'orders', type: 'DATASET', datasetVersionId: 'dataset-version-dwd', alias: 't1' }],
   fields: [
     { id: 'field_revenue', code: 'revenue', name: '营业收入', role: 'MEASURE', canonicalType: 'DECIMAL', expression: { type: 'FIELD_REF', nodeId: 'orders', field: 'amount' } },
     { id: 'field_region', code: 'region', name: '地区', role: 'DIMENSION', canonicalType: 'STRING', expression: { type: 'FIELD_REF', nodeId: 'orders', field: 'region' } },
@@ -344,4 +281,18 @@ const datasetDSL: DatasetDSL = {
 const datasetVersion: PublishedVersionRecord = {
   id: 'dataset-version-1', datasetId: 'dataset-1', versionNo: 3, status: 'PUBLISHED', dslVersion: '1.0', dslHash: 'e'.repeat(64), planHash: 'f'.repeat(64),
   dsl: datasetDSL, logicalPlan: {}, publishedAt: '2026-07-18T00:00:00Z', publishedBy: 'user-1', datasetRecordVersion: 3, draftVersionId: 'dataset-draft-1', draftRecordVersion: 2,
+}
+
+const datasetLineage: WarehouseLineage = {
+  rootDatasetVersionId: 'dataset-version-1',
+  nodes: [
+    { datasetVersionId: 'dataset-version-ods', datasetId: 'dataset-ods', code: 'ods_orders', name: '订单业务源表', layer: 'ODS', status: 'PUBLISHED' },
+    { datasetVersionId: 'dataset-version-dwd', datasetId: 'dataset-dwd', code: 'dwd_orders', name: '订单明细标准层', layer: 'DWD', status: 'PUBLISHED' },
+    { datasetVersionId: 'dataset-version-1', datasetId: 'dataset-1', code: 'enterprise_revenue', name: '企业收入数据集', layer: 'DWS', status: 'PUBLISHED' },
+  ],
+  edges: [
+    { fromDatasetVersionId: 'dataset-version-ods', toDatasetVersionId: 'dataset-version-dwd', sourceType: 'DATASET_VERSION' },
+    { fromDatasetVersionId: 'dataset-version-dwd', toDatasetVersionId: 'dataset-version-1', sourceType: 'DATASET_VERSION' },
+  ],
+  topologicalOrder: ['dataset-version-ods', 'dataset-version-dwd', 'dataset-version-1'],
 }

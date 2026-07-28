@@ -23,16 +23,21 @@ var spreadsheetDecimalPattern = regexp.MustCompile(
 	`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$`,
 )
 
-// FileVersionReader exposes the immutable Excel/CSV read path. Implementations
-// must verify the object size and checksum before returning any rows.
+// FileVersionReader exposes the immutable Excel/CSV streaming path.
 type FileVersionReader interface {
-	ReadVersionTablesWithExpansionLimit(
+	StreamVersionTable(
 		context.Context,
 		string,
 		string,
+		string,
+		string,
 		int64,
-		int64,
-	) (datasource.FileVersion, []datasource.FileTableData, error)
+		string,
+		int,
+		int,
+		bool,
+		func(datasource.FileTableStreamBatch) error,
+	) (datasource.FileVersion, datasource.FileTableStreamSummary, error)
 }
 
 type FileStageInput struct {
@@ -47,6 +52,7 @@ type FileStageInput struct {
 	MaxFileBytes        int64
 	MaxRows             int
 	BatchSize           int
+	AllowTruncate       bool
 	Columns             []StageColumn
 }
 
@@ -140,47 +146,6 @@ func (stager *FileStager) Stage(
 		return StageResult{}, err
 	}
 
-	started := time.Now()
-	version, tables, err := stager.reader.ReadVersionTablesWithExpansionLimit(
-		ctx,
-		input.TenantID,
-		input.FileVersionID,
-		input.MaxFileBytes,
-		stager.maxBytes,
-	)
-	if err != nil {
-		return StageResult{}, fmt.Errorf("read immutable file version: %w", err)
-	}
-	if version.TenantID != input.TenantID ||
-		version.ID != input.ExpectedFileAssetID ||
-		version.VersionID != input.FileVersionID ||
-		version.SHA256 != input.ExpectedSHA256 ||
-		version.SizeBytes <= 0 ||
-		version.SizeBytes > input.MaxFileBytes {
-		return StageResult{}, fmt.Errorf(
-			"%w: immutable file identity or checksum changed",
-			ErrInvalidBuild,
-		)
-	}
-	selected, err := selectFileTable(tables, input.TableName)
-	if err != nil {
-		return StageResult{}, err
-	}
-	indexes, err := validateFileProjection(
-		selected,
-		columnNames,
-		canonicalTypes,
-	)
-	if err != nil {
-		return StageResult{}, err
-	}
-	if len(selected.Rows) > input.MaxRows {
-		return StageResult{}, fmt.Errorf(
-			"%w: file table exceeds the trusted row limit",
-			ErrInvalidBuild,
-		)
-	}
-
 	tx, err := stager.transactions.Begin(ctx)
 	if err != nil {
 		return StageResult{}, err
@@ -197,68 +162,116 @@ func (stager *FileStager) Stage(
 		return StageResult{}, fmt.Errorf("create file staging table: %w", err)
 	}
 
+	started := time.Now()
 	var copied, stagedBytes int64
-	for start := 0; start < len(selected.Rows); start += input.BatchSize {
-		if err := ctx.Err(); err != nil {
-			return StageResult{}, err
-		}
-		end := start + input.BatchSize
-		if end > len(selected.Rows) {
-			end = len(selected.Rows)
-		}
-		rows := make([][]any, end-start)
-		for offset, raw := range selected.Rows[start:end] {
-			if err := ctx.Err(); err != nil {
-				return StageResult{}, err
+	var sourceWidth int
+	var indexes []int
+	var sourceColumns []string
+	version, summary, err := stager.reader.StreamVersionTable(
+		ctx,
+		input.TenantID,
+		input.FileVersionID,
+		input.ExpectedFileAssetID,
+		input.ExpectedSHA256,
+		input.MaxFileBytes,
+		input.TableName,
+		input.MaxRows,
+		input.BatchSize,
+		input.AllowTruncate,
+		func(batch datasource.FileTableStreamBatch) error {
+			if sourceWidth == 0 {
+				sourceWidth = len(batch.Columns)
+				sourceColumns = append([]string(nil), batch.Columns...)
+				var projectionErr error
+				indexes, projectionErr = validateStreamFileProjection(
+					batch.Columns, columnNames,
+				)
+				if projectionErr != nil {
+					return projectionErr
+				}
+			} else if !sameColumnNames(sourceColumns, batch.Columns) ||
+				len(batch.Columns) != sourceWidth {
+				return fmt.Errorf(
+					"%w: worksheet header changed while streaming",
+					ErrInvalidBuild,
+				)
 			}
-			normalized, err := normalizeFileRow(
-				raw,
-				indexes,
-				canonicalTypes,
-				len(selected.Columns),
+			if int64(len(batch.Rows)) > int64(input.MaxRows)-copied {
+				return fmt.Errorf(
+					"%w: file table exceeds the trusted row limit",
+					ErrInvalidBuild,
+				)
+			}
+			rows := make([][]any, len(batch.Rows))
+			for offset, raw := range batch.Rows {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				normalized, err := normalizeFileRow(
+					raw, indexes, canonicalTypes, sourceWidth,
+				)
+				if err != nil {
+					return fmt.Errorf(
+						"normalize worksheet row %d: %w",
+						copied+int64(offset)+1,
+						err,
+					)
+				}
+				projected := make([]string, len(indexes))
+				for index, sourceIndex := range indexes {
+					if sourceIndex < len(raw) {
+						projected[index] = raw[sourceIndex]
+					}
+				}
+				encodedRow, err := json.Marshal(projected)
+				if err != nil {
+					return errors.New("file staging row is not serializable")
+				}
+				rowBytes := int64(len(encodedRow) + 1)
+				if rowBytes > stager.maxBytes-stagedBytes {
+					return ErrStageBytesExceeded
+				}
+				stagedBytes += rowBytes
+				rows[offset] = normalized
+			}
+			count, err := tx.CopyFrom(
+				ctx,
+				pgx.Identifier{schema, table},
+				columnNames,
+				pgx.CopyFromRows(rows),
 			)
 			if err != nil {
-				return StageResult{}, fmt.Errorf(
-					"normalize worksheet row %d: %w",
-					start+offset+1,
-					err,
-				)
+				return fmt.Errorf("copy file staging batch: %w", err)
 			}
-			projected := make([]string, len(indexes))
-			for index, sourceIndex := range indexes {
-				if sourceIndex < len(raw) {
-					projected[index] = raw[sourceIndex]
-				}
+			if count != int64(len(rows)) {
+				return errors.New("file staging copy count is inconsistent")
 			}
-			encodedRow, err := json.Marshal(projected)
-			if err != nil {
-				return StageResult{}, errors.New(
-					"file staging row is not serializable",
-				)
-			}
-			rowBytes := int64(len(encodedRow) + 1)
-			if rowBytes > stager.maxBytes-stagedBytes {
-				return StageResult{}, ErrStageBytesExceeded
-			}
-			stagedBytes += rowBytes
-			rows[offset] = normalized
-		}
-		count, err := tx.CopyFrom(
-			ctx,
-			pgx.Identifier{schema, table},
-			columnNames,
-			pgx.CopyFromRows(rows),
-		)
-		if err != nil {
-			return StageResult{}, fmt.Errorf("copy file staging batch: %w", err)
-		}
-		if count != int64(len(rows)) {
-			return StageResult{}, errors.New("file staging copy count is inconsistent")
-		}
-		copied += count
+			copied += count
+			return nil
+		},
+	)
+	if err != nil {
+		return StageResult{}, fmt.Errorf("stream immutable file version: %w", err)
 	}
-	if copied != int64(len(selected.Rows)) {
+	if version.TenantID != input.TenantID ||
+		version.ID != input.ExpectedFileAssetID ||
+		version.VersionID != input.FileVersionID ||
+		version.SHA256 != input.ExpectedSHA256 ||
+		version.SizeBytes <= 0 ||
+		version.SizeBytes > input.MaxFileBytes {
+		return StageResult{}, fmt.Errorf(
+			"%w: immutable file identity or checksum changed",
+			ErrInvalidBuild,
+		)
+	}
+	if int64(summary.RowCount) != copied {
 		return StageResult{}, errors.New("file staging row count is inconsistent")
+	}
+	if sourceWidth == 0 {
+		return StageResult{}, fmt.Errorf(
+			"%w: worksheet stream returned no schema",
+			ErrInvalidBuild,
+		)
 	}
 	if _, err := tx.Exec(ctx, "ANALYZE "+qualified); err != nil {
 		return StageResult{}, fmt.Errorf("analyze file staging table: %w", err)
@@ -336,6 +349,38 @@ func validateFileProjection(
 			)
 		}
 		indexes[index] = columnIndex
+	}
+	return indexes, nil
+}
+
+func validateStreamFileProjection(
+	available []string,
+	projected []string,
+) ([]int, error) {
+	if len(available) == 0 || len(available) > 1600 {
+		return nil, fmt.Errorf("%w: worksheet schema is invalid", ErrInvalidBuild)
+	}
+	indexByName := make(map[string]int, len(available))
+	for index, name := range available {
+		if _, duplicate := indexByName[name]; duplicate ||
+			strings.TrimSpace(name) == "" {
+			return nil, fmt.Errorf(
+				"%w: worksheet contains duplicate or empty columns",
+				ErrInvalidBuild,
+			)
+		}
+		indexByName[name] = index
+	}
+	indexes := make([]int, len(projected))
+	for index, name := range projected {
+		sourceIndex, exists := indexByName[name]
+		if !exists {
+			return nil, fmt.Errorf(
+				"%w: worksheet projection changed",
+				ErrInvalidBuild,
+			)
+		}
+		indexes[index] = sourceIndex
 	}
 	return indexes, nil
 }

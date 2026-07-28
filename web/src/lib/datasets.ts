@@ -1,6 +1,6 @@
 import { apiRequest } from './api'
-import { graphContains, graphLeaves, graphProducedFields, serializeDesignerGraph, type DesignerGraphV1, type GraphInput } from './dataset-graph'
-export type { CanvasPoint as GraphPosition, DesignerGraphV1, GraphDimension, GraphEnd, GraphEndOutput, GraphGroup, GraphInput, GraphJoin, GraphMetric } from './dataset-graph'
+import { graphContains, graphGroupOutputKey, graphLeaves, graphProducedFields, serializeDesignerGraph, type DesignerGraphV1, type GraphInput, type GraphTransform, type GraphTransformComponentType } from './dataset-graph'
+export type { CanvasPoint as GraphPosition, DesignerGraphV1, GraphDimension, GraphEnd, GraphEndOutput, GraphGroup, GraphGroupByMode, GraphInput, GraphJoin, GraphMetric } from './dataset-graph'
 export type DatasetLayer = 'ODS' | 'DIM' | 'DWD' | 'DWS' | 'ADS'
 
 export type AssetTable = {
@@ -97,6 +97,25 @@ export type PublishedVersionSummary = Pick<PublishedVersionRecord,
 export type PublishedVersionPage = {
   items: PublishedVersionSummary[]; total: number; limit: number; offset: number
 }
+export type WarehouseLineageNode = {
+  datasetVersionId: string
+  datasetId: string
+  code: string
+  name: string
+  layer: DatasetLayer
+  status: PublishedVersionRecord['status']
+}
+export type WarehouseLineageEdge = {
+  fromDatasetVersionId: string
+  toDatasetVersionId: string
+  sourceType: 'DATASET_VERSION'
+}
+export type WarehouseLineage = {
+  rootDatasetVersionId: string
+  nodes: WarehouseLineageNode[]
+  edges: WarehouseLineageEdge[]
+  topologicalOrder: string[]
+}
 export type VersionUsage = {
   reportDraftReferences: number
   downstreamDraftReferences: number
@@ -136,20 +155,44 @@ export type DatasetPublicationApprovalResult = {
 }
 export type DatasetPreview = {
   queryId: string; columns: string[]; rows: unknown[][]; rowCount: number; durationMs: number
+  columnMetadata?: DatasetPreviewColumn[]
   warnings?: Array<{ code: string; message: string; joinId?: string; estimatedRows?: number }>
+}
+export type DatasetPreviewColumn = {
+  fieldId?: string; code: string; name: string; description?: string; physicalName?: string
+  canonicalType?: string; semanticType?: string; role?: string; nullable: boolean
+  groupingPlaceholder?: string
 }
 export type DatasetDraftPreview = DatasetPreview & {
   dslHash: string; planHash: string; baseVersion: number
 }
 export type DatasetCandidatePreview = DatasetPreview & { dslHash: string; planHash: string }
-export type AssetTablePreview = { columns: string[]; rows: unknown[][] }
+export type AssetTablePreview = {
+  columns: string[]; rows: unknown[][]; columnMetadata?: DatasetPreviewColumn[]
+}
 export type DatasetDSL = Record<string, unknown> & {
   dslVersion: string; dataset: {
     code: string; name: string; description?: string; domain?: string; subject?: string; type: string; layer?: DatasetLayer
     semanticContractVersion?: string; consumerContractId?: string
   }
   nodes: Array<Record<string, unknown>>; fields: Array<Record<string, unknown>>
+  transforms?: DatasetTransformDSL[]
   designer?: DesignerGraphV1
+}
+export type DatasetTransformDSL = {
+  id: string
+  name: string
+  family: GraphTransform['family']
+  componentType: GraphTransformComponentType
+  input: GraphInput
+  rules: Array<{
+    id: string
+    operation: GraphTransform['rules'][number]['operation']
+    inputKeys: string[]
+    output: GraphTransform['rules'][number]['output']
+    expression: Record<string, unknown>
+    replaceSourceKey?: string
+  }>
 }
 
 /** 将资产中心类型收敛为 DSL V1 的规范类型。 */
@@ -169,6 +212,26 @@ const identifier = (value: string) => {
   const cleaned = value.trim().replace(/[^A-Za-z0-9_]/g, '_').replace(/^[^A-Za-z]+/, '')
   return cleaned || 'field'
 }
+const executableTransformComponentType = (transform: GraphTransform): GraphTransformComponentType => {
+  if (transform.componentType) return transform.componentType
+  const operation = transform.rules[0]?.operation
+  if (transform.family === 'DATE') return ['CURRENT_DATE', 'DATE_DIFF', 'DATE_EXTRACT', 'DATE_START', 'DATE_END'].includes(operation || '') ? 'DATE_CALCULATION' : 'DATE_FORMAT'
+  if (transform.family === 'CAST') return 'CAST'
+  if (transform.family === 'CONDITION') return 'CONDITION'
+  if (transform.family === 'NULL') return 'NULL'
+  if (transform.family === 'WINDOW') return 'WINDOW_FUNCTION'
+  if (transform.family === 'NUMBER') {
+    if (operation === 'ABS') return 'NUMBER_ABSOLUTE'
+    if (operation && ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'].includes(operation)) return 'NUMBER_ARITHMETIC'
+    return 'NUMBER_ROUNDING'
+  }
+  if (operation === 'UPPER') return 'TEXT_UPPER'
+  if (operation === 'TRIM') return 'TEXT_TRIM'
+  if (operation === 'REPLACE') return 'TEXT_REPLACE'
+  if (operation === 'LOWER') return 'TEXT_LOWER'
+  if (operation === 'CONCAT' || transform.family === 'SPLIT_MERGE') return 'TEXT_CONCAT'
+  return 'TEXT_SUBSTRING'
+}
 export const datasetLayerChoices = (draft: DatasetDraft): DatasetLayer[] => {
   const datasetNodes = draft.nodes.filter(node => node.table.sourceKind === 'DATASET')
   if (datasetNodes.length !== draft.nodes.length) return ['ODS']
@@ -187,7 +250,7 @@ const modeledDatasetLayer = (draft: DatasetDraft): DatasetLayer => {
   return draft.layer && choices.includes(draft.layer) ? draft.layer : choices[0]
 }
 const modeledExecutionPolicy = (layer: DatasetLayer) => layer === 'ODS'
-  ? { mode: 'REALTIME', timeoutMs: 5000, previewLimit: 200, resultLimit: 10000, cacheTtlSeconds: 300, materialization: { enabled: false } }
+  ? { mode: 'REALTIME', timeoutMs: 5000, previewLimit: 100, resultLimit: 10000, cacheTtlSeconds: 300, materialization: { enabled: false } }
   : {
       mode: 'MATERIALIZED_PREFERRED',
       timeoutMs: 30000,
@@ -212,6 +275,104 @@ const graphItemText = (value: unknown, ...keys: string[]): string => {
   const candidate = keys.map(key => item[key]).find(entry => typeof entry === 'string')
   return typeof candidate === 'string' ? candidate.trim() : ''
 }
+
+const filterLiteralValue = (value: string, canonicalType: string): unknown => {
+  const type = canonicalType.toUpperCase()
+  if (['NUMBER', 'INT', 'INTEGER', 'DECIMAL', 'FLOAT', 'DOUBLE'].includes(type)) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : value
+  }
+  if (type === 'BOOLEAN') {
+    if (value.trim().toLowerCase() === 'true') return true
+    if (value.trim().toLowerCase() === 'false') return false
+  }
+  return value
+}
+
+const filterComparableType = (value: string): string => {
+  const type = canonicalType(value)
+  if (type === 'INTEGER' || type === 'DECIMAL') return 'NUMBER'
+  if (type === 'DATE' || type === 'DATETIME') return 'TEMPORAL'
+  return type
+}
+
+/**
+ * 把画布过滤组件转换为结构化 PRE_AGGREGATION 谓词。固定值使用 LITERAL，
+ * 字段关系使用 FIELD_REF/上游字段表达式；这里不会生成或拼接 SQL。
+ */
+const designerFilters = (
+  draft: DatasetDraft,
+  designer: DesignerGraphV1,
+  materializedGroupID = '',
+  preAggregatedGroupIDs: ReadonlySet<string> = new Set(),
+) => (designer.transforms ?? []).flatMap(transform => {
+  if (transform.componentType !== 'FILTER') return []
+  if (!transform.input) throw new Error(`请为过滤组件“${transform.name || transform.id}”连接输入`)
+  const available = new Map(graphProducedFields(
+    transform.input,
+    designer,
+    draft.nodes,
+    draft.fields,
+    new Set(),
+    materializedGroupID,
+    preAggregatedGroupIDs,
+  ).map(field => [field.key, field]))
+  return (transform.conditions ?? []).map(condition => {
+    const field = available.get(condition.inputKey)
+    if (!field) throw new Error(`过滤组件“${transform.name || transform.id}”引用了已不可用的字段`)
+    if (field.kind === 'METRIC' || field.aggregation) throw new Error(`过滤组件“${transform.name || transform.id}”只能生成 WHERE，不能过滤聚合指标`)
+    if (preAggregatedGroupIDs.size && preAggregatedGroupIDs.has(field.binding.nodeId)) {
+      throw new Error(`过滤组件“${transform.name || transform.id}”请放在关联前分组组件之前`)
+    }
+    const left = field.expression ?? { type: 'FIELD_REF', nodeId: field.binding.nodeId, field: field.binding.field }
+    const operator = condition.operator || 'EQUALS'
+    const collection = operator === 'IN' || operator === 'NOT_IN'
+    const fieldComparison = condition.valueMode === 'FIELD'
+    if (fieldComparison && collection) {
+      throw new Error(`过滤组件“${transform.name || transform.id}”的 IN / NOT IN 只支持固定值集合`)
+    }
+    const rightField = fieldComparison ? available.get(condition.value) : undefined
+    if (fieldComparison && !rightField) {
+      throw new Error(`过滤组件“${transform.name || transform.id}”引用了已不可用的比较字段`)
+    }
+    if (rightField?.kind === 'METRIC' || rightField?.aggregation) {
+      throw new Error(`过滤组件“${transform.name || transform.id}”不能用聚合指标进行字段比较`)
+    }
+    if (rightField && condition.inputKey === condition.value) {
+      throw new Error(`过滤组件“${transform.name || transform.id}”请选择两个不同字段进行比较`)
+    }
+    if (rightField && filterComparableType(field.canonicalType) !== filterComparableType(rightField.canonicalType)) {
+      throw new Error(`过滤组件“${transform.name || transform.id}”的比较字段类型不兼容`)
+    }
+    if (rightField && preAggregatedGroupIDs.size && preAggregatedGroupIDs.has(rightField.binding.nodeId)) {
+      throw new Error(`过滤组件“${transform.name || transform.id}”请放在关联前分组组件之前`)
+    }
+    const right = rightField
+      ? rightField.expression ?? { type: 'FIELD_REF', nodeId: rightField.binding.nodeId, field: rightField.binding.field }
+      : { type: 'LITERAL', value: filterLiteralValue(condition.value, field.canonicalType) }
+    const expression = operator === 'IS_NULL' || operator === 'IS_NOT_NULL'
+      ? { type: operator, argument: left }
+      : collection
+        ? {
+            type: operator,
+            left,
+            right: {
+              type: 'ARRAY',
+              arguments: condition.value.split(/[,，\n]/).map(item => item.trim()).filter(Boolean)
+                .map(value => ({ type: 'LITERAL', value: filterLiteralValue(value, field.canonicalType) })),
+            },
+          }
+        : {
+            type: operator,
+            left,
+            right,
+          }
+    if (collection && !(expression.right as { arguments?: unknown[] }).arguments?.length) {
+      throw new Error(`过滤组件“${transform.name || transform.id}”的集合值不能为空`)
+    }
+    return { id: condition.id, stage: 'PRE_AGGREGATION', optional: false, expression }
+  })
+})
 
 const datasetNodeDSL = (node: DesignerNode) => node.table.sourceKind === 'DATASET' && node.table.datasetVersionId
   ? {
@@ -285,8 +446,11 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
     }
     return input?.kind === 'GROUP' ? groups.find(group => group.id === input.id) : undefined
   })()
-  const globalDimensions = new Map((globalGroup?.dimensions ?? []).map(item => [graphItemKey(item), item]))
-  const globalMetrics = new Map((globalGroup?.metrics ?? []).map(item => [graphItemKey(item), item]))
+  const globalDimensions = new Map((globalGroup?.dimensions ?? []).map(item => [graphGroupOutputKey(item), item]))
+  const globalMetrics = new Map((globalGroup?.metrics ?? []).map(item => [graphGroupOutputKey(item), item]))
+  const nullableGroupDimensionKeys = new Set(groups
+    .filter(group => group.groupByMode === 'CUBE' || group.groupByMode === 'ROLLUP' || group.groupByMode === 'GROUPING_SETS')
+    .flatMap(group => group.dimensions.map(graphGroupOutputKey)))
   if (globalGroup && (!globalDimensions.size || !globalMetrics.size)) throw new Error('结束节点前的分组组件需要同时配置分组字段和指标字段')
   const preAggregatedGroupIDs = new Set<string>()
   const preAggregations = groups.flatMap(group => {
@@ -300,31 +464,60 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
     const nodeId = leaves[0]
     const upstream = new Map(graphProducedFields(group.input, designer, draft.nodes, draft.fields).map(item => [item.key, item]))
     const outputAlias = (key: string, fallback: string) => identifier(key.includes('.') ? key.slice(key.indexOf('.') + 1) : fallback)
-    const sourceExpression = (key: string, source: ReturnType<typeof graphProducedFields>[number]) => {
-      const plainPhysical = key === `${nodeId}.${source.binding.field}` && source.expression?.type === 'FIELD_REF' && source.expression.nodeId === nodeId && source.expression.field === source.binding.field
+    const sourceExpression = (key: string, outputField: string, source: ReturnType<typeof graphProducedFields>[number]) => {
+      const plainPhysical = outputField === source.binding.field && key === `${nodeId}.${source.binding.field}` && source.expression?.type === 'FIELD_REF' && source.expression.nodeId === nodeId && source.expression.field === source.binding.field
       return plainPhysical ? {} : { expression: source.expression ?? { type: 'FIELD_REF', nodeId, field: source.binding.field } }
     }
+    const dimensionAliases = new Map<string, string>()
     const dimensions = (group.dimensions ?? []).flatMap(item => {
       const key = graphItemKey(item), source = upstream.get(key)
-      return key && source ? [{
-        field: outputAlias(key, source.binding.field),
+      if (!key || !source) return []
+      const field = item.outputKey
+        ? identifier(graphItemText(item, 'code') || outputAlias(key, source.binding.field))
+        : outputAlias(key, source.binding.field)
+      dimensionAliases.set(key, field)
+      return [{
+        field,
         ...(graphItemText(item, 'unit', 'grouping') ? { unit: graphItemText(item, 'unit', 'grouping') } : {}),
-        ...sourceExpression(key, source),
-      }] : []
+        ...sourceExpression(key, field, source),
+      }]
     })
-    const metrics = (group.metrics ?? []).flatMap(item => {
-      const key = graphItemKey(item), source = upstream.get(key), fn = graphItemText(item, 'function', 'aggregation')
-      return key && source && fn ? [{ field: outputAlias(key, source.binding.field), function: fn, ...sourceExpression(key, source) }] : []
+    type DesignerPreAggregationMetric = {
+      field: string
+      function: string
+      countRows?: boolean
+      expression?: Record<string, unknown>
+    }
+    const metrics: DesignerPreAggregationMetric[] = (group.metrics ?? []).flatMap((item): DesignerPreAggregationMetric[] => {
+      const key = graphItemKey(item), fn = graphItemText(item, 'function', 'aggregation')
+      const countRows = fn === 'COUNT' && (key === '*' || item.countRows)
+      const source = countRows ? upstream.values().next().value : upstream.get(key)
+      const field = item.outputKey
+        ? identifier(graphItemText(item, 'code') || outputAlias(key, source?.binding.field || 'metric'))
+        : outputAlias(key, source?.binding.field || 'metric')
+      if (!key || !source || !fn) return []
+      return countRows
+        ? [{ field, function: 'COUNT', countRows: true }]
+        : [{ field, function: fn, ...sourceExpression(key, field, source) }]
     })
     if (!dimensions.length || !metrics.length) throw new Error(`请完成分组组件“${group.name || group.id}”的分组字段和指标配置`)
     const aliases = [...dimensions, ...metrics].map(item => item.field)
     if (new Set(aliases).size !== aliases.length) throw new Error(`分组组件“${group.name || group.id}”的输出字段编码重复，请调整字段处理产物编码`)
+    const mappedGroupingSets = group.groupByMode === 'GROUPING_SETS'
+      ? (group.groupingSets ?? []).map(groupingSet => groupingSet.map(key => {
+        const field = dimensionAliases.get(key)
+        if (!field) throw new Error(`分组组件“${group.name || group.id}”的分组集引用了未选择的维度`)
+        return field
+      }))
+      : []
     preAggregatedGroupIDs.add(group.id)
     return [{
       id: group.id, nodeId,
       joinId: consumer.id,
       joinSide: consumer.left?.kind === 'GROUP' && consumer.left.id === group.id ? 'LEFT' : 'RIGHT',
       groupBy: dimensions,
+      ...(group.groupByMode && group.groupByMode !== 'STANDARD' ? { groupByMode: group.groupByMode } : {}),
+      ...(group.groupByMode === 'GROUPING_SETS' ? { groupingSets: mappedGroupingSets } : {}),
       metrics,
     }]
   })
@@ -341,6 +534,48 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
     ...groupProduced,
     ...graphProducedFields(endInput, designer, draft.nodes, draft.fields, new Set(), globalGroup?.id ?? '', preAggregatedGroupIDs),
   ].map(item => [item.key, item]))
+  const transforms: DatasetTransformDSL[] = (designer.transforms ?? [])
+    .map(transform => {
+      if (!transform.input) throw new Error(`请为字段处理组件“${transform.name || transform.id}”连接输入`)
+      if (transform.componentType === 'FILTER') {
+        return {
+          id: transform.id,
+          name: transform.name,
+          family: transform.family,
+          componentType: 'FILTER',
+          input: { ...transform.input },
+          rules: [],
+        }
+      }
+      const produced = new Map(graphProducedFields(
+        { kind: 'TRANSFORM', id: transform.id },
+        designer,
+        draft.nodes,
+        draft.fields,
+        new Set(),
+        globalGroup?.id ?? '',
+        preAggregatedGroupIDs,
+      ).map(field => [field.key, field]))
+      return {
+        id: transform.id,
+        name: transform.name,
+        family: transform.family,
+        componentType: executableTransformComponentType(transform),
+        input: { ...transform.input },
+        rules: transform.rules.map(rule => {
+          const field = produced.get(`${transform.id}.${rule.output.id}`)
+          if (!field?.expression) throw new Error(`字段处理组件“${transform.name || transform.id}”的规则“${rule.output.name || rule.id}”未生成可执行表达式`)
+          return {
+            id: rule.id,
+            operation: rule.operation,
+            inputKeys: [...rule.inputKeys],
+            output: { ...rule.output, canonicalType: canonicalType(rule.output.canonicalType) },
+            expression: { ...field.expression },
+            ...(rule.replaceSourceKey ? { replaceSourceKey: rule.replaceSourceKey } : {}),
+          }
+        }),
+      }
+    })
 
   // 结束节点控制“对外可见字段”，不能反向改变上游分组口径。未勾选的根分组
   // 维度仍以 invisible 字段进入 DSL/groupBy，确保指标粒度与画布配置一致。
@@ -352,7 +587,7 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
   const outputSpecs = [
     ...endOutputs.map(output => ({ ...output, visible: true })),
     ...(globalGroup?.dimensions ?? []).flatMap(value => {
-      const key = graphItemKey(value)
+      const key = graphGroupOutputKey(value)
       return key && !visibleKeys.has(key) ? [{ value, key, visible: false }] : []
     }),
   ]
@@ -386,7 +621,7 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
       expression,
       canonicalType: option?.canonicalType || (produced.aggregation === 'COUNT' || produced.aggregation === 'COUNT_DISTINCT' ? 'INTEGER' : canonicalType(produced.canonicalType || column.canonicalType)),
       ...(option?.semanticType ? { semanticType: option.semanticType } : {}),
-      nullable: option?.nullable ?? (selectedByKey.has(key) ? column.nullable : true),
+      nullable: nullableGroupDimensionKeys.has(key) ? true : option?.nullable ?? (selectedByKey.has(key) ? column.nullable : true),
       visible,
     }
   })
@@ -396,24 +631,36 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
   const finalGroupBy = globalGroup
     ? outputSpecs.flatMap((output, index) => globalDimensions.has(output.key) ? [fields[index].id] : [])
     : []
+  const finalGroupFieldIDs = new Map(globalGroup
+    ? outputSpecs.flatMap((output, index) => globalDimensions.has(output.key) ? [[output.key, fields[index].id] as const] : [])
+    : [])
+  const finalGroupingSets = globalGroup?.groupByMode === 'GROUPING_SETS'
+    ? (globalGroup.groupingSets ?? []).map(groupingSet => groupingSet.map(key => {
+      const fieldID = finalGroupFieldIDs.get(key)
+      if (!fieldID) throw new Error(`分组组件“${globalGroup.name || globalGroup.id}”的分组集引用了未选择的维度`)
+      return fieldID
+    }))
+    : []
 
   const parameterCodes = new Set(draft.parameters.map(item => item.code))
-  const filters = draft.filters.map(item => {
+  const graphFilters = designerFilters(draft, designer, globalGroup?.id ?? '', preAggregatedGroupIDs)
+  const graphFilterIDs = new Set(graphFilters.map(item => item.id))
+  const filters = [...graphFilters, ...draft.filters.filter(item => !graphFilterIDs.has(item.id)).map(item => {
     const right = item.parameterCode
       ? (parameterCodes.has(item.parameterCode) ? { type: 'PARAM_REF', code: item.parameterCode } : null)
       : { type: 'LITERAL', value: item.value }
     if (!right) throw new Error(`过滤条件引用了不存在的参数 ${item.parameterCode}`)
     return { id: item.id, stage: 'PRE_AGGREGATION', optional: Boolean(item.parameterCode), expression: { type: item.operator, left: { type: 'FIELD_REF', nodeId: item.nodeId, field: item.field }, right } }
-  })
+  })]
   const requestedGrainKeys = globalGroup
     ? finalGroupBy.map(id => fields.find(field => field.id === id)!.code)
     : draft.grainKeys.filter(code => fieldIDs.has(code))
+  const layer = modeledDatasetLayer(draft)
   const grainKeys = requestedGrainKeys.length ? requestedGrainKeys : (finalGroupBy.length
     ? finalGroupBy.map(id => fields.find(field => field.id === id)!.code)
-    : [fields[0].code])
+    : layer === 'DWD' ? [] : [fields[0].code])
   const grainDescription = draft.grainDescription.trim() || '每行代表一条结束节点输出记录'
   const sourceCount = new Set(draft.nodes.map(node => node.table.dataSourceId)).size
-  const layer = modeledDatasetLayer(draft)
   return {
     dslVersion: '1.0',
     dataset: {
@@ -426,12 +673,15 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
     },
     nodes: draft.nodes.map(datasetNodeDSL),
     joins: draft.joins.map(datasetJoinDSL),
+    transforms,
     preAggregations,
     ...(draft.factContract ? { factContract: draft.factContract } : {}),
     ...(draft.analysisContract ? { analysisContract: draft.analysisContract } : {}),
     fields,
     filters,
     groupBy: finalGroupBy,
+    ...(globalGroup?.groupByMode && globalGroup.groupByMode !== 'STANDARD' ? { groupByMode: globalGroup.groupByMode } : {}),
+    ...(globalGroup?.groupByMode === 'GROUPING_SETS' ? { groupingSets: finalGroupingSets } : {}),
     having: [],
     sorts: draft.sorts.flatMap(item => fieldIDs.get(item.fieldId) ? [{ fieldId: fieldIDs.get(item.fieldId)!, direction: item.direction }] : []),
     parameters: draft.parameters.map(item => ({ ...item, code: identifier(item.code) })),
@@ -527,10 +777,10 @@ export function buildDatasetDSL(draft: DatasetDraft): DatasetDSL {
     : draft.groupingEnabled === true
       ? outputSelected.flatMap(({ node, column }, index) => options.get(`${node.id}.${column.columnName}`)?.groupBy ? [baseFields[index].id] : [])
       : draft.groupingEnabled === false ? [] : baseFields.filter(field => field.role !== 'MEASURE').map(field => field.id)
-  const grainKeys = draft.grainKeys.filter(code => fieldIDs.has(code))
-  if (!draft.grainDescription.trim() || !grainKeys.length) throw new Error('请填写输出粒度并选择至少一个粒度键')
-  const sourceCount = new Set(draft.nodes.map(node => node.table.dataSourceId)).size
   const layer = modeledDatasetLayer(draft)
+  const grainKeys = draft.grainKeys.filter(code => fieldIDs.has(code))
+  if (!draft.grainDescription.trim() || !grainKeys.length && layer !== 'DWD') throw new Error('请填写输出粒度并选择至少一个粒度键')
+  const sourceCount = new Set(draft.nodes.map(node => node.table.dataSourceId)).size
   return {
     dslVersion: '1.0',
     dataset: {
@@ -744,6 +994,10 @@ export const datasetAPI = {
     return apiRequest<PublishedVersionPage>(`${datasetPath(id)}/versions?${query}`, { cache: 'no-store' })
   },
   getVersion: (id: string, versionId: string) => apiRequest<PublishedVersionRecord>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}`, { cache: 'no-store' }),
+  getWarehouseLineage: (datasetVersionId: string) => {
+    const query = new URLSearchParams({ datasetVersionId })
+    return apiRequest<WarehouseLineage>(`/v1/semantic-qa/warehouse-dag?${query}`, { cache: 'no-store' })
+  },
   getVersionUsage: (id: string, versionId: string) => apiRequest<VersionUsage>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}/usage`, { cache: 'no-store' }),
   rollbackVersion: (id: string, versionId: string, expectedVersion: number) => apiRequest<DatasetRecord>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}/rollback`, { method: 'POST', body: JSON.stringify({ expectedVersion }) }),
   transitionVersion: (id: string, versionId: string, input: VersionTransitionInput) => apiRequest<PublishedVersionRecord>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}/status`, { method: 'POST', body: JSON.stringify(input) }),

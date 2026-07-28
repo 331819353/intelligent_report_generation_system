@@ -31,9 +31,11 @@ type Config struct {
 	WorkerPollInterval              time.Duration
 	AIBaseURL                       string
 	AIModel                         string
+	AIModels                        []string
 	AIAPIKey                        string
 	AIRequestTimeout                time.Duration
 	AIAttemptTimeout                time.Duration
+	AIPrimaryFailoverTimeout        time.Duration
 	AIRetryBaseDelay                time.Duration
 	AIRetryMaxDelay                 time.Duration
 	AIMaxAttempts                   int
@@ -162,6 +164,11 @@ func loadApplication(process databaseProcess) (Config, error) {
 	}
 	aiBaseURL := envOrDefault("AI_BASE_URL", "https://mgallery.haier.net/v1/")
 	aiAPIKey := os.Getenv("AI_API_KEY")
+	aiModel := envOrDefault("AI_MODEL", "MiniMax-M2")
+	aiModels := parseUniqueCSV(os.Getenv("AI_MODELS"))
+	if len(aiModels) == 0 {
+		aiModels = []string{aiModel}
+	}
 	embeddingBaseURL := envOrDefault("AI_EMBEDDING_BASE_URL", aiBaseURL)
 	embeddingAPIKey := os.Getenv("AI_EMBEDDING_API_KEY")
 	if strings.TrimSpace(embeddingAPIKey) == "" {
@@ -178,10 +185,12 @@ func loadApplication(process databaseProcess) (Config, error) {
 		ShutdownTimeout:                 10 * time.Second,
 		WorkerPollInterval:              2 * time.Second,
 		AIBaseURL:                       aiBaseURL,
-		AIModel:                         envOrDefault("AI_MODEL", "deepseek-v3"),
+		AIModel:                         aiModel,
+		AIModels:                        aiModels,
 		AIAPIKey:                        aiAPIKey,
 		AIRequestTimeout:                25 * time.Second,
 		AIAttemptTimeout:                8 * time.Second,
+		AIPrimaryFailoverTimeout:        8 * time.Second,
 		AIRetryBaseDelay:                200 * time.Millisecond,
 		AIRetryMaxDelay:                 2 * time.Second,
 		AIMaxAttempts:                   3,
@@ -216,7 +225,7 @@ func loadApplication(process databaseProcess) (Config, error) {
 		ConnectorStreamMaxCellBytes:     1 << 20,
 		ConnectorStreamMaxRowBytes:      4 << 20,
 		ConnectorStreamMaxBytes:         1 << 30,
-		WarehouseStageMaxBytes:          512 << 20,
+		WarehouseStageMaxBytes:          1 << 30,
 		DataSourceCredentialKey:         envOrDefault("DATA_SOURCE_CREDENTIAL_KEY", defaultDataSourceCredentialKey),
 	}
 
@@ -232,6 +241,7 @@ func loadApplication(process databaseProcess) (Config, error) {
 		{"WORKER_POLL_INTERVAL", &cfg.WorkerPollInterval},
 		{"AI_REQUEST_TIMEOUT", &cfg.AIRequestTimeout},
 		{"AI_ATTEMPT_TIMEOUT", &cfg.AIAttemptTimeout},
+		{"AI_PRIMARY_FAILOVER_TIMEOUT", &cfg.AIPrimaryFailoverTimeout},
 		{"AI_RETRY_BASE_DELAY", &cfg.AIRetryBaseDelay},
 		{"AI_RETRY_MAX_DELAY", &cfg.AIRetryMaxDelay},
 		{"AI_EMBEDDING_TIMEOUT", &cfg.AIEmbeddingTimeout},
@@ -347,6 +357,9 @@ func (c Config) Validate() error {
 	if c.AIAttemptTimeout <= 0 || c.AIAttemptTimeout > c.AIRequestTimeout {
 		return errors.New("AI_ATTEMPT_TIMEOUT must be greater than zero and at most AI_REQUEST_TIMEOUT")
 	}
+	if c.AIPrimaryFailoverTimeout <= 0 || c.AIPrimaryFailoverTimeout > c.AIRequestTimeout {
+		return errors.New("AI_PRIMARY_FAILOVER_TIMEOUT must be greater than zero and at most AI_REQUEST_TIMEOUT")
+	}
 	if c.AIMaxAttempts < 1 || c.AIMaxAttempts > 5 || c.AIRetryBaseDelay <= 0 || c.AIRetryMaxDelay < c.AIRetryBaseDelay {
 		return errors.New("AI retry configuration is invalid")
 	}
@@ -360,8 +373,13 @@ func (c Config) Validate() error {
 		return errors.New("AI_CONFIDENCE_THRESHOLD must be between zero and one")
 	}
 	if strings.TrimSpace(c.AIAPIKey) != "" {
-		if !validAIBaseURL(c.AIBaseURL) || strings.TrimSpace(c.AIModel) == "" {
-			return errors.New("AI_BASE_URL or AI_MODEL is invalid")
+		if !validAIBaseURL(c.AIBaseURL) || len(c.AIModels) == 0 {
+			return errors.New("AI_BASE_URL or AI_MODELS is invalid")
+		}
+		for _, model := range c.AIModels {
+			if strings.TrimSpace(model) == "" || len(model) > 256 || strings.ContainsAny(model, "\r\n\t") {
+				return errors.New("AI_MODELS contains an invalid model name")
+			}
 		}
 	}
 	if c.AIEmbeddingTimeout <= 0 || c.AIEmbeddingTimeout > 2*time.Minute {
@@ -463,6 +481,24 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func parseUniqueCSV(value string) []string {
+	values := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, part := range strings.Split(value, ",") {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+		key := strings.ToLower(item)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		values = append(values, item)
+	}
+	return values
 }
 
 // validAIBaseURL 禁止携带凭据、查询和片段；明文 HTTP 只允许本机开发端点。

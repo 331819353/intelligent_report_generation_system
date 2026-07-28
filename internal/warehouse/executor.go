@@ -103,7 +103,9 @@ func (executor *Executor) Build(ctx context.Context, input BuildInput) (BuildRes
 	if err := validateOutputContract(input.Document, keys); err != nil {
 		return BuildResult{}, err
 	}
-	if err := validateTenantOwnedInputs(input.TenantID, targetLayer, input.Tables); err != nil {
+	if err := validateTenantOwnedInputs(
+		input.TenantID, input.RunID, targetLayer, input.Tables,
+	); err != nil {
 		return BuildResult{}, err
 	}
 	compiled, err := querycompiler.CompileMaterialization(querycompiler.MaterializationInput{
@@ -195,6 +197,7 @@ func businessKeys(document dataset.Document, requested []string) ([]string, erro
 
 func validateTenantOwnedInputs(
 	tenantID string,
+	runID string,
 	targetLayer materialization.Layer,
 	tables map[string]querycompiler.TableRef,
 ) error {
@@ -207,11 +210,17 @@ func validateTenantOwnedInputs(
 			valid = table.Schema == "warehouse_staging" &&
 				strings.HasPrefix(table.Name, "stage_t"+tenantFragment+"_") &&
 				warehouseStagingName.MatchString(table.Name)
-		case materialization.LayerDWD:
-			valid = warehouseLayerInput(table, "ods", "warehouse_ods", tenantFragment) ||
-				warehouseLayerInput(table, "dim", "warehouse_dim", tenantFragment)
-		case materialization.LayerDIM:
-			valid = warehouseLayerInput(table, "ods", "warehouse_ods", tenantFragment)
+		case materialization.LayerDWD, materialization.LayerDIM:
+			stageSchema, stageName, stageErr := materialization.GenerateStagingIdentifier(
+				tenantID, runID, table.NodeID,
+			)
+			valid = stageErr == nil &&
+				table.Schema == stageSchema &&
+				table.Name == stageName
+			if targetLayer == materialization.LayerDWD {
+				valid = valid ||
+					warehouseLayerInput(table, "dim", "warehouse_dim", tenantFragment)
+			}
 		case materialization.LayerDWS:
 			valid = warehouseLayerInput(table, "dwd", "warehouse_dwd", tenantFragment) ||
 				warehouseLayerInput(table, "dim", "warehouse_dim", tenantFragment)

@@ -422,32 +422,34 @@ func successfulQuality(
 	keys []string,
 ) []materialization.QualityResult {
 	rowObserved, _ := json.Marshal(map[string]int64{"rowCount": rowCount})
-	keyExpectation, _ := json.Marshal(map[string]int{"keyFieldCount": len(keys)})
-	return []materialization.QualityResult{
-		{
-			NodeID:   nodeID,
-			RuleCode: "ROW_COUNT_NONNEGATIVE", RuleVersion: "1",
-			RuleDefinitionHash: ruleHash("ROW_COUNT_NONNEGATIVE", "row_count >= 0"),
-			Scope:              "DATASET", Severity: materialization.QualityError,
-			Status:      materialization.QualityPassed,
-			Expectation: json.RawMessage(`{"minimum":0}`),
-			Observed:    rowObserved,
-			Message:     "warehouse output row count is valid",
-		},
-		{
-			NodeID:   nodeID,
-			RuleCode: "OUTPUT_GRAIN_UNIQUE_NOT_NULL", RuleVersion: "1",
-			RuleDefinitionHash: ruleHash(
-				"OUTPUT_GRAIN_UNIQUE_NOT_NULL",
-				"declared output grain keys are non-null and unique",
-			),
-			Scope: "DATASET", Severity: materialization.QualityError,
-			Status:      materialization.QualityPassed,
-			Expectation: keyExpectation,
-			Observed:    json.RawMessage(`{"duplicateRows":0,"nullRows":0}`),
-			Message:     "declared output grain passed uniqueness and null checks",
-		},
+	results := []materialization.QualityResult{{
+		NodeID:   nodeID,
+		RuleCode: "ROW_COUNT_NONNEGATIVE", RuleVersion: "1",
+		RuleDefinitionHash: ruleHash("ROW_COUNT_NONNEGATIVE", "row_count >= 0"),
+		Scope:              "DATASET", Severity: materialization.QualityError,
+		Status:      materialization.QualityPassed,
+		Expectation: json.RawMessage(`{"minimum":0}`),
+		Observed:    rowObserved,
+		Message:     "warehouse output row count is valid",
+	}}
+	if len(keys) == 0 {
+		return results
 	}
+	keyExpectation, _ := json.Marshal(map[string]int{"keyFieldCount": len(keys)})
+	results = append(results, materialization.QualityResult{
+		NodeID:   nodeID,
+		RuleCode: "OUTPUT_GRAIN_UNIQUE_NOT_NULL", RuleVersion: "1",
+		RuleDefinitionHash: ruleHash(
+			"OUTPUT_GRAIN_UNIQUE_NOT_NULL",
+			"declared output grain keys are non-null and unique",
+		),
+		Scope: "DATASET", Severity: materialization.QualityError,
+		Status:      materialization.QualityPassed,
+		Expectation: keyExpectation,
+		Observed:    json.RawMessage(`{"duplicateRows":0,"nullRows":0}`),
+		Message:     "declared output grain passed uniqueness and null checks",
+	})
+	return results
 }
 
 func failedGrainQuality(nodeID string) []materialization.QualityResult {

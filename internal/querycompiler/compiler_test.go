@@ -43,6 +43,19 @@ func TestPhysicalIdentifierWhitelistSupportsUnicodeWithoutAllowingSQLSyntax(t *t
 	}
 }
 
+func TestPhysicalColumnWhitelistSupportsParentheticalSpreadsheetHeader(t *testing.T) {
+	compiler := compiler{input: Input{Dialect: PostgreSQL}}
+	err := compiler.validateTable(TableRef{
+		Name: "staged_sheet",
+		Columns: map[string]bool{
+			"单价值(分析)": true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCompileBindsValuesAndInjectsPolicies(t *testing.T) {
 	compiled, err := Compile(compilerInput(t))
 	if err != nil {
@@ -159,6 +172,100 @@ func TestDateFormatCompilesExactCodesForMySQLAndOracle(t *testing.T) {
 	}
 }
 
+func TestDateCalculationCompilesForAllSupportedDialects(t *testing.T) {
+	start := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "start_date"}
+	end := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "end_date"}
+	current := dataset.Expression{Type: "CURRENT_DATE"}
+	tests := []struct {
+		name       string
+		expression dataset.Expression
+		want       map[Dialect]string
+	}{
+		{
+			name:       "day difference",
+			expression: dataset.Expression{Type: "DATE_DIFF", Unit: "DAY", Arguments: []dataset.Expression{start, end}},
+			want: map[Dialect]string{
+				MySQL:      "DATEDIFF(`o`.`end_date`, `o`.`start_date`)",
+				Oracle:     `(TRUNC("O"."END_DATE") - TRUNC("O"."START_DATE"))`,
+				PostgreSQL: `(CAST("o"."end_date" AS DATE) - CAST("o"."start_date" AS DATE))`,
+			},
+		},
+		{
+			name:       "day difference to SQL current date",
+			expression: dataset.Expression{Type: "DATE_DIFF", Unit: "DAY", Arguments: []dataset.Expression{start, current}},
+			want: map[Dialect]string{
+				MySQL:      "DATEDIFF(CURRENT_DATE(), `o`.`start_date`)",
+				Oracle:     `(TRUNC(TRUNC(CURRENT_DATE)) - TRUNC("O"."START_DATE"))`,
+				PostgreSQL: `(CAST(CURRENT_DATE AS DATE) - CAST("o"."start_date" AS DATE))`,
+			},
+		},
+		{
+			name:       "weekday",
+			expression: dataset.Expression{Type: "DATE_EXTRACT", Unit: "WEEKDAY", Argument: &start},
+			want: map[Dialect]string{
+				MySQL:      "(WEEKDAY(`o`.`start_date`) + 1)",
+				Oracle:     `(TRUNC("O"."START_DATE") - TRUNC("O"."START_DATE", 'IW') + 1)`,
+				PostgreSQL: `EXTRACT(ISODOW FROM "o"."start_date")`,
+			},
+		},
+		{
+			name:       "current year end",
+			expression: dataset.Expression{Type: "DATE_END", Unit: "YEAR", Argument: &current},
+			want: map[Dialect]string{
+				MySQL:      "DATE(CONCAT(YEAR(CURRENT_DATE()), '-12-31'))",
+				Oracle:     "(ADD_MONTHS(TRUNC(TRUNC(CURRENT_DATE), 'YYYY'), 12) - 1)",
+				PostgreSQL: "CAST(DATE_TRUNC('year', CURRENT_DATE) + INTERVAL '1 year' - INTERVAL '1 day' AS DATE)",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, dialect := range []Dialect{MySQL, Oracle, PostgreSQL} {
+				value := compiler{input: Input{Dialect: dialect, Tables: map[string]TableRef{"orders": {NodeID: "orders", Columns: map[string]bool{"start_date": true, "end_date": true}}}}}
+				compiled, err := value.expression(test.expression, map[string]string{"orders": "o"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if compiled != test.want[dialect] {
+					t.Fatalf("dialect=%s compiled=%s want=%s", dialect, compiled, test.want[dialect])
+				}
+			}
+		})
+	}
+}
+
+func TestCurrentDateRemainsNativeSQLInsideFillAndConditionExpressions(t *testing.T) {
+	field := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "start_date"}
+	current := dataset.Expression{Type: "CURRENT_DATE"}
+	isNull := dataset.Expression{Type: "IS_NULL", Argument: &field}
+	expressions := []dataset.Expression{
+		{Type: "COALESCE", Arguments: []dataset.Expression{field, current}},
+		{Type: "CASE", Whens: []dataset.CaseBranch{{When: isNull, Then: current}}, Else: &field},
+	}
+	for _, test := range []struct {
+		dialect Dialect
+		want    string
+	}{
+		{dialect: MySQL, want: "CURRENT_DATE()"},
+		{dialect: Oracle, want: "TRUNC(CURRENT_DATE)"},
+		{dialect: PostgreSQL, want: "CURRENT_DATE"},
+	} {
+		for _, expression := range expressions {
+			value := compiler{input: Input{
+				Dialect: test.dialect,
+				Tables:  map[string]TableRef{"orders": {NodeID: "orders", Columns: map[string]bool{"start_date": true}}},
+			}}
+			compiled, err := value.expression(expression, map[string]string{"orders": "o"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(compiled, test.want) || len(value.args) != 0 {
+				t.Fatalf("dialect=%s compiled=%s args=%#v", test.dialect, compiled, value.args)
+			}
+		}
+	}
+}
+
 func TestNumericAndContainsExpressionsCompileForMySQLAndOracle(t *testing.T) {
 	field := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_amount"}
 	for _, test := range []struct {
@@ -206,6 +313,107 @@ func TestCompileAllowsProjectionAroundGroupedMetric(t *testing.T) {
 	}
 	if !strings.Contains(compiled.SQL, "CAST(SUM(`o`.`order_amount`) AS CHAR) AS `revenue`") || !strings.Contains(compiled.SQL, "GROUP BY") {
 		t.Fatalf("post-group projection SQL=%s", compiled.SQL)
+	}
+}
+
+func TestCompileBuildsNativeCubeAndMySQLGroupingSetExpansion(t *testing.T) {
+	cubeInput := func(dialect Dialect) Input {
+		input := compilerInput(t)
+		input.Dialect = dialect
+		input.RowPolicies, input.ColumnPolicies = nil, nil
+		input.Document.Fields = append(input.Document.Fields, dataset.Field{
+			ID: "field_order_status", Code: "order_status", Name: "订单状态", Role: "DIMENSION",
+			Expression:    dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_status"},
+			CanonicalType: "STRING", Nullable: true,
+		})
+		input.Document.GroupBy = append(input.Document.GroupBy, "field_order_status")
+		input.Document.GroupByMode = dataset.GroupByModeCube
+		return input
+	}
+
+	for _, dialect := range []Dialect{Oracle, PostgreSQL} {
+		compiled, err := Compile(cubeInput(dialect))
+		if err != nil {
+			t.Fatalf("dialect=%s: %v", dialect, err)
+		}
+		if !strings.Contains(compiled.SQL, "GROUP BY CUBE (") || strings.Contains(compiled.SQL, "UNION ALL") {
+			t.Fatalf("dialect=%s SQL=%s", dialect, compiled.SQL)
+		}
+	}
+
+	compiled, err := Compile(cubeInput(MySQL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(compiled.SQL, "GROUP BY CUBE") || strings.Count(compiled.SQL, " UNION ALL ") != 3 ||
+		!strings.Contains(compiled.SQL, "CASE WHEN 1 = 1 THEN NULL ELSE") {
+		t.Fatalf("MySQL CUBE expansion SQL=%s", compiled.SQL)
+	}
+	if len(compiled.Args) != 9 || compiled.Args[len(compiled.Args)-1] != 100 {
+		t.Fatalf("MySQL CUBE args=%#v", compiled.Args)
+	}
+}
+
+func TestCompileBuildsRollupAndCustomGroupingSets(t *testing.T) {
+	groupedInput := func(dialect Dialect, mode dataset.GroupByMode) Input {
+		input := compilerInput(t)
+		input.Dialect = dialect
+		input.RowPolicies, input.ColumnPolicies = nil, nil
+		input.Document.Fields = append(input.Document.Fields, dataset.Field{
+			ID: "field_order_status", Code: "order_status", Name: "订单状态", Role: "DIMENSION",
+			Expression:    dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_status"},
+			CanonicalType: "STRING", Nullable: true,
+		})
+		input.Document.GroupBy = append(input.Document.GroupBy, "field_order_status")
+		input.Document.GroupByMode = mode
+		if mode == dataset.GroupByModeSets {
+			input.Document.GroupingSets = [][]string{
+				{"field_stat_month", "field_order_status"},
+				{"field_order_status"},
+				{},
+			}
+		}
+		return input
+	}
+
+	for _, dialect := range []Dialect{Oracle, PostgreSQL} {
+		rollup, err := Compile(groupedInput(dialect, dataset.GroupByModeRollup))
+		if err != nil {
+			t.Fatalf("ROLLUP dialect=%s: %v", dialect, err)
+		}
+		if !strings.Contains(rollup.SQL, "GROUP BY ROLLUP (") || strings.Contains(rollup.SQL, "UNION ALL") {
+			t.Fatalf("ROLLUP dialect=%s SQL=%s", dialect, rollup.SQL)
+		}
+
+		groupingSets, err := Compile(groupedInput(dialect, dataset.GroupByModeSets))
+		if err != nil {
+			t.Fatalf("GROUPING SETS dialect=%s: %v", dialect, err)
+		}
+		if !strings.Contains(groupingSets.SQL, "GROUP BY GROUPING SETS ((") ||
+			!strings.Contains(groupingSets.SQL, "), ())") ||
+			strings.Contains(groupingSets.SQL, "UNION ALL") {
+			t.Fatalf("GROUPING SETS dialect=%s SQL=%s", dialect, groupingSets.SQL)
+		}
+	}
+
+	rollup, err := Compile(groupedInput(MySQL, dataset.GroupByModeRollup))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rollup.SQL, " WITH ROLLUP") || strings.Contains(rollup.SQL, "UNION ALL") {
+		t.Fatalf("MySQL ROLLUP SQL=%s", rollup.SQL)
+	}
+
+	groupingSets, err := Compile(groupedInput(MySQL, dataset.GroupByModeSets))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(groupingSets.SQL, " UNION ALL ") != 2 ||
+		!strings.Contains(groupingSets.SQL, "CASE WHEN 1 = 1 THEN NULL ELSE") {
+		t.Fatalf("MySQL GROUPING SETS expansion SQL=%s", groupingSets.SQL)
+	}
+	if groupingSets.Args[len(groupingSets.Args)-1] != 100 {
+		t.Fatalf("MySQL GROUPING SETS args=%#v", groupingSets.Args)
 	}
 }
 
@@ -261,6 +469,64 @@ func TestCompileBuildsGroupedDerivedTableBeforeJoin(t *testing.T) {
 	}
 	if !strings.Contains(compiled.SQL, "UPPER(`pre_source`.`customer_name`) AS `region_upper`") || !strings.Contains(compiled.SQL, "COUNT(`pre_source`.`customer_name`) AS `customer_count`") || !strings.Contains(compiled.SQL, "`c`.`region_upper` AS `region_upper`") {
 		t.Fatalf("transformed pre-join aggregation SQL=%s", compiled.SQL)
+	}
+
+	document.PreAggregations[0].Metrics = []dataset.PreAggregationMetric{{Field: "customer_count", Function: "COUNT", CountRows: true}}
+	input.Document = document
+	compiled, err = Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(compiled.SQL, "COUNT(*) AS `customer_count`") || strings.Contains(compiled.SQL, "COUNT(`pre_source`.") {
+		t.Fatalf("pre-join row count SQL=%s", compiled.SQL)
+	}
+
+	document.PreAggregations[0].GroupByMode = dataset.GroupByModeCube
+	input.Document = document
+	compiled, err = Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(compiled.SQL, " UNION ALL ") != 3 || !strings.Contains(compiled.SQL, "CASE WHEN 1 = 1 THEN NULL ELSE") {
+		t.Fatalf("MySQL pre-join CUBE expansion SQL=%s", compiled.SQL)
+	}
+	input.Dialect = PostgreSQL
+	compiled, err = Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(compiled.SQL, `GROUP BY CUBE ("pre_source"."customer_id", UPPER("pre_source"."customer_name"))`) {
+		t.Fatalf("PostgreSQL pre-join CUBE SQL=%s", compiled.SQL)
+	}
+
+	document.PreAggregations[0].GroupByMode = dataset.GroupByModeRollup
+	input.Document = document
+	input.Dialect = MySQL
+	compiled, err = Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(compiled.SQL, "WITH ROLLUP") || strings.Contains(compiled.SQL, "UNION ALL") {
+		t.Fatalf("MySQL pre-join ROLLUP SQL=%s", compiled.SQL)
+	}
+
+	document.PreAggregations[0].GroupByMode = dataset.GroupByModeSets
+	document.PreAggregations[0].GroupingSets = [][]string{{"customer_id", "region_upper"}, {"region_upper"}, {}}
+	input.Document = document
+	compiled, err = Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(compiled.SQL, " UNION ALL ") != 2 {
+		t.Fatalf("MySQL pre-join GROUPING SETS SQL=%s", compiled.SQL)
+	}
+	input.Dialect = PostgreSQL
+	compiled, err = Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(compiled.SQL, `GROUP BY GROUPING SETS (("pre_source"."customer_id", UPPER("pre_source"."customer_name")), (UPPER("pre_source"."customer_name")), ())`) {
+		t.Fatalf("PostgreSQL pre-join GROUPING SETS SQL=%s", compiled.SQL)
 	}
 }
 
@@ -670,5 +936,56 @@ func TestExpressionOnlyReferencesCurrentScanNode(t *testing.T) {
 	aggregate := dataset.Expression{Type: "GT", Left: &dataset.Expression{Type: "AGGREGATE", Function: "COUNT"}, Right: &dataset.Expression{Type: "LITERAL", Value: 1}}
 	if expressionOnlyReferencesNode(aggregate, "orders") {
 		t.Fatal("聚合过滤器被错误识别为可下推")
+	}
+}
+
+func TestWindowRankingCompilesStructuredPartitionAndOrder(t *testing.T) {
+	status := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_status"}
+	amount := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_amount"}
+	expression := dataset.Expression{
+		Type: "WINDOW", Function: "DENSE_RANK",
+		PartitionBy: []dataset.Expression{status},
+		OrderBy:     []dataset.WindowOrder{{Expression: amount, Direction: "DESC"}},
+	}
+	for _, test := range []struct {
+		dialect Dialect
+		want    string
+	}{
+		{dialect: MySQL, want: "DENSE_RANK() OVER (PARTITION BY `o`.`order_status` ORDER BY `o`.`order_amount` DESC)"},
+		{dialect: Oracle, want: `DENSE_RANK() OVER (PARTITION BY "O"."ORDER_STATUS" ORDER BY "O"."ORDER_AMOUNT" DESC)`},
+		{dialect: PostgreSQL, want: `DENSE_RANK() OVER (PARTITION BY "o"."order_status" ORDER BY "o"."order_amount" DESC)`},
+	} {
+		compiler := compiler{input: Input{
+			Dialect: test.dialect,
+			Tables: map[string]TableRef{"orders": {
+				NodeID:  "orders",
+				Columns: map[string]bool{"order_status": true, "order_amount": true},
+			}},
+		}}
+		compiled, err := compiler.expression(expression, map[string]string{"orders": "o"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled != test.want || len(compiler.args) != 0 {
+			t.Fatalf("dialect=%s compiled=%s args=%#v", test.dialect, compiled, compiler.args)
+		}
+	}
+	aggregateWindow := expression
+	aggregateWindow.Function = "SUM"
+	aggregateWindow.Argument = &amount
+	compiler := compiler{input: Input{
+		Dialect: MySQL,
+		Tables: map[string]TableRef{"orders": {
+			NodeID:  "orders",
+			Columns: map[string]bool{"order_status": true, "order_amount": true},
+		}},
+	}}
+	compiled, err := compiler.expression(aggregateWindow, map[string]string{"orders": "o"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "SUM(`o`.`order_amount`) OVER (PARTITION BY `o`.`order_status` ORDER BY `o`.`order_amount` DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)"
+	if compiled != want {
+		t.Fatalf("aggregate window=%s want=%s", compiled, want)
 	}
 }

@@ -12,7 +12,7 @@ func TestPublicationGeneratorUsesReservedPublishedVersionIdentity(t *testing.T) 
 	version.DraftRecordVersion = 2
 	version.DatasetRecordVersion = 7
 
-	preparation, err := NewPublicationGenerator(nil).GeneratePublicationCandidates(
+	preparation, err := NewPublicationGenerator().GeneratePublicationCandidates(
 		context.Background(), testTenantID, testActorID, version,
 	)
 	if err != nil {

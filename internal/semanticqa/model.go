@@ -7,6 +7,8 @@ import (
 	"intelligent-report-generation-system/internal/dataset"
 )
 
+const maxSemanticMemberSetSize = 128
+
 var (
 	ErrInvalidRequest  = errors.New("semantic QA request is invalid")
 	ErrNotFound        = errors.New("semantic QA object was not found")
@@ -180,14 +182,156 @@ type QueryPlanInput struct {
 	// The following fields are server-owned resolution metadata. They are
 	// populated by the governed catalog interpreter and must never be accepted
 	// from API callers.
-	MetricCandidateCount int    `json:"-"`
-	MetricMatchMethod    string `json:"-"`
-	Domain               string `json:"-"`
+	MetricCandidateCount  int                              `json:"-"`
+	MetricMatchMethod     string                           `json:"-"`
+	Domain                string                           `json:"-"`
+	DimensionValueLookups []QueryDimensionValueLookupTrace `json:"-"`
+	// DimensionResolutionComplete is set only by the server-side conversational
+	// interpreter after every current-turn value has been resolved to governed
+	// dimension members. It prevents PlanQuery from repeating an unconstrained
+	// exact lookup and reintroducing an ambiguity already resolved with field
+	// metadata and the persisted decision graph.
+	DimensionResolutionComplete bool `json:"-"`
+}
+
+// QueryTurnInput is the conversation-level contract used by the assistant.
+// A turn may resolve to several independently governed QueryPlans. Keeping the
+// executable leaf as QueryPlan preserves the existing permission, freshness,
+// compatibility and lineage gates for every requested metric.
+type QueryTurnInput struct {
+	Question string `json:"question"`
+	// PriorQuestions contains at most the two immediately preceding user
+	// questions. Together with Question this is the transient three-turn
+	// window used to explain conversational resolution. Raw questions are
+	// never persisted in a QueryPlan.
+	PriorQuestions      []string `json:"priorQuestions,omitempty"`
+	ContextQueryPlanIDs []string `json:"contextQueryPlanIds,omitempty"`
+	MaximumPathHops     int      `json:"maximumPathHops,omitempty"`
+}
+
+type QueryTurnPlan struct {
+	QuestionHash        string         `json:"questionHash"`
+	Intent              string         `json:"intent"`
+	MetricCodes         []string       `json:"metricCodes"`
+	ContextQueryPlanIDs []string       `json:"contextQueryPlanIds"`
+	ContextInherited    bool           `json:"contextInherited"`
+	Plans               []QueryPlan    `json:"plans"`
+	Trace               QueryTurnTrace `json:"trace"`
+}
+
+// QueryTurnTrace is a transient, reader-facing audit trail. It is assembled
+// from the same governed candidates and selected QueryPlans that drive
+// execution; the frontend must not reconstruct these decisions from labels.
+type QueryTurnTrace struct {
+	ConversationQuestions []string                         `json:"conversationQuestions"`
+	ContextPolicy         string                           `json:"contextPolicy"`
+	StandaloneQuestion    string                           `json:"standaloneQuestion"`
+	Extraction            QueryTurnExtraction              `json:"extraction"`
+	MetricCandidates      []QueryMetricCandidateTrace      `json:"metricCandidates"`
+	DimensionValueLookups []QueryDimensionValueLookupTrace `json:"dimensionValueLookups"`
+	FinalSelections       []QueryFinalSelectionTrace       `json:"finalSelections"`
+	Assessments           []QueryTraceAssessment           `json:"assessments"`
+}
+
+type QueryTurnExtraction struct {
+	Intent              string   `json:"intent"`
+	MetricTerms         []string `json:"metricTerms"`
+	DimensionValueTerms []string `json:"dimensionValueTerms"`
+}
+
+type QueryMetricCandidateTrace struct {
+	Code        string  `json:"code"`
+	Label       string  `json:"label"`
+	MatchedTerm string  `json:"matchedTerm,omitempty"`
+	MatchMethod string  `json:"matchMethod"`
+	Score       float64 `json:"score"`
+	Selected    bool    `json:"selected"`
+	Source      string  `json:"source"`
+}
+
+type QueryDimensionValueLookupTrace struct {
+	Term                      string                    `json:"term"`
+	CanonicalValue            string                    `json:"canonicalValue,omitempty"`
+	AliasValues               []string                  `json:"aliasValues,omitempty"`
+	MetricCode                string                    `json:"metricCode"`
+	MetricName                string                    `json:"metricName,omitempty"`
+	MetricFieldID             string                    `json:"metricFieldId"`
+	MetricVersionID           string                    `json:"metricVersionId,omitempty"`
+	DatasetVersionID          string                    `json:"datasetVersionId,omitempty"`
+	MaterializationID         string                    `json:"materializationId,omitempty"`
+	TableSchema               string                    `json:"tableSchema,omitempty"`
+	TableName                 string                    `json:"tableName,omitempty"`
+	DecisionID                string                    `json:"decisionId,omitempty"`
+	DimensionID               string                    `json:"dimensionId,omitempty"`
+	DimensionCode             string                    `json:"dimensionCode"`
+	DimensionName             string                    `json:"dimensionName"`
+	DimensionFieldID          string                    `json:"dimensionFieldId"`
+	DimensionFieldName        string                    `json:"dimensionFieldName"`
+	DimensionFieldDescription string                    `json:"dimensionFieldDescription"`
+	VectorQuery               string                    `json:"vectorQuery"`
+	VectorModel               string                    `json:"vectorModel,omitempty"`
+	VectorDimensions          int                       `json:"vectorDimensions,omitempty"`
+	VectorEmbedding           []float32                 `json:"-"`
+	VectorSearchStatus        string                    `json:"vectorSearchStatus"`
+	VectorCandidateCount      int                       `json:"vectorCandidateCount"`
+	VectorCandidateMemberKeys []string                  `json:"vectorCandidateMemberKeys,omitempty"`
+	VectorTopScore            float64                   `json:"vectorTopScore,omitempty"`
+	WhereDesignStatus         string                    `json:"whereDesignStatus"`
+	WhereDesignOperator       string                    `json:"whereDesignOperator,omitempty"`
+	WhereDesignReason         string                    `json:"whereDesignReason,omitempty"`
+	WhereDesignModel          string                    `json:"whereDesignModel,omitempty"`
+	MatchMethod               string                    `json:"matchMethod"`
+	CandidateCount            int                       `json:"candidateCount"`
+	CandidateMemberKeys       []string                  `json:"candidateMemberKeys,omitempty"`
+	SelectedMemberKeys        []string                  `json:"selectedMemberKeys,omitempty"`
+	WhereCondition            string                    `json:"whereCondition"`
+	CompiledCondition         string                    `json:"compiledCondition"`
+	CandidateFilter           QueryCandidateFilterTrace `json:"candidateFilter"`
+	Selected                  bool                      `json:"selected"`
+	Source                    string                    `json:"source"`
+	Sensitive                 bool                      `json:"sensitive"`
+}
+
+type QueryCandidateFilterTrace struct {
+	InputCount    int      `json:"inputCount"`
+	AcceptedCount int      `json:"acceptedCount"`
+	RejectedCount int      `json:"rejectedCount"`
+	Status        string   `json:"status"`
+	Rules         []string `json:"rules"`
+}
+
+type QueryFinalSelectionTrace struct {
+	MetricCode        string                     `json:"metricCode"`
+	MetricName        string                     `json:"metricName"`
+	MetricFieldID     string                     `json:"metricFieldId"`
+	MetricVersionID   string                     `json:"metricVersionId"`
+	DatasetVersionID  string                     `json:"datasetVersionId"`
+	Dimensions        []QueryFinalDimensionTrace `json:"dimensions"`
+	WhereCondition    string                     `json:"whereCondition"`
+	CompiledCondition string                     `json:"compiledCondition"`
+	PlanID            string                     `json:"planId"`
+	PlanStatus        string                     `json:"planStatus"`
+}
+
+type QueryFinalDimensionTrace struct {
+	DimensionCode string   `json:"dimensionCode"`
+	DimensionName string   `json:"dimensionName"`
+	MemberKeys    []string `json:"memberKeys"`
+}
+
+type QueryTraceAssessment struct {
+	Step     string `json:"step"`
+	Status   string `json:"status"`
+	Decision string `json:"decision"`
+	Detail   string `json:"detail"`
 }
 
 type QueryMemberFilterInput struct {
 	DimensionCode string `json:"dimensionCode"`
-	MemberValue   string `json:"memberValue"`
+	MemberValue   string `json:"memberValue,omitempty"`
+	// MemberValues is a governed semantic set. It is compiled as one IN
+	// predicate, never as several EQUALS predicates joined with AND.
+	MemberValues []string `json:"memberValues,omitempty"`
 }
 
 // QueryTimeRange is a half-open, caller-controlled time boundary. Values must
@@ -213,9 +357,10 @@ type QueryExecutionBinding struct {
 }
 
 type QueryMemberFilterBinding struct {
-	DimensionID string `json:"dimensionId"`
-	FieldID     string `json:"fieldId"`
-	MemberKey   string `json:"memberKey"`
+	DimensionID string   `json:"dimensionId"`
+	FieldID     string   `json:"fieldId"`
+	MemberKey   string   `json:"memberKey,omitempty"`
+	MemberKeys  []string `json:"memberKeys,omitempty"`
 }
 
 type QueryEvidence struct {
@@ -251,9 +396,10 @@ type QueryConditionDocument struct {
 }
 
 type QueryDimensionClause struct {
-	DimensionCode string `json:"dimensionCode"`
-	DimensionID   string `json:"dimensionId"`
-	MemberKey     string `json:"memberKey"`
+	DimensionCode string   `json:"dimensionCode"`
+	DimensionID   string   `json:"dimensionId"`
+	MemberKey     string   `json:"memberKey,omitempty"`
+	MemberKeys    []string `json:"memberKeys,omitempty"`
 }
 
 type QueryPlan struct {
@@ -266,6 +412,7 @@ type QueryPlan struct {
 	Confidence                float64                `json:"confidence"`
 	SelectedMetricID          string                 `json:"selectedMetricId,omitempty"`
 	SelectedMetricVersionID   string                 `json:"selectedMetricVersionId,omitempty"`
+	MetricFieldID             string                 `json:"metricFieldId,omitempty"`
 	SelectedDimensionID       string                 `json:"selectedDimensionId,omitempty"`
 	SelectedDatasetVersionID  string                 `json:"selectedDatasetVersionId,omitempty"`
 	SelectedMaterializationID string                 `json:"selectedMaterializationId,omitempty"`
@@ -278,7 +425,11 @@ type QueryPlan struct {
 	ExecutionErrorCode        string                 `json:"executionErrorCode,omitempty"`
 	ExecutionDurationMS       *int64                 `json:"executionDurationMs,omitempty"`
 	ExecutionRowCount         *int                   `json:"executionRowCount,omitempty"`
-	CreatedAt                 string                 `json:"createdAt"`
+	// PlanningTrace is response-only and intentionally absent from the
+	// persisted normalized request. It exposes the actual dimension/member
+	// candidate set considered while this plan was created.
+	PlanningTrace []QueryDimensionValueLookupTrace `json:"planningTrace,omitempty"`
+	CreatedAt     string                           `json:"createdAt"`
 }
 
 type ExecuteQueryPlanInput struct {

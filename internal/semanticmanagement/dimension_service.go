@@ -254,6 +254,43 @@ func (s *DimensionService) ListCompatibilities(ctx context.Context, tenantID str
 	return s.store.ListCompatibilities(ctx, tenantID, filter)
 }
 
+func (s *DimensionService) ListDimensionWhereDecisions(
+	ctx context.Context,
+	tenantID string,
+	filter DimensionWhereDecisionFilter,
+) ([]DimensionWhereDecision, int, error) {
+	if s == nil || s.store == nil || !validTenant(tenantID) ||
+		!normalizePage(&filter.Page) {
+		return nil, 0, ErrInvalidRequest
+	}
+	store, ok := s.store.(DimensionWhereDecisionStore)
+	if !ok {
+		return nil, 0, ErrInvalidRequest
+	}
+	filter.Query = strings.TrimSpace(filter.Query)
+	filter.TableName = strings.TrimSpace(filter.TableName)
+	filter.DimensionID = strings.TrimSpace(filter.DimensionID)
+	if len(filter.Query) > 256 || len(filter.TableName) > 128 ||
+		(filter.DimensionID != "" && !validUUID(filter.DimensionID)) {
+		return nil, 0, ErrInvalidRequest
+	}
+	return store.ListDimensionWhereDecisions(ctx, tenantID, filter)
+}
+
+func (s *DimensionService) ListDimensionWhereDecisionGroups(
+	ctx context.Context,
+	tenantID string,
+) ([]DimensionWhereDecisionGroup, error) {
+	if s == nil || s.store == nil || !validTenant(tenantID) {
+		return nil, ErrInvalidRequest
+	}
+	store, ok := s.store.(DimensionWhereDecisionStore)
+	if !ok {
+		return nil, ErrInvalidRequest
+	}
+	return store.ListDimensionWhereDecisionGroups(ctx, tenantID)
+}
+
 func (s *DimensionService) ProposeCompatibility(ctx context.Context, tenantID, actorID string, input ProposeCompatibilityInput) (DimensionMetricCompatibility, error) {
 	normalizeCompatibility(&input)
 	joinPath, joinPathValid := normalizeCompatibilityJoinPath(
@@ -435,6 +472,9 @@ func (s *DimensionService) SearchMemberMetrics(ctx context.Context, tenantID, ac
 	if s == nil || s.store == nil || !validActor(tenantID, actorID) ||
 		!validText(query, 1, 1024) || limit < 1 || limit > 100 {
 		return nil, ErrInvalidRequest
+	}
+	if isReservedDimensionDefaultValue(query) {
+		return []MemberMetricSearchResult{}, nil
 	}
 	return s.store.SearchMemberMetrics(ctx, tenantID, actorID, query, limit)
 }

@@ -9,17 +9,11 @@ import (
 	"intelligent-report-generation-system/internal/dataset"
 )
 
-// PublicationGenerator derives and enriches a candidate batch from the exact immutable draft
-// revision loaded by the background preparation worker. The reserved version identity becomes
-// the real immutable version on approval, so the prepared batch never needs to be rebound or
-// sent to the LLM twice.
-type PublicationGenerator struct {
-	enricher *Enricher
-}
+// PublicationGenerator derives a rule-only candidate batch from the exact immutable
+// draft revision loaded by the background preparation worker.
+type PublicationGenerator struct{}
 
-func NewPublicationGenerator(enricher *Enricher) *PublicationGenerator {
-	return &PublicationGenerator{enricher: enricher}
-}
+func NewPublicationGenerator() *PublicationGenerator { return &PublicationGenerator{} }
 
 func (g *PublicationGenerator) GeneratePublicationCandidates(
 	ctx context.Context,
@@ -35,14 +29,7 @@ func (g *PublicationGenerator) GeneratePublicationCandidates(
 	if err != nil {
 		return dataset.PublicationCandidatePreparation{}, err
 	}
-	if g != nil && g.enricher != nil {
-		enriched, enrichmentErr := g.enricher.Enrich(ctx, tenantID, actorID, version, result)
-		result = enriched
-		if enrichmentErr != nil {
-			result.Warnings = append(result.Warnings,
-				"LLM 语义补全暂不可用，本次已保留规则候选；重新提交同一审批申请可重试补全。")
-		}
-	}
+	result = attachDefaultSemantics(version, result)
 	raw, err := json.Marshal(result)
 	if err != nil {
 		return dataset.PublicationCandidatePreparation{}, err

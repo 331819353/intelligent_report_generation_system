@@ -52,7 +52,12 @@ func NewExecutor(connectors map[datasource.Type]queryruntime.QueryConnector, fil
 
 // Execute 对每个节点实施必要字段裁剪、过滤下推、源端限额和固定版本读取。
 func (e *Executor) Execute(ctx context.Context, queryID string, document dataset.Document, plan queryruntime.ResolvedPlan, sources map[string]datasource.Source, parameters map[string]any, scope policy.UserScope, rowPolicies []policy.RowPolicy, columnPolicies []policy.ColumnPolicy, maxRows int) (datasource.QueryResult, error) {
-	if document.Dataset.Type != "CROSS_SOURCE" || len(document.Nodes) < 2 || len(document.Nodes) > dataset.MaxNodes {
+	validNodeCount := len(document.Nodes) >= 1 &&
+		len(document.Nodes) <= dataset.MaxNodes
+	validSourceShape :=
+		document.Dataset.Type == "CROSS_SOURCE" && len(document.Nodes) >= 2 ||
+			document.Dataset.Type == "SINGLE_SOURCE"
+	if !validNodeCount || !validSourceShape {
 		return datasource.QueryResult{}, errors.New("invalid federated dataset node count")
 	}
 	for _, join := range document.Joins {
@@ -105,13 +110,22 @@ func (e *Executor) Execute(ctx context.Context, queryID string, document dataset
 	var firstErr error
 	var errorOnce sync.Once
 	var wait sync.WaitGroup
+	sourceLimit := sourceRowLimit(maxRows)
+	truncateSource := plan.SourceSampleLimit > 0
+	if truncateSource {
+		sourceLimit = min(sourceLimit, plan.SourceSampleLimit)
+	}
 	for _, node := range executionDocument.Nodes {
 		node := node
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
 			started := time.Now()
-			table, err := e.loadNode(queryContext, queryID, executionDocument, node, plan, sources, parameters, fileLoads, sourceRowLimit(maxRows), preAggregation.Projections[node.ID])
+			table, err := e.loadNode(
+				queryContext, queryID, executionDocument, node, plan, sources,
+				parameters, fileLoads, sourceLimit, truncateSource,
+				preAggregation.Projections[node.ID],
+			)
 			stat := datasource.QuerySourceStat{
 				NodeID: node.ID, SubqueryID: queryruntime.FederatedSubqueryID(queryID, node.ID),
 				DurationMS: time.Since(started).Milliseconds(), Status: sourceExecutionStatus(err),
@@ -200,6 +214,7 @@ type fileLoad struct {
 	once    sync.Once
 	version datasource.FileVersion
 	tables  []datasource.FileTableData
+	names   []string
 	err     error
 }
 
@@ -212,12 +227,19 @@ func prepareFileLoads(document dataset.Document, plan queryruntime.ResolvedPlan)
 			if loads[key] == nil {
 				loads[key] = &fileLoad{}
 			}
+			seen := false
+			for _, name := range loads[key].names {
+				seen = seen || name == resolved.Table.Name
+			}
+			if !seen {
+				loads[key].names = append(loads[key].names, resolved.Table.Name)
+			}
 		}
 	}
 	return loads
 }
 
-func (e *Executor) loadNode(ctx context.Context, queryID string, document dataset.Document, node dataset.Node, plan queryruntime.ResolvedPlan, sources map[string]datasource.Source, parameters map[string]any, fileLoads map[string]*fileLoad, rowLimit int, aggregateProjections map[string]querycompiler.ScanAggregateProjection) (filequery.NodeTableData, error) {
+func (e *Executor) loadNode(ctx context.Context, queryID string, document dataset.Document, node dataset.Node, plan queryruntime.ResolvedPlan, sources map[string]datasource.Source, parameters map[string]any, fileLoads map[string]*fileLoad, rowLimit int, truncateSource bool, aggregateProjections map[string]querycompiler.ScanAggregateProjection) (filequery.NodeTableData, error) {
 	resolved := plan.Nodes[node.ID]
 	source, ok := sources[resolved.SourceID]
 	if !ok || source.Type != resolved.SourceType {
@@ -230,7 +252,21 @@ func (e *Executor) loadNode(ctx context.Context, queryID string, document datase
 		key := resolved.SourceID + ":" + resolved.FileVersionID
 		load := fileLoads[key]
 		load.once.Do(func() {
-			load.version, load.tables, load.err = e.files.ReadVersionTables(ctx, source.TenantID, resolved.FileVersionID, source.RuntimeQuota.MaxExcelFileBytes)
+			if previewReader, ok := e.files.(filequery.PreviewVersionReader); ok &&
+				truncateSource {
+				load.version, load.tables, load.err =
+					previewReader.ReadVersionTablesPreview(
+						ctx, source.TenantID, resolved.FileVersionID,
+						source.RuntimeQuota.MaxExcelFileBytes, load.names,
+						rowLimit,
+					)
+			} else {
+				load.version, load.tables, load.err =
+					e.files.ReadVersionTables(
+						ctx, source.TenantID, resolved.FileVersionID,
+						source.RuntimeQuota.MaxExcelFileBytes,
+					)
+			}
 		})
 		if load.err != nil {
 			return filequery.NodeTableData{}, load.err
@@ -242,12 +278,23 @@ func (e *Executor) loadNode(ctx context.Context, queryID string, document datase
 			if table.Name != resolved.Table.Name {
 				continue
 			}
+			if table.Types == nil {
+				table.Types = map[string]string{}
+			}
+			for column, canonicalType := range resolved.Table.ColumnTypes {
+				if canonicalType != "" {
+					table.Types[column] = canonicalType
+				}
+			}
 			prepared, err := filequery.NodeTableFromFile(table, node.Projection)
 			if err != nil {
 				return filequery.NodeTableData{}, err
 			}
 			if len(prepared.Rows) > rowLimit {
-				return filequery.NodeTableData{}, ErrSourceRowLimit
+				if !truncateSource {
+					return filequery.NodeTableData{}, ErrSourceRowLimit
+				}
+				prepared.Rows = prepared.Rows[:rowLimit]
 			}
 			return prepared, nil
 		}
@@ -257,8 +304,12 @@ func (e *Executor) loadNode(ctx context.Context, queryID string, document datase
 	if resolved.SourceType == datasource.TypeOracle {
 		dialect = querycompiler.Oracle
 	}
+	scanRows := rowLimit + 1
+	if truncateSource {
+		scanRows = rowLimit
+	}
 	compiled, err := querycompiler.CompileScan(querycompiler.ScanInput{
-		Document: document, NodeID: node.ID, Dialect: dialect, Table: resolved.Table, Parameters: parameters, MaxRows: rowLimit + 1,
+		Document: document, NodeID: node.ID, Dialect: dialect, Table: resolved.Table, Parameters: parameters, MaxRows: scanRows,
 		AggregateProjections: aggregateProjections,
 	})
 	if err != nil {
@@ -270,7 +321,8 @@ func (e *Executor) loadNode(ctx context.Context, queryID string, document datase
 		slog.ErrorContext(ctx, "federated source query failed", "query_id", queryID, "node_id", node.ID, "source_id", source.ID, "error", err)
 		return filequery.NodeTableData{}, err
 	}
-	if result.RowCount != len(result.Rows) || result.RowCount > rowLimit {
+	if result.RowCount != len(result.Rows) ||
+		!truncateSource && result.RowCount > rowLimit {
 		slog.ErrorContext(ctx, "federated source row shape is invalid", "query_id", queryID, "node_id", node.ID, "reported_rows", result.RowCount, "actual_rows", len(result.Rows), "row_limit", rowLimit)
 		return filequery.NodeTableData{}, ErrSourceRowLimit
 	}

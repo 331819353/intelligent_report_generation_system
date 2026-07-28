@@ -202,7 +202,7 @@ type PublishInput struct {
 
 // DimensionFilter 是指标运行时唯一允许追加的受控过滤。
 // 字段必须属于指标已发布定义的 allowedDimensions，值始终通过参数绑定传递；
-// 普通维度仅支持 EQUALS，DATE/DATETIME 额外支持半开区间所需的 GTE/LT。
+// 普通维度支持 EQUALS 和受控集合 IN，DATE/DATETIME 额外支持半开区间所需的 GTE/LT。
 type DimensionFilter struct {
 	FieldID  string `json:"fieldId"`
 	Operator string `json:"operator"`
@@ -250,11 +250,12 @@ type QueryCandidate struct {
 // QueryFilterBinding 让查询运行时可独立复核派生 DSL 中新增过滤的确切形状。
 // 它不保存成员值，成员值只存在于本次执行的参数映射中。
 type QueryFilterBinding struct {
-	FieldID       string
-	FilterID      string
-	ParameterCode string
-	DataType      string
-	Operator      string
+	FieldID        string
+	FilterID       string
+	ParameterCode  string
+	ParameterCodes []string
+	DataType       string
+	Operator       string
 }
 
 // Store 定义指标草稿、不可变版本和精确依赖解析的持久化边界。

@@ -35,6 +35,39 @@ func registerDimensionRoutes(
 		}
 		writeSemanticList(w, items, total, page)
 	})))
+	mux.Handle("GET /api/v1/semantic/dimension-where-decisions", protect("READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page, ok := semanticPage(w, r)
+		if !ok {
+			return
+		}
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		items, total, err := service.ListDimensionWhereDecisions(
+			r.Context(), claims.TenantID, DimensionWhereDecisionFilter{
+				Page: page, Query: r.URL.Query().Get("q"),
+				TableName:   r.URL.Query().Get("tableName"),
+				DimensionID: r.URL.Query().Get("dimensionId"),
+			},
+		)
+		if err != nil {
+			writeSemanticError(w, err)
+			return
+		}
+		writeSemanticList(w, items, total, page)
+	})))
+	mux.Handle("GET /api/v1/semantic/dimension-where-decision-groups", protect("READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		items, err := service.ListDimensionWhereDecisionGroups(
+			r.Context(), claims.TenantID,
+		)
+		if err != nil {
+			writeSemanticError(w, err)
+			return
+		}
+		writeSemanticJSON(w, http.StatusOK, map[string]any{
+			"items": items,
+			"total": len(items),
+		})
+	})))
 	mux.Handle("POST /api/v1/semantic/dimensions", protect("MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var input CreateDimensionInput
 		if !decodeSemanticRequest(w, r, &input) {

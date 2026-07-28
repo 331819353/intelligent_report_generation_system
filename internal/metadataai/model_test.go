@@ -149,24 +149,20 @@ func TestNormalizeOutputTrimsAndDeduplicatesProviderTags(t *testing.T) {
 	}
 }
 
-func TestValidateOutputAcceptsCSVEnglishSnakeCaseNamesAndChineseDescriptions(t *testing.T) {
+func TestValidateOutputAcceptsChineseFileBusinessNamesAndDescriptions(t *testing.T) {
 	input, output := validCompletion()
 	input.SourceFormat = SourceFormatCSV
-	output.Columns[0].BusinessName = "order_id"
-	output.Columns[1].BusinessName = "order_amount"
 
 	if err := ValidateOutput(input, output); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestValidateOutputRequiresChineseTableAndEnglishFieldsForAllFileSources(t *testing.T) {
+func TestValidateOutputRequiresChineseTableAndFieldsForAllFileSources(t *testing.T) {
 	for _, sourceFormat := range []string{SourceFormatCSV, SourceFormatExcel} {
 		t.Run(sourceFormat, func(t *testing.T) {
 			input, output := validCompletion()
 			input.SourceFormat = sourceFormat
-			output.Columns[0].BusinessName = "order_id"
-			output.Columns[1].BusinessName = "order_amount"
 			if err := ValidateOutput(input, output); err != nil {
 				t.Fatalf("valid file metadata rejected: %v", err)
 			}
@@ -184,11 +180,11 @@ func TestValidateOutputRejectsInvalidCSVFieldMetadata(t *testing.T) {
 		business    string
 		description string
 	}{
-		{name: "中文字段名称", business: "订单编号", description: "订单唯一标识"},
-		{name: "包含空格", business: "order id", description: "订单唯一标识"},
-		{name: "大写字母", business: "Order_ID", description: "订单唯一标识"},
-		{name: "连续下划线", business: "order__id", description: "订单唯一标识"},
-		{name: "英文描述", business: "order_id", description: "Unique order identifier"},
+		{name: "英文下划线名称", business: "order_id", description: "订单唯一标识"},
+		{name: "英文空格名称", business: "order id", description: "订单唯一标识"},
+		{name: "英文驼峰名称", business: "OrderID", description: "订单唯一标识"},
+		{name: "英文名称和描述", business: "order_id", description: "Unique order identifier"},
+		{name: "中文名称英文描述", business: "订单编号", description: "Unique order identifier"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -196,7 +192,6 @@ func TestValidateOutputRejectsInvalidCSVFieldMetadata(t *testing.T) {
 			input.SourceFormat = SourceFormatCSV
 			output.Columns[0].BusinessName = test.business
 			output.Columns[0].BusinessDescription = test.description
-			output.Columns[1].BusinessName = "order_amount"
 			if err := ValidateOutput(input, output); !errors.Is(err, ErrInvalidOutput) {
 				t.Fatalf("error=%v, want ErrInvalidOutput", err)
 			}
@@ -204,14 +199,14 @@ func TestValidateOutputRejectsInvalidCSVFieldMetadata(t *testing.T) {
 	}
 }
 
-func TestNormalizeOutputForCSVCanonicalizesASCIINamesWithoutInventingChineseTranslations(t *testing.T) {
+func TestNormalizeOutputForFileDoesNotRewriteBusinessNames(t *testing.T) {
 	input, output := validCompletion()
 	input.SourceFormat = SourceFormatCSV
 	output.Columns[0].BusinessName = "Customer Name"
 	output.Columns[1].BusinessName = "HTTPOrder-ID"
 
 	normalized := normalizeOutputForInput(input, output)
-	if normalized.Columns[0].BusinessName != "customer_name" || normalized.Columns[1].BusinessName != "http_order_id" {
+	if normalized.Columns[0].BusinessName != "Customer Name" || normalized.Columns[1].BusinessName != "HTTPOrder-ID" {
 		t.Fatalf("normalized names=%q, %q", normalized.Columns[0].BusinessName, normalized.Columns[1].BusinessName)
 	}
 

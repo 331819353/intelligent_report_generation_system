@@ -530,7 +530,7 @@ func validatePartialSuggestionForTarget(
 				return err
 			}
 			if column && isFileSourceFormat(input.SourceFormat) &&
-				!csvBusinessNameRegexp.MatchString(value.BusinessName) {
+				!containsChinese(value.BusinessName) {
 				return ErrInvalidOutput
 			}
 			if !column && isFileSourceFormat(input.SourceFormat) &&

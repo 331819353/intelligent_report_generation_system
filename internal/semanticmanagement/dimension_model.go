@@ -299,6 +299,144 @@ type MemberMetricSearchResult struct {
 	PublishedName             string          `json:"publishedName"`
 }
 
+type DimensionWhereDecision struct {
+	ID                   string    `json:"id"`
+	VectorKey            string    `json:"vectorKey"`
+	VectorKeyHash        string    `json:"vectorKeyHash"`
+	EmbeddingModel       string    `json:"embeddingModel"`
+	DimensionID          string    `json:"dimensionId"`
+	DimensionName        string    `json:"dimensionName"`
+	DimensionFieldID     string    `json:"dimensionFieldId"`
+	DimensionFieldName   string    `json:"dimensionFieldName"`
+	DimensionDescription string    `json:"dimensionDescription"`
+	CanonicalValue       string    `json:"canonicalValue"`
+	Aliases              []string  `json:"aliases"`
+	SelectedMemberCount  int       `json:"selectedMemberCount"`
+	MetricID             string    `json:"metricId"`
+	MetricVersionID      string    `json:"metricVersionId"`
+	DatasetVersionID     string    `json:"datasetVersionId"`
+	MetricCode           string    `json:"metricCode"`
+	MetricName           string    `json:"metricName"`
+	MetricFieldID        string    `json:"metricFieldId"`
+	MaterializationID    string    `json:"materializationId"`
+	TableSchema          string    `json:"tableSchema"`
+	TableName            string    `json:"tableName"`
+	PredicateOperator    string    `json:"predicateOperator"`
+	WhereCondition       string    `json:"whereCondition"`
+	CompiledCondition    string    `json:"compiledCondition"`
+	LLMModel             string    `json:"llmModel"`
+	LLMPromptVersion     string    `json:"llmPromptVersion"`
+	LLMReason            string    `json:"llmReason"`
+	LatestQueryPlanID    string    `json:"latestQueryPlanId"`
+	DimensionMemberID    string    `json:"dimensionMemberId,omitempty"`
+	SourceType           string    `json:"sourceType"`
+	SourceInputHash      string    `json:"sourceInputHash,omitempty"`
+	ObservationCount     int64     `json:"observationCount"`
+	FirstSeenAt          time.Time `json:"firstSeenAt"`
+	LastSeenAt           time.Time `json:"lastSeenAt"`
+}
+
+type DimensionWhereDecisionGroup struct {
+	DimensionID          string     `json:"dimensionId"`
+	DimensionName        string     `json:"dimensionName"`
+	DimensionFieldName   string     `json:"dimensionFieldName"`
+	DimensionDescription string     `json:"dimensionDescription"`
+	MemberIndexPolicy    string     `json:"memberIndexPolicy"`
+	MemberCount          int64      `json:"memberCount"`
+	DecisionCount        int64      `json:"decisionCount"`
+	PendingVectorCount   int64      `json:"pendingVectorCount"`
+	MetricCount          int64      `json:"metricCount"`
+	TableCount           int64      `json:"tableCount"`
+	BuildStatus          string     `json:"buildStatus"`
+	LastBuiltAt          *time.Time `json:"lastBuiltAt,omitempty"`
+}
+
+type DimensionWhereDecisionFilter struct {
+	Page
+	Query       string
+	TableName   string
+	DimensionID string
+}
+
+type DimensionWhereDecisionStore interface {
+	ListDimensionWhereDecisions(
+		context.Context,
+		string,
+		DimensionWhereDecisionFilter,
+	) ([]DimensionWhereDecision, int, error)
+	ListDimensionWhereDecisionGroups(
+		context.Context,
+		string,
+	) ([]DimensionWhereDecisionGroup, error)
+}
+
+type DimensionWherePolicyClaim struct {
+	ID                   string
+	TenantID             string
+	ActorID              string
+	DimensionID          string
+	DimensionFieldName   string
+	DimensionDescription string
+	MetricCode           string
+	MetricFieldID        string
+	TableSchema          string
+	TableName            string
+	SampleValues         []string
+	Attempt              int
+	LeaseOwner           string
+	LeaseToken           string
+	LeaseExpiresAt       time.Time
+}
+
+type DimensionWherePolicyDecision struct {
+	PredicateOperator string
+	LLMModel          string
+	LLMReason         string
+	Confidence        float64
+}
+
+type DimensionWhereDecisionBuildProgress struct {
+	PoliciesQueued      int64
+	PoliciesSucceeded   int64
+	EligibleMembers     int64
+	MaterializedMembers int64
+	PendingVectors      int64
+}
+
+type DimensionWhereDecisionBuildStore interface {
+	ListDimensionDecisionTenantIDs(context.Context) ([]string, error)
+	ReconcileDimensionWherePolicies(
+		context.Context,
+		string,
+	) (int64, error)
+	ClaimDimensionWherePolicy(
+		context.Context,
+		string,
+		string,
+		time.Duration,
+	) (*DimensionWherePolicyClaim, error)
+	CompleteDimensionWherePolicy(
+		context.Context,
+		DimensionWherePolicyClaim,
+		DimensionWherePolicyDecision,
+	) error
+	FailDimensionWherePolicy(
+		context.Context,
+		DimensionWherePolicyClaim,
+		string,
+	) error
+	MaterializeDimensionWhereDecisions(
+		context.Context,
+		string,
+		int,
+	) (int64, error)
+	CleanupDimensionWhereDecisions(context.Context, string) (int64, error)
+	DimensionWhereDecisionBuildProgress(
+		context.Context,
+		string,
+	) (DimensionWhereDecisionBuildProgress, error)
+}
+
 type DimensionStore interface {
 	ListDimensions(context.Context, string, DimensionFilter) ([]Dimension, int, error)
 	GetDimension(context.Context, string, string) (Dimension, error)

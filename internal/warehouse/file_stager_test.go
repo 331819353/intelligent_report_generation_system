@@ -3,6 +3,7 @@ package warehouse
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"intelligent-report-generation-system/internal/datasource"
@@ -19,23 +20,73 @@ const (
 )
 
 type fakeFileVersionReader struct {
-	version          datasource.FileVersion
-	tables           []datasource.FileTableData
-	err              error
-	maxExpandedBytes *int64
+	version datasource.FileVersion
+	tables  []datasource.FileTableData
+	err     error
 }
 
-func (reader fakeFileVersionReader) ReadVersionTablesWithExpansionLimit(
-	_ context.Context,
-	_ string,
-	_ string,
+func (reader fakeFileVersionReader) StreamVersionTable(
+	ctx context.Context,
+	tenantID string,
+	versionID string,
+	expectedFileAssetID string,
+	expectedSHA256 string,
 	_ int64,
-	maxExpandedBytes int64,
-) (datasource.FileVersion, []datasource.FileTableData, error) {
-	if reader.maxExpandedBytes != nil {
-		*reader.maxExpandedBytes = maxExpandedBytes
+	tableName string,
+	maxRows int,
+	batchSize int,
+	allowTruncate bool,
+	consume func(datasource.FileTableStreamBatch) error,
+) (datasource.FileVersion, datasource.FileTableStreamSummary, error) {
+	if reader.err != nil {
+		return datasource.FileVersion{}, datasource.FileTableStreamSummary{}, reader.err
 	}
-	return reader.version, reader.tables, reader.err
+	if reader.version.TenantID != tenantID ||
+		reader.version.VersionID != versionID ||
+		reader.version.ID != expectedFileAssetID ||
+		reader.version.SHA256 != expectedSHA256 {
+		return datasource.FileVersion{}, datasource.FileTableStreamSummary{},
+			fmt.Errorf("%w: immutable file identity changed", ErrInvalidBuild)
+	}
+	for _, table := range reader.tables {
+		if table.Name != tableName {
+			continue
+		}
+		if len(table.Rows) > maxRows && !allowTruncate {
+			return datasource.FileVersion{}, datasource.FileTableStreamSummary{},
+				fmt.Errorf("%w: file table exceeds row limit", ErrInvalidBuild)
+		}
+		rows := table.Rows
+		if len(rows) > maxRows {
+			rows = rows[:maxRows]
+		}
+		if len(rows) == 0 {
+			if err := consume(datasource.FileTableStreamBatch{
+				Columns: table.Columns, Rows: [][]string{},
+			}); err != nil {
+				return datasource.FileVersion{}, datasource.FileTableStreamSummary{}, err
+			}
+		}
+		for start := 0; start < len(rows); start += batchSize {
+			if err := ctx.Err(); err != nil {
+				return datasource.FileVersion{}, datasource.FileTableStreamSummary{}, err
+			}
+			end := start + batchSize
+			if end > len(rows) {
+				end = len(rows)
+			}
+			if err := consume(datasource.FileTableStreamBatch{
+				Columns: table.Columns, Rows: rows[start:end],
+			}); err != nil {
+				return datasource.FileVersion{}, datasource.FileTableStreamSummary{}, err
+			}
+		}
+		return reader.version, datasource.FileTableStreamSummary{
+			RowCount: len(rows),
+		}, nil
+	}
+	return datasource.FileVersion{}, datasource.FileTableStreamSummary{},
+		fmt.Errorf("%w: worksheet was not found", ErrInvalidBuild)
 }
 
 func fileStageInput(t *testing.T) FileStageInput {
@@ -114,10 +165,8 @@ func TestFileStagerCopiesExactImmutableVersionInTypedBatches(t *testing.T) {
 	}
 }
 
-func TestFileStagerEnforcesLogicalBytesAndExpansionLimit(t *testing.T) {
+func TestFileStagerEnforcesLogicalBytes(t *testing.T) {
 	reader := fileReader()
-	var expandedLimit int64
-	reader.maxExpandedBytes = &expandedLimit
 	tx := fileStageTx(t)
 	_, err := newFileStagerWithMaxBytes(
 		fakeStagingFactory{tx: tx},
@@ -130,9 +179,6 @@ func TestFileStagerEnforcesLogicalBytesAndExpansionLimit(t *testing.T) {
 			"err=%v committed=%v rows=%d",
 			err, tx.committed, len(tx.copiedRows),
 		)
-	}
-	if expandedLimit != 32 {
-		t.Fatalf("expanded limit=%d want=32", expandedLimit)
 	}
 }
 
@@ -176,12 +222,6 @@ func TestFileStagerRejectsWrongVersionChecksumAndCanonicalType(t *testing.T) {
 			name: "wrong checksum",
 			mutate: func(reader *fakeFileVersionReader) {
 				reader.version.SHA256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-			},
-		},
-		{
-			name: "canonical type drift",
-			mutate: func(reader *fakeFileVersionReader) {
-				reader.tables[0].Types["amount"] = "STRING"
 			},
 		},
 	}

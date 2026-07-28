@@ -13,18 +13,22 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"intelligent-report-generation-system/internal/physicalname"
 )
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}$`)
 
-// physicalIdentifierPattern 与查询编译器的物理白名单保持一致。DSL 自身的
-// code/id 仍使用更严格的 ASCII identifierPattern；projection 和 FIELD_REF
-// 允许安全的 Unicode 字母/数字，从而无损表达 Excel 中文表头以及数据库中的
-// Unicode 标识符。空格、引号、点号和操作符仍被拒绝。
-var physicalIdentifierPattern = regexp.MustCompile(`^[\p{L}][\p{L}\p{N}_$#]{0,127}$`)
-
 // MaxNodes 限制单个数据集的节点数量，避免校验与跨源预览出现无界扇出。
 const MaxNodes = 16
+
+// MaxCubeDimensions caps the exponential grouping-set expansion used by the
+// file executor and by the MySQL compatibility compiler.
+const MaxCubeDimensions = 8
+
+// MaxGroupingSets caps custom grouping-set expansion in MySQL and the file
+// executor while leaving enough room for practical subtotal layouts.
+const MaxGroupingSets = 64
 
 // DecodeAndNormalize 严格解析、迁移并规范化 DSL，未知字段会被拒绝。
 func DecodeAndNormalize(raw []byte) (Document, error) {
@@ -325,6 +329,7 @@ func Validate(document Document) error {
 			projections[node.ID][field] = true
 		}
 	}
+	validateTransforms(&issues, document.Transforms, nodeIDs, joinIDs, parameterRefs)
 	seenPreAggregationIDs := map[string]bool{}
 	preAggregatedNodes := map[string]bool{}
 	preAggregationOutputs := map[string]map[string]bool{}
@@ -354,6 +359,11 @@ func Validate(document Document) error {
 		if len(item.GroupBy) == 0 {
 			add(path+".groupBy", "至少需要一个分组字段")
 		}
+		preAggregationDimensions := make([]string, len(item.GroupBy))
+		for index, group := range item.GroupBy {
+			preAggregationDimensions[index] = group.Field
+		}
+		validateGroupByMode(&issues, path, item.GroupByMode, preAggregationDimensions, item.GroupingSets)
 		if len(item.Metrics) == 0 {
 			add(path+".metrics", "至少需要一个聚合指标")
 		}
@@ -383,9 +393,14 @@ func Validate(document Document) error {
 		for j, metric := range item.Metrics {
 			fieldPath := fmt.Sprintf("%s.metrics[%d]", path, j)
 			validatePhysicalIdentifier(&issues, fieldPath+".field", metric.Field)
-			if metric.Expression == nil && !projections[item.NodeID][metric.Field] {
+			if metric.CountRows && metric.Function != "COUNT" {
+				add(fieldPath+".countRows", "统计输入总行数只支持 COUNT")
+			}
+			if metric.CountRows && metric.Expression != nil {
+				add(fieldPath+".expression", "统计输入总行数不能引用字段表达式")
+			} else if !metric.CountRows && metric.Expression == nil && !projections[item.NodeID][metric.Field] {
 				add(fieldPath+".field", "指标字段必须包含在节点 projection 中")
-			} else if metric.Expression != nil {
+			} else if !metric.CountRows && metric.Expression != nil {
 				validateExpression(&issues, fieldPath+".expression", *metric.Expression, nodeIDs, parameterRefs)
 				validateExpressionProjection(&issues, fieldPath+".expression", *metric.Expression, projections)
 				validatePreAggregationSourceExpression(&issues, fieldPath+".expression", *metric.Expression, item.NodeID)
@@ -479,6 +494,9 @@ func Validate(document Document) error {
 			add(path+".canonicalType", "不支持的规范类型")
 		}
 		validateExpression(&issues, path+".expression", field.Expression, nodeIDs, parameterCodes)
+		if field.Expression.Type != "WINDOW" && expressionHasWindow(field.Expression) {
+			add(path+".expression", "窗口函数只能作为输出字段的顶层表达式")
+		}
 		aggregation := analyzeExpressionAggregation(field.Expression, 0)
 		fieldAggregations[i] = aggregation
 		hasOutputAggregation = hasOutputAggregation || aggregation.hasAggregate
@@ -509,6 +527,7 @@ func Validate(document Document) error {
 		validateFilter(&issues, fmt.Sprintf("having[%d]", i), filter, "POST_AGGREGATION", nodeIDs, parameterCodes)
 	}
 	groupFields := map[string]bool{}
+	validateGroupByMode(&issues, "", document.GroupByMode, document.GroupBy, document.GroupingSets)
 	for i, fieldID := range document.GroupBy {
 		if !fieldIDs[fieldID] {
 			add(fmt.Sprintf("groupBy[%d]", i), "引用的输出字段不存在")
@@ -549,7 +568,14 @@ func Validate(document Document) error {
 	if document.OutputGrain.Description == "" {
 		add("outputGrain.description", "必须说明每一行代表的业务含义")
 	}
-	if len(document.OutputGrain.KeyFields) == 0 {
+	// ODS and detail-preserving DWD may faithfully carry a source that declares
+	// no business key. Inventing the first output column as a uniqueness
+	// contract makes a valid DWD impossible to materialize. DIM/DWS/ADS still
+	// require explicit keys because their entity/aggregate contracts depend on
+	// a governed grain.
+	if len(document.OutputGrain.KeyFields) == 0 &&
+		document.Dataset.Layer != LayerODS &&
+		document.Dataset.Layer != LayerDWD {
 		add("outputGrain.keyFields", "至少需要一个粒度键字段")
 	}
 	grainKeys := map[string]bool{}
@@ -1007,6 +1033,22 @@ func expressionHasAggregate(expression Expression) bool {
 	return analyzeExpressionAggregation(expression, 0).hasAggregate
 }
 
+func expressionHasWindow(expression Expression) bool {
+	found := false
+	visitDatasetExpression(expression, func(value Expression) {
+		found = found || value.Type == "WINDOW"
+	})
+	return found
+}
+
+func expressionHasCurrentDate(expression Expression) bool {
+	found := false
+	visitDatasetExpression(expression, func(value Expression) {
+		found = found || value.Type == "CURRENT_DATE"
+	})
+	return found
+}
+
 func analyzeExpressionAggregation(
 	expression Expression,
 	aggregateDepth int,
@@ -1043,6 +1085,12 @@ func analyzeExpressionAggregation(
 		merge(branch.When)
 		merge(branch.Then)
 	}
+	for _, child := range expression.PartitionBy {
+		merge(child)
+	}
+	for _, item := range expression.OrderBy {
+		merge(item.Expression)
+	}
 	return result
 }
 
@@ -1058,6 +1106,174 @@ func groupByIndex(groupBy []string, fieldID string) int {
 func documentHasGroupingOrAggregation(document Document) bool {
 	return len(document.GroupBy) > 0 || len(document.Having) > 0 ||
 		len(document.PreAggregations) > 0 || documentHasBusinessAggregation(document)
+}
+
+func validateTransforms(
+	issues *[]ValidationIssue,
+	transforms []Transform,
+	nodes, joins map[string]bool,
+	parameters map[string]bool,
+) {
+	add := func(path, reason string) {
+		*issues = append(*issues, ValidationIssue{Path: path, Reason: reason})
+	}
+	if len(transforms) > 32 {
+		add("transforms", "字段处理组件最多允许 32 个")
+	}
+	families := map[string]string{
+		"FILTER":     "CONDITION",
+		"TEXT_UPPER": "TEXT", "TEXT_TRIM": "TEXT", "TEXT_REPLACE": "TEXT", "TEXT_LOWER": "TEXT",
+		"TEXT_SUBSTRING": "TEXT", "TEXT_CONCAT": "TEXT", "NUMBER_ABSOLUTE": "NUMBER",
+		"NUMBER_ROUNDING": "NUMBER", "NUMBER_ARITHMETIC": "NUMBER", "DATE_CALCULATION": "DATE",
+		"DATE_FORMAT": "DATE", "WINDOW_FUNCTION": "WINDOW", "NULL": "NULL", "CAST": "CAST", "CONDITION": "CONDITION",
+	}
+	operations := map[string]map[string]bool{
+		"FILTER":     {},
+		"TEXT_UPPER": {"UPPER": true}, "TEXT_TRIM": {"TRIM": true}, "TEXT_REPLACE": {"REPLACE": true},
+		"TEXT_LOWER": {"LOWER": true}, "TEXT_SUBSTRING": {"SUBSTRING": true}, "TEXT_CONCAT": {"CONCAT": true},
+		"NUMBER_ABSOLUTE": {"ABS": true}, "NUMBER_ROUNDING": {"ROUND": true, "FLOOR": true, "CEIL": true},
+		"NUMBER_ARITHMETIC": {"ADD": true, "SUBTRACT": true, "MULTIPLY": true, "DIVIDE": true},
+		"DATE_CALCULATION":  {"CURRENT_DATE": true, "DATE_DIFF": true, "DATE_EXTRACT": true, "DATE_START": true, "DATE_END": true},
+		"DATE_FORMAT":       {"DATE_FORMAT": true}, "WINDOW_FUNCTION": {"WINDOW": true}, "NULL": {"COALESCE": true},
+		"CAST": {"CAST": true}, "CONDITION": {"CASE": true},
+	}
+	transformIDs := make(map[string]bool, len(transforms))
+	transformIndexes := make(map[string]int, len(transforms))
+	for index, transform := range transforms {
+		path := fmt.Sprintf("transforms[%d].id", index)
+		validateIdentifier(issues, path, transform.ID)
+		if transformIDs[transform.ID] || nodes[transform.ID] || joins[transform.ID] {
+			add(path, "组件标识与其他节点重复")
+		}
+		transformIDs[transform.ID] = true
+		transformIndexes[transform.ID] = index
+	}
+	visiting, visited := map[string]bool{}, map[string]bool{}
+	var visitTransform func(string) bool
+	visitTransform = func(id string) bool {
+		if visiting[id] {
+			return true
+		}
+		if visited[id] {
+			return false
+		}
+		visited[id], visiting[id] = true, true
+		transform := transforms[transformIndexes[id]]
+		if transform.Input.Kind == "TRANSFORM" && transformIDs[transform.Input.ID] && visitTransform(transform.Input.ID) {
+			return true
+		}
+		delete(visiting, id)
+		return false
+	}
+	for _, transform := range transforms {
+		if visitTransform(transform.ID) {
+			add(fmt.Sprintf("transforms[%d].input.id", transformIndexes[transform.ID]), "字段处理组件拓扑存在循环依赖")
+			break
+		}
+	}
+	outputKeys := map[string]bool{}
+	for index, transform := range transforms {
+		path := fmt.Sprintf("transforms[%d]", index)
+		if strings.TrimSpace(transform.Name) == "" || len([]rune(transform.Name)) > 200 {
+			add(path+".name", "名称不能为空且最多 200 个字符")
+		}
+		if families[transform.ComponentType] == "" {
+			add(path+".componentType", "不支持的字段处理组件类型")
+		} else if families[transform.ComponentType] != transform.Family &&
+			!(transform.ComponentType == "TEXT_CONCAT" && transform.Family == "SPLIT_MERGE") {
+			add(path+".family", "处理分类与组件类型不匹配")
+		}
+		if !oneOf(transform.Input.Kind, "NODE", "JOIN", "GROUP", "TRANSFORM") {
+			add(path+".input.kind", "必须为 NODE、JOIN、GROUP 或 TRANSFORM")
+		}
+		validateIdentifier(issues, path+".input.id", transform.Input.ID)
+		switch transform.Input.Kind {
+		case "NODE":
+			if !nodes[transform.Input.ID] {
+				add(path+".input.id", "引用的数据节点不存在")
+			}
+		case "JOIN":
+			if !joins[transform.Input.ID] {
+				add(path+".input.id", "引用的关联组件不存在")
+			}
+		case "TRANSFORM":
+			if !transformIDs[transform.Input.ID] {
+				add(path+".input.id", "引用的字段处理组件不存在")
+			} else if transform.Input.ID == transform.ID {
+				add(path+".input.id", "字段处理组件不能引用自身")
+			}
+		}
+		if transform.ComponentType == "FILTER" && len(transform.Rules) != 0 {
+			add(path+".rules", "过滤组件的条件必须写入顶层 filters，不能保存字段转换规则")
+		} else if transform.ComponentType != "FILTER" && (len(transform.Rules) == 0 || len(transform.Rules) > 20) {
+			add(path+".rules", "每个字段处理组件必须包含 1 至 20 条规则")
+		}
+		ruleIDs := map[string]bool{}
+		for ruleIndex, rule := range transform.Rules {
+			rulePath := fmt.Sprintf("%s.rules[%d]", path, ruleIndex)
+			validateIdentifier(issues, rulePath+".id", rule.ID)
+			if ruleIDs[rule.ID] {
+				add(rulePath+".id", "规则标识重复")
+			}
+			ruleIDs[rule.ID] = true
+			if !operations[transform.ComponentType][rule.Operation] {
+				add(rulePath+".operation", "处理逻辑与组件类型不匹配")
+			}
+			if len(rule.InputKeys) > 16 {
+				add(rulePath+".inputKeys", "输入字段最多允许 16 个")
+			}
+			for inputIndex, key := range rule.InputKeys {
+				keyPath := fmt.Sprintf("%s.inputKeys[%d]", rulePath, inputIndex)
+				parts := strings.SplitN(key, ".", 2)
+				if len(parts) != 2 {
+					add(keyPath, "必须使用 componentId.field 格式")
+					continue
+				}
+				validateIdentifier(issues, keyPath, parts[0])
+				validatePhysicalIdentifier(issues, keyPath, parts[1])
+			}
+			validateIdentifier(issues, rulePath+".output.id", rule.Output.ID)
+			validateIdentifier(issues, rulePath+".output.code", rule.Output.Code)
+			if strings.TrimSpace(rule.Output.Name) == "" || len([]rune(rule.Output.Name)) > 200 {
+				add(rulePath+".output.name", "输出名称不能为空且最多 200 个字符")
+			}
+			if !oneOf(rule.Output.CanonicalType, "STRING", "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "DATETIME") {
+				add(rulePath+".output.canonicalType", "不支持的输出类型")
+			}
+			outputKey := transform.ID + "." + rule.Output.ID
+			if outputKeys[outputKey] {
+				add(rulePath+".output.id", "字段处理输出标识重复")
+			}
+			outputKeys[outputKey] = true
+			if rule.Expression.Type != rule.Operation {
+				add(rulePath+".expression.type", "必须与规则 operation 一致")
+			}
+			validateExpression(issues, rulePath+".expression", rule.Expression, nodes, parameters)
+			if rule.ReplaceSourceKey != "" && (len(rule.InputKeys) == 0 || rule.ReplaceSourceKey != rule.InputKeys[0]) {
+				add(rulePath+".replaceSourceKey", "只能替换规则的第一个输入字段")
+			}
+			if transform.ComponentType == "DATE_CALCULATION" {
+				expectedType := "INTEGER"
+				if oneOf(rule.Operation, "CURRENT_DATE", "DATE_START", "DATE_END") {
+					expectedType = "DATE"
+				}
+				if rule.Output.CanonicalType != expectedType {
+					add(rulePath+".output.canonicalType", "日期计算输出类型与处理逻辑不匹配")
+				}
+			}
+			if transform.ComponentType == "NULL" &&
+				len(rule.Expression.Arguments) == 2 &&
+				rule.Expression.Arguments[1].Type == "CURRENT_DATE" &&
+				!oneOf(rule.Output.CanonicalType, "DATE", "DATETIME") {
+				add(rulePath+".output.canonicalType", "使用 CURRENT_DATE 填充空值时输出类型必须为 DATE 或 DATETIME")
+			}
+			if transform.ComponentType == "CONDITION" &&
+				expressionHasCurrentDate(rule.Expression) &&
+				rule.Output.CanonicalType != "DATE" {
+				add(rulePath+".output.canonicalType", "条件映射输出 CURRENT_DATE 时输出类型必须为 DATE")
+			}
+		}
+	}
 }
 
 // validateDesigner 只校验画布元数据的稳定边界，不把展示配置提升为查询语义。
@@ -1428,6 +1644,9 @@ func validateSourceFilterExpression(issues *[]ValidationIssue, path string, expr
 		if item.Type == "AGGREGATE" {
 			*issues = append(*issues, ValidationIssue{Path: path + ".type", Reason: "源过滤不能包含聚合表达式"})
 		}
+		if item.Type == "WINDOW" {
+			*issues = append(*issues, ValidationIssue{Path: path + ".type", Reason: "源过滤不能包含窗口表达式"})
+		}
 	}
 	visitDatasetExpression(expression, visit)
 }
@@ -1442,6 +1661,9 @@ func validatePreAggregationSourceExpression(issues *[]ValidationIssue, path stri
 		}
 		if value.Type == "AGGREGATE" {
 			*issues = append(*issues, ValidationIssue{Path: path, Reason: "关联前分组源表达式不能包含聚合函数"})
+		}
+		if value.Type == "WINDOW" {
+			*issues = append(*issues, ValidationIssue{Path: path, Reason: "关联前分组源表达式不能包含窗口函数"})
 		}
 	})
 }
@@ -1460,6 +1682,12 @@ func visitDatasetExpression(expression Expression, visit func(Expression)) {
 		visitDatasetExpression(branch.When, visit)
 		visitDatasetExpression(branch.Then, visit)
 	}
+	for _, child := range expression.PartitionBy {
+		visitDatasetExpression(child, visit)
+	}
+	for _, item := range expression.OrderBy {
+		visitDatasetExpression(item.Expression, visit)
+	}
 }
 
 // BuildLogicalPlan 从规范 DSL 生成与 SQL 方言无关的稳定逻辑计划。
@@ -1476,21 +1704,59 @@ func BuildLogicalPlan(document Document) LogicalPlan {
 			fields = append(fields, group.Field)
 		}
 		for _, metric := range item.Metrics {
-			fields = append(fields, metric.Function+":"+metric.Field)
+			if metric.CountRows {
+				fields = append(fields, metric.Function+":*:"+metric.Field)
+			} else {
+				fields = append(fields, metric.Function+":"+metric.Field)
+			}
 		}
-		plan.Steps = append(plan.Steps, PlanStep{ID: item.ID, Kind: "PRE_AGGREGATE", Inputs: []string{item.NodeID}, Fields: fields})
+		kind := groupingPlanKind("PRE_AGGREGATE", item.GroupByMode)
+		if item.GroupByMode == GroupByModeSets {
+			for _, set := range item.GroupingSets {
+				fields = append(fields, "SET:"+strings.Join(set, ","))
+			}
+		}
+		plan.Steps = append(plan.Steps, PlanStep{ID: item.ID, Kind: kind, Inputs: []string{item.NodeID}, Fields: fields})
 	}
 	for _, join := range document.Joins {
 		plan.Steps = append(plan.Steps, PlanStep{ID: join.ID, Kind: "JOIN_" + join.JoinType, Inputs: []string{join.LeftNodeID, join.RightNodeID}})
+	}
+	for _, transform := range document.Transforms {
+		fields := make([]string, 0, len(transform.Rules))
+		for _, rule := range transform.Rules {
+			fields = append(fields, rule.Output.Code)
+		}
+		plan.Steps = append(plan.Steps, PlanStep{
+			ID:     transform.ID,
+			Kind:   "TRANSFORM_" + transform.ComponentType,
+			Inputs: []string{transform.Input.Kind + ":" + transform.Input.ID},
+			Fields: fields,
+		})
 	}
 	if len(document.Filters) > 0 {
 		plan.Steps = append(plan.Steps, PlanStep{ID: "pre_aggregation_filters", Kind: "FILTER"})
 	}
 	if len(document.GroupBy) > 0 {
-		plan.Steps = append(plan.Steps, PlanStep{ID: "aggregation", Kind: "AGGREGATE", Fields: append([]string(nil), document.GroupBy...)})
+		kind := groupingPlanKind("AGGREGATE", document.GroupByMode)
+		fields := append([]string(nil), document.GroupBy...)
+		if document.GroupByMode == GroupByModeSets {
+			for _, set := range document.GroupingSets {
+				fields = append(fields, "SET:"+strings.Join(set, ","))
+			}
+		}
+		plan.Steps = append(plan.Steps, PlanStep{ID: "aggregation", Kind: kind, Fields: fields})
 	}
 	if len(document.Having) > 0 {
 		plan.Steps = append(plan.Steps, PlanStep{ID: "post_aggregation_filters", Kind: "HAVING"})
+	}
+	windowFields := make([]string, 0)
+	for _, field := range document.Fields {
+		if field.Expression.Type == "WINDOW" {
+			windowFields = append(windowFields, field.Code)
+		}
+	}
+	if len(windowFields) > 0 {
+		plan.Steps = append(plan.Steps, PlanStep{ID: "window", Kind: "WINDOW", Fields: windowFields})
 	}
 	if document.Distinct {
 		plan.Steps = append(plan.Steps, PlanStep{ID: "output_deduplication", Kind: "DEDUPLICATE"})
@@ -1565,9 +1831,38 @@ func normalize(document Document) Document {
 			normalizeExpression(&join.Conditions[j].RightExpression)
 		}
 	}
+	for i := range document.Transforms {
+		transform := &document.Transforms[i]
+		transform.ID = strings.TrimSpace(transform.ID)
+		transform.Name = strings.TrimSpace(transform.Name)
+		transform.Family = upper(transform.Family)
+		transform.ComponentType = upper(transform.ComponentType)
+		transform.Input.Kind = upper(transform.Input.Kind)
+		transform.Input.ID = strings.TrimSpace(transform.Input.ID)
+		for j := range transform.Rules {
+			rule := &transform.Rules[j]
+			rule.ID = strings.TrimSpace(rule.ID)
+			rule.Operation = upper(rule.Operation)
+			rule.ReplaceSourceKey = strings.TrimSpace(rule.ReplaceSourceKey)
+			for keyIndex := range rule.InputKeys {
+				rule.InputKeys[keyIndex] = strings.TrimSpace(rule.InputKeys[keyIndex])
+			}
+			rule.Output.ID = strings.TrimSpace(rule.Output.ID)
+			rule.Output.Name = strings.TrimSpace(rule.Output.Name)
+			rule.Output.Code = strings.TrimSpace(rule.Output.Code)
+			rule.Output.CanonicalType = upper(rule.Output.CanonicalType)
+			normalizeExpression(&rule.Expression)
+		}
+	}
 	for i := range document.PreAggregations {
 		item := &document.PreAggregations[i]
 		item.ID, item.NodeID, item.JoinID, item.JoinSide = strings.TrimSpace(item.ID), strings.TrimSpace(item.NodeID), strings.TrimSpace(item.JoinID), upper(item.JoinSide)
+		item.GroupByMode = GroupByMode(upper(string(item.GroupByMode)))
+		for setIndex := range item.GroupingSets {
+			for fieldIndex := range item.GroupingSets[setIndex] {
+				item.GroupingSets[setIndex][fieldIndex] = strings.TrimSpace(item.GroupingSets[setIndex][fieldIndex])
+			}
+		}
 		for j := range item.GroupBy {
 			item.GroupBy[j].Field = strings.TrimSpace(item.GroupBy[j].Field)
 			item.GroupBy[j].Unit = upper(item.GroupBy[j].Unit)
@@ -1642,6 +1937,12 @@ func normalize(document Document) Document {
 	}
 	for i := range document.GroupBy {
 		document.GroupBy[i] = strings.TrimSpace(document.GroupBy[i])
+	}
+	document.GroupByMode = GroupByMode(upper(string(document.GroupByMode)))
+	for setIndex := range document.GroupingSets {
+		for fieldIndex := range document.GroupingSets[setIndex] {
+			document.GroupingSets[setIndex][fieldIndex] = strings.TrimSpace(document.GroupingSets[setIndex][fieldIndex])
+		}
 	}
 	for i := range document.Sorts {
 		document.Sorts[i].FieldID = strings.TrimSpace(document.Sorts[i].FieldID)
@@ -1789,6 +2090,13 @@ func normalizeExpression(expression *Expression) {
 		normalizeExpression(&expression.Whens[i].When)
 		normalizeExpression(&expression.Whens[i].Then)
 	}
+	for i := range expression.PartitionBy {
+		normalizeExpression(&expression.PartitionBy[i])
+	}
+	for i := range expression.OrderBy {
+		normalizeExpression(&expression.OrderBy[i].Expression)
+		expression.OrderBy[i].Direction = upper(expression.OrderBy[i].Direction)
+	}
 }
 
 func validateJoinGraph(issues *[]ValidationIssue, nodes []Node, joins []Join) {
@@ -1857,6 +2165,11 @@ func validateProjectedFieldRefs(issues *[]ValidationIssue, document Document) {
 	for i, field := range document.Fields {
 		validateExpressionProjection(issues, fmt.Sprintf("fields[%d].expression", i), field.Expression, projections)
 	}
+	for transformIndex, transform := range document.Transforms {
+		for ruleIndex, rule := range transform.Rules {
+			validateExpressionProjection(issues, fmt.Sprintf("transforms[%d].rules[%d].expression", transformIndex, ruleIndex), rule.Expression, projections)
+		}
+	}
 	for i, filter := range document.Filters {
 		validateExpressionProjection(issues, fmt.Sprintf("filters[%d].expression", i), filter.Expression, projections)
 	}
@@ -1882,6 +2195,12 @@ func validateExpressionProjection(issues *[]ValidationIssue, path string, expres
 		validateExpressionProjection(issues, path, branch.When, projections)
 		validateExpressionProjection(issues, path, branch.Then, projections)
 	}
+	for _, child := range expression.PartitionBy {
+		validateExpressionProjection(issues, path, child, projections)
+	}
+	for _, item := range expression.OrderBy {
+		validateExpressionProjection(issues, path, item.Expression, projections)
+	}
 }
 
 func validateFilter(issues *[]ValidationIssue, path string, filter Filter, expectedStage string, nodes, parameters map[string]bool) {
@@ -1893,6 +2212,11 @@ func validateFilter(issues *[]ValidationIssue, path string, filter Filter, expec
 	if expectedStage == "PRE_AGGREGATION" && expressionHasAggregate(filter.Expression) {
 		*issues = append(*issues, ValidationIssue{
 			Path: path + ".expression", Reason: "聚合前过滤不能包含聚合表达式",
+		})
+	}
+	if expressionHasWindow(filter.Expression) {
+		*issues = append(*issues, ValidationIssue{
+			Path: path + ".expression", Reason: "过滤条件不能包含窗口表达式",
 		})
 	}
 }
@@ -1934,12 +2258,70 @@ func validateExpression(issues *[]ValidationIssue, path string, expression Expre
 			add(".unit", "不支持的日期输出格式")
 		}
 		validateRequiredExpression(issues, path+".argument", expression.Argument, nodes, parameters)
+	case "CURRENT_DATE":
+		// 当前日期由执行器在查询开始时按会话日期计算，不接受自由参数。
+	case "DATE_DIFF":
+		if !oneOf(expression.Unit, "DAY", "MONTH", "YEAR") {
+			add(".unit", "日期差单位必须为 DAY、MONTH 或 YEAR")
+		}
+		if len(expression.Arguments) != 2 {
+			add(".arguments", "日期差必须按开始日期、结束日期提供两个参数")
+		}
+		for i := range expression.Arguments {
+			validateExpression(issues, fmt.Sprintf("%s.arguments[%d]", path, i), expression.Arguments[i], nodes, parameters)
+		}
+	case "DATE_EXTRACT":
+		if !oneOf(expression.Unit, "DAY", "WEEK", "MONTH", "QUARTER", "YEAR", "WEEKDAY", "DAY_OF_YEAR") {
+			add(".unit", "不支持的日期部分")
+		}
+		validateRequiredExpression(issues, path+".argument", expression.Argument, nodes, parameters)
+	case "DATE_START", "DATE_END":
+		if !oneOf(expression.Unit, "WEEK", "MONTH", "QUARTER", "YEAR") {
+			add(".unit", "周期边界单位必须为 WEEK、MONTH、QUARTER 或 YEAR")
+		}
+		validateRequiredExpression(issues, path+".argument", expression.Argument, nodes, parameters)
 	case "AGGREGATE":
 		if !oneOf(expression.Function, "SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT") {
 			add(".function", "不支持的聚合函数")
 		}
 		if expression.Function != "COUNT" || expression.Argument != nil {
 			validateRequiredExpression(issues, path+".argument", expression.Argument, nodes, parameters)
+		}
+	case "WINDOW":
+		if !oneOf(expression.Function, "ROW_NUMBER", "RANK", "DENSE_RANK", "SUM", "AVG", "COUNT", "MIN", "MAX") {
+			add(".function", "不支持的窗口函数")
+		}
+		ranking := oneOf(expression.Function, "ROW_NUMBER", "RANK", "DENSE_RANK")
+		if ranking && expression.Argument != nil {
+			add(".argument", "排名窗口函数不接受计算字段")
+		}
+		if !ranking {
+			validateRequiredExpression(issues, path+".argument", expression.Argument, nodes, parameters)
+			if expression.Argument != nil && (expressionHasAggregate(*expression.Argument) || expressionHasWindow(*expression.Argument)) {
+				add(".argument", "窗口计算字段不能包含聚合或窗口表达式")
+			}
+		}
+		if len(expression.PartitionBy) == 0 {
+			add(".partitionBy", "OVER 至少需要一个 PARTITION BY 分区字段")
+		}
+		for i := range expression.PartitionBy {
+			validateExpression(issues, fmt.Sprintf("%s.partitionBy[%d]", path, i), expression.PartitionBy[i], nodes, parameters)
+			if expressionHasAggregate(expression.PartitionBy[i]) || expressionHasWindow(expression.PartitionBy[i]) {
+				add(fmt.Sprintf(".partitionBy[%d]", i), "PARTITION BY 不能包含聚合或窗口表达式")
+			}
+		}
+		if len(expression.OrderBy) == 0 {
+			add(".orderBy", "OVER 至少需要一个 ORDER BY 排序字段")
+		}
+		for i := range expression.OrderBy {
+			itemPath := fmt.Sprintf("%s.orderBy[%d]", path, i)
+			validateExpression(issues, itemPath+".expression", expression.OrderBy[i].Expression, nodes, parameters)
+			if expressionHasAggregate(expression.OrderBy[i].Expression) || expressionHasWindow(expression.OrderBy[i].Expression) {
+				add(fmt.Sprintf(".orderBy[%d].expression", i), "ORDER BY 不能包含聚合或窗口表达式")
+			}
+			if !oneOf(expression.OrderBy[i].Direction, "ASC", "DESC") {
+				add(fmt.Sprintf(".orderBy[%d].direction", i), "必须为 ASC 或 DESC")
+			}
 		}
 	case "CAST":
 		if !oneOf(expression.TargetType, "STRING", "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "DATETIME") {
@@ -2092,6 +2474,84 @@ func validateExecutionPolicy(issues *[]ValidationIssue, policy ExecutionPolicy) 
 	}
 }
 
+func validateGroupByMode(issues *[]ValidationIssue, pathPrefix string, mode GroupByMode, dimensions []string, groupingSets [][]string) {
+	path := func(field string) string {
+		if pathPrefix == "" {
+			return field
+		}
+		return pathPrefix + "." + field
+	}
+	if mode != "" && mode != GroupByModeStandard && mode != GroupByModeCube &&
+		mode != GroupByModeRollup && mode != GroupByModeSets {
+		*issues = append(*issues, ValidationIssue{Path: path("groupByMode"), Reason: "必须为 STANDARD、CUBE、ROLLUP 或 GROUPING_SETS"})
+		return
+	}
+	if mode != GroupByModeSets && len(groupingSets) > 0 {
+		*issues = append(*issues, ValidationIssue{Path: path("groupingSets"), Reason: "只有 GROUPING_SETS 模式可以声明自定义分组集"})
+	}
+	if mode == GroupByModeCube {
+		if len(dimensions) < 2 {
+			*issues = append(*issues, ValidationIssue{Path: path("groupByMode"), Reason: "CUBE 多维分组至少需要两个分组字段"})
+		}
+		if len(dimensions) > MaxCubeDimensions {
+			*issues = append(*issues, ValidationIssue{Path: path("groupByMode"), Reason: fmt.Sprintf("CUBE 多维分组最多支持 %d 个分组字段", MaxCubeDimensions)})
+		}
+		return
+	}
+	if mode == GroupByModeRollup && len(dimensions) == 0 {
+		*issues = append(*issues, ValidationIssue{Path: path("groupByMode"), Reason: "ROLLUP 至少需要一个分组字段"})
+		return
+	}
+	if mode != GroupByModeSets {
+		return
+	}
+	if len(groupingSets) == 0 {
+		*issues = append(*issues, ValidationIssue{Path: path("groupingSets"), Reason: "GROUPING_SETS 至少需要一个自定义分组集"})
+		return
+	}
+	if len(groupingSets) > MaxGroupingSets {
+		*issues = append(*issues, ValidationIssue{Path: path("groupingSets"), Reason: fmt.Sprintf("GROUPING_SETS 最多支持 %d 个分组集", MaxGroupingSets)})
+	}
+	allowed := make(map[string]bool, len(dimensions))
+	for _, dimension := range dimensions {
+		allowed[dimension] = true
+	}
+	seenSets := map[string]bool{}
+	for setIndex, set := range groupingSets {
+		seenFields := map[string]bool{}
+		canonical := append([]string(nil), set...)
+		sort.Strings(canonical)
+		key := strings.Join(canonical, "\x00")
+		if seenSets[key] {
+			*issues = append(*issues, ValidationIssue{Path: fmt.Sprintf("%s[%d]", path("groupingSets"), setIndex), Reason: "自定义分组集重复"})
+		}
+		seenSets[key] = true
+		for fieldIndex, field := range set {
+			fieldPath := fmt.Sprintf("%s[%d][%d]", path("groupingSets"), setIndex, fieldIndex)
+			if !allowed[field] {
+				*issues = append(*issues, ValidationIssue{Path: fieldPath, Reason: "自定义分组集只能引用 groupBy 中的字段"})
+			}
+			if seenFields[field] {
+				*issues = append(*issues, ValidationIssue{Path: fieldPath, Reason: "自定义分组集内字段重复"})
+			}
+			seenFields[field] = true
+		}
+	}
+}
+
+func groupingPlanKind(base string, mode GroupByMode) string {
+	switch mode {
+	case GroupByModeCube:
+		return base + "_CUBE"
+	case GroupByModeRollup:
+		return base + "_ROLLUP"
+	case GroupByModeSets:
+		return base + "_GROUPING_SETS"
+	default:
+		return base
+	}
+}
+
 func validateIdentifier(issues *[]ValidationIssue, path, value string) {
 	if !identifierPattern.MatchString(value) {
 		*issues = append(*issues, ValidationIssue{Path: path, Reason: "必须以字母开头且只能包含字母、数字和下划线，长度不超过 128"})
@@ -2115,7 +2575,7 @@ func validateClassification(issues *[]ValidationIssue, path, value string) {
 }
 
 func validatePhysicalIdentifier(issues *[]ValidationIssue, path, value string) {
-	if !physicalIdentifierPattern.MatchString(value) {
+	if !physicalname.ValidColumn(value) {
 		*issues = append(*issues, ValidationIssue{Path: path, Reason: "必须是查询引擎支持的物理字段名"})
 	}
 }

@@ -23,6 +23,12 @@ type VersionReader interface {
 	ReadVersionTables(context.Context, string, string, int64) (datasource.FileVersion, []datasource.FileTableData, error)
 }
 
+// PreviewVersionReader is implemented by production file storage so preview
+// execution can avoid expanding an entire large workbook.
+type PreviewVersionReader interface {
+	ReadVersionTablesPreview(context.Context, string, string, int64, []string, int) (datasource.FileVersion, []datasource.FileTableData, error)
+}
+
 // NewExecutor 创建可取消的 Excel/CSV 查询执行器。
 func NewExecutor(manager VersionReader) *Executor {
 	return &Executor{manager: manager, active: map[string]context.CancelFunc{}}
@@ -46,13 +52,40 @@ func (e *Executor) Execute(ctx context.Context, source datasource.Source, queryI
 		delete(e.active, queryID)
 		e.mu.Unlock()
 	}()
-	version, fileTables, err := e.manager.ReadVersionTables(queryContext, source.TenantID, fileVersionID, source.RuntimeQuota.MaxExcelFileBytes)
+	tableNames := make([]string, 0, len(document.Nodes))
+	seenTables := map[string]bool{}
+	for _, node := range document.Nodes {
+		table, exists := tables[node.ID]
+		if !exists || table.Name == "" {
+			return datasource.QueryResult{}, ErrUnsupportedExpression
+		}
+		if !seenTables[table.Name] {
+			seenTables[table.Name] = true
+			tableNames = append(tableNames, table.Name)
+		}
+	}
+	var version datasource.FileVersion
+	var fileTables []datasource.FileTableData
+	var err error
+	if previewReader, ok := e.manager.(PreviewVersionReader); ok {
+		version, fileTables, err = previewReader.ReadVersionTablesPreview(
+			queryContext, source.TenantID, fileVersionID,
+			source.RuntimeQuota.MaxExcelFileBytes, tableNames, 100,
+		)
+	} else {
+		// Compatibility for non-production reader implementations.
+		version, fileTables, err = e.manager.ReadVersionTables(
+			queryContext, source.TenantID, fileVersionID,
+			source.RuntimeQuota.MaxExcelFileBytes,
+		)
+	}
 	if err != nil {
 		return datasource.QueryResult{}, err
 	}
 	if version.ID != source.FileAssetID {
 		return datasource.QueryResult{}, ErrFileVersionMismatch
 	}
+	applyResolvedFileTypes(fileTables, document, tables)
 	result, err := Evaluate(queryContext, Input{
 		Document: document, Tables: tables, FileTables: fileTables, Parameters: parameters,
 		Scope: scope, RowPolicies: rowPolicies, ColumnPolicies: columnPolicies, MaxRows: maxRows,
@@ -62,6 +95,32 @@ func (e *Executor) Execute(ctx context.Context, source datasource.Source, queryI
 	}
 	result.DurationMS = time.Since(started).Milliseconds()
 	return result, nil
+}
+
+func applyResolvedFileTypes(
+	fileTables []datasource.FileTableData,
+	document dataset.Document,
+	tables map[string]querycompiler.TableRef,
+) {
+	byName := make(map[string]*datasource.FileTableData, len(fileTables))
+	for index := range fileTables {
+		byName[fileTables[index].Name] = &fileTables[index]
+	}
+	for _, node := range document.Nodes {
+		ref := tables[node.ID]
+		table := byName[ref.Name]
+		if table == nil {
+			continue
+		}
+		if table.Types == nil {
+			table.Types = map[string]string{}
+		}
+		for column, canonicalType := range ref.ColumnTypes {
+			if canonicalType != "" {
+				table.Types[column] = canonicalType
+			}
+		}
+	}
 }
 
 // Cancel 中止当前进程内同一查询标识对应的文件计算。

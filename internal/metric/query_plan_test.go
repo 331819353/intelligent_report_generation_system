@@ -2,10 +2,85 @@ package metric
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"intelligent-report-generation-system/internal/dataset"
 )
+
+func TestAppendDimensionFiltersCompilesSemanticSetAsOneINPredicate(t *testing.T) {
+	field := dataset.Field{
+		ID: "birth_cohort", Code: "birth_cohort", Name: "出生年代段",
+		Role: "DIMENSION", CanonicalType: "STRING",
+		Expression: dataset.Expression{
+			Type: "FIELD_REF", NodeID: "workforce", Field: "business_track",
+		},
+	}
+	document := dataset.Document{
+		Filters: []dataset.Filter{}, Parameters: []dataset.Parameter{},
+	}
+	bindings, parameters, err := appendDimensionFilters(
+		&document,
+		map[string]dataset.Field{field.ID: field},
+		map[string]Dimension{field.ID: {FieldID: field.ID}},
+		[]DimensionFilter{{
+			FieldID: field.ID, Operator: "IN",
+			Value: []string{"80-85", "85-90"},
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 1 || len(bindings[0].ParameterCodes) != 2 ||
+		len(parameters) != 2 || len(document.Filters) != 1 ||
+		document.Filters[0].Expression.Type != "IN" ||
+		document.Filters[0].Expression.Right == nil ||
+		document.Filters[0].Expression.Right.Type != "ARRAY" ||
+		len(document.Filters[0].Expression.Right.Arguments) != 2 {
+		t.Fatalf(
+			"bindings=%#v parameters=%#v document=%#v",
+			bindings, parameters, document,
+		)
+	}
+}
+
+func TestAppendDimensionFiltersSupportsGovernedMultiLabelExpansion(t *testing.T) {
+	field := dataset.Field{
+		ID: "key_talent", Code: "key_talent", Name: "关键人才",
+		Role: "DIMENSION", CanonicalType: "STRING",
+		Expression: dataset.Expression{
+			Type: "FIELD_REF", NodeID: "workforce", Field: "key_talent",
+		},
+	}
+	values := make([]string, 54)
+	for index := range values {
+		values[index] = fmt.Sprintf("关键人才组合-%d", index+1)
+	}
+	document := dataset.Document{
+		Filters: []dataset.Filter{}, Parameters: []dataset.Parameter{},
+	}
+	bindings, parameters, err := appendDimensionFilters(
+		&document,
+		map[string]dataset.Field{field.ID: field},
+		map[string]Dimension{field.ID: {FieldID: field.ID}},
+		[]DimensionFilter{{
+			FieldID: field.ID, Operator: "IN", Value: values,
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 1 ||
+		len(bindings[0].ParameterCodes) != len(values) ||
+		len(parameters) != len(values) ||
+		document.Filters[0].Expression.Right == nil ||
+		len(document.Filters[0].Expression.Right.Arguments) != len(values) {
+		t.Fatalf(
+			"bindings=%#v parameterCount=%d document=%#v",
+			bindings, len(parameters), document,
+		)
+	}
+}
 
 func TestBuildQueryCandidateDetachesSourceAnalysisContract(t *testing.T) {
 	document := dataset.Document{

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,10 @@ const refreshJobColumns = `job.id::text,job.dimension_id::text,job.dimension_ver
 	job.request_hash,job.requested_by::text,job.attempt,job.max_attempts,
 	job.member_count,job.result_code,job.error_message,job.created_at,job.updated_at,
 	job.started_at,job.completed_at`
+
+var reservedDimensionDefaultPattern = regexp.MustCompile(
+	`^(?:unknown|\+?999999999(?:\.0+)?|1970-01-01(?:[ t]00:00:00(?:\.0+)?(?:z|[+-]00(?::?00)?)?)?)$`,
+)
 
 func (s *PostgresStore) CreateRefreshJob(
 	ctx context.Context,
@@ -487,6 +492,9 @@ func scanDimensionMembersToStage(
 				rows.Close()
 				return source, 0, err
 			}
+			if isReservedDimensionDefaultValue(raw) {
+				continue
+			}
 			memberKey, label, normalized, valueHash, err :=
 				prepareDimensionMemberValue(raw)
 			if err != nil {
@@ -504,6 +512,9 @@ func scanDimensionMembersToStage(
 		}
 		if rawFetched == 0 {
 			break
+		}
+		if len(batch) == 0 {
+			continue
 		}
 		if _, err := controlTx.CopyFrom(
 			ctx,
@@ -1059,6 +1070,12 @@ func prepareDimensionMemberValue(raw string) (string, string, string, string, er
 	}
 	digest := sha256.Sum256([]byte(raw))
 	return raw, raw, normalized, fmt.Sprintf("%x", digest), nil
+}
+
+// isReservedDimensionDefaultValue removes only DWS modeling placeholders.
+// Boolean False/True values intentionally remain valid dimension members.
+func isReservedDimensionDefaultValue(raw string) bool {
+	return reservedDimensionDefaultPattern.MatchString(normalizeSearchValue(raw))
 }
 
 func classifyRefreshDatabaseError(err error) error {

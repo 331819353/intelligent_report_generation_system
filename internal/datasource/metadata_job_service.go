@@ -762,7 +762,8 @@ func metadataCompletionShouldRetry(err error) bool {
 	}
 	switch code {
 	case "SOURCE_CHANGED", "STRUCTURE_CHANGED", "PROCESSING_LEASE_LOST",
-		"TENANT_AI_FORBIDDEN", "QUOTA_EXCEEDED":
+		"TENANT_AI_FORBIDDEN", "QUOTA_EXCEEDED", "INVALID_TARGET_SCOPE",
+		"ODS_DATASET_UNSUPPORTED_COLUMN":
 		return false
 	default:
 		return true
@@ -798,6 +799,10 @@ func metadataCompletionJobFailure(err error) (string, string) {
 		return "LLM_OUTPUT_INVALID", "LLM 返回的表名、字段或标签不完整，请重试或改为手工完善"
 	case "PARTIAL_OUTPUT":
 		return "LLM_OUTPUT_PARTIAL", "LLM 已保存可用的表名、字段和标签，剩余缺失项请在 ODS 数据集中手工完善"
+	case "INVALID_TARGET_SCOPE":
+		return "LLM_TARGET_SCOPE_INVALID", "当前表没有可处理的元数据目标，请刷新表结构后重试"
+	case "ODS_DATASET_UNSUPPORTED_COLUMN":
+		return "ODS_DATASET_UNSUPPORTED_COLUMN", "ODS 数据集创建失败：Excel 表头含查询引擎不支持的字符，请修改表头后重新上传"
 	default:
 		return "LLM_COMPLETION_FAILED", "LLM 表结构完善失败，请重试；若持续失败可先手工完善表名、字段和标签"
 	}

@@ -465,6 +465,9 @@ func (s *PostgresStore) ListDimensionMembers(ctx context.Context, tenantID, acto
 			  AND dimension.status='PUBLISHED'
 			  AND dimension.member_index_policy='FULL'
 			  AND NOT dimension.sensitive
+			  AND NOT platform.is_reserved_dimension_default(
+			    member.normalized_value
+			  )
 			  AND ($3='' OR member.member_key ILIKE '%'||$3||'%'
 			    OR member.canonical_label ILIKE '%'||$3||'%'
 			    OR member.normalized_value=$3)
@@ -1357,6 +1360,9 @@ func (s *PostgresStore) SearchMemberMetrics(ctx context.Context, tenantID, actor
 			  AND metric_materialization.status='ACTIVE'
 			WHERE member.tenant_id=platform.current_tenant_id()
 			  AND member.status='ACTIVE' AND dimension.status='PUBLISHED'
+			  AND NOT platform.is_reserved_dimension_default(
+			    member.normalized_value
+			  )
 			  AND member.refresh_generation=dimension.member_refresh_generation
 			  AND member.last_refresh_job_id=dimension_refresh_job.id
 			  AND NOT dimension.sensitive

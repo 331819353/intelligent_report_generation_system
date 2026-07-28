@@ -434,7 +434,7 @@ func (r *PostgresRepository) BeginDelete(ctx context.Context, tenantID, id strin
 // Quota 加载租户的数据源数量、查询行数和文件大小限制。
 func (r *PostgresRepository) Quota(ctx context.Context, tenantID string) (q Quota, err error) {
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT COALESCE(q.max_data_sources,20),COALESCE(q.max_connections_per_source,5),COALESCE(q.max_concurrent_queries,10),COALESCE(q.max_excel_file_bytes,52428800) FROM (SELECT $1::uuid tenant_id) x LEFT JOIN platform.tenant_data_source_quotas q USING(tenant_id)`, tenantID).Scan(&q.MaxDataSources, &q.MaxConnectionsPerSource, &q.MaxConcurrentQueries, &q.MaxExcelFileBytes)
+		return tx.QueryRow(ctx, `SELECT COALESCE(q.max_data_sources,20),COALESCE(q.max_connections_per_source,5),COALESCE(q.max_concurrent_queries,10),COALESCE(q.max_excel_file_bytes,$2) FROM (SELECT $1::uuid tenant_id) x LEFT JOIN platform.tenant_data_source_quotas q USING(tenant_id)`, tenantID, DefaultMaxExcelFileBytes).Scan(&q.MaxDataSources, &q.MaxConnectionsPerSource, &q.MaxConcurrentQueries, &q.MaxExcelFileBytes)
 	})
 	return
 }

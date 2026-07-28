@@ -65,14 +65,16 @@ func TestProposalSchemaIncludesEveryFineGrainedTransformComponent(t *testing.T) 
 	contract := string(raw)
 	for _, componentType := range []string{
 		"TEXT_UPPER", "TEXT_TRIM", "TEXT_REPLACE", "TEXT_LOWER", "TEXT_SUBSTRING", "TEXT_CONCAT",
-		"NUMBER_ABSOLUTE", "NUMBER_ROUNDING", "NUMBER_ARITHMETIC", "DATE_FORMAT", "NULL", "CAST", "CONDITION",
+		"NUMBER_ABSOLUTE", "NUMBER_ROUNDING", "NUMBER_ARITHMETIC", "DATE_CALCULATION", "DATE_FORMAT", "NULL", "CAST", "CONDITION",
 	} {
 		if !strings.Contains(contract, `"`+componentType+`"`) {
 			t.Fatalf("proposal schema does not include transform component %s", componentType)
 		}
 	}
-	if !strings.Contains(contract, `"TRANSFORM"`) || !strings.Contains(contract, `"conditionValues"`) {
-		t.Fatal("proposal schema does not expose transform inputs or condition arrays")
+	for _, field := range []string{`"TRANSFORM"`, `"conditionValues"`, `"startDateSource"`, `"endDateSource"`, `"thenMode"`, `"elseMode"`, `"CURRENT_DATE"`} {
+		if !strings.Contains(contract, field) {
+			t.Fatalf("proposal schema does not expose %s", field)
+		}
 	}
 }
 
@@ -97,6 +99,70 @@ func TestValidateProposalAcceptsConditionTransformWithMixedInValues(t *testing.T
 	}
 	if err := validateProposal(proposal, testCatalog()); err != nil {
 		t.Fatalf("validateProposal() transform error = %v", err)
+	}
+}
+
+func TestDateCalculationTransformRuleContracts(t *testing.T) {
+	tests := []struct {
+		name string
+		rule PlanTransformRule
+		want bool
+	}{
+		{
+			name: "date difference",
+			rule: PlanTransformRule{Operation: "DATE_DIFF", InputKeys: []string{"node_1.start_date", "node_1.end_date"}, Unit: "MONTH", Output: PlanTransformOutput{CanonicalType: "INTEGER"}},
+			want: true,
+		},
+		{
+			name: "current year end",
+			rule: PlanTransformRule{Operation: "DATE_END", InputKeys: []string{}, Unit: "YEAR", DateSource: "CURRENT_DATE", Output: PlanTransformOutput{CanonicalType: "DATE"}},
+			want: true,
+		},
+		{
+			name: "difference ending at SQL current date",
+			rule: PlanTransformRule{
+				Operation: "DATE_DIFF", InputKeys: []string{"node_1.start_date"}, Unit: "DAY",
+				StartDateSource: "FIELD", EndDateSource: "CURRENT_DATE",
+				Output: PlanTransformOutput{CanonicalType: "INTEGER"},
+			},
+			want: true,
+		},
+		{
+			name: "field extraction needs input",
+			rule: PlanTransformRule{Operation: "DATE_EXTRACT", InputKeys: []string{}, Unit: "YEAR", DateSource: "FIELD", Output: PlanTransformOutput{CanonicalType: "INTEGER"}},
+			want: false,
+		},
+		{
+			name: "difference rejects week",
+			rule: PlanTransformRule{Operation: "DATE_DIFF", InputKeys: []string{"node_1.start_date", "node_1.end_date"}, Unit: "WEEK", Output: PlanTransformOutput{CanonicalType: "INTEGER"}},
+			want: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := validTransformRule("DATE_CALCULATION", test.rule); got != test.want {
+				t.Fatalf("validTransformRule()=%v want=%v detail=%s", got, test.want, transformRuleValidationDetail("DATE_CALCULATION", test.rule))
+			}
+		})
+	}
+}
+
+func TestCurrentDateIsAcceptedAsConditionAndNullOutputSource(t *testing.T) {
+	condition := PlanTransformRule{
+		Operation: "CASE", InputKeys: []string{"node_1.status"},
+		ConditionOperator: "EQUALS", MatchValue: "OPEN",
+		ThenMode: "CURRENT_DATE", ElseMode: "LITERAL", ElseValue: "1970-01-01",
+		Output: PlanTransformOutput{CanonicalType: "DATE"},
+	}
+	if detail := transformRuleValidationDetail("CONDITION", condition); detail != "" {
+		t.Fatalf("CASE CURRENT_DATE rejected: %s", detail)
+	}
+	fill := PlanTransformRule{
+		Operation: "COALESCE", InputKeys: []string{"node_1.created_at"},
+		FallbackMode: "CURRENT_DATE", Output: PlanTransformOutput{CanonicalType: "DATE"},
+	}
+	if detail := transformRuleValidationDetail("NULL", fill); detail != "" {
+		t.Fatalf("COALESCE CURRENT_DATE rejected: %s", detail)
 	}
 }
 

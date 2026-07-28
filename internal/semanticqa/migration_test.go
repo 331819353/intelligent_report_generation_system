@@ -15,6 +15,7 @@ func TestSemanticQAMigrationsContainAuthorityRecoveryAndPrivacyFences(t *testing
 		"000093_dws_analysis_modeling.up.sql",
 		"000094_semantic_materialization_graph_event.up.sql",
 		"000095_semantic_query_execution_quality.up.sql",
+		"000134_semantic_compatibility_graph_event.up.sql",
 	}
 	var combined strings.Builder
 	for _, file := range files {
@@ -43,6 +44,7 @@ func TestSemanticQAMigrationsContainAuthorityRecoveryAndPrivacyFences(t *testing
 		"dataset_materializations_enqueue_semantic_graph",
 		"execution_duration_ms",
 		"execution_row_count",
+		"dimension_metric_compatibility_enqueue_semantic_change",
 		"ENABLE ROW LEVEL SECURITY",
 		"FORCE ROW LEVEL SECURITY",
 	} {

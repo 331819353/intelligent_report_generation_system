@@ -17,11 +17,15 @@ type embeddingProviderStub struct {
 func (s embeddingProviderStub) Configured() bool { return s.configured }
 func (s embeddingProviderStub) Model() string    { return "embedding-model" }
 func (s embeddingProviderStub) Dimensions() int  { return 3 }
-func (s embeddingProviderStub) Embed(context.Context, []string) ([][]float32, error) {
+func (s embeddingProviderStub) Embed(_ context.Context, values []string) ([][]float32, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
-	return [][]float32{append([]float32(nil), s.vector...)}, nil
+	result := make([][]float32, len(values))
+	for index := range values {
+		result[index] = append([]float32(nil), s.vector...)
+	}
+	return result, nil
 }
 
 type semanticStoreStub struct {
@@ -35,7 +39,9 @@ func (s *semanticStoreStub) ListPendingTenantIDs(context.Context) ([]string, err
 	return []string{"tenant-1"}, nil
 }
 func (s *semanticStoreStub) Claim(context.Context, string, string, time.Duration) (*EmbeddingClaim, error) {
-	return s.claim, nil
+	claim := s.claim
+	s.claim = nil
+	return claim, nil
 }
 func (s *semanticStoreStub) Complete(_ context.Context, _ EmbeddingClaim, _, _ string, _ []float32) error {
 	s.completed = true

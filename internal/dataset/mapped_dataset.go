@@ -9,10 +9,27 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"intelligent-report-generation-system/internal/fieldtype"
+	"intelligent-report-generation-system/internal/physicalname"
 	"intelligent-report-generation-system/internal/platform/database"
 )
 
-var errMappedDatasetUnsupportedColumn = errors.New("mapped dataset contains an unsupported physical column name")
+// ErrMappedDatasetUnsupportedColumn identifies a deterministic downstream ODS
+// contract failure. It is surfaced to the metadata worker instead of being
+// silently treated as a successful mapping.
+var ErrMappedDatasetUnsupportedColumn = mappedDatasetUnsupportedColumnError{}
+
+type mappedDatasetUnsupportedColumnError struct{}
+
+func (mappedDatasetUnsupportedColumnError) Error() string {
+	return "mapped dataset contains an unsupported physical column name"
+}
+
+// MetadataCompletionFailureCode lets the data-source worker classify this
+// deterministic failure without importing the dataset package.
+func (mappedDatasetUnsupportedColumnError) MetadataCompletionFailureCode() string {
+	return "ODS_DATASET_UNSUPPORTED_COLUMN"
+}
 
 // MappedDatasetTable 是构建 LLM 映射表默认数据集所需的最小表快照。
 // 它不是第二份元数据模型，仅在同一事务内把已完善资产转为 DSL。
@@ -71,8 +88,8 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 		physicalName := strings.TrimSpace(column.ColumnName)
 		// 查询编译器只允许经物理白名单校验的数据库标识符。不丢列、
 		// 不改写物理名；整表不可安全执行时由 Ensure 路径跳过创建。
-		if !physicalIdentifierPattern.MatchString(physicalName) {
-			return Document{}, fmt.Errorf("%w: column %d", errMappedDatasetUnsupportedColumn, index+1)
+		if !physicalname.ValidColumn(physicalName) {
+			return Document{}, fmt.Errorf("%w: column %d", ErrMappedDatasetUnsupportedColumn, index+1)
 		}
 		projection = append(projection, physicalName)
 		logicalName := physicalName
@@ -96,7 +113,7 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 			Description:   strings.TrimSpace(column.BusinessDescription),
 			Role:          role,
 			Expression:    Expression{Type: "FIELD_REF", NodeID: "node_1", Field: physicalName},
-			CanonicalType: mappedDatasetCanonicalType(column.CanonicalType),
+			CanonicalType: mappedDatasetColumnCanonicalType(column),
 			SemanticType:  strings.ToUpper(strings.TrimSpace(column.SemanticType)),
 			Nullable:      column.Nullable,
 			Visible:       &visible,
@@ -113,8 +130,11 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 			defaultTimeField = fieldCode
 		}
 	}
+	grainDescription := "每行代表" + name + "中的一条记录"
 	if len(grainCodes) == 0 {
-		grainCodes = []string{fields[0].Code}
+		// ODS must preserve source rows even when the source does not declare a
+		// business key. The first column is not evidence of uniqueness.
+		grainDescription += "（源表未声明业务主键）"
 	}
 
 	return Document{
@@ -146,7 +166,7 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 		Sorts:           []Sort{},
 		Parameters:      []Parameter{},
 		OutputGrain: OutputGrain{
-			Description: "每行代表" + name + "中的一条记录",
+			Description: grainDescription,
 			KeyFields:   grainCodes,
 			TimeField:   defaultTimeField,
 			DefaultTimeGrain: func() string {
@@ -157,13 +177,13 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 			}(),
 		},
 		ExecutionPolicy: ExecutionPolicy{
-			Mode:            "MATERIALIZED_PREFERRED",
+			Mode:            "REALTIME",
 			TimeoutMS:       5000,
-			PreviewLimit:    200,
+			PreviewLimit:    100,
 			ResultLimit:     10000,
 			CacheTTLSeconds: 300,
 			Materialization: MaterializationPolicy{
-				Enabled: true, RefreshMode: "ON_DEMAND",
+				Enabled: false,
 			},
 		},
 		Designer: map[string]any{
@@ -268,11 +288,7 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 
 	table := MappedDatasetTable{}
 	err = tx.QueryRow(ctx, `SELECT t.id::text,t.data_source_id::text,source.name,
-		COALESCE((SELECT fv.id::text
-			FROM platform.file_assets fa
-			JOIN platform.file_asset_versions fv
-			  ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version
-			WHERE fa.id=source.file_asset_id),''),
+		COALESCE(published_source.file_version_id::text,''),
 		t.table_name,t.metadata_version,t.structure_hash,t.business_name,t.business_description,
 		COALESCE((
 		  SELECT min(regexp_replace(tag,'^领域[：:]','','g'))
@@ -281,8 +297,13 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 		),'')
 		FROM platform.metadata_tables t
 		JOIN platform.data_sources source ON source.id=t.data_source_id AND source.tenant_id=t.tenant_id
+		JOIN platform.data_source_versions published_source
+		  ON published_source.id=source.current_published_version_id
+		 AND published_source.data_source_id=source.id
+		 AND published_source.tenant_id=source.tenant_id
 		WHERE t.id::text=$1 AND t.tenant_id::text=$2
 		  AND source.status='ACTIVE' AND source.deleted_at IS NULL
+		  AND source.publication_status='PUBLISHED'
 		  AND t.asset_status='ACTIVE' AND t.management_status='ENABLED'
 		  AND t.last_enriched_structure_hash<>''
 		  AND t.last_enriched_structure_hash=t.structure_hash
@@ -292,7 +313,7 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 		  AND NOT EXISTS(SELECT 1 FROM platform.metadata_columns c
 			WHERE c.table_id=t.id AND c.tenant_id=t.tenant_id AND c.asset_status='ACTIVE'
 			  AND (c.last_enriched_structure_hash='' OR c.last_enriched_structure_hash<>c.structure_hash))
-		FOR SHARE OF t,source`, tableID, tenantID).Scan(
+		FOR SHARE OF t,source,published_source`, tableID, tenantID).Scan(
 		&table.ID, &table.DataSourceID, &table.DataSourceName, &table.FileVersionID, &table.TableName,
 		&table.MetadataVersion, &table.StructureHash,
 		&table.BusinessName, &table.BusinessDescription, &table.Domain,
@@ -333,9 +354,8 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 	}
 
 	document, err := BuildMappedDatasetDocument(table, columns)
-	if errors.Is(err, errMappedDatasetUnsupportedColumn) {
-		// 元数据补全不应因当前查询编译器不支持的物理名永久失败。
-		return false, nil
+	if errors.Is(err, ErrMappedDatasetUnsupportedColumn) {
+		return false, err
 	}
 	if err != nil {
 		return false, err
@@ -422,8 +442,8 @@ func (s *PostgresStore) ensureMappedDatasetDraftTx(
 		return false, err
 	}
 	prepared, err := prepareMappedDataset(table, columns)
-	if errors.Is(err, errMappedDatasetUnsupportedColumn) {
-		return false, nil
+	if errors.Is(err, ErrMappedDatasetUnsupportedColumn) {
+		return false, err
 	}
 	if err != nil {
 		return false, err
@@ -475,11 +495,7 @@ func loadMappedDatasetInputTx(
 			  AND (c.last_enriched_structure_hash='' OR c.last_enriched_structure_hash<>c.structure_hash))`
 	}
 	query := `SELECT t.id::text,t.data_source_id::text,source.name,
-		COALESCE((SELECT fv.id::text
-			FROM platform.file_assets fa
-			JOIN platform.file_asset_versions fv
-			  ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version
-			WHERE fa.id=source.file_asset_id),''),
+		COALESCE(published_source.file_version_id::text,''),
 		t.table_name,t.metadata_version,t.structure_hash,t.business_name,t.business_description,
 		COALESCE((
 		  SELECT min(regexp_replace(tag,'^领域[：:]','','g'))
@@ -488,13 +504,18 @@ func loadMappedDatasetInputTx(
 		),'')
 		FROM platform.metadata_tables t
 		JOIN platform.data_sources source ON source.id=t.data_source_id AND source.tenant_id=t.tenant_id
+		JOIN platform.data_source_versions published_source
+		  ON published_source.id=source.current_published_version_id
+		 AND published_source.data_source_id=source.id
+		 AND published_source.tenant_id=source.tenant_id
 		WHERE t.id::text=$1 AND t.tenant_id::text=$2
 		  AND source.status='ACTIVE' AND source.deleted_at IS NULL
+		  AND source.publication_status='PUBLISHED'
 		  AND t.asset_status='ACTIVE' AND t.management_status='ENABLED'
 		  AND EXISTS(SELECT 1 FROM platform.metadata_columns c
 			WHERE c.table_id=t.id AND c.tenant_id=t.tenant_id AND c.asset_status='ACTIVE')
 		  ` + completionPredicate + `
-		FOR SHARE OF t,source`
+		FOR SHARE OF t,source,published_source`
 	err := tx.QueryRow(ctx, query, tableID, tenantID).Scan(
 		&table.ID, &table.DataSourceID, &table.DataSourceName, &table.FileVersionID,
 		&table.TableName, &table.MetadataVersion, &table.StructureHash,
@@ -1039,16 +1060,10 @@ func (s *PostgresStore) enqueueMappedMaterializationTx(
 	tenantID string,
 	published VersionRecord,
 ) error {
-	if s.mappedPublicationSink == nil {
-		return errors.New("mapped dataset materialization commit sink is not configured")
-	}
-	requestedBy := strings.TrimSpace(published.PublishedBy)
-	if _, err := uuid.Parse(requestedBy); err != nil {
-		return errors.New("mapped dataset published version has no valid publisher")
-	}
-	return s.mappedPublicationSink.EnqueueMappedDatasetMaterializationTx(
-		ctx, tx, tenantID, requestedBy, published,
-	)
+	// ODS is a virtual governed mapping over the immutable source. Publishing
+	// it must not copy source rows into the warehouse; DWD is the first layer
+	// that performs a full extraction and physical materialization.
+	return nil
 }
 
 func mappedDatasetFieldRole(column MappedDatasetColumn) string {
@@ -1082,6 +1097,13 @@ func mappedDatasetCanonicalType(value string) string {
 	default:
 		return "STRING"
 	}
+}
+
+func mappedDatasetColumnCanonicalType(column MappedDatasetColumn) string {
+	if fieldtype.IsCodeLike(column.ColumnName, column.BusinessName) {
+		return "STRING"
+	}
+	return mappedDatasetCanonicalType(column.CanonicalType)
 }
 
 func uniqueMappedIdentifier(value, fallback string, used map[string]bool) string {

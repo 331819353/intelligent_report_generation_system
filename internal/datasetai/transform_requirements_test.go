@@ -87,6 +87,7 @@ func TestDeriveCreateTransformRequirementsRecognizesFineGrainedComponents(t *tes
 		{"金额取绝对值", "NUMBER_ABSOLUTE"},
 		{"金额四舍五入", "NUMBER_ROUNDING"},
 		{"对两个字段进行数值运算", "NUMBER_ARITHMETIC"},
+		{"计算开始日期和结束日期的自然月差", "DATE_CALCULATION"},
 		{"将订单日期转换为年月字段", "DATE_FORMAT"},
 		{"为空时填充默认值", "NULL"},
 		{"把金额转为字符串", "CAST"},
@@ -99,6 +100,19 @@ func TestDeriveCreateTransformRequirementsRecognizesFineGrainedComponents(t *tes
 				t.Fatalf("requirements = %#v, want %s", requirements, test.componentType)
 			}
 		})
+	}
+}
+
+func TestDeriveCreateTransformRequirementsRecognizesDateCalculationsWithoutDateFormatting(t *testing.T) {
+	for _, instruction := range []string{
+		"获取当前日期的本月最后一天",
+		"提取订单日期的年、月、日",
+		"计算开始日期和结束日期相差多少天",
+	} {
+		requirements := deriveCreateTransformRequirements(instruction)
+		if len(requirements) != 1 || requirements[0].ComponentType != "DATE_CALCULATION" {
+			t.Fatalf("deriveCreateTransformRequirements(%q) = %#v, want DATE_CALCULATION", instruction, requirements)
+		}
 	}
 }
 

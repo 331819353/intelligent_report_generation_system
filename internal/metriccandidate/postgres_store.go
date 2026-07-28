@@ -24,8 +24,9 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore
 
 // TriggerManualIdentification compares the current governed dataset inventory with the
 // existing metric/candidate catalog and schedules only an explicit, user-initiated scan.
-// Only published DWS/ADS versions are query-serving semantic assets. DWD stays
-// an implementation layer and is therefore never mixed into this index build.
+// DWS field roles and descriptions are authoritative because DWS save already completed
+// semantic naming. MEASURE fields are handled by the Go rule extractor, while
+// non-measure roles are inserted directly as approved dimension assets.
 func (s *PostgresStore) TriggerManualIdentification(
 	ctx context.Context,
 	tenantID, actorID string,
@@ -58,14 +59,14 @@ func (s *PostgresStore) TriggerManualIdentification(
 				WHERE dataset.status='PUBLISHED'
 				  AND dataset.deleted_at IS NULL
 				  AND version.status='PUBLISHED'
-				  AND version.layer IN ('DWS','ADS')
+				  AND version.layer='DWS'
 			), activated AS (
 				INSERT INTO platform.metric_extraction_jobs(
 					tenant_id,dataset_id,dataset_version_id,dsl_hash,
 					requested_by,extractor_version
 				)
 				SELECT tenant_id,dataset_id,dataset_version_id,schema_hash,
-					$1::uuid,'metric-candidate-manual-v1'
+					$1::uuid,$2
 				FROM candidates
 				ON CONFLICT(tenant_id,dataset_version_id,extractor_version)
 				DO UPDATE SET
@@ -83,7 +84,7 @@ func (s *PostgresStore) TriggerManualIdentification(
 			SELECT
 				(SELECT count(*)::int FROM candidates),
 				(SELECT count(*)::int FROM activated)`,
-			actorID)
+			actorID, CodeIdentificationVersion)
 		if queryErr != nil {
 			return queryErr
 		}
@@ -105,13 +106,9 @@ func (s *PostgresStore) TriggerManualIdentification(
 		// made every manual identification request fail with "conn busy" and
 		// rolled back the newly enqueued jobs.
 		rows.Close()
-		if err := tx.QueryRow(ctx, `SELECT eligible_count::int,profiled_count::int
-			FROM platform.trigger_manual_dws_dimension_identification($1::uuid)`,
-			actorID,
-		).Scan(
-			&result.DimensionDatasetCount,
-			&result.DimensionProfileCount,
-		); err != nil {
+		result.DimensionDatasetCount, result.DimensionAssetCount, err =
+			approveDWSFieldDimensionsTx(ctx, tx, actorID)
+		if err != nil {
 			return err
 		}
 		result.Datasets, err = loadIdentificationDatasetIndexesTx(ctx, tx)
@@ -129,14 +126,128 @@ func (s *PostgresStore) TriggerManualIdentification(
 				'historicalMetricCount',$4::int,
 				'existingCandidateCount',$5::int
 				,'dimensionDatasetCount',$6::int
-				,'dimensionProfileCount',$7::int
+				,'dimensionAssetCount',$7::int
 			)
 		)`, actorID, result.EligibleDatasetCount, result.EnqueuedJobCount,
 			result.HistoricalMetricCount, result.ExistingCandidateCount,
-			result.DimensionDatasetCount, result.DimensionProfileCount)
+			result.DimensionDatasetCount, result.DimensionAssetCount)
 		return err
 	})
 	return result, err
+}
+
+// approveDWSFieldDimensionsTx uses only immutable, already-enriched DWS field metadata
+// and approved sensitivity tags. It deliberately does not call an LLM or create
+// survey candidates.
+func approveDWSFieldDimensionsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	actorID string,
+) (datasetCount, assetCount int, err error) {
+	err = tx.QueryRow(ctx, `WITH current_dws AS (
+			SELECT dataset.tenant_id,dataset.id AS dataset_id,
+				version.id AS dataset_version_id
+			FROM platform.datasets AS dataset
+			JOIN platform.dataset_versions AS version
+			  ON version.tenant_id=dataset.tenant_id
+			 AND version.dataset_id=dataset.id
+			 AND version.id=dataset.current_published_version_id
+			 AND version.status='PUBLISHED'
+			 AND version.layer='DWS'
+			WHERE dataset.tenant_id=platform.current_tenant_id()
+			  AND dataset.status='PUBLISHED'
+			  AND dataset.deleted_at IS NULL
+		), classified AS (
+			SELECT current_dws.tenant_id,current_dws.dataset_id,
+				current_dws.dataset_version_id,field.field_id,
+				field.field_code::text AS code,field.field_name AS name,
+				field.description,
+				field.field_role,field.semantic_type,
+				(
+				  field.field_role='IDENTIFIER'
+				  OR upper(field.semantic_type)='IDENTIFIER'
+				) AS high_cardinality,
+				EXISTS(
+				  SELECT 1
+				  FROM platform.asset_tag_bindings AS binding
+				  JOIN platform.semantic_tags AS tag
+				    ON tag.tenant_id=binding.tenant_id
+				   AND tag.id=binding.tag_id
+				   AND tag.category='SENSITIVITY'
+				   AND tag.status='ACTIVE'
+				  WHERE binding.tenant_id=field.tenant_id
+				    AND binding.asset_type='DATASET_FIELD'
+				    AND binding.dataset_id=current_dws.dataset_id
+				    AND binding.dataset_version_id=field.dataset_version_id
+				    AND binding.dataset_field_id=field.field_id
+				    AND binding.status='APPROVED'
+				) AS sensitive
+			FROM current_dws
+			JOIN platform.dataset_fields AS field
+			  ON field.tenant_id=current_dws.tenant_id
+			 AND field.dataset_version_id=current_dws.dataset_version_id
+			WHERE field.field_role IN (
+				'DIMENSION','ATTRIBUTE','TIME','IDENTIFIER'
+			)
+		), inserted AS (
+			INSERT INTO platform.semantic_dimensions(
+				tenant_id,dataset_id,dataset_version_id,field_id,
+				code,name,description,dimension_type,member_index_policy,
+				high_cardinality,sensitive,status,definition_hash,
+				created_by,updated_by
+			)
+			SELECT classified.tenant_id,classified.dataset_id,
+				classified.dataset_version_id,classified.field_id,
+				classified.code,classified.name,
+				classified.description,
+				CASE WHEN classified.field_role='TIME'
+				  THEN 'TIME' ELSE 'STANDARD' END,
+				-- Programmatic approval establishes dimension identity immediately.
+				-- Member enumeration remains fail-closed until a separate governed
+				-- profile/index policy explicitly enables it.
+				'NONE',
+				classified.high_cardinality,classified.sensitive,
+				'PUBLISHED',
+				encode(public.digest(convert_to(concat_ws(E'\x1f',
+					classified.dataset_id::text,
+					classified.dataset_version_id::text,
+					classified.field_id,classified.code,classified.name,
+					classified.description,classified.field_role,classified.semantic_type,
+					'NONE',
+					classified.high_cardinality::text,
+					classified.sensitive::text,'PUBLISHED'
+				),'UTF8'),'sha256'),'hex'),
+				$1::uuid,$1::uuid
+			FROM classified
+			ON CONFLICT(tenant_id,dataset_version_id,field_id) DO NOTHING
+			RETURNING id,dataset_id,dataset_version_id,field_id
+		), audited AS (
+			INSERT INTO platform.audit_logs(
+				tenant_id,actor_user_id,action,resource_type,resource_id,detail
+			)
+			SELECT platform.current_tenant_id(),$1::uuid,
+				'PROGRAM_APPROVE_DWS_DIMENSION','SEMANTIC_DIMENSION',
+				inserted.id::text,jsonb_build_object(
+					'datasetId',inserted.dataset_id::text,
+					'datasetVersionId',inserted.dataset_version_id::text,
+					'fieldId',inserted.field_id,
+					'classification','DATASET_FIELD_ROLE'
+				)
+			FROM inserted
+		), retired_candidates AS (
+			UPDATE platform.dimension_survey_candidates AS candidate
+			SET status='STALE',version=candidate.version+1,
+				decision_reason='PROGRAM_FIELD_CLASSIFICATION_ENABLED',
+				updated_by=$1::uuid,updated_at=clock_timestamp()
+			WHERE candidate.status='SUGGESTED'
+			RETURNING candidate.id
+		)
+		SELECT
+			(SELECT count(*)::int FROM current_dws),
+			(SELECT count(*)::int FROM inserted)`,
+		actorID,
+	).Scan(&datasetCount, &assetCount)
+	return datasetCount, assetCount, err
 }
 
 func loadIdentificationDatasetIndexesTx(
@@ -154,7 +265,7 @@ func loadIdentificationDatasetIndexesTx(
 		WHERE dataset.status='PUBLISHED'
 		  AND dataset.deleted_at IS NULL
 		  AND version.status='PUBLISHED'
-		  AND version.layer IN ('DWS','ADS')
+		  AND version.layer='DWS'
 		ORDER BY version.layer,dataset.code,dataset.id`)
 	if err != nil {
 		return nil, err
@@ -211,7 +322,7 @@ func loadIdentificationDatasetIndexesTx(
 		  ON dataset_version.tenant_id=version.tenant_id
 		 AND dataset_version.id=version.dataset_version_id
 		 AND dataset_version.status='PUBLISHED'
-		 AND dataset_version.layer IN ('DWS','ADS')
+		 AND dataset_version.layer='DWS'
 		ORDER BY version.dataset_version_id,metric.code`)
 	if err != nil {
 		return nil, err
@@ -253,7 +364,7 @@ func loadIdentificationDatasetIndexesTx(
 		  ON dataset_version.tenant_id=candidate.tenant_id
 		 AND dataset_version.id=candidate.dataset_version_id
 		 AND dataset_version.status='PUBLISHED'
-		 AND dataset_version.layer IN ('DWS','ADS')
+		 AND dataset_version.layer='DWS'
 		LEFT JOIN platform.metric_semantic_documents AS document
 		  ON document.tenant_id=candidate.tenant_id
 		 AND document.subject_type='CANDIDATE'
@@ -295,7 +406,7 @@ func loadIdentificationDatasetIndexesTx(
 		  ON version.tenant_id=field.tenant_id
 		 AND version.id=field.dataset_version_id
 		 AND version.status='PUBLISHED'
-		 AND version.layer IN ('DWS','ADS')
+		 AND version.layer='DWS'
 		LEFT JOIN platform.semantic_dimensions AS dimension
 		  ON dimension.tenant_id=field.tenant_id
 		 AND dimension.dataset_version_id=field.dataset_version_id
@@ -335,7 +446,7 @@ func loadIdentificationDatasetIndexesTx(
 		    LIMIT 200
 		  ) AS value
 		) AS member_values ON true
-		WHERE field.field_role IN ('DIMENSION','TIME')
+		WHERE field.field_role IN ('DIMENSION','ATTRIBUTE','TIME','IDENTIFIER')
 		ORDER BY field.dataset_version_id,field.ordinal_position`)
 	if err != nil {
 		return nil, err
@@ -390,6 +501,53 @@ func loadIdentificationDatasetIndexesTx(
 		items[index].IndexDocument = raw
 	}
 	return items, nil
+}
+
+func (s *PostgresStore) ListAutomaticApprovalCandidates(
+	ctx context.Context,
+	tenantID string,
+	limit int,
+) (items []AutomaticApprovalCandidate, err error) {
+	if s == nil || tenantID == "" || limit < 1 || limit > automaticApprovalBatchSize {
+		return nil, ErrInvalidRequest
+	}
+	items = []AutomaticApprovalCandidate{}
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		rows, queryErr := tx.Query(ctx, `SELECT `+candidateSelect+`,
+				COALESCE(job.requested_by::text,version.published_by::text)
+			FROM platform.metric_candidates AS candidate
+			JOIN platform.metric_extraction_jobs AS job
+			  ON job.tenant_id=candidate.tenant_id
+			 AND job.id=candidate.job_id
+			 AND job.extractor_version=$1
+			JOIN platform.dataset_versions AS version
+			  ON version.tenant_id=candidate.tenant_id
+			 AND version.id=candidate.dataset_version_id
+			 AND version.status='PUBLISHED'
+			 AND version.layer='DWS'
+			`+candidateSemanticJoin+`
+			WHERE candidate.status IN ('READY','NEEDS_REVIEW')
+			  AND cardinality(candidate.block_reasons)=0
+			  AND COALESCE(job.requested_by,version.published_by) IS NOT NULL
+			ORDER BY candidate.created_at,candidate.id
+			LIMIT $2`,
+			CodeIdentificationVersion, limit)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item AutomaticApprovalCandidate
+			if scanErr := scanCandidateWithTrailingActor(
+				rows, &item.Candidate, &item.ActorID,
+			); scanErr != nil {
+				return scanErr
+			}
+			items = append(items, item)
+		}
+		return rows.Err()
+	})
+	return items, err
 }
 
 // LoadMetricSemanticContext returns reviewed catalog metadata for the exact physical
@@ -498,21 +656,34 @@ func (s *PostgresStore) EnqueueDatasetMetricExtractionTx(
 	if tenantID == "" || version.Status != "PUBLISHED" || version.DatasetID == "" || version.ID == "" || version.DSLHash == "" {
 		return ErrInvalidRequest
 	}
-	if version.Layer == dataset.LayerDWS || version.Layer == dataset.LayerADS {
+	if version.Layer == dataset.LayerADS {
 		return nil
+	}
+	extractorVersion := JobVersion
+	if version.Layer == dataset.LayerDWS {
+		// DWS save-time semantic naming has already fixed field roles, names and
+		// descriptions. Publish the dimension assets in the same transaction and
+		// let the worker accept only explicit MEASURE fields.
+		if _, _, err := approveDWSFieldDimensionsTx(ctx, tx, actorID); err != nil {
+			return err
+		}
+		extractorVersion = CodeIdentificationVersion
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO platform.metric_extraction_jobs(
 		tenant_id,dataset_id,dataset_version_id,dsl_hash,requested_by,extractor_version,prepared_result
-	) VALUES($1,$2,$3,$4,NULLIF($5,'')::uuid,$6,(
-		SELECT request.metric_candidate_result
-		FROM platform.dataset_publication_requests AS request
-		WHERE request.tenant_id=$1 AND request.dataset_id=$2
-		  AND request.reserved_published_version_id=$3
-		  AND request.status='PENDING'
-		  AND request.metric_candidate_generation_status IN ('SUCCEEDED','PARTIAL')
-	))
+	) VALUES($1,$2,$3,$4,NULLIF($5,'')::uuid,$6,
+		CASE WHEN $6=$7 THEN NULL ELSE (
+			SELECT request.metric_candidate_result
+			FROM platform.dataset_publication_requests AS request
+			WHERE request.tenant_id=$1 AND request.dataset_id=$2
+			  AND request.reserved_published_version_id=$3
+			  AND request.status='PENDING'
+			  AND request.metric_candidate_generation_status IN ('SUCCEEDED','PARTIAL')
+		) END
+	)
 	ON CONFLICT(tenant_id,dataset_version_id,extractor_version) DO NOTHING`,
-		tenantID, version.DatasetID, version.ID, version.DSLHash, actorID, JobVersion)
+		tenantID, version.DatasetID, version.ID, version.DSLHash, actorID,
+		extractorVersion, CodeIdentificationVersion)
 	return err
 }
 
@@ -524,6 +695,7 @@ type JobClaim struct {
 	DatasetVersionID string
 	DSLHash          string
 	RequestedBy      string
+	ExtractorVersion string
 	PreparedResult   json.RawMessage
 }
 
@@ -578,10 +750,11 @@ func (s *PostgresStore) ClaimJob(ctx context.Context, tenantID, workerID string,
 			error_code='',error_message=''
 		FROM candidate WHERE job.id=candidate.id
 		RETURNING job.id::text,job.dataset_id::text,job.dataset_version_id::text,
-			job.dsl_hash,COALESCE(job.requested_by::text,''),COALESCE(job.prepared_result,'null'::jsonb)`,
+			job.dsl_hash,COALESCE(job.requested_by::text,''),job.extractor_version,
+			COALESCE(job.prepared_result,'null'::jsonb)`,
 			workerID, int64(lease/time.Second)).
 			Scan(&item.ID, &item.DatasetID, &item.DatasetVersionID, &item.DSLHash,
-				&item.RequestedBy, &item.PreparedResult)
+				&item.RequestedBy, &item.ExtractorVersion, &item.PreparedResult)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -692,7 +865,8 @@ func (s *PostgresStore) FinishJob(ctx context.Context, claim JobClaim, workerID 
 		// The source can be disabled or made stale after extraction begins. Revalidate under
 		// row locks. A snapshot already known to be unavailable may enter the inventory only
 		// when every candidate is explicitly dependency-blocked and therefore unreviewable.
-		if err := dataset.ValidateVersionDependenciesInTx(ctx, tx, claim.DatasetID, claim.DatasetVersionID); err != nil {
+		if err := dataset.ValidateVersionDependenciesInTx(ctx, tx, claim.DatasetID, claim.DatasetVersionID); err != nil &&
+			claim.ExtractorVersion != CodeIdentificationVersion {
 			if !errors.Is(err, dataset.ErrVersionUnavailable) || !dependencyBlocked {
 				return err
 			}
@@ -822,8 +996,10 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, filter ListFi
 			 AND version.id=candidate.dataset_version_id
 			WHERE ($1='' OR candidate.status=$1)
 			  AND ($2='' OR candidate.dataset_id::text=$2)
-			  AND (version.layer IN ('DIM','DWD')
-			    OR job.extractor_version='metric-candidate-manual-v1')
+				  AND (version.layer IN ('DIM','DWD')
+				    OR job.extractor_version IN (
+				      'metric-candidate-manual-v1','metric-candidate-code-v1'
+				    ))
 			  AND NOT(candidate.status='BLOCKED' AND candidate.block_reasons &&
 			    ARRAY['AGGREGATED_DATASET_UNSUPPORTED','PRE_AGGREGATION_UNSUPPORTED',
 			          'AGGREGATE_EXPRESSION_UNSUPPORTED']::text[])`,
@@ -838,8 +1014,10 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, filter ListFi
 			  ON version.tenant_id=candidate.tenant_id
 			 AND version.id=candidate.dataset_version_id`+candidateSemanticJoin+`
 			WHERE ($1='' OR candidate.status=$1) AND ($2='' OR candidate.dataset_id::text=$2)
-			  AND (version.layer IN ('DIM','DWD')
-			    OR job.extractor_version='metric-candidate-manual-v1')
+				  AND (version.layer IN ('DIM','DWD')
+				    OR job.extractor_version IN (
+				      'metric-candidate-manual-v1','metric-candidate-code-v1'
+				    ))
 			  AND NOT(candidate.status='BLOCKED' AND candidate.block_reasons &&
 			    ARRAY['AGGREGATED_DATASET_UNSUPPORTED','PRE_AGGREGATION_UNSUPPORTED',
 			          'AGGREGATE_EXPRESSION_UNSUPPORTED']::text[])
@@ -910,10 +1088,18 @@ func (s *PostgresStore) Reject(ctx context.Context, tenantID, actorID, id string
 }
 
 func scanCandidate(row interface{ Scan(...any) error }, candidate *Candidate) error {
+	return scanCandidateWithTrailingActor(row, candidate, nil)
+}
+
+func scanCandidateWithTrailingActor(
+	row interface{ Scan(...any) error },
+	candidate *Candidate,
+	actorID *string,
+) error {
 	var status string
 	var evidenceRaw json.RawMessage
 	var lineageRaw json.RawMessage
-	if err := row.Scan(
+	destinations := []any{
 		&candidate.ID, &candidate.DatasetID, &candidate.DatasetVersionID, &candidate.DSLHash,
 		&candidate.Name, &candidate.Code, &candidate.Description, &status, &candidate.Method,
 		&candidate.Confidence, &candidate.ProposedDefinition, &candidate.SourceFieldIDs,
@@ -925,7 +1111,11 @@ func scanCandidate(row interface{ Scan(...any) error }, candidate *Candidate) er
 		&lineageRaw, &candidate.Semantic.LineageSummary, &candidate.Semantic.Tags,
 		&candidate.Semantic.Source, &candidate.Semantic.Model, &candidate.Semantic.PromptVersion,
 		&candidate.Semantic.InputHash, &candidate.Semantic.RequestID, &candidate.Semantic.ErrorCode,
-	); err != nil {
+	}
+	if actorID != nil {
+		destinations = append(destinations, actorID)
+	}
+	if err := row.Scan(destinations...); err != nil {
 		return err
 	}
 	candidate.Status = CandidateStatus(status)

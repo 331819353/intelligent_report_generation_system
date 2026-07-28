@@ -393,6 +393,14 @@ func writeDatasetError(w http.ResponseWriter, err error) {
 		writeDatasetJSON(w, http.StatusUnprocessableEntity, map[string]any{"code": "DSL-001-VALIDATION-FAILED", "message": "数据集 DSL 校验失败", "details": validation.Issues})
 	case errors.As(err, &publication):
 		writeDatasetJSON(w, http.StatusUnprocessableEntity, map[string]any{"code": "DATASET_PUBLISH_VALIDATION_FAILED", "message": "数据集发布前校验失败", "details": publication.Issues})
+	case errors.Is(err, ErrPublishValidation):
+		writeDatasetJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"code": "DATASET_PUBLISH_VALIDATION_FAILED", "message": "数据集发布前校验失败",
+			"details": []PublicationIssue{{
+				Path: "nodes", Code: "PUBLISH_DEPENDENCY_CHANGED",
+				Reason: "草稿依赖在发布前发生变化，请重新保存并试跑",
+			}},
+		})
 	case errors.Is(err, ErrNotFound):
 		writeDatasetJSON(w, http.StatusNotFound, map[string]string{"code": "DATASET_NOT_FOUND", "message": "数据集不存在"})
 	case errors.Is(err, ErrVersionNotFound):
@@ -425,6 +433,10 @@ func writeDatasetError(w http.ResponseWriter, err error) {
 		writeDatasetJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "DATASET_PUBLISH_UNAVAILABLE", "message": "发布试跑服务暂时不可用"})
 	case errors.Is(err, ErrLLMTriggerUnavailable):
 		writeDatasetJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "DATASET_LLM_TRIGGER_UNAVAILABLE", "message": "数据集智能建模触发服务暂时不可用"})
+	case errors.Is(err, ErrSemanticNamingUnavailable):
+		writeDatasetJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "DATASET_SEMANTIC_NAMING_UNAVAILABLE", "message": "DWD/DWS/ADS 语义命名服务暂时不可用，请稍后重试"})
+	case errors.Is(err, ErrSemanticNamingInvalid):
+		writeDatasetJSON(w, http.StatusUnprocessableEntity, map[string]string{"code": "DATASET_SEMANTIC_NAMING_INVALID", "message": "DWD/DWS/ADS 语义命名结果未通过校验，请重试"})
 	case errors.Is(err, ErrInvalidTransition):
 		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_VERSION_TRANSITION_INVALID", "message": "数据集状态迁移无效"})
 	case errors.Is(err, ErrInUse):

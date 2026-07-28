@@ -117,7 +117,7 @@ const errorMessage = (cause: unknown) => {
   if (cause instanceof RequestError && cause.status === 409) {
     return '资源已被其他治理操作更新，请重新加载后再试。'
   }
-  return cause instanceof Error ? cause.message : '语义治理服务暂不可用，请稍后重试。'
+  return cause instanceof Error ? cause.message : '维度治理服务暂不可用，请稍后重试。'
 }
 
 const stricterPolicy = (
@@ -492,7 +492,7 @@ export function SemanticGovernancePage({ initialView = 'candidates' }: { initial
   }
 
   return (
-    <AppShell title="资产管理中心" eyebrow="指标 · 语义 · 维度值">
+    <AppShell title="资产管理中心" eyebrow="维度资产 · 维度值治理">
       <AssetManagementTabs />
       <section className="semantic-governance">
         {notice && (
@@ -503,11 +503,11 @@ export function SemanticGovernancePage({ initialView = 'candidates' }: { initial
         )}
 
         {!permissionsReady ? (
-          <section className="semantic-state">正在检查语义治理权限…</section>
+          <section className="semantic-state">正在检查维度治理权限…</section>
         ) : !capabilities.read ? (
           <section className="semantic-state denied">
-            <strong>当前账号没有语义治理读取权限</strong>
-            <span>语义治理复用全局 DATASET:READ；请联系管理员授权后重试。</span>
+            <strong>当前账号没有维度治理读取权限</strong>
+            <span>维度治理复用全局 DATASET:READ；请联系管理员授权后重试。</span>
           </section>
         ) : (
           <>
@@ -517,14 +517,14 @@ export function SemanticGovernancePage({ initialView = 'candidates' }: { initial
               </div>
             )}
             {loadError && <div className="semantic-load-error" role="alert">{loadError}</div>}
-            <div className="semantic-summary" aria-label="语义治理概览">
+            <div className="semantic-summary" aria-label="维度治理概览">
               <article><span>当前候选</span><strong>{formatCount(candidateTotal)}</strong><small>{suggestedCount} 条在当前页待治理</small></article>
               <article><span>风险候选</span><strong>{formatCount(riskyCount)}</strong><small>敏感或高基数，策略不可放宽</small></article>
               <article><span>正式维度</span><strong>{formatCount(dimensionTotal)}</strong><small>{publishedCount} 条在当前页已发布</small></article>
               <article><span>检索门槛</span><strong>2</strong><small>成员快照 + 已验证指标兼容</small></article>
             </div>
 
-            <div className="semantic-view-tabs" role="tablist" aria-label="语义治理视图">
+            <div className="semantic-view-tabs" role="tablist" aria-label="维度治理视图">
               <button type="button" role="tab" aria-selected={view === 'candidates'} onClick={() => setView('candidates')}>
                 DWS 维度候选
               </button>

@@ -378,6 +378,50 @@ func TestServicePlanUsesCurrentGraphAndObjectAuditForModification(t *testing.T) 
 	}
 }
 
+func TestServicePlanUsesUnsavedNewCanvasAsModificationBaseline(t *testing.T) {
+	proposal := testProposal()
+	current := proposal.Plan
+	invoker := &fakeInvoker{configured: true, results: []aiplatform.InvocationResult{
+		intentResult(t, readyIntent(), "intent-unsaved"),
+		plannerResult(t, proposal, "request-unsaved"),
+	}}
+	service := NewService(plannerCatalog(), invoker)
+	var progress []PlanProgressEvent
+	ctx := withPlanProgressReporter(context.Background(), func(event PlanProgressEvent) {
+		progress = append(progress, event)
+	})
+
+	result, err := service.Plan(ctx, "tenant-1", "actor-1", "", PlanRequest{
+		Instruction: "调整当前尚未保存的流程",
+		Current:     &current,
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if result.Proposal.Mode != "MODIFY" || len(invoker.inputs) != 2 {
+		t.Fatalf("mode/invocations = %q/%d", result.Proposal.Mode, len(invoker.inputs))
+	}
+	intentEnvelope := intentRequestEnvelope(t, invoker.inputs[0])
+	plannerEnvelope := requestEnvelope(t, invoker.inputs[1])
+	normalizedCurrent := normalizeGraphPlan(current)
+	if !reflect.DeepEqual(intentEnvelope.Current, normalizedCurrent) || plannerEnvelope.Current == nil || !reflect.DeepEqual(*plannerEnvelope.Current, normalizedCurrent) {
+		t.Fatalf("unsaved current graph was not forwarded to both model phases: intent=%#v planner=%#v", intentEnvelope.Current, plannerEnvelope.Current)
+	}
+	if invoker.inputs[0].ResourceType != "" || invoker.inputs[1].ResourceType != "" {
+		t.Fatalf("unsaved canvas must not invent a persisted resource audit target: %#v", invoker.inputs)
+	}
+	foundContext := false
+	for _, event := range progress {
+		if event.Stage == ProgressStageContext && event.Status == ProgressStatusSucceeded &&
+			strings.Contains(event.Message, "当前未保存画布") {
+			foundContext = true
+		}
+	}
+	if !foundContext {
+		t.Fatalf("progress does not confirm unsaved baseline: %#v", progress)
+	}
+}
+
 func TestModificationLanguageAlwaysUsesTheSemanticIntentModel(t *testing.T) {
 	current := scopeTestPlan()
 	catalog := fieldChangeTestCatalog()

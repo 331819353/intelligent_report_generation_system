@@ -42,7 +42,12 @@ export type SemanticQueryPlan = {
     metricCode: string
     metricVersionId: string
     datasetVersionId: string
-    dimensions: Array<{ dimensionCode: string; dimensionId: string; memberKey: string }>
+    dimensions: Array<{
+      dimensionCode: string
+      dimensionId: string
+      memberKey?: string
+      memberKeys?: string[]
+    }>
     timeRange?: { start: string; endExclusive: string }
   }
   executedQueryId?: string
@@ -50,6 +55,105 @@ export type SemanticQueryPlan = {
   executionDurationMs?: number
   executionRowCount?: number
   createdAt: string
+}
+
+export type SemanticQueryTurn = {
+  questionHash: string
+  intent: string
+  metricCodes: string[]
+  contextQueryPlanIds: string[]
+  contextInherited: boolean
+  plans: SemanticQueryPlan[]
+  trace: SemanticQueryTurnTrace
+}
+
+export type SemanticQueryTurnTrace = {
+  conversationQuestions: string[]
+  contextPolicy: string
+  standaloneQuestion: string
+  extraction: {
+    intent: string
+    metricTerms: string[]
+    dimensionValueTerms: string[]
+  }
+  metricCandidates: Array<{
+    code: string
+    label: string
+    matchedTerm?: string
+    matchMethod: string
+    score: number
+    selected: boolean
+    source: string
+  }>
+  dimensionValueLookups: Array<{
+    term: string
+    canonicalValue?: string
+    aliasValues?: string[]
+    metricCode: string
+    metricName?: string
+    metricFieldId: string
+    metricVersionId?: string
+    datasetVersionId?: string
+    materializationId?: string
+    tableSchema?: string
+    tableName?: string
+    decisionId?: string
+    dimensionId?: string
+    dimensionCode: string
+    dimensionName: string
+    dimensionFieldId: string
+    dimensionFieldName: string
+    dimensionFieldDescription: string
+    vectorQuery: string
+    vectorModel?: string
+    vectorDimensions?: number
+    vectorSearchStatus: string
+    vectorCandidateCount: number
+    vectorCandidateMemberKeys?: string[]
+    vectorTopScore?: number
+    whereDesignStatus: string
+    whereDesignOperator?: string
+    whereDesignReason?: string
+    whereDesignModel?: string
+    matchMethod: string
+    candidateCount: number
+    candidateMemberKeys?: string[]
+    selectedMemberKeys?: string[]
+    whereCondition: string
+    compiledCondition: string
+    candidateFilter: {
+      inputCount: number
+      acceptedCount: number
+      rejectedCount: number
+      status: string
+      rules: string[]
+    }
+    selected: boolean
+    source: string
+    sensitive: boolean
+  }>
+  finalSelections: Array<{
+    metricCode: string
+    metricName: string
+    metricFieldId: string
+    metricVersionId: string
+    datasetVersionId: string
+    dimensions: Array<{
+      dimensionCode: string
+      dimensionName: string
+      memberKeys: string[]
+    }>
+    whereCondition: string
+    compiledCondition: string
+    planId: string
+    planStatus: string
+  }>
+  assessments: Array<{
+    step: string
+    status: 'PASS' | 'WARN' | 'BLOCKED' | string
+    decision: string
+    detail: string
+  }>
 }
 
 export type SemanticPreviewResult = {
@@ -139,12 +243,31 @@ export type PlanQuestionInput = {
   signal?: AbortSignal
 }
 
+export type PlanTurnInput = {
+  question: string
+  priorQuestions?: string[]
+  contextQueryPlanIds?: string[]
+  signal?: AbortSignal
+}
+
 const newQueryID = () => typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
   ? crypto.randomUUID()
   : '00000000-0000-4000-8000-000000000001'
 
 export const semanticChatAPI = {
   graphStatus: () => apiRequest<SemanticGraphStatus>('/v1/semantic-qa/graph/status'),
+
+  planTurn: ({ question, priorQuestions, contextQueryPlanIds, signal }: PlanTurnInput) =>
+    apiRequest<SemanticQueryTurn>('/v1/semantic-qa/query-turns', {
+      method: 'POST',
+      signal,
+      body: JSON.stringify({
+        question,
+        maximumPathHops: 8,
+        ...(priorQuestions?.length ? { priorQuestions } : {}),
+        ...(contextQueryPlanIds?.length ? { contextQueryPlanIds } : {}),
+      }),
+    }),
 
   planQuestion: ({ question, contextQueryPlanId, signal }: PlanQuestionInput) =>
     apiRequest<SemanticQueryPlan>('/v1/semantic-qa/query-plans', {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
-import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DropSlashIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MathOperationsIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTIcon, TextTSlashIcon, TreeStructureIcon, XIcon, type Icon } from '@phosphor-icons/react'
+import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MathOperationsIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTIcon, TextTSlashIcon, TreeStructureIcon, XIcon, type Icon } from '@phosphor-icons/react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { RequestError } from '../lib/api'
@@ -11,6 +11,7 @@ import {
   requestDatasetAIProposal,
   type DatasetAIPlanHints,
   type DatasetAIPlanResult,
+  type DatasetAIProgressEvent,
 } from '../lib/dataset-ai'
 import { hydrateDatasetDraft } from '../lib/dataset-draft'
 import {
@@ -30,9 +31,11 @@ import {
   type DesignerGraphV1,
   type GraphEnd,
   type GraphGroup,
+  type GraphGroupByMode,
   type GraphInput,
   type GraphJoin,
   type GraphConditionOperator,
+  type GraphFilterCondition,
   type GraphTransform,
   type GraphTransformComponentType,
   type GraphTransformFamily,
@@ -52,6 +55,7 @@ import {
   type DatasetLayer,
   type DatasetLLMTrigger,
   type DatasetPreview,
+  type DatasetPreviewColumn,
   type DatasetPublicationRequest,
   type DatasetRecord,
   type DatasetSummary,
@@ -73,7 +77,7 @@ type CanvasComponentKind = RelationInput['kind'] | 'END'
 type CanvasPreviewTarget = RelationInput | { kind: 'END'; id: string }
 type NodePreviewState = { loading: boolean; data?: AssetTablePreview; error?: string; suggestion?: string }
 type VersionPreviewState = { versionID: string; loading: boolean; data?: DatasetPreview; error?: string }
-type DialogState = { mode: 'create' | 'view' | 'metadata' | 'history' | 'publish' | 'disable' | 'restore' | 'delete'; dataset?: DatasetSummary }
+type DialogState = { mode: 'create' | 'view' | 'metadata' | 'history' | 'publish' | 'publish-review' | 'disable' | 'restore' | 'delete'; dataset?: DatasetSummary }
 type DatasetBatchAction = 'publish' | 'disable' | 'delete'
 type DatasetBatchOutcome = { dataset: DatasetSummary; error?: string }
 type Notice = { tone: 'success' | 'error'; message: string }
@@ -112,7 +116,7 @@ const statusLabels: Record<string, string> = {
   DRAFT: '草稿', VALIDATING: '校验中', PUBLISHED: '已发布', STALE: '已失效', DEPRECATED: '已废弃', DISABLED: '已停用',
 }
 const layerOverview: Array<{ layer: DatasetLayer; name: string; description: string }> = [
-  { layer: 'ODS', name: '源映射', description: '物理表映射' },
+  { layer: 'ODS', name: '源映射', description: '结构映射 · 数据留在来源' },
   { layer: 'DIM', name: '维度', description: '实体说明' },
   { layer: 'DWD', name: '事实明细', description: '动作与维度' },
   { layer: 'DWS', name: '主题汇总', description: '分析视角' },
@@ -128,7 +132,7 @@ const publicationStatusLabels: Record<string, string> = {
 const metricCandidateGenerationLabels: Record<string, string> = {
   LEGACY: '历史流程', PENDING: '审批后加工', SUCCEEDED: '历史准备已完成', PARTIAL: '历史准备部分完成', FAILED: '历史准备失败',
 }
-type TransformPaletteCategory = 'TEXT' | 'NUMBER' | 'DATE' | 'RULE'
+type TransformPaletteCategory = 'TEXT' | 'NUMBER' | 'DATE' | 'WINDOW' | 'RULE'
 type TransformComponentMeta = {
   componentType: GraphTransformComponentType
   family: GraphTransformFamily
@@ -140,6 +144,7 @@ type TransformComponentMeta = {
   icon: Icon
 }
 const transformComponentMeta: TransformComponentMeta[] = [
+  { componentType: 'WINDOW_FUNCTION', family: 'WINDOW', category: 'WINDOW', label: '窗口计算', description: '按分区与排序排名或聚合', sortKey: 'CHUANGKOUJISUAN', operations: ['WINDOW'], icon: RowsIcon },
   { componentType: 'TEXT_UPPER', family: 'TEXT', category: 'TEXT', label: '大写转换', description: '英文字母统一转大写', sortKey: 'DAXIEZHUANHUAN', operations: ['UPPER'], icon: TextAaIcon },
   { componentType: 'TEXT_TRIM', family: 'TEXT', category: 'TEXT', label: '空格清理', description: '去除文本首尾空格', sortKey: 'KONGGEQINGLI', operations: ['TRIM'], icon: TextTSlashIcon },
   { componentType: 'TEXT_REPLACE', family: 'TEXT', category: 'TEXT', label: '文本替换', description: '查找并替换指定文本', sortKey: 'WENBENTIHUAN', operations: ['REPLACE'], icon: SwapIcon },
@@ -149,15 +154,20 @@ const transformComponentMeta: TransformComponentMeta[] = [
   { componentType: 'NUMBER_ABSOLUTE', family: 'NUMBER', category: 'NUMBER', label: '取绝对值', description: '将负数转换为正数值', sortKey: 'QUJUEDUIZHI', operations: ['ABS'], icon: PlusMinusIcon },
   { componentType: 'NUMBER_ROUNDING', family: 'NUMBER', category: 'NUMBER', label: '数值取整', description: '四舍五入或上下取整', sortKey: 'SHUZHIQUZHENG', operations: ['ROUND', 'FLOOR', 'CEIL'], icon: ApproximateEqualsIcon },
   { componentType: 'NUMBER_ARITHMETIC', family: 'NUMBER', category: 'NUMBER', label: '数值运算', description: '两个字段加减乘除', sortKey: 'SHUZHIYUNSUAN', operations: ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'], icon: MathOperationsIcon },
+  { componentType: 'DATE_CALCULATION', family: 'DATE', category: 'DATE', label: '日期计算', description: '日期差、CURRENT_DATE 与周期首末日', sortKey: 'RIQIJISUAN', operations: ['DATE_DIFF', 'DATE_EXTRACT', 'DATE_START', 'DATE_END', 'CURRENT_DATE'], icon: CalendarDotsIcon },
   { componentType: 'DATE_FORMAT', family: 'DATE', category: 'DATE', label: '日期转换', description: '输出年、年月、年季或年月日', sortKey: 'RIQIZHUANHUAN', operations: ['DATE_FORMAT'], icon: CalendarDotsIcon },
-  { componentType: 'NULL', family: 'NULL', category: 'RULE', label: '空值填充', description: '仅为空时补固定值或字段', sortKey: 'KONGZHITIANCHONG', operations: ['COALESCE'], icon: DropSlashIcon },
+  { componentType: 'FILTER', family: 'CONDITION', category: 'RULE', label: '过滤组件', description: '按固定值或字段关系筛选数据行', sortKey: 'GUOLVZUJI', operations: [], icon: FunnelIcon },
+  { componentType: 'NULL', family: 'NULL', category: 'RULE', label: '空值填充', description: '为空时补固定值、字段或 CURRENT_DATE', sortKey: 'KONGZHITIANCHONG', operations: ['COALESCE'], icon: DropSlashIcon },
   { componentType: 'CAST', family: 'CAST', category: 'RULE', label: '类型转换', description: '规范字段的数据类型', sortKey: 'LEIXINGZHUANHUAN', operations: ['CAST'], icon: ArrowsLeftRightIcon },
-  { componentType: 'CONDITION', family: 'CONDITION', category: 'RULE', label: '条件映射', description: '按比较条件输出新值', sortKey: 'TIAOJIANYINGSHE', operations: ['CASE'], icon: ListChecksIcon },
+  { componentType: 'CONDITION', family: 'CONDITION', category: 'RULE', label: '条件映射', description: '按条件输出固定值、原字段或 CURRENT_DATE', sortKey: 'TIAOJIANYINGSHE', operations: ['CASE'], icon: ListChecksIcon },
 ]
 const transformCategoryMeta: Array<{ category: TransformPaletteCategory; label: string; className: string }> = [
+  // 日期处理是高频字段加工能力，放在流程组件之后，避免在短视口中被文本和
+  // 数值组件挤到不可见区域。
+  { category: 'DATE', label: '日期组件', className: 'component-date' },
   { category: 'TEXT', label: '文本组件', className: 'component-text' },
   { category: 'NUMBER', label: '数值组件', className: 'component-number' },
-  { category: 'DATE', label: '日期组件', className: 'component-date' },
+  { category: 'WINDOW', label: '分析组件', className: 'component-window' },
   { category: 'RULE', label: '规则组件', className: 'component-rule' },
 ]
 const transformComponentDefinition = (componentType: GraphTransformComponentType) => transformComponentMeta.find(item => item.componentType === componentType)
@@ -168,6 +178,7 @@ const transformComponentTypeFor = (transform: Pick<GraphTransform, 'family' | 'c
   if (transform.family === 'CAST') return 'CAST'
   if (transform.family === 'CONDITION') return 'CONDITION'
   if (transform.family === 'NULL') return 'NULL'
+  if (transform.family === 'WINDOW') return 'WINDOW_FUNCTION'
   if (transform.family === 'NUMBER') {
     if (operation === 'ABS') return 'NUMBER_ABSOLUTE'
     if (operation && ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'].includes(operation)) return 'NUMBER_ARITHMETIC'
@@ -196,6 +207,27 @@ const dateFormatMeta: Record<DateFormatUnit, { label: string; format: string; ex
 const dateFormatOptions = (Object.keys(dateFormatMeta) as DateFormatUnit[]).map(value => ({
   value, label: `${dateFormatMeta[value].label}（${dateFormatMeta[value].format}）`,
 }))
+const dateCalculationUnitOptions = {
+  DATE_DIFF: [
+    { value: 'YEAR', label: '自然年差' }, { value: 'MONTH', label: '自然月差' }, { value: 'DAY', label: '自然日差' },
+  ],
+  DATE_EXTRACT: [
+    { value: 'YEAR', label: '年' }, { value: 'QUARTER', label: '季度' }, { value: 'MONTH', label: '月' },
+    { value: 'WEEK', label: 'ISO 周' }, { value: 'DAY', label: '日' }, { value: 'WEEKDAY', label: '星期（周一为 1）' },
+    { value: 'DAY_OF_YEAR', label: '年内第几天' },
+  ],
+  DATE_START: [
+    { value: 'WEEK', label: '周第一天（周一）' }, { value: 'MONTH', label: '月第一天' },
+    { value: 'QUARTER', label: '季度第一天' }, { value: 'YEAR', label: '年第一天' },
+  ],
+  DATE_END: [
+    { value: 'WEEK', label: '周最后一天（周日）' }, { value: 'MONTH', label: '月最后一天' },
+    { value: 'QUARTER', label: '季度最后一天' }, { value: 'YEAR', label: '年最后一天' },
+  ],
+} as const
+type DateCalculationOperation = keyof typeof dateCalculationUnitOptions
+const dateCalculationDefaultUnit = (operation: DateCalculationOperation): GraphTransformRule['unit'] =>
+  dateCalculationUnitOptions[operation][0].value
 const conditionOperatorOptions: Array<{ value: GraphConditionOperator; label: string }> = [
   { value: 'EQUALS', label: '等于' }, { value: 'NOT_EQUALS', label: '不等于' },
   { value: 'GT', label: '大于' }, { value: 'GTE', label: '大于等于' },
@@ -399,7 +431,7 @@ async function loadAllTables(): Promise<AssetTable[]> {
 
 const designerAssetLayers: DatasetLayer[] = ['ODS', 'DIM', 'DWD', 'DWS']
 const designerLayerLabels: Record<DatasetLayer, { name: string; description: string }> = {
-  ODS: { name: 'ODS 源映射', description: '原始映射与标准落地' },
+  ODS: { name: 'ODS 源映射', description: '字段结构映射 · 数据不复制入仓' },
   DIM: { name: 'DIM 维度', description: '统一业务实体说明' },
   DWD: { name: 'DWD 事实明细', description: '标准业务过程明细' },
   DWS: { name: 'DWS 主题汇总', description: '跨事实主题聚合' },
@@ -425,6 +457,31 @@ function datasetVersionColumns(table: AssetTable, version: PublishedVersionRecor
       ordinalPosition: index + 1,
     }]
   })
+}
+
+function withDesignerNodePreviewMetadata(node: DesignerNode, preview: AssetTablePreview): AssetTablePreview {
+  const columnsByCode = new Map(node.columns.map(column => [column.columnName, column]))
+  const columnsByNormalizedCode = new Map(node.columns.map(column => [column.columnName.toLocaleLowerCase(), column]))
+  const metadataByCode = new Map((preview.columnMetadata ?? []).flatMap(metadata => {
+    const keys = [metadata.code, metadata.physicalName].filter((value): value is string => Boolean(value))
+    return keys.map(key => [key.toLocaleLowerCase(), metadata] as const)
+  }))
+  const columnMetadata: DatasetPreviewColumn[] = preview.columns.map((code, index) => {
+    const serverMetadata = metadataByCode.get(code.toLocaleLowerCase()) ?? preview.columnMetadata?.[index]
+    if (serverMetadata) return serverMetadata
+    const column = columnsByCode.get(code) ?? columnsByNormalizedCode.get(code.toLocaleLowerCase())
+    return {
+      fieldId: column?.id,
+      code,
+      name: column?.businessName?.trim() || column?.columnName || code,
+      description: column?.businessDescription,
+      physicalName: column?.columnName || code,
+      canonicalType: column?.canonicalType,
+      semanticType: column?.semanticType,
+      nullable: column?.nullable ?? true,
+    }
+  })
+  return { ...preview, columnMetadata }
 }
 
 function publishedDatasetAsset(dataset: DatasetSummary, version: PublishedVersionRecord): AssetTable {
@@ -464,8 +521,11 @@ async function loadDesignerAssets(datasetItems: DatasetSummary[]): Promise<Asset
 
 const nodeFieldCode = (node: DesignerNode, columnName: string, multiple: boolean) => multiple ? `${node.alias}_${columnName}` : columnName
 const safeIdentifier = (value: string) => value.trim().replace(/[^A-Za-z0-9_]/g, '_').replace(/^[^A-Za-z]+/, '') || 'field'
+const groupFieldOutputKey = (groupID: string, role: 'dimension' | 'metric', field: ProducedField) =>
+  `${safeIdentifier(groupID)}.${role}_${safeIdentifier(field.code)}`
 const numericCanonicalTypes = new Set(['NUMBER', 'INT', 'INTEGER', 'DECIMAL', 'FLOAT', 'DOUBLE'])
 const dateCanonicalTypes = new Set(['DATE', 'DATETIME', 'TIMESTAMP'])
+const rankingWindowFunctions = new Set(['ROW_NUMBER', 'RANK', 'DENSE_RANK'])
 const transformOperations = (transform: Pick<GraphTransform, 'family' | 'componentType'>): GraphTransformOperation[] => {
   if (transform.componentType) return transformComponentDefinition(transform.componentType)?.operations || []
   if (transform.family === 'DATE') return ['DATE_FORMAT']
@@ -474,9 +534,12 @@ const transformOperations = (transform: Pick<GraphTransform, 'family' | 'compone
   if (transform.family === 'NUMBER') return ['ROUND', 'ABS', 'FLOOR', 'CEIL', 'ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE']
   if (transform.family === 'CONDITION') return ['CASE']
   if (transform.family === 'NULL') return ['COALESCE']
+  if (transform.family === 'WINDOW') return ['WINDOW']
   return ['CONCAT', 'SUBSTRING']
 }
 const transformOperationLabel: Record<GraphTransformOperation, string> = {
+  WINDOW: 'OVER 窗口函数',
+  CURRENT_DATE: '获取当前日期', DATE_DIFF: '计算两个日期的差', DATE_EXTRACT: '提取日期部分', DATE_START: '获取周期第一天', DATE_END: '获取周期最后一天',
   DATE_FORMAT: '日期格式化', DATE_TRUNC: '日期归整', CAST: '转换类型', ADD: '相加', SUBTRACT: '相减', MULTIPLY: '相乘', DIVIDE: '相除',
   ROUND: '四舍五入', ABS: '绝对值', FLOOR: '向下取整', CEIL: '向上取整',
   CONCAT: '合并两个字段', COALESCE: '填充空值', CASE: '按条件映射', SUBSTRING: '按位置拆分', TRIM: '去除首尾空格',
@@ -488,34 +551,47 @@ const transformFieldCandidates = (family: GraphTransformFamily, fields: Produced
     : fields
 const defaultFallbackValue = (field?: ProducedField) => {
   const type = field?.canonicalType.toUpperCase() || 'STRING'
-  if (numericCanonicalTypes.has(type)) return '0'
-  if (type === 'BOOLEAN') return 'false'
+  if (numericCanonicalTypes.has(type)) return '999999999'
+  if (type === 'BOOLEAN') return 'False'
   if (dateCanonicalTypes.has(type)) return '1970-01-01'
-  return '-'
+  return 'UNKNOWN'
 }
 const defaultTransformRule = (transform: TransformBox, fields: ProducedField[], index: number): GraphTransformRule => {
   const operation = transformOperations(transform)[0]
   const candidates = transformFieldCandidates(transform.family, fields)
   const first = candidates[0]
-  const binary = ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'CONCAT'].includes(operation)
+  const binary = ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'CONCAT', 'DATE_DIFF'].includes(operation)
   const suffix: Record<GraphTransformOperation, string> = {
+    WINDOW: 'row_number',
+    CURRENT_DATE: 'current_date', DATE_DIFF: 'date_diff', DATE_EXTRACT: 'date_part', DATE_START: 'period_start', DATE_END: 'period_end',
     DATE_FORMAT: dateFormatMeta.DAY.suffix, DATE_TRUNC: 'date', CAST: 'text', ADD: 'calculated', SUBTRACT: 'calculated', MULTIPLY: 'calculated', DIVIDE: 'calculated',
     ROUND: 'rounded', ABS: 'absolute', FLOOR: 'floor', CEIL: 'ceil', CONCAT: 'merged', COALESCE: 'filled', CASE: 'mapped', SUBSTRING: 'substring',
     TRIM: 'trimmed', UPPER: 'uppercase', LOWER: 'lowercase', REPLACE: 'replaced',
   }
-  const outputType = transform.family === 'DATE' ? 'STRING'
+  const outputType = transform.componentType === 'DATE_CALCULATION'
+    ? ['CURRENT_DATE', 'DATE_START', 'DATE_END'].includes(operation) ? 'DATE' : 'INTEGER'
+    : transform.family === 'DATE' ? 'STRING'
     : transform.family === 'CAST' ? 'STRING'
       : transform.family === 'NUMBER' ? 'DECIMAL'
+        : transform.family === 'WINDOW' ? 'INTEGER'
         : transform.family === 'NULL' ? first?.canonicalType || 'STRING' : 'STRING'
   const label = transformDisplayLabel(transform)
   return {
     id: `rule_${index}`,
     operation,
-    inputKeys: first ? binary ? [first.key, candidates[1]?.key || first.key] : [first.key] : [],
-    output: { id: `output_${index}`, name: first ? transform.family === 'DATE' ? `${first.name}${dateFormatMeta.DAY.label}` : `${first.name}${label}结果` : `${label}结果`, code: safeIdentifier(`${first?.code || 'field'}_${suffix[operation]}`), canonicalType: outputType },
+    inputKeys: operation === 'WINDOW' ? [] : first ? binary ? [first.key, candidates[1]?.key || first.key] : [first.key] : [],
+    output: { id: `output_${index}`, name: operation === 'WINDOW' ? '分区行号' : operation === 'CURRENT_DATE' ? '当前日期' : first ? transform.componentType === 'DATE_CALCULATION' ? `${first.name}${transformOperationLabel[operation]}` : transform.family === 'DATE' ? `${first.name}${dateFormatMeta.DAY.label}` : `${first.name}${label}结果` : `${label}结果`, code: safeIdentifier(operation === 'WINDOW' ? 'partition_row_number' : operation === 'CURRENT_DATE' ? 'current_date' : `${first?.code || 'field'}_${suffix[operation]}`), canonicalType: outputType },
+    ...(operation === 'WINDOW' ? {
+      windowFunction: 'ROW_NUMBER' as const,
+      partitionByKeys: first ? [first.key] : [],
+      orderBy: candidates[1] || first ? [{ id: `window_order_${index}_1`, key: (candidates[1] || first)!.key, direction: 'ASC' as const }] : [],
+    } : {}),
     ...(operation === 'DATE_FORMAT' ? { unit: 'DAY' as const } : {}),
+    ...(operation === 'DATE_DIFF' ? { unit: 'DAY' as const, startDateSource: 'FIELD' as const, endDateSource: 'FIELD' as const } : {}),
+    ...(operation === 'DATE_EXTRACT' ? { unit: 'YEAR' as const, dateSource: 'FIELD' as const } : {}),
+    ...(operation === 'DATE_START' || operation === 'DATE_END' ? { unit: 'MONTH' as const, dateSource: 'FIELD' as const } : {}),
     ...(operation === 'CAST' ? { targetType: 'STRING' as const } : {}),
-    ...(operation === 'CASE' ? { conditionOperator: 'EQUALS' as const, matchValue: '', thenValue: '', elseValue: '' } : {}),
+    ...(operation === 'CASE' ? { conditionOperator: 'EQUALS' as const, matchValue: '', thenMode: 'LITERAL' as const, thenValue: '', elseMode: 'LITERAL' as const, elseValue: '' } : {}),
     ...(operation === 'COALESCE' ? { fallbackMode: 'LITERAL' as const, fallbackValue: defaultFallbackValue(first) } : {}),
     ...(operation === 'CONCAT' ? { separator: '' } : {}),
     ...(operation === 'ROUND' ? { precision: 2 } : {}),
@@ -533,20 +609,82 @@ const dateFormatOutputForUnit = (rule: GraphTransformRule, field: ProducedField 
   if (nameIsGenerated) output.name = `${field.name}${dateFormatMeta[unit].label}`
   return output
 }
-const transformRuleInputCount = (operation: GraphTransformOperation, fallbackMode?: GraphTransformRule['fallbackMode']) => ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'CONCAT'].includes(operation) || operation === 'COALESCE' && fallbackMode === 'FIELD' ? 2 : 1
+const transformRuleInputCount = (
+  operation: GraphTransformOperation,
+  fallbackMode?: GraphTransformRule['fallbackMode'],
+  dateSource?: GraphTransformRule['dateSource'],
+  startDateSource?: GraphTransformRule['startDateSource'],
+  endDateSource?: GraphTransformRule['endDateSource'],
+) =>
+  operation === 'WINDOW' || operation === 'CURRENT_DATE' || (operation === 'DATE_EXTRACT' || operation === 'DATE_START' || operation === 'DATE_END') && dateSource === 'CURRENT_DATE'
+    ? 0
+    : operation === 'DATE_DIFF'
+      ? Number(startDateSource !== 'CURRENT_DATE') + Number(endDateSource !== 'CURRENT_DATE')
+      : ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'CONCAT'].includes(operation) || operation === 'COALESCE' && fallbackMode === 'FIELD' ? 2 : 1
 const transformRuleIsComplete = (rule: GraphTransformRule) => {
-  const inputCount = transformRuleInputCount(rule.operation, rule.fallbackMode)
+  const inputCount = transformRuleInputCount(rule.operation, rule.fallbackMode, rule.dateSource, rule.startDateSource, rule.endDateSource)
   const inputsComplete = rule.inputKeys.length >= inputCount && rule.inputKeys.slice(0, inputCount).every(Boolean)
   const unaryCondition = rule.conditionOperator === 'IS_NULL' || rule.conditionOperator === 'IS_NOT_NULL'
   const inCondition = rule.conditionOperator === 'IN'
   const collectionComplete = !inCondition || Boolean(rule.conditionValues?.length && rule.conditionValues.every(item => item.value.trim()))
-  const caseComplete = rule.operation !== 'CASE' || ((unaryCondition || inCondition || Boolean(rule.matchValue?.length)) && collectionComplete && rule.thenValue !== undefined && rule.elseValue !== undefined)
-  const fallbackComplete = rule.operation !== 'COALESCE' || rule.fallbackMode === 'FIELD' || rule.fallbackValue !== undefined
+  const thenComplete = rule.thenMode === 'CURRENT_DATE' || rule.thenMode === 'FIELD' || rule.thenValue !== undefined
+  const elseComplete = rule.elseMode === 'CURRENT_DATE' || rule.elseMode === 'FIELD' || rule.elseValue !== undefined
+  const caseComplete = rule.operation !== 'CASE' || ((unaryCondition || inCondition || Boolean(rule.matchValue?.length)) && collectionComplete && thenComplete && elseComplete)
+  const fallbackComplete = rule.operation !== 'COALESCE' || rule.fallbackMode === 'FIELD' || rule.fallbackMode === 'CURRENT_DATE' || rule.fallbackValue !== undefined
   const precisionComplete = rule.operation !== 'ROUND' || Number.isInteger(rule.precision) && (rule.precision ?? 0) >= -10 && (rule.precision ?? 0) <= 10
   const substringComplete = rule.operation !== 'SUBSTRING' || Number.isInteger(rule.start) && Number.isInteger(rule.length) && (rule.start ?? 0) >= 1 && (rule.length ?? -1) >= 0
   const replaceComplete = rule.operation !== 'REPLACE' || Boolean(rule.searchValue?.length)
-  return inputsComplete && caseComplete && fallbackComplete && precisionComplete && substringComplete && replaceComplete && Boolean(rule.output.name.trim() && rule.output.code.trim() && rule.output.canonicalType.trim())
+  const windowComplete = rule.operation !== 'WINDOW' || Boolean(
+    rule.windowFunction &&
+    (rankingWindowFunctions.has(rule.windowFunction) || rule.windowValueKey) &&
+    rule.partitionByKeys?.length &&
+    rule.orderBy?.length &&
+    rule.orderBy.every(item => item.key && (item.direction === 'ASC' || item.direction === 'DESC')),
+  )
+  return inputsComplete && caseComplete && fallbackComplete && precisionComplete && substringComplete && replaceComplete && windowComplete && Boolean(rule.output.name.trim() && rule.output.code.trim() && rule.output.canonicalType.trim())
 }
+const filterOperatorNeedsValue = (operator: GraphConditionOperator) => operator !== 'IS_NULL' && operator !== 'IS_NOT_NULL'
+const filterOperatorSupportsField = (operator: GraphConditionOperator) => filterOperatorNeedsValue(operator) && operator !== 'IN' && operator !== 'NOT_IN'
+const filterComparableType = (value: string) => {
+  const type = value.toUpperCase()
+  if (numericCanonicalTypes.has(type)) return 'NUMBER'
+  if (dateCanonicalTypes.has(type)) return 'TEMPORAL'
+  if (['STRING', 'TEXT', 'VARCHAR', 'CHAR'].includes(type)) return 'STRING'
+  return type
+}
+const filterFieldsAreCompatible = (left: ProducedField | undefined, right: ProducedField) => Boolean(
+  left && filterComparableType(left.canonicalType) === filterComparableType(right.canonicalType),
+)
+const filterConditionIsComplete = (condition: GraphFilterCondition) => Boolean(
+  condition.inputKey &&
+  condition.operator &&
+  (!filterOperatorNeedsValue(condition.operator) || condition.value.trim()) &&
+  (condition.valueMode !== 'FIELD' || filterOperatorSupportsField(condition.operator)),
+)
+const transformIsFilter = (transform: Pick<GraphTransform, 'componentType'>) => transform.componentType === 'FILTER'
+const transformIsComplete = (transform: GraphTransform) => Boolean(
+  transform.input && transform.name.trim() && (
+    transformIsFilter(transform)
+      ? transform.conditions?.length && transform.conditions.every(filterConditionIsComplete)
+      : transform.rules.length && transform.rules.every(transformRuleIsComplete)
+  ),
+)
+const groupingSetsAreComplete = (group: GraphGroup) => {
+  if (group.groupByMode !== 'GROUPING_SETS') return true
+  const dimensionKeys = new Set(group.dimensions.map(dimension => dimension.key))
+  const groupingSets = group.groupingSets ?? []
+  if (!groupingSets.length || groupingSets.length > 64 || groupingSets.some(groupingSet => groupingSet.some(key => !dimensionKeys.has(key)))) return false
+  const canonical = groupingSets.map(groupingSet => [...new Set(groupingSet)].sort().join('\u0000'))
+  return groupingSets.every(groupingSet => new Set(groupingSet).size === groupingSet.length) && new Set(canonical).size === canonical.length
+}
+const groupIsComplete = (group: GraphGroup) => Boolean(
+  group.input &&
+  group.dimensions.length &&
+  group.metrics.length &&
+  group.metrics.every(metric => metric.aggregation) &&
+  (group.groupByMode !== 'CUBE' || group.dimensions.length >= 2 && group.dimensions.length <= 8) &&
+  groupingSetsAreComplete(group),
+)
 const endOutputFor = (field: ProducedField, previous?: EndBox['outputs'][number]): EndBox['outputs'][number] => {
   const generated = generatedGraphFieldIdentity(field)
   return { key: field.key, name: previous?.name || generated.name, code: previous?.code || generated.code }
@@ -644,6 +782,7 @@ function isConnected(nodes: DesignerNode[], joins: JoinOption[]): boolean {
 }
 
 function configuredGrainKeys(value: DatasetDraft, end?: EndBox | null): string[] {
+  if (value.layer === 'DWD' && !value.groupingEnabled) return value.grainKeys
   if (end?.outputs.length) return [safeIdentifier(end.outputs[0].code)]
   const options = new Map(value.fields.map(field => [field.key, field]))
   if (value.finalConfigured) {
@@ -751,6 +890,7 @@ export function DatasetCenterPage() {
   const [canvasFullscreen, setCanvasFullscreen] = useState(false)
   const [aiPrompt, setAIPrompt] = useState('')
   const [aiResult, setAIResult] = useState<DatasetAIPlanResult | null>(null)
+  const [aiProgressLogs, setAIProgressLogs] = useState<DatasetAIProgressEvent[]>([])
   const [aiError, setAIError] = useState<DatasetAIErrorView | null>(null)
   const [aiBusy, setAIBusy] = useState(false)
   const [aiApplying, setAIApplying] = useState(false)
@@ -952,6 +1092,7 @@ export function DatasetCenterPage() {
     aiApplyRequest.current += 1
     setAIPrompt('')
     setAIResult(null)
+    setAIProgressLogs([])
     setAIError(null)
     setAIBusy(false)
     setAIApplying(false)
@@ -1087,7 +1228,7 @@ export function DatasetCenterPage() {
       const data = node.table.sourceKind === 'DATASET' && node.table.datasetId && node.table.datasetVersionId
         ? await datasetAPI.previewVersion(node.table.datasetId, node.table.datasetVersionId, crypto.randomUUID(), {}, 5)
         : await datasetAPI.tablePreview(node.table.id, 5)
-      setNodePreviews(current => ({ ...current, [node.id]: { loading: false, data } }))
+      setNodePreviews(current => ({ ...current, [node.id]: { loading: false, data: withDesignerNodePreviewMetadata(node, data) } }))
     } catch (cause) {
       setNodePreviews(current => ({ ...current, [node.id]: { loading: false, error: cause instanceof Error ? cause.message : '加载数据预览失败' } }))
     }
@@ -1180,7 +1321,7 @@ export function DatasetCenterPage() {
       right: relationLeaves(box.right, boxes, groupBoxes, transformBoxes).includes(nodeID) ? undefined : box.right,
     })))
     setGroupBoxes(groups => groups.map(group => relationLeaves(group.input, relationBoxes, groups, transformBoxes).includes(nodeID) ? { ...group, input: undefined, dimensions: [], metrics: [] } : group))
-    setTransformBoxes(transforms => transforms.map(transform => relationLeaves(transform.input, relationBoxes, groupBoxes, transforms).includes(nodeID) ? { ...transform, input: undefined, rules: [] } : transform))
+    setTransformBoxes(transforms => transforms.map(transform => relationLeaves(transform.input, relationBoxes, groupBoxes, transforms).includes(nodeID) ? { ...transform, input: undefined, rules: [], conditions: [] } : transform))
     setEndBox(value => value && relationLeaves(value.input, relationBoxes, groupBoxes, transformBoxes).includes(nodeID) ? { ...value, input: undefined, outputs: [] } : value)
     setNodePositions(positions => Object.fromEntries(Object.entries(positions).filter(([id]) => id !== nodeID)))
     setNodePreviews(previews => Object.fromEntries(Object.entries(previews).filter(([id]) => id !== nodeID)))
@@ -1324,7 +1465,7 @@ export function DatasetCenterPage() {
     })))
     setDraft(current => ({ ...current, joins: current.joins.filter(join => join.id !== boxID) }))
     setGroupBoxes(current => current.map(group => group.input?.kind === 'JOIN' && group.input.id === boxID ? { ...group, input: undefined, dimensions: [], metrics: [] } : group))
-    setTransformBoxes(current => current.map(transform => transform.input?.kind === 'JOIN' && transform.input.id === boxID ? { ...transform, input: undefined, rules: [] } : transform))
+    setTransformBoxes(current => current.map(transform => transform.input?.kind === 'JOIN' && transform.input.id === boxID ? { ...transform, input: undefined, rules: [], conditions: [] } : transform))
     setEndBox(current => current?.input && relationContains(current.input, { kind: 'JOIN', id: boxID }, relationBoxes, groupBoxes, transformBoxes) ? { ...current, input: undefined, outputs: [] } : current)
     if (activeJoinID === boxID) setActiveJoinID('')
   }
@@ -1412,7 +1553,8 @@ export function DatasetCenterPage() {
     setGroupBoxes(current => current.map(group => group.id === groupID ? {
       ...group, input,
       dimensions: group.dimensions.filter(field => available.has(field.key)),
-      metrics: group.metrics.filter(field => available.has(field.key)),
+      ...(group.groupingSets ? { groupingSets: group.groupingSets.map(groupingSet => groupingSet.filter(key => available.has(key))) } : {}),
+      metrics: group.metrics.filter(field => field.key === '*' || field.countRows || available.has(field.key)),
     } : group))
     setDraft(current => ({ ...current, joins: current.joins.map(join => relationBoxes.some(box => box.id === join.id && (box.left?.id === groupID || box.right?.id === groupID)) ? { ...join, manualConfirmed: false } : join) }))
     setFormError('')
@@ -1420,6 +1562,17 @@ export function DatasetCenterPage() {
 
   const updateGroupName = (groupID: string, name: string) => {
     setGroupBoxes(current => current.map(group => group.id === groupID ? { ...group, name } : group))
+    setFormError('')
+  }
+
+  const updateGroupByMode = (groupID: string, groupByMode: GraphGroupByMode) => {
+    setGroupBoxes(current => current.map(group => group.id === groupID ? {
+      ...group,
+      ...(groupByMode === 'STANDARD' ? { groupByMode: undefined } : { groupByMode }),
+      ...(groupByMode === 'GROUPING_SETS'
+        ? { groupingSets: group.groupingSets?.length ? group.groupingSets : [group.dimensions.map(dimension => dimension.key)] }
+        : { groupingSets: undefined }),
+    } : group))
     setFormError('')
   }
 
@@ -1437,19 +1590,133 @@ export function DatasetCenterPage() {
     const existing = group.dimensions.find(item => item.key === field.key)
     const generated = generatedGraphFieldIdentity(field)
     const dimensions = enabled
-      ? [...group.dimensions.filter(item => item.key !== field.key), { key: field.key, name: existing?.name || generated.name, code: existing?.code || generated.code }]
+      ? [...group.dimensions.filter(item => item.key !== field.key), {
+        key: field.key,
+        ...(existing?.outputKey ? { outputKey: existing.outputKey } : {}),
+        name: existing?.name || generated.name,
+        code: existing?.code || generated.code,
+      }]
       : group.dimensions.filter(item => item.key !== field.key)
-    return { ...group, dimensions, metrics: enabled ? group.metrics.filter(item => item.key !== field.key) : group.metrics }
+    const groupingSets = group.groupByMode === 'GROUPING_SETS'
+      ? enabled && !group.dimensions.length && group.groupingSets?.length === 1 && !group.groupingSets[0].length
+        ? [[field.key]]
+        : (group.groupingSets ?? []).map(groupingSet => enabled ? groupingSet : groupingSet.filter(key => key !== field.key))
+      : undefined
+    const metrics = enabled ? group.metrics.map(metric => metric.key === field.key ? {
+      ...metric,
+      outputKey: metric.outputKey || groupFieldOutputKey(group.id, 'metric', field),
+      name: metric.name === generated.name ? `${generated.name}指标` : metric.name,
+      code: safeIdentifier(metric.code) === safeIdentifier(generated.code) ? safeIdentifier(`${generated.code}_metric`) : metric.code,
+    } : metric) : group.metrics
+    return { ...group, dimensions, groupingSets, metrics }
   })
+
+  const updateAllGroupDimensions = (groupID: string, fields: ProducedField[], enabled: boolean) => commitGroupFields(groupID, group => {
+    const fieldKeys = new Set(fields.map(field => field.key))
+    const previous = new Map(group.dimensions.map(dimension => [dimension.key, dimension]))
+    const dimensions = enabled
+      ? fields.map(field => {
+        const existing = previous.get(field.key)
+        const generated = generatedGraphFieldIdentity(field)
+        return {
+          key: field.key,
+          ...(existing?.outputKey ? { outputKey: existing.outputKey } : {}),
+          name: existing?.name || generated.name,
+          code: existing?.code || generated.code,
+        }
+      })
+      : group.dimensions.filter(dimension => !fieldKeys.has(dimension.key))
+    const groupingSets = group.groupByMode === 'GROUPING_SETS'
+      ? enabled && !group.dimensions.length
+        ? [dimensions.map(dimension => dimension.key)]
+        : enabled
+          ? group.groupingSets
+          : [[]]
+      : undefined
+    return {
+      ...group,
+      dimensions,
+      groupingSets,
+      metrics: enabled ? group.metrics.map(metric => {
+        const source = fields.find(field => field.key === metric.key)
+        if (!source) return metric
+        const generated = generatedGraphFieldIdentity(source)
+        return {
+          ...metric,
+          outputKey: metric.outputKey || groupFieldOutputKey(group.id, 'metric', source),
+          name: metric.name === generated.name ? `${generated.name}指标` : metric.name,
+          code: safeIdentifier(metric.code) === safeIdentifier(generated.code) ? safeIdentifier(`${generated.code}_metric`) : metric.code,
+        }
+      }) : group.metrics,
+    }
+  })
+
+  const updateGroupingSets = (groupID: string, groupingSets: string[][]) => commitGroupFields(groupID, group => ({
+    ...group,
+    groupingSets: groupingSets.map(groupingSet => [...groupingSet]),
+  }))
 
   const updateGroupMetric = (groupID: string, field: ProducedField, enabled: boolean, patch: { aggregation?: string } = {}) => commitGroupFields(groupID, group => {
     const existing = group.metrics.find(item => item.key === field.key)
     const generated = generatedGraphFieldIdentity(field)
     const aggregation = patch.aggregation ?? existing?.aggregation ?? ''
+    const dimension = group.dimensions.find(item => item.key === field.key)
     const metrics = enabled
-      ? [...group.metrics.filter(item => item.key !== field.key), { key: field.key, name: existing?.name || generated.name, code: existing?.code || generated.code, aggregation }]
+      ? [...group.metrics.filter(item => item.key !== field.key), {
+        key: field.key,
+        ...(existing?.outputKey || dimension ? { outputKey: existing?.outputKey || groupFieldOutputKey(group.id, 'metric', field) } : {}),
+        name: existing?.name || (dimension ? `${generated.name}指标` : generated.name),
+        code: existing?.code || (dimension ? safeIdentifier(`${generated.code}_metric`) : generated.code),
+        aggregation,
+      }]
       : group.metrics.filter(item => item.key !== field.key)
-    return { ...group, metrics, dimensions: enabled ? group.dimensions.filter(item => item.key !== field.key) : group.dimensions }
+    return {
+      ...group,
+      metrics,
+      dimensions: group.dimensions,
+    }
+  })
+
+  const updateAllGroupMetrics = (groupID: string, fields: ProducedField[], enabled: boolean) => commitGroupFields(groupID, group => {
+    const fieldKeys = new Set(fields.map(field => field.key))
+    const previous = new Map(group.metrics.map(metric => [metric.key, metric]))
+    const rowCountMetrics = group.metrics.filter(metric => metric.key === '*' || metric.countRows)
+    const metrics = enabled
+      ? [...rowCountMetrics, ...fields.map(field => {
+        const existing = previous.get(field.key)
+        const generated = generatedGraphFieldIdentity(field)
+        const numeric = ['NUMBER', 'INT', 'INTEGER', 'DECIMAL', 'FLOAT', 'DOUBLE'].includes(field.canonicalType.toUpperCase())
+        const dimension = group.dimensions.find(item => item.key === field.key)
+        return {
+          key: field.key,
+          ...(existing?.outputKey || dimension ? { outputKey: existing?.outputKey || groupFieldOutputKey(group.id, 'metric', field) } : {}),
+          name: existing?.name || (dimension ? `${generated.name}指标` : generated.name),
+          code: existing?.code || (dimension ? safeIdentifier(`${generated.code}_metric`) : generated.code),
+          aggregation: existing?.aggregation || (numeric ? 'SUM' : 'COUNT'),
+        }
+      })]
+      : group.metrics.filter(metric => metric.key === '*' || metric.countRows || !fieldKeys.has(metric.key))
+    return {
+      ...group,
+      metrics,
+      dimensions: group.dimensions,
+    }
+  })
+
+  const updateGroupRowCountMetric = (groupID: string, enabled: boolean) => commitGroupFields(groupID, group => {
+    const existing = group.metrics.find(metric => metric.key === '*' || metric.countRows)
+    const remaining = group.metrics.filter(metric => metric.key !== '*' && !metric.countRows)
+    return {
+      ...group,
+      metrics: enabled ? [{
+        key: '*',
+        outputKey: existing?.outputKey || `${group.id}.metric_row_count`,
+        name: existing?.name || '总行数',
+        code: existing?.code || 'row_count',
+        aggregation: 'COUNT',
+        countRows: true,
+      }, ...remaining] : remaining,
+    }
   })
 
   const removeGroupBox = (groupID: string) => {
@@ -1460,7 +1727,7 @@ export function DatasetCenterPage() {
       right: box.right?.kind === 'GROUP' && box.right.id === groupID ? undefined : box.right,
     })))
     setGroupBoxes(current => current.filter(group => group.id !== groupID))
-    setTransformBoxes(current => current.map(transform => transform.input?.kind === 'GROUP' && transform.input.id === groupID ? { ...transform, input: undefined, rules: [] } : transform))
+    setTransformBoxes(current => current.map(transform => transform.input?.kind === 'GROUP' && transform.input.id === groupID ? { ...transform, input: undefined, rules: [], conditions: [] } : transform))
     setEndBox(current => current?.input && relationContains(current.input, { kind: 'GROUP', id: groupID }, relationBoxes, groupBoxes, transformBoxes) ? { ...current, input: undefined, outputs: [] } : current)
     setActiveGroupID(current => current === groupID ? '' : current)
     setDraft(current => ({ ...current, joins: current.joins.filter(join => !consumers.has(join.id)) }))
@@ -1484,6 +1751,7 @@ export function DatasetCenterPage() {
     const transform: TransformBox = {
       id, family: definition.family, componentType, name: `${definition.label} ${nextNumber}`,
       position: position ?? { x: 620 + (nextNumber - 1) * 85, y: 175 + (nextNumber - 1) * 125 }, rules: [],
+      ...(componentType === 'FILTER' ? { conditions: [] } : {}),
     }
     const next = [...transformBoxes, transform]
     setTransformBoxes(next)
@@ -1505,7 +1773,39 @@ export function DatasetCenterPage() {
     const available = new Set(availableFields.map(field => field.key))
     const next = transformBoxes.map(transform => {
       if (transform.id !== transformID) return transform
-      const retained = transform.rules.map(rule => ({ ...rule, inputKeys: rule.inputKeys.filter(key => available.has(key)) })).filter(rule => rule.inputKeys.length)
+      if (transformIsFilter(transform)) {
+        const filterFields = availableFields.filter(field => field.kind !== 'METRIC' && !field.aggregation)
+        const retained = (transform.conditions ?? [])
+          .filter(condition => available.has(condition.inputKey))
+          .map(condition => condition.valueMode === 'FIELD' && !available.has(condition.value) ? { ...condition, value: '' } : condition)
+        return {
+          ...transform,
+          input,
+          rules: [],
+          conditions: retained.length
+            ? retained
+            : input && filterFields.length
+              ? [{ id: `${transform.id}_condition_1`, inputKey: filterFields[0].key, operator: 'EQUALS' as const, value: '' }]
+              : [],
+        }
+      }
+      const retained = transform.rules.flatMap(rule => {
+        if (rule.operation === 'WINDOW') {
+          const partitionByKeys = (rule.partitionByKeys ?? []).filter(key => available.has(key))
+          const orderBy = (rule.orderBy ?? []).filter(item => available.has(item.key))
+          const windowValueKey = rule.windowValueKey && available.has(rule.windowValueKey) ? rule.windowValueKey : undefined
+          return partitionByKeys.length || orderBy.length ? [{ ...rule, partitionByKeys, orderBy, windowValueKey }] : []
+        }
+        const inputKeys = rule.inputKeys.filter(key => available.has(key))
+        const needed = transformRuleInputCount(
+          rule.operation,
+          rule.fallbackMode,
+          rule.dateSource,
+          rule.startDateSource,
+          rule.endDateSource,
+        )
+        return inputKeys.length || needed === 0 ? [{ ...rule, inputKeys: inputKeys.slice(0, needed) }] : []
+      })
       return { ...transform, input, rules: retained.length ? retained : input && availableFields.length ? [defaultTransformRule(transform, availableFields, 1)] : [] }
     })
     refreshTransformOutputs(next)
@@ -1523,13 +1823,19 @@ export function DatasetCenterPage() {
       rules: transform.rules.map(rule => {
         if (rule.id !== ruleID) return rule
         const updated = { ...rule, ...patch, output: patch.output ? { ...rule.output, ...patch.output } : rule.output }
-        const needed = transformRuleInputCount(updated.operation, updated.fallbackMode)
+        const needed = transformRuleInputCount(
+          updated.operation,
+          updated.fallbackMode,
+          updated.dateSource,
+          updated.startDateSource,
+          updated.endDateSource,
+        )
         const inputKeys = [...updated.inputKeys]
         while (inputKeys.length < needed) inputKeys.push(inputKeys[0] || '')
         const targetType = updated.targetType || 'STRING'
         const output = {
           ...updated.output,
-          canonicalType: updated.operation === 'CAST' ? targetType : updated.operation === 'DATE_FORMAT' ? 'STRING' : updated.operation === 'DATE_TRUNC' ? updated.output.canonicalType || 'DATE' : updated.operation === 'CASE' || updated.operation === 'CONCAT' || updated.operation === 'SUBSTRING' || updated.operation === 'TRIM' || updated.operation === 'UPPER' || updated.operation === 'LOWER' || updated.operation === 'REPLACE' ? 'STRING' : ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'ROUND', 'ABS', 'FLOOR', 'CEIL'].includes(updated.operation) ? 'DECIMAL' : updated.output.canonicalType,
+          canonicalType: updated.operation === 'WINDOW' ? updated.output.canonicalType || 'INTEGER' : updated.operation === 'CAST' ? targetType : updated.operation === 'DATE_FORMAT' ? 'STRING' : updated.operation === 'DATE_TRUNC' ? updated.output.canonicalType || 'DATE' : updated.operation === 'CASE' ? updated.thenMode === 'CURRENT_DATE' || updated.elseMode === 'CURRENT_DATE' ? 'DATE' : 'STRING' : updated.operation === 'CONCAT' || updated.operation === 'SUBSTRING' || updated.operation === 'TRIM' || updated.operation === 'UPPER' || updated.operation === 'LOWER' || updated.operation === 'REPLACE' ? 'STRING' : ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'ROUND', 'ABS', 'FLOOR', 'CEIL'].includes(updated.operation) ? 'DECIMAL' : updated.output.canonicalType,
         }
         return { ...updated, inputKeys: inputKeys.slice(0, needed), output }
       }),
@@ -1551,6 +1857,35 @@ export function DatasetCenterPage() {
     refreshTransformOutputs(transformBoxes.map(transform => transform.id === transformID ? { ...transform, rules: transform.rules.filter(rule => rule.id !== ruleID) } : transform))
   }
 
+  const updateFilterCondition = (transformID: string, conditionID: string, patch: Partial<GraphFilterCondition>) => {
+    refreshTransformOutputs(transformBoxes.map(transform => transform.id === transformID ? {
+      ...transform,
+      conditions: (transform.conditions ?? []).map(condition => condition.id === conditionID ? { ...condition, ...patch } : condition),
+    } : transform))
+    setFormError('')
+  }
+
+  const addFilterCondition = (transformID: string) => {
+    const transform = transformBoxes.find(item => item.id === transformID)
+    if (!transform) return
+    const available = relationOutputFields(transform.input, relationBoxes, groupBoxes, draft.nodes, draft.fields, transformBoxes)
+      .filter(field => field.kind !== 'METRIC' && !field.aggregation)
+    if (!available.length) { setFormError('请先为过滤组件连接一个包含明细字段的输入组件'); return }
+    const index = (transform.conditions?.length ?? 0) + 1
+    refreshTransformOutputs(transformBoxes.map(item => item.id === transformID ? {
+      ...item,
+      conditions: [...(item.conditions ?? []), { id: `${item.id}_condition_${index}`, inputKey: available[0].key, operator: 'EQUALS', value: '' }],
+    } : item))
+    setFormError('')
+  }
+
+  const removeFilterCondition = (transformID: string, conditionID: string) => {
+    refreshTransformOutputs(transformBoxes.map(transform => transform.id === transformID ? {
+      ...transform,
+      conditions: (transform.conditions ?? []).filter(condition => condition.id !== conditionID),
+    } : transform))
+  }
+
   const removeTransformBox = (transformID: string) => {
     const removed: RelationInput = { kind: 'TRANSFORM', id: transformID }
     const consumers = new Set(relationBoxes.filter(box => box.left?.kind === 'TRANSFORM' && box.left.id === transformID || box.right?.kind === 'TRANSFORM' && box.right.id === transformID).map(box => box.id))
@@ -1560,7 +1895,7 @@ export function DatasetCenterPage() {
       right: box.right?.kind === 'TRANSFORM' && box.right.id === transformID ? undefined : box.right,
     })))
     setDraft(current => ({ ...current, joins: current.joins.filter(join => !consumers.has(join.id)) }))
-    const next = transformBoxes.filter(transform => transform.id !== transformID).map(transform => transform.input?.kind === 'TRANSFORM' && transform.input.id === transformID ? { ...transform, input: undefined, rules: [] } : transform)
+    const next = transformBoxes.filter(transform => transform.id !== transformID).map(transform => transform.input?.kind === 'TRANSFORM' && transform.input.id === transformID ? { ...transform, input: undefined, rules: [], conditions: [] } : transform)
     setTransformBoxes(next)
     setEndBox(current => current?.input && relationContains(current.input, removed, relationBoxes, groupBoxes, transformBoxes) ? { ...current, input: undefined, outputs: [] } : current)
     setActiveTransformID(current => current === transformID ? '' : current)
@@ -1587,7 +1922,13 @@ export function DatasetCenterPage() {
         ? await datasetAPI.previewDraft(editingRecord.id, editingRecord.version, candidateDSL, queryID, {}, 5)
         : await datasetAPI.previewCandidate(candidateDSL, queryID, {}, 5)
       if (componentPreviewRequests.current[key] !== request || editorFingerprintRef.current !== previewFingerprint) return
-      setComponentPreviews(current => ({ ...current, [key]: { loading: false, data: { columns: data.columns, rows: data.rows.slice(0, 5) } } }))
+      setComponentPreviews(current => ({
+        ...current,
+        [key]: {
+          loading: false,
+          data: { columns: data.columns, columnMetadata: data.columnMetadata, rows: data.rows.slice(0, 5) },
+        },
+      }))
     } catch (cause) {
       if (componentPreviewRequests.current[key] !== request || editorFingerprintRef.current !== previewFingerprint) return
       const issue = componentPreviewIssue(cause)
@@ -1615,7 +1956,10 @@ export function DatasetCenterPage() {
         ? await datasetAPI.previewDraft(record.id, record.version, candidateDSL, queryID, {}, 5)
         : await datasetAPI.previewCandidate(candidateDSL, queryID, {}, 5)
       if (request !== endPreviewRequest.current || editorFingerprintRef.current !== previewFingerprint) return
-      setEndPreview({ loading: false, data: { columns: data.columns, rows: data.rows.slice(0, 5) } })
+      setEndPreview({
+        loading: false,
+        data: { columns: data.columns, columnMetadata: data.columnMetadata, rows: data.rows.slice(0, 5) },
+      })
     } catch (cause) {
       if (request !== endPreviewRequest.current || editorFingerprintRef.current !== previewFingerprint) return
       const issue = endPreviewIssue(cause)
@@ -1723,12 +2067,12 @@ export function DatasetCenterPage() {
       setCanvasNotice('表配置已暂存')
     } else if (activeGroupID) {
       const group = groupBoxes.find(item => item.id === activeGroupID)
-      const complete = Boolean(group?.input && group.dimensions.length && group.metrics.length && group.metrics.every(metric => metric.aggregation))
+      const complete = Boolean(group && groupIsComplete(group))
       setCanvasNotice(complete ? '分组组件配置已暂存' : '分组组件配置已暂存，请继续完善')
     } else if (activeTransformID) {
       const transform = transformBoxes.find(item => item.id === activeTransformID)
-      const complete = Boolean(transform?.input && transform.name.trim() && transform.rules.length && transform.rules.every(transformRuleIsComplete))
-      setCanvasNotice(complete ? '字段处理组件配置已暂存' : '字段处理组件配置已暂存，请继续完善')
+      const complete = Boolean(transform && transformIsComplete(transform))
+      setCanvasNotice(complete ? `${transformIsFilter(transform!) ? '过滤' : '字段处理'}组件配置已暂存` : `${transform && transformIsFilter(transform) ? '过滤' : '字段处理'}组件配置已暂存，请继续完善`)
     } else if (activeEnd) {
       setCanvasNotice('结束节点配置已暂存')
     }
@@ -1777,6 +2121,9 @@ export function DatasetCenterPage() {
       if (!group.input) { setFormError(`请为分组组件“${group.name}”连接输入`); return }
       if (!group.name.trim()) { setFormError('请为每个分组组件填写清晰的产物名称'); return }
       if (!group.dimensions.length) { setFormError(`请为“${group.name}”至少选择一个分组字段`); return }
+      if (group.groupByMode === 'CUBE' && group.dimensions.length < 2) { setFormError(`“${group.name}”使用 GROUP BY CUBE 时至少需要两个分组字段`); return }
+      if (group.groupByMode === 'CUBE' && group.dimensions.length > 8) { setFormError(`“${group.name}”使用 GROUP BY CUBE 时最多支持 8 个分组字段`); return }
+      if (group.groupByMode === 'GROUPING_SETS' && !groupingSetsAreComplete(group)) { setFormError(`“${group.name}”的 GROUPING SETS 需要 1–64 个不重复且仅引用已选维度的分组集`); return }
       if (!group.metrics.length || group.metrics.some(metric => !metric.aggregation)) { setFormError(`请为“${group.name}”至少配置一个完整的聚合指标`); return }
       const codes = [...group.dimensions, ...group.metrics].map(field => safeIdentifier(field.code))
       if ([...group.dimensions, ...group.metrics].some(field => !field.name.trim() || !field.code.trim()) || new Set(codes).size !== codes.length) {
@@ -1784,12 +2131,45 @@ export function DatasetCenterPage() {
       }
     }
     for (const transform of transformBoxes) {
-      if (!transform.input) { setFormError(`请为字段处理组件“${transform.name}”连接输入`); return }
-      if (!transform.name.trim()) { setFormError('请为每个字段处理组件填写清晰的产物名称'); return }
+      const filter = transformIsFilter(transform)
+      if (!transform.input) { setFormError(`请为${filter ? '过滤' : '字段处理'}组件“${transform.name}”连接输入`); return }
+      if (!transform.name.trim()) { setFormError(`请为每个${filter ? '过滤' : '字段处理'}组件填写清晰的名称`); return }
+      const availableFields = relationOutputFields(transform.input, relationBoxes, groupBoxes, draft.nodes, draft.fields, transformBoxes)
+      const available = new Set(availableFields.map(field => field.key))
+      if (filter) {
+        if (!transform.conditions?.length || transform.conditions.some(condition => !filterConditionIsComplete(condition))) {
+          setFormError(`请为“${transform.name}”至少配置一条完整的过滤条件`); return
+        }
+        if (transform.conditions.some(condition => !available.has(condition.inputKey))) {
+          setFormError(`“${transform.name}”引用了已不可用的上游字段，请重新选择`); return
+        }
+        const filterable = new Set(availableFields.filter(field => field.kind !== 'METRIC' && !field.aggregation).map(field => field.key))
+        if (transform.conditions.some(condition => !filterable.has(condition.inputKey))) {
+          setFormError(`“${transform.name}”只能过滤明细字段，不能用于聚合指标`); return
+        }
+        const fieldsByKey = new Map(availableFields.map(field => [field.key, field]))
+        for (const condition of transform.conditions) {
+          if (condition.valueMode !== 'FIELD') continue
+          if (!filterOperatorSupportsField(condition.operator)) {
+            setFormError(`“${transform.name}”的 IN / NOT IN 只支持固定值集合`); return
+          }
+          const left = fieldsByKey.get(condition.inputKey)
+          const right = fieldsByKey.get(condition.value)
+          if (!right || !filterable.has(condition.value)) {
+            setFormError(`“${transform.name}”引用了已不可用的比较字段`); return
+          }
+          if (condition.inputKey === condition.value) {
+            setFormError(`“${transform.name}”请选择两个不同字段进行比较`); return
+          }
+          if (!filterFieldsAreCompatible(left, right)) {
+            setFormError(`“${transform.name}”的比较字段类型不兼容`); return
+          }
+        }
+        continue
+      }
       if (!transform.rules.length || transform.rules.some(rule => !transformRuleIsComplete(rule))) {
         setFormError(`请为“${transform.name}”至少配置一条完整的转换规则`); return
       }
-      const available = new Set(relationOutputFields(transform.input, relationBoxes, groupBoxes, draft.nodes, draft.fields, transformBoxes).map(field => field.key))
       if (transform.rules.some(rule => rule.inputKeys.some(key => !available.has(key)))) {
         setFormError(`“${transform.name}”引用了已不可用的上游字段，请重新选择`); return
       }
@@ -1831,17 +2211,17 @@ export function DatasetCenterPage() {
       const completed = completedEditorDraft
       const dsl = buildDatasetDSL(completed)
       const validation = await datasetAPI.validate(dsl)
+      const semanticNamed = completed.layer === 'DWD' || completed.layer === 'DWS' || completed.layer === 'ADS'
       let saved: DatasetRecord
       if (editingRecord) {
-        await datasetAPI.update(editingRecord.id, editingRecord.version, completed, dsl)
-        const persisted = await datasetAPI.get(editingRecord.id)
-        if (persisted.version <= editingRecord.version || persisted.dslHash !== validation.dslHash ||
-          persisted.name !== completed.name || persisted.description !== completed.description ||
-          (persisted.dsl.dataset.domain ?? '') !== completed.domain ||
-          (persisted.dsl.dataset.subject ?? '') !== completed.subject) {
+        saved = await datasetAPI.update(editingRecord.id, editingRecord.version, completed, dsl)
+        if (saved.version <= editingRecord.version ||
+          (!semanticNamed && (saved.dslHash !== validation.dslHash ||
+            saved.name !== completed.name || saved.description !== completed.description)) ||
+          (saved.dsl.dataset.domain ?? '') !== completed.domain ||
+          (saved.dsl.dataset.subject ?? '') !== completed.subject) {
           throw new Error('服务端未确认最新配置已保存，请保留当前页面后重试')
         }
-        saved = persisted
       } else {
         saved = await datasetAPI.create(dsl)
       }
@@ -1856,11 +2236,13 @@ export function DatasetCenterPage() {
           currentPublishedVersionId: saved.currentPublishedVersionId, updatedAt: saved.updatedAt,
         }
         navigate('/datasets', { replace: true, state: location.state })
-        setNotice({ tone: 'success', message: `已保存“${saved.name}”，请继续提交发布审批` })
+        setNotice({ tone: 'success', message: `已保存“${saved.name}”，请继续提交发布申请` })
         await openPublication(savedSummary)
       } else {
         if (datasetId) navigate('/datasets', { replace: true })
-        setNotice({ tone: 'success', message: editingRecord ? `已保存“${saved.name}”的最新配置` : `已创建“${saved.name}”，可继续进入修改完善配置` })
+        setNotice({ tone: 'success', message: semanticNamed
+          ? `已保存“${saved.name}”，LLM 已完成表名、字段名和受控标签语义校正`
+          : editingRecord ? `已保存“${saved.name}”的最新配置` : `已创建“${saved.name}”，可继续进入修改完善配置` })
       }
     } catch (cause) {
       setFormError(cause instanceof Error ? cause.message : editingRecord ? '保存数据集失败' : '创建数据集失败')
@@ -1869,8 +2251,8 @@ export function DatasetCenterPage() {
     }
   }
 
-  const openPublication = async (dataset: DatasetSummary) => {
-    setDialog({ mode: 'publish', dataset })
+  const openPublication = async (dataset: DatasetSummary, mode: 'publish' | 'publish-review' = 'publish') => {
+    setDialog({ mode, dataset })
     setPublicationRecord(null)
     setPublicationRequests([])
     setPublicationCapabilities({ manage: false, publish: false })
@@ -1932,11 +2314,11 @@ export function DatasetCenterPage() {
       setNotice({
         tone: 'success',
         message: request.status === 'PENDING'
-          ? `“${publicationRecord.name}”已提交发布审批；审批通过前不会启动加工`
+          ? `“${publicationRecord.name}”已提交发布申请；审批通过前不会启动加工`
           : `当前草稿已有${publicationStatusLabels[request.status] ?? request.status}记录`,
       })
     } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : '提交发布审批失败')
+      setFormError(cause instanceof Error ? cause.message : '提交发布申请失败')
     } finally {
       setBusyAction('')
     }
@@ -2163,7 +2545,7 @@ export function DatasetCenterPage() {
       const outcomes = await mapDatasetBatch(selectedDatasets, async dataset => {
         if (activeAction === 'publish') {
           if (dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED') {
-            throw new Error('当前状态不能提交发布审批')
+            throw new Error('当前状态不能提交发布申请')
           }
           const record = await datasetAPI.get(dataset.id)
           await datasetAPI.requestPublication(record.id, {
@@ -2189,7 +2571,7 @@ export function DatasetCenterPage() {
       setSelectedDatasetIDs(new Set(failures.map(outcome => outcome.dataset.id)))
       await loadDatasets()
       setBatchAction(null)
-      const actionLabel = activeAction === 'publish' ? '提交发布审批' : activeAction === 'disable' ? '停用（下架）' : '删除'
+      const actionLabel = activeAction === 'publish' ? '提交发布申请' : activeAction === 'disable' ? '停用（下架）' : '删除'
       if (!failures.length) {
         setNotice({ tone: 'success', message: `批量${actionLabel}完成，共处理 ${succeeded} 个数据集` })
       } else {
@@ -2275,6 +2657,21 @@ export function DatasetCenterPage() {
     const requestID = ++aiRequest.current
     const baseFingerprint = editorFingerprintRef.current
     const actualCurrent = datasetAIPlanFromEditor(draft, currentDesignerGraph, metadata)
+    const visibleComponentCount = relationBoxes.length + groupBoxes.length + transformBoxes.length
+    const serializedComponentCount = actualCurrent
+      ? actualCurrent.joins.length + actualCurrent.groups.length + (actualCurrent.transforms?.length ?? 0)
+      : 0
+    const endInputChanged = Boolean(endBox?.input && actualCurrent && (
+      actualCurrent.end.input.kind !== endBox.input.kind || actualCurrent.end.input.id !== endBox.input.id
+    ))
+    if (draft.nodes.length > 0 && (!actualCurrent || serializedComponentCount !== visibleComponentCount || endInputChanged)) {
+      setAIError(datasetAILocalIssue(
+        '当前未保存画布中存在尚未完成配置或连线的组件，系统已停止提交，避免 AI 忽略这些组件。',
+        '请补全画布上每个组件的输入、必填字段和结束节点连线后重试；完整画布会作为 current 基线发送。',
+      ))
+      setAIRetryAction(null)
+      return
+    }
     // Once the canvas contains nodes it is the single source of truth for every AI
     // modification. A staged proposal is only reusable while a brand-new canvas is
     // still empty; this prevents a follow-up prompt from silently ignoring manual edits.
@@ -2284,10 +2681,14 @@ export function DatasetCenterPage() {
     })
     setAILastInstruction(instruction)
     setAIRetryAction(null)
+    setAIProgressLogs([])
     setAIBusy(true)
     setAIError(null)
     try {
-      const result = await requestDatasetAIProposal(editingRecord?.id, instruction, current, aiPlanHints)
+      const result = await requestDatasetAIProposal(editingRecord?.id, instruction, current, aiPlanHints, event => {
+        if (requestID !== aiRequest.current) return
+        setAIProgressLogs(logs => [...logs, event].slice(-30))
+      })
       if (requestID !== aiRequest.current) return
       const tableIDs = [...new Set(result.proposal.plan.nodes.map(node => node.tableId))]
       const columnEntries = await Promise.all(tableIDs.map(async tableID => {
@@ -2542,7 +2943,7 @@ export function DatasetCenterPage() {
         <label><input ref={selectFilteredCheckbox} type="checkbox" checked={allFilteredSelected} disabled={actionBusy || !filtered.length} onChange={toggleFilteredSelection} /><span>选择当前结果</span></label>
         <strong>已选择 {selectedDatasets.length} 个</strong>
         <div>
-          <button className="action-publish" type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => { setFormError(''); setBatchAction('publish') }}>批量提交发布</button>
+          <button className="action-publish" type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => { setFormError(''); setBatchAction('publish') }}>批量提交发布申请</button>
           <button className="action-pause" type="button" disabled={actionBusy || !selectedDatasets.length} title="停用即从可查询目录下架，保留草稿和历史，可恢复" onClick={() => { setFormError(''); setBatchAction('disable') }}>批量停用（下架）</button>
           <button className="action-delete" type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => { setFormError(''); setBatchAction('delete') }}>批量删除</button>
           <button className="quiet-button" type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => setSelectedDatasetIDs(new Set())}>清空选择</button>
@@ -2556,7 +2957,7 @@ export function DatasetCenterPage() {
             <div className="dataset-asset-main"><div><h3>{dataset.name}</h3><span className={`dataset-asset-status ${dataset.status.toLowerCase()}`}>{statusLabels[dataset.status] ?? dataset.status}</span><span className={`dataset-asset-layer ${dataset.layer.toLowerCase()}`}>{dataset.layer}</span>{(dataset.tags || []).slice(0, 3).map(tag => <span className="dataset-asset-tag" key={tag}>{tag}</span>)}{(dataset.tags || []).length > 3 && <span className="dataset-asset-tag more" title={(dataset.tags || []).slice(3).join('、')}>+{(dataset.tags || []).length - 3}</span>}</div><p>{dataset.description || '暂无说明'}</p><small>{dataset.originDataSourceName ? `${dataset.originDataSourceName} · ` : ''}{dataset.code}</small></div>
             <dl><div><dt>类型</dt><dd>{typeLabels[dataset.type] ?? dataset.type}</dd></div><div><dt>版本</dt><dd>V{dataset.version}</dd></div><div><dt>更新时间</dt><dd>{new Date(dataset.updatedAt).toLocaleString('zh-CN', { hour12: false })}</dd></div></dl>
           </div>
-          <div className="dataset-asset-actions"><button className="action-edit" type="button" disabled={actionBusy} onClick={() => void openEdit(dataset)}>修改</button><button className="action-publish" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title={dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED' ? '请先恢复可用状态再提交发布审批' : '冻结当前草稿并提交发布审批'} onClick={() => void openPublication(dataset)}>发布</button><button className="action-history" type="button" disabled={actionBusy} onClick={() => void openHistory(dataset)}>历史版本</button>{dataset.status === 'DISABLED' ? <button className="action-resume" type="button" disabled={actionBusy} title="恢复到停用前的数据集状态" onClick={() => { setFormError(''); setDialog({ mode: 'restore', dataset }) }}>恢复</button> : <button className="action-pause" type="button" disabled={actionBusy || dataset.status === 'DEPRECATED'} title={dataset.status === 'DEPRECATED' ? '已废弃数据集不能再次停用' : '停用会从可查询目录下架，保留配置和历史并可恢复'} onClick={() => { setFormError(''); setDialog({ mode: 'disable', dataset }) }}>停用（下架）</button>}<button className="action-delete" type="button" disabled={actionBusy} onClick={() => { setFormError(''); setDialog({ mode: 'delete', dataset }) }}>删除</button></div>
+          <div className="dataset-asset-actions"><button className="action-edit" type="button" disabled={actionBusy} onClick={() => void openEdit(dataset)}>修改</button><button className="action-publish" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title={dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED' ? '请先恢复可用状态再提交发布申请' : '冻结当前草稿并提交发布申请'} onClick={() => void openPublication(dataset)}>发布申请</button><button className="action-review" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title={dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED' ? '当前状态不可处理发布审批' : '查看并处理发布申请'} onClick={() => void openPublication(dataset, 'publish-review')}>发布审批</button><button className="action-history" type="button" disabled={actionBusy} onClick={() => void openHistory(dataset)}>历史版本</button>{dataset.status === 'DISABLED' ? <button className="action-resume" type="button" disabled={actionBusy} title="恢复到停用前的数据集状态" onClick={() => { setFormError(''); setDialog({ mode: 'restore', dataset }) }}>恢复</button> : <button className="action-pause" type="button" disabled={actionBusy || dataset.status === 'DEPRECATED'} title={dataset.status === 'DEPRECATED' ? '已废弃数据集不能再次停用' : '停用会从可查询目录下架，保留配置和历史并可恢复'} onClick={() => { setFormError(''); setDialog({ mode: 'disable', dataset }) }}>停用（下架）</button>}<button className="action-delete" type="button" disabled={actionBusy} onClick={() => { setFormError(''); setDialog({ mode: 'delete', dataset }) }}>删除</button></div>
         </article>)}</div>}
     </section>
 
@@ -2610,15 +3011,15 @@ export function DatasetCenterPage() {
           )}
         </aside>
         <main ref={canvasFullscreenTarget} className={`dataset-template-canvas ${canvasFullscreen ? 'is-fullscreen' : ''}`} onClick={closeCanvasEditor} onDragOver={event => event.preventDefault()} onDrop={(event: DragEvent<HTMLElement>) => { event.preventDefault(); const table = tables.find(item => item.id === event.dataTransfer.getData('text/dataset-table-id')); if (table) void selectTable(table) }}>
-          <DatasetAIComposer prompt={aiPrompt} lastInstruction={aiLastInstruction} result={aiResult} labels={aiReviewLabels} error={aiError} busy={aiBusy} applying={aiApplying} applied={aiApplied} detailsExpanded={aiDetailsExpanded} ready={!assetsLoading && !busyAction} hasAssets={tables.length > 0} canUndo={Boolean(aiUndo)} canRetry={Boolean(aiRetryAction)} retryRequiresGeneration={aiRetryAction === 'GENERATE'} hasGraph={draft.nodes.length > 0} onPromptChange={setAIPrompt} onSubmit={() => void generateDatasetAIPlan()} onApply={() => void applyDatasetAIPlan()} onUndo={undoDatasetAIPlan} onRetryOriginal={() => retryDatasetAI('ORIGINAL')} onRetryModified={() => retryDatasetAI('MODIFIED')} onDismissError={dismissDatasetAIError} onDetailsExpandedChange={setAIDetailsExpanded} />
+          <DatasetAIComposer prompt={aiPrompt} lastInstruction={aiLastInstruction} result={aiResult} progressLogs={aiProgressLogs} labels={aiReviewLabels} error={aiError} busy={aiBusy} applying={aiApplying} applied={aiApplied} detailsExpanded={aiDetailsExpanded} ready={!assetsLoading && !busyAction} hasAssets={tables.length > 0} canUndo={Boolean(aiUndo)} canRetry={Boolean(aiRetryAction)} retryRequiresGeneration={aiRetryAction === 'GENERATE'} hasGraph={draft.nodes.length > 0} onPromptChange={setAIPrompt} onSubmit={() => void generateDatasetAIPlan()} onApply={() => void applyDatasetAIPlan()} onUndo={undoDatasetAIPlan} onRetryOriginal={() => retryDatasetAI('ORIGINAL')} onRetryModified={() => retryDatasetAI('MODIFIED')} onDismissError={dismissDatasetAIError} onDetailsExpandedChange={setAIDetailsExpanded} />
           {!draft.nodes.length ? <div className="dataset-canvas-empty"><strong>选择第一张映射表开始建模</strong><p>表会成为数据节点；点击节点可预览真实数据并选择输出字段。</p>{canvasNotice && <small role="status">{canvasNotice}</small>}</div> : <div className="dataset-node-graph">
             <div className="dataset-graph-heading"><div><strong>组件关系画布</strong><small>{draft.nodes.length} 个数据节点 · {relationBoxes.length} 个关联 · {groupBoxes.length} 个分组 · {endBox ? '1 个结束节点' : '尚无结束节点'} · {transformBoxes.length} 个字段处理</small></div><span>{canvasNotice || '拖入组件并连线，结束节点定义最终产物'}</span></div>
             <RelationCanvas nodes={draft.nodes} fields={draft.fields} joins={draft.joins} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} end={endBox} nodePositions={nodePositions} activeNodeID={activeNodeID} activeJoinID={activeJoinID} activeGroupID={activeGroupID} activeTransformID={activeTransformID} activeEnd={activeEnd} tables={tables} isFullscreen={canvasFullscreen} previewTarget={canvasPreviewTarget} preview={canvasPreview} previewLabel={canvasPreviewLabel} onPreview={openCanvasPreview} onRefreshPreview={() => { if (canvasPreviewTarget) openCanvasPreview(canvasPreviewTarget) }} onClosePreview={() => setCanvasPreviewTarget(null)} onArrange={arrangeCanvas} onToggleFullscreen={() => void toggleCanvasFullscreen()} onAddJoin={addRelationBox} onAddGroup={addGroupBox} onAddTransform={addTransformBox} onAddEnd={addEndBox} onAddTable={(table, position) => void selectTable(table, position)} onMove={updateCanvasPosition} onConnect={dropRelationInput} onConnectGroup={connectGroupInput} onConnectTransform={connectTransformInput} onConnectEnd={connectEndInput} onRemoveBox={removeRelationBox} onRemoveGroup={removeGroupBox} onRemoveTransform={removeTransformBox} onRemoveEnd={removeEndBox} onNodeClick={openNodeConfig} onJoinClick={joinID => { setActiveNodeID(''); setActiveGroupID(''); setActiveTransformID(''); setActiveEnd(false); setActiveJoinID(joinID); setCanvasNotice('') }} onGroupClick={groupID => { setActiveNodeID(''); setActiveJoinID(''); setActiveTransformID(''); setActiveEnd(false); setActiveGroupID(groupID); setCanvasNotice('') }} onTransformClick={transformID => { setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveEnd(false); setActiveTransformID(transformID); setCanvasNotice('') }} onEndClick={() => { setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveTransformID(''); setActiveEnd(true); setCanvasNotice('') }} onRemoveNode={removeNode} />
           </div>}
           {activeNode && <NodeConfigDrawer node={activeNode} fields={draft.fields.filter(field => field.key.startsWith(`${activeNode.id}.`))} onFieldPatch={updateOutputField} onDone={closeCanvasEditor} />}
           {activeRelationBox && <JoinConfigDrawer box={activeRelationBox} join={activeJoin} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} nodes={draft.nodes} leftOutputFields={activeLeftOutputFields} rightOutputFields={activeRightOutputFields} onNameChange={name => setRelationBoxes(current => current.map(box => box.id === activeRelationBox.id ? { ...box, name } : box))} onJoinPatch={patch => activeJoin && updateJoin(activeJoin.id, { ...patch, manualConfirmed: false })} onConditionPatch={(conditionID, patch) => activeJoin && updateJoinCondition(activeJoin.id, conditionID, patch)} onAddCondition={() => activeJoin && addJoinCondition(activeJoin.id)} onRemoveCondition={conditionID => activeJoin && removeJoinCondition(activeJoin.id, conditionID)} onOutputChange={(key, checked) => updateRelationOutput(activeRelationBox.id, key, checked)} onDone={closeCanvasEditor} />}
-          {activeGroup && <GroupingConfigDrawer box={activeGroup} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} nodes={draft.nodes} availableFields={groupInputFields} error={formError} onNameChange={name => updateGroupName(activeGroup.id, name)} onDimensionChange={(field, enabled) => updateGroupDimension(activeGroup.id, field, enabled)} onMetricChange={(field, enabled, patch) => updateGroupMetric(activeGroup.id, field, enabled, patch)} onDone={closeCanvasEditor} />}
-          {activeTransform && <TransformConfigDrawer transform={activeTransform} inputs={transformInputFields} nodes={draft.nodes} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} error={formError} onNameChange={name => updateTransformName(activeTransform.id, name)} onRuleChange={(ruleID, patch) => updateTransformRule(activeTransform.id, ruleID, patch)} onAddRule={() => addTransformRule(activeTransform.id)} onRemoveRule={ruleID => removeTransformRule(activeTransform.id, ruleID)} onDone={closeCanvasEditor} />}
+          {activeGroup && <GroupingConfigDrawer box={activeGroup} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} nodes={draft.nodes} availableFields={groupInputFields} error={formError} onNameChange={name => updateGroupName(activeGroup.id, name)} onGroupByModeChange={mode => updateGroupByMode(activeGroup.id, mode)} onGroupingSetsChange={groupingSets => updateGroupingSets(activeGroup.id, groupingSets)} onDimensionChange={(field, enabled) => updateGroupDimension(activeGroup.id, field, enabled)} onAllDimensionsChange={enabled => updateAllGroupDimensions(activeGroup.id, groupInputFields, enabled)} onRowCountMetricChange={enabled => updateGroupRowCountMetric(activeGroup.id, enabled)} onMetricChange={(field, enabled, patch) => updateGroupMetric(activeGroup.id, field, enabled, patch)} onAllMetricsChange={enabled => updateAllGroupMetrics(activeGroup.id, groupInputFields, enabled)} onDone={closeCanvasEditor} />}
+          {activeTransform && <TransformConfigDrawer transform={activeTransform} inputs={transformInputFields} nodes={draft.nodes} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} error={formError} onNameChange={name => updateTransformName(activeTransform.id, name)} onRuleChange={(ruleID, patch) => updateTransformRule(activeTransform.id, ruleID, patch)} onAddRule={() => addTransformRule(activeTransform.id)} onRemoveRule={ruleID => removeTransformRule(activeTransform.id, ruleID)} onFilterConditionChange={(conditionID, patch) => updateFilterCondition(activeTransform.id, conditionID, patch)} onAddFilterCondition={() => addFilterCondition(activeTransform.id)} onRemoveFilterCondition={conditionID => removeFilterCondition(activeTransform.id, conditionID)} onDone={closeCanvasEditor} />}
           {activeEnd && endBox && <EndConfigDrawer end={endBox} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} nodes={draft.nodes} availableFields={endInputFields} onNameChange={name => setEndBox(current => current ? { ...current, name } : current)} onOutputChange={updateEndOutput} onDone={closeCanvasEditor} />}
           {formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}
         </main>
@@ -2718,27 +3119,32 @@ export function DatasetCenterPage() {
 
     {dialog?.mode === 'history' && dialog.dataset && <Dialog title={`${dialog.dataset.name} · 历史版本`} eyebrow="发布快照与安全回滚" wide onClose={closeDialog}><PublishedVersionHistoryPanel record={historyRecord} items={historyItems} selected={selectedHistoryVersion} preview={historyPreview} loading={busyAction.startsWith('history:') || busyAction.startsWith('version:')} busy={actionBusy} confirming={historyConfirm} error={formError} onSelect={versionID => void selectHistoryVersion(versionID)} onStartRollback={() => setHistoryConfirm(true)} onCancelRollback={() => { setHistoryConfirm(false); setFormError('') }} onRollback={() => void rollbackHistoryVersion()} onClose={closeDialog} /></Dialog>}
 
-    {dialog?.mode === 'publish' && dialog.dataset && <Dialog title={`${dialog.dataset.name} · 发布审批`} eyebrow="冻结草稿与审批发布" wide onClose={closeDialog}>
+    {(dialog?.mode === 'publish' || dialog?.mode === 'publish-review') && dialog.dataset && <Dialog
+      title={`${dialog.dataset.name} · ${dialog.mode === 'publish' ? '发布申请' : '发布审批'}`}
+      eyebrow={dialog.mode === 'publish' ? '冻结草稿并提交申请' : '审批发布申请'}
+      wide
+      onClose={closeDialog}
+    >
       <div className="dataset-publication">
-        {busyAction.startsWith('publication:') ? <Empty>正在加载发布审批信息…</Empty> : publicationRecord ? <>
+        {busyAction.startsWith('publication:') ? <Empty>正在加载{dialog.mode === 'publish' ? '发布申请' : '发布审批'}信息…</Empty> : publicationRecord ? <>
           <section className="dataset-publication-current" aria-label="当前发布候选">
             <div><span>当前草稿</span><strong>草稿 V{publicationRecord.draftVersionNo}</strong><small>{publicationRecord.dslHash.slice(0, 12)}…</small></div>
             <div><span>数据集聚合版本</span><strong>V{publicationRecord.version}</strong><small>提交时会冻结当前精确版本</small></div>
-            <div><span>当前草稿审批</span><strong className={currentDraftPublicationRequest?.status.toLowerCase()}>{currentDraftPublicationRequest ? publicationStatusLabels[currentDraftPublicationRequest.status] : '未提交'}</strong><small>{currentDraftPublicationRequest?.publishedVersionId ? `已发布版本 ${currentDraftPublicationRequest.publishedVersionId} · 后台加工已启动` : currentDraftPublicationRequest ? '等待审批；审批前不会启动加工' : '尚未提交发布审批'}</small></div>
+            <div><span>当前草稿审批</span><strong className={currentDraftPublicationRequest?.status.toLowerCase()}>{currentDraftPublicationRequest ? publicationStatusLabels[currentDraftPublicationRequest.status] : '未提交'}</strong><small>{currentDraftPublicationRequest?.publishedVersionId ? `已发布版本 ${currentDraftPublicationRequest.publishedVersionId} · 后台加工已启动` : currentDraftPublicationRequest ? '等待审批；审批前不会启动加工' : '尚未提交发布申请'}</small></div>
           </section>
 
-          <div className="dataset-publication-layout">
-            <section className="dataset-publication-submit" aria-label="提交发布审批">
+          <div className="dataset-publication-body">
+            {dialog.mode === 'publish' && <section className="dataset-publication-submit" aria-label="提交发布申请">
               <header><div><span>申请人操作</span><h3>提交当前草稿</h3></div><small>{publicationCapabilities.manage ? '具备提交权限' : '仅可查看'}</small></header>
               <p>系统只冻结当前草稿版本、DSL 与校验参数。审批通过后才生成不可变发布版本，并启动指标提取或 DIM/DWD/DWS/ADS PostgreSQL 加工。</p>
               <label>申请说明（选填）<textarea value={publicationNote} onChange={event => setPublicationNote(event.target.value)} placeholder="例如：订单与客户区域关联已由 AI 完成，请审批用于指标设计" /></label>
               {currentDraftPublicationRequest?.status === 'PENDING' && <div className="dataset-publication-hint">当前精确草稿已经在审批中，无需重复提交。</div>}
               {currentDraftPublicationRequest?.status === 'APPROVED' && <div className="dataset-publication-hint success">当前精确草稿已审批发布。再次修改并保存后可提交新的审批。</div>}
               {publicationRequests[0]?.status === 'CANCELLED' && !currentDraftPublicationRequest && <div className="dataset-publication-hint">上次申请已因草稿变更自动取消；当前草稿可重新提交审批。</div>}
-              <button className="primary-button" type="button" disabled={actionBusy || !publicationCapabilities.manage || currentDraftPublicationRequest?.status === 'APPROVED' || currentDraftPublicationRequest?.status === 'PENDING'} onClick={() => void submitPublicationRequest()}>{busyAction === 'publication-submit' ? '正在提交审批…' : '提交发布审批'}</button>
-            </section>
+              <button className="primary-button" type="button" disabled={actionBusy || !publicationCapabilities.manage || currentDraftPublicationRequest?.status === 'APPROVED' || currentDraftPublicationRequest?.status === 'PENDING'} onClick={() => void submitPublicationRequest()}>{busyAction === 'publication-submit' ? '正在提交申请…' : '提交发布申请'}</button>
+            </section>}
 
-            <section className="dataset-publication-review" aria-label="审批发布申请">
+            {dialog.mode === 'publish-review' && <section className="dataset-publication-review" aria-label="审批发布申请">
               <header><div><span>审批人操作</span><h3>审批并发布</h3></div><small>{publicationCapabilities.publish ? '具备审批权限' : '仅可查看'}</small></header>
               {!publicationRequests.length ? <div className="dataset-publication-empty">暂无发布申请</div> : <>
                 <label>选择申请<select aria-label="选择发布申请" value={selectedPublicationRequestID} onChange={event => { setSelectedPublicationRequestID(event.target.value); setPublicationDecisionNote(''); setFormError('') }}>{publicationRequests.map(request => <option key={request.id} value={request.id}>{publicationStatusLabels[request.status]} · 草稿记录 V{request.expectedDraftRecordVersion} · {new Date(request.submittedAt).toLocaleString('zh-CN', { hour12: false })}</option>)}</select></label>
@@ -2756,10 +3162,10 @@ export function DatasetCenterPage() {
                   <div className="dataset-publication-review-actions"><button className="dataset-publication-reject" type="button" disabled={actionBusy || !publicationCapabilities.publish || !publicationDecisionNote.trim()} onClick={() => void rejectPublicationRequest()}>{busyAction === 'publication-reject' ? '正在拒绝…' : '拒绝'}</button><button className="primary-button" type="button" disabled={actionBusy || !publicationCapabilities.publish} onClick={() => void approvePublicationRequest()}>{busyAction === 'publication-approve' ? '正在批准并登记加工…' : '审批通过并启动加工'}</button></div>
                 </>}
               </>}
-            </section>
+            </section>}
           </div>
 
-          {metricReturnTo && currentDraftPublicationRequest?.status === 'APPROVED' && <section className="dataset-publication-metric-return" aria-label="继续指标设计"><div><strong>数据集已可用于指标设计</strong><small>指标 AI 将只读取本次审批生成的精确已发布版本。</small></div><button className="primary-button" type="button" onClick={() => navigate(metricReturnTo, { state: { metricAIRequirement, ...(metricPreferredDatasetId ? { preferredDatasetId: metricPreferredDatasetId } : {}), ...(metricSafeDatasetExtension ? { safeDatasetExtension: true } : {}) } })}>返回资产管理中心继续生成</button></section>}
+          {dialog.mode === 'publish' && metricReturnTo && currentDraftPublicationRequest?.status === 'APPROVED' && <section className="dataset-publication-metric-return" aria-label="继续指标设计"><div><strong>数据集已可用于指标设计</strong><small>指标 AI 将只读取本次审批生成的精确已发布版本。</small></div><button className="primary-button" type="button" onClick={() => navigate(metricReturnTo, { state: { metricAIRequirement, ...(metricPreferredDatasetId ? { preferredDatasetId: metricPreferredDatasetId } : {}), ...(metricSafeDatasetExtension ? { safeDatasetExtension: true } : {}) } })}>返回资产管理中心继续生成</button></section>}
           {formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}
           <footer className="dataset-publication-footer"><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>关闭</button></footer>
         </> : <div className="dataset-center-feedback error" role="alert">{formError || '无法加载数据集发布信息'}</div>}
@@ -2767,7 +3173,7 @@ export function DatasetCenterPage() {
     </Dialog>}
 
     {batchAction && <Dialog
-      title={batchAction === 'publish' ? '批量提交发布审批' : batchAction === 'disable' ? '批量停用（下架）' : '批量删除数据集'}
+      title={batchAction === 'publish' ? '批量提交发布申请' : batchAction === 'disable' ? '批量停用（下架）' : '批量删除数据集'}
       eyebrow={batchAction === 'delete' ? '危险操作' : '批量操作'}
       onClose={closeBatchDialog}
     ><div className="dataset-delete-confirm">
@@ -2789,10 +3195,11 @@ export function DatasetCenterPage() {
   </AppShell>
 }
 
-function DatasetAIComposer({ prompt, lastInstruction, result, labels, error, busy, applying, applied, detailsExpanded, ready, hasAssets, canUndo, canRetry, retryRequiresGeneration, hasGraph, onPromptChange, onSubmit, onApply, onUndo, onRetryOriginal, onRetryModified, onDismissError, onDetailsExpandedChange }: {
+function DatasetAIComposer({ prompt, lastInstruction, result, progressLogs, labels, error, busy, applying, applied, detailsExpanded, ready, hasAssets, canUndo, canRetry, retryRequiresGeneration, hasGraph, onPromptChange, onSubmit, onApply, onUndo, onRetryOriginal, onRetryModified, onDismissError, onDetailsExpandedChange }: {
   prompt: string
   lastInstruction: string
   result: DatasetAIPlanResult | null
+  progressLogs: DatasetAIProgressEvent[]
   labels: DatasetAIReviewLabels
   error: DatasetAIErrorView | null
   busy: boolean
@@ -2859,7 +3266,7 @@ function DatasetAIComposer({ prompt, lastInstruction, result, labels, error, bus
     </form>
     {!ready && <p className="dataset-ai-helper" role="status">正在准备当前画布与可用数据资产…</p>}
     {ready && !hasAssets && <p className="dataset-ai-helper" role="status">请先完成至少一张数据表的 LLM 映射，再使用自动配置。</p>}
-    {busy && <div className="dataset-ai-progress" role="status" aria-live="polite"><MagicWandIcon aria-hidden="true" size={18} weight="duotone" /><p><strong>正在理解业务目标并规划 DAG</strong><small>只读取表和字段业务元数据，不发送数据样例；原画布不会被覆盖。</small></p></div>}
+    {busy && <DatasetAIGenerationProgress logs={progressLogs} />}
     {error && <div className="dataset-ai-error" role="alert">
       <div className="dataset-ai-error-copy">
         <strong>{error.title}</strong>
@@ -2915,6 +3322,24 @@ function DatasetAIComposer({ prompt, lastInstruction, result, labels, error, bus
       </div>
     </article>}
   </section>
+}
+
+function DatasetAIGenerationProgress({ logs }: { logs: DatasetAIProgressEvent[] }) {
+  const statusLabel = (status: DatasetAIProgressEvent['status']) => status === 'SUCCEEDED' ? '已完成' : status === 'WARN' ? '校正中' : '处理中'
+  return <div className="dataset-ai-progress" role="status" aria-live="polite">
+    <MagicWandIcon aria-hidden="true" size={18} weight="duotone" />
+    <div className="dataset-ai-progress-copy">
+      <p><strong>正在理解业务目标并规划 DAG</strong><small>以下进度由后端生成；只读取表和字段业务元数据，不发送数据样例。</small></p>
+      <ol className="dataset-ai-progress-log" role="log" aria-label="AI 生成日志">
+        {!logs.length && <li className="is-active is-placeholder"><time aria-hidden="true">--:--:--</time><span>连接中</span><strong>正在建立后端进度通道…</strong></li>}
+        {logs.map((entry, index) => <li className={`${entry.status === 'RUNNING' ? 'is-active' : ''} ${entry.status === 'WARN' ? 'is-warning' : ''}`} key={`${entry.timestamp}:${entry.stage}:${index}`}>
+          <time>{new Date(entry.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}</time>
+          <span>{statusLabel(entry.status)}</span>
+          <strong>{entry.message}</strong>
+        </li>)}
+      </ol>
+    </div>
+  </div>
 }
 
 function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, nodePositions, activeNodeID, activeJoinID, activeGroupID, activeTransformID, activeEnd, tables, isFullscreen, previewTarget, preview, previewLabel, onPreview, onRefreshPreview, onClosePreview, onArrange, onToggleFullscreen, onAddJoin, onAddGroup, onAddTransform, onAddEnd, onAddTable, onMove, onConnect, onConnectGroup, onConnectTransform, onConnectEnd, onRemoveBox, onRemoveGroup, onRemoveTransform, onRemoveEnd, onNodeClick, onJoinClick, onGroupClick, onTransformClick, onEndClick, onRemoveNode }: {
@@ -3239,11 +3664,12 @@ function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, 
       {edges.map(item => <button key={`delete-${item.key}`} type="button" className="dataset-line-delete" style={{ left: item.geometry.deletePosition.x, top: item.geometry.deletePosition.y }} aria-label={item.label} onClick={event => { event.stopPropagation(); item.remove() }}><XIcon aria-hidden="true" size={11} weight="bold" /></button>)}
       {nodes.map((node, index) => { const position = nodePositions[node.id] ?? { x: 42, y: 58 + index * 145 }; const nodeFields = fields.filter(field => field.key.startsWith(`${node.id}.`)); return <article key={node.id} role="button" tabIndex={0} aria-label={`配置数据节点 ${index + 1}`} style={{ left: position.x, top: position.y }} className={`dataset-canvas-component data ${activeNodeID === node.id ? 'active' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'NODE', id: node.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onClick={() => onNodeClick(node.id)}><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'NODE', id: node.id })} aria-label={`从数据节点 ${index + 1} 拖出连接`} draggable onDragStart={event => dragConnection(event, { kind: 'NODE', id: node.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>数据节点 {index + 1}</span><button type="button" aria-label={`移除${nodeLabel(node)}`} onClick={event => { event.stopPropagation(); onRemoveNode(node.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{node.table.businessName || node.table.tableName}</strong><small>{node.table.dataSourceName} · {node.alias}</small><footer><span>原始数据</span><b>{nodeFields.filter(field => field.output !== false).length} 字段</b></footer>{previewTrigger({ kind: 'NODE', id: node.id }, `数据节点 ${index + 1}`)}</article> })}
       {boxes.map((box, index) => { const position = box.position; const join = joins.find(item => item.id === box.id); const outputs = relationOutputKeys({ kind: 'JOIN', id: box.id }, boxes, groups, nodes, fields, transforms); const complete = Boolean(box.left && box.right); return <article key={box.id} role="button" tabIndex={0} aria-label={`配置关联 ${index + 1}`} style={{ left: position.x, top: position.y }} className={`dataset-canvas-component relation ${activeJoinID === box.id ? 'active' : ''} ${join?.manualConfirmed ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'JOIN', id: box.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onDragOver={acceptConnectionOver} onDrop={event => dropOnJoinNode(event, box)} onClick={() => onJoinClick(box.id)}><button type="button" className="input-port component-side input-side slot-one" aria-label={`连接到关联节点 ${index + 1} 槽位 1`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropConnection(event, box.id, 'left')} /><button type="button" className="input-port component-side input-side slot-two" aria-label={`连接到关联节点 ${index + 1} 槽位 2`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropConnection(event, box.id, 'right')} /><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'JOIN', id: box.id })} aria-label={`从关联节点 ${index + 1} 拖出连接`} draggable={complete} aria-disabled={!complete} onDragStart={event => complete && dragConnection(event, { kind: 'JOIN', id: box.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>关联组件</span><button type="button" aria-label={`删除关联组件 ${index + 1}`} onClick={event => { event.stopPropagation(); onRemoveBox(box.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{box.name}</strong><small>{join?.joinType ? `${join.joinType} JOIN` : '尚未完成关联'}</small><div><span>槽位 1</span><b>{inputLabel(box.left)}</b></div><div><span>槽位 2</span><b>{inputLabel(box.right)}</b></div><footer><span>{join?.manualConfirmed ? `${joinConditions(join).length} 个关联条件` : '点击完成配置'}</span><b>{outputs.length} 字段</b></footer>{previewTrigger({ kind: 'JOIN', id: box.id }, `关联组件 ${index + 1}`)}</article> })}
-      {groups.map((group, index) => { const complete = Boolean(group.input && group.dimensions.length && group.metrics.length && group.metrics.every(metric => metric.aggregation)); return <article key={group.id} role="button" tabIndex={0} aria-label={`打开分组组件 ${index + 1} 配置`} style={{ left: group.position.x, top: group.position.y }} className={`dataset-canvas-component group ${activeGroupID === group.id ? 'active' : ''} ${complete ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'GROUP', id: group.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onDragOver={acceptConnectionOver} onDrop={event => finishConnectionDrop(event, input => onConnectGroup(group.id, input))} onClick={() => onGroupClick(group.id)}><button type="button" className="input-port component-side input-side group-input" aria-label={`连接到分组组件 ${index + 1} 输入槽位`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropGroupConnection(event, group.id)} /><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'GROUP', id: group.id })} aria-label={`从分组组件 ${index + 1} 拖出连接`} draggable={complete} aria-disabled={!complete} onDragStart={event => complete && dragConnection(event, { kind: 'GROUP', id: group.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>分组组件 {index + 1}</span><button type="button" aria-label={`删除分组组件 ${index + 1}`} onClick={event => { event.stopPropagation(); onRemoveGroup(group.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{group.name}</strong><div><span>输入</span><b>{inputLabel(group.input)}</b></div><footer><span>{group.dimensions.length} 个维度</span><b>{group.metrics.length} 个指标</b></footer>{previewTrigger({ kind: 'GROUP', id: group.id }, `分组组件 ${index + 1}`)}</article> })}
+          {groups.map((group, index) => { const complete = groupIsComplete(group); const modeLabel = group.groupByMode === 'CUBE' ? 'CUBE · ' : group.groupByMode === 'ROLLUP' ? 'ROLLUP · ' : group.groupByMode === 'GROUPING_SETS' ? 'SETS · ' : ''; return <article key={group.id} role="button" tabIndex={0} aria-label={`打开分组组件 ${index + 1} 配置`} style={{ left: group.position.x, top: group.position.y }} className={`dataset-canvas-component group ${activeGroupID === group.id ? 'active' : ''} ${complete ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'GROUP', id: group.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onDragOver={acceptConnectionOver} onDrop={event => finishConnectionDrop(event, input => onConnectGroup(group.id, input))} onClick={() => onGroupClick(group.id)}><button type="button" className="input-port component-side input-side group-input" aria-label={`连接到分组组件 ${index + 1} 输入槽位`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropGroupConnection(event, group.id)} /><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'GROUP', id: group.id })} aria-label={`从分组组件 ${index + 1} 拖出连接`} draggable={complete} aria-disabled={!complete} onDragStart={event => complete && dragConnection(event, { kind: 'GROUP', id: group.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>分组组件 {index + 1}</span><button type="button" aria-label={`删除分组组件 ${index + 1}`} onClick={event => { event.stopPropagation(); onRemoveGroup(group.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{group.name}</strong><div><span>输入</span><b>{inputLabel(group.input)}</b></div><footer><span>{modeLabel}{group.dimensions.length} 个维度</span><b>{group.metrics.length} 个指标</b></footer>{previewTrigger({ kind: 'GROUP', id: group.id }, `分组组件 ${index + 1}`)}</article> })}
       {transforms.map((transform, index) => {
-        const complete = Boolean(transform.input && transform.rules.length && transform.rules.every(transformRuleIsComplete))
+        const complete = transformIsComplete(transform)
         const label = transformDisplayLabel(transform)
-        return <article key={transform.id} role="button" tabIndex={0} aria-label={`打开${label} ${index + 1} 配置`} style={{ left: transform.position.x, top: transform.position.y }} className={`dataset-canvas-component transform ${transformColorClass(transform)} ${activeTransformID === transform.id ? 'active' : ''} ${complete ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'TRANSFORM', id: transform.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onDragOver={acceptConnectionOver} onDrop={event => finishConnectionDrop(event, input => onConnectTransform(transform.id, input))} onClick={() => onTransformClick(transform.id)}><button type="button" className="input-port component-side input-side group-input" aria-label={`连接到${label} ${index + 1} 输入槽位`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropTransformConnection(event, transform.id)} /><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'TRANSFORM', id: transform.id })} aria-label={`从${label} ${index + 1} 拖出连接`} draggable={complete} aria-disabled={!complete} onDragStart={event => complete && dragConnection(event, { kind: 'TRANSFORM', id: transform.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>{label}</span><button type="button" aria-label={`删除${label} ${index + 1}`} onClick={event => { event.stopPropagation(); onRemoveTransform(transform.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{transform.name}</strong><div><span>输入</span><b>{inputLabel(transform.input)}</b></div><footer><span>{transform.rules.length} 条规则</span><b>{complete ? '已配置' : '待完善'}</b></footer>{previewTrigger({ kind: 'TRANSFORM', id: transform.id }, `${label} ${index + 1}`)}</article>
+        const itemCount = transformIsFilter(transform) ? transform.conditions?.length ?? 0 : transform.rules.length
+        return <article key={transform.id} role="button" tabIndex={0} aria-label={`打开${label} ${index + 1} 配置`} style={{ left: transform.position.x, top: transform.position.y }} className={`dataset-canvas-component transform ${transformColorClass(transform)} ${activeTransformID === transform.id ? 'active' : ''} ${complete ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'TRANSFORM', id: transform.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onDragOver={acceptConnectionOver} onDrop={event => finishConnectionDrop(event, input => onConnectTransform(transform.id, input))} onClick={() => onTransformClick(transform.id)}><button type="button" className="input-port component-side input-side group-input" aria-label={`连接到${label} ${index + 1} 输入槽位`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropTransformConnection(event, transform.id)} /><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'TRANSFORM', id: transform.id })} aria-label={`从${label} ${index + 1} 拖出连接`} draggable={complete} aria-disabled={!complete} onDragStart={event => complete && dragConnection(event, { kind: 'TRANSFORM', id: transform.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>{label}</span><button type="button" aria-label={`删除${label} ${index + 1}`} onClick={event => { event.stopPropagation(); onRemoveTransform(transform.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{transform.name}</strong><div><span>输入</span><b>{inputLabel(transform.input)}</b></div><footer><span>{itemCount} 条{transformIsFilter(transform) ? '条件' : '规则'}</span><b>{complete ? '已配置' : '待完善'}</b></footer>{previewTrigger({ kind: 'TRANSFORM', id: transform.id }, `${label} ${index + 1}`)}</article>
       })}
       {end && <article role="button" tabIndex={0} aria-label="打开结束节点配置" style={{ left: end.position.x, top: end.position.y }} className={`dataset-canvas-component end ${activeEnd ? 'active' : ''} ${end.input && end.outputs.length ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''}`} draggable onDragStart={event => event.dataTransfer.setData('text/dataset-canvas-item', JSON.stringify({ kind: 'END', id: end.id }))} onDragOver={acceptConnectionOver} onDrop={event => finishConnectionDrop(event, onConnectEnd)} onClick={onEndClick}><button type="button" className="input-port component-side input-side group-input" aria-label="连接到结束节点输入槽位" onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={dropEndConnection} /><header><span>结束节点</span><button type="button" aria-label="删除结束节点" onClick={event => { event.stopPropagation(); onRemoveEnd() }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{end.name}</strong><div><span>最终输入</span><b>{inputLabel(end.input)}</b></div><footer><span>输出结果</span><b>{end.outputs.length} 个字段</b></footer>{previewTrigger({ kind: 'END', id: end.id }, '结束节点')}</article>}
       {!boxes.length && !groups.length && !transforms.length && !end && <div className="dataset-component-canvas-hint"><strong>拖入组件建立数据流</strong><p>数据节点、字段处理、分组、关联与结束节点之间会用有方向的曲线连接。</p></div>}
@@ -3265,28 +3691,148 @@ function NodeConfigDrawer({ node, fields, onFieldPatch, onDone }: {
   </aside>
 }
 
-function GroupingConfigDrawer({ box, boxes, groups, transforms, nodes, availableFields, error, onNameChange, onDimensionChange, onMetricChange, onDone }: {
+function GroupingConfigDrawer({ box, boxes, groups, transforms, nodes, availableFields, error, onNameChange, onGroupByModeChange, onGroupingSetsChange, onDimensionChange, onAllDimensionsChange, onRowCountMetricChange, onMetricChange, onAllMetricsChange, onDone }: {
   box: GroupBox; boxes: RelationBox[]; groups: GroupBox[]; transforms: TransformBox[]; nodes: DesignerNode[]; availableFields: ProducedField[]
   error: string; onNameChange: (name: string) => void
+  onGroupByModeChange: (mode: GraphGroupByMode) => void
+  onGroupingSetsChange: (groupingSets: string[][]) => void
   onDimensionChange: (field: ProducedField, enabled: boolean) => void
+  onAllDimensionsChange: (enabled: boolean) => void
+  onRowCountMetricChange: (enabled: boolean) => void
   onMetricChange: (field: ProducedField, enabled: boolean, patch?: { aggregation?: string }) => void
+  onAllMetricsChange: (enabled: boolean) => void
   onDone: () => void
 }) {
   const shape = graphShape(boxes, groups, transforms)
+  const allDimensionsSelected = availableFields.length > 0 && availableFields.every(field => box.dimensions.some(dimension => dimension.key === field.key))
+  const allMetricsSelected = availableFields.length > 0 && availableFields.every(field => box.metrics.some(metric => metric.key === field.key))
+  const rowCountMetric = box.metrics.find(metric => metric.key === '*' || metric.countRows)
+  const placeholderHelp = '未分组维度按类型显示：文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False。'
+  const modeHelp = box.groupByMode === 'CUBE'
+    ? `为全部维度组合生成明细、小计与总计；${placeholderHelp}`
+    : box.groupByMode === 'ROLLUP'
+      ? `按维度顺序逐级汇总并生成总计；${placeholderHelp}`
+      : box.groupByMode === 'GROUPING_SETS'
+        ? `只生成下方明确配置的维度组合；空分组集表示总计。${placeholderHelp}`
+        : '按所有已选维度生成单一粒度的聚合结果。'
   return <aside className="dataset-canvas-drawer output" aria-label="配置分组组件" onClick={event => event.stopPropagation()}>
     <header><div><span>分组组件</span><strong>{box.name}</strong><small>先定义输入粒度，再为下游自动生成带稳定别名的维度和指标</small></div><button type="button" aria-label="保存并关闭分组配置" onClick={onDone}>×</button></header>
-    <section><h3>组件与产物</h3><div className="dataset-group-input"><label><span>产物名称</span><input aria-label="分组产物名称" value={box.name} onChange={event => onNameChange(event.target.value)} placeholder="例如：客户月度汇总" /></label><div aria-label="分组组件输入" className={`dataset-connected-input ${box.input ? 'connected' : 'empty'}`}><span>输入组件</span><strong>{relationInputLabel(box.input, nodes, boxes, groups, transforms)}</strong><small>{box.input ? '输入由画布连线确定；删除连线后可重新连接' : '请回到画布，从上游组件拖线到该组件输入端口'}</small></div></div></section>
-    <section><div className="dataset-drawer-title"><div><h3>分组字段</h3><p>可多选；这里只确定分组维度，日期年月日请先连接独立日期转换组件。</p></div><span>{box.dimensions.length} 已选</span></div><div className="dataset-drawer-field-list configured">{availableFields.map(field => { const configured = box.dimensions.find(item => item.key === field.key); return <div className={configured ? 'selected' : ''} key={field.key}><label><input aria-label={`分组维度 ${field.code}`} type="checkbox" checked={Boolean(configured)} onChange={event => onDimensionChange(field, event.target.checked)} /><span><strong>{field.name}</strong><small>{graphProducedFieldLabel(field)}</small></span></label>{configured && <div className="dataset-product-fields generated"><output className="dataset-generated-field-alias" aria-label={`${field.code} 字段别名`}><small>字段别名</small><strong>{configured.code}</strong></output></div>}</div> })}</div></section>
-    <section><div className="dataset-drawer-title"><div><h3>聚合指标</h3><p>选择字段与计算逻辑；字段别名由规则自动生成并保持稳定。</p></div><span>{box.metrics.length} 已选</span></div><div className="dataset-drawer-field-list configured metrics">{availableFields.map(field => { const configured = box.metrics.find(item => item.key === field.key); const numeric = ['NUMBER', 'INT', 'INTEGER', 'DECIMAL', 'FLOAT', 'DOUBLE'].includes(field.canonicalType.toUpperCase()); return <div className={configured ? 'selected' : ''} key={field.key}><label><input aria-label={`聚合指标 ${field.code}`} type="checkbox" checked={Boolean(configured)} onChange={event => onMetricChange(field, event.target.checked)} /><span><strong>{field.name}</strong><small>{graphProducedFieldLabel(field)}</small></span></label>{configured && <div className="dataset-product-fields generated"><select aria-label={`${field.code} 聚合逻辑`} value={configured.aggregation} onChange={event => onMetricChange(field, true, { aggregation: event.target.value })}><option value="">选择逻辑</option>{numeric && <><option>SUM</option><option>AVG</option></>}<option>COUNT</option><option>COUNT_DISTINCT</option><option>MIN</option><option>MAX</option></select><output className="dataset-generated-field-alias" aria-label={`${field.code} 字段别名`}><small>字段别名</small><strong>{configured.code}</strong></output></div>}</div> })}</div></section>
+    <section><h3>组件与产物</h3><div className="dataset-group-input"><label><span>产物名称</span><input aria-label="分组产物名称" value={box.name} onChange={event => onNameChange(event.target.value)} placeholder="例如：客户月度汇总" /></label><label><span>分组方式</span><select aria-label="分组方式" value={box.groupByMode || 'STANDARD'} onChange={event => onGroupByModeChange(event.target.value as GraphGroupByMode)}><option value="STANDARD">普通分组（GROUP BY）</option><option value="CUBE">多维分组（GROUP BY CUBE）</option><option value="ROLLUP">逐级汇总（GROUP BY ROLLUP）</option><option value="GROUPING_SETS">自定义组合（GROUPING SETS）</option></select><small>{modeHelp}</small></label><div aria-label="分组组件输入" className={`dataset-connected-input ${box.input ? 'connected' : 'empty'}`}><span>输入组件</span><strong>{relationInputLabel(box.input, nodes, boxes, groups, transforms)}</strong><small>{box.input ? '输入由画布连线确定；删除连线后可重新连接' : '请回到画布，从上游组件拖线到该组件输入端口'}</small></div></div></section>
+    <section><div className="dataset-drawer-title"><div><h3>分组字段</h3><p>可多选；同一字段也可以作为聚合指标，日期年月日请先连接独立日期转换组件。</p></div><div className="dataset-drawer-title-actions"><span>{box.dimensions.length} 已选</span><button type="button" disabled={!availableFields.length} aria-label={allDimensionsSelected ? '取消全选分组字段' : '全选分组字段'} onClick={() => onAllDimensionsChange(!allDimensionsSelected)}>{allDimensionsSelected ? '取消全选' : '全选'}</button></div></div><div className="dataset-drawer-field-list configured">{availableFields.map(field => { const configured = box.dimensions.find(item => item.key === field.key); return <div className={configured ? 'selected' : ''} key={field.key}><label><input aria-label={`分组维度 ${field.code}`} type="checkbox" checked={Boolean(configured)} onChange={event => onDimensionChange(field, event.target.checked)} /><span><strong>{field.name}</strong><small>{graphProducedFieldLabel(field)}</small></span></label>{configured && <div className="dataset-product-fields generated"><output className="dataset-generated-field-alias" aria-label={`${field.code} 字段别名`}><small>字段别名</small><strong>{configured.code}</strong></output></div>}</div> })}</div></section>
+    {box.groupByMode === 'GROUPING_SETS' && <section><div className="dataset-drawer-title"><div><h3>自定义分组集</h3><p>每个分组集是一种输出粒度；不选维度的空分组集会生成总计。</p></div><span>{box.groupingSets?.length ?? 0} 组</span></div><div className="dataset-grouping-sets">{(box.groupingSets ?? []).map((groupingSet, index) => {
+      const selected = new Set(groupingSet)
+      return <article key={`${index}-${groupingSet.join('|')}`}>
+        <header><strong>分组集 {index + 1}</strong><span>{groupingSet.length ? `${groupingSet.length} 个维度` : '总计（空分组集）'}</span><button type="button" aria-label={`删除分组集 ${index + 1}`} disabled={(box.groupingSets?.length ?? 0) <= 1} onClick={() => onGroupingSetsChange((box.groupingSets ?? []).filter((_, itemIndex) => itemIndex !== index))}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header>
+        <div>{box.dimensions.map(dimension => <label key={dimension.key}><input type="checkbox" aria-label={`分组集 ${index + 1} 维度 ${dimension.code}`} checked={selected.has(dimension.key)} onChange={event => {
+          const next = new Set(selected)
+          if (event.target.checked) next.add(dimension.key)
+          else next.delete(dimension.key)
+          onGroupingSetsChange((box.groupingSets ?? []).map((item, itemIndex) => itemIndex === index ? box.dimensions.filter(dimension => next.has(dimension.key)).map(dimension => dimension.key) : item))
+        }} /><span>{dimension.name}</span><small>{dimension.code}</small></label>)}</div>
+      </article>
+    })}</div><button className="dataset-add-condition" type="button" aria-label="添加分组集" disabled={(box.groupingSets?.length ?? 0) >= 64} onClick={() => onGroupingSetsChange([...(box.groupingSets ?? []), []])}>添加分组集</button></section>}
+    <section>
+      <div className="dataset-drawer-title">
+        <div><h3>聚合指标</h3><p>首项 * 表示全部输入行；选择 * + COUNT 生成 COUNT(*)。普通字段的 COUNT 仅统计非空值。</p></div>
+        <div className="dataset-drawer-title-actions"><span>{box.metrics.length} 已选</span><button type="button" disabled={!availableFields.length} aria-label={allMetricsSelected ? '取消全选聚合指标' : '全选聚合指标'} onClick={() => onAllMetricsChange(!allMetricsSelected)}>{allMetricsSelected ? '取消全选字段' : '全选字段'}</button></div>
+      </div>
+      <div className="dataset-drawer-field-list configured metrics">
+        <div className={rowCountMetric ? 'selected' : ''}>
+          <label>
+            <input aria-label="聚合指标 *" type="checkbox" checked={Boolean(rowCountMetric)} onChange={event => onRowCountMetricChange(event.target.checked)} />
+            <span><strong>*</strong><small>全部输入行</small></span>
+          </label>
+          {rowCountMetric && <div className="dataset-product-fields generated">
+            <select aria-label="* 聚合逻辑" value="COUNT" disabled><option>COUNT</option></select>
+            <output className="dataset-generated-field-alias" aria-label="* 字段别名"><small>字段别名</small><strong>{rowCountMetric.code}</strong></output>
+          </div>}
+        </div>
+        {availableFields.map(field => {
+          const configured = box.metrics.find(item => item.key === field.key && !item.countRows)
+          const numeric = ['NUMBER', 'INT', 'INTEGER', 'DECIMAL', 'FLOAT', 'DOUBLE'].includes(field.canonicalType.toUpperCase())
+          return <div className={configured ? 'selected' : ''} key={field.key}>
+            <label>
+              <input aria-label={`聚合指标 ${field.code}`} type="checkbox" checked={Boolean(configured)} onChange={event => onMetricChange(field, event.target.checked)} />
+              <span><strong>{field.name}</strong><small>{graphProducedFieldLabel(field)}</small></span>
+            </label>
+            {configured && <div className="dataset-product-fields generated">
+              <select aria-label={`${field.code} 聚合逻辑`} value={configured.aggregation} onChange={event => onMetricChange(field, true, { aggregation: event.target.value })}>
+                <option value="">选择逻辑</option>
+                {numeric && <><option>SUM</option><option>AVG</option></>}
+                <option>COUNT</option><option>COUNT_DISTINCT</option><option>MIN</option><option>MAX</option>
+              </select>
+              <output className="dataset-generated-field-alias" aria-label={`${field.code} 字段别名`}><small>字段别名</small><strong>{configured.code}</strong></output>
+            </div>}
+          </div>
+        })}
+      </div>
+    </section>
     <footer>{error && <span className="dataset-drawer-error" role="alert">{error}</span>}<small>{graphLeaves({ kind: 'GROUP', id: box.id }, shape).length ? '该分组产物可继续连接关联组件或结束节点' : '请先连接输入组件'}</small><button type="button" onClick={onDone}>完成</button></footer>
   </aside>
 }
 
-function TransformConfigDrawer({ transform, inputs, nodes, boxes, groups, transforms, error, onNameChange, onRuleChange, onAddRule, onRemoveRule, onDone }: {
+function TransformConfigDrawer({ transform, inputs, nodes, boxes, groups, transforms, error, onNameChange, onRuleChange, onAddRule, onRemoveRule, onFilterConditionChange, onAddFilterCondition, onRemoveFilterCondition, onDone }: {
   transform: TransformBox; inputs: ProducedField[]; nodes: DesignerNode[]; boxes: RelationBox[]; groups: GroupBox[]; transforms: TransformBox[]; error: string
   onNameChange: (name: string) => void; onRuleChange: (ruleID: string, patch: Partial<GraphTransformRule>) => void
   onAddRule: () => void; onRemoveRule: (ruleID: string) => void; onDone: () => void
+  onFilterConditionChange: (conditionID: string, patch: Partial<GraphFilterCondition>) => void
+  onAddFilterCondition: () => void; onRemoveFilterCondition: (conditionID: string) => void
 }) {
+  if (transformIsFilter(transform)) {
+    const filterableInputs = inputs.filter(field => field.kind !== 'METRIC' && !field.aggregation)
+    const conditions = transform.conditions ?? []
+    const filterOptions: Array<{ value: GraphConditionOperator; label: string }> = conditionOperatorOptions.flatMap(option =>
+      option.value === 'IN' ? [option, { value: 'NOT_IN', label: '不在…中' }] : [option],
+    )
+    const operatorOptions = (field?: ProducedField) => filterOptions.filter(option => {
+      const stringField = ['STRING', 'TEXT', 'VARCHAR', 'CHAR'].includes(field?.canonicalType.toUpperCase() || '')
+      return stringField || option.value !== 'CONTAINS' && option.value !== 'NOT_CONTAINS'
+    })
+    return <aside className={`dataset-canvas-drawer transform ${transformColorClass(transform)}`} aria-label="配置过滤组件" onClick={event => event.stopPropagation()}>
+      <header><div><span>过滤组件</span><strong>{transform.name}</strong><small>按固定值或字段之间的关系保留数据行，并生成 SQL WHERE 条件</small></div><button type="button" aria-label="保存并关闭过滤配置" onClick={onDone}>×</button></header>
+      <section><h3>组件与输入</h3><div className="dataset-group-input"><label><span>组件名称</span><input aria-label="过滤组件名称" value={transform.name} onChange={event => onNameChange(event.target.value)} placeholder="例如：仅保留已支付订单" /></label><div aria-label="过滤组件输入" className={`dataset-connected-input ${transform.input ? 'connected' : 'empty'}`}><span>输入组件</span><strong>{relationInputLabel(transform.input, nodes, boxes, groups, transforms)}</strong><small>{transform.input ? `${filterableInputs.length} 个可过滤字段` : '请从上游组件拖线到输入端口'}</small></div></div></section>
+      <section><div className="dataset-drawer-title"><div><h3>过滤条件</h3><p>多条条件按 AND 组合；“在…中”可用逗号或换行分隔多个值。</p></div><span>{conditions.length} 条</span></div>
+        {transform.input && !filterableInputs.length && <p className="dataset-relation-pending">当前输入只有聚合指标；WHERE 过滤仅支持明细字段，请调整组件位置。</p>}
+        <div className="dataset-transform-rules dataset-filter-conditions">{conditions.map((condition, index) => {
+          const field = filterableInputs.find(item => item.key === condition.inputKey)
+          const needsValue = filterOperatorNeedsValue(condition.operator)
+          const collection = condition.operator === 'IN' || condition.operator === 'NOT_IN'
+          const valueMode = condition.valueMode ?? 'LITERAL'
+          const comparableFields = filterableInputs.filter(item =>
+            item.key !== condition.inputKey && filterFieldsAreCompatible(field, item),
+          )
+          return <article key={condition.id}>
+            <header><strong>条件 {index + 1}{index > 0 ? ' · AND' : ''}</strong><button type="button" aria-label={`删除过滤条件 ${index + 1}`} onClick={() => onRemoveFilterCondition(condition.id)}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header>
+            <div className="dataset-transform-rule-grid">
+              <label><span>过滤字段</span><select aria-label={`过滤条件 ${index + 1} 字段`} value={condition.inputKey} onChange={event => {
+                const inputKey = event.target.value
+                const nextField = filterableInputs.find(item => item.key === inputKey)
+                const currentRight = filterableInputs.find(item => item.key === condition.value)
+                onFilterConditionChange(condition.id, {
+                  inputKey,
+                  ...(valueMode === 'FIELD' && (!currentRight || currentRight.key === inputKey || !filterFieldsAreCompatible(nextField, currentRight)) ? { value: '' } : {}),
+                })
+              }}><option value="">选择字段</option>{filterableInputs.map(item => <option key={item.key} value={item.key}>{graphProducedFieldLabel(item)}</option>)}</select></label>
+              <label><span>比较方式</span><select aria-label={`过滤条件 ${index + 1} 运算符`} value={condition.operator} onChange={event => {
+                const operator = event.target.value as GraphConditionOperator
+                onFilterConditionChange(condition.id, {
+                  operator,
+                  ...(!filterOperatorNeedsValue(operator) ? { value: '', valueMode: 'LITERAL' as const } : {}),
+                  ...(condition.valueMode === 'FIELD' && !filterOperatorSupportsField(operator) ? { value: '', valueMode: 'LITERAL' as const } : {}),
+                })
+              }}>{operatorOptions(field).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+              {needsValue && !collection && <label><span>比较对象</span><select aria-label={`过滤条件 ${index + 1} 比较对象`} value={valueMode} onChange={event => onFilterConditionChange(condition.id, { valueMode: event.target.value as GraphFilterCondition['valueMode'], value: '' })}><option value="LITERAL">固定值</option><option value="FIELD">其他字段</option></select></label>}
+              {needsValue && valueMode === 'FIELD' && !collection
+                ? <label className="dataset-filter-value"><span>比较字段</span><select aria-label={`过滤条件 ${index + 1} 比较字段`} value={condition.value} onChange={event => onFilterConditionChange(condition.id, { value: event.target.value })}><option value="">选择类型兼容的字段</option>{comparableFields.map(item => <option key={item.key} value={item.key}>{graphProducedFieldLabel(item)}</option>)}</select><small>{field ? `仅显示与 ${field.name}（${field.canonicalType}）类型兼容的其他字段` : '先选择过滤字段'}</small></label>
+                : needsValue && <label className="dataset-filter-value"><span>{collection ? '候选值' : '比较值'}</span><textarea aria-label={`过滤条件 ${index + 1} 值`} value={condition.value} rows={collection ? 3 : 1} placeholder={collection ? '例如：华东, 华南' : '输入要匹配的值'} onChange={event => onFilterConditionChange(condition.id, { value: event.target.value })} /><small>{field ? `${field.name} · ${field.canonicalType}` : '先选择过滤字段'}</small></label>}
+            </div>
+          </article>
+        })}</div>
+        <button className="dataset-add-condition" type="button" disabled={!transform.input || !filterableInputs.length} onClick={onAddFilterCondition}>添加过滤条件</button>
+      </section>
+      <footer>{error && <span className="dataset-drawer-error" role="alert">{error}</span>}<small>过滤后的字段保持不变，可继续连接其他组件或结束节点</small><button type="button" onClick={onDone}>完成</button></footer>
+    </aside>
+  }
   const candidates = transformFieldCandidates(transform.family, inputs)
   const options = candidates
   const componentMeta = transformComponentMetaFor(transform)
@@ -3301,24 +3847,72 @@ function TransformConfigDrawer({ transform, inputs, nodes, boxes, groups, transf
     }
     if (rule.operation === 'COALESCE') {
       patch.output = { ...rule.output, canonicalType: source?.canonicalType || 'STRING' }
+      if (rule.fallbackMode === 'CURRENT_DATE' && !dateCanonicalTypes.has(source?.canonicalType.toUpperCase() || '')) {
+        patch.fallbackMode = 'LITERAL'
+      }
       if (rule.fallbackMode !== 'FIELD' && (rule.fallbackValue === undefined || rule.fallbackValue === defaultFallbackValue(previous))) {
         patch.fallbackValue = defaultFallbackValue(source)
       }
     }
     onRuleChange(rule.id, patch)
   }
+  const dateDiffFieldValues = (rule: GraphTransformRule) => {
+    let fieldIndex = 0
+    const startDateSource = rule.startDateSource || 'FIELD'
+    const endDateSource = rule.endDateSource || 'FIELD'
+    const startKey = startDateSource === 'FIELD' ? rule.inputKeys[fieldIndex++] || '' : ''
+    const endKey = endDateSource === 'FIELD' ? rule.inputKeys[fieldIndex] || '' : ''
+    return { startDateSource, endDateSource, startKey, endKey }
+  }
+  const changeDateDiffSource = (rule: GraphTransformRule, side: 'START' | 'END', source: NonNullable<GraphTransformRule['startDateSource']>) => {
+    const current = dateDiffFieldValues(rule)
+    const startDateSource = side === 'START' ? source : current.startDateSource
+    const endDateSource = side === 'END' ? source : current.endDateSource
+    const startKey = startDateSource === 'FIELD' ? current.startKey || options[0]?.key || '' : ''
+    const endKey = endDateSource === 'FIELD' ? current.endKey || options[1]?.key || options[0]?.key || '' : ''
+    onRuleChange(rule.id, {
+      startDateSource,
+      endDateSource,
+      inputKeys: [...(startDateSource === 'FIELD' ? [startKey] : []), ...(endDateSource === 'FIELD' ? [endKey] : [])],
+      ...(startDateSource === 'CURRENT_DATE' ? { replaceSourceKey: undefined } : {}),
+    })
+  }
+  const changeDateDiffField = (rule: GraphTransformRule, side: 'START' | 'END', key: string) => {
+    const current = dateDiffFieldValues(rule)
+    const startKey = side === 'START' ? key : current.startKey
+    const endKey = side === 'END' ? key : current.endKey
+    onRuleChange(rule.id, {
+      inputKeys: [
+        ...(current.startDateSource === 'FIELD' ? [startKey] : []),
+        ...(current.endDateSource === 'FIELD' ? [endKey] : []),
+      ],
+      ...(side === 'START' && rule.replaceSourceKey === current.startKey ? { replaceSourceKey: key } : {}),
+    })
+  }
   const changeOperation = (rule: GraphTransformRule, operation: GraphTransformOperation) => {
     const fallbackMode = operation === 'COALESCE' ? rule.fallbackMode || 'LITERAL' : rule.fallbackMode
-    const count = transformRuleInputCount(operation, fallbackMode)
+    const dateSource = operation === 'DATE_EXTRACT' || operation === 'DATE_START' || operation === 'DATE_END' ? 'FIELD' as const : undefined
+    const startDateSource = operation === 'DATE_DIFF' ? 'FIELD' as const : undefined
+    const endDateSource = operation === 'DATE_DIFF' ? 'FIELD' as const : undefined
+    const count = transformRuleInputCount(operation, fallbackMode, dateSource, startDateSource, endDateSource)
     const first = rule.inputKeys[0] || options[0]?.key || ''
-    const inputKeys = count === 1 ? [first] : [first, rule.inputKeys[1] || options[1]?.key || first]
+    const inputKeys = count === 0 ? [] : count === 1 ? [first] : [first, rule.inputKeys[1] || options[1]?.key || first]
     const source = inputs.find(field => field.key === first)
-    const canonicalType = operation === 'CAST' ? rule.targetType || 'STRING' : operation === 'DATE_FORMAT' ? 'STRING' : operation === 'DATE_TRUNC' ? source?.canonicalType || 'DATE' : operation === 'COALESCE' ? source?.canonicalType || 'STRING' : ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'ROUND', 'ABS', 'FLOOR', 'CEIL'].includes(operation) ? 'DECIMAL' : 'STRING'
+    const canonicalType = operation === 'WINDOW' || operation === 'DATE_DIFF' || operation === 'DATE_EXTRACT' ? 'INTEGER' : operation === 'CURRENT_DATE' || operation === 'DATE_START' || operation === 'DATE_END' ? 'DATE' : operation === 'CAST' ? rule.targetType || 'STRING' : operation === 'DATE_FORMAT' ? 'STRING' : operation === 'DATE_TRUNC' ? source?.canonicalType || 'DATE' : operation === 'COALESCE' ? source?.canonicalType || 'STRING' : ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'ROUND', 'ABS', 'FLOOR', 'CEIL'].includes(operation) ? 'DECIMAL' : 'STRING'
     onRuleChange(rule.id, {
-      operation, inputKeys, output: { ...rule.output, canonicalType },
+      operation, inputKeys, dateSource, startDateSource, endDateSource, output: { ...rule.output, canonicalType },
+      ...(count === 0 ? { replaceSourceKey: undefined } : {}),
+      ...(operation === 'WINDOW' ? {
+        windowFunction: rule.windowFunction || 'ROW_NUMBER',
+        partitionByKeys: rule.partitionByKeys?.length ? rule.partitionByKeys : options[0] ? [options[0].key] : [],
+        orderBy: rule.orderBy?.length ? rule.orderBy : options[1] || options[0] ? [{ id: `window_order_${rule.id}_1`, key: (options[1] || options[0]).key, direction: 'ASC' }] : [],
+      } : {}),
       ...(operation === 'DATE_FORMAT' || operation === 'DATE_TRUNC' ? { unit: rule.unit || 'DAY' } : {}),
+      ...(operation === 'DATE_DIFF' || operation === 'DATE_EXTRACT' || operation === 'DATE_START' || operation === 'DATE_END' ? {
+        unit: dateCalculationDefaultUnit(operation),
+      } : {}),
       ...(operation === 'CAST' ? { targetType: rule.targetType || 'STRING' } : {}),
-      ...(operation === 'CASE' ? { conditionOperator: rule.conditionOperator || 'EQUALS', matchValue: rule.matchValue ?? '', conditionValues: rule.conditionValues?.length ? rule.conditionValues : [{ id: `condition_value_${rule.id}_1`, mode: 'LITERAL' as const, value: '' }], thenValue: rule.thenValue ?? '', elseValue: rule.elseValue ?? '' } : {}),
+      ...(operation === 'CASE' ? { conditionOperator: rule.conditionOperator || 'EQUALS', matchValue: rule.matchValue ?? '', conditionValues: rule.conditionValues?.length ? rule.conditionValues : [{ id: `condition_value_${rule.id}_1`, mode: 'LITERAL' as const, value: '' }], thenMode: rule.thenMode || 'LITERAL', thenValue: rule.thenValue ?? '', elseMode: rule.elseMode || 'LITERAL', elseValue: rule.elseValue ?? '' } : {}),
       ...(operation === 'COALESCE' ? { fallbackMode, fallbackValue: rule.fallbackValue ?? defaultFallbackValue(source) } : {}),
       ...(operation === 'CONCAT' ? { separator: rule.separator ?? '' } : {}),
       ...(operation === 'ROUND' ? { precision: rule.precision ?? 2 } : {}),
@@ -3341,19 +3935,93 @@ function TransformConfigDrawer({ transform, inputs, nodes, boxes, groups, transf
       <button type="button" onClick={() => onRuleChange(rule.id, { conditionValues: [...values, { id: `condition_value_${Date.now().toString(36)}`, mode: 'LITERAL', value: '' }] })}>＋ 添加候选值</button>
     </div>
   }
+  const windowEditor = (rule: GraphTransformRule, ruleIndex: number) => {
+    const partitions = new Set(rule.partitionByKeys ?? [])
+    const orders = rule.orderBy ?? []
+    const aggregateWindow = !rankingWindowFunctions.has(rule.windowFunction || 'ROW_NUMBER')
+    const windowValueOptions = rule.windowFunction === 'SUM' || rule.windowFunction === 'AVG'
+      ? inputs.filter(field => numericCanonicalTypes.has(field.canonicalType.toUpperCase()))
+      : inputs
+    const updateOrder = (id: string, patch: Partial<(typeof orders)[number]>) => onRuleChange(rule.id, { orderBy: orders.map(item => item.id === id ? { ...item, ...patch } : item) })
+    return <div className="dataset-window-config" aria-label={`规则 ${ruleIndex + 1} OVER 配置`}>
+      <label><span>窗口函数</span><select aria-label={`规则 ${ruleIndex + 1} 窗口函数`} value={rule.windowFunction || 'ROW_NUMBER'} onChange={event => {
+        const windowFunction = event.target.value as NonNullable<GraphTransformRule['windowFunction']>
+        const ranking = rankingWindowFunctions.has(windowFunction)
+        const valueCandidates = windowFunction === 'SUM' || windowFunction === 'AVG'
+          ? inputs.filter(field => numericCanonicalTypes.has(field.canonicalType.toUpperCase()))
+          : inputs
+        const valueKey = ranking ? undefined : rule.windowValueKey && valueCandidates.some(field => field.key === rule.windowValueKey) ? rule.windowValueKey : valueCandidates[0]?.key
+        const valueField = inputs.find(field => field.key === valueKey)
+        const generatedNames: Record<NonNullable<GraphTransformRule['windowFunction']>, string> = {
+          ROW_NUMBER: '分区行号', RANK: '分区排名', DENSE_RANK: '分区密集排名',
+          SUM: '分区合计', AVG: '分区平均', COUNT: '分区计数', MIN: '分区最小值', MAX: '分区最大值',
+        }
+        const generatedCodes = Object.fromEntries(Object.keys(generatedNames).map(key => [key, `partition_${key.toLowerCase()}`])) as Record<NonNullable<GraphTransformRule['windowFunction']>, string>
+        const generatedNameValues = Object.values(generatedNames)
+        const generatedCodeValues = Object.values(generatedCodes)
+        onRuleChange(rule.id, {
+          windowFunction,
+          windowValueKey: valueKey,
+          output: {
+            ...rule.output,
+            name: generatedNameValues.includes(rule.output.name) ? generatedNames[windowFunction] : rule.output.name,
+            code: generatedCodeValues.includes(rule.output.code) ? generatedCodes[windowFunction] : rule.output.code,
+            canonicalType: ranking || windowFunction === 'COUNT' ? 'INTEGER' : windowFunction === 'SUM' || windowFunction === 'AVG' ? 'DECIMAL' : valueField?.canonicalType || 'STRING',
+          },
+        })
+      }}><optgroup label="排名函数"><option value="ROW_NUMBER">ROW_NUMBER（连续行号）</option><option value="RANK">RANK（并列跳号）</option><option value="DENSE_RANK">DENSE_RANK（并列不跳号）</option></optgroup><optgroup label="组内聚合"><option value="SUM">SUM（分区合计）</option><option value="AVG">AVG（分区平均）</option><option value="COUNT">COUNT（分区计数）</option><option value="MIN">MIN（分区最小值）</option><option value="MAX">MAX（分区最大值）</option></optgroup></select></label>
+      {aggregateWindow && <label><span>计算字段</span><select aria-label={`规则 ${ruleIndex + 1} 窗口计算字段`} value={rule.windowValueKey || ''} onChange={event => {
+        const windowValueKey = event.target.value
+        const field = inputs.find(item => item.key === windowValueKey)
+        onRuleChange(rule.id, {
+          windowValueKey,
+          output: {
+            ...rule.output,
+            canonicalType: rule.windowFunction === 'COUNT' ? 'INTEGER' : rule.windowFunction === 'SUM' || rule.windowFunction === 'AVG' ? 'DECIMAL' : field?.canonicalType || 'STRING',
+          },
+        })
+      }}><option value="">选择字段</option>{windowValueOptions.map(field => <option key={field.key} value={field.key}>{graphProducedFieldLabel(field)}</option>)}</select><small>{rule.windowFunction === 'SUM' || rule.windowFunction === 'AVG' ? '仅显示数值字段' : '在每个分区内计算该字段'}</small></label>}
+      <fieldset><legend>PARTITION BY 分区字段</legend><small>同一组内独立计算排名；至少选择一个字段。</small><div>{inputs.map(field => <label key={field.key}><input type="checkbox" aria-label={`规则 ${ruleIndex + 1} 分区字段 ${field.code}`} checked={partitions.has(field.key)} onChange={event => {
+        const partitionByKeys = event.target.checked ? [...partitions, field.key] : [...partitions].filter(key => key !== field.key)
+        onRuleChange(rule.id, { partitionByKeys })
+      }} /><span>{field.name}<small>{field.code}</small></span></label>)}</div></fieldset>
+      <fieldset><legend>ORDER BY 排序字段</legend><small>按声明顺序决定排名；可配置多个排序字段。</small>{orders.map((item, orderIndex) => <div className="dataset-window-order" key={item.id}>
+        <select aria-label={`规则 ${ruleIndex + 1} 排序字段 ${orderIndex + 1}`} value={item.key} onChange={event => updateOrder(item.id, { key: event.target.value })}><option value="">选择字段</option>{inputs.map(field => <option key={field.key} value={field.key}>{graphProducedFieldLabel(field)}</option>)}</select>
+        <select aria-label={`规则 ${ruleIndex + 1} 排序方向 ${orderIndex + 1}`} value={item.direction} onChange={event => updateOrder(item.id, { direction: event.target.value as 'ASC' | 'DESC' })}><option value="ASC">升序 ASC</option><option value="DESC">降序 DESC</option></select>
+        <button type="button" aria-label={`删除规则 ${ruleIndex + 1} 排序字段 ${orderIndex + 1}`} disabled={orders.length === 1} onClick={() => onRuleChange(rule.id, { orderBy: orders.filter(order => order.id !== item.id) })}>×</button>
+      </div>)}<button type="button" onClick={() => onRuleChange(rule.id, { orderBy: [...orders, { id: `window_order_${Date.now().toString(36)}`, key: inputs[0]?.key || '', direction: 'ASC' }] })}>＋ 添加排序字段</button></fieldset>
+      <output><code>{rule.windowFunction || 'ROW_NUMBER'}({aggregateWindow ? '字段' : ''}) OVER (PARTITION BY … ORDER BY …)</code><small>系统保存结构化表达式，不保存或拼接自定义 SQL。</small></output>
+    </div>
+  }
   return <aside className={`dataset-canvas-drawer transform ${transformColorClass(transform)}`} aria-label={`配置${componentLabel}`} onClick={event => event.stopPropagation()}>
     <header><div><span>{componentLabel}</span><strong>{transform.name}</strong><small>{componentMeta?.description || '把上游字段转换为可继续使用的新字段'}</small></div><button type="button" aria-label="保存并关闭字段处理配置" onClick={onDone}>×</button></header>
     <section><h3>组件与输入</h3><div className="dataset-group-input"><label><span>产物名称</span><input aria-label="字段处理产物名称" value={transform.name} onChange={event => onNameChange(event.target.value)} placeholder="例如：订单日期标准化" /></label><div aria-label="字段处理组件输入" className={`dataset-connected-input ${transform.input ? 'connected' : 'empty'}`}><span>输入组件</span><strong>{relationInputLabel(transform.input, nodes, boxes, groups, transforms)}</strong><small>{transform.input ? `${inputs.length} 个可用字段` : '请从上游组件拖线到输入端口'}</small></div></div></section>
-    <section><div className="dataset-drawer-title"><div><h3>转换规则</h3><p>{transform.family === 'NULL' ? '默认用固定值填充 NULL；只有选择“其他字段”时才需要第二字段。' : transformComponentTypeFor(transform) === 'TEXT_CONCAT' ? '按字段一、连接符、字段二的顺序生成拼接结果。' : transformComponentTypeFor(transform) === 'TEXT_SUBSTRING' ? '按从 1 开始的字符位置与长度提取文本。' : transform.family === 'CONDITION' ? '选择比较方式，命中和未命中时分别输出对应值。' : transformComponentTypeFor(transform) === 'NUMBER_ARITHMETIC' ? '选择加减乘除，并指定参与运算的两个数值字段。' : transformComponentTypeFor(transform) === 'NUMBER_ROUNDING' ? '可选择四舍五入、向下取整或向上取整。' : '每条规则生成一个新字段，也可替换原字段。'}</p></div><span>{transform.rules.length} 条</span></div>{transform.input && !options.length && <p className="dataset-relation-pending">当前输入没有符合该处理类型的字段，请更换输入或先使用类型转换组件。</p>}
+    <section><div className="dataset-drawer-title"><div><h3>{transform.family === 'WINDOW' ? '窗口规则' : '转换规则'}</h3><p>{transform.family === 'WINDOW' ? '配置窗口函数、PARTITION BY 分区字段和 ORDER BY 排序字段；每条规则生成一个排名或组内聚合字段。' : transformComponentTypeFor(transform) === 'DATE_CALCULATION' ? '日期差的开始、结束日期及周期边界都可选择输入字段或 SQL CURRENT_DATE。' : transform.family === 'NULL' ? 'NULL 可用固定值、其他字段或 SQL CURRENT_DATE 填充。' : transformComponentTypeFor(transform) === 'TEXT_CONCAT' ? '按字段一、连接符、字段二的顺序生成拼接结果。' : transformComponentTypeFor(transform) === 'TEXT_SUBSTRING' ? '按从 1 开始的字符位置与长度提取文本。' : transform.family === 'CONDITION' ? '选择比较方式，命中和未命中分支可输出固定值、原字段或 SQL CURRENT_DATE。' : transformComponentTypeFor(transform) === 'NUMBER_ARITHMETIC' ? '选择加减乘除，并指定参与运算的两个数值字段。' : transformComponentTypeFor(transform) === 'NUMBER_ROUNDING' ? '可选择四舍五入、向下取整或向上取整。' : '每条规则生成一个新字段，也可替换原字段。'}</p></div><span>{transform.rules.length} 条</span></div>{transform.input && !options.length && <p className="dataset-relation-pending">当前输入没有符合该处理类型的字段，请更换输入或先使用类型转换组件。</p>}
       <div className="dataset-transform-rules">{transform.rules.map((rule, index) => <article key={rule.id}>
         <header><strong>规则 {index + 1}</strong><button type="button" aria-label={`删除转换规则 ${index + 1}`} onClick={() => onRemoveRule(rule.id)}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header>
         <div className="dataset-transform-rule-grid">
           <label><span>处理逻辑</span><select aria-label={`规则 ${index + 1} 处理逻辑`} value={rule.operation} disabled={operations.length === 1} onChange={event => changeOperation(rule, event.target.value as GraphTransformOperation)}>{operations.map(operation => <option key={operation} value={operation}>{transformOperationLabel[operation]}</option>)}</select></label>
-          <label><span>输入字段</span><select aria-label={`规则 ${index + 1} 输入字段 1`} value={rule.inputKeys[0] || ''} onChange={event => changePrimaryInput(rule, event.target.value)}><option value="">选择字段</option>{options.map(field => <option key={field.key} value={field.key}>{graphProducedFieldLabel(field)}</option>)}</select></label>
-          {rule.operation === 'COALESCE' && <label><span>补值来源</span><select aria-label={`规则 ${index + 1} 补值来源`} value={rule.fallbackMode || 'LITERAL'} onChange={event => onRuleChange(rule.id, { fallbackMode: event.target.value as GraphTransformRule['fallbackMode'] })}><option value="LITERAL">固定值</option><option value="FIELD">其他字段</option></select></label>}
-          {transformRuleInputCount(rule.operation, rule.fallbackMode) === 2 && <label><span>{rule.operation === 'COALESCE' ? '补值字段' : rule.operation === 'CONCAT' ? '合并字段' : '第二字段'}</span><select aria-label={`规则 ${index + 1} 输入字段 2`} value={rule.inputKeys[1] || ''} onChange={event => onRuleChange(rule.id, { inputKeys: [rule.inputKeys[0] || '', event.target.value] })}><option value="">选择字段</option>{options.map(field => <option key={field.key} value={field.key}>{graphProducedFieldLabel(field)}</option>)}</select></label>}
-          {rule.operation === 'COALESCE' && rule.fallbackMode !== 'FIELD' && <label><span>填充值</span><input aria-label={`规则 ${index + 1} 空值填充值`} value={rule.fallbackValue ?? ''} onChange={event => onRuleChange(rule.id, { fallbackValue: event.target.value })} /><small>仅当输入字段为 NULL 时使用该值</small></label>}
+          {(rule.operation === 'DATE_EXTRACT' || rule.operation === 'DATE_START' || rule.operation === 'DATE_END') && <label><span>日期来源</span><select aria-label={`规则 ${index + 1} 日期来源`} value={rule.dateSource || 'FIELD'} onChange={event => {
+            const nextSource = event.target.value as NonNullable<GraphTransformRule['dateSource']>
+            onRuleChange(rule.id, { dateSource: nextSource, inputKeys: nextSource === 'CURRENT_DATE' ? [] : [rule.inputKeys[0] || options[0]?.key || ''], ...(nextSource === 'CURRENT_DATE' ? { replaceSourceKey: undefined } : {}) })
+          }}><option value="FIELD">输入日期字段</option><option value="CURRENT_DATE">SQL CURRENT_DATE</option></select></label>}
+          {rule.operation === 'DATE_DIFF' && (() => {
+            const dates = dateDiffFieldValues(rule)
+            return <>
+              <label><span>开始日期来源</span><select aria-label={`规则 ${index + 1} 开始日期来源`} value={dates.startDateSource} onChange={event => changeDateDiffSource(rule, 'START', event.target.value as NonNullable<GraphTransformRule['startDateSource']>)}><option value="FIELD">输入日期字段</option><option value="CURRENT_DATE">SQL CURRENT_DATE</option></select></label>
+              {dates.startDateSource === 'FIELD' && <label><span>开始日期</span><select aria-label={`规则 ${index + 1} 开始日期字段`} value={dates.startKey} onChange={event => changeDateDiffField(rule, 'START', event.target.value)}><option value="">选择字段</option>{options.map(field => <option key={field.key} value={field.key}>{graphProducedFieldLabel(field)}</option>)}</select></label>}
+              <label><span>结束日期来源</span><select aria-label={`规则 ${index + 1} 结束日期来源`} value={dates.endDateSource} onChange={event => changeDateDiffSource(rule, 'END', event.target.value as NonNullable<GraphTransformRule['endDateSource']>)}><option value="FIELD">输入日期字段</option><option value="CURRENT_DATE">SQL CURRENT_DATE</option></select></label>
+              {dates.endDateSource === 'FIELD' && <label><span>结束日期</span><select aria-label={`规则 ${index + 1} 结束日期字段`} value={dates.endKey} onChange={event => changeDateDiffField(rule, 'END', event.target.value)}><option value="">选择字段</option>{options.map(field => <option key={field.key} value={field.key}>{graphProducedFieldLabel(field)}</option>)}</select></label>}
+            </>
+          })()}
+          {rule.operation !== 'WINDOW' && rule.operation !== 'CURRENT_DATE' && rule.operation !== 'DATE_DIFF' && transformRuleInputCount(rule.operation, rule.fallbackMode, rule.dateSource, rule.startDateSource, rule.endDateSource) > 0 && <label><span>输入字段</span><select aria-label={`规则 ${index + 1} 输入字段 1`} value={rule.inputKeys[0] || ''} onChange={event => changePrimaryInput(rule, event.target.value)}><option value="">选择字段</option>{options.map(field => <option key={field.key} value={field.key}>{graphProducedFieldLabel(field)}</option>)}</select></label>}
+          {rule.operation === 'WINDOW' && windowEditor(rule, index)}
+          {rule.operation === 'COALESCE' && <label><span>补值来源</span><select aria-label={`规则 ${index + 1} 补值来源`} value={rule.fallbackMode || 'LITERAL'} onChange={event => onRuleChange(rule.id, { fallbackMode: event.target.value as GraphTransformRule['fallbackMode'] })}><option value="LITERAL">固定值</option><option value="FIELD">其他字段</option><option value="CURRENT_DATE" disabled={!dateCanonicalTypes.has(inputs.find(field => field.key === rule.inputKeys[0])?.canonicalType.toUpperCase() || '')}>SQL CURRENT_DATE（日期字段）</option></select></label>}
+          {rule.operation !== 'DATE_DIFF' && transformRuleInputCount(rule.operation, rule.fallbackMode, rule.dateSource, rule.startDateSource, rule.endDateSource) === 2 && <label><span>{rule.operation === 'COALESCE' ? '补值字段' : rule.operation === 'CONCAT' ? '合并字段' : '第二字段'}</span><select aria-label={`规则 ${index + 1} 输入字段 2`} value={rule.inputKeys[1] || ''} onChange={event => onRuleChange(rule.id, { inputKeys: [rule.inputKeys[0] || '', event.target.value] })}><option value="">选择字段</option>{options.map(field => <option key={field.key} value={field.key}>{graphProducedFieldLabel(field)}</option>)}</select></label>}
+          {rule.operation === 'COALESCE' && (rule.fallbackMode || 'LITERAL') === 'LITERAL' && <label><span>填充值</span><input aria-label={`规则 ${index + 1} 空值填充值`} value={rule.fallbackValue ?? ''} onChange={event => onRuleChange(rule.id, { fallbackValue: event.target.value })} /><small>仅当输入字段为 NULL 时使用该值</small></label>}
+          {rule.operation === 'COALESCE' && rule.fallbackMode === 'CURRENT_DATE' && <output><code>CURRENT_DATE</code><small>生成 SQL 时使用数据库原生 CURRENT_DATE</small></output>}
           {rule.operation === 'DATE_FORMAT' && <label><span>输出格式</span><select aria-label={`规则 ${index + 1} 输出格式`} value={rule.unit || 'DAY'} onChange={event => { const unit = event.target.value as DateFormatUnit; onRuleChange(rule.id, { unit, output: dateFormatOutputForUnit(rule, inputs.find(field => field.key === rule.inputKeys[0]), unit) }) }}>{dateFormatOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select><small>输出示例：{dateFormatMeta[(rule.unit as DateFormatUnit) || 'DAY'].example}</small></label>}
+          {(rule.operation === 'DATE_DIFF' || rule.operation === 'DATE_EXTRACT' || rule.operation === 'DATE_START' || rule.operation === 'DATE_END') && <label><span>{rule.operation === 'DATE_DIFF' ? '差值单位' : rule.operation === 'DATE_EXTRACT' ? '日期部分' : '周期边界'}</span><select aria-label={`规则 ${index + 1} 日期计算单位`} value={rule.unit || dateCalculationDefaultUnit(rule.operation)} onChange={event => onRuleChange(rule.id, { unit: event.target.value as GraphTransformRule['unit'] })}>{dateCalculationUnitOptions[rule.operation].map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select>{rule.operation === 'DATE_DIFF' && <small>结果方向：结束日期 - 开始日期</small>}</label>}
           {rule.operation === 'CAST' && <label><span>目标类型</span><select aria-label={`规则 ${index + 1} 目标类型`} value={rule.targetType || 'STRING'} onChange={event => onRuleChange(rule.id, { targetType: event.target.value as GraphTransformRule['targetType'], output: { ...rule.output, canonicalType: event.target.value } })}>{['STRING', 'INTEGER', 'DECIMAL', 'BOOLEAN', 'DATE', 'DATETIME'].map(type => <option key={type}>{type}</option>)}</select></label>}
           {rule.operation === 'ROUND' && <label><span>保留小数位</span><input aria-label={`规则 ${index + 1} 保留小数位`} type="number" min="-10" max="10" step="1" value={rule.precision ?? 2} onChange={event => onRuleChange(rule.id, { precision: Number(event.target.value) })} /><small>0 表示整数，负数可按十位、百位取整</small></label>}
           {rule.operation === 'SUBSTRING' && <><label><span>起始位置</span><input aria-label={`规则 ${index + 1} 截取起始位置`} type="number" min="1" step="1" value={rule.start ?? 1} onChange={event => onRuleChange(rule.id, { start: Number(event.target.value) })} /></label><label><span>截取长度</span><input aria-label={`规则 ${index + 1} 截取长度`} type="number" min="0" step="1" value={rule.length ?? 10} onChange={event => onRuleChange(rule.id, { length: Number(event.target.value) })} /></label></>}
@@ -3367,13 +4035,19 @@ function TransformConfigDrawer({ transform, inputs, nodes, boxes, groups, transf
             {rule.conditionOperator === 'IN'
               ? conditionCollectionEditor(rule, index)
               : rule.conditionOperator !== 'IS_NULL' && rule.conditionOperator !== 'IS_NOT_NULL' && <label><span>比较值</span><input aria-label={`规则 ${index + 1} 匹配值`} value={rule.matchValue || ''} onChange={event => onRuleChange(rule.id, { matchValue: event.target.value })} /></label>}
-            <label><span>命中时输出</span><input aria-label={`规则 ${index + 1} 命中值`} value={rule.thenValue || ''} onChange={event => onRuleChange(rule.id, { thenValue: event.target.value })} /></label>
-            <label><span>未命中输出</span><input aria-label={`规则 ${index + 1} 默认值`} value={rule.elseValue || ''} onChange={event => onRuleChange(rule.id, { elseValue: event.target.value })} /></label>
+            <label><span>命中值来源</span><select aria-label={`规则 ${index + 1} 命中值来源`} value={rule.thenMode || 'LITERAL'} onChange={event => onRuleChange(rule.id, { thenMode: event.target.value as GraphTransformRule['thenMode'] })}><option value="LITERAL">固定值</option><option value="FIELD">原字段</option><option value="CURRENT_DATE">SQL CURRENT_DATE</option></select></label>
+            {(rule.thenMode || 'LITERAL') === 'LITERAL'
+              ? <label><span>命中时输出</span><input aria-label={`规则 ${index + 1} 命中值`} value={rule.thenValue || ''} onChange={event => onRuleChange(rule.id, { thenValue: event.target.value })} /></label>
+              : rule.thenMode === 'FIELD' ? <output><code>原字段</code><small>命中时保留第一个输入字段</small></output> : <output><code>CURRENT_DATE</code><small>生成 SQL 时使用数据库原生 CURRENT_DATE</small></output>}
+            <label><span>未命中值来源</span><select aria-label={`规则 ${index + 1} 未命中值来源`} value={rule.elseMode || 'LITERAL'} onChange={event => onRuleChange(rule.id, { elseMode: event.target.value as GraphTransformRule['elseMode'] })}><option value="LITERAL">固定值</option><option value="FIELD">原字段</option><option value="CURRENT_DATE">SQL CURRENT_DATE</option></select></label>
+            {(rule.elseMode || 'LITERAL') === 'LITERAL'
+              ? <label><span>未命中输出</span><input aria-label={`规则 ${index + 1} 默认值`} value={rule.elseValue || ''} onChange={event => onRuleChange(rule.id, { elseValue: event.target.value })} /></label>
+              : rule.elseMode === 'FIELD' ? <output><code>原字段</code><small>未命中时保留第一个输入字段</small></output> : <output><code>CURRENT_DATE</code><small>生成 SQL 时使用数据库原生 CURRENT_DATE</small></output>}
           </>}
           <label><span>输出名称</span><input aria-label={`规则 ${index + 1} 输出名称`} value={rule.output.name} onChange={event => onRuleChange(rule.id, { output: { ...rule.output, name: event.target.value } })} /></label>
           <label><span>输出编码</span><input aria-label={`规则 ${index + 1} 输出编码`} value={rule.output.code} onChange={event => onRuleChange(rule.id, { output: { ...rule.output, code: event.target.value } })} /></label>
         </div>
-        <label className="dataset-transform-replace"><input type="checkbox" checked={Boolean(rule.replaceSourceKey)} onChange={event => onRuleChange(rule.id, { replaceSourceKey: event.target.checked ? rule.inputKeys[0] : undefined })} /><span>用转换结果替换第一个输入字段</span></label>
+        {rule.operation !== 'WINDOW' && rule.operation !== 'CURRENT_DATE' && rule.inputKeys[0] && <label className="dataset-transform-replace"><input type="checkbox" checked={Boolean(rule.replaceSourceKey)} onChange={event => onRuleChange(rule.id, { replaceSourceKey: event.target.checked ? rule.inputKeys[0] : undefined })} /><span>用转换结果替换第一个输入字段</span></label>}
       </article>)}</div>
       <button className="dataset-add-condition" type="button" disabled={!transform.input || !inputs.length} onClick={onAddRule}>添加转换规则</button>
     </section>
@@ -3457,7 +4131,7 @@ function CanvasPreviewDialog({ preview, label, onRefresh, onClose }: { preview?:
     {preview?.loading
       ? <div className="dataset-node-preview-state">正在执行“{label}”并读取真实数据…</div>
       : preview?.data
-        ? <PreviewRows preview={{ queryId: '', columns: preview.data.columns, rows: preview.data.rows, rowCount: preview.data.rows.length, durationMs: 0 }} />
+        ? <PreviewRows preview={{ queryId: '', columns: preview.data.columns, columnMetadata: preview.data.columnMetadata, rows: preview.data.rows, rowCount: preview.data.rows.length, durationMs: 0 }} />
         : preview?.error
           ? <div className="dataset-preview-diagnostic" role="alert"><div><strong>异常原因</strong><span>{preview.error}</span></div><div><strong>处理建议</strong><span>{preview.suggestion || '请完善当前组件配置并确认上游数据源可用。'}</span></div></div>
           : <div className="dataset-node-preview-state">点击刷新以加载当前组件的前 5 行数据。</div>}
@@ -3466,7 +4140,14 @@ function CanvasPreviewDialog({ preview, label, onRefresh, onClose }: { preview?:
 
 function PreviewRows({ preview }: { preview: DatasetPreview }) {
   if (!preview.rows.length) return <Empty>当前查询没有返回数据。</Empty>
-  return <div className="dataset-preview-table-wrap"><table><thead><tr>{preview.columns.map((column, index) => <th key={`${column}-${index}`}>{column}</th>)}</tr></thead><tbody>{preview.rows.slice(0, 5).map((row, rowIndex) => <tr key={rowIndex}>{preview.columns.map((_, columnIndex) => <td key={columnIndex}>{row[columnIndex] == null ? '—' : String(row[columnIndex])}</td>)}</tr>)}</tbody></table></div>
+  return <div className="dataset-preview-table-wrap"><table><thead><tr>{preview.columns.map((column, index) => {
+    const metadata = preview.columnMetadata?.[index]
+    const label = metadata?.name?.trim() || metadata?.physicalName?.trim() || column
+    const technicalNames = [metadata?.physicalName, metadata?.code || column]
+      .map(value => value?.trim()).filter((value): value is string => Boolean(value) && value !== label)
+      .filter((value, valueIndex, values) => values.indexOf(value) === valueIndex)
+    return <th key={`${column}-${index}`} title={metadata?.description || undefined}><strong>{label}</strong>{technicalNames.length > 0 && <small>{technicalNames.join(' · ')}</small>}</th>
+  })}</tr></thead><tbody>{preview.rows.slice(0, 5).map((row, rowIndex) => <tr key={rowIndex}>{preview.columns.map((_, columnIndex) => <td key={columnIndex}>{row[columnIndex] == null ? preview.columnMetadata?.[columnIndex]?.groupingPlaceholder || '—' : String(row[columnIndex])}</td>)}</tr>)}</tbody></table></div>
 }
 
 function PublishedVersionTopologyPreview({ version }: { version: PublishedVersionRecord }) {
@@ -3509,7 +4190,7 @@ function PublishedVersionTopologyPreview({ version }: { version: PublishedVersio
     <svg style={extent} aria-hidden="true">{edges.map((path, index) => <path key={index} d={path} />)}</svg>
     {nodes.map(node => { const position = normalize(node.position); return <div key={node.id} className="node" style={{ left: position.x, top: position.y }}><small>数据节点</small><strong>{node.name}</strong></div> })}
     {groups.map(group => { const position = normalize(group.position); return <div key={group.id} className="group" style={{ left: position.x, top: position.y }}><small>分组组件</small><strong>{group.name}</strong><span>{group.dimensions.length} 维度 · {group.metrics.length} 指标</span></div> })}
-    {transforms.map(transform => { const position = normalize(transform.position); return <div key={transform.id} className={`transform ${transformColorClass(transform)}`} style={{ left: position.x, top: position.y }}><small>{transformDisplayLabel(transform)}</small><strong>{transform.name}</strong><span>{transform.rules.length} 条规则</span></div> })}
+    {transforms.map(transform => { const position = normalize(transform.position); return <div key={transform.id} className={`transform ${transformColorClass(transform)}`} style={{ left: position.x, top: position.y }}><small>{transformDisplayLabel(transform)}</small><strong>{transform.name}</strong><span>{transformIsFilter(transform) ? transform.conditions?.length ?? 0 : transform.rules.length} 条{transformIsFilter(transform) ? '条件' : '规则'}</span></div> })}
     {joins.map(join => { const position = normalize(join.position); return <div key={join.id} className="join" style={{ left: position.x, top: position.y }}><small>关联组件</small><strong>{join.name}</strong></div> })}
     {end && (() => { const position = normalize(end.position); return <div className="end" style={{ left: position.x, top: position.y }}><small>结束节点</small><strong>{end.name}</strong><span>{end.outputs.length} 个输出</span></div> })()}
     {!designer && <div className="legacy-note">旧版本未保存组件坐标，仅展示可恢复的数据节点。</div>}

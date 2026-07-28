@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	aiplatform "intelligent-report-generation-system/internal/ai"
 )
@@ -19,17 +22,33 @@ type providerInvoker struct {
 	err         error
 	errs        []error
 	onInvoke    func(int)
+	models      string
+	delays      []time.Duration
 }
 
 func (i *providerInvoker) Configured() bool   { return i.configured }
 func (*providerInvoker) ProviderName() string { return "test-provider" }
-func (*providerInvoker) Model() string        { return "test-model" }
-func (i *providerInvoker) Invoke(_ context.Context, invocation aiplatform.Invocation) (aiplatform.InvocationResult, error) {
+func (i *providerInvoker) Model() string {
+	if i.models != "" {
+		return i.models
+	}
+	return "test-model"
+}
+func (i *providerInvoker) Invoke(ctx context.Context, invocation aiplatform.Invocation) (aiplatform.InvocationResult, error) {
 	i.invocation = invocation
 	i.invocations = append(i.invocations, invocation)
 	index := len(i.invocations) - 1
 	if i.onInvoke != nil {
 		i.onInvoke(index)
+	}
+	if index < len(i.delays) && i.delays[index] > 0 {
+		timer := time.NewTimer(i.delays[index])
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return aiplatform.InvocationResult{}, ctx.Err()
+		}
 	}
 	if index < len(i.results) || index < len(i.errs) {
 		var result aiplatform.InvocationResult
@@ -51,7 +70,6 @@ func TestOrchestratedProviderBuildsMinimalRequestAndParsesUsage(t *testing.T) {
 	input.Table.Name = "销售订单"
 	input.Columns[0].Name, input.Columns[1].Name = "客户名称", "订单金额"
 	input.SampleRows = []map[string]any{{"客户名称": "华东智造有限公司", "订单金额": 16320}}
-	output.Columns[0].BusinessName, output.Columns[1].BusinessName = "customer_name", "order_amount"
 	content, _ := json.Marshal(output)
 	invoker := &providerInvoker{configured: true, result: aiplatform.InvocationResult{ProviderResult: aiplatform.ProviderResult{
 		Content: content, Model: "model-v1", Usage: aiplatform.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
@@ -72,7 +90,8 @@ func TestOrchestratedProviderBuildsMinimalRequestAndParsesUsage(t *testing.T) {
 	}
 	if !messageContains(invoker.invocation.Request.Messages[0], "真实表头") || !messageContains(invoker.invocation.Request.Messages[0], "字段业务描述") ||
 		!messageContains(invoker.invocation.Request.Messages[0], "sourceFormat=CSV 或 EXCEL") || !messageContains(invoker.invocation.Request.Messages[0], "中文业务名称") ||
-		!messageContains(invoker.invocation.Request.Messages[0], "下划线") || !messageContains(invoker.invocation.Request.Messages[0], "中文描述") ||
+		!messageContains(invoker.invocation.Request.Messages[0], "原表头含中文") || !messageContains(invoker.invocation.Request.Messages[0], "原表头为英文") ||
+		!messageContains(invoker.invocation.Request.Messages[0], "中文描述") ||
 		!messageContains(invoker.invocation.Request.Messages[0], "最多十行") || !messageContains(invoker.invocation.Request.Messages[0], "候选关联键") ||
 		!messageContains(invoker.invocation.Request.Messages[0], "适用范围") ||
 		!messageContains(invoker.invocation.Request.Messages[0], "semanticType 必须与输入 canonicalType 兼容") {
@@ -93,12 +112,202 @@ func TestOrchestratedProviderBuildsMinimalRequestAndParsesUsage(t *testing.T) {
 		[]byte(`"minItems":2`),
 		[]byte(`"maxItems":2`),
 		[]byte(`"description":"文件表中文业务名称"`),
-		[]byte(`"description":"文件字段映射名称：小写英文 snake_case，多个单词使用下划线分隔"`),
+		[]byte(`"description":"文件字段中文业务名称：中文表头保持中文含义，英文表头翻译为中文"`),
 		[]byte(`"description":"文件字段中文业务描述，可包含 ID、SKU 等英文缩写"`),
 	} {
 		if !bytes.Contains(invoker.invocation.Request.ResponseSchema.Schema, fragment) {
 			t.Fatalf("元数据输出 Schema 缺少动态约束 %s: %s", fragment, invoker.invocation.Request.ResponseSchema.Schema)
 		}
+	}
+}
+
+type batchingProviderInvoker struct {
+	mu            sync.Mutex
+	active        int
+	maxActive     int
+	calls         int
+	tableCalls    int
+	batchSizes    []int
+	sampleWidths  []int
+	contextWidths []int
+	failColumnID  string
+	invocationLag time.Duration
+}
+
+func (*batchingProviderInvoker) Configured() bool     { return true }
+func (*batchingProviderInvoker) ProviderName() string { return "batch-test" }
+func (*batchingProviderInvoker) Model() string        { return "batch-model" }
+
+func (i *batchingProviderInvoker) Invoke(
+	ctx context.Context,
+	invocation aiplatform.Invocation,
+) (aiplatform.InvocationResult, error) {
+	var input CompletionInput
+	if len(invocation.Request.Messages) < 2 ||
+		len(invocation.Request.Messages[1].Parts) != 1 ||
+		json.Unmarshal(
+			[]byte(invocation.Request.Messages[1].Parts[0].Text), &input,
+		) != nil {
+		return aiplatform.InvocationResult{}, errors.New("invalid batch test input")
+	}
+	i.mu.Lock()
+	i.active++
+	if i.active > i.maxActive {
+		i.maxActive = i.active
+	}
+	i.calls++
+	if input.TargetTable {
+		i.tableCalls++
+	}
+	i.batchSizes = append(i.batchSizes, len(input.Columns))
+	i.contextWidths = append(i.contextWidths, len(input.ContextColumns))
+	for _, row := range input.SampleRows {
+		i.sampleWidths = append(i.sampleWidths, len(row))
+	}
+	i.mu.Unlock()
+	defer func() {
+		i.mu.Lock()
+		i.active--
+		i.mu.Unlock()
+	}()
+	if i.invocationLag > 0 {
+		timer := time.NewTimer(i.invocationLag)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return aiplatform.InvocationResult{}, ctx.Err()
+		}
+	}
+	for _, column := range input.Columns {
+		if column.ID == i.failColumnID {
+			return aiplatform.InvocationResult{}, errors.New("batch provider unavailable")
+		}
+	}
+	output := CompletionOutput{
+		SchemaVersion: SchemaVersion,
+		Columns:       make([]SuggestionValue, 0, len(input.Columns)),
+	}
+	if input.TargetTable {
+		output.Table = &SuggestionValue{
+			TargetID: input.Table.ID, BusinessName: "员工信息",
+			BusinessDescription: "员工信息明细表",
+			Tags:                []string{"领域:企业", "作用:主数据"},
+			SensitivityLevel:    "INTERNAL", Confidence: 0.95,
+		}
+	}
+	for _, column := range input.Columns {
+		output.Columns = append(output.Columns, SuggestionValue{
+			TargetID: column.ID, BusinessName: "字段" + column.ID,
+			BusinessDescription: "员工字段业务含义",
+			Tags:                []string{"作用:辅助信息"},
+			SensitivityLevel:    "INTERNAL", SemanticType: "TEXT",
+			Confidence: 0.95,
+		})
+	}
+	content, err := json.Marshal(output)
+	if err != nil {
+		return aiplatform.InvocationResult{}, err
+	}
+	return aiplatform.InvocationResult{ProviderResult: aiplatform.ProviderResult{
+		Content: content, Model: "batch-model",
+		Usage: aiplatform.Usage{
+			PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3,
+		},
+	}}, nil
+}
+
+func batchedCompletionInput(columnCount int) CompletionInput {
+	input := CompletionInput{
+		SchemaVersion: SchemaVersion,
+		SourceFormat:  SourceFormatExcel,
+		TargetTable:   true,
+		Table:         Target{ID: "table-batch", Name: "员工列表"},
+		Columns:       make([]Target, 0, columnCount),
+		SampleRows:    []map[string]any{{}},
+	}
+	for index := 1; index <= columnCount; index++ {
+		id := fmt.Sprintf("column-%02d", index)
+		name := fmt.Sprintf("字段%02d", index)
+		input.Columns = append(input.Columns, Target{
+			ID: id, Name: name, Kind: "COLUMN", CanonicalType: "TEXT",
+		})
+		input.SampleRows[0][name] = index
+	}
+	return input
+}
+
+func TestOrchestratedProviderCompletesLargeTableInBoundedParallelBatches(t *testing.T) {
+	input := batchedCompletionInput(57)
+	invoker := &batchingProviderInvoker{invocationLag: 20 * time.Millisecond}
+	provider := NewOrchestratedProvider(invoker)
+
+	result, err := provider.Complete(
+		context.Background(), "tenant-1", "actor-1", input,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateOutput(input, result.Output); err != nil {
+		t.Fatalf("merged output is invalid: %v", err)
+	}
+	if len(result.Output.Columns) != 57 ||
+		result.Output.Columns[0].TargetID != "column-01" ||
+		result.Output.Columns[56].TargetID != "column-57" {
+		t.Fatalf("merged column order=%#v", result.Output.Columns)
+	}
+	if invoker.calls != 12 || invoker.tableCalls != 1 ||
+		invoker.maxActive != metadataCompletionBatchConcurrency {
+		t.Fatalf(
+			"calls=%d tableCalls=%d maxActive=%d",
+			invoker.calls, invoker.tableCalls, invoker.maxActive,
+		)
+	}
+	for _, size := range invoker.batchSizes {
+		if size < 1 || size > metadataCompletionBatchColumns {
+			t.Fatalf("batch size=%d, want 1..%d", size, metadataCompletionBatchColumns)
+		}
+	}
+	for _, width := range invoker.sampleWidths {
+		if width > metadataCompletionBatchColumns {
+			t.Fatalf(
+				"sample width=%d, want <=%d",
+				width, metadataCompletionBatchColumns,
+			)
+		}
+	}
+	for _, width := range invoker.contextWidths {
+		if width != 57 {
+			t.Fatalf("context width=%d, want 57", width)
+		}
+	}
+	if result.Usage != (Usage{
+		PromptTokens: 12, CompletionTokens: 24, TotalTokens: 36,
+	}) {
+		t.Fatalf("merged usage=%#v", result.Usage)
+	}
+}
+
+func TestOrchestratedProviderReturnsSuccessfulBatchesAsPartialOutput(t *testing.T) {
+	input := batchedCompletionInput(5)
+	invoker := &batchingProviderInvoker{failColumnID: "column-03"}
+	provider := NewOrchestratedProvider(invoker)
+	provider.batchColumns = 2
+	provider.batchConcurrency = 3
+	provider.batchSemaphore = make(chan struct{}, 3)
+
+	result, err := provider.Complete(
+		context.Background(), "tenant-1", "actor-1", input,
+	)
+	var partial *PartialOutputError
+	if !errors.As(err, &partial) || partial.MissingTargets != 2 {
+		t.Fatalf("error=%v, want two missing targets", err)
+	}
+	if result.Output.Table == nil || len(result.Output.Columns) != 3 {
+		t.Fatalf("partial output=%#v", result.Output)
+	}
+	if err := validatePartialOutput(input, result.Output); err != nil {
+		t.Fatalf("partial output cannot be persisted: %v", err)
 	}
 }
 
@@ -153,6 +362,102 @@ func TestOrchestratedProviderRepairsDuplicateTargetIDWithCorrectionContext(t *te
 	}
 	if correctionMessage.Role != aiplatform.MessageRoleUser || !messageContains(correctionMessage, "duplicates targetId") {
 		t.Fatalf("纠错请求未携带本地校验原因: %#v", correctionMessage)
+	}
+}
+
+func TestOrchestratedProviderUsesDeepSeekOnlyAfterMiniMaxValidationFailure(t *testing.T) {
+	input, validOutput := validCompletion()
+	invalidOutput := validOutput
+	invalidOutput.Columns = append(
+		[]SuggestionValue(nil),
+		validOutput.Columns...,
+	)
+	invalidOutput.Columns[1].TargetID = invalidOutput.Columns[0].TargetID
+	invalidContent, err := json.Marshal(invalidOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validContent, err := json.Marshal(validOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoker := &providerInvoker{
+		configured: true,
+		models:     "MiniMax-M2,deepseek-v3",
+		results: []aiplatform.InvocationResult{
+			{ProviderResult: aiplatform.ProviderResult{
+				Content: invalidContent,
+				Model:   "MiniMax-M2",
+				Usage: aiplatform.Usage{
+					PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30,
+				},
+			}},
+			{ProviderResult: aiplatform.ProviderResult{
+				Content: validContent,
+				Model:   "deepseek-v3",
+				Usage: aiplatform.Usage{
+					PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3,
+				},
+			}},
+		},
+	}
+
+	result, err := NewOrchestratedProviderWithPrimaryFailover(
+		invoker,
+		time.Second,
+	).Complete(context.Background(), "tenant-1", "actor-1", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invoker.invocations) != 2 ||
+		invoker.invocations[0].PreferredModel != "" ||
+		invoker.invocations[1].PreferredModel != "deepseek-v3" {
+		t.Fatalf("invocations=%#v", invoker.invocations)
+	}
+	if result.Model != "MiniMax-M2,deepseek-v3" ||
+		result.Usage != (Usage{
+			PromptTokens: 11, CompletionTokens: 22, TotalTokens: 33,
+		}) {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestOrchestratedProviderFallsBackAfterPrimaryDeadline(t *testing.T) {
+	input, output := validCompletion()
+	content, err := json.Marshal(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoker := &providerInvoker{
+		configured: true,
+		models:     "MiniMax-M2,deepseek-v3",
+		delays:     []time.Duration{time.Second, 0},
+		results: []aiplatform.InvocationResult{
+			{},
+			{ProviderResult: aiplatform.ProviderResult{
+				Content: content,
+				Model:   "deepseek-v3",
+			}},
+		},
+	}
+
+	result, err := NewOrchestratedProviderWithPrimaryFailover(
+		invoker,
+		10*time.Millisecond,
+	).Complete(context.Background(), "tenant-1", "actor-1", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invoker.invocations) != 2 ||
+		invoker.invocations[1].PreferredModel != "deepseek-v3" {
+		t.Fatalf("invocations=%#v", invoker.invocations)
+	}
+	if len(invoker.invocations[1].Request.Messages) !=
+		len(invoker.invocations[0].Request.Messages) {
+		t.Fatal("transport failover unexpectedly included repair content")
+	}
+	if result.Model != "deepseek-v3" {
+		t.Fatalf("result model=%q", result.Model)
 	}
 }
 
@@ -352,6 +657,7 @@ func TestOrchestratedProviderDoesNotRetryValidOutput(t *testing.T) {
 	}
 	invoker := &providerInvoker{
 		configured: true,
+		models:     "MiniMax-M2,deepseek-v3",
 		results:    []aiplatform.InvocationResult{{ProviderResult: aiplatform.ProviderResult{Content: content}}},
 	}
 
@@ -364,6 +670,12 @@ func TestOrchestratedProviderDoesNotRetryValidOutput(t *testing.T) {
 	}
 	if len(invoker.invocations) != 1 {
 		t.Fatalf("有效输出调用次数=%d, want 1", len(invoker.invocations))
+	}
+	if invoker.invocations[0].PreferredModel != "" {
+		t.Fatalf(
+			"有效 MiniMax 输出不应触发后备模型: %#v",
+			invoker.invocations[0],
+		)
 	}
 }
 
@@ -553,5 +865,12 @@ func TestOrchestratedProviderPreservesPublishedErrorContract(t *testing.T) {
 				t.Fatalf("error=%v, want %v 且保留原错误", err, test.want)
 			}
 		})
+	}
+}
+
+func TestMergeProviderModelsPreservesDistinctLoadBalancedModels(t *testing.T) {
+	model := mergeProviderModels("MiniMax-M2", "deepseek-v3,MiniMax-M2")
+	if model != "MiniMax-M2,deepseek-v3" {
+		t.Fatalf("model=%q", model)
 	}
 }

@@ -96,6 +96,29 @@ func TestGovernedPublicationFailsClosedWithoutMaterializationOutbox(t *testing.T
 	}
 }
 
+func TestMapPublicationPostgresErrorPreservesDomainValidationDetail(t *testing.T) {
+	tests := []struct {
+		constraint string
+		code       string
+	}{
+		{constraint: "dataset_versions_domain_required", code: "DATASET_DOMAIN_REQUIRED"},
+		{constraint: "dataset_versions_domain_lineage_match", code: "DATASET_DOMAIN_LINEAGE_MISMATCH"},
+	}
+	for _, test := range tests {
+		t.Run(test.constraint, func(t *testing.T) {
+			err := mapPublicationPostgresError(&pgconn.PgError{
+				Code: "23514", ConstraintName: test.constraint,
+			})
+			var validation *PublicationValidationError
+			if !errors.As(err, &validation) || len(validation.Issues) != 1 ||
+				validation.Issues[0].Path != "dataset.domain" ||
+				validation.Issues[0].Code != test.code {
+				t.Fatalf("error=%#v", err)
+			}
+		})
+	}
+}
+
 func (e *recordingDatasetExecutor) Exec(_ context.Context, statement string, arguments ...any) (pgconn.CommandTag, error) {
 	e.statements = append(e.statements, statement)
 	e.arguments = append(e.arguments, arguments)

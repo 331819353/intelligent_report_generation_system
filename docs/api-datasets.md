@@ -15,22 +15,21 @@ DIM/DWD 与 DWS 建模不随发布自动启动，只能通过以上入口人工�
 
 非 ODS 数据集（DIM、DWD、DWS、ADS）在当前建模草稿生成后即自动登记 LLM 标签建议任务，发布形成新的不可变版本时再自动登记该版本，不提供人工触发入口。worker 只能从租户内 `ACTIVE / CONTROLLED` 词表选择标签，并仅生成 `SUGGESTED` 绑定，不自动批准；页面展示当前发布版本的建议标签，没有发布版本时展示当前草稿标签。任务身份包含精确版本、prompt 版本和 schema hash，同一草稿继续编辑时不会复活或改写已终结的审计任务。
 
-### 人工识别指标与维度
+### 同步 DWS 指标与维度资产
 
-`POST /metric-candidates/identify` 需要全局 `METRIC:MANAGE` 和 `DATASET:READ`，由资产管理中心“自动识别指标与维度”按钮人工提交。DWS/ADS 发布、审批和物化不再自动登记指标候选、维度候选或字段画像任务，迁移前遗留的 DWS/ADS 自动候选也不会继续出现在审批清单。
+发布 DWS 精确版本时，系统直接信任保存后的字段角色：`MEASURE` 由纯代码规则生成
+指标入库任务，`DIMENSION / ATTRIBUTE / TIME / IDENTIFIER` 直接写入正式维度资产。
+资产发现阶段不调用 LLM；名称与描述已经在 DWS 草稿保存时由语义命名流程补全并
+持久化，入库阶段不会再次推断或改写。
 
-人工识别先统计并比对现有正式指标和历史候选，只遍历当前发布的 DWS/ADS，
-不再用 DWD 作为回退。每个精确版本登记一项
-`metric-candidate-manual-v1` 任务；同一按钮还为当前 ACTIVE DWS 补建维度候选
-和有界字段画像。对同一物化重复点击会复用已成功画像，只重放已失败画像，不会
-再次把已发布的 `FULL` 成员索引收紧为 `NONE`。
+`POST /metric-candidates/identify` 需要全局 `METRIC:MANAGE` 和 `DATASET:READ`，由
+资产管理中心“同步 DWS 指标与维度”按钮发起一次幂等对账，为迁移前或异常遗漏的
+当前 DWS 补齐同一套程序化入库。指标规则结果自动接收为指标资产，维度直接以
+`PUBLISHED` 状态创建；两者都不进入人工审批中心，也不提供候选清单。
 
-接口返回覆盖数据集、提交任务、历史指标/候选、维度画像数量，以及按 DWS/ADS
-分组的领域、指标清单和维度清单。维度候选审批为 `PUBLISHED` 后，低基数、
-非敏感且采用 `FULL` 策略的去重成员值会异步刷新并独立向量化；再次读取清单会
-返回成员总数、已向量化数量和最多 200 个成员标签。高基数维度只做精确匹配，
-敏感维度不建立成员向量。指标候选和维度候选仍需人工审核，不会由模型直接转成
-正式资产。
+维度身份自动入库不等于自动开放成员枚举。程序创建的维度默认
+`member_index_policy=NONE`，敏感性和高基数标记继续受治理策略约束；后续如需成员
+索引，必须由独立画像与索引治理流程显式放开。
 
 ## 校验并规范化
 
@@ -71,7 +70,7 @@ DIM/DWD 与 DWS 建模不随发布自动启动，只能通过以上入口人工�
 
 默认数据集通过只读的 `originTableId` 标识来源表，并与手工创建的数据集共用草稿、修订、预览和生命周期能力。默认 DSL 只包含一个 `TABLE` 数据节点和一个结束节点：`joins` 与 `preAggregations` 都为空，结束节点的输入直接指向该数据节点，默认输出为当前全部活动字段。该系统生成的 DSL 固定使用 `MATERIALIZED_PREFERRED`，并声明 `materialization.enabled=true`、`refreshMode=ON_DEMAND`；普通人工设计的数据集默认仍关闭物化，系统不会批量替它们开启。
 
-文件映射数据集使用 LLM 生成并通过本地规则校验的英文 `snake_case` 作为字段 `code`，因此查询和预览不会退化为 `field_1`、`field_2`；原始文件表头仍固定保存在 projection 与 `FIELD_REF` 中，中文表头同时作为字段显示名。文件数据集名称优先选择中文表业务名，其次为中文 Sheet 名或中文数据源名。目录不按名称去重，同名数据集按各自 ID 全部返回，并携带来源表及来源数据源名称用于区分。
+文件映射数据集不再要求 LLM 为中文表头生成英文 `snake_case`。字段中文显示名来自元数据补全：中文表头保持中文含义，英文表头翻译为中文。内部字段 `code` 与显示名解耦：安全的原始英文表头继续作为稳定代码，中文表头使用按列序稳定生成的 `field_1`、`field_2` 等技术代码；原始表头始终固定保存在 projection 与 `FIELD_REF` 中。文件数据集名称优先选择中文表业务名，其次为中文 Sheet 名或中文数据源名。目录不按名称去重，同名数据集按各自 ID 全部返回，并携带来源表及来源数据源名称用于区分。
 
 指标 AI 将映射表数据集作为不可原地改造的来源证据，不会把它作为 `MODIFY_DATASET` 目标；已发布字段足够时可直接使用 `CREATE_ON_DATASET`，需要关联、派生、补字段或改变结构时使用 `CREATE_DATASET` 新建普通数据集。这是指标 AI 编排边界，不取消数据集中心对映射表数据集的原有人工维护能力；人工保存的新草稿仍必须走发布审批。
 
@@ -260,6 +259,10 @@ DWD 草稿和发布版本都记录对精确 ODS 版本的依赖。删除 ODS 时
 
 画布中的“数据节点 → 分组组件 → 关联槽位”使用 DSL 顶层 `preAggregations` 保存，不再退化为 Join 完成后的全局 `groupBy`。每项通过 `nodeId`、`joinId` 和 `joinSide` 固定分组组件的输入节点与下游槽位，`groupBy` 只保存已经由上游产出的维度，`metrics` 保存字段与 `SUM/AVG/COUNT/COUNT_DISTINCT/MIN/MAX`。日期年、年月、年季或年月日必须由独立 `DATE_FORMAT` 转换组件先产出字符串维度，分组组件不再承担日期转换。领域校验要求关联条件只能引用该分组组件实际产出的字段；规范逻辑计划按 `SCAN → TRANSFORM → PRE_AGGREGATE → JOIN` 排序。单源编译器使用分组派生表后再 Join，跨源与文件执行器在内存 Join 前对对应节点分组，因此保存回显与实际预览采用相同拓扑。
 
+分组组件通过 `groupByMode` 支持 `STANDARD`、`CUBE`、`ROLLUP` 和 `GROUPING_SETS`。`CUBE` 生成全部维度组合（限制 2–8 个维度），`ROLLUP` 按维度声明顺序逐级生成小计与总计，`GROUPING_SETS` 则通过 `groupingSets` 明确列出需要的维度组合，其中空数组 `[]` 表示总计。未参与当前组合的维度在底层保持类型安全的 `NULL`，预览列元数据通过 `groupingPlaceholder` 统一声明为 `ALL`。Oracle 与 PostgreSQL 编译为原生分组语法，MySQL 原生使用 `WITH ROLLUP`，并将不支持的 `CUBE`、`GROUPING SETS` 安全展开为等价的 `UNION ALL`；文件和跨源执行器采用相同语义。最终分组把这些字段放在 DSL 顶层，关联前分组则放在对应的 `preAggregations[]` 项中。
+
+空值填充组件根据所选主字段的规范类型自动给出固定值：文本为 `UNKNOWN`、日期为 `1970-01-01`、数值为 `999999999`、布尔为 `False`；用户仍可改为其他固定值、上游字段或 `CURRENT_DATE`。
+
 创建和每次成功保存都会在同一数据库事务中追加一份不可变草稿修订。保存失败时，当前草稿、派生索引和修订目录全部回滚，不会出现只有部分内容进入历史的状态。
 
 ## 草稿历史与回滚
@@ -444,14 +447,21 @@ DWD 草稿和发布版本都记录对精确 ODS 版本的依赖。删除 ODS 时
 }
 ```
 
-批准事务会复制已提交的数据集草稿生成独立 `PUBLISHED` 行，并把申请状态、审批人、不可变版本、`currentPublishedVersionId`、发布审计和后续任务 outbox 原子提交；任一步失败都会整体回滚。ODS 批准后登记指标候选提取，DIM/DWD/DWS/ADS 还会为本次刚批准的精确版本登记 PostgreSQL 物化 build。任务登记属于审批事务，真正的 LLM/规则提取和数据加工只由 Worker 在事务提交后执行。派生层在对应 build 生成 `ACTIVE` 物化前不可查询，不会复用审批前任务或旧版本物理表；完成后查询运行时自动使用 `warehouse_published` 稳定视图。原草稿仍可继续编辑，首次正式发布版本号为 1。指标定义、指标 AI 的 `CREATE_ON_DATASET` 提案和后续报告绑定只能引用精确 `PUBLISHED` 版本；人工维护版本来自审批，映射表初始镜像可来自受控系统发布。它们都不能绑定 `PENDING` 申请、可变草稿或仅有数据集主对象 ID 的“当前版本”。普通草稿在指标创建流程中可作为 `MODIFY_DATASET` 的 AI 改造目标；映射表结构不足时改用 `CREATE_DATASET` 新建普通数据集，保存后再提交发布审批。
+批准事务会复制已提交的数据集草稿生成独立 `PUBLISHED` 行，并把申请状态、审批人、不可变版本、`currentPublishedVersionId`、发布审计和后续任务 outbox 原子提交；任一步失败都会整体回滚。ODS 批准后登记通用指标提取，DIM/DWD/DWS/ADS 还会为本次刚批准的精确版本登记 PostgreSQL 物化 build；DWS 发布同时按已保存字段角色登记程序化指标/维度入库，其中资产发现不调用 LLM。任务登记属于审批事务，数据加工只由 Worker 在事务提交后执行。派生层在对应 build 生成 `ACTIVE` 物化前不可查询，不会复用审批前任务或旧版本物理表；完成后查询运行时自动使用 `warehouse_published` 稳定视图。原草稿仍可继续编辑，首次正式发布版本号为 1。指标定义、指标 AI 的 `CREATE_ON_DATASET` 提案和后续报告绑定只能引用精确 `PUBLISHED` 版本；人工维护版本来自审批，映射表初始镜像可来自受控系统发布。它们都不能绑定 `PENDING` 申请、可变草稿或仅有数据集主对象 ID 的“当前版本”。普通草稿在指标创建流程中可作为 `MODIFY_DATASET` 的 AI 改造目标；映射表结构不足时改用 `CREATE_DATASET` 新建普通数据集，保存后再提交发布审批。
 
 审批发布试跑支持两条互斥路径：
 
-- ODS 与未显式声明层级的历史 TABLE 文档继续使用受控源查询/文件执行路径；
-- 显式 DIM/DWD/DWS/ADS 的全部 `DATASET` 节点使用 PostgreSQL 物化路径。DIM 上游必须是 ODS；DWD 至少有一个 ODS 事实输入且可附加 DIM；DWS 只能包含一个或多个 DWD；ADS 上游必须是 DWS。每个节点固定的精确上游版本还必须是所属数据集的当前 `PUBLISHED` 版本，并拥有 schema hash 一致的当前 `ACTIVE` 物化及可读 `warehouse_published` 稳定视图。
+- ODS 与未显式声明层级的历史 TABLE 文档继续使用受控源查询/文件执行路径；ODS 是
+  字段清晰后的虚拟来源映射，不要求也不创建数仓物化；
+- 显式 DIM/DWD 的 ODS `DATASET` 节点在设计预览时展开为其精确 TABLE/fileVersion
+  来源，每个来源只截取 100 行后执行候选 DAG；正式构建才全量回源并首次落仓；
+- DWS/ADS 的 `DATASET` 节点使用 PostgreSQL 物化路径。DWS 只能包含一个或多个
+  DWD，ADS 上游必须是 DWS；每个节点必须拥有 schema hash 一致的当前 `ACTIVE`
+  物化及可读 `warehouse_published` 稳定视图。
 
-PostgreSQL 路径不会递归重放上游 DAG，也不会读取上游源库或在内存拼接。缺失 ACTIVE 物化、精确版本不再是当前发布版本、层级/摘要漂移、稳定关系不是视图、读取权限不足或混用 TABLE/DATASET 时均失败关闭，且不会回退到上游草稿、其他发布版本或任意物理表。
+DWS/ADS PostgreSQL 路径不会递归重放上游 DAG，也不会读取上游源库或在内存拼接。
+DIM/DWD 只允许展开受控 ODS 映射，混合虚拟 ODS 与数仓关系的交互预览失败关闭。
+任何路径都不会回退到上游草稿、其他发布版本或可变文件版本。
 
 ## 发布版本目录与精确加载
 
@@ -531,6 +541,27 @@ PostgreSQL 路径不会递归重放上游 DAG，也不会读取上游源库或�
 {
   "queryId": "d7567ac1-dd36-4d16-aac4-65d48d491d74",
   "columns": ["stat_month", "revenue"],
+  "columnMetadata": [
+    {
+      "fieldId": "field_stat_month",
+      "code": "stat_month",
+      "name": "统计月份",
+      "canonicalType": "DATE",
+      "semanticType": "DATE",
+      "role": "TIME",
+      "nullable": false
+    },
+    {
+      "fieldId": "field_revenue",
+      "code": "revenue",
+      "name": "订单金额",
+      "description": "统计周期内的订单金额合计",
+      "canonicalType": "DECIMAL",
+      "semanticType": "AMOUNT",
+      "role": "MEASURE",
+      "nullable": false
+    }
+  ],
   "rows": [["2026-01-01", 12500.5]],
   "rowCount": 1,
   "durationMs": 18,
@@ -545,13 +576,20 @@ PostgreSQL 路径不会递归重放上游 DAG，也不会读取上游源库或�
 }
 ```
 
+`columns` 保持可用于程序绑定的稳定技术编码，`columnMetadata` 与其按位置一一对应，
+为每一列提供字段 ID、业务名称、说明、物理字段名（仅直接字段引用）、规范类型、
+语义类型和角色。Excel/CSV 中文表头即使使用 `field_1` 等内部代码，下游也应读取
+`columnMetadata[].name` / `physicalName` 理解字段含义，而不需要猜测列序号。
+
 MySQL/Oracle 预览仅执行服务端从 DSL 生成的参数化 `SELECT`。物理表和字段来自当前租户的活跃资产白名单，执行前重新加载用户行列策略；Connector 再执行只读词法防护、连接并发限制和多取一行的结果上限检查。
 
-Excel/CSV 预览使用 DSL TABLE 节点固定的 `fileVersionId`，不会回退到文件资产的可变“当前版本”。服务端先验证版本与数据源归属，再从对象存储读取对应版本，复核对象大小和 SHA-256，并用该版本的原始解析配置及真实表头执行过滤、同版本等值 Join、聚合、排序和行列策略。当前文件执行器最多保留 200,000 行中间结果；大文件流式/物化、非等值 Join 和跨源计划由 T0304 承担。
+Excel/CSV 预览使用 DSL TABLE 节点固定的 `fileVersionId`，不会回退到文件资产的可变“当前版本”。服务端先验证版本与数据源归属，再从对象存储读取对应版本，复核对象大小和 SHA-256；预览读取器只展开所需 worksheet 的表头和前 100 行，再执行过滤、同版本等值 Join、转换、排序和行列策略，不再为小样本预览完整解析大型 worksheet。
 
-显式 DIM/DWD/DWS/ADS 预览只读取 PostgreSQL 中由服务端解析的 `warehouse_published` 稳定视图。解析结果包含节点、精确上游数据集版本、精确 ACTIVE materialization ID、schema/snapshot hash 和允许列；客户端 DSL 不保存、也不能提交稳定视图或物理表名称。执行事务在编译后再次以租户 RLS 锁定并复核当前发布指针、版本状态、ACTIVE 物化、全部摘要、视图类型和 API 角色的 SELECT 权限，再执行参数化 PostgreSQL 查询，防止解析与执行之间发生激活切换。
+显式 DIM/DWD 预览读取 ODS 固定来源的 100 行样本；显式 DWS/ADS 预览只读取
+PostgreSQL 中由服务端解析的 `warehouse_published` 稳定视图。客户端 DSL 不保存、
+也不能提交源 SQL、稳定视图或物理表名称。
 
-`CROSS_SOURCE` 实时预览支持 MySQL↔Oracle、数据库↔Excel 和 Excel↔Excel 等值 Join。执行器只向各源读取 Join、显式关联前分组、过滤和输出所需字段，可证明只引用单节点的前置过滤会参数化下推；规范化后的数据先执行 `preAggregations`，再在网关完成 Join、最终聚合、排序和行列策略。单个数据集最多 16 个节点，每个源按预览行数放大读取且硬上限为 10,000 行；源返回超过上限时整次预览失败，不使用截断结果。当前不支持非等值 Join、缓存和物化。
+`CROSS_SOURCE` 实时预览支持 MySQL↔Oracle、数据库↔Excel 和 Excel↔Excel 等值 Join。执行器只向各源读取 Join、显式关联前分组、过滤和输出所需字段，可证明只引用单节点的前置过滤会参数化下推；规范化后的数据先执行 `preAggregations`，再在网关完成 Join、最终聚合、排序和行列策略。普通跨源预览每个源按预览行数放大读取且硬上限为 10,000 行，超限失败；DIM/DWD 的虚拟 ODS 预览是明确例外，每个来源固定截断为前 100 行，因为它只用于 DAG 中间过程展示，不能当作全量质量证明。
 
 当数据库节点在参与的每条 Join 中都是声明基数的“多”侧，且度量仅以直接字段形式参与 `SUM/MIN/MAX/COUNT/AVG` 时，执行器会按所有仍需保留的 Join、过滤和维度字段在源端预聚合，再由网关归并部分结果。COUNT 对部分计数求和并保持整数类型，AVG 使用部分 SUM/COUNT 计算加权平均；空集合分别保持 0/NULL，纯整数求和溢出会失败关闭。出现 `COUNT(*)`、`COUNT_DISTINCT`、复杂聚合参数、`AGGREGATE_ONLY` 最小分组人数、COUNT/AVG 的直接聚合策略校验、度量字段被非聚合复用、ONE 侧节点或文件节点时，会自动回退原始扫描，避免改变行数、去重或权限语义。所有标识符仍来自物理白名单，过滤值和行数限制仍使用参数绑定。
 
@@ -565,7 +603,7 @@ Excel/CSV 预览使用 DSL TABLE 节点固定的 `fileVersionId`，不会回退�
 
 `POST /datasets/{id}/versions/{versionId}/preview`，需要同一数据集的 `DATASET:READ` 或对象级读取权限，请求与响应结构和草稿预览相同。
 
-服务端只执行 URL 中的精确发布版本。SOURCE 路径把版本状态、所属数据集状态、依赖摘要复核与可信物理计划解析放入同一个租户事务和锁定边界；严格 DIM/DWD/DWS/ADS 路径还要求每个固定上游版本仍为其当前发布版本并绑定当前 ACTIVE 物化，执行事务再次锁定复核该绑定后读取稳定视图。所属数据集为 `DISABLED`，版本为 `STALE`、`DEPRECATED`，或发布时固定的物理表结构摘要、文件版本 SHA-256、上游版本/当前指针/物化摘要已经漂移时，返回 `DATASET_VERSION_UNAVAILABLE`。当前依赖漂移只会拒绝本次执行，不会在请求内自动改写版本状态；基于影响分析幂等传播 `STALE` 仍归入 T0307。此接口不会回退到当前发布指针或当前草稿。查询审计的 `dataset_version_id` 固定为请求中的版本 ID，`run_type` 为 `PREVIEW`。
+服务端只执行 URL 中的精确发布版本。SOURCE 路径把版本状态、所属数据集状态、依赖摘要复核与可信物理计划解析放入同一个租户事务和锁定边界。DIM/DWD 的 ODS 上游会被展开为发布时固定的精确来源，并各自最多采样 100 行执行 DAG；DWD 的 DIM 上游及 DWS/ADS 上游仍要求当前 ACTIVE 物化，执行事务再次锁定复核后读取稳定视图。所属数据集为 `DISABLED`，版本为 `STALE`、`DEPRECATED`，或发布时固定的物理表结构摘要、文件版本 SHA-256、上游版本/当前指针/物化摘要已经漂移时，返回 `DATASET_VERSION_UNAVAILABLE`。当前依赖漂移只会拒绝本次执行，不会在请求内自动改写版本状态；基于影响分析幂等传播 `STALE` 仍归入 T0307。此接口不会回退到当前发布指针或当前草稿。查询审计的 `dataset_version_id` 固定为请求中的版本 ID，`run_type` 为 `PREVIEW`。
 
 ## 取消预览
 

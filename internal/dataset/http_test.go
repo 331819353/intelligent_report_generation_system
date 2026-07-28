@@ -1058,6 +1058,7 @@ func TestWriteDatasetErrorMapsPublicationAndVersionErrors(t *testing.T) {
 		wantCode   string
 	}{
 		{name: "发布校验失败", err: publicationError, wantStatus: http.StatusUnprocessableEntity, wantCode: "DATASET_PUBLISH_VALIDATION_FAILED"},
+		{name: "普通发布校验失败", err: ErrPublishValidation, wantStatus: http.StatusUnprocessableEntity, wantCode: "DATASET_PUBLISH_VALIDATION_FAILED"},
 		{name: "数据集不存在", err: ErrNotFound, wantStatus: http.StatusNotFound, wantCode: "DATASET_NOT_FOUND"},
 		{name: "版本不存在", err: ErrVersionNotFound, wantStatus: http.StatusNotFound, wantCode: "DATASET_VERSION_NOT_FOUND"},
 		{name: "草稿修订不存在", err: ErrRevisionNotFound, wantStatus: http.StatusNotFound, wantCode: "DATASET_REVISION_NOT_FOUND"},
@@ -1067,6 +1068,8 @@ func TestWriteDatasetErrorMapsPublicationAndVersionErrors(t *testing.T) {
 		{name: "幂等键冲突", err: ErrIdempotencyConflict, wantStatus: http.StatusConflict, wantCode: "DATASET_IDEMPOTENCY_CONFLICT"},
 		{name: "领域权限拒绝", err: ErrForbidden, wantStatus: http.StatusForbidden, wantCode: "PERMISSION_DENIED"},
 		{name: "发布服务不可用", err: ErrPublishUnavailable, wantStatus: http.StatusServiceUnavailable, wantCode: "DATASET_PUBLISH_UNAVAILABLE"},
+		{name: "语义命名服务不可用", err: ErrSemanticNamingUnavailable, wantStatus: http.StatusServiceUnavailable, wantCode: "DATASET_SEMANTIC_NAMING_UNAVAILABLE"},
+		{name: "语义命名输出无效", err: ErrSemanticNamingInvalid, wantStatus: http.StatusUnprocessableEntity, wantCode: "DATASET_SEMANTIC_NAMING_INVALID"},
 		{name: "数据集仍被占用", err: ErrInUse, wantStatus: http.StatusConflict, wantCode: "DATASET_IN_USE"},
 		{name: "状态迁移无效", err: ErrInvalidTransition, wantStatus: http.StatusConflict, wantCode: "DATASET_VERSION_TRANSITION_INVALID"},
 		{name: "文档无效", err: ErrInvalidDocument, wantStatus: http.StatusBadRequest, wantCode: "DSL-002-INVALID-DOCUMENT"},

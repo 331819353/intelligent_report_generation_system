@@ -48,9 +48,22 @@ type MetadataJob struct {
 	ErrorCode           string               `json:"errorCode,omitempty"`
 	ErrorMessage        string               `json:"errorMessage,omitempty"`
 	Failures            []MetadataJobFailure `json:"failures,omitempty"`
+	Logs                []MetadataJobLog     `json:"logs,omitempty"`
 	CreatedAt           string               `json:"createdAt"`
 	StartedAt           string               `json:"startedAt,omitempty"`
 	CompletedAt         string               `json:"completedAt,omitempty"`
+}
+
+// MetadataJobLog 是从任务状态和 AI 审计摘要生成的安全处理日志。
+// 它不包含提示词、样本值、模型响应正文、密钥或上游错误正文。
+type MetadataJobLog struct {
+	Timestamp  string `json:"timestamp"`
+	Level      string `json:"level"`
+	Stage      string `json:"stage"`
+	Message    string `json:"message"`
+	TableName  string `json:"tableName,omitempty"`
+	Model      string `json:"model,omitempty"`
+	DurationMS int64  `json:"durationMs,omitempty"`
 }
 
 // MetadataJobFailure 是页面可展示的逐表失败摘要，只包含任务项中已脱敏的错误信息。

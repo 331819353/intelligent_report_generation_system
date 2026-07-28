@@ -37,6 +37,69 @@ func TestPrepareIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestPreparePersistsDateCalculationAsFormalTransformComponent(t *testing.T) {
+	var input map[string]any
+	if err := json.Unmarshal(readExample(t), &input); err != nil {
+		t.Fatal(err)
+	}
+	input["transforms"] = []any{map[string]any{
+		"id":            "transform_date_calc",
+		"name":          "日期计算 1",
+		"family":        "DATE",
+		"componentType": "DATE_CALCULATION",
+		"input":         map[string]any{"kind": "NODE", "id": "orders"},
+		"rules": []any{map[string]any{
+			"id":        "extract_year",
+			"operation": "DATE_EXTRACT",
+			"inputKeys": []any{"orders.order_date"},
+			"output": map[string]any{
+				"id": "order_year", "name": "订单年份", "code": "order_year", "canonicalType": "INTEGER",
+			},
+			"expression": map[string]any{
+				"type": "DATE_EXTRACT", "unit": "YEAR",
+				"argument": map[string]any{"type": "FIELD_REF", "nodeId": "orders", "field": "order_date"},
+			},
+		}},
+	}}
+	raw, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := Prepare(raw)
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if len(prepared.Document.Transforms) != 1 || prepared.Document.Transforms[0].ComponentType != "DATE_CALCULATION" {
+		t.Fatalf("formal transforms missing from document: %#v", prepared.Document.Transforms)
+	}
+	var persisted map[string]any
+	if err := json.Unmarshal(prepared.DSLJSON, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	transforms, ok := persisted["transforms"].([]any)
+	if !ok || len(transforms) != 1 || transforms[0].(map[string]any)["componentType"] != "DATE_CALCULATION" {
+		t.Fatalf("persisted DSL does not expose DATE_CALCULATION: %#v", persisted["transforms"])
+	}
+	foundStep := false
+	for _, step := range prepared.LogicalPlan.Steps {
+		if step.ID == "transform_date_calc" && step.Kind == "TRANSFORM_DATE_CALCULATION" &&
+			reflect.DeepEqual(step.Inputs, []string{"NODE:orders"}) &&
+			reflect.DeepEqual(step.Fields, []string{"order_year"}) {
+			foundStep = true
+		}
+	}
+	if !foundStep {
+		t.Fatalf("logical plan does not include date calculation transform: %#v", prepared.LogicalPlan.Steps)
+	}
+
+	input["transforms"].([]any)[0].(map[string]any)["rules"].([]any)[0].(map[string]any)["operation"] = "ADD"
+	invalid, _ := json.Marshal(input)
+	if _, err := Prepare(invalid); err == nil {
+		t.Fatal("Prepare() accepted DATE_CALCULATION with an arithmetic operation")
+	}
+}
+
 func TestPreparePersistsVersionedDomainAndSubject(t *testing.T) {
 	baseline, err := Prepare(readExample(t))
 	if err != nil {
@@ -294,6 +357,30 @@ func TestValidateReturnsPreciseReferencePaths(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsDetailLayersWithoutInventedBusinessKey(t *testing.T) {
+	document, err := BuildMappedDatasetDocument(MappedDatasetTable{
+		ID:           "44444444-4444-4444-8444-444444444444",
+		DataSourceID: "source-1",
+		TableName:    "raw_rows",
+	}, []MappedDatasetColumn{{ColumnName: "value", CanonicalType: "TEXT"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(document); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	document.Dataset.Layer = LayerDWD
+	if err := Validate(document); err != nil {
+		t.Fatalf("Validate() DWD error = %v", err)
+	}
+
+	document.Dataset.Layer = LayerDIM
+	if err := Validate(document); !validationHasReason(err, "至少需要一个粒度键字段") {
+		t.Fatalf("Validate() DIM error = %v, want missing grain key", err)
+	}
+}
+
 func TestValidateRejectsInvalidAggregatePlacementAndGrain(t *testing.T) {
 	prepared, err := Prepare(readExample(t))
 	if err != nil {
@@ -346,6 +433,68 @@ func TestValidateRejectsInvalidAggregatePlacementAndGrain(t *testing.T) {
 	})
 }
 
+func TestValidateAcceptsAdvancedGroupingModes(t *testing.T) {
+	prepared, err := Prepare(readExample(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := prepared.Document
+	document.Fields = append(document.Fields, Field{
+		ID: "field_order_status", Code: "order_status", Name: "订单状态", Role: "DIMENSION",
+		Expression:    Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_status"},
+		CanonicalType: "STRING", Nullable: true,
+	})
+	document.GroupBy = append(document.GroupBy, "field_order_status")
+	document.GroupByMode = GroupByModeCube
+
+	if err := Validate(document); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	plan := BuildLogicalPlan(document)
+	if len(plan.Steps) == 0 || plan.Steps[len(plan.Steps)-2].Kind != "AGGREGATE_CUBE" {
+		t.Fatalf("logical plan does not preserve CUBE: %#v", plan.Steps)
+	}
+
+	document.GroupBy = document.GroupBy[:1]
+	if err := Validate(document); !validationHasReason(err, "CUBE 多维分组至少需要两个分组字段") {
+		t.Fatalf("Validate() error = %v, want minimum CUBE dimensions", err)
+	}
+
+	document.GroupBy = []string{"field_stat_month", "field_order_status"}
+	document.GroupByMode = GroupByModeRollup
+	if err := Validate(document); err != nil {
+		t.Fatalf("ROLLUP Validate() error = %v", err)
+	}
+	plan = BuildLogicalPlan(document)
+	if plan.Steps[len(plan.Steps)-2].Kind != "AGGREGATE_ROLLUP" {
+		t.Fatalf("logical plan does not preserve ROLLUP: %#v", plan.Steps)
+	}
+
+	document.GroupByMode = GroupByModeSets
+	document.GroupingSets = [][]string{
+		{"field_stat_month", "field_order_status"},
+		{"field_order_status"},
+		{},
+	}
+	if err := Validate(document); err != nil {
+		t.Fatalf("GROUPING_SETS Validate() error = %v", err)
+	}
+	plan = BuildLogicalPlan(document)
+	if plan.Steps[len(plan.Steps)-2].Kind != "AGGREGATE_GROUPING_SETS" {
+		t.Fatalf("logical plan does not preserve GROUPING_SETS: %#v", plan.Steps)
+	}
+
+	document.GroupingSets = [][]string{{"field_stat_month"}, {"field_stat_month"}}
+	if err := Validate(document); !validationHasReason(err, "自定义分组集重复") {
+		t.Fatalf("Validate() error = %v, want duplicate grouping set", err)
+	}
+	document.GroupingSets = nil
+	document.GroupByMode = "UNKNOWN"
+	if err := Validate(document); !validationHasReason(err, "必须为 STANDARD、CUBE、ROLLUP 或 GROUPING_SETS") {
+		t.Fatalf("Validate() error = %v, want unsupported grouping mode", err)
+	}
+}
+
 func TestValidateTextExpressionShapes(t *testing.T) {
 	field := Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_status"}
 	valid := Expression{Type: "REPLACE", Arguments: []Expression{
@@ -380,6 +529,44 @@ func TestValidateDateFormatExpressionShapes(t *testing.T) {
 	validateExpression(&issues, "expression", Expression{Type: "DATE_FORMAT", Unit: "WEEK", Argument: &field}, map[string]bool{"orders": true}, nil)
 	if len(issues) != 1 || !strings.Contains(issues[0].Reason, "输出格式") {
 		t.Fatalf("invalid DATE_FORMAT issues=%#v", issues)
+	}
+}
+
+func TestValidateDateCalculationExpressionShapes(t *testing.T) {
+	start := Expression{Type: "FIELD_REF", NodeID: "orders", Field: "start_date"}
+	end := Expression{Type: "FIELD_REF", NodeID: "orders", Field: "end_date"}
+	current := Expression{Type: "CURRENT_DATE"}
+	valid := []Expression{
+		current,
+		{Type: "DATE_DIFF", Unit: "YEAR", Arguments: []Expression{start, end}},
+		{Type: "DATE_DIFF", Unit: "MONTH", Arguments: []Expression{start, end}},
+		{Type: "DATE_DIFF", Unit: "DAY", Arguments: []Expression{start, end}},
+		{Type: "DATE_EXTRACT", Unit: "WEEKDAY", Argument: &start},
+		{Type: "DATE_EXTRACT", Unit: "DAY_OF_YEAR", Argument: &start},
+		{Type: "DATE_START", Unit: "QUARTER", Argument: &current},
+		{Type: "DATE_END", Unit: "YEAR", Argument: &current},
+	}
+	for _, expression := range valid {
+		issues := []ValidationIssue{}
+		validateExpression(&issues, "expression", expression, map[string]bool{"orders": true}, nil)
+		if len(issues) != 0 {
+			t.Fatalf("valid expression=%#v issues=%#v", expression, issues)
+		}
+	}
+
+	invalid := []Expression{
+		{Type: "DATE_DIFF", Unit: "WEEK", Arguments: []Expression{start, end}},
+		{Type: "DATE_DIFF", Unit: "DAY", Arguments: []Expression{start}},
+		{Type: "DATE_EXTRACT", Unit: "HOUR", Argument: &start},
+		{Type: "DATE_START", Unit: "DAY", Argument: &start},
+		{Type: "DATE_END", Unit: "YEAR"},
+	}
+	for _, expression := range invalid {
+		issues := []ValidationIssue{}
+		validateExpression(&issues, "expression", expression, map[string]bool{"orders": true}, nil)
+		if len(issues) == 0 {
+			t.Fatalf("invalid expression=%#v was accepted", expression)
+		}
 	}
 }
 
@@ -479,6 +666,22 @@ func TestPreparePersistsPreJoinAggregationBeforeJoin(t *testing.T) {
 	}
 	if len(result.Document.PreAggregations) != 1 || result.Document.PreAggregations[0].Metrics[0].Function != "SUM" {
 		t.Fatalf("pre-aggregation was not persisted: %#v", result.Document.PreAggregations)
+	}
+
+	document.PreAggregations[0].Metrics = []PreAggregationMetric{{Field: "row_count", Function: "COUNT", CountRows: true}}
+	document.Fields[1].Expression = Expression{Type: "FIELD_REF", NodeID: "orders", Field: "row_count"}
+	if err := Validate(document); err != nil {
+		t.Fatalf("COUNT(*) pre-aggregation was rejected: %v", err)
+	}
+	plan := BuildLogicalPlan(document)
+	foundRowCount := false
+	for _, step := range plan.Steps {
+		for _, field := range step.Fields {
+			foundRowCount = foundRowCount || field == "COUNT:*:row_count"
+		}
+	}
+	if !foundRowCount {
+		t.Fatalf("COUNT(*) pre-aggregation missing from logical plan: %#v", plan.Steps)
 	}
 }
 
@@ -606,4 +809,26 @@ func validationHasReason(err error, reason string) bool {
 		}
 	}
 	return false
+}
+
+func TestWindowExpressionValidation(t *testing.T) {
+	partition := Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_status"}
+	order := Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_amount"}
+	valid := Expression{
+		Type: "WINDOW", Function: "RANK",
+		PartitionBy: []Expression{partition},
+		OrderBy:     []WindowOrder{{Expression: order, Direction: "DESC"}},
+	}
+	issues := []ValidationIssue{}
+	validateExpression(&issues, "expression", valid, map[string]bool{"orders": true}, nil)
+	if len(issues) != 0 {
+		t.Fatalf("valid WINDOW issues=%#v", issues)
+	}
+
+	invalid := Expression{Type: "WINDOW", Function: "NTILE"}
+	issues = nil
+	validateExpression(&issues, "expression", invalid, map[string]bool{"orders": true}, nil)
+	if len(issues) < 3 {
+		t.Fatalf("invalid WINDOW issues=%#v", issues)
+	}
 }

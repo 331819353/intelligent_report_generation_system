@@ -1,4 +1,5 @@
 import {
+  ArrowRight,
   ChartLineUp,
   ChatCenteredDots,
   CheckCircle,
@@ -24,6 +25,7 @@ import {
   type SemanticGraphStatus,
   type SemanticQueryExecution,
   type SemanticQueryPlan,
+  type SemanticQueryTurn,
 } from '../lib/semantic-chat'
 
 type Feedback = 'ACCURATE' | 'INACCURATE'
@@ -35,6 +37,9 @@ type ChatMessage = {
   createdAt: string
   pending?: boolean
   question?: string
+  turn?: SemanticQueryTurn
+  plans?: SemanticQueryPlan[]
+  executions?: SemanticQueryExecution[]
   plan?: SemanticQueryPlan
   execution?: SemanticQueryExecution
   errorCode?: string
@@ -55,7 +60,8 @@ type GoldenRunState = {
 }
 
 const storageKey = 'intelligent-report-semantic-chat-v1'
-const suggestionQuestions = ['本月销售额是多少？', '各区域销售额排名前 10', '最近 30 天销售趋势', '销售额同比有什么变化？']
+const workforceMetricCode = 'metric_dws_employee_profile_regenerated_20260727_em_904c04ae2441'
+const suggestionQuestions = ['80后小微在职人员有多少人？', '本月销售额和订单量分别是多少？', '各区域销售额排名前 10', '最近 30 天销售趋势']
 const newID = () => typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
   ? crypto.randomUUID()
   : `${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -82,6 +88,16 @@ function formatValue(value: unknown) {
 
 function resultColumnLabels(execution: SemanticQueryExecution) {
   const labels = [...execution.result.columns]
+  for (const dimension of execution.queryPlan.conditions?.dimensions ?? []) {
+    const columnIndex = execution.result.columns.findIndex(column =>
+      column.toLowerCase() === dimension.dimensionCode.toLowerCase(),
+    )
+    const evidence = execution.evidence.lineage.find(item =>
+      item.subjectType === 'DIMENSION' &&
+      item.subjectRef === dimension.dimensionId,
+    )
+    if (columnIndex >= 0 && evidence?.label) labels[columnIndex] = evidence.label
+  }
   const metricEvidence = execution.evidence.lineage.find(item =>
     item.subjectType === 'METRIC' &&
     item.subjectRef === execution.evidence.metricVersionId,
@@ -94,14 +110,46 @@ function resultColumnLabels(execution: SemanticQueryExecution) {
   return labels
 }
 
-function buildAnswer(execution: SemanticQueryExecution) {
+function dimensionConditionText(plan: SemanticQueryPlan, question = '') {
+  return (plan.conditions?.dimensions ?? []).map(dimension => {
+    const label = plan.evidence.find(item =>
+      item.subjectType === 'DIMENSION' && item.subjectRef === dimension.dimensionId,
+    )?.label || dimension.dimensionCode
+    const values = dimension.memberKeys?.length
+      ? dimension.memberKeys
+      : dimension.memberKey ? [dimension.memberKey] : []
+    const normalizedValues = [...values].sort()
+    if (dimension.dimensionCode === 'birth_cohort' &&
+      normalizedValues.join(',') === ['80-85', '85-90'].sort().join(',')) {
+      return `${label}为 80后（80-85、85-90）`
+    }
+    if (dimension.dimensionCode === 'employee_status' && normalizedValues.length === 1 &&
+      normalizedValues[0] === '在岗') {
+      return `${label}为 在职（映射为在岗）`
+    }
+    if (dimension.dimensionCode === 'key_talent' && normalizedValues.length > 0 &&
+      normalizedValues.every(value => value.split(/[,，]/u).map(item => item.trim()).includes('关键人才'))) {
+      return `${label}为 是（命中“关键人才”标签，共 ${normalizedValues.length} 种已治理组合）`
+    }
+    return `${label}为 ${values.join('、')}`
+  }).join('、')
+}
+
+function buildAnswer(execution: SemanticQueryExecution, question = '') {
   const { result, comparison } = execution
   if (result.rowCount === 0 || result.rows.length === 0) return '在当前筛选条件与数据权限范围内没有查询到结果。'
   const first = result.rows[0] ?? []
   const columns = resultColumnLabels(execution)
-  let answer = result.rowCount === 1
-    ? `查询结果：${columns.slice(0, 4).map((column, index) => `${column}为 ${formatValue(first[index])}`).join('，')}。`
-    : `已查询到 ${result.rowCount} 条结果，按当前分析口径展示前 ${Math.min(result.rows.length, 100)} 条。`
+  const conditions = dimensionConditionText(execution.queryPlan, question)
+  const scope = question.includes('小微') ||
+    execution.queryPlan.conditions?.metricCode === workforceMetricCode
+    ? '在小微人员范围内，'
+    : ''
+  let answer = result.rowCount === 1 && columns.length === 1 && conditions
+    ? `查询结果：${scope}按${conditions}的口径，${columns[0]}为 ${formatValue(first[0])}。`
+    : result.rowCount === 1
+      ? `查询结果：${columns.slice(0, 4).map((column, index) => `${column}为 ${formatValue(first[index])}`).join('，')}。`
+      : `已查询到 ${result.rowCount} 条结果，按当前分析口径展示前 ${Math.min(result.rows.length, 100)} 条。`
   if (comparison?.baseline.rows.length) {
     const currentValue = first.find(value => typeof value === 'number')
     const baselineValue = comparison.baseline.rows[0]?.find(value => typeof value === 'number')
@@ -111,6 +159,34 @@ function buildAnswer(execution: SemanticQueryExecution) {
     }
   }
   return answer
+}
+
+function metricLabel(plan?: SemanticQueryPlan) {
+  return plan?.evidence.find(item => item.subjectType === 'METRIC')?.label ||
+    plan?.conditions?.metricCode || '指标'
+}
+
+function messagePlans(message?: ChatMessage) {
+  if (!message) return []
+  if (message.plans?.length) return message.plans
+  return message.plan ? [message.plan] : []
+}
+
+function messageExecutions(message?: ChatMessage) {
+  if (!message) return []
+  if (message.executions?.length) return message.executions
+  return message.execution ? [message.execution] : []
+}
+
+function buildTurnAnswer(executions: SemanticQueryExecution[], question = '') {
+  if (executions.length === 1) return buildAnswer(executions[0], question)
+  const values = executions.map(execution => {
+    const label = metricLabel(execution.queryPlan)
+    if (!execution.result.rows.length) return `${label}未查询到结果`
+    const row = execution.result.rows[0]
+    return `${label}为 ${formatValue(row[row.length - 1])}`
+  })
+  return `已完成 ${executions.length} 个指标的可信查询：${values.join('；')}。`
 }
 
 function planFailureAnswer(plan: SemanticQueryPlan) {
@@ -125,6 +201,12 @@ function planFailureAnswer(plan: SemanticQueryPlan) {
     METRIC_TIME_FIELD_NOT_AVAILABLE: '该指标尚未配置可验证的时间字段，无法执行时间分析。',
   }
   return copy[plan.failureCode ?? ''] ?? `当前问题未通过可信查询门禁（${plan.failureCode || plan.status}），系统没有执行数据查询。`
+}
+
+function turnFailureAnswer(plans: SemanticQueryPlan[]) {
+  if (plans.length === 1) return planFailureAnswer(plans[0])
+  const failed = plans.filter(plan => plan.status !== 'READY')
+  return `本轮请求包含 ${plans.length} 个指标，其中 ${failed.length} 个未通过可信查询门禁，系统没有执行部分结果。${failed.map(plan => `${metricLabel(plan)}：${planFailureAnswer(plan)}`).join(' ')}`
 }
 
 function answerError(cause: unknown) {
@@ -170,6 +252,217 @@ function resolutionStatusLabel(status: string) {
   return labels[status] ?? status
 }
 
+function turnStatus(plans: SemanticQueryPlan[]) {
+  if (!plans.length) return undefined
+  if (plans.every(plan => plan.status === 'EXECUTED')) return 'EXECUTED'
+  if (plans.every(plan => plan.status === 'READY')) return 'READY'
+  return plans.find(plan => !['READY', 'EXECUTED'].includes(plan.status))?.status ?? plans[0].status
+}
+
+function traceStatusLabel(status?: string) {
+  if (status === 'PASS') return '准确可执行'
+  if (status === 'WARN') return '需关注'
+  if (status === 'BLOCKED') return '已阻断'
+  return '等待执行'
+}
+
+function traceMatchMethodLabel(method?: string) {
+  const labels: Record<string, string> = {
+    EXACT_CATALOG: '指标名/别名精确匹配',
+    CATALOG_RERANK: '指标目录重排',
+    HYBRID_RECALL: '指标混合召回',
+    DECISION_GRAPH: '维度决策图反向证明',
+    CONTEXT_PLAN: '继承已验证计划',
+    EXACT_MEMBER: '标准维度值精确匹配',
+    MEMBER_ALIAS: '维度值别名匹配',
+    SEMANTIC_MAPPING: '语义映射',
+    SEMANTIC_ALIAS: '语义映射后别名命中',
+    SEMANTIC_SET: '语义集合展开',
+    SEMANTIC_SET_ALIAS: '语义集合别名展开',
+    SEMANTIC_TAG: '标签集合展开',
+  }
+  return method ? labels[method] ?? method : '—'
+}
+
+function vectorSearchStatusLabel(status?: string) {
+  const labels: Record<string, string> = {
+    SUCCEEDED: '向量检索完成',
+    SKIPPED_PROVIDER_NOT_CONFIGURED: '向量服务未配置，已用精确治理映射',
+    SKIPPED_SENSITIVE_DIMENSION: '敏感维度不外发向量',
+    FAILED: '向量检索失败，已用精确治理映射',
+  }
+  return status ? labels[status] ?? status : '未执行向量检索'
+}
+
+function whereDesignStatusLabel(status?: string) {
+  const labels: Record<string, string> = {
+    SUCCEEDED: 'LLM 设计完成',
+    REUSED_DECISION_GRAPH: '复用已验证决策图 WHERE',
+    SKIPPED_PROVIDER_NOT_CONFIGURED: 'LLM 未配置，已使用安全规则',
+    SKIPPED_SENSITIVE_DIMENSION: '敏感维度不外发 LLM',
+    SKIPPED_NOT_SELECTED: '候选未选中，无需设计',
+    SKIPPED_FIELD_NAME_MISSING: '缺少字段名，未调用 LLM',
+    SKIPPED_FIELD_DESCRIPTION_MISSING: '缺少字段描述，未调用 LLM',
+    FAILED_QUOTA: 'LLM 租户配额不足，已使用安全规则',
+    FAILED_FORBIDDEN: 'LLM 租户策略未授权，已使用安全规则',
+    FAILED_RATE_LIMITED: 'LLM 服务限流，已使用安全规则',
+    FAILED_TIMEOUT: 'LLM 调用超时，已使用安全规则',
+    FAILED: 'LLM 调用失败，已使用安全规则',
+    FAILED_VALIDATION: 'LLM 决策未通过校验，已使用安全规则',
+  }
+  return status ? labels[status] ?? status : '未执行 LLM WHERE 设计'
+}
+
+function compactID(value?: string) {
+  if (!value) return '—'
+  return value.length > 18 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value
+}
+
+function memberKeyPreview(values: string[] = [], limit = 6) {
+  if (!values.length) return '无可展示值'
+  const preview = values.slice(0, limit).join('、')
+  return values.length > limit ? `${preview}，另 ${values.length - limit} 个` : preview
+}
+
+function RetrievalProcess({ message }: { message: ChatMessage }) {
+  const plans = messagePlans(message)
+  if (!plans.length) return null
+  const executions = messageExecutions(message)
+  const trace = message.turn?.trace
+  const lineage = plans.reduce((total, plan) => total + plan.evidence.filter(item =>
+    ['DATASET_VERSION', 'DATASET', 'SOURCE'].includes(item.subjectType),
+  ).length, 0)
+  if (!trace) {
+    return (
+      <details className="semantic-chat-retrieval-process legacy" open>
+        <summary><WarningCircle size={15} /><strong>检索过程不可审计</strong><span>旧计划</span></summary>
+        <p className="semantic-chat-trace-legacy">该回答缺少后端候选级轨迹，页面不会根据最终结果反推一个“看起来正确”的过程。请重新提问以生成真实检索证据。</p>
+      </details>
+    )
+  }
+  const assessment = (step: string) => trace.assessments.find(item => item.step === step)
+  const stepClass = (step: string) => (assessment(step)?.status ?? '').toLowerCase()
+  const metricCandidates = trace.metricCandidates.slice(0, 12)
+  const executionComplete = executions.length === plans.length
+  return (
+    <details className="semantic-chat-retrieval-process" open>
+      <summary><Graph size={15} /><strong>查看检索结果的过程</strong><span>{trace.conversationQuestions.length} 轮上下文 · {plans.length} 个指标 · {lineage} 项血缘</span></summary>
+      <ol className="semantic-chat-trace">
+        <li className={stepClass('CONTEXT_SYNTHESIS')}>
+          <span>1</span>
+          <div>
+            <header><strong>组合上下文并形成独立问题</strong><em>{traceStatusLabel(assessment('CONTEXT_SYNTHESIS')?.status)}</em></header>
+            <small>{assessment('CONTEXT_SYNTHESIS')?.detail}</small>
+            <div className="semantic-chat-trace-questions">
+              {trace.conversationQuestions.map((item, index) => <p key={`${index}-${item}`}><b>Q{index + 1}</b><span>{item}</span></p>)}
+            </div>
+            <div className="semantic-chat-standalone-question"><b>意图识别后的独立问题</b><p>{trace.standaloneQuestion || '未能形成可执行的独立问题'}</p></div>
+          </div>
+        </li>
+        <li className={stepClass('INTENT_EXTRACTION')}>
+          <span>2</span>
+          <div>
+            <header><strong>提取意图、指标和维度值</strong><em>{traceStatusLabel(assessment('INTENT_EXTRACTION')?.status)}</em></header>
+            <small>{assessment('INTENT_EXTRACTION')?.detail}</small>
+            <div className="semantic-chat-extraction-grid">
+              <p><b>意图</b><span>{trace.extraction.intent}</span></p>
+              <p><b>指标词</b><span>{trace.extraction.metricTerms.length ? trace.extraction.metricTerms.join('、') : '未直接提及，使用上下文指标'}</span></p>
+              <p><b>维度值词</b><span>{trace.extraction.dimensionValueTerms.length ? trace.extraction.dimensionValueTerms.join('、') : '未提取到维度值词'}</span></p>
+            </div>
+          </div>
+        </li>
+        <li className={stepClass('METRIC_RETRIEVAL')}>
+          <span>3</span>
+          <div>
+            <header><strong>检索指标资产并选择</strong><em>{traceStatusLabel(assessment('METRIC_RETRIEVAL')?.status)}</em></header>
+            <small>{assessment('METRIC_RETRIEVAL')?.detail}</small>
+            <div className="semantic-chat-candidate-table" role="table" aria-label="指标检索候选">
+              <div role="row" className="head"><span>候选指标</span><span>命中词</span><span>匹配方式</span><span>结果</span></div>
+              {metricCandidates.map(candidate => (
+                <div role="row" className={candidate.selected ? 'selected' : ''} key={`${candidate.code}-${candidate.source}`}>
+                  <span><b>{candidate.label || candidate.code}</b><small>{candidate.code}</small></span>
+                  <span>{candidate.matchedTerm || '—'}</span>
+                  <span>{traceMatchMethodLabel(candidate.matchMethod)}</span>
+                  <span>{candidate.selected ? '已选择' : '未选择'}</span>
+                </div>
+              ))}
+            </div>
+            {trace.metricCandidates.length > metricCandidates.length && <small>页面展示前 {metricCandidates.length} 个；后端实际审查 {trace.metricCandidates.length} 个候选。</small>}
+          </div>
+        </li>
+        <li className={stepClass('DIMENSION_VALUE_RETRIEVAL')}>
+          <span>4</span>
+          <div>
+            <header><strong>检索维度值映射并选择</strong><em>{traceStatusLabel(assessment('DIMENSION_VALUE_RETRIEVAL')?.status)}</em></header>
+            <small>{assessment('DIMENSION_VALUE_RETRIEVAL')?.detail}</small>
+            {trace.dimensionValueLookups.length ? <div className="semantic-chat-member-lookups">
+              {trace.dimensionValueLookups.map((lookup, index) => (
+                <article className={lookup.selected ? 'selected' : ''} key={`${lookup.metricCode}-${lookup.dimensionCode}-${lookup.term}-${index}`}>
+                  <header><b>“{lookup.term}”{lookup.canonicalValue && lookup.canonicalValue !== lookup.term ? ` → “${lookup.canonicalValue}”` : ''}</b><em>{lookup.selected ? '已选择' : '未采用'}</em></header>
+                  <div className="semantic-chat-mapping-chain" aria-label="维度值到查询条件映射">
+                    <p><span>维度字段：维度值</span><strong>{lookup.dimensionFieldName || lookup.dimensionCode}：{lookup.canonicalValue || lookup.term}</strong><code>{lookup.dimensionFieldId || lookup.dimensionCode}</code></p>
+                    <ArrowRight size={13} />
+                    <p><span>指标字段</span><strong>{lookup.metricFieldId || lookup.metricCode}</strong><code>{lookup.metricCode}</code></p>
+                    <ArrowRight size={13} />
+                    <p><span>WHERE 查询条件</span><strong><code>{lookup.whereCondition || '未形成条件'}</code></strong></p>
+                  </div>
+                  <p><span>维度字段名</span><strong><code>{lookup.dimensionFieldName || lookup.dimensionCode}</code> · {lookup.dimensionName || '—'}</strong></p>
+                  <p><span>字段描述</span><strong>{lookup.dimensionFieldDescription || '未配置字段描述'}</strong></p>
+                  <p><span>规范值与别名</span><strong>{lookup.canonicalValue || lookup.term}{lookup.aliasValues?.length ? ` · 原始表达 ${lookup.aliasValues.join('、')}` : ''}</strong></p>
+                  <p><span>向量键</span><strong><code>{lookup.vectorQuery || `${lookup.dimensionFieldDescription || lookup.dimensionName}:${lookup.canonicalValue || lookup.term}`}</code> · {vectorSearchStatusLabel(lookup.vectorSearchStatus)}{lookup.vectorModel ? ` · ${lookup.vectorModel}/${lookup.vectorDimensions || '?'}维` : ''}{lookup.vectorCandidateCount ? ` · ${lookup.vectorCandidateCount} 个候选` : ''}</strong></p>
+                  <p><span>WHERE 决策</span><strong>{whereDesignStatusLabel(lookup.whereDesignStatus)}{lookup.whereDesignOperator ? ` · ${lookup.whereDesignOperator}` : ''}{lookup.whereDesignModel ? ` · ${lookup.whereDesignModel}` : ''}</strong></p>
+                  {lookup.whereDesignReason && <p><span>LLM 设计依据</span><strong>{lookup.whereDesignReason}</strong></p>}
+                  <p><span>目标表 / 决策资产</span><strong>{lookup.tableName ? <code>{lookup.tableSchema}.{lookup.tableName}</code> : '—'}{lookup.decisionId ? ` · 已写入 ${lookup.decisionId}` : ''}</strong></p>
+                  <p><span>匹配方式</span><strong>{traceMatchMethodLabel(lookup.matchMethod)} · {lookup.source === 'CONTEXT_PLAN' ? '来自已验证上下文' : '来自当前提问'}</strong></p>
+                  <p><span>候选结果</span><strong>{lookup.sensitive ? `敏感值已隐藏，共 ${lookup.candidateCount} 个` : `${memberKeyPreview(lookup.candidateMemberKeys)}（共 ${lookup.candidateCount} 个）`}</strong></p>
+                  <p><span>实际选择</span><strong>{lookup.sensitive ? '已按治理键选择，页面不展示值' : memberKeyPreview(lookup.selectedMemberKeys)}</strong></p>
+                  <p><span>异常候选过滤</span><strong>{lookup.candidateFilter?.inputCount ?? lookup.candidateCount} → {lookup.candidateFilter?.acceptedCount ?? lookup.selectedMemberKeys?.length ?? 0}，拒绝 {lookup.candidateFilter?.rejectedCount ?? 0} 个</strong></p>
+                  <p><span>安全执行条件</span><strong><code>{lookup.compiledCondition || '—'}</code></strong></p>
+                </article>
+              ))}
+            </div> : <p className="semantic-chat-empty-trace">本轮及继承上下文均未要求维度值筛选。</p>}
+          </div>
+        </li>
+        <li className={stepClass('FINAL_PLAN')}>
+          <span>5</span>
+          <div>
+            <header><strong>锁定最终查询计划与数据血缘</strong><em>{traceStatusLabel(assessment('FINAL_PLAN')?.status)}</em></header>
+            <small>{assessment('FINAL_PLAN')?.detail}</small>
+            <div className="semantic-chat-final-plans">
+              {trace.finalSelections.map(selection => (
+                <article key={selection.planId}>
+                  <header><b>{selection.metricName || selection.metricCode}</b><em>{selection.planStatus}</em></header>
+                  <p><span>指标资产</span><code>{selection.metricCode}</code></p>
+                  {selection.dimensions.map(dimension => <p key={dimension.dimensionCode}><span>{dimension.dimensionName || dimension.dimensionCode}</span><strong>{memberKeyPreview(dimension.memberKeys)}</strong><code>{dimension.dimensionCode}</code></p>)}
+                  <p><span>指标字段</span><code>{selection.metricFieldId || selection.metricCode}</code></p>
+                  <p><span>组合 WHERE</span><code>{selection.whereCondition || '无维度筛选'}</code></p>
+                  <p><span>安全编译</span><code>{selection.compiledCondition || '无维度筛选'}</code></p>
+                  <p><span>指标版本</span><code>{compactID(selection.metricVersionId)}</code></p>
+                  <p><span>数据集版本</span><code>{compactID(selection.datasetVersionId)}</code></p>
+                </article>
+              ))}
+            </div>
+          </div>
+        </li>
+        <li className={executionComplete ? 'pass' : ''}>
+          <span>6</span>
+          <div>
+            <header><strong>执行查询并复核结果</strong><em>{executionComplete ? '准确可执行' : '等待执行'}</em></header>
+            {executionComplete
+              ? <div className="semantic-chat-execution-trace">
+                  {executions.map(execution => {
+                    const value = execution.result.rows[0]?.at(-1)
+                    return <p key={execution.queryPlan.id}><b>{metricLabel(execution.queryPlan)}</b><strong>{formatValue(value)}</strong><span>{execution.result.rowCount} 行 · {execution.result.durationMs} ms · 权限/版本/兼容性已复核</span></p>
+                  })}
+                </div>
+              : <small>仅在全部计划通过门禁后执行；当前未生成部分答案。</small>}
+          </div>
+        </li>
+      </ol>
+    </details>
+  )
+}
+
 export function SemanticChatPage() {
   const [sessions, setSessions] = useState<ChatSession[]>(readSessions)
   const [activeSessionID, setActiveSessionID] = useState(() => sessions[0].id)
@@ -187,6 +480,12 @@ export function SemanticChatPage() {
   const activeSession = sessions.find(item => item.id === activeSessionID) ?? sessions[0]
   const assistantMessages = activeSession.messages.filter(message => message.role === 'ASSISTANT' && !message.pending)
   const selectedMessage = assistantMessages.find(message => message.id === selectedMessageID) ?? assistantMessages.at(-1)
+  const selectedPlans = messagePlans(selectedMessage)
+  const selectedExecutions = messageExecutions(selectedMessage)
+  const selectedConfidence = selectedPlans.length
+    ? Math.min(...selectedPlans.map(plan => plan.confidence))
+    : undefined
+  const selectedEvidence = selectedPlans.flatMap(plan => plan.evidence)
   const isPending = activeSession.messages.some(message => message.pending)
 
   useEffect(() => {
@@ -220,10 +519,16 @@ export function SemanticChatPage() {
 
   const quality = (() => {
     const attempts = assistantMessages.filter(message => !message.pending)
-    const executed = attempts.filter(message => message.execution)
+    const executed = attempts.filter(message => {
+      const plans = messagePlans(message)
+      return plans.length > 0 && messageExecutions(message).length === plans.length
+    })
     const evidenced = executed.filter(message => {
-      const evidence = message.execution?.evidence
-      return evidence?.executionRevalidated && evidence.permissionDecision && evidence.freshnessDecision && evidence.compatibilityDecision
+      const evidence = messageExecutions(message).map(execution => execution.evidence)
+      return evidence.length > 0 && evidence.every(item =>
+        item.executionRevalidated && item.permissionDecision &&
+        item.freshnessDecision && item.compatibilityDecision,
+      )
     })
     const rated = attempts.filter(message => message.feedback)
     const accurate = rated.filter(message => message.feedback === 'ACCURATE')
@@ -258,9 +563,18 @@ export function SemanticChatPage() {
     const content = value.trim()
     if (!content || isPending) return
     const sessionID = activeSession.id
-    const contextPlanID = [...activeSession.messages].reverse().find(message =>
-      message.role === 'ASSISTANT' && (message.plan?.status === 'READY' || message.plan?.status === 'EXECUTED'),
-    )?.plan?.id
+    const priorQuestions = activeSession.messages
+      .filter(message => message.role === 'USER')
+      .slice(-2)
+      .map(message => message.content)
+    const contextMessage = [...activeSession.messages].reverse().find(message =>
+      message.role === 'ASSISTANT' && messagePlans(message).some(plan =>
+        plan.status === 'READY' || plan.status === 'EXECUTED',
+      ),
+    )
+    const contextPlanIDs = messagePlans(contextMessage).filter(plan =>
+      plan.status === 'READY' || plan.status === 'EXECUTED',
+    ).map(plan => plan.id)
     const userMessage: ChatMessage = { id: newID(), role: 'USER', content, createdAt: now() }
     const assistantMessage: ChatMessage = {
       id: newID(), role: 'ASSISTANT', content: '正在理解问题并验证语义路径…',
@@ -276,27 +590,36 @@ export function SemanticChatPage() {
     const controller = new AbortController()
     controllerRef.current = controller
     try {
-      const plan = await semanticChatAPI.planQuestion({
+      const turn = await semanticChatAPI.planTurn({
         question: content,
-        contextQueryPlanId: contextPlanID,
+        priorQuestions,
+        contextQueryPlanIds: contextPlanIDs,
         signal: controller.signal,
       })
-      if (plan.status !== 'READY') {
+      const plans = turn.plans
+      if (!plans.length || plans.some(plan => plan.status !== 'READY')) {
         updateMessage(sessionID, assistantMessage.id, message => ({
-          ...message, pending: false, plan, content: planFailureAnswer(plan),
+          ...message, pending: false, turn, plans, plan: plans[0],
+          content: plans.length ? turnFailureAnswer(plans) : '没有找到可以证明的已发布指标。',
         }))
         return
       }
       updateMessage(sessionID, assistantMessage.id, message => ({
-        ...message, plan, content: '语义路径已验证，正在执行受控查询…',
+        ...message, turn, plans, plan: plans[0],
+        content: `已验证 ${plans.length} 个指标的语义路径，正在执行受控查询…`,
       }))
-      const execution = await semanticChatAPI.executePlan(plan, controller.signal)
+      const executions = await Promise.all(plans.map(plan =>
+        semanticChatAPI.executePlan(plan, controller.signal),
+      ))
+      const executedPlans = executions.map(execution => execution.queryPlan)
       updateMessage(sessionID, assistantMessage.id, message => ({
         ...message,
         pending: false,
-        plan: execution.queryPlan,
-        execution,
-        content: buildAnswer(execution),
+        plans: executedPlans,
+        executions,
+        plan: executedPlans[0],
+        execution: executions[0],
+        content: buildTurnAnswer(executions, content),
       }))
     } catch (cause) {
       const error = answerError(cause)
@@ -395,25 +718,33 @@ export function SemanticChatPage() {
             {activeSession.messages.map(message => message.role === 'USER'
               ? <article className="semantic-chat-message user" key={message.id}><div>{message.content}</div><time>{new Date(message.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time></article>
               : <article
-                className={`semantic-chat-message assistant ${message.errorCode || (message.plan && message.plan.status !== 'EXECUTED' && message.plan.status !== 'READY') ? 'blocked' : ''} ${selectedMessage?.id === message.id ? 'selected' : ''}`}
+                className={`semantic-chat-message assistant ${message.errorCode || messagePlans(message).some(plan => plan.status !== 'EXECUTED' && plan.status !== 'READY') ? 'blocked' : ''} ${selectedMessage?.id === message.id ? 'selected' : ''}`}
                 key={message.id}
                 onClick={() => setSelectedMessageID(message.id)}
               >
                 <span className="semantic-chat-avatar"><Sparkle size={16} weight="fill" /></span>
                 <div className="semantic-chat-answer">
-                  <header><strong>智能分析助手</strong>{message.pending && <i>处理中</i>}{message.plan && <em className={message.plan.status.toLowerCase()}>{statusLabel(message.plan.status)}</em>}</header>
+                  <header><strong>智能分析助手</strong>{message.pending && <i>处理中</i>}{messagePlans(message).length > 0 && <em className={(turnStatus(messagePlans(message)) ?? '').toLowerCase()}>{statusLabel(turnStatus(messagePlans(message)))}</em>}</header>
                   <p>{message.content}</p>
-                  {message.execution && message.execution.result.rows.length > 0 && (
-                    <div className="semantic-chat-result">
-                      <table>
-                        <thead><tr>{resultColumnLabels(message.execution).map((column, columnIndex) => <th key={`${column}-${columnIndex}`}>{column}</th>)}</tr></thead>
-                        <tbody>{message.execution.result.rows.slice(0, 10).map((row, rowIndex) => <tr key={rowIndex}>{resultColumnLabels(message.execution!).map((column, columnIndex) => <td key={`${column}-${columnIndex}`}>{formatValue(row[columnIndex])}</td>)}</tr>)}</tbody>
-                      </table>
+                  <RetrievalProcess message={message} />
+                  {messageExecutions(message).map(execution => execution.result.rows.length > 0 && (
+                    <div className="semantic-chat-result-block" key={execution.queryPlan.id}>
+                      {messageExecutions(message).length > 1 && <strong>{metricLabel(execution.queryPlan)}</strong>}
+                      <div className="semantic-chat-result">
+                        <table>
+                          <thead><tr>{resultColumnLabels(execution).map((column, columnIndex) => <th key={`${column}-${columnIndex}`}>{column}</th>)}</tr></thead>
+                          <tbody>{execution.result.rows.slice(0, 10).map((row, rowIndex) => <tr key={rowIndex}>{resultColumnLabels(execution).map((column, columnIndex) => <td key={`${column}-${columnIndex}`}>{formatValue(row[columnIndex])}</td>)}</tr>)}</tbody>
+                        </table>
+                      </div>
                     </div>
-                  )}
+                  ))}
                   <footer>
-                    <span>{message.execution ? `${message.execution.result.rowCount} 行 · ${message.execution.result.durationMs} ms` : message.plan ? `${Math.round(message.plan.confidence * 100)}% 检索置信度` : message.errorCode}</span>
-                    {message.execution && <span><ShieldCheck size={14} />{message.execution.evidence.lineage.length} 项可信证据</span>}
+                    <span>{messageExecutions(message).length
+                      ? `${messageExecutions(message).reduce((total, item) => total + item.result.rowCount, 0)} 行 · ${messageExecutions(message).reduce((total, item) => total + item.result.durationMs, 0)} ms`
+                      : messagePlans(message).length
+                        ? `${Math.round(Math.min(...messagePlans(message).map(plan => plan.confidence)) * 100)}% 最低检索置信度`
+                        : message.errorCode}</span>
+                    {messageExecutions(message).length > 0 && <span><ShieldCheck size={14} />{messageExecutions(message).reduce((total, item) => total + item.evidence.lineage.length, 0)} 项可信证据</span>}
                   </footer>
                 </div>
               </article>
@@ -444,17 +775,17 @@ export function SemanticChatPage() {
           </section>
 
           <section className="semantic-chat-current-quality">
-            <header><strong>当前答案</strong><span>{selectedMessage?.errorCode ? '可信拒答' : statusLabel(selectedMessage?.plan?.status)}</span></header>
+            <header><strong>当前答案</strong><span>{selectedMessage?.errorCode ? '可信拒答' : statusLabel(turnStatus(selectedPlans))}</span></header>
             {!selectedMessage ? <p className="semantic-chat-empty-quality">发送问题后，这里会展示逐项验证结果。</p> : <>
-              <div className="semantic-chat-confidence"><span>检索路径置信度</span><strong>{selectedMessage.plan ? `${Math.round(selectedMessage.plan.confidence * 100)}%` : '—'}</strong></div>
-              {selectedMessage.plan?.resolution?.length ? <ol className="semantic-chat-resolution" aria-label="问答定位链路">{selectedMessage.plan.resolution.map((step, index) => <li className={step.status === 'RESOLVED' || step.status === 'SKIPPED' ? 'pass' : ''} key={`${step.stage}-${index}`}><span>{index + 1}</span><div><strong>{resolutionStageLabel(step.stage)}</strong><small>{resolutionStatusLabel(step.status)}{step.candidateCount ? ` · ${step.candidateCount} 个候选` : ''}</small></div></li>)}</ol> : null}
+              <div className="semantic-chat-confidence"><span>{selectedPlans.length > 1 ? `${selectedPlans.length} 个指标最低置信度` : '检索路径置信度'}</span><strong>{selectedConfidence == null ? '—' : `${Math.round(selectedConfidence * 100)}%`}</strong></div>
+              {selectedPlans[0]?.resolution?.length ? <ol className="semantic-chat-resolution" aria-label="问答定位链路">{selectedPlans[0].resolution.map((step, index) => <li className={step.status === 'RESOLVED' || step.status === 'SKIPPED' ? 'pass' : ''} key={`${step.stage}-${index}`}><span>{index + 1}</span><div><strong>{resolutionStageLabel(step.stage)}</strong><small>{resolutionStatusLabel(step.status)}{step.candidateCount ? ` · ${step.candidateCount} 个候选` : ''}</small></div></li>)}</ol> : null}
               <ul>
-                <li className={selectedMessage.execution ? 'pass' : ''}><Database size={16} /><span><strong>查询执行</strong><small>{selectedMessage.execution ? '受控查询已完成' : '未执行或执行失败'}</small></span>{selectedMessage.execution ? <CheckCircle /> : <WarningCircle />}</li>
-                <li className={selectedMessage.execution?.evidence.executionRevalidated ? 'pass' : ''}><ShieldCheck size={16} /><span><strong>权限与版本</strong><small>{selectedMessage.execution ? '运行时已重新校验' : '等待可执行计划'}</small></span>{selectedMessage.execution?.evidence.executionRevalidated ? <CheckCircle /> : <WarningCircle />}</li>
-                <li className={selectedMessage.execution?.evidence.compatibilityDecision === 'VERIFIED_NON_UNSAFE' ? 'pass' : ''}><Graph size={16} /><span><strong>维度兼容</strong><small>{selectedMessage.execution?.evidence.compatibilityDecision === 'VERIFIED_NON_UNSAFE' ? '已验证且无扇出风险' : '尚未通过验证'}</small></span>{selectedMessage.execution?.evidence.compatibilityDecision === 'VERIFIED_NON_UNSAFE' ? <CheckCircle /> : <WarningCircle />}</li>
+                <li className={selectedExecutions.length === selectedPlans.length && selectedPlans.length > 0 ? 'pass' : ''}><Database size={16} /><span><strong>查询执行</strong><small>{selectedExecutions.length === selectedPlans.length && selectedPlans.length > 0 ? `${selectedExecutions.length} 个受控查询已完成` : '未执行或执行失败'}</small></span>{selectedExecutions.length === selectedPlans.length && selectedPlans.length > 0 ? <CheckCircle /> : <WarningCircle />}</li>
+                <li className={selectedExecutions.length > 0 && selectedExecutions.every(item => item.evidence.executionRevalidated) ? 'pass' : ''}><ShieldCheck size={16} /><span><strong>权限与版本</strong><small>{selectedExecutions.length > 0 ? '全部指标已在运行时重新校验' : '等待可执行计划'}</small></span>{selectedExecutions.length > 0 && selectedExecutions.every(item => item.evidence.executionRevalidated) ? <CheckCircle /> : <WarningCircle />}</li>
+                <li className={selectedExecutions.length > 0 && selectedExecutions.every(item => item.evidence.compatibilityDecision === 'VERIFIED_NON_UNSAFE') ? 'pass' : ''}><Graph size={16} /><span><strong>维度兼容</strong><small>{selectedExecutions.length > 0 && selectedExecutions.every(item => item.evidence.compatibilityDecision === 'VERIFIED_NON_UNSAFE') ? '全部指标均无扇出风险' : '尚未通过验证'}</small></span>{selectedExecutions.length > 0 && selectedExecutions.every(item => item.evidence.compatibilityDecision === 'VERIFIED_NON_UNSAFE') ? <CheckCircle /> : <WarningCircle />}</li>
               </ul>
-              {selectedMessage.plan?.conditions?.metricVersionId ? <details><summary>查看查询条件 JSON</summary><pre className="semantic-chat-condition-json">{JSON.stringify(selectedMessage.plan.conditions, null, 2)}</pre></details> : null}
-              {selectedMessage.plan?.evidence.length ? <details><summary>查看证据链（{selectedMessage.plan.evidence.length}）</summary><ol>{selectedMessage.plan.evidence.map(item => <li key={`${item.index}-${item.nodeKey}`}><span>{item.label}</span><small>{item.subjectType} · {item.authority} · {Math.round(item.confidence * 100)}%</small></li>)}</ol></details> : null}
+              {selectedPlans.some(plan => plan.conditions?.metricVersionId) ? <details><summary>查看查询条件 JSON</summary><pre className="semantic-chat-condition-json">{JSON.stringify(selectedPlans.map(plan => plan.conditions), null, 2)}</pre></details> : null}
+              {selectedEvidence.length ? <details><summary>查看证据链（{selectedEvidence.length}）</summary><ol>{selectedEvidence.map((item, index) => <li key={`${index}-${item.nodeKey}`}><span>{item.label}</span><small>{item.subjectType} · {item.authority} · {Math.round(item.confidence * 100)}%</small></li>)}</ol></details> : null}
               <div className="semantic-chat-feedback"><span>这个答案准确吗？</span><div><button className={selectedMessage.feedback === 'ACCURATE' ? 'active positive' : ''} type="button" onClick={() => rateSelected('ACCURATE')}><ThumbsUp size={15} />准确</button><button className={selectedMessage.feedback === 'INACCURATE' ? 'active negative' : ''} type="button" onClick={() => rateSelected('INACCURATE')}><ThumbsDown size={15} />不准确</button></div></div>
             </>}
           </section>

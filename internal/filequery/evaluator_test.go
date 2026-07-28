@@ -3,8 +3,10 @@ package filequery
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"os"
+	"regexp"
 	"testing"
 
 	"intelligent-report-generation-system/internal/dataset"
@@ -77,6 +79,110 @@ func TestEvaluateAllowsProjectionAroundGroupedMetric(t *testing.T) {
 	}
 }
 
+func TestEvaluateCubeProducesDetailSubtotalsAndGrandTotal(t *testing.T) {
+	input := fileInput(t)
+	input.RowPolicies, input.ColumnPolicies = nil, nil
+	input.Document.Sorts = nil
+	input.Document.Fields = append(input.Document.Fields, dataset.Field{
+		ID: "field_order_status", Code: "order_status", Name: "订单状态", Role: "DIMENSION",
+		Expression:    dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_status"},
+		CanonicalType: "STRING", Nullable: true,
+	})
+	input.Document.GroupBy = append(input.Document.GroupBy, "field_order_status")
+	input.Document.GroupByMode = dataset.GroupByModeCube
+
+	result, err := Evaluate(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RowCount != 6 {
+		t.Fatalf("CUBE row count=%d rows=%#v", result.RowCount, result.Rows)
+	}
+	var detail, monthSubtotal, statusSubtotal, grandTotal int
+	for _, row := range result.Rows {
+		month, revenue, status := row[0], row[1], row[2]
+		switch {
+		case month != nil && status != nil:
+			detail++
+		case month != nil && status == nil:
+			monthSubtotal++
+		case month == nil && status != nil:
+			statusSubtotal++
+			if revenue != 50.0 {
+				t.Fatalf("status subtotal=%#v", row)
+			}
+		default:
+			grandTotal++
+			if revenue != 50.0 {
+				t.Fatalf("grand total=%#v", row)
+			}
+		}
+	}
+	if detail != 2 || monthSubtotal != 2 || statusSubtotal != 1 || grandTotal != 1 {
+		t.Fatalf("unexpected CUBE levels detail=%d month=%d status=%d grand=%d rows=%#v", detail, monthSubtotal, statusSubtotal, grandTotal, result.Rows)
+	}
+}
+
+func TestEvaluateRollupAndCustomGroupingSets(t *testing.T) {
+	groupedInput := func(mode dataset.GroupByMode) Input {
+		input := fileInput(t)
+		input.RowPolicies, input.ColumnPolicies = nil, nil
+		input.Document.Sorts = nil
+		input.Document.Fields = append(input.Document.Fields, dataset.Field{
+			ID: "field_order_status", Code: "order_status", Name: "订单状态", Role: "DIMENSION",
+			Expression:    dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_status"},
+			CanonicalType: "STRING", Nullable: true,
+		})
+		input.Document.GroupBy = append(input.Document.GroupBy, "field_order_status")
+		input.Document.GroupByMode = mode
+		return input
+	}
+
+	rollupInput := groupedInput(dataset.GroupByModeRollup)
+	rollup, err := Evaluate(context.Background(), rollupInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rollup.RowCount != 5 {
+		t.Fatalf("ROLLUP row count=%d rows=%#v", rollup.RowCount, rollup.Rows)
+	}
+	for _, row := range rollup.Rows {
+		if row[0] == nil && row[2] != nil {
+			t.Fatalf("ROLLUP must not produce status-only subtotal: %#v", row)
+		}
+	}
+
+	setsInput := groupedInput(dataset.GroupByModeSets)
+	setsInput.Document.GroupingSets = [][]string{
+		{"field_stat_month", "field_order_status"},
+		{"field_order_status"},
+		{},
+	}
+	groupingSets, err := Evaluate(context.Background(), setsInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if groupingSets.RowCount != 4 {
+		t.Fatalf("GROUPING SETS row count=%d rows=%#v", groupingSets.RowCount, groupingSets.Rows)
+	}
+	var detail, statusOnly, grandTotal int
+	for _, row := range groupingSets.Rows {
+		switch {
+		case row[0] != nil && row[2] != nil:
+			detail++
+		case row[0] == nil && row[2] != nil:
+			statusOnly++
+		case row[0] == nil && row[2] == nil:
+			grandTotal++
+		default:
+			t.Fatalf("unexpected GROUPING SETS level: %#v", row)
+		}
+	}
+	if detail != 2 || statusOnly != 1 || grandTotal != 1 {
+		t.Fatalf("unexpected GROUPING SETS levels detail=%d status=%d grand=%d rows=%#v", detail, statusOnly, grandTotal, groupingSets.Rows)
+	}
+}
+
 func TestEvaluateGroupsSlotOneBeforeJoining(t *testing.T) {
 	document := dataset.Document{
 		DSLVersion: "1.0", Dataset: dataset.Descriptor{Code: "group_then_join", Name: "先分组后关联", Type: "CROSS_SOURCE"},
@@ -109,6 +215,88 @@ func TestEvaluateGroupsSlotOneBeforeJoining(t *testing.T) {
 	}
 	if result.RowCount != 3 || result.Rows[0][0] != int64(1) || result.Rows[0][1] != int64(2) || result.Rows[2][1] != int64(1) {
 		t.Fatalf("pre-join aggregation result=%#v", result)
+	}
+
+	document.PreAggregations[0].Metrics = []dataset.PreAggregationMetric{{Field: "customer_count", Function: "COUNT", CountRows: true}}
+	document.Fields[1].Expression = dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "customer_count"}
+	input.Document = document
+	result, err = Evaluate(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Rows[0][1] != int64(2) || result.Rows[2][1] != int64(1) {
+		t.Fatalf("pre-join COUNT(*) result=%#v", result)
+	}
+
+	document.Nodes[0].Projection = append(document.Nodes[0].Projection, "region")
+	document.PreAggregations[0].GroupBy = append(document.PreAggregations[0].GroupBy, dataset.PreAggregationGroup{Field: "region"})
+	document.PreAggregations[0].GroupByMode = dataset.GroupByModeCube
+	document.Fields = []dataset.Field{
+		{ID: "field_customer_id", Code: "customer_id", Name: "客户ID", Role: "DIMENSION", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "customer_id"}, CanonicalType: "INTEGER", Nullable: true},
+		{ID: "field_region", Code: "region", Name: "地区", Role: "DIMENSION", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "region"}, CanonicalType: "STRING", Nullable: true},
+		{ID: "field_customer_count", Code: "customer_count", Name: "客户数", Role: "MEASURE", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "customers", Field: "customer_count"}, CanonicalType: "INTEGER", Nullable: false},
+		{ID: "field_amount", Code: "amount", Name: "金额", Role: "MEASURE", Expression: dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "amount"}, CanonicalType: "DECIMAL", Nullable: true},
+	}
+	input.Document = document
+	input.Tables["customers"] = querycompiler.TableRef{NodeID: "customers", Columns: map[string]bool{"customer_id": true, "customer_name": true, "region": true}}
+	input.NodeTables["customers"] = NodeTableData{
+		Columns: []string{"customer_id", "customer_name", "region"},
+		Rows:    [][]any{{int64(1), "张三", "华东"}, {int64(1), "李四", "华东"}, {int64(2), "王五", "华南"}},
+	}
+	result, err = Evaluate(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RowCount != 9 {
+		t.Fatalf("pre-join CUBE row count=%d rows=%#v", result.RowCount, result.Rows)
+	}
+	var detail, customerSubtotal, regionSubtotal, grandTotal int
+	for _, row := range result.Rows {
+		switch {
+		case row[0] != nil && row[1] != nil:
+			detail++
+		case row[0] != nil:
+			customerSubtotal++
+		case row[1] != nil:
+			regionSubtotal++
+		default:
+			grandTotal++
+		}
+	}
+	if detail != 3 || customerSubtotal != 3 || regionSubtotal != 2 || grandTotal != 1 {
+		t.Fatalf("pre-join CUBE levels detail=%d customer=%d region=%d grand=%d rows=%#v", detail, customerSubtotal, regionSubtotal, grandTotal, result.Rows)
+	}
+
+	document.PreAggregations[0].GroupByMode = dataset.GroupByModeRollup
+	document.PreAggregations[0].GroupingSets = nil
+	input.Document = document
+	result, err = Evaluate(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RowCount != 7 {
+		t.Fatalf("pre-join ROLLUP row count=%d rows=%#v", result.RowCount, result.Rows)
+	}
+	for _, row := range result.Rows {
+		if row[0] == nil && row[1] != nil {
+			t.Fatalf("pre-join ROLLUP must not produce region-only subtotal: %#v", row)
+		}
+	}
+
+	document.PreAggregations[0].GroupByMode = dataset.GroupByModeSets
+	document.PreAggregations[0].GroupingSets = [][]string{{"customer_id", "region"}, {"region"}, {}}
+	input.Document = document
+	result, err = Evaluate(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RowCount != 6 {
+		t.Fatalf("pre-join GROUPING SETS row count=%d rows=%#v", result.RowCount, result.Rows)
+	}
+	for _, row := range result.Rows {
+		if row[0] != nil && row[1] == nil {
+			t.Fatalf("pre-join GROUPING SETS must not produce customer-only subtotal: %#v", row)
+		}
 	}
 }
 
@@ -239,6 +427,66 @@ func TestDateFormatProducesExactCalendarCodes(t *testing.T) {
 	}
 }
 
+func TestDateCalculationUsesCalendarDifferencesPartsAndBoundaries(t *testing.T) {
+	start := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "start_date"}
+	end := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "end_date"}
+	row := sourceRow{
+		"orders.start_date": "2024-02-29T23:30:00+08:00",
+		"orders.end_date":   "2026-07-05T01:00:00+08:00",
+	}
+	for unit, expected := range map[string]int64{"YEAR": 2, "MONTH": 29, "DAY": 857} {
+		value, err := evaluateExpression(dataset.Expression{Type: "DATE_DIFF", Unit: unit, Arguments: []dataset.Expression{start, end}}, row, nil, nil)
+		if err != nil || value != expected {
+			t.Fatalf("DATE_DIFF unit=%s value=%#v err=%v", unit, value, err)
+		}
+	}
+	for unit, expected := range map[string]int64{
+		"YEAR": 2024, "QUARTER": 1, "MONTH": 2, "WEEK": 9, "DAY": 29, "WEEKDAY": 4, "DAY_OF_YEAR": 60,
+	} {
+		value, err := evaluateExpression(dataset.Expression{Type: "DATE_EXTRACT", Unit: unit, Argument: &start}, row, nil, nil)
+		if err != nil || value != expected {
+			t.Fatalf("DATE_EXTRACT unit=%s value=%#v err=%v", unit, value, err)
+		}
+	}
+	for _, test := range []struct {
+		operation, unit, expected string
+	}{
+		{operation: "DATE_START", unit: "WEEK", expected: "2024-02-26"},
+		{operation: "DATE_END", unit: "WEEK", expected: "2024-03-03"},
+		{operation: "DATE_START", unit: "MONTH", expected: "2024-02-01"},
+		{operation: "DATE_END", unit: "MONTH", expected: "2024-02-29"},
+		{operation: "DATE_START", unit: "QUARTER", expected: "2024-01-01"},
+		{operation: "DATE_END", unit: "QUARTER", expected: "2024-03-31"},
+		{operation: "DATE_START", unit: "YEAR", expected: "2024-01-01"},
+		{operation: "DATE_END", unit: "YEAR", expected: "2024-12-31"},
+	} {
+		value, err := evaluateExpression(dataset.Expression{Type: test.operation, Unit: test.unit, Argument: &start}, row, nil, nil)
+		if err != nil || value != test.expected {
+			t.Fatalf("%s unit=%s value=%#v err=%v", test.operation, test.unit, value, err)
+		}
+	}
+	current, err := evaluateExpression(dataset.Expression{Type: "CURRENT_DATE"}, nil, nil, nil)
+	if err != nil || !regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`).MatchString(fmt.Sprint(current)) {
+		t.Fatalf("CURRENT_DATE value=%#v err=%v", current, err)
+	}
+}
+
+func TestDateCalculationPreservesNullAndNegativeDirection(t *testing.T) {
+	start := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "start_date"}
+	end := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "end_date"}
+	value, err := evaluateExpression(dataset.Expression{Type: "DATE_DIFF", Unit: "DAY", Arguments: []dataset.Expression{start, end}}, sourceRow{
+		"orders.start_date": "2026-01-02",
+		"orders.end_date":   "2025-12-31",
+	}, nil, nil)
+	if err != nil || value != int64(-2) {
+		t.Fatalf("negative DATE_DIFF value=%#v err=%v", value, err)
+	}
+	nullValue, err := evaluateExpression(dataset.Expression{Type: "DATE_END", Unit: "MONTH", Argument: &start}, sourceRow{"orders.start_date": nil}, nil, nil)
+	if err != nil || nullValue != nil {
+		t.Fatalf("DATE_END NULL value=%#v err=%v", nullValue, err)
+	}
+}
+
 func TestNumericAndContainsExpressionsProduceExpectedValues(t *testing.T) {
 	field := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "amount"}
 	row := sourceRow{"orders.amount": -12.345}
@@ -331,5 +579,64 @@ func TestAggregateSumPreservesIntegersAndRejectsOverflow(t *testing.T) {
 	_, err = aggregate(expression, []sourceRow{{"source.value": int64(math.MaxInt64)}, {"source.value": int64(1)}}, nil)
 	if err == nil {
 		t.Fatal("integer SUM overflow was not rejected")
+	}
+}
+
+func TestEvaluateWindowRankPartitionsAndOrdersRows(t *testing.T) {
+	input := fileInput(t)
+	input.RowPolicies, input.ColumnPolicies = nil, nil
+	input.Parameters = nil
+	input.Document.Dataset.Layer = dataset.LayerDWD
+	input.Document.Parameters = nil
+	input.Document.Filters = nil
+	input.Document.Nodes[0].SourceFilters = nil
+	input.Document.GroupBy = nil
+	input.Document.Having = nil
+	input.Document.Sorts = nil
+	input.Document.FactContract = nil
+	input.Document.AnalysisContract = nil
+	status := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_status"}
+	amount := dataset.Expression{Type: "FIELD_REF", NodeID: "orders", Field: "order_amount"}
+	input.Document.Fields = []dataset.Field{
+		{ID: "field_status", Code: "status", Name: "状态", Role: "DIMENSION", Expression: status, CanonicalType: "STRING"},
+		{ID: "field_amount", Code: "amount", Name: "金额", Role: "MEASURE", Expression: amount, CanonicalType: "DECIMAL"},
+		{
+			ID: "field_rank", Code: "status_rank", Name: "状态内排名", Role: "ATTRIBUTE", CanonicalType: "INTEGER",
+			Expression: dataset.Expression{
+				Type: "WINDOW", Function: "RANK",
+				PartitionBy: []dataset.Expression{status},
+				OrderBy:     []dataset.WindowOrder{{Expression: amount, Direction: "DESC"}},
+			},
+		},
+		{
+			ID: "field_partition_sum", Code: "status_amount_sum", Name: "状态内金额合计", Role: "MEASURE", CanonicalType: "DECIMAL",
+			Expression: dataset.Expression{
+				Type: "WINDOW", Function: "SUM", Argument: &amount,
+				PartitionBy: []dataset.Expression{status},
+				OrderBy:     []dataset.WindowOrder{{Expression: amount, Direction: "DESC"}},
+			},
+		},
+	}
+	input.Document.OutputGrain = dataset.OutputGrain{Description: "每行代表一笔订单", KeyFields: []string{"status_rank"}}
+
+	result, err := Evaluate(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRanks := []any{int64(3), int64(4), int64(2), int64(1), int64(1)}
+	if result.RowCount != 5 {
+		t.Fatalf("row count=%d rows=%#v", result.RowCount, result.Rows)
+	}
+	for index, row := range result.Rows {
+		if row[2] != wantRanks[index] {
+			t.Fatalf("row %d rank=%#v want=%#v rows=%#v", index, row[2], wantRanks[index], result.Rows)
+		}
+		wantSum := 150.0
+		if index == 4 {
+			wantSum = 999.0
+		}
+		if row[3] != wantSum {
+			t.Fatalf("row %d window sum=%#v want=%#v rows=%#v", index, row[3], wantSum, result.Rows)
+		}
 	}
 }

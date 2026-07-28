@@ -2,6 +2,7 @@ package materializationworker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,11 +14,23 @@ import (
 	"intelligent-report-generation-system/internal/materialization"
 	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/querycompiler"
+	"intelligent-report-generation-system/internal/warehouse"
 )
 
 type PostgresResolver struct {
 	controlPool   *pgxpool.Pool
 	warehousePool *pgxpool.Pool
+	odsRehydrator odsFullRehydrator
+}
+
+type odsFullRehydrator interface {
+	Rehydrate(
+		context.Context,
+		materialization.Claim,
+		upstreamMaterialization,
+		materialization.InputSnapshot,
+		string,
+	) (warehouse.StageResult, error)
 }
 
 func NewPostgresResolver(pool *pgxpool.Pool) *PostgresResolver {
@@ -29,6 +42,14 @@ func NewSeparatedPostgresResolver(
 ) *PostgresResolver {
 	return &PostgresResolver{
 		controlPool: controlPool, warehousePool: warehousePool,
+	}
+}
+
+func (resolver *PostgresResolver) SetODSRehydrator(
+	rehydrator odsFullRehydrator,
+) {
+	if resolver != nil {
+		resolver.odsRehydrator = rehydrator
 	}
 }
 
@@ -129,6 +150,7 @@ func (resolver *PostgresResolver) Resolve(
 	}
 
 	var upstreams []upstreamMaterialization
+	nodeUpstreamIndexes := map[string]int{}
 	err = database.WithTenantTx(ctx, resolver.controlPool, claim.TenantID, func(tx pgx.Tx) error {
 		var dslJSON []byte
 		var storedLayer string
@@ -190,7 +212,9 @@ func (resolver *PostgresResolver) Resolve(
 		upstreams = make([]upstreamMaterialization, len(claim.Inputs))
 		resolved.InputRowCount = make(map[int]int64, len(claim.Inputs))
 		for index, input := range claim.Inputs {
-			upstream, err := resolveFrozenInputTx(ctx, tx, input)
+			upstream, err := resolveFrozenInputTx(
+				ctx, tx, input, claim.Layer,
+			)
 			if err != nil {
 				return err
 			}
@@ -220,7 +244,8 @@ func (resolver *PostgresResolver) Resolve(
 					nil,
 				)
 			}
-			if resolver.controlPool == resolver.warehousePool {
+			if resolver.controlPool == resolver.warehousePool &&
+				upstream.ID != "" {
 				if err := assertUpstreamRelationsTx(ctx, tx, upstream); err != nil {
 					return err
 				}
@@ -276,6 +301,7 @@ func (resolver *PostgresResolver) Resolve(
 				Columns:     columns,
 				ColumnTypes: columnTypes,
 			}
+			nodeUpstreamIndexes[node.ID] = match
 			usedInputs[match] = true
 		}
 		for _, used := range usedInputs {
@@ -301,12 +327,46 @@ func (resolver *PostgresResolver) Resolve(
 		}
 		defer warehouseTx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
 		for _, upstream := range upstreams {
+			if upstream.ID == "" {
+				continue
+			}
 			if err := assertUpstreamRelationsTx(ctx, warehouseTx, upstream); err != nil {
 				return ResolvedBuild{}, err
 			}
 		}
 		if err := warehouseTx.Commit(ctx); err != nil {
 			return ResolvedBuild{}, err
+		}
+	}
+	if (claim.Layer == materialization.LayerDIM ||
+		claim.Layer == materialization.LayerDWD) &&
+		resolver.odsRehydrator != nil {
+		for _, node := range resolved.Document.Nodes {
+			upstreamIndex, exists := nodeUpstreamIndexes[node.ID]
+			if !exists || upstreamIndex < 0 ||
+				upstreamIndex >= len(upstreams) {
+				return ResolvedBuild{}, executionError(
+					CodeUpstreamContractInvalid,
+					"a source-backed warehouse node has no resolved upstream index",
+					nil,
+				)
+			}
+			upstream := upstreams[upstreamIndex]
+			if upstream.Layer != string(materialization.LayerODS) {
+				continue
+			}
+			projected, err := resolver.odsRehydrator.Rehydrate(
+				ctx, claim, upstream, claim.Inputs[upstreamIndex], node.ID,
+			)
+			if err != nil {
+				return ResolvedBuild{}, err
+			}
+			table := resolved.Tables[node.ID]
+			table.Schema = projected.Schema
+			table.Name = projected.Table
+			resolved.Tables[node.ID] = table
+			resolved.InputRowCount[claim.Inputs[upstreamIndex].Ordinal] =
+				projected.RowCount
 		}
 	}
 	return resolved, nil
@@ -316,7 +376,14 @@ func resolveFrozenInputTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	input materialization.InputSnapshot,
+	targetLayer materialization.Layer,
 ) (upstreamMaterialization, error) {
+	if (targetLayer == materialization.LayerDIM ||
+		targetLayer == materialization.LayerDWD) &&
+		input.Type == materialization.InputDatasetVersion &&
+		input.Layer == string(materialization.LayerODS) {
+		return resolveVirtualODSInputTx(ctx, tx, input)
+	}
 	var item upstreamMaterialization
 	base := `SELECT materialization.id::text,materialization.dataset_id::text,
 		materialization.dataset_version_id::text,materialization.layer,
@@ -370,6 +437,66 @@ func resolveFrozenInputTx(
 			)
 		}
 		return upstreamMaterialization{}, err
+	}
+	return item, nil
+}
+
+type virtualODSSourceSnapshot struct {
+	Contract         string                        `json:"contract"`
+	DatasetID        string                        `json:"datasetId"`
+	DatasetVersionID string                        `json:"datasetVersionId"`
+	SourceInput      materialization.InputSnapshot `json:"sourceInput"`
+}
+
+func resolveVirtualODSInputTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	input materialization.InputSnapshot,
+) (upstreamMaterialization, error) {
+	var item upstreamMaterialization
+	if err := tx.QueryRow(ctx, `SELECT owner.id::text,version.id::text,
+			version.layer,version.schema_hash,version.version_no
+		FROM platform.dataset_versions AS version
+		JOIN platform.datasets AS owner
+		  ON owner.id=version.dataset_id AND owner.tenant_id=version.tenant_id
+		WHERE owner.id=$1 AND version.id=$2
+		  AND version.layer='ODS'
+		  AND version.status='PUBLISHED'
+		  AND owner.status='PUBLISHED'
+		  AND owner.current_published_version_id=version.id
+		  AND owner.deleted_at IS NULL
+		FOR SHARE OF version,owner`,
+		input.DatasetID, input.DatasetVersionID,
+	).Scan(
+		&item.DatasetID, &item.DatasetVersionID, &item.Layer,
+		&item.SchemaHash, &item.VersionNo,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return upstreamMaterialization{}, executionError(
+				CodeUpstreamUnavailable,
+				"the frozen virtual ODS version is unavailable",
+				err,
+			)
+		}
+		return upstreamMaterialization{}, err
+	}
+	var snapshot virtualODSSourceSnapshot
+	if err := json.Unmarshal(input.SnapshotJSON, &snapshot); err != nil ||
+		snapshot.Contract != "virtual-ods-source-v1" ||
+		snapshot.DatasetID != item.DatasetID ||
+		snapshot.DatasetVersionID != item.DatasetVersionID ||
+		snapshot.SourceInput.SnapshotHash != input.SnapshotHash ||
+		input.SchemaHash != item.SchemaHash {
+		return upstreamMaterialization{}, executionError(
+			CodeUpstreamContractInvalid,
+			"the frozen virtual ODS source lineage is invalid",
+			err,
+		)
+	}
+	item.VersionHash = item.SchemaHash
+	item.SnapshotHash = input.SnapshotHash
+	if input.RowCount != nil {
+		item.RowCount = *input.RowCount
 	}
 	return item, nil
 }

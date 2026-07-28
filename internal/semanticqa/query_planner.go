@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -29,11 +30,16 @@ type metricGraphPayload struct {
 }
 
 type scopedMemberMatch struct {
-	MemberValue   string
-	DimensionID   string
-	DimensionCode string
-	DimensionName string
-	MatchedValue  string
+	MemberValue          string
+	DimensionID          string
+	DimensionCode        string
+	DimensionName        string
+	DimensionFieldID     string
+	DimensionDescription string
+	MatchedValue         string
+	MatchMethod          string
+	SetMapped            bool
+	Sensitive            bool
 }
 
 type metricScopedQuestionResolution struct {
@@ -42,6 +48,99 @@ type metricScopedQuestionResolution struct {
 	MemberFilters  []QueryMemberFilterInput
 	CandidateCount int
 	FailureCode    string
+	Trace          []QueryDimensionValueLookupTrace
+}
+
+// PreviewMetricDimensionLookups performs the same metric-scoped governed
+// member resolution used by PlanQuery, but without creating a plan. The
+// service uses the resulting governed field description and member term as
+// bounded vector queries before the immutable plan is persisted.
+func (store *PostgresStore) PreviewMetricDimensionLookups(
+	ctx context.Context,
+	tenantID, metricCode, question string,
+) (result []QueryDimensionValueLookupTrace, err error) {
+	result = []QueryDimensionValueLookupTrace{}
+	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
+		var minimumConfidence float64
+		if err := tx.QueryRow(ctx, `SELECT minimum_path_confidence::float8
+			FROM platform.semantic_qa_settings
+			WHERE tenant_id=platform.current_tenant_id()`,
+		).Scan(&minimumConfidence); err != nil {
+			return err
+		}
+		var generationID string
+		if err := tx.QueryRow(ctx, `SELECT generation.id::text
+			FROM platform.semantic_graph_projection_state AS state
+			JOIN platform.semantic_graph_generations AS generation
+			  ON generation.id=state.current_generation_id
+			 AND generation.tenant_id=state.tenant_id
+			WHERE state.tenant_id=platform.current_tenant_id()
+			  AND state.status='READY'
+			  AND state.applied_event_version=state.requested_event_version
+			  AND generation.status='READY'`,
+		).Scan(&generationID); err != nil {
+			return err
+		}
+		metrics, err := graphNodesByCode(
+			ctx, tx, generationID, "METRIC", metricCode,
+		)
+		if err != nil || len(metrics) != 1 {
+			return err
+		}
+		var payload metricGraphPayload
+		if err := json.Unmarshal(metrics[0].Payload, &payload); err != nil {
+			return err
+		}
+		resolution, err := resolveMetricScopedQuestion(
+			ctx, tx, generationID, metrics[0], payload,
+			question, "", minimumConfidence,
+		)
+		if err != nil {
+			return err
+		}
+		result = resolution.Trace
+		var metricName, metricFieldID, materializationID string
+		var tableSchema, tableName string
+		if err := tx.QueryRow(ctx, `SELECT metric.name,
+				COALESCE(version.definition_json#>>'{expression,fieldId}',''),
+				materialization.id::text,materialization.published_schema,
+				materialization.published_name
+			FROM platform.metric_versions AS version
+			JOIN platform.metrics AS metric
+			  ON metric.tenant_id=version.tenant_id
+			 AND metric.id=version.metric_id
+			JOIN platform.dataset_materializations AS materialization
+			  ON materialization.tenant_id=version.tenant_id
+			 AND materialization.dataset_id=version.dataset_id
+			 AND materialization.dataset_version_id=version.dataset_version_id
+			 AND materialization.layer='DWS'
+			 AND materialization.status='ACTIVE'
+			WHERE version.id=$1::uuid
+			  AND version.metric_id=$2::uuid
+			  AND version.dataset_version_id=$3::uuid
+			  AND version.status='PUBLISHED'
+			ORDER BY materialization.activated_at DESC,materialization.id
+			LIMIT 1`,
+			payload.MetricVersionID, payload.MetricID, payload.DatasetVersionID,
+		).Scan(
+			&metricName, &metricFieldID, &materializationID,
+			&tableSchema, &tableName,
+		); err != nil {
+			return err
+		}
+		for index := range result {
+			result[index].MetricCode = metricCode
+			result[index].MetricName = metricName
+			result[index].MetricFieldID = metricFieldID
+			result[index].MetricVersionID = payload.MetricVersionID
+			result[index].DatasetVersionID = payload.DatasetVersionID
+			result[index].MaterializationID = materializationID
+			result[index].TableSchema = tableSchema
+			result[index].TableName = tableName
+		}
+		return nil
+	})
+	return result, err
 }
 
 func (store *PostgresStore) PlanQuery(
@@ -93,6 +192,10 @@ func (store *PostgresStore) PlanQuery(
 		plan.Status = "GAP"
 		plan.FailureCode = "METRIC_NOT_FOUND"
 		plan.Evidence = []QueryEvidence{}
+		plan.PlanningTrace = append(
+			[]QueryDimensionValueLookupTrace(nil),
+			input.DimensionValueLookups...,
+		)
 		if input.MetricMatchMethod == "" {
 			input.MetricMatchMethod = "EXPLICIT_CODE"
 		}
@@ -100,6 +203,8 @@ func (store *PostgresStore) PlanQuery(
 		switch input.MetricMatchMethod {
 		case "CATALOG_RERANK":
 			intentDecision = "CATALOG_CONSTRAINED_INTERPRETATION"
+		case "DECISION_GRAPH":
+			intentDecision = "DIMENSION_DECISION_GRAPH_BACKED_INTENT"
 		case "EXPLICIT_CODE":
 			intentDecision = "CALLER_STRUCTURED_INTENT"
 		case "CONTEXT":
@@ -185,7 +290,8 @@ func (store *PostgresStore) PlanQuery(
 			Dimensions:       []QueryDimensionClause{}, TimeRange: input.TimeRange,
 		}
 		autoMemberCandidateCount := 0
-		if input.MemberValue == "" && len(input.MemberFilters) == 0 &&
+		if input.MemberValue == "" &&
+			!input.DimensionResolutionComplete &&
 			strings.TrimSpace(input.Question) != "" {
 			scoped, err := resolveMetricScopedQuestion(
 				ctx, tx, plan.GraphGenerationID, metricNode,
@@ -196,6 +302,7 @@ func (store *PostgresStore) PlanQuery(
 				return err
 			}
 			autoMemberCandidateCount = scoped.CandidateCount
+			plan.PlanningTrace = append(plan.PlanningTrace, scoped.Trace...)
 			if scoped.FailureCode != "" {
 				plan.Resolution = append(plan.Resolution, QueryResolutionStep{
 					Stage: "DIMENSION_MEMBER", Status: "AMBIGUOUS",
@@ -205,16 +312,28 @@ func (store *PostgresStore) PlanQuery(
 				plan.Status, plan.FailureCode = "AMBIGUOUS", scoped.FailureCode
 				return persistQueryPlan(ctx, tx, actorID, input, &plan)
 			}
-			if scoped.MemberValue != "" {
+			if len(scoped.MemberFilters) > 0 {
+				input.MemberFilters = mergeQueryMemberFilters(
+					input.MemberFilters, scoped.MemberFilters,
+				)
+			} else if scoped.MemberValue != "" {
 				input.DimensionCode = scoped.DimensionCode
 				input.MemberValue = scoped.MemberValue
-				input.MemberFilters = scoped.MemberFilters
 			} else if input.DimensionCode == "" {
 				input.DimensionCode = scoped.DimensionCode
+			}
+			input.MemberFilters, err = normalizeQueryMemberFilters(
+				input.DimensionCode, input.MemberValue, input.MemberFilters,
+			)
+			if err != nil {
+				return err
 			}
 		}
 		var metricTimeFieldID, metricTimeFieldType string
 		if err := tx.QueryRow(ctx, `SELECT
+				COALESCE(
+				  metric_version.definition_json#>>'{expression,fieldId}',''
+				),
 				COALESCE(metric_version.definition_json->>'timeFieldId',''),
 				COALESCE(time_field.canonical_type,'')
 			FROM platform.metric_versions AS metric_version
@@ -229,7 +348,9 @@ func (store *PostgresStore) PlanQuery(
 			  AND metric_version.status='PUBLISHED'`,
 			metricPayload.MetricVersionID, metricPayload.MetricID,
 			metricPayload.DatasetVersionID,
-		).Scan(&metricTimeFieldID, &metricTimeFieldType); err != nil {
+		).Scan(
+			&plan.MetricFieldID, &metricTimeFieldID, &metricTimeFieldType,
+		); err != nil {
 			return err
 		}
 		if (input.TimeRange != nil || input.TimePreset != "" ||
@@ -362,7 +483,7 @@ func (store *PostgresStore) PlanQuery(
 			plan.SelectedDimensionID = dimensionNode.SubjectRef
 		}
 		type resolvedMemberFilter struct {
-			member    resolvedGraphNode
+			members   []resolvedGraphNode
 			dimension resolvedGraphNode
 		}
 		resolvedMemberFilters := make(
@@ -373,60 +494,77 @@ func (store *PostgresStore) PlanQuery(
 			seenFilterDimensions[dimensionNode.SubjectRef] = true
 		}
 		for _, memberFilter := range input.MemberFilters {
-			memberCandidates, err := graphMemberNodes(
-				ctx, tx, plan.GraphGenerationID,
-				strings.ToLower(strings.TrimSpace(memberFilter.MemberValue)),
-				memberFilter.DimensionCode, metricNode.NodeKey,
-				metricPayload.DatasetVersionID, minimumConfidence,
-			)
-			if err != nil {
-				return err
+			memberValues := memberFilter.MemberValues
+			if len(memberValues) == 0 && memberFilter.MemberValue != "" {
+				memberValues = []string{memberFilter.MemberValue}
 			}
-			if len(memberCandidates) > 1 {
-				plan.Resolution = append(plan.Resolution, QueryResolutionStep{
-					Stage: "DIMENSION_MEMBER", Status: "AMBIGUOUS",
-					CandidateCount: len(memberCandidates),
-					SelectedCode:   memberFilter.DimensionCode,
-					Decision:       "METRIC_SCOPED_FILTER",
-				})
-				plan.Status, plan.FailureCode = "AMBIGUOUS", "FILTER_MEMBER_AMBIGUOUS"
-				return persistQueryPlan(ctx, tx, actorID, input, &plan)
+			members := make([]resolvedGraphNode, 0, len(memberValues))
+			filterDimensionID := ""
+			for _, memberValue := range memberValues {
+				memberCandidates, err := graphMemberNodes(
+					ctx, tx, plan.GraphGenerationID,
+					strings.ToLower(strings.TrimSpace(memberValue)),
+					memberFilter.DimensionCode, metricNode.NodeKey,
+					metricPayload.DatasetVersionID, minimumConfidence,
+				)
+				if err != nil {
+					return err
+				}
+				if len(memberCandidates) > 1 {
+					plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+						Stage: "DIMENSION_MEMBER", Status: "AMBIGUOUS",
+						CandidateCount: len(memberCandidates),
+						SelectedCode:   memberFilter.DimensionCode,
+						Decision:       "METRIC_SCOPED_FILTER",
+					})
+					plan.Status, plan.FailureCode = "AMBIGUOUS", "FILTER_MEMBER_AMBIGUOUS"
+					return persistQueryPlan(ctx, tx, actorID, input, &plan)
+				}
+				if len(memberCandidates) == 0 {
+					plan.Resolution = append(plan.Resolution, QueryResolutionStep{
+						Stage: "DIMENSION_MEMBER", Status: "NOT_FOUND",
+						SelectedCode: memberFilter.DimensionCode,
+						Decision:     "METRIC_SCOPED_FILTER",
+					})
+					plan.Status, plan.FailureCode = "GAP", "FILTER_MEMBER_NOT_FOUND"
+					return persistQueryPlan(ctx, tx, actorID, input, &plan)
+				}
+				var payload struct {
+					DimensionID string `json:"dimensionId"`
+				}
+				if err := json.Unmarshal(
+					memberCandidates[0].Payload, &payload,
+				); err != nil {
+					return err
+				}
+				if payload.DimensionID == "" ||
+					(filterDimensionID != "" &&
+						filterDimensionID != payload.DimensionID) {
+					plan.Status, plan.FailureCode =
+						"REJECTED", "FILTER_SET_DIMENSION_MISMATCH"
+					return persistQueryPlan(ctx, tx, actorID, input, &plan)
+				}
+				filterDimensionID = payload.DimensionID
+				members = append(members, memberCandidates[0])
 			}
-			if len(memberCandidates) == 0 {
-				plan.Resolution = append(plan.Resolution, QueryResolutionStep{
-					Stage: "DIMENSION_MEMBER", Status: "NOT_FOUND",
-					SelectedCode: memberFilter.DimensionCode,
-					Decision:     "METRIC_SCOPED_FILTER",
-				})
-				plan.Status, plan.FailureCode = "GAP", "FILTER_MEMBER_NOT_FOUND"
-				return persistQueryPlan(ctx, tx, actorID, input, &plan)
-			}
-			var payload struct {
-				DimensionID string `json:"dimensionId"`
-			}
-			if err := json.Unmarshal(
-				memberCandidates[0].Payload, &payload,
-			); err != nil {
-				return err
-			}
-			if payload.DimensionID == "" ||
-				seenFilterDimensions[payload.DimensionID] {
+			if filterDimensionID == "" ||
+				seenFilterDimensions[filterDimensionID] {
 				plan.Status, plan.FailureCode = "REJECTED", "FILTER_DIMENSION_DUPLICATED"
 				return persistQueryPlan(ctx, tx, actorID, input, &plan)
 			}
 			filterDimension, err := graphNodeByKey(
 				ctx, tx, plan.GraphGenerationID,
-				"dimension:"+payload.DimensionID,
+				"dimension:"+filterDimensionID,
 			)
 			if err != nil {
 				plan.Status, plan.FailureCode = "GAP", "FILTER_DIMENSION_NOT_FOUND"
 				return persistQueryPlan(ctx, tx, actorID, input, &plan)
 			}
-			seenFilterDimensions[payload.DimensionID] = true
+			seenFilterDimensions[filterDimensionID] = true
 			resolvedMemberFilters = append(
 				resolvedMemberFilters,
 				resolvedMemberFilter{
-					member: memberCandidates[0], dimension: filterDimension,
+					members: members, dimension: filterDimension,
 				},
 			)
 		}
@@ -469,8 +607,8 @@ func (store *PostgresStore) PlanQuery(
 			plan.Conditions.Dimensions = append(plan.Conditions.Dimensions, clause)
 		}
 		for _, memberFilter := range resolvedMemberFilters {
-			clause, err := queryConditionClause(
-				memberFilter.dimension, memberFilter.member,
+			clause, err := queryConditionSetClause(
+				memberFilter.dimension, memberFilter.members,
 			)
 			if err != nil {
 				return err
@@ -506,13 +644,15 @@ func (store *PostgresStore) PlanQuery(
 			plan.Evidence = append(plan.Evidence, evidence)
 		}
 		for _, memberFilter := range resolvedMemberFilters {
-			plan.Evidence = append(plan.Evidence, QueryEvidence{
-				NodeKey: memberFilter.member.NodeKey, SubjectType: "MEMBER",
-				SubjectRef: memberFilter.member.SubjectRef,
-				Label:      "成员命中（值已脱敏）",
-				Authority:  "CONTROL_PLANE", Confidence: 1,
-				EvidenceHash: memberFilter.member.PayloadHash,
-			})
+			for _, member := range memberFilter.members {
+				plan.Evidence = append(plan.Evidence, QueryEvidence{
+					NodeKey: member.NodeKey, SubjectType: "MEMBER",
+					SubjectRef: member.SubjectRef,
+					Label:      "成员命中（值已脱敏）",
+					Authority:  "CONTROL_PLANE", Confidence: 1,
+					EvidenceHash: member.PayloadHash,
+				})
+			}
 			evidence, err := graphMetricDimensionEvidence(
 				ctx, tx, plan.GraphGenerationID, metricNode.NodeKey,
 				memberFilter.dimension, minimumConfidence,
@@ -652,6 +792,41 @@ func queryConditionClause(
 		DimensionID:   dimensionPayload.DimensionID,
 		MemberKey:     memberPayload.MemberKey,
 	}, nil
+}
+
+func queryConditionSetClause(
+	dimension resolvedGraphNode,
+	members []resolvedGraphNode,
+) (QueryDimensionClause, error) {
+	if len(members) == 0 {
+		return QueryDimensionClause{}, ErrUnprovenPath
+	}
+	first, err := queryConditionClause(dimension, members[0])
+	if err != nil {
+		return QueryDimensionClause{}, err
+	}
+	keys := make([]string, 0, len(members))
+	seen := map[string]bool{}
+	for _, member := range members {
+		clause, err := queryConditionClause(dimension, member)
+		if err != nil ||
+			clause.DimensionID != first.DimensionID ||
+			clause.DimensionCode != first.DimensionCode {
+			return QueryDimensionClause{}, ErrUnprovenPath
+		}
+		if !seen[clause.MemberKey] {
+			seen[clause.MemberKey] = true
+			keys = append(keys, clause.MemberKey)
+		}
+	}
+	sort.Strings(keys)
+	if len(keys) == 1 {
+		first.MemberKey = keys[0]
+		return first, nil
+	}
+	first.MemberKey = ""
+	first.MemberKeys = keys
+	return first, nil
 }
 
 func graphMaterializationEvidence(
@@ -800,34 +975,49 @@ func resolveMetricScopedQuestion(
 		matches, err := metricScopedMemberMatches(
 			ctx, tx, generationID, metricNode.NodeKey,
 			metric.DatasetVersionID, requestedDimensionCode,
-			minimumConfidence, tokens,
+			minimumConfidence, tokens, question,
 		)
 		if err != nil {
 			return result, err
 		}
 		result.CandidateCount = len(matches)
-		if len(matches) > 33 {
+		if len(matches) > maxSemanticMemberSetSize {
+			result.Trace = buildDimensionValueLookupTrace(matches, nil)
 			result.FailureCode = "MEMBER_AMBIGUOUS"
 			return result, nil
 		}
 		selected, ambiguous := selectMetricScopedMemberMatches(matches, question)
+		result.Trace = buildDimensionValueLookupTrace(matches, selected)
 		if ambiguous {
 			result.FailureCode = "MEMBER_AMBIGUOUS"
 			return result, nil
 		}
-		if len(selected) > 9 {
+		if len(selected) > maxSemanticMemberSetSize {
 			result.FailureCode = "MEMBER_AMBIGUOUS"
 			return result, nil
 		}
 		if len(selected) > 0 {
-			result.DimensionCode = selected[0].DimensionCode
-			result.MemberValue = selected[0].MemberValue
-			for _, item := range selected[1:] {
+			byDimension := map[string][]scopedMemberMatch{}
+			dimensionOrder := []string{}
+			for _, item := range selected {
+				if _, exists := byDimension[item.DimensionID]; !exists {
+					dimensionOrder = append(dimensionOrder, item.DimensionID)
+				}
+				byDimension[item.DimensionID] = append(
+					byDimension[item.DimensionID], item,
+				)
+			}
+			for _, dimensionID := range dimensionOrder {
+				items := byDimension[dimensionID]
+				values := make([]string, 0, len(items))
+				for _, item := range items {
+					values = append(values, item.MemberValue)
+				}
 				result.MemberFilters = append(
 					result.MemberFilters,
 					QueryMemberFilterInput{
-						DimensionCode: item.DimensionCode,
-						MemberValue:   item.MemberValue,
+						DimensionCode: items[0].DimensionCode,
+						MemberValues:  values,
 					},
 				)
 			}
@@ -868,12 +1058,14 @@ func metricScopedMemberMatches(
 	generationID, metricNodeKey, datasetVersionID, dimensionCode string,
 	minimumConfidence float64,
 	tokens []string,
+	question string,
 ) ([]scopedMemberMatch, error) {
 	rows, err := tx.Query(ctx, `WITH tokens(value) AS (
-			SELECT unnest($6::text[])
-		), compatible_dimensions AS (
+				SELECT unnest($6::text[])
+			), compatible_dimensions AS (
 			SELECT dimension.id,dimension.code::text AS code,
-				dimension.name
+				dimension.name,dimension.field_id,dimension.description,
+				dimension.sensitive
 			FROM platform.semantic_dimensions AS dimension
 			JOIN platform.semantic_graph_nodes AS graph_dimension
 			  ON graph_dimension.tenant_id=dimension.tenant_id
@@ -887,11 +1079,43 @@ func metricScopedMemberMatches(
 			 AND compatibility.relation_type='METRIC_DIMENSION'
 			 AND compatibility.confidence>=$5
 			WHERE dimension.status='PUBLISHED'
-			  AND dimension.dataset_version_id=$3::uuid
-			  AND ($4='' OR lower(dimension.code::text)=lower($4))
-		), matches AS (
+				  AND dimension.dataset_version_id=$3::uuid
+				  AND ($4='' OR lower(dimension.code::text)=lower($4))
+			), semantic_tokens AS (
+				SELECT DISTINCT matched_value,mapped_value,knowledge_type,set_mapped
+				FROM (
+				  SELECT tokens.value AS matched_value,
+				      lower(btrim(mapped.value)) AS mapped_value,
+				      lower(asset.knowledge_type) AS knowledge_type,
+				      asset.mapping_value ~ '[,，]' AS set_mapped
+				  FROM tokens
+				  JOIN platform.semantic_term_assets AS asset
+				    ON lower(asset.common_term::text)=tokens.value
+				   AND asset.status='ACTIVE'
+				  CROSS JOIN LATERAL regexp_split_to_table(
+				    asset.mapping_value,'[[:space:]]*[,，][[:space:]]*'
+				  ) AS mapped(value)
+				  UNION ALL
+				  SELECT lower(asset.common_term::text) AS matched_value,
+				      lower(btrim(mapped.value)) AS mapped_value,
+				      lower(asset.knowledge_type) AS knowledge_type,
+				      asset.mapping_value ~ '[,，]' AS set_mapped
+				  FROM platform.semantic_term_assets AS asset
+				  CROSS JOIN LATERAL regexp_split_to_table(
+				    asset.mapping_value,'[[:space:]]*[,，][[:space:]]*'
+				  ) AS mapped(value)
+				  WHERE asset.status='ACTIVE'
+				    AND position(
+				      lower(asset.common_term::text) IN lower($7)
+				    )>0
+				) AS mapped
+			), matches AS (
 			SELECT member.id,member.normalized_value,dimension.id AS dimension_id,
-				dimension.code,dimension.name,tokens.value AS matched_value
+				dimension.code,dimension.name,dimension.field_id,
+				dimension.description,
+				tokens.value AS matched_value,
+				false AS set_mapped,'EXACT_MEMBER'::text AS match_method,
+				dimension.sensitive
 			FROM tokens
 			JOIN platform.dimension_members AS member
 			  ON member.normalized_value=tokens.value
@@ -902,7 +1126,11 @@ func metricScopedMemberMatches(
 			  AND (member.valid_to IS NULL OR member.valid_to>now())
 			UNION ALL
 			SELECT member.id,member.normalized_value,dimension.id AS dimension_id,
-				dimension.code,dimension.name,tokens.value AS matched_value
+				dimension.code,dimension.name,dimension.field_id,
+				dimension.description,
+				tokens.value AS matched_value,
+				false AS set_mapped,'MEMBER_ALIAS'::text AS match_method,
+				dimension.sensitive
 			FROM tokens
 			JOIN platform.dimension_member_aliases AS alias
 			  ON alias.normalized_alias=tokens.value
@@ -913,19 +1141,112 @@ func metricScopedMemberMatches(
 			 AND member.dimension_id=alias.dimension_id
 			JOIN compatible_dimensions AS dimension
 			  ON dimension.id=member.dimension_id
-			WHERE member.status='ACTIVE'
-			  AND (member.valid_from IS NULL OR member.valid_from<=now())
-			  AND (member.valid_to IS NULL OR member.valid_to>now())
-		)
+				WHERE member.status='ACTIVE'
+				  AND (member.valid_from IS NULL OR member.valid_from<=now())
+				  AND (member.valid_to IS NULL OR member.valid_to>now())
+				UNION ALL
+				SELECT member.id,member.normalized_value,dimension.id AS dimension_id,
+					dimension.code,dimension.name,dimension.field_id,
+					dimension.description,
+					semantic.matched_value,
+					semantic.set_mapped,
+					CASE WHEN semantic.set_mapped
+					  THEN 'SEMANTIC_SET' ELSE 'SEMANTIC_MAPPING' END,
+					dimension.sensitive
+				FROM semantic_tokens AS semantic
+				JOIN compatible_dimensions AS dimension
+				  ON semantic.knowledge_type IN (
+				       'dimension_member','dimension_value','维度值','维度成员'
+				     )
+				    OR semantic.knowledge_type=lower(dimension.code)
+				    OR semantic.knowledge_type=lower(dimension.name)
+				JOIN platform.dimension_members AS member
+				  ON member.dimension_id=dimension.id
+				 AND (
+				   lower(member.normalized_value)=semantic.mapped_value
+				   OR lower(member.member_key)=semantic.mapped_value
+				   OR lower(member.canonical_label)=semantic.mapped_value
+				 )
+				WHERE member.status='ACTIVE'
+				  AND (member.valid_from IS NULL OR member.valid_from<=now())
+				  AND (member.valid_to IS NULL OR member.valid_to>now())
+				UNION ALL
+				SELECT member.id,member.normalized_value,dimension.id AS dimension_id,
+					dimension.code,dimension.name,dimension.field_id,
+					dimension.description,
+					semantic.matched_value,
+					semantic.set_mapped,
+					CASE WHEN semantic.set_mapped
+					  THEN 'SEMANTIC_SET_ALIAS' ELSE 'SEMANTIC_ALIAS' END,
+					dimension.sensitive
+				FROM semantic_tokens AS semantic
+				JOIN compatible_dimensions AS dimension
+				  ON semantic.knowledge_type IN (
+				       'dimension_member','dimension_value','维度值','维度成员'
+				     )
+				    OR semantic.knowledge_type=lower(dimension.code)
+				    OR semantic.knowledge_type=lower(dimension.name)
+				JOIN platform.dimension_member_aliases AS alias
+				  ON lower(alias.normalized_alias)=semantic.mapped_value
+				 AND (alias.valid_from IS NULL OR alias.valid_from<=now())
+				 AND (alias.valid_to IS NULL OR alias.valid_to>now())
+				JOIN platform.dimension_members AS member
+				  ON member.id=alias.dimension_member_id
+				 AND member.dimension_id=alias.dimension_id
+				 AND member.dimension_id=dimension.id
+				WHERE member.status='ACTIVE'
+				  AND (member.valid_from IS NULL OR member.valid_from<=now())
+				  AND (member.valid_to IS NULL OR member.valid_to>now())
+				UNION ALL
+				SELECT member.id,member.normalized_value,dimension.id AS dimension_id,
+					dimension.code,dimension.name,dimension.field_id,
+					dimension.description,
+					lower(asset.common_term::text) AS matched_value,
+					true AS set_mapped,'SEMANTIC_TAG'::text AS match_method,
+					dimension.sensitive
+				FROM platform.semantic_term_assets AS asset
+				JOIN compatible_dimensions AS dimension
+				  ON lower(asset.knowledge_type) IN (
+				       'dimension_member','dimension_value','维度值','维度成员'
+				     )
+				    OR lower(asset.knowledge_type)=lower(dimension.code)
+				    OR lower(asset.knowledge_type)=lower(dimension.name)
+				JOIN platform.dimension_members AS member
+				  ON member.dimension_id=dimension.id
+				CROSS JOIN LATERAL regexp_split_to_table(
+				  member.normalized_value,
+				  '[[:space:]]*[,，][[:space:]]*'
+				) AS member_tag(value)
+				WHERE asset.status='ACTIVE'
+				  AND lower(asset.mapping_value) LIKE 'tag:%'
+				  AND lower(btrim(member_tag.value))=
+				      lower(btrim(substr(asset.mapping_value,5)))
+				  AND (
+				    EXISTS (
+				      SELECT 1 FROM tokens
+				      WHERE tokens.value=lower(asset.common_term::text)
+				    )
+				    OR position(
+				      lower(asset.common_term::text) IN lower($7)
+				    )>0
+				  )
+				  AND member.status='ACTIVE'
+				  AND (member.valid_from IS NULL OR member.valid_from<=now())
+				  AND (member.valid_to IS NULL OR member.valid_to>now())
+			)
 		SELECT DISTINCT ON(id) normalized_value,dimension_id::text,
-			code,name,matched_value
+			code,name,field_id,description,matched_value,match_method,
+			set_mapped,sensitive
 		FROM matches
-		WHERE lower(matched_value)<>lower(name)
-		  AND lower(matched_value)<>lower(code)
-		ORDER BY id,char_length(matched_value) DESC,matched_value
-		LIMIT 34`,
+		WHERE set_mapped
+		   OR (
+		     lower(matched_value)<>lower(name)
+		     AND lower(matched_value)<>lower(code)
+		   )
+		ORDER BY id,set_mapped DESC,char_length(matched_value) DESC,matched_value
+		LIMIT 129`,
 		generationID, metricNodeKey, datasetVersionID, dimensionCode,
-		minimumConfidence, tokens,
+		minimumConfidence, tokens, question,
 	)
 	if err != nil {
 		return nil, err
@@ -936,13 +1257,92 @@ func metricScopedMemberMatches(
 		var item scopedMemberMatch
 		if err := rows.Scan(
 			&item.MemberValue, &item.DimensionID, &item.DimensionCode,
-			&item.DimensionName, &item.MatchedValue,
+			&item.DimensionName, &item.DimensionFieldID,
+			&item.DimensionDescription, &item.MatchedValue, &item.MatchMethod,
+			&item.SetMapped, &item.Sensitive,
 		); err != nil {
 			return nil, err
 		}
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+func buildDimensionValueLookupTrace(
+	matches, selected []scopedMemberMatch,
+) []QueryDimensionValueLookupTrace {
+	type traceGroup struct {
+		item       QueryDimensionValueLookupTrace
+		candidates map[string]bool
+		selected   map[string]bool
+	}
+	selectedMatches := make(map[string]bool, len(selected))
+	for _, match := range selected {
+		selectedMatches[match.DimensionID+"\x00"+match.MemberValue+"\x00"+match.MatchedValue] = true
+	}
+	groups := map[string]*traceGroup{}
+	order := []string{}
+	for _, match := range matches {
+		key := strings.Join([]string{
+			match.MatchedValue, match.DimensionID, match.MatchMethod,
+		}, "\x00")
+		group, exists := groups[key]
+		if !exists {
+			group = &traceGroup{
+				item: QueryDimensionValueLookupTrace{
+					Term:                      match.MatchedValue,
+					DimensionID:               match.DimensionID,
+					DimensionCode:             match.DimensionCode,
+					DimensionName:             match.DimensionName,
+					DimensionFieldID:          match.DimensionFieldID,
+					DimensionFieldName:        match.DimensionCode,
+					DimensionFieldDescription: match.DimensionDescription,
+					MatchMethod:               match.MatchMethod,
+					Source:                    "CURRENT_TURN",
+					Sensitive:                 match.Sensitive,
+				},
+				candidates: map[string]bool{},
+				selected:   map[string]bool{},
+			}
+			groups[key] = group
+			order = append(order, key)
+		}
+		group.candidates[match.MemberValue] = true
+		if selectedMatches[match.DimensionID+"\x00"+match.MemberValue+"\x00"+match.MatchedValue] {
+			group.selected[match.MemberValue] = true
+		}
+	}
+	result := make([]QueryDimensionValueLookupTrace, 0, len(groups))
+	for _, key := range order {
+		group := groups[key]
+		group.item.CandidateCount = len(group.candidates)
+		group.item.Selected = len(group.selected) > 0
+		if !group.item.Sensitive {
+			for value := range group.candidates {
+				group.item.CandidateMemberKeys = append(
+					group.item.CandidateMemberKeys, value,
+				)
+			}
+			for value := range group.selected {
+				group.item.SelectedMemberKeys = append(
+					group.item.SelectedMemberKeys, value,
+				)
+			}
+			sort.Strings(group.item.CandidateMemberKeys)
+			sort.Strings(group.item.SelectedMemberKeys)
+		}
+		result = append(result, group.item)
+	}
+	sort.SliceStable(result, func(left, right int) bool {
+		if result[left].Term != result[right].Term {
+			return result[left].Term < result[right].Term
+		}
+		if result[left].DimensionCode != result[right].DimensionCode {
+			return result[left].DimensionCode < result[right].DimensionCode
+		}
+		return result[left].MatchMethod < result[right].MatchMethod
+	})
+	return result
 }
 
 func selectMetricScopedMemberMatches(
@@ -959,7 +1359,7 @@ func selectMetricScopedMemberMatches(
 			byDimension[match.DimensionID], match,
 		)
 	}
-	selected := make([]scopedMemberMatch, 0, len(byDimension))
+	selected := make([]scopedMemberMatch, 0, len(matches))
 	for _, candidates := range byDimension {
 		sort.Slice(candidates, func(left, right int) bool {
 			leftLength := utf8.RuneCountInString(candidates[left].MatchedValue)
@@ -969,26 +1369,30 @@ func selectMetricScopedMemberMatches(
 			}
 			return candidates[left].MemberValue < candidates[right].MemberValue
 		})
-		if len(candidates) > 1 &&
-			utf8.RuneCountInString(candidates[0].MatchedValue) ==
-				utf8.RuneCountInString(candidates[1].MatchedValue) &&
-			candidates[0].MemberValue != candidates[1].MemberValue {
-			// Multiple values from one dimension require an explicit set
-			// contract. Selecting just one would silently change the question.
-			return nil, true
-		}
-		for _, candidate := range candidates[1:] {
+		longestMatchedValue := candidates[0].MatchedValue
+		dimensionSelection := []scopedMemberMatch{}
+		for _, candidate := range candidates {
+			if candidate.MatchedValue == longestMatchedValue {
+				dimensionSelection = append(dimensionSelection, candidate)
+				continue
+			}
 			if candidate.MemberValue != candidates[0].MemberValue &&
-				!strings.Contains(
-					candidates[0].MatchedValue, candidate.MatchedValue,
-				) &&
-				!strings.Contains(
-					candidate.MatchedValue, candidates[0].MatchedValue,
-				) {
+				!strings.Contains(longestMatchedValue, candidate.MatchedValue) &&
+				!strings.Contains(candidate.MatchedValue, longestMatchedValue) {
 				return nil, true
 			}
 		}
-		selected = append(selected, candidates[0])
+		if len(dimensionSelection) > 1 {
+			for _, candidate := range dimensionSelection {
+				// One alias accidentally pointing at several members is
+				// ambiguous. A comma-separated semantic mapping is the
+				// explicit governed contract that authorizes a set.
+				if !candidate.SetMapped {
+					return nil, true
+				}
+			}
+		}
+		selected = append(selected, dimensionSelection...)
 	}
 	byMatchedValue := map[string][]scopedMemberMatch{}
 	for _, match := range selected {
@@ -998,25 +1402,41 @@ func selectMetricScopedMemberMatches(
 	}
 	filtered := make([]scopedMemberMatch, 0, len(selected))
 	for _, candidates := range byMatchedValue {
-		if len(candidates) == 1 {
-			filtered = append(filtered, candidates[0])
+		dimensionIDs := map[string]bool{}
+		for _, candidate := range candidates {
+			dimensionIDs[candidate.DimensionID] = true
+		}
+		if len(dimensionIDs) == 1 {
+			filtered = append(filtered, candidates...)
 			continue
 		}
-		named := []scopedMemberMatch{}
+		namedDimensionID := ""
 		for _, candidate := range candidates {
 			if strings.Contains(question, strings.ToLower(candidate.DimensionName)) ||
 				strings.Contains(question, strings.ToLower(candidate.DimensionCode)) {
-				named = append(named, candidate)
+				if namedDimensionID != "" &&
+					namedDimensionID != candidate.DimensionID {
+					return nil, true
+				}
+				namedDimensionID = candidate.DimensionID
 			}
 		}
-		if len(named) != 1 {
+		if namedDimensionID == "" {
 			return nil, true
 		}
-		filtered = append(filtered, named[0])
+		for _, candidate := range candidates {
+			if candidate.DimensionID == namedDimensionID {
+				filtered = append(filtered, candidate)
+			}
+		}
 	}
 	sort.Slice(filtered, func(left, right int) bool {
-		return strings.ToLower(filtered[left].DimensionCode) <
-			strings.ToLower(filtered[right].DimensionCode)
+		leftCode := strings.ToLower(filtered[left].DimensionCode)
+		rightCode := strings.ToLower(filtered[right].DimensionCode)
+		if leftCode != rightCode {
+			return leftCode < rightCode
+		}
+		return filtered[left].MemberValue < filtered[right].MemberValue
 	})
 	return filtered, false
 }
@@ -1341,6 +1761,7 @@ func persistQueryPlan(
 	input QueryPlanInput,
 	plan *QueryPlan,
 ) error {
+	reconcilePlanningTrace(plan)
 	memberFilterCount := len(input.MemberFilters)
 	if input.MemberValue != "" {
 		memberFilterCount++
@@ -1358,6 +1779,7 @@ func persistQueryPlan(
 		"comparisonMode":    input.ComparisonMode,
 		"resolution":        plan.Resolution,
 		"conditions":        plan.Conditions,
+		"planningTrace":     plan.PlanningTrace,
 	}
 	if input.TimeRange != nil {
 		normalizedRequest["timeRange"] = input.TimeRange
@@ -1401,7 +1823,455 @@ func persistQueryPlan(
 			return err
 		}
 	}
+	if plan.Status == "READY" {
+		if err := persistDimensionWhereDecisions(ctx, tx, plan); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func persistDimensionWhereDecisions(
+	ctx context.Context,
+	tx pgx.Tx,
+	plan *QueryPlan,
+) error {
+	if plan == nil || plan.ID == "" ||
+		plan.SelectedMetricID == "" ||
+		plan.SelectedMetricVersionID == "" ||
+		plan.SelectedDatasetVersionID == "" ||
+		plan.SelectedMaterializationID == "" {
+		return nil
+	}
+	var metricCode, metricName, metricFieldID string
+	var tableSchema, tableName string
+	if err := tx.QueryRow(ctx, `SELECT metric.code::text,metric.name,
+			COALESCE(version.definition_json#>>'{expression,fieldId}',''),
+			materialization.published_schema,materialization.published_name
+		FROM platform.metric_versions AS version
+		JOIN platform.metrics AS metric
+		  ON metric.tenant_id=version.tenant_id
+		 AND metric.id=version.metric_id
+		JOIN platform.dataset_materializations AS materialization
+		  ON materialization.tenant_id=version.tenant_id
+		 AND materialization.id=$4::uuid
+		 AND materialization.dataset_id=version.dataset_id
+		 AND materialization.dataset_version_id=version.dataset_version_id
+		 AND materialization.status='ACTIVE'
+		WHERE version.id=$1::uuid
+		  AND version.metric_id=$2::uuid
+		  AND version.dataset_version_id=$3::uuid
+		  AND version.status='PUBLISHED'`,
+		plan.SelectedMetricVersionID, plan.SelectedMetricID,
+		plan.SelectedDatasetVersionID, plan.SelectedMaterializationID,
+	).Scan(
+		&metricCode, &metricName, &metricFieldID, &tableSchema, &tableName,
+	); err != nil {
+		return err
+	}
+	dimensionIDs := map[string]string{}
+	for _, dimension := range plan.Conditions.Dimensions {
+		dimensionIDs[strings.ToLower(dimension.DimensionCode)] =
+			dimension.DimensionID
+	}
+	for index := range plan.PlanningTrace {
+		trace := &plan.PlanningTrace[index]
+		dimensionID := trace.DimensionID
+		if dimensionID == "" {
+			dimensionID =
+				dimensionIDs[strings.ToLower(trace.DimensionCode)]
+		}
+		if dimensionID != "" {
+			var physicalFieldID, physicalFieldName, description string
+			err := tx.QueryRow(ctx, `SELECT dimension.field_id,
+					dimension.code::text,dimension.description
+				FROM platform.semantic_dimensions AS dimension
+				WHERE dimension.id=$1::uuid
+				  AND dimension.status='PUBLISHED'`,
+				dimensionID,
+			).Scan(
+				&physicalFieldID, &physicalFieldName, &description,
+			)
+			if err != nil {
+				return err
+			}
+			trace.DimensionFieldID = physicalFieldID
+			trace.DimensionFieldName = physicalFieldName
+			trace.DimensionFieldDescription = description
+		}
+		values := append([]string(nil), trace.SelectedMemberKeys...)
+		sort.Strings(values)
+		selected := make(map[string]bool, len(values))
+		for _, value := range values {
+			selected[value] = true
+		}
+		trace.WhereCondition, trace.CompiledCondition =
+			queryLookupWhereConditions(*trace, selected)
+		canonicalValue := strings.TrimSpace(trace.CanonicalValue)
+		if trace.Sensitive || !trace.Selected ||
+			trace.WhereDesignStatus != "SUCCEEDED" ||
+			trace.VectorSearchStatus != "SUCCEEDED" ||
+			len(trace.VectorEmbedding) != 2560 ||
+			strings.TrimSpace(trace.VectorQuery) == "" ||
+			strings.TrimSpace(trace.VectorModel) == "" ||
+			canonicalValue == "" || len(values) == 0 ||
+			dimensionID == "" ||
+			strings.TrimSpace(trace.DimensionFieldID) == "" ||
+			strings.TrimSpace(trace.DimensionFieldName) == "" ||
+			strings.TrimSpace(trace.DimensionFieldDescription) == "" ||
+			strings.TrimSpace(trace.WhereCondition) == "" ||
+			strings.TrimSpace(trace.CompiledCondition) == "" ||
+			strings.TrimSpace(trace.WhereDesignOperator) == "" ||
+			strings.TrimSpace(trace.WhereDesignModel) == "" ||
+			strings.TrimSpace(trace.WhereDesignReason) == "" ||
+			metricFieldID == "" {
+			continue
+		}
+		aliases := make([]string, 0, len(trace.AliasValues)+1)
+		for _, alias := range append(
+			append([]string(nil), trace.AliasValues...), trace.Term,
+		) {
+			alias = strings.TrimSpace(alias)
+			if alias == "" || len(alias) > 1024 {
+				continue
+			}
+			aliases = appendUniqueString(aliases, alias)
+		}
+		sort.Strings(aliases)
+		if len(aliases) > 64 {
+			aliases = aliases[:64]
+		}
+		var dimensionMemberID any
+		if len(values) == 1 {
+			var resolvedMemberID string
+			memberErr := tx.QueryRow(ctx, `SELECT id::text
+				FROM platform.dimension_members
+				WHERE dimension_id=$1::uuid
+				  AND normalized_value=$2
+				  AND status='ACTIVE'`,
+				dimensionID, values[0],
+			).Scan(&resolvedMemberID)
+			if memberErr != nil && !errors.Is(memberErr, pgx.ErrNoRows) {
+				return memberErr
+			}
+			if memberErr == nil {
+				dimensionMemberID = resolvedMemberID
+			}
+		}
+		err := tx.QueryRow(ctx, `INSERT INTO platform.dimension_where_decisions(
+				tenant_id,vector_key,vector_key_hash,embedding,embedding_model,
+				dimension_id,dimension_field_id,dimension_field_name,
+				dimension_description,canonical_value,aliases,
+				selected_member_set_hash,selected_member_count,
+				metric_id,metric_version_id,dataset_version_id,
+				metric_code,metric_name,metric_field_id,materialization_id,
+				table_schema,table_name,predicate_operator,where_condition,
+				compiled_condition,llm_model,llm_prompt_version,llm_reason,
+				latest_query_plan_id,dimension_member_id
+			) VALUES(
+				platform.current_tenant_id(),$1,$2,$3::halfvec,$4,
+				$5::uuid,$6,$7,$8,$9,$10,$11,$12,
+				$13::uuid,$14::uuid,$15::uuid,$16,$17,$18,$19::uuid,
+				$20,$21,$22,$23,$24,$25,
+				'semantic-query-where-design-v2',$26,$27::uuid,$28::uuid
+			)
+			ON CONFLICT(
+				tenant_id,dimension_id,selected_member_set_hash,
+				metric_version_id,materialization_id
+			) DO UPDATE SET
+				vector_key=EXCLUDED.vector_key,
+				vector_key_hash=EXCLUDED.vector_key_hash,
+				embedding=EXCLUDED.embedding,
+				embedding_model=EXCLUDED.embedding_model,
+				dimension_field_id=EXCLUDED.dimension_field_id,
+				dimension_field_name=EXCLUDED.dimension_field_name,
+				dimension_description=EXCLUDED.dimension_description,
+				canonical_value=EXCLUDED.canonical_value,
+				aliases=ARRAY(
+					SELECT DISTINCT alias
+					FROM unnest(
+						platform.dimension_where_decisions.aliases ||
+						EXCLUDED.aliases
+					) AS expanded(alias)
+					WHERE btrim(alias)<>''
+					ORDER BY alias
+					LIMIT 64
+				),
+				metric_code=EXCLUDED.metric_code,
+				metric_name=EXCLUDED.metric_name,
+				metric_field_id=EXCLUDED.metric_field_id,
+				table_schema=EXCLUDED.table_schema,
+				table_name=EXCLUDED.table_name,
+				predicate_operator=EXCLUDED.predicate_operator,
+				where_condition=EXCLUDED.where_condition,
+				compiled_condition=EXCLUDED.compiled_condition,
+				llm_model=EXCLUDED.llm_model,
+				llm_prompt_version=EXCLUDED.llm_prompt_version,
+				llm_reason=EXCLUDED.llm_reason,
+				latest_query_plan_id=EXCLUDED.latest_query_plan_id,
+				dimension_member_id=EXCLUDED.dimension_member_id,
+				embedding_document_id=NULL,
+				source_type='QUERY_OBSERVED',
+				source_input_hash='',
+				observation_count=
+					platform.dimension_where_decisions.observation_count+1,
+				last_seen_at=now()
+			RETURNING id::text`,
+			trace.VectorQuery, hashText(trace.VectorQuery),
+			formatVector(trace.VectorEmbedding), trace.VectorModel,
+			dimensionID, trace.DimensionFieldID, trace.DimensionFieldName,
+			trace.DimensionFieldDescription, canonicalValue, aliases,
+			hashText(strings.Join(values, "\x1f")), len(values),
+			plan.SelectedMetricID, plan.SelectedMetricVersionID,
+			plan.SelectedDatasetVersionID, metricCode, metricName,
+			metricFieldID, plan.SelectedMaterializationID,
+			tableSchema, tableName, trace.WhereDesignOperator,
+			trace.WhereCondition, trace.CompiledCondition,
+			trace.WhereDesignModel, trace.WhereDesignReason, plan.ID,
+			dimensionMemberID,
+		).Scan(&trace.DecisionID)
+		if err != nil {
+			return err
+		}
+		trace.MetricName = metricName
+		trace.MetricCode = metricCode
+		trace.MetricFieldID = metricFieldID
+		trace.MetricVersionID = plan.SelectedMetricVersionID
+		trace.DatasetVersionID = plan.SelectedDatasetVersionID
+		trace.MaterializationID = plan.SelectedMaterializationID
+		trace.TableSchema = tableSchema
+		trace.TableName = tableName
+		trace.DimensionID = dimensionID
+	}
+	return nil
+}
+
+func reconcilePlanningTrace(plan *QueryPlan) {
+	if plan == nil || len(plan.PlanningTrace) == 0 {
+		return
+	}
+	selectedByDimension := map[string]map[string]bool{}
+	for _, dimension := range plan.Conditions.Dimensions {
+		values := append([]string(nil), dimension.MemberKeys...)
+		if dimension.MemberKey != "" {
+			values = append(values, dimension.MemberKey)
+		}
+		selected := map[string]bool{}
+		for _, value := range values {
+			selected[value] = true
+		}
+		selectedByDimension[strings.ToLower(dimension.DimensionCode)] = selected
+	}
+	for index := range plan.PlanningTrace {
+		trace := &plan.PlanningTrace[index]
+		if trace.MetricCode == "" {
+			trace.MetricCode = plan.Conditions.MetricCode
+		}
+		trace.MetricFieldID = plan.MetricFieldID
+		trace.MetricVersionID = plan.SelectedMetricVersionID
+		trace.DatasetVersionID = plan.SelectedDatasetVersionID
+		trace.MaterializationID = plan.SelectedMaterializationID
+		if trace.CanonicalValue == "" {
+			trace.CanonicalValue = deterministicCanonicalValue(*trace)
+		}
+		trace.AliasValues = appendUniqueString(
+			trace.AliasValues, trace.Term,
+		)
+		if trace.VectorQuery == "" {
+			trace.VectorQuery = dimensionVectorQuery(*trace)
+		}
+		if trace.Sensitive {
+			trace.Selected = len(
+				selectedByDimension[strings.ToLower(trace.DimensionCode)],
+			) > 0
+		} else {
+			finalMembers := selectedByDimension[strings.ToLower(trace.DimensionCode)]
+			selected := make([]string, 0, len(trace.CandidateMemberKeys))
+			for _, member := range trace.CandidateMemberKeys {
+				if finalMembers[member] {
+					selected = append(selected, member)
+				}
+			}
+			sort.Strings(selected)
+			trace.SelectedMemberKeys = selected
+			trace.Selected = len(selected) > 0
+		}
+		acceptedCount := len(trace.SelectedMemberKeys)
+		if trace.Sensitive && trace.Selected {
+			acceptedCount = len(
+				selectedByDimension[strings.ToLower(trace.DimensionCode)],
+			)
+		}
+		inputCount := trace.CandidateCount
+		if trace.VectorCandidateCount > inputCount {
+			inputCount = trace.VectorCandidateCount
+		}
+		trace.CandidateFilter = QueryCandidateFilterTrace{
+			InputCount: inputCount, AcceptedCount: acceptedCount,
+			RejectedCount: max(0, inputCount-acceptedCount),
+			Status:        "PASS",
+			Rules: []string{
+				"METRIC_DIMENSION_COMPATIBLE",
+				"ACTIVE_MEMBER_WINDOW",
+				"NON_EMPTY_MEMBER_KEY",
+				"SEMANTIC_SET_SIZE_WITHIN_LIMIT",
+			},
+		}
+		trace.WhereCondition, trace.CompiledCondition =
+			queryLookupWhereConditions(
+				*trace,
+				selectedByDimension[strings.ToLower(trace.DimensionCode)],
+			)
+	}
+	plan.PlanningTrace = deduplicatePlanningTrace(plan.PlanningTrace)
+}
+
+func queryLookupWhereConditions(
+	trace QueryDimensionValueLookupTrace,
+	selected map[string]bool,
+) (string, string) {
+	values := make([]string, 0, len(selected))
+	for value := range selected {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	if len(values) == 0 {
+		return "", ""
+	}
+	dimensionCode := trace.DimensionCode
+	if dimensionCode == "" {
+		dimensionCode = trace.DimensionFieldID
+	}
+	fieldName := trace.DimensionFieldName
+	if fieldName == "" {
+		fieldName = dimensionCode
+	}
+	if fieldName == "" {
+		fieldName = trace.DimensionFieldID
+	}
+	compiledField := trace.DimensionFieldID
+	if compiledField == "" {
+		compiledField = fieldName
+	}
+	compiled := fmt.Sprintf(
+		"%s IN (:%s_1 … :%s_%d)",
+		compiledField, dimensionCode, dimensionCode, len(values),
+	)
+	if len(values) == 1 {
+		compiled = fmt.Sprintf(
+			"%s = :%s_1", compiledField, dimensionCode,
+		)
+	}
+	if trace.Sensitive {
+		return fieldName + " = <受控参数>", compiled
+	}
+	escape := func(value string) string {
+		return strings.ReplaceAll(value, "'", "''")
+	}
+	if trace.WhereDesignOperator == "CONTAINS" ||
+		trace.WhereDesignOperator == "" &&
+			trace.MatchMethod == "SEMANTIC_TAG" {
+		return fmt.Sprintf(
+			"%s LIKE '%%%s%%'", fieldName, escape(trace.Term),
+		), compiled
+	}
+	if trace.WhereDesignOperator == "EQUALS" ||
+		trace.WhereDesignOperator == "" && len(values) == 1 {
+		return fmt.Sprintf(
+			"%s = '%s'", fieldName, escape(values[0]),
+		), compiled
+	}
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, "'"+escape(value)+"'")
+	}
+	return fmt.Sprintf(
+		"%s IN (%s)", fieldName, strings.Join(quoted, ", "),
+	), compiled
+}
+
+func deduplicatePlanningTrace(
+	items []QueryDimensionValueLookupTrace,
+) []QueryDimensionValueLookupTrace {
+	result := make([]QueryDimensionValueLookupTrace, 0, len(items))
+	indexByKey := map[string]int{}
+	for _, item := range items {
+		key := strings.Join([]string{
+			strings.ToLower(item.MetricCode),
+			strings.ToLower(item.DimensionCode),
+			strings.ToLower(item.CanonicalValue),
+			hashText(strings.Join(item.SelectedMemberKeys, "\x1f")),
+			item.MatchMethod,
+		}, "\x00")
+		index, exists := indexByKey[key]
+		if !exists {
+			indexByKey[key] = len(result)
+			result = append(result, item)
+			continue
+		}
+		existing := &result[index]
+		if item.Source == "CURRENT_TURN" {
+			existing.Source = item.Source
+		}
+		if existing.DimensionFieldName == "" {
+			existing.DimensionFieldName = item.DimensionFieldName
+		}
+		if existing.DimensionFieldDescription == "" {
+			existing.DimensionFieldDescription =
+				item.DimensionFieldDescription
+		}
+		if existing.DimensionID == "" {
+			existing.DimensionID = item.DimensionID
+		}
+		if existing.CanonicalValue == "" {
+			existing.CanonicalValue = item.CanonicalValue
+		}
+		for _, alias := range item.AliasValues {
+			existing.AliasValues = appendUniqueString(
+				existing.AliasValues, alias,
+			)
+		}
+		existing.AliasValues = appendUniqueString(
+			existing.AliasValues, item.Term,
+		)
+		if existing.MetricName == "" {
+			existing.MetricName = item.MetricName
+		}
+		if existing.TableName == "" {
+			existing.TableSchema = item.TableSchema
+			existing.TableName = item.TableName
+		}
+		if existing.MaterializationID == "" {
+			existing.MaterializationID = item.MaterializationID
+		}
+		if existing.MetricVersionID == "" {
+			existing.MetricVersionID = item.MetricVersionID
+		}
+		if existing.DatasetVersionID == "" {
+			existing.DatasetVersionID = item.DatasetVersionID
+		}
+		if item.VectorSearchStatus != "" {
+			existing.VectorQuery = item.VectorQuery
+			existing.VectorModel = item.VectorModel
+			existing.VectorDimensions = item.VectorDimensions
+			existing.VectorEmbedding = append(
+				[]float32(nil), item.VectorEmbedding...,
+			)
+			existing.VectorSearchStatus = item.VectorSearchStatus
+			existing.VectorCandidateCount = item.VectorCandidateCount
+			existing.VectorCandidateMemberKeys = append(
+				[]string(nil), item.VectorCandidateMemberKeys...,
+			)
+			existing.VectorTopScore = item.VectorTopScore
+		}
+		if item.WhereDesignStatus != "" {
+			existing.WhereDesignStatus = item.WhereDesignStatus
+			existing.WhereDesignOperator = item.WhereDesignOperator
+			existing.WhereDesignReason = item.WhereDesignReason
+			existing.WhereDesignModel = item.WhereDesignModel
+		}
+	}
+	return result
 }
 
 func hasSourceEvidence(evidence []QueryEvidence) bool {

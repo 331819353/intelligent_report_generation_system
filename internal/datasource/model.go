@@ -119,6 +119,11 @@ type Quota struct {
 	MaxDataSources, MaxConnectionsPerSource, MaxConcurrentQueries int
 	MaxExcelFileBytes                                             int64
 }
+
+// DefaultMaxExcelFileBytes 是没有租户级覆盖时的文件上传上限。它需要与
+// tenant_data_source_quotas 的数据库默认值保持一致。
+const DefaultMaxExcelFileBytes int64 = 256 << 20
+
 type TestResult struct {
 	ServerVersion   string     `json:"serverVersion"`
 	LatencyMS       int64      `json:"latencyMs"`

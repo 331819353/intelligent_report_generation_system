@@ -92,25 +92,34 @@ func (r *PostgresMetadataJobRepository) GetMetadataJob(ctx context.Context, tena
 		if err := scanMetadataJob(tx.QueryRow(ctx, `SELECT `+metadataJobSelect+` FROM platform.data_source_metadata_jobs j WHERE j.id=$1 AND j.data_source_id=$2`, jobID, sourceID), &job); err != nil {
 			return err
 		}
-		if job.Failed == 0 {
-			return nil
-		}
-		rows, err := tx.Query(ctx, `SELECT catalog_name,schema_name,table_name,error_code,error_message
-			FROM platform.data_source_metadata_job_items
-			WHERE job_id=$1 AND status='FAILED'
-			ORDER BY created_at,id`, jobID)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			failure, err := scanMetadataJobFailure(rows)
+		if job.Failed > 0 {
+			rows, err := tx.Query(ctx, `SELECT catalog_name,schema_name,table_name,error_code,error_message
+				FROM platform.data_source_metadata_job_items
+				WHERE job_id=$1 AND status='FAILED'
+				ORDER BY created_at,id`, jobID)
 			if err != nil {
 				return err
 			}
-			job.Failures = append(job.Failures, failure)
+			for rows.Next() {
+				failure, err := scanMetadataJobFailure(rows)
+				if err != nil {
+					rows.Close()
+					return err
+				}
+				job.Failures = append(job.Failures, failure)
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return err
+			}
+			rows.Close()
 		}
-		return rows.Err()
+		logs, err := loadMetadataJobLogs(ctx, tx, job)
+		if err != nil {
+			return err
+		}
+		job.Logs = logs
+		return nil
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MetadataJob{}, ErrMetadataJobNotFound
@@ -132,6 +141,17 @@ func (r *PostgresMetadataJobRepository) LatestActiveMetadataJob(ctx context.Cont
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, err
+	}
+	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
+		logs, err := loadMetadataJobLogs(ctx, tx, item)
+		if err != nil {
+			return err
+		}
+		item.Logs = logs
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}

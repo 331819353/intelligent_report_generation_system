@@ -131,7 +131,10 @@ func (p *OpenAICompatibleProvider) Complete(ctx context.Context, request Provide
 	if strings.TrimSpace(choice.Message.Content) == "" {
 		return ProviderResult{}, newProviderError(ErrorCodeInvalidResponse, "AI provider did not return structured content", 0, false, 0, nil)
 	}
-	content, err := validateStructuredOutput(schemaRoot, []byte(choice.Message.Content))
+	content, err := validateStructuredOutput(
+		schemaRoot,
+		normalizeStructuredOutputEnvelope([]byte(choice.Message.Content)),
+	)
 	if err != nil {
 		return ProviderResult{}, err
 	}
@@ -154,6 +157,35 @@ func (p *OpenAICompatibleProvider) Complete(ctx context.Context, request Provide
 		RequestID:    requestID,
 		Usage:        usage,
 	}, nil
+}
+
+// normalizeStructuredOutputEnvelope removes only two deterministic wrappers
+// emitted by otherwise compatible reasoning models. The remaining bytes still
+// pass the full duplicate-key, trailing-content and JSON Schema validation.
+// Arbitrary prose before or after JSON is deliberately not extracted.
+func normalizeStructuredOutputEnvelope(content []byte) []byte {
+	normalized := bytes.TrimSpace(content)
+	if bytes.HasPrefix(normalized, []byte("<think>")) {
+		const closing = "</think>"
+		end := bytes.Index(normalized, []byte(closing))
+		if end < 0 {
+			return normalized
+		}
+		normalized = bytes.TrimSpace(normalized[end+len(closing):])
+	}
+	if !bytes.HasPrefix(normalized, []byte("```")) ||
+		!bytes.HasSuffix(normalized, []byte("```")) {
+		return normalized
+	}
+	lineEnd := bytes.IndexByte(normalized, '\n')
+	if lineEnd < 0 {
+		return normalized
+	}
+	language := strings.TrimSpace(string(normalized[3:lineEnd]))
+	if language != "" && !strings.EqualFold(language, "json") {
+		return normalized
+	}
+	return bytes.TrimSpace(normalized[lineEnd+1 : len(normalized)-3])
 }
 
 type wireRequest struct {

@@ -89,15 +89,20 @@ func (s *Service) CompleteTable(ctx context.Context, tenantID, actorID, tableID 
 
 func metadataCompletionFailureCode(err error) string {
 	var partial *PartialOutputError
+	var classified interface{ MetadataCompletionFailureCode() string }
 	switch {
 	case errors.As(err, &partial):
 		return "PARTIAL_OUTPUT"
+	case errors.As(err, &classified):
+		return classified.MetadataCompletionFailureCode()
 	case errors.Is(err, ErrSourceChanged):
 		return "SOURCE_CHANGED"
 	case errors.Is(err, ErrStructureChanged):
 		return "STRUCTURE_CHANGED"
 	case errors.Is(err, ErrProcessingLeaseLost):
 		return "PROCESSING_LEASE_LOST"
+	case errors.Is(err, ErrInvalidTargetScope):
+		return "INVALID_TARGET_SCOPE"
 	case errors.Is(err, ErrProviderUnavailable):
 		return "PROVIDER_UNAVAILABLE"
 	case errors.Is(err, ErrInvalidOutput):
@@ -124,6 +129,9 @@ func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID strin
 	if expectedStructureHash != "" && input.StructureHash != expectedStructureHash {
 		return GenerateResult{}, ErrStructureChanged
 	}
+	// 即使字段目标随后因增量范围或已完成 marker 被收缩，每个批次仍保留
+	// 全表的紧凑字段概览，避免重试批次丢失必要的表级语义上下文。
+	contextColumns := completionColumnContexts(input.Columns)
 	input, err = scopeCompletionInput(input, targetTable, targetColumnIDs)
 	if err != nil {
 		return GenerateResult{}, err
@@ -132,6 +140,7 @@ func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID strin
 	if !input.TargetTable && len(input.Columns) == 0 {
 		return GenerateResult{}, ErrInvalidTargetScope
 	}
+	input.ContextColumns = contextColumns
 	input.SampleRows = samples
 	hash, err := inputHash(input)
 	if err != nil {

@@ -7,6 +7,17 @@ import (
 
 const DSLVersion = "1.0"
 
+// GroupByMode 描述分组组件如何组合多个维度。空值与 STANDARD 等价，
+// 以保持历史 DSL 的 JSON 形状和哈希稳定。
+type GroupByMode string
+
+const (
+	GroupByModeStandard GroupByMode = "STANDARD"
+	GroupByModeCube     GroupByMode = "CUBE"
+	GroupByModeRollup   GroupByMode = "ROLLUP"
+	GroupByModeSets     GroupByMode = "GROUPING_SETS"
+)
+
 // Layer 是数据资产在数仓加工链路中的稳定层级。它与 SINGLE_SOURCE/CROSS_SOURCE
 // 的物理来源分类正交：前者描述加工语义，后者描述执行时涉及的数据源数量。
 type Layer string
@@ -56,6 +67,8 @@ var (
 	ErrQueryConflict              = errors.New("query run already exists")
 	ErrLayerDependencyUnavailable = errors.New("dataset layer dependency is unavailable")
 	ErrLLMTriggerUnavailable      = errors.New("dataset LLM trigger is unavailable")
+	ErrSemanticNamingUnavailable  = errors.New("dataset semantic naming is unavailable")
+	ErrSemanticNamingInvalid      = errors.New("dataset semantic naming output is invalid")
 )
 
 // Document 是数据集 DSL V1 的完整、可版本化定义。
@@ -64,6 +77,7 @@ type Document struct {
 	Dataset          Descriptor        `json:"dataset"`
 	Nodes            []Node            `json:"nodes"`
 	Joins            []Join            `json:"joins"`
+	Transforms       []Transform       `json:"transforms,omitempty"`
 	PreAggregations  []PreAggregation  `json:"preAggregations,omitempty"`
 	FactContract     *FactContract     `json:"factContract,omitempty"`
 	AnalysisContract *AnalysisContract `json:"analysisContract,omitempty"`
@@ -71,6 +85,8 @@ type Document struct {
 	Distinct         bool              `json:"distinct,omitempty"`
 	Filters          []Filter          `json:"filters"`
 	GroupBy          []string          `json:"groupBy"`
+	GroupByMode      GroupByMode       `json:"groupByMode,omitempty"`
+	GroupingSets     [][]string        `json:"groupingSets,omitempty"`
 	Having           []Filter          `json:"having"`
 	Sorts            []Sort            `json:"sorts"`
 	Parameters       []Parameter       `json:"parameters"`
@@ -103,12 +119,14 @@ func (document Document) MarshalJSON() ([]byte, error) {
 // PreAggregation 描述一个发生在 Join 槽位之前的显式分组组件。
 // Join 仍引用原始节点 ID，JoinID 与 JoinSide 用于保存画布上的准确连接拓扑。
 type PreAggregation struct {
-	ID       string                 `json:"id"`
-	NodeID   string                 `json:"nodeId"`
-	JoinID   string                 `json:"joinId"`
-	JoinSide string                 `json:"joinSide"`
-	GroupBy  []PreAggregationGroup  `json:"groupBy"`
-	Metrics  []PreAggregationMetric `json:"metrics"`
+	ID           string                 `json:"id"`
+	NodeID       string                 `json:"nodeId"`
+	JoinID       string                 `json:"joinId"`
+	JoinSide     string                 `json:"joinSide"`
+	GroupBy      []PreAggregationGroup  `json:"groupBy"`
+	GroupByMode  GroupByMode            `json:"groupByMode,omitempty"`
+	GroupingSets [][]string             `json:"groupingSets,omitempty"`
+	Metrics      []PreAggregationMetric `json:"metrics"`
 }
 
 // PreAggregationGroup 描述关联前分组的维度字段及可选日期粒度。
@@ -122,6 +140,7 @@ type PreAggregationGroup struct {
 type PreAggregationMetric struct {
 	Field      string      `json:"field"`
 	Function   string      `json:"function"`
+	CountRows  bool        `json:"countRows,omitempty"`
 	Expression *Expression `json:"expression,omitempty"`
 }
 
@@ -242,6 +261,38 @@ type JoinCondition struct {
 	RightExpression Expression `json:"rightExpression"`
 }
 
+// Transform 是执行 DSL 中可审计的字段处理组件。Designer 仍保存坐标等
+// 交互信息；这里保存组件身份、拓扑和每条规则的规范表达式。
+type Transform struct {
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	Family        string          `json:"family"`
+	ComponentType string          `json:"componentType"`
+	Input         TransformInput  `json:"input"`
+	Rules         []TransformRule `json:"rules"`
+}
+
+type TransformInput struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
+type TransformRule struct {
+	ID               string          `json:"id"`
+	Operation        string          `json:"operation"`
+	InputKeys        []string        `json:"inputKeys"`
+	Output           TransformOutput `json:"output"`
+	Expression       Expression      `json:"expression"`
+	ReplaceSourceKey string          `json:"replaceSourceKey,omitempty"`
+}
+
+type TransformOutput struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Code          string `json:"code"`
+	CanonicalType string `json:"canonicalType"`
+}
+
 // Field 描述数据集输出字段及其语义角色。
 type Field struct {
 	ID            string     `json:"id"`
@@ -311,28 +362,36 @@ type MaterializationPolicy struct {
 
 // Expression 是受白名单约束的递归表达式树。
 type Expression struct {
-	Type       string       `json:"type"`
-	NodeID     string       `json:"nodeId,omitempty"`
-	Field      string       `json:"field,omitempty"`
-	Code       string       `json:"code,omitempty"`
-	Function   string       `json:"function,omitempty"`
-	Unit       string       `json:"unit,omitempty"`
-	TargetType string       `json:"targetType,omitempty"`
-	Value      any          `json:"value,omitempty"`
-	Argument   *Expression  `json:"argument,omitempty"`
-	Arguments  []Expression `json:"arguments,omitempty"`
-	Left       *Expression  `json:"left,omitempty"`
-	Right      *Expression  `json:"right,omitempty"`
-	Lower      *Expression  `json:"lower,omitempty"`
-	Upper      *Expression  `json:"upper,omitempty"`
-	Whens      []CaseBranch `json:"whens,omitempty"`
-	Else       *Expression  `json:"else,omitempty"`
+	Type        string        `json:"type"`
+	NodeID      string        `json:"nodeId,omitempty"`
+	Field       string        `json:"field,omitempty"`
+	Code        string        `json:"code,omitempty"`
+	Function    string        `json:"function,omitempty"`
+	Unit        string        `json:"unit,omitempty"`
+	TargetType  string        `json:"targetType,omitempty"`
+	Value       any           `json:"value,omitempty"`
+	Argument    *Expression   `json:"argument,omitempty"`
+	Arguments   []Expression  `json:"arguments,omitempty"`
+	Left        *Expression   `json:"left,omitempty"`
+	Right       *Expression   `json:"right,omitempty"`
+	Lower       *Expression   `json:"lower,omitempty"`
+	Upper       *Expression   `json:"upper,omitempty"`
+	Whens       []CaseBranch  `json:"whens,omitempty"`
+	Else        *Expression   `json:"else,omitempty"`
+	PartitionBy []Expression  `json:"partitionBy,omitempty"`
+	OrderBy     []WindowOrder `json:"orderBy,omitempty"`
 }
 
 // CaseBranch 描述 CASE 表达式的一条条件和返回值分支。
 type CaseBranch struct {
 	When Expression `json:"when"`
 	Then Expression `json:"then"`
+}
+
+// WindowOrder 描述窗口函数 OVER 子句中的结构化排序项。
+type WindowOrder struct {
+	Expression Expression `json:"expression"`
+	Direction  string     `json:"direction"`
 }
 
 // ValidationIssue 提供可直接定位到 DSL 字段的校验错误。
@@ -373,6 +432,27 @@ type Prepared struct {
 	LogicalPlan     LogicalPlan
 	LogicalPlanJSON json.RawMessage
 	PlanHash        string
+	SemanticNaming  *SemanticNamingEvidence
+}
+
+// SemanticNamingEvidence carries the audited save-time LLM decision into the
+// dataset transaction. It is not part of the DSL and therefore never changes a
+// logical plan or schema hash by itself.
+type SemanticNamingEvidence struct {
+	AIRequestID   string
+	PromptVersion string
+	Tags          []SemanticTagSuggestion
+}
+
+// SemanticTagSuggestion is a controlled taxonomy choice made together with
+// DWD/DWS/ADS business-table and output-field naming.
+type SemanticTagSuggestion struct {
+	TagID      string
+	TagCode    string
+	TagName    string
+	Category   string
+	Confidence float64
+	Rationale  string
 }
 
 // LogicalPlan 是可确定性再生成、但不包含具体 SQL 的逻辑计划。
@@ -611,12 +691,28 @@ type CandidatePreviewInput struct {
 
 // PreviewResult 返回小样本数据和运行摘要，不暴露生成 SQL。
 type PreviewResult struct {
-	QueryID    string           `json:"queryId"`
-	Columns    []string         `json:"columns"`
-	Rows       [][]any          `json:"rows"`
-	RowCount   int              `json:"rowCount"`
-	DurationMS int64            `json:"durationMs"`
-	Warnings   []PreviewWarning `json:"warnings,omitempty"`
+	QueryID        string           `json:"queryId"`
+	Columns        []string         `json:"columns"`
+	ColumnMetadata []PreviewColumn  `json:"columnMetadata"`
+	Rows           [][]any          `json:"rows"`
+	RowCount       int              `json:"rowCount"`
+	DurationMS     int64            `json:"durationMs"`
+	Warnings       []PreviewWarning `json:"warnings,omitempty"`
+}
+
+// PreviewColumn 为稳定技术列编码补充可供界面和下游理解的业务语义。
+// 数组顺序与 PreviewResult.Columns 及每一行的值严格一致。
+type PreviewColumn struct {
+	FieldID             string `json:"fieldId,omitempty"`
+	Code                string `json:"code"`
+	Name                string `json:"name"`
+	Description         string `json:"description,omitempty"`
+	PhysicalName        string `json:"physicalName,omitempty"`
+	CanonicalType       string `json:"canonicalType,omitempty"`
+	SemanticType        string `json:"semanticType,omitempty"`
+	Role                string `json:"role,omitempty"`
+	Nullable            bool   `json:"nullable"`
+	GroupingPlaceholder string `json:"groupingPlaceholder,omitempty"`
 }
 
 // DraftPreviewResult 标识实际生成样本的规范候选，供编辑器丢弃过期 DAG 的响应。

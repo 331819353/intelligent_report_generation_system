@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"unicode"
 
@@ -12,15 +11,12 @@ import (
 )
 
 const (
-	SchemaVersion          = "1.1"
-	PromptVersion          = "metadata-completion-v9"
-	SourceFormatCSV        = "CSV"
-	SourceFormatExcel      = "EXCEL"
-	SourceFormatDatabase   = "DATABASE"
-	csvBusinessNamePattern = `^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$`
+	SchemaVersion        = "1.1"
+	PromptVersion        = "metadata-completion-v12"
+	SourceFormatCSV      = "CSV"
+	SourceFormatExcel    = "EXCEL"
+	SourceFormatDatabase = "DATABASE"
 )
-
-var csvBusinessNameRegexp = regexp.MustCompile(csvBusinessNamePattern)
 
 var (
 	ErrProviderUnavailable = errors.New("AI metadata provider is not configured")
@@ -79,12 +75,36 @@ type CompletionInput struct {
 	SchemaVersion string `json:"schemaVersion"`
 	// SourceFormat 只描述本次资产来自 CSV、Excel 工作簿还是数据库，不包含文件名或连接信息。
 	SourceFormat string `json:"sourceFormat,omitempty"`
+	// ContextColumns 是分批请求使用的全表紧凑字段上下文；Columns 仍是本批唯一
+	// 允许输出的目标，模型不得为 ContextColumns 中的其他字段生成结果。
+	ContextColumns []CompletionColumnContext `json:"contextColumns,omitempty"`
 	// StructureHash 只用于数据库并发栅栏，不发送给外部模型，也不混入提示词输入哈希。
 	StructureHash string           `json:"-"`
 	TargetTable   bool             `json:"targetTable"`
 	Table         Target           `json:"table"`
 	Columns       []Target         `json:"columns"`
 	SampleRows    []map[string]any `json:"sampleRows,omitempty"`
+}
+
+type CompletionColumnContext struct {
+	Name          string `json:"name"`
+	CanonicalType string `json:"canonicalType,omitempty"`
+	PrimaryKey    bool   `json:"primaryKey,omitempty"`
+	ForeignKey    bool   `json:"foreignKey,omitempty"`
+	Unique        bool   `json:"unique,omitempty"`
+	Nullable      bool   `json:"nullable"`
+}
+
+func completionColumnContexts(columns []Target) []CompletionColumnContext {
+	contexts := make([]CompletionColumnContext, 0, len(columns))
+	for _, column := range columns {
+		contexts = append(contexts, CompletionColumnContext{
+			Name: column.Name, CanonicalType: column.CanonicalType,
+			PrimaryKey: column.PrimaryKey, ForeignKey: column.ForeignKey,
+			Unique: column.Unique, Nullable: column.Nullable,
+		})
+	}
+	return contexts
 }
 
 type SuggestionValue struct {
@@ -236,8 +256,8 @@ func validateValue(value SuggestionValue, column, fileColumn bool) error {
 	if err := validateText("businessDescription", value.BusinessDescription, 1000); err != nil {
 		return err
 	}
-	if fileColumn && !csvBusinessNameRegexp.MatchString(value.BusinessName) {
-		return errors.New("businessName must use lowercase English snake_case for file columns")
+	if fileColumn && !containsChinese(value.BusinessName) {
+		return errors.New("businessName must contain Chinese text for file columns")
 	}
 	if fileColumn && !containsChinese(value.BusinessDescription) {
 		return errors.New("businessDescription must contain Chinese text for file columns")
@@ -286,58 +306,15 @@ func normalizeOutput(output CompletionOutput) CompletionOutput {
 	return output
 }
 
-// normalizeOutputForInput 在通用清理后，对文件字段名称执行可逆、无猜测的 ASCII snake_case 规范化。
-// 中文或其他非 ASCII 名称不会被静默丢弃，仍由 ValidateOutput 拒绝并触发一次模型纠错。
+// normalizeOutputForInput 保留输入参数以维持调用边界；文件字段显示名与数据库
+// 字段一样只做通用清理，不再把模型输出改写为英文技术标识符。
 func normalizeOutputForInput(input CompletionInput, output CompletionOutput) CompletionOutput {
-	output = normalizeOutput(output)
-	if !isFileSourceFormat(input.SourceFormat) {
-		return output
-	}
-	for i := range output.Columns {
-		output.Columns[i].BusinessName = normalizeASCIISnakeCase(output.Columns[i].BusinessName)
-	}
-	return output
+	_ = input
+	return normalizeOutput(output)
 }
 
 func isFileSourceFormat(value string) bool {
 	return value == SourceFormatCSV || value == SourceFormatExcel
-}
-
-// normalizeASCIISnakeCase 将空格、连字符、点号和驼峰形式统一为小写下划线形式。
-func normalizeASCIISnakeCase(value string) string {
-	value = strings.TrimSpace(value)
-	for _, r := range value {
-		if r > unicode.MaxASCII {
-			return value
-		}
-	}
-	runes := []rune(value)
-	var builder strings.Builder
-	lastSeparator := false
-	appendSeparator := func() {
-		if builder.Len() > 0 && !lastSeparator {
-			builder.WriteByte('_')
-			lastSeparator = true
-		}
-	}
-	for index, r := range runes {
-		switch {
-		case r >= 'A' && r <= 'Z':
-			previousLowerOrDigit := index > 0 && ((runes[index-1] >= 'a' && runes[index-1] <= 'z') || (runes[index-1] >= '0' && runes[index-1] <= '9'))
-			acronymBoundary := index > 0 && runes[index-1] >= 'A' && runes[index-1] <= 'Z' && index+1 < len(runes) && runes[index+1] >= 'a' && runes[index+1] <= 'z'
-			if previousLowerOrDigit || acronymBoundary {
-				appendSeparator()
-			}
-			builder.WriteRune(r + ('a' - 'A'))
-			lastSeparator = false
-		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
-			builder.WriteRune(r)
-			lastSeparator = false
-		default:
-			appendSeparator()
-		}
-	}
-	return strings.Trim(builder.String(), "_")
 }
 
 // containsChinese 允许描述中保留 ID、SKU 等英文缩写，但至少要有一个中文字符。

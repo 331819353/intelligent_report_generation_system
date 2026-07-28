@@ -37,6 +37,9 @@ func TestSemanticQAFixturesFreezeMarketModelingContracts(t *testing.T) {
 			"30000000-0000-4000-8000-000000000001": LayerDWD,
 			"30000000-0000-4000-8000-000000000002": LayerDWD,
 		},
+		"dws-workforce-headcount.json": {
+			"30000000-0000-4000-8000-000000000010": LayerDWD,
+		},
 		"ads-consumer-contract.json": {
 			"40000000-0000-4000-8000-000000000001": LayerDWS,
 		},

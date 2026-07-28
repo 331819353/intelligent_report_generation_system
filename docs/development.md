@@ -19,7 +19,7 @@ npm --prefix web install
 | 服务 | 地址 | 用途 |
 |---|---|---|
 | PostgreSQL（控制面） | `127.0.0.1:5432` | 系统、数据源、数据集、指标、配置、版本和审计 |
-| PostgreSQL（数据面） | `127.0.0.1:5433` | ODS、DIM、DWD、DWS、ADS 物理表和发布视图 |
+| PostgreSQL（数据面） | `127.0.0.1:5433` | DIM、DWD、DWS、ADS 物理表和发布视图；ODS 明细不复制入仓 |
 | Redis | `127.0.0.1:6379` | 查询缓存、分布式状态和短期任务协调 |
 | MinIO API | `127.0.0.1:9000` | 报告 JSON、Excel、附件、快照和 PDF |
 | MinIO Console | `http://127.0.0.1:9001` | 本地对象存储管理界面 |
@@ -91,16 +91,18 @@ sh -n scripts/migrate.sh
 
 ```bash
 export AI_BASE_URL="https://mgallery.haier.net/v1/"
-export AI_MODEL="deepseek-v3"
+export AI_MODEL="MiniMax-M2"
+export AI_MODELS="MiniMax-M2,deepseek-v3"
 export AI_API_KEY="<从密钥管理系统或本地安全环境注入>"
 export API_WRITE_TIMEOUT="240s"
 export AI_REQUEST_TIMEOUT="100s"
 export AI_ATTEMPT_TIMEOUT="90s"
+export AI_PRIMARY_FAILOVER_TIMEOUT="60s"
 export AI_MAX_ATTEMPTS="1"
 export AI_CONFIDENCE_THRESHOLD="0.8"
 ```
 
-上述超时用于本地 `deepseek-v3` 验收；应按实际 Provider 延迟调整，并始终保持 `2 × AI_REQUEST_TIMEOUT < API_WRITE_TIMEOUT`。批量加工仍应使用持久化异步任务，不能通过无限放大同步 HTTP 超时替代。未设置 `AI_API_KEY` 时，元数据补全和数据集 DAG 提案等 AI 接口明确降级为不可用，非 AI 功能继续运行。元数据 AI API、数据集 API、结构化输出约束和审计字段分别见 `docs/api-metadata-ai.md`、`docs/api-datasets.md` 和 `docs/ai-orchestration.md`。
+模型序列按“主模型,后备模型”解释：普通调用固定使用 MiniMax，元数据补全只有在 MiniMax 超时、调用失败或严格校验失败后才以独立审计请求切换 DeepSeek。上述超时应按实际 Provider 延迟调整，并始终保持 `2 × AI_REQUEST_TIMEOUT < API_WRITE_TIMEOUT`。批量加工仍应使用持久化异步任务，不能通过无限放大同步 HTTP 超时替代。未设置 `AI_API_KEY` 时，元数据补全和数据集 DAG 提案等 AI 接口明确降级为不可用，非 AI 功能继续运行。元数据 AI API、数据集 API、结构化输出约束和审计字段分别见 `docs/api-metadata-ai.md`、`docs/api-datasets.md` 和 `docs/ai-orchestration.md`。
 
 ## 一键启动本地服务
 
@@ -255,16 +257,17 @@ socket 数。池数量达到上限时只按 LRU 淘汰没有活动连接或等�
 - `CONNECTOR_STREAM_MAX_CELL_BYTES`（1 MiB）、
   `CONNECTOR_STREAM_MAX_ROW_BYTES`（4 MiB）、
   `CONNECTOR_STREAM_MAX_BYTES`（1 GiB）；
-- 通用 worker 的 `WAREHOUSE_STAGE_MAX_BYTES`（512 MiB，每租户每物化任务，同时
+- 通用 worker 的 `WAREHOUSE_STAGE_MAX_BYTES`（1 GiB，每租户每物化任务，同时
   覆盖数据库和 Excel/CSV 的逻辑 staging）。
 
-文件 ODS 的 CSV、XLS 和对象读取硬上限是
-`min(max_excel_file_bytes, WAREHOUSE_STAGE_MAX_BYTES)`；XLSX 的展开总量和
-worksheet 内存预算还分别采用解析器默认上限与 staging 上限中的较小者。这个保守
-边界意味着较低的 staging 配置会拒绝压缩文件本体很大、即使最终只选择很小 Sheet
-的工作簿；调高前应同时评估 worker 内存、临时空间和单任务隔离，不能只看目标 Sheet。
+文件对象读取仍受租户 `max_excel_file_bytes` 限制。ODS/DWD 设计预览只解析所需
+worksheet 的表头和前 100 行。DWD/DIM 正式回源通过 Excelize 行迭代
+和 1,000 行批次 COPY，不在内存中构造完整二维表；worksheet XML 超过 16 MiB 时
+落到临时文件。展开总量同时受“压缩文件大小的 8 倍”和 2 GiB 绝对上限约束，
+逻辑投影行则独立累计到 `WAREHOUSE_STAGE_MAX_BYTES`。调高这些边界前应同时评估
+worker 内存、临时空间、仓储容量和单任务隔离。
 
-MySQL 普通查询、元数据同步和 ODS 流都使用 `SSCursor`。预算终止、取消和 HTTP
+MySQL 普通查询、元数据同步和 DWD/DIM 正式回源流都使用 `SSCursor`。预算终止、取消和 HTTP
 客户端断流会先关闭 socket，再关闭游标，避免游标清理继续排空未读大结果；成功完整
 消费才允许连接回池。单个源字段仍必须由数据库驱动先物化后才能执行 cell 上限检查，
 因此生产还应限制 Connector 容器内存、源账号可见字段和数据库最大包/LOB 策略；不得

@@ -263,7 +263,7 @@ func tenantPolicyAllowsPurpose(enabled bool, allowedPurposes []string, purpose s
 	// 指标起草与数据集标签建议都只产生待人工治理的提案；它们不会直接发布
 	// 指标或批准标签，因此沿用租户总 AI 开关而不静默扩张历史用途白名单。
 	return purpose == PurposeMetricAuthoring || purpose == PurposeDatasetTagSuggestion ||
-		purpose == PurposeSemanticQueryPlanning ||
+		purpose == PurposeSemanticQueryPlanning || purpose == PurposeDatasetSemanticNaming ||
 		containsPurpose(allowedPurposes, purpose)
 }
 

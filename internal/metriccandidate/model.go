@@ -185,12 +185,12 @@ type IdentificationResult struct {
 	HistoricalMetricCount  int                          `json:"historicalMetricCount"`
 	ExistingCandidateCount int                          `json:"existingCandidateCount"`
 	DimensionDatasetCount  int                          `json:"dimensionDatasetCount"`
-	DimensionProfileCount  int                          `json:"dimensionProfileCount"`
+	DimensionAssetCount    int                          `json:"dimensionAssetCount"`
 	Datasets               []IdentificationDatasetIndex `json:"datasets"`
 }
 
 // IdentificationDatasetIndex is the bounded, review-facing projection of the
-// hybrid query index for one current DWS/ADS version. The authoritative member
+// hybrid query index for one current DWS version. The authoritative member
 // postings remain in dimension_members; this response only exposes the first
 // safe page of deduplicated values.
 type IdentificationDatasetIndex struct {
@@ -235,6 +235,22 @@ type Store interface {
 
 type IdentificationStore interface {
 	TriggerManualIdentification(context.Context, string, string) (IdentificationResult, error)
+}
+
+// AutomaticApprovalCandidate binds a code-recognized candidate to the user who
+// explicitly started the DWS scan. The actor remains visible in the normal metric
+// candidate and metric asset audit trail.
+type AutomaticApprovalCandidate struct {
+	Candidate Candidate
+	ActorID   string
+}
+
+type AutomaticApprovalStore interface {
+	ListAutomaticApprovalCandidates(
+		context.Context,
+		string,
+		int,
+	) ([]AutomaticApprovalCandidate, error)
 }
 
 // MetricCreator 只允许把已审核候选物化为草稿；它不暴露发布能力。

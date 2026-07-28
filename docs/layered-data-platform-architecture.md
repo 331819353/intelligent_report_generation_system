@@ -1,6 +1,6 @@
 # 分层数据平台与语义层技术方案
 
-本文定义数据源、ODS/DIM/DWD/DWS/ADS、LLM 建模编排、物化执行、标签与语义检索的目标架构和本轮落地边界。核心原则是：控制面与数据面分离、所有运行版本不可变、测试不等于发布、跨源数据只以流式暂存进入 PostgreSQL。LLM 负责分析元数据并生成表结构与结构化 DAG，不获得 SQL、DDL 或物理执行权；底层开发引擎负责把已治理 DAG 编译成物理过程。
+本文定义数据源、ODS/DIM/DWD/DWS/ADS、LLM 建模编排、物化执行、标签与语义检索的目标架构和本轮落地边界。核心原则是：控制面与数据面分离、ODS 不复制来源明细、DWD 才是首次全量落仓、所有运行版本不可变、测试不等于发布。LLM 负责分析元数据并生成表结构与结构化 DAG，不获得 SQL、DDL 或物理执行权；底层开发引擎负责把已治理 DAG 编译成物理过程。
 
 > 后续已批准的目标合同与实施顺序见
 > [智能问答语义层与分层建模改造计划](./semantic-qa-retrofit-plan.md) 和
@@ -27,7 +27,6 @@ flowchart LR
 
   subgraph Data["PostgreSQL 数据面"]
     Stage["warehouse_staging"]
-    ODS["warehouse_ods"]
     DIM["warehouse_dim"]
     DWD["warehouse_dwd"]
     DWS["warehouse_dws"]
@@ -52,15 +51,12 @@ flowchart LR
   MySQL --> Builder
   Oracle --> Builder
   Builder --> Stage --> DWD
-  Builder --> ODS
   Builder --> DIM
   Builder --> DWS
   Builder --> ADS
-  ODS --> DIM
-  ODS --> DWD
+  Catalog -. "ODS 字段映射 + 精确源版本" .-> Builder
   DIM --> DWD
   DWD --> DWS --> ADS
-  ODS --> Published
   DIM --> Published
   DWD --> Published
   DWS --> Published
@@ -73,7 +69,7 @@ flowchart LR
   Build --> Published
 ```
 
-`platform` schema 只保存配置、元数据、不可变版本、血缘、运行和索引信息，不保存动态业务事实表。业务数据按层写入独立 `warehouse_*` schema。所有表名由服务端根据租户、数据集和运行 ID 计算，客户端不能提交物理表名或 SQL。
+`platform` schema 只保存配置、元数据、不可变版本、ODS 映射、血缘、运行和索引信息，不保存动态业务事实表。ODS 明细始终留在来源：Excel/CSV 留在精确文件版本，MySQL/Oracle 留在精确发布源表。DWD、DIM、DWS、ADS 的业务数据写入独立 `warehouse_*` schema。所有表名由服务端根据租户、数据集和运行 ID 计算，客户端不能提交物理表名或 SQL。
 
 ## 2. 数据源生命周期
 
@@ -108,13 +104,13 @@ DRAFT / UNTESTED
 
 | 层级 | 合法输入 | 合法操作 | 明确禁止 |
 | --- | --- | --- | --- |
-| ODS | 一个已发布物理表或精确文件版本 | 源表字段的治理映射、技术类型规范化和必要的非业务转换 | Join、Group、业务聚合 |
-| DIM | 一个已发布 ODS 精确版本/物化 | 抽离人物、商品、组织、区域等实体说明；保留实体键、名称、分类、状态等分析字段并做基础清洗 | 事实聚合、改变实体粒度、直接访问物理源 |
-| DWD | 至少一个已发布 ODS 事实版本/物化，可附加已发布 DIM | 清洗事实动作，保留“谁、何时、对什么、做了什么”的明细键，并扩充有分析价值的实体说明 | Group、业务聚合、缺少 ODS 事实根的 DIM-only 设计 |
+| ODS | 一个已发布物理表或精确文件版本 | 保存清晰的字段/类型/说明映射；预览时从该精确来源截取最多 100 行 | 复制全量明细到数仓、Join、Group、业务聚合 |
+| DIM | 一个已发布 ODS 精确版本 | 抽离人物、商品、组织、区域等实体说明；正式构建时从 ODS 固定的来源全量加工并落仓 | 事实聚合、改变实体粒度、绕过 ODS 映射读取其他来源 |
+| DWD | 至少一个已发布 ODS 事实版本，可附加已发布 DIM | 正式构建时按已完成 DAG 从冻结来源全量抽取、清洗和关联后首次落仓；设计预览只加工各 ODS 的 100 行样本 | Group、业务聚合、缺少 ODS 事实根的 DIM-only 设计 |
 | DWS | 一个或多个已发布 DWD 精确版本/物化 | 按主题、主体、时间、商品等视角组合事实，执行 Join、分组、聚合并形成可解释分析结果 | 直接引用 DIM、ODS、外部源表或在内存完成主计算 |
 | ADS | 一个或多个已发布 DWS 精确版本/物化 | 面向报表、接口、看板或应用场景组合、裁剪、重命名和必要的二次汇总 | 直接越层引用 DIM、DWD、ODS 或外部源表 |
 
-历史 DSL 未声明 `layer` 时，服务端仍用确定性规则归类：含聚合为 DWS；单表、无 Join 为 ODS；其他为 DWD，并保留旧 TABLE 执行兼容以避免改写已发布正文/hash。显式声明层级的新 DSL 采用严格节点合同：`ODS <- SOURCE`、`DIM <- ODS`、`DWD <- 至少一个 ODS + 可选 DIM`、`DWS <- DWD[1..N]`、`ADS <- DWS`。DIM/DWD/DWS/ADS 只能固定精确 `DATASET` 发布版本，不能混入 `TABLE` 绕过治理。新客户端必须显式写入层级，不能依赖历史兼容绕过治理。
+历史 DSL 未声明 `layer` 时，服务端仍用确定性规则归类：含聚合为 DWS；单表、无 Join 为 ODS；其他为 DWD，并保留旧 TABLE 执行兼容以避免改写已发布正文/hash。显式声明层级的新 DSL 采用严格节点合同：`ODS <- SOURCE`、`DIM <- ODS`、`DWD <- 至少一个 ODS + 可选 DIM`、`DWS <- DWD[1..N]`、`ADS <- DWS`。ODS 的 `DATASET` 版本是可审计的虚拟来源合同，不要求 ACTIVE 物化；DWD 注册时把它展开为精确来源快照，DWS/ADS 则只读取数仓中当前 ACTIVE 的上游物化。
 
 ### 3.1 LLM 建模与开发引擎边界
 
@@ -151,11 +147,10 @@ flowchart LR
 开发引擎只接受通过层级、字段引用、表达式白名单和依赖校验的 DSL。它根据 DAG 拓扑并行执行无依赖节点，负责参数化 SQL 编译、COPY/CTAS、租约、重试、质量门和原子激活。由此允许建模过程拆分或并行，同时仍以精确版本、hash 和质量结果证明最终 DIM、DWD、DWS、ADS 一致。
 
 系统由完成映射的表/Sheet 自动生成 ODS 时，会固定
-`MATERIALIZED_PREFERRED + enabled=true + ON_DEMAND`。不可变发布版本和首个
-`QUEUED` build 在同一事务提交，build 固定精确源发布版本与元数据摘要；源端抽取
-只会在事务提交后由 worker 执行。启动对账按同一确定性幂等键补齐历史遗漏 build。
-该默认值只适用于 `originTableId` 标识的系统映射 ODS，普通设计器新建的数据集
-不会被隐式开启物化。
+`REALTIME + previewLimit=100 + materialization.enabled=false`。发布事务只保存
+不可变 ODS 字段合同及精确源发布版本/文件版本，不登记 ODS build，也不创建
+`warehouse_ods` 表。DWD/DIM 发布构建才把 ODS 合同中的精确来源转成不可变
+build input；因此重新上传文件或重新发布数据库源不会静默改变已经登记的构建。
 
 映射 ODS 的后续结构刷新采用保守所有权栅栏，不是“所有已发布映射表自动升级”。
 仅当当前发布版本具有不可变的 `SYSTEM_MAPPED_* publication_origin`、当前草稿仍与
@@ -221,24 +216,21 @@ JSON Schema，并以 tag ID 枚举约束输出；输入最多 192 KiB、taxonomy
 `semantic_change_outbox.event_version`，后台再重建文档及向量。因此编辑标签
 不会改写数据集 DSL，迟到 worker 也不能覆盖新版本结果。
 
-## 5. ODS 提取与 DIM/DWD/DWS/ADS 执行策略
+## 5. ODS 采样与 DIM/DWD/DWS/ADS 执行策略
 
-ODS 从 MySQL/Oracle 抽取时，把安全可证明的字段投影和源过滤编译为源库受限参数化
-查询，再使用 NDJSON 分批流传输。Go 执行器按规范类型校验每个值，并在同一个
-PostgreSQL 事务中用 `COPY` 写入运行级 `warehouse_staging`；不会把完整明细装入
-Go 或 Python 内存。远端错误、字段漂移、类型错误、行数不一致或 COPY 失败都会
-回滚整个暂存表。Excel/CSV 采用相同的定型与事务落库边界；其对象读取、解析展开、
-worksheet 内存和逻辑 staging 另有逐层硬预算，不把“只选小 Sheet”作为放宽大文件
-读取的理由。
+ODS 不执行全量提取。交互式预览按 ODS 发布版本固定的来源读取：数据库节点使用
+受限参数化扫描，Excel/CSV 使用精确 `fileVersionId` 的有界 worksheet 解析；每个
+来源节点最多取前 100 行，再在内存中按正在编辑的 DIM/DWD DAG 执行过滤、转换、
+Join 和字段投影。100 行是预览样本而非完整性证明，不能据此确认全量类型范围或
+质量结果。编码、编号、ID、代码、标识等字段由字段合同强制为 `STRING`，不会因为
+前 100 行恰好全为数字而改成整数。
 
-DIM 的输入是 PostgreSQL 中精确 ACTIVE 的 ODS 物化；DWD 至少包含一个 ODS 事实
-输入，并可附加正式 DIM；DWS 的输入只包含一个或多个精确 ACTIVE 的 DWD；ADS 的
-输入是精确 ACTIVE 的 DWS。因此无论
-上游最初来自同库还是跨库，Join、字段转换、明细整合、主题聚合和应用组合都统一在
-PostgreSQL 中执行。这避免了跨源内存 Join，也
-不会为“同源优化”重新绕过已经冻结的 ODS 版本。当前版本没有把 DWD DAG 重新下推
-到原始 MySQL/Oracle；后续若引入 source-affinity 优化，必须证明与冻结 ODS 快照
-语义等价后才能启用，不能以文档描述替代实现。
+DIM/DWD 正式构建会冻结 ODS 中的精确数据源版本、表结构摘要、文件版本及 SHA-256，
+再从 MySQL/Oracle 流式读取或从 Excel/CSV 逐行解析全量明细，使用运行级
+`warehouse_staging` 承接各 ODS 投影，并按已批准 DAG 加工后写入
+`warehouse_dim / warehouse_dwd`。远端错误、字段漂移、类型错误、行数不一致或
+COPY 失败都会回滚本次构建。DWS 的输入只包含一个或多个精确 ACTIVE 的 DWD；
+ADS 的输入是精确 ACTIVE 的 DWS，两层均只在数仓中检索、加工和落地，不回源。
 
 Connector 的资源上限不只按单数据源配置。进程级
 `CONNECTOR_MAX_POOLS`（开发默认 1,000）限制连接池注册表，
@@ -259,24 +251,22 @@ Go 侧仍在 JSON 解码、NDJSON 消费和 `COPY` 前独立失败关闭。当�
 | 普通 JSON 响应 | 64 MiB | 服务端稳定资源码；Go 用 `LimitReader` 做 max+1 复核 |
 | 技术元数据同步 | 200,000 个源字典行，并共享普通 JSON 64 MiB | fetch 阶段 `METADATA_SYNC_*_LIMIT_EXCEEDED` |
 | 元数据样本单元格 / 单行 / 整体响应 | 16 KiB / 64 KiB / 512 KiB | `METADATA_SAMPLE_*_BYTES_EXCEEDED` |
-| ODS NDJSON 单元格 / 单行 / 整条流 | 1 MiB / 4 MiB / 1 GiB | `QUERY_*_BYTES_EXCEEDED`，整次流失败 |
+| DWD/DIM 回源 NDJSON 单元格 / 单行 / 整条流 | 1 MiB / 4 MiB / 1 GiB | `QUERY_*_BYTES_EXCEEDED`，整次流失败 |
 | 单个 NDJSON 事件 | 8 MiB 内部硬上限 | `QUERY_STREAM_EVENT_BYTES_EXCEEDED` |
-| 每租户、每物化任务的数据库或 Excel/CSV staging 逻辑载荷 | 512 MiB | `ErrStageBytesExceeded`，事务回滚 |
+| 每租户、每物化任务的数据库或 Excel/CSV staging 逻辑载荷 | 1 GiB | `ErrStageBytesExceeded`，事务回滚 |
 
-样本仍最多十行、最多 256 个明确投影字段；投影来自已发现元数据，二进制、LOB、
+结构识别/LLM 授权样本仍最多十行；ODS/DWD 设计预览则每个来源最多 100 行。两者最多
+256 个明确投影字段；投影来自已发现元数据，二进制、LOB、
 Oracle `LONG / LONG RAW / XMLTYPE / JSON` 等不安全类型在 Go 和 Connector 两侧
 排除或拒绝。普通查询、样本和流式查询不会用静默 `LIMIT` 把截断结果当成完整结果；
 行数、列数、单元格、单行、响应/整流以及仓储载荷任一超限都使调用失败。对外物化
 仍统一收口为 `ODS_STAGING_FAILED`，底层稳定码只用于无敏感值的运维诊断。
 
-文件 ODS 以 `min(max_excel_file_bytes, WAREHOUSE_STAGE_MAX_BYTES)` 作为 CSV、
-XLS 和对象读取硬上限；XLSX 的展开总量与 worksheet 内存预算还分别取解析器自身
-上限和 `WAREHOUSE_STAGE_MAX_BYTES` 中的更严格值。逻辑投影行在 COPY 前继续累计
-受同一 staging 上限约束。因此低 staging cap 会保守拒绝“压缩文件本体较大、但选中
-Sheet 很小”的文件；这是防止压缩炸弹和解析前内存失控的安全优先兼容取舍，不应通过
-绕过对象读取上限解决。
+文件对象读取受租户 `max_excel_file_bytes` 约束；XLSX 采用逐行解析与 1,000 行
+批次 COPY，worksheet XML 超过 16 MiB 时落到临时文件。展开总量不得超过压缩文件
+大小的 8 倍且绝对不超过 2 GiB，逻辑投影行在 COPY 前继续累计受 staging 上限约束。
 
-MySQL 技术元数据同步、普通查询和 ODS 都使用真正的 `SSCursor` 逐批读取。预算终止、
+MySQL 技术元数据同步、普通查询和 DWD/DIM 正式回源都使用真正的 `SSCursor` 逐批读取。预算终止、
 主动取消、客户端断流或任何流式异常都会先关闭 socket，并把物理连接标为不可复用，
 防止驱动在归还连接池时排空未读结果而产生无界读取；Oracle 游标也遵循同样的异常
 连接丢弃合同。驱动仍须先物化一个源字段值，cell 上限不是源端单值峰值内存的绝对
@@ -300,11 +290,11 @@ MySQL 技术元数据同步、普通查询和 ODS 都使用真正的 `SSCursor` 
 
 ### 当前 worker 落地边界
 
-本轮可执行 worker 已支持 ODS/DIM/DWD/DWS/ADS 的 PostgreSQL 闭环：
+本轮可执行 worker 采用“ODS 虚拟合同、DWD/DIM 首次落仓、DWS/ADS 数仓内加工”的闭环：
 
 - 只领取服务端已登记的不可变 build run，并持续用随机 lease token 心跳续租；
 - 重新加载仍为当前发布态的目标 `dataset_version`，严格校验规范 DSL 与 `schema_hash`；
-- ODS 只接受单个 `TABLE` 节点和单个 SOURCE 输入。输入必须同时固定当前
+- ODS 只接受单个 `TABLE` 节点和单个 SOURCE 输入，发布后不登记构建；合同固定当前
   `PUBLISHED` 的 `data_source_version`、活动元数据表及其 `structure_hash`；
 - MySQL/Oracle 的投影和可下推过滤由受限方言编译器在源端执行，Connector 以严格
   NDJSON 流传输，最多 5,000,000 行，最终批次直接 typed COPY 到 run-scoped
@@ -313,27 +303,34 @@ MySQL 技术元数据同步、普通查询和 ODS 都使用真正的 `SSCursor` 
   `assetId + versionId + size + SHA-256`，再复核 Sheet、投影和规范类型。行数、列形状
   或单元格类型漂移都会让同一 PostgreSQL staging 事务回滚；对象读取、XLSX
   展开/worksheet 内存和逻辑 staging 同时受上述更严格预算约束；
-- ODS staging 完成后再次检查数据源发布指针、资产状态、结构摘要和文件摘要，再由
-  同一个可信 CTAS、质量门和原子激活链路生成 `warehouse_ods` 物理表及稳定视图；
-- DIM 只接受 ODS；DWD 至少接受一个 ODS 事实输入并可接受 DIM；DWS 只接受一个或多个 DWD；ADS 只接受 DWS。每个冻结输入必须解析到同租户、同精确版本、当前 `ACTIVE` 的物化及其 `warehouse_published` 稳定视图；
+- DWD/DIM 构建把虚拟 ODS 输入重新解析为同租户的精确来源快照，全量 staging 后按
+  ODS 字段合同投影为运行级输入；只有 DWD/DIM 输出进入数仓物化和稳定视图；
+- DIM 只接受 ODS；DWD 至少接受一个 ODS 事实输入并可接受 DIM；ODS 输入不要求
+  ACTIVE 物化，DIM/DWD/DWS/ADS 数仓输入则必须解析到同租户、同精确版本、当前
+  `ACTIVE` 的物化及其 `warehouse_published` 稳定视图；
 - 解析时同时校验 ACTIVE 稳定视图和其不可变物理表；CTAS 读取冻结物化的运行级物理表，而不直接读取可能被下一次发布切换的稳定视图，避免“解析后、执行前”发生上游快照漂移；
 - 输入的 schema hash、snapshot hash 和可选 row count 必须与 ACTIVE 物化完全一致，DSL 中每个节点必须有且只能有可信输入；`sourceVersion` 仅作为审计标签，不参与物理定位；
 - 所有计划节点必须声明 PostgreSQL 执行；worker 按 DAG 拓扑记录节点运行，最终由受限 DSL 编译器和 CTAS 执行；
 - 当前只执行 `FULL + TABLE`，`INCREMENTAL`、`BACKFILL` 和 `PARTITIONED_TABLE` 分别以 `REFRESH_MODE_UNSUPPORTED`、`PARTITIONED_TABLE_UNSUPPORTED` 失败关闭，不会暗中退化成全量表；
-- 激活前记录输出行数、`pg_total_relation_size`、确定性 snapshot hash，以及行数和声明粒度键质量结果；
+- 激活前记录输出行数、`pg_total_relation_size`、确定性 snapshot hash，以及行数和
+  已声明粒度键的质量结果；ODS 不执行数仓质量门，DIM/DWS/ADS 必须显式声明业务键。
+  保持源行粒度且上游明确未声明业务主键的 DWD 可以不声明键，此时只执行行数质量门，
+  不得用首列虚构唯一性合同；
 - 丢失租约后立即取消数据库工作，后续节点更新和激活仍由 token + 数据库时间双重栅栏保护。过期运行重领时会从计划起点重放全部节点。
 
-当前仍不执行 `INCREMENTAL`、`BACKFILL`、`PARTITIONED_TABLE` 或非单表 ODS。缺少
-对应 Connector/stager 的源类型会以 `ODS_SOURCE_STAGING_NOT_CONFIGURED` 失败；
+当前仍不执行 `INCREMENTAL`、`BACKFILL`、`PARTITIONED_TABLE`。缺少
+对应 Connector/stager 的源类型会以 `ODS_SOURCE_STAGING_NOT_CONFIGURED` 失败（错误码
+保留 ODS 名称用于兼容，实际发生在 DWD/DIM 的 ODS 来源回放阶段）；
 源重新发布、结构漂移或文件摘要不匹配会以 `ODS_SOURCE_CONTRACT_INVALID` 失败；
 源读取、类型转换或 COPY 失败使用 `ODS_STAGING_FAILED`，超时使用
 `ODS_STAGING_TIMEOUT`。这些都是可审计终态，不会创建 ACTIVE 物化。
 
 ### 发布试跑与指标查询读取路径
 
-构建路径和交互式读取路径使用不同的并发合同。worker 构建 DIM/DWD/DWS/ADS 时读取冻结
-materialization ID 对应的运行级不可变物理表；数据集发布试跑、草稿/版本预览和
-DWS 指标试算则读取当前 ACTIVE 物化对应的 `warehouse_published` 稳定视图：
+构建路径和交互式读取路径使用不同的并发合同。DWD/DIM worker 从冻结 ODS 来源全量
+抽取，DWS/ADS worker 读取冻结 materialization ID 对应的运行级不可变物理表。
+DWD/DIM 草稿预览先从每个 ODS 来源截取 100 行再执行 DAG；DWS/ADS 预览和 DWS
+指标试算读取当前 ACTIVE 物化对应的 `warehouse_published` 稳定视图。
 
 ```text
 严格 DSL
@@ -344,9 +341,10 @@ DWS 指标试算则读取当前 ACTIVE 物化对应的 `warehouse_published` 稳
   → 查询审计 + 精确 materialization 绑定
 ```
 
-解析器不递归重放上游 DAG，也不接受客户端 SQL、稳定视图名或物理表名。DIM
-节点只能绑定当前发布且 ACTIVE 的 ODS 精确版本；DWD 节点至少绑定一个同条件的
-ODS，并可绑定 DIM；DWS 节点只能绑定一个或多个 DWD；ADS 节点只能绑定 DWS。任一节点缺失、失效、换版、换 ACTIVE
+解析器只允许把 DIM/DWD 的 ODS 节点展开到该版本冻结的单一物理来源，不执行任意
+数据集递归，也不接受客户端 SQL、稳定视图名或物理表名。DIM 节点只能绑定当前发布
+的 ODS 精确版本；DWD 节点至少绑定一个同条件的 ODS，并可绑定 ACTIVE DIM；
+DWS 节点只能绑定一个或多个 ACTIVE DWD；ADS 节点只能绑定 ACTIVE DWS。任一节点缺失、失效、换版、换 ACTIVE
 指针、摘要漂移或稳定关系异常都会在
 执行前失败关闭。执行事务对 materialization、版本和所有者行加共享锁，阻止原子
 激活在查询中途切换指针；实际 SELECT 同时取得 PostgreSQL 视图关系锁。

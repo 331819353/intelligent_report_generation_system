@@ -53,6 +53,10 @@ type NodeTableData struct {
 }
 
 type sourceRow map[string]any
+type rowGroup struct {
+	rows            []sourceRow
+	omittedFieldIDs map[string]bool
+}
 type outputRow struct {
 	values map[string]any
 }
@@ -108,6 +112,17 @@ func Evaluate(ctx context.Context, input Input) (datasource.QueryResult, error) 
 	if err != nil {
 		return datasource.QueryResult{}, err
 	}
+	windowValues := make(map[string][]any)
+	for _, field := range input.Document.Fields {
+		if field.Expression.Type != "WINDOW" {
+			continue
+		}
+		values, err := evaluateWindowExpression(ctx, field.Expression, groups, input.Parameters)
+		if err != nil {
+			return datasource.QueryResult{}, fmt.Errorf("field %s: %w", field.Code, err)
+		}
+		windowValues[field.Code] = values
+	}
 	// 在生成任何聚合输出前先校验列策略，并用最严格的最小分组人数过滤组。
 	minimumGroupSize, err := validateColumnPolicies(input.Document, input.ColumnPolicies)
 	if err != nil {
@@ -118,19 +133,19 @@ func Evaluate(ctx context.Context, input Input) (datasource.QueryResult, error) 
 		if err := checkContext(ctx, index); err != nil {
 			return datasource.QueryResult{}, err
 		}
-		if len(group) < minimumGroupSize {
+		if len(group.rows) < minimumGroupSize {
 			continue
 		}
 		first := sourceRow{}
-		if len(group) > 0 {
-			first = group[0]
+		if len(group.rows) > 0 {
+			first = group.rows[0]
 		}
 		keep := true
 		for _, filter := range input.Document.Having {
 			if filter.Optional && hasNilParameter(filter.Expression, input.Parameters) {
 				continue
 			}
-			value, err := evaluateExpression(filter.Expression, first, group, input.Parameters)
+			value, err := evaluateExpression(filter.Expression, first, group.rows, input.Parameters)
 			if err != nil {
 				return datasource.QueryResult{}, err
 			}
@@ -145,7 +160,17 @@ func Evaluate(ctx context.Context, input Input) (datasource.QueryResult, error) 
 		}
 		values := make(map[string]any, len(input.Document.Fields))
 		for _, field := range input.Document.Fields {
-			value, err := evaluateExpression(field.Expression, first, group, input.Parameters)
+			if group.omittedFieldIDs[field.ID] {
+				values[field.Code] = nil
+				continue
+			}
+			var value any
+			var err error
+			if ranked, ok := windowValues[field.Code]; ok {
+				value = ranked[index]
+			} else {
+				value, err = evaluateExpression(field.Expression, first, group.rows, input.Parameters)
+			}
 			if err != nil {
 				return datasource.QueryResult{}, fmt.Errorf("field %s: %w", field.Code, err)
 			}
@@ -204,8 +229,13 @@ func preAggregateNodes(ctx context.Context, document dataset.Document, rowsByNod
 		if !exists {
 			return nil, fmt.Errorf("pre-aggregation node %s is unavailable", item.NodeID)
 		}
-		groups := map[string][]sourceRow{}
+		type aggregateGroup struct {
+			rows   []sourceRow
+			active []bool
+		}
+		groups := map[string]*aggregateGroup{}
 		order := []string{}
+		valuesByRow := make([][]any, len(rows))
 		for index, row := range rows {
 			if err := checkContext(ctx, index); err != nil {
 				return nil, err
@@ -213,6 +243,9 @@ func preAggregateNodes(ctx context.Context, document dataset.Document, rowsByNod
 			values := make([]any, 0, len(item.GroupBy))
 			for _, group := range item.GroupBy {
 				expression := dataset.Expression{Type: "FIELD_REF", NodeID: item.NodeID, Field: group.Field}
+				if group.Expression != nil {
+					expression = *group.Expression
+				}
 				if group.Unit != "" {
 					expression = dataset.Expression{Type: "DATE_TRUNC", Unit: group.Unit, Argument: &expression}
 				}
@@ -222,37 +255,79 @@ func preAggregateNodes(ctx context.Context, document dataset.Document, rowsByNod
 				}
 				values = append(values, value)
 			}
-			payload, err := json.Marshal(values)
-			if err != nil {
-				return nil, err
-			}
-			key := string(payload)
-			if _, exists := groups[key]; !exists {
+			valuesByRow[index] = values
+		}
+		dimensions := make([]string, len(item.GroupBy))
+		for index, group := range item.GroupBy {
+			dimensions[index] = group.Field
+		}
+		for _, active := range groupingSelections(item.GroupByMode, dimensions, item.GroupingSets) {
+			if len(rows) == 0 && noGroupingDimensions(active) {
+				payload, _ := json.Marshal(struct {
+					Active []bool
+					Values []any
+				}{Active: active, Values: make([]any, len(item.GroupBy))})
+				key := string(payload)
+				groups[key] = &aggregateGroup{active: active}
 				order = append(order, key)
 			}
-			groups[key] = append(groups[key], row)
+			for rowIndex, row := range rows {
+				values := append([]any(nil), valuesByRow[rowIndex]...)
+				for dimensionIndex := range values {
+					if !active[dimensionIndex] {
+						values[dimensionIndex] = nil
+					}
+				}
+				payload, err := json.Marshal(struct {
+					Active []bool
+					Values []any
+				}{Active: active, Values: values})
+				if err != nil {
+					return nil, err
+				}
+				key := string(payload)
+				if groups[key] == nil {
+					groups[key] = &aggregateGroup{active: active}
+					order = append(order, key)
+				}
+				groups[key].rows = append(groups[key].rows, row)
+			}
 		}
 		aggregated := make([]sourceRow, 0, len(order))
 		for index, key := range order {
 			if err := checkContext(ctx, index); err != nil {
 				return nil, err
 			}
-			groupRows := groups[key]
+			group := groups[key]
 			output := sourceRow{}
-			for _, group := range item.GroupBy {
-				expression := dataset.Expression{Type: "FIELD_REF", NodeID: item.NodeID, Field: group.Field}
-				if group.Unit != "" {
-					expression = dataset.Expression{Type: "DATE_TRUNC", Unit: group.Unit, Argument: &expression}
+			for dimensionIndex, dimension := range item.GroupBy {
+				if !group.active[dimensionIndex] {
+					output[item.NodeID+"."+dimension.Field] = nil
+					continue
 				}
-				value, err := evaluateExpression(expression, groupRows[0], nil, parameters)
+				expression := dataset.Expression{Type: "FIELD_REF", NodeID: item.NodeID, Field: dimension.Field}
+				if dimension.Expression != nil {
+					expression = *dimension.Expression
+				}
+				if dimension.Unit != "" {
+					expression = dataset.Expression{Type: "DATE_TRUNC", Unit: dimension.Unit, Argument: &expression}
+				}
+				value, err := evaluateExpression(expression, group.rows[0], nil, parameters)
 				if err != nil {
 					return nil, err
 				}
-				output[item.NodeID+"."+group.Field] = value
+				output[item.NodeID+"."+dimension.Field] = value
 			}
 			for _, metric := range item.Metrics {
-				argument := dataset.Expression{Type: "FIELD_REF", NodeID: item.NodeID, Field: metric.Field}
-				value, err := aggregate(dataset.Expression{Type: "AGGREGATE", Function: metric.Function, Argument: &argument}, groupRows, parameters)
+				aggregateExpression := dataset.Expression{Type: "AGGREGATE", Function: metric.Function}
+				if !metric.CountRows {
+					argument := dataset.Expression{Type: "FIELD_REF", NodeID: item.NodeID, Field: metric.Field}
+					if metric.Expression != nil {
+						argument = *metric.Expression
+					}
+					aggregateExpression.Argument = &argument
+				}
+				value, err := aggregate(aggregateExpression, group.rows, parameters)
 				if err != nil {
 					return nil, err
 				}
@@ -313,7 +388,11 @@ func loadNodes(ctx context.Context, input Input) (map[string][]sourceRow, error)
 				if index < len(raw) {
 					value = raw[index]
 				}
-				parsed, err := parseCell(value, table.Types[name])
+				canonicalType := table.Types[name]
+				if trustedType := ref.ColumnTypes[name]; trustedType != "" {
+					canonicalType = trustedType
+				}
+				parsed, err := parseCell(value, canonicalType)
 				if err != nil {
 					return nil, fmt.Errorf("worksheet %s row %d column %s: %w", ref.Name, rowIndex+1, name, err)
 				}
@@ -583,7 +662,7 @@ func joinKey(conditions []dataset.JoinCondition, row sourceRow, left bool) (stri
 	return string(payload), true, err
 }
 
-func groupRows(ctx context.Context, document dataset.Document, rows []sourceRow, parameters map[string]any) ([][]sourceRow, error) {
+func groupRows(ctx context.Context, document dataset.Document, rows []sourceRow, parameters map[string]any) ([]rowGroup, error) {
 	// 无显式 groupBy 时有两种语义：存在聚合表达式则全部输入形成一个组；纯明细
 	// 查询则每行独立成组。显式分组使用首次出现顺序，保证未排序结果仍可复现。
 	hasAggregate := false
@@ -594,44 +673,271 @@ func groupRows(ctx context.Context, document dataset.Document, rows []sourceRow,
 	}
 	if len(document.GroupBy) == 0 {
 		if hasAggregate {
-			return [][]sourceRow{rows}, nil
+			return []rowGroup{{rows: rows}}, nil
 		}
-		groups := make([][]sourceRow, len(rows))
+		groups := make([]rowGroup, len(rows))
 		for index, row := range rows {
-			groups[index] = []sourceRow{row}
+			groups[index] = rowGroup{rows: []sourceRow{row}}
 		}
 		return groups, nil
 	}
-	groupsByKey := map[string][]sourceRow{}
-	order := []string{}
+	groupFields := make([]dataset.Field, len(document.GroupBy))
+	for index, fieldID := range document.GroupBy {
+		field, ok := fieldsByID[fieldID]
+		if !ok {
+			return nil, errors.New("groupBy references an unknown field")
+		}
+		groupFields[index] = field
+	}
+	valuesByRow := make([][]any, len(rows))
 	for index, row := range rows {
 		if err := checkContext(ctx, index); err != nil {
 			return nil, err
 		}
-		values := make([]any, 0, len(document.GroupBy))
-		for _, fieldID := range document.GroupBy {
-			field, ok := fieldsByID[fieldID]
-			if !ok {
-				return nil, errors.New("groupBy references an unknown field")
-			}
+		values := make([]any, len(groupFields))
+		for fieldIndex, field := range groupFields {
 			value, err := evaluateExpression(field.Expression, row, nil, parameters)
+			if err != nil {
+				return nil, err
+			}
+			values[fieldIndex] = value
+		}
+		valuesByRow[index] = values
+	}
+	groupsByKey := map[string]*rowGroup{}
+	order := []string{}
+	for _, active := range groupingSelections(document.GroupByMode, document.GroupBy, document.GroupingSets) {
+		if len(rows) == 0 && noGroupingDimensions(active) {
+			payload, _ := json.Marshal(struct {
+				Active []bool
+				Values []any
+			}{Active: active, Values: make([]any, len(document.GroupBy))})
+			key := string(payload)
+			omitted := map[string]bool{}
+			for _, fieldID := range document.GroupBy {
+				omitted[fieldID] = true
+			}
+			groupsByKey[key] = &rowGroup{omittedFieldIDs: omitted}
+			order = append(order, key)
+		}
+		for rowIndex, row := range rows {
+			values := append([]any(nil), valuesByRow[rowIndex]...)
+			omitted := map[string]bool{}
+			for fieldIndex, fieldID := range document.GroupBy {
+				if !active[fieldIndex] {
+					values[fieldIndex] = nil
+					omitted[fieldID] = true
+				}
+			}
+			payload, err := json.Marshal(struct {
+				Active []bool
+				Values []any
+			}{Active: active, Values: values})
+			if err != nil {
+				return nil, err
+			}
+			key := string(payload)
+			if groupsByKey[key] == nil {
+				groupsByKey[key] = &rowGroup{omittedFieldIDs: omitted}
+				order = append(order, key)
+			}
+			groupsByKey[key].rows = append(groupsByKey[key].rows, row)
+		}
+	}
+	groups := make([]rowGroup, 0, len(order))
+	for _, key := range order {
+		groups = append(groups, *groupsByKey[key])
+	}
+	return groups, nil
+}
+
+func groupingSelections(mode dataset.GroupByMode, dimensions []string, groupingSets [][]string) [][]bool {
+	all := func() []bool {
+		selected := make([]bool, len(dimensions))
+		for index := range selected {
+			selected[index] = true
+		}
+		return selected
+	}
+	switch mode {
+	case dataset.GroupByModeCube:
+		selections := make([][]bool, 0, 1<<len(dimensions))
+		for mask := (1 << len(dimensions)) - 1; mask >= 0; mask-- {
+			selected := make([]bool, len(dimensions))
+			for index := range dimensions {
+				selected[index] = mask&(1<<index) != 0
+			}
+			selections = append(selections, selected)
+		}
+		return selections
+	case dataset.GroupByModeRollup:
+		selections := make([][]bool, 0, len(dimensions)+1)
+		for prefixLength := len(dimensions); prefixLength >= 0; prefixLength-- {
+			selected := make([]bool, len(dimensions))
+			for index := 0; index < prefixLength; index++ {
+				selected[index] = true
+			}
+			selections = append(selections, selected)
+		}
+		return selections
+	case dataset.GroupByModeSets:
+		indexes := make(map[string]int, len(dimensions))
+		for index, dimension := range dimensions {
+			indexes[dimension] = index
+		}
+		selections := make([][]bool, 0, len(groupingSets))
+		for _, groupingSet := range groupingSets {
+			selected := make([]bool, len(dimensions))
+			for _, dimension := range groupingSet {
+				if index, ok := indexes[dimension]; ok {
+					selected[index] = true
+				}
+			}
+			selections = append(selections, selected)
+		}
+		return selections
+	default:
+		return [][]bool{all()}
+	}
+}
+
+func noGroupingDimensions(selected []bool) bool {
+	for _, active := range selected {
+		if active {
+			return false
+		}
+	}
+	return true
+}
+
+func evaluateWindowExpression(ctx context.Context, expression dataset.Expression, groups []rowGroup, parameters map[string]any) ([]any, error) {
+	ranking := expression.Function == "ROW_NUMBER" || expression.Function == "RANK" || expression.Function == "DENSE_RANK"
+	aggregateWindow := expression.Function == "SUM" || expression.Function == "AVG" || expression.Function == "COUNT" || expression.Function == "MIN" || expression.Function == "MAX"
+	if (!ranking && !aggregateWindow) ||
+		len(expression.PartitionBy) == 0 || len(expression.OrderBy) == 0 {
+		return nil, errors.New("unsupported or incomplete WINDOW expression")
+	}
+	if aggregateWindow && expression.Argument == nil {
+		return nil, errors.New("aggregate WINDOW requires an argument")
+	}
+	partitions := map[string][]int{}
+	partitionOrder := []string{}
+	orderValues := make([][]any, len(groups))
+	for index, group := range groups {
+		if err := checkContext(ctx, index); err != nil {
+			return nil, err
+		}
+		first := sourceRow{}
+		if len(group.rows) > 0 {
+			first = group.rows[0]
+		}
+		partitionValues := make([]any, 0, len(expression.PartitionBy))
+		for _, child := range expression.PartitionBy {
+			value, err := evaluateExpression(child, first, group.rows, parameters)
+			if err != nil {
+				return nil, err
+			}
+			partitionValues = append(partitionValues, value)
+		}
+		payload, err := json.Marshal(partitionValues)
+		if err != nil {
+			return nil, err
+		}
+		key := string(payload)
+		if _, exists := partitions[key]; !exists {
+			partitionOrder = append(partitionOrder, key)
+		}
+		partitions[key] = append(partitions[key], index)
+		values := make([]any, 0, len(expression.OrderBy))
+		for _, item := range expression.OrderBy {
+			value, err := evaluateExpression(item.Expression, first, group.rows, parameters)
 			if err != nil {
 				return nil, err
 			}
 			values = append(values, value)
 		}
-		payload, _ := json.Marshal(values)
-		key := string(payload)
-		if _, exists := groupsByKey[key]; !exists {
-			order = append(order, key)
+		orderValues[index] = values
+	}
+	compareIndexes := func(leftIndex, rightIndex int) (int, error) {
+		for orderIndex, item := range expression.OrderBy {
+			left, right := orderValues[leftIndex][orderIndex], orderValues[rightIndex][orderIndex]
+			if left == nil || right == nil {
+				if left == nil && right == nil {
+					continue
+				}
+				if left == nil {
+					return 1, nil
+				}
+				return -1, nil
+			}
+			result, ok := compare(left, right)
+			if !ok {
+				return 0, errors.New("window order values cannot be compared")
+			}
+			if result == 0 {
+				continue
+			}
+			if item.Direction == "DESC" {
+				result = -result
+			}
+			return result, nil
 		}
-		groupsByKey[key] = append(groupsByKey[key], row)
+		return 0, nil
 	}
-	groups := make([][]sourceRow, 0, len(order))
-	for _, key := range order {
-		groups = append(groups, groupsByKey[key])
+	result := make([]any, len(groups))
+	for _, key := range partitionOrder {
+		indexes := partitions[key]
+		var sortErr error
+		sort.SliceStable(indexes, func(i, j int) bool {
+			comparison, err := compareIndexes(indexes[i], indexes[j])
+			if err != nil {
+				sortErr = err
+				return false
+			}
+			return comparison < 0
+		})
+		if sortErr != nil {
+			return nil, sortErr
+		}
+		if aggregateWindow {
+			rows := make([]sourceRow, 0, len(indexes))
+			for _, index := range indexes {
+				rows = append(rows, groups[index].rows...)
+			}
+			value, err := aggregate(dataset.Expression{
+				Type: "AGGREGATE", Function: expression.Function, Argument: expression.Argument,
+			}, rows, parameters)
+			if err != nil {
+				return nil, err
+			}
+			for _, index := range indexes {
+				result[index] = value
+			}
+			continue
+		}
+		rank, denseRank := 1, 1
+		for position, index := range indexes {
+			if position > 0 {
+				comparison, err := compareIndexes(indexes[position-1], index)
+				if err != nil {
+					return nil, err
+				}
+				if comparison != 0 {
+					rank = position + 1
+					denseRank++
+				}
+			}
+			switch expression.Function {
+			case "ROW_NUMBER":
+				result[index] = int64(position + 1)
+			case "RANK":
+				result[index] = int64(rank)
+			case "DENSE_RANK":
+				result[index] = int64(denseRank)
+			}
+		}
 	}
-	return groups, nil
+	return result, nil
 }
 
 func evaluateExpression(expression dataset.Expression, row sourceRow, group []sourceRow, parameters map[string]any) (any, error) {
@@ -646,6 +952,108 @@ func evaluateExpression(expression dataset.Expression, row sourceRow, group []so
 		return expression.Value, nil
 	case "AGGREGATE":
 		return aggregate(expression, group, parameters)
+	case "WINDOW":
+		return nil, errors.New("WINDOW requires dataset-level evaluation")
+	case "CURRENT_DATE":
+		return time.Now().Format("2006-01-02"), nil
+	case "DATE_DIFF":
+		if len(expression.Arguments) != 2 {
+			return nil, errors.New("DATE_DIFF requires start and end arguments")
+		}
+		startValue, err := evaluateExpression(expression.Arguments[0], row, group, parameters)
+		if err != nil || startValue == nil {
+			return startValue, err
+		}
+		endValue, err := evaluateExpression(expression.Arguments[1], row, group, parameters)
+		if err != nil || endValue == nil {
+			return endValue, err
+		}
+		start, startOK := parseTime(startValue)
+		end, endOK := parseTime(endValue)
+		if !startOK || !endOK {
+			return nil, errors.New("DATE_DIFF requires date values")
+		}
+		switch expression.Unit {
+		case "YEAR":
+			return int64(end.Year() - start.Year()), nil
+		case "MONTH":
+			return int64((end.Year()-start.Year())*12 + int(end.Month()-start.Month())), nil
+		case "DAY":
+			startDate := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
+			endDate := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, time.UTC)
+			return int64(endDate.Sub(startDate) / (24 * time.Hour)), nil
+		}
+		return nil, ErrUnsupportedExpression
+	case "DATE_EXTRACT":
+		if expression.Argument == nil {
+			return nil, errors.New("DATE_EXTRACT requires an argument")
+		}
+		value, err := evaluateExpression(*expression.Argument, row, group, parameters)
+		if err != nil || value == nil {
+			return value, err
+		}
+		parsed, ok := parseTime(value)
+		if !ok {
+			return nil, errors.New("DATE_EXTRACT requires a date value")
+		}
+		switch expression.Unit {
+		case "YEAR":
+			return int64(parsed.Year()), nil
+		case "QUARTER":
+			return int64((int(parsed.Month())-1)/3 + 1), nil
+		case "MONTH":
+			return int64(parsed.Month()), nil
+		case "WEEK":
+			_, week := parsed.ISOWeek()
+			return int64(week), nil
+		case "DAY":
+			return int64(parsed.Day()), nil
+		case "WEEKDAY":
+			return int64((int(parsed.Weekday())+6)%7 + 1), nil
+		case "DAY_OF_YEAR":
+			return int64(parsed.YearDay()), nil
+		}
+		return nil, ErrUnsupportedExpression
+	case "DATE_START", "DATE_END":
+		if expression.Argument == nil {
+			return nil, errors.New(expression.Type + " requires an argument")
+		}
+		value, err := evaluateExpression(*expression.Argument, row, group, parameters)
+		if err != nil || value == nil {
+			return value, err
+		}
+		parsed, ok := parseTime(value)
+		if !ok {
+			return nil, errors.New(expression.Type + " requires a date value")
+		}
+		start := time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, parsed.Location())
+		switch expression.Unit {
+		case "WEEK":
+			start = start.AddDate(0, 0, -(int(start.Weekday())+6)%7)
+		case "MONTH":
+			start = time.Date(parsed.Year(), parsed.Month(), 1, 0, 0, 0, 0, parsed.Location())
+		case "QUARTER":
+			month := time.Month((int(parsed.Month())-1)/3*3 + 1)
+			start = time.Date(parsed.Year(), month, 1, 0, 0, 0, 0, parsed.Location())
+		case "YEAR":
+			start = time.Date(parsed.Year(), 1, 1, 0, 0, 0, 0, parsed.Location())
+		default:
+			return nil, ErrUnsupportedExpression
+		}
+		if expression.Type == "DATE_START" {
+			return start.Format("2006-01-02"), nil
+		}
+		switch expression.Unit {
+		case "WEEK":
+			return start.AddDate(0, 0, 6).Format("2006-01-02"), nil
+		case "MONTH":
+			return start.AddDate(0, 1, -1).Format("2006-01-02"), nil
+		case "QUARTER":
+			return start.AddDate(0, 3, -1).Format("2006-01-02"), nil
+		case "YEAR":
+			return start.AddDate(1, 0, -1).Format("2006-01-02"), nil
+		}
+		return nil, ErrUnsupportedExpression
 	case "DATE_TRUNC":
 		if expression.Argument == nil {
 			return nil, errors.New("DATE_TRUNC requires an argument")
@@ -1559,6 +1967,16 @@ func hasNilParameter(expression dataset.Expression, parameters map[string]any) b
 			return true
 		}
 	}
+	for _, child := range expression.PartitionBy {
+		if hasNilParameter(child, parameters) {
+			return true
+		}
+	}
+	for _, item := range expression.OrderBy {
+		if hasNilParameter(item.Expression, parameters) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -1574,6 +1992,16 @@ func expressionContains(expression dataset.Expression, kind string) bool {
 	}
 	for _, child := range expression.Arguments {
 		if expressionContains(child, kind) {
+			return true
+		}
+	}
+	for _, child := range expression.PartitionBy {
+		if expressionContains(child, kind) {
+			return true
+		}
+	}
+	for _, item := range expression.OrderBy {
+		if expressionContains(item.Expression, kind) {
 			return true
 		}
 	}

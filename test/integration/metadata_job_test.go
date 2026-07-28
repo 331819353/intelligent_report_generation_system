@@ -531,7 +531,7 @@ func TestManagedMetadataRefreshDoesNotReactivateDeletedAsset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.ApplyManagedMetadata(ctx, source, tableID, initialStructureHash, refreshResult); !errors.Is(err, datasource.ErrMetadataSourceChanged) {
+	if _, err := repository.ApplyManagedMetadata(ctx, source, tableID, initialStructureHash, false, refreshResult); !errors.Is(err, datasource.ErrMetadataSourceChanged) {
 		t.Fatalf("stale source version refresh err=%v", err)
 	}
 	source.Version = currentSourceVersion
@@ -544,7 +544,7 @@ func TestManagedMetadataRefreshDoesNotReactivateDeletedAsset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.ApplyManagedMetadata(ctx, source, tableID, initialStructureHash, refreshResult); !errors.Is(err, datasource.ErrMetadataRefreshSuperseded) {
+	if _, err := repository.ApplyManagedMetadata(ctx, source, tableID, initialStructureHash, false, refreshResult); !errors.Is(err, datasource.ErrMetadataRefreshSuperseded) {
 		t.Fatalf("superseded refresh err=%v", err)
 	}
 	var supersedingHash, supersedingComment string
@@ -573,7 +573,7 @@ func TestManagedMetadataRefreshDoesNotReactivateDeletedAsset(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	applied, err := repository.ApplyManagedMetadata(ctx, source, tableID, initialStructureHash, refreshResult)
+	applied, err := repository.ApplyManagedMetadata(ctx, source, tableID, initialStructureHash, false, refreshResult)
 	if err != nil || applied.Managed || applied.TableID != "" {
 		t.Fatalf("guarded refresh result=%#v err=%v", applied, err)
 	}

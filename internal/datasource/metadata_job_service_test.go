@@ -37,6 +37,30 @@ func (e classifiedCompletionError) MetadataCompletionFailureCode() string {
 	return e.code
 }
 
+func TestInvalidMetadataTargetScopeIsNotRetried(t *testing.T) {
+	err := classifiedCompletionError{code: "INVALID_TARGET_SCOPE"}
+	if metadataCompletionShouldRetry(err) {
+		t.Fatal("invalid target scope was classified as retryable")
+	}
+	code, message := metadataCompletionJobFailure(err)
+	if code != "LLM_TARGET_SCOPE_INVALID" ||
+		!strings.Contains(message, "没有可处理") {
+		t.Fatalf("failure=(%q,%q)", code, message)
+	}
+}
+
+func TestUnsupportedODSDatasetColumnIsNotRetried(t *testing.T) {
+	err := classifiedCompletionError{code: "ODS_DATASET_UNSUPPORTED_COLUMN"}
+	if metadataCompletionShouldRetry(err) {
+		t.Fatal("unsupported ODS dataset column was classified as retryable")
+	}
+	code, message := metadataCompletionJobFailure(err)
+	if code != "ODS_DATASET_UNSUPPORTED_COLUMN" ||
+		!strings.Contains(message, "表头") {
+		t.Fatalf("failure=(%q,%q)", code, message)
+	}
+}
+
 type progressiveCompleter struct {
 	slowStarted chan struct{}
 	slowRelease chan struct{}

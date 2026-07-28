@@ -1,0 +1,371 @@
+.semantic-asset-page {
+  display: grid;
+  gap: 18px;
+}
+
+.semantic-asset-notice,
+.semantic-asset-readonly {
+  border: 1px solid;
+  border-radius: 10px;
+  padding: 11px 13px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.semantic-asset-notice {
+  position: fixed;
+  top: 24px;
+  right: 24px;
+  z-index: 60;
+  width: min(520px, calc(100vw - 48px));
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 14px;
+  background: white;
+  box-shadow: 0 18px 45px #10182826;
+  font-weight: 700;
+}
+
+.semantic-asset-notice.success {
+  border-color: #a7f3d0;
+  color: #047857;
+}
+
+.semantic-asset-notice.info {
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+}
+
+.semantic-asset-notice.error {
+  border-color: #fecaca;
+  color: #b42318;
+}
+
+.semantic-asset-notice button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.semantic-asset-readonly {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.semantic-asset-hero {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 22px 24px;
+  border: 1px solid #e8ebef;
+  border-radius: 12px;
+  background: white;
+}
+
+.semantic-asset-hero h2 {
+  margin: 5px 0 6px;
+  font-size: 22px;
+}
+
+.semantic-asset-hero p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.semantic-asset-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.semantic-asset-summary article {
+  display: grid;
+  gap: 5px;
+  padding: 18px 20px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: white;
+}
+
+.semantic-asset-summary span,
+.semantic-asset-summary small {
+  color: var(--muted);
+}
+
+.semantic-asset-summary span {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.semantic-asset-summary strong {
+  color: var(--ink);
+  font-size: 29px;
+  font-weight: 720;
+  letter-spacing: -.035em;
+}
+
+.semantic-asset-summary small {
+  font-size: 10px;
+}
+
+.semantic-asset-filters {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.2fr) repeat(3, 190px) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 15px 18px;
+  border: 1px solid #e8ebef;
+  border-radius: 12px;
+  background: white;
+}
+
+.semantic-asset-filters label,
+.semantic-asset-dialog label {
+  display: grid;
+  gap: 6px;
+  color: #475467;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.semantic-asset-filters input,
+.semantic-asset-filters select,
+.semantic-asset-dialog input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 11px;
+  background: white;
+  color: var(--ink);
+}
+
+.semantic-asset-empty {
+  min-height: 260px;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  border: 1px dashed #cdd5df;
+  border-radius: 12px;
+  background: #ffffff99;
+  color: var(--muted);
+  text-align: center;
+}
+
+.semantic-asset-empty.denied {
+  border-color: #fed7aa;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.semantic-asset-empty strong {
+  color: var(--ink);
+  font-size: 17px;
+}
+
+.semantic-asset-empty span {
+  font-size: 12px;
+}
+
+.semantic-asset-table-wrap {
+  overflow: hidden;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: white;
+}
+
+.semantic-asset-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.semantic-asset-table th,
+.semantic-asset-table td {
+  padding: 13px 15px;
+  border-bottom: 1px solid #edf0f3;
+  text-align: left;
+  vertical-align: middle;
+  overflow-wrap: anywhere;
+}
+
+.semantic-asset-table th {
+  background: #f8fafc;
+  color: #667085;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: .03em;
+}
+
+.semantic-asset-table td {
+  color: #344054;
+  font-size: 12px;
+}
+
+.semantic-asset-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.semantic-asset-table th:nth-child(1) { width: 15%; }
+.semantic-asset-table th:nth-child(2) { width: 28%; }
+.semantic-asset-table th:nth-child(3) { width: 14%; }
+.semantic-asset-table th:nth-child(4) { width: 17%; }
+.semantic-asset-table th:nth-child(5) { width: 10%; }
+.semantic-asset-table th:nth-child(6) { width: 16%; }
+
+.semantic-type-chip,
+.embedding-status {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.semantic-type-chip {
+  background: #edf3ff;
+  color: #2059c7;
+}
+
+.embedding-status {
+  background: #f2f4f7;
+  color: #667085;
+}
+
+.embedding-status.succeeded {
+  background: #ecfdf3;
+  color: #047857;
+}
+
+.embedding-status.pending {
+  background: #fffaeb;
+  color: #b54708;
+}
+
+.embedding-status.failed {
+  background: #fef2f2;
+  color: #b42318;
+}
+
+.semantic-asset-table td small {
+  display: block;
+  margin-top: 4px;
+  color: #b42318;
+  font-size: 9px;
+}
+
+.semantic-asset-actions {
+  display: flex;
+  gap: 7px;
+}
+
+.semantic-asset-actions button {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 7px 10px;
+  background: white;
+  color: #344054;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.semantic-asset-actions button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+.semantic-asset-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 30px;
+  background: #10182899;
+}
+
+.semantic-asset-dialog {
+  width: min(620px, 100%);
+  display: grid;
+  gap: 16px;
+  max-height: calc(100vh - 60px);
+  overflow: auto;
+  padding: 0 24px 24px;
+  border-radius: 14px;
+  background: white;
+  box-shadow: 0 24px 70px #10182845;
+}
+
+.semantic-asset-dialog.compact {
+  width: min(520px, 100%);
+}
+
+.semantic-asset-dialog > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 20px;
+  margin: 0 -24px;
+  padding: 22px 24px 18px;
+  border-bottom: 1px solid #e8ebef;
+}
+
+.semantic-asset-dialog h2 {
+  margin: 5px 0 0;
+}
+
+.semantic-asset-dialog > header > button {
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 8px;
+  background: #f2f4f7;
+  color: #475467;
+  font-size: 22px;
+}
+
+.semantic-asset-dialog > p {
+  margin: 2px 0;
+  color: #475467;
+  line-height: 1.7;
+}
+
+.semantic-asset-dialog footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+}
+
+.danger-button {
+  min-height: 40px;
+  border: 1px solid #fecaca;
+  border-radius: 9px;
+  padding: 9px 15px;
+  background: #fef2f2;
+  color: #b42318;
+  font-weight: 800;
+}
+
+@media (max-width: 1360px) {
+  .semantic-asset-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .semantic-asset-filters {
+    grid-template-columns: minmax(260px, 1fr) repeat(2, 180px);
+  }
+
+  .semantic-asset-filters .quiet-button {
+    width: fit-content;
+  }
+}

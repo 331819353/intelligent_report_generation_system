@@ -17,11 +17,16 @@ import (
 // ExtractorVersion identifies the deterministic rule contract used for job deduplication.
 // Changing extraction semantics requires a new value so exact dataset versions can be
 // reconciled again without rewriting prior audit evidence.
-const ExtractorVersion = "metric-candidate-v4"
+const ExtractorVersion = "metric-candidate-v5"
 
 // JobVersion advances the durable publication workflow whenever extraction or semantic
 // enrichment changes, while keeping prior jobs and audit evidence immutable.
-const JobVersion = "metric-candidate-semantic-v5"
+const JobVersion = "metric-candidate-semantic-v6"
+
+// CodeIdentificationVersion identifies the DWS field-classification scan triggered
+// by publication or an explicit reconciliation. Jobs with this version are rule-only
+// and their reviewable results are automatically accepted into the metric asset catalog.
+const CodeIdentificationVersion = "metric-candidate-code-v1"
 
 var ErrInvalidDatasetVersion = errors.New("metric candidate extraction requires an exact published dataset version")
 
@@ -87,6 +92,49 @@ func Extract(version dataset.VersionRecord) (ExtractionResult, error) {
 	result.Status = TaskStatusSucceeded
 	if partial {
 		result.Status = TaskStatusPartial
+	}
+	return result, nil
+}
+
+// ExtractDWSFieldMetrics narrows deterministic extraction to fields that the saved DWS
+// contract has already classified as MEASURE. Other numeric or identifier fields are not
+// reinterpreted as metrics in this path.
+func ExtractDWSFieldMetrics(version dataset.VersionRecord) (ExtractionResult, error) {
+	if version.Layer != dataset.LayerDWS {
+		return ExtractionResult{}, ErrInvalidDatasetVersion
+	}
+	result, err := Extract(version)
+	if err != nil {
+		return result, err
+	}
+	prepared, err := dataset.Prepare(version.DSL)
+	if err != nil {
+		return result, fmt.Errorf("%w: invalid dataset DSL: %v", ErrInvalidDatasetVersion, err)
+	}
+	measureFieldIDs := make(map[string]bool, len(prepared.Document.Fields))
+	for _, field := range prepared.Document.Fields {
+		if field.Role == "MEASURE" {
+			measureFieldIDs[field.ID] = true
+		}
+	}
+	filtered := make([]CandidateDraft, 0, len(result.Candidates))
+	partial := false
+	for _, candidate := range result.Candidates {
+		if !measureFieldIDs[candidate.SourceFieldID] {
+			continue
+		}
+		filtered = append(filtered, candidate)
+		if candidate.Status != CandidateStatusReady {
+			partial = true
+		}
+	}
+	result.Candidates = filtered
+	result.Status = TaskStatusSucceeded
+	if partial {
+		result.Status = TaskStatusPartial
+	}
+	if len(filtered) == 0 {
+		result.Warnings = append(result.Warnings, "DWS 发布版本没有已分类为 MEASURE 的字段。")
 	}
 	return result, nil
 }
@@ -488,6 +536,9 @@ func candidateDescription(document dataset.Document, field dataset.Field) string
 }
 
 func businessMetricDescription(document dataset.Document, field dataset.Field, aggregation string) string {
+	if description := safeText(field.Description, "", 2000); description != "" {
+		return description
+	}
 	contextName := businessContextName(document)
 	objectName := metricObjectName(field)
 	switch aggregation {

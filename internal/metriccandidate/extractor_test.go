@@ -269,6 +269,42 @@ func TestExtractRejectsAnythingOtherThanTheExactPublishedEnvelope(t *testing.T) 
 	}
 }
 
+func TestExtractDWSFieldMetricsTrustsSavedMeasureRoles(t *testing.T) {
+	document := monthlyPaymentsDocument()
+	document.Dataset.Layer = dataset.LayerDWS
+	document.Nodes[0].Type = "DATASET"
+	document.Nodes[0].DataSourceID = ""
+	document.Nodes[0].TableID = ""
+	document.Nodes[0].DatasetVersionID = "12121212-1212-4212-8212-121212121212"
+	document.Fields[1].Description = "保存 DWS 时由语义补全流程完善的订单数量字段说明。"
+	version := publishedDatasetVersion(t, document)
+	version.Layer = dataset.LayerDWS
+
+	result, err := ExtractDWSFieldMetrics(version)
+	if err != nil {
+		t.Fatalf("ExtractDWSFieldMetrics() error = %v", err)
+	}
+	if len(result.Candidates) == 0 {
+		t.Fatal("expected the saved MEASURE field to produce a metric")
+	}
+	measureFieldIDs := map[string]bool{
+		"field_order_count": true,
+		"field_paid_amount": true,
+	}
+	for _, candidate := range result.Candidates {
+		if !measureFieldIDs[candidate.SourceFieldID] {
+			t.Fatalf("non-MEASURE field was reinterpreted as a metric: %#v", candidate)
+		}
+		if candidate.SourceFieldID == "field_order_count" &&
+			candidate.Definition.Metric.Description != document.Fields[1].Description {
+			t.Fatalf(
+				"saved DWS field description was not reused: got %q",
+				candidate.Definition.Metric.Description,
+			)
+		}
+	}
+}
+
 func assertCandidate(t *testing.T, candidate CandidateDraft, aggregation string, confidence Confidence, status CandidateStatus, additivity string) {
 	t.Helper()
 	if candidate.Definition.Aggregation != aggregation || candidate.Confidence != confidence || candidate.Status != status || candidate.Definition.Additivity != additivity {

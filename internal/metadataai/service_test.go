@@ -7,6 +7,7 @@ import (
 	"time"
 
 	aiplatform "intelligent-report-generation-system/internal/ai"
+	"intelligent-report-generation-system/internal/dataset"
 )
 
 type serviceStore struct {
@@ -182,6 +183,24 @@ func TestCompleteTableClassifiesSourceChangeAtPersistence(t *testing.T) {
 	}
 }
 
+func TestCompleteTableClassifiesUnsupportedODSDatasetColumnAtPersistence(t *testing.T) {
+	input, output := validCompletion()
+	input.StructureHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	store := &serviceStore{input: input, saveErr: dataset.ErrMappedDatasetUnsupportedColumn}
+	service := NewService(store, serviceProvider{output: output}, time.Second, 0.8)
+
+	err := service.CompleteTable(context.Background(), "tenant", "actor", "table-1", nil,
+		true, nil, input.StructureHash, "item-1", "worker-1", 2)
+	if !errors.Is(err, dataset.ErrMappedDatasetUnsupportedColumn) {
+		t.Fatalf("error=%v", err)
+	}
+	var classified interface{ MetadataCompletionFailureCode() string }
+	if !errors.As(err, &classified) ||
+		classified.MetadataCompletionFailureCode() != "ODS_DATASET_UNSUPPORTED_COLUMN" {
+		t.Fatalf("classification=%v", err)
+	}
+}
+
 func TestCompleteTableScopesIncrementalTargetsBeforeProviderCall(t *testing.T) {
 	input, output := validCompletion()
 	input.StructureHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -215,6 +234,11 @@ func TestCompleteTableRejectsEmptyOrUnknownIncrementalScope(t *testing.T) {
 			false, ids, input.StructureHash, "item-1", "worker-1", 1)
 		if !errors.Is(err, ErrInvalidTargetScope) {
 			t.Fatalf("ids=%v error=%v", ids, err)
+		}
+		var classified interface{ MetadataCompletionFailureCode() string }
+		if !errors.As(err, &classified) ||
+			classified.MetadataCompletionFailureCode() != "INVALID_TARGET_SCOPE" {
+			t.Fatalf("ids=%v classification=%v", ids, err)
 		}
 		if store.createdJob.TableID != "" || captured.Table.ID != "" {
 			t.Fatalf("ids=%v reached job creation or provider", ids)

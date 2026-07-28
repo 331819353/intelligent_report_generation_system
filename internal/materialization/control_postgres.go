@@ -69,9 +69,9 @@ func (store *PostgresStore) RegisterCurrent(
 	return run, created, nil
 }
 
-// EnqueueMappedDatasetMaterializationTx implements dataset.MappedPublicationCommitSink.
-// It freezes the exact just-published ODS version in the caller's transaction and
-// writes only QUEUED control-plane rows. Source extraction remains worker-owned.
+// EnqueueMappedDatasetMaterializationTx is retained for wiring compatibility.
+// Mapped ODS publication no longer calls this hook; ODS is a virtual source
+// mapping and therefore never registers a warehouse build.
 func (store *PostgresStore) EnqueueMappedDatasetMaterializationTx(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -98,12 +98,7 @@ func (store *PostgresStore) EnqueueMappedDatasetMaterializationTx(
 	if !mapped {
 		return ErrInvalidRequest
 	}
-	_, _, err := store.registerCurrentTx(
-		ctx, tx, tenantID, actorID, version.DatasetID, version.ID,
-		RegisterCurrentRequest{Mode: RunModeFull, MaxAttempts: 3},
-		true,
-	)
-	return err
+	return nil
 }
 
 // EnqueueGovernedDatasetMaterializationTx freezes the exact DIM/DWD/DWS/ADS version
@@ -143,6 +138,13 @@ func (store *PostgresStore) registerCurrentTx(
 	target, err := loadPublishedBuildTargetTx(ctx, tx, datasetID)
 	if err != nil {
 		return Run{}, false, err
+	}
+	// ODS is a governed virtual mapping over the immutable source, not a
+	// warehouse materialization target. Reject the control-plane entry point
+	// as well as the worker path so a manual/API registration cannot recreate
+	// an ODS warehouse copy.
+	if target.Layer == LayerODS {
+		return Run{}, false, ErrInvalidRequest
 	}
 	if expectedVersionID != "" && target.VersionID != expectedVersionID {
 		return Run{}, false, ErrConflict
@@ -369,7 +371,7 @@ func deriveCurrentInputsTx(
 				continue
 			}
 			input, upstreamDatasetID, err := deriveDatasetInputTx(
-				ctx, tx, node.DatasetVersionID, allowedLayers,
+				ctx, tx, node.DatasetVersionID, allowedLayers, target.Layer,
 			)
 			if err != nil {
 				return nil, nil, err
@@ -528,7 +530,28 @@ func deriveDatasetInputTx(
 	tx pgx.Tx,
 	versionID string,
 	allowedLayers map[Layer]bool,
+	targetLayer Layer,
 ) (InputSnapshot, string, error) {
+	var candidateLayer string
+	if err := tx.QueryRow(ctx, `SELECT version.layer
+		FROM platform.dataset_versions AS version
+		JOIN platform.datasets AS owner
+		  ON owner.id=version.dataset_id AND owner.tenant_id=version.tenant_id
+		WHERE version.id=$1
+		  AND version.status='PUBLISHED'
+		  AND owner.status='PUBLISHED'
+		  AND owner.current_published_version_id=version.id
+		  AND owner.deleted_at IS NULL
+		FOR SHARE OF version,owner`, versionID).Scan(&candidateLayer); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return InputSnapshot{}, "", ErrConflict
+		}
+		return InputSnapshot{}, "", err
+	}
+	if (targetLayer == LayerDIM || targetLayer == LayerDWD) &&
+		candidateLayer == string(LayerODS) {
+		return deriveVirtualODSInputTx(ctx, tx, versionID)
+	}
 	var datasetID, storedVersionID, storedLayer, versionHash string
 	var materializationID, materializationLayer, materializationHash string
 	var snapshotHash string
@@ -588,6 +611,80 @@ func deriveDatasetInputTx(
 		SourceVersion:     fmt.Sprintf("dataset-version:%d", versionNo),
 		SchemaHash:        versionHash, SnapshotHash: snapshotHash,
 		SnapshotJSON: snapshotJSON, RowCount: &rowCount,
+	}, datasetID, nil
+}
+
+type virtualODSSourceSnapshot struct {
+	Contract         string        `json:"contract"`
+	DatasetID        string        `json:"datasetId"`
+	DatasetVersionID string        `json:"datasetVersionId"`
+	SourceInput      InputSnapshot `json:"sourceInput"`
+}
+
+func deriveVirtualODSInputTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	versionID string,
+) (InputSnapshot, string, error) {
+	var (
+		datasetID  string
+		versionNo  int
+		schemaHash string
+		dslJSON    []byte
+	)
+	if err := tx.QueryRow(ctx, `SELECT owner.id::text,version.version_no,
+			version.schema_hash,version.dsl_json
+		FROM platform.dataset_versions AS version
+		JOIN platform.datasets AS owner
+		  ON owner.id=version.dataset_id AND owner.tenant_id=version.tenant_id
+		WHERE version.id=$1
+		  AND version.layer='ODS'
+		  AND version.status='PUBLISHED'
+		  AND owner.status='PUBLISHED'
+		  AND owner.current_published_version_id=version.id
+		  AND owner.deleted_at IS NULL
+		FOR SHARE OF version,owner`, versionID).Scan(
+		&datasetID, &versionNo, &schemaHash, &dslJSON,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return InputSnapshot{}, "", ErrConflict
+		}
+		return InputSnapshot{}, "", err
+	}
+	if err := dataset.ValidateVersionDependenciesInTx(
+		ctx, tx, datasetID, versionID,
+	); err != nil {
+		return InputSnapshot{}, "", ErrConflict
+	}
+	prepared, err := dataset.Prepare(dslJSON)
+	if err != nil || prepared.DSLHash != schemaHash ||
+		prepared.Document.Dataset.Layer != dataset.LayerODS ||
+		len(prepared.Document.Nodes) != 1 ||
+		prepared.Document.Nodes[0].Type != "TABLE" {
+		return InputSnapshot{}, "", ErrConflict
+	}
+	sourceInput, err := deriveSourceInputTx(
+		ctx, tx, prepared.Document.Nodes[0],
+	)
+	if err != nil {
+		return InputSnapshot{}, "", err
+	}
+	snapshotJSON, err := json.Marshal(virtualODSSourceSnapshot{
+		Contract:  "virtual-ods-source-v1",
+		DatasetID: datasetID, DatasetVersionID: versionID,
+		SourceInput: sourceInput,
+	})
+	if err != nil {
+		return InputSnapshot{}, "", err
+	}
+	return InputSnapshot{
+		Type: InputDatasetVersion, Layer: string(LayerODS),
+		DatasetID: datasetID, DatasetVersionID: versionID,
+		SourceVersion: fmt.Sprintf(
+			"dataset-version:%d/%s", versionNo, sourceInput.SourceVersion,
+		),
+		SchemaHash: schemaHash, SnapshotHash: sourceInput.SnapshotHash,
+		SnapshotJSON: snapshotJSON, RowCount: sourceInput.RowCount,
 	}, datasetID, nil
 }
 

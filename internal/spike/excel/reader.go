@@ -1,7 +1,10 @@
 package excel
 
 import (
+	"archive/zip"
 	"bytes"
+	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +26,27 @@ type Sheet struct {
 	Rows [][]string
 }
 type Workbook struct{ Sheets []Sheet }
+
+// XLSXExpandedSize reads only the ZIP central directory and returns the exact
+// declared uncompressed size. The subsequent Excelize open still enforces the
+// same limit while decompressing, so a forged directory cannot bypass it.
+func XLSXExpandedSize(data []byte) (int64, error) {
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, file := range reader.File {
+		if ^uint64(0)-total < file.UncompressedSize64 {
+			return 0, errors.New("XLSX expanded size overflows")
+		}
+		total += file.UncompressedSize64
+		if total > uint64(^uint64(0)>>1) {
+			return 0, errors.New("XLSX expanded size is too large")
+		}
+	}
+	return int64(total), nil
+}
 
 // CSVOptions 定义 CSV 的字符编码和方言。分隔符与引号均限制为单个字符。
 type CSVOptions struct {
@@ -68,6 +92,313 @@ func ReadWithOptions(name string, r io.Reader, size int64, limits Limits, csvOpt
 	default:
 		return Workbook{}, errors.New("unsupported excel extension")
 	}
+}
+
+// ReadPreviewWithOptions 只为 XLSX 控制面操作构造前 maxRows 行的安全预览。
+// 原始文件大小和预览所需的共享字符串等元数据仍受配额保护；超大 worksheet 的
+// 剩余 XML 不会被解压。CSV/XLS 继续使用完整读取语义。
+func ReadPreviewWithOptions(
+	name string,
+	data []byte,
+	size int64,
+	limits Limits,
+	csvOptions CSVOptions,
+	maxRows int,
+) (Workbook, error) {
+	if size <= 0 || size > limits.MaxFileBytes ||
+		int64(len(data)) != size || int64(len(data)) > limits.MaxFileBytes {
+		return Workbook{}, errors.New("excel file size exceeds limit")
+	}
+	if maxRows < 1 || maxRows > limits.MaxRows {
+		return Workbook{}, errors.New("excel preview row limit is invalid")
+	}
+	if !strings.EqualFold(name[strings.LastIndex(name, ".")+1:], "xlsx") {
+		return ReadWithOptions(
+			name, bytes.NewReader(data), size, limits, csvOptions,
+		)
+	}
+	preview, err := buildXLSXPreview(data, limits, maxRows)
+	if err != nil {
+		return Workbook{}, err
+	}
+	if int64(len(preview)) > limits.MaxFileBytes {
+		return Workbook{}, errors.New("excel preview file size exceeds limit")
+	}
+	previewLimits := limits
+	previewLimits.MaxRows = maxRows
+	return readXLSX(preview, previewLimits)
+}
+
+// StreamSheetRows reads one worksheet row by row. Excelize spills worksheet XML
+// larger than WorksheetMemoryBytes to a temporary file, so callers can process
+// large sheets without retaining the full two-dimensional workbook in memory.
+func StreamSheetRows(
+	ctx context.Context,
+	name string,
+	data []byte,
+	size int64,
+	limits Limits,
+	csvOptions CSVOptions,
+	sheetName string,
+	maxRows int,
+	consume func([]string) error,
+) error {
+	if ctx == nil || consume == nil || strings.TrimSpace(sheetName) == "" ||
+		maxRows < 1 || maxRows > limits.MaxRows ||
+		size <= 0 || size > limits.MaxFileBytes ||
+		int64(len(data)) != size || int64(len(data)) > limits.MaxFileBytes {
+		return errors.New("excel stream input is invalid")
+	}
+	extension := strings.ToLower(name[strings.LastIndex(name, ".")+1:])
+	if extension != "xlsx" {
+		book, err := ReadWithOptions(
+			name, bytes.NewReader(data), size, limits, csvOptions,
+		)
+		if err != nil {
+			return err
+		}
+		for _, sheet := range book.Sheets {
+			if sheet.Name != sheetName {
+				continue
+			}
+			if len(sheet.Rows) > maxRows {
+				return fmt.Errorf("sheet %s exceeds row limit", sheetName)
+			}
+			for _, row := range sheet.Rows {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if err := consume(row); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		return fmt.Errorf("sheet %s was not found", sheetName)
+	}
+
+	file, err := excelize.OpenReader(bytes.NewReader(data), excelize.Options{
+		UnzipSizeLimit: limits.UnzipBytes, UnzipXMLSizeLimit: limits.WorksheetMemoryBytes,
+	})
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	found := false
+	for _, candidate := range file.GetSheetList() {
+		found = found || candidate == sheetName
+	}
+	if !found {
+		return fmt.Errorf("sheet %s was not found", sheetName)
+	}
+	rows, err := file.Rows(sheetName)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		count++
+		if count > maxRows {
+			return fmt.Errorf("sheet %s exceeds row limit", sheetName)
+		}
+		columns, err := rows.Columns()
+		if err != nil {
+			return err
+		}
+		if len(columns) > limits.MaxColumns {
+			return fmt.Errorf("sheet %s exceeds column limit", sheetName)
+		}
+		if err := consume(columns); err != nil {
+			return err
+		}
+	}
+	return rows.Close()
+}
+
+// buildXLSXPreview 保留工作簿结构、样式和共享字符串，只截取各 worksheet 的
+// 前 maxRows 个 XML row。这样 Excelize 校验的是有界预览包，而不是原文件中
+// 可能达到数 GB 的完整 worksheet 展开体积。
+func buildXLSXPreview(data []byte, limits Limits, maxRows int) ([]byte, error) {
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+	var output bytes.Buffer
+	writer := zip.NewWriter(&output)
+	var expandedBytes int64
+	worksheetCount := 0
+	for _, file := range reader.File {
+		if !xlsxPreviewEntry(file.Name) {
+			continue
+		}
+		var content []byte
+		if strings.HasPrefix(file.Name, "xl/worksheets/") &&
+			strings.HasSuffix(file.Name, ".xml") {
+			content, err = trimXLSXWorksheet(
+				file, maxRows, limits.WorksheetMemoryBytes,
+			)
+			worksheetCount++
+		} else {
+			content, err = readZIPEntry(
+				file, limits.UnzipBytes-expandedBytes,
+			)
+		}
+		if err != nil {
+			_ = writer.Close()
+			return nil, fmt.Errorf("read XLSX preview entry %s: %w", file.Name, err)
+		}
+		expandedBytes += int64(len(content))
+		if expandedBytes > limits.UnzipBytes {
+			_ = writer.Close()
+			return nil, errors.New("XLSX preview exceeds unzip limit")
+		}
+		method := file.Method
+		if method != zip.Store && method != zip.Deflate {
+			method = zip.Deflate
+		}
+		header := &zip.FileHeader{
+			Name:     file.Name,
+			Method:   method,
+			Modified: file.Modified,
+		}
+		entry, createErr := writer.CreateHeader(header)
+		if createErr != nil {
+			_ = writer.Close()
+			return nil, createErr
+		}
+		if _, writeErr := entry.Write(content); writeErr != nil {
+			_ = writer.Close()
+			return nil, writeErr
+		}
+	}
+	if worksheetCount == 0 {
+		_ = writer.Close()
+		return nil, errors.New("XLSX preview contains no worksheet")
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
+}
+
+func xlsxPreviewEntry(name string) bool {
+	switch name {
+	case "[Content_Types].xml",
+		"_rels/.rels",
+		"xl/workbook.xml",
+		"xl/_rels/workbook.xml.rels",
+		"xl/sharedStrings.xml",
+		"xl/styles.xml":
+		return true
+	default:
+		return strings.HasPrefix(name, "docProps/") ||
+			strings.HasPrefix(name, "xl/theme/") ||
+			(strings.HasPrefix(name, "xl/worksheets/") &&
+				strings.HasSuffix(name, ".xml"))
+	}
+}
+
+func readZIPEntry(file *zip.File, remaining int64) ([]byte, error) {
+	if remaining < 0 || file.UncompressedSize64 > uint64(remaining) {
+		return nil, errors.New("XLSX preview exceeds unzip limit")
+	}
+	body, err := file.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	content, err := io.ReadAll(io.LimitReader(body, remaining+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(content)) > remaining {
+		return nil, errors.New("XLSX preview exceeds unzip limit")
+	}
+	return content, nil
+}
+
+func trimXLSXWorksheet(
+	file *zip.File,
+	maxRows int,
+	maxPreviewBytes int64,
+) ([]byte, error) {
+	if maxPreviewBytes <= 0 {
+		return nil, errors.New("XLSX worksheet preview limit is invalid")
+	}
+	body, err := file.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	var captured bytes.Buffer
+	decoder := xml.NewDecoder(io.TeeReader(
+		io.LimitReader(body, maxPreviewBytes+1),
+		&captured,
+	))
+	inSheetData := false
+	rowCount := 0
+	var worksheetPrefix, sheetDataPrefix string
+	for {
+		token, decodeErr := decoder.RawToken()
+		if decodeErr == io.EOF {
+			if int64(captured.Len()) > maxPreviewBytes {
+				return nil, errors.New("XLSX worksheet preview exceeds memory limit")
+			}
+			return append([]byte(nil), captured.Bytes()...), nil
+		}
+		if decodeErr != nil {
+			if int64(captured.Len()) > maxPreviewBytes {
+				return nil, errors.New("XLSX worksheet preview exceeds memory limit")
+			}
+			return nil, decodeErr
+		}
+		switch element := token.(type) {
+		case xml.StartElement:
+			switch element.Name.Local {
+			case "worksheet":
+				worksheetPrefix = element.Name.Space
+			case "sheetData":
+				inSheetData = true
+				sheetDataPrefix = element.Name.Space
+			}
+		case xml.EndElement:
+			switch element.Name.Local {
+			case "row":
+				if !inSheetData {
+					continue
+				}
+				rowCount++
+				if rowCount < maxRows {
+					continue
+				}
+				offset := decoder.InputOffset()
+				if offset < 0 || offset > int64(captured.Len()) {
+					return nil, errors.New("XLSX worksheet preview boundary is invalid")
+				}
+				preview := append(
+					[]byte(nil), captured.Bytes()[:int(offset)]...,
+				)
+				preview = append(preview, []byte(
+					"</"+qualifiedXMLName(sheetDataPrefix, "sheetData")+">"+
+						"</"+qualifiedXMLName(worksheetPrefix, "worksheet")+">",
+				)...)
+				return preview, nil
+			case "sheetData":
+				inSheetData = false
+			}
+		}
+	}
+}
+
+func qualifiedXMLName(prefix, local string) string {
+	if prefix == "" {
+		return local
+	}
+	return prefix + ":" + local
 }
 
 // readCSV 解码指定字符集，解析方言并生成单工作表模型。

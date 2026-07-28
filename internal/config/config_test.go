@@ -32,6 +32,7 @@ func TestLoadDefaults(t *testing.T) {
 		"APP_ENV", "APP_LOG_LEVEL", "API_HTTP_ADDR", "API_READ_HEADER_TIMEOUT",
 		"API_READ_TIMEOUT", "API_WRITE_TIMEOUT", "API_IDLE_TIMEOUT",
 		"SHUTDOWN_TIMEOUT", "WORKER_POLL_INTERVAL", "AI_REQUEST_TIMEOUT", "AI_ATTEMPT_TIMEOUT",
+		"AI_PRIMARY_FAILOVER_TIMEOUT",
 	} {
 		t.Setenv(key, "")
 	}
@@ -87,6 +88,7 @@ func TestLoadAllowsMissingAIKeyAndRejectsInvalidThreshold(t *testing.T) {
 func TestLoadParsesAIOrchestrationLimits(t *testing.T) {
 	t.Setenv("AI_API_KEY", "")
 	t.Setenv("AI_ATTEMPT_TIMEOUT", "7s")
+	t.Setenv("AI_PRIMARY_FAILOVER_TIMEOUT", "6s")
 	t.Setenv("AI_MAX_ATTEMPTS", "4")
 	t.Setenv("AI_MAX_INPUT_BYTES", "131072")
 	t.Setenv("AI_INPUT_COST_MICROS_PER_MILLION_TOKENS", "125000")
@@ -95,7 +97,10 @@ func TestLoadParsesAIOrchestrationLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AIAttemptTimeout != 7*time.Second || cfg.AIMaxAttempts != 4 || cfg.AIMaxInputBytes != 131072 {
+	if cfg.AIAttemptTimeout != 7*time.Second ||
+		cfg.AIPrimaryFailoverTimeout != 6*time.Second ||
+		cfg.AIMaxAttempts != 4 ||
+		cfg.AIMaxInputBytes != 131072 {
 		t.Fatalf("AI 编排边界未正确加载: %#v", cfg)
 	}
 	if cfg.AIInputCostMicrosPerMTokens != 125000 || cfg.AIOutputCostMicrosPerMTokens != 500000 {
@@ -109,6 +114,11 @@ func TestLoadRejectsUnsafeAIOrchestrationLimits(t *testing.T) {
 		t.Fatal("超过上限的 AI 重试次数未被拒绝")
 	}
 	t.Setenv("AI_MAX_ATTEMPTS", "3")
+	t.Setenv("AI_PRIMARY_FAILOVER_TIMEOUT", "26s")
+	if _, err := Load(); err == nil {
+		t.Fatal("超过请求总预算的主模型切换时限未被拒绝")
+	}
+	t.Setenv("AI_PRIMARY_FAILOVER_TIMEOUT", "8s")
 	t.Setenv("AI_INPUT_COST_MICROS_PER_MILLION_TOKENS", "-1")
 	if _, err := Load(); err == nil {
 		t.Fatal("负数 AI 成本配置未被拒绝")
@@ -147,6 +157,19 @@ func TestLoadRejectsRemotePlaintextAIEndpoint(t *testing.T) {
 	t.Setenv("AI_BASE_URL", "http://127.0.0.1:11434/v1")
 	if _, err := Load(); err != nil {
 		t.Fatalf("本机开发 Provider 地址应被允许: %v", err)
+	}
+}
+
+func TestLoadParsesUniqueOrderedPrimaryAndFallbackModels(t *testing.T) {
+	t.Setenv("AI_MODELS", " MiniMax-M2, deepseek-v3, minimax-m2 ")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.AIModels) != 2 ||
+		cfg.AIModels[0] != "MiniMax-M2" ||
+		cfg.AIModels[1] != "deepseek-v3" {
+		t.Fatalf("AIModels=%#v", cfg.AIModels)
 	}
 }
 

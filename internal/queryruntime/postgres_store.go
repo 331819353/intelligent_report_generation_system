@@ -175,8 +175,34 @@ func resolveTx(
 			if document.Dataset.Type != "CROSS_SOURCE" {
 				result.FileVersionID = node.FileVersionID
 			}
+			availableColumns := map[string]string{}
+			rows, err := tx.Query(ctx, `SELECT column_name,canonical_type
+				FROM platform.metadata_columns
+				WHERE table_id::text=$1 AND asset_status='ACTIVE'
+				ORDER BY ordinal_position`, node.TableID)
+			if err != nil {
+				return ResolvedPlan{}, err
+			}
+			for rows.Next() {
+				var name, canonicalType string
+				if err := rows.Scan(&name, &canonicalType); err != nil {
+					rows.Close()
+					return ResolvedPlan{}, err
+				}
+				availableColumns[name] = canonicalType
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return ResolvedPlan{}, err
+			}
+			rows.Close()
 			for _, name := range node.Projection {
+				canonicalType, exists := availableColumns[name]
+				if !exists {
+					return ResolvedPlan{}, dataset.ErrInvalidDocument
+				}
 				columns[name] = true
+				columnTypes[name] = canonicalType
 			}
 		} else {
 			if node.FileVersionID != "" {
@@ -225,6 +251,43 @@ func resolveDatasetNodesTx(
 	tenantID string,
 	document dataset.Document,
 ) (ResolvedPlan, error) {
+	if document.Dataset.Layer == dataset.LayerDIM ||
+		document.Dataset.Layer == dataset.LayerDWD {
+		expanded, virtualCount, typeOverrides, err :=
+			expandVirtualODSNodesTx(ctx, tx, document)
+		if err != nil {
+			return ResolvedPlan{}, err
+		}
+		if virtualCount > 0 {
+			if virtualCount != len(document.Nodes) {
+				// A preview must not silently join mutable source samples to a
+				// governed warehouse relation.
+				return ResolvedPlan{}, dataset.ErrPreviewUnsupported
+			}
+			result, err := resolveTx(ctx, tx, tenantID, expanded)
+			if err != nil {
+				return ResolvedPlan{}, err
+			}
+			for nodeID, overrides := range typeOverrides {
+				table := result.Tables[nodeID]
+				if table.ColumnTypes == nil {
+					table.ColumnTypes = map[string]string{}
+				}
+				for physical, canonicalType := range overrides {
+					if table.Columns[physical] {
+						table.ColumnTypes[physical] = canonicalType
+					}
+				}
+				result.Tables[nodeID] = table
+				resolvedNode := result.Nodes[nodeID]
+				resolvedNode.Table = table
+				result.Nodes[nodeID] = resolvedNode
+			}
+			result.ExecutionDocument = &expanded
+			result.SourceSampleLimit = odsSourcePreviewRows
+			return result, nil
+		}
+	}
 	expectedLayers := map[dataset.Layer]bool{}
 	switch document.Dataset.Layer {
 	case dataset.LayerDIM:

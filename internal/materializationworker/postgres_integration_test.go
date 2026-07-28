@@ -109,16 +109,19 @@ func TestPostgresWorkerBuildsDWDAndDWSFromFrozenLayers(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("register ODS fixture run: created=%v err=%v", created, err)
 	}
+	odsResolver := NewODSResolver(
+		pool,
+		warehouse.NewStager(pool, integrationSourceStream{
+			sourceID: sourceID, sourceVersionID: sourceVersionID,
+		}),
+		nil,
+		nil,
+	)
+	odsResolver.SetFullProjector(warehouse.NewODSProjector(pool))
+	postgresResolver := NewPostgresResolver(pool)
+	postgresResolver.SetODSRehydrator(odsResolver)
 	worker := NewWorker(store, NewCompositeResolver(
-		NewODSResolver(
-			pool,
-			warehouse.NewStager(pool, integrationSourceStream{
-				sourceID: sourceID, sourceVersionID: sourceVersionID,
-			}),
-			nil,
-			nil,
-		),
-		NewPostgresResolver(pool),
+		odsResolver, postgresResolver,
 	), &integrationBuilder{
 		test: t, delegate: warehouse.NewExecutor(pool),
 		expectedInputSchema: "warehouse_staging",
@@ -148,9 +151,9 @@ func TestPostgresWorkerBuildsDWDAndDWSFromFrozenLayers(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("register DWD run: created=%v err=%v", created, err)
 	}
-	worker = NewWorker(store, NewPostgresResolver(pool), &integrationBuilder{
+	worker = NewWorker(store, postgresResolver, &integrationBuilder{
 		test: t, delegate: warehouse.NewExecutor(pool),
-		expectedInputSchema: "warehouse_ods",
+		expectedInputSchema: "warehouse_staging",
 	})
 	processed, err = worker.ProcessNext(
 		ctx, tenantID, "integration-materialization-worker", time.Minute,
@@ -975,21 +978,57 @@ type integrationFileReader struct {
 	tables  []datasource.FileTableData
 }
 
-func (reader integrationFileReader) ReadVersionTablesWithExpansionLimit(
+func (reader integrationFileReader) StreamVersionTable(
 	ctx context.Context,
-	tenantID, versionID string,
-	maxFileBytes, maxExpandedBytes int64,
-) (datasource.FileVersion, []datasource.FileTableData, error) {
+	tenantID, versionID, expectedFileAssetID, expectedSHA256 string,
+	maxFileBytes int64,
+	tableName string,
+	maxRows, batchSize int,
+	allowTruncate bool,
+	consume func(datasource.FileTableStreamBatch) error,
+) (datasource.FileVersion, datasource.FileTableStreamSummary, error) {
 	if err := ctx.Err(); err != nil {
-		return datasource.FileVersion{}, nil, err
+		return datasource.FileVersion{}, datasource.FileTableStreamSummary{}, err
 	}
 	if tenantID != reader.version.TenantID ||
 		versionID != reader.version.VersionID ||
+		expectedFileAssetID != reader.version.ID ||
+		expectedSHA256 != reader.version.SHA256 ||
 		maxFileBytes < reader.version.SizeBytes ||
-		maxExpandedBytes < 1 {
-		return datasource.FileVersion{}, nil, errors.New("invalid immutable file read contract")
+		maxRows < 1 || batchSize < 1 {
+		return datasource.FileVersion{}, datasource.FileTableStreamSummary{},
+			errors.New("invalid immutable file read contract")
 	}
-	return reader.version, reader.tables, nil
+	for _, table := range reader.tables {
+		if table.Name != tableName {
+			continue
+		}
+		rows := table.Rows
+		if len(rows) > maxRows {
+			if !allowTruncate {
+				return datasource.FileVersion{}, datasource.FileTableStreamSummary{},
+					errors.New("immutable file row limit exceeded")
+			}
+			rows = rows[:maxRows]
+		}
+		for start := 0; start < len(rows); start += batchSize {
+			end := start + batchSize
+			if end > len(rows) {
+				end = len(rows)
+			}
+			if err := consume(datasource.FileTableStreamBatch{
+				Columns: table.Columns,
+				Rows:    rows[start:end],
+			}); err != nil {
+				return datasource.FileVersion{}, datasource.FileTableStreamSummary{}, err
+			}
+		}
+		return reader.version, datasource.FileTableStreamSummary{
+			RowCount: len(rows),
+		}, nil
+	}
+	return datasource.FileVersion{}, datasource.FileTableStreamSummary{},
+		errors.New("immutable worksheet was not found")
 }
 
 func (stream integrationSourceStream) StreamQuery(
@@ -1008,7 +1047,7 @@ func (stream integrationSourceStream) StreamQuery(
 	if source.ID != stream.sourceID ||
 		source.ConfigVersionID != stream.sourceVersionID ||
 		source.PublishedVersionID != stream.sourceVersionID ||
-		maxRows != warehouse.MaxODSRows {
+		(maxRows != odsPreviewRows && maxRows != warehouse.MaxODSRows) {
 		return datasource.StreamSummary{}, errors.New("worker did not use the exact published source version")
 	}
 	rows := [][]any{

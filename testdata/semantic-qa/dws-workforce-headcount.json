@@ -1,0 +1,158 @@
+{
+  "dslVersion": "1.0",
+  "dataset": {
+    "code": "dws_employee_profile_regenerated_20260727",
+    "name": "员工画像属性聚合统计表",
+    "description": "按出生年代段、小微编码和人员状态汇总员工总人数；每条业务记录均归属一个小微编码",
+    "type": "SINGLE_SOURCE",
+    "layer": "DWS",
+    "domain": "企业",
+    "semanticContractVersion": "1.0"
+  },
+  "nodes": [
+    {
+      "id": "employment",
+      "type": "DATASET",
+      "datasetVersionId": "30000000-0000-4000-8000-000000000010",
+      "alias": "employment",
+      "projection": [
+        "employee_id",
+        "business_track",
+        "xiaowei_code",
+        "employment_status",
+        "key_talent_category"
+      ],
+      "sourceFilters": []
+    }
+  ],
+  "joins": [],
+  "analysisContract": {
+    "intent": "DISTRIBUTION",
+    "inputMode": "SINGLE_FACT",
+    "commonGrainFields": [
+      "birth_cohort",
+      "xiaowei_code",
+      "employee_status",
+      "key_talent"
+    ],
+    "conformedDimensions": [
+      "birth_cohort",
+      "xiaowei_code",
+      "employee_status",
+      "key_talent"
+    ],
+    "measures": [
+      {
+        "field": "employee_total_count",
+        "sourceNodeIds": ["employment"],
+        "aggregation": "COUNT",
+        "additivity": "ADDITIVE",
+        "unit": "人"
+      }
+    ]
+  },
+  "fields": [
+    {
+      "id": "field_birth_cohort",
+      "code": "birth_cohort",
+      "name": "出生年代段",
+      "role": "DIMENSION",
+      "description": "源字段 business_track 的业务含义是出生年份区间，不是业务赛道",
+      "expression": {
+        "type": "FIELD_REF",
+        "nodeId": "employment",
+        "field": "business_track"
+      },
+      "canonicalType": "STRING",
+      "nullable": false
+    },
+    {
+      "id": "field_xiaowei_code",
+      "code": "xiaowei_code",
+      "name": "小微编码",
+      "role": "DIMENSION",
+      "expression": {
+        "type": "FIELD_REF",
+        "nodeId": "employment",
+        "field": "xiaowei_code"
+      },
+      "canonicalType": "STRING",
+      "nullable": false
+    },
+    {
+      "id": "field_employee_status",
+      "code": "employee_status",
+      "name": "人员状态",
+      "role": "DIMENSION",
+      "expression": {
+        "type": "FIELD_REF",
+        "nodeId": "employment",
+        "field": "employment_status"
+      },
+      "canonicalType": "STRING",
+      "nullable": false
+    },
+    {
+      "id": "field_key_talent",
+      "code": "key_talent",
+      "name": "关键人才",
+      "role": "DIMENSION",
+      "description": "人才标签组合字段；问答通过受控 TAG 语义映射展开为完整成员集合",
+      "expression": {
+        "type": "FIELD_REF",
+        "nodeId": "employment",
+        "field": "key_talent_category"
+      },
+      "canonicalType": "STRING",
+      "nullable": false
+    },
+    {
+      "id": "field_employee_total_count",
+      "code": "employee_total_count",
+      "name": "员工总人数",
+      "role": "MEASURE",
+      "expression": {
+        "type": "AGGREGATE",
+        "function": "COUNT",
+        "argument": {
+          "type": "FIELD_REF",
+          "nodeId": "employment",
+          "field": "employee_id"
+        }
+      },
+      "canonicalType": "INTEGER",
+      "unit": "人",
+      "nullable": false
+    }
+  ],
+  "filters": [],
+  "groupBy": [
+    "field_birth_cohort",
+    "field_xiaowei_code",
+    "field_employee_status",
+    "field_key_talent"
+  ],
+  "having": [],
+  "sorts": [],
+  "parameters": [],
+  "outputGrain": {
+    "description": "每行一个出生年代段、小微编码和人员状态组合",
+    "keyFields": [
+      "birth_cohort",
+      "xiaowei_code",
+      "employee_status",
+      "key_talent"
+    ]
+  },
+  "executionPolicy": {
+    "mode": "MATERIALIZED_PREFERRED",
+    "timeoutMs": 5000,
+    "previewLimit": 100,
+    "resultLimit": 10000,
+    "cacheTtlSeconds": 300,
+    "materialization": {
+      "enabled": true,
+      "refreshMode": "MANUAL"
+    }
+  }
+}

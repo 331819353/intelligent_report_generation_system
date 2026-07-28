@@ -1,0 +1,29 @@
+{
+  "items": [
+    {
+      "commonTerm": "小微在职人员",
+      "mappingValue": "metric_dws_employee_profile_regenerated_20260727_em_904c04ae2441",
+      "knowledgeType": "指标别名"
+    },
+    {
+      "commonTerm": "小微人员",
+      "mappingValue": "metric_dws_employee_profile_regenerated_20260727_em_904c04ae2441",
+      "knowledgeType": "指标别名"
+    },
+    {
+      "commonTerm": "80后",
+      "mappingValue": "80-85,85-90",
+      "knowledgeType": "出生年代段"
+    },
+    {
+      "commonTerm": "在职",
+      "mappingValue": "在岗",
+      "knowledgeType": "人员状态"
+    },
+    {
+      "commonTerm": "关键人才",
+      "mappingValue": "TAG:关键人才",
+      "knowledgeType": "关键人才"
+    }
+  ]
+}

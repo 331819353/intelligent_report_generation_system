@@ -12,9 +12,9 @@ func outputSchema(input CompletionInput) map[string]any {
 	column := valueSchema(true)
 	if isFileSourceFormat(input.SourceFormat) {
 		properties := column["properties"].(map[string]any)
-		// deepseek-v3 的严格 Schema 方言对 pattern 的兼容性不稳定；Schema 负责向模型说明合同，
-		// 最终格式强制由 ValidateOutput 的 Go 正则和中文字符检查完成。
-		properties["businessName"].(map[string]any)["description"] = "文件字段映射名称：小写英文 snake_case，多个单词使用下划线分隔"
+		// Schema 负责向模型说明语言合同，最终由 ValidateOutput 的中文字符
+		// 检查兜底，避免依赖 Provider 对 description 的遵循程度。
+		properties["businessName"].(map[string]any)["description"] = "文件字段中文业务名称：中文表头保持中文含义，英文表头翻译为中文"
 		properties["businessDescription"].(map[string]any)["description"] = "文件字段中文业务描述，可包含 ID、SKU 等英文缩写"
 	}
 	// 仅表头变化时 columns 必须是空数组；空 enum 不符合 JSON Schema，因此无需再约束不可出现的 item。

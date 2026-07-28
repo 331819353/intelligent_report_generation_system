@@ -19,6 +19,7 @@ import (
 	"intelligent-report-generation-system/internal/config"
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasetai"
+	"intelligent-report-generation-system/internal/datasetsemanticnaming"
 	"intelligent-report-generation-system/internal/datasource"
 	"intelligent-report-generation-system/internal/embedding"
 	"intelligent-report-generation-system/internal/federation"
@@ -35,6 +36,7 @@ import (
 	"intelligent-report-generation-system/internal/policy"
 	"intelligent-report-generation-system/internal/queryruntime"
 	"intelligent-report-generation-system/internal/report"
+	"intelligent-report-generation-system/internal/semanticasset"
 	"intelligent-report-generation-system/internal/semanticmanagement"
 	"intelligent-report-generation-system/internal/semanticqa"
 )
@@ -112,7 +114,10 @@ func main() {
 	excelHandler := datasource.NewExcelHandler(authService, accessService, excelManager)
 	assetRepository := asset.NewRepository(pool)
 	assetHandler := asset.NewHandler(authService, accessService, assetRepository, dataSourceService)
-	modelProvider := aiplatform.NewOpenAICompatibleProvider(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel, &http.Client{Timeout: cfg.AIAttemptTimeout})
+	modelProvider := aiplatform.NewOpenAICompatibleProviderPool(
+		cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModels,
+		&http.Client{Timeout: cfg.AIAttemptTimeout},
+	)
 	aiService, err := aiplatform.NewService(aiplatform.NewPostgresStore(pool), modelProvider, aiplatform.ServiceOptions{
 		Timeout: cfg.AIRequestTimeout, AttemptTimeout: cfg.AIAttemptTimeout,
 		MaxAttempts: cfg.AIMaxAttempts, BaseRetryDelay: cfg.AIRetryBaseDelay, MaxRetryDelay: cfg.AIRetryMaxDelay,
@@ -143,7 +148,9 @@ func main() {
 	if reconciledDatasets > 0 {
 		logger.Info("mapped table datasets reconciled", "count", reconciledDatasets)
 	}
-	metadataAIProvider := metadataai.NewOrchestratedProvider(aiService)
+	metadataAIProvider := metadataai.NewOrchestratedProviderWithPrimaryFailover(
+		aiService, cfg.AIPrimaryFailoverTimeout,
+	)
 	metadataAIService := metadataai.NewService(metadataAIStore, metadataAIProvider, cfg.AIRequestTimeout, cfg.AIConfidenceThreshold)
 	dataSourceService.SetTableCompleter(metadataAIService)
 	dataSourceService.SetMappedDatasetDraftEnsurer(datasetStore)
@@ -166,6 +173,11 @@ func main() {
 	})
 	datasetAIHandler := datasetai.NewHandler(authService, accessService, datasetAIService)
 	datasetService := dataset.NewService(datasetStore)
+	datasetService.SetSemanticNamer(datasetsemanticnaming.NewGenerator(
+		datasetsemanticnaming.NewPostgresCatalog(pool),
+		aiService,
+		cfg.AIRequestTimeout,
+	))
 	datasetService.SetLLMTriggerStore(datasetStore)
 	queryConnectors := map[datasource.Type]queryruntime.QueryConnector{
 		datasource.TypeMySQL:  mysqlConnector,
@@ -206,6 +218,10 @@ func main() {
 	semanticDimensionService := semanticmanagement.NewDimensionService(semanticManagementStore)
 	semanticManagementHandler := semanticmanagement.NewHandler(
 		authService, accessService, semanticManagementService, semanticDimensionService,
+	)
+	semanticAssetStore := semanticasset.NewPostgresStore(pool)
+	semanticAssetHandler := semanticasset.NewHandler(
+		authService, accessService, semanticasset.NewService(semanticAssetStore),
 	)
 	semanticQAStore := semanticqa.NewPostgresStore(pool)
 	semanticQAService := semanticqa.NewService(
@@ -269,6 +285,8 @@ func main() {
 	api.Handle("POST /api/v1/metrics/ai/proposals", metricAIHandler)
 	api.Handle("GET /api/v1/metrics/semantic-search", metricSemanticHandler)
 	api.Handle("/api/v1/semantic/", semanticManagementHandler)
+	api.Handle("/api/v1/semantic-assets", semanticAssetHandler)
+	api.Handle("/api/v1/semantic-assets/", semanticAssetHandler)
 	api.Handle("/api/v1/semantic-qa/", semanticQAHandler)
 	api.Handle("/api/v1/metric-candidates", metricCandidateHandler)
 	api.Handle("/api/v1/metric-candidates/", metricCandidateHandler)

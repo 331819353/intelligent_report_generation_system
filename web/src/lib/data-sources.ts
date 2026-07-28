@@ -181,6 +181,16 @@ export type MetadataJobFailure = {
   errorMessage?: string
 }
 
+export type MetadataJobLog = {
+  timestamp: string
+  level: 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR'
+  stage: MetadataJobStage
+  message: string
+  tableName?: string
+  model?: string
+  durationMs?: number
+}
+
 export type MetadataJob = {
   id: string
   dataSourceId: string
@@ -199,6 +209,7 @@ export type MetadataJob = {
   errorCode?: string
   errorMessage?: string
   failures?: MetadataJobFailure[]
+  logs?: MetadataJobLog[]
   createdAt: string
   startedAt?: string
   completedAt?: string

@@ -29,6 +29,11 @@ func (tx *fakeStagingTx) Exec(_ context.Context, sql string, _ ...any) (pgconn.C
 	return pgconn.NewCommandTag("OK"), nil
 }
 
+func (tx *fakeStagingTx) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
+	tx.executed = append(tx.executed, sql)
+	return fakeRow{value: int64(len(tx.copiedRows))}
+}
+
 func (tx *fakeStagingTx) CopyFrom(_ context.Context, table pgx.Identifier, columns []string, source pgx.CopyFromSource) (int64, error) {
 	if table.Sanitize() != tx.target {
 		return 0, errors.New("unexpected target")
@@ -319,17 +324,74 @@ func TestStageRejectsUnpublishedOrUnpinnedSourceVersion(t *testing.T) {
 func TestValidateStageColumnsSupportsQuotedUnicodePhysicalNames(t *testing.T) {
 	names, definitions, types, err := validateStageColumns([]StageColumn{
 		{Name: "订单编号", CanonicalType: "INTEGER"},
-		{Name: "区域", CanonicalType: "STRING"},
+		{Name: "单价值(分析)", CanonicalType: "STRING"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(names, ",") != "订单编号,区域" ||
+	if strings.Join(names, ",") != "订单编号,单价值(分析)" ||
 		!strings.Contains(definitions[0], `"订单编号" bigint`) ||
+		!strings.Contains(definitions[1], `"单价值(分析)" text`) ||
 		strings.Join(types, ",") != "INTEGER,STRING" {
 		t.Fatalf(
 			"names=%#v definitions=%#v types=%#v",
 			names, definitions, types,
 		)
+	}
+}
+
+func TestODSProjectorBuildsRunScopedInputWithoutPublishingODS(t *testing.T) {
+	document, err := dataset.BuildMappedDatasetDocument(
+		dataset.MappedDatasetTable{
+			ID:           "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+			DataSourceID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+			TableName:    "员工列表",
+			BusinessName: "员工列表",
+		},
+		[]dataset.MappedDatasetColumn{{
+			ColumnName: "节点组织编码", BusinessName: "节点组织编码",
+			CanonicalType: "INTEGER",
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenantID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	sourceRunID := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	targetRunID := "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+	sourceSchema, sourceTable, err := stagingTarget(
+		tenantID, sourceRunID, document.Nodes[0].ID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx := &fakeStagingTx{
+		copiedRows: [][]any{{"1"}, {"2"}, {"V01560366"}},
+	}
+	result, err := newODSProjector(
+		fakeStagingFactory{tx: tx},
+	).Project(context.Background(), ODSProjectionInput{
+		TenantID: tenantID, SourceRunID: sourceRunID,
+		TargetRunID: targetRunID, TargetNodeID: "employee_fact",
+		Document: document,
+		Source: querycompiler.TableRef{
+			NodeID: document.Nodes[0].ID,
+			Schema: sourceSchema, Name: sourceTable,
+			Columns:     map[string]bool{"节点组织编码": true},
+			ColumnTypes: map[string]string{"节点组织编码": "STRING"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tx.committed || result.RowCount != 3 ||
+		result.Schema != "warehouse_staging" ||
+		!strings.Contains(
+			strings.Join(tx.executed, "\n"), "CREATE UNLOGGED TABLE",
+		) {
+		t.Fatalf("result=%#v tx=%#v", result, tx)
+	}
+	if document.ExecutionPolicy.Materialization.Enabled {
+		t.Fatal("published ODS policy was mutated")
 	}
 }

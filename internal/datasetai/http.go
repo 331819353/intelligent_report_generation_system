@@ -1,6 +1,7 @@
 package datasetai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,38 @@ func NewHandler(authService *auth.Service, permissions *access.Service, planner 
 			if editing {
 				resourceID = r.PathValue("id")
 			}
+			streaming := strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/x-ndjson")
+			if streaming {
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					writePlanJSON(w, http.StatusInternalServerError, map[string]string{"code": "AI_STREAM_UNAVAILABLE", "message": "当前服务不支持生成进度流"})
+					return
+				}
+				w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+				w.Header().Set("Cache-Control", "no-store")
+				w.Header().Set("X-Content-Type-Options", "nosniff")
+				w.WriteHeader(http.StatusOK)
+				encoder := json.NewEncoder(w)
+				writeFrame := func(value any) {
+					if err := encoder.Encode(value); err == nil {
+						flusher.Flush()
+					}
+				}
+				ctx := withPlanProgressReporter(r.Context(), func(event PlanProgressEvent) {
+					writeFrame(planStreamProgressFrame{Type: "progress", Progress: event})
+				})
+				result, err := planner.Plan(ctx, claims.TenantID, claims.Subject, resourceID, input)
+				if err != nil {
+					if errors.Is(err, ErrInvalidOutput) {
+						slog.WarnContext(r.Context(), "dataset AI proposal failed validation", "resource_id", resourceID, "error", err)
+					}
+					status, body := capturePlanError(err)
+					writeFrame(planStreamErrorFrame{Type: "error", Status: status, Error: body})
+					return
+				}
+				writeFrame(planStreamResultFrame{Type: "result", Result: result})
+				return
+			}
 			result, err := planner.Plan(r.Context(), claims.TenantID, claims.Subject, resourceID, input)
 			if err != nil {
 				if errors.Is(err, ErrInvalidOutput) {
@@ -49,6 +82,57 @@ func NewHandler(authService *auth.Service, permissions *access.Service, planner 
 	mux.Handle("POST /api/v1/datasets/ai/proposals", protect(nil, plan(false)))
 	mux.Handle("POST /api/v1/datasets/{id}/ai/proposals", protect(func(r *http.Request) string { return r.PathValue("id") }, plan(true)))
 	return mux
+}
+
+type planStreamProgressFrame struct {
+	Type     string            `json:"type"`
+	Progress PlanProgressEvent `json:"progress"`
+}
+
+type planStreamResultFrame struct {
+	Type   string     `json:"type"`
+	Result PlanResult `json:"result"`
+}
+
+type planStreamErrorFrame struct {
+	Type   string          `json:"type"`
+	Status int             `json:"status"`
+	Error  json.RawMessage `json:"error"`
+}
+
+type planErrorCapture struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (capture *planErrorCapture) Header() http.Header {
+	if capture.header == nil {
+		capture.header = make(http.Header)
+	}
+	return capture.header
+}
+
+func (capture *planErrorCapture) WriteHeader(status int) {
+	if capture.status == 0 {
+		capture.status = status
+	}
+}
+
+func (capture *planErrorCapture) Write(value []byte) (int, error) {
+	if capture.status == 0 {
+		capture.status = http.StatusOK
+	}
+	return capture.body.Write(value)
+}
+
+func capturePlanError(err error) (int, json.RawMessage) {
+	capture := &planErrorCapture{}
+	writePlanError(capture, err)
+	if capture.status == 0 {
+		capture.status = http.StatusBadGateway
+	}
+	return capture.status, append(json.RawMessage(nil), capture.body.Bytes()...)
 }
 
 func decodePlanRequest(w http.ResponseWriter, r *http.Request, target any) bool {

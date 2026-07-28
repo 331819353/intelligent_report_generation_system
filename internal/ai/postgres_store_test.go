@@ -99,6 +99,15 @@ func TestTenantPolicyAllowsSemanticQueryPlanningWithoutPurposeOptIn(t *testing.T
 	}
 }
 
+func TestTenantPolicyAllowsDatasetSemanticNamingWithoutPurposeOptIn(t *testing.T) {
+	if !tenantPolicyAllowsPurpose(true, nil, PurposeDatasetSemanticNaming) {
+		t.Fatal("dataset semantic naming should follow the tenant-wide AI switch")
+	}
+	if tenantPolicyAllowsPurpose(false, nil, PurposeDatasetSemanticNaming) {
+		t.Fatal("disabled tenant AI switch must reject dataset semantic naming")
+	}
+}
+
 func TestTenantPolicyKeepsExplicitAllowlistForOtherPurposes(t *testing.T) {
 	if tenantPolicyAllowsPurpose(true, nil, PurposeReportGeneration) {
 		t.Fatal("report generation must remain forbidden when it is absent from allowed purposes")

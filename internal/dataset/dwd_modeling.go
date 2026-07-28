@@ -3103,40 +3103,13 @@ func standardizedDIMFieldDescription(entityName string, field Field) string {
 }
 
 func mandatoryDIMCleaning(field Field) []string {
-	canonical := strings.ToUpper(strings.TrimSpace(field.CanonicalType))
-	role := strings.ToUpper(strings.TrimSpace(field.Role))
-	dimensionRelated := role == "IDENTIFIER" || role == "DIMENSION" ||
-		role == "ATTRIBUTE" || role == "TIME"
-	nullFillEligible := role == "IDENTIFIER" || role == "DIMENSION" ||
-		role == "ATTRIBUTE"
-	operations := make([]string, 0, 3)
-	if canonical == "STRING" && dimensionRelated {
-		operations = append(operations, "TRIM")
-	}
-	if field.Nullable && nullFillEligible {
-		switch canonical {
-		case "STRING":
-			operations = append(operations, "COALESCE_UNKNOWN")
-		case "INTEGER", "DECIMAL":
-			operations = append(operations, "COALESCE_NEGATIVE_ONE")
-		}
-	}
-	switch canonical {
-	case "DATE":
-		operations = append(operations, "CAST_DATE")
-	case "DATETIME":
-		operations = append(operations, "CAST_DATETIME")
-	case "STRING":
-		if role == "TIME" {
-			if strings.EqualFold(field.SemanticType, "DATE") ||
-				strings.Contains(strings.ToLower(field.Code), "date") {
-				operations = append(operations, "CAST_DATE")
-			} else {
-				operations = append(operations, "CAST_DATETIME")
-			}
-		}
-	}
-	return operations
+	return mandatoryDWDFieldCleaning(dwdPlanningField{
+		Code:          field.Code,
+		Role:          field.Role,
+		CanonicalType: field.CanonicalType,
+		SemanticType:  field.SemanticType,
+		Nullable:      field.Nullable,
+	}, nil)
 }
 
 func buildLLMDesignedDWDDocument(
@@ -3406,6 +3379,18 @@ func applyLLMDWDCleaning(
 				},
 			}
 			nullable = false
+		case "COALESCE_DEFAULT":
+			value, supported := dwdDefaultNullValue(canonicalType)
+			if !supported {
+				return Expression{}, "", false, errDWDModelingInvalid
+			}
+			expression = Expression{
+				Type: "COALESCE",
+				Arguments: []Expression{
+					expression, {Type: "LITERAL", Value: value},
+				},
+			}
+			nullable = false
 		case "CAST_DATE":
 			argument := expression
 			expression = Expression{Type: "CAST", TargetType: "DATE", Argument: &argument}
@@ -3419,6 +3404,21 @@ func applyLLMDWDCleaning(
 		}
 	}
 	return expression, canonicalType, nullable, nil
+}
+
+func dwdDefaultNullValue(canonicalType string) (any, bool) {
+	switch strings.ToUpper(strings.TrimSpace(canonicalType)) {
+	case "STRING":
+		return "UNKNOWN", true
+	case "DATE", "DATETIME":
+		return "1970-01-01", true
+	case "INTEGER", "DECIMAL":
+		return 999999999, true
+	case "BOOLEAN":
+		return false, true
+	default:
+		return nil, false
+	}
 }
 
 func applyLLMDWDProcessing(

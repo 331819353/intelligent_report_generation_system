@@ -250,6 +250,14 @@ func rewriteAggregationChildren(expression dataset.Expression, rewrite func(data
 	for index, branch := range expression.Whens {
 		result.Whens[index] = dataset.CaseBranch{When: rewrite(branch.When), Then: rewrite(branch.Then)}
 	}
+	result.PartitionBy = make([]dataset.Expression, len(expression.PartitionBy))
+	for index, child := range expression.PartitionBy {
+		result.PartitionBy[index] = rewrite(child)
+	}
+	result.OrderBy = make([]dataset.WindowOrder, len(expression.OrderBy))
+	for index, item := range expression.OrderBy {
+		result.OrderBy[index] = dataset.WindowOrder{Expression: rewrite(item.Expression), Direction: item.Direction}
+	}
 	return result
 }
 
@@ -367,5 +375,11 @@ func visitAggregationChildren(expression dataset.Expression, visit func(dataset.
 	for _, branch := range expression.Whens {
 		visit(branch.When)
 		visit(branch.Then)
+	}
+	for _, child := range expression.PartitionBy {
+		visit(child)
+	}
+	for _, item := range expression.OrderBy {
+		visit(item.Expression)
 	}
 }

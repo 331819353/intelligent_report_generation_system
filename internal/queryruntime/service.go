@@ -70,7 +70,7 @@ func (s *Service) Preview(ctx context.Context, tenantID, actorID, datasetID stri
 // PreviewDraft 执行已有数据集的一份完整未保存候选 DSL。持久化草稿只作为乐观锁
 // 和审计身份；候选经过规范化及策略复核后直接执行，不写入数据集或修订仓储。
 func (s *Service) PreviewDraft(ctx context.Context, tenantID, actorID, datasetID string, input dataset.DraftPreviewInput) (dataset.DraftPreviewResult, error) {
-	if tenantID == "" || actorID == "" || datasetID == "" || input.ExpectedVersion < 1 || input.MaxRows < 0 || input.MaxRows > 5 {
+	if tenantID == "" || actorID == "" || datasetID == "" || input.ExpectedVersion < 1 || input.MaxRows < 0 {
 		return dataset.DraftPreviewResult{}, dataset.ErrPreviewInvalid
 	}
 	record, err := s.datasets.Get(ctx, tenantID, datasetID)
@@ -87,6 +87,11 @@ func (s *Service) PreviewDraft(ctx context.Context, tenantID, actorID, datasetID
 	if record.ID != datasetID || prepared.Document.Dataset.Code != record.Code || record.DraftVersionID == "" {
 		return dataset.DraftPreviewResult{}, dataset.ErrInvalidDocument
 	}
+	previewCap := editablePreviewRowLimit(prepared.Document)
+	if input.MaxRows > previewCap ||
+		input.MaxRows > prepared.Document.ExecutionPolicy.PreviewLimit {
+		return dataset.DraftPreviewResult{}, dataset.ErrPreviewInvalid
+	}
 	fieldCodes := make([]string, 0, len(prepared.Document.Fields))
 	for _, field := range prepared.Document.Fields {
 		fieldCodes = append(fieldCodes, field.Code)
@@ -97,9 +102,10 @@ func (s *Service) PreviewDraft(ctx context.Context, tenantID, actorID, datasetID
 	}
 	maxRows := input.MaxRows
 	if maxRows == 0 {
-		maxRows = min(prepared.Document.ExecutionPolicy.PreviewLimit, 5)
+		maxRows = min(prepared.Document.ExecutionPolicy.PreviewLimit, previewCap)
 	}
-	if maxRows < 1 || maxRows > 5 {
+	if maxRows < 1 || maxRows > previewCap ||
+		maxRows > prepared.Document.ExecutionPolicy.PreviewLimit {
 		return dataset.DraftPreviewResult{}, dataset.ErrPreviewInvalid
 	}
 	parameters := input.Parameters
@@ -126,12 +132,17 @@ const candidatePolicyObjectID = "00000000-0000-0000-0000-000000000000"
 // PreviewCandidate 执行尚未保存的数据集候选。候选没有 DATASET 对象身份，因此只
 // 使用当前用户属性和资产访问权限，不继承任何已保存数据集的行列策略。
 func (s *Service) PreviewCandidate(ctx context.Context, tenantID, actorID string, input dataset.CandidatePreviewInput) (dataset.CandidatePreviewResult, error) {
-	if tenantID == "" || actorID == "" || input.MaxRows < 0 || input.MaxRows > 5 {
+	if tenantID == "" || actorID == "" || input.MaxRows < 0 {
 		return dataset.CandidatePreviewResult{}, dataset.ErrPreviewInvalid
 	}
 	prepared, err := dataset.Prepare(input.DSL)
 	if err != nil {
 		return dataset.CandidatePreviewResult{}, err
+	}
+	previewCap := editablePreviewRowLimit(prepared.Document)
+	if input.MaxRows > previewCap ||
+		input.MaxRows > prepared.Document.ExecutionPolicy.PreviewLimit {
+		return dataset.CandidatePreviewResult{}, dataset.ErrPreviewInvalid
 	}
 	fieldCodes := make([]string, 0, len(prepared.Document.Fields))
 	for _, field := range prepared.Document.Fields {
@@ -142,9 +153,10 @@ func (s *Service) PreviewCandidate(ctx context.Context, tenantID, actorID string
 	}
 	maxRows := input.MaxRows
 	if maxRows == 0 {
-		maxRows = min(prepared.Document.ExecutionPolicy.PreviewLimit, 5)
+		maxRows = min(prepared.Document.ExecutionPolicy.PreviewLimit, previewCap)
 	}
-	if maxRows < 1 || maxRows > 5 {
+	if maxRows < 1 || maxRows > previewCap ||
+		maxRows > prepared.Document.ExecutionPolicy.PreviewLimit {
 		return dataset.CandidatePreviewResult{}, dataset.ErrPreviewInvalid
 	}
 	parameters := input.Parameters
@@ -260,6 +272,14 @@ func sameMetricSourceEnvelope(
 	original, derived dataset.Document,
 	candidate metric.QueryCandidate,
 ) bool {
+	addedParameterCount := 0
+	for _, binding := range candidate.FilterBindings {
+		if len(binding.ParameterCodes) > 0 {
+			addedParameterCount += len(binding.ParameterCodes)
+		} else {
+			addedParameterCount++
+		}
+	}
 	if !sameMetricDatasetIdentity(original.Dataset, derived.Dataset) ||
 		!reflect.DeepEqual(original.Nodes, derived.Nodes) ||
 		!reflect.DeepEqual(original.Joins, derived.Joins) ||
@@ -268,7 +288,7 @@ func sameMetricSourceEnvelope(
 		derived.AnalysisContract != nil ||
 		!reflect.DeepEqual(original.ExecutionPolicy, derived.ExecutionPolicy) ||
 		len(derived.Filters) != len(original.Filters)+len(candidate.FilterBindings) ||
-		len(derived.Parameters) != len(original.Parameters)+len(candidate.FilterBindings) ||
+		len(derived.Parameters) != len(original.Parameters)+addedParameterCount ||
 		!reflect.DeepEqual(
 			original.Filters,
 			derived.Filters[:len(original.Filters)],
@@ -286,41 +306,78 @@ func sameMetricSourceEnvelope(
 	seenBindings := map[string]bool{}
 	seenFilters := map[string]bool{}
 	seenParameters := map[string]bool{}
+	parameterOffset := len(original.Parameters)
 	for index, binding := range candidate.FilterBindings {
 		field, exists := fields[binding.FieldID]
 		bindingKey := binding.FieldID + "\x00" + binding.Operator
+		parameterCodes := binding.ParameterCodes
+		if len(parameterCodes) == 0 && binding.ParameterCode != "" {
+			parameterCodes = []string{binding.ParameterCode}
+		}
 		if !exists || seenBindings[bindingKey] ||
 			binding.FilterID == "" || seenFilters[binding.FilterID] ||
-			binding.ParameterCode == "" || seenParameters[binding.ParameterCode] ||
+			len(parameterCodes) == 0 ||
+			binding.ParameterCode != parameterCodes[0] ||
 			binding.DataType != field.CanonicalType ||
-			(binding.Operator != "EQUALS" &&
+			(binding.Operator != "EQUALS" && binding.Operator != "IN" &&
 				!((binding.Operator == "GTE" || binding.Operator == "LT") &&
 					(field.CanonicalType == "DATE" ||
 						field.CanonicalType == "DATETIME"))) {
 			return false
 		}
+		if binding.Operator == "IN" && len(parameterCodes) < 2 {
+			return false
+		}
+		for _, parameterCode := range parameterCodes {
+			if parameterCode == "" || seenParameters[parameterCode] {
+				return false
+			}
+			seenParameters[parameterCode] = true
+		}
 		seenBindings[bindingKey] = true
 		seenFilters[binding.FilterID] = true
-		seenParameters[binding.ParameterCode] = true
-		parameter := derived.Parameters[len(original.Parameters)+index]
 		filter := derived.Filters[len(original.Filters)+index]
-		if parameter.Code != binding.ParameterCode ||
-			parameter.Name != "语义维度过滤" ||
-			parameter.DataType != binding.DataType ||
-			parameter.MultiValue || !parameter.Required ||
-			parameter.DefaultValue != nil ||
-			filter.ID != binding.FilterID ||
+		parameterName := "语义维度过滤"
+		if binding.Operator == "IN" {
+			parameterName = "语义维度集合过滤"
+		}
+		for parameterIndex, parameterCode := range parameterCodes {
+			parameter := derived.Parameters[parameterOffset+parameterIndex]
+			if parameter.Code != parameterCode ||
+				parameter.Name != parameterName ||
+				parameter.DataType != binding.DataType ||
+				parameter.MultiValue || !parameter.Required ||
+				parameter.DefaultValue != nil {
+				return false
+			}
+		}
+		parameterOffset += len(parameterCodes)
+		if filter.ID != binding.FilterID ||
 			filter.Stage != "PRE_AGGREGATION" || filter.Optional ||
 			filter.Expression.Type != binding.Operator ||
 			filter.Expression.Left == nil ||
 			filter.Expression.Right == nil ||
-			!reflect.DeepEqual(*filter.Expression.Left, field.Expression) ||
-			filter.Expression.Right.Type != "PARAM_REF" ||
+			!reflect.DeepEqual(*filter.Expression.Left, field.Expression) {
+			return false
+		}
+		if binding.Operator == "IN" {
+			if filter.Expression.Right.Type != "ARRAY" ||
+				len(filter.Expression.Right.Arguments) != len(parameterCodes) {
+				return false
+			}
+			for parameterIndex, parameterCode := range parameterCodes {
+				argument := filter.Expression.Right.Arguments[parameterIndex]
+				if argument.Type != "PARAM_REF" ||
+					argument.Code != parameterCode {
+					return false
+				}
+			}
+		} else if filter.Expression.Right.Type != "PARAM_REF" ||
 			filter.Expression.Right.Code != binding.ParameterCode {
 			return false
 		}
 	}
-	return true
+	return parameterOffset == len(derived.Parameters)
 }
 
 // sameMetricDatasetIdentity 只比较会标识数据资产和改变数据源解析方式的属性。
@@ -408,6 +465,10 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 		// explicitly.
 		resolved.Engine = ExecutionSource
 	}
+	executionDocument := document
+	if resolved.ExecutionDocument != nil {
+		executionDocument = *resolved.ExecutionDocument
+	}
 	policyObjectID := snapshot.DatasetID
 	if policyObjectID == "" {
 		policyObjectID = candidatePolicyObjectID
@@ -443,7 +504,7 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	}
 	if resolved.Engine == ExecutionPostgreSQL {
 		return s.previewWarehouse(
-			ctx, tenantID, document, resolved, input.Parameters, scope,
+			ctx, tenantID, executionDocument, resolved, input.Parameters, scope,
 			rowPolicies, columnPolicies, maxRows, baseRun,
 		)
 	}
@@ -455,18 +516,34 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
-	baseRun.Sources = resolvedRunSources(queryID, document.Dataset.Type, resolved)
-	if document.Dataset.Type == "CROSS_SOURCE" {
-		return s.previewFederated(ctx, sources, snapshot.PlanHash, document, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
+	sourceAuditType := executionDocument.Dataset.Type
+	if resolved.SourceSampleLimit > 0 {
+		// Sampled DAG previews execute node scans separately, including the
+		// single-source case, so every frozen source node is auditable.
+		sourceAuditType = "CROSS_SOURCE"
+	}
+	baseRun.Sources = resolvedRunSources(queryID, sourceAuditType, resolved)
+	if executionDocument.Dataset.Type == "CROSS_SOURCE" ||
+		resolved.SourceSampleLimit > 0 {
+		return s.previewFederated(ctx, sources, snapshot.PlanHash, executionDocument, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
 	}
 	source, ok := sources[resolved.SourceID]
 	if !ok {
 		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
 	}
 	if resolved.SourceType == datasource.TypeExcel {
-		return s.previewFile(ctx, source, snapshot.PlanHash, document, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
+		return s.previewFile(ctx, source, snapshot.PlanHash, executionDocument, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
 	}
-	return s.previewDatabase(ctx, source, document, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
+	return s.previewDatabase(ctx, source, executionDocument, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
+}
+
+func editablePreviewRowLimit(document dataset.Document) int {
+	if document.Dataset.Layer == dataset.LayerODS ||
+		document.Dataset.Layer == dataset.LayerDIM ||
+		document.Dataset.Layer == dataset.LayerDWD {
+		return odsSourcePreviewRows
+	}
+	return 5
 }
 
 func (s *Service) loadSources(ctx context.Context, tenantID string, resolved ResolvedPlan, quota datasource.Quota) (map[string]datasource.Source, error) {
@@ -774,7 +851,7 @@ func (s *Service) previewFile(ctx context.Context, source datasource.Source, pla
 }
 
 func (s *Service) previewFederated(ctx context.Context, sources map[string]datasource.Source, planHash string, document dataset.Document, resolved ResolvedPlan, parameters map[string]any, scope policy.UserScope, rowPolicies []policy.RowPolicy, columnPolicies []policy.ColumnPolicy, maxRows int, run RunRecord) (dataset.PreviewResult, error) {
-	if s.federated == nil || len(resolved.Nodes) < 2 {
+	if s.federated == nil || len(resolved.Nodes) < 1 {
 		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
 	}
 	normalized, err := querycompiler.NormalizeParameters(document.Parameters, parameters)
@@ -871,7 +948,90 @@ func (s *Service) execute(ctx context.Context, document dataset.Document, run Ru
 		}
 		return dataset.PreviewResult{QueryID: run.ID}, err
 	}
-	return dataset.PreviewResult{QueryID: run.ID, Columns: result.Columns, Rows: result.Rows, RowCount: result.RowCount, DurationMS: durationMS, Warnings: previewWarnings(result.Warnings)}, nil
+	return dataset.PreviewResult{
+		QueryID:        run.ID,
+		Columns:        result.Columns,
+		ColumnMetadata: previewColumnMetadata(document, result.Columns),
+		Rows:           result.Rows,
+		RowCount:       result.RowCount,
+		DurationMS:     durationMS,
+		Warnings:       previewWarnings(result.Warnings),
+	}, nil
+}
+
+func previewColumnMetadata(document dataset.Document, columns []string) []dataset.PreviewColumn {
+	fieldsByCode := make(map[string]dataset.Field, len(document.Fields))
+	for _, field := range document.Fields {
+		fieldsByCode[field.Code] = field
+	}
+	groupingPlaceholders := previewGroupingPlaceholders(document)
+	metadata := make([]dataset.PreviewColumn, 0, len(columns))
+	for _, column := range columns {
+		field, exists := fieldsByCode[column]
+		if !exists {
+			for _, candidate := range document.Fields {
+				if strings.EqualFold(candidate.Code, column) {
+					field, exists = candidate, true
+					break
+				}
+			}
+		}
+		if !exists {
+			// 不把未知 Connector 列误标成某个业务字段；仍提供与 columns
+			// 对齐的最小元数据，便于旧执行器平滑升级。
+			metadata = append(metadata, dataset.PreviewColumn{Code: column, Name: column})
+			continue
+		}
+		physicalName := ""
+		if field.Expression.Type == "FIELD_REF" {
+			physicalName = field.Expression.Field
+		}
+		metadata = append(metadata, dataset.PreviewColumn{
+			FieldID:             field.ID,
+			Code:                field.Code,
+			Name:                field.Name,
+			Description:         field.Description,
+			PhysicalName:        physicalName,
+			CanonicalType:       field.CanonicalType,
+			SemanticType:        field.SemanticType,
+			Role:                field.Role,
+			Nullable:            field.Nullable,
+			GroupingPlaceholder: groupingPlaceholders[field.ID],
+		})
+	}
+	return metadata
+}
+
+func previewGroupingPlaceholders(document dataset.Document) map[string]string {
+	advanced := func(mode dataset.GroupByMode) bool {
+		return mode == dataset.GroupByModeCube ||
+			mode == dataset.GroupByModeRollup ||
+			mode == dataset.GroupByModeSets
+	}
+	groupedFieldIDs := map[string]bool{}
+	if advanced(document.GroupByMode) {
+		for _, fieldID := range document.GroupBy {
+			groupedFieldIDs[fieldID] = true
+		}
+	}
+	preAggregatedDimensions := map[string]bool{}
+	for _, item := range document.PreAggregations {
+		if !advanced(item.GroupByMode) {
+			continue
+		}
+		for _, group := range item.GroupBy {
+			preAggregatedDimensions[item.NodeID+"\x00"+group.Field] = true
+		}
+	}
+	result := map[string]string{}
+	for _, field := range document.Fields {
+		preAggregated := field.Expression.Type == "FIELD_REF" &&
+			preAggregatedDimensions[field.Expression.NodeID+"\x00"+field.Expression.Field]
+		if groupedFieldIDs[field.ID] || preAggregated {
+			result[field.ID] = "ALL"
+		}
+	}
+	return result
 }
 
 func previewWarnings(warnings []datasource.QueryWarning) []dataset.PreviewWarning {

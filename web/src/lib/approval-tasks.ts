@@ -4,14 +4,8 @@ import {
   type DatasetPublicationRequest,
   type DatasetSummary,
 } from './datasets'
-import { metricCandidateAPI, type MetricCandidate } from './metric-candidates'
-import { metricAPI } from './metrics'
-import {
-  semanticGovernanceAPI,
-  type DimensionSurveyCandidate,
-} from './semantic-governance'
 
-export type ApprovalCategory = 'DATA_SOURCE' | 'DATASET' | 'METRIC' | 'DIMENSION'
+export type ApprovalCategory = 'DATA_SOURCE' | 'DATASET'
 
 export type DataSourceApprovalTask = {
   key: string
@@ -34,29 +28,7 @@ export type DatasetApprovalTask = {
   request: DatasetPublicationRequest
 }
 
-export type MetricApprovalTask = {
-  key: string
-  category: 'METRIC'
-  name: string
-  subtitle: string
-  submittedAt: string
-  candidate: MetricCandidate
-}
-
-export type DimensionApprovalTask = {
-  key: string
-  category: 'DIMENSION'
-  name: string
-  subtitle: string
-  submittedAt: string
-  candidate: DimensionSurveyCandidate
-}
-
-export type ApprovalTask =
-  | DataSourceApprovalTask
-  | DatasetApprovalTask
-  | MetricApprovalTask
-  | DimensionApprovalTask
+export type ApprovalTask = DataSourceApprovalTask | DatasetApprovalTask
 
 export type ApprovalTaskBatch = {
   category: ApprovalCategory
@@ -81,32 +53,6 @@ async function loadAllDatasetRequests(datasetID: string): Promise<DatasetPublica
   const items: DatasetPublicationRequest[] = []
   for (let offset = 0; ;) {
     const page = await datasetAPI.listPublicationRequests(datasetID, pageSize, offset)
-    const pageItems = Array.isArray(page.items) ? page.items : []
-    items.push(...pageItems)
-    if (!pageItems.length || items.length >= page.total) return items
-    offset += pageItems.length
-  }
-}
-
-async function loadAllMetricCandidates(): Promise<MetricCandidate[]> {
-  const items: MetricCandidate[] = []
-  for (let offset = 0; ;) {
-    const page = await metricCandidateAPI.list(pageSize, offset)
-    const pageItems = Array.isArray(page.items) ? page.items : []
-    items.push(...pageItems)
-    if (!pageItems.length || items.length >= page.total) return items
-    offset += pageItems.length
-  }
-}
-
-async function loadAllDimensionCandidates(): Promise<DimensionSurveyCandidate[]> {
-  const items: DimensionSurveyCandidate[] = []
-  for (let offset = 0; ;) {
-    const page = await semanticGovernanceAPI.listCandidates({
-      status: 'SUGGESTED',
-      limit: pageSize,
-      offset,
-    })
     const pageItems = Array.isArray(page.items) ? page.items : []
     items.push(...pageItems)
     if (!pageItems.length || items.length >= page.total) return items
@@ -158,41 +104,4 @@ export async function loadDatasetApprovalTasks(subject?: string): Promise<Approv
       request,
     })))
   return { category: 'DATASET', tasks, assetCount: datasets.length }
-}
-
-/** 指标候选属于系统生成的治理审批，仅向具备指标管理权限的用户展示。 */
-export async function loadMetricApprovalTasks(): Promise<ApprovalTaskBatch> {
-  const permission = await metricAPI.evaluatePermission('', 'MANAGE')
-  if (!permission.allowed) return { category: 'METRIC', tasks: [] }
-  const candidates = await loadAllMetricCandidates()
-  const tasks = candidates
-    .filter(candidate => candidate.status === 'READY' || candidate.status === 'NEEDS_REVIEW')
-    .map<MetricApprovalTask>(candidate => ({
-      key: `METRIC:${candidate.id}`,
-      category: 'METRIC',
-      name: candidate.name,
-      subtitle: `${candidate.method} · ${Math.round(candidate.confidence * 100)}% 置信度`,
-      submittedAt: candidate.createdAt,
-      candidate,
-    }))
-  return { category: 'METRIC', tasks }
-}
-
-/** DWS 维度勘测候选需要人工接收或拒绝，归入维度治理审批。 */
-export async function loadDimensionApprovalTasks(): Promise<ApprovalTaskBatch> {
-  const [read, manage] = await Promise.all([
-    semanticGovernanceAPI.evaluatePermission('READ'),
-    semanticGovernanceAPI.evaluatePermission('MANAGE'),
-  ])
-  if (!read.allowed || !manage.allowed) return { category: 'DIMENSION', tasks: [] }
-  const candidates = await loadAllDimensionCandidates()
-  const tasks = candidates.map<DimensionApprovalTask>(candidate => ({
-    key: `DIMENSION:${candidate.id}`,
-    category: 'DIMENSION',
-    name: candidate.proposedName,
-    subtitle: `${candidate.fieldRole} · ${candidate.fieldCode}`,
-    submittedAt: candidate.createdAt,
-    candidate,
-  }))
-  return { category: 'DIMENSION', tasks }
 }

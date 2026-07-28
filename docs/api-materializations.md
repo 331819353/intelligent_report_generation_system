@@ -36,13 +36,14 @@
 1. 锁定目标数据集的当前 `PUBLISHED` 版本，重新校验 DSL 摘要、层级和物化开关。
 2. 从 DSL 派生无 SQL 的安全拓扑和 PostgreSQL 目标合同。
 3. 冻结输入：
-   - ODS 只允许一个 `TABLE` 节点。数据库输入固定当前已发布的
-     `data_source_version`、元数据表和 `structure_hash`；Excel 输入还必须与当前
-     发布数据源版本的精确文件版本一致，`snapshotHash` 使用文件 SHA-256。
-   - DIM 只允许 ODS；DWD 至少包含一个 ODS 事实输入并可附加 DIM；
-     DWS 只允许一个或多个 DWD；ADS 只允许 DWS。每个上游必须仍是其所属数据集的当前发布版本，并拥有精确
-     `ACTIVE` 物化。登记优先固定 `MATERIALIZATION` 身份，同时保存 schema hash、
-     snapshot hash 和 row count。
+   - ODS 是来源上的虚拟字段映射，不是物化目标；对 ODS 调用本接口返回
+     `MATERIALIZATION_INVALID_REQUEST`。
+   - DIM/DWD 的 ODS 输入冻结为 `virtual-ods-source-v1` 来源快照：数据库输入固定当前已发布的
+     `data_source_version`、元数据表和 `structure_hash`；Excel 输入还必须固定精确
+     文件版本及其 SHA-256。Worker 正式执行时按该快照全量回源，并先投影 ODS 字段合同。
+   - DWD 可附加已经在数仓中的 DIM；DWS 只允许一个或多个 DWD；ADS 只允许 DWS。
+     这些数仓上游必须仍是其所属数据集的当前发布版本并拥有精确 `ACTIVE` 物化，
+     同时冻结 materialization 身份、schema hash、snapshot hash 和 row count。
 4. 原子写入运行、冻结输入、节点状态和
    `REGISTER_MATERIALIZATION_BUILD` 审计事件。
 
@@ -50,14 +51,11 @@
 首次创建返回 `201`，幂等重放返回 `200`。输入、发布指针或请求预算不一致时返回
 `409`。
 
-### 自动映射 ODS 的首次构建
+### 自动映射 ODS
 
-带 `originTableId` 的系统映射 ODS 固定启用 `ON_DEMAND` 物化。其首次及后续系统
-刷新发布不依赖浏览器调用本接口：数据集发布事务直接复用上述服务端派生逻辑，把
-精确新版本、源数据发布版本、表/文件版本和结构摘要写成 `QUEUED` build。事务中
-只登记控制面任务，真正的源端读取、staging、CTAS 和激活仍由 materialization
-worker 在提交后执行。启动对账会补登记历史遗漏任务，同一版本和冻结输入只会得到
-一个确定性幂等任务；不同操作者触发对账不会改写已有任务的 `requestedBy`。
+带 `originTableId` 的系统映射 ODS 固定使用 `REALTIME`、`previewLimit=100` 且
+`materialization.enabled=false`。首次发布、结构刷新和启动对账都只维护数据集版本、
+字段合同及精确来源版本，不登记 build、不建立 `warehouse_ods` 表或稳定视图。
 
 ## 查询构建
 
@@ -98,24 +96,25 @@ worker 在提交后执行。启动对账会补登记历史遗漏任务，同一�
 
 ## 当前执行边界
 
-ODS worker 已启用 MySQL、Oracle 与 Excel/CSV 的精确发布输入搬运。数据库源把
-受限投影/过滤前置到源库，以严格 NDJSON 流和 typed COPY 写入 run-scoped
-PostgreSQL staging；Excel/CSV 复核不可变文件版本、SHA-256、Sheet、投影和类型后
-分批 COPY。两条路径都限制为 5,000,000 行，完整 staging 成功后才执行
-`warehouse_ods` CTAS、质量门和原子激活。
+ODS 不由 worker 物化。DIM/DWD worker 收到 `virtual-ods-source-v1` 输入后，复核
+不可变来源版本、结构摘要及文件 SHA-256：MySQL/Oracle 通过受控只读流抽取，
+Excel/CSV 逐行读取精确文件版本；完整来源先进入 run-scoped staging，再按已发布
+ODS 字段合同投影并执行目标 DAG。只有完整 staging 和目标层质量门都成功，才会在
+`warehouse_dim` 或 `warehouse_dwd` 原子激活。流截断、类型错误、摘要漂移、超时或
+租约丢失都不会产生 ACTIVE 物化。
 
-当前仅支持 `FULL + TABLE + 单 TABLE 节点`。`INCREMENTAL`、`BACKFILL`、
-`PARTITIONED_TABLE` 和非单表 ODS 失败关闭；数据源重新发布、结构/文件摘要漂移、
-流截断、类型错误、超时或租约丢失都不会产生 ACTIVE 物化。DIM/DWD/DWS/ADS 仍只接受由
-上游活跃物化解析出的 PostgreSQL 输入，并全部在 PostgreSQL 执行。
+当前物化只支持 `FULL`；`INCREMENTAL`、`BACKFILL` 和 `PARTITIONED_TABLE` 失败关闭。
+DWS/ADS 只从数仓中精确的上游 ACTIVE 物化读取，并在 PostgreSQL 内执行。
 
 ## ACTIVE 物化的查询消费
 
-显式 DIM/DWD/DWS/ADS 的发布试跑与预览不会递归执行上游数据集，也不会接受客户端提供的
-物理标识。DIM 的 ODS 上游、DWD 的 ODS/DIM 上游、DWS 的 DWD 上游、ADS 的 DWS 上游都必须是所属数据集的当前
-`PUBLISHED` 精确版本，并存在 schema hash 一致的 `ACTIVE` 物化；查询运行时只把
-其 `warehouse_published` 稳定视图作为允许表。DWS 指标则直接绑定指标定义中的
-精确 DWS 当前 ACTIVE 物化，不重放 DWS DAG。
+显式 DIM/DWD/DWS/ADS 的发布试跑与预览不会接受客户端提供的物理标识。DIM/DWD
+固定的 ODS 上游必须是当前 `PUBLISHED` 精确版本；运行时把它展开为精确来源，并对
+每个来源最多采样 100 行后执行当前 DAG，供中间过程展示。DWD 的 DIM 上游以及
+DWS/ADS 的数仓上游则必须存在 schema hash 一致的当前 `ACTIVE` 物化，查询运行时
+只把其 `warehouse_published` 稳定视图作为允许表。当前交互式预览对“虚拟 ODS 来源
++ 数仓 DIM”的混合执行失败关闭，避免把样本和全量维表混成不可解释结果。DWS 指标
+直接绑定精确 DWS 当前 ACTIVE 物化，不重放 DWS DAG。
 
 解析完成后，PostgreSQL 执行事务会用租户 RLS 再次锁定并复核发布指针、版本、
 materialization ID、schema/snapshot hash、稳定视图类型和 API 角色 SELECT 权限。

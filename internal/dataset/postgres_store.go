@@ -18,8 +18,8 @@ type PublicationCommitSink interface {
 	EnqueueDatasetMetricExtractionTx(context.Context, pgx.Tx, string, string, VersionRecord) error
 }
 
-// MappedPublicationCommitSink 在系统自动发布映射 ODS 的事务内登记首个物化
-// build。实现只能写入控制面任务，不能在发布事务内访问源库或执行物化。
+// MappedPublicationCommitSink 为历史装配兼容接口。ODS 已改为虚拟来源映射，
+// 当前发布流程不再调用该接口登记物化 build。
 type MappedPublicationCommitSink interface {
 	EnqueueMappedDatasetMaterializationTx(context.Context, pgx.Tx, string, string, VersionRecord) error
 }
@@ -56,8 +56,7 @@ func (s *PostgresStore) SetPublicationCommitSink(sink PublicationCommitSink) {
 	s.publicationSink = sink
 }
 
-// SetMappedPublicationCommitSink 接入自动映射 ODS 的物化控制面登记器。
-// 应只在进程启动装配阶段调用。
+// SetMappedPublicationCommitSink 保留历史装配兼容；ODS 不再登记物化 build。
 func (s *PostgresStore) SetMappedPublicationCommitSink(sink MappedPublicationCommitSink) {
 	s.mappedPublicationSink = sink
 }
@@ -137,6 +136,11 @@ func createDatasetTxWithOptions(
 	if err := replaceDerivedWithOptions(
 		ctx, tx, tenantID, datasetID, versionID, prepared.Document, true,
 		options,
+	); err != nil {
+		return "", err
+	}
+	if err := saveSemanticNamingTagsTx(
+		ctx, tx, actorID, datasetID, versionID, prepared, false,
 	); err != nil {
 		return "", err
 	}
@@ -297,6 +301,11 @@ func (s *PostgresStore) Update(ctx context.Context, tenantID, actorID, id string
 			return err
 		}
 		if err := replaceDerived(ctx, tx, tenantID, id, versionID, prepared.Document, true); err != nil {
+			return err
+		}
+		if err := saveSemanticNamingTagsTx(
+			ctx, tx, actorID, id, versionID, prepared, true,
+		); err != nil {
 			return err
 		}
 		if err := insertDraftRevisionTx(ctx, tx, tenantID, id, actorID, versionID, version+1, draftRecordVersion, "SAVE", "", prepared); err != nil {
@@ -820,6 +829,11 @@ func (s *PostgresStore) publishTx(
 	if err := replaceDerived(ctx, tx, tenantID, datasetID, publishedVersionID, plan.Prepared.Document, false); err != nil {
 		return err
 	}
+	if err := copyDraftDatasetTagsTx(
+		ctx, tx, datasetID, draftVersionID, publishedVersionID,
+	); err != nil {
+		return err
+	}
 	if tag, err := tx.Exec(ctx, `UPDATE platform.dataset_versions SET status='PUBLISHED' WHERE id=$1 AND status='PUBLISHING'`, publishedVersionID); err != nil {
 		return err
 	} else if tag.RowsAffected() != 1 {
@@ -1325,6 +1339,20 @@ func mapPublicationPostgresError(err error) error {
 			return ErrIdempotencyConflict
 		}
 		return ErrConflict
+	}
+	if pgError.Code == "23514" {
+		switch pgError.ConstraintName {
+		case "dataset_versions_domain_required":
+			return publicationFailure(
+				"dataset.domain", "DATASET_DOMAIN_REQUIRED",
+				"发布数据集必须填写业务领域",
+			)
+		case "dataset_versions_domain_lineage_match":
+			return publicationFailure(
+				"dataset.domain", "DATASET_DOMAIN_LINEAGE_MISMATCH",
+				"数据集业务领域必须与所有已发布上游一致；请修正领域后重新提交审批",
+			)
+		}
 	}
 	if pgError.Code == "23503" || pgError.Code == "23514" {
 		return ErrPublishValidation

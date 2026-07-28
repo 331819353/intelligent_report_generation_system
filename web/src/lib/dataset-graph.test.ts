@@ -73,6 +73,61 @@ const emptyDSL = (designer: DesignerGraphV1): DatasetDSL => ({
   designer,
 })
 
+it('过滤组件在持久化和恢复后保持条件并透传上游字段', () => {
+  const filterNode = node('customer', '客户表', [
+    column('table_customer', 'customer_id', '客户ID'),
+    column('table_customer', 'amount', '交易金额', 'DECIMAL'),
+    column('table_customer', 'expected_amount', '预期金额', 'DECIMAL'),
+  ])
+  const filterFields: FieldOption[] = filterNode.columns.map(item => ({
+    key: `customer.${item.columnName}`,
+    role: 'ATTRIBUTE',
+    aggregation: '',
+    output: true,
+  }))
+  const graph: DesignerGraphV1 = {
+    version: '1.0',
+    nodePositions: { customer: { x: 20, y: 40 } },
+    nodeNames: { customer: '客户表' },
+    joins: [],
+    groups: [],
+    transforms: [{
+      id: 'filter_1',
+      name: '金额过滤',
+      family: 'CONDITION',
+      componentType: 'FILTER',
+      input: { kind: 'NODE', id: 'customer' },
+      position: { x: 320, y: 40 },
+      rules: [],
+      conditions: [
+        { id: 'filter_1_condition_1', inputKey: 'customer.amount', operator: 'GT', value: '0' },
+        { id: 'filter_1_condition_2', inputKey: 'customer.amount', operator: 'GTE', valueMode: 'FIELD', value: 'customer.expected_amount' },
+      ],
+    }],
+    end: {
+      id: 'end_1',
+      name: '最终输出',
+      input: { kind: 'TRANSFORM', id: 'filter_1' },
+      position: { x: 620, y: 40 },
+      outputs: [],
+    },
+  }
+
+  const serialized = serializeDesignerGraph(graph)
+  const hydrated = hydrateDesignerGraph(emptyDSL(serialized), [filterNode], [], filterFields)
+  const output = graphProducedFields({ kind: 'TRANSFORM', id: 'filter_1' }, hydrated, [filterNode], filterFields)
+
+  expect(hydrated.transforms?.[0]).toMatchObject({
+    componentType: 'FILTER',
+    conditions: [
+      { id: 'filter_1_condition_1', inputKey: 'customer.amount', operator: 'GT', value: '0' },
+      { id: 'filter_1_condition_2', inputKey: 'customer.amount', operator: 'GTE', valueMode: 'FIELD', value: 'customer.expected_amount' },
+    ],
+  })
+  expect(output.map(field => field.key)).toEqual(['customer.customer_id', 'customer.amount', 'customer.expected_amount'])
+  expect(output.every(field => field.producerName === '金额过滤')).toBe(true)
+})
+
 it('按依赖阶段合并 DWD 多字段规则且不限制组件数量和类型', () => {
   const source = node('fact', '事实表', [
     column('table_fact', 'name_a', '名称 A'),
@@ -267,6 +322,8 @@ describe('dataset graph', () => {
           name: '客户聚合结果',
           input: { kind: 'NODE', id: 'customer' },
           position: { x: 137, y: 83 },
+          groupByMode: 'GROUPING_SETS',
+          groupingSets: [['customer.customer_id'], []],
           dimensions: [{ key: 'customer.customer_id', name: '客户标识', code: 'customer_key', grouping: 'DAY' }],
           metrics: [{ key: 'customer.amount', name: '客户金额', code: 'customer_amount', aggregation: 'SUM' }],
         },
@@ -276,7 +333,7 @@ describe('dataset graph', () => {
           input: { kind: 'NODE', id: 'region' },
           position: { x: 149, y: 271 },
           dimensions: [{ key: 'region.region_code', name: '区域', code: 'region_key' }],
-          metrics: [{ key: 'region.order_id', name: '订单量', code: 'order_count', aggregation: 'COUNT' }],
+          metrics: [{ key: '*', outputKey: 'group_region.metric_row_count', name: '订单总数', code: 'order_count', aggregation: 'COUNT', countRows: true }],
         },
       ],
       end: {
@@ -311,6 +368,14 @@ describe('dataset graph', () => {
       ['客户聚合结果', { x: 137, y: 83 }],
       ['区域聚合结果', { x: 149, y: 271 }],
     ])
+    expect(hydrated.groups[0]).toMatchObject({
+      groupByMode: 'GROUPING_SETS',
+      groupingSets: [['customer.customer_id'], []],
+    })
+    expect(graphProducedFields({ kind: 'GROUP', id: 'group_region' }, hydrated, nodes, fields, new Set(), 'group_region').find(item => item.code === 'order_count')?.expression).toEqual({
+      type: 'AGGREGATE',
+      function: 'COUNT',
+    })
     expect(hydrated.end).toMatchObject({ name: '数据集最终结果', position: { x: 713, y: 211 } })
   })
 
@@ -456,6 +521,54 @@ describe('dataset graph', () => {
     })
   })
 
+  it('日期计算生成日期差、日期部分和当前周期边界表达式并可完整回载', () => {
+    const dateNode = node('orders', '订单表', [
+      column('table_orders', 'created_at', '创建日期', 'DATE'),
+      column('table_orders', 'paid_at', '支付日期', 'DATETIME'),
+    ])
+    const dateFields: FieldOption[] = [
+      { key: 'orders.created_at', name: '创建日期', code: 'created_at', role: 'ATTRIBUTE', aggregation: '', output: true },
+      { key: 'orders.paid_at', name: '支付日期', code: 'paid_at', role: 'ATTRIBUTE', aggregation: '', output: true },
+    ]
+    const graph: DesignerGraphV1 = {
+      version: '1.0', nodePositions: { orders: { x: 0, y: 0 } }, nodeNames: { orders: '订单表' }, joins: [], groups: [],
+      transforms: [{
+        id: 'transform_date_calc', name: '日期计算 1', family: 'DATE', componentType: 'DATE_CALCULATION',
+        input: { kind: 'NODE', id: 'orders' }, position: { x: 300, y: 0 },
+        rules: [
+          { id: 'rule_diff', operation: 'DATE_DIFF', inputKeys: ['orders.created_at'], unit: 'MONTH', startDateSource: 'FIELD', endDateSource: 'CURRENT_DATE', output: { id: 'month_diff', name: '距今自然月差', code: 'month_diff', canonicalType: 'INTEGER' } },
+          { id: 'rule_extract', operation: 'DATE_EXTRACT', inputKeys: ['orders.created_at'], unit: 'WEEKDAY', dateSource: 'FIELD', output: { id: 'weekday', name: '星期', code: 'weekday', canonicalType: 'INTEGER' } },
+          { id: 'rule_end', operation: 'DATE_END', inputKeys: [], unit: 'YEAR', dateSource: 'CURRENT_DATE', output: { id: 'current_year_end', name: '本年最后一天', code: 'current_year_end', canonicalType: 'DATE' } },
+          { id: 'rule_today', operation: 'CURRENT_DATE', inputKeys: [], output: { id: 'today', name: '当前日期', code: 'current_date', canonicalType: 'DATE' } },
+        ],
+      }],
+    }
+
+    const produced = graphProducedFields({ kind: 'TRANSFORM', id: 'transform_date_calc' }, graph, [dateNode], dateFields)
+    expect(produced.slice(-4).map(field => field.expression)).toEqual([
+      {
+        type: 'DATE_DIFF', unit: 'MONTH', arguments: [
+          { type: 'FIELD_REF', nodeId: 'orders', field: 'created_at' },
+          { type: 'CURRENT_DATE' },
+        ],
+      },
+      { type: 'DATE_EXTRACT', unit: 'WEEKDAY', argument: { type: 'FIELD_REF', nodeId: 'orders', field: 'created_at' } },
+      { type: 'DATE_END', unit: 'YEAR', argument: { type: 'CURRENT_DATE' } },
+      { type: 'CURRENT_DATE' },
+    ])
+
+    const hydrated = hydrateDesignerGraph(emptyDSL(serializeDesignerGraph(graph)), [dateNode], [], dateFields)
+    expect(hydrated.transforms?.[0]).toMatchObject({
+      componentType: 'DATE_CALCULATION',
+      rules: [
+        { operation: 'DATE_DIFF', unit: 'MONTH', startDateSource: 'FIELD', endDateSource: 'CURRENT_DATE', inputKeys: ['orders.created_at'] },
+        { operation: 'DATE_EXTRACT', unit: 'WEEKDAY', dateSource: 'FIELD' },
+        { operation: 'DATE_END', unit: 'YEAR', dateSource: 'CURRENT_DATE', inputKeys: [] },
+        { operation: 'CURRENT_DATE', inputKeys: [] },
+      ],
+    })
+  })
+
   it('文本处理生成带受控参数的 Unicode 截取与替换表达式', () => {
     const graph: DesignerGraphV1 = {
       version: '1.0', nodePositions: { customer: { x: 0, y: 0 } }, nodeNames: { customer: '客户数据节点' }, joins: [], groups: [],
@@ -487,6 +600,15 @@ describe('dataset graph', () => {
   })
 
   it('数值、条件、空值和字段合并生成类型安全且可执行的表达式', () => {
+    const transformNodes = nodes.map(item => item.id === 'customer'
+      ? { ...item, columns: [...item.columns, column('table_customer', 'created_at', '创建日期', 'DATE')], selected: [...item.selected, 'created_at'] }
+      : item)
+    const transformFields: FieldOption[] = transformNodes.flatMap(item => item.columns.map(itemColumn => ({
+      key: `${item.id}.${itemColumn.columnName}`,
+      role: 'ATTRIBUTE',
+      aggregation: '',
+      output: true,
+    })))
     const graph: DesignerGraphV1 = {
       version: '1.0', nodePositions: { customer: { x: 0, y: 0 } }, nodeNames: { customer: '客户数据节点' }, joins: [], groups: [],
       transforms: [
@@ -499,11 +621,16 @@ describe('dataset graph', () => {
           rules: [
             { id: 'rule_gt', operation: 'CASE', inputKeys: ['customer.amount'], conditionOperator: 'GT', matchValue: '100', thenValue: '大额', elseValue: '普通', output: { id: 'amount_level', name: '金额档位', code: 'amount_level', canonicalType: 'STRING' } },
             { id: 'rule_contains', operation: 'CASE', inputKeys: ['customer.amount'], conditionOperator: 'CONTAINS', matchValue: '12', thenValue: '包含', elseValue: '不包含', output: { id: 'amount_contains', name: '金额包含判断', code: 'amount_contains', canonicalType: 'STRING' } },
+            { id: 'rule_current', operation: 'CASE', inputKeys: ['customer.amount'], conditionOperator: 'GT', matchValue: '100', thenMode: 'CURRENT_DATE', thenValue: '', elseMode: 'LITERAL', elseValue: '1970-01-01', output: { id: 'mapped_date', name: '映射日期', code: 'mapped_date', canonicalType: 'DATE' } },
+            { id: 'rule_preserve', operation: 'CASE', inputKeys: ['customer.amount'], conditionOperator: 'EQUALS', matchValue: '690', thenMode: 'LITERAL', thenValue: '智家定制生态圈', elseMode: 'FIELD', output: { id: 'mapped_domain', name: '业务领域', code: 'business_domain', canonicalType: 'STRING' } },
           ],
         },
         {
           id: 'transform_null', name: '金额补空', family: 'NULL', input: { kind: 'NODE', id: 'customer' }, position: { x: 300, y: 240 },
-          rules: [{ id: 'rule_fill', operation: 'COALESCE', inputKeys: ['customer.amount'], fallbackMode: 'LITERAL', fallbackValue: '0', output: { id: 'amount_filled', name: '补空金额', code: 'amount_filled', canonicalType: 'DECIMAL' } }],
+          rules: [
+            { id: 'rule_fill', operation: 'COALESCE', inputKeys: ['customer.amount'], fallbackMode: 'LITERAL', fallbackValue: '0', output: { id: 'amount_filled', name: '补空金额', code: 'amount_filled', canonicalType: 'DECIMAL' } },
+            { id: 'rule_fill_date', operation: 'COALESCE', inputKeys: ['customer.created_at'], fallbackMode: 'CURRENT_DATE', output: { id: 'date_filled', name: '补空日期', code: 'date_filled', canonicalType: 'DATE' } },
+          ],
         },
         {
           id: 'transform_merge', name: '客户金额编码', family: 'SPLIT_MERGE', input: { kind: 'NODE', id: 'customer' }, position: { x: 300, y: 360 },
@@ -512,10 +639,10 @@ describe('dataset graph', () => {
       ],
     }
 
-    expect(graphProducedFields({ kind: 'TRANSFORM', id: 'transform_number' }, graph, nodes, fields).at(-1)?.expression).toEqual({
+    expect(graphProducedFields({ kind: 'TRANSFORM', id: 'transform_number' }, graph, transformNodes, transformFields).at(-1)?.expression).toEqual({
       type: 'ROUND', arguments: [{ type: 'FIELD_REF', nodeId: 'customer', field: 'amount' }, { type: 'LITERAL', value: 1 }],
     })
-    const conditions = graphProducedFields({ kind: 'TRANSFORM', id: 'transform_condition' }, graph, nodes, fields)
+    const conditions = graphProducedFields({ kind: 'TRANSFORM', id: 'transform_condition' }, graph, transformNodes, transformFields)
     expect(conditions.find(field => field.code === 'amount_level')?.expression).toEqual({
       type: 'CASE',
       whens: [{ when: { type: 'GT', left: { type: 'FIELD_REF', nodeId: 'customer', field: 'amount' }, right: { type: 'LITERAL', value: 100 } }, then: { type: 'LITERAL', value: '大额' } }],
@@ -524,16 +651,42 @@ describe('dataset graph', () => {
     expect(conditions.find(field => field.code === 'amount_contains')?.expression).toMatchObject({
       whens: [{ when: { type: 'CONTAINS', left: { type: 'CAST', targetType: 'STRING' }, right: { type: 'LITERAL', value: '12' } } }],
     })
-    expect(graphProducedFields({ kind: 'TRANSFORM', id: 'transform_null' }, graph, nodes, fields).at(-1)?.expression).toEqual({
+    expect(conditions.find(field => field.code === 'mapped_date')?.expression).toEqual({
+      type: 'CASE',
+      whens: [{ when: { type: 'GT', left: { type: 'FIELD_REF', nodeId: 'customer', field: 'amount' }, right: { type: 'LITERAL', value: 100 } }, then: { type: 'CURRENT_DATE' } }],
+      else: { type: 'LITERAL', value: '1970-01-01' },
+    })
+    expect(conditions.find(field => field.code === 'business_domain')?.expression).toEqual({
+      type: 'CASE',
+      whens: [{ when: { type: 'EQUALS', left: { type: 'FIELD_REF', nodeId: 'customer', field: 'amount' }, right: { type: 'LITERAL', value: 690 } }, then: { type: 'LITERAL', value: '智家定制生态圈' } }],
+      else: { type: 'FIELD_REF', nodeId: 'customer', field: 'amount' },
+    })
+    const nullFilled = graphProducedFields({ kind: 'TRANSFORM', id: 'transform_null' }, graph, transformNodes, transformFields)
+    expect(nullFilled.find(field => field.code === 'amount_filled')?.expression).toEqual({
       type: 'COALESCE', arguments: [{ type: 'FIELD_REF', nodeId: 'customer', field: 'amount' }, { type: 'LITERAL', value: 0 }],
     })
-    expect(graphProducedFields({ kind: 'TRANSFORM', id: 'transform_merge' }, graph, nodes, fields).at(-1)?.expression).toEqual({
+    expect(nullFilled.find(field => field.code === 'date_filled')?.expression).toEqual({
+      type: 'COALESCE', arguments: [{ type: 'FIELD_REF', nodeId: 'customer', field: 'created_at' }, { type: 'CURRENT_DATE' }],
+    })
+    expect(graphProducedFields({ kind: 'TRANSFORM', id: 'transform_merge' }, graph, transformNodes, transformFields).at(-1)?.expression).toEqual({
       type: 'CONCAT',
       arguments: [
         { type: 'COALESCE', arguments: [{ type: 'FIELD_REF', nodeId: 'customer', field: 'customer_id' }, { type: 'LITERAL', value: '' }] },
         { type: 'LITERAL', value: '-' },
         { type: 'COALESCE', arguments: [{ type: 'CAST', targetType: 'STRING', argument: { type: 'FIELD_REF', nodeId: 'customer', field: 'amount' } }, { type: 'LITERAL', value: '' }] },
       ],
+    })
+    const hydrated = hydrateDesignerGraph(emptyDSL(serializeDesignerGraph(graph)), transformNodes, [], transformFields)
+    expect(hydrated.transforms?.find(item => item.id === 'transform_condition')?.rules[2]).toMatchObject({
+      thenMode: 'CURRENT_DATE',
+      elseMode: 'LITERAL',
+    })
+    expect(hydrated.transforms?.find(item => item.id === 'transform_condition')?.rules[3]).toMatchObject({
+      thenMode: 'LITERAL',
+      elseMode: 'FIELD',
+    })
+    expect(hydrated.transforms?.find(item => item.id === 'transform_null')?.rules[1]).toMatchObject({
+      fallbackMode: 'CURRENT_DATE',
     })
   })
 
@@ -714,5 +867,63 @@ describe('dataset graph', () => {
     }
 
     expect(validateDesignerGraph(graph, ['customer', 'region'])).toEqual({ valid: true, issues: [], errors: [] })
+  })
+
+  it('窗口计算组件回载 PARTITION BY 与 ORDER BY 并生成结构化 WINDOW 表达式', () => {
+    const graph: DesignerGraphV1 = {
+      version: '1.0',
+      nodePositions: { customer: { x: 20, y: 40 } },
+      nodeNames: { customer: '客户表' },
+      joins: [],
+      groups: [],
+      transforms: [{
+        id: 'window_1',
+        name: '客户内金额排名',
+        family: 'WINDOW',
+        componentType: 'WINDOW_FUNCTION',
+        input: { kind: 'NODE', id: 'customer' },
+        position: { x: 320, y: 40 },
+        rules: [{
+          id: 'rule_1',
+          operation: 'WINDOW',
+          inputKeys: [],
+          windowFunction: 'DENSE_RANK',
+          partitionByKeys: ['customer.customer_id'],
+          orderBy: [{ id: 'order_1', key: 'customer.amount', direction: 'DESC' }],
+          output: { id: 'output_1', name: '客户内排名', code: 'customer_rank', canonicalType: 'INTEGER' },
+        }],
+      }],
+      end: {
+        id: 'end_1',
+        name: '最终输出',
+        input: { kind: 'TRANSFORM', id: 'window_1' },
+        position: { x: 620, y: 40 },
+        outputs: [],
+      },
+    }
+
+    const hydrated = hydrateDesignerGraph(emptyDSL(serializeDesignerGraph(graph)), [nodes[0]], [], fields)
+    const output = graphProducedFields({ kind: 'TRANSFORM', id: 'window_1' }, hydrated, [nodes[0]], fields)
+    const ranking = output.find(field => field.key === 'window_1.output_1')
+
+    expect(hydrated.transforms?.[0].rules[0]).toMatchObject({
+      operation: 'WINDOW',
+      windowFunction: 'DENSE_RANK',
+      partitionByKeys: ['customer.customer_id'],
+      orderBy: [{ key: 'customer.amount', direction: 'DESC' }],
+    })
+    expect(ranking).toMatchObject({
+      code: 'customer_rank',
+      canonicalType: 'INTEGER',
+      expression: {
+        type: 'WINDOW',
+        function: 'DENSE_RANK',
+        partitionBy: [{ type: 'FIELD_REF', nodeId: 'customer', field: 'customer_id' }],
+        orderBy: [{
+          expression: { type: 'FIELD_REF', nodeId: 'customer', field: 'amount' },
+          direction: 'DESC',
+        }],
+      },
+    })
   })
 })

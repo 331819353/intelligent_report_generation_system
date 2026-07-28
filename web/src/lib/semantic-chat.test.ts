@@ -3,6 +3,33 @@ import { semanticChatAPI, type SemanticQueryPlan } from './semantic-chat'
 
 afterEach(() => vi.unstubAllGlobals())
 
+test('plans a turn with every prior verified metric context', async () => {
+  const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+    questionHash: 'a'.repeat(64),
+    intent: 'METRIC',
+    metricCodes: ['sales_amount', 'order_count'],
+    contextQueryPlanIds: ['plan-1', 'plan-2'],
+    contextInherited: true,
+    plans: [],
+  }), { status: 201, headers: { 'Content-Type': 'application/json' } }))
+  vi.stubGlobal('fetch', fetchMock)
+
+  await semanticChatAPI.planTurn({
+    question: '那上个月呢？',
+    priorQuestions: ['本月销售额是多少？', '其中华东是多少？'],
+    contextQueryPlanIds: ['plan-1', 'plan-2'],
+  })
+
+  const [url, init] = fetchMock.mock.calls[0]
+  expect(url).toBe('/api/v1/semantic-qa/query-turns')
+  expect(JSON.parse(String(init?.body))).toEqual({
+    question: '那上个月呢？',
+    maximumPathHops: 8,
+    priorQuestions: ['本月销售额是多少？', '其中华东是多少？'],
+    contextQueryPlanIds: ['plan-1', 'plan-2'],
+  })
+})
+
 test('plans a follow-up question against the previous governed query plan', async () => {
   const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
     id: 'plan-2',

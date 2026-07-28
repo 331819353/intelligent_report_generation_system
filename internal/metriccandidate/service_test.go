@@ -20,10 +20,11 @@ const (
 )
 
 type candidateStoreStub struct {
-	getFn      func(context.Context, string, string) (Candidate, error)
-	listFn     func(context.Context, string, ListFilter) ([]Candidate, int, error)
-	rejectFn   func(context.Context, string, string, string, RejectInput) (Candidate, error)
-	identifyFn func(context.Context, string, string) (IdentificationResult, error)
+	getFn       func(context.Context, string, string) (Candidate, error)
+	listFn      func(context.Context, string, ListFilter) ([]Candidate, int, error)
+	rejectFn    func(context.Context, string, string, string, RejectInput) (Candidate, error)
+	identifyFn  func(context.Context, string, string) (IdentificationResult, error)
+	automaticFn func(context.Context, string, int) ([]AutomaticApprovalCandidate, error)
 }
 
 func (store *candidateStoreStub) List(ctx context.Context, tenantID string, filter ListFilter) ([]Candidate, int, error) {
@@ -55,6 +56,17 @@ func (store *candidateStoreStub) TriggerManualIdentification(
 		return IdentificationResult{}, errors.New("unexpected TriggerManualIdentification call")
 	}
 	return store.identifyFn(ctx, tenantID, actorID)
+}
+
+func (store *candidateStoreStub) ListAutomaticApprovalCandidates(
+	ctx context.Context,
+	tenantID string,
+	limit int,
+) ([]AutomaticApprovalCandidate, error) {
+	if store.automaticFn == nil {
+		return nil, errors.New("unexpected ListAutomaticApprovalCandidates call")
+	}
+	return store.automaticFn(ctx, tenantID, limit)
 }
 
 type metricCreatorStub struct {
@@ -128,6 +140,56 @@ func TestServiceAcceptUsesAtomicMetricCreationAndReturnsAcceptedState(t *testing
 	}
 	if result.Candidate.Status != CandidateStatusAccepted || result.Candidate.AcceptedMetricID != testMetricID || result.Metric.ID != testMetricID {
 		t.Fatalf("Accept() result = %#v", result)
+	}
+}
+
+func TestAutomaticApproverAcceptsProgramIdentifiedDWSMetric(t *testing.T) {
+	reviewable := reviewCandidate(t, CandidateStatusReady)
+	accepted := reviewable
+	accepted.Status = CandidateStatusAccepted
+	accepted.Version++
+	accepted.AcceptedMetricID = testMetricID
+
+	getCalls := 0
+	store := &candidateStoreStub{
+		automaticFn: func(_ context.Context, tenantID string, limit int) ([]AutomaticApprovalCandidate, error) {
+			if tenantID != testTenantID || limit != automaticApprovalBatchSize {
+				t.Fatalf("automatic list scope = (%q, %d)", tenantID, limit)
+			}
+			return []AutomaticApprovalCandidate{{Candidate: reviewable, ActorID: testActorID}}, nil
+		},
+		getFn: func(context.Context, string, string) (Candidate, error) {
+			getCalls++
+			if getCalls == 1 {
+				return reviewable, nil
+			}
+			return accepted, nil
+		},
+	}
+	creator := &metricCreatorStub{createFn: func(
+		_ context.Context,
+		tenantID, actorID, candidateID string,
+		expectedVersion int64,
+		_ metric.CreateInput,
+	) (metric.Record, error) {
+		if tenantID != testTenantID || actorID != testActorID ||
+			candidateID != reviewable.ID || expectedVersion != reviewable.Version {
+			t.Fatalf(
+				"automatic create scope = (%q, %q, %q, %d)",
+				tenantID, actorID, candidateID, expectedVersion,
+			)
+		}
+		return metric.Record{ID: testMetricID}, nil
+	}}
+
+	processed, err := NewAutomaticApprover(
+		store, NewService(store, creator),
+	).ProcessPending(context.Background(), testTenantID)
+	if err != nil || !processed {
+		t.Fatalf("ProcessPending() processed=%v error=%v", processed, err)
+	}
+	if creator.calls != 1 || getCalls != 2 {
+		t.Fatalf("automatic approval calls: creator=%d get=%d", creator.calls, getCalls)
 	}
 }
 
@@ -406,6 +468,41 @@ func TestWorkerPersistsBlockedCandidatesWhenPublishedDatasetDependencyIsUnavaila
 	}
 	if !extractionBlockedByUnavailable(result) {
 		t.Fatal("dependency-blocked result was not recognized by persistence guard")
+	}
+}
+
+func TestWorkerRegistersDWSFieldAssetsBeforeMaterializationCompletes(t *testing.T) {
+	document := monthlyPaymentsDocument()
+	document.Dataset.Layer = dataset.LayerDWS
+	document.Nodes[0].Type = "DATASET"
+	document.Nodes[0].DataSourceID = ""
+	document.Nodes[0].TableID = ""
+	document.Nodes[0].DatasetVersionID = "12121212-1212-4212-8212-121212121212"
+	version := publishedDatasetVersion(t, document)
+	version.Layer = dataset.LayerDWS
+	claim := claimForVersion(version)
+	claim.ExtractorVersion = CodeIdentificationVersion
+	store := &jobStoreStub{
+		claims:                    []*JobClaim{&claim},
+		loadVersion:               version,
+		loadDependencyUnavailable: true,
+	}
+
+	handled, err := NewWorker(store).ProcessNext(
+		context.Background(), testTenantID, "worker-1", time.Minute,
+	)
+	if err != nil || !handled {
+		t.Fatalf("ProcessNext() handled=%v error=%v", handled, err)
+	}
+	if store.finishCalls != 1 || len(store.results) != 1 ||
+		len(store.results[0].Candidates) == 0 {
+		t.Fatalf("program DWS extraction calls/results = %#v", store)
+	}
+	for _, candidate := range store.results[0].Candidates {
+		if candidate.Status == CandidateStatusBlocked ||
+			containsString(candidate.BlockReasons, BlockReasonDatasetUnavailable) {
+			t.Fatalf("semantic DWS asset was blocked by materialization: %#v", candidate)
+		}
 	}
 }
 

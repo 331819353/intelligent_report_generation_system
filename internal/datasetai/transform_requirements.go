@@ -34,7 +34,16 @@ func deriveCreateTransformRequirements(instruction string) []TransformRequiremen
 		if contains("每个月", "每月", "月度", "按月", "每季度", "季度", "按季度", "每年", "年度", "按年", "每天", "每日", "按天", "按日") {
 			return true
 		}
-		return contains("转为", "转成", "转换成", "转换为", "提取") && contains("年份", "年月", "年季", "季度", "年月日")
+		return contains("转为", "转成", "转换成", "转换为") && contains("年份", "年月", "年季", "季度", "年月日")
+	}
+	dateCalculation := func() bool {
+		if contains("日期计算", "日期差", "相差多少年", "相差多少月", "相差多少天", "自然年差", "自然月差", "自然日差", "当前日期") {
+			return true
+		}
+		if contains("第一天", "最后一天", "月初", "月末", "季初", "季末", "年初", "年末", "星期几", "年内第几天") {
+			return contains("日期", "本周", "本月", "本季", "本季度", "本年", "当前")
+		}
+		return contains("提取", "获取") && contains("日期的年", "日期的月", "日期的日", "日期年份", "日期月份", "日期日")
 	}
 	conditionMapping := func() bool {
 		if contains("条件映射", "case when", "case_when") {
@@ -68,6 +77,7 @@ func deriveCreateTransformRequirements(instruction string) []TransformRequiremen
 		{componentType: "NUMBER_ARITHMETIC", reason: "用户要求字段数值运算", match: func(string) bool {
 			return contains("数值运算", "字段相加", "字段相减", "字段相乘", "字段相除", "相加", "相减", "相乘", "相除", "加减乘除")
 		}},
+		{componentType: "DATE_CALCULATION", reason: "用户要求计算日期差、日期部分或周期边界", match: func(string) bool { return dateCalculation() }},
 		{componentType: "DATE_FORMAT", reason: "用户要求转换日期粒度或格式", match: func(string) bool { return dateConversion() }},
 		{componentType: "NULL", reason: "用户要求填充空值", match: func(string) bool {
 			return contains("空值填充", "空值处理", "缺失值填充", "缺失值处理", "null填充", "null 填充", "为空时填充", "coalesce(")

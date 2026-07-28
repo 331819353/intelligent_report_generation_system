@@ -69,10 +69,9 @@ attempt、owner、lease token 和未过期租约，API 不能写画像任务或�
    以及 `WAREHOUSE_STAGE_MAX_BYTES`，不能使用开发默认值。当前字节/行基准依次为
    请求 1 MiB、普通 JSON 64 MiB、技术元数据同步 200,000 个源字典行、样本
    16 KiB/单元格、64 KiB/行、512 KiB/响应，NDJSON 1 MiB/单元格、
-   4 MiB/行、1 GiB/整流，数据库或 Excel/CSV 单任务 staging 逻辑载荷 512 MiB。
-   文件对象/CSV/XLS 读取使用
-   `min(max_excel_file_bytes, WAREHOUSE_STAGE_MAX_BYTES)`，XLSX 展开和 worksheet
-   内存预算再取解析器上限与 staging 上限中的更严格值。
+   4 MiB/行、1 GiB/整流，数据库或 Excel/CSV 单任务 staging 逻辑载荷 1 GiB。
+   文件对象读取受租户 `max_excel_file_bytes` 限制；XLSX 展开不得超过压缩文件
+   的 8 倍和 2 GiB，worksheet XML 超过 16 MiB 时使用临时文件。
 2. `CONNECTOR_EGRESS_ALLOWLIST` 只配置获批的 `IP/CIDR:port`；
    `CONNECTOR_EGRESS_DENYLIST` 显式覆盖平台 PostgreSQL、Redis、MinIO、API 和云
    控制面网段。Connector 子网的 Security Group / NetworkPolicy / 主机防火墙采用
@@ -141,12 +140,10 @@ CIDR，驱动随后 pin 到已验证 IP。该应用层校验不能完全约束 O
   `LONG / LONG RAW / XMLTYPE / JSON` 等类型不会被采样。单元格、行、响应任一
   超限都整体失败，不交给 LLM；
 - ODS 流的单元格、行、事件、整流或 5,000,000 行上限任一超限，或数据库
-  staging 逻辑载荷超过 512 MiB 时，同一 PostgreSQL 事务回滚且不产生 ACTIVE
+  staging 逻辑载荷超过 1 GiB 时，同一 PostgreSQL 事务回滚且不产生 ACTIVE
   物化；不能把截断结果视为成功；
-- Excel/CSV 逻辑 staging 同样受 512 MiB 上限约束；对象、CSV、XLS 读取超过
-  `min(max_excel_file_bytes, WAREHOUSE_STAGE_MAX_BYTES)`，或 XLSX 展开/
-  worksheet 内存超过各自更严格上限时失败关闭。用“文件本体超过低 stage cap、
-  选中 Sheet 很小”的用例验证保守拒绝，且不产生 ACTIVE 物化；
+- Excel/CSV 逻辑 staging 同样受 1 GiB 上限约束；对象读取超过租户文件配额，
+  或 XLSX 展开超过 8 倍压缩比/2 GiB 绝对边界时失败关闭，且不产生 ACTIVE 物化；
 - MySQL 服务端游标在超限、取消、客户端断流或提前 EOF 后先关闭 socket，物理连接
   不回池；后续请求使用新连接，清理路径不会继续排空未读结果；
 - 新 ACTIVE DWS 物化会立即撤销旧 FULL 维度的成员可用性；只有当前

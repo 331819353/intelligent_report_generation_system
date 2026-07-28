@@ -109,7 +109,7 @@ func TestDatasetPublicationApprovalCommitsDecisionAndVersionAtomically(t *testin
 	}
 	preparationWorker := metriccandidate.NewPublicationPreparationWorker(
 		candidateStore,
-		metriccandidate.NewPublicationGenerator(nil),
+		metriccandidate.NewPublicationGenerator(),
 	)
 	preparationProcessed, err := preparationWorker.ProcessNext(
 		ctx, tenantID, "dataset-approval-integration-worker", time.Minute,
