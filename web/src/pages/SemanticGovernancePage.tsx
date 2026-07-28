@@ -7,6 +7,7 @@ import {
 } from 'react'
 import { AppShell } from '../components/AppShell'
 import { AssetManagementTabs } from '../components/AssetManagementTabs'
+import { AssetSharingSelect } from '../components/AssetSharingSelect'
 import { RequestError } from '../lib/api'
 import {
   createDimensionRefreshIdempotencyKey,
@@ -559,6 +560,11 @@ export function SemanticGovernancePage({ initialView = 'candidates' }: { initial
                 onQueryChange={value => { setDimensionLoading(true); setDimensionQuery(value) }}
                 onStatusChange={value => { setDimensionLoading(true); setDimensionStatus(value) }}
                 onReload={() => void loadDimensions()}
+                onSharingChange={(dimensionID, sharingScope) => setDimensions(current =>
+                  current.map(item => item.id === dimensionID
+                    ? { ...item, sharingScope }
+                    : item)
+                )}
                 onOpen={dimension => {
                   setMemberQuery('')
                   void loadDimensionDetail(dimension)
@@ -786,6 +792,7 @@ function DimensionDirectory({
   onQueryChange,
   onStatusChange,
   onReload,
+  onSharingChange,
   onOpen,
 }: {
   dimensions: Dimension[]
@@ -796,6 +803,10 @@ function DimensionDirectory({
   onQueryChange: (value: string) => void
   onStatusChange: (value: '' | 'DRAFT' | 'PUBLISHED' | 'DEPRECATED') => void
   onReload: () => void
+  onSharingChange: (
+    dimensionID: string,
+    sharingScope: 'PRIVATE' | 'DOMAIN' | 'PLATFORM',
+  ) => void
   onOpen: (dimension: Dimension) => void
 }) {
   return (
@@ -847,6 +858,14 @@ function DimensionDirectory({
               </div>
               <footer>
                 <span>字段 {dimension.fieldCode}</span>
+                <AssetSharingSelect
+                  resourceType="DIMENSION"
+                  resourceID={dimension.id}
+                  value={dimension.sharingScope || 'PRIVATE'}
+                  ownerUserID={dimension.createdBy}
+                  assetDomainID={dimension.domainId}
+                  onChange={sharingScope => onSharingChange(dimension.id, sharingScope)}
+                />
                 <button type="button" onClick={() => onOpen(dimension)}>查看治理详情</button>
               </footer>
             </article>

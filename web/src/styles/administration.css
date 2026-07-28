@@ -1,0 +1,284 @@
+.administration-stack { display: grid; gap: 16px; }
+
+.administration-hero {
+  min-height: 138px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+  overflow: hidden;
+  border: 1px solid #dce7fb;
+  border-radius: 14px;
+  padding: 25px 30px;
+  background: #f0f5ff;
+}
+.administration-hero > div { max-width: 730px; }
+.administration-hero h2 { margin: 7px 0 7px; color: #1b2941; font-size: 25px; letter-spacing: -.035em; }
+.administration-hero p { margin: 0; color: #66758c; font-size: 12px; line-height: 1.7; }
+.administration-hero > svg { flex: none; color: #2864dc; opacity: .86; }
+
+.administration-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.administration-metrics article {
+  position: relative;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 11px;
+  padding: 16px 18px;
+  background: white;
+}
+.administration-metrics article > svg { grid-row: 1 / span 2; grid-column: 2; color: #2864dc; }
+.administration-metrics span, .administration-metrics small { color: #7a8390; }
+.administration-metrics span { font-size: 10px; font-weight: 750; }
+.administration-metrics strong { color: #202632; font-size: 25px; line-height: 1.1; }
+.administration-metrics small { grid-column: 1 / -1; font-size: 9px; }
+
+.administration-feedback {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border-radius: 9px;
+  padding: 10px 12px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.administration-feedback.success { border: 1px solid #a7f3d0; background: #f0fdf4; color: #047857; }
+.administration-feedback.error { border: 1px solid #fecaca; background: #fef2f2; color: #b42318; }
+.administration-feedback button { display: grid; flex: none; place-items: center; border: 0; padding: 2px; background: transparent; color: inherit; }
+
+.administration-workspace {
+  min-height: 535px;
+  display: grid;
+  grid-template-columns: 218px minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid #e1e5eb;
+  border-radius: 13px;
+  background: white;
+}
+.administration-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 14px;
+  border-right: 1px solid #e6eaf0;
+  background: #f9fafc;
+}
+.administration-tabs > button {
+  min-height: 56px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 10px 11px;
+  background: transparent;
+  color: #6a7482;
+  text-align: left;
+}
+.administration-tabs > button > span { min-width: 0; display: grid; gap: 3px; }
+.administration-tabs > button strong { color: #344054; font-size: 11px; }
+.administration-tabs > button small { overflow: hidden; color: #98a2b3; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.administration-tabs > button:hover { background: white; }
+.administration-tabs > button.active { border-color: #d6e3fb; background: #edf3ff; color: #2864dc; }
+.administration-tabs > button.active strong { color: #2059c7; }
+.administration-security-note {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 9px;
+  margin-top: auto;
+  border: 1px solid #e4e7ec;
+  border-radius: 9px;
+  padding: 11px;
+  background: white;
+  color: #667085;
+}
+.administration-security-note > span { display: grid; gap: 4px; }
+.administration-security-note strong { font-size: 9px; }
+.administration-security-note small { font-size: 8px; line-height: 1.55; }
+
+.administration-panel { min-width: 0; background: white; }
+.administration-view { display: grid; align-content: start; gap: 20px; padding: 23px 25px 28px; }
+.administration-view-heading { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.administration-view-heading h2, .permission-management aside h2, .permission-heading h2 { margin: 5px 0 4px; color: #202632; font-size: 20px; letter-spacing: -.025em; }
+.administration-view-heading p, .permission-heading p { margin: 0; color: #7c8592; font-size: 10px; line-height: 1.6; }
+.administration-view-heading .quiet-button { display: inline-flex; align-items: center; gap: 6px; flex: none; padding: 8px 12px; font-size: 10px; }
+
+.domain-management-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.domain-management-grid article {
+  min-width: 0;
+  display: grid;
+  gap: 13px;
+  border: 1px solid #e3e7ed;
+  border-radius: 11px;
+  padding: 15px;
+  background: white;
+  transition: border-color .15s ease, box-shadow .15s ease, opacity .15s ease;
+}
+.domain-management-grid article:hover { border-color: #cbd9f1; box-shadow: 0 5px 18px #183b7509; }
+.domain-management-grid article.disabled { background: #fafbfc; opacity: .68; }
+.domain-management-grid article > header, .domain-management-grid article > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.domain-management-avatar {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: #edf3ff;
+  color: #2864dc;
+  font-size: 12px;
+  font-weight: 850;
+}
+.domain-status { border-radius: 999px; padding: 4px 7px; font-size: 8px; font-weight: 800; }
+.domain-status.active { background: #ecfdf3; color: #047857; }
+.domain-status.disabled { background: #f2f4f7; color: #667085; }
+.domain-management-grid h3 { margin: 0 0 5px; color: #29313e; font-size: 14px; }
+.domain-management-grid h3 em { margin-left: 7px; border-radius: 999px; padding: 3px 6px; background: #edf3ff; color: #2864dc; font-size: 8px; font-style: normal; vertical-align: 1px; }
+.domain-management-grid code { color: #8b95a3; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; }
+.domain-management-grid p { min-height: 34px; margin: 0; color: #7a8390; font-size: 10px; line-height: 1.65; }
+.domain-management-grid footer { padding-top: 11px; border-top: 1px solid #edf0f3; }
+.domain-management-grid footer small { color: #98a2b3; font-size: 8px; }
+.domain-management-grid footer button { display: grid; place-items: center; border: 0; padding: 0; background: transparent; color: #2864dc; }
+.domain-management-grid footer button:disabled { color: #b9c0ca; cursor: not-allowed; }
+
+.member-management-list { display: grid; gap: 9px; }
+.member-management-list article {
+  display: grid;
+  grid-template-columns: minmax(170px, .8fr) minmax(115px, .5fr) minmax(220px, 1fr) minmax(280px, 1.3fr);
+  gap: 16px;
+  align-items: center;
+  border: 1px solid #e4e7ec;
+  border-radius: 10px;
+  padding: 13px 14px;
+}
+.member-identity { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.member-identity > span {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  flex: none;
+  place-items: center;
+  border-radius: 50%;
+  background: #edf3ff;
+  color: #2864dc;
+  font-size: 11px;
+  font-weight: 850;
+}
+.member-identity > div, .member-meta { min-width: 0; display: grid; gap: 3px; }
+.member-identity strong { overflow: hidden; color: #344054; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.member-identity small, .member-meta small { overflow: hidden; color: #98a2b3; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.member-meta > span { width: max-content; border-radius: 999px; padding: 3px 6px; font-size: 8px; font-weight: 800; }
+.member-meta > span.active { background: #ecfdf3; color: #047857; }
+.member-domain-list, .member-role-list { min-width: 0; display: flex; flex-wrap: wrap; gap: 5px; }
+.member-domain-list > small, .member-role-list > small {
+  width: 100%;
+  color: #98a2b3;
+  font-size: 8px;
+  font-weight: 750;
+}
+.member-domain-list button, .member-role-list button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 27px;
+  border: 1px solid #e1e5eb;
+  border-radius: 7px;
+  padding: 0 8px;
+  background: white;
+  color: #667085;
+  font-size: 8px;
+  font-weight: 750;
+}
+.member-domain-list button:hover:not(:disabled), .member-role-list button:hover:not(:disabled) { border-color: #a8c1f2; color: #2864dc; }
+.member-domain-list button.assigned { border-color: #b9dfcc; background: #edf9f3; color: #127147; }
+.member-role-list button.assigned { border-color: #b7cdf6; background: #edf3ff; color: #2059c7; }
+
+.permission-management { min-height: 535px; display: grid; grid-template-columns: 215px minmax(0, 1fr); }
+.permission-management > aside { display: flex; flex-direction: column; gap: 5px; padding: 22px 13px; border-right: 1px solid #e6eaf0; background: #fcfcfd; }
+.permission-management aside header { padding: 0 8px 11px; }
+.permission-management aside > button {
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 8px 9px;
+  background: transparent;
+  color: #7a8390;
+  text-align: left;
+}
+.permission-management aside > button > span { min-width: 0; display: grid; gap: 3px; }
+.permission-management aside > button strong { color: #344054; font-size: 10px; }
+.permission-management aside > button small { overflow: hidden; color: #98a2b3; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.permission-management aside > button.active { border-color: #d6e3fb; background: #edf3ff; color: #2864dc; }
+.permission-management aside > button.active strong { color: #2059c7; }
+.permission-management > section { min-width: 0; padding: 22px 24px 28px; }
+.permission-heading { display: flex; align-items: center; justify-content: space-between; gap: 22px; margin-bottom: 19px; }
+.permission-heading .primary-button { flex: none; min-height: 36px; padding: 7px 12px; font-size: 10px; }
+.permission-group-list { display: grid; gap: 10px; }
+.permission-group-list > section { border: 1px solid #e4e7ec; border-radius: 9px; }
+.permission-group-list > section > header { display: flex; align-items: center; gap: 7px; padding: 10px 12px; border-bottom: 1px solid #edf0f3; background: #fafbfc; color: #5e6b7c; }
+.permission-group-list > section > header strong { font-size: 10px; }
+.permission-group-list > section > header small { margin-left: auto; color: #98a2b3; font-size: 8px; }
+.permission-group-list > section > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; padding: 9px; }
+.permission-group-list label {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 17px minmax(0, 1fr);
+  gap: 7px;
+  align-items: center;
+  border: 1px solid #edf0f3;
+  border-radius: 7px;
+  padding: 8px;
+  cursor: pointer;
+}
+.permission-group-list label:hover { border-color: #cbd9f1; }
+.permission-group-list label.checked { border-color: #c3d5f7; background: #f3f7ff; }
+.permission-group-list input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.permission-check { width: 16px; height: 16px; display: grid; place-items: center; border: 1px solid #d0d5dd; border-radius: 4px; background: white; color: white; }
+.checked .permission-check { border-color: #2864dc; background: #2864dc; }
+.permission-group-list label > span:last-child { min-width: 0; display: grid; gap: 2px; }
+.permission-group-list label strong, .permission-group-list label small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.permission-group-list label strong { color: #475467; font-size: 9px; }
+.permission-group-list label small { color: #98a2b3; font-size: 7px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+.administration-empty { min-height: 300px; display: grid; place-items: center; align-content: center; gap: 9px; padding: 30px; color: #98a2b3; text-align: center; }
+.administration-empty strong { color: #344054; font-size: 13px; }
+.administration-empty p { margin: 0; font-size: 10px; }
+
+.administration-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: #1720335c;
+  backdrop-filter: blur(3px);
+}
+.administration-dialog { width: min(490px, 100%); overflow: hidden; border: 1px solid #e1e5eb; border-radius: 14px; background: white; box-shadow: 0 24px 70px #10182830; }
+.administration-dialog > header { display: flex; justify-content: space-between; gap: 20px; padding: 21px 22px 18px; border-bottom: 1px solid #eaecf0; }
+.administration-dialog > header h2 { margin: 5px 0 4px; color: #202632; font-size: 20px; }
+.administration-dialog > header p { margin: 0; color: #7c8592; font-size: 10px; }
+.administration-dialog > header button { width: 32px; height: 32px; display: grid; flex: none; place-items: center; border: 1px solid #e4e7ec; border-radius: 8px; background: white; color: #667085; }
+.administration-dialog form { display: grid; gap: 14px; padding: 20px 22px 22px; }
+.administration-dialog label { display: grid; gap: 7px; color: #475467; font-size: 10px; font-weight: 750; }
+.administration-dialog label small { color: #98a2b3; font-size: 8px; font-weight: 500; }
+.administration-dialog input, .administration-dialog textarea { width: 100%; border: 1px solid #d8dde5; border-radius: 8px; padding: 10px 11px; background: #fafbfc; color: #344054; outline: 0; }
+.administration-dialog textarea { min-height: 82px; resize: vertical; }
+.administration-dialog input:focus, .administration-dialog textarea:focus { border-color: #7fa3ec; background: white; box-shadow: 0 0 0 3px #2864dc13; }
+.administration-dialog-error { border: 1px solid #fecaca; border-radius: 8px; padding: 9px 10px; background: #fef2f2; color: #b42318; font-size: 9px; }
+.administration-dialog footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 3px; }
+.administration-dialog footer button { min-height: 36px; display: inline-flex; align-items: center; gap: 6px; padding: 7px 13px; font-size: 10px; }
+
+@media (max-width: 1260px) {
+  .domain-management-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .member-management-list article { grid-template-columns: minmax(180px, 1fr) minmax(120px, .7fr); }
+  .member-domain-list, .member-role-list { grid-column: 1 / -1; }
+  .permission-group-list > section > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

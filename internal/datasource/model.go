@@ -8,17 +8,18 @@ import (
 )
 
 var (
-	ErrInvalidConfiguration = errors.New("invalid data source configuration")
-	ErrQuotaExceeded        = errors.New("tenant data source quota exceeded")
-	ErrCodeConflict         = errors.New("data source code already exists")
-	ErrTestRequired         = errors.New("a successful connection test is required for the current data source version")
-	ErrTestExpired          = errors.New("the successful connection test for the current data source version has expired")
-	ErrSourceVersionChanged = errors.New("data source configuration changed during the operation")
-	ErrVersionConflict      = errors.New("data source was modified by another request")
-	ErrVersioningRequired   = errors.New("data source versioned publication is not supported by the repository")
-	ErrReviewPending        = errors.New("data source publication review is pending")
-	ErrReviewRejected       = errors.New("data source publication review was rejected")
-	ErrDatasetReferenced    = errors.New("data source is referenced by an active dataset")
+	ErrInvalidConfiguration       = errors.New("invalid data source configuration")
+	ErrQuotaExceeded              = errors.New("tenant data source quota exceeded")
+	ErrCodeConflict               = errors.New("data source code already exists")
+	ErrTestRequired               = errors.New("a successful connection test is required for the current data source version")
+	ErrTestExpired                = errors.New("the successful connection test for the current data source version has expired")
+	ErrSourceVersionChanged       = errors.New("data source configuration changed during the operation")
+	ErrVersionConflict            = errors.New("data source was modified by another request")
+	ErrVersioningRequired         = errors.New("data source versioned publication is not supported by the repository")
+	ErrReviewPending              = errors.New("data source publication review is pending")
+	ErrReviewRejected             = errors.New("data source publication review was rejected")
+	ErrDatasetReferenced          = errors.New("data source is referenced by an active dataset")
+	ErrSharingOwnerDomainRequired = errors.New("only the data source owner in the owning domain can change its sharing scope")
 )
 
 var dataSourceCodePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}$`)
@@ -76,16 +77,18 @@ const (
 )
 
 type Source struct {
-	ID          string         `json:"id"`
-	TenantID    string         `json:"tenantId"`
-	Code        string         `json:"code"`
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	OwnerID     string         `json:"ownerId,omitempty"`
-	Visibility  Visibility     `json:"visibility"`
-	Type        Type           `json:"type"`
-	Status      Status         `json:"status"`
-	Config      map[string]any `json:"config"`
+	ID           string         `json:"id"`
+	TenantID     string         `json:"tenantId"`
+	Code         string         `json:"code"`
+	Name         string         `json:"name"`
+	Description  string         `json:"description"`
+	OwnerID      string         `json:"ownerId,omitempty"`
+	Visibility   Visibility     `json:"visibility"`
+	DomainID     string         `json:"domainId"`
+	SharingScope string         `json:"sharingScope"`
+	Type         Type           `json:"type"`
+	Status       Status         `json:"status"`
+	Config       map[string]any `json:"config"`
 	// SecretRef 只在服务端解析，任何数据源响应都不得把加密值或外部密钥引用返回浏览器。
 	SecretRef              string            `json:"-"`
 	FileAssetID            string            `json:"fileAssetId,omitempty"`

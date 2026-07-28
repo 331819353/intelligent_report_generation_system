@@ -33,6 +33,8 @@ type Dimension struct {
 	Code                    string     `json:"code"`
 	Name                    string     `json:"name"`
 	Description             string     `json:"description"`
+	DomainID                string     `json:"domainId"`
+	SharingScope            string     `json:"sharingScope"`
 	DimensionType           string     `json:"dimensionType"`
 	MemberIndexPolicy       string     `json:"memberIndexPolicy"`
 	HighCardinality         bool       `json:"highCardinality"`

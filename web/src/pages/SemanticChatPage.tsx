@@ -110,7 +110,7 @@ function resultColumnLabels(execution: SemanticQueryExecution) {
   return labels
 }
 
-function dimensionConditionText(plan: SemanticQueryPlan, question = '') {
+function dimensionConditionText(plan: SemanticQueryPlan) {
   return (plan.conditions?.dimensions ?? []).map(dimension => {
     const label = plan.evidence.find(item =>
       item.subjectType === 'DIMENSION' && item.subjectRef === dimension.dimensionId,
@@ -140,7 +140,7 @@ function buildAnswer(execution: SemanticQueryExecution, question = '') {
   if (result.rowCount === 0 || result.rows.length === 0) return '在当前筛选条件与数据权限范围内没有查询到结果。'
   const first = result.rows[0] ?? []
   const columns = resultColumnLabels(execution)
-  const conditions = dimensionConditionText(execution.queryPlan, question)
+  const conditions = dimensionConditionText(execution.queryPlan)
   const scope = question.includes('小微') ||
     execution.queryPlan.conditions?.metricCode === workforceMetricCode
     ? '在小微人员范围内，'

@@ -12,6 +12,8 @@ export type SemanticAsset = {
   commonTerm: string
   mappingValue: string
   knowledgeType: string
+  domainId?: string
+  sharingScope?: 'PRIVATE' | 'DOMAIN' | 'PLATFORM'
   status: SemanticAssetStatus
   version: number
   embeddingStatus: SemanticAssetEmbeddingStatus

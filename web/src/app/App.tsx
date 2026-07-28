@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { AdminPage } from '../pages/AdminPage'
 import { DesignerPage } from '../pages/DesignerPage'
@@ -7,18 +8,29 @@ import { DimensionValueGraphPage } from '../pages/DimensionValueGraphPage'
 import { LoginPage } from '../pages/LoginPage'
 import { MetricCatalogPage } from '../pages/MetricCatalogPage'
 import { MetricCenterPage } from '../pages/MetricCenterPage'
+import { ManagementCenterPage } from '../pages/ManagementCenterPage'
 import { SemanticAssetPage } from '../pages/SemanticAssetPage'
 import { SemanticGovernancePage } from '../pages/SemanticGovernancePage'
 import { SemanticChatPage } from '../pages/SemanticChatPage'
 import { ViewerPage } from '../pages/ViewerPage'
 import { RequireAuth } from '../components/RequireAuth'
+import { domainChangedEvent } from '../lib/domain-context'
 
 /** 定义公开登录页、受保护业务页和兜底跳转。 */
 export function App() {
+  const [domainRevision, setDomainRevision] = useState(0)
+
+  useEffect(() => {
+    const refreshCurrentRoute = () => setDomainRevision(revision => revision + 1)
+    window.addEventListener(domainChangedEvent, refreshCurrentRoute)
+    return () => window.removeEventListener(domainChangedEvent, refreshCurrentRoute)
+  }, [])
+
   return (
-    <Routes>
+    <Routes key={domainRevision}>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/admin" element={<RequireAuth><AdminPage /></RequireAuth>} />
+      <Route path="/management" element={<RequireAuth><ManagementCenterPage /></RequireAuth>} />
       <Route path="/data-sources" element={<RequireAuth><DataSourceCenterPage /></RequireAuth>} />
       <Route path="/datasets" element={<RequireAuth><DatasetCenterPage /></RequireAuth>} />
       <Route path="/datasets/:datasetId/edit" element={<RequireAuth><DatasetCenterPage /></RequireAuth>} />

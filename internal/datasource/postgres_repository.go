@@ -34,6 +34,7 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 
 const sourceProjection = `source.id::text,source.tenant_id::text,source.code::text,source.name,
 	COALESCE(source.description,''),COALESCE(source.owner_user_id::text,''),source.visibility::text,
+	source.domain_id::text,source.sharing_scope::text,
 	config_version.source_type::text,source.status::text,config_version.config,
 	COALESCE(config_version.secret_ref,''),COALESCE(config_version.file_asset_id::text,''),
 	COALESCE(config_version.file_version_id::text,''),config_version.id::text,
@@ -99,11 +100,13 @@ func (r *PostgresRepository) Create(ctx context.Context, s Source) (Source, erro
 		if _, err := tx.Exec(ctx, `INSERT INTO platform.data_sources(
 				id,tenant_id,code,name,description,owner_user_id,visibility,source_type,status,config,
 				secret_ref,file_asset_id,created_by,updated_by,validation_status,publication_status,
-				current_draft_version_id)
+				current_draft_version_id,sharing_scope)
 			VALUES($1,$2,$3,$4,$5,NULLIF($6,'')::uuid,$7,$8,$9,$10,NULLIF($11,''),NULLIF($12,'')::uuid,
-				NULLIF($13,'')::uuid,NULLIF($14,'')::uuid,'UNTESTED','UNPUBLISHED',$15)`,
+				NULLIF($13,'')::uuid,NULLIF($14,'')::uuid,'UNTESTED','UNPUBLISHED',$15,
+				$16::platform.asset_share_scope)`,
 			s.ID, s.TenantID, s.Code, s.Name, s.Description, s.OwnerID, s.Visibility, s.Type,
-			StatusDraft, config, s.SecretRef, s.FileAssetID, s.CreatedBy, s.UpdatedBy, configVersionID); err != nil {
+			StatusDraft, config, s.SecretRef, s.FileAssetID, s.CreatedBy, s.UpdatedBy,
+			configVersionID, s.SharingScope); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO platform.data_source_versions(
@@ -218,18 +221,20 @@ func (r *PostgresRepository) Update(ctx context.Context, s Source) (Source, erro
 		}
 		tag, err := tx.Exec(ctx, `UPDATE platform.data_sources SET
 				code=$1,name=$2,description=$3,owner_user_id=NULLIF($4,'')::uuid,visibility=$5,
-				source_type=CASE WHEN current_published_version_id IS NULL THEN $6 ELSE source_type END,
-				config=CASE WHEN current_published_version_id IS NULL THEN $7 ELSE config END,
-				secret_ref=CASE WHEN current_published_version_id IS NULL THEN NULLIF($8,'') ELSE secret_ref END,
-				file_asset_id=CASE WHEN current_published_version_id IS NULL THEN NULLIF($9,'')::uuid ELSE file_asset_id END,
-				current_draft_version_id=$10,validation_status='UNTESTED',
+				sharing_scope=$6::platform.asset_share_scope,
+				source_type=CASE WHEN current_published_version_id IS NULL THEN $7 ELSE source_type END,
+				config=CASE WHEN current_published_version_id IS NULL THEN $8 ELSE config END,
+				secret_ref=CASE WHEN current_published_version_id IS NULL THEN NULLIF($9,'') ELSE secret_ref END,
+				file_asset_id=CASE WHEN current_published_version_id IS NULL THEN NULLIF($10,'')::uuid ELSE file_asset_id END,
+				current_draft_version_id=$11,validation_status='UNTESTED',
 				last_tested_version_id=NULL,last_tested_config_hash=NULL,test_expires_at=NULL,last_tested_at=NULL,
 				status=CASE WHEN current_published_version_id IS NULL THEN 'DRAFT'::platform.data_source_status ELSE status END,
 				last_error=CASE WHEN current_published_version_id IS NULL THEN NULL ELSE last_error END,
-				updated_by=NULLIF($11,'')::uuid,version=version+1
-			WHERE id=$12 AND version=$13 AND deleted_at IS NULL`,
-			s.Code, s.Name, s.Description, s.OwnerID, s.Visibility, s.Type, config, s.SecretRef,
-			s.FileAssetID, configVersionID, s.UpdatedBy, s.ID, expectedVersion)
+				updated_by=NULLIF($12,'')::uuid,version=version+1
+			WHERE id=$13 AND version=$14 AND deleted_at IS NULL`,
+			s.Code, s.Name, s.Description, s.OwnerID, s.Visibility, s.SharingScope, s.Type,
+			config, s.SecretRef, s.FileAssetID, configVersionID, s.UpdatedBy, s.ID,
+			expectedVersion)
 		if err != nil {
 			return err
 		}
@@ -451,7 +456,8 @@ func scanSource(row rowScanner, s *Source) error {
 	var config []byte
 	if err := row.Scan(
 		&s.ID, &s.TenantID, &s.Code, &s.Name, &s.Description, &s.OwnerID, &s.Visibility,
-		&s.Type, &s.Status, &config, &s.SecretRef, &s.FileAssetID, &s.FileVersionID,
+		&s.DomainID, &s.SharingScope, &s.Type, &s.Status, &config, &s.SecretRef,
+		&s.FileAssetID, &s.FileVersionID,
 		&s.ConfigVersionID, &s.PublishedVersionID, &s.ConfigVersion, &s.PublishedConfigVersion,
 		&s.ConfigHash, &s.ValidationStatus, &s.PublicationStatus, &s.HasUnpublishedChanges,
 		&s.LastTestedAt, &s.TestExpiresAt, &s.CreatedBy, &s.UpdatedBy,

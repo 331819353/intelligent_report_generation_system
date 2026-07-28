@@ -49,6 +49,9 @@ func main() {
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.users(tenant_id,email,display_name,password_hash,status) VALUES ($1,$2,'系统管理员',$3,'ACTIVE') ON CONFLICT (tenant_id,email) DO UPDATE SET password_hash=EXCLUDED.password_hash,status='ACTIVE',token_version=platform.users.token_version+1,deleted_at=NULL RETURNING id`, tenantID, email, hash).Scan(&adminID); err != nil {
 			return err
 		}
+		if err := seedDomains(ctx, tx, tenantID, adminID); err != nil {
+			return err
+		}
 		if err := seedAccess(ctx, tx, tenantID, adminID); err != nil {
 			return err
 		}
@@ -58,6 +61,33 @@ func main() {
 		fatal("upsert seed admin", err)
 	}
 	fmt.Printf("seeded tenant=%s admin=%s\n", tenantCode, email)
+}
+
+// seedDomains 创建本地演示工作空间的默认业务领域，重复执行保持幂等。
+func seedDomains(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error {
+	domains := []struct {
+		code, name, description string
+		isDefault               bool
+	}{
+		{"enterprise", "企业经营", "企业级经营分析与管理驾驶舱", true},
+		{"marketing", "营销运营", "市场活动、渠道与客户经营分析", false},
+		{"supply-chain", "供应链", "采购、库存、履约与供应保障分析", false},
+	}
+	for _, domain := range domains {
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.business_domains(
+				tenant_id,code,name,description,is_default,created_by
+			) VALUES($1,$2,$3,$4,$5,$6)
+			ON CONFLICT (tenant_id,code) DO UPDATE SET
+				name=EXCLUDED.name,
+				description=EXCLUDED.description,
+				status='ACTIVE',
+				deleted_at=NULL`,
+			tenantID, domain.code, domain.name, domain.description, domain.isDefault, adminID,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // seedAccess 写入系统权限、管理员角色及用户绑定，重复执行时保持幂等。
@@ -106,7 +136,22 @@ func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error 
 			}
 		}
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO platform.user_roles(tenant_id,user_id,role_id,assigned_by) VALUES ($1,$2,$3,$2) ON CONFLICT DO NOTHING`, tenantID, adminID, roleIDs["platform_admin"])
+	if _, err := tx.Exec(ctx, `INSERT INTO platform.user_roles(
+			tenant_id,user_id,role_id,assigned_by
+		) VALUES ($1,$2,$3,$2) ON CONFLICT DO NOTHING`,
+		tenantID, adminID, roleIDs["platform_admin"],
+	); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO platform.domain_memberships(
+			tenant_id,domain_id,user_id,assigned_by
+		)
+		SELECT $1,domain.id,$2,$2
+		FROM platform.business_domains AS domain
+		WHERE domain.status='ACTIVE' AND domain.deleted_at IS NULL
+		ON CONFLICT(tenant_id,domain_id,user_id) DO UPDATE SET status='ACTIVE'`,
+		tenantID, adminID,
+	)
 	return err
 }
 

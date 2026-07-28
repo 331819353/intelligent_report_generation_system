@@ -14,6 +14,7 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { AssetManagementTabs } from '../components/AssetManagementTabs'
+import { AssetSharingSelect } from '../components/AssetSharingSelect'
 import {
   datasetAPI,
   type AssetTable,
@@ -403,7 +404,19 @@ export function MetricCatalogPage() {
               <div className="metric-asset-icon" aria-hidden="true"><FunctionIcon size={22} weight="bold" /></div>
               <div className="metric-asset-main"><div><button type="button" onClick={() => openDetail(metric)}>{metric.name}</button><span className={`metric-status status-${metric.status.toLowerCase()}`}>{statusLabels[metric.status] ?? metric.status}</span></div><p>{metric.description || '暂无指标说明'}</p><small>{metric.code}</small></div>
               <dl><div><dt>类型</dt><dd>{typeLabels[metric.type] ?? metric.type}</dd></div><div><dt>绑定版本</dt><dd title={metric.datasetVersionId}>{shortId(metric.datasetVersionId)}</dd></div><div><dt>指标版本</dt><dd>{metric.currentPublishedVersionId ? '已发布精确版本' : `草稿 V${metric.version}`}</dd></div><div><dt>更新时间</dt><dd>{formatDate(metric.updatedAt)}</dd></div></dl>
-              <div className="metric-asset-actions"><button className="action-view" type="button" onClick={() => openDetail(metric)}>查看</button><button className="action-edit" type="button" onClick={() => navigate(`/metrics/${metric.id}/edit`)}>编辑</button><button className="action-delete" type="button" onClick={() => requestMetricDeletion(metric)}>删除</button></div>
+              <div className="metric-asset-actions">
+                <AssetSharingSelect
+                  resourceType="METRIC"
+                  resourceID={metric.id}
+                  value={metric.sharingScope || 'PRIVATE'}
+                  ownerUserID={metric.ownerUserId}
+                  assetDomainID={metric.domainId}
+                  onChange={sharingScope => setMetrics(current => current.map(item =>
+                    item.id === metric.id ? { ...item, sharingScope } : item
+                  ))}
+                />
+                <button className="action-view" type="button" onClick={() => openDetail(metric)}>查看</button><button className="action-edit" type="button" onClick={() => navigate(`/metrics/${metric.id}/edit`)}>编辑</button><button className="action-delete" type="button" onClick={() => requestMetricDeletion(metric)}>删除</button>
+              </div>
             </article>)}
           </div> : <div className="metric-dataset-empty"><FunctionIcon size={25} /><div><strong>暂无可展示指标</strong><p>{dataset.currentPublishedVersionId ? '可从该数据集的当前发布 DAG 开始创建。' : '先发布数据集，再基于其 DAG 创建指标。'}</p></div></div>}
         </section>)}

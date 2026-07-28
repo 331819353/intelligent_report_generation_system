@@ -1,4 +1,6 @@
 import { apiRequest } from './api'
+import type { BusinessDomain } from './administration'
+import { clearDomain, selectDomain } from './domain-context'
 
 export type TokenPair = {
   accessToken: string
@@ -14,6 +16,7 @@ const sessionKey = 'intelligent-report-auth'
 export async function login(tenantCode: string, email: string, password: string) {
   const tokens = await apiRequest<TokenPair>('/v1/auth/login', {
     method: 'POST',
+    businessDomain: false,
     body: JSON.stringify({ tenantCode, email, password }),
   })
   sessionStorage.setItem(sessionKey, JSON.stringify(tokens))
@@ -42,12 +45,40 @@ export function currentSubject() {
 }
 
 /** 清除当前标签页保存的认证信息。 */
-export function clearTokens() { sessionStorage.removeItem(sessionKey) }
+export function clearTokens() {
+  sessionStorage.removeItem(sessionKey)
+  clearDomain()
+}
+
+/** 因领域停用或会话撤销而强制退出，并立即通知受保护路由。 */
+export function forceLogout(reason = 'SESSION_EXPIRED') {
+  clearTokens()
+  window.dispatchEvent(new CustomEvent('auth-expired', { detail: { reason } }))
+}
+
+/** 仅同步服务端会话领域，不触发页面重载。 */
+export async function bindBusinessDomain(domainID: string) {
+  await apiRequest<void>('/v1/auth/domain', {
+    method: 'PUT',
+    businessDomain: false,
+    body: JSON.stringify({ domainId: domainID }),
+  })
+}
+
+/** 验证并切换服务端会话领域，成功后再更新本地领域和业务页面。 */
+export async function switchBusinessDomain(domain: BusinessDomain) {
+  await bindBusinessDomain(domain.id)
+  selectDomain(domain)
+}
 
 /** 尝试撤销服务端会话，并始终清理本地令牌。 */
 export async function logout() {
   const tokens = currentTokens()
   try {
-    if (tokens?.refreshToken) await apiRequest<void>('/v1/auth/logout', { method: 'POST', body: JSON.stringify({ refreshToken: tokens.refreshToken }) })
+    if (tokens?.refreshToken) await apiRequest<void>('/v1/auth/logout', {
+      method: 'POST',
+      businessDomain: false,
+      body: JSON.stringify({ refreshToken: tokens.refreshToken }),
+    })
   } finally { clearTokens() }
 }

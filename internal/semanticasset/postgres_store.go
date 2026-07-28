@@ -19,6 +19,7 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 }
 
 const assetColumns = `id::text,common_term::text,mapping_value,knowledge_type,
+	domain_id::text,sharing_scope::text,
 	status,version,embedding_status,embedding_model,embedding_error_code,
 	embedded_at,created_by::text,updated_by::text,created_at,updated_at`
 
@@ -297,7 +298,8 @@ func (store *PostgresStore) Import(
 func scanAsset(row pgx.Row, item *Asset, total ...*int) error {
 	destinations := []any{
 		&item.ID, &item.CommonTerm, &item.MappingValue,
-		&item.KnowledgeType, &item.Status, &item.Version,
+		&item.KnowledgeType, &item.DomainID, &item.SharingScope,
+		&item.Status, &item.Version,
 		&item.EmbeddingStatus, &item.EmbeddingModel,
 		&item.EmbeddingErrorCode, &item.EmbeddedAt,
 		&item.CreatedBy, &item.UpdatedBy, &item.CreatedAt, &item.UpdatedAt,

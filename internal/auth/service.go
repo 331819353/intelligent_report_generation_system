@@ -8,8 +8,10 @@ import (
 )
 
 var (
-	ErrInvalidCredentials = errors.New("invalid credentials")
-	ErrInvalidRefresh     = errors.New("invalid refresh token")
+	ErrInvalidCredentials     = errors.New("invalid credentials")
+	ErrInvalidRefresh         = errors.New("invalid refresh token")
+	ErrDomainForbidden        = errors.New("business domain is not available to this user")
+	ErrNoActiveBusinessDomain = errors.New("user has no active business domain")
 )
 
 type LoginUser struct {
@@ -26,6 +28,7 @@ type Session struct {
 	ID               string
 	TenantID         string
 	UserID           string
+	DomainID         string
 	RefreshTokenHash []byte
 	TokenVersion     int64
 	UserStatus       UserStatus
@@ -43,6 +46,13 @@ type Store interface {
 	RevokeSession(ctx context.Context, tenantID, sessionID string, tokenHash []byte, reason string) error
 	RecordLoginFailure(ctx context.Context, tenantID, userID, email, requestID, ipAddress, userAgent string)
 }
+
+type businessDomainStore interface {
+	ResolveBusinessDomain(ctx context.Context, tenantID, userID, requestedDomainID string) (string, error)
+	SetSessionDomain(ctx context.Context, tenantID, sessionID, userID, domainID string) error
+}
+
+const compatibilityDomainID = "00000000-0000-0000-0000-000000000000"
 
 type Service struct {
 	store      Store
@@ -87,6 +97,10 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error
 		s.store.RecordLoginFailure(ctx, tenantID, userID, input.Email, input.RequestID, input.IPAddress, input.UserAgent)
 		return TokenPair{}, ErrInvalidCredentials
 	}
+	domainID, err := s.ResolveBusinessDomain(ctx, tenantID, user.ID, "")
+	if err != nil {
+		return TokenPair{}, ErrNoActiveBusinessDomain
+	}
 
 	sessionID, err := randomUUID()
 	if err != nil {
@@ -97,7 +111,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error
 		return TokenPair{}, err
 	}
 	refreshExpires := s.now().UTC().Add(s.refreshTTL)
-	session := Session{ID: sessionID, TenantID: tenantID, UserID: user.ID, RefreshTokenHash: refreshHash, TokenVersion: user.TokenVersion, UserStatus: user.Status, ExpiresAt: refreshExpires}
+	session := Session{ID: sessionID, TenantID: tenantID, UserID: user.ID, DomainID: domainID, RefreshTokenHash: refreshHash, TokenVersion: user.TokenVersion, UserStatus: user.Status, ExpiresAt: refreshExpires}
 	if err := s.store.CreateSession(ctx, session, input.UserAgent, input.IPAddress); err != nil {
 		return TokenPair{}, err
 	}
@@ -114,6 +128,22 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 	// 摘要使用恒定时间比较，降低通过耗时推断令牌内容的风险。
 	if err != nil || session.RevokedAt != nil || session.ExpiresAt.Before(s.now()) || session.UserStatus != UserStatusActive || !hmac.Equal(session.RefreshTokenHash, oldHash) {
 		return TokenPair{}, ErrInvalidRefresh
+	}
+	domainID, err := s.ResolveBusinessDomain(
+		ctx, tenantID, session.UserID, session.DomainID,
+	)
+	if err != nil {
+		_ = s.store.RevokeSession(
+			ctx, tenantID, sessionID, oldHash, "BUSINESS_DOMAIN_UNAVAILABLE",
+		)
+		return TokenPair{}, ErrInvalidRefresh
+	}
+	if session.DomainID == "" {
+		if err := s.setSessionDomain(
+			ctx, tenantID, sessionID, session.UserID, domainID,
+		); err != nil {
+			return TokenPair{}, ErrInvalidRefresh
+		}
 	}
 	newToken, newHash, err := NewRefreshToken(tenantID, sessionID)
 	if err != nil {
@@ -138,17 +168,97 @@ func (s *Service) Logout(ctx context.Context, refreshToken string) error {
 	return nil
 }
 
-// ValidateAccess 复核用户状态、令牌版本与会话状态，支持即时撤权。
-func (s *Service) ValidateAccess(ctx context.Context, claims AccessClaims) error {
+// ValidateAccessSession 复核用户、会话和会话绑定领域的实时状态。
+func (s *Service) ValidateAccessSession(
+	ctx context.Context, claims AccessClaims,
+) (Session, error) {
 	user, err := s.store.FindUserByID(ctx, claims.TenantID, claims.Subject)
 	if err != nil || user.Status != UserStatusActive || user.TokenVersion != claims.TokenVersion {
-		return errors.New("access token has been revoked")
+		return Session{}, errors.New("access token has been revoked")
 	}
 	session, err := s.store.FindSession(ctx, claims.TenantID, claims.SessionID)
 	if err != nil || session.RevokedAt != nil || session.ExpiresAt.Before(s.now()) || session.UserID != claims.Subject {
-		return errors.New("access session has been revoked")
+		return Session{}, errors.New("access session has been revoked")
 	}
-	return nil
+	domainID, err := s.ResolveBusinessDomain(
+		ctx, claims.TenantID, claims.Subject, session.DomainID,
+	)
+	if err != nil {
+		_ = s.store.RevokeSession(
+			ctx, claims.TenantID, claims.SessionID,
+			session.RefreshTokenHash, "BUSINESS_DOMAIN_UNAVAILABLE",
+		)
+		return Session{}, ErrDomainForbidden
+	}
+	if session.DomainID == "" {
+		if err := s.setSessionDomain(
+			ctx, claims.TenantID, claims.SessionID, claims.Subject, domainID,
+		); err != nil {
+			return Session{}, errors.New("bind access session business domain")
+		}
+		session.DomainID = domainID
+	}
+	return session, nil
+}
+
+// ValidateAccess 保留只关心成功与否的调用接口。
+func (s *Service) ValidateAccess(ctx context.Context, claims AccessClaims) error {
+	_, err := s.ValidateAccessSession(ctx, claims)
+	return err
+}
+
+// ResolveBusinessDomain validates the requested domain membership. An omitted
+// domain resolves to the user's active default domain.
+func (s *Service) ResolveBusinessDomain(
+	ctx context.Context, tenantID, userID, requestedDomainID string,
+) (string, error) {
+	store, ok := s.store.(businessDomainStore)
+	if !ok {
+		// Keep legacy and test stores source-compatible without allowing them to
+		// validate arbitrary client-selected domains.
+		if requestedDomainID == "" || requestedDomainID == compatibilityDomainID {
+			return compatibilityDomainID, nil
+		}
+		return "", ErrDomainForbidden
+	}
+	domainID, err := store.ResolveBusinessDomain(
+		ctx, tenantID, userID, requestedDomainID,
+	)
+	if err != nil || domainID == "" {
+		return "", ErrDomainForbidden
+	}
+	return domainID, nil
+}
+
+// SwitchBusinessDomain 验证用户所属领域后更新当前登录会话的领域绑定。
+func (s *Service) SwitchBusinessDomain(
+	ctx context.Context, claims AccessClaims, requestedDomainID string,
+) (string, error) {
+	domainID, err := s.ResolveBusinessDomain(
+		ctx, claims.TenantID, claims.Subject, requestedDomainID,
+	)
+	if err != nil {
+		return "", err
+	}
+	if err := s.setSessionDomain(
+		ctx, claims.TenantID, claims.SessionID, claims.Subject, domainID,
+	); err != nil {
+		return "", err
+	}
+	return domainID, nil
+}
+
+func (s *Service) setSessionDomain(
+	ctx context.Context, tenantID, sessionID, userID, domainID string,
+) error {
+	store, ok := s.store.(businessDomainStore)
+	if !ok {
+		if domainID == compatibilityDomainID {
+			return nil
+		}
+		return ErrDomainForbidden
+	}
+	return store.SetSessionDomain(ctx, tenantID, sessionID, userID, domainID)
 }
 
 // issuePair 将新访问令牌与当前刷新令牌封装为统一响应。

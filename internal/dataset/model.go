@@ -479,6 +479,9 @@ type Record struct {
 	Code                      string          `json:"code"`
 	Name                      string          `json:"name"`
 	Description               string          `json:"description"`
+	DomainID                  string          `json:"domainId"`
+	SharingScope              string          `json:"sharingScope"`
+	OwnerUserID               string          `json:"ownerUserId"`
 	Type                      string          `json:"type"`
 	Layer                     Layer           `json:"layer"`
 	Tags                      []string        `json:"tags"`
@@ -506,6 +509,9 @@ type Summary struct {
 	Code                      string   `json:"code"`
 	Name                      string   `json:"name"`
 	Description               string   `json:"description"`
+	DomainID                  string   `json:"domainId"`
+	SharingScope              string   `json:"sharingScope"`
+	OwnerUserID               string   `json:"ownerUserId"`
 	Type                      string   `json:"type"`
 	Layer                     Layer    `json:"layer"`
 	Tags                      []string `json:"tags"`

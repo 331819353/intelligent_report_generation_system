@@ -102,6 +102,10 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 				writeDSError(w, http.StatusConflict, "DATA_SOURCE_REVIEW_PENDING", "数据源正在审核中；请先撤销申请或等待审核完成")
 				return
 			}
+			if errors.Is(err, ErrSharingOwnerDomainRequired) {
+				writeDSError(w, http.StatusForbidden, "DATA_SOURCE_SHARING_OWNER_DOMAIN_REQUIRED", "仅数据源持有者可以在资产所属领域修改共享状态")
+				return
+			}
 			writeDSError(w, http.StatusBadRequest, "DATA_SOURCE_UPDATE_FAILED", "invalid data source configuration or state")
 			return
 		}
@@ -372,6 +376,7 @@ type dataSourceInput struct {
 	Description     string         `json:"description"`
 	OwnerID         string         `json:"ownerId"`
 	Visibility      Visibility     `json:"visibility"`
+	SharingScope    string         `json:"sharingScope"`
 	Type            Type           `json:"type"`
 	Host            string         `json:"host"`
 	Port            int            `json:"port"`
@@ -388,7 +393,8 @@ func sourceFromInput(ctx context.Context, service *Service, credentials Credenti
 	source := Source{
 		ID: id, TenantID: tenantID, Code: strings.TrimSpace(in.Code), Name: strings.TrimSpace(in.Name),
 		Description: strings.TrimSpace(in.Description), OwnerID: strings.TrimSpace(in.OwnerID),
-		Visibility: in.Visibility, Type: in.Type, FileAssetID: strings.TrimSpace(in.FileAssetID),
+		Visibility: in.Visibility, SharingScope: strings.ToUpper(strings.TrimSpace(in.SharingScope)),
+		Type: in.Type, FileAssetID: strings.TrimSpace(in.FileAssetID),
 		Version: in.ExpectedVersion,
 	}
 	config := make(map[string]any, len(in.Config)+4)

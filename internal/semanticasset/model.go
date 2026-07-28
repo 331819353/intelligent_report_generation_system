@@ -46,6 +46,8 @@ type Asset struct {
 	CommonTerm         string     `json:"commonTerm"`
 	MappingValue       string     `json:"mappingValue"`
 	KnowledgeType      string     `json:"knowledgeType"`
+	DomainID           string     `json:"domainId"`
+	SharingScope       string     `json:"sharingScope"`
 	Status             string     `json:"status"`
 	Version            int64      `json:"version"`
 	EmbeddingStatus    string     `json:"embeddingStatus"`

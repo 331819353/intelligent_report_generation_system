@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"strings"
+
+	"intelligent-report-generation-system/internal/platform/database"
 )
 
 type Handler struct{ service *Service }
@@ -18,6 +20,7 @@ func NewHandler(service *Service) http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/login", h.login)
 	mux.HandleFunc("POST /api/v1/auth/refresh", h.refresh)
 	mux.HandleFunc("POST /api/v1/auth/logout", h.logout)
+	mux.Handle("PUT /api/v1/auth/domain", RequireTenantAccessToken(service, http.HandlerFunc(h.switchDomain)))
 	mux.Handle("GET /api/v1/auth/me", RequireAccessToken(service, http.HandlerFunc(h.me)))
 	return mux
 }
@@ -53,10 +56,47 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 			writeAuthError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "tenant, account or password is invalid")
 			return
 		}
+		if errors.Is(err, ErrNoActiveBusinessDomain) {
+			writeAuthError(
+				w, http.StatusForbidden, "NO_ACTIVE_BUSINESS_DOMAIN",
+				"account has no active assigned business domain",
+			)
+			return
+		}
 		writeAuthError(w, http.StatusInternalServerError, "AUTHENTICATION_FAILED", "authentication service failed")
 		return
 	}
 	writeAuthJSON(w, http.StatusOK, pair)
+}
+
+// switchDomain 在服务端同步当前会话领域，后续停用领域时可精确撤销会话。
+func (h *Handler) switchDomain(w http.ResponseWriter, r *http.Request) {
+	claims, ok := ClaimsFromContext(r.Context())
+	if !ok {
+		writeAuthError(w, http.StatusUnauthorized, "ACCESS_TOKEN_REQUIRED", "valid bearer token is required")
+		return
+	}
+	var request struct {
+		DomainID string `json:"domainId"`
+	}
+	if err := decodeJSON(w, r, &request); err != nil || strings.TrimSpace(request.DomainID) == "" {
+		writeAuthError(w, http.StatusBadRequest, "INVALID_REQUEST", "domainId is required")
+		return
+	}
+	if _, err := h.service.SwitchBusinessDomain(
+		r.Context(), claims, strings.TrimSpace(request.DomainID),
+	); err != nil {
+		if errors.Is(err, ErrDomainForbidden) {
+			writeAuthError(
+				w, http.StatusForbidden, "BUSINESS_DOMAIN_FORBIDDEN",
+				"selected business domain is not available to this user",
+			)
+			return
+		}
+		writeAuthError(w, http.StatusInternalServerError, "DOMAIN_SWITCH_FAILED", "failed to switch business domain")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // refresh 轮换刷新令牌并返回新的令牌对。
@@ -129,8 +169,9 @@ func ClaimsFromContext(ctx context.Context) (AccessClaims, bool) {
 	return claims, ok
 }
 
-// RequireAccessToken 验证 Bearer 令牌及服务端会话后再放行业务请求。
-func RequireAccessToken(service *Service, next http.Handler) http.Handler {
+func requireAccessToken(
+	service *Service, useRequestedDomain bool, next http.Handler,
+) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		header := r.Header.Get("Authorization")
 		if !strings.HasPrefix(header, "Bearer ") {
@@ -142,10 +183,54 @@ func RequireAccessToken(service *Service, next http.Handler) http.Handler {
 			writeAuthError(w, http.StatusUnauthorized, "INVALID_ACCESS_TOKEN", "access token is invalid or expired")
 			return
 		}
-		if err := service.ValidateAccess(r.Context(), claims); err != nil {
+		session, err := service.ValidateAccessSession(r.Context(), claims)
+		if err != nil {
+			if errors.Is(err, ErrDomainForbidden) {
+				writeAuthError(
+					w, http.StatusUnauthorized, "BUSINESS_DOMAIN_SESSION_DISABLED",
+					"the business domain bound to this session is no longer available",
+				)
+				return
+			}
 			writeAuthError(w, http.StatusUnauthorized, "REVOKED_ACCESS_TOKEN", "access token has been revoked")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), claimsKey{}, claims)))
+		domainID := session.DomainID
+		if useRequestedDomain {
+			requestedDomainID := strings.TrimSpace(r.Header.Get("X-Business-Domain-ID"))
+			if requestedDomainID != "" {
+				domainID, err = service.ResolveBusinessDomain(
+					r.Context(), claims.TenantID, claims.Subject, requestedDomainID,
+				)
+				if err != nil {
+					writeAuthError(
+						w, http.StatusForbidden, "BUSINESS_DOMAIN_FORBIDDEN",
+						"selected business domain is not available to this user",
+					)
+					return
+				}
+			}
+		}
+		if domainID == "" {
+			writeAuthError(
+				w, http.StatusUnauthorized, "BUSINESS_DOMAIN_SESSION_DISABLED",
+				"the business domain bound to this session is no longer available",
+			)
+			return
+		}
+		ctx := context.WithValue(r.Context(), claimsKey{}, claims)
+		ctx = database.WithAccessContext(ctx, claims.Subject, domainID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// RequireAccessToken 验证 Bearer 令牌、会话和请求指定的业务领域。
+func RequireAccessToken(service *Service, next http.Handler) http.Handler {
+	return requireAccessToken(service, true, next)
+}
+
+// RequireTenantAccessToken 用于租户管理控制面：忽略客户端领域请求头，
+// 但仍要求当前会话绑定的领域有效，领域停用后管理员同样会被强制退出。
+func RequireTenantAccessToken(service *Service, next http.Handler) http.Handler {
+	return requireAccessToken(service, false, next)
 }

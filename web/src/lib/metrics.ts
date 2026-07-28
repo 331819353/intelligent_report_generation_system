@@ -47,6 +47,9 @@ export type MetricRecord = {
   code: string
   name: string
   description: string
+  domainId?: string
+  sharingScope?: 'PRIVATE' | 'DOMAIN' | 'PLATFORM'
+  ownerUserId?: string
   type: MetricType
   status: MetricStatus
   version: number
@@ -63,7 +66,7 @@ export type MetricRecord = {
 }
 
 export type MetricSummary = Pick<MetricRecord,
-  'id' | 'code' | 'name' | 'description' | 'status' | 'version' | 'currentPublishedVersionId'> & {
+  'id' | 'code' | 'name' | 'description' | 'domainId' | 'sharingScope' | 'ownerUserId' | 'status' | 'version' | 'currentPublishedVersionId'> & {
   datasetId: string
   datasetVersionId: string
   type: MetricType

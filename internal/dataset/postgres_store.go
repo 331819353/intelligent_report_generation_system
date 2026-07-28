@@ -160,13 +160,14 @@ func createDatasetTxWithOptions(
 // Get 读取租户内数据集和 current_draft_version_id 指向的规范草稿。
 func (s *PostgresStore) Get(ctx context.Context, tenantID, id string) (record Record, err error) {
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		err := tx.QueryRow(ctx, `SELECT d.id::text,COALESCE(d.origin_table_id::text,''),d.code::text,d.name,d.description,d.dataset_type,v.layer,d.status,d.version,
+		err := tx.QueryRow(ctx, `SELECT d.id::text,COALESCE(d.origin_table_id::text,''),d.code::text,d.name,d.description,d.domain_id::text,d.sharing_scope::text,COALESCE(d.created_by::text,''),d.dataset_type,v.layer,d.status,d.version,
 			v.id::text,v.version_no,v.record_version,COALESCE(d.current_published_version_id::text,''),
 			v.dsl_version,v.schema_hash,v.plan_hash,v.dsl_json,v.logical_plan_json,d.created_at::text,d.updated_at::text
 			FROM platform.datasets d JOIN platform.dataset_versions v
 			ON v.id=d.current_draft_version_id AND v.tenant_id=d.tenant_id AND v.dataset_id=d.id
 			WHERE d.id::text=$1 AND d.deleted_at IS NULL`, id).Scan(
-			&record.ID, &record.OriginTableID, &record.Code, &record.Name, &record.Description, &record.Type, &record.Layer,
+			&record.ID, &record.OriginTableID, &record.Code, &record.Name, &record.Description,
+			&record.DomainID, &record.SharingScope, &record.OwnerUserID, &record.Type, &record.Layer,
 			&record.Status, &record.Version,
 			&record.DraftVersionID, &record.DraftVersionNo, &record.DraftRecordVersion, &record.CurrentPublishedVersionID,
 			&record.DSLVersion, &record.DSLHash, &record.PlanHash, &record.DSL, &record.LogicalPlan,
@@ -225,7 +226,8 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 		}
 		rows, err := tx.Query(ctx, `SELECT d.id::text,COALESCE(d.origin_table_id::text,''),
 			COALESCE(origin_table.table_name,''),COALESCE(origin_source.name,''),
-			d.code::text,d.name,d.description,d.dataset_type,d.layer,
+			d.code::text,d.name,d.description,d.domain_id::text,d.sharing_scope::text,
+			COALESCE(d.created_by::text,''),d.dataset_type,d.layer,
 			COALESCE(dataset_tag_list.tags,origin_table.tags,'{}'::text[]),
 			d.status,d.version,v.schema_hash,
 			COALESCE(d.current_published_version_id::text,''),d.updated_at::text
@@ -256,7 +258,8 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 		for rows.Next() {
 			var item Summary
 			if err := rows.Scan(&item.ID, &item.OriginTableID, &item.OriginTableName, &item.OriginDataSourceName,
-				&item.Code, &item.Name, &item.Description, &item.Type, &item.Layer, &item.Tags, &item.Status, &item.Version,
+				&item.Code, &item.Name, &item.Description, &item.DomainID, &item.SharingScope,
+				&item.OwnerUserID, &item.Type, &item.Layer, &item.Tags, &item.Status, &item.Version,
 				&item.DSLHash, &item.CurrentPublishedVersionID, &item.UpdatedAt); err != nil {
 				return err
 			}

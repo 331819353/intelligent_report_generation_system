@@ -12,6 +12,7 @@ import (
 const dimensionColumns = `dimension.id::text,dimension.dataset_id::text,
 	dimension.dataset_version_id::text,dimension.field_id,field.field_code::text,
 	dimension.code::text,dimension.name,dimension.description,dimension.dimension_type,
+	dimension.domain_id::text,dimension.sharing_scope::text,
 	dimension.member_index_policy,dimension.high_cardinality,dimension.sensitive,
 	dimension.status,dimension.definition_hash,dimension.version,
 	COALESCE(dimension.member_refresh_generation::text,''),dimension.member_count,
@@ -1404,6 +1405,7 @@ func scanDimension(row scanRow, item *Dimension, extra ...any) error {
 	targets := []any{
 		&item.ID, &item.DatasetID, &item.DatasetVersionID, &item.FieldID, &item.FieldCode,
 		&item.Code, &item.Name, &item.Description, &item.DimensionType,
+		&item.DomainID, &item.SharingScope,
 		&item.MemberIndexPolicy, &item.HighCardinality, &item.Sensitive,
 		&item.Status, &item.DefinitionHash, &item.Version,
 		&item.MemberRefreshGeneration, &item.MemberCount, &item.MemberRefreshedAt,

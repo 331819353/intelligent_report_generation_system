@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MathOperationsIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTIcon, TextTSlashIcon, TreeStructureIcon, XIcon, type Icon } from '@phosphor-icons/react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
+import { AssetSharingSelect } from '../components/AssetSharingSelect'
 import { RequestError } from '../lib/api'
 import {
   datasetAIPlanFromEditor,
@@ -2957,7 +2958,20 @@ export function DatasetCenterPage() {
             <div className="dataset-asset-main"><div><h3>{dataset.name}</h3><span className={`dataset-asset-status ${dataset.status.toLowerCase()}`}>{statusLabels[dataset.status] ?? dataset.status}</span><span className={`dataset-asset-layer ${dataset.layer.toLowerCase()}`}>{dataset.layer}</span>{(dataset.tags || []).slice(0, 3).map(tag => <span className="dataset-asset-tag" key={tag}>{tag}</span>)}{(dataset.tags || []).length > 3 && <span className="dataset-asset-tag more" title={(dataset.tags || []).slice(3).join('、')}>+{(dataset.tags || []).length - 3}</span>}</div><p>{dataset.description || '暂无说明'}</p><small>{dataset.originDataSourceName ? `${dataset.originDataSourceName} · ` : ''}{dataset.code}</small></div>
             <dl><div><dt>类型</dt><dd>{typeLabels[dataset.type] ?? dataset.type}</dd></div><div><dt>版本</dt><dd>V{dataset.version}</dd></div><div><dt>更新时间</dt><dd>{new Date(dataset.updatedAt).toLocaleString('zh-CN', { hour12: false })}</dd></div></dl>
           </div>
-          <div className="dataset-asset-actions"><button className="action-edit" type="button" disabled={actionBusy} onClick={() => void openEdit(dataset)}>修改</button><button className="action-publish" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title={dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED' ? '请先恢复可用状态再提交发布申请' : '冻结当前草稿并提交发布申请'} onClick={() => void openPublication(dataset)}>发布申请</button><button className="action-review" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title={dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED' ? '当前状态不可处理发布审批' : '查看并处理发布申请'} onClick={() => void openPublication(dataset, 'publish-review')}>发布审批</button><button className="action-history" type="button" disabled={actionBusy} onClick={() => void openHistory(dataset)}>历史版本</button>{dataset.status === 'DISABLED' ? <button className="action-resume" type="button" disabled={actionBusy} title="恢复到停用前的数据集状态" onClick={() => { setFormError(''); setDialog({ mode: 'restore', dataset }) }}>恢复</button> : <button className="action-pause" type="button" disabled={actionBusy || dataset.status === 'DEPRECATED'} title={dataset.status === 'DEPRECATED' ? '已废弃数据集不能再次停用' : '停用会从可查询目录下架，保留配置和历史并可恢复'} onClick={() => { setFormError(''); setDialog({ mode: 'disable', dataset }) }}>停用（下架）</button>}<button className="action-delete" type="button" disabled={actionBusy} onClick={() => { setFormError(''); setDialog({ mode: 'delete', dataset }) }}>删除</button></div>
+          <div className="dataset-asset-actions">
+            <AssetSharingSelect
+              resourceType="DATASET"
+              resourceID={dataset.id}
+              value={dataset.sharingScope || 'PRIVATE'}
+              ownerUserID={dataset.ownerUserId}
+              assetDomainID={dataset.domainId}
+              disabled={actionBusy}
+              onChange={sharingScope => setDatasets(current => current.map(item =>
+                item.id === dataset.id ? { ...item, sharingScope } : item
+              ))}
+            />
+            <button className="action-edit" type="button" disabled={actionBusy} onClick={() => void openEdit(dataset)}>修改</button><button className="action-publish" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title={dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED' ? '请先恢复可用状态再提交发布申请' : '冻结当前草稿并提交发布申请'} onClick={() => void openPublication(dataset)}>发布申请</button><button className="action-review" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title={dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED' ? '当前状态不可处理发布审批' : '查看并处理发布申请'} onClick={() => void openPublication(dataset, 'publish-review')}>发布审批</button><button className="action-history" type="button" disabled={actionBusy} onClick={() => void openHistory(dataset)}>历史版本</button>{dataset.status === 'DISABLED' ? <button className="action-resume" type="button" disabled={actionBusy} title="恢复到停用前的数据集状态" onClick={() => { setFormError(''); setDialog({ mode: 'restore', dataset }) }}>恢复</button> : <button className="action-pause" type="button" disabled={actionBusy || dataset.status === 'DEPRECATED'} title={dataset.status === 'DEPRECATED' ? '已废弃数据集不能再次停用' : '停用会从可查询目录下架，保留配置和历史并可恢复'} onClick={() => { setFormError(''); setDialog({ mode: 'disable', dataset }) }}>停用（下架）</button>}<button className="action-delete" type="button" disabled={actionBusy} onClick={() => { setFormError(''); setDialog({ mode: 'delete', dataset }) }}>删除</button>
+          </div>
         </article>)}</div>}
     </section>
 

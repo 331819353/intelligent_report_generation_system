@@ -144,7 +144,9 @@ export function DimensionValueGraphPage() {
   }, [])
 
   useEffect(() => {
-    if (permissionsReady && canRead) void loadGraph()
+    if (!permissionsReady || !canRead) return
+    const timer = window.setTimeout(() => { void loadGraph() }, 0)
+    return () => window.clearTimeout(timer)
   }, [canRead, loadGraph, permissionsReady])
 
   const summary = useMemo(() => ({

@@ -5,6 +5,7 @@ export type DataSourceStatus = 'DRAFT' | 'ACTIVE' | 'DISABLED' | 'SYNCING' | 'ER
 export type DataSourceValidationStatus = 'UNTESTED' | 'PASSED' | 'FAILED'
 export type DataSourcePublicationStatus = 'UNPUBLISHED' | 'PUBLISHED'
 export type DataSourceVisibility = 'PRIVATE' | 'TENANT_PUBLIC'
+export type AssetSharingScope = 'PRIVATE' | 'DOMAIN' | 'PLATFORM'
 export type DataSourceReviewStatus = 'NOT_SUBMITTED' | 'PENDING' | 'APPROVED' | 'REJECTED' | 'WITHDRAWN'
 
 export type DataSourceRecord = {
@@ -15,6 +16,8 @@ export type DataSourceRecord = {
   description?: string
   ownerId?: string
   visibility?: DataSourceVisibility
+  domainId?: string
+  sharingScope?: AssetSharingScope
   type: DataSourceType
   status: DataSourceStatus
   config: Record<string, unknown>
@@ -67,6 +70,7 @@ export type DataSourceConnectionInput = {
   name: string
   description?: string
   visibility?: DataSourceVisibility
+  sharingScope?: AssetSharingScope
   ownerId?: string
   type: Exclude<DataSourceType, 'EXCEL'>
   host: string
@@ -82,6 +86,7 @@ export type ExcelDataSourceInput = {
   name: string
   description?: string
   visibility?: DataSourceVisibility
+  sharingScope?: AssetSharingScope
   ownerId?: string
   type: 'EXCEL'
   fileAssetId: string

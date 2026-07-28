@@ -72,6 +72,9 @@ func main() {
 	authService := auth.NewService(auth.NewPostgresStore(pool), passwords, tokens, cfg.AuthRefreshTTL)
 	accessService := access.NewService(access.NewPostgresStore(pool))
 	accessAdminHandler := access.NewAdminHandler(authService, accessService, access.NewAdminStore(pool))
+	assetScopeHandler := access.NewAssetScopeHandler(
+		authService, access.NewAssetScopeStore(pool),
+	)
 	dataSourceRepo := datasource.NewPostgresRepository(pool)
 	objectStorage, err := datasource.NewMinIOStorage(cfg.MinIOEndpoint, cfg.MinIOAccessKey, cfg.MinIOSecretKey, cfg.MinIOUseSSL)
 	if err != nil {
@@ -247,11 +250,16 @@ func main() {
 	api := http.NewServeMux()
 	api.Handle("/api/v1/auth/", auth.NewHandler(authService))
 	api.Handle("POST /api/v1/permissions/evaluate", auth.RequireAccessToken(authService, access.EvaluateHandler(accessService)))
+	api.Handle("/api/v1/domains", accessAdminHandler)
+	api.Handle("/api/v1/domains/", accessAdminHandler)
 	api.Handle("/api/v1/roles", accessAdminHandler)
 	api.Handle("/api/v1/roles/", accessAdminHandler)
+	api.Handle("/api/v1/users", accessAdminHandler)
 	api.Handle("/api/v1/users/", accessAdminHandler)
+	api.Handle("/api/v1/permissions", accessAdminHandler)
 	api.Handle("/api/v1/object-permissions", accessAdminHandler)
 	api.Handle("/api/v1/object-permissions/", accessAdminHandler)
+	api.Handle("/api/v1/asset-access/", assetScopeHandler)
 	api.Handle("/api/v1/background-tasks", backgroundTaskHandler)
 	api.Handle("/api/v1/background-tasks/", backgroundTaskHandler)
 	// Exact review routes take precedence over the general data-source subtree. The legacy

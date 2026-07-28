@@ -7,6 +7,7 @@ import {
 } from 'react'
 import { AppShell } from '../components/AppShell'
 import { AssetManagementTabs } from '../components/AssetManagementTabs'
+import { AssetSharingSelect } from '../components/AssetSharingSelect'
 import { RequestError } from '../lib/api'
 import {
   semanticAssetAPI,
@@ -107,7 +108,8 @@ export function SemanticAssetPage() {
   ])
 
   useEffect(() => {
-    void loadAssets()
+    const timer = window.setTimeout(() => { void loadAssets() }, 0)
+    return () => window.clearTimeout(timer)
   }, [loadAssets])
 
   const embeddedCount = useMemo(
@@ -347,6 +349,17 @@ export function SemanticAssetPage() {
                         <td>{statusLabels[asset.status]}</td>
                         <td>
                           <div className="semantic-asset-actions">
+                            <AssetSharingSelect
+                              resourceType="SEMANTIC_ASSET"
+                              resourceID={asset.id}
+                              value={asset.sharingScope || 'PRIVATE'}
+                              ownerUserID={asset.createdBy}
+                              assetDomainID={asset.domainId}
+                              disabled={!canManage}
+                              onChange={sharingScope => setAssets(current => current.map(item =>
+                                item.id === asset.id ? { ...item, sharingScope } : item
+                              ))}
+                            />
                             <button
                               type="button"
                               disabled={!canManage || asset.status !== 'ACTIVE'}

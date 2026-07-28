@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"intelligent-report-generation-system/internal/platform/database"
 )
 
 type Service struct {
@@ -56,6 +58,12 @@ func (s *Service) Audit(ctx context.Context, tenantID, actorID, action, resource
 func (s *Service) Create(ctx context.Context, source Source) (Source, error) {
 	if source.Visibility == "" {
 		source.Visibility = VisibilityPrivate
+	}
+	if source.SharingScope == "" {
+		source.SharingScope = "PRIVATE"
+	}
+	if source.SharingScope != "PRIVATE" && source.SharingScope != "DOMAIN" && source.SharingScope != "PLATFORM" {
+		return Source{}, fmt.Errorf("%w: invalid sharing scope", ErrInvalidConfiguration)
 	}
 	if err := source.Validate(); err != nil {
 		return Source{}, fmt.Errorf("%w: %v", ErrInvalidConfiguration, err)
@@ -136,6 +144,14 @@ func (s *Service) Update(ctx context.Context, source Source) (Source, error) {
 	if current.ReviewStatus == ReviewPending {
 		return Source{}, ErrReviewPending
 	}
+	accessContext, hasAccessContext := database.AccessContextFromContext(ctx)
+	if source.SharingScope != "" &&
+		source.SharingScope != current.SharingScope &&
+		(!hasAccessContext ||
+			source.UpdatedBy != current.OwnerID ||
+			accessContext.DomainID != current.DomainID) {
+		return Source{}, ErrSharingOwnerDomainRequired
+	}
 	// 版本化仓储会让旧发布配置继续服务，编辑草稿时不能提前关闭线上连接池。
 	// 旧仓储仍维持原有“覆盖配置前关闭连接”的行为。
 	if _, versioned := s.repo.(VersionedRepository); !versioned {
@@ -154,6 +170,15 @@ func (s *Service) Update(ctx context.Context, source Source) (Source, error) {
 	}
 	if source.Visibility == "" {
 		source.Visibility = current.Visibility
+	}
+	if source.SharingScope == "" {
+		source.SharingScope = current.SharingScope
+	}
+	if source.SharingScope == "" {
+		source.SharingScope = "PRIVATE"
+	}
+	if source.SharingScope != "PRIVATE" && source.SharingScope != "DOMAIN" && source.SharingScope != "PLATFORM" {
+		return Source{}, fmt.Errorf("%w: invalid sharing scope", ErrInvalidConfiguration)
 	}
 	source.CreatedBy = current.CreatedBy
 	source.Status = StatusDraft

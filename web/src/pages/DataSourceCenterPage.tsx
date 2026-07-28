@@ -1,7 +1,9 @@
-import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { AppShell } from '../components/AppShell'
+import { AssetSharingSelect } from '../components/AssetSharingSelect'
 import { RequestError } from '../lib/api'
 import { currentSubject } from '../lib/auth'
+import { currentDomainID, subscribeDomainChange } from '../lib/domain-context'
 import { md5Hex } from '../lib/md5'
 import {
   dataSourceAPI,
@@ -14,6 +16,7 @@ import {
   type DataSourceTestResult,
   type DataSourceType,
   type DataSourceVisibility,
+  type AssetSharingScope,
   type DiscoveredTableRecord,
 	type ExcelFileAsset,
   type ExcelWorkbookInspection,
@@ -32,6 +35,7 @@ type ConnectionDraft = {
   name: string
   description: string
   visibility: DataSourceVisibility
+  sharingScope: AssetSharingScope
   type: DataSourceType
   host: string
   port: string
@@ -148,7 +152,7 @@ const tableDraftChanged = (draft: TableDraft, table: DataSourceTableRecord) => d
   || draft.manualLocked !== table.manualLocked
 
 const emptyDraft = (): ConnectionDraft => ({
-  code: '', name: '', description: '', visibility: 'PRIVATE',
+  code: '', name: '', description: '', visibility: 'PRIVATE', sharingScope: 'PRIVATE',
   type: 'MYSQL', host: '', port: '3306', database: '', username: '', password: '',
 })
 const configText = (source: DataSourceRecord, key: string) => {
@@ -170,6 +174,7 @@ const draftFromSource = (source: DataSourceRecord): ConnectionDraft => ({
   name: source.name,
   description: source.description || '',
   visibility: source.visibility || 'PRIVATE',
+  sharingScope: source.sharingScope || (source.visibility === 'TENANT_PUBLIC' ? 'PLATFORM' : 'PRIVATE'),
   type: source.type === 'ORACLE' ? 'ORACLE' : 'MYSQL',
   host: configText(source, 'host'),
   port: configText(source, 'port') || (source.type === 'ORACLE' ? '1521' : '3306'),
@@ -182,6 +187,7 @@ const normalizedDraft = (draft: ConnectionDraft) => ({
   name: draft.name.trim(),
   description: draft.description.trim(),
   visibility: draft.visibility,
+  sharingScope: draft.sharingScope,
   type: draft.type,
   host: draft.host.trim(),
   port: draft.port.trim(),
@@ -269,6 +275,11 @@ export function DataSourceCenterPage() {
   const notifiedMetadataJobs = useRef(new Set<string>())
   const viewedSourceIdRef = useRef(dialog?.mode === 'view' ? dialog.source?.id || '' : '')
   const signedInSubject = currentSubject()
+  const selectedDomainID = useSyncExternalStore(
+    subscribeDomainChange,
+    currentDomainID,
+    () => '',
+  )
 
   useEffect(() => {
     viewedSourceIdRef.current = dialog?.mode === 'view' ? dialog.source?.id || '' : ''
@@ -474,7 +485,7 @@ export function DataSourceCenterPage() {
       if (active) setLoading(false)
     })
     return () => { active = false }
-  }, [runConnectionTest])
+  }, [runConnectionTest, selectedDomainID])
 
   const openCreate = () => {
     setDraft(emptyDraft())
@@ -784,6 +795,11 @@ export function DataSourceCenterPage() {
     if (validationError) throw new Error(validationError)
     const input: DataSourceConnectionInput = {
       code: draft.code.trim(), name: draft.name.trim(), description: draft.description.trim(), visibility: draft.visibility,
+      ...((!editing && draft.sharingScope !== 'PRIVATE') || (
+        editing &&
+        editing.ownerId === signedInSubject &&
+        editing.domainId === selectedDomainID
+      ) ? { sharingScope: draft.sharingScope } : {}),
       type: draft.type as 'MYSQL' | 'ORACLE', host: draft.host.trim(), port: Number(draft.port),
       database: draft.database.trim(), username: draft.username.trim(), password: draft.password,
     }
@@ -884,7 +900,9 @@ export function DataSourceCenterPage() {
 				if (!excelAsset) setExcelAsset(asset)
 				saved = await dataSourceAPI.create({
           code: draft.code.trim(), name: draft.name.trim(), description: draft.description.trim(),
-          visibility: draft.visibility, type: 'EXCEL', fileAssetId: asset.id,
+          visibility: draft.visibility,
+          ...(draft.sharingScope === 'PRIVATE' ? {} : { sharingScope: draft.sharingScope }),
+          type: 'EXCEL', fileAssetId: asset.id,
         })
 				const testResult = await runConnectionTest(saved.id)
 				const active = await dataSourceAPI.get(saved.id)
@@ -1087,6 +1105,17 @@ export function DataSourceCenterPage() {
                   </span>
 	                </button>
 	                <div className="data-source-actions">
+                    <AssetSharingSelect
+                      resourceType="DATA_SOURCE"
+                      resourceID={source.id}
+                      value={source.sharingScope || (source.visibility === 'TENANT_PUBLIC' ? 'PLATFORM' : 'PRIVATE')}
+                      ownerUserID={source.ownerId}
+                      assetDomainID={source.domainId}
+                      disabled={actionBusy || unavailable}
+                      onChange={sharingScope => setSources(current => current.map(item =>
+                        item.id === source.id ? { ...item, sharingScope } : item
+                      ))}
+                    />
 	                  {reviewStatus === 'PENDING' ? <>
 	                    {isRequester && <button className="action-withdraw" type="button" disabled={actionBusy} onClick={event => { event.stopPropagation(); void withdrawReview(source) }}>{busyAction === `review-withdraw:${source.id}` ? '撤销中…' : '撤销申请'}</button>}
 	                  </> : <>
@@ -1107,7 +1136,22 @@ export function DataSourceCenterPage() {
             <label>数据源名称<input autoFocus value={draft.name} onChange={event => updateDraft('name', event.target.value)} placeholder="例如：销售业务库" /></label>
             <label>数据源编码<input aria-label="数据源编码" maxLength={128} value={draft.code} onChange={event => updateDraft('code', event.target.value)} placeholder="例如：sales_mysql" /><small>以英文字母开头，仅支持英文字母、数字和下划线；中文文件名会自动转换为 MD5 编码。</small></label>
             <label>数据源描述<input value={draft.description} onChange={event => updateDraft('description', event.target.value)} placeholder="说明数据范围、用途和使用边界" /></label>
-            <label>分享状态<select value={draft.visibility} onChange={event => setDraft(current => ({ ...current, visibility: event.target.value as DataSourceVisibility }))}><option value="PRIVATE">仅所属人及授权用户</option><option value="TENANT_PUBLIC">租户内共享</option></select></label>
+            <label>分享状态<select
+              aria-label="分享状态"
+              value={draft.sharingScope}
+              disabled={dialog.mode === 'edit' && (
+                dialog.source?.ownerId !== signedInSubject ||
+                dialog.source?.domainId !== selectedDomainID
+              )}
+              title={dialog.mode === 'edit' && (
+                dialog.source?.ownerId !== signedInSubject ||
+                dialog.source?.domainId !== selectedDomainID
+              ) ? '仅数据源持有者可以在资产所属领域修改共享状态' : undefined}
+              onChange={event => setDraft(current => ({ ...current, sharingScope: event.target.value as AssetSharingScope }))}
+            ><option value="PRIVATE">仅自己</option><option value="DOMAIN">领域内共享</option><option value="PLATFORM">平台共享（跨领域只读）</option></select>{dialog.mode === 'edit' && (
+              dialog.source?.ownerId !== signedInSubject ||
+              dialog.source?.domainId !== selectedDomainID
+            ) && <small>仅数据源持有者可以在资产所属领域修改共享状态。</small>}</label>
             <label>数据源类型<select value={draft.type} onChange={event => {
 				const type = event.target.value as DataSourceType
 				setExcelFile(null)

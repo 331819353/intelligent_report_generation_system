@@ -60,6 +60,7 @@ export type DatasetDraft = {
 }
 export type DatasetRecord = {
   id: string; code: string; name: string; description: string; type: string; status: string
+  domainId?: string; sharingScope?: AssetSharingScope; ownerUserId?: string
   originTableId?: string; layer: DatasetLayer; tags: string[]
   version: number; draftVersionId: string; draftVersionNo: number; draftRecordVersion: number; currentPublishedVersionId?: string
   dslHash: string; planHash: string; dsl: DatasetDSL; logicalPlan: unknown
@@ -67,9 +68,11 @@ export type DatasetRecord = {
 }
 export type DatasetSummary = {
   id: string; code: string; name: string; description: string; type: string; status: string
+  domainId?: string; sharingScope?: AssetSharingScope; ownerUserId?: string
   originTableId?: string; originTableName?: string; originDataSourceName?: string; layer: DatasetLayer; tags: string[]
   version: number; dslHash: string; currentPublishedVersionId?: string; updatedAt: string
 }
+export type AssetSharingScope = 'PRIVATE' | 'DOMAIN' | 'PLATFORM'
 export type DatasetPage = {
   items: DatasetSummary[]; total: number; limit: number; offset: number
 }

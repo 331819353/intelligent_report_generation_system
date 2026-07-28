@@ -276,7 +276,8 @@ func (s *PostgresStore) GetByOriginCandidate(ctx context.Context, tenantID, cand
 func (s *PostgresStore) Get(ctx context.Context, tenantID, id string) (record Record, err error) {
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `SELECT
-			m.id::text,m.code::text,m.name,m.description,m.metric_type,m.status,m.version,
+			m.id::text,m.code::text,m.name,m.description,m.domain_id::text,m.sharing_scope::text,
+			COALESCE(m.created_by::text,''),m.metric_type,m.status,m.version,
 			v.id::text,v.version_no,v.record_version,COALESCE(m.current_published_version_id::text,''),
 			m.dataset_id::text,v.dataset_version_id::text,v.definition_hash,v.definition_json,
 			to_char(m.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
@@ -285,7 +286,8 @@ func (s *PostgresStore) Get(ctx context.Context, tenantID, id string) (record Re
 			JOIN platform.metric_versions AS v
 			  ON v.id=m.current_draft_version_id AND v.metric_id=m.id AND v.tenant_id=m.tenant_id
 			WHERE m.id::text=$1 AND m.deleted_at IS NULL`, id).Scan(
-			&record.ID, &record.Code, &record.Name, &record.Description, &record.Type, &record.Status,
+			&record.ID, &record.Code, &record.Name, &record.Description,
+			&record.DomainID, &record.SharingScope, &record.OwnerUserID, &record.Type, &record.Status,
 			&record.Version, &record.DraftVersionID, &record.DraftVersionNo, &record.DraftRecordVersion,
 			&record.CurrentPublishedVersionID, &record.DatasetID, &record.DatasetVersionID,
 			&record.DefinitionHash, &record.Definition, &record.CreatedAt, &record.UpdatedAt,
@@ -306,7 +308,8 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT
-			m.id::text,m.code::text,m.name,m.description,m.metric_type,m.status,m.version,
+			m.id::text,m.code::text,m.name,m.description,m.domain_id::text,m.sharing_scope::text,
+			COALESCE(m.created_by::text,''),m.metric_type,m.status,m.version,
 			m.dataset_id::text,v.dataset_version_id::text,
 			COALESCE(m.current_published_version_id::text,''),
 			to_char(m.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
@@ -322,7 +325,8 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 		for rows.Next() {
 			var item Summary
 			if err := rows.Scan(
-				&item.ID, &item.Code, &item.Name, &item.Description, &item.Type, &item.Status,
+				&item.ID, &item.Code, &item.Name, &item.Description,
+				&item.DomainID, &item.SharingScope, &item.OwnerUserID, &item.Type, &item.Status,
 				&item.Version, &item.DatasetID, &item.DatasetVersionID,
 				&item.CurrentPublishedVersionID, &item.UpdatedAt,
 			); err != nil {
