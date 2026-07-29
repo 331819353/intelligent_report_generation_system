@@ -14,10 +14,15 @@ import (
 
 type scriptedDIMValidationInvoker struct {
 	results []aiplatform.InvocationResult
+	errors  []error
 	calls   []aiplatform.Invocation
+	models  string
 }
 
 func (invoker *scriptedDIMValidationInvoker) Configured() bool { return true }
+func (invoker *scriptedDIMValidationInvoker) Model() string {
+	return invoker.models
+}
 
 func (invoker *scriptedDIMValidationInvoker) Invoke(
 	_ context.Context,
@@ -27,6 +32,9 @@ func (invoker *scriptedDIMValidationInvoker) Invoke(
 	index := len(invoker.calls) - 1
 	if index >= len(invoker.results) {
 		return aiplatform.InvocationResult{}, errors.New("unexpected invocation")
+	}
+	if index < len(invoker.errors) && invoker.errors[index] != nil {
+		return invoker.results[index], invoker.errors[index]
 	}
 	return invoker.results[index], nil
 }
@@ -837,6 +845,122 @@ func TestDWDStageRepairMessagesUseFreshFinalRegeneration(t *testing.T) {
 		!strings.Contains(freshInstruction, "忽略之前的候选答案") ||
 		!strings.Contains(freshInstruction, "repair contract") {
 		t.Fatalf("fresh repair instruction = %q", freshInstruction)
+	}
+}
+
+func TestDesignDimensionFallsBackToDeepSeekAfterM2InvalidOutput(
+	t *testing.T,
+) {
+	invoker := &scriptedDIMValidationInvoker{
+		models: "MiniMax-M2,deepseek-v3",
+		results: []aiplatform.InvocationResult{
+			{},
+			{
+				RequestID: "deepseek_request",
+				ProviderResult: aiplatform.ProviderResult{
+					Model: "deepseek-v3",
+					Content: json.RawMessage(`{"output":{
+						"sourceDatasetVersionId":"merchant_version",
+						"name":"商户维度",
+						"description":"每行代表一个稳定商户实体",
+						"grainKeyFieldCodes":["merchant_id"],
+						"fields":[
+							{"sourceFieldCode":"merchant_id","outputName":"商户ID","outputDescription":"商户唯一业务标识","standardization":[]},
+							{"sourceFieldCode":"merchant_name","outputName":"商户名称","outputDescription":"商户标准名称","standardization":["TRIM"]}
+						],
+						"rationale":"商户ID稳定标识一个商户实体"
+					}}`),
+				},
+			},
+		},
+		errors: []error{
+			&aiplatform.ProviderError{
+				Code:      aiplatform.ErrorCodeInvalidOutput,
+				Message:   "AI structured output is invalid",
+				Retryable: false,
+			},
+			nil,
+		},
+	}
+	planner := NewOrchestratedDWDModelingPlanner(invoker, time.Second)
+	input := dwdPlanningInput{
+		TenantID: "tenant", ActorID: "actor", ResourceID: "merchant_version",
+		Domain: "企业经营",
+		Tables: []dwdPlanningTable{{
+			DatasetID: "merchant_dataset", VersionID: "merchant_version",
+			Name: "商户主数据",
+			OutputGrain: OutputGrain{
+				KeyFields: []string{"merchant_id"},
+			},
+			Fields: []dwdPlanningField{
+				{
+					Code: "merchant_id", Role: "IDENTIFIER",
+					CanonicalType: "STRING", SemanticType: "IDENTIFIER",
+				},
+				{
+					Code: "merchant_name", Role: "ATTRIBUTE",
+					CanonicalType: "STRING", SemanticType: "COMPANY_NAME",
+				},
+			},
+		}},
+	}
+	completion, err := planner.DesignDimension(
+		context.Background(), input,
+		[]dwdLLMClassification{{
+			DatasetVersionID:             "merchant_version",
+			Role:                         "MASTER",
+			DimensionKeyFieldCodes:       []string{"merchant_id"},
+			DimensionAttributeFieldCodes: []string{"merchant_name"},
+			Rationale:                    "每行一个稳定商户实体",
+		}},
+		"merchant_version",
+	)
+	if err != nil {
+		t.Fatalf("design dimension with fallback: %v", err)
+	}
+	if completion.AIRequestID != "deepseek_request" ||
+		len(invoker.calls) != 2 ||
+		invoker.calls[0].PreferredModel != "" ||
+		invoker.calls[1].PreferredModel != "deepseek-v3" {
+		t.Fatalf(
+			"completion=%#v calls=%#v",
+			completion, invoker.calls,
+		)
+	}
+	if len(invoker.calls[1].Request.Messages) != 3 ||
+		invoker.calls[1].Request.Messages[2].Role !=
+			aiplatform.MessageRoleUser {
+		t.Fatalf(
+			"fallback repair messages = %#v",
+			invoker.calls[1].Request.Messages,
+		)
+	}
+}
+
+func TestDWDModelingFallbackRejectsPermanentProviderErrors(t *testing.T) {
+	for _, code := range []aiplatform.ErrorCode{
+		aiplatform.ErrorCodeAuthentication,
+		aiplatform.ErrorCodeInvalidRequest,
+		aiplatform.ErrorCodeCanceled,
+		aiplatform.ErrorCodeRefusal,
+		aiplatform.ErrorCodeResponseTooLarge,
+	} {
+		if dwdModelingFallbackEligible(
+			context.Background(),
+			&aiplatform.ProviderError{
+				Code: code, Message: "permanent error",
+			},
+		) {
+			t.Fatalf("provider error %s unexpectedly allowed fallback", code)
+		}
+	}
+	if !dwdModelingFallbackEligible(
+		context.Background(),
+		&aiplatform.ProviderError{
+			Code: aiplatform.ErrorCodeTimeout,
+		},
+	) {
+		t.Fatal("provider timeout did not allow fallback")
 	}
 }
 

@@ -102,7 +102,7 @@ export AI_MAX_ATTEMPTS="1"
 export AI_CONFIDENCE_THRESHOLD="0.8"
 ```
 
-模型序列按“主模型,后备模型”解释：普通调用固定使用 MiniMax，元数据补全只有在 MiniMax 超时、调用失败或严格校验失败后才以独立审计请求切换 DeepSeek。上述超时应按实际 Provider 延迟调整，并始终保持 `2 × AI_REQUEST_TIMEOUT < API_WRITE_TIMEOUT`。批量加工仍应使用持久化异步任务，不能通过无限放大同步 HTTP 超时替代。未设置 `AI_API_KEY` 时，元数据补全和数据集 DAG 提案等 AI 接口明确降级为不可用，非 AI 功能继续运行。元数据 AI API、数据集 API、结构化输出约束和审计字段分别见 `docs/api-metadata-ai.md`、`docs/api-datasets.md` 和 `docs/ai-orchestration.md`。
+模型序列按“主模型,后备模型”解释：DIM/DWD 建模和元数据补全先使用 MiniMax；MiniMax 出现结构化输出、本地合同、超时、限流或上游服务失败后，以独立审计请求切换 DeepSeek。认证、租户策略、配额、取消、非法请求、拒答和响应过大不会换模型重试。上述超时应按实际 Provider 延迟调整，并始终保持 `2 × AI_REQUEST_TIMEOUT < API_WRITE_TIMEOUT`。批量加工仍应使用持久化异步任务，不能通过无限放大同步 HTTP 超时替代。未设置 `AI_API_KEY` 时，元数据补全和数据集 DAG 提案等 AI 接口明确降级为不可用，非 AI 功能继续运行。元数据 AI API、数据集 API、结构化输出约束和审计字段分别见 `docs/api-metadata-ai.md`、`docs/api-datasets.md` 和 `docs/ai-orchestration.md`。
 
 ## 一键启动本地服务
 

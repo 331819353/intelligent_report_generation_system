@@ -306,17 +306,18 @@ func (planner *OrchestratedDWDModelingPlanner) invokeDIMValidation(
 			}
 		}
 		lastErr = invokeErr
-		if !repairableDWDModelingError(invokeErr) ||
-			attempt == dwdStageInvocationAttempts-1 {
+		if attempt == dwdStageInvocationAttempts-1 {
 			return nil, "", invokeErr
 		}
-		if err := callCtx.Err(); err != nil {
-			return nil, "", err
+		if !planner.prepareDWDStageRetry(
+			callCtx, &invocation, baseMessages, result, invokeErr,
+			repairPrompt, attempt == dwdStageInvocationAttempts-2,
+		) {
+			if err := callCtx.Err(); err != nil {
+				return nil, "", err
+			}
+			return nil, "", invokeErr
 		}
-		invocation.Request.Messages = dwdStageRepairMessages(
-			baseMessages, result, invokeErr, repairPrompt,
-			attempt == dwdStageInvocationAttempts-2,
-		)
 	}
 	return nil, "", lastErr
 }

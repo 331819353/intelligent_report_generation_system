@@ -235,6 +235,10 @@ type dwdAIInvoker interface {
 	Invoke(context.Context, aiplatform.Invocation) (aiplatform.InvocationResult, error)
 }
 
+type dwdAIModelCatalog interface {
+	Model() string
+}
+
 type OrchestratedDWDModelingPlanner struct {
 	invoker dwdAIInvoker
 	timeout time.Duration
@@ -435,18 +439,19 @@ func (planner *OrchestratedDWDModelingPlanner) Classify(
 			}
 			invokeErr = decodeErr
 		}
-		if !repairableDWDModelingError(invokeErr) ||
-			attempt == dwdStageInvocationAttempts-1 {
+		if attempt == dwdStageInvocationAttempts-1 {
 			return dwdClassificationCompletion{}, invokeErr
 		}
-		if err := callCtx.Err(); err != nil {
-			return dwdClassificationCompletion{}, err
-		}
-		invocation.Request.Messages = dwdStageRepairMessages(
-			baseMessages, result, invokeErr,
+		if !planner.prepareDWDStageRetry(
+			callCtx, &invocation, baseMessages, result, invokeErr,
 			`请只修复 ODS 多产物识别：domain 必须等于输入；classifications 必须逐表覆盖且不重复，只能使用输入的精确 datasetVersionId 和字段 code；role 只能是 FACT、DIMENSION、MASTER、OTHER。先按原提示中的 DIM、DWD 和同表边界复核真实行粒度。日期/时间参与输出粒度的周期快照/日度聚合必须是 FACT；以事件 ID、订单号、交易号、支付号、配送号等一次性过程键为粒度并带事件时间、状态、参与方或轨迹字段的无度量事件流水也是 FACT。role 必须与 rationale 的 DIM/DWD 结论一致。FACT 可以通过 dimensionKeyFieldCodes + dimensionAttributeFieldCodes 声明一个内嵌实体维度，但事实行键和过程单号不能作为实体键；任何 DIM 投影都不能包含交易度量、事件时间或汇总人数。一人一行的个人主表仍是 DIMENSION/MASTER。没有可靠实体时两个数组必须为空。rationale 保持简短。不要返回 outputs、SQL、Markdown 或解释。`,
 			attempt == dwdStageInvocationAttempts-2,
-		)
+		) {
+			if err := callCtx.Err(); err != nil {
+				return dwdClassificationCompletion{}, err
+			}
+			return dwdClassificationCompletion{}, invokeErr
+		}
 	}
 	return dwdClassificationCompletion{}, errDWDModelingInvalid
 }
@@ -544,18 +549,19 @@ func (planner *OrchestratedDWDModelingPlanner) MergeClassifications(
 			}
 			invokeErr = decodeErr
 		}
-		if !repairableDWDModelingError(invokeErr) ||
-			attempt == dwdStageInvocationAttempts-1 {
+		if attempt == dwdStageInvocationAttempts-1 {
 			return dwdClassificationCompletion{}, invokeErr
 		}
-		if err := callCtx.Err(); err != nil {
-			return dwdClassificationCompletion{}, err
-		}
-		invocation.Request.Messages = dwdStageRepairMessages(
-			baseMessages, result, invokeErr,
+		if !planner.prepareDWDStageRetry(
+			callCtx, &invocation, baseMessages, result, invokeErr,
 			`请只修复最终领域分类合并结果：逐一覆盖全部输入 ODS；保留每张 ODS 已独立验证通过的角色和候选维度字段，不得因可能重名而提前改为 OTHER 或清空维度投影。DIM 将先全部落地为未发布草稿，再由独立校验器按表名和字段裁决。不得把周期快照、交易明细或以一次性过程键和事件时间为粒度的无度量事件流水改成 DIM，不得新增字段。只能使用输入中的精确版本和字段 code，rationale 简短说明最终粒度。`,
 			attempt == dwdStageInvocationAttempts-2,
-		)
+		) {
+			if err := callCtx.Err(); err != nil {
+				return dwdClassificationCompletion{}, err
+			}
+			return dwdClassificationCompletion{}, invokeErr
+		}
 	}
 	return dwdClassificationCompletion{}, errDWDModelingInvalid
 }
@@ -647,22 +653,23 @@ func (planner *OrchestratedDWDModelingPlanner) DesignDimension(
 			}
 			invokeErr = decodeErr
 		}
-		if !repairableDWDModelingError(invokeErr) ||
-			attempt == dwdStageInvocationAttempts-1 {
+		if attempt == dwdStageInvocationAttempts-1 {
 			return dwdDimensionDesignCompletion{}, invokeErr
 		}
-		if err := callCtx.Err(); err != nil {
-			return dwdDimensionDesignCompletion{}, err
-		}
-		invocation.Request.Messages = dwdStageRepairMessages(
-			baseMessages, result, invokeErr,
+		if !planner.prepareDWDStageRetry(
+			callCtx, &invocation, baseMessages, result, invokeErr,
 			fmt.Sprintf(`上一份 DIM 设计未通过结构校验：%s
 
 请只返回修复后的 {"output": ...}：sourceDatasetVersionId 必须等于指定版本；fields 必须逐字段覆盖且不重复；中文名称和说明不能为空；所有 STRING 必须 TRIM，可空标识/维度/属性必须 COALESCE_DEFAULT，DATE/DATETIME/STRING TIME 必须 CAST_DATE；不得为 TIME/MEASURE 填充哨兵值。standardization 只能使用约定的四种枚举，新设计不得使用 CAST_DATETIME。不要返回 SQL、Markdown 或额外解释。`,
 				invokeErr.Error(),
 			),
 			attempt == dwdStageInvocationAttempts-2,
-		)
+		) {
+			if err := callCtx.Err(); err != nil {
+				return dwdDimensionDesignCompletion{}, err
+			}
+			return dwdDimensionDesignCompletion{}, invokeErr
+		}
 	}
 	return dwdDimensionDesignCompletion{}, errDWDModelingInvalid
 }
@@ -765,18 +772,19 @@ func (planner *OrchestratedDWDModelingPlanner) DesignFact(
 			}
 			invokeErr = decodeErr
 		}
-		if !repairableDWDModelingError(invokeErr) ||
-			attempt == dwdStageInvocationAttempts-1 {
+		if attempt == dwdStageInvocationAttempts-1 {
 			return dwdFactDesignCompletion{}, invokeErr
 		}
-		if err := callCtx.Err(); err != nil {
-			return dwdFactDesignCompletion{}, err
-		}
-		invocation.Request.Messages = dwdStageRepairMessages(
-			baseMessages, result, invokeErr,
+		if !planner.prepareDWDStageRetry(
+			callCtx, &invocation, baseMessages, result, invokeErr,
 			dwdFactDesignRepairInstruction(invokeErr),
 			attempt == dwdStageInvocationAttempts-2,
-		)
+		) {
+			if err := callCtx.Err(); err != nil {
+				return dwdFactDesignCompletion{}, err
+			}
+			return dwdFactDesignCompletion{}, invokeErr
+		}
 	}
 	return dwdFactDesignCompletion{}, errDWDModelingInvalid
 }
@@ -867,6 +875,92 @@ func dwdStageRepairMessages(
 	})
 }
 
+// prepareDWDStageRetry keeps one immutable audit record per model call. The
+// primary model receives the original request; once it returns invalid
+// structured output, fails local validation, times out or has a recoverable
+// provider failure, the next call explicitly selects the configured fallback
+// model. Authentication, invalid-request, tenant-policy, quota, refusal and
+// oversized-response failures remain fail-closed because changing models
+// cannot make them safe or valid.
+func (planner *OrchestratedDWDModelingPlanner) prepareDWDStageRetry(
+	ctx context.Context,
+	invocation *aiplatform.Invocation,
+	baseMessages []aiplatform.Message,
+	result aiplatform.InvocationResult,
+	invokeErr error,
+	repairInstruction string,
+	freshRegeneration bool,
+) bool {
+	if planner == nil || invocation == nil || invokeErr == nil ||
+		ctx.Err() != nil {
+		return false
+	}
+	switchedToFallback := false
+	if strings.TrimSpace(invocation.PreferredModel) == "" &&
+		dwdModelingFallbackEligible(ctx, invokeErr) {
+		if fallbackModel := configuredDWDFallbackModel(planner.invoker); fallbackModel != "" {
+			invocation.PreferredModel = fallbackModel
+			switchedToFallback = true
+		}
+	}
+	if !repairableDWDModelingError(invokeErr) {
+		if switchedToFallback {
+			invocation.Request.Messages = append(
+				[]aiplatform.Message(nil), baseMessages...,
+			)
+		}
+		return switchedToFallback
+	}
+	invocation.Request.Messages = dwdStageRepairMessages(
+		baseMessages, result, invokeErr,
+		repairInstruction, freshRegeneration,
+	)
+	return true
+}
+
+func configuredDWDFallbackModel(invoker dwdAIInvoker) string {
+	catalog, ok := invoker.(dwdAIModelCatalog)
+	if !ok {
+		return ""
+	}
+	models := strings.Split(catalog.Model(), ",")
+	if len(models) < 2 {
+		return ""
+	}
+	primary := strings.TrimSpace(models[0])
+	fallback := strings.TrimSpace(models[1])
+	if fallback == "" || strings.EqualFold(primary, fallback) {
+		return ""
+	}
+	return fallback
+}
+
+func dwdModelingFallbackEligible(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil ||
+		errors.Is(err, aiplatform.ErrTenantAIForbidden) ||
+		errors.Is(err, aiplatform.ErrQuotaExceeded) ||
+		errors.Is(err, aiplatform.ErrInvalidInvocation) {
+		return false
+	}
+	if errors.Is(err, errDWDModelingInvalid) {
+		return true
+	}
+	var providerError *aiplatform.ProviderError
+	if !errors.As(err, &providerError) {
+		return false
+	}
+	switch providerError.Code {
+	case aiplatform.ErrorCodeCanceled,
+		aiplatform.ErrorCodeInvalidRequest,
+		aiplatform.ErrorCodeAuthentication,
+		aiplatform.ErrorCodeRefusal,
+		aiplatform.ErrorCodeResponseTooLarge:
+		return false
+	default:
+		return true
+	}
+}
+
 const dwdModelingSystemPrompt = `你是企业数据仓库 DIM/DWD 建模设计师。输入只包含同一业务领域内已发布 ODS 数据集的完整元数据，不包含业务数据行。ODS 是源系统物理表的治理映射。
 
 先按以下平台定义完成判断，再设计字段和 DAG；不要输出内部分析过程：
@@ -950,41 +1044,19 @@ func (planner *OrchestratedDWDModelingPlanner) Plan(
 		if validationErr == nil {
 			return completion, nil
 		}
-		if !repairableDWDModelingError(validationErr) ||
-			invocationAttempt == dwdModelingInvocationAttempts-1 {
+		if invocationAttempt == dwdModelingInvocationAttempts-1 {
 			return dwdPlanningCompletion{}, validationErr
 		}
-		if err := callCtx.Err(); err != nil {
-			return dwdPlanningCompletion{}, err
+		if !planner.prepareDWDStageRetry(
+			callCtx, &invocation, baseMessages, result, validationErr,
+			dwdModelingRepairInstruction(validationErr, ""),
+			invocationAttempt == dwdModelingInvocationAttempts-2,
+		) {
+			if err := callCtx.Err(); err != nil {
+				return dwdPlanningCompletion{}, err
+			}
+			return dwdPlanningCompletion{}, validationErr
 		}
-
-		repairContent := result.ProviderResult.Content
-		repairDiagnostic := ""
-		if candidate, diagnostic, ok := aiplatform.InvalidOutputDetails(invokeErr); ok {
-			repairContent = candidate
-			repairDiagnostic = diagnostic
-		}
-		repairMessages := append([]aiplatform.Message(nil), baseMessages...)
-		if len(repairContent) > 0 &&
-			len(repairContent) <= maxDWDModelingRepairContent {
-			repairMessages = append(repairMessages, aiplatform.Message{
-				Role: aiplatform.MessageRoleAssistant,
-				Parts: []aiplatform.ContentPart{{
-					Type: aiplatform.ContentTypeText,
-					Text: string(repairContent),
-				}},
-			})
-		}
-		repairMessages = append(repairMessages, aiplatform.Message{
-			Role: aiplatform.MessageRoleUser,
-			Parts: []aiplatform.ContentPart{{
-				Type: aiplatform.ContentTypeText,
-				Text: dwdModelingRepairInstruction(
-					validationErr, repairDiagnostic,
-				),
-			}},
-		})
-		invocation.Request.Messages = repairMessages
 	}
 	return dwdPlanningCompletion{}, errDWDModelingInvalid
 }
