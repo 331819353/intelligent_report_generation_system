@@ -59,6 +59,22 @@ WHERE rolname IN (:'app_user',:'worker_user',:'connection_test_user')
   \quit 1
 \endif
 SELECT 'dedicated database role attributes passed' AS result;
+
+DO $$
+DECLARE
+  definition text;
+BEGIN
+  SELECT pg_get_functiondef(
+    'platform.trigger_manual_dwd_modeling(uuid)'::regprocedure
+  ) INTO definition;
+  IF position('''领域:''||domain.name AS domain_key' IN definition)>0
+     OR position('domain.name AS domain_key' IN definition)=0 THEN
+    RAISE EXCEPTION
+      'manual DWD trigger does not use the canonical plain business domain key';
+  END IF;
+END
+$$;
+SELECT 'manual DWD trigger domain identity passed' AS result;
 SQL
 
 # 使用应用账号运行事务化验证，覆盖 RLS、审计不可变性与策略隔离。
