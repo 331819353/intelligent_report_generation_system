@@ -1502,6 +1502,11 @@ func validateUpstreamsWithOptions(
 	}); err != nil {
 		return err
 	}
+	if err := ValidateSourceDependencies(ctx, document, postgresSourceDependencyResolver{
+		tx: tx, allowDraftDatasetDependencies: options.allowDraftDatasetDependencies,
+	}); err != nil {
+		return err
+	}
 	for i, node := range document.Nodes {
 		switch node.Type {
 		case "TABLE":
@@ -1575,6 +1580,48 @@ func validateUpstreamsWithOptions(
 type postgresLayerDependencyResolver struct {
 	tx                            pgx.Tx
 	allowDraftDatasetDependencies bool
+}
+
+type postgresSourceDependencyResolver struct {
+	tx                            pgx.Tx
+	allowDraftDatasetDependencies bool
+}
+
+func (resolver postgresSourceDependencyResolver) ResolveDatasetVersionDocument(
+	ctx context.Context,
+	versionID string,
+) (Document, error) {
+	var raw json.RawMessage
+	statusClause := `version.status='PUBLISHED'
+		  AND owner.status='PUBLISHED'`
+	if resolver.allowDraftDatasetDependencies {
+		statusClause = `version.status IN ('DRAFT','PUBLISHED')
+		  AND owner.status IN ('DRAFT','PUBLISHED')`
+	}
+	err := resolver.tx.QueryRow(ctx, `SELECT version.dsl_json
+		FROM platform.dataset_versions AS version
+		JOIN platform.datasets AS owner
+		  ON owner.id=version.dataset_id AND owner.tenant_id=version.tenant_id
+		WHERE version.id::text=$1 AND `+statusClause+`
+		  AND owner.deleted_at IS NULL
+		FOR SHARE OF version,owner`, versionID).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Document{}, fmt.Errorf(
+			"%w: dataset source dependency is unavailable: %w",
+			ErrInvalidDocument, ErrLayerDependencyUnavailable,
+		)
+	}
+	if err != nil {
+		return Document{}, err
+	}
+	document, err := DecodeAndNormalize(raw)
+	if err != nil {
+		return Document{}, fmt.Errorf(
+			"%w: upstream dataset source contract is invalid",
+			ErrInvalidDocument,
+		)
+	}
+	return document, nil
 }
 
 func (resolver postgresLayerDependencyResolver) ResolveDatasetVersionLayer(

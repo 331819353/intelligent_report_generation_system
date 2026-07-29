@@ -236,15 +236,18 @@ func Validate(document Document) error {
 		}
 	}
 	dataSources := map[string]bool{}
+	hasDatasetNode := false
 	for _, node := range document.Nodes {
 		if node.DataSourceID != "" {
 			dataSources[node.DataSourceID] = true
 		}
+		hasDatasetNode = hasDatasetNode || node.Type == "DATASET"
 	}
 	if document.Dataset.Type == "SINGLE_SOURCE" && len(dataSources) > 1 {
 		add("dataset.type", "SINGLE_SOURCE 的全部物理表必须属于同一数据源")
 	}
-	if document.Dataset.Type == "CROSS_SOURCE" && len(dataSources) < 2 {
+	if document.Dataset.Type == "CROSS_SOURCE" && len(dataSources) < 2 &&
+		!hasDatasetNode {
 		add("dataset.type", "CROSS_SOURCE 必须引用至少两个不同数据源")
 	}
 	if len(document.Nodes) > 1 && len(document.Joins) == 0 {
