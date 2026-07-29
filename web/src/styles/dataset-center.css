@@ -368,6 +368,17 @@
 .dataset-metadata-form textarea { min-height: 95px; resize: vertical; font: inherit; }
 .dataset-metadata-form > small, .dataset-delete-confirm > small { color: var(--muted); font-size: 10px; }
 .dataset-metadata-form footer, .dataset-delete-confirm footer, .dataset-detail footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.dataset-metadata-editor > section { display: grid; gap: 12px; margin-top: 18px; }
+.dataset-metadata-field-scroll { max-height: 410px; overflow: auto; border: 1px solid #dfe6ef; border-radius: 9px; background: white; }
+.dataset-metadata-field-scroll table { width: 100%; min-width: 1060px; border-collapse: collapse; font-size: 10px; }
+.dataset-metadata-field-scroll th { position: sticky; z-index: 1; top: 0; padding: 9px 10px; background: #eef3f8; color: #536077; text-align: left; white-space: nowrap; }
+.dataset-metadata-field-scroll td { padding: 8px 9px; border-top: 1px solid #edf0f4; color: #45536a; vertical-align: top; }
+.dataset-metadata-field-scroll td:first-child { min-width: 150px; }
+.dataset-metadata-field-scroll td strong, .dataset-metadata-field-scroll td small { display: block; }
+.dataset-metadata-field-scroll td small { margin-top: 3px; color: var(--muted); }
+.dataset-metadata-field-scroll input:not([type="checkbox"]), .dataset-metadata-field-scroll select, .dataset-metadata-field-scroll textarea { min-width: 130px; width: 100%; border: 1px solid #d6dee9; border-radius: 6px; padding: 7px; background: white; color: #344258; font: inherit; }
+.dataset-metadata-field-scroll textarea { min-height: 58px; resize: vertical; }
+.dataset-metadata-field-scroll td:last-child label { display: flex; align-items: center; gap: 5px; margin: 3px 0; white-space: nowrap; }
 @media (max-width: 680px) {
   .dataset-metadata-grid { grid-template-columns: 1fr; }
 }

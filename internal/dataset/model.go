@@ -619,6 +619,26 @@ type UpdateInput struct {
 	DSL             json.RawMessage `json:"dsl"`
 }
 
+// MetadataUpdateInput 只允许修改数据集与输出字段的业务元信息。调用方不提交
+// DSL，服务端基于当前草稿打补丁，从接口边界保证 DAG、字段编码和逻辑类型不变。
+type MetadataUpdateInput struct {
+	Name            string                `json:"name"`
+	Description     string                `json:"description"`
+	Subject         string                `json:"subject"`
+	ExpectedVersion int64                 `json:"expectedVersion"`
+	Fields          []FieldMetadataUpdate `json:"fields"`
+}
+
+type FieldMetadataUpdate struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	Role         string `json:"role"`
+	SemanticType string `json:"semanticType"`
+	Nullable     bool   `json:"nullable"`
+	Visible      bool   `json:"visible"`
+}
+
 // LifecycleInput 使用数据集聚合版本保护停用、恢复和删除操作，避免覆盖并发保存或发布。
 type LifecycleInput struct {
 	ExpectedVersion int64 `json:"expectedVersion"`

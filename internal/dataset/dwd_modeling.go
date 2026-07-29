@@ -3837,7 +3837,10 @@ func buildLLMDesignedDWDDocument(
 	if err != nil {
 		return Document{}, "", err
 	}
-	businessName := ModeledDatasetBusinessName(output.Name)
+	businessName := ModeledDWDDisplayName(
+		output.Name,
+		fact.Document.Dataset.Name,
+	)
 	if businessName == "" {
 		return Document{}, "", errDWDModelingInvalid
 	}

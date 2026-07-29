@@ -240,9 +240,10 @@ export const datasetLayerChoices = (draft: DatasetDraft): DatasetLayer[] => {
   if (datasetNodes.length !== draft.nodes.length) return ['ODS']
   const upstreamLayers = new Set(datasetNodes.map(node => node.table.datasetLayer).filter(Boolean))
   if (!upstreamLayers.size) throw new Error('无法识别上游数据集层级')
-  if ([...upstreamLayers].every(layer => layer === 'ODS')) {
+  if ([...upstreamLayers].every(layer => layer === 'ODS' || layer === 'DIM') && upstreamLayers.has('ODS')) {
     // 保持既有 ODS 数据节点画布默认生成 DWD；用户可在保存前明确切换为 DIM。
-    return ['DWD', 'DIM']
+    // DWD 的合法输入是一张事实 ODS 加可选 DIM；DIM 仍严格限制为纯 ODS 输入。
+    return upstreamLayers.has('DIM') ? ['DWD'] : ['DWD', 'DIM']
   }
   if ([...upstreamLayers].every(layer => layer === 'DWD' || layer === 'DIM') && upstreamLayers.has('DWD')) return ['DWS']
   if ([...upstreamLayers].every(layer => layer === 'DWS')) return ['ADS']
@@ -977,6 +978,27 @@ export const datasetAPI = {
   validate: (dsl: DatasetDSL) => apiRequest<{ valid: boolean; dslHash: string; planHash: string; logicalPlan: unknown }>('/v1/datasets/validate', { method: 'POST', body: JSON.stringify({ dsl }) }),
   create: (dsl: DatasetDSL) => apiRequest<DatasetRecord>('/v1/datasets', { method: 'POST', body: JSON.stringify({ code: dsl.dataset.code, name: dsl.dataset.name, description: dsl.dataset.description ?? '', type: dsl.dataset.type, dsl }) }),
   update: (id: string, version: number, draft: DatasetDraft, dsl: DatasetDSL) => apiRequest<DatasetRecord>(`${datasetPath(id)}/draft`, { method: 'PUT', body: JSON.stringify({ name: draft.name, description: draft.description, expectedVersion: version, dsl }) }),
+  updateMetadata: (
+    id: string,
+    version: number,
+    input: {
+      name: string
+      description: string
+      subject: string
+      fields: Array<{
+        id: string
+        name: string
+        description: string
+        role: string
+        semanticType: string
+        nullable: boolean
+        visible: boolean
+      }>
+    },
+  ) => apiRequest<DatasetRecord>(`${datasetPath(id)}/metadata`, {
+    method: 'PUT',
+    body: JSON.stringify({ ...input, expectedVersion: version }),
+  }),
   disable: (id: string, expectedVersion: number) => apiRequest<DatasetRecord>(`${datasetPath(id)}/disable`, { method: 'POST', body: JSON.stringify({ expectedVersion }) }),
   restore: (id: string, expectedVersion: number) => apiRequest<DatasetRecord>(`${datasetPath(id)}/restore`, { method: 'POST', body: JSON.stringify({ expectedVersion }) }),
   delete: (id: string, expectedVersion: number) => apiRequest<void>(datasetPath(id), { method: 'DELETE', body: JSON.stringify({ expectedVersion }) }),

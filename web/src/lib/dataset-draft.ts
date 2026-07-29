@@ -123,7 +123,9 @@ function datasetVersionNode(
  */
 export async function hydrateDatasetDraft(record: DatasetRecord, tables: AssetTable[], datasets: DatasetSummary[] = []): Promise<DatasetDraft> {
   const dsl = record.dsl
-  const systemGeneratedDWD = record.layer === 'DWD' && record.code.startsWith('dwd_auto_')
+  // 自动建模历史上使用 dwd_auto_*，当前已切换到 dwd_领域_主题_业务名。
+  // 两种受治理物理编码都应恢复规范别名，并把已经由后端验证的 Join 视为已确认。
+  const systemGeneratedDWD = record.layer === 'DWD' && record.code.startsWith('dwd_')
   const nodeValues = list(dsl.nodes).map(object)
   const datasetVersionIDs = nodeValues
     .filter(value => text(value.type).toUpperCase() === 'DATASET' || Boolean(text(value.datasetVersionId)))
@@ -305,7 +307,10 @@ export async function hydrateDatasetDraft(record: DatasetRecord, tables: AssetTa
     }
   }) : configuredFields
   const hydratedDesigner = hydrateDesignerGraph(dsl, nodes, joins, graphFields)
-  const designer = systemGeneratedDWD && !hasFixedDesigner
+  const hasPersistedCleaning = graphFields.some(field => Boolean(field.persistedExpression))
+  const hasPersistedDesignerTransforms = Boolean(dsl.designer?.transforms?.length)
+  const designer = (record.layer === 'DIM' || record.layer === 'DWD') &&
+    hasPersistedCleaning && !hasPersistedDesignerTransforms
     ? expandSystemDWDDesignerGraph(hydratedDesigner, nodes, graphFields)
     : hydratedDesigner
   return {

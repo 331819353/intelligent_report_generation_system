@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 const defaultModeledSemanticCode = "general"
@@ -47,6 +48,46 @@ func ModeledDatasetBusinessName(name string) string {
 		return strings.TrimSpace(strings.Join(parts[3:], "_"))
 	}
 	return strings.TrimSpace(strings.Join(parts[1:], "_"))
+}
+
+// ModeledDWDDisplayName guarantees that the reader-facing DWD title is a
+// Chinese business name. Warehouse layer tokens belong to the physical code,
+// never to the display title. An invalid model proposal falls back to the
+// governed fact name instead of leaking an English or technical identifier.
+func ModeledDWDDisplayName(name, factName string) string {
+	for _, candidate := range []string{name, factName} {
+		candidate = stripModeledLayerDisplayTokens(
+			ModeledDatasetBusinessName(candidate),
+		)
+		if modeledChineseDisplayName(candidate) {
+			return candidate
+		}
+	}
+	return "业务明细事实表"
+}
+
+func stripModeledLayerDisplayTokens(name string) string {
+	name = strings.TrimSpace(name)
+	for _, token := range []string{
+		"ODS", "DIM", "DWD", "DWS", "ADS",
+		"ods", "dim", "dwd", "dws", "ads",
+	} {
+		name = strings.ReplaceAll(name, token, "")
+	}
+	return strings.Trim(strings.TrimSpace(name), "_- ")
+}
+
+func modeledChineseDisplayName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for _, value := range name {
+		if !unicode.Is(unicode.Han, value) {
+			return false
+		}
+	}
+	return true
 }
 
 // modeledDatasetPhysicalCode applies the governed physical-name convention:

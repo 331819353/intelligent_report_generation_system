@@ -322,7 +322,7 @@ const dwdFactDesignSystemPrompt = `你是企业数据仓库 DWD 明细结构与 
 - 个人主表本身不是人数事实。若输入明确是一人一快照日，可设计无度量/快照 DWD，并保留 person_id、snapshot_date 和组织/状态外键；人数由后续 DWS 对 person_id 去重计数。只有源中已存在受治理的 headcount_flag 时才可保留并求和，不得臆造字段，也不得在 DIM 重复保存人数。
 
 设计要求：
-1. 生成且只生成指定 FACT 的一张 DWD，保持原子事实粒度，不得分组或聚合，并保留事实表全部字段。
+1. 生成且只生成指定 FACT 的一张 DWD，保持原子事实粒度，不得分组或聚合，并保留事实表全部字段。name 必须是完整中文业务表名，不得包含 ODS、DIM、DWD、DWS、ADS 等层级字符，也不得使用 SNAPSHOT、FACT 等英文或物理表编码。
 2. 逐一检查 IDENTIFIER/DIMENSION 及以 _id/_key 结尾的字段；只有事实字段与 DIM 字段 code 忽略大小写后完全同名、语义相同、类型兼容且 DIM 侧唯一时才能 LEFT JOIN。复合业务键必须完整放入同一 join.conditions。
 3. 每个已关联 DIM 至少扩充一个关联键之外的名称、分类、区域、状态等描述字段（只要存在）；DIM 侧关联键只用于 Join，不重复输出。
 4. generation 前的卫生组件是强制合同：所有 STRING 使用 TRIM；可空 IDENTIFIER/DIMENSION/ATTRIBUTE 使用 COALESCE_DEFAULT，固定值为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；DATE、DATETIME 及 STRING TIME 统一使用 CAST_DATE 去除时分秒，输出逻辑类型保持 DATE，字段 format 固定为 YYYYMMDD。MEASURE 与 TIME 空值保留 NULL，不填哨兵值。不得在 processing 中再用 DATE_FORMAT、DATE_TRUNC 或 CAST_DATETIME 改变该日粒度合同。
@@ -1108,9 +1108,7 @@ func completeDWDOutputContract(
 		if !exists {
 			continue
 		}
-		if strings.TrimSpace(output.Name) == "" {
-			output.Name = fact.Name
-		}
+		output.Name = ModeledDWDDisplayName(output.Name, fact.Name)
 		if strings.TrimSpace(output.Description) == "" {
 			output.Description = fact.Description
 		}

@@ -189,6 +189,22 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		}
 		writeDatasetJSON(w, http.StatusOK, record)
 	})))
+	mux.Handle("PUT /api/v1/datasets/{id}/metadata", protect("MANAGE", objectID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		var input MetadataUpdateInput
+		if !decodeRequest(w, r, &input) {
+			return
+		}
+		record, err := service.UpdateMetadata(
+			r.Context(), claims.TenantID, claims.Subject,
+			r.PathValue("id"), input,
+		)
+		if err != nil {
+			writeDatasetError(w, err)
+			return
+		}
+		writeDatasetJSON(w, http.StatusOK, record)
+	})))
 	mux.Handle("POST /api/v1/datasets/{id}/disable", protect("MANAGE", objectID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, _ := auth.ClaimsFromContext(r.Context())
 		var input LifecycleInput

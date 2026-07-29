@@ -84,7 +84,7 @@ type CanvasComponentKind = RelationInput['kind'] | 'END'
 type CanvasPreviewTarget = RelationInput | { kind: 'END'; id: string }
 type NodePreviewState = { loading: boolean; data?: AssetTablePreview; error?: string; suggestion?: string }
 type VersionPreviewState = { versionID: string; loading: boolean; data?: DatasetPreview; error?: string }
-type DialogState = { mode: 'create' | 'view' | 'metadata' | 'history' | 'publish' | 'publish-review' | 'disable' | 'restore' | 'delete'; dataset?: DatasetSummary }
+type DialogState = { mode: 'create' | 'view' | 'metadata' | 'edit-metadata' | 'history' | 'publish' | 'publish-review' | 'disable' | 'restore' | 'delete'; dataset?: DatasetSummary }
 type DatasetBatchAction = 'publish' | 'disable' | 'delete'
 type DatasetBatchOutcome = { dataset: DatasetSummary; error?: string }
 type Notice = { tone: 'success' | 'error'; message: string }
@@ -113,6 +113,12 @@ type DatasetDetailField = {
   role: string; canonicalType: string; semanticType: string; nullable: boolean; visible: boolean
 }
 type DatasetMetadataForm = { name: string; description: string; domain: string; subject: string }
+type DatasetMetadataEditForm = {
+  name: string
+  description: string
+  subject: string
+  fields: DatasetDetailField[]
+}
 type DatasetEditorSnapshot = {
   draft: DatasetDraft
   relationBoxes: RelationBox[]
@@ -1132,6 +1138,7 @@ export function DatasetCenterPage() {
   const [detailAssetColumns, setDetailAssetColumns] = useState<AssetColumn[]>([])
   const [detailPreview, setDetailPreview] = useState<DatasetPreview | null>(null)
   const [detailPreviewError, setDetailPreviewError] = useState('')
+  const [metadataEdit, setMetadataEdit] = useState<DatasetMetadataEditForm | null>(null)
   const [publicationRecord, setPublicationRecord] = useState<DatasetRecord | null>(null)
   const [publicationRequests, setPublicationRequests] = useState<DatasetPublicationRequest[]>([])
   const [publicationCapabilities, setPublicationCapabilities] = useState({ manage: false, publish: false })
@@ -2795,6 +2802,67 @@ export function DatasetCenterPage() {
     setBusyAction('')
   }
 
+  const openMetadataEdit = () => {
+    if (!detail || !dialog?.dataset) return
+    setMetadataEdit({
+      name: detail.name,
+      description: detail.description,
+      subject: detail.dsl.dataset.subject ?? '',
+      fields: datasetDetailFields(detail),
+    })
+    setFormError('')
+    setDialog({ mode: 'edit-metadata', dataset: dialog.dataset })
+  }
+
+  const updateMetadataField = (id: string, patch: Partial<DatasetDetailField>) => {
+    setMetadataEdit(current => current ? {
+      ...current,
+      fields: current.fields.map(field => field.id === id ? { ...field, ...patch } : field),
+    } : current)
+  }
+
+  const saveMetadataEdit = async () => {
+    if (!detail || !metadataEdit || !metadataEdit.name.trim() || !metadataEdit.description.trim()) {
+      setFormError('请填写数据集名称和说明')
+      return
+    }
+    if (metadataEdit.fields.some(field => !field.name.trim())) {
+      setFormError('每个字段都必须填写业务名称')
+      return
+    }
+    setBusyAction('metadata-update')
+    setFormError('')
+    try {
+      const saved = await datasetAPI.updateMetadata(
+        detail.id,
+        detail.version,
+        {
+          name: metadataEdit.name.trim(),
+          description: metadataEdit.description.trim(),
+          subject: metadataEdit.subject.trim(),
+          fields: metadataEdit.fields.map(field => ({
+            id: field.id,
+            name: field.name.trim(),
+            description: field.description.trim(),
+            role: field.role,
+            semanticType: field.semanticType.trim(),
+            nullable: field.nullable,
+            visible: field.visible,
+          })),
+        },
+      )
+      setDetail(saved)
+      await loadDatasets()
+      setDialog(null)
+      setMetadataEdit(null)
+      setNotice({ tone: 'success', message: `“${saved.name}”元信息已保存，DAG 未改变` })
+    } catch (cause) {
+      setFormError(cause instanceof Error ? cause.message : '保存元信息失败')
+    } finally {
+      setBusyAction('')
+    }
+  }
+
   const openHistory = async (dataset: DatasetSummary) => {
     const request = ++historySelectionRequest.current
     setDialog({ mode: 'history', dataset })
@@ -3322,6 +3390,7 @@ export function DatasetCenterPage() {
     if (document.fullscreenElement === canvasFullscreenTarget.current) void document.exitFullscreen()
     setCanvasFullscreen(false)
     setDialog(null)
+    setMetadataEdit(null)
     setEditingRecord(null)
     setHistoryRecord(null)
     setHistoryItems([])
@@ -3582,8 +3651,41 @@ export function DatasetCenterPage() {
           </div>
         </section>
         <section className="dataset-detail-preview" aria-label="预览数据"><div><h3>预览数据</h3><span>前 5 行</span></div>{detailPreview ? <PreviewRows preview={detailPreview} /> : <div className="dataset-center-feedback error" role="alert">{detailPreviewError || '暂无可预览数据'}</div>}</section>
-        <footer><button className="quiet-button" type="button" onClick={closeDialog}>关闭</button><button className="primary-button" type="button" onClick={() => { setDialog(null); void openEdit(detail) }}>修改配置</button></footer>
+        <footer><button className="quiet-button" type="button" onClick={closeDialog}>关闭</button><button className="quiet-button" type="button" onClick={openMetadataEdit}>修改元信息</button><button className="primary-button" type="button" onClick={() => { setDialog(null); void openEdit(detail) }}>修改 DAG</button></footer>
       </div> : <div className="dataset-center-feedback error" role="alert">{formError}</div>}
+    </Dialog>}
+
+    {dialog?.mode === 'edit-metadata' && dialog.dataset && detail && metadataEdit && <Dialog
+      title={`${detail.name} · 修改元信息`}
+      eyebrow="仅修改业务语义，不改变 DAG、字段编码和逻辑类型"
+      wide
+      onClose={closeDialog}
+    >
+      <div className="dataset-metadata-form dataset-metadata-editor">
+        <div className="dataset-metadata-grid">
+          <label>数据集名称<input autoFocus value={metadataEdit.name} onChange={event => setMetadataEdit(current => current ? { ...current, name: event.target.value } : current)} /></label>
+          <label>业务主题<input value={metadataEdit.subject} onChange={event => setMetadataEdit(current => current ? { ...current, subject: event.target.value } : current)} /></label>
+        </div>
+        <label>数据集说明<textarea value={metadataEdit.description} onChange={event => setMetadataEdit(current => current ? { ...current, description: event.target.value } : current)} /></label>
+        <section>
+          <div className="dataset-detail-section-heading"><div><span className="eyebrow">字段元信息</span><h3>业务名称、说明与语义</h3></div><span>编码和类型只读</span></div>
+          <div className="dataset-metadata-field-scroll">
+            <table>
+              <thead><tr><th>字段编码 / 类型</th><th>业务名称</th><th>业务说明</th><th>角色</th><th>语义类型</th><th>约束</th></tr></thead>
+              <tbody>{metadataEdit.fields.map(field => <tr key={field.id}>
+                <td><strong>{field.code}</strong><small>{field.canonicalType || '—'}</small></td>
+                <td><input aria-label={`${field.code}业务名称`} value={field.name} onChange={event => updateMetadataField(field.id, { name: event.target.value })} /></td>
+                <td><textarea aria-label={`${field.code}业务说明`} value={field.description} onChange={event => updateMetadataField(field.id, { description: event.target.value })} /></td>
+                <td><select aria-label={`${field.code}角色`} value={field.role} onChange={event => updateMetadataField(field.id, { role: event.target.value })}>{['IDENTIFIER', 'DIMENSION', 'ATTRIBUTE', 'TIME', 'MEASURE'].map(role => <option key={role} value={role}>{role}</option>)}</select></td>
+                <td><input aria-label={`${field.code}语义类型`} value={field.semanticType} onChange={event => updateMetadataField(field.id, { semanticType: event.target.value })} /></td>
+                <td><label><input type="checkbox" checked={field.nullable} onChange={event => updateMetadataField(field.id, { nullable: event.target.checked })} />可空</label><label><input type="checkbox" checked={field.visible} onChange={event => updateMetadataField(field.id, { visible: event.target.checked })} />可见</label></td>
+              </tr>)}</tbody>
+            </table>
+          </div>
+        </section>
+        {formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}
+        <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => setDialog({ mode: 'view', dataset: dialog.dataset })}>取消</button><button className="primary-button" type="button" disabled={actionBusy} onClick={() => void saveMetadataEdit()}>{busyAction === 'metadata-update' ? '正在保存…' : '保存元信息'}</button></footer>
+      </div>
     </Dialog>}
 
     {dialog?.mode === 'history' && dialog.dataset && <Dialog title={`${dialog.dataset.name} · 历史版本`} eyebrow="发布快照与安全回滚" wide onClose={closeDialog}><PublishedVersionHistoryPanel record={historyRecord} items={historyItems} selected={selectedHistoryVersion} preview={historyPreview} loading={busyAction.startsWith('history:') || busyAction.startsWith('version:')} busy={actionBusy} confirming={historyConfirm} error={formError} onSelect={versionID => void selectHistoryVersion(versionID)} onStartRollback={() => setHistoryConfirm(true)} onCancelRollback={() => { setHistoryConfirm(false); setFormError('') }} onRollback={() => void rollbackHistoryVersion()} onClose={closeDialog} /></Dialog>}

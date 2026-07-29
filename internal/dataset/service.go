@@ -209,6 +209,116 @@ func (s *Service) Update(ctx context.Context, tenantID, actorID, id string, inpu
 	return s.store.Update(ctx, tenantID, actorID, id, input, prepared)
 }
 
+// UpdateMetadata 基于服务端当前草稿修改业务元信息。它不调用语义命名 LLM，
+// 因而用户输入不会被自动重写；同时客户端无法借此接口改变 DAG 或技术结构。
+func (s *Service) UpdateMetadata(
+	ctx context.Context,
+	tenantID, actorID, id string,
+	input MetadataUpdateInput,
+) (Record, error) {
+	if tenantID == "" || actorID == "" || strings.TrimSpace(id) == "" {
+		return Record{}, ErrNotFound
+	}
+	if input.ExpectedVersion <= 0 {
+		return Record{}, fmt.Errorf(
+			"%w: expectedVersion must be greater than zero",
+			ErrInvalidDocument,
+		)
+	}
+	current, err := s.store.Get(ctx, tenantID, id)
+	if err != nil {
+		return Record{}, err
+	}
+	prepared, err := Prepare(current.DSL)
+	if err != nil {
+		return Record{}, err
+	}
+	if err := applyDatasetMetadataUpdate(&prepared.Document, input); err != nil {
+		return Record{}, err
+	}
+	raw, err := json.Marshal(prepared.Document)
+	if err != nil {
+		return Record{}, err
+	}
+	prepared, err = Prepare(raw)
+	if err != nil {
+		return Record{}, err
+	}
+	prepared, err = s.bindCurrentDomain(ctx, tenantID, prepared)
+	if err != nil {
+		return Record{}, err
+	}
+	return s.store.Update(ctx, tenantID, actorID, id, UpdateInput{
+		Name:            prepared.Document.Dataset.Name,
+		Description:     prepared.Document.Dataset.Description,
+		ExpectedVersion: input.ExpectedVersion,
+		DSL:             prepared.DSLJSON,
+	}, prepared)
+}
+
+func applyDatasetMetadataUpdate(
+	document *Document,
+	input MetadataUpdateInput,
+) error {
+	input.Name = strings.TrimSpace(input.Name)
+	input.Description = strings.TrimSpace(input.Description)
+	input.Subject = strings.TrimSpace(input.Subject)
+	if input.Name == "" || input.Description == "" {
+		return fmt.Errorf(
+			"%w: dataset name and description are required",
+			ErrInvalidDocument,
+		)
+	}
+	if len(input.Fields) != len(document.Fields) {
+		return fmt.Errorf(
+			"%w: metadata update must cover every output field",
+			ErrInvalidDocument,
+		)
+	}
+	updates := make(map[string]FieldMetadataUpdate, len(input.Fields))
+	for _, update := range input.Fields {
+		update.ID = strings.TrimSpace(update.ID)
+		update.Name = strings.TrimSpace(update.Name)
+		update.Description = strings.TrimSpace(update.Description)
+		update.Role = strings.ToUpper(strings.TrimSpace(update.Role))
+		update.SemanticType = strings.TrimSpace(update.SemanticType)
+		if update.ID == "" || update.Name == "" {
+			return fmt.Errorf(
+				"%w: field id and business name are required",
+				ErrInvalidDocument,
+			)
+		}
+		if _, duplicate := updates[update.ID]; duplicate {
+			return fmt.Errorf(
+				"%w: duplicate field metadata id %s",
+				ErrInvalidDocument, update.ID,
+			)
+		}
+		updates[update.ID] = update
+	}
+	document.Dataset.Name = input.Name
+	document.Dataset.Description = input.Description
+	document.Dataset.Subject = input.Subject
+	for index := range document.Fields {
+		field := &document.Fields[index]
+		update, exists := updates[field.ID]
+		if !exists {
+			return fmt.Errorf(
+				"%w: unknown or missing field metadata id %s",
+				ErrInvalidDocument, field.ID,
+			)
+		}
+		field.Name = update.Name
+		field.Description = update.Description
+		field.Role = update.Role
+		field.SemanticType = update.SemanticType
+		field.Nullable = update.Nullable
+		visible := update.Visible
+		field.Visible = &visible
+	}
+	return nil
+}
+
 func (s *Service) applySemanticNaming(
 	ctx context.Context,
 	tenantID, actorID, resourceID string,
