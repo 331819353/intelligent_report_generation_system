@@ -72,9 +72,36 @@ BEGIN
     RAISE EXCEPTION
       'manual DWD trigger does not use the canonical plain business domain key';
   END IF;
+  IF position('dimension.completed_at DESC' IN definition)=0
+     OR position('fact.status AS fact_status' IN definition)=0
+     OR position('DWD_MODELING_COMPLETED' IN definition)=0
+     OR position('dwd_output_count<fact_count' IN definition)=0
+     OR position('dwd_output_count>=fact_count' IN definition)=0
+     OR position('ORDER BY workflow.updated_at DESC' IN definition)>0 THEN
+    RAISE EXCEPTION
+      'manual DWD trigger does not select the latest completed DIM batch';
+  END IF;
 END
 $$;
 SELECT 'manual DWD trigger domain identity passed' AS result;
+
+DO $$
+DECLARE
+  definition text;
+BEGIN
+  SELECT pg_get_functiondef(
+    'platform.retry_dwd_modeling_stage_task(uuid,uuid)'::regprocedure
+  ) INTO definition;
+  IF position('newer_dimension.completed_at' IN definition)=0
+     OR position(
+       'newer_dataset.domain_id=dataset.domain_id' IN definition
+     )=0 THEN
+    RAISE EXCEPTION
+      'DWD retry does not reject a superseded DIM batch';
+  END IF;
+END
+$$;
+SELECT 'latest published DIM retry guard passed' AS result;
 SQL
 
 # 使用应用账号运行事务化验证，覆盖 RLS、审计不可变性与策略隔离。

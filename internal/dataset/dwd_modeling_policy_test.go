@@ -744,6 +744,99 @@ func TestNormalizeDWDClassificationsFiltersTransactionalEntityAttributes(
 	}
 }
 
+func TestExpandedDWDClassificationsUsesLatestPublishedDIMContract(
+	t *testing.T,
+) {
+	classification := dwdLLMClassification{
+		DatasetVersionID:       "courier_ods_version",
+		Role:                   "MASTER",
+		DimensionKeyFieldCodes: []string{"courier_id"},
+		DimensionAttributeFieldCodes: []string{
+			"courier_name", "phone_masked",
+		},
+		Rationale: "每行一个骑手",
+	}
+	publishedDIM := dwdODSAsset{
+		DatasetID: "courier_dim",
+		Document: Document{
+			OutputGrain: OutputGrain{
+				KeyFields: []string{"courier_id"},
+			},
+			Fields: []Field{
+				{
+					Code: "courier_id", Role: "IDENTIFIER",
+					CanonicalType: "INTEGER", SemanticType: "IDENTIFIER",
+				},
+				{
+					Code: "courier_name", Role: "DIMENSION",
+					CanonicalType: "STRING", SemanticType: "TEXT",
+				},
+				{
+					Code: "status", Role: "DIMENSION",
+					CanonicalType: "STRING", SemanticType: "CATEGORY",
+				},
+			},
+		},
+	}
+	input := dwdPlanningInput{
+		Domain: "企业经营",
+		Tables: []dwdPlanningTable{{
+			DatasetID: "courier_ods", VersionID: "courier_ods_version",
+			OutputGrain: OutputGrain{
+				KeyFields: []string{"courier_id"},
+			},
+			Fields: []dwdPlanningField{
+				{
+					Code: "courier_id", Role: "IDENTIFIER",
+					CanonicalType: "INTEGER", SemanticType: "IDENTIFIER",
+				},
+				{
+					Code: "courier_name", Role: "DIMENSION",
+					CanonicalType: "STRING", SemanticType: "TEXT",
+				},
+				{
+					Code: "phone_masked", Role: "IDENTIFIER",
+					CanonicalType: "STRING", SemanticType: "IDENTIFIER",
+				},
+			},
+		}},
+	}
+	stage := dwdDimensionStageResult{
+		AssetsBySourceVersion: map[string]dwdODSAsset{
+			"courier_ods_version": publishedDIM,
+		},
+	}
+	got := expandedDWDClassifications(
+		[]dwdLLMClassification{classification},
+		stage,
+	)
+	if len(got) != 1 {
+		t.Fatalf("classification count = %d, want 1", len(got))
+	}
+	if !reflect.DeepEqual(
+		got[0].DimensionKeyFieldCodes, []string{"courier_id"},
+	) {
+		t.Fatalf("dimension keys = %#v", got[0].DimensionKeyFieldCodes)
+	}
+	if !reflect.DeepEqual(
+		got[0].DimensionAttributeFieldCodes,
+		[]string{"courier_name", "status"},
+	) {
+		t.Fatalf(
+			"dimension attributes = %#v",
+			got[0].DimensionAttributeFieldCodes,
+		)
+	}
+	factPlanningInput := planningInputWithModeledDimensions(
+		input, stage, []dwdLLMClassification{classification},
+	)
+	if err := validateDWDLLMClassifications(
+		factPlanningInput, input.Domain, got,
+	); err != nil {
+		t.Fatalf("latest published DIM contract is invalid: %v", err)
+	}
+}
+
 func TestDWDSingleTableClassificationScope(t *testing.T) {
 	input := dwdPlanningInput{
 		TenantID: "tenant", ActorID: "actor", ResourceID: "workflow",

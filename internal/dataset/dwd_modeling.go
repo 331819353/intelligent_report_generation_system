@@ -1677,6 +1677,9 @@ func expandedDWDClassifications(
 				continue
 			}
 			seenDimensionDatasets[asset.DatasetID] = true
+			dimension = classificationForModeledDIMContract(
+				dimension, asset.Document,
+			)
 		}
 		if classification.Role != "FACT" {
 			result = append(result, dimension)
@@ -1689,6 +1692,43 @@ func expandedDWDClassifications(
 		result = append(result, dimension)
 	}
 	return result
+}
+
+// classificationForModeledDIMContract treats the current modeled DIM as the
+// authoritative fact-planning contract. A classification checkpoint describes
+// the source ODS at the time DIM design started, while the reviewed/published
+// DIM may intentionally omit a source attribute. Carrying that stale attribute
+// into fact planning makes a valid DIM publication impossible to consume.
+func classificationForModeledDIMContract(
+	classification dwdLLMClassification,
+	document Document,
+) dwdLLMClassification {
+	fields := make(
+		map[string]dwdPlanningField, len(document.Fields),
+	)
+	attributeCandidates := make([]string, 0, len(document.Fields))
+	for _, field := range document.Fields {
+		fields[field.Code] = dwdPlanningField{
+			Code: field.Code, Name: field.Name, Description: field.Description,
+			Role: field.Role, CanonicalType: field.CanonicalType,
+			SemanticType: field.SemanticType, Nullable: field.Nullable,
+		}
+		attributeCandidates = append(attributeCandidates, field.Code)
+	}
+	keys := normalizeDWDClassificationFieldCodes(
+		fields, document.OutputGrain.KeyFields,
+	)
+	if len(keys) == 0 {
+		keys = normalizeDWDClassificationFieldCodes(
+			fields, classification.DimensionKeyFieldCodes,
+		)
+	}
+	classification.DimensionKeyFieldCodes = keys
+	classification.DimensionAttributeFieldCodes =
+		stableDWDEntityDimensionAttributes(
+			fields, keys, attributeCandidates,
+		)
+	return classification
 }
 
 func dwdDimensionStageScope(
@@ -5198,7 +5238,9 @@ func finishDWDJobTx(
 		workflowCompleted = false
 	}
 	tag, err = tx.Exec(ctx, `UPDATE platform.dwd_modeling_jobs SET
-		status=$1,domain_key=$2,trigger_role=$3,
+		status=$1,
+		domain_key=COALESCE(NULLIF($2,''),domain_key),
+		trigger_role=COALESCE(NULLIF($3,''),trigger_role),
 		generated_count=$4,updated_count=$5,skipped_count=$6,
 		result_json=$7,error_code=$8,error_message=$9,
 		ai_request_id=NULLIF($10,'')::uuid,

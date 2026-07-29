@@ -3043,6 +3043,20 @@ export function DatasetCenterPage() {
         })
         return
       }
+      if (result.blockedReason === 'DWD_MODELING_COMPLETED') {
+        setNotice({
+          tone: 'success',
+          message: '当前最新已发版 DIM 批次的明细建模已经完成，无需重复提交。如需重新生成，请先执行新一轮维度建模并发布 DIM。',
+        })
+        return
+      }
+      if (result.blockedReason === 'DWD_MODELING_RETRY_REQUIRED') {
+        setNotice({
+          tone: 'error',
+          message: '当前最新 DIM 批次的明细建模未完成，请在运行日志中重试失败任务；DWD 重试仍只使用当前最新已发版 DIM。',
+        })
+        return
+      }
       const unit = trigger === 'DWS_MODELING' ? '个主题' : '个领域'
       const existing = result.existingCount
         ? `；${result.existingCount} ${unit}已有待处理或运行中任务`

@@ -925,7 +925,8 @@ export type DatasetLLMTriggerResult = {
   existingCount: number
   blockedCount?: number
   blockedReason?: 'DIM_MODELING_REQUIRED' | 'DIM_PUBLICATION_REQUIRED' |
-    'NO_FACT_MODEL_AVAILABLE' | 'DWD_PUBLICATION_REQUIRED' | string
+    'NO_FACT_MODEL_AVAILABLE' | 'DWD_MODELING_COMPLETED' |
+    'DWD_MODELING_RETRY_REQUIRED' | 'DWD_PUBLICATION_REQUIRED' | string
 }
 
 export const datasetAPI = {
