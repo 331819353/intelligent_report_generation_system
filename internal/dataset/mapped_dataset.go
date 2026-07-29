@@ -43,6 +43,7 @@ type MappedDatasetTable struct {
 	TableName           string
 	BusinessName        string
 	BusinessDescription string
+	DomainID            string
 	Domain              string
 }
 
@@ -113,7 +114,7 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 			Description:   strings.TrimSpace(column.BusinessDescription),
 			Role:          role,
 			Expression:    Expression{Type: "FIELD_REF", NodeID: "node_1", Field: physicalName},
-			CanonicalType: mappedDatasetColumnCanonicalType(column),
+			CanonicalType: mappedDatasetColumnCanonicalType(table, column),
 			SemanticType:  strings.ToUpper(strings.TrimSpace(column.SemanticType)),
 			Nullable:      column.Nullable,
 			Visible:       &visible,
@@ -290,13 +291,13 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 	err = tx.QueryRow(ctx, `SELECT t.id::text,t.data_source_id::text,source.name,
 		COALESCE(published_source.file_version_id::text,''),
 		t.table_name,t.metadata_version,t.structure_hash,t.business_name,t.business_description,
-		COALESCE((
-		  SELECT min(regexp_replace(tag,'^领域[：:]','','g'))
-		  FROM unnest(COALESCE(t.tags,'{}'::text[])) AS tag
-		  WHERE tag ~ '^领域[：:]'
-		),'')
+		business_domain.id::text,business_domain.name
 		FROM platform.metadata_tables t
 		JOIN platform.data_sources source ON source.id=t.data_source_id AND source.tenant_id=t.tenant_id
+		JOIN platform.business_domains business_domain
+		  ON business_domain.id=source.domain_id
+		 AND business_domain.tenant_id=source.tenant_id
+		 AND business_domain.status='ACTIVE'
 		JOIN platform.data_source_versions published_source
 		  ON published_source.id=source.current_published_version_id
 		 AND published_source.data_source_id=source.id
@@ -316,7 +317,7 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 		FOR SHARE OF t,source,published_source`, tableID, tenantID).Scan(
 		&table.ID, &table.DataSourceID, &table.DataSourceName, &table.FileVersionID, &table.TableName,
 		&table.MetadataVersion, &table.StructureHash,
-		&table.BusinessName, &table.BusinessDescription, &table.Domain,
+		&table.BusinessName, &table.BusinessDescription, &table.DomainID, &table.Domain,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
@@ -379,7 +380,10 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 		Description: document.Dataset.Description, Type: document.Dataset.Type, DSL: raw,
 	}
 	if !exists {
-		datasetID, createErr := createDatasetTx(ctx, tx, tenantID, actorID, input, prepared, table.ID)
+		datasetID, createErr := createDatasetTxWithOptions(
+			ctx, tx, tenantID, actorID, input, prepared, table.ID,
+			derivedWriteOptions{domainID: table.DomainID},
+		)
 		if createErr != nil {
 			return false, createErr
 		}
@@ -456,8 +460,9 @@ func (s *PostgresStore) ensureMappedDatasetDraftTx(
 			Type:        prepared.Document.Dataset.Type,
 			DSL:         raw,
 		}
-		datasetID, createErr := createDatasetTx(
+		datasetID, createErr := createDatasetTxWithOptions(
 			ctx, tx, tenantID, actorID, input, prepared, table.ID,
+			derivedWriteOptions{domainID: table.DomainID},
 		)
 		if createErr != nil {
 			return false, createErr
@@ -497,13 +502,13 @@ func loadMappedDatasetInputTx(
 	query := `SELECT t.id::text,t.data_source_id::text,source.name,
 		COALESCE(published_source.file_version_id::text,''),
 		t.table_name,t.metadata_version,t.structure_hash,t.business_name,t.business_description,
-		COALESCE((
-		  SELECT min(regexp_replace(tag,'^领域[：:]','','g'))
-		  FROM unnest(COALESCE(t.tags,'{}'::text[])) AS tag
-		  WHERE tag ~ '^领域[：:]'
-		),'')
+		business_domain.id::text,business_domain.name
 		FROM platform.metadata_tables t
 		JOIN platform.data_sources source ON source.id=t.data_source_id AND source.tenant_id=t.tenant_id
+		JOIN platform.business_domains business_domain
+		  ON business_domain.id=source.domain_id
+		 AND business_domain.tenant_id=source.tenant_id
+		 AND business_domain.status='ACTIVE'
 		JOIN platform.data_source_versions published_source
 		  ON published_source.id=source.current_published_version_id
 		 AND published_source.data_source_id=source.id
@@ -519,7 +524,7 @@ func loadMappedDatasetInputTx(
 	err := tx.QueryRow(ctx, query, tableID, tenantID).Scan(
 		&table.ID, &table.DataSourceID, &table.DataSourceName, &table.FileVersionID,
 		&table.TableName, &table.MetadataVersion, &table.StructureHash,
-		&table.BusinessName, &table.BusinessDescription, &table.Domain,
+		&table.BusinessName, &table.BusinessDescription, &table.DomainID, &table.Domain,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MappedDatasetTable{}, nil, false, nil
@@ -960,9 +965,7 @@ func mappedDatasetDisplayName(table MappedDatasetTable) string {
 }
 
 func mappedDatasetDomain(value string) string {
-	value = strings.TrimSpace(strings.TrimPrefix(
-		strings.ReplaceAll(value, "：", ":"), "领域:",
-	))
+	value = strings.TrimSpace(value)
 	if value == "" {
 		return "general"
 	}
@@ -1099,8 +1102,12 @@ func mappedDatasetCanonicalType(value string) string {
 	}
 }
 
-func mappedDatasetColumnCanonicalType(column MappedDatasetColumn) string {
-	if fieldtype.IsCodeLike(column.ColumnName, column.BusinessName) {
+func mappedDatasetColumnCanonicalType(
+	table MappedDatasetTable,
+	column MappedDatasetColumn,
+) string {
+	if table.FileVersionID != "" &&
+		fieldtype.IsCodeLike(column.ColumnName, column.BusinessName) {
 		return "STRING"
 	}
 	return mappedDatasetCanonicalType(column.CanonicalType)

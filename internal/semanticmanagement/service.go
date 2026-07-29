@@ -23,7 +23,7 @@ const (
 var languageCodePattern = regexp.MustCompile(`^[a-z]{2}(-[A-Z]{2})?$`)
 
 var tagCategories = values(
-	"BUSINESS_DOMAIN", "BUSINESS_ENTITY", "TABLE_FUNCTION", "USAGE_SCOPE",
+	"BUSINESS_ENTITY", "TABLE_FUNCTION", "USAGE_SCOPE",
 	"DATA_GRAIN", "JOIN_ROLE", "SENSITIVITY", "FREEFORM",
 )
 var tagGovernance = values("CONTROLLED", "FREEFORM")

@@ -27,21 +27,25 @@ func validateDWDPublicationDependenciesTx(
 	tx pgx.Tx,
 	datasetID, draftVersionID string,
 ) error {
-	var layer, targetDomain string
+	var layer, targetDomainID, targetDomain string
 	err := tx.QueryRow(ctx, `SELECT version.layer,
-			btrim(COALESCE(version.dsl_json#>>'{dataset,domain}',''))
+			dataset.domain_id::text,business_domain.name
 		FROM platform.dataset_versions AS version
 		JOIN platform.datasets AS dataset
 		  ON dataset.tenant_id=version.tenant_id
 		 AND dataset.id=version.dataset_id
 		 AND dataset.current_draft_version_id=version.id
+		JOIN platform.business_domains AS business_domain
+		  ON business_domain.tenant_id=dataset.tenant_id
+		 AND business_domain.id=dataset.domain_id
+		 AND business_domain.status='ACTIVE'
 		WHERE dataset.id::text=$1
 		  AND version.id::text=$2
 		  AND version.status='DRAFT'
 		  AND dataset.deleted_at IS NULL
 		FOR SHARE OF dataset,version`,
 		datasetID, draftVersionID,
-	).Scan(&layer, &targetDomain)
+	).Scan(&layer, &targetDomainID, &targetDomain)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrConflict
 	}
@@ -49,7 +53,7 @@ func validateDWDPublicationDependenciesTx(
 		return err
 	}
 
-	if targetDomain == "" {
+	if targetDomainID == "" || targetDomain == "" {
 		return &PublicationValidationError{Issues: []PublicationIssue{{
 			Path:   "dataset.domain",
 			Code:   "DATASET_DOMAIN_REQUIRED",
@@ -61,8 +65,8 @@ func validateDWDPublicationDependenciesTx(
 		err = tx.QueryRow(ctx, `SELECT count(*)::integer,
 				count(*) FILTER(
 				  WHERE upstream.id IS NULL
-				     OR lower(platform.dataset_version_effective_domain(upstream.id))
-				          <> lower($2)
+				     OR upstream_dataset.id IS NULL
+				     OR upstream_dataset.domain_id<>$2::uuid
 				)::integer
 			FROM platform.dataset_versions AS draft
 			CROSS JOIN LATERAL jsonb_array_elements(
@@ -72,9 +76,13 @@ func validateDWDPublicationDependenciesTx(
 			  ON upstream.tenant_id=draft.tenant_id
 			 AND upstream.id=(node->>'datasetVersionId')::uuid
 			 AND upstream.status='PUBLISHED'
+			LEFT JOIN platform.datasets AS upstream_dataset
+			  ON upstream_dataset.tenant_id=upstream.tenant_id
+			 AND upstream_dataset.id=upstream.dataset_id
+			 AND upstream_dataset.deleted_at IS NULL
 			WHERE draft.id::text=$1
 			  AND node->>'type'='DATASET'`,
-			draftVersionID, targetDomain,
+			draftVersionID, targetDomainID,
 		).Scan(&dependencyCount, &mismatchedCount)
 		if err != nil {
 			return err

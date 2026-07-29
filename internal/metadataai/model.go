@@ -12,7 +12,7 @@ import (
 
 const (
 	SchemaVersion        = "1.1"
-	PromptVersion        = "metadata-completion-v12"
+	PromptVersion        = "metadata-completion-v13"
 	SourceFormatCSV      = "CSV"
 	SourceFormatExcel    = "EXCEL"
 	SourceFormatDatabase = "DATABASE"
@@ -175,7 +175,6 @@ type Suggestion struct {
 }
 
 var allowedTags = map[string]bool{
-	"领域:企业": true, "领域:金融": true, "领域:产业": true, "领域:政务": true, "领域:运营": true,
 	"产业:制造业": true, "产业:服务业": true, "产业:信息产业": true,
 	"主题:经营分析": true, "主题:风险监控": true, "主题:企业画像": true,
 	"作用:维度表": true, "作用:事实表": true, "作用:主数据": true, "作用:指标来源": true, "作用:辅助信息": true,

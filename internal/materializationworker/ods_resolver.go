@@ -521,9 +521,6 @@ func loadODSMetadataTableTx(
 		if err := rows.Scan(&name, &businessName, &canonicalType); err != nil {
 			return err
 		}
-		if fieldtype.IsCodeLike(name, businessName) {
-			canonicalType = "TEXT"
-		}
 		if _, duplicate := available[name]; duplicate {
 			return executionError(
 				CodeODSSourceContractInvalid,
@@ -531,7 +528,9 @@ func loadODSMetadataTableTx(
 				nil,
 			)
 		}
-		available[name] = strings.ToUpper(strings.TrimSpace(canonicalType))
+		available[name] = odsMetadataCanonicalType(
+			plan.source.Type, name, businessName, canonicalType,
+		)
 	}
 	if err := rows.Err(); err != nil {
 		return err
@@ -592,6 +591,17 @@ func loadODSMetadataTableTx(
 		plan.maxExcelFileSize = plan.source.RuntimeQuota.MaxExcelFileBytes
 	}
 	return nil
+}
+
+func odsMetadataCanonicalType(
+	sourceType datasource.Type,
+	columnName, businessName, canonicalType string,
+) string {
+	if sourceType == datasource.TypeExcel &&
+		fieldtype.IsCodeLike(columnName, businessName) {
+		return "TEXT"
+	}
+	return strings.ToUpper(strings.TrimSpace(canonicalType))
 }
 
 func (resolver *ODSResolver) stage(

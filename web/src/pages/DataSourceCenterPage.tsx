@@ -1064,7 +1064,9 @@ export function DataSourceCenterPage() {
     if (log) log.scrollTop = log.scrollHeight
   }, [visibleMetadataJob?.id, visibleMetadataJob?.status, visibleMetadataJobLogs.length])
   const selectableDiscoveredTables = dialog?.mode === 'select-tables'
-    ? discoveredTables.filter(table => dialog.source?.type === 'EXCEL' || !metadataTables.some(asset => assetTableKey(asset) === discoveredTableKey(table)))
+    ? discoveredTables.filter(table => dialog.source?.type === 'EXCEL' || !metadataTables.some(asset =>
+        assetTableKey(asset) === discoveredTableKey(table) && asset.managementStatus !== 'DISABLED',
+      ))
     : []
   return (
     <AppShell title="数据源配置中心" eyebrow="工作栏" actions={<button className="primary-button" type="button" disabled={actionBusy} onClick={openCreate}>新建数据源</button>}>
@@ -1293,8 +1295,10 @@ export function DataSourceCenterPage() {
               </article>
             })}</div> : <div className="data-source-discovery-list">{discoveredTables.map(table => {
               const key = discoveredTableKey(table)
-              const imported = metadataTables.some(asset => assetTableKey(asset) === key)
-              return <label className={imported ? 'imported' : ''} key={key}><input type="checkbox" disabled={imported || actionBusy} checked={selectedTableKeys.includes(key)} onChange={() => setSelectedTableKeys(current => current.includes(key) ? current.filter(item => item !== key) : [...current, key])} /><span><strong>{table.name}</strong><small>{[table.catalogName, table.schemaName, table.name].filter(Boolean).join('.')} · {table.columns.length} 字段</small></span><em>{imported ? '已入库' : table.type}</em></label>
+              const importedAsset = metadataTables.find(asset => assetTableKey(asset) === key)
+              const imported = importedAsset?.managementStatus !== 'DISABLED' && Boolean(importedAsset)
+              const canRemanage = importedAsset?.managementStatus === 'DISABLED'
+              return <label className={imported ? 'imported' : ''} key={key}><input type="checkbox" disabled={imported || actionBusy} checked={selectedTableKeys.includes(key)} onChange={() => setSelectedTableKeys(current => current.includes(key) ? current.filter(item => item !== key) : [...current, key])} /><span><strong>{table.name}</strong><small>{[table.catalogName, table.schemaName, table.name].filter(Boolean).join('.')} · {table.columns.length} 字段</small></span><em>{imported ? '已入库' : canRemanage ? '可重新纳管' : table.type}</em></label>
             })}</div>}
           </>}
           <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => returnToTableAssets(dialog.source!)}>取消</button><button className="primary-button" type="button" disabled={actionBusy || discoveryLoading || selectedTableKeys.length === 0} onClick={() => void importSelectedTables()}>{actionBusy ? '正在提交完善任务…' : dialog.source.type === 'EXCEL' ? `提交 ${selectedTableKeys.length} 个 Sheet 映射` : `新增 ${selectedTableKeys.length} 张表`}</button></footer>

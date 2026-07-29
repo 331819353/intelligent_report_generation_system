@@ -61,7 +61,7 @@ func modeledDatasetPhysicalCode(
 	tags []string,
 	businessName string,
 ) (string, error) {
-	domainCode := modeledSemanticCode(modeledSemanticValue(domain, "领域"))
+	domainCode := modeledSemanticCode(strings.TrimSpace(domain))
 	topicCode := modeledSemanticCode(modeledTopic(tags))
 	businessCode := trimWarehouseCodePrefix(
 		normalizeBusinessIdentifier(businessName),
@@ -137,7 +137,7 @@ func modeledSemanticValue(value, category string) string {
 }
 
 func modeledDomainName(value string) string {
-	if value = modeledSemanticValue(value, "领域"); value != "" {
+	if value = strings.TrimSpace(value); value != "" {
 		return value
 	}
 	return defaultModeledSemanticCode

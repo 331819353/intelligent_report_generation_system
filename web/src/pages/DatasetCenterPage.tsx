@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MathOperationsIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTIcon, TextTSlashIcon, TreeStructureIcon, XIcon, type Icon } from '@phosphor-icons/react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { AssetSharingSelect } from '../components/AssetSharingSelect'
 import { RequestError } from '../lib/api'
+import { currentDomain } from '../lib/domain-context'
 import {
   datasetAIPlanFromEditor,
   datasetAIRequestContext,
@@ -66,7 +67,12 @@ import {
   type PublishedVersionRecord,
   type PublishedVersionSummary,
 } from '../lib/datasets'
-import { rememberBackgroundTaskFocus } from '../lib/background-tasks'
+import {
+  backgroundTaskAPI,
+  rememberBackgroundTaskFocus,
+  type BackgroundTask,
+  type BackgroundTaskStatus,
+} from '../lib/background-tasks'
 
 type RelationInput = GraphInput
 type CurveGeometry = { path: string; midpoint: CanvasPoint }
@@ -82,6 +88,26 @@ type DialogState = { mode: 'create' | 'view' | 'metadata' | 'history' | 'publish
 type DatasetBatchAction = 'publish' | 'disable' | 'delete'
 type DatasetBatchOutcome = { dataset: DatasetSummary; error?: string }
 type Notice = { tone: 'success' | 'error'; message: string }
+type ModelingLogEntry = {
+  id: string
+  timestamp: string
+  label: string
+  message: string
+  tone: 'queued' | 'running' | 'success' | 'warning' | 'error'
+}
+type ModelingMonitorState = {
+  tasks: BackgroundTask[]
+  ready: boolean
+  expected: boolean
+  syncError: string
+  logsPinned: boolean
+}
+type ModelingMonitorConfig = {
+  trigger: DatasetLLMTrigger
+  label: string
+  taskKinds: Set<string>
+  idleTitle: string
+}
 type DatasetDetailField = {
   id: string; physicalName: string; code: string; name: string; description: string
   role: string; canonicalType: string; semanticType: string; nullable: boolean; visible: boolean
@@ -116,6 +142,245 @@ type DatasetAIErrorView = {
 const statusLabels: Record<string, string> = {
   DRAFT: '草稿', VALIDATING: '校验中', PUBLISHED: '已发布', STALE: '已失效', DEPRECATED: '已废弃', DISABLED: '已停用',
 }
+const modelingMonitorConfigs: ModelingMonitorConfig[] = [
+  {
+    trigger: 'DIM_MODELING',
+    label: '维度建模',
+    taskKinds: new Set(['ODS_DOMAIN_CLASSIFICATION', 'DIM_MODELING']),
+    idleTitle: '按 ODS 领域分析业务实体并生成待审批的 DIM 草稿',
+  },
+  {
+    trigger: 'DWD_MODELING',
+    label: '明细建模',
+    taskKinds: new Set(['DWD_FACT_MODELING']),
+    idleTitle: '基于已审批发布的 DIM 和同批次事实分类生成 DWD 草稿',
+  },
+  {
+    trigger: 'DWS_MODELING',
+    label: '主题建模',
+    taskKinds: new Set(['DWS_MODELING']),
+    idleTitle: '基于已发布明细模型形成主题分析草稿；草稿需先完成发布审批',
+  },
+]
+const emptyModelingMonitorState = (): ModelingMonitorState => ({
+  tasks: [],
+  ready: false,
+  expected: false,
+  syncError: '',
+  logsPinned: false,
+})
+const emptyModelingMonitors = (): Record<DatasetLLMTrigger, ModelingMonitorState> => ({
+  DIM_MODELING: emptyModelingMonitorState(),
+  DWD_MODELING: emptyModelingMonitorState(),
+  DWS_MODELING: emptyModelingMonitorState(),
+})
+const activeBackgroundTaskStatuses = new Set<BackgroundTaskStatus>(['QUEUED', 'RUNNING'])
+const backgroundTaskStatusLabels: Record<BackgroundTaskStatus, string> = {
+  QUEUED: '排队中',
+  RUNNING: '执行中',
+  SUCCEEDED: '已完成',
+  PARTIAL: '部分完成',
+  FAILED: '失败',
+  CANCELLED: '已中止',
+  SKIPPED: '已跳过',
+  STALE: '已失效',
+}
+const isActiveModelingTask = (task: BackgroundTask) =>
+  activeBackgroundTaskStatuses.has(task.status)
+const modelingProgress = (tasks: BackgroundTask[]) => {
+  if (!tasks.length || !tasks.some(isActiveModelingTask)) return undefined
+  const values = tasks.map(task => {
+    if (!activeBackgroundTaskStatuses.has(task.status)) return 100
+    if (typeof task.progressPercent === 'number') return task.progressPercent
+    if (task.status === 'QUEUED') return 0
+    return undefined
+  })
+  if (values.some(value => value === undefined)) return undefined
+  return Math.round(values.reduce<number>((sum, value) => sum + (value ?? 0), 0) / values.length)
+}
+const modelingLogTone = (status: BackgroundTaskStatus): ModelingLogEntry['tone'] => {
+  if (status === 'SUCCEEDED' || status === 'SKIPPED') return 'success'
+  if (status === 'PARTIAL' || status === 'CANCELLED' || status === 'STALE') return 'warning'
+  if (status === 'FAILED') return 'error'
+  return status === 'RUNNING' ? 'running' : 'queued'
+}
+const modelingLogEntries = (
+  tasks: BackgroundTask[],
+  awaitingDiscovery: boolean,
+  trigger: DatasetLLMTrigger,
+): ModelingLogEntry[] => {
+  const entries: ModelingLogEntry[] = []
+  for (const task of tasks) {
+    entries.push({
+      id: `${task.id}:queued`,
+      timestamp: task.createdAt,
+      label: '已提交',
+      message: `${task.name}已进入${task.kindLabel}队列`,
+      tone: 'queued',
+    })
+    if (task.startedAt) {
+      entries.push({
+        id: `${task.id}:started`,
+        timestamp: task.startedAt,
+        label: '执行中',
+        message: `${task.name}开始执行（第 ${task.attempt} / ${task.maxAttempts} 次）`,
+        tone: 'running',
+      })
+    }
+    if (isActiveModelingTask(task) && task.updatedAt !== task.startedAt &&
+      task.updatedAt !== task.createdAt) {
+      entries.push({
+        id: `${task.id}:updated:${task.updatedAt}`,
+        timestamp: task.updatedAt,
+        label: task.status === 'QUEUED' ? '排队中' : '处理中',
+        message: `${task.name}：${task.progressText}`,
+        tone: task.status === 'QUEUED' ? 'queued' : 'running',
+      })
+    }
+    if (!activeBackgroundTaskStatuses.has(task.status)) {
+      entries.push({
+        id: `${task.id}:completed`,
+        timestamp: task.completedAt || task.updatedAt,
+        label: backgroundTaskStatusLabels[task.status],
+        message: task.errorMessage
+          ? `${task.name}：${task.errorMessage}`
+          : `${task.name}${task.progressText ? `：${task.progressText}` : ''}`,
+        tone: modelingLogTone(task.status),
+      })
+    }
+  }
+  if (awaitingDiscovery && !entries.length) {
+    entries.push({
+      id: `${trigger}:connecting`,
+      timestamp: new Date().toISOString(),
+      label: '连接中',
+      message: '任务已提交，正在读取持久化任务记录…',
+      tone: 'running',
+    })
+  }
+  return entries
+    .sort((left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime())
+    .slice(-40)
+}
+
+function DatasetModelingAction({
+  config,
+  monitor,
+  actionBusy,
+  submitting,
+  logID,
+  onTrigger,
+  onTogglePinned,
+}: {
+  config: ModelingMonitorConfig
+  monitor: ModelingMonitorState
+  actionBusy: boolean
+  submitting: boolean
+  logID: string
+  onTrigger: () => void
+  onTogglePinned: () => void
+}) {
+  const activeTasks = monitor.tasks.filter(isActiveModelingTask)
+  const busy = submitting || monitor.expected || activeTasks.length > 0
+  const progressPercent = modelingProgress(monitor.tasks)
+  const displayProgressPercent = progressPercent ??
+    (!busy && monitor.tasks.length ? 100 : undefined)
+  const progressLabel = displayProgressPercent === undefined
+    ? busy ? '执行中' : '—'
+    : `${displayProgressPercent}%`
+  const completedCount = monitor.tasks.length - activeTasks.length
+  const logs = modelingLogEntries(
+    monitor.tasks,
+    busy && !monitor.tasks.length,
+    config.trigger,
+  )
+  const hasLogs = busy || monitor.tasks.length > 0 || Boolean(monitor.syncError)
+  const buttonLabel = !monitor.ready
+    ? '状态同步中'
+    : submitting
+      ? '正在提交…'
+      : busy && progressPercent !== undefined
+        ? `${config.label} ${progressPercent}%`
+        : busy
+          ? `${config.label}中`
+          : config.label
+  const buttonStyle = progressPercent === undefined
+    ? undefined
+    : { '--dataset-modeling-progress': `${progressPercent}%` } as CSSProperties
+  const status = monitor.syncError
+    ? '同步重试中'
+    : busy
+      ? '每 3 秒刷新'
+      : `${logs.length} 条`
+
+  return <div
+    className={`dataset-modeling-action${busy ? ' is-running' : ''}${progressPercent === undefined ? ' is-indeterminate' : ' is-determinate'}${hasLogs ? ' has-logs' : ''}${monitor.logsPinned ? ' is-pinned' : ''}`}
+    onKeyDown={event => {
+      if (event.key === 'Escape' && monitor.logsPinned) onTogglePinned()
+    }}
+  >
+    <button
+      className="dataset-modeling-trigger"
+      type="button"
+      disabled={actionBusy || !monitor.ready || busy}
+      aria-busy={busy}
+      aria-describedby={hasLogs ? logID : undefined}
+      style={buttonStyle}
+      title={busy ? `${config.label}正在运行；悬停或聚焦查看实时日志` : config.idleTitle}
+      onClick={onTrigger}
+    >
+      <span>{buttonLabel}</span>
+    </button>
+    {hasLogs && <button
+      className="dataset-modeling-log-toggle"
+      type="button"
+      aria-label={monitor.logsPinned ? `取消固定${config.label}日志` : `固定显示${config.label}日志`}
+      aria-controls={logID}
+      aria-expanded={monitor.logsPinned}
+      onClick={onTogglePinned}
+    >
+      <ListChecksIcon size={13} weight="bold" aria-hidden="true" />
+    </button>}
+    {hasLogs && <section
+      className="dataset-modeling-log-popover"
+      id={logID}
+      role="region"
+      aria-label={`${config.label}实时日志`}
+    >
+      <header>
+        <div><MagicWandIcon size={17} weight="duotone" aria-hidden="true" /><span><strong>{config.label}运行日志</strong><small>真实任务状态 · 安全摘要</small></span></div>
+        <em>{status}</em>
+      </header>
+      <div className="dataset-modeling-log-progress">
+        <span>{monitor.tasks.length
+          ? `已结束 ${completedCount} / ${monitor.tasks.length} 个任务`
+          : monitor.ready ? '正在发现任务阶段…' : '正在同步任务状态…'}</span>
+        <strong>{progressLabel}</strong>
+        <progress
+          max={100}
+          value={displayProgressPercent}
+          aria-label={`${config.label}总体进度`}
+          aria-valuetext={displayProgressPercent === undefined ? '任务执行中，暂时无法可靠估算百分比' : `${displayProgressPercent}%`}
+        />
+      </div>
+      {monitor.syncError && <div className="dataset-modeling-log-error" role="alert">
+        状态同步暂时失败：{monitor.syncError}
+      </div>}
+      <ol className="dataset-modeling-live-log" role="log" aria-live="polite" aria-relevant="additions text">
+        {!logs.length && <li className="running">
+          <time aria-hidden="true">--:--:--</time><span>连接中</span><strong>正在读取{config.label}任务…</strong>
+        </li>}
+        {logs.map(entry => <li className={entry.tone} key={entry.id}>
+          <time dateTime={entry.timestamp}>{new Date(entry.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}</time>
+          <span>{entry.label}</span>
+          <strong>{entry.message}</strong>
+        </li>)}
+      </ol>
+      <footer>悬停或键盘聚焦可查看，点击右上日志按钮可固定；不展示模型输入、原始输出或业务数据。</footer>
+    </section>}
+  </div>
+}
+
 const layerOverview: Array<{ layer: DatasetLayer; name: string; description: string }> = [
   { layer: 'ODS', name: '源映射', description: '结构映射 · 数据留在来源' },
   { layer: 'DIM', name: '维度', description: '实体说明' },
@@ -839,6 +1104,9 @@ export function DatasetCenterPage() {
   const { datasetId } = useParams()
   const navigate = useNavigate()
   const location = useLocation()
+  const modelingLogIDPrefix = useId()
+  const selectedBusinessDomain = currentDomain()
+  const selectedBusinessDomainName = selectedBusinessDomain?.name.trim() ?? ''
   const [datasets, setDatasets] = useState<DatasetSummary[]>([])
   const [tables, setTables] = useState<AssetTable[]>([])
   const [loading, setLoading] = useState(true)
@@ -878,6 +1146,7 @@ export function DatasetCenterPage() {
   const [editingRecord, setEditingRecord] = useState<DatasetRecord | null>(null)
   const [formError, setFormError] = useState('')
   const [busyAction, setBusyAction] = useState('')
+  const [modelingMonitors, setModelingMonitors] = useState(emptyModelingMonitors)
   const [generatedCode, setGeneratedCode] = useState('')
   const [activeNodeID, setActiveNodeID] = useState('')
   const [activeJoinID, setActiveJoinID] = useState('')
@@ -915,10 +1184,135 @@ export function DatasetCenterPage() {
   const metricAIAutoRunKeys = useRef(new Set<string>())
   const selectFilteredCheckbox = useRef<HTMLInputElement | null>(null)
   const autoGenerateDatasetAIPlan = useRef<(instruction: string) => void>(() => undefined)
+  const modelingRunTaskIDs = useRef<Record<DatasetLLMTrigger, Set<string>>>({
+    DIM_MODELING: new Set(),
+    DWD_MODELING: new Set(),
+    DWS_MODELING: new Set(),
+  })
+  const modelingRequestedAt = useRef<Record<DatasetLLMTrigger, number | null>>({
+    DIM_MODELING: null,
+    DWD_MODELING: null,
+    DWS_MODELING: null,
+  })
+  const modelingExpectedRef = useRef<Record<DatasetLLMTrigger, boolean>>({
+    DIM_MODELING: false,
+    DWD_MODELING: false,
+    DWS_MODELING: false,
+  })
+  const modelingSyncRequest = useRef(0)
 
   const loadDatasets = useCallback(async () => {
     setDatasets(await loadAllDatasets())
   }, [])
+
+  const expectModelingTasks = useCallback((
+    trigger: DatasetLLMTrigger,
+    expected: boolean,
+  ) => {
+    modelingExpectedRef.current[trigger] = expected
+    setModelingMonitors(current => ({
+      ...current,
+      [trigger]: { ...current[trigger], expected },
+    }))
+  }, [])
+
+  const refreshModelingTasks = useCallback(async () => {
+    const request = ++modelingSyncRequest.current
+    try {
+      const page = await backgroundTaskAPI.list('ALL', 200)
+      if (request !== modelingSyncRequest.current) return
+      const updates = {} as Record<DatasetLLMTrigger, Pick<ModelingMonitorState, 'tasks' | 'ready' | 'expected' | 'syncError'>>
+      const completionNotices: Notice[] = []
+      let refreshCatalog = false
+      for (const config of modelingMonitorConfigs) {
+        const { trigger } = config
+        const relevant = page.items.filter(task => config.taskKinds.has(task.kind))
+        const active = relevant.filter(isActiveModelingTask)
+        const requestedAt = modelingRequestedAt.current[trigger]
+        const runTaskIDs = modelingRunTaskIDs.current[trigger]
+        if (!runTaskIDs.size) {
+          const requestedTasks = requestedAt === null
+            ? []
+            : relevant.filter(task => new Date(task.createdAt).getTime() >= requestedAt - 5_000)
+          const activeBatchTasks = active.length
+            ? relevant.filter(task => active.some(activeTask =>
+                Math.abs(new Date(task.createdAt).getTime() - new Date(activeTask.createdAt).getTime()) <= 5_000
+              ))
+            : []
+          const candidates = requestedTasks.length ? requestedTasks : activeBatchTasks
+          modelingRunTaskIDs.current[trigger] = new Set(candidates.map(task => task.id))
+        } else if (requestedAt !== null) {
+          relevant
+            .filter(task => new Date(task.createdAt).getTime() >= requestedAt - 5_000)
+            .forEach(task => runTaskIDs.add(task.id))
+        } else if (modelingExpectedRef.current[trigger]) {
+          active.forEach(task => runTaskIDs.add(task.id))
+        }
+        const selected = relevant
+          .filter(task => modelingRunTaskIDs.current[trigger].has(task.id))
+          .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime())
+        const selectedActive = selected.filter(isActiveModelingTask)
+        let expected = modelingExpectedRef.current[trigger]
+        if (selectedActive.length) {
+          expected = true
+          modelingExpectedRef.current[trigger] = true
+        } else if (selected.length && expected) {
+          expected = false
+          modelingExpectedRef.current[trigger] = false
+          modelingRequestedAt.current[trigger] = null
+          refreshCatalog = true
+          const failed = selected.filter(task => ['FAILED', 'CANCELLED', 'STALE'].includes(task.status))
+          const partial = selected.filter(task => task.status === 'PARTIAL')
+          if (failed.length) {
+            completionNotices.push({
+              tone: 'error',
+              message: `${config.label}已结束：${failed.length} 个任务失败或中止。悬停“${config.label}”可查看运行日志。`,
+            })
+          } else if (partial.length) {
+            completionNotices.push({
+              tone: 'error',
+              message: `${config.label}部分完成：${partial.length} 个任务需要处理。悬停“${config.label}”可查看运行日志。`,
+            })
+          } else {
+            completionNotices.push({
+              tone: 'success',
+              message: `${config.label}已完成，数据集目录已刷新。`,
+            })
+          }
+        }
+        updates[trigger] = {
+          tasks: selected,
+          ready: true,
+          expected,
+          syncError: '',
+        }
+      }
+      setModelingMonitors(current => {
+        const next = { ...current }
+        for (const config of modelingMonitorConfigs) {
+          next[config.trigger] = {
+            ...current[config.trigger],
+            ...updates[config.trigger],
+          }
+        }
+        return next
+      })
+      if (completionNotices.length) {
+        setNotice(completionNotices[completionNotices.length - 1])
+      }
+      if (refreshCatalog) {
+        void loadDatasets()
+      }
+    } catch (cause) {
+      if (request !== modelingSyncRequest.current) return
+      const message = cause instanceof Error ? cause.message : '读取建模任务失败'
+      setModelingMonitors(current => ({
+        DIM_MODELING: { ...current.DIM_MODELING, syncError: message },
+        DWD_MODELING: { ...current.DWD_MODELING, syncError: message },
+        DWS_MODELING: { ...current.DWS_MODELING, syncError: message },
+      }))
+    }
+  }, [loadDatasets])
 
   useEffect(() => {
     let active = true
@@ -927,6 +1321,12 @@ export function DatasetCenterPage() {
     }).finally(() => { if (active) setLoading(false) })
     return () => { active = false }
   }, [])
+
+  useEffect(() => {
+    void refreshModelingTasks()
+    const timer = window.setInterval(() => void refreshModelingTasks(), 3_000)
+    return () => window.clearInterval(timer)
+  }, [refreshModelingTasks])
 
   useEffect(() => {
     if (!notice) return
@@ -1060,13 +1460,13 @@ export function DatasetCenterPage() {
     code: generatedCode,
     name: metadata.name.trim(),
     description: metadata.description.trim(),
-    domain: metadata.domain.trim(),
+    domain: selectedBusinessDomainName,
     subject: metadata.subject.trim(),
     grainKeys: configuredGrainKeys(draft, endBox),
     designer: serializeDesignerGraph(currentDesignerGraph),
     preAggregation: undefined,
     finalOutputKeys: undefined,
-  }), [currentDesignerGraph, draft, endBox, generatedCode, metadata])
+  }), [currentDesignerGraph, draft, endBox, generatedCode, metadata, selectedBusinessDomainName])
   const layerChoices = useMemo(() => {
     try {
       return draft.nodes.length ? datasetLayerChoices(draft) : ['DWD'] as DatasetLayer[]
@@ -1085,7 +1485,7 @@ export function DatasetCenterPage() {
       const value = normalized.slice(prefix.length).trim()
       return value ? [value] : []
     }))].sort((left, right) => left.localeCompare(right, 'zh-CN'))
-    return { domains: values('领域:'), subjects: values('主题:') }
+    return { subjects: values('主题:') }
   }, [draft.nodes, editingRecord?.tags])
 
   const resetDatasetAI = useCallback(() => {
@@ -1119,7 +1519,7 @@ export function DatasetCenterPage() {
     setEndBox(null)
     setNodePreviews({})
     setNodePositions({})
-    setMetadata({ name: '', description: '', domain: '', subject: '' })
+    setMetadata({ name: '', description: '', domain: selectedBusinessDomainName, subject: '' })
     setGeneratedCode(`dataset_${Date.now().toString(36)}`)
     setActiveNodeID('')
     setActiveJoinID('')
@@ -1189,7 +1589,7 @@ export function DatasetCenterPage() {
       const loadedMetadata: DatasetMetadataForm = {
         name: record.name,
         description: record.description,
-        domain: record.dsl.dataset.domain ?? '',
+        domain: selectedBusinessDomainName,
         subject: record.dsl.dataset.subject ?? '',
       }
       setTables(availableTables)
@@ -1221,7 +1621,7 @@ export function DatasetCenterPage() {
       setAssetsLoading(false)
       setBusyAction('')
     }
-  }, [datasets, resetDatasetAI, tables])
+  }, [datasets, resetDatasetAI, selectedBusinessDomainName, tables])
 
   const loadNodePreview = useCallback(async (node: DesignerNode) => {
     setNodePreviews(current => ({ ...current, [node.id]: { loading: true } }))
@@ -2202,8 +2602,12 @@ export function DatasetCenterPage() {
   }
 
   const saveDataset = async () => {
-    if (!metadata.domain.trim() || !metadata.name.trim() || !metadata.description.trim()) {
-      setFormError('请填写业务领域、数据集名称和说明')
+    if (!selectedBusinessDomainName) {
+      setFormError('当前账号没有可用的所属领域，请先选择业务领域')
+      return
+    }
+    if (!metadata.name.trim() || !metadata.description.trim()) {
+      setFormError('请填写数据集名称和说明')
       return
     }
     setBusyAction(editingRecord ? 'update' : 'create')
@@ -2591,9 +2995,26 @@ export function DatasetCenterPage() {
 
   const triggerDatasetLLM = async (trigger: DatasetLLMTrigger, label: string) => {
     if (busyAction) return
+    modelingRunTaskIDs.current[trigger] = new Set()
+    modelingRequestedAt.current[trigger] = Date.now()
+    expectModelingTasks(trigger, true)
+    setModelingMonitors(current => ({
+      ...current,
+      [trigger]: {
+        ...current[trigger],
+        tasks: [],
+        expected: true,
+        logsPinned: false,
+        syncError: '',
+      },
+    }))
     setBusyAction(`llm:${trigger}`)
     try {
       const result = await datasetAPI.triggerLLM(trigger)
+      if (result.enqueuedCount + result.existingCount === 0) {
+        expectModelingTasks(trigger, false)
+        modelingRequestedAt.current[trigger] = null
+      }
       if (result.blockedReason === 'DWD_PUBLICATION_REQUIRED') {
         setNotice({
           tone: 'error',
@@ -2637,6 +3058,9 @@ export function DatasetCenterPage() {
       if (result.enqueuedCount > 0 || result.existingCount > 0) {
         rememberBackgroundTaskFocus(trigger)
       }
+      if (result.enqueuedCount + result.existingCount > 0) {
+        await refreshModelingTasks()
+      }
       setNotice({
         tone: 'success',
         message: `${label}${submitted}${existing}${noFact}${
@@ -2646,6 +3070,9 @@ export function DatasetCenterPage() {
         }`,
       })
     } catch (cause) {
+      expectModelingTasks(trigger, false)
+      modelingRequestedAt.current[trigger] = null
+      modelingRunTaskIDs.current[trigger] = new Set()
       setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : `${label}触发失败` })
     } finally {
       setBusyAction('')
@@ -2928,15 +3355,32 @@ export function DatasetCenterPage() {
         <section className="dataset-intelligent-modeling" aria-label="智能建模">
           <span>智能建模</span>
           <div>
-            <button type="button" disabled={actionBusy} title="按 ODS 领域分析业务实体并生成待审批的 DIM 草稿" onClick={() => void triggerDatasetLLM('DIM_MODELING', '维度建模')}>
-              {busyAction === 'llm:DIM_MODELING' ? '正在提交…' : '维度建模'}
-            </button>
-            <button type="button" disabled={actionBusy} title="基于已审批发布的 DIM 和同批次事实分类生成 DWD 草稿" onClick={() => void triggerDatasetLLM('DWD_MODELING', '明细建模')}>
-              {busyAction === 'llm:DWD_MODELING' ? '正在提交…' : '明细建模'}
-            </button>
-            <button type="button" disabled={actionBusy} title="基于已发布明细模型形成主题分析草稿；草稿需先完成发布审批" onClick={() => void triggerDatasetLLM('DWS_MODELING', '主题建模')}>
-              {busyAction === 'llm:DWS_MODELING' ? '正在提交…' : '主题建模'}
-            </button>
+            {modelingMonitorConfigs.map(config => <DatasetModelingAction
+              key={config.trigger}
+              config={config}
+              monitor={modelingMonitors[config.trigger]}
+              actionBusy={actionBusy}
+              submitting={busyAction === `llm:${config.trigger}`}
+              logID={`${modelingLogIDPrefix}-${config.trigger.toLowerCase()}`}
+              onTrigger={() => void triggerDatasetLLM(config.trigger, config.label)}
+              onTogglePinned={() => setModelingMonitors(current => {
+                const willPin = !current[config.trigger].logsPinned
+                return {
+                  DIM_MODELING: {
+                    ...current.DIM_MODELING,
+                    logsPinned: config.trigger === 'DIM_MODELING' && willPin,
+                  },
+                  DWD_MODELING: {
+                    ...current.DWD_MODELING,
+                    logsPinned: config.trigger === 'DWD_MODELING' && willPin,
+                  },
+                  DWS_MODELING: {
+                    ...current.DWS_MODELING,
+                    logsPinned: config.trigger === 'DWS_MODELING' && willPin,
+                  },
+                }
+              })}
+            />)}
           </div>
         </section>
       </div>
@@ -3043,7 +3487,7 @@ export function DatasetCenterPage() {
 
     {dialog?.mode === 'metadata' && <Dialog title={editingRecord ? '保存数据集修改' : '完善数据集信息'} eyebrow="保存配置" onClose={() => { if (!busyAction) setDialog({ mode: 'create' }) }}>
       <div className="dataset-metadata-form">
-        <p>图形化配置已完成，请确认物理落层，并补充数据集的领域、主题、名称和说明后保存。</p>
+        <p>图形化配置已完成，请确认物理落层，并补充数据集的主题、名称和说明后保存。业务领域自动继承当前用户所属领域。</p>
         <label>
           数据集层级
           <select
@@ -3060,17 +3504,14 @@ export function DatasetCenterPage() {
         </label>
         <div className="dataset-metadata-grid">
           <label>
-            业务领域（必填）
+            业务领域（当前用户所属）
             <input
               aria-label="业务领域"
-              autoComplete="off"
-              list="dataset-domain-options"
-              maxLength={128}
-              value={metadata.domain}
-              onChange={event => setMetadata(current => ({ ...current, domain: event.target.value }))}
-              placeholder="例如：企业、运营、订单"
+              readOnly
+              value={selectedBusinessDomainName}
+              placeholder="请先选择业务领域"
             />
-            <datalist id="dataset-domain-options">{classificationSuggestions.domains.map(value => <option key={value} value={value} />)}</datalist>
+            <small>由登录用户当前选择的所属领域统一确定，不参与 LLM 标签生成。</small>
           </label>
           <label>
             业务主题（可选）
@@ -3109,7 +3550,7 @@ export function DatasetCenterPage() {
           <div><strong>{detail.name}</strong><span className={`dataset-asset-status ${detail.status.toLowerCase()}`}>{statusLabels[detail.status] ?? detail.status}</span><span className={`dataset-asset-layer ${detail.layer.toLowerCase()}`}>{detail.layer}</span>{(detail.tags || []).map(tag => <span className="dataset-asset-tag" key={tag}>{tag}</span>)}</div>
           <p>{detail.description || '暂无说明'}</p>
         </header>
-        <dl><div><dt>编码</dt><dd>{detail.code}</dd></div><div><dt>类型</dt><dd>{typeLabels[detail.type] ?? detail.type}</dd></div><div><dt>业务领域</dt><dd>{detail.dsl.dataset.domain || '未配置'}</dd></div><div><dt>业务主题</dt><dd>{detail.dsl.dataset.subject || '未配置'}</dd></div><div><dt>聚合版本</dt><dd>V{detail.version}</dd></div><div><dt>草稿版本</dt><dd>V{detail.draftVersionNo}</dd></div><div><dt>数据节点</dt><dd>{Array.isArray(detail.dsl.nodes) ? detail.dsl.nodes.length : 0}</dd></div><div><dt>输出字段</dt><dd>{completeDetailFields.length}</dd></div></dl>
+        <dl><div><dt>编码</dt><dd>{detail.code}</dd></div><div><dt>类型</dt><dd>{typeLabels[detail.type] ?? detail.type}</dd></div><div><dt>业务领域</dt><dd>{selectedBusinessDomainName || '未配置'}</dd></div><div><dt>业务主题</dt><dd>{detail.dsl.dataset.subject || '未配置'}</dd></div><div><dt>聚合版本</dt><dd>V{detail.version}</dd></div><div><dt>草稿版本</dt><dd>V{detail.draftVersionNo}</dd></div><div><dt>数据节点</dt><dd>{Array.isArray(detail.dsl.nodes) ? detail.dsl.nodes.length : 0}</dd></div><div><dt>输出字段</dt><dd>{completeDetailFields.length}</dd></div></dl>
         <section className="dataset-detail-metadata" aria-label="LLM 生成的完整元数据">
           <div className="dataset-detail-section-heading"><div><span className="eyebrow">LLM 元数据</span><h3>完整业务语义</h3></div><span>{detailAsset ? `${detailAsset.schemaName}.${detailAsset.tableName}` : `${detail.layer} 数据集`}</span></div>
           {detailAsset && <dl className="dataset-detail-table-summary">

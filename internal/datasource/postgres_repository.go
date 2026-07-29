@@ -377,6 +377,29 @@ func (r *PostgresRepository) UpdateStatus(ctx context.Context, tenantID, id stri
 		if tag.RowsAffected() != 1 {
 			return pgx.ErrNoRows
 		}
+		if status == StatusDeleted {
+			if _, err := tx.Exec(ctx, `UPDATE platform.metadata_columns AS metadata_column
+				SET asset_status='INACTIVE'
+				WHERE metadata_column.tenant_id=$1
+				  AND metadata_column.asset_status='ACTIVE'
+				  AND EXISTS(
+				    SELECT 1
+				    FROM platform.metadata_tables AS metadata_table
+				    WHERE metadata_table.id=metadata_column.table_id
+				      AND metadata_table.tenant_id=metadata_column.tenant_id
+				      AND metadata_table.data_source_id=$2
+				  )`, tenantID, id); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE platform.metadata_tables
+				SET asset_status='INACTIVE',management_status='DISABLED'
+				WHERE tenant_id=$1 AND data_source_id=$2
+				  AND (asset_status='ACTIVE' OR management_status<>'DISABLED')`,
+				tenantID, id,
+			); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }

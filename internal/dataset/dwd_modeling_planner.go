@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	dwdModelingPromptVersion        = "warehouse-modeling-v9"
-	dwdClassificationPromptVersion  = "warehouse-classification-v2"
-	dwdDimensionDesignPromptVersion = "warehouse-dimension-design-v2"
-	dwdFactDesignPromptVersion      = "warehouse-fact-design-v3"
+	dwdModelingPromptVersion        = "warehouse-modeling-v10"
+	dwdClassificationPromptVersion  = "warehouse-classification-v5"
+	dwdLegacyClassificationVersion  = "warehouse-classification-v4"
+	dwdDimensionDesignPromptVersion = "warehouse-dimension-design-v3"
+	dwdFactDesignPromptVersion      = "warehouse-fact-design-v4"
 	maxDWDModelingRepairContent     = 64 << 10
 	dwdModelingInvocationAttempts   = 3
 	dwdStageInvocationAttempts      = 3
@@ -55,6 +56,7 @@ type dwdPlanningInput struct {
 	TenantID   string             `json:"-"`
 	ActorID    string             `json:"-"`
 	ResourceID string             `json:"-"`
+	DomainID   string             `json:"-"`
 	Domain     string             `json:"domain"`
 	Trigger    dwdPlanningTrigger `json:"trigger"`
 	Tables     []dwdPlanningTable `json:"tables"`
@@ -240,35 +242,58 @@ func (planner *OrchestratedDWDModelingPlanner) Configured() bool {
 
 const dwdClassificationSystemPrompt = `你是企业数据仓库 ODS 多产物识别器。输入只包含同一业务领域内已发布 ODS 数据集的元数据，不包含业务数据行。
 
-逐表判断为 FACT、DIMENSION、MASTER 或 OTHER：
-- FACT 是“谁在何时对什么做了什么”的事件或交易明细；
-- DIMENSION 是人物、商品、组织、区域等用于解释事实的分析实体；
-- MASTER 是稳定的核心实体主数据；
-- 证据不足时使用 OTHER。
+先严格使用下列平台定义完成判定，再输出结构化结果；不要输出内部分析过程。
 
-role 表示 ODS 本身的主要行粒度，但不限制它只能产生一个模型。必须按实际行粒度判断，而不是只看表名：订单商品/订单行项目若一行代表一次订单中的一个商品项，并包含数量、成交单价、折扣、行金额等可加度量，role 仍应是 FACT；如果同一 FACT 内还包含可由稳定业务键抽取的实体属性，例如 SKU_ID + 商品名称 + 分类，则同时用 dimensionKeyFieldCodes 和 dimensionAttributeFieldCodes 声明一个可去重治理的商品维度。这样同一 ODS 可以同时产生 DWD 与 DIM。
+一、DIM 定义与同表边界
+- DIM 是用来解释、筛选、分组事实的稳定业务实体，如人员、客户、商品、组织、区域、渠道。DIM 每行必须稳定代表一个实体业务键，而不是一次交易、事件或统计结果。
+- DIM 应包含实体自然键/治理键，以及函数依赖于该实体键的稳定名称、分类、状态、组织、区域、生命周期和有效期等说明属性；不得包含交易数量、金额、价格、事件次数等事实度量。
+- 只有同时满足“同一实体键、同一行粒度、相同生命周期/更新节奏、相容的治理和敏感级别”的信息才放在同一 DIM。不同实体、不同粒度、多值重复组、独立生命周期、高频事件流水或权限边界不同的信息必须拆分。
+- MASTER 是稳定核心主数据来源，落地时同样形成 DIM；DIMENSION 是普通分析实体来源。
 
-dimensionKeyFieldCodes 只能放实体稳定业务键；dimensionAttributeFieldCodes 只能放该实体的稳定说明属性，不能放订单号、事实行号、数量、成交价、折扣、金额或事件时间。没有足够的稳定键和说明属性时两个数组都必须为空。DIMENSION/MASTER 必须声明其实体键与说明属性；FACT/OTHER 可为空。当前一次分类最多从每张 ODS 抽取一个明确实体维度，不得臆造字段。
+二、DWD/FACT 定义与同表边界
+- FACT 是原子业务事件、交易行或周期快照，回答“谁在何时对什么做了什么/处于什么状态”；DWD 每行保持该原子事实粒度，不做汇总。
+- DWD 应包含事实/退化键、可关联 DIM 的外键、事件日期、原子度量、状态和追踪字段。
+- 只有属于同一业务过程、同一事实粒度、同一事件时间含义和相容更新节奏的信息才放在同一 DWD。订单头、订单行、支付、配送等粒度不同的过程不能混成一张明细表。
 
-classifications 必须逐一覆盖输入表且不得重复，只能复制精确 datasetVersionId 和字段 code。理由应简短、基于表名、说明、标签、字段角色和粒度。不要设计关联、SQL 或物理表。输出只能是 JSON Schema 指定的对象。`
+逐表把主要行粒度判断为 FACT、DIMENSION、MASTER 或 OTHER，证据不足时使用 OTHER。必须按真实行粒度而不是表名判断：订单商品/订单行项目若一行代表一次订单中的一个商品项，并包含数量、成交单价、折扣、行金额等原子度量，role 是 FACT；输出粒度由日期/时间键和实体键共同组成且包含订单数、金额、数量、时长等度量的周期快照或日度聚合也必须是 FACT，绝不能判为 DIMENSION/MASTER。若同一 FACT 还含可由稳定业务键安全去重的实体属性，例如 SKU_ID + 商品名称 + 分类，可同时用 dimensionKeyFieldCodes 和 dimensionAttributeFieldCodes 声明一个抽取 DIM。
 
-const dwdDimensionDesignSystemPrompt = `你是企业数据仓库 DIM 设计师。领域内 ODS 多产物识别已经通过校验且不可更改；本次只设计指定的一个实体维度，不包含业务数据行。输入字段已经按实体键和稳定说明属性收窄，来源 ODS 既可能是独立维表，也可能同时产生事实 DWD。
+个人信息主表若一人一行、以人员稳定属性为主，仍应判为 DIMENSION/MASTER，不能仅因业务要统计人数而改判 FACT，也不能把 person_count 放入 DIM。只有一人一事件或一人一快照日的输入才是 FACT；当前人数应由 COUNT(DISTINCT person_id) 计算，历史人数趋势应由“一人 × 快照日”的周期快照 DWD 承载。
 
+dimensionKeyFieldCodes 只能放实体稳定业务键，日期、时间和快照周期字段不能作为实体键；dimensionAttributeFieldCodes 只能放函数依赖于同一实体键且满足上述同表边界的稳定说明属性，不能放订单号、事实行号、数量、价格、折扣、金额、统计人数或事件时间。DIMENSION/MASTER 的维度属性同样不得包含 role=MEASURE 或 semanticType=AMOUNT/QUANTITY 的字段。没有可靠实体时两个数组都必须为空。DIMENSION/MASTER 必须声明实体键和说明属性；FACT/OTHER 可为空。当前每张 ODS 最多抽取一个明确实体 DIM，不得臆造字段。
+
+classifications 必须逐一覆盖输入表且不得重复，只能复制精确 datasetVersionId 和字段 code。role 必须与 rationale 中描述的行粒度和 DIM/DWD 结论一致。rationale 应简短说明“行粒度 + 判定依据 + 是否可抽取 DIM”，不要设计关联、SQL 或物理表。输出只能是 JSON Schema 指定的对象。`
+
+const dwdDimensionDesignSystemPrompt = `你是企业数据仓库 DIM 设计师。领域内 ODS 多产物识别已经通过校验且不可更改；本次只设计指定的一个实体 DIM，不包含业务数据行。输入字段已经按实体键和稳定说明属性收窄，来源 ODS 既可能是独立维表，也可能同时产生事实 DWD。
+
+先按平台 DIM 定义复核设计边界，再输出结构化结果；不要输出内部分析过程：
+- DIM 每行稳定代表一个业务实体键，用于解释、筛选和分组事实。
+- DIM 包含实体键及函数依赖于该键的稳定名称、分类、状态、组织、区域、生命周期或有效期属性，不保存交易度量、事件次数或汇总人数。
+- 同一 DIM 内字段必须具有同一实体键、同一粒度、相同生命周期/更新节奏和相容治理级别；不同实体、不同粒度、多值重复组、事件流水或权限边界不同的信息不得合并。
+- 一人一行的个人主表属于人员 DIM。人数是指标：当前人数使用 COUNT(DISTINCT person_id)，历史趋势使用“一人 × 快照日”的周期快照 DWD，不能在人员 DIM 中新增 person_count。
+
+设计要求：
 1. 保持输入声明的实体粒度并逐字段覆盖当前收窄后的字段，不得新增、删除或臆造字段；grainKeyFieldCodes 必须原样返回输入 outputGrain.keyFields。
-2. 为 DIM 提供简洁明确的中文业务名称与说明；逐字段补充可维护的中文名称和业务说明，不能只复述字段编码。
-3. 逐字段给出字段值标准化：字符串标识、维度和属性使用 TRIM；可空标识、维度和属性使用 COALESCE_DEFAULT，其固定值按规范类型统一为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；DATE/DATETIME 显式转换；字符串时间先 TRIM 再按语义选择 CAST_DATE 或 CAST_DATETIME。度量与时间不得填充哨兵值。
-4. standardization 只能使用 TRIM、COALESCE_DEFAULT、CAST_DATE、CAST_DATETIME。只能复制输入的精确 datasetVersionId 和字段 code。
+2. 提供简洁明确的中文 DIM 名称与说明；逐字段补充可维护的中文名称和业务说明，不能只复述字段编码。
+3. generation 前的卫生组件是强制合同：所有 STRING 使用 TRIM；可空 IDENTIFIER/DIMENSION/ATTRIBUTE 使用 COALESCE_DEFAULT，其固定值按规范类型为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；DATE、DATETIME 及 STRING TIME 统一使用 CAST_DATE 去除时分秒，输出逻辑类型保持 DATE，字段 format 固定为 YYYYMMDD。MEASURE 与 TIME 空值保留 NULL，不填哨兵值。
+4. standardization 只能使用 TRIM、COALESCE_DEFAULT、CAST_DATE、CAST_DATETIME；新设计不得使用 CAST_DATETIME，保留该枚举仅用于读取历史检查点。只能复制输入的精确 datasetVersionId 和字段 code。
 5. 不返回 SQL、DDL、物理表名、自由表达式、样例值、Markdown 或额外解释。
 
 输出只能是 JSON Schema 指定的对象。`
 
-const dwdFactDesignSystemPrompt = `你是企业数据仓库 DWD 明细结构与 DAG 设计师。ODS 角色分类已经通过校验且不可更改；第二阶段的 DIM 已完成说明补充和字段值标准化。本次只设计指定的一张 FACT，输入只包含该事实 ODS 和同领域已加工 DIM 的元数据，不包含业务数据行。dimensionStage=STANDARDIZED_DIM_CONTRACT 表示该表的字段合同来自已加工 DIM；datasetVersionId 仍保留原 ODS 标识，供结构化方案与第一步分类稳定对应。平台生成 DWD 草稿时会替换为精确的 DIM 草稿或发布版本；DWD 发布前仍必须绑定正式 DIM 发布版本。
+const dwdFactDesignSystemPrompt = `你是企业数据仓库 DWD 明细结构与 DAG 设计师。ODS 角色分类已经通过校验且不可更改；第二阶段 DIM 已完成说明补充和字段值标准化。本次只设计指定的一张 FACT，输入只包含该事实 ODS 和同领域已加工 DIM 的元数据，不包含业务数据行。dimensionStage=STANDARDIZED_DIM_CONTRACT 表示字段合同来自已加工 DIM；datasetVersionId 保留原 ODS 标识，供结构化方案与第一步分类稳定对应。平台生成 DWD 草稿时会替换为精确 DIM 草稿或发布版本；DWD 发布前必须绑定正式 DIM 发布版本。
 
-1. 生成且只生成指定 FACT 的一张 DWD，保持业务事实粒度，不得分组或聚合。
-2. 保留事实表全部字段。逐一检查标识/维度字段和以 _id/_key 结尾的字段；只有事实字段与维度字段 code 忽略大小写后完全同名、类型兼容，且在 DIMENSION/MASTER 中唯一时才能 LEFT JOIN。禁止仅因类型相同就关联不同业务键。复合业务键必须完整放入同一 join.conditions。
-3. 每个已关联维度至少扩充一个关联键之外的名称、分类、区域、状态等描述字段（只要存在）；维度侧关联键只用于 Join，不重复输出。
-4. 基础 cleaning：字符串维度/标识/属性去首尾空格；可空标识、维度和属性使用 COALESCE_DEFAULT，按类型固定为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；时间显式转换，字符串时间先 TRIM 再 CAST；度量和时间不得擅自补默认值。
-5. 真实需要时可使用 DATE_FORMAT、DATE_TRUNC、CAST、TRIM、UPPER、LOWER、REPLACE、SUBSTRING、CONCAT、COALESCE、ADD、SUBTRACT、MULTIPLY、DIVIDE、ROUND、ABS、FLOOR、CEIL、CASE。arguments 的每项都是字符串，二元处理只能引用已经加入输出的事实或维度字段。
+先按平台 DWD 定义复核设计边界和应关联 DIM，再输出结构化结果；不要输出内部分析过程：
+- DWD 是原子业务事件、交易行或周期快照，每行只代表同一业务过程、同一事实粒度和同一事件时间含义，不分组、不聚合。
+- DWD 包含事实/退化键、可靠 DIM 外键、事件日期、原子度量、状态和追踪字段。订单头、订单行、支付、配送等不同粒度/过程不得合并。
+- 应关联能够解释该事实“谁、什么对象、组织、区域、渠道、状态”的全部可靠 DIM，但只允许显式语义同一、完整复合键、类型兼容且 DIM 侧唯一的多对一关联；不得按类型相同或名称相似猜测。
+- 个人主表本身不是人数事实。若输入明确是一人一快照日，可设计无度量/快照 DWD，并保留 person_id、snapshot_date 和组织/状态外键；人数由后续 DWS 对 person_id 去重计数。只有源中已存在受治理的 headcount_flag 时才可保留并求和，不得臆造字段，也不得在 DIM 重复保存人数。
+
+设计要求：
+1. 生成且只生成指定 FACT 的一张 DWD，保持原子事实粒度，不得分组或聚合，并保留事实表全部字段。
+2. 逐一检查 IDENTIFIER/DIMENSION 及以 _id/_key 结尾的字段；只有事实字段与 DIM 字段 code 忽略大小写后完全同名、语义相同、类型兼容且 DIM 侧唯一时才能 LEFT JOIN。复合业务键必须完整放入同一 join.conditions。
+3. 每个已关联 DIM 至少扩充一个关联键之外的名称、分类、区域、状态等描述字段（只要存在）；DIM 侧关联键只用于 Join，不重复输出。
+4. generation 前的卫生组件是强制合同：所有 STRING 使用 TRIM；可空 IDENTIFIER/DIMENSION/ATTRIBUTE 使用 COALESCE_DEFAULT，固定值为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；DATE、DATETIME 及 STRING TIME 统一使用 CAST_DATE 去除时分秒，输出逻辑类型保持 DATE，字段 format 固定为 YYYYMMDD。MEASURE 与 TIME 空值保留 NULL，不填哨兵值。不得在 processing 中再用 DATE_FORMAT、DATE_TRUNC 或 CAST_DATETIME 改变该日粒度合同。
+5. 非基础卫生且真实需要时，其他字段可使用 CAST、TRIM、UPPER、LOWER、REPLACE、SUBSTRING、CONCAT、COALESCE、ADD、SUBTRACT、MULTIPLY、DIVIDE、ROUND、ABS、FLOOR、CEIL、CASE。arguments 的每项都是字符串，二元处理只能引用已经加入输出的事实或 DIM 字段。
 6. 只能复制输入中的精确 dataset version id 和字段 code，不得返回 SQL、DDL、表达式文本、物理表或调度命令。输出是交给受控 DAG 开发引擎的待审阅结构化设计。
 
 输出只能是 JSON Schema 指定的对象。`
@@ -390,7 +415,7 @@ func (planner *OrchestratedDWDModelingPlanner) Classify(
 		}
 		invocation.Request.Messages = dwdStageRepairMessages(
 			baseMessages, result, invokeErr,
-			`请只修复 ODS 多产物识别：domain 必须等于输入；classifications 必须逐表覆盖且不重复，只能使用输入的精确 datasetVersionId 和字段 code；role 只能是 FACT、DIMENSION、MASTER、OTHER。FACT 可以同时通过 dimensionKeyFieldCodes + dimensionAttributeFieldCodes 声明一个内嵌实体维度；交易度量、订单号、事实行号和事件时间不得进入维度。没有可靠实体时两个数组必须为空。rationale 保持简短。不要返回 outputs、SQL、Markdown 或解释。`,
+			`请只修复 ODS 多产物识别：domain 必须等于输入；classifications 必须逐表覆盖且不重复，只能使用输入的精确 datasetVersionId 和字段 code；role 只能是 FACT、DIMENSION、MASTER、OTHER。先按原提示中的 DIM、DWD 和同表边界复核真实行粒度。日期/时间参与输出粒度且包含订单数、金额、数量或时长等度量的周期快照/日度聚合必须是 FACT；role 必须与 rationale 的 DIM/DWD 结论一致。FACT 可以通过 dimensionKeyFieldCodes + dimensionAttributeFieldCodes 声明一个内嵌实体维度；日期/时间不能作为实体键，任何 DIM 投影都不能包含交易度量、订单号、事实行号、汇总人数或事件时间。一人一行的个人主表仍是 DIMENSION/MASTER，不能只因需要统计人数改判 FACT。没有可靠实体时两个数组必须为空。rationale 保持简短。不要返回 outputs、SQL、Markdown 或解释。`,
 		)
 	}
 	return dwdClassificationCompletion{}, errDWDModelingInvalid
@@ -494,7 +519,7 @@ func (planner *OrchestratedDWDModelingPlanner) DesignDimension(
 			baseMessages, result, invokeErr,
 			fmt.Sprintf(`上一份 DIM 设计未通过结构校验：%s
 
-请只返回修复后的 {"output": ...}：sourceDatasetVersionId 必须等于指定版本；fields 必须逐字段覆盖且不重复；中文名称和说明不能为空；standardization 只能使用约定的五种操作并符合字段类型。不要返回 SQL、Markdown 或额外解释。`,
+请只返回修复后的 {"output": ...}：sourceDatasetVersionId 必须等于指定版本；fields 必须逐字段覆盖且不重复；中文名称和说明不能为空；所有 STRING 必须 TRIM，可空标识/维度/属性必须 COALESCE_DEFAULT，DATE/DATETIME/STRING TIME 必须 CAST_DATE；不得为 TIME/MEASURE 填充哨兵值。standardization 只能使用约定的四种枚举，新设计不得使用 CAST_DATETIME。不要返回 SQL、Markdown 或额外解释。`,
 				invokeErr.Error(),
 			),
 		)
@@ -622,7 +647,7 @@ func dwdFactDesignRepairInstruction(validationErr error) string {
 1. factDatasetVersionId 必须是指定 FACT；保留全部事实字段且不聚合。
 2. 只能引用输入中的精确版本和字段；事实字段与维度字段 code 必须忽略大小写后完全同名且类型兼容，唯一可靠维度键必须 LEFT JOIN，复合键保持在同一个 conditions。禁止仅因类型相同而关联不同业务键。
 3. 已关联维度存在说明字段时必须扩充至少一个，维度侧关联键不得重复输出。
-4. cleaning、processing、grainKeyOutputCodes 和 timeOutputCode 必须满足原始合同。
+4. 所有 STRING 必须 TRIM；可空标识/维度/属性必须 COALESCE_DEFAULT；DATE/DATETIME/STRING TIME 必须 CAST_DATE 并保持 YYYYMMDD 日粒度；TIME/MEASURE 不得填哨兵值，processing 不得再用 DATE_FORMAT、DATE_TRUNC 或 CAST_DATETIME 改变日期合同。
 5. 名称、说明和 rationale 保持简短，不返回 classifications、SQL、Markdown 或额外解释。`,
 		validationErr.Error(),
 	)
@@ -631,6 +656,33 @@ func dwdFactDesignRepairInstruction(validationErr error) string {
 func validDWDPlanningInput(input dwdPlanningInput) bool {
 	return input.TenantID != "" && input.ActorID != "" &&
 		input.Domain != "" && len(input.Tables) > 0 && len(input.Tables) <= 48
+}
+
+func dwdSingleTableClassificationScope(
+	input dwdPlanningInput,
+	versionID string,
+) (dwdPlanningInput, error) {
+	scoped := input
+	scoped.ResourceID = versionID
+	scoped.Tables = nil
+	for _, table := range input.Tables {
+		if table.VersionID != versionID {
+			continue
+		}
+		scoped.Tables = []dwdPlanningTable{table}
+		scoped.Trigger = dwdPlanningTrigger{
+			DatasetID: table.DatasetID,
+			VersionID: table.VersionID,
+		}
+		break
+	}
+	if len(scoped.Tables) != 1 || !validDWDPlanningInput(scoped) {
+		return dwdPlanningInput{}, fmt.Errorf(
+			"%w: ODS classification scope is unavailable",
+			errDWDModelingInvalid,
+		)
+	}
+	return scoped, nil
 }
 
 func dwdStageRepairMessages(
@@ -667,16 +719,15 @@ func dwdStageRepairMessages(
 
 const dwdModelingSystemPrompt = `你是企业数据仓库 DIM/DWD 建模设计师。输入只包含同一业务领域内已发布 ODS 数据集的完整元数据，不包含业务数据行。ODS 是源系统物理表的治理映射。
 
-你的职责是完成可交给开发引擎执行的分层结构和 DAG 设计，而不是复述输入或编写 SQL：
-1. 对每张 ODS 判断为 FACT、DIMENSION、MASTER 或 OTHER，并给出简短元数据依据。事实表描述“谁在何时对什么做了什么”的业务事件/交易明细；维度表描述人物、商品、组织、区域等分析维度；主数据描述稳定核心实体；证据不足使用 OTHER。必须按实际行粒度而非名称判断：一行一个订单商品项且含数量、价格、折扣、行金额等交易度量的是 FACT；一行稳定代表一个商品/SKU且以名称、品牌、分类等说明属性为主的商品目录才是 DIMENSION/MASTER。没有独立商品实体来源时不得把订单行项目误当商品维度或臆造商品维度。平台会把每个 DIMENSION/MASTER 分类并行转换为一张保留实体粒度、关键字段和说明字段的 DIM 草稿，因此分类本身就是 DIM 设计决策。
-2. 每张 FACT 必须设计且只设计一张以事实明细为中心的 DWD 输出；不得分组、聚合或改变事实粒度。
-3. 必须逐一审视 FACT 中所有标识/维度字段以及 code 以 _id/_key 结尾的字段，并在全部 DIMENSION/MASTER 中按字段 code、业务名称、说明、标签和类型寻找关联键。事实字段与某个维度键 code 精确同名（忽略大小写）、类型兼容且候选唯一时，该 LEFT JOIN 是必选项，不得退化为 ODS 单表直出。关联若依赖两个或更多业务键，必须在同一个 join.conditions 中完整返回全部条件，不能拆成多个 Join，也不能只取其中一个条件。只有确实没有唯一可靠候选时才不关联，禁止仅凭字段位置猜测。
-4. DWD 必须保留事实表全部字段。对事实表的标识、维度、属性和时间字段设计基础清洗：字符串去首尾空格；非时间的可空标识、维度和属性使用 COALESCE_DEFAULT，按规范类型固定为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；日期/时间显式转换为 DATE 或 DATETIME。字符串时间先 TRIM 再 CAST；度量空值和时间空值不得擅自补默认值。基础卫生操作进入 cleaning。
-5. 每个已关联的维度/主数据必须至少选择一个关联键之外的名称、分类、区域、状态等描述字段扩充到输出（只要输入存在此类字段），不能只关联而不扩维。所有维度侧关联键只用于 Join，不得再次放入 output.fields；最终结果只保留事实侧关联键，避免同一业务键输出两份。维度字符串同样去首尾空格；字段编码必须是稳定英文标识符且唯一。
-6. 除基础 cleaning 外，按真实元数据需要为每个字段设计 processing，可使用现有全部字段处理能力：DATE_FORMAT、DATE_TRUNC、CAST、TRIM、UPPER、LOWER、REPLACE、SUBSTRING、CONCAT、COALESCE、ADD、SUBTRACT、MULTIPLY、DIVIDE、ROUND、ABS、FLOOR、CEIL、CASE。不需要额外处理时返回空数组。不得为了展示而滥加操作；不得聚合或改变事实粒度。
-7. processing 每步使用紧凑参数，arguments 的每个元素都必须是字符串：DATE_FORMAT/DATE_TRUNC arguments=["MONTH"]；CAST=["DATE"]；REPLACE=["旧值","新值"]；SUBSTRING=["1","8"]；CONCAT=["-"]；COALESCE=["UNKNOWN"]；ROUND=["2"]；CASE=["EQUALS","A","有效","其他"]；其余操作 arguments=[]。同一处理功能、同一依赖阶段应用于多个字段时，平台会把多条规则合并进一个 DAG 组件。二元计算或拼接通过 secondarySourceDatasetVersionId/secondarySourceFieldCode 引用已加入当前输出的事实或维度字段；不用次字段时两个值均为空字符串。不得返回 SQL、自由表达式或虚构表字段。
-8. classifications 必须逐一覆盖输入中的每张表；outputs 必须逐一覆盖所有被分类为 FACT 的表，不得为其他角色生成 output。DIM 与 DWD 是当前可恢复流程的第一阶段；DWD 必须保留维度键和分析属性，后续 DWS 只允许使用一个或多个已发布 DWD。ADS 仅为明确消费场景预留，不自动组合。
-9. 只能使用输入给出的精确 dataset version id 和字段 code。结果是待审阅的结构化设计方案，不代表自动发布；物理表、SQL、调度和重试由底层 DAG 开发引擎负责。
+先按以下平台定义完成判断，再设计字段和 DAG；不要输出内部分析过程：
+1. DIM 每行稳定代表一个人员、客户、商品、组织、区域、渠道等业务实体键，用于解释、筛选和分组事实；只包含函数依赖于同一实体键且具有相同粒度、生命周期/更新节奏及相容治理级别的稳定说明属性。不同实体、不同粒度、多值重复组、事件流水和交易度量必须拆分。一人一行的个人主表仍是 DIMENSION/MASTER；需要统计人数不能把它改判 FACT，也不能在 DIM 保存 person_count。
+2. DWD/FACT 每行代表一个原子事件、交易行或周期快照，包含事实/退化键、可靠 DIM 外键、事件日期、原子度量、状态和追踪字段；只合并同一业务过程、同一事实粒度和同一事件时间含义的信息，不得分组或聚合。若需要历史人数趋势，应使用“一人 × 快照日”的周期快照 DWD，再由 DWS 聚合。
+3. 对每张 ODS 判断 FACT、DIMENSION、MASTER 或 OTHER，按真实行粒度而非名称判断。FACT 内若还有可由稳定键安全去重且满足 DIM 同表边界的实体属性，可同时声明抽取 DIM；没有可靠实体不得臆造。
+4. 每张 FACT 必须且只能设计一张保持原子粒度的 DWD。逐一检查标识/维度及 _id/_key 字段；只关联语义同一、code 忽略大小写后完全同名、类型兼容、DIM 侧唯一的键。复合键必须完整放在同一 join.conditions，禁止仅按类型或近似名称猜测。
+5. DWD 保留事实全部字段；每个关联 DIM 至少输出一个关联键之外的说明属性（只要存在），DIM 侧关联键只用于 Join，不重复输出。
+6. generation 前强制应用卫生组件：所有 STRING 使用 TRIM；可空 IDENTIFIER/DIMENSION/ATTRIBUTE 使用 COALESCE_DEFAULT，固定值为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；DATE、DATETIME 和 STRING TIME 使用 CAST_DATE 去除时分秒，逻辑类型保持 DATE，字段 format 固定为 YYYYMMDD；TIME/MEASURE 空值保留 NULL。processing 不得再用 DATE_FORMAT、DATE_TRUNC 或 CAST_DATETIME 改变日期合同。
+7. 其他 processing 只在真实需要时使用 CAST、TRIM、UPPER、LOWER、REPLACE、SUBSTRING、CONCAT、COALESCE、ADD、SUBTRACT、MULTIPLY、DIVIDE、ROUND、ABS、FLOOR、CEIL、CASE。arguments 每项必须是字符串；二元处理只能引用已加入当前输出的事实或 DIM 字段；不得聚合或改变事实粒度。
+8. classifications 必须逐表覆盖；outputs 必须逐一覆盖所有 FACT 且不得覆盖其他角色。只能使用输入给出的精确 dataset version id 和字段 code。结果是待审阅结构化方案，不代表自动发布；不得返回 SQL、物理表、调度命令、Markdown 或额外解释。
 
 输出只能是 JSON Schema 指定的对象。`
 
@@ -1212,37 +1263,23 @@ func completeMandatoryDWDPolicyCleaning(
 
 func mandatoryDWDFieldCleaning(
 	field dwdPlanningField,
-	proposed []string,
+	_ []string,
 ) []string {
 	canonical := strings.ToUpper(strings.TrimSpace(field.CanonicalType))
 	role := strings.ToUpper(strings.TrimSpace(field.Role))
-	dimensionRelated := role == "IDENTIFIER" || role == "DIMENSION" ||
-		role == "ATTRIBUTE" || role == "TIME"
 	nullFillEligible := role == "IDENTIFIER" || role == "DIMENSION" ||
 		role == "ATTRIBUTE"
 	operations := make([]string, 0, 3)
-	if canonical == "STRING" && dimensionRelated {
+	// 文本卫生不应依赖 LLM 对字段角色的判断。所有 STRING 在进入 DIM/DWD
+	// 产物前都经过同一个 TRIM 组件；度量/时间只是不做哨兵空值填充。
+	if canonical == "STRING" {
 		operations = append(operations, "TRIM")
 	}
-	switch canonical {
-	case "DATE":
+	switch {
+	case dwdFieldRequiresDayNormalization(field):
+		// 数仓的统一日期合同只保留日粒度。即使源是 DATETIME，也在生成前
+		// 通过 CAST_DATE 去除时分秒，并由输出字段 format 声明 YYYYMMDD。
 		operations = append(operations, "CAST_DATE")
-	case "DATETIME":
-		operations = append(operations, "CAST_DATETIME")
-	case "STRING":
-		if role == "TIME" {
-			switch {
-			case containsString(proposed, "CAST_DATE"):
-				operations = append(operations, "CAST_DATE")
-			case containsString(proposed, "CAST_DATETIME"):
-				operations = append(operations, "CAST_DATETIME")
-			case strings.EqualFold(field.SemanticType, "DATE") ||
-				strings.Contains(strings.ToLower(field.Code), "date"):
-				operations = append(operations, "CAST_DATE")
-			default:
-				operations = append(operations, "CAST_DATETIME")
-			}
-		}
 	}
 	if field.Nullable && nullFillEligible &&
 		dwdDefaultNullValueSupported(canonical) {
@@ -1250,6 +1287,20 @@ func mandatoryDWDFieldCleaning(
 		operations = append(operations, "COALESCE_DEFAULT")
 	}
 	return operations
+}
+
+func dwdFieldRequiresDayNormalization(field dwdPlanningField) bool {
+	canonical := strings.ToUpper(strings.TrimSpace(field.CanonicalType))
+	if canonical == "DATE" || canonical == "DATETIME" {
+		return true
+	}
+	if canonical != "STRING" {
+		return false
+	}
+	role := strings.ToUpper(strings.TrimSpace(field.Role))
+	semantic := strings.ToUpper(strings.TrimSpace(field.SemanticType))
+	return role == "TIME" ||
+		containsString([]string{"DATE", "DATETIME", "TIME"}, semantic)
 }
 
 func dwdDefaultNullValueSupported(canonicalType string) bool {
@@ -1393,7 +1444,7 @@ func dwdModelingRepairInstruction(validationErr error, diagnostic string) string
 2. 只能复制输入中的精确 datasetVersionId 和字段 code；维度关联只允许 LEFT JOIN，且关联键类型兼容。
 3. 每个 FACT 的全部字段都必须出现在其 output.fields 中；逐一检查标识/维度及 _id/_key 字段，存在唯一同名且类型兼容的 DIMENSION/MASTER 键时必须 LEFT JOIN；复合业务键必须放入同一个 join.conditions 并完整覆盖。
 4. 每个已关联维度必须至少输出一个关联键之外的描述字段（只要该表存在），维度扩充字段必须来自该 output 已关联的 DIMENSION/MASTER；维度侧所有关联键不得出现在 output.fields。
-5. 非时间的字符串维度相关字段使用 TRIM；可空标识、维度和属性使用 COALESCE_DEFAULT，按类型固定为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；字符串时间先 TRIM 再 CAST_DATE/CAST_DATETIME；DATE/DATETIME 使用对应 CAST；度量和时间不得补默认值。
+5. 所有 STRING 使用 TRIM；可空标识、维度和属性使用 COALESCE_DEFAULT，按类型固定为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；DATE/DATETIME/STRING TIME 使用 CAST_DATE 并保持 YYYYMMDD 日粒度；度量和时间不得补哨兵值，processing 不得再用 DATE_FORMAT、DATE_TRUNC 或 CAST_DATETIME 改变日期合同。
 6. processing 可按实际需要使用全部已声明处理操作；每步只按原始提示规定填写紧凑 arguments，同类多字段分别声明规则即可，平台会合并组件。二元操作的次字段必须来自已关联输入。
 7. grainKeyOutputCodes 和 timeOutputCode 只能引用 output.fields 的 outputCode。
 8. 为控制响应长度，名称、说明和 rationale 保持简短，不复述输入，不返回 SQL、Markdown 或解释。`, reason)
@@ -1852,30 +1903,174 @@ func normalizeDWDClassifications(
 				}
 				classification.DimensionAttributeFieldCodes = filtered
 			}
-			if (classification.Role == "DIMENSION" ||
-				classification.Role == "MASTER") &&
-				len(classification.DimensionKeyFieldCodes) == 0 {
+			// FACT/OTHER 的维度抽取是可选产物，不能让模型返回的半份建议
+			// 破坏主表角色分类。FACT 只保留稳定实体键与非交易说明属性；
+			// 清洗后若键或属性任一为空，或抽取粒度等于事实粒度，则确定性
+			// 降级为“不从该 ODS 抽 DIM”。DIMENSION/MASTER 也在本地收窄
+			// 属性合同，避免模型反复把来源中已标记的度量带入 DIM。
+			switch classification.Role {
+			case "OTHER":
+				classification.DimensionKeyFieldCodes = []string{}
+				classification.DimensionAttributeFieldCodes = []string{}
+			case "FACT":
 				classification.DimensionKeyFieldCodes =
-					defaultDWDDimensionKeys(table)
-			}
-			if (classification.Role == "DIMENSION" ||
-				classification.Role == "MASTER") &&
-				len(classification.DimensionAttributeFieldCodes) == 0 {
-				for _, field := range table.Fields {
-					if !containsString(
-						classification.DimensionKeyFieldCodes, field.Code,
+					stableDWDEmbeddedDimensionKeys(
+						fields, classification.DimensionKeyFieldCodes,
+					)
+				classification.DimensionAttributeFieldCodes =
+					stableDWDEmbeddedDimensionAttributes(
+						fields,
+						classification.DimensionKeyFieldCodes,
+						classification.DimensionAttributeFieldCodes,
+					)
+				if len(classification.DimensionKeyFieldCodes) == 0 ||
+					len(classification.DimensionAttributeFieldCodes) == 0 ||
+					sameDWDStringSet(
+						classification.DimensionKeyFieldCodes,
+						table.OutputGrain.KeyFields,
 					) {
+					classification.DimensionKeyFieldCodes = []string{}
+					classification.DimensionAttributeFieldCodes = []string{}
+				}
+			case "DIMENSION", "MASTER":
+				if len(classification.DimensionKeyFieldCodes) == 0 {
+					classification.DimensionKeyFieldCodes =
+						defaultDWDDimensionKeys(table)
+				}
+				if len(classification.DimensionAttributeFieldCodes) == 0 {
+					for _, field := range table.Fields {
 						classification.DimensionAttributeFieldCodes = append(
 							classification.DimensionAttributeFieldCodes,
 							field.Code,
 						)
 					}
 				}
+				classification.DimensionAttributeFieldCodes =
+					stableDWDEntityDimensionAttributes(
+						fields,
+						classification.DimensionKeyFieldCodes,
+						classification.DimensionAttributeFieldCodes,
+					)
 			}
 			normalized = append(normalized, classification)
 		}
 	}
 	return normalized
+}
+
+func stableDWDEmbeddedDimensionKeys(
+	fields map[string]dwdPlanningField,
+	codes []string,
+) []string {
+	result := make([]string, 0, len(codes))
+	for _, code := range codes {
+		field, exists := fields[code]
+		normalizedCode := strings.ToLower(strings.TrimSpace(code))
+		if !exists ||
+			isDWDTemporalField(field) ||
+			(!strings.EqualFold(field.Role, "IDENTIFIER") &&
+				!strings.HasSuffix(normalizedCode, "_id") &&
+				!strings.HasSuffix(normalizedCode, "_key")) {
+			continue
+		}
+		result = append(result, field.Code)
+	}
+	return result
+}
+
+func stableDWDEmbeddedDimensionAttributes(
+	fields map[string]dwdPlanningField,
+	keyCodes []string,
+	attributeCodes []string,
+) []string {
+	keys := make(map[string]bool, len(keyCodes))
+	for _, code := range keyCodes {
+		keys[strings.ToLower(strings.TrimSpace(code))] = true
+	}
+	result := make([]string, 0, len(attributeCodes))
+	for _, code := range attributeCodes {
+		field, exists := fields[code]
+		if !exists || keys[strings.ToLower(strings.TrimSpace(code))] {
+			continue
+		}
+		role := strings.ToUpper(strings.TrimSpace(field.Role))
+		semantic := strings.ToUpper(strings.TrimSpace(field.SemanticType))
+		if role == "MEASURE" || role == "TIME" ||
+			semantic == "AMOUNT" || semantic == "QUANTITY" {
+			continue
+		}
+		result = append(result, field.Code)
+	}
+	return result
+}
+
+func stableDWDEntityDimensionAttributes(
+	fields map[string]dwdPlanningField,
+	keyCodes []string,
+	attributeCodes []string,
+) []string {
+	keys := make(map[string]bool, len(keyCodes))
+	for _, code := range keyCodes {
+		keys[strings.ToLower(strings.TrimSpace(code))] = true
+	}
+	result := make([]string, 0, len(attributeCodes))
+	for _, code := range attributeCodes {
+		field, exists := fields[code]
+		if !exists || keys[strings.ToLower(strings.TrimSpace(code))] ||
+			isDWDTransactionalMeasure(field) {
+			continue
+		}
+		result = append(result, field.Code)
+	}
+	return result
+}
+
+func isDWDPeriodicSnapshotFact(table dwdPlanningTable) bool {
+	fields := planningFieldsByCode(table)
+	hasTemporalGrain := false
+	for _, code := range table.OutputGrain.KeyFields {
+		field, exists := fields[code]
+		if exists && isDWDTemporalField(field) {
+			hasTemporalGrain = true
+			break
+		}
+	}
+	if !hasTemporalGrain {
+		return false
+	}
+	for _, field := range table.Fields {
+		if isDWDTransactionalMeasure(field) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDWDTemporalField(field dwdPlanningField) bool {
+	role := strings.ToUpper(strings.TrimSpace(field.Role))
+	semantic := strings.ToUpper(strings.TrimSpace(field.SemanticType))
+	canonical := strings.ToUpper(strings.TrimSpace(field.CanonicalType))
+	if role == "TIME" {
+		return true
+	}
+	switch semantic {
+	case "DATE", "DATETIME", "TIME", "TIMESTAMP":
+		return true
+	}
+	switch canonical {
+	case "DATE", "DATETIME", "TIME", "TIMESTAMP":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDWDTransactionalMeasure(field dwdPlanningField) bool {
+	role := strings.ToUpper(strings.TrimSpace(field.Role))
+	semantic := strings.ToUpper(strings.TrimSpace(field.SemanticType))
+	return role == "MEASURE" ||
+		semantic == "AMOUNT" ||
+		semantic == "QUANTITY"
 }
 
 func normalizeDWDClassificationFieldCodes(
@@ -2330,6 +2525,17 @@ func validateDWDLLMClassifications(
 			)
 		}
 		fields := planningFieldsByCode(table)
+		if (classification.Role == "DIMENSION" ||
+			classification.Role == "MASTER") &&
+			isDWDPeriodicSnapshotFact(table) {
+			return fmt.Errorf(
+				"%w: dataset %s is a periodic snapshot FACT; "+
+					"reclassify the primary role as FACT and declare only "+
+					"the stable embedded entity projection as a dimension",
+				errDWDModelingInvalid,
+				classification.DatasetVersionID,
+			)
+		}
 		dimensionKeyFieldCodes := append(
 			[]string(nil), classification.DimensionKeyFieldCodes...,
 		)
@@ -2379,13 +2585,19 @@ func validateDWDLLMClassifications(
 					classification.DatasetVersionID,
 				)
 			}
+			if isDWDTemporalField(field) {
+				return fmt.Errorf(
+					"%w: dimension key %s is temporal in dataset %s",
+					errDWDModelingInvalid, code,
+					classification.DatasetVersionID,
+				)
+			}
 			keys[key] = true
 		}
 		attributes := map[string]bool{}
 		for _, code := range dimensionAttributeFieldCodes {
 			field, fieldExists := fields[code]
 			key := strings.ToLower(code)
-			semantic := strings.ToUpper(strings.TrimSpace(field.SemanticType))
 			role := strings.ToUpper(strings.TrimSpace(field.Role))
 			if !fieldExists {
 				return fmt.Errorf(
@@ -2408,11 +2620,10 @@ func validateDWDLLMClassifications(
 					classification.DatasetVersionID,
 				)
 			}
-			if classification.Role == "FACT" &&
-				(role == "MEASURE" || semantic == "AMOUNT" ||
-					semantic == "QUANTITY" || role == "TIME") {
+			if isDWDTransactionalMeasure(field) ||
+				(classification.Role == "FACT" && role == "TIME") {
 				return fmt.Errorf(
-					"%w: FACT dimension attribute %s is transactional in dataset %s",
+					"%w: dimension attribute %s is transactional in dataset %s",
 					errDWDModelingInvalid, code,
 					classification.DatasetVersionID,
 				)
@@ -2832,8 +3043,8 @@ func validateDWDCleaning(field dwdPlanningField, cleaning []string) error {
 		(canonical == "STRING" && seen["COALESCE_UNKNOWN"]) ||
 		((canonical == "INTEGER" || canonical == "DECIMAL") &&
 			seen["COALESCE_NEGATIVE_ONE"])
-	if canonical == "STRING" && dimensionRelated && !seen["TRIM"] {
-		return errors.New("STRING dimension/time field requires TRIM")
+	if canonical == "STRING" && !seen["TRIM"] {
+		return errors.New("STRING field requires TRIM")
 	}
 	if nullFillEligible && field.Nullable &&
 		dwdDefaultNullValueSupported(canonical) && !hasTypedDefault {
@@ -2842,12 +3053,14 @@ func validateDWDCleaning(field dwdPlanningField, cleaning []string) error {
 	if canonical == "DATE" && !seen["CAST_DATE"] {
 		return errors.New("DATE field requires CAST_DATE")
 	}
-	if canonical == "DATETIME" && !seen["CAST_DATETIME"] {
-		return errors.New("DATETIME field requires CAST_DATETIME")
+	if canonical == "DATETIME" && !seen["CAST_DATE"] {
+		return errors.New("DATETIME field requires CAST_DATE day normalization")
 	}
-	if role == "TIME" && canonical == "STRING" &&
-		!seen["CAST_DATE"] && !seen["CAST_DATETIME"] {
-		return errors.New("STRING time field requires CAST_DATE or CAST_DATETIME")
+	if dwdFieldRequiresDayNormalization(field) && canonical == "STRING" &&
+		!seen["CAST_DATE"] {
+		return errors.New(
+			"STRING date/time field requires CAST_DATE day normalization",
+		)
 	}
 	hasNullFill := seen["COALESCE_DEFAULT"] ||
 		seen["COALESCE_UNKNOWN"] || seen["COALESCE_NEGATIVE_ONE"]
@@ -2869,9 +3082,11 @@ func validateDWDCleaning(field dwdPlanningField, cleaning []string) error {
 	if seen["COALESCE_DEFAULT"] && !dwdDefaultNullValueSupported(canonical) {
 		return errors.New("COALESCE_DEFAULT requires a supported canonical type")
 	}
-	if seen["CAST_DATE"] && canonical != "DATE" &&
-		!(canonical == "STRING" && role == "TIME") {
-		return errors.New("CAST_DATE requires DATE or STRING time input")
+	if seen["CAST_DATE"] && canonical != "DATE" && canonical != "DATETIME" &&
+		!(canonical == "STRING" && dwdFieldRequiresDayNormalization(field)) {
+		return errors.New(
+			"CAST_DATE requires DATE, DATETIME or STRING date/time input",
+		)
 	}
 	if seen["CAST_DATETIME"] && canonical != "DATETIME" &&
 		!(canonical == "STRING" && role == "TIME") {
@@ -2895,6 +3110,7 @@ func validateDWDProcessing(
 		return errors.New("processing steps exceed 32")
 	}
 	canonical := strings.ToUpper(strings.TrimSpace(field.CanonicalType))
+	requiresDayNormalization := dwdFieldRequiresDayNormalization(field)
 	for _, operation := range cleaning {
 		switch operation {
 		case "CAST_DATE":
@@ -2922,12 +3138,24 @@ func validateDWDProcessing(
 		}
 		switch operation {
 		case "DATE_FORMAT":
+			if requiresDayNormalization {
+				return fmt.Errorf(
+					"%s must not replace the mandatory YYYYMMDD day contract",
+					stepPath,
+				)
+			}
 			if !containsString([]string{"DAY", "MONTH", "QUARTER", "YEAR"}, step.Unit) ||
 				!containsString([]string{"DATE", "DATETIME"}, canonical) {
 				return fmt.Errorf("%s requires DATE/DATETIME and a supported unit", stepPath)
 			}
 			canonical = "STRING"
 		case "DATE_TRUNC":
+			if requiresDayNormalization {
+				return fmt.Errorf(
+					"%s must not change the mandatory day value",
+					stepPath,
+				)
+			}
 			if !containsString([]string{"DAY", "WEEK", "MONTH", "QUARTER", "YEAR"}, step.Unit) ||
 				!containsString([]string{"DATE", "DATETIME"}, canonical) {
 				return fmt.Errorf("%s requires DATE/DATETIME and a supported unit", stepPath)
@@ -2970,6 +3198,12 @@ func validateDWDProcessing(
 			}
 			canonical = "DECIMAL"
 		case "COALESCE":
+			if strings.EqualFold(field.Role, "TIME") ||
+				strings.EqualFold(field.Role, "MEASURE") {
+				return fmt.Errorf(
+					"%s must preserve TIME/MEASURE nulls", stepPath,
+				)
+			}
 			// 空字符串本身是合法的 STRING 回填值；其余类型在编译阶段执行
 			// 严格字面量解析，避免把自由文本隐式转换成 SQL。
 			if _, err := dwdTypedLiteral(
@@ -2996,6 +3230,11 @@ func validateDWDProcessing(
 			}
 			canonical = "STRING"
 		}
+	}
+	if requiresDayNormalization && canonical != "DATE" {
+		return errors.New(
+			"DATE/DATETIME/time field must retain the mandatory DATE day contract",
+		)
 	}
 	return nil
 }

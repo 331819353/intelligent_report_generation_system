@@ -75,11 +75,13 @@ func (r *PostgresRepository) ApplySelectedMetadata(ctx context.Context, source S
 				return err
 			}
 			// 显式导入/重新映射具有 FULL 语义：保留现有业务元数据值，
-			// 但清空完成 marker，使同结构的新文件版本也会重新读取样本并
-			// 完整执行 LLM 映射。后台增量刷新走 ApplyManagedMetadata，
-			// 不受这里的重置影响。
+			// 恢复此前停用的表资产，并清空完成 marker，使同结构的新文件
+			// 版本也会重新读取样本并完整执行 LLM 映射。后台增量刷新走
+			// ApplyManagedMetadata，不受这里的重置影响。
 			if _, err := tx.Exec(ctx, `UPDATE platform.metadata_tables
-				SET last_enriched_structure_hash='',last_enriched_table_structure_hash=''
+				SET management_status='ENABLED',
+				    last_enriched_structure_hash='',
+				    last_enriched_table_structure_hash=''
 				WHERE id=$1 AND tenant_id=$2 AND asset_status='ACTIVE'`,
 				id, source.TenantID,
 			); err != nil {

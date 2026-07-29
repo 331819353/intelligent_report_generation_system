@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +15,12 @@ import (
 	aiplatform "intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/platform/database"
+)
+
+const (
+	dwsModelingConcurrency        = 4
+	dwsSingleFactPlanningVersion  = "dws-single-fact-planning-v3"
+	dwsGroupedFactPlanningVersion = "dws-group-planning-v2"
 )
 
 type DWSAnalysisSelector interface {
@@ -86,10 +94,16 @@ func (selector *OrchestratedDWSAnalysisSelector) Select(
 		return fallback, "", nil
 	}
 	temperature := 0.0
+	promptVersion := dwsSingleFactPlanningVersion
+	systemPrompt := `你负责基于当前一张 DWD 的事实结构与同领域全部 DIM 语义上下文规划 DWS。DIM 只用于理解实体、字段、筛选与分组语义，DWS 物理依赖仍只能指向当前 DWD。请从 eligibleTemplateCodes 中选择最多三个与该事实粒度匹配的分析意图；不得选择跨事实比较，不得创造新编码，不得输出 SQL、DDL、物理表名或数据值。`
+	if len(facts) > 1 {
+		promptVersion = dwsGroupedFactPlanningVersion
+		systemPrompt = `你负责基于显式跨事实任务中的全部 DWD 事实结构与全部 DIM 语义上下文规划 DWS。必须先判断哪些事实可以在共同粒度安全聚合，再从 eligibleTemplateCodes 中选择最多三个分析意图。不得创造新编码，不得输出 SQL、DDL、物理表名或数据值；缺少共同粒度时返回空数组。`
+	}
 	result, err := selector.ai.Invoke(ctx, aiplatform.Invocation{
 		TenantID: tenantID, ActorID: actorID,
 		Purpose:       aiplatform.PurposeDatasetDAGGeneration,
-		PromptVersion: "dws-group-planning-v2",
+		PromptVersion: promptVersion,
 		ResourceType:  "DATASET_MODELING_SCOPE", ResourceID: scopeHash,
 		Request: aiplatform.ProviderRequest{
 			Messages: []aiplatform.Message{
@@ -97,7 +111,7 @@ func (selector *OrchestratedDWSAnalysisSelector) Select(
 					Role: aiplatform.MessageRoleSystem,
 					Parts: []aiplatform.ContentPart{{
 						Type: aiplatform.ContentTypeText,
-						Text: `你负责基于本主题下全部 DWD 事实结构与全部 DIM 语义上下文规划 DWS。必须先判断哪些事实可以在共同粒度安全聚合，再从 eligibleTemplateCodes 中选择最多三个分析意图。多事实场景不得退化为逐表一对一设计。不得创造新编码，不得输出 SQL、DDL、物理表名或数据值；缺少共同粒度时返回空数组。`,
+						Text: systemPrompt,
 					}},
 				},
 				{
@@ -209,7 +223,9 @@ type dwsScopeAsset struct {
 
 type dwsModelingScope struct {
 	GroupKey    string          `json:"groupKey"`
+	DomainID    string          `json:"domainId"`
 	DomainCode  string          `json:"domainCode"`
+	DomainName  string          `json:"domainName"`
 	SubjectCode string          `json:"subjectCode"`
 	SubjectName string          `json:"subjectName"`
 	DWD         []dwsScopeAsset `json:"dwd"`
@@ -414,6 +430,12 @@ func (worker *DWSModelingWorker) process(
 	claim dwsModelingClaim,
 	workerID string,
 ) error {
+	if uuid.Validate(claim.Scope.DomainID) != nil {
+		return worker.finish(
+			ctx, claim, workerID, "FAILED", "DOMAIN_CONTEXT_INVALID", nil,
+		)
+	}
+	ctx = database.WithAccessContext(ctx, claim.ActorID, claim.Scope.DomainID)
 	facts, dimensions, current, err := worker.loadPlanningScope(ctx, claim)
 	if err != nil {
 		return worker.finish(
@@ -989,6 +1011,29 @@ func (worker *DWSModelingWorker) finishCounts(
 }
 
 func RunDWSModelingWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	worker *DWSModelingWorker,
+	workerID string,
+	pollInterval time.Duration,
+) {
+	var group sync.WaitGroup
+	group.Add(dwsModelingConcurrency)
+	for index := 1; index <= dwsModelingConcurrency; index++ {
+		index := index
+		go func() {
+			defer group.Done()
+			runDWSModelingLoop(
+				ctx, logger, worker,
+				workerID+"-dws-"+strconv.Itoa(index),
+				pollInterval,
+			)
+		}()
+	}
+	group.Wait()
+}
+
+func runDWSModelingLoop(
 	ctx context.Context,
 	logger *slog.Logger,
 	worker *DWSModelingWorker,

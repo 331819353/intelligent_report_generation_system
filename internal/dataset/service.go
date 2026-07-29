@@ -47,6 +47,10 @@ type SemanticNamer interface {
 	Enrich(context.Context, string, string, string, Document, bool) (SemanticNamingResult, error)
 }
 
+type currentDomainResolver interface {
+	ResolveCurrentDomainName(context.Context, string) (string, error)
+}
+
 type SemanticNamingResult struct {
 	Document      Document
 	AIRequestID   string
@@ -107,6 +111,10 @@ func (s *Service) Create(ctx context.Context, tenantID, actorID string, input Cr
 	} else if input.Layer != prepared.Document.Dataset.Layer {
 		return Record{}, fmt.Errorf("%w: layer must match DSL dataset layer", ErrInvalidDocument)
 	}
+	prepared, err = s.bindCurrentDomain(ctx, tenantID, prepared)
+	if err != nil {
+		return Record{}, err
+	}
 	prepared, err = s.applySemanticNaming(
 		ctx, tenantID, actorID, input.Code, prepared, false,
 	)
@@ -163,6 +171,10 @@ func (s *Service) Update(ctx context.Context, tenantID, actorID, id string, inpu
 	}
 	if current.Code != prepared.Document.Dataset.Code {
 		return Record{}, fmt.Errorf("%w: dataset code cannot be changed through draft update", ErrInvalidDocument)
+	}
+	prepared, err = s.bindCurrentDomain(ctx, tenantID, prepared)
+	if err != nil {
+		return Record{}, err
 	}
 	// 首次发布后，层级成为数据集身份的一部分。跨层改造必须新建数据集并
 	// 显式建立血缘，否则稳定视图、上游合同和历史物化会在同一 ID 下冲突。
@@ -222,6 +234,13 @@ func (s *Service) applySemanticNaming(
 	if err != nil {
 		return Prepared{}, err
 	}
+	if strings.TrimSpace(result.Document.Dataset.Domain) !=
+		strings.TrimSpace(prepared.Document.Dataset.Domain) {
+		return Prepared{}, fmt.Errorf(
+			"%w: business domain is owned by the current user context",
+			ErrSemanticNamingInvalid,
+		)
+	}
 	raw, err := json.Marshal(result.Document)
 	if err != nil {
 		return Prepared{}, fmt.Errorf("%w: semantic document encoding failed", ErrSemanticNamingInvalid)
@@ -239,6 +258,33 @@ func (s *Service) applySemanticNaming(
 		Tags: append([]SemanticTagSuggestion(nil), result.Tags...),
 	}
 	return enriched, nil
+}
+
+func (s *Service) bindCurrentDomain(
+	ctx context.Context,
+	tenantID string,
+	prepared Prepared,
+) (Prepared, error) {
+	resolver, ok := s.store.(currentDomainResolver)
+	if !ok {
+		return prepared, nil
+	}
+	name, err := resolver.ResolveCurrentDomainName(ctx, tenantID)
+	if err != nil {
+		return Prepared{}, err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Prepared{}, fmt.Errorf(
+			"%w: current business domain is unavailable", ErrInvalidDocument,
+		)
+	}
+	prepared.Document.Dataset.Domain = name
+	raw, err := json.Marshal(prepared.Document)
+	if err != nil {
+		return Prepared{}, err
+	}
+	return Prepare(raw)
 }
 
 // Disable 把数据集切换为可恢复的目录级停用状态；草稿和发布快照均保持不变。

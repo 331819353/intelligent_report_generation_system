@@ -147,15 +147,7 @@ WITH tasks AS (
     stage_job.id::text,
     concat(
       COALESCE(
-        NULLIF(
-          btrim(
-            replace(
-              replace(workflow.domain_key,'领域:',''),
-              '领域：',''
-            )
-          ),
-          ''
-        ),
+        NULLIF(btrim(workflow.domain_key),''),
         dataset.name
       ),
       CASE stage_job.stage

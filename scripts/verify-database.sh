@@ -72,6 +72,8 @@ DECLARE
   tenant_b uuid;
   user_a uuid;
   user_b uuid;
+  domain_a uuid;
+  domain_b uuid;
   role_a uuid;
   visible_count integer;
   cross_tenant_rejected boolean := false;
@@ -181,12 +183,20 @@ BEGIN
   PERFORM set_config('app.tenant_id', tenant_a::text, true);
   INSERT INTO platform.users(tenant_id, email, display_name, password_hash)
   VALUES (tenant_a, 'a@example.test', 'User A', 'test-hash') RETURNING id INTO user_a;
+  INSERT INTO platform.business_domains(tenant_id,code,name,is_default,created_by)
+  VALUES (tenant_a,'verify','Verify Domain A',true,user_a) RETURNING id INTO domain_a;
+  INSERT INTO platform.domain_memberships(tenant_id,domain_id,user_id,assigned_by)
+  VALUES (tenant_a,domain_a,user_a,user_a);
   INSERT INTO platform.roles(tenant_id, code, name)
   VALUES (tenant_a, 'viewer', 'Viewer') RETURNING id INTO role_a;
 
   PERFORM set_config('app.tenant_id', tenant_b::text, true);
   INSERT INTO platform.users(tenant_id, email, display_name, password_hash)
   VALUES (tenant_b, 'b@example.test', 'User B', 'test-hash') RETURNING id INTO user_b;
+  INSERT INTO platform.business_domains(tenant_id,code,name,is_default,created_by)
+  VALUES (tenant_b,'verify','Verify Domain B',true,user_b) RETURNING id INTO domain_b;
+  INSERT INTO platform.domain_memberships(tenant_id,domain_id,user_id,assigned_by)
+  VALUES (tenant_b,domain_b,user_b,user_b);
 
   PERFORM set_config('app.tenant_id', tenant_a::text, true);
   SELECT count(*) INTO visible_count FROM platform.users;
@@ -195,8 +205,13 @@ BEGIN
   END IF;
 
   -- 构造最小指标草稿，验证数据集归属复合外键、草稿指针和指标表 RLS。
-  INSERT INTO platform.datasets(tenant_id,code,name,dataset_type,layer,created_by,updated_by)
-  VALUES (tenant_a,'verify_metric_dataset','Verify Metric Dataset','SINGLE_SOURCE','ODS',user_a,user_a)
+  INSERT INTO platform.datasets(
+    tenant_id,domain_id,code,name,dataset_type,layer,created_by,updated_by
+  )
+  VALUES (
+    tenant_a,domain_a,'verify_metric_dataset','Verify Metric Dataset',
+    'SINGLE_SOURCE','ODS',user_a,user_a
+  )
   RETURNING id INTO metric_dataset_a;
   INSERT INTO platform.dataset_versions(
     tenant_id,dataset_id,version_no,status,layer,dsl_version,dsl_json,schema_hash,
@@ -259,11 +274,11 @@ BEGIN
   asset_source_version_a := gen_random_uuid();
   asset_source_version_b := gen_random_uuid();
   INSERT INTO platform.data_sources(
-    id,tenant_id,code,name,source_type,status,config,secret_ref,
+    id,tenant_id,domain_id,code,name,source_type,status,config,secret_ref,
     current_draft_version_id,current_published_version_id,
     validation_status,publication_status,last_synced_at
   ) VALUES (
-    asset_source_a,tenant_a,'verify_asset_source','Verify Asset Source','MYSQL','DRAFT',
+    asset_source_a,tenant_a,domain_a,'verify_asset_source','Verify Asset Source','MYSQL','DRAFT',
     '{}','env://VERIFY_ASSET_SECRET',asset_source_version_a,NULL,
     'UNTESTED','UNPUBLISHED',NULL
   );

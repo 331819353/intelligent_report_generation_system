@@ -58,8 +58,9 @@ API 不能直接修改画像任务或维度成员；画像资源 GUC 也只能�
 输入不包含样本行、凭据、SQL、表达式字面值或完整业务数据；总大小最多 192 KiB。
 模型响应由 JSON Schema 把 `tagId` 枚举限制在现有受控 taxonomy 中，最多 256 条，
 服务端再验证置信度、说明长度、分类、重复项和确定性输出摘要。允许的自动建议分类
-仅为 `BUSINESS_DOMAIN`、`BUSINESS_ENTITY`、`TABLE_FUNCTION`、`USAGE_SCOPE`、
-`DATA_GRAIN` 和 `JOIN_ROLE`。
+仅为 `BUSINESS_ENTITY`、`TABLE_FUNCTION`、`USAGE_SCOPE`、
+`DATA_GRAIN` 和 `JOIN_ROLE`。业务领域不是标签，由当前用户所属领域和资产
+`domain_id` 唯一确定，历史 `领域:* / BUSINESS_DOMAIN` 标签不保留也不参与输入。
 
 管理员使用语义管理 API 把建议改为 `APPROVED` 或 `REJECTED`。批准绑定会触发
 migration 000060 的 outbox 逻辑，推进对应数据集版本事件；从此才由本 worker

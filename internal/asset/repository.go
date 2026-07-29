@@ -284,6 +284,16 @@ func (r *Repository) SetTableManagementStatus(ctx context.Context, tenantID, act
 		if tag.RowsAffected() != 1 {
 			return errors.New("table asset not found")
 		}
+		// 恢复表资产意味着重新纳入 ODS 使用范围。业务元数据已经完整时，
+		// 在同一事务内立即补建或恢复默认 ODS；尚未完整时保持安全空操作，
+		// 后续手工完善或全量映射仍会沿用同一提交边界。
+		if status == "ENABLED" && r.manualCompletionSink != nil {
+			if err := r.manualCompletionSink.EnsureMappedDatasetTx(
+				ctx, tx, tenantID, actorID, id,
+			); err != nil {
+				return err
+			}
+		}
 		return audit(ctx, tx, tenantID, actorID, "UPDATE_ASSET_STATUS", "TABLE_ASSET", id, map[string]string{"managementStatus": status})
 	})
 	if err != nil {
@@ -373,7 +383,13 @@ func normalizeTags(tags []string) []string {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(tags))
 	for _, tag := range tags {
-		tag = strings.TrimSpace(tag)
+		tag = strings.TrimSpace(strings.ReplaceAll(tag, "：", ":"))
+		// Business domain is an ownership boundary carried by domain_id, not
+		// free-form asset metadata. Rejecting it here prevents old clients from
+		// recreating the retired label after migration cleanup.
+		if strings.HasPrefix(tag, "领域:") {
+			continue
+		}
 		if tag != "" && !seen[tag] {
 			seen[tag] = true
 			out = append(out, tag)

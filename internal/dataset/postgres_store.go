@@ -48,6 +48,23 @@ type PostgresStore struct {
 	materializationDeletionSink MaterializationDeletionSink
 }
 
+// ResolveCurrentDomainName returns the active business-domain identity already
+// bound to the request transaction. Dataset DSL callers cannot supply a
+// different domain label.
+func (s *PostgresStore) ResolveCurrentDomainName(
+	ctx context.Context,
+	tenantID string,
+) (name string, err error) {
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT domain.name
+			FROM platform.business_domains AS domain
+			WHERE domain.id=platform.current_or_default_domain_id()
+			  AND domain.tenant_id=platform.current_tenant_id()
+			  AND domain.status='ACTIVE'`).Scan(&name)
+	})
+	return name, err
+}
+
 // NewPostgresStore 创建数据集 PostgreSQL 仓储。
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
@@ -104,6 +121,10 @@ type derivedWriteOptions struct {
 	// allowDraftDatasetDependencies is reserved for system-generated warehouse
 	// drafts. User saves and every publication path keep the default false value.
 	allowDraftDatasetDependencies bool
+	// domainID pins system-generated datasets to the same owning business
+	// domain as their source asset. User-created datasets use the transaction's
+	// current domain default.
+	domainID string
 }
 
 func createDatasetTxWithOptions(
@@ -117,10 +138,15 @@ func createDatasetTxWithOptions(
 ) (string, error) {
 	var datasetID, versionID string
 	if err := tx.QueryRow(ctx, `INSERT INTO platform.datasets(
-		tenant_id,code,name,description,dataset_type,layer,origin_table_id,created_by,updated_by
-	) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,'')::uuid,NULLIF($8,'')::uuid,NULLIF($8,'')::uuid) RETURNING id::text`,
+		tenant_id,code,name,description,dataset_type,layer,origin_table_id,
+		domain_id,created_by,updated_by
+	) VALUES(
+		$1,$2,$3,$4,$5,$6,NULLIF($7,'')::uuid,
+		COALESCE(NULLIF($9,'')::uuid,platform.current_or_default_domain_id()),
+		NULLIF($8,'')::uuid,NULLIF($8,'')::uuid
+	) RETURNING id::text`,
 		tenantID, input.Code, input.Name, input.Description, input.Type, prepared.Document.Dataset.Layer,
-		originTableID, actorID).Scan(&datasetID); err != nil {
+		originTableID, actorID, options.domainID).Scan(&datasetID); err != nil {
 		return "", err
 	}
 	if err := tx.QueryRow(ctx, `INSERT INTO platform.dataset_versions(

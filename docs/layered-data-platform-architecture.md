@@ -192,13 +192,13 @@ build input；因此重新上传文件或重新发布数据库源不会静默改
 JSON Schema，并以 tag ID 枚举约束输出；输入最多 192 KiB、taxonomy 最多 1024 个
 标签、单次最多 256 个建议。自动选择覆盖：
 
-- `BUSINESS_DOMAIN`：业务域；
 - `BUSINESS_ENTITY`：业务实体；
 - `TABLE_FUNCTION`：表的功能；
 - `USAGE_SCOPE`：使用范围；
 - `DATA_GRAIN`：一行代表什么粒度；
 - `JOIN_ROLE`：主键、外键、业务键、桥接键及关联方向；
 
+业务领域不属于 taxonomy，由用户当前所属领域和资产 `domain_id` 确定。
 `SENSITIVITY` 和 `FREEFORM` 仍可由人工治理，但模型不能自动创建或选择它们。
 关联定位依据字段描述、主外键/唯一性/可空性和 DAG Join 条件中的字段引用；条件中的
 业务字面值不会进入模型输入。

@@ -713,7 +713,7 @@ func loadTaxonomy(ctx context.Context, tx pgx.Tx) ([]TaxonomyTag, error) {
 		WHERE tag.status='ACTIVE'
 		  AND tag.governance='CONTROLLED'
 		  AND tag.category IN (
-		    'BUSINESS_DOMAIN','BUSINESS_ENTITY','TABLE_FUNCTION',
+		    'BUSINESS_ENTITY','TABLE_FUNCTION',
 		    'USAGE_SCOPE','DATA_GRAIN','JOIN_ROLE'
 		  )
 		ORDER BY tag.category,tag.code::text,tag.id

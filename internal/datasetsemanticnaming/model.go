@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	PromptVersion     = "dataset-semantic-naming-v3"
+	PromptVersion     = "dataset-semantic-naming-v4"
 	MaxFields         = 1024
 	MaxUpstreams      = 32
 	MaxUpstreamFields = 4096

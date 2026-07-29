@@ -34,7 +34,7 @@
 
 受控 `category`：
 
-`BUSINESS_DOMAIN`、`BUSINESS_ENTITY`、`TABLE_FUNCTION`、`USAGE_SCOPE`、
+`BUSINESS_ENTITY`、`TABLE_FUNCTION`、`USAGE_SCOPE`、
 `DATA_GRAIN`、`JOIN_ROLE`、`SENSITIVITY`、`FREEFORM`。
 
 `governance` 为 `CONTROLLED` 或 `FREEFORM`。普通写入状态为 `DRAFT` 或
@@ -45,10 +45,10 @@
 
 ```json
 {
-  "code": "home_ecosystem",
-  "name": "智家生态圈",
-  "description": "受治理的业务域名称",
-  "category": "BUSINESS_DOMAIN",
+  "code": "customer",
+  "name": "客户",
+  "description": "受治理的业务实体名称",
+  "category": "BUSINESS_ENTITY",
   "governance": "CONTROLLED",
   "status": "ACTIVE"
 }
@@ -399,7 +399,7 @@ worker 的治理边界如下：
 3. 不读取或发送业务样本行，不保存凭据、SQL、表达式字面值、Prompt 正文或模型
    正文；统一 AI 审计只记录摘要、状态和用量；
 4. 模型只能从当前租户 `ACTIVE + CONTROLLED` taxonomy 的
-   `BUSINESS_DOMAIN / BUSINESS_ENTITY / TABLE_FUNCTION / USAGE_SCOPE /
+   `BUSINESS_ENTITY / TABLE_FUNCTION / USAGE_SCOPE /
    DATA_GRAIN / JOIN_ROLE` 中选择。严格 JSON Schema 将 `tagId` 限定为现有 ID，
    服务端再次校验、去重和规范化；
 5. 结果最多创建 `origin=LLM,status=SUGGESTED` 的
