@@ -158,7 +158,13 @@ func (e *Executor) Execute(ctx context.Context, queryID string, document dataset
 		cancelRemote()
 		return result, firstErr
 	}
-	warnings, err := analyzeJoinRisks(queryContext, executionDocument, tables)
+	riskTables, err := filequery.ApplyPreAggregations(
+		queryContext, executionDocument, tables, parameters,
+	)
+	if err != nil {
+		return result, err
+	}
+	warnings, err := analyzeJoinRisks(queryContext, executionDocument, riskTables)
 	if err != nil {
 		return result, err
 	}

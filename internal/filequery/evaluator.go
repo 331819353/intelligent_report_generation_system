@@ -61,6 +61,60 @@ type outputRow struct {
 	values map[string]any
 }
 
+// ApplyPreAggregations 返回显式关联前分组后的节点行集。联邦风险探测复用
+// 与正式 Join 相同的求值边界，不能把 DIM 底层 ODS 的重复行误判为维度键重复。
+func ApplyPreAggregations(ctx context.Context, document dataset.Document, tables map[string]NodeTableData, parameters map[string]any) (map[string]NodeTableData, error) {
+	if len(document.PreAggregations) == 0 {
+		return tables, nil
+	}
+	rowsByNode := make(map[string][]sourceRow, len(document.Nodes))
+	for _, node := range document.Nodes {
+		table, exists := tables[node.ID]
+		if !exists {
+			return nil, fmt.Errorf("pre-aggregation node %s is unavailable", node.ID)
+		}
+		rows, err := loadPreparedNode(ctx, node, table, parameters)
+		if err != nil {
+			return nil, err
+		}
+		rowsByNode[node.ID] = rows
+	}
+	rowsByNode, err := preAggregateNodes(ctx, document, rowsByNode, parameters)
+	if err != nil {
+		return nil, err
+	}
+	outputColumns := make(map[string][]string, len(document.Nodes))
+	for _, node := range document.Nodes {
+		outputColumns[node.ID] = append([]string(nil), node.Projection...)
+	}
+	for _, item := range document.PreAggregations {
+		columns := make([]string, 0, len(item.GroupBy)+len(item.Metrics))
+		for _, group := range item.GroupBy {
+			columns = append(columns, group.Field)
+		}
+		for _, metric := range item.Metrics {
+			columns = append(columns, metric.Field)
+		}
+		outputColumns[item.NodeID] = columns
+	}
+	result := make(map[string]NodeTableData, len(rowsByNode))
+	for nodeID, rows := range rowsByNode {
+		columns := outputColumns[nodeID]
+		table := NodeTableData{
+			Columns: append([]string(nil), columns...),
+			Rows:    make([][]any, len(rows)),
+		}
+		for rowIndex, row := range rows {
+			table.Rows[rowIndex] = make([]any, len(columns))
+			for columnIndex, column := range columns {
+				table.Rows[rowIndex][columnIndex] = row[nodeID+"."+column]
+			}
+		}
+		result[nodeID] = table
+	}
+	return result, nil
+}
+
 // Evaluate 在内存上执行 DSL；所有循环都会响应超时和人工取消。
 func Evaluate(ctx context.Context, input Input) (datasource.QueryResult, error) {
 	if err := dataset.Validate(input.Document); err != nil {

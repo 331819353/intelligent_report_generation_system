@@ -128,6 +128,11 @@ func (c *compiler) compileJoinProbeSide(nodeID string, conditions []dataset.Join
 	if err := c.validateTable(ref); err != nil {
 		return "", nil, err
 	}
+	relation, relationArgs, err := c.nodeRelation(*node, ref)
+	if err != nil {
+		return "", nil, err
+	}
+	c.args = append(c.args, relationArgs...)
 	aliases := map[string]string{node.ID: node.Alias}
 	keys := make([]string, 0, len(conditions))
 	projections := make([]string, 0, len(conditions))
@@ -136,7 +141,11 @@ func (c *compiler) compileJoinProbeSide(nodeID string, conditions []dataset.Join
 		if left {
 			expression = condition.LeftExpression
 		}
-		if expression.Type != "FIELD_REF" || expression.NodeID != nodeID || !ref.Columns[expression.Field] {
+		fieldAvailable := ref.Columns[expression.Field]
+		if c.preAggregation(nodeID) != nil {
+			fieldAvailable = c.preAggregationProduces(nodeID, expression.Field)
+		}
+		if expression.Type != "FIELD_REF" || expression.NodeID != nodeID || !fieldAvailable {
 			return "", nil, errors.New("join probe expression is not a whitelisted field")
 		}
 		value, err := c.expression(expression, aliases)
@@ -147,25 +156,27 @@ func (c *compiler) compileJoinProbeSide(nodeID string, conditions []dataset.Join
 		keys = append(keys, key)
 		projections = append(projections, value+" AS "+c.quote(key))
 	}
-	where, err := c.compileJoinProbeFilters(*node, aliases)
+	where, err := c.compileJoinProbeFilters(*node, aliases, c.preAggregation(nodeID) == nil)
 	if err != nil {
 		return "", nil, err
 	}
-	sql := "SELECT " + strings.Join(projections, ", ") + " FROM " + c.tableName(ref) + " " + c.quote(node.Alias)
+	sql := "SELECT " + strings.Join(projections, ", ") + " FROM " + relation + " " + c.quote(node.Alias)
 	if len(where) > 0 {
 		sql += " WHERE " + strings.Join(where, " AND ")
 	}
 	return sql, keys, nil
 }
 
-func (c *compiler) compileJoinProbeFilters(node dataset.Node, aliases map[string]string) ([]string, error) {
+func (c *compiler) compileJoinProbeFilters(node dataset.Node, aliases map[string]string, includeSourceFilters bool) ([]string, error) {
 	where := make([]string, 0, len(node.SourceFilters)+len(c.input.Document.Filters))
-	for _, filter := range node.SourceFilters {
-		value, err := c.scanSourceFilter(node, filter, aliases)
-		if err != nil {
-			return nil, err
+	if includeSourceFilters {
+		for _, filter := range node.SourceFilters {
+			value, err := c.scanSourceFilter(node, filter, aliases)
+			if err != nil {
+				return nil, err
+			}
+			where = append(where, value)
 		}
-		where = append(where, value)
 	}
 	for _, filter := range c.input.Document.Filters {
 		if filter.Optional && hasNilParameter(filter.Expression, c.input.Parameters) {
