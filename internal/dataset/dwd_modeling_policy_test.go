@@ -7,9 +7,29 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	aiplatform "intelligent-report-generation-system/internal/ai"
 )
+
+type scriptedDIMValidationInvoker struct {
+	results []aiplatform.InvocationResult
+	calls   []aiplatform.Invocation
+}
+
+func (invoker *scriptedDIMValidationInvoker) Configured() bool { return true }
+
+func (invoker *scriptedDIMValidationInvoker) Invoke(
+	_ context.Context,
+	invocation aiplatform.Invocation,
+) (aiplatform.InvocationResult, error) {
+	invoker.calls = append(invoker.calls, invocation)
+	index := len(invoker.calls) - 1
+	if index >= len(invoker.results) {
+		return aiplatform.InvocationResult{}, errors.New("unexpected invocation")
+	}
+	return invoker.results[index], nil
+}
 
 func TestMandatoryDWDFieldCleaningAppliesDatasetHygiene(t *testing.T) {
 	tests := []struct {
@@ -689,7 +709,7 @@ func TestRetryableDWDClassificationFailureRequiresBatchInvalidOutput(
 	}
 }
 
-func TestCanonicalizeMergedDWDClassificationsKeepsAuthoritativeEntity(
+func TestCanonicalizeMergedDWDClassificationsPreservesAllDIMCandidates(
 	t *testing.T,
 ) {
 	input := dwdPlanningInput{
@@ -785,10 +805,13 @@ func TestCanonicalizeMergedDWDClassificationsKeepsAuthoritativeEntity(
 		t.Fatalf("authoritative merchant classification = %#v", got[0])
 	}
 	if got[1].Role != "FACT" ||
-		len(got[1].DimensionKeyFieldCodes) != 0 ||
-		len(got[1].DimensionAttributeFieldCodes) != 0 ||
-		!strings.Contains(got[1].Rationale, "唯一权威 DIM") {
-		t.Fatalf("redundant fact projection = %#v", got[1])
+		!reflect.DeepEqual(
+			got[1].DimensionKeyFieldCodes, []string{"MERCHANT_ID"},
+		) ||
+		!reflect.DeepEqual(
+			got[1].DimensionAttributeFieldCodes, []string{"ZONE_ID"},
+		) {
+		t.Fatalf("candidate fact projection was suppressed early = %#v", got[1])
 	}
 	if err := validateDWDLLMClassifications(
 		input, input.Domain, got,
@@ -913,5 +936,266 @@ func TestCanonicalizeMergedDWDClassificationsRestoresUniqueProjection(
 		input, input.Domain, got,
 	); err != nil {
 		t.Fatalf("restored unique projection is invalid: %v", err)
+	}
+}
+
+func TestCanonicalizeDIMNameValidationAddsExactDuplicateOmittedByLLM(
+	t *testing.T,
+) {
+	candidates := []dwdDIMValidationCandidate{
+		{
+			SourceDatasetVersionID: "version_a",
+			Name:                   "商户维度表",
+		},
+		{
+			SourceDatasetVersionID: "version_b",
+			Name:                   " 商户维度 ",
+		},
+		{
+			SourceDatasetVersionID: "version_c",
+			Name:                   "用户维度表",
+		},
+	}
+	plan, err := canonicalizeDIMNameValidation(
+		candidates, dwdDIMNameValidationPlan{Groups: []dwdDIMDuplicateNameGroup{}},
+	)
+	if err != nil {
+		t.Fatalf("canonicalize DIM names: %v", err)
+	}
+	if len(plan.Groups) != 1 ||
+		!reflect.DeepEqual(
+			plan.Groups[0].SourceDatasetVersionIDs,
+			[]string{"version_a", "version_b"},
+		) {
+		t.Fatalf("duplicate name groups = %#v", plan.Groups)
+	}
+}
+
+func TestValidateDimensionNamesRepairsInvalidOutputIncrementally(
+	t *testing.T,
+) {
+	invoker := &scriptedDIMValidationInvoker{
+		results: []aiplatform.InvocationResult{
+			{
+				RequestID: "request_1",
+				ProviderResult: aiplatform.ProviderResult{
+					Content: json.RawMessage(
+						`{"groups":[{"sourceDatasetVersionIds":["version_a"],"rationale":"不完整"}]}`,
+					),
+				},
+			},
+			{
+				RequestID: "request_2",
+				ProviderResult: aiplatform.ProviderResult{
+					Content: json.RawMessage(`{"groups":[]}`),
+				},
+			},
+		},
+	}
+	planner := NewOrchestratedDWDModelingPlanner(invoker, time.Second)
+	completion, err := planner.ValidateDimensionNames(
+		context.Background(),
+		dwdPlanningInput{
+			TenantID: "tenant", ActorID: "actor",
+			ResourceID: "resource", Domain: "企业经营",
+			Tables: []dwdPlanningTable{{
+				VersionID: "version_a",
+				Fields: []dwdPlanningField{{
+					Code: "merchant_id",
+				}},
+			}},
+		},
+		[]dwdDIMValidationCandidate{
+			{
+				SourceDatasetVersionID: "version_a",
+				DimensionDatasetID:     "dim_a", Name: "商户维度表",
+			},
+			{
+				SourceDatasetVersionID: "version_b",
+				DimensionDatasetID:     "dim_b", Name: "商户维度",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("validate DIM names: %v", err)
+	}
+	if completion.AIRequestID != "request_2" ||
+		len(completion.Plan.Groups) != 1 ||
+		len(invoker.calls) != 2 {
+		t.Fatalf(
+			"completion=%#v calls=%d", completion, len(invoker.calls),
+		)
+	}
+	secondMessages := invoker.calls[1].Request.Messages
+	if len(secondMessages) != 4 ||
+		secondMessages[2].Role != aiplatform.MessageRoleAssistant ||
+		!strings.Contains(
+			secondMessages[3].Parts[0].Text, "只修复 DIM 表名重复组",
+		) {
+		t.Fatalf("repair messages = %#v", secondMessages)
+	}
+}
+
+func TestBuildCanonicalDIMDocumentKeepsOneODSWithoutCrossSourceJoin(
+	t *testing.T,
+) {
+	visible := true
+	candidate := func(
+		sourceVersion, datasetID string,
+		fields []Field,
+	) dwdDIMValidationCandidate {
+		projection := make([]string, 0, len(fields))
+		for index := range fields {
+			fields[index].ID = "source_field_" + fields[index].Code
+			fields[index].Expression = Expression{
+				Type: "FIELD_REF", NodeID: "node_entity",
+				Field: fields[index].Code,
+			}
+			fields[index].Visible = &visible
+			projection = append(projection, fields[index].Code)
+		}
+		document := Document{
+			DSLVersion: DSLVersion,
+			Dataset: Descriptor{
+				Code: "dim_enterprise_merchant_" + datasetID,
+				Name: "商户维度表", Description: "商户信息",
+				Type: "SINGLE_SOURCE", Layer: LayerDIM,
+			},
+			Nodes: []Node{{
+				ID: "node_entity", Type: "DATASET",
+				DatasetVersionID: sourceVersion,
+				Alias:            "t1", Projection: projection,
+				SourceFilters: []SourceFilter{},
+			}},
+			Joins: []Join{}, Fields: fields,
+			Filters: []Filter{}, GroupBy: []string{},
+			Having: []Filter{}, Sorts: []Sort{},
+			Parameters: []Parameter{},
+			OutputGrain: OutputGrain{
+				Description: "每行一个商户",
+				KeyFields:   []string{"merchant_id"},
+			},
+			ExecutionPolicy: ExecutionPolicy{
+				Mode: "MATERIALIZED_PREFERRED", TimeoutMS: 30000,
+				PreviewLimit: 200, ResultLimit: 100000,
+				Materialization: MaterializationPolicy{
+					Enabled: true, RefreshMode: "ON_DEMAND",
+				},
+			},
+		}
+		planningFields := make([]dwdPlanningField, 0, len(fields))
+		for _, field := range fields {
+			planningFields = append(planningFields, dwdPlanningField{
+				Code: field.Code, Name: field.Name, Role: field.Role,
+				CanonicalType: field.CanonicalType,
+			})
+		}
+		return dwdDIMValidationCandidate{
+			SourceDatasetID:        "source_" + datasetID,
+			SourceDatasetVersionID: sourceVersion,
+			DimensionDatasetID:     datasetID,
+			Name:                   "商户维度表", Description: "商户信息",
+			OutputGrain: document.OutputGrain,
+			Fields:      planningFields, Document: document,
+		}
+	}
+	first := candidate("version_a", "dataset_a", []Field{
+		{
+			Code: "merchant_id", Name: "商户编码",
+			Role: "IDENTIFIER", CanonicalType: "STRING",
+		},
+		{
+			Code: "merchant_name", Name: "商户名称",
+			Role: "ATTRIBUTE", CanonicalType: "STRING",
+		},
+	})
+	second := candidate("version_b", "dataset_b", []Field{
+		{
+			Code: "merchant_id", Name: "商户编码",
+			Role: "IDENTIFIER", CanonicalType: "STRING",
+		},
+		{
+			Code: "zone_id", Name: "配送区域",
+			Role: "ATTRIBUTE", CanonicalType: "STRING",
+		},
+	})
+	plan := dwdDIMDuplicateValidationPlan{
+		Decision:                        "KEEP_ONE",
+		CanonicalSourceDatasetVersionID: "version_a",
+		FinalName:                       "商户维度表", FinalDescription: "统一商户主数据",
+		SeparateNames: []dwdDIMSeparateName{},
+		Rationale:     "同一商户业务键且字段互补",
+	}
+	document, inputHash, err := buildCanonicalDIMDocument(
+		[]dwdDIMValidationCandidate{first, second}, plan,
+	)
+	if err != nil {
+		t.Fatalf("build canonical DIM: %v", err)
+	}
+	if len(inputHash) != 64 || len(document.Nodes) != 1 ||
+		len(document.Joins) != 0 || len(document.Fields) != 2 {
+		t.Fatalf("canonical DIM shape = %#v", document)
+	}
+	if document.Nodes[0].DatasetVersionID != "version_a" {
+		t.Fatalf("canonical DIM source = %#v", document.Nodes)
+	}
+	if _, err := Prepare(mustMarshalDWDDocument(document)); err != nil {
+		t.Fatalf("canonical DIM does not pass DSL preparation: %#v", err)
+	}
+}
+
+func TestBuildCanonicalDIMDocumentRejectsIncompatibleEntityKey(t *testing.T) {
+	base := func(version, canonicalType string) dwdDIMValidationCandidate {
+		field := Field{
+			ID: "field_1", Code: "merchant_id", Name: "商户编码",
+			Role: "IDENTIFIER", CanonicalType: canonicalType,
+			Expression: Expression{
+				Type: "FIELD_REF", NodeID: "node_entity",
+				Field: "merchant_id",
+			},
+		}
+		document := Document{
+			DSLVersion: DSLVersion,
+			Dataset: Descriptor{
+				Code: "dim_merchant_" + version, Name: "商户维度表",
+				Type: "SINGLE_SOURCE", Layer: LayerDIM,
+			},
+			Nodes: []Node{{
+				ID: "node_entity", Type: "DATASET",
+				DatasetVersionID: version, Alias: "t1",
+				Projection:    []string{"merchant_id"},
+				SourceFilters: []SourceFilter{},
+			}},
+			Fields: []Field{field},
+			OutputGrain: OutputGrain{
+				Description: "每行一个商户",
+				KeyFields:   []string{"merchant_id"},
+			},
+		}
+		return dwdDIMValidationCandidate{
+			SourceDatasetVersionID: version,
+			DimensionDatasetID:     "dataset_" + version,
+			Name:                   "商户维度表", OutputGrain: document.OutputGrain,
+			Fields: []dwdPlanningField{{
+				Code: "merchant_id", CanonicalType: canonicalType,
+			}},
+			Document: document,
+		}
+	}
+	_, _, err := buildCanonicalDIMDocument(
+		[]dwdDIMValidationCandidate{
+			base("version_a", "STRING"),
+			base("version_b", "DATE"),
+		},
+		dwdDIMDuplicateValidationPlan{
+			Decision:                        "KEEP_ONE",
+			CanonicalSourceDatasetVersionID: "version_a",
+			FinalName:                       "商户维度表", FinalDescription: "统一商户",
+			SeparateNames: []dwdDIMSeparateName{},
+			Rationale:     "同名候选",
+		},
+	)
+	if !errors.Is(err, errDWDModelingInvalid) {
+		t.Fatalf("incompatible key error = %v", err)
 	}
 }

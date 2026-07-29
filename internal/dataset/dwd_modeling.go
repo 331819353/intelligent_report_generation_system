@@ -844,7 +844,24 @@ func (worker *DWDModelingWorker) runDWDDimensionTask(
 		classification.Classifications, completion.DimensionDesigns,
 		completion.DimensionFailures,
 	)
-	return completion, err
+	if err != nil {
+		return completion, err
+	}
+	validation, err := worker.validateGeneratedDIMStage(
+		ctx, claim, workerID, input, snapshotHash,
+		classification.Classifications, completion.DimensionDesigns,
+		completion.DimensionStage, planner,
+	)
+	if err != nil {
+		return completion, err
+	}
+	completion.DimensionStage = validation.Stage
+	completion.CheckpointCount += validation.CheckpointCount
+	completion.ReusedCheckpointCount += validation.ReusedCheckpointCount
+	if validation.AIRequestID != "" {
+		completion.AIRequestID = validation.AIRequestID
+	}
+	return completion, nil
 }
 
 func (worker *DWDModelingWorker) runDWDFactTask(
@@ -895,7 +912,7 @@ func (worker *DWDModelingWorker) runDWDFactTask(
 		input, dimensionStage, classification.Classifications,
 	)
 	factClassifications := expandedDWDClassifications(
-		classification.Classifications,
+		classification.Classifications, dimensionStage,
 	)
 	completion.FactPlanningInput = &factPlanningInput
 	completion.FactClassifications = factClassifications
@@ -1106,6 +1123,20 @@ func (worker *DWDModelingWorker) planWithCheckpoints(
 	if err != nil {
 		return dwdPlanningCompletion{}, err
 	}
+	validation, err := worker.validateGeneratedDIMStage(
+		ctx, claim, workerID, input, snapshotHash,
+		classification.Classifications, completion.DimensionDesigns,
+		dimensionStage, planner,
+	)
+	if err != nil {
+		return dwdPlanningCompletion{}, err
+	}
+	dimensionStage = validation.Stage
+	completion.CheckpointCount += validation.CheckpointCount
+	completion.ReusedCheckpointCount += validation.ReusedCheckpointCount
+	if validation.AIRequestID != "" {
+		completion.AIRequestID = validation.AIRequestID
+	}
 	completion.DimensionStage = dimensionStage
 	if len(dimensionStage.AssetsBySourceVersion) <
 		dwdDimensionProductCount(classification.Classifications) ||
@@ -1119,7 +1150,7 @@ func (worker *DWDModelingWorker) planWithCheckpoints(
 		input, dimensionStage, classification.Classifications,
 	)
 	factClassifications := expandedDWDClassifications(
-		classification.Classifications,
+		classification.Classifications, dimensionStage,
 	)
 	completion.FactPlanningInput = &factPlanningInput
 	completion.FactClassifications = factClassifications
@@ -1267,63 +1298,6 @@ func (worker *DWDModelingWorker) prepareDIMStage(
 			}
 			if currentSnapshotHash != expectedSnapshotHash {
 				return errDWDModelingSubjectChange
-			}
-			tableByVersion := make(
-				map[string]dwdPlanningTable, len(input.Tables),
-			)
-			for _, table := range input.Tables {
-				tableByVersion[table.VersionID] = table
-			}
-			authoritativeEntitySignatures := map[string]bool{}
-			for _, classification := range classifications {
-				if !classificationProducesDimension(classification) {
-					continue
-				}
-				table, exists := tableByVersion[classification.DatasetVersionID]
-				if !exists {
-					return errDWDModelingSubjectChange
-				}
-				if signature, strong := dwdDimensionEntitySignature(
-					table, classification.DimensionKeyFieldCodes,
-				); strong {
-					authoritativeEntitySignatures[signature] = true
-				}
-			}
-			for _, classification := range classifications {
-				if classificationProducesDimension(classification) {
-					continue
-				}
-				source, exists := assetsByVersion[classification.DatasetVersionID]
-				if !exists {
-					return errDWDModelingSubjectChange
-				}
-				dimDatasetID, mapped, retired, err :=
-					worker.retireSuppressedGeneratedDIMDraftTx(
-						ctx, tx, claim, source,
-						authoritativeEntitySignatures,
-					)
-				if err != nil {
-					return err
-				}
-				if !mapped {
-					continue
-				}
-				if retired {
-					stage.Retired++
-					stage.Items = append(stage.Items, dwdModelingResultItem{
-						Layer: string(LayerDIM), SourceDatasetID: source.DatasetID,
-						SourceVersionID: source.VersionID, DatasetID: dimDatasetID,
-						Action: "RETIRED", Reason: "REDUNDANT_ENTITY_MERGED",
-					})
-					continue
-				}
-				stage.Skipped++
-				stage.Items = append(stage.Items, dwdModelingResultItem{
-					Layer: string(LayerDIM), SourceDatasetID: source.DatasetID,
-					SourceVersionID: source.VersionID, DatasetID: dimDatasetID,
-					Action: "SKIPPED",
-					Reason: "REDUNDANT_DIM_REQUIRES_REVIEW",
-				})
 			}
 			for _, failure := range failures {
 				source, exists := assetsByVersion[failure.SourceDatasetVersionID]
@@ -1575,6 +1549,7 @@ func planningInputWithModeledDimensions(
 	for _, classification := range classifications {
 		classificationByVersion[classification.DatasetVersionID] = classification
 	}
+	seenDimensionDatasets := map[string]bool{}
 	for _, table := range input.Tables {
 		classification := classificationByVersion[table.VersionID]
 		dimensionIdentity := classificationDimensionIdentity(classification)
@@ -1603,11 +1578,17 @@ func planningInputWithModeledDimensions(
 		if classification.Role == "FACT" &&
 			classificationProducesDimension(classification) {
 			result.Tables = append(result.Tables, table)
+			if seenDimensionDatasets[asset.DatasetID] {
+				continue
+			}
 			dimensionTable.DatasetID = asset.DatasetID
 			dimensionTable.VersionID = dimensionIdentity
 			dimensionTable.SourceCode = asset.Code
 			dimensionTable.SourceTableName = ""
+		} else if seenDimensionDatasets[asset.DatasetID] {
+			continue
 		}
+		seenDimensionDatasets[asset.DatasetID] = true
 		result.Tables = append(result.Tables, dimensionTable)
 	}
 	return result
@@ -1615,19 +1596,39 @@ func planningInputWithModeledDimensions(
 
 func expandedDWDClassifications(
 	classifications []dwdLLMClassification,
+	stages ...dwdDimensionStageResult,
 ) []dwdLLMClassification {
 	result := make(
 		[]dwdLLMClassification, 0, len(classifications)*2,
 	)
+	assets := map[string]dwdODSAsset{}
+	if len(stages) > 0 {
+		assets = stages[0].AssetsBySourceVersion
+	}
+	seenDimensionDatasets := map[string]bool{}
 	for _, classification := range classifications {
-		result = append(result, classification)
-		if classification.Role != "FACT" ||
-			!classificationProducesDimension(classification) {
+		if classification.Role == "FACT" {
+			result = append(result, classification)
+		}
+		if !classificationProducesDimension(classification) {
+			if classification.Role != "FACT" {
+				result = append(result, classification)
+			}
 			continue
 		}
 		dimension := classification
-		dimension.DatasetVersionID =
-			classificationDimensionIdentity(classification)
+		dimensionIdentity := classificationDimensionIdentity(classification)
+		if asset, exists := assets[dimensionIdentity]; exists {
+			if seenDimensionDatasets[asset.DatasetID] {
+				continue
+			}
+			seenDimensionDatasets[asset.DatasetID] = true
+		}
+		if classification.Role != "FACT" {
+			result = append(result, dimension)
+			continue
+		}
+		dimension.DatasetVersionID = dimensionIdentity
 		dimension.Role = "DIMENSION"
 		dimension.Rationale =
 			"从同一事实 ODS 的稳定实体键和说明属性抽取并标准化"
@@ -1724,12 +1725,14 @@ func (worker *DWDModelingWorker) resolveModeledDIMStage(
 			}
 			sameDomain := []dwdODSAsset{}
 			assetsByVersion := map[string]dwdODSAsset{}
+			assetsByDataset := map[string]dwdODSAsset{}
 			for _, asset := range assets {
 				if asset.DomainID != input.DomainID {
 					continue
 				}
 				sameDomain = append(sameDomain, asset)
 				assetsByVersion[asset.VersionID] = asset
+				assetsByDataset[asset.DatasetID] = asset
 			}
 			currentSnapshotHash, err := dwdPlanningSnapshotHash(sameDomain)
 			if err != nil {
@@ -1755,8 +1758,31 @@ func (worker *DWDModelingWorker) resolveModeledDIMStage(
 				if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 					return err
 				}
+				modeledSource := source
+				if errors.Is(err, pgx.ErrNoRows) {
+					var canonicalSourceDatasetID string
+					suppressionErr := tx.QueryRow(ctx, `SELECT
+							canonical_source_dataset_id::text,
+							canonical_dim_dataset_id::text
+						FROM platform.dim_modeling_suppressions
+						WHERE suppressed_source_dataset_id=$1::uuid`,
+						source.DatasetID,
+					).Scan(&canonicalSourceDatasetID, &dimDatasetID)
+					if suppressionErr != nil &&
+						!errors.Is(suppressionErr, pgx.ErrNoRows) {
+						return suppressionErr
+					}
+					if suppressionErr == nil {
+						canonicalSource, exists :=
+							assetsByDataset[canonicalSourceDatasetID]
+						if !exists {
+							return errDWDModelingSubjectChange
+						}
+						modeledSource = canonicalSource
+					}
+				}
 				modeled, published, err := loadCompatibleModeledDIMAssetTx(
-					ctx, tx, dimDatasetID, source,
+					ctx, tx, dimDatasetID, modeledSource,
 				)
 				if err != nil {
 					return err
@@ -2782,6 +2808,48 @@ func loadDWDPlanningHistoryTx(
 		return dwdPlanningHistory{}, err
 	}
 	rows.Close()
+	suppressedSourcesByDIM := map[string][]publishedDIMSource{}
+	rows, err = tx.Query(ctx, `SELECT
+			suppression.canonical_dim_dataset_id::text,
+			suppression.suppressed_source_dataset_id::text,
+			source.current_published_version_id::text
+		FROM platform.dim_modeling_suppressions AS suppression
+		JOIN platform.dim_modeling_outputs AS canonical_output
+		  ON canonical_output.dim_dataset_id=
+		       suppression.canonical_dim_dataset_id
+		 AND canonical_output.source_dataset_id=
+		       suppression.canonical_source_dataset_id
+		 AND canonical_output.tenant_id=suppression.tenant_id
+		JOIN platform.datasets AS source
+		  ON source.id=suppression.suppressed_source_dataset_id
+		 AND source.tenant_id=suppression.tenant_id
+		 AND source.deleted_at IS NULL
+		WHERE canonical_output.domain_key=$1
+		  AND source.current_published_version_id IS NOT NULL`,
+		domain,
+	)
+	if err != nil {
+		return dwdPlanningHistory{}, err
+	}
+	for rows.Next() {
+		var dimDatasetID string
+		var source publishedDIMSource
+		if err := rows.Scan(
+			&dimDatasetID, &source.SourceDatasetID,
+			&source.SourceVersionID,
+		); err != nil {
+			rows.Close()
+			return dwdPlanningHistory{}, err
+		}
+		suppressedSourcesByDIM[dimDatasetID] = append(
+			suppressedSourcesByDIM[dimDatasetID], source,
+		)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return dwdPlanningHistory{}, err
+	}
+	rows.Close()
 
 	var classificationRaw json.RawMessage
 	err = tx.QueryRow(ctx, `SELECT checkpoint.payload_json
@@ -2854,6 +2922,11 @@ func loadDWDPlanningHistoryTx(
 					source.SourceVersionID
 				item.DimensionVersionBySourceDataset[source.SourceDatasetID] =
 					node.DatasetVersionID
+				for _, suppressed := range suppressedSourcesByDIM[datasetID] {
+					item.SourceVersionByDataset[suppressed.SourceDatasetID] =
+						suppressed.SourceVersionID
+					item.DimensionVersionBySourceDataset[suppressed.SourceDatasetID] = node.DatasetVersionID
+				}
 				continue
 			}
 			if datasetID != "" {
@@ -4568,7 +4641,7 @@ func (worker *DWDModelingWorker) retireSuppressedGeneratedDIMDraftTx(
 			  'sourceDatasetId',$4::text,
 			  'sourceDatasetVersionId',$5::text,
 			  'dwdModelingJobId',$6::text,
-			  'reason','REDUNDANT_ENTITY_MERGED'
+			  'reason','DUPLICATE_DIM_KEEP_ONE'
 			))`,
 		claim.TenantID, claim.ActorID, datasetID, source.DatasetID,
 		source.VersionID, claim.ID,
@@ -4626,12 +4699,17 @@ func (worker *DWDModelingWorker) upsertGeneratedDIMDraftTx(
 			claim.TenantID, source.DatasetID, datasetID, domain, claim.ID,
 			inputHash, prepared.DSLHash,
 		)
+		if err == nil {
+			_, err = tx.Exec(ctx, `DELETE FROM platform.dim_modeling_suppressions
+				WHERE suppressed_source_dataset_id=$1::uuid`,
+				source.DatasetID,
+			)
+		}
 		return datasetID, "CREATED", err
 	}
 	if err != nil {
 		return "", "", err
 	}
-
 	var aggregateVersion, draftRecordVersion int64
 	var draftVersionID, currentSchemaHash, layer string
 	err = tx.QueryRow(ctx, `SELECT dataset.version,dataset.current_draft_version_id::text,

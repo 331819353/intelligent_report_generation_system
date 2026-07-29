@@ -695,6 +695,14 @@ func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string
 		// 自动生成 DIM/DWD 使用来源数据集 ID 派生稳定编码。软删除后必须同时释放
 		// 自动建模所有权映射和活动编码，否则下一次 ODS 发布触发重建时会被已删除
 		// 记录的全局唯一编码阻断，任务只能无意义重试。
+		if _, err := tx.Exec(ctx, `DELETE FROM platform.dim_modeling_suppressions
+			WHERE tenant_id=$1 AND (
+			  suppressed_source_dataset_id::text=$2
+			  OR canonical_source_dataset_id::text=$2
+			  OR canonical_dim_dataset_id::text=$2
+			)`, tenantID, id); err != nil {
+			return err
+		}
 		if layer == string(LayerDWD) {
 			if _, err := tx.Exec(ctx, `DELETE FROM platform.dwd_modeling_outputs
 				WHERE tenant_id=$1 AND dwd_dataset_id::text=$2`, tenantID, id); err != nil {

@@ -17,7 +17,7 @@ import (
 const (
 	dwdModelingPromptVersion        = "warehouse-modeling-v10"
 	dwdClassificationPromptVersion  = "warehouse-classification-v5"
-	dwdClassificationMergeVersion   = "warehouse-classification-merge-v1"
+	dwdClassificationMergeVersion   = "warehouse-classification-merge-v2"
 	dwdLegacyClassificationVersion  = "warehouse-classification-v4"
 	dwdDimensionDesignPromptVersion = "warehouse-dimension-design-v3"
 	dwdFactDesignPromptVersion      = "warehouse-fact-design-v4"
@@ -50,6 +50,16 @@ type resumableDWDModelingPlanner interface {
 		[]dwdLLMClassification,
 		string,
 	) (dwdDimensionDesignCompletion, error)
+	ValidateDimensionNames(
+		context.Context,
+		dwdPlanningInput,
+		[]dwdDIMValidationCandidate,
+	) (dwdDIMNameValidationCompletion, error)
+	ValidateDimensionDuplicates(
+		context.Context,
+		dwdPlanningInput,
+		dwdDIMDuplicateValidationInput,
+	) (dwdDIMDuplicateValidationCompletion, error)
 	DesignFact(
 		context.Context,
 		dwdPlanningInput,
@@ -269,16 +279,15 @@ dimensionKeyFieldCodes 只能放实体稳定业务键，日期、时间和快照
 
 classifications 必须逐一覆盖输入表且不得重复，只能复制精确 datasetVersionId 和字段 code。role 必须与 rationale 中描述的行粒度和 DIM/DWD 结论一致。rationale 应简短说明“行粒度 + 判定依据 + 是否可抽取 DIM”，不要设计关联、SQL 或物理表。输出只能是 JSON Schema 指定的对象。`
 
-const dwdClassificationMergeSystemPrompt = `你是企业数据仓库 ODS 分类合并审校器。输入包含同一业务领域的全部 ODS 元数据，以及每张 ODS 已单独通过结构校验的候选分类。你的输出是后续 DIM/DWD 生成唯一使用的最终领域分类，不包含业务数据行。
+const dwdClassificationMergeSystemPrompt = `你是企业数据仓库 ODS 分类合并审校器。输入包含同一业务领域的全部 ODS 元数据，以及每张 ODS 已单独通过结构校验的候选分类。你的输出用于生成全部候选 DIM/DWD 草稿；DIM 的跨表唯一性会在全部草稿落地后由独立校验器处理。本阶段不包含业务数据行。
 
 先跨表比较真实行粒度、实体业务键、属性完整度、生命周期和来源权威性，再输出最终 classifications：
 1. 必须逐一覆盖全部输入 ODS，不增不减，只能复制精确 datasetVersionId 和字段 code；role 只能是 FACT、DIMENSION、MASTER、OTHER。
-2. 相同业务实体只能保留一个 DIM 产物。优先选择独立 MASTER，其次选择字段更完整、粒度更稳定的独立 DIMENSION，最后才考虑从 FACT 抽取的内嵌实体投影。
-3. 如果独立 MASTER/DIMENSION 已经覆盖某个实体键，FACT 中相同实体键的 dimensionKeyFieldCodes 和 dimensionAttributeFieldCodes 必须清空，但 FACT 主角色保持不变。
-4. 多个独立 MASTER/DIMENSION 若表示同一实体，只保留一个权威来源；冗余来源改为 OTHER 并清空两个维度字段数组。只有实体、复合键、生命周期或治理边界确实不同，才允许分别保留。
-5. 不得仅按表名合并：必须核对忽略大小写后相同的业务键、兼容类型、实体含义和属性函数依赖。通用 id/code 无法证明同一实体时不得强行合并。
+2. 不得因为别的 ODS 可能生成同名或同实体 DIM，就把已经独立验证通过的 MASTER/DIMENSION 改为 OTHER，也不得清空 FACT 中已经验证通过的实体维度投影。所有候选 DIM 必须先生成并保存为未发布草稿。
+3. 可在 rationale 中简短标注可能的同名/同实体候选，供落地后的 DIM 校验器复核；本阶段不决定保留或合并哪个 DIM。
+4. 不得仅按表名推断实体相同。周期快照或事实投影即使带有相同实体键，也必须保持原 FACT 角色。
 6. 周期快照、日度聚合、订单行、支付、配送事件等事实仍保持 FACT；交易度量、事件时间、订单号和事实行号不得进入 DIM 投影。
-7. rationale 必须简短明确地说明最终行粒度、是否生成 DIM，以及被合并或抑制时采用的权威来源。不要返回 SQL、DDL、物理表、Markdown 或额外解释。
+7. rationale 必须简短明确地说明最终行粒度与是否生成候选 DIM。不要返回 SQL、DDL、物理表、Markdown 或额外解释。
 
 输出只能是 JSON Schema 指定的完整对象。`
 
@@ -543,7 +552,7 @@ func (planner *OrchestratedDWDModelingPlanner) MergeClassifications(
 		}
 		invocation.Request.Messages = dwdStageRepairMessages(
 			baseMessages, result, invokeErr,
-			`请只修复最终领域分类合并结果：逐一覆盖全部输入 ODS；相同实体只保留一个权威 DIM。独立 MASTER/DIMENSION 已覆盖实体键时，清空 FACT 的维度投影；冗余独立实体来源改为 OTHER 并清空维度字段。不得把周期快照或交易明细改成 DIM，不得按通用 id/code 猜测同一实体。只能使用输入中的精确版本和字段 code，rationale 简短说明最终粒度、唯一 DIM 和权威来源。`,
+			`请只修复最终领域分类合并结果：逐一覆盖全部输入 ODS；保留每张 ODS 已独立验证通过的角色和候选维度字段，不得因可能重名而提前改为 OTHER 或清空维度投影。DIM 将先全部落地为未发布草稿，再由独立校验器按表名和字段裁决。不得把周期快照或交易明细改成 DIM，不得新增字段。只能使用输入中的精确版本和字段 code，rationale 简短说明最终粒度。`,
 			attempt == dwdStageInvocationAttempts-2,
 		)
 	}
@@ -2099,14 +2108,11 @@ func normalizeDWDClassifications(
 }
 
 // canonicalizeMergedDWDClassifications is the deterministic safety net behind
-// the cross-table merge LLM. Exact, non-generic entity-key sets with compatible
-// types identify the same governed entity. One authoritative source owns the
-// DIM; FACT tables retain their primary role without emitting a duplicate
-// projection, while redundant standalone entity sources become OTHER.
-//
-// authorityCandidates is normally the independently validated per-ODS output.
-// It prevents a merge response from preferring a sparse FACT projection over an
-// already identified MASTER/DIMENSION source.
+// the cross-table review LLM. Each independently validated per-ODS dimension
+// contract is preserved here so every candidate DIM can first be persisted as
+// an unpublished draft. Cross-table uniqueness is intentionally handled only
+// by the post-generation DIM validator, which can inspect the actual generated
+// names and fields before deciding whether two drafts are mergeable.
 func canonicalizeMergedDWDClassifications(
 	input dwdPlanningInput,
 	classifications []dwdLLMClassification,
@@ -2122,129 +2128,25 @@ func canonicalizeMergedDWDClassifications(
 			authority = candidate
 		}
 	}
-	tableByVersion := make(
-		map[string]dwdPlanningTable, len(input.Tables),
-	)
-	tableOrder := make(map[string]int, len(input.Tables))
-	for index, table := range input.Tables {
-		tableByVersion[table.VersionID] = table
-		tableOrder[table.VersionID] = index
-	}
 	authorityByVersion := make(
 		map[string]dwdLLMClassification, len(authority),
 	)
 	for _, classification := range authority {
 		authorityByVersion[classification.DatasetVersionID] = classification
 	}
-	type entityCandidate struct {
-		classification dwdLLMClassification
-		signature      string
-		priority       int
-		attributeCount int
-		order          int
-	}
-	groups := map[string][]entityCandidate{}
-	for _, classification := range authority {
-		if !classificationProducesDimension(classification) {
-			continue
-		}
-		table, exists := tableByVersion[classification.DatasetVersionID]
-		if !exists {
-			continue
-		}
-		signature, strong := dwdDimensionEntitySignature(
-			table, classification.DimensionKeyFieldCodes,
-		)
-		if !strong {
-			continue
-		}
-		groups[signature] = append(groups[signature], entityCandidate{
-			classification: classification,
-			signature:      signature,
-			priority:       dwdDimensionAuthorityPriority(classification.Role),
-			attributeCount: len(classification.DimensionAttributeFieldCodes),
-			order:          tableOrder[classification.DatasetVersionID],
-		})
-	}
-	canonicalByVersion := map[string]string{}
-	for _, candidates := range groups {
-		if len(candidates) < 2 {
-			continue
-		}
-		sort.SliceStable(candidates, func(left, right int) bool {
-			if candidates[left].priority != candidates[right].priority {
-				return candidates[left].priority > candidates[right].priority
-			}
-			if candidates[left].attributeCount !=
-				candidates[right].attributeCount {
-				return candidates[left].attributeCount >
-					candidates[right].attributeCount
-			}
-			return candidates[left].order < candidates[right].order
-		})
-		canonical := candidates[0].classification.DatasetVersionID
-		for _, candidate := range candidates {
-			canonicalByVersion[candidate.classification.DatasetVersionID] =
-				canonical
-		}
-	}
 	result := make([]dwdLLMClassification, 0, len(normalized))
 	for _, classification := range normalized {
-		canonicalVersionID, grouped :=
-			canonicalByVersion[classification.DatasetVersionID]
-		if !grouped {
-			// A domain merge may adjudicate duplicates, but it must not erase a
-			// unique per-ODS contract that already passed the stricter local
-			// role and field validation.
-			if authoritative, exists :=
-				authorityByVersion[classification.DatasetVersionID]; exists {
-				classification.Role = authoritative.Role
-				classification.DimensionKeyFieldCodes = append(
-					[]string(nil),
-					authoritative.DimensionKeyFieldCodes...,
-				)
-				classification.DimensionAttributeFieldCodes = append(
-					[]string(nil),
-					authoritative.DimensionAttributeFieldCodes...,
-				)
-			}
-			result = append(result, classification)
-			continue
+		if authoritative, exists :=
+			authorityByVersion[classification.DatasetVersionID]; exists {
+			classification.Role = authoritative.Role
+			classification.DimensionKeyFieldCodes = append(
+				[]string(nil), authoritative.DimensionKeyFieldCodes...,
+			)
+			classification.DimensionAttributeFieldCodes = append(
+				[]string(nil),
+				authoritative.DimensionAttributeFieldCodes...,
+			)
 		}
-		authoritative := authorityByVersion[classification.DatasetVersionID]
-		if classification.DatasetVersionID == canonicalVersionID {
-			// Restore the locally proven authoritative dimension contract when
-			// the merge model accidentally demotes or clears it.
-			if classificationProducesDimension(authoritative) {
-				classification.Role = authoritative.Role
-				classification.DimensionKeyFieldCodes = append(
-					[]string(nil),
-					authoritative.DimensionKeyFieldCodes...,
-				)
-				classification.DimensionAttributeFieldCodes = append(
-					[]string(nil),
-					authoritative.DimensionAttributeFieldCodes...,
-				)
-			}
-			result = append(result, classification)
-			continue
-		}
-		canonicalName := canonicalVersionID
-		if table, exists := tableByVersion[canonicalVersionID]; exists &&
-			strings.TrimSpace(table.Name) != "" {
-			canonicalName = strings.TrimSpace(table.Name)
-		}
-		if authoritative.Role == "FACT" {
-			classification.Role = "FACT"
-		} else {
-			classification.Role = "OTHER"
-		}
-		classification.DimensionKeyFieldCodes = []string{}
-		classification.DimensionAttributeFieldCodes = []string{}
-		classification.Rationale = strings.TrimSpace(
-			classification.Rationale,
-		) + "；相同实体由“" + canonicalName +
-			"”作为唯一权威 DIM，本表不重复生成维度"
 		result = append(result, classification)
 	}
 	return normalizeDWDClassifications(input, result)
