@@ -68,9 +68,9 @@ type ResolvedPlan struct {
 	Tables           map[string]querycompiler.TableRef
 	Nodes            map[string]ResolvedNode
 	Materializations []ResolvedMaterialization
-	// ExecutionDocument is present only when a logical ODS DATASET node was
-	// expanded back to its immutable source TABLE for an intermediate preview.
-	// The caller-facing dataset document and output schema remain unchanged.
+	// ExecutionDocument is present only when logical ODS/DIM DATASET nodes were
+	// expanded back to their exact published source contracts for a bounded
+	// intermediate preview. The caller-facing document and schema are unchanged.
 	ExecutionDocument *dataset.Document
 	// SourceSampleLimit makes the source executor truncate every source node
 	// before applying the downstream DAG. ODS-backed previews use exactly 100

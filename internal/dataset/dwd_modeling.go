@@ -4003,12 +4003,14 @@ func buildLLMDesignedDWDDocument(
 	document := Document{
 		DSLVersion: DSLVersion,
 		Dataset: Descriptor{
-			Code:                    datasetCode,
-			Name:                    businessName,
-			Description:             strings.TrimSpace(output.Description),
-			Domain:                  modeledDomainName(domain),
-			Subject:                 modeledTopic(fact.Tags),
-			Type:                    "SINGLE_SOURCE",
+			Code:        datasetCode,
+			Name:        businessName,
+			Description: strings.TrimSpace(output.Description),
+			Domain:      modeledDomainName(domain),
+			Subject:     modeledTopic(fact.Tags),
+			Type: dwdModeledDatasetType(
+				fact, assetsByVersion, output,
+			),
 			Layer:                   LayerDWD,
 			SemanticContractVersion: "1.0",
 		},
@@ -4058,6 +4060,32 @@ func buildLLMDesignedDWDDocument(
 	}
 	sum := sha256.Sum256(raw)
 	return document, hex.EncodeToString(sum[:]), nil
+}
+
+func dwdModeledDatasetType(
+	fact dwdODSAsset,
+	assetsByVersion map[string]dwdODSAsset,
+	output dwdLLMOutput,
+) string {
+	sourceIDs := map[string]bool{}
+	addAsset := func(asset dwdODSAsset) {
+		for _, node := range asset.Document.Nodes {
+			if node.DataSourceID != "" {
+				sourceIDs[node.DataSourceID] = true
+			}
+		}
+	}
+	addAsset(fact)
+	for _, join := range output.Joins {
+		asset, exists := assetsByVersion[join.DimensionDatasetVersionID]
+		if exists {
+			addAsset(asset)
+		}
+	}
+	if len(sourceIDs) > 1 {
+		return "CROSS_SOURCE"
+	}
+	return "SINGLE_SOURCE"
 }
 
 func sortedDWDProjection(fields map[string]bool) []string {

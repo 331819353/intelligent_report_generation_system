@@ -102,6 +102,7 @@ type Document struct {
 	layerInferred  bool
 	layerSpecified bool
 	inferredLayer  Layer
+	sourcePreview  bool
 }
 
 // MarshalJSON 保留历史 DSL 的“未声明 layer”形状。旧调用方常见的

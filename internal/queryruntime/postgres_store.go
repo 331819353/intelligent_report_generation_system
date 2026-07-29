@@ -256,17 +256,25 @@ func resolveDatasetNodesTx(
 		expanded, virtualCount, typeOverrides, err :=
 			expandVirtualODSNodesTx(ctx, tx, document)
 		if err != nil {
-			return ResolvedPlan{}, err
+			return ResolvedPlan{}, fmt.Errorf(
+				"expand bounded ODS/DIM preview inputs: %w", err,
+			)
 		}
 		if virtualCount > 0 {
 			if virtualCount != len(document.Nodes) {
-				// A preview must not silently join mutable source samples to a
-				// governed warehouse relation.
-				return ResolvedPlan{}, dataset.ErrPreviewUnsupported
+				// Preview executes either a complete bounded source-plane DAG
+				// (ODS plus unfolded one-source DIM) or a complete warehouse
+				// DAG. It must never mix the two trust planes.
+				return ResolvedPlan{}, fmt.Errorf(
+					"%w: preview input trust planes are mixed",
+					dataset.ErrPreviewUnsupported,
+				)
 			}
 			result, err := resolveTx(ctx, tx, tenantID, expanded)
 			if err != nil {
-				return ResolvedPlan{}, err
+				return ResolvedPlan{}, fmt.Errorf(
+					"resolve unfolded source preview: %w", err,
+				)
 			}
 			for nodeID, overrides := range typeOverrides {
 				table := result.Tables[nodeID]

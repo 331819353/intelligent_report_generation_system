@@ -602,6 +602,15 @@ func Validate(document Document) error {
 	return nil
 }
 
+// AsSourcePreviewExecution marks a private, server-derived execution document.
+// It permits a DWD source preview to use pre-join grouping only for replaying
+// the DISTINCT contract of a published DIM. The marker is not serialized, so
+// client-authored and persisted DWD documents cannot use this exception.
+func AsSourcePreviewExecution(document Document) Document {
+	document.sourcePreview = true
+	return document
+}
+
 // Valid 把层级枚举校验集中在领域类型上，避免 API、仓储和后续物化器各自维护字符串集合。
 func (layer Layer) Valid() bool {
 	return layer == LayerODS || layer == LayerDIM || layer == LayerDWD ||
@@ -673,7 +682,7 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 				}
 			}
 		}
-		if hasGrouping || hasAggregation {
+		if (hasGrouping || hasAggregation) && !document.sourcePreview {
 			add("dataset.layer", "DWD 必须保持明细粒度，不允许业务分组或聚合")
 		}
 	case LayerDWS:

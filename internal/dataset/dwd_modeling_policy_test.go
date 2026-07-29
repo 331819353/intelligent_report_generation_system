@@ -104,6 +104,33 @@ func TestMandatoryDWDFieldCleaningAppliesDatasetHygiene(t *testing.T) {
 	}
 }
 
+func TestDWDModeledDatasetTypeUsesPhysicalSourceIdentities(t *testing.T) {
+	fact := dwdODSAsset{
+		VersionID: "fact_version",
+		Document: Document{Nodes: []Node{{
+			ID: "fact", Type: "TABLE", DataSourceID: "oracle_source",
+		}}},
+	}
+	dim := dwdODSAsset{
+		VersionID: "dim_source_version",
+		Document: Document{Nodes: []Node{{
+			ID: "dimension", Type: "TABLE", DataSourceID: "mysql_source",
+		}}},
+	}
+	output := dwdLLMOutput{
+		Joins: []dwdLLMJoin{{
+			DimensionDatasetVersionID: dim.VersionID,
+		}},
+	}
+	if got := dwdModeledDatasetType(
+		fact,
+		map[string]dwdODSAsset{dim.VersionID: dim},
+		output,
+	); got != "CROSS_SOURCE" {
+		t.Fatalf("dataset type = %q, want CROSS_SOURCE", got)
+	}
+}
+
 func TestValidateDWDCleaningRequiresFullStringAndDayPolicy(t *testing.T) {
 	stringMeasure := dwdPlanningField{
 		Code: "raw_value", Role: "MEASURE", CanonicalType: "STRING",
