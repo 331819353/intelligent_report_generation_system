@@ -69,6 +69,28 @@ type dwdModelingClaim struct {
 	CheckpointVersion       int
 }
 
+type dwdClassificationBatchError struct {
+	FailureCount int
+	Cause        error
+}
+
+func (err *dwdClassificationBatchError) Error() string {
+	if err == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf(
+		"%d 张 ODS 分类输出在纠错后仍无效：%v",
+		err.FailureCount, err.Cause,
+	)
+}
+
+func (err *dwdClassificationBatchError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.Cause
+}
+
 type dwdODSAsset struct {
 	DatasetID        string
 	VersionID        string
@@ -106,6 +128,7 @@ type dwdDimensionStageResult struct {
 	Items                      []dwdModelingResultItem
 	Created                    int
 	Updated                    int
+	Retired                    int
 	Skipped                    int
 	FailedDesignCount          int
 	FailedSourceDatasets       []string
@@ -165,6 +188,12 @@ func (worker *DWDModelingWorker) ProcessNext(
 		return true, worker.finishWithoutOutput(ctx, *claim, workerID, "SKIPPED", "SUBJECT_CHANGED", err.Error())
 	case errors.Is(err, errDWDModelingTagsNotReady):
 		return true, worker.retryOrSkip(ctx, *claim, workerID, "CLASSIFICATION_NOT_READY", err.Error())
+	case retryableDWDClassificationFailure(err) &&
+		claim.Attempt < claim.MaxAttempts:
+		return true, worker.retryOrSkip(
+			ctx, *claim, workerID, "AI_INVALID_OUTPUT",
+			dwdModelingFailureMessage(err),
+		)
 	default:
 		if terminal, errorCode := terminalDWDModelingFailure(err); terminal {
 			finishErr := worker.finishWithoutOutput(
@@ -183,11 +212,30 @@ func (worker *DWDModelingWorker) ProcessNext(
 
 func dwdModelingFailureMessage(err error) string {
 	detail := strings.TrimSpace(dwdValidationDetail(err))
+	diagnostic := strings.TrimSpace(
+		aiplatform.InvalidOutputDiagnostic(err),
+	)
+	if diagnostic != "" && !strings.Contains(detail, diagnostic) {
+		detail += "；结构诊断：" + diagnostic
+	}
 	if detail == "" {
 		return "DIM/DWD 分层建模遇到不可重试错误"
 	}
 	message := "DIM/DWD 建模校验失败：" + detail
 	return boundedDWDJobMessage(message)
+}
+
+func retryableDWDClassificationFailure(err error) bool {
+	var batchError *dwdClassificationBatchError
+	if !errors.As(err, &batchError) || batchError == nil {
+		return false
+	}
+	if errors.Is(batchError.Cause, errDWDModelingInvalid) {
+		return true
+	}
+	var providerError *aiplatform.ProviderError
+	return errors.As(batchError.Cause, &providerError) &&
+		providerError.Code == aiplatform.ErrorCodeInvalidOutput
 }
 
 func boundedDWDJobMessage(message string) string {
@@ -520,6 +568,21 @@ func (worker *DWDModelingWorker) runDWDClassificationTask(
 	); err != nil {
 		return dwdPlanningCompletion{}, err
 	}
+	merged, mergeReused, err := worker.loadDWDClassificationMergeCheckpoint(
+		ctx, claim, workerID, input, snapshotHash,
+	)
+	if err != nil {
+		return dwdPlanningCompletion{}, err
+	}
+	if mergeReused {
+		completion.AIRequestID = merged.AIRequestID
+		completion.Plan.Classifications = append(
+			[]dwdLLMClassification(nil), merged.Classifications...,
+		)
+		completion.CheckpointCount = 1
+		completion.ReusedCheckpointCount = 1
+		return completion, nil
+	}
 	type classificationResult struct {
 		completion dwdClassificationCompletion
 		reused     bool
@@ -574,13 +637,29 @@ func (worker *DWDModelingWorker) runDWDClassificationTask(
 			return classificationResult{completion: classification}, nil
 		})
 	}
-	results, err := runBoundedDWDTasks(
+	results, taskErrors := runBoundedDWDTasksCollect(
 		ctx, dwdFactDesignConcurrency, tasks,
 	)
-	if err != nil {
-		return dwdPlanningCompletion{}, err
+	failureCount := 0
+	var firstFailure error
+	for _, taskErr := range taskErrors {
+		if taskErr == nil {
+			continue
+		}
+		if errors.Is(taskErr, context.Canceled) ||
+			errors.Is(taskErr, errDWDModelingLeaseLost) ||
+			errors.Is(taskErr, errDWDModelingSubjectChange) {
+			return dwdPlanningCompletion{}, taskErr
+		}
+		failureCount++
+		if firstFailure == nil {
+			firstFailure = taskErr
+		}
 	}
-	for _, result := range results {
+	for index, result := range results {
+		if taskErrors[index] != nil {
+			continue
+		}
 		if result.completion.Domain != input.Domain ||
 			len(result.completion.Classifications) != 1 {
 			return dwdPlanningCompletion{}, errDWDModelingInvalid
@@ -595,11 +674,60 @@ func (worker *DWDModelingWorker) runDWDClassificationTask(
 			result.completion.Classifications[0],
 		)
 	}
+	if firstFailure != nil {
+		return dwdPlanningCompletion{}, &dwdClassificationBatchError{
+			FailureCount: failureCount,
+			Cause:        firstFailure,
+		}
+	}
 	if err := validateDWDLLMClassifications(
 		input, completion.Plan.Domain, completion.Plan.Classifications,
 	); err != nil {
 		return dwdPlanningCompletion{}, err
 	}
+	merged, err = planner.MergeClassifications(
+		ctx, input, completion.Plan.Classifications,
+	)
+	if err != nil {
+		return dwdPlanningCompletion{}, &dwdClassificationBatchError{
+			FailureCount: 1,
+			Cause:        err,
+		}
+	}
+	merged.Classifications = canonicalizeMergedDWDClassifications(
+		input, merged.Classifications, completion.Plan.Classifications,
+	)
+	if merged.Domain != input.Domain {
+		return dwdPlanningCompletion{}, &dwdClassificationBatchError{
+			FailureCount: 1,
+			Cause:        errDWDModelingInvalid,
+		}
+	}
+	if err := validateDWDLLMClassifications(
+		input, merged.Domain, merged.Classifications,
+	); err != nil {
+		return dwdPlanningCompletion{}, &dwdClassificationBatchError{
+			FailureCount: 1,
+			Cause:        err,
+		}
+	}
+	if err := worker.saveDWDModelingCheckpoint(
+		ctx, claim, workerID, input, snapshotHash,
+		"CLASSIFICATION_MERGE", claim.TriggerDatasetVersionID,
+		dwdClassificationMergeVersion, merged.AIRequestID,
+		dwdLLMClassificationPlan{
+			Domain:          merged.Domain,
+			Classifications: merged.Classifications,
+		},
+	); err != nil {
+		return dwdPlanningCompletion{}, err
+	}
+	completion.CheckpointCount++
+	completion.AIRequestID = merged.AIRequestID
+	completion.Plan.Domain = merged.Domain
+	completion.Plan.Classifications = append(
+		[]dwdLLMClassification(nil), merged.Classifications...,
+	)
 	return completion, nil
 }
 
@@ -1139,6 +1267,63 @@ func (worker *DWDModelingWorker) prepareDIMStage(
 			}
 			if currentSnapshotHash != expectedSnapshotHash {
 				return errDWDModelingSubjectChange
+			}
+			tableByVersion := make(
+				map[string]dwdPlanningTable, len(input.Tables),
+			)
+			for _, table := range input.Tables {
+				tableByVersion[table.VersionID] = table
+			}
+			authoritativeEntitySignatures := map[string]bool{}
+			for _, classification := range classifications {
+				if !classificationProducesDimension(classification) {
+					continue
+				}
+				table, exists := tableByVersion[classification.DatasetVersionID]
+				if !exists {
+					return errDWDModelingSubjectChange
+				}
+				if signature, strong := dwdDimensionEntitySignature(
+					table, classification.DimensionKeyFieldCodes,
+				); strong {
+					authoritativeEntitySignatures[signature] = true
+				}
+			}
+			for _, classification := range classifications {
+				if classificationProducesDimension(classification) {
+					continue
+				}
+				source, exists := assetsByVersion[classification.DatasetVersionID]
+				if !exists {
+					return errDWDModelingSubjectChange
+				}
+				dimDatasetID, mapped, retired, err :=
+					worker.retireSuppressedGeneratedDIMDraftTx(
+						ctx, tx, claim, source,
+						authoritativeEntitySignatures,
+					)
+				if err != nil {
+					return err
+				}
+				if !mapped {
+					continue
+				}
+				if retired {
+					stage.Retired++
+					stage.Items = append(stage.Items, dwdModelingResultItem{
+						Layer: string(LayerDIM), SourceDatasetID: source.DatasetID,
+						SourceVersionID: source.VersionID, DatasetID: dimDatasetID,
+						Action: "RETIRED", Reason: "REDUNDANT_ENTITY_MERGED",
+					})
+					continue
+				}
+				stage.Skipped++
+				stage.Items = append(stage.Items, dwdModelingResultItem{
+					Layer: string(LayerDIM), SourceDatasetID: source.DatasetID,
+					SourceVersionID: source.VersionID, DatasetID: dimDatasetID,
+					Action: "SKIPPED",
+					Reason: "REDUNDANT_DIM_REQUIRES_REVIEW",
+				})
 			}
 			for _, failure := range failures {
 				source, exists := assetsByVersion[failure.SourceDatasetVersionID]
@@ -1698,7 +1883,8 @@ func (worker *DWDModelingWorker) finishDWDStageCompletion(
 				ctx, tx, claim, workerID, completion.AIRequestID,
 				input.Domain, roleByVersion[claim.TriggerDatasetVersionID],
 				status, completion.DimensionStage.Created,
-				completion.DimensionStage.Updated,
+				completion.DimensionStage.Updated+
+					completion.DimensionStage.Retired,
 				completion.DimensionStage.Skipped,
 				completion.CheckpointCount,
 				completion.ReusedCheckpointCount,
@@ -1761,6 +1947,45 @@ func runBoundedDWDTasks[T any](
 	return results, firstErr
 }
 
+func runBoundedDWDTasksCollect[T any](
+	ctx context.Context,
+	limit int,
+	tasks []func(context.Context) (T, error),
+) ([]T, []error) {
+	results := make([]T, len(tasks))
+	taskErrors := make([]error, len(tasks))
+	if len(tasks) == 0 {
+		return results, taskErrors
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > len(tasks) {
+		limit = len(tasks)
+	}
+	indices := make(chan int, len(tasks))
+	for index := range tasks {
+		indices <- index
+	}
+	close(indices)
+	var group sync.WaitGroup
+	group.Add(limit)
+	for range limit {
+		go func() {
+			defer group.Done()
+			for index := range indices {
+				if ctx.Err() != nil {
+					taskErrors[index] = ctx.Err()
+					continue
+				}
+				results[index], taskErrors[index] = tasks[index](ctx)
+			}
+		}()
+	}
+	group.Wait()
+	return results, taskErrors
+}
+
 func (worker *DWDModelingWorker) renewDWDClaim(
 	ctx context.Context,
 	claim dwdModelingClaim,
@@ -1796,6 +2021,12 @@ func (worker *DWDModelingWorker) loadDWDClassificationCheckpoint(
 	input dwdPlanningInput,
 	snapshotHash string,
 ) (dwdClassificationCompletion, bool, error) {
+	merged, found, err := worker.loadDWDClassificationMergeCheckpoint(
+		ctx, claim, workerID, input, snapshotHash,
+	)
+	if err != nil || found {
+		return merged, found, err
+	}
 	completion := dwdClassificationCompletion{Domain: input.Domain}
 	foundCount := 0
 	for _, table := range input.Tables {
@@ -1832,12 +2063,146 @@ func (worker *DWDModelingWorker) loadDWDClassificationCheckpoint(
 	if foundCount != len(input.Tables) {
 		return dwdClassificationCompletion{}, false, nil
 	}
+	completion.Classifications = canonicalizeMergedDWDClassifications(
+		input, completion.Classifications,
+	)
 	if err := validateDWDLLMClassifications(
 		input, completion.Domain, completion.Classifications,
 	); err != nil {
 		return dwdClassificationCompletion{}, false, err
 	}
 	return completion, true, nil
+}
+
+func (worker *DWDModelingWorker) loadDWDClassificationMergeCheckpoint(
+	ctx context.Context,
+	claim dwdModelingClaim,
+	workerID string,
+	input dwdPlanningInput,
+	snapshotHash string,
+) (dwdClassificationCompletion, bool, error) {
+	var completion dwdClassificationCompletion
+	found := false
+	err := database.WithTenantTx(
+		ctx, worker.store.pool, claim.TenantID, func(tx pgx.Tx) error {
+			if err := validateDWDClaimTx(ctx, tx, claim, workerID); err != nil {
+				return err
+			}
+			var raw json.RawMessage
+			var payloadHash string
+			err := tx.QueryRow(ctx, `SELECT payload_json,payload_hash,
+					ai_request_id::text
+				FROM platform.dwd_modeling_checkpoints
+				WHERE job_id=$1::uuid
+				  AND checkpoint_kind='CLASSIFICATION_MERGE'
+				  AND subject_dataset_version_id=$2::uuid
+				  AND snapshot_hash=$3 AND prompt_version=$4`,
+				claim.ID, claim.TriggerDatasetVersionID, snapshotHash,
+				dwdClassificationMergeVersion,
+			).Scan(&raw, &payloadHash, &completion.AIRequestID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			found = true
+			if err := validateDWDCheckpointHash(raw, payloadHash); err != nil {
+				return err
+			}
+			payload, err := decodeDWDClassificationPlan(raw)
+			if err != nil {
+				return err
+			}
+			authority, complete, err :=
+				loadDWDClassificationAuthorityTx(
+					ctx, tx, claim, input, snapshotHash,
+				)
+			if err != nil {
+				return err
+			}
+			if complete {
+				payload.Classifications =
+					canonicalizeMergedDWDClassifications(
+						input, payload.Classifications, authority,
+					)
+			} else {
+				payload.Classifications =
+					canonicalizeMergedDWDClassifications(
+						input, payload.Classifications,
+					)
+			}
+			if err := validateDWDLLMClassifications(
+				input, payload.Domain, payload.Classifications,
+			); err != nil {
+				return err
+			}
+			completion.Domain = payload.Domain
+			completion.Classifications = payload.Classifications
+			return nil
+		},
+	)
+	return completion, found, err
+}
+
+func loadDWDClassificationAuthorityTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	claim dwdModelingClaim,
+	input dwdPlanningInput,
+	snapshotHash string,
+) ([]dwdLLMClassification, bool, error) {
+	authority := make(
+		[]dwdLLMClassification, 0, len(input.Tables),
+	)
+	for _, table := range input.Tables {
+		var raw json.RawMessage
+		var payloadHash string
+		err := tx.QueryRow(ctx, `SELECT payload_json,payload_hash
+			FROM platform.dwd_modeling_checkpoints
+			WHERE job_id=$1::uuid
+			  AND checkpoint_kind='CLASSIFICATION'
+			  AND subject_dataset_version_id=$2::uuid
+			  AND snapshot_hash=$3 AND prompt_version=$4`,
+			claim.ID, table.VersionID, snapshotHash,
+			dwdClassificationPromptVersion,
+		).Scan(&raw, &payloadHash)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, false, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		if err := validateDWDCheckpointHash(raw, payloadHash); err != nil {
+			return nil, false, err
+		}
+		payload, err := decodeDWDClassificationPlan(raw)
+		if err != nil {
+			return nil, false, err
+		}
+		scoped, err := dwdSingleTableClassificationScope(
+			input, table.VersionID,
+		)
+		if err != nil {
+			return nil, false, err
+		}
+		payload.Classifications = normalizeDWDClassifications(
+			scoped, payload.Classifications,
+		)
+		if err := validateDWDLLMClassifications(
+			scoped, payload.Domain, payload.Classifications,
+		); err != nil {
+			return nil, false, err
+		}
+		authority = append(authority, payload.Classifications[0])
+	}
+	authority = normalizeDWDClassifications(input, authority)
+	if err := validateDWDLLMClassifications(
+		input, input.Domain, authority,
+	); err != nil {
+		return nil, false, err
+	}
+	return authority, true, nil
 }
 
 func (worker *DWDModelingWorker) loadDWDLegacyClassificationCheckpoint(
@@ -1880,7 +2245,7 @@ func (worker *DWDModelingWorker) loadDWDLegacyClassificationCheckpoint(
 			if err != nil {
 				return err
 			}
-			payload.Classifications = normalizeDWDClassifications(
+			payload.Classifications = canonicalizeMergedDWDClassifications(
 				input, payload.Classifications,
 			)
 			if err := validateDWDLLMClassifications(
@@ -2589,7 +2954,8 @@ func (worker *DWDModelingWorker) persistLLMPlan(
 			[]dwdModelingResultItem(nil), completion.DimensionStage.Items...,
 		)
 		created := completion.DimensionStage.Created
-		updated := completion.DimensionStage.Updated
+		updated := completion.DimensionStage.Updated +
+			completion.DimensionStage.Retired
 		skipped := completion.DimensionStage.Skipped
 		for _, historical := range completion.UnchangedOutputs {
 			fact, exists := assetsByDataset[historical.FactDatasetID]
@@ -4043,6 +4409,175 @@ func mustMarshalDWDDocument(document Document) []byte {
 	return raw
 }
 
+// retireSuppressedGeneratedDIMDraftTx removes only an untouched, unpublished
+// auto-generated DIM whose entity is now owned by another authoritative source.
+// Any sign of governance, manual editing or downstream use leaves the asset
+// visible for explicit review instead of deleting user work.
+func (worker *DWDModelingWorker) retireSuppressedGeneratedDIMDraftTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	claim dwdModelingClaim,
+	source dwdODSAsset,
+	authoritativeEntitySignatures map[string]bool,
+) (datasetID string, mapped, retired bool, err error) {
+	var (
+		datasetVersion, publishedVersionCount  int64
+		datasetStatus, draftStatus             string
+		currentSchemaHash, generatedSchemaHash string
+		rawDraftDSL                            json.RawMessage
+		deleted                                bool
+		publicationRequestCount                int64
+		metricCount, dependencyCount           int64
+		reportDependencyCount                  int64
+		materializationCount, buildRunCount    int64
+		queryRunCount                          int64
+	)
+	err = tx.QueryRow(ctx, `SELECT
+			output.dim_dataset_id::text,
+			dataset.version,dataset.status,dataset.deleted_at IS NOT NULL,
+			draft.status,draft.schema_hash,draft.dsl_json,
+			output.last_generated_schema_hash,
+			(SELECT count(*) FROM platform.dataset_versions AS version
+			  WHERE version.dataset_id=dataset.id
+			    AND version.status IN ('PUBLISHED','STALE')),
+			(SELECT count(*) FROM platform.dataset_publication_requests AS request
+			  WHERE request.dataset_id=dataset.id),
+			(SELECT count(*) FROM platform.metrics AS metric
+			  WHERE metric.dataset_id=dataset.id AND metric.deleted_at IS NULL),
+			(SELECT count(*)
+			 FROM platform.dataset_dependencies AS dependency
+			 JOIN platform.dataset_versions AS source_version
+			   ON source_version.id::text=dependency.source_id
+			 JOIN platform.dataset_versions AS downstream_version
+			   ON downstream_version.id=dependency.dataset_version_id
+			 JOIN platform.datasets AS downstream_dataset
+			   ON downstream_dataset.id=downstream_version.dataset_id
+			  AND downstream_dataset.deleted_at IS NULL
+			 WHERE dependency.source_type='DATASET_VERSION'
+			   AND source_version.dataset_id=dataset.id
+			   AND downstream_version.status<>'DEPRECATED'),
+			(SELECT count(*)
+			 FROM platform.report_draft_dependencies AS dependency
+			 JOIN platform.dataset_versions AS source_version
+			   ON source_version.id::text=dependency.dependency_id
+			 JOIN platform.reports AS report
+			   ON report.id=dependency.report_id AND report.deleted_at IS NULL
+			 WHERE dependency.dependency_type='DATASET_VERSION'
+			   AND source_version.dataset_id=dataset.id),
+			(SELECT count(*) FROM platform.dataset_materializations AS materialization
+			  WHERE materialization.dataset_id=dataset.id),
+			(SELECT count(*) FROM platform.dataset_build_runs AS build
+			  WHERE build.dataset_id=dataset.id
+			    AND build.status IN ('QUEUED','RUNNING')),
+			(SELECT count(*) FROM platform.query_runs AS run
+			  WHERE run.dataset_id=dataset.id AND run.status='RUNNING')
+		FROM platform.dim_modeling_outputs AS output
+		JOIN platform.datasets AS dataset
+		  ON dataset.id=output.dim_dataset_id
+		 AND dataset.tenant_id=output.tenant_id
+		JOIN platform.dataset_versions AS draft
+		  ON draft.id=dataset.current_draft_version_id
+		 AND draft.dataset_id=dataset.id
+		 AND draft.tenant_id=dataset.tenant_id
+		WHERE output.source_dataset_id=$1::uuid
+		FOR UPDATE OF output,dataset`,
+		source.DatasetID,
+	).Scan(
+		&datasetID, &datasetVersion, &datasetStatus, &deleted,
+		&draftStatus, &currentSchemaHash, &rawDraftDSL,
+		&generatedSchemaHash,
+		&publishedVersionCount, &publicationRequestCount, &metricCount,
+		&dependencyCount, &reportDependencyCount, &materializationCount,
+		&buildRunCount, &queryRunCount,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, false, nil
+	}
+	if err != nil {
+		return "", false, false, err
+	}
+	mapped = true
+	document, decodeErr := DecodeAndNormalize(rawDraftDSL)
+	if decodeErr != nil {
+		return datasetID, true, false, nil
+	}
+	generatedTable := dwdPlanningTable{
+		OutputGrain: document.OutputGrain,
+		Fields:      make([]dwdPlanningField, 0, len(document.Fields)),
+	}
+	for _, field := range document.Fields {
+		generatedTable.Fields = append(
+			generatedTable.Fields, dwdPlanningField{
+				Code:          field.Code,
+				Role:          field.Role,
+				CanonicalType: field.CanonicalType,
+				SemanticType:  field.SemanticType,
+				Nullable:      field.Nullable,
+			},
+		)
+	}
+	generatedSignature, strong := dwdDimensionEntitySignature(
+		generatedTable, document.OutputGrain.KeyFields,
+	)
+	if !strong || !authoritativeEntitySignatures[generatedSignature] {
+		return datasetID, true, false, nil
+	}
+	safe := !deleted &&
+		datasetStatus == "DRAFT" &&
+		draftStatus == "DRAFT" &&
+		currentSchemaHash == generatedSchemaHash &&
+		publishedVersionCount == 0 &&
+		publicationRequestCount == 0 &&
+		metricCount == 0 &&
+		dependencyCount == 0 &&
+		reportDependencyCount == 0 &&
+		materializationCount == 0 &&
+		buildRunCount == 0 &&
+		queryRunCount == 0
+	if !safe {
+		return datasetID, true, false, nil
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM platform.dim_modeling_outputs
+		WHERE source_dataset_id=$1::uuid AND dim_dataset_id=$2::uuid`,
+		source.DatasetID, datasetID,
+	)
+	if err != nil {
+		return "", false, false, err
+	}
+	if tag.RowsAffected() != 1 {
+		return "", false, false, ErrConflict
+	}
+	tag, err = tx.Exec(ctx, `UPDATE platform.datasets SET
+			status='DEPRECATED',current_published_version_id=NULL,
+			disabled_from_status=NULL,disabled_published_version_id=NULL,
+			code=left(code,100)||'_deleted_'||substr(id::text,1,8),
+			deleted_at=now(),version=version+1,updated_by=$1
+		WHERE id=$2::uuid AND version=$3 AND deleted_at IS NULL`,
+		claim.ActorID, datasetID, datasetVersion,
+	)
+	if err != nil {
+		return "", false, false, err
+	}
+	if tag.RowsAffected() != 1 {
+		return "", false, false, ErrConflict
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+			tenant_id,actor_user_id,action,resource_type,resource_id,detail
+		) VALUES($1,$2,'AUTO_DIM_RETIRE','DATASET',$3,
+			jsonb_build_object(
+			  'sourceDatasetId',$4::text,
+			  'sourceDatasetVersionId',$5::text,
+			  'dwdModelingJobId',$6::text,
+			  'reason','REDUNDANT_ENTITY_MERGED'
+			))`,
+		claim.TenantID, claim.ActorID, datasetID, source.DatasetID,
+		source.VersionID, claim.ID,
+	); err != nil {
+		return "", false, false, err
+	}
+	return datasetID, true, true, nil
+}
+
 func (worker *DWDModelingWorker) upsertGeneratedDIMDraftTx(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -4364,6 +4899,7 @@ func finishDWDJobTx(
 			"pendingDatasetIds":       dimensionStage.PendingPublicationDatasets,
 			"failedDesignCount":       dimensionStage.FailedDesignCount,
 			"failedSourceDatasetIds":  dimensionStage.FailedSourceDatasets,
+			"retiredCount":            dimensionStage.Retired,
 		},
 		"resume": map[string]any{
 			"checkpointCount":       checkpointCount,

@@ -17,6 +17,7 @@ import (
 const (
 	dwdModelingPromptVersion        = "warehouse-modeling-v10"
 	dwdClassificationPromptVersion  = "warehouse-classification-v5"
+	dwdClassificationMergeVersion   = "warehouse-classification-merge-v1"
 	dwdLegacyClassificationVersion  = "warehouse-classification-v4"
 	dwdDimensionDesignPromptVersion = "warehouse-dimension-design-v3"
 	dwdFactDesignPromptVersion      = "warehouse-fact-design-v4"
@@ -38,6 +39,11 @@ type DWDModelingPlanner interface {
 type resumableDWDModelingPlanner interface {
 	DWDModelingPlanner
 	Classify(context.Context, dwdPlanningInput) (dwdClassificationCompletion, error)
+	MergeClassifications(
+		context.Context,
+		dwdPlanningInput,
+		[]dwdLLMClassification,
+	) (dwdClassificationCompletion, error)
 	DesignDimension(
 		context.Context,
 		dwdPlanningInput,
@@ -263,6 +269,19 @@ dimensionKeyFieldCodes 只能放实体稳定业务键，日期、时间和快照
 
 classifications 必须逐一覆盖输入表且不得重复，只能复制精确 datasetVersionId 和字段 code。role 必须与 rationale 中描述的行粒度和 DIM/DWD 结论一致。rationale 应简短说明“行粒度 + 判定依据 + 是否可抽取 DIM”，不要设计关联、SQL 或物理表。输出只能是 JSON Schema 指定的对象。`
 
+const dwdClassificationMergeSystemPrompt = `你是企业数据仓库 ODS 分类合并审校器。输入包含同一业务领域的全部 ODS 元数据，以及每张 ODS 已单独通过结构校验的候选分类。你的输出是后续 DIM/DWD 生成唯一使用的最终领域分类，不包含业务数据行。
+
+先跨表比较真实行粒度、实体业务键、属性完整度、生命周期和来源权威性，再输出最终 classifications：
+1. 必须逐一覆盖全部输入 ODS，不增不减，只能复制精确 datasetVersionId 和字段 code；role 只能是 FACT、DIMENSION、MASTER、OTHER。
+2. 相同业务实体只能保留一个 DIM 产物。优先选择独立 MASTER，其次选择字段更完整、粒度更稳定的独立 DIMENSION，最后才考虑从 FACT 抽取的内嵌实体投影。
+3. 如果独立 MASTER/DIMENSION 已经覆盖某个实体键，FACT 中相同实体键的 dimensionKeyFieldCodes 和 dimensionAttributeFieldCodes 必须清空，但 FACT 主角色保持不变。
+4. 多个独立 MASTER/DIMENSION 若表示同一实体，只保留一个权威来源；冗余来源改为 OTHER 并清空两个维度字段数组。只有实体、复合键、生命周期或治理边界确实不同，才允许分别保留。
+5. 不得仅按表名合并：必须核对忽略大小写后相同的业务键、兼容类型、实体含义和属性函数依赖。通用 id/code 无法证明同一实体时不得强行合并。
+6. 周期快照、日度聚合、订单行、支付、配送事件等事实仍保持 FACT；交易度量、事件时间、订单号和事实行号不得进入 DIM 投影。
+7. rationale 必须简短明确地说明最终行粒度、是否生成 DIM，以及被合并或抑制时采用的权威来源。不要返回 SQL、DDL、物理表、Markdown 或额外解释。
+
+输出只能是 JSON Schema 指定的完整对象。`
+
 const dwdDimensionDesignSystemPrompt = `你是企业数据仓库 DIM 设计师。领域内 ODS 多产物识别已经通过校验且不可更改；本次只设计指定的一个实体 DIM，不包含业务数据行。输入字段已经按实体键和稳定说明属性收窄，来源 ODS 既可能是独立维表，也可能同时产生事实 DWD。
 
 先按平台 DIM 定义复核设计边界，再输出结构化结果；不要输出内部分析过程：
@@ -416,6 +435,116 @@ func (planner *OrchestratedDWDModelingPlanner) Classify(
 		invocation.Request.Messages = dwdStageRepairMessages(
 			baseMessages, result, invokeErr,
 			`请只修复 ODS 多产物识别：domain 必须等于输入；classifications 必须逐表覆盖且不重复，只能使用输入的精确 datasetVersionId 和字段 code；role 只能是 FACT、DIMENSION、MASTER、OTHER。先按原提示中的 DIM、DWD 和同表边界复核真实行粒度。日期/时间参与输出粒度且包含订单数、金额、数量或时长等度量的周期快照/日度聚合必须是 FACT；role 必须与 rationale 的 DIM/DWD 结论一致。FACT 可以通过 dimensionKeyFieldCodes + dimensionAttributeFieldCodes 声明一个内嵌实体维度；日期/时间不能作为实体键，任何 DIM 投影都不能包含交易度量、订单号、事实行号、汇总人数或事件时间。一人一行的个人主表仍是 DIMENSION/MASTER，不能只因需要统计人数改判 FACT。没有可靠实体时两个数组必须为空。rationale 保持简短。不要返回 outputs、SQL、Markdown 或解释。`,
+			attempt == dwdStageInvocationAttempts-2,
+		)
+	}
+	return dwdClassificationCompletion{}, errDWDModelingInvalid
+}
+
+func (planner *OrchestratedDWDModelingPlanner) MergeClassifications(
+	ctx context.Context,
+	input dwdPlanningInput,
+	classifications []dwdLLMClassification,
+) (dwdClassificationCompletion, error) {
+	if !planner.Configured() || !validDWDPlanningInput(input) {
+		return dwdClassificationCompletion{}, errDWDModelingInvalid
+	}
+	classifications = normalizeDWDClassifications(input, classifications)
+	if err := validateDWDLLMClassifications(
+		input, input.Domain, classifications,
+	); err != nil {
+		return dwdClassificationCompletion{}, err
+	}
+	raw, err := json.Marshal(struct {
+		Domain          string                 `json:"domain"`
+		Tables          []dwdPlanningTable     `json:"tables"`
+		Classifications []dwdLLMClassification `json:"candidateClassifications"`
+	}{
+		Domain: input.Domain, Tables: input.Tables,
+		Classifications: classifications,
+	})
+	if err != nil {
+		return dwdClassificationCompletion{}, err
+	}
+	if len(raw) > 256<<10 {
+		return dwdClassificationCompletion{}, fmt.Errorf(
+			"%w: classification merge context exceeds 256 KiB",
+			errDWDModelingInvalid,
+		)
+	}
+	schema, err := dwdClassificationResponseSchema(input)
+	if err != nil {
+		return dwdClassificationCompletion{}, err
+	}
+	temperature := 0.0
+	request := aiplatform.ProviderRequest{
+		Messages: []aiplatform.Message{
+			{
+				Role: aiplatform.MessageRoleSystem,
+				Parts: []aiplatform.ContentPart{{
+					Type: aiplatform.ContentTypeText,
+					Text: dwdClassificationMergeSystemPrompt,
+				}},
+			},
+			{
+				Role: aiplatform.MessageRoleUser,
+				Parts: []aiplatform.ContentPart{{
+					Type: aiplatform.ContentTypeText, Text: string(raw),
+				}},
+			},
+		},
+		ResponseSchema:  schema,
+		Temperature:     &temperature,
+		MaxOutputTokens: 6000,
+	}
+	callCtx, cancel := context.WithTimeout(
+		ctx, planner.timeout*dwdStageInvocationAttempts,
+	)
+	defer cancel()
+	invocation := aiplatform.Invocation{
+		TenantID: input.TenantID, ActorID: input.ActorID,
+		Purpose:       aiplatform.PurposeDatasetDAGGeneration,
+		PromptVersion: dwdClassificationMergeVersion,
+		ResourceType:  "DATASET_MODELING_SCOPE", ResourceID: input.ResourceID,
+		Request: request,
+	}
+	baseMessages := append([]aiplatform.Message(nil), request.Messages...)
+	for attempt := 0; attempt < dwdStageInvocationAttempts; attempt++ {
+		result, invokeErr := planner.invoker.Invoke(callCtx, invocation)
+		if invokeErr == nil {
+			candidate, decodeErr := decodeDWDClassificationPlan(
+				result.ProviderResult.Content,
+			)
+			if decodeErr == nil {
+				candidate.Classifications =
+					canonicalizeMergedDWDClassifications(
+						input, candidate.Classifications, classifications,
+					)
+				decodeErr = validateDWDLLMClassifications(
+					input, candidate.Domain,
+					candidate.Classifications,
+				)
+			}
+			if decodeErr == nil {
+				return dwdClassificationCompletion{
+					AIRequestID:     result.RequestID,
+					Domain:          candidate.Domain,
+					Classifications: candidate.Classifications,
+				}, nil
+			}
+			invokeErr = decodeErr
+		}
+		if !repairableDWDModelingError(invokeErr) ||
+			attempt == dwdStageInvocationAttempts-1 {
+			return dwdClassificationCompletion{}, invokeErr
+		}
+		if err := callCtx.Err(); err != nil {
+			return dwdClassificationCompletion{}, err
+		}
+		invocation.Request.Messages = dwdStageRepairMessages(
+			baseMessages, result, invokeErr,
+			`请只修复最终领域分类合并结果：逐一覆盖全部输入 ODS；相同实体只保留一个权威 DIM。独立 MASTER/DIMENSION 已覆盖实体键时，清空 FACT 的维度投影；冗余独立实体来源改为 OTHER 并清空维度字段。不得把周期快照或交易明细改成 DIM，不得按通用 id/code 猜测同一实体。只能使用输入中的精确版本和字段 code，rationale 简短说明最终粒度、唯一 DIM 和权威来源。`,
+			attempt == dwdStageInvocationAttempts-2,
 		)
 	}
 	return dwdClassificationCompletion{}, errDWDModelingInvalid
@@ -522,6 +651,7 @@ func (planner *OrchestratedDWDModelingPlanner) DesignDimension(
 请只返回修复后的 {"output": ...}：sourceDatasetVersionId 必须等于指定版本；fields 必须逐字段覆盖且不重复；中文名称和说明不能为空；所有 STRING 必须 TRIM，可空标识/维度/属性必须 COALESCE_DEFAULT，DATE/DATETIME/STRING TIME 必须 CAST_DATE；不得为 TIME/MEASURE 填充哨兵值。standardization 只能使用约定的四种枚举，新设计不得使用 CAST_DATETIME。不要返回 SQL、Markdown 或额外解释。`,
 				invokeErr.Error(),
 			),
+			attempt == dwdStageInvocationAttempts-2,
 		)
 	}
 	return dwdDimensionDesignCompletion{}, errDWDModelingInvalid
@@ -635,6 +765,7 @@ func (planner *OrchestratedDWDModelingPlanner) DesignFact(
 		invocation.Request.Messages = dwdStageRepairMessages(
 			baseMessages, result, invokeErr,
 			dwdFactDesignRepairInstruction(invokeErr),
+			attempt == dwdStageInvocationAttempts-2,
 		)
 	}
 	return dwdFactDesignCompletion{}, errDWDModelingInvalid
@@ -690,6 +821,7 @@ func dwdStageRepairMessages(
 	result aiplatform.InvocationResult,
 	invokeErr error,
 	instruction string,
+	freshRegeneration bool,
 ) []aiplatform.Message {
 	repairContent := result.ProviderResult.Content
 	repairDiagnostic := ""
@@ -698,7 +830,9 @@ func dwdStageRepairMessages(
 		repairDiagnostic = diagnostic
 	}
 	messages := append([]aiplatform.Message(nil), base...)
-	if len(repairContent) > 0 && len(repairContent) <= maxDWDModelingRepairContent {
+	if !freshRegeneration &&
+		len(repairContent) > 0 &&
+		len(repairContent) <= maxDWDModelingRepairContent {
 		messages = append(messages, aiplatform.Message{
 			Role: aiplatform.MessageRoleAssistant,
 			Parts: []aiplatform.ContentPart{{
@@ -708,6 +842,12 @@ func dwdStageRepairMessages(
 	}
 	if strings.TrimSpace(repairDiagnostic) != "" {
 		instruction += "\n结构诊断：" + strings.TrimSpace(repairDiagnostic)
+	}
+	if freshRegeneration {
+		instruction = `前两轮输出仍未通过结构校验。请忽略之前的候选答案，
+仅根据最初的系统规则、原始输入和当前结构诊断，从头生成一份精简的完整 JSON。
+不要复述输入、不要输出分析过程，也不要沿用上一份候选的字段顺序或多余属性。
+` + instruction
 	}
 	return append(messages, aiplatform.Message{
 		Role: aiplatform.MessageRoleUser,
@@ -1956,6 +2096,219 @@ func normalizeDWDClassifications(
 		}
 	}
 	return normalized
+}
+
+// canonicalizeMergedDWDClassifications is the deterministic safety net behind
+// the cross-table merge LLM. Exact, non-generic entity-key sets with compatible
+// types identify the same governed entity. One authoritative source owns the
+// DIM; FACT tables retain their primary role without emitting a duplicate
+// projection, while redundant standalone entity sources become OTHER.
+//
+// authorityCandidates is normally the independently validated per-ODS output.
+// It prevents a merge response from preferring a sparse FACT projection over an
+// already identified MASTER/DIMENSION source.
+func canonicalizeMergedDWDClassifications(
+	input dwdPlanningInput,
+	classifications []dwdLLMClassification,
+	authorityCandidates ...[]dwdLLMClassification,
+) []dwdLLMClassification {
+	normalized := normalizeDWDClassifications(input, classifications)
+	authority := normalized
+	if len(authorityCandidates) > 0 {
+		candidate := normalizeDWDClassifications(
+			input, authorityCandidates[0],
+		)
+		if len(candidate) == len(input.Tables) {
+			authority = candidate
+		}
+	}
+	tableByVersion := make(
+		map[string]dwdPlanningTable, len(input.Tables),
+	)
+	tableOrder := make(map[string]int, len(input.Tables))
+	for index, table := range input.Tables {
+		tableByVersion[table.VersionID] = table
+		tableOrder[table.VersionID] = index
+	}
+	authorityByVersion := make(
+		map[string]dwdLLMClassification, len(authority),
+	)
+	for _, classification := range authority {
+		authorityByVersion[classification.DatasetVersionID] = classification
+	}
+	type entityCandidate struct {
+		classification dwdLLMClassification
+		signature      string
+		priority       int
+		attributeCount int
+		order          int
+	}
+	groups := map[string][]entityCandidate{}
+	for _, classification := range authority {
+		if !classificationProducesDimension(classification) {
+			continue
+		}
+		table, exists := tableByVersion[classification.DatasetVersionID]
+		if !exists {
+			continue
+		}
+		signature, strong := dwdDimensionEntitySignature(
+			table, classification.DimensionKeyFieldCodes,
+		)
+		if !strong {
+			continue
+		}
+		groups[signature] = append(groups[signature], entityCandidate{
+			classification: classification,
+			signature:      signature,
+			priority:       dwdDimensionAuthorityPriority(classification.Role),
+			attributeCount: len(classification.DimensionAttributeFieldCodes),
+			order:          tableOrder[classification.DatasetVersionID],
+		})
+	}
+	canonicalByVersion := map[string]string{}
+	for _, candidates := range groups {
+		if len(candidates) < 2 {
+			continue
+		}
+		sort.SliceStable(candidates, func(left, right int) bool {
+			if candidates[left].priority != candidates[right].priority {
+				return candidates[left].priority > candidates[right].priority
+			}
+			if candidates[left].attributeCount !=
+				candidates[right].attributeCount {
+				return candidates[left].attributeCount >
+					candidates[right].attributeCount
+			}
+			return candidates[left].order < candidates[right].order
+		})
+		canonical := candidates[0].classification.DatasetVersionID
+		for _, candidate := range candidates {
+			canonicalByVersion[candidate.classification.DatasetVersionID] =
+				canonical
+		}
+	}
+	result := make([]dwdLLMClassification, 0, len(normalized))
+	for _, classification := range normalized {
+		canonicalVersionID, grouped :=
+			canonicalByVersion[classification.DatasetVersionID]
+		if !grouped {
+			// A domain merge may adjudicate duplicates, but it must not erase a
+			// unique per-ODS contract that already passed the stricter local
+			// role and field validation.
+			if authoritative, exists :=
+				authorityByVersion[classification.DatasetVersionID]; exists {
+				classification.Role = authoritative.Role
+				classification.DimensionKeyFieldCodes = append(
+					[]string(nil),
+					authoritative.DimensionKeyFieldCodes...,
+				)
+				classification.DimensionAttributeFieldCodes = append(
+					[]string(nil),
+					authoritative.DimensionAttributeFieldCodes...,
+				)
+			}
+			result = append(result, classification)
+			continue
+		}
+		authoritative := authorityByVersion[classification.DatasetVersionID]
+		if classification.DatasetVersionID == canonicalVersionID {
+			// Restore the locally proven authoritative dimension contract when
+			// the merge model accidentally demotes or clears it.
+			if classificationProducesDimension(authoritative) {
+				classification.Role = authoritative.Role
+				classification.DimensionKeyFieldCodes = append(
+					[]string(nil),
+					authoritative.DimensionKeyFieldCodes...,
+				)
+				classification.DimensionAttributeFieldCodes = append(
+					[]string(nil),
+					authoritative.DimensionAttributeFieldCodes...,
+				)
+			}
+			result = append(result, classification)
+			continue
+		}
+		canonicalName := canonicalVersionID
+		if table, exists := tableByVersion[canonicalVersionID]; exists &&
+			strings.TrimSpace(table.Name) != "" {
+			canonicalName = strings.TrimSpace(table.Name)
+		}
+		if authoritative.Role == "FACT" {
+			classification.Role = "FACT"
+		} else {
+			classification.Role = "OTHER"
+		}
+		classification.DimensionKeyFieldCodes = []string{}
+		classification.DimensionAttributeFieldCodes = []string{}
+		classification.Rationale = strings.TrimSpace(
+			classification.Rationale,
+		) + "；相同实体由“" + canonicalName +
+			"”作为唯一权威 DIM，本表不重复生成维度"
+		result = append(result, classification)
+	}
+	return normalizeDWDClassifications(input, result)
+}
+
+func dwdDimensionEntitySignature(
+	table dwdPlanningTable,
+	keyCodes []string,
+) (string, bool) {
+	if len(keyCodes) == 0 {
+		return "", false
+	}
+	fields := planningFieldsByCode(table)
+	parts := make([]string, 0, len(keyCodes))
+	for _, code := range keyCodes {
+		normalizedCode := strings.ToLower(strings.TrimSpace(code))
+		if dwdGenericEntityKeyCode(normalizedCode) {
+			return "", false
+		}
+		field, exists := fields[code]
+		if !exists {
+			for candidateCode, candidateField := range fields {
+				if strings.EqualFold(candidateCode, code) {
+					field, exists = candidateField, true
+					break
+				}
+			}
+		}
+		if !exists {
+			return "", false
+		}
+		canonicalType := strings.ToUpper(strings.TrimSpace(
+			field.CanonicalType,
+		))
+		if canonicalType == "INTEGER" || canonicalType == "DECIMAL" {
+			canonicalType = "NUMBER"
+		}
+		parts = append(parts, normalizedCode+":"+canonicalType)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "|"), true
+}
+
+func dwdGenericEntityKeyCode(code string) bool {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "id", "key", "code", "identifier", "business_id", "entity_id",
+		"record_id", "row_id":
+		return true
+	default:
+		return false
+	}
+}
+
+func dwdDimensionAuthorityPriority(role string) int {
+	switch strings.ToUpper(strings.TrimSpace(role)) {
+	case "MASTER":
+		return 3
+	case "DIMENSION":
+		return 2
+	case "FACT":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func stableDWDEmbeddedDimensionKeys(

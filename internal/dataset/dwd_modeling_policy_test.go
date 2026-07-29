@@ -1,9 +1,14 @@
 package dataset
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
+
+	aiplatform "intelligent-report-generation-system/internal/ai"
 )
 
 func TestMandatoryDWDFieldCleaningAppliesDatasetHygiene(t *testing.T) {
@@ -585,5 +590,328 @@ func TestDWDSingleTableClassificationScope(t *testing.T) {
 		input, "missing_version",
 	); err == nil {
 		t.Fatal("missing ODS version unexpectedly produced a scope")
+	}
+}
+
+func TestRunBoundedDWDTasksCollectDoesNotCancelPeerTasks(t *testing.T) {
+	expectedFailure := errors.New("classification output is invalid")
+	tasks := []func(context.Context) (string, error){
+		func(context.Context) (string, error) {
+			return "first", nil
+		},
+		func(context.Context) (string, error) {
+			return "", expectedFailure
+		},
+		func(context.Context) (string, error) {
+			return "third", nil
+		},
+	}
+
+	results, taskErrors := runBoundedDWDTasksCollect(
+		context.Background(), 2, tasks,
+	)
+	if !reflect.DeepEqual(results, []string{"first", "", "third"}) {
+		t.Fatalf("results = %#v", results)
+	}
+	if len(taskErrors) != 3 ||
+		taskErrors[0] != nil ||
+		!errors.Is(taskErrors[1], expectedFailure) ||
+		taskErrors[2] != nil {
+		t.Fatalf("task errors = %#v", taskErrors)
+	}
+}
+
+func TestDWDStageRepairMessagesUseFreshFinalRegeneration(t *testing.T) {
+	base := []aiplatform.Message{{
+		Role: aiplatform.MessageRoleSystem,
+		Parts: []aiplatform.ContentPart{{
+			Type: aiplatform.ContentTypeText,
+			Text: "base instructions",
+		}},
+	}}
+	result := aiplatform.InvocationResult{
+		ProviderResult: aiplatform.ProviderResult{
+			Content: json.RawMessage(`{"invalid":"candidate"}`),
+		},
+	}
+
+	incremental := dwdStageRepairMessages(
+		base, result, errDWDModelingInvalid, "repair contract", false,
+	)
+	if len(incremental) != 3 ||
+		incremental[1].Role != aiplatform.MessageRoleAssistant {
+		t.Fatalf("incremental repair messages = %#v", incremental)
+	}
+
+	fresh := dwdStageRepairMessages(
+		base, result, errDWDModelingInvalid, "repair contract", true,
+	)
+	if len(fresh) != 2 ||
+		fresh[1].Role != aiplatform.MessageRoleUser {
+		t.Fatalf("fresh repair messages = %#v", fresh)
+	}
+	freshInstruction := fresh[1].Parts[0].Text
+	if strings.Contains(freshInstruction, `"invalid":"candidate"`) ||
+		!strings.Contains(freshInstruction, "忽略之前的候选答案") ||
+		!strings.Contains(freshInstruction, "repair contract") {
+		t.Fatalf("fresh repair instruction = %q", freshInstruction)
+	}
+}
+
+func TestRetryableDWDClassificationFailureRequiresBatchInvalidOutput(
+	t *testing.T,
+) {
+	invalidOutput := &aiplatform.ProviderError{
+		Code:      aiplatform.ErrorCodeInvalidOutput,
+		Message:   "AI structured output is invalid",
+		Retryable: false,
+	}
+	batchFailure := &dwdClassificationBatchError{
+		FailureCount: 1,
+		Cause:        invalidOutput,
+	}
+	if !retryableDWDClassificationFailure(batchFailure) {
+		t.Fatal("classification invalid output was not stage-retryable")
+	}
+	if retryableDWDClassificationFailure(invalidOutput) {
+		t.Fatal("non-classification invalid output was stage-retryable")
+	}
+	timeout := &dwdClassificationBatchError{
+		FailureCount: 1,
+		Cause: &aiplatform.ProviderError{
+			Code:      aiplatform.ErrorCodeTimeout,
+			Message:   "AI provider timed out",
+			Retryable: true,
+		},
+	}
+	if retryableDWDClassificationFailure(timeout) {
+		t.Fatal("provider timeout was classified as invalid output")
+	}
+}
+
+func TestCanonicalizeMergedDWDClassificationsKeepsAuthoritativeEntity(
+	t *testing.T,
+) {
+	input := dwdPlanningInput{
+		Domain: "企业经营",
+		Tables: []dwdPlanningTable{
+			{
+				VersionID: "merchant_master_version",
+				Name:      "商户维度表",
+				OutputGrain: OutputGrain{
+					KeyFields: []string{"merchant_id"},
+				},
+				Fields: []dwdPlanningField{
+					{
+						Code: "merchant_id", Role: "IDENTIFIER",
+						CanonicalType: "STRING",
+					},
+					{
+						Code: "merchant_name", Role: "ATTRIBUTE",
+						CanonicalType: "STRING",
+					},
+					{
+						Code: "merchant_status", Role: "ATTRIBUTE",
+						CanonicalType: "STRING",
+					},
+				},
+			},
+			{
+				VersionID: "merchant_daily_version",
+				Name:      "商户日度运营聚合表",
+				OutputGrain: OutputGrain{
+					KeyFields: []string{"metric_date", "MERCHANT_ID"},
+				},
+				Fields: []dwdPlanningField{
+					{
+						Code: "metric_date", Role: "TIME",
+						CanonicalType: "DATE", SemanticType: "DATE",
+					},
+					{
+						Code: "MERCHANT_ID", Role: "IDENTIFIER",
+						CanonicalType: "STRING",
+					},
+					{
+						Code: "ZONE_ID", Role: "ATTRIBUTE",
+						CanonicalType: "STRING",
+					},
+					{
+						Code: "order_count", Role: "MEASURE",
+						CanonicalType: "INTEGER", SemanticType: "QUANTITY",
+					},
+				},
+			},
+		},
+	}
+	authority := []dwdLLMClassification{
+		{
+			DatasetVersionID:             "merchant_master_version",
+			Role:                         "MASTER",
+			DimensionKeyFieldCodes:       []string{"merchant_id"},
+			DimensionAttributeFieldCodes: []string{"merchant_name", "merchant_status"},
+			Rationale:                    "每行代表一个权威商户实体",
+		},
+		{
+			DatasetVersionID:             "merchant_daily_version",
+			Role:                         "FACT",
+			DimensionKeyFieldCodes:       []string{"MERCHANT_ID"},
+			DimensionAttributeFieldCodes: []string{"ZONE_ID"},
+			Rationale:                    "每行代表一个商户日度快照",
+		},
+	}
+	// Simulate a poor merge response that selected the sparse FACT projection.
+	merged := []dwdLLMClassification{
+		{
+			DatasetVersionID: "merchant_master_version",
+			Role:             "OTHER",
+			Rationale:        "不生成维度",
+		},
+		authority[1],
+	}
+	got := canonicalizeMergedDWDClassifications(
+		input, merged, authority,
+	)
+	if len(got) != 2 {
+		t.Fatalf("classification count = %d, want 2", len(got))
+	}
+	if got[0].Role != "MASTER" ||
+		!reflect.DeepEqual(
+			got[0].DimensionKeyFieldCodes, []string{"merchant_id"},
+		) ||
+		!reflect.DeepEqual(
+			got[0].DimensionAttributeFieldCodes,
+			[]string{"merchant_name", "merchant_status"},
+		) {
+		t.Fatalf("authoritative merchant classification = %#v", got[0])
+	}
+	if got[1].Role != "FACT" ||
+		len(got[1].DimensionKeyFieldCodes) != 0 ||
+		len(got[1].DimensionAttributeFieldCodes) != 0 ||
+		!strings.Contains(got[1].Rationale, "唯一权威 DIM") {
+		t.Fatalf("redundant fact projection = %#v", got[1])
+	}
+	if err := validateDWDLLMClassifications(
+		input, input.Domain, got,
+	); err != nil {
+		t.Fatalf("canonical merged classifications are invalid: %v", err)
+	}
+}
+
+func TestCanonicalizeMergedDWDClassificationsDoesNotMergeGenericIDs(
+	t *testing.T,
+) {
+	input := dwdPlanningInput{
+		Domain: "企业经营",
+		Tables: []dwdPlanningTable{
+			{
+				VersionID: "customer_version", Name: "客户",
+				OutputGrain: OutputGrain{KeyFields: []string{"id"}},
+				Fields: []dwdPlanningField{
+					{Code: "id", Role: "IDENTIFIER", CanonicalType: "STRING"},
+					{Code: "name", Role: "ATTRIBUTE", CanonicalType: "STRING"},
+				},
+			},
+			{
+				VersionID: "store_version", Name: "门店",
+				OutputGrain: OutputGrain{KeyFields: []string{"id"}},
+				Fields: []dwdPlanningField{
+					{Code: "id", Role: "IDENTIFIER", CanonicalType: "STRING"},
+					{Code: "name", Role: "ATTRIBUTE", CanonicalType: "STRING"},
+				},
+			},
+		},
+	}
+	classifications := []dwdLLMClassification{
+		{
+			DatasetVersionID:             "customer_version",
+			Role:                         "MASTER",
+			DimensionKeyFieldCodes:       []string{"id"},
+			DimensionAttributeFieldCodes: []string{"name"},
+			Rationale:                    "每行代表一个客户",
+		},
+		{
+			DatasetVersionID:             "store_version",
+			Role:                         "DIMENSION",
+			DimensionKeyFieldCodes:       []string{"id"},
+			DimensionAttributeFieldCodes: []string{"name"},
+			Rationale:                    "每行代表一个门店",
+		},
+	}
+	got := canonicalizeMergedDWDClassifications(
+		input, classifications, classifications,
+	)
+	if got[0].Role != "MASTER" || got[1].Role != "DIMENSION" {
+		t.Fatalf("generic IDs were incorrectly merged: %#v", got)
+	}
+	if err := validateDWDLLMClassifications(
+		input, input.Domain, got,
+	); err != nil {
+		t.Fatalf("generic classifications are invalid: %v", err)
+	}
+}
+
+func TestCanonicalizeMergedDWDClassificationsRestoresUniqueProjection(
+	t *testing.T,
+) {
+	input := dwdPlanningInput{
+		Domain: "企业经营",
+		Tables: []dwdPlanningTable{{
+			VersionID: "order_item_version",
+			Name:      "订单商品明细事实表",
+			OutputGrain: OutputGrain{
+				KeyFields: []string{"order_id", "line_id"},
+			},
+			Fields: []dwdPlanningField{
+				{
+					Code: "order_id", Role: "IDENTIFIER",
+					CanonicalType: "STRING",
+				},
+				{
+					Code: "line_id", Role: "IDENTIFIER",
+					CanonicalType: "STRING",
+				},
+				{
+					Code: "sku_id", Role: "IDENTIFIER",
+					CanonicalType: "STRING",
+				},
+				{
+					Code: "item_name", Role: "ATTRIBUTE",
+					CanonicalType: "STRING",
+				},
+				{
+					Code: "quantity", Role: "MEASURE",
+					CanonicalType: "INTEGER", SemanticType: "QUANTITY",
+				},
+			},
+		}},
+	}
+	authority := []dwdLLMClassification{{
+		DatasetVersionID:             "order_item_version",
+		Role:                         "FACT",
+		DimensionKeyFieldCodes:       []string{"sku_id"},
+		DimensionAttributeFieldCodes: []string{"item_name"},
+		Rationale:                    "每行是订单商品项，可抽取唯一商品实体",
+	}}
+	merged := []dwdLLMClassification{{
+		DatasetVersionID: "order_item_version",
+		Role:             "FACT",
+		Rationale:        "没有独立商品主表，因此不生成商品维度",
+	}}
+	got := canonicalizeMergedDWDClassifications(
+		input, merged, authority,
+	)
+	if len(got) != 1 ||
+		!reflect.DeepEqual(
+			got[0].DimensionKeyFieldCodes, []string{"sku_id"},
+		) ||
+		!reflect.DeepEqual(
+			got[0].DimensionAttributeFieldCodes, []string{"item_name"},
+		) {
+		t.Fatalf("unique projection was erased by merge: %#v", got)
+	}
+	if err := validateDWDLLMClassifications(
+		input, input.Domain, got,
+	); err != nil {
+		t.Fatalf("restored unique projection is invalid: %v", err)
 	}
 }
