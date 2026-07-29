@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	dwdDIMNameValidationPromptVersion      = "warehouse-dim-name-validation-v1"
+	dwdDIMNameValidationPromptVersion      = "warehouse-dim-name-validation-v2"
 	dwdDIMDuplicateValidationPromptVersion = "warehouse-dim-duplicate-validation-v1"
 )
 
@@ -340,7 +340,7 @@ func dwdDIMNameValidationResponseSchema(
 					"properties": map[string]any{
 						"sourceDatasetVersionIds": map[string]any{
 							"type": "array", "minItems": 2,
-							"maxItems": len(versionIDs), "uniqueItems": true,
+							"maxItems": len(versionIDs),
 							"items": map[string]any{
 								"type": "string", "enum": versionIDs,
 							},

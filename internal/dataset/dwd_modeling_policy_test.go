@@ -326,7 +326,7 @@ func TestNormalizeDWDClassificationsDropsIncompleteOptionalFactDimension(
 	}
 }
 
-func TestValidateDWDClassificationsRejectsPeriodicSnapshotPrimaryDIMRole(
+func TestNormalizeDWDClassificationsCorrectsPeriodicSnapshotPrimaryDIMRole(
 	t *testing.T,
 ) {
 	input := dwdPlanningInput{
@@ -375,10 +375,168 @@ func TestValidateDWDClassificationsRejectsPeriodicSnapshotPrimaryDIMRole(
 	err := validateDWDLLMClassifications(
 		input, input.Domain, normalized,
 	)
-	if err == nil || !strings.Contains(
-		err.Error(), "periodic snapshot FACT",
-	) {
-		t.Fatalf("validation error = %v, want periodic snapshot FACT", err)
+	if err != nil {
+		t.Fatalf("corrected periodic snapshot classification is invalid: %v", err)
+	}
+	if len(normalized) != 1 || normalized[0].Role != "FACT" ||
+		len(normalized[0].DimensionKeyFieldCodes) != 0 ||
+		len(normalized[0].DimensionAttributeFieldCodes) != 0 {
+		t.Fatalf("periodic snapshot was not corrected to FACT: %#v", normalized)
+	}
+}
+
+func factlessDeliveryEventPlanningInput() dwdPlanningInput {
+	return dwdPlanningInput{
+		Domain: "企业经营",
+		Tables: []dwdPlanningTable{{
+			DatasetID: "delivery_event_dataset", VersionID: "delivery_event_version",
+			Name: "配送事件事实表", Description: "配送过程中的原子状态变更事件流水",
+			OutputGrain: OutputGrain{
+				KeyFields:   []string{"EVENT_ID"},
+				TimeField:   "EVENT_TIME",
+				Description: "每行代表一条配送事件事实记录",
+			},
+			Fields: []dwdPlanningField{
+				{
+					Code: "EVENT_ID", Name: "事件ID", Role: "IDENTIFIER",
+					CanonicalType: "INTEGER", SemanticType: "IDENTIFIER",
+				},
+				{
+					Code: "ORDER_ID", Name: "订单ID", Role: "IDENTIFIER",
+					CanonicalType: "INTEGER", SemanticType: "IDENTIFIER",
+				},
+				{
+					Code: "COURIER_ID", Name: "骑手ID", Role: "IDENTIFIER",
+					CanonicalType: "INTEGER", SemanticType: "IDENTIFIER",
+				},
+				{
+					Code: "EVENT_TYPE", Name: "事件类型", Role: "DIMENSION",
+					CanonicalType: "STRING", SemanticType: "CATEGORY",
+				},
+				{
+					Code: "EVENT_TIME", Name: "事件时间", Role: "TIME",
+					CanonicalType: "DATETIME", SemanticType: "DATETIME",
+				},
+				{
+					Code: "LONGITUDE", Name: "经度", Role: "DIMENSION",
+					CanonicalType: "INTEGER", SemanticType: "TEXT",
+				},
+			},
+		}},
+	}
+}
+
+func TestNormalizeDWDClassificationsCorrectsFactlessDeliveryEvent(
+	t *testing.T,
+) {
+	input := factlessDeliveryEventPlanningInput()
+	normalized := normalizeDWDClassifications(
+		input,
+		[]dwdLLMClassification{{
+			DatasetVersionID:       "delivery_event_version",
+			Role:                   "DIMENSION",
+			DimensionKeyFieldCodes: []string{"EVENT_ID"},
+			DimensionAttributeFieldCodes: []string{
+				"ORDER_ID", "COURIER_ID", "EVENT_TYPE", "EVENT_TIME", "LONGITUDE",
+			},
+			Rationale: "每行是配送事件事实，不存在稳定实体，但输出角色误填为维度",
+		}},
+	)
+	if len(normalized) != 1 || normalized[0].Role != "FACT" ||
+		len(normalized[0].DimensionKeyFieldCodes) != 0 ||
+		len(normalized[0].DimensionAttributeFieldCodes) != 0 ||
+		!strings.Contains(normalized[0].Rationale, "原子事件/交易粒度") {
+		t.Fatalf("factless event was not corrected to FACT: %#v", normalized)
+	}
+	if err := validateDWDLLMClassifications(
+		input, input.Domain, normalized,
+	); err != nil {
+		t.Fatalf("corrected factless event classification is invalid: %v", err)
+	}
+}
+
+func TestValidateDWDClassificationsRejectsRawFactlessEventDIM(
+	t *testing.T,
+) {
+	input := factlessDeliveryEventPlanningInput()
+	err := validateDWDLLMClassifications(
+		input, input.Domain,
+		[]dwdLLMClassification{{
+			DatasetVersionID:             "delivery_event_version",
+			Role:                         "DIMENSION",
+			DimensionKeyFieldCodes:       []string{"EVENT_ID"},
+			DimensionAttributeFieldCodes: []string{"EVENT_TYPE", "EVENT_TIME"},
+			Rationale:                    "配送事件维度",
+		}},
+	)
+	if err == nil || !strings.Contains(err.Error(), "must be classified as FACT") {
+		t.Fatalf("raw factless event DIM validation error = %v", err)
+	}
+}
+
+func TestDimensionDesignBoundaryRejectsFactlessEventGrain(t *testing.T) {
+	table := factlessDeliveryEventPlanningInput().Tables[0]
+	_, err := normalizeDWDDimensionDesign(
+		table,
+		dwdLLMDimensionDesign{
+			SourceDatasetVersionID: table.VersionID,
+			Name:                   "配送事件维度表", Description: "错误的事件伪维度",
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "DIM design retains") {
+		t.Fatalf("factless event DIM design error = %v", err)
+	}
+}
+
+func TestFactOccurrenceKeyCannotBecomeEmbeddedDimension(t *testing.T) {
+	input := factlessDeliveryEventPlanningInput()
+	normalized := normalizeDWDClassifications(
+		input,
+		[]dwdLLMClassification{{
+			DatasetVersionID:             "delivery_event_version",
+			Role:                         "FACT",
+			DimensionKeyFieldCodes:       []string{"EVENT_ID"},
+			DimensionAttributeFieldCodes: []string{"EVENT_TYPE"},
+			Rationale:                    "配送事件事实并错误抽取事件维度",
+		}},
+	)
+	if len(normalized) != 1 ||
+		len(normalized[0].DimensionKeyFieldCodes) != 0 ||
+		len(normalized[0].DimensionAttributeFieldCodes) != 0 {
+		t.Fatalf("fact occurrence key survived DIM projection: %#v", normalized)
+	}
+}
+
+func TestFactOccurrenceGrainDoesNotMatchStableEntityKey(t *testing.T) {
+	tests := []struct {
+		code string
+		want bool
+	}{
+		{code: "EVENT_ID", want: true},
+		{code: "ORDER_ID", want: true},
+		{code: "DELIVERY_EVENT_ID", want: true},
+		{code: "COURIER_ID", want: false},
+		{code: "MERCHANT_ID", want: false},
+		{code: "DELIVERY_ZONE_ID", want: false},
+		{code: "EVENT_TYPE_ID", want: false},
+		{code: "RECORD_ID", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.code, func(t *testing.T) {
+			table := dwdPlanningTable{
+				OutputGrain: OutputGrain{KeyFields: []string{test.code}},
+				Fields: []dwdPlanningField{{
+					Code: test.code, Role: "IDENTIFIER",
+					CanonicalType: "STRING", SemanticType: "IDENTIFIER",
+				}},
+			}
+			if got := hasDWDFactOccurrenceGrain(table); got != test.want {
+				t.Fatalf(
+					"hasDWDFactOccurrenceGrain(%s) = %t, want %t",
+					test.code, got, test.want,
+				)
+			}
+		})
 	}
 }
 
@@ -543,6 +701,10 @@ func TestNormalizeDWDClassificationsFiltersTransactionalEntityAttributes(
 					Code: "status", Role: "DIMENSION",
 					CanonicalType: "STRING", SemanticType: "CATEGORY",
 				},
+				{
+					Code: "order_id", Role: "IDENTIFIER",
+					CanonicalType: "INTEGER", SemanticType: "IDENTIFIER",
+				},
 			},
 		}},
 	}
@@ -554,7 +716,7 @@ func TestNormalizeDWDClassificationsFiltersTransactionalEntityAttributes(
 			DimensionKeyFieldCodes: []string{"merchant_id"},
 			DimensionAttributeFieldCodes: []string{
 				"merchant_name", "onboard_time", "rating",
-				"commission_rate", "status",
+				"commission_rate", "status", "order_id",
 			},
 			Rationale: "每行代表一个商户实体",
 		}},

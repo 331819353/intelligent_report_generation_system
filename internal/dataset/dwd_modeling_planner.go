@@ -15,11 +15,11 @@ import (
 )
 
 const (
-	dwdModelingPromptVersion        = "warehouse-modeling-v10"
-	dwdClassificationPromptVersion  = "warehouse-classification-v5"
-	dwdClassificationMergeVersion   = "warehouse-classification-merge-v2"
+	dwdModelingPromptVersion        = "warehouse-modeling-v11"
+	dwdClassificationPromptVersion  = "warehouse-classification-v6"
+	dwdClassificationMergeVersion   = "warehouse-classification-merge-v3"
 	dwdLegacyClassificationVersion  = "warehouse-classification-v4"
-	dwdDimensionDesignPromptVersion = "warehouse-dimension-design-v3"
+	dwdDimensionDesignPromptVersion = "warehouse-dimension-design-v4"
 	dwdFactDesignPromptVersion      = "warehouse-fact-design-v4"
 	maxDWDModelingRepairContent     = 64 << 10
 	dwdModelingInvocationAttempts   = 3
@@ -267,11 +267,11 @@ const dwdClassificationSystemPrompt = `你是企业数据仓库 ODS 多产物识
 - MASTER 是稳定核心主数据来源，落地时同样形成 DIM；DIMENSION 是普通分析实体来源。
 
 二、DWD/FACT 定义与同表边界
-- FACT 是原子业务事件、交易行或周期快照，回答“谁在何时对什么做了什么/处于什么状态”；DWD 每行保持该原子事实粒度，不做汇总。
+- FACT 是原子业务事件、交易行或周期快照，回答“谁在何时对什么做了什么/处于什么状态”；DWD 每行保持该原子事实粒度，不做汇总。事实可以没有数值度量：事件 ID + 事件时间 + 订单/人员等关联键构成无度量事件事实（factless fact），仍必须进入 DWD。
 - DWD 应包含事实/退化键、可关联 DIM 的外键、事件日期、原子度量、状态和追踪字段。
 - 只有属于同一业务过程、同一事实粒度、同一事件时间含义和相容更新节奏的信息才放在同一 DWD。订单头、订单行、支付、配送等粒度不同的过程不能混成一张明细表。
 
-逐表把主要行粒度判断为 FACT、DIMENSION、MASTER 或 OTHER，证据不足时使用 OTHER。必须按真实行粒度而不是表名判断：订单商品/订单行项目若一行代表一次订单中的一个商品项，并包含数量、成交单价、折扣、行金额等原子度量，role 是 FACT；输出粒度由日期/时间键和实体键共同组成且包含订单数、金额、数量、时长等度量的周期快照或日度聚合也必须是 FACT，绝不能判为 DIMENSION/MASTER。若同一 FACT 还含可由稳定业务键安全去重的实体属性，例如 SKU_ID + 商品名称 + 分类，可同时用 dimensionKeyFieldCodes 和 dimensionAttributeFieldCodes 声明一个抽取 DIM。
+逐表把主要行粒度判断为 FACT、DIMENSION、MASTER 或 OTHER，证据不足时使用 OTHER。必须按真实行粒度而不是表名判断：订单商品/订单行项目若一行代表一次订单中的一个商品项，并包含数量、成交单价、折扣、行金额等原子度量，role 是 FACT；输出粒度由日期/时间键和实体键共同组成的周期快照或日度聚合必须是 FACT；以 EVENT_ID、ORDER_ID、TRANSACTION_ID、PAYMENT_ID、DELIVERY_ID 等一次性业务过程键为粒度，并带事件时间、状态、参与方或追踪字段的无度量事件流水也必须是 FACT，绝不能判为 DIMENSION/MASTER。若同一 FACT 还含可由稳定业务键安全去重的实体属性，例如 SKU_ID + 商品名称 + 分类，可同时用 dimensionKeyFieldCodes 和 dimensionAttributeFieldCodes 声明一个抽取 DIM；事实行键、订单号和事件 ID 绝不能作为该实体 DIM 的键。
 
 个人信息主表若一人一行、以人员稳定属性为主，仍应判为 DIMENSION/MASTER，不能仅因业务要统计人数而改判 FACT，也不能把 person_count 放入 DIM。只有一人一事件或一人一快照日的输入才是 FACT；当前人数应由 COUNT(DISTINCT person_id) 计算，历史人数趋势应由“一人 × 快照日”的周期快照 DWD 承载。
 
@@ -286,8 +286,8 @@ const dwdClassificationMergeSystemPrompt = `你是企业数据仓库 ODS 分类�
 2. 不得因为别的 ODS 可能生成同名或同实体 DIM，就把已经独立验证通过的 MASTER/DIMENSION 改为 OTHER，也不得清空 FACT 中已经验证通过的实体维度投影。所有候选 DIM 必须先生成并保存为未发布草稿。
 3. 可在 rationale 中简短标注可能的同名/同实体候选，供落地后的 DIM 校验器复核；本阶段不决定保留或合并哪个 DIM。
 4. 不得仅按表名推断实体相同。周期快照或事实投影即使带有相同实体键，也必须保持原 FACT 角色。
-6. 周期快照、日度聚合、订单行、支付、配送事件等事实仍保持 FACT；交易度量、事件时间、订单号和事实行号不得进入 DIM 投影。
-7. rationale 必须简短明确地说明最终行粒度与是否生成候选 DIM。不要返回 SQL、DDL、物理表、Markdown 或额外解释。
+5. 周期快照、日度聚合、订单行、支付、配送事件及其他无度量事件流水仍保持 FACT；交易度量、事件时间、订单号、事件 ID 和事实行号不得进入 DIM 投影。
+6. rationale 必须简短明确地说明最终行粒度与是否生成候选 DIM。不要返回 SQL、DDL、物理表、Markdown 或额外解释。
 
 输出只能是 JSON Schema 指定的完整对象。`
 
@@ -297,6 +297,7 @@ const dwdDimensionDesignSystemPrompt = `你是企业数据仓库 DIM 设计师�
 - DIM 每行稳定代表一个业务实体键，用于解释、筛选和分组事实。
 - DIM 包含实体键及函数依赖于该键的稳定名称、分类、状态、组织、区域、生命周期或有效期属性，不保存交易度量、事件次数或汇总人数。
 - 同一 DIM 内字段必须具有同一实体键、同一粒度、相同生命周期/更新节奏和相容治理级别；不同实体、不同粒度、多值重复组、事件流水或权限边界不同的信息不得合并。
+- EVENT_ID、ORDER_ID、TRANSACTION_ID、PAYMENT_ID、DELIVERY_ID 等一次性业务过程键不是实体维度键；包含事件时间、参与方外键、状态轨迹或地理轨迹的事件记录必须留在 DWD，即使没有金额、数量等数值度量也不得设计成 DIM。
 - 一人一行的个人主表属于人员 DIM。人数是指标：当前人数使用 COUNT(DISTINCT person_id)，历史趋势使用“一人 × 快照日”的周期快照 DWD，不能在人员 DIM 中新增 person_count。
 
 设计要求：
@@ -443,7 +444,7 @@ func (planner *OrchestratedDWDModelingPlanner) Classify(
 		}
 		invocation.Request.Messages = dwdStageRepairMessages(
 			baseMessages, result, invokeErr,
-			`请只修复 ODS 多产物识别：domain 必须等于输入；classifications 必须逐表覆盖且不重复，只能使用输入的精确 datasetVersionId 和字段 code；role 只能是 FACT、DIMENSION、MASTER、OTHER。先按原提示中的 DIM、DWD 和同表边界复核真实行粒度。日期/时间参与输出粒度且包含订单数、金额、数量或时长等度量的周期快照/日度聚合必须是 FACT；role 必须与 rationale 的 DIM/DWD 结论一致。FACT 可以通过 dimensionKeyFieldCodes + dimensionAttributeFieldCodes 声明一个内嵌实体维度；日期/时间不能作为实体键，任何 DIM 投影都不能包含交易度量、订单号、事实行号、汇总人数或事件时间。一人一行的个人主表仍是 DIMENSION/MASTER，不能只因需要统计人数改判 FACT。没有可靠实体时两个数组必须为空。rationale 保持简短。不要返回 outputs、SQL、Markdown 或解释。`,
+			`请只修复 ODS 多产物识别：domain 必须等于输入；classifications 必须逐表覆盖且不重复，只能使用输入的精确 datasetVersionId 和字段 code；role 只能是 FACT、DIMENSION、MASTER、OTHER。先按原提示中的 DIM、DWD 和同表边界复核真实行粒度。日期/时间参与输出粒度的周期快照/日度聚合必须是 FACT；以事件 ID、订单号、交易号、支付号、配送号等一次性过程键为粒度并带事件时间、状态、参与方或轨迹字段的无度量事件流水也是 FACT。role 必须与 rationale 的 DIM/DWD 结论一致。FACT 可以通过 dimensionKeyFieldCodes + dimensionAttributeFieldCodes 声明一个内嵌实体维度，但事实行键和过程单号不能作为实体键；任何 DIM 投影都不能包含交易度量、事件时间或汇总人数。一人一行的个人主表仍是 DIMENSION/MASTER。没有可靠实体时两个数组必须为空。rationale 保持简短。不要返回 outputs、SQL、Markdown 或解释。`,
 			attempt == dwdStageInvocationAttempts-2,
 		)
 	}
@@ -552,7 +553,7 @@ func (planner *OrchestratedDWDModelingPlanner) MergeClassifications(
 		}
 		invocation.Request.Messages = dwdStageRepairMessages(
 			baseMessages, result, invokeErr,
-			`请只修复最终领域分类合并结果：逐一覆盖全部输入 ODS；保留每张 ODS 已独立验证通过的角色和候选维度字段，不得因可能重名而提前改为 OTHER 或清空维度投影。DIM 将先全部落地为未发布草稿，再由独立校验器按表名和字段裁决。不得把周期快照或交易明细改成 DIM，不得新增字段。只能使用输入中的精确版本和字段 code，rationale 简短说明最终粒度。`,
+			`请只修复最终领域分类合并结果：逐一覆盖全部输入 ODS；保留每张 ODS 已独立验证通过的角色和候选维度字段，不得因可能重名而提前改为 OTHER 或清空维度投影。DIM 将先全部落地为未发布草稿，再由独立校验器按表名和字段裁决。不得把周期快照、交易明细或以一次性过程键和事件时间为粒度的无度量事件流水改成 DIM，不得新增字段。只能使用输入中的精确版本和字段 code，rationale 简短说明最终粒度。`,
 			attempt == dwdStageInvocationAttempts-2,
 		)
 	}
@@ -2052,6 +2053,18 @@ func normalizeDWDClassifications(
 				}
 				classification.DimensionAttributeFieldCodes = filtered
 			}
+			// 事件、交易和快照事实不依赖数值度量才能成立。对于结构证据
+			// 已足够明确的事实粒度，本地合同直接纠正主角色，避免模型在
+			// rationale 已承认“事件事实”时仍因 schema 填成 DIMENSION。
+			if factKind := dwdNonEntityFactKind(table); factKind != "" &&
+				classification.Role != "FACT" {
+				classification.Role = "FACT"
+				classification.DimensionKeyFieldCodes = []string{}
+				classification.DimensionAttributeFieldCodes = []string{}
+				classification.Rationale =
+					"本地粒度合同纠正为 FACT：" + factKind +
+						"；不生成实体 DIM"
+			}
 			// FACT/OTHER 的维度抽取是可选产物，不能让模型返回的半份建议
 			// 破坏主表角色分类。FACT 只保留稳定实体键与非交易说明属性；
 			// 清洗后若键或属性任一为空，或抽取粒度等于事实粒度，则确定性
@@ -2223,6 +2236,7 @@ func stableDWDEmbeddedDimensionKeys(
 		normalizedCode := strings.ToLower(strings.TrimSpace(code))
 		if !exists ||
 			isDWDTemporalField(field) ||
+			isDWDFactOccurrenceKey(field) ||
 			(!strings.EqualFold(field.Role, "IDENTIFIER") &&
 				!strings.HasSuffix(normalizedCode, "_id") &&
 				!strings.HasSuffix(normalizedCode, "_key")) {
@@ -2251,7 +2265,8 @@ func stableDWDEmbeddedDimensionAttributes(
 		role := strings.ToUpper(strings.TrimSpace(field.Role))
 		semantic := strings.ToUpper(strings.TrimSpace(field.SemanticType))
 		if role == "MEASURE" || role == "TIME" ||
-			semantic == "AMOUNT" || semantic == "QUANTITY" {
+			semantic == "AMOUNT" || semantic == "QUANTITY" ||
+			isDWDFactOccurrenceKey(field) {
 			continue
 		}
 		result = append(result, field.Code)
@@ -2272,7 +2287,8 @@ func stableDWDEntityDimensionAttributes(
 	for _, code := range attributeCodes {
 		field, exists := fields[code]
 		if !exists || keys[strings.ToLower(strings.TrimSpace(code))] ||
-			isDWDTransactionalMeasure(field) {
+			isDWDTransactionalMeasure(field) ||
+			isDWDFactOccurrenceKey(field) {
 			continue
 		}
 		result = append(result, field.Code)
@@ -2282,19 +2298,109 @@ func stableDWDEntityDimensionAttributes(
 
 func isDWDPeriodicSnapshotFact(table dwdPlanningTable) bool {
 	fields := planningFieldsByCode(table)
-	hasTemporalGrain := false
+	hasSnapshotGrain := false
+	hasNonTemporalGrain := false
 	for _, code := range table.OutputGrain.KeyFields {
 		field, exists := fields[code]
-		if exists && isDWDTemporalField(field) {
-			hasTemporalGrain = true
-			break
+		if !exists {
+			continue
 		}
+		if isDWDTemporalField(field) {
+			if isDWDSnapshotPeriodField(field) {
+				hasSnapshotGrain = true
+			}
+			continue
+		}
+		hasNonTemporalGrain = true
 	}
-	if !hasTemporalGrain {
+	if !hasSnapshotGrain {
 		return false
+	}
+	if hasNonTemporalGrain {
+		return true
 	}
 	for _, field := range table.Fields {
 		if isDWDTransactionalMeasure(field) {
+			return true
+		}
+	}
+	return false
+}
+
+// dwdNonEntityFactKind recognizes fact grains that commonly have no numeric
+// measures. A delivery event with EVENT_ID + EVENT_TIME + ORDER_ID/COURIER_ID is
+// still an atomic fact; treating EVENT_ID as an entity key creates a volatile
+// pseudo-dimension that grows for every business occurrence.
+func dwdNonEntityFactKind(table dwdPlanningTable) string {
+	if isDWDPeriodicSnapshotFact(table) {
+		return "周期快照粒度"
+	}
+	if hasDWDFactOccurrenceGrain(table) {
+		return "原子事件/交易粒度"
+	}
+	return ""
+}
+
+func hasDWDFactOccurrenceGrain(table dwdPlanningTable) bool {
+	fields := planningFieldsByCode(table)
+	for _, code := range table.OutputGrain.KeyFields {
+		field, exists := fields[code]
+		if exists && isDWDFactOccurrenceKey(field) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDWDFactOccurrenceKey(field dwdPlanningField) bool {
+	code := strings.ToLower(strings.TrimSpace(field.Code))
+	if code == "" || isDWDTemporalField(field) {
+		return false
+	}
+	stem := code
+	for _, suffix := range []string{
+		"_identifier", "_number", "_code", "_key", "_no", "_id",
+	} {
+		stem = strings.TrimSuffix(stem, suffix)
+	}
+	switch stem {
+	case "event", "transaction", "order", "payment", "delivery",
+		"shipment", "trip", "session", "log", "request",
+		"task", "operation", "activity", "snapshot", "order_item",
+		"order_line", "transaction_line":
+		return true
+	}
+	for _, suffix := range []string{
+		"_event", "_transaction", "_order", "_payment", "_delivery",
+		"_shipment", "_trip", "_session", "_log",
+		"_request", "_task", "_operation", "_activity", "_snapshot",
+		"_order_item", "_order_line", "_transaction_line",
+	} {
+		if strings.HasSuffix(stem, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDWDSnapshotPeriodField(field dwdPlanningField) bool {
+	if !isDWDTemporalField(field) {
+		return false
+	}
+	value := strings.ToLower(strings.TrimSpace(field.Code))
+	for _, lifecycle := range []string{
+		"effective", "valid_", "start", "end", "_from", "_to",
+		"birth", "register", "hire", "onboard", "created", "updated",
+	} {
+		if strings.Contains(value, lifecycle) {
+			return false
+		}
+	}
+	for _, marker := range []string{
+		"snapshot", "metric_", "stat_", "report_", "business_date",
+		"biz_date", "data_date", "as_of", "period", "day", "month",
+	} {
+		if strings.Contains(value, marker) {
 			return true
 		}
 	}
@@ -2476,6 +2582,13 @@ func dwdDimensionPlanningScope(
 			Description: "每行代表一个可治理的" +
 				strings.TrimSpace(table.Name) + "实体",
 		}
+		if factKind := dwdNonEntityFactKind(table); factKind != "" {
+			return dwdPlanningTable{}, dwdLLMClassification{},
+				fmt.Errorf(
+					"%w: requested DIM projection still has %s",
+					errDWDModelingInvalid, factKind,
+				)
+		}
 		return table, classification, nil
 	}
 	return dwdPlanningTable{}, dwdLLMClassification{},
@@ -2486,6 +2599,12 @@ func normalizeDWDDimensionDesign(
 	table dwdPlanningTable,
 	design dwdLLMDimensionDesign,
 ) (dwdLLMDimensionDesign, error) {
+	if factKind := dwdNonEntityFactKind(table); factKind != "" {
+		return dwdLLMDimensionDesign{}, fmt.Errorf(
+			"%w: DIM design retains %s",
+			errDWDModelingInvalid, factKind,
+		)
+	}
 	if design.SourceDatasetVersionID != table.VersionID ||
 		strings.TrimSpace(design.Name) == "" ||
 		strings.TrimSpace(design.Description) == "" ||
@@ -2782,13 +2901,14 @@ func validateDWDLLMClassifications(
 		fields := planningFieldsByCode(table)
 		if (classification.Role == "DIMENSION" ||
 			classification.Role == "MASTER") &&
-			isDWDPeriodicSnapshotFact(table) {
+			dwdNonEntityFactKind(table) != "" {
 			return fmt.Errorf(
-				"%w: dataset %s is a periodic snapshot FACT; "+
-					"reclassify the primary role as FACT and declare only "+
-					"the stable embedded entity projection as a dimension",
+				"%w: dataset %s has %s and must be classified as FACT; "+
+					"only a separately provable stable entity projection "+
+					"may produce a DIM",
 				errDWDModelingInvalid,
 				classification.DatasetVersionID,
+				dwdNonEntityFactKind(table),
 			)
 		}
 		dimensionKeyFieldCodes := append(
@@ -2847,6 +2967,15 @@ func validateDWDLLMClassifications(
 					classification.DatasetVersionID,
 				)
 			}
+			if classification.Role == "FACT" &&
+				isDWDFactOccurrenceKey(field) {
+				return fmt.Errorf(
+					"%w: fact occurrence key %s cannot become an entity "+
+						"dimension key in dataset %s",
+					errDWDModelingInvalid, code,
+					classification.DatasetVersionID,
+				)
+			}
 			keys[key] = true
 		}
 		attributes := map[string]bool{}
@@ -2876,9 +3005,11 @@ func validateDWDLLMClassifications(
 				)
 			}
 			if isDWDTransactionalMeasure(field) ||
+				isDWDFactOccurrenceKey(field) ||
 				(classification.Role == "FACT" && role == "TIME") {
 				return fmt.Errorf(
-					"%w: dimension attribute %s is transactional in dataset %s",
+					"%w: dimension attribute %s is transactional or a fact "+
+						"occurrence key in dataset %s",
 					errDWDModelingInvalid, code,
 					classification.DatasetVersionID,
 				)

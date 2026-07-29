@@ -1299,6 +1299,60 @@ func (worker *DWDModelingWorker) prepareDIMStage(
 			if currentSnapshotHash != expectedSnapshotHash {
 				return errDWDModelingSubjectChange
 			}
+			tableByVersion := make(
+				map[string]dwdPlanningTable, len(input.Tables),
+			)
+			for _, table := range input.Tables {
+				tableByVersion[table.VersionID] = table
+			}
+			// A previous classifier may have created a DIM from an atomic event
+			// or snapshot fact. Once the stronger grain contract corrects that
+			// role, retire only the untouched unpublished system draft. Published,
+			// reviewed, edited or referenced assets remain visible for governance.
+			for _, classification := range classifications {
+				if classificationProducesDimension(classification) {
+					continue
+				}
+				table, exists := tableByVersion[classification.DatasetVersionID]
+				if !exists {
+					return errDWDModelingSubjectChange
+				}
+				factKind := dwdNonEntityFactKind(table)
+				if factKind == "" {
+					continue
+				}
+				source, exists := assetsByVersion[classification.DatasetVersionID]
+				if !exists {
+					return errDWDModelingSubjectChange
+				}
+				dimDatasetID, mapped, retired, err :=
+					worker.retireInvalidFactGeneratedDIMDraftTx(
+						ctx, tx, claim, source,
+					)
+				if err != nil {
+					return err
+				}
+				if !mapped {
+					continue
+				}
+				if retired {
+					stage.Retired++
+					stage.Items = append(stage.Items, dwdModelingResultItem{
+						Layer: string(LayerDIM), SourceDatasetID: source.DatasetID,
+						SourceVersionID: source.VersionID, DatasetID: dimDatasetID,
+						Action: "RETIRED", Reason: "NON_ENTITY_FACT",
+						ErrorMessage: factKind,
+					})
+					continue
+				}
+				stage.Skipped++
+				stage.Items = append(stage.Items, dwdModelingResultItem{
+					Layer: string(LayerDIM), SourceDatasetID: source.DatasetID,
+					SourceVersionID: source.VersionID, DatasetID: dimDatasetID,
+					Action: "SKIPPED", Reason: "NON_ENTITY_FACT_REQUIRES_REVIEW",
+					ErrorMessage: factKind,
+				})
+			}
 			for _, failure := range failures {
 				source, exists := assetsByVersion[failure.SourceDatasetVersionID]
 				if !exists {
@@ -3501,6 +3555,31 @@ func buildLLMDesignedDIMDocument(
 			"%w: DIM source has no governed entity key", errDWDModelingInvalid,
 		)
 	}
+	scopedGrain := source.Document.OutputGrain
+	scopedGrain.KeyFields = append([]string(nil), keys...)
+	scoped := dwdPlanningTable{
+		DatasetID: source.DatasetID, VersionID: source.VersionID,
+		Name: design.Name, Description: design.Description,
+		OutputGrain: scopedGrain,
+		Fields:      make([]dwdPlanningField, 0, len(designByField)),
+	}
+	for _, field := range source.Document.Fields {
+		if _, selected := designByField[field.Code]; !selected {
+			continue
+		}
+		scoped.Fields = append(scoped.Fields, dwdPlanningField{
+			Code: field.Code, Name: field.Name,
+			Description: field.Description, Role: field.Role,
+			CanonicalType: field.CanonicalType,
+			SemanticType:  field.SemanticType, Nullable: field.Nullable,
+		})
+	}
+	if factKind := dwdNonEntityFactKind(scoped); factKind != "" {
+		return Document{}, "", fmt.Errorf(
+			"%w: DIM projection retains %s",
+			errDWDModelingInvalid, factKind,
+		)
+	}
 	datasetCode, err := businessModeledDatasetCode(
 		LayerDIM, domain, source, keys,
 	)
@@ -4493,6 +4572,33 @@ func (worker *DWDModelingWorker) retireSuppressedGeneratedDIMDraftTx(
 	source dwdODSAsset,
 	authoritativeEntitySignatures map[string]bool,
 ) (datasetID string, mapped, retired bool, err error) {
+	return worker.retireGeneratedDIMDraftTx(
+		ctx, tx, claim, source, authoritativeEntitySignatures,
+		true, false, "DUPLICATE_DIM_KEEP_ONE",
+	)
+}
+
+func (worker *DWDModelingWorker) retireInvalidFactGeneratedDIMDraftTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	claim dwdModelingClaim,
+	source dwdODSAsset,
+) (datasetID string, mapped, retired bool, err error) {
+	return worker.retireGeneratedDIMDraftTx(
+		ctx, tx, claim, source, nil, false, true, "NON_ENTITY_FACT",
+	)
+}
+
+func (worker *DWDModelingWorker) retireGeneratedDIMDraftTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	claim dwdModelingClaim,
+	source dwdODSAsset,
+	authoritativeEntitySignatures map[string]bool,
+	requireAuthoritativeSignature bool,
+	requireFactOccurrenceGrain bool,
+	reason string,
+) (datasetID string, mapped, retired bool, err error) {
 	var (
 		datasetVersion, publishedVersionCount  int64
 		datasetStatus, draftStatus             string
@@ -4589,10 +4695,19 @@ func (worker *DWDModelingWorker) retireSuppressedGeneratedDIMDraftTx(
 			},
 		)
 	}
+	// Correcting a source to FACT is not sufficient authority to delete a
+	// previously extracted stable entity DIM. Automatic cleanup is limited
+	// further to drafts whose own grain is an occurrence key such as EVENT_ID
+	// or ORDER_ID.
+	if requireFactOccurrenceGrain &&
+		!hasDWDFactOccurrenceGrain(generatedTable) {
+		return datasetID, true, false, nil
+	}
 	generatedSignature, strong := dwdDimensionEntitySignature(
 		generatedTable, document.OutputGrain.KeyFields,
 	)
-	if !strong || !authoritativeEntitySignatures[generatedSignature] {
+	if requireAuthoritativeSignature &&
+		(!strong || !authoritativeEntitySignatures[generatedSignature]) {
 		return datasetID, true, false, nil
 	}
 	safe := !deleted &&
@@ -4641,10 +4756,10 @@ func (worker *DWDModelingWorker) retireSuppressedGeneratedDIMDraftTx(
 			  'sourceDatasetId',$4::text,
 			  'sourceDatasetVersionId',$5::text,
 			  'dwdModelingJobId',$6::text,
-			  'reason','DUPLICATE_DIM_KEEP_ONE'
+			  'reason',$7::text
 			))`,
 		claim.TenantID, claim.ActorID, datasetID, source.DatasetID,
-		source.VersionID, claim.ID,
+		source.VersionID, claim.ID, reason,
 	); err != nil {
 		return "", false, false, err
 	}
