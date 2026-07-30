@@ -67,6 +67,7 @@ var (
 	ErrQueryConflict              = errors.New("query run already exists")
 	ErrLayerDependencyUnavailable = errors.New("dataset layer dependency is unavailable")
 	ErrLLMTriggerUnavailable      = errors.New("dataset LLM trigger is unavailable")
+	ErrLLMTriggerScopeInvalid     = errors.New("dataset LLM trigger scope is invalid")
 	ErrSemanticNamingUnavailable  = errors.New("dataset semantic naming is unavailable")
 	ErrSemanticNamingInvalid      = errors.New("dataset semantic naming output is invalid")
 )
@@ -227,11 +228,14 @@ type FactContract struct {
 }
 
 type AtomicMeasureContract struct {
-	Field      string `json:"field"`
-	Additivity string `json:"additivity"`
-	Unit       string `json:"unit,omitempty"`
-	Currency   string `json:"currency,omitempty"`
-	NullPolicy string `json:"nullPolicy"`
+	Field              string `json:"field"`
+	Additivity         string `json:"additivity"`
+	ValueBehavior      string `json:"valueBehavior,omitempty"`
+	DefaultAggregation string `json:"defaultAggregation,omitempty"`
+	TimeAggregation    string `json:"timeAggregation,omitempty"`
+	Unit               string `json:"unit,omitempty"`
+	Currency           string `json:"currency,omitempty"`
+	NullPolicy         string `json:"nullPolicy"`
 }
 
 // AnalysisContract 描述 DWS 的市场通用分析意图和多事实共同粒度。它只保存
@@ -247,12 +251,14 @@ type AnalysisContract struct {
 }
 
 type AnalysisMeasureContract struct {
-	Field         string   `json:"field"`
-	SourceNodeIDs []string `json:"sourceNodeIds"`
-	Aggregation   string   `json:"aggregation"`
-	Additivity    string   `json:"additivity"`
-	Unit          string   `json:"unit,omitempty"`
-	Currency      string   `json:"currency,omitempty"`
+	Field           string   `json:"field"`
+	SourceNodeIDs   []string `json:"sourceNodeIds"`
+	Aggregation     string   `json:"aggregation"`
+	Additivity      string   `json:"additivity"`
+	ValueBehavior   string   `json:"valueBehavior,omitempty"`
+	TimeAggregation string   `json:"timeAggregation,omitempty"`
+	Unit            string   `json:"unit,omitempty"`
+	Currency        string   `json:"currency,omitempty"`
 }
 
 // JoinCondition 保存 Join 两侧表达式，禁止保存拼接后的 SQL。

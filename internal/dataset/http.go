@@ -105,14 +105,20 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 	})))
 	registerLLMTrigger := func(path string, kind LLMTriggerKind) {
 		mux.Handle(path, protect("MANAGE", nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			body, bodyErr := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024))
-			if r.URL.RawQuery != "" || bodyErr != nil || strings.TrimSpace(string(body)) != "" {
-				writeDatasetJSON(w, http.StatusBadRequest, map[string]string{"code": "DATASET_LLM_TRIGGER_INVALID", "message": "LLM 手动触发请求不接受请求体或查询参数"})
+			body, bodyErr := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<10))
+			if r.URL.RawQuery != "" || bodyErr != nil {
+				writeDatasetJSON(w, http.StatusBadRequest, map[string]string{"code": "DATASET_LLM_TRIGGER_INVALID", "message": "智能建模触发请求参数无效"})
+				return
+			}
+			scope := LLMTriggerScope{}
+			if strings.TrimSpace(string(body)) != "" &&
+				json.Unmarshal(body, &scope) != nil {
+				writeDatasetJSON(w, http.StatusBadRequest, map[string]string{"code": "DATASET_LLM_TRIGGER_INVALID", "message": "智能建模范围格式无效"})
 				return
 			}
 			claims, _ := auth.ClaimsFromContext(r.Context())
 			result, err := service.TriggerLLM(
-				r.Context(), claims.TenantID, claims.Subject, kind,
+				r.Context(), claims.TenantID, claims.Subject, kind, scope,
 			)
 			if err != nil {
 				writeDatasetError(w, err)
@@ -127,6 +133,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 	// 兼容旧客户端；组合入口不再隐式触发 DIM，只执行明细建模。
 	registerLLMTrigger("POST /api/v1/datasets/trigger-dim-dwd-modeling", LLMTriggerDWDModeling)
 	registerLLMTrigger("POST /api/v1/datasets/trigger-dws-modeling", LLMTriggerDWSModeling)
+	registerLLMTrigger("POST /api/v1/datasets/trigger-ads-modeling", LLMTriggerADSModeling)
 	mux.Handle("GET /api/v1/datasets/{id}", protect("READ", objectID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, _ := auth.ClaimsFromContext(r.Context())
 		record, err := service.Get(r.Context(), claims.TenantID, r.PathValue("id"))
@@ -449,6 +456,13 @@ func writeDatasetError(w http.ResponseWriter, err error) {
 		writeDatasetJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "DATASET_PUBLISH_UNAVAILABLE", "message": "发布试跑服务暂时不可用"})
 	case errors.Is(err, ErrLLMTriggerUnavailable):
 		writeDatasetJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "DATASET_LLM_TRIGGER_UNAVAILABLE", "message": "数据集智能建模触发服务暂时不可用"})
+	case errors.Is(err, ErrLLMTriggerScopeInvalid):
+		var scopeErr *LLMTriggerScopeError
+		message := "所选数据集未通过建模规则校验"
+		if errors.As(err, &scopeErr) && strings.TrimSpace(scopeErr.Message) != "" {
+			message = scopeErr.Message
+		}
+		writeDatasetJSON(w, http.StatusUnprocessableEntity, map[string]string{"code": "DATASET_LLM_TRIGGER_SCOPE_INVALID", "message": message})
 	case errors.Is(err, ErrSemanticNamingUnavailable):
 		writeDatasetJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "DATASET_SEMANTIC_NAMING_UNAVAILABLE", "message": "DWD/DWS/ADS 语义命名服务暂时不可用，请稍后重试"})
 	case errors.Is(err, ErrSemanticNamingInvalid):

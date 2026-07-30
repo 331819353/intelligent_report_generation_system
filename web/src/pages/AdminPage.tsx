@@ -99,6 +99,7 @@ const backgroundFocusCopy: Record<BackgroundTaskFocus, string> = {
   DIM_MODELING: '维度建模任务',
   DWD_MODELING: '明细建模任务',
   DWS_MODELING: '主题建模任务',
+  ADS_MODELING: '应用建模任务',
 }
 const dimensionModelingKinds = new Set([
   'ODS_DOMAIN_CLASSIFICATION',
@@ -107,8 +108,10 @@ const dimensionModelingKinds = new Set([
 const matchesBackgroundFocus = (
   task: BackgroundTask,
   focus: BackgroundTaskFocus | null,
-) => !focus || (focus === 'DWS_MODELING'
-  ? task.kind === 'DWS_MODELING'
+) => !focus || (focus === 'ADS_MODELING'
+  ? task.kind === 'ADS_MODELING'
+  : focus === 'DWS_MODELING'
+    ? task.kind === 'DWS_MODELING'
   : focus === 'DWD_MODELING'
     ? task.kind === 'DWD_FACT_MODELING'
     : dimensionModelingKinds.has(task.kind))
@@ -383,8 +386,8 @@ export function AdminPage() {
           <article className="metric-card"><span>数据源</span><strong>{sourceCount ?? '—'}</strong><small>{sourceCount ? '已接入当前租户' : '当前未配置'}</small></article>
           <article className="metric-card"><span>已发布报告</span><strong>0</strong><small>当前未发布</small></article>
           <article className="metric-card"><span>数据集</span><strong>{datasetCount ?? '—'}</strong><small>{datasetCount ? '当前租户数据集' : '当前未配置'}</small></article>
-          <button className="metric-card workbench-task-card" type="button" aria-haspopup="dialog" aria-label={`待处理任务 ${pendingValue}`} onClick={openApprovalQueue}>
-            <span>待处理任务</span><strong>{pendingValue}</strong><small>{hasAnyLoadError ? '部分分类加载失败，点击查看' : totalTasks ? '按类型进入审批' : '任务队列为空'}</small>
+          <button className="metric-card workbench-task-card" type="button" aria-haspopup="dialog" aria-label={`审批中心 ${pendingValue}`} onClick={openApprovalQueue}>
+            <span>审批中心</span><strong>{pendingValue}</strong><small>{hasAnyLoadError ? '部分分类加载失败，点击查看' : totalTasks ? '按类型进入审批' : '任务队列为空'}</small>
             <ClipboardText aria-hidden="true" size={22} weight="duotone" />
           </button>
           <button className="metric-card workbench-task-card" type="button" aria-haspopup="dialog" aria-label={`后台任务 ${backgroundPage.activeCount}`} onClick={openBackgroundTasks}>
@@ -398,7 +401,7 @@ export function AdminPage() {
       {queueOpen && <div className="workbench-review-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !busyAction) setQueueOpen(false) }}>
         <section className="workbench-review-dialog" role="dialog" aria-modal="true" aria-labelledby="workbench-review-title">
           <header>
-            <div><span className="eyebrow">待处理任务</span><h2 id="workbench-review-title">统一审批中心</h2><p>数据源和数据集发布申请按业务类型集中展示。</p></div>
+            <div><span className="eyebrow">审批中心</span><h2 id="workbench-review-title">统一审批中心</h2><p>数据源和数据集发布申请按业务类型集中展示。</p></div>
             <button type="button" aria-label="关闭统一审批中心" disabled={Boolean(busyAction)} onClick={() => setQueueOpen(false)}><X size={20} /></button>
           </header>
 

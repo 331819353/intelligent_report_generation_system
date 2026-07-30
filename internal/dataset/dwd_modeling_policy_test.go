@@ -771,6 +771,102 @@ func TestNormalizeDWDClassificationsFiltersTransactionalEntityAttributes(
 	}
 }
 
+func TestDWDMeasureContractOverridesAdditiveGuessForCumulativeAndPointValues(
+	t *testing.T,
+) {
+	tests := []struct {
+		name, code, displayName, proposed, behavior string
+	}{
+		{
+			name: "cumulative", code: "sales_ytd",
+			displayName: "本年累计销售额", proposed: "FLOW",
+			behavior: "CUMULATIVE",
+		},
+		{
+			name: "point in time", code: "ending_inventory",
+			displayName: "期末库存", proposed: "FLOW",
+			behavior: "POINT_IN_TIME",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			contract := dwdAtomicMeasureContract(
+				dwdLLMField{
+					OutputCode: test.code, OutputName: test.displayName,
+					MeasureBehavior: test.proposed,
+				},
+				Field{
+					Code: test.code, Name: test.displayName,
+					Role: "MEASURE", CanonicalType: "DECIMAL",
+				},
+			)
+			if contract.ValueBehavior != test.behavior ||
+				contract.Additivity != "SEMI_ADDITIVE" ||
+				contract.DefaultAggregation != "SUM" ||
+				contract.TimeAggregation != "LAST" {
+				t.Fatalf("measure contract = %#v", contract)
+			}
+		})
+	}
+}
+
+func TestConsolidateContainedDimensionsKeepsIndependentKeysSeparate(
+	t *testing.T,
+) {
+	table := dwdPlanningTable{
+		VersionID: "entity_version",
+		Fields: []dwdPlanningField{
+			{Code: "country_id", Role: "IDENTIFIER", CanonicalType: "STRING"},
+			{Code: "city_id", Role: "IDENTIFIER", CanonicalType: "STRING"},
+			{Code: "product_id", Role: "IDENTIFIER", CanonicalType: "STRING"},
+			{Code: "country_name", Role: "ATTRIBUTE", CanonicalType: "STRING"},
+			{Code: "city_name", Role: "ATTRIBUTE", CanonicalType: "STRING"},
+			{Code: "product_name", Role: "ATTRIBUTE", CanonicalType: "STRING"},
+		},
+	}
+	contained := consolidateContainedDWDDimensions(
+		table,
+		dwdLLMClassification{
+			Role:                         "DIMENSION",
+			DimensionKeyFieldCodes:       []string{"country_id"},
+			DimensionAttributeFieldCodes: []string{"country_name"},
+			AdditionalDimensions: []dwdLLMDimensionProjection{{
+				Code: "city", Name: "城市",
+				DimensionKeyFieldCodes:       []string{"country_id", "city_id"},
+				DimensionAttributeFieldCodes: []string{"city_name"},
+			}},
+		},
+	)
+	if len(contained.AdditionalDimensions) != 0 ||
+		!sameDWDStringSet(
+			contained.DimensionKeyFieldCodes,
+			[]string{"country_id", "city_id"},
+		) ||
+		!sameDWDStringSet(
+			contained.DimensionAttributeFieldCodes,
+			[]string{"country_name", "city_name"},
+		) {
+		t.Fatalf("contained dimensions were not unified: %#v", contained)
+	}
+
+	independent := consolidateContainedDWDDimensions(
+		table,
+		dwdLLMClassification{
+			Role:                         "DIMENSION",
+			DimensionKeyFieldCodes:       []string{"country_id"},
+			DimensionAttributeFieldCodes: []string{"country_name"},
+			AdditionalDimensions: []dwdLLMDimensionProjection{{
+				Code: "product", Name: "商品",
+				DimensionKeyFieldCodes:       []string{"product_id"},
+				DimensionAttributeFieldCodes: []string{"product_name"},
+			}},
+		},
+	)
+	if len(independent.AdditionalDimensions) != 1 {
+		t.Fatalf("independent dimensions were incorrectly merged: %#v", independent)
+	}
+}
+
 func TestExpandedDWDClassificationsUsesLatestPublishedDIMContract(
 	t *testing.T,
 ) {
@@ -861,6 +957,120 @@ func TestExpandedDWDClassificationsUsesLatestPublishedDIMContract(
 		factPlanningInput, input.Domain, got,
 	); err != nil {
 		t.Fatalf("latest published DIM contract is invalid: %v", err)
+	}
+}
+
+func TestClassificationDimensionSpecsSupportsTwoEntitiesFromOneODS(
+	t *testing.T,
+) {
+	input := dwdPlanningInput{
+		Domain: "交易",
+		Trigger: dwdPlanningTrigger{
+			DatasetID: "order_dataset", VersionID: "order_version",
+		},
+		Tables: []dwdPlanningTable{{
+			DatasetID: "order_dataset", VersionID: "order_version",
+			Name: "订单交易",
+			OutputGrain: OutputGrain{
+				KeyFields: []string{"order_id"}, TimeField: "event_time",
+			},
+			Fields: []dwdPlanningField{
+				{Code: "order_id", Role: "IDENTIFIER", CanonicalType: "STRING"},
+				{Code: "customer_id", Role: "IDENTIFIER", CanonicalType: "STRING"},
+				{Code: "customer_name", Role: "DIMENSION", CanonicalType: "STRING"},
+				{Code: "merchant_id", Role: "IDENTIFIER", CanonicalType: "STRING"},
+				{Code: "merchant_name", Role: "DIMENSION", CanonicalType: "STRING"},
+				{Code: "amount", Role: "MEASURE", CanonicalType: "DECIMAL"},
+				{Code: "event_time", Role: "TIME", CanonicalType: "DATETIME"},
+			},
+		}},
+	}
+	normalized := normalizeDWDClassifications(
+		input, []dwdLLMClassification{{
+			DatasetVersionID:       "order_version",
+			Role:                   "FACT",
+			DimensionKeyFieldCodes: []string{"customer_id"},
+			DimensionAttributeFieldCodes: []string{
+				"customer_name",
+			},
+			AdditionalDimensions: []dwdLLMDimensionProjection{{
+				Code: "merchant", Name: "商户",
+				DimensionKeyFieldCodes:       []string{"merchant_id"},
+				DimensionAttributeFieldCodes: []string{"merchant_name"},
+				Rationale:                    "每行一个稳定商户实体",
+			}},
+			Rationale: "每行一笔订单，同时包含客户和商户实体属性",
+		}},
+	)
+	if err := validateDWDLLMClassifications(
+		input, input.Domain, normalized,
+	); err != nil {
+		t.Fatalf("two-entity classification is invalid: %v", err)
+	}
+	specs := dwdDimensionSpecs(normalized)
+	if len(specs) != 2 {
+		t.Fatalf("dimension spec count = %d, want 2", len(specs))
+	}
+	if specs[0].MappingKey != "primary" ||
+		specs[1].MappingKey != "merchant" ||
+		specs[0].Identity == specs[1].Identity {
+		t.Fatalf("dimension specs = %#v", specs)
+	}
+}
+
+func TestValidateDWDFactRelationBatchPreservesPrimaryOnlyContract(
+	t *testing.T,
+) {
+	current := dwdPlanningTable{
+		VersionID: "order_version",
+		Fields: []dwdPlanningField{{
+			Code: "order_id", Role: "IDENTIFIER", CanonicalType: "STRING",
+		}},
+	}
+	candidate := dwdPlanningTable{
+		VersionID: "payment_version",
+		Fields: []dwdPlanningField{{
+			Code: "source_order_id", Role: "IDENTIFIER",
+			CanonicalType: "STRING",
+		}},
+	}
+	batch := dwdFactRelationBatch{
+		Relations: []dwdFactRelationDecision{{
+			CandidateDatasetVersionID: "payment_version",
+			Related:                   true, CurrentRole: "PRIMARY",
+			Conditions: []dwdLLMJoinCondition{{
+				FactFieldCode:      "order_id",
+				DimensionFieldCode: "source_order_id",
+			}},
+			Rationale: "每个订单至多匹配一条汇总支付记录",
+		}},
+	}
+	if err := validateDWDFactRelationBatch(
+		current, []dwdPlanningTable{candidate}, batch,
+	); err != nil {
+		t.Fatalf("primary fact relation is invalid: %v", err)
+	}
+	associations := []dwdFactAssociation{}
+	for _, decision := range batch.Relations {
+		if decision.Related && decision.CurrentRole == "PRIMARY" {
+			associations = append(associations, dwdFactAssociation{
+				SecondaryDatasetVersionID: decision.CandidateDatasetVersionID,
+				Conditions:                decision.Conditions,
+			})
+		}
+	}
+	if len(dwdFactAssociationMap(associations)) != 1 {
+		t.Fatal("primary relationship was not retained")
+	}
+	batch.Relations[0].CurrentRole = "SECONDARY"
+	associations = associations[:0]
+	for _, decision := range batch.Relations {
+		if decision.Related && decision.CurrentRole == "PRIMARY" {
+			associations = append(associations, dwdFactAssociation{})
+		}
+	}
+	if len(associations) != 0 {
+		t.Fatal("secondary relationship must not be retained")
 	}
 }
 

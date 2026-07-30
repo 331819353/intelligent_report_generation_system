@@ -221,6 +221,12 @@ SELECT format(
 WHERE to_regclass('platform.dws_modeling_jobs') IS NOT NULL
 \gexec
 SELECT format(
+  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.ads_modeling_jobs, platform.ads_modeling_outputs FROM %I',
+  :'app_user'
+)
+WHERE to_regclass('platform.ads_modeling_jobs') IS NOT NULL
+\gexec
+SELECT format(
   'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.dwd_modeling_stage_jobs FROM %I',
   :'app_user'
 )
@@ -267,6 +273,40 @@ SELECT format(
   :'app_user'
 )
 WHERE to_regprocedure('platform.trigger_manual_dws_modeling(uuid)') IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE ALL ON FUNCTION platform.trigger_manual_dim_modeling(uuid,uuid[]), platform.trigger_manual_dwd_modeling(uuid,uuid[]), platform.trigger_manual_dws_modeling(uuid,uuid[]), platform.trigger_manual_ads_modeling(uuid,uuid[]) FROM PUBLIC, %I, %I',
+  :'worker_user',
+  :'connection_test_user'
+)
+WHERE to_regprocedure(
+  'platform.trigger_manual_ads_modeling(uuid,uuid[])'
+) IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.trigger_manual_dim_modeling(uuid,uuid[]), platform.trigger_manual_dwd_modeling(uuid,uuid[]), platform.trigger_manual_dws_modeling(uuid,uuid[]), platform.trigger_manual_ads_modeling(uuid,uuid[]) TO %I',
+  :'app_user'
+)
+WHERE to_regprocedure(
+  'platform.trigger_manual_ads_modeling(uuid,uuid[])'
+) IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE ALL ON FUNCTION platform.trigger_unscoped_dws_modeling(uuid) FROM PUBLIC, %I, %I',
+  :'worker_user',
+  :'connection_test_user'
+)
+WHERE to_regprocedure(
+  'platform.trigger_unscoped_dws_modeling(uuid)'
+) IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.trigger_unscoped_dws_modeling(uuid) TO %I',
+  :'app_user'
+)
+WHERE to_regprocedure(
+  'platform.trigger_unscoped_dws_modeling(uuid)'
+) IS NOT NULL
 \gexec
 SELECT format(
   'REVOKE ALL ON FUNCTION platform.cancel_dwd_modeling_stage_task(uuid,uuid), platform.retry_dwd_modeling_stage_task(uuid,uuid) FROM PUBLIC, %I, %I',

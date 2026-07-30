@@ -41,7 +41,8 @@
    - DIM/DWD 的 ODS 输入冻结为 `virtual-ods-source-v1` 来源快照：数据库输入固定当前已发布的
      `data_source_version`、元数据表和 `structure_hash`；Excel 输入还必须固定精确
      文件版本及其 SHA-256。Worker 正式执行时按该快照全量回源，并先投影 ODS 字段合同。
-   - DWD 可附加已经在数仓中的 DIM；DWS 只允许一个或多个 DWD；ADS 只允许 DWS。
+   - DWD 可附加已经在数仓中的 DIM 或受控次事实；DWS 允许一个或多个 DWD，或允许
+     单个 DIM 形成只有一个计数指标的 `ENTITY_COUNT`；ADS 只允许 DWS。
      这些数仓上游必须仍是其所属数据集的当前发布版本并拥有精确 `ACTIVE` 物化，
      同时冻结 materialization 身份、schema hash、snapshot hash 和 row count。
 4. 原子写入运行、冻结输入、节点状态和

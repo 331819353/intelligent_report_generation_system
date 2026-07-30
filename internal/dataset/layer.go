@@ -15,7 +15,7 @@ type LayerDependencyResolver interface {
 //
 //	DIM <- ODS
 //	DWD <- at least one ODS + optional DIM
-//	DWS <- DWD
+//	DWS <- DWD or DIM (DIM is limited to factless entity-count aggregation)
 //	ADS <- DWS
 //
 // 显式声明 layer 的新 DIM/DWD/DWS/ADS 文档由基础校验强制只使用 DATASET 节点；这里继续
@@ -42,7 +42,7 @@ func ValidateLayerDependencies(ctx context.Context, document Document, resolver 
 	case LayerDWD:
 		expected = map[Layer]bool{LayerODS: true, LayerDIM: true}
 	case LayerDWS:
-		expected = map[Layer]bool{LayerDWD: true}
+		expected = map[Layer]bool{LayerDWD: true, LayerDIM: true}
 	case LayerADS:
 		expected = map[Layer]bool{LayerDWS: true}
 	default:
@@ -53,6 +53,7 @@ func ValidateLayerDependencies(ctx context.Context, document Document, resolver 
 	issues := make([]ValidationIssue, 0)
 	hasODSInput := false
 	hasDWDInput := false
+	hasDIMInput := false
 	for index, node := range document.Nodes {
 		if node.Type != "DATASET" {
 			continue
@@ -67,12 +68,15 @@ func ValidateLayerDependencies(ctx context.Context, document Document, resolver 
 		if upstream == LayerDWD {
 			hasDWDInput = true
 		}
+		if upstream == LayerDIM {
+			hasDIMInput = true
+		}
 		if !expected[upstream] {
 			expectedText := "ODS"
 			if layer == LayerDWD {
 				expectedText = "ODS 或 DIM"
 			} else if layer == LayerDWS {
-				expectedText = "DWD"
+				expectedText = "DWD 或 DIM"
 			} else if layer == LayerADS {
 				expectedText = "DWS"
 			}
@@ -89,10 +93,10 @@ func ValidateLayerDependencies(ctx context.Context, document Document, resolver 
 			Reason: "DWD 至少需要一个已发布 ODS 数据集版本作为事实输入",
 		})
 	}
-	if layer == LayerDWS && !hasDWDInput {
+	if layer == LayerDWS && !hasDWDInput && !hasDIMInput {
 		issues = append(issues, ValidationIssue{
 			Path:   "nodes",
-			Reason: "DWS 至少需要一个已发布 DWD 数据集版本作为事实输入",
+			Reason: "DWS 至少需要一个已发布 DWD 或 DIM 数据集版本作为分析输入",
 		})
 	}
 	if len(issues) > 0 {

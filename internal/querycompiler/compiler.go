@@ -72,8 +72,18 @@ func Compile(input Input) (CompiledQuery, error) {
 			return CompiledQuery{}, err
 		}
 	}
-	if input.Document.Dataset.Type != "SINGLE_SOURCE" || len(input.Document.Nodes) == 0 {
-		return CompiledQuery{}, errors.New("secure compiler currently requires a single-source dataset")
+	if len(input.Document.Nodes) == 0 {
+		return CompiledQuery{}, errors.New("secure compiler requires at least one input node")
+	}
+	if input.Document.Dataset.Type != "SINGLE_SOURCE" &&
+		!(input.Dialect == PostgreSQL &&
+			input.Document.Dataset.Type == "CROSS_SOURCE") {
+		// CROSS_SOURCE plans may only be compiled directly after every logical
+		// input has been rebound to a trusted relation in the governed
+		// PostgreSQL warehouse. Source-plane cross-source execution must keep
+		// using the federated executor so credentials and trust boundaries are
+		// never collapsed by caller-authored metadata.
+		return CompiledQuery{}, errors.New("secure compiler requires a single-source dataset outside the governed PostgreSQL warehouse")
 	}
 	if input.MaxRows < 1 || input.MaxRows > input.Document.ExecutionPolicy.PreviewLimit {
 		return CompiledQuery{}, errors.New("preview row limit is invalid")

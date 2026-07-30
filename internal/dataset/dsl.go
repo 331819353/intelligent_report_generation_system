@@ -695,7 +695,7 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 		if document.layerSpecified {
 			for index, node := range document.Nodes {
 				if node.Type != "DATASET" {
-					add(fmt.Sprintf("nodes[%d].type", index), "显式 DWS 只能引用已发布 DWD 数据集版本")
+					add(fmt.Sprintf("nodes[%d].type", index), "显式 DWS 只能引用已发布 DWD 或 DIM 数据集版本")
 				}
 			}
 		}
@@ -921,6 +921,11 @@ func validateSemanticContracts(issues *[]ValidationIssue, document Document) {
 			if !oneOf(measure.Additivity, "ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE") {
 				add(path+".additivity", "必须为 ADDITIVE、SEMI_ADDITIVE 或 NON_ADDITIVE")
 			}
+			validateMeasureTimeBehavior(
+				issues, path, measure.ValueBehavior,
+				measure.DefaultAggregation, measure.TimeAggregation,
+				measure.Additivity,
+			)
 			if !oneOf(measure.NullPolicy, "PRESERVE", "ZERO", "REJECT") {
 				add(path+".nullPolicy", "必须为 PRESERVE、ZERO 或 REJECT")
 			}
@@ -947,7 +952,7 @@ func validateSemanticContracts(issues *[]ValidationIssue, document Document) {
 			contract.Intent,
 			"TREND", "PERIOD_COMPARISON", "DISTRIBUTION", "RANKING", "TOP_N",
 			"DRILLDOWN", "FUNNEL", "RETENTION", "LIFECYCLE", "ANOMALY",
-			"CONTRIBUTION", "MULTI_FACT_COMPARISON",
+			"CONTRIBUTION", "MULTI_FACT_COMPARISON", "ENTITY_COUNT",
 		) {
 			add("analysisContract.intent", "不支持的市场通用分析意图")
 		}
@@ -989,8 +994,13 @@ func validateSemanticContracts(issues *[]ValidationIssue, document Document) {
 			if !oneOf(measure.Additivity, "ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE") {
 				add(path+".additivity", "必须声明指标可加性")
 			}
+			validateMeasureTimeBehavior(
+				issues, path, measure.ValueBehavior,
+				measure.Aggregation, measure.TimeAggregation,
+				measure.Additivity,
+			)
 			if len(measure.SourceNodeIDs) == 0 {
-				add(path+".sourceNodeIds", "至少引用一个 DWD 输入节点")
+				add(path+".sourceNodeIds", "至少引用一个 DWD 或 DIM 输入节点")
 			}
 			for sourceIndex, nodeID := range measure.SourceNodeIDs {
 				if !nodes[nodeID] {
@@ -1005,7 +1015,7 @@ func validateSemanticContracts(issues *[]ValidationIssue, document Document) {
 			}
 			for index, node := range document.Nodes {
 				if !preAggregated[node.ID] {
-					add(fmt.Sprintf("nodes[%d]", index), "多事实 DWS 必须先把每个 DWD 聚合到共同粒度再 Join")
+					add(fmt.Sprintf("nodes[%d]", index), "多输入 DWS 必须先把每个输入聚合到共同粒度再 Join")
 				}
 			}
 		}
@@ -1896,6 +1906,9 @@ func normalize(document Document) Document {
 			measure := &document.FactContract.AtomicMeasures[i]
 			measure.Field = strings.TrimSpace(measure.Field)
 			measure.Additivity = upper(measure.Additivity)
+			measure.ValueBehavior = upper(measure.ValueBehavior)
+			measure.DefaultAggregation = upper(measure.DefaultAggregation)
+			measure.TimeAggregation = upper(measure.TimeAggregation)
 			measure.Unit = strings.TrimSpace(measure.Unit)
 			measure.Currency = upper(measure.Currency)
 			measure.NullPolicy = upper(measure.NullPolicy)
@@ -1918,6 +1931,8 @@ func normalize(document Document) Document {
 			measure.Field = strings.TrimSpace(measure.Field)
 			measure.Aggregation = upper(measure.Aggregation)
 			measure.Additivity = upper(measure.Additivity)
+			measure.ValueBehavior = upper(measure.ValueBehavior)
+			measure.TimeAggregation = upper(measure.TimeAggregation)
 			measure.Unit = strings.TrimSpace(measure.Unit)
 			measure.Currency = upper(measure.Currency)
 			for j := range measure.SourceNodeIDs {
@@ -2547,6 +2562,61 @@ func validateGroupByMode(issues *[]ValidationIssue, pathPrefix string, mode Grou
 				*issues = append(*issues, ValidationIssue{Path: fieldPath, Reason: "自定义分组集内字段重复"})
 			}
 			seenFields[field] = true
+		}
+	}
+}
+
+func validateMeasureTimeBehavior(
+	issues *[]ValidationIssue,
+	path, behavior, aggregation, timeAggregation, additivity string,
+) {
+	if behavior == "" && timeAggregation == "" {
+		return
+	}
+	if !oneOf(
+		behavior, "FLOW", "CUMULATIVE", "POINT_IN_TIME", "NON_ADDITIVE",
+	) {
+		*issues = append(*issues, ValidationIssue{
+			Path:   path + ".valueBehavior",
+			Reason: "必须为 FLOW、CUMULATIVE、POINT_IN_TIME 或 NON_ADDITIVE",
+		})
+		return
+	}
+	if aggregation != "" &&
+		!oneOf(aggregation, "SUM", "MIN", "MAX", "COUNT", "COUNT_DISTINCT", "AVG") {
+		*issues = append(*issues, ValidationIssue{
+			Path:   path + ".defaultAggregation",
+			Reason: "不支持默认聚合函数",
+		})
+	}
+	if !oneOf(timeAggregation, "SUM", "LAST", "NONE") {
+		*issues = append(*issues, ValidationIssue{
+			Path:   path + ".timeAggregation",
+			Reason: "必须为 SUM、LAST 或 NONE",
+		})
+		return
+	}
+	switch behavior {
+	case "FLOW":
+		if additivity != "ADDITIVE" || timeAggregation != "SUM" {
+			*issues = append(*issues, ValidationIssue{
+				Path:   path,
+				Reason: "FLOW 必须声明 ADDITIVE 且跨时间使用 SUM",
+			})
+		}
+	case "CUMULATIVE", "POINT_IN_TIME":
+		if additivity != "SEMI_ADDITIVE" || timeAggregation != "LAST" {
+			*issues = append(*issues, ValidationIssue{
+				Path:   path,
+				Reason: behavior + " 必须声明 SEMI_ADDITIVE 且跨时间使用 LAST",
+			})
+		}
+	case "NON_ADDITIVE":
+		if additivity != "NON_ADDITIVE" || timeAggregation != "NONE" {
+			*issues = append(*issues, ValidationIssue{
+				Path:   path,
+				Reason: "NON_ADDITIVE 指标必须禁止跨时间聚合",
+			})
 		}
 	}
 }

@@ -233,6 +233,23 @@ WITH tasks AS (
 
   UNION ALL
   SELECT
+    'ADS_MODELING',job.id::text,
+    concat(dataset.name,'应用建模')::text,
+    concat(dataset.code::text,' · DWS → ADS 应用数据草稿')::text,
+    job.status::text,'DATASET',job.source_dws_dataset_id::text,
+    (job.generated_count+job.updated_count+job.skipped_count)::bigint,
+    1::bigint,
+    job.attempt,job.max_attempts,job.error_code::text,job.error_message::text,
+    job.requested_at,
+    CASE WHEN job.attempt>0 THEN job.requested_at ELSE NULL::timestamptz END,
+    job.updated_at,job.completed_at
+  FROM platform.ads_modeling_jobs AS job
+  JOIN platform.datasets AS dataset
+    ON dataset.id=job.source_dws_dataset_id
+   AND dataset.tenant_id=job.tenant_id
+
+  UNION ALL
+  SELECT
     'DATASET_MATERIALIZATION_CLEANUP',job.id::text,dataset.name::text,
     concat(dataset.code::text,' · ',job.layer,' · 仓库物理表清理')::text,
     job.status::text,'DATASET',job.dataset_id::text,
@@ -478,7 +495,8 @@ func decorate(task *Task) {
 		task.ProgressText = "已合并到同领域代表任务"
 	}
 	if task.ErrorCode == "WAITING_DIM_PUBLICATION" ||
-		task.ErrorCode == "WAITING_ACTIVE_DWD_MATERIALIZATION" {
+		task.ErrorCode == "WAITING_ACTIVE_DWD_MATERIALIZATION" ||
+		task.ErrorCode == "WAITING_ACTIVE_DWS_MATERIALIZATION" {
 		task.ProgressText = task.ErrorMessage
 		task.ErrorCode = ""
 		task.ErrorMessage = ""
@@ -525,6 +543,7 @@ var kindLabels = map[string]string{
 	"DIM_MODELING":                    "维度建模",
 	"DWD_FACT_MODELING":               "事实落地",
 	"DWS_MODELING":                    "LLM 市场通用 DWS 建模",
+	"ADS_MODELING":                    "ADS 应用数据建模",
 	"DATASET_MATERIALIZATION_CLEANUP": "DIM/DWD/DWS/ADS 仓库物理表清理",
 }
 
@@ -547,6 +566,7 @@ var retryableKinds = map[string]bool{
 	"DIM_MODELING":              true,
 	"DWD_FACT_MODELING":         true,
 	"DWS_MODELING":              true,
+	"ADS_MODELING":              false,
 	"DATASET_BUILD":             true,
 }
 

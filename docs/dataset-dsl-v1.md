@@ -35,6 +35,7 @@ Schema 负责结构和基础类型校验；服务端领域校验额外检查标�
 - Join 类型：`INNER`、`LEFT`、`RIGHT`、`FULL`；必须声明基数和至少一个条件。可选的 `relationshipType` 为 `DIRECT / ROLE_PLAYING / BRIDGE`，`relationshipRole` 保存如 `ORDERING_USER / PAYING_USER / SHIPPING_REGION` 的稳定业务角色，`fanoutPolicy` 为 `SAFE / DEDUPLICATE / UNSAFE`。角色扮演和 Bridge 必须声明角色；Bridge 还必须声明扇出策略。`manualConfirmed` 会随草稿保存，修改 Join 字段、类型、基数或关系语义后设计器会重新置为未确认。
 - 新的显式 DWD 不接受 `UNKNOWN` 基数。多个用户、商品、地域 DIM 应分别从事实侧声明 `MANY_TO_ONE` 或 `ONE_TO_ONE`，不构成一对多；真正的 `ONE_TO_MANY / MANY_TO_MANY` 必须标记为 `BRIDGE` 并选择 `DEDUPLICATE` 或 `UNSAFE`。`UNSAFE` 只保留关系证据，不能用于自动可加指标。分配权重、主成员和 SCD2 event-time 仍由后续结构化合同扩展，不能用自由表达式或 SQL 代替。
 - 字段角色：`DIMENSION`、`MEASURE`、`ATTRIBUTE`、`TIME`、`IDENTIFIER`。
+- DWD `factContract.atomicMeasures[]` 除 `additivity` 外可声明 `valueBehavior / defaultAggregation / timeAggregation`。`FLOW` 必须是 `ADDITIVE + SUM`；`CUMULATIVE` 和 `POINT_IN_TIME` 必须是 `SEMI_ADDITIVE + LAST`，表示可以在同一时点沿实体维度横向汇总、但不能跨时间求和；`NON_ADDITIVE` 使用 `NONE`。DWS 的 `analysisContract.measures[]` 继承同一时间语义，不能用 `MAX` 伪装最后时点。
 - 参数值只能通过 `PARAM_REF` 引用；表达式不接受 SQL 片段。
 - 表达式型 `sourceFilters` 必须是布尔谓词，只能引用所属节点字段且不能包含聚合；跨节点过滤在 Join 后执行。
 - 日期格式化使用独立的 `DATE_FORMAT` 表达式并返回字符串：`YEAR` 输出 `YYYY`、`MONTH` 输出 `YYYYMM`、`QUARTER` 输出 `YYYYQn`、`DAY` 输出 `YYYYMMDD`。`DATE_TRUNC` 仍只表示日期截断，供分组粒度使用；两种语义不得混用。

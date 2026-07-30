@@ -15,12 +15,13 @@ import (
 )
 
 const (
-	dwdModelingPromptVersion        = "warehouse-modeling-v11"
-	dwdClassificationPromptVersion  = "warehouse-classification-v6"
-	dwdClassificationMergeVersion   = "warehouse-classification-merge-v3"
+	dwdModelingPromptVersion        = "warehouse-modeling-v12"
+	dwdClassificationPromptVersion  = "warehouse-classification-v8"
+	dwdClassificationMergeVersion   = "warehouse-classification-merge-v4"
 	dwdLegacyClassificationVersion  = "warehouse-classification-v4"
-	dwdDimensionDesignPromptVersion = "warehouse-dimension-design-v4"
-	dwdFactDesignPromptVersion      = "warehouse-fact-design-v4"
+	dwdDimensionDesignPromptVersion = "warehouse-dimension-design-v5"
+	dwdFactAssociationPromptVersion = "warehouse-fact-association-v1"
+	dwdFactDesignPromptVersion      = "warehouse-fact-design-v6"
 	maxDWDModelingRepairContent     = 64 << 10
 	dwdModelingInvocationAttempts   = 3
 	dwdStageInvocationAttempts      = 3
@@ -77,6 +78,10 @@ type dwdPlanningInput struct {
 	Trigger    dwdPlanningTrigger `json:"trigger"`
 	Tables     []dwdPlanningTable `json:"tables"`
 	History    dwdPlanningHistory `json:"-"`
+	// FactScopeSelected keeps the explicit/boxed workflow on its existing
+	// relationship contract. Automatic fact-fact discovery is default-only.
+	FactScopeSelected      bool                             `json:"-"`
+	FactLookupAssociations map[string][]dwdLLMJoinCondition `json:"-"`
 }
 
 type dwdPlanningHistory struct {
@@ -141,6 +146,8 @@ type dwdDimensionDesignCompletion struct {
 
 type dwdDimensionDesignFailure struct {
 	SourceDatasetVersionID string
+	DimensionIdentity      string
+	MappingKey             string
 	ErrorCode              string
 	ErrorMessage           string
 }
@@ -169,22 +176,50 @@ type dwdLLMPlan struct {
 }
 
 type dwdLLMClassification struct {
-	DatasetVersionID             string   `json:"datasetVersionId"`
-	Role                         string   `json:"role"`
+	DatasetVersionID             string                      `json:"datasetVersionId"`
+	Role                         string                      `json:"role"`
+	DimensionKeyFieldCodes       []string                    `json:"dimensionKeyFieldCodes"`
+	DimensionAttributeFieldCodes []string                    `json:"dimensionAttributeFieldCodes"`
+	AdditionalDimensions         []dwdLLMDimensionProjection `json:"additionalDimensions"`
+	Rationale                    string                      `json:"rationale"`
+}
+
+type dwdLLMDimensionProjection struct {
+	Code                         string   `json:"code"`
+	Name                         string   `json:"name"`
 	DimensionKeyFieldCodes       []string `json:"dimensionKeyFieldCodes"`
 	DimensionAttributeFieldCodes []string `json:"dimensionAttributeFieldCodes"`
 	Rationale                    string   `json:"rationale"`
 }
 
 type dwdLLMOutput struct {
-	FactDatasetVersionID string        `json:"factDatasetVersionId"`
-	Name                 string        `json:"name"`
-	Description          string        `json:"description"`
-	Joins                []dwdLLMJoin  `json:"joins"`
-	Fields               []dwdLLMField `json:"fields"`
-	GrainKeyOutputCodes  []string      `json:"grainKeyOutputCodes"`
-	TimeOutputCode       string        `json:"timeOutputCode"`
-	Rationale            string        `json:"rationale"`
+	FactDatasetVersionID string               `json:"factDatasetVersionId"`
+	Name                 string               `json:"name"`
+	Description          string               `json:"description"`
+	Joins                []dwdLLMJoin         `json:"joins"`
+	Fields               []dwdLLMField        `json:"fields"`
+	GrainKeyOutputCodes  []string             `json:"grainKeyOutputCodes"`
+	TimeOutputCode       string               `json:"timeOutputCode"`
+	Rationale            string               `json:"rationale"`
+	FactAssociations     []dwdFactAssociation `json:"factAssociations,omitempty"`
+}
+
+type dwdFactAssociation struct {
+	SecondaryDatasetVersionID string                `json:"secondaryDatasetVersionId"`
+	Conditions                []dwdLLMJoinCondition `json:"conditions"`
+	Rationale                 string                `json:"rationale"`
+}
+
+type dwdFactRelationBatch struct {
+	Relations []dwdFactRelationDecision `json:"relations"`
+}
+
+type dwdFactRelationDecision struct {
+	CandidateDatasetVersionID string                `json:"candidateDatasetVersionId"`
+	Related                   bool                  `json:"related"`
+	CurrentRole               string                `json:"currentRole"`
+	Conditions                []dwdLLMJoinCondition `json:"conditions"`
+	Rationale                 string                `json:"rationale"`
 }
 
 type dwdLLMJoin struct {
@@ -206,6 +241,7 @@ type dwdLLMField struct {
 	OutputName             string                 `json:"outputName"`
 	OutputDescription      string                 `json:"outputDescription"`
 	Role                   string                 `json:"role"`
+	MeasureBehavior        string                 `json:"measureBehavior"`
 	Cleaning               []string               `json:"cleaning"`
 	Processing             []dwdLLMProcessingStep `json:"processing"`
 }
@@ -279,7 +315,9 @@ const dwdClassificationSystemPrompt = `你是企业数据仓库 ODS 多产物识
 
 个人信息主表若一人一行、以人员稳定属性为主，仍应判为 DIMENSION/MASTER，不能仅因业务要统计人数而改判 FACT，也不能把 person_count 放入 DIM。只有一人一事件或一人一快照日的输入才是 FACT；当前人数应由 COUNT(DISTINCT person_id) 计算，历史人数趋势应由“一人 × 快照日”的周期快照 DWD 承载。
 
-dimensionKeyFieldCodes 只能放实体稳定业务键，日期、时间和快照周期字段不能作为实体键；dimensionAttributeFieldCodes 只能放函数依赖于同一实体键且满足上述同表边界的稳定说明属性，不能放订单号、事实行号、数量、价格、折扣、金额、统计人数或事件时间。DIMENSION/MASTER 的维度属性同样不得包含 role=MEASURE 或 semanticType=AMOUNT/QUANTITY 的字段。没有可靠实体时两个数组都必须为空。DIMENSION/MASTER 必须声明实体键和说明属性；FACT/OTHER 可为空。当前每张 ODS 最多抽取一个明确实体 DIM，不得臆造字段。
+dimensionKeyFieldCodes 与 dimensionAttributeFieldCodes 描述主维度候选。additionalDimensions 可再声明最多一个不同实体维度候选，因此每张 ODS 最多输出两张 DIM。若两个候选的实体键集合存在包含关系，且属性可安全落在较细键粒度，则应合并成一个统一宽维度；只有键集合互不包含、代表独立实体粒度时才保留两张 DIM。附加候选必须有稳定 code、明确中文 name、独立实体键和说明属性；两个候选不得使用完全相同的实体键，不得只是把同一实体属性任意拆开。
+
+所有维度键只能放实体稳定业务键，日期、时间和快照周期字段不能作为实体键；维度属性只能放函数依赖于同一实体键且满足上述同表边界的稳定说明属性，不能放订单号、事实行号、数量、价格、折扣、金额、统计人数或事件时间。DIMENSION/MASTER 的维度属性同样不得包含 role=MEASURE 或 semanticType=AMOUNT/QUANTITY 的字段。没有可靠实体时主维度两个数组与 additionalDimensions 都必须为空。DIMENSION/MASTER 至少声明一个实体维度；FACT/OTHER 可不产生维度。不得臆造字段。
 
 classifications 必须逐一覆盖输入表且不得重复，只能复制精确 datasetVersionId 和字段 code。role 必须与 rationale 中描述的行粒度和 DIM/DWD 结论一致。rationale 应简短说明“行粒度 + 判定依据 + 是否可抽取 DIM”，不要设计关联、SQL 或物理表。输出只能是 JSON Schema 指定的对象。`
 
@@ -287,7 +325,7 @@ const dwdClassificationMergeSystemPrompt = `你是企业数据仓库 ODS 分类�
 
 先跨表比较真实行粒度、实体业务键、属性完整度、生命周期和来源权威性，再输出最终 classifications：
 1. 必须逐一覆盖全部输入 ODS，不增不减，只能复制精确 datasetVersionId 和字段 code；role 只能是 FACT、DIMENSION、MASTER、OTHER。
-2. 不得因为别的 ODS 可能生成同名或同实体 DIM，就把已经独立验证通过的 MASTER/DIMENSION 改为 OTHER，也不得清空 FACT 中已经验证通过的实体维度投影。所有候选 DIM 必须先生成并保存为未发布草稿。
+2. 不得因为别的 ODS 可能生成同名或同实体 DIM，就把已经独立验证通过的 MASTER/DIMENSION 改为 OTHER，也不得清空 FACT 中已经验证通过的主维度或 additionalDimensions。所有候选 DIM 必须先生成并保存为未发布草稿。
 3. 可在 rationale 中简短标注可能的同名/同实体候选，供落地后的 DIM 校验器复核；本阶段不决定保留或合并哪个 DIM。
 4. 不得仅按表名推断实体相同。周期快照或事实投影即使带有相同实体键，也必须保持原 FACT 角色。
 5. 周期快照、日度聚合、订单行、支付、配送事件及其他无度量事件流水仍保持 FACT；交易度量、事件时间、订单号、事件 ID 和事实行号不得进入 DIM 投影。
@@ -313,7 +351,18 @@ const dwdDimensionDesignSystemPrompt = `你是企业数据仓库 DIM 设计师�
 
 输出只能是 JSON Schema 指定的对象。`
 
-const dwdFactDesignSystemPrompt = `你是企业数据仓库 DWD 明细结构与 DAG 设计师。ODS 角色分类已经通过校验且不可更改；第二阶段 DIM 已完成说明补充和字段值标准化。本次只设计指定的一张 FACT，输入只包含该事实 ODS 和同领域已加工 DIM 的元数据，不包含业务数据行。dimensionStage=STANDARDIZED_DIM_CONTRACT 表示字段合同来自已加工 DIM；datasetVersionId 保留原 ODS 标识，供结构化方案与第一步分类稳定对应。平台生成 DWD 草稿时会替换为精确 DIM 草稿或发布版本；DWD 发布前必须绑定正式 DIM 发布版本。
+const dwdFactAssociationSystemPrompt = `你是企业数据仓库 DWD 事实关系识别器。本轮只判断一张当前事实表与一批候选事实表能否在不改变当前事实粒度的前提下关联，不设计输出表。
+
+规则：
+1. related=true 只用于业务过程相关、关联键语义一致且类型兼容的表；不得仅凭类型或近似名称推断。
+2. currentRole=PRIMARY 表示当前表是本轮 DWD 的主表，候选表在完整键上至多匹配一行，可作为 LEFT JOIN 次表；只有这种关系会被保留。
+3. currentRole=SECONDARY 表示当前表相对候选表是次表；即使 related=true 也不保留该关系。无法证明主次或可能多对多时 related=false。
+4. conditions 使用当前表字段作为 factFieldCode、候选表字段作为 dimensionFieldCode，必须给出完整复合键；字段 code 必须精确来自输入。
+5. relations 必须逐一覆盖本批全部候选且不重复。不要返回 SQL、Markdown 或分析过程。
+
+输出只能是 JSON Schema 指定的对象。`
+
+const dwdFactDesignSystemPrompt = `你是企业数据仓库 DWD 明细结构与 DAG 设计师。ODS 角色分类已经通过校验且不可更改；第二阶段 DIM 已完成说明补充和字段值标准化。本次只设计指定的一张 FACT，输入只包含该事实 ODS、同领域已加工 DIM，以及第一轮确认可作为次表的事实表元数据，不包含业务数据行。dimensionStage=STANDARDIZED_DIM_CONTRACT 表示字段合同来自已加工 DIM；factAssociations 是第一轮已确认且当前表为主表的关系，必须按指定完整键保留。平台生成 DWD 草稿时会把 DIM 规划标识替换为精确 DIM 草稿或发布版本；DWD 发布前必须绑定正式 DIM 发布版本。
 
 先按平台 DWD 定义复核设计边界和应关联 DIM，再输出结构化结果；不要输出内部分析过程：
 - DWD 是原子业务事件、交易行或周期快照，每行只代表同一业务过程、同一事实粒度和同一事件时间含义，不分组、不聚合。
@@ -327,7 +376,8 @@ const dwdFactDesignSystemPrompt = `你是企业数据仓库 DWD 明细结构与 
 3. 每个已关联 DIM 至少扩充一个关联键之外的名称、分类、区域、状态等描述字段（只要存在）；DIM 侧关联键只用于 Join，不重复输出。
 4. generation 前的卫生组件是强制合同：所有 STRING 使用 TRIM；可空 IDENTIFIER/DIMENSION/ATTRIBUTE 使用 COALESCE_DEFAULT，固定值为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；DATE、DATETIME 及 STRING TIME 统一使用 CAST_DATE 去除时分秒，输出逻辑类型保持 DATE，字段 format 固定为 YYYYMMDD。MEASURE 与 TIME 空值保留 NULL，不填哨兵值。不得在 processing 中再用 DATE_FORMAT、DATE_TRUNC 或 CAST_DATETIME 改变该日粒度合同。
 5. 非基础卫生且真实需要时，其他字段可使用 CAST、TRIM、UPPER、LOWER、REPLACE、SUBSTRING、CONCAT、COALESCE、ADD、SUBTRACT、MULTIPLY、DIVIDE、ROUND、ABS、FLOOR、CEIL、CASE。arguments 的每项都是字符串，二元处理只能引用已经加入输出的事实或 DIM 字段。
-6. 只能复制输入中的精确 dataset version id 和字段 code，不得返回 SQL、DDL、表达式文本、物理表或调度命令。输出是交给受控 DAG 开发引擎的待审阅结构化设计。
+6. 每个输出字段必须声明 measureBehavior：非 MEASURE 固定为空字符串；普通期间发生额/数量为 FLOW；截至当前的累计/YTD/MTD/running total 为 CUMULATIVE；余额、库存、存量、期末数、在手量等时点状态为 POINT_IN_TIME；比率、均价等不可直接汇总值为 NON_ADDITIVE。不得把累计值或时点值声明成 FLOW。
+7. 只能复制输入中的精确 dataset version id 和字段 code，不得返回 SQL、DDL、表达式文本、物理表或调度命令。输出是交给受控 DAG 开发引擎的待审阅结构化设计。
 
 输出只能是 JSON Schema 指定的对象。`
 
@@ -351,6 +401,7 @@ type dwdLLMDimensionDesign struct {
 	GrainKeyFieldCodes     []string                     `json:"grainKeyFieldCodes"`
 	Fields                 []dwdLLMDimensionFieldDesign `json:"fields"`
 	Rationale              string                       `json:"rationale"`
+	DimensionIdentity      string                       `json:"-"`
 }
 
 type dwdLLMDimensionFieldDesign struct {
@@ -444,7 +495,7 @@ func (planner *OrchestratedDWDModelingPlanner) Classify(
 		}
 		if !planner.prepareDWDStageRetry(
 			callCtx, &invocation, baseMessages, result, invokeErr,
-			`请只修复 ODS 多产物识别：domain 必须等于输入；classifications 必须逐表覆盖且不重复，只能使用输入的精确 datasetVersionId 和字段 code；role 只能是 FACT、DIMENSION、MASTER、OTHER。先按原提示中的 DIM、DWD 和同表边界复核真实行粒度。日期/时间参与输出粒度的周期快照/日度聚合必须是 FACT；以事件 ID、订单号、交易号、支付号、配送号等一次性过程键为粒度并带事件时间、状态、参与方或轨迹字段的无度量事件流水也是 FACT。role 必须与 rationale 的 DIM/DWD 结论一致。FACT 可以通过 dimensionKeyFieldCodes + dimensionAttributeFieldCodes 声明一个内嵌实体维度，但事实行键和过程单号不能作为实体键；任何 DIM 投影都不能包含交易度量、事件时间或汇总人数。一人一行的个人主表仍是 DIMENSION/MASTER。没有可靠实体时两个数组必须为空。rationale 保持简短。不要返回 outputs、SQL、Markdown 或解释。`,
+			`请只修复 ODS 多产物识别：domain 必须等于输入；classifications 必须逐表覆盖且不重复，只能使用输入的精确 datasetVersionId 和字段 code；role 只能是 FACT、DIMENSION、MASTER、OTHER。先按原提示中的 DIM、DWD 和同表边界复核真实行粒度。日期/时间参与输出粒度的周期快照/日度聚合必须是 FACT；以事件 ID、订单号、交易号、支付号、配送号等一次性过程键为粒度并带事件时间、状态、参与方或轨迹字段的无度量事件流水也是 FACT。role 必须与 rationale 的 DIM/DWD 结论一致。主维度使用 dimensionKeyFieldCodes + dimensionAttributeFieldCodes；只有确有第二个不同实体时才使用最多一个 additionalDimensions，两个实体键不能完全相同。事实行键和过程单号不能作为实体键；任何 DIM 投影都不能包含交易度量、事件时间或汇总人数。一人一行的个人主表仍是 DIMENSION/MASTER。没有可靠实体时主维度数组和 additionalDimensions 都必须为空。rationale 保持简短。不要返回 outputs、SQL、Markdown 或解释。`,
 			attempt == dwdStageInvocationAttempts-2,
 		) {
 			if err := callCtx.Err(); err != nil {
@@ -570,13 +621,13 @@ func (planner *OrchestratedDWDModelingPlanner) DesignDimension(
 	ctx context.Context,
 	input dwdPlanningInput,
 	classifications []dwdLLMClassification,
-	sourceVersionID string,
+	dimensionIdentity string,
 ) (dwdDimensionDesignCompletion, error) {
 	if !planner.Configured() || !validDWDPlanningInput(input) {
 		return dwdDimensionDesignCompletion{}, errDWDModelingInvalid
 	}
 	table, classification, err := dwdDimensionPlanningScope(
-		input, classifications, sourceVersionID,
+		input, classifications, dimensionIdentity,
 	)
 	if err != nil {
 		return dwdDimensionDesignCompletion{}, err
@@ -630,7 +681,7 @@ func (planner *OrchestratedDWDModelingPlanner) DesignDimension(
 		TenantID: input.TenantID, ActorID: input.ActorID,
 		Purpose:       aiplatform.PurposeDatasetDAGGeneration,
 		PromptVersion: dwdDimensionDesignPromptVersion,
-		ResourceType:  "DATASET_VERSION", ResourceID: sourceVersionID,
+		ResourceType:  "DATASET_VERSION", ResourceID: table.VersionID,
 		Request: request,
 	}
 	baseMessages := append([]aiplatform.Message(nil), request.Messages...)
@@ -646,6 +697,7 @@ func (planner *OrchestratedDWDModelingPlanner) DesignDimension(
 				)
 			}
 			if decodeErr == nil {
+				candidate.Output.DimensionIdentity = dimensionIdentity
 				return dwdDimensionDesignCompletion{
 					AIRequestID: result.RequestID,
 					Output:      candidate.Output,
@@ -674,6 +726,142 @@ func (planner *OrchestratedDWDModelingPlanner) DesignDimension(
 	return dwdDimensionDesignCompletion{}, errDWDModelingInvalid
 }
 
+func (planner *OrchestratedDWDModelingPlanner) discoverDWDFactAssociations(
+	ctx context.Context,
+	input dwdPlanningInput,
+	classifications []dwdLLMClassification,
+	factVersionID string,
+) ([]dwdFactAssociation, error) {
+	tableByVersion := make(map[string]dwdPlanningTable, len(input.Tables))
+	roleByVersion := make(map[string]string, len(classifications))
+	for _, table := range input.Tables {
+		tableByVersion[table.VersionID] = table
+	}
+	for _, classification := range classifications {
+		roleByVersion[classification.DatasetVersionID] = classification.Role
+	}
+	current, exists := tableByVersion[factVersionID]
+	if !exists || roleByVersion[factVersionID] != "FACT" {
+		return nil, errDWDModelingInvalid
+	}
+	candidates := make([]dwdPlanningTable, 0, len(input.Tables))
+	for _, table := range input.Tables {
+		if table.VersionID != factVersionID &&
+			roleByVersion[table.VersionID] == "FACT" {
+			candidates = append(candidates, table)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].VersionID < candidates[j].VersionID
+	})
+	if len(candidates) == 0 {
+		return []dwdFactAssociation{}, nil
+	}
+
+	const batchSize = 6
+	associations := []dwdFactAssociation{}
+	for start := 0; start < len(candidates); start += batchSize {
+		end := min(start+batchSize, len(candidates))
+		batch := candidates[start:end]
+		raw, err := json.Marshal(struct {
+			Domain     string             `json:"domain"`
+			Current    dwdPlanningTable   `json:"currentFact"`
+			Candidates []dwdPlanningTable `json:"candidateFacts"`
+		}{
+			Domain: input.Domain, Current: current, Candidates: batch,
+		})
+		if err != nil {
+			return nil, err
+		}
+		schema, err := dwdFactAssociationResponseSchema(batch)
+		if err != nil {
+			return nil, err
+		}
+		temperature := 0.0
+		request := aiplatform.ProviderRequest{
+			Messages: []aiplatform.Message{
+				{
+					Role: aiplatform.MessageRoleSystem,
+					Parts: []aiplatform.ContentPart{{
+						Type: aiplatform.ContentTypeText,
+						Text: dwdFactAssociationSystemPrompt,
+					}},
+				},
+				{
+					Role: aiplatform.MessageRoleUser,
+					Parts: []aiplatform.ContentPart{{
+						Type: aiplatform.ContentTypeText, Text: string(raw),
+					}},
+				},
+			},
+			ResponseSchema: schema, Temperature: &temperature,
+			MaxOutputTokens: 3000,
+		}
+		callCtx, cancel := context.WithTimeout(
+			ctx, planner.timeout*dwdStageInvocationAttempts,
+		)
+		invocation := aiplatform.Invocation{
+			TenantID: input.TenantID, ActorID: input.ActorID,
+			Purpose:       aiplatform.PurposeDatasetDAGGeneration,
+			PromptVersion: dwdFactAssociationPromptVersion,
+			ResourceType:  "DATASET_VERSION", ResourceID: factVersionID,
+			Request: request,
+		}
+		var decisions dwdFactRelationBatch
+		var invokeErr error
+		for attempt := 0; attempt < dwdStageInvocationAttempts; attempt++ {
+			result, err := planner.invoker.Invoke(callCtx, invocation)
+			invokeErr = err
+			if invokeErr == nil {
+				invokeErr = decodeStrictDWDJSON(
+					result.ProviderResult.Content, &decisions,
+				)
+			}
+			if invokeErr == nil {
+				invokeErr = validateDWDFactRelationBatch(
+					current, batch, decisions,
+				)
+			}
+			if invokeErr == nil {
+				break
+			}
+			if attempt+1 < dwdStageInvocationAttempts {
+				invocation.Request.Messages = append(
+					invocation.Request.Messages,
+					aiplatform.Message{
+						Role: aiplatform.MessageRoleUser,
+						Parts: []aiplatform.ContentPart{{
+							Type: aiplatform.ContentTypeText,
+							Text: "上一轮关系结果无效。请逐一覆盖本批候选；只有当前表为 PRIMARY 且候选表在完整业务键上至多一行时才保留，字段 code 必须精确来自输入。",
+						}},
+					},
+				)
+			}
+		}
+		cancel()
+		if invokeErr != nil {
+			return nil, invokeErr
+		}
+		for _, decision := range decisions.Relations {
+			if !decision.Related || decision.CurrentRole != "PRIMARY" {
+				continue
+			}
+			associations = append(associations, dwdFactAssociation{
+				SecondaryDatasetVersionID: decision.CandidateDatasetVersionID,
+				Conditions: append(
+					[]dwdLLMJoinCondition(nil), decision.Conditions...,
+				),
+				Rationale: strings.TrimSpace(decision.Rationale),
+			})
+		}
+	}
+	sort.Slice(associations, func(i, j int) bool {
+		return associations[i].SecondaryDatasetVersionID <
+			associations[j].SecondaryDatasetVersionID
+	})
+	return associations, nil
+}
+
 func (planner *OrchestratedDWDModelingPlanner) DesignFact(
 	ctx context.Context,
 	input dwdPlanningInput,
@@ -683,6 +871,17 @@ func (planner *OrchestratedDWDModelingPlanner) DesignFact(
 	if !planner.Configured() || !validDWDPlanningInput(input) {
 		return dwdFactDesignCompletion{}, errDWDModelingInvalid
 	}
+	factAssociations := []dwdFactAssociation{}
+	if !input.FactScopeSelected {
+		var err error
+		factAssociations, err = planner.discoverDWDFactAssociations(
+			ctx, input, classifications, factVersionID,
+		)
+		if err != nil {
+			return dwdFactDesignCompletion{}, err
+		}
+	}
+	input.FactLookupAssociations = dwdFactAssociationMap(factAssociations)
 	scoped, scopedClassifications, err := dwdFactPlanningScope(
 		input, classifications, factVersionID,
 	)
@@ -692,11 +891,13 @@ func (planner *OrchestratedDWDModelingPlanner) DesignFact(
 	raw, err := json.Marshal(struct {
 		Domain               string                 `json:"domain"`
 		FactDatasetVersionID string                 `json:"factDatasetVersionId"`
+		FactAssociations     []dwdFactAssociation   `json:"factAssociations"`
 		Classifications      []dwdLLMClassification `json:"classifications"`
 		Tables               []dwdPlanningTable     `json:"tables"`
 	}{
 		Domain: scoped.Domain, FactDatasetVersionID: factVersionID,
-		Classifications: scopedClassifications, Tables: scoped.Tables,
+		FactAssociations: factAssociations,
+		Classifications:  scopedClassifications, Tables: scoped.Tables,
 	})
 	if err != nil {
 		return dwdFactDesignCompletion{}, err
@@ -754,6 +955,7 @@ func (planner *OrchestratedDWDModelingPlanner) DesignFact(
 					Classifications: scopedClassifications,
 					Outputs:         []dwdLLMOutput{candidate.Output},
 				}
+				plan = completeDWDFactAssociations(scoped, plan)
 				plan = normalizeDWDSafeJoinAssociations(scoped, plan)
 				plan = completeDWDOutputContract(scoped, plan)
 				plan = normalizeDWDJoinOutputProjection(plan)
@@ -762,6 +964,9 @@ func (planner *OrchestratedDWDModelingPlanner) DesignFact(
 				decodeErr = validateDWDLLMPlan(scoped, plan)
 				if decodeErr == nil {
 					candidate.Output = plan.Outputs[0]
+					candidate.Output.FactAssociations = append(
+						[]dwdFactAssociation(nil), factAssociations...,
+					)
 				}
 			}
 			if decodeErr == nil {
@@ -1319,6 +1524,19 @@ func completeDWDFieldMetadata(field *dwdLLMField, source dwdPlanningField) {
 	) {
 		field.Role = normalizedDWDFieldRole(source)
 	}
+	field.MeasureBehavior = strings.ToUpper(strings.TrimSpace(
+		field.MeasureBehavior,
+	))
+	if field.Role != "MEASURE" {
+		field.MeasureBehavior = ""
+	} else if !containsString(
+		[]string{
+			"FLOW", "CUMULATIVE", "POINT_IN_TIME", "NON_ADDITIVE",
+		},
+		field.MeasureBehavior,
+	) {
+		field.MeasureBehavior = "FLOW"
+	}
 	if field.Cleaning == nil {
 		field.Cleaning = []string{}
 	}
@@ -1557,9 +1775,12 @@ func normalizeDWDSafeJoinAssociations(
 		safeJoins := make([]dwdLLMJoin, 0, len(output.Joins))
 		for _, join := range output.Joins {
 			dimension, exists := tables[join.DimensionDatasetVersionID]
+			approvedFactConditions, factLookup :=
+				input.FactLookupAssociations[join.DimensionDatasetVersionID]
 			if !exists || keptDimensions[join.DimensionDatasetVersionID] ||
-				(roles[join.DimensionDatasetVersionID] != "DIMENSION" &&
-					roles[join.DimensionDatasetVersionID] != "MASTER") ||
+				((roles[join.DimensionDatasetVersionID] != "DIMENSION" &&
+					roles[join.DimensionDatasetVersionID] != "MASTER") &&
+					!factLookup) ||
 				join.JoinType != "LEFT" || len(join.Conditions) == 0 ||
 				len(join.Conditions) > 8 {
 				continue
@@ -1573,10 +1794,10 @@ func normalizeDWDSafeJoinAssociations(
 				conditionKey := strings.ToLower(condition.FactFieldCode) + "\x00" +
 					strings.ToLower(condition.DimensionFieldCode)
 				if !factOK || !dimensionOK || conditionSeen[conditionKey] ||
-					!strings.EqualFold(
+					(!factLookup && !strings.EqualFold(
 						strings.TrimSpace(factField.Code),
 						strings.TrimSpace(dimensionField.Code),
-					) ||
+					)) ||
 					!dwdCanonicalTypesCompatible(
 						factField.CanonicalType, dimensionField.CanonicalType,
 					) {
@@ -1584,6 +1805,11 @@ func normalizeDWDSafeJoinAssociations(
 					break
 				}
 				conditionSeen[conditionKey] = true
+			}
+			if factLookup && !sameDWDJoinConditions(
+				join.Conditions, approvedFactConditions,
+			) {
+				continue
 			}
 			if !safe {
 				continue
@@ -1612,6 +1838,67 @@ func normalizeDWDSafeJoinAssociations(
 		output.Fields = filteredFields
 	}
 	return plan
+}
+
+func completeDWDFactAssociations(
+	input dwdPlanningInput,
+	plan dwdLLMPlan,
+) dwdLLMPlan {
+	if len(input.FactLookupAssociations) == 0 {
+		return plan
+	}
+	for outputIndex := range plan.Outputs {
+		output := &plan.Outputs[outputIndex]
+		joinByVersion := make(map[string]int, len(output.Joins))
+		for index, join := range output.Joins {
+			joinByVersion[join.DimensionDatasetVersionID] = index
+		}
+		versions := make([]string, 0, len(input.FactLookupAssociations))
+		for versionID := range input.FactLookupAssociations {
+			versions = append(versions, versionID)
+		}
+		sort.Strings(versions)
+		for _, versionID := range versions {
+			conditions := input.FactLookupAssociations[versionID]
+			index, exists := joinByVersion[versionID]
+			if !exists {
+				output.Joins = append(output.Joins, dwdLLMJoin{
+					DimensionDatasetVersionID: versionID,
+				})
+				index = len(output.Joins) - 1
+				joinByVersion[versionID] = index
+			}
+			output.Joins[index].Conditions = append(
+				[]dwdLLMJoinCondition(nil), conditions...,
+			)
+			output.Joins[index].JoinType = "LEFT"
+			if strings.TrimSpace(output.Joins[index].Rationale) == "" {
+				output.Joins[index].Rationale =
+					"第一轮确认当前事实为主表，候选事实为至多一行的次表"
+			}
+		}
+	}
+	return plan
+}
+
+func sameDWDJoinConditions(
+	left, right []dwdLLMJoinCondition,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	expected := make(map[string]bool, len(right))
+	for _, condition := range right {
+		expected[strings.ToLower(condition.FactFieldCode)+"\x00"+
+			strings.ToLower(condition.DimensionFieldCode)] = true
+	}
+	for _, condition := range left {
+		if !expected[strings.ToLower(condition.FactFieldCode)+"\x00"+
+			strings.ToLower(condition.DimensionFieldCode)] {
+			return false
+		}
+	}
+	return true
 }
 
 // normalizeDWDJoinOutputProjection enforces one visible copy of every join key.
@@ -1666,8 +1953,9 @@ func dwdModelingRepairInstruction(validationErr error, diagnostic string) string
 4. 每个已关联维度必须至少输出一个关联键之外的描述字段（只要该表存在），维度扩充字段必须来自该 output 已关联的 DIMENSION/MASTER；维度侧所有关联键不得出现在 output.fields。
 5. 所有 STRING 使用 TRIM；可空标识、维度和属性使用 COALESCE_DEFAULT，按类型固定为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；DATE/DATETIME/STRING TIME 使用 CAST_DATE 并保持 YYYYMMDD 日粒度；度量和时间不得补哨兵值，processing 不得再用 DATE_FORMAT、DATE_TRUNC 或 CAST_DATETIME 改变日期合同。
 6. processing 可按实际需要使用全部已声明处理操作；每步只按原始提示规定填写紧凑 arguments，同类多字段分别声明规则即可，平台会合并组件。二元操作的次字段必须来自已关联输入。
-7. grainKeyOutputCodes 和 timeOutputCode 只能引用 output.fields 的 outputCode。
-8. 为控制响应长度，名称、说明和 rationale 保持简短，不复述输入，不返回 SQL、Markdown 或解释。`, reason)
+7. 每个字段必须提供 measureBehavior；非度量为空，度量只能为 FLOW、CUMULATIVE、POINT_IN_TIME 或 NON_ADDITIVE。累计、YTD/MTD、running total 不得标为 FLOW；余额、库存、存量、期末数等不得跨时间求和。
+8. grainKeyOutputCodes 和 timeOutputCode 只能引用 output.fields 的 outputCode。
+9. 为控制响应长度，名称、说明和 rationale 保持简短，不复述输入，不返回 SQL、Markdown 或解释。`, reason)
 }
 
 func dwdClassificationResponseSchema(
@@ -1687,7 +1975,8 @@ func dwdClassificationResponseSchema(
 			"type": "object", "additionalProperties": false,
 			"required": []string{
 				"datasetVersionId", "role", "dimensionKeyFieldCodes",
-				"dimensionAttributeFieldCodes", "rationale",
+				"dimensionAttributeFieldCodes", "additionalDimensions",
+				"rationale",
 			},
 			"properties": map[string]any{
 				"datasetVersionId": map[string]any{
@@ -1708,6 +1997,41 @@ func dwdClassificationResponseSchema(
 					"maxItems": len(fieldCodes),
 					"items": map[string]any{
 						"type": "string", "enum": fieldCodes,
+					},
+					"additionalDimensions": map[string]any{
+						"type": "array", "minItems": 0, "maxItems": 1,
+						"items": map[string]any{
+							"type": "object", "additionalProperties": false,
+							"required": []string{
+								"code", "name", "dimensionKeyFieldCodes",
+								"dimensionAttributeFieldCodes", "rationale",
+							},
+							"properties": map[string]any{
+								"code": map[string]any{
+									"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$",
+								},
+								"name": map[string]any{
+									"type": "string", "minLength": 1, "maxLength": 128,
+								},
+								"dimensionKeyFieldCodes": map[string]any{
+									"type": "array", "minItems": 1, "maxItems": 8,
+									"uniqueItems": true,
+									"items": map[string]any{
+										"type": "string", "enum": fieldCodes,
+									},
+								},
+								"dimensionAttributeFieldCodes": map[string]any{
+									"type": "array", "minItems": 1,
+									"maxItems": len(fieldCodes), "uniqueItems": true,
+									"items": map[string]any{
+										"type": "string", "enum": fieldCodes,
+									},
+								},
+								"rationale": map[string]any{
+									"type": "string", "minLength": 1, "maxLength": 1024,
+								},
+							},
+						},
 					},
 				},
 				"rationale": map[string]any{
@@ -1878,6 +2202,163 @@ func dwdFactDesignResponseSchema(
 	}, nil
 }
 
+func dwdFactAssociationResponseSchema(
+	candidates []dwdPlanningTable,
+) (aiplatform.JSONSchema, error) {
+	versionIDs := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		versionIDs = append(versionIDs, candidate.VersionID)
+	}
+	if len(versionIDs) == 0 {
+		return aiplatform.JSONSchema{}, errDWDModelingInvalid
+	}
+	schema := map[string]any{
+		"type": "object", "additionalProperties": false,
+		"required": []string{"relations"},
+		"properties": map[string]any{
+			"relations": map[string]any{
+				"type": "array", "minItems": len(versionIDs),
+				"maxItems": len(versionIDs),
+				"items": map[string]any{
+					"type": "object", "additionalProperties": false,
+					"required": []string{
+						"candidateDatasetVersionId", "related",
+						"currentRole", "conditions", "rationale",
+					},
+					"properties": map[string]any{
+						"candidateDatasetVersionId": map[string]any{
+							"type": "string", "enum": versionIDs,
+						},
+						"related": map[string]any{"type": "boolean"},
+						"currentRole": map[string]any{
+							"type": "string",
+							"enum": []string{"PRIMARY", "SECONDARY", "NONE"},
+						},
+						"conditions": map[string]any{
+							"type": "array", "minItems": 0, "maxItems": 8,
+							"items": map[string]any{
+								"type": "object", "additionalProperties": false,
+								"required": []string{
+									"factFieldCode", "dimensionFieldCode",
+								},
+								"properties": map[string]any{
+									"factFieldCode": map[string]any{
+										"type": "string", "maxLength": 128,
+									},
+									"dimensionFieldCode": map[string]any{
+										"type": "string", "maxLength": 128,
+									},
+								},
+							},
+						},
+						"rationale": map[string]any{
+							"type": "string", "maxLength": 1024,
+						},
+					},
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return aiplatform.JSONSchema{}, err
+	}
+	return aiplatform.JSONSchema{
+		Name:        "warehouse_fact_relation_batch",
+		Description: "当前事实表与一批候选事实表的主次和关联键判断",
+		Schema:      raw,
+	}, nil
+}
+
+func validateDWDFactRelationBatch(
+	current dwdPlanningTable,
+	candidates []dwdPlanningTable,
+	batch dwdFactRelationBatch,
+) error {
+	if len(batch.Relations) != len(candidates) {
+		return fmt.Errorf(
+			"%w: fact relation batch coverage is incomplete",
+			errDWDModelingInvalid,
+		)
+	}
+	candidateByVersion := make(
+		map[string]dwdPlanningTable, len(candidates),
+	)
+	for _, candidate := range candidates {
+		candidateByVersion[candidate.VersionID] = candidate
+	}
+	seen := map[string]bool{}
+	currentFields := planningFieldsByCode(current)
+	for _, relation := range batch.Relations {
+		candidate, exists :=
+			candidateByVersion[relation.CandidateDatasetVersionID]
+		if !exists || seen[relation.CandidateDatasetVersionID] ||
+			!containsString(
+				[]string{"PRIMARY", "SECONDARY", "NONE"},
+				relation.CurrentRole,
+			) ||
+			strings.TrimSpace(relation.Rationale) == "" {
+			return fmt.Errorf(
+				"%w: fact relation decision is invalid",
+				errDWDModelingInvalid,
+			)
+		}
+		seen[relation.CandidateDatasetVersionID] = true
+		if !relation.Related {
+			if len(relation.Conditions) != 0 {
+				return fmt.Errorf(
+					"%w: unrelated fact relation has join conditions",
+					errDWDModelingInvalid,
+				)
+			}
+			continue
+		}
+		if len(relation.Conditions) == 0 ||
+			len(relation.Conditions) > 8 ||
+			relation.CurrentRole == "NONE" {
+			return fmt.Errorf(
+				"%w: related fact relation lacks a valid role or key",
+				errDWDModelingInvalid,
+			)
+		}
+		candidateFields := planningFieldsByCode(candidate)
+		conditionSeen := map[string]bool{}
+		for _, condition := range relation.Conditions {
+			left, leftOK := currentFields[condition.FactFieldCode]
+			right, rightOK :=
+				candidateFields[condition.DimensionFieldCode]
+			key := strings.ToLower(condition.FactFieldCode) + "\x00" +
+				strings.ToLower(condition.DimensionFieldCode)
+			if !leftOK || !rightOK || conditionSeen[key] ||
+				!dwdCanonicalTypesCompatible(
+					left.CanonicalType, right.CanonicalType,
+				) {
+				return fmt.Errorf(
+					"%w: fact relation join key is invalid",
+					errDWDModelingInvalid,
+				)
+			}
+			conditionSeen[key] = true
+		}
+	}
+	return nil
+}
+
+func dwdFactAssociationMap(
+	associations []dwdFactAssociation,
+) map[string][]dwdLLMJoinCondition {
+	if len(associations) == 0 {
+		return nil
+	}
+	result := make(map[string][]dwdLLMJoinCondition, len(associations))
+	for _, association := range associations {
+		result[association.SecondaryDatasetVersionID] = append(
+			[]dwdLLMJoinCondition(nil), association.Conditions...,
+		)
+	}
+	return result
+}
+
 func dwdModelingResponseSchema(input dwdPlanningInput) (aiplatform.JSONSchema, error) {
 	versionIDs := make([]string, 0, len(input.Tables))
 	maxFields := 0
@@ -1955,8 +2436,8 @@ func dwdModelingResponseSchema(input dwdPlanningInput) (aiplatform.JSONSchema, e
 								"type": "object", "additionalProperties": false,
 								"required": []string{
 									"sourceDatasetVersionId", "sourceFieldCode", "outputCode",
-									"outputName", "outputDescription", "role", "cleaning",
-									"processing",
+									"outputName", "outputDescription", "role",
+									"measureBehavior", "cleaning", "processing",
 								},
 								"properties": map[string]any{
 									"sourceDatasetVersionId": map[string]any{"type": "string", "enum": versionIDs},
@@ -1967,6 +2448,13 @@ func dwdModelingResponseSchema(input dwdPlanningInput) (aiplatform.JSONSchema, e
 									"role": map[string]any{
 										"type": "string",
 										"enum": []string{"DIMENSION", "MEASURE", "ATTRIBUTE", "TIME", "IDENTIFIER"},
+									},
+									"measureBehavior": map[string]any{
+										"type": "string",
+										"enum": []string{
+											"", "FLOW", "CUMULATIVE",
+											"POINT_IN_TIME", "NON_ADDITIVE",
+										},
 									},
 									"cleaning": map[string]any{
 										"type": "array", "minItems": 0, "maxItems": 3,
@@ -2131,6 +2619,7 @@ func normalizeDWDClassifications(
 				classification.Role = "FACT"
 				classification.DimensionKeyFieldCodes = []string{}
 				classification.DimensionAttributeFieldCodes = []string{}
+				classification.AdditionalDimensions = []dwdLLMDimensionProjection{}
 				classification.Rationale =
 					"本地粒度合同纠正为 FACT：" + factKind +
 						"；不生成实体 DIM"
@@ -2144,6 +2633,7 @@ func normalizeDWDClassifications(
 			case "OTHER":
 				classification.DimensionKeyFieldCodes = []string{}
 				classification.DimensionAttributeFieldCodes = []string{}
+				classification.AdditionalDimensions = []dwdLLMDimensionProjection{}
 			case "FACT":
 				classification.DimensionKeyFieldCodes =
 					stableDWDEmbeddedDimensionKeys(
@@ -2184,10 +2674,184 @@ func normalizeDWDClassifications(
 						classification.DimensionAttributeFieldCodes,
 					)
 			}
+			classification.AdditionalDimensions =
+				normalizeDWDAdditionalDimensions(
+					table, classification,
+				)
+			classification = consolidateContainedDWDDimensions(
+				table, classification,
+			)
 			normalized = append(normalized, classification)
 		}
 	}
 	return normalized
+}
+
+func consolidateContainedDWDDimensions(
+	table dwdPlanningTable,
+	classification dwdLLMClassification,
+) dwdLLMClassification {
+	if len(classification.AdditionalDimensions) != 1 ||
+		len(classification.DimensionKeyFieldCodes) == 0 {
+		return classification
+	}
+	additional := classification.AdditionalDimensions[0]
+	primaryContainsAdditional := dwdStringSetContains(
+		classification.DimensionKeyFieldCodes,
+		additional.DimensionKeyFieldCodes,
+	)
+	additionalContainsPrimary := dwdStringSetContains(
+		additional.DimensionKeyFieldCodes,
+		classification.DimensionKeyFieldCodes,
+	)
+	if !primaryContainsAdditional && !additionalContainsPrimary {
+		// Independent key sets represent independent dimensions. They must not
+		// be folded into a wide table merely because they occur in one ODS.
+		return classification
+	}
+	if additionalContainsPrimary &&
+		len(additional.DimensionKeyFieldCodes) >
+			len(classification.DimensionKeyFieldCodes) {
+		classification.DimensionKeyFieldCodes = append(
+			[]string(nil), additional.DimensionKeyFieldCodes...,
+		)
+	}
+	keys := make(
+		map[string]bool, len(classification.DimensionKeyFieldCodes),
+	)
+	for _, code := range classification.DimensionKeyFieldCodes {
+		keys[strings.ToLower(strings.TrimSpace(code))] = true
+	}
+	attributes := append(
+		append(
+			[]string(nil),
+			classification.DimensionAttributeFieldCodes...,
+		),
+		additional.DimensionAttributeFieldCodes...,
+	)
+	attributes = normalizeDWDClassificationFieldCodes(
+		planningFieldsByCode(table), attributes,
+	)
+	filtered := attributes[:0]
+	for _, code := range attributes {
+		if !keys[strings.ToLower(strings.TrimSpace(code))] {
+			filtered = append(filtered, code)
+		}
+	}
+	fields := planningFieldsByCode(table)
+	if classification.Role == "FACT" {
+		filtered = stableDWDEmbeddedDimensionAttributes(
+			fields, classification.DimensionKeyFieldCodes, filtered,
+		)
+	} else {
+		filtered = stableDWDEntityDimensionAttributes(
+			fields, classification.DimensionKeyFieldCodes, filtered,
+		)
+	}
+	classification.DimensionAttributeFieldCodes = filtered
+	classification.AdditionalDimensions = []dwdLLMDimensionProjection{}
+	classification.Rationale = strings.TrimSpace(
+		classification.Rationale +
+			"；本地包含合同将可落在同一细粒度的候选合并为统一维度",
+	)
+	return classification
+}
+
+func dwdStringSetContains(container, subset []string) bool {
+	if len(subset) == 0 || len(container) < len(subset) {
+		return false
+	}
+	values := make(map[string]bool, len(container))
+	for _, value := range container {
+		values[strings.ToLower(strings.TrimSpace(value))] = true
+	}
+	for _, value := range subset {
+		if !values[strings.ToLower(strings.TrimSpace(value))] {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeDWDAdditionalDimensions(
+	table dwdPlanningTable,
+	classification dwdLLMClassification,
+) []dwdLLMDimensionProjection {
+	if classification.Role == "OTHER" ||
+		len(classification.AdditionalDimensions) == 0 {
+		return []dwdLLMDimensionProjection{}
+	}
+	fields := planningFieldsByCode(table)
+	result := make([]dwdLLMDimensionProjection, 0, 1)
+	seenCodes := map[string]bool{}
+	for _, candidate := range classification.AdditionalDimensions {
+		if len(result) == 1 {
+			break
+		}
+		candidate.Code = strings.ToLower(strings.TrimSpace(candidate.Code))
+		candidate.Name = strings.TrimSpace(candidate.Name)
+		candidate.Rationale = strings.TrimSpace(candidate.Rationale)
+		if !validDWDDimensionProjectionCode(candidate.Code) ||
+			candidate.Name == "" || candidate.Rationale == "" ||
+			seenCodes[candidate.Code] {
+			continue
+		}
+		seenCodes[candidate.Code] = true
+		candidate.DimensionKeyFieldCodes =
+			normalizeDWDClassificationFieldCodes(
+				fields, candidate.DimensionKeyFieldCodes,
+			)
+		candidate.DimensionAttributeFieldCodes =
+			normalizeDWDClassificationFieldCodes(
+				fields, candidate.DimensionAttributeFieldCodes,
+			)
+		if classification.Role == "FACT" {
+			candidate.DimensionKeyFieldCodes =
+				stableDWDEmbeddedDimensionKeys(
+					fields, candidate.DimensionKeyFieldCodes,
+				)
+			candidate.DimensionAttributeFieldCodes =
+				stableDWDEmbeddedDimensionAttributes(
+					fields, candidate.DimensionKeyFieldCodes,
+					candidate.DimensionAttributeFieldCodes,
+				)
+		} else {
+			candidate.DimensionAttributeFieldCodes =
+				stableDWDEntityDimensionAttributes(
+					fields, candidate.DimensionKeyFieldCodes,
+					candidate.DimensionAttributeFieldCodes,
+				)
+		}
+		if len(candidate.DimensionKeyFieldCodes) == 0 ||
+			len(candidate.DimensionAttributeFieldCodes) == 0 ||
+			sameDWDStringSet(
+				candidate.DimensionKeyFieldCodes,
+				classification.DimensionKeyFieldCodes,
+			) ||
+			classification.Role == "FACT" && sameDWDStringSet(
+				candidate.DimensionKeyFieldCodes,
+				table.OutputGrain.KeyFields,
+			) {
+			continue
+		}
+		result = append(result, candidate)
+	}
+	return result
+}
+
+func validDWDDimensionProjectionCode(value string) bool {
+	if len(value) < 2 || len(value) > 64 ||
+		value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, character := range value[1:] {
+		if character != '_' &&
+			(character < 'a' || character > 'z') &&
+			(character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // canonicalizeMergedDWDClassifications is the deterministic safety net behind
@@ -2228,6 +2892,10 @@ func canonicalizeMergedDWDClassifications(
 			classification.DimensionAttributeFieldCodes = append(
 				[]string(nil),
 				authoritative.DimensionAttributeFieldCodes...,
+			)
+			classification.AdditionalDimensions = append(
+				[]dwdLLMDimensionProjection(nil),
+				authoritative.AdditionalDimensions...,
 			)
 		}
 		result = append(result, classification)
@@ -2559,7 +3227,8 @@ func classificationProducesDimension(
 ) bool {
 	return classification.Role == "DIMENSION" ||
 		classification.Role == "MASTER" ||
-		len(classification.DimensionKeyFieldCodes) > 0
+		len(classification.DimensionKeyFieldCodes) > 0 ||
+		len(classification.AdditionalDimensions) > 0
 }
 
 func classificationDimensionIdentity(
@@ -2572,33 +3241,107 @@ func classificationDimensionIdentity(
 	return classification.DatasetVersionID
 }
 
+type dwdDimensionSpec struct {
+	Identity       string
+	MappingKey     string
+	DisplayName    string
+	Classification dwdLLMClassification
+}
+
+func classificationDimensionSpecs(
+	classification dwdLLMClassification,
+) []dwdDimensionSpec {
+	result := []dwdDimensionSpec{}
+	if classification.Role == "DIMENSION" ||
+		classification.Role == "MASTER" ||
+		len(classification.DimensionKeyFieldCodes) > 0 {
+		result = append(result, dwdDimensionSpec{
+			Identity:       classificationDimensionIdentity(classification),
+			MappingKey:     "primary",
+			Classification: classification,
+		})
+	}
+	for _, projection := range classification.AdditionalDimensions {
+		candidate := classification
+		candidate.DimensionKeyFieldCodes = append(
+			[]string(nil), projection.DimensionKeyFieldCodes...,
+		)
+		candidate.DimensionAttributeFieldCodes = append(
+			[]string(nil), projection.DimensionAttributeFieldCodes...,
+		)
+		candidate.AdditionalDimensions = nil
+		candidate.Rationale = projection.Rationale
+		result = append(result, dwdDimensionSpec{
+			Identity: classification.DatasetVersionID + "#DIM:" +
+				projection.Code,
+			MappingKey:     projection.Code,
+			DisplayName:    projection.Name,
+			Classification: candidate,
+		})
+	}
+	return result
+}
+
+func dwdDimensionSpecs(
+	classifications []dwdLLMClassification,
+) []dwdDimensionSpec {
+	result := []dwdDimensionSpec{}
+	for _, classification := range classifications {
+		result = append(
+			result, classificationDimensionSpecs(classification)...,
+		)
+	}
+	return result
+}
+
+func dwdDimensionSpecByIdentity(
+	classifications []dwdLLMClassification,
+	dimensionIdentity string,
+) (dwdDimensionSpec, bool) {
+	for _, spec := range dwdDimensionSpecs(classifications) {
+		if spec.Identity == dimensionIdentity {
+			return spec, true
+		}
+	}
+	return dwdDimensionSpec{}, false
+}
+
 func dwdDimensionPlanningScope(
 	input dwdPlanningInput,
 	classifications []dwdLLMClassification,
-	sourceVersionID string,
+	dimensionIdentity string,
 ) (dwdPlanningTable, dwdLLMClassification, error) {
 	if err := validateDWDLLMClassifications(
 		input, input.Domain, classifications,
 	); err != nil {
 		return dwdPlanningTable{}, dwdLLMClassification{}, err
 	}
-	var table dwdPlanningTable
-	foundTable := false
-	for _, candidate := range input.Tables {
-		if candidate.VersionID == sourceVersionID {
-			table = candidate
-			foundTable = true
-			break
-		}
-	}
-	if !foundTable {
+	spec, foundSpec := dwdDimensionSpecByIdentity(
+		classifications, dimensionIdentity,
+	)
+	if !foundSpec {
 		return dwdPlanningTable{}, dwdLLMClassification{},
 			fmt.Errorf("%w: requested dimension is unavailable", errDWDModelingInvalid)
 	}
-	for _, classification := range classifications {
-		if classification.DatasetVersionID != sourceVersionID {
+	var table dwdPlanningTable
+	for _, candidate := range input.Tables {
+		if candidate.VersionID == spec.Classification.DatasetVersionID {
+			table = candidate
+			break
+		}
+	}
+	if table.VersionID == "" {
+		return dwdPlanningTable{}, dwdLLMClassification{},
+			fmt.Errorf("%w: requested dimension source is unavailable", errDWDModelingInvalid)
+	}
+	if spec.DisplayName != "" {
+		table.Name = spec.DisplayName
+	}
+	for _, sourceClassification := range classifications {
+		if sourceClassification.DatasetVersionID != table.VersionID {
 			continue
 		}
+		classification := spec.Classification
 		// Checkpoints produced by the previous classifier only recorded the
 		// primary DIMENSION/MASTER role. Expand that legacy representation here
 		// so an in-flight run can resume with the new field-scoped DIM contract.
@@ -2789,8 +3532,11 @@ func dwdFactPlanningScope(
 	)
 	for _, table := range input.Tables {
 		role := roleByVersion[table.VersionID]
+		_, acceptedFactLookup :=
+			input.FactLookupAssociations[table.VersionID]
 		if table.VersionID != factVersionID &&
-			role != "DIMENSION" && role != "MASTER" {
+			role != "DIMENSION" && role != "MASTER" &&
+			!(role == "FACT" && acceptedFactLookup) {
 			continue
 		}
 		scoped.Tables = append(scoped.Tables, table)
@@ -2916,7 +3662,10 @@ func validateDWDLLMPlanCoverage(
 		}
 		outputByFact[output.FactDatasetVersionID] = true
 		fact := tableByVersion[output.FactDatasetVersionID]
-		if err := validateDWDLLMOutput(fact, tableByVersion, roleByVersion, output); err != nil {
+		if err := validateDWDLLMOutput(
+			fact, tableByVersion, roleByVersion,
+			input.FactLookupAssociations, output,
+		); err != nil {
 			appendDWDValidationIssue(
 				&issues, "output %s: %s",
 				output.FactDatasetVersionID, dwdValidationDetail(err),
@@ -3117,6 +3866,29 @@ func validateDWDLLMClassifications(
 				errDWDModelingInvalid,
 			)
 		}
+		for _, additional := range classification.AdditionalDimensions {
+			scoped := input
+			scoped.Tables = []dwdPlanningTable{table}
+			scoped.Trigger = dwdPlanningTrigger{
+				DatasetID: table.DatasetID, VersionID: table.VersionID,
+			}
+			candidate := classification
+			candidate.DimensionKeyFieldCodes = append(
+				[]string(nil), additional.DimensionKeyFieldCodes...,
+			)
+			candidate.DimensionAttributeFieldCodes = append(
+				[]string(nil), additional.DimensionAttributeFieldCodes...,
+			)
+			candidate.AdditionalDimensions = nil
+			if err := validateDWDLLMClassifications(
+				scoped, domain, []dwdLLMClassification{candidate},
+			); err != nil {
+				return fmt.Errorf(
+					"%w: additional dimension %s is invalid: %v",
+					errDWDModelingInvalid, additional.Code, err,
+				)
+			}
+		}
 		roleByVersion[classification.DatasetVersionID] = classification.Role
 	}
 	if len(roleByVersion) != len(tableByVersion) {
@@ -3150,6 +3922,7 @@ func validateDWDLLMOutput(
 	fact dwdPlanningTable,
 	tables map[string]dwdPlanningTable,
 	roles map[string]string,
+	factLookupAssociations map[string][]dwdLLMJoinCondition,
 	output dwdLLMOutput,
 ) error {
 	issues := []string{}
@@ -3176,6 +3949,8 @@ func validateDWDLLMOutput(
 	dimensionJoinKeys := map[string]map[string]bool{}
 	for _, join := range output.Joins {
 		dimension, exists := tables[join.DimensionDatasetVersionID]
+		approvedFactConditions, factLookup :=
+			factLookupAssociations[join.DimensionDatasetVersionID]
 		switch {
 		case !exists:
 			return fmt.Errorf(
@@ -3188,7 +3963,8 @@ func validateDWDLLMOutput(
 				errDWDModelingInvalid, join.DimensionDatasetVersionID,
 			)
 		case roles[join.DimensionDatasetVersionID] != "DIMENSION" &&
-			roles[join.DimensionDatasetVersionID] != "MASTER":
+			roles[join.DimensionDatasetVersionID] != "MASTER" &&
+			!factLookup:
 			return fmt.Errorf(
 				"%w: DWD join target %s is classified as %s instead of DIMENSION/MASTER",
 				errDWDModelingInvalid, join.DimensionDatasetVersionID,
@@ -3211,10 +3987,10 @@ func validateDWDLLMOutput(
 			conditionKey := strings.ToLower(condition.FactFieldCode) + "\x00" +
 				strings.ToLower(condition.DimensionFieldCode)
 			if !factOK || !dimensionOK || conditionSeen[conditionKey] ||
-				!strings.EqualFold(
+				(!factLookup && !strings.EqualFold(
 					strings.TrimSpace(factField.Code),
 					strings.TrimSpace(dimensionField.Code),
-				) ||
+				)) ||
 				!dwdCanonicalTypesCompatible(
 					factField.CanonicalType, dimensionField.CanonicalType,
 				) {
@@ -3228,6 +4004,14 @@ func validateDWDLLMOutput(
 			joinByFactField[strings.ToLower(condition.FactFieldCode)] = joinBinding{
 				join: join, condition: condition,
 			}
+		}
+		if factLookup && !sameDWDJoinConditions(
+			join.Conditions, approvedFactConditions,
+		) {
+			return fmt.Errorf(
+				"%w: fact lookup join differs from the accepted first-round relationship",
+				errDWDModelingInvalid,
+			)
 		}
 		joined[join.DimensionDatasetVersionID] = true
 		dimensionJoinKeys[join.DimensionDatasetVersionID] = dimensionKeys
@@ -3317,6 +4101,29 @@ func validateDWDLLMOutput(
 		if !roleValid {
 			appendDWDValidationIssue(
 				&issues, "field[%d] has invalid role %s", fieldIndex, field.Role,
+			)
+		}
+		measureBehavior := strings.ToUpper(strings.TrimSpace(
+			field.MeasureBehavior,
+		))
+		if field.Role == "MEASURE" {
+			if !containsString(
+				[]string{
+					"FLOW", "CUMULATIVE", "POINT_IN_TIME", "NON_ADDITIVE",
+				},
+				measureBehavior,
+			) {
+				appendDWDValidationIssue(
+					&issues,
+					"measure field %s has invalid measureBehavior %s",
+					field.OutputCode, field.MeasureBehavior,
+				)
+			}
+		} else if measureBehavior != "" {
+			appendDWDValidationIssue(
+				&issues,
+				"non-measure field %s must have empty measureBehavior",
+				field.OutputCode,
 			)
 		}
 		if exists && fieldExists && roleValid {

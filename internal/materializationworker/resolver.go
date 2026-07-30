@@ -223,7 +223,8 @@ func (resolver *PostgresResolver) Resolve(
 				layerAllowed = upstream.Layer == string(materialization.LayerODS) ||
 					upstream.Layer == string(materialization.LayerDIM)
 			} else if claim.Layer == materialization.LayerDWS {
-				layerAllowed = upstream.Layer == string(materialization.LayerDWD)
+				layerAllowed = upstream.Layer == string(materialization.LayerDWD) ||
+					upstream.Layer == string(materialization.LayerDIM)
 			} else if claim.Layer == materialization.LayerADS {
 				layerAllowed = upstream.Layer == string(materialization.LayerDWS)
 			}

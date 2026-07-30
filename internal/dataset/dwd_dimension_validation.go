@@ -734,7 +734,7 @@ func (worker *DWDModelingWorker) loadGeneratedDIMValidationCandidates(
 				return err
 			}
 			if err := validateDWDPlanningSnapshotTx(
-				ctx, tx, input.DomainID, snapshotHash,
+				ctx, tx, input, snapshotHash,
 			); err != nil {
 				return err
 			}
@@ -748,13 +748,16 @@ func (worker *DWDModelingWorker) loadGeneratedDIMValidationCandidates(
 					sourceByVersion[asset.VersionID] = asset
 				}
 			}
-			for _, classification := range classifications {
-				if !classificationProducesDimension(classification) {
+			for _, spec := range dwdDimensionSpecs(classifications) {
+				// Cross-source duplicate arbitration is intentionally limited
+				// to the legacy primary entity. Additional entity projections
+				// have independent identities and are locally contract-validated.
+				if spec.MappingKey != "primary" {
 					continue
 				}
 				source, exists :=
-					sourceByVersion[classification.DatasetVersionID]
-				_, designed := designs[classification.DatasetVersionID]
+					sourceByVersion[spec.Classification.DatasetVersionID]
+				_, designed := designs[spec.Identity]
 				if !exists || !designed {
 					continue
 				}
@@ -775,7 +778,8 @@ func (worker *DWDModelingWorker) loadGeneratedDIMValidationCandidates(
 					 AND draft.tenant_id=dataset.tenant_id
 					 AND draft.status='DRAFT'
 					 AND draft.layer='DIM'
-					WHERE output.source_dataset_id=$1::uuid`,
+					WHERE output.source_dataset_id=$1::uuid
+					  AND output.dimension_key='primary'`,
 					source.DatasetID,
 				).Scan(&dimDatasetID, &dimVersionID, &raw)
 				if errors.Is(err, pgx.ErrNoRows) {
@@ -808,7 +812,7 @@ func (worker *DWDModelingWorker) loadGeneratedDIMValidationCandidates(
 				result = append(result, dwdDIMValidationCandidate{
 					SourceDatasetID:           source.DatasetID,
 					SourceDatasetVersionID:    source.VersionID,
-					SourceRole:                classification.Role,
+					SourceRole:                spec.Classification.Role,
 					DimensionDatasetID:        dimDatasetID,
 					DimensionDatasetVersionID: dimVersionID,
 					Name:                      document.Dataset.Name,
@@ -1056,7 +1060,7 @@ func (worker *DWDModelingWorker) applyDIMKeepOneValidation(
 				return err
 			}
 			if err := validateDWDPlanningSnapshotTx(
-				ctx, tx, input.DomainID, snapshotHash,
+				ctx, tx, input, snapshotHash,
 			); err != nil {
 				return err
 			}
@@ -1148,7 +1152,7 @@ func (worker *DWDModelingWorker) applyDIMSeparateNames(
 				return err
 			}
 			if err := validateDWDPlanningSnapshotTx(
-				ctx, tx, input.DomainID, snapshotHash,
+				ctx, tx, input, snapshotHash,
 			); err != nil {
 				return err
 			}

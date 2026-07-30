@@ -257,6 +257,9 @@
       "properties": {
         "field": { "$ref": "#/$defs/identifier" },
         "additivity": { "enum": ["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"] },
+        "valueBehavior": { "enum": ["FLOW", "CUMULATIVE", "POINT_IN_TIME", "NON_ADDITIVE"] },
+        "defaultAggregation": { "enum": ["SUM", "MIN", "MAX", "COUNT", "COUNT_DISTINCT", "AVG"] },
+        "timeAggregation": { "enum": ["SUM", "LAST", "NONE"] },
         "unit": { "type": "string", "maxLength": 64 },
         "currency": { "type": "string", "maxLength": 16 },
         "nullPolicy": { "enum": ["PRESERVE", "ZERO", "REJECT"] }
@@ -267,7 +270,7 @@
       "additionalProperties": false,
       "required": ["intent", "inputMode", "commonGrainFields", "conformedDimensions", "measures"],
       "properties": {
-        "intent": { "enum": ["TREND", "PERIOD_COMPARISON", "DISTRIBUTION", "RANKING", "TOP_N", "DRILLDOWN", "FUNNEL", "RETENTION", "LIFECYCLE", "ANOMALY", "CONTRIBUTION", "MULTI_FACT_COMPARISON"] },
+        "intent": { "enum": ["TREND", "PERIOD_COMPARISON", "DISTRIBUTION", "RANKING", "TOP_N", "DRILLDOWN", "FUNNEL", "RETENTION", "LIFECYCLE", "ANOMALY", "CONTRIBUTION", "MULTI_FACT_COMPARISON", "ENTITY_COUNT"] },
         "inputMode": { "enum": ["SINGLE_FACT", "MULTI_FACT"] },
         "commonGrainFields": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/identifier" } },
         "conformedDimensions": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/identifier" } },
@@ -285,6 +288,8 @@
         "sourceNodeIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/identifier" } },
         "aggregation": { "enum": ["SUM", "MIN", "MAX", "COUNT", "COUNT_DISTINCT", "AVG"] },
         "additivity": { "enum": ["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"] },
+        "valueBehavior": { "enum": ["FLOW", "CUMULATIVE", "POINT_IN_TIME", "NON_ADDITIVE"] },
+        "timeAggregation": { "enum": ["SUM", "LAST", "NONE"] },
         "unit": { "type": "string", "maxLength": 64 },
         "currency": { "type": "string", "maxLength": 16 }
       }

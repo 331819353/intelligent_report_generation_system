@@ -3,8 +3,11 @@ package dataset
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"intelligent-report-generation-system/internal/platform/database"
 )
@@ -16,7 +19,30 @@ const (
 	LLMTriggerDIMModeling LLMTriggerKind = "DIM_MODELING"
 	LLMTriggerDWDModeling LLMTriggerKind = "DWD_MODELING"
 	LLMTriggerDWSModeling LLMTriggerKind = "DWS_MODELING"
+	LLMTriggerADSModeling LLMTriggerKind = "ADS_MODELING"
 )
+
+const maxLLMTriggerDatasetIDs = 200
+
+// LLMTriggerScope 为空时表示按目标层的默认上游范围执行；非空时只允许使用
+// 这些当前发布数据集。服务端会在入队事务内再次解析层级，不能信任客户端标签。
+type LLMTriggerScope struct {
+	DatasetIDs []string `json:"datasetIds"`
+}
+
+// LLMTriggerScopeError 是可安全返回给页面的规则校验结果，不包含物理对象信息。
+type LLMTriggerScopeError struct {
+	Message string
+}
+
+func (err *LLMTriggerScopeError) Error() string {
+	if err == nil || strings.TrimSpace(err.Message) == "" {
+		return ErrLLMTriggerScopeInvalid.Error()
+	}
+	return err.Message
+}
+
+func (err *LLMTriggerScopeError) Unwrap() error { return ErrLLMTriggerScopeInvalid }
 
 // LLMTriggerResult 返回当前发布资产的匹配数和本次实际激活的任务数。终态任务
 // 可以通过人工操作安全重跑；未激活的资产已经存在待处理或运行中的任务。
@@ -31,7 +57,9 @@ type LLMTriggerResult struct {
 
 // LLMTriggerStore 把人工操作与具体 outbox 表隔离，便于 HTTP 与服务合同测试。
 type LLMTriggerStore interface {
-	TriggerLLM(context.Context, string, string, LLMTriggerKind) (LLMTriggerResult, error)
+	TriggerLLM(
+		context.Context, string, string, LLMTriggerKind, LLMTriggerScope,
+	) (LLMTriggerResult, error)
 }
 
 // SetLLMTriggerStore 注册人工 LLM 任务入口。没有注册时 API 以 503 失败关闭。
@@ -47,21 +75,118 @@ func (s *Service) TriggerLLM(
 	ctx context.Context,
 	tenantID, actorID string,
 	kind LLMTriggerKind,
+	scope LLMTriggerScope,
 ) (LLMTriggerResult, error) {
 	if s == nil || strings.TrimSpace(tenantID) == "" || strings.TrimSpace(actorID) == "" ||
 		!validLLMTriggerKind(kind) {
 		return LLMTriggerResult{}, ErrInvalidDocument
 	}
+	normalized, err := normalizeLLMTriggerScope(scope)
+	if err != nil {
+		return LLMTriggerResult{}, err
+	}
 	if s.llmTrigger == nil {
 		return LLMTriggerResult{}, ErrLLMTriggerUnavailable
 	}
-	return s.llmTrigger.TriggerLLM(ctx, tenantID, actorID, kind)
+	return s.llmTrigger.TriggerLLM(ctx, tenantID, actorID, kind, normalized)
 }
 
 func validLLMTriggerKind(kind LLMTriggerKind) bool {
 	return kind == LLMTriggerDIMModeling ||
 		kind == LLMTriggerDWDModeling ||
-		kind == LLMTriggerDWSModeling
+		kind == LLMTriggerDWSModeling ||
+		kind == LLMTriggerADSModeling
+}
+
+func normalizeLLMTriggerScope(scope LLMTriggerScope) (LLMTriggerScope, error) {
+	if len(scope.DatasetIDs) > maxLLMTriggerDatasetIDs {
+		return LLMTriggerScope{}, &LLMTriggerScopeError{
+			Message: fmt.Sprintf("一次最多选择 %d 个数据集", maxLLMTriggerDatasetIDs),
+		}
+	}
+	seen := make(map[string]bool, len(scope.DatasetIDs))
+	normalized := make([]string, 0, len(scope.DatasetIDs))
+	for _, raw := range scope.DatasetIDs {
+		id := strings.ToLower(strings.TrimSpace(raw))
+		if uuid.Validate(id) != nil {
+			return LLMTriggerScope{}, &LLMTriggerScopeError{
+				Message: "所选数据集标识无效，请刷新列表后重新选择",
+			}
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		normalized = append(normalized, id)
+	}
+	sort.Strings(normalized)
+	scope.DatasetIDs = normalized
+	return scope, nil
+}
+
+type llmTriggerAsset struct {
+	ID    string
+	Layer Layer
+}
+
+func validateLLMTriggerAssets(
+	kind LLMTriggerKind,
+	requested []string,
+	assets []llmTriggerAsset,
+) error {
+	if len(requested) == 0 {
+		return nil
+	}
+	if len(assets) != len(requested) {
+		return &LLMTriggerScopeError{
+			Message: "部分所选数据集不存在、不属于当前业务领域或没有当前已发布版本",
+		}
+	}
+	allowed := map[LLMTriggerKind]map[Layer]bool{
+		LLMTriggerDIMModeling: {LayerODS: true},
+		LLMTriggerDWDModeling: {LayerODS: true, LayerDIM: true},
+		LLMTriggerDWSModeling: {LayerDWD: true, LayerDIM: true},
+		LLMTriggerADSModeling: {LayerDWS: true},
+	}[kind]
+	layerCounts := map[Layer]int{}
+	for _, asset := range assets {
+		if !allowed[asset.Layer] {
+			return &LLMTriggerScopeError{Message: llmTriggerLayerRule(kind)}
+		}
+		layerCounts[asset.Layer]++
+	}
+	if kind == LLMTriggerDWDModeling && layerCounts[LayerODS] == 0 {
+		return &LLMTriggerScopeError{
+			Message: "明细建模至少需要选择一个 ODS 数据集，DIM 只能作为可选维度输入",
+		}
+	}
+	if kind == LLMTriggerDWSModeling && layerCounts[LayerDWD] == 0 {
+		return &LLMTriggerScopeError{
+			Message: "主题建模至少需要选择一个 DWD 数据集，DIM 只能作为联合分析上下文",
+		}
+	}
+	if kind == LLMTriggerDWSModeling &&
+		(layerCounts[LayerDWD] > 32 || layerCounts[LayerDIM] > 64) {
+		return &LLMTriggerScopeError{
+			Message: "一次联合主题建模最多选择 32 个 DWD 和 64 个 DIM 数据集",
+		}
+	}
+	return nil
+}
+
+func llmTriggerLayerRule(kind LLMTriggerKind) string {
+	switch kind {
+	case LLMTriggerDIMModeling:
+		return "维度建模只能选择 ODS 数据集"
+	case LLMTriggerDWDModeling:
+		return "明细建模只能选择 ODS 数据集和可选的 DIM 数据集"
+	case LLMTriggerDWSModeling:
+		return "主题建模只能选择 DWD 数据集和可选的 DIM 数据集"
+	case LLMTriggerADSModeling:
+		return "应用建模只能选择 DWS 数据集"
+	default:
+		return "所选数据集不符合建模层级规则"
+	}
 }
 
 // TriggerLLM 在租户事务内把人工选择转换成现有 durable outbox。唯一约束确保
@@ -71,6 +196,7 @@ func (s *PostgresStore) TriggerLLM(
 	ctx context.Context,
 	tenantID, actorID string,
 	kind LLMTriggerKind,
+	scope LLMTriggerScope,
 ) (result LLMTriggerResult, err error) {
 	if s == nil || s.pool == nil || strings.TrimSpace(tenantID) == "" ||
 		strings.TrimSpace(actorID) == "" || !validLLMTriggerKind(kind) {
@@ -78,14 +204,69 @@ func (s *PostgresStore) TriggerLLM(
 	}
 	result.Trigger = kind
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		if len(scope.DatasetIDs) > 0 {
+			rows, queryErr := tx.Query(ctx, `SELECT
+					dataset.id::text,version.layer
+				FROM unnest($1::uuid[]) AS selected(dataset_id)
+				JOIN platform.datasets AS dataset
+				  ON dataset.id=selected.dataset_id
+				 AND dataset.tenant_id=platform.current_tenant_id()
+				 AND dataset.domain_id=platform.current_domain_id()
+				 AND dataset.status='PUBLISHED'
+				 AND dataset.deleted_at IS NULL
+				JOIN platform.dataset_versions AS version
+				  ON version.id=dataset.current_published_version_id
+				 AND version.dataset_id=dataset.id
+				 AND version.tenant_id=dataset.tenant_id
+				 AND version.status='PUBLISHED'
+				ORDER BY dataset.id`,
+				scope.DatasetIDs,
+			)
+			if queryErr != nil {
+				return queryErr
+			}
+			assets := make([]llmTriggerAsset, 0, len(scope.DatasetIDs))
+			for rows.Next() {
+				var asset llmTriggerAsset
+				if scanErr := rows.Scan(&asset.ID, &asset.Layer); scanErr != nil {
+					rows.Close()
+					return scanErr
+				}
+				assets = append(assets, asset)
+			}
+			if rowsErr := rows.Err(); rowsErr != nil {
+				rows.Close()
+				return rowsErr
+			}
+			rows.Close()
+			if validationErr := validateLLMTriggerAssets(
+				kind, scope.DatasetIDs, assets,
+			); validationErr != nil {
+				return validationErr
+			}
+		}
+		var selectedIDs any
+		if len(scope.DatasetIDs) > 0 {
+			selectedIDs = scope.DatasetIDs
+		}
 		var triggerErr error
 		switch kind {
 		case LLMTriggerDIMModeling:
-			triggerErr = triggerDIMModeling(ctx, tx, actorID, &result)
+			triggerErr = triggerDIMModeling(
+				ctx, tx, actorID, selectedIDs, &result,
+			)
 		case LLMTriggerDWDModeling:
-			triggerErr = triggerDWDModeling(ctx, tx, actorID, &result)
+			triggerErr = triggerDWDModeling(
+				ctx, tx, actorID, selectedIDs, &result,
+			)
 		case LLMTriggerDWSModeling:
-			triggerErr = triggerDWSModeling(ctx, tx, actorID, &result)
+			triggerErr = triggerDWSModeling(
+				ctx, tx, actorID, selectedIDs, &result,
+			)
+		case LLMTriggerADSModeling:
+			triggerErr = triggerADSModeling(
+				ctx, tx, actorID, selectedIDs, &result,
+			)
 		default:
 			return ErrInvalidDocument
 		}
@@ -99,17 +280,19 @@ func (s *PostgresStore) TriggerLLM(
 				'DATASET','',jsonb_build_object(
 					'trigger',$2::text,
 					'eligibleCount',$3::bigint,
-					'enqueuedCount',$4::bigint
+					'enqueuedCount',$4::bigint,
+					'selectedDatasetIds',COALESCE($5::uuid[],'{}'::uuid[])
 				)
 			)`,
 			actorID, string(kind), result.EligibleCount, result.EnqueuedCount,
+			selectedIDs,
 		)
 		return triggerErr
 	})
 	if err != nil {
 		return LLMTriggerResult{}, err
 	}
-	if kind == LLMTriggerDWSModeling {
+	if kind == LLMTriggerDWSModeling || kind == LLMTriggerADSModeling {
 		result.ExistingCount = result.EligibleCount - result.EnqueuedCount
 	}
 	if result.ExistingCount < 0 {
@@ -122,12 +305,15 @@ func triggerDIMModeling(
 	ctx context.Context,
 	tx pgx.Tx,
 	actorID string,
+	selectedIDs any,
 	result *LLMTriggerResult,
 ) error {
 	return tx.QueryRow(ctx, `SELECT
 			eligible_count,enqueued_count,existing_count,
 			blocked_count,blocked_reason
-		FROM platform.trigger_manual_dim_modeling($1::uuid)`, actorID,
+		FROM platform.trigger_manual_dim_modeling(
+			$1::uuid,$2::uuid[]
+		)`, actorID, selectedIDs,
 	).Scan(
 		&result.EligibleCount, &result.EnqueuedCount, &result.ExistingCount,
 		&result.BlockedCount, &result.BlockedReason,
@@ -138,12 +324,15 @@ func triggerDWDModeling(
 	ctx context.Context,
 	tx pgx.Tx,
 	actorID string,
+	selectedIDs any,
 	result *LLMTriggerResult,
 ) error {
 	err := tx.QueryRow(ctx, `SELECT
 			eligible_count,enqueued_count,existing_count,
 			blocked_count,blocked_reason
-		FROM platform.trigger_manual_dwd_modeling($1::uuid)`, actorID,
+		FROM platform.trigger_manual_dwd_modeling(
+			$1::uuid,$2::uuid[]
+		)`, actorID, selectedIDs,
 	).Scan(
 		&result.EligibleCount, &result.EnqueuedCount, &result.ExistingCount,
 		&result.BlockedCount, &result.BlockedReason,
@@ -161,11 +350,21 @@ func triggerDWSModeling(
 	ctx context.Context,
 	tx pgx.Tx,
 	actorID string,
+	selectedIDs any,
 	result *LLMTriggerResult,
 ) error {
-	err := tx.QueryRow(ctx, `SELECT eligible_count,enqueued_count,blocked_count
-		FROM platform.trigger_manual_dws_modeling($1::uuid)`, actorID,
-	).Scan(&result.EligibleCount, &result.EnqueuedCount, &result.BlockedCount)
+	query := `SELECT eligible_count,enqueued_count,blocked_count
+		FROM platform.trigger_manual_dws_modeling(
+			$1::uuid,$2::uuid[]
+		)`
+	args := []any{actorID, selectedIDs}
+	if selectedIDs == nil {
+		query = `SELECT eligible_count,enqueued_count,blocked_count
+			FROM platform.trigger_unscoped_dws_modeling($1::uuid)`
+		args = []any{actorID}
+	}
+	err := tx.QueryRow(ctx, query, args...).
+		Scan(&result.EligibleCount, &result.EnqueuedCount, &result.BlockedCount)
 	if err != nil {
 		return err
 	}
@@ -173,4 +372,22 @@ func triggerDWSModeling(
 		result.BlockedReason = "DWD_PUBLICATION_REQUIRED"
 	}
 	return nil
+}
+
+func triggerADSModeling(
+	ctx context.Context,
+	tx pgx.Tx,
+	actorID string,
+	selectedIDs any,
+	result *LLMTriggerResult,
+) error {
+	err := tx.QueryRow(ctx, `SELECT eligible_count,enqueued_count,blocked_count
+		FROM platform.trigger_manual_ads_modeling(
+			$1::uuid,$2::uuid[]
+		)`, actorID, selectedIDs,
+	).Scan(&result.EligibleCount, &result.EnqueuedCount, &result.BlockedCount)
+	if err == nil && result.EligibleCount == 0 && result.BlockedCount > 0 {
+		result.BlockedReason = "DWS_PUBLICATION_REQUIRED"
+	}
+	return err
 }

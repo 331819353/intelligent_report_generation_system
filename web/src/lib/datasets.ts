@@ -918,7 +918,11 @@ export function createDatasetPublishIdempotencyKey(): string {
 
 const datasetPath = (id: string) => `/v1/datasets/${encodeURIComponent(id)}`
 
-export type DatasetLLMTrigger = 'DIM_MODELING' | 'DWD_MODELING' | 'DWS_MODELING'
+export type DatasetLLMTrigger =
+  | 'DIM_MODELING'
+  | 'DWD_MODELING'
+  | 'DWS_MODELING'
+  | 'ADS_MODELING'
 export type DatasetLLMTriggerResult = {
   trigger: DatasetLLMTrigger
   eligibleCount: number
@@ -954,15 +958,20 @@ export const datasetAPI = {
     const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
     return apiRequest<DatasetPage>(`/v1/datasets?${query}`, { cache: 'no-store' })
   },
-  triggerLLM: (trigger: DatasetLLMTrigger) => {
+  triggerLLM: (trigger: DatasetLLMTrigger, datasetIds: string[] = []) => {
     const paths: Record<DatasetLLMTrigger, string> = {
       DIM_MODELING: 'trigger-dim-modeling',
       DWD_MODELING: 'trigger-dwd-modeling',
       DWS_MODELING: 'trigger-dws-modeling',
+      ADS_MODELING: 'trigger-ads-modeling',
     }
     return apiRequest<DatasetLLMTriggerResult>(
       `/v1/datasets/${paths[trigger]}`,
-      { method: 'POST', cache: 'no-store' },
+      {
+        method: 'POST',
+        cache: 'no-store',
+        body: JSON.stringify({ datasetIds }),
+      },
     )
   },
   // 数据集聚合版本会在发布和协作保存时变化，读取时禁止复用浏览器或代理缓存。

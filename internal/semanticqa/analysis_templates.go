@@ -10,6 +10,8 @@ import (
 	"intelligent-report-generation-system/internal/dataset"
 )
 
+const dwsRecordCountMetricCode = "record_count"
+
 type AnalysisTemplate struct {
 	Code                  string   `json:"code"`
 	Name                  string   `json:"name"`
@@ -120,11 +122,27 @@ func MarketAnalysisTemplates() []AnalysisTemplate {
 			NotApplicableWhen:     []string{"共同粒度不可证明", "事实单位、币种或时区不兼容"},
 			MaterializationPolicy: "SUGGESTION_ONLY",
 		},
+		{
+			Code: "ENTITY_COUNT", Name: "实体数量", Intent: "ENTITY_COUNT",
+			RequiredFactCount: "0", RequiresDimension: true,
+			OutputGrainRule: "实体说明属性或全量范围",
+			SafetyRules: append([]string(nil), []string{
+				"只引用一张精确 PUBLISHED DIM 版本",
+				"只生成一个 COUNT 或 COUNT_DISTINCT 指标",
+				"不把 DIM 属性改造成交易事实或金额指标",
+				"逻辑候选只生成草稿，不自动发布或激活物化",
+			}...),
+			NotApplicableWhen:     []string{"DIM 缺少受治理实体键"},
+			MaterializationPolicy: "SUGGESTION_ONLY",
+		},
 	}
 }
 
 func autoEligibleTemplateCodes(document dataset.Document) []string {
 	if document.Dataset.Layer != dataset.LayerDWD || document.FactContract == nil {
+		return nil
+	}
+	if !hasSafeAtomicMeasure(document) && !supportsSafeRecordCount(document) {
 		return nil
 	}
 	hasTime := effectiveFactTimeField(document) != ""
@@ -147,6 +165,18 @@ func autoEligibleTemplateCodes(document dataset.Document) []string {
 func buildSingleFactDWSCandidate(
 	source dataset.Record,
 	sourceVersionID, templateCode string,
+) (dataset.Prepared, error) {
+	return buildSingleFactDWSCandidateWithSelection(
+		source, sourceVersionID, templateCode, nil, nil, "STANDARD", nil,
+	)
+}
+
+func buildSingleFactDWSCandidateWithSelection(
+	source dataset.Record,
+	sourceVersionID, templateCode string,
+	selectedDimensionCodes, selectedMetricCodes []string,
+	groupingMode string,
+	selectedGroupingSets [][]string,
 ) (dataset.Prepared, error) {
 	sourceDocument, err := dataset.DecodeAndNormalize(source.DSL)
 	if err != nil || sourceDocument.Dataset.Layer != dataset.LayerDWD ||
@@ -183,20 +213,65 @@ func buildSingleFactDWSCandidate(
 	if template.RequiresDimension && len(dimensions) == 0 {
 		return dataset.Prepared{}, ErrUnprovenPath
 	}
+	selectedMetricSet := map[string]bool{}
+	for _, code := range selectedMetricCodes {
+		selectedMetricSet[strings.ToLower(strings.TrimSpace(code))] = true
+	}
+	requiresNativeTime := false
+	for _, measure := range sourceDocument.FactContract.AtomicMeasures {
+		if len(selectedMetricSet) > 0 &&
+			!selectedMetricSet[strings.ToLower(measure.Field)] {
+			continue
+		}
+		sourceField, exists := fieldsByCode[measure.Field]
+		if !exists {
+			continue
+		}
+		measure = effectiveDWSAtomicMeasure(measure, sourceField)
+		if measure.Additivity == "SEMI_ADDITIVE" ||
+			measure.ValueBehavior == "CUMULATIVE" ||
+			measure.ValueBehavior == "POINT_IN_TIME" {
+			requiresNativeTime = true
+			break
+		}
+	}
+	if requiresNativeTime &&
+		(!hasTime || !isTemporalCanonicalType(timeField.CanonicalType)) {
+		return dataset.Prepared{}, ErrUnprovenPath
+	}
 
 	selectedDimensions := []dataset.Field{}
-	switch template.Code {
-	case "DISTRIBUTION", "RANKING":
-		selectedDimensions = append(selectedDimensions, dimensions[0])
-	case "DRILLDOWN":
-		limit := min(3, len(dimensions))
-		selectedDimensions = append(selectedDimensions, dimensions[:limit]...)
+	selectedDimensionSet := map[string]bool{}
+	for _, code := range selectedDimensionCodes {
+		selectedDimensionSet[strings.ToLower(strings.TrimSpace(code))] = true
 	}
-	includeTime := template.RequiresTime
+	if len(selectedDimensionSet) > 0 {
+		for _, dimension := range dimensions {
+			if selectedDimensionSet[strings.ToLower(dimension.Code)] {
+				selectedDimensions = append(selectedDimensions, dimension)
+			}
+			if len(selectedDimensions) == 3 {
+				break
+			}
+		}
+	}
+	if len(selectedDimensions) == 0 {
+		switch template.Code {
+		case "DISTRIBUTION", "RANKING":
+			selectedDimensions = append(selectedDimensions, dimensions[0])
+		case "DRILLDOWN":
+			limit := min(3, len(dimensions))
+			selectedDimensions = append(selectedDimensions, dimensions[:limit]...)
+		}
+	}
+	includeTime := template.RequiresTime || requiresNativeTime
 	outputFields := []dataset.Field{}
 	groupBy := []string{}
 	grainFields := []string{}
 	conformedDimensions := []string{}
+	timeFieldID := ""
+	timeOutputCode := ""
+	timeGrain := ""
 	if includeTime {
 		output := timeField
 		output.ID = "field_stat_month"
@@ -209,11 +284,26 @@ func buildSingleFactDWSCandidate(
 				Type: "FIELD_REF", NodeID: "fact", Field: timeField.Code,
 			},
 		}
+		timeGrain = "MONTH"
+		if requiresNativeTime {
+			output.ID = "field_stat_date"
+			output.Code = "stat_date"
+			output.Name = "统计日期"
+			output.Expression = dataset.Expression{
+				Type: "DATE_TRUNC", Unit: "DAY",
+				Argument: &dataset.Expression{
+					Type: "FIELD_REF", NodeID: "fact", Field: timeField.Code,
+				},
+			}
+			timeGrain = "DAY"
+		}
 		output.CanonicalType = "DATE"
 		outputFields = append(outputFields, output)
 		groupBy = append(groupBy, output.ID)
 		grainFields = append(grainFields, output.Code)
 		conformedDimensions = append(conformedDimensions, output.Code)
+		timeFieldID = output.ID
+		timeOutputCode = output.Code
 	}
 	for _, selected := range selectedDimensions {
 		output := selected
@@ -228,16 +318,24 @@ func buildSingleFactDWSCandidate(
 	}
 	analysisMeasures := []dataset.AnalysisMeasureContract{}
 	for _, measure := range sourceDocument.FactContract.AtomicMeasures {
+		if len(selectedMetricSet) > 0 &&
+			!selectedMetricSet[strings.ToLower(measure.Field)] {
+			continue
+		}
 		sourceField, exists := fieldsByCode[measure.Field]
 		if !exists || sourceField.Role != "MEASURE" {
 			continue
 		}
-		aggregation := "SUM"
-		if measure.Additivity == "SEMI_ADDITIVE" {
-			aggregation = "MAX"
-		}
+		measure = effectiveDWSAtomicMeasure(measure, sourceField)
 		if measure.Additivity == "NON_ADDITIVE" {
 			continue
+		}
+		aggregation := strings.ToUpper(strings.TrimSpace(
+			measure.DefaultAggregation,
+		))
+		if aggregation != "SUM" && aggregation != "MIN" &&
+			aggregation != "MAX" && aggregation != "AVG" {
+			aggregation = "SUM"
 		}
 		output := sourceField
 		output.ID = "field_" + sourceField.Code
@@ -251,7 +349,28 @@ func buildSingleFactDWSCandidate(
 		analysisMeasures = append(analysisMeasures, dataset.AnalysisMeasureContract{
 			Field: sourceField.Code, SourceNodeIDs: []string{"fact"},
 			Aggregation: aggregation, Additivity: measure.Additivity,
-			Unit: measure.Unit, Currency: measure.Currency,
+			ValueBehavior:   measure.ValueBehavior,
+			TimeAggregation: measure.TimeAggregation,
+			Unit:            measure.Unit, Currency: measure.Currency,
+		})
+	}
+	if supportsSafeRecordCount(sourceDocument) &&
+		(selectedMetricSet[dwsRecordCountMetricCode] || len(analysisMeasures) == 0) {
+		visible := true
+		outputFields = append(outputFields, dataset.Field{
+			ID:   "field_" + dwsRecordCountMetricCode,
+			Code: dwsRecordCountMetricCode, Name: "事实记录数",
+			Description: "按当前 DWS 输出粒度统计的原子事实记录数",
+			Role:        "MEASURE", CanonicalType: "INTEGER",
+			Nullable: false, Visible: &visible,
+			Expression: dataset.Expression{
+				Type: "AGGREGATE", Function: "COUNT",
+			},
+		})
+		analysisMeasures = append(analysisMeasures, dataset.AnalysisMeasureContract{
+			Field: dwsRecordCountMetricCode, SourceNodeIDs: []string{"fact"},
+			Aggregation: "COUNT", Additivity: "ADDITIVE",
+			ValueBehavior: "FLOW", TimeAggregation: "SUM",
 		})
 	}
 	if len(analysisMeasures) == 0 || len(grainFields) == 0 {
@@ -264,9 +383,13 @@ func buildSingleFactDWSCandidate(
 		})
 	} else if includeTime {
 		sorts = append(sorts, dataset.Sort{
-			FieldID: "field_stat_month", Direction: "ASC",
+			FieldID: timeFieldID, Direction: "ASC",
 		})
 	}
+	resolvedGroupingMode, groupingSets := buildDWSGroupingPlan(
+		groupingMode, selectedGroupingSets, selectedDimensions,
+		timeFieldID, requiresNativeTime,
+	)
 	code := generatedDWSCode(template.Code, source.Code)
 	document := dataset.Document{
 		DSLVersion: dataset.DSLVersion,
@@ -275,7 +398,7 @@ func buildSingleFactDWSCandidate(
 			Description: "基于精确 DWD 版本自动生成的可评审市场分析草稿",
 			Domain:      sourceDocument.Dataset.Domain,
 			Subject:     sourceDocument.Dataset.Subject,
-			Type:        "SINGLE_SOURCE", Layer: dataset.LayerDWS,
+			Type:        sourceDocument.Dataset.Type, Layer: dataset.LayerDWS,
 			SemanticContractVersion: "1.0",
 		},
 		Nodes: []dataset.Node{{
@@ -290,6 +413,7 @@ func buildSingleFactDWSCandidate(
 			Measures:            analysisMeasures,
 		},
 		Fields: outputFields, Filters: []dataset.Filter{}, GroupBy: groupBy,
+		GroupByMode: resolvedGroupingMode, GroupingSets: groupingSets,
 		Having: []dataset.Filter{}, Sorts: sorts, Parameters: []dataset.Parameter{},
 		OutputGrain: dataset.OutputGrain{
 			Description: "每行代表 " + strings.Join(grainFields, " + "),
@@ -304,12 +428,254 @@ func buildSingleFactDWSCandidate(
 		},
 	}
 	if includeTime {
-		document.AnalysisContract.TimeField = "stat_month"
-		document.AnalysisContract.TimeGrain = "MONTH"
-		document.OutputGrain.TimeField = "stat_month"
-		document.OutputGrain.DefaultTimeGrain = "MONTH"
+		document.AnalysisContract.TimeField = timeOutputCode
+		document.AnalysisContract.TimeGrain = timeGrain
+		document.OutputGrain.TimeField = timeOutputCode
+		document.OutputGrain.DefaultTimeGrain = timeGrain
 	}
 	raw, err := jsonMarshal(document)
+	if err != nil {
+		return dataset.Prepared{}, err
+	}
+	return dataset.Prepare(raw)
+}
+
+func buildDWSGroupingPlan(
+	requested string,
+	selectedSets [][]string,
+	dimensions []dataset.Field,
+	timeFieldID string,
+	timeMustBeRetained bool,
+) (dataset.GroupByMode, [][]string) {
+	mode := dataset.GroupByMode(strings.ToUpper(strings.TrimSpace(requested)))
+	if mode != dataset.GroupByModeCube &&
+		mode != dataset.GroupByModeRollup &&
+		mode != dataset.GroupByModeSets {
+		return dataset.GroupByModeStandard, nil
+	}
+	dimensionFieldIDs := make([]string, 0, len(dimensions))
+	fieldIDByCode := make(map[string]string, len(dimensions))
+	for _, dimension := range dimensions {
+		fieldID := "field_" + dimension.Code
+		dimensionFieldIDs = append(dimensionFieldIDs, fieldID)
+		fieldIDByCode[strings.ToLower(dimension.Code)] = fieldID
+	}
+	if len(dimensionFieldIDs) < 2 &&
+		(mode == dataset.GroupByModeCube ||
+			mode == dataset.GroupByModeRollup) {
+		return dataset.GroupByModeStandard, nil
+	}
+	if mode == dataset.GroupByModeSets {
+		sets := make([][]string, 0, len(selectedSets))
+		seen := map[string]bool{}
+		for _, selected := range selectedSets {
+			set := []string{}
+			if timeFieldID != "" {
+				set = append(set, timeFieldID)
+			}
+			for _, code := range selected {
+				fieldID := fieldIDByCode[strings.ToLower(
+					strings.TrimSpace(code),
+				)]
+				if fieldID != "" && !containsStringValue(set, fieldID) {
+					set = append(set, fieldID)
+				}
+			}
+			if len(set) == 0 {
+				continue
+			}
+			key := strings.Join(set, "\x00")
+			if !seen[key] {
+				seen[key] = true
+				sets = append(sets, set)
+			}
+		}
+		if len(sets) == 0 {
+			return dataset.GroupByModeStandard, nil
+		}
+		return dataset.GroupByModeSets, sets
+	}
+	if timeMustBeRetained && timeFieldID != "" {
+		sets := [][]string{{timeFieldID}}
+		switch mode {
+		case dataset.GroupByModeRollup:
+			current := []string{timeFieldID}
+			for _, fieldID := range dimensionFieldIDs {
+				current = append(append([]string(nil), current...), fieldID)
+				sets = append(sets, current)
+			}
+		case dataset.GroupByModeCube:
+			for mask := 1; mask < 1<<len(dimensionFieldIDs); mask++ {
+				set := []string{timeFieldID}
+				for index, fieldID := range dimensionFieldIDs {
+					if mask&(1<<index) != 0 {
+						set = append(set, fieldID)
+					}
+				}
+				sets = append(sets, set)
+			}
+		}
+		return dataset.GroupByModeSets, sets
+	}
+	return mode, nil
+}
+
+func containsStringValue(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func buildDimensionCountDWSCandidate(
+	source dataset.Record,
+	sourceVersionID string,
+	selectedDimensionCodes []string,
+) (dataset.Prepared, error) {
+	sourceDocument, err := dataset.DecodeAndNormalize(source.DSL)
+	if err != nil || sourceDocument.Dataset.Layer != dataset.LayerDIM ||
+		len(sourceDocument.OutputGrain.KeyFields) == 0 {
+		return dataset.Prepared{}, ErrInvalidRequest
+	}
+	fieldsByCode := make(map[string]dataset.Field, len(sourceDocument.Fields))
+	projection := make([]string, 0, len(sourceDocument.Fields))
+	keySet := make(map[string]bool, len(sourceDocument.OutputGrain.KeyFields))
+	for _, code := range sourceDocument.OutputGrain.KeyFields {
+		keySet[strings.ToLower(strings.TrimSpace(code))] = true
+	}
+	for _, field := range sourceDocument.Fields {
+		fieldsByCode[strings.ToLower(field.Code)] = field
+		projection = append(projection, field.Code)
+	}
+	countField, exists := fieldsByCode[strings.ToLower(
+		sourceDocument.OutputGrain.KeyFields[0],
+	)]
+	if !exists {
+		return dataset.Prepared{}, ErrUnprovenPath
+	}
+
+	selected := make([]dataset.Field, 0, 3)
+	seen := map[string]bool{}
+	for _, code := range selectedDimensionCodes {
+		field, found := fieldsByCode[strings.ToLower(strings.TrimSpace(code))]
+		if !found || keySet[strings.ToLower(field.Code)] ||
+			field.Role == "MEASURE" || field.Role == "TIME" ||
+			seen[strings.ToLower(field.Code)] {
+			continue
+		}
+		seen[strings.ToLower(field.Code)] = true
+		selected = append(selected, field)
+		if len(selected) == 3 {
+			break
+		}
+	}
+	if len(selected) == 0 {
+		for _, field := range sourceDocument.Fields {
+			if keySet[strings.ToLower(field.Code)] || field.Role == "MEASURE" ||
+				field.Role == "TIME" {
+				continue
+			}
+			selected = append(selected, field)
+			if len(selected) == 3 {
+				break
+			}
+		}
+	}
+
+	outputFields := make([]dataset.Field, 0, len(selected)+2)
+	groupBy := make([]string, 0, max(1, len(selected)))
+	grainFields := make([]string, 0, max(1, len(selected)))
+	conformedDimensions := make([]string, 0, max(1, len(selected)))
+	if len(selected) == 0 {
+		visible := true
+		outputFields = append(outputFields, dataset.Field{
+			ID: "field_count_scope", Code: "count_scope", Name: "统计范围",
+			Description: "实体数量统计的全量范围", Role: "DIMENSION",
+			CanonicalType: "STRING", Nullable: false, Visible: &visible,
+			Expression: dataset.Expression{
+				Type: "LITERAL", Value: "ALL",
+			},
+		})
+		groupBy = append(groupBy, "field_count_scope")
+		grainFields = append(grainFields, "count_scope")
+		conformedDimensions = append(conformedDimensions, "count_scope")
+	} else {
+		for _, field := range selected {
+			output := field
+			output.ID = "field_" + safeDWSIdentifier(field.Code, "dimension")
+			output.Role = "DIMENSION"
+			output.Expression = dataset.Expression{
+				Type: "FIELD_REF", NodeID: "dimension", Field: field.Code,
+			}
+			outputFields = append(outputFields, output)
+			groupBy = append(groupBy, output.ID)
+			grainFields = append(grainFields, output.Code)
+			conformedDimensions = append(conformedDimensions, output.Code)
+		}
+	}
+	countArgument := dataset.Expression{
+		Type: "FIELD_REF", NodeID: "dimension", Field: countField.Code,
+	}
+	visible := true
+	outputFields = append(outputFields, dataset.Field{
+		ID: "field_entity_count", Code: "entity_count", Name: "实体数量",
+		Description: "按 DIM 实体键统计的实体数量", Role: "MEASURE",
+		CanonicalType: "INTEGER", Nullable: false, Visible: &visible,
+		Expression: dataset.Expression{
+			Type: "AGGREGATE", Function: "COUNT_DISTINCT",
+			Argument: &countArgument,
+		},
+	})
+
+	code := generatedDWSCode("ENTITY_COUNT", source.Code)
+	document := dataset.Document{
+		DSLVersion: dataset.DSLVersion,
+		Dataset: dataset.Descriptor{
+			Code: code, Name: "实体数量 · " + source.Name,
+			Description: "基于精确 DIM 版本生成的无事实实体数量主题草稿",
+			Domain:      sourceDocument.Dataset.Domain,
+			Subject:     sourceDocument.Dataset.Subject,
+			Type:        sourceDocument.Dataset.Type, Layer: dataset.LayerDWS,
+			SemanticContractVersion: "1.0",
+		},
+		Nodes: []dataset.Node{{
+			ID: "dimension", Type: "DATASET",
+			DatasetVersionID: sourceVersionID,
+			Alias:            "dimension", Projection: projection,
+			SourceFilters: []dataset.SourceFilter{},
+		}},
+		Joins:      []dataset.Join{},
+		Fields:     outputFields,
+		Filters:    []dataset.Filter{},
+		GroupBy:    groupBy,
+		Having:     []dataset.Filter{},
+		Sorts:      []dataset.Sort{},
+		Parameters: []dataset.Parameter{},
+		OutputGrain: dataset.OutputGrain{
+			Description: "每行代表一个实体数量分析分组",
+			KeyFields:   grainFields,
+		},
+		AnalysisContract: &dataset.AnalysisContract{
+			Intent: "ENTITY_COUNT", InputMode: "SINGLE_FACT",
+			CommonGrainFields:   grainFields,
+			ConformedDimensions: conformedDimensions,
+			Measures: []dataset.AnalysisMeasureContract{{
+				Field: "entity_count", SourceNodeIDs: []string{"dimension"},
+				Aggregation: "COUNT_DISTINCT", Additivity: "NON_ADDITIVE",
+				ValueBehavior: "NON_ADDITIVE", TimeAggregation: "NONE",
+			}},
+		},
+		ExecutionPolicy: dataset.ExecutionPolicy{
+			Mode: "MATERIALIZED_PREFERRED", TimeoutMS: 5000,
+			PreviewLimit: 100, ResultLimit: 10000, CacheTTLSeconds: 300,
+			Materialization: dataset.MaterializationPolicy{
+				Enabled: true, RefreshMode: "MANUAL",
+			},
+		},
+	}
+	raw, err := json.Marshal(document)
 	if err != nil {
 		return dataset.Prepared{}, err
 	}
@@ -323,9 +689,11 @@ func buildMultiFactDWSCandidate(
 	sources []dwsPlanningAsset,
 	scope dwsModelingScope,
 	templateCode string,
+	datasetType string,
 ) (dataset.Prepared, error) {
 	if len(sources) < 2 ||
-		strings.ToUpper(strings.TrimSpace(templateCode)) != "MULTI_FACT_COMPARISON" {
+		strings.ToUpper(strings.TrimSpace(templateCode)) != "MULTI_FACT_COMPARISON" ||
+		(datasetType != "SINGLE_SOURCE" && datasetType != "CROSS_SOURCE") {
 		return dataset.Prepared{}, ErrInvalidRequest
 	}
 	nodes := make([]dataset.Node, 0, len(sources))
@@ -394,14 +762,14 @@ func buildMultiFactDWSCandidate(
 		added := 0
 		for _, contract := range document.FactContract.AtomicMeasures {
 			field, exists := fieldsByCode[contract.Field]
-			if !exists || field.Role != "MEASURE" ||
-				contract.Additivity == "NON_ADDITIVE" {
+			if !exists || field.Role != "MEASURE" {
+				continue
+			}
+			contract = effectiveDWSAtomicMeasure(contract, field)
+			if contract.Additivity != "ADDITIVE" {
 				continue
 			}
 			aggregation := "SUM"
-			if contract.Additivity == "SEMI_ADDITIVE" {
-				aggregation = "MAX"
-			}
 			alias := boundedDWSFieldCode(sourcePrefix + "_" + field.Code)
 			expression := dataset.Expression{
 				Type: "FIELD_REF", NodeID: nodeID, Field: field.Code,
@@ -424,7 +792,9 @@ func buildMultiFactDWSCandidate(
 			measures = append(measures, dataset.AnalysisMeasureContract{
 				Field: alias, SourceNodeIDs: []string{nodeID},
 				Aggregation: aggregation, Additivity: contract.Additivity,
-				Unit: contract.Unit, Currency: contract.Currency,
+				ValueBehavior:   contract.ValueBehavior,
+				TimeAggregation: contract.TimeAggregation,
+				Unit:            contract.Unit, Currency: contract.Currency,
 			})
 			added++
 			if added == 3 {
@@ -432,7 +802,32 @@ func buildMultiFactDWSCandidate(
 			}
 		}
 		if len(preAggregation.Metrics) == 0 {
-			return dataset.Prepared{}, ErrUnprovenPath
+			if !supportsSafeRecordCount(document) {
+				return dataset.Prepared{}, ErrUnprovenPath
+			}
+			alias := boundedDWSFieldCode(
+				sourcePrefix + "_" + dwsRecordCountMetricCode,
+			)
+			preAggregation.Metrics = append(
+				preAggregation.Metrics,
+				dataset.PreAggregationMetric{
+					Field: alias, Function: "COUNT", CountRows: true,
+				},
+			)
+			outputFields = append(outputFields, dataset.Field{
+				ID: "field_" + alias, Code: alias,
+				Name:        source.Record.Name + " · 事实记录数",
+				Description: "预聚合到共同时间粒度后的原子事实记录数",
+				Role:        "MEASURE", CanonicalType: "INTEGER",
+				Expression: dataset.Expression{
+					Type: "FIELD_REF", NodeID: nodeID, Field: alias,
+				},
+			})
+			measures = append(measures, dataset.AnalysisMeasureContract{
+				Field: alias, SourceNodeIDs: []string{nodeID},
+				Aggregation: "COUNT", Additivity: "ADDITIVE",
+				ValueBehavior: "FLOW", TimeAggregation: "SUM",
+			})
 		}
 		preAggregations = append(preAggregations, preAggregation)
 	}
@@ -465,10 +860,7 @@ func buildMultiFactDWSCandidate(
 				len(sources),
 			),
 			Domain: domain, Subject: subjectCode,
-			// DATASET 节点不暴露底层物理数据源；DSL 的 CROSS_SOURCE 合同只适用
-			// 于直接引用多个 TABLE 数据源的场景。多事实由 AnalysisContract
-			// 的 MULTI_FACT 输入模式表达。
-			Type: "SINGLE_SOURCE", Layer: dataset.LayerDWS,
+			Type: datasetType, Layer: dataset.LayerDWS,
 			SemanticContractVersion: "1.0",
 		},
 		Nodes: nodes, Joins: joins, PreAggregations: preAggregations,
@@ -511,24 +903,117 @@ func multiFactEligibleSources(sources []dwsPlanningAsset) []dwsPlanningAsset {
 			effectiveFactTimeField(document) == "" {
 			continue
 		}
-		fieldsByCode := map[string]dataset.Field{}
-		for _, field := range document.Fields {
-			fieldsByCode[field.Code] = field
-		}
-		hasMeasure := false
-		for _, contract := range document.FactContract.AtomicMeasures {
-			field, exists := fieldsByCode[contract.Field]
-			if exists && field.Role == "MEASURE" &&
-				contract.Additivity != "NON_ADDITIVE" {
-				hasMeasure = true
-				break
-			}
-		}
-		if hasMeasure {
+		if hasSafeAtomicMeasure(document) || supportsSafeRecordCount(document) {
 			eligible = append(eligible, source)
 		}
 	}
 	return eligible
+}
+
+func hasSafeAtomicMeasure(document dataset.Document) bool {
+	if document.FactContract == nil {
+		return false
+	}
+	fieldsByCode := map[string]dataset.Field{}
+	for _, field := range document.Fields {
+		fieldsByCode[field.Code] = field
+	}
+	for _, contract := range document.FactContract.AtomicMeasures {
+		field, exists := fieldsByCode[contract.Field]
+		if !exists || field.Role != "MEASURE" {
+			continue
+		}
+		contract = effectiveDWSAtomicMeasure(contract, field)
+		if contract.Additivity == "ADDITIVE" {
+			return true
+		}
+	}
+	return false
+}
+
+func supportsSafeRecordCount(document dataset.Document) bool {
+	if document.Dataset.Layer != dataset.LayerDWD ||
+		document.FactContract == nil ||
+		len(document.FactContract.GrainKeyFields) == 0 {
+		return false
+	}
+	fieldsByCode := map[string]bool{}
+	for _, field := range document.Fields {
+		fieldsByCode[field.Code] = true
+	}
+	for _, code := range document.FactContract.GrainKeyFields {
+		if !fieldsByCode[code] {
+			return false
+		}
+	}
+	return true
+}
+
+func effectiveDWSAtomicMeasure(
+	contract dataset.AtomicMeasureContract,
+	field dataset.Field,
+) dataset.AtomicMeasureContract {
+	behavior := strings.ToUpper(strings.TrimSpace(contract.ValueBehavior))
+	if inferred := inferredDWSMeasureValueBehavior(field); inferred != "" {
+		behavior = inferred
+	}
+	if behavior == "" {
+		switch contract.Additivity {
+		case "SEMI_ADDITIVE":
+			behavior = "POINT_IN_TIME"
+		case "NON_ADDITIVE":
+			behavior = "NON_ADDITIVE"
+		default:
+			behavior = "FLOW"
+		}
+	}
+	contract.ValueBehavior = behavior
+	switch behavior {
+	case "CUMULATIVE", "POINT_IN_TIME":
+		contract.Additivity = "SEMI_ADDITIVE"
+		contract.DefaultAggregation = "SUM"
+		contract.TimeAggregation = "LAST"
+	case "NON_ADDITIVE":
+		contract.Additivity = "NON_ADDITIVE"
+		if contract.DefaultAggregation == "" {
+			contract.DefaultAggregation = "AVG"
+		}
+		contract.TimeAggregation = "NONE"
+	default:
+		contract.ValueBehavior = "FLOW"
+		contract.Additivity = "ADDITIVE"
+		if contract.DefaultAggregation == "" {
+			contract.DefaultAggregation = "SUM"
+		}
+		contract.TimeAggregation = "SUM"
+	}
+	return contract
+}
+
+func inferredDWSMeasureValueBehavior(field dataset.Field) string {
+	value := strings.ToLower(strings.Join([]string{
+		field.Code, field.Name, field.Description, field.SemanticType,
+	}, " "))
+	for _, marker := range []string{
+		"累计", "累积", "截至", "本年累计", "本月累计",
+		"cumulative", "running_total", "running total", "to_date",
+		"ytd", "mtd", "qtd",
+	} {
+		if strings.Contains(value, marker) {
+			return "CUMULATIVE"
+		}
+	}
+	for _, marker := range []string{
+		"余额", "库存", "存量", "时点", "期末", "期初", "结余",
+		"在手", "保有", "未结", "balance", "inventory", "stock",
+		"on_hand", "on hand", "outstanding", "closing", "ending",
+		"as_of", "as of",
+	} {
+		if strings.Contains(value, marker) {
+			return "POINT_IN_TIME"
+		}
+	}
+	return ""
 }
 
 func effectiveFactTimeField(document dataset.Document) string {
@@ -603,11 +1088,14 @@ func safeDWSIdentifier(value, fallback string) string {
 }
 
 func boundedDWSFieldCode(value string) string {
-	if len(value) <= 120 {
+	// DWS outputs are materialized into PostgreSQL. Keep every generated
+	// output/pre-aggregation identifier within PostgreSQL's 63-byte limit so
+	// preview and publication never rely on PostgreSQL's silent truncation.
+	if len(value) <= 63 {
 		return value
 	}
 	sum := sha256.Sum256([]byte(value))
-	return value[:111] + "_" + hex.EncodeToString(sum[:])[:8]
+	return value[:54] + "_" + hex.EncodeToString(sum[:])[:8]
 }
 
 func boundedDWSCode(value string) string {

@@ -184,6 +184,14 @@ func main() {
 		),
 		workerID, cfg.WorkerPollInterval,
 	)
+	go semanticqa.RunADSModelingWorker(
+		ctx, logger,
+		semanticqa.NewADSModelingWorker(
+			semanticqa.NewPostgresStore(pool),
+			datasetService,
+		),
+		workerID, cfg.WorkerPollInterval,
+	)
 	odsResolver := materializationworker.NewODSResolver(
 		pool,
 		warehouse.NewStagerWithMaxBytes(

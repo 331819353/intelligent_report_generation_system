@@ -2,9 +2,12 @@ package semanticqa
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,8 +22,8 @@ import (
 
 const (
 	dwsModelingConcurrency        = 4
-	dwsSingleFactPlanningVersion  = "dws-single-fact-planning-v3"
-	dwsGroupedFactPlanningVersion = "dws-group-planning-v2"
+	dwsSingleFactPlanningVersion  = "dws-single-fact-planning-v4"
+	dwsGroupedFactPlanningVersion = "dws-group-planning-v4"
 )
 
 type DWSAnalysisSelector interface {
@@ -33,7 +36,15 @@ type DWSAnalysisSelector interface {
 		[]dwsPlanningAsset,
 		[]dwsPlanningAsset,
 		[]string,
-	) ([]string, string, error)
+	) ([]dwsAnalysisSelection, string, error)
+}
+
+type dwsAnalysisSelection struct {
+	TemplateCode   string     `json:"templateCode"`
+	DimensionCodes []string   `json:"dimensionCodes"`
+	MetricCodes    []string   `json:"metricCodes"`
+	GroupingMode   string     `json:"groupingMode,omitempty"`
+	GroupingSets   [][]string `json:"groupingSets,omitempty"`
 }
 
 type OrchestratedDWSAnalysisSelector struct {
@@ -52,8 +63,18 @@ func (selector *OrchestratedDWSAnalysisSelector) Select(
 	scope dwsModelingScope,
 	facts, dimensions []dwsPlanningAsset,
 	eligible []string,
-) ([]string, string, error) {
-	fallback := boundedTemplateSelection(eligible)
+) ([]dwsAnalysisSelection, string, error) {
+	selectedScope := strings.HasPrefix(scope.GroupKey, "selected-dws:")
+	maxSelections := 1
+	fallback := []dwsAnalysisSelection{}
+	if selectedScope {
+		maxSelections = 3
+		fallback = boundedTemplateSelection(eligible)
+	} else if len(facts) == 1 {
+		fallback = consolidatedDWSSelection(eligible, facts[0].Document)
+	} else {
+		fallback = boundedTemplateSelection(eligible)
+	}
 	if selector == nil || selector.ai == nil || !selector.ai.Configured() {
 		return fallback, "", nil
 	}
@@ -78,6 +99,29 @@ func (selector *OrchestratedDWSAnalysisSelector) Select(
 				item["businessAction"] = asset.Document.FactContract.BusinessAction
 				item["grainKeyFields"] = asset.Document.FactContract.GrainKeyFields
 				item["eventTimeField"] = asset.Document.FactContract.EventTimeField
+				fieldsByCode := make(
+					map[string]dataset.Field, len(asset.Document.Fields),
+				)
+				for _, field := range asset.Document.Fields {
+					fieldsByCode[field.Code] = field
+				}
+				atomicMeasures := make(
+					[]dataset.AtomicMeasureContract, 0,
+					len(asset.Document.FactContract.AtomicMeasures),
+				)
+				for _, measure := range asset.Document.FactContract.AtomicMeasures {
+					if field, exists := fieldsByCode[measure.Field]; exists {
+						measure = effectiveDWSAtomicMeasure(measure, field)
+					}
+					atomicMeasures = append(atomicMeasures, measure)
+				}
+				item["atomicMeasures"] = atomicMeasures
+				if supportsSafeRecordCount(asset.Document) {
+					item["derivedMetrics"] = []map[string]string{{
+						"code": dwsRecordCountMetricCode,
+						"name": "事实记录数", "aggregation": "COUNT",
+					}}
+				}
 			}
 			result = append(result, item)
 		}
@@ -88,17 +132,23 @@ func (selector *OrchestratedDWSAnalysisSelector) Select(
 		"subjectCode": scope.SubjectCode, "subjectName": scope.SubjectName,
 		"dwdFacts": assetMetadata(facts), "dimensionContext": assetMetadata(dimensions),
 		"eligibleTemplateCodes": eligible,
-		"maximumSelections":     3,
+		"maximumSelections":     maxSelections,
 	})
 	if err != nil {
 		return fallback, "", nil
 	}
 	temperature := 0.0
 	promptVersion := dwsSingleFactPlanningVersion
-	systemPrompt := `你负责基于当前一张 DWD 的事实结构与同领域全部 DIM 语义上下文规划 DWS。DIM 只用于理解实体、字段、筛选与分组语义，DWS 物理依赖仍只能指向当前 DWD。请从 eligibleTemplateCodes 中选择最多三个与该事实粒度匹配的分析意图；不得选择跨事实比较，不得创造新编码，不得输出 SQL、DDL、物理表名或数据值。`
+	systemPrompt := `你负责基于当前一张 DWD 的事实结构与任务范围内 DIM 语义上下文规划 DWS。默认自动建模必须只返回一个统一主题表：在同一事实粒度可解释的维度优先放入同一张多维表，不要按趋势、分布、排名等消费场景拆成多表。dimensionCodes 只能逐字复制 dwdFacts.fields 中非度量、非时间字段的 code；metricCodes 只能逐字复制 dwdFacts.fields 中 MEASURE 字段或 dwdFacts.derivedMetrics 的 code。两到三个可自由组合维度使用 CUBE；严格层级维度使用 ROLLUP 且 dimensionCodes 按由粗到细排序；仅需要部分组合使用 GROUPING_SETS，并让每个 groupingSets 项都是 dimensionCodes 的子集；普通单粒度使用 STANDARD。累计值和时点值必须依据 atomicMeasures.valueBehavior/timeAggregation 设计，始终保留原生时间粒度，绝不能跨时间 SUM。不得选择跨事实比较，不得创造编码，不得输出 SQL、DDL、物理表名或数据值。`
+	if selectedScope {
+		systemPrompt = `你负责基于用户明确框选的一张 DWD 与所选 DIM 规划 DWS。保持用户明确范围，可从 eligibleTemplateCodes 中选择最多三个分析意图，并为每个意图选择维度和指标。groupingMode 可为 STANDARD、CUBE、ROLLUP 或 GROUPING_SETS；自定义 groupingSets 只能引用本选择的 dimensionCodes。累计值和时点值必须保留原生时间粒度且不得跨时间 SUM。字段 code 只能逐字复制输入，不得创造编码、SQL、DDL、物理表名或数据值。`
+	}
 	if len(facts) > 1 {
 		promptVersion = dwsGroupedFactPlanningVersion
-		systemPrompt = `你负责基于显式跨事实任务中的全部 DWD 事实结构与全部 DIM 语义上下文规划 DWS。必须先判断哪些事实可以在共同粒度安全聚合，再从 eligibleTemplateCodes 中选择最多三个分析意图。不得创造新编码，不得输出 SQL、DDL、物理表名或数据值；缺少共同粒度时返回空数组。`
+		systemPrompt = `你负责把显式选择的全部 DWD 与所选 DIM 作为一个不可拆分的联合分析范围来规划 DWS。必须同时分析全部输入，先判断多张事实是否能在共同粒度安全聚合；再为每个意图明确选择公共维度和指标。字段 code 只能逐字复制输入。不得把输入拆成逐表任务，不得创造编码，不得输出 SQL、DDL、物理表名或数据值；缺少共同粒度时返回空 selections。`
+	} else if len(facts) == 0 && len(dimensions) == 1 {
+		promptVersion = "dws-dimension-count-planning-v1"
+		systemPrompt = `你负责把当前一张 DIM 识别为无事实实体计数主题。只能选择 ENTITY_COUNT，并从 dimensionContext.fields 中选择最多三个非度量、非时间、非实体键说明字段作为 dimensionCodes；metricCodes 必须且只能是 ["entity_count"]。不得臆造其他指标、事实、字段、SQL 或物理对象。`
 	}
 	result, err := selector.ai.Invoke(ctx, aiplatform.Invocation{
 		TenantID: tenantID, ActorID: actorID,
@@ -125,14 +175,29 @@ func (selector *OrchestratedDWSAnalysisSelector) Select(
 				Name: "dws_analysis_template_selection",
 				Schema: json.RawMessage(`{
 					"type":"object","additionalProperties":false,
-					"required":["templateCodes"],
-					"properties":{"templateCodes":{
+					"required":["selections"],
+					"properties":{"selections":{
 						"type":"array","maxItems":3,"uniqueItems":true,
-						"items":{"enum":[
-							"TREND","PERIOD_COMPARISON","DISTRIBUTION",
-							"RANKING","DRILLDOWN","ANOMALY",
-							"MULTI_FACT_COMPARISON"
-						]}
+						"items":{"type":"object","additionalProperties":false,
+							"required":["templateCode","dimensionCodes","metricCodes"],
+							"properties":{
+								"templateCode":{"enum":[
+									"TREND","PERIOD_COMPARISON","DISTRIBUTION",
+									"RANKING","DRILLDOWN","ANOMALY",
+									"MULTI_FACT_COMPARISON","ENTITY_COUNT"
+								]},
+								"dimensionCodes":{"type":"array","maxItems":3,
+									"uniqueItems":true,"items":{"type":"string"}},
+								"metricCodes":{"type":"array","maxItems":16,
+									"uniqueItems":true,"items":{"type":"string"}},
+								"groupingMode":{"enum":[
+									"STANDARD","CUBE","ROLLUP","GROUPING_SETS"
+								]},
+								"groupingSets":{"type":"array","maxItems":16,
+									"items":{"type":"array","maxItems":3,
+										"uniqueItems":true,"items":{"type":"string"}}}
+							}
+						}
 					}}
 				}`),
 			},
@@ -145,39 +210,259 @@ func (selector *OrchestratedDWSAnalysisSelector) Select(
 		return fallback, "", nil
 	}
 	var response struct {
-		TemplateCodes []string `json:"templateCodes"`
+		Selections []dwsAnalysisSelection `json:"selections"`
 	}
 	if json.Unmarshal(result.ProviderResult.Content, &response) != nil {
 		return fallback, result.RequestID, nil
 	}
-	selected := validatedTemplateSelection(response.TemplateCodes, eligible)
-	if len(response.TemplateCodes) > 0 && len(selected) == 0 {
+	selected := validatedAnalysisSelection(
+		response.Selections, eligible, facts, dimensions,
+		maxSelections, !selectedScope,
+	)
+	if len(response.Selections) > 0 && len(selected) == 0 {
 		return fallback, result.RequestID, nil
 	}
 	return selected, result.RequestID, nil
 }
 
-func boundedTemplateSelection(eligible []string) []string {
+func boundedTemplateSelection(eligible []string) []dwsAnalysisSelection {
 	if len(eligible) > 3 {
 		eligible = eligible[:3]
 	}
-	return append([]string(nil), eligible...)
+	result := make([]dwsAnalysisSelection, 0, len(eligible))
+	for _, code := range eligible {
+		result = append(result, dwsAnalysisSelection{
+			TemplateCode: code, DimensionCodes: []string{}, MetricCodes: []string{},
+		})
+	}
+	return result
 }
 
-func validatedTemplateSelection(selected, eligible []string) []string {
+func consolidatedDWSSelection(
+	eligible []string,
+	document dataset.Document,
+) []dwsAnalysisSelection {
+	if len(eligible) == 0 {
+		return nil
+	}
+	selectedTemplate := eligible[0]
+	hasSemiAdditive := false
+	if document.FactContract != nil {
+		fieldsByCode := make(map[string]dataset.Field, len(document.Fields))
+		for _, field := range document.Fields {
+			fieldsByCode[field.Code] = field
+		}
+		for _, measure := range document.FactContract.AtomicMeasures {
+			if field, exists := fieldsByCode[measure.Field]; exists {
+				measure = effectiveDWSAtomicMeasure(measure, field)
+			}
+			if measure.Additivity == "SEMI_ADDITIVE" {
+				hasSemiAdditive = true
+				break
+			}
+		}
+	}
+	preferred := []string{"DRILLDOWN", "TREND"}
+	if hasSemiAdditive {
+		preferred = []string{"TREND", "DRILLDOWN"}
+	}
+	for _, candidate := range preferred {
+		for _, code := range eligible {
+			if code == candidate {
+				selectedTemplate = candidate
+				break
+			}
+		}
+		if selectedTemplate == candidate {
+			break
+		}
+	}
+	selection := dwsAnalysisSelection{
+		TemplateCode:   selectedTemplate,
+		DimensionCodes: []string{},
+		MetricCodes:    []string{},
+		GroupingMode:   "STANDARD",
+		GroupingSets:   [][]string{},
+	}
+	for _, field := range document.Fields {
+		if field.Role == "DIMENSION" && len(selection.DimensionCodes) < 3 {
+			selection.DimensionCodes = append(
+				selection.DimensionCodes, field.Code,
+			)
+		}
+	}
+	if document.FactContract != nil {
+		fieldsByCode := make(map[string]dataset.Field, len(document.Fields))
+		for _, field := range document.Fields {
+			fieldsByCode[field.Code] = field
+		}
+		for _, measure := range document.FactContract.AtomicMeasures {
+			if field, exists := fieldsByCode[measure.Field]; exists {
+				measure = effectiveDWSAtomicMeasure(measure, field)
+			}
+			if measure.Additivity == "NON_ADDITIVE" ||
+				len(selection.MetricCodes) == 16 {
+				continue
+			}
+			selection.MetricCodes = append(
+				selection.MetricCodes, measure.Field,
+			)
+		}
+	}
+	if len(selection.MetricCodes) == 0 &&
+		supportsSafeRecordCount(document) {
+		selection.MetricCodes = []string{dwsRecordCountMetricCode}
+	}
+	if len(selection.DimensionCodes) >= 2 {
+		selection.GroupingMode = "CUBE"
+	}
+	return []dwsAnalysisSelection{selection}
+}
+
+func validatedAnalysisSelection(
+	selected []dwsAnalysisSelection,
+	eligible []string,
+	facts, dimensions []dwsPlanningAsset,
+	maxSelections int,
+	consolidated bool,
+) []dwsAnalysisSelection {
 	allowed := map[string]bool{}
 	for _, code := range eligible {
 		allowed[code] = true
 	}
-	result := []string{}
+	allowedDimensions := map[string]string{}
+	allowedMetrics := map[string]string{}
+	selectableAssets := facts
+	if len(selectableAssets) == 0 {
+		selectableAssets = dimensions
+	}
+	for _, asset := range selectableAssets {
+		for _, field := range asset.Document.Fields {
+			switch field.Role {
+			case "MEASURE":
+				allowedMetrics[strings.ToLower(field.Code)] = field.Code
+			case "TIME":
+				// Time is selected by the template contract, not as a regular
+				// conformed dimension.
+			default:
+				if len(facts) == 0 || field.Role == "DIMENSION" {
+					allowedDimensions[strings.ToLower(field.Code)] = field.Code
+				}
+			}
+		}
+		if supportsSafeRecordCount(asset.Document) {
+			allowedMetrics[dwsRecordCountMetricCode] = dwsRecordCountMetricCode
+		}
+	}
+	allowedMetrics["entity_count"] = "entity_count"
+	result := []dwsAnalysisSelection{}
 	seen := map[string]bool{}
-	for _, code := range selected {
-		code = strings.ToUpper(strings.TrimSpace(code))
-		if !allowed[code] || seen[code] || len(result) == 3 {
+	for _, selection := range selected {
+		code := strings.ToUpper(strings.TrimSpace(selection.TemplateCode))
+		if !allowed[code] || seen[code] || len(result) == maxSelections {
 			continue
 		}
 		seen[code] = true
-		result = append(result, code)
+		selection.TemplateCode = code
+		selection.DimensionCodes = validatedDWSFieldCodes(
+			selection.DimensionCodes, allowedDimensions, 3,
+		)
+		selection.MetricCodes = validatedDWSFieldCodes(
+			selection.MetricCodes, allowedMetrics, 16,
+		)
+		if code == "ENTITY_COUNT" {
+			selection.MetricCodes = []string{"entity_count"}
+		}
+		if consolidated && len(facts) == 1 {
+			defaults := consolidatedDWSSelection(
+				[]string{code}, facts[0].Document,
+			)
+			if len(defaults) == 1 {
+				if len(selection.DimensionCodes) == 0 {
+					selection.DimensionCodes = defaults[0].DimensionCodes
+				}
+				if len(selection.MetricCodes) == 0 {
+					selection.MetricCodes = defaults[0].MetricCodes
+				}
+				if strings.TrimSpace(selection.GroupingMode) == "" {
+					selection.GroupingMode = defaults[0].GroupingMode
+				}
+			}
+		}
+		selection = validatedDWSGrouping(selection, consolidated)
+		result = append(result, selection)
+	}
+	return result
+}
+
+func validatedDWSGrouping(
+	selection dwsAnalysisSelection,
+	consolidated bool,
+) dwsAnalysisSelection {
+	mode := strings.ToUpper(strings.TrimSpace(selection.GroupingMode))
+	if mode != "STANDARD" && mode != "CUBE" &&
+		mode != "ROLLUP" && mode != "GROUPING_SETS" {
+		mode = "STANDARD"
+	}
+	if consolidated && mode == "STANDARD" &&
+		len(selection.DimensionCodes) >= 2 {
+		mode = "CUBE"
+	}
+	if (mode == "CUBE" || mode == "ROLLUP") &&
+		len(selection.DimensionCodes) < 2 {
+		mode = "STANDARD"
+	}
+	allowed := make(map[string]string, len(selection.DimensionCodes))
+	for _, code := range selection.DimensionCodes {
+		allowed[strings.ToLower(code)] = code
+	}
+	groupingSets := [][]string{}
+	seen := map[string]bool{}
+	if mode == "GROUPING_SETS" {
+		for _, candidate := range selection.GroupingSets {
+			validated := validatedDWSFieldCodes(candidate, allowed, 3)
+			if len(validated) == 0 {
+				continue
+			}
+			keyParts := append([]string(nil), validated...)
+			for index := range keyParts {
+				keyParts[index] = strings.ToLower(keyParts[index])
+			}
+			sort.Strings(keyParts)
+			key := strings.Join(keyParts, "\x00")
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			groupingSets = append(groupingSets, validated)
+			if len(groupingSets) == 16 {
+				break
+			}
+		}
+		if len(groupingSets) == 0 {
+			mode = "STANDARD"
+		}
+	}
+	selection.GroupingMode = mode
+	selection.GroupingSets = groupingSets
+	return selection
+}
+
+func validatedDWSFieldCodes(
+	candidates []string,
+	allowed map[string]string,
+	limit int,
+) []string {
+	result := make([]string, 0, min(limit, len(candidates)))
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		key := strings.ToLower(strings.TrimSpace(candidate))
+		exact := allowed[key]
+		if exact == "" || seen[key] || len(result) == limit {
+			continue
+		}
+		seen[key] = true
+		result = append(result, exact)
 	}
 	return result
 }
@@ -208,7 +493,7 @@ type dwsModelingClaim struct {
 	ActorID, LeaseToken, InputHash, GroupKey       string
 	ScopeHash                                      string
 	Scope                                          dwsModelingScope
-	Selections                                     []string
+	Selections                                     []dwsAnalysisSelection
 	Attempt, MaxAttempts                           int
 }
 
@@ -414,7 +699,11 @@ func (worker *DWSModelingWorker) claim(
 			return err
 		}
 		if err := json.Unmarshal(selectionJSON, &item.Selections); err != nil {
-			return err
+			var legacy []string
+			if legacyErr := json.Unmarshal(selectionJSON, &legacy); legacyErr != nil {
+				return err
+			}
+			item.Selections = boundedTemplateSelection(legacy)
 		}
 		if err := json.Unmarshal(scopeJSON, &item.Scope); err != nil {
 			return err
@@ -447,7 +736,12 @@ func (worker *DWSModelingWorker) process(
 			ctx, claim, workerID, "SKIPPED", "SUBJECT_CHANGED", nil,
 		)
 	}
-	readiness, err := worker.sourceReady(ctx, claim, facts)
+	factlessDimension := len(facts) == 0 && len(dimensions) == 1
+	readinessSources := facts
+	if factlessDimension {
+		readinessSources = dimensions
+	}
+	readiness, err := worker.sourceReady(ctx, claim, readinessSources)
 	if err != nil {
 		return err
 	}
@@ -459,20 +753,14 @@ func (worker *DWSModelingWorker) process(
 	if !readiness.Ready {
 		return worker.waitForDependency(ctx, claim, workerID)
 	}
-	if len(facts) == 0 {
+	if len(facts) == 0 && !factlessDimension {
 		return worker.finish(
 			ctx, claim, workerID, "SKIPPED", "FACT_CONTRACT_MISSING", nil,
 		)
 	}
-	modelingFacts := multiFactEligibleSources(facts)
-	eligible := []string{}
-	if len(modelingFacts) == 1 {
-		eligible = autoEligibleTemplateCodes(modelingFacts[0].Document)
-	} else {
-		if len(modelingFacts) > 1 {
-			eligible = []string{"MULTI_FACT_COMPARISON"}
-		}
-	}
+	modelingFacts, eligible := eligibleDWSAnalysisScope(
+		facts, factlessDimension,
+	)
 	if len(eligible) == 0 {
 		return worker.finish(
 			ctx, claim, workerID, "SKIPPED", "NO_SAFE_TEMPLATE", nil,
@@ -485,6 +773,12 @@ func (worker *DWSModelingWorker) process(
 	}
 	if len(claim.Selections) == 0 {
 		selections := boundedTemplateSelection(eligible)
+		if !strings.HasPrefix(claim.GroupKey, "selected-dws:") &&
+			len(modelingFacts) == 1 {
+			selections = consolidatedDWSSelection(
+				eligible, modelingFacts[0].Document,
+			)
+		}
 		requestID := ""
 		if worker.selector != nil {
 			selected, selectedRequestID, _ := worker.selector.Select(
@@ -507,17 +801,39 @@ func (worker *DWSModelingWorker) process(
 		claim.InputHash = claim.ScopeHash
 	}
 	results := make([]dwsModelingResult, 0, len(claim.Selections))
-	generated, updated, skipped := 0, 0, 0
-	for _, templateCode := range claim.Selections {
+	generated, updated, skipped, unchanged := 0, 0, 0, 0
+	multiFactDatasetType := ""
+	if len(modelingFacts) > 1 {
+		multiFactDatasetType, err = worker.resolveDWSPhysicalSourceType(
+			ctx, claim, modelingFacts,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	for _, selection := range claim.Selections {
+		templateCode := selection.TemplateCode
 		var prepared dataset.Prepared
 		var buildErr error
-		if len(modelingFacts) > 1 {
+		if factlessDimension {
+			prepared, buildErr = buildDimensionCountDWSCandidate(
+				dimensions[0].Record, dimensions[0].VersionID,
+				selection.DimensionCodes,
+			)
+		} else if len(modelingFacts) > 1 {
 			prepared, buildErr = buildMultiFactDWSCandidate(
-				modelingFacts, claim.Scope, templateCode,
+				modelingFacts, claim.Scope, templateCode, multiFactDatasetType,
 			)
 		} else {
-			prepared, buildErr = buildSingleFactDWSCandidate(
-				modelingFacts[0].Record, modelingFacts[0].VersionID, templateCode,
+			prepared, buildErr = buildSingleFactDWSCandidateWithSelection(
+				modelingFacts[0].Record, modelingFacts[0].VersionID,
+				templateCode, selection.DimensionCodes, selection.MetricCodes,
+				selection.GroupingMode, selection.GroupingSets,
+			)
+		}
+		if buildErr == nil {
+			prepared, buildErr = scopeSelectedDWSCandidate(
+				prepared, claim.GroupKey,
 			)
 		}
 		if buildErr != nil {
@@ -532,6 +848,12 @@ func (worker *DWSModelingWorker) process(
 			ctx, claim, templateCode, prepared,
 		)
 		if upsertErr != nil {
+			slog.WarnContext(
+				ctx, "DWS modeling output upsert failed",
+				"job_id", claim.ID,
+				"template_code", templateCode,
+				"error", upsertErr,
+			)
 			skipped++
 			results = append(results, dwsModelingResult{
 				TemplateCode: templateCode, Action: "SKIPPED",
@@ -544,6 +866,11 @@ func (worker *DWSModelingWorker) process(
 			generated++
 		case "UPDATED":
 			updated++
+		case "UNCHANGED":
+			// 计入 processed 以保持任务中心的进度合同，但它是成功的幂等
+			// 结果，不应让整项任务显示为“已跳过”。
+			skipped++
+			unchanged++
 		default:
 			skipped++
 		}
@@ -551,16 +878,141 @@ func (worker *DWSModelingWorker) process(
 			TemplateCode: templateCode, DatasetID: datasetID, Action: action,
 		})
 	}
-	status := "SUCCEEDED"
-	if skipped > 0 && generated+updated > 0 {
-		status = "PARTIAL"
-	} else if skipped > 0 && generated+updated == 0 {
-		status = "SKIPPED"
-	}
+	status := dwsModelingCompletionStatus(
+		generated, updated, skipped, unchanged,
+	)
 	return worker.finishCounts(
 		ctx, claim, workerID, status, "", results,
 		generated, updated, skipped,
 	)
+}
+
+func dwsModelingCompletionStatus(
+	generated, updated, skipped, unchanged int,
+) string {
+	failedOrOwned := max(0, skipped-unchanged)
+	successful := generated + updated + unchanged
+	if failedOrOwned > 0 && successful > 0 {
+		return "PARTIAL"
+	}
+	if failedOrOwned > 0 {
+		return "SKIPPED"
+	}
+	return "SUCCEEDED"
+}
+
+func (worker *DWSModelingWorker) resolveDWSPhysicalSourceType(
+	ctx context.Context,
+	claim dwsModelingClaim,
+	facts []dwsPlanningAsset,
+) (datasetType string, err error) {
+	versionIDs := make([]string, 0, len(facts))
+	for _, fact := range facts {
+		versionIDs = append(versionIDs, fact.VersionID)
+	}
+	err = database.WithTenantTx(ctx, worker.store.pool, claim.TenantID, func(tx pgx.Tx) error {
+		var sourceCount int
+		if err := tx.QueryRow(ctx, `WITH RECURSIVE lineage AS (
+				SELECT version.id,version.dsl_json,
+					ARRAY[version.id] AS path,0 AS depth
+				FROM platform.dataset_versions AS version
+				WHERE version.id=ANY($1::uuid[])
+				  AND version.status='PUBLISHED'
+				UNION ALL
+				SELECT upstream.id,upstream.dsl_json,
+					lineage.path||upstream.id,lineage.depth+1
+				FROM lineage
+				CROSS JOIN LATERAL jsonb_array_elements(
+					COALESCE(lineage.dsl_json->'nodes','[]'::jsonb)
+				) AS node
+				JOIN platform.dataset_versions AS upstream
+				  ON upstream.tenant_id=platform.current_tenant_id()
+				 AND upstream.id=(node->>'datasetVersionId')::uuid
+				WHERE node->>'type'='DATASET'
+				  AND lineage.depth<16
+				  AND NOT upstream.id=ANY(lineage.path)
+			)
+			SELECT count(DISTINCT node->>'datasourceId')::int
+			FROM lineage
+			CROSS JOIN LATERAL jsonb_array_elements(
+				COALESCE(lineage.dsl_json->'nodes','[]'::jsonb)
+			) AS node
+			WHERE node->>'type'='TABLE'
+			  AND btrim(COALESCE(node->>'datasourceId',''))<>''`,
+			versionIDs,
+		).Scan(&sourceCount); err != nil {
+			return err
+		}
+		if sourceCount < 1 {
+			return ErrUnprovenPath
+		}
+		datasetType = "SINGLE_SOURCE"
+		if sourceCount > 1 {
+			datasetType = "CROSS_SOURCE"
+		}
+		return nil
+	})
+	return datasetType, err
+}
+
+func eligibleDWSAnalysisScope(
+	facts []dwsPlanningAsset,
+	factlessDimension bool,
+) ([]dwsPlanningAsset, []string) {
+	if factlessDimension {
+		return nil, []string{"ENTITY_COUNT"}
+	}
+	if len(facts) == 1 {
+		return facts, autoEligibleTemplateCodes(facts[0].Document)
+	}
+	if len(facts) > 1 {
+		eligibleFacts := multiFactEligibleSources(facts)
+		// 显式多事实范围是不可拆分的合同。任一事实不能安全进入共同粒度时，
+		// 整个范围应拒绝模板，而不是静默丢弃该事实后降级成单事实主题。
+		if len(eligibleFacts) == len(facts) {
+			return facts, []string{"MULTI_FACT_COMPARISON"}
+		}
+	}
+	return nil, nil
+}
+
+func scopeSelectedDWSCandidate(
+	prepared dataset.Prepared,
+	groupKey string,
+) (dataset.Prepared, error) {
+	if !strings.HasPrefix(groupKey, "selected-dws:") {
+		return prepared, nil
+	}
+	return recodeDWSCandidate(
+		prepared,
+		scopedDWSCode(prepared.Document.Dataset.Code, groupKey),
+	)
+}
+
+func scopedDWSCode(baseCode, groupKey string) string {
+	sum := sha256.Sum256([]byte(groupKey))
+	suffix := hex.EncodeToString(sum[:])[:8]
+	baseCode = strings.TrimRight(strings.TrimSpace(baseCode), "_")
+	if len(baseCode) > 54 {
+		baseCode = strings.TrimRight(baseCode[:54], "_")
+	}
+	return baseCode + "_" + suffix
+}
+
+func recodeDWSCandidate(
+	prepared dataset.Prepared,
+	code string,
+) (dataset.Prepared, error) {
+	if prepared.Document.Dataset.Code == code {
+		return prepared, nil
+	}
+	document := prepared.Document
+	document.Dataset.Code = code
+	raw, err := json.Marshal(document)
+	if err != nil {
+		return dataset.Prepared{}, err
+	}
+	return dataset.Prepare(raw)
 }
 
 func (worker *DWSModelingWorker) loadPlanningScope(
@@ -635,29 +1087,35 @@ func (worker *DWSModelingWorker) loadPlanningScope(
 		if loadErr != nil || !valid {
 			return nil, nil, false, loadErr
 		}
-		// The SQL trigger deliberately provides the complete DIM inventory so a
-		// planner can inspect conformed dimensions. Only dimensions in the fact
-		// domain may become physical inputs of this DWS candidate.
-		if !strings.EqualFold(
-			strings.TrimSpace(asset.Document.Dataset.Domain), domain,
-		) {
+		// 默认全量任务提供当前批次的 DIM 清单；显式选择任务只提供所选
+		// DIM。只有和事实处于同一领域的维度才可进入联合分析上下文。
+		assetDomain := strings.TrimSpace(asset.Document.Dataset.Domain)
+		if domain == "" {
+			domain = assetDomain
+		}
+		if assetDomain == "" || !strings.EqualFold(assetDomain, domain) {
 			continue
 		}
 		dimensions = append(dimensions, asset)
 	}
-	return facts, dimensions, len(facts) > 0, nil
+	return facts, dimensions, len(facts) > 0 ||
+		len(facts) == 0 && len(dimensions) == 1, nil
 }
 
 func (worker *DWSModelingWorker) sourceReady(
 	ctx context.Context,
 	claim dwsModelingClaim,
-	facts []dwsPlanningAsset,
+	sources []dwsPlanningAsset,
 ) (readiness dwsSourceReadiness, err error) {
 	err = database.WithTenantTx(ctx, worker.store.pool, claim.TenantID, func(tx pgx.Tx) error {
 		readiness.Ready = true
-		for _, fact := range facts {
+		for _, source := range sources {
 			var available bool
 			var latestBuildStatus string
+			layer := source.Document.Dataset.Layer
+			if layer != dataset.LayerDWD && layer != dataset.LayerDIM {
+				return ErrInvalidRequest
+			}
 			if err := tx.QueryRow(ctx, `SELECT
 				EXISTS(
 					SELECT 1
@@ -674,7 +1132,7 @@ func (worker *DWSModelingWorker) sourceReady(
 					 AND materialization.status='ACTIVE'
 					 AND materialization.schema_hash=version.schema_hash
 					WHERE version.id=$1::uuid AND version.dataset_id=$2::uuid
-					  AND version.status='PUBLISHED' AND version.layer='DWD'
+					  AND version.status='PUBLISHED' AND version.layer=$3
 				),
 				COALESCE((
 					SELECT run.status
@@ -684,7 +1142,7 @@ func (worker *DWSModelingWorker) sourceReady(
 					ORDER BY run.created_at DESC,run.id DESC
 					LIMIT 1
 				),'')`,
-				fact.VersionID, fact.Record.ID,
+				source.VersionID, source.Record.ID, layer,
 			).Scan(&available, &latestBuildStatus); err != nil {
 				return err
 			}
@@ -710,7 +1168,7 @@ func (worker *DWSModelingWorker) waitForDependency(
 		tag, err := tx.Exec(ctx, `UPDATE platform.dws_modeling_jobs
 			SET status='WAITING_DEPENDENCY',attempt=GREATEST(attempt-1,0),
 				error_code='WAITING_ACTIVE_DWD_MATERIALIZATION',
-				error_message='等待全部 DWD 发布版本完成物化；物化转为可用后，主题建模会自动继续',
+				error_message='等待主题建模的上游发布版本完成物化；物化转为可用后会自动继续',
 				next_attempt_at=now()+interval '1 minute',
 				lease_owner='',lease_token=NULL,lease_expires_at=NULL,
 				updated_at=now()
@@ -731,7 +1189,7 @@ func (worker *DWSModelingWorker) saveSelection(
 	ctx context.Context,
 	claim dwsModelingClaim,
 	workerID, inputHash, requestID string,
-	selections []string,
+	selections []dwsAnalysisSelection,
 ) error {
 	raw, err := json.Marshal(selections)
 	if err != nil {
@@ -812,6 +1270,14 @@ func (worker *DWSModelingWorker) upsertDWS(
 	current, err := worker.datasets.Get(ctx, claim.TenantID, output.DatasetID)
 	if err != nil {
 		return "", "", err
+	}
+	// 旧版显式范围尚未在物理编码中携带范围后缀。输出已经建立所有权
+	// 映射时继续固定其现有编码，允许新 worker 幂等接管而不改写资产身份。
+	if current.Code != prepared.Document.Dataset.Code {
+		prepared, err = recodeDWSCandidate(prepared, current.Code)
+		if err != nil {
+			return "", "", err
+		}
 	}
 	if current.DSLHash != output.LastGeneratedHash {
 		_ = worker.saveOutput(

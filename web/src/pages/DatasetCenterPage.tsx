@@ -167,6 +167,12 @@ const modelingMonitorConfigs: ModelingMonitorConfig[] = [
     taskKinds: new Set(['DWS_MODELING']),
     idleTitle: '基于已发布明细模型形成主题分析草稿；草稿需先完成发布审批',
   },
+  {
+    trigger: 'ADS_MODELING',
+    label: '应用建模',
+    taskKinds: new Set(['ADS_MODELING']),
+    idleTitle: '基于已发布 DWS 形成可评审的 ADS 应用数据草稿',
+  },
 ]
 const emptyModelingMonitorState = (): ModelingMonitorState => ({
   tasks: [],
@@ -179,7 +185,52 @@ const emptyModelingMonitors = (): Record<DatasetLLMTrigger, ModelingMonitorState
   DIM_MODELING: emptyModelingMonitorState(),
   DWD_MODELING: emptyModelingMonitorState(),
   DWS_MODELING: emptyModelingMonitorState(),
+  ADS_MODELING: emptyModelingMonitorState(),
 })
+
+const modelingSelectionError = (
+  trigger: DatasetLLMTrigger,
+  selected: DatasetSummary[],
+) => {
+  if (!selected.length) return ''
+  const allowed: Record<DatasetLLMTrigger, Set<DatasetLayer>> = {
+    DIM_MODELING: new Set(['ODS']),
+    DWD_MODELING: new Set(['ODS', 'DIM']),
+    DWS_MODELING: new Set(['DWD', 'DIM']),
+    ADS_MODELING: new Set(['DWS']),
+  }
+  const invalidState = selected.filter(dataset =>
+    dataset.status !== 'PUBLISHED' || !dataset.currentPublishedVersionId
+  )
+  if (invalidState.length) {
+    const examples = invalidState.slice(0, 3).map(dataset => dataset.name).join('、')
+    return `所选数据集“${examples}”没有当前已发布版本，请完成发布后再建模`
+  }
+  const invalidLayer = selected.filter(dataset => !allowed[trigger].has(dataset.layer))
+  if (invalidLayer.length) {
+    const rules: Record<DatasetLLMTrigger, string> = {
+      DIM_MODELING: '维度建模只能选择 ODS 数据集',
+      DWD_MODELING: '明细建模只能选择 ODS 数据集和可选的 DIM 数据集',
+      DWS_MODELING: '主题建模只能选择 DWD 数据集和可选的 DIM 数据集',
+      ADS_MODELING: '应用建模只能选择 DWS 数据集',
+    }
+    return rules[trigger]
+  }
+  if (trigger === 'DWD_MODELING' && !selected.some(dataset => dataset.layer === 'ODS')) {
+    return '明细建模至少需要选择一个 ODS 数据集，DIM 只能作为可选维度输入'
+  }
+  if (trigger === 'DWS_MODELING' && !selected.some(dataset => dataset.layer === 'DWD')) {
+    return '主题建模至少需要选择一个 DWD 数据集，DIM 只能作为联合分析上下文'
+  }
+  if (trigger === 'DWS_MODELING') {
+    const dwdCount = selected.filter(dataset => dataset.layer === 'DWD').length
+    const dimCount = selected.filter(dataset => dataset.layer === 'DIM').length
+    if (dwdCount > 32 || dimCount > 64) {
+      return '一次联合主题建模最多选择 32 个 DWD 和 64 个 DIM 数据集'
+    }
+  }
+  return ''
+}
 const activeBackgroundTaskStatuses = new Set<BackgroundTaskStatus>(['QUEUED', 'RUNNING'])
 const backgroundTaskStatusLabels: Record<BackgroundTaskStatus, string> = {
   QUEUED: '排队中',
@@ -1195,16 +1246,19 @@ export function DatasetCenterPage() {
     DIM_MODELING: new Set(),
     DWD_MODELING: new Set(),
     DWS_MODELING: new Set(),
+    ADS_MODELING: new Set(),
   })
   const modelingRequestedAt = useRef<Record<DatasetLLMTrigger, number | null>>({
     DIM_MODELING: null,
     DWD_MODELING: null,
     DWS_MODELING: null,
+    ADS_MODELING: null,
   })
   const modelingExpectedRef = useRef<Record<DatasetLLMTrigger, boolean>>({
     DIM_MODELING: false,
     DWD_MODELING: false,
     DWS_MODELING: false,
+    ADS_MODELING: false,
   })
   const modelingSyncRequest = useRef(0)
 
@@ -1317,6 +1371,7 @@ export function DatasetCenterPage() {
         DIM_MODELING: { ...current.DIM_MODELING, syncError: message },
         DWD_MODELING: { ...current.DWD_MODELING, syncError: message },
         DWS_MODELING: { ...current.DWS_MODELING, syncError: message },
+        ADS_MODELING: { ...current.ADS_MODELING, syncError: message },
       }))
     }
   }, [loadDatasets])
@@ -3063,6 +3118,12 @@ export function DatasetCenterPage() {
 
   const triggerDatasetLLM = async (trigger: DatasetLLMTrigger, label: string) => {
     if (busyAction) return
+    const selectionError = modelingSelectionError(trigger, selectedDatasets)
+    if (selectionError) {
+      setNotice({ tone: 'error', message: `${label}尚未触发：${selectionError}` })
+      return
+    }
+    const selectedIDs = selectedDatasets.map(dataset => dataset.id)
     modelingRunTaskIDs.current[trigger] = new Set()
     modelingRequestedAt.current[trigger] = Date.now()
     expectModelingTasks(trigger, true)
@@ -3078,7 +3139,7 @@ export function DatasetCenterPage() {
     }))
     setBusyAction(`llm:${trigger}`)
     try {
-      const result = await datasetAPI.triggerLLM(trigger)
+      const result = await datasetAPI.triggerLLM(trigger, selectedIDs)
       if (result.enqueuedCount + result.existingCount === 0) {
         expectModelingTasks(trigger, false)
         modelingRequestedAt.current[trigger] = null
@@ -3087,6 +3148,13 @@ export function DatasetCenterPage() {
         setNotice({
           tone: 'error',
           message: `主题建模尚未提交：${result.blockedCount ?? 0} 个明细模型仍是草稿。请先提交发布并完成审批，发布后再触发主题建模。`,
+        })
+        return
+      }
+      if (result.blockedReason === 'DWS_PUBLICATION_REQUIRED') {
+        setNotice({
+          tone: 'error',
+          message: `应用建模尚未提交：${result.blockedCount ?? 0} 个主题模型仍是草稿。请先提交发布并完成审批，发布后再触发应用建模。`,
         })
         return
       }
@@ -3125,7 +3193,11 @@ export function DatasetCenterPage() {
         })
         return
       }
-      const unit = trigger === 'DWS_MODELING' ? '个主题' : '个领域'
+      const unit = trigger === 'DWS_MODELING'
+        ? '个主题'
+        : trigger === 'ADS_MODELING'
+          ? '个应用'
+          : '个批次'
       const existing = result.existingCount
         ? `；${result.existingCount} ${unit}已有待处理或运行中任务`
         : ''
@@ -3133,10 +3205,14 @@ export function DatasetCenterPage() {
         ? `；${result.blockedCount} 个纯维度领域无需创建 DWD`
         : ''
       const submitted = trigger === 'DIM_MODELING'
-        ? `已为 ${result.enqueuedCount} 个领域提交维度建模任务（每个领域依次执行领域分析与维度设计；符合条件 ${result.eligibleCount} 个领域）`
+        ? `已提交 ${result.enqueuedCount} 个维度建模批次（纳入 ${result.eligibleCount} 张 ODS）`
         : trigger === 'DWD_MODELING'
-          ? `已为 ${result.enqueuedCount} 个领域提交明细建模任务（只执行事实落地；符合条件 ${result.eligibleCount} 个领域）`
-          : `已提交 ${result.enqueuedCount} 个主题任务（符合条件 ${result.eligibleCount} 个主题）`
+          ? `已提交 ${result.enqueuedCount} 个明细建模批次（只执行事实落地；符合条件 ${result.eligibleCount} 个范围）`
+	          : trigger === 'DWS_MODELING'
+	            ? selectedIDs.length
+	              ? `已提交 ${result.enqueuedCount} 个联合主题任务（${selectedIDs.length} 个所选数据集一起分析）`
+	              : `已提交 ${result.enqueuedCount} 个主题任务（符合条件 ${result.eligibleCount} 个上游数据集，含 DWD / DIM）`
+	            : `已提交 ${result.enqueuedCount} 个应用任务（符合条件 ${result.eligibleCount} 张 DWS）`
       if (result.enqueuedCount > 0 || result.existingCount > 0) {
         rememberBackgroundTaskFocus(trigger)
       }
@@ -3145,7 +3221,7 @@ export function DatasetCenterPage() {
       }
       setNotice({
         tone: 'success',
-        message: `${label}${submitted}${existing}${noFact}${
+        message: `${selectedIDs.length ? `已按所选 ${selectedIDs.length} 个数据集校验并执行：` : '已按默认全量范围执行：'}${submitted}${existing}${noFact}${
           trigger === 'DWS_MODELING'
             ? '；主题规划通常会很快完成，任务中心将优先展示主题建模任务'
             : ''
@@ -3387,7 +3463,10 @@ export function DatasetCenterPage() {
     resetDatasetAI()
     historySelectionRequest.current += 1
     endPreviewRequest.current += 1
-    if (document.fullscreenElement === canvasFullscreenTarget.current) void document.exitFullscreen()
+    if (document.fullscreenElement &&
+      document.fullscreenElement === canvasFullscreenTarget.current) {
+      void document.exitFullscreen()
+    }
     setCanvasFullscreen(false)
     setDialog(null)
     setMetadataEdit(null)
@@ -3436,7 +3515,7 @@ export function DatasetCenterPage() {
           <small>显示 {filtered.length} / {datasets.length}</small>
         </div>
         <section className="dataset-intelligent-modeling" aria-label="智能建模">
-          <span>智能建模</span>
+          <span>智能建模 · {selectedDatasets.length ? `按所选 ${selectedDatasets.length} 个数据集` : '默认全量范围'}</span>
           <div>
             {modelingMonitorConfigs.map(config => <DatasetModelingAction
               key={config.trigger}
@@ -3460,6 +3539,10 @@ export function DatasetCenterPage() {
                   DWS_MODELING: {
                     ...current.DWS_MODELING,
                     logsPinned: config.trigger === 'DWS_MODELING' && willPin,
+                  },
+                  ADS_MODELING: {
+                    ...current.ADS_MODELING,
+                    logsPinned: config.trigger === 'ADS_MODELING' && willPin,
                   },
                 }
               })}

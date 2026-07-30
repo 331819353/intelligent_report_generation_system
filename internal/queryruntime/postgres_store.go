@@ -296,22 +296,11 @@ func resolveDatasetNodesTx(
 			return result, nil
 		}
 	}
-	expectedLayers := map[dataset.Layer]bool{}
-	switch document.Dataset.Layer {
-	case dataset.LayerDIM:
-		expectedLayers[dataset.LayerODS] = true
-	case dataset.LayerDWD:
-		expectedLayers[dataset.LayerODS] = true
-		expectedLayers[dataset.LayerDIM] = true
-	case dataset.LayerDWS:
-		expectedLayers[dataset.LayerDWD] = true
-	case dataset.LayerADS:
-		expectedLayers[dataset.LayerDWS] = true
-	default:
+	expectedLayers := warehousePreviewInputLayers(document.Dataset.Layer)
+	if len(expectedLayers) == 0 {
 		return ResolvedPlan{}, dataset.ErrPreviewUnsupported
 	}
-	hasODSInput := false
-	hasDWDInput := false
+	inputLayers := map[dataset.Layer]bool{}
 	result := ResolvedPlan{
 		Engine: ExecutionPostgreSQL,
 		Tables: map[string]querycompiler.TableRef{},
@@ -326,19 +315,58 @@ func resolveDatasetNodesTx(
 		}
 		result.Tables[node.ID] = table
 		result.Materializations = append(result.Materializations, binding)
-		hasODSInput = hasODSInput || binding.Layer == string(dataset.LayerODS)
-		hasDWDInput = hasDWDInput || binding.Layer == string(dataset.LayerDWD)
+		inputLayers[dataset.Layer(binding.Layer)] = true
 	}
 	if len(result.Materializations) == 0 {
 		return ResolvedPlan{}, dataset.ErrPreviewUnsupported
 	}
-	if document.Dataset.Layer == dataset.LayerDWD && !hasODSInput {
-		return ResolvedPlan{}, dataset.ErrPreviewUnsupported
-	}
-	if document.Dataset.Layer == dataset.LayerDWS && !hasDWDInput {
+	if !hasRequiredWarehousePreviewInput(
+		document.Dataset.Layer, inputLayers,
+	) {
 		return ResolvedPlan{}, dataset.ErrPreviewUnsupported
 	}
 	return result, nil
+}
+
+func warehousePreviewInputLayers(layer dataset.Layer) map[dataset.Layer]bool {
+	switch layer {
+	case dataset.LayerDIM:
+		return map[dataset.Layer]bool{dataset.LayerODS: true}
+	case dataset.LayerDWD:
+		return map[dataset.Layer]bool{
+			dataset.LayerODS: true,
+			dataset.LayerDIM: true,
+		}
+	case dataset.LayerDWS:
+		// Factless entity-count DWS datasets are intentionally backed by a
+		// governed DIM materialization. Ordinary and multi-fact DWS datasets
+		// continue to use DWD materializations.
+		return map[dataset.Layer]bool{
+			dataset.LayerDWD: true,
+			dataset.LayerDIM: true,
+		}
+	case dataset.LayerADS:
+		return map[dataset.Layer]bool{dataset.LayerDWS: true}
+	default:
+		return nil
+	}
+}
+
+func hasRequiredWarehousePreviewInput(
+	layer dataset.Layer,
+	inputLayers map[dataset.Layer]bool,
+) bool {
+	switch layer {
+	case dataset.LayerDWD:
+		// A DWD must retain at least one fact-bearing ODS input even when it
+		// also joins governed dimensions.
+		return inputLayers[dataset.LayerODS]
+	case dataset.LayerDWS:
+		return inputLayers[dataset.LayerDWD] ||
+			inputLayers[dataset.LayerDIM]
+	default:
+		return true
+	}
 }
 
 func resolveActiveMaterializationTx(

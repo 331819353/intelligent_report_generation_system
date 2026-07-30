@@ -355,7 +355,7 @@ func deriveCurrentInputsTx(
 		if target.Layer == LayerDWD {
 			allowedLayers = map[Layer]bool{LayerODS: true, LayerDIM: true}
 		} else if target.Layer == LayerDWS {
-			allowedLayers = map[Layer]bool{LayerDWD: true}
+			allowedLayers = map[Layer]bool{LayerDWD: true, LayerDIM: true}
 		} else if target.Layer == LayerADS {
 			allowedLayers = map[Layer]bool{LayerDWS: true}
 		}

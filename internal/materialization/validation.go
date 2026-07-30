@@ -280,7 +280,7 @@ func validateInput(input InputSnapshot, target Layer) error {
 		}
 	case LayerDWS:
 		if (input.Type != InputDatasetVersion && input.Type != InputMaterialization) ||
-			input.Layer != string(LayerDWD) {
+			(input.Layer != string(LayerDWD) && input.Layer != string(LayerDIM)) {
 			return ErrInvalidRequest
 		}
 	case LayerADS:
