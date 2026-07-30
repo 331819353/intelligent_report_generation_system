@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -17,24 +18,25 @@ import (
 // ExtractorVersion identifies the deterministic rule contract used for job deduplication.
 // Changing extraction semantics requires a new value so exact dataset versions can be
 // reconciled again without rewriting prior audit evidence.
-const ExtractorVersion = "metric-candidate-v5"
+const ExtractorVersion = "metric-candidate-v7"
 
 // JobVersion advances the durable publication workflow whenever extraction or semantic
 // enrichment changes, while keeping prior jobs and audit evidence immutable.
-const JobVersion = "metric-candidate-semantic-v6"
+const JobVersion = "metric-candidate-semantic-v8"
 
-// CodeIdentificationVersion identifies the DWS field-classification scan triggered
+// CodeIdentificationVersion identifies the governed DWS/ADS field-classification scan triggered
 // by publication or an explicit reconciliation. Jobs with this version are rule-only
 // and their reviewable results are automatically accepted into the metric asset catalog.
-const CodeIdentificationVersion = "metric-candidate-code-v1"
+const CodeIdentificationVersion = "metric-candidate-code-v3"
 
 var ErrInvalidDatasetVersion = errors.New("metric candidate extraction requires an exact published dataset version")
 
 const (
-	BlockReasonAggregatedDataset   = "AGGREGATED_DATASET_UNSUPPORTED"
-	BlockReasonPreAggregation      = "PRE_AGGREGATION_UNSUPPORTED"
-	BlockReasonAggregateExpression = "AGGREGATE_EXPRESSION_UNSUPPORTED"
-	BlockReasonDatasetUnavailable  = "DATASET_DEPENDENCY_UNAVAILABLE"
+	BlockReasonAggregatedDataset     = "AGGREGATED_DATASET_UNSUPPORTED"
+	BlockReasonPreAggregation        = "PRE_AGGREGATION_UNSUPPORTED"
+	BlockReasonAggregateExpression   = "AGGREGATE_EXPRESSION_UNSUPPORTED"
+	BlockReasonDatasetUnavailable    = "DATASET_DEPENDENCY_UNAVAILABLE"
+	BlockReasonMetricFactsIncomplete = "METRIC_FACTS_INCOMPLETE"
 )
 
 var supportedAggregations = map[string]bool{
@@ -96,11 +98,11 @@ func Extract(version dataset.VersionRecord) (ExtractionResult, error) {
 	return result, nil
 }
 
-// ExtractDWSFieldMetrics narrows deterministic extraction to fields that the saved DWS
-// contract has already classified as MEASURE. Other numeric or identifier fields are not
-// reinterpreted as metrics in this path.
-func ExtractDWSFieldMetrics(version dataset.VersionRecord) (ExtractionResult, error) {
-	if version.Layer != dataset.LayerDWS {
+// ExtractGovernedFieldMetrics narrows deterministic extraction to fields that a governed
+// DWS/ADS contract has classified as MEASURE. Unproven numeric fields are never promoted
+// merely because an LLM or naming heuristic considers them metric-like.
+func ExtractGovernedFieldMetrics(version dataset.VersionRecord) (ExtractionResult, error) {
+	if version.Layer != dataset.LayerDWS && version.Layer != dataset.LayerADS {
 		return ExtractionResult{}, ErrInvalidDatasetVersion
 	}
 	result, err := Extract(version)
@@ -123,6 +125,15 @@ func ExtractDWSFieldMetrics(version dataset.VersionRecord) (ExtractionResult, er
 		if !measureFieldIDs[candidate.SourceFieldID] {
 			continue
 		}
+		if candidate.Status != CandidateStatusReady {
+			candidate.Status = CandidateStatusBlocked
+			if !containsString(candidate.BlockReasons, BlockReasonMetricFactsIncomplete) {
+				candidate.BlockReasons = append(candidate.BlockReasons, BlockReasonMetricFactsIncomplete)
+			}
+			if !containsString(candidate.Warnings, "指标计算事实不完整或相互冲突，修复数据集合同后才能同步发布。") {
+				candidate.Warnings = append(candidate.Warnings, "指标计算事实不完整或相互冲突，修复数据集合同后才能同步发布。")
+			}
+		}
 		filtered = append(filtered, candidate)
 		if candidate.Status != CandidateStatusReady {
 			partial = true
@@ -134,9 +145,18 @@ func ExtractDWSFieldMetrics(version dataset.VersionRecord) (ExtractionResult, er
 		result.Status = TaskStatusPartial
 	}
 	if len(filtered) == 0 {
-		result.Warnings = append(result.Warnings, "DWS 发布版本没有已分类为 MEASURE 的字段。")
+		result.Warnings = append(result.Warnings, "DWS/ADS 发布版本没有已分类为 MEASURE 的字段。")
 	}
 	return result, nil
+}
+
+// ExtractDWSFieldMetrics keeps the prior package API for callers that explicitly require
+// a DWS source while sharing the stricter governed-field implementation.
+func ExtractDWSFieldMetrics(version dataset.VersionRecord) (ExtractionResult, error) {
+	if version.Layer != dataset.LayerDWS {
+		return ExtractionResult{}, ErrInvalidDatasetVersion
+	}
+	return ExtractGovernedFieldMetrics(version)
 }
 
 type candidateRule struct {
@@ -157,6 +177,12 @@ type candidateRule struct {
 	// descriptions, units and semantic caliber must still describe the real business
 	// calculation.
 	BusinessAggregation string
+	Additivity          string
+	ValueBehavior       string
+	TimeAggregation     string
+	Unit                string
+	SourceFormula       string
+	SourceEvidencePath  string
 }
 
 func deriveCandidateRules(document dataset.Document, detailCompatible bool) []candidateRule {
@@ -183,17 +209,39 @@ func deriveCandidateRules(document dataset.Document, detailCompatible bool) []ca
 			if !ok || field.Role != "MEASURE" {
 				continue
 			}
+			confidence, status := ConfidenceHigh, CandidateStatusReady
+			evidence := []Evidence{{
+				Code: "DAG_AGGREGATE_OUTPUT", Path: fmt.Sprintf("dsl.fields[%d].expression.function", index),
+				Value: aggregateFunction,
+			}}
+			warnings := []string{}
+			contract, contractIndex, contractFound := analysisMeasureContract(document, field.Code)
+			if contractFound {
+				evidence = append(evidence,
+					Evidence{Code: "ANALYSIS_CONTRACT_AGGREGATION", Path: fmt.Sprintf("dsl.analysisContract.measures[%d].aggregation", contractIndex), Value: contract.Aggregation},
+					Evidence{Code: "ANALYSIS_CONTRACT_ADDITIVITY", Path: fmt.Sprintf("dsl.analysisContract.measures[%d].additivity", contractIndex), Value: contract.Additivity},
+					Evidence{Code: "ANALYSIS_CONTRACT_TIME_BEHAVIOR", Path: fmt.Sprintf("dsl.analysisContract.measures[%d]", contractIndex), Value: contract.ValueBehavior + ":" + contract.TimeAggregation},
+				)
+				if contract.Aggregation != aggregateFunction {
+					status, confidence = CandidateStatusNeedsReview, ConfidenceLow
+					warnings = append(warnings, "分析合同中的聚合方式与字段 DAG 公式不一致，候选不会自动发布。")
+				}
+			} else {
+				status, confidence = CandidateStatusNeedsReview, ConfidenceMedium
+				warnings = append(warnings, "聚合输出缺少对应的分析度量合同，可加性和跨时间行为无法作为已确认事实。")
+			}
 			add(candidateRule{
 				Field: field, FieldIndex: index, Aggregation: "NONE",
-				Confidence: ConfidenceHigh, Status: CandidateStatusReady,
+				Confidence: confidence, Status: status,
 				Name:        safeText(field.Name, field.Code, 200),
 				Description: businessMetricDescription(document, field, aggregateFunction),
 				CodeSeed:    field.Code,
-				Evidence: []Evidence{{
-					Code: "DAG_AGGREGATE_OUTPUT", Path: fmt.Sprintf("dsl.fields[%d].expression.function", index),
-					Value: aggregateFunction,
-				}},
+				Evidence:    evidence, Warnings: warnings,
 				Kind: "DAG_DERIVED_METRIC", MetricType: "DERIVED", BusinessAggregation: aggregateFunction,
+				Additivity: contract.Additivity, ValueBehavior: contract.ValueBehavior,
+				TimeAggregation: contract.TimeAggregation, Unit: firstNonEmpty(contract.Unit, contract.Currency),
+				SourceFormula:      datasetExpressionFormula(field.Expression),
+				SourceEvidencePath: fmt.Sprintf("dsl.fields[%d].expression", index),
 			})
 		}
 		return rules
@@ -309,6 +357,12 @@ func buildCandidate(
 		status = CandidateStatusBlocked
 	}
 	warnings = append(warnings, timeWarnings...)
+	if len(timeWarnings) > 0 && status == CandidateStatusReady {
+		status = CandidateStatusNeedsReview
+		if confidence == ConfidenceHigh {
+			confidence = ConfidenceMedium
+		}
+	}
 	grainWarnings := semanticGrainWarnings(document)
 	warnings = append(warnings, grainWarnings...)
 	if len(grainWarnings) > 0 && status == CandidateStatusReady {
@@ -322,6 +376,9 @@ func buildCandidate(
 	}
 
 	unit := strings.TrimSpace(field.Unit)
+	if strings.TrimSpace(rule.Unit) != "" {
+		unit = strings.TrimSpace(rule.Unit)
+	}
 	businessAggregation := rule.BusinessAggregation
 	if businessAggregation == "" {
 		businessAggregation = aggregation
@@ -334,10 +391,58 @@ func buildCandidate(
 		warnings = append(warnings, "源字段单位超出指标定义边界，候选未自动携带单位。")
 	}
 	numberFormat := strings.TrimSpace(field.Format)
+	decimalScale, numberSemanticsExact := exactNumberSemantics(field, businessAggregation)
 	if numberFormat == "" || !validBoundedText(numberFormat, 64) {
 		numberFormat = defaultNumberFormat(field, aggregation)
 		if strings.TrimSpace(field.Format) != "" {
 			warnings = append(warnings, "源字段格式超出指标定义边界，候选改用安全默认格式。")
+		}
+	}
+	if !numberSemanticsExact {
+		warnings = append(warnings, "DECIMAL 输出字段未声明可验证的数字格式和小数位，当前候选不会自动发布。")
+		if status == CandidateStatusReady {
+			status = CandidateStatusNeedsReview
+		}
+		if confidence == ConfidenceHigh {
+			confidence = ConfidenceMedium
+		}
+	}
+	additivity := strings.ToUpper(strings.TrimSpace(rule.Additivity))
+	contractFactsTrusted := rule.Kind != "DAG_DERIVED_METRIC" || rule.Status == CandidateStatusReady
+	if !contractFactsTrusted {
+		additivity = defaultAdditivity(businessAggregation)
+	}
+	if additivity == "" {
+		additivity = defaultAdditivity(businessAggregation)
+		if rule.Kind == "DAG_DERIVED_METRIC" {
+			warnings = append(warnings, "DAG 聚合输出没有可验证的可加性合同，当前值仅为保守建议。")
+			if status == CandidateStatusReady {
+				status = CandidateStatusNeedsReview
+			}
+		}
+	}
+	nonAdditiveDimensionFieldIDs := []string{}
+	if additivity == "SEMI_ADDITIVE" {
+		if timeFieldID == "" {
+			additivity = "NON_ADDITIVE"
+			warnings = append(warnings, "半可加度量未绑定时间维度，已保守降级且不会自动发布。")
+			if status == CandidateStatusReady {
+				status = CandidateStatusNeedsReview
+			}
+		} else {
+			nonAdditiveDimensionFieldIDs = []string{timeFieldID}
+		}
+	}
+	var sourceCalculation *metric.SourceCalculation
+	if rule.Kind == "DAG_DERIVED_METRIC" {
+		valueBehavior, timeAggregation := rule.ValueBehavior, rule.TimeAggregation
+		if !contractFactsTrusted {
+			valueBehavior, timeAggregation = "", ""
+		}
+		sourceCalculation = &metric.SourceCalculation{
+			Stage: "DATASET_DAG", Aggregation: businessAggregation,
+			Formula: rule.SourceFormula, ValueBehavior: valueBehavior,
+			TimeAggregation: timeAggregation, EvidencePath: rule.SourceEvidencePath,
 		}
 	}
 
@@ -353,14 +458,15 @@ func buildCandidate(
 		DatasetVersionID:             version.ID,
 		Expression:                   metric.Expression{Type: "FIELD_REF", FieldID: field.ID},
 		Aggregation:                  aggregation,
+		SourceCalculation:            sourceCalculation,
 		Unit:                         unit,
 		NumberFormat:                 numberFormat,
 		TimeFieldID:                  timeFieldID,
 		TimeGrain:                    timeGrain,
-		Additivity:                   defaultAdditivity(aggregation),
-		NonAdditiveDimensionFieldIDs: []string{},
+		Additivity:                   additivity,
+		NonAdditiveDimensionFieldIDs: nonAdditiveDimensionFieldIDs,
 		AllowedDimensions:            cloneDimensions(dimensions),
-		DecimalScale:                 defaultDecimalScale(field, aggregation),
+		DecimalScale:                 decimalScale,
 		RoundingMode:                 "HALF_UP",
 		NullHandling:                 "IGNORE",
 		DivisionByZero:               "NULL",
@@ -384,6 +490,20 @@ func buildCandidate(
 	}
 	if field.SemanticType != "" {
 		evidence = append(evidence, Evidence{Code: "FIELD_SEMANTIC_TYPE", Path: fmt.Sprintf("dsl.fields[%d].semanticType", fieldIndex), Value: field.SemanticType})
+	}
+	evidence = append(evidence,
+		Evidence{Code: "METRIC_NUMBER_FORMAT", Path: sourceNumberFormatEvidencePath(field, fieldIndex), Value: definition.NumberFormat},
+		Evidence{Code: "METRIC_DECIMAL_SCALE", Path: fmt.Sprintf("dsl.fields[%d].canonicalType", fieldIndex), Value: strconv.Itoa(definition.DecimalScale)},
+		Evidence{Code: "METRIC_ADDITIVITY", Path: sourceAdditivityEvidencePath(rule, fieldIndex), Value: definition.Additivity},
+	)
+	if definition.Unit != "" {
+		evidence = append(evidence, Evidence{Code: "METRIC_UNIT", Path: sourceUnitEvidencePath(rule, fieldIndex), Value: definition.Unit})
+	}
+	if definition.SourceCalculation != nil {
+		evidence = append(evidence, Evidence{
+			Code: "SOURCE_CALCULATION_FORMULA", Path: definition.SourceCalculation.EvidencePath,
+			Value: definition.SourceCalculation.Formula,
+		})
 	}
 	evidence = append(evidence, ruleEvidence...)
 	if len(dimensions) > 0 {
@@ -446,6 +566,13 @@ func extractDimensions(fields []dataset.Field) []metric.Dimension {
 func extractTimeSemantics(document dataset.Document, dimensions []metric.Dimension) (string, string, []string) {
 	timeCode := strings.TrimSpace(document.OutputGrain.TimeField)
 	timeGrain := strings.ToUpper(strings.TrimSpace(document.OutputGrain.DefaultTimeGrain))
+	if document.AnalysisContract != nil {
+		contractTimeCode := strings.TrimSpace(document.AnalysisContract.TimeField)
+		contractTimeGrain := strings.ToUpper(strings.TrimSpace(document.AnalysisContract.TimeGrain))
+		if contractTimeCode != timeCode || contractTimeGrain != timeGrain {
+			return "", "NONE", []string{"分析合同与输出粒度的时间字段或时间粒度不一致，候选不会自动发布。"}
+		}
+	}
 	if timeCode == "" && timeGrain == "" {
 		return "", "NONE", []string{}
 	}
@@ -483,6 +610,18 @@ func topLevelAggregateFunction(expression dataset.Expression) (string, bool) {
 	}
 	function := strings.ToUpper(strings.TrimSpace(expression.Function))
 	return function, supportedAggregations[function]
+}
+
+func analysisMeasureContract(document dataset.Document, fieldCode string) (dataset.AnalysisMeasureContract, int, bool) {
+	if document.AnalysisContract == nil {
+		return dataset.AnalysisMeasureContract{}, 0, false
+	}
+	for index, measure := range document.AnalysisContract.Measures {
+		if measure.Field == fieldCode {
+			return measure, index, true
+		}
+	}
+	return dataset.AnalysisMeasureContract{}, 0, false
 }
 
 func expressionContainsAggregate(expression dataset.Expression) bool {
@@ -658,11 +797,121 @@ func defaultDecimalScale(field dataset.Field, aggregation string) int {
 	return 2
 }
 
+func exactNumberSemantics(field dataset.Field, aggregation string) (int, bool) {
+	if aggregation == "COUNT" || aggregation == "COUNT_DISTINCT" || field.CanonicalType == "INTEGER" {
+		return 0, true
+	}
+	format := strings.TrimSpace(field.Format)
+	if format == "" {
+		return defaultDecimalScale(field, aggregation), field.CanonicalType != "DECIMAL"
+	}
+	decimal := strings.LastIndex(format, ".")
+	if decimal < 0 {
+		return 0, true
+	}
+	scale := 0
+	for _, character := range format[decimal+1:] {
+		if character == '0' || character == '#' {
+			scale++
+			continue
+		}
+		break
+	}
+	if scale > 12 {
+		return 12, false
+	}
+	return scale, true
+}
+
 func defaultNumberFormat(field dataset.Field, aggregation string) string {
 	if defaultDecimalScale(field, aggregation) == 0 {
 		return "#,##0"
 	}
 	return "#,##0.00"
+}
+
+func datasetExpressionFormula(expression dataset.Expression) string {
+	switch expression.Type {
+	case "FIELD_REF":
+		if expression.NodeID != "" {
+			return expression.NodeID + "." + expression.Field
+		}
+		return expression.Field
+	case "PARAM_REF":
+		return ":" + expression.Code
+	case "LITERAL":
+		raw, _ := json.Marshal(expression.Value)
+		return string(raw)
+	case "AGGREGATE":
+		argument := "*"
+		if expression.Argument != nil {
+			argument = datasetExpressionFormula(*expression.Argument)
+		}
+		return expression.Function + "(" + argument + ")"
+	case "DATE_TRUNC", "DATE_FORMAT", "DATE_EXTRACT", "DATE_START", "DATE_END":
+		argument := ""
+		if expression.Argument != nil {
+			argument = datasetExpressionFormula(*expression.Argument)
+		}
+		return expression.Type + "(" + expression.Unit + ", " + argument + ")"
+	case "CAST":
+		if expression.Argument == nil {
+			return "CAST(?)"
+		}
+		return "CAST(" + datasetExpressionFormula(*expression.Argument) + " AS " + expression.TargetType + ")"
+	case "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "AND", "OR":
+		operator := map[string]string{
+			"ADD": "+", "SUBTRACT": "-", "MULTIPLY": "*", "DIVIDE": "/",
+			"AND": "AND", "OR": "OR",
+		}[expression.Type]
+		parts := make([]string, 0, len(expression.Arguments))
+		for _, argument := range expression.Arguments {
+			parts = append(parts, datasetExpressionFormula(argument))
+		}
+		return "(" + strings.Join(parts, " "+operator+" ") + ")"
+	default:
+		if expression.Argument != nil {
+			return expression.Type + "(" + datasetExpressionFormula(*expression.Argument) + ")"
+		}
+		if len(expression.Arguments) > 0 {
+			parts := make([]string, 0, len(expression.Arguments))
+			for _, argument := range expression.Arguments {
+				parts = append(parts, datasetExpressionFormula(argument))
+			}
+			return expression.Type + "(" + strings.Join(parts, ", ") + ")"
+		}
+		return expressionEvidence(expression)
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func sourceAdditivityEvidencePath(rule candidateRule, fieldIndex int) string {
+	if rule.Kind == "DAG_DERIVED_METRIC" && rule.Additivity != "" {
+		return "dsl.analysisContract.measures"
+	}
+	return fmt.Sprintf("dsl.fields[%d].aggregation", fieldIndex)
+}
+
+func sourceUnitEvidencePath(rule candidateRule, fieldIndex int) string {
+	if rule.Kind == "DAG_DERIVED_METRIC" && rule.Unit != "" {
+		return "dsl.analysisContract.measures"
+	}
+	return fmt.Sprintf("dsl.fields[%d].unit-or-governed-count-convention", fieldIndex)
+}
+
+func sourceNumberFormatEvidencePath(field dataset.Field, fieldIndex int) string {
+	if strings.TrimSpace(field.Format) != "" {
+		return fmt.Sprintf("dsl.fields[%d].format", fieldIndex)
+	}
+	return fmt.Sprintf("dsl.fields[%d].canonicalType", fieldIndex)
 }
 
 func candidateFingerprint(version dataset.VersionRecord, fieldID, definitionHash string) string {

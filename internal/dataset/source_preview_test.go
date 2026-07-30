@@ -27,8 +27,7 @@ func TestSourcePreviewExecutionExceptionIsNotPersisted(t *testing.T) {
 		Joins: []Join{{
 			ID: "join_dimension", LeftNodeID: "fact",
 			RightNodeID: "dimension", JoinType: "LEFT",
-			Cardinality: "MANY_TO_ONE", RelationshipType: "DIRECT",
-			FanoutPolicy: "SAFE", ManualConfirmed: true,
+			Cardinality: "MANY_TO_ONE", ManualConfirmed: true,
 			Conditions: []JoinCondition{{
 				Operator: "EQUALS",
 				LeftExpression: Expression{

@@ -223,7 +223,7 @@ func writeMetricError(writer http.ResponseWriter, err error) {
 		writeMetricJSON(writer, http.StatusNotFound, map[string]string{"code": "METRIC_NOT_FOUND", "message": "指标不存在"})
 	case errors.Is(err, ErrVersionNotFound):
 		writeMetricJSON(writer, http.StatusNotFound, map[string]string{"code": "METRIC_VERSION_NOT_FOUND", "message": "指标版本不存在"})
-	case errors.Is(err, ErrVersionUnavailable):
+	case errors.Is(err, ErrVersionUnavailable), errors.Is(err, dataset.ErrVersionUnavailable):
 		writeMetricJSON(writer, http.StatusConflict, map[string]string{"code": "METRIC_VERSION_UNAVAILABLE", "message": "指标版本已失效、废弃或依赖不可用"})
 	case errors.Is(err, ErrConflict):
 		writeMetricJSON(writer, http.StatusConflict, map[string]string{"code": "METRIC_VERSION_CONFLICT", "message": "指标已被其他请求修改，请重新加载"})

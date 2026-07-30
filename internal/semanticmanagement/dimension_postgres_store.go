@@ -268,8 +268,9 @@ const bareDimensionColumns = `id::text,dataset_id::text,dataset_version_id::text
 	  WHERE field.tenant_id=platform.current_tenant_id()
 	    AND field.dataset_version_id=semantic_dimensions.dataset_version_id
 	    AND field.field_id=semantic_dimensions.field_id),
-	code::text,name,description,dimension_type,member_index_policy,high_cardinality,
-	sensitive,status,definition_hash,version,COALESCE(member_refresh_generation::text,''),
+	code::text,name,description,dimension_type,domain_id::text,sharing_scope::text,
+	member_index_policy,high_cardinality,sensitive,status,definition_hash,version,
+	COALESCE(member_refresh_generation::text,''),
 	member_count,member_refreshed_at,COALESCE(last_member_refresh_job_id::text,''),
 	created_by::text,updated_by::text,created_at,updated_at`
 

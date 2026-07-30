@@ -24,8 +24,9 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore
 
 // TriggerManualIdentification compares the current governed dataset inventory with the
 // existing metric/candidate catalog and schedules only an explicit, user-initiated scan.
-// DWS field roles and descriptions are authoritative because DWS save already completed
-// semantic naming. MEASURE fields are handled by the Go rule extractor, while
+// DWS/ADS field roles and descriptions are authoritative because governed save already
+// completed semantic naming. MEASURE fields are handled by deterministic fact extraction
+// plus constrained LLM wording, while
 // non-measure roles are inserted directly as approved dimension assets.
 func (s *PostgresStore) TriggerManualIdentification(
 	ctx context.Context,
@@ -59,7 +60,7 @@ func (s *PostgresStore) TriggerManualIdentification(
 				WHERE dataset.status='PUBLISHED'
 				  AND dataset.deleted_at IS NULL
 				  AND version.status='PUBLISHED'
-				  AND version.layer='DWS'
+					  AND version.layer IN ('DWS','ADS')
 			), activated AS (
 				INSERT INTO platform.metric_extraction_jobs(
 					tenant_id,dataset_id,dataset_version_id,dsl_hash,
@@ -107,8 +108,23 @@ func (s *PostgresStore) TriggerManualIdentification(
 		// rolled back the newly enqueued jobs.
 		rows.Close()
 		result.DimensionDatasetCount, result.DimensionAssetCount, err =
-			approveDWSFieldDimensionsTx(ctx, tx, actorID)
+			approveGovernedFieldDimensionsTx(ctx, tx, actorID)
 		if err != nil {
+			return err
+		}
+		// A DWS materialization can become ACTIVE while its immutable dataset
+		// version is still PUBLISHING. The activation trigger deliberately
+		// fails closed until the version is PUBLISHED, so an explicit asset
+		// synchronization must replay profile scheduling after it has created
+		// the governed dimension assets. This is idempotent on materialization
+		// and field identity and is what makes Excel-style member filtering
+		// usable for newly published DWS versions.
+		var profiledDatasetCount int
+		if err := tx.QueryRow(
+			ctx,
+			`SELECT platform.enqueue_current_dws_dimension_profiles($1::uuid)`,
+			actorID,
+		).Scan(&profiledDatasetCount); err != nil {
 			return err
 		}
 		result.Datasets, err = loadIdentificationDatasetIndexesTx(ctx, tx)
@@ -136,15 +152,15 @@ func (s *PostgresStore) TriggerManualIdentification(
 	return result, err
 }
 
-// approveDWSFieldDimensionsTx uses only immutable, already-enriched DWS field metadata
-// and approved sensitivity tags. It deliberately does not call an LLM or create
+// approveGovernedFieldDimensionsTx uses only immutable, already-enriched DWS/ADS field
+// metadata and approved sensitivity tags. It deliberately does not call an LLM or create
 // survey candidates.
-func approveDWSFieldDimensionsTx(
+func approveGovernedFieldDimensionsTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	actorID string,
 ) (datasetCount, assetCount int, err error) {
-	err = tx.QueryRow(ctx, `WITH current_dws AS (
+	err = tx.QueryRow(ctx, `WITH current_governed AS (
 			SELECT dataset.tenant_id,dataset.id AS dataset_id,
 				version.id AS dataset_version_id
 			FROM platform.datasets AS dataset
@@ -153,13 +169,13 @@ func approveDWSFieldDimensionsTx(
 			 AND version.dataset_id=dataset.id
 			 AND version.id=dataset.current_published_version_id
 			 AND version.status='PUBLISHED'
-			 AND version.layer='DWS'
+			 AND version.layer IN ('DWS','ADS')
 			WHERE dataset.tenant_id=platform.current_tenant_id()
 			  AND dataset.status='PUBLISHED'
 			  AND dataset.deleted_at IS NULL
 		), classified AS (
-			SELECT current_dws.tenant_id,current_dws.dataset_id,
-				current_dws.dataset_version_id,field.field_id,
+			SELECT current_governed.tenant_id,current_governed.dataset_id,
+				current_governed.dataset_version_id,field.field_id,
 				field.field_code::text AS code,field.field_name AS name,
 				field.description,
 				field.field_role,field.semantic_type,
@@ -177,15 +193,15 @@ func approveDWSFieldDimensionsTx(
 				   AND tag.status='ACTIVE'
 				  WHERE binding.tenant_id=field.tenant_id
 				    AND binding.asset_type='DATASET_FIELD'
-				    AND binding.dataset_id=current_dws.dataset_id
+				    AND binding.dataset_id=current_governed.dataset_id
 				    AND binding.dataset_version_id=field.dataset_version_id
 				    AND binding.dataset_field_id=field.field_id
 				    AND binding.status='APPROVED'
 				) AS sensitive
-			FROM current_dws
+			FROM current_governed
 			JOIN platform.dataset_fields AS field
-			  ON field.tenant_id=current_dws.tenant_id
-			 AND field.dataset_version_id=current_dws.dataset_version_id
+			  ON field.tenant_id=current_governed.tenant_id
+			 AND field.dataset_version_id=current_governed.dataset_version_id
 			WHERE field.field_role IN (
 				'DIMENSION','ATTRIBUTE','TIME','IDENTIFIER'
 			)
@@ -226,7 +242,11 @@ func approveDWSFieldDimensionsTx(
 				tenant_id,actor_user_id,action,resource_type,resource_id,detail
 			)
 			SELECT platform.current_tenant_id(),$1::uuid,
-				'PROGRAM_APPROVE_DWS_DIMENSION','SEMANTIC_DIMENSION',
+				CASE WHEN version.layer='DWS'
+				  THEN 'PROGRAM_APPROVE_DWS_DIMENSION'
+				  ELSE 'PROGRAM_APPROVE_GOVERNED_DIMENSION'
+				END,
+				'SEMANTIC_DIMENSION',
 				inserted.id::text,jsonb_build_object(
 					'datasetId',inserted.dataset_id::text,
 					'datasetVersionId',inserted.dataset_version_id::text,
@@ -234,6 +254,9 @@ func approveDWSFieldDimensionsTx(
 					'classification','DATASET_FIELD_ROLE'
 				)
 			FROM inserted
+			JOIN platform.dataset_versions AS version
+			  ON version.tenant_id=platform.current_tenant_id()
+			 AND version.id=inserted.dataset_version_id
 		), retired_candidates AS (
 			UPDATE platform.dimension_survey_candidates AS candidate
 			SET status='STALE',version=candidate.version+1,
@@ -243,7 +266,7 @@ func approveDWSFieldDimensionsTx(
 			RETURNING candidate.id
 		)
 		SELECT
-			(SELECT count(*)::int FROM current_dws),
+			(SELECT count(*)::int FROM current_governed),
 			(SELECT count(*)::int FROM inserted)`,
 		actorID,
 	).Scan(&datasetCount, &assetCount)
@@ -265,7 +288,7 @@ func loadIdentificationDatasetIndexesTx(
 		WHERE dataset.status='PUBLISHED'
 		  AND dataset.deleted_at IS NULL
 		  AND version.status='PUBLISHED'
-		  AND version.layer='DWS'
+		  AND version.layer IN ('DWS','ADS')
 		ORDER BY version.layer,dataset.code,dataset.id`)
 	if err != nil {
 		return nil, err
@@ -322,7 +345,7 @@ func loadIdentificationDatasetIndexesTx(
 		  ON dataset_version.tenant_id=version.tenant_id
 		 AND dataset_version.id=version.dataset_version_id
 		 AND dataset_version.status='PUBLISHED'
-		 AND dataset_version.layer='DWS'
+		 AND dataset_version.layer IN ('DWS','ADS')
 		ORDER BY version.dataset_version_id,metric.code`)
 	if err != nil {
 		return nil, err
@@ -364,7 +387,7 @@ func loadIdentificationDatasetIndexesTx(
 		  ON dataset_version.tenant_id=candidate.tenant_id
 		 AND dataset_version.id=candidate.dataset_version_id
 		 AND dataset_version.status='PUBLISHED'
-		 AND dataset_version.layer='DWS'
+		 AND dataset_version.layer IN ('DWS','ADS')
 		LEFT JOIN platform.metric_semantic_documents AS document
 		  ON document.tenant_id=candidate.tenant_id
 		 AND document.subject_type='CANDIDATE'
@@ -406,7 +429,7 @@ func loadIdentificationDatasetIndexesTx(
 		  ON version.tenant_id=field.tenant_id
 		 AND version.id=field.dataset_version_id
 		 AND version.status='PUBLISHED'
-		 AND version.layer='DWS'
+		 AND version.layer IN ('DWS','ADS')
 		LEFT JOIN platform.semantic_dimensions AS dimension
 		  ON dimension.tenant_id=field.tenant_id
 		 AND dimension.dataset_version_id=field.dataset_version_id
@@ -524,9 +547,9 @@ func (s *PostgresStore) ListAutomaticApprovalCandidates(
 			  ON version.tenant_id=candidate.tenant_id
 			 AND version.id=candidate.dataset_version_id
 			 AND version.status='PUBLISHED'
-			 AND version.layer='DWS'
+			 AND version.layer IN ('DWS','ADS')
 			`+candidateSemanticJoin+`
-			WHERE candidate.status IN ('READY','NEEDS_REVIEW')
+			WHERE candidate.status='READY'
 			  AND cardinality(candidate.block_reasons)=0
 			  AND COALESCE(job.requested_by,version.published_by) IS NOT NULL
 			ORDER BY candidate.created_at,candidate.id
@@ -656,15 +679,12 @@ func (s *PostgresStore) EnqueueDatasetMetricExtractionTx(
 	if tenantID == "" || version.Status != "PUBLISHED" || version.DatasetID == "" || version.ID == "" || version.DSLHash == "" {
 		return ErrInvalidRequest
 	}
-	if version.Layer == dataset.LayerADS {
-		return nil
-	}
 	extractorVersion := JobVersion
-	if version.Layer == dataset.LayerDWS {
-		// DWS save-time semantic naming has already fixed field roles, names and
-		// descriptions. Publish the dimension assets in the same transaction and
-		// let the worker accept only explicit MEASURE fields.
-		if _, _, err := approveDWSFieldDimensionsTx(ctx, tx, actorID); err != nil {
+	if version.Layer == dataset.LayerDWS || version.Layer == dataset.LayerADS {
+		// Governed save-time classification has already fixed field roles. Publish
+		// dimension assets in the same transaction and let the worker accept only
+		// MEASURE fields whose calculation facts are fully evidenced.
+		if _, _, err := approveGovernedFieldDimensionsTx(ctx, tx, actorID); err != nil {
 			return err
 		}
 		extractorVersion = CodeIdentificationVersion

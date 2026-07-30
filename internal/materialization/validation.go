@@ -181,23 +181,8 @@ func (request RegisterRequest) Validate() error {
 	if request.Plan.Layer == LayerODS && len(inputs) != 1 {
 		return ErrInvalidRequest
 	}
-	if request.Plan.Layer == LayerDWD {
-		hasODSInput := false
-		for _, input := range inputs {
-			hasODSInput = hasODSInput || input.Layer == string(LayerODS)
-		}
-		if !hasODSInput {
-			return ErrInvalidRequest
-		}
-	}
-	if request.Plan.Layer == LayerDWS {
-		hasDWDInput := false
-		for _, input := range inputs {
-			hasDWDInput = hasDWDInput || input.Layer == string(LayerDWD)
-		}
-		if !hasDWDInput {
-			return ErrInvalidRequest
-		}
+	if !hasRequiredWarehouseInput(request.Plan.Layer, inputs) {
+		return ErrInvalidRequest
 	}
 	for _, node := range request.Plan.Nodes {
 		for _, ordinal := range node.InputOrdinals {
@@ -207,6 +192,25 @@ func (request RegisterRequest) Validate() error {
 		}
 	}
 	return nil
+}
+
+func hasRequiredWarehouseInput(layer Layer, inputs []InputSnapshot) bool {
+	inputLayers := make(map[string]bool, len(inputs))
+	for _, input := range inputs {
+		inputLayers[input.Layer] = true
+	}
+	switch layer {
+	case LayerDWD:
+		// A DWD remains fact-bearing even when it also joins governed DIMs.
+		return inputLayers[string(LayerODS)]
+	case LayerDWS:
+		// Factless entity-count DWS datasets aggregate a governed DIM directly;
+		// ordinary and multi-fact DWS datasets aggregate one or more DWDs.
+		return inputLayers[string(LayerDWD)] ||
+			inputLayers[string(LayerDIM)]
+	default:
+		return true
+	}
 }
 
 func validateInput(input InputSnapshot, target Layer) error {

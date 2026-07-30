@@ -138,7 +138,7 @@ func proposalOutputSchema(catalog []CatalogTable) map[string]any {
 		"name":     map[string]any{"type": "string", "minLength": 1, "maxLength": 200},
 		"left":     input,
 		"right":    input,
-		"joinType": map[string]any{"type": "string", "enum": []string{"INNER", "LEFT"}},
+		"joinType": map[string]any{"type": "string", "enum": []string{"INNER", "LEFT", "RIGHT", "FULL"}},
 		"conditions": map[string]any{
 			"type": "array", "minItems": 1, "maxItems": 16, "items": joinCondition,
 		},
@@ -205,7 +205,7 @@ func proposalOutputSchema(catalog []CatalogTable) map[string]any {
 		"id":            identifier,
 		"name":          map[string]any{"type": "string", "minLength": 1, "maxLength": 200},
 		"family":        map[string]any{"type": "string", "enum": []string{"TEXT", "NUMBER", "DATE", "NULL", "CAST", "CONDITION"}},
-		"componentType": map[string]any{"type": "string", "enum": []string{"TEXT_UPPER", "TEXT_TRIM", "TEXT_REPLACE", "TEXT_LOWER", "TEXT_SUBSTRING", "TEXT_CONCAT", "NUMBER_ABSOLUTE", "NUMBER_ROUNDING", "NUMBER_ARITHMETIC", "DATE_CALCULATION", "DATE_FORMAT", "NULL", "CAST", "CONDITION"}},
+		"componentType": map[string]any{"type": "string", "enum": []string{"TEXT_CASE", "TEXT_TRIM", "TEXT_REPLACE", "TEXT_SUBSTRING", "TEXT_CONCAT", "NUMBER_ABSOLUTE", "NUMBER_ROUNDING", "NUMBER_ARITHMETIC", "DATE_CALCULATION", "DATE_FORMAT", "NULL", "CAST", "CONDITION"}},
 		"input":         input,
 		"rules":         map[string]any{"type": "array", "minItems": 1, "maxItems": 64, "items": transformRule},
 	})

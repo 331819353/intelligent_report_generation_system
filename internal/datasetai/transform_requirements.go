@@ -7,6 +7,7 @@ import (
 
 type transformRequirementRule struct {
 	componentType string
+	operation     string
 	reason        string
 	match         func(string) bool
 }
@@ -52,7 +53,7 @@ func deriveCreateTransformRequirements(instruction string) []TransformRequiremen
 		return contains("映射为", "标记为", "分类为", "否则输出", "否则为") || contains("如果") && contains("则", "否则")
 	}
 	rules := []transformRequirementRule{
-		{componentType: "TEXT_UPPER", reason: "用户要求文本大写转换", match: func(string) bool {
+		{componentType: "TEXT_CASE", operation: "UPPER", reason: "用户要求文本转为大写", match: func(string) bool {
 			return contains("大写转换", "转为大写", "转换成大写", "统一大写", "upper(", "uppercase")
 		}},
 		{componentType: "TEXT_TRIM", reason: "用户要求清理文本空格", match: func(string) bool {
@@ -61,7 +62,7 @@ func deriveCreateTransformRequirements(instruction string) []TransformRequiremen
 		{componentType: "TEXT_REPLACE", reason: "用户要求替换文本内容", match: func(string) bool {
 			return contains("文本替换", "字符串替换", "替换指定文本", "替换为", "替换成", "replace(")
 		}},
-		{componentType: "TEXT_LOWER", reason: "用户要求文本小写转换", match: func(string) bool {
+		{componentType: "TEXT_CASE", operation: "LOWER", reason: "用户要求文本转为小写", match: func(string) bool {
 			return contains("小写转换", "转为小写", "转换成小写", "统一小写", "lower(", "lowercase")
 		}},
 		{componentType: "TEXT_SUBSTRING", reason: "用户要求截取字段内容", match: func(string) bool {
@@ -90,7 +91,11 @@ func deriveCreateTransformRequirements(instruction string) []TransformRequiremen
 	result := make([]TransformRequirement, 0, len(rules))
 	for _, rule := range rules {
 		if rule.match(text) {
-			result = append(result, TransformRequirement{ComponentType: rule.componentType, Reason: rule.reason})
+			result = append(result, TransformRequirement{
+				ComponentType: rule.componentType,
+				Operation:     rule.operation,
+				Reason:        rule.reason,
+			})
 		}
 	}
 	return result
@@ -106,14 +111,18 @@ func validateTransformRequirements(plan GraphPlan, requirements []TransformRequi
 		for _, rule := range transform.Rules {
 			if consumedKeys[fieldKey(transform.ID, rule.Output.ID)] {
 				available[transform.ComponentType] = true
-				break
+				available[transform.ComponentType+":"+rule.Operation] = true
 			}
 		}
 	}
 	missing := make([]string, 0, len(requirements))
 	for _, requirement := range requirements {
-		if !available[requirement.ComponentType] {
-			missing = append(missing, requirement.ComponentType)
+		key := requirement.ComponentType
+		if requirement.Operation != "" {
+			key += ":" + requirement.Operation
+		}
+		if !available[key] {
+			missing = append(missing, key)
 		}
 	}
 	if len(missing) > 0 {

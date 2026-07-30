@@ -251,6 +251,9 @@ func main() {
 		dataset.NewOrchestratedDWDModelingPlanner(aiService, cfg.AIRequestTimeout),
 	), workerID, cfg.WorkerPollInterval)
 	metricCandidateWorker := metriccandidate.NewWorker(metricCandidateStore)
+	metricCandidateWorker.SetEnricher(metriccandidate.NewEnricher(
+		aiService, cfg.AIRequestTimeout, metricCandidateStore,
+	))
 	metricCandidateWorker.SetAutomaticApprover(metriccandidate.NewAutomaticApprover(
 		metricCandidateStore,
 		metriccandidate.NewService(

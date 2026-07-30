@@ -29,7 +29,6 @@ func TestCompileJoinProbesUsesPreAggregatedJoinRowset(t *testing.T) {
 		Joins: []dataset.Join{{
 			ID: "join_sku", LeftNodeID: "fact", RightNodeID: "sku_dim",
 			JoinType: "LEFT", Cardinality: "MANY_TO_ONE",
-			RelationshipType: "DIRECT", FanoutPolicy: "SAFE",
 			ManualConfirmed: true,
 			Conditions: []dataset.JoinCondition{{
 				Operator: "EQUALS",
@@ -148,7 +147,6 @@ func TestCompileJoinProbesKeepsRawRowsetWithoutPreAggregation(t *testing.T) {
 		Joins: []dataset.Join{{
 			ID: "join_merchant", LeftNodeID: "fact", RightNodeID: "merchant",
 			JoinType: "LEFT", Cardinality: "MANY_TO_ONE",
-			RelationshipType: "DIRECT", FanoutPolicy: "SAFE",
 			ManualConfirmed: true,
 			Conditions: []dataset.JoinCondition{{
 				Operator: "EQUALS",

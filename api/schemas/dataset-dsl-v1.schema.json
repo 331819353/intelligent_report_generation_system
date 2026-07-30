@@ -101,41 +101,28 @@
         "leftNodeId": { "$ref": "#/$defs/identifier" },
         "rightNodeId": { "$ref": "#/$defs/identifier" },
         "joinType": { "enum": ["INNER", "LEFT", "RIGHT", "FULL"] },
-        "cardinality": { "enum": ["UNKNOWN", "ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_ONE", "MANY_TO_MANY"] },
-        "relationshipType": { "enum": ["DIRECT", "ROLE_PLAYING", "BRIDGE"] },
-        "relationshipRole": { "$ref": "#/$defs/identifier" },
-        "fanoutPolicy": { "enum": ["SAFE", "PRIMARY", "ALLOCATE", "DEDUPLICATE", "NON_ADDITIVE", "UNSAFE"] },
-        "bridge": { "$ref": "#/$defs/bridgeContract" },
-        "temporal": { "$ref": "#/$defs/temporalJoinContract" },
+        "cardinality": { "enum": ["ONE_TO_ONE", "MANY_TO_ONE", "ONE_TO_MANY", "MANY_TO_MANY"] },
         "conditions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/joinCondition" } },
         "manualConfirmed": { "type": "boolean" }
-      }
-    },
-    "bridgeContract": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["bridgeNodeId", "relationshipTypeField"],
-      "properties": {
-        "bridgeNodeId": { "$ref": "#/$defs/identifier" },
-        "relationshipTypeField": { "$ref": "#/$defs/physicalIdentifier" },
-        "allocationWeightField": { "$ref": "#/$defs/physicalIdentifier" },
-        "primaryFlagField": { "$ref": "#/$defs/physicalIdentifier" },
-        "validFromField": { "$ref": "#/$defs/physicalIdentifier" },
-        "validToField": { "$ref": "#/$defs/physicalIdentifier" }
-      }
-    },
-    "temporalJoinContract": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["eventNodeId", "eventTimeField", "validityNodeId", "validFromField", "validToField", "validToInclusive"],
-      "properties": {
-        "eventNodeId": { "$ref": "#/$defs/identifier" },
-        "eventTimeField": { "$ref": "#/$defs/physicalIdentifier" },
-        "validityNodeId": { "$ref": "#/$defs/identifier" },
-        "validFromField": { "$ref": "#/$defs/physicalIdentifier" },
-        "validToField": { "$ref": "#/$defs/physicalIdentifier" },
-        "validToInclusive": { "type": "boolean" }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "joinType": { "const": "INNER" } } },
+          "then": { "properties": { "cardinality": { "const": "ONE_TO_ONE" } } }
+        },
+        {
+          "if": { "properties": { "joinType": { "const": "LEFT" } } },
+          "then": { "properties": { "cardinality": { "const": "MANY_TO_ONE" } } }
+        },
+        {
+          "if": { "properties": { "joinType": { "const": "RIGHT" } } },
+          "then": { "properties": { "cardinality": { "const": "ONE_TO_MANY" } } }
+        },
+        {
+          "if": { "properties": { "joinType": { "const": "FULL" } } },
+          "then": { "properties": { "cardinality": { "const": "MANY_TO_MANY" } } }
+        }
+      ]
     },
     "joinCondition": {
       "type": "object",
@@ -234,7 +221,7 @@
         "id": { "$ref": "#/$defs/identifier" },
         "name": { "type": "string", "minLength": 1, "maxLength": 200 },
         "family": { "enum": ["DATE", "TEXT", "CAST", "NUMBER", "CONDITION", "NULL", "WINDOW", "SPLIT_MERGE"] },
-        "componentType": { "enum": ["FILTER", "WINDOW_FUNCTION", "DATE_CALCULATION", "DATE_FORMAT", "TEXT_UPPER", "TEXT_TRIM", "TEXT_REPLACE", "TEXT_LOWER", "TEXT_SUBSTRING", "TEXT_CONCAT", "NUMBER_ABSOLUTE", "NUMBER_ROUNDING", "NUMBER_ARITHMETIC", "CAST", "CONDITION", "NULL"] },
+        "componentType": { "enum": ["FILTER", "WINDOW_FUNCTION", "DATE_CALCULATION", "DATE_FORMAT", "TEXT_CASE", "TEXT_UPPER", "TEXT_TRIM", "TEXT_REPLACE", "TEXT_LOWER", "TEXT_SUBSTRING", "TEXT_CONCAT", "NUMBER_ABSOLUTE", "NUMBER_ROUNDING", "NUMBER_ARITHMETIC", "CAST", "CONDITION", "NULL"] },
         "input": { "$ref": "#/$defs/transformInput" },
         "rules": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/transformRule" } }
       }

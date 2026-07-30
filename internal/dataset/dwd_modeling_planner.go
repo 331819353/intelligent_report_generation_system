@@ -1998,38 +1998,37 @@ func dwdClassificationResponseSchema(
 					"items": map[string]any{
 						"type": "string", "enum": fieldCodes,
 					},
-					"additionalDimensions": map[string]any{
-						"type": "array", "minItems": 0, "maxItems": 1,
-						"items": map[string]any{
-							"type": "object", "additionalProperties": false,
-							"required": []string{
-								"code", "name", "dimensionKeyFieldCodes",
-								"dimensionAttributeFieldCodes", "rationale",
+				},
+				"additionalDimensions": map[string]any{
+					"type": "array", "minItems": 0, "maxItems": 1,
+					"items": map[string]any{
+						"type": "object", "additionalProperties": false,
+						"required": []string{
+							"code", "name", "dimensionKeyFieldCodes",
+							"dimensionAttributeFieldCodes", "rationale",
+						},
+						"properties": map[string]any{
+							"code": map[string]any{
+								"type": "string", "minLength": 2, "maxLength": 64,
 							},
-							"properties": map[string]any{
-								"code": map[string]any{
-									"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$",
+							"name": map[string]any{
+								"type": "string", "minLength": 1, "maxLength": 128,
+							},
+							"dimensionKeyFieldCodes": map[string]any{
+								"type": "array", "minItems": 1, "maxItems": 8,
+								"items": map[string]any{
+									"type": "string", "enum": fieldCodes,
 								},
-								"name": map[string]any{
-									"type": "string", "minLength": 1, "maxLength": 128,
+							},
+							"dimensionAttributeFieldCodes": map[string]any{
+								"type": "array", "minItems": 1,
+								"maxItems": len(fieldCodes),
+								"items": map[string]any{
+									"type": "string", "enum": fieldCodes,
 								},
-								"dimensionKeyFieldCodes": map[string]any{
-									"type": "array", "minItems": 1, "maxItems": 8,
-									"uniqueItems": true,
-									"items": map[string]any{
-										"type": "string", "enum": fieldCodes,
-									},
-								},
-								"dimensionAttributeFieldCodes": map[string]any{
-									"type": "array", "minItems": 1,
-									"maxItems": len(fieldCodes), "uniqueItems": true,
-									"items": map[string]any{
-										"type": "string", "enum": fieldCodes,
-									},
-								},
-								"rationale": map[string]any{
-									"type": "string", "minLength": 1, "maxLength": 1024,
-								},
+							},
+							"rationale": map[string]any{
+								"type": "string", "minLength": 1, "maxLength": 1024,
 							},
 						},
 					},

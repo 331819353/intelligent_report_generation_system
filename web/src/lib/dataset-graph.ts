@@ -21,6 +21,7 @@ export type GraphTransformComponentType =
   | 'WINDOW_FUNCTION'
   | 'DATE_CALCULATION'
   | 'DATE_FORMAT'
+  | 'TEXT_CASE'
   | 'TEXT_UPPER'
   | 'TEXT_TRIM'
   | 'TEXT_REPLACE'
@@ -84,6 +85,20 @@ export type GraphTransform = {
   id: string; name: string; family: GraphTransformFamily; componentType?: GraphTransformComponentType; input?: GraphInput; position: CanvasPoint
   rules: GraphTransformRule[]
   conditions?: GraphFilterCondition[]
+}
+
+const graphTransformComponentTypes: GraphTransformComponentType[] = [
+  'FILTER', 'WINDOW_FUNCTION', 'DATE_CALCULATION', 'DATE_FORMAT', 'TEXT_CASE',
+  'TEXT_UPPER', 'TEXT_TRIM', 'TEXT_REPLACE', 'TEXT_LOWER', 'TEXT_SUBSTRING',
+  'TEXT_CONCAT', 'NUMBER_ABSOLUTE', 'NUMBER_ROUNDING', 'NUMBER_ARITHMETIC',
+  'CAST', 'CONDITION', 'NULL',
+]
+
+export const normalizeGraphTransformComponentType = (value?: string): GraphTransformComponentType | undefined => {
+  if (value === 'TEXT_UPPER' || value === 'TEXT_LOWER') return 'TEXT_CASE'
+  return graphTransformComponentTypes.includes(value as GraphTransformComponentType)
+    ? value as GraphTransformComponentType
+    : undefined
 }
 export type GraphEndOutput = { key: string; name: string; code: string }
 export type GraphEnd = {
@@ -608,7 +623,8 @@ export function graphProducedFields(value: GraphInput | undefined, graph: Pick<D
 
 export const graphOutputKeys = (value: GraphInput | undefined, graph: Pick<DesignerGraphV1, 'joins' | 'groups' | 'transforms'>, nodes: DesignerNode[], fields: FieldOption[]) => graphProducedFields(value, graph, nodes, fields).map(item => item.key)
 
-export const graphProducedFieldLabel = (field: ProducedField) => `${field.producerName} / ${field.name} · ${field.code} · ${field.kind === 'DIMENSION' ? '维度' : field.kind === 'METRIC' ? `${field.aggregation || '聚合'} 指标` : '字段'}`
+/** 组件字段选择只展示用户可识别的数据集（上游产物）与业务字段名称。 */
+export const graphProducedFieldLabel = (field: ProducedField) => `${field.producerName} / ${field.name}`
 
 export function layoutDesignerGraph(graph: DesignerGraphV1, nodeIDs: string[]): DesignerGraphV1 {
   const keys = [
@@ -719,7 +735,7 @@ function parseExistingDesigner(rawValue: unknown, fallback: DesignerGraphV1): De
   })
   const transforms: GraphTransform[] = list(raw.transforms).flatMap((value, index) => {
     const item = record(value), id = text(item.id), family = text(item.family) as GraphTransformFamily
-    const componentType = text(item.componentType) as GraphTransformComponentType
+    const componentType = normalizeGraphTransformComponentType(text(item.componentType))
     if (!id || !['DATE', 'TEXT', 'CAST', 'NUMBER', 'CONDITION', 'NULL', 'WINDOW', 'SPLIT_MERGE'].includes(family)) return []
     const rules: GraphTransformRule[] = list(item.rules).flatMap((value, ruleIndex) => {
       const rule = record(value), output = record(rule.output), persistedOperation = text(rule.operation) as GraphTransformOperation
@@ -804,7 +820,7 @@ function parseExistingDesigner(rawValue: unknown, fallback: DesignerGraphV1): De
       id,
       name: text(item.name) || `字段处理 ${index + 1}`,
       family,
-      ...(['FILTER', 'WINDOW_FUNCTION', 'DATE_CALCULATION', 'DATE_FORMAT', 'TEXT_UPPER', 'TEXT_TRIM', 'TEXT_REPLACE', 'TEXT_LOWER', 'TEXT_SUBSTRING', 'TEXT_CONCAT', 'NUMBER_ABSOLUTE', 'NUMBER_ROUNDING', 'NUMBER_ARITHMETIC', 'CAST', 'CONDITION', 'NULL'].includes(componentType) ? { componentType } : {}),
+      ...(componentType ? { componentType } : {}),
       input: input(item.input),
       position: point(item.position, { x: 642, y: 48 + index * 150 }),
       rules,
@@ -1165,8 +1181,7 @@ export function expandSystemDWDDesignerGraph(
     if (operation === 'DATE_FORMAT' || operation === 'DATE_TRUNC') return { family: 'DATE', componentType: 'DATE_FORMAT' }
     if (operation === 'CAST') return { family: 'CAST', componentType: 'CAST' }
     if (operation === 'TRIM') return { family: 'TEXT', componentType: 'TEXT_TRIM' }
-    if (operation === 'UPPER') return { family: 'TEXT', componentType: 'TEXT_UPPER' }
-    if (operation === 'LOWER') return { family: 'TEXT', componentType: 'TEXT_LOWER' }
+    if (operation === 'UPPER' || operation === 'LOWER') return { family: 'TEXT', componentType: 'TEXT_CASE' }
     if (operation === 'REPLACE') return { family: 'TEXT', componentType: 'TEXT_REPLACE' }
     if (operation === 'SUBSTRING') return { family: 'TEXT', componentType: 'TEXT_SUBSTRING' }
     if (operation === 'CONCAT') return { family: 'SPLIT_MERGE', componentType: 'TEXT_CONCAT' }
@@ -1287,6 +1302,7 @@ export const serializeDesignerGraph = (graph: DesignerGraphV1): DesignerGraphV1 
   })),
   transforms: (graph.transforms ?? []).map(item => ({
     ...item,
+    ...(normalizeGraphTransformComponentType(item.componentType) ? { componentType: normalizeGraphTransformComponentType(item.componentType) } : {}),
     position: point(item.position, { x: 642, y: 48 }),
     rules: item.rules.map(rule => ({
       ...rule,

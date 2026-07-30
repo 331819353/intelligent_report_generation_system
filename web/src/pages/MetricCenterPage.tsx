@@ -26,7 +26,6 @@ import {
 import {
   buildPreviewParameters,
   datasetAPI,
-  type DatasetPreview,
   type DatasetSummary,
   type ParameterOption,
   type PublishedVersionRecord,
@@ -42,10 +41,8 @@ import {
   type MetricUsage,
   type MetricVersionRecord,
   type MetricVersionSummary,
-  type PreviewMetricInput,
   type PublishMetricInput,
 } from '../lib/metrics'
-import { PreviewTable } from './DatasetDesignerPage'
 
 const pageSize = 50
 const emptyUsage = (): MetricUsage => ({
@@ -162,7 +159,7 @@ function metricAtomicFieldEligible(field: DatasetField, aggregation: MetricDefin
   return numeric
 }
 
-/** 试算参数只从当前精确数据集版本读取，不能复用其他版本或可变草稿。 */
+/** 发布校验参数只从当前精确数据集版本读取，不能复用其他版本或可变草稿。 */
 function datasetParameters(version: PublishedVersionRecord | null): ParameterOption[] {
   return valueAsList(version?.dsl.parameters).map(valueAsRecord).map(parameter => ({
     code: valueAsText(parameter.code),
@@ -188,7 +185,7 @@ function versionSummary(version: PublishedVersionRecord): PublishedVersionSummar
   }
 }
 
-/** 资产管理中心的指标编辑页只提供受控定义编辑，所有业务计算统一交由服务端验证与试算。 */
+/** 资产管理中心的指标编辑页只提供受控定义编辑，所有业务计算统一交由服务端验证。 */
 export function MetricCenterPage() {
   const { metricId } = useParams()
   const navigate = useNavigate()
@@ -215,16 +212,11 @@ export function MetricCenterPage() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [pageLoading, setPageLoading] = useState(true)
-  const [previewValues, setPreviewValues] = useState<Record<string, string>>({})
-  const [preview, setPreview] = useState<DatasetPreview | null>(null)
+  const [validationValues, setValidationValues] = useState<Record<string, string>>({})
   const [versions, setVersions] = useState<MetricVersionSummary[]>([])
   const [versionsTotal, setVersionsTotal] = useState(0)
   const [selectedMetricVersion, setSelectedMetricVersion] = useState<MetricVersionRecord | null>(null)
-  const [selectedVersionDataset, setSelectedVersionDataset] = useState<PublishedVersionRecord | null>(null)
-  const [versionDatasetUnavailable, setVersionDatasetUnavailable] = useState(false)
   const [selectedVersionUsage, setSelectedVersionUsage] = useState<MetricUsage>(emptyUsage)
-  const [versionPreviewValues, setVersionPreviewValues] = useState<Record<string, string>>({})
-  const [versionPreview, setVersionPreview] = useState<DatasetPreview | null>(null)
   const [versionLoading, setVersionLoading] = useState(false)
   const [publishOutcomeUnknown, setPublishOutcomeUnknown] = useState(false)
   const [reconciliationRequired, setReconciliationRequired] = useState(false)
@@ -244,13 +236,16 @@ export function MetricCenterPage() {
   const dimensionFields = useMemo(() => fields.filter(field => ['DIMENSION', 'TIME', 'ATTRIBUTE', 'IDENTIFIER'].includes(field.role)), [fields])
   const timeFields = useMemo(() => fields.filter(field => field.role === 'TIME' && (field.canonicalType === 'DATE' || field.canonicalType === 'DATETIME')), [fields])
   const parameters = useMemo(() => datasetParameters(selectedDatasetVersion), [selectedDatasetVersion])
-  const versionParameters = useMemo(() => datasetParameters(selectedVersionDataset), [selectedVersionDataset])
   const dirty = Boolean(record) && fingerprint !== savedFingerprint
   const writesLocked = publishOutcomeUnknown || reconciliationRequired
   const advancedExpression = definition.expression.type !== 'FIELD_REF'
   // 已有指标缺少精确数据集快照时必须整体只读，避免用空字段集改写口径。
   const datasetSnapshotUnavailable = Boolean(record && !selectedDatasetVersion)
-  const editorDisabled = busy || pageLoading || writesLocked || datasetSnapshotUnavailable || advancedExpression || !permissionsReady || !capabilities.manage
+  const syncSourceUnavailable = Boolean(record?.syncManaged && (
+    datasets.find(dataset => dataset.id === record.datasetId)?.status !== 'PUBLISHED' ||
+    datasets.find(dataset => dataset.id === record.datasetId)?.currentPublishedVersionId !== definition.datasetVersionId
+  ))
+  const editorDisabled = busy || pageLoading || writesLocked || datasetSnapshotUnavailable || syncSourceUnavailable || advancedExpression || !permissionsReady || !capabilities.manage
   const atomicFieldId = definition.expression.type === 'FIELD_REF' ? definition.expression.fieldId : ''
 
   useEffect(() => {
@@ -272,16 +267,11 @@ export function MetricCenterPage() {
       setSelectedDatasetVersion(null)
       setCapabilities({ read: false, manage: false, publish: false })
       setPermissionsReady(false)
-      setPreviewValues({})
-      setPreview(null)
+      setValidationValues({})
       setVersions([])
       setVersionsTotal(0)
       setSelectedMetricVersion(null)
-      setSelectedVersionDataset(null)
-      setVersionDatasetUnavailable(false)
       setSelectedVersionUsage(emptyUsage())
-      setVersionPreviewValues({})
-      setVersionPreview(null)
       setVersionLoading(false)
       setPublishOutcomeUnknown(false)
       setReconciliationRequired(false)
@@ -356,8 +346,6 @@ export function MetricCenterPage() {
         : page.items.find(item => item.id === record?.currentPublishedVersionId)?.id ?? page.items[0]?.id ?? ''
       if (!preferredId) {
         setSelectedMetricVersion(null)
-        setSelectedVersionDataset(null)
-        setVersionDatasetUnavailable(false)
         setSelectedVersionUsage(emptyUsage())
         return
       }
@@ -368,23 +356,7 @@ export function MetricCenterPage() {
       ])
       if (!active || routeIdentity.current !== routeMetricId || request !== versionRequest.current) return
       setSelectedMetricVersion(metricVersion)
-      setSelectedVersionDataset(null)
-      setVersionDatasetUnavailable(false)
       setSelectedVersionUsage(usage)
-      setVersionPreviewValues({})
-      setVersionPreview(null)
-      // 指标版本和占用有独立读取权限；数据集快照不可读时仍保留前两者，只禁用试算。
-      try {
-        const dataVersion = await datasetAPI.getVersion(metricVersion.definition.datasetId, metricVersion.definition.datasetVersionId)
-        if (!active || routeIdentity.current !== routeMetricId || request !== versionRequest.current) return
-        setSelectedVersionDataset(dataVersion)
-      } catch (cause) {
-        if (datasetPermissionDenied(cause) && active && routeIdentity.current === routeMetricId && request === versionRequest.current) {
-          setVersionDatasetUnavailable(true)
-        } else {
-          throw cause
-        }
-      }
     }).catch(cause => {
       if (active && routeIdentity.current === routeMetricId && request === versionRequest.current) {
         setError(cause instanceof Error ? `加载指标版本失败：${cause.message}` : '加载指标版本失败')
@@ -407,7 +379,6 @@ export function MetricCenterPage() {
     const request = ++datasetRequest.current
     setDatasetVersions([])
     setSelectedDatasetVersion(null)
-    setPreview(null)
     updateDefinition({
       datasetId,
       datasetVersionId: '',
@@ -431,7 +402,6 @@ export function MetricCenterPage() {
     const datasetId = definition.datasetId
     const request = ++datasetRequest.current
     setSelectedDatasetVersion(null)
-    setPreview(null)
     updateDefinition({
       datasetVersionId: versionId,
       expression: { type: 'FIELD_REF', fieldId: '' },
@@ -559,6 +529,8 @@ export function MetricCenterPage() {
       if (!record) {
         pendingRouteMessage.current = '指标草稿已创建。'
         navigate(`/metrics/${saved.id}/edit`, { replace: true })
+      } else if (saved.syncManaged) {
+        setMessage(`同步指标已保存并发布 · 版本 ${saved.version}`)
       } else {
         setMessage(`指标草稿已保存 · 版本 ${saved.version}`)
       }
@@ -566,44 +538,6 @@ export function MetricCenterPage() {
       if (routeIdentity.current === requestedRouteId) setError(cause instanceof Error ? cause.message : '保存指标草稿失败')
     } finally {
       if (routeIdentity.current === requestedRouteId) setBusy(false)
-    }
-  }
-
-  function buildPreviewInput(
-    snapshot: PublishedVersionRecord | null,
-    values: Record<string, string>,
-    dimensions: string[],
-  ): PreviewMetricInput {
-    return {
-      queryId: globalThis.crypto.randomUUID(),
-      parameters: buildPreviewParameters(datasetParameters(snapshot), values),
-      dimensionFieldIds: dimensions,
-      // 传 0 由服务端按数据集 previewLimit 与平台默认值取更小者，避免前端固定值放大版本限额。
-      maxRows: 0,
-    }
-  }
-
-  async function previewDraft() {
-    if (!record || !selectedDatasetVersion || busy || writesLocked || !capabilities.read) return
-    if (dirty) {
-      setError('当前指标有未保存修改，请先保存草稿后再试算')
-      return
-    }
-    const requestedMetricId = record.id
-    setBusy(true); setError(''); setMessage(''); setPreview(null)
-    try {
-      const result = await metricAPI.preview(record.id, buildPreviewInput(
-        selectedDatasetVersion,
-        previewValues,
-        definition.allowedDimensions.map(item => item.fieldId),
-      ))
-      if (routeIdentity.current !== requestedMetricId) return
-      setPreview(result)
-      setMessage(`指标试算完成 · ${result.rowCount} 行`)
-    } catch (cause) {
-      if (routeIdentity.current === requestedMetricId) setError(cause instanceof Error ? cause.message : '指标试算失败')
-    } finally {
-      if (routeIdentity.current === requestedMetricId) setBusy(false)
     }
   }
 
@@ -619,7 +553,7 @@ export function MetricCenterPage() {
         expectedVersion: record.version,
         expectedDraftRecordVersion: record.draftRecordVersion,
         expectedDefinitionHash: record.definitionHash,
-        validationParameters: buildPreviewParameters(parameters, previewValues),
+        validationParameters: buildPreviewParameters(parameters, validationValues),
       }
       const candidate: PendingMetricPublication = {
         metricId: record.id,
@@ -706,7 +640,7 @@ export function MetricCenterPage() {
     if (!record || !capabilities.read) return
     const request = ++versionRequest.current
     selectedMetricVersionId.current = versionId
-    setVersionLoading(true); setError(''); setVersionPreview(null); setVersionPreviewValues({})
+    setVersionLoading(true); setError('')
     try {
       const [metricVersion, usage] = await Promise.all([
         metricAPI.getVersion(record.id, versionId),
@@ -714,44 +648,11 @@ export function MetricCenterPage() {
       ])
       if (request !== versionRequest.current || routeIdentity.current !== record.id) return
       setSelectedMetricVersion(metricVersion)
-      setSelectedVersionDataset(null)
-      setVersionDatasetUnavailable(false)
       setSelectedVersionUsage(usage)
-      try {
-        const dataVersion = await datasetAPI.getVersion(metricVersion.definition.datasetId, metricVersion.definition.datasetVersionId)
-        if (request !== versionRequest.current || routeIdentity.current !== record.id) return
-        setSelectedVersionDataset(dataVersion)
-      } catch (cause) {
-        if (datasetPermissionDenied(cause) && request === versionRequest.current && routeIdentity.current === record.id) {
-          setVersionDatasetUnavailable(true)
-        } else {
-          throw cause
-        }
-      }
     } catch (cause) {
       if (request === versionRequest.current) setError(cause instanceof Error ? cause.message : '加载指标版本失败')
     } finally {
       if (request === versionRequest.current) setVersionLoading(false)
-    }
-  }
-
-  async function previewExactVersion() {
-    if (!record || !selectedMetricVersion || !selectedVersionDataset || selectedMetricVersion.status !== 'PUBLISHED' || busy || writesLocked) return
-    const requestedVersionId = selectedMetricVersion.id
-    setBusy(true); setError(''); setMessage(''); setVersionPreview(null)
-    try {
-      const result = await metricAPI.previewVersion(record.id, requestedVersionId, buildPreviewInput(
-        selectedVersionDataset,
-        versionPreviewValues,
-        selectedMetricVersion.definition.allowedDimensions.map(item => item.fieldId),
-      ))
-      if (selectedMetricVersionId.current !== requestedVersionId) return
-      setVersionPreview(result)
-      setMessage(`精确指标版本 V${selectedMetricVersion.versionNo} 试算完成 · ${result.rowCount} 行`)
-    } catch (cause) {
-      if (selectedMetricVersionId.current === requestedVersionId) setError(cause instanceof Error ? cause.message : '精确指标版本试算失败')
-    } finally {
-      if (selectedMetricVersionId.current === requestedVersionId) setBusy(false)
     }
   }
 
@@ -818,20 +719,21 @@ export function MetricCenterPage() {
     {record && <>
       {writesLocked && <span className="metric-lock-state">等待对账</span>}
       <button className="quiet-button" type="button" onClick={() => navigate('/metrics/new')}>新建指标</button>
-      <button className="quiet-button" type="button" disabled={!selectedDatasetVersion || dirty || busy || writesLocked || !capabilities.read} onClick={previewDraft}>试算</button>
-      <button className="primary-button" type="button" disabled={editorDisabled || !dirty} onClick={saveDraft}>保存草稿</button>
-      {publishOutcomeUnknown
+      <button className="primary-button" type="button" disabled={editorDisabled || !dirty} onClick={saveDraft}>{record?.syncManaged ? '保存并发布' : '保存草稿'}</button>
+      {!record?.syncManaged && (publishOutcomeUnknown
         ? <button className="primary-button" type="button" disabled={busy || datasetSnapshotUnavailable} onClick={() => publication.current && void submitPublication(publication.current)}>重试刚才发布</button>
-        : <button className="quiet-button" type="button" disabled={!selectedDatasetVersion || dirty || busy || writesLocked || !capabilities.publish} onClick={publishDraft}>发布指标</button>}
+        : <button className="quiet-button" type="button" disabled={!selectedDatasetVersion || dirty || busy || writesLocked || !capabilities.publish} onClick={publishDraft}>发布指标</button>)}
       {reconciliationRequired && <button className="quiet-button" type="button" onClick={() => setReloadKey(value => value + 1)}>重新加载指标</button>}
     </>}
   </>
 
   return <AppShell title={title} eyebrow="资产管理中心 · 指标资产" actions={actions}>
-    {(!isNew || error || message) && <div className="metric-feedback" aria-live="polite">
-      {error && <span className="designer-error">{error}</span>}
-      {message && <span className="designer-success">{message}</span>}
-      {!isNew && <small>指标只引用精确发布版本；试算、空值和除零语义由服务端执行，跨引擎精确舍入仍按待办边界失败关闭或留待后续统一。</small>}
+      {(!isNew || error || message) && <div className="metric-feedback" aria-live="polite">
+        {error && <span className="designer-error">{error}</span>}
+        {message && <span className="designer-success">{message}</span>}
+        {record?.syncManaged && !syncSourceUnavailable && <small>该指标由已发布数据集同步管理，保存修改会直接生成新的发布版本。</small>}
+        {syncSourceUnavailable && <small>来源数据集当前不是已发布版本，同步指标已转为只读。</small>}
+        {!isNew && <small>指标只引用精确发布版本；空值和除零语义由服务端执行，跨引擎精确舍入仍按待办边界失败关闭或留待后续统一。</small>}
     </div>}
     <div className="metric-center-layout">
       <main className="metric-editor">
@@ -857,21 +759,21 @@ export function MetricCenterPage() {
             <section className="metric-panel metric-source">
               <header><span className="eyebrow">不可变来源</span><h2>数据集版本</h2></header>
               <label>数据集<select aria-label="指标数据集" value={definition.datasetId} disabled={Boolean(record)} onChange={event => void selectDataset(event.target.value)}><option value="">请选择</option>{datasets.map(dataset => <option key={dataset.id} value={dataset.id}>{dataset.name} · {dataset.status}</option>)}</select></label>
-              <label>精确发布版本<select aria-label="指标数据集版本" value={definition.datasetVersionId} onChange={event => void selectDatasetVersion(event.target.value)}><option value="">请选择</option>{datasetVersions.map(version => <option key={version.id} value={version.id} disabled={version.status !== 'PUBLISHED' && version.id !== definition.datasetVersionId}>V{version.versionNo} · {version.status} · {version.id}</option>)}</select></label>
+              <label>精确发布版本<select aria-label="指标数据集版本" value={definition.datasetVersionId} disabled={record?.syncManaged} onChange={event => void selectDatasetVersion(event.target.value)}><option value="">请选择</option>{datasetVersions.map(version => <option key={version.id} value={version.id} disabled={version.status !== 'PUBLISHED' && version.id !== definition.datasetVersionId}>V{version.versionNo} · {version.status} · {version.id}</option>)}</select></label>
               {selectedDatasetVersion && <dl className="metric-source-snapshot"><div><dt>版本 ID</dt><dd>{selectedDatasetVersion.id}</dd></div><div><dt>DSL 摘要</dt><dd>{selectedDatasetVersion.dslHash.slice(0, 16)}</dd></div><div><dt>状态</dt><dd>{selectedDatasetVersion.status}</dd></div></dl>}
             </section>
 
             {record && !selectedDatasetVersion && <section className="metric-panel metric-definition-fallback" aria-label="指标只读口径">
               <header><span className="eyebrow">服务端指标定义</span><h2>只读精确口径</h2></header>
               <p className="metric-empty">精确数据集字段元数据当前不可用，以下内容直接来自指标定义，不会按空字段解释。</p>
-              <dl><div><dt>数据集 / 版本</dt><dd>{definition.datasetId} / {definition.datasetVersionId}</dd></div><div><dt>表达式</dt><dd className="metric-expression-json"><code>{JSON.stringify(definition.expression)}</code></dd></div><div><dt>聚合 / 可加性</dt><dd>{definition.aggregation} / {definition.additivity}</dd></div><div><dt>时间口径</dt><dd>{definition.timeFieldId || '未设置'} / {definition.timeGrain}</dd></div><div><dt>允许维度</dt><dd>{definition.allowedDimensions.length ? definition.allowedDimensions.map(item => `${item.name}（${item.fieldId}）`).join('、') : '无'}</dd></div></dl>
+              <dl><div><dt>数据集 / 版本</dt><dd>{definition.datasetId} / {definition.datasetVersionId}</dd></div><div><dt>指标取值表达式</dt><dd className="metric-expression-json"><code>{JSON.stringify(definition.expression)}</code></dd></div>{definition.sourceCalculation && <><div><dt>源 DAG 公式</dt><dd className="metric-expression-json"><code>{definition.sourceCalculation.formula}</code></dd></div><div><dt>真实聚合 / 跨时间</dt><dd>{definition.sourceCalculation.aggregation} / {definition.sourceCalculation.timeAggregation || '未声明'}</dd></div></>}<div><dt>查询层聚合 / 可加性</dt><dd>{definition.aggregation} / {definition.additivity}</dd></div><div><dt>时间口径</dt><dd>{definition.timeFieldId || '未设置'} / {definition.timeGrain}</dd></div><div><dt>允许维度</dt><dd>{definition.allowedDimensions.length ? definition.allowedDimensions.map(item => `${item.name}（${item.fieldId}）`).join('、') : '无'}</dd></div></dl>
               <MetricDefinitionJSON definition={definition} label="指标草稿完整定义 JSON" />
             </section>}
 
             <section className="metric-panel metric-expression">
               <header><span className="eyebrow">结构化口径</span><h2>表达式与聚合</h2></header>
               {advancedExpression ? <div className="advanced-expression"><strong>高级表达式只读</strong><p>派生、比率和指标引用的可视化编辑器将在后续增强；本页面不会执行或改写该表达式。</p><pre>{JSON.stringify(definition.expression, null, 2)}</pre></div> : <label>原子字段<select aria-label="原子指标字段" value={atomicFieldId} onChange={event => updateDefinition({ expression: { type: 'FIELD_REF', fieldId: event.target.value } })}><option value="">{definition.aggregation === 'COUNT' || definition.aggregation === 'COUNT_DISTINCT' ? '请选择计数字段' : '请选择数值字段'}</option>{atomicFields.map(field => <option key={field.id} value={field.id}>{field.name} · {field.role} · {field.canonicalType}</option>)}</select></label>}
-              <label>聚合<select aria-label="指标聚合" value={definition.aggregation} onChange={event => updateAggregation(event.target.value as MetricDefinition['aggregation'])}>{['NONE', 'SUM', 'AVG', 'MIN', 'MAX', 'COUNT', 'COUNT_DISTINCT'].map(value => <option key={value}>{value}</option>)}</select></label>
+              <label>{definition.sourceCalculation ? '查询层聚合（源 DAG 已完成聚合）' : '聚合'}<select aria-label="指标聚合" value={definition.aggregation} disabled={Boolean(definition.sourceCalculation)} onChange={event => updateAggregation(event.target.value as MetricDefinition['aggregation'])}>{['NONE', 'SUM', 'AVG', 'MIN', 'MAX', 'COUNT', 'COUNT_DISTINCT'].map(value => <option key={value}>{value}</option>)}</select></label>
               <label>单位<input aria-label="指标单位" value={definition.unit} onChange={event => updateDefinition({ unit: event.target.value })} /></label>
               <label>数字格式<input aria-label="指标数字格式" value={definition.numberFormat} onChange={event => updateDefinition({ numberFormat: event.target.value })} /></label>
               <label>小数位数<input aria-label="指标小数位数" type="number" min={0} max={12} value={definition.decimalScale} onChange={event => updateDefinition({ decimalScale: Number(event.target.value) })} /></label>
@@ -908,27 +810,19 @@ export function MetricCenterPage() {
 
             </fieldset>}
           </>}
-          {permissionsReady && capabilities.read && parameters.length > 0 && <section className="metric-panel metric-parameters"><header><span className="eyebrow">服务端试算</span><h2>验证参数</h2></header>{parameters.map(parameter => <label key={parameter.code}>{parameter.name || parameter.code}<input aria-label={`指标参数 ${parameter.code}`} type={parameter.dataType === 'DATE' ? 'date' : 'text'} placeholder={parameter.multiValue ? '多个值请用逗号分隔' : parameter.dataType} value={previewValues[parameter.code] ?? ''} disabled={busy || writesLocked} onChange={event => setPreviewValues(current => ({ ...current, [parameter.code]: event.target.value }))} /></label>)}</section>}
-          {preview && <PreviewTable preview={preview} />}
+          {permissionsReady && capabilities.read && parameters.length > 0 && <section className="metric-panel metric-parameters"><header><span className="eyebrow">发布校验</span><h2>校验参数</h2></header>{parameters.map(parameter => <label key={parameter.code}>{parameter.name || parameter.code}<input aria-label={`指标参数 ${parameter.code}`} type={parameter.dataType === 'DATE' ? 'date' : 'text'} placeholder={parameter.multiValue ? '多个值请用逗号分隔' : parameter.dataType} value={validationValues[parameter.code] ?? ''} disabled={busy || writesLocked} onChange={event => setValidationValues(current => ({ ...current, [parameter.code]: event.target.value }))} /></label>)}</section>}
           {record && <MetricVersionManager
             versions={versions}
             total={versionsTotal}
             currentVersionId={record.currentPublishedVersionId ?? ''}
             selected={selectedMetricVersion}
             usage={selectedVersionUsage}
-            parameters={versionParameters}
-            datasetUnavailable={versionDatasetUnavailable}
-            datasetReady={Boolean(selectedVersionDataset)}
-            parameterValues={versionPreviewValues}
-            preview={versionPreview}
             loading={versionLoading}
             busy={busy}
             writesLocked={writesLocked}
             canPublish={capabilities.publish}
             onSelect={selectMetricVersion}
             onLoadMore={loadMoreVersions}
-            onParameterChange={(code, value) => setVersionPreviewValues(current => ({ ...current, [code]: value }))}
-            onPreview={previewExactVersion}
             onDeprecate={deprecateVersion}
           />}
         </>}
@@ -1755,7 +1649,7 @@ function ReadonlyMetricConfiguration({ definition }: { definition: MetricDefinit
       <div className="wide"><dt>数据来源</dt><dd>已匹配并锁定精确发布版本</dd></div>
       <div><dt>指标类型</dt><dd>{metricTypeLabels[definition.metric.type]}</dd></div>
       <div><dt>计算字段</dt><dd>{definition.expression.type === 'FIELD_REF' ? '已匹配原子字段' : '已生成计算表达式'}</dd></div>
-      <div><dt>聚合方式</dt><dd>{aggregationLabels[definition.aggregation]}</dd></div>
+      <div><dt>聚合方式</dt><dd>{aggregationLabels[definition.sourceCalculation?.aggregation ?? definition.aggregation]}{definition.sourceCalculation ? '（数据集 DAG 已完成）' : ''}</dd></div>
       <div><dt>单位</dt><dd>{definition.unit || '未设置'}</dd></div>
       <div><dt>数字格式</dt><dd>{definition.numberFormat || '未设置'}</dd></div>
       <div><dt>小数位数</dt><dd>{definition.decimalScale}</dd></div>
@@ -1779,30 +1673,22 @@ function MetricDefinitionJSON({ definition, label }: { definition: MetricDefinit
 }
 
 function MetricVersionManager({
-  versions, total, currentVersionId, selected, usage, parameters, parameterValues, preview,
-  datasetUnavailable, datasetReady, loading, busy, writesLocked, canPublish, onSelect, onLoadMore, onParameterChange, onPreview, onDeprecate,
+  versions, total, currentVersionId, selected, usage,
+  loading, busy, writesLocked, canPublish, onSelect, onLoadMore, onDeprecate,
 }: {
   versions: MetricVersionSummary[]
   total: number
   currentVersionId: string
   selected: MetricVersionRecord | null
   usage: MetricUsage
-  parameters: ParameterOption[]
-  datasetUnavailable: boolean
-  datasetReady: boolean
-  parameterValues: Record<string, string>
-  preview: DatasetPreview | null
   loading: boolean
   busy: boolean
   writesLocked: boolean
   canPublish: boolean
   onSelect: (versionId: string) => void
   onLoadMore: () => void
-  onParameterChange: (code: string, value: string) => void
-  onPreview: () => void
   onDeprecate: () => void
 }) {
-  const previewDisabled = busy || loading || writesLocked || !datasetReady || selected?.status !== 'PUBLISHED'
   return <section className="metric-version-manager" aria-label="指标发布版本管理">
     <header><div><span className="eyebrow">不可变口径</span><h2>发布版本</h2></div>{writesLocked && <small>聚合状态尚未完成对账，当前仅允许查看。</small>}</header>
     <nav aria-label="指标版本列表">
@@ -1815,13 +1701,10 @@ function MetricVersionManager({
     <div className="metric-version-detail">
       {loading && !selected ? <p className="metric-empty">正在加载精确版本…</p> : selected ? <>
         <header><div><strong>V{selected.versionNo}</strong><span className={`version-status status-${selected.status.toLowerCase()}`}>{selected.status}</span>{selected.id === currentVersionId && <span className="current-version">当前发布版本</span>}</div><small>{new Date(selected.publishedAt).toLocaleString('zh-CN')}</small></header>
-        <dl><div><dt>精确指标版本 ID</dt><dd>{selected.id}</dd></div><div><dt>数据集版本 ID</dt><dd>{selected.datasetVersionId}</dd></div><div><dt>定义摘要</dt><dd>{selected.definitionHash.slice(0, 16)}</dd></div><div><dt>表达式</dt><dd className="metric-expression-json"><code>{JSON.stringify(selected.definition.expression)}</code></dd></div><div><dt>聚合 / 可加性</dt><dd>{selected.definition.aggregation} / {selected.definition.additivity}</dd></div><div><dt>时间口径</dt><dd>{selected.definition.timeFieldId || '未设置'} / {selected.definition.timeGrain}</dd></div><div><dt>允许维度</dt><dd>{selected.definition.allowedDimensions.length ? selected.definition.allowedDimensions.map(item => `${item.name}（${item.fieldId}）`).join('、') : '无'}</dd></div></dl>
+        <dl><div><dt>精确指标版本 ID</dt><dd>{selected.id}</dd></div><div><dt>数据集版本 ID</dt><dd>{selected.datasetVersionId}</dd></div><div><dt>定义摘要</dt><dd>{selected.definitionHash.slice(0, 16)}</dd></div><div><dt>指标取值表达式</dt><dd className="metric-expression-json"><code>{JSON.stringify(selected.definition.expression)}</code></dd></div>{selected.definition.sourceCalculation && <><div><dt>源 DAG 公式</dt><dd className="metric-expression-json"><code>{selected.definition.sourceCalculation.formula}</code></dd></div><div><dt>真实聚合 / 跨时间</dt><dd>{selected.definition.sourceCalculation.aggregation} / {selected.definition.sourceCalculation.timeAggregation || '未声明'}</dd></div></>}<div><dt>查询层聚合 / 可加性</dt><dd>{selected.definition.aggregation} / {selected.definition.additivity}</dd></div><div><dt>时间口径</dt><dd>{selected.definition.timeFieldId || '未设置'} / {selected.definition.timeGrain}</dd></div><div><dt>允许维度</dt><dd>{selected.definition.allowedDimensions.length ? selected.definition.allowedDimensions.map(item => `${item.name}（${item.fieldId}）`).join('、') : '无'}</dd></div></dl>
         <MetricDefinitionJSON definition={selected.definition} label="指标版本完整定义 JSON" />
         <section className="metric-usage" aria-label="指标版本使用汇总"><span>报告草稿引用<strong>{usage.reportDraftReferences}</strong></span><span>下游草稿引用<strong>{usage.downstreamDraftReferences}</strong></span><span>下游发布引用<strong>{usage.downstreamPublishedReferences}</strong></span><span>运行中查询<strong>{usage.activeQueryRuns}</strong></span></section>
-        {datasetUnavailable && <p className="metric-empty">当前无法读取精确数据集版本；指标口径和占用仍可查看，参数与试算已禁用。</p>}
-        {parameters.length > 0 && <section className="metric-version-parameters">{parameters.map(parameter => <label key={parameter.code}>{parameter.name || parameter.code}<input aria-label={`指标版本参数 ${parameter.code}`} type={parameter.dataType === 'DATE' ? 'date' : 'text'} value={parameterValues[parameter.code] ?? ''} disabled={previewDisabled} onChange={event => onParameterChange(parameter.code, event.target.value)} /></label>)}</section>}
-        <div className="metric-version-actions"><button className="quiet-button" type="button" disabled={previewDisabled} onClick={onPreview}>试算精确版本</button>{selected.status === 'PUBLISHED' && <button className="danger-button" type="button" disabled={busy || loading || writesLocked || !canPublish} onClick={onDeprecate}>废弃版本</button>}{selected.status === 'DEPRECATED' && <small>废弃版本仅供审计查看，不能再次试算或恢复。</small>}</div>
-        {preview && <PreviewTable preview={preview} />}
+        <div className="metric-version-actions">{selected.status === 'PUBLISHED' && <button className="danger-button" type="button" disabled={busy || loading || writesLocked || !canPublish} onClick={onDeprecate}>废弃版本</button>}{selected.status === 'DEPRECATED' && <small>废弃版本仅供审计查看，不能恢复。</small>}</div>
       </> : <p className="metric-empty">选择一个发布版本查看精确口径。</p>}
     </div>
   </section>

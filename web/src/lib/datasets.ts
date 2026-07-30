@@ -1,5 +1,5 @@
 import { apiRequest } from './api'
-import { graphContains, graphGroupOutputKey, graphLeaves, graphProducedFields, serializeDesignerGraph, type DesignerGraphV1, type GraphInput, type GraphTransform, type GraphTransformComponentType } from './dataset-graph'
+import { graphContains, graphGroupOutputKey, graphLeaves, graphProducedFields, normalizeGraphTransformComponentType, serializeDesignerGraph, type DesignerGraphV1, type GraphInput, type GraphTransform, type GraphTransformComponentType } from './dataset-graph'
 export type { CanvasPoint as GraphPosition, DesignerGraphV1, GraphDimension, GraphEnd, GraphEndOutput, GraphGroup, GraphGroupByMode, GraphInput, GraphJoin, GraphMetric } from './dataset-graph'
 export type DatasetLayer = 'ODS' | 'DIM' | 'DWD' | 'DWS' | 'ADS'
 
@@ -42,6 +42,12 @@ export type JoinOption = {
   joinType: string; cardinality: string; manualConfirmed: boolean; conditions?: JoinConditionOption[]
   relationshipType?: string; relationshipRole?: string; fanoutPolicy?: string
   bridge?: BridgeContractOption; temporal?: TemporalJoinContractOption
+}
+export const joinCardinalityForType = (joinType: string) => {
+  if (joinType === 'INNER') return 'ONE_TO_ONE'
+  if (joinType === 'RIGHT') return 'ONE_TO_MANY'
+  if (joinType === 'FULL') return 'MANY_TO_MANY'
+  return 'MANY_TO_ONE'
 }
 export type FilterOption = { id: string; nodeId: string; field: string; operator: string; value: string; parameterCode: string }
 export type ParameterOption = { code: string; name: string; dataType: string; required: boolean; multiValue: boolean }
@@ -216,7 +222,7 @@ const identifier = (value: string) => {
   return cleaned || 'field'
 }
 const executableTransformComponentType = (transform: GraphTransform): GraphTransformComponentType => {
-  if (transform.componentType) return transform.componentType
+  if (transform.componentType) return normalizeGraphTransformComponentType(transform.componentType) || transform.componentType
   const operation = transform.rules[0]?.operation
   if (transform.family === 'DATE') return ['CURRENT_DATE', 'DATE_DIFF', 'DATE_EXTRACT', 'DATE_START', 'DATE_END'].includes(operation || '') ? 'DATE_CALCULATION' : 'DATE_FORMAT'
   if (transform.family === 'CAST') return 'CAST'
@@ -228,10 +234,9 @@ const executableTransformComponentType = (transform: GraphTransform): GraphTrans
     if (operation && ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'].includes(operation)) return 'NUMBER_ARITHMETIC'
     return 'NUMBER_ROUNDING'
   }
-  if (operation === 'UPPER') return 'TEXT_UPPER'
+  if (operation === 'UPPER' || operation === 'LOWER') return 'TEXT_CASE'
   if (operation === 'TRIM') return 'TEXT_TRIM'
   if (operation === 'REPLACE') return 'TEXT_REPLACE'
-  if (operation === 'LOWER') return 'TEXT_LOWER'
   if (operation === 'CONCAT' || transform.family === 'SPLIT_MERGE') return 'TEXT_CONCAT'
   return 'TEXT_SUBSTRING'
 }
@@ -403,12 +408,7 @@ const datasetJoinDSL = (join: JoinOption) => ({
   leftNodeId: join.leftNodeId,
   rightNodeId: join.rightNodeId,
   joinType: join.joinType,
-  cardinality: join.cardinality || 'UNKNOWN',
-  ...(join.relationshipType ? { relationshipType: join.relationshipType } : {}),
-  ...(join.relationshipRole ? { relationshipRole: identifier(join.relationshipRole) } : {}),
-  ...(join.fanoutPolicy ? { fanoutPolicy: join.fanoutPolicy } : {}),
-  ...(join.bridge ? { bridge: join.bridge } : {}),
-  ...(join.temporal ? { temporal: join.temporal } : {}),
+  cardinality: joinCardinalityForType(join.joinType),
   manualConfirmed: join.manualConfirmed,
   conditions: (join.conditions && join.conditions.length > 1
     ? join.conditions

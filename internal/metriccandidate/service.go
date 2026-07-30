@@ -160,16 +160,22 @@ type LoadedDatasetVersion struct {
 	DependencyUnavailable bool
 }
 
-// Worker 运行纯规则提取器。LLM 不在此路径上，因此数据集发布不依赖模型可用性。
+// Worker 先用精确数据集版本提取不可更改的计算事实，再让 LLM 只补充业务表述。
+// 模型不可用时仍保存规则结果，但证据不完整的候选不会自动发布。
 type Worker struct {
 	store        JobStore
 	autoApprover *AutomaticApprover
+	enricher     *Enricher
 }
 
 func NewWorker(store JobStore) *Worker { return &Worker{store: store} }
 
 func (w *Worker) SetAutomaticApprover(approver *AutomaticApprover) {
 	w.autoApprover = approver
+}
+
+func (w *Worker) SetEnricher(enricher *Enricher) {
+	w.enricher = enricher
 }
 
 func (w *Worker) TenantIDs(ctx context.Context) ([]string, error) {
@@ -203,7 +209,7 @@ func (w *Worker) ProcessNext(ctx context.Context, tenantID, workerID string, lea
 		version := loaded.Version
 		if err == nil {
 			if claim.ExtractorVersion == CodeIdentificationVersion {
-				result, err = ExtractDWSFieldMetrics(version)
+				result, err = ExtractGovernedFieldMetrics(version)
 			} else {
 				result, err = Extract(version)
 			}
@@ -212,7 +218,20 @@ func (w *Worker) ProcessNext(ctx context.Context, tenantID, workerID string, lea
 					claim.ExtractorVersion != CodeIdentificationVersion {
 					result = blockUnavailableDatasetCandidates(result)
 				}
-				result = attachDefaultSemantics(version, result)
+				if claim.ExtractorVersion == CodeIdentificationVersion && w.enricher != nil {
+					var enrichmentErr error
+					result, enrichmentErr = w.enricher.Enrich(
+						ctx, claim.TenantID, claim.RequestedBy, version, result,
+					)
+					if enrichmentErr != nil {
+						result.Warnings = append(
+							result.Warnings,
+							"LLM 语义补全失败，已保留可审计的规则事实；不会用模型猜测覆盖计算口径。",
+						)
+					}
+				} else {
+					result = attachDefaultSemantics(version, result)
+				}
 				err = w.store.FinishJob(ctx, *claim, workerID, result)
 			}
 		}

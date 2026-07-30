@@ -62,12 +62,16 @@ func materializedMetricDocument(
 		}
 		projection = append(projection, field.Code)
 	}
+	exactMaterializedGrain := sameStringSet(
+		original.GroupBy, derived.GroupBy,
+	)
 
 	for index := range derived.Fields {
 		expression, err := rewriteMaterializedExpressionForLayer(
 			derived.Fields[index].Expression,
 			replacements,
 			original.Dataset.Layer,
+			exactMaterializedGrain,
 		)
 		if err != nil {
 			return dataset.Document{}, err
@@ -96,6 +100,7 @@ func materializedMetricDocument(
 			derived.Filters[index].Expression,
 			replacements,
 			original.Dataset.Layer,
+			exactMaterializedGrain,
 		)
 		if err != nil {
 			return dataset.Document{}, err
@@ -119,7 +124,7 @@ func rewriteMaterializedExpression(
 	replacements map[string]materializedFieldReplacement,
 ) (dataset.Expression, error) {
 	return rewriteMaterializedExpressionForLayer(
-		expression, replacements, dataset.LayerDWS,
+		expression, replacements, dataset.LayerDWS, false,
 	)
 }
 
@@ -127,13 +132,16 @@ func rewriteMaterializedExpressionForLayer(
 	expression dataset.Expression,
 	replacements map[string]materializedFieldReplacement,
 	sourceLayer dataset.Layer,
+	exactMaterializedGrain bool,
 ) (dataset.Expression, error) {
 	key, err := expressionKey(expression)
 	if err != nil {
 		return dataset.Expression{}, err
 	}
 	if replacement, found := replacements[key]; found {
-		return materializedFieldReference(replacement.field, sourceLayer)
+		return materializedFieldReference(
+			replacement.field, sourceLayer, exactMaterializedGrain,
+		)
 	}
 	// 多事实 DWS 的输出度量通常是关联前预聚合的别名，因此原字段表达式是
 	// FIELD_REF，指标定义再在外层声明 SUM/MIN/MAX。直接递归会把两层都改写
@@ -156,7 +164,7 @@ func rewriteMaterializedExpressionForLayer(
 			return nil
 		}
 		rewritten, err := rewriteMaterializedExpressionForLayer(
-			**value, replacements, sourceLayer,
+			**value, replacements, sourceLayer, exactMaterializedGrain,
 		)
 		if err != nil {
 			return err
@@ -175,6 +183,7 @@ func rewriteMaterializedExpressionForLayer(
 	for index := range expression.Arguments {
 		rewritten, err := rewriteMaterializedExpressionForLayer(
 			expression.Arguments[index], replacements, sourceLayer,
+			exactMaterializedGrain,
 		)
 		if err != nil {
 			return dataset.Expression{}, err
@@ -184,12 +193,14 @@ func rewriteMaterializedExpressionForLayer(
 	for index := range expression.Whens {
 		when, err := rewriteMaterializedExpressionForLayer(
 			expression.Whens[index].When, replacements, sourceLayer,
+			exactMaterializedGrain,
 		)
 		if err != nil {
 			return dataset.Expression{}, err
 		}
 		then, err := rewriteMaterializedExpressionForLayer(
 			expression.Whens[index].Then, replacements, sourceLayer,
+			exactMaterializedGrain,
 		)
 		if err != nil {
 			return dataset.Expression{}, err
@@ -200,6 +211,7 @@ func rewriteMaterializedExpressionForLayer(
 	for index := range expression.PartitionBy {
 		rewritten, err := rewriteMaterializedExpressionForLayer(
 			expression.PartitionBy[index], replacements, sourceLayer,
+			exactMaterializedGrain,
 		)
 		if err != nil {
 			return dataset.Expression{}, err
@@ -209,6 +221,7 @@ func rewriteMaterializedExpressionForLayer(
 	for index := range expression.OrderBy {
 		rewritten, err := rewriteMaterializedExpressionForLayer(
 			expression.OrderBy[index].Expression, replacements, sourceLayer,
+			exactMaterializedGrain,
 		)
 		if err != nil {
 			return dataset.Expression{}, err
@@ -221,6 +234,7 @@ func rewriteMaterializedExpressionForLayer(
 func materializedFieldReference(
 	field dataset.Field,
 	sourceLayer dataset.Layer,
+	exactMaterializedGrain bool,
 ) (dataset.Expression, error) {
 	reference := dataset.Expression{
 		Type: "FIELD_REF", NodeID: materializedMetricNodeID, Field: field.Code,
@@ -230,6 +244,14 @@ func materializedFieldReference(
 	}
 	if field.Role != "MEASURE" {
 		return reference, nil
+	}
+	if exactMaterializedGrain {
+		// The governed materialization has one row per complete published
+		// groupBy key. MAX returns that frozen cell without attempting to
+		// roll up a non-decomposable COUNT_DISTINCT or ratio.
+		return dataset.Expression{
+			Type: "AGGREGATE", Function: "MAX", Argument: &reference,
+		}, nil
 	}
 	if field.Expression.Type != "AGGREGATE" {
 		return dataset.Expression{}, errors.New("calculated DWS measure is not safely roll-up capable")
@@ -249,6 +271,23 @@ func materializedFieldReference(
 	return dataset.Expression{
 		Type: "AGGREGATE", Function: function, Argument: &reference,
 	}, nil
+}
+
+func sameStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	values := make(map[string]int, len(left))
+	for _, value := range left {
+		values[value]++
+	}
+	for _, value := range right {
+		if values[value] == 0 {
+			return false
+		}
+		values[value]--
+	}
+	return true
 }
 
 func materializedPreAggregationReference(

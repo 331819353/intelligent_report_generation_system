@@ -38,9 +38,12 @@
 .metric-dimension-toggle { display: flex !important; align-items: center; gap: 8px !important; }
 .metric-dimension-toggle input { width: 16px; }
 .metric-dimension-toggle small { color: var(--muted); font-weight: 400; }
-.metric-dimension-config { display: grid; grid-template-columns: 1fr 1.5fr .7fr 1fr; gap: 8px; padding: 10px; border-radius: 8px; background: #f8fafc; }
+.metric-dimension-config { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; align-items: start; padding: 10px; border-radius: 8px; background: #f8fafc; }
 .metric-dimension-config .metric-dimension-toggle { grid-column: 1 / -1; }
-.metric-dimension-config select[multiple] { min-height: 74px; }
+.metric-dimension-config > label:not(.metric-dimension-toggle) { grid-template-rows: 14px 60px; align-self: start; }
+.metric-dimension-config > label:not(.metric-dimension-toggle) > input,
+.metric-dimension-config > label:not(.metric-dimension-toggle) > select { box-sizing: border-box; height: 60px; min-height: 60px; }
+.metric-dimension-config select[multiple] { height: 60px; min-height: 60px; padding-block: 5px; }
 .metric-empty { color: var(--muted); font-size: 12px; }
 .metric-parameters { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .metric-version-manager { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: white; }
@@ -247,6 +250,7 @@
 @media (max-width: 1280px) {
   .metric-definition { grid-template-columns: 1fr; }
   .metric-expression, .metric-dimensions, .metric-parameters { grid-column: 1; }
+  .metric-dimension-config { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 760px) {
@@ -265,4 +269,5 @@
   .metric-ai-config > dl > div.wide { grid-column: auto; }
   .metric-ai-actions > div { display: grid; grid-template-columns: 1fr 1fr; }
   .metric-ai-actions button { width: 100%; }
+  .metric-dimension-config { grid-template-columns: 1fr; }
 }

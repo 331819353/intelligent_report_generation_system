@@ -6,6 +6,7 @@ import {
   graphProducedFields,
   graphRoot,
   layoutDesignerGraph,
+  normalizeGraphTransformComponentType,
   validateDesignerGraph,
   type DesignerGraphV1,
   type GraphInput,
@@ -16,13 +17,14 @@ import {
   type GraphTransformFamily,
   type GraphTransformRule,
 } from './dataset-graph'
-import type {
-  AssetColumn,
-  AssetTable,
-  DatasetDraft,
-  DesignerNode,
-  FieldOption,
-  JoinOption,
+import {
+  joinCardinalityForType,
+  type AssetColumn,
+  type AssetTable,
+  type DatasetDraft,
+  type DesignerNode,
+  type FieldOption,
+  type JoinOption,
 } from './datasets'
 
 export type DatasetAIInput = { kind: 'NODE' | 'JOIN' | 'GROUP' | 'TRANSFORM'; id: string }
@@ -32,7 +34,7 @@ export type DatasetAIJoinCondition = {
 }
 export type DatasetAIPlanJoin = {
   id: string; name: string; left: DatasetAIInput; right: DatasetAIInput
-  joinType: 'INNER' | 'LEFT'; conditions: DatasetAIJoinCondition[]
+  joinType: 'INNER' | 'LEFT' | 'RIGHT' | 'FULL'; conditions: DatasetAIJoinCondition[]
 }
 export type DatasetAIPlanDimension = { nodeId: string; column: string; grouping: '' | 'DAY' | 'WEEK' | 'MONTH' | 'QUARTER' | 'YEAR' }
 export type DatasetAIPlanMetric = { nodeId: string; column: string; aggregation: 'SUM' | 'AVG' | 'COUNT' | 'COUNT_DISTINCT' | 'MIN' | 'MAX' }
@@ -167,14 +169,14 @@ export type MaterializedDatasetAIPlan = {
 
 const identifier = (value: string) => value.trim().replace(/[^A-Za-z0-9_]/g, '_').replace(/^[^A-Za-z]+/, '') || 'field'
 const transformComponentType = (transform: Pick<GraphTransform, 'family' | 'componentType' | 'rules'>): GraphTransformComponentType => {
-  if (transform.componentType) return transform.componentType
+  if (transform.componentType) return normalizeGraphTransformComponentType(transform.componentType) || transform.componentType
   const operation = transform.rules[0]?.operation
   if (transform.family === 'DATE') return 'DATE_FORMAT'
   if (transform.family === 'CAST') return 'CAST'
   if (transform.family === 'CONDITION') return 'CONDITION'
   if (transform.family === 'NULL') return 'NULL'
   if (transform.family === 'NUMBER') return operation === 'ABS' ? 'NUMBER_ABSOLUTE' : ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'].includes(operation) ? 'NUMBER_ARITHMETIC' : 'NUMBER_ROUNDING'
-  return operation === 'UPPER' ? 'TEXT_UPPER' : operation === 'LOWER' ? 'TEXT_LOWER' : operation === 'TRIM' ? 'TEXT_TRIM' : operation === 'REPLACE' ? 'TEXT_REPLACE' : operation === 'SUBSTRING' ? 'TEXT_SUBSTRING' : 'TEXT_CONCAT'
+  return operation === 'UPPER' || operation === 'LOWER' ? 'TEXT_CASE' : operation === 'TRIM' ? 'TEXT_TRIM' : operation === 'REPLACE' ? 'TEXT_REPLACE' : operation === 'SUBSTRING' ? 'TEXT_SUBSTRING' : 'TEXT_CONCAT'
 }
 const fieldKey = (nodeId: string, column: string) => `${nodeId}.${column}`
 const keyParts = (key: string) => {
@@ -218,9 +220,10 @@ export function datasetAIPlanFromEditor(
       ? configured.conditions
       : [{ id: `${configured.id}_condition_1`, leftField: configured.leftField, rightField: configured.rightField }]
     if (!conditions.length || conditions.some(condition => !condition.leftField || !condition.rightField)) return []
+    const joinType = (['INNER', 'LEFT', 'RIGHT', 'FULL'].includes(configured.joinType) ? configured.joinType : 'LEFT') as DatasetAIPlanJoin['joinType']
     return [{
       id: box.id, name: box.name, left: box.left as DatasetAIInput, right: box.right as DatasetAIInput,
-      joinType: configured.joinType === 'INNER' ? 'INNER' : 'LEFT',
+      joinType,
       conditions: conditions.map(condition => ({
         leftNodeId: configured.leftNodeId, leftColumn: condition.leftField,
         rightNodeId: configured.rightNodeId, rightColumn: condition.rightField,
@@ -413,7 +416,7 @@ export async function materializeDatasetAIPlan(
     return {
       id: join.id, leftNodeId: first.leftNodeId, rightNodeId: first.rightNodeId,
       leftField: first.leftColumn, rightField: first.rightColumn, joinType: join.joinType,
-      cardinality: '', manualConfirmed: true,
+      cardinality: joinCardinalityForType(join.joinType), manualConfirmed: true,
       conditions: join.conditions.map((condition, index) => {
         const previous = base.joins.find(item => item.id === join.id)?.conditions?.[index]
         return {

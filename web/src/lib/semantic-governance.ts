@@ -17,7 +17,8 @@ export type DimensionType =
   | 'OTHER'
 
 export type MemberIndexPolicy = 'FULL' | 'EXACT_ONLY' | 'NONE'
-export type DimensionStatus = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED'
+export type DimensionStatus = 'DRAFT' | 'PUBLISHED' | 'STALE' | 'DEPRECATED'
+export type WritableDimensionStatus = Exclude<DimensionStatus, 'STALE'>
 export type DimensionSurveyStatus = 'SUGGESTED' | 'ACCEPTED' | 'REJECTED' | 'STALE'
 export type DimensionFieldRole = 'DIMENSION' | 'ATTRIBUTE' | 'TIME' | 'IDENTIFIER'
 
@@ -131,6 +132,18 @@ export type Dimension = {
   updatedBy: string
   createdAt: string
   updatedAt: string
+}
+
+export type UpdateDimensionInput = {
+  expectedVersion: number
+  code: string
+  name: string
+  description: string
+  dimensionType: DimensionType
+  memberIndexPolicy: MemberIndexPolicy
+  highCardinality: boolean
+  sensitive: boolean
+  status: WritableDimensionStatus
 }
 
 export type DimensionMember = {
@@ -376,6 +389,18 @@ export const semanticGovernanceAPI = {
 
   getDimension: (id: string) =>
     apiRequest<Dimension>(dimensionPath(id), { cache: 'no-store' }),
+
+  updateDimension: (id: string, input: UpdateDimensionInput) =>
+    apiRequest<Dimension>(dimensionPath(id), {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+
+  deprecateDimension: (id: string, expectedVersion: number) =>
+    apiRequest<Dimension>(`${dimensionPath(id)}/deprecate`, {
+      method: 'POST',
+      body: JSON.stringify({ expectedVersion }),
+    }),
 
   listMembers: (dimensionId: string, q = '', status: '' | 'ACTIVE' | 'DEPRECATED' = 'ACTIVE', limit = 200, offset = 0) =>
     apiRequest<SemanticPage<DimensionMember>>(

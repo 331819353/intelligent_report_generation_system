@@ -274,33 +274,24 @@ func Validate(document Document) error {
 		if !oneOf(join.JoinType, "INNER", "LEFT", "RIGHT", "FULL") {
 			add(path+".joinType", "不支持的 Join 类型")
 		}
-		if !oneOf(join.Cardinality, "UNKNOWN", "ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_ONE", "MANY_TO_MANY") {
-			add(path+".cardinality", "不支持的 Join 基数")
+		expectedCardinality := joinCardinalityForType(join.JoinType)
+		if join.Cardinality != expectedCardinality {
+			add(path+".cardinality", fmt.Sprintf("%s JOIN 的关联基数必须为 %s", join.JoinType, expectedCardinality))
 		}
-		if join.RelationshipType != "" && !oneOf(join.RelationshipType, "DIRECT", "ROLE_PLAYING", "BRIDGE") {
-			add(path+".relationshipType", "必须为 DIRECT、ROLE_PLAYING 或 BRIDGE")
+		if join.RelationshipType != "" {
+			add(path+".relationshipType", "关联基数由 Join 类型自动推导，不再使用关系类型")
 		}
 		if join.RelationshipRole != "" {
-			validateIdentifier(&issues, path+".relationshipRole", join.RelationshipRole)
+			add(path+".relationshipRole", "关联基数由 Join 类型自动推导，不再使用业务角色")
 		}
-		if join.FanoutPolicy != "" && !oneOf(
-			join.FanoutPolicy,
-			"SAFE", "PRIMARY", "ALLOCATE", "DEDUPLICATE", "NON_ADDITIVE", "UNSAFE",
-		) {
-			add(path+".fanoutPolicy", "必须为 SAFE、PRIMARY、ALLOCATE、DEDUPLICATE、NON_ADDITIVE 或 UNSAFE")
+		if join.FanoutPolicy != "" {
+			add(path+".fanoutPolicy", "关联基数由 Join 类型自动推导，不再使用扇出策略")
 		}
-		if join.RelationshipType == "ROLE_PLAYING" && join.RelationshipRole == "" {
-			add(path+".relationshipRole", "角色扮演维度必须声明稳定的业务角色编码")
+		if join.Bridge != nil {
+			add(path+".bridge", "关联基数由 Join 类型自动推导，不再支持 Bridge 配置")
 		}
-		if join.RelationshipType == "BRIDGE" && join.RelationshipRole == "" {
-			add(path+".relationshipRole", "Bridge 关系必须声明稳定的业务角色编码")
-		}
-		if join.RelationshipType == "BRIDGE" && join.FanoutPolicy == "" {
-			add(path+".fanoutPolicy", "Bridge 关系必须声明指标扇出处理策略")
-		}
-		if join.RelationshipType != "" && join.RelationshipType != "BRIDGE" &&
-			join.FanoutPolicy != "" && join.FanoutPolicy != "SAFE" {
-			add(path+".fanoutPolicy", "非 Bridge 关系只能使用 SAFE 扇出策略")
+		if join.Temporal != nil {
+			add(path+".temporal", "关联基数由 Join 类型自动推导，不再支持 SCD2 时间配置")
 		}
 		if len(join.Conditions) == 0 {
 			add(path+".conditions", "至少需要一个 Join 条件")
@@ -319,7 +310,6 @@ func Validate(document Document) error {
 				add(conditionPath+".rightExpression", "必须引用 Join 右节点字段")
 			}
 		}
-		validateJoinSemanticContract(&issues, path, join, document.Nodes)
 	}
 	joinsByID := make(map[string]Join, len(document.Joins))
 	for _, join := range document.Joins {
@@ -666,24 +656,6 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 					add(fmt.Sprintf("nodes[%d].type", index), "显式 DWD 只能引用已发布 ODS 或 DIM 数据集版本")
 				}
 			}
-			for index, join := range document.Joins {
-				path := fmt.Sprintf("joins[%d]", index)
-				switch join.Cardinality {
-				case "UNKNOWN":
-					add(path+".cardinality", "显式 DWD 必须证明 Join 基数，不能使用 UNKNOWN")
-				case "ONE_TO_MANY", "MANY_TO_MANY":
-					if join.RelationshipType != "BRIDGE" {
-						add(path+".relationshipType", "DWD 的多值关联必须显式建模为 BRIDGE，多个普通 DIM 应分别使用 MANY_TO_ONE 或 ONE_TO_ONE")
-					}
-					if !oneOf(join.FanoutPolicy, "PRIMARY", "ALLOCATE", "DEDUPLICATE", "NON_ADDITIVE", "UNSAFE") {
-						add(path+".fanoutPolicy", "DWD Bridge 必须选择 PRIMARY、ALLOCATE、DEDUPLICATE、NON_ADDITIVE 或 UNSAFE")
-					}
-				case "ONE_TO_ONE", "MANY_TO_ONE":
-					if join.RelationshipType == "BRIDGE" {
-						add(path+".relationshipType", "ONE_TO_ONE 或 MANY_TO_ONE 的普通维度关联不应标记为 BRIDGE")
-					}
-				}
-			}
 		}
 		if (hasGrouping || hasAggregation) && !document.sourcePreview {
 			add("dataset.layer", "DWD 必须保持明细粒度，不允许业务分组或聚合")
@@ -745,135 +717,6 @@ func documentHasBusinessAggregation(document Document) bool {
 		visitDatasetExpression(field.Expression, visit)
 	}
 	return found
-}
-
-func validateJoinSemanticContract(
-	issues *[]ValidationIssue,
-	path string,
-	join Join,
-	nodes []Node,
-) {
-	add := func(suffix, reason string) {
-		*issues = append(*issues, ValidationIssue{Path: path + suffix, Reason: reason})
-	}
-	projections := map[string]map[string]bool{}
-	for _, node := range nodes {
-		fields := map[string]bool{}
-		for _, field := range node.Projection {
-			fields[field] = true
-		}
-		projections[node.ID] = fields
-	}
-	if join.Bridge != nil {
-		bridge := join.Bridge
-		if join.RelationshipType != "BRIDGE" {
-			add(".bridge", "只有 BRIDGE 关系可以声明 Bridge 字段合同")
-		}
-		if bridge.BridgeNodeID != join.LeftNodeID && bridge.BridgeNodeID != join.RightNodeID {
-			add(".bridge.bridgeNodeId", "必须引用 Join 的左节点或右节点")
-		}
-		validateBridgeField := func(field, suffix string) {
-			if field == "" {
-				return
-			}
-			validatePhysicalIdentifier(issues, path+".bridge."+suffix, field)
-			if !projections[bridge.BridgeNodeID][field] {
-				add(".bridge."+suffix, "必须包含在 Bridge 节点 projection 中")
-			}
-		}
-		validateBridgeField(bridge.RelationshipTypeField, "relationshipTypeField")
-		validateBridgeField(bridge.AllocationWeightField, "allocationWeightField")
-		validateBridgeField(bridge.PrimaryFlagField, "primaryFlagField")
-		validateBridgeField(bridge.ValidFromField, "validFromField")
-		validateBridgeField(bridge.ValidToField, "validToField")
-		if (bridge.ValidFromField == "") != (bridge.ValidToField == "") {
-			add(".bridge", "Bridge 有效区间必须同时声明 validFromField 和 validToField")
-		}
-		if bridge.RelationshipTypeField == "" {
-			add(".bridge.relationshipTypeField", "Bridge 必须声明关系类型字段")
-		}
-		if join.FanoutPolicy == "ALLOCATE" && bridge.AllocationWeightField == "" {
-			add(".bridge.allocationWeightField", "ALLOCATE 策略必须声明分配权重字段")
-		}
-		if join.FanoutPolicy == "PRIMARY" && bridge.PrimaryFlagField == "" {
-			add(".bridge.primaryFlagField", "PRIMARY 策略必须声明主成员标记字段")
-		}
-	} else if join.RelationshipType == "BRIDGE" {
-		add(".bridge", "BRIDGE 关系必须声明结构化 Bridge 字段合同")
-	}
-
-	if join.Temporal == nil {
-		return
-	}
-	temporal := join.Temporal
-	if temporal.EventNodeID != join.LeftNodeID && temporal.EventNodeID != join.RightNodeID {
-		add(".temporal.eventNodeId", "必须引用 Join 的左节点或右节点")
-	}
-	if temporal.ValidityNodeID != join.LeftNodeID && temporal.ValidityNodeID != join.RightNodeID {
-		add(".temporal.validityNodeId", "必须引用 Join 的左节点或右节点")
-	}
-	if temporal.EventNodeID == temporal.ValidityNodeID {
-		add(".temporal", "事件时间节点和有效区间节点必须位于 Join 两侧")
-	}
-	for _, field := range []struct {
-		value  string
-		suffix string
-	}{
-		{value: temporal.EventTimeField, suffix: "eventTimeField"},
-		{value: temporal.ValidFromField, suffix: "validFromField"},
-		{value: temporal.ValidToField, suffix: "validToField"},
-	} {
-		validatePhysicalIdentifier(issues, path+".temporal."+field.suffix, field.value)
-	}
-	if !projections[temporal.EventNodeID][temporal.EventTimeField] {
-		add(".temporal.eventTimeField", "必须包含在事件节点 projection 中")
-	}
-	if !projections[temporal.ValidityNodeID][temporal.ValidFromField] {
-		add(".temporal.validFromField", "必须包含在有效区间节点 projection 中")
-	}
-	if !projections[temporal.ValidityNodeID][temporal.ValidToField] {
-		add(".temporal.validToField", "必须包含在有效区间节点 projection 中")
-	}
-	if !temporalJoinConditionsPresent(join) {
-		add(".temporal", "SCD2 Join conditions 必须包含 eventTime >= validFrom 且 eventTime < validTo")
-	}
-}
-
-func temporalJoinConditionsPresent(join Join) bool {
-	temporal := join.Temporal
-	if temporal == nil {
-		return false
-	}
-	fromFound, toFound := false, false
-	for _, condition := range join.Conditions {
-		left, right := condition.LeftExpression, condition.RightExpression
-		if left.Type != "FIELD_REF" || right.Type != "FIELD_REF" {
-			continue
-		}
-		eventOnLeft := left.NodeID == temporal.EventNodeID &&
-			left.Field == temporal.EventTimeField
-		eventOnRight := right.NodeID == temporal.EventNodeID &&
-			right.Field == temporal.EventTimeField
-		fromOnLeft := left.NodeID == temporal.ValidityNodeID &&
-			left.Field == temporal.ValidFromField
-		fromOnRight := right.NodeID == temporal.ValidityNodeID &&
-			right.Field == temporal.ValidFromField
-		toOnLeft := left.NodeID == temporal.ValidityNodeID &&
-			left.Field == temporal.ValidToField
-		toOnRight := right.NodeID == temporal.ValidityNodeID &&
-			right.Field == temporal.ValidToField
-		fromFound = fromFound ||
-			(eventOnLeft && fromOnRight && condition.Operator == "GTE") ||
-			(fromOnLeft && eventOnRight && condition.Operator == "LTE")
-		toOperator, inverseToOperator := "LT", "GT"
-		if temporal.ValidToInclusive {
-			toOperator, inverseToOperator = "LTE", "GTE"
-		}
-		toFound = toFound ||
-			(eventOnLeft && toOnRight && condition.Operator == toOperator) ||
-			(toOnLeft && eventOnRight && condition.Operator == inverseToOperator)
-	}
-	return fromFound && toFound
 }
 
 func validateSemanticContracts(issues *[]ValidationIssue, document Document) {
@@ -1143,14 +986,15 @@ func validateTransforms(
 		add("transforms", "字段处理组件最多允许 32 个")
 	}
 	families := map[string]string{
-		"FILTER":     "CONDITION",
-		"TEXT_UPPER": "TEXT", "TEXT_TRIM": "TEXT", "TEXT_REPLACE": "TEXT", "TEXT_LOWER": "TEXT",
+		"FILTER":    "CONDITION",
+		"TEXT_CASE": "TEXT", "TEXT_UPPER": "TEXT", "TEXT_TRIM": "TEXT", "TEXT_REPLACE": "TEXT", "TEXT_LOWER": "TEXT",
 		"TEXT_SUBSTRING": "TEXT", "TEXT_CONCAT": "TEXT", "NUMBER_ABSOLUTE": "NUMBER",
 		"NUMBER_ROUNDING": "NUMBER", "NUMBER_ARITHMETIC": "NUMBER", "DATE_CALCULATION": "DATE",
 		"DATE_FORMAT": "DATE", "WINDOW_FUNCTION": "WINDOW", "NULL": "NULL", "CAST": "CAST", "CONDITION": "CONDITION",
 	}
 	operations := map[string]map[string]bool{
 		"FILTER":     {},
+		"TEXT_CASE":  {"UPPER": true, "LOWER": true},
 		"TEXT_UPPER": {"UPPER": true}, "TEXT_TRIM": {"TRIM": true}, "TEXT_REPLACE": {"REPLACE": true},
 		"TEXT_LOWER": {"LOWER": true}, "TEXT_SUBSTRING": {"SUBSTRING": true}, "TEXT_CONCAT": {"CONCAT": true},
 		"NUMBER_ABSOLUTE": {"ABS": true}, "NUMBER_ROUNDING": {"ROUND": true, "FLOOR": true, "CEIL": true},
@@ -1799,10 +1643,22 @@ func BuildLogicalPlan(document Document) LogicalPlan {
 	return plan
 }
 
+func joinCardinalityForType(joinType string) string {
+	switch joinType {
+	case "INNER":
+		return "ONE_TO_ONE"
+	case "RIGHT":
+		return "ONE_TO_MANY"
+	case "FULL":
+		return "MANY_TO_MANY"
+	default:
+		return "MANY_TO_ONE"
+	}
+}
+
 // normalize 统一空白、枚举大小写、nil 数组和执行策略默认值。
 func normalize(document Document) Document {
-	// normalize 只做不会改变业务含义的规范化和默认值填充。任何引用完整性或
-	// 业务合法性判断都留给 Validate，避免“修复”一个本应被用户看到的错误。
+	// 关联基数由 Join 类型确定；旧版可配置的关系语义在这里统一迁移。
 	document.Dataset.Code = strings.TrimSpace(document.Dataset.Code)
 	document.Dataset.Name = strings.TrimSpace(document.Dataset.Name)
 	document.Dataset.Description = strings.TrimSpace(document.Dataset.Description)
@@ -1829,24 +1685,13 @@ func normalize(document Document) Document {
 	for i := range document.Joins {
 		join := &document.Joins[i]
 		join.ID, join.LeftNodeID, join.RightNodeID = strings.TrimSpace(join.ID), strings.TrimSpace(join.LeftNodeID), strings.TrimSpace(join.RightNodeID)
-		join.JoinType, join.Cardinality = upper(join.JoinType), upper(join.Cardinality)
-		join.RelationshipType, join.RelationshipRole = upper(join.RelationshipType), upper(join.RelationshipRole)
-		join.FanoutPolicy = upper(join.FanoutPolicy)
-		if join.Bridge != nil {
-			join.Bridge.BridgeNodeID = strings.TrimSpace(join.Bridge.BridgeNodeID)
-			join.Bridge.RelationshipTypeField = strings.TrimSpace(join.Bridge.RelationshipTypeField)
-			join.Bridge.AllocationWeightField = strings.TrimSpace(join.Bridge.AllocationWeightField)
-			join.Bridge.PrimaryFlagField = strings.TrimSpace(join.Bridge.PrimaryFlagField)
-			join.Bridge.ValidFromField = strings.TrimSpace(join.Bridge.ValidFromField)
-			join.Bridge.ValidToField = strings.TrimSpace(join.Bridge.ValidToField)
-		}
-		if join.Temporal != nil {
-			join.Temporal.EventNodeID = strings.TrimSpace(join.Temporal.EventNodeID)
-			join.Temporal.EventTimeField = strings.TrimSpace(join.Temporal.EventTimeField)
-			join.Temporal.ValidityNodeID = strings.TrimSpace(join.Temporal.ValidityNodeID)
-			join.Temporal.ValidFromField = strings.TrimSpace(join.Temporal.ValidFromField)
-			join.Temporal.ValidToField = strings.TrimSpace(join.Temporal.ValidToField)
-		}
+		join.JoinType = upper(join.JoinType)
+		join.Cardinality = joinCardinalityForType(join.JoinType)
+		join.RelationshipType = ""
+		join.RelationshipRole = ""
+		join.FanoutPolicy = ""
+		join.Bridge = nil
+		join.Temporal = nil
 		for j := range join.Conditions {
 			join.Conditions[j].Operator = upper(join.Conditions[j].Operator)
 			normalizeExpression(&join.Conditions[j].LeftExpression)
@@ -1859,6 +1704,9 @@ func normalize(document Document) Document {
 		transform.Name = strings.TrimSpace(transform.Name)
 		transform.Family = upper(transform.Family)
 		transform.ComponentType = upper(transform.ComponentType)
+		if transform.ComponentType == "TEXT_UPPER" || transform.ComponentType == "TEXT_LOWER" {
+			transform.ComponentType = "TEXT_CASE"
+		}
 		transform.Input.Kind = upper(transform.Input.Kind)
 		transform.Input.ID = strings.TrimSpace(transform.Input.ID)
 		for j := range transform.Rules {

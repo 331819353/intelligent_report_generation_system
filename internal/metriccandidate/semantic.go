@@ -13,7 +13,7 @@ import (
 	"intelligent-report-generation-system/internal/metric"
 )
 
-const MetricEnrichmentPromptVersion = "metric-candidate-enrichment-v2"
+const MetricEnrichmentPromptVersion = "metric-candidate-enrichment-v3"
 
 func attachDefaultSemantics(version dataset.VersionRecord, result ExtractionResult) ExtractionResult {
 	prepared, _ := dataset.Prepare(version.DSL)
@@ -42,6 +42,23 @@ func attachDefaultSemantics(version dataset.VersionRecord, result ExtractionResu
 		}
 		objectName := metricObjectName(sourceField)
 		caliber := businessCaliber(objectName, businessAggregation, definition.NullHandling)
+		if source := definition.SourceCalculation; source != nil {
+			caliber = fmt.Sprintf(
+				"按源数据集 DAG 公式 %s 计算（%s）",
+				source.Formula, source.Aggregation,
+			)
+			if source.ValueBehavior != "" {
+				caliber += "；值行为为 " + source.ValueBehavior
+			}
+			if source.TimeAggregation != "" {
+				caliber += "；跨时间规则为 " + source.TimeAggregation
+			}
+			caliber += "；" + businessCaliber(objectName, businessAggregation, definition.NullHandling)
+		}
+		caliber += fmt.Sprintf(
+			"；可加性为 %s；展示格式为 %s，保留 %d 位小数",
+			definition.Additivity, definition.NumberFormat, definition.DecimalScale,
+		)
 		if definition.Unit != "" {
 			caliber += "；单位为 " + definition.Unit
 		}
@@ -53,7 +70,7 @@ func attachDefaultSemantics(version dataset.VersionRecord, result ExtractionResu
 		}
 		lineage := LineageMetadata{
 			DatasetID: version.DatasetID, DatasetVersionID: version.ID, SourceFieldID: draft.SourceFieldID,
-			Aggregation: definition.Aggregation, DimensionFieldIDs: dimensionIDs,
+			Aggregation: businessAggregation, DimensionFieldIDs: dimensionIDs,
 			DependencyMetricVersionIDs: append([]string(nil), definitionDependencyIDs(definition.Expression)...),
 		}
 		lineageSummary := fmt.Sprintf("来自发布数据集“%s”的业务输出“%s”，计算方式为 %s", versionName(version), sourceField.Name, businessAggregation)
@@ -86,6 +103,10 @@ func attachDefaultSemantics(version dataset.VersionRecord, result ExtractionResu
 }
 
 func effectiveBusinessAggregation(draft CandidateDraft) string {
+	if source := draft.Definition.SourceCalculation; source != nil &&
+		supportedAggregations[strings.ToUpper(strings.TrimSpace(source.Aggregation))] {
+		return strings.ToUpper(strings.TrimSpace(source.Aggregation))
+	}
 	for _, evidence := range draft.Evidence {
 		if evidence.Code == "DAG_AGGREGATE_OUTPUT" && supportedAggregations[strings.ToUpper(strings.TrimSpace(evidence.Value))] {
 			return strings.ToUpper(strings.TrimSpace(evidence.Value))

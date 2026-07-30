@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
-import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MathOperationsIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTIcon, TextTSlashIcon, TreeStructureIcon, XIcon, type Icon } from '@phosphor-icons/react'
+import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowDownIcon, ArrowUpIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DotsSixVerticalIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MagnifyingGlassIcon, MathOperationsIcon, PlusIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTSlashIcon, TreeStructureIcon, XIcon, type Icon } from '@phosphor-icons/react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { AssetSharingSelect } from '../components/AssetSharingSelect'
+import { DatasetAIDock } from '../components/dataset/DatasetAIDock'
+import { DatasetComponentToolbar } from '../components/dataset/DatasetComponentToolbar'
+import { DatasetDesignWorkspace } from '../components/dataset/DatasetDesignWorkspace'
 import { RequestError } from '../lib/api'
 import { currentDomain } from '../lib/domain-context'
 import {
@@ -27,6 +30,7 @@ import {
   graphProducedFields,
   hydrateDesignerGraph,
   layoutDesignerGraph,
+  normalizeGraphTransformComponentType,
   serializeDesignerGraph,
   validateDesignerGraph,
   type CanvasPoint,
@@ -50,6 +54,7 @@ import {
   buildDatasetDSL,
   datasetLayerChoices,
   datasetAPI,
+  joinCardinalityForType,
   type AssetColumn,
   type AssetTable,
   type AssetTablePreview,
@@ -78,10 +83,17 @@ type RelationInput = GraphInput
 type CurveGeometry = { path: string; midpoint: CanvasPoint }
 type RelationBox = GraphJoin
 type GroupBox = GraphGroup
+type GroupMetricSelection = { key: string; aggregation: string }
 type TransformBox = GraphTransform
 type EndBox = GraphEnd
 type CanvasComponentKind = RelationInput['kind'] | 'END'
 type CanvasPreviewTarget = RelationInput | { kind: 'END'; id: string }
+type CanvasEdgeTarget =
+  | { kind: 'JOIN'; id: string; side: 'left' | 'right' }
+  | { kind: 'GROUP'; id: string }
+  | { kind: 'TRANSFORM'; id: string }
+  | { kind: 'END'; id: string }
+type PendingEdgeInsertion = { inserted: RelationInput; source: RelationInput; target: CanvasEdgeTarget }
 type NodePreviewState = { loading: boolean; data?: AssetTablePreview; error?: string; suggestion?: string }
 type VersionPreviewState = { versionID: string; loading: boolean; data?: DatasetPreview; error?: string }
 type DialogState = { mode: 'create' | 'view' | 'metadata' | 'edit-metadata' | 'history' | 'publish' | 'publish-review' | 'disable' | 'restore' | 'delete'; dataset?: DatasetSummary }
@@ -439,10 +451,10 @@ function DatasetModelingAction({
 }
 
 const layerOverview: Array<{ layer: DatasetLayer; name: string; description: string }> = [
-  { layer: 'ODS', name: '源映射', description: '结构映射 · 数据留在来源' },
-  { layer: 'DIM', name: '维度', description: '实体说明' },
-  { layer: 'DWD', name: '事实明细', description: '动作与维度' },
-  { layer: 'DWS', name: '主题汇总', description: '分析视角' },
+  { layer: 'ODS', name: '贴源层', description: '结构映射 · 数据留在来源' },
+  { layer: 'DIM', name: '维度层', description: '实体说明' },
+  { layer: 'DWD', name: '明细层', description: '动作与维度' },
+  { layer: 'DWS', name: '汇总层', description: '分析视角' },
   { layer: 'ADS', name: '应用数据', description: '按需交付' },
 ]
 const typeLabels: Record<string, string> = { SINGLE_SOURCE: '单数据源', CROSS_SOURCE: '跨数据源' }
@@ -468,10 +480,9 @@ type TransformComponentMeta = {
 }
 const transformComponentMeta: TransformComponentMeta[] = [
   { componentType: 'WINDOW_FUNCTION', family: 'WINDOW', category: 'WINDOW', label: '窗口计算', description: '按分区与排序排名或聚合', sortKey: 'CHUANGKOUJISUAN', operations: ['WINDOW'], icon: RowsIcon },
-  { componentType: 'TEXT_UPPER', family: 'TEXT', category: 'TEXT', label: '大写转换', description: '英文字母统一转大写', sortKey: 'DAXIEZHUANHUAN', operations: ['UPPER'], icon: TextAaIcon },
+  { componentType: 'TEXT_CASE', family: 'TEXT', category: 'TEXT', label: '大小写转换', description: '英文字母统一转为大写或小写', sortKey: 'DAXIAOXIEZHUANHUAN', operations: ['UPPER', 'LOWER'], icon: TextAaIcon },
   { componentType: 'TEXT_TRIM', family: 'TEXT', category: 'TEXT', label: '空格清理', description: '去除文本首尾空格', sortKey: 'KONGGEQINGLI', operations: ['TRIM'], icon: TextTSlashIcon },
   { componentType: 'TEXT_REPLACE', family: 'TEXT', category: 'TEXT', label: '文本替换', description: '查找并替换指定文本', sortKey: 'WENBENTIHUAN', operations: ['REPLACE'], icon: SwapIcon },
-  { componentType: 'TEXT_LOWER', family: 'TEXT', category: 'TEXT', label: '小写转换', description: '英文字母统一转小写', sortKey: 'XIAOXIEZHUANHUAN', operations: ['LOWER'], icon: TextTIcon },
   { componentType: 'TEXT_SUBSTRING', family: 'TEXT', category: 'TEXT', label: '字段截取', description: '按起始位置截取文本', sortKey: 'ZIDUANJIEQU', operations: ['SUBSTRING'], icon: ScissorsIcon },
   { componentType: 'TEXT_CONCAT', family: 'TEXT', category: 'TEXT', label: '字段拼接', description: '用连接符拼接两字段', sortKey: 'ZIDUANPINJIE', operations: ['CONCAT'], icon: LinkSimpleIcon },
   { componentType: 'NUMBER_ABSOLUTE', family: 'NUMBER', category: 'NUMBER', label: '取绝对值', description: '将负数转换为正数值', sortKey: 'QUJUEDUIZHI', operations: ['ABS'], icon: PlusMinusIcon },
@@ -495,7 +506,7 @@ const transformCategoryMeta: Array<{ category: TransformPaletteCategory; label: 
 ]
 const transformComponentDefinition = (componentType: GraphTransformComponentType) => transformComponentMeta.find(item => item.componentType === componentType)
 const transformComponentTypeFor = (transform: Pick<GraphTransform, 'family' | 'componentType' | 'rules'>): GraphTransformComponentType => {
-  if (transform.componentType) return transform.componentType
+  if (transform.componentType) return normalizeGraphTransformComponentType(transform.componentType) || transform.componentType
   const operation = transform.rules[0]?.operation
   if (transform.family === 'DATE') return 'DATE_FORMAT'
   if (transform.family === 'CAST') return 'CAST'
@@ -507,10 +518,9 @@ const transformComponentTypeFor = (transform: Pick<GraphTransform, 'family' | 'c
     if (operation && ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'].includes(operation)) return 'NUMBER_ARITHMETIC'
     return 'NUMBER_ROUNDING'
   }
-  if (operation === 'UPPER') return 'TEXT_UPPER'
+  if (operation === 'UPPER' || operation === 'LOWER') return 'TEXT_CASE'
   if (operation === 'TRIM') return 'TEXT_TRIM'
   if (operation === 'REPLACE') return 'TEXT_REPLACE'
-  if (operation === 'LOWER') return 'TEXT_LOWER'
   if (operation === 'CONCAT' || transform.family === 'SPLIT_MERGE' && !operation) return 'TEXT_CONCAT'
   return 'TEXT_SUBSTRING'
 }
@@ -578,10 +588,10 @@ const isTime = (column: AssetColumn) => ['DATE', 'DATETIME', 'TIMESTAMP'].includ
 const emptyDraft = (): DatasetDraft => ({ code: '', name: '', description: '', layer: 'DWD', nodes: [], fields: [], joins: [], filters: [], parameters: [], calculations: [], sorts: [], grainDescription: '', grainKeys: [], groupingEnabled: false, finalConfigured: false, finalGroupingEnabled: false })
 const datasetLayers: DatasetLayer[] = ['ODS', 'DIM', 'DWD', 'DWS', 'ADS']
 const datasetLayerLabels: Record<DatasetLayer, string> = {
-  ODS: 'ODS · 来源物理映射',
-  DIM: 'DIM · 实体说明',
-  DWD: 'DWD · 业务事实明细',
-  DWS: 'DWS · 分析主题汇总',
+  ODS: 'ODS · 贴源层',
+  DIM: 'DIM · 维度层',
+  DWD: 'DWD · 明细层',
+  DWS: 'DWS · 汇总层',
   ADS: 'ADS · 应用交付数据',
 }
 const editorFingerprint = (snapshot: DatasetEditorSnapshot) => JSON.stringify(snapshot)
@@ -754,10 +764,10 @@ async function loadAllTables(): Promise<AssetTable[]> {
 
 const designerAssetLayers: DatasetLayer[] = ['ODS', 'DIM', 'DWD', 'DWS']
 const designerLayerLabels: Record<DatasetLayer, { name: string; description: string }> = {
-  ODS: { name: 'ODS 源映射', description: '字段结构映射 · 数据不复制入仓' },
-  DIM: { name: 'DIM 维度', description: '统一业务实体说明' },
-  DWD: { name: 'DWD 事实明细', description: '标准业务过程明细' },
-  DWS: { name: 'DWS 主题汇总', description: '跨事实主题聚合' },
+  ODS: { name: '贴源层', description: '字段结构映射 · 数据不复制入仓' },
+  DIM: { name: '维度层', description: '统一业务实体说明' },
+  DWD: { name: '明细层', description: '标准业务过程明细' },
+  DWS: { name: '汇总层', description: '跨事实主题聚合' },
   ADS: { name: 'ADS 应用数据', description: '面向应用的数据交付' },
 }
 
@@ -1058,7 +1068,7 @@ function relationCandidate(left: DesignerNode, right: DesignerNode, index: numbe
   const rightField = common ? rightByName.get(common.columnName.toLocaleLowerCase())?.columnName ?? '' : rightColumns.find(column => column.semanticType === 'IDENTIFIER')?.columnName ?? rightColumns[0]?.columnName ?? ''
   return {
     id: `join_${index}`, leftNodeId: left.id, rightNodeId: right.id, leftField, rightField,
-    joinType: 'LEFT', cardinality: '', relationshipType: 'DIRECT', relationshipRole: '', fanoutPolicy: 'SAFE', manualConfirmed: false,
+    joinType: 'LEFT', cardinality: joinCardinalityForType('LEFT'), manualConfirmed: false,
     conditions: [{ id: `join_${index}_condition_1`, leftField, rightField, operator: 'EQUALS' }],
   }
 }
@@ -1182,7 +1192,6 @@ export function DatasetCenterPage() {
   const [endBox, setEndBox] = useState<EndBox | null>(null)
   const [nodePreviews, setNodePreviews] = useState<Record<string, NodePreviewState>>({})
   const [nodePositions, setNodePositions] = useState<Record<string, CanvasPoint>>({})
-  const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set())
   const [metadata, setMetadata] = useState<DatasetMetadataForm>({ name: '', description: '', domain: '', subject: '' })
   const [detail, setDetail] = useState<DatasetRecord | null>(null)
   const [detailAsset, setDetailAsset] = useState<AssetTable | null>(null)
@@ -1605,8 +1614,6 @@ export function DatasetCenterPage() {
     try {
       const items = await loadDesignerAssets(datasets)
       setTables(items)
-      const firstPhysicalSource = items.find(item => item.sourceKind !== 'DATASET')?.dataSourceId
-      setExpandedSources(new Set(['dataset-layer:ODS', ...(firstPhysicalSource ? [firstPhysicalSource] : [])]))
     } catch (cause) {
       setFormError(cause instanceof Error ? cause.message : '加载资产模板失败')
     } finally {
@@ -1655,13 +1662,6 @@ export function DatasetCenterPage() {
         subject: record.dsl.dataset.subject ?? '',
       }
       setTables(availableTables)
-      setExpandedSources(new Set(hydrated.nodes.map(node =>
-        node.table.sourceKind === 'DATASET'
-          ? `dataset-layer:${node.table.datasetLayer}`
-          : 'dataset-layer:ODS',
-      ).concat(hydrated.nodes
-        .filter(node => node.table.sourceKind !== 'DATASET')
-        .map(node => node.table.dataSourceId))))
       setDraft(hydrated)
       setRelationBoxes(graph.joins)
       setGroupBoxes(graph.groups)
@@ -1797,19 +1797,35 @@ export function DatasetCenterPage() {
   })
 
   const updateJoin = (joinID: string, patch: Partial<JoinOption>) => setDraft(current => ({
-    ...current, joins: current.joins.map(join => join.id === joinID ? { ...join, ...patch } : join),
+    ...current,
+    joins: current.joins.map(join => {
+      if (join.id !== joinID) return join
+      const joinType = patch.joinType || join.joinType
+      return {
+        ...join,
+        ...patch,
+        joinType,
+        cardinality: joinCardinalityForType(joinType),
+        relationshipType: undefined,
+        relationshipRole: undefined,
+        fanoutPolicy: undefined,
+        bridge: undefined,
+        temporal: undefined,
+      }
+    }),
   }))
 
-  const addRelationBox = (position?: CanvasPoint) => {
+  const addRelationBox = (position?: CanvasPoint, input?: RelationInput) => {
     const largest = relationBoxes.reduce((value, box) => Math.max(value, Number(box.id.replace('join_', '')) || 0), draft.joins.length)
     const id = `join_${largest + 1}`
-    setRelationBoxes(current => [...current, { id, name: `关联结果 ${largest + 1}`, position: position ?? { x: 510 + current.length * 250, y: 150 + (current.length % 2) * 155 }, outputKeys: [] }])
+    setRelationBoxes(current => [...current, { id, name: `关联结果 ${largest + 1}`, position: position ?? { x: 510 + current.length * 250, y: 150 + (current.length % 2) * 155 }, ...(input ? { left: input } : {}), outputKeys: [] }])
     setActiveNodeID('')
     setActiveGroupID('')
     setActiveTransformID('')
     setActiveEnd(false)
     setActiveJoinID(id)
-    setCanvasNotice('关联组件已加入画布，请配置槽位 1 和槽位 2')
+    setCanvasNotice(input ? '关联组件已插入连线，槽位 1 已连接，请继续连接槽位 2' : '关联组件已加入画布，请配置槽位 1 和槽位 2')
+    return id
   }
 
   const dropRelationInput = (boxID: string, side: 'left' | 'right', input?: RelationInput) => setRelationBoxes(current => {
@@ -1985,17 +2001,18 @@ export function DatasetCenterPage() {
     }),
   }))
 
-  const addGroupBox = (position?: CanvasPoint) => {
+  const addGroupBox = (position?: CanvasPoint, input?: RelationInput) => {
     const nextNumber = groupBoxes.reduce((largest, group) => Math.max(largest, Number(group.id.replace('group_', '')) || 0), 0) + 1
     const id = `group_${nextNumber}`
-    const group: GroupBox = { id, name: `分组结果 ${nextNumber}`, position: position ?? { x: 420 + (nextNumber - 1) * 80, y: 165 + (nextNumber - 1) * 145 }, dimensions: [], metrics: [] }
+    const group: GroupBox = { id, name: `分组结果 ${nextNumber}`, position: position ?? { x: 420 + (nextNumber - 1) * 80, y: 165 + (nextNumber - 1) * 145 }, ...(input ? { input } : {}), dimensions: [], metrics: [] }
     setGroupBoxes(current => [...current, group])
     setActiveNodeID('')
     setActiveJoinID('')
     setActiveTransformID('')
     setActiveGroupID(id)
     setActiveEnd(false)
-    setCanvasNotice('分组组件已加入画布，请从上游组件手动连线')
+    setCanvasNotice(input ? '分组组件已插入连线，请继续配置维度和指标' : '分组组件已加入画布，请从上游组件手动连线')
+    return id
   }
 
   const connectGroupInput = (groupID: string, input?: RelationInput) => {
@@ -2049,59 +2066,39 @@ export function DatasetCenterPage() {
     }
   }
 
-  const updateGroupDimension = (groupID: string, field: ProducedField, enabled: boolean) => commitGroupFields(groupID, group => {
-    const existing = group.dimensions.find(item => item.key === field.key)
-    const generated = generatedGraphFieldIdentity(field)
-    const dimensions = enabled
-      ? [...group.dimensions.filter(item => item.key !== field.key), {
+  const updateGroupDimensions = (groupID: string, fields: ProducedField[]) => commitGroupFields(groupID, group => {
+    const seen = new Set<string>()
+    const orderedFields = fields.filter(field => {
+      if (seen.has(field.key)) return false
+      seen.add(field.key)
+      return true
+    })
+    const previous = new Map(group.dimensions.map(dimension => [dimension.key, dimension]))
+    const dimensions = orderedFields.map(field => {
+      const existing = previous.get(field.key)
+      const generated = generatedGraphFieldIdentity(field)
+      return {
         key: field.key,
         ...(existing?.outputKey ? { outputKey: existing.outputKey } : {}),
         name: existing?.name || generated.name,
         code: existing?.code || generated.code,
-      }]
-      : group.dimensions.filter(item => item.key !== field.key)
+      }
+    })
+    const dimensionKeys = new Set(dimensions.map(dimension => dimension.key))
+    const previousGroupingSets = group.groupingSets?.length ? group.groupingSets : [[]]
     const groupingSets = group.groupByMode === 'GROUPING_SETS'
-      ? enabled && !group.dimensions.length && group.groupingSets?.length === 1 && !group.groupingSets[0].length
-        ? [[field.key]]
-        : (group.groupingSets ?? []).map(groupingSet => enabled ? groupingSet : groupingSet.filter(key => key !== field.key))
-      : undefined
-    const metrics = enabled ? group.metrics.map(metric => metric.key === field.key ? {
-      ...metric,
-      outputKey: metric.outputKey || groupFieldOutputKey(group.id, 'metric', field),
-      name: metric.name === generated.name ? `${generated.name}指标` : metric.name,
-      code: safeIdentifier(metric.code) === safeIdentifier(generated.code) ? safeIdentifier(`${generated.code}_metric`) : metric.code,
-    } : metric) : group.metrics
-    return { ...group, dimensions, groupingSets, metrics }
-  })
-
-  const updateAllGroupDimensions = (groupID: string, fields: ProducedField[], enabled: boolean) => commitGroupFields(groupID, group => {
-    const fieldKeys = new Set(fields.map(field => field.key))
-    const previous = new Map(group.dimensions.map(dimension => [dimension.key, dimension]))
-    const dimensions = enabled
-      ? fields.map(field => {
-        const existing = previous.get(field.key)
-        const generated = generatedGraphFieldIdentity(field)
-        return {
-          key: field.key,
-          ...(existing?.outputKey ? { outputKey: existing.outputKey } : {}),
-          name: existing?.name || generated.name,
-          code: existing?.code || generated.code,
-        }
-      })
-      : group.dimensions.filter(dimension => !fieldKeys.has(dimension.key))
-    const groupingSets = group.groupByMode === 'GROUPING_SETS'
-      ? enabled && !group.dimensions.length
+      ? !dimensions.length
+        ? [[]]
+        : !group.dimensions.length && previousGroupingSets.length === 1 && !previousGroupingSets[0].length
         ? [dimensions.map(dimension => dimension.key)]
-        : enabled
-          ? group.groupingSets
-          : [[]]
+        : previousGroupingSets.map(groupingSet => groupingSet.filter(key => dimensionKeys.has(key)))
       : undefined
     return {
       ...group,
       dimensions,
       groupingSets,
-      metrics: enabled ? group.metrics.map(metric => {
-        const source = fields.find(field => field.key === metric.key)
+      metrics: group.metrics.map(metric => {
+        const source = orderedFields.find(field => field.key === metric.key)
         if (!source) return metric
         const generated = generatedGraphFieldIdentity(source)
         return {
@@ -2110,7 +2107,7 @@ export function DatasetCenterPage() {
           name: metric.name === generated.name ? `${generated.name}指标` : metric.name,
           code: safeIdentifier(metric.code) === safeIdentifier(generated.code) ? safeIdentifier(`${generated.code}_metric`) : metric.code,
         }
-      }) : group.metrics,
+      }),
     }
   })
 
@@ -2119,67 +2116,39 @@ export function DatasetCenterPage() {
     groupingSets: groupingSets.map(groupingSet => [...groupingSet]),
   }))
 
-  const updateGroupMetric = (groupID: string, field: ProducedField, enabled: boolean, patch: { aggregation?: string } = {}) => commitGroupFields(groupID, group => {
-    const existing = group.metrics.find(item => item.key === field.key)
-    const generated = generatedGraphFieldIdentity(field)
-    const aggregation = patch.aggregation ?? existing?.aggregation ?? ''
-    const dimension = group.dimensions.find(item => item.key === field.key)
-    const metrics = enabled
-      ? [...group.metrics.filter(item => item.key !== field.key), {
+  const updateGroupMetrics = (groupID: string, fields: ProducedField[], selections: GroupMetricSelection[]) => commitGroupFields(groupID, group => {
+    const fieldsByKey = new Map(fields.map(field => [field.key, field]))
+    const previous = new Map(group.metrics.map(metric => [metric.key, metric]))
+    const seen = new Set<string>()
+    const metrics = selections.flatMap(selection => {
+      if (seen.has(selection.key)) return []
+      seen.add(selection.key)
+      if (selection.key === '*') {
+        const existing = group.metrics.find(metric => metric.key === '*' || metric.countRows)
+        return [{
+          key: '*',
+          outputKey: existing?.outputKey || `${group.id}.metric_row_count`,
+          name: existing?.name || '总行数',
+          code: existing?.code || 'row_count',
+          aggregation: 'COUNT',
+          countRows: true,
+        }]
+      }
+      const field = fieldsByKey.get(selection.key)
+      if (!field) return []
+      if (!groupMetricAggregationOptions(field).some(option => option.value === selection.aggregation)) return []
+      const existing = previous.get(field.key)
+      const generated = generatedGraphFieldIdentity(field)
+      const dimension = group.dimensions.find(item => item.key === field.key)
+      return [{
         key: field.key,
         ...(existing?.outputKey || dimension ? { outputKey: existing?.outputKey || groupFieldOutputKey(group.id, 'metric', field) } : {}),
         name: existing?.name || (dimension ? `${generated.name}指标` : generated.name),
         code: existing?.code || (dimension ? safeIdentifier(`${generated.code}_metric`) : generated.code),
-        aggregation,
+        aggregation: selection.aggregation,
       }]
-      : group.metrics.filter(item => item.key !== field.key)
-    return {
-      ...group,
-      metrics,
-      dimensions: group.dimensions,
-    }
-  })
-
-  const updateAllGroupMetrics = (groupID: string, fields: ProducedField[], enabled: boolean) => commitGroupFields(groupID, group => {
-    const fieldKeys = new Set(fields.map(field => field.key))
-    const previous = new Map(group.metrics.map(metric => [metric.key, metric]))
-    const rowCountMetrics = group.metrics.filter(metric => metric.key === '*' || metric.countRows)
-    const metrics = enabled
-      ? [...rowCountMetrics, ...fields.map(field => {
-        const existing = previous.get(field.key)
-        const generated = generatedGraphFieldIdentity(field)
-        const numeric = ['NUMBER', 'INT', 'INTEGER', 'DECIMAL', 'FLOAT', 'DOUBLE'].includes(field.canonicalType.toUpperCase())
-        const dimension = group.dimensions.find(item => item.key === field.key)
-        return {
-          key: field.key,
-          ...(existing?.outputKey || dimension ? { outputKey: existing?.outputKey || groupFieldOutputKey(group.id, 'metric', field) } : {}),
-          name: existing?.name || (dimension ? `${generated.name}指标` : generated.name),
-          code: existing?.code || (dimension ? safeIdentifier(`${generated.code}_metric`) : generated.code),
-          aggregation: existing?.aggregation || (numeric ? 'SUM' : 'COUNT'),
-        }
-      })]
-      : group.metrics.filter(metric => metric.key === '*' || metric.countRows || !fieldKeys.has(metric.key))
-    return {
-      ...group,
-      metrics,
-      dimensions: group.dimensions,
-    }
-  })
-
-  const updateGroupRowCountMetric = (groupID: string, enabled: boolean) => commitGroupFields(groupID, group => {
-    const existing = group.metrics.find(metric => metric.key === '*' || metric.countRows)
-    const remaining = group.metrics.filter(metric => metric.key !== '*' && !metric.countRows)
-    return {
-      ...group,
-      metrics: enabled ? [{
-        key: '*',
-        outputKey: existing?.outputKey || `${group.id}.metric_row_count`,
-        name: existing?.name || '总行数',
-        code: existing?.code || 'row_count',
-        aggregation: 'COUNT',
-        countRows: true,
-      }, ...remaining] : remaining,
-    }
+    })
+    return { ...group, metrics }
   })
 
   const removeGroupBox = (groupID: string) => {
@@ -2206,21 +2175,29 @@ export function DatasetCenterPage() {
     setEndPreview({ loading: false })
   }
 
-  const addTransformBox = (componentType: GraphTransformComponentType, position?: CanvasPoint) => {
+  const addTransformBox = (componentType: GraphTransformComponentType, position?: CanvasPoint, input?: RelationInput) => {
     const definition = transformComponentDefinition(componentType)
     if (!definition) return
     const nextNumber = transformBoxes.reduce((largest, transform) => Math.max(largest, Number(transform.id.replace('transform_', '')) || 0), 0) + 1
     const id = `transform_${nextNumber}`
-    const transform: TransformBox = {
+    const availableFields = relationOutputFields(input, relationBoxes, groupBoxes, draft.nodes, draft.fields, transformBoxes)
+    const filterFields = availableFields.filter(field => field.kind !== 'METRIC' && !field.aggregation)
+    let transform: TransformBox = {
       id, family: definition.family, componentType, name: `${definition.label} ${nextNumber}`,
-      position: position ?? { x: 620 + (nextNumber - 1) * 85, y: 175 + (nextNumber - 1) * 125 }, rules: [],
-      ...(componentType === 'FILTER' ? { conditions: [] } : {}),
+      position: position ?? { x: 620 + (nextNumber - 1) * 85, y: 175 + (nextNumber - 1) * 125 }, ...(input ? { input } : {}), rules: [],
+      ...(componentType === 'FILTER' ? {
+        conditions: input && filterFields.length
+          ? [{ id: `${id}_condition_1`, inputKey: filterFields[0].key, operator: 'EQUALS' as const, value: '' }]
+          : [],
+      } : {}),
     }
+    if (componentType !== 'FILTER' && input && availableFields.length) transform = { ...transform, rules: [defaultTransformRule(transform, availableFields, 1)] }
     const next = [...transformBoxes, transform]
     setTransformBoxes(next)
     setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveTransformID(id); setActiveEnd(false)
     setFormError('')
-    setCanvasNotice(`${definition.label}已加入画布，请从上游组件手动连线`)
+    setCanvasNotice(input ? `${definition.label}已插入连线，请继续完善配置` : `${definition.label}已加入画布，请从上游组件手动连线`)
+    return id
   }
 
   const connectTransformInput = (transformID: string, input?: RelationInput) => {
@@ -3586,68 +3563,31 @@ export function DatasetCenterPage() {
     </section>
 
     {dialog?.mode === 'create' && <Dialog title={editingCanvas ? '修改数据集' : '新建数据集'} eyebrow="图形化配置" wide closeDisabled={aiApplying} onClose={closeDialog}>
-      <div className="dataset-create-layout">
-        <aside className="dataset-template-tree">
-          <header><strong>数据资产节点</strong><small>按数仓层级分组 / 固定精确发布版本</small></header>
-          {assetsLoading ? <p>正在加载分层数据资产…</p> : sourceGroups.map(source =>
-            <section key={source.id}>
-              <button className="source-tree-node" type="button" aria-expanded={expandedSources.has(source.id)} onClick={() => setExpandedSources(current => {
-                const next = new Set(current)
-                if (next.has(source.id)) next.delete(source.id)
-                else next.add(source.id)
-                return next
-              })}>
-                <span>{expandedSources.has(source.id) ? '▾' : '▸'}</span>
-                <strong>{source.name}</strong>
-                <small>{source.type} · {source.tables.length}</small>
-              </button>
-              {expandedSources.has(source.id) && <div className="source-tree-children">
-                {!source.tables.length && <p className="source-tree-empty">暂无可用数据集</p>}
-                {source.physicalSourceGroups.map(group => <section className="source-tree-physical-group" key={group.id}>
-                  <button className="source-tree-node" type="button" aria-expanded={expandedSources.has(group.id)} onClick={() => setExpandedSources(current => {
-                    const next = new Set(current)
-                    if (next.has(group.id)) next.delete(group.id)
-                    else next.add(group.id)
-                    return next
-                  })}>
-                    <span>{expandedSources.has(group.id) ? '▾' : '▸'}</span>
-                    <strong>{group.name}</strong><small>{group.type}</small>
-                  </button>
-                  {expandedSources.has(group.id) && <div className="source-tree-children">{group.tables.map(table => {
-                    const instanceCount = draft.nodes.filter(node => node.table.id === table.id).length
-                    return <button key={table.id} type="button" draggable onDragStart={event => event.dataTransfer.setData('text/dataset-table-id', table.id)} onClick={() => void selectTable(table)}>
-                      <span>▦</span>
-                      <span><strong>{table.businessName || table.tableName}</strong><small>已映射 · ODS 源映射 · {table.schemaName}.{table.tableName} · {table.columnCount} 字段</small></span>
-                      {instanceCount > 0 && <em>已引用 {instanceCount} 次</em>}
-                    </button>
-                  })}</div>}
-                </section>)}
-                {source.datasetTables.map(table => {
-                  const instanceCount = draft.nodes.filter(node => node.table.id === table.id).length
-                  return <button key={table.id} type="button" draggable onDragStart={event => event.dataTransfer.setData('text/dataset-table-id', table.id)} onClick={() => void selectTable(table)}>
-                    <span>▦</span>
-                    <span><strong>{table.businessName || table.tableName}</strong><small>{table.datasetLayer} 已发布版本 · {table.tableName} · {table.columnCount} 字段</small></span>
-                    {instanceCount > 0 && <em>已引用 {instanceCount} 次</em>}
-                  </button>
-                })}
-              </div>}
-            </section>,
-          )}
-        </aside>
-        <main ref={canvasFullscreenTarget} className={`dataset-template-canvas ${canvasFullscreen ? 'is-fullscreen' : ''}`} onClick={closeCanvasEditor} onDragOver={event => event.preventDefault()} onDrop={(event: DragEvent<HTMLElement>) => { event.preventDefault(); const table = tables.find(item => item.id === event.dataTransfer.getData('text/dataset-table-id')); if (table) void selectTable(table) }}>
-          <DatasetAIComposer prompt={aiPrompt} lastInstruction={aiLastInstruction} result={aiResult} progressLogs={aiProgressLogs} labels={aiReviewLabels} error={aiError} busy={aiBusy} applying={aiApplying} applied={aiApplied} detailsExpanded={aiDetailsExpanded} ready={!assetsLoading && !busyAction} hasAssets={tables.length > 0} canUndo={Boolean(aiUndo)} canRetry={Boolean(aiRetryAction)} retryRequiresGeneration={aiRetryAction === 'GENERATE'} hasGraph={draft.nodes.length > 0} onPromptChange={setAIPrompt} onSubmit={() => void generateDatasetAIPlan()} onApply={() => void applyDatasetAIPlan()} onUndo={undoDatasetAIPlan} onRetryOriginal={() => retryDatasetAI('ORIGINAL')} onRetryModified={() => retryDatasetAI('MODIFIED')} onDismissError={dismissDatasetAIError} onDetailsExpandedChange={setAIDetailsExpanded} />
-          {!draft.nodes.length ? <div className="dataset-canvas-empty"><strong>选择第一张映射表开始建模</strong><p>表会成为数据节点；点击节点可预览真实数据并选择输出字段。</p>{canvasNotice && <small role="status">{canvasNotice}</small>}</div> : <div className="dataset-node-graph">
-            <div className="dataset-graph-heading"><div><strong>组件关系画布</strong><small>{draft.nodes.length} 个数据节点 · {relationBoxes.length} 个关联 · {groupBoxes.length} 个分组 · {endBox ? '1 个结束节点' : '尚无结束节点'} · {transformBoxes.length} 个字段处理</small></div><span>{canvasNotice || '拖入组件并连线，结束节点定义最终产物'}</span></div>
-            <RelationCanvas nodes={draft.nodes} fields={draft.fields} joins={draft.joins} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} end={endBox} nodePositions={nodePositions} activeNodeID={activeNodeID} activeJoinID={activeJoinID} activeGroupID={activeGroupID} activeTransformID={activeTransformID} activeEnd={activeEnd} tables={tables} isFullscreen={canvasFullscreen} previewTarget={canvasPreviewTarget} preview={canvasPreview} previewLabel={canvasPreviewLabel} onPreview={openCanvasPreview} onRefreshPreview={() => { if (canvasPreviewTarget) openCanvasPreview(canvasPreviewTarget) }} onClosePreview={() => setCanvasPreviewTarget(null)} onArrange={arrangeCanvas} onToggleFullscreen={() => void toggleCanvasFullscreen()} onAddJoin={addRelationBox} onAddGroup={addGroupBox} onAddTransform={addTransformBox} onAddEnd={addEndBox} onAddTable={(table, position) => void selectTable(table, position)} onMove={updateCanvasPosition} onConnect={dropRelationInput} onConnectGroup={connectGroupInput} onConnectTransform={connectTransformInput} onConnectEnd={connectEndInput} onRemoveBox={removeRelationBox} onRemoveGroup={removeGroupBox} onRemoveTransform={removeTransformBox} onRemoveEnd={removeEndBox} onNodeClick={openNodeConfig} onJoinClick={joinID => { setActiveNodeID(''); setActiveGroupID(''); setActiveTransformID(''); setActiveEnd(false); setActiveJoinID(joinID); setCanvasNotice('') }} onGroupClick={groupID => { setActiveNodeID(''); setActiveJoinID(''); setActiveTransformID(''); setActiveEnd(false); setActiveGroupID(groupID); setCanvasNotice('') }} onTransformClick={transformID => { setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveEnd(false); setActiveTransformID(transformID); setCanvasNotice('') }} onEndClick={() => { setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveTransformID(''); setActiveEnd(true); setCanvasNotice('') }} onRemoveNode={removeNode} />
-          </div>}
+      <DatasetDesignWorkspace
+        ref={canvasFullscreenTarget}
+        loading={assetsLoading}
+        groups={sourceGroups}
+        tables={tables}
+        nodes={draft.nodes}
+        isFullscreen={canvasFullscreen}
+        relationCount={relationBoxes.length}
+        groupCount={groupBoxes.length}
+        transformCount={transformBoxes.length}
+        hasEnd={Boolean(endBox)}
+        notice={canvasNotice}
+        onCanvasClick={closeCanvasEditor}
+        onSelectTable={table => void selectTable(table)}
+        assistant={<DatasetAIComposer prompt={aiPrompt} lastInstruction={aiLastInstruction} result={aiResult} progressLogs={aiProgressLogs} labels={aiReviewLabels} error={aiError} busy={aiBusy} applying={aiApplying} applied={aiApplied} detailsExpanded={aiDetailsExpanded} ready={!assetsLoading && !busyAction} hasAssets={tables.length > 0} canUndo={Boolean(aiUndo)} canRetry={Boolean(aiRetryAction)} retryRequiresGeneration={aiRetryAction === 'GENERATE'} hasGraph={draft.nodes.length > 0} onPromptChange={setAIPrompt} onSubmit={() => void generateDatasetAIPlan()} onApply={() => void applyDatasetAIPlan()} onUndo={undoDatasetAIPlan} onRetryOriginal={() => retryDatasetAI('ORIGINAL')} onRetryModified={() => retryDatasetAI('MODIFIED')} onDismissError={dismissDatasetAIError} onDetailsExpandedChange={setAIDetailsExpanded} />}
+        canvas={<RelationCanvas nodes={draft.nodes} fields={draft.fields} joins={draft.joins} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} end={endBox} nodePositions={nodePositions} activeNodeID={activeNodeID} activeJoinID={activeJoinID} activeGroupID={activeGroupID} activeTransformID={activeTransformID} activeEnd={activeEnd} tables={tables} isFullscreen={canvasFullscreen} previewTarget={canvasPreviewTarget} preview={canvasPreview} previewLabel={canvasPreviewLabel} onPreview={openCanvasPreview} onRefreshPreview={() => { if (canvasPreviewTarget) openCanvasPreview(canvasPreviewTarget) }} onClosePreview={() => setCanvasPreviewTarget(null)} onArrange={arrangeCanvas} onToggleFullscreen={() => void toggleCanvasFullscreen()} onAddJoin={addRelationBox} onAddGroup={addGroupBox} onAddTransform={addTransformBox} onAddEnd={addEndBox} onAddTable={(table, position) => void selectTable(table, position)} onMove={updateCanvasPosition} onConnect={dropRelationInput} onConnectGroup={connectGroupInput} onConnectTransform={connectTransformInput} onConnectEnd={connectEndInput} onRemoveBox={removeRelationBox} onRemoveGroup={removeGroupBox} onRemoveTransform={removeTransformBox} onRemoveEnd={removeEndBox} onNodeClick={openNodeConfig} onJoinClick={joinID => { setActiveNodeID(''); setActiveGroupID(''); setActiveTransformID(''); setActiveEnd(false); setActiveJoinID(joinID); setCanvasNotice('') }} onGroupClick={groupID => { setActiveNodeID(''); setActiveJoinID(''); setActiveTransformID(''); setActiveEnd(false); setActiveGroupID(groupID); setCanvasNotice('') }} onTransformClick={transformID => { setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveEnd(false); setActiveTransformID(transformID); setCanvasNotice('') }} onEndClick={() => { setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveTransformID(''); setActiveEnd(true); setCanvasNotice('') }} onRemoveNode={removeNode} />}
+        panels={<>
           {activeNode && <NodeConfigDrawer node={activeNode} fields={draft.fields.filter(field => field.key.startsWith(`${activeNode.id}.`))} onFieldPatch={updateOutputField} onDone={closeCanvasEditor} />}
           {activeRelationBox && <JoinConfigDrawer box={activeRelationBox} join={activeJoin} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} nodes={draft.nodes} leftOutputFields={activeLeftOutputFields} rightOutputFields={activeRightOutputFields} onNameChange={name => setRelationBoxes(current => current.map(box => box.id === activeRelationBox.id ? { ...box, name } : box))} onJoinPatch={patch => activeJoin && updateJoin(activeJoin.id, { ...patch, manualConfirmed: false })} onConditionPatch={(conditionID, patch) => activeJoin && updateJoinCondition(activeJoin.id, conditionID, patch)} onAddCondition={() => activeJoin && addJoinCondition(activeJoin.id)} onRemoveCondition={conditionID => activeJoin && removeJoinCondition(activeJoin.id, conditionID)} onOutputChange={(key, checked) => updateRelationOutput(activeRelationBox.id, key, checked)} onDone={closeCanvasEditor} />}
-          {activeGroup && <GroupingConfigDrawer box={activeGroup} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} nodes={draft.nodes} availableFields={groupInputFields} error={formError} onNameChange={name => updateGroupName(activeGroup.id, name)} onGroupByModeChange={mode => updateGroupByMode(activeGroup.id, mode)} onGroupingSetsChange={groupingSets => updateGroupingSets(activeGroup.id, groupingSets)} onDimensionChange={(field, enabled) => updateGroupDimension(activeGroup.id, field, enabled)} onAllDimensionsChange={enabled => updateAllGroupDimensions(activeGroup.id, groupInputFields, enabled)} onRowCountMetricChange={enabled => updateGroupRowCountMetric(activeGroup.id, enabled)} onMetricChange={(field, enabled, patch) => updateGroupMetric(activeGroup.id, field, enabled, patch)} onAllMetricsChange={enabled => updateAllGroupMetrics(activeGroup.id, groupInputFields, enabled)} onDone={closeCanvasEditor} />}
+          {activeGroup && <GroupingConfigDrawer box={activeGroup} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} nodes={draft.nodes} availableFields={groupInputFields} error={formError} onNameChange={name => updateGroupName(activeGroup.id, name)} onGroupByModeChange={mode => updateGroupByMode(activeGroup.id, mode)} onGroupingSetsChange={groupingSets => updateGroupingSets(activeGroup.id, groupingSets)} onDimensionsChange={fields => updateGroupDimensions(activeGroup.id, fields)} onMetricsChange={selections => updateGroupMetrics(activeGroup.id, groupInputFields, selections)} onDone={closeCanvasEditor} />}
           {activeTransform && <TransformConfigDrawer transform={activeTransform} inputs={transformInputFields} nodes={draft.nodes} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} error={formError} onNameChange={name => updateTransformName(activeTransform.id, name)} onRuleChange={(ruleID, patch) => updateTransformRule(activeTransform.id, ruleID, patch)} onAddRule={() => addTransformRule(activeTransform.id)} onRemoveRule={ruleID => removeTransformRule(activeTransform.id, ruleID)} onFilterConditionChange={(conditionID, patch) => updateFilterCondition(activeTransform.id, conditionID, patch)} onAddFilterCondition={() => addFilterCondition(activeTransform.id)} onRemoveFilterCondition={conditionID => removeFilterCondition(activeTransform.id, conditionID)} onDone={closeCanvasEditor} />}
           {activeEnd && endBox && <EndConfigDrawer end={endBox} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} nodes={draft.nodes} availableFields={endInputFields} onNameChange={name => setEndBox(current => current ? { ...current, name } : current)} onOutputChange={updateEndOutput} onDone={closeCanvasEditor} />}
-          {formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}
-        </main>
-      </div>
+        </>}
+        feedback={formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}
+      />
       <footer className="dataset-dialog-footer"><button className="quiet-button" type="button" disabled={actionBusy || aiApplying} onClick={closeDialog}>取消</button><button className="primary-button" type="button" disabled={actionBusy || assetsLoading || aiBusy || aiApplying} onClick={openMetadata}>{busyAction.startsWith('asset:') ? '正在填充…' : aiBusy ? '正在生成 AI 方案…' : aiApplying ? '正在应用 AI 方案…' : '保存配置'}</button></footer>
     </Dialog>}
 
@@ -3895,14 +3835,19 @@ function DatasetAIComposer({ prompt, lastInstruction, result, progressLogs, labe
     const transformOutput = proposal?.plan.transforms?.find(transform => transform.id === nodeID)?.rules.find(rule => rule.output.id === column)?.output
     return `${nodeLabel(nodeID)} · ${labels.fields[`${nodeID}.${column}`] || transformOutput?.name || column}`
   }
-  const joinMeaning = (joinType: 'INNER' | 'LEFT') => joinType === 'INNER' ? '仅保留两侧匹配数据' : '保留左侧全部数据'
+  const joinMeaning = (joinType: 'INNER' | 'LEFT' | 'RIGHT' | 'FULL') => ({
+    INNER: '仅保留两侧匹配数据 · 一对一',
+    LEFT: '保留左侧全部数据 · 多对一',
+    RIGHT: '保留右侧全部数据 · 一对多',
+    FULL: '保留两侧全部数据 · 多对多',
+  })[joinType]
   useLayoutEffect(() => {
     const textarea = promptRef.current
     if (!textarea) return
     textarea.style.height = '0px'
     textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 28), 128)}px`
   }, [prompt])
-  return <section className={`dataset-ai-composer ${proposal ? 'has-proposal' : ''}`} aria-label="AI 自动配置数据流" onMouseDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()} onDrop={event => event.stopPropagation()}>
+  return <DatasetAIDock hasProposal={Boolean(proposal)}>
     <form onSubmit={event => { event.preventDefault(); onSubmit() }}>
       <span className="dataset-ai-icon" aria-hidden="true"><MagicWandIcon size={19} weight="fill" /></span>
       <label>
@@ -3975,7 +3920,7 @@ function DatasetAIComposer({ prompt, lastInstruction, result, progressLogs, labe
         {(proposal.assumptions.length > 0 || proposal.warnings.length > 0) && <section className="dataset-ai-notes"><h4>生成依据</h4>{proposal.assumptions.map(item => <p key={`assumption:${item}`}>{item}</p>)}{proposal.warnings.map(item => <p className="warning" key={`warning:${item}`}>{item}</p>)}</section>}
       </div>
     </article>}
-  </section>
+  </DatasetAIDock>
 }
 
 function DatasetAIGenerationProgress({ logs }: { logs: DatasetAIProgressEvent[] }) {
@@ -4001,7 +3946,7 @@ function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, 
   activeNodeID: string; activeJoinID: string; activeGroupID: string; activeTransformID: string; activeEnd: boolean; tables: AssetTable[]
   isFullscreen: boolean; previewTarget: CanvasPreviewTarget | null; preview?: NodePreviewState; previewLabel: string
   onPreview: (target: CanvasPreviewTarget) => void; onRefreshPreview: () => void; onClosePreview: () => void; onArrange: () => void; onToggleFullscreen: () => void
-  onAddJoin: (position?: CanvasPoint) => void; onAddGroup: (position?: CanvasPoint) => void; onAddTransform: (componentType: GraphTransformComponentType, position?: CanvasPoint) => void; onAddEnd: (position?: CanvasPoint) => void; onAddTable: (table: AssetTable, position: CanvasPoint) => void
+  onAddJoin: (position?: CanvasPoint, input?: RelationInput) => string; onAddGroup: (position?: CanvasPoint, input?: RelationInput) => string; onAddTransform: (componentType: GraphTransformComponentType, position?: CanvasPoint, input?: RelationInput) => string | undefined; onAddEnd: (position?: CanvasPoint) => void; onAddTable: (table: AssetTable, position: CanvasPoint) => void
   onMove: (kind: CanvasComponentKind, id: string, position: CanvasPoint) => void
   onConnect: (boxID: string, side: 'left' | 'right', input?: RelationInput) => void
   onConnectGroup: (groupID: string, input?: RelationInput) => void; onConnectTransform: (transformID: string, input?: RelationInput) => void; onConnectEnd: (input?: RelationInput) => void
@@ -4012,9 +3957,12 @@ function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, 
   const [connectionPoint, setConnectionPoint] = useState<CanvasPoint | null>(null)
   const [sourcePortPositions, setSourcePortPositions] = useState<Record<string, CanvasPoint>>({})
   const [targetPortPositions, setTargetPortPositions] = useState<Record<string, CanvasPoint>>({})
+  const [openEdgeMenuKey, setOpenEdgeMenuKey] = useState('')
+  const [pendingEdgeInsertion, setPendingEdgeInsertion] = useState<PendingEdgeInsertion | null>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
   const lineLayerRef = useRef<SVGSVGElement>(null)
   const connectionPointerIDRef = useRef<number | null>(null)
+  const edgeInsertionInFlightRef = useRef<PendingEdgeInsertion | null>(null)
   const measureSourcePorts = useCallback(() => {
     const canvas = canvasRef.current
     const layer = lineLayerRef.current
@@ -4029,7 +3977,7 @@ function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, 
       const bounds = port.getBoundingClientRect()
       if (!key || bounds.width <= 0 || bounds.height <= 0) return
       next[key] = {
-        // output-port 是组件右半区的大热区，连线从卡片右边缘发出。
+        // output-port 是贴在组件右侧内缘的半圆端口，连线仍从卡片右边缘发出。
         x: bounds.right - layerBounds.left - 1,
         y: bounds.top + bounds.height / 2 - layerBounds.top,
       }
@@ -4232,6 +4180,37 @@ function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, 
       window.removeEventListener('pointercancel', cancelPointerConnection)
     }
   }, [boxes, draggingConnection, groups, onConnect, onConnectEnd, onConnectGroup, onConnectTransform, transforms])
+  useEffect(() => {
+    if (!pendingEdgeInsertion) return
+    const { inserted, source, target } = pendingEdgeInsertion
+    const ready = inserted.kind === 'JOIN'
+      ? boxes.some(box => box.id === inserted.id && box.left?.kind === source.kind && box.left.id === source.id)
+      : inserted.kind === 'GROUP'
+      ? groups.some(group => group.id === inserted.id && group.input?.kind === source.kind && group.input.id === source.id)
+      : inserted.kind === 'TRANSFORM'
+        ? transforms.some(transform => transform.id === inserted.id && transform.input?.kind === source.kind && transform.input.id === source.id)
+        : false
+    if (!ready || edgeInsertionInFlightRef.current === pendingEdgeInsertion) return
+    // 连接回调会改写父组件状态并重建函数引用；用 ref 标记已消费的事务，
+    // 再在同一个微任务中清除 pending 与改写下游，避免 effect 重复连接。
+    edgeInsertionInFlightRef.current = pendingEdgeInsertion
+    queueMicrotask(() => {
+      setPendingEdgeInsertion(current => current === pendingEdgeInsertion ? null : current)
+      if (target.kind === 'JOIN') onConnect(target.id, target.side, inserted)
+      else if (target.kind === 'GROUP') onConnectGroup(target.id, inserted)
+      else if (target.kind === 'TRANSFORM') onConnectTransform(target.id, inserted)
+      else onConnectEnd(inserted)
+      edgeInsertionInFlightRef.current = null
+    })
+  }, [boxes, groups, onConnect, onConnectEnd, onConnectGroup, onConnectTransform, pendingEdgeInsertion, transforms])
+  useEffect(() => {
+    if (!openEdgeMenuKey) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpenEdgeMenuKey('')
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [openEdgeMenuKey])
   const sourcePort = (input: RelationInput, position: CanvasPoint) => ({
     // 首次布局前保留稳定回退；布局完成后使用真实端口圆心，避免内容把卡片撑高
     // 时曲线仍按 min-height 猜测位置。
@@ -4248,26 +4227,116 @@ function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, 
     const geometry = curveGeometry(start, targetPortPositions[targetKey] ?? fallbackTarget)
     return { path: geometry.path, deletePosition: geometry.midpoint }
   }
-  const edges = boxes.flatMap((box, boxIndex) => {
+  type CanvasEdge = {
+    key: string
+    source: RelationInput
+    target: CanvasEdgeTarget
+    targetLabel: string
+    geometry: { path: string; deletePosition: CanvasPoint }
+    deleteLabel: string
+    remove: () => void
+  }
+  const edges: CanvasEdge[] = boxes.flatMap((box, boxIndex) => {
     const target = box.position ?? { x: 510, y: 150 }
     return ([box.left, box.right] as Array<RelationInput | undefined>).flatMap((input, slot) => {
       if (!input) return []
       const side = slot === 0 ? 'left' : 'right'
       const geometry = edge(input, `JOIN:${box.id}:${side}`, { x: target.x, y: target.y + (slot === 0 ? 43 : 82) })
-      return geometry ? [{ key: `${box.id}-${slot}`, source: input, geometry, label: `删除关联节点 ${boxIndex + 1} 槽位 ${slot + 1} 连线`, remove: () => onConnect(box.id, slot === 0 ? 'left' : 'right') }] : []
+      return geometry ? [{
+        key: `${box.id}-${slot}`,
+        source: input,
+        target: { kind: 'JOIN' as const, id: box.id, side: side as 'left' | 'right' },
+        targetLabel: `关联节点 ${boxIndex + 1} 槽位 ${slot + 1}`,
+        geometry,
+        deleteLabel: `删除关联节点 ${boxIndex + 1} 槽位 ${slot + 1} 连线`,
+        remove: () => onConnect(box.id, side),
+      }] : []
     })
   })
   for (const group of groups) if (group.input) {
     const geometry = edge(group.input, `GROUP:${group.id}:input`, { x: group.position.x, y: group.position.y + 58 })
-    if (geometry) edges.push({ key: `${group.id}-input`, source: group.input, geometry, label: `删除“${group.name}”输入连线`, remove: () => onConnectGroup(group.id) })
+    if (geometry) edges.push({ key: `${group.id}-input`, source: group.input, target: { kind: 'GROUP', id: group.id }, targetLabel: `“${group.name}”输入`, geometry, deleteLabel: `删除“${group.name}”输入连线`, remove: () => onConnectGroup(group.id) })
   }
   for (const transform of transforms) if (transform.input) {
     const geometry = edge(transform.input, `TRANSFORM:${transform.id}:input`, { x: transform.position.x, y: transform.position.y + 58 })
-    if (geometry) edges.push({ key: `${transform.id}-input`, source: transform.input, geometry, label: `删除“${transform.name}”输入连线`, remove: () => onConnectTransform(transform.id) })
+    if (geometry) edges.push({ key: `${transform.id}-input`, source: transform.input, target: { kind: 'TRANSFORM', id: transform.id }, targetLabel: `“${transform.name}”输入`, geometry, deleteLabel: `删除“${transform.name}”输入连线`, remove: () => onConnectTransform(transform.id) })
   }
   if (end?.input) {
     const geometry = edge(end.input, `END:${end.id}:input`, { x: end.position.x, y: end.position.y + 58 })
-    if (geometry) edges.push({ key: 'end-input', source: end.input, geometry, label: '删除结束节点输入连线', remove: () => onConnectEnd() })
+    if (geometry) edges.push({ key: 'end-input', source: end.input, target: { kind: 'END', id: end.id }, targetLabel: '结束节点输入', geometry, deleteLabel: '删除结束节点输入连线', remove: () => onConnectEnd() })
+  }
+  const insertComponentOnEdge = (item: CanvasEdge, selection: { kind: 'JOIN' } | { kind: 'GROUP' } | { kind: 'TRANSFORM'; componentType: GraphTransformComponentType }) => {
+    const width = selection.kind === 'JOIN' ? 180 : selection.kind === 'GROUP' ? 190 : 200
+    const position = {
+      x: Math.max(16, item.geometry.deletePosition.x - width / 2),
+      y: Math.max(20, item.geometry.deletePosition.y - 58),
+    }
+    const id = selection.kind === 'JOIN'
+      ? onAddJoin(position, item.source)
+      : selection.kind === 'GROUP'
+        ? onAddGroup(position, item.source)
+        : onAddTransform(selection.componentType, position, item.source)
+    if (!id) return
+    setOpenEdgeMenuKey('')
+    setPendingEdgeInsertion({
+      inserted: { kind: selection.kind, id },
+      source: item.source,
+      target: item.target,
+    })
+  }
+  const edgeComponentPicker = (item: CanvasEdge) => {
+    const sourceAlreadyGrouped = item.source.kind === 'NODE' && groups.some(group => group.input?.kind === 'NODE' && group.input.id === item.source.id)
+    const groupDisabled = item.source.kind === 'GROUP' || item.target.kind === 'GROUP' || sourceAlreadyGrouped
+    const sourceGroup = item.source.kind === 'GROUP' ? groups.find(group => group.id === item.source.id) : undefined
+    const sourceGroupInput = sourceGroup?.input
+    const sourceGroupCanFeedJoin = Boolean(sourceGroupInput
+      && relationLeaves(sourceGroupInput, boxes, groups, transforms).length === 1
+      && !boxes.some(join => relationContains(sourceGroupInput, { kind: 'JOIN', id: join.id }, boxes, groups, transforms))
+      && !groups.some(group => group.id !== sourceGroup?.id && relationContains(sourceGroupInput, { kind: 'GROUP', id: group.id }, boxes, groups, transforms)))
+    const joinDisabled = Boolean(sourceGroup && !sourceGroupCanFeedJoin)
+    const groupDescription = item.source.kind === 'GROUP' || item.target.kind === 'GROUP'
+      ? '分组组件不能连续串联'
+      : sourceAlreadyGrouped
+        ? '该数据节点已进入其他分组组件'
+        : '按维度聚合指标'
+    return <div
+      className="dataset-edge-component-picker"
+      role="dialog"
+      aria-modal="false"
+      aria-label={`在${item.targetLabel}的连线上插入组件`}
+      onClick={event => event.stopPropagation()}
+      onPointerDown={event => event.stopPropagation()}
+      onWheel={event => event.stopPropagation()}
+      onTouchMove={event => event.stopPropagation()}
+    >
+      <header>
+        <div><strong>插入组件</strong><small>{inputLabel(item.source)} → {item.targetLabel}</small></div>
+        <button type="button" aria-label="关闭组件选择" onClick={() => setOpenEdgeMenuKey('')}><XIcon aria-hidden="true" size={13} weight="bold" /></button>
+      </header>
+      <div className="dataset-edge-component-list">
+        <section className="component-flow" aria-label="流程组件">
+          <strong>流程组件</strong>
+          <button type="button" disabled={groupDisabled} title={groupDisabled ? groupDescription : undefined} onClick={() => insertComponentOnEdge(item, { kind: 'GROUP' })}>
+            <RowsIcon data-component-icon="GROUP" aria-hidden="true" size={17} weight="bold" />
+            <span><b>分组组件</b><small>{groupDescription}</small></span>
+          </button>
+          <button type="button" disabled={joinDisabled} title={joinDisabled ? '该分组产物不满足关联槽位输入约束' : undefined} onClick={() => insertComponentOnEdge(item, { kind: 'JOIN' })}>
+            <GitMergeIcon data-component-icon="JOIN" aria-hidden="true" size={17} weight="bold" />
+            <span><b>关联组件</b><small>{joinDisabled ? '当前分组产物不可再关联' : '当前上游接入槽位 1'}</small></span>
+          </button>
+        </section>
+        {transformCategoryMeta.map(category => <section key={category.category} className={category.className} aria-label={category.label}>
+          <strong>{category.label}</strong>
+          {transformComponentMeta.filter(component => component.category === category.category).sort((left, right) => left.sortKey.localeCompare(right.sortKey, 'en')).map(component => {
+            const ComponentIcon = component.icon
+            return <button key={component.componentType} type="button" onClick={() => insertComponentOnEdge(item, { kind: 'TRANSFORM', componentType: component.componentType })}>
+              <ComponentIcon data-component-icon={component.componentType} aria-hidden="true" size={17} weight="bold" />
+              <span><b>{component.label}</b><small>{component.description}</small></span>
+            </button>
+          })}
+        </section>)}
+      </div>
+    </div>
   }
   const draggingPosition = draggingConnection ? positionOf(draggingConnection) : undefined
   const draggingStart = draggingConnection && draggingPosition ? {
@@ -4293,29 +4362,26 @@ function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, 
     onClick={event => { event.stopPropagation(); onPreview(target) }}
   ><span>点击预览</span><small>前 5 行</small></button>
   return <section className="dataset-component-builder" onClick={event => event.stopPropagation()}>
-    <aside className="dataset-component-toolbar" aria-label="画布组件栏">
-      <div><strong>组件</strong><small>点击组件进行配置；从右半区拖线，放到下游左半区完成连接</small></div>
-      <div className="dataset-component-palette">
-        <section className="dataset-component-palette-group component-flow" aria-label="流程组件">
-          <header><strong>流程组件</strong><small>按拼音 A–Z</small></header>
-          <button type="button" draggable onDragStart={event => event.dataTransfer.setData('text/dataset-component', 'GROUP')} onClick={() => onAddGroup()}><RowsIcon data-component-icon="GROUP" aria-hidden="true" size={18} weight="bold" /><strong>分组组件</strong><small>可添加多个 / 分组聚合</small></button>
-          <button type="button" draggable onDragStart={event => event.dataTransfer.setData('text/dataset-component', 'JOIN')} onClick={() => onAddJoin()}><GitMergeIcon data-component-icon="JOIN" aria-hidden="true" size={18} weight="bold" /><strong>关联组件</strong><small>双输入 / 可继续连接</small></button>
-          <button type="button" draggable={!end} disabled={Boolean(end)} onDragStart={event => event.dataTransfer.setData('text/dataset-component', 'END')} onClick={() => onAddEnd()}><CheckCircleIcon data-component-icon="END" aria-hidden="true" size={18} weight="bold" /><strong>结束节点</strong><small>唯一 / 定义最终输出</small></button>
-        </section>
-        {transformCategoryMeta.map(category => <section key={category.category} className={`dataset-component-palette-group ${category.className}`} aria-label={category.label}>
-          <header><strong>{category.label}</strong><small>按拼音 A–Z</small></header>
-          {transformComponentMeta.filter(item => item.category === category.category).sort((left, right) => left.sortKey.localeCompare(right.sortKey, 'en')).map(item => { const ComponentIcon = item.icon; return <button key={item.componentType} type="button" draggable onDragStart={event => event.dataTransfer.setData('text/dataset-component', `TRANSFORM:${item.componentType}`)} onClick={() => onAddTransform(item.componentType)}><ComponentIcon data-component-icon={item.componentType} aria-hidden="true" size={18} weight="bold" /><strong>{item.label}</strong><small>{item.description}</small></button> })}
-        </section>)}
-      </div>
-    </aside>
+    <DatasetComponentToolbar
+      categories={transformCategoryMeta}
+      components={transformComponentMeta}
+      hasEnd={Boolean(end)}
+      onAddGroup={() => onAddGroup()}
+      onAddJoin={() => onAddJoin()}
+      onAddTransform={onAddTransform}
+      onAddEnd={onAddEnd}
+    />
     <div className="dataset-component-canvas-frame">
       <div className="dataset-canvas-actions" role="toolbar" aria-label="画布工具">
         <button type="button" onClick={onArrange}><TreeStructureIcon aria-hidden="true" size={15} weight="bold" /><span>整理</span></button>
         <button type="button" aria-pressed={isFullscreen} onClick={onToggleFullscreen}>{isFullscreen ? <ArrowsInSimpleIcon aria-hidden="true" size={15} weight="bold" /> : <ArrowsOutSimpleIcon aria-hidden="true" size={15} weight="bold" />}<span>{isFullscreen ? '退出全屏' : '全屏'}</span></button>
       </div>
-      <div ref={canvasRef} className="dataset-component-canvas" aria-label="关系组件画布" onPointerDown={beginPointerConnection} onDragOver={event => { event.preventDefault(); if (draggingConnection) { const bounds = event.currentTarget.getBoundingClientRect(); setConnectionPoint({ x: event.clientX - bounds.left + (event.currentTarget.scrollLeft || 0), y: event.clientY - bounds.top + (event.currentTarget.scrollTop || 0) }) } }} onDrop={dropOnCanvas}>
+      <div ref={canvasRef} className={`dataset-component-canvas ${draggingConnection ? 'is-connecting' : ''}`} aria-label="关系组件画布" onClick={() => setOpenEdgeMenuKey('')} onPointerDown={beginPointerConnection} onDragOver={event => { event.preventDefault(); if (draggingConnection) { const bounds = event.currentTarget.getBoundingClientRect(); setConnectionPoint({ x: event.clientX - bounds.left + (event.currentTarget.scrollLeft || 0), y: event.clientY - bounds.top + (event.currentTarget.scrollTop || 0) }) } }} onDrop={dropOnCanvas}>
       <svg ref={lineLayerRef} className="dataset-component-lines" style={canvasExtent} aria-hidden="true"><defs><marker id="dataset-edge-arrow" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L10,5 L0,10 Z" /></marker></defs>{edges.map(item => <path className="dataset-flow-edge" data-source-key={graphInputKey(item.source)} key={item.key} d={item.geometry.path} markerEnd="url(#dataset-edge-arrow)" />)}{draggingStart && connectionPoint && <path className="preview" d={curveGeometry(draggingStart, connectionPoint).path} markerEnd="url(#dataset-edge-arrow)" />}</svg>
-      {edges.map(item => <button key={`delete-${item.key}`} type="button" className="dataset-line-delete" style={{ left: item.geometry.deletePosition.x, top: item.geometry.deletePosition.y }} aria-label={item.label} onClick={event => { event.stopPropagation(); item.remove() }}><XIcon aria-hidden="true" size={11} weight="bold" /></button>)}
+      {edges.map(item => <div key={`actions-${item.key}`} className={`dataset-line-actions ${openEdgeMenuKey === item.key ? 'is-open' : ''}`} style={{ left: item.geometry.deletePosition.x, top: item.geometry.deletePosition.y }} onClick={event => event.stopPropagation()}>
+        <button type="button" className="dataset-line-add" aria-label={`在${item.targetLabel}的连线上插入组件`} aria-expanded={openEdgeMenuKey === item.key} aria-haspopup="dialog" onClick={() => setOpenEdgeMenuKey(current => current === item.key ? '' : item.key)}><PlusIcon aria-hidden="true" size={12} weight="bold" /></button>
+        <button type="button" className="dataset-line-delete" aria-label={item.deleteLabel} onClick={item.remove}><XIcon aria-hidden="true" size={11} weight="bold" /></button>
+      </div>)}
       {nodes.map((node, index) => { const position = nodePositions[node.id] ?? { x: 42, y: 58 + index * 145 }; const nodeFields = fields.filter(field => field.key.startsWith(`${node.id}.`)); return <article key={node.id} role="button" tabIndex={0} aria-label={`配置数据节点 ${index + 1}`} style={{ left: position.x, top: position.y }} className={`dataset-canvas-component data ${activeNodeID === node.id ? 'active' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'NODE', id: node.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onClick={() => onNodeClick(node.id)}><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'NODE', id: node.id })} aria-label={`从数据节点 ${index + 1} 拖出连接`} draggable onDragStart={event => dragConnection(event, { kind: 'NODE', id: node.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>数据节点 {index + 1}</span><button type="button" aria-label={`移除${nodeLabel(node)}`} onClick={event => { event.stopPropagation(); onRemoveNode(node.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{node.table.businessName || node.table.tableName}</strong><small>{node.table.dataSourceName} · {node.alias}</small><footer><span>原始数据</span><b>{nodeFields.filter(field => field.output !== false).length} 字段</b></footer>{previewTrigger({ kind: 'NODE', id: node.id }, `数据节点 ${index + 1}`)}</article> })}
       {boxes.map((box, index) => { const position = box.position; const join = joins.find(item => item.id === box.id); const outputs = relationOutputKeys({ kind: 'JOIN', id: box.id }, boxes, groups, nodes, fields, transforms); const complete = Boolean(box.left && box.right); return <article key={box.id} role="button" tabIndex={0} aria-label={`配置关联 ${index + 1}`} style={{ left: position.x, top: position.y }} className={`dataset-canvas-component relation ${activeJoinID === box.id ? 'active' : ''} ${join?.manualConfirmed ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'JOIN', id: box.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onDragOver={acceptConnectionOver} onDrop={event => dropOnJoinNode(event, box)} onClick={() => onJoinClick(box.id)}><button type="button" className="input-port component-side input-side slot-one" aria-label={`连接到关联节点 ${index + 1} 槽位 1`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropConnection(event, box.id, 'left')} /><button type="button" className="input-port component-side input-side slot-two" aria-label={`连接到关联节点 ${index + 1} 槽位 2`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropConnection(event, box.id, 'right')} /><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'JOIN', id: box.id })} aria-label={`从关联节点 ${index + 1} 拖出连接`} draggable={complete} aria-disabled={!complete} onDragStart={event => complete && dragConnection(event, { kind: 'JOIN', id: box.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>关联组件</span><button type="button" aria-label={`删除关联组件 ${index + 1}`} onClick={event => { event.stopPropagation(); onRemoveBox(box.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{box.name}</strong><small>{join?.joinType ? `${join.joinType} JOIN` : '尚未完成关联'}</small><div><span>槽位 1</span><b>{inputLabel(box.left)}</b></div><div><span>槽位 2</span><b>{inputLabel(box.right)}</b></div><footer><span>{join?.manualConfirmed ? `${joinConditions(join).length} 个关联条件` : '点击完成配置'}</span><b>{outputs.length} 字段</b></footer>{previewTrigger({ kind: 'JOIN', id: box.id }, `关联组件 ${index + 1}`)}</article> })}
           {groups.map((group, index) => { const complete = groupIsComplete(group); const modeLabel = group.groupByMode === 'CUBE' ? 'CUBE · ' : group.groupByMode === 'ROLLUP' ? 'ROLLUP · ' : group.groupByMode === 'GROUPING_SETS' ? 'SETS · ' : ''; return <article key={group.id} role="button" tabIndex={0} aria-label={`打开分组组件 ${index + 1} 配置`} style={{ left: group.position.x, top: group.position.y }} className={`dataset-canvas-component group ${activeGroupID === group.id ? 'active' : ''} ${complete ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'GROUP', id: group.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onDragOver={acceptConnectionOver} onDrop={event => finishConnectionDrop(event, input => onConnectGroup(group.id, input))} onClick={() => onGroupClick(group.id)}><button type="button" className="input-port component-side input-side group-input" aria-label={`连接到分组组件 ${index + 1} 输入槽位`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropGroupConnection(event, group.id)} /><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'GROUP', id: group.id })} aria-label={`从分组组件 ${index + 1} 拖出连接`} draggable={complete} aria-disabled={!complete} onDragStart={event => complete && dragConnection(event, { kind: 'GROUP', id: group.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>分组组件 {index + 1}</span><button type="button" aria-label={`删除分组组件 ${index + 1}`} onClick={event => { event.stopPropagation(); onRemoveGroup(group.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{group.name}</strong><div><span>输入</span><b>{inputLabel(group.input)}</b></div><footer><span>{modeLabel}{group.dimensions.length} 个维度</span><b>{group.metrics.length} 个指标</b></footer>{previewTrigger({ kind: 'GROUP', id: group.id }, `分组组件 ${index + 1}`)}</article> })}
@@ -4326,8 +4392,18 @@ function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, 
         return <article key={transform.id} role="button" tabIndex={0} aria-label={`打开${label} ${index + 1} 配置`} style={{ left: transform.position.x, top: transform.position.y }} className={`dataset-canvas-component transform ${transformColorClass(transform)} ${activeTransformID === transform.id ? 'active' : ''} ${complete ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'TRANSFORM', id: transform.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onDragOver={acceptConnectionOver} onDrop={event => finishConnectionDrop(event, input => onConnectTransform(transform.id, input))} onClick={() => onTransformClick(transform.id)}><button type="button" className="input-port component-side input-side group-input" aria-label={`连接到${label} ${index + 1} 输入槽位`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropTransformConnection(event, transform.id)} /><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'TRANSFORM', id: transform.id })} aria-label={`从${label} ${index + 1} 拖出连接`} draggable={complete} aria-disabled={!complete} onDragStart={event => complete && dragConnection(event, { kind: 'TRANSFORM', id: transform.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>{label}</span><button type="button" aria-label={`删除${label} ${index + 1}`} onClick={event => { event.stopPropagation(); onRemoveTransform(transform.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{transform.name}</strong><div><span>输入</span><b>{inputLabel(transform.input)}</b></div><footer><span>{itemCount} 条{transformIsFilter(transform) ? '条件' : '规则'}</span><b>{complete ? '已配置' : '待完善'}</b></footer>{previewTrigger({ kind: 'TRANSFORM', id: transform.id }, `${label} ${index + 1}`)}</article>
       })}
       {end && <article role="button" tabIndex={0} aria-label="打开结束节点配置" style={{ left: end.position.x, top: end.position.y }} className={`dataset-canvas-component end ${activeEnd ? 'active' : ''} ${end.input && end.outputs.length ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''}`} draggable onDragStart={event => event.dataTransfer.setData('text/dataset-canvas-item', JSON.stringify({ kind: 'END', id: end.id }))} onDragOver={acceptConnectionOver} onDrop={event => finishConnectionDrop(event, onConnectEnd)} onClick={onEndClick}><button type="button" className="input-port component-side input-side group-input" aria-label="连接到结束节点输入槽位" onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={dropEndConnection} /><header><span>结束节点</span><button type="button" aria-label="删除结束节点" onClick={event => { event.stopPropagation(); onRemoveEnd() }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{end.name}</strong><div><span>最终输入</span><b>{inputLabel(end.input)}</b></div><footer><span>输出结果</span><b>{end.outputs.length} 个字段</b></footer>{previewTrigger({ kind: 'END', id: end.id }, '结束节点')}</article>}
-      {!boxes.length && !groups.length && !transforms.length && !end && <div className="dataset-component-canvas-hint"><strong>拖入组件建立数据流</strong><p>数据节点、字段处理、分组、关联与结束节点之间会用有方向的曲线连接。</p></div>}
+      {!boxes.length && !groups.length && !transforms.length && !end && <div className="dataset-component-canvas-hint"><strong>{nodes.length ? '从顶部选择组件建立数据流' : '从左侧拖入数据集开始建模'}</strong><p>{nodes.length ? '字段处理、分组、关联与结束节点之间会用有方向的曲线连接。' : '数据集会成为画布节点，随后可从顶部横向组件栏继续搭建流程。'}</p></div>}
       </div>
+      {edges.find(item => item.key === openEdgeMenuKey) && <div
+        className="dataset-edge-component-modal"
+        role="presentation"
+        onClick={() => setOpenEdgeMenuKey('')}
+        onPointerDown={event => event.stopPropagation()}
+        onWheel={event => event.stopPropagation()}
+        onTouchMove={event => event.stopPropagation()}
+      >
+        {edgeComponentPicker(edges.find(item => item.key === openEdgeMenuKey)!)}
+      </div>}
       {previewTarget && <CanvasPreviewDialog label={previewLabel} preview={preview} onRefresh={onRefreshPreview} onClose={onClosePreview} />}
     </div>
   </section>
@@ -4340,27 +4416,412 @@ function NodeConfigDrawer({ node, fields, onFieldPatch, onDone }: {
   const optionFor = (column: AssetColumn) => fields.find(field => field.key === `${node.id}.${column.columnName}`) ?? fieldOption(node, column)
   return <aside className="dataset-canvas-drawer" aria-label={`配置表 ${node.table.businessName || node.table.tableName}`} onClick={event => event.stopPropagation()}>
     <header><div><span>数据节点</span><strong>{node.table.businessName || node.table.tableName}</strong><small>{node.table.schemaName}.{node.table.tableName}</small></div><button type="button" aria-label="保存并关闭表配置" onClick={onDone}>×</button></header>
-    <section><div className="dataset-drawer-title"><div><h3>输出字段</h3><p>数据节点只负责投影；分组与聚合请连接独立分组组件。</p></div><span>{fields.filter(field => field.output !== false).length} 已选</span></div><div className="dataset-drawer-field-list">{node.columns.map(column => { const option = optionFor(column); return <label key={column.id}><input aria-label={`输出字段 ${column.columnName}`} type="checkbox" checked={option.output !== false} onChange={event => onFieldPatch(option.key, { output: event.target.checked })} /><span><strong>{column.businessName || column.columnName}</strong><small>{column.columnName} · {column.canonicalType}</small></span></label> })}</div></section>
+    <section><div className="dataset-drawer-title"><div><h3>输出字段</h3><p>数据节点只负责投影；分组与聚合请连接独立分组组件。</p></div><span>{fields.filter(field => field.output !== false).length} 已选</span></div><div className="dataset-drawer-field-list">{node.columns.map(column => { const option = optionFor(column); return <label key={column.id}><input aria-label={`输出字段 ${column.columnName}`} type="checkbox" checked={option.output !== false} onChange={event => onFieldPatch(option.key, { output: event.target.checked })} /><span><strong>{column.businessName || column.columnName}</strong><small>{node.table.businessName || node.table.tableName}</small></span></label> })}</div></section>
     <footer><small>点击画板空白处也会自动保存并收起</small><button type="button" onClick={onDone}>完成</button></footer>
   </aside>
 }
 
-function GroupingConfigDrawer({ box, boxes, groups, transforms, nodes, availableFields, error, onNameChange, onGroupByModeChange, onGroupingSetsChange, onDimensionChange, onAllDimensionsChange, onRowCountMetricChange, onMetricChange, onAllMetricsChange, onDone }: {
+type OrderedPickerField = Pick<ProducedField, 'key' | 'name' | 'code'> & Partial<Pick<ProducedField, 'producerName' | 'canonicalType'>>
+
+function OrderedFieldSequence({ fields, keys, onChange, emptyText, compact = false }: {
+  fields: OrderedPickerField[]
+  keys: string[]
+  onChange: (keys: string[]) => void
+  emptyText: string
+  compact?: boolean
+}) {
+  const [draggingKey, setDraggingKey] = useState('')
+  const draggingKeyRef = useRef('')
+  const fieldsByKey = new Map(fields.map(field => [field.key, field]))
+  const orderedFields = keys.flatMap(key => {
+    const field = fieldsByKey.get(key)
+    return field ? [field] : []
+  })
+  const move = (key: string, offset: number) => {
+    const currentIndex = keys.indexOf(key)
+    const nextIndex = currentIndex + offset
+    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= keys.length) return
+    const next = [...keys]
+    const [moved] = next.splice(currentIndex, 1)
+    next.splice(nextIndex, 0, moved)
+    onChange(next)
+  }
+  const moveBefore = (targetKey: string) => {
+    const sourceKey = draggingKeyRef.current
+    if (!sourceKey || sourceKey === targetKey || !keys.includes(sourceKey)) return
+    const next = keys.filter(key => key !== sourceKey)
+    next.splice(Math.max(0, next.indexOf(targetKey)), 0, sourceKey)
+    onChange(next)
+  }
+  useEffect(() => {
+    if (!draggingKey) return
+    const stopDragging = () => {
+      draggingKeyRef.current = ''
+      setDraggingKey('')
+    }
+    window.addEventListener('pointerup', stopDragging)
+    window.addEventListener('pointercancel', stopDragging)
+    return () => {
+      window.removeEventListener('pointerup', stopDragging)
+      window.removeEventListener('pointercancel', stopDragging)
+    }
+  }, [draggingKey])
+  if (!orderedFields.length) return <div className={`dataset-ordered-fields-empty ${compact ? 'compact' : ''}`}>{emptyText}</div>
+  return <div className={`dataset-ordered-fields ${compact ? 'compact' : ''}`} aria-label="已选字段顺序">
+    {orderedFields.map((field, index) => <div
+      className={draggingKey === field.key ? 'is-dragging' : ''}
+      draggable
+      key={field.key}
+      onPointerEnter={() => moveBefore(field.key)}
+      onPointerUp={() => {
+        draggingKeyRef.current = ''
+        setDraggingKey('')
+      }}
+      onDragStart={event => {
+        draggingKeyRef.current = field.key
+        setDraggingKey(field.key)
+        event.dataTransfer.effectAllowed = 'move'
+        event.dataTransfer.setData('text/dataset-group-field', field.key)
+      }}
+      onDragOver={event => {
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'move'
+      }}
+      onDrop={event => {
+        event.preventDefault()
+        event.stopPropagation()
+        draggingKeyRef.current = event.dataTransfer.getData('text/dataset-group-field') || draggingKeyRef.current
+        moveBefore(field.key)
+        draggingKeyRef.current = ''
+        setDraggingKey('')
+      }}
+      onDragEnd={() => {
+        draggingKeyRef.current = ''
+        setDraggingKey('')
+      }}
+    >
+      <button type="button" className="dataset-field-drag-handle" aria-label={`拖拽调整 ${field.name} 的顺序`} onPointerDown={event => {
+        if (event.button !== 0) return
+        draggingKeyRef.current = field.key
+        setDraggingKey(field.key)
+      }}><DotsSixVerticalIcon aria-hidden="true" size={16} weight="bold" /></button>
+      <b>{index + 1}</b>
+      <span><strong>{field.name}</strong><small>{field.producerName || '上游产物'}</small></span>
+      <div>
+        <button type="button" aria-label={`上移 ${field.name}`} disabled={index === 0} onClick={() => move(field.key, -1)}><ArrowUpIcon size={13} weight="bold" /></button>
+        <button type="button" aria-label={`下移 ${field.name}`} disabled={index === orderedFields.length - 1} onClick={() => move(field.key, 1)}><ArrowDownIcon size={13} weight="bold" /></button>
+        <button type="button" aria-label={`移除 ${field.name}`} onClick={() => onChange(keys.filter(key => key !== field.key))}><XIcon size={13} weight="bold" /></button>
+      </div>
+    </div>)}
+  </div>
+}
+
+function OrderedFieldSelectionDialog({ title, description, fields, selectedKeys, maxSelected, onCancel, onApply }: {
+  title: string
+  description: string
+  fields: OrderedPickerField[]
+  selectedKeys: string[]
+  maxSelected?: number
+  onCancel: () => void
+  onApply: (keys: string[]) => void
+}) {
+  const availableKeys = new Set(fields.map(field => field.key))
+  const [draftKeys, setDraftKeys] = useState(() => selectedKeys.filter(key => availableKeys.has(key)))
+  const [keyword, setKeyword] = useState('')
+  const searchRef = useRef<HTMLInputElement>(null)
+  const normalizedKeyword = keyword.trim().toLocaleLowerCase()
+  const filteredFields = fields.filter(field => !normalizedKeyword || [field.name, field.producerName || ''].some(value => value.toLocaleLowerCase().includes(normalizedKeyword)))
+  const selected = new Set(draftKeys)
+  const atLimit = Boolean(maxSelected && draftKeys.length >= maxSelected)
+  useEffect(() => {
+    searchRef.current?.focus()
+    const previousOverflow = document.body.style.overflow
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onCancel()
+    }
+    document.body.style.overflow = 'hidden'
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [onCancel])
+  const toggle = (key: string, enabled: boolean) => {
+    if (enabled) {
+      if (selected.has(key) || atLimit) return
+      setDraftKeys(current => [...current, key])
+      return
+    }
+    setDraftKeys(current => current.filter(item => item !== key))
+  }
+  return <div className="dataset-field-picker-backdrop" onMouseDown={event => event.target === event.currentTarget && onCancel()}>
+    <section className="dataset-field-picker-dialog" role="dialog" aria-modal="true" aria-label={title} onMouseDown={event => event.stopPropagation()} onWheel={event => event.stopPropagation()} onTouchMove={event => event.stopPropagation()}>
+      <header>
+        <div><span>有序多选</span><strong>{title}</strong><small>{description}</small></div>
+        <button type="button" aria-label={`关闭${title}`} onClick={onCancel}><XIcon size={16} weight="bold" /></button>
+      </header>
+      <div className="dataset-field-picker-body">
+        <section className="dataset-field-picker-candidates">
+          <header><div><strong>可选字段</strong><small>点击字段后按选择先后加入右侧</small></div><span>{fields.length} 个</span></header>
+          <label className="dataset-field-picker-search">
+            <MagnifyingGlassIcon aria-hidden="true" size={15} />
+            <input ref={searchRef} aria-label="搜索可选字段" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索数据集或字段名称" />
+          </label>
+          <div className="dataset-field-picker-options">
+            {filteredFields.map(field => {
+              const checked = selected.has(field.key)
+              const order = checked ? draftKeys.indexOf(field.key) + 1 : 0
+              return <label className={checked ? 'selected' : ''} key={field.key}>
+                <input type="checkbox" checked={checked} disabled={!checked && atLimit} onChange={event => toggle(field.key, event.target.checked)} />
+                <span><strong>{field.name}</strong><small>{field.producerName || '上游产物'}</small></span>
+                {checked && <b aria-label={`选择顺序 ${order}`}>{order}</b>}
+              </label>
+            })}
+            {!filteredFields.length && <p>没有匹配的字段</p>}
+          </div>
+        </section>
+        <section className="dataset-field-picker-selected">
+          <header><div><strong>字段顺序</strong><small>拖拽调整；也可使用上移、下移按钮</small></div><span>{draftKeys.length}{maxSelected ? ` / ${maxSelected}` : ''}</span></header>
+          <OrderedFieldSequence fields={fields} keys={draftKeys} onChange={setDraftKeys} emptyText="尚未选择字段，请从左侧依次点击加入" />
+        </section>
+      </div>
+      <footer>
+        <button type="button" className="quiet" onClick={() => setDraftKeys([])}>清空</button>
+        <span>{maxSelected && atLimit ? `当前模式最多选择 ${maxSelected} 个字段` : '保存后仍可在抽屉中拖拽调整顺序'}</span>
+        <button type="button" className="quiet" onClick={onCancel}>取消</button>
+        <button type="button" onClick={() => onApply(draftKeys)}>完成选择</button>
+      </footer>
+    </section>
+  </div>
+}
+
+function OrderedDimensionPicker({ title, description, fields, selectedKeys, onChange, emptyText, maxSelected, compact = false }: {
+  title: string
+  description: string
+  fields: OrderedPickerField[]
+  selectedKeys: string[]
+  onChange: (keys: string[]) => void
+  emptyText: string
+  maxSelected?: number
+  compact?: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  return <div className={`dataset-ordered-field-picker ${compact ? 'compact' : ''}`}>
+    <button type="button" className="dataset-ordered-field-trigger" disabled={!fields.length} aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(true)}>
+      <span><small>维度字段</small><strong>{selectedKeys.length ? `已选择 ${selectedKeys.length} 个，点击修改` : '点击选择维度字段'}</strong></span>
+      <CaretDownIcon aria-hidden="true" size={15} weight="bold" />
+    </button>
+    <OrderedFieldSequence fields={fields} keys={selectedKeys} onChange={onChange} emptyText={emptyText} compact={compact} />
+    {open && <OrderedFieldSelectionDialog
+      title={title}
+      description={description}
+      fields={fields}
+      selectedKeys={selectedKeys}
+      maxSelected={maxSelected}
+      onCancel={() => setOpen(false)}
+      onApply={keys => {
+        onChange(keys)
+        setOpen(false)
+      }}
+    />}
+  </div>
+}
+
+const groupMetricAggregationOptions = (field: ProducedField) => [
+  ...(numericCanonicalTypes.has(field.canonicalType.toUpperCase()) ? [
+    { value: 'SUM', label: 'SUM · 求和' },
+    { value: 'AVG', label: 'AVG · 平均值' },
+  ] : []),
+  { value: 'COUNT', label: 'COUNT · 非空计数' },
+  { value: 'COUNT_DISTINCT', label: 'COUNT DISTINCT · 去重计数' },
+  { value: 'MIN', label: 'MIN · 最小值' },
+  { value: 'MAX', label: 'MAX · 最大值' },
+]
+
+function GroupMetricSelectionDialog({ fields, metrics, onCancel, onApply }: {
+  fields: ProducedField[]
+  metrics: GroupBox['metrics']
+  onCancel: () => void
+  onApply: (metrics: GroupMetricSelection[]) => void
+}) {
+  const [draftMetrics, setDraftMetrics] = useState<GroupMetricSelection[]>(() => {
+    const availableFields = new Map(fields.map(field => [field.key, field]))
+    const seen = new Set<string>()
+    return metrics.flatMap(metric => {
+      const key = metric.key === '*' || metric.countRows ? '*' : metric.key
+      if (seen.has(key)) return []
+      seen.add(key)
+      if (key === '*') return [{ key, aggregation: 'COUNT' }]
+      const field = availableFields.get(key)
+      if (!field) return []
+      const aggregation = groupMetricAggregationOptions(field).some(option => option.value === metric.aggregation) ? metric.aggregation : ''
+      return [{ key, aggregation }]
+    })
+  })
+  const [keyword, setKeyword] = useState('')
+  const searchRef = useRef<HTMLInputElement>(null)
+  const normalizedKeyword = keyword.trim().toLocaleLowerCase()
+  const filteredFields = fields.filter(field => !normalizedKeyword || [field.name, field.producerName].some(value => value.toLocaleLowerCase().includes(normalizedKeyword)))
+  const rowCountVisible = !normalizedKeyword || ['总行数', '全部输入行', 'count'].some(value => value.includes(normalizedKeyword))
+  const selectedKeys = new Set(draftMetrics.map(metric => metric.key))
+  const allFieldsSelected = fields.length > 0 && fields.every(field => selectedKeys.has(field.key))
+  const incomplete = draftMetrics.some(metric => {
+    if (metric.key === '*') return metric.aggregation !== 'COUNT'
+    const field = fields.find(item => item.key === metric.key)
+    return !field || !groupMetricAggregationOptions(field).some(option => option.value === metric.aggregation)
+  })
+  useEffect(() => {
+    searchRef.current?.focus()
+    const previousOverflow = document.body.style.overflow
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onCancel()
+    }
+    document.body.style.overflow = 'hidden'
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [onCancel])
+  const toggleMetric = (key: string, enabled: boolean) => {
+    if (!enabled) {
+      setDraftMetrics(current => current.filter(metric => metric.key !== key))
+      return
+    }
+    if (selectedKeys.has(key)) return
+    const field = fields.find(item => item.key === key)
+    setDraftMetrics(current => [...current, {
+      key,
+      aggregation: key === '*' ? 'COUNT' : field && numericCanonicalTypes.has(field.canonicalType.toUpperCase()) ? 'SUM' : 'COUNT',
+    }])
+  }
+  const updateAggregation = (key: string, aggregation: string) => {
+    setDraftMetrics(current => current.map(metric => metric.key === key ? { ...metric, aggregation } : metric))
+  }
+  const toggleAllFields = () => {
+    if (allFieldsSelected) {
+      const fieldKeys = new Set(fields.map(field => field.key))
+      setDraftMetrics(current => current.filter(metric => !fieldKeys.has(metric.key)))
+      return
+    }
+    setDraftMetrics(current => {
+      const currentKeys = new Set(current.map(metric => metric.key))
+      return [...current, ...fields.flatMap(field => currentKeys.has(field.key) ? [] : [{
+        key: field.key,
+        aggregation: numericCanonicalTypes.has(field.canonicalType.toUpperCase()) ? 'SUM' : 'COUNT',
+      }])]
+    })
+  }
+  return <div className="dataset-field-picker-backdrop" onMouseDown={event => event.target === event.currentTarget && onCancel()}>
+    <section className="dataset-field-picker-dialog dataset-metric-picker-dialog" role="dialog" aria-modal="true" aria-label="选择聚合指标并配置计算公式" onMouseDown={event => event.stopPropagation()} onWheel={event => event.stopPropagation()} onTouchMove={event => event.stopPropagation()}>
+      <header>
+        <div><span>指标配置</span><strong>选择聚合指标并配置计算公式</strong><small>先选择指标字段，再为每个指标指定聚合计算公式。</small></div>
+        <button type="button" aria-label="关闭聚合指标选择" onClick={onCancel}><XIcon size={16} weight="bold" /></button>
+      </header>
+      <div className="dataset-field-picker-body">
+        <section className="dataset-field-picker-candidates">
+          <header><div><strong>可选指标</strong><small>字段按数据集名称与字段名称展示</small></div><span>{fields.length + 1} 个</span></header>
+          <label className="dataset-field-picker-search">
+            <MagnifyingGlassIcon aria-hidden="true" size={15} />
+            <input ref={searchRef} aria-label="搜索可选指标" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索数据集或字段名称" />
+          </label>
+          <div className="dataset-field-picker-options">
+            {rowCountVisible && <label className={selectedKeys.has('*') ? 'selected' : ''}>
+              <input type="checkbox" checked={selectedKeys.has('*')} onChange={event => toggleMetric('*', event.target.checked)} />
+              <span><strong>总行数</strong><small>全部输入行</small></span>
+              {selectedKeys.has('*') && <b aria-label="已选择总行数"><CheckCircleIcon aria-hidden="true" size={13} weight="fill" /></b>}
+            </label>}
+            {filteredFields.map(field => <label className={selectedKeys.has(field.key) ? 'selected' : ''} key={field.key}>
+              <input type="checkbox" checked={selectedKeys.has(field.key)} onChange={event => toggleMetric(field.key, event.target.checked)} />
+              <span><strong>{field.name}</strong><small>{field.producerName}</small></span>
+              {selectedKeys.has(field.key) && <b aria-label={`已选择 ${field.name}`}><CheckCircleIcon aria-hidden="true" size={13} weight="fill" /></b>}
+            </label>)}
+            {!rowCountVisible && !filteredFields.length && <p>没有匹配的指标字段</p>}
+          </div>
+        </section>
+        <section className="dataset-field-picker-selected dataset-metric-picker-selected">
+          <header><div><strong>已选指标与计算公式</strong><small>每个指标必须配置一种计算公式</small></div><span>{draftMetrics.length}</span></header>
+          <div className="dataset-metric-formulas">
+            {draftMetrics.map((metric, index) => {
+              const field = metric.key === '*' ? undefined : fields.find(item => item.key === metric.key)
+              if (metric.key !== '*' && !field) return null
+              return <article key={metric.key}>
+                <header>
+                  <b>{index + 1}</b>
+                  <span><strong>{field?.name || '总行数'}</strong><small>{field?.producerName || '全部输入行'}</small></span>
+                  <button type="button" aria-label={`移除指标 ${field?.name || '总行数'}`} onClick={() => toggleMetric(metric.key, false)}><XIcon size={13} weight="bold" /></button>
+                </header>
+                <label><span>计算公式</span><select aria-label={`${field?.name || '总行数'} 计算公式`} value={metric.aggregation} disabled={metric.key === '*'} onChange={event => updateAggregation(metric.key, event.target.value)}>
+                  {metric.key === '*'
+                    ? <option value="COUNT">COUNT(*) · 总行数</option>
+                    : <><option value="">选择计算公式</option>{groupMetricAggregationOptions(field!).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</>}
+                </select></label>
+              </article>
+            })}
+            {!draftMetrics.length && <div className="dataset-ordered-fields-empty">尚未选择聚合指标，请从左侧勾选</div>}
+          </div>
+        </section>
+      </div>
+      <footer>
+        <button type="button" className="quiet" disabled={!fields.length} onClick={toggleAllFields}>{allFieldsSelected ? '取消全选字段' : '全选字段'}</button>
+        <span>{incomplete ? '请为全部已选指标配置计算公式' : `已配置 ${draftMetrics.length} 个指标`}</span>
+        <button type="button" className="quiet" onClick={onCancel}>取消</button>
+        <button type="button" disabled={incomplete} onClick={() => onApply(draftMetrics)}>完成配置</button>
+      </footer>
+    </section>
+  </div>
+}
+
+function GroupMetricPicker({ fields, metrics, onChange }: {
+  fields: ProducedField[]
+  metrics: GroupBox['metrics']
+  onChange: (metrics: GroupMetricSelection[]) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const fieldsByKey = new Map(fields.map(field => [field.key, field]))
+  return <div className="dataset-group-metric-picker">
+    <button type="button" className="dataset-ordered-field-trigger" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(true)}>
+      <span><small>指标字段与计算公式</small><strong>{metrics.length ? `已配置 ${metrics.length} 个指标，点击修改` : '点击选择指标并配置计算公式'}</strong></span>
+      <CaretDownIcon aria-hidden="true" size={15} weight="bold" />
+    </button>
+    <div className="dataset-group-metric-summary">
+      {metrics.map(metric => {
+        const field = fieldsByKey.get(metric.key)
+        return <div key={metric.key}>
+          <span><strong>{metric.key === '*' || metric.countRows ? '总行数' : field?.name || metric.name}</strong><small>{metric.key === '*' || metric.countRows ? '全部输入行' : field?.producerName || '上游产物'}</small></span>
+          <b>{metric.key === '*' || metric.countRows ? 'COUNT(*)' : metric.aggregation || '未配置'}</b>
+        </div>
+      })}
+      {!metrics.length && <div className="dataset-ordered-fields-empty">尚未选择聚合指标</div>}
+    </div>
+    {open && <GroupMetricSelectionDialog
+      fields={fields}
+      metrics={metrics}
+      onCancel={() => setOpen(false)}
+      onApply={next => {
+        onChange(next)
+        setOpen(false)
+      }}
+    />}
+  </div>
+}
+
+function GroupingConfigDrawer({ box, boxes, groups, transforms, nodes, availableFields, error, onNameChange, onGroupByModeChange, onGroupingSetsChange, onDimensionsChange, onMetricsChange, onDone }: {
   box: GroupBox; boxes: RelationBox[]; groups: GroupBox[]; transforms: TransformBox[]; nodes: DesignerNode[]; availableFields: ProducedField[]
   error: string; onNameChange: (name: string) => void
   onGroupByModeChange: (mode: GraphGroupByMode) => void
   onGroupingSetsChange: (groupingSets: string[][]) => void
-  onDimensionChange: (field: ProducedField, enabled: boolean) => void
-  onAllDimensionsChange: (enabled: boolean) => void
-  onRowCountMetricChange: (enabled: boolean) => void
-  onMetricChange: (field: ProducedField, enabled: boolean, patch?: { aggregation?: string }) => void
-  onAllMetricsChange: (enabled: boolean) => void
+  onDimensionsChange: (fields: ProducedField[]) => void
+  onMetricsChange: (metrics: GroupMetricSelection[]) => void
   onDone: () => void
 }) {
   const shape = graphShape(boxes, groups, transforms)
-  const allDimensionsSelected = availableFields.length > 0 && availableFields.every(field => box.dimensions.some(dimension => dimension.key === field.key))
-  const allMetricsSelected = availableFields.length > 0 && availableFields.every(field => box.metrics.some(metric => metric.key === field.key))
-  const rowCountMetric = box.metrics.find(metric => metric.key === '*' || metric.countRows)
+  const availableFieldsByKey = new Map(availableFields.map(field => [field.key, field]))
+  const dimensionPickerFields: OrderedPickerField[] = box.dimensions.map(dimension => availableFieldsByKey.get(dimension.key) ?? dimension)
+  const updateDimensionKeys = (keys: string[]) => onDimensionsChange(keys.flatMap(key => {
+    const field = availableFieldsByKey.get(key)
+    return field ? [field] : []
+  }))
   const placeholderHelp = '未分组维度按类型显示：文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False。'
   const modeHelp = box.groupByMode === 'CUBE'
     ? `为全部维度组合生成明细、小计与总计；${placeholderHelp}`
@@ -4369,57 +4830,49 @@ function GroupingConfigDrawer({ box, boxes, groups, transforms, nodes, available
       : box.groupByMode === 'GROUPING_SETS'
         ? `只生成下方明确配置的维度组合；空分组集表示总计。${placeholderHelp}`
         : '按所有已选维度生成单一粒度的聚合结果。'
+  const orderHelp = box.groupByMode === 'ROLLUP'
+    ? '字段顺序就是逐级汇总路径，例如“区域 → 门店 → 商品”。'
+    : box.groupByMode === 'GROUPING_SETS'
+      ? '这里先建立可用维度池；每个分组集可在下方独立选择并排序。'
+      : box.groupByMode === 'CUBE'
+        ? '字段顺序决定维度输出顺序；CUBE 会计算这些字段的全部组合。'
+        : '字段顺序决定分组维度在结果中的输出顺序。'
   return <aside className="dataset-canvas-drawer output" aria-label="配置分组组件" onClick={event => event.stopPropagation()}>
     <header><div><span>分组组件</span><strong>{box.name}</strong><small>先定义输入粒度，再为下游自动生成带稳定别名的维度和指标</small></div><button type="button" aria-label="保存并关闭分组配置" onClick={onDone}>×</button></header>
     <section><h3>组件与产物</h3><div className="dataset-group-input"><label><span>产物名称</span><input aria-label="分组产物名称" value={box.name} onChange={event => onNameChange(event.target.value)} placeholder="例如：客户月度汇总" /></label><label><span>分组方式</span><select aria-label="分组方式" value={box.groupByMode || 'STANDARD'} onChange={event => onGroupByModeChange(event.target.value as GraphGroupByMode)}><option value="STANDARD">普通分组（GROUP BY）</option><option value="CUBE">多维分组（GROUP BY CUBE）</option><option value="ROLLUP">逐级汇总（GROUP BY ROLLUP）</option><option value="GROUPING_SETS">自定义组合（GROUPING SETS）</option></select><small>{modeHelp}</small></label><div aria-label="分组组件输入" className={`dataset-connected-input ${box.input ? 'connected' : 'empty'}`}><span>输入组件</span><strong>{relationInputLabel(box.input, nodes, boxes, groups, transforms)}</strong><small>{box.input ? '输入由画布连线确定；删除连线后可重新连接' : '请回到画布，从上游组件拖线到该组件输入端口'}</small></div></div></section>
-    <section><div className="dataset-drawer-title"><div><h3>分组字段</h3><p>可多选；同一字段也可以作为聚合指标，日期年月日请先连接独立日期转换组件。</p></div><div className="dataset-drawer-title-actions"><span>{box.dimensions.length} 已选</span><button type="button" disabled={!availableFields.length} aria-label={allDimensionsSelected ? '取消全选分组字段' : '全选分组字段'} onClick={() => onAllDimensionsChange(!allDimensionsSelected)}>{allDimensionsSelected ? '取消全选' : '全选'}</button></div></div><div className="dataset-drawer-field-list configured">{availableFields.map(field => { const configured = box.dimensions.find(item => item.key === field.key); return <div className={configured ? 'selected' : ''} key={field.key}><label><input aria-label={`分组维度 ${field.code}`} type="checkbox" checked={Boolean(configured)} onChange={event => onDimensionChange(field, event.target.checked)} /><span><strong>{field.name}</strong><small>{graphProducedFieldLabel(field)}</small></span></label>{configured && <div className="dataset-product-fields generated"><output className="dataset-generated-field-alias" aria-label={`${field.code} 字段别名`}><small>字段别名</small><strong>{configured.code}</strong></output></div>}</div> })}</div></section>
+    <section>
+      <div className="dataset-drawer-title"><div><h3>分组字段</h3><p>{orderHelp}</p></div><span>{box.dimensions.length} 已选</span></div>
+      <OrderedDimensionPicker
+        title="选择并排序分组字段"
+        description="点击字段决定初始顺序，选择完成后可继续拖拽调整。"
+        fields={availableFields}
+        selectedKeys={box.dimensions.map(dimension => dimension.key)}
+        onChange={updateDimensionKeys}
+        emptyText="尚未选择分组字段"
+        maxSelected={box.groupByMode === 'CUBE' ? 8 : undefined}
+      />
+      <p className="dataset-ordered-field-note">同一字段仍可作为聚合指标；日期年月日请先连接独立日期转换组件。</p>
+    </section>
     {box.groupByMode === 'GROUPING_SETS' && <section><div className="dataset-drawer-title"><div><h3>自定义分组集</h3><p>每个分组集是一种输出粒度；不选维度的空分组集会生成总计。</p></div><span>{box.groupingSets?.length ?? 0} 组</span></div><div className="dataset-grouping-sets">{(box.groupingSets ?? []).map((groupingSet, index) => {
-      const selected = new Set(groupingSet)
-      return <article key={`${index}-${groupingSet.join('|')}`}>
+      return <article key={index}>
         <header><strong>分组集 {index + 1}</strong><span>{groupingSet.length ? `${groupingSet.length} 个维度` : '总计（空分组集）'}</span><button type="button" aria-label={`删除分组集 ${index + 1}`} disabled={(box.groupingSets?.length ?? 0) <= 1} onClick={() => onGroupingSetsChange((box.groupingSets ?? []).filter((_, itemIndex) => itemIndex !== index))}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header>
-        <div>{box.dimensions.map(dimension => <label key={dimension.key}><input type="checkbox" aria-label={`分组集 ${index + 1} 维度 ${dimension.code}`} checked={selected.has(dimension.key)} onChange={event => {
-          const next = new Set(selected)
-          if (event.target.checked) next.add(dimension.key)
-          else next.delete(dimension.key)
-          onGroupingSetsChange((box.groupingSets ?? []).map((item, itemIndex) => itemIndex === index ? box.dimensions.filter(dimension => next.has(dimension.key)).map(dimension => dimension.key) : item))
-        }} /><span>{dimension.name}</span><small>{dimension.code}</small></label>)}</div>
+        <OrderedDimensionPicker
+          compact
+          title={`选择并排序分组集 ${index + 1} 的字段`}
+          description="每个分组集独立保存字段及顺序；不选择任何字段时表示总计。"
+          fields={dimensionPickerFields}
+          selectedKeys={groupingSet}
+          onChange={keys => onGroupingSetsChange((box.groupingSets ?? []).map((item, itemIndex) => itemIndex === index ? keys : item))}
+          emptyText="当前为空分组集，将生成总计"
+        />
       </article>
     })}</div><button className="dataset-add-condition" type="button" aria-label="添加分组集" disabled={(box.groupingSets?.length ?? 0) >= 64} onClick={() => onGroupingSetsChange([...(box.groupingSets ?? []), []])}>添加分组集</button></section>}
     <section>
       <div className="dataset-drawer-title">
-        <div><h3>聚合指标</h3><p>首项 * 表示全部输入行；选择 * + COUNT 生成 COUNT(*)。普通字段的 COUNT 仅统计非空值。</p></div>
-        <div className="dataset-drawer-title-actions"><span>{box.metrics.length} 已选</span><button type="button" disabled={!availableFields.length} aria-label={allMetricsSelected ? '取消全选聚合指标' : '全选聚合指标'} onClick={() => onAllMetricsChange(!allMetricsSelected)}>{allMetricsSelected ? '取消全选字段' : '全选字段'}</button></div>
+        <div><h3>聚合指标</h3><p>在弹窗中选择指标字段，并为每个指标配置计算公式；总行数使用 COUNT(*)。</p></div>
+        <span>{box.metrics.length} 已选</span>
       </div>
-      <div className="dataset-drawer-field-list configured metrics">
-        <div className={rowCountMetric ? 'selected' : ''}>
-          <label>
-            <input aria-label="聚合指标 *" type="checkbox" checked={Boolean(rowCountMetric)} onChange={event => onRowCountMetricChange(event.target.checked)} />
-            <span><strong>*</strong><small>全部输入行</small></span>
-          </label>
-          {rowCountMetric && <div className="dataset-product-fields generated">
-            <select aria-label="* 聚合逻辑" value="COUNT" disabled><option>COUNT</option></select>
-            <output className="dataset-generated-field-alias" aria-label="* 字段别名"><small>字段别名</small><strong>{rowCountMetric.code}</strong></output>
-          </div>}
-        </div>
-        {availableFields.map(field => {
-          const configured = box.metrics.find(item => item.key === field.key && !item.countRows)
-          const numeric = ['NUMBER', 'INT', 'INTEGER', 'DECIMAL', 'FLOAT', 'DOUBLE'].includes(field.canonicalType.toUpperCase())
-          return <div className={configured ? 'selected' : ''} key={field.key}>
-            <label>
-              <input aria-label={`聚合指标 ${field.code}`} type="checkbox" checked={Boolean(configured)} onChange={event => onMetricChange(field, event.target.checked)} />
-              <span><strong>{field.name}</strong><small>{graphProducedFieldLabel(field)}</small></span>
-            </label>
-            {configured && <div className="dataset-product-fields generated">
-              <select aria-label={`${field.code} 聚合逻辑`} value={configured.aggregation} onChange={event => onMetricChange(field, true, { aggregation: event.target.value })}>
-                <option value="">选择逻辑</option>
-                {numeric && <><option>SUM</option><option>AVG</option></>}
-                <option>COUNT</option><option>COUNT_DISTINCT</option><option>MIN</option><option>MAX</option>
-              </select>
-              <output className="dataset-generated-field-alias" aria-label={`${field.code} 字段别名`}><small>字段别名</small><strong>{configured.code}</strong></output>
-            </div>}
-          </div>
-        })}
-      </div>
+      <GroupMetricPicker fields={availableFields} metrics={box.metrics} onChange={onMetricsChange} />
     </section>
     <footer>{error && <span className="dataset-drawer-error" role="alert">{error}</span>}<small>{graphLeaves({ kind: 'GROUP', id: box.id }, shape).length ? '该分组产物可继续连接关联组件或结束节点' : '请先连接输入组件'}</small><button type="button" onClick={onDone}>完成</button></footer>
   </aside>
@@ -4477,8 +4930,8 @@ function TransformConfigDrawer({ transform, inputs, nodes, boxes, groups, transf
               }}>{operatorOptions(field).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
               {needsValue && !collection && <label><span>比较对象</span><select aria-label={`过滤条件 ${index + 1} 比较对象`} value={valueMode} onChange={event => onFilterConditionChange(condition.id, { valueMode: event.target.value as GraphFilterCondition['valueMode'], value: '' })}><option value="LITERAL">固定值</option><option value="FIELD">其他字段</option></select></label>}
               {needsValue && valueMode === 'FIELD' && !collection
-                ? <label className="dataset-filter-value"><span>比较字段</span><select aria-label={`过滤条件 ${index + 1} 比较字段`} value={condition.value} onChange={event => onFilterConditionChange(condition.id, { value: event.target.value })}><option value="">选择类型兼容的字段</option>{comparableFields.map(item => <option key={item.key} value={item.key}>{graphProducedFieldLabel(item)}</option>)}</select><small>{field ? `仅显示与 ${field.name}（${field.canonicalType}）类型兼容的其他字段` : '先选择过滤字段'}</small></label>
-                : needsValue && <label className="dataset-filter-value"><span>{collection ? '候选值' : '比较值'}</span><textarea aria-label={`过滤条件 ${index + 1} 值`} value={condition.value} rows={collection ? 3 : 1} placeholder={collection ? '例如：华东, 华南' : '输入要匹配的值'} onChange={event => onFilterConditionChange(condition.id, { value: event.target.value })} /><small>{field ? `${field.name} · ${field.canonicalType}` : '先选择过滤字段'}</small></label>}
+                ? <label className="dataset-filter-value"><span>比较字段</span><select aria-label={`过滤条件 ${index + 1} 比较字段`} value={condition.value} onChange={event => onFilterConditionChange(condition.id, { value: event.target.value })}><option value="">选择类型兼容的字段</option>{comparableFields.map(item => <option key={item.key} value={item.key}>{graphProducedFieldLabel(item)}</option>)}</select><small>{field ? `仅显示与“${graphProducedFieldLabel(field)}”类型兼容的其他字段` : '先选择过滤字段'}</small></label>
+                : needsValue && <label className="dataset-filter-value"><span>{collection ? '候选值' : '比较值'}</span><textarea aria-label={`过滤条件 ${index + 1} 值`} value={condition.value} rows={collection ? 3 : 1} placeholder={collection ? '例如：华东, 华南' : '输入要匹配的值'} onChange={event => onFilterConditionChange(condition.id, { value: event.target.value })} /><small>{field ? graphProducedFieldLabel(field) : '先选择过滤字段'}</small></label>}
             </div>
           </article>
         })}</div>
@@ -4723,36 +5176,14 @@ function JoinConfigDrawer({ box, join, boxes, groups, transforms, nodes, leftOut
   const leftFields = leftOutputFields.filter(field => (!join || field.binding.nodeId === join.leftNodeId) && physicalJoinField(field))
   const rightFields = rightOutputFields.filter(field => (!join || field.binding.nodeId === join.rightNodeId) && physicalJoinField(field))
   const conditions = join ? joinConditions(join) : []
-  const bridgeNodeId = join?.bridge?.bridgeNodeId || join?.rightNodeId || ''
-  const bridgeFields = bridgeNodeId === join?.leftNodeId ? leftFields : rightFields
-  const temporalEventNodeId = join?.temporal?.eventNodeId || join?.leftNodeId || ''
-  const temporalValidityNodeId = temporalEventNodeId === join?.leftNodeId ? join?.rightNodeId || '' : join?.leftNodeId || ''
-  const temporalEventFields = temporalEventNodeId === join?.leftNodeId ? leftFields : rightFields
-  const temporalValidityFields = temporalValidityNodeId === join?.leftNodeId ? leftFields : rightFields
   const outputItems = [...new Map([...leftOutputFields, ...rightOutputFields].map(field => [field.key, field])).values()]
   const selectedOutputs = new Set(box.outputKeys.length ? box.outputKeys : outputItems.map(field => field.key))
   return <aside className="dataset-canvas-drawer relation" aria-label="配置表关联" onClick={event => event.stopPropagation()}>
     <header><div><span>关联组件</span><strong>{box.name}</strong><small>关联接收两个上游数据集；转换结果会保留在关联产物中</small></div><button type="button" aria-label="保存并关闭关系配置" onClick={onDone}>×</button></header>
     <section><h3>组件与输入槽位</h3><div className="dataset-group-input"><label><span>产物名称</span><input aria-label="关联产物名称" value={box.name} onChange={event => onNameChange(event.target.value)} placeholder="例如：客户订单关联结果" /></label></div><div className="dataset-relation-inputs readonly"><div aria-label="关联槽位 1" className={`dataset-connected-input ${box.left ? 'connected' : 'empty'}`}><span>槽位 1</span><strong>{relationInputLabel(box.left, nodes, boxes, groups, transforms)}</strong></div><div aria-label="关联槽位 2" className={`dataset-connected-input ${box.right ? 'connected' : 'empty'}`}><span>槽位 2</span><strong>{relationInputLabel(box.right, nodes, boxes, groups, transforms)}</strong></div></div>{!join && <p className="dataset-relation-pending">请在画布中把两个上游组件分别连接到槽位 1 和槽位 2。</p>}</section>
     {join && <><section><h3>连接方式</h3><div className="dataset-join-types">{['INNER', 'LEFT', 'RIGHT', 'FULL'].map(type => <button key={type} type="button" className={join.joinType === type ? 'selected' : ''} aria-pressed={join.joinType === type} onClick={() => onJoinPatch({ joinType: type })}>{type === 'INNER' ? 'INNER JOIN' : `${type} JOIN`}</button>)}</div></section>
-      <section><div className="dataset-drawer-title"><div><h3>关系语义</h3><p>多个普通维度分别使用 MANY_TO_ONE；真正的多值关系必须声明 Bridge 与扇出策略。</p></div></div><div className="dataset-group-input">
-        <label><span>关联基数</span><select aria-label="关联基数" value={join.cardinality} onChange={event => onJoinPatch({ cardinality: event.target.value })}><option value="">请选择</option><option value="ONE_TO_ONE">ONE_TO_ONE</option><option value="MANY_TO_ONE">MANY_TO_ONE</option><option value="ONE_TO_MANY">ONE_TO_MANY</option><option value="MANY_TO_MANY">MANY_TO_MANY</option></select></label>
-        <label><span>关系类型</span><select aria-label="关系类型" value={join.relationshipType || ''} onChange={event => { const relationshipType = event.target.value; onJoinPatch({ relationshipType, ...(relationshipType === 'BRIDGE' ? { fanoutPolicy: join.fanoutPolicy === 'UNSAFE' ? 'UNSAFE' : 'DEDUPLICATE', bridge: join.bridge || { bridgeNodeId: join.rightNodeId, relationshipTypeField: rightFields[0]?.binding.field || '' } } : { fanoutPolicy: 'SAFE', bridge: undefined }) }) }}><option value="">兼容旧合同</option><option value="DIRECT">普通维度</option><option value="ROLE_PLAYING">角色扮演维度</option><option value="BRIDGE">Bridge 多值关系</option></select></label>
-        {(join.relationshipType === 'ROLE_PLAYING' || join.relationshipType === 'BRIDGE') && <label><span>业务角色编码</span><input aria-label="关系业务角色编码" value={join.relationshipRole || ''} onChange={event => onJoinPatch({ relationshipRole: event.target.value })} placeholder="例如 ORDERING_USER" /></label>}
-        {join.relationshipType === 'BRIDGE' && <><label><span>指标扇出策略</span><select aria-label="指标扇出策略" value={join.fanoutPolicy || ''} onChange={event => onJoinPatch({ fanoutPolicy: event.target.value })}><option value="">请选择</option><option value="PRIMARY">PRIMARY · 只取主成员</option><option value="ALLOCATE">ALLOCATE · 权重分摊</option><option value="DEDUPLICATE">DEDUPLICATE · 去重后可用</option><option value="NON_ADDITIVE">NON_ADDITIVE · 禁止跨成员相加</option><option value="UNSAFE">UNSAFE · 禁止指标消费</option></select></label>
-          <label><span>Bridge 节点</span><select aria-label="Bridge 节点" value={bridgeNodeId} onChange={event => onJoinPatch({ bridge: { ...(join.bridge || { relationshipTypeField: '' }), bridgeNodeId: event.target.value } })}><option value={join.leftNodeId}>槽位 1</option><option value={join.rightNodeId}>槽位 2</option></select></label>
-          <label><span>关系类型字段</span><select aria-label="Bridge 关系类型字段" value={join.bridge?.relationshipTypeField || ''} onChange={event => onJoinPatch({ bridge: { ...(join.bridge || { bridgeNodeId }), relationshipTypeField: event.target.value } })}><option value="">请选择</option>{bridgeFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select></label>
-          {join.fanoutPolicy === 'PRIMARY' && <label><span>主成员标记字段</span><select aria-label="Bridge 主成员标记字段" value={join.bridge?.primaryFlagField || ''} onChange={event => onJoinPatch({ bridge: { ...(join.bridge || { bridgeNodeId, relationshipTypeField: '' }), primaryFlagField: event.target.value } })}><option value="">请选择</option>{bridgeFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select></label>}
-          {join.fanoutPolicy === 'ALLOCATE' && <label><span>分配权重字段</span><select aria-label="Bridge 分配权重字段" value={join.bridge?.allocationWeightField || ''} onChange={event => onJoinPatch({ bridge: { ...(join.bridge || { bridgeNodeId, relationshipTypeField: '' }), allocationWeightField: event.target.value } })}><option value="">请选择</option>{bridgeFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select></label>}</>}
-        <label><span>SCD2 时间关联</span><input aria-label="启用 SCD2 时间关联" type="checkbox" checked={Boolean(join.temporal)} onChange={event => onJoinPatch({ temporal: event.target.checked ? { eventNodeId: join.leftNodeId, eventTimeField: '', validityNodeId: join.rightNodeId, validFromField: '', validToField: '', validToInclusive: false } : undefined })} /></label>
-        {join.temporal && <><label><span>事件节点</span><select aria-label="SCD2 事件节点" value={temporalEventNodeId} onChange={event => { const eventNodeId = event.target.value; onJoinPatch({ temporal: { ...join.temporal!, eventNodeId, validityNodeId: eventNodeId === join.leftNodeId ? join.rightNodeId : join.leftNodeId, eventTimeField: '', validFromField: '', validToField: '' } }) }}><option value={join.leftNodeId}>槽位 1</option><option value={join.rightNodeId}>槽位 2</option></select></label>
-          <label><span>事件时间字段</span><select aria-label="SCD2 事件时间字段" value={join.temporal.eventTimeField} onChange={event => onJoinPatch({ temporal: { ...join.temporal!, eventTimeField: event.target.value } })}><option value="">请选择</option>{temporalEventFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select></label>
-          <label><span>有效开始字段</span><select aria-label="SCD2 有效开始字段" value={join.temporal.validFromField} onChange={event => onJoinPatch({ temporal: { ...join.temporal!, validFromField: event.target.value } })}><option value="">请选择</option>{temporalValidityFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select></label>
-          <label><span>有效结束字段</span><select aria-label="SCD2 有效结束字段" value={join.temporal.validToField} onChange={event => onJoinPatch({ temporal: { ...join.temporal!, validToField: event.target.value } })}><option value="">请选择</option>{temporalValidityFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select></label>
-          <label><span>结束时间包含边界</span><input aria-label="SCD2 结束时间包含边界" type="checkbox" checked={join.temporal.validToInclusive} onChange={event => onJoinPatch({ temporal: { ...join.temporal!, validToInclusive: event.target.checked } })} /></label></>}
-      </div></section>
-      <section><div className="dataset-drawer-title"><div><h3>关联字段</h3><p>关联键使用两侧稳定的原始字段；SCD2 使用 GTE 与 LT/LTE 明确有效区间。</p></div><span>{conditions.length} 个条件</span></div><div className="dataset-join-conditions">{conditions.map((condition, index) => <div key={condition.id}><span>{index + 1}</span><select aria-label={`条件 ${index + 1} 左字段`} value={condition.leftField} onChange={event => onConditionPatch(condition.id, { leftField: event.target.value })}><option value="">选择槽位 1 字段</option>{leftFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select><select aria-label={`条件 ${index + 1} 运算符`} value={condition.operator || 'EQUALS'} onChange={event => onConditionPatch(condition.id, { operator: event.target.value as 'EQUALS' | 'NOT_EQUALS' | 'GT' | 'GTE' | 'LT' | 'LTE' })}><option value="EQUALS">=</option><option value="NOT_EQUALS">≠</option><option value="GT">&gt;</option><option value="GTE">≥</option><option value="LT">&lt;</option><option value="LTE">≤</option></select><select aria-label={`条件 ${index + 1} 右字段`} value={condition.rightField} onChange={event => onConditionPatch(condition.id, { rightField: event.target.value })}><option value="">选择槽位 2 字段</option>{rightFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select><button type="button" disabled={conditions.length === 1} aria-label={`删除条件 ${index + 1}`} onClick={() => onRemoveCondition(condition.id)}>×</button></div>)}</div><button className="dataset-add-condition" type="button" onClick={onAddCondition}>＋ 添加关联字段</button></section>
-      <section><div className="dataset-drawer-title"><div><h3>输出字段</h3><p>勾选字段组成“{box.name}”，并作为下游组件可识别的产物。</p></div><span>{selectedOutputs.size} 已选</span></div><div className="dataset-drawer-field-list">{outputItems.map(field => <label key={field.key}><input aria-label={`关联输出 ${field.code}`} type="checkbox" checked={selectedOutputs.has(field.key)} onChange={event => onOutputChange(field.key, event.target.checked)} /><span><strong>{field.name}</strong><small>{graphProducedFieldLabel(field)}</small></span></label>)}</div></section></>}
+      <section><div className="dataset-drawer-title"><div><h3>关联字段</h3><p>选择槽位 1 与槽位 2 的关联键；多个字段用于复合键关联。</p></div><span>{conditions.length} 个条件</span></div><div className="dataset-join-conditions">{conditions.map((condition, index) => <div key={condition.id}><span>{index + 1}</span><select aria-label={`条件 ${index + 1} 左字段`} value={condition.leftField} onChange={event => onConditionPatch(condition.id, { leftField: event.target.value })}><option value="">选择槽位 1 字段</option>{leftFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select><select aria-label={`条件 ${index + 1} 运算符`} value={condition.operator || 'EQUALS'} onChange={event => onConditionPatch(condition.id, { operator: event.target.value as 'EQUALS' | 'NOT_EQUALS' | 'GT' | 'GTE' | 'LT' | 'LTE' })}><option value="EQUALS">=</option><option value="NOT_EQUALS">≠</option><option value="GT">&gt;</option><option value="GTE">≥</option><option value="LT">&lt;</option><option value="LTE">≤</option></select><select aria-label={`条件 ${index + 1} 右字段`} value={condition.rightField} onChange={event => onConditionPatch(condition.id, { rightField: event.target.value })}><option value="">选择槽位 2 字段</option>{rightFields.map(field => <option key={field.key} value={field.binding.field}>{graphProducedFieldLabel(field)}</option>)}</select><button type="button" disabled={conditions.length === 1} aria-label={`删除条件 ${index + 1}`} onClick={() => onRemoveCondition(condition.id)}>×</button></div>)}</div><button className="dataset-add-condition" type="button" onClick={onAddCondition}>＋ 添加关联字段</button></section>
+      <section><div className="dataset-drawer-title"><div><h3>输出字段</h3><p>勾选字段组成“{box.name}”，并作为下游组件可识别的产物。</p></div><span>{selectedOutputs.size} 已选</span></div><div className="dataset-drawer-field-list">{outputItems.map(field => <label key={field.key}><input aria-label={`关联输出 ${field.code}`} type="checkbox" checked={selectedOutputs.has(field.key)} onChange={event => onOutputChange(field.key, event.target.checked)} /><span><strong>{field.name}</strong><small>{field.producerName}</small></span></label>)}</div></section></>}
     <footer><small>点击画板空白处也会自动保存并收起</small><button type="button" onClick={onDone}>完成</button></footer>
   </aside>
 }
@@ -4766,7 +5197,7 @@ function EndConfigDrawer({ end, boxes, groups, transforms, nodes, availableField
   return <aside className="dataset-canvas-drawer end" aria-label="配置结束节点" onClick={event => event.stopPropagation()}>
     <header><div><span>结束节点</span><strong>{end.name}</strong><small>唯一的最终出口：定义数据集对外字段；数据预览请使用画布按钮</small></div><button type="button" aria-label="保存并关闭结束节点配置" onClick={onDone}>×</button></header>
     <section><h3>最终产物</h3><div className="dataset-group-input"><label><span>产物名称</span><input aria-label="结束节点产物名称" value={end.name} onChange={event => onNameChange(event.target.value)} placeholder="例如：客户订单分析数据集" /></label><div aria-label="结束节点输入" className={`dataset-connected-input ${end.input ? 'connected' : 'empty'}`}><span>最终输入</span><strong>{relationInputLabel(end.input, nodes, boxes, groups, transforms)}</strong><small>{end.input ? '最终输入由画布连线确定' : '请从最终上游组件拖线到结束节点'}</small></div></div></section>
-    <section><div className="dataset-drawer-title"><div><h3>输出字段</h3><p>选择最终对外字段；勾选后按上游稳定编码自动生成字段别名。</p></div><span>{end.outputs.length} 已选</span></div><div className="dataset-drawer-field-list configured end-fields">{availableFields.map(field => { const output = selected.get(field.key); return <div className={output ? 'selected' : ''} key={field.key}><label><input aria-label={`最终输出 ${field.code}`} type="checkbox" checked={Boolean(output)} onChange={event => onOutputChange(field, event.target.checked)} /><span><strong>{field.name}</strong><small>{graphProducedFieldLabel(field)}</small></span></label>{output && <div className="dataset-product-fields generated"><output className="dataset-generated-field-alias" aria-label={`${field.code} 字段别名`}><small>字段别名</small><strong>{output.code}</strong></output></div>}</div> })}</div></section>
+    <section><div className="dataset-drawer-title"><div><h3>输出字段</h3><p>选择最终对外字段；勾选后按上游稳定编码自动生成字段别名。</p></div><span>{end.outputs.length} 已选</span></div><div className="dataset-drawer-field-list configured end-fields">{availableFields.map(field => { const output = selected.get(field.key); return <div className={output ? 'selected' : ''} key={field.key}><label><input aria-label={`最终输出 ${field.code}`} type="checkbox" checked={Boolean(output)} onChange={event => onOutputChange(field, event.target.checked)} /><span><strong>{field.name}</strong><small>{field.producerName}</small></span></label>{output && <div className="dataset-product-fields generated"><output className="dataset-generated-field-alias" aria-label={`${field.code} 字段别名`}><small>字段别名</small><strong>{output.code}</strong></output></div>}</div> })}</div></section>
     <footer><small>保存数据集时会以此节点的字段作为最终 DSL 输出</small><button type="button" onClick={onDone}>完成</button></footer>
   </aside>
 }

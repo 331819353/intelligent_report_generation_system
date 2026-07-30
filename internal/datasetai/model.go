@@ -103,6 +103,7 @@ type PlanHints struct {
 // again after generation so a valid JSON response cannot silently omit required components.
 type TransformRequirement struct {
 	ComponentType string `json:"componentType"`
+	Operation     string `json:"operation,omitempty"`
 	Reason        string `json:"reason"`
 }
 
@@ -699,7 +700,7 @@ func validateGraphShape(value GraphPlan) error {
 
 func validTransformComponent(value PlanTransform) bool {
 	families := map[string]string{
-		"TEXT_UPPER": "TEXT", "TEXT_TRIM": "TEXT", "TEXT_REPLACE": "TEXT", "TEXT_LOWER": "TEXT", "TEXT_SUBSTRING": "TEXT", "TEXT_CONCAT": "TEXT",
+		"TEXT_CASE": "TEXT", "TEXT_UPPER": "TEXT", "TEXT_TRIM": "TEXT", "TEXT_REPLACE": "TEXT", "TEXT_LOWER": "TEXT", "TEXT_SUBSTRING": "TEXT", "TEXT_CONCAT": "TEXT",
 		"NUMBER_ABSOLUTE": "NUMBER", "NUMBER_ROUNDING": "NUMBER", "NUMBER_ARITHMETIC": "NUMBER", "DATE_CALCULATION": "DATE", "DATE_FORMAT": "DATE",
 		"NULL": "NULL", "CAST": "CAST", "CONDITION": "CONDITION",
 	}
@@ -714,7 +715,7 @@ func validTransformRule(componentType string, rule PlanTransformRule) bool {
 // without including provider prose or source-row values.
 func transformRuleValidationDetail(componentType string, rule PlanTransformRule) string {
 	operations := map[string]map[string]bool{
-		"TEXT_UPPER": {"UPPER": true}, "TEXT_TRIM": {"TRIM": true}, "TEXT_REPLACE": {"REPLACE": true}, "TEXT_LOWER": {"LOWER": true},
+		"TEXT_CASE": {"UPPER": true, "LOWER": true}, "TEXT_UPPER": {"UPPER": true}, "TEXT_TRIM": {"TRIM": true}, "TEXT_REPLACE": {"REPLACE": true}, "TEXT_LOWER": {"LOWER": true},
 		"TEXT_SUBSTRING": {"SUBSTRING": true}, "TEXT_CONCAT": {"CONCAT": true}, "NUMBER_ABSOLUTE": {"ABS": true},
 		"NUMBER_ROUNDING": {"ROUND": true, "FLOOR": true, "CEIL": true}, "NUMBER_ARITHMETIC": {"ADD": true, "SUBTRACT": true, "MULTIPLY": true, "DIVIDE": true},
 		"DATE_CALCULATION": {"CURRENT_DATE": true, "DATE_DIFF": true, "DATE_EXTRACT": true, "DATE_START": true, "DATE_END": true},
@@ -857,7 +858,7 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 
 	joins := make(map[string]PlanJoin, len(value.Joins))
 	for _, join := range value.Joins {
-		if componentIDs[join.ID] || !oneOf(join.JoinType, "INNER", "LEFT") || len(join.Conditions) < 1 {
+		if componentIDs[join.ID] || !oneOf(join.JoinType, "INNER", "LEFT", "RIGHT", "FULL") || len(join.Conditions) < 1 {
 			return invalidOutput("join identity, type, or conditions are invalid")
 		}
 		componentIDs[join.ID] = true

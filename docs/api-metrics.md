@@ -148,11 +148,21 @@ Content-Type: application/json
   "dimensionFieldIds": [
     "region"
   ],
+  "dimensionFilters": [
+    {
+      "fieldId": "region",
+      "operator": "EQUALS",
+      "value": "华东"
+    }
+  ],
+  "metricSortDirection": "DESC",
   "maxRows": 100
 }
 ```
 
-`queryId` 和 `maxRows` 可省略；`parameters` 必须符合数据集参数合同，`dimensionFieldIds` 只能选择指标定义声明的维度且不能重复。服务端从可信的精确数据集版本派生执行计划，客户端不能提交 SQL、连接、过滤或数据源覆盖。
+`queryId` 和 `maxRows` 可省略；`parameters` 必须符合数据集参数合同，`dimensionFieldIds` 只能选择指标定义声明的维度且不能重复。`dimensionFilters` 同样只能引用指标允许维度，普通维度支持 `EQUALS` / `NOT_EQUALS` / `IN` / `NOT_IN`，日期和时间维度额外支持 `GTE` / `LT`；所有值均由服务端参数绑定。`metricSortDirection` 只能是 `ASC` 或 `DESC`。服务端从可信的精确数据集版本派生执行计划，客户端不能提交 SQL、连接、任意字段过滤或数据源覆盖。
+
+指标详情中的“预览”是血缘后的最后一个页签，只展示一张透视表。页面打开时自动以全部允许维度作为行粒度查询；维度筛选位于对应表头，并采用 Excel 式搜索、全选和逐值勾选交互，候选值来自精确数据集版本的 ACTIVE 维度成员索引。指标排序位于指标表头。应用筛选或排序后生成新的 `queryId` 并重新请求服务端，不在浏览器内缓存、过滤、聚合或拼接结果。当前目录只展示 DWS/ADS 数据资产，因此预览必须解析到精确发布版本的 ACTIVE 物化表并由 PostgreSQL 执行；不存在可用物化时失败关闭，不能回放源 DAG 或使用前端样例数据代替。
 
 成功响应不包含生成 SQL：
 

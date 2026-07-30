@@ -64,6 +64,14 @@ func normalize(definition *Definition) {
 	definition.DatasetID = strings.TrimSpace(definition.DatasetID)
 	definition.DatasetVersionID = strings.TrimSpace(definition.DatasetVersionID)
 	definition.Aggregation = strings.ToUpper(strings.TrimSpace(definition.Aggregation))
+	if definition.SourceCalculation != nil {
+		definition.SourceCalculation.Stage = strings.ToUpper(strings.TrimSpace(definition.SourceCalculation.Stage))
+		definition.SourceCalculation.Aggregation = strings.ToUpper(strings.TrimSpace(definition.SourceCalculation.Aggregation))
+		definition.SourceCalculation.Formula = strings.TrimSpace(definition.SourceCalculation.Formula)
+		definition.SourceCalculation.ValueBehavior = strings.ToUpper(strings.TrimSpace(definition.SourceCalculation.ValueBehavior))
+		definition.SourceCalculation.TimeAggregation = strings.ToUpper(strings.TrimSpace(definition.SourceCalculation.TimeAggregation))
+		definition.SourceCalculation.EvidencePath = strings.TrimSpace(definition.SourceCalculation.EvidencePath)
+	}
 	definition.Unit = strings.TrimSpace(definition.Unit)
 	definition.NumberFormat = strings.TrimSpace(definition.NumberFormat)
 	definition.TimeFieldID = strings.TrimSpace(definition.TimeFieldID)
@@ -137,6 +145,45 @@ func validate(definition Definition) ([]ValidationIssue, []string, []string) {
 	}
 	if !oneOf(definition.Aggregation, "NONE", "SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT") {
 		add("aggregation", "METRIC_AGGREGATION_UNSUPPORTED", "聚合方式不受支持")
+	}
+	if source := definition.SourceCalculation; source != nil {
+		if source.Stage != "DATASET_DAG" {
+			add("sourceCalculation.stage", "METRIC_SOURCE_CALCULATION_STAGE_UNSUPPORTED", "同步指标源计算必须来自精确数据集 DAG")
+		}
+		if !oneOf(source.Aggregation, "SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT") {
+			add("sourceCalculation.aggregation", "METRIC_SOURCE_CALCULATION_AGGREGATION_UNSUPPORTED", "源计算聚合方式不受支持")
+		}
+		validateText(&issues, "sourceCalculation.formula", "METRIC_SOURCE_CALCULATION_FORMULA_INVALID", source.Formula, 1, 16384)
+		if source.ValueBehavior != "" && !oneOf(source.ValueBehavior, "FLOW", "CUMULATIVE", "POINT_IN_TIME", "NON_ADDITIVE") {
+			add("sourceCalculation.valueBehavior", "METRIC_SOURCE_VALUE_BEHAVIOR_UNSUPPORTED", "源度量值行为不受支持")
+		}
+		if source.TimeAggregation != "" && !oneOf(source.TimeAggregation, "SUM", "LAST", "NONE") {
+			add("sourceCalculation.timeAggregation", "METRIC_SOURCE_TIME_AGGREGATION_UNSUPPORTED", "源度量跨时间聚合方式不受支持")
+		}
+		if (source.ValueBehavior == "") != (source.TimeAggregation == "") {
+			add("sourceCalculation", "METRIC_SOURCE_TIME_BEHAVIOR_INCOMPLETE", "源度量值行为和跨时间聚合必须同时声明")
+		}
+		switch source.ValueBehavior {
+		case "FLOW":
+			if definition.Additivity != "ADDITIVE" || source.TimeAggregation != "SUM" {
+				add("sourceCalculation", "METRIC_SOURCE_FLOW_CONTRACT_INVALID", "流量指标必须完全可加且跨时间求和")
+			}
+		case "CUMULATIVE", "POINT_IN_TIME":
+			if definition.Additivity != "SEMI_ADDITIVE" || source.TimeAggregation != "LAST" {
+				add("sourceCalculation", "METRIC_SOURCE_SNAPSHOT_CONTRACT_INVALID", "累计值或时点值必须半可加且跨时间取期末值")
+			}
+		case "NON_ADDITIVE":
+			if definition.Additivity != "NON_ADDITIVE" || source.TimeAggregation != "NONE" {
+				add("sourceCalculation", "METRIC_SOURCE_NON_ADDITIVE_CONTRACT_INVALID", "不可加值必须禁止跨时间聚合")
+			}
+		}
+		validateText(&issues, "sourceCalculation.evidencePath", "METRIC_SOURCE_CALCULATION_EVIDENCE_INVALID", source.EvidencePath, 1, 500)
+		if definition.Aggregation != "NONE" {
+			add("aggregation", "METRIC_SOURCE_CALCULATION_NESTED_AGGREGATION", "DAG 已完成聚合的同步指标不能再次聚合")
+		}
+		if definition.Metric.Type != "DERIVED" {
+			add("metric.type", "METRIC_SOURCE_CALCULATION_TYPE_INVALID", "DAG 已完成计算的同步指标必须声明为派生指标")
+		}
 	}
 	validateText(&issues, "unit", "METRIC_UNIT_INVALID", definition.Unit, 0, 32)
 	validateText(&issues, "numberFormat", "METRIC_NUMBER_FORMAT_INVALID", definition.NumberFormat, 1, 64)
@@ -232,7 +279,11 @@ func validate(definition Definition) ([]ValidationIssue, []string, []string) {
 	if definition.Metric.Type == "RATIO" && !expressionStats.hasDivision {
 		add("expression", "METRIC_RATIO_DIVISION_REQUIRED", "比率指标表达式必须包含除法")
 	}
-	if (definition.Aggregation == "AVG" || definition.Aggregation == "COUNT_DISTINCT" || definition.Metric.Type == "RATIO" || expressionStats.metricRefs > 0) && definition.Additivity == "ADDITIVE" {
+	businessAggregation := definition.Aggregation
+	if definition.SourceCalculation != nil {
+		businessAggregation = definition.SourceCalculation.Aggregation
+	}
+	if (businessAggregation == "AVG" || businessAggregation == "COUNT_DISTINCT" || definition.Metric.Type == "RATIO" || expressionStats.metricRefs > 0) && definition.Additivity == "ADDITIVE" {
 		add("additivity", "METRIC_ADDITIVITY_CONFLICT", "平均值、去重计数、比率或派生指标不能声明为完全可加")
 	}
 	dependencyIDs := make([]string, 0, len(dependencies))

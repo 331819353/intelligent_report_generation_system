@@ -705,7 +705,8 @@ func (s *PostgresStore) CompleteDimensionProfile(
 
 		// 程序字段分类创建的正式维度没有人工策略决策。画像明确推荐 FULL
 		// 时可按同一程序化审批链放开成员索引；人工创建或人工收紧为 NONE 的
-		// 维度没有 PROGRAM_APPROVE_DWS_DIMENSION 审计证据，不会被自动放宽。
+		// 维度没有程序审批审计证据，不会被自动放宽。兼容早期全局同步写入
+		// 的 PROGRAM_APPROVE_GOVERNED_DIMENSION，避免已发布 DWS 永久停在 NONE。
 		if recommended == "FULL" && !sensitive && !observation.RiskHighCardinality {
 			promotionRows, promoteErr := tx.Query(ctx, `UPDATE platform.semantic_dimensions AS dimension
 				SET member_index_policy='FULL',
@@ -748,7 +749,10 @@ func (s *PostgresStore) CompleteDimensionProfile(
 				    WHERE approval.tenant_id=dimension.tenant_id
 				      AND approval.resource_type='SEMANTIC_DIMENSION'
 				      AND approval.resource_id=dimension.id::text
-				      AND approval.action='PROGRAM_APPROVE_DWS_DIMENSION'
+				      AND approval.action IN (
+				        'PROGRAM_APPROVE_DWS_DIMENSION',
+				        'PROGRAM_APPROVE_GOVERNED_DIMENSION'
+				      )
 				  )
 				RETURNING dimension.id::text,dimension.version-1,dimension.version`,
 				claim.RequestedBy, claim.DatasetID, claim.DatasetVersionID,

@@ -119,6 +119,12 @@ func buildQueryCandidate(
 	document.Distinct = false
 	document.Fields = selectedFields
 	document.GroupBy = groupBy
+	// The caller's selected dimensions define one ordinary preview grain.
+	// A source DWS may itself have CUBE/ROLLUP/GROUPING_SETS materialization
+	// semantics, but carrying those sets into this reduced projection can
+	// reference omitted fields and would return several grains in one preview.
+	document.GroupByMode = ""
+	document.GroupingSets = nil
 	document.Having = []dataset.Filter{}
 	document.Sorts = sorts
 	document.OutputGrain = dataset.OutputGrain{
@@ -194,15 +200,16 @@ func appendDimensionFilters(
 		setValues, setValuesValid := dimensionFilterSetValues(
 			requestedFilter.Value,
 		)
-		if !oneOf(operator, "EQUALS", "IN", "GTE", "LT") ||
+		setOperator := operator == "IN" || operator == "NOT_IN"
+		if !oneOf(operator, "EQUALS", "NOT_EQUALS", "IN", "NOT_IN", "GTE", "LT") ||
 			requestedFilter.Value == nil ||
-			(operator == "IN" && !setValuesValid) ||
-			(operator != "EQUALS" && operator != "IN" &&
+			(setOperator && !setValuesValid) ||
+			(!oneOf(operator, "EQUALS", "NOT_EQUALS", "IN", "NOT_IN") &&
 				!oneOf(field.CanonicalType, "DATE", "DATETIME")) {
 			return nil, nil, invalid(
 				fmt.Sprintf("dimensionFilters[%d]", index),
 				"METRIC_PREVIEW_FILTER_UNSUPPORTED",
-				"维度过滤仅支持非空的 EQUALS/IN，时间字段额外支持 GTE 和 LT",
+				"维度过滤仅支持非空的 EQUALS/NOT_EQUALS/IN/NOT_IN，时间字段额外支持 GTE 和 LT",
 			)
 		}
 		seenBindings[bindingKey] = true
@@ -211,7 +218,7 @@ func appendDimensionFilters(
 		left := cloneDatasetExpression(field.Expression)
 		parameterCodes := []string{}
 		var right dataset.Expression
-		if operator == "IN" {
+		if setOperator {
 			right = dataset.Expression{Type: "ARRAY", Arguments: []dataset.Expression{}}
 			for valueIndex, value := range setValues {
 				parameterCode := uniqueDimensionFilterParameter(

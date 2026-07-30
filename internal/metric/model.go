@@ -30,23 +30,36 @@ var (
 
 // Definition 是指标草稿和发布版本共同使用的唯一事实来源。
 type Definition struct {
-	SchemaVersion                string      `json:"schemaVersion"`
-	Metric                       Descriptor  `json:"metric"`
-	DatasetID                    string      `json:"datasetId"`
-	DatasetVersionID             string      `json:"datasetVersionId"`
-	Expression                   Expression  `json:"expression"`
-	Aggregation                  string      `json:"aggregation"`
-	Unit                         string      `json:"unit"`
-	NumberFormat                 string      `json:"numberFormat"`
-	TimeFieldID                  string      `json:"timeFieldId,omitempty"`
-	TimeGrain                    string      `json:"timeGrain"`
-	Additivity                   string      `json:"additivity"`
-	NonAdditiveDimensionFieldIDs []string    `json:"nonAdditiveDimensionFieldIds"`
-	AllowedDimensions            []Dimension `json:"allowedDimensions"`
-	DecimalScale                 int         `json:"decimalScale"`
-	RoundingMode                 string      `json:"roundingMode"`
-	NullHandling                 string      `json:"nullHandling"`
-	DivisionByZero               string      `json:"divisionByZero"`
+	SchemaVersion                string             `json:"schemaVersion"`
+	Metric                       Descriptor         `json:"metric"`
+	DatasetID                    string             `json:"datasetId"`
+	DatasetVersionID             string             `json:"datasetVersionId"`
+	Expression                   Expression         `json:"expression"`
+	Aggregation                  string             `json:"aggregation"`
+	SourceCalculation            *SourceCalculation `json:"sourceCalculation,omitempty"`
+	Unit                         string             `json:"unit"`
+	NumberFormat                 string             `json:"numberFormat"`
+	TimeFieldID                  string             `json:"timeFieldId,omitempty"`
+	TimeGrain                    string             `json:"timeGrain"`
+	Additivity                   string             `json:"additivity"`
+	NonAdditiveDimensionFieldIDs []string           `json:"nonAdditiveDimensionFieldIds"`
+	AllowedDimensions            []Dimension        `json:"allowedDimensions"`
+	DecimalScale                 int                `json:"decimalScale"`
+	RoundingMode                 string             `json:"roundingMode"`
+	NullHandling                 string             `json:"nullHandling"`
+	DivisionByZero               string             `json:"divisionByZero"`
+}
+
+// SourceCalculation 保存同步指标在精确数据集 DAG 中已经完成的真实计算。
+// Aggregation 仍描述查询指标输出时是否需要再次聚合；二者必须分开，避免把
+// COUNT_DISTINCT 等已在 DWS 中完成的计算错误展示成“不聚合”。
+type SourceCalculation struct {
+	Stage           string `json:"stage"`
+	Aggregation     string `json:"aggregation"`
+	Formula         string `json:"formula"`
+	ValueBehavior   string `json:"valueBehavior,omitempty"`
+	TimeAggregation string `json:"timeAggregation,omitempty"`
+	EvidencePath    string `json:"evidencePath"`
 }
 
 // Descriptor 保存指标主对象的可移植基本信息。
@@ -110,6 +123,7 @@ type Record struct {
 	OwnerUserID               string          `json:"ownerUserId"`
 	Type                      string          `json:"type"`
 	Status                    string          `json:"status"`
+	SyncManaged               bool            `json:"syncManaged"`
 	Version                   int64           `json:"version"`
 	DraftVersionID            string          `json:"draftVersionId"`
 	DraftVersionNo            int             `json:"draftVersionNo"`
@@ -134,6 +148,7 @@ type Summary struct {
 	OwnerUserID               string `json:"ownerUserId"`
 	Type                      string `json:"type"`
 	Status                    string `json:"status"`
+	SyncManaged               bool   `json:"syncManaged"`
 	Version                   int64  `json:"version"`
 	DatasetID                 string `json:"datasetId"`
 	DatasetVersionID          string `json:"datasetVersionId"`
@@ -208,7 +223,8 @@ type PublishInput struct {
 
 // DimensionFilter 是指标运行时唯一允许追加的受控过滤。
 // 字段必须属于指标已发布定义的 allowedDimensions，值始终通过参数绑定传递；
-// 普通维度支持 EQUALS 和受控集合 IN，DATE/DATETIME 额外支持半开区间所需的 GTE/LT。
+// 普通维度支持 EQUALS/NOT_EQUALS 和受控集合 IN/NOT_IN，
+// DATE/DATETIME 额外支持半开区间所需的 GTE/LT。
 type DimensionFilter struct {
 	FieldID  string `json:"fieldId"`
 	Operator string `json:"operator"`

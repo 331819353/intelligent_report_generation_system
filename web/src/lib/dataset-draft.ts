@@ -1,5 +1,6 @@
 import {
   datasetAPI,
+  joinCardinalityForType,
   type AssetTable,
   type CalculatedField,
   type DatasetDraft,
@@ -214,37 +215,15 @@ export async function hydrateDatasetDraft(record: DatasetRecord, tables: AssetTa
     }))
     const first = conditions[0] ?? { leftField: '', rightField: '' }
     const generatedJoinReady = systemGeneratedDWD && conditions.length > 0 && conditions.every(condition => condition.leftField && condition.rightField)
+    const joinType = text(raw.joinType)
     return {
       id: text(raw.id),
       leftNodeId: text(raw.leftNodeId),
       rightNodeId: text(raw.rightNodeId),
       leftField: first.leftField,
       rightField: first.rightField,
-      joinType: text(raw.joinType),
-      cardinality: text(raw.cardinality) || 'UNKNOWN',
-      relationshipType: text(raw.relationshipType),
-      relationshipRole: text(raw.relationshipRole),
-      fanoutPolicy: text(raw.fanoutPolicy),
-      ...(raw.bridge && typeof raw.bridge === 'object' ? {
-        bridge: {
-          bridgeNodeId: text(object(raw.bridge).bridgeNodeId),
-          relationshipTypeField: text(object(raw.bridge).relationshipTypeField),
-          allocationWeightField: text(object(raw.bridge).allocationWeightField),
-          primaryFlagField: text(object(raw.bridge).primaryFlagField),
-          validFromField: text(object(raw.bridge).validFromField),
-          validToField: text(object(raw.bridge).validToField),
-        },
-      } : {}),
-      ...(raw.temporal && typeof raw.temporal === 'object' ? {
-        temporal: {
-          eventNodeId: text(object(raw.temporal).eventNodeId),
-          eventTimeField: text(object(raw.temporal).eventTimeField),
-          validityNodeId: text(object(raw.temporal).validityNodeId),
-          validFromField: text(object(raw.temporal).validFromField),
-          validToField: text(object(raw.temporal).validToField),
-          validToInclusive: Boolean(object(raw.temporal).validToInclusive),
-        },
-      } : {}),
+      joinType,
+      cardinality: joinCardinalityForType(joinType),
       manualConfirmed: generatedJoinReady || Boolean(raw.manualConfirmed),
       conditions,
     }

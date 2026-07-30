@@ -92,8 +92,13 @@ func (s *PostgresStore) create(ctx context.Context, tenantID, actorID, candidate
 				); err != nil {
 					return err
 				}
-				return acceptMetricCandidateTx(
+				if err := acceptMetricCandidateTx(
 					ctx, tx, tenantID, actorID, candidateID, metricID, expectedCandidateVersion,
+				); err != nil {
+					return err
+				}
+				return publishSynchronizedMetricTx(
+					ctx, tx, tenantID, actorID, metricID, candidateID, prepared,
 				)
 			}
 		}
@@ -124,6 +129,11 @@ func (s *PostgresStore) create(ctx context.Context, tenantID, actorID, candidate
 		if candidateID != "" {
 			if err := acceptMetricCandidateTx(
 				ctx, tx, tenantID, actorID, candidateID, metricID, expectedCandidateVersion,
+			); err != nil {
+				return err
+			}
+			if err := publishSynchronizedMetricTx(
+				ctx, tx, tenantID, actorID, metricID, candidateID, prepared,
 			); err != nil {
 				return err
 			}
@@ -193,9 +203,11 @@ func iterateMetricDraftFromCandidateTx(
 	}
 	definition := prepared.Definition
 	if _, err := tx.Exec(ctx, `UPDATE platform.metrics SET
-		name=$1,description=$2,metric_type=$3,version=version+1,updated_by=$4
-		WHERE id::text=$5`, definition.Metric.Name, definition.Metric.Description,
-		definition.Metric.Type, actorID, metricID); err != nil {
+		name=$1,description=$2,metric_type=$3,
+		origin_candidate_id=COALESCE(origin_candidate_id,$4::uuid),
+		version=version+1,updated_by=$5
+		WHERE id::text=$6`, definition.Metric.Name, definition.Metric.Description,
+		definition.Metric.Type, candidateID, actorID, metricID); err != nil {
 		return err
 	}
 	if err := replaceDerivedTx(ctx, tx, tenantID, metricID, draftVersionID, prepared); err != nil {
@@ -238,6 +250,322 @@ func acceptMetricCandidateTx(
 	return err
 }
 
+// publishSynchronizedMetricTx 把从已发布 DWS/ADS 数据集同步得到的指标草稿
+// 在同一事务中固化为发布版本。同步资产的生命周期由来源数据集控制，因此
+// 不再要求用户对规则提取出的同一份定义重复执行“保存草稿 + 手工发布”。
+func publishSynchronizedMetricTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, actorID, metricID, candidateID string,
+	prepared Prepared,
+) error {
+	var draftVersionID, datasetID, datasetVersionID, definitionHash string
+	var draftVersionNo int
+	var draftRecordVersion int64
+	var syncManaged, sourcePublished bool
+	err := tx.QueryRow(ctx, `SELECT
+			draft.id::text,draft.version_no,draft.record_version,
+			metric.dataset_id::text,draft.dataset_version_id::text,draft.definition_hash,
+			metric.origin_candidate_id IS NOT NULL,
+			EXISTS(
+				SELECT 1
+				FROM platform.datasets AS dataset
+				JOIN platform.dataset_versions AS version
+				  ON version.tenant_id=dataset.tenant_id
+				 AND version.dataset_id=dataset.id
+				 AND version.id=dataset.current_published_version_id
+				WHERE dataset.id=metric.dataset_id
+				  AND dataset.status='PUBLISHED'
+				  AND dataset.deleted_at IS NULL
+				  AND version.id=draft.dataset_version_id
+				  AND version.status='PUBLISHED'
+				  AND version.layer IN ('DWS','ADS')
+			)
+		FROM platform.metrics AS metric
+		JOIN platform.metric_versions AS draft
+		  ON draft.tenant_id=metric.tenant_id
+		 AND draft.metric_id=metric.id
+		 AND draft.id=metric.current_draft_version_id
+		WHERE metric.id::text=$1 AND metric.deleted_at IS NULL
+		FOR UPDATE OF metric,draft`, metricID).Scan(
+		&draftVersionID, &draftVersionNo, &draftRecordVersion,
+		&datasetID, &datasetVersionID, &definitionHash,
+		&syncManaged, &sourcePublished,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if !syncManaged {
+		return nil
+	}
+	if !sourcePublished || prepared.DefinitionHash != definitionHash ||
+		prepared.Definition.DatasetID != datasetID ||
+		prepared.Definition.DatasetVersionID != datasetVersionID {
+		return ErrVersionUnavailable
+	}
+	tag, err := tx.Exec(ctx, `UPDATE platform.metric_versions SET
+			version_no=version_no+1,updated_by=$1
+		WHERE id=$2 AND status='DRAFT' AND record_version=$3`,
+		actorID, draftVersionID, draftRecordVersion)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	var publishedVersionID string
+	err = tx.QueryRow(ctx, `INSERT INTO platform.metric_versions(
+			tenant_id,metric_id,dataset_id,dataset_version_id,version_no,status,
+			definition_version,definition_json,definition_hash,record_version,
+			created_by,updated_by,published_at,published_by,
+			source_draft_version_id,source_draft_record_version
+		) VALUES(
+			$1,$2,$3,$4,$5,'PUBLISHING',$6,$7,$8,1,
+			$9,$9,now(),$9,$10,$11
+		) RETURNING id::text`,
+		tenantID, metricID, datasetID, datasetVersionID, draftVersionNo,
+		DefinitionVersion, prepared.DefinitionJSON, prepared.DefinitionHash,
+		actorID, draftVersionID, draftRecordVersion,
+	).Scan(&publishedVersionID)
+	if err != nil {
+		return err
+	}
+	if err := replaceDerivedTx(
+		ctx, tx, tenantID, metricID, publishedVersionID, prepared,
+	); err != nil {
+		return err
+	}
+	// 先移动主对象指针，再完成 PUBLISHING -> PUBLISHED。指针一致性约束在
+	// 提交时复核，而发布状态触发器会立即创建并验证维度兼容关系；此顺序
+	// 保证它看到的主对象已经指向本次精确发布版本。
+	if _, err := tx.Exec(ctx, `UPDATE platform.metrics SET
+			current_published_version_id=$1,status='PUBLISHED',
+			version=version+1,updated_by=$2
+		WHERE id=$3`, publishedVersionID, actorID, metricID); err != nil {
+		return err
+	}
+	tag, err = tx.Exec(ctx, `UPDATE platform.metric_versions
+		SET status='PUBLISHED'
+		WHERE id=$1 AND status='PUBLISHING'`, publishedVersionID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	if err := refreshSynchronizedMetricSemanticTx(
+		ctx, tx, publishedVersionID, candidateID, prepared.Definition,
+	); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+			tenant_id,actor_user_id,action,resource_type,resource_id,detail
+		) VALUES($1,$2,'SYNC_PUBLISH','METRIC',$3,jsonb_build_object(
+			'metricVersionId',$4::text,'versionNo',$5::int,
+			'draftVersionId',$6::text,'draftRecordVersion',$7::bigint,
+			'datasetVersionId',$8::text,'definitionHash',$9::text
+		))`,
+		tenantID, actorID, metricID, publishedVersionID, draftVersionNo,
+		draftVersionID, draftRecordVersion, datasetVersionID, definitionHash,
+	)
+	return err
+}
+
+// refreshSynchronizedMetricSemanticTx makes the published semantic document describe
+// the exact version that was just published. The legacy publication trigger uses the
+// metric's first origin candidate, which is intentionally immutable and may therefore
+// carry stale wording after a later synchronization or user edit.
+func refreshSynchronizedMetricSemanticTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	publishedVersionID, candidateID string,
+	definition Definition,
+) error {
+	businessAggregation := definition.Aggregation
+	if definition.SourceCalculation != nil {
+		businessAggregation = definition.SourceCalculation.Aggregation
+	}
+	if candidateID != "" {
+		tag, err := tx.Exec(ctx, `UPDATE platform.metric_semantic_documents AS published
+			SET candidate_id=candidate.candidate_id,
+				name=candidate.name,description=candidate.description,
+				caliber=candidate.caliber,dimensions=candidate.dimensions,
+				period=candidate.period,period_description=candidate.period_description,
+				lineage=jsonb_set(
+					published.lineage,'{aggregation}',to_jsonb($3::text),true
+				),
+				lineage_summary=candidate.lineage_summary,tags=candidate.tags,
+				document=candidate.document,semantic_source=candidate.semantic_source,
+				llm_model=candidate.llm_model,prompt_version=candidate.prompt_version,
+				semantic_input_hash=candidate.semantic_input_hash,
+				ai_request_id=candidate.ai_request_id,
+				enrichment_error_code=candidate.enrichment_error_code,
+				embedding=NULL,embedding_model='',embedding_input_hash='',
+				embedding_status='PENDING',embedding_attempt=0,
+				embedding_error_code='',next_attempt_at=now(),
+				lease_owner='',lease_expires_at=NULL,embedded_at=NULL,
+				updated_at=now()
+			FROM platform.metric_semantic_documents AS candidate
+			WHERE published.subject_type='METRIC_VERSION'
+			  AND published.metric_version_id::text=$1
+			  AND candidate.subject_type='CANDIDATE'
+			  AND candidate.candidate_id::text=$2
+			  AND candidate.tenant_id=published.tenant_id`,
+			publishedVersionID, candidateID, businessAggregation)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return ErrOriginCandidateUnavailable
+		}
+		return nil
+	}
+
+	caliber := synchronizedMetricCaliber(definition, businessAggregation)
+	periodDescription := synchronizedMetricPeriodDescription(definition.TimeGrain)
+	dimensions := make([]string, 0, len(definition.AllowedDimensions))
+	for _, dimension := range definition.AllowedDimensions {
+		dimensions = append(dimensions, dimension.Name)
+	}
+	tags := synchronizedMetricTags(definition, businessAggregation, dimensions)
+	tag, err := tx.Exec(ctx, `WITH rendered AS (
+			SELECT document.id,concat_ws(E'\n',
+				'指标名称：'||$2::text,
+				'指标说明：'||$3::text,
+				'统计口径：'||$4::text,
+				'分析维度：'||array_to_string($5::text[],'、'),
+				'统计周期：'||$6::text||'（'||$7::text||'）',
+				'数据血缘：'||document.lineage_summary,
+				'检索标签：'||array_to_string($8::text[],'、')
+			) AS body
+			FROM platform.metric_semantic_documents AS document
+			WHERE document.subject_type='METRIC_VERSION'
+			  AND document.metric_version_id::text=$1
+		)
+		UPDATE platform.metric_semantic_documents AS published
+		SET candidate_id=NULL,name=$2,description=$3,caliber=$4,
+			dimensions=$5,period=$7,period_description=$6,tags=$8,
+			lineage=jsonb_set(
+				published.lineage,'{aggregation}',to_jsonb($9::text),true
+			),
+			document=rendered.body,semantic_source='RULE',llm_model='',
+			prompt_version='synchronized-metric-definition-v2',
+			semantic_input_hash=encode(
+				public.digest(convert_to(rendered.body,'UTF8'),'sha256'
+			),'hex'),
+			ai_request_id=NULL,enrichment_error_code='',
+			embedding=NULL,embedding_model='',embedding_input_hash='',
+			embedding_status='PENDING',embedding_attempt=0,
+			embedding_error_code='',next_attempt_at=now(),
+			lease_owner='',lease_expires_at=NULL,embedded_at=NULL,
+			updated_at=now()
+		FROM rendered
+		WHERE published.id=rendered.id`,
+		publishedVersionID,
+		definition.Metric.Name,
+		definition.Metric.Description,
+		caliber,
+		dimensions,
+		periodDescription,
+		definition.TimeGrain,
+		tags,
+		businessAggregation,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrVersionUnavailable
+	}
+	return nil
+}
+
+func synchronizedMetricCaliber(definition Definition, businessAggregation string) string {
+	parts := []string{}
+	if source := definition.SourceCalculation; source != nil {
+		parts = append(parts,
+			fmt.Sprintf("按源数据集 DAG 公式 %s 计算（%s）", source.Formula, source.Aggregation),
+		)
+		if source.ValueBehavior != "" {
+			parts = append(parts, "值行为为 "+source.ValueBehavior)
+		}
+		if source.TimeAggregation != "" {
+			parts = append(parts, "跨时间规则为 "+source.TimeAggregation)
+		}
+		parts = append(parts, "查询层直接读取聚合结果，不再二次聚合")
+	} else {
+		parts = append(parts, "按指标定义执行 "+businessAggregation+" 聚合")
+	}
+	nullRule := "忽略空值"
+	if definition.NullHandling != "IGNORE" {
+		nullRule = "空值规则为 " + definition.NullHandling
+	}
+	parts = append(parts,
+		nullRule,
+		"可加性为 "+definition.Additivity,
+		fmt.Sprintf("展示格式为 %s，保留 %d 位小数", definition.NumberFormat, definition.DecimalScale),
+	)
+	if definition.Unit != "" {
+		parts = append(parts, "单位为 "+definition.Unit)
+	}
+	return strings.Join(parts, "；")
+}
+
+func synchronizedMetricPeriodDescription(period string) string {
+	switch period {
+	case "DAY":
+		return "按日"
+	case "WEEK":
+		return "按周"
+	case "MONTH":
+		return "按月"
+	case "QUARTER":
+		return "按季度"
+	case "YEAR":
+		return "按年"
+	default:
+		return "无固定统计周期"
+	}
+}
+
+func synchronizedMetricTags(
+	definition Definition,
+	businessAggregation string,
+	dimensions []string,
+) []string {
+	metricType := map[string]string{
+		"ATOMIC":  "原子指标",
+		"DERIVED": "派生指标",
+		"RATIO":   "复合指标",
+	}[definition.Metric.Type]
+	values := []string{
+		definition.Metric.Name,
+		definition.Metric.Code,
+		metricType,
+		businessAggregation,
+		definition.TimeGrain,
+		definition.Unit,
+	}
+	values = append(values, dimensions...)
+	result := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || value == "NONE" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+		if len(result) == 16 {
+			break
+		}
+	}
+	return result
+}
+
 func sameCandidateCalculation(candidate, accepted Definition) bool {
 	// LLM enrichment may improve only the human-facing name and description after
 	// deterministic extraction. Every executable and formatting fact, including unit,
@@ -277,7 +605,8 @@ func (s *PostgresStore) Get(ctx context.Context, tenantID, id string) (record Re
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `SELECT
 			m.id::text,m.code::text,m.name,m.description,m.domain_id::text,m.sharing_scope::text,
-			COALESCE(m.created_by::text,''),m.metric_type,m.status,m.version,
+			COALESCE(m.created_by::text,''),m.metric_type,m.status,
+			m.origin_candidate_id IS NOT NULL,m.version,
 			v.id::text,v.version_no,v.record_version,COALESCE(m.current_published_version_id::text,''),
 			m.dataset_id::text,v.dataset_version_id::text,v.definition_hash,v.definition_json,
 			to_char(m.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
@@ -288,7 +617,8 @@ func (s *PostgresStore) Get(ctx context.Context, tenantID, id string) (record Re
 			WHERE m.id::text=$1 AND m.deleted_at IS NULL`, id).Scan(
 			&record.ID, &record.Code, &record.Name, &record.Description,
 			&record.DomainID, &record.SharingScope, &record.OwnerUserID, &record.Type, &record.Status,
-			&record.Version, &record.DraftVersionID, &record.DraftVersionNo, &record.DraftRecordVersion,
+			&record.SyncManaged, &record.Version, &record.DraftVersionID,
+			&record.DraftVersionNo, &record.DraftRecordVersion,
 			&record.CurrentPublishedVersionID, &record.DatasetID, &record.DatasetVersionID,
 			&record.DefinitionHash, &record.Definition, &record.CreatedAt, &record.UpdatedAt,
 		)
@@ -309,7 +639,8 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 		}
 		rows, err := tx.Query(ctx, `SELECT
 			m.id::text,m.code::text,m.name,m.description,m.domain_id::text,m.sharing_scope::text,
-			COALESCE(m.created_by::text,''),m.metric_type,m.status,m.version,
+			COALESCE(m.created_by::text,''),m.metric_type,m.status,
+			m.origin_candidate_id IS NOT NULL,m.version,
 			m.dataset_id::text,v.dataset_version_id::text,
 			COALESCE(m.current_published_version_id::text,''),
 			to_char(m.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
@@ -327,7 +658,7 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 			if err := rows.Scan(
 				&item.ID, &item.Code, &item.Name, &item.Description,
 				&item.DomainID, &item.SharingScope, &item.OwnerUserID, &item.Type, &item.Status,
-				&item.Version, &item.DatasetID, &item.DatasetVersionID,
+				&item.SyncManaged, &item.Version, &item.DatasetID, &item.DatasetVersionID,
 				&item.CurrentPublishedVersionID, &item.UpdatedAt,
 			); err != nil {
 				return err
@@ -419,13 +750,18 @@ func (s *PostgresStore) Update(ctx context.Context, tenantID, actorID, id string
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		var currentVersion, draftRecordVersion int64
 		var draftVersionID, definitionHash, datasetID, metricCode string
+		var syncManaged bool
 		err := tx.QueryRow(ctx, `SELECT
-			m.version,m.code::text,m.dataset_id::text,v.id::text,v.record_version,v.definition_hash
+			m.version,m.code::text,m.dataset_id::text,v.id::text,v.record_version,
+			v.definition_hash,m.origin_candidate_id IS NOT NULL
 			FROM platform.metrics AS m
 			JOIN platform.metric_versions AS v
 			  ON v.id=m.current_draft_version_id AND v.metric_id=m.id AND v.tenant_id=m.tenant_id
 			WHERE m.id::text=$1 AND m.deleted_at IS NULL FOR UPDATE OF m,v`, id).
-			Scan(&currentVersion, &metricCode, &datasetID, &draftVersionID, &draftRecordVersion, &definitionHash)
+			Scan(
+				&currentVersion, &metricCode, &datasetID, &draftVersionID,
+				&draftRecordVersion, &definitionHash, &syncManaged,
+			)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -469,6 +805,13 @@ func (s *PostgresStore) Update(ctx context.Context, tenantID, actorID, id string
 		}
 		if err := replaceDerivedTx(ctx, tx, tenantID, id, draftVersionID, prepared); err != nil {
 			return err
+		}
+		if syncManaged {
+			if err := publishSynchronizedMetricTx(
+				ctx, tx, tenantID, actorID, id, "", prepared,
+			); err != nil {
+				return err
+			}
 		}
 		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(
 			tenant_id,actor_user_id,action,resource_type,resource_id,detail
@@ -583,15 +926,17 @@ func (s *PostgresStore) Publish(ctx context.Context, tenantID, actorID, metricID
 		if err := replaceDerivedTx(ctx, tx, tenantID, metricID, publishedVersionID, plan.Prepared); err != nil {
 			return err
 		}
-		if tag, err := tx.Exec(ctx, `UPDATE platform.metric_versions SET status='PUBLISHED' WHERE id=$1 AND status='PUBLISHING'`, publishedVersionID); err != nil {
-			return err
-		} else if tag.RowsAffected() != 1 {
-			return ErrConflict
-		}
+		// 兼容关系触发器在发布版本完成时立即校验主对象当前指针；先移动指针，
+		// 再完成版本状态，最终一致性仍由延迟约束在事务提交前封口。
 		if _, err := tx.Exec(ctx, `UPDATE platform.metrics SET
 			current_published_version_id=$1,status='PUBLISHED',version=version+1,updated_by=$2
 			WHERE id=$3`, publishedVersionID, actorID, metricID); err != nil {
 			return err
+		}
+		if tag, err := tx.Exec(ctx, `UPDATE platform.metric_versions SET status='PUBLISHED' WHERE id=$1 AND status='PUBLISHING'`, publishedVersionID); err != nil {
+			return err
+		} else if tag.RowsAffected() != 1 {
+			return ErrConflict
 		}
 		if err := scanVersionTx(ctx, tx, metricID, publishedVersionID, &record); err != nil {
 			return err
@@ -1029,6 +1374,15 @@ func replaceDerivedTx(ctx context.Context, tx pgx.Tx, tenantID, metricID, versio
 }
 
 func clearDerivedTx(ctx context.Context, tx pgx.Tx, versionID string) error {
+	// The semantic catalog document is a rebuildable projection of a metric
+	// version and carries the dataset_version_id as part of its composite
+	// foreign key. Remove it before a mutable draft switches dataset versions;
+	// the metric-version update trigger enqueues the exact document rebuild in
+	// the same transaction.
+	if _, err := tx.Exec(ctx, `DELETE FROM platform.semantic_documents
+		WHERE subject_type='METRIC_VERSION' AND metric_version_id=$1`, versionID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM platform.metric_dimensions WHERE metric_version_id=$1`, versionID); err != nil {
 		return err
 	}

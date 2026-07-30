@@ -447,86 +447,8 @@ func buildDWSGroupingPlan(
 	timeFieldID string,
 	timeMustBeRetained bool,
 ) (dataset.GroupByMode, [][]string) {
-	mode := dataset.GroupByMode(strings.ToUpper(strings.TrimSpace(requested)))
-	if mode != dataset.GroupByModeCube &&
-		mode != dataset.GroupByModeRollup &&
-		mode != dataset.GroupByModeSets {
-		return dataset.GroupByModeStandard, nil
-	}
-	dimensionFieldIDs := make([]string, 0, len(dimensions))
-	fieldIDByCode := make(map[string]string, len(dimensions))
-	for _, dimension := range dimensions {
-		fieldID := "field_" + dimension.Code
-		dimensionFieldIDs = append(dimensionFieldIDs, fieldID)
-		fieldIDByCode[strings.ToLower(dimension.Code)] = fieldID
-	}
-	if len(dimensionFieldIDs) < 2 &&
-		(mode == dataset.GroupByModeCube ||
-			mode == dataset.GroupByModeRollup) {
-		return dataset.GroupByModeStandard, nil
-	}
-	if mode == dataset.GroupByModeSets {
-		sets := make([][]string, 0, len(selectedSets))
-		seen := map[string]bool{}
-		for _, selected := range selectedSets {
-			set := []string{}
-			if timeFieldID != "" {
-				set = append(set, timeFieldID)
-			}
-			for _, code := range selected {
-				fieldID := fieldIDByCode[strings.ToLower(
-					strings.TrimSpace(code),
-				)]
-				if fieldID != "" && !containsStringValue(set, fieldID) {
-					set = append(set, fieldID)
-				}
-			}
-			if len(set) == 0 {
-				continue
-			}
-			key := strings.Join(set, "\x00")
-			if !seen[key] {
-				seen[key] = true
-				sets = append(sets, set)
-			}
-		}
-		if len(sets) == 0 {
-			return dataset.GroupByModeStandard, nil
-		}
-		return dataset.GroupByModeSets, sets
-	}
-	if timeMustBeRetained && timeFieldID != "" {
-		sets := [][]string{{timeFieldID}}
-		switch mode {
-		case dataset.GroupByModeRollup:
-			current := []string{timeFieldID}
-			for _, fieldID := range dimensionFieldIDs {
-				current = append(append([]string(nil), current...), fieldID)
-				sets = append(sets, current)
-			}
-		case dataset.GroupByModeCube:
-			for mask := 1; mask < 1<<len(dimensionFieldIDs); mask++ {
-				set := []string{timeFieldID}
-				for index, fieldID := range dimensionFieldIDs {
-					if mask&(1<<index) != 0 {
-						set = append(set, fieldID)
-					}
-				}
-				sets = append(sets, set)
-			}
-		}
-		return dataset.GroupByModeSets, sets
-	}
-	return mode, nil
-}
-
-func containsStringValue(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
+	_, _, _, _, _ = requested, selectedSets, dimensions, timeFieldID, timeMustBeRetained
+	return dataset.GroupByModeStandard, nil
 }
 
 func buildDimensionCountDWSCandidate(
@@ -734,8 +656,8 @@ func buildMultiFactDWSCandidate(
 			joinSide = "RIGHT"
 			joins = append(joins, dataset.Join{
 				ID: joinID, LeftNodeID: "fact_1", RightNodeID: nodeID,
-				JoinType: "LEFT", Cardinality: "ONE_TO_ONE",
-				FanoutPolicy: "SAFE", ManualConfirmed: true,
+				JoinType: "LEFT", Cardinality: "MANY_TO_ONE",
+				ManualConfirmed: true,
 				Conditions: []dataset.JoinCondition{{
 					LeftExpression: dataset.Expression{
 						Type: "FIELD_REF", NodeID: "fact_1", Field: "stat_month",

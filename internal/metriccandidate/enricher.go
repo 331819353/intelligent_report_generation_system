@@ -12,6 +12,7 @@ import (
 
 	aiplatform "intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/dataset"
+	"intelligent-report-generation-system/internal/metric"
 )
 
 const maxEnrichmentCandidates = 64
@@ -89,7 +90,13 @@ type enrichmentCandidateInput struct {
 	SourceRole        string   `json:"sourceRole"`
 	SourceSemantic    string   `json:"sourceSemanticType"`
 	Aggregation       string   `json:"aggregation"`
+	Formula           string   `json:"formula"`
+	Additivity        string   `json:"additivity"`
+	ValueBehavior     string   `json:"valueBehavior"`
+	TimeAggregation   string   `json:"timeAggregation"`
 	Unit              string   `json:"unit"`
+	NumberFormat      string   `json:"numberFormat"`
+	DecimalScale      int      `json:"decimalScale"`
 	Dimensions        []string `json:"dimensions"`
 	Period            string   `json:"period"`
 	DeterministicRule string   `json:"deterministicRule"`
@@ -105,12 +112,33 @@ type enrichmentInput struct {
 	Candidates         []enrichmentCandidateInput `json:"candidates"`
 }
 
-const enrichmentSystemPrompt = `你是企业级指标语义专家，负责把服务端锁定的指标事实改写为专业、准确、易懂的业务定义。输入中的聚合、维度、周期、单位、固定过滤和来源均是不可修改的事实；源表与源字段业务元数据是解释业务含义的依据，不是让你新增过滤条件的授权。
+func sourceCalculationFormula(definition metric.Definition) string {
+	if definition.SourceCalculation != nil {
+		return definition.SourceCalculation.Formula
+	}
+	return ""
+}
+
+func sourceCalculationValueBehavior(definition metric.Definition) string {
+	if definition.SourceCalculation != nil {
+		return definition.SourceCalculation.ValueBehavior
+	}
+	return ""
+}
+
+func sourceCalculationTimeAggregation(definition metric.Definition) string {
+	if definition.SourceCalculation != nil {
+		return definition.SourceCalculation.TimeAggregation
+	}
+	return ""
+}
+
+const enrichmentSystemPrompt = `你是企业级指标语义专家，负责把服务端锁定的指标事实改写为专业、准确、易懂的业务定义。输入中的函数公式、聚合、可加性、值行为、跨时间聚合、维度、周期、单位、数字格式、小数位、固定过滤和来源均是不可修改的事实；源表与源字段业务元数据是解释业务含义的依据，不是让你新增过滤条件的授权。
 对每个 fingerprint 返回且只返回一项：
 1. name 使用业务人员熟悉的中文名，不出现字段编码、SQL、DAG 等技术词。
 2. description 用一句话回答“这个指标衡量什么”：优先说明统计主体、时间范围、业务动作或状态、统计对象和结果含义。例如订单计数应表达为“统计……的订单数量”，不能写成“由某数据集按 COUNT_DISTINCT 计算输出”。description 不出现数据集 ID、字段编码、聚合函数名、空值规则、血缘或实现过程。
 3. 只有当固定过滤、字段业务说明、数据集说明或画板业务提示明确支持时，才能写“支付成功”“已完成”“有效”等状态；不得凭常识虚构未实现的过滤条件。名称或粒度说明中的周期与锁定 period 冲突时，以锁定 period 为准，不得掩盖冲突。
-4. caliber 用业务语言准确解释计算对象、去重/汇总方式、固定过滤和空值规则。可在括号中标注聚合函数，但不得把已经在 DAG 中完成的 COUNT_DISTINCT/SUM 错写成“直接取值、不进行聚合”。
+4. caliber 用业务语言准确解释计算对象、函数公式、去重/汇总方式、可加性、跨时间规则、固定过滤和空值规则。可在括号中标注聚合函数，但不得把已经在 DAG 中完成的 COUNT_DISTINCT/SUM 错写成“直接取值、不进行聚合”，也不得把 LAST、NONE 等跨时间规则改写成 SUM。
 5. unit 已由服务端依据字段事实和通用计量规则锁定：订单、交易、支付、退款、发票等业务单据计数通常为“笔”，明细记录数为“条”，其他实体计数通常为“个”。你不得修改单位，但描述与 caliber 应使用相符量词。
 6. periodDescription 只翻译锁定 period；NONE 表示当前执行定义没有固定统计周期。
 7. lineageSummary 只描述发布数据集、业务输出和真实计算关系，不猜测数据库、SQL 或组织信息。
@@ -186,6 +214,11 @@ func (e *Enricher) enrichBatch(
 			SourceFieldCode: draft.SourceFieldCode, SourceFieldName: field.Name, SourceDescription: field.Description,
 			SourceRole: field.Role, SourceSemantic: field.SemanticType,
 			Aggregation: effectiveBusinessAggregation(draft), Unit: draft.Definition.Unit,
+			Formula:         sourceCalculationFormula(draft.Definition),
+			Additivity:      draft.Definition.Additivity,
+			ValueBehavior:   sourceCalculationValueBehavior(draft.Definition),
+			TimeAggregation: sourceCalculationTimeAggregation(draft.Definition),
+			NumberFormat:    draft.Definition.NumberFormat, DecimalScale: draft.Definition.DecimalScale,
 			Dimensions: append([]string(nil), draft.Semantic.Dimensions...), Period: draft.Semantic.Period,
 			DeterministicRule: draft.Semantic.Caliber,
 		})
@@ -261,9 +294,8 @@ func (e *Enricher) enrichBatch(
 		item := byFingerprint[draft.Fingerprint]
 		draft.Semantic.Name = strings.TrimSpace(item.Name)
 		draft.Semantic.Description = strings.TrimSpace(item.Description)
-		draft.Semantic.Caliber = strings.TrimSpace(item.Caliber)
-		draft.Semantic.PeriodDescription = strings.TrimSpace(item.PeriodDescription)
-		draft.Semantic.LineageSummary = strings.TrimSpace(item.LineageSummary)
+		// 公式、口径、周期和血缘全部保留服务端从精确 DSL 得出的文本。
+		// LLM 返回对应字段只用于结构化响应完整性检查，不能覆盖事实。
 		draft.Semantic.Tags = nonEmptyUnique(append(draft.Semantic.Tags, item.Tags...), 16, 32)
 		draft.Semantic.Source = "HYBRID"
 		draft.Semantic.Model = e.invoker.Model()

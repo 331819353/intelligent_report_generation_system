@@ -459,7 +459,7 @@ func TestGeneratedDWSFieldCodesFitPostgreSQLIdentifiers(t *testing.T) {
 	}
 }
 
-func TestDefaultDWSSelectionConsolidatesDimensionsIntoOneCube(t *testing.T) {
+func TestDefaultDWSSelectionConsolidatesDimensionsAtOnePhysicalGrain(t *testing.T) {
 	document := dataset.Document{
 		Dataset: dataset.Descriptor{Layer: dataset.LayerDWD},
 		Fields: []dataset.Field{
@@ -482,7 +482,7 @@ func TestDefaultDWSSelectionConsolidatesDimensionsIntoOneCube(t *testing.T) {
 	)
 	if len(selections) != 1 ||
 		selections[0].TemplateCode != "DRILLDOWN" ||
-		selections[0].GroupingMode != "CUBE" ||
+		selections[0].GroupingMode != "STANDARD" ||
 		!slices.Equal(
 			selections[0].DimensionCodes,
 			[]string{"region_code", "channel_code"},
@@ -509,7 +509,7 @@ func TestLegacyAdditiveMeasureIsCorrectedAtDWSBoundary(t *testing.T) {
 	}
 }
 
-func TestPointInTimeDWSRetainsDateAcrossEveryGroupingSet(t *testing.T) {
+func TestPointInTimeDWSUsesOnePhysicalGrain(t *testing.T) {
 	sourceVersionID := "2470617f-c71d-493d-93d5-9d67ac327e79"
 	upstreamVersionID := "f0206e2a-a8d7-45c6-9e98-ec8ca53c0565"
 	visible := true
@@ -596,15 +596,14 @@ func TestPointInTimeDWSRetainsDateAcrossEveryGroupingSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build point-in-time DWS: %#v", err)
 	}
-	if prepared.Document.GroupByMode != dataset.GroupByModeSets ||
+	if prepared.Document.GroupByMode != dataset.GroupByModeStandard ||
+		len(prepared.Document.GroupingSets) != 0 ||
 		prepared.Document.AnalysisContract.TimeField != "stat_date" ||
 		prepared.Document.AnalysisContract.TimeGrain != "DAY" {
 		t.Fatalf("point-in-time grouping contract = %#v", prepared.Document)
 	}
-	for _, set := range prepared.Document.GroupingSets {
-		if !slices.Contains(set, "field_stat_date") {
-			t.Fatalf("grouping set drops snapshot date: %#v", set)
-		}
+	if !slices.Contains(prepared.Document.GroupBy, "field_stat_date") {
+		t.Fatalf("point-in-time DWS drops snapshot date: %#v", prepared.Document.GroupBy)
 	}
 	measure := prepared.Document.AnalysisContract.Measures[0]
 	if measure.Aggregation != "SUM" ||

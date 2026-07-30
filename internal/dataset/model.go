@@ -181,7 +181,9 @@ type SourceFilter struct {
 	Expression *Expression `json:"expression,omitempty"`
 }
 
-// Join 描述两个节点之间的关联；无法在设计期确认基数时使用 UNKNOWN，执行优化必须保守降级。
+// Join 描述两个节点之间的关联。关联基数由 JoinType 自动推导：
+// INNER=ONE_TO_ONE、LEFT=MANY_TO_ONE、RIGHT=ONE_TO_MANY、FULL=MANY_TO_MANY。
+// 旧关系语义字段仅保留用于兼容历史 DSL 的严格解码，规范化后不会继续下传。
 type Join struct {
 	ID               string                `json:"id"`
 	LeftNodeID       string                `json:"leftNodeId"`
@@ -197,8 +199,7 @@ type Join struct {
 	ManualConfirmed  bool                  `json:"manualConfirmed"`
 }
 
-// BridgeContract 只声明受控字段身份，不允许 SQL 或自由表达式。BridgeNodeID
-// 必须是 Join 的一侧，字段必须来自该节点 projection。
+// BridgeContract 仅用于解码并迁移旧版 DSL。
 type BridgeContract struct {
 	BridgeNodeID          string `json:"bridgeNodeId"`
 	RelationshipTypeField string `json:"relationshipTypeField,omitempty"`
@@ -208,8 +209,7 @@ type BridgeContract struct {
 	ValidToField          string `json:"validToField,omitempty"`
 }
 
-// TemporalJoinContract 将 SCD2 事件时间与有效区间绑定到 Join 两侧的白名单字段。
-// 实际比较仍由 conditions 表达，编译器不接受任意 SQL。
+// TemporalJoinContract 仅用于解码并迁移旧版 DSL。
 type TemporalJoinContract struct {
 	EventNodeID      string `json:"eventNodeId"`
 	EventTimeField   string `json:"eventTimeField"`

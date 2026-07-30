@@ -314,18 +314,23 @@ func sameMetricSourceEnvelope(
 		if len(parameterCodes) == 0 && binding.ParameterCode != "" {
 			parameterCodes = []string{binding.ParameterCode}
 		}
+		ordinaryOperator := binding.Operator == "EQUALS" ||
+			binding.Operator == "NOT_EQUALS" ||
+			binding.Operator == "IN" ||
+			binding.Operator == "NOT_IN"
 		if !exists || seenBindings[bindingKey] ||
 			binding.FilterID == "" || seenFilters[binding.FilterID] ||
 			len(parameterCodes) == 0 ||
 			binding.ParameterCode != parameterCodes[0] ||
 			binding.DataType != field.CanonicalType ||
-			(binding.Operator != "EQUALS" && binding.Operator != "IN" &&
+			!ordinaryOperator &&
 				!((binding.Operator == "GTE" || binding.Operator == "LT") &&
 					(field.CanonicalType == "DATE" ||
-						field.CanonicalType == "DATETIME"))) {
+						field.CanonicalType == "DATETIME")) {
 			return false
 		}
-		if binding.Operator == "IN" && len(parameterCodes) < 2 {
+		setOperator := binding.Operator == "IN" || binding.Operator == "NOT_IN"
+		if setOperator && len(parameterCodes) < 2 {
 			return false
 		}
 		for _, parameterCode := range parameterCodes {
@@ -338,7 +343,7 @@ func sameMetricSourceEnvelope(
 		seenFilters[binding.FilterID] = true
 		filter := derived.Filters[len(original.Filters)+index]
 		parameterName := "语义维度过滤"
-		if binding.Operator == "IN" {
+		if setOperator {
 			parameterName = "语义维度集合过滤"
 		}
 		for parameterIndex, parameterCode := range parameterCodes {
@@ -360,7 +365,7 @@ func sameMetricSourceEnvelope(
 			!reflect.DeepEqual(*filter.Expression.Left, field.Expression) {
 			return false
 		}
-		if binding.Operator == "IN" {
+		if setOperator {
 			if filter.Expression.Right.Type != "ARRAY" ||
 				len(filter.Expression.Right.Arguments) != len(parameterCodes) {
 				return false

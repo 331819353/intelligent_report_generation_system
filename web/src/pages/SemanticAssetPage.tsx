@@ -18,8 +18,10 @@ import {
 } from '../lib/semantic-assets'
 
 type Notice = { tone: 'success' | 'error' | 'info'; message: string }
+type SemanticGroup = 'DIMENSION' | 'METRIC'
 type EditorState = {
   asset?: SemanticAsset
+  group: SemanticGroup
   draft: SemanticAssetInput
 }
 
@@ -35,10 +37,32 @@ const statusLabels: Record<SemanticAssetStatus, string> = {
   DEPRECATED: '已停用',
 }
 
-const emptyDraft = (): SemanticAssetInput => ({
+const semanticGroupLabels: Record<SemanticGroup, { label: string; example: string; type: string }> = {
+  DIMENSION: {
+    label: '维度语义',
+    example: '“智家” → “智家生态圈”',
+    type: 'DIMENSION_SEMANTIC',
+  },
+  METRIC: {
+    label: '指标语义',
+    example: '“有多少人” → “员工人数”',
+    type: 'METRIC_SEMANTIC',
+  },
+}
+
+const semanticGroupOf = (knowledgeType: string): SemanticGroup => {
+  const normalized = knowledgeType.trim().toLocaleUpperCase('zh-CN')
+  return normalized.includes('METRIC') ||
+    normalized.includes('MEASURE') ||
+    normalized.includes('指标')
+    ? 'METRIC'
+    : 'DIMENSION'
+}
+
+const emptyDraft = (group: SemanticGroup): SemanticAssetInput => ({
   commonTerm: '',
   mappingValue: '',
-  knowledgeType: '',
+  knowledgeType: semanticGroupLabels[group].type,
 })
 
 const errorMessage = (cause: unknown) =>
@@ -53,6 +77,7 @@ export function SemanticAssetPage() {
   const [assets, setAssets] = useState<SemanticAsset[]>([])
   const [total, setTotal] = useState(0)
   const [knowledgeTypes, setKnowledgeTypes] = useState<string[]>([])
+  const [semanticGroup, setSemanticGroup] = useState<SemanticGroup>('DIMENSION')
   const [query, setQuery] = useState('')
   const [knowledgeType, setKnowledgeType] = useState('')
   const [status, setStatus] = useState<SemanticAssetStatus | ''>('ACTIVE')
@@ -120,6 +145,14 @@ export function SemanticAssetPage() {
     () => assets.filter(item => item.embeddingStatus === 'PENDING').length,
     [assets],
   )
+  const groupedAssets = useMemo(
+    () => assets.filter(item => semanticGroupOf(item.knowledgeType) === semanticGroup),
+    [assets, semanticGroup],
+  )
+  const groupCounts = useMemo(() => ({
+    DIMENSION: assets.filter(item => semanticGroupOf(item.knowledgeType) === 'DIMENSION').length,
+    METRIC: assets.filter(item => semanticGroupOf(item.knowledgeType) === 'METRIC').length,
+  }), [assets])
 
   const submitEditor = async (event: FormEvent) => {
     event.preventDefault()
@@ -130,7 +163,7 @@ export function SemanticAssetPage() {
       knowledgeType: editor.draft.knowledgeType.trim(),
     }
     if (!input.commonTerm || !input.mappingValue || !input.knowledgeType) {
-      setNotice({ tone: 'error', message: '常用词、映射值和类型均不能为空。' })
+      setNotice({ tone: 'error', message: '用户表达、标准语义和细分类型均不能为空。' })
       return
     }
     setBusy(true)
@@ -144,7 +177,7 @@ export function SemanticAssetPage() {
         await semanticAssetAPI.create(input)
         setNotice({
           tone: 'success',
-          message: '语义资产已创建，常用词已进入向量化队列。',
+          message: `${semanticGroupLabels[editor.group].label}已创建，用户表达已进入独立向量化队列。`,
         })
       }
       setEditor(null)
@@ -180,7 +213,7 @@ export function SemanticAssetPage() {
   }
 
   return (
-    <AppShell title="资产管理中心" eyebrow="指标 · 语义 · 维度">
+    <AppShell title="资产管理中心" eyebrow="数据资产 · 语义资产">
       <AssetManagementTabs />
       <section className="semantic-asset-page">
         {notice && (
@@ -214,39 +247,58 @@ export function SemanticAssetPage() {
             )}
             <header className="semantic-asset-hero">
               <div>
-                <span className="eyebrow">Semantic Dictionary</span>
-                <h2>常用词语义映射</h2>
+                <span className="eyebrow">语义资产</span>
+                <h2>把用户表达纠正为标准业务语义</h2>
                 <p>
-                  常用词单独向量化；匹配后返回确定的映射值与知识类型。
-                  本目录与 DWS 维度资产相互独立。
+                  维度语义处理实体歧义，指标语义纠正问题表达；两类资产分别存放、
+                  独立向量化，命中后返回确定的标准语义。
                 </p>
               </div>
               <button
                 className="primary-button"
                 type="button"
                 disabled={!canManage}
-                onClick={() => setEditor({ draft: emptyDraft() })}
+                onClick={() => setEditor({
+                  group: semanticGroup,
+                  draft: emptyDraft(semanticGroup),
+                })}
               >
-                新增语义资产
+                新增{semanticGroupLabels[semanticGroup].label}
               </button>
             </header>
 
+            <div className="semantic-group-switch" role="tablist" aria-label="语义资产分类">
+              {(Object.keys(semanticGroupLabels) as SemanticGroup[]).map(group => (
+                <button
+                  key={group}
+                  type="button"
+                  role="tab"
+                  aria-selected={semanticGroup === group}
+                  onClick={() => setSemanticGroup(group)}
+                >
+                  <span>{semanticGroupLabels[group].label}</span>
+                  <strong>{semanticGroupLabels[group].example}</strong>
+                  <small>{groupCounts[group]} 条</small>
+                </button>
+              ))}
+            </div>
+
             <div className="semantic-asset-summary" aria-label="语义资产概览">
               <article>
+                <span>维度语义</span><strong>{groupCounts.DIMENSION}</strong>
+                <small>解决实体名称、简称和歧义</small>
+              </article>
+              <article>
+                <span>指标语义</span><strong>{groupCounts.METRIC}</strong>
+                <small>纠正问法并映射标准指标</small>
+              </article>
+              <article>
                 <span>当前结果</span><strong>{total}</strong>
-                <small>符合筛选的语义资产</small>
+                <small>{pendingCount} 条等待向量化</small>
               </article>
               <article>
                 <span>已向量化</span><strong>{embeddedCount}</strong>
-                <small>当前页向量可用</small>
-              </article>
-              <article>
-                <span>待向量化</span><strong>{pendingCount}</strong>
-                <small>当前页异步处理中</small>
-              </article>
-              <article>
-                <span>知识类型</span><strong>{knowledgeTypes.length}</strong>
-                <small>租户内受控类型</small>
+                <small>当前页可参与语义匹配</small>
               </article>
             </div>
 
@@ -254,9 +306,9 @@ export function SemanticAssetPage() {
               <label>
                 搜索
                 <input
-                  aria-label="搜索常用词、映射值或类型"
+                  aria-label="搜索用户表达、标准语义或类型"
                   value={query}
-                  placeholder="输入常用词、映射值或类型"
+                  placeholder="输入用户表达、标准语义或类型"
                   onChange={event => setQuery(event.target.value)}
                 />
               </label>
@@ -265,7 +317,11 @@ export function SemanticAssetPage() {
                 <select
                   aria-label="语义资产类型"
                   value={knowledgeType}
-                  onChange={event => setKnowledgeType(event.target.value)}
+                  onChange={event => {
+                    const value = event.target.value
+                    setKnowledgeType(value)
+                    if (value) setSemanticGroup(semanticGroupOf(value))
+                  }}
                 >
                   <option value="">全部类型</option>
                   {knowledgeTypes.map(value => (
@@ -314,30 +370,30 @@ export function SemanticAssetPage() {
 
             {loading ? (
               <div className="semantic-asset-empty">正在加载语义资产…</div>
-            ) : assets.length === 0 ? (
+            ) : groupedAssets.length === 0 ? (
               <div className="semantic-asset-empty">
-                <strong>当前筛选下没有语义资产</strong>
-                <span>新增常用词映射后会自动进入向量化队列。</span>
+                <strong>当前筛选下没有{semanticGroupLabels[semanticGroup].label}</strong>
+                <span>新增表达映射后会自动进入独立向量化队列。</span>
               </div>
             ) : (
               <div className="semantic-asset-table-wrap">
                 <table className="semantic-asset-table">
                   <thead>
                     <tr>
-                      <th>常用词</th>
-                      <th>映射值</th>
-                      <th>类型</th>
+                      <th>用户表达</th>
+                      <th>标准语义</th>
+                      <th>语义分类</th>
                       <th>向量状态</th>
                       <th>资产状态</th>
                       <th>操作</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {assets.map(asset => (
+                    {groupedAssets.map(asset => (
                       <tr key={asset.id}>
                         <td><strong>{asset.commonTerm}</strong></td>
                         <td>{asset.mappingValue}</td>
-                        <td><span className="semantic-type-chip">{asset.knowledgeType}</span></td>
+                        <td><span className={`semantic-type-chip ${semanticGroupOf(asset.knowledgeType).toLowerCase()}`}>{semanticGroupLabels[semanticGroupOf(asset.knowledgeType)].label}</span><small className="semantic-subtype">{asset.knowledgeType}</small></td>
                         <td>
                           <span className={`embedding-status ${asset.embeddingStatus.toLowerCase()}`}>
                             {embeddingLabels[asset.embeddingStatus]}
@@ -365,6 +421,7 @@ export function SemanticAssetPage() {
                               disabled={!canManage || asset.status !== 'ACTIVE'}
                               onClick={() => setEditor({
                                 asset,
+                                group: semanticGroupOf(asset.knowledgeType),
                                 draft: {
                                   commonTerm: asset.commonTerm,
                                   mappingValue: asset.mappingValue,
@@ -404,8 +461,8 @@ export function SemanticAssetPage() {
           >
             <header>
               <div>
-                <span className="eyebrow">Semantic Asset</span>
-                <h2>{editor.asset ? '编辑语义资产' : '新增语义资产'}</h2>
+                <span className="eyebrow">{semanticGroupLabels[editor.group].label}</span>
+                <h2>{editor.asset ? '编辑语义资产' : `新增${semanticGroupLabels[editor.group].label}`}</h2>
               </div>
               <button
                 type="button"
@@ -416,10 +473,33 @@ export function SemanticAssetPage() {
               </button>
             </header>
             <label>
-              常用词
+              语义分类
+              <select
+                aria-label="语义分类"
+                value={editor.group}
+                disabled={Boolean(editor.asset)}
+                onChange={event => {
+                  const group = event.target.value as SemanticGroup
+                  setEditor({
+                    ...editor,
+                    group,
+                    draft: {
+                      ...editor.draft,
+                      knowledgeType: semanticGroupLabels[group].type,
+                    },
+                  })
+                }}
+              >
+                <option value="DIMENSION">维度语义 · 解决实体歧义</option>
+                <option value="METRIC">指标语义 · 纠正问题表达</option>
+              </select>
+            </label>
+            <label>
+              用户表达
               <input
-                aria-label="常用词"
+                aria-label="用户表达"
                 value={editor.draft.commonTerm}
+                placeholder={editor.group === 'DIMENSION' ? '例如：智家' : '例如：有多少人'}
                 onChange={event => setEditor({
                   ...editor,
                   draft: { ...editor.draft, commonTerm: event.target.value },
@@ -427,10 +507,11 @@ export function SemanticAssetPage() {
               />
             </label>
             <label>
-              映射值
+              标准语义
               <input
-                aria-label="映射值"
+                aria-label="标准语义"
                 value={editor.draft.mappingValue}
+                placeholder={editor.group === 'DIMENSION' ? '例如：智家生态圈' : '例如：员工人数'}
                 onChange={event => setEditor({
                   ...editor,
                   draft: { ...editor.draft, mappingValue: event.target.value },
@@ -438,7 +519,7 @@ export function SemanticAssetPage() {
               />
             </label>
             <label>
-              类型
+              细分类型
               <input
                 aria-label="类型"
                 list="semantic-asset-type-options"

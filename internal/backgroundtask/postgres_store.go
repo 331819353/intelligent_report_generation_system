@@ -266,6 +266,12 @@ const taskSelectColumns = `kind,id,name,description,source_status,resource_type,
   resource_id,processed,total,attempt,max_attempts,error_code,error_message,
   created_at,started_at,updated_at,completed_at`
 
+const taskVisibilityFilter = `created_at > COALESCE((
+  SELECT NULLIF(tenant.settings->>'backgroundTaskCenterClearedAt','')::timestamptz
+  FROM platform.tenants AS tenant
+  WHERE tenant.id=platform.current_tenant_id()
+),'-infinity'::timestamptz)`
+
 func (store *PostgresStore) List(
 	ctx context.Context,
 	tenantID, view string,
@@ -292,7 +298,7 @@ func (store *PostgresStore) List(
 		}
 		rows, queryErr := tx.Query(ctx, taskUnionSQL+`
 			SELECT `+taskSelectColumns+` FROM tasks
-			WHERE `+filter+`
+			WHERE (`+filter+`) AND `+taskVisibilityFilter+`
 			ORDER BY
 			  CASE WHEN source_status='RUNNING' THEN 0
 			       WHEN source_status IN (
@@ -318,7 +324,7 @@ func (store *PostgresStore) List(
 			SELECT count(*) FROM tasks
 			WHERE source_status IN (
 			  'PENDING','QUEUED','WAITING_DEPENDENCY','RUNNING'
-			)`,
+			) AND `+taskVisibilityFilter,
 		).Scan(&page.ActiveCount)
 	})
 	page.GeneratedAt = time.Now().UTC()
@@ -336,7 +342,7 @@ func (store *PostgresStore) Find(
 		var scanErr error
 		task, scanErr = scanTask(tx.QueryRow(ctx, taskUnionSQL+`
 			SELECT `+taskSelectColumns+` FROM tasks
-			WHERE kind=$1 AND id=$2`, kind, taskID))
+			WHERE kind=$1 AND id=$2 AND `+taskVisibilityFilter, kind, taskID))
 		if errors.Is(scanErr, pgx.ErrNoRows) {
 			return ErrNotFound
 		}

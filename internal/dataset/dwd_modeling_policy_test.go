@@ -39,6 +39,43 @@ func (invoker *scriptedDIMValidationInvoker) Invoke(
 	return invoker.results[index], nil
 }
 
+func TestDWDClassificationResponseSchemaPassesStrictRequestValidation(t *testing.T) {
+	input := dwdPlanningInput{
+		Domain: "商户",
+		Tables: []dwdPlanningTable{{
+			VersionID: "version_merchant",
+			Fields: []dwdPlanningField{
+				{Code: "merchant_id"},
+				{Code: "merchant_name"},
+			},
+		}},
+	}
+	schema, err := dwdClassificationResponseSchema(input)
+	if err != nil {
+		t.Fatalf("build classification response schema: %v", err)
+	}
+	temperature := 0.0
+	err = aiplatform.ValidateProviderRequest(aiplatform.ProviderRequest{
+		Messages: []aiplatform.Message{{
+			Role: aiplatform.MessageRoleUser,
+			Parts: []aiplatform.ContentPart{{
+				Type: aiplatform.ContentTypeText,
+				Text: "classify the governed ODS metadata",
+			}},
+		}},
+		ResponseSchema:  schema,
+		Temperature:     &temperature,
+		MaxOutputTokens: 3000,
+	})
+	if err != nil {
+		t.Fatalf("classification provider request is invalid: %v", err)
+	}
+	if raw := string(schema.Schema); strings.Contains(raw, `"pattern"`) ||
+		strings.Contains(raw, `"uniqueItems"`) {
+		t.Fatalf("classification schema contains provider-incompatible keywords: %s", raw)
+	}
+}
+
 func TestMandatoryDWDFieldCleaningAppliesDatasetHygiene(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -4141,7 +4141,6 @@ func buildLLMDesignedDWDDocument(
 			ID:         fmt.Sprintf("join_%d", index+1),
 			LeftNodeID: "node_fact", RightNodeID: nodeID,
 			JoinType: "LEFT", Cardinality: "MANY_TO_ONE",
-			RelationshipType: "DIRECT", FanoutPolicy: "SAFE",
 			// LLM 只允许从已发布的字段合同中选择关联键；本地校验通过后
 			// 生成的关联已经是可执行合同，不应再要求用户逐个点击确认。
 			ManualConfirmed: true,
@@ -4844,6 +4843,15 @@ func loadPublishedODSAssetsTx(ctx context.Context, tx pgx.Tx) ([]dwdODSAsset, er
 		    AND binding.dataset_version_id=version.id
 		    AND binding.status IN ('SUGGESTED','APPROVED')
 		    AND tag.status IN ('DRAFT','ACTIVE')
+		    -- ODS role classification is an output of this workflow. Feeding
+		    -- it back into the planning snapshot makes a successful
+		    -- classification stage invalidate its own checkpoints before the
+		    -- DIM stage can consume them.
+		    AND NOT (
+		      binding.origin='LLM'
+		      AND binding.evidence_json->>'decisionPoint'=
+		          'ODS_ROLE_CLASSIFICATION'
+		    )
 		) AS binding_tags ON true
 		WHERE dataset.deleted_at IS NULL
 		ORDER BY dataset.id`)

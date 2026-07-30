@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,8 +21,8 @@ import (
 
 const (
 	dwsModelingConcurrency        = 4
-	dwsSingleFactPlanningVersion  = "dws-single-fact-planning-v4"
-	dwsGroupedFactPlanningVersion = "dws-group-planning-v4"
+	dwsSingleFactPlanningVersion  = "dws-single-fact-planning-v5"
+	dwsGroupedFactPlanningVersion = "dws-group-planning-v5"
 )
 
 type DWSAnalysisSelector interface {
@@ -139,9 +138,9 @@ func (selector *OrchestratedDWSAnalysisSelector) Select(
 	}
 	temperature := 0.0
 	promptVersion := dwsSingleFactPlanningVersion
-	systemPrompt := `你负责基于当前一张 DWD 的事实结构与任务范围内 DIM 语义上下文规划 DWS。默认自动建模必须只返回一个统一主题表：在同一事实粒度可解释的维度优先放入同一张多维表，不要按趋势、分布、排名等消费场景拆成多表。dimensionCodes 只能逐字复制 dwdFacts.fields 中非度量、非时间字段的 code；metricCodes 只能逐字复制 dwdFacts.fields 中 MEASURE 字段或 dwdFacts.derivedMetrics 的 code。两到三个可自由组合维度使用 CUBE；严格层级维度使用 ROLLUP 且 dimensionCodes 按由粗到细排序；仅需要部分组合使用 GROUPING_SETS，并让每个 groupingSets 项都是 dimensionCodes 的子集；普通单粒度使用 STANDARD。累计值和时点值必须依据 atomicMeasures.valueBehavior/timeAggregation 设计，始终保留原生时间粒度，绝不能跨时间 SUM。不得选择跨事实比较，不得创造编码，不得输出 SQL、DDL、物理表名或数据值。`
+	systemPrompt := `你负责基于当前一张 DWD 的事实结构与任务范围内 DIM 语义上下文规划 DWS。默认自动建模必须只返回一个统一主题表：在同一事实粒度可解释的维度优先放入同一张多维表，不要按趋势、分布、排名等消费场景拆成多表。dimensionCodes 只能逐字复制 dwdFacts.fields 中非度量、非时间字段的 code；metricCodes 只能逐字复制 dwdFacts.fields 中 MEASURE 字段或 dwdFacts.derivedMetrics 的 code。DWS 必须保存一份由全部所选维度构成的唯一最细粒度，groupingMode 只能是 STANDARD；CUBE、ROLLUP 和 GROUPING_SETS 由查询层按需汇总，不能写入同一张物化表。累计值和时点值必须依据 atomicMeasures.valueBehavior/timeAggregation 设计，始终保留原生时间粒度，绝不能跨时间 SUM。不得选择跨事实比较，不得创造编码，不得输出 SQL、DDL、物理表名或数据值。`
 	if selectedScope {
-		systemPrompt = `你负责基于用户明确框选的一张 DWD 与所选 DIM 规划 DWS。保持用户明确范围，可从 eligibleTemplateCodes 中选择最多三个分析意图，并为每个意图选择维度和指标。groupingMode 可为 STANDARD、CUBE、ROLLUP 或 GROUPING_SETS；自定义 groupingSets 只能引用本选择的 dimensionCodes。累计值和时点值必须保留原生时间粒度且不得跨时间 SUM。字段 code 只能逐字复制输入，不得创造编码、SQL、DDL、物理表名或数据值。`
+		systemPrompt = `你负责基于用户明确框选的一张 DWD 与所选 DIM 规划 DWS。保持用户明确范围，可从 eligibleTemplateCodes 中选择最多三个分析意图，并为每个意图选择维度和指标。DWS 必须保存由全部所选维度构成的唯一最细粒度，groupingMode 只能是 STANDARD；维度组合与汇总由查询层完成。累计值和时点值必须保留原生时间粒度且不得跨时间 SUM。字段 code 只能逐字复制输入，不得创造编码、SQL、DDL、物理表名或数据值。`
 	}
 	if len(facts) > 1 {
 		promptVersion = dwsGroupedFactPlanningVersion
@@ -190,9 +189,7 @@ func (selector *OrchestratedDWSAnalysisSelector) Select(
 									"uniqueItems":true,"items":{"type":"string"}},
 								"metricCodes":{"type":"array","maxItems":16,
 									"uniqueItems":true,"items":{"type":"string"}},
-								"groupingMode":{"enum":[
-									"STANDARD","CUBE","ROLLUP","GROUPING_SETS"
-								]},
+								"groupingMode":{"enum":["STANDARD"]},
 								"groupingSets":{"type":"array","maxItems":16,
 									"items":{"type":"array","maxItems":3,
 										"uniqueItems":true,"items":{"type":"string"}}}
@@ -313,9 +310,6 @@ func consolidatedDWSSelection(
 		supportsSafeRecordCount(document) {
 		selection.MetricCodes = []string{dwsRecordCountMetricCode}
 	}
-	if len(selection.DimensionCodes) >= 2 {
-		selection.GroupingMode = "CUBE"
-	}
 	return []dwsAnalysisSelection{selection}
 }
 
@@ -399,52 +393,14 @@ func validatedDWSGrouping(
 	selection dwsAnalysisSelection,
 	consolidated bool,
 ) dwsAnalysisSelection {
-	mode := strings.ToUpper(strings.TrimSpace(selection.GroupingMode))
-	if mode != "STANDARD" && mode != "CUBE" &&
-		mode != "ROLLUP" && mode != "GROUPING_SETS" {
-		mode = "STANDARD"
-	}
-	if consolidated && mode == "STANDARD" &&
-		len(selection.DimensionCodes) >= 2 {
-		mode = "CUBE"
-	}
-	if (mode == "CUBE" || mode == "ROLLUP") &&
-		len(selection.DimensionCodes) < 2 {
-		mode = "STANDARD"
-	}
-	allowed := make(map[string]string, len(selection.DimensionCodes))
-	for _, code := range selection.DimensionCodes {
-		allowed[strings.ToLower(code)] = code
-	}
-	groupingSets := [][]string{}
-	seen := map[string]bool{}
-	if mode == "GROUPING_SETS" {
-		for _, candidate := range selection.GroupingSets {
-			validated := validatedDWSFieldCodes(candidate, allowed, 3)
-			if len(validated) == 0 {
-				continue
-			}
-			keyParts := append([]string(nil), validated...)
-			for index := range keyParts {
-				keyParts[index] = strings.ToLower(keyParts[index])
-			}
-			sort.Strings(keyParts)
-			key := strings.Join(keyParts, "\x00")
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			groupingSets = append(groupingSets, validated)
-			if len(groupingSets) == 16 {
-				break
-			}
-		}
-		if len(groupingSets) == 0 {
-			mode = "STANDARD"
-		}
-	}
-	selection.GroupingMode = mode
-	selection.GroupingSets = groupingSets
+	_ = consolidated
+	// The warehouse materialization contract has one declared output grain.
+	// Persisting subtotal rows from CUBE/ROLLUP/GROUPING_SETS in the same table
+	// makes that grain nullable and ambiguous, and cannot pass the immutable
+	// unique/non-null quality gate. Queryruntime safely rolls up additive DWS
+	// measures from this complete detail grain when fewer dimensions are asked.
+	selection.GroupingMode = "STANDARD"
+	selection.GroupingSets = nil
 	return selection
 }
 

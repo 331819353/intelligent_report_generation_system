@@ -190,7 +190,7 @@ type IdentificationResult struct {
 }
 
 // IdentificationDatasetIndex is the bounded, review-facing projection of the
-// hybrid query index for one current DWS version. The authoritative member
+// hybrid query index for one current governed DWS/ADS version. The authoritative member
 // postings remain in dimension_members; this response only exposes the first
 // safe page of deduplicated values.
 type IdentificationDatasetIndex struct {

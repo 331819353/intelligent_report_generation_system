@@ -794,8 +794,7 @@ func buildContainedDWSADSCandidate(
 		Joins: []dataset.Join{{
 			ID: "join_target", LeftNodeID: "source",
 			RightNodeID: "target", JoinType: "LEFT",
-			Cardinality: "ONE_TO_ONE", RelationshipType: "DIRECT",
-			FanoutPolicy: "SAFE", ManualConfirmed: true,
+			Cardinality: "MANY_TO_ONE", ManualConfirmed: true,
 			Conditions: joinConditions,
 		}},
 		PreAggregations: []dataset.PreAggregation{{

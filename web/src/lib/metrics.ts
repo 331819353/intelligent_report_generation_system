@@ -22,6 +22,15 @@ export type MetricDimension = {
   nullLabel: string
 }
 
+export type MetricSourceCalculation = {
+  stage: 'DATASET_DAG'
+  aggregation: Exclude<MetricAggregation, 'NONE'>
+  formula: string
+  valueBehavior?: 'FLOW' | 'CUMULATIVE' | 'POINT_IN_TIME' | 'NON_ADDITIVE'
+  timeAggregation?: 'SUM' | 'LAST' | 'NONE'
+  evidencePath: string
+}
+
 export type MetricDefinition = {
   schemaVersion: '1.0'
   metric: { code: string; name: string; description: string; type: MetricType }
@@ -29,6 +38,7 @@ export type MetricDefinition = {
   datasetVersionId: string
   expression: MetricExpression
   aggregation: MetricAggregation
+  sourceCalculation?: MetricSourceCalculation
   unit: string
   numberFormat: string
   timeFieldId?: string
@@ -52,6 +62,7 @@ export type MetricRecord = {
   ownerUserId?: string
   type: MetricType
   status: MetricStatus
+  syncManaged: boolean
   version: number
   draftVersionId: string
   draftVersionNo: number
@@ -66,7 +77,7 @@ export type MetricRecord = {
 }
 
 export type MetricSummary = Pick<MetricRecord,
-  'id' | 'code' | 'name' | 'description' | 'domainId' | 'sharingScope' | 'ownerUserId' | 'status' | 'version' | 'currentPublishedVersionId'> & {
+  'id' | 'code' | 'name' | 'description' | 'domainId' | 'sharingScope' | 'ownerUserId' | 'status' | 'syncManaged' | 'version' | 'currentPublishedVersionId'> & {
   datasetId: string
   datasetVersionId: string
   type: MetricType
@@ -135,7 +146,15 @@ export type PreviewMetricInput = {
   queryId: string
   parameters: Record<string, unknown>
   dimensionFieldIds: string[]
+  dimensionFilters?: MetricDimensionFilter[]
+  metricSortDirection?: 'ASC' | 'DESC'
   maxRows: number
+}
+
+export type MetricDimensionFilter = {
+  fieldId: string
+  operator: 'EQUALS' | 'NOT_EQUALS' | 'IN' | 'NOT_IN' | 'GTE' | 'LT'
+  value: string | string[]
 }
 
 export type MetricVersionTransitionInput = {
