@@ -2088,8 +2088,14 @@ func reconcilePlanningTrace(plan *QueryPlan) {
 			finalMembers := selectedByDimension[strings.ToLower(trace.DimensionCode)]
 			selected := make([]string, 0, len(trace.CandidateMemberKeys))
 			for _, member := range trace.CandidateMemberKeys {
-				if finalMembers[member] {
-					selected = append(selected, member)
+				for finalMember := range finalMembers {
+					if strings.EqualFold(
+						strings.TrimSpace(finalMember),
+						strings.TrimSpace(member),
+					) {
+						selected = append(selected, finalMember)
+						break
+					}
 				}
 			}
 			sort.Strings(selected)

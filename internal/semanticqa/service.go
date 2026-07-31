@@ -99,6 +99,36 @@ func (service *Service) GetSettings(ctx context.Context, tenantID string) (Setti
 	return service.store.GetSettings(ctx, tenantID)
 }
 
+func (service *Service) TokenizeQuery(
+	ctx context.Context,
+	tenantID, actorID string,
+	input QueryTokenizeInput,
+) (QueryTokenization, error) {
+	result := QueryTokenization{
+		Strategy: queryTokenizationStrategy,
+		Tokens:   []QueryToken{},
+	}
+	input.Question = strings.TrimSpace(input.Question)
+	input.Timezone = strings.TrimSpace(input.Timezone)
+	if input.Timezone == "" {
+		input.Timezone = "UTC"
+	}
+	if service == nil || service.store == nil ||
+		uuid.Validate(tenantID) != nil || uuid.Validate(actorID) != nil ||
+		len(input.Question) < 1 || len(input.Question) > 4000 {
+		return result, ErrInvalidRequest
+	}
+	if _, err := time.LoadLocation(input.Timezone); err != nil {
+		return result, ErrInvalidRequest
+	}
+	if tokenizer, ok := service.interpreter.(QueryTokenizer); ok {
+		return tokenizer.Tokenize(
+			ctx, tenantID, actorID, input.Question, input.Timezone,
+		)
+	}
+	return tokenizeQuery(input.Question, nil), nil
+}
+
 func (service *Service) UpdateSettings(
 	ctx context.Context,
 	tenantID, actorID string,
@@ -652,8 +682,9 @@ func (service *Service) PlanQueryTurn(
 	input QueryTurnInput,
 ) (QueryTurnPlan, error) {
 	result := QueryTurnPlan{
-		MetricCodes: []string{}, ContextQueryPlanIDs: []string{},
-		Plans: []QueryPlan{},
+		Status: "PLANNING", MetricCodes: []string{},
+		ContextQueryPlanIDs: []string{},
+		Plans:               []QueryPlan{},
 		Trace: QueryTurnTrace{
 			ConversationQuestions: []string{},
 			ContextPolicy:         "CURRENT_TURN_OVERRIDES_SAME_DIMENSION_THEN_LATEST_VERIFIED_PLAN",
@@ -671,12 +702,64 @@ func (service *Service) PlanQueryTurn(
 		return result, ErrInvalidRequest
 	}
 	input.Question = strings.TrimSpace(input.Question)
+	input.Timezone = strings.TrimSpace(input.Timezone)
+	if input.Timezone == "" {
+		input.Timezone = "UTC"
+	}
 	if len(input.Question) < 1 || len(input.Question) > 4000 ||
 		input.MaximumPathHops < 0 || input.MaximumPathHops > 16 ||
 		len(input.ContextQueryPlanIDs) > 8 ||
-		len(input.PriorQuestions) > 2 {
+		len(input.PriorQuestions) > 2 ||
+		len(input.ConfirmedMetricCodes) > 8 ||
+		len(input.ConfirmedDecisions) > 16 ||
+		!validQuerySemanticHints(input.SemanticHints) {
 		return result, ErrInvalidRequest
 	}
+	input.ConfirmedMetricCodes = uniqueStrings(
+		input.ConfirmedMetricCodes, 8,
+	)
+	for _, confirmed := range input.ConfirmedDecisions {
+		if strings.TrimSpace(confirmed.MetricCode) == "" ||
+			uuid.Validate(strings.TrimSpace(confirmed.DecisionID)) != nil {
+			return result, ErrInvalidRequest
+		}
+	}
+	if _, err := time.LoadLocation(input.Timezone); err != nil {
+		return result, ErrInvalidRequest
+	}
+	// The production assistant owns the complete semantic chain. Callers no
+	// longer need a separate "practice" request to run Jieba, per-token vector
+	// retrieval and bounded LLM candidate selection before governed planning.
+	if tokenizer, ok := service.interpreter.(QueryTokenizer); ok {
+		var tokenization QueryTokenization
+		var err error
+		if queryTurnTokenizer, supported :=
+			service.interpreter.(QueryTurnTokenizer); supported {
+			tokenization, err = queryTurnTokenizer.TokenizeQueryTurn(
+				ctx, tenantID, actorID, input.Question, input.Timezone,
+				len(input.ContextQueryPlanIDs) > 0 ||
+					len(input.ConfirmedMetricCodes) > 0,
+			)
+		} else {
+			tokenization, err = tokenizer.Tokenize(
+				ctx, tenantID, actorID, input.Question, input.Timezone,
+			)
+		}
+		if err != nil {
+			return result, err
+		}
+		result.Tokenization = &tokenization
+		hints, _ := semanticHintsFromTokenization(tokenization)
+		hints = supplementAdministrativeLocationHints(tokenization, hints)
+		if validQuerySemanticHints(hints) &&
+			(hints.Intent != "" || len(hints.MetricNames) > 0 ||
+				len(hints.DimensionValues) > 0) {
+			input.SemanticHints = hints
+		}
+	}
+	planningQuestion := queryWithSemanticHints(
+		input.Question, input.SemanticHints,
+	)
 	for index := range input.PriorQuestions {
 		input.PriorQuestions[index] = strings.TrimSpace(
 			input.PriorQuestions[index],
@@ -720,7 +803,19 @@ func (service *Service) PlanQueryTurn(
 	turnSlots := QueryTurnSlots{
 		Intent: "UNKNOWN", MetricCodes: []string{}, Domains: map[string]string{},
 	}
-	if interpreter, ok := service.interpreter.(QueryTurnInterpreter); ok {
+	if len(input.ConfirmedMetricCodes) > 0 {
+		resolver, ok := service.interpreter.(QueryMetricConfirmationResolver)
+		if !ok {
+			return result, ErrUnprovenPath
+		}
+		confirmed, err := resolver.ConfirmMetricCodes(
+			ctx, tenantID, input.ConfirmedMetricCodes,
+		)
+		if err != nil {
+			return result, err
+		}
+		turnSlots = confirmed
+	} else if interpreter, ok := service.interpreter.(QueryTurnInterpreter); ok {
 		if interpreted, err := interpreter.InterpretMany(
 			ctx, tenantID, actorID, input.Question,
 		); err == nil {
@@ -741,13 +836,40 @@ func (service *Service) PlanQueryTurn(
 			}
 		}
 	}
+	if hintIntent := strings.ToUpper(strings.TrimSpace(
+		input.SemanticHints.Intent,
+	)); hintIntent != "" && hintIntent != "UNKNOWN" {
+		turnSlots.Intent = hintIntent
+	}
 	hadCurrentMetrics := len(turnSlots.MetricCodes) > 0
 	metricCodes := selectTurnMetricCodes(
 		turnSlots.MetricCodes, contextSlots,
 		hadCurrentMetrics && questionAddsMetrics(input.Question),
 	)
 	if len(metricCodes) == 0 {
-		return result, ErrUnprovenPath
+		result.QuestionHash = hashText(input.Question)
+		result.Intent = strings.ToUpper(strings.TrimSpace(turnSlots.Intent))
+		if result.Intent == "" {
+			result.Intent = "UNKNOWN"
+		}
+		result.Status = "NEEDS_METRIC_CONFIRMATION"
+		clarificationCandidates := turnSlots.MetricCandidates
+		if len(clarificationCandidates) > 8 {
+			clarificationCandidates = clarificationCandidates[:8]
+		}
+		result.Clarification = &QueryClarification{
+			Type:    "METRIC",
+			Message: "请选择本次问题对应的指标；候选均来自当前已发布指标目录。",
+			MetricCandidates: append(
+				[]QueryMetricCandidateTrace(nil),
+				clarificationCandidates...,
+			),
+		}
+		result.Trace = buildQueryTurnTrace(
+			result.Trace.ConversationQuestions, result.Trace.ContextPolicy,
+			turnSlots, contextSlots, result,
+		)
+		return result, nil
 	}
 	intent := strings.ToUpper(strings.TrimSpace(turnSlots.Intent))
 	if !hadCurrentMetrics {
@@ -758,11 +880,16 @@ func (service *Service) PlanQueryTurn(
 	}
 	for _, metricCode := range metricCodes {
 		planInput := QueryPlanInput{
-			Question: input.Question, Intent: intent, MetricCode: metricCode,
+			Question: planningQuestion, Intent: intent, MetricCode: metricCode,
 			MaximumPathHops:      input.MaximumPathHops,
 			MetricCandidateCount: turnSlots.MetricCandidateCount,
 			MetricMatchMethod:    turnSlots.MetricMatchMethod,
 			Domain:               turnSlots.Domains[metricCode],
+		}
+		if timeRange, found := semanticHintTimeRange(
+			input.SemanticHints.DimensionValues,
+		); found {
+			planInput.TimeRange = &timeRange
 		}
 		if context, ok := contextByMetric[strings.ToLower(metricCode)]; ok {
 			planInput.ContextQueryPlanID = context.id
@@ -775,9 +902,49 @@ func (service *Service) PlanQueryTurn(
 		if planInput.MetricMatchMethod == "" {
 			planInput.MetricMatchMethod = "EXPLICIT_CODE"
 		}
-		if enricher, ok := service.interpreter.(QueryDimensionLookupEnricher); ok {
+		if enricher, ok := service.interpreter.(QueryDimensionHintEnricher); ok &&
+			len(input.SemanticHints.DimensionValues) > 0 {
+			lookups, enrichErr := enricher.EnrichDimensionLookupsWithHints(
+				ctx, tenantID, actorID, metricCode, planningQuestion,
+				input.SemanticHints.DimensionValues,
+			)
+			if enrichErr != nil {
+				return result, enrichErr
+			}
+			planInput.DimensionValueLookups = lookups
+			lookups = applyConfirmedDecisions(
+				lookups, input.ConfirmedDecisions, metricCode,
+			)
+			planInput.DimensionValueLookups = lookups
+			if filters, complete :=
+				memberFiltersFromResolvedLookups(lookups); complete {
+				planInput.MemberFilters = filters
+				planInput.DimensionResolutionComplete = true
+			} else if hasActionableSemanticDimensionHint(
+				input.SemanticHints.DimensionValues,
+			) {
+				// Decision-graph recall and final WHERE selection are separate
+				// observable stages. Preserve every retrieved candidate in the
+				// turn trace, but do not create an unfiltered executable plan
+				// when the downstream filter cannot prove one selection.
+				result.Trace.DimensionValueLookups = append(
+					result.Trace.DimensionValueLookups, lookups...,
+				)
+				if choices := dimensionClarificationChoices(
+					lookups, metricCode,
+				); len(choices) > 0 && result.Clarification == nil {
+					result.Clarification = &QueryClarification{
+						Type:                "DIMENSION",
+						Message:             "请选择问题中维度值对应的维度字段和值。",
+						DimensionCandidates: choices,
+					}
+				}
+				continue
+			}
+		} else if enricher, ok :=
+			service.interpreter.(QueryDimensionLookupEnricher); ok {
 			if lookups, enrichErr := enricher.EnrichDimensionLookups(
-				ctx, tenantID, actorID, metricCode, input.Question,
+				ctx, tenantID, actorID, metricCode, planningQuestion,
 			); enrichErr == nil {
 				planInput.DimensionValueLookups = lookups
 				if filters, complete :=
@@ -800,12 +967,370 @@ func (service *Service) PlanQueryTurn(
 		(!hadCurrentMetrics || questionAddsMetrics(input.Question))
 	if len(result.Plans) > 0 {
 		result.Intent = result.Plans[0].Intent
+	} else {
+		result.Intent = intent
 	}
 	result.Trace = buildQueryTurnTrace(
 		result.Trace.ConversationQuestions, result.Trace.ContextPolicy,
 		turnSlots, contextSlots, result,
 	)
+	finalizeQueryTurnStatus(&result)
 	return result, nil
+}
+
+func finalizeQueryTurnStatus(result *QueryTurnPlan) {
+	if result == nil {
+		return
+	}
+	if result.Clarification != nil {
+		result.Status = "NEEDS_DIMENSION_CONFIRMATION"
+		return
+	}
+	if len(result.Plans) == 0 {
+		result.Status = "SEMANTIC_GAP"
+		result.Clarification = &QueryClarification{
+			Type:    "SEMANTIC_GAP",
+			Message: "已识别问题中的指标和维度值，但当前已发布的指标-维度关系或决策图不足以安全生成查询条件。",
+		}
+		return
+	}
+	result.Status = "PLANNED"
+}
+
+func applyConfirmedDecisions(
+	lookups []QueryDimensionValueLookupTrace,
+	confirmed []QueryConfirmedDecision,
+	metricCode string,
+) []QueryDimensionValueLookupTrace {
+	allowed := map[string]bool{}
+	for _, item := range confirmed {
+		if strings.EqualFold(
+			strings.TrimSpace(item.MetricCode), metricCode,
+		) {
+			allowed[strings.TrimSpace(item.DecisionID)] = true
+		}
+	}
+	if len(allowed) == 0 {
+		return lookups
+	}
+	for lookupIndex := range lookups {
+		for candidateIndex := range lookups[lookupIndex].DecisionCandidates {
+			candidate := &lookups[lookupIndex].DecisionCandidates[candidateIndex]
+			if !allowed[candidate.DecisionID] ||
+				strings.TrimSpace(candidate.MemberValue) == "" {
+				continue
+			}
+			lookups[lookupIndex].Selected = true
+			lookups[lookupIndex].DecisionID = candidate.DecisionID
+			lookups[lookupIndex].CanonicalValue = candidate.CanonicalValue
+			lookups[lookupIndex].SelectedMemberKeys = []string{
+				candidate.MemberValue,
+			}
+			lookups[lookupIndex].WhereCondition = candidate.WhereCondition
+			lookups[lookupIndex].CompiledCondition =
+				candidate.CompiledCondition
+			lookups[lookupIndex].WhereDesignOperator =
+				candidate.PredicateOperator
+			lookups[lookupIndex].WhereDesignStatus =
+				"USER_CONFIRMED_DECISION_GRAPH"
+			lookups[lookupIndex].TableSchema = candidate.TableSchema
+			lookups[lookupIndex].TableName = candidate.TableName
+			candidate.Selected = true
+		}
+	}
+	return lookups
+}
+
+func dimensionClarificationChoices(
+	lookups []QueryDimensionValueLookupTrace,
+	metricCode string,
+) []QueryDimensionCandidateChoice {
+	result := []QueryDimensionCandidateChoice{}
+	seen := map[string]bool{}
+	for _, lookup := range lookups {
+		if lookup.Selected || !dimensionLookupRelevantForClarification(lookup) {
+			continue
+		}
+		for _, candidate := range lookup.DecisionCandidates {
+			if candidate.DecisionID == "" || candidate.MemberValue == "" ||
+				seen[candidate.DecisionID] {
+				continue
+			}
+			seen[candidate.DecisionID] = true
+			result = append(result, QueryDimensionCandidateChoice{
+				MetricCode: metricCode, DecisionID: candidate.DecisionID,
+				DimensionCode:  lookup.DimensionCode,
+				DimensionName:  lookup.DimensionName,
+				CanonicalValue: candidate.CanonicalValue,
+				TableSchema:    candidate.TableSchema,
+				TableName:      candidate.TableName,
+			})
+			if len(result) == 16 {
+				return result
+			}
+		}
+	}
+	return result
+}
+
+func dimensionLookupRelevantForClarification(
+	lookup QueryDimensionValueLookupTrace,
+) bool {
+	if lookup.Selected {
+		return false
+	}
+	if !strings.EqualFold(
+		strings.TrimSpace(lookup.WhereDesignStatus),
+		"NO_SAFE_DECISION_SELECTED",
+	) {
+		return true
+	}
+	bestScore := lookup.VectorTopScore
+	for _, candidate := range lookup.DecisionCandidates {
+		if candidate.Score > bestScore {
+			bestScore = candidate.Score
+		}
+	}
+	// A clarification is useful only when the governed decision graph contains
+	// a genuinely close, but ambiguous, candidate. Showing low-similarity
+	// members for an unknown value encourages users to confirm an unrelated
+	// WHERE predicate.
+	return bestScore >= 0.94
+}
+
+func hasActionableSemanticDimensionHint(
+	hints []QuerySemanticDimensionHint,
+) bool {
+	for _, hint := range hints {
+		if strings.TrimSpace(hint.Value) != "" &&
+			!strings.EqualFold(
+				strings.TrimSpace(hint.DimensionType), "TIME",
+			) {
+			return true
+		}
+	}
+	return false
+}
+
+func semanticHintsFromTokenization(
+	tokenization QueryTokenization,
+) (QuerySemanticHints, bool) {
+	completion := tokenization.LLMCompletion
+	if completion.Status != "SUCCEEDED" {
+		return QuerySemanticHints{}, false
+	}
+	hints := QuerySemanticHints{
+		Intent:      completion.Intent,
+		MetricNames: append([]string(nil), completion.MetricNames...),
+		DimensionValues: make(
+			[]QuerySemanticDimensionHint, 0, len(completion.DimensionValues),
+		),
+	}
+	for _, dimension := range completion.DimensionValues {
+		hints.DimensionValues = append(
+			hints.DimensionValues,
+			QuerySemanticDimensionHint{
+				SourceToken: dimension.SourceToken,
+				Value:       dimension.Value, DimensionName: dimension.DimensionName,
+				DimensionCode: dimension.DimensionCode,
+				DimensionType: dimension.DimensionType,
+				ValueType:     dimension.ValueType,
+				TimeRange:     dimension.TimeRange,
+			},
+		)
+	}
+	if !validQuerySemanticHints(hints) {
+		return QuerySemanticHints{}, false
+	}
+	return hints, true
+}
+
+func supplementAdministrativeLocationHints(
+	tokenization QueryTokenization,
+	hints QuerySemanticHints,
+) QuerySemanticHints {
+	covered := func(source, value string) bool {
+		source = strings.ToLower(strings.TrimSpace(source))
+		value = strings.ToLower(strings.TrimSpace(value))
+		for _, hint := range hints.DimensionValues {
+			hintSource := strings.ToLower(strings.TrimSpace(hint.SourceToken))
+			hintValue := strings.ToLower(strings.TrimSpace(hint.Value))
+			if hintValue == value || hintSource == source ||
+				(hintValue != "" && value != "" &&
+					(strings.Contains(hintValue, value) ||
+						strings.Contains(value, hintValue))) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, token := range tokenization.Tokens {
+		text := strings.TrimSpace(token.Text)
+		value, name, code, found :=
+			administrativeLocationHint(text)
+		if !found || covered(text, value) {
+			continue
+		}
+		hints.DimensionValues = append(
+			hints.DimensionValues,
+			QuerySemanticDimensionHint{
+				SourceToken: text, Value: value,
+				DimensionName: name, DimensionCode: code,
+				DimensionType: "STANDARD", ValueType: "STRING",
+			},
+		)
+	}
+	return hints
+}
+
+func administrativeLocationHint(
+	text string,
+) (value, name, code string, found bool) {
+	for _, mapping := range []struct {
+		suffix, name, code string
+	}{
+		{suffix: "特别行政区", name: "城市", code: "city"},
+		{suffix: "自治区", name: "省份", code: "province"},
+		{suffix: "省", name: "省份", code: "province"},
+		{suffix: "市", name: "城市", code: "city"},
+		{suffix: "区", name: "行政区", code: "district"},
+		{suffix: "县", name: "行政区", code: "district"},
+	} {
+		if !strings.HasSuffix(text, mapping.suffix) {
+			continue
+		}
+		value = strings.TrimSpace(strings.TrimSuffix(text, mapping.suffix))
+		runeCount := len([]rune(value))
+		if runeCount < 2 || runeCount > 12 {
+			return "", "", "", false
+		}
+		return value, mapping.name, mapping.code, true
+	}
+	return "", "", "", false
+}
+
+func semanticHintTimeRange(
+	hints []QuerySemanticDimensionHint,
+) (QueryTimeRange, bool) {
+	for _, hint := range hints {
+		if strings.EqualFold(
+			strings.TrimSpace(hint.DimensionType), "TIME",
+		) && hint.TimeRange != nil {
+			return *hint.TimeRange, true
+		}
+	}
+	return QueryTimeRange{}, false
+}
+
+func validQuerySemanticHints(hints QuerySemanticHints) bool {
+	intent := strings.ToUpper(strings.TrimSpace(hints.Intent))
+	if intent != "" && !oneOf(
+		intent, "LOOKUP", "METRIC", "TREND", "COMPARISON", "RANKING",
+		"DRILLDOWN", "DISTRIBUTION", "FUNNEL", "RETENTION", "ANOMALY",
+		"UNKNOWN",
+	) {
+		return false
+	}
+	if len(hints.MetricNames) > 8 || len(hints.DimensionValues) > 16 {
+		return false
+	}
+	for _, metricName := range hints.MetricNames {
+		metricName = strings.TrimSpace(metricName)
+		if metricName == "" || len(metricName) > 256 ||
+			strings.ContainsAny(metricName, "\x00\r\n") {
+			return false
+		}
+	}
+	for _, hint := range hints.DimensionValues {
+		if strings.TrimSpace(hint.Value) == "" ||
+			len(hint.Value) > 1024 ||
+			strings.TrimSpace(hint.DimensionName) == "" ||
+			len(hint.DimensionName) > 256 ||
+			strings.TrimSpace(hint.DimensionCode) == "" ||
+			len(hint.DimensionCode) > 128 ||
+			len(hint.SourceToken) > 1024 ||
+			len(hint.DimensionType) > 64 ||
+			len(hint.ValueType) > 64 ||
+			strings.ContainsAny(
+				hint.Value+hint.DimensionName+hint.DimensionCode+
+					hint.SourceToken+hint.DimensionType+hint.ValueType,
+				"\x00\r\n",
+			) {
+			return false
+		}
+		isTime := strings.EqualFold(
+			strings.TrimSpace(hint.DimensionType), "TIME",
+		)
+		if hint.TimeRange != nil {
+			normalized, rangeErr := normalizeQueryTimeRange(
+				*hint.TimeRange,
+			)
+			if !isTime || rangeErr != nil {
+				return false
+			}
+			_, startDateOnly, startErr :=
+				parseQueryBoundary(normalized.Start)
+			_, endDateOnly, endErr :=
+				parseQueryBoundary(normalized.EndExclusive)
+			valueType := strings.ToUpper(strings.TrimSpace(hint.ValueType))
+			if startErr != nil || endErr != nil ||
+				startDateOnly != endDateOnly ||
+				!oneOf(valueType, "DATE", "DATETIME") ||
+				(valueType == "DATE") != startDateOnly {
+				return false
+			}
+		} else if isTime && strings.TrimSpace(hint.ValueType) != "" {
+			// A typed time value must already be normalized by the LLM stage.
+			return false
+		}
+	}
+	var firstTimeRange *QueryTimeRange
+	for _, hint := range hints.DimensionValues {
+		if hint.TimeRange == nil {
+			continue
+		}
+		if firstTimeRange == nil {
+			copied := *hint.TimeRange
+			firstTimeRange = &copied
+			continue
+		}
+		if firstTimeRange.Start != hint.TimeRange.Start ||
+			firstTimeRange.EndExclusive != hint.TimeRange.EndExclusive {
+			return false
+		}
+	}
+	return true
+}
+
+func queryWithSemanticHints(
+	question string,
+	hints QuerySemanticHints,
+) string {
+	parts := []string{}
+	intent := strings.ToUpper(strings.TrimSpace(hints.Intent))
+	if intent != "" && intent != "UNKNOWN" {
+		parts = append(parts, "意图："+intent)
+	}
+	metricNames := uniqueStrings(hints.MetricNames, 8)
+	if len(metricNames) > 0 {
+		parts = append(parts, "指标："+strings.Join(metricNames, "、"))
+	}
+	dimensions := []string{}
+	for _, hint := range hints.DimensionValues {
+		name := strings.TrimSpace(hint.DimensionName)
+		value := strings.TrimSpace(hint.Value)
+		if name == "" || value == "" {
+			continue
+		}
+		dimensions = append(dimensions, name+"="+value)
+	}
+	if len(dimensions) > 0 {
+		parts = append(parts, "维度："+strings.Join(dimensions, "、"))
+	}
+	if len(parts) == 0 {
+		return question
+	}
+	return question + "【语义补充：" + strings.Join(parts, "；") + "】"
 }
 
 // memberFiltersFromResolvedLookups converts the interpreter's selected,
@@ -822,7 +1347,9 @@ func memberFiltersFromResolvedLookups(
 	valuesByDimension := map[string][]string{}
 	codeByDimension := map[string]string{}
 	for _, lookup := range lookups {
-		if lookup.Source != "" && lookup.Source != "CURRENT_TURN" {
+		if lookup.Source != "" &&
+			lookup.Source != "CURRENT_TURN" &&
+			lookup.Source != "LLM_INTENT_COMPLETION" {
 			continue
 		}
 		term := strings.ToLower(strings.TrimSpace(lookup.Term))
@@ -914,11 +1441,15 @@ func buildQueryTurnTrace(
 		ConversationQuestions: append(
 			[]string(nil), conversationQuestions...,
 		),
-		ContextPolicy:         contextPolicy,
-		MetricCandidates:      []QueryMetricCandidateTrace{},
-		DimensionValueLookups: []QueryDimensionValueLookupTrace{},
-		FinalSelections:       []QueryFinalSelectionTrace{},
-		Assessments:           []QueryTraceAssessment{},
+		ContextPolicy:    contextPolicy,
+		MetricToolLoop:   turnSlots.MetricToolLoop,
+		MetricCandidates: []QueryMetricCandidateTrace{},
+		DimensionValueLookups: append(
+			[]QueryDimensionValueLookupTrace(nil),
+			turn.Trace.DimensionValueLookups...,
+		),
+		FinalSelections: []QueryFinalSelectionTrace{},
+		Assessments:     []QueryTraceAssessment{},
 		Extraction: QueryTurnExtraction{
 			Intent: turn.Intent, MetricTerms: []string{},
 			DimensionValueTerms: []string{},
@@ -979,6 +1510,10 @@ func buildQueryTurnTrace(
 		)
 	}
 	lookupSeen := map[string]bool{}
+	for _, lookup := range trace.DimensionValueLookups {
+		keyBytes, _ := json.Marshal(lookup)
+		lookupSeen[string(keyBytes)] = true
+	}
 	for _, plan := range turn.Plans {
 		for _, lookup := range plan.PlanningTrace {
 			if lookup.MetricCode == "" {
@@ -1033,22 +1568,18 @@ func buildQueryTurnTrace(
 		)
 	}
 	for _, lookup := range trace.DimensionValueLookups {
-		if lookup.Selected {
-			trace.Extraction.DimensionValueTerms = appendUniqueTraceTerm(
-				trace.Extraction.DimensionValueTerms, lookup.Term,
-			)
-		}
+		trace.Extraction.DimensionValueTerms = appendUniqueTraceTerm(
+			trace.Extraction.DimensionValueTerms, lookup.Term,
+		)
 	}
 	trace.StandaloneQuestion = buildStandaloneQuestion(
 		trace.ConversationQuestions, trace.FinalSelections,
 		trace.DimensionValueLookups,
 	)
-	allPlansReady := len(turn.Plans) > 0
-	allMetricsSelected := len(turn.MetricCodes) > 0
+	allPlansReady := len(turn.Plans) > 0 &&
+		len(turn.Plans) == len(turn.MetricCodes)
 	for _, plan := range turn.Plans {
 		allPlansReady = allPlansReady && plan.Status == "READY"
-		allMetricsSelected = allMetricsSelected &&
-			plan.SelectedMetricVersionID != ""
 	}
 	trace.Assessments = append(trace.Assessments, QueryTraceAssessment{
 		Step: "CONTEXT_SYNTHESIS", Status: "PASS",
@@ -1072,7 +1603,7 @@ func buildQueryTurnTrace(
 		),
 	})
 	metricStatus := "BLOCKED"
-	if allMetricsSelected {
+	if len(turn.MetricCodes) > 0 {
 		metricStatus = "PASS"
 	}
 	trace.Assessments = append(trace.Assessments, QueryTraceAssessment{
@@ -1086,60 +1617,42 @@ func buildQueryTurnTrace(
 	dimensionStatus, dimensionDecision := "PASS", "NO_DIMENSION_VALUE_REQUEST"
 	vectorizedLookups := 0
 	vectorEligibleLookups := 0
+	selectedLookups := 0
 	if len(trace.DimensionValueLookups) > 0 {
-		dimensionDecision =
-			"PERSISTED_DECISION_GRAPH_THEN_LLM_WHERE_GOVERNED_COMPILE"
-		whereDesignedLookups := 0
-		reusedDecisionLookups := 0
-		whereDesignEligibleLookups := 0
-		currentTermResolved := map[string]bool{}
+		dimensionDecision = "PERSISTED_DECISION_GRAPH_VECTOR_RETRIEVAL"
 		for _, lookup := range trace.DimensionValueLookups {
-			if lookup.Source == "CURRENT_TURN" {
-				term := strings.ToLower(strings.TrimSpace(lookup.Term))
-				if term != "" {
-					if _, exists := currentTermResolved[term]; !exists {
-						currentTermResolved[term] = false
-					}
-					if lookup.Selected {
-						currentTermResolved[term] = true
-					}
-				}
-			}
 			if !lookup.Sensitive {
 				vectorEligibleLookups++
-				if lookup.Selected {
-					whereDesignEligibleLookups++
-				}
 			}
-			if lookup.VectorSearchStatus == "SUCCEEDED" {
+			if lookup.VectorSearchStatus == "SUCCEEDED" &&
+				lookup.VectorCandidateCount > 0 {
 				vectorizedLookups++
 			}
-			if lookup.WhereDesignStatus == "SUCCEEDED" {
-				whereDesignedLookups++
-			}
-			if lookup.WhereDesignStatus == "REUSED_DECISION_GRAPH" {
-				whereDesignedLookups++
-				reusedDecisionLookups++
+			if lookup.Selected {
+				selectedLookups++
 			}
 		}
-		for _, resolved := range currentTermResolved {
-			if !resolved {
-				dimensionStatus = "BLOCKED"
-				break
-			}
-		}
-		if dimensionStatus == "PASS" &&
-			(vectorizedLookups < vectorEligibleLookups ||
-				whereDesignedLookups < whereDesignEligibleLookups) {
-			dimensionStatus = "WARN"
+		if vectorizedLookups < vectorEligibleLookups {
+			dimensionStatus = "BLOCKED"
 		}
 		trace.Assessments = append(trace.Assessments, QueryTraceAssessment{
 			Step: "DIMENSION_VALUE_RETRIEVAL", Status: dimensionStatus,
 			Decision: dimensionDecision,
 			Detail: fmt.Sprintf(
-				"形成 %d 组非空“维度字段:规范值”候选，%d 组以“维度描述:规范值”为键检索持久化决策图，%d 组直接复用既有决策，%d 组获得已验证 WHERE 并通过安全编译",
+				"形成 %d 组“维度描述:维度值”检索键，%d 组从持久化决策图召回了候选",
 				len(trace.DimensionValueLookups), vectorizedLookups,
-				reusedDecisionLookups, whereDesignedLookups,
+			),
+		})
+		filterStatus := "PASS"
+		if selectedLookups < vectorEligibleLookups {
+			filterStatus = "BLOCKED"
+		}
+		trace.Assessments = append(trace.Assessments, QueryTraceAssessment{
+			Step: "WHERE_FILTER", Status: filterStatus,
+			Decision: "LLM_FILTER_THEN_GOVERNED_COMPILE",
+			Detail: fmt.Sprintf(
+				"%d/%d 组决策图候选获得唯一保留项并通过安全编译",
+				selectedLookups, vectorEligibleLookups,
 			),
 		})
 	} else {
@@ -1147,6 +1660,11 @@ func buildQueryTurnTrace(
 			Step: "DIMENSION_VALUE_RETRIEVAL", Status: dimensionStatus,
 			Decision: dimensionDecision,
 			Detail:   "当前问题未要求维度值筛选",
+		})
+		trace.Assessments = append(trace.Assessments, QueryTraceAssessment{
+			Step: "WHERE_FILTER", Status: "PASS",
+			Decision: "NO_DIMENSION_WHERE_REQUIRED",
+			Detail:   "当前问题没有需要过滤和拼接的维度 WHERE 条件",
 		})
 	}
 	finalStatus := "BLOCKED"
@@ -1174,6 +1692,7 @@ func queryFinalSelectionTrace(plan QueryPlan) QueryFinalSelectionTrace {
 		MetricVersionID:  plan.SelectedMetricVersionID,
 		DatasetVersionID: plan.SelectedDatasetVersionID,
 		Dimensions:       []QueryFinalDimensionTrace{},
+		TimeRange:        plan.Conditions.TimeRange,
 		PlanID:           plan.ID, PlanStatus: plan.Status,
 	}
 	for _, dimension := range plan.Conditions.Dimensions {

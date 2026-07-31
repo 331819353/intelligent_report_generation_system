@@ -454,11 +454,16 @@ export function MetricCatalogPage() {
   }), [dataAssetDatasetIDs, datasetById, metrics])
   const displayDimensions = useMemo(() => dimensions.flatMap(dimension => {
     if (!dataAssetDatasetIDs.has(dimension.datasetId)) return []
+    const dataset = datasetById.get(dimension.datasetId)
+    // 维度以数据集版本为不可变快照保存。资产清单只展示当前发布版本，
+    // 历史版本继续留在数据库中用于审计，避免同一字段跨版本重复出现。
+    if (!dataset?.currentPublishedVersionId ||
+        dataset.currentPublishedVersionId !== dimension.datasetVersionId) return []
     if (dimension.status !== 'PUBLISHED') return [dimension]
     return [{
       ...dimension,
       status: synchronizedAssetStatus(
-        datasetById.get(dimension.datasetId),
+        dataset,
         dimension.datasetVersionId,
       ) as DimensionStatus,
     }]

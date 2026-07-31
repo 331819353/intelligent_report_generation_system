@@ -37,15 +37,13 @@ const statusLabels: Record<SemanticAssetStatus, string> = {
   DEPRECATED: '已停用',
 }
 
-const semanticGroupLabels: Record<SemanticGroup, { label: string; example: string; type: string }> = {
+const semanticGroupLabels: Record<SemanticGroup, { label: string; type: string }> = {
   DIMENSION: {
     label: '维度语义',
-    example: '“智家” → “智家生态圈”',
     type: 'DIMENSION_SEMANTIC',
   },
   METRIC: {
     label: '指标语义',
-    example: '“有多少人” → “员工人数”',
     type: 'METRIC_SEMANTIC',
   },
 }
@@ -267,22 +265,6 @@ export function SemanticAssetPage() {
               </button>
             </header>
 
-            <div className="semantic-group-switch" role="tablist" aria-label="语义资产分类">
-              {(Object.keys(semanticGroupLabels) as SemanticGroup[]).map(group => (
-                <button
-                  key={group}
-                  type="button"
-                  role="tab"
-                  aria-selected={semanticGroup === group}
-                  onClick={() => setSemanticGroup(group)}
-                >
-                  <span>{semanticGroupLabels[group].label}</span>
-                  <strong>{semanticGroupLabels[group].example}</strong>
-                  <small>{groupCounts[group]} 条</small>
-                </button>
-              ))}
-            </div>
-
             <div className="semantic-asset-summary" aria-label="语义资产概览">
               <article>
                 <span>维度语义</span><strong>{groupCounts.DIMENSION}</strong>
@@ -300,6 +282,20 @@ export function SemanticAssetPage() {
                 <span>已向量化</span><strong>{embeddedCount}</strong>
                 <small>当前页可参与语义匹配</small>
               </article>
+            </div>
+
+            <div className="semantic-group-switch" role="tablist" aria-label="语义资产分类">
+              {(Object.keys(semanticGroupLabels) as SemanticGroup[]).map(group => (
+                <button
+                  key={group}
+                  type="button"
+                  role="tab"
+                  aria-selected={semanticGroup === group}
+                  onClick={() => setSemanticGroup(group)}
+                >
+                  {semanticGroupLabels[group].label}
+                </button>
+              ))}
             </div>
 
             <div className="semantic-asset-filters">

@@ -200,23 +200,180 @@ type QueryPlanInput struct {
 // compatibility and lineage gates for every requested metric.
 type QueryTurnInput struct {
 	Question string `json:"question"`
+	// Timezone is used to turn relative time words found during Jieba semantic
+	// enrichment into explicit query boundaries before planning.
+	Timezone string `json:"timezone,omitempty"`
 	// PriorQuestions contains at most the two immediately preceding user
 	// questions. Together with Question this is the transient three-turn
 	// window used to explain conversational resolution. Raw questions are
 	// never persisted in a QueryPlan.
-	PriorQuestions      []string `json:"priorQuestions,omitempty"`
-	ContextQueryPlanIDs []string `json:"contextQueryPlanIds,omitempty"`
-	MaximumPathHops     int      `json:"maximumPathHops,omitempty"`
+	PriorQuestions       []string                 `json:"priorQuestions,omitempty"`
+	ContextQueryPlanIDs  []string                 `json:"contextQueryPlanIds,omitempty"`
+	MaximumPathHops      int                      `json:"maximumPathHops,omitempty"`
+	ConfirmedMetricCodes []string                 `json:"confirmedMetricCodes,omitempty"`
+	ConfirmedDecisions   []QueryConfirmedDecision `json:"confirmedDecisions,omitempty"`
+	// SemanticHints are untrusted names and values produced by the preceding
+	// bounded LLM candidate selector. The server resolves them again against
+	// published metric/dimension catalogs and persisted decisions; callers
+	// cannot supply fields, tables, predicates or SQL.
+	SemanticHints QuerySemanticHints `json:"semanticHints,omitempty"`
+}
+
+type QueryConfirmedDecision struct {
+	MetricCode string `json:"metricCode"`
+	DecisionID string `json:"decisionId"`
+}
+
+type QuerySemanticHints struct {
+	Intent          string                       `json:"intent,omitempty"`
+	MetricNames     []string                     `json:"metricNames,omitempty"`
+	DimensionValues []QuerySemanticDimensionHint `json:"dimensionValues,omitempty"`
+}
+
+type QuerySemanticDimensionHint struct {
+	SourceToken   string          `json:"sourceToken,omitempty"`
+	Value         string          `json:"value"`
+	DimensionName string          `json:"dimensionName"`
+	DimensionCode string          `json:"dimensionCode"`
+	DimensionType string          `json:"dimensionType,omitempty"`
+	ValueType     string          `json:"valueType,omitempty"`
+	TimeRange     *QueryTimeRange `json:"timeRange,omitempty"`
+}
+
+// QueryTokenizeInput is deliberately independent from query planning. It lets
+// callers inspect deterministic segmentation even when no governed metric path
+// can be proven for the question.
+type QueryTokenizeInput struct {
+	Question string `json:"question"`
+	Timezone string `json:"timezone,omitempty"`
+}
+
+type QueryTokenization struct {
+	QuestionHash          string                        `json:"questionHash"`
+	Strategy              string                        `json:"strategy"`
+	Tokens                []QueryToken                  `json:"tokens"`
+	EntityCount           int                           `json:"entityCount"`
+	DictionaryEntityCount int                           `json:"dictionaryEntityCount"`
+	IndexPrerequisites    []QuerySemanticIndexStatus    `json:"indexPrerequisites"`
+	QuestionEmbedding     QueryEmbeddingTrace           `json:"questionEmbedding"`
+	QuestionMetricTop5    []QueryTokenSemanticCandidate `json:"questionMetricTop5"`
+	SemanticRetrievalMode string                        `json:"semanticRetrievalMode"`
+	SemanticRetrievals    []QueryTokenSemanticRetrieval `json:"semanticRetrievals"`
+	LLMCompletion         QueryTokenLLMCompletion       `json:"llmCompletion"`
+}
+
+type QuerySemanticIndexStatus struct {
+	IndexType  string `json:"indexType"`
+	KeyShape   string `json:"keyShape"`
+	ValueShape string `json:"valueShape"`
+	Total      int64  `json:"total"`
+	Ready      int64  `json:"ready"`
+	Pending    int64  `json:"pending"`
+	Status     string `json:"status"`
+	Model      string `json:"model,omitempty"`
+}
+
+type QueryEmbeddingTrace struct {
+	Status     string `json:"status"`
+	Model      string `json:"model,omitempty"`
+	Dimensions int    `json:"dimensions,omitempty"`
+}
+
+// QueryToken offsets are Unicode code-point offsets [Start, End), rather than
+// UTF-8 byte offsets, so the browser can highlight Chinese text reliably.
+type QueryToken struct {
+	Text         string  `json:"text"`
+	Normalized   string  `json:"normalized"`
+	PartOfSpeech string  `json:"partOfSpeech,omitempty"`
+	EntityType   string  `json:"entityType"`
+	EntityName   string  `json:"entityName,omitempty"`
+	EntityCode   string  `json:"entityCode,omitempty"`
+	Start        int     `json:"start"`
+	End          int     `json:"end"`
+	Source       string  `json:"source"`
+	Confidence   float64 `json:"confidence"`
+}
+
+type QueryTokenSemanticRetrieval struct {
+	Token               string                        `json:"token"`
+	PartOfSpeech        string                        `json:"partOfSpeech,omitempty"`
+	EntityType          string                        `json:"entityType"`
+	Start               int                           `json:"start"`
+	End                 int                           `json:"end"`
+	RetrievalStatus     string                        `json:"retrievalStatus"`
+	MetricCandidates    []QueryTokenSemanticCandidate `json:"metricCandidates"`
+	DimensionCandidates []QueryTokenSemanticCandidate `json:"dimensionCandidates"`
+}
+
+type QueryTokenSemanticCandidate struct {
+	SemanticType  string  `json:"semanticType"`
+	Name          string  `json:"name"`
+	Code          string  `json:"code"`
+	Description   string  `json:"description,omitempty"`
+	DimensionName string  `json:"dimensionName,omitempty"`
+	DimensionCode string  `json:"dimensionCode,omitempty"`
+	DimensionType string  `json:"dimensionType,omitempty"`
+	ValueType     string  `json:"valueType,omitempty"`
+	FieldID       string  `json:"fieldId,omitempty"`
+	Value         string  `json:"value,omitempty"`
+	Geographic    bool    `json:"geographic,omitempty"`
+	Score         float64 `json:"score"`
+	MatchMethod   string  `json:"matchMethod"`
+}
+
+type QueryTokenLLMCompletion struct {
+	Status            string                   `json:"status"`
+	Model             string                   `json:"model,omitempty"`
+	Intent            string                   `json:"intent"`
+	AugmentedQuestion string                   `json:"augmentedQuestion"`
+	MetricNames       []string                 `json:"metricNames"`
+	DimensionValues   []QueryLLMDimensionValue `json:"dimensionValues"`
+	ReferenceTime     string                   `json:"referenceTime,omitempty"`
+	Timezone          string                   `json:"timezone,omitempty"`
+	Confidence        float64                  `json:"confidence"`
+	ErrorCode         string                   `json:"errorCode,omitempty"`
+}
+
+type QueryLLMDimensionValue struct {
+	SourceToken   string          `json:"sourceToken"`
+	Value         string          `json:"value"`
+	DimensionName string          `json:"dimensionName"`
+	DimensionCode string          `json:"dimensionCode"`
+	DimensionType string          `json:"dimensionType,omitempty"`
+	ValueType     string          `json:"valueType,omitempty"`
+	FieldID       string          `json:"fieldId,omitempty"`
+	TimeRange     *QueryTimeRange `json:"timeRange,omitempty"`
+	Confidence    float64         `json:"confidence"`
 }
 
 type QueryTurnPlan struct {
-	QuestionHash        string         `json:"questionHash"`
-	Intent              string         `json:"intent"`
-	MetricCodes         []string       `json:"metricCodes"`
-	ContextQueryPlanIDs []string       `json:"contextQueryPlanIds"`
-	ContextInherited    bool           `json:"contextInherited"`
-	Plans               []QueryPlan    `json:"plans"`
-	Trace               QueryTurnTrace `json:"trace"`
+	QuestionHash        string              `json:"questionHash"`
+	Status              string              `json:"status"`
+	Intent              string              `json:"intent"`
+	MetricCodes         []string            `json:"metricCodes"`
+	ContextQueryPlanIDs []string            `json:"contextQueryPlanIds"`
+	ContextInherited    bool                `json:"contextInherited"`
+	Tokenization        *QueryTokenization  `json:"tokenization,omitempty"`
+	Clarification       *QueryClarification `json:"clarification,omitempty"`
+	Plans               []QueryPlan         `json:"plans"`
+	Trace               QueryTurnTrace      `json:"trace"`
+}
+
+type QueryClarification struct {
+	Type                string                          `json:"type"`
+	Message             string                          `json:"message"`
+	MetricCandidates    []QueryMetricCandidateTrace     `json:"metricCandidates,omitempty"`
+	DimensionCandidates []QueryDimensionCandidateChoice `json:"dimensionCandidates,omitempty"`
+}
+
+type QueryDimensionCandidateChoice struct {
+	MetricCode     string `json:"metricCode"`
+	DecisionID     string `json:"decisionId"`
+	DimensionCode  string `json:"dimensionCode"`
+	DimensionName  string `json:"dimensionName"`
+	CanonicalValue string `json:"canonicalValue"`
+	TableSchema    string `json:"tableSchema"`
+	TableName      string `json:"tableName"`
 }
 
 // QueryTurnTrace is a transient, reader-facing audit trail. It is assembled
@@ -226,11 +383,26 @@ type QueryTurnTrace struct {
 	ConversationQuestions []string                         `json:"conversationQuestions"`
 	ContextPolicy         string                           `json:"contextPolicy"`
 	StandaloneQuestion    string                           `json:"standaloneQuestion"`
+	MetricToolLoop        *QueryMetricToolLoopTrace        `json:"metricToolLoop,omitempty"`
 	Extraction            QueryTurnExtraction              `json:"extraction"`
 	MetricCandidates      []QueryMetricCandidateTrace      `json:"metricCandidates"`
 	DimensionValueLookups []QueryDimensionValueLookupTrace `json:"dimensionValueLookups"`
 	FinalSelections       []QueryFinalSelectionTrace       `json:"finalSelections"`
 	Assessments           []QueryTraceAssessment           `json:"assessments"`
+}
+
+type QueryMetricToolLoopTrace struct {
+	AuditRequestID string                    `json:"auditRequestId"`
+	Model          string                    `json:"model"`
+	Rounds         int                       `json:"rounds"`
+	ToolCalls      int                       `json:"toolCalls"`
+	Steps          []QueryMetricToolLoopStep `json:"steps"`
+}
+
+type QueryMetricToolLoopStep struct {
+	Round    int    `json:"round"`
+	ToolName string `json:"toolName"`
+	Terminal bool   `json:"terminal"`
 }
 
 type QueryTurnExtraction struct {
@@ -240,13 +412,17 @@ type QueryTurnExtraction struct {
 }
 
 type QueryMetricCandidateTrace struct {
-	Code        string  `json:"code"`
-	Label       string  `json:"label"`
-	MatchedTerm string  `json:"matchedTerm,omitempty"`
-	MatchMethod string  `json:"matchMethod"`
-	Score       float64 `json:"score"`
-	Selected    bool    `json:"selected"`
-	Source      string  `json:"source"`
+	Code             string  `json:"code"`
+	Label            string  `json:"label"`
+	Domain           string  `json:"domain,omitempty"`
+	DatasetVersionID string  `json:"datasetVersionId,omitempty"`
+	TableSchema      string  `json:"tableSchema,omitempty"`
+	TableName        string  `json:"tableName,omitempty"`
+	MatchedTerm      string  `json:"matchedTerm,omitempty"`
+	MatchMethod      string  `json:"matchMethod"`
+	Score            float64 `json:"score"`
+	Selected         bool    `json:"selected"`
+	Source           string  `json:"source"`
 }
 
 type QueryDimensionValueLookupTrace struct {
@@ -276,6 +452,7 @@ type QueryDimensionValueLookupTrace struct {
 	VectorCandidateCount      int                       `json:"vectorCandidateCount"`
 	VectorCandidateMemberKeys []string                  `json:"vectorCandidateMemberKeys,omitempty"`
 	VectorTopScore            float64                   `json:"vectorTopScore,omitempty"`
+	DecisionCandidates        []QueryDecisionCandidate  `json:"decisionCandidates,omitempty"`
 	WhereDesignStatus         string                    `json:"whereDesignStatus"`
 	WhereDesignOperator       string                    `json:"whereDesignOperator,omitempty"`
 	WhereDesignReason         string                    `json:"whereDesignReason,omitempty"`
@@ -290,6 +467,21 @@ type QueryDimensionValueLookupTrace struct {
 	Selected                  bool                      `json:"selected"`
 	Source                    string                    `json:"source"`
 	Sensitive                 bool                      `json:"sensitive"`
+}
+
+type QueryDecisionCandidate struct {
+	DecisionID        string  `json:"decisionId"`
+	CanonicalValue    string  `json:"canonicalValue"`
+	MemberValue       string  `json:"memberValue,omitempty"`
+	MetricCode        string  `json:"metricCode"`
+	MetricName        string  `json:"metricName"`
+	TableSchema       string  `json:"tableSchema"`
+	TableName         string  `json:"tableName"`
+	WhereCondition    string  `json:"whereCondition"`
+	CompiledCondition string  `json:"compiledCondition"`
+	PredicateOperator string  `json:"predicateOperator"`
+	Score             float64 `json:"score"`
+	Selected          bool    `json:"selected"`
 }
 
 type QueryCandidateFilterTrace struct {
@@ -307,6 +499,7 @@ type QueryFinalSelectionTrace struct {
 	MetricVersionID   string                     `json:"metricVersionId"`
 	DatasetVersionID  string                     `json:"datasetVersionId"`
 	Dimensions        []QueryFinalDimensionTrace `json:"dimensions"`
+	TimeRange         *QueryTimeRange            `json:"timeRange,omitempty"`
 	WhereCondition    string                     `json:"whereCondition"`
 	CompiledCondition string                     `json:"compiledCondition"`
 	PlanID            string                     `json:"planId"`

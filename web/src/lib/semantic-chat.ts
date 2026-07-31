@@ -59,10 +59,26 @@ export type SemanticQueryPlan = {
 
 export type SemanticQueryTurn = {
   questionHash: string
+  status: 'PLANNING' | 'PLANNED' | 'NEEDS_METRIC_CONFIRMATION' | 'NEEDS_DIMENSION_CONFIRMATION' | 'SEMANTIC_GAP'
   intent: string
   metricCodes: string[]
   contextQueryPlanIds: string[]
   contextInherited: boolean
+  tokenization?: SemanticQueryTokenization
+  clarification?: {
+    type: 'METRIC' | 'DIMENSION' | 'SEMANTIC_GAP'
+    message: string
+    metricCandidates?: SemanticQueryTurnTrace['metricCandidates']
+    dimensionCandidates?: Array<{
+      metricCode: string
+      decisionId: string
+      dimensionCode: string
+      dimensionName: string
+      canonicalValue: string
+      tableSchema: string
+      tableName: string
+    }>
+  }
   plans: SemanticQueryPlan[]
   trace: SemanticQueryTurnTrace
 }
@@ -71,6 +87,13 @@ export type SemanticQueryTurnTrace = {
   conversationQuestions: string[]
   contextPolicy: string
   standaloneQuestion: string
+  metricToolLoop?: {
+    auditRequestId: string
+    model: string
+    rounds: number
+    toolCalls: number
+    steps: Array<{ round: number; toolName: string; terminal: boolean }>
+  }
   extraction: {
     intent: string
     metricTerms: string[]
@@ -79,6 +102,10 @@ export type SemanticQueryTurnTrace = {
   metricCandidates: Array<{
     code: string
     label: string
+    domain?: string
+    datasetVersionId?: string
+    tableSchema?: string
+    tableName?: string
     matchedTerm?: string
     matchMethod: string
     score: number
@@ -111,6 +138,19 @@ export type SemanticQueryTurnTrace = {
     vectorCandidateCount: number
     vectorCandidateMemberKeys?: string[]
     vectorTopScore?: number
+    decisionCandidates?: Array<{
+      decisionId: string
+      canonicalValue: string
+      metricCode: string
+      metricName: string
+      tableSchema: string
+      tableName: string
+      whereCondition: string
+      compiledCondition: string
+      predicateOperator: string
+      score: number
+      selected: boolean
+    }>
     whereDesignStatus: string
     whereDesignOperator?: string
     whereDesignReason?: string
@@ -143,6 +183,7 @@ export type SemanticQueryTurnTrace = {
       dimensionName: string
       memberKeys: string[]
     }>
+    timeRange?: { start: string; endExclusive: string }
     whereCondition: string
     compiledCondition: string
     planId: string
@@ -204,6 +245,114 @@ export type SemanticGraphStatus = {
   lastErrorCode?: string
 }
 
+export type SemanticQueryToken = {
+  text: string
+  normalized: string
+  partOfSpeech?: string
+  entityType:
+    | 'METRIC'
+    | 'DIMENSION'
+    | 'DIMENSION_VALUE'
+    | 'PERSON'
+    | 'LOCATION'
+    | 'ORGANIZATION'
+    | 'PROPER_NOUN'
+    | 'NOUN_CANDIDATE'
+    | 'TIME'
+    | 'NUMBER'
+    | 'COMPARISON_WORD'
+    | 'ANALYSIS_WORD'
+    | 'QUERY_WORD'
+    | 'TEXT'
+    | 'PUNCTUATION'
+    | string
+  entityName?: string
+  entityCode?: string
+  start: number
+  end: number
+  source: string
+  confidence: number
+}
+
+export type SemanticQueryTokenization = {
+  questionHash: string
+  strategy: string
+  tokens: SemanticQueryToken[]
+  entityCount: number
+  dictionaryEntityCount: number
+  indexPrerequisites: SemanticIndexPrerequisite[]
+  questionEmbedding: {
+    status: string
+    model?: string
+    dimensions?: number
+  }
+  questionMetricTop5: SemanticTokenSemanticCandidate[]
+  semanticRetrievalMode?: string
+  semanticRetrievals?: SemanticTokenSemanticRetrieval[]
+  llmCompletion?: SemanticTokenLLMCompletion
+}
+
+export type SemanticIndexPrerequisite = {
+  indexType: string
+  keyShape: string
+  valueShape: string
+  total: number
+  ready: number
+  pending: number
+  status: string
+  model?: string
+}
+
+export type SemanticTokenSemanticCandidate = {
+  semanticType: 'METRIC' | 'DIMENSION' | 'DIMENSION_VALUE' | string
+  name: string
+  code: string
+  description?: string
+  dimensionName?: string
+  dimensionCode?: string
+  dimensionType?: string
+  valueType?: string
+  fieldId?: string
+  value?: string
+  geographic?: boolean
+  score: number
+  matchMethod: string
+}
+
+export type SemanticTokenSemanticRetrieval = {
+  token: string
+  partOfSpeech?: string
+  entityType: string
+  start: number
+  end: number
+  retrievalStatus: string
+  metricCandidates: SemanticTokenSemanticCandidate[]
+  dimensionCandidates: SemanticTokenSemanticCandidate[]
+}
+
+export type SemanticTokenLLMCompletion = {
+  status: string
+  model?: string
+  intent: string
+  augmentedQuestion: string
+  metricNames: string[]
+  dimensionValues: Array<{
+    sourceToken: string
+    value: string
+    dimensionName: string
+    dimensionCode: string
+    dimensionType?: string
+    valueType?: string
+    fieldId?: string
+    timeRange?: { start: string; endExclusive: string }
+    confidence: number
+  }>
+  referenceTime?: string
+  timezone?: string
+  confidence: number
+  errorCode?: string
+}
+
 export type GoldenQuestionSet = {
   id: string
   code: string
@@ -247,6 +396,21 @@ export type PlanTurnInput = {
   question: string
   priorQuestions?: string[]
   contextQueryPlanIds?: string[]
+  confirmedMetricCodes?: string[]
+  confirmedDecisions?: Array<{ metricCode: string; decisionId: string }>
+  semanticHints?: {
+    intent?: string
+    metricNames?: string[]
+    dimensionValues?: Array<{
+      sourceToken?: string
+      value: string
+      dimensionName: string
+      dimensionCode: string
+      dimensionType?: string
+      valueType?: string
+      timeRange?: { start: string; endExclusive: string }
+    }>
+  }
   signal?: AbortSignal
 }
 
@@ -257,15 +421,29 @@ const newQueryID = () => typeof crypto !== 'undefined' && typeof crypto.randomUU
 export const semanticChatAPI = {
   graphStatus: () => apiRequest<SemanticGraphStatus>('/v1/semantic-qa/graph/status'),
 
-  planTurn: ({ question, priorQuestions, contextQueryPlanIds, signal }: PlanTurnInput) =>
+  tokenize: (question: string, signal?: AbortSignal) =>
+    apiRequest<SemanticQueryTokenization>('/v1/semantic-qa/tokenize', {
+      method: 'POST',
+      signal,
+      body: JSON.stringify({
+        question,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      }),
+    }),
+
+  planTurn: ({ question, priorQuestions, contextQueryPlanIds, confirmedMetricCodes, confirmedDecisions, semanticHints, signal }: PlanTurnInput) =>
     apiRequest<SemanticQueryTurn>('/v1/semantic-qa/query-turns', {
       method: 'POST',
       signal,
       body: JSON.stringify({
         question,
         maximumPathHops: 8,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
         ...(priorQuestions?.length ? { priorQuestions } : {}),
         ...(contextQueryPlanIds?.length ? { contextQueryPlanIds } : {}),
+        ...(confirmedMetricCodes?.length ? { confirmedMetricCodes } : {}),
+        ...(confirmedDecisions?.length ? { confirmedDecisions } : {}),
+        ...(semanticHints ? { semanticHints } : {}),
       }),
     }),
 

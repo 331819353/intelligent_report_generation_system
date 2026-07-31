@@ -162,7 +162,16 @@ func (store *PostgresStore) recallMetricDimensionDecisions(
 	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
 		rows, queryErr := tx.Query(ctx, `WITH eligible AS (
 				SELECT decision.id::text,dimension.code::text,
-					decision.canonical_value,decision.aliases,
+					decision.canonical_value,
+					ARRAY(
+					  SELECT DISTINCT alias
+					  FROM unnest(
+					    decision.aliases ||
+					    COALESCE(semantic_alias.aliases,'{}'::text[])
+					  ) AS expanded(alias)
+					  WHERE btrim(alias)<>''
+					  ORDER BY alias
+					) AS aliases,
 					COALESCE(member.normalized_value,'') AS member_value,
 					decision.selected_member_count,
 					decision.predicate_operator,decision.where_condition,
@@ -179,7 +188,10 @@ func (store *PostgresStore) recallMetricDimensionDecisions(
 					CASE
 					  WHEN lower(decision.canonical_value)=lower($4)
 					    OR EXISTS(
-					      SELECT 1 FROM unnest(decision.aliases) AS alias(value)
+					      SELECT 1 FROM unnest(
+					        decision.aliases ||
+					        COALESCE(semantic_alias.aliases,'{}'::text[])
+					      ) AS alias(value)
 					      WHERE lower(alias.value)=lower($4)
 					    )
 					  THEN 1 ELSE 0
@@ -228,6 +240,27 @@ func (store *PostgresStore) recallMetricDimensionDecisions(
 				 AND member.id=decision.dimension_member_id
 				 AND member.dimension_id=decision.dimension_id
 				 AND member.status='ACTIVE'
+				LEFT JOIN LATERAL (
+				  SELECT array_agg(asset.common_term::text ORDER BY
+				    char_length(asset.common_term::text) DESC,
+				    lower(asset.common_term::text)
+				  ) AS aliases
+				  FROM platform.semantic_term_assets AS asset
+				  WHERE asset.tenant_id=decision.tenant_id
+				    AND asset.status='ACTIVE'
+				    AND lower(asset.mapping_value) IN (
+				      lower(decision.canonical_value),
+				      lower(COALESCE(member.normalized_value,'')),
+				      lower(
+				        dimension.code::text||':'||
+				        decision.canonical_value
+				      ),
+				      lower(
+				        dimension.code::text||':'||
+				        COALESCE(member.normalized_value,'')
+				      )
+				    )
+				) AS semantic_alias ON true
 				WHERE decision.tenant_id=platform.current_tenant_id()
 			)
 			SELECT id,code,canonical_value,aliases,member_value,

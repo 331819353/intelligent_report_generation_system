@@ -12,11 +12,45 @@ Base path：`/api/v1/semantic-qa`
 ```json
 {
   "question": "其中的关键人才有多少？",
+  "timezone": "Asia/Shanghai",
   "priorQuestions": ["80后小微在职人员有多少人？"],
   "contextQueryPlanIds": ["上一轮全部 READY / EXECUTED 计划 ID"],
   "maximumPathHops": 8
 }
 ```
+
+歧义确认请求仍使用同一接口，只提交上一次响应中的受治理标识：
+
+```json
+{
+  "question": "销售怎么样？",
+  "timezone": "Asia/Shanghai",
+  "confirmedMetricCodes": ["sales_amount"],
+  "confirmedDecisions": [{
+    "metricCode": "sales_amount",
+    "decisionId": "维度 WHERE 决策图 ID"
+  }],
+  "maximumPathHops": 8
+}
+```
+
+`confirmedMetricCodes` 最多 8 个，`confirmedDecisions` 最多 16 个。服务端会重新加载
+当前 PUBLISHED 指标和决策图；请求不能提交表名、字段名、成员 SQL、WHERE 或物理
+数据。
+
+`timezone` 是 IANA 时区，缺省为 `UTC`，用于把分词阶段识别出的相对时间转换为
+确定的半开区间。`query-turns` 会在服务端自动执行 Jieba/HMM、整句和逐词语义
+召回、受约束 LLM 候选选择，再进入 QueryPlan；调用方不需要先请求独立的测试页面
+或自行拼装 `semanticHints`。
+
+明确命中唯一已发布指标名称、别名或特征词干，且问题不含时间歧义和未知维度时，
+分词补全会返回 `llmCompletion.model=DETERMINISTIC_SEMANTIC_CATALOG`，避免不必要
+的模型调用。已确认指标或已执行上下文计划也可作为当前轮的可信指标锚点。相对时间、
+未知专名及未命中决策图的普通维度仍进入受约束 LLM/向量链路，不会被快速路径猜测。
+
+指标已确定、但维度值无法匹配该指标已验证兼容维度或持久化决策图时，响应状态为
+`SEMANTIC_GAP`，且 `clarification.type=SEMANTIC_GAP`。此时 `plans` 为空，
+客户端必须展示缺口说明，不能降级成没有 WHERE 条件的查询。
 
 `priorQuestions` 最多两个，仅作为本次响应的三轮意图综合证据，不写入
 QueryPlan；`contextQueryPlanIds` 才是条件继承的安全锚点。当前轮命中的同维度
@@ -30,13 +64,31 @@ QueryPlan；`contextQueryPlanIds` 才是条件继承的安全锚点。当前轮�
 ```json
 {
   "questionHash": "64 位摘要",
+  "status": "PLANNED",
   "intent": "METRIC",
   "metricCodes": ["sales_amount", "order_count"],
   "contextQueryPlanIds": [],
   "contextInherited": false,
+  "tokenization": {
+    "strategy": "JIEBA_HMM_POS_SEMANTIC_CATALOG_V1",
+    "tokens": [],
+    "questionMetricTop5": [],
+    "semanticRetrievals": [],
+    "llmCompletion": {"status": "SUCCEEDED"}
+  },
   "trace": {
     "conversationQuestions": ["最近三轮问题，当前问题在最后"],
     "standaloneQuestion": "由最终治理条件形成的独立问题",
+    "metricToolLoop": {
+      "auditRequestId": "AI 审计 ID",
+      "model": "MiniMax-M2",
+      "rounds": 2,
+      "toolCalls": 2,
+      "steps": [
+        {"round": 1, "toolName": "search_metrics", "terminal": false},
+        {"round": 2, "toolName": "submit_metric_selection", "terminal": true}
+      ]
+    },
     "extraction": {
       "intent": "METRIC",
       "metricTerms": ["员工总人数"],
@@ -100,6 +152,16 @@ QueryPlan；`contextQueryPlanIds` 才是条件继承的安全锚点。当前轮�
   ]
 }
 ```
+
+无法唯一判断指标时返回 `status=NEEDS_METRIC_CONFIRMATION` 和
+`clarification.metricCandidates`；每项包含指标名称、编码、领域、精确数据集版本和
+来源 DWS 发布视图。无法唯一判断维度和值时返回
+`status=NEEDS_DIMENSION_CONFIRMATION` 和
+`clarification.dimensionCandidates`，确认键是 `decisionId`。这两种响应都不会执行
+未确认结果。
+
+指标检索优先使用受控模型工具循环；协议、预算和降级规则见
+[多模型受控工具循环](ai-tool-loop.md)。
 
 多轮追问把上一轮全部 `READY / EXECUTED` 计划 ID 放入
 `contextQueryPlanIds`，同时把前两次用户问句放入 `priorQuestions`。页面的

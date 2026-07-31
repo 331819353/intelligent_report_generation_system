@@ -33,6 +33,7 @@ type Config struct {
 	AIModel                         string
 	AIModels                        []string
 	AIAPIKey                        string
+	AIProviderEndpoints             []AIProviderEndpoint
 	AIRequestTimeout                time.Duration
 	AIAttemptTimeout                time.Duration
 	AIPrimaryFailoverTimeout        time.Duration
@@ -74,6 +75,13 @@ type Config struct {
 	ConnectorStreamMaxBytes         int64
 	WarehouseStageMaxBytes          int64
 	DataSourceCredentialKey         string
+}
+
+type AIProviderEndpoint struct {
+	Name    string
+	BaseURL string
+	APIKey  string
+	Models  []string
 }
 
 type databaseProcess struct {
@@ -169,6 +177,45 @@ func loadApplication(process databaseProcess) (Config, error) {
 	if len(aiModels) == 0 {
 		aiModels = []string{aiModel}
 	}
+	aiProviderEndpoints := []AIProviderEndpoint{}
+	if strings.TrimSpace(aiAPIKey) != "" {
+		aiProviderEndpoints = append(aiProviderEndpoints, AIProviderEndpoint{
+			Name: "gateway", BaseURL: aiBaseURL, APIKey: aiAPIKey,
+			Models: append([]string(nil), aiModels...),
+		})
+	}
+	for _, endpoint := range []struct {
+		name, baseURLKey, defaultBaseURL, apiKeyKey, modelsKey string
+	}{
+		{
+			"deepseek", "AI_DEEPSEEK_BASE_URL",
+			"https://api.deepseek.com", "AI_DEEPSEEK_API_KEY",
+			"AI_DEEPSEEK_MODELS",
+		},
+		{
+			"glm", "AI_GLM_BASE_URL",
+			"https://open.bigmodel.cn/api/paas/v4", "AI_GLM_API_KEY",
+			"AI_GLM_MODELS",
+		},
+		{
+			"minimax", "AI_MINIMAX_BASE_URL",
+			"https://api.minimaxi.com/v1", "AI_MINIMAX_API_KEY",
+			"AI_MINIMAX_MODELS",
+		},
+	} {
+		apiKey := strings.TrimSpace(os.Getenv(endpoint.apiKeyKey))
+		if apiKey == "" {
+			continue
+		}
+		aiProviderEndpoints = append(
+			aiProviderEndpoints,
+			AIProviderEndpoint{
+				Name:    endpoint.name,
+				BaseURL: envOrDefault(endpoint.baseURLKey, endpoint.defaultBaseURL),
+				APIKey:  apiKey, Models: parseUniqueCSV(os.Getenv(endpoint.modelsKey)),
+			},
+		)
+	}
 	embeddingBaseURL := envOrDefault("AI_EMBEDDING_BASE_URL", aiBaseURL)
 	embeddingAPIKey := os.Getenv("AI_EMBEDDING_API_KEY")
 	if strings.TrimSpace(embeddingAPIKey) == "" {
@@ -188,6 +235,7 @@ func loadApplication(process databaseProcess) (Config, error) {
 		AIModel:                         aiModel,
 		AIModels:                        aiModels,
 		AIAPIKey:                        aiAPIKey,
+		AIProviderEndpoints:             aiProviderEndpoints,
 		AIRequestTimeout:                25 * time.Second,
 		AIAttemptTimeout:                8 * time.Second,
 		AIPrimaryFailoverTimeout:        8 * time.Second,
@@ -379,6 +427,22 @@ func (c Config) Validate() error {
 		for _, model := range c.AIModels {
 			if strings.TrimSpace(model) == "" || len(model) > 256 || strings.ContainsAny(model, "\r\n\t") {
 				return errors.New("AI_MODELS contains an invalid model name")
+			}
+		}
+	}
+	for _, endpoint := range c.AIProviderEndpoints {
+		if strings.TrimSpace(endpoint.Name) == "" ||
+			!validAIBaseURL(endpoint.BaseURL) ||
+			strings.TrimSpace(endpoint.APIKey) == "" ||
+			len(endpoint.Models) == 0 {
+			return errors.New("configured AI provider endpoint is invalid")
+		}
+		for _, model := range endpoint.Models {
+			if strings.TrimSpace(model) == "" || len(model) > 256 ||
+				strings.ContainsAny(model, "\r\n\t") {
+				return errors.New(
+					"configured AI provider model name is invalid",
+				)
 			}
 		}
 	}

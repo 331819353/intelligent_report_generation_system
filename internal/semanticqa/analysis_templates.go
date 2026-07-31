@@ -621,6 +621,11 @@ func buildMultiFactDWSCandidate(
 	nodes := make([]dataset.Node, 0, len(sources))
 	preAggregations := make([]dataset.PreAggregation, 0, len(sources))
 	joins := make([]dataset.Join, 0, len(sources)-1)
+	conformedFields := multiFactConformedDimensionFields(sources)
+	commonGrainFields := []string{"stat_month"}
+	for _, field := range conformedFields {
+		commonGrainFields = append(commonGrainFields, field.Code)
+	}
 	outputFields := []dataset.Field{{
 		ID: "field_stat_month", Code: "stat_month", Name: "统计月份",
 		Role: "TIME", CanonicalType: "DATE", Nullable: false,
@@ -628,6 +633,17 @@ func buildMultiFactDWSCandidate(
 			Type: "FIELD_REF", NodeID: "fact_1", Field: "stat_month",
 		},
 	}}
+	for _, field := range conformedFields {
+		outputFields = append(outputFields, dataset.Field{
+			ID: "field_" + field.Code, Code: field.Code,
+			Name: field.Name, Description: field.Description,
+			Role: "DIMENSION", CanonicalType: field.CanonicalType,
+			SemanticType: field.SemanticType, Nullable: true,
+			Expression: dataset.Expression{
+				Type: "FIELD_REF", NodeID: "fact_1", Field: field.Code,
+			},
+		})
+	}
 	measures := []dataset.AnalysisMeasureContract{}
 	for index, source := range sources {
 		document := source.Document
@@ -654,19 +670,33 @@ func buildMultiFactDWSCandidate(
 		if index > 0 {
 			joinID = fmt.Sprintf("join_%d", index)
 			joinSide = "RIGHT"
+			conditions := []dataset.JoinCondition{{
+				LeftExpression: dataset.Expression{
+					Type: "FIELD_REF", NodeID: "fact_1", Field: "stat_month",
+				},
+				Operator: "EQUALS",
+				RightExpression: dataset.Expression{
+					Type: "FIELD_REF", NodeID: nodeID, Field: "stat_month",
+				},
+			}}
+			for _, conformed := range conformedFields {
+				conditions = append(conditions, dataset.JoinCondition{
+					LeftExpression: dataset.Expression{
+						Type: "FIELD_REF", NodeID: "fact_1",
+						Field: conformed.Code,
+					},
+					Operator: "EQUALS",
+					RightExpression: dataset.Expression{
+						Type: "FIELD_REF", NodeID: nodeID,
+						Field: conformed.Code,
+					},
+				})
+			}
 			joins = append(joins, dataset.Join{
 				ID: joinID, LeftNodeID: "fact_1", RightNodeID: nodeID,
 				JoinType: "LEFT", Cardinality: "MANY_TO_ONE",
 				ManualConfirmed: true,
-				Conditions: []dataset.JoinCondition{{
-					LeftExpression: dataset.Expression{
-						Type: "FIELD_REF", NodeID: "fact_1", Field: "stat_month",
-					},
-					Operator: "EQUALS",
-					RightExpression: dataset.Expression{
-						Type: "FIELD_REF", NodeID: nodeID, Field: "stat_month",
-					},
-				}},
+				Conditions:      conditions,
 			})
 		}
 		timeExpression := dataset.Expression{
@@ -679,6 +709,17 @@ func buildMultiFactDWSCandidate(
 				Field: "stat_month", Unit: "MONTH", Expression: &timeExpression,
 			}},
 			Metrics: []dataset.PreAggregationMetric{},
+		}
+		for _, conformed := range conformedFields {
+			expression := dataset.Expression{
+				Type: "FIELD_REF", NodeID: nodeID, Field: conformed.Code,
+			}
+			preAggregation.GroupBy = append(
+				preAggregation.GroupBy,
+				dataset.PreAggregationGroup{
+					Field: conformed.Code, Expression: &expression,
+				},
+			)
 		}
 		sourcePrefix := groupedMeasurePrefix(source.Record.Code, index)
 		added := 0
@@ -778,7 +819,7 @@ func buildMultiFactDWSCandidate(
 		Dataset: dataset.Descriptor{
 			Code: code, Name: name + "主题汇总",
 			Description: fmt.Sprintf(
-				"基于 %d 张当前发布 DWD 的共同月份粒度生成的多事实主题汇总草稿",
+				"基于 %d 张当前发布 DWD 的共同月份与一致维度粒度生成的多事实主题汇总草稿",
 				len(sources),
 			),
 			Domain: domain, Subject: subjectCode,
@@ -788,18 +829,24 @@ func buildMultiFactDWSCandidate(
 		Nodes: nodes, Joins: joins, PreAggregations: preAggregations,
 		AnalysisContract: &dataset.AnalysisContract{
 			Intent: "MULTI_FACT_COMPARISON", InputMode: "MULTI_FACT",
-			CommonGrainFields:   []string{"stat_month"},
-			ConformedDimensions: []string{"stat_month"},
-			TimeField:           "stat_month", TimeGrain: "MONTH", Measures: measures,
+			CommonGrainFields: append(
+				[]string(nil), commonGrainFields...,
+			),
+			ConformedDimensions: append(
+				[]string(nil), commonGrainFields...,
+			),
+			TimeField: "stat_month", TimeGrain: "MONTH", Measures: measures,
 		},
 		Fields: outputFields, Filters: []dataset.Filter{}, GroupBy: []string{},
 		Having: []dataset.Filter{}, Sorts: []dataset.Sort{{
 			FieldID: "field_stat_month", Direction: "ASC",
 		}}, Parameters: []dataset.Parameter{},
 		OutputGrain: dataset.OutputGrain{
-			Description: "每行代表一个统计月份",
-			KeyFields:   []string{"stat_month"},
-			TimeField:   "stat_month", DefaultTimeGrain: "MONTH",
+			Description: "每行代表一个统计月份与一致维度组合",
+			KeyFields: append(
+				[]string(nil), commonGrainFields...,
+			),
+			TimeField: "stat_month", DefaultTimeGrain: "MONTH",
 		},
 		ExecutionPolicy: dataset.ExecutionPolicy{
 			Mode: "MATERIALIZED_PREFERRED", TimeoutMS: 5000,
@@ -814,6 +861,64 @@ func buildMultiFactDWSCandidate(
 		return dataset.Prepared{}, err
 	}
 	return dataset.Prepare(raw)
+}
+
+// multiFactConformedDimensionFields finds the conservative fact constellation
+// bridge: a field must be a DIMENSION in every fact and keep the same code,
+// canonical type and (when present) semantic type. Facts are aggregated to this
+// grain before joining, which prevents measure fanout.
+func multiFactConformedDimensionFields(
+	sources []dwsPlanningAsset,
+) []dataset.Field {
+	if len(sources) < 2 {
+		return nil
+	}
+	timeCodes := map[string]bool{"stat_month": true}
+	for _, source := range sources {
+		timeCodes[strings.ToLower(
+			effectiveFactTimeField(source.Document),
+		)] = true
+	}
+	result := []dataset.Field{}
+	for _, candidate := range sources[0].Document.Fields {
+		code := strings.ToLower(strings.TrimSpace(candidate.Code))
+		if code == "" || timeCodes[code] ||
+			strings.ToUpper(candidate.Role) != "DIMENSION" {
+			continue
+		}
+		compatible := true
+		for _, source := range sources[1:] {
+			found := false
+			for _, field := range source.Document.Fields {
+				if !strings.EqualFold(field.Code, candidate.Code) ||
+					strings.ToUpper(field.Role) != "DIMENSION" {
+					continue
+				}
+				sameSemanticType := candidate.SemanticType == "" ||
+					field.SemanticType == "" ||
+					strings.EqualFold(
+						candidate.SemanticType, field.SemanticType,
+					)
+				if strings.EqualFold(
+					candidate.CanonicalType, field.CanonicalType,
+				) && sameSemanticType {
+					found = true
+				}
+				break
+			}
+			if !found {
+				compatible = false
+				break
+			}
+		}
+		if compatible {
+			result = append(result, candidate)
+			if len(result) == 4 {
+				break
+			}
+		}
+	}
+	return result
 }
 
 func multiFactEligibleSources(sources []dwsPlanningAsset) []dwsPlanningAsset {

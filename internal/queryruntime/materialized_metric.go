@@ -14,6 +14,7 @@ const materializedMetricNodeID = "materialized_root"
 type materializedFieldReplacement struct {
 	field          dataset.Field
 	rollupFunction string
+	entityCount    bool
 }
 
 // materializedMetricDocument turns a warehouse metric plan into a query over
@@ -59,6 +60,9 @@ func materializedMetricDocument(
 		}
 		replacements[key] = materializedFieldReplacement{
 			field: field, rollupFunction: rollupFunction,
+			entityCount: isEntityCountContractMeasure(
+				original.AnalysisContract, field,
+			),
 		}
 		projection = append(projection, field.Code)
 	}
@@ -139,8 +143,9 @@ func rewriteMaterializedExpressionForLayer(
 		return dataset.Expression{}, err
 	}
 	if replacement, found := replacements[key]; found {
-		return materializedFieldReference(
+		return materializedFieldReferenceForContract(
 			replacement.field, sourceLayer, exactMaterializedGrain,
+			replacement.entityCount,
 		)
 	}
 	// 多事实 DWS 的输出度量通常是关联前预聚合的别名，因此原字段表达式是
@@ -236,6 +241,17 @@ func materializedFieldReference(
 	sourceLayer dataset.Layer,
 	exactMaterializedGrain bool,
 ) (dataset.Expression, error) {
+	return materializedFieldReferenceForContract(
+		field, sourceLayer, exactMaterializedGrain, false,
+	)
+}
+
+func materializedFieldReferenceForContract(
+	field dataset.Field,
+	sourceLayer dataset.Layer,
+	exactMaterializedGrain bool,
+	entityCount bool,
+) (dataset.Expression, error) {
 	reference := dataset.Expression{
 		Type: "FIELD_REF", NodeID: materializedMetricNodeID, Field: field.Code,
 	}
@@ -251,6 +267,17 @@ func materializedFieldReference(
 		// roll up a non-decomposable COUNT_DISTINCT or ratio.
 		return dataset.Expression{
 			Type: "AGGREGATE", Function: "MAX", Argument: &reference,
+		}, nil
+	}
+	if entityCount {
+		// ENTITY_COUNT DWS assets are built from a current DIM snapshot:
+		// each source entity contributes to exactly one frozen output-grain
+		// cell. Summing those disjoint cell counts is therefore the governed
+		// coarser-grain execution of the entity-count analysis contract. This
+		// exception is intentionally contract-bound; arbitrary
+		// COUNT_DISTINCT measures remain non-decomposable below.
+		return dataset.Expression{
+			Type: "AGGREGATE", Function: "SUM", Argument: &reference,
 		}, nil
 	}
 	if field.Expression.Type != "AGGREGATE" {
@@ -271,6 +298,25 @@ func materializedFieldReference(
 	return dataset.Expression{
 		Type: "AGGREGATE", Function: function, Argument: &reference,
 	}, nil
+}
+
+func isEntityCountContractMeasure(
+	contract *dataset.AnalysisContract,
+	field dataset.Field,
+) bool {
+	if contract == nil || contract.Intent != "ENTITY_COUNT" ||
+		field.Role != "MEASURE" ||
+		field.Expression.Type != "AGGREGATE" ||
+		strings.ToUpper(field.Expression.Function) != "COUNT_DISTINCT" {
+		return false
+	}
+	for _, measure := range contract.Measures {
+		if measure.Field == field.Code &&
+			strings.ToUpper(measure.Aggregation) == "COUNT_DISTINCT" {
+			return true
+		}
+	}
+	return false
 }
 
 func sameStringSet(left, right []string) bool {

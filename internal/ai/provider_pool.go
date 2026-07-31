@@ -19,12 +19,26 @@ type ModelProviderSelector interface {
 	FallbackModel() string
 }
 
+// ModelProviderChainSelector exposes the ordered models after the primary.
+// Domain workflows use it to restart a failed stateful operation from round
+// one, with a fresh executor and a separate immutable audit record.
+type ModelProviderChainSelector interface {
+	FallbackModels() []string
+}
+
 // PrimaryFallbackProvider always selects the first configured model by default.
 // The second configured model is available only through an explicit fallback
 // request from a domain workflow after the primary call fails validation or
 // reaches its failover deadline.
 type PrimaryFallbackProvider struct {
 	providers []Provider
+}
+
+type ProviderEndpoint struct {
+	Name    string
+	BaseURL string
+	APIKey  string
+	Models  []string
 }
 
 // NewPrimaryFallbackProvider creates an ordered provider pool and drops nil or
@@ -51,6 +65,35 @@ func NewOpenAICompatibleProviderPool(
 			providers,
 			NewOpenAICompatibleProvider(baseURL, apiKey, model, client),
 		)
+	}
+	if len(providers) == 1 {
+		return providers[0]
+	}
+	return NewPrimaryFallbackProvider(providers...)
+}
+
+// NewMultiEndpointProviderPool supports independent DeepSeek, GLM and MiniMax
+// credentials/endpoints while preserving the configured provider/model order.
+func NewMultiEndpointProviderPool(
+	endpoints []ProviderEndpoint,
+	client *http.Client,
+) Provider {
+	providers := []Provider{}
+	seen := map[string]bool{}
+	for _, endpoint := range endpoints {
+		for _, model := range endpoint.Models {
+			key := strings.ToLower(
+				strings.TrimRight(strings.TrimSpace(endpoint.BaseURL), "/") +
+					"\x00" + strings.TrimSpace(model),
+			)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			providers = append(providers, NewOpenAICompatibleProvider(
+				endpoint.BaseURL, endpoint.APIKey, model, client,
+			))
+		}
 	}
 	if len(providers) == 1 {
 		return providers[0]
@@ -105,6 +148,17 @@ func (p *PrimaryFallbackProvider) FallbackModel() string {
 		return ""
 	}
 	return p.providers[1].Model()
+}
+
+func (p *PrimaryFallbackProvider) FallbackModels() []string {
+	if p == nil || len(p.providers) < 2 {
+		return []string{}
+	}
+	result := make([]string, 0, len(p.providers)-1)
+	for _, provider := range p.providers[1:] {
+		result = append(result, provider.Model())
+	}
+	return result
 }
 
 func (p *PrimaryFallbackProvider) Complete(

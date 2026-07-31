@@ -20,6 +20,19 @@ const (
 	metadataCompletionMaxRetries  = 3
 )
 
+// metadataSampleRowLimit keeps the LLM input bounded as tables become wider.
+// One-column tables use the default ten rows; the budget decreases linearly
+// to three rows at fifty columns, and tables wider than fifty stay at three.
+func metadataSampleRowLimit(columnCount int) int {
+	if columnCount <= 1 {
+		return 10
+	}
+	if columnCount >= 50 {
+		return 3
+	}
+	return 10 - ((columnCount - 1) * 7 / 49)
+}
+
 // managedMetadataRepository 为刷新任务提供原子身份校验；导入仍使用 Repository 的可重新导入语义。
 type managedMetadataRepository interface {
 	ApplyManagedMetadata(context.Context, Source, string, string, bool, SyncResult) (ManagedMetadataApplyResult, error)
@@ -557,7 +570,9 @@ func (s *Service) executeMetadataJob(ctx context.Context, claim *metadataJobClai
 				}
 				return err
 			}
-			sample, sampleErr := sampler.Sample(ctx, source, table, 10)
+			sample, sampleErr := sampler.Sample(
+				ctx, source, table, metadataSampleRowLimit(len(table.Columns)),
+			)
 			if sampleErr != nil {
 				slog.ErrorContext(ctx, "metadata job table sampling failed", "job_id", claim.ID, "table", item.TableName, "error", sampleErr)
 				if err := s.failMetadataJobItem(ctx, claim, item, workerID, lease, "SAMPLE", "SAMPLE_FAILED", "读取表样本失败"); err != nil {

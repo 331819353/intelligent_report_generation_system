@@ -32,6 +32,7 @@ const (
 	MessageRoleSystem    MessageRole = "system"
 	MessageRoleUser      MessageRole = "user"
 	MessageRoleAssistant MessageRole = "assistant"
+	MessageRoleTool      MessageRole = "tool"
 )
 
 // ContentType 区分文本和远程图片内容。

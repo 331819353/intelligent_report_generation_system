@@ -149,6 +149,33 @@ func (s *Service) Model() string {
 	return s.provider.Model()
 }
 
+// FallbackModel exposes only the configured model name so domain workflows
+// can explicitly repair invalid structured output in a separate audited call.
+func (s *Service) FallbackModel() string {
+	if s == nil || s.provider == nil {
+		return ""
+	}
+	if selector, ok := s.provider.(ModelProviderSelector); ok {
+		return selector.FallbackModel()
+	}
+	return ""
+}
+
+func (s *Service) FallbackModels() []string {
+	if s == nil || s.provider == nil {
+		return []string{}
+	}
+	if selector, ok := s.provider.(ModelProviderChainSelector); ok {
+		return append([]string(nil), selector.FallbackModels()...)
+	}
+	if selector, ok := s.provider.(ModelProviderSelector); ok {
+		if model := strings.TrimSpace(selector.FallbackModel()); model != "" {
+			return []string{model}
+		}
+	}
+	return []string{}
+}
+
 // Invoke 在发送前最小化并脱敏输入，然后执行租户配额预留、有限重试和审计收口。
 func (s *Service) Invoke(ctx context.Context, input Invocation) (InvocationResult, error) {
 	if !s.Configured() {

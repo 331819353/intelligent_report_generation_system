@@ -117,9 +117,15 @@ func main() {
 	excelHandler := datasource.NewExcelHandler(authService, accessService, excelManager)
 	assetRepository := asset.NewRepository(pool)
 	assetHandler := asset.NewHandler(authService, accessService, assetRepository, dataSourceService)
-	modelProvider := aiplatform.NewOpenAICompatibleProviderPool(
-		cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModels,
-		&http.Client{Timeout: cfg.AIAttemptTimeout},
+	providerEndpoints := make([]aiplatform.ProviderEndpoint, 0, len(cfg.AIProviderEndpoints))
+	for _, endpoint := range cfg.AIProviderEndpoints {
+		providerEndpoints = append(providerEndpoints, aiplatform.ProviderEndpoint{
+			Name: endpoint.Name, BaseURL: endpoint.BaseURL,
+			APIKey: endpoint.APIKey, Models: endpoint.Models,
+		})
+	}
+	modelProvider := aiplatform.NewMultiEndpointProviderPool(
+		providerEndpoints, &http.Client{Timeout: cfg.AIAttemptTimeout},
 	)
 	aiService, err := aiplatform.NewService(aiplatform.NewPostgresStore(pool), modelProvider, aiplatform.ServiceOptions{
 		Timeout: cfg.AIRequestTimeout, AttemptTimeout: cfg.AIAttemptTimeout,

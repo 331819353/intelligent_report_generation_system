@@ -59,6 +59,11 @@ type GoldenRunState = {
   results: GoldenQuestionReplay[]
 }
 
+type TurnConfirmation = {
+  confirmedMetricCodes?: string[]
+  confirmedDecisions?: Array<{ metricCode: string; decisionId: string }>
+}
+
 const storageKey = 'intelligent-report-semantic-chat-v1'
 const workforceMetricCode = 'metric_dws_employee_profile_regenerated_20260727_em_904c04ae2441'
 const suggestionQuestions = ['80后小微在职人员有多少人？', '本月销售额和订单量分别是多少？', '各区域销售额排名前 10', '最近 30 天销售趋势']
@@ -434,6 +439,7 @@ function RetrievalProcess({ message }: { message: ChatMessage }) {
                   <header><b>{selection.metricName || selection.metricCode}</b><em>{selection.planStatus}</em></header>
                   <p><span>指标资产</span><code>{selection.metricCode}</code></p>
                   {selection.dimensions.map(dimension => <p key={dimension.dimensionCode}><span>{dimension.dimensionName || dimension.dimensionCode}</span><strong>{memberKeyPreview(dimension.memberKeys)}</strong><code>{dimension.dimensionCode}</code></p>)}
+                  {selection.timeRange && <p><span>时间范围</span><code>[{selection.timeRange.start}, {selection.timeRange.endExclusive})</code></p>}
                   <p><span>指标字段</span><code>{selection.metricFieldId || selection.metricCode}</code></p>
                   <p><span>组合 WHERE</span><code>{selection.whereCondition || '无维度筛选'}</code></p>
                   <p><span>安全编译</span><code>{selection.compiledCondition || '无维度筛选'}</code></p>
@@ -460,6 +466,62 @@ function RetrievalProcess({ message }: { message: ChatMessage }) {
         </li>
       </ol>
     </details>
+  )
+}
+
+function ClarificationChoices({
+  message,
+  onConfirm,
+}: {
+  message: ChatMessage
+  onConfirm: (confirmation: TurnConfirmation) => void
+}) {
+  const clarification = message.turn?.clarification
+  if (!clarification) return null
+  if (clarification.type === 'SEMANTIC_GAP') return null
+  if (clarification.type === 'METRIC') {
+    return (
+      <div className="semantic-chat-clarification" role="group" aria-label="请选择指标">
+        {(clarification.metricCandidates ?? []).slice(0, 12).map(candidate => (
+          <button
+            type="button"
+            key={candidate.code}
+            onClick={event => {
+              event.stopPropagation()
+              onConfirm({ confirmedMetricCodes: [candidate.code] })
+            }}
+          >
+            <strong>{candidate.label || candidate.code}</strong>
+            <span>{candidate.code}</span>
+            <small>{candidate.tableName ? `${candidate.tableSchema}.${candidate.tableName}` : candidate.domain || '已发布指标'}</small>
+          </button>
+        ))}
+      </div>
+    )
+  }
+  return (
+    <div className="semantic-chat-clarification" role="group" aria-label="请选择维度和值">
+      {(clarification.dimensionCandidates ?? []).slice(0, 16).map(candidate => (
+        <button
+          type="button"
+          key={candidate.decisionId}
+          onClick={event => {
+            event.stopPropagation()
+            onConfirm({
+              confirmedMetricCodes: [candidate.metricCode],
+              confirmedDecisions: [{
+                metricCode: candidate.metricCode,
+                decisionId: candidate.decisionId,
+              }],
+            })
+          }}
+        >
+          <strong>{candidate.dimensionName || candidate.dimensionCode}：{candidate.canonicalValue}</strong>
+          <span>{candidate.dimensionCode}</span>
+          <small>{candidate.tableName ? `${candidate.tableSchema}.${candidate.tableName}` : '已发布决策图'}</small>
+        </button>
+      ))}
+    </div>
   )
 }
 
@@ -559,7 +621,7 @@ export function SemanticChatPage() {
     setQuestion('')
   }
 
-  async function submitQuestion(value = question) {
+  async function submitQuestion(value = question, confirmation: TurnConfirmation = {}) {
     const content = value.trim()
     if (!content || isPending) return
     const sessionID = activeSession.id
@@ -594,13 +656,16 @@ export function SemanticChatPage() {
         question: content,
         priorQuestions,
         contextQueryPlanIds: contextPlanIDs,
+        confirmedMetricCodes: confirmation.confirmedMetricCodes,
+        confirmedDecisions: confirmation.confirmedDecisions,
         signal: controller.signal,
       })
       const plans = turn.plans
-      if (!plans.length || plans.some(plan => plan.status !== 'READY')) {
+      if (turn.clarification || !plans.length || plans.some(plan => plan.status !== 'READY')) {
         updateMessage(sessionID, assistantMessage.id, message => ({
           ...message, pending: false, turn, plans, plan: plans[0],
-          content: plans.length ? turnFailureAnswer(plans) : '没有找到可以证明的已发布指标。',
+          content: turn.clarification?.message
+            ?? (plans.length ? turnFailureAnswer(plans) : '没有找到可以证明的已发布指标。'),
         }))
         return
       }
@@ -726,6 +791,13 @@ export function SemanticChatPage() {
                 <div className="semantic-chat-answer">
                   <header><strong>智能分析助手</strong>{message.pending && <i>处理中</i>}{messagePlans(message).length > 0 && <em className={(turnStatus(messagePlans(message)) ?? '').toLowerCase()}>{statusLabel(turnStatus(messagePlans(message)))}</em>}</header>
                   <p>{message.content}</p>
+                  <ClarificationChoices
+                    message={message}
+                    onConfirm={confirmation => void submitQuestion(
+                      message.question ?? message.content,
+                      confirmation,
+                    )}
+                  />
                   <RetrievalProcess message={message} />
                   {messageExecutions(message).map(execution => execution.result.rows.length > 0 && (
                     <div className="semantic-chat-result-block" key={execution.queryPlan.id}>

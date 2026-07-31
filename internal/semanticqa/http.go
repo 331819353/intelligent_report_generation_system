@@ -174,6 +174,19 @@ func NewHandler(
 			writeResponse(w, http.StatusOK, item, err)
 		},
 	)))
+	mux.Handle("POST /api/v1/semantic-qa/tokenize", protect("READ", http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var input QueryTokenizeInput
+			if !decodeRequest(w, r, &input) {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.TokenizeQuery(
+				r.Context(), claims.TenantID, claims.Subject, input,
+			)
+			writeResponse(w, http.StatusOK, item, err)
+		},
+	)))
 	mux.Handle("POST /api/v1/semantic-qa/query-plans", protect("READ", http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			var input QueryPlanInput

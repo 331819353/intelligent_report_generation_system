@@ -51,3 +51,38 @@ func TestMaterializedFieldReferenceRejectsNonDecomposableRollup(t *testing.T) {
 		t.Fatal("non-decomposable coarser-grain rollup should be rejected")
 	}
 }
+
+func TestMaterializedFieldReferenceRollsUpEntityCountContract(t *testing.T) {
+	field := dataset.Field{
+		Code: "entity_count",
+		Role: "MEASURE",
+		Expression: dataset.Expression{
+			Type: "AGGREGATE", Function: "COUNT_DISTINCT",
+			Argument: &dataset.Expression{
+				Type: "FIELD_REF", NodeID: "dimension", Field: "courier_id",
+			},
+		},
+	}
+	contract := &dataset.AnalysisContract{
+		Intent: "ENTITY_COUNT",
+		Measures: []dataset.AnalysisMeasureContract{
+			{Field: "entity_count", Aggregation: "COUNT_DISTINCT"},
+		},
+	}
+	if !isEntityCountContractMeasure(contract, field) {
+		t.Fatal("expected generated ENTITY_COUNT measure to be recognized")
+	}
+	expression, err := materializedFieldReferenceForContract(
+		field, dataset.LayerDWS, false, true,
+	)
+	if err != nil {
+		t.Fatalf("entity-count contract rollup rejected: %v", err)
+	}
+	if expression.Type != "AGGREGATE" ||
+		expression.Function != "SUM" ||
+		expression.Argument == nil ||
+		expression.Argument.NodeID != materializedMetricNodeID ||
+		expression.Argument.Field != "entity_count" {
+		t.Fatalf("unexpected entity-count rollup: %#v", expression)
+	}
+}

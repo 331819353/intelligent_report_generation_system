@@ -34,6 +34,8 @@ type QueryTurnSlots struct {
 	MetricMatchMethod    string
 	Domains              map[string]string
 	MetricCandidates     []QueryMetricCandidateTrace
+	NeedsClarification   bool
+	MetricToolLoop       *QueryMetricToolLoopTrace
 }
 
 type QueryInterpreter interface {
@@ -44,15 +46,40 @@ type QueryTurnInterpreter interface {
 	InterpretMany(context.Context, string, string, string) (QueryTurnSlots, error)
 }
 
+type QueryMetricConfirmationResolver interface {
+	ConfirmMetricCodes(
+		context.Context, string, []string,
+	) (QueryTurnSlots, error)
+}
+
 type QueryDimensionLookupEnricher interface {
 	EnrichDimensionLookups(
 		context.Context, string, string, string, string,
 	) ([]QueryDimensionValueLookupTrace, error)
 }
 
+type QueryDimensionHintEnricher interface {
+	EnrichDimensionLookupsWithHints(
+		context.Context, string, string, string, string,
+		[]QuerySemanticDimensionHint,
+	) ([]QueryDimensionValueLookupTrace, error)
+}
+
 type semanticAIInvoker interface {
 	Configured() bool
 	Invoke(context.Context, aiplatform.Invocation) (aiplatform.InvocationResult, error)
+}
+
+type semanticToolAIInvoker interface {
+	InvokeToolLoop(
+		context.Context,
+		aiplatform.ToolInvocation,
+	) (aiplatform.ToolInvocationResult, error)
+}
+
+type semanticToolAIFallbackInvoker interface {
+	semanticToolAIInvoker
+	FallbackModels() []string
 }
 
 type SemanticInterpreter struct {
@@ -165,6 +192,22 @@ func (interpreter *SemanticInterpreter) EnrichDimensionLookups(
 					if candidateIndex == 0 {
 						lookups[index].VectorTopScore = candidate.Score
 					}
+					lookups[index].DecisionCandidates = append(
+						lookups[index].DecisionCandidates,
+						QueryDecisionCandidate{
+							DecisionID:        candidate.DecisionID,
+							CanonicalValue:    candidate.CanonicalValue,
+							MemberValue:       candidate.MemberValue,
+							MetricCode:        lookups[index].MetricCode,
+							MetricName:        lookups[index].MetricName,
+							TableSchema:       candidate.TableSchema,
+							TableName:         candidate.TableName,
+							WhereCondition:    candidate.WhereCondition,
+							CompiledCondition: candidate.CompiledCondition,
+							PredicateOperator: candidate.PredicateOperator,
+							Score:             candidate.Score,
+						},
+					)
 					if lookups[index].DecisionID == "" &&
 						decisionMatchesLookup(candidate, lookups[index]) {
 						lookups[index].DecisionID = candidate.DecisionID
@@ -185,6 +228,7 @@ func (interpreter *SemanticInterpreter) EnrichDimensionLookups(
 						lookups[index].TableSchema =
 							candidate.TableSchema
 						lookups[index].TableName = candidate.TableName
+						lookups[index].DecisionCandidates[len(lookups[index].DecisionCandidates)-1].Selected = true
 					}
 				}
 			}
@@ -194,6 +238,548 @@ func (interpreter *SemanticInterpreter) EnrichDimensionLookups(
 		ctx, tenantID, actorID, metricCode, question, lookups,
 	)
 	return lookups, nil
+}
+
+// EnrichDimensionLookupsWithHints chains the bounded output of token semantic
+// completion into the governed decision graph. Hints contain names and values
+// only. Every field, member key, materialization and predicate is reloaded from
+// the published catalog or an existing decision; no caller-supplied SQL can
+// cross this boundary.
+func (interpreter *SemanticInterpreter) EnrichDimensionLookupsWithHints(
+	ctx context.Context,
+	tenantID, actorID, metricCode, question string,
+	hints []QuerySemanticDimensionHint,
+) ([]QueryDimensionValueLookupTrace, error) {
+	lookups, err := interpreter.EnrichDimensionLookups(
+		ctx, tenantID, actorID, metricCode, question,
+	)
+	if err != nil {
+		return lookups, err
+	}
+	for _, hint := range hints {
+		if strings.EqualFold(strings.TrimSpace(hint.DimensionType), "TIME") ||
+			strings.TrimSpace(hint.Value) == "" {
+			continue
+		}
+		alreadyResolved := false
+		for _, lookup := range lookups {
+			if strings.EqualFold(lookup.DimensionCode, hint.DimensionCode) &&
+				(strings.EqualFold(lookup.Term, hint.Value) ||
+					strings.EqualFold(lookup.CanonicalValue, hint.Value)) {
+				alreadyResolved = true
+				break
+			}
+		}
+		if alreadyResolved {
+			continue
+		}
+		hintLookup, lookupErr := interpreter.decisionLookupFromHint(
+			ctx, tenantID, actorID, metricCode, question, hint,
+		)
+		if lookupErr != nil {
+			return lookups, lookupErr
+		}
+		if strings.TrimSpace(hintLookup.DimensionCode) != "" {
+			lookups = append(lookups, hintLookup)
+		}
+	}
+	return deduplicateSemanticLookups(lookups), nil
+}
+
+func (interpreter *SemanticInterpreter) decisionLookupFromHint(
+	ctx context.Context,
+	tenantID, actorID, metricCode, question string,
+	hint QuerySemanticDimensionHint,
+) (QueryDimensionValueLookupTrace, error) {
+	lookup, err := interpreter.store.metricDimensionHintLookup(
+		ctx, tenantID, metricCode, hint,
+	)
+	if err != nil {
+		return lookup, err
+	}
+	if lookup.DimensionCode == "" {
+		lookup = QueryDimensionValueLookupTrace{
+			Term:               strings.TrimSpace(hint.Value),
+			CanonicalValue:     strings.TrimSpace(hint.Value),
+			MetricCode:         metricCode,
+			DimensionCode:      strings.TrimSpace(hint.DimensionCode),
+			DimensionName:      strings.TrimSpace(hint.DimensionName),
+			DimensionFieldName: strings.TrimSpace(hint.DimensionCode),
+			VectorSearchStatus: "REJECTED_INCOMPATIBLE_DIMENSION",
+			WhereDesignStatus:  "NO_SAFE_DECISION_SELECTED",
+			MatchMethod:        "LLM_SEMANTIC_HINT",
+			Source:             "LLM_INTENT_COMPLETION",
+			CandidateFilter: QueryCandidateFilterTrace{
+				Status: "REJECTED_INCOMPATIBLE_DIMENSION",
+				Rules: []string{
+					"PUBLISHED_METRIC_DIMENSION_COMPATIBILITY_REQUIRED",
+				},
+			},
+		}
+		lookup.VectorQuery = dimensionVectorQuery(lookup)
+		return lookup, nil
+	}
+	lookup.Term = strings.TrimSpace(hint.Value)
+	lookup.CanonicalValue = lookup.Term
+	lookup.AliasValues = appendUniqueString(
+		lookup.AliasValues, strings.TrimSpace(hint.SourceToken),
+	)
+	lookup.MatchMethod = "LLM_SEMANTIC_HINT"
+	lookup.Source = "LLM_INTENT_COMPLETION"
+	lookup.VectorQuery = dimensionVectorQuery(lookup)
+	lookup.DecisionCandidates = []QueryDecisionCandidate{}
+	if lookup.VectorQuery == "" {
+		lookup.VectorSearchStatus = "SKIPPED_VECTOR_KEY_INCOMPLETE"
+		lookup.WhereDesignStatus = "NO_SAFE_DECISION_SELECTED"
+		return lookup, nil
+	}
+	if lookup.Sensitive {
+		lookup.VectorSearchStatus = "SKIPPED_SENSITIVE_DIMENSION"
+		lookup.WhereDesignStatus = "NO_SAFE_DECISION_SELECTED"
+		return lookup, nil
+	}
+	if interpreter.embedding == nil || !interpreter.embedding.Configured() {
+		lookup.VectorSearchStatus = "SKIPPED_PROVIDER_NOT_CONFIGURED"
+		lookup.WhereDesignStatus = "NO_SAFE_DECISION_SELECTED"
+		return lookup, nil
+	}
+	vectors, err := interpreter.embedding.Embed(ctx, []string{
+		lookup.VectorQuery,
+	})
+	if err != nil || len(vectors) != 1 {
+		lookup.VectorSearchStatus = "FAILED"
+		lookup.WhereDesignStatus = "NO_SAFE_DECISION_SELECTED"
+		return lookup, nil
+	}
+	lookup.VectorModel = interpreter.embedding.Model()
+	lookup.VectorDimensions = len(vectors[0])
+	lookup.VectorEmbedding = append([]float32(nil), vectors[0]...)
+	candidates, err := interpreter.store.recallMetricDimensionDecisions(
+		ctx, tenantID, metricCode, lookup.DimensionCode,
+		lookup.Term, vectors[0], 5,
+	)
+	if err != nil {
+		lookup.VectorSearchStatus = "FAILED"
+		lookup.WhereDesignStatus = "NO_SAFE_DECISION_SELECTED"
+		return lookup, nil
+	}
+	lookup.VectorSearchStatus = "SUCCEEDED"
+	lookup.VectorCandidateCount = len(candidates)
+	lookup.CandidateCount = len(candidates)
+	lookup.CandidateMemberKeys = []string{}
+	for index, candidate := range candidates {
+		lookup.VectorCandidateMemberKeys = appendUniqueString(
+			lookup.VectorCandidateMemberKeys, candidate.CanonicalValue,
+		)
+		lookup.CandidateMemberKeys = appendUniqueString(
+			lookup.CandidateMemberKeys, candidate.MemberValue,
+		)
+		if index == 0 {
+			lookup.VectorTopScore = candidate.Score
+		}
+		lookup.DecisionCandidates = append(
+			lookup.DecisionCandidates,
+			QueryDecisionCandidate{
+				DecisionID:     candidate.DecisionID,
+				CanonicalValue: candidate.CanonicalValue,
+				MemberValue:    candidate.MemberValue,
+				MetricCode:     metricCode, MetricName: lookup.MetricName,
+				TableSchema:       candidate.TableSchema,
+				TableName:         candidate.TableName,
+				WhereCondition:    candidate.WhereCondition,
+				CompiledCondition: candidate.CompiledCondition,
+				PredicateOperator: candidate.PredicateOperator,
+				Score:             candidate.Score,
+			},
+		)
+	}
+	selectedIndex, reason, model, status := interpreter.selectHintDecision(
+		ctx, tenantID, actorID, metricCode, question, lookup, candidates,
+	)
+	lookup.WhereDesignStatus = status
+	lookup.WhereDesignReason = reason
+	lookup.WhereDesignModel = model
+	lookup.CandidateFilter = QueryCandidateFilterTrace{
+		InputCount: len(candidates), RejectedCount: len(candidates),
+		Status: status,
+		Rules: []string{
+			"PUBLISHED_DECISION_ONLY",
+			"METRIC_DIMENSION_COMPATIBLE",
+			"SINGLE_ACTIVE_MEMBER_REQUIRED",
+			"LLM_MAY_SELECT_DECISION_ID_ONLY",
+		},
+	}
+	if selectedIndex < 0 {
+		return lookup, nil
+	}
+	selected := candidates[selectedIndex]
+	lookup.Selected = true
+	lookup.CanonicalValue = selected.CanonicalValue
+	lookup.DecisionID = selected.DecisionID
+	lookup.WhereDesignOperator = selected.PredicateOperator
+	lookup.WhereCondition = selected.WhereCondition
+	lookup.CompiledCondition = selected.CompiledCondition
+	lookup.TableSchema = selected.TableSchema
+	lookup.TableName = selected.TableName
+	lookup.MetricFieldID = selected.MetricFieldID
+	lookup.SelectedMemberKeys = []string{selected.MemberValue}
+	lookup.CandidateFilter.AcceptedCount = 1
+	lookup.CandidateFilter.RejectedCount = max(0, len(candidates)-1)
+	if selectedIndex < len(lookup.DecisionCandidates) {
+		lookup.DecisionCandidates[selectedIndex].Selected = true
+	}
+	return lookup, nil
+}
+
+type hintDecisionSelectionOutput struct {
+	SelectedDecisionID string  `json:"selectedDecisionId"`
+	Reason             string  `json:"reason"`
+	Confidence         float64 `json:"confidence"`
+}
+
+type hintDecisionSelectionCandidate struct {
+	DecisionID     string   `json:"decisionId"`
+	CanonicalValue string   `json:"canonicalValue"`
+	Aliases        []string `json:"aliases"`
+	Score          float64  `json:"score"`
+}
+
+func (interpreter *SemanticInterpreter) selectHintDecision(
+	ctx context.Context,
+	tenantID, actorID, metricCode, question string,
+	lookup QueryDimensionValueLookupTrace,
+	candidates []dimensionDecisionCandidate,
+) (int, string, string, string) {
+	for index, candidate := range candidates {
+		if candidate.SelectedMemberCount != 1 ||
+			strings.TrimSpace(candidate.MemberValue) == "" {
+			continue
+		}
+		if strings.EqualFold(candidate.CanonicalValue, lookup.Term) {
+			return index, "维度值与决策图规范值精确一致",
+				candidate.LLMModel, "REUSED_DECISION_GRAPH_EXACT"
+		}
+		for _, alias := range candidate.Aliases {
+			if strings.EqualFold(alias, lookup.Term) {
+				return index, "维度值与决策图别名精确一致",
+					candidate.LLMModel, "REUSED_DECISION_GRAPH_ALIAS"
+			}
+		}
+	}
+	if index, ok := highConfidenceHintDecisionFallback(
+		lookup, candidates,
+	); ok {
+		return index,
+			"唯一候选通过跨语言近精确向量与分差校验",
+			"", "VECTOR_FILTERED_DECISION_GRAPH"
+	}
+	if interpreter.ai == nil || !interpreter.ai.Configured() {
+		return -1, "没有精确决策且 LLM 未配置", "",
+			"NO_SAFE_DECISION_SELECTED"
+	}
+	selectionCandidates := []hintDecisionSelectionCandidate{}
+	for _, candidate := range candidates {
+		if candidate.SelectedMemberCount != 1 ||
+			strings.TrimSpace(candidate.MemberValue) == "" {
+			continue
+		}
+		selectionCandidates = append(
+			selectionCandidates,
+			hintDecisionSelectionCandidate{
+				DecisionID:     candidate.DecisionID,
+				CanonicalValue: candidate.CanonicalValue,
+				Aliases:        append([]string(nil), candidate.Aliases...),
+				Score:          candidate.Score,
+			},
+		)
+	}
+	if len(selectionCandidates) == 0 {
+		return -1, "候选决策不能还原为单一受管维度成员", "",
+			"NO_SAFE_DECISION_SELECTED"
+	}
+	payload, err := json.Marshal(struct {
+		Question             string                           `json:"question"`
+		MetricCode           string                           `json:"metricCode"`
+		DimensionCode        string                           `json:"dimensionCode"`
+		DimensionName        string                           `json:"dimensionName"`
+		DimensionDescription string                           `json:"dimensionDescription"`
+		Value                string                           `json:"value"`
+		Candidates           []hintDecisionSelectionCandidate `json:"candidates"`
+	}{
+		Question: question, MetricCode: metricCode,
+		DimensionCode:        lookup.DimensionCode,
+		DimensionName:        lookup.DimensionName,
+		DimensionDescription: lookup.DimensionFieldDescription,
+		Value:                lookup.Term, Candidates: selectionCandidates,
+	})
+	if err != nil {
+		return -1, "决策候选序列化失败", "",
+			"NO_SAFE_DECISION_SELECTED"
+	}
+	temperature := 0.0
+	result, err := interpreter.ai.Invoke(ctx, aiplatform.Invocation{
+		TenantID: tenantID, ActorID: actorID,
+		Purpose:       aiplatform.PurposeSemanticQueryPlanning,
+		PromptVersion: "semantic-query-decision-filter-v4",
+		ResourceType:  "SEMANTIC_DECISION_FILTER",
+		ResourceID: hashText(strings.Join(
+			[]string{metricCode, lookup.DimensionCode, lookup.Term}, "\x00",
+		)),
+		Request: aiplatform.ProviderRequest{
+			Messages: []aiplatform.Message{
+				{
+					Role: aiplatform.MessageRoleSystem,
+					Parts: []aiplatform.ContentPart{{
+						Type: aiplatform.ContentTypeText,
+						Text: `你是只读语义决策过滤器。结合原问题、已选指标，以及语义资产中发布的 dimensionName、dimensionCode、dimensionDescription 和用户维度值，从同一受管维度的候选中最多选择一个语义等价决策。维度含义只能以输入的已发布语义元数据为依据，不得套用程序外的固定业务词表。判断 canonicalValue 或 aliases 是否与 value 等价；语言、书写形式或规范编码不同不等于语义不同，但向量 score 只用于排序，不能单独证明等价。相似但不等价、范围不一致、存在多个同等可能候选或证据不足时返回空字符串。若且仅有一个候选满足等价条件，选择它。selectedDecisionId 只能逐字复制 candidates 中的 decisionId，不得生成或修改 SQL、WHERE、字段、表名和值。reason 简要说明选择或拒绝原因。`,
+					}},
+				},
+				{
+					Role: aiplatform.MessageRoleUser,
+					Parts: []aiplatform.ContentPart{{
+						Type: aiplatform.ContentTypeText, Text: string(payload),
+					}},
+				},
+			},
+			ResponseSchema: aiplatform.JSONSchema{
+				Name: "semantic_decision_filter",
+				Schema: json.RawMessage(`{
+					"type":"object","additionalProperties":false,
+					"required":["selectedDecisionId","reason","confidence"],
+					"properties":{
+						"selectedDecisionId":{"type":"string","maxLength":64},
+						"reason":{"type":"string","maxLength":500},
+						"confidence":{"type":"number","minimum":0,"maximum":1}
+					}
+				}`),
+			},
+			Temperature: &temperature, MaxOutputTokens: 500,
+		},
+	})
+	if err != nil {
+		if index, ok := highConfidenceHintDecisionFallback(
+			lookup, candidates,
+		); ok {
+			return index,
+				"LLM 过滤暂不可用；唯一向量候选通过高置信度与分差校验",
+				"", "VECTOR_FILTERED_DECISION_GRAPH"
+		}
+		return -1, "LLM 决策过滤失败", "",
+			whereDesignFailureStatus(err)
+	}
+	var output hintDecisionSelectionOutput
+	if json.Unmarshal(result.ProviderResult.Content, &output) != nil ||
+		output.Confidence < 0.7 ||
+		strings.TrimSpace(output.SelectedDecisionID) == "" {
+		if index, ok := highConfidenceHintDecisionFallback(
+			lookup, candidates,
+		); ok {
+			return index,
+				"LLM 未确认候选；唯一向量候选通过高置信度与分差校验",
+				result.ProviderResult.Model,
+				"VECTOR_FILTERED_DECISION_GRAPH"
+		}
+		return -1, strings.TrimSpace(output.Reason),
+			result.ProviderResult.Model, "NO_SAFE_DECISION_SELECTED"
+	}
+	for index, candidate := range candidates {
+		if candidate.DecisionID == output.SelectedDecisionID &&
+			candidate.SelectedMemberCount == 1 &&
+			strings.TrimSpace(candidate.MemberValue) != "" &&
+			candidate.Score >= 0.80 {
+			return index, output.Reason, result.ProviderResult.Model,
+				"LLM_FILTERED_DECISION_GRAPH"
+		}
+	}
+	return -1, "LLM 返回的决策不在高相关受管候选集合内", result.ProviderResult.Model,
+		"NO_SAFE_DECISION_SELECTED"
+}
+
+func highConfidenceHintDecisionFallback(
+	lookup QueryDimensionValueLookupTrace,
+	candidates []dimensionDecisionCandidate,
+) (int, bool) {
+	bestIndex := -1
+	bestScore, secondScore := 0.0, 0.0
+	for index, candidate := range candidates {
+		if candidate.SelectedMemberCount != 1 ||
+			strings.TrimSpace(candidate.MemberValue) == "" ||
+			strings.TrimSpace(candidate.DecisionID) == "" {
+			continue
+		}
+		if candidate.Score > bestScore {
+			secondScore = bestScore
+			bestScore = candidate.Score
+			bestIndex = index
+		} else if candidate.Score > secondScore {
+			secondScore = candidate.Score
+		}
+	}
+	if strings.TrimSpace(lookup.Term) == "" || bestIndex < 0 ||
+		!((bestScore >= 0.94 && bestScore-secondScore >= 0.06) ||
+			(bestScore >= 0.985 && secondScore <= 0.98 &&
+				bestScore-secondScore >= 0.01)) {
+		return -1, false
+	}
+	return bestIndex, true
+}
+
+type rankedMetricDimensionHintLookup struct {
+	value QueryDimensionValueLookupTrace
+	rank  int
+}
+
+func selectMetricDimensionHintLookup(
+	candidates []rankedMetricDimensionHintLookup,
+) (QueryDimensionValueLookupTrace, bool) {
+	if len(candidates) == 0 {
+		return QueryDimensionValueLookupTrace{}, false
+	}
+	bestRank := candidates[0].rank
+	bestCount := 0
+	for _, candidate := range candidates {
+		if candidate.rank == bestRank {
+			bestCount++
+		}
+	}
+	// Exact governed codes are unique within a published dataset. Name and
+	// relaxed suffix/containment matches must have one unambiguous best match.
+	if bestRank > 0 && bestCount != 1 {
+		return QueryDimensionValueLookupTrace{}, false
+	}
+	return candidates[0].value, true
+}
+
+func (store *PostgresStore) metricDimensionHintLookup(
+	ctx context.Context,
+	tenantID, metricCode string,
+	hint QuerySemanticDimensionHint,
+) (lookup QueryDimensionValueLookupTrace, err error) {
+	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
+		rows, queryErr := tx.Query(ctx, `WITH candidates AS (
+			SELECT
+				dimension.id::text AS dimension_id,
+				dimension.code::text AS dimension_code,
+				dimension.name AS dimension_name,
+				dimension.field_id AS dimension_field_id,
+				dimension.code::text AS dimension_field_name,
+				dimension.description AS dimension_description,
+				dimension.sensitive,
+				metric.name AS metric_name,
+				COALESCE(
+				  version.definition_json#>>'{expression,fieldId}',''
+				) AS metric_field_id,
+				version.id::text AS metric_version_id,
+				version.dataset_version_id::text AS dataset_version_id,
+				materialization.id::text AS materialization_id,
+				materialization.published_schema,
+				materialization.published_name,
+				CASE
+				  WHEN lower(dimension.code::text)=lower($2) THEN 0
+				  WHEN lower(dimension.name)=lower($3) THEN 1
+				  WHEN btrim($2)<>'' AND (
+				    right(
+				      lower(dimension.code::text),
+				      length(lower($2))+1
+				    )='_'||lower($2)
+				    OR right(
+				      lower($2),
+				      length(lower(dimension.code::text))+1
+				    )='_'||lower(dimension.code::text)
+				  ) THEN 2
+				  WHEN btrim($3)<>'' AND (
+				    strpos(lower(dimension.name),lower($3))>0
+				    OR strpos(lower($3),lower(dimension.name))>0
+				  ) THEN 3
+				  ELSE 4
+				END AS match_rank,
+				materialization.activated_at
+			FROM platform.metrics AS metric
+			JOIN platform.metric_versions AS version
+			  ON version.tenant_id=metric.tenant_id
+			 AND version.id=metric.current_published_version_id
+			 AND version.metric_id=metric.id
+			 AND version.status='PUBLISHED'
+			JOIN platform.dimension_metric_compatibility AS compatibility
+			  ON compatibility.tenant_id=metric.tenant_id
+			 AND compatibility.metric_id=metric.id
+			 AND compatibility.metric_version_id=version.id
+			 AND compatibility.metric_dataset_version_id=
+			     version.dataset_version_id
+			 AND compatibility.status='VERIFIED'
+			 AND compatibility.fanout_policy<>'UNSAFE'
+			JOIN platform.semantic_dimensions AS dimension
+			  ON dimension.tenant_id=compatibility.tenant_id
+			 AND dimension.id=compatibility.dimension_id
+			 AND dimension.dataset_version_id=version.dataset_version_id
+			 AND dimension.status='PUBLISHED'
+			JOIN platform.dataset_materializations AS materialization
+			  ON materialization.tenant_id=version.tenant_id
+			 AND materialization.dataset_version_id=version.dataset_version_id
+			 AND materialization.layer='DWS'
+			 AND materialization.status='ACTIVE'
+			WHERE metric.tenant_id=platform.current_tenant_id()
+			  AND metric.code=$1
+			  AND metric.status='PUBLISHED'
+			  AND metric.deleted_at IS NULL
+		)
+		SELECT dimension_id,dimension_code,dimension_name,
+			dimension_field_id,dimension_field_name,dimension_description,
+			sensitive,
+			metric_name,metric_field_id,metric_version_id,
+			dataset_version_id,materialization_id,published_schema,
+			published_name,match_rank
+		FROM candidates
+		WHERE match_rank<4
+		ORDER BY match_rank,activated_at DESC,dimension_id
+		LIMIT 8`,
+			metricCode, strings.TrimSpace(hint.DimensionCode),
+			strings.TrimSpace(hint.DimensionName),
+		)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		candidates := []rankedMetricDimensionHintLookup{}
+		for rows.Next() {
+			var candidate rankedMetricDimensionHintLookup
+			if scanErr := rows.Scan(
+				&candidate.value.DimensionID,
+				&candidate.value.DimensionCode,
+				&candidate.value.DimensionName,
+				&candidate.value.DimensionFieldID,
+				&candidate.value.DimensionFieldName,
+				&candidate.value.DimensionFieldDescription,
+				&candidate.value.Sensitive,
+				&candidate.value.MetricName,
+				&candidate.value.MetricFieldID,
+				&candidate.value.MetricVersionID,
+				&candidate.value.DatasetVersionID,
+				&candidate.value.MaterializationID,
+				&candidate.value.TableSchema,
+				&candidate.value.TableName,
+				&candidate.rank,
+			); scanErr != nil {
+				return scanErr
+			}
+			candidates = append(candidates, candidate)
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			return rowsErr
+		}
+		// An exact governed code/name match always wins. A relaxed match
+		// (for example city -> zone_city) is accepted only when exactly one
+		// compatible published dimension has the best rank; ambiguity remains
+		// a safe rejection instead of becoming an arbitrary WHERE field.
+		selected, ok := selectMetricDimensionHintLookup(candidates)
+		if !ok {
+			return nil
+		}
+		lookup = selected
+		lookup.MetricCode = metricCode
+		return nil
+	})
+	return lookup, err
 }
 
 type dimensionChoiceCandidate struct {
@@ -763,14 +1349,17 @@ func dimensionVectorQuery(lookup QueryDimensionValueLookupTrace) string {
 }
 
 type recallCandidate struct {
-	SubjectType   string   `json:"subjectType"`
-	Domain        string   `json:"domain,omitempty"`
-	Code          string   `json:"code,omitempty"`
-	DimensionCode string   `json:"dimensionCode,omitempty"`
-	Label         string   `json:"label"`
-	Aliases       []string `json:"aliases,omitempty"`
-	MemberValue   string   `json:"memberValue,omitempty"`
-	Score         float64  `json:"score"`
+	SubjectType      string   `json:"subjectType"`
+	Domain           string   `json:"domain,omitempty"`
+	Code             string   `json:"code,omitempty"`
+	DimensionCode    string   `json:"dimensionCode,omitempty"`
+	Label            string   `json:"label"`
+	Aliases          []string `json:"aliases,omitempty"`
+	MemberValue      string   `json:"memberValue,omitempty"`
+	DatasetVersionID string   `json:"datasetVersionId,omitempty"`
+	TableSchema      string   `json:"tableSchema,omitempty"`
+	TableName        string   `json:"tableName,omitempty"`
+	Score            float64  `json:"score"`
 }
 
 type interpretedSlots struct {
@@ -961,6 +1550,7 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 		strings.TrimSpace(question) == "" {
 		return QueryTurnSlots{}, ErrInvalidRequest
 	}
+	broadMetricQuestion := questionRequestsBroadMetricSelection(question)
 	candidates, err := interpreter.store.recall(ctx, tenantID, question, nil, 24)
 	if err != nil {
 		return QueryTurnSlots{}, err
@@ -999,15 +1589,62 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 			}
 		}
 	}
+	if broadMetricQuestion {
+		return QueryTurnSlots{
+			Intent:               inferIntent(strings.ToLower(question)),
+			MetricCandidateCount: len(candidates),
+			MetricMatchMethod:    "HYBRID_RECALL",
+			Domains:              map[string]string{},
+			MetricCandidates: metricCandidateTraces(
+				question, candidates, nil, "HYBRID_RECALL",
+			),
+			NeedsClarification: true,
+		}, nil
+	}
+	// Exact published names, aliases and unambiguous metric stems do not need
+	// a model round-trip. This keeps explicit multi-metric questions bounded
+	// while the tool loop remains available for genuinely semantic wording.
+	if toolAI, ok := interpreter.ai.(semanticToolAIInvoker); ok {
+		if result, toolErr := interpreter.interpretManyWithToolLoop(
+			ctx, toolAI, tenantID, actorID, question, "",
+		); toolErr == nil {
+			return result, nil
+		} else if shouldRetrySemanticToolLoop(toolErr) {
+			if fallbackAI, supported :=
+				interpreter.ai.(semanticToolAIFallbackInvoker); supported {
+				for _, model := range uniqueStrings(
+					fallbackAI.FallbackModels(), 8,
+				) {
+					if ctx.Err() != nil {
+						break
+					}
+					result, fallbackErr :=
+						interpreter.interpretManyWithToolLoop(
+							ctx, toolAI, tenantID, actorID, question, model,
+						)
+					if fallbackErr == nil {
+						return result, nil
+					}
+					if !shouldRetrySemanticToolLoop(fallbackErr) {
+						break
+					}
+				}
+			}
+		}
+	}
 	llmCandidates := externalRecallCandidates(candidates)
 	fallback := QueryTurnSlots{
 		Intent:               inferIntent(strings.ToLower(question)),
 		MetricCandidateCount: len(candidates), Domains: map[string]string{},
+		NeedsClarification: broadMetricQuestion,
 		MetricCandidates: metricCandidateTraces(
 			question, candidates, nil, "HYBRID_RECALL",
 		),
 	}
 	withDecisionGraph := func(base QueryTurnSlots) QueryTurnSlots {
+		if broadMetricQuestion {
+			return base
+		}
 		graphCandidates, graphErr :=
 			interpreter.store.inferPersonCountMetricsFromDecisionGraph(
 				ctx, tenantID, question,
@@ -1090,6 +1727,10 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 	if output.Intent == "LOOKUP" && questionRequestsAggregate(question) {
 		output.Intent = "METRIC"
 	}
+	if broadMetricQuestion {
+		fallback.Intent = output.Intent
+		return fallback, nil
+	}
 	codes := uniqueStrings(output.MetricCodes, 8)
 	if len(codes) == 0 {
 		fallback.Intent = output.Intent
@@ -1105,6 +1746,64 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 		MetricMatchMethod:    "CATALOG_RERANK", Domains: domains,
 		MetricCandidates: metricCandidateTraces(
 			question, candidates, codes, "CATALOG_RERANK",
+		),
+	}, nil
+}
+
+func shouldRetrySemanticToolLoop(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) ||
+		errors.Is(err, aiplatform.ErrQuotaExceeded) ||
+		errors.Is(err, aiplatform.ErrTenantAIForbidden) ||
+		errors.Is(err, ErrInvalidRequest) {
+		return false
+	}
+	if errors.Is(err, ErrUnprovenPath) {
+		return true
+	}
+	var providerErr *aiplatform.ProviderError
+	return errors.As(err, &providerErr)
+}
+
+// ConfirmMetricCodes reloads user-confirmed codes from the published catalog.
+// Browser-supplied labels, source tables and scores are never trusted.
+func (interpreter *SemanticInterpreter) ConfirmMetricCodes(
+	ctx context.Context,
+	tenantID string,
+	codes []string,
+) (QueryTurnSlots, error) {
+	codes = uniqueStrings(codes, 8)
+	if interpreter == nil || interpreter.store == nil || len(codes) == 0 {
+		return QueryTurnSlots{}, ErrInvalidRequest
+	}
+	selected := make([]recallCandidate, 0, len(codes))
+	for _, code := range codes {
+		items, err := interpreter.store.recall(ctx, tenantID, code, nil, 8)
+		if err != nil {
+			return QueryTurnSlots{}, err
+		}
+		found := false
+		for _, item := range items {
+			if item.SubjectType == "METRIC" &&
+				strings.EqualFold(item.Code, code) {
+				selected = append(selected, item)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return QueryTurnSlots{}, ErrUnprovenPath
+		}
+	}
+	domains := make(map[string]string, len(selected))
+	for _, item := range selected {
+		domains[item.Code] = item.Domain
+	}
+	return QueryTurnSlots{
+		Intent: "UNKNOWN", MetricCodes: codes,
+		MetricCandidateCount: len(selected),
+		MetricMatchMethod:    "USER_CONFIRMED", Domains: domains,
+		MetricCandidates: metricCandidateTraces(
+			strings.Join(codes, " "), selected, codes, "USER_CONFIRMED",
 		),
 	}, nil
 }
@@ -1126,10 +1825,7 @@ func metricCandidateTraces(
 			continue
 		}
 		matchedTerm := ""
-		for _, token := range append(
-			[]string{candidate.Label, candidate.Code},
-			candidate.Aliases...,
-		) {
+		for _, token := range metricExplicitTerms(candidate) {
 			token = strings.TrimSpace(token)
 			if token != "" && strings.Contains(question, strings.ToLower(token)) &&
 				len([]rune(token)) > len([]rune(matchedTerm)) {
@@ -1146,6 +1842,9 @@ func metricCandidateTraces(
 		}
 		result = append(result, QueryMetricCandidateTrace{
 			Code: candidate.Code, Label: candidate.Label,
+			Domain:           candidate.Domain,
+			DatasetVersionID: candidate.DatasetVersionID,
+			TableSchema:      candidate.TableSchema, TableName: candidate.TableName,
 			MatchedTerm: matchedTerm, MatchMethod: method,
 			Score: candidate.Score, Selected: isSelected,
 			Source: "CURRENT_TURN",
@@ -1237,10 +1936,7 @@ func exactMetricCodes(
 			continue
 		}
 		position, length := -1, 0
-		tokens := append(
-			[]string{candidate.Label, candidate.Code},
-			candidate.Aliases...,
-		)
+		tokens := metricExplicitTerms(candidate)
 		for _, token := range tokens {
 			token = strings.ToLower(strings.TrimSpace(token))
 			if token == "" {
@@ -1281,6 +1977,35 @@ func exactMetricCodes(
 		}
 	}
 	return codes
+}
+
+func metricExplicitTerms(candidate recallCandidate) []string {
+	terms := append(
+		[]string{candidate.Label, candidate.Code},
+		candidate.Aliases...,
+	)
+	suffixes := []string{
+		"订单数量合计", "商品数量合计", "金额合计", "实体数量",
+		"记录数量", "总数量", "总金额", "数量合计", "记录数",
+		"总量", "总数", "数量", "金额", "分钟数", "时长", "收入",
+		"比例", "占比", "率", "数",
+	}
+	for _, source := range append(
+		[]string{candidate.Label}, candidate.Aliases...,
+	) {
+		source = strings.TrimSpace(source)
+		for _, suffix := range suffixes {
+			if !strings.HasSuffix(source, suffix) {
+				continue
+			}
+			stem := strings.TrimSpace(strings.TrimSuffix(source, suffix))
+			if len([]rune(stem)) >= 2 {
+				terms = appendUniqueString(terms, stem)
+			}
+			break
+		}
+	}
+	return terms
 }
 
 func inferIntent(question string) string {
@@ -1404,13 +2129,16 @@ func (store *PostgresStore) recall(
 		}
 		rows, err := tx.Query(ctx, `WITH candidates AS (
 					SELECT 'METRIC_VERSION'::text AS subject_type,
-						platform.dataset_version_effective_domain(dataset_version.id) AS domain,
-						metric.code::text AS code,
-						''::text AS dimension_code,
-						metric.name AS label,
-						COALESCE(semantic_alias.aliases,'{}'::text[]) AS aliases,
-						''::text AS member_value,
-						GREATEST(
+							platform.dataset_version_effective_domain(dataset_version.id) AS domain,
+							metric.code::text AS code,
+							''::text AS dimension_code,
+							metric.name AS label,
+							COALESCE(semantic_alias.aliases,'{}'::text[]) AS aliases,
+							''::text AS member_value,
+							dataset_version.id::text AS dataset_version_id,
+							COALESCE(materialization.published_schema,'') AS table_schema,
+							COALESCE(materialization.published_name,'') AS table_name,
+							GREATEST(
 						  CASE WHEN $2<>'' AND document.embedding_status='SUCCEEDED'
 						    THEN 1-(document.embedding <=> $2::halfvec)
 						    ELSE 0 END,
@@ -1455,11 +2183,22 @@ func (store *PostgresStore) recall(
 					    AND lower(asset.mapping_value) IN (
 					      lower(metric.code::text),lower(metric.name)
 					    )
-					) AS semantic_alias ON true
-					WHERE metric_version.status='PUBLISHED'
-				)
-				SELECT 'METRIC',
-					domain,code,dimension_code,label,aliases,member_value,score
+						) AS semantic_alias ON true
+						LEFT JOIN LATERAL (
+						  SELECT current.published_schema,current.published_name
+						  FROM platform.dataset_materializations AS current
+						  WHERE current.tenant_id=dataset_version.tenant_id
+						    AND current.dataset_version_id=dataset_version.id
+						    AND current.layer='DWS'
+						    AND current.status='ACTIVE'
+						  ORDER BY current.activated_at DESC,current.id
+						  LIMIT 1
+						) AS materialization ON true
+						WHERE metric_version.status='PUBLISHED'
+					)
+					SELECT 'METRIC',
+						domain,code,dimension_code,label,aliases,member_value,
+						dataset_version_id,table_schema,table_name,score
 				FROM candidates
 				WHERE label<>'' AND score>0.15
 			ORDER BY score DESC,subject_type,code,label
@@ -1472,7 +2211,9 @@ func (store *PostgresStore) recall(
 			var item recallCandidate
 			if err := rows.Scan(
 				&item.SubjectType, &item.Domain, &item.Code, &item.DimensionCode,
-				&item.Label, &item.Aliases, &item.MemberValue, &item.Score,
+				&item.Label, &item.Aliases, &item.MemberValue,
+				&item.DatasetVersionID, &item.TableSchema, &item.TableName,
+				&item.Score,
 			); err != nil {
 				return err
 			}

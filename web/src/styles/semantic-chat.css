@@ -385,6 +385,31 @@
 .semantic-chat-candidate-table b { color: inherit; font-size: 9px; }
 .semantic-chat-candidate-table small { overflow: hidden; color: #8d96a3; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
 
+.semantic-chat-clarification {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin: 12px 0;
+}
+
+.semantic-chat-clarification button {
+  align-items: flex-start;
+  background: #fff;
+  border: 1px solid #d9dee7;
+  border-radius: 10px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.semantic-chat-clarification button:hover { border-color: #3157d5; }
+.semantic-chat-clarification span,
+.semantic-chat-clarification small { color: #667085; overflow-wrap: anywhere; }
+
 .semantic-chat-member-lookups,
 .semantic-chat-final-plans {
   display: grid;

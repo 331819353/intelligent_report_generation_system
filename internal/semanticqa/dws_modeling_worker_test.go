@@ -424,6 +424,91 @@ func TestExplicitMultiFactScopeNeverDropsAnIneligibleFact(t *testing.T) {
 	}
 }
 
+func TestMultiFactDWSJoinsOnlyAfterConformedDimensionPreAggregation(t *testing.T) {
+	fact := func(
+		code, name, idField, measure string,
+	) dwsPlanningAsset {
+		document := dataset.Document{
+			Dataset: dataset.Descriptor{
+				Code: code, Name: name, Layer: dataset.LayerDWD,
+				Domain: "sales", Subject: "orders", Type: "CROSS_SOURCE",
+			},
+			Fields: []dataset.Field{
+				{
+					ID: "field_" + idField, Code: idField,
+					Name: "事实主键", Role: "IDENTIFIER",
+					CanonicalType: "STRING",
+				},
+				{
+					ID: "field_event_date", Code: "event_date",
+					Name: "发生日期", Role: "TIME", CanonicalType: "DATE",
+				},
+				{
+					ID: "field_region_code", Code: "region_code",
+					Name: "区域", Role: "DIMENSION", CanonicalType: "STRING",
+					SemanticType: "GEOGRAPHY",
+				},
+				{
+					ID: "field_" + measure, Code: measure, Name: "金额",
+					Role: "MEASURE", CanonicalType: "DECIMAL",
+				},
+			},
+			OutputGrain: dataset.OutputGrain{
+				KeyFields: []string{idField}, TimeField: "event_date",
+			},
+			FactContract: &dataset.FactContract{
+				GrainKeyFields: []string{idField},
+				EventTimeField: "event_date",
+				AtomicMeasures: []dataset.AtomicMeasureContract{{
+					Field: measure, Additivity: "ADDITIVE",
+					DefaultAggregation: "SUM", ValueBehavior: "FLOW",
+					TimeAggregation: "SUM",
+				}},
+			},
+		}
+		return dwsPlanningAsset{
+			Record:   dataset.Record{Code: code, Name: name},
+			Document: document,
+		}
+	}
+	first := fact("dwd_orders", "订单", "order_id", "order_amount")
+	first.VersionID = "10000000-0000-4000-8000-000000000001"
+	second := fact("dwd_refunds", "退款", "refund_id", "refund_amount")
+	second.VersionID = "10000000-0000-4000-8000-000000000002"
+	prepared, err := buildMultiFactDWSCandidate(
+		[]dwsPlanningAsset{first, second},
+		dwsModelingScope{
+			DomainCode: "sales", SubjectCode: "orders",
+			SubjectName: "订单经营",
+		},
+		"MULTI_FACT_COMPARISON", "CROSS_SOURCE",
+	)
+	if err != nil {
+		t.Fatalf("build multi-fact DWS: %v", err)
+	}
+	contract := prepared.Document.AnalysisContract
+	if contract == nil ||
+		!slices.Equal(
+			contract.CommonGrainFields,
+			[]string{"stat_month", "region_code"},
+		) {
+		t.Fatalf("common grain = %#v", contract)
+	}
+	for _, preAggregation := range prepared.Document.PreAggregations {
+		groups := []string{}
+		for _, group := range preAggregation.GroupBy {
+			groups = append(groups, group.Field)
+		}
+		if !slices.Equal(groups, []string{"stat_month", "region_code"}) {
+			t.Fatalf("pre-aggregation groups = %#v", groups)
+		}
+	}
+	if len(prepared.Document.Joins) != 1 ||
+		len(prepared.Document.Joins[0].Conditions) != 2 {
+		t.Fatalf("join = %#v", prepared.Document.Joins)
+	}
+}
+
 func TestUnchangedDWSOutputsRemainSuccessful(t *testing.T) {
 	if status := dwsModelingCompletionStatus(0, 0, 3, 3); status != "SUCCEEDED" {
 		t.Fatalf("unchanged status = %q", status)
