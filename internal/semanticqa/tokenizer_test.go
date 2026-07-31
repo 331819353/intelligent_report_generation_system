@@ -164,7 +164,7 @@ func TestDistinctiveMetricStemMatchesOnlyUniquePublishedMetric(t *testing.T) {
 		},
 	}
 	matches := distinctiveMetricStemMatches(
-		"投诉总量和订单总量", candidates,
+		"投诉总量和订单总量", candidates, testSemanticParsingRules(),
 	)
 	if len(matches) != 1 ||
 		matches[0].EntityCode != "complaint_count" ||
@@ -174,7 +174,7 @@ func TestDistinctiveMetricStemMatchesOnlyUniquePublishedMetric(t *testing.T) {
 }
 
 func TestTokenizeQueryCoalescesAdministrativeLocationSuffix(t *testing.T) {
-	result := tokenizeQuery(
+	result := tokenizeQueryWithRules(
 		"帮我查询北京市的投诉总量是什么？",
 		[]querySemanticMatch{
 			{
@@ -183,12 +183,14 @@ func TestTokenizeQueryCoalescesAdministrativeLocationSuffix(t *testing.T) {
 				Source:     "METRIC_DISTINCTIVE_STEM",
 				Confidence: 0.98, Priority: 113,
 			},
-		},
+		}, testSemanticParsingRules(),
 	)
 	for _, token := range result.Tokens {
 		if token.Text == "北京市" &&
 			token.EntityType == "LOCATION" &&
-			token.EntityCode == "RULE_ADMINISTRATIVE_LOCATION" {
+			token.EntityCode == "city" &&
+			token.Normalized == "北京" &&
+			token.Source == "SEMANTIC_PARSING_RULE" {
 			return
 		}
 	}

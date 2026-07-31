@@ -239,7 +239,7 @@ func TestDeterministicTokenCompletionHandlesExplicitMetricAndCity(t *testing.T) 
 			{Text: "总量", EntityType: "NOUN_CANDIDATE"},
 			{Text: "是什么", EntityType: "TEXT"},
 		},
-		false,
+		false, testSemanticParsingRules(),
 	)
 	if !ok || completion.Status != "SUCCEEDED" ||
 		completion.Model != "DETERMINISTIC_SEMANTIC_CATALOG" ||
@@ -270,6 +270,7 @@ func TestDeterministicTokenCompletionDefersTimeAndUnknownDimensions(
 	} {
 		if _, ok := deterministicTokenSemanticCompletion(
 			"测试问题", "Asia/Shanghai", time.Now(), tokens, false,
+			testSemanticParsingRules(),
 		); ok {
 			t.Fatalf("ambiguous tokens must still use bounded completion: %#v",
 				tokens)
@@ -287,11 +288,13 @@ func TestDeterministicTokenCompletionUsesContextForAdministrativeFollowUp(
 	}
 	if _, ok := deterministicTokenSemanticCompletion(
 		"上海市呢？", "Asia/Shanghai", time.Now(), tokens, false,
+		testSemanticParsingRules(),
 	); ok {
 		t.Fatal("a metricless turn without a plan context must not fast-path")
 	}
 	completion, ok := deterministicTokenSemanticCompletion(
 		"上海市呢？", "Asia/Shanghai", time.Now(), tokens, true,
+		testSemanticParsingRules(),
 	)
 	if !ok || len(completion.MetricNames) != 0 ||
 		completion.Model != "DETERMINISTIC_SEMANTIC_CATALOG" {
@@ -302,10 +305,13 @@ func TestDeterministicTokenCompletionUsesContextForAdministrativeFollowUp(
 func TestDeterministicTokenCompletionSkipsModelForBroadMetricQuestion(
 	t *testing.T,
 ) {
-	tokenization := tokenizeQuery("北京市经营情况怎么样？", nil)
+	rules := testSemanticParsingRules()
+	tokenization := tokenizeQueryWithRules(
+		"北京市经营情况怎么样？", nil, rules,
+	)
 	completion, ok := deterministicTokenSemanticCompletion(
 		"北京市经营情况怎么样？", "Asia/Shanghai", time.Now(),
-		tokenization.Tokens, false,
+		tokenization.Tokens, false, rules,
 	)
 	if !ok || completion.Model != "DETERMINISTIC_SEMANTIC_CATALOG" {
 		t.Fatalf("confirmed metric anchor tokens = %#v", tokenization.Tokens)
@@ -328,16 +334,17 @@ func TestSemanticToolLoopFallbackOnlyHandlesModelFailures(t *testing.T) {
 }
 
 func TestBroadMetricQuestionAlwaysRequiresUserSelection(t *testing.T) {
+	rules := testSemanticParsingRules()
 	for _, question := range []string{
 		"北京市经营情况怎么样？",
 		"看下整体情况",
 		"最近业务如何",
 	} {
-		if !questionRequestsBroadMetricSelection(question) {
+		if !rules.requestsBroadMetricSelection(question) {
 			t.Fatalf("expected broad metric question: %q", question)
 		}
 	}
-	if questionRequestsBroadMetricSelection("北京市投诉总量是多少？") {
+	if rules.requestsBroadMetricSelection("北京市投诉总量是多少？") {
 		t.Fatal("an explicit metric question is not broad")
 	}
 }
@@ -534,11 +541,9 @@ func TestFinalizeQueryTurnStatusRejectsEmptyPlan(t *testing.T) {
 }
 
 func TestAdministrativeLocationHintSurvivesLLMValidationFailure(t *testing.T) {
+	rules := testSemanticParsingRules()
 	hints := supplementAdministrativeLocationHints(
-		QueryTokenization{Tokens: []QueryToken{{
-			Text: "月球市", PartOfSpeech: "n",
-			EntityType: "NOUN_CANDIDATE",
-		}}},
+		tokenizeQueryWithRules("月球市", nil, rules),
 		QuerySemanticHints{},
 	)
 	if len(hints.DimensionValues) != 1 {
@@ -551,7 +556,7 @@ func TestAdministrativeLocationHintSurvivesLLMValidationFailure(t *testing.T) {
 	}
 
 	hints = supplementAdministrativeLocationHints(
-		QueryTokenization{Tokens: []QueryToken{{Text: "北京市"}}},
+		tokenizeQueryWithRules("北京市", nil, rules),
 		QuerySemanticHints{DimensionValues: []QuerySemanticDimensionHint{{
 			SourceToken: "北京", Value: "北京",
 			DimensionCode: "city", DimensionName: "城市",
@@ -573,12 +578,14 @@ func TestExactMetricCodesAcceptDistinctiveMeasureStem(t *testing.T) {
 			Label: "总订单数",
 		},
 	}
-	codes := exactMetricCodes("投诉总量是什么？", candidates, 8)
+	codes := exactMetricCodes(
+		"投诉总量是什么？", candidates, 8, testSemanticParsingRules(),
+	)
 	if len(codes) != 1 || codes[0] != "complaint_count" {
 		t.Fatalf("metric codes = %#v", codes)
 	}
 	if codes := exactMetricCodes(
-		"经营情况怎么样？", candidates, 8,
+		"经营情况怎么样？", candidates, 8, testSemanticParsingRules(),
 	); len(codes) != 0 {
 		t.Fatalf("broad wording selected arbitrary metrics: %#v", codes)
 	}

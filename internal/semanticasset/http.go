@@ -141,6 +141,89 @@ func NewHandler(
 		}),
 	))
 
+	mux.Handle("GET /api/v1/semantic-parsing-rules", protect(
+		"READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			page, ok := requestPage(w, r)
+			if !ok {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			items, total, err := service.ListParsingRules(
+				r.Context(), claims.TenantID,
+				ParsingRuleFilter{
+					Page: page, Query: r.URL.Query().Get("q"),
+					RuleType: r.URL.Query().Get("ruleType"),
+					Status:   r.URL.Query().Get("status"),
+				},
+			)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusOK, map[string]any{
+				"items": items, "total": total,
+				"limit": page.Limit, "offset": page.Offset,
+			})
+		}),
+	))
+
+	mux.Handle("POST /api/v1/semantic-parsing-rules", protect(
+		"MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var input ParsingRuleInput
+			if !decodeRequest(w, r, &input, 256<<10) {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.CreateParsingRule(
+				r.Context(), claims.TenantID, claims.Subject, input,
+			)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusCreated, item)
+		}),
+	))
+
+	mux.Handle("PUT /api/v1/semantic-parsing-rules/{id}", protect(
+		"MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var input ParsingRuleUpdateInput
+			if !decodeRequest(w, r, &input, 256<<10) {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.UpdateParsingRule(
+				r.Context(), claims.TenantID, claims.Subject,
+				r.PathValue("id"), input,
+			)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, item)
+		}),
+	))
+
+	mux.Handle("POST /api/v1/semantic-parsing-rules/{id}/deprecate", protect(
+		"MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var input DeprecateInput
+			if !decodeRequest(w, r, &input, 64<<10) {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.DeprecateParsingRule(
+				r.Context(), claims.TenantID, claims.Subject,
+				r.PathValue("id"), input.ExpectedVersion,
+			)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, item)
+		}),
+	))
+
 	return mux
 }
 

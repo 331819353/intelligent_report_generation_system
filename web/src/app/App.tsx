@@ -10,6 +10,7 @@ import { MetricCatalogPage } from '../pages/MetricCatalogPage'
 import { MetricCenterPage } from '../pages/MetricCenterPage'
 import { ManagementCenterPage } from '../pages/ManagementCenterPage'
 import { SemanticAssetPage } from '../pages/SemanticAssetPage'
+import { SemanticParsingRulePage } from '../pages/SemanticParsingRulePage'
 import { SemanticChatPage } from '../pages/SemanticChatPage'
 import { ViewerPage } from '../pages/ViewerPage'
 import { RequireAuth } from '../components/RequireAuth'
@@ -35,6 +36,7 @@ export function App() {
       <Route path="/datasets/:datasetId/edit" element={<RequireAuth><DatasetCenterPage /></RequireAuth>} />
       <Route path="/assets/metrics" element={<RequireAuth><MetricCatalogPage /></RequireAuth>} />
       <Route path="/assets/semantics" element={<RequireAuth><SemanticAssetPage /></RequireAuth>} />
+      <Route path="/assets/parsing-rules" element={<RequireAuth><SemanticParsingRulePage /></RequireAuth>} />
       <Route path="/assets/dimensions" element={<Navigate to="/assets/metrics" replace />} />
       <Route path="/assets/dimension-values" element={<RequireAuth><DimensionValueGraphPage /></RequireAuth>} />
       <Route path="/assistant" element={<RequireAuth><SemanticChatPage /></RequireAuth>} />

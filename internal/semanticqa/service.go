@@ -1166,47 +1166,26 @@ func supplementAdministrativeLocationHints(
 	}
 	for _, token := range tokenization.Tokens {
 		text := strings.TrimSpace(token.Text)
-		value, name, code, found :=
-			administrativeLocationHint(text)
-		if !found || covered(text, value) {
+		if token.Source != "SEMANTIC_PARSING_RULE" ||
+			token.EntityType != "LOCATION" {
+			continue
+		}
+		value := strings.TrimSpace(token.Normalized)
+		if value == "" || token.EntityName == "" || token.EntityCode == "" ||
+			covered(text, value) {
 			continue
 		}
 		hints.DimensionValues = append(
 			hints.DimensionValues,
 			QuerySemanticDimensionHint{
 				SourceToken: text, Value: value,
-				DimensionName: name, DimensionCode: code,
+				DimensionName: token.EntityName,
+				DimensionCode: token.EntityCode,
 				DimensionType: "STANDARD", ValueType: "STRING",
 			},
 		)
 	}
 	return hints
-}
-
-func administrativeLocationHint(
-	text string,
-) (value, name, code string, found bool) {
-	for _, mapping := range []struct {
-		suffix, name, code string
-	}{
-		{suffix: "特别行政区", name: "城市", code: "city"},
-		{suffix: "自治区", name: "省份", code: "province"},
-		{suffix: "省", name: "省份", code: "province"},
-		{suffix: "市", name: "城市", code: "city"},
-		{suffix: "区", name: "行政区", code: "district"},
-		{suffix: "县", name: "行政区", code: "district"},
-	} {
-		if !strings.HasSuffix(text, mapping.suffix) {
-			continue
-		}
-		value = strings.TrimSpace(strings.TrimSuffix(text, mapping.suffix))
-		runeCount := len([]rune(value))
-		if runeCount < 2 || runeCount > 12 {
-			return "", "", "", false
-		}
-		return value, mapping.name, mapping.code, true
-	}
-	return "", "", "", false
 }
 
 func semanticHintTimeRange(

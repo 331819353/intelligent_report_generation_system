@@ -137,6 +137,10 @@ func (interpreter *SemanticInterpreter) tokenize(
 	if interpreter == nil || interpreter.store == nil || question == "" {
 		return QueryTokenization{}, ErrInvalidRequest
 	}
+	parsingRules, err := interpreter.store.semanticParsingRules(ctx, tenantID)
+	if err != nil {
+		return QueryTokenization{}, err
+	}
 	candidates, err := interpreter.store.tokenizationMetricCandidates(
 		ctx, tenantID, 512,
 	)
@@ -164,7 +168,9 @@ func (interpreter *SemanticInterpreter) tokenize(
 			)
 		}
 	}
-	for _, match := range distinctiveMetricStemMatches(question, candidates) {
+	for _, match := range distinctiveMetricStemMatches(
+		question, candidates, parsingRules,
+	) {
 		matches = append(matches, match)
 		matchedMetricCodes = appendUniqueString(
 			matchedMetricCodes, match.EntityCode,
@@ -208,16 +214,17 @@ func (interpreter *SemanticInterpreter) tokenize(
 			}
 		}
 	}
-	result := tokenizeQuery(question, matches)
+	result := tokenizeQueryWithRules(question, matches, parsingRules)
 	return interpreter.enrichTokenSemantics(
 		ctx, tenantID, actorID, question, timezone, result,
-		allowTrustedMetricAnchorCompletion,
+		allowTrustedMetricAnchorCompletion, parsingRules,
 	), nil
 }
 
 func distinctiveMetricStemMatches(
 	question string,
 	candidates []recallCandidate,
+	rules semanticParsingRules,
 ) []querySemanticMatch {
 	type owner struct {
 		code, label string
@@ -237,7 +244,7 @@ func distinctiveMetricStemMatches(
 			baseTerms[strings.ToLower(strings.TrimSpace(term))] = true
 		}
 		seenForMetric := map[string]bool{}
-		for _, term := range metricExplicitTerms(candidate) {
+		for _, term := range rules.metricTerms(candidate) {
 			normalized := strings.ToLower(strings.TrimSpace(term))
 			if normalized == "" || baseTerms[normalized] ||
 				seenForMetric[normalized] {
@@ -380,6 +387,18 @@ func tokenizeQuery(
 	question string,
 	semanticMatches []querySemanticMatch,
 ) QueryTokenization {
+	return tokenizeQueryWithRules(
+		question, semanticMatches, semanticParsingRules{
+			queryResidualTerms: map[string]bool{},
+		},
+	)
+}
+
+func tokenizeQueryWithRules(
+	question string,
+	semanticMatches []querySemanticMatch,
+	rules semanticParsingRules,
+) QueryTokenization {
 	result := QueryTokenization{
 		QuestionHash: hashText(question),
 		Strategy:     queryTokenizationStrategy,
@@ -441,7 +460,23 @@ func tokenizeQuery(
 			result.Tokens, questionRunes, cursor, len(questionRunes),
 		)
 	}
-	result.Tokens = coalesceAdministrativeLocationTokens(result.Tokens)
+	result.Tokens = coalesceAdministrativeLocationTokens(result.Tokens, rules)
+	for index := range result.Tokens {
+		value, name, code, found := rules.administrativeLocation(
+			result.Tokens[index].Text,
+		)
+		if !found {
+			continue
+		}
+		result.Tokens[index].Normalized = value
+		result.Tokens[index].EntityType = "LOCATION"
+		result.Tokens[index].EntityName = name
+		result.Tokens[index].EntityCode = code
+		result.Tokens[index].Confidence = max(
+			result.Tokens[index].Confidence, 0.9,
+		)
+		result.Tokens[index].Source = "SEMANTIC_PARSING_RULE"
+	}
 	for _, token := range result.Tokens {
 		if token.EntityType == "TEXT" || token.EntityType == "PUNCTUATION" {
 			continue
@@ -456,6 +491,7 @@ func tokenizeQuery(
 
 func coalesceAdministrativeLocationTokens(
 	tokens []QueryToken,
+	rules semanticParsingRules,
 ) []QueryToken {
 	working := append([]QueryToken(nil), tokens...)
 	result := make([]QueryToken, 0, len(working))
@@ -465,18 +501,19 @@ func coalesceAdministrativeLocationTokens(
 			oneOf(current.EntityType, "LOCATION", "PROPER_NOUN",
 				"NOUN_CANDIDATE") {
 			next := working[index+1]
-			suffix := administrativeSuffixAtTokenStart(next.Text)
+			suffix := rules.administrativeSuffixAtStart(next.Text)
 			combined := strings.TrimSpace(current.Text + suffix)
 			if suffix != "" {
-				if _, _, _, found := administrativeLocationHint(combined); found {
+				if value, name, code, found :=
+					rules.administrativeLocation(combined); found {
 					current.Text = combined
-					current.Normalized = strings.ToLower(combined)
+					current.Normalized = value
 					current.End = next.Start + len([]rune(suffix))
 					current.EntityType = "LOCATION"
-					current.EntityName = "行政区划"
-					current.EntityCode = "RULE_ADMINISTRATIVE_LOCATION"
+					current.EntityName = name
+					current.EntityCode = code
 					current.Confidence = max(current.Confidence, 0.9)
-					current.Source = "RULE"
+					current.Source = "SEMANTIC_PARSING_RULE"
 					remainder := strings.TrimPrefix(next.Text, suffix)
 					if remainder == "" {
 						index++
@@ -498,22 +535,6 @@ func coalesceAdministrativeLocationTokens(
 		result = append(result, current)
 	}
 	return result
-}
-
-func administrativeSuffixAtTokenStart(text string) string {
-	text = strings.TrimSpace(text)
-	for _, suffix := range []string{
-		"特别行政区", "自治区", "省", "市", "区", "县",
-	} {
-		if !strings.HasPrefix(text, suffix) {
-			continue
-		}
-		remainder := strings.TrimPrefix(text, suffix)
-		if remainder == "" || deterministicSemanticResidual(remainder) {
-			return suffix
-		}
-	}
-	return ""
 }
 
 func isDictionaryTokenSource(source string) bool {

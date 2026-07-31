@@ -35,6 +35,7 @@ func (interpreter *SemanticInterpreter) interpretManyWithToolLoop(
 	ctx context.Context,
 	toolAI semanticToolAIInvoker,
 	tenantID, actorID, question, preferredModel string,
+	parsingRules semanticParsingRules,
 ) (QueryTurnSlots, error) {
 	executor := &semanticMetricToolExecutor{
 		interpreter: interpreter, tenantID: tenantID, question: question,
@@ -127,14 +128,14 @@ func (interpreter *SemanticInterpreter) interpretManyWithToolLoop(
 	codes := uniqueStrings(selection.MetricCodes, 8)
 	needsClarification := selection.NeedsClarification ||
 		selection.Confidence < 0.7 || len(codes) == 0
-	explicitCodes := exactMetricCodes(question, candidates, 8)
+	explicitCodes := exactMetricCodes(question, candidates, 8, parsingRules)
 	if len(explicitCodes) > 0 {
 		// Published names, aliases and distinctive metric stems in the user's
 		// original question are stronger evidence than a model clarification.
 		codes = explicitCodes
 		needsClarification = false
 	} else if len(codes) > 1 ||
-		questionRequestsBroadMetricSelection(question) {
+		parsingRules.requestsBroadMetricSelection(question) {
 		// A broad question such as "经营情况怎么样" must not let the model
 		// invent an arbitrary KPI bundle. Without any explicit metric anchor,
 		// either one arbitrary KPI or a bundle is a real user decision.
@@ -159,7 +160,7 @@ func (interpreter *SemanticInterpreter) interpretManyWithToolLoop(
 		MetricCodes: codes, MetricCandidateCount: len(candidates),
 		MetricMatchMethod: "AGENT_TOOL_LOOP", Domains: domains,
 		MetricCandidates: metricCandidateTraces(
-			question, candidates, codes, "AGENT_TOOL_LOOP",
+			question, candidates, codes, "AGENT_TOOL_LOOP", parsingRules,
 		),
 		NeedsClarification: needsClarification,
 		MetricToolLoop: &QueryMetricToolLoopTrace{
@@ -168,20 +169,6 @@ func (interpreter *SemanticInterpreter) interpretManyWithToolLoop(
 			Steps: toolSteps,
 		},
 	}, nil
-}
-
-func questionRequestsBroadMetricSelection(question string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(question))
-	for _, phrase := range []string{
-		"经营情况", "业务情况", "整体情况", "总体情况",
-		"经营怎么样", "业务怎么样", "表现怎么样", "数据怎么样",
-		"经营如何", "业务如何", "整体如何",
-	} {
-		if strings.Contains(normalized, phrase) {
-			return true
-		}
-	}
-	return false
 }
 
 func (executor *semanticMetricToolExecutor) ExecuteTool(

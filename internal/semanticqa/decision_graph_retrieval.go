@@ -316,9 +316,11 @@ func metricTracesWithDecisionGraphSelection(
 	question string,
 	catalog []recallCandidate,
 	candidate decisionGraphMetricCandidate,
+	parsingRules semanticParsingRules,
 ) []QueryMetricCandidateTrace {
 	result := metricCandidateTraces(
 		question, catalog, []string{candidate.Code}, "DECISION_GRAPH",
+		parsingRules,
 	)
 	matchedTerm := personCountPhrase(question)
 	found := false

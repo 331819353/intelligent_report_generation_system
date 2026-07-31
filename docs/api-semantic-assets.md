@@ -2,7 +2,7 @@
 
 语义资产用于维护“常用词 → 映射值 + 知识类型”的受控词典。它与 DWS
 维度资产独立存储、独立展示；原 `/semantic-governance` 入口继续兼容，但会
-跳转到 `/assets/dimensions`。
+跳转到资产管理中心。
 
 ## 数据与向量边界
 
@@ -28,6 +28,10 @@
 | `PUT` | `/api/v1/semantic-assets/{id}` | 按 `expectedVersion` 更新 |
 | `POST` | `/api/v1/semantic-assets/import` | 幂等批量导入 |
 | `POST` | `/api/v1/semantic-assets/{id}/deprecate` | 按 `expectedVersion` 停用 |
+| `GET` | `/api/v1/semantic-parsing-rules` | 查询平台默认和当前租户解析规则；支持 `q`、`ruleType`、`status` |
+| `POST` | `/api/v1/semantic-parsing-rules` | 创建或重新启用当前租户规则 |
+| `PUT` | `/api/v1/semantic-parsing-rules/{id}` | 按 `expectedVersion` 更新租户规则 |
+| `POST` | `/api/v1/semantic-parsing-rules/{id}/deprecate` | 按 `expectedVersion` 停用租户规则 |
 | `GET` | `/api/v1/semantic/dimension-where-decision-groups` | 查询全部已发布 DWS 维度及成员、决策、待处理数量和构建状态 |
 | `GET` | `/api/v1/semantic/dimension-where-decisions` | 分页查询已验证维度 WHERE 决策；支持 `q`、`tableName`、`dimensionId`、`limit`、`offset` |
 
@@ -58,3 +62,14 @@
 `vectorKey`、`dimensionFieldName`、`canonicalValue`、`aliases`、
 `metricFieldId`、`whereCondition`、`compiledCondition`、`sourceType` 与 LLM
 审计摘要；向量本体和用户问题原文不会通过该接口返回。
+
+## 语义解析规则
+
+`semantic_parsing_rules` 存放无需向量化的精确语言规则，管理入口为
+`/assets/parsing-rules`。当前支持指标名称后缀、行政区划后缀、问句剩余词和
+宽泛指标问法四类规则。运行时每次请求从平台基础 PostgreSQL 读取，保存后无需
+发版或重启，下一次智能问答立即生效。
+
+平台规则为只读默认值。当前租户创建相同 `ruleType + pattern` 的规则时优先于
+平台规则；停用该租户规则会形成屏蔽项，不会退回平台默认值。重新提交同一规则
+可恢复为生效状态。所有写操作保留乐观锁版本和审计记录。

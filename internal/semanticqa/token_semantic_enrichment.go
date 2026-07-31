@@ -67,6 +67,7 @@ func (interpreter *SemanticInterpreter) enrichTokenSemantics(
 	tenantID, actorID, question, timezone string,
 	result QueryTokenization,
 	allowTrustedMetricAnchorCompletion bool,
+	parsingRules semanticParsingRules,
 ) QueryTokenization {
 	result.SemanticRetrievalMode = "LEXICAL_SEMANTIC_DOCUMENT_FALLBACK"
 	result.IndexPrerequisites = []QuerySemanticIndexStatus{}
@@ -94,7 +95,7 @@ func (interpreter *SemanticInterpreter) enrichTokenSemantics(
 	)
 	deterministicCompletion, deterministic := deterministicTokenSemanticCompletion(
 		question, timezone, time.Now(), result.Tokens,
-		allowTrustedMetricAnchorCompletion,
+		allowTrustedMetricAnchorCompletion, parsingRules,
 	)
 
 	searchTokens := make([]QueryToken, 0, tokenSemanticMaximumTokens)
@@ -225,6 +226,7 @@ func deterministicTokenSemanticCompletion(
 	now time.Time,
 	tokens []QueryToken,
 	allowTrustedMetricAnchorCompletion bool,
+	parsingRules semanticParsingRules,
 ) (QueryTokenLLMCompletion, bool) {
 	location, err := time.LoadLocation(timezone)
 	if err != nil {
@@ -268,49 +270,31 @@ func deterministicTokenSemanticCompletion(
 			// completion step to produce a typed, left-closed range.
 			return QueryTokenLLMCompletion{}, false
 		case "LOCATION", "PERSON", "ORGANIZATION", "PROPER_NOUN", "NUMBER":
-			if _, _, _, ok := administrativeLocationHint(token.Text); !ok {
+			if _, _, _, ok := parsingRules.administrativeLocation(token.Text); !ok {
 				return QueryTokenLLMCompletion{}, false
 			}
 			administrativeLocationCount++
 		case "NOUN_CANDIDATE":
-			if !deterministicSemanticResidual(token.Text) {
-				if _, _, _, ok := administrativeLocationHint(token.Text); !ok {
+			if !parsingRules.isDeterministicResidual(token.Text) {
+				if _, _, _, ok := parsingRules.administrativeLocation(token.Text); !ok {
 					return QueryTokenLLMCompletion{}, false
 				}
 				administrativeLocationCount++
 			}
 		case "TEXT":
 			if len([]rune(strings.TrimSpace(token.Text))) > 1 &&
-				!deterministicSemanticResidual(token.Text) {
+				!parsingRules.isDeterministicResidual(token.Text) {
 				return QueryTokenLLMCompletion{}, false
 			}
 		}
 	}
 	if len(result.MetricNames) == 0 &&
-		!questionRequestsBroadMetricSelection(question) &&
+		!parsingRules.requestsBroadMetricSelection(question) &&
 		(!allowTrustedMetricAnchorCompletion ||
 			administrativeLocationCount == 0) {
 		return QueryTokenLLMCompletion{}, false
 	}
 	return result, true
-}
-
-func deterministicSemanticResidual(text string) bool {
-	text = strings.ToLower(strings.TrimSpace(text))
-	if text == "" {
-		return true
-	}
-	for _, term := range []string{
-		"总量", "总数", "数量", "金额", "总额", "合计", "平均",
-		"均值", "比例", "占比", "分别", "是什么", "怎么样",
-		"什么", "多少", "几笔", "几条", "帮我", "请问", "查询", "统计",
-		"查看", "告诉我", "一下", "经营情况", "经营", "情况", "怎么",
-	} {
-		if text == term {
-			return true
-		}
-	}
-	return false
 }
 
 func tokenSemanticSearchTargets(token QueryToken) (

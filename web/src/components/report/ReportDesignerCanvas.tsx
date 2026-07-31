@@ -572,11 +572,11 @@ function ReportTemplateInspector({ template, canEdit, onChange }: { template: Re
       </header>
       <div className="report-inspector-body report-template-editor">
         <InspectorSection title="模板身份">
-          <TemplateTextField required label="模板名称" value={template.name} disabled={!canEdit} maxLength={100} onCommit={value => emit('修改模板名称', next => { next.name = value })} />
+          <TemplateTextField key={`name:${template.name}`} required label="模板名称" value={template.name} disabled={!canEdit} maxLength={100} onCommit={value => emit('修改模板名称', next => { next.name = value })} />
           <label className="report-template-field"><span>字体体系</span><select value={template.typography.fontFamily} disabled={!canEdit} onChange={event => emit('修改模板字体', next => { next.typography.fontFamily = event.target.value as ReportTemplate['typography']['fontFamily'] })}><option value="SYSTEM">系统无衬线</option><option value="SERIF">衬线字体</option><option value="MONOSPACE">等宽字体</option></select></label>
         </InspectorSection>
         <InspectorSection title="全局提示词上下文">
-          <TemplateTextField multiline label="提示词" value={template.promptContext} disabled={!canEdit} maxLength={4000} onCommit={value => emit('修改模板提示词', next => { next.promptContext = value })} />
+          <TemplateTextField key={`prompt:${template.promptContext}`} multiline label="提示词" value={template.promptContext} disabled={!canEdit} maxLength={4000} onCommit={value => emit('修改模板提示词', next => { next.promptContext = value })} />
           <p className="report-field-help">AI 生成或修改报告前，应把该上下文作为全局约束注入，不写入单个分块提示词。</p>
         </InspectorSection>
         <InspectorSection title="标题与正文">
@@ -616,7 +616,6 @@ function ReportTemplateInspector({ template, canEdit, onChange }: { template: Re
 
 function TemplateTextField({ label, value, multiline = false, required = false, disabled, maxLength, onCommit }: { label: string; value: string; multiline?: boolean; required?: boolean; disabled: boolean; maxLength: number; onCommit: (value: string) => void }) {
   const [draft, setDraft] = useState(value)
-  useEffect(() => setDraft(value), [value])
   const shared = { value: draft, disabled, maxLength, onChange: (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setDraft(event.target.value), onBlur: () => { const next = draft.trim(); if (required && !next) return setDraft(value); if (draft !== value) onCommit(required ? next : draft) } }
   return <label className="report-template-field"><span>{label}</span>{multiline ? <textarea rows={6} {...shared} /> : <input type="text" {...shared} />}</label>
 }

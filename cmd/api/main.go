@@ -301,6 +301,8 @@ func main() {
 	api.Handle("/api/v1/semantic/", semanticManagementHandler)
 	api.Handle("/api/v1/semantic-assets", semanticAssetHandler)
 	api.Handle("/api/v1/semantic-assets/", semanticAssetHandler)
+	api.Handle("/api/v1/semantic-parsing-rules", semanticAssetHandler)
+	api.Handle("/api/v1/semantic-parsing-rules/", semanticAssetHandler)
 	api.Handle("/api/v1/semantic-qa/", semanticQAHandler)
 	api.Handle("/api/v1/metric-candidates", metricCandidateHandler)
 	api.Handle("/api/v1/metric-candidates/", metricCandidateHandler)

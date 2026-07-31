@@ -1550,13 +1550,17 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 		strings.TrimSpace(question) == "" {
 		return QueryTurnSlots{}, ErrInvalidRequest
 	}
-	broadMetricQuestion := questionRequestsBroadMetricSelection(question)
+	parsingRules, err := interpreter.store.semanticParsingRules(ctx, tenantID)
+	if err != nil {
+		return QueryTurnSlots{}, err
+	}
+	broadMetricQuestion := parsingRules.requestsBroadMetricSelection(question)
 	candidates, err := interpreter.store.recall(ctx, tenantID, question, nil, 24)
 	if err != nil {
 		return QueryTurnSlots{}, err
 	}
 	buildExact := func(items []recallCandidate) QueryTurnSlots {
-		codes := exactMetricCodes(question, items, 8)
+		codes := exactMetricCodes(question, items, 8, parsingRules)
 		domains := make(map[string]string, len(codes))
 		for _, code := range codes {
 			domains[code] = candidateDomain(items, code)
@@ -1566,7 +1570,7 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 			MetricCandidateCount: len(items), MetricMatchMethod: "EXACT_CATALOG",
 			Domains: domains,
 			MetricCandidates: metricCandidateTraces(
-				question, items, codes, "EXACT_CATALOG",
+				question, items, codes, "EXACT_CATALOG", parsingRules,
 			),
 		}
 	}
@@ -1596,7 +1600,7 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 			MetricMatchMethod:    "HYBRID_RECALL",
 			Domains:              map[string]string{},
 			MetricCandidates: metricCandidateTraces(
-				question, candidates, nil, "HYBRID_RECALL",
+				question, candidates, nil, "HYBRID_RECALL", parsingRules,
 			),
 			NeedsClarification: true,
 		}, nil
@@ -1606,7 +1610,7 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 	// while the tool loop remains available for genuinely semantic wording.
 	if toolAI, ok := interpreter.ai.(semanticToolAIInvoker); ok {
 		if result, toolErr := interpreter.interpretManyWithToolLoop(
-			ctx, toolAI, tenantID, actorID, question, "",
+			ctx, toolAI, tenantID, actorID, question, "", parsingRules,
 		); toolErr == nil {
 			return result, nil
 		} else if shouldRetrySemanticToolLoop(toolErr) {
@@ -1621,6 +1625,7 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 					result, fallbackErr :=
 						interpreter.interpretManyWithToolLoop(
 							ctx, toolAI, tenantID, actorID, question, model,
+							parsingRules,
 						)
 					if fallbackErr == nil {
 						return result, nil
@@ -1638,7 +1643,7 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 		MetricCandidateCount: len(candidates), Domains: map[string]string{},
 		NeedsClarification: broadMetricQuestion,
 		MetricCandidates: metricCandidateTraces(
-			question, candidates, nil, "HYBRID_RECALL",
+			question, candidates, nil, "HYBRID_RECALL", parsingRules,
 		),
 	}
 	withDecisionGraph := func(base QueryTurnSlots) QueryTurnSlots {
@@ -1661,7 +1666,7 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 		}
 		base.Domains[selected.Code] = selected.Domain
 		base.MetricCandidates = metricTracesWithDecisionGraphSelection(
-			question, candidates, selected,
+			question, candidates, selected, parsingRules,
 		)
 		return base
 	}
@@ -1745,7 +1750,7 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 		MetricCandidateCount: len(candidates),
 		MetricMatchMethod:    "CATALOG_RERANK", Domains: domains,
 		MetricCandidates: metricCandidateTraces(
-			question, candidates, codes, "CATALOG_RERANK",
+			question, candidates, codes, "CATALOG_RERANK", parsingRules,
 		),
 	}, nil
 }
@@ -1774,6 +1779,10 @@ func (interpreter *SemanticInterpreter) ConfirmMetricCodes(
 	codes = uniqueStrings(codes, 8)
 	if interpreter == nil || interpreter.store == nil || len(codes) == 0 {
 		return QueryTurnSlots{}, ErrInvalidRequest
+	}
+	parsingRules, err := interpreter.store.semanticParsingRules(ctx, tenantID)
+	if err != nil {
+		return QueryTurnSlots{}, err
 	}
 	selected := make([]recallCandidate, 0, len(codes))
 	for _, code := range codes {
@@ -1804,6 +1813,7 @@ func (interpreter *SemanticInterpreter) ConfirmMetricCodes(
 		MetricMatchMethod:    "USER_CONFIRMED", Domains: domains,
 		MetricCandidates: metricCandidateTraces(
 			strings.Join(codes, " "), selected, codes, "USER_CONFIRMED",
+			parsingRules,
 		),
 	}, nil
 }
@@ -1813,6 +1823,7 @@ func metricCandidateTraces(
 	candidates []recallCandidate,
 	selectedCodes []string,
 	selectedMethod string,
+	parsingRules semanticParsingRules,
 ) []QueryMetricCandidateTrace {
 	question = strings.ToLower(question)
 	selected := map[string]bool{}
@@ -1825,7 +1836,7 @@ func metricCandidateTraces(
 			continue
 		}
 		matchedTerm := ""
-		for _, token := range metricExplicitTerms(candidate) {
+		for _, token := range parsingRules.metricTerms(candidate) {
 			token = strings.TrimSpace(token)
 			if token != "" && strings.Contains(question, strings.ToLower(token)) &&
 				len([]rune(token)) > len([]rune(matchedTerm)) {
@@ -1923,6 +1934,7 @@ func exactMetricCodes(
 	question string,
 	candidates []recallCandidate,
 	limit int,
+	parsingRules semanticParsingRules,
 ) []string {
 	question = strings.ToLower(question)
 	type match struct {
@@ -1936,7 +1948,7 @@ func exactMetricCodes(
 			continue
 		}
 		position, length := -1, 0
-		tokens := metricExplicitTerms(candidate)
+		tokens := parsingRules.metricTerms(candidate)
 		for _, token := range tokens {
 			token = strings.ToLower(strings.TrimSpace(token))
 			if token == "" {
@@ -1977,35 +1989,6 @@ func exactMetricCodes(
 		}
 	}
 	return codes
-}
-
-func metricExplicitTerms(candidate recallCandidate) []string {
-	terms := append(
-		[]string{candidate.Label, candidate.Code},
-		candidate.Aliases...,
-	)
-	suffixes := []string{
-		"订单数量合计", "商品数量合计", "金额合计", "实体数量",
-		"记录数量", "总数量", "总金额", "数量合计", "记录数",
-		"总量", "总数", "数量", "金额", "分钟数", "时长", "收入",
-		"比例", "占比", "率", "数",
-	}
-	for _, source := range append(
-		[]string{candidate.Label}, candidate.Aliases...,
-	) {
-		source = strings.TrimSpace(source)
-		for _, suffix := range suffixes {
-			if !strings.HasSuffix(source, suffix) {
-				continue
-			}
-			stem := strings.TrimSpace(strings.TrimSuffix(source, suffix))
-			if len([]rune(stem)) >= 2 {
-				terms = appendUniqueString(terms, stem)
-			}
-			break
-		}
-	}
-	return terms
 }
 
 func inferIntent(question string) string {

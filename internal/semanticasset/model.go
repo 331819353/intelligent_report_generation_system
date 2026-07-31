@@ -88,6 +88,50 @@ type ImportResult struct {
 	Total     int `json:"total"`
 }
 
+type ParsingRule struct {
+	ID            string    `json:"id"`
+	RuleType      string    `json:"ruleType"`
+	Pattern       string    `json:"pattern"`
+	MatchMode     string    `json:"matchMode"`
+	Action        string    `json:"action"`
+	OutputName    string    `json:"outputName,omitempty"`
+	OutputCode    string    `json:"outputCode,omitempty"`
+	MinimumLength int       `json:"minimumLength"`
+	MaximumLength int       `json:"maximumLength"`
+	Priority      int       `json:"priority"`
+	Scope         string    `json:"scope"`
+	Status        string    `json:"status"`
+	Version       int64     `json:"version"`
+	CreatedBy     string    `json:"createdBy,omitempty"`
+	UpdatedBy     string    `json:"updatedBy,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+type ParsingRuleFilter struct {
+	Page
+	Query    string
+	RuleType string
+	Status   string
+}
+
+type ParsingRuleInput struct {
+	RuleType      string `json:"ruleType"`
+	Pattern       string `json:"pattern"`
+	MatchMode     string `json:"matchMode"`
+	Action        string `json:"action"`
+	OutputName    string `json:"outputName,omitempty"`
+	OutputCode    string `json:"outputCode,omitempty"`
+	MinimumLength int    `json:"minimumLength"`
+	MaximumLength int    `json:"maximumLength"`
+	Priority      int    `json:"priority"`
+}
+
+type ParsingRuleUpdateInput struct {
+	ExpectedVersion int64 `json:"expectedVersion"`
+	ParsingRuleInput
+}
+
 type Store interface {
 	List(context.Context, string, Filter) ([]Asset, int, error)
 	ListKnowledgeTypes(context.Context, string) ([]string, error)
@@ -95,6 +139,18 @@ type Store interface {
 	Update(context.Context, string, string, string, UpdateInput) (Asset, error)
 	Deprecate(context.Context, string, string, string, int64) (Asset, error)
 	Import(context.Context, string, string, []UpsertInput) (ImportResult, error)
+	ListParsingRules(
+		context.Context, string, ParsingRuleFilter,
+	) ([]ParsingRule, int, error)
+	CreateParsingRule(
+		context.Context, string, string, ParsingRuleInput,
+	) (ParsingRule, error)
+	UpdateParsingRule(
+		context.Context, string, string, string, ParsingRuleUpdateInput,
+	) (ParsingRule, error)
+	DeprecateParsingRule(
+		context.Context, string, string, string, int64,
+	) (ParsingRule, error)
 }
 
 type Service struct{ store Store }

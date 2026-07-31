@@ -47,6 +47,8 @@ Base path：`/api/v1/semantic-qa`
 分词补全会返回 `llmCompletion.model=DETERMINISTIC_SEMANTIC_CATALOG`，避免不必要
 的模型调用。已确认指标或已执行上下文计划也可作为当前轮的可信指标锚点。相对时间、
 未知专名及未命中决策图的普通维度仍进入受约束 LLM/向量链路，不会被快速路径猜测。
+指标后缀、行政区划后缀、确定性剩余词和宽泛指标问法均来自平台基础 PostgreSQL
+的 `semantic_parsing_rules`，按请求热加载；租户同类型同表达规则覆盖平台默认值。
 
 指标已确定、但维度值无法匹配该指标已验证兼容维度或持久化决策图时，响应状态为
 `SEMANTIC_GAP`，且 `clarification.type=SEMANTIC_GAP`。此时 `plans` 为空，
