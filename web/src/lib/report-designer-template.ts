@@ -1,120 +1,133 @@
 import reportExample from '../../../api/examples/report-json-v1.json'
-import type { ReportBlock, ReportDocument, ReportMenuRatios } from './report-contract'
+import type { ReportBlock, ReportComponent, ReportDocument } from './report-contract'
+import { defaultReportTemplate } from './report-template'
 
-const DEFAULT_MENU_RATIOS: ReportMenuRatios = {
-  topColumns: [3, 1],
-  bottomColumns: [1, 1],
-  rowHeights: [2, 1],
+type BlockTemplate = {
+  id: string
+  name: string
+  x: number
+  y: number
+  title: string
+  showFilter?: boolean
+  showChart?: boolean
+  showConclusion?: boolean
+  chartType?: 'LINE' | 'COLUMN' | 'BAR' | 'PIE'
 }
 
-/** 新建设计稿使用层级优先模板；正式示例 JSON 保持兼容，避免影响历史草稿。 */
+const BLOCK_TEMPLATES: BlockTemplate[] = [
+  { id: 'revenue', name: '营业收入趋势', x: 0, y: 0, title: '营业收入', showFilter: true, showChart: true, showConclusion: true, chartType: 'LINE' },
+  { id: 'profit', name: '利润达成情况', x: 4, y: 0, title: '利润达成', showChart: true, chartType: 'COLUMN' },
+  { id: 'customer', name: '客户增长分析', x: 8, y: 0, title: '客户增长', showChart: true, showConclusion: true, chartType: 'LINE' },
+  { id: 'region', name: '区域经营表现', x: 0, y: 3, title: '区域表现', showFilter: true, showChart: true, chartType: 'BAR' },
+  { id: 'product', name: '产品收入结构', x: 4, y: 3, title: '产品结构', showChart: true, showConclusion: true, chartType: 'PIE' },
+  { id: 'risk', name: '经营风险提示', x: 8, y: 3, title: '风险提示', showConclusion: true },
+]
+
+/** 新建设计稿直接呈现两行 4×3 分块，配置与统一渲染器共用同一份报告 JSON。 */
 export function createReportDesignerTemplate(): ReportDocument {
   const document = structuredClone(reportExample) as ReportDocument
+  const sourceBlock = document.pages[0].blocks[0]
   const page = document.pages[0]
-  const overview = structuredClone(page.blocks[0])
 
-  const menu: ReportBlock = {
-    id: 'block_menu',
-    kind: 'MENU',
-    name: '菜单区',
-    visible: true,
-    grid: { x: 0, y: 0, w: 12, h: 2 },
-    innerGrid: { columns: 48, rows: 8 },
-    zIndex: 200,
-    locks: { layout: true, config: false, dataSnapshot: false },
-    sticky: { enabled: true, top: 0, scope: 'PAGE', zIndex: 200 },
-    style: { padding: 0, background: 'NAVY' },
-    menuLayout: {
-      visible: true,
-      defaultRatios: structuredClone(DEFAULT_MENU_RATIOS),
-      ratios: structuredClone(DEFAULT_MENU_RATIOS),
-      usesDefaultRatios: true,
-      cells: {
-        logoTitle: {
-          visible: true,
-          logoText: 'IR',
-          title: '企业经营月度分析报告',
-          subtitle: 'Intelligent Report',
-        },
-        actions: { visible: true, items: ['刷新', '导出', '更多'] },
-        globalFilters: { visible: true, parameterIds: ['param_stat_month'] },
-        navigation: {
-          visible: true,
-          items: [
-            { label: '经营概览', targetBlockId: 'block_overview' },
-            { label: '增长分析', targetBlockId: 'block_growth' },
-          ],
-        },
-      },
-    },
-    components: [],
-  }
-
-  overview.kind = 'CONTENT'
-  overview.name = '内容区 01 · 经营概览'
-  overview.visible = true
-  overview.grid = { x: 0, y: 2, w: 12, h: 8 }
-  overview.innerGrid = { columns: 48, rows: 32 }
-  overview.sticky = { enabled: false }
-  overview.components[0].grid = { x: 0, y: 0, w: 32, h: 4 }
-  overview.components[0].sticky = { enabled: false }
-  overview.components[1].grid = { x: 32, y: 0, w: 16, h: 4 }
-  overview.components[1].sticky = { enabled: false }
-  overview.components[2].grid = { x: 0, y: 4, w: 32, h: 28 }
-  overview.components[3].grid = { x: 32, y: 4, w: 16, h: 28 }
-  overview.contentLayout = {
-    visible: true,
-    areas: {
-      title: { visible: true, componentIds: ['title_main', 'filter_stat_month'] },
-      conclusion: { visible: true, componentIds: ['conclusion_overview'] },
-      components: { visible: true, componentIds: ['chart_revenue_trend'] },
-    },
-  }
-
-  const growth = createGrowthBlock(overview)
-  page.blocks = [menu, overview, growth]
-  page.contentGridRows = 17
+  page.blocks = BLOCK_TEMPLATES.map(template => createContentBlock(sourceBlock, template))
+  page.contentGridRows = 10
+  document.template = structuredClone(defaultReportTemplate)
   document.report.name = '企业经营月度分析报告'
+  document.report.description = '由 160 × 108 逻辑分格驱动的可配置经营报告'
   return document
 }
 
-function createGrowthBlock(source: ReportBlock): ReportBlock {
-  const block = structuredClone(source)
-  block.id = 'block_growth'
-  block.name = '内容区 02 · 增长分析'
-  block.grid = { x: 0, y: 10, w: 12, h: 7 }
-  block.innerGrid = { columns: 48, rows: 28 }
-  block.components = block.components.map(component => {
-    const next = structuredClone(component)
-    next.id = `${component.id}_growth`
-    next.name = component.type === 'TITLE' ? '增长分析标题'
-      : component.type === 'FILTER' ? '增长分析筛选'
-        : component.type === 'CHART' ? '季度增长趋势'
-          : '增长分析结论'
-    if (next.type === 'TITLE') {
-      next.binding = { text: '增长与动能分析' }
-      next.grid = { x: 0, y: 0, w: 32, h: 4 }
-    } else if (next.type === 'FILTER') {
-      next.grid = { x: 32, y: 0, w: 16, h: 4 }
-    } else if (next.type === 'CHART') {
-      next.grid = { x: 0, y: 4, w: 32, h: 24 }
-    } else {
-      next.grid = { x: 32, y: 4, w: 16, h: 24 }
-      if (next.binding) next.binding = {
-        ...next.binding,
-        chartComponentIds: ['chart_revenue_trend_growth'],
-      }
-    }
-    next.sticky = { enabled: false }
-    return next
-  })
-  block.contentLayout = {
-    visible: true,
-    areas: {
-      title: { visible: true, componentIds: ['title_main_growth', 'filter_stat_month_growth'] },
-      conclusion: { visible: false, componentIds: ['conclusion_overview_growth'] },
-      components: { visible: true, componentIds: ['chart_revenue_trend_growth'] },
-    },
+function createContentBlock(source: ReportBlock, template: BlockTemplate): ReportBlock {
+  const titleID = `title_${template.id}`
+  const filterID = `filter_${template.id}`
+  const chartID = `chart_${template.id}`
+  const conclusionID = `conclusion_${template.id}`
+  const titleWidth = template.showFilter ? 10 : 16
+  const bodyWidth = template.showChart && template.showConclusion ? 10 : 16
+  const components: ReportComponent[] = [
+    createTitle(source.components[0], titleID, template.title, titleWidth),
+  ]
+
+  if (template.showFilter) components.push(createFilter(source.components[1], filterID))
+  if (template.showChart) components.push(createChart(source.components[2], chartID, template.name, template.chartType ?? 'LINE', bodyWidth))
+  if (template.showConclusion) {
+    components.push(createConclusion(
+      source.components[3],
+      conclusionID,
+      template.name,
+      template.showChart ? chartID : undefined,
+      template.showChart ? 10 : 0,
+      template.showChart ? 6 : 16,
+    ))
   }
-  return block
+
+  return {
+    id: `block_${template.id}`,
+    kind: 'CONTENT',
+    name: template.name,
+    visible: true,
+    grid: { x: template.x, y: template.y, w: 4, h: 3 },
+    innerGrid: { columns: 16, rows: 12 },
+    locks: { layout: false, config: false, dataSnapshot: false },
+    sticky: { enabled: false },
+    style: { padding: 2, background: 'WHITE', radius: 14, shadow: 'SOFT' },
+    permissionPolicy: structuredClone(source.permissionPolicy),
+    contentLayout: {
+      visible: true,
+      areas: {
+        title: { visible: true, componentIds: [titleID] },
+        filter: { visible: template.showFilter === true, componentIds: template.showFilter ? [filterID] : [] },
+        conclusion: { visible: template.showConclusion === true, componentIds: template.showConclusion ? [conclusionID] : [] },
+        chart: { visible: template.showChart === true, componentIds: template.showChart ? [chartID] : [] },
+      },
+    },
+    components,
+  }
+}
+
+function createTitle(source: ReportComponent, id: string, text: string, width: number): ReportComponent {
+  const component = structuredClone(source)
+  component.id = id
+  component.name = `${text}标题`
+  component.grid = { x: 0, y: 0, w: width, h: 3 }
+  component.manualLocked = false
+  component.sticky = { enabled: false }
+  component.binding = { text }
+  return component
+}
+
+function createFilter(source: ReportComponent, id: string): ReportComponent {
+  const component = structuredClone(source)
+  component.id = id
+  component.name = '统计周期'
+  component.grid = { x: 10, y: 0, w: 6, h: 3 }
+  component.sticky = { enabled: false }
+  return component
+}
+
+function createChart(source: ReportComponent, id: string, name: string, type: 'LINE' | 'COLUMN' | 'BAR' | 'PIE', width: number): ReportComponent {
+  const component = structuredClone(source)
+  component.id = id
+  component.name = name
+  component.grid = { x: 0, y: 3, w: width, h: 9 }
+  component.sticky = { enabled: false }
+  component.binding = {
+    ...component.binding,
+    chart: { type },
+  }
+  component.interaction = { clickFilter: false }
+  return component
+}
+
+function createConclusion(source: ReportComponent, id: string, name: string, chartID: string | undefined, x: number, width: number): ReportComponent {
+  const component = structuredClone(source)
+  component.id = id
+  component.name = `${name}结论`
+  component.grid = { x, y: 3, w: width, h: 9 }
+  component.sticky = { enabled: false }
+  component.binding = {
+    ...component.binding,
+    chartComponentIds: chartID ? [chartID] : [],
+  }
+  return component
 }

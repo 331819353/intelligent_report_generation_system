@@ -22,12 +22,60 @@ type Document struct {
 	SchemaVersion    string            `json:"schemaVersion"`
 	Report           Report            `json:"report"`
 	Canvas           Canvas            `json:"canvas"`
+	Template         *ReportTemplate   `json:"template,omitempty"`
 	Theme            map[string]any    `json:"theme,omitempty"`
 	Parameters       []Parameter       `json:"parameters,omitempty"`
 	DataRequirements []DataRequirement `json:"dataRequirements,omitempty"`
 	Pages            []Page            `json:"pages"`
 	Generation       *Generation       `json:"generation,omitempty"`
 	Extensions       map[string]any    `json:"extensions,omitempty"`
+}
+
+// ReportTemplate 同时保存 AI 全局提示词上下文与渲染器可直接消费的安全设计令牌。
+type ReportTemplate struct {
+	ID            string             `json:"id"`
+	Name          string             `json:"name"`
+	PromptContext string             `json:"promptContext"`
+	Typography    TemplateTypography `json:"typography"`
+	Palette       TemplatePalette    `json:"palette"`
+	Canvas        TemplateCanvas     `json:"canvas"`
+	Block         TemplateBlock      `json:"block"`
+}
+
+type TemplateTypography struct {
+	FontFamily string            `json:"fontFamily"`
+	Title      TemplateTitleText `json:"title"`
+	Body       TemplateBodyText  `json:"body"`
+}
+
+type TemplateTitleText struct {
+	FontSize   int    `json:"fontSize"`
+	Color      string `json:"color"`
+	FontWeight int    `json:"fontWeight"`
+}
+
+type TemplateBodyText struct {
+	FontSize int    `json:"fontSize"`
+	Color    string `json:"color"`
+}
+
+type TemplatePalette struct {
+	Primary string `json:"primary"`
+	Accent  string `json:"accent"`
+	Muted   string `json:"muted"`
+}
+
+type TemplateCanvas struct {
+	BackgroundColor string `json:"backgroundColor"`
+	GridColor       string `json:"gridColor"`
+}
+
+type TemplateBlock struct {
+	BackgroundColor string `json:"backgroundColor"`
+	BorderColor     string `json:"borderColor"`
+	BorderRadius    int    `json:"borderRadius"`
+	Padding         int    `json:"padding"`
+	Shadow          string `json:"shadow"`
 }
 
 // Report 保存不依赖数据库记录的报告基本属性和默认运行策略。
@@ -184,9 +232,12 @@ type ContentArea struct {
 }
 
 type ContentAreas struct {
-	Title      ContentArea `json:"title"`
-	Conclusion ContentArea `json:"conclusion"`
-	Components ContentArea `json:"components"`
+	Title      ContentArea  `json:"title"`
+	Filter     *ContentArea `json:"filter,omitempty"`
+	Conclusion ContentArea  `json:"conclusion"`
+	Chart      *ContentArea `json:"chart,omitempty"`
+	// Components 兼容早期草稿；新设计器使用 Chart。
+	Components *ContentArea `json:"components,omitempty"`
 }
 
 type ContentLayout struct {

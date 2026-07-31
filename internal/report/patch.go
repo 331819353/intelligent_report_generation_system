@@ -356,13 +356,17 @@ func touchedBlocks(delta documentDelta) []string {
 // validateChangeSemantics 让审计操作类型与真实前后差异一致，禁止用宽泛操作名包裹无关修改。
 func validateChangeSemantics(before, after reportjson.Document, change DraftChange) error {
 	delta := calculateDelta(before, after)
-	if delta.Other && change.OperationType != "LEGACY_DRAFT_RECOVERY" {
+	if delta.Other && change.OperationType != "LEGACY_DRAFT_RECOVERY" && change.OperationType != "TEMPLATE_UPDATE" && change.OperationType != "UNDO" && change.OperationType != "REDO" {
 		return fmt.Errorf("%w: 语义操作包含报告或页面级无关修改", ErrInvalidPatch)
 	}
 	beforeBlocks, afterBlocks := blockMap(before), blockMap(after)
 	beforeComponents, afterComponents := componentMap(before), componentMap(after)
 	target := change.Target
 	switch change.OperationType {
+	case "TEMPLATE_UPDATE":
+		if target.PageID != "" || target.BlockID != "" || target.ComponentID != "" || target.SourceComponentID != "" || target.CreatedComponentID != "" || target.ReferencedOperationID != "" || !onlyTemplateChanged(before, after) || len(delta.AddedBlocks)+len(delta.RemovedBlocks)+len(delta.ChangedBlocks)+len(delta.AddedComponents)+len(delta.RemovedComponents)+len(delta.ChangedComponents) > 0 {
+			return semanticTargetError(change.OperationType)
+		}
 	case "BLOCK_MOVE", "BLOCK_RESIZE":
 		old, oldOK := beforeBlocks[target.BlockID]
 		next, nextOK := afterBlocks[target.BlockID]
@@ -481,6 +485,12 @@ func validateCompensatingSemantics(before, after reportjson.Document, change Dra
 	}{}
 	beforeBlocks, afterBlocks := blockMap(before), blockMap(after)
 	beforeComponents, afterComponents := componentMap(before), componentMap(after)
+	if delta.Other && onlyTemplateChanged(before, after) {
+		candidates = append(candidates, struct {
+			operationType string
+			target        ChangeTarget
+		}{"TEMPLATE_UPDATE", ChangeTarget{}})
+	}
 	for blockID := range delta.AddedBlocks {
 		located := afterBlocks[blockID]
 		candidate := target
@@ -607,6 +617,12 @@ func blockOnlyStickyChanged(old, next reportjson.Block) bool {
 	oldSticky, nextSticky := old.Sticky, next.Sticky
 	old.Sticky, next.Sticky = nil, nil
 	return !reflect.DeepEqual(oldSticky, nextSticky) && reflect.DeepEqual(old, next)
+}
+
+func onlyTemplateChanged(before, after reportjson.Document) bool {
+	oldTemplate, nextTemplate := before.Template, after.Template
+	before.Template, after.Template = nil, nil
+	return !reflect.DeepEqual(oldTemplate, nextTemplate) && reflect.DeepEqual(before, after)
 }
 
 func blockOnlyConfigChanged(old, next reportjson.Block) bool {

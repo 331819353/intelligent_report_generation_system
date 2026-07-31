@@ -12,6 +12,7 @@ import (
 )
 
 var codePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}$`)
+var hexColorPattern = regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
 
 var componentTypes = map[string]bool{
 	"TITLE": true, "RICH_TEXT": true, "FILTER": true, "KPI": true,
@@ -226,6 +227,7 @@ func Validate(document Document) error {
 	}
 	validateReport(&issues, document.Report)
 	validateCanvas(&issues, document.Canvas)
+	validateTemplate(&issues, document.Template)
 	pageIDs := map[string]bool{}
 	pageOrders := map[int]bool{}
 	blockIDs := map[string]bool{}
@@ -954,6 +956,60 @@ func validateCanvas(issues *[]ValidationIssue, canvas Canvas) {
 	}
 	if canvas.VerticalOverflow != "SCROLL" {
 		add("canvas.verticalOverflow", "V1 必须为 SCROLL")
+	}
+}
+
+func validateTemplate(issues *[]ValidationIssue, template *ReportTemplate) {
+	if template == nil {
+		return
+	}
+	add := func(path, reason string) { *issues = append(*issues, ValidationIssue{Path: path, Reason: reason}) }
+	validateID(issues, "template.id", template.ID)
+	if template.Name == "" || len(template.Name) > 100 {
+		add("template.name", "长度必须为 1 到 100")
+	}
+	if len(template.PromptContext) > 4000 {
+		add("template.promptContext", "长度不能超过 4000")
+	}
+	if !oneOf(template.Typography.FontFamily, "SYSTEM", "SERIF", "MONOSPACE") {
+		add("template.typography.fontFamily", "必须为 SYSTEM、SERIF 或 MONOSPACE")
+	}
+	if template.Typography.Title.FontSize < 12 || template.Typography.Title.FontSize > 72 {
+		add("template.typography.title.fontSize", "必须在 12 到 72 之间")
+	}
+	if template.Typography.Title.FontWeight < 400 || template.Typography.Title.FontWeight > 900 || template.Typography.Title.FontWeight%100 != 0 {
+		add("template.typography.title.fontWeight", "必须为 400 到 900 的整百数")
+	}
+	if template.Typography.Body.FontSize < 10 || template.Typography.Body.FontSize > 24 {
+		add("template.typography.body.fontSize", "必须在 10 到 24 之间")
+	}
+	colors := []struct {
+		path  string
+		value string
+	}{
+		{"template.typography.title.color", template.Typography.Title.Color},
+		{"template.typography.body.color", template.Typography.Body.Color},
+		{"template.palette.primary", template.Palette.Primary},
+		{"template.palette.accent", template.Palette.Accent},
+		{"template.palette.muted", template.Palette.Muted},
+		{"template.canvas.backgroundColor", template.Canvas.BackgroundColor},
+		{"template.canvas.gridColor", template.Canvas.GridColor},
+		{"template.block.backgroundColor", template.Block.BackgroundColor},
+		{"template.block.borderColor", template.Block.BorderColor},
+	}
+	for _, color := range colors {
+		if !hexColorPattern.MatchString(color.value) {
+			add(color.path, "必须为六位十六进制颜色")
+		}
+	}
+	if template.Block.BorderRadius < 0 || template.Block.BorderRadius > 32 {
+		add("template.block.borderRadius", "必须在 0 到 32 之间")
+	}
+	if template.Block.Padding < 0 || template.Block.Padding > 24 {
+		add("template.block.padding", "必须在 0 到 24 之间")
+	}
+	if !oneOf(template.Block.Shadow, "NONE", "SOFT", "MEDIUM") {
+		add("template.block.shadow", "必须为 NONE、SOFT 或 MEDIUM")
 	}
 }
 

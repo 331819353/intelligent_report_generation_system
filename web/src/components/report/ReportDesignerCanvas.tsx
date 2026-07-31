@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { CaretDown, ChartLineUp, Eye, EyeSlash, GearSix, GridFour, ListChecks, SlidersHorizontal, TextT, TreeStructure } from '@phosphor-icons/react'
-import type { BlockSticky, ComponentSticky, ComponentType, Grid, ReportBlock, ReportDocument, ReportRuntimeContext, ReportSelection, ReportValidationIssue, Sticky } from '../../lib/report-contract'
+import type { BlockSticky, ComponentSticky, ComponentType, Grid, ReportBlock, ReportDocument, ReportRuntimeContext, ReportSelection, ReportTemplate, ReportValidationIssue, Sticky } from '../../lib/report-contract'
 import type { ReportDraftChange, ReportEditorState } from '../../lib/report-drafts'
 import { acknowledgeReportEditorChanges, commitReportEditorHistory, createReportEditorHistory, redoReportEditorHistory, undoReportEditorHistory, type ReportEditorHistory, type ReportEditorOperationInput, type ReportEditorSnapshot } from '../../lib/report-history'
-import { addComponent, createBlockAtCell, createBlockWithComponent, deleteComponent, duplicateComponent, MAX_EDITOR_CONTENT_ROWS, MAX_STICKY_TOP, MAX_STICKY_Z_INDEX, resetBlock, updateBlockDefinition, updateBlockGrid, updateBlockSticky, updateComponentGrid, updateComponentSticky, type BlockResetMode, type LayoutUpdateResult } from '../../lib/report-layout'
+import { addComponent, createBlockAtCell, createBlockWithComponent, deleteComponent, duplicateComponent, MAX_EDITOR_CONTENT_ROWS, MAX_STICKY_TOP, MAX_STICKY_Z_INDEX, resetBlock, updateBlockDefinition, updateBlockGrid, updateBlockSticky, updateComponentGrid, updateComponentSticky, updateReportTemplate, type BlockResetMode, type LayoutUpdateResult } from '../../lib/report-layout'
 import { validateReportDocument } from '../../lib/report-schema'
+import { buildReportTemplatePromptContext, defaultReportTemplate } from '../../lib/report-template'
 import { ComponentPalette } from './ComponentPalette'
 import { ReportContractFailure, ReportRenderer } from './ReportRenderer'
 
@@ -28,6 +29,8 @@ export type ReportDesignerTransition = {
   pendingChanges: ReportDraftChange[]
 }
 
+type DesignerViewMode = 'DESIGN' | 'PREVIEW' | 'CONFIG'
+
 /** 校验服务端草稿，并在内存中维护 Patch 历史；浏览器会话不再是报告事实来源。 */
 export function ReportDesignerCanvas({ source, runtime, onChange, onTransition, initialEditorState, initialPendingChanges, acknowledgedClientOperationIds, loadGeneration = 0, pendingComponentType, onPendingComponentTypeChange, onPendingComponentConsumed }: ReportDesignerCanvasProps) {
   const validation = validateReportDocument(source)
@@ -44,6 +47,9 @@ function EditableDocument({ initialDocument, initialEditorState, initialPendingC
   const [issue, setIssue] = useState<ReportValidationIssue>()
   const [pendingReset, setPendingReset] = useState<{ pageID: string; blockID: string; mode: BlockResetMode; componentCount: number }>()
   const [selection, setSelection] = useState<ReportSelection | undefined>(() => firstBlockSelection(initialDocument))
+  const [viewMode, setViewMode] = useState<DesignerViewMode>('DESIGN')
+  const [copyMessage, setCopyMessage] = useState('')
+  const [templateSelected, setTemplateSelected] = useState(true)
   const historyRef = useRef(history)
   const document = history.present.document
   const canEdit = runtime.permissions?.includes('report:edit') === true
@@ -160,6 +166,18 @@ function EditableDocument({ initialDocument, initialEditorState, initialPendingC
     })
   }
 
+  function handleTemplateChange(template: ReportTemplate, summary: string) {
+    commit(updateReportTemplate(document, template), {
+      operationType: 'TEMPLATE_UPDATE',
+      summary,
+    })
+  }
+
+  function selectTarget(nextSelection: ReportSelection) {
+    setTemplateSelected(false)
+    setSelection(nextSelection)
+  }
+
   function handleBlockReset(pageID: string, blockID: string, mode: BlockResetMode) {
     if (!canEdit) return setIssue({ path: '$', reason: '当前用户没有报告编辑权限' })
     const block = document.pages.find(page => page.id === pageID)?.blocks.find(item => item.id === blockID)
@@ -222,6 +240,13 @@ function EditableDocument({ initialDocument, initialEditorState, initialPendingC
     applyHistory(redoReportEditorHistory(historyRef.current))
   }
 
+  function copyConfiguration() {
+    void navigator.clipboard.writeText(JSON.stringify(document, null, 2)).then(
+      () => setCopyMessage('配置已复制'),
+      () => setCopyMessage('复制失败，请手动选择'),
+    )
+  }
+
   function handleResetDialogKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
     if (event.key === 'Escape') {
       event.preventDefault()
@@ -248,9 +273,11 @@ function EditableDocument({ initialDocument, initialEditorState, initialPendingC
           <header><TreeStructure size={18} weight="duotone" /><div><strong>页面结构</strong><span>JSON 层级</span></div></header>
           <DesignerStructureTree
             document={document}
-            selection={effectiveSelection}
+            selection={templateSelected ? undefined : effectiveSelection}
+            templateSelected={templateSelected}
             canEdit={canEdit}
-            onSelectionChange={setSelection}
+            onTemplateSelect={() => setTemplateSelected(true)}
+            onSelectionChange={selectTarget}
             onBlockChange={handleBlockDefinitionChange}
           />
           <details className="report-component-library">
@@ -262,38 +289,55 @@ function EditableDocument({ initialDocument, initialEditorState, initialPendingC
         <main className="report-designer-center">
           <div className="report-history-toolbar" aria-label="报告编辑历史">
             <div><strong>设计画板</strong><span>160 × 108 分格 · 12 列 · 纵向自动扩展</span></div>
+            <div className="report-view-switch" role="tablist" aria-label="报告视图">
+              <button type="button" role="tab" aria-selected={viewMode === 'DESIGN'} onClick={() => setViewMode('DESIGN')}>设计</button>
+              <button type="button" role="tab" aria-selected={viewMode === 'PREVIEW'} onClick={() => setViewMode('PREVIEW')}>预览</button>
+              <button type="button" role="tab" aria-selected={viewMode === 'CONFIG'} onClick={() => setViewMode('CONFIG')}>配置</button>
+            </div>
             <button type="button" disabled={!canEdit || history.past.length === 0} onClick={undo}>撤销</button>
             <button type="button" disabled={!canEdit || history.future.length === 0} onClick={redo}>重做</button>
-            <span>当前：{history.present.operation}</span>
           </div>
           {!canEdit && <div className="report-layout-issue" role="status">当前账号仅可查看报告，没有编辑权限。</div>}
           {issue && <div className="report-layout-issue" role="alert"><code>{issue.path}</code>：{issue.reason}</div>}
           <div className="report-designer-canvas-scroll">
-            <ReportRenderer
-              document={document}
-              runtime={runtime}
-              mode="designer"
-              warnings={warnings}
-              onBlockGridChange={canEdit ? handleBlockGridChange : undefined}
-              onComponentGridChange={canEdit ? handleComponentGridChange : undefined}
-              onComponentDrop={canEdit ? handleComponentDrop : undefined}
-              onComponentDuplicate={canEdit ? handleComponentDuplicate : undefined}
-              onComponentDelete={canEdit ? handleComponentDelete : undefined}
-              onBlockReset={canEdit ? handleBlockReset : undefined}
-              onEmptyCellActivate={canEdit ? handleEmptyCellActivate : undefined}
-              onEmptyCellDrop={canEdit ? handleEmptyCellDrop : undefined}
-              designerContentRows={history.present.minimumRowsByPage}
-              pendingComponentType={pendingComponentType}
-              onPendingComponentConsumed={onPendingComponentConsumed}
-              selection={effectiveSelection}
-              onSelectionChange={setSelection}
-            />
+            {viewMode === 'CONFIG' ? (
+              <section className="report-config-source" aria-label="报告 JSON 配置">
+                <header>
+                  <div><strong>报告配置文件</strong><span>设计画板与预览引擎的唯一输入</span></div>
+                  <button type="button" onClick={copyConfiguration}>{copyMessage || '复制 JSON'}</button>
+                </header>
+                <pre>{JSON.stringify(document, null, 2)}</pre>
+              </section>
+            ) : (
+              <ReportRenderer
+                document={document}
+                runtime={runtime}
+                mode={viewMode === 'PREVIEW' ? 'viewer' : 'designer'}
+                warnings={warnings}
+                onBlockGridChange={viewMode === 'DESIGN' && canEdit ? handleBlockGridChange : undefined}
+                onComponentGridChange={viewMode === 'DESIGN' && canEdit ? handleComponentGridChange : undefined}
+                onComponentDrop={viewMode === 'DESIGN' && canEdit ? handleComponentDrop : undefined}
+                onComponentDuplicate={viewMode === 'DESIGN' && canEdit ? handleComponentDuplicate : undefined}
+                onComponentDelete={viewMode === 'DESIGN' && canEdit ? handleComponentDelete : undefined}
+                onBlockReset={viewMode === 'DESIGN' && canEdit ? handleBlockReset : undefined}
+                onEmptyCellActivate={viewMode === 'DESIGN' && canEdit ? handleEmptyCellActivate : undefined}
+                onEmptyCellDrop={viewMode === 'DESIGN' && canEdit ? handleEmptyCellDrop : undefined}
+                designerContentRows={history.present.minimumRowsByPage}
+                pendingComponentType={pendingComponentType}
+                onPendingComponentConsumed={onPendingComponentConsumed}
+                selection={viewMode === 'DESIGN' && !templateSelected ? effectiveSelection : undefined}
+                onSelectionChange={viewMode === 'DESIGN' ? selectTarget : undefined}
+              />
+            )}
           </div>
         </main>
         <aside className="report-inspector-panel">
           <DesignerInspector
             target={selectedTarget}
+            template={document.template ?? defaultReportTemplate}
+            templateSelected={templateSelected}
             canEdit={canEdit}
+            onTemplateChange={handleTemplateChange}
             onBlockChange={handleBlockDefinitionChange}
             onBlockStickyChange={handleBlockStickyChange}
             onComponentStickyChange={handleComponentStickyChange}
@@ -305,7 +349,7 @@ function EditableDocument({ initialDocument, initialEditorState, initialPendingC
           <section className="report-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="report-reset-title" aria-describedby="report-reset-description" onKeyDown={handleResetDialogKeyDown}>
             <span>不可逆操作确认</span>
             <h3 id="report-reset-title">{pendingReset.mode === 'CLEAR' ? '清空分块' : '删除分块'}</h3>
-            <p id="report-reset-description">将移除该分块中的 <strong>{pendingReset.componentCount}</strong> 个组件，并把原区域恢复为空白 1×1 基础单元。</p>
+            <p id="report-reset-description">将移除该分块中的 <strong>{pendingReset.componentCount}</strong> 个组件，并把原区域恢复为可添加 4×3 分块的空白区域。</p>
             <div>
               <button type="button" autoFocus onClick={() => setPendingReset(undefined)}>取消</button>
               <button type="button" className="danger-button" onClick={() => executeBlockReset(pendingReset.pageID, pendingReset.blockID, pendingReset.mode)}>{pendingReset.mode === 'CLEAR' ? '确认清空' : '确认删除'}</button>
@@ -324,29 +368,85 @@ type SelectedTarget =
 type MenuCellKey = keyof NonNullable<ReportBlock['menuLayout']>['cells']
 type ContentAreaKey = keyof NonNullable<ReportBlock['contentLayout']>['areas']
 
-function DesignerStructureTree({ document, selection, canEdit, onSelectionChange, onBlockChange }: { document: ReportDocument; selection?: ReportSelection; canEdit: boolean; onSelectionChange: (selection: ReportSelection) => void; onBlockChange: (block: ReportBlock, summary: string) => void }) {
+function DesignerStructureTree({ document, selection, templateSelected, canEdit, onTemplateSelect, onSelectionChange, onBlockChange }: { document: ReportDocument; selection?: ReportSelection; templateSelected: boolean; canEdit: boolean; onTemplateSelect: () => void; onSelectionChange: (selection: ReportSelection) => void; onBlockChange: (block: ReportBlock, summary: string) => void }) {
   const pages = [...document.pages].sort((left, right) => left.order - right.order)
+  const [collapsedPageIDs, setCollapsedPageIDs] = useState<Set<string>>(() => new Set())
+  const [collapsedBlockIDs, setCollapsedBlockIDs] = useState<Set<string>>(() => new Set())
+  const allCollapsed = pages.length > 0 && pages.every(page => collapsedPageIDs.has(page.id))
+
+  const togglePage = (pageID: string) => {
+    setCollapsedPageIDs(current => {
+      const next = new Set(current)
+      if (next.has(pageID)) next.delete(pageID)
+      else next.add(pageID)
+      return next
+    })
+  }
+
+  const toggleBlock = (blockKey: string) => {
+    setCollapsedBlockIDs(current => {
+      const next = new Set(current)
+      if (next.has(blockKey)) next.delete(blockKey)
+      else next.add(blockKey)
+      return next
+    })
+  }
+
+  const toggleAll = () => {
+    if (allCollapsed) {
+      setCollapsedPageIDs(new Set())
+      setCollapsedBlockIDs(new Set())
+      return
+    }
+    setCollapsedPageIDs(new Set(pages.map(page => page.id)))
+    setCollapsedBlockIDs(new Set(pages.flatMap(page => page.blocks.map(block => `${page.id}:${block.id}`))))
+  }
+
   return (
     <nav className="report-structure-tree" aria-label="报告页面结构">
-      {pages.map(page => (
+      <button type="button" className={`report-template-node${templateSelected ? ' is-selected' : ''}`} onClick={onTemplateSelect}>
+        <GearSix size={16} weight="duotone" />
+        <span><strong>全局模板</strong><small>{document.template?.name ?? defaultReportTemplate.name}</small></span>
+      </button>
+      <div className="report-tree-toolbar">
+        <span>{pages.length} 个页面</span>
+        <button type="button" onClick={toggleAll}>{allCollapsed ? '展开全部' : '折叠全部'}</button>
+      </div>
+      {pages.map(page => {
+        const pageCollapsed = collapsedPageIDs.has(page.id)
+        return (
         <section key={page.id}>
-          <div className="report-tree-page"><CaretDown size={13} /><ListChecks size={16} /><strong>{page.name}</strong><span>{page.blocks.length}</span></div>
-          <div className="report-tree-children">
+          <button type="button" className="report-tree-page" aria-expanded={!pageCollapsed} onClick={() => togglePage(page.id)}>
+            <CaretDown className={`report-tree-caret${pageCollapsed ? ' is-collapsed' : ''}`} size={13} />
+            <ListChecks size={16} />
+            <strong>{page.name}</strong>
+            <span>{page.blocks.length}</span>
+          </button>
+          {!pageCollapsed && <div className="report-tree-children">
             {page.blocks.map(block => {
               const selected = selection?.blockID === block.id && selection.pageID === page.id && selection.kind === 'BLOCK'
+              const blockKey = `${page.id}:${block.id}`
+              const blockCollapsed = collapsedBlockIDs.has(blockKey)
+              const blockName = block.name ?? block.id
               return (
                 <div className="report-tree-block" key={block.id}>
-                  <button type="button" className={selected ? 'is-selected' : ''} onClick={() => onSelectionChange({ kind: 'BLOCK', pageID: page.id, blockID: block.id })}>
-                    <CaretDown size={12} /><BlockKindIcon block={block} /><span>{block.name ?? block.id}</span>
-                    <small>{block.grid.w}×{block.grid.h}</small>
+                  <div className={`report-tree-block-row${selected ? ' is-selected' : ''}`}>
+                    <button type="button" className="report-tree-toggle" aria-expanded={!blockCollapsed} aria-label={`${blockCollapsed ? '展开' : '折叠'}${blockName}`} onClick={() => toggleBlock(blockKey)}>
+                      <CaretDown className={`report-tree-caret${blockCollapsed ? ' is-collapsed' : ''}`} size={12} />
+                    </button>
+                    <button type="button" className="report-tree-block-select" onClick={() => onSelectionChange({ kind: 'BLOCK', pageID: page.id, blockID: block.id })}>
+                      <BlockKindIcon block={block} />
+                      <span>{blockName}</span>
+                      <small>{block.grid.w}×{block.grid.h}</small>
+                    </button>
                     <EyeToggle
                       visible={semanticBlockVisible(block)}
                       disabled={!canEdit || block.locks.config}
-                      label={`${block.name ?? block.id}显示`}
-                      onChange={() => onBlockChange(toggleBlockVisibility(block), `${semanticBlockVisible(block) ? '隐藏' : '显示'}${block.name ?? block.id}`)}
+                      label={`${blockName}显示`}
+                      onChange={() => onBlockChange(toggleBlockVisibility(block), `${semanticBlockVisible(block) ? '隐藏' : '显示'}${blockName}`)}
                     />
-                  </button>
-                  {block.kind === 'MENU' && block.menuLayout && (
+                  </div>
+                  {!blockCollapsed && block.kind === 'MENU' && block.menuLayout && (
                     <div className="report-tree-leaves">
                       {(Object.keys(block.menuLayout.cells) as MenuCellKey[]).map(cellKey => {
                         const cell = block.menuLayout!.cells[cellKey]
@@ -358,13 +458,16 @@ function DesignerStructureTree({ document, selection, canEdit, onSelectionChange
                       })}
                     </div>
                   )}
-                  {block.kind === 'CONTENT' && block.contentLayout && (
+                  {!blockCollapsed && block.kind === 'CONTENT' && block.contentLayout && (
                     <div className="report-tree-leaves">
                       {(Object.keys(block.contentLayout.areas) as ContentAreaKey[]).map(areaKey => {
                         const area = block.contentLayout!.areas[areaKey]
-                        return <TreeSemanticLeaf key={areaKey} label={contentAreaLabel(areaKey)} visible={area.visible} disabled={!canEdit || block.locks.config} onSelect={() => onSelectionChange({ kind: 'BLOCK', pageID: page.id, blockID: block.id })} onToggle={() => {
+                        if (!area) return null
+                        const required = areaKey === 'title'
+                        return <TreeSemanticLeaf key={areaKey} label={contentAreaLabel(areaKey)} visible={area.visible} disabled={!canEdit || block.locks.config || required} onSelect={() => onSelectionChange({ kind: 'BLOCK', pageID: page.id, blockID: block.id })} onToggle={() => {
+                          if (required) return
                           const next = structuredClone(block)
-                          next.contentLayout!.areas[areaKey].visible = !area.visible
+                          next.contentLayout!.areas[areaKey]!.visible = !area.visible
                           onBlockChange(next, `${area.visible ? '隐藏' : '显示'}${contentAreaLabel(areaKey)}`)
                         }} />
                       })}
@@ -378,9 +481,10 @@ function DesignerStructureTree({ document, selection, canEdit, onSelectionChange
                 </div>
               )
             })}
-          </div>
+          </div>}
         </section>
-      ))}
+        )
+      })}
     </nav>
   )
 }
@@ -423,8 +527,9 @@ function EyeToggle({ visible, disabled, label, onChange }: { visible: boolean; d
 
 type InspectorTab = 'LAYOUT' | 'CONTENT' | 'INTERACTION' | 'JSON'
 
-function DesignerInspector({ target, canEdit, onBlockChange, onBlockStickyChange, onComponentStickyChange }: { target?: SelectedTarget; canEdit: boolean; onBlockChange: (block: ReportBlock, summary: string) => void; onBlockStickyChange: (sticky: BlockSticky) => void; onComponentStickyChange: (sticky: ComponentSticky) => void }) {
+function DesignerInspector({ target, template, templateSelected, canEdit, onTemplateChange, onBlockChange, onBlockStickyChange, onComponentStickyChange }: { target?: SelectedTarget; template: ReportTemplate; templateSelected: boolean; canEdit: boolean; onTemplateChange: (template: ReportTemplate, summary: string) => void; onBlockChange: (block: ReportBlock, summary: string) => void; onBlockStickyChange: (sticky: BlockSticky) => void; onComponentStickyChange: (sticky: ComponentSticky) => void }) {
   const [tab, setTab] = useState<InspectorTab>(() => target?.block.kind ? 'LAYOUT' : 'INTERACTION')
+  if (templateSelected) return <ReportTemplateInspector template={template} canEdit={canEdit} onChange={onTemplateChange} />
   const block = target?.block
   const targetName = target?.kind === 'COMPONENT' ? target.component.name : block?.name ?? block?.id ?? '未选择'
   return (
@@ -449,6 +554,79 @@ function DesignerInspector({ target, canEdit, onBlockChange, onBlockStickyChange
       </div>
     </>
   )
+}
+
+function ReportTemplateInspector({ template, canEdit, onChange }: { template: ReportTemplate; canEdit: boolean; onChange: (template: ReportTemplate, summary: string) => void }) {
+  function emit(summary: string, update: (next: ReportTemplate) => void) {
+    const next = structuredClone(template)
+    update(next)
+    onChange(next, summary)
+  }
+
+  return (
+    <>
+      <header className="report-inspector-header report-template-header">
+        <div><GearSix size={18} weight="duotone" /><span>全局模板</span></div>
+        <strong>{template.name}</strong>
+        <small>同时约束 AI 上下文与渲染样式</small>
+      </header>
+      <div className="report-inspector-body report-template-editor">
+        <InspectorSection title="模板身份">
+          <TemplateTextField required label="模板名称" value={template.name} disabled={!canEdit} maxLength={100} onCommit={value => emit('修改模板名称', next => { next.name = value })} />
+          <label className="report-template-field"><span>字体体系</span><select value={template.typography.fontFamily} disabled={!canEdit} onChange={event => emit('修改模板字体', next => { next.typography.fontFamily = event.target.value as ReportTemplate['typography']['fontFamily'] })}><option value="SYSTEM">系统无衬线</option><option value="SERIF">衬线字体</option><option value="MONOSPACE">等宽字体</option></select></label>
+        </InspectorSection>
+        <InspectorSection title="全局提示词上下文">
+          <TemplateTextField multiline label="提示词" value={template.promptContext} disabled={!canEdit} maxLength={4000} onCommit={value => emit('修改模板提示词', next => { next.promptContext = value })} />
+          <p className="report-field-help">AI 生成或修改报告前，应把该上下文作为全局约束注入，不写入单个分块提示词。</p>
+        </InspectorSection>
+        <InspectorSection title="标题与正文">
+          <div className="report-template-number-grid">
+            <TemplateNumberField label="标题大小" suffix="px" value={template.typography.title.fontSize} min={12} max={72} disabled={!canEdit} onChange={value => emit('修改全局标题大小', next => { next.typography.title.fontSize = value })} />
+            <TemplateNumberField label="标题字重" value={template.typography.title.fontWeight} min={400} max={900} step={100} disabled={!canEdit} onChange={value => emit('修改全局标题字重', next => { next.typography.title.fontWeight = value })} />
+            <TemplateNumberField label="正文字号" suffix="px" value={template.typography.body.fontSize} min={10} max={24} disabled={!canEdit} onChange={value => emit('修改全局正文字号', next => { next.typography.body.fontSize = value })} />
+          </div>
+          <TemplateColorField label="标题颜色" value={template.typography.title.color} disabled={!canEdit} onChange={value => emit('修改全局标题颜色', next => { next.typography.title.color = value })} />
+          <TemplateColorField label="正文颜色" value={template.typography.body.color} disabled={!canEdit} onChange={value => emit('修改全局正文颜色', next => { next.typography.body.color = value })} />
+        </InspectorSection>
+        <InspectorSection title="全局配色">
+          <TemplateColorField label="主色" value={template.palette.primary} disabled={!canEdit} onChange={value => emit('修改模板主色', next => { next.palette.primary = value })} />
+          <TemplateColorField label="强调色" value={template.palette.accent} disabled={!canEdit} onChange={value => emit('修改模板强调色', next => { next.palette.accent = value })} />
+          <TemplateColorField label="辅助色" value={template.palette.muted} disabled={!canEdit} onChange={value => emit('修改模板辅助色', next => { next.palette.muted = value })} />
+        </InspectorSection>
+        <InspectorSection title="画布">
+          <TemplateColorField label="画布背景" value={template.canvas.backgroundColor} disabled={!canEdit} onChange={value => emit('修改画布背景', next => { next.canvas.backgroundColor = value })} />
+          <TemplateColorField label="网格颜色" value={template.canvas.gridColor} disabled={!canEdit} onChange={value => emit('修改画布网格颜色', next => { next.canvas.gridColor = value })} />
+        </InspectorSection>
+        <InspectorSection title="分块样式">
+          <TemplateColorField label="分块背景" value={template.block.backgroundColor} disabled={!canEdit} onChange={value => emit('修改分块背景', next => { next.block.backgroundColor = value })} />
+          <TemplateColorField label="边框颜色" value={template.block.borderColor} disabled={!canEdit} onChange={value => emit('修改分块边框', next => { next.block.borderColor = value })} />
+          <div className="report-template-number-grid">
+            <TemplateNumberField label="圆角" suffix="px" value={template.block.borderRadius} min={0} max={32} disabled={!canEdit} onChange={value => emit('修改分块圆角', next => { next.block.borderRadius = value })} />
+            <TemplateNumberField label="内边距" suffix="px" value={template.block.padding} min={0} max={24} disabled={!canEdit} onChange={value => emit('修改分块内边距', next => { next.block.padding = value })} />
+          </div>
+          <label className="report-template-field"><span>阴影强度</span><select value={template.block.shadow} disabled={!canEdit} onChange={event => emit('修改分块阴影', next => { next.block.shadow = event.target.value as ReportTemplate['block']['shadow'] })}><option value="NONE">无阴影</option><option value="SOFT">柔和</option><option value="MEDIUM">中等</option></select></label>
+        </InspectorSection>
+        <InspectorSection title="AI 合成上下文">
+          <pre className="report-template-prompt-preview">{buildReportTemplatePromptContext(template)}</pre>
+        </InspectorSection>
+      </div>
+    </>
+  )
+}
+
+function TemplateTextField({ label, value, multiline = false, required = false, disabled, maxLength, onCommit }: { label: string; value: string; multiline?: boolean; required?: boolean; disabled: boolean; maxLength: number; onCommit: (value: string) => void }) {
+  const [draft, setDraft] = useState(value)
+  useEffect(() => setDraft(value), [value])
+  const shared = { value: draft, disabled, maxLength, onChange: (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setDraft(event.target.value), onBlur: () => { const next = draft.trim(); if (required && !next) return setDraft(value); if (draft !== value) onCommit(required ? next : draft) } }
+  return <label className="report-template-field"><span>{label}</span>{multiline ? <textarea rows={6} {...shared} /> : <input type="text" {...shared} />}</label>
+}
+
+function TemplateNumberField({ label, suffix, value, min, max, step = 1, disabled, onChange }: { label: string; suffix?: string; value: number; min: number; max: number; step?: number; disabled: boolean; onChange: (value: number) => void }) {
+  return <label className="report-template-number"><span>{label}</span><div><input type="number" value={value} min={min} max={max} step={step} disabled={disabled} onChange={event => { const next = event.currentTarget.valueAsNumber; if (Number.isFinite(next)) onChange(Math.min(max, Math.max(min, Math.round(next / step) * step))) }} />{suffix && <em>{suffix}</em>}</div></label>
+}
+
+function TemplateColorField({ label, value, disabled, onChange }: { label: string; value: string; disabled: boolean; onChange: (value: string) => void }) {
+  return <label className="report-template-color"><span>{label}</span><div><input type="color" value={value} disabled={disabled} onChange={event => onChange(event.target.value.toUpperCase())} /><code>{value.toUpperCase()}</code></div></label>
 }
 
 function InspectorTabButton({ tab, active, label, icon, onSelect }: { tab: InspectorTab; active: InspectorTab; label: string; icon: ReactNode; onSelect: (tab: InspectorTab) => void }) {
@@ -525,9 +703,12 @@ function ContentLayoutEditor({ block, canEdit, onChange }: { block: ReportBlock;
       <InspectorSection title="内部区域">
         {(Object.keys(layout.areas) as ContentAreaKey[]).map(areaKey => {
           const area = layout.areas[areaKey]
-          return <ToggleRow key={areaKey} label={contentAreaLabel(areaKey)} description={`${area.componentIds.length} 个组件`} checked={area.visible} disabled={disabled} onChange={() => {
+          if (!area) return null
+          const required = areaKey === 'title'
+          return <ToggleRow key={areaKey} label={contentAreaLabel(areaKey)} description={required ? '必填 · 不可隐藏' : `${area.componentIds.length} 个组件`} checked={area.visible} disabled={disabled || required} onChange={() => {
+            if (required) return
             const next = structuredClone(block)
-            next.contentLayout!.areas[areaKey].visible = !area.visible
+            next.contentLayout!.areas[areaKey]!.visible = !area.visible
             onChange(next, `${area.visible ? '隐藏' : '显示'}${contentAreaLabel(areaKey)}`)
           }} />
         })}
@@ -573,7 +754,7 @@ function menuCellLabel(key: MenuCellKey) {
 }
 
 function contentAreaLabel(key: ContentAreaKey) {
-  return { title: '标题区（标题 + 筛选）', conclusion: '结论区', components: '组件图' }[key]
+  return { title: '标题区（必填）', filter: '筛选区', conclusion: '结论区', chart: '图表区', components: '图表区（兼容）' }[key]
 }
 
 function StickyEditor({ target, canEdit, onBlockChange, onComponentChange }: { target?: SelectedTarget; canEdit: boolean; onBlockChange: (sticky: BlockSticky) => void; onComponentChange: (sticky: ComponentSticky) => void }) {

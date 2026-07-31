@@ -1,0 +1,8 @@
+-- 模板是报告级全局配置，需要独立修订语义，不能伪装为分块配置修改。
+ALTER TABLE platform.report_revisions
+  DROP CONSTRAINT report_revisions_operation_type_check,
+  ADD CONSTRAINT report_revisions_operation_type_check CHECK(operation_type IN (
+    'REPORT_CREATE','TEMPLATE_UPDATE','BLOCK_MOVE','BLOCK_RESIZE','BLOCK_CREATE','BLOCK_CLEAR','BLOCK_DELETE','BLOCK_STICKY_UPDATE',
+    'COMPONENT_MOVE','COMPONENT_RESIZE','COMPONENT_CREATE','COMPONENT_COPY','COMPONENT_DELETE','COMPONENT_STICKY_UPDATE',
+    'LEGACY_DRAFT_RECOVERY','UNDO','REDO'
+  ));

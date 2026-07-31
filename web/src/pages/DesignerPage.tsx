@@ -329,7 +329,7 @@ export function DesignerPage() {
   const actions = <>
     <span className={`report-draft-status report-draft-status--${statusLabel}`}>{statusLabel}</span>
     <button type="button" className="quiet-button" disabled>✦ AI 修改</button>
-    <button type="button" className="quiet-button" disabled={!seed}>预览</button>
+    <button type="button" className="quiet-button" disabled={!transition} onClick={() => transition && exportReportJSON(transition.document, 'designer-config')}>导出配置</button>
     <button type="button" className="primary-button" disabled={saveDisabled} onClick={handleSave}>{retryCandidate ? '重试保存' : baseline ? '保存草稿' : '创建草稿'}</button>
     <button type="button" className="quiet-button" disabled title="不可变发布版本将在 T0601 接入">发布</button>
   </>

@@ -7,6 +7,7 @@ export type ReportEditorState = {
 }
 
 export type ReportOperationType =
+  | 'TEMPLATE_UPDATE'
   | 'BLOCK_MOVE'
   | 'BLOCK_RESIZE'
   | 'BLOCK_CREATE'

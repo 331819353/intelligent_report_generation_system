@@ -63,11 +63,17 @@ function validateDesignerBlockSemantics(document: ReportDocument): ReportValidat
       if (block.kind !== 'CONTENT') return
       const path = `pages[${pageIndex}].blocks[${blockIndex}]`
       if (!block.contentLayout) {
-        issues.push({ path: `${path}.contentLayout`, reason: '内容区必须声明标题、结论和组件图区域' })
+        issues.push({ path: `${path}.contentLayout`, reason: '内容分块必须声明标题、筛选、结论和图表区域' })
         return
       }
       const componentIDs = new Set(block.components.map(component => component.id))
+      const titleArea = block.contentLayout.areas.title
+      const hasTitle = titleArea.componentIds.some(componentID => block.components.some(component => component.id === componentID && component.type === 'TITLE'))
+      if (!titleArea.visible || !hasTitle) {
+        issues.push({ path: `${path}.contentLayout.areas.title`, reason: '标题区必须显示并引用所属分块内的标题组件' })
+      }
       Object.entries(block.contentLayout.areas).forEach(([areaName, area]) => {
+        if (!area) return
         area.componentIds.forEach((componentID, componentIndex) => {
           if (!componentIDs.has(componentID)) {
             issues.push({

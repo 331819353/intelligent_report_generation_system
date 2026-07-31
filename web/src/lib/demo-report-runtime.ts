@@ -39,6 +39,39 @@ export const demoReportRuntime: ReportRuntimeContext = {
       data: { points: quarterRevenuePoints },
       updatedAt: '2026-07-15T10:30:00+08:00',
     },
+    chart_revenue: {
+      status: 'READY',
+      data: { points: monthlyRevenuePoints },
+      updatedAt: '2026-07-15T10:30:00+08:00',
+    },
+    chart_profit: {
+      status: 'READY',
+      data: { points: quarterRevenuePoints.map((point, index) => ({ ...point, id: `profit_${index}`, value: index === 0 ? 84 : 96 })) },
+      updatedAt: '2026-07-15T10:30:00+08:00',
+    },
+    chart_customer: {
+      status: 'READY',
+      data: { points: monthlyRevenuePoints.map((point, index) => ({ ...point, id: `customer_${index}`, value: 28 + index * 7 })) },
+      updatedAt: '2026-07-15T10:30:00+08:00',
+    },
+    chart_region: {
+      status: 'READY',
+      data: { points: [
+        chartPoint('region_east', '华东', 72, {}),
+        chartPoint('region_south', '华南', 61, {}),
+        chartPoint('region_north', '华北', 48, {}),
+      ] },
+      updatedAt: '2026-07-15T10:30:00+08:00',
+    },
+    chart_product: {
+      status: 'READY',
+      data: { points: [
+        chartPoint('product_a', '产品 A', 46, {}),
+        chartPoint('product_b', '产品 B', 32, {}),
+        chartPoint('product_c', '产品 C', 22, {}),
+      ] },
+      updatedAt: '2026-07-15T10:30:00+08:00',
+    },
     conclusion_overview: {
       status: 'READY',
       data: { summary: '营业收入连续三个月增长，二季度增长动能较一季度明显增强。' },
@@ -47,6 +80,26 @@ export const demoReportRuntime: ReportRuntimeContext = {
     conclusion_overview_growth: {
       status: 'READY',
       data: { summary: '二季度营业收入较一季度提升 41.2%，增长动能持续增强。' },
+      updatedAt: '2026-07-15T10:30:00+08:00',
+    },
+    conclusion_revenue: {
+      status: 'READY',
+      data: { summary: '营业收入连续三个月增长，增长动能保持稳定。' },
+      updatedAt: '2026-07-15T10:30:00+08:00',
+    },
+    conclusion_customer: {
+      status: 'READY',
+      data: { summary: '新增客户保持双位数增长，重点客户留存率持续改善。' },
+      updatedAt: '2026-07-15T10:30:00+08:00',
+    },
+    conclusion_product: {
+      status: 'READY',
+      data: { summary: '核心产品贡献近八成收入，产品结构整体健康。' },
+      updatedAt: '2026-07-15T10:30:00+08:00',
+    },
+    conclusion_risk: {
+      status: 'READY',
+      data: { summary: '关注华北区域回款周期和低毛利产品占比，建议下月重点跟进。' },
       updatedAt: '2026-07-15T10:30:00+08:00',
     },
     source_note: {

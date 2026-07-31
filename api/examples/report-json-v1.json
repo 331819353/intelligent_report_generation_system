@@ -25,6 +25,32 @@
     "scaleMode": "FIT_WIDTH",
     "verticalOverflow": "SCROLL"
   },
+  "template": {
+    "id": "template_business_light",
+    "name": "商务浅色",
+    "promptContext": "使用克制、专业、清晰的经营分析风格。标题简洁，图表优先表达趋势和对比；分块使用浅色背景与适度留白，结论必须突出证据和行动建议。",
+    "typography": {
+      "fontFamily": "SYSTEM",
+      "title": {"fontSize": 18, "color": "#172033", "fontWeight": 700},
+      "body": {"fontSize": 12, "color": "#344054"}
+    },
+    "palette": {
+      "primary": "#2864DC",
+      "accent": "#0E7490",
+      "muted": "#667085"
+    },
+    "canvas": {
+      "backgroundColor": "#F8FAFC",
+      "gridColor": "#DFE6EE"
+    },
+    "block": {
+      "backgroundColor": "#FFFFFF",
+      "borderColor": "#E1E7EF",
+      "borderRadius": 14,
+      "padding": 2,
+      "shadow": "SOFT"
+    }
+  },
   "theme": {
     "themeId": "theme_business_light",
     "pageBackground": "#FFFFFF",

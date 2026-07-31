@@ -5,6 +5,7 @@ import { buildReportInteractionCommand, type ReportInteractionExecutor } from '.
 import { calculateCanvasScale, deriveEmptyGridCells, LOGICAL_CANVAS_WIDTH, LOGICAL_ROW_HEIGHT, pointerDeltaToGrid, pointerDeltaToInnerGrid, pointerPositionToInnerGrid, type BlockResetMode, type EmptyGridCell } from '../../lib/report-layout'
 import { validateReportDocument } from '../../lib/report-schema'
 import { calculateReportStickyPlacements, reportStickyPlacementKey, type ReportStickyPlacement } from '../../lib/report-sticky'
+import { reportTemplateCSSVariables } from '../../lib/report-template'
 import { defaultComponentRegistry, type ReportComponentRegistry, UnknownComponentRenderer } from './componentRegistry'
 import { parseDraggedComponentType, REPORT_COMPONENT_DRAG_MIME } from './componentDrag'
 import { ReportErrorBoundary } from './ReportErrorBoundary'
@@ -213,7 +214,7 @@ function ReportRendererSession({ document, runtime, mode, registry, warnings = [
     : { placements: [], issues: [] }
   const stickyPlacements = new Map(stickyPlan.placements.map(placement => [placement.key, placement]))
   return (
-    <section className={`report-renderer report-renderer--${mode}`} data-render-mode={mode} aria-label={`${document.report.name}报告内容`}>
+    <section className={`report-renderer report-renderer--${mode}`} style={reportTemplateCSSVariables(document.template) as CSSProperties} data-render-mode={mode} aria-label={`${document.report.name}报告内容`}>
       {interactionStatus && <div className={`report-interaction-message${interactionStatus.kind === 'ERROR' ? ' report-interaction-message--error' : ''}`} role={interactionStatus.kind === 'ERROR' ? 'alert' : 'status'}>{interactionStatus.message}</div>}
       {warnings.length > 0 && (
         <div className="report-contract-warning" role="status">
@@ -410,7 +411,7 @@ function ReportBlockView({ pageID, block, mode, runtime, parameters, registry, s
               <ReportComponentView key={component.id} pageID={pageID} block={block} component={component} mode={mode} runtime={runtime} parameters={parameters} registry={registry} scale={scale} onComponentGridChange={onComponentGridChange} onComponentDuplicate={onComponentDuplicate} onComponentDelete={onComponentDelete} onInteraction={event => onComponentInteraction(component.id, event)} interactionBusy={busyComponentIDs.has(component.id)} drillLevel={drillLevels[component.id] ?? -1} selected={selection?.kind === 'COMPONENT' && selection.pageID === pageID && selection.blockID === block.id && selection.componentID === component.id} onSelectionChange={onSelectionChange} stickyPlacement={stickyPlacements.get(reportStickyPlacementKey('COMPONENT', component.id, block.id))} />
             ))}
             {mode === 'designer' && block.contentLayout && Object.entries(block.contentLayout.areas)
-              .filter(([, area]) => !area.visible)
+              .filter(([, area]) => area && !area.visible)
               .map(([areaName, area]) => <HiddenContentArea key={areaName} name={areaName} componentIDs={area.componentIds} block={block} />)}
           </div>
         )}
@@ -486,13 +487,13 @@ function HiddenContentArea({ name, componentIDs, block }: { name: string; compon
   const top = Math.min(...components.map(component => component.grid.y))
   const right = Math.max(...components.map(component => component.grid.x + component.grid.w))
   const bottom = Math.max(...components.map(component => component.grid.y + component.grid.h))
-  const labels: Record<string, string> = { title: '标题区（标题 + 筛选）', conclusion: '结论区', components: '组件图' }
+  const labels: Record<string, string> = { title: '标题区', filter: '筛选区', conclusion: '结论区', chart: '图表区', components: '图表区' }
   return <div className="report-content-area-hidden" style={gridStyle({ x: left, y: top, w: right - left, h: bottom - top })}><span>{labels[name] ?? name}已隐藏</span></div>
 }
 
 function visibleComponentsForBlock(block: ReportBlock): ReportComponent[] {
   const hiddenIDs = new Set(Object.values(block.contentLayout?.areas ?? {})
-    .filter(area => !area.visible)
+    .filter(area => area && !area.visible)
     .flatMap(area => area.componentIds))
   return block.components.filter(component => component.visible && !hiddenIDs.has(component.id))
 }
@@ -526,8 +527,8 @@ function EmptyGridCellButton({ pageID, cell, scale, pendingComponentType, onActi
     <button
       className="report-empty-cell"
       type="button"
-      style={gridStyle({ ...cell, w: 1, h: 1 })}
-      aria-label={`空白单元，第 ${cell.x + 1} 列，第 ${cell.y + 1} 行`}
+      style={gridStyle({ ...cell, w: 4, h: 3 })}
+      aria-label={`添加 4×3 分块，第 ${cell.x + 1} 列，第 ${cell.y + 1} 行`}
       data-cell-scale={scale.toFixed(4)}
       onClick={handleClick}
       onDragOver={event => { if (onDrop) event.preventDefault() }}

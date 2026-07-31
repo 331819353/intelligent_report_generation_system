@@ -9,6 +9,7 @@
     "schemaVersion": {"const": "1.0"},
     "report": {"$ref": "#/$defs/report"},
     "canvas": {"$ref": "#/$defs/canvas"},
+    "template": {"$ref": "#/$defs/reportTemplate"},
     "theme": {"type": "object"},
     "parameters": {"type": "array", "items": {"$ref": "#/$defs/parameter"}},
     "dataRequirements": {"type": "array", "items": {"$ref": "#/$defs/dataRequirement"}},
@@ -19,6 +20,75 @@
   "$defs": {
     "id": {"type": "string", "minLength": 1, "maxLength": 128},
     "code": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"},
+    "color": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
+    "reportTemplate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "promptContext", "typography", "palette", "canvas", "block"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 100},
+        "promptContext": {"type": "string", "maxLength": 4000},
+        "typography": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fontFamily", "title", "body"],
+          "properties": {
+            "fontFamily": {"enum": ["SYSTEM", "SERIF", "MONOSPACE"]},
+            "title": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["fontSize", "color", "fontWeight"],
+              "properties": {
+                "fontSize": {"type": "integer", "minimum": 12, "maximum": 72},
+                "color": {"$ref": "#/$defs/color"},
+                "fontWeight": {"type": "integer", "minimum": 400, "maximum": 900, "multipleOf": 100}
+              }
+            },
+            "body": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["fontSize", "color"],
+              "properties": {
+                "fontSize": {"type": "integer", "minimum": 10, "maximum": 24},
+                "color": {"$ref": "#/$defs/color"}
+              }
+            }
+          }
+        },
+        "palette": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["primary", "accent", "muted"],
+          "properties": {
+            "primary": {"$ref": "#/$defs/color"},
+            "accent": {"$ref": "#/$defs/color"},
+            "muted": {"$ref": "#/$defs/color"}
+          }
+        },
+        "canvas": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["backgroundColor", "gridColor"],
+          "properties": {
+            "backgroundColor": {"$ref": "#/$defs/color"},
+            "gridColor": {"$ref": "#/$defs/color"}
+          }
+        },
+        "block": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["backgroundColor", "borderColor", "borderRadius", "padding", "shadow"],
+          "properties": {
+            "backgroundColor": {"$ref": "#/$defs/color"},
+            "borderColor": {"$ref": "#/$defs/color"},
+            "borderRadius": {"type": "integer", "minimum": 0, "maximum": 32},
+            "padding": {"type": "integer", "minimum": 0, "maximum": 24},
+            "shadow": {"enum": ["NONE", "SOFT", "MEDIUM"]}
+          }
+        }
+      }
+    },
     "report": {
       "type": "object",
       "additionalProperties": false,
@@ -307,10 +377,12 @@
         "areas": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["title", "conclusion", "components"],
+          "required": ["title", "conclusion"],
           "properties": {
             "title": {"$ref": "#/$defs/contentArea"},
+            "filter": {"$ref": "#/$defs/contentArea"},
             "conclusion": {"$ref": "#/$defs/contentArea"},
+            "chart": {"$ref": "#/$defs/contentArea"},
             "components": {"$ref": "#/$defs/contentArea"}
           }
         }

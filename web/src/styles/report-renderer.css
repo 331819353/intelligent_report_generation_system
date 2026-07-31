@@ -89,3 +89,127 @@ body:has(.report-designer-workbench) .report-designer-workbench{height:calc(100v
 .report-designer-canvas-scroll{background:#e9edf2}
 .report-structure-panel>header{color:#344054}
 .report-json-preview{background:#202735;color:#d7deea}
+
+/* 报告设计器 V1 雏形：12 列主网格、默认 4×3 卡片与四区内容布局。 */
+.report-renderer .report-block{
+  box-sizing:border-box;
+  margin:4px;
+  border:1px solid #e1e7ef;
+  border-radius:14px;
+  padding:2px;
+  background:#fff;
+  box-shadow:0 5px 18px #22304812,0 1px 3px #2230480d;
+}
+.report-renderer--designer .report-block{border-color:#a9bdd9}
+.report-renderer .report-block>.report-inner-grid{border-radius:10px;overflow:hidden}
+.report-renderer--designer .report-block--selected{outline:3px solid #2864dc;outline-offset:-3px;box-shadow:0 7px 24px #2864dc26}
+.report-renderer--designer .report-page-canvas{
+  background-color:#f8fafc;
+  background-image:linear-gradient(#dfe6ee 1px,transparent 1px),linear-gradient(90deg,#dfe6ee 1px,transparent 1px);
+}
+.report-block--content .report-component{border-radius:7px;background:#fff}
+.report-block--content .report-title-component{justify-content:center;padding:9px 12px;background:#fff}
+.report-block--content .report-title-component>span{font-size:8px;letter-spacing:.09em}
+.report-block--content .report-title-component h2{margin-top:2px;font-size:18px;letter-spacing:-.02em}
+.report-block--content .report-filter-component{gap:4px;padding:7px 9px;background:#f8fafc}
+.report-block--content .report-filter-component>span{font-size:9px}
+.report-block--content .report-filter-component select,
+.report-block--content .report-filter-component input{padding:5px 7px;font-size:10px}
+.report-block--content .report-chart-component{padding:10px 12px}
+.report-block--content .report-chart-component header span{font-size:8px}
+.report-block--content .report-chart-component h3{margin:2px 0;font-size:14px}
+.report-block--content .report-chart-component header small{font-size:8px}
+.report-block--content .report-line-chart svg{max-height:135px}
+.report-block--content .report-bar-chart{padding-top:7px}
+.report-block--content .report-chart-interactions{display:none}
+.report-block--content .report-conclusion-component{border-left:3px solid #2864dc;padding:13px;background:#f3f7ff}
+.report-block--content .report-conclusion-component>span{font-size:8px;letter-spacing:.08em}
+.report-block--content .report-conclusion-component h3{margin:10px 0 6px;font-size:15px}
+.report-block--content .report-conclusion-component p{margin:0;font-size:10px;line-height:1.55}
+.report-block--content .report-conclusion-component small{font-size:8px}
+.report-block-label{right:10px;top:8px;border:1px solid #d6e2f2;border-radius:999px;background:#f4f8ff;padding:3px 8px;color:#40638d;font-weight:700}
+.report-resize-handle{right:8px;bottom:8px;width:25px;height:25px;border:0;border-radius:8px;background:#2864dc;color:#fff;box-shadow:0 3px 10px #2864dc45}
+.report-empty-cell{
+  margin:4px;
+  border:1px dashed #9fb2c9;
+  border-radius:14px;
+  background:#f3f6fa99;
+}
+.report-empty-cell::after{content:'＋ 添加 4×3 分块';font-size:13px;font-weight:700}
+.report-empty-cell:hover,.report-empty-cell:focus{border-width:2px;border-color:#2864dc;background:#eef4ff}
+.report-view-switch{display:flex!important;flex-direction:row!important;gap:2px;margin-right:6px;border:1px solid #d9e0e8;border-radius:8px;background:#eef1f5;padding:2px}
+.report-history-toolbar .report-view-switch button{border:0;border-radius:6px;background:transparent;padding:5px 10px;color:#64748b}
+.report-history-toolbar .report-view-switch button[aria-selected=true]{background:#fff;color:#2459bd;box-shadow:0 1px 4px #1f29371a}
+.report-config-source{width:min(960px,100%);margin:0 auto;border:1px solid #d7dfe9;border-radius:12px;background:#fff;box-shadow:0 10px 28px #22304812;overflow:hidden}
+.report-config-source>header{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e4e9ef;padding:13px 16px}
+.report-config-source>header div{display:grid;gap:2px}
+.report-config-source>header strong{font-size:13px}
+.report-config-source>header span{color:#8994a4;font-size:10px}
+.report-config-source>header button{border:1px solid #cfd8e5;border-radius:7px;background:#fff;padding:6px 10px;color:#315a91;font-size:11px}
+.report-config-source pre{height:calc(100vh - 190px);min-height:520px;margin:0;overflow:auto;background:#172033;color:#d8e2f0;padding:20px;font:11px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;tab-size:2}
+.report-renderer--viewer .report-block{border-color:#e8edf3;box-shadow:0 4px 15px #2230480f}
+
+/* 全局报告模板令牌：设计态、预览态和正式查看态保持一致。 */
+.report-renderer{font-family:var(--report-font-family);font-size:var(--report-body-size);color:var(--report-body-color)}
+.report-renderer .report-page-canvas{background-color:var(--report-canvas-background)}
+.report-renderer--designer .report-page-canvas{
+  background-color:var(--report-canvas-background);
+  background-image:linear-gradient(var(--report-grid-color) 1px,transparent 1px),linear-gradient(90deg,var(--report-grid-color) 1px,transparent 1px);
+}
+.report-renderer .report-block{
+  border-color:var(--report-block-border);
+  border-radius:var(--report-block-radius);
+  padding:var(--report-block-padding);
+  background:var(--report-block-background);
+  box-shadow:var(--report-block-shadow);
+}
+.report-renderer .report-block--content .report-component,
+.report-renderer .report-block--content .report-title-component,
+.report-renderer .report-block--content .report-chart-component,
+.report-renderer .report-block--content .report-filter-component{background:transparent}
+.report-renderer .report-title-component h2{font-family:var(--report-font-family);font-size:var(--report-title-size);font-weight:var(--report-title-weight);color:var(--report-title-color)}
+.report-renderer .report-title-component>span,
+.report-renderer .report-chart-component header span,
+.report-renderer .report-conclusion-component>span{color:var(--report-muted)}
+.report-renderer .report-line-chart{color:var(--report-primary)}
+.report-renderer .report-bar-chart i{background:var(--report-primary)}
+.report-renderer .report-conclusion-component{border-left-color:var(--report-accent)}
+
+.report-template-node{width:100%;display:flex;align-items:center;gap:9px;margin-bottom:10px;border:1px solid #dce4ee;border-radius:8px;background:#f8fafc;padding:9px 10px;color:#40516a;text-align:left}
+.report-template-node>span{min-width:0;display:grid;gap:2px}
+.report-template-node strong{font-size:11px}
+.report-template-node small{overflow:hidden;color:#8b96a7;font-size:9px;text-overflow:ellipsis;white-space:nowrap}
+.report-template-node.is-selected{border-color:#9bb9ed;background:#edf4ff;color:#2459bd;box-shadow:0 3px 10px #2864dc12}
+.report-template-header{background:linear-gradient(180deg,#f8fbff,#fff)}
+.report-template-editor{padding-bottom:28px}
+.report-template-field{display:grid;gap:6px;margin:9px 0;color:#596579;font-size:10px;font-weight:700}
+.report-template-field input,.report-template-field textarea,.report-template-field select{min-width:0;border:1px solid #ced7e2;border-radius:7px;background:#fff;padding:8px 9px;color:#27364b;font:inherit;font-size:11px;font-weight:500}
+.report-template-field textarea{resize:vertical;line-height:1.55}
+.report-template-number-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:8px 0}
+.report-template-number{display:grid;gap:5px;color:#596579;font-size:9px;font-weight:700}
+.report-template-number>div{display:flex;align-items:center;border:1px solid #ced7e2;border-radius:7px;background:#fff;overflow:hidden}
+.report-template-number input{min-width:0;width:100%;border:0;background:transparent;padding:7px 8px;color:#27364b;font-size:11px;outline:0}
+.report-template-number em{padding-right:8px;color:#8b96a7;font-size:9px;font-style:normal}
+.report-template-color{display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid #eef1f5;padding:7px 0;color:#596579;font-size:10px;font-weight:700}
+.report-template-color>div{display:flex;align-items:center;gap:7px}
+.report-template-color input{width:28px;height:24px;border:1px solid #cad4e0;border-radius:6px;background:#fff;padding:2px}
+.report-template-color code{color:#667085;font-size:9px}
+.report-template-prompt-preview{max-height:230px;margin:8px 0 0;overflow:auto;border:1px solid #dce4ef;border-radius:8px;background:#f7f9fc;color:#4b5c74;padding:11px;white-space:pre-wrap;font:9px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace}
+
+/* 页面结构树折叠：页面与分块分别维护展开状态，批量操作不修改报告 JSON。 */
+.report-tree-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 3px 6px;padding:0 5px;color:#98a2b3;font-size:9px}
+.report-tree-toolbar button{border:0;border-radius:5px;background:transparent;padding:4px 6px;color:#64748b;font-size:9px;cursor:pointer}
+.report-tree-toolbar button:hover,.report-tree-toolbar button:focus-visible{background:#eef3f8;color:#2459bd;outline:none}
+.report-tree-page{cursor:pointer}
+.report-tree-page:hover,.report-tree-page:focus-visible{background:#f3f6fa;outline:none}
+.report-tree-caret{flex:0 0 auto;transition:transform .16s ease}
+.report-tree-caret.is-collapsed{transform:rotate(-90deg)}
+.report-tree-block-row{display:grid;grid-template-columns:22px minmax(0,1fr) 24px;align-items:center;border-radius:6px;color:#42526a}
+.report-tree-block-row:hover{background:#f5f8fc}
+.report-tree-block-row.is-selected{background:#eaf2ff;color:#1f56bd}
+.report-tree-toggle{width:22px;height:28px;display:grid;place-items:center;border:0;background:transparent;padding:0;color:#78889d;cursor:pointer}
+.report-tree-toggle:focus-visible,.report-tree-block-select:focus-visible{border-radius:5px;outline:2px solid #8eb1ef;outline-offset:-2px}
+.report-tree-block-select{min-width:0;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:7px;border:0;background:transparent;padding:7px 2px;color:inherit;text-align:left;font-size:11px;cursor:pointer}
+.report-tree-block-select>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.report-tree-block-select>small{color:#99a3b1}
+.report-tree-block-row>span[role=button]{display:grid;place-items:center;color:#8592a5}

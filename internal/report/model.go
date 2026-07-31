@@ -34,6 +34,7 @@ var (
 )
 
 var allowedOperationTypes = map[string]bool{
+	"TEMPLATE_UPDATE":         true,
 	"BLOCK_MOVE":              true,
 	"BLOCK_RESIZE":            true,
 	"BLOCK_CREATE":            true,

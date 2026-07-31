@@ -117,8 +117,11 @@ export type ReportContentLayout = {
   visible: boolean
   areas: {
     title: ReportContentArea
+    filter?: ReportContentArea
     conclusion: ReportContentArea
-    components: ReportContentArea
+    chart?: ReportContentArea
+    /** 兼容早期草稿；新设计器使用 chart。 */
+    components?: ReportContentArea
   }
 }
 
@@ -146,6 +149,40 @@ export type ReportPage = {
   background?: Record<string, unknown>
   contentGridRows: number
   blocks: ReportBlock[]
+}
+
+export type ReportTemplate = {
+  id: string
+  name: string
+  promptContext: string
+  typography: {
+    fontFamily: 'SYSTEM' | 'SERIF' | 'MONOSPACE'
+    title: {
+      fontSize: number
+      color: string
+      fontWeight: number
+    }
+    body: {
+      fontSize: number
+      color: string
+    }
+  }
+  palette: {
+    primary: string
+    accent: string
+    muted: string
+  }
+  canvas: {
+    backgroundColor: string
+    gridColor: string
+  }
+  block: {
+    backgroundColor: string
+    borderColor: string
+    borderRadius: number
+    padding: number
+    shadow: 'NONE' | 'SOFT' | 'MEDIUM'
+  }
 }
 
 export type ReportParameter = {
@@ -196,6 +233,8 @@ export type ReportDocument = {
     scaleMode: 'FIT_WIDTH'
     verticalOverflow: 'SCROLL'
   }
+  template?: ReportTemplate
+  /** 兼容早期开放式主题字段；新设计器使用 template。 */
   theme?: Record<string, unknown>
   parameters?: ReportParameter[]
   dataRequirements?: Array<Record<string, unknown>>
