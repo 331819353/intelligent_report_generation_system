@@ -28,6 +28,8 @@
 | `GET` | `/api/v1/semantic-assets/releases/active` | 查询当前原子激活的 `semantic_version/content_hash` 和状态指针版本 |
 | `GET` | `/api/v1/semantic-assets/releases/{id}` | 查询发布包完整对象清单、验证结果和投影证据 |
 | `POST` | `/api/v1/semantic-assets/releases` | 创建固定对象清单和内容哈希的 DRAFT 发布包 |
+| `POST` | `/api/v1/semantic-assets/releases/bootstrap/preview` | 只读盘点当前已发布原生资产，返回可迁移候选、排除项和阻断项 |
+| `POST` | `/api/v1/semantic-assets/releases/bootstrap` | 显式把可迁移的当前原生资产创建为 DRAFT 发布包，不自动激活 |
 | `POST` | `/api/v1/semantic-assets/releases/{id}/validate` | 按 `expectedVersion` 执行七层合同完整性和关系安全门禁 |
 | `POST` | `/api/v1/semantic-assets/releases/{id}/activate` | 按发布包和状态指针双重乐观锁原子激活；四类投影必须 READY 且 hash 一致 |
 | `GET` | `/api/v1/semantic-assets` | 分页查询；支持 `q`、`knowledgeType`、`status`、`embeddingStatus` |
@@ -74,7 +76,14 @@ Relation、Dataset、Policy 和 QualityRule。服务端会执行对象类型相�
 - Metric 必须声明公式、粒度、默认时间、来源数据集、权限和质量规则；
 - Relation 必须认证、基数已知且 fanout 策略不能为 `UNSAFE`；
 - Time 必须声明时区、日历和完整周期策略；
-- Dataset 必须声明粒度、来源和新鲜度合同。
+- Dataset 必须声明粒度、来源和新鲜度合同；
+- Metric 的时间、数据集、允许维度、权限和质量引用必须唯一解析到同一发布包对象；
+- DimensionValue 使用 `dimensionId + canonicalCode + version` 的作用域复合身份，
+  NebulaGraph VID 同时包含维度 ID，不能用“华东”等裸文本作为全局值身份；
+- `aliases / positiveAliases / negativeAliases / hardNegativeExamples` 进入版本化 Alias
+  合同；服务端使用 NFKC/case-fold 生成 alias key，并拒绝同一对象正负极性冲突、
+  空值、控制字符和无界列表。跨对象一对多 Alias 可以发布，但问答时必须进入 Bundle
+  图验证和最小澄清，不能按热度静默覆盖。
 
 验证通过后发布包进入 `PROJECTING`。以下投影是固定门禁，不由客户端删减：
 
@@ -87,6 +96,29 @@ Relation、Dataset、Policy 和 QualityRule。服务端会执行对象类型相�
 `READY`。激活操作同时校验发布包 `expectedVersion` 和租户状态
 `expectedStateVersion`，在一个数据库事务中将旧版本标记为 `SUPERSEDED`、新版本标记
 为 `ACTIVE` 并切换活动指针。任何半发布状态都不能进入智能问答运行时。
+
+### 现有资产升级
+
+升级不是另建一套资产。`bootstrap/preview` 在租户事务中读取当前已发布指标、数据集、
+已验证指标—维度兼容关系、非敏感维度值和现有 RBAC，只把能够固定到当前发布版本与
+活动物化的对象转换为候选合同。调用者必须显式给出旧资产没有记录的时区、日历和完整
+周期策略，例如：
+
+```json
+{
+  "semanticVersion": "legacy-2026.08.03-v1",
+  "defaultTimezone": "Asia/Shanghai",
+  "defaultCalendar": "GREGORIAN",
+  "completePeriodPolicy": "EXCLUDE_INCOMPLETE",
+  "notes": "首次原生资产升级"
+}
+```
+
+预览返回 `sourceCounts`、`candidateCount` 和带 `BLOCKER/WARNING` 严重级别的
+`issues`。仍指向旧数据集版本的已发布指标会以 WARNING 排除，避免旧口径混入当前执行
+图；缺少公式、粒度、活动物化、查询角色或完整必需对象类型则为 BLOCKER。敏感维度成员
+不进入发布包、检索索引或 NebulaGraph。创建接口只接受无 BLOCKER 的候选，并仍需依次
+执行 validate、四投影和 activate；不会因“迁移”绕过发布门禁。
 
 批量导入请求示例：
 

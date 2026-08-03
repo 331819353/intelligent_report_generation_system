@@ -3,6 +3,7 @@ package semanticasset
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -86,6 +87,57 @@ func TestNormalizeSemanticReleaseRejectsMissingMetricEvidenceFields(t *testing.T
 	_, err := normalizeSemanticRelease(input)
 	if !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("incomplete metric error = %v", err)
+	}
+}
+
+func TestNormalizeSemanticReleaseRejectsAliasPolarityConflict(t *testing.T) {
+	input := completeSemanticReleaseInput()
+	for index := range input.Objects {
+		if input.Objects[index].ObjectType == "METRIC" {
+			input.Objects[index].Contract = json.RawMessage(`{
+				"title":"支付GMV","formula":"sum(paid_amount)",
+				"grain":["order_id"],"defaultTimeDimensionId":"paid_at",
+				"sourceDatasetIds":["paid_orders"],
+				"groupableDimensionIds":["sales_region"],
+				"permissionPolicyIds":["commerce_reader"],
+				"qualityRuleIds":["paid_orders_freshness"],
+				"positiveAliases":["支付 ＧＭＶ"],
+				"negativeAliases":["支付 GMV"]
+			}`)
+		}
+	}
+	_, err := normalizeSemanticRelease(input)
+	if !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), "ALIAS_POLARITY_CONFLICT") {
+		t.Fatalf("positive/negative normalized alias conflict error = %v", err)
+	}
+}
+
+func TestNormalizeSemanticReleaseUsesDimensionScopedValueIdentity(t *testing.T) {
+	input := completeSemanticReleaseInput()
+	owner := input.Objects[0].OwnerID
+	validFrom := input.Objects[0].ValidFrom
+	input.Objects = append(input.Objects,
+		SemanticReleaseObjectInput{
+			ObjectType: "DIMENSION_VALUE", ObjectID: "east_a", ObjectVersion: "1",
+			DomainID: "commerce", OwnerID: owner, Certification: "CERTIFIED",
+			Sensitivity: "INTERNAL", ValidFrom: validFrom,
+			Contract: json.RawMessage(`{
+				"title":"华东","dimensionId":"sales_region","canonicalCode":"EAST"
+			}`),
+		},
+		SemanticReleaseObjectInput{
+			ObjectType: "DIMENSION_VALUE", ObjectID: "east_b", ObjectVersion: "1",
+			DomainID: "commerce", OwnerID: owner, Certification: "CERTIFIED",
+			Sensitivity: "INTERNAL", ValidFrom: validFrom,
+			Contract: json.RawMessage(`{
+				"title":"东区","dimensionId":"sales_region","canonicalCode":"east"
+			}`),
+		},
+	)
+	_, err := normalizeSemanticRelease(input)
+	if !errors.Is(err, ErrInvalidRequest) ||
+		!strings.Contains(err.Error(), "DIMENSION_VALUE_COMPOSITE_KEY_CONFLICT") {
+		t.Fatalf("dimension-scoped duplicate canonical value error = %v", err)
 	}
 }
 

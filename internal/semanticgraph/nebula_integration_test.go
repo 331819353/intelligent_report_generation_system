@@ -84,7 +84,7 @@ func TestNebulaProjectionAndBoundedPathIntegration(t *testing.T) {
 	dimensionVID := StableVID(manifest.TenantID, "dataset", "integration_dimension", "1")
 	metricVID := StableVID(manifest.TenantID, "metric", "integration_gmv", "1")
 	regionVID := StableVID(manifest.TenantID, "dimension", "integration_region", "1")
-	northVID := StableVID(manifest.TenantID, "dimension_value", "integration_north", "1")
+	northVID := StableVID(manifest.TenantID, "dimension_value", "integration_region::integration_north", "1")
 	roleVID := StableVID(manifest.TenantID, "role", "integration_analyst", "1")
 	runtime := NewRuntime(client)
 	scope := Scope{TenantID: manifest.TenantID, SemanticVersion: manifest.SemanticVersion,
@@ -118,7 +118,7 @@ func TestNebulaProjectionAndBoundedPathIntegration(t *testing.T) {
 	authorized, _, err := runtime.FilterAuthorized(context.Background(), scope, AuthorizationRequest{
 		RoleVIDs: []string{roleVID}, CandidateVIDs: []string{metricVID, regionVID},
 	})
-	if err != nil || len(authorized) != 1 || authorized[0] != metricVID {
+	if err != nil || len(authorized) != 2 || authorized[0] != regionVID || authorized[1] != metricVID {
 		t.Fatalf("permission propagation failed: authorized=%#v error=%v", authorized, err)
 	}
 	impacted, _, err := runtime.ImpactAnalysis(context.Background(), scope, ImpactRequest{

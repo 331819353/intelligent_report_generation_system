@@ -48,7 +48,9 @@ BEGIN
     ('000094_semantic_materialization_graph_event'),
     ('000095_semantic_query_execution_quality'),
     ('000183_semantic_release_registry'),
-    ('000184_nebulagraph_projection_runtime')
+    ('000184_nebulagraph_projection_runtime'),
+    ('000185_semantic_question_graph_runtime'),
+    ('000186_semantic_runtime_projections')
   ) AS expected(version)
   LEFT JOIN platform_schema_migrations AS applied USING(version)
   WHERE applied.version IS NULL;
@@ -264,6 +266,59 @@ BEGIN
   END IF;
 
   SELECT count(*) INTO invalid_count
+  FROM platform.semantic_question_runs AS run
+  WHERE run.semantic_release_id IS NOT NULL
+    AND (
+      run.semantic_version=''
+      OR run.semantic_content_hash !~ '^[0-9a-f]{64}$'
+      OR NOT EXISTS(
+        SELECT 1
+        FROM platform.semantic_releases AS release
+        WHERE release.tenant_id=run.tenant_id
+          AND release.id=run.semantic_release_id
+          AND release.semantic_version=run.semantic_version
+          AND release.content_hash=run.semantic_content_hash
+      )
+    );
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'question runs are not pinned to an exact semantic release: %',invalid_count;
+  END IF;
+
+  SELECT count(*) INTO invalid_count
+  FROM platform.semantic_question_artifacts AS artifact
+  WHERE artifact.artifact_hash !~ '^[0-9a-f]{64}$'
+    OR jsonb_typeof(artifact.payload)<>'object'
+    OR artifact.payload ? 'normalizedText'
+    OR artifact.payload ? 'mentionText';
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'question replay artifacts are invalid or contain raw question text: %',invalid_count;
+  END IF;
+
+  SELECT count(*) INTO invalid_count
+  FROM platform.semantic_release_projections AS projection
+  JOIN platform.semantic_releases AS release
+    ON release.tenant_id=projection.tenant_id
+   AND release.id=projection.release_id
+  WHERE projection.status='READY'
+    AND (
+      (projection.target='EXECUTION_SEMANTIC_LAYER' AND (
+        SELECT count(*) FROM platform.semantic_execution_registry AS registry
+        WHERE registry.tenant_id=projection.tenant_id
+          AND registry.release_id=projection.release_id
+	      )<>release.object_count)
+      OR
+      (projection.target='SEARCH_INDEX' AND (
+        SELECT count(DISTINCT (document.object_type,document.object_id,document.object_version))
+        FROM platform.semantic_release_search_documents AS document
+        WHERE document.tenant_id=projection.tenant_id
+          AND document.release_id=projection.release_id
+	      )<>release.object_count)
+    );
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'ready semantic runtime projections are incomplete: %',invalid_count;
+  END IF;
+
+  SELECT count(*) INTO invalid_count
   FROM platform.semantic_releases AS release
   LEFT JOIN platform.semantic_release_state AS state
     ON state.tenant_id=release.tenant_id
@@ -329,6 +384,20 @@ SELECT (
   )
   AND NOT has_table_privilege(
     :'worker_user','platform.semantic_graph_plan_cache','INSERT,UPDATE,DELETE'
+  )
+  AND NOT has_table_privilege(
+    :'worker_user','platform.semantic_question_artifacts','INSERT,UPDATE,DELETE'
+  )
+  AND NOT has_table_privilege(
+    :'app_user','platform.semantic_execution_registry','INSERT,UPDATE,DELETE'
+  )
+  AND NOT has_table_privilege(
+    :'app_user','platform.semantic_release_search_documents','INSERT,UPDATE,DELETE'
+  )
+  AND has_function_privilege(
+    :'worker_user',
+    'platform.claim_semantic_runtime_projection(uuid,text,integer)',
+    'EXECUTE'
   )
   AND has_function_privilege(
     :'worker_user',

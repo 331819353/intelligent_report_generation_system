@@ -216,7 +216,7 @@ WHERE to_regclass('platform.semantic_qa_settings') IS NOT NULL
 
 -- 问答运行状态是 API 编排事实。worker 可读取用于观测，但不能伪造状态迁移。
 SELECT format(
-  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.semantic_question_runs, platform.semantic_question_run_events FROM %I',
+  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.semantic_question_runs, platform.semantic_question_run_events, platform.semantic_question_artifacts FROM %I',
   :'worker_user'
 )
 WHERE to_regclass('platform.semantic_question_runs') IS NOT NULL
@@ -254,6 +254,32 @@ SELECT format(
   :'worker_user',:'connection_test_user'
 )
 WHERE to_regclass('platform.semantic_graph_plan_cache') IS NOT NULL
+\gexec
+
+-- PostgreSQL-backed release projections are written only by the generic semantic
+-- runtime worker. API and connection-test roles can read the outputs but cannot
+-- fabricate an execution registry or a versioned search index.
+SELECT format(
+  'REVOKE ALL ON FUNCTION platform.list_semantic_runtime_projection_tenants(), platform.claim_semantic_runtime_projection(uuid,text,integer), platform.complete_semantic_runtime_projection(uuid,uuid,text,uuid,text,text,integer,jsonb), platform.fail_semantic_runtime_projection(uuid,uuid,text,uuid,text,jsonb) FROM PUBLIC, %I, %I, %I',
+  :'app_user',:'worker_user',:'connection_test_user'
+)
+WHERE to_regprocedure(
+  'platform.claim_semantic_runtime_projection(uuid,text,integer)'
+) IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.list_semantic_runtime_projection_tenants(), platform.claim_semantic_runtime_projection(uuid,text,integer), platform.complete_semantic_runtime_projection(uuid,uuid,text,uuid,text,text,integer,jsonb), platform.fail_semantic_runtime_projection(uuid,uuid,text,uuid,text,jsonb) TO %I',
+  :'worker_user'
+)
+WHERE to_regprocedure(
+  'platform.claim_semantic_runtime_projection(uuid,text,integer)'
+) IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.semantic_execution_registry, platform.semantic_release_search_documents FROM %I, %I',
+  :'app_user',:'connection_test_user'
+)
+WHERE to_regclass('platform.semantic_execution_registry') IS NOT NULL
 \gexec
 
 SELECT format(

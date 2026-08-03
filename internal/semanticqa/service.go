@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/metric"
+	"intelligent-report-generation-system/internal/semanticgraph"
 )
 
 var (
@@ -74,9 +75,14 @@ type Service struct {
 	interpreter     QueryInterpreter
 	questionMu      sync.Mutex
 	activeQuestions map[string]context.CancelFunc
+	semanticGraph   semanticgraph.Graph
 	metricExecutor  interface {
 		PreviewVersion(context.Context, string, string, string, string, metric.PreviewInput) (dataset.PreviewResult, error)
 	}
+}
+
+func (service *Service) SetSemanticGraph(graph semanticgraph.Graph) {
+	service.semanticGraph = graph
 }
 
 func NewService(
@@ -918,7 +924,7 @@ func (service *Service) PlanQueryTurn(
 	// context metric) is fixed do Jieba tokens enter the dimension/time semantic
 	// completion used by stage two. This prevents early dimension retrieval from
 	// influencing which metric catalog is selected.
-	if tokenizer, ok := service.interpreter.(QueryTokenizer); ok {
+	if tokenizer, ok := service.interpreter.(QueryTokenizer); ok && !input.GovernedUnderstanding {
 		reportQueryTurnProgress(
 			ctx, QueryProgressStageDimensionEnrichment,
 			QueryProgressStatusRunning,
@@ -987,6 +993,10 @@ func (service *Service) PlanQueryTurn(
 			MetricMatchMethod:    turnSlots.MetricMatchMethod,
 			Domain:               turnSlots.Domains[metricCode],
 		}
+		if inferQueryTimePreset(planInput.Question) != "" ||
+			inferQueryComparisonMode(planInput.Question) != "" {
+			planInput.Timezone = input.Timezone
+		}
 		if timeRange, found := semanticHintTimeRange(
 			input.SemanticHints.DimensionValues,
 		); found {
@@ -1005,7 +1015,7 @@ func (service *Service) PlanQueryTurn(
 		}
 		dimensionHandledByTool := false
 		if resolver, ok := service.interpreter.(QueryDimensionToolLoopResolver); ok &&
-			len(input.ConfirmedDecisions) == 0 {
+			len(input.ConfirmedDecisions) == 0 && !input.GovernedUnderstanding {
 			resolution, resolveErr := resolver.ResolveDimensionsWithToolLoop(
 				ctx, tenantID, actorID, metricCode, dimensionBaseQuestion,
 				input.SemanticHints.DimensionValues,
@@ -1049,7 +1059,12 @@ func (service *Service) PlanQueryTurn(
 				}
 			}
 		}
-		if !dimensionHandledByTool {
+		if input.GovernedUnderstanding {
+			// The orchestrator proved that every meaningful span in this narrow
+			// question is the exact metric plus deterministic time/comparison
+			// language. An empty member-filter set is therefore complete.
+			planInput.DimensionResolutionComplete = true
+		} else if !dimensionHandledByTool {
 			if enricher, ok := service.interpreter.(QueryDimensionHintEnricher); ok &&
 				len(input.SemanticHints.DimensionValues) > 0 {
 				lookups, enrichErr := enricher.EnrichDimensionLookupsWithHints(

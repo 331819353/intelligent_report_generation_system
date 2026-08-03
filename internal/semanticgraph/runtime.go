@@ -176,6 +176,14 @@ func (runtime *Runtime) FilterAuthorized(
 		  AND permission.semantic_version==$semantic_version
 		  AND permission.certified==true
 		RETURN id(candidate) AS candidate_vid LIMIT 1`
+	propagationStatement := `MATCH (r:role)-[permission:can_access]->(root)-[rels:contains|measures|depends_on|sourced_from|groupable_by|belongs_to|has_value|derived_from|guards|uses*1..3]->(candidate)
+		WHERE id(r)==$role_vid AND id(candidate)==$candidate_vid
+		  AND permission.tenant_scope==$tenant_scope
+		  AND permission.semantic_version==$semantic_version
+		  AND permission.certified==true
+		  AND ALL(rel IN rels WHERE rel.tenant_scope==$tenant_scope
+		    AND rel.semantic_version==$semantic_version AND rel.certified==true)
+		RETURN id(candidate) AS candidate_vid LIMIT 1`
 	allowed := map[string]bool{}
 	for _, roleVID := range uniqueStrings(request.RoleVIDs) {
 		for _, candidateVID := range uniqueStrings(request.CandidateVIDs) {
@@ -184,6 +192,14 @@ func (runtime *Runtime) FilterAuthorized(
 			}))
 			if err != nil {
 				return nil, Evidence{}, err
+			}
+			if len(result.Rows) == 0 {
+				result, err = runtime.executor.Execute(ctx, propagationStatement, runtime.parameters(scope, map[string]any{
+					"role_vid": roleVID, "candidate_vid": candidateVID,
+				}))
+				if err != nil {
+					return nil, Evidence{}, err
+				}
 			}
 			if len(result.Rows) == 1 {
 				allowed[candidateVID] = true

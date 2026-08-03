@@ -85,21 +85,42 @@ func (store *PostgresStore) SaveQuestionOutcome(
 	}
 	return database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
 		command, execErr := tx.Exec(ctx, `UPDATE platform.semantic_question_runs
-			SET route=$1,decision=$2,semantic_version=$3,intent_hash=$4,
-				binding_bundle_hash=$5,query_plan_hash=$6,result_hash=$7,
-				query_plan_ids=$8::uuid[],failure_code=$9,
-				execution_budget=$10::jsonb,updated_at=now()
-			WHERE tenant_id=platform.current_tenant_id() AND id=$11::uuid`,
+			SET route=$1,decision=$2,semantic_version=$3,
+				semantic_release_id=NULLIF($4,'')::uuid,
+				semantic_content_hash=$5,understanding_hash=$6,
+				graph_plan_hash=$7,intent_hash=$8,
+				binding_bundle_hash=$9,query_plan_hash=$10,result_hash=$11,
+				query_plan_ids=$12::uuid[],failure_code=$13,
+				execution_budget=$14::jsonb,updated_at=now()
+			WHERE tenant_id=platform.current_tenant_id() AND id=$15::uuid`,
 			outcome.Route, outcome.Decision, outcome.SemanticVersion,
+			outcome.SemanticReleaseID, outcome.SemanticContentHash,
+			outcome.UnderstandingHash, outcome.GraphPlanHash,
 			outcome.IntentHash, outcome.BindingBundleHash,
-			outcome.QueryPlanHash, outcome.ResultHash,
-			outcome.QueryPlanIDs, outcome.FailureCode, budget, runID,
+			outcome.QueryPlanHash, outcome.ResultHash, outcome.QueryPlanIDs,
+			outcome.FailureCode, budget, runID,
 		)
 		if execErr != nil {
 			return execErr
 		}
 		if command.RowsAffected() != 1 {
 			return ErrNotFound
+		}
+		for _, artifact := range outcome.Artifacts {
+			if !oneOf(artifact.Type, "UNDERSTANDING", "GRAPH_PLAN", "SEMANTIC_IR") ||
+				!validHash(artifact.Hash) || len(artifact.Payload) == 0 {
+				return ErrUnprovenPath
+			}
+			if _, artifactErr := tx.Exec(ctx, `INSERT INTO platform.semantic_question_artifacts(
+					tenant_id,question_run_id,artifact_type,artifact_hash,payload
+				) VALUES(platform.current_tenant_id(),$1::uuid,$2,$3,$4::jsonb)
+				ON CONFLICT(tenant_id,question_run_id,artifact_type) DO UPDATE
+				SET artifact_hash=EXCLUDED.artifact_hash,payload=EXCLUDED.payload,
+					updated_at=now()`,
+				runID, artifact.Type, artifact.Hash, artifact.Payload,
+			); artifactErr != nil {
+				return artifactErr
+			}
 		}
 		return nil
 	})
@@ -114,14 +135,18 @@ func (store *PostgresStore) GetQuestionRun(
 		queryErr := tx.QueryRow(ctx, `SELECT id::text,
 			COALESCE(conversation_id::text,''),COALESCE(parent_question_id::text,''),
 			question_hash,current_state,COALESCE(route::text,''),decision,
-			semantic_version,intent_hash,query_plan_hash,result_hash,
+			semantic_version,COALESCE(semantic_release_id::text,''),
+			semantic_content_hash,understanding_hash,graph_plan_hash,
+			intent_hash,query_plan_hash,result_hash,
 			query_plan_ids::text[],failure_code,
 			created_at::text,updated_at::text,COALESCE(completed_at::text,'')
 			FROM platform.semantic_question_runs
 			WHERE tenant_id=platform.current_tenant_id() AND id=$1::uuid`, runID).Scan(
 			&item.QuestionID, &item.ConversationID, &item.ParentQuestionID,
 			&item.QuestionHash, &item.State, &item.Route, &item.Decision,
-			&item.SemanticVersion, &item.IntentHash, &item.QueryPlanHash,
+			&item.SemanticVersion, &item.SemanticReleaseID,
+			&item.SemanticContentHash, &item.UnderstandingHash,
+			&item.GraphPlanHash, &item.IntentHash, &item.QueryPlanHash,
 			&item.ResultHash, &item.QueryPlanIDs, &item.FailureCode,
 			&item.CreatedAt, &item.UpdatedAt, &item.CompletedAt,
 		)

@@ -13,6 +13,8 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -367,6 +369,7 @@ func validateSemanticReleaseObjects(
 		Counts: map[string]int{},
 	}
 	objectTypesByID := make(map[string][]string, len(objects))
+	dimensionValueKeys := map[string]string{}
 	for _, object := range objects {
 		objectTypesByID[object.ObjectID] = append(
 			objectTypesByID[object.ObjectID], object.ObjectType,
@@ -388,6 +391,77 @@ func validateSemanticReleaseObjects(
 					Code: "CONTRACT_FIELD_REQUIRED", ObjectType: object.ObjectType,
 					ObjectID: object.ObjectID, Field: field,
 					Message: "认证合同缺少必填字段",
+				})
+			}
+		}
+		result.Issues = append(result.Issues, validateSemanticAliases(object, contract)...)
+		requireReference := func(field, expectedType string) {
+			if !semanticReleaseReferenceExists(
+				objectTypesByID, stringContractValue(contract[field]), expectedType,
+			) {
+				result.Issues = append(result.Issues, SemanticReleaseValidationIssue{
+					Code: "CONTRACT_REFERENCE_INVALID", ObjectType: object.ObjectType,
+					ObjectID: object.ObjectID, Field: field,
+					Message: "合同引用必须唯一指向同一发布包中的认证对象",
+				})
+			}
+		}
+		requireReferences := func(field, expectedType string) {
+			values, valid := semanticContractStrings(contract[field])
+			if !valid || len(values) == 0 {
+				result.Issues = append(result.Issues, SemanticReleaseValidationIssue{
+					Code: "CONTRACT_REFERENCE_INVALID", ObjectType: object.ObjectType,
+					ObjectID: object.ObjectID, Field: field,
+					Message: "合同引用列表必须包含同一发布包中的认证对象",
+				})
+				return
+			}
+			for _, value := range values {
+				if !semanticReleaseReferenceExists(objectTypesByID, value, expectedType) {
+					result.Issues = append(result.Issues, SemanticReleaseValidationIssue{
+						Code: "CONTRACT_REFERENCE_INVALID", ObjectType: object.ObjectType,
+						ObjectID: object.ObjectID, Field: field,
+						Message: "合同引用必须唯一指向同一发布包中的认证对象",
+					})
+				}
+			}
+		}
+		switch object.ObjectType {
+		case "METRIC":
+			requireReference("defaultTimeDimensionId", "TIME")
+			requireReferences("sourceDatasetIds", "DATASET")
+			requireReferences("permissionPolicyIds", "POLICY")
+			requireReferences("qualityRuleIds", "QUALITY_RULE")
+			if contract["groupableDimensionIds"] != nil {
+				requireReferences("groupableDimensionIds", "DIMENSION")
+			}
+		case "DIMENSION_VALUE":
+			requireReference("dimensionId", "DIMENSION")
+			key := stringContractValue(contract["dimensionId"]) + "\x00" +
+				strings.ToLower(stringContractValue(contract["canonicalCode"]))
+			if previous := dimensionValueKeys[key]; key == "\x00" || previous != "" {
+				result.Issues = append(result.Issues, SemanticReleaseValidationIssue{
+					Code:       "DIMENSION_VALUE_COMPOSITE_KEY_CONFLICT",
+					ObjectType: object.ObjectType, ObjectID: object.ObjectID,
+					Field:   "canonicalCode",
+					Message: "维度值必须使用维度作用域内唯一的规范码",
+				})
+			} else {
+				dimensionValueKeys[key] = object.ObjectID
+			}
+		case "QUALITY_RULE":
+			requireReference("targetId", "")
+		case "POLICY":
+			requireReferences("accessibleObjectIds", "")
+			roles, rolesValid := semanticContractStrings(contract["roles"])
+			purposes, purposesValid := semanticContractStrings(contract["purpose"])
+			effect := strings.ToUpper(stringContractValue(contract["effect"]))
+			if !rolesValid || len(roles) == 0 || !purposesValid || len(purposes) == 0 ||
+				(effect != "ALLOW" && effect != "DENY") {
+				result.Issues = append(result.Issues, SemanticReleaseValidationIssue{
+					Code: "POLICY_CONTRACT_INVALID", ObjectType: object.ObjectType,
+					ObjectID: object.ObjectID,
+					Message:  "策略必须具有角色、用途和明确的 ALLOW/DENY 效果",
 				})
 			}
 		}
@@ -436,6 +510,91 @@ func validateSemanticReleaseObjects(
 		result.Status = "BLOCKED"
 	}
 	return result
+}
+
+func validateSemanticAliases(
+	object SemanticReleaseObject,
+	contract map[string]any,
+) []SemanticReleaseValidationIssue {
+	issues := []SemanticReleaseValidationIssue{}
+	positive, negative := map[string]bool{}, map[string]bool{}
+	for _, field := range []string{
+		"aliases", "synonyms", "abbreviations", "shortNames", "positiveAliases",
+		"negativeAliases", "hardNegativeExamples",
+	} {
+		if contract[field] == nil {
+			continue
+		}
+		values, valid := semanticContractStrings(contract[field])
+		if !valid || len(values) > 128 {
+			issues = append(issues, SemanticReleaseValidationIssue{
+				Code: "ALIAS_CONTRACT_INVALID", ObjectType: object.ObjectType,
+				ObjectID: object.ObjectID, Field: field,
+				Message: "别名合同必须是有界非空字符串列表",
+			})
+			continue
+		}
+		for _, value := range values {
+			key := semanticAliasKey(value)
+			if key == "" || len([]rune(value)) > 256 || containsControlRune(value) {
+				issues = append(issues, SemanticReleaseValidationIssue{
+					Code: "ALIAS_CONTRACT_INVALID", ObjectType: object.ObjectType,
+					ObjectID: object.ObjectID, Field: field,
+					Message: "别名为空、过长或包含控制字符",
+				})
+				continue
+			}
+			if field == "negativeAliases" || field == "hardNegativeExamples" {
+				negative[key] = true
+			} else {
+				positive[key] = true
+			}
+		}
+	}
+	for key := range positive {
+		if negative[key] {
+			issues = append(issues, SemanticReleaseValidationIssue{
+				Code: "ALIAS_POLARITY_CONFLICT", ObjectType: object.ObjectType,
+				ObjectID: object.ObjectID, Field: "aliases",
+				Message: "同一规范化别名不能同时是当前对象的正例和反例",
+			})
+		}
+	}
+	if locale, exists := contract["locale"]; exists {
+		value, valid := locale.(string)
+		if !valid || len(strings.TrimSpace(value)) < 2 || len(value) > 35 {
+			issues = append(issues, SemanticReleaseValidationIssue{
+				Code: "ALIAS_LOCALE_INVALID", ObjectType: object.ObjectType,
+				ObjectID: object.ObjectID, Field: "locale", Message: "别名 locale 无效",
+			})
+		}
+	}
+	return issues
+}
+
+func semanticContractStrings(value any) ([]string, bool) {
+	result := []string{}
+	switch typed := value.(type) {
+	case string:
+		if strings.TrimSpace(typed) != "" {
+			result = append(result, strings.TrimSpace(typed))
+		}
+	case []any:
+		for _, item := range typed {
+			text, ok := item.(string)
+			if !ok || strings.TrimSpace(text) == "" {
+				return nil, false
+			}
+			result = append(result, strings.TrimSpace(text))
+		}
+	default:
+		return nil, false
+	}
+	return result, true
+}
+
+func semanticAliasKey(value string) string {
+	return cases.Fold().String(strings.Join(strings.Fields(norm.NFKC.String(value)), " "))
 }
 
 func semanticReleaseReferenceExists(

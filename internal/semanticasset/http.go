@@ -160,6 +160,43 @@ func NewHandler(
 		}),
 	))
 
+	mux.Handle("POST /api/v1/semantic-assets/releases/bootstrap/preview", protect(
+		"MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var input BootstrapSemanticReleaseInput
+			if !decodeRequest(w, r, &input, 64<<10) {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.PreviewBootstrapSemanticRelease(
+				r.Context(), claims.TenantID, claims.Subject, input,
+			)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusOK, item)
+		}),
+	))
+
+	mux.Handle("POST /api/v1/semantic-assets/releases/bootstrap", protect(
+		"MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var input BootstrapSemanticReleaseInput
+			if !decodeRequest(w, r, &input, 64<<10) {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.BootstrapSemanticRelease(
+				r.Context(), claims.TenantID, claims.Subject, input,
+			)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusCreated, item)
+		}),
+	))
+
 	mux.Handle("POST /api/v1/semantic-assets/releases/{id}/validate", protect(
 		"MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var input ValidateSemanticReleaseInput

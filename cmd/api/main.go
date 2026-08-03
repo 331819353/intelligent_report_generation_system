@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -37,6 +38,7 @@ import (
 	"intelligent-report-generation-system/internal/queryruntime"
 	"intelligent-report-generation-system/internal/report"
 	"intelligent-report-generation-system/internal/semanticasset"
+	"intelligent-report-generation-system/internal/semanticgraph"
 	"intelligent-report-generation-system/internal/semanticmanagement"
 	"intelligent-report-generation-system/internal/semanticqa"
 )
@@ -241,6 +243,40 @@ func main() {
 		),
 	)
 	semanticQAService.SetMetricExecutor(metricService)
+	if !cfg.NebulaGraphEnabled {
+		logger.Error("NebulaGraph is required by the semantic question runtime")
+		os.Exit(1)
+	}
+	if cfg.NebulaGraphEnabled {
+		var tlsConfig *tls.Config
+		if cfg.NebulaGraphTLSEnabled {
+			tlsConfig, err = semanticgraph.LoadTLSConfig(
+				cfg.NebulaGraphCAFile, cfg.NebulaGraphTLSServerName,
+			)
+			if err != nil {
+				logger.Error("load NebulaGraph TLS configuration", "error", err)
+				os.Exit(1)
+			}
+		}
+		graphClient, graphErr := semanticgraph.NewNebulaClient(semanticgraph.NebulaConfig{
+			Addresses: cfg.NebulaGraphAddresses, Username: cfg.NebulaGraphUsername,
+			Password: cfg.NebulaGraphPassword, Space: cfg.NebulaGraphSpace,
+			Timeout: cfg.NebulaGraphTimeout, IdleTimeout: cfg.NebulaGraphIdleTimeout,
+			MinimumPoolSize: cfg.NebulaGraphPoolMinSize,
+			MaximumPoolSize: cfg.NebulaGraphPoolMaxSize,
+			TLSConfig:       tlsConfig, FailureThreshold: 3, OpenInterval: 15 * time.Second,
+		})
+		if graphErr != nil {
+			logger.Error("initialize NebulaGraph semantic runtime", "error", graphErr)
+			os.Exit(1)
+		}
+		defer graphClient.Close()
+		semanticQAService.SetSemanticGraph(semanticgraph.NewResilientGraph(
+			semanticgraph.NewRuntime(graphClient), semanticgraph.NewPostgresStore(pool),
+			5*time.Minute,
+		))
+		logger.Info("semantic question runtime uses NebulaGraph as relationship authority")
+	}
 	semanticQAHandler := semanticqa.NewHandler(
 		authService,
 		accessService,

@@ -163,7 +163,15 @@ func BuildProjection(manifest ReleaseManifest) (Projection, error) {
 			}
 			continue
 		}
-		vid := StableVID(manifest.TenantID, tag, object.ObjectID, object.ObjectVersion)
+		stableObjectID := object.ObjectID
+		if object.ObjectType == "DIMENSION_VALUE" {
+			dimensionID := stringValue(contract["dimensionId"])
+			if dimensionID == "" {
+				return Projection{}, fmt.Errorf("%w: dimension value has no scoped dimension", ErrInvalidRequest)
+			}
+			stableObjectID = dimensionID + "::" + object.ObjectID
+		}
+		vid := StableVID(manifest.TenantID, tag, stableObjectID, object.ObjectVersion)
 		contractJSON, _ := json.Marshal(contract)
 		vertex := Vertex{VID: vid, Tag: tag, Props: map[string]any{
 			"object_id": object.ObjectID, "object_version": object.ObjectVersion,
@@ -278,6 +286,16 @@ func inferredRelations(object ReleaseObject, contract map[string]any) []inferred
 	case "METRIC", "MEASURE":
 		appendMany("sourced_from", "sourceDatasetIds", object.ObjectID, object.ObjectType, "DATASET")
 		appendMany("groupable_by", "groupableDimensionIds", object.ObjectID, object.ObjectType, "DIMENSION")
+		if target := stringValue(contract["defaultTimeDimensionId"]); target != "" {
+			relations = append(relations, inferredRelation{
+				id:           object.ObjectID + ":groupable_by:" + target,
+				relationType: "groupable_by", fromRef: object.ObjectID, toRef: target,
+				contract: map[string]any{
+					"certified": true, "allowedForQuery": true,
+					"fromType": object.ObjectType, "toType": "TIME",
+				},
+			})
+		}
 		appendMany("depends_on", "dependsOnMetricIds", object.ObjectID, object.ObjectType, "METRIC")
 		for _, policyID := range stringSlice(contract["permissionPolicyIds"]) {
 			relations = append(relations, inferredRelation{

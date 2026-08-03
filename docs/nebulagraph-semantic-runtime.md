@@ -27,7 +27,9 @@
   `table_column`、`business_term`、`certified_example`、`role`、`quality_rule`。
 - Edges：方案定义的 12 类关系，另含认证示例专用的 `uses`。
 - VID：`type:tenant_hash:object_id:version`。超过 128 字节时使用相同输入的 SHA-256，
-  原始 ID 和版本仍保存在属性中。
+  原始 ID 和版本仍保存在属性中。DimensionValue 的稳定身份例外地把
+  `dimension_id::value_id` 作为 object identity 输入，保证相同规范值在销售区域和物流
+  区域中不会成为同一图节点。
 - 所有顶点和边携带 `tenant_scope`、`semantic_version`；顶点另携带对象
   `content_hash`。
 
@@ -48,6 +50,11 @@ Schema 位于 `deployments/nebula/schema.ngql`；由于 `nebula-console -f` 按�
 
 路径成本为每条边的基础、fanout、陈旧、跨源和策略复杂度成本之和。未知基数、未认证、
 不允许查询或超过四跳的路径直接淘汰；最多返回三条低风险路径。
+
+`POST /api/v1/questions` 已把该接口设为关系最终裁决边界：活动发布加载后，先对冲突
+Alias 的前三个候选 Bundle 做闭包与权限消歧，再验证最终指标、普通维度、默认时间维度、
+维度值复合身份和来源数据集；`can_access` 可从策略根节点沿认证关系传播到下游对象。
+执行前后必须重新确认 PostgreSQL 活动指针和 Nebula 投影内容哈希仍一致。
 
 `verify-nebulagraph.sh` 不只检查 Tags/Edges 是否存在，还会在真实 NebulaGraph 中投影
 数据集、指标、维度值和权限对象，并逐项验证候选扩展、值归属、Bundle 兼容性、Join

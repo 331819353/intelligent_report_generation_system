@@ -217,6 +217,10 @@ type QueryTurnInput struct {
 	// published metric/dimension catalogs and persisted decisions; callers
 	// cannot supply fields, tables, predicates or SQL.
 	SemanticHints QuerySemanticHints `json:"semanticHints,omitempty"`
+	// GovernedUnderstanding is set only by the Question Orchestrator after the
+	// active release resolved every meaningful span. It avoids invoking the
+	// legacy enrichment model for simple exact-alias questions.
+	GovernedUnderstanding bool `json:"-"`
 }
 
 type QueryConfirmedDecision struct {
@@ -656,6 +660,9 @@ type AnswerEvidence struct {
 	GraphGenerationID     string          `json:"graphGenerationId"`
 	GraphGeneration       int64           `json:"graphGeneration"`
 	SemanticVersion       string          `json:"semanticVersion"`
+	SemanticContentHash   string          `json:"semanticContentHash,omitempty"`
+	GraphPlanID           string          `json:"graphPlanId,omitempty"`
+	GraphEvidenceIDs      []string        `json:"graphEvidenceIds,omitempty"`
 	PathHash              string          `json:"pathHash"`
 	QueryPlanHash         string          `json:"queryPlanHash"`
 	ResultHash            string          `json:"resultHash"`

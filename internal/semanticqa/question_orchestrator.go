@@ -49,15 +49,16 @@ type SemanticObjectRef struct {
 }
 
 type CompleteIntent struct {
-	IntentID        string              `json:"intentId"`
-	SemanticVersion string              `json:"semanticVersion"`
-	TaskType        string              `json:"taskType"`
-	Metrics         []SemanticObjectRef `json:"metrics"`
-	Dimensions      []SemanticObjectRef `json:"dimensions"`
-	Time            *QueryTimeRange     `json:"time,omitempty"`
-	ExecutionPath   QuestionRoute       `json:"executionPath"`
-	GraphPlanIDs    []string            `json:"graphPlanIds"`
-	Ambiguities     []string            `json:"ambiguities"`
+	IntentID            string              `json:"intentId"`
+	SemanticVersion     string              `json:"semanticVersion"`
+	SemanticContentHash string              `json:"semanticContentHash,omitempty"`
+	TaskType            string              `json:"taskType"`
+	Metrics             []SemanticObjectRef `json:"metrics"`
+	Dimensions          []SemanticObjectRef `json:"dimensions"`
+	Time                *QueryTimeRange     `json:"time,omitempty"`
+	ExecutionPath       QuestionRoute       `json:"executionPath"`
+	GraphPlanIDs        []string            `json:"graphPlanIds"`
+	Ambiguities         []string            `json:"ambiguities"`
 }
 
 type SemanticIRMetric struct {
@@ -77,16 +78,17 @@ type SemanticIRFilter struct {
 // and deterministic compilation. Every value is derived from an immutable,
 // READY QueryPlan; callers never submit this object for execution.
 type SemanticQueryIR struct {
-	SchemaVersion   string             `json:"schemaVersion"`
-	Mode            string             `json:"mode"`
-	SemanticVersion string             `json:"semanticVersion"`
-	Metrics         []SemanticIRMetric `json:"metrics"`
-	Dimensions      []string           `json:"dimensions"`
-	Time            *QueryTimeRange    `json:"time,omitempty"`
-	Filters         []SemanticIRFilter `json:"filters"`
-	OrderBy         []SemanticIROrder  `json:"orderBy"`
-	Limit           int                `json:"limit"`
-	EvidenceIDs     []string           `json:"evidenceIds"`
+	SchemaVersion       string             `json:"schemaVersion"`
+	Mode                string             `json:"mode"`
+	SemanticVersion     string             `json:"semanticVersion"`
+	SemanticContentHash string             `json:"semanticContentHash,omitempty"`
+	Metrics             []SemanticIRMetric `json:"metrics"`
+	Dimensions          []string           `json:"dimensions"`
+	Time                *QueryTimeRange    `json:"time,omitempty"`
+	Filters             []SemanticIRFilter `json:"filters"`
+	OrderBy             []SemanticIROrder  `json:"orderBy"`
+	Limit               int                `json:"limit"`
+	EvidenceIDs         []string           `json:"evidenceIds"`
 }
 
 type SemanticIROrder struct {
@@ -95,6 +97,10 @@ type SemanticIROrder struct {
 }
 
 type ExecutionGraphRef struct {
+	SemanticVersion    string   `json:"semanticVersion,omitempty"`
+	ContentHash        string   `json:"contentHash,omitempty"`
+	GraphPlanID        string   `json:"graphPlanId,omitempty"`
+	GraphEvidenceIDs   []string `json:"graphEvidenceIds,omitempty"`
 	GenerationID       string   `json:"generationId"`
 	Generation         int64    `json:"generation"`
 	QueryPlanIDs       []string `json:"queryPlanIds"`
@@ -143,16 +149,18 @@ type QuestionChartSpec struct {
 }
 
 type AccuracyEvidence struct {
-	SemanticVersion string                   `json:"semanticVersion"`
-	IntentHash      string                   `json:"intentHash"`
-	BindingEvidence []string                 `json:"bindingEvidence"`
-	MetricContracts []string                 `json:"metricContracts"`
-	GraphPlanIDs    []string                 `json:"graphPlanIds"`
-	QueryPlanHash   string                   `json:"queryPlanHash"`
-	ResultHash      string                   `json:"resultHash"`
-	ValidatorChecks []string                 `json:"validatorChecks"`
-	ToolLoop        AccuracyToolLoopEvidence `json:"toolLoop"`
-	AnswerFidelity  string                   `json:"answerFidelity"`
+	SemanticVersion     string                   `json:"semanticVersion"`
+	SemanticContentHash string                   `json:"semanticContentHash,omitempty"`
+	IntentHash          string                   `json:"intentHash"`
+	BindingEvidence     []string                 `json:"bindingEvidence"`
+	MetricContracts     []string                 `json:"metricContracts"`
+	GraphPlanIDs        []string                 `json:"graphPlanIds"`
+	GraphEvidenceIDs    []string                 `json:"graphEvidenceIds,omitempty"`
+	QueryPlanHash       string                   `json:"queryPlanHash"`
+	ResultHash          string                   `json:"resultHash"`
+	ValidatorChecks     []string                 `json:"validatorChecks"`
+	ToolLoop            AccuracyToolLoopEvidence `json:"toolLoop"`
+	AnswerFidelity      string                   `json:"answerFidelity"`
 }
 
 type AccuracyToolLoopEvidence struct {
@@ -173,49 +181,56 @@ type QuestionBudgets struct {
 }
 
 type QuestionResponse struct {
-	QuestionID       string                  `json:"questionId"`
-	ConversationID   string                  `json:"conversationId"`
-	ParentQuestionID string                  `json:"parentQuestionId,omitempty"`
-	QuestionHash     string                  `json:"questionHash"`
-	State            QuestionState           `json:"state"`
-	Status           string                  `json:"status"`
-	Route            QuestionRoute           `json:"route"`
-	Routing          QuestionRoutingDecision `json:"routing"`
-	SemanticVersion  string                  `json:"semanticVersion,omitempty"`
-	Lifecycle        []QuestionStateEvent    `json:"lifecycle"`
-	Intent           *CompleteIntent         `json:"intent,omitempty"`
-	SemanticIR       *SemanticQueryIR        `json:"semanticIr,omitempty"`
-	ExecutionGraph   *ExecutionGraphRef      `json:"executionGraph,omitempty"`
-	Guard            *SQLGuardDecision       `json:"sqlGuard,omitempty"`
-	Verification     *ResultVerification     `json:"resultVerification,omitempty"`
-	Answer           *QuestionAnswer         `json:"answer,omitempty"`
-	Clarification    *QueryClarification     `json:"clarification,omitempty"`
-	Planning         *QueryTurnPlan          `json:"planning,omitempty"`
-	Plans            []QueryPlan             `json:"queryPlans"`
-	Executions       []QueryPlanExecution    `json:"executions"`
-	Evidence         *AccuracyEvidence       `json:"accuracyEvidence,omitempty"`
-	Failure          *QuestionFailure        `json:"failure,omitempty"`
-	Budgets          QuestionBudgets         `json:"budgets"`
-	ToolRegistry     []QuestionToolSummary   `json:"toolRegistry"`
+	QuestionID          string                  `json:"questionId"`
+	ConversationID      string                  `json:"conversationId"`
+	ParentQuestionID    string                  `json:"parentQuestionId,omitempty"`
+	QuestionHash        string                  `json:"questionHash"`
+	State               QuestionState           `json:"state"`
+	Status              string                  `json:"status"`
+	Route               QuestionRoute           `json:"route"`
+	Routing             QuestionRoutingDecision `json:"routing"`
+	SemanticVersion     string                  `json:"semanticVersion,omitempty"`
+	SemanticContentHash string                  `json:"semanticContentHash,omitempty"`
+	Understanding       *QuestionUnderstanding  `json:"understanding,omitempty"`
+	GraphPlan           *QuestionGraphPlan      `json:"graphPlan,omitempty"`
+	Lifecycle           []QuestionStateEvent    `json:"lifecycle"`
+	Intent              *CompleteIntent         `json:"intent,omitempty"`
+	SemanticIR          *SemanticQueryIR        `json:"semanticIr,omitempty"`
+	ExecutionGraph      *ExecutionGraphRef      `json:"executionGraph,omitempty"`
+	Guard               *SQLGuardDecision       `json:"sqlGuard,omitempty"`
+	Verification        *ResultVerification     `json:"resultVerification,omitempty"`
+	Answer              *QuestionAnswer         `json:"answer,omitempty"`
+	Clarification       *QueryClarification     `json:"clarification,omitempty"`
+	Planning            *QueryTurnPlan          `json:"planning,omitempty"`
+	Plans               []QueryPlan             `json:"queryPlans"`
+	Executions          []QueryPlanExecution    `json:"executions"`
+	Evidence            *AccuracyEvidence       `json:"accuracyEvidence,omitempty"`
+	Failure             *QuestionFailure        `json:"failure,omitempty"`
+	Budgets             QuestionBudgets         `json:"budgets"`
+	ToolRegistry        []QuestionToolSummary   `json:"toolRegistry"`
 }
 
 type QuestionRunSummary struct {
-	QuestionID       string        `json:"questionId"`
-	ConversationID   string        `json:"conversationId,omitempty"`
-	ParentQuestionID string        `json:"parentQuestionId,omitempty"`
-	QuestionHash     string        `json:"questionHash"`
-	State            QuestionState `json:"state"`
-	Route            QuestionRoute `json:"route,omitempty"`
-	Decision         string        `json:"decision,omitempty"`
-	SemanticVersion  string        `json:"semanticVersion,omitempty"`
-	IntentHash       string        `json:"intentHash,omitempty"`
-	QueryPlanHash    string        `json:"queryPlanHash,omitempty"`
-	ResultHash       string        `json:"resultHash,omitempty"`
-	QueryPlanIDs     []string      `json:"queryPlanIds"`
-	FailureCode      string        `json:"failureCode,omitempty"`
-	CreatedAt        string        `json:"createdAt"`
-	UpdatedAt        string        `json:"updatedAt"`
-	CompletedAt      string        `json:"completedAt,omitempty"`
+	QuestionID          string        `json:"questionId"`
+	ConversationID      string        `json:"conversationId,omitempty"`
+	ParentQuestionID    string        `json:"parentQuestionId,omitempty"`
+	QuestionHash        string        `json:"questionHash"`
+	State               QuestionState `json:"state"`
+	Route               QuestionRoute `json:"route,omitempty"`
+	Decision            string        `json:"decision,omitempty"`
+	SemanticVersion     string        `json:"semanticVersion,omitempty"`
+	SemanticReleaseID   string        `json:"semanticReleaseId,omitempty"`
+	SemanticContentHash string        `json:"semanticContentHash,omitempty"`
+	UnderstandingHash   string        `json:"understandingHash,omitempty"`
+	GraphPlanHash       string        `json:"graphPlanHash,omitempty"`
+	IntentHash          string        `json:"intentHash,omitempty"`
+	QueryPlanHash       string        `json:"queryPlanHash,omitempty"`
+	ResultHash          string        `json:"resultHash,omitempty"`
+	QueryPlanIDs        []string      `json:"queryPlanIds"`
+	FailureCode         string        `json:"failureCode,omitempty"`
+	CreatedAt           string        `json:"createdAt"`
+	UpdatedAt           string        `json:"updatedAt"`
+	CompletedAt         string        `json:"completedAt,omitempty"`
 }
 
 type questionRuntimeMetadata struct {
@@ -233,16 +248,21 @@ type questionRuntimeStore interface {
 }
 
 type questionRunOutcome struct {
-	Route             QuestionRoute
-	Decision          string
-	SemanticVersion   string
-	IntentHash        string
-	BindingBundleHash string
-	QueryPlanHash     string
-	ResultHash        string
-	QueryPlanIDs      []string
-	FailureCode       string
-	Budgets           QuestionBudgets
+	Route               QuestionRoute
+	Decision            string
+	SemanticVersion     string
+	SemanticReleaseID   string
+	SemanticContentHash string
+	UnderstandingHash   string
+	GraphPlanHash       string
+	IntentHash          string
+	BindingBundleHash   string
+	QueryPlanHash       string
+	ResultHash          string
+	QueryPlanIDs        []string
+	FailureCode         string
+	Budgets             QuestionBudgets
+	Artifacts           []questionArtifact
 }
 
 func defaultQuestionBudgets() QuestionBudgets {
@@ -305,6 +325,24 @@ func (service *Service) AnswerQuestion(
 		ConversationID:   request.ConversationID,
 		ParentQuestionID: request.ParentQuestionID,
 	})
+	var semanticSnapshot *QuestionSemanticSnapshot
+	var semanticSnapshotErr error
+	if service.semanticGraph != nil {
+		if snapshotStore, ok := service.store.(questionSemanticScopeStore); ok {
+			snapshot, loadErr := snapshotStore.LoadQuestionSemanticSnapshot(
+				ctx, tenantID, actorID, time.Now().UTC(),
+			)
+			semanticSnapshot, semanticSnapshotErr = &snapshot, loadErr
+		} else {
+			semanticSnapshotErr = ErrGraphNotReady
+		}
+	}
+	understanding := understandQuestion(request.Question, semanticSnapshot)
+	response.Understanding = &understanding
+	if semanticSnapshotErr == nil && semanticSnapshot != nil {
+		response.SemanticVersion = semanticSnapshot.SemanticVersion
+		response.SemanticContentHash = semanticSnapshot.ContentHash
+	}
 
 	contextPlanIDs := []string{}
 	if runtimeStore, ok := service.store.(questionRuntimeStore); ok {
@@ -316,12 +354,21 @@ func (service *Service) AnswerQuestion(
 			return response, err
 		}
 	}
+	confirmedMetricCodes := append([]string(nil), request.ConfirmedMetricCodes...)
+	semanticHints := QuerySemanticHints{}
+	governedUnderstanding := false
+	if codes, hints, complete := governedSimpleQuestionHints(request.Question, understanding); complete {
+		confirmedMetricCodes = uniqueStrings(append(confirmedMetricCodes, codes...), 8)
+		semanticHints = hints
+		governedUnderstanding = true
+	}
 	turn, err := service.PlanQueryTurn(ctx, tenantID, actorID, QueryTurnInput{
 		Question: request.Question, Timezone: request.Timezone,
 		ContextQueryPlanIDs:  contextPlanIDs,
-		ConfirmedMetricCodes: request.ConfirmedMetricCodes,
+		ConfirmedMetricCodes: confirmedMetricCodes,
 		ConfirmedDecisions:   request.ConfirmedDecisions,
-		MaximumPathHops:      4,
+		MaximumPathHops:      4, SemanticHints: semanticHints,
+		GovernedUnderstanding: governedUnderstanding,
 	})
 	response.QuestionID = turn.QuestionRunID
 	response.State = turn.State
@@ -346,7 +393,11 @@ func (service *Service) AnswerQuestion(
 		response.Status = "CLARIFICATION_REQUIRED"
 		_ = service.saveQuestionOutcome(ctx, tenantID, response, questionRunOutcome{
 			Route: response.Route, Decision: response.Status,
-			QueryPlanIDs: queryPlanIDs(turn.Plans), Budgets: budgets,
+			SemanticVersion:     questionSemanticVersion(semanticSnapshot),
+			SemanticReleaseID:   questionSemanticReleaseID(semanticSnapshot),
+			SemanticContentHash: questionSemanticContentHash(semanticSnapshot),
+			UnderstandingHash:   mustQuestionHash(understanding),
+			QueryPlanIDs:        queryPlanIDs(turn.Plans), Budgets: budgets,
 		})
 		return response, nil
 	}
@@ -372,12 +423,109 @@ func (service *Service) AnswerQuestion(
 	if err := machine.advance(QuestionStateValidating); err != nil {
 		return response, err
 	}
+	var governedGraphPlan *QuestionGraphPlan
+	if service.semanticGraph != nil {
+		if semanticSnapshotErr != nil || semanticSnapshot == nil {
+			code, message := questionSemanticFailureDetail(
+				semanticSnapshotErr, "ACTIVE_SEMANTIC_RELEASE_REQUIRED",
+			)
+			response.Status = "BLOCKED"
+			response.Failure = &QuestionFailure{Code: code, Message: message}
+			if err := machine.advance(QuestionStateBlocked); err != nil {
+				return response, err
+			}
+			response.State, response.Lifecycle = machine.state, machine.lifecycle()
+			_ = service.saveQuestionOutcome(ctx, tenantID, response, questionRunOutcome{
+				Route: response.Route, Decision: response.Status, FailureCode: code,
+				UnderstandingHash: mustQuestionHash(understanding),
+				QueryPlanIDs:      queryPlanIDs(turn.Plans), Budgets: budgets,
+			})
+			return response, nil
+		}
+		clarification, ambiguityErr := validateGovernedMetricAmbiguity(
+			ctx, service.semanticGraph, *semanticSnapshot, understanding,
+			turn.Plans, confirmedMetricCodes,
+		)
+		if ambiguityErr != nil {
+			code, message := questionSemanticFailureDetail(
+				ambiguityErr, "SEMANTIC_BUNDLE_REJECTED",
+			)
+			response.Status = "BLOCKED"
+			response.Failure = &QuestionFailure{Code: code, Message: message}
+			response.SemanticVersion = semanticSnapshot.SemanticVersion
+			response.SemanticContentHash = semanticSnapshot.ContentHash
+			if err := machine.advance(QuestionStateBlocked); err != nil {
+				return response, err
+			}
+			response.State, response.Lifecycle = machine.state, machine.lifecycle()
+			_ = service.saveQuestionOutcome(ctx, tenantID, response, questionRunOutcome{
+				Route: response.Route, Decision: response.Status,
+				SemanticVersion:     semanticSnapshot.SemanticVersion,
+				SemanticReleaseID:   semanticSnapshot.ReleaseID,
+				SemanticContentHash: semanticSnapshot.ContentHash,
+				UnderstandingHash:   mustQuestionHash(understanding),
+				FailureCode:         code, QueryPlanIDs: queryPlanIDs(turn.Plans), Budgets: budgets,
+			})
+			return response, nil
+		}
+		if clarification != nil {
+			response.Status = "CLARIFICATION_REQUIRED"
+			response.Route = QuestionRouteClarifyOrRefuse
+			response.Routing.Selected = QuestionRouteClarifyOrRefuse
+			response.Routing.ReasonCode = "GOVERNED_ALIAS_AMBIGUOUS"
+			response.Clarification = clarification
+			if err := machine.advance(QuestionStateClarificationRequired); err != nil {
+				return response, err
+			}
+			response.State, response.Lifecycle = machine.state, machine.lifecycle()
+			_ = service.saveQuestionOutcome(ctx, tenantID, response, questionRunOutcome{
+				Route: response.Route, Decision: response.Status,
+				SemanticVersion:     semanticSnapshot.SemanticVersion,
+				SemanticReleaseID:   semanticSnapshot.ReleaseID,
+				SemanticContentHash: semanticSnapshot.ContentHash,
+				UnderstandingHash:   mustQuestionHash(understanding),
+				QueryPlanIDs:        queryPlanIDs(turn.Plans), Budgets: budgets,
+			})
+			return response, nil
+		}
+		graphPlan, graphErr := validateQuestionSemanticGraph(
+			ctx, service.semanticGraph, *semanticSnapshot, understanding, turn.Plans,
+		)
+		if graphErr != nil {
+			code, message := questionSemanticFailureDetail(
+				graphErr, "NO_CERTIFIED_GRAPH_PATH",
+			)
+			response.Status = "BLOCKED"
+			response.Failure = &QuestionFailure{Code: code, Message: message}
+			response.SemanticVersion = semanticSnapshot.SemanticVersion
+			response.SemanticContentHash = semanticSnapshot.ContentHash
+			if err := machine.advance(QuestionStateBlocked); err != nil {
+				return response, err
+			}
+			response.State, response.Lifecycle = machine.state, machine.lifecycle()
+			_ = service.saveQuestionOutcome(ctx, tenantID, response, questionRunOutcome{
+				Route: response.Route, Decision: response.Status,
+				SemanticVersion:     semanticSnapshot.SemanticVersion,
+				SemanticReleaseID:   semanticSnapshot.ReleaseID,
+				SemanticContentHash: semanticSnapshot.ContentHash,
+				UnderstandingHash:   mustQuestionHash(understanding),
+				FailureCode:         code, QueryPlanIDs: queryPlanIDs(turn.Plans), Budgets: budgets,
+			})
+			return response, nil
+		}
+		governedGraphPlan = &graphPlan
+		response.GraphPlan = governedGraphPlan
+		response.SemanticContentHash = graphPlan.ContentHash
+	}
 
 	reportQuestionProgress(
 		ctx, response.QuestionID, QueryProgressStageSQLGuard,
 		QueryProgressStatusRunning, "正在验证 Semantic IR、执行图和查询预算。",
 	)
 	semanticVersion := semanticVersionForPlans(turn.Plans)
+	if governedGraphPlan != nil {
+		semanticVersion = governedGraphPlan.SemanticVersion
+	}
 	intent, ir, graph, err := buildQuestionContracts(turn, semanticVersion, budgets)
 	if err != nil {
 		return response, err
@@ -386,7 +534,17 @@ func (service *Service) AnswerQuestion(
 	response.Intent = &intent
 	response.SemanticIR = &ir
 	response.ExecutionGraph = &graph
-	guard := validateSemanticExecution(turn.Plans, ir, budgets)
+	if governedGraphPlan != nil {
+		intent.SemanticContentHash = governedGraphPlan.ContentHash
+		intent.GraphPlanIDs = []string{governedGraphPlan.ID}
+		ir.SemanticContentHash = governedGraphPlan.ContentHash
+		ir.EvidenceIDs = uniqueStrings(append(ir.EvidenceIDs, governedGraphPlan.EvidenceIDs...), 256)
+		graph.SemanticVersion = governedGraphPlan.SemanticVersion
+		graph.ContentHash = governedGraphPlan.ContentHash
+		graph.GraphPlanID = governedGraphPlan.ID
+		graph.GraphEvidenceIDs = append([]string(nil), governedGraphPlan.EvidenceIDs...)
+	}
+	guard := validateSemanticExecutionWithGraph(turn.Plans, ir, budgets, governedGraphPlan)
 	response.Guard = &guard
 	if guard.Status != "PASS" {
 		reportQuestionProgress(
@@ -403,8 +561,13 @@ func (service *Service) AnswerQuestion(
 		response.State, response.Lifecycle = machine.state, machine.lifecycle()
 		_ = service.saveQuestionOutcome(ctx, tenantID, response, questionRunOutcome{
 			Route: response.Route, Decision: response.Status,
-			SemanticVersion: semanticVersion, FailureCode: response.Failure.Code,
-			QueryPlanIDs: queryPlanIDs(turn.Plans), Budgets: budgets,
+			SemanticVersion:     semanticVersion,
+			SemanticReleaseID:   questionSemanticReleaseID(semanticSnapshot),
+			SemanticContentHash: response.SemanticContentHash,
+			UnderstandingHash:   mustQuestionHash(understanding),
+			GraphPlanHash:       questionGraphPlanHash(governedGraphPlan),
+			FailureCode:         response.Failure.Code,
+			QueryPlanIDs:        queryPlanIDs(turn.Plans), Budgets: budgets,
 		})
 		return response, nil
 	}
@@ -427,6 +590,15 @@ func (service *Service) AnswerQuestion(
 		if index >= budgets.MaximumMetricQueries {
 			return response, fmt.Errorf("%w: metric query budget exceeded", ErrUnprovenPath)
 		}
+		if governedGraphPlan != nil {
+			current, currentErr := service.questionSemanticSnapshotCurrent(
+				ctx, tenantID, questionSemanticReleaseID(semanticSnapshot),
+				governedGraphPlan.SemanticVersion, governedGraphPlan.ContentHash,
+			)
+			if currentErr != nil || !current {
+				return response, fmt.Errorf("%w: semantic release changed before execution", ErrUnprovenPath)
+			}
+		}
 		execution, executeErr := service.executeQueryPlanCore(
 			ctx, tenantID, actorID, plan.ID, ExecuteQueryPlanInput{
 				ExpectedGraphGenerationID: plan.GraphGenerationID,
@@ -438,7 +610,26 @@ func (service *Service) AnswerQuestion(
 		if executeErr != nil {
 			return response, executeErr
 		}
+		if governedGraphPlan != nil {
+			execution.Evidence.SemanticVersion = governedGraphPlan.SemanticVersion
+			execution.Evidence.SemanticContentHash = governedGraphPlan.ContentHash
+			execution.Evidence.GraphPlanID = governedGraphPlan.ID
+			execution.Evidence.GraphEvidenceIDs = append(
+				[]string(nil), governedGraphPlan.EvidenceIDs...,
+			)
+			execution.Evidence.CompatibilityDecision = "NEBULA_GRAPH_CERTIFIED_BUNDLE"
+			execution.Evidence.PermissionDecision = "NEBULA_GRAPH_POLICY_PROPAGATION_AND_RUNTIME_REVALIDATION"
+		}
 		executions = append(executions, execution)
+	}
+	if governedGraphPlan != nil {
+		current, currentErr := service.questionSemanticSnapshotCurrent(
+			ctx, tenantID, questionSemanticReleaseID(semanticSnapshot),
+			governedGraphPlan.SemanticVersion, governedGraphPlan.ContentHash,
+		)
+		if currentErr != nil || !current {
+			return response, fmt.Errorf("%w: semantic release changed after execution", ErrUnprovenPath)
+		}
 	}
 	reportQuestionProgress(
 		ctx, response.QuestionID, QueryProgressStageExecution,
@@ -448,7 +639,9 @@ func (service *Service) AnswerQuestion(
 		ctx, response.QuestionID, QueryProgressStageResultVerification,
 		QueryProgressStatusRunning, "正在核验结果模式、行数和证据哈希。",
 	)
-	verification := verifyQuestionResults(turn.Plans, executions, budgets)
+	verification := verifyQuestionResultsForSemanticVersion(
+		turn.Plans, executions, budgets, semanticVersion,
+	)
 	response.Verification = &verification
 	if verification.Status != "PASS" {
 		reportQuestionProgress(
@@ -465,8 +658,13 @@ func (service *Service) AnswerQuestion(
 		response.State, response.Lifecycle = machine.state, machine.lifecycle()
 		_ = service.saveQuestionOutcome(ctx, tenantID, response, questionRunOutcome{
 			Route: response.Route, Decision: response.Status,
-			SemanticVersion: semanticVersion, FailureCode: response.Failure.Code,
-			QueryPlanIDs: queryPlanIDs(turn.Plans), Budgets: budgets,
+			SemanticVersion:     semanticVersion,
+			SemanticReleaseID:   questionSemanticReleaseID(semanticSnapshot),
+			SemanticContentHash: response.SemanticContentHash,
+			UnderstandingHash:   mustQuestionHash(understanding),
+			GraphPlanHash:       questionGraphPlanHash(governedGraphPlan),
+			FailureCode:         response.Failure.Code,
+			QueryPlanIDs:        queryPlanIDs(turn.Plans), Budgets: budgets,
 		})
 		return response, nil
 	}
@@ -500,9 +698,14 @@ func (service *Service) AnswerQuestion(
 	response.State, response.Lifecycle = machine.state, machine.lifecycle()
 	if err := service.saveQuestionOutcome(ctx, tenantID, response, questionRunOutcome{
 		Route: response.Route, Decision: response.Status,
-		SemanticVersion: semanticVersion, IntentHash: evidence.IntentHash,
-		BindingBundleHash: hashText(strings.Join(evidence.BindingEvidence, "\x00")),
-		QueryPlanHash:     evidence.QueryPlanHash, ResultHash: evidence.ResultHash,
+		SemanticVersion:     semanticVersion,
+		SemanticReleaseID:   questionSemanticReleaseID(semanticSnapshot),
+		SemanticContentHash: response.SemanticContentHash,
+		UnderstandingHash:   mustQuestionHash(understanding),
+		GraphPlanHash:       questionGraphPlanHash(governedGraphPlan),
+		IntentHash:          evidence.IntentHash,
+		BindingBundleHash:   questionBindingBundleHash(governedGraphPlan, evidence),
+		QueryPlanHash:       evidence.QueryPlanHash, ResultHash: evidence.ResultHash,
 		QueryPlanIDs: queryPlanIDs(response.Plans), Budgets: budgets,
 	}); err != nil {
 		return response, err
@@ -524,6 +727,7 @@ func (service *Service) saveQuestionOutcome(
 	if !ok || response.QuestionID == "" {
 		return nil
 	}
+	outcome.Artifacts = questionArtifacts(response)
 	return store.SaveQuestionOutcome(ctx, tenantID, response.QuestionID, outcome)
 }
 
@@ -730,10 +934,67 @@ func validateSemanticExecution(
 	return decision
 }
 
+func validateSemanticExecutionWithGraph(
+	plans []QueryPlan,
+	ir SemanticQueryIR,
+	budgets QuestionBudgets,
+	graphPlan *QuestionGraphPlan,
+) SQLGuardDecision {
+	decision := validateSemanticExecution(plans, ir, budgets)
+	if graphPlan == nil {
+		return decision
+	}
+	add := func(code string, pass bool, detail string) {
+		status := "PASS"
+		if !pass {
+			status, decision.Status = "BLOCKED", "BLOCKED"
+		}
+		decision.Checks = append(decision.Checks, GuardCheck{
+			Code: code, Status: status, Detail: detail,
+		})
+	}
+	add("active_release_version_pass",
+		graphPlan.SemanticVersion == ir.SemanticVersion &&
+			graphPlan.ContentHash == ir.SemanticContentHash && validHash(graphPlan.ContentHash) &&
+			graphPlan.NormalizerVersion == questionNormalizerVersion,
+		"Semantic IR 必须固定到活动发布的版本和内容哈希",
+	)
+	add("nebula_graph_plan_pass",
+		strings.HasPrefix(graphPlan.ID, "graphplan:") &&
+			validHash(strings.TrimPrefix(graphPlan.ID, "graphplan:")) &&
+			validHash(graphPlan.BindingBundleHash) && len(graphPlan.EvidenceIDs) > 0,
+		"执行绑定必须具有可复算的 NebulaGraph 计划和查询证据",
+	)
+	authorized := uniqueStrings(graphPlan.AuthorizedVIDs, 100)
+	required := append(append(append([]string{}, graphPlan.MetricVIDs...), graphPlan.DimensionVIDs...), graphPlan.DatasetVIDs...)
+	for _, binding := range graphPlan.ValueBindings {
+		required = append(required, binding.ValueVID)
+	}
+	add("graph_policy_propagation_pass", sameStringSet(authorized, required),
+		"指标、维度、值和数据集必须全部通过图权限传播",
+	)
+	add("certified_join_and_fanout_pass",
+		graphPlan.MaximumHops > 0 && graphPlan.MaximumHops <= 4 && graphPlan.FanoutRisk == "NONE",
+		"只允许四跳以内的认证 Join 路径且不得存在 fanout 风险",
+	)
+	return decision
+}
+
 func verifyQuestionResults(
 	plans []QueryPlan,
 	executions []QueryPlanExecution,
 	budgets QuestionBudgets,
+) ResultVerification {
+	return verifyQuestionResultsForSemanticVersion(
+		plans, executions, budgets, semanticVersionForPlans(plans),
+	)
+}
+
+func verifyQuestionResultsForSemanticVersion(
+	plans []QueryPlan,
+	executions []QueryPlanExecution,
+	budgets QuestionBudgets,
+	expectedSemanticVersion string,
 ) ResultVerification {
 	verification := ResultVerification{Status: "PASS", TrustLevel: "A", Checks: []GuardCheck{}}
 	add := func(code string, pass bool, detail string) {
@@ -744,7 +1005,6 @@ func verifyQuestionResults(
 		verification.Checks = append(verification.Checks, GuardCheck{Code: code, Status: status, Detail: detail})
 	}
 	add("execution_count_pass", len(plans) > 0 && len(plans) == len(executions), "每个语义计划必须恰有一个执行结果")
-	expectedSemanticVersion := semanticVersionForPlans(plans)
 	for index, execution := range executions {
 		result := execution.Result
 		planIdentityValid := index < len(plans) &&
@@ -855,6 +1115,8 @@ func buildAccuracyEvidence(
 		return AccuracyEvidence{}, err
 	}
 	resultHashes := make([]string, 0, len(executions))
+	graphEvidenceIDs := []string{}
+	semanticContentHash := ""
 	checks := make([]string, 0, len(verification.Checks))
 	metrics := make([]string, 0, len(intent.Metrics))
 	for _, item := range verification.Checks {
@@ -867,6 +1129,12 @@ func buildAccuracyEvidence(
 	}
 	for _, execution := range executions {
 		resultHashes = append(resultHashes, execution.Evidence.ResultHash)
+		graphEvidenceIDs = append(graphEvidenceIDs, execution.Evidence.GraphEvidenceIDs...)
+		if semanticContentHash == "" {
+			semanticContentHash = execution.Evidence.SemanticContentHash
+		} else if execution.Evidence.SemanticContentHash != semanticContentHash {
+			return AccuracyEvidence{}, fmt.Errorf("%w: mixed semantic content hashes", ErrUnprovenPath)
+		}
 	}
 	resultHash, err := hashJSON(resultHashes)
 	if err != nil {
@@ -895,10 +1163,11 @@ func buildAccuracyEvidence(
 		}
 	}
 	return AccuracyEvidence{
-		SemanticVersion: intent.SemanticVersion, IntentHash: intentHash,
-		BindingEvidence: uniqueStrings(ir.EvidenceIDs, 256),
+		SemanticVersion: intent.SemanticVersion, SemanticContentHash: semanticContentHash,
+		IntentHash: intentHash, BindingEvidence: uniqueStrings(ir.EvidenceIDs, 256),
 		MetricContracts: metrics, GraphPlanIDs: intent.GraphPlanIDs,
-		QueryPlanHash: planHash, ResultHash: resultHash,
+		GraphEvidenceIDs: uniqueStrings(graphEvidenceIDs, 256),
+		QueryPlanHash:    planHash, ResultHash: resultHash,
 		ValidatorChecks: checks,
 		ToolLoop: AccuracyToolLoopEvidence{
 			Iterations:     loopIterations,

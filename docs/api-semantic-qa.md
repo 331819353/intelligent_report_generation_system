@@ -12,6 +12,12 @@
 完成意图补全、三路路由、Semantic IR 构建、SQL Guard、执行、Result Verifier 和
 确定性答案生成，不再要求浏览器先规划、并发执行计划后自行拼接答案。
 
+生产环境会在规划前加载 PostgreSQL 中原子激活的 `semantic_release`，并要求该发布的
+NebulaGraph 投影处于 `READY` 且 `semantic_version/content_hash` 完全一致。旧
+PostgreSQL graph generation 只负责生成过渡候选和执行适配，不再是关系、权限或 Join
+的最终裁决者。NebulaGraph 不可用且没有精确同版本认证缓存时，Question 进入
+`BLOCKED`，不会降级到旧图执行。
+
 ```json
 {
   "question": "华东区本月支付 GMV 是多少？",
@@ -46,10 +52,19 @@
   `RELIABLE_DIALECT_AST_ADAPTER_NOT_CONFIGURED`，不会退化为执行模型自由 SQL。
 - C `CLARIFY_OR_REFUSE`：证据不完整、存在歧义或治理条件不满足时最小澄清或拒绝。
 
-成功响应同时返回 `intent`、`semanticIr`、`executionGraph`、`sqlGuard`、
+成功响应同时返回 `understanding`、`graphPlan`、`intent`、`semanticIr`、
+`executionGraph`、`sqlGuard`、
 `resultVerification`、`answer`、`accuracyEvidence`、固定预算和 Host-owned Tool Registry
-摘要。`accuracyEvidence` 包含语义版本、Intent/Plan/Result 哈希、绑定证据、验证项和
-Evidence Loop 新证据轨迹；答案文本只从已通过 Result Verifier 的结果槽位生成。
+摘要。`understanding` 使用版本化 NFKC/case-fold Normalizer，返回规范化文本、原始
+UTF-8 半开字节区间的 `AlignmentMap`、规则/认证 Alias Span、候选对象和认证示例 ID。
+`graphPlan` 固定活动发布版本/内容哈希，并包含维度值复合身份、时间维度、认证数据集、
+权限传播、最多四跳 Join 和图证据。冲突 Alias 最多取前三个候选 Bundle 做图闭包和权限
+验证；只有多个合法 Bundle 仍会改变结果时才发起最小澄清。
+
+`accuracyEvidence` 包含语义版本/内容哈希、Intent/Plan/Result 哈希、绑定证据、
+GraphPlan/图证据、验证项和 Evidence Loop 新证据轨迹；答案文本只从已通过 Result
+Verifier 的结果槽位生成。执行前后会重新确认活动发布指针和 NebulaGraph 投影 hash
+没有漂移。
 
 进度流仍使用 `Accept: application/x-ndjson`。Question 创建后，进度事件会带
 `questionId`，客户端可用它调用取消接口；新增阶段包括 `ORCHESTRATION`、`SQL_GUARD`、
@@ -139,7 +154,9 @@ QueryPlan；`contextQueryPlanIds` 才是条件继承的安全锚点。当前轮�
 turn 才会返回 `PLANNED / PLAN_READY`，存在非 READY 计划时不会再被包装成可执行结果。
 状态机会写入 `semantic_question_runs / semantic_question_run_events`；账本只保存运行
 UUID、操作者、会话关系、问题哈希、路由、语义版本、计划/结果摘要哈希、状态和安全
-事件摘要，不保存原始问题、提示词、SQL 或结果行。迁移时使用期望前置状态和
+事件摘要，不保存原始问题、提示词、SQL 或结果行。活动发布 ID、内容哈希、理解/图计划
+hash 也会写入运行记录；`semantic_question_artifacts` 保存删除原问句和命中文本后的
+Understanding、GraphPlan 与 Semantic IR，用于同版本重放。迁移时使用期望前置状态和
 `recordVersion` 串行化，失败链会收敛到 `BLOCKED`。
 
 ```json

@@ -14,15 +14,18 @@ pgvector 检索、租户 RLS、物化与发布门禁、PostgreSQL 属性图投�
 一部分问答证据链。当前工作区还新增了统一 Question Orchestrator、三路径路由合同、
 状态机、Semantic Query IR、Tool Registry、AccuracyEvidence 和资产治理概览。
 
-但是当前实现仍处于“旧执行底座 + 新合同外壳”的过渡状态，尚未完整落地 v1.3：
+阶段 0～2 已消除原审计中“没有原子发布”和“没有图数据库”两项架构缺口；阶段 3 已把
+统一问答主路径固定到活动语义发布，并以 NebulaGraph 作为 Bundle、权限和路径的最终
+关系裁决者。当前仍属于受控迁移期，尚未完整落地 v1.3：
 
-1. `semantic_graph_*` 是 PostgreSQL 表，不是 NebulaGraph；现有策略文档还明确把外部图
-   数据库推迟到未来，与 v1.3 固定选择 NebulaGraph 的决定冲突。
-2. 资产管理仍以数据集、指标、维度、词条和解析规则的分散管理为主，尚未形成一套可
-   原子发布的七层可执行语义合同。
-3. 问答虽然已生成 Semantic Query IR，但执行仍主要调用项目原有指标预览链路；没有
-   独立的执行语义层适配器和完整 GraphPlan 编译边界。
-4. Tool Registry 已有工具定义，但 Evidence Loop 实际只覆盖指标和维度绑定的一部分，
+1. PostgreSQL 旧 QueryPlan/graph generation 仍承担候选生成和物理指标执行适配；它已
+   失去关系裁决权，但独立执行语义层适配器仍待阶段 4 完成。
+2. 活动发布已经统一七层合同，并补齐版本化 Alias、DimensionValue 复合身份、时间和
+   策略引用门禁；多视图检索的可训练重排、校准和生产索引发布仍待评测数据驱动。
+3. 问答已生成活动版本 Semantic Query IR 和 GraphPlan，但底层执行仍调用项目原有指标
+   预览适配器；尚未形成完整逻辑计划、方言 AST 和 `EXPLAIN` 边界。
+4. Tool Registry 已有工具定义，Evidence Loop 已覆盖旧指标/维度检索和新的 Alias、
+   认证示例、图闭包、权限取证，但还不是贯穿编译、`EXPLAIN`、执行和结果验证的完整闭环。
    还不是贯穿图闭包、编译、`EXPLAIN`、执行和结果验证的 Host 控制闭环。
 5. 当前 SQL Guard 主要验证服务端 IR、版本、路径 hash 和参数绑定，不包含目标方言
    AST、表列 allowlist、成本、扫描量和 `EXPLAIN` 门禁。
@@ -38,18 +41,18 @@ pgvector 检索、租户 RLS、物化与发布门禁、PostgreSQL 属性图投�
 
 | 范围 | 当前落地 | v1.3 目标 | 判定 | 优先级 |
 | --- | --- | --- | --- | --- |
-| 权威顺序 | 指标、维度、数据集和词条分散存储；图 generation 单独演进 | 人工合同 > 执行语义层 > 认证数据集 > 检索/图投影 | 部分实现 | P0 |
+| 权威顺序 | 原子活动发布为治理事实源；NebulaGraph 为关系裁决；旧计划仅作候选/执行适配 | 人工合同 > 执行语义层 > 认证数据集 > 检索/图投影 | 关系权威已切换，执行语义层待阶段 4 | P0 |
 | 语义对象 | 已有指标、维度、成员、词条、数据集和物化 | 七层合同：Domain、Term、Entity、SemanticModel、Metric、Dimension/Value/Time/Cohort、Relation、Policy/DQ | 缺少实体、时间、cohort 和统一关系合同 | P0 |
-| 语义版本 | 已建立原子 `semantic_releases`、四投影 hash 门禁和活动指针；旧 graph generation 待切读 | 所有执行层和派生投影携带同一 `semantic_version/content_hash`，原子切换 | 核心合同已实现，问答切读待阶段 3 | P0 |
+| 语义版本 | 问答、IR、GraphPlan、执行证据和运行账本固定活动 `semantic_version/content_hash`，执行前后复核 | 所有执行层和派生投影携带同一 `semantic_version/content_hash`，原子切换 | 在线问答切读已完成 | P0 |
 | 资产发布 | 已实现候选、静态校验、四投影、READY 和原子激活；黄金回归待评测阶段接入 | 构建候选版本 → 静态校验 → 投影 → 黄金回归 → 原子激活 → 延迟清理 | 核心流程已实现 | P0 |
-| 关系图 | NebulaGraph Schema、版本投影 Worker、稳定 VID、有界查询和 Go GraphPlanner 已实现；旧表仅保留回放 | NebulaGraph 可重建投影，稳定 VID，有界 1～4 跳，Go GraphPlanner | 运行时已实现，问答切读待阶段 3 | P0 |
-| 图在线用途 | 六类接口和真实 NebulaGraph 集成测试已实现 | 候选扩展、值归属、兼容性、路径选择、权限传播、影响分析六类能力 | 已实现，业务编排接入待阶段 3 | P0 |
+| 关系图 | NebulaGraph 版本投影、维度作用域值 VID、有界查询和 Go GraphPlanner 已接入问答；旧表仅保留候选/回放 | NebulaGraph 可重建投影，稳定 VID，有界 1～4 跳，Go GraphPlanner | 已实现并切读 | P0 |
+| 图在线用途 | 六类接口、真实图测试和问答 Bundle/权限/Join 接入已实现 | 候选扩展、值归属、兼容性、路径选择、权限传播、影响分析六类能力 | 已实现 | P0 |
 | 图可用性 | 已实现 Session Pool、超时、熔断及仅精确版本认证 Join GraphPlan 缓存 | Nebula 多副本；不可用时只接受版本一致的缓存 GraphPlan | 开发单副本已验证，生产多副本待部署 | P0 |
-| 检索 | PostgreSQL FTS/pgvector、词条和维度成员检索 | Span → 精确 Alias → 六路召回 → Bundle 联合重排 → 图闭包 → 校准 | 部分实现 | P0 |
-| Alias | 通用词条映射与解析规则 | 作用域、locale、生效期、正/负 alias、hard negative、冲突门禁 | 部分实现 | P1 |
-| 维度值 | 成员、别名、WHERE 决策 | `(dimension_id,value_id)` 复合身份、层级/父路径/有效期、图归属 | 部分实现 | P0 |
+| 检索 | NFKC Span/精确 Alias/认证示例 + 既有 FTS、pgvector、值检索 + 图扩展；可训练重排待数据 | Span → 精确 Alias → 六路召回 → Bundle 联合重排 → 图闭包 → 校准 | 规则版六路链路已接通，学习排序待阶段 5 | P0 |
+| Alias | 活动发布承载 locale、正/负 alias、hard negative 和极性冲突门禁；跨对象冲突走图消歧 | 作用域、locale、生效期、正/负 alias、hard negative、冲突门禁 | 核心合同已实现 | P1 |
+| 维度值 | 发布/图/问答统一使用维度作用域复合身份，并校验 `has_value` | `(dimension_id,value_id)` 复合身份、层级/父路径/有效期、图归属 | 核心合同已实现；层级产品治理待扩充 | P0 |
 | 问答入口 | 已新增统一 `/questions` 编排，旧接口仍存在 | 单一生产入口 + REST/SSE + 可恢复状态机 | 部分实现 | P0 |
-| 路径 A | 服务端生成 Semantic IR，底层执行原指标预览 | 受约束 IR，经语义层/适配器确定性编译，随后 Guard | 部分实现 | P0 |
+| 路径 A | 服务端生成活动版本 IR/GraphPlan，底层仍经原指标预览兼容适配器执行 | 受约束 IR，经语义层/适配器确定性编译，随后 Guard | 图与版本门禁完成；编译适配待阶段 4 | P0 |
 | 路径 B | 明确关闭 | 仅在受治理范围内启用的 Text-to-SQL + AST/GraphPlan/成本门禁 | 未实现；关闭是当前安全行为 | P1 |
 | 路径 C | 有澄清和阻断 | 最小澄清、越权/范围外/DQ/成本阻断和 continuation token | 部分实现 | P0 |
 | 多指标 | 每个指标形成独立 QueryPlan 和结果集 | 求共同粒度；各事实先聚合再安全合并 | 部分实现 | P0 |
@@ -57,7 +60,7 @@ pgvector 检索、租户 RLS、物化与发布门禁、PostgreSQL 属性图投�
 | SQL Guard | IR、路径 hash、只读入口和参数绑定检查 | SQL AST、表列集合、函数白名单、RLS、fanout、`EXPLAIN` 和成本 | 未完整实现 | P0 |
 | 结果验证 | schema、行数、hash、版本和权限复核 | 时间完整性、单位、空值、比率、Top N、恒等式、DQ、P0 对照 | 部分实现 | P0 |
 | 答案忠实 | 确定性结果摘要和 AccuracyEvidence | 数字槽位逐项验证、口径/过滤/新鲜度/来源完整展示 | 部分实现 | P0 |
-| 权限 | 应用授权 + PostgreSQL/warehouse RLS | 应用 + Policy Engine + 语义层 + 数仓四层 | 部分实现；尚无 OPA 适配 | P0 |
+| 权限 | 应用授权 + 活动 Policy 合同 + Nebula 关系传播 + PostgreSQL/warehouse RLS | 应用 + Policy Engine + 语义层 + 数仓四层 | 图权限已接入；独立 OPA 适配待后续 | P0 |
 | 评测 | 黄金问题集、回放和基础验证脚本 | 2,000+ sealed、结果等价、Wilson 下界、分层错误预算、影子流量 | 未实现 | P0 |
 | 可观测性 | 请求日志、进度和执行证据 | OTel trace 串联 Web、Go、模型、图、语义层和数仓 | 部分实现 | P1 |
 | 前端 | 工作台、澄清、证据、资产概览正在重构 | 口径卡、最小澄清、结果/证据抽屉、治理和评测台 | 部分实现 | P1 |
@@ -96,8 +99,9 @@ NebulaGraph 是本轮升级的标准语义关系图，不再作为未来可选�
 `semantic_version` 与当前活动版本完全一致的认证 GraphPlan 缓存，否则进入阻断状态，
 禁止回退到未经同版本验证的旧路径。
 
-现有 PostgreSQL 属性图在迁移期保留为核对源和回放依据，但在线规划读取将在阶段 2
-切到 `SemanticGraph` 接口后的 NebulaGraph 实现；完成对照回归前不删除历史表。
+现有 PostgreSQL 属性图在迁移期保留为候选生成、核对和回放依据；在线 Question 的
+Bundle、值归属、权限和 Join 裁决已经切到 `SemanticGraph` 接口后的 NebulaGraph
+实现。完成执行适配和对照回归前不删除历史表。
 
 ## 4. 分阶段实施与提交边界
 
@@ -184,8 +188,14 @@ development/validation/sealed/production_regression 数据集；结果等价比�
 | --- | --- | --- | --- |
 | 0 | `cf1b62a` | 差距审计、NebulaGraph ADR、升级边界和基线 | Go、React、CI 基线通过 |
 | 1 | `e56abf9` | 不可变语义发布包、七层合同校验、四投影 hash 门禁、原子激活、资产目录/就绪度 | 发布服务、迁移、API、React 回归通过 |
-| 2 | 待本阶段提交 | NebulaGraph Compose/nGQL、官方 Go 客户端、租约 Worker、六类在线能力、GraphPlanner、精确版本缓存 | 全量单测、迁移门禁及六类真实图查询通过 |
+| 2 | `7159631` | NebulaGraph Compose/nGQL、官方 Go 客户端、租约 Worker、六类在线能力、GraphPlanner、精确版本缓存 | 全量单测、迁移门禁及六类真实图查询通过 |
+| 3 | 待本阶段提交 | NFKC/AlignmentMap、版本化 Alias 与维度值复合身份、认证示例、Top3 冲突 Bundle 图消歧、活动版本 GraphPlan、权限传播、三类非图投影 Worker、旧原生资产迁移预览/候选、执行前后版本复核和脱敏重放产物 | 2,422 对象四投影 READY；Nebula 2,327 节点/2,498 边/0 孤儿；真实问答固定版本并通过图权限与结果门禁；全量 Go/CI 通过 |
 
-阶段 2 只完成“图运行时及投影”本身，不把尚未完成的问答接入算作完成。阶段 3 将把
-活动 `semantic_version/content_hash`、候选 Bundle、权限闭包和 Join GraphPlan 接入统一
-Question Orchestrator；接入前旧 PostgreSQL 图仍仅作为对照与回放数据源。
+阶段 3 不宣称旧指标预览已经成为完整执行语义层。它只保留为物理执行兼容适配器，且
+不能绕过活动发布、NebulaGraph、权限或版本门禁；阶段 4 将替换编译/Guard/结果验证
+底座。
+
+现有项目的已发布指标不会被假定为天然满足新合同。迁移入口按当前发布指针和活动物化
+逐项核对：可证明的对象进入新 DRAFT，仍引用旧数据集版本或缺少执行证据的对象作为排除
+项返回；时区、日历和完整周期必须由操作人显式确认。这样升级沿用当前资产 ID 与版本，
+同时不把旧方案的历史不一致带入活动语义版本。

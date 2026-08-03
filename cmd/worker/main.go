@@ -178,6 +178,15 @@ func main() {
 		),
 		workerID, cfg.WorkerPollInterval,
 	)
+	go semanticasset.RunRuntimeProjectionWorker(
+		ctx, logger,
+		semanticasset.NewRuntimeProjectionWorker(semanticasset.NewPostgresStore(pool)),
+		workerID, cfg.WorkerPollInterval,
+	)
+	if !cfg.NebulaGraphEnabled {
+		logger.Error("NebulaGraph is required by the semantic release projection runtime")
+		os.Exit(1)
+	}
 	if cfg.NebulaGraphEnabled {
 		var nebulaTLSConfig *tls.Config
 		if cfg.NebulaGraphTLSEnabled {
