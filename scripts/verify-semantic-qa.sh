@@ -47,7 +47,8 @@ BEGIN
     ('000093_dws_analysis_modeling'),
     ('000094_semantic_materialization_graph_event'),
     ('000095_semantic_query_execution_quality'),
-    ('000183_semantic_release_registry')
+    ('000183_semantic_release_registry'),
+    ('000184_nebulagraph_projection_runtime')
   ) AS expected(version)
   LEFT JOIN platform_schema_migrations AS applied USING(version)
   WHERE applied.version IS NULL;
@@ -237,6 +238,32 @@ BEGIN
   END IF;
 
   SELECT count(*) INTO invalid_count
+  FROM platform.semantic_release_projections AS projection
+  WHERE projection.target='NEBULA_GRAPH'
+    AND (
+      (projection.status='RUNNING' AND (
+        projection.lease_owner='' OR projection.lease_token IS NULL
+        OR projection.lease_expires_at IS NULL
+      ))
+      OR (projection.status<>'RUNNING' AND (
+        projection.lease_owner<>'' OR projection.lease_token IS NOT NULL
+        OR projection.lease_expires_at IS NOT NULL
+      ))
+    );
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'NebulaGraph projection leases are inconsistent: %',invalid_count;
+  END IF;
+
+  SELECT count(*) INTO invalid_count
+  FROM platform.semantic_graph_plan_cache AS cache
+  WHERE NOT cache.certified OR cache.expires_at<=cache.created_at
+    OR cache.content_hash !~ '^[0-9a-f]{64}$'
+    OR cache.request_hash !~ '^[0-9a-f]{64}$';
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'semantic GraphPlan cache contains unsafe entries: %',invalid_count;
+  END IF;
+
+  SELECT count(*) INTO invalid_count
   FROM platform.semantic_releases AS release
   LEFT JOIN platform.semantic_release_state AS state
     ON state.tenant_id=release.tenant_id
@@ -259,6 +286,7 @@ BEGIN
   IF invalid_count<>0 THEN
     RAISE EXCEPTION 'active semantic releases bypass projection gates: %',invalid_count;
   END IF;
+
 END
 $verify$;
 
@@ -298,6 +326,14 @@ SELECT (
   )
   AND NOT has_table_privilege(
     :'worker_user','platform.semantic_release_events','INSERT,UPDATE,DELETE'
+  )
+  AND NOT has_table_privilege(
+    :'worker_user','platform.semantic_graph_plan_cache','INSERT,UPDATE,DELETE'
+  )
+  AND has_function_privilege(
+    :'worker_user',
+    'platform.claim_semantic_nebula_projection(uuid,text,integer)',
+    'EXECUTE'
   )
 ) AS semantic_role_boundary_valid
 \gset

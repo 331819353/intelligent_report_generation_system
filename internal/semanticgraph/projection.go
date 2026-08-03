@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,25 +30,27 @@ var allowedEdgeTypes = map[string]bool{
 	"can_access": true, "derived_from": true, "guards": true, "uses": true,
 }
 
+var stableVIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+
 type ReleaseObject struct {
-	ObjectType      string
-	ObjectID        string
-	ObjectVersion   string
-	DomainID        string
-	ContentHash     string
-	Certification   string
-	Sensitivity     string
-	ValidFrom       time.Time
-	ValidTo         *time.Time
-	Contract        json.RawMessage
+	ObjectType    string
+	ObjectID      string
+	ObjectVersion string
+	DomainID      string
+	ContentHash   string
+	Certification string
+	Sensitivity   string
+	ValidFrom     time.Time
+	ValidTo       *time.Time
+	Contract      json.RawMessage
 }
 
 type ReleaseManifest struct {
-	TenantID       string
-	ReleaseID      string
+	TenantID        string
+	ReleaseID       string
 	SemanticVersion string
-	ContentHash    string
-	Objects        []ReleaseObject
+	ContentHash     string
+	Objects         []ReleaseObject
 }
 
 type Vertex struct {
@@ -211,16 +214,16 @@ func BuildProjection(manifest ReleaseManifest) (Projection, error) {
 			Props: map[string]any{
 				"relation_id": relationID, "tenant_scope": manifest.TenantID,
 				"certified": certified, "allowed_for_query": allowed,
-				"cardinality": defaultString(stringValue(contract["cardinality"]), "not_applicable"),
-				"base_cost": defaultFloat(numberValue(contract["baseCost"]), defaultBaseCost(contract)),
-				"fanout_penalty": numberValue(contract["fanoutPenalty"]),
-				"stale_penalty": numberValue(contract["staleDatasetPenalty"]),
+				"cardinality":          defaultString(stringValue(contract["cardinality"]), "not_applicable"),
+				"base_cost":            defaultFloat(numberValue(contract["baseCost"]), defaultBaseCost(contract)),
+				"fanout_penalty":       numberValue(contract["fanoutPenalty"]),
+				"stale_penalty":        numberValue(contract["staleDatasetPenalty"]),
 				"cross_source_penalty": numberValue(contract["crossSourcePenalty"]),
-				"policy_penalty": numberValue(contract["policyComplexityPenalty"]),
-				"semantic_version": manifest.SemanticVersion,
-				"effective_from": unixFromContract(contract["effectiveFrom"]),
-				"effective_to": unixFromContract(contract["effectiveTo"]),
-				"attributes_json": string(attributes),
+				"policy_penalty":       numberValue(contract["policyComplexityPenalty"]),
+				"semantic_version":     manifest.SemanticVersion,
+				"effective_from":       unixFromContract(contract["effectiveFrom"]),
+				"effective_to":         unixFromContract(contract["effectiveTo"]),
+				"attributes_json":      string(attributes),
 			},
 		})
 		return nil
@@ -261,20 +264,29 @@ type inferredRelation struct {
 
 func inferredRelations(object ReleaseObject, contract map[string]any) []inferredRelation {
 	relations := []inferredRelation{}
-	appendMany := func(relationType, field, fromRef string) {
+	appendMany := func(relationType, field, fromRef, fromType, toType string) {
 		for _, target := range stringSlice(contract[field]) {
 			relations = append(relations, inferredRelation{
-				id: object.ObjectID + ":" + relationType + ":" + target,
+				id:           object.ObjectID + ":" + relationType + ":" + target,
 				relationType: relationType, fromRef: fromRef, toRef: target,
-				contract: map[string]any{"certified": true, "allowedForQuery": true},
+				contract: map[string]any{"certified": true, "allowedForQuery": true,
+					"fromType": fromType, "toType": toType},
 			})
 		}
 	}
 	switch object.ObjectType {
 	case "METRIC", "MEASURE":
-		appendMany("sourced_from", "sourceDatasetIds", object.ObjectID)
-		appendMany("groupable_by", "groupableDimensionIds", object.ObjectID)
-		appendMany("depends_on", "dependsOnMetricIds", object.ObjectID)
+		appendMany("sourced_from", "sourceDatasetIds", object.ObjectID, object.ObjectType, "DATASET")
+		appendMany("groupable_by", "groupableDimensionIds", object.ObjectID, object.ObjectType, "DIMENSION")
+		appendMany("depends_on", "dependsOnMetricIds", object.ObjectID, object.ObjectType, "METRIC")
+		for _, policyID := range stringSlice(contract["permissionPolicyIds"]) {
+			relations = append(relations, inferredRelation{
+				id:           policyID + ":can_access:" + object.ObjectID,
+				relationType: "can_access", fromRef: policyID, toRef: object.ObjectID,
+				contract: map[string]any{"certified": true, "allowedForQuery": true,
+					"fromType": "POLICY", "toType": object.ObjectType},
+			})
+		}
 	case "DIMENSION_VALUE":
 		if target := stringValue(contract["dimensionId"]); target != "" {
 			relations = append(relations, inferredRelation{id: target + ":has_value:" + object.ObjectID,
@@ -295,9 +307,9 @@ func inferredRelations(object ReleaseObject, contract map[string]any) []inferred
 				contract: map[string]any{"certified": true, "allowedForQuery": true}})
 		}
 	case "POLICY":
-		appendMany("can_access", "accessibleObjectIds", object.ObjectID)
+		appendMany("can_access", "accessibleObjectIds", object.ObjectID, "POLICY", "")
 	case "CERTIFIED_EXAMPLE":
-		appendMany("uses", "objectIds", object.ObjectID)
+		appendMany("uses", "objectIds", object.ObjectID, "CERTIFIED_EXAMPLE", "")
 	}
 	return relations
 }
@@ -306,7 +318,7 @@ func StableVID(tenantID, tag, objectID, version string) string {
 	tenantHash := sha256.Sum256([]byte(strings.TrimSpace(tenantID)))
 	prefix := strings.ToLower(strings.TrimSpace(tag)) + ":" + hex.EncodeToString(tenantHash[:6]) + ":"
 	vid := prefix + strings.TrimSpace(objectID) + ":" + strings.TrimSpace(version)
-	if len([]byte(vid)) <= 128 {
+	if stableVIDPattern.MatchString(vid) {
 		return vid
 	}
 	hash := sha256.Sum256([]byte(strings.TrimSpace(tenantID) + "\x00" + tag + "\x00" + objectID + "\x00" + version))

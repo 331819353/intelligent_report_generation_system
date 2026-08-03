@@ -20,7 +20,7 @@ func TestNormalizeSemanticReleaseBuildsDeterministicManifestHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalize reordered release: %v", err)
 	}
-	if first.ContentHash != second.ContentHash || len(first.Objects) != 7 {
+	if first.ContentHash != second.ContentHash || len(first.Objects) != 8 {
 		t.Fatalf("manifest hash is not deterministic: %#v %#v", first, second)
 	}
 	if first.Objects[0].ObjectType != "DATASET" ||
@@ -43,7 +43,7 @@ func TestNormalizeSemanticReleaseRejectsUnsafeRelation(t *testing.T) {
 	for index := range input.Objects {
 		if input.Objects[index].ObjectType == "RELATION" {
 			input.Objects[index].Contract = json.RawMessage(`{
-				"title":"订单到门店","fromId":"dataset:orders",
+				"title":"订单到门店","relationType":"joins_to","fromId":"dataset:orders",
 				"toId":"dataset:stores","cardinality":"unknown",
 				"certified":false,"fanoutPolicy":"UNSAFE"
 			}`)
@@ -52,6 +52,25 @@ func TestNormalizeSemanticReleaseRejectsUnsafeRelation(t *testing.T) {
 	_, err := normalizeSemanticRelease(input)
 	if !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("unsafe relation error = %v", err)
+	}
+}
+
+func TestNormalizeSemanticReleaseRejectsMissingRelationEndpoint(t *testing.T) {
+	input := completeSemanticReleaseInput()
+	for index := range input.Objects {
+		if input.Objects[index].ObjectType == "RELATION" {
+			input.Objects[index].Contract = json.RawMessage(`{
+				"title":"订单到未知表","relationType":"joins_to",
+				"fromId":"paid_orders","fromType":"DATASET",
+				"toId":"missing_dataset","toType":"DATASET",
+				"cardinality":"many_to_one","certified":true,
+				"fanoutPolicy":"SAFE"
+			}`)
+		}
+	}
+	_, err := normalizeSemanticRelease(input)
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("missing relation endpoint error = %v", err)
 	}
 }
 
@@ -92,6 +111,7 @@ func completeSemanticReleaseInput() CreateSemanticReleaseInput {
 				"title":"支付GMV","formula":"sum(paid_amount)",
 				"grain":["order_id"],"defaultTimeDimensionId":"paid_at",
 				"sourceDatasetIds":["paid_orders"],
+				"groupableDimensionIds":["sales_region"],
 				"permissionPolicyIds":["commerce_reader"],
 				"qualityRuleIds":["paid_orders_freshness"]
 			}`),
@@ -104,8 +124,9 @@ func completeSemanticReleaseInput() CreateSemanticReleaseInput {
 				"calendar":"NATURAL","completePeriodPolicy":"LAST_COMPLETE_PERIOD"
 			}`),
 			object("RELATION", "paid_orders_to_store", `{
-				"title":"支付订单到门店","fromId":"paid_orders",
-				"toId":"store","cardinality":"many_to_one",
+				"title":"支付订单到门店","relationType":"joins_to","fromId":"paid_orders",
+				"fromType":"DATASET","toId":"store","toType":"DATASET",
+				"cardinality":"many_to_one",
 				"certified":true,"fanoutPolicy":"SAFE"
 			}`),
 			object("DATASET", "paid_orders", `{
@@ -113,9 +134,15 @@ func completeSemanticReleaseInput() CreateSemanticReleaseInput {
 				"source":"commerce.fct_paid_order",
 				"freshness":{"warnAfter":"1h","blockAfter":"4h"}
 			}`),
+			object("DATASET", "store", `{
+				"title":"门店","grain":["store_id"],
+				"source":"commerce.dim_store",
+				"freshness":{"warnAfter":"12h","blockAfter":"24h"}
+			}`),
 			object("POLICY", "commerce_reader", `{
 				"title":"交易域只读策略","roles":["analyst"],
-				"purpose":["analytics"],"effect":"ALLOW"
+				"purpose":["analytics"],"effect":"ALLOW",
+				"accessibleObjectIds":["paid_gmv","paid_orders","store","sales_region"]
 			}`),
 			object("QUALITY_RULE", "paid_orders_freshness", `{
 				"title":"支付订单新鲜度","targetId":"paid_orders",

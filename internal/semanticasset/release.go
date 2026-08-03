@@ -51,10 +51,10 @@ var semanticContractRequiredFields = map[string][]string{
 	"DIMENSION_VALUE":   {"title", "dimensionId", "canonicalCode"},
 	"TIME":              {"title", "timezone", "calendar", "completePeriodPolicy"},
 	"COHORT":            {"title", "entryEvent", "observationWindow", "exclusions"},
-	"RELATION":          {"title", "fromId", "toId", "cardinality", "certified", "fanoutPolicy"},
+	"RELATION":          {"title", "relationType", "fromId", "toId", "cardinality", "certified", "fanoutPolicy"},
 	"DATASET":           {"title", "grain", "source", "freshness"},
 	"TABLE_COLUMN":      {"title", "datasetId", "dataType"},
-	"POLICY":            {"title", "roles", "purpose", "effect"},
+	"POLICY":            {"title", "roles", "purpose", "effect", "accessibleObjectIds"},
 	"QUALITY_RULE":      {"title", "targetId", "severity", "validator"},
 	"CERTIFIED_EXAMPLE": {"title", "question", "intent"},
 	"PARSING_RULE":      {"title", "ruleType", "pattern", "action"},
@@ -366,6 +366,12 @@ func validateSemanticReleaseObjects(
 		Status: "PASS", Issues: []SemanticReleaseValidationIssue{},
 		Counts: map[string]int{},
 	}
+	objectTypesByID := make(map[string][]string, len(objects))
+	for _, object := range objects {
+		objectTypesByID[object.ObjectID] = append(
+			objectTypesByID[object.ObjectID], object.ObjectType,
+		)
+	}
 	for _, object := range objects {
 		result.Counts[object.ObjectType]++
 		var contract map[string]any
@@ -389,13 +395,32 @@ func validateSemanticReleaseObjects(
 			certified, _ := contract["certified"].(bool)
 			cardinality, _ := contract["cardinality"].(string)
 			fanout, _ := contract["fanoutPolicy"].(string)
+			relationType, _ := contract["relationType"].(string)
 			if !certified || cardinality == "unknown" ||
+				!semanticGraphRelationTypeAllowed(relationType) ||
 				strings.EqualFold(fanout, "UNSAFE") {
 				result.Issues = append(result.Issues, SemanticReleaseValidationIssue{
 					Code: "RELATION_NOT_EXECUTION_SAFE", ObjectType: object.ObjectType,
 					ObjectID: object.ObjectID,
 					Message:  "关系必须认证、基数已知且 fanout 策略安全",
 				})
+			}
+			for _, endpoint := range []struct {
+				field, typeField string
+			}{
+				{"fromId", "fromType"}, {"toId", "toType"},
+			} {
+				if !semanticReleaseReferenceExists(
+					objectTypesByID,
+					stringContractValue(contract[endpoint.field]),
+					stringContractValue(contract[endpoint.typeField]),
+				) {
+					result.Issues = append(result.Issues, SemanticReleaseValidationIssue{
+						Code: "RELATION_ENDPOINT_INVALID", ObjectType: object.ObjectType,
+						ObjectID: object.ObjectID, Field: endpoint.field,
+						Message: "关系端点必须唯一引用同一发布包内对象",
+					})
+				}
 			}
 		}
 	}
@@ -411,6 +436,47 @@ func validateSemanticReleaseObjects(
 		result.Status = "BLOCKED"
 	}
 	return result
+}
+
+func semanticReleaseReferenceExists(
+	objectTypesByID map[string][]string,
+	reference, expectedType string,
+) bool {
+	reference = strings.TrimSpace(reference)
+	expectedType = strings.ToUpper(strings.TrimSpace(expectedType))
+	if separator := strings.IndexByte(reference, ':'); separator > 0 {
+		possibleType := strings.ToUpper(reference[:separator])
+		if semanticReleaseObjectTypes[possibleType] {
+			expectedType, reference = possibleType, reference[separator+1:]
+		}
+	}
+	types := objectTypesByID[reference]
+	if expectedType == "" {
+		return len(types) == 1
+	}
+	matches := 0
+	for _, objectType := range types {
+		if objectType == expectedType {
+			matches++
+		}
+	}
+	return matches == 1
+}
+
+func stringContractValue(value any) string {
+	result, _ := value.(string)
+	return strings.TrimSpace(result)
+}
+
+func semanticGraphRelationTypeAllowed(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(strings.ReplaceAll(value, "-", "_"))) {
+	case "contains", "measures", "depends_on", "sourced_from",
+		"groupable_by", "belongs_to", "has_value", "joins_to",
+		"synonym_of", "can_access", "derived_from", "guards", "uses":
+		return true
+	default:
+		return false
+	}
 }
 
 func hashSemanticRelease(objects []SemanticReleaseObject) (string, error) {

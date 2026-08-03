@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -29,6 +30,7 @@ import (
 	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/semanticasset"
 	"intelligent-report-generation-system/internal/semanticcatalog"
+	"intelligent-report-generation-system/internal/semanticgraph"
 	"intelligent-report-generation-system/internal/semanticmanagement"
 	"intelligent-report-generation-system/internal/semanticqa"
 	"intelligent-report-generation-system/internal/warehouse"
@@ -176,11 +178,40 @@ func main() {
 		),
 		workerID, cfg.WorkerPollInterval,
 	)
-	go semanticqa.RunGraphWorker(
-		ctx, logger,
-		semanticqa.NewGraphWorker(semanticqa.NewPostgresStore(pool)),
-		workerID, cfg.WorkerPollInterval,
-	)
+	if cfg.NebulaGraphEnabled {
+		var nebulaTLSConfig *tls.Config
+		if cfg.NebulaGraphTLSEnabled {
+			nebulaTLSConfig, err = semanticgraph.LoadTLSConfig(
+				cfg.NebulaGraphCAFile, cfg.NebulaGraphTLSServerName,
+			)
+			if err != nil {
+				logger.Error("load NebulaGraph TLS configuration", "error", err)
+				os.Exit(1)
+			}
+		}
+		nebulaClient, nebulaErr := semanticgraph.NewNebulaClient(semanticgraph.NebulaConfig{
+			Addresses: cfg.NebulaGraphAddresses, Username: cfg.NebulaGraphUsername,
+			Password: cfg.NebulaGraphPassword, Space: cfg.NebulaGraphSpace,
+			Timeout: cfg.NebulaGraphTimeout, IdleTimeout: cfg.NebulaGraphIdleTimeout,
+			MinimumPoolSize: cfg.NebulaGraphPoolMinSize,
+			MaximumPoolSize: cfg.NebulaGraphPoolMaxSize, TLSConfig: nebulaTLSConfig,
+		})
+		if nebulaErr != nil {
+			logger.Error("initialize NebulaGraph projection client", "error", nebulaErr)
+			os.Exit(1)
+		}
+		defer nebulaClient.Close()
+		go semanticgraph.RunProjectionWorker(
+			ctx, logger,
+			semanticgraph.NewProjectionWorker(
+				semanticgraph.NewPostgresStore(pool),
+				semanticgraph.NewProjector(nebulaClient), cfg.NebulaGraphSpace,
+			),
+			workerID, cfg.WorkerPollInterval,
+		)
+	} else {
+		logger.Warn("NebulaGraph projection is disabled")
+	}
 	go semanticqa.RunDWSModelingWorker(
 		ctx, logger,
 		semanticqa.NewDWSModelingWorker(

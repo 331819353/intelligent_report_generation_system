@@ -231,6 +231,31 @@ SELECT format(
 WHERE to_regclass('platform.semantic_releases') IS NOT NULL
 \gexec
 
+-- NebulaGraph 投影 worker 只能通过有界租约函数推进自己的投影；发布清单、
+-- 其他投影和活动版本仍不可直接修改。GraphPlan 缓存只由在线 API 写入。
+SELECT format(
+  'REVOKE ALL ON FUNCTION platform.list_semantic_nebula_projection_tenants(), platform.claim_semantic_nebula_projection(uuid,text,integer), platform.heartbeat_semantic_nebula_projection(uuid,uuid,text,uuid,integer), platform.complete_semantic_nebula_projection(uuid,uuid,text,uuid,text,text,integer,jsonb), platform.fail_semantic_nebula_projection(uuid,uuid,text,uuid,text,jsonb) FROM PUBLIC, %I, %I, %I',
+  :'app_user',:'worker_user',:'connection_test_user'
+)
+WHERE to_regprocedure(
+  'platform.claim_semantic_nebula_projection(uuid,text,integer)'
+) IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.list_semantic_nebula_projection_tenants(), platform.claim_semantic_nebula_projection(uuid,text,integer), platform.heartbeat_semantic_nebula_projection(uuid,uuid,text,uuid,integer), platform.complete_semantic_nebula_projection(uuid,uuid,text,uuid,text,text,integer,jsonb), platform.fail_semantic_nebula_projection(uuid,uuid,text,uuid,text,jsonb) TO %I',
+  :'worker_user'
+)
+WHERE to_regprocedure(
+  'platform.claim_semantic_nebula_projection(uuid,text,integer)'
+) IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.semantic_graph_plan_cache FROM %I, %I',
+  :'worker_user',:'connection_test_user'
+)
+WHERE to_regclass('platform.semantic_graph_plan_cache') IS NOT NULL
+\gexec
+
 SELECT format(
   'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.dws_modeling_jobs, platform.dws_modeling_outputs FROM %I',
   :'app_user'

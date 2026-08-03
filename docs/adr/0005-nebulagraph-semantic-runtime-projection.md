@@ -23,8 +23,9 @@ semantic_graph_edges` 使用 PostgreSQL 保存版本化属性图，并由递归 
 - NebulaGraph 不成为指标公式、权限策略或治理状态的唯一事实源，不接受在线反向写入。
 - 每个环境使用一个主 Space：`smart_query_dev`、`smart_query_staging`、
   `smart_query_prod`；只有强租户物理隔离要求时才拆分 Space。
-- 所有顶点使用稳定 VID：`type:object_id:version`；超长身份使用可复现 hash，并保留原
-  ID 属性。
+- 所有顶点使用稳定 VID。共享 Space 为避免不同租户同名对象碰撞，实际格式为
+  `type:tenant_hash:object_id:version`；超长身份使用可复现 hash，并保留原 ID、租户和
+  版本属性。
 - 在线查询必须从权限裁剪后的已知 VID 出发，只允许 1～4 跳、固定结果上限和超时，
   禁止全图扫描。
 - NebulaGraph 返回认证候选路径；Go `GraphPlanner` 负责 fanout、跨源、陈旧、权限和

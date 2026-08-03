@@ -47,6 +47,16 @@ func TestBuildProjectionRejectsAmbiguousRelationEndpoint(t *testing.T) {
 	}
 }
 
+func TestStableVIDHashesUnsafeIdentity(t *testing.T) {
+	vid := StableVID("11111111-1111-4111-8111-111111111111", "metric", `gmv";DROP SPACE prod`, "1")
+	if !stableVIDPattern.MatchString(vid) || len(vid) > 128 {
+		t.Fatalf("unsafe stable VID: %q", vid)
+	}
+	if vid != StableVID("11111111-1111-4111-8111-111111111111", "metric", `gmv";DROP SPACE prod`, "1") {
+		t.Fatal("hashed VID is not deterministic")
+	}
+}
+
 func TestProjectorRequiresCountAndOrphanVerification(t *testing.T) {
 	manifest := projectionManifestForTest()
 	sink := &projectionSinkForTest{}

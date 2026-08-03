@@ -40,11 +40,11 @@ pgvector 检索、租户 RLS、物化与发布门禁、PostgreSQL 属性图投�
 | --- | --- | --- | --- | --- |
 | 权威顺序 | 指标、维度、数据集和词条分散存储；图 generation 单独演进 | 人工合同 > 执行语义层 > 认证数据集 > 检索/图投影 | 部分实现 | P0 |
 | 语义对象 | 已有指标、维度、成员、词条、数据集和物化 | 七层合同：Domain、Term、Entity、SemanticModel、Metric、Dimension/Value/Time/Cohort、Relation、Policy/DQ | 缺少实体、时间、cohort 和统一关系合同 | P0 |
-| 语义版本 | PostgreSQL graph generation、资产 version/hash 并存 | 所有执行层和派生投影携带同一 `semantic_version/content_hash`，原子切换 | 未统一 | P0 |
-| 资产发布 | 各模块分别发布和触发投影 | 构建候选版本 → 静态校验 → 投影 → 黄金回归 → 原子激活 → 延迟清理 | 部分实现 | P0 |
-| 关系图 | PostgreSQL `semantic_graph_nodes/edges` + 递归 SQL | NebulaGraph 可重建投影，稳定 VID，有界 1～4 跳，Go GraphPlanner | 未实现 | P0 |
-| 图在线用途 | 指标、维度、成员和物化的部分路径证明 | 候选扩展、值归属、兼容性、路径选择、权限传播、影响分析六类能力 | 部分实现 | P0 |
-| 图可用性 | PostgreSQL generation readiness | Nebula 多副本；不可用时只接受版本一致的缓存 GraphPlan | 未实现 | P0 |
+| 语义版本 | 已建立原子 `semantic_releases`、四投影 hash 门禁和活动指针；旧 graph generation 待切读 | 所有执行层和派生投影携带同一 `semantic_version/content_hash`，原子切换 | 核心合同已实现，问答切读待阶段 3 | P0 |
+| 资产发布 | 已实现候选、静态校验、四投影、READY 和原子激活；黄金回归待评测阶段接入 | 构建候选版本 → 静态校验 → 投影 → 黄金回归 → 原子激活 → 延迟清理 | 核心流程已实现 | P0 |
+| 关系图 | NebulaGraph Schema、版本投影 Worker、稳定 VID、有界查询和 Go GraphPlanner 已实现；旧表仅保留回放 | NebulaGraph 可重建投影，稳定 VID，有界 1～4 跳，Go GraphPlanner | 运行时已实现，问答切读待阶段 3 | P0 |
+| 图在线用途 | 六类接口和真实 NebulaGraph 集成测试已实现 | 候选扩展、值归属、兼容性、路径选择、权限传播、影响分析六类能力 | 已实现，业务编排接入待阶段 3 | P0 |
+| 图可用性 | 已实现 Session Pool、超时、熔断及仅精确版本认证 Join GraphPlan 缓存 | Nebula 多副本；不可用时只接受版本一致的缓存 GraphPlan | 开发单副本已验证，生产多副本待部署 | P0 |
 | 检索 | PostgreSQL FTS/pgvector、词条和维度成员检索 | Span → 精确 Alias → 六路召回 → Bundle 联合重排 → 图闭包 → 校准 | 部分实现 | P0 |
 | Alias | 通用词条映射与解析规则 | 作用域、locale、生效期、正/负 alias、hard negative、冲突门禁 | 部分实现 | P1 |
 | 维度值 | 成员、别名、WHERE 决策 | `(dimension_id,value_id)` 复合身份、层级/父路径/有效期、图归属 | 部分实现 | P0 |
@@ -77,7 +77,7 @@ NebulaGraph 是本轮升级的标准语义关系图，不再作为未来可选�
 - Edges：`contains`、`measures`、`depends_on`、`sourced_from`、`groupable_by`、
   `belongs_to`、`has_value`、`joins_to`、`synonym_of`、`can_access`、`derived_from`、
   `guards`。
-- VID：稳定的 `type:object_id:version`；查询只能从已知候选 VID 出发，路径限定 1～4
+- VID：稳定的 `type:tenant_hash:object_id:version`（不安全或超长 ID 使用确定性哈希）；查询只能从已知候选 VID 出发，路径限定 1～4
   跳，并设置 limit、timeout 和 trace。
 
 ### 3.2 六类在线能力
@@ -177,3 +177,15 @@ development/validation/sealed/production_regression 数据集；结果等价比�
 
 该结果只证明当前代码可构建和既有回归通过，不代表 v1.3 的图、正确性和生产完成定义
 已经达成。后续每个阶段都必须在此基线上增加相应契约和集成测试。
+
+## 7. 分阶段落地记录
+
+| 阶段 | 提交 | 已落地 | 验证 |
+| --- | --- | --- | --- |
+| 0 | `cf1b62a` | 差距审计、NebulaGraph ADR、升级边界和基线 | Go、React、CI 基线通过 |
+| 1 | `e56abf9` | 不可变语义发布包、七层合同校验、四投影 hash 门禁、原子激活、资产目录/就绪度 | 发布服务、迁移、API、React 回归通过 |
+| 2 | 待本阶段提交 | NebulaGraph Compose/nGQL、官方 Go 客户端、租约 Worker、六类在线能力、GraphPlanner、精确版本缓存 | 全量单测、迁移门禁及六类真实图查询通过 |
+
+阶段 2 只完成“图运行时及投影”本身，不把尚未完成的问答接入算作完成。阶段 3 将把
+活动 `semantic_version/content_hash`、候选 Bundle、权限闭包和 Join GraphPlan 接入统一
+Question Orchestrator；接入前旧 PostgreSQL 图仍仅作为对照与回放数据源。
