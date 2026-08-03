@@ -195,7 +195,7 @@ development/validation/sealed/production_regression 数据集；结果等价比�
 | 3 | `60ca704` | NFKC/AlignmentMap、版本化 Alias 与维度值复合身份、认证示例、Top3 冲突 Bundle 图消歧、活动版本 GraphPlan、权限传播、三类非图投影 Worker、旧原生资产迁移预览/候选、执行前后版本复核和脱敏重放产物 | 2,422 对象四投影 READY；Nebula 2,327 节点/2,498 边/0 孤儿；真实问答固定版本并通过图权限与结果门禁；全量 Go/CI 通过 |
 | 4 | `1aca8f1` | execution registry 权威校验；14 Tool Host；追加式脱敏调用审计；3/12/2/2/2/60s 预算；PostgreSQL 同方言解析、DSL 表列白名单、`EXPLAIN` 成本；内容 hash/类型/物化/比较期结果不变量 | 真实“本月净收入”问答 `ANSWERED`；Registry/DQ/AST/成本/结果全部 PASS；8 条 Host 调用事实 hash 有效且无 SQL/参数/结果明文 |
 | 5 | `bed81af` | development/validation/sealed/production_regression；规划回归与 E2E 结果等价隔离；双审与冻结 hash；Wilson/P0/越权/泄漏/覆盖/拒答门禁；后续语义激活绑定评测；React 口径、图计划、Registry、预检证明、发布流水线和门禁面板 | 单测验证 Wilson 与 P0 阻断；数据库验证 sealed/运行证据/激活角色边界；React 构建；真实样本不足时门禁明确 BLOCKED，不宣称 95% |
-| 6 | 待本阶段提交 | 全类安全样本 100% 阻断补强；结构化错误反馈（口径/筛选/数字/权限/新鲜度/表达）；完整回归、运行镜像与文档收口 | Go/vet/React/CI/PostgreSQL/NebulaGraph 和真实问答/E2E 结果 hash 回放通过；远端 master 一致 |
+| 6 | `fcac4c9` | 结构化错误反馈（口径/筛选/数字/权限/新鲜度/表达）；API 与数据库双重形状约束；运行镜像和文档收口 | Go 全量测试/vet/build、React lint/build、CI、PostgreSQL 控制库/数仓/语义约束、NebulaGraph 和真实 API 回放通过 |
 
 阶段 4 没有重写当前项目已经成熟的指标编译和只读数仓执行器，而是在其上游增加活动
 执行注册表和 Tool Host，在其下游增加结果不变量。原指标 Preview 代码只保留为物理
@@ -206,3 +206,24 @@ development/validation/sealed/production_regression 数据集；结果等价比�
 逐项核对：可证明的对象进入新 DRAFT，仍引用旧数据集版本或缺少执行证据的对象作为排除
 项返回；时区、日历和完整周期必须由操作人显式确认。这样升级沿用当前资产 ID 与版本，
 同时不把旧方案的历史不一致带入活动语义版本。
+
+## 8. 最终运行态验收
+
+2026-08-03 使用 `master@fcac4c9` 重新构建 API、Worker 和 Web 镜像后完成以下验收：
+
+- API、Worker、Web、PostgreSQL、数仓 PostgreSQL、Redis、MinIO、连接器及 NebulaGraph
+  Meta/Storage/Graph 服务全部健康；`/health/ready` 返回 `ready`；
+- 真实 Question `0231730b-1c6c-4b30-8664-88ea8cf9fdbe` 为 `ANSWERED / SEMANTIC_IR`，
+  固定 `legacy-2026.08.03-v1`、语义内容 hash、GraphPlan hash、QueryPlan hash 和结果 hash；
+- “不准确但未提供错误类型”返回 HTTP 400；`FILTER` 反馈写入成功；随后提交“准确”时
+  服务端强制归一为 `issueType=NONE`，证明前端选择不能绕过服务端和数据库合同；
+- development E2E 集 `7e9a776f-273e-4a61-97b7-5a6dff45935e` 的单条结果 hash
+  等价回放通过，P0 为 100%，但评测门禁保持 `BLOCKED`：集合未 sealed、样本不足 2,000、
+  Wilson 下界仅 20.65%，且尚无安全、越权和拒答样本；
+- `go test ./...`、`go vet ./cmd/... ./internal/...`、`go build ./cmd/...`、React lint/build、
+  `scripts/ci-check.sh`、`verify-database.sh`、`verify-warehouse.sh`、
+  `verify-semantic-qa.sh` 和 `verify-nebulagraph.sh` 全部通过。
+
+因此，方案要求的工程主链路已经在当前项目内升级落地；正式业务准确率验收仍需业务方提供
+至少 2,000 条双审、冻结、分层且包含安全/拒答场景的真实 sealed 样本。在满足该外部输入前，
+系统会继续阻断后续语义版本激活，不以点赞或开发夹具替代准确率结论。
