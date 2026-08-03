@@ -163,6 +163,59 @@ func TestQuestionToolRegistryEnforcesStateAndClosedSchema(t *testing.T) {
 	}
 }
 
+func TestQuestionToolRegistryContainsCompleteCanonicalSurface(t *testing.T) {
+	canonical := []string{
+		"search_semantic_objects", "get_semantic_contracts",
+		"lookup_dimension_values", "get_certified_examples",
+		"validate_semantic_bundle", "get_data_quality_status",
+		"compile_semantic_query", "validate_query_plan", "explain_query_plan",
+		"probe_join_cardinality", "execute_query_plan",
+		"execute_validation_query", "compare_candidate_results",
+		"request_clarification",
+	}
+	for _, name := range canonical {
+		if !defaultQuestionToolRegistry.Contains(name) {
+			t.Fatalf("canonical Tool Host contract missing %s", name)
+		}
+	}
+}
+
+func TestGovernedResultVerifierPinsSemanticContentHashAndTypes(t *testing.T) {
+	plan := readyQuestionPlan("paid_gmv", 7)
+	queryID := uuid.NewString()
+	result := dataset.PreviewResult{
+		QueryID: queryID, Columns: []string{"paid_gmv"},
+		ColumnMetadata: []dataset.PreviewColumn{{
+			FieldID: "paid_gmv", Code: "paid_gmv", CanonicalType: "DECIMAL",
+		}},
+		Rows: [][]any{{123.45}}, RowCount: 1,
+	}
+	executed := plan
+	executed.Status = "EXECUTED"
+	evidence, err := buildAnswerEvidence(executed, result, nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence.SemanticVersion = "release-v1"
+	evidence.SemanticContentHash = strings.Repeat("1", 64)
+	execution := QueryPlanExecution{QueryPlan: executed, Result: result, Evidence: evidence}
+	verification := verifyQuestionResultsForSemanticSnapshot(
+		[]QueryPlan{plan}, []QueryPlanExecution{execution}, defaultQuestionBudgets(),
+		"release-v1", strings.Repeat("1", 64),
+	)
+	if verification.Status != "PASS" {
+		t.Fatalf("governed result must pass: %+v", verification)
+	}
+	execution.Evidence.SemanticContentHash = strings.Repeat("2", 64)
+	verification = verifyQuestionResultsForSemanticSnapshot(
+		[]QueryPlan{plan}, []QueryPlanExecution{execution}, defaultQuestionBudgets(),
+		"release-v1", strings.Repeat("1", 64),
+	)
+	if verification.Status != "BLOCKED" {
+		t.Fatalf("semantic content drift must be blocked: %+v", verification)
+	}
+}
+
 func TestQuestionRouterUsesSemanticPathAndFailClosedLongTailPolicy(t *testing.T) {
 	decision := routeQuestion(QueryTurnPlan{
 		State: QuestionStatePlanReady,

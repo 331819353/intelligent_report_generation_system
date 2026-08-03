@@ -235,6 +235,58 @@ func (s *Service) PreviewVersion(ctx context.Context, tenantID, actorID, id, ver
 	}, false)
 }
 
+// PreflightVersion builds exactly the same immutable metric candidate as
+// PreviewVersion, but stops after the warehouse has parsed and EXPLAINed the
+// generated PostgreSQL statement under the current policy scope.
+func (s *Service) PreflightVersion(
+	ctx context.Context,
+	tenantID, actorID, id, versionID string,
+	input PreviewInput,
+) (QueryPreflightProof, error) {
+	if s.previewer == nil {
+		return QueryPreflightProof{}, ErrPreviewUnavailable
+	}
+	version, err := s.GetVersion(ctx, tenantID, id, versionID)
+	if err != nil {
+		return QueryPreflightProof{}, err
+	}
+	if err := s.requireDatasetRead(ctx, tenantID, actorID, version.DatasetID); err != nil {
+		return QueryPreflightProof{}, err
+	}
+	if version.Status != "PUBLISHED" {
+		return QueryPreflightProof{}, ErrVersionUnavailable
+	}
+	prepared, err := Prepare(version.Definition)
+	if err != nil {
+		return QueryPreflightProof{}, ErrVersionUnavailable
+	}
+	validated, err := s.validatePrepared(ctx, tenantID, actorID, id, prepared)
+	if err != nil {
+		var validation *ValidationError
+		if errors.As(err, &validation) {
+			return QueryPreflightProof{}, ErrVersionUnavailable
+		}
+		return QueryPreflightProof{}, err
+	}
+	candidate, parameters, err := buildQueryCandidate(
+		id, version.ID, validated,
+		input.DimensionFieldIDs, input.DimensionFilters,
+		input.MetricSortDirection,
+	)
+	if err != nil {
+		return QueryPreflightProof{}, err
+	}
+	parameters, err = mergePreviewParameters(input.Parameters, parameters)
+	if err != nil {
+		return QueryPreflightProof{}, err
+	}
+	return s.previewer.PreflightMetric(
+		ctx, tenantID, actorID, candidate, dataset.PreviewInput{
+			QueryID: input.QueryID, Parameters: parameters, MaxRows: input.MaxRows,
+		},
+	)
+}
+
 func mergePreviewParameters(
 	caller map[string]any,
 	generated map[string]any,

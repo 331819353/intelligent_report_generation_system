@@ -5,6 +5,7 @@ import (
 
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasource"
+	"intelligent-report-generation-system/internal/metric"
 	"intelligent-report-generation-system/internal/policy"
 	"intelligent-report-generation-system/internal/querycompiler"
 )
@@ -36,6 +37,7 @@ type FederatedExecutor interface {
 // boundary deliberately accepts structured DSL plus trusted relation bindings,
 // never caller-authored SQL or physical relation names.
 type WarehouseExecutor interface {
+	Preflight(context.Context, string, dataset.Document, ResolvedPlan, map[string]any, policy.UserScope, []policy.RowPolicy, []policy.ColumnPolicy, int) (metric.QueryPreflightProof, error)
 	Execute(context.Context, string, string, dataset.Document, ResolvedPlan, map[string]any, policy.UserScope, []policy.RowPolicy, []policy.ColumnPolicy, int) (datasource.QueryResult, error)
 	Cancel(context.Context, string) (bool, error)
 }

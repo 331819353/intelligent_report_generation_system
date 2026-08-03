@@ -10,6 +10,90 @@ import (
 	"intelligent-report-generation-system/internal/metric"
 )
 
+func (service *Service) preflightQueryPlanCore(
+	ctx context.Context,
+	tenantID, actorID string,
+	plan QueryPlan,
+	maximumRows int,
+	maximumPreflights int,
+) ([]metric.QueryPreflightProof, error) {
+	if service == nil || service.store == nil || service.metricExecutor == nil ||
+		uuid.Validate(tenantID) != nil || uuid.Validate(actorID) != nil ||
+		uuid.Validate(plan.ID) != nil || maximumRows < 1 || maximumRows > 500 ||
+		maximumPreflights < 1 || maximumPreflights > 2 {
+		return nil, ErrInvalidRequest
+	}
+	preparedPlan, binding, err := service.store.PrepareQueryPlanExecution(
+		ctx, tenantID, plan.ID, plan.GraphGenerationID, plan.PathHash,
+	)
+	if err != nil {
+		return nil, err
+	}
+	dimensionFields := []string{}
+	if binding.DimensionFieldID != "" {
+		dimensionFields = append(dimensionFields, binding.DimensionFieldID)
+	}
+	if preparedPlan.Intent == "TREND" && binding.TimeFieldID != "" &&
+		binding.TimeFieldID != binding.DimensionFieldID {
+		dimensionFields = append(dimensionFields, binding.TimeFieldID)
+	}
+	maxRows := maximumRows
+	if binding.TopN > 0 && maxRows > binding.TopN {
+		maxRows = binding.TopN
+	}
+	preflightRange := func(timeRange *QueryTimeRange) (metric.QueryPreflightProof, error) {
+		dimensionFilters := []metric.DimensionFilter{}
+		for _, memberFilter := range binding.MemberFilters {
+			operator := "EQUALS"
+			value := any(memberFilter.MemberKey)
+			if len(memberFilter.MemberKeys) > 1 {
+				operator, value = "IN", memberFilter.MemberKeys
+			}
+			dimensionFilters = append(dimensionFilters, metric.DimensionFilter{
+				FieldID: memberFilter.FieldID, Operator: operator, Value: value,
+			})
+		}
+		if timeRange != nil {
+			dimensionFilters = append(dimensionFilters,
+				metric.DimensionFilter{
+					FieldID: binding.TimeFieldID, Operator: "GTE", Value: timeRange.Start,
+				},
+				metric.DimensionFilter{
+					FieldID: binding.TimeFieldID, Operator: "LT", Value: timeRange.EndExclusive,
+				},
+			)
+		}
+		return service.metricExecutor.PreflightVersion(
+			ctx, tenantID, actorID, preparedPlan.SelectedMetricID,
+			preparedPlan.SelectedMetricVersionID, metric.PreviewInput{
+				Parameters: map[string]any{}, DimensionFieldIDs: dimensionFields,
+				DimensionFilters:    dimensionFilters,
+				MetricSortDirection: binding.SortDirection, MaxRows: maxRows,
+			},
+		)
+	}
+	requiredPreflights := 1
+	if binding.ComparisonRange != nil {
+		requiredPreflights++
+	}
+	if requiredPreflights > maximumPreflights {
+		return nil, fmt.Errorf("%w: explain tool budget exceeded", ErrUnprovenPath)
+	}
+	proofs := []metric.QueryPreflightProof{}
+	if binding.ComparisonRange != nil {
+		proof, preflightErr := preflightRange(binding.ComparisonRange)
+		if preflightErr != nil {
+			return nil, preflightErr
+		}
+		proofs = append(proofs, proof)
+	}
+	proof, err := preflightRange(binding.TimeRange)
+	if err != nil {
+		return nil, err
+	}
+	return append(proofs, proof), nil
+}
+
 // executeQueryPlanCore is the lifecycle-free execution adapter used by the
 // Question Orchestrator. The legacy execute endpoint wraps the same governed
 // store/runtime boundary with its own compatibility lifecycle.

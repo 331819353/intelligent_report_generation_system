@@ -282,6 +282,15 @@ SELECT format(
 WHERE to_regclass('platform.semantic_execution_registry') IS NOT NULL
 \gexec
 
+-- Tool Host audit is append-only for the API. Workers and connection-test
+-- identities may inspect no call facts and cannot fabricate them.
+SELECT format(
+  'REVOKE ALL ON TABLE platform.semantic_tool_calls FROM %I, %I; REVOKE UPDATE, DELETE ON TABLE platform.semantic_tool_calls FROM %I; GRANT SELECT, INSERT ON TABLE platform.semantic_tool_calls TO %I',
+  :'worker_user',:'connection_test_user',:'app_user',:'app_user'
+)
+WHERE to_regclass('platform.semantic_tool_calls') IS NOT NULL
+\gexec
+
 SELECT format(
   'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.dws_modeling_jobs, platform.dws_modeling_outputs FROM %I',
   :'app_user'

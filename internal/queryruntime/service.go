@@ -218,24 +218,56 @@ func (s *Service) PreviewRevision(ctx context.Context, tenantID, actorID, datase
 
 // PreviewMetric 执行指标服务端派生的计划，并复核它没有扩张精确数据集版本的来源边界。
 func (s *Service) PreviewMetric(ctx context.Context, tenantID, actorID string, candidate metric.QueryCandidate, input dataset.PreviewInput, validation bool) (dataset.PreviewResult, error) {
-	if tenantID == "" || actorID == "" || candidate.MetricID == "" || candidate.MetricVersionID == "" ||
-		candidate.DatasetID == "" || candidate.DatasetVersionID == "" || candidate.PlanHash == "" {
-		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
-	}
-	version, err := s.datasets.GetVersion(ctx, tenantID, candidate.DatasetID, candidate.DatasetVersionID)
+	snapshot, err := s.prepareMetricSnapshot(ctx, tenantID, actorID, candidate)
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
+	runType := "PREVIEW"
+	if validation {
+		runType = "VALIDATION"
+	}
+	return s.previewSnapshot(ctx, tenantID, actorID, snapshot, input, runType)
+}
+
+// PreflightMetric follows the exact immutable metric derivation and policy
+// resolution used by PreviewMetric, then requires the governed PostgreSQL
+// warehouse to parse and EXPLAIN the compiled statement without executing it.
+func (s *Service) PreflightMetric(
+	ctx context.Context,
+	tenantID, actorID string,
+	candidate metric.QueryCandidate,
+	input dataset.PreviewInput,
+) (metric.QueryPreflightProof, error) {
+	snapshot, err := s.prepareMetricSnapshot(ctx, tenantID, actorID, candidate)
+	if err != nil {
+		return metric.QueryPreflightProof{}, err
+	}
+	return s.preflightSnapshot(ctx, tenantID, actorID, snapshot, input)
+}
+
+func (s *Service) prepareMetricSnapshot(
+	ctx context.Context,
+	tenantID, actorID string,
+	candidate metric.QueryCandidate,
+) (runtimeSnapshot, error) {
+	if tenantID == "" || actorID == "" || candidate.MetricID == "" || candidate.MetricVersionID == "" ||
+		candidate.DatasetID == "" || candidate.DatasetVersionID == "" || candidate.PlanHash == "" {
+		return runtimeSnapshot{}, dataset.ErrPreviewInvalid
+	}
+	version, err := s.datasets.GetVersion(ctx, tenantID, candidate.DatasetID, candidate.DatasetVersionID)
+	if err != nil {
+		return runtimeSnapshot{}, err
+	}
 	if version.Status != "PUBLISHED" {
-		return dataset.PreviewResult{}, dataset.ErrVersionUnavailable
+		return runtimeSnapshot{}, dataset.ErrVersionUnavailable
 	}
 	original, err := dataset.DecodeAndNormalize(version.DSL)
 	if err != nil {
-		return dataset.PreviewResult{}, dataset.ErrVersionUnavailable
+		return runtimeSnapshot{}, dataset.ErrVersionUnavailable
 	}
 	derived, err := dataset.DecodeAndNormalize(candidate.DSL)
 	if err != nil || !sameMetricSourceEnvelope(original, derived, candidate) {
-		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+		return runtimeSnapshot{}, dataset.ErrPreviewInvalid
 	}
 	materializedRoot := false
 	if version.Layer == dataset.LayerDIM ||
@@ -246,24 +278,20 @@ func (s *Service) PreviewMetric(ctx context.Context, tenantID, actorID string, c
 			original, derived, candidate.DatasetVersionID,
 		)
 		if err != nil {
-			return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
+			return runtimeSnapshot{}, dataset.ErrPreviewUnsupported
 		}
 		materializedRoot = true
 	}
 	derivedDSL, err := json.Marshal(derived)
 	if err != nil {
-		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+		return runtimeSnapshot{}, dataset.ErrPreviewInvalid
 	}
-	runType := "PREVIEW"
-	if validation {
-		runType = "VALIDATION"
-	}
-	return s.previewSnapshot(ctx, tenantID, actorID, runtimeSnapshot{
+	return runtimeSnapshot{
 		DatasetID: candidate.DatasetID, VersionID: candidate.DatasetVersionID,
 		MetricID: candidate.MetricID, MetricVersionID: candidate.MetricVersionID,
 		PlanHash: candidate.PlanHash, DSL: derivedDSL, ExactVersion: true,
 		MetricExecution: true, MaterializedRoot: materializedRoot,
-	}, input, runType)
+	}, nil
 }
 
 // sameMetricSourceEnvelope 禁止指标派生计划扩张精确版本的来源边界。
@@ -442,6 +470,65 @@ type runtimeSnapshot struct {
 	ExactVersion     bool
 	MetricExecution  bool
 	MaterializedRoot bool
+}
+
+func (s *Service) preflightSnapshot(
+	ctx context.Context,
+	tenantID, actorID string,
+	snapshot runtimeSnapshot,
+	input dataset.PreviewInput,
+) (metric.QueryPreflightProof, error) {
+	document, err := dataset.DecodeAndNormalize(snapshot.DSL)
+	if err != nil {
+		return metric.QueryPreflightProof{}, dataset.ErrInvalidDocument
+	}
+	var resolved ResolvedPlan
+	if snapshot.MaterializedRoot {
+		resolved, err = s.store.ResolveMaterializedVersion(
+			ctx, tenantID, snapshot.DatasetID, snapshot.VersionID, document,
+		)
+	} else {
+		resolved, err = s.store.ResolveVersion(
+			ctx, tenantID, snapshot.DatasetID, snapshot.VersionID, document,
+		)
+	}
+	if err != nil {
+		return metric.QueryPreflightProof{}, err
+	}
+	if resolved.Engine != ExecutionPostgreSQL || s.warehouse == nil ||
+		len(resolved.Materializations) == 0 || len(resolved.Tables) == 0 {
+		return metric.QueryPreflightProof{}, dataset.ErrPreviewUnsupported
+	}
+	executionDocument := document
+	if resolved.ExecutionDocument != nil {
+		executionDocument = *resolved.ExecutionDocument
+	}
+	scope, rowPolicies, columnPolicies, err := s.policies.Load(
+		ctx, tenantID, actorID, "DATASET", snapshot.DatasetID,
+	)
+	if err != nil {
+		return metric.QueryPreflightProof{}, err
+	}
+	if len(rowPolicies) > 0 || len(columnPolicies) > 0 {
+		return metric.QueryPreflightProof{}, dataset.ErrPreviewUnsupported
+	}
+	maxRows := input.MaxRows
+	if maxRows == 0 {
+		maxRows = min(document.ExecutionPolicy.PreviewLimit, 100)
+	}
+	if maxRows < 1 || maxRows > document.ExecutionPolicy.PreviewLimit {
+		return metric.QueryPreflightProof{}, dataset.ErrPreviewInvalid
+	}
+	proof, err := s.warehouse.Preflight(
+		ctx, tenantID, executionDocument, resolved, input.Parameters, scope,
+		rowPolicies, columnPolicies, maxRows,
+	)
+	if err != nil {
+		return metric.QueryPreflightProof{}, err
+	}
+	proof.DatasetID = snapshot.DatasetID
+	proof.DatasetVersionID = snapshot.VersionID
+	return proof, nil
 }
 
 func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string, snapshot runtimeSnapshot, input dataset.PreviewInput, runType string) (dataset.PreviewResult, error) {

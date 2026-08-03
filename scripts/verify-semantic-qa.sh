@@ -50,7 +50,8 @@ BEGIN
     ('000183_semantic_release_registry'),
     ('000184_nebulagraph_projection_runtime'),
     ('000185_semantic_question_graph_runtime'),
-    ('000186_semantic_runtime_projections')
+    ('000186_semantic_runtime_projections'),
+    ('000187_semantic_execution_tool_host')
   ) AS expected(version)
   LEFT JOIN platform_schema_migrations AS applied USING(version)
   WHERE applied.version IS NULL;
@@ -319,6 +320,37 @@ BEGIN
   END IF;
 
   SELECT count(*) INTO invalid_count
+  FROM platform.semantic_tool_calls AS call
+  WHERE call.request_hash !~ '^[0-9a-f]{64}$'
+     OR call.result_hash !~ '^[0-9a-f]{64}$'
+     OR call.policy_scope_hash !~ '^[0-9a-f]{64}$'
+     OR call.semantic_content_hash !~ '^[0-9a-f]{64}$'
+     OR cardinality(call.evidence_ids)>256
+     OR jsonb_typeof(call.budget_json)<>'object';
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'semantic Tool Host audit contains invalid facts: %',invalid_count;
+  END IF;
+
+  SELECT count(*) INTO invalid_count
+  FROM information_schema.columns
+  WHERE table_schema='platform' AND table_name='semantic_tool_calls'
+    AND column_name IN (
+      'sql','raw_sql','arguments','parameters','parameter_json',
+      'result','result_json','question','prompt','reasoning'
+    );
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'semantic Tool Host audit exposes forbidden raw payload columns: %',invalid_count;
+  END IF;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid='platform.semantic_tool_calls'::regclass
+      AND tgname='semantic_tool_calls_immutable' AND NOT tgisinternal
+  ) THEN
+    RAISE EXCEPTION 'semantic Tool Host audit immutability trigger is missing';
+  END IF;
+
+  SELECT count(*) INTO invalid_count
   FROM platform.semantic_releases AS release
   LEFT JOIN platform.semantic_release_state AS state
     ON state.tenant_id=release.tenant_id
@@ -393,6 +425,15 @@ SELECT (
   )
   AND NOT has_table_privilege(
     :'app_user','platform.semantic_release_search_documents','INSERT,UPDATE,DELETE'
+  )
+  AND has_table_privilege(
+    :'app_user','platform.semantic_tool_calls','SELECT,INSERT'
+  )
+  AND NOT has_table_privilege(
+    :'app_user','platform.semantic_tool_calls','UPDATE,DELETE'
+  )
+  AND NOT has_table_privilege(
+    :'worker_user','platform.semantic_tool_calls','SELECT,INSERT,UPDATE,DELETE'
   )
   AND has_function_privilege(
     :'worker_user',

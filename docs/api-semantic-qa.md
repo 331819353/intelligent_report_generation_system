@@ -52,8 +52,8 @@ PostgreSQL graph generation 只负责生成过渡候选和执行适配，不再�
   `RELIABLE_DIALECT_AST_ADAPTER_NOT_CONFIGURED`，不会退化为执行模型自由 SQL。
 - C `CLARIFY_OR_REFUSE`：证据不完整、存在歧义或治理条件不满足时最小澄清或拒绝。
 
-成功响应同时返回 `understanding`、`graphPlan`、`intent`、`semanticIr`、
-`executionGraph`、`sqlGuard`、
+成功响应同时返回 `understanding`、`graphPlan`、`executionRegistry`、`preflightProofs`、
+`intent`、`semanticIr`、`executionGraph`、`sqlGuard`、
 `resultVerification`、`answer`、`accuracyEvidence`、固定预算和 Host-owned Tool Registry
 摘要。`understanding` 使用版本化 NFKC/case-fold Normalizer，返回规范化文本、原始
 UTF-8 半开字节区间的 `AlignmentMap`、规则/认证 Alias Span、候选对象和认证示例 ID。
@@ -65,6 +65,17 @@ UTF-8 半开字节区间的 `AlignmentMap`、规则/认证 Alias Span、候选�
 GraphPlan/图证据、验证项和 Evidence Loop 新证据轨迹；答案文本只从已通过 Result
 Verifier 的结果槽位生成。执行前后会重新确认活动发布指针和 NebulaGraph 投影 hash
 没有漂移。
+
+`executionRegistry` 证明活动发布的执行投影、原生指标/数据集当前发布指针、精确活动物化
+和 DQ 规则一致；`preflightProofs` 只返回 PostgreSQL 方言、查询/参数 hash、引用字段 ID、
+物化 ID、估算行数和成本，不返回生成 SQL 或参数值。路径 A 的查询必须先由 PostgreSQL
+`EXPLAIN (FORMAT JSON)` 完成同方言解析，且成本在预算内。`EXPLAIN ANALYZE` 不会用于
+预检。
+
+Go Tool Host 的同步预算固定为最多 3 轮、12 次元数据工具、2 次 `EXPLAIN`、2 个主计划、
+2 次验证和 60 秒。图闭包、编译、DQ、计划校验、预检、执行和结果验证均写入
+`semantic_tool_calls` 追加式审计；表中只保存版本、PolicyScope/请求/结果 hash、证据、
+预算和耗时，不保存原始问句、SQL、参数、结果行、提示词或模型思维链。
 
 进度流仍使用 `Accept: application/x-ndjson`。Question 创建后，进度事件会带
 `questionId`，客户端可用它调用取消接口；新增阶段包括 `ORCHESTRATION`、`SQL_GUARD`、

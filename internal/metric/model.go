@@ -241,6 +241,28 @@ type PreviewInput struct {
 	MaxRows             int               `json:"maxRows,omitempty"`
 }
 
+// QueryPreflightProof is the sanitized proof returned by the governed
+// execution runtime. It never exposes generated SQL, bound values, physical
+// credentials or result samples.
+type QueryPreflightProof struct {
+	Dialect              string   `json:"dialect"`
+	QueryHash            string   `json:"queryHash"`
+	ParameterHash        string   `json:"parameterHash"`
+	DatasetID            string   `json:"datasetId"`
+	DatasetVersionID     string   `json:"datasetVersionId"`
+	MaterializationIDs   []string `json:"materializationIds"`
+	ReferencedFieldIDs   []string `json:"referencedFieldIds"`
+	ArgumentCount        int      `json:"argumentCount"`
+	MaximumRows          int      `json:"maximumRows"`
+	ParserDecision       string   `json:"parserDecision"`
+	AllowlistDecision    string   `json:"allowlistDecision"`
+	ExplainDecision      string   `json:"explainDecision"`
+	EstimatedRows        int64    `json:"estimatedRows"`
+	EstimatedTotalCost   float64  `json:"estimatedTotalCost"`
+	MaximumEstimatedRows int64    `json:"maximumEstimatedRows"`
+	MaximumEstimatedCost float64  `json:"maximumEstimatedCost"`
+}
+
 type VersionTransitionInput struct {
 	ExpectedVersion int64  `json:"expectedVersion"`
 	ExpectedStatus  string `json:"expectedStatus"`
@@ -300,5 +322,6 @@ type Store interface {
 // Previewer 确保草稿试算和发布试算复用同一受控查询执行器。
 type Previewer interface {
 	PreviewMetric(context.Context, string, string, QueryCandidate, dataset.PreviewInput, bool) (dataset.PreviewResult, error)
+	PreflightMetric(context.Context, string, string, QueryCandidate, dataset.PreviewInput) (QueryPreflightProof, error)
 	Cancel(context.Context, string, string, string, string) error
 }

@@ -78,6 +78,7 @@ type Service struct {
 	semanticGraph   semanticgraph.Graph
 	metricExecutor  interface {
 		PreviewVersion(context.Context, string, string, string, string, metric.PreviewInput) (dataset.PreviewResult, error)
+		PreflightVersion(context.Context, string, string, string, string, metric.PreviewInput) (metric.QueryPreflightProof, error)
 	}
 }
 
@@ -102,6 +103,7 @@ func NewService(
 
 func (service *Service) SetMetricExecutor(executor interface {
 	PreviewVersion(context.Context, string, string, string, string, metric.PreviewInput) (dataset.PreviewResult, error)
+	PreflightVersion(context.Context, string, string, string, string, metric.PreviewInput) (metric.QueryPreflightProof, error)
 }) {
 	service.metricExecutor = executor
 }

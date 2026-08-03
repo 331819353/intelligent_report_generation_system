@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"intelligent-report-generation-system/internal/dataset"
+	"intelligent-report-generation-system/internal/metric"
 )
 
 // QuestionRoute is the only execution routing decision exposed by the new
@@ -174,40 +175,45 @@ type QuestionFailure struct {
 }
 
 type QuestionBudgets struct {
-	MaximumToolLoopRounds int `json:"maximumToolLoopRounds"`
-	MaximumMetricQueries  int `json:"maximumMetricQueries"`
-	MaximumRowsPerQuery   int `json:"maximumRowsPerQuery"`
-	DeadlineMS            int `json:"deadlineMs"`
+	MaximumToolLoopRounds    int `json:"maximumToolLoopRounds"`
+	MaximumMetadataTools     int `json:"maximumMetadataTools"`
+	MaximumExplainQueries    int `json:"maximumExplainQueries"`
+	MaximumMetricQueries     int `json:"maximumMetricQueries"`
+	MaximumValidationQueries int `json:"maximumValidationQueries"`
+	MaximumRowsPerQuery      int `json:"maximumRowsPerQuery"`
+	DeadlineMS               int `json:"deadlineMs"`
 }
 
 type QuestionResponse struct {
-	QuestionID          string                  `json:"questionId"`
-	ConversationID      string                  `json:"conversationId"`
-	ParentQuestionID    string                  `json:"parentQuestionId,omitempty"`
-	QuestionHash        string                  `json:"questionHash"`
-	State               QuestionState           `json:"state"`
-	Status              string                  `json:"status"`
-	Route               QuestionRoute           `json:"route"`
-	Routing             QuestionRoutingDecision `json:"routing"`
-	SemanticVersion     string                  `json:"semanticVersion,omitempty"`
-	SemanticContentHash string                  `json:"semanticContentHash,omitempty"`
-	Understanding       *QuestionUnderstanding  `json:"understanding,omitempty"`
-	GraphPlan           *QuestionGraphPlan      `json:"graphPlan,omitempty"`
-	Lifecycle           []QuestionStateEvent    `json:"lifecycle"`
-	Intent              *CompleteIntent         `json:"intent,omitempty"`
-	SemanticIR          *SemanticQueryIR        `json:"semanticIr,omitempty"`
-	ExecutionGraph      *ExecutionGraphRef      `json:"executionGraph,omitempty"`
-	Guard               *SQLGuardDecision       `json:"sqlGuard,omitempty"`
-	Verification        *ResultVerification     `json:"resultVerification,omitempty"`
-	Answer              *QuestionAnswer         `json:"answer,omitempty"`
-	Clarification       *QueryClarification     `json:"clarification,omitempty"`
-	Planning            *QueryTurnPlan          `json:"planning,omitempty"`
-	Plans               []QueryPlan             `json:"queryPlans"`
-	Executions          []QueryPlanExecution    `json:"executions"`
-	Evidence            *AccuracyEvidence       `json:"accuracyEvidence,omitempty"`
-	Failure             *QuestionFailure        `json:"failure,omitempty"`
-	Budgets             QuestionBudgets         `json:"budgets"`
-	ToolRegistry        []QuestionToolSummary   `json:"toolRegistry"`
+	QuestionID          string                          `json:"questionId"`
+	ConversationID      string                          `json:"conversationId"`
+	ParentQuestionID    string                          `json:"parentQuestionId,omitempty"`
+	QuestionHash        string                          `json:"questionHash"`
+	State               QuestionState                   `json:"state"`
+	Status              string                          `json:"status"`
+	Route               QuestionRoute                   `json:"route"`
+	Routing             QuestionRoutingDecision         `json:"routing"`
+	SemanticVersion     string                          `json:"semanticVersion,omitempty"`
+	SemanticContentHash string                          `json:"semanticContentHash,omitempty"`
+	Understanding       *QuestionUnderstanding          `json:"understanding,omitempty"`
+	GraphPlan           *QuestionGraphPlan              `json:"graphPlan,omitempty"`
+	ExecutionRegistry   *QuestionExecutionRegistryProof `json:"executionRegistry,omitempty"`
+	PreflightProofs     []metric.QueryPreflightProof    `json:"preflightProofs,omitempty"`
+	Lifecycle           []QuestionStateEvent            `json:"lifecycle"`
+	Intent              *CompleteIntent                 `json:"intent,omitempty"`
+	SemanticIR          *SemanticQueryIR                `json:"semanticIr,omitempty"`
+	ExecutionGraph      *ExecutionGraphRef              `json:"executionGraph,omitempty"`
+	Guard               *SQLGuardDecision               `json:"sqlGuard,omitempty"`
+	Verification        *ResultVerification             `json:"resultVerification,omitempty"`
+	Answer              *QuestionAnswer                 `json:"answer,omitempty"`
+	Clarification       *QueryClarification             `json:"clarification,omitempty"`
+	Planning            *QueryTurnPlan                  `json:"planning,omitempty"`
+	Plans               []QueryPlan                     `json:"queryPlans"`
+	Executions          []QueryPlanExecution            `json:"executions"`
+	Evidence            *AccuracyEvidence               `json:"accuracyEvidence,omitempty"`
+	Failure             *QuestionFailure                `json:"failure,omitempty"`
+	Budgets             QuestionBudgets                 `json:"budgets"`
+	ToolRegistry        []QuestionToolSummary           `json:"toolRegistry"`
 }
 
 type QuestionRunSummary struct {
@@ -267,10 +273,13 @@ type questionRunOutcome struct {
 
 func defaultQuestionBudgets() QuestionBudgets {
 	return QuestionBudgets{
-		MaximumToolLoopRounds: 3,
-		MaximumMetricQueries:  8,
-		MaximumRowsPerQuery:   100,
-		DeadlineMS:            60000,
+		MaximumToolLoopRounds:    3,
+		MaximumMetadataTools:     12,
+		MaximumExplainQueries:    2,
+		MaximumMetricQueries:     2,
+		MaximumValidationQueries: 2,
+		MaximumRowsPerQuery:      100,
+		DeadlineMS:               60000,
 	}
 }
 
@@ -310,6 +319,7 @@ func (service *Service) AnswerQuestion(
 		return response, ErrInvalidRequest
 	}
 	budgets := defaultQuestionBudgets()
+	toolBudget := questionToolBudgetTracker{budgets: budgets}
 	response = QuestionResponse{
 		ConversationID:   request.ConversationID,
 		ParentQuestionID: request.ParentQuestionID,
@@ -488,9 +498,25 @@ func (service *Service) AnswerQuestion(
 			})
 			return response, nil
 		}
+		if err := toolBudget.reserve("validate_semantic_bundle"); err != nil {
+			return response, err
+		}
+		graphStarted := time.Now()
 		graphPlan, graphErr := validateQuestionSemanticGraph(
 			ctx, service.semanticGraph, *semanticSnapshot, understanding, turn.Plans,
 		)
+		graphAuditErr := service.auditQuestionToolCall(
+			ctx, tenantID, actorID, response.QuestionID, semanticSnapshot,
+			"validate_semantic_bundle", QuestionStateValidating,
+			struct {
+				BindingBundleHash string `json:"bindingBundleHash"`
+				QueryPlanCount    int    `json:"queryPlanCount"`
+			}{graphPlan.BindingBundleHash, len(turn.Plans)},
+			graphPlan, graphPlan.EvidenceIDs, budgets, graphStarted, graphErr,
+		)
+		if graphAuditErr != nil {
+			return response, graphAuditErr
+		}
 		if graphErr != nil {
 			code, message := questionSemanticFailureDetail(
 				graphErr, "NO_CERTIFIED_GRAPH_PATH",
@@ -544,7 +570,124 @@ func (service *Service) AnswerQuestion(
 		graph.GraphPlanID = governedGraphPlan.ID
 		graph.GraphEvidenceIDs = append([]string(nil), governedGraphPlan.EvidenceIDs...)
 	}
+	if governedGraphPlan == nil || semanticSnapshot == nil {
+		return response, fmt.Errorf("%w: governed semantic execution requires an active graph release", ErrUnprovenPath)
+	}
+	if err := toolBudget.reserve("compile_semantic_query"); err != nil {
+		return response, err
+	}
+	compileStarted := time.Now()
+	irHash, err := hashJSON(ir)
+	if err != nil {
+		return response, err
+	}
+	if err := service.auditQuestionToolCall(
+		ctx, tenantID, actorID, response.QuestionID, semanticSnapshot,
+		"compile_semantic_query", QuestionStateValidating,
+		struct {
+			SemanticIRHash string `json:"semanticIrHash"`
+		}{irHash}, graph, ir.EvidenceIDs, budgets, compileStarted, nil,
+	); err != nil {
+		return response, err
+	}
+	registryStore, ok := service.store.(questionExecutionRegistryStore)
+	if !ok {
+		return response, fmt.Errorf("%w: execution registry unavailable", ErrUnprovenPath)
+	}
+	if err := toolBudget.reserve("get_data_quality_status"); err != nil {
+		return response, err
+	}
+	registryStarted := time.Now()
+	registryProof, registryErr := registryStore.ValidateQuestionExecutionRegistry(
+		ctx, tenantID, semanticSnapshot.ReleaseID,
+		semanticSnapshot.SemanticVersion, semanticSnapshot.ContentHash, turn.Plans,
+	)
+	registryAuditErr := service.auditQuestionToolCall(
+		ctx, tenantID, actorID, response.QuestionID, semanticSnapshot,
+		"get_data_quality_status", QuestionStateValidating,
+		struct {
+			DatasetVersionIDs []string `json:"datasetVersionIds"`
+		}{queryPlanDatasetVersionIDs(turn.Plans)},
+		registryProof, toolEvidenceIDs(registryProof.ProofHash), budgets,
+		registryStarted, registryErr,
+	)
+	if registryAuditErr != nil {
+		return response, registryAuditErr
+	}
+	if registryErr != nil {
+		return response, fmt.Errorf("%w: execution registry validation: %v", ErrUnprovenPath, registryErr)
+	}
+	response.ExecutionRegistry = &registryProof
+	preflightByPlan := make(map[string][]metric.QueryPreflightProof, len(turn.Plans))
+	for _, plan := range turn.Plans {
+		remainingExplains := budgets.MaximumExplainQueries - toolBudget.explain
+		preflightStarted := time.Now()
+		proofs, preflightErr := service.preflightQueryPlanCore(
+			ctx, tenantID, actorID, plan, budgets.MaximumRowsPerQuery,
+			remainingExplains,
+		)
+		if preflightErr != nil {
+			if reserveErr := toolBudget.reserve("explain_query_plan"); reserveErr != nil {
+				return response, reserveErr
+			}
+			auditErr := service.auditQuestionToolCall(
+				ctx, tenantID, actorID, response.QuestionID, semanticSnapshot,
+				"explain_query_plan", QuestionStateValidating,
+				struct {
+					QueryPlanID string `json:"queryPlanId"`
+				}{plan.ID}, struct{}{}, planEvidenceIDs(plan), budgets,
+				preflightStarted, preflightErr,
+			)
+			if auditErr != nil {
+				return response, auditErr
+			}
+			return response, fmt.Errorf("%w: query preflight: %v", ErrUnprovenPath, preflightErr)
+		}
+		preflightByPlan[plan.ID] = proofs
+		response.PreflightProofs = append(response.PreflightProofs, proofs...)
+		for _, proof := range proofs {
+			if err := toolBudget.reserve("explain_query_plan"); err != nil {
+				return response, err
+			}
+			if err := service.auditQuestionToolCall(
+				ctx, tenantID, actorID, response.QuestionID, semanticSnapshot,
+				"explain_query_plan", QuestionStateValidating,
+				struct {
+					QueryPlanID string `json:"queryPlanId"`
+				}{plan.ID}, proof,
+				toolEvidenceIDs(plan.PathHash, proof.QueryHash), budgets,
+				preflightStarted, nil,
+			); err != nil {
+				return response, err
+			}
+		}
+	}
 	guard := validateSemanticExecutionWithGraph(turn.Plans, ir, budgets, governedGraphPlan)
+	guard = addGovernedExecutionChecks(
+		guard, turn.Plans, registryProof, preflightByPlan,
+		semanticSnapshot.ContentHash,
+	)
+	for _, plan := range turn.Plans {
+		if err := toolBudget.reserve("validate_query_plan"); err != nil {
+			return response, err
+		}
+		validateStarted := time.Now()
+		var validateErr error
+		if guard.Status != "PASS" {
+			validateErr = ErrUnprovenPath
+		}
+		if err := service.auditQuestionToolCall(
+			ctx, tenantID, actorID, response.QuestionID, semanticSnapshot,
+			"validate_query_plan", QuestionStateValidating,
+			struct {
+				QueryPlanID string `json:"queryPlanId"`
+			}{plan.ID}, guard,
+			toolEvidenceIDs(plan.PathHash, registryProof.ProofHash), budgets,
+			validateStarted, validateErr,
+		); err != nil {
+			return response, err
+		}
+	}
 	response.Guard = &guard
 	if guard.Status != "PASS" {
 		reportQuestionProgress(
@@ -599,6 +742,33 @@ func (service *Service) AnswerQuestion(
 				return response, fmt.Errorf("%w: semantic release changed before execution", ErrUnprovenPath)
 			}
 		}
+		if err := toolBudget.reserve("get_data_quality_status"); err != nil {
+			return response, err
+		}
+		revalidationStarted := time.Now()
+		revalidationProof, revalidationErr := registryStore.ValidateQuestionExecutionRegistry(
+			ctx, tenantID, semanticSnapshot.ReleaseID,
+			semanticSnapshot.SemanticVersion, semanticSnapshot.ContentHash,
+			[]QueryPlan{plan},
+		)
+		if err := service.auditQuestionToolCall(
+			ctx, tenantID, actorID, response.QuestionID, semanticSnapshot,
+			"get_data_quality_status", QuestionStateValidating,
+			struct {
+				DatasetVersionIDs []string `json:"datasetVersionIds"`
+			}{[]string{plan.SelectedDatasetVersionID}}, revalidationProof,
+			toolEvidenceIDs(revalidationProof.ProofHash), budgets,
+			revalidationStarted, revalidationErr,
+		); err != nil {
+			return response, err
+		}
+		if revalidationErr != nil {
+			return response, fmt.Errorf("%w: execution registry changed before execution", ErrUnprovenPath)
+		}
+		if err := toolBudget.reserve("execute_query_plan"); err != nil {
+			return response, err
+		}
+		executionStarted := time.Now()
 		execution, executeErr := service.executeQueryPlanCore(
 			ctx, tenantID, actorID, plan.ID, ExecuteQueryPlanInput{
 				ExpectedGraphGenerationID: plan.GraphGenerationID,
@@ -607,6 +777,18 @@ func (service *Service) AnswerQuestion(
 				MaxRows: budgets.MaximumRowsPerQuery,
 			},
 		)
+		executionAuditErr := service.auditQuestionToolCall(
+			ctx, tenantID, actorID, response.QuestionID, semanticSnapshot,
+			"execute_query_plan", QuestionStateExecuting,
+			struct {
+				QueryPlanID string `json:"queryPlanId"`
+			}{plan.ID}, execution,
+			toolEvidenceIDs(plan.PathHash, revalidationProof.ProofHash), budgets,
+			executionStarted, executeErr,
+		)
+		if executionAuditErr != nil {
+			return response, executionAuditErr
+		}
 		if executeErr != nil {
 			return response, executeErr
 		}
@@ -619,6 +801,12 @@ func (service *Service) AnswerQuestion(
 			)
 			execution.Evidence.CompatibilityDecision = "NEBULA_GRAPH_CERTIFIED_BUNDLE"
 			execution.Evidence.PermissionDecision = "NEBULA_GRAPH_POLICY_PROPAGATION_AND_RUNTIME_REVALIDATION"
+			execution.Evidence.FreshnessDecision = "EXECUTION_REGISTRY_ACTIVE_MATERIALIZATION_AND_DQ_PASS"
+			execution.Evidence.ValidatorChecks = uniqueStrings(append(
+				execution.Evidence.ValidatorChecks,
+				"execution_registry_pass", "postgres_ast_parse_pass",
+				"explain_cost_pass", "semantic_content_hash_pass",
+			), 64)
 		}
 		executions = append(executions, execution)
 	}
@@ -639,9 +827,32 @@ func (service *Service) AnswerQuestion(
 		ctx, response.QuestionID, QueryProgressStageResultVerification,
 		QueryProgressStatusRunning, "正在核验结果模式、行数和证据哈希。",
 	)
-	verification := verifyQuestionResultsForSemanticVersion(
+	verification := verifyQuestionResultsForSemanticSnapshot(
 		turn.Plans, executions, budgets, semanticVersion,
+		response.SemanticContentHash,
 	)
+	for index, plan := range turn.Plans {
+		if err := toolBudget.reserve("execute_validation_query"); err != nil {
+			return response, err
+		}
+		validationStarted := time.Now()
+		var validationErr error
+		if verification.Status != "PASS" {
+			validationErr = ErrUnprovenPath
+		}
+		if err := service.auditQuestionToolCall(
+			ctx, tenantID, actorID, response.QuestionID, semanticSnapshot,
+			"execute_validation_query", QuestionStateExecuting,
+			struct {
+				QueryPlanID string `json:"queryPlanId"`
+			}{plan.ID}, verification,
+			toolEvidenceIDs(
+				plan.PathHash, executions[index].Evidence.ResultHash,
+			), budgets, validationStarted, validationErr,
+		); err != nil {
+			return response, err
+		}
+	}
 	response.Verification = &verification
 	if verification.Status != "PASS" {
 		reportQuestionProgress(
@@ -980,6 +1191,74 @@ func validateSemanticExecutionWithGraph(
 	return decision
 }
 
+func addGovernedExecutionChecks(
+	decision SQLGuardDecision,
+	plans []QueryPlan,
+	registry QuestionExecutionRegistryProof,
+	preflights map[string][]metric.QueryPreflightProof,
+	expectedContentHash string,
+) SQLGuardDecision {
+	add := func(code string, pass bool, detail string) {
+		status := "PASS"
+		if !pass {
+			status, decision.Status = "BLOCKED", "BLOCKED"
+		}
+		decision.Checks = append(decision.Checks, GuardCheck{
+			Code: code, Status: status, Detail: detail,
+		})
+	}
+	add("execution_registry_release_pass",
+		registry.SemanticContentHash == expectedContentHash &&
+			validHash(registry.SemanticContentHash) && validHash(registry.ProofHash) &&
+			registry.ProjectionResourceVersion != "",
+		"执行语义注册表必须来自当前活动发布及 READY 投影",
+	)
+	add("data_quality_and_freshness_pass",
+		registry.QualityDecision == "PASS" && registry.FreshnessObservedAt != "" &&
+			len(registry.QualityRuleIDs) > 0,
+		"质量规则、活动物化和新鲜度水位必须在执行前通过",
+	)
+	for _, plan := range plans {
+		proofs := preflights[plan.ID]
+		add("postgres_ast_parse_pass:"+plan.ID, len(proofs) > 0,
+			"每个主查询和比较查询都必须由 PostgreSQL 同方言解析器解析",
+		)
+		for index, proof := range proofs {
+			add(fmt.Sprintf("compiler_allowlist_pass:%s:%d", plan.ID, index),
+				proof.ParserDecision == "POSTGRESQL_EXPLAIN_PARSED" &&
+					proof.AllowlistDecision == "POSTGRESQL_AST_RELATION_ALLOWLIST" &&
+					validHash(proof.QueryHash) && validHash(proof.ParameterHash) &&
+					containsString(proof.MaterializationIDs, plan.SelectedMaterializationID) &&
+					proof.DatasetVersionID == plan.SelectedDatasetVersionID,
+				"AST 来源、表列白名单、参数摘要和物化版本必须精确匹配",
+			)
+			add(fmt.Sprintf("explain_cost_pass:%s:%d", plan.ID, index),
+				proof.ExplainDecision == "COST_WITHIN_BUDGET" &&
+					proof.EstimatedRows <= proof.MaximumEstimatedRows &&
+					proof.EstimatedTotalCost <= proof.MaximumEstimatedCost,
+				"EXPLAIN 估算行数和优化器成本必须在同步预算内",
+			)
+		}
+	}
+	return decision
+}
+
+func queryPlanDatasetVersionIDs(plans []QueryPlan) []string {
+	result := make([]string, 0, len(plans))
+	for _, plan := range plans {
+		result = append(result, plan.SelectedDatasetVersionID)
+	}
+	return uniqueStrings(result, 16)
+}
+
+func planEvidenceIDs(plan QueryPlan) []string {
+	result := []string{plan.PathHash}
+	for _, evidence := range plan.Evidence {
+		result = append(result, evidence.EvidenceHash)
+	}
+	return uniqueStrings(result, 256)
+}
+
 func verifyQuestionResults(
 	plans []QueryPlan,
 	executions []QueryPlanExecution,
@@ -995,6 +1274,17 @@ func verifyQuestionResultsForSemanticVersion(
 	executions []QueryPlanExecution,
 	budgets QuestionBudgets,
 	expectedSemanticVersion string,
+) ResultVerification {
+	return verifyQuestionResultsForSemanticSnapshot(
+		plans, executions, budgets, expectedSemanticVersion, "",
+	)
+}
+
+func verifyQuestionResultsForSemanticSnapshot(
+	plans []QueryPlan,
+	executions []QueryPlanExecution,
+	budgets QuestionBudgets,
+	expectedSemanticVersion, expectedSemanticContentHash string,
 ) ResultVerification {
 	verification := ResultVerification{Status: "PASS", TrustLevel: "A", Checks: []GuardCheck{}}
 	add := func(code string, pass bool, detail string) {
@@ -1042,6 +1332,48 @@ func verifyQuestionResultsForSemanticVersion(
 				execution.Evidence.SemanticVersion == expectedSemanticVersion,
 			"所有结果必须来自 Question 固定的同一语义版本",
 		)
+		if expectedSemanticContentHash != "" {
+			add(fmt.Sprintf("semantic_content_hash_consistent:%d", index),
+				validHash(expectedSemanticContentHash) &&
+					execution.Evidence.SemanticContentHash == expectedSemanticContentHash,
+				"所有结果必须来自 Question 固定的同一语义内容哈希",
+			)
+		}
+		add(fmt.Sprintf("materialization_identity_pass:%d", index),
+			index < len(plans) &&
+				execution.Evidence.DatasetVersionID == plans[index].SelectedDatasetVersionID &&
+				execution.Evidence.MaterializationID == plans[index].SelectedMaterializationID &&
+				execution.Evidence.FreshnessDecision != "",
+			"结果必须来自计划固定的活动物化及新鲜度证明",
+		)
+		if expectedSemanticContentHash != "" {
+			metadataValid := len(result.ColumnMetadata) == len(result.Columns)
+			for _, column := range result.ColumnMetadata {
+				metadataValid = metadataValid && column.Code != "" && column.CanonicalType != ""
+			}
+			add(fmt.Sprintf("result_type_contract_pass:%d", index), metadataValid,
+				"每个返回列必须携带稳定字段编码和规范类型",
+			)
+		}
+		if index < len(plans) && len(plans[index].Conditions.Dimensions) == 0 &&
+			oneOf(plans[index].Intent, "LOOKUP", "METRIC") {
+			add(fmt.Sprintf("scalar_cardinality_pass:%d", index), result.RowCount <= 1,
+				"无分组指标查询只能返回零或一行",
+			)
+		}
+		if execution.Comparison != nil {
+			baseline := execution.Comparison.Baseline
+			comparisonValid := len(baseline.Columns) == len(result.Columns) &&
+				baseline.RowCount == len(baseline.Rows) &&
+				baseline.RowCount <= budgets.MaximumRowsPerQuery
+			for columnIndex := range result.Columns {
+				comparisonValid = comparisonValid &&
+					baseline.Columns[columnIndex] == result.Columns[columnIndex]
+			}
+			add(fmt.Sprintf("comparison_coverage_pass:%d", index), comparisonValid,
+				"当前期和比较期必须具有相同结果合同并分别满足行数预算",
+			)
+		}
 	}
 	return verification
 }
