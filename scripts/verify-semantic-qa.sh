@@ -46,7 +46,8 @@ BEGIN
     ('000092_semantic_graph_contract_rebuild'),
     ('000093_dws_analysis_modeling'),
     ('000094_semantic_materialization_graph_event'),
-    ('000095_semantic_query_execution_quality')
+    ('000095_semantic_query_execution_quality'),
+    ('000183_semantic_release_registry')
   ) AS expected(version)
   LEFT JOIN platform_schema_migrations AS applied USING(version)
   WHERE applied.version IS NULL;
@@ -200,6 +201,64 @@ BEGIN
   IF invalid_count<>0 THEN
     RAISE EXCEPTION 'published ADS versions lack a published consumer contract: %',invalid_count;
   END IF;
+
+  SELECT count(*) INTO invalid_count
+  FROM platform.tenants AS tenant
+  LEFT JOIN platform.semantic_release_state AS state
+    ON state.tenant_id=tenant.id
+  WHERE state.tenant_id IS NULL;
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'tenants lack semantic release state: %',invalid_count;
+  END IF;
+
+  SELECT count(*) INTO invalid_count
+  FROM platform.semantic_releases AS release
+  WHERE (
+    SELECT count(*)
+    FROM platform.semantic_release_projections AS projection
+    WHERE projection.tenant_id=release.tenant_id
+      AND projection.release_id=release.id
+  )<>4;
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'semantic releases do not have four mandatory projections: %',invalid_count;
+  END IF;
+
+  SELECT count(*) INTO invalid_count
+  FROM platform.semantic_release_projections AS projection
+  WHERE projection.status='READY'
+    AND (
+      projection.applied_content_hash<>projection.expected_content_hash
+      OR projection.resource_version=''
+      OR projection.completed_at IS NULL
+      OR projection.error_code<>''
+    );
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'ready semantic release projections have invalid evidence: %',invalid_count;
+  END IF;
+
+  SELECT count(*) INTO invalid_count
+  FROM platform.semantic_releases AS release
+  LEFT JOIN platform.semantic_release_state AS state
+    ON state.tenant_id=release.tenant_id
+   AND state.active_release_id=release.id
+  WHERE release.status='ACTIVE'
+    AND (
+      state.active_release_id IS NULL
+      OR EXISTS(
+        SELECT 1
+        FROM platform.semantic_release_projections AS projection
+        WHERE projection.tenant_id=release.tenant_id
+          AND projection.release_id=release.id
+          AND (
+            projection.status<>'READY'
+            OR projection.expected_content_hash<>release.content_hash
+            OR projection.applied_content_hash<>release.content_hash
+          )
+      )
+    );
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'active semantic releases bypass projection gates: %',invalid_count;
+  END IF;
 END
 $verify$;
 
@@ -224,6 +283,21 @@ SELECT (
   )
   AND NOT has_table_privilege(
     :'worker_user','platform.semantic_query_plans','INSERT,UPDATE,DELETE'
+  )
+  AND NOT has_table_privilege(
+    :'worker_user','platform.semantic_releases','INSERT,UPDATE,DELETE'
+  )
+  AND NOT has_table_privilege(
+    :'worker_user','platform.semantic_release_objects','INSERT,UPDATE,DELETE'
+  )
+  AND NOT has_table_privilege(
+    :'worker_user','platform.semantic_release_projections','INSERT,UPDATE,DELETE'
+  )
+  AND NOT has_table_privilege(
+    :'worker_user','platform.semantic_release_state','INSERT,UPDATE,DELETE'
+  )
+  AND NOT has_table_privilege(
+    :'worker_user','platform.semantic_release_events','INSERT,UPDATE,DELETE'
   )
 ) AS semantic_role_boundary_valid
 \gset

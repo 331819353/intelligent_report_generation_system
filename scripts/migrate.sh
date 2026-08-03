@@ -214,6 +214,15 @@ SELECT format(
 WHERE to_regclass('platform.semantic_qa_settings') IS NOT NULL
 \gexec
 
+-- 语义发布包和活动版本指针只允许 API 控制面事务修改。阶段 2 的投影 worker
+-- 通过专用 SECURITY DEFINER 函数报告投影结果，不能直接改写发布清单或激活状态。
+SELECT format(
+  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.semantic_releases, platform.semantic_release_objects, platform.semantic_release_projections, platform.semantic_release_state, platform.semantic_release_events FROM %I',
+  :'worker_user'
+)
+WHERE to_regclass('platform.semantic_releases') IS NOT NULL
+\gexec
+
 SELECT format(
   'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.dws_modeling_jobs, platform.dws_modeling_outputs FROM %I',
   :'app_user'

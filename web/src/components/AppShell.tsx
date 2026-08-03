@@ -122,7 +122,7 @@ export function AppShell({ title, eyebrow, children, actions, className = '' }: 
           <NavLink to="/data-sources"><Database aria-hidden="true" size={18} />数据源配置中心</NavLink>
           <NavLink to="/datasets"><Stack aria-hidden="true" size={18} />数据集配置中心</NavLink>
           <NavLink
-            to="/assets/metrics"
+            to="/assets/overview"
             className={({ isActive }) => isActive || location.pathname.startsWith('/assets/') ? 'active' : ''}
           >
             <TreeStructure aria-hidden="true" size={18} />资产管理中心

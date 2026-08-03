@@ -24,6 +24,31 @@ func NewHandler(
 		)
 	}
 
+	mux.Handle("GET /api/v1/semantic-assets/catalog", protect(
+		"READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			page, ok := requestPage(w, r)
+			if !ok {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.Catalog(
+				r.Context(), claims.TenantID,
+				CatalogFilter{
+					Page: page, Query: r.URL.Query().Get("q"),
+					ObjectType: r.URL.Query().Get("objectType"),
+					Status:     r.URL.Query().Get("status"),
+					Ready:      r.URL.Query().Get("ready"),
+				},
+			)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusOK, item)
+		}),
+	))
+
 	mux.Handle("GET /api/v1/semantic-assets", protect(
 		"READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			page, ok := requestPage(w, r)
@@ -49,6 +74,127 @@ func NewHandler(
 				"items": items, "total": total,
 				"limit": page.Limit, "offset": page.Offset,
 			})
+		}),
+	))
+
+	mux.Handle("GET /api/v1/semantic-assets/readiness", protect(
+		"READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.Readiness(r.Context(), claims.TenantID)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusOK, item)
+		}),
+	))
+
+	mux.Handle("GET /api/v1/semantic-assets/releases", protect(
+		"READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			page, ok := requestPage(w, r)
+			if !ok {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			items, total, err := service.ListSemanticReleases(
+				r.Context(), claims.TenantID, page,
+			)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusOK, map[string]any{
+				"items": items, "total": total,
+				"limit": page.Limit, "offset": page.Offset,
+			})
+		}),
+	))
+
+	mux.Handle("GET /api/v1/semantic-assets/releases/active", protect(
+		"READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.GetActiveSemanticRelease(
+				r.Context(), claims.TenantID,
+			)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusOK, item)
+		}),
+	))
+
+	mux.Handle("GET /api/v1/semantic-assets/releases/{id}", protect(
+		"READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.GetSemanticRelease(
+				r.Context(), claims.TenantID, r.PathValue("id"),
+			)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusOK, item)
+		}),
+	))
+
+	mux.Handle("POST /api/v1/semantic-assets/releases", protect(
+		"MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var input CreateSemanticReleaseInput
+			if !decodeRequest(w, r, &input, 32<<20) {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.CreateSemanticRelease(
+				r.Context(), claims.TenantID, claims.Subject, input,
+			)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusCreated, item)
+		}),
+	))
+
+	mux.Handle("POST /api/v1/semantic-assets/releases/{id}/validate", protect(
+		"MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var input ValidateSemanticReleaseInput
+			if !decodeRequest(w, r, &input, 64<<10) {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.ValidateSemanticRelease(
+				r.Context(), claims.TenantID, claims.Subject,
+				r.PathValue("id"), input,
+			)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, item)
+		}),
+	))
+
+	mux.Handle("POST /api/v1/semantic-assets/releases/{id}/activate", protect(
+		"MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var input ActivateSemanticReleaseInput
+			if !decodeRequest(w, r, &input, 64<<10) {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.ActivateSemanticRelease(
+				r.Context(), claims.TenantID, claims.Subject,
+				r.PathValue("id"), input,
+			)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, item)
 		}),
 	))
 
@@ -296,6 +442,11 @@ func writeError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusConflict, map[string]string{
 			"code":    "SEMANTIC_ASSET_CONFLICT",
 			"message": "常用词与类型重复，或资产版本已经变化，请重新加载",
+		})
+	case errors.Is(err, ErrReleaseNotReady):
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"code":    "SEMANTIC_RELEASE_NOT_READY",
+			"message": "语义发布的执行层、注册表、检索或图投影尚未全部通过同版本校验",
 		})
 	default:
 		writeJSON(w, http.StatusInternalServerError, map[string]string{

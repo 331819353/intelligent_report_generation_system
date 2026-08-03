@@ -4,9 +4,11 @@ import { NavLink } from 'react-router-dom'
 export function AssetManagementTabs() {
   return (
     <nav className="asset-management-tabs" aria-label="资产管理分类">
-      <NavLink to="/assets/metrics">数据资产</NavLink>
-      <NavLink to="/assets/semantics">语义资产</NavLink>
-      <NavLink to="/assets/parsing-rules">语义解析规则</NavLink>
+      <NavLink to="/assets/overview">治理总览</NavLink>
+      <NavLink to="/assets/metrics">指标与维度</NavLink>
+      <NavLink to="/assets/semantics">业务词汇</NavLink>
+      <NavLink to="/assets/dimension-values">维值决策图</NavLink>
+      <NavLink to="/assets/parsing-rules">解析规则</NavLink>
     </nav>
   )
 }

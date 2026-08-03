@@ -23,9 +23,10 @@ const (
 )
 
 var (
-	ErrInvalidRequest = errors.New("semantic asset request is invalid")
-	ErrNotFound       = errors.New("semantic asset was not found")
-	ErrConflict       = errors.New("semantic asset changed or conflicts")
+	ErrInvalidRequest  = errors.New("semantic asset request is invalid")
+	ErrNotFound        = errors.New("semantic asset was not found")
+	ErrConflict        = errors.New("semantic asset changed or conflicts")
+	ErrReleaseNotReady = errors.New("semantic release projections are not ready")
 )
 
 type Page struct {
@@ -39,6 +40,46 @@ type Filter struct {
 	KnowledgeType   string
 	Status          string
 	EmbeddingStatus string
+}
+
+type CatalogFilter struct {
+	Page
+	Query      string
+	ObjectType string
+	Status     string
+	Ready      string
+}
+
+// CatalogObject is the common governance projection consumed by the asset
+// control plane and Question Orchestrator. It does not replace the native
+// metric/dimension contracts; it gives every object one lifecycle/readiness
+// shape so the UI no longer reconciles unrelated APIs.
+type CatalogObject struct {
+	ObjectType        string    `json:"objectType"`
+	ID                string    `json:"id"`
+	Code              string    `json:"code"`
+	Name              string    `json:"name"`
+	Description       string    `json:"description,omitempty"`
+	DomainID          string    `json:"domainId,omitempty"`
+	SharingScope      string    `json:"sharingScope,omitempty"`
+	Status            string    `json:"status"`
+	Certification     string    `json:"certification"`
+	Version           int64     `json:"version"`
+	ContentHash       string    `json:"contentHash,omitempty"`
+	OwnerID           string    `json:"ownerId,omitempty"`
+	Sensitivity       string    `json:"sensitivity"`
+	ExecutionEligible bool      `json:"executionEligible"`
+	ReadinessCode     string    `json:"readinessCode"`
+	UpdatedAt         time.Time `json:"updatedAt"`
+}
+
+type CatalogView struct {
+	SemanticVersion string           `json:"semanticVersion,omitempty"`
+	Readiness       CatalogReadiness `json:"readiness"`
+	Items           []CatalogObject  `json:"items"`
+	Total           int              `json:"total"`
+	Limit           int              `json:"limit"`
+	Offset          int              `json:"offset"`
 }
 
 type Asset struct {
@@ -133,6 +174,8 @@ type ParsingRuleUpdateInput struct {
 }
 
 type Store interface {
+	Readiness(context.Context, string) (ReadinessSnapshot, error)
+	Catalog(context.Context, string, CatalogFilter) ([]CatalogObject, int, ReadinessSnapshot, error)
 	List(context.Context, string, Filter) ([]Asset, int, error)
 	ListKnowledgeTypes(context.Context, string) ([]string, error)
 	Create(context.Context, string, string, UpsertInput) (Asset, error)
@@ -156,6 +199,52 @@ type Store interface {
 type Service struct{ store Store }
 
 func NewService(store Store) *Service { return &Service{store: store} }
+
+// Readiness returns the one authoritative, transactionally consistent view of
+// the semantic contracts that are allowed to enter the question runtime. The
+// frontend must render these checks rather than reconstructing readiness from
+// independently paged management APIs.
+func (service *Service) Readiness(
+	ctx context.Context,
+	tenantID string,
+) (CatalogReadiness, error) {
+	if service == nil || service.store == nil || !validUUID(tenantID) {
+		return CatalogReadiness{}, ErrInvalidRequest
+	}
+	snapshot, err := service.store.Readiness(ctx, tenantID)
+	if err != nil {
+		return CatalogReadiness{}, err
+	}
+	return evaluateCatalogReadiness(snapshot, time.Now().UTC()), nil
+}
+
+func (service *Service) Catalog(
+	ctx context.Context,
+	tenantID string,
+	filter CatalogFilter,
+) (CatalogView, error) {
+	filter.Query = strings.TrimSpace(filter.Query)
+	filter.ObjectType = strings.ToUpper(strings.TrimSpace(filter.ObjectType))
+	filter.Status = strings.ToUpper(strings.TrimSpace(filter.Status))
+	filter.Ready = strings.ToUpper(strings.TrimSpace(filter.Ready))
+	if service == nil || service.store == nil || !validUUID(tenantID) ||
+		!normalizePage(&filter.Page) || !validOptionalText(filter.Query, 256) ||
+		!validOptionalValue(filter.ObjectType, "METRIC", "DIMENSION", "TERM", "PARSING_RULE") ||
+		!validOptionalText(filter.Status, 64) ||
+		!validOptionalValue(filter.Ready, "READY", "NOT_READY") {
+		return CatalogView{}, ErrInvalidRequest
+	}
+	items, total, snapshot, err := service.store.Catalog(ctx, tenantID, filter)
+	if err != nil {
+		return CatalogView{}, err
+	}
+	readiness := evaluateCatalogReadiness(snapshot, time.Now().UTC())
+	return CatalogView{
+		SemanticVersion: readiness.SemanticVersion,
+		Readiness:       readiness, Items: items, Total: total,
+		Limit: filter.Limit, Offset: filter.Offset,
+	}, nil
+}
 
 func (service *Service) List(
 	ctx context.Context,
