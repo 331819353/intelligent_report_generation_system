@@ -1,7 +1,6 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { AdminPage } from '../pages/AdminPage'
-import { DesignerPage } from '../pages/DesignerPage'
 import { DatasetCenterPage } from '../pages/DatasetCenterPage'
 import { DataSourceCenterPage } from '../pages/DataSourceCenterPage'
 import { DimensionValueGraphPage } from '../pages/DimensionValueGraphPage'
@@ -13,9 +12,15 @@ import { SemanticAssetPage } from '../pages/SemanticAssetPage'
 import { AssetOverviewPage } from '../pages/AssetOverviewPage'
 import { SemanticParsingRulePage } from '../pages/SemanticParsingRulePage'
 import { SemanticChatPage } from '../pages/SemanticChatPage'
-import { ViewerPage } from '../pages/ViewerPage'
 import { RequireAuth } from '../components/RequireAuth'
 import { domainChangedEvent } from '../lib/domain-context'
+
+const DesignerPage = lazy(() => import('../pages/DesignerPage').then(module => ({ default: module.DesignerPage })))
+const ViewerPage = lazy(() => import('../pages/ViewerPage').then(module => ({ default: module.ViewerPage })))
+
+function LazyReportPage({ children }: { children: ReactNode }) {
+  return <Suspense fallback={<main className="viewer-page"><div className="report-runtime-state"><strong>正在加载报表模块</strong><span>初始化 Card SDK 与共享 Renderer…</span></div></main>}>{children}</Suspense>
+}
 
 /** 定义公开登录页、受保护业务页和兜底跳转。 */
 export function App() {
@@ -47,8 +52,9 @@ export function App() {
       <Route path="/metrics/new" element={<RequireAuth><MetricCenterPage /></RequireAuth>} />
       <Route path="/metrics/:metricId/edit" element={<RequireAuth><MetricCenterPage /></RequireAuth>} />
       <Route path="/semantic-governance" element={<Navigate to="/assets/metrics" replace />} />
-      <Route path="/designer/:reportId" element={<RequireAuth><DesignerPage /></RequireAuth>} />
-      <Route path="/reports/:reportId" element={<RequireAuth><ViewerPage /></RequireAuth>} />
+      <Route path="/report-studio/:reportId" element={<RequireAuth><LazyReportPage><DesignerPage /></LazyReportPage></RequireAuth>} />
+      <Route path="/designer/:reportId" element={<RequireAuth><LazyReportPage><DesignerPage /></LazyReportPage></RequireAuth>} />
+      <Route path="/reports/:reportId" element={<RequireAuth><LazyReportPage><ViewerPage /></LazyReportPage></RequireAuth>} />
       <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>
   )

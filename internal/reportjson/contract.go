@@ -77,6 +77,9 @@ func DecodeAndNormalize(raw []byte) (Document, error) {
 	if header.SchemaVersion == "" {
 		header.SchemaVersion = "0.9"
 	}
+	if header.SchemaVersion == CardSchemaVersion {
+		return decodeAndNormalizeCardDocument(raw)
+	}
 	if header.SchemaVersion != "0.9" && header.SchemaVersion != SchemaVersion {
 		return Document{}, fmt.Errorf("不支持的报告 JSON 版本 %q", header.SchemaVersion)
 	}
@@ -220,6 +223,9 @@ func normalizeSlices(document *Document) {
 
 // Validate 收集可以同时发现的结构、枚举、引用和二维布局问题。
 func Validate(document Document) error {
+	if document.IsCardDSL() {
+		return validateCardDocument(document)
+	}
 	issues := make([]ValidationIssue, 0)
 	add := func(path, reason string) { issues = append(issues, ValidationIssue{Path: path, Reason: reason}) }
 	if document.SchemaVersion != SchemaVersion {

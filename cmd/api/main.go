@@ -247,6 +247,8 @@ func main() {
 		semanticQAService,
 	)
 	reportService := report.NewService(report.NewPostgresStore(pool))
+	reportService.SetMetricQueryExecutor(metricService)
+	reportService.SetArtifactStore(objectStorage, cfg.MinIOReportsBucket)
 	reportHandler := report.NewHandler(authService, accessService, reportService)
 	backgroundTaskHandler := backgroundtask.NewHandler(
 		authService,
@@ -304,6 +306,8 @@ func main() {
 	api.Handle("/api/v1/semantic-parsing-rules", semanticAssetHandler)
 	api.Handle("/api/v1/semantic-parsing-rules/", semanticAssetHandler)
 	api.Handle("/api/v1/semantic-qa/", semanticQAHandler)
+	api.Handle("/api/v1/questions", semanticQAHandler)
+	api.Handle("/api/v1/questions/", semanticQAHandler)
 	api.Handle("/api/v1/metric-candidates", metricCandidateHandler)
 	api.Handle("/api/v1/metric-candidates/", metricCandidateHandler)
 	api.Handle("/api/v1/metrics", metricHandler)

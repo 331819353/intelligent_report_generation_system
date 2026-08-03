@@ -101,18 +101,20 @@ type ProviderResult struct {
 type ErrorCode string
 
 const (
-	ErrorCodeProviderUnavailable ErrorCode = "AI_PROVIDER_UNAVAILABLE"
-	ErrorCodeInvalidRequest      ErrorCode = "AI_REQUEST_INVALID"
-	ErrorCodeCanceled            ErrorCode = "AI_REQUEST_CANCELED"
-	ErrorCodeTimeout             ErrorCode = "AI_PROVIDER_TIMEOUT"
-	ErrorCodeRateLimited         ErrorCode = "AI_RATE_LIMITED"
-	ErrorCodeAuthentication      ErrorCode = "AI_PROVIDER_AUTH_FAILED"
-	ErrorCodeProviderRejected    ErrorCode = "AI_PROVIDER_REJECTED"
-	ErrorCodeResponseTooLarge    ErrorCode = "AI_RESPONSE_TOO_LARGE"
-	ErrorCodeInvalidResponse     ErrorCode = "AI_INVALID_RESPONSE"
-	ErrorCodeRefusal             ErrorCode = "AI_PROVIDER_REFUSAL"
-	ErrorCodeInvalidOutput       ErrorCode = "AI_INVALID_OUTPUT"
-	ErrorCodeCompletionFailed    ErrorCode = "AI_COMPLETION_FAILED"
+	ErrorCodeProviderUnavailable  ErrorCode = "AI_PROVIDER_UNAVAILABLE"
+	ErrorCodeInvalidRequest       ErrorCode = "AI_REQUEST_INVALID"
+	ErrorCodeCanceled             ErrorCode = "AI_REQUEST_CANCELED"
+	ErrorCodeTimeout              ErrorCode = "AI_PROVIDER_TIMEOUT"
+	ErrorCodeRateLimited          ErrorCode = "AI_RATE_LIMITED"
+	ErrorCodeAuthentication       ErrorCode = "AI_PROVIDER_AUTH_FAILED"
+	ErrorCodeProviderRejected     ErrorCode = "AI_PROVIDER_REJECTED"
+	ErrorCodeResponseTooLarge     ErrorCode = "AI_RESPONSE_TOO_LARGE"
+	ErrorCodeInvalidResponse      ErrorCode = "AI_INVALID_RESPONSE"
+	ErrorCodeRefusal              ErrorCode = "AI_PROVIDER_REFUSAL"
+	ErrorCodeInvalidOutput        ErrorCode = "AI_INVALID_OUTPUT"
+	ErrorCodeToolNoProgress       ErrorCode = "AI_TOOL_NO_PROGRESS"
+	ErrorCodeToolExecutionBlocked ErrorCode = "AI_TOOL_EXECUTION_BLOCKED"
+	ErrorCodeCompletionFailed     ErrorCode = "AI_COMPLETION_FAILED"
 )
 
 // ProviderError 保存安全错误说明及上层重试决策所需的信息。

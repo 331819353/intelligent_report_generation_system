@@ -1,0 +1,154 @@
+{
+  "$schema": "https://schemas.intelligent-report.local/report-1.0.schema.json",
+  "schemaVersion": "1.0.0",
+  "report": {
+    "code": "sales_overview",
+    "name": "销售经营概览",
+    "title": "销售经营概览",
+    "description": "卡片式 Report DSL 1.0.0 示例",
+    "type": "REPORT",
+    "status": "DRAFT",
+    "themeId": "business-light",
+    "language": "zh-CN",
+    "timezone": "Asia/Shanghai",
+    "visibility": "PRIVATE",
+    "onlineEnabled": true,
+    "pdfArchiveEnabled": false,
+    "defaultRefreshPolicy": "CACHE"
+  },
+  "layout": {
+    "columns": 12,
+    "rowHeight": 8,
+    "margin": 12,
+    "breakpoints": { "lg": 1200, "md": 768, "sm": 0 }
+  },
+  "globalFilters": [
+    {
+      "id": "date-range",
+      "label": "日期",
+      "type": "DATE_RANGE",
+      "source": { "semanticModelId": "88aaa86c-0e58-4213-af89-66712256ba97", "dimensionId": "order_date" },
+      "operator": "between",
+      "defaultValue": { "type": "relativeDate", "value": "last_30_days" },
+      "required": true,
+      "multiValue": false,
+      "options": []
+    }
+  ],
+  "cards": [
+    {
+      "id": "report-title",
+      "type": "TITLE",
+      "cardVersion": "1.0.0",
+      "layout": {
+        "lg": { "x": 0, "y": 0, "w": 12, "h": 8 },
+        "md": { "x": 0, "y": 0, "w": 12, "h": 8 },
+        "sm": { "x": 0, "y": 0, "w": 12, "h": 8 }
+      },
+      "appearance": { "title": "报告标题", "showHeader": false, "heightMode": "FIXED" },
+      "config": { "text": "销售经营概览", "subtitle": "最近 30 天核心经营指标" },
+      "binding": { "semanticModelId": "", "metrics": [], "dimensions": [], "globalFilterBindings": [], "filters": [], "sort": [], "limit": 0 },
+      "interactions": []
+    },
+    {
+      "id": "gmv-comparison",
+      "type": "COMPARISON",
+      "cardVersion": "1.0.0",
+      "layout": {
+        "lg": { "x": 0, "y": 10, "w": 4, "h": 18 },
+        "md": { "x": 0, "y": 10, "w": 12, "h": 18 },
+        "sm": { "x": 0, "y": 10, "w": 12, "h": 18 }
+      },
+      "appearance": { "title": "销售额", "showHeader": true, "heightMode": "FIXED" },
+      "config": {},
+      "binding": {
+        "semanticModelId": "88aaa86c-0e58-4213-af89-66712256ba97",
+        "metrics": [{ "id": "dbeb30e1-c6d9-4be9-99ef-cccbba5aecdf", "version": 7, "versionId": "7df04613-cf0f-4f0d-8b62-a9354a11869e", "role": "value" }],
+        "dimensions": [],
+        "globalFilterBindings": [{ "filterId": "date-range", "targetDimensionId": "order_date" }],
+        "filters": [], "sort": [], "limit": 1
+      },
+      "interactions": []
+    },
+    {
+      "id": "gmv-conclusion",
+      "type": "CONCLUSION",
+      "cardVersion": "1.0.0",
+      "layout": {
+        "lg": { "x": 4, "y": 10, "w": 8, "h": 18 },
+        "md": { "x": 0, "y": 30, "w": 12, "h": 18 },
+        "sm": { "x": 0, "y": 30, "w": 12, "h": 18 }
+      },
+      "appearance": { "title": "经营结论", "showHeader": true, "heightMode": "FIXED" },
+      "config": { "template": "本期{metric}为{value}。" },
+      "binding": {
+        "semanticModelId": "88aaa86c-0e58-4213-af89-66712256ba97",
+        "metrics": [{ "id": "dbeb30e1-c6d9-4be9-99ef-cccbba5aecdf", "version": 7, "versionId": "7df04613-cf0f-4f0d-8b62-a9354a11869e", "role": "value" }],
+        "dimensions": [],
+        "globalFilterBindings": [{ "filterId": "date-range", "targetDimensionId": "order_date" }],
+        "filters": [], "sort": [], "limit": 1
+      },
+      "interactions": []
+    },
+    {
+      "id": "monthly-trend",
+      "type": "CHART",
+      "cardVersion": "1.0.0",
+      "layout": {
+        "lg": { "x": 0, "y": 30, "w": 8, "h": 28 },
+        "md": { "x": 0, "y": 50, "w": 12, "h": 28 },
+        "sm": { "x": 0, "y": 50, "w": 12, "h": 28 }
+      },
+      "appearance": { "title": "销售趋势", "showHeader": true, "heightMode": "FIXED" },
+      "config": { "chartType": "line", "legend": true },
+      "binding": {
+        "semanticModelId": "88aaa86c-0e58-4213-af89-66712256ba97",
+        "metrics": [{ "id": "dbeb30e1-c6d9-4be9-99ef-cccbba5aecdf", "version": 7, "versionId": "7df04613-cf0f-4f0d-8b62-a9354a11869e", "role": "value" }],
+        "dimensions": [{ "id": "order_month", "role": "time" }],
+        "globalFilterBindings": [{ "filterId": "date-range", "targetDimensionId": "order_date" }],
+        "filters": [], "sort": [{ "field": "order_month", "direction": "asc" }], "limit": 36
+      },
+      "interactions": [{ "id": "trend-drill", "event": "data.click", "action": { "type": "drillDown", "pathId": "time-path", "toDimension": "order_date" } }]
+    },
+    {
+      "id": "region-ranking",
+      "type": "RANKING",
+      "cardVersion": "1.0.0",
+      "layout": {
+        "lg": { "x": 8, "y": 30, "w": 4, "h": 28 },
+        "md": { "x": 0, "y": 80, "w": 12, "h": 28 },
+        "sm": { "x": 0, "y": 80, "w": 12, "h": 28 }
+      },
+      "appearance": { "title": "区域销售排名", "showHeader": true, "heightMode": "FIXED" },
+      "config": {},
+      "binding": {
+        "semanticModelId": "88aaa86c-0e58-4213-af89-66712256ba97",
+        "metrics": [{ "id": "dbeb30e1-c6d9-4be9-99ef-cccbba5aecdf", "version": 7, "versionId": "7df04613-cf0f-4f0d-8b62-a9354a11869e", "role": "value" }],
+        "dimensions": [{ "id": "region", "role": "category" }],
+        "globalFilterBindings": [{ "filterId": "date-range", "targetDimensionId": "order_date" }],
+        "filters": [], "sort": [{ "field": "dbeb30e1-c6d9-4be9-99ef-cccbba5aecdf", "direction": "desc" }], "limit": 10
+      },
+      "interactions": [{ "id": "region-filter-link", "event": "data.click", "action": { "type": "crossFilter", "targetCardId": "monthly-trend", "toDimension": "order_date" } }]
+    },
+    {
+      "id": "region-detail",
+      "type": "TABLE",
+      "cardVersion": "1.0.0",
+      "layout": {
+        "lg": { "x": 0, "y": 60, "w": 12, "h": 30 },
+        "md": { "x": 0, "y": 110, "w": 12, "h": 30 },
+        "sm": { "x": 0, "y": 110, "w": 12, "h": 30 }
+      },
+      "appearance": { "title": "区域经营明细", "showHeader": true, "heightMode": "FIXED" },
+      "config": {},
+      "binding": {
+        "semanticModelId": "88aaa86c-0e58-4213-af89-66712256ba97",
+        "metrics": [{ "id": "dbeb30e1-c6d9-4be9-99ef-cccbba5aecdf", "version": 7, "versionId": "7df04613-cf0f-4f0d-8b62-a9354a11869e", "role": "value" }],
+        "dimensions": [{ "id": "region", "role": "column" }],
+        "globalFilterBindings": [{ "filterId": "date-range", "targetDimensionId": "order_date" }],
+        "filters": [], "sort": [{ "field": "dbeb30e1-c6d9-4be9-99ef-cccbba5aecdf", "direction": "desc" }], "limit": 100
+      },
+      "interactions": []
+    }
+  ]
+}

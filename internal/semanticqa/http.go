@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"intelligent-report-generation-system/internal/access"
+	aiplatform "intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/auth"
 	"intelligent-report-generation-system/internal/dataset"
 )
@@ -24,6 +26,103 @@ func NewHandler(
 			access.Require(permissions, "DATASET", action, nil, next),
 		)
 	}
+	mux.Handle("POST /api/v1/questions", protect("READ", http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var input QuestionRequest
+			if !decodeRequest(w, r, &input) {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			answerQuestionHTTP(
+				w, r, service, claims.TenantID, claims.Subject, input,
+			)
+		},
+	)))
+	mux.Handle("GET /api/v1/questions/{id}", protect("READ", http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.GetQuestion(
+				r.Context(), claims.TenantID, r.PathValue("id"),
+			)
+			writeResponse(w, http.StatusOK, item, err)
+		},
+	)))
+	mux.Handle("GET /api/v1/questions/{id}/events", protect("READ", http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			items, err := service.ListQuestionEvents(
+				r.Context(), claims.TenantID, r.PathValue("id"),
+			)
+			writeResponse(w, http.StatusOK, map[string]any{"items": items}, err)
+		},
+	)))
+	mux.Handle("POST /api/v1/questions/{id}/clarifications", protect("READ", http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var input QuestionRequest
+			if !decodeRequest(w, r, &input) {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			parent, err := service.GetQuestion(
+				r.Context(), claims.TenantID, r.PathValue("id"),
+			)
+			if err != nil {
+				writeResponse(w, http.StatusOK, nil, err)
+				return
+			}
+			if parent.State != QuestionStateClarificationRequired ||
+				hashText(strings.TrimSpace(input.Question)) != parent.QuestionHash {
+				writeResponse(w, http.StatusOK, nil, ErrInvalidState)
+				return
+			}
+			input.ConversationID = parent.ConversationID
+			input.ParentQuestionID = parent.QuestionID
+			answerQuestionHTTP(
+				w, r, service, claims.TenantID, claims.Subject, input,
+			)
+		},
+	)))
+	mux.Handle("POST /api/v1/questions/{id}/feedback", protect("READ", http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var input SubmitQueryFeedbackInput
+			if !decodeRequest(w, r, &input) {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			run, err := service.GetQuestion(
+				r.Context(), claims.TenantID, r.PathValue("id"),
+			)
+			if err != nil {
+				writeResponse(w, http.StatusOK, nil, err)
+				return
+			}
+			if run.State != QuestionStateAnswered || len(run.QueryPlanIDs) == 0 {
+				writeResponse(w, http.StatusOK, nil, ErrInvalidState)
+				return
+			}
+			items := make([]QueryFeedback, 0, len(run.QueryPlanIDs))
+			for _, planID := range run.QueryPlanIDs {
+				item, submitErr := service.SubmitQueryFeedback(
+					r.Context(), claims.TenantID, claims.Subject, planID, input,
+				)
+				if submitErr != nil {
+					writeResponse(w, http.StatusOK, nil, submitErr)
+					return
+				}
+				items = append(items, item)
+			}
+			writeResponse(w, http.StatusOK, map[string]any{"items": items}, nil)
+		},
+	)))
+	mux.Handle("POST /api/v1/questions/{id}/cancel", protect("READ", http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.CancelQuestion(
+				r.Context(), claims.TenantID, r.PathValue("id"),
+			)
+			writeResponse(w, http.StatusAccepted, item, err)
+		},
+	)))
 	mux.Handle("GET /api/v1/semantic-qa/settings", protect("READ", http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			claims, _ := auth.ClaimsFromContext(r.Context())
@@ -207,10 +306,55 @@ func NewHandler(
 				return
 			}
 			claims, _ := auth.ClaimsFromContext(r.Context())
-			item, err := service.PlanQueryTurn(
-				r.Context(), claims.TenantID, claims.Subject, input,
+			streaming := strings.Contains(
+				strings.ToLower(r.Header.Get("Accept")),
+				"application/x-ndjson",
 			)
-			writeResponse(w, http.StatusCreated, item, err)
+			if !streaming {
+				item, err := service.PlanQueryTurn(
+					r.Context(), claims.TenantID, claims.Subject, input,
+				)
+				writeResponse(w, http.StatusCreated, item, err)
+				return
+			}
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				writeError(
+					w, http.StatusInternalServerError, "QUERY_STREAM_UNAVAILABLE",
+					"当前服务不支持问答进度流",
+				)
+				return
+			}
+			w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("X-Accel-Buffering", "no")
+			w.WriteHeader(http.StatusOK)
+			encoder := json.NewEncoder(w)
+			writeFrame := func(value any) {
+				if err := encoder.Encode(value); err == nil {
+					flusher.Flush()
+				}
+			}
+			ctx := withQueryTurnProgressReporter(
+				r.Context(), func(event QueryTurnProgressEvent) {
+					writeFrame(queryTurnProgressFrame{
+						Type: "progress", Progress: event,
+					})
+				},
+			)
+			item, err := service.PlanQueryTurn(
+				ctx, claims.TenantID, claims.Subject, input,
+			)
+			if err != nil {
+				status, code, message := responseError(err)
+				writeFrame(queryTurnErrorFrame{
+					Type: "error", Status: status,
+					Error: queryTurnStreamError{Code: code, Message: message},
+				})
+				return
+			}
+			writeFrame(queryTurnResultFrame{Type: "result", Result: item})
 		},
 	)))
 	mux.Handle("GET /api/v1/semantic-qa/query-plans/{id}", protect("READ", http.HandlerFunc(
@@ -230,6 +374,20 @@ func NewHandler(
 			}
 			claims, _ := auth.ClaimsFromContext(r.Context())
 			item, err := service.ExecuteQueryPlan(
+				r.Context(), claims.TenantID, claims.Subject,
+				r.PathValue("id"), input,
+			)
+			writeResponse(w, http.StatusOK, item, err)
+		},
+	)))
+	mux.Handle("POST /api/v1/semantic-qa/query-plans/{id}/feedback", protect("READ", http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var input SubmitQueryFeedbackInput
+			if !decodeRequest(w, r, &input) {
+				return
+			}
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.SubmitQueryFeedback(
 				r.Context(), claims.TenantID, claims.Subject,
 				r.PathValue("id"), input,
 			)
@@ -359,6 +517,59 @@ func NewHandler(
 	return mux
 }
 
+func answerQuestionHTTP(
+	w http.ResponseWriter,
+	r *http.Request,
+	service *Service,
+	tenantID, actorID string,
+	input QuestionRequest,
+) {
+	streaming := strings.Contains(
+		strings.ToLower(r.Header.Get("Accept")), "application/x-ndjson",
+	)
+	if !streaming {
+		item, err := service.AnswerQuestion(
+			r.Context(), tenantID, actorID, input,
+		)
+		writeResponse(w, http.StatusCreated, item, err)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(
+			w, http.StatusInternalServerError, "QUESTION_STREAM_UNAVAILABLE",
+			"当前服务不支持问答进度流",
+		)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	encoder := json.NewEncoder(w)
+	writeFrame := func(value any) {
+		if err := encoder.Encode(value); err == nil {
+			flusher.Flush()
+		}
+	}
+	ctx := withQueryTurnProgressReporter(
+		r.Context(), func(event QueryTurnProgressEvent) {
+			writeFrame(queryTurnProgressFrame{Type: "progress", Progress: event})
+		},
+	)
+	item, err := service.AnswerQuestion(ctx, tenantID, actorID, input)
+	if err != nil {
+		status, code, message := responseError(err)
+		writeFrame(queryTurnErrorFrame{
+			Type: "error", Status: status,
+			Error: queryTurnStreamError{Code: code, Message: message},
+		})
+		return
+	}
+	writeFrame(questionResultFrame{Type: "result", Result: item})
+}
+
 func optionalPositiveInteger(value string) (int, error) {
 	if value == "" {
 		return 0, nil
@@ -392,24 +603,72 @@ func writeResponse(w http.ResponseWriter, status int, value any, err error) {
 		writeJSON(w, status, value)
 		return
 	}
+	status, code, message := responseError(err)
+	writeError(w, status, code, message)
+}
+
+func responseError(err error) (int, string, string) {
+	var providerErr *aiplatform.ProviderError
 	switch {
 	case errors.Is(err, ErrInvalidRequest), errors.Is(err, ErrUnsafeChange),
 		errors.Is(err, dataset.ErrInvalidDocument):
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "请求不满足语义合同")
+		return http.StatusBadRequest, "INVALID_REQUEST", "请求不满足语义合同"
 	case errors.Is(err, ErrNotFound), errors.Is(err, dataset.ErrNotFound):
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "对象不存在")
+		return http.StatusNotFound, "NOT_FOUND", "对象不存在"
 	case errors.Is(err, ErrConflict), errors.Is(err, dataset.ErrConflict),
 		errors.Is(err, ErrInvalidState):
-		writeError(w, http.StatusConflict, "CONFLICT", "对象已变化或状态不允许该操作")
+		return http.StatusConflict, "CONFLICT", "对象已变化或状态不允许该操作"
 	case errors.Is(err, ErrDisabled):
-		writeError(w, http.StatusConflict, "SEMANTIC_QA_DISABLED", "租户尚未启用该语义问答能力")
+		return http.StatusConflict, "SEMANTIC_QA_DISABLED", "租户尚未启用该语义问答能力"
 	case errors.Is(err, ErrGraphNotReady):
-		writeError(w, http.StatusServiceUnavailable, "SEMANTIC_GRAPH_NOT_READY", "语义图尚未追平权威控制面")
+		return http.StatusServiceUnavailable, "SEMANTIC_GRAPH_NOT_READY", "语义图尚未追平权威控制面"
 	case errors.Is(err, ErrUnprovenPath):
-		writeError(w, http.StatusUnprocessableEntity, "UNPROVEN_PATH", "无法证明完整语义检索链路")
+		return http.StatusUnprocessableEntity, "UNPROVEN_PATH", "无法证明完整语义检索链路"
+	case errors.As(err, &providerErr):
+		switch providerErr.Code {
+		case aiplatform.ErrorCodeProviderUnavailable:
+			return http.StatusServiceUnavailable, string(providerErr.Code), "智能问答模型服务暂时不可用"
+		case aiplatform.ErrorCodeTimeout:
+			return http.StatusGatewayTimeout, string(providerErr.Code), "智能问答模型调用超时"
+		case aiplatform.ErrorCodeRateLimited:
+			return http.StatusTooManyRequests, string(providerErr.Code), "智能问答模型服务暂时限流"
+		case aiplatform.ErrorCodeToolNoProgress,
+			aiplatform.ErrorCodeToolExecutionBlocked,
+			aiplatform.ErrorCodeInvalidOutput,
+			aiplatform.ErrorCodeInvalidResponse:
+			return http.StatusBadGateway, string(providerErr.Code), "智能问答 Evidence Loop 未通过安全校验"
+		default:
+			return http.StatusBadGateway, string(providerErr.Code), "智能问答模型调用失败"
+		}
 	default:
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "语义问答处理失败")
+		return http.StatusInternalServerError, "INTERNAL_ERROR", "语义问答处理失败"
 	}
+}
+
+type queryTurnProgressFrame struct {
+	Type     string                 `json:"type"`
+	Progress QueryTurnProgressEvent `json:"progress"`
+}
+
+type queryTurnResultFrame struct {
+	Type   string        `json:"type"`
+	Result QueryTurnPlan `json:"result"`
+}
+
+type questionResultFrame struct {
+	Type   string           `json:"type"`
+	Result QuestionResponse `json:"result"`
+}
+
+type queryTurnStreamError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type queryTurnErrorFrame struct {
+	Type   string               `json:"type"`
+	Status int                  `json:"status"`
+	Error  queryTurnStreamError `json:"error"`
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

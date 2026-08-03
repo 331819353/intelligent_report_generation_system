@@ -347,16 +347,19 @@ type QueryLLMDimensionValue struct {
 }
 
 type QueryTurnPlan struct {
-	QuestionHash        string              `json:"questionHash"`
-	Status              string              `json:"status"`
-	Intent              string              `json:"intent"`
-	MetricCodes         []string            `json:"metricCodes"`
-	ContextQueryPlanIDs []string            `json:"contextQueryPlanIds"`
-	ContextInherited    bool                `json:"contextInherited"`
-	Tokenization        *QueryTokenization  `json:"tokenization,omitempty"`
-	Clarification       *QueryClarification `json:"clarification,omitempty"`
-	Plans               []QueryPlan         `json:"plans"`
-	Trace               QueryTurnTrace      `json:"trace"`
+	QuestionRunID       string               `json:"questionRunId"`
+	State               QuestionState        `json:"state"`
+	Lifecycle           []QuestionStateEvent `json:"lifecycle"`
+	QuestionHash        string               `json:"questionHash"`
+	Status              string               `json:"status"`
+	Intent              string               `json:"intent"`
+	MetricCodes         []string             `json:"metricCodes"`
+	ContextQueryPlanIDs []string             `json:"contextQueryPlanIds"`
+	ContextInherited    bool                 `json:"contextInherited"`
+	Tokenization        *QueryTokenization   `json:"tokenization,omitempty"`
+	Clarification       *QueryClarification  `json:"clarification,omitempty"`
+	Plans               []QueryPlan          `json:"plans"`
+	Trace               QueryTurnTrace       `json:"trace"`
 }
 
 type QueryClarification struct {
@@ -368,6 +371,7 @@ type QueryClarification struct {
 
 type QueryDimensionCandidateChoice struct {
 	MetricCode     string `json:"metricCode"`
+	Term           string `json:"term"`
 	DecisionID     string `json:"decisionId"`
 	DimensionCode  string `json:"dimensionCode"`
 	DimensionName  string `json:"dimensionName"`
@@ -384,6 +388,7 @@ type QueryTurnTrace struct {
 	ContextPolicy         string                           `json:"contextPolicy"`
 	StandaloneQuestion    string                           `json:"standaloneQuestion"`
 	MetricToolLoop        *QueryMetricToolLoopTrace        `json:"metricToolLoop,omitempty"`
+	DimensionToolLoops    []QueryDimensionToolLoopTrace    `json:"dimensionToolLoops,omitempty"`
 	Extraction            QueryTurnExtraction              `json:"extraction"`
 	MetricCandidates      []QueryMetricCandidateTrace      `json:"metricCandidates"`
 	DimensionValueLookups []QueryDimensionValueLookupTrace `json:"dimensionValueLookups"`
@@ -400,9 +405,23 @@ type QueryMetricToolLoopTrace struct {
 }
 
 type QueryMetricToolLoopStep struct {
-	Round    int    `json:"round"`
-	ToolName string `json:"toolName"`
-	Terminal bool   `json:"terminal"`
+	Round            int      `json:"round"`
+	ToolName         string   `json:"toolName"`
+	ArgumentsHash    string   `json:"argumentsHash"`
+	StateHash        string   `json:"stateHash"`
+	EvidenceIDs      []string `json:"evidenceIds"`
+	NewEvidenceCount int      `json:"newEvidenceCount"`
+	ErrorCode        string   `json:"errorCode,omitempty"`
+	Terminal         bool     `json:"terminal"`
+}
+
+type QueryDimensionToolLoopTrace struct {
+	MetricCode     string                    `json:"metricCode"`
+	AuditRequestID string                    `json:"auditRequestId"`
+	Model          string                    `json:"model"`
+	Rounds         int                       `json:"rounds"`
+	ToolCalls      int                       `json:"toolCalls"`
+	Steps          []QueryMetricToolLoopStep `json:"steps"`
 }
 
 type QueryTurnExtraction struct {
@@ -636,7 +655,12 @@ type ExecuteQueryPlanInput struct {
 type AnswerEvidence struct {
 	GraphGenerationID     string          `json:"graphGenerationId"`
 	GraphGeneration       int64           `json:"graphGeneration"`
+	SemanticVersion       string          `json:"semanticVersion"`
 	PathHash              string          `json:"pathHash"`
+	QueryPlanHash         string          `json:"queryPlanHash"`
+	ResultHash            string          `json:"resultHash"`
+	QueryTraceID          string          `json:"queryTraceId"`
+	VerifiedAt            string          `json:"verifiedAt"`
 	MetricID              string          `json:"metricId"`
 	MetricVersionID       string          `json:"metricVersionId"`
 	DimensionID           string          `json:"dimensionId,omitempty"`
@@ -647,13 +671,31 @@ type AnswerEvidence struct {
 	FreshnessDecision     string          `json:"freshnessDecision"`
 	CompatibilityDecision string          `json:"compatibilityDecision"`
 	ExecutionRevalidated  bool            `json:"executionRevalidated"`
+	ValidatorChecks       []string        `json:"validatorChecks"`
 }
 
 type QueryPlanExecution struct {
-	QueryPlan  QueryPlan                 `json:"queryPlan"`
-	Result     dataset.PreviewResult     `json:"result"`
-	Evidence   AnswerEvidence            `json:"evidence"`
-	Comparison *QueryComparisonExecution `json:"comparison,omitempty"`
+	QuestionRunID string                    `json:"questionRunId"`
+	State         QuestionState             `json:"state"`
+	Lifecycle     []QuestionStateEvent      `json:"lifecycle"`
+	QueryPlan     QueryPlan                 `json:"queryPlan"`
+	Result        dataset.PreviewResult     `json:"result"`
+	Evidence      AnswerEvidence            `json:"evidence"`
+	Comparison    *QueryComparisonExecution `json:"comparison,omitempty"`
+}
+
+type SubmitQueryFeedbackInput struct {
+	Rating  string `json:"rating"`
+	Comment string `json:"comment,omitempty"`
+}
+
+type QueryFeedback struct {
+	ID          string `json:"id"`
+	QueryPlanID string `json:"queryPlanId"`
+	Rating      string `json:"rating"`
+	Comment     string `json:"comment,omitempty"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
 }
 
 type QueryComparisonExecution struct {

@@ -8,12 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"intelligent-report-generation-system/internal/platform/database"
+	"intelligent-report-generation-system/internal/reportjson"
 )
 
 type PostgresStore struct{ pool *pgxpool.Pool }
@@ -67,7 +70,7 @@ func (s *PostgresStore) Create(ctx context.Context, tenantID, actorID string, pl
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO platform.report_drafts(report_id,tenant_id,schema_version,definition_json,definition_hash,revision_no,editor_state_json,updated_by) VALUES($1,$2,'1.0',$3,$4,1,$5,$6)`, plan.ID, tenantID, plan.Prepared.JSON, plan.Prepared.Hash, editorJSON, actorID); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.report_drafts(report_id,tenant_id,schema_version,definition_json,definition_hash,revision_no,editor_state_json,updated_by) VALUES($1,$2,$3,$4,$5,1,$6,$7)`, plan.ID, tenantID, plan.Prepared.Document.SchemaVersion, plan.Prepared.JSON, plan.Prepared.Hash, editorJSON, actorID); err != nil {
 			return err
 		}
 		createPatch, err := json.Marshal([]map[string]any{{"op": "add", "path": "", "value": json.RawMessage(plan.Prepared.JSON)}})
@@ -199,7 +202,7 @@ func (s *PostgresStore) Update(ctx context.Context, tenantID, actorID, id string
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE platform.report_drafts SET definition_json=$1,definition_hash=$2,revision_no=$3,editor_state_json=$4,updated_by=$5 WHERE report_id=$6`, plan.Final.JSON, plan.Final.Hash, finalRevision, editorJSON, actorID, id); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE platform.report_drafts SET schema_version=$1,definition_json=$2,definition_hash=$3,revision_no=$4,editor_state_json=$5,updated_by=$6 WHERE report_id=$7`, plan.Final.Document.SchemaVersion, plan.Final.JSON, plan.Final.Hash, finalRevision, editorJSON, actorID, id); err != nil {
 			return err
 		}
 		report := plan.Final.Document.Report
@@ -221,6 +224,409 @@ func (s *PostgresStore) Update(ctx context.Context, tenantID, actorID, id string
 		return DraftRecord{}, mapPostgresError(err)
 	}
 	return record, nil
+}
+
+func (s *PostgresStore) ResolvePublicationDependencies(ctx context.Context, tenantID, actorID, reportID string, dependencies []DependencyIndex) (snapshots []DependencySnapshot, issues []ValidationIssue, err error) {
+	snapshots, issues = []DependencySnapshot{}, []ValidationIssue{}
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM platform.reports WHERE id=$1 AND deleted_at IS NULL)`, reportID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return ErrNotFound
+		}
+		canUpdate, err := allowedTx(ctx, tx, tenantID, actorID, "UPDATE", reportID)
+		if err != nil {
+			return err
+		}
+		canPublish, err := allowedTx(ctx, tx, tenantID, actorID, "PUBLISH", reportID)
+		if err != nil {
+			return err
+		}
+		if !canUpdate && !canPublish {
+			return ErrForbidden
+		}
+		snapshots, issues, err = validatePublicationDependenciesTx(ctx, tx, tenantID, actorID, dependencies, false)
+		return err
+	})
+	return snapshots, issues, err
+}
+
+func (s *PostgresStore) ReplayPublication(ctx context.Context, tenantID, actorID, reportID, operation, key, requestHash string) (record PublishedVersion, found bool, err error) {
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		if operation != "PUBLISH" && operation != "ROLLBACK" {
+			return ErrInvalidRequest
+		}
+		allowed, err := allowedTx(ctx, tx, tenantID, actorID, "PUBLISH", reportID)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return ErrForbidden
+		}
+		return replayPublicationTx(ctx, tx, actorID, reportID, operation, key, requestHash, &record, &found)
+	})
+	return record, found, err
+}
+
+func (s *PostgresStore) Publish(ctx context.Context, tenantID, actorID, reportID string, plan PublishPlan) (record PublishedVersion, err error) {
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		if err := lockIdempotency(ctx, tx, tenantID, "REPORT:PUBLISH:"+reportID, plan.IdempotencyKey); err != nil {
+			return err
+		}
+		allowed, err := allowedTx(ctx, tx, tenantID, actorID, "PUBLISH", reportID)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return ErrForbidden
+		}
+		var found bool
+		if err := replayPublicationTx(ctx, tx, actorID, reportID, "PUBLISH", plan.IdempotencyKey, plan.RequestHash, &record, &found); err != nil || found {
+			return err
+		}
+		var currentRevision int64
+		var currentHash string
+		err = tx.QueryRow(ctx, `SELECT d.revision_no,d.definition_hash
+			FROM platform.reports r JOIN platform.report_drafts d ON d.report_id=r.id AND d.tenant_id=r.tenant_id
+			WHERE r.id=$1 AND r.deleted_at IS NULL FOR UPDATE OF r,d`, reportID).Scan(&currentRevision, &currentHash)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if currentRevision != plan.ExpectedRevision || currentHash != publicationSourceHash(plan.Prepared) {
+			return &ConflictError{Revision: currentRevision, Hash: currentHash}
+		}
+		_, dependencies := deriveIndexes(plan.Prepared.Document)
+		resolved, validationIssues, err := validatePublicationDependenciesTx(ctx, tx, tenantID, actorID, dependencies, true)
+		if err != nil {
+			return err
+		}
+		if len(validationIssues) > 0 {
+			return &PublicationValidationError{Issues: validationIssues}
+		}
+		if !sameDependencySnapshots(resolved, plan.Dependencies) {
+			return ErrDependencyChanged
+		}
+		var alreadyPublished bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM platform.report_versions WHERE report_id=$1 AND source_revision_no=$2 AND source_definition_hash=$3)`, reportID, plan.ExpectedRevision, currentHash).Scan(&alreadyPublished); err != nil {
+			return err
+		}
+		if alreadyPublished {
+			return ErrAlreadyPublished
+		}
+		var nextVersion int
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(max(version_no),0)+1 FROM platform.report_versions WHERE report_id=$1`, reportID).Scan(&nextVersion); err != nil {
+			return err
+		}
+		var versionID, publishedAt string
+		err = tx.QueryRow(ctx, `INSERT INTO platform.report_versions(
+			tenant_id,report_id,version_no,source_revision_no,source_definition_hash,schema_version,
+			definition_json,definition_bytes,definition_hash,size_bytes,object_uri,publish_comment,published_by
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		RETURNING id::text,published_at::text`, tenantID, reportID, nextVersion, plan.ExpectedRevision, currentHash,
+			plan.Prepared.Document.SchemaVersion, plan.Prepared.JSON, plan.Prepared.JSON, plan.Prepared.Hash, len(plan.Prepared.JSON), plan.ObjectURI, plan.Comment, actorID).Scan(&versionID, &publishedAt)
+		if err != nil {
+			return err
+		}
+		for _, component := range plan.Components {
+			if _, err := tx.Exec(ctx, `INSERT INTO platform.report_version_component_indexes(
+				tenant_id,report_version_id,report_id,page_id,block_id,component_id,component_type
+			) VALUES($1,$2,$3,$4,$5,$6,$7)`, tenantID, versionID, reportID, component.PageID, component.BlockID, component.ComponentID, component.ComponentType); err != nil {
+				return err
+			}
+		}
+		for _, dependency := range plan.Dependencies {
+			if _, err := tx.Exec(ctx, `INSERT INTO platform.report_version_dependencies(
+				tenant_id,report_version_id,report_id,dependency_type,dependency_id,referenced_version_id,json_path
+			) VALUES($1,$2,$3,$4,$5,$6,$7)`, tenantID, versionID, reportID, dependency.Type, dependency.ID, dependency.VersionID, dependency.Path); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE platform.reports SET current_published_version_id=$1,status='PUBLISHED',version=version+1,updated_by=$2 WHERE id=$3`, versionID, actorID, reportID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail)
+			VALUES($1,$2,'PUBLISH','REPORT',$3,jsonb_build_object('version',$4::int,'sourceRevision',$5::bigint,'sha256',$6::text,'sizeBytes',$7::bigint))`, tenantID, actorID, reportID, nextVersion, plan.ExpectedRevision, plan.Prepared.Hash, len(plan.Prepared.JSON)); err != nil {
+			return err
+		}
+		record = PublishedVersion{ID: versionID, ReportID: reportID, Version: nextVersion, SourceRevision: plan.ExpectedRevision, SchemaVersion: plan.Prepared.Document.SchemaVersion, SHA256: plan.Prepared.Hash, SizeBytes: int64(len(plan.Prepared.JSON)), Comment: plan.Comment, PublishedBy: actorID, PublishedAt: publishedAt, Current: true, ObjectURI: plan.ObjectURI}
+		return insertPublicationIdempotency(ctx, tx, tenantID, actorID, reportID, "PUBLISH", plan.IdempotencyKey, plan.RequestHash, record)
+	})
+	if err != nil {
+		return PublishedVersion{}, mapPostgresError(err)
+	}
+	return record, nil
+}
+
+func (s *PostgresStore) ListVersions(ctx context.Context, tenantID, actorID, reportID string, limit, offset int) (items []PublishedVersion, total int, err error) {
+	items = []PublishedVersion{}
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		allowed, err := allowedTx(ctx, tx, tenantID, actorID, "READ", reportID)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return ErrForbidden
+		}
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM platform.reports WHERE id=$1 AND deleted_at IS NULL)`, reportID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return ErrNotFound
+		}
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM platform.report_versions WHERE report_id=$1`, reportID).Scan(&total); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `SELECT v.id::text,v.report_id::text,v.version_no,v.source_revision_no,v.schema_version,
+			v.definition_hash,v.size_bytes,v.publish_comment,COALESCE(v.published_by::text,''),v.published_at::text,
+			(r.current_published_version_id=v.id)
+			FROM platform.report_versions v JOIN platform.reports r ON r.id=v.report_id AND r.tenant_id=v.tenant_id
+			WHERE v.report_id=$1 ORDER BY (r.current_published_version_id=v.id) DESC,v.version_no DESC LIMIT $2 OFFSET $3`, reportID, limit, offset)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item PublishedVersion
+			if err := rows.Scan(&item.ID, &item.ReportID, &item.Version, &item.SourceRevision, &item.SchemaVersion, &item.SHA256, &item.SizeBytes, &item.Comment, &item.PublishedBy, &item.PublishedAt, &item.Current); err != nil {
+				return err
+			}
+			items = append(items, item)
+		}
+		return rows.Err()
+	})
+	return items, total, err
+}
+
+func (s *PostgresStore) GetVersionArtifact(ctx context.Context, tenantID, actorID, reportID string, version int) (artifact VersionArtifact, err error) {
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		allowed, err := allowedTx(ctx, tx, tenantID, actorID, "READ", reportID)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return ErrForbidden
+		}
+		var item PublishedVersion
+		err = tx.QueryRow(ctx, `SELECT v.id::text,v.report_id::text,v.version_no,v.source_revision_no,v.schema_version,
+			v.definition_hash,v.size_bytes,v.publish_comment,COALESCE(v.published_by::text,''),v.published_at::text,
+			(r.current_published_version_id=v.id),v.definition_bytes,COALESCE(v.object_uri,'')
+			FROM platform.report_versions v JOIN platform.reports r ON r.id=v.report_id AND r.tenant_id=v.tenant_id
+			WHERE v.report_id=$1 AND v.version_no=$2 AND r.deleted_at IS NULL`, reportID, version).Scan(
+			&item.ID, &item.ReportID, &item.Version, &item.SourceRevision, &item.SchemaVersion, &item.SHA256,
+			&item.SizeBytes, &item.Comment, &item.PublishedBy, &item.PublishedAt, &item.Current, &artifact.Definition, &item.ObjectURI)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrVersionNotFound
+		}
+		if err != nil {
+			return err
+		}
+		artifact.Version = item
+		return nil
+	})
+	return artifact, err
+}
+
+func (s *PostgresStore) Rollback(ctx context.Context, tenantID, actorID, reportID string, version int, idempotencyKey, requestHash, comment string) (record PublishedVersion, err error) {
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		if err := lockIdempotency(ctx, tx, tenantID, "REPORT:ROLLBACK:"+reportID, idempotencyKey); err != nil {
+			return err
+		}
+		allowed, err := allowedTx(ctx, tx, tenantID, actorID, "PUBLISH", reportID)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return ErrForbidden
+		}
+		var found bool
+		if err := replayPublicationTx(ctx, tx, actorID, reportID, "ROLLBACK", idempotencyKey, requestHash, &record, &found); err != nil || found {
+			return err
+		}
+		var currentID string
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(current_published_version_id::text,'') FROM platform.reports WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, reportID).Scan(&currentID); errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
+			return err
+		}
+		err = tx.QueryRow(ctx, `SELECT id::text,report_id::text,version_no,source_revision_no,schema_version,definition_hash,
+			size_bytes,publish_comment,COALESCE(published_by::text,''),published_at::text
+			FROM platform.report_versions WHERE report_id=$1 AND version_no=$2`, reportID, version).Scan(
+			&record.ID, &record.ReportID, &record.Version, &record.SourceRevision, &record.SchemaVersion, &record.SHA256,
+			&record.SizeBytes, &record.Comment, &record.PublishedBy, &record.PublishedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrVersionNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if currentID == record.ID {
+			record.Current = true
+			return insertPublicationIdempotency(ctx, tx, tenantID, actorID, reportID, "ROLLBACK", idempotencyKey, requestHash, record)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE platform.reports SET current_published_version_id=$1,status='PUBLISHED',version=version+1,updated_by=$2 WHERE id=$3`, record.ID, actorID, reportID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail)
+			VALUES($1,$2,'ROLLBACK','REPORT',$3,jsonb_build_object('targetVersion',$4::int,'previousVersionId',COALESCE($5::text,''),'comment',$6::text))`, tenantID, actorID, reportID, version, currentID, comment); err != nil {
+			return err
+		}
+		record.Current = true
+		return insertPublicationIdempotency(ctx, tx, tenantID, actorID, reportID, "ROLLBACK", idempotencyKey, requestHash, record)
+	})
+	return record, err
+}
+
+func validatePublicationDependenciesTx(ctx context.Context, tx pgx.Tx, tenantID, actorID string, dependencies []DependencyIndex, lock bool) ([]DependencySnapshot, []ValidationIssue, error) {
+	snapshots := make([]DependencySnapshot, 0, len(dependencies))
+	issues := []ValidationIssue{}
+	for _, dependency := range dependencies {
+		switch dependency.Type {
+		case "SOURCE_TRACE":
+			snapshots = append(snapshots, DependencySnapshot{Type: "SOURCE_TRACE", ID: dependency.ID, Path: dependency.Path})
+		case "DATASET_VERSION":
+			if uuid.Validate(dependency.ID) != nil {
+				issues = append(issues, dependencyValidationIssue("DATASET_VERSION_NOT_FOUND", dependency, "数据集版本不存在或不可发布"))
+				continue
+			}
+			query := `SELECT v.id::text,d.id::text FROM platform.dataset_versions v
+				JOIN platform.datasets d ON d.id=v.dataset_id AND d.tenant_id=v.tenant_id
+				WHERE v.id=$1 AND v.status='PUBLISHED' AND d.status='PUBLISHED'
+				  AND d.current_published_version_id=v.id AND d.deleted_at IS NULL`
+			if lock {
+				query += ` FOR SHARE OF v,d`
+			}
+			var versionID, datasetID string
+			err := tx.QueryRow(ctx, query, dependency.ID).Scan(&versionID, &datasetID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				issues = append(issues, dependencyValidationIssue("DATASET_VERSION_NOT_FOUND", dependency, "数据集版本不存在、未发布或已失效"))
+				continue
+			}
+			if err != nil {
+				return nil, nil, err
+			}
+			allowed, err := resourceAllowedTx(ctx, tx, tenantID, actorID, "DATASET", "READ", datasetID)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !allowed {
+				issues = append(issues, dependencyValidationIssue("DATASET_FORBIDDEN", dependency, "没有数据集读取权限"))
+				continue
+			}
+			snapshots = append(snapshots, DependencySnapshot{Type: "DATASET_VERSION", ID: dependency.ID, VersionID: versionID, Path: dependency.Path})
+		case "METRIC":
+			if uuid.Validate(dependency.ID) != nil {
+				issues = append(issues, dependencyValidationIssue("METRIC_VERSION_NOT_FOUND", dependency, "指标不存在或没有可发布版本"))
+				continue
+			}
+			query := `SELECT m.id::text,v.id::text FROM platform.metrics m
+				JOIN platform.metric_versions v ON v.id=m.current_published_version_id AND v.metric_id=m.id AND v.tenant_id=m.tenant_id
+				WHERE m.id=$1 AND m.status='PUBLISHED' AND v.status='PUBLISHED' AND m.deleted_at IS NULL`
+			if lock {
+				query += ` FOR SHARE OF m,v`
+			}
+			var metricID, versionID string
+			err := tx.QueryRow(ctx, query, dependency.ID).Scan(&metricID, &versionID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				issues = append(issues, dependencyValidationIssue("METRIC_VERSION_NOT_FOUND", dependency, "指标不存在、未发布或已失效"))
+				continue
+			}
+			if err != nil {
+				return nil, nil, err
+			}
+			allowed, err := resourceAllowedTx(ctx, tx, tenantID, actorID, "METRIC", "READ", metricID)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !allowed {
+				issues = append(issues, dependencyValidationIssue("METRIC_FORBIDDEN", dependency, "没有指标读取权限"))
+				continue
+			}
+			snapshots = append(snapshots, DependencySnapshot{Type: "METRIC_VERSION", ID: dependency.ID, VersionID: versionID, Path: dependency.Path})
+		}
+	}
+	sort.Slice(snapshots, func(i, j int) bool {
+		return dependencySnapshotKey(snapshots[i]) < dependencySnapshotKey(snapshots[j])
+	})
+	sortValidationIssues(issues)
+	return snapshots, issues, nil
+}
+
+func dependencyValidationIssue(code string, dependency DependencyIndex, message string) ValidationIssue {
+	return ValidationIssue{Level: "error", Code: code, Path: dependency.Path, Message: message, DependencyID: dependency.ID}
+}
+
+func resourceAllowedTx(ctx context.Context, tx pgx.Tx, tenantID, actorID, resourceType, action, objectID string) (bool, error) {
+	var allowed bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM platform.user_roles ur
+		JOIN platform.roles r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id AND r.status='ACTIVE' AND r.deleted_at IS NULL
+		JOIN platform.role_permissions rp ON rp.tenant_id=ur.tenant_id AND rp.role_id=ur.role_id
+		JOIN platform.permissions p ON p.tenant_id=rp.tenant_id AND p.id=rp.permission_id
+		WHERE ur.tenant_id=$1 AND ur.user_id=$2 AND p.resource_type=$3 AND p.action=$4
+		UNION ALL
+		SELECT 1 FROM platform.object_permissions op
+		WHERE op.tenant_id=$1 AND op.object_type=$3 AND op.object_id=$5 AND op.action=$4
+		  AND (op.subject_type='USER' AND op.subject_id=$2 OR op.subject_type='ROLE' AND EXISTS (
+		    SELECT 1 FROM platform.user_roles ur JOIN platform.roles r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
+		    WHERE ur.tenant_id=$1 AND ur.user_id=$2 AND ur.role_id=op.subject_id AND r.status='ACTIVE' AND r.deleted_at IS NULL))
+	)`, tenantID, actorID, resourceType, action, objectID).Scan(&allowed)
+	return allowed, err
+}
+
+func publicationSourceHash(prepared reportjson.Prepared) string {
+	publication, _ := prepared.Document.Extensions["publication"].(map[string]any)
+	value, _ := publication["sourceHash"].(string)
+	return value
+}
+
+func sameDependencySnapshots(left, right []DependencySnapshot) bool {
+	leftCopy, rightCopy := append([]DependencySnapshot(nil), left...), append([]DependencySnapshot(nil), right...)
+	sort.Slice(leftCopy, func(i, j int) bool { return dependencySnapshotKey(leftCopy[i]) < dependencySnapshotKey(leftCopy[j]) })
+	sort.Slice(rightCopy, func(i, j int) bool { return dependencySnapshotKey(rightCopy[i]) < dependencySnapshotKey(rightCopy[j]) })
+	return reflect.DeepEqual(leftCopy, rightCopy)
+}
+
+func dependencySnapshotKey(value DependencySnapshot) string {
+	return value.Type + "\x00" + value.ID + "\x00" + value.VersionID + "\x00" + value.Path
+}
+
+func replayPublicationTx(ctx context.Context, tx pgx.Tx, actorID, reportID, operation, key, requestHash string, record *PublishedVersion, found *bool) error {
+	var storedActorID, storedHash string
+	var response []byte
+	err := tx.QueryRow(ctx, `SELECT actor_user_id::text,request_hash,response_json FROM platform.report_publication_idempotency
+		WHERE report_id=$1 AND operation=$2 AND idempotency_key=$3`, reportID, operation, key).Scan(&storedActorID, &storedHash, &response)
+	if errors.Is(err, pgx.ErrNoRows) {
+		*found = false
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if storedActorID != actorID || storedHash != requestHash {
+		return ErrIdempotencyConflict
+	}
+	if err := json.Unmarshal(response, record); err != nil {
+		return err
+	}
+	*found = true
+	return nil
+}
+
+func insertPublicationIdempotency(ctx context.Context, tx pgx.Tx, tenantID, actorID, reportID, operation, key, requestHash string, record PublishedVersion) error {
+	payload, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO platform.report_publication_idempotency(
+		tenant_id,report_id,actor_user_id,operation,idempotency_key,request_hash,response_json
+	) VALUES($1,$2,$3,$4,$5,$6,$7)`, tenantID, reportID, actorID, operation, key, requestHash, payload)
+	return err
 }
 
 func sameSemanticTarget(referenced, current json.RawMessage) bool {
@@ -408,6 +814,12 @@ func mapPostgresError(err error) error {
 	}
 	if pgError.ConstraintName == "report_idempotency_create_idx" || pgError.ConstraintName == "report_idempotency_update_idx" {
 		return ErrIdempotencyConflict
+	}
+	if pgError.ConstraintName == "report_publication_idempotency_key" {
+		return ErrIdempotencyConflict
+	}
+	if pgError.ConstraintName == "report_versions_source_revision_key" {
+		return ErrAlreadyPublished
 	}
 	if strings.Contains(pgError.ConstraintName, "report_revisions_tenant_id_report_id_client_operation_id") {
 		return fmt.Errorf("%w: clientOperationId 已用于当前报告", ErrInvalidRequest)

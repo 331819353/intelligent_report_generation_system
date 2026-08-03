@@ -11,7 +11,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"intelligent-report-generation-system/internal/dataset"
@@ -56,6 +58,7 @@ type Store interface {
 	GetQueryPlan(context.Context, string, string) (QueryPlan, error)
 	PrepareQueryPlanExecution(context.Context, string, string, string, string) (QueryPlan, QueryExecutionBinding, error)
 	FinishQueryPlanExecution(context.Context, string, string, string, string, bool, string, int64, int) (QueryPlan, error)
+	UpsertQueryFeedback(context.Context, string, string, string, SubmitQueryFeedbackInput) (QueryFeedback, error)
 }
 
 type DatasetService interface {
@@ -66,10 +69,12 @@ type DatasetService interface {
 }
 
 type Service struct {
-	store          Store
-	datasets       DatasetService
-	interpreter    QueryInterpreter
-	metricExecutor interface {
+	store           Store
+	datasets        DatasetService
+	interpreter     QueryInterpreter
+	questionMu      sync.Mutex
+	activeQuestions map[string]context.CancelFunc
+	metricExecutor  interface {
 		PreviewVersion(context.Context, string, string, string, string, metric.PreviewInput) (dataset.PreviewResult, error)
 	}
 }
@@ -79,7 +84,10 @@ func NewService(
 	datasets DatasetService,
 	interpreters ...QueryInterpreter,
 ) *Service {
-	service := &Service{store: store, datasets: datasets}
+	service := &Service{
+		store: store, datasets: datasets,
+		activeQuestions: map[string]context.CancelFunc{},
+	}
 	if len(interpreters) > 0 {
 		service.interpreter = interpreters[0]
 	}
@@ -680,8 +688,14 @@ func (service *Service) PlanQueryTurn(
 	ctx context.Context,
 	tenantID, actorID string,
 	input QueryTurnInput,
-) (QueryTurnPlan, error) {
-	result := QueryTurnPlan{
+) (result QueryTurnPlan, runErr error) {
+	machine := newQuestionStateMachine("")
+	defer func() {
+		if runErr != nil {
+			blockQuestionState(&result, machine)
+		}
+	}()
+	result = QueryTurnPlan{
 		Status: "PLANNING", MetricCodes: []string{},
 		ContextQueryPlanIDs: []string{},
 		Plans:               []QueryPlan{},
@@ -727,39 +741,6 @@ func (service *Service) PlanQueryTurn(
 	if _, err := time.LoadLocation(input.Timezone); err != nil {
 		return result, ErrInvalidRequest
 	}
-	// The production assistant owns the complete semantic chain. Callers no
-	// longer need a separate "practice" request to run Jieba, per-token vector
-	// retrieval and bounded LLM candidate selection before governed planning.
-	if tokenizer, ok := service.interpreter.(QueryTokenizer); ok {
-		var tokenization QueryTokenization
-		var err error
-		if queryTurnTokenizer, supported :=
-			service.interpreter.(QueryTurnTokenizer); supported {
-			tokenization, err = queryTurnTokenizer.TokenizeQueryTurn(
-				ctx, tenantID, actorID, input.Question, input.Timezone,
-				len(input.ContextQueryPlanIDs) > 0 ||
-					len(input.ConfirmedMetricCodes) > 0,
-			)
-		} else {
-			tokenization, err = tokenizer.Tokenize(
-				ctx, tenantID, actorID, input.Question, input.Timezone,
-			)
-		}
-		if err != nil {
-			return result, err
-		}
-		result.Tokenization = &tokenization
-		hints, _ := semanticHintsFromTokenization(tokenization)
-		hints = supplementAdministrativeLocationHints(tokenization, hints)
-		if validQuerySemanticHints(hints) &&
-			(hints.Intent != "" || len(hints.MetricNames) > 0 ||
-				len(hints.DimensionValues) > 0) {
-			input.SemanticHints = hints
-		}
-	}
-	planningQuestion := queryWithSemanticHints(
-		input.Question, input.SemanticHints,
-	)
 	for index := range input.PriorQuestions {
 		input.PriorQuestions[index] = strings.TrimSpace(
 			input.PriorQuestions[index],
@@ -769,6 +750,26 @@ func (service *Service) PlanQueryTurn(
 			return result, ErrInvalidRequest
 		}
 	}
+	result.QuestionHash = hashText(input.Question)
+	if err := advanceTurnLifecycle(
+		&result, machine, QuestionStateReceived,
+	); err != nil {
+		return result, err
+	}
+	if err := persistQuestionStateMachine(
+		ctx, service, tenantID, actorID, result.QuestionHash, machine,
+	); err != nil {
+		return result, err
+	}
+	if err := advanceTurnLifecycle(
+		&result, machine, QuestionStateAuthorized,
+	); err != nil {
+		return result, err
+	}
+	reportQueryTurnProgress(
+		ctx, QueryProgressStageRequest, QueryProgressStatusSucceeded,
+		"问题已接收，开始验证会话上下文和语义路径",
+	)
 	result.Trace.ConversationQuestions = append(
 		append([]string(nil), input.PriorQuestions...),
 		input.Question,
@@ -782,6 +783,12 @@ func (service *Service) PlanQueryTurn(
 		id    string
 		slots QuerySlots
 	}{}
+	if len(contextIDs) > 0 {
+		reportQueryTurnProgress(
+			ctx, QueryProgressStageContext, QueryProgressStatusRunning,
+			"正在读取上一轮已验证的指标、维度和时间条件",
+		)
+	}
 	for _, id := range contextIDs {
 		if uuid.Validate(id) != nil {
 			return result, ErrInvalidRequest
@@ -799,10 +806,25 @@ func (service *Service) PlanQueryTurn(
 			slots QuerySlots
 		}{id: id, slots: slots}
 	}
+	if err := advanceTurnLifecycle(
+		&result, machine, QuestionStateContextReady,
+	); err != nil {
+		return result, err
+	}
+	if len(contextIDs) > 0 {
+		reportQueryTurnProgress(
+			ctx, QueryProgressStageContext, QueryProgressStatusSucceeded,
+			"已完成会话上下文继承校验",
+		)
+	}
 
 	turnSlots := QueryTurnSlots{
 		Intent: "UNKNOWN", MetricCodes: []string{}, Domains: map[string]string{},
 	}
+	reportQueryTurnProgress(
+		ctx, QueryProgressStageMetricSelection, QueryProgressStatusRunning,
+		"正在理解指标意图并锁定已发布指标",
+	)
 	if len(input.ConfirmedMetricCodes) > 0 {
 		resolver, ok := service.interpreter.(QueryMetricConfirmationResolver)
 		if !ok {
@@ -816,15 +838,21 @@ func (service *Service) PlanQueryTurn(
 		}
 		turnSlots = confirmed
 	} else if interpreter, ok := service.interpreter.(QueryTurnInterpreter); ok {
-		if interpreted, err := interpreter.InterpretMany(
+		interpreted, err := interpreter.InterpretMany(
 			ctx, tenantID, actorID, input.Question,
-		); err == nil {
-			turnSlots = interpreted
+		)
+		if err != nil {
+			return result, err
 		}
+		turnSlots = interpreted
 	} else if service.interpreter != nil {
-		if interpreted, err := service.interpreter.Interpret(
+		interpreted, err := service.interpreter.Interpret(
 			ctx, tenantID, actorID, input.Question,
-		); err == nil && interpreted.MetricCode != "" {
+		)
+		if err != nil {
+			return result, err
+		}
+		if interpreted.MetricCode != "" {
 			turnSlots = QueryTurnSlots{
 				Intent:               interpreted.Intent,
 				MetricCodes:          []string{interpreted.MetricCode},
@@ -836,12 +864,14 @@ func (service *Service) PlanQueryTurn(
 			}
 		}
 	}
-	if hintIntent := strings.ToUpper(strings.TrimSpace(
-		input.SemanticHints.Intent,
-	)); hintIntent != "" && hintIntent != "UNKNOWN" {
-		turnSlots.Intent = hintIntent
-	}
 	hadCurrentMetrics := len(turnSlots.MetricCodes) > 0
+	if hadCurrentMetrics {
+		reportQueryTurnProgress(
+			ctx, QueryProgressStageMetricSelection,
+			QueryProgressStatusSucceeded,
+			fmt.Sprintf("已锁定 %d 个指标，准备解析维度条件", len(turnSlots.MetricCodes)),
+		)
+	}
 	metricCodes := selectTurnMetricCodes(
 		turnSlots.MetricCodes, contextSlots,
 		hadCurrentMetrics && questionAddsMetrics(input.Question),
@@ -869,8 +899,68 @@ func (service *Service) PlanQueryTurn(
 			result.Trace.ConversationQuestions, result.Trace.ContextPolicy,
 			turnSlots, contextSlots, result,
 		)
+		if err := advanceTurnLifecycle(
+			&result, machine, QuestionStateClarificationRequired,
+		); err != nil {
+			return result, err
+		}
+		reportQueryTurnProgress(
+			ctx, QueryProgressStageMetricSelection, QueryProgressStatusWarn,
+			"指标候选无法唯一确定，等待用户确认",
+		)
+		reportQueryTurnProgress(
+			ctx, QueryProgressStageComplete, QueryProgressStatusWarn,
+			"语义检索已暂停，确认指标后将继续",
+		)
 		return result, nil
 	}
+	// Metric selection is stage one. Only after a governed metric (or trusted
+	// context metric) is fixed do Jieba tokens enter the dimension/time semantic
+	// completion used by stage two. This prevents early dimension retrieval from
+	// influencing which metric catalog is selected.
+	if tokenizer, ok := service.interpreter.(QueryTokenizer); ok {
+		reportQueryTurnProgress(
+			ctx, QueryProgressStageDimensionEnrichment,
+			QueryProgressStatusRunning,
+			"正在识别问题中的维度、维度值和时间表达",
+		)
+		var tokenization QueryTokenization
+		var err error
+		if queryTurnTokenizer, supported :=
+			service.interpreter.(QueryTurnTokenizer); supported {
+			tokenization, err = queryTurnTokenizer.TokenizeQueryTurn(
+				ctx, tenantID, actorID, input.Question, input.Timezone, true,
+			)
+		} else {
+			tokenization, err = tokenizer.Tokenize(
+				ctx, tenantID, actorID, input.Question, input.Timezone,
+			)
+		}
+		if err != nil {
+			return result, err
+		}
+		result.Tokenization = &tokenization
+		hints, _ := semanticHintsFromTokenization(tokenization)
+		hints = supplementAdministrativeLocationHints(tokenization, hints)
+		if validQuerySemanticHints(hints) &&
+			(hints.Intent != "" || len(hints.MetricNames) > 0 ||
+				len(hints.DimensionValues) > 0) {
+			input.SemanticHints = hints
+		}
+		reportQueryTurnProgress(
+			ctx, QueryProgressStageDimensionEnrichment,
+			QueryProgressStatusSucceeded,
+			"已完成维度、维度值和时间表达补全",
+		)
+	}
+	if hintIntent := strings.ToUpper(strings.TrimSpace(
+		input.SemanticHints.Intent,
+	)); hintIntent != "" && hintIntent != "UNKNOWN" {
+		turnSlots.Intent = hintIntent
+	}
+	planningQuestion := queryWithSemanticHints(
+		input.Question, input.SemanticHints,
+	)
 	intent := strings.ToUpper(strings.TrimSpace(turnSlots.Intent))
 	if !hadCurrentMetrics {
 		intent = "UNKNOWN"
@@ -878,9 +968,20 @@ func (service *Service) PlanQueryTurn(
 	if intent == "" {
 		intent = "UNKNOWN"
 	}
+	if err := advanceTurnLifecycle(
+		&result, machine, QuestionStateValidating,
+	); err != nil {
+		return result, err
+	}
+	dimensionBaseQuestion := planningQuestion
+	if strings.TrimSpace(turnSlots.AugmentedQuestion) != "" {
+		dimensionBaseQuestion = queryWithSemanticHints(
+			turnSlots.AugmentedQuestion, input.SemanticHints,
+		)
+	}
 	for _, metricCode := range metricCodes {
 		planInput := QueryPlanInput{
-			Question: planningQuestion, Intent: intent, MetricCode: metricCode,
+			Question: dimensionBaseQuestion, Intent: intent, MetricCode: metricCode,
 			MaximumPathHops:      input.MaximumPathHops,
 			MetricCandidateCount: turnSlots.MetricCandidateCount,
 			MetricMatchMethod:    turnSlots.MetricMatchMethod,
@@ -902,50 +1003,104 @@ func (service *Service) PlanQueryTurn(
 		if planInput.MetricMatchMethod == "" {
 			planInput.MetricMatchMethod = "EXPLICIT_CODE"
 		}
-		if enricher, ok := service.interpreter.(QueryDimensionHintEnricher); ok &&
-			len(input.SemanticHints.DimensionValues) > 0 {
-			lookups, enrichErr := enricher.EnrichDimensionLookupsWithHints(
-				ctx, tenantID, actorID, metricCode, planningQuestion,
+		dimensionHandledByTool := false
+		if resolver, ok := service.interpreter.(QueryDimensionToolLoopResolver); ok &&
+			len(input.ConfirmedDecisions) == 0 {
+			resolution, resolveErr := resolver.ResolveDimensionsWithToolLoop(
+				ctx, tenantID, actorID, metricCode, dimensionBaseQuestion,
 				input.SemanticHints.DimensionValues,
 			)
-			if enrichErr != nil {
-				return result, enrichErr
+			if resolveErr != nil && !semanticDeterministicFallbackAllowed(resolveErr) {
+				return result, resolveErr
 			}
-			planInput.DimensionValueLookups = lookups
-			lookups = applyConfirmedDecisions(
-				lookups, input.ConfirmedDecisions, metricCode,
-			)
-			planInput.DimensionValueLookups = lookups
-			if filters, complete :=
-				memberFiltersFromResolvedLookups(lookups); complete {
-				planInput.MemberFilters = filters
-				planInput.DimensionResolutionComplete = true
-			} else if hasActionableSemanticDimensionHint(
-				input.SemanticHints.DimensionValues,
-			) {
-				// Decision-graph recall and final WHERE selection are separate
-				// observable stages. Preserve every retrieved candidate in the
-				// turn trace, but do not create an unfiltered executable plan
-				// when the downstream filter cannot prove one selection.
-				result.Trace.DimensionValueLookups = append(
-					result.Trace.DimensionValueLookups, lookups...,
-				)
-				if choices := dimensionClarificationChoices(
-					lookups, metricCode,
-				); len(choices) > 0 && result.Clarification == nil {
-					result.Clarification = &QueryClarification{
-						Type:                "DIMENSION",
-						Message:             "请选择问题中维度值对应的维度字段和值。",
-						DimensionCandidates: choices,
-					}
+			if resolveErr == nil {
+				dimensionHandledByTool = true
+				if resolution.Trace != nil {
+					result.Trace.DimensionToolLoops = append(
+						result.Trace.DimensionToolLoops, *resolution.Trace,
+					)
 				}
-				continue
+				if strings.TrimSpace(resolution.AugmentedQuestion) != "" {
+					planInput.Question = resolution.AugmentedQuestion
+				}
+				lookups := resolution.Lookups
+				planInput.DimensionValueLookups = lookups
+				if filters, complete :=
+					memberFiltersFromResolvedLookups(lookups); complete {
+					planInput.MemberFilters = filters
+					planInput.DimensionResolutionComplete = true
+				} else if hasActionableDimensionLookups(lookups) ||
+					hasActionableSemanticDimensionHint(
+						input.SemanticHints.DimensionValues,
+					) {
+					result.Trace.DimensionValueLookups = append(
+						result.Trace.DimensionValueLookups, lookups...,
+					)
+					if choices := dimensionClarificationChoices(
+						lookups, metricCode,
+					); len(choices) > 0 && result.Clarification == nil {
+						result.Clarification = &QueryClarification{
+							Type:                "DIMENSION",
+							Message:             "请选择问题中维度值对应的维度字段和值。",
+							DimensionCandidates: choices,
+						}
+					}
+					continue
+				}
 			}
-		} else if enricher, ok :=
-			service.interpreter.(QueryDimensionLookupEnricher); ok {
-			if lookups, enrichErr := enricher.EnrichDimensionLookups(
-				ctx, tenantID, actorID, metricCode, planningQuestion,
-			); enrichErr == nil {
+		}
+		if !dimensionHandledByTool {
+			if enricher, ok := service.interpreter.(QueryDimensionHintEnricher); ok &&
+				len(input.SemanticHints.DimensionValues) > 0 {
+				lookups, enrichErr := enricher.EnrichDimensionLookupsWithHints(
+					ctx, tenantID, actorID, metricCode, dimensionBaseQuestion,
+					input.SemanticHints.DimensionValues,
+				)
+				if enrichErr != nil {
+					return result, enrichErr
+				}
+				planInput.DimensionValueLookups = lookups
+				var confirmedValid bool
+				lookups, confirmedValid = applyConfirmedDecisions(
+					lookups, input.ConfirmedDecisions, metricCode,
+				)
+				if !confirmedValid {
+					return result, ErrUnprovenPath
+				}
+				planInput.DimensionValueLookups = lookups
+				if filters, complete :=
+					memberFiltersFromResolvedLookups(lookups); complete {
+					planInput.MemberFilters = filters
+					planInput.DimensionResolutionComplete = true
+				} else if hasActionableSemanticDimensionHint(
+					input.SemanticHints.DimensionValues,
+				) {
+					// Decision-graph recall and final WHERE selection are separate
+					// observable stages. Preserve every retrieved candidate in the
+					// turn trace, but do not create an unfiltered executable plan
+					// when the downstream filter cannot prove one selection.
+					result.Trace.DimensionValueLookups = append(
+						result.Trace.DimensionValueLookups, lookups...,
+					)
+					if choices := dimensionClarificationChoices(
+						lookups, metricCode,
+					); len(choices) > 0 && result.Clarification == nil {
+						result.Clarification = &QueryClarification{
+							Type:                "DIMENSION",
+							Message:             "请选择问题中维度值对应的维度字段和值。",
+							DimensionCandidates: choices,
+						}
+					}
+					continue
+				}
+			} else if enricher, ok :=
+				service.interpreter.(QueryDimensionLookupEnricher); ok {
+				lookups, enrichErr := enricher.EnrichDimensionLookups(
+					ctx, tenantID, actorID, metricCode, dimensionBaseQuestion,
+				)
+				if enrichErr != nil {
+					return result, enrichErr
+				}
 				planInput.DimensionValueLookups = lookups
 				if filters, complete :=
 					memberFiltersFromResolvedLookups(lookups); complete {
@@ -954,11 +1109,19 @@ func (service *Service) PlanQueryTurn(
 				}
 			}
 		}
+		reportQueryTurnProgress(
+			ctx, QueryProgressStagePlan, QueryProgressStatusRunning,
+			"正在验证指标、维度、数据集与物化结果的完整路径",
+		)
 		plan, err := service.PlanQuery(ctx, tenantID, actorID, planInput)
 		if err != nil {
 			return result, err
 		}
 		result.Plans = append(result.Plans, plan)
+		reportQueryTurnProgress(
+			ctx, QueryProgressStagePlan, QueryProgressStatusSucceeded,
+			"已生成一个通过权限、版本和血缘校验的查询计划",
+		)
 	}
 	result.QuestionHash = hashText(input.Question)
 	result.MetricCodes = metricCodes
@@ -975,6 +1138,27 @@ func (service *Service) PlanQueryTurn(
 		turnSlots, contextSlots, result,
 	)
 	finalizeQueryTurnStatus(&result)
+	if result.Clarification != nil {
+		if err := advanceTurnLifecycle(
+			&result, machine, QuestionStateClarificationRequired,
+		); err != nil {
+			return result, err
+		}
+		reportQueryTurnProgress(
+			ctx, QueryProgressStageComplete, QueryProgressStatusWarn,
+			"维度候选无法唯一确定，等待用户确认",
+		)
+	} else {
+		if err := advanceTurnLifecycle(
+			&result, machine, QuestionStatePlanReady,
+		); err != nil {
+			return result, err
+		}
+		reportQueryTurnProgress(
+			ctx, QueryProgressStageComplete, QueryProgressStatusSucceeded,
+			fmt.Sprintf("语义路径验证完成，共生成 %d 个查询计划", len(result.Plans)),
+		)
+	}
 	return result, nil
 }
 
@@ -994,6 +1178,19 @@ func finalizeQueryTurnStatus(result *QueryTurnPlan) {
 		}
 		return
 	}
+	for _, plan := range result.Plans {
+		if plan.Status != "READY" {
+			result.Status = "SEMANTIC_GAP"
+			message := "查询计划未通过语义图、版本、权限或血缘门禁。"
+			if strings.TrimSpace(plan.FailureCode) != "" {
+				message += " 阻断代码：" + plan.FailureCode
+			}
+			result.Clarification = &QueryClarification{
+				Type: "SEMANTIC_GAP", Message: message,
+			}
+			return
+		}
+	}
 	result.Status = "PLANNED"
 }
 
@@ -1001,44 +1198,29 @@ func applyConfirmedDecisions(
 	lookups []QueryDimensionValueLookupTrace,
 	confirmed []QueryConfirmedDecision,
 	metricCode string,
-) []QueryDimensionValueLookupTrace {
-	allowed := map[string]bool{}
+) ([]QueryDimensionValueLookupTrace, bool) {
+	decisionIDs := []string{}
 	for _, item := range confirmed {
 		if strings.EqualFold(
 			strings.TrimSpace(item.MetricCode), metricCode,
 		) {
-			allowed[strings.TrimSpace(item.DecisionID)] = true
+			decisionIDs = append(decisionIDs, strings.TrimSpace(item.DecisionID))
 		}
 	}
-	if len(allowed) == 0 {
-		return lookups
+	if len(decisionIDs) == 0 {
+		return lookups, true
 	}
-	for lookupIndex := range lookups {
-		for candidateIndex := range lookups[lookupIndex].DecisionCandidates {
-			candidate := &lookups[lookupIndex].DecisionCandidates[candidateIndex]
-			if !allowed[candidate.DecisionID] ||
-				strings.TrimSpace(candidate.MemberValue) == "" {
-				continue
-			}
-			lookups[lookupIndex].Selected = true
-			lookups[lookupIndex].DecisionID = candidate.DecisionID
-			lookups[lookupIndex].CanonicalValue = candidate.CanonicalValue
-			lookups[lookupIndex].SelectedMemberKeys = []string{
-				candidate.MemberValue,
-			}
-			lookups[lookupIndex].WhereCondition = candidate.WhereCondition
-			lookups[lookupIndex].CompiledCondition =
-				candidate.CompiledCondition
-			lookups[lookupIndex].WhereDesignOperator =
-				candidate.PredicateOperator
-			lookups[lookupIndex].WhereDesignStatus =
+	selected, valid := applyToolSelectedDecisions(lookups, decisionIDs)
+	if !valid {
+		return nil, false
+	}
+	for index := range selected {
+		if selected[index].Selected {
+			selected[index].WhereDesignStatus =
 				"USER_CONFIRMED_DECISION_GRAPH"
-			lookups[lookupIndex].TableSchema = candidate.TableSchema
-			lookups[lookupIndex].TableName = candidate.TableName
-			candidate.Selected = true
 		}
 	}
-	return lookups
+	return selected, true
 }
 
 func dimensionClarificationChoices(
@@ -1058,7 +1240,8 @@ func dimensionClarificationChoices(
 			}
 			seen[candidate.DecisionID] = true
 			result = append(result, QueryDimensionCandidateChoice{
-				MetricCode: metricCode, DecisionID: candidate.DecisionID,
+				MetricCode: metricCode, Term: lookup.Term,
+				DecisionID:     candidate.DecisionID,
 				DimensionCode:  lookup.DimensionCode,
 				DimensionName:  lookup.DimensionName,
 				CanonicalValue: candidate.CanonicalValue,
@@ -1106,6 +1289,17 @@ func hasActionableSemanticDimensionHint(
 			!strings.EqualFold(
 				strings.TrimSpace(hint.DimensionType), "TIME",
 			) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasActionableDimensionLookups(
+	lookups []QueryDimensionValueLookupTrace,
+) bool {
+	for _, lookup := range lookups {
+		if strings.TrimSpace(lookup.Term) != "" {
 			return true
 		}
 	}
@@ -1420,8 +1614,12 @@ func buildQueryTurnTrace(
 		ConversationQuestions: append(
 			[]string(nil), conversationQuestions...,
 		),
-		ContextPolicy:    contextPolicy,
-		MetricToolLoop:   turnSlots.MetricToolLoop,
+		ContextPolicy:  contextPolicy,
+		MetricToolLoop: turnSlots.MetricToolLoop,
+		DimensionToolLoops: append(
+			[]QueryDimensionToolLoopTrace(nil),
+			turn.Trace.DimensionToolLoops...,
+		),
 		MetricCandidates: []QueryMetricCandidateTrace{},
 		DimensionValueLookups: append(
 			[]QueryDimensionValueLookupTrace(nil),
@@ -2175,7 +2373,13 @@ func (service *Service) ExecuteQueryPlan(
 	ctx context.Context,
 	tenantID, actorID, id string,
 	input ExecuteQueryPlanInput,
-) (QueryPlanExecution, error) {
+) (output QueryPlanExecution, runErr error) {
+	var machine *questionStateMachine
+	defer func() {
+		if runErr != nil {
+			blockQuestionState(nil, machine)
+		}
+	}()
 	if service == nil || service.store == nil || service.metricExecutor == nil ||
 		uuid.Validate(tenantID) != nil || uuid.Validate(actorID) != nil ||
 		uuid.Validate(id) != nil ||
@@ -2188,11 +2392,33 @@ func (service *Service) ExecuteQueryPlan(
 	if input.Parameters == nil {
 		input.Parameters = map[string]any{}
 	}
+	machine = newQuestionStateMachine(input.QueryID)
+	if err := machine.advance(QuestionStateReceived); err != nil {
+		return QueryPlanExecution{}, err
+	}
+	if err := persistQuestionStateMachine(
+		ctx, service, tenantID, actorID,
+		hashText(id+"\x00"+input.ExpectedPathHash), machine,
+	); err != nil {
+		return QueryPlanExecution{}, err
+	}
+	for _, state := range []QuestionState{
+		QuestionStateAuthorized,
+		QuestionStateContextReady, QuestionStatePlanReady,
+		QuestionStateValidating,
+	} {
+		if err := machine.advance(state); err != nil {
+			return QueryPlanExecution{}, err
+		}
+	}
 	plan, binding, err := service.store.PrepareQueryPlanExecution(
 		ctx, tenantID, id,
 		input.ExpectedGraphGenerationID, input.ExpectedPathHash,
 	)
 	if err != nil {
+		return QueryPlanExecution{}, err
+	}
+	if err := machine.advance(QuestionStateCostApproved); err != nil {
 		return QueryPlanExecution{}, err
 	}
 	dimensionFields := []string{}
@@ -2249,6 +2475,9 @@ func (service *Service) ExecuteQueryPlan(
 		)
 	}
 	var baselineResult *dataset.PreviewResult
+	if err := machine.advance(QuestionStateExecuting); err != nil {
+		return QueryPlanExecution{}, err
+	}
 	if binding.ComparisonRange != nil {
 		baselineQueryID := uuid.NewSHA1(
 			uuid.MustParse(input.QueryID),
@@ -2276,6 +2505,19 @@ func (service *Service) ExecuteQueryPlan(
 		)
 		return QueryPlanExecution{}, executeErr
 	}
+	answerEvidence, evidenceErr := buildAnswerEvidence(
+		plan, result, baselineResult, time.Now().UTC(),
+	)
+	if evidenceErr != nil {
+		_, _ = service.store.FinishQueryPlanExecution(
+			ctx, tenantID, id, input.QueryID,
+			"RESULT_EVIDENCE_HASH_FAILED", false,
+			input.ExpectedGraphGenerationID, 0, 0,
+		)
+		return QueryPlanExecution{}, fmt.Errorf(
+			"%w: result evidence hash: %v", ErrUnprovenPath, evidenceErr,
+		)
+	}
 	plan, err = service.store.FinishQueryPlanExecution(
 		ctx, tenantID, id, result.QueryID, "", true,
 		input.ExpectedGraphGenerationID, result.DurationMS, result.RowCount,
@@ -2286,24 +2528,14 @@ func (service *Service) ExecuteQueryPlan(
 		return QueryPlanExecution{}, err
 	}
 	execution := QueryPlanExecution{
-		QueryPlan: plan,
-		Result:    result,
-		Evidence: AnswerEvidence{
-			GraphGenerationID:     plan.GraphGenerationID,
-			GraphGeneration:       plan.GraphGeneration,
-			PathHash:              plan.PathHash,
-			MetricID:              plan.SelectedMetricID,
-			MetricVersionID:       plan.SelectedMetricVersionID,
-			DimensionID:           plan.SelectedDimensionID,
-			DatasetVersionID:      plan.SelectedDatasetVersionID,
-			MaterializationID:     plan.SelectedMaterializationID,
-			Lineage:               append([]QueryEvidence(nil), plan.Evidence...),
-			PermissionDecision:    "REVALIDATED_BY_METRIC_RUNTIME",
-			FreshnessDecision:     "ACTIVE_MATERIALIZATION_EXACT_VERSION",
-			CompatibilityDecision: "VERIFIED_NON_UNSAFE",
-			ExecutionRevalidated:  true,
-		},
+		QuestionRunID: machine.runID,
+		QueryPlan:     plan,
+		Result:        result,
+		Evidence:      answerEvidence,
 	}
+	// FinishQueryPlanExecution reloads the authoritative plan after the final
+	// generation check. Use that copy for the evidence returned to the client.
+	execution.Evidence.Lineage = append([]QueryEvidence(nil), plan.Evidence...)
 	if baselineResult != nil &&
 		binding.TimeRange != nil && binding.ComparisonRange != nil {
 		execution.Comparison = &QueryComparisonExecution{
@@ -2313,7 +2545,110 @@ func (service *Service) ExecuteQueryPlan(
 			Baseline:      *baselineResult,
 		}
 	}
+	if err := machine.advance(QuestionStateResultVerified); err != nil {
+		return QueryPlanExecution{}, err
+	}
+	if err := machine.advance(QuestionStateAnswered); err != nil {
+		return QueryPlanExecution{}, err
+	}
+	execution.State = machine.state
+	execution.Lifecycle = machine.lifecycle()
 	return execution, nil
+}
+
+// buildAnswerEvidence creates the public, reproducible proof that an executed
+// result may be shown. It contains hashes and named validator outcomes, not
+// model reasoning, prompts, SQL text or warehouse credentials.
+func buildAnswerEvidence(
+	plan QueryPlan,
+	result dataset.PreviewResult,
+	baseline *dataset.PreviewResult,
+	verifiedAt time.Time,
+) (AnswerEvidence, error) {
+	queryPlanHash, err := hashJSON(struct {
+		Intent     string                 `json:"intent"`
+		Conditions QueryConditionDocument `json:"conditions"`
+		PathHash   string                 `json:"pathHash"`
+	}{
+		Intent: plan.Intent, Conditions: plan.Conditions, PathHash: plan.PathHash,
+	})
+	if err != nil {
+		return AnswerEvidence{}, err
+	}
+	type resultSnapshot struct {
+		Columns  []string `json:"columns"`
+		Rows     [][]any  `json:"rows"`
+		RowCount int      `json:"rowCount"`
+	}
+	type resultEnvelope struct {
+		Current  resultSnapshot  `json:"current"`
+		Baseline *resultSnapshot `json:"baseline,omitempty"`
+	}
+	envelope := resultEnvelope{Current: resultSnapshot{
+		Columns: append([]string(nil), result.Columns...),
+		Rows:    result.Rows, RowCount: result.RowCount,
+	}}
+	if baseline != nil {
+		envelope.Baseline = &resultSnapshot{
+			Columns: append([]string(nil), baseline.Columns...),
+			Rows:    baseline.Rows, RowCount: baseline.RowCount,
+		}
+	}
+	resultHash, err := hashJSON(envelope)
+	if err != nil {
+		return AnswerEvidence{}, err
+	}
+	return AnswerEvidence{
+		GraphGenerationID: plan.GraphGenerationID,
+		GraphGeneration:   plan.GraphGeneration,
+		SemanticVersion: fmt.Sprintf(
+			"semantic-graph-%d", plan.GraphGeneration,
+		),
+		PathHash:              plan.PathHash,
+		QueryPlanHash:         queryPlanHash,
+		ResultHash:            resultHash,
+		QueryTraceID:          result.QueryID,
+		VerifiedAt:            verifiedAt.UTC().Format(time.RFC3339Nano),
+		MetricID:              plan.SelectedMetricID,
+		MetricVersionID:       plan.SelectedMetricVersionID,
+		DimensionID:           plan.SelectedDimensionID,
+		DatasetVersionID:      plan.SelectedDatasetVersionID,
+		MaterializationID:     plan.SelectedMaterializationID,
+		Lineage:               append([]QueryEvidence(nil), plan.Evidence...),
+		PermissionDecision:    "REVALIDATED_BY_METRIC_RUNTIME",
+		FreshnessDecision:     "ACTIVE_MATERIALIZATION_EXACT_VERSION",
+		CompatibilityDecision: "VERIFIED_NON_UNSAFE",
+		ExecutionRevalidated:  true,
+		ValidatorChecks: []string{
+			"policy_pass",
+			"semantic_version_pass",
+			"graph_path_pass",
+			"metric_contract_pass",
+			"dimension_compatibility_pass",
+			"freshness_pass",
+			"result_execution_pass",
+		},
+	}, nil
+}
+
+func (service *Service) SubmitQueryFeedback(
+	ctx context.Context,
+	tenantID, actorID, queryPlanID string,
+	input SubmitQueryFeedbackInput,
+) (QueryFeedback, error) {
+	input.Rating = strings.ToUpper(strings.TrimSpace(input.Rating))
+	input.Comment = strings.TrimSpace(input.Comment)
+	if service == nil || service.store == nil ||
+		uuid.Validate(tenantID) != nil || uuid.Validate(actorID) != nil ||
+		uuid.Validate(queryPlanID) != nil ||
+		!oneOf(input.Rating, "ACCURATE", "INACCURATE") ||
+		len([]rune(input.Comment)) > 2000 ||
+		containsControl(input.Comment) {
+		return QueryFeedback{}, ErrInvalidRequest
+	}
+	return service.store.UpsertQueryFeedback(
+		ctx, tenantID, actorID, queryPlanID, input,
+	)
 }
 
 func (service *Service) CreateQuestionTemplate(
@@ -2558,6 +2893,15 @@ func validCode(value string) bool {
 		}
 	}
 	return true
+}
+
+func containsControl(value string) bool {
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return true
+		}
+	}
+	return false
 }
 
 func validReasonCode(value string) bool {

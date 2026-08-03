@@ -7,7 +7,12 @@ import (
 	"fmt"
 )
 
-const SchemaVersion = "1.0"
+const (
+	// SchemaVersion 是旧版“页面/分块/组件”合同，仅保留用于历史草稿迁移。
+	SchemaVersion = "1.0"
+	// CardSchemaVersion 是 Report Studio、Runtime 和发布物共同使用的当前合同。
+	CardSchemaVersion = "1.0.0"
+)
 
 const (
 	// MaxStickyTop 和 MaxStickyZIndex 同时约束编辑器输入与运行态样式，避免异常文档制造超大位移或层级。
@@ -19,8 +24,12 @@ var ErrInvalidDocument = errors.New("report JSON document is invalid")
 
 // Document 是设计器、在线查看器和导出渲染器共享的正式报告合同。
 type Document struct {
+	SchemaURL        string            `json:"$schema,omitempty"`
 	SchemaVersion    string            `json:"schemaVersion"`
 	Report           Report            `json:"report"`
+	Layout           *ResponsiveLayout `json:"layout,omitempty"`
+	GlobalFilters    []GlobalFilter    `json:"globalFilters,omitempty"`
+	Cards            []Card            `json:"cards,omitempty"`
 	Canvas           Canvas            `json:"canvas"`
 	Template         *ReportTemplate   `json:"template,omitempty"`
 	Theme            map[string]any    `json:"theme,omitempty"`
@@ -82,7 +91,9 @@ type TemplateBlock struct {
 type Report struct {
 	ID                   string         `json:"id,omitempty"`
 	Code                 string         `json:"code"`
-	Name                 string         `json:"name"`
+	Name                 string         `json:"name,omitempty"`
+	Title                string         `json:"title,omitempty"`
+	ThemeID              string         `json:"themeId,omitempty"`
 	Description          string         `json:"description,omitempty"`
 	Type                 string         `json:"type"`
 	Language             string         `json:"language"`

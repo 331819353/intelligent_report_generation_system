@@ -7,7 +7,6 @@ import {
   GearSix,
   GlobeHemisphereWest,
   House,
-  PresentationChart,
   Stack,
   TreeStructure,
 } from '@phosphor-icons/react'
@@ -26,15 +25,15 @@ import {
 } from '../lib/domain-context'
 
 type AppShellProps = {
-  title: string
-  eyebrow: string
+  title?: string
+  eyebrow?: string
   children: ReactNode
   actions?: ReactNode
   className?: string
 }
 
 /** 为后台业务页面提供统一侧栏、顶栏和内容容器。 */
-export function AppShell({ title, eyebrow, children, actions, className = '' }: AppShellProps) {
+export function AppShell({ title = '智能报表平台', eyebrow = '工作台', children, actions, className = '' }: AppShellProps) {
   const location = useLocation()
   const domainSwitcherRef = useRef<HTMLDivElement>(null)
   const [domains, setDomains] = useState<BusinessDomain[]>([])
@@ -129,8 +128,7 @@ export function AppShell({ title, eyebrow, children, actions, className = '' }: 
           </NavLink>
           <NavLink to="/assistant"><ChatCenteredDots aria-hidden="true" size={18} />智能问答</NavLink>
           <span className="sidebar-section-label reports">报告</span>
-          <NavLink to="/designer/draft"><ChartBar aria-hidden="true" size={18} />报告设计器</NavLink>
-          <NavLink to="/reports/demo"><PresentationChart aria-hidden="true" size={18} />在线报告</NavLink>
+          <NavLink to="/report-studio/draft"><ChartBar aria-hidden="true" size={18} />报告设计器</NavLink>
           {canManage && <>
             <span className="sidebar-section-label reports">管理</span>
             <NavLink to="/management"><GearSix aria-hidden="true" size={18} />管理中心</NavLink>

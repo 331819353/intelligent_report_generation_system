@@ -30,6 +30,7 @@ type QuerySlots struct {
 type QueryTurnSlots struct {
 	Intent               string
 	MetricCodes          []string
+	AugmentedQuestion    string
 	MetricCandidateCount int
 	MetricMatchMethod    string
 	Domains              map[string]string
@@ -63,6 +64,20 @@ type QueryDimensionHintEnricher interface {
 		context.Context, string, string, string, string,
 		[]QuerySemanticDimensionHint,
 	) ([]QueryDimensionValueLookupTrace, error)
+}
+
+type QueryDimensionToolLoopResolver interface {
+	ResolveDimensionsWithToolLoop(
+		context.Context, string, string, string, string,
+		[]QuerySemanticDimensionHint,
+	) (QueryDimensionToolResolution, error)
+}
+
+type QueryDimensionToolResolution struct {
+	Lookups            []QueryDimensionValueLookupTrace
+	NeedsClarification bool
+	AugmentedQuestion  string
+	Trace              *QueryDimensionToolLoopTrace
 }
 
 type semanticAIInvoker interface {
@@ -1554,6 +1569,45 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 	if err != nil {
 		return QueryTurnSlots{}, err
 	}
+	// The normal path is an enforced semantic-library -> published-catalog
+	// tool state machine. Deterministic catalog parsing remains below only as a
+	// provider-availability fallback and never masks protocol or no-progress
+	// failures from the evidence loop.
+	if toolAI, ok := interpreter.ai.(semanticToolAIInvoker); ok {
+		result, toolErr := interpreter.interpretManyWithToolLoop(
+			ctx, toolAI, tenantID, actorID, question, "", parsingRules,
+		)
+		if toolErr == nil {
+			return result, nil
+		}
+		if shouldRetrySemanticToolLoop(toolErr) {
+			if fallbackAI, supported :=
+				interpreter.ai.(semanticToolAIFallbackInvoker); supported {
+				for _, model := range uniqueStrings(
+					fallbackAI.FallbackModels(), 8,
+				) {
+					if ctx.Err() != nil {
+						break
+					}
+					result, fallbackErr :=
+						interpreter.interpretManyWithToolLoop(
+							ctx, toolAI, tenantID, actorID, question,
+							model, parsingRules,
+						)
+					if fallbackErr == nil {
+						return result, nil
+					}
+					toolErr = fallbackErr
+					if !shouldRetrySemanticToolLoop(fallbackErr) {
+						break
+					}
+				}
+			}
+		}
+		if !semanticDeterministicFallbackAllowed(toolErr) {
+			return QueryTurnSlots{}, toolErr
+		}
+	}
 	broadMetricQuestion := parsingRules.requestsBroadMetricSelection(question)
 	candidates, err := interpreter.store.recall(ctx, tenantID, question, nil, 24)
 	if err != nil {
@@ -1604,38 +1658,6 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 			),
 			NeedsClarification: true,
 		}, nil
-	}
-	// Exact published names, aliases and unambiguous metric stems do not need
-	// a model round-trip. This keeps explicit multi-metric questions bounded
-	// while the tool loop remains available for genuinely semantic wording.
-	if toolAI, ok := interpreter.ai.(semanticToolAIInvoker); ok {
-		if result, toolErr := interpreter.interpretManyWithToolLoop(
-			ctx, toolAI, tenantID, actorID, question, "", parsingRules,
-		); toolErr == nil {
-			return result, nil
-		} else if shouldRetrySemanticToolLoop(toolErr) {
-			if fallbackAI, supported :=
-				interpreter.ai.(semanticToolAIFallbackInvoker); supported {
-				for _, model := range uniqueStrings(
-					fallbackAI.FallbackModels(), 8,
-				) {
-					if ctx.Err() != nil {
-						break
-					}
-					result, fallbackErr :=
-						interpreter.interpretManyWithToolLoop(
-							ctx, toolAI, tenantID, actorID, question, model,
-							parsingRules,
-						)
-					if fallbackErr == nil {
-						return result, nil
-					}
-					if !shouldRetrySemanticToolLoop(fallbackErr) {
-						break
-					}
-				}
-			}
-		}
 	}
 	llmCandidates := externalRecallCandidates(candidates)
 	fallback := QueryTurnSlots{
@@ -1767,6 +1789,27 @@ func shouldRetrySemanticToolLoop(err error) bool {
 	}
 	var providerErr *aiplatform.ProviderError
 	return errors.As(err, &providerErr)
+}
+
+func semanticDeterministicFallbackAllowed(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, aiplatform.ErrQuotaExceeded) {
+		return true
+	}
+	var providerErr *aiplatform.ProviderError
+	if !errors.As(err, &providerErr) {
+		return false
+	}
+	switch providerErr.Code {
+	case aiplatform.ErrorCodeProviderUnavailable,
+		aiplatform.ErrorCodeTimeout,
+		aiplatform.ErrorCodeRateLimited:
+		return true
+	default:
+		return false
+	}
 }
 
 // ConfirmMetricCodes reloads user-confirmed codes from the published catalog.

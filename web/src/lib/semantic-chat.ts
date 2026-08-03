@@ -1,4 +1,4 @@
-import { apiRequest } from './api'
+import { apiRequest, apiResponse, RequestError, type APIError } from './api'
 
 export type SemanticQueryEvidence = {
   index: number
@@ -58,6 +58,9 @@ export type SemanticQueryPlan = {
 }
 
 export type SemanticQueryTurn = {
+  questionRunId: string
+  state: SemanticQuestionState
+  lifecycle: SemanticQuestionStateEvent[]
   questionHash: string
   status: 'PLANNING' | 'PLANNED' | 'NEEDS_METRIC_CONFIRMATION' | 'NEEDS_DIMENSION_CONFIRMATION' | 'SEMANTIC_GAP'
   intent: string
@@ -71,6 +74,7 @@ export type SemanticQueryTurn = {
     metricCandidates?: SemanticQueryTurnTrace['metricCandidates']
     dimensionCandidates?: Array<{
       metricCode: string
+      term?: string
       decisionId: string
       dimensionCode: string
       dimensionName: string
@@ -83,6 +87,37 @@ export type SemanticQueryTurn = {
   trace: SemanticQueryTurnTrace
 }
 
+export type SemanticQuestionState =
+  | 'RECEIVED'
+  | 'AUTHORIZED'
+  | 'CONTEXT_READY'
+  | 'VALIDATING'
+  | 'PLAN_READY'
+  | 'CLARIFICATION_REQUIRED'
+  | 'COST_APPROVED'
+  | 'EXECUTING'
+  | 'RESULT_VERIFIED'
+  | 'ANSWERED'
+  | 'BLOCKED'
+
+export type SemanticQuestionStateEvent = {
+  state: SemanticQuestionState
+  timestamp: string
+  stage?: string
+  status?: string
+  code?: string
+  durationMs?: number
+  summary?: Record<string, unknown>
+}
+
+export type SemanticQueryProgressEvent = {
+  timestamp: string
+  questionId?: string
+  stage: string
+  status: 'RUNNING' | 'SUCCEEDED' | 'WARN' | string
+  message: string
+}
+
 export type SemanticQueryTurnTrace = {
   conversationQuestions: string[]
   contextPolicy: string
@@ -92,8 +127,16 @@ export type SemanticQueryTurnTrace = {
     model: string
     rounds: number
     toolCalls: number
-    steps: Array<{ round: number; toolName: string; terminal: boolean }>
+    steps: SemanticEvidenceLoopStep[]
   }
+  dimensionToolLoops?: Array<{
+    metricCode: string
+    auditRequestId: string
+    model: string
+    rounds: number
+    toolCalls: number
+    steps: SemanticEvidenceLoopStep[]
+  }>
   extraction: {
     intent: string
     metricTerms: string[]
@@ -197,6 +240,17 @@ export type SemanticQueryTurnTrace = {
   }>
 }
 
+export type SemanticEvidenceLoopStep = {
+  round: number
+  toolName: string
+  argumentsHash: string
+  stateHash: string
+  evidenceIds: string[]
+  newEvidenceCount: number
+  errorCode?: string
+  terminal: boolean
+}
+
 export type SemanticPreviewResult = {
   queryId: string
   columns: string[]
@@ -209,7 +263,12 @@ export type SemanticPreviewResult = {
 export type SemanticAnswerEvidence = {
   graphGenerationId: string
   graphGeneration: number
+  semanticVersion?: string
   pathHash: string
+  queryPlanHash?: string
+  resultHash?: string
+  queryTraceId?: string
+  verifiedAt?: string
   metricId: string
   metricVersionId: string
   dimensionId?: string
@@ -220,9 +279,13 @@ export type SemanticAnswerEvidence = {
   freshnessDecision: string
   compatibilityDecision: string
   executionRevalidated: boolean
+  validatorChecks?: string[]
 }
 
 export type SemanticQueryExecution = {
+  questionRunId: string
+  state: SemanticQuestionState
+  lifecycle: SemanticQuestionStateEvent[]
   queryPlan: SemanticQueryPlan
   result: SemanticPreviewResult
   evidence: SemanticAnswerEvidence
@@ -232,6 +295,115 @@ export type SemanticQueryExecution = {
     baselineRange: { start: string; endExclusive: string }
     baseline: SemanticPreviewResult
   }
+}
+
+export type SemanticQuestionResponse = {
+  questionId: string
+  conversationId: string
+  parentQuestionId?: string
+  questionHash: string
+  state: SemanticQuestionState
+  status: 'PROCESSING' | 'ANSWERED' | 'CLARIFICATION_REQUIRED' | 'BLOCKED'
+  route: 'SEMANTIC_IR' | 'GOVERNED_TEXT_TO_SQL' | 'CLARIFY_OR_REFUSE'
+  routing: {
+    selected: 'SEMANTIC_IR' | 'GOVERNED_TEXT_TO_SQL' | 'CLARIFY_OR_REFUSE'
+    reasonCode: string
+    capabilities: Array<{
+      route: 'SEMANTIC_IR' | 'GOVERNED_TEXT_TO_SQL' | 'CLARIFY_OR_REFUSE'
+      enabled: boolean
+      reasonCode?: string
+    }>
+  }
+  semanticVersion?: string
+  lifecycle: SemanticQuestionStateEvent[]
+  intent?: {
+    intentId: string
+    semanticVersion: string
+    taskType: string
+    metrics: Array<{ id: string; versionId: string; code: string; label: string; bindingEvidence: string[] }>
+    dimensions: Array<{ id: string; versionId: string; code: string; label: string; bindingEvidence: string[] }>
+    time?: { start: string; endExclusive: string }
+    executionPath: string
+    graphPlanIds: string[]
+    ambiguities: string[]
+  }
+  semanticIr?: {
+    schemaVersion: string
+    mode: 'semantic'
+    semanticVersion: string
+    metrics: Array<{ metricId: string; metricVersionId: string; code: string }>
+    dimensions: string[]
+    time?: { start: string; endExclusive: string }
+    filters: Array<{ dimensionId: string; dimensionCode: string; operator: string; valueIds: string[] }>
+    orderBy: Array<{ member: string; direction: string }>
+    limit: number
+    evidenceIds: string[]
+  }
+  executionGraph?: {
+    generationId: string
+    generation: number
+    queryPlanIds: string[]
+    pathHashes: string[]
+    datasetVersionIds: string[]
+    materializationIds: string[]
+  }
+  sqlGuard?: {
+    status: 'PASS' | 'BLOCKED'
+    mode: string
+    maximumRows: number
+    checks: Array<{ code: string; status: 'PASS' | 'BLOCKED'; detail: string }>
+  }
+  resultVerification?: {
+    status: 'PASS' | 'BLOCKED'
+    trustLevel: 'A' | 'B' | 'C' | 'D'
+    checks: Array<{ code: string; status: 'PASS' | 'BLOCKED'; detail: string }>
+  }
+  answer?: {
+    text: string
+    resultSets: Array<{ metricCode: string; columns: string[]; rows: unknown[][]; rowCount: number }>
+    chart: { type: string; xField?: string; yField?: string }
+    asOf: string
+  }
+  clarification?: SemanticQueryTurn['clarification']
+  planning?: SemanticQueryTurn
+  queryPlans: SemanticQueryPlan[]
+  executions: SemanticQueryExecution[]
+  accuracyEvidence?: {
+    semanticVersion: string
+    intentHash: string
+    bindingEvidence: string[]
+    metricContracts: string[]
+    graphPlanIds: string[]
+    queryPlanHash: string
+    resultHash: string
+    validatorChecks: string[]
+    toolLoop: { iterations: number; newEvidenceIds: string[] }
+    answerFidelity: 'PASS' | 'BLOCKED'
+  }
+  failure?: { code: string; message: string }
+  budgets: {
+    maximumToolLoopRounds: number
+    maximumMetricQueries: number
+    maximumRowsPerQuery: number
+    deadlineMs: number
+  }
+  toolRegistry: Array<{
+    name: string
+    canonicalName: string
+    allowedStates: SemanticQuestionState[]
+    warehouseAccess: boolean
+    terminal: boolean
+  }>
+}
+
+export type AskQuestionInput = {
+  question: string
+  conversationId: string
+  parentQuestionId?: string
+  confirmedMetricCodes?: string[]
+  confirmedDecisions?: Array<{ metricCode: string; decisionId: string }>
+  signal?: AbortSignal
+  onProgress?: (event: SemanticQueryProgressEvent) => void
 }
 
 export type SemanticGraphStatus = {
@@ -412,6 +584,7 @@ export type PlanTurnInput = {
     }>
   }
   signal?: AbortSignal
+  onProgress?: (event: SemanticQueryProgressEvent) => void
 }
 
 const newQueryID = () => typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -420,6 +593,84 @@ const newQueryID = () => typeof crypto !== 'undefined' && typeof crypto.randomUU
 
 export const semanticChatAPI = {
   graphStatus: () => apiRequest<SemanticGraphStatus>('/v1/semantic-qa/graph/status'),
+
+  askQuestion: async ({
+    question, conversationId, parentQuestionId,
+    confirmedMetricCodes, confirmedDecisions, signal, onProgress,
+  }: AskQuestionInput) => {
+    const endpoint = parentQuestionId
+      ? `/v1/questions/${encodeURIComponent(parentQuestionId)}/clarifications`
+      : '/v1/questions'
+    const init: RequestInit = {
+      method: 'POST',
+      signal,
+      body: JSON.stringify({
+        question,
+        conversationId,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        locale: 'zh-CN',
+        display: { preferredChart: 'AUTO' },
+        ...(confirmedMetricCodes?.length ? { confirmedMetricCodes } : {}),
+        ...(confirmedDecisions?.length ? { confirmedDecisions } : {}),
+      }),
+    }
+    if (!onProgress) return apiRequest<SemanticQuestionResponse>(endpoint, init)
+    const response = await apiResponse(endpoint, {
+      ...init,
+      headers: { Accept: 'application/x-ndjson' },
+    })
+    if (!response.body || !response.headers.get('Content-Type')?.includes('application/x-ndjson')) {
+      return response.json() as Promise<SemanticQuestionResponse>
+    }
+    type StreamFrame =
+      | { type: 'progress'; progress: SemanticQueryProgressEvent }
+      | { type: 'result'; result: SemanticQuestionResponse }
+      | { type: 'error'; status: number; error: APIError }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let result: SemanticQuestionResponse | undefined
+    const consume = (line: string) => {
+      if (!line.trim()) return
+      const frame = JSON.parse(line) as StreamFrame
+      if (frame.type === 'progress') onProgress(frame.progress)
+      if (frame.type === 'result') result = frame.result
+      if (frame.type === 'error') throw new RequestError(frame.error, frame.status)
+    }
+    while (true) {
+      const chunk = await reader.read()
+      buffer += decoder.decode(chunk.value, { stream: !chunk.done })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) consume(line)
+      if (chunk.done) break
+    }
+    consume(buffer)
+    if (!result) {
+      throw new RequestError({ code: 'QUESTION_STREAM_INCOMPLETE', message: '问答进度连接提前结束，请重试' }, 502)
+    }
+    return result
+  },
+
+  submitQuestionFeedback: (
+    questionId: string,
+    rating: 'ACCURATE' | 'INACCURATE',
+    comment = '',
+  ) => apiRequest<{ items: Array<{ id: string; queryPlanId: string; rating: string }> }>(
+    `/v1/questions/${encodeURIComponent(questionId)}/feedback`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ rating, ...(comment.trim() ? { comment: comment.trim() } : {}) }),
+    },
+  ),
+
+  cancelQuestion: (questionId: string) => apiRequest<{
+    questionId: string
+    state: SemanticQuestionState
+    status: 'CANCELLED'
+  }>(`/v1/questions/${encodeURIComponent(questionId)}/cancel`, {
+    method: 'POST',
+  }),
 
   tokenize: (question: string, signal?: AbortSignal) =>
     apiRequest<SemanticQueryTokenization>('/v1/semantic-qa/tokenize', {
@@ -431,8 +682,8 @@ export const semanticChatAPI = {
       }),
     }),
 
-  planTurn: ({ question, priorQuestions, contextQueryPlanIds, confirmedMetricCodes, confirmedDecisions, semanticHints, signal }: PlanTurnInput) =>
-    apiRequest<SemanticQueryTurn>('/v1/semantic-qa/query-turns', {
+  planTurn: async ({ question, priorQuestions, contextQueryPlanIds, confirmedMetricCodes, confirmedDecisions, semanticHints, signal, onProgress }: PlanTurnInput) => {
+    const init: RequestInit = {
       method: 'POST',
       signal,
       body: JSON.stringify({
@@ -445,7 +696,44 @@ export const semanticChatAPI = {
         ...(confirmedDecisions?.length ? { confirmedDecisions } : {}),
         ...(semanticHints ? { semanticHints } : {}),
       }),
-    }),
+    }
+    if (!onProgress) return apiRequest<SemanticQueryTurn>('/v1/semantic-qa/query-turns', init)
+    const response = await apiResponse('/v1/semantic-qa/query-turns', {
+      ...init,
+      headers: { Accept: 'application/x-ndjson' },
+    })
+    if (!response.body || !response.headers.get('Content-Type')?.includes('application/x-ndjson')) {
+      return response.json() as Promise<SemanticQueryTurn>
+    }
+    type StreamFrame =
+      | { type: 'progress'; progress: SemanticQueryProgressEvent }
+      | { type: 'result'; result: SemanticQueryTurn }
+      | { type: 'error'; status: number; error: APIError }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let result: SemanticQueryTurn | undefined
+    const consume = (line: string) => {
+      if (!line.trim()) return
+      const frame = JSON.parse(line) as StreamFrame
+      if (frame.type === 'progress') onProgress(frame.progress)
+      if (frame.type === 'result') result = frame.result
+      if (frame.type === 'error') throw new RequestError(frame.error, frame.status)
+    }
+    while (true) {
+      const chunk = await reader.read()
+      buffer += decoder.decode(chunk.value, { stream: !chunk.done })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) consume(line)
+      if (chunk.done) break
+    }
+    consume(buffer)
+    if (!result) {
+      throw new RequestError({ code: 'QUERY_STREAM_INCOMPLETE', message: '问答进度连接提前结束，请重试' }, 502)
+    }
+    return result
+  },
 
   planQuestion: ({ question, contextQueryPlanId, signal }: PlanQuestionInput) =>
     apiRequest<SemanticQueryPlan>('/v1/semantic-qa/query-plans', {
@@ -472,6 +760,15 @@ export const semanticChatAPI = {
         maxRows: 100,
       }),
     }),
+
+  submitFeedback: (planId: string, rating: 'ACCURATE' | 'INACCURATE', comment = '') =>
+    apiRequest<{ id: string; queryPlanId: string; rating: string; comment?: string; createdAt: string; updatedAt: string }>(
+      `/v1/semantic-qa/query-plans/${encodeURIComponent(planId)}/feedback`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ rating, ...(comment.trim() ? { comment: comment.trim() } : {}) }),
+      },
+    ),
 
   listGoldenQuestionSets: () =>
     apiRequest<{ items: GoldenQuestionSet[] } | GoldenQuestionSet[]>('/v1/semantic-qa/golden-question-sets')

@@ -2,6 +2,36 @@ package semanticqa
 
 import "testing"
 
+func TestTokenSemanticSearchTargetsReserveMetricRecallForWholeQuestion(
+	t *testing.T,
+) {
+	tests := []struct {
+		name           string
+		entityType     string
+		wantDimensions bool
+	}{
+		{name: "metric", entityType: "METRIC", wantDimensions: false},
+		{name: "query word", entityType: "QUERY_WORD", wantDimensions: false},
+		{name: "analysis word", entityType: "ANALYSIS_WORD", wantDimensions: false},
+		{name: "time", entityType: "TIME", wantDimensions: true},
+		{name: "dimension value", entityType: "DIMENSION_VALUE", wantDimensions: true},
+		{name: "noun candidate", entityType: "NOUN_CANDIDATE", wantDimensions: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			metrics, dimensions := tokenSemanticSearchTargets(QueryToken{
+				Text: "测试", EntityType: test.entityType,
+			})
+			if metrics || dimensions != test.wantDimensions {
+				t.Fatalf(
+					"unexpected targets for %s: metrics=%v dimensions=%v",
+					test.entityType, metrics, dimensions,
+				)
+			}
+		})
+	}
+}
+
 func TestRankTokenSemanticCorpusReturnsTopThreePerToken(t *testing.T) {
 	token := QueryToken{
 		Text: "销售额", PartOfSpeech: "n", EntityType: "NOUN_CANDIDATE",

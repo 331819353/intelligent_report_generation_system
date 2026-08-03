@@ -4,24 +4,36 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
 	aiplatform "intelligent-report-generation-system/internal/ai"
 )
 
-const semanticMetricToolLoopPromptVersion = "semantic-metric-tool-loop-v1"
+const semanticMetricToolLoopPromptVersion = "semantic-metric-tool-loop-v3"
 
 type semanticMetricToolExecutor struct {
-	interpreter *SemanticInterpreter
-	tenantID    string
-	question    string
-	candidates  map[string]recallCandidate
-	order       []string
+	interpreter       *SemanticInterpreter
+	tenantID          string
+	question          string
+	candidates        map[string]recallCandidate
+	order             []string
+	semanticSearches  int
+	metricSearches    int
+	latestMetricQuery string
 }
 
 type semanticMetricSearchInput struct {
 	Query string `json:"query"`
+}
+
+type semanticMetricEvidence struct {
+	Code        string  `json:"code,omitempty"`
+	Name        string  `json:"name"`
+	Description string  `json:"description,omitempty"`
+	Score       float64 `json:"score"`
+	MatchMethod string  `json:"matchMethod"`
 }
 
 type semanticMetricSelectionInput struct {
@@ -34,14 +46,29 @@ type semanticMetricSelectionInput struct {
 func (interpreter *SemanticInterpreter) interpretManyWithToolLoop(
 	ctx context.Context,
 	toolAI semanticToolAIInvoker,
-	tenantID, actorID, question, preferredModel string,
+	tenantID, actorID, question string,
+	preferredModel string,
 	parsingRules semanticParsingRules,
 ) (QueryTurnSlots, error) {
 	executor := &semanticMetricToolExecutor{
 		interpreter: interpreter, tenantID: tenantID, question: question,
 		candidates: map[string]recallCandidate{}, order: []string{},
 	}
+	payload, err := json.Marshal(struct {
+		Question string `json:"question"`
+	}{
+		Question: question,
+	})
+	if err != nil {
+		return QueryTurnSlots{}, err
+	}
 	temperature := 0.0
+	tools, err := defaultQuestionToolRegistry.RequiredDefinitions(
+		"search_metric_semantics", "search_metrics", "submit_metric_selection",
+	)
+	if err != nil {
+		return QueryTurnSlots{}, err
+	}
 	result, err := toolAI.InvokeToolLoop(ctx, aiplatform.ToolInvocation{
 		TenantID: tenantID, ActorID: actorID,
 		Purpose:        aiplatform.PurposeSemanticQueryPlanning,
@@ -55,8 +82,10 @@ func (interpreter *SemanticInterpreter) interpretManyWithToolLoop(
 					Role: aiplatform.MessageRoleSystem,
 					Parts: []aiplatform.ContentPart{{
 						Type: aiplatform.ContentTypeText,
-						Text: `你是只读指标语义检索代理。你不能访问数据库或生成 SQL，只能调用给定工具。
-先根据完整问题调用 search_metrics；候选不足时可以改写一次检索词继续检索。只有工具返回的已发布指标可以被选择。
+						Text: `你是只读指标语义检索代理。你不能访问数据库或生成 SQL，只能调用给定工具，并严格按阶段工作。
+第一阶段先使用完整原问题调用 search_metric_semantics，从指标语义库取得名称、口径和说明。根据语义证据补全用户问题；证据不足时可以改写完整问题再次检索语义库。
+第二阶段调用 search_metrics，把补全后的完整指标问题作为 query，从已发布指标清单取得可选择的具体指标。候选不足时，可以根据已有语义证据调整完整指标短语后再次检索指标清单。
+不得把查询动作、时间、分析方式、数字、单位、维度名或维度值作为独立指标查询，不得逐个搜索普通分词。只有 search_metrics 返回的已发布指标可以被选择。
 识别用户本轮明确要求的全部指标，最多 8 个。若存在多个同等可能的指标、没有可靠候选或用户必须确认，则调用 submit_metric_selection，needsClarification=true 且 metricCodes 为空；不得擅自猜测。
 能够唯一判断时调用 submit_metric_selection，并逐字复制工具返回的 code。终止工具必须单独调用。`,
 					}},
@@ -64,45 +93,16 @@ func (interpreter *SemanticInterpreter) interpretManyWithToolLoop(
 				{
 					Role: aiplatform.MessageRoleUser,
 					Parts: []aiplatform.ContentPart{{
-						Type: aiplatform.ContentTypeText, Text: question,
+						Type: aiplatform.ContentTypeText, Text: string(payload),
 					}},
 				},
 			},
-			Tools: []aiplatform.ToolDefinition{
-				{
-					Name:        "search_metrics",
-					Description: "按用户表达检索当前租户已发布指标、指标语义和来源物化表。",
-					Parameters: json.RawMessage(`{
-						"type":"object","additionalProperties":false,
-						"required":["query"],
-						"properties":{
-							"query":{"type":"string","minLength":1,"maxLength":512}
-						}
-					}`),
-				},
-				{
-					Name:        "submit_metric_selection",
-					Description: "提交最终指标选择或明确请求用户确认；这是唯一终止工具。",
-					Parameters: json.RawMessage(`{
-						"type":"object","additionalProperties":false,
-						"required":["intent","metricCodes","confidence","needsClarification"],
-						"properties":{
-							"intent":{"enum":[
-								"LOOKUP","METRIC","TREND","COMPARISON","RANKING",
-								"DRILLDOWN","DISTRIBUTION","FUNNEL","RETENTION",
-								"ANOMALY","UNKNOWN"
-							]},
-							"metricCodes":{"type":"array","maxItems":8,
-								"items":{"type":"string","maxLength":128}},
-							"confidence":{"type":"number","minimum":0,"maximum":1},
-							"needsClarification":{"type":"boolean"}
-						}
-					}`),
-				},
-			},
+			Tools:      tools,
 			ToolChoice: aiplatform.ToolChoiceAuto,
 			Thinking:   true, Temperature: &temperature,
-			MaxOutputTokens: 1200, MaxRounds: 4, MaxToolCalls: 6,
+			MaxOutputTokens: 1400,
+			MaxRounds:       aiplatform.MaxToolLoopRounds,
+			MaxToolCalls:    aiplatform.MaxToolCallsPerLoop,
 		},
 		Executor: executor,
 	})
@@ -128,20 +128,6 @@ func (interpreter *SemanticInterpreter) interpretManyWithToolLoop(
 	codes := uniqueStrings(selection.MetricCodes, 8)
 	needsClarification := selection.NeedsClarification ||
 		selection.Confidence < 0.7 || len(codes) == 0
-	explicitCodes := exactMetricCodes(question, candidates, 8, parsingRules)
-	if len(explicitCodes) > 0 {
-		// Published names, aliases and distinctive metric stems in the user's
-		// original question are stronger evidence than a model clarification.
-		codes = explicitCodes
-		needsClarification = false
-	} else if len(codes) > 1 ||
-		parsingRules.requestsBroadMetricSelection(question) {
-		// A broad question such as "经营情况怎么样" must not let the model
-		// invent an arbitrary KPI bundle. Without any explicit metric anchor,
-		// either one arbitrary KPI or a bundle is a real user decision.
-		codes = []string{}
-		needsClarification = true
-	}
 	if needsClarification {
 		codes = []string{}
 	}
@@ -152,13 +138,18 @@ func (interpreter *SemanticInterpreter) interpretManyWithToolLoop(
 	toolSteps := make([]QueryMetricToolLoopStep, 0, len(result.Trace.Steps))
 	for _, step := range result.Trace.Steps {
 		toolSteps = append(toolSteps, QueryMetricToolLoopStep{
-			Round: step.Round, ToolName: step.ToolName, Terminal: step.Terminal,
+			Round: step.Round, ToolName: step.ToolName,
+			ArgumentsHash: step.ArgumentsHash, StateHash: step.StateHash,
+			EvidenceIDs:      append([]string(nil), step.EvidenceIDs...),
+			NewEvidenceCount: step.NewEvidenceCount,
+			ErrorCode:        step.ErrorCode, Terminal: step.Terminal,
 		})
 	}
 	return QueryTurnSlots{
 		Intent:      strings.ToUpper(strings.TrimSpace(selection.Intent)),
 		MetricCodes: codes, MetricCandidateCount: len(candidates),
 		MetricMatchMethod: "AGENT_TOOL_LOOP", Domains: domains,
+		AugmentedQuestion: executor.augmentedQuestion(),
 		MetricCandidates: metricCandidateTraces(
 			question, candidates, codes, "AGENT_TOOL_LOOP", parsingRules,
 		),
@@ -175,8 +166,53 @@ func (executor *semanticMetricToolExecutor) ExecuteTool(
 	ctx context.Context,
 	execution aiplatform.ToolExecution,
 ) (aiplatform.ToolExecutionResult, error) {
+	if !defaultQuestionToolRegistry.Allowed(
+		execution.Name, QuestionStateContextReady,
+	) {
+		return aiplatform.ToolExecutionResult{}, ErrInvalidState
+	}
 	switch execution.Name {
+	case "search_metric_semantics":
+		reportQueryTurnProgress(
+			ctx, QueryProgressStageMetricSemantic, QueryProgressStatusRunning,
+			"正在检索指标语义库并补全问题表达",
+		)
+		var input semanticMetricSearchInput
+		if json.Unmarshal(execution.Arguments, &input) != nil {
+			return aiplatform.ToolExecutionResult{}, ErrInvalidRequest
+		}
+		query := strings.TrimSpace(input.Query)
+		if query == "" || len([]rune(query)) > 512 {
+			return aiplatform.ToolExecutionResult{}, ErrInvalidRequest
+		}
+		candidates, err := executor.interpreter.recallMetricSemanticsForTool(
+			ctx, executor.tenantID, query,
+		)
+		if err != nil {
+			return aiplatform.ToolExecutionResult{}, err
+		}
+		executor.semanticSearches++
+		reportQueryTurnProgress(
+			ctx, QueryProgressStageMetricSemantic,
+			QueryProgressStatusSucceeded,
+			fmt.Sprintf("指标语义检索完成，召回 %d 条语义候选", len(candidates)),
+		)
+		content, err := json.Marshal(map[string]any{
+			"query": query, "semanticCandidates": candidates,
+		})
+		return aiplatform.ToolExecutionResult{
+			Content:     content,
+			EvidenceIDs: metricSemanticEvidenceIDs(query, candidates),
+		}, err
 	case "search_metrics":
+		if executor.semanticSearches == 0 {
+			return aiplatform.ToolExecutionResult{},
+				errors.New("metric catalog search requires semantic search first")
+		}
+		reportQueryTurnProgress(
+			ctx, QueryProgressStageMetricCatalog, QueryProgressStatusRunning,
+			"正在使用补全后的问题检索已发布指标清单",
+		)
 		var input semanticMetricSearchInput
 		if json.Unmarshal(execution.Arguments, &input) != nil {
 			return aiplatform.ToolExecutionResult{}, ErrInvalidRequest
@@ -191,27 +227,26 @@ func (executor *semanticMetricToolExecutor) ExecuteTool(
 		if err != nil {
 			return aiplatform.ToolExecutionResult{}, err
 		}
-		for _, candidate := range candidates {
-			key := strings.ToLower(candidate.Code)
-			if key == "" {
-				continue
-			}
-			if current, exists := executor.candidates[key]; !exists {
-				executor.candidates[key] = candidate
-				executor.order = append(executor.order, key)
-			} else if candidate.Score > current.Score {
-				executor.candidates[key] = candidate
-			}
-		}
+		executor.addCandidates(candidates)
+		executor.metricSearches++
+		executor.latestMetricQuery = query
+		reportQueryTurnProgress(
+			ctx, QueryProgressStageMetricCatalog,
+			QueryProgressStatusSucceeded,
+			fmt.Sprintf("指标清单检索完成，召回 %d 个可用候选", len(candidates)),
+		)
 		content, err := json.Marshal(map[string]any{
 			"query":      query,
 			"candidates": externalRecallCandidates(candidates),
 		})
-		return aiplatform.ToolExecutionResult{Content: content}, err
+		return aiplatform.ToolExecutionResult{
+			Content:     content,
+			EvidenceIDs: metricCatalogEvidenceIDs(query, candidates),
+		}, err
 	case "submit_metric_selection":
-		if len(executor.candidates) == 0 {
+		if executor.semanticSearches == 0 || executor.metricSearches == 0 {
 			return aiplatform.ToolExecutionResult{},
-				errors.New("metric selection requires a completed search")
+				errors.New("metric selection requires semantic and catalog searches")
 		}
 		var input semanticMetricSelectionInput
 		if json.Unmarshal(execution.Arguments, &input) != nil {
@@ -227,6 +262,13 @@ func (executor *semanticMetricToolExecutor) ExecuteTool(
 		) {
 			return aiplatform.ToolExecutionResult{}, ErrUnprovenPath
 		}
+		status, message := QueryProgressStatusSucceeded, "指标选择已通过目录约束校验"
+		if input.NeedsClarification || len(input.MetricCodes) == 0 {
+			status, message = QueryProgressStatusWarn, "指标候选仍有歧义，准备请求用户确认"
+		}
+		reportQueryTurnProgress(
+			ctx, QueryProgressStageMetricSelection, status, message,
+		)
 		content, err := json.Marshal(input)
 		return aiplatform.ToolExecutionResult{
 			Content: content, Terminal: true,
@@ -234,6 +276,95 @@ func (executor *semanticMetricToolExecutor) ExecuteTool(
 	default:
 		return aiplatform.ToolExecutionResult{}, ErrInvalidRequest
 	}
+}
+
+func (executor *semanticMetricToolExecutor) augmentedQuestion() string {
+	if executor == nil {
+		return ""
+	}
+	question := strings.TrimSpace(executor.question)
+	query := strings.TrimSpace(executor.latestMetricQuery)
+	if query == "" || strings.EqualFold(query, question) {
+		return question
+	}
+	return question + "【指标语义补充：" + query + "】"
+}
+
+func (interpreter *SemanticInterpreter) recallMetricSemanticsForTool(
+	ctx context.Context,
+	tenantID, query string,
+) ([]semanticMetricEvidence, error) {
+	metrics, _, err := interpreter.store.tokenSemanticCorpus(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	candidates := rankTokenSemanticCorpus(
+		QueryToken{Text: query, EntityType: "NOUN_CANDIDATE"}, metrics, 12,
+	)
+	if interpreter.embedding != nil && interpreter.embedding.Configured() {
+		vectors, embedErr := interpreter.embedding.Embed(ctx, []string{query})
+		if embedErr == nil && len(vectors) == 1 {
+			vectorCandidates, vectorErr :=
+				interpreter.store.vectorTokenSemanticCandidates(
+					ctx, tenantID, query, vectors[0], 12, true, false,
+				)
+			if vectorErr == nil && len(vectorCandidates) > 0 {
+				candidates = vectorCandidates
+			}
+		}
+	}
+	result := make([]semanticMetricEvidence, 0, len(candidates))
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		key := strings.ToLower(strings.TrimSpace(candidate.Name))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, semanticMetricEvidence{
+			Code: candidate.Code, Name: candidate.Name,
+			Description: boundedSemanticToolText(
+				candidate.Description, 320,
+			),
+			Score: candidate.Score, MatchMethod: candidate.MatchMethod,
+		})
+	}
+	return result, nil
+}
+
+func (executor *semanticMetricToolExecutor) addCandidates(
+	candidates []recallCandidate,
+) {
+	if executor == nil {
+		return
+	}
+	if executor.candidates == nil {
+		executor.candidates = map[string]recallCandidate{}
+	}
+	for _, candidate := range candidates {
+		if candidate.SubjectType != "METRIC" {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(candidate.Code))
+		if key == "" {
+			continue
+		}
+		if current, exists := executor.candidates[key]; !exists {
+			executor.candidates[key] = candidate
+			executor.order = append(executor.order, key)
+		} else if candidate.Score > current.Score {
+			executor.candidates[key] = candidate
+		}
+	}
+}
+
+func boundedSemanticToolText(value string, maximum int) string {
+	value = strings.TrimSpace(value)
+	characters := []rune(value)
+	if maximum < 1 || len(characters) <= maximum {
+		return value
+	}
+	return strings.TrimSpace(string(characters[:maximum])) + "…"
 }
 
 func (interpreter *SemanticInterpreter) recallMetricsForTool(

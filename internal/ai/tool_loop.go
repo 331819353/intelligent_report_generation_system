@@ -9,11 +9,13 @@ import (
 	"errors"
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
 
 var toolNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
+var evidenceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9:._@/-]{0,255}$`)
 
 // InvokeToolLoop runs a bounded, audited think/tool/think loop. Tool execution
 // remains inside the caller supplied authorization boundary; provider-generated
@@ -185,6 +187,8 @@ func (s *Service) runToolLoop(
 	attempts, toolCalls, totalToolResultBytes := 0, 0, 0
 	requestIDs := []string{}
 	traceSteps := []ToolLoopStepTrace{}
+	evidenceByID := map[string]struct{}{}
+	actionSignatures := map[string]struct{}{}
 	for round := 1; round <= request.MaxRounds; round++ {
 		providerRequest := ToolProviderRequest{
 			Messages: messages, Tools: request.Tools,
@@ -272,11 +276,50 @@ func (s *Service) runToolLoop(
 			if err != nil {
 				return internalToolLoopResult{}, attempts, err
 			}
+			argumentsHash := hashBytes(arguments)
+			stateHash := hashEvidenceState(evidenceByID)
 			executionResult, err := executor.ExecuteTool(
 				ctx, ToolExecution{Name: call.Name, Arguments: arguments},
 			)
 			if err != nil {
 				return internalToolLoopResult{}, attempts, err
+			}
+			executionResult.ErrorCode = strings.TrimSpace(executionResult.ErrorCode)
+			signature := stateHash + "\x00" + call.Name + "\x00" +
+				argumentsHash + "\x00" + executionResult.ErrorCode
+			if _, repeated := actionSignatures[signature]; repeated {
+				return internalToolLoopResult{}, attempts, newProviderError(
+					ErrorCodeToolNoProgress,
+					"AI tool loop repeated an action without new evidence",
+					0, false, 0, nil,
+				)
+			}
+			actionSignatures[signature] = struct{}{}
+			evidenceIDs, err := normalizeEvidenceIDs(executionResult.EvidenceIDs)
+			if err != nil {
+				return internalToolLoopResult{}, attempts, err
+			}
+			newEvidenceCount := 0
+			for _, evidenceID := range evidenceIDs {
+				if _, exists := evidenceByID[evidenceID]; exists {
+					continue
+				}
+				evidenceByID[evidenceID] = struct{}{}
+				newEvidenceCount++
+			}
+			if executionResult.ErrorCode != "" && !executionResult.Repairable {
+				return internalToolLoopResult{}, attempts, newProviderError(
+					ErrorCodeToolExecutionBlocked,
+					"tool registry rejected a non-repairable action",
+					0, false, 0, nil,
+				)
+			}
+			if !executionResult.Terminal && executionResult.ErrorCode == "" &&
+				newEvidenceCount == 0 {
+				return internalToolLoopResult{}, attempts, newProviderError(
+					ErrorCodeToolNoProgress,
+					"tool call produced no new evidence", 0, false, 0, nil,
+				)
 			}
 			content, err := canonicalToolResult(executionResult.Content)
 			if err != nil {
@@ -297,15 +340,28 @@ func (s *Service) runToolLoop(
 				)
 			}
 			if executionResult.Terminal {
+				if len(evidenceByID) == 0 || executionResult.ErrorCode != "" {
+					return internalToolLoopResult{}, attempts, newProviderError(
+						ErrorCodeToolNoProgress,
+						"terminal tool requires prior governed evidence",
+						0, false, 0, nil,
+					)
+				}
 				terminalCalls++
 				terminalResult = content
 				traceSteps = append(traceSteps, ToolLoopStepTrace{
-					Round: round, ToolName: call.Name, Terminal: true,
+					Round: round, ToolName: call.Name,
+					ArgumentsHash: argumentsHash, StateHash: stateHash,
+					EvidenceIDs: evidenceIDs, NewEvidenceCount: newEvidenceCount,
+					ErrorCode: executionResult.ErrorCode, Terminal: true,
 				})
 				continue
 			}
 			traceSteps = append(traceSteps, ToolLoopStepTrace{
-				Round: round, ToolName: call.Name, Terminal: false,
+				Round: round, ToolName: call.Name,
+				ArgumentsHash: argumentsHash, StateHash: stateHash,
+				EvidenceIDs: evidenceIDs, NewEvidenceCount: newEvidenceCount,
+				ErrorCode: executionResult.ErrorCode, Terminal: false,
 			})
 			messages = append(messages, ToolMessage{
 				Role: MessageRoleTool, ToolCallID: call.ID,
@@ -327,7 +383,8 @@ func (s *Service) runToolLoop(
 				Content: terminalResult, Model: configuredModel, Usage: usage,
 				Trace: ToolLoopTrace{
 					Rounds: round, ToolCalls: toolCalls,
-					Steps: append([]ToolLoopStepTrace(nil), traceSteps...),
+					EvidenceIDs: sortedEvidenceIDs(evidenceByID),
+					Steps:       append([]ToolLoopStepTrace(nil), traceSteps...),
 				},
 				providerRequestID: hashProviderRequestIDs(requestIDs),
 			}, attempts, nil
@@ -492,6 +549,51 @@ func hashProviderRequestIDs(ids []string) string {
 	}
 	sum := sha256.Sum256([]byte(strings.Join(filtered, "\x00")))
 	return hex.EncodeToString(sum[:])
+}
+
+func hashBytes(value []byte) string {
+	sum := sha256.Sum256(value)
+	return hex.EncodeToString(sum[:])
+}
+
+func hashEvidenceState(evidenceByID map[string]struct{}) string {
+	return hashBytes([]byte(strings.Join(sortedEvidenceIDs(evidenceByID), "\x00")))
+}
+
+func sortedEvidenceIDs(evidenceByID map[string]struct{}) []string {
+	result := make([]string, 0, len(evidenceByID))
+	for evidenceID := range evidenceByID {
+		result = append(result, evidenceID)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func normalizeEvidenceIDs(values []string) ([]string, error) {
+	result := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	if len(values) > 128 {
+		return nil, newProviderError(
+			ErrorCodeInvalidOutput, "tool returned too many evidence IDs",
+			0, false, 0, nil,
+		)
+	}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if !evidenceIDPattern.MatchString(value) {
+			return nil, newProviderError(
+				ErrorCodeInvalidOutput, "tool returned an invalid evidence ID",
+				0, false, 0, nil,
+			)
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 func addUsage(left, right Usage) Usage {

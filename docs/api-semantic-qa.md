@@ -1,11 +1,64 @@
 # Semantic QA API
 
-Base path：`/api/v1/semantic-qa`
+主问答入口：`/api/v1/questions`
+兼容入口：`/api/v1/semantic-qa`
 鉴权：Bearer access token
 权限对象：`DATASET`；读取接口要求 `READ`，治理接口要求 `MANAGE`
 请求 JSON 使用严格字段校验，未知字段返回 `400 INVALID_REQUEST`。
 
-## 多指标问答轮次
+## 统一 Question Orchestrator（主链）
+
+新前端和新调用方只使用 `POST /api/v1/questions`。服务端在一个 Question 生命周期内
+完成意图补全、三路路由、Semantic IR 构建、SQL Guard、执行、Result Verifier 和
+确定性答案生成，不再要求浏览器先规划、并发执行计划后自行拼接答案。
+
+```json
+{
+  "question": "华东区本月支付 GMV 是多少？",
+  "conversationId": "会话 UUID",
+  "timezone": "Asia/Shanghai",
+  "locale": "zh-CN",
+  "display": {"preferredChart": "AUTO"}
+}
+```
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/api/v1/questions` | 创建并执行一个受治理 Question |
+| `GET` | `/api/v1/questions/{id}` | 读取运行摘要、路由、版本和证据哈希 |
+| `GET` | `/api/v1/questions/{id}/events` | 读取状态事件账本 |
+| `POST` | `/api/v1/questions/{id}/clarifications` | 基于原问题哈希和受治理 ID 继续澄清 |
+| `POST` | `/api/v1/questions/{id}/feedback` | 将准确/不准确反馈关联到本 Question 的全部计划 |
+| `POST` | `/api/v1/questions/{id}/cancel` | 取消活动运行并写入 `CLIENT_CANCELLED` 阻断事件 |
+
+状态机为：
+`RECEIVED → AUTHORIZED → CONTEXT_READY → PLAN_READY → VALIDATING → COST_APPROVED → EXECUTING → RESULT_VERIFIED → ANSWERED`。
+无法唯一证明语义时进入 `CLARIFICATION_REQUIRED`；门禁、执行、验证或取消失败进入
+`BLOCKED`。事件包含安全的 `stage/status/code/summary`，不保存原始问句、提示词、SQL
+或结果行。
+
+路由严格限定为三类：
+
+- A `SEMANTIC_IR`：默认路径，只接受已认证指标、维度和值，构建
+  [`Semantic Query IR v1`](../api/schemas/semantic-query-ir-v1.schema.json) 后由确定性编译器执行。
+- B `GOVERNED_TEXT_TO_SQL`：仅在目标方言存在可靠 AST 适配器时允许。当前仓库包含多种
+  数据源方言，尚未配置统一可靠 AST 适配器，因此该路径明确返回能力关闭码
+  `RELIABLE_DIALECT_AST_ADAPTER_NOT_CONFIGURED`，不会退化为执行模型自由 SQL。
+- C `CLARIFY_OR_REFUSE`：证据不完整、存在歧义或治理条件不满足时最小澄清或拒绝。
+
+成功响应同时返回 `intent`、`semanticIr`、`executionGraph`、`sqlGuard`、
+`resultVerification`、`answer`、`accuracyEvidence`、固定预算和 Host-owned Tool Registry
+摘要。`accuracyEvidence` 包含语义版本、Intent/Plan/Result 哈希、绑定证据、验证项和
+Evidence Loop 新证据轨迹；答案文本只从已通过 Result Verifier 的结果槽位生成。
+
+进度流仍使用 `Accept: application/x-ndjson`。Question 创建后，进度事件会带
+`questionId`，客户端可用它调用取消接口；新增阶段包括 `ORCHESTRATION`、`SQL_GUARD`、
+`EXECUTION`、`RESULT_VERIFICATION` 和 `ANSWER`。
+
+下列 `/api/v1/semantic-qa/query-turns` 与 `/query-plans/{id}/execute` 仅保留给旧调用方
+和治理调试页面。它们不是新产品问答主链。
+
+## 兼容接口：多指标问答轮次
 
 `POST /api/v1/semantic-qa/query-turns`
 
@@ -39,14 +92,16 @@ Base path：`/api/v1/semantic-qa`
 数据。
 
 `timezone` 是 IANA 时区，缺省为 `UTC`，用于把分词阶段识别出的相对时间转换为
-确定的半开区间。`query-turns` 会在服务端自动执行 Jieba/HMM、整句和逐词语义
-召回、受约束 LLM 候选选择，再进入 QueryPlan；调用方不需要先请求独立的测试页面
-或自行拼装 `semanticHints`。
+确定的半开区间。`query-turns` 会在服务端自动执行 Jieba/HMM，以及两个受控工具
+循环：先检索指标语义并补全问题，再检索已发布指标清单；指标锁定后，再检索该指标
+兼容的维度语义、成员和决策图。调用方不需要先请求独立测试页面或自行拼装
+`semanticHints`。
 
-明确命中唯一已发布指标名称、别名或特征词干，且问题不含时间歧义和未知维度时，
-分词补全会返回 `llmCompletion.model=DETERMINISTIC_SEMANTIC_CATALOG`，避免不必要
-的模型调用。已确认指标或已执行上下文计划也可作为当前轮的可信指标锚点。相对时间、
-未知专名及未命中决策图的普通维度仍进入受约束 LLM/向量链路，不会被快速路径猜测。
+指标锁定后，若问题中的维度和时间均可由已发布目录确定，分词补全会返回
+`llmCompletion.model=DETERMINISTIC_SEMANTIC_CATALOG`，避免第二阶段不必要的补充
+模型调用；这不会跳过第一阶段的指标语义与指标清单工具循环。已确认指标或已执行
+上下文计划也可作为当前轮的可信指标锚点。相对时间、未知专名及未命中决策图的普通
+维度仍进入受约束 LLM/向量链路，不会被快速路径猜测。
 指标后缀、行政区划后缀、确定性剩余词和宽泛指标问法均来自平台基础 PostgreSQL
 的 `semantic_parsing_rules`，按请求热加载；租户同类型同表达规则覆盖平台默认值。
 
@@ -59,12 +114,42 @@ QueryPlan；`contextQueryPlanIds` 才是条件继承的安全锚点。当前轮�
 值覆盖上下文，其余维度、时间和指标条件只从已验证计划继承，不能从原始问句
 猜测。
 
+调用方需要在等待期间展示真实处理阶段时，可为同一请求增加
+`Accept: application/x-ndjson`。服务端依次返回 `progress` 帧和最终 `result` 帧；
+失败则返回 `error` 帧。进度事件只包含服务端阶段、状态、时间和安全文案，不包含
+原始问题、工具参数、候选标识、提示词、SQL 或模型供应商载荷。
+
+```json
+{"type":"progress","progress":{"timestamp":"2026-08-03T08:00:00Z","stage":"METRIC_CATALOG","status":"RUNNING","message":"正在使用补全后的问题检索已发布指标清单"}}
+{"type":"progress","progress":{"timestamp":"2026-08-03T08:00:01Z","stage":"METRIC_CATALOG","status":"SUCCEEDED","message":"指标清单检索完成，召回 3 个可用候选"}}
+{"type":"result","result":{"status":"PLANNED","plans":[]}}
+```
+
+未设置该 `Accept` 头时继续返回原有的单个 JSON 响应，保持兼容。智能问答页面默认
+使用进度流，并在进入执行阶段后继续显示受控查询的完成情况；最终用响应中的真实
+候选级审计轨迹替换等待日志。
+
 响应中的 `plans` 为每个指标各自独立的 QueryPlan。客户端必须仅执行状态为
 `READY` 的完整计划集合；任何计划为 `AMBIGUOUS / GAP / REJECTED` 时不得用
 其余指标的部分结果回答整轮问题。
 
+响应同时包含 `questionRunId`、当前 `state` 和 `lifecycle`。规划链使用
+`RECEIVED → AUTHORIZED → CONTEXT_READY → VALIDATING → PLAN_READY`；无法唯一证明
+指标或维度时终止于 `CLARIFICATION_REQUIRED`。只有所有叶子计划均为 `READY`，
+turn 才会返回 `PLANNED / PLAN_READY`，存在非 READY 计划时不会再被包装成可执行结果。
+状态机会写入 `semantic_question_runs / semantic_question_run_events`；账本只保存运行
+UUID、操作者、会话关系、问题哈希、路由、语义版本、计划/结果摘要哈希、状态和安全
+事件摘要，不保存原始问题、提示词、SQL 或结果行。迁移时使用期望前置状态和
+`recordVersion` 串行化，失败链会收敛到 `BLOCKED`。
+
 ```json
 {
+  "questionRunId": "本轮 UUID",
+  "state": "PLAN_READY",
+  "lifecycle": [
+    {"state": "RECEIVED", "timestamp": "2026-08-03T08:00:00Z"},
+    {"state": "PLAN_READY", "timestamp": "2026-08-03T08:00:01Z"}
+  ],
   "questionHash": "64 位摘要",
   "status": "PLANNED",
   "intent": "METRIC",
@@ -84,13 +169,26 @@ QueryPlan；`contextQueryPlanIds` 才是条件继承的安全锚点。当前轮�
     "metricToolLoop": {
       "auditRequestId": "AI 审计 ID",
       "model": "MiniMax-M2",
-      "rounds": 2,
-      "toolCalls": 2,
+      "rounds": 3,
+      "toolCalls": 3,
       "steps": [
-        {"round": 1, "toolName": "search_metrics", "terminal": false},
-        {"round": 2, "toolName": "submit_metric_selection", "terminal": true}
+        {"round": 1, "toolName": "search_metric_semantics", "terminal": false},
+        {"round": 2, "toolName": "search_metrics", "terminal": false},
+        {"round": 3, "toolName": "submit_metric_selection", "terminal": true}
       ]
     },
+    "dimensionToolLoops": [{
+      "metricCode": "sales_amount",
+      "auditRequestId": "AI 审计 ID",
+      "model": "MiniMax-M2",
+      "rounds": 3,
+      "toolCalls": 3,
+      "steps": [
+        {"round": 1, "toolName": "search_dimension_semantics", "terminal": false},
+        {"round": 2, "toolName": "search_dimension_decisions", "terminal": false},
+        {"round": 3, "toolName": "submit_dimension_selection", "terminal": true}
+      ]
+    }],
     "extraction": {
       "intent": "METRIC",
       "metricTerms": ["员工总人数"],
@@ -159,11 +257,30 @@ QueryPlan；`contextQueryPlanIds` 才是条件继承的安全锚点。当前轮�
 `clarification.metricCandidates`；每项包含指标名称、编码、领域、精确数据集版本和
 来源 DWS 发布视图。无法唯一判断维度和值时返回
 `status=NEEDS_DIMENSION_CONFIRMATION` 和
-`clarification.dimensionCandidates`，确认键是 `decisionId`。这两种响应都不会执行
-未确认结果。
+`clarification.dimensionCandidates`，每项同时返回原始 `term` 和确认键 `decisionId`。
+智能问答页面允许一次确认多个指标，并按 `metricCode + term` 对维度歧义分组，每组
+只能选择一个决策；服务端重新检索候选并执行同样的单词单决策约束。这两种响应都不会
+执行未确认结果，确认后会在同一问答会话中自动继续规划和查询。
 
-指标检索优先使用受控模型工具循环；协议、预算和降级规则见
+指标 Evidence Loop 强制执行 `search_metric_semantics → search_metrics →
+submit_metric_selection`；维度工具循环强制执行
+`search_dimension_semantics → search_dimension_decisions →
+submit_dimension_selection`。两个循环均可在预算内重复检索，且终止值必须来自工具
+候选。每个非终止调用必须产生新的 `evidenceId`，轨迹提供参数哈希、状态哈希与
+新增证据数；重复检索无新证据会稳定失败。协议、预算和降级规则见
 [多模型受控工具循环](ai-tool-loop.md)。
+
+## 查询结果反馈
+
+`POST /api/v1/semantic-qa/query-plans/{id}/feedback`
+
+```json
+{"rating":"ACCURATE","comment":"口径和筛选条件正确"}
+```
+
+只接受已经执行完成的计划，`rating` 为 `ACCURATE / INACCURATE`。同一用户对同一
+计划再次提交时更新为最新评价。智能问答页面可同时填写最多 2000 字的点评；多指标
+答案会把同一评价写入本轮每个已执行计划。反馈不会直接修改语义资产或绕过治理流程。
 
 多轮追问把上一轮全部 `READY / EXECUTED` 计划 ID 放入
 `contextQueryPlanIds`，同时把前两次用户问句放入 `priorQuestions`。页面的
@@ -330,6 +447,7 @@ IANA 时区冻结为精确边界，因此执行重试不会因跨日或跨月而
 | --- | --- |
 | `GET` | `/query-plans/{id}` |
 | `POST` | `/query-plans/{id}/execute` |
+| `POST` | `/query-plans/{id}/feedback` |
 
 执行请求必须回传创建计划时的 `expectedGraphGenerationId` 和 `expectedPathHash`，并提供调用方生成的 UUID `queryId`。`maxRows` 范围为 0–500。
 
@@ -342,7 +460,13 @@ IANA 时区冻结为精确边界，因此执行重试不会因跨日或跨月而
 - 同版本、同 schema hash 的 ACTIVE 物化；
 - 对象权限、行列策略和查询限额。
 
-响应包含结果、`durationMs / rowCount` 和 `AnswerEvidence`。不会返回 SQL 或物理表名。执行期间 generation 变化会丢弃结果并返回冲突。
+响应包含结果、`durationMs / rowCount` 和 `AnswerEvidence`。执行响应同样带有
+`questionRunId/state/lifecycle`，完整成功路径为 `RECEIVED → AUTHORIZED →
+CONTEXT_READY → PLAN_READY → VALIDATING → COST_APPROVED → EXECUTING →
+RESULT_VERIFIED → ANSWERED`。`AnswerEvidence` 额外提供 `semanticVersion`、
+`queryPlanHash`、`resultHash`、`queryTraceId`、`verifiedAt` 与服务端命名的
+`validatorChecks`，用于证明本次回答绑定的语义版本、计划和结果快照。不会返回
+SQL、隐藏推理或物理表名。执行期间 generation 变化会丢弃结果并返回冲突。
 
 计划中的 `resolution` 会按顺序返回 `INTENT_RECOGNITION /
 DOMAIN_CATALOG / METRIC_CATALOG / DIMENSION_MEMBER / DATASET_LOCK` 五个阶段的状态、

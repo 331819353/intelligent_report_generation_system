@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.intelligent-report.local/report-1.0.schema.json",
+  "title": "Report DSL 1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schemaVersion", "report", "layout", "globalFilters", "cards"],
+  "properties": {
+    "$schema": { "const": "https://schemas.intelligent-report.local/report-1.0.schema.json" },
+    "schemaVersion": { "const": "1.0.0" },
+    "report": { "$ref": "#/$defs/report" },
+    "layout": { "$ref": "#/$defs/layout" },
+    "globalFilters": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/globalFilter" } },
+    "cards": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "$ref": "#/$defs/card" } },
+    "extensions": { "type": "object" }
+  },
+  "$defs": {
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "title", "type", "status", "themeId", "language", "timezone", "visibility"],
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "code": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$" },
+        "name": { "type": "string", "maxLength": 200 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "type": { "enum": ["DASHBOARD", "REPORT"] },
+        "status": { "enum": ["DRAFT", "PUBLISHED", "ARCHIVED"] },
+        "themeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "language": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "visibility": { "enum": ["PRIVATE", "TENANT", "PUBLIC"] },
+        "onlineEnabled": { "type": "boolean" },
+        "pdfArchiveEnabled": { "type": "boolean" },
+        "defaultRefreshPolicy": { "enum": ["REALTIME", "CACHE", "MATERIALIZED", "SNAPSHOT"] }
+      }
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["columns", "rowHeight", "margin", "breakpoints"],
+      "properties": {
+        "columns": { "const": 12 },
+        "rowHeight": { "type": "integer", "minimum": 4, "maximum": 80 },
+        "margin": { "type": "integer", "minimum": 0, "maximum": 48 },
+        "breakpoints": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["lg", "md", "sm"],
+          "properties": {
+            "lg": { "type": "integer", "minimum": 1 },
+            "md": { "type": "integer", "minimum": 1 },
+            "sm": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "grid": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "w", "h"],
+      "properties": {
+        "x": { "type": "integer", "minimum": 0, "maximum": 11 },
+        "y": { "type": "integer", "minimum": 0 },
+        "w": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "h": { "type": "integer", "minimum": 2, "maximum": 200 }
+      }
+    },
+    "globalFilter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "type", "source", "operator", "required"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "type": { "enum": ["DATE_RANGE", "DATE", "SELECT", "MULTI_SELECT", "NUMBER_RANGE", "TEXT"] },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["semanticModelId", "dimensionId"],
+          "properties": {
+            "semanticModelId": { "type": "string", "minLength": 1 },
+            "dimensionId": { "type": "string", "minLength": 1 }
+          }
+        },
+        "operator": { "enum": ["equals", "notEquals", "in", "notIn", "between", "gte", "lt"] },
+        "defaultValue": {},
+        "required": { "type": "boolean" },
+        "multiValue": { "type": "boolean" },
+        "options": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["label", "value"],
+            "properties": { "label": { "type": "string" }, "value": {} }
+          }
+        },
+        "appearance": { "type": "object" }
+      }
+    },
+    "metricBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "role"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 1 },
+        "versionId": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["value", "baseline", "target", "numerator", "denominator", "series"] },
+        "alias": { "type": "string", "maxLength": 100 }
+      }
+    },
+    "dimensionBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "role"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["category", "series", "group", "time", "column"] },
+        "alias": { "type": "string", "maxLength": 100 }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metrics", "dimensions", "globalFilterBindings", "filters", "sort"],
+      "properties": {
+        "semanticModelId": { "type": "string" },
+        "metrics": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/metricBinding" } },
+        "dimensions": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/dimensionBinding" } },
+        "globalFilterBindings": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["filterId", "targetDimensionId"],
+            "properties": {
+              "filterId": { "type": "string", "minLength": 1 },
+              "targetDimensionId": { "type": "string", "minLength": 1 },
+              "enabled": { "type": "boolean" }
+            }
+          }
+        },
+        "filters": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["dimensionId", "operator", "value"],
+            "properties": {
+              "dimensionId": { "type": "string", "minLength": 1 },
+              "operator": { "enum": ["equals", "notEquals", "in", "notIn", "between", "gte", "lt"] },
+              "value": {}
+            }
+          }
+        },
+        "sort": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["field", "direction"],
+            "properties": { "field": { "type": "string", "minLength": 1 }, "direction": { "enum": ["asc", "desc"] } }
+          }
+        },
+        "limit": { "type": "integer", "minimum": 0, "maximum": 1000 }
+      }
+    },
+    "interaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "event", "action"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "event": { "enum": ["data.click", "card.click", "table.row.click"] },
+        "action": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": { "enum": ["drillDown", "crossFilter", "navigate", "openModal", "openUrl"] },
+            "pathId": { "type": "string" },
+            "toDimension": { "type": "string" },
+            "targetReportId": { "type": "string" },
+            "targetCardId": { "type": "string" },
+            "url": { "type": "string" },
+            "parameterMap": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "card": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "cardVersion", "layout", "appearance", "binding", "interactions"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "type": { "enum": ["TITLE", "CONCLUSION", "CHART", "COMPARISON", "RANKING", "TABLE"] },
+        "cardVersion": { "type": "string", "pattern": "^1\\.[0-9]+\\.[0-9]+$" },
+        "layout": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["lg", "md", "sm"],
+          "properties": { "lg": { "$ref": "#/$defs/grid" }, "md": { "$ref": "#/$defs/grid" }, "sm": { "$ref": "#/$defs/grid" } }
+        },
+        "appearance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title"],
+          "properties": {
+            "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "subtitle": { "type": "string", "maxLength": 500 },
+            "description": { "type": "string", "maxLength": 2000 },
+            "showHeader": { "type": "boolean" },
+            "heightMode": { "enum": ["FIXED", "CONTENT"] }
+          }
+        },
+        "config": { "type": "object" },
+        "binding": { "$ref": "#/$defs/binding" },
+        "interactions": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/interaction" } },
+        "permissions": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requiredPermission": { "type": "string" },
+            "allowedRoleCodes": { "type": "array", "items": { "type": "string" } },
+            "denyDownload": { "type": "boolean" }
+          }
+        },
+        "extensions": { "type": "object" }
+      }
+    }
+  }
+}

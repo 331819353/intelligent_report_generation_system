@@ -31,6 +31,12 @@ var (
 	ErrEditLocked          = errors.New("report edit is locked")
 	ErrResourceOccupied    = errors.New("report resource is occupied")
 	ErrForbidden           = errors.New("report operation is forbidden")
+	ErrVersionNotFound     = errors.New("report version not found")
+	ErrAlreadyPublished    = errors.New("report draft revision is already published")
+	ErrDependencyChanged   = errors.New("report publication dependency changed")
+	ErrArtifactCorrupt     = errors.New("report version artifact is corrupt")
+	ErrQueryUnavailable    = errors.New("report query runtime is unavailable")
+	ErrQueryInvalid        = errors.New("report query request is invalid")
 )
 
 var allowedOperationTypes = map[string]bool{
@@ -48,6 +54,12 @@ var allowedOperationTypes = map[string]bool{
 	"COMPONENT_COPY":          true,
 	"COMPONENT_DELETE":        true,
 	"COMPONENT_STICKY_UPDATE": true,
+	"REPORT_SETTINGS_UPDATE":  true,
+	"FILTER_UPDATE":           true,
+	"CARD_CREATE":             true,
+	"CARD_DELETE":             true,
+	"CARD_LAYOUT_UPDATE":      true,
+	"CARD_CONFIG_UPDATE":      true,
 	"LEGACY_DRAFT_RECOVERY":   true,
 	"UNDO":                    true,
 	"REDO":                    true,
@@ -72,6 +84,8 @@ type ChangeTarget struct {
 	ComponentID           string `json:"componentId,omitempty"`
 	SourceComponentID     string `json:"sourceComponentId,omitempty"`
 	CreatedComponentID    string `json:"createdComponentId,omitempty"`
+	CardID                string `json:"cardId,omitempty"`
+	FilterID              string `json:"filterId,omitempty"`
 	ReferencedOperationID string `json:"referencedOperationId,omitempty"`
 }
 
@@ -144,6 +158,89 @@ type DependencyIndex struct {
 	Type, ID, Path string
 }
 
+// ValidationIssue 是发布前四级校验的稳定问题合同；文案可本地化，Code 不可随意变化。
+type ValidationIssue struct {
+	Level        string `json:"level"`
+	Code         string `json:"code"`
+	Path         string `json:"path"`
+	Message      string `json:"message"`
+	ComponentID  string `json:"componentId,omitempty"`
+	DependencyID string `json:"dependencyId,omitempty"`
+}
+
+type ValidationResult struct {
+	Valid  bool              `json:"valid"`
+	Issues []ValidationIssue `json:"issues"`
+}
+
+type PublicationValidationError struct{ Issues []ValidationIssue }
+
+func (e *PublicationValidationError) Error() string { return "report publication validation failed" }
+
+type ValidateInput struct {
+	Revision int64 `json:"revision"`
+}
+
+type PublishInput struct {
+	Revision int64  `json:"revision"`
+	Comment  string `json:"comment,omitempty"`
+	Prewarm  bool   `json:"prewarm,omitempty"`
+}
+
+type RollbackInput struct {
+	Comment string `json:"comment,omitempty"`
+}
+
+// DependencySnapshot 把草稿中的逻辑引用固定到发布时可信的精确版本。
+type DependencySnapshot struct {
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	VersionID string `json:"versionId,omitempty"`
+	Path      string `json:"path"`
+}
+
+// PublishedVersion 是不可变报告制品的元数据，不把 definition 重复放入列表响应。
+type PublishedVersion struct {
+	ID             string `json:"id"`
+	ReportID       string `json:"reportId"`
+	Version        int    `json:"version"`
+	SourceRevision int64  `json:"sourceRevision"`
+	SchemaVersion  string `json:"schemaVersion"`
+	SHA256         string `json:"sha256"`
+	SizeBytes      int64  `json:"sizeBytes"`
+	Comment        string `json:"comment,omitempty"`
+	PublishedBy    string `json:"publishedBy"`
+	PublishedAt    string `json:"publishedAt"`
+	Current        bool   `json:"current"`
+	ObjectURI      string `json:"-"`
+}
+
+type ReportManifest struct {
+	ReportID      string `json:"reportId"`
+	Version       int    `json:"version"`
+	SchemaVersion string `json:"schemaVersion"`
+	DefinitionURL string `json:"definitionUrl"`
+	SHA256        string `json:"sha256"`
+	SizeBytes     int64  `json:"sizeBytes"`
+	PublishedAt   string `json:"publishedAt"`
+}
+
+type VersionArtifact struct {
+	Version    PublishedVersion
+	Definition json.RawMessage
+}
+
+type PublishPlan struct {
+	ExpectedRevision int64
+	IdempotencyKey   string
+	RequestHash      string
+	Comment          string
+	ObjectURI        string
+	Prepared         reportjson.Prepared
+	Components       []ComponentIndex
+	Dependencies     []DependencySnapshot
+}
+
 type PreparedChange struct {
 	ClientOperationID     string
 	OperationType         string
@@ -208,4 +305,10 @@ type Store interface {
 	Get(context.Context, string, string, string, string) (DraftRecord, error)
 	Update(context.Context, string, string, string, UpdatePlan) (DraftRecord, error)
 	ListRevisions(context.Context, string, string, string, int, int) ([]RevisionRecord, int, error)
+	ResolvePublicationDependencies(context.Context, string, string, string, []DependencyIndex) ([]DependencySnapshot, []ValidationIssue, error)
+	ReplayPublication(context.Context, string, string, string, string, string, string) (PublishedVersion, bool, error)
+	Publish(context.Context, string, string, string, PublishPlan) (PublishedVersion, error)
+	ListVersions(context.Context, string, string, string, int, int) ([]PublishedVersion, int, error)
+	GetVersionArtifact(context.Context, string, string, string, int) (VersionArtifact, error)
+	Rollback(context.Context, string, string, string, int, string, string, string) (PublishedVersion, error)
 }

@@ -7,7 +7,7 @@ export type APIError = {
   repairAttempted?: boolean
   diagnosticCode?: string
   suggestion?: string
-  details?: Array<{ path: string; code?: string; reason: string }>
+  details?: Array<{ path: string; code?: string; reason?: string; message?: string }>
   /** 乐观锁冲突返回服务端最新基线，页面仍需显式让用户选择是否加载。 */
   currentRevision?: number
   currentHash?: string
@@ -17,7 +17,7 @@ export class RequestError extends Error {
   /** 保留服务端错误结构和 HTTP 状态，便于页面精确展示。 */
   constructor(public readonly detail: APIError, public readonly status: number) {
     // 发布校验可能同时返回多个路径；完整保留稳定代码，避免设计器只展示第一条遗漏。
-    const issues = detail.details?.map(issue => `${issue.path}${issue.code ? ` [${issue.code}]` : ''} ${issue.reason}`).join('；')
+    const issues = detail.details?.map(issue => `${issue.path}${issue.code ? ` [${issue.code}]` : ''} ${issue.reason ?? issue.message ?? ''}`).join('；')
     super(issues ? `${detail.message}：${issues}` : detail.message)
   }
 }

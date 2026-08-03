@@ -87,6 +87,7 @@ func (toolLoopTestExecutor) ExecuteTool(
 			Content: json.RawMessage(
 				`{"candidates":[{"code":"metric_sales"}]}`,
 			),
+			EvidenceIDs: []string{"metric:metric_sales@v1"},
 		}, nil
 	case "submit_metric_selection":
 		return ToolExecutionResult{
@@ -95,6 +96,18 @@ func (toolLoopTestExecutor) ExecuteTool(
 	default:
 		return ToolExecutionResult{}, errors.New("unknown tool")
 	}
+}
+
+type repeatedEvidenceToolLoopExecutor struct{}
+
+func (repeatedEvidenceToolLoopExecutor) ExecuteTool(
+	_ context.Context,
+	execution ToolExecution,
+) (ToolExecutionResult, error) {
+	return ToolExecutionResult{
+		Content:     json.RawMessage(`{"candidates":[]}`),
+		EvidenceIDs: []string{"metric-search:fixed"},
+	}, nil
 }
 
 func TestServiceExposesEveryConfiguredFallbackModel(t *testing.T) {
@@ -222,6 +235,10 @@ func TestInvokeToolLoopReplaysReasoningAndStopsAtTerminalTool(t *testing.T) {
 		len(result.Trace.Steps) != 2 ||
 		result.Trace.Steps[0].ToolName != "search_metrics" ||
 		result.Trace.Steps[0].Terminal ||
+		result.Trace.Steps[0].ArgumentsHash == "" ||
+		result.Trace.Steps[0].StateHash == "" ||
+		result.Trace.Steps[0].NewEvidenceCount != 1 ||
+		len(result.Trace.EvidenceIDs) != 1 ||
 		result.Trace.Steps[1].ToolName != "submit_metric_selection" ||
 		!result.Trace.Steps[1].Terminal ||
 		result.Usage.PromptTokens != 30 ||
@@ -251,6 +268,65 @@ func TestInvokeToolLoopReplaysReasoningAndStopsAtTerminalTool(t *testing.T) {
 			"completion=%#v failure=%#v",
 			store.completion, store.failure,
 		)
+	}
+}
+
+func TestInvokeToolLoopRejectsSearchWithoutNewEvidence(t *testing.T) {
+	store := &toolLoopTestStore{}
+	provider := &toolLoopTestProvider{responses: []ToolProviderResult{
+		{
+			Message: ToolMessage{ToolCalls: []ToolCall{{
+				ID: "search-1", Name: "search_metrics",
+				Arguments: json.RawMessage(`{"query":"销售额"}`),
+			}}},
+			Model: "glm-test", Usage: Usage{
+				PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2,
+			},
+		},
+		{
+			Message: ToolMessage{ToolCalls: []ToolCall{{
+				ID: "search-2", Name: "search_metrics",
+				Arguments: json.RawMessage(`{"query":"销售额"}`),
+			}}},
+			Model: "glm-test", Usage: Usage{
+				PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2,
+			},
+		},
+	}}
+	service, err := NewService(store, provider, ServiceOptions{
+		Timeout: time.Second, AttemptTimeout: time.Second,
+		MaxAttempts: 3, BaseRetryDelay: time.Millisecond,
+		MaxRetryDelay: time.Millisecond, MaxInputBytes: 64 << 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.InvokeToolLoop(context.Background(), ToolInvocation{
+		TenantID: "tenant", ActorID: "actor",
+		Purpose: PurposeSemanticQueryPlanning, PromptVersion: "no-progress-v1",
+		Request: ToolLoopRequest{
+			Messages: []Message{{
+				Role:  MessageRoleUser,
+				Parts: []ContentPart{{Type: ContentTypeText, Text: "销售额"}},
+			}},
+			Tools: []ToolDefinition{{
+				Name: "search_metrics", Description: "检索指标",
+				Parameters: json.RawMessage(`{
+					"type":"object","additionalProperties":false,
+					"required":["query"],
+					"properties":{"query":{"type":"string"}}
+				}`),
+			}},
+			ToolChoice: ToolChoiceAuto, MaxOutputTokens: 100,
+			MaxRounds: 2, MaxToolCalls: 2,
+		},
+		Executor: repeatedEvidenceToolLoopExecutor{},
+	})
+	var providerErr *ProviderError
+	if !errors.As(err, &providerErr) ||
+		providerErr.Code != ErrorCodeToolNoProgress ||
+		store.failure.ErrorCode != string(ErrorCodeToolNoProgress) {
+		t.Fatalf("expected no-progress failure, got err=%v store=%#v", err, store)
 	}
 }
 

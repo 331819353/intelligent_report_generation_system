@@ -58,6 +58,7 @@ type Config struct {
 	MinIOSecretKey                  string
 	MinIOUseSSL                     bool
 	MinIOUploadsBucket              string
+	MinIOReportsBucket              string
 	AuthTokenIssuer                 string
 	AuthAccessSecret                string
 	AuthAccessTTL                   time.Duration
@@ -258,6 +259,7 @@ func loadApplication(process databaseProcess) (Config, error) {
 		MinIOSecretKey:                  envOrDefault("MINIO_SECRET_KEY", "local_minio_password"),
 		MinIOUseSSL:                     strings.EqualFold(os.Getenv("MINIO_USE_SSL"), "true"),
 		MinIOUploadsBucket:              envOrDefault("MINIO_BUCKET_UPLOADS", "uploads"),
+		MinIOReportsBucket:              envOrDefault("MINIO_BUCKET_REPORTS", "reports"),
 		AuthTokenIssuer:                 envOrDefault("AUTH_TOKEN_ISSUER", "intelligent-report-system"),
 		AuthAccessSecret:                envOrDefault("AUTH_ACCESS_TOKEN_SECRET", "local_access_token_secret_change_me"),
 		AuthAccessTTL:                   15 * time.Minute,
@@ -495,6 +497,9 @@ func (c Config) Validate() error {
 		return errors.New(
 			"production MinIO must use TLS unless it is loopback",
 		)
+	}
+	if strings.TrimSpace(c.MinIOUploadsBucket) == "" || strings.TrimSpace(c.MinIOReportsBucket) == "" {
+		return errors.New("MinIO bucket names must not be empty")
 	}
 	credentialKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(c.DataSourceCredentialKey))
 	if err != nil || len(credentialKey) != 32 {

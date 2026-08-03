@@ -198,6 +198,122 @@
 .semantic-chat-answer > footer { display: flex; flex-wrap: wrap; gap: 7px 14px; color: #8b929d; font-size: 8px; }
 .semantic-chat-answer > footer span { display: inline-flex; align-items: center; gap: 4px; }
 
+.semantic-chat-interpretation {
+  max-width: 720px;
+  display: grid;
+  gap: 9px;
+  margin: 9px 0 10px;
+  border: 1px solid #cfe0f6;
+  border-radius: 10px;
+  padding: 11px 12px;
+  background: #f7faff;
+}
+
+.semantic-chat-interpretation > header { display: flex; align-items: center; gap: 6px; color: #2e66b8; }
+.semantic-chat-interpretation > header strong { font-size: 10px; }
+.semantic-chat-interpretation > header span { margin-left: auto; border-radius: 999px; padding: 3px 6px; background: #e8f1ff; color: #4c73ad; font-size: 8px; font-weight: 750; }
+.semantic-chat-interpretation > div { display: grid; gap: 7px; }
+.semantic-chat-interpretation article { display: grid; gap: 7px; border-top: 1px solid #e2eaf5; padding-top: 8px; }
+.semantic-chat-interpretation article:first-child { border-top: 0; padding-top: 0; }
+.semantic-chat-interpretation dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; margin: 0; }
+.semantic-chat-interpretation dl > div { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 5px; align-items: baseline; }
+.semantic-chat-interpretation dt { color: #8390a3; font-size: 8px; font-weight: 750; }
+.semantic-chat-interpretation dd { min-width: 0; margin: 0; color: #3d4b61; font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+.semantic-chat-interpretation article > small { color: #8693a5; font: 8px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.semantic-chat-interpretation > p { margin: 0; color: #718096; font-size: 8px; line-height: 1.5; }
+
+.semantic-chat-live-process {
+  max-width: 640px;
+  margin: 10px 0 12px;
+  overflow: hidden;
+  border: 1px solid #d9e5f8;
+  border-radius: 11px;
+  background: linear-gradient(180deg, #f8fbff 0%, #fff 100%);
+  box-shadow: 0 8px 24px #3769b50a;
+}
+
+.semantic-chat-live-process > header {
+  display: grid;
+  grid-template-columns: 9px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid #e8eef8;
+}
+
+.semantic-chat-live-process > header strong { color: #315d9e; font-size: 11px; }
+.semantic-chat-live-process > header em { color: #7e8b9e; font-size: 8px; font-style: normal; font-weight: 700; }
+.semantic-chat-live-indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #3475e1;
+  box-shadow: 0 0 0 4px #3475e118;
+  animation: semantic-chat-live-pulse 1.4s ease-out infinite;
+}
+
+.semantic-chat-live-process > ol {
+  display: grid;
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px 12px 4px;
+  list-style: none;
+  scrollbar-gutter: stable;
+}
+
+.semantic-chat-live-process > ol > li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 8px;
+  min-height: 40px;
+  align-items: start;
+}
+
+.semantic-chat-live-process > ol > li:not(:last-child)::before {
+  position: absolute;
+  top: 17px;
+  bottom: -1px;
+  left: 9px;
+  width: 1px;
+  background: #dce4f0;
+  content: "";
+}
+
+.semantic-chat-live-process li > span {
+  z-index: 1;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #eef4ff;
+  color: #3971ca;
+}
+
+.semantic-chat-live-process li > span > i {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.semantic-chat-live-process li.active > span {
+  box-shadow: 0 0 0 4px #3475e112;
+  animation: semantic-chat-step-pulse 1.2s ease-in-out infinite;
+}
+
+.semantic-chat-live-process li.succeeded > span { background: #e9f8f1; color: #16805a; }
+.semantic-chat-live-process li.warn > span { background: #fff5df; color: #a6680b; }
+.semantic-chat-live-process li > div { min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 2px 0 12px; }
+.semantic-chat-live-process li strong { color: #485464; font-size: 10px; line-height: 1.55; }
+.semantic-chat-live-process li.active strong { color: #285da9; }
+.semantic-chat-live-process li small { flex: none; color: #96a0ae; font-size: 8px; }
+.semantic-chat-live-process li.succeeded small { color: #438c72; }
+.semantic-chat-live-process li.warn small { color: #9b6a1e; }
+.semantic-chat-live-process > footer { padding: 7px 12px 9px 40px; color: #8b96a5; font-size: 8px; line-height: 1.5; }
+
 .semantic-chat-retrieval-process {
   margin: 10px 0 12px;
   overflow: hidden;
@@ -407,8 +523,25 @@
 }
 
 .semantic-chat-clarification button:hover { border-color: #3157d5; }
+.semantic-chat-clarification button.selected { border-color: #3157d5; background: #f2f6ff; box-shadow: 0 0 0 1px #3157d526; }
+.semantic-chat-clarification button:disabled { cursor: not-allowed; opacity: .55; }
+.semantic-chat-clarification .confirm { grid-column: 1 / -1; min-height: 36px; align-items: center; justify-content: center; flex-direction: row; border-color: #3157d5; background: #3157d5; color: #fff; font-weight: 750; }
+.semantic-chat-clarification .confirm:hover { background: #2849b6; }
+.semantic-chat-clarification-intro { grid-column: 1 / -1; display: grid; gap: 3px; margin: 0; }
+.semantic-chat-clarification-intro strong { color: #344054; font-size: 10px; }
+.semantic-chat-clarification-intro span { color: #7a8492; font-size: 9px; }
+.semantic-chat-clarification fieldset { grid-column: 1 / -1; min-width: 0; margin: 0; border: 1px solid #e2e6ed; border-radius: 10px; padding: 9px; }
+.semantic-chat-clarification fieldset legend { padding: 0 5px; color: #526174; font-size: 9px; font-weight: 750; }
+.semantic-chat-clarification fieldset > div { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 7px; }
 .semantic-chat-clarification span,
 .semantic-chat-clarification small { color: #667085; overflow-wrap: anywhere; }
+.semantic-chat-clarification .confirm { color: #fff; }
+
+.semantic-chat-semantic-gap { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 9px; margin: 12px 0; border: 1px solid #f1d5a8; border-radius: 10px; padding: 11px; background: #fffaf2; color: #a66212; }
+.semantic-chat-semantic-gap > div { display: grid; gap: 3px; }
+.semantic-chat-semantic-gap strong { color: #805018; font-size: 10px; }
+.semantic-chat-semantic-gap span { color: #715d46; font-size: 9px; line-height: 1.5; }
+.semantic-chat-semantic-gap small { color: #9a7d5c; font-size: 8px; line-height: 1.5; }
 
 .semantic-chat-member-lookups,
 .semantic-chat-final-plans {
@@ -536,6 +669,8 @@
 
 .semantic-chat-composer textarea:focus { border-color: #7198e5; box-shadow: 0 0 0 3px #2864dc12; }
 .semantic-chat-composer > button { width: 42px; height: 42px; align-self: end; padding: 0; }
+.semantic-chat-composer > button.semantic-chat-cancel { display: grid; place-items: center; border: 1px solid #efc0bb; border-radius: 9px; background: #fff5f4; color: #b33c34; }
+.semantic-chat-composer > button.semantic-chat-cancel:hover { background: #fdebea; }
 .semantic-chat-composer > small { grid-column: 1 / -1; color: #999fa8; font-size: 8px; }
 
 .semantic-chat-quality {
@@ -629,6 +764,16 @@
 .semantic-chat-resolution small { overflow: hidden; color: #969da8; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
 .semantic-chat-condition-json { max-height: 220px; margin: 8px 0 0; padding: 9px; overflow: auto; border-radius: 8px; background: #f5f7fb; color: #44536a; font: 8px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
+.semantic-chat-accuracy-evidence { display: grid; gap: 8px; margin-top: 8px; }
+.semantic-chat-accuracy-evidence article { display: grid; gap: 7px; border: 1px solid #dfe7f3; border-radius: 8px; padding: 9px; background: #f8faff; }
+.semantic-chat-accuracy-evidence article > strong { color: #315e9f; font-size: 9px; }
+.semantic-chat-accuracy-evidence dl { display: grid; gap: 5px; margin: 0; }
+.semantic-chat-accuracy-evidence dl > div { display: grid; grid-template-columns: 55px minmax(0, 1fr); gap: 7px; }
+.semantic-chat-accuracy-evidence dt { color: #8b96a7; font-size: 8px; }
+.semantic-chat-accuracy-evidence dd { min-width: 0; margin: 0; overflow: hidden; color: #4b5870; font: 8px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-chat-accuracy-evidence ul { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.semantic-chat-accuracy-evidence ul li { display: inline-flex; align-items: center; gap: 3px; border-radius: 999px; padding: 3px 6px; background: #eaf8f2; color: #147a52; font-size: 7px; }
+
 .semantic-chat-current-quality > ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
 .semantic-chat-current-quality > ul li { display: grid; grid-template-columns: 18px minmax(0, 1fr) 15px; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid #edf0f3; color: #b06a16; }
 .semantic-chat-current-quality > ul li.pass { color: #16805a; }
@@ -645,10 +790,20 @@
 
 .semantic-chat-feedback { display: grid; gap: 8px; margin-top: 12px; }
 .semantic-chat-feedback > span { color: #747d89; font-size: 9px; font-weight: 700; }
+.semantic-chat-feedback textarea { width: 100%; min-height: 54px; resize: vertical; border: 1px solid #dfe3e8; border-radius: 7px; padding: 7px 8px; background: #fff; color: #4a5565; font: inherit; font-size: 9px; line-height: 1.5; }
+.semantic-chat-feedback textarea:focus { border-color: #7198e5; outline: 0; box-shadow: 0 0 0 3px #2864dc12; }
+.semantic-chat-feedback textarea:disabled { background: #f6f7f9; opacity: .7; }
 .semantic-chat-feedback > div { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
 .semantic-chat-feedback button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; border: 1px solid #dfe3e8; border-radius: 7px; padding: 7px; background: #fff; color: #687383; font-size: 9px; }
 .semantic-chat-feedback button.active.positive { border-color: #a7dcc6; background: #effaf5; color: #147a52; }
 .semantic-chat-feedback button.active.negative { border-color: #efc0bb; background: #fff5f4; color: #b33c34; }
+.semantic-chat-feedback button:disabled { cursor: not-allowed; opacity: .55; }
+.semantic-chat-feedback > small { color: #b42318; font-size: 9px; }
+
+.semantic-chat-tool-loop { display: grid; gap: 4px; margin: 8px 0; padding: 8px 10px; border: 1px solid #dce7fb; border-radius: 7px; background: #f7faff; }
+.semantic-chat-tool-loop b { color: #2457a7; font-size: 10px; }
+.semantic-chat-tool-loop span { color: #374151; font-size: 10px; line-height: 1.5; }
+.semantic-chat-tool-loop small { color: #748094; font-size: 9px; }
 
 .semantic-chat-golden > header > div { display: flex; align-items: center; gap: 7px; color: #2864dc; }
 .semantic-chat-golden > p { margin: 12px 0 0; color: #8c949f; font-size: 9px; line-height: 1.6; }
@@ -660,6 +815,15 @@
 
 @keyframes semantic-chat-pulse {
   50% { opacity: .45; }
+}
+
+@keyframes semantic-chat-live-pulse {
+  0% { box-shadow: 0 0 0 0 #3475e13d; }
+  70%, 100% { box-shadow: 0 0 0 7px #3475e100; }
+}
+
+@keyframes semantic-chat-step-pulse {
+  50% { transform: scale(.88); opacity: .65; }
 }
 
 @media (max-width: 1380px) {

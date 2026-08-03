@@ -214,6 +214,14 @@ SELECT format(
 WHERE to_regclass('platform.semantic_qa_settings') IS NOT NULL
 \gexec
 
+-- 问答运行状态是 API 编排事实。worker 可读取用于观测，但不能伪造状态迁移。
+SELECT format(
+  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.semantic_question_runs, platform.semantic_question_run_events FROM %I',
+  :'worker_user'
+)
+WHERE to_regclass('platform.semantic_question_runs') IS NOT NULL
+\gexec
+
 -- 语义发布包和活动版本指针只允许 API 控制面事务修改。阶段 2 的投影 worker
 -- 通过专用 SECURITY DEFINER 函数报告投影结果，不能直接改写发布清单或激活状态。
 SELECT format(

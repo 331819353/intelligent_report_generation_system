@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -14,10 +15,26 @@ import (
 	"intelligent-report-generation-system/internal/reportjson"
 )
 
-type Service struct{ store Store }
+type Service struct {
+	store          Store
+	query          *reportQueryRuntime
+	artifacts      ArtifactStore
+	artifactBucket string
+}
+
+// ArtifactStore 是发布控制面依赖的最小对象存储边界；MinIO/S3 实现不进入 Report DSL。
+type ArtifactStore interface {
+	Put(context.Context, string, string, io.Reader, int64, string) error
+	Get(context.Context, string, string) (io.ReadCloser, error)
+}
 
 // NewService 创建报告草稿服务；发布版本和对象存储编排由 T0601 负责。
-func NewService(store Store) *Service { return &Service{store: store} }
+func NewService(store Store) *Service { return &Service{store: store, query: newReportQueryRuntime()} }
+
+func (s *Service) SetArtifactStore(store ArtifactStore, bucket string) {
+	s.artifacts = store
+	s.artifactBucket = strings.TrimSpace(bucket)
+}
 
 func (s *Service) Create(ctx context.Context, tenantID, actorID, idempotencyKey string, input CreateInput) (DraftRecord, error) {
 	if tenantID == "" || actorID == "" || !validIdempotencyKey(idempotencyKey) || len(input.Definition) > MaxDefinitionBytes {
@@ -150,15 +167,24 @@ func (s *Service) Update(ctx context.Context, tenantID, actorID, id, idempotency
 		if err := validatePersistentIdentity(baseline.Document, next.Document); err != nil {
 			return DraftRecord{}, err
 		}
-		if err := validateLockedMutation(baseline.Document, next.Document); err != nil {
-			return DraftRecord{}, err
-		}
-		if err := validateChangeSemantics(current.Document, next.Document, change); err != nil {
-			return DraftRecord{}, err
-		}
-		// 占用校验必须覆盖每个中间变更；若只比较批次首尾，移动后撤销会把真实触碰过的分块抵消掉。
-		for _, blockID := range touchedBlocks(calculateDelta(current.Document, next.Document)) {
-			affectedBlockSet[blockID] = true
+		if baseline.Document.IsCardDSL() {
+			if err := validateCardChangeSemantics(current.Document, next.Document, change); err != nil {
+				return DraftRecord{}, err
+			}
+			for _, cardID := range touchedCards(current.Document, next.Document) {
+				affectedBlockSet[cardID] = true
+			}
+		} else {
+			if err := validateLockedMutation(baseline.Document, next.Document); err != nil {
+				return DraftRecord{}, err
+			}
+			if err := validateChangeSemantics(current.Document, next.Document, change); err != nil {
+				return DraftRecord{}, err
+			}
+			// 占用校验必须覆盖每个中间变更；若只比较批次首尾，移动后撤销会把真实触碰过的分块抵消掉。
+			for _, blockID := range touchedBlocks(calculateDelta(current.Document, next.Document)) {
+				affectedBlockSet[blockID] = true
+			}
 		}
 		targetJSON, err := json.Marshal(change.Target)
 		if err != nil {
@@ -244,6 +270,9 @@ func validatePersistentIdentity(baseline, candidate reportjson.Document) error {
 }
 
 func normalizeEditorState(input EditorState, document reportjson.Document) (EditorState, error) {
+	if document.IsCardDSL() {
+		return EditorState{MinimumRowsByPage: map[string]int{}}, nil
+	}
 	provided := input.MinimumRowsByPage
 	if provided == nil {
 		provided = map[string]int{}
@@ -284,6 +313,21 @@ func deriveIndexes(document reportjson.Document) ([]ComponentIndex, []Dependency
 			seenDependencies[key] = true
 			dependencies = append(dependencies, DependencyIndex{Type: kind, ID: id, Path: path})
 		}
+	}
+	if document.IsCardDSL() {
+		for cardIndex, card := range document.Cards {
+			components = append(components, ComponentIndex{PageID: "main", BlockID: "canvas", ComponentID: card.ID, ComponentType: card.Type})
+			path := fmt.Sprintf("cards[%d].binding", cardIndex)
+			for metricIndex, metric := range card.Binding.Metrics {
+				addDependency("METRIC", metric.ID, fmt.Sprintf("%s.metrics[%d].id", path, metricIndex))
+			}
+		}
+		sort.Slice(components, func(i, j int) bool { return components[i].ComponentID < components[j].ComponentID })
+		sort.Slice(dependencies, func(i, j int) bool {
+			left, right := dependencies[i], dependencies[j]
+			return left.Type+"\x00"+left.ID+"\x00"+left.Path < right.Type+"\x00"+right.ID+"\x00"+right.Path
+		})
+		return components, dependencies
 	}
 	for requirementIndex, requirement := range document.DataRequirements {
 		path := fmt.Sprintf("dataRequirements[%d]", requirementIndex)

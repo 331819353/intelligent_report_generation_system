@@ -303,13 +303,17 @@ func tokenSemanticSearchTargets(token QueryToken) (
 ) {
 	switch token.EntityType {
 	case "TEXT", "PUNCTUATION", "QUERY_WORD",
-		"ANALYSIS_WORD", "COMPARISON_WORD":
+		"ANALYSIS_WORD", "COMPARISON_WORD", "METRIC":
 		return false, false
 	case "TIME", "LOCATION", "PERSON", "ORGANIZATION",
 		"PROPER_NOUN", "NUMBER", "DIMENSION", "DIMENSION_VALUE":
 		return false, true
 	default:
-		return true, true
+		// Metric retrieval is intentionally whole-question first. The metric
+		// tool loop may issue a bounded follow-up search for a complete metric
+		// phrase when those candidates are insufficient; individual tokenizer
+		// fragments are used only to discover dimensions and values.
+		return false, true
 	}
 }
 
@@ -1213,7 +1217,7 @@ func (interpreter *SemanticInterpreter) completeTokenSemantics(
 	invocation := aiplatform.Invocation{
 		TenantID: tenantID, ActorID: actorID,
 		Purpose:       aiplatform.PurposeSemanticQueryPlanning,
-		PromptVersion: "semantic-token-question-completion-v2",
+		PromptVersion: "semantic-token-question-completion-v3",
 		ResourceType:  "SEMANTIC_TOKEN_COMPLETION",
 		ResourceID:    hashText(question),
 		Request: aiplatform.ProviderRequest{
@@ -1222,12 +1226,12 @@ func (interpreter *SemanticInterpreter) completeTokenSemantics(
 					Role: aiplatform.MessageRoleSystem,
 					Parts: []aiplatform.ContentPart{{
 						Type: aiplatform.ContentTypeText,
-						Text: `你是只读语义意图与候选选择器。输入包含原问题、整句指标向量 Top 5，以及每个分词的指标语义 Top 5 和维度语义 Top 5。不要复制或改写名称，只返回意图、候选排名和分词位置。
+						Text: `你是只读语义意图与候选选择器。输入包含原问题、整句指标语义 Top 5，以及每个分词的维度语义 Top 5。指标必须优先根据保留完整上下文的 questionMetricTop5 判断；分词仅用于识别维度和值。不要复制或改写名称，只返回意图、候选排名和分词位置。
 intent 只能是 LOOKUP、METRIC、TREND、COMPARISON、RANKING、DRILLDOWN、DISTRIBUTION、FUNNEL、RETENTION、ANOMALY、UNKNOWN。
 LOOKUP 只用于用户明确要求记录、列表、明细或逐行数据；“多少、几笔、金额、数量、总计、是多少”这类聚合值问题必须是 METRIC。
 questionMetricRanks：从 questionMetricTop5 选择候选，排名只能是 1 到 5。
-metricSelections：tokenStart 是表达指标的分词 start，candidateRank 是该分词 metricCandidates 的 1 到 5。
-整句指标 Top 5 和逐词指标 Top 5 都只是互斥候选，不是结果清单。对原问题中的每一个独立指标表达，只能从整句候选或对应分词候选中选出一个语义最吻合的指标，不能两路重复选择，也严禁因为候选进入 Top 5 就全部选择。只有原问题明确表达多个不同指标时，才允许选择多个指标；没有等价候选时输出空数组。
+metricSelections：保留为协议兼容字段，必须返回空数组；不得通过普通分词选择指标。
+整句指标 Top 5 只是候选，不是结果清单。对原问题中的每一个独立指标表达，只能从整句候选中选出一个语义最吻合的指标，严禁因为候选进入 Top 5 就全部选择。只有原问题明确表达多个不同指标时，才允许选择多个指标；没有等价候选时输出空数组，后续受控工具循环会按完整指标短语补充检索。
 dimensionSelections：sourceTokenStart 是原问题中维度值分词的 start；candidateTokenStart 是提供维度语义候选的分词 start；candidateRank 是该分词 dimensionCandidates 的 1 到 5。可以使用相邻词召回的维度候选，但必须依据候选中已发布的 dimensionName、dimensionCode、dimensionType、valueType 和 description 判断其是否符合完整问题，不得根据程序外的固定业务词表推断。同一个 sourceTokenStart 只能选择一个最符合完整问题的维度。
 每个选择都必须返回 normalizedValue、timeRangeStart、timeRangeEndExclusive。非 TIME 维度的 normalizedValue 必须逐字复制原分词，两个时间边界必须是空字符串，不能改写成另一个成员值。TIME 维度必须结合原问题中的时间关系、referenceTime、timezone 和候选 valueType 完成规范化：normalizedValue 输出便于读者核对的明确日期或时间范围；DATE 边界使用 YYYY-MM-DD，DATETIME 边界使用带时区的 RFC3339；timeRangeStart/timeRangeEndExclusive 表示左闭右开的实际查询范围。
 必须先区分三种时间关系：
@@ -1441,9 +1445,9 @@ func resolveTokenSemanticLLMOutput(
 	for _, retrieval := range retrievals {
 		retrievalByStart[retrieval.Start] = retrieval
 	}
-	// Whole-question and per-token retrieval are alternative evidence routes.
-	// When the model selected whole-question candidates, do not union a second
-	// token route into an accidental multi-metric result.
+	// Per-token metric selections remain readable for responses produced by an
+	// older prompt, but the current retrieval path leaves those candidate lists
+	// empty and resolves metrics from the whole-question shortlist instead.
 	if len(output.QuestionMetricRanks) == 0 {
 		for _, selection := range output.MetricSelections {
 			retrieval, found := retrievalByStart[selection.TokenStart]

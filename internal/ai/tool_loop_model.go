@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	MaxToolLoopRounds       = 4
+	MaxToolLoopRounds       = 3
 	MaxToolCallsPerLoop     = 8
 	MaxToolResultBytes      = 32 << 10
 	MaxToolLoopResultBytes  = 64 << 10
@@ -88,8 +88,16 @@ type ToolExecution struct {
 type ToolExecutionResult struct {
 	// Content must be one bounded JSON value. It is returned to the model for a
 	// normal tool and becomes the final structured result for a terminal tool.
-	Content  json.RawMessage
-	Terminal bool
+	Content json.RawMessage
+	// EvidenceIDs identify governed records or immutable retrieval observations.
+	// A non-terminal successful call may continue only when it contributes at
+	// least one evidence ID that has not appeared earlier in this loop.
+	EvidenceIDs []string
+	// ErrorCode is a stable tool-registry code. Only a repairable error is
+	// returned to the model; a non-repairable error closes the loop locally.
+	ErrorCode  string
+	Repairable bool
+	Terminal   bool
 }
 
 type ToolExecutor interface {
@@ -109,15 +117,21 @@ type ToolInvocation struct {
 }
 
 type ToolLoopTrace struct {
-	Rounds    int                 `json:"rounds"`
-	ToolCalls int                 `json:"toolCalls"`
-	Steps     []ToolLoopStepTrace `json:"steps"`
+	Rounds      int                 `json:"rounds"`
+	ToolCalls   int                 `json:"toolCalls"`
+	EvidenceIDs []string            `json:"evidenceIds"`
+	Steps       []ToolLoopStepTrace `json:"steps"`
 }
 
 type ToolLoopStepTrace struct {
-	Round    int    `json:"round"`
-	ToolName string `json:"toolName"`
-	Terminal bool   `json:"terminal"`
+	Round            int      `json:"round"`
+	ToolName         string   `json:"toolName"`
+	ArgumentsHash    string   `json:"argumentsHash"`
+	StateHash        string   `json:"stateHash"`
+	EvidenceIDs      []string `json:"evidenceIds"`
+	NewEvidenceCount int      `json:"newEvidenceCount"`
+	ErrorCode        string   `json:"errorCode,omitempty"`
+	Terminal         bool     `json:"terminal"`
 }
 
 type ToolInvocationResult struct {

@@ -37,6 +37,15 @@ func TestQuerySemanticHintsAreBoundedAndContainNoPredicates(t *testing.T) {
 	}
 }
 
+func TestContainsControlRejectsFeedbackControlCharacters(t *testing.T) {
+	if !containsControl("bad\tfeedback") || !containsControl("bad\nfeedback") {
+		t.Fatal("all control characters must be rejected")
+	}
+	if containsControl("指标结果不准确") {
+		t.Fatal("ordinary feedback text must remain valid")
+	}
+}
+
 func TestQueryWithSemanticHintsCarriesOnlyIntentNamesAndValues(t *testing.T) {
 	result := queryWithSemanticHints(
 		"华东区域订单量",
@@ -216,9 +225,36 @@ func TestDimensionClarificationChoicesExcludeLowRelevanceCandidates(
 	lookup.DecisionCandidates[0].Score = 0.952
 	if choices := dimensionClarificationChoices(
 		[]QueryDimensionValueLookupTrace{lookup}, "complaint_count",
-	); len(choices) != 1 {
+	); len(choices) != 1 || choices[0].Term != "月球" {
 		t.Fatalf("close ambiguous choices should remain confirmable: %#v",
 			choices)
+	}
+}
+
+func TestConfirmedDecisionsRejectTwoDimensionsForOneTerm(t *testing.T) {
+	lookups := []QueryDimensionValueLookupTrace{
+		{
+			Term: "北京", DimensionCode: "city",
+			DecisionCandidates: []QueryDecisionCandidate{{
+				DecisionID: "decision-city", MemberValue: "beijing",
+			}},
+		},
+		{
+			Term: "北京", DimensionCode: "region",
+			DecisionCandidates: []QueryDecisionCandidate{{
+				DecisionID: "decision-region", MemberValue: "north",
+			}},
+		},
+	}
+	if _, valid := applyConfirmedDecisions(
+		lookups,
+		[]QueryConfirmedDecision{
+			{MetricCode: "complaint_count", DecisionID: "decision-city"},
+			{MetricCode: "complaint_count", DecisionID: "decision-region"},
+		},
+		"complaint_count",
+	); valid {
+		t.Fatal("user confirmation must preserve one decision per dimension term")
 	}
 }
 
@@ -330,6 +366,16 @@ func TestSemanticToolLoopFallbackOnlyHandlesModelFailures(t *testing.T) {
 	if shouldRetrySemanticToolLoop(ErrInvalidRequest) ||
 		shouldRetrySemanticToolLoop(errors.New("database unavailable")) {
 		t.Fatal("request and tool execution errors must not switch providers")
+	}
+	if !semanticDeterministicFallbackAllowed(
+		aiplatform.NormalizeProviderError(context.DeadlineExceeded),
+	) {
+		t.Fatal("provider timeout should permit deterministic catalog fallback")
+	}
+	if semanticDeterministicFallbackAllowed(&aiplatform.ProviderError{
+		Code: aiplatform.ErrorCodeToolNoProgress,
+	}) || semanticDeterministicFallbackAllowed(ErrUnprovenPath) {
+		t.Fatal("protocol and evidence failures must not be silently downgraded")
 	}
 }
 
@@ -460,14 +506,14 @@ func TestConfirmedDecisionUsesOnlyRecalledGovernedCandidate(t *testing.T) {
 			PredicateOperator: "EQUALS",
 		}},
 	}}
-	applied := applyConfirmedDecisions(
+	applied, valid := applyConfirmedDecisions(
 		lookups,
 		[]QueryConfirmedDecision{{
 			MetricCode: "sales_amount", DecisionID: decisionID,
 		}},
 		"sales_amount",
 	)
-	if !applied[0].Selected ||
+	if !valid || !applied[0].Selected ||
 		len(applied[0].SelectedMemberKeys) != 1 ||
 		applied[0].SelectedMemberKeys[0] != "EAST" ||
 		applied[0].WhereDesignStatus !=
@@ -485,16 +531,15 @@ func TestConfirmedDecisionUsesOnlyRecalledGovernedCandidate(t *testing.T) {
 		lookups[0].DecisionCandidates...,
 	)
 	untrustedInput[0].DecisionCandidates[0].Selected = false
-	untrusted := applyConfirmedDecisions(
+	if _, valid := applyConfirmedDecisions(
 		untrustedInput,
 		[]QueryConfirmedDecision{{
 			MetricCode: "sales_amount",
 			DecisionID: "20000000-0000-4000-8000-000000000002",
 		}},
 		"sales_amount",
-	)
-	if untrusted[0].Selected {
-		t.Fatalf("unknown decision was selected: %#v", untrusted[0])
+	); valid {
+		t.Fatal("unknown decision id must be rejected")
 	}
 }
 
@@ -536,6 +581,19 @@ func TestFinalizeQueryTurnStatusRejectsEmptyPlan(t *testing.T) {
 	finalizeQueryTurnStatus(&result)
 	if result.Status != "SEMANTIC_GAP" || result.Clarification == nil ||
 		result.Clarification.Type != "SEMANTIC_GAP" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestFinalizeQueryTurnStatusRejectsNonReadyLeafPlan(t *testing.T) {
+	result := QueryTurnPlan{Status: "PLANNING", Plans: []QueryPlan{{
+		Status: "REJECTED", FailureCode: "SOURCE_LINEAGE_NOT_PROVEN",
+	}}}
+	finalizeQueryTurnStatus(&result)
+	if result.Status != "SEMANTIC_GAP" || result.Clarification == nil ||
+		!strings.Contains(
+			result.Clarification.Message, "SOURCE_LINEAGE_NOT_PROVEN",
+		) {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 }
