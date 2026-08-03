@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	aiplatform "intelligent-report-generation-system/internal/ai"
@@ -37,6 +38,7 @@ type QueryTurnSlots struct {
 	MetricCandidates     []QueryMetricCandidateTrace
 	NeedsClarification   bool
 	MetricToolLoop       *QueryMetricToolLoopTrace
+	GovernedMetricOnly   bool
 }
 
 type QueryInterpreter interface {
@@ -64,6 +66,12 @@ type QueryDimensionHintEnricher interface {
 		context.Context, string, string, string, string,
 		[]QuerySemanticDimensionHint,
 	) ([]QueryDimensionValueLookupTrace, error)
+}
+
+type QueryDimensionExactHintResolver interface {
+	ResolveExactDimensionHints(
+		context.Context, string, string, []QuerySemanticDimensionHint,
+	) ([]QueryDimensionValueLookupTrace, bool, error)
 }
 
 type QueryDimensionToolLoopResolver interface {
@@ -299,6 +307,142 @@ func (interpreter *SemanticInterpreter) EnrichDimensionLookupsWithHints(
 		}
 	}
 	return deduplicateSemanticLookups(lookups), nil
+}
+
+// ResolveExactDimensionHints resolves only exact current-version dimension
+// members and aliases through the persisted decision graph. It deliberately
+// performs no embedding or model call: when every actionable hint is proven,
+// the caller can skip the slower semantic tool loop; otherwise the ordinary
+// ambiguity-safe resolver remains responsible for the question.
+func (interpreter *SemanticInterpreter) ResolveExactDimensionHints(
+	ctx context.Context,
+	tenantID, metricCode string,
+	hints []QuerySemanticDimensionHint,
+) ([]QueryDimensionValueLookupTrace, bool, error) {
+	if interpreter == nil || interpreter.store == nil ||
+		strings.TrimSpace(metricCode) == "" {
+		return nil, false, ErrInvalidRequest
+	}
+	lookups := []QueryDimensionValueLookupTrace{}
+	actionable, complete := 0, true
+	for _, hint := range hints {
+		if strings.EqualFold(strings.TrimSpace(hint.DimensionType), "TIME") ||
+			strings.TrimSpace(hint.Value) == "" {
+			continue
+		}
+		actionable++
+		lookup, err := interpreter.store.metricDimensionHintLookup(
+			ctx, tenantID, metricCode, hint,
+		)
+		if err != nil {
+			return lookups, false, err
+		}
+		lookup.Term = strings.TrimSpace(hint.Value)
+		lookup.CanonicalValue = lookup.Term
+		lookup.AliasValues = appendUniqueString(
+			lookup.AliasValues, strings.TrimSpace(hint.SourceToken),
+		)
+		lookup.MatchMethod = "EXACT_DECISION_GRAPH"
+		lookup.Source = "CURRENT_TURN"
+		lookup.VectorSearchStatus = "SKIPPED_EXACT_DECISION_GRAPH"
+		lookup.WhereDesignStatus = "NO_SAFE_DECISION_SELECTED"
+		if strings.TrimSpace(lookup.DimensionCode) == "" || lookup.Sensitive {
+			complete = false
+			lookups = append(lookups, lookup)
+			continue
+		}
+		candidates, err := interpreter.store.exactMetricDimensionDecisions(
+			ctx, tenantID, metricCode, lookup.DimensionCode, lookup.Term, 8,
+		)
+		if err != nil {
+			return lookups, false, err
+		}
+		lookup.DecisionCandidates = make(
+			[]QueryDecisionCandidate, 0, len(candidates),
+		)
+		for _, candidate := range candidates {
+			lookup.DecisionCandidates = append(
+				lookup.DecisionCandidates,
+				QueryDecisionCandidate{
+					DecisionID:     candidate.DecisionID,
+					CanonicalValue: candidate.CanonicalValue,
+					MemberValue:    candidate.MemberValue,
+					MetricCode:     metricCode, MetricName: lookup.MetricName,
+					TableSchema:       candidate.TableSchema,
+					TableName:         candidate.TableName,
+					WhereCondition:    candidate.WhereCondition,
+					CompiledCondition: candidate.CompiledCondition,
+					PredicateOperator: candidate.PredicateOperator,
+					Score:             candidate.Score,
+				},
+			)
+		}
+		lookup.CandidateCount = len(candidates)
+		lookup.VectorCandidateCount = len(candidates)
+		lookup.CandidateFilter = QueryCandidateFilterTrace{
+			InputCount: len(candidates), RejectedCount: len(candidates),
+			Status: "NO_SAFE_DECISION_SELECTED",
+			Rules: []string{
+				"CURRENT_PUBLISHED_DATASET_VERSION",
+				"VERIFIED_METRIC_DIMENSION_COMPATIBILITY",
+				"EXACT_CANONICAL_MEMBER_OR_GOVERNED_ALIAS",
+				"SINGLE_MEMBER_AND_PREDICATE_REQUIRED",
+			},
+		}
+		selected, ok := selectExactDimensionDecision(candidates)
+		if !ok {
+			complete = false
+			lookups = append(lookups, lookup)
+			continue
+		}
+		lookup.Selected = true
+		lookup.CanonicalValue = selected.CanonicalValue
+		lookup.DecisionID = selected.DecisionID
+		lookup.SelectedMemberKeys = []string{selected.MemberValue}
+		lookup.CandidateMemberKeys = []string{selected.MemberValue}
+		lookup.VectorCandidateMemberKeys = []string{selected.CanonicalValue}
+		lookup.WhereDesignStatus = "REUSED_DECISION_GRAPH_EXACT"
+		lookup.WhereDesignOperator = selected.PredicateOperator
+		lookup.WhereDesignReason = "维度值与当前版本决策图规范值或受管别名精确一致"
+		lookup.WhereCondition = selected.WhereCondition
+		lookup.CompiledCondition = selected.CompiledCondition
+		lookup.TableSchema = selected.TableSchema
+		lookup.TableName = selected.TableName
+		lookup.MetricFieldID = selected.MetricFieldID
+		lookup.CandidateFilter.AcceptedCount = 1
+		lookup.CandidateFilter.RejectedCount = max(0, len(candidates)-1)
+		lookup.CandidateFilter.Status = "EXACT_DECISION_SELECTED"
+		for index := range lookup.DecisionCandidates {
+			lookup.DecisionCandidates[index].Selected =
+				lookup.DecisionCandidates[index].DecisionID == selected.DecisionID
+		}
+		lookups = append(lookups, lookup)
+	}
+	lookups = deduplicateSemanticLookups(lookups)
+	return lookups, actionable > 0 && complete, nil
+}
+
+func selectExactDimensionDecision(
+	candidates []dimensionDecisionCandidate,
+) (dimensionDecisionCandidate, bool) {
+	valid := []dimensionDecisionCandidate{}
+	identities := map[string]bool{}
+	for _, candidate := range candidates {
+		if candidate.DecisionID == "" || candidate.SelectedMemberCount != 1 ||
+			strings.TrimSpace(candidate.MemberValue) == "" ||
+			strings.TrimSpace(candidate.WhereCondition) == "" ||
+			strings.TrimSpace(candidate.CompiledCondition) == "" {
+			continue
+		}
+		identity := strings.ToLower(strings.TrimSpace(candidate.MemberValue)) +
+			"\x00" + strings.TrimSpace(candidate.CompiledCondition)
+		identities[identity] = true
+		valid = append(valid, candidate)
+	}
+	if len(valid) == 0 || len(identities) != 1 {
+		return dimensionDecisionCandidate{}, false
+	}
+	return valid[0], true
 }
 
 func (interpreter *SemanticInterpreter) decisionLookupFromHint(
@@ -715,6 +859,16 @@ func (store *PostgresStore) metricDimensionHintLookup(
 			 AND version.id=metric.current_published_version_id
 			 AND version.metric_id=metric.id
 			 AND version.status='PUBLISHED'
+			JOIN platform.dataset_versions AS dataset_version
+			  ON dataset_version.tenant_id=version.tenant_id
+			 AND dataset_version.id=version.dataset_version_id
+			 AND dataset_version.status='PUBLISHED'
+			JOIN platform.datasets AS dataset
+			  ON dataset.tenant_id=dataset_version.tenant_id
+			 AND dataset.id=dataset_version.dataset_id
+			 AND dataset.current_published_version_id=dataset_version.id
+			 AND dataset.status='PUBLISHED'
+			 AND dataset.deleted_at IS NULL
 			JOIN platform.dimension_metric_compatibility AS compatibility
 			  ON compatibility.tenant_id=metric.tenant_id
 			 AND compatibility.metric_id=metric.id
@@ -1377,6 +1531,13 @@ type recallCandidate struct {
 	Score            float64  `json:"score"`
 }
 
+type supersededMetricCandidate struct {
+	Candidate        recallCandidate
+	SupersededCode   string
+	MatchedTerm      string
+	ReplacementCount int
+}
+
 type interpretedSlots struct {
 	Intent             string  `json:"intent"`
 	MetricCode         string  `json:"metricCode"`
@@ -1569,6 +1730,45 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 	if err != nil {
 		return QueryTurnSlots{}, err
 	}
+	broadMetricQuestion := parsingRules.requestsBroadMetricSelection(question)
+	candidates, err := interpreter.store.recall(ctx, tenantID, question, nil, 24)
+	if err != nil {
+		return QueryTurnSlots{}, err
+	}
+	buildExact := func(items []recallCandidate) QueryTurnSlots {
+		codes := exactMetricCodes(question, items, 8, parsingRules)
+		domains := make(map[string]string, len(codes))
+		for _, code := range codes {
+			domains[code] = candidateDomain(items, code)
+		}
+		return QueryTurnSlots{
+			Intent: inferIntent(strings.ToLower(question)), MetricCodes: codes,
+			MetricCandidateCount: len(items), MetricMatchMethod: "EXACT_CATALOG",
+			Domains: domains,
+			MetricCandidates: metricCandidateTraces(
+				question, items, codes, "EXACT_CATALOG", parsingRules,
+			),
+		}
+	}
+	// Exact names, codes and governed aliases from the current published
+	// dataset version are authoritative. Resolve them before invoking an AI
+	// tool loop; the model is reserved for genuinely semantic or ambiguous
+	// wording, which keeps common questions fast and deterministic.
+	exact := buildExact(candidates)
+	if len(exact.MetricCodes) > 0 {
+		return exact, nil
+	}
+	superseded, err := interpreter.store.supersededMetricCandidates(
+		ctx, tenantID, question,
+	)
+	if err != nil {
+		return QueryTurnSlots{}, err
+	}
+	if inherited, resolved := resolveSupersededMetricTurn(
+		question, superseded,
+	); resolved {
+		return inherited, nil
+	}
 	// The normal path is an enforced semantic-library -> published-catalog
 	// tool state machine. Deterministic catalog parsing remains below only as a
 	// provider-availability fallback and never masks protocol or no-progress
@@ -1607,30 +1807,6 @@ func (interpreter *SemanticInterpreter) InterpretMany(
 		if !semanticDeterministicFallbackAllowed(toolErr) {
 			return QueryTurnSlots{}, toolErr
 		}
-	}
-	broadMetricQuestion := parsingRules.requestsBroadMetricSelection(question)
-	candidates, err := interpreter.store.recall(ctx, tenantID, question, nil, 24)
-	if err != nil {
-		return QueryTurnSlots{}, err
-	}
-	buildExact := func(items []recallCandidate) QueryTurnSlots {
-		codes := exactMetricCodes(question, items, 8, parsingRules)
-		domains := make(map[string]string, len(codes))
-		for _, code := range codes {
-			domains[code] = candidateDomain(items, code)
-		}
-		return QueryTurnSlots{
-			Intent: inferIntent(strings.ToLower(question)), MetricCodes: codes,
-			MetricCandidateCount: len(items), MetricMatchMethod: "EXACT_CATALOG",
-			Domains: domains,
-			MetricCandidates: metricCandidateTraces(
-				question, items, codes, "EXACT_CATALOG", parsingRules,
-			),
-		}
-	}
-	exact := buildExact(candidates)
-	if len(exact.MetricCodes) > 0 {
-		return exact, nil
 	}
 	if interpreter.embedding != nil && interpreter.embedding.Configured() {
 		vectors, embedErr := interpreter.embedding.Embed(ctx, []string{question})
@@ -2248,6 +2424,200 @@ func (store *PostgresStore) recall(
 		return rows.Err()
 	})
 	return items, err
+}
+
+// supersededMetricCandidates maps an exact name/code from a non-current
+// published dataset version to its unique executable successor. Equivalence is
+// derived from governed lineage and calculation semantics, never from a
+// question-specific synonym table.
+func (store *PostgresStore) supersededMetricCandidates(
+	ctx context.Context,
+	tenantID, question string,
+) (items []supersededMetricCandidate, err error) {
+	items = []supersededMetricCandidate{}
+	if store == nil || strings.TrimSpace(question) == "" {
+		return items, nil
+	}
+	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
+		rows, queryErr := tx.Query(ctx, `WITH stale AS (
+			SELECT metric.id,metric.code::text AS code,metric.name,
+				version.dataset_id,version.definition_json,
+				CASE
+				  WHEN position(lower(metric.name) IN lower($1))>0
+				    THEN metric.name
+				  ELSE metric.code::text
+				END AS matched_term
+			FROM platform.metrics AS metric
+			JOIN platform.metric_versions AS version
+			  ON version.tenant_id=metric.tenant_id
+			 AND version.id=metric.current_published_version_id
+			 AND version.status='PUBLISHED'
+			JOIN platform.datasets AS dataset
+			  ON dataset.tenant_id=version.tenant_id
+			 AND dataset.id=version.dataset_id
+			 AND dataset.current_published_version_id<>version.dataset_version_id
+			 AND dataset.status='PUBLISHED'
+			 AND dataset.deleted_at IS NULL
+			WHERE metric.status='PUBLISHED'
+			  AND metric.deleted_at IS NULL
+			  AND (
+			    position(lower(metric.name) IN lower($1))>0
+			    OR position(lower(metric.code::text) IN lower($1))>0
+			  )
+		), replacements AS (
+			SELECT stale.code AS superseded_code,stale.matched_term,
+				metric.code::text AS code,metric.name,
+				platform.dataset_version_effective_domain(version.dataset_version_id)
+				  AS domain,
+				version.dataset_version_id,
+				COALESCE(materialization.published_schema,'') AS table_schema,
+				COALESCE(materialization.published_name,'') AS table_name,
+				count(*) OVER (PARTITION BY stale.id) AS replacement_count
+			FROM stale
+			JOIN platform.datasets AS dataset
+			  ON dataset.id=stale.dataset_id
+			JOIN platform.metric_versions AS version
+			  ON version.tenant_id=dataset.tenant_id
+			 AND version.dataset_id=dataset.id
+			 AND version.dataset_version_id=dataset.current_published_version_id
+			 AND version.status='PUBLISHED'
+			JOIN platform.metrics AS metric
+			  ON metric.tenant_id=version.tenant_id
+			 AND metric.id=version.metric_id
+			 AND metric.current_published_version_id=version.id
+			 AND metric.status='PUBLISHED'
+			 AND metric.deleted_at IS NULL
+			LEFT JOIN LATERAL (
+			  SELECT current.published_schema,current.published_name
+			  FROM platform.dataset_materializations AS current
+			  WHERE current.tenant_id=version.tenant_id
+			    AND current.dataset_version_id=version.dataset_version_id
+			    AND current.layer='DWS'
+			    AND current.status='ACTIVE'
+			  ORDER BY current.activated_at DESC,current.id
+			  LIMIT 1
+			) AS materialization ON true
+			WHERE jsonb_build_object(
+				'expression',version.definition_json->'expression',
+				'aggregation',version.definition_json->'aggregation',
+				'sourceCalculation',version.definition_json->'sourceCalculation',
+				'additivity',version.definition_json->'additivity',
+				'timeGrain',version.definition_json->'timeGrain',
+				'unit',version.definition_json->'unit'
+			  ) = jsonb_build_object(
+				'expression',stale.definition_json->'expression',
+				'aggregation',stale.definition_json->'aggregation',
+				'sourceCalculation',stale.definition_json->'sourceCalculation',
+				'additivity',stale.definition_json->'additivity',
+				'timeGrain',stale.definition_json->'timeGrain',
+				'unit',stale.definition_json->'unit'
+			  )
+		)
+		SELECT 'METRIC'::text,domain,code,''::text,name,
+			'{}'::text[],''::text,dataset_version_id::text,
+			table_schema,table_name,1.0::float8,
+			superseded_code,matched_term,replacement_count::int
+		FROM replacements
+		ORDER BY position(lower(matched_term) IN lower($1)),
+			char_length(matched_term) DESC,code`, question)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item supersededMetricCandidate
+			if scanErr := rows.Scan(
+				&item.Candidate.SubjectType, &item.Candidate.Domain,
+				&item.Candidate.Code, &item.Candidate.DimensionCode,
+				&item.Candidate.Label, &item.Candidate.Aliases,
+				&item.Candidate.MemberValue,
+				&item.Candidate.DatasetVersionID,
+				&item.Candidate.TableSchema, &item.Candidate.TableName,
+				&item.Candidate.Score, &item.SupersededCode,
+				&item.MatchedTerm, &item.ReplacementCount,
+			); scanErr != nil {
+				return scanErr
+			}
+			items = append(items, item)
+		}
+		return rows.Err()
+	})
+	return items, err
+}
+
+func resolveSupersededMetricTurn(
+	question string,
+	items []supersededMetricCandidate,
+) (QueryTurnSlots, bool) {
+	if len(items) == 0 {
+		return QueryTurnSlots{}, false
+	}
+	result := QueryTurnSlots{
+		Intent:      inferIntent(strings.ToLower(question)),
+		MetricCodes: []string{}, Domains: map[string]string{},
+		MetricMatchMethod: "SUPERSEDED_CATALOG_ALIAS",
+		MetricCandidates:  []QueryMetricCandidateTrace{},
+	}
+	seenSuccessor, seenSuperseded := map[string]bool{}, map[string]bool{}
+	for _, item := range items {
+		legacyKey := strings.ToLower(strings.TrimSpace(item.SupersededCode))
+		if item.ReplacementCount != 1 || legacyKey == "" {
+			return QueryTurnSlots{}, false
+		}
+		seenSuperseded[legacyKey] = true
+		codeKey := strings.ToLower(strings.TrimSpace(item.Candidate.Code))
+		if codeKey == "" || seenSuccessor[codeKey] {
+			continue
+		}
+		seenSuccessor[codeKey] = true
+		result.MetricCodes = append(result.MetricCodes, item.Candidate.Code)
+		result.Domains[item.Candidate.Code] = item.Candidate.Domain
+		result.MetricCandidates = append(
+			result.MetricCandidates,
+			QueryMetricCandidateTrace{
+				Code: item.Candidate.Code, Label: item.Candidate.Label,
+				Domain:           item.Candidate.Domain,
+				DatasetVersionID: item.Candidate.DatasetVersionID,
+				TableSchema:      item.Candidate.TableSchema,
+				TableName:        item.Candidate.TableName,
+				MatchedTerm:      item.MatchedTerm,
+				MatchMethod:      "SUPERSEDED_CATALOG_ALIAS",
+				Score:            1, Selected: true,
+				Source: "CURRENT_DATASET_VERSION_LINEAGE",
+			},
+		)
+	}
+	result.MetricCandidateCount = len(result.MetricCandidates)
+	result.GovernedMetricOnly = supersededQuestionContainsOnlyMetricTerms(
+		question, items,
+	)
+	return result, len(result.MetricCodes) > 0 && len(seenSuperseded) > 0
+}
+
+func supersededQuestionContainsOnlyMetricTerms(
+	question string,
+	items []supersededMetricCandidate,
+) bool {
+	residual := normalizeQuestion(question).NormalizedText
+	for _, item := range items {
+		term := normalizeQuestion(item.MatchedTerm).NormalizedText
+		if term != "" {
+			residual = strings.ReplaceAll(residual, term, "")
+		}
+	}
+	for _, filler := range []string{
+		"帮我", "请问", "给我", "告诉我", "查一下", "查询", "看一下",
+		"是多少", "是什么", "有多少", "多少", "的", "是", "为", "呢", "吗",
+	} {
+		residual = strings.ReplaceAll(residual, filler, "")
+	}
+	residual = strings.Map(func(character rune) rune {
+		if unicode.IsSpace(character) || unicode.IsPunct(character) {
+			return -1
+		}
+		return character
+	}, residual)
+	return residual == ""
 }
 
 // recallMetricMembers performs the second hybrid lookup only after a metric has

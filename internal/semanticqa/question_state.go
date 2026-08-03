@@ -173,11 +173,24 @@ func persistQuestionStateMachine(
 		current QuestionState,
 		event QuestionStateEvent,
 	) error {
+		// State transitions are the durable audit trail for a question run.
+		// The request context may already be cancelled when a timeout/error
+		// defer moves the run to BLOCKED, so use a short cleanup context. This
+		// prevents runs from being stranded in VALIDATING/EXECUTING while still
+		// bounding every persistence operation.
+		persistCtx, cancel := questionStatePersistenceContext(ctx)
+		defer cancel()
 		return recorder.AppendQuestionState(
-			ctx, tenantID, machine.runID, current, event,
+			persistCtx, tenantID, machine.runID, current, event,
 		)
 	}
 	return nil
+}
+
+func questionStatePersistenceContext(
+	ctx context.Context,
+) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 }
 
 func syncTurnLifecycle(

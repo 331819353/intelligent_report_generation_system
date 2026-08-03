@@ -940,7 +940,8 @@ func (service *Service) PlanQueryTurn(
 	// context metric) is fixed do Jieba tokens enter the dimension/time semantic
 	// completion used by stage two. This prevents early dimension retrieval from
 	// influencing which metric catalog is selected.
-	if tokenizer, ok := service.interpreter.(QueryTokenizer); ok && !input.GovernedUnderstanding {
+	if tokenizer, ok := service.interpreter.(QueryTokenizer); ok &&
+		!input.GovernedUnderstanding && !turnSlots.GovernedMetricOnly {
 		reportQueryTurnProgress(
 			ctx, QueryProgressStageDimensionEnrichment,
 			QueryProgressStatusRunning,
@@ -1030,8 +1031,30 @@ func (service *Service) PlanQueryTurn(
 			planInput.MetricMatchMethod = "EXPLICIT_CODE"
 		}
 		dimensionHandledByTool := false
+		if resolver, ok := service.interpreter.(QueryDimensionExactHintResolver); ok &&
+			len(input.ConfirmedDecisions) == 0 && !input.GovernedUnderstanding &&
+			!turnSlots.GovernedMetricOnly &&
+			hasActionableSemanticDimensionHint(input.SemanticHints.DimensionValues) {
+			lookups, complete, resolveErr := resolver.ResolveExactDimensionHints(
+				ctx, tenantID, metricCode, input.SemanticHints.DimensionValues,
+			)
+			if resolveErr != nil {
+				return result, resolveErr
+			}
+			if complete {
+				filters, filtersComplete :=
+					memberFiltersFromResolvedLookups(lookups)
+				if filtersComplete {
+					planInput.DimensionValueLookups = lookups
+					planInput.MemberFilters = filters
+					planInput.DimensionResolutionComplete = true
+					dimensionHandledByTool = true
+				}
+			}
+		}
 		if resolver, ok := service.interpreter.(QueryDimensionToolLoopResolver); ok &&
-			len(input.ConfirmedDecisions) == 0 && !input.GovernedUnderstanding {
+			!dimensionHandledByTool && len(input.ConfirmedDecisions) == 0 &&
+			!input.GovernedUnderstanding && !turnSlots.GovernedMetricOnly {
 			resolution, resolveErr := resolver.ResolveDimensionsWithToolLoop(
 				ctx, tenantID, actorID, metricCode, dimensionBaseQuestion,
 				input.SemanticHints.DimensionValues,
@@ -1075,7 +1098,7 @@ func (service *Service) PlanQueryTurn(
 				}
 			}
 		}
-		if input.GovernedUnderstanding {
+		if input.GovernedUnderstanding || turnSlots.GovernedMetricOnly {
 			// The orchestrator proved that every meaningful span in this narrow
 			// question is the exact metric plus deterministic time/comparison
 			// language. An empty member-filter set is therefore complete.

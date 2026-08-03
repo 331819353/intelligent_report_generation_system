@@ -78,6 +78,18 @@ func (interpreter *SemanticInterpreter) enrichTokenSemantics(
 		Status: "PENDING", Intent: "UNKNOWN", MetricNames: []string{},
 		DimensionValues: []QueryLLMDimensionValue{},
 	}
+	deterministicCompletion, deterministic := deterministicTokenSemanticCompletion(
+		question, timezone, time.Now(), result.Tokens,
+		allowTrustedMetricAnchorCompletion, parsingRules,
+	)
+	if deterministic {
+		// The tokenizer's semantic spans were built from the same current,
+		// tenant-scoped catalog. Once every non-function token is covered, a
+		// second corpus/index scan cannot add evidence and only adds latency.
+		result.SemanticRetrievalMode = "DETERMINISTIC_SEMANTIC_CATALOG"
+		result.LLMCompletion = deterministicCompletion
+		return result
+	}
 	if statuses, statusErr := interpreter.store.semanticIndexStatuses(
 		ctx, tenantID,
 	); statusErr == nil {
@@ -93,11 +105,6 @@ func (interpreter *SemanticInterpreter) enrichTokenSemantics(
 	valueTypes, _ := interpreter.store.tokenSemanticDimensionValueTypes(
 		ctx, tenantID,
 	)
-	deterministicCompletion, deterministic := deterministicTokenSemanticCompletion(
-		question, timezone, time.Now(), result.Tokens,
-		allowTrustedMetricAnchorCompletion, parsingRules,
-	)
-
 	searchTokens := make([]QueryToken, 0, tokenSemanticMaximumTokens)
 	for _, token := range result.Tokens {
 		if token.EntityType == "PUNCTUATION" ||
@@ -209,10 +216,6 @@ func (interpreter *SemanticInterpreter) enrichTokenSemantics(
 		result.SemanticRetrievals = append(
 			result.SemanticRetrievals, retrieval,
 		)
-	}
-	if deterministic {
-		result.LLMCompletion = deterministicCompletion
-		return result
 	}
 	result.LLMCompletion = interpreter.completeTokenSemantics(
 		ctx, tenantID, actorID, question, result.QuestionMetricTop5,

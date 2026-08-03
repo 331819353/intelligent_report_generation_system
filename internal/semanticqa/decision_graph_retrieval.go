@@ -299,6 +299,124 @@ func (store *PostgresStore) recallMetricDimensionDecisions(
 	return items, err
 }
 
+// exactMetricDimensionDecisions is the non-probabilistic decision-graph path
+// used for catalog members already identified by the tokenizer. Every result
+// is constrained to the metric's current published dataset version, verified
+// compatibility and active materialization. Similarity is intentionally not
+// used here; aliases must already be persisted on the governed decision.
+func (store *PostgresStore) exactMetricDimensionDecisions(
+	ctx context.Context,
+	tenantID, metricCode, dimensionCode, queryValue string,
+	limit int,
+) (items []dimensionDecisionCandidate, err error) {
+	items = []dimensionDecisionCandidate{}
+	if store == nil || strings.TrimSpace(metricCode) == "" ||
+		strings.TrimSpace(dimensionCode) == "" ||
+		strings.TrimSpace(queryValue) == "" || limit < 1 || limit > 32 {
+		return items, nil
+	}
+	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
+		rows, queryErr := tx.Query(ctx, `SELECT decision.id::text,
+				dimension.code::text,decision.canonical_value,
+				ARRAY(
+				  SELECT DISTINCT alias
+				  FROM unnest(decision.aliases) AS expanded(alias)
+				  WHERE btrim(alias)<>''
+				  ORDER BY alias
+				) AS aliases,
+				COALESCE(member.normalized_value,'') AS member_value,
+				decision.selected_member_count,decision.predicate_operator,
+				decision.where_condition,decision.compiled_condition,
+				decision.llm_model,decision.llm_reason,
+				decision.embedding_model,decision.table_schema,
+				decision.table_name,decision.metric_field_id,
+				decision.source_type,1.0::float8
+			FROM platform.dimension_where_decisions AS decision
+			JOIN platform.metrics AS metric
+			  ON metric.tenant_id=decision.tenant_id
+			 AND metric.id=decision.metric_id
+			 AND metric.code=$1
+			 AND metric.current_published_version_id=decision.metric_version_id
+			 AND metric.status='PUBLISHED'
+			 AND metric.deleted_at IS NULL
+			JOIN platform.metric_versions AS version
+			  ON version.tenant_id=metric.tenant_id
+			 AND version.id=metric.current_published_version_id
+			 AND version.dataset_version_id=decision.dataset_version_id
+			 AND version.status='PUBLISHED'
+			JOIN platform.dataset_versions AS dataset_version
+			  ON dataset_version.tenant_id=version.tenant_id
+			 AND dataset_version.id=version.dataset_version_id
+			 AND dataset_version.status='PUBLISHED'
+			JOIN platform.datasets AS dataset
+			  ON dataset.tenant_id=dataset_version.tenant_id
+			 AND dataset.id=dataset_version.dataset_id
+			 AND dataset.current_published_version_id=dataset_version.id
+			 AND dataset.status='PUBLISHED'
+			 AND dataset.deleted_at IS NULL
+			JOIN platform.semantic_dimensions AS dimension
+			  ON dimension.tenant_id=decision.tenant_id
+			 AND dimension.id=decision.dimension_id
+			 AND lower(dimension.code::text)=lower($2)
+			 AND dimension.dataset_version_id=dataset_version.id
+			 AND dimension.status='PUBLISHED'
+			JOIN platform.dimension_metric_compatibility AS compatibility
+			  ON compatibility.tenant_id=dimension.tenant_id
+			 AND compatibility.dimension_id=dimension.id
+			 AND compatibility.metric_id=metric.id
+			 AND compatibility.metric_version_id=version.id
+			 AND compatibility.metric_dataset_version_id=dataset_version.id
+			 AND compatibility.status='VERIFIED'
+			 AND compatibility.fanout_policy<>'UNSAFE'
+			JOIN platform.dataset_materializations AS materialization
+			  ON materialization.tenant_id=decision.tenant_id
+			 AND materialization.id=decision.materialization_id
+			 AND materialization.dataset_version_id=dataset_version.id
+			 AND materialization.layer='DWS'
+			 AND materialization.status='ACTIVE'
+			LEFT JOIN platform.dimension_members AS member
+			  ON member.tenant_id=decision.tenant_id
+			 AND member.id=decision.dimension_member_id
+			 AND member.dimension_id=decision.dimension_id
+			 AND member.status='ACTIVE'
+			WHERE decision.tenant_id=platform.current_tenant_id()
+			  AND (
+			    lower(decision.canonical_value)=lower($3)
+			    OR lower(COALESCE(member.normalized_value,''))=lower($3)
+			    OR EXISTS (
+			      SELECT 1
+			      FROM unnest(decision.aliases) AS alias(value)
+			      WHERE lower(btrim(alias.value))=lower(btrim($3))
+			    )
+			  )
+			ORDER BY CASE decision.source_type
+				WHEN 'QUERY_OBSERVED' THEN 0 ELSE 1 END,
+				decision.observation_count DESC,decision.id
+			LIMIT $4`, metricCode, dimensionCode, queryValue, limit)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item dimensionDecisionCandidate
+			if scanErr := rows.Scan(
+				&item.DecisionID, &item.DimensionCode,
+				&item.CanonicalValue, &item.Aliases, &item.MemberValue,
+				&item.SelectedMemberCount, &item.PredicateOperator,
+				&item.WhereCondition, &item.CompiledCondition,
+				&item.LLMModel, &item.LLMReason, &item.EmbeddingModel,
+				&item.TableSchema, &item.TableName, &item.MetricFieldID,
+				&item.SourceType, &item.Score,
+			); scanErr != nil {
+				return scanErr
+			}
+			items = append(items, item)
+		}
+		return rows.Err()
+	})
+	return items, err
+}
+
 func questionRequestsPersonCount(question string) bool {
 	question = strings.ToLower(strings.Join(strings.Fields(question), ""))
 	for _, phrase := range []string{

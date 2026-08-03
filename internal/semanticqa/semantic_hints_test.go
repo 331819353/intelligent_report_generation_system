@@ -189,6 +189,41 @@ func TestHighConfidenceHintDecisionFallbackRequiresUniqueVectorWinner(
 	}
 }
 
+func TestSelectExactDimensionDecisionRequiresOneGovernedMember(t *testing.T) {
+	candidates := []dimensionDecisionCandidate{
+		{
+			DecisionID: "profile-beijing", CanonicalValue: "Beijing",
+			MemberValue: "Beijing", SelectedMemberCount: 1,
+			WhereCondition: "城市 = Beijing", CompiledCondition: "zone_city = $1",
+		},
+		{
+			DecisionID: "observed-beijing", CanonicalValue: "Beijing",
+			MemberValue: "Beijing", SelectedMemberCount: 1,
+			WhereCondition: "城市 = Beijing", CompiledCondition: "zone_city = $1",
+		},
+	}
+	selected, ok := selectExactDimensionDecision(candidates)
+	if !ok || selected.DecisionID != "profile-beijing" {
+		t.Fatalf("equivalent exact decisions should be reusable: %#v", selected)
+	}
+	candidates = append(candidates, dimensionDecisionCandidate{
+		DecisionID: "merchant-beijing", CanonicalValue: "Beijing",
+		MemberValue: "Beijing", SelectedMemberCount: 1,
+		WhereCondition:    "商户城市 = Beijing",
+		CompiledCondition: "merchant_city = $1",
+	})
+	if _, ok := selectExactDimensionDecision(candidates); ok {
+		t.Fatal("one term resolving to different predicates must remain ambiguous")
+	}
+	candidates = []dimensionDecisionCandidate{{
+		DecisionID: "unsafe", MemberValue: "Beijing",
+		SelectedMemberCount: 2, CompiledCondition: "zone_city = $1",
+	}}
+	if _, ok := selectExactDimensionDecision(candidates); ok {
+		t.Fatal("a multi-member or incomplete decision must fail closed")
+	}
+}
+
 func TestActionableSemanticDimensionHintExcludesTimeOnlyHints(t *testing.T) {
 	if hasActionableSemanticDimensionHint([]QuerySemanticDimensionHint{
 		{Value: "当前", DimensionType: "TIME"},
@@ -646,5 +681,37 @@ func TestExactMetricCodesAcceptDistinctiveMeasureStem(t *testing.T) {
 		"经营情况怎么样？", candidates, 8, testSemanticParsingRules(),
 	); len(codes) != 0 {
 		t.Fatalf("broad wording selected arbitrary metrics: %#v", codes)
+	}
+}
+
+func TestResolveSupersededMetricTurnRequiresUniqueEquivalentSuccessor(
+	t *testing.T,
+) {
+	items := []supersededMetricCandidate{{
+		Candidate: recallCandidate{
+			SubjectType: "METRIC", Code: "current_discount",
+			Label: "订单商品折扣金额合计", Domain: "orders",
+			DatasetVersionID: "current-version", Score: 1,
+		},
+		SupersededCode: "legacy_discount", MatchedTerm: "商品折扣",
+		ReplacementCount: 1,
+	}}
+	turn, ok := resolveSupersededMetricTurn("商品折扣是多少？", items)
+	if !ok || len(turn.MetricCodes) != 1 ||
+		turn.MetricCodes[0] != "current_discount" ||
+		turn.MetricMatchMethod != "SUPERSEDED_CATALOG_ALIAS" ||
+		!turn.GovernedMetricOnly ||
+		len(turn.MetricCandidates) != 1 ||
+		turn.MetricCandidates[0].MatchedTerm != "商品折扣" {
+		t.Fatalf("unexpected inherited metric turn: %#v", turn)
+	}
+	items[0].ReplacementCount = 2
+	if _, ok := resolveSupersededMetricTurn("商品折扣是多少？", items); ok {
+		t.Fatal("ambiguous successors must fall back to clarification")
+	}
+	items[0].ReplacementCount = 1
+	turn, ok = resolveSupersededMetricTurn("Beijing的商品折扣是多少？", items)
+	if !ok || turn.GovernedMetricOnly {
+		t.Fatal("unresolved dimension text must not enter the metric-only fast path")
 	}
 }

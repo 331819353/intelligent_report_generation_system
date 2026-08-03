@@ -1,6 +1,7 @@
 package semanticqa
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -42,5 +43,18 @@ func TestQuestionStateMachineRejectsSkippedEvidenceGates(t *testing.T) {
 	}
 	if err := machine.advance(QuestionStateExecuting); err != ErrInvalidState {
 		t.Fatalf("expected invalid transition, got %v", err)
+	}
+}
+
+func TestQuestionStatePersistenceSurvivesRequestCancellation(t *testing.T) {
+	requestCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	persistCtx, persistCancel := questionStatePersistenceContext(requestCtx)
+	defer persistCancel()
+	if persistCtx.Err() != nil {
+		t.Fatalf("cleanup persistence inherited cancellation: %v", persistCtx.Err())
+	}
+	if _, hasDeadline := persistCtx.Deadline(); !hasDeadline {
+		t.Fatal("cleanup persistence must remain time bounded")
 	}
 }
