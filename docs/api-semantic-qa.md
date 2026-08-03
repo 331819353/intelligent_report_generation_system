@@ -513,11 +513,22 @@ DOMAIN_CATALOG / METRIC_CATALOG / DIMENSION_MEMBER / DATASET_LOCK` 五个阶段�
 | `POST/GET` | `/question-templates` | 创建/列出意图与必需槽位模板 |
 | `POST/GET` | `/golden-question-sets` | 创建/列出版本化问题集 |
 | `POST` | `/golden-question-sets/{id}/activate` | 原子激活版本 |
+| `GET` | `/golden-question-sets/{id}/evaluation-gate` | 服务端复算正式发布门禁、Wilson 下界和首次错误阶段 |
 | `POST` | `/golden-questions` | 在 DRAFT set 中登记 hash、fixture 和预期路径 |
 | `GET` | `/golden-questions?setId=...` | 列出问题 |
-| `POST` | `/golden-questions/{id}/replay` | 在 current generation 重放规划 |
+| `POST` | `/golden-questions/{id}/replay` | 规划集重放路径；E2E 集走正式 Question Orchestrator 并比较结果 hash |
 
-指定模板时模板必须 ACTIVE，且模板 intent 必须与 fixture intent 一致。原问题和原始结果行不进入回放表；回放保存 generation、plan、failure stage 和通过/失败状态。
+问题集显式声明 `datasetSplit=DEVELOPMENT / VALIDATION / SEALED /
+PRODUCTION_REGRESSION` 和 `evaluationMode=FIXTURE_REGRESSION /
+END_TO_END_RESULT_EQUIVALENCE`。规划回归只保存 question hash，不计入正式准确率；E2E
+问题保存经脱敏和批准的问句，READY 样本必须有专家批准的 `expectedResultHash`。SEALED
+集激活要求至少 2,000 条、每条 `independentReviewCount=2`，并生成不可变集合指纹。
+
+`evaluation-gate` 只使用黄金运行，不使用点赞。它同时返回严格准确率点估计和 95%
+Wilson 下界、P0 正确率、越权阻断率、敏感泄漏数、直接回答覆盖率、拒答精确率，以及
+首次失败阶段分布。任一硬条件缺失时 `decision=BLOCKED`；这意味着工程能力已经存在，
+但在真实业务 sealed 数据未录入前不会宣称达到 95%。运行记录不保存 SQL、参数或结果行，
+只保存版本、路径和结果 hash、布尔安全事实与错误归因。
 
 ## 6. 物化建议
 

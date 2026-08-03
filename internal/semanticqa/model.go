@@ -737,6 +737,8 @@ type CreateGoldenQuestionSetInput struct {
 	Version              int64   `json:"version"`
 	CorrectnessThreshold float64 `json:"correctnessThreshold"`
 	SafetyThreshold      float64 `json:"safetyThreshold"`
+	DatasetSplit         string  `json:"datasetSplit,omitempty"`
+	EvaluationMode       string  `json:"evaluationMode,omitempty"`
 }
 
 type GoldenQuestionSet struct {
@@ -747,6 +749,10 @@ type GoldenQuestionSet struct {
 	Version              int64   `json:"version"`
 	CorrectnessThreshold float64 `json:"correctnessThreshold"`
 	SafetyThreshold      float64 `json:"safetyThreshold"`
+	DatasetSplit         string  `json:"datasetSplit"`
+	EvaluationMode       string  `json:"evaluationMode"`
+	SealedContentHash    string  `json:"sealedContentHash,omitempty"`
+	SealedAt             string  `json:"sealedAt,omitempty"`
 	Status               string  `json:"status"`
 	RecordVersion        int64   `json:"recordVersion"`
 	CreatedAt            string  `json:"createdAt"`
@@ -760,40 +766,113 @@ type ActivateGoldenQuestionSetInput struct {
 type GoldenQuestionFixture struct {
 	QueryPlan           QueryPlanInput `json:"queryPlan"`
 	ExpectedFailureCode string         `json:"expectedFailureCode,omitempty"`
+	ExpectedResultHash  string         `json:"expectedResultHash,omitempty"`
 	SafetyCritical      bool           `json:"safetyCritical"`
 }
 
 type CreateGoldenQuestionInput struct {
-	SetID            string                `json:"setId"`
-	Question         string                `json:"question"`
-	TemplateID       string                `json:"templateId,omitempty"`
-	ExpectedPathHash string                `json:"expectedPathHash"`
-	ExpectedStatus   string                `json:"expectedStatus"`
-	Fixture          GoldenQuestionFixture `json:"fixture"`
+	SetID                  string                `json:"setId"`
+	Question               string                `json:"question"`
+	TemplateID             string                `json:"templateId,omitempty"`
+	ExpectedPathHash       string                `json:"expectedPathHash"`
+	ExpectedStatus         string                `json:"expectedStatus"`
+	Priority               string                `json:"priority,omitempty"`
+	Answerable             *bool                 `json:"answerable,omitempty"`
+	SecurityExpectation    string                `json:"securityExpectation,omitempty"`
+	IndependentReviewCount int                   `json:"independentReviewCount,omitempty"`
+	Fixture                GoldenQuestionFixture `json:"fixture"`
 }
 
 type GoldenQuestion struct {
-	ID               string                `json:"id"`
-	SetID            string                `json:"setId"`
-	QuestionHash     string                `json:"questionHash"`
-	TemplateID       string                `json:"templateId,omitempty"`
-	ExpectedPathHash string                `json:"expectedPathHash"`
-	ExpectedStatus   string                `json:"expectedStatus"`
-	Fixture          GoldenQuestionFixture `json:"fixture"`
-	Status           string                `json:"status"`
-	CreatedAt        string                `json:"createdAt"`
-	UpdatedAt        string                `json:"updatedAt"`
-	createdBy        string
+	ID                     string                `json:"id"`
+	SetID                  string                `json:"setId"`
+	QuestionHash           string                `json:"questionHash"`
+	TemplateID             string                `json:"templateId,omitempty"`
+	ExpectedPathHash       string                `json:"expectedPathHash"`
+	ExpectedStatus         string                `json:"expectedStatus"`
+	Priority               string                `json:"priority"`
+	Answerable             bool                  `json:"answerable"`
+	SecurityExpectation    string                `json:"securityExpectation"`
+	IndependentReviewCount int                   `json:"independentReviewCount"`
+	Fixture                GoldenQuestionFixture `json:"fixture"`
+	Status                 string                `json:"status"`
+	CreatedAt              string                `json:"createdAt"`
+	UpdatedAt              string                `json:"updatedAt"`
+	createdBy              string
+	approvedQuestion       string
+	evaluationMode         string
+	datasetSplit           string
 }
 
 type GoldenQuestionReplay struct {
-	ID               string    `json:"id"`
-	GoldenQuestionID string    `json:"goldenQuestionId"`
-	Status           string    `json:"status"`
-	FailureStage     string    `json:"failureStage,omitempty"`
-	FailureCode      string    `json:"failureCode,omitempty"`
-	QueryPlan        QueryPlan `json:"queryPlan"`
-	CreatedAt        string    `json:"createdAt"`
+	ID                    string    `json:"id"`
+	GoldenQuestionID      string    `json:"goldenQuestionId"`
+	Status                string    `json:"status"`
+	FailureStage          string    `json:"failureStage,omitempty"`
+	FailureCode           string    `json:"failureCode,omitempty"`
+	EvaluationMode        string    `json:"evaluationMode"`
+	SemanticVersion       string    `json:"semanticVersion,omitempty"`
+	SemanticContentHash   string    `json:"semanticContentHash,omitempty"`
+	ExpectedResultHash    string    `json:"expectedResultHash,omitempty"`
+	ActualResultHash      string    `json:"actualResultHash,omitempty"`
+	DirectAnswer          bool      `json:"directAnswer"`
+	Refusal               bool      `json:"refusal"`
+	UnauthorizedBlocked   bool      `json:"unauthorizedBlocked"`
+	SensitiveLeakDetected bool      `json:"sensitiveLeakDetected"`
+	QueryPlan             QueryPlan `json:"queryPlan"`
+	CreatedAt             string    `json:"createdAt"`
+}
+
+type GoldenQuestionReplayObservation struct {
+	Plan                  QueryPlan
+	FailureStage          string
+	FailureCode           string
+	EvaluationMode        string
+	SemanticVersion       string
+	SemanticContentHash   string
+	ExpectedResultHash    string
+	ActualResultHash      string
+	DirectAnswer          bool
+	Refusal               bool
+	UnauthorizedBlocked   bool
+	SensitiveLeakDetected bool
+}
+
+type EvaluationMetric struct {
+	Numerator        int     `json:"numerator"`
+	Denominator      int     `json:"denominator"`
+	PointEstimate    float64 `json:"pointEstimate"`
+	WilsonLowerBound float64 `json:"wilsonLowerBound,omitempty"`
+	Required         float64 `json:"required"`
+	Passed           bool    `json:"passed"`
+}
+
+// EvaluationReleaseGate is a server-calculated snapshot. Product feedback is
+// intentionally excluded: only approved golden cases and their latest
+// reproducible runs can influence a release decision.
+type EvaluationReleaseGate struct {
+	SetID                 string           `json:"setId"`
+	SetVersion            int64            `json:"setVersion"`
+	DatasetSplit          string           `json:"datasetSplit"`
+	EvaluationMode        string           `json:"evaluationMode"`
+	SetStatus             string           `json:"setStatus"`
+	SealedContentHash     string           `json:"sealedContentHash,omitempty"`
+	Decision              string           `json:"decision"`
+	TotalCases            int              `json:"totalCases"`
+	EvaluatedCases        int              `json:"evaluatedCases"`
+	DualReviewedCases     int              `json:"dualReviewedCases"`
+	StrictAccuracy        EvaluationMetric `json:"strictAccuracy"`
+	P0Accuracy            EvaluationMetric `json:"p0Accuracy"`
+	SafetyBlockRate       EvaluationMetric `json:"safetyBlockRate"`
+	UnauthorizedBlockRate EvaluationMetric `json:"unauthorizedBlockRate"`
+	DirectAnswerCoverage  EvaluationMetric `json:"directAnswerCoverage"`
+	RefusalPrecision      EvaluationMetric `json:"refusalPrecision"`
+	SensitiveLeakCount    int              `json:"sensitiveLeakCount"`
+	FailureStageCounts    map[string]int   `json:"failureStageCounts"`
+	SemanticVersions      []string         `json:"semanticVersions"`
+	SemanticContentHashes []string         `json:"semanticContentHashes"`
+	Blockers              []string         `json:"blockers"`
+	CalculatedAt          string           `json:"calculatedAt"`
 }
 
 type MaterializationRecommendation struct {

@@ -315,6 +315,67 @@ export type SemanticQuestionResponse = {
     }>
   }
   semanticVersion?: string
+  semanticContentHash?: string
+  understanding?: {
+    normalizerVersion: string
+    normalizedText: string
+    mentions: Array<{
+      type: string
+      startByte: number
+      endByte: number
+      mentionText: string
+      detector: string
+      evidenceId: string
+      candidates: Array<{ objectType: string; objectId: string; objectVersion: string; code: string; label: string; vid: string }>
+    }>
+    certifiedExamples: Array<{ objectId: string; objectVersion: string; score: number; evidenceId: string }>
+  }
+  graphPlan?: {
+    id: string
+    semanticVersion: string
+    contentHash: string
+    normalizerVersion: string
+    bindingBundleHash: string
+    metricVids: string[]
+    dimensionVids: string[]
+    datasetVids: string[]
+    authorizedVids: string[]
+    evidenceIds: string[]
+    maximumHops: number
+    fanoutRisk: string
+  }
+  executionRegistry?: {
+    releaseId: string
+    semanticVersion: string
+    semanticContentHash: string
+    projectionResourceVersion: string
+    registryObjectIds: string[]
+    metricVersionIds: string[]
+    datasetVersionIds: string[]
+    materializationIds: string[]
+    qualityRuleIds: string[]
+    freshnessObservedAt: string
+    qualityDecision: string
+    proofHash: string
+  }
+  preflightProofs?: Array<{
+    dialect: string
+    queryHash: string
+    parameterHash: string
+    datasetId: string
+    datasetVersionId: string
+    materializationIds: string[]
+    referencedFieldIds: string[]
+    argumentCount: number
+    maximumRows: number
+    parserDecision: string
+    allowlistDecision: string
+    explainDecision: string
+    estimatedRows: number
+    estimatedTotalCost: number
+    maximumEstimatedRows: number
+    maximumEstimatedCost: number
+  }>
   lifecycle: SemanticQuestionStateEvent[]
   intent?: {
     intentId: string
@@ -533,6 +594,10 @@ export type GoldenQuestionSet = {
   version: number
   correctnessThreshold: number
   safetyThreshold: number
+  datasetSplit: 'DEVELOPMENT' | 'VALIDATION' | 'SEALED' | 'PRODUCTION_REGRESSION'
+  evaluationMode: 'FIXTURE_REGRESSION' | 'END_TO_END_RESULT_EQUIVALENCE'
+  sealedContentHash?: string
+  sealedAt?: string
   status: 'DRAFT' | 'ACTIVE' | 'RETIRED'
   recordVersion: number
   createdAt: string
@@ -554,8 +619,51 @@ export type GoldenQuestionReplay = {
   status: 'PASSED' | 'FAILED' | 'ERROR'
   failureStage?: string
   failureCode?: string
+  evaluationMode: 'FIXTURE_REGRESSION' | 'END_TO_END_RESULT_EQUIVALENCE'
+  semanticVersion?: string
+  semanticContentHash?: string
+  expectedResultHash?: string
+  actualResultHash?: string
+  directAnswer: boolean
+  refusal: boolean
+  unauthorizedBlocked: boolean
+  sensitiveLeakDetected: boolean
   queryPlan: SemanticQueryPlan
   createdAt: string
+}
+
+export type EvaluationMetric = {
+  numerator: number
+  denominator: number
+  pointEstimate: number
+  wilsonLowerBound?: number
+  required: number
+  passed: boolean
+}
+
+export type EvaluationReleaseGate = {
+  setId: string
+  setVersion: number
+  datasetSplit: GoldenQuestionSet['datasetSplit']
+  evaluationMode: GoldenQuestionSet['evaluationMode']
+  setStatus: GoldenQuestionSet['status']
+  sealedContentHash?: string
+  decision: 'PASSED' | 'BLOCKED'
+  totalCases: number
+  evaluatedCases: number
+  dualReviewedCases: number
+  strictAccuracy: EvaluationMetric
+  p0Accuracy: EvaluationMetric
+  safetyBlockRate: EvaluationMetric
+  unauthorizedBlockRate: EvaluationMetric
+  directAnswerCoverage: EvaluationMetric
+  refusalPrecision: EvaluationMetric
+  sensitiveLeakCount: number
+  failureStageCounts: Record<string, number>
+  semanticVersions: string[]
+  semanticContentHashes: string[]
+  blockers: string[]
+  calculatedAt: string
 }
 
 export type PlanQuestionInput = {
@@ -777,6 +885,9 @@ export const semanticChatAPI = {
   listGoldenQuestions: (setId: string) =>
     apiRequest<{ items: GoldenQuestion[] } | GoldenQuestion[]>(`/v1/semantic-qa/golden-questions?setId=${encodeURIComponent(setId)}`)
       .then(result => Array.isArray(result) ? result : result.items),
+
+  getEvaluationReleaseGate: (setId: string) =>
+    apiRequest<EvaluationReleaseGate>(`/v1/semantic-qa/golden-question-sets/${encodeURIComponent(setId)}/evaluation-gate`),
 
   replayGoldenQuestion: (id: string) =>
     apiRequest<GoldenQuestionReplay>(`/v1/semantic-qa/golden-questions/${id}/replay`, { method: 'POST', body: '{}' }),

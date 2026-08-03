@@ -33,8 +33,9 @@ pgvector 检索、租户 RLS、物化与发布门禁、PostgreSQL 属性图投�
    PostgreSQL 解析、表列白名单、参数 hash 和 `EXPLAIN` 成本；长尾路径 B 仍保持关闭。
 6. Result Verifier 已增加内容 hash、返回类型、物化/新鲜度、标量基数和比较期合同；
    总分恒等式、Top N 并列规则、比率独立分母对照和 P0 认证结果仍需按真实指标补齐。
-7. 黄金问题表和回放入口已存在，但没有 2,000+ sealed test、Wilson 下界、分层错误预算
-   和发布门禁实现，不能据此宣称达到 95%。
+7. 已区分规划回归与端到端结果等价评测，并实现 sealed/双审/结果 hash、Wilson 下界、
+   P0/安全/覆盖率/拒答率、首次错误归因和语义发布激活硬门禁。仓库没有伪造 2,000 条
+   业务样本；当前门禁会如实保持 `BLOCKED`，直到业务 Owner 提供真实 sealed 集并通过。
 
 因此，本轮升级不是继续扩展旧 PostgreSQL 图查询，也不是只调整页面；必须先固定权威
 语义合同，再将检索、NebulaGraph、问答规划和执行统一到同一个 `semantic_version`。
@@ -46,7 +47,7 @@ pgvector 检索、租户 RLS、物化与发布门禁、PostgreSQL 属性图投�
 | 权威顺序 | 原子活动发布为治理事实源；NebulaGraph 为关系裁决；执行注册表固定原生版本；旧计划仅作候选/物理适配 | 人工合同 > 执行语义层 > 认证数据集 > 检索/图投影 | 已按目标顺序切读 | P0 |
 | 语义对象 | 已有指标、维度、成员、词条、数据集和物化 | 七层合同：Domain、Term、Entity、SemanticModel、Metric、Dimension/Value/Time/Cohort、Relation、Policy/DQ | 缺少实体、时间、cohort 和统一关系合同 | P0 |
 | 语义版本 | 问答、IR、GraphPlan、执行证据和运行账本固定活动 `semantic_version/content_hash`，执行前后复核 | 所有执行层和派生投影携带同一 `semantic_version/content_hash`，原子切换 | 在线问答切读已完成 | P0 |
-| 资产发布 | 已实现候选、静态校验、四投影、READY 和原子激活；黄金回归待评测阶段接入 | 构建候选版本 → 静态校验 → 投影 → 黄金回归 → 原子激活 → 延迟清理 | 核心流程已实现 | P0 |
+| 资产发布 | 已实现候选、静态校验、四投影、READY；首次基线后，激活事务强制复算同版本/hash 的 sealed E2E 门禁 | 构建候选版本 → 静态校验 → 投影 → 黄金回归 → 原子激活 → 延迟清理 | 核心流程和硬门禁已实现 | P0 |
 | 关系图 | NebulaGraph 版本投影、维度作用域值 VID、有界查询和 Go GraphPlanner 已接入问答；旧表仅保留候选/回放 | NebulaGraph 可重建投影，稳定 VID，有界 1～4 跳，Go GraphPlanner | 已实现并切读 | P0 |
 | 图在线用途 | 六类接口、真实图测试和问答 Bundle/权限/Join 接入已实现 | 候选扩展、值归属、兼容性、路径选择、权限传播、影响分析六类能力 | 已实现 | P0 |
 | 图可用性 | 已实现 Session Pool、超时、熔断及仅精确版本认证 Join GraphPlan 缓存 | Nebula 多副本；不可用时只接受版本一致的缓存 GraphPlan | 开发单副本已验证，生产多副本待部署 | P0 |
@@ -63,9 +64,9 @@ pgvector 检索、租户 RLS、物化与发布门禁、PostgreSQL 属性图投�
 | 结果验证 | schema/类型/行数/hash/版本/内容 hash/物化/新鲜度/比较期合同 | 时间完整性、单位、空值、比率、Top N、恒等式、DQ、P0 对照 | 通用合同已实现；指标专用不变量待阶段 5 | P0 |
 | 答案忠实 | 确定性结果摘要和 AccuracyEvidence | 数字槽位逐项验证、口径/过滤/新鲜度/来源完整展示 | 部分实现 | P0 |
 | 权限 | 应用授权 + 活动 Policy 合同 + Nebula 关系传播 + PostgreSQL/warehouse RLS | 应用 + Policy Engine + 语义层 + 数仓四层 | 图权限已接入；独立 OPA 适配待后续 | P0 |
-| 评测 | 黄金问题集、回放和基础验证脚本 | 2,000+ sealed、结果等价、Wilson 下界、分层错误预算、影子流量 | 未实现 | P0 |
+| 评测 | 四类 split、规划/E2E 模式、双审冻结 hash、结果等价、Wilson、P0/安全/覆盖/拒答和首次错误门禁已实现；真实 sealed 样本待业务录入 | 2,000+ sealed、结果等价、Wilson 下界、分层错误预算、影子流量 | 工程门禁已实现；数据验收未达标 | P0 |
 | 可观测性 | 请求日志、进度和执行证据 | OTel trace 串联 Web、Go、模型、图、语义层和数仓 | 部分实现 | P1 |
-| 前端 | 工作台、澄清、证据、资产概览正在重构 | 口径卡、最小澄清、结果/证据抽屉、治理和评测台 | 部分实现 | P1 |
+| 前端 | 已有口径/澄清/验证进度、结果、原文对齐、Nebula GraphPlan、Registry、SQL 预检证据；资产页展示四投影和评测绑定，评测台不再把点赞/规划回放叫准确率 | 口径卡、最小澄清、结果/证据抽屉、治理和评测台 | 核心闭环已实现 | P1 |
 
 ## 3. NebulaGraph 强制落地边界
 
@@ -192,7 +193,8 @@ development/validation/sealed/production_regression 数据集；结果等价比�
 | 1 | `e56abf9` | 不可变语义发布包、七层合同校验、四投影 hash 门禁、原子激活、资产目录/就绪度 | 发布服务、迁移、API、React 回归通过 |
 | 2 | `7159631` | NebulaGraph Compose/nGQL、官方 Go 客户端、租约 Worker、六类在线能力、GraphPlanner、精确版本缓存 | 全量单测、迁移门禁及六类真实图查询通过 |
 | 3 | `60ca704` | NFKC/AlignmentMap、版本化 Alias 与维度值复合身份、认证示例、Top3 冲突 Bundle 图消歧、活动版本 GraphPlan、权限传播、三类非图投影 Worker、旧原生资产迁移预览/候选、执行前后版本复核和脱敏重放产物 | 2,422 对象四投影 READY；Nebula 2,327 节点/2,498 边/0 孤儿；真实问答固定版本并通过图权限与结果门禁；全量 Go/CI 通过 |
-| 4 | 待本阶段提交 | execution registry 权威校验；14 Tool Host；追加式脱敏调用审计；3/12/2/2/2/60s 预算；PostgreSQL 同方言解析、DSL 表列白名单、`EXPLAIN` 成本；内容 hash/类型/物化/比较期结果不变量 | 真实“本月净收入”问答 `ANSWERED`；Registry/DQ/AST/成本/结果全部 PASS；8 条 Host 调用事实 hash 有效且无 SQL/参数/结果明文 |
+| 4 | `1aca8f1` | execution registry 权威校验；14 Tool Host；追加式脱敏调用审计；3/12/2/2/2/60s 预算；PostgreSQL 同方言解析、DSL 表列白名单、`EXPLAIN` 成本；内容 hash/类型/物化/比较期结果不变量 | 真实“本月净收入”问答 `ANSWERED`；Registry/DQ/AST/成本/结果全部 PASS；8 条 Host 调用事实 hash 有效且无 SQL/参数/结果明文 |
+| 5 | 待本阶段提交 | development/validation/sealed/production_regression；规划回归与 E2E 结果等价隔离；双审与冻结 hash；Wilson/P0/越权/泄漏/覆盖/拒答门禁；后续语义激活绑定评测；React 口径、图计划、Registry、预检证明、发布流水线和门禁面板 | 单测验证 Wilson 与 P0 阻断；数据库验证 sealed/运行证据/激活角色边界；React 构建；真实样本不足时门禁明确 BLOCKED，不宣称 95% |
 
 阶段 4 没有重写当前项目已经成熟的指标编译和只读数仓执行器，而是在其上游增加活动
 执行注册表和 Tool Host，在其下游增加结果不变量。原指标 Preview 代码只保留为物理

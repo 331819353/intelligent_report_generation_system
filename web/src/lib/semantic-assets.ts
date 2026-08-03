@@ -137,6 +137,8 @@ export type SemanticRelease = {
   createdBy: string
   updatedBy: string
   activatedBy?: string
+  evaluationSetId?: string
+  evaluationSetContentHash?: string
   createdAt: string
   updatedAt: string
   validatedAt?: string

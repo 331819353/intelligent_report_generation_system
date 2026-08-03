@@ -31,7 +31,7 @@
 | `POST` | `/api/v1/semantic-assets/releases/bootstrap/preview` | 只读盘点当前已发布原生资产，返回可迁移候选、排除项和阻断项 |
 | `POST` | `/api/v1/semantic-assets/releases/bootstrap` | 显式把可迁移的当前原生资产创建为 DRAFT 发布包，不自动激活 |
 | `POST` | `/api/v1/semantic-assets/releases/{id}/validate` | 按 `expectedVersion` 执行七层合同完整性和关系安全门禁 |
-| `POST` | `/api/v1/semantic-assets/releases/{id}/activate` | 按发布包和状态指针双重乐观锁原子激活；四类投影必须 READY 且 hash 一致 |
+| `POST` | `/api/v1/semantic-assets/releases/{id}/activate` | 按发布包和状态指针双重乐观锁原子激活；四类投影必须 READY；已有活动版本后还必须提交 `evaluationSetId` |
 | `GET` | `/api/v1/semantic-assets` | 分页查询；支持 `q`、`knowledgeType`、`status`、`embeddingStatus` |
 | `GET` | `/api/v1/semantic-assets/types` | 查询知识类型 |
 | `POST` | `/api/v1/semantic-assets` | 新增资产 |
@@ -94,8 +94,12 @@ Relation、Dataset、Policy 和 QualityRule。服务端会执行对象类型相�
 
 只有四个投影的 `appliedContentHash` 都等于发布包 `contentHash`，发布包才会进入
 `READY`。激活操作同时校验发布包 `expectedVersion` 和租户状态
-`expectedStateVersion`，在一个数据库事务中将旧版本标记为 `SUPERSEDED`、新版本标记
-为 `ACTIVE` 并切换活动指针。任何半发布状态都不能进入智能问答运行时。
+`expectedStateVersion`。首次 bootstrap 可以建立基线；已有活动版本后，激活请求必须携带
+`evaluationSetId`。数据库会重新计算该 ACTIVE sealed 集是否为端到端结果等价模式、是否
+至少 2,000 条且全部双审、是否完整运行，并要求每条运行的 `semantic_version` 和
+`semantic_content_hash` 与待激活发布包完全相同，同时校验 Wilson、P0、越权、泄漏、
+覆盖和拒答门槛。全部通过后，事务才将旧版本标记为 `SUPERSEDED`、新版本标记为
+`ACTIVE` 并切换活动指针；客户端不能通过伪造布尔值绕过。
 
 ### 现有资产升级
 

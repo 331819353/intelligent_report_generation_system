@@ -17,6 +17,7 @@ import { AssetManagementTabs } from '../components/AssetManagementTabs'
 import {
   semanticAssetAPI,
   type SemanticCatalogView,
+  type SemanticRelease,
   type SemanticReleaseState,
 } from '../lib/semantic-assets'
 
@@ -28,6 +29,7 @@ const formatCount = (value: number) => new Intl.NumberFormat('zh-CN').format(val
 export function AssetOverviewPage() {
   const [data, setData] = useState<SemanticCatalogView>()
   const [releaseState, setReleaseState] = useState<SemanticReleaseState>()
+  const [releases, setReleases] = useState<SemanticRelease[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [reloadToken, setReloadToken] = useState(0)
@@ -43,10 +45,12 @@ export function AssetOverviewPage() {
     Promise.all([
       semanticAssetAPI.catalog(),
       semanticAssetAPI.activeRelease(),
-    ]).then(([catalog, release]) => {
+      semanticAssetAPI.releases({ limit: 8 }),
+    ]).then(([catalog, release, releasePage]) => {
       if (active) {
         setData(catalog)
         setReleaseState(release)
+        setReleases(releasePage.items)
       }
     }).catch(cause => {
       if (active) setError(cause instanceof Error ? cause.message : '资产治理概览加载失败')
@@ -122,6 +126,18 @@ export function AssetOverviewPage() {
             </li>)}
           </ol>
           <p><ShieldCheckIcon size={16} />目录对象只在认证状态、版本和投影门禁同时通过时向 Question Orchestrator 开放。</p>
+        </section>
+
+        <section className="asset-overview-releases" aria-label="语义版本发布流水线">
+          <header><div><span className="eyebrow">Atomic release pipeline</span><h3>版本、投影与评测绑定</h3></div><span>{releases.length} 个最近版本</span></header>
+          <div className="asset-overview-release-list">
+            {releases.map(release => <article key={release.id}>
+              <header><div><strong>{release.semanticVersion}</strong><small title={release.contentHash}>{release.contentHash.slice(0, 12)}… · {release.objectCount} 个对象</small></div><span className={release.status.toLowerCase()}>{release.status}</span></header>
+              <div className="asset-overview-projections">{release.projections.map(projection => <p className={projection.status === 'READY' ? 'ready' : 'attention'} key={projection.id}><span>{projection.target}</span><strong>{projection.status}</strong><small>{projection.resourceVersion || projection.errorCode || '等待投影'}</small></p>)}</div>
+              <footer><span>{release.evaluationSetId ? `评测集 ${release.evaluationSetId.slice(0, 8)}…` : release.status === 'ACTIVE' && !release.baseReleaseId ? '初始基线版本' : '尚未绑定 sealed 发布门禁'}</span>{release.evaluationSetContentHash && <code title={release.evaluationSetContentHash}>{release.evaluationSetContentHash.slice(0, 12)}…</code>}</footer>
+            </article>)}
+          </div>
+          <p><ShieldCheckIcon size={16} />已有活动版本后，下一次激活必须由数据库复算同一语义版本与内容哈希的 sealed E2E 门禁；前端无法绕过。</p>
         </section>
 
         <section className="asset-overview-modules" aria-label="资产治理模块">

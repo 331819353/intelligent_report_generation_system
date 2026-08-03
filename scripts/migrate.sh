@@ -292,6 +292,24 @@ WHERE to_regclass('platform.semantic_tool_calls') IS NOT NULL
 \gexec
 
 SELECT format(
+  'REVOKE ALL ON FUNCTION platform.semantic_evaluation_set_passes(uuid,text,text) FROM PUBLIC, %I, %I; GRANT EXECUTE ON FUNCTION platform.semantic_evaluation_set_passes(uuid,text,text) TO %I',
+  :'worker_user',:'connection_test_user',:'app_user'
+)
+WHERE to_regprocedure(
+  'platform.semantic_evaluation_set_passes(uuid,text,text)'
+) IS NOT NULL
+\gexec
+
+SELECT format(
+  'REVOKE ALL ON FUNCTION platform.semantic_evaluation_security_set_passes(uuid,text,text) FROM PUBLIC, %I, %I; GRANT EXECUTE ON FUNCTION platform.semantic_evaluation_security_set_passes(uuid,text,text) TO %I',
+  :'worker_user',:'connection_test_user',:'app_user'
+)
+WHERE to_regprocedure(
+  'platform.semantic_evaluation_security_set_passes(uuid,text,text)'
+) IS NOT NULL
+\gexec
+
+SELECT format(
   'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.dws_modeling_jobs, platform.dws_modeling_outputs FROM %I',
   :'app_user'
 )

@@ -13,7 +13,9 @@ const semanticReleaseColumns = `release.id::text,release.semantic_version,
 	release.content_hash,release.status,COALESCE(release.base_release_id::text,''),
 	release.notes,release.object_count,release.validation_summary,release.version,
 	release.created_by::text,release.updated_by::text,
-	COALESCE(release.activated_by::text,''),release.created_at,release.updated_at,
+	COALESCE(release.activated_by::text,''),
+	COALESCE(release.evaluation_set_id::text,''),
+	release.evaluation_set_content_hash,release.created_at,release.updated_at,
 	release.validated_at,release.activated_at`
 
 func (store *PostgresStore) CreateSemanticRelease(
@@ -235,7 +237,7 @@ func (store *PostgresStore) SaveSemanticReleaseValidation(
 
 func (store *PostgresStore) ActivateSemanticRelease(
 	ctx context.Context,
-	tenantID, actorID, releaseID string,
+	tenantID, actorID, releaseID, evaluationSetID string,
 	expectedVersion, expectedStateVersion int64,
 ) (state SemanticReleaseState, err error) {
 	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
@@ -281,6 +283,28 @@ func (store *PostgresStore) ActivateSemanticRelease(
 		if invalidProjectionCount != 0 {
 			return ErrReleaseNotReady
 		}
+		evaluationSetContentHash := ""
+		if activeReleaseID != "" && activeReleaseID != releaseID && evaluationSetID == "" {
+			return ErrReleaseNotReady
+		}
+		if evaluationSetID != "" {
+			var gatePassed bool
+			if queryErr := tx.QueryRow(ctx, `SELECT
+				platform.semantic_evaluation_set_passes($1::uuid,$2,$3)
+				AND platform.semantic_evaluation_security_set_passes($1::uuid,$2,$3),
+				COALESCE((
+				  SELECT sealed_content_hash
+				  FROM platform.semantic_golden_question_sets
+				  WHERE id=$1::uuid
+				),'')`, evaluationSetID, semanticVersion, contentHash).Scan(
+				&gatePassed, &evaluationSetContentHash,
+			); queryErr != nil {
+				return queryErr
+			}
+			if !gatePassed || evaluationSetContentHash == "" {
+				return ErrReleaseNotReady
+			}
+		}
 		if activeReleaseID != "" && activeReleaseID != releaseID {
 			if _, updateErr := tx.Exec(ctx, `UPDATE platform.semantic_releases
 				SET status='SUPERSEDED',version=version+1,updated_by=$1::uuid
@@ -296,15 +320,20 @@ func (store *PostgresStore) ActivateSemanticRelease(
 		}
 		if _, updateErr := tx.Exec(ctx, `UPDATE platform.semantic_releases
 			SET status='ACTIVE',version=version+1,updated_by=$1::uuid,
-				activated_by=$1::uuid,activated_at=now()
-			WHERE id=$2::uuid`, actorID, releaseID); updateErr != nil {
+				activated_by=$1::uuid,activated_at=now(),
+				evaluation_set_id=NULLIF($3,'')::uuid,
+				evaluation_set_content_hash=$4
+			WHERE id=$2::uuid`, actorID, releaseID, evaluationSetID,
+			evaluationSetContentHash); updateErr != nil {
 			return updateErr
 		}
 		if eventErr := insertSemanticReleaseEvent(
 			ctx, tx, releaseID, "ACTIVATED", actorID,
 			map[string]any{
 				"semanticVersion": semanticVersion, "contentHash": contentHash,
-				"previousReleaseId": activeReleaseID,
+				"previousReleaseId":        activeReleaseID,
+				"evaluationSetId":          evaluationSetID,
+				"evaluationSetContentHash": evaluationSetContentHash,
 			},
 		); eventErr != nil {
 			return eventErr
@@ -394,6 +423,7 @@ func scanSemanticRelease(row pgx.Row, release *SemanticRelease, extra ...any) er
 		&release.Status, &release.BaseReleaseID, &release.Notes,
 		&release.ObjectCount, &summary, &release.Version,
 		&release.CreatedBy, &release.UpdatedBy, &release.ActivatedBy,
+		&release.EvaluationSetID, &release.EvaluationSetContentHash,
 		&release.CreatedAt, &release.UpdatedAt, &release.ValidatedAt,
 		&release.ActivatedAt,
 	}

@@ -82,27 +82,35 @@ func (store *PostgresStore) CreateGoldenQuestionSet(
 ) (item GoldenQuestionSet, err error) {
 	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
 		var createdAt, updatedAt time.Time
+		var sealedAt *time.Time
 		err := tx.QueryRow(ctx, `INSERT INTO platform.semantic_golden_question_sets(
 				tenant_id,code,name,business_domain,version,
-				correctness_threshold,safety_threshold,created_by,updated_by
+				correctness_threshold,safety_threshold,dataset_split,evaluation_mode,
+				created_by,updated_by
 			) VALUES(
-				platform.current_tenant_id(),$1,$2,$3,$4,$5,$6,$7::uuid,$7::uuid
+				platform.current_tenant_id(),$1,$2,$3,$4,$5,$6,$7,$8,$9::uuid,$9::uuid
 			)
 			RETURNING id::text,code,name,business_domain,version,
 				correctness_threshold::float8,safety_threshold::float8,
+				dataset_split,evaluation_mode,sealed_content_hash,sealed_at,
 				status,record_version,created_at,updated_at`,
 			input.Code, input.Name, input.BusinessDomain, input.Version,
-			input.CorrectnessThreshold, input.SafetyThreshold, actorID,
+			input.CorrectnessThreshold, input.SafetyThreshold,
+			input.DatasetSplit, input.EvaluationMode, actorID,
 		).Scan(
 			&item.ID, &item.Code, &item.Name, &item.BusinessDomain, &item.Version,
-			&item.CorrectnessThreshold, &item.SafetyThreshold, &item.Status,
-			&item.RecordVersion, &createdAt, &updatedAt,
+			&item.CorrectnessThreshold, &item.SafetyThreshold,
+			&item.DatasetSplit, &item.EvaluationMode, &item.SealedContentHash,
+			&sealedAt, &item.Status, &item.RecordVersion, &createdAt, &updatedAt,
 		)
 		if err != nil {
 			return mapPostgresError(err)
 		}
 		item.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 		item.UpdatedAt = updatedAt.UTC().Format(time.RFC3339Nano)
+		if sealedAt != nil {
+			item.SealedAt = sealedAt.UTC().Format(time.RFC3339Nano)
+		}
 		return nil
 	})
 	return item, err
@@ -116,6 +124,7 @@ func (store *PostgresStore) ListGoldenQuestionSets(
 	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id::text,code,name,business_domain,
 				version,correctness_threshold::float8,safety_threshold::float8,
+				dataset_split,evaluation_mode,sealed_content_hash,sealed_at,
 				status,record_version,created_at,updated_at
 			FROM platform.semantic_golden_question_sets
 			ORDER BY code,version DESC,id`)
@@ -126,16 +135,22 @@ func (store *PostgresStore) ListGoldenQuestionSets(
 		for rows.Next() {
 			var item GoldenQuestionSet
 			var createdAt, updatedAt time.Time
+			var sealedAt *time.Time
 			if err := rows.Scan(
 				&item.ID, &item.Code, &item.Name, &item.BusinessDomain,
 				&item.Version, &item.CorrectnessThreshold,
-				&item.SafetyThreshold, &item.Status, &item.RecordVersion,
+				&item.SafetyThreshold, &item.DatasetSplit, &item.EvaluationMode,
+				&item.SealedContentHash, &sealedAt,
+				&item.Status, &item.RecordVersion,
 				&createdAt, &updatedAt,
 			); err != nil {
 				return err
 			}
 			item.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 			item.UpdatedAt = updatedAt.UTC().Format(time.RFC3339Nano)
+			if sealedAt != nil {
+				item.SealedAt = sealedAt.UTC().Format(time.RFC3339Nano)
+			}
 			items = append(items, item)
 		}
 		return rows.Err()
@@ -149,12 +164,13 @@ func (store *PostgresStore) ActivateGoldenQuestionSet(
 	expectedRecordVersion int64,
 ) (GoldenQuestionSet, error) {
 	err := database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
-		var code, status string
+		var code, status, datasetSplit, evaluationMode string
 		var recordVersion int64
-		if err := tx.QueryRow(ctx, `SELECT code,status,record_version
+		if err := tx.QueryRow(ctx, `SELECT code,status,record_version,
+				dataset_split,evaluation_mode
 			FROM platform.semantic_golden_question_sets
 			WHERE id=$1::uuid FOR UPDATE`, id).
-			Scan(&code, &status, &recordVersion); err != nil {
+			Scan(&code, &status, &recordVersion, &datasetSplit, &evaluationMode); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
@@ -172,6 +188,38 @@ func (store *PostgresStore) ActivateGoldenQuestionSet(
 		if count == 0 {
 			return ErrInvalidState
 		}
+		sealedContentHash := ""
+		if datasetSplit == "SEALED" {
+			if evaluationMode != "END_TO_END_RESULT_EQUIVALENCE" || count < 2000 {
+				return ErrInvalidState
+			}
+			var eligibleCount int
+			if err := tx.QueryRow(ctx, `SELECT count(*)::int
+				FROM platform.semantic_golden_questions
+				WHERE set_id=$1::uuid AND status='ACTIVE'
+				  AND independent_review_count=2
+				  AND approved_question<>''
+				  AND (
+				    expected_status<>'READY'
+				    OR fixture_json->>'expectedResultHash' ~ '^[0-9a-f]{64}$'
+				  )`, id).Scan(&eligibleCount); err != nil {
+				return err
+			}
+			if eligibleCount != count {
+				return ErrInvalidState
+			}
+			if err := tx.QueryRow(ctx, `SELECT encode(digest(string_agg(
+				question_hash||':'||expected_path_hash||':'||expected_status||':'||
+				COALESCE(fixture_json->>'expectedResultHash','')||':'||priority||':'||
+				answerable::text||':'||security_expectation,
+				'|' ORDER BY question_hash,id
+			), 'sha256'),'hex')
+				FROM platform.semantic_golden_questions
+				WHERE set_id=$1::uuid AND status='ACTIVE'`, id).
+				Scan(&sealedContentHash); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(ctx, `UPDATE platform.semantic_golden_question_sets
 			SET status='RETIRED',record_version=record_version+1,
 				updated_by=$1::uuid,updated_at=now()
@@ -180,9 +228,11 @@ func (store *PostgresStore) ActivateGoldenQuestionSet(
 		}
 		tag, err := tx.Exec(ctx, `UPDATE platform.semantic_golden_question_sets
 			SET status='ACTIVE',record_version=record_version+1,
-				updated_by=$1::uuid,activated_at=now(),updated_at=now()
+				updated_by=$1::uuid,activated_at=now(),updated_at=now(),
+				sealed_content_hash=CASE WHEN dataset_split='SEALED' THEN $4 ELSE '' END,
+				sealed_at=CASE WHEN dataset_split='SEALED' THEN now() ELSE NULL END
 			WHERE id=$2::uuid AND status='DRAFT' AND record_version=$3`,
-			actorID, id, expectedRecordVersion)
+			actorID, id, expectedRecordVersion, sealedContentHash)
 		if err != nil {
 			return err
 		}
@@ -216,37 +266,50 @@ func (store *PostgresStore) CreateGoldenQuestion(
 	if err != nil {
 		return item, err
 	}
+	answerable := true
+	if input.Answerable != nil {
+		answerable = *input.Answerable
+	}
 	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
 		var createdAt, updatedAt time.Time
 		var fixtureJSON []byte
 		err := tx.QueryRow(ctx, `INSERT INTO platform.semantic_golden_questions(
 				tenant_id,set_id,question_hash,template_id,expected_path_hash,
-				expected_status,fixture_json,created_by,updated_by
+				expected_status,fixture_json,approved_question,priority,answerable,
+				security_expectation,independent_review_count,created_by,updated_by
 			)
 			SELECT platform.current_tenant_id(),question_set.id,$2,
-				NULLIF($3,'')::uuid,$4,$5,$6,$7::uuid,$7::uuid
+				NULLIF($3::text,'')::uuid,$4,$5,$6::jsonb,
+				CASE WHEN question_set.evaluation_mode='END_TO_END_RESULT_EQUIVALENCE'
+				  THEN $7::text ELSE ''::text END,
+				$8,$9,$10,$11,$12::uuid,$12::uuid
 			FROM platform.semantic_golden_question_sets AS question_set
 			WHERE question_set.id=$1::uuid AND question_set.status='DRAFT'
 			  AND (
-			    $3=''
+			    $3::text=''
 			    OR EXISTS(
 			      SELECT 1
 			      FROM platform.semantic_question_templates AS template
 			      WHERE template.id=$3::uuid
 			        AND template.status='ACTIVE'
-			        AND template.intent=$6->'queryPlan'->>'intent'
+			        AND template.intent=($6::jsonb)->'queryPlan'->>'intent'
 			    )
 			  )
 			RETURNING id::text,set_id::text,question_hash,
 				COALESCE(template_id::text,''),expected_path_hash,
-				expected_status,fixture_json,status,created_by::text,
-				created_at,updated_at`,
+				expected_status,priority,answerable,security_expectation,
+				independent_review_count,fixture_json,status,created_by::text,
+				created_at,updated_at,approved_question`,
 			input.SetID, questionHash, input.TemplateID, input.ExpectedPathHash,
-			input.ExpectedStatus, fixture, actorID,
+			input.ExpectedStatus, fixture, input.Question, input.Priority, answerable,
+			input.SecurityExpectation, input.IndependentReviewCount, actorID,
 		).Scan(
 			&item.ID, &item.SetID, &item.QuestionHash, &item.TemplateID,
-			&item.ExpectedPathHash, &item.ExpectedStatus, &fixtureJSON,
+			&item.ExpectedPathHash, &item.ExpectedStatus, &item.Priority,
+			&item.Answerable, &item.SecurityExpectation,
+			&item.IndependentReviewCount, &fixtureJSON,
 			&item.Status, &item.createdBy, &createdAt, &updatedAt,
+			&item.approvedQuestion,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrInvalidState
@@ -267,8 +330,12 @@ func (store *PostgresStore) CreateGoldenQuestion(
 const goldenQuestionColumns = `question.id::text,
 	COALESCE(question.set_id::text,''),question.question_hash,
 	COALESCE(question.template_id::text,''),question.expected_path_hash,
-	question.expected_status,question.fixture_json,question.status,
-	question.created_by::text,question.created_at,question.updated_at`
+	question.expected_status,question.priority,question.answerable,
+	question.security_expectation,question.independent_review_count,
+	question.fixture_json,question.status,
+	question.created_by::text,question.created_at,question.updated_at,
+	question.approved_question,question_set.evaluation_mode,
+	question_set.dataset_split`
 
 func (store *PostgresStore) ListGoldenQuestions(
 	ctx context.Context,
@@ -278,6 +345,9 @@ func (store *PostgresStore) ListGoldenQuestions(
 	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT `+goldenQuestionColumns+`
 			FROM platform.semantic_golden_questions AS question
+			JOIN platform.semantic_golden_question_sets AS question_set
+			  ON question_set.id=question.set_id
+			 AND question_set.tenant_id=question.tenant_id
 			WHERE question.set_id=$1::uuid
 			ORDER BY question.question_hash,question.id`, setID)
 		if err != nil {
@@ -327,8 +397,11 @@ func scanGoldenQuestion(row rowScanner) (item GoldenQuestion, err error) {
 	var createdAt, updatedAt time.Time
 	err = row.Scan(
 		&item.ID, &item.SetID, &item.QuestionHash, &item.TemplateID,
-		&item.ExpectedPathHash, &item.ExpectedStatus, &fixtureJSON,
+		&item.ExpectedPathHash, &item.ExpectedStatus, &item.Priority,
+		&item.Answerable, &item.SecurityExpectation,
+		&item.IndependentReviewCount, &fixtureJSON,
 		&item.Status, &item.createdBy, &createdAt, &updatedAt,
+		&item.approvedQuestion, &item.evaluationMode, &item.datasetSplit,
 	)
 	if err != nil {
 		return item, err
@@ -348,8 +421,23 @@ func (store *PostgresStore) RecordGoldenQuestionReplay(
 	plan QueryPlan,
 	failureStage, failureCode string,
 ) (result GoldenQuestionReplay, err error) {
+	return store.RecordGoldenQuestionReplayV2(
+		ctx, tenantID, actorID, item,
+		GoldenQuestionReplayObservation{
+			Plan: plan, FailureStage: failureStage, FailureCode: failureCode,
+			EvaluationMode: "FIXTURE_REGRESSION",
+		},
+	)
+}
+
+func (store *PostgresStore) RecordGoldenQuestionReplayV2(
+	ctx context.Context,
+	tenantID, actorID string,
+	item GoldenQuestion,
+	observation GoldenQuestionReplayObservation,
+) (result GoldenQuestionReplay, err error) {
 	status := "PASSED"
-	if failureCode != "" {
+	if observation.FailureCode != "" {
 		status = "FAILED"
 	}
 	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
@@ -357,24 +445,43 @@ func (store *PostgresStore) RecordGoldenQuestionReplay(
 		err := tx.QueryRow(ctx, `INSERT INTO platform.semantic_golden_question_runs(
 				tenant_id,golden_question_id,graph_generation_id,query_plan_id,
 				status,expected_status,actual_status,expected_path_hash,
-				actual_path_hash,failure_stage,failure_code,executed_by
+				actual_path_hash,failure_stage,failure_code,evaluation_mode,
+				semantic_version,semantic_content_hash,expected_result_hash,
+				actual_result_hash,direct_answer,refusal,unauthorized_blocked,
+				sensitive_leak_detected,executed_by
 			) VALUES(
 				platform.current_tenant_id(),$1::uuid,NULLIF($2,'')::uuid,
-				NULLIF($3,'')::uuid,$4,$5,$6,$7,$8,$9,$10,$11::uuid
+				NULLIF($3,'')::uuid,$4,$5,$6,$7,$8,$9,$10,$11,
+				$12,$13,$14,$15,$16,$17,$18,$19,$20::uuid
 			)
 			RETURNING id::text,created_at`,
-			item.ID, plan.GraphGenerationID, plan.ID, status,
-			item.ExpectedStatus, plan.Status, item.ExpectedPathHash,
-			plan.PathHash, failureStage, failureCode, actorID,
+			item.ID, observation.Plan.GraphGenerationID, observation.Plan.ID, status,
+			item.ExpectedStatus, observation.Plan.Status, item.ExpectedPathHash,
+			observation.Plan.PathHash, observation.FailureStage,
+			observation.FailureCode, observation.EvaluationMode,
+			observation.SemanticVersion, observation.SemanticContentHash,
+			observation.ExpectedResultHash, observation.ActualResultHash,
+			observation.DirectAnswer, observation.Refusal,
+			observation.UnauthorizedBlocked,
+			observation.SensitiveLeakDetected, actorID,
 		).Scan(&result.ID, &createdAt)
 		if err != nil {
 			return err
 		}
 		result.GoldenQuestionID = item.ID
 		result.Status = status
-		result.FailureStage = failureStage
-		result.FailureCode = failureCode
-		result.QueryPlan = plan
+		result.FailureStage = observation.FailureStage
+		result.FailureCode = observation.FailureCode
+		result.EvaluationMode = observation.EvaluationMode
+		result.SemanticVersion = observation.SemanticVersion
+		result.SemanticContentHash = observation.SemanticContentHash
+		result.ExpectedResultHash = observation.ExpectedResultHash
+		result.ActualResultHash = observation.ActualResultHash
+		result.DirectAnswer = observation.DirectAnswer
+		result.Refusal = observation.Refusal
+		result.UnauthorizedBlocked = observation.UnauthorizedBlocked
+		result.SensitiveLeakDetected = observation.SensitiveLeakDetected
+		result.QueryPlan = observation.Plan
 		result.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 		return nil
 	})

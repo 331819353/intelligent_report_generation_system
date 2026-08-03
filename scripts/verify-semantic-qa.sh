@@ -51,7 +51,10 @@ BEGIN
     ('000184_nebulagraph_projection_runtime'),
     ('000185_semantic_question_graph_runtime'),
     ('000186_semantic_runtime_projections'),
-    ('000187_semantic_execution_tool_host')
+    ('000187_semantic_execution_tool_host'),
+    ('000188_semantic_evaluation_release_gate'),
+    ('000189_semantic_release_evaluation_gate'),
+    ('000190_semantic_evaluation_security_gate')
   ) AS expected(version)
   LEFT JOIN platform_schema_migrations AS applied USING(version)
   WHERE applied.version IS NULL;
@@ -332,6 +335,83 @@ BEGIN
   END IF;
 
   SELECT count(*) INTO invalid_count
+  FROM platform.semantic_golden_question_sets AS question_set
+  WHERE question_set.status='ACTIVE'
+    AND question_set.dataset_split='SEALED'
+    AND (
+      question_set.evaluation_mode<>'END_TO_END_RESULT_EQUIVALENCE'
+      OR question_set.sealed_content_hash !~ '^[0-9a-f]{64}$'
+      OR question_set.sealed_at IS NULL
+      OR (
+        SELECT count(*)
+        FROM platform.semantic_golden_questions AS question
+        WHERE question.set_id=question_set.id AND question.status='ACTIVE'
+      )<2000
+      OR EXISTS(
+        SELECT 1
+        FROM platform.semantic_golden_questions AS question
+        WHERE question.set_id=question_set.id AND question.status='ACTIVE'
+          AND (
+            question.independent_review_count<>2
+            OR question.approved_question=''
+            OR (
+              question.expected_status='READY'
+              AND question.fixture_json->>'expectedResultHash'
+                !~ '^[0-9a-f]{64}$'
+            )
+          )
+      )
+    );
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'active sealed evaluation sets bypass release gates: %',invalid_count;
+  END IF;
+
+  SELECT count(*) INTO invalid_count
+  FROM platform.semantic_golden_question_runs AS run
+  JOIN platform.semantic_golden_questions AS question
+    ON question.tenant_id=run.tenant_id
+   AND question.id=run.golden_question_id
+  JOIN platform.semantic_golden_question_sets AS question_set
+    ON question_set.tenant_id=question.tenant_id
+   AND question_set.id=question.set_id
+  WHERE run.evaluation_mode<>question_set.evaluation_mode
+     OR (run.evaluation_mode='END_TO_END_RESULT_EQUIVALENCE' AND (
+       run.semantic_content_hash !~ '^[0-9a-f]{64}$'
+       OR (
+         question.expected_status='READY'
+         AND (
+           run.expected_result_hash !~ '^[0-9a-f]{64}$'
+           OR run.actual_result_hash !~ '^[0-9a-f]{64}$'
+         )
+       )
+     ));
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'golden evaluation run evidence is incomplete: %',invalid_count;
+  END IF;
+
+  SELECT count(*) INTO invalid_count
+  FROM platform.semantic_releases AS release
+  WHERE release.status='ACTIVE'
+    AND EXISTS(
+      SELECT 1 FROM platform.semantic_releases AS prior
+      WHERE prior.tenant_id=release.tenant_id
+        AND prior.id<>release.id AND prior.status='SUPERSEDED'
+    )
+    AND (
+      release.evaluation_set_id IS NULL
+      OR release.evaluation_set_content_hash !~ '^[0-9a-f]{64}$'
+      OR NOT platform.semantic_evaluation_set_passes(
+        release.evaluation_set_id,release.semantic_version,release.content_hash
+      )
+      OR NOT platform.semantic_evaluation_security_set_passes(
+        release.evaluation_set_id,release.semantic_version,release.content_hash
+      )
+    );
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'active semantic release bypassed sealed E2E gate: %',invalid_count;
+  END IF;
+
+  SELECT count(*) INTO invalid_count
   FROM information_schema.columns
   WHERE table_schema='platform' AND table_name='semantic_tool_calls'
     AND column_name IN (
@@ -443,6 +523,26 @@ SELECT (
   AND has_function_privilege(
     :'worker_user',
     'platform.claim_semantic_nebula_projection(uuid,text,integer)',
+    'EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user',
+    'platform.semantic_evaluation_set_passes(uuid,text,text)',
+    'EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'worker_user',
+    'platform.semantic_evaluation_set_passes(uuid,text,text)',
+    'EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user',
+    'platform.semantic_evaluation_security_set_passes(uuid,text,text)',
+    'EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'worker_user',
+    'platform.semantic_evaluation_security_set_passes(uuid,text,text)',
     'EXECUTE'
   )
 ) AS semantic_role_boundary_valid

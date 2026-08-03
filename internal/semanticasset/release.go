@@ -87,8 +87,9 @@ type ValidateSemanticReleaseInput struct {
 }
 
 type ActivateSemanticReleaseInput struct {
-	ExpectedVersion      int64 `json:"expectedVersion"`
-	ExpectedStateVersion int64 `json:"expectedStateVersion"`
+	ExpectedVersion      int64  `json:"expectedVersion"`
+	ExpectedStateVersion int64  `json:"expectedStateVersion"`
+	EvaluationSetID      string `json:"evaluationSetId,omitempty"`
 }
 
 type SemanticReleaseObject struct {
@@ -115,24 +116,26 @@ type SemanticReleaseProjection struct {
 }
 
 type SemanticRelease struct {
-	ID                string                      `json:"id"`
-	SemanticVersion   string                      `json:"semanticVersion"`
-	ContentHash       string                      `json:"contentHash"`
-	Status            string                      `json:"status"`
-	BaseReleaseID     string                      `json:"baseReleaseId,omitempty"`
-	Notes             string                      `json:"notes,omitempty"`
-	ObjectCount       int                         `json:"objectCount"`
-	ValidationSummary json.RawMessage             `json:"validationSummary"`
-	Version           int64                       `json:"version"`
-	CreatedBy         string                      `json:"createdBy"`
-	UpdatedBy         string                      `json:"updatedBy"`
-	ActivatedBy       string                      `json:"activatedBy,omitempty"`
-	CreatedAt         time.Time                   `json:"createdAt"`
-	UpdatedAt         time.Time                   `json:"updatedAt"`
-	ValidatedAt       *time.Time                  `json:"validatedAt,omitempty"`
-	ActivatedAt       *time.Time                  `json:"activatedAt,omitempty"`
-	Projections       []SemanticReleaseProjection `json:"projections"`
-	Objects           []SemanticReleaseObject     `json:"objects,omitempty"`
+	ID                       string                      `json:"id"`
+	SemanticVersion          string                      `json:"semanticVersion"`
+	ContentHash              string                      `json:"contentHash"`
+	Status                   string                      `json:"status"`
+	BaseReleaseID            string                      `json:"baseReleaseId,omitempty"`
+	Notes                    string                      `json:"notes,omitempty"`
+	ObjectCount              int                         `json:"objectCount"`
+	ValidationSummary        json.RawMessage             `json:"validationSummary"`
+	Version                  int64                       `json:"version"`
+	CreatedBy                string                      `json:"createdBy"`
+	UpdatedBy                string                      `json:"updatedBy"`
+	ActivatedBy              string                      `json:"activatedBy,omitempty"`
+	EvaluationSetID          string                      `json:"evaluationSetId,omitempty"`
+	EvaluationSetContentHash string                      `json:"evaluationSetContentHash,omitempty"`
+	CreatedAt                time.Time                   `json:"createdAt"`
+	UpdatedAt                time.Time                   `json:"updatedAt"`
+	ValidatedAt              *time.Time                  `json:"validatedAt,omitempty"`
+	ActivatedAt              *time.Time                  `json:"activatedAt,omitempty"`
+	Projections              []SemanticReleaseProjection `json:"projections"`
+	Objects                  []SemanticReleaseObject     `json:"objects,omitempty"`
 }
 
 type SemanticReleaseState struct {
@@ -163,7 +166,7 @@ type semanticReleaseStore interface {
 	GetSemanticRelease(context.Context, string, string) (SemanticRelease, error)
 	GetActiveSemanticRelease(context.Context, string) (SemanticReleaseState, error)
 	SaveSemanticReleaseValidation(context.Context, string, string, string, int64, SemanticReleaseValidation) (SemanticRelease, error)
-	ActivateSemanticRelease(context.Context, string, string, string, int64, int64) (SemanticReleaseState, error)
+	ActivateSemanticRelease(context.Context, string, string, string, string, int64, int64) (SemanticReleaseState, error)
 }
 
 type semanticReleaseDraft struct {
@@ -255,11 +258,12 @@ func (service *Service) ActivateSemanticRelease(
 ) (SemanticReleaseState, error) {
 	store, ok := service.releaseStore()
 	if !ok || !validActor(tenantID, actorID) || !validUUID(releaseID) ||
+		(input.EvaluationSetID != "" && !validUUID(input.EvaluationSetID)) ||
 		input.ExpectedVersion < 1 || input.ExpectedStateVersion < 1 {
 		return SemanticReleaseState{}, ErrInvalidRequest
 	}
 	return store.ActivateSemanticRelease(
-		ctx, tenantID, actorID, releaseID,
+		ctx, tenantID, actorID, releaseID, input.EvaluationSetID,
 		input.ExpectedVersion, input.ExpectedStateVersion,
 	)
 }

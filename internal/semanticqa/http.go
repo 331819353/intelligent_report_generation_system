@@ -448,6 +448,15 @@ func NewHandler(
 			writeResponse(w, http.StatusOK, item, err)
 		},
 	)))
+	mux.Handle("GET /api/v1/semantic-qa/golden-question-sets/{id}/evaluation-gate", protect("READ", http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			item, err := service.GetEvaluationReleaseGate(
+				r.Context(), claims.TenantID, r.PathValue("id"),
+			)
+			writeResponse(w, http.StatusOK, item, err)
+		},
+	)))
 	mux.Handle("POST /api/v1/semantic-qa/golden-questions", protect("MANAGE", http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			var input CreateGoldenQuestionInput

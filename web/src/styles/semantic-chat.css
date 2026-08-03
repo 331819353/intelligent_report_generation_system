@@ -812,6 +812,18 @@
 .semantic-chat-golden-progress { display: grid; gap: 5px; margin: 8px 0; color: #7e8794; font-size: 8px; }
 .semantic-chat-golden-progress progress { width: 100%; height: 6px; accent-color: #2864dc; }
 .semantic-chat-golden-error { display: block; margin-top: 8px; color: #b42318; font-size: 8px; }
+.semantic-chat-evaluation-mode { margin: 0 0 8px; color: #667085; font-size: 8px; line-height: 1.45; }
+.semantic-chat-golden > header > span.passed { background: #eaf8ef; color: #167647; }
+.semantic-chat-golden > header > span.blocked { background: #fff0ed; color: #b42318; }
+.semantic-chat-release-gate { display: grid; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #eaecf0; }
+.semantic-chat-release-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.semantic-chat-release-metrics p { display: grid; gap: 2px; min-width: 0; margin: 0; padding: 7px; border-radius: 7px; background: #f8fafc; }
+.semantic-chat-release-metrics span, .semantic-chat-release-metrics small { color: #7a8492; font-size: 7px; }
+.semantic-chat-release-metrics strong { color: #344054; font-size: 10px; overflow-wrap: anywhere; }
+.semantic-chat-release-gate details { border: 1px solid #e5e9ef; border-radius: 7px; padding: 7px; color: #596273; font-size: 8px; }
+.semantic-chat-release-gate summary { cursor: pointer; font-weight: 750; }
+.semantic-chat-release-gate ul { display: grid; gap: 4px; margin: 7px 0 0; padding-left: 15px; color: #8b3b31; }
+.semantic-chat-release-gate > small { color: #7a8492; font-size: 7px; line-height: 1.5; }
 
 @keyframes semantic-chat-pulse {
   50% { opacity: .45; }

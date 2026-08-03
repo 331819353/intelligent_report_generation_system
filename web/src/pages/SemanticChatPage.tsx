@@ -25,6 +25,7 @@ import {
 } from '../lib/semantic-assets'
 import {
   semanticChatAPI,
+  type EvaluationReleaseGate,
   type GoldenQuestionReplay,
   type GoldenQuestionSet,
   type SemanticQueryExecution,
@@ -379,6 +380,33 @@ function validatorCheckLabel(check: string) {
   return labels[check] ?? check
 }
 
+function releaseGateBlockerLabel(code: string) {
+  const labels: Record<string, string> = {
+    SET_NOT_ACTIVE: '评测集尚未激活',
+    NOT_SEALED_TEST: '不是冻结的 sealed test',
+    NOT_END_TO_END_EVALUATION: '当前仅为规划回归，未做端到端结果等价评测',
+    SEALED_CONTENT_HASH_MISSING: '缺少冻结集合指纹',
+    MINIMUM_2000_CASES_NOT_MET: '双人复核样本不足 2,000 条',
+    EVALUATION_INCOMPLETE: '仍有黄金问题未执行',
+    DUAL_REVIEW_INCOMPLETE: '仍有问题未完成双人复核',
+    SEMANTIC_VERSION_NOT_PINNED: '评测运行未锁定到唯一语义版本',
+    SEMANTIC_CONTENT_HASH_NOT_PINNED: '评测运行未锁定到唯一语义内容哈希',
+    STRICT_ACCURACY_POINT_ESTIMATE_BELOW_96: '严格准确率点估计低于 96%',
+    STRICT_ACCURACY_WILSON_LOWER_BOUND_BELOW_95: '95% Wilson 下界低于 95%',
+    P0_ACCURACY_BELOW_100: 'P0 核心指标未达到 100%',
+    SECURITY_BLOCK_RATE_BELOW_100: '安全样本阻断率未达到 100%',
+    UNAUTHORIZED_BLOCK_RATE_BELOW_100: '越权阻断率未达到 100%',
+    SENSITIVE_DATA_LEAK_DETECTED: '检测到敏感数据泄漏',
+    DIRECT_ANSWER_COVERAGE_BELOW_85: '直接回答覆盖率低于 85%',
+    REFUSAL_PRECISION_BELOW_95: '拒答精确率低于 95%',
+  }
+  return labels[code] ?? code
+}
+
+function metricPercent(value?: number) {
+  return value == null ? '—' : `${(value * 100).toFixed(2)}%`
+}
+
 function LiveRetrievalProcess({ message }: { message: ChatMessage }) {
   const logRef = useRef<HTMLOListElement>(null)
   const [elapsedSeconds, setElapsedSeconds] = useState(() => Math.max(
@@ -661,6 +689,7 @@ export function SemanticChatPage() {
   const [selectedGoldenSetID, setSelectedGoldenSetID] = useState('')
   const [goldenRun, setGoldenRun] = useState<GoldenRunState>()
   const [goldenError, setGoldenError] = useState('')
+  const [evaluationGate, setEvaluationGate] = useState<EvaluationReleaseGate>()
   const controllerRef = useRef<AbortController | undefined>(undefined)
   const activeQuestionIDRef = useRef<string | undefined>(undefined)
   const messageEndRef = useRef<HTMLDivElement>(null)
@@ -670,9 +699,7 @@ export function SemanticChatPage() {
   const selectedMessage = assistantMessages.find(message => message.id === selectedMessageID) ?? assistantMessages.at(-1)
   const selectedPlans = messagePlans(selectedMessage)
   const selectedExecutions = messageExecutions(selectedMessage)
-  const selectedConfidence = selectedPlans.length
-    ? Math.min(...selectedPlans.map(plan => plan.confidence))
-    : undefined
+  const selectedGoldenSet = goldenSets.find(item => item.id === selectedGoldenSetID)
   const selectedEvidence = selectedPlans.flatMap(plan => plan.evidence)
   const feedbackReady = selectedPlans.length > 0 && selectedExecutions.length === selectedPlans.length
   const isPending = activeSession.messages.some(message => message.pending)
@@ -702,6 +729,18 @@ export function SemanticChatPage() {
     })
     return () => { active = false; controllerRef.current?.abort() }
   }, [])
+
+  useEffect(() => {
+    let active = true
+    setEvaluationGate(undefined)
+    if (!selectedGoldenSetID) return () => { active = false }
+    semanticChatAPI.getEvaluationReleaseGate(selectedGoldenSetID).then(item => {
+      if (active) setEvaluationGate(item)
+    }).catch(cause => {
+      if (active) setGoldenError(cause instanceof Error ? cause.message : '评测门禁加载失败')
+    })
+    return () => { active = false }
+  }, [selectedGoldenSetID])
 
   useEffect(() => {
     if (typeof messageEndRef.current?.scrollIntoView === 'function') {
@@ -916,6 +955,7 @@ export function SemanticChatPage() {
         results.push(replay)
         setGoldenRun({ completed: index + 1, total: questions.length, results: [...results] })
       }
+      setEvaluationGate(await semanticChatAPI.getEvaluationReleaseGate(selectedGoldenSetID))
     } catch (cause) {
       setGoldenError(cause instanceof Error ? cause.message : '黄金问题回放失败')
     }
@@ -1004,7 +1044,7 @@ export function SemanticChatPage() {
                     <span>{messageExecutions(message).length
                       ? `${messageExecutions(message).reduce((total, item) => total + item.result.rowCount, 0)} 行 · ${messageExecutions(message).reduce((total, item) => total + item.result.durationMs, 0)} ms`
                       : messagePlans(message).length
-                        ? `${Math.round(Math.min(...messagePlans(message).map(plan => plan.confidence)) * 100)}% 最低检索置信度`
+                        ? `${messagePlans(message).length} 个计划已形成，尚未产生可验证结果`
                         : message.errorCode}</span>
                     {messageExecutions(message).length > 0 && <span><ShieldCheck size={14} />{messageExecutions(message).reduce((total, item) => total + item.evidence.lineage.length, 0)} 项可信证据</span>}
                   </footer>
@@ -1031,17 +1071,17 @@ export function SemanticChatPage() {
         </section>
 
         <aside className="semantic-chat-quality">
-          <header><span className="eyebrow">答案验证</span><h2>效果与准确性</h2><p>区分检索置信度、执行证据和人工评价，不用单一分数掩盖风险。</p></header>
+          <header><span className="eyebrow">答案验证</span><h2>效果与准确性</h2><p>可信等级来自确定性验证；用户反馈仅是产品信号，不计入正式准确率。</p></header>
           <section className="semantic-chat-score-grid" aria-label="本会话质量统计">
             <div><span>回答成功率</span><strong>{quality.successRate == null ? '—' : `${quality.successRate}%`}</strong></div>
             <div><span>证据完整率</span><strong>{quality.evidenceRate == null ? '—' : `${quality.evidenceRate}%`}</strong></div>
-            <div><span>人工准确率</span><strong>{quality.manualRate == null ? '—' : `${quality.manualRate}%`}</strong></div>
+            <div><span>用户正向反馈</span><strong>{quality.manualRate == null ? '—' : `${quality.manualRate}%`}</strong></div>
           </section>
 
           <section className="semantic-chat-current-quality">
             <header><strong>当前答案</strong><span>{selectedMessage?.errorCode ? '可信拒答' : statusLabel(turnStatus(selectedPlans))}</span></header>
             {!selectedMessage ? <p className="semantic-chat-empty-quality">发送问题后，这里会展示逐项验证结果。</p> : <>
-              <div className="semantic-chat-confidence"><span>{selectedPlans.length > 1 ? `${selectedPlans.length} 个指标最低置信度` : '检索路径置信度'}</span><strong>{selectedConfidence == null ? '—' : `${Math.round(selectedConfidence * 100)}%`}</strong></div>
+              <div className="semantic-chat-confidence"><span>确定性验证等级</span><strong>{selectedMessage.questionResponse?.resultVerification?.trustLevel ? `${selectedMessage.questionResponse.resultVerification.trustLevel} 级` : '未通过'}</strong></div>
               {selectedMessage.questionResponse && <div className="semantic-chat-confidence"><span>执行路径 · {selectedMessage.questionResponse.route}</span><strong>{selectedMessage.questionResponse.resultVerification?.trustLevel ? `可信 ${selectedMessage.questionResponse.resultVerification.trustLevel} 级` : selectedMessage.questionResponse.status}</strong></div>}
               {selectedPlans[0]?.resolution?.length ? <ol className="semantic-chat-resolution" aria-label="问答定位链路">{selectedPlans[0].resolution.map((step, index) => <li className={step.status === 'RESOLVED' || step.status === 'SKIPPED' ? 'pass' : ''} key={`${step.stage}-${index}`}><span>{index + 1}</span><div><strong>{resolutionStageLabel(step.stage)}</strong><small>{resolutionStatusLabel(step.status)}{step.candidateCount ? ` · ${step.candidateCount} 个候选` : ''}</small></div></li>)}</ol> : null}
               <ul>
@@ -1055,6 +1095,10 @@ export function SemanticChatPage() {
               {selectedPlans.some(plan => plan.conditions?.metricVersionId) ? <details><summary>查看查询条件 JSON</summary><pre className="semantic-chat-condition-json">{JSON.stringify(selectedPlans.map(plan => plan.conditions), null, 2)}</pre></details> : null}
               {selectedMessage.questionResponse?.semanticIr ? <details><summary>查看 Semantic Query IR</summary><pre className="semantic-chat-condition-json">{JSON.stringify(selectedMessage.questionResponse.semanticIr, null, 2)}</pre></details> : null}
               {selectedMessage.questionResponse?.routing ? <details><summary>查看三路路由与能力门禁</summary><pre className="semantic-chat-condition-json">{JSON.stringify(selectedMessage.questionResponse.routing, null, 2)}</pre></details> : null}
+              {selectedMessage.questionResponse?.understanding ? <details><summary>查看规范化与原文证据</summary><pre className="semantic-chat-condition-json">{JSON.stringify(selectedMessage.questionResponse.understanding, null, 2)}</pre></details> : null}
+              {selectedMessage.questionResponse?.graphPlan ? <details><summary>查看 NebulaGraph 约束计划</summary><pre className="semantic-chat-condition-json">{JSON.stringify(selectedMessage.questionResponse.graphPlan, null, 2)}</pre></details> : null}
+              {selectedMessage.questionResponse?.executionRegistry ? <details><summary>查看执行注册表证明</summary><pre className="semantic-chat-condition-json">{JSON.stringify(selectedMessage.questionResponse.executionRegistry, null, 2)}</pre></details> : null}
+              {selectedMessage.questionResponse?.preflightProofs?.length ? <details><summary>查看 SQL 预检证明</summary><pre className="semantic-chat-condition-json">{JSON.stringify(selectedMessage.questionResponse.preflightProofs, null, 2)}</pre></details> : null}
               {selectedMessage.questionResponse?.toolRegistry?.length ? <details><summary>查看 Host Tool Registry</summary><pre className="semantic-chat-condition-json">{JSON.stringify(selectedMessage.questionResponse.toolRegistry, null, 2)}</pre></details> : null}
               {selectedMessage.questionResponse?.accuracyEvidence ? <details><summary>查看统一 AccuracyEvidence</summary><pre className="semantic-chat-condition-json">{JSON.stringify(selectedMessage.questionResponse.accuracyEvidence, null, 2)}</pre></details> : null}
               {selectedExecutions.length ? <details><summary>查看 AccuracyEvidence</summary><div className="semantic-chat-accuracy-evidence">
@@ -1076,14 +1120,27 @@ export function SemanticChatPage() {
           </section>
 
           <section className="semantic-chat-golden">
-            <header><div><TestTube size={17} /><strong>黄金问题回放</strong></div>{goldenRate != null && <span>{goldenRate}% 通过</span>}</header>
+            <header><div><TestTube size={17} /><strong>黄金评测与发布门禁</strong></div>{evaluationGate && <span className={evaluationGate.decision === 'PASSED' ? 'passed' : 'blocked'}>{evaluationGate.decision === 'PASSED' ? '允许发布' : '阻断发布'}</span>}</header>
             {goldenSets.length === 0 ? <p>尚未配置黄金问题集。可在语义治理流程中建立版本化测试门禁。</p> : <>
               <select aria-label="黄金问题集" value={selectedGoldenSetID} onChange={event => { setSelectedGoldenSetID(event.target.value); setGoldenRun(undefined) }}>
-                {goldenSets.map(set => <option key={set.id} value={set.id}>{set.name} · V{set.version} · {set.status}</option>)}
+                {goldenSets.map(set => <option key={set.id} value={set.id}>{set.name} · V{set.version} · {set.datasetSplit} · {set.status}</option>)}
               </select>
+              {selectedGoldenSet && <p className="semantic-chat-evaluation-mode">{selectedGoldenSet.evaluationMode === 'END_TO_END_RESULT_EQUIVALENCE' ? '正式端到端结果等价评测' : '规划回归（不计入正式准确率）'}{goldenRate != null ? ` · 本次回放 ${goldenRate}%` : ''}</p>}
               {goldenRun && <div className="semantic-chat-golden-progress"><span>已完成 {goldenRun.completed}/{goldenRun.total}</span><progress value={goldenRun.completed} max={Math.max(1, goldenRun.total)} /></div>}
-              <button className="quiet-button full" type="button" onClick={() => void runGoldenQuestions()} disabled={!selectedGoldenSetID || Boolean(goldenRun && goldenRun.completed < goldenRun.total)}><ChartLineUp size={16} />运行测试集</button>
+              <button className="quiet-button full" type="button" onClick={() => void runGoldenQuestions()} disabled={!selectedGoldenSetID || Boolean(goldenRun && goldenRun.completed < goldenRun.total)}><ChartLineUp size={16} />{selectedGoldenSet?.evaluationMode === 'END_TO_END_RESULT_EQUIVALENCE' ? '运行端到端评测' : '运行规划回归'}</button>
             </>}
+            {evaluationGate && <div className="semantic-chat-release-gate">
+              <div className="semantic-chat-release-metrics">
+                <p><span>样本/已评测/双审</span><strong>{evaluationGate.totalCases}/{evaluationGate.evaluatedCases}/{evaluationGate.dualReviewedCases}</strong></p>
+                <p><span>严格准确率</span><strong>{metricPercent(evaluationGate.strictAccuracy.pointEstimate)}</strong><small>Wilson 下界 {metricPercent(evaluationGate.strictAccuracy.wilsonLowerBound)}</small></p>
+                <p><span>P0 / 安全阻断 / 越权</span><strong>{metricPercent(evaluationGate.p0Accuracy.pointEstimate)} / {metricPercent(evaluationGate.safetyBlockRate.pointEstimate)} / {metricPercent(evaluationGate.unauthorizedBlockRate.pointEstimate)}</strong></p>
+                <p><span>覆盖率 / 拒答精确率</span><strong>{metricPercent(evaluationGate.directAnswerCoverage.pointEstimate)} / {metricPercent(evaluationGate.refusalPrecision.pointEstimate)}</strong></p>
+              </div>
+              {evaluationGate.sensitiveLeakCount > 0 && <p className="semantic-chat-golden-error">敏感泄漏 {evaluationGate.sensitiveLeakCount} 条</p>}
+              {evaluationGate.blockers.length > 0 && <details open><summary>发布阻断项（{evaluationGate.blockers.length}）</summary><ul>{evaluationGate.blockers.map(code => <li key={code}>{releaseGateBlockerLabel(code)}</li>)}</ul></details>}
+              {Object.keys(evaluationGate.failureStageCounts).length > 0 && <details><summary>首次错误阶段</summary><ul>{Object.entries(evaluationGate.failureStageCounts).map(([stage, count]) => <li key={stage}>{stage}：{count}</li>)}</ul></details>}
+              <small>正式门槛：2,000+ sealed 双审样本，点估计 ≥96%、Wilson 下界 ≥95%、P0 与越权阻断 100%、敏感泄漏 0。</small>
+            </div>}
             {goldenError && <small className="semantic-chat-golden-error">{goldenError}</small>}
           </section>
         </aside>
