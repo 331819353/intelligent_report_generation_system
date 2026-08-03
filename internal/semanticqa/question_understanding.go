@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -62,9 +64,16 @@ type QuestionCertifiedExample struct {
 }
 
 var (
-	questionTimeMentionPattern = regexp.MustCompile(`(?:今|昨|明|上|下|本)?(?:天|日|周|月|季|季度|年)|(?:20[0-9]{2})[-年/](?:0?[1-9]|1[0-2])(?:[-月/](?:0?[1-9]|[12][0-9]|3[01])日?)?`)
-	questionComparePattern     = regexp.MustCompile(`同比|环比|较上期|对比|相比`)
-	questionLimitPattern       = regexp.MustCompile(`(?:前|top\s*)([1-9][0-9]{0,2})`)
+	questionTimeMentionPattern  = regexp.MustCompile(`(?:今|昨|明|上|下|本)?(?:天|日|周|月|季|季度|年)|(?:20[0-9]{2})[-年/](?:0?[1-9]|1[0-2])(?:[-月/](?:0?[1-9]|[12][0-9]|3[01])日?)?`)
+	questionComparePattern      = regexp.MustCompile(`同比|环比|较上期|对比|相比`)
+	questionLimitPattern        = regexp.MustCompile(`(?:前|top\s*)([1-9][0-9]{0,2})`)
+	questionExplicitDatePattern = regexp.MustCompile(
+		`(20[0-9]{2})(?:年|[-/.])(1[0-2]|0?[1-9])(?:月|[-/.])` +
+			`(3[01]|[12][0-9]|0?[1-9])日?`,
+	)
+	questionExplicitMonthPattern = regexp.MustCompile(
+		`(20[0-9]{2})(?:年|[-/.])(1[0-2]|0?[1-9])月?`,
+	)
 )
 
 func understandQuestion(original string, snapshot *QuestionSemanticSnapshot) QuestionUnderstanding {
@@ -89,6 +98,7 @@ func governedSimpleQuestionHints(
 	metricCodes := []string{}
 	covered := make([]bool, len(original))
 	intent := "METRIC"
+	var explicitTimeRange *QueryTimeRange
 	for _, mention := range understanding.Mentions {
 		if mention.StartByte < 0 || mention.EndByte > len(original) || mention.StartByte >= mention.EndByte {
 			return nil, QuerySemanticHints{}, false
@@ -100,6 +110,9 @@ func governedSimpleQuestionHints(
 			}
 			metricCodes = append(metricCodes, mention.Candidates[0].Code)
 		case "TIME_RANGE":
+			if value, ok := inferExplicitQueryTimeRange(mention.MentionText); ok {
+				explicitTimeRange = &value
+			}
 		case "COMPARE":
 			intent = "COMPARISON"
 		case "LIMIT", "DIMENSION", "DIMENSION_VALUE", "ENTITY":
@@ -137,9 +150,58 @@ func governedSimpleQuestionHints(
 	if residual != "" {
 		return nil, QuerySemanticHints{}, false
 	}
-	return metricCodes, QuerySemanticHints{
+	hints := QuerySemanticHints{
 		Intent: intent, MetricNames: append([]string(nil), metricCodes...),
-	}, true
+	}
+	if explicitTimeRange != nil {
+		hints.DimensionValues = append(
+			hints.DimensionValues,
+			QuerySemanticDimensionHint{
+				SourceToken:   "EXPLICIT_TIME_RANGE",
+				Value:         explicitTimeRange.Start,
+				DimensionName: "时间范围", DimensionCode: "RULE_TIME",
+				DimensionType: "TIME", ValueType: "DATE",
+				TimeRange: explicitTimeRange,
+			},
+		)
+	}
+	return metricCodes, hints, true
+}
+
+func inferExplicitQueryTimeRange(question string) (QueryTimeRange, bool) {
+	parsePart := func(value string) (int, bool) {
+		parsed, err := strconv.Atoi(value)
+		return parsed, err == nil
+	}
+	if match := questionExplicitDatePattern.FindStringSubmatch(question); len(match) == 4 {
+		year, yearOK := parsePart(match[1])
+		month, monthOK := parsePart(match[2])
+		day, dayOK := parsePart(match[3])
+		if !yearOK || !monthOK || !dayOK {
+			return QueryTimeRange{}, false
+		}
+		start := time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
+		if start.Year() != year || int(start.Month()) != month || start.Day() != day {
+			return QueryTimeRange{}, false
+		}
+		return QueryTimeRange{
+			Start:        start.Format(time.DateOnly),
+			EndExclusive: start.AddDate(0, 0, 1).Format(time.DateOnly),
+		}, true
+	}
+	if match := questionExplicitMonthPattern.FindStringSubmatch(question); len(match) == 3 {
+		year, yearOK := parsePart(match[1])
+		month, monthOK := parsePart(match[2])
+		if !yearOK || !monthOK {
+			return QueryTimeRange{}, false
+		}
+		start := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
+		return QueryTimeRange{
+			Start:        start.Format(time.DateOnly),
+			EndExclusive: start.AddDate(0, 1, 0).Format(time.DateOnly),
+		}, true
+	}
+	return QueryTimeRange{}, false
 }
 
 func normalizeQuestion(original string) QuestionUnderstanding {

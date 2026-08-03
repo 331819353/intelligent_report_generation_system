@@ -196,3 +196,82 @@ func TestTokenizeQueryCoalescesAdministrativeLocationSuffix(t *testing.T) {
 	}
 	t.Fatalf("expected 北京 + 市 to be one location token: %#v", result.Tokens)
 }
+
+func TestAnchorTokenizationMetricsPreventsDimensionPhraseMetricLeak(t *testing.T) {
+	candidates := []recallCandidate{
+		{SubjectType: "METRIC", Code: "net_revenue", Label: "净收入"},
+		{
+			SubjectType: "METRIC", Code: "delivery_zone_count",
+			Label: "配送区域实体数量",
+		},
+	}
+	anchored, complete := anchorTokenizationMetricCandidates(
+		candidates, []string{"net_revenue"},
+	)
+	if !complete || len(anchored) != 1 || anchored[0].Code != "net_revenue" {
+		t.Fatalf("unexpected anchored catalog: %#v complete=%v", anchored, complete)
+	}
+	if _, complete := anchorTokenizationMetricCandidates(
+		candidates, []string{"missing_metric"},
+	); complete {
+		t.Fatal("a missing governed metric anchor must fail closed")
+	}
+}
+
+func TestTokenizePreservesGovernedDimensionEndingInAdministrativeSuffix(
+	t *testing.T,
+) {
+	result := tokenizeQueryWithRules(
+		"净收入按配送区域城市排名",
+		[]querySemanticMatch{
+			{
+				Text: "净收入", EntityType: "METRIC", EntityName: "净收入",
+				EntityCode: "net_revenue", Source: "METRIC_CATALOG",
+				Confidence: 1, Priority: 115,
+			},
+			{
+				Text: "配送区域城市", EntityType: "DIMENSION",
+				EntityName: "配送区域城市", EntityCode: "zone_city",
+				Source: "GOVERNED_DIMENSION", Confidence: 1, Priority: 100,
+			},
+		},
+		testSemanticParsingRules(),
+	)
+	for _, token := range result.Tokens {
+		if token.Text != "配送区域城市" {
+			continue
+		}
+		if token.EntityType != "DIMENSION" || token.EntityCode != "zone_city" ||
+			token.Normalized != "配送区域城市" {
+			t.Fatalf("governed dimension was overwritten: %#v", token)
+		}
+		return
+	}
+	t.Fatalf("governed dimension token missing: %#v", result.Tokens)
+}
+
+func TestTokenizeRecognizesDistributionAsAnalysisGrammar(t *testing.T) {
+	result := tokenizeQueryWithRules(
+		"净收入按配送区域城市分布",
+		[]querySemanticMatch{
+			{
+				Text: "净收入", EntityType: "METRIC", EntityName: "净收入",
+				EntityCode: "net_revenue", Source: "METRIC_CATALOG",
+				Confidence: 1, Priority: 115,
+			},
+			{
+				Text: "配送区域城市", EntityType: "DIMENSION",
+				EntityName: "配送区域城市", EntityCode: "zone_city",
+				Source: "GOVERNED_DIMENSION", Confidence: 1, Priority: 100,
+			},
+		},
+		testSemanticParsingRules(),
+	)
+	for _, token := range result.Tokens {
+		if token.Text == "分布" && token.EntityType == "ANALYSIS_WORD" &&
+			token.EntityCode == "RULE_DISTRIBUTION" {
+			return
+		}
+	}
+	t.Fatalf("distribution grammar token missing: %#v", result.Tokens)
+}

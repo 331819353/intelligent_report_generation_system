@@ -237,6 +237,26 @@ func TestActionableSemanticDimensionHintExcludesTimeOnlyHints(t *testing.T) {
 	}
 }
 
+func TestExactGroupingDimensionRequiresOneGovernedDimension(t *testing.T) {
+	tokenization := QueryTokenization{Tokens: []QueryToken{{
+		EntityType: "DIMENSION", EntityCode: "zone_city",
+		Source: "GOVERNED_DIMENSION",
+	}}}
+	if code := exactGroupingDimensionCode(tokenization, "RANKING"); code != "zone_city" {
+		t.Fatalf("grouping dimension = %q", code)
+	}
+	if code := exactGroupingDimensionCode(tokenization, "METRIC"); code != "" {
+		t.Fatalf("ordinary metric query must not group by %q", code)
+	}
+	tokenization.Tokens = append(tokenization.Tokens, QueryToken{
+		EntityType: "DIMENSION", EntityCode: "zone_district",
+		Source: "GOVERNED_DIMENSION",
+	})
+	if code := exactGroupingDimensionCode(tokenization, "RANKING"); code != "" {
+		t.Fatalf("ambiguous grouping dimensions must fail closed, got %q", code)
+	}
+}
+
 func TestDimensionClarificationChoicesExcludeLowRelevanceCandidates(
 	t *testing.T,
 ) {

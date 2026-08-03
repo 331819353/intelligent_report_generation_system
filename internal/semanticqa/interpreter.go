@@ -2217,7 +2217,8 @@ func inferIntent(question string) string {
 	case strings.Contains(question, "同比") || strings.Contains(question, "环比") ||
 		strings.Contains(question, "对比"):
 		return "COMPARISON"
-	case strings.Contains(question, "排行") || strings.Contains(question, "top"):
+	case strings.Contains(question, "排行") || strings.Contains(question, "排名") ||
+		strings.Contains(question, "top"):
 		return "RANKING"
 	case strings.Contains(question, "分布"):
 		return "DISTRIBUTION"

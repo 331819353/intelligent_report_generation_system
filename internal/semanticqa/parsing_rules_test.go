@@ -37,7 +37,8 @@ func testSemanticParsingRules() semanticParsingRules {
 		"均值", "比例", "占比", "分别", "是什么", "怎么样",
 		"什么", "多少", "几笔", "几条", "帮我", "请问", "查询",
 		"统计", "查看", "告诉我", "一下", "经营情况", "经营",
-		"情况", "怎么", "呢",
+		"情况", "怎么", "呢", "按", "按照", "根据", "基于", "依据",
+		"每个", "各",
 	} {
 		rules.queryResidualTerms[normalizeParsingRuleText(term)] = true
 	}
@@ -63,6 +64,7 @@ func TestSemanticParsingRulesDriveDeterministicInterpretation(t *testing.T) {
 		t.Fatalf("unexpected administrative mapping: %q %q %q %v", value, name, code, found)
 	}
 	if !rules.isDeterministicResidual("总量") ||
+		!rules.isDeterministicResidual("按照") ||
 		!rules.requestsBroadMetricSelection("北京市经营情况怎么样？") ||
 		rules.requestsBroadMetricSelection("北京市投诉总量是多少？") {
 		t.Fatal("configured residual or broad-question rules were not applied")

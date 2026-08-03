@@ -940,6 +940,7 @@ func (service *Service) PlanQueryTurn(
 	// context metric) is fixed do Jieba tokens enter the dimension/time semantic
 	// completion used by stage two. This prevents early dimension retrieval from
 	// influencing which metric catalog is selected.
+	deterministicCatalogCompletion := false
 	if tokenizer, ok := service.interpreter.(QueryTokenizer); ok &&
 		!input.GovernedUnderstanding && !turnSlots.GovernedMetricOnly {
 		reportQueryTurnProgress(
@@ -949,7 +950,13 @@ func (service *Service) PlanQueryTurn(
 		)
 		var tokenization QueryTokenization
 		var err error
-		if queryTurnTokenizer, supported :=
+		if anchoredTokenizer, supported :=
+			service.interpreter.(QueryAnchoredTurnTokenizer); supported {
+			tokenization, err = anchoredTokenizer.TokenizeQueryTurnForMetrics(
+				ctx, tenantID, actorID, input.Question, input.Timezone,
+				metricCodes,
+			)
+		} else if queryTurnTokenizer, supported :=
 			service.interpreter.(QueryTurnTokenizer); supported {
 			tokenization, err = queryTurnTokenizer.TokenizeQueryTurn(
 				ctx, tenantID, actorID, input.Question, input.Timezone, true,
@@ -963,6 +970,9 @@ func (service *Service) PlanQueryTurn(
 			return result, err
 		}
 		result.Tokenization = &tokenization
+		deterministicCatalogCompletion =
+			tokenization.LLMCompletion.Status == "SUCCEEDED" &&
+				tokenization.LLMCompletion.Model == "DETERMINISTIC_SEMANTIC_CATALOG"
 		hints, _ := semanticHintsFromTokenization(tokenization)
 		hints = supplementAdministrativeLocationHints(tokenization, hints)
 		if validQuerySemanticHints(hints) &&
@@ -991,6 +1001,12 @@ func (service *Service) PlanQueryTurn(
 	if intent == "" {
 		intent = "UNKNOWN"
 	}
+	groupingDimensionCode := ""
+	if result.Tokenization != nil {
+		groupingDimensionCode = exactGroupingDimensionCode(
+			*result.Tokenization, intent,
+		)
+	}
 	if err := advanceTurnLifecycle(
 		&result, machine, QuestionStateValidating,
 	); err != nil {
@@ -1009,6 +1025,9 @@ func (service *Service) PlanQueryTurn(
 			MetricCandidateCount: turnSlots.MetricCandidateCount,
 			MetricMatchMethod:    turnSlots.MetricMatchMethod,
 			Domain:               turnSlots.Domains[metricCode],
+		}
+		if groupingDimensionCode != "" {
+			planInput.DimensionCode = groupingDimensionCode
 		}
 		if inferQueryTimePreset(planInput.Question) != "" ||
 			inferQueryComparisonMode(planInput.Question) != "" {
@@ -1030,7 +1049,11 @@ func (service *Service) PlanQueryTurn(
 		if planInput.MetricMatchMethod == "" {
 			planInput.MetricMatchMethod = "EXPLICIT_CODE"
 		}
-		dimensionHandledByTool := false
+		dimensionHandledByTool := deterministicCatalogCompletion &&
+			!hasActionableSemanticDimensionHint(input.SemanticHints.DimensionValues)
+		if dimensionHandledByTool {
+			planInput.DimensionResolutionComplete = true
+		}
 		if resolver, ok := service.interpreter.(QueryDimensionExactHintResolver); ok &&
 			len(input.ConfirmedDecisions) == 0 && !input.GovernedUnderstanding &&
 			!turnSlots.GovernedMetricOnly &&
@@ -1358,6 +1381,30 @@ func hasActionableDimensionLookups(
 		}
 	}
 	return false
+}
+
+func exactGroupingDimensionCode(
+	tokenization QueryTokenization,
+	intent string,
+) string {
+	intent = strings.ToUpper(strings.TrimSpace(intent))
+	if !oneOf(intent, "RANKING", "DISTRIBUTION", "DRILLDOWN") {
+		return ""
+	}
+	selected, selectedKey := "", ""
+	for _, token := range tokenization.Tokens {
+		if token.EntityType != "DIMENSION" ||
+			token.Source != "GOVERNED_DIMENSION" ||
+			strings.TrimSpace(token.EntityCode) == "" {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(token.EntityCode))
+		if selectedKey != "" && selectedKey != key {
+			return ""
+		}
+		selected, selectedKey = token.EntityCode, key
+	}
+	return selected
 }
 
 func semanticHintsFromTokenization(

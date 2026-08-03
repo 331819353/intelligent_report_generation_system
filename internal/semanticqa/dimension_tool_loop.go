@@ -570,6 +570,16 @@ func (store *PostgresStore) metricCompatibleDimensionCatalog(
 			  ON version.tenant_id=metric.tenant_id
 			 AND version.id=metric.current_published_version_id
 			 AND version.status='PUBLISHED'
+			JOIN platform.dataset_versions AS dataset_version
+			  ON dataset_version.tenant_id=version.tenant_id
+			 AND dataset_version.id=version.dataset_version_id
+			 AND dataset_version.status='PUBLISHED'
+			JOIN platform.datasets AS dataset
+			  ON dataset.tenant_id=dataset_version.tenant_id
+			 AND dataset.id=dataset_version.dataset_id
+			 AND dataset.current_published_version_id=dataset_version.id
+			 AND dataset.status='PUBLISHED'
+			 AND dataset.deleted_at IS NULL
 			JOIN platform.dimension_metric_compatibility AS compatibility
 			  ON compatibility.tenant_id=metric.tenant_id
 			 AND compatibility.metric_id=metric.id

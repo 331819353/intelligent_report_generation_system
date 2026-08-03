@@ -77,6 +77,7 @@ var queryTokenKeywords = []querySemanticMatch{
 	{Text: "趋势", EntityType: "ANALYSIS_WORD", EntityName: "趋势分析", EntityCode: "RULE_TREND", Source: "RULE", Confidence: 0.96, Priority: 74},
 	{Text: "排名", EntityType: "ANALYSIS_WORD", EntityName: "排名分析", EntityCode: "RULE_RANKING", Source: "RULE", Confidence: 0.96, Priority: 74},
 	{Text: "排行", EntityType: "ANALYSIS_WORD", EntityName: "排名分析", EntityCode: "RULE_RANKING", Source: "RULE", Confidence: 0.94, Priority: 74},
+	{Text: "分布", EntityType: "ANALYSIS_WORD", EntityName: "分布分析", EntityCode: "RULE_DISTRIBUTION", Source: "RULE", Confidence: 0.96, Priority: 74},
 	{Text: "最高", EntityType: "ANALYSIS_WORD", EntityName: "最大值分析", EntityCode: "RULE_MAX", Source: "RULE", Confidence: 0.88, Priority: 68},
 	{Text: "最低", EntityType: "ANALYSIS_WORD", EntityName: "最小值分析", EntityCode: "RULE_MIN", Source: "RULE", Confidence: 0.88, Priority: 68},
 	{Text: "增长", EntityType: "ANALYSIS_WORD", EntityName: "增长分析", EntityCode: "RULE_GROWTH", Source: "RULE", Confidence: 0.9, Priority: 68},
@@ -100,6 +101,12 @@ type QueryTurnTokenizer interface {
 	) (QueryTokenization, error)
 }
 
+type QueryAnchoredTurnTokenizer interface {
+	TokenizeQueryTurnForMetrics(
+		context.Context, string, string, string, string, []string,
+	) (QueryTokenization, error)
+}
+
 // Tokenize combines general-purpose Jieba/HMM segmentation and POS tagging
 // with governed semantic-catalog labels. The catalog only annotates exact
 // published names and aliases; it does not determine how all remaining Chinese
@@ -111,7 +118,7 @@ func (interpreter *SemanticInterpreter) Tokenize(
 	question, timezone string,
 ) (QueryTokenization, error) {
 	return interpreter.tokenize(
-		ctx, tenantID, actorID, question, timezone, false,
+		ctx, tenantID, actorID, question, timezone, false, nil,
 	)
 }
 
@@ -123,7 +130,21 @@ func (interpreter *SemanticInterpreter) TokenizeQueryTurn(
 ) (QueryTokenization, error) {
 	return interpreter.tokenize(
 		ctx, tenantID, actorID, question, timezone,
-		trustedMetricAnchorAvailable,
+		trustedMetricAnchorAvailable, nil,
+	)
+}
+
+func (interpreter *SemanticInterpreter) TokenizeQueryTurnForMetrics(
+	ctx context.Context,
+	tenantID, actorID, question, timezone string,
+	metricCodes []string,
+) (QueryTokenization, error) {
+	metricCodes = uniqueStrings(metricCodes, 8)
+	if len(metricCodes) == 0 {
+		return QueryTokenization{}, ErrInvalidRequest
+	}
+	return interpreter.tokenize(
+		ctx, tenantID, actorID, question, timezone, true, metricCodes,
 	)
 }
 
@@ -132,6 +153,7 @@ func (interpreter *SemanticInterpreter) tokenize(
 	tenantID, actorID string,
 	question, timezone string,
 	allowTrustedMetricAnchorCompletion bool,
+	anchoredMetricCodes []string,
 ) (QueryTokenization, error) {
 	question = strings.TrimSpace(question)
 	if interpreter == nil || interpreter.store == nil || question == "" {
@@ -146,6 +168,15 @@ func (interpreter *SemanticInterpreter) tokenize(
 	)
 	if err != nil {
 		return QueryTokenization{}, err
+	}
+	if len(anchoredMetricCodes) > 0 {
+		anchored, complete := anchorTokenizationMetricCandidates(
+			candidates, anchoredMetricCodes,
+		)
+		if !complete {
+			return QueryTokenization{}, ErrUnprovenPath
+		}
+		candidates = anchored
 	}
 	matches := []querySemanticMatch{}
 	matchedMetricCodes := []string{}
@@ -177,6 +208,29 @@ func (interpreter *SemanticInterpreter) tokenize(
 		)
 	}
 	for _, metricCode := range matchedMetricCodes {
+		if dimensions, catalogErr :=
+			interpreter.store.metricCompatibleDimensionCatalog(
+				ctx, tenantID, metricCode,
+			); catalogErr == nil {
+			for _, dimension := range dimensions {
+				for _, dimensionTerm := range []string{
+					dimension.DimensionName, dimension.DimensionCode,
+				} {
+					dimensionTerm = strings.TrimSpace(dimensionTerm)
+					if dimensionTerm == "" ||
+						!containsNormalizedFold(question, dimensionTerm) {
+						continue
+					}
+					matches = append(matches, querySemanticMatch{
+						Text: dimensionTerm, EntityType: "DIMENSION",
+						EntityName: dimension.DimensionName,
+						EntityCode: dimension.DimensionCode,
+						Source:     "GOVERNED_DIMENSION",
+						Confidence: 1, Priority: 100,
+					})
+				}
+			}
+		}
 		lookups, lookupErr := interpreter.store.PreviewMetricDimensionLookups(
 			ctx, tenantID, metricCode, question,
 		)
@@ -219,6 +273,30 @@ func (interpreter *SemanticInterpreter) tokenize(
 		ctx, tenantID, actorID, question, timezone, result,
 		allowTrustedMetricAnchorCompletion, parsingRules,
 	), nil
+}
+
+func anchorTokenizationMetricCandidates(
+	candidates []recallCandidate,
+	metricCodes []string,
+) ([]recallCandidate, bool) {
+	allowed := map[string]bool{}
+	for _, code := range metricCodes {
+		code = strings.ToLower(strings.TrimSpace(code))
+		if code != "" {
+			allowed[code] = true
+		}
+	}
+	anchored := make([]recallCandidate, 0, len(allowed))
+	found := map[string]bool{}
+	for _, candidate := range candidates {
+		key := strings.ToLower(strings.TrimSpace(candidate.Code))
+		if !allowed[key] || found[key] {
+			continue
+		}
+		found[key] = true
+		anchored = append(anchored, candidate)
+	}
+	return anchored, len(allowed) > 0 && len(found) == len(allowed)
 }
 
 func distinctiveMetricStemMatches(
@@ -462,6 +540,17 @@ func tokenizeQueryWithRules(
 	}
 	result.Tokens = coalesceAdministrativeLocationTokens(result.Tokens, rules)
 	for index := range result.Tokens {
+		// An exact governed entity is stronger evidence than a generic suffix
+		// rule. In particular, dimension names such as "配送区域城市" must not
+		// be rewritten as the administrative location "配送区域城" merely
+		// because the display name ends with 市.
+		if !oneOf(
+			result.Tokens[index].EntityType,
+			"TEXT", "LOCATION", "PERSON", "ORGANIZATION",
+			"PROPER_NOUN", "NOUN_CANDIDATE",
+		) {
+			continue
+		}
 		value, name, code, found := rules.administrativeLocation(
 			result.Tokens[index].Text,
 		)

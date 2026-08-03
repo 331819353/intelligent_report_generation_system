@@ -105,6 +105,33 @@ func TestGovernedSimpleQuestionHintsUseExactMetricWithoutLegacyModel(t *testing.
 	}
 }
 
+func TestGovernedSimpleQuestionHintsCarryExplicitDateRange(t *testing.T) {
+	snapshot := QuestionSemanticSnapshot{
+		TenantID: "tenant-a", SemanticVersion: "release-1",
+		ContentHash: strings.Repeat("a", 64), EffectiveAt: time.Now().UTC(),
+		Objects: []QuestionSemanticObject{{
+			ObjectType: "METRIC", ObjectID: "metric-1", ObjectVersion: "v1",
+			Contract: map[string]any{"code": "net_revenue", "title": "净收入"},
+		}},
+	}
+	question := "2026年6月1日的净收入是多少？"
+	understanding := understandQuestion(question, &snapshot)
+	_, hints, complete := governedSimpleQuestionHints(question, understanding)
+	if !complete || len(hints.DimensionValues) != 1 ||
+		hints.DimensionValues[0].TimeRange == nil ||
+		hints.DimensionValues[0].TimeRange.Start != "2026-06-01" ||
+		hints.DimensionValues[0].TimeRange.EndExclusive != "2026-06-02" {
+		t.Fatalf("explicit date range was not preserved: %+v", hints)
+	}
+	month, ok := inferExplicitQueryTimeRange("2026-06")
+	if !ok || month.Start != "2026-06-01" || month.EndExclusive != "2026-07-01" {
+		t.Fatalf("explicit month range = %+v ok=%v", month, ok)
+	}
+	if _, ok := inferExplicitQueryTimeRange("2026年2月30日"); ok {
+		t.Fatal("invalid calendar date must not be normalized into a different day")
+	}
+}
+
 func TestGovernedSimpleQuestionHintsRejectUnaccountedBusinessText(t *testing.T) {
 	snapshot := QuestionSemanticSnapshot{
 		TenantID: "tenant-a", SemanticVersion: "release-1",
