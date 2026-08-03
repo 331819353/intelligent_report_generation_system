@@ -130,6 +130,19 @@ func TestGovernedSimpleQuestionHintsCarryExplicitDateRange(t *testing.T) {
 	if _, ok := inferExplicitQueryTimeRange("2026年2月30日"); ok {
 		t.Fatal("invalid calendar date must not be normalized into a different day")
 	}
+	for _, date := range []string{
+		"2026-06-09", "2026-06-10", "2026-06-19", "2026-06-20",
+		"2026-06-30",
+	} {
+		question := date + "的净收入是多少？"
+		understanding := understandQuestion(question, &snapshot)
+		_, hints, complete := governedSimpleQuestionHints(question, understanding)
+		if !complete || len(hints.DimensionValues) != 1 ||
+			hints.DimensionValues[0].TimeRange == nil ||
+			hints.DimensionValues[0].TimeRange.Start != date {
+			t.Fatalf("two-digit date %q was truncated: %+v", date, hints)
+		}
+	}
 }
 
 func TestGovernedSimpleQuestionHintsRejectUnaccountedBusinessText(t *testing.T) {

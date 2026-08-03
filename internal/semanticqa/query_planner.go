@@ -615,6 +615,24 @@ func (store *PostgresStore) PlanQuery(
 			}
 			plan.Conditions.Dimensions = append(plan.Conditions.Dimensions, clause)
 		}
+		if dimensionNode != nil {
+			clause, err := queryConditionDimensionClause(*dimensionNode)
+			if err != nil {
+				return err
+			}
+			found := false
+			for _, existing := range plan.Conditions.Dimensions {
+				if existing.DimensionID == clause.DimensionID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				plan.Conditions.Dimensions = append(
+					plan.Conditions.Dimensions, clause,
+				)
+			}
+		}
 		sort.Slice(plan.Conditions.Dimensions, func(left, right int) bool {
 			return plan.Conditions.Dimensions[left].DimensionCode <
 				plan.Conditions.Dimensions[right].DimensionCode
@@ -762,6 +780,25 @@ func (store *PostgresStore) PlanQuery(
 		return persistQueryPlan(ctx, tx, actorID, input, &plan)
 	})
 	return plan, err
+}
+
+func queryConditionDimensionClause(
+	dimension resolvedGraphNode,
+) (QueryDimensionClause, error) {
+	var payload struct {
+		DimensionID string `json:"dimensionId"`
+		Code        string `json:"code"`
+	}
+	if err := json.Unmarshal(dimension.Payload, &payload); err != nil {
+		return QueryDimensionClause{}, err
+	}
+	if payload.DimensionID == "" || payload.Code == "" {
+		return QueryDimensionClause{}, ErrUnprovenPath
+	}
+	return QueryDimensionClause{
+		DimensionCode: payload.Code,
+		DimensionID:   payload.DimensionID,
+	}, nil
 }
 
 func queryConditionClause(
@@ -1122,6 +1159,24 @@ func metricScopedMemberMatches(
 			JOIN compatible_dimensions AS dimension
 			  ON dimension.id=member.dimension_id
 			WHERE member.status='ACTIVE'
+			  AND (member.valid_from IS NULL OR member.valid_from<=now())
+			  AND (member.valid_to IS NULL OR member.valid_to>now())
+			UNION ALL
+			SELECT member.id,member.normalized_value,dimension.id AS dimension_id,
+				dimension.code,dimension.name,dimension.field_id,
+				dimension.description,
+				lower(btrim(member.normalized_value)) AS matched_value,
+				false AS set_mapped,
+				'EXACT_MEMBER_PHRASE'::text AS match_method,
+				dimension.sensitive
+			FROM compatible_dimensions AS dimension
+			JOIN platform.dimension_members AS member
+			  ON member.dimension_id=dimension.id
+			WHERE member.status='ACTIVE'
+			  AND char_length(btrim(member.normalized_value))>=2
+			  AND position(
+			    lower(btrim(member.normalized_value)) IN lower($7)
+			  )>0
 			  AND (member.valid_from IS NULL OR member.valid_from<=now())
 			  AND (member.valid_to IS NULL OR member.valid_to>now())
 			UNION ALL

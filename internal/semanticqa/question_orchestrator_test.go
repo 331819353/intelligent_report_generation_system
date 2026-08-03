@@ -56,6 +56,30 @@ func TestBuildQuestionContractsCreatesVersionedSemanticIR(t *testing.T) {
 	}
 }
 
+func TestBuildQuestionContractsPreservesGroupingDimensionWithoutFilter(t *testing.T) {
+	plan := readyQuestionPlan("paid_gmv", 7)
+	plan.Conditions.Dimensions[0].MemberKey = ""
+	plan.Conditions.Dimensions[0].MemberKeys = nil
+	turn := QueryTurnPlan{Intent: "RANKING", Plans: []QueryPlan{plan}}
+
+	intent, ir, _, err := buildQuestionContracts(
+		turn, "semantic-graph-7", defaultQuestionBudgets(),
+	)
+	if err != nil {
+		t.Fatalf("build contracts: %v", err)
+	}
+	if len(intent.Dimensions) != 1 || intent.Dimensions[0].Code != "region" {
+		t.Fatalf("grouping dimension missing from intent: %+v", intent)
+	}
+	if len(ir.Dimensions) != 1 ||
+		ir.Dimensions[0] != plan.Conditions.Dimensions[0].DimensionID {
+		t.Fatalf("grouping dimension missing from semantic IR: %+v", ir)
+	}
+	if len(ir.Filters) != 0 {
+		t.Fatalf("grouping-only dimension must not create a member filter: %+v", ir)
+	}
+}
+
 func TestBuildQuestionContractsRejectsMixedSemanticVersions(t *testing.T) {
 	first := readyQuestionPlan("paid_gmv", 7)
 	second := readyQuestionPlan("order_count", 8)

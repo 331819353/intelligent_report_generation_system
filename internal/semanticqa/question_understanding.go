@@ -64,7 +64,7 @@ type QuestionCertifiedExample struct {
 }
 
 var (
-	questionTimeMentionPattern  = regexp.MustCompile(`(?:今|昨|明|上|下|本)?(?:天|日|周|月|季|季度|年)|(?:20[0-9]{2})[-年/](?:0?[1-9]|1[0-2])(?:[-月/](?:0?[1-9]|[12][0-9]|3[01])日?)?`)
+	questionTimeMentionPattern  = regexp.MustCompile(`(?:今|昨|明|上|下|本)?(?:天|日|周|月|季|季度|年)|(?:20[0-9]{2})[-年/](?:1[0-2]|0?[1-9])(?:[-月/](?:3[01]|[12][0-9]|0?[1-9])日?)?`)
 	questionComparePattern      = regexp.MustCompile(`同比|环比|较上期|对比|相比`)
 	questionLimitPattern        = regexp.MustCompile(`(?:前|top\s*)([1-9][0-9]{0,2})`)
 	questionExplicitDatePattern = regexp.MustCompile(
