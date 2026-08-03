@@ -2667,19 +2667,31 @@ func (service *Service) SubmitQueryFeedback(
 	tenantID, actorID, queryPlanID string,
 	input SubmitQueryFeedbackInput,
 ) (QueryFeedback, error) {
-	input.Rating = strings.ToUpper(strings.TrimSpace(input.Rating))
-	input.Comment = strings.TrimSpace(input.Comment)
-	if service == nil || service.store == nil ||
+	input, valid := normalizeQueryFeedbackInput(input)
+	if !valid || service == nil || service.store == nil ||
 		uuid.Validate(tenantID) != nil || uuid.Validate(actorID) != nil ||
-		uuid.Validate(queryPlanID) != nil ||
-		!oneOf(input.Rating, "ACCURATE", "INACCURATE") ||
-		len([]rune(input.Comment)) > 2000 ||
-		containsControl(input.Comment) {
+		uuid.Validate(queryPlanID) != nil {
 		return QueryFeedback{}, ErrInvalidRequest
 	}
 	return service.store.UpsertQueryFeedback(
 		ctx, tenantID, actorID, queryPlanID, input,
 	)
+}
+
+func normalizeQueryFeedbackInput(input SubmitQueryFeedbackInput) (SubmitQueryFeedbackInput, bool) {
+	input.Rating = strings.ToUpper(strings.TrimSpace(input.Rating))
+	input.IssueType = strings.ToUpper(strings.TrimSpace(input.IssueType))
+	input.Comment = strings.TrimSpace(input.Comment)
+	if input.Rating == "ACCURATE" {
+		input.IssueType = "NONE"
+	}
+	valid := oneOf(input.Rating, "ACCURATE", "INACCURATE") &&
+		oneOf(input.IssueType, "NONE", "METRIC_DEFINITION", "FILTER",
+			"RESULT_VALUE", "PERMISSION", "FRESHNESS", "EXPRESSION", "OTHER") &&
+		!(input.Rating == "INACCURATE" && input.IssueType == "NONE") &&
+		len([]rune(input.Comment)) <= 2000 &&
+		!containsControl(input.Comment)
+	return input, valid
 }
 
 func (service *Service) CreateQuestionTemplate(

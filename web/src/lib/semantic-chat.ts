@@ -763,12 +763,13 @@ export const semanticChatAPI = {
   submitQuestionFeedback: (
     questionId: string,
     rating: 'ACCURATE' | 'INACCURATE',
+    issueType: string,
     comment = '',
-  ) => apiRequest<{ items: Array<{ id: string; queryPlanId: string; rating: string }> }>(
+  ) => apiRequest<{ items: Array<{ id: string; queryPlanId: string; rating: string; issueType: string }> }>(
     `/v1/questions/${encodeURIComponent(questionId)}/feedback`,
     {
       method: 'POST',
-      body: JSON.stringify({ rating, ...(comment.trim() ? { comment: comment.trim() } : {}) }),
+      body: JSON.stringify({ rating, issueType: rating === 'ACCURATE' ? 'NONE' : issueType, ...(comment.trim() ? { comment: comment.trim() } : {}) }),
     },
   ),
 
@@ -869,12 +870,12 @@ export const semanticChatAPI = {
       }),
     }),
 
-  submitFeedback: (planId: string, rating: 'ACCURATE' | 'INACCURATE', comment = '') =>
-    apiRequest<{ id: string; queryPlanId: string; rating: string; comment?: string; createdAt: string; updatedAt: string }>(
+  submitFeedback: (planId: string, rating: 'ACCURATE' | 'INACCURATE', issueType: string, comment = '') =>
+    apiRequest<{ id: string; queryPlanId: string; rating: string; issueType: string; comment?: string; createdAt: string; updatedAt: string }>(
       `/v1/semantic-qa/query-plans/${encodeURIComponent(planId)}/feedback`,
       {
         method: 'POST',
-        body: JSON.stringify({ rating, ...(comment.trim() ? { comment: comment.trim() } : {}) }),
+        body: JSON.stringify({ rating, issueType: rating === 'ACCURATE' ? 'NONE' : issueType, ...(comment.trim() ? { comment: comment.trim() } : {}) }),
       },
     ),
 

@@ -692,14 +692,16 @@ type QueryPlanExecution struct {
 }
 
 type SubmitQueryFeedbackInput struct {
-	Rating  string `json:"rating"`
-	Comment string `json:"comment,omitempty"`
+	Rating    string `json:"rating"`
+	IssueType string `json:"issueType,omitempty"`
+	Comment   string `json:"comment,omitempty"`
 }
 
 type QueryFeedback struct {
 	ID          string `json:"id"`
 	QueryPlanID string `json:"queryPlanId"`
 	Rating      string `json:"rating"`
+	IssueType   string `json:"issueType"`
 	Comment     string `json:"comment,omitempty"`
 	CreatedAt   string `json:"createdAt"`
 	UpdatedAt   string `json:"updatedAt"`

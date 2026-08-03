@@ -790,6 +790,8 @@
 
 .semantic-chat-feedback { display: grid; gap: 8px; margin-top: 12px; }
 .semantic-chat-feedback > span { color: #747d89; font-size: 9px; font-weight: 700; }
+.semantic-chat-feedback select { width: 100%; border: 1px solid #dfe3e8; border-radius: 7px; padding: 7px 8px; background: #fff; color: #4a5565; font-size: 9px; }
+.semantic-chat-feedback select:focus { border-color: #7198e5; outline: 0; box-shadow: 0 0 0 3px #2864dc12; }
 .semantic-chat-feedback textarea { width: 100%; min-height: 54px; resize: vertical; border: 1px solid #dfe3e8; border-radius: 7px; padding: 7px 8px; background: #fff; color: #4a5565; font: inherit; font-size: 9px; line-height: 1.5; }
 .semantic-chat-feedback textarea:focus { border-color: #7198e5; outline: 0; box-shadow: 0 0 0 3px #2864dc12; }
 .semantic-chat-feedback textarea:disabled { background: #f6f7f9; opacity: .7; }

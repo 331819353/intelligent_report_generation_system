@@ -36,6 +36,7 @@ import {
 } from '../lib/semantic-chat'
 
 type Feedback = 'ACCURATE' | 'INACCURATE'
+type FeedbackIssueType = 'METRIC_DEFINITION' | 'FILTER' | 'RESULT_VALUE' | 'PERMISSION' | 'FRESHNESS' | 'EXPRESSION' | 'OTHER'
 
 type ChatMessage = {
   id: string
@@ -52,6 +53,7 @@ type ChatMessage = {
   execution?: SemanticQueryExecution
   errorCode?: string
   feedback?: Feedback
+  feedbackIssueType?: FeedbackIssueType
   feedbackComment?: string
   feedbackPending?: boolean
   feedbackError?: string
@@ -918,6 +920,10 @@ export function SemanticChatPage() {
     const allPlans = messagePlans(selectedMessage)
     const plans = allPlans.filter(plan => plan.status === 'EXECUTED')
     if (!plans.length || plans.length !== allPlans.length || selectedMessage.feedbackPending) return
+    if (feedback === 'INACCURATE' && !selectedMessage.feedbackIssueType) {
+      updateMessage(activeSession.id, selectedMessage.id, message => ({ ...message, feedbackError: '请先选择错误类型，便于进入对应治理队列。' }))
+      return
+    }
     const sessionID = activeSession.id
     const messageID = selectedMessage.id
     updateMessage(sessionID, messageID, message => ({ ...message, feedbackPending: true, feedbackError: undefined }))
@@ -926,10 +932,11 @@ export function SemanticChatPage() {
         await semanticChatAPI.submitQuestionFeedback(
           selectedMessage.questionResponse.questionId,
           feedback,
+          selectedMessage.feedbackIssueType ?? 'OTHER',
           selectedMessage.feedbackComment ?? '',
         )
       } else {
-        await Promise.all(plans.map(plan => semanticChatAPI.submitFeedback(plan.id, feedback, selectedMessage.feedbackComment ?? '')))
+        await Promise.all(plans.map(plan => semanticChatAPI.submitFeedback(plan.id, feedback, selectedMessage.feedbackIssueType ?? 'OTHER', selectedMessage.feedbackComment ?? '')))
       }
       updateMessage(sessionID, messageID, message => ({
         ...message, feedback, feedbackPending: false, feedbackError: undefined,
@@ -1115,7 +1122,7 @@ export function SemanticChatPage() {
                 </article>)}
               </div></details> : null}
               {selectedEvidence.length ? <details><summary>查看证据链（{selectedEvidence.length}）</summary><ol>{selectedEvidence.map((item, index) => <li key={`${index}-${item.nodeKey}`}><span>{item.label}</span><small>{item.subjectType} · {item.authority} · {Math.round(item.confidence * 100)}%</small></li>)}</ol></details> : null}
-              <div className="semantic-chat-feedback"><span>这个答案准确吗？</span><textarea aria-label="补充结果点评" maxLength={2000} placeholder="可选：补充指标口径、维度筛选或结果方面的意见" value={selectedMessage.feedbackComment ?? ''} disabled={!feedbackReady || selectedMessage.feedbackPending} onChange={event => updateMessage(activeSession.id, selectedMessage.id, message => ({ ...message, feedbackComment: event.target.value }))} /><div><button className={selectedMessage.feedback === 'ACCURATE' ? 'active positive' : ''} type="button" disabled={!feedbackReady || selectedMessage.feedbackPending} onClick={() => void rateSelected('ACCURATE')}><ThumbsUp size={15} />{selectedMessage.feedbackPending ? '提交中' : '准确'}</button><button className={selectedMessage.feedback === 'INACCURATE' ? 'active negative' : ''} type="button" disabled={!feedbackReady || selectedMessage.feedbackPending} onClick={() => void rateSelected('INACCURATE')}><ThumbsDown size={15} />{selectedMessage.feedbackPending ? '提交中' : '不准确'}</button></div>{selectedMessage.feedbackError && <small role="alert">{selectedMessage.feedbackError}</small>}</div>
+              <div className="semantic-chat-feedback"><span>这个答案准确吗？反馈只进入运营治理，不计入黄金准确率。</span><select aria-label="答案错误类型" value={selectedMessage.feedbackIssueType ?? ''} disabled={!feedbackReady || selectedMessage.feedbackPending} onChange={event => updateMessage(activeSession.id, selectedMessage.id, message => ({ ...message, feedbackIssueType: event.target.value as FeedbackIssueType, feedbackError: undefined }))}><option value="">不准确时请选择错误类型</option><option value="METRIC_DEFINITION">指标口径错误</option><option value="FILTER">筛选条件错误</option><option value="RESULT_VALUE">数字或结果错误</option><option value="PERMISSION">权限问题</option><option value="FRESHNESS">数据新鲜度问题</option><option value="EXPRESSION">表达或图表问题</option><option value="OTHER">其他问题</option></select><textarea aria-label="补充结果点评" maxLength={2000} placeholder="可选：补充指标口径、维度筛选或结果方面的意见" value={selectedMessage.feedbackComment ?? ''} disabled={!feedbackReady || selectedMessage.feedbackPending} onChange={event => updateMessage(activeSession.id, selectedMessage.id, message => ({ ...message, feedbackComment: event.target.value }))} /><div><button className={selectedMessage.feedback === 'ACCURATE' ? 'active positive' : ''} type="button" disabled={!feedbackReady || selectedMessage.feedbackPending} onClick={() => void rateSelected('ACCURATE')}><ThumbsUp size={15} />{selectedMessage.feedbackPending ? '提交中' : '准确'}</button><button className={selectedMessage.feedback === 'INACCURATE' ? 'active negative' : ''} type="button" disabled={!feedbackReady || selectedMessage.feedbackPending} onClick={() => void rateSelected('INACCURATE')}><ThumbsDown size={15} />{selectedMessage.feedbackPending ? '提交中' : '不准确'}</button></div>{selectedMessage.feedbackError && <small role="alert">{selectedMessage.feedbackError}</small>}</div>
             </>}
           </section>
 

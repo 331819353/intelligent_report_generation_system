@@ -303,12 +303,14 @@ submit_dimension_selection`。两个循环均可在预算内重复检索，且�
 `POST /api/v1/semantic-qa/query-plans/{id}/feedback`
 
 ```json
-{"rating":"ACCURATE","comment":"口径和筛选条件正确"}
+{"rating":"INACCURATE","issueType":"FILTER","comment":"区域筛选应包含华北"}
 ```
 
-只接受已经执行完成的计划，`rating` 为 `ACCURATE / INACCURATE`。同一用户对同一
-计划再次提交时更新为最新评价。智能问答页面可同时填写最多 2000 字的点评；多指标
-答案会把同一评价写入本轮每个已执行计划。反馈不会直接修改语义资产或绕过治理流程。
+只接受已经执行完成的计划，`rating` 为 `ACCURATE / INACCURATE`。准确时服务端固定
+`issueType=NONE`；不准确时必须从 `METRIC_DEFINITION / FILTER / RESULT_VALUE /
+PERMISSION / FRESHNESS / EXPRESSION / OTHER` 中选择错误类型。同一用户对同一计划再次
+提交时更新为最新评价。智能问答页面可同时填写最多 2000 字的点评；多指标答案会把同一
+评价写入本轮每个已执行计划。反馈不会直接修改语义资产、解锁发布或进入正式准确率。
 
 多轮追问把上一轮全部 `READY / EXECUTED` 计划 ID 放入
 `contextQueryPlanIds`，同时把前两次用户问句放入 `priorQuestions`。页面的

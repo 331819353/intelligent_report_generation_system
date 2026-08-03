@@ -54,7 +54,8 @@ BEGIN
     ('000187_semantic_execution_tool_host'),
     ('000188_semantic_evaluation_release_gate'),
     ('000189_semantic_release_evaluation_gate'),
-    ('000190_semantic_evaluation_security_gate')
+    ('000190_semantic_evaluation_security_gate'),
+    ('000191_semantic_feedback_issue_type')
   ) AS expected(version)
   LEFT JOIN platform_schema_migrations AS applied USING(version)
   WHERE applied.version IS NULL;
@@ -387,6 +388,14 @@ BEGIN
      ));
   IF invalid_count<>0 THEN
     RAISE EXCEPTION 'golden evaluation run evidence is incomplete: %',invalid_count;
+  END IF;
+
+  SELECT count(*) INTO invalid_count
+  FROM platform.semantic_query_feedback
+  WHERE (rating='ACCURATE' AND issue_type<>'NONE')
+     OR (rating='INACCURATE' AND issue_type='NONE');
+  IF invalid_count<>0 THEN
+    RAISE EXCEPTION 'semantic feedback is missing structured issue type: %',invalid_count;
   END IF;
 
   SELECT count(*) INTO invalid_count

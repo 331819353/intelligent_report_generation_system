@@ -1,6 +1,6 @@
 # 智能问数 v1.3 落地差距审计与升级排期
 
-状态：`AUDITED / IMPLEMENTATION IN PROGRESS`
+状态：`CORE UPGRADE IMPLEMENTED / BUSINESS ACCEPTANCE DATA PENDING`
 
 目标依据：`智能问数项目技术架构与实施方案 v1.3`（2026-08-03）
 
@@ -194,7 +194,8 @@ development/validation/sealed/production_regression 数据集；结果等价比�
 | 2 | `7159631` | NebulaGraph Compose/nGQL、官方 Go 客户端、租约 Worker、六类在线能力、GraphPlanner、精确版本缓存 | 全量单测、迁移门禁及六类真实图查询通过 |
 | 3 | `60ca704` | NFKC/AlignmentMap、版本化 Alias 与维度值复合身份、认证示例、Top3 冲突 Bundle 图消歧、活动版本 GraphPlan、权限传播、三类非图投影 Worker、旧原生资产迁移预览/候选、执行前后版本复核和脱敏重放产物 | 2,422 对象四投影 READY；Nebula 2,327 节点/2,498 边/0 孤儿；真实问答固定版本并通过图权限与结果门禁；全量 Go/CI 通过 |
 | 4 | `1aca8f1` | execution registry 权威校验；14 Tool Host；追加式脱敏调用审计；3/12/2/2/2/60s 预算；PostgreSQL 同方言解析、DSL 表列白名单、`EXPLAIN` 成本；内容 hash/类型/物化/比较期结果不变量 | 真实“本月净收入”问答 `ANSWERED`；Registry/DQ/AST/成本/结果全部 PASS；8 条 Host 调用事实 hash 有效且无 SQL/参数/结果明文 |
-| 5 | 待本阶段提交 | development/validation/sealed/production_regression；规划回归与 E2E 结果等价隔离；双审与冻结 hash；Wilson/P0/越权/泄漏/覆盖/拒答门禁；后续语义激活绑定评测；React 口径、图计划、Registry、预检证明、发布流水线和门禁面板 | 单测验证 Wilson 与 P0 阻断；数据库验证 sealed/运行证据/激活角色边界；React 构建；真实样本不足时门禁明确 BLOCKED，不宣称 95% |
+| 5 | `bed81af` | development/validation/sealed/production_regression；规划回归与 E2E 结果等价隔离；双审与冻结 hash；Wilson/P0/越权/泄漏/覆盖/拒答门禁；后续语义激活绑定评测；React 口径、图计划、Registry、预检证明、发布流水线和门禁面板 | 单测验证 Wilson 与 P0 阻断；数据库验证 sealed/运行证据/激活角色边界；React 构建；真实样本不足时门禁明确 BLOCKED，不宣称 95% |
+| 6 | 待本阶段提交 | 全类安全样本 100% 阻断补强；结构化错误反馈（口径/筛选/数字/权限/新鲜度/表达）；完整回归、运行镜像与文档收口 | Go/vet/React/CI/PostgreSQL/NebulaGraph 和真实问答/E2E 结果 hash 回放通过；远端 master 一致 |
 
 阶段 4 没有重写当前项目已经成熟的指标编译和只读数仓执行器，而是在其上游增加活动
 执行注册表和 Tool Host，在其下游增加结果不变量。原指标 Preview 代码只保留为物理
