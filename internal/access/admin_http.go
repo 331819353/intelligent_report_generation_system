@@ -2,7 +2,9 @@ package access
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
 
 	"intelligent-report-generation-system/internal/auth"
 )
@@ -30,6 +32,15 @@ func NewAdminHandler(authService *auth.Service, store *AdminStore) http.Handler 
 			next.ServeHTTP(w, r)
 		}))
 	}
+	mux.Handle("GET /api/v1/platform-management/access", authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		allowed, err := store.IsPlatformAdministrator(r.Context(), claims.TenantID, claims.Subject)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "PLATFORM_ADMIN_CHECK_FAILED", "failed to verify platform administrator")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"platformAdministrator": allowed})
+	})))
 	mux.Handle("GET /api/v1/domains", authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		domains, err := store.ListDomains(r.Context(), c.TenantID, c.Subject)
@@ -53,6 +64,32 @@ func NewAdminHandler(authService *auth.Service, store *AdminStore) http.Handler 
 		items, err := store.ListManagedDomains(r.Context(), c.TenantID, c.Subject)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "MANAGED_DOMAIN_LIST_FAILED", "failed to list managed business domains")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	})))
+	mux.Handle("GET /api/v1/platform-management/approvals", platformManaged(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		limit := managementLimit(w, r)
+		if limit == 0 {
+			return
+		}
+		items, err := store.ListPlatformApprovals(r.Context(), c.TenantID, c.Subject, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "PLATFORM_APPROVAL_LIST_FAILED", "failed to list platform approvals")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	})))
+	mux.Handle("GET /api/v1/platform-management/audit-logs", platformManaged(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		limit := managementLimit(w, r)
+		if limit == 0 {
+			return
+		}
+		items, err := store.ListPlatformAuditLogs(r.Context(), c.TenantID, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "PLATFORM_AUDIT_LOG_LIST_FAILED", "failed to list platform audit logs")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -161,6 +198,10 @@ func NewAdminHandler(authService *auth.Service, store *AdminStore) http.Handler 
 			r.Context(), c.TenantID, c.Subject, r.PathValue("id"),
 			in.Decision, in.Comment,
 		); err != nil {
+			if errors.Is(err, ErrDomainApplicationForbidden) || errors.Is(err, ErrDomainApplicationPlatformReviewRequired) {
+				writeError(w, http.StatusForbidden, "DOMAIN_APPLICATION_REVIEW_FORBIDDEN", err.Error())
+				return
+			}
 			writeError(w, http.StatusBadRequest, "DOMAIN_APPLICATION_REVIEW_FAILED", err.Error())
 			return
 		}
@@ -174,6 +215,22 @@ func NewAdminHandler(authService *auth.Service, store *AdminStore) http.Handler 
 			return
 		}
 		writeJSON(w, 200, map[string]any{"items": users})
+	})))
+	mux.Handle("PATCH /api/v1/users/{id}", platformManaged(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		var in struct {
+			Status string `json:"status"`
+		}
+		if !decodeAdmin(w, r, &in) {
+			return
+		}
+		if err := store.UpdateUserStatus(
+			r.Context(), c.TenantID, c.Subject, r.PathValue("id"), in.Status,
+		); err != nil {
+			writeError(w, http.StatusBadRequest, "USER_STATUS_UPDATE_FAILED", err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})))
 	mux.Handle("PUT /api/v1/users/{id}/platform-administrator", platformManaged(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
@@ -219,6 +276,22 @@ func NewAdminHandler(authService *auth.Service, store *AdminStore) http.Handler 
 		w.WriteHeader(http.StatusNoContent)
 	})))
 	return mux
+}
+
+func managementLimit(w http.ResponseWriter, r *http.Request) int {
+	if len(r.URL.Query()) == 0 {
+		return 100
+	}
+	if len(r.URL.Query()) != 1 || r.URL.Query().Get("limit") == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "only one limit query parameter is supported")
+		return 0
+	}
+	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil || limit < 1 || limit > 200 {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "limit must be between 1 and 200")
+		return 0
+	}
+	return limit
 }
 
 // decodeAdmin 严格解析管理请求，避免静默接受未知字段。

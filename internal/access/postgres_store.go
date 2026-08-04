@@ -13,8 +13,9 @@ type PostgresStore struct{ pool *pgxpool.Pool }
 // NewPostgresStore 创建 PostgreSQL 权限判定存储。
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
-// Allowed 按平台、领域、用户三级固定边界判定权限。平台管理员只拥有控制面
-// 权限；领域管理员拥有本领域完整数据权限；普通领域成员可配置但不能发布。
+// Allowed 按平台、领域、用户三级固定边界判定权限。平台管理员拥有全部权限，
+// 但仍需明确选择领域以保持数据隔离；领域管理员只管理所属领域，普通用户可
+// 配置但不能发布。
 func (s *PostgresStore) Allowed(ctx context.Context, check Check) (allowed bool, err error) {
 	err = database.WithTenantTx(ctx, s.pool, check.TenantID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT EXISTS (
@@ -26,7 +27,6 @@ func (s *PostgresStore) Allowed(ctx context.Context, check Check) (allowed bool,
           WHERE assignment.tenant_id=$1 AND assignment.user_id=$2
             AND role.code::text='platform_admin'
             AND role.status='ACTIVE' AND role.deleted_at IS NULL
-            AND $3 IN ('TENANT','USER')
           UNION ALL
           SELECT 1
           FROM platform.domain_memberships AS membership

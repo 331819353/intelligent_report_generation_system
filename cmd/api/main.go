@@ -229,6 +229,7 @@ func main() {
 	api.Handle("/api/v1/domain-applications", accessAdminHandler)
 	api.Handle("/api/v1/domain-applications/", accessAdminHandler)
 	api.Handle("/api/v1/managed-domains", accessAdminHandler)
+	api.Handle("/api/v1/platform-management/", accessAdminHandler)
 	api.Handle("/api/v1/domains", accessAdminHandler)
 	api.Handle("/api/v1/domains/", accessAdminHandler)
 	api.Handle("/api/v1/users", accessAdminHandler)

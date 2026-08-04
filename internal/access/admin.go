@@ -21,12 +21,14 @@ type UserDomain struct {
 }
 type UserSummary struct {
 	ID                    string       `json:"id"`
+	EmployeeNo            string       `json:"employeeNo"`
 	Email                 string       `json:"email"`
 	DisplayName           string       `json:"displayName"`
 	Status                string       `json:"status"`
 	PlatformAdministrator bool         `json:"platformAdministrator"`
 	Domains               []UserDomain `json:"domains"`
 	LastLoginAt           *string      `json:"lastLoginAt,omitempty"`
+	CreatedAt             string       `json:"createdAt"`
 }
 type BusinessDomain struct {
 	ID             string                `json:"id"`
@@ -41,6 +43,7 @@ type BusinessDomain struct {
 }
 type DomainAdministrator struct {
 	ID          string `json:"id"`
+	EmployeeNo  string `json:"employeeNo"`
 	Email       string `json:"email"`
 	DisplayName string `json:"displayName"`
 }
@@ -63,9 +66,51 @@ type DomainApplication struct {
 	ReviewedAt           string `json:"reviewedAt,omitempty"`
 	CreatedAt            string `json:"createdAt"`
 }
+type PlatformApproval struct {
+	ID                   string  `json:"id"`
+	Kind                 string  `json:"kind"`
+	ResourceID           string  `json:"resourceId"`
+	ResourceName         string  `json:"resourceName"`
+	DomainID             string  `json:"domainId"`
+	DomainCode           string  `json:"domainCode"`
+	DomainName           string  `json:"domainName"`
+	RequesterUserID      string  `json:"requesterUserId"`
+	RequesterEmail       string  `json:"requesterEmail"`
+	RequesterDisplayName string  `json:"requesterDisplayName"`
+	Status               string  `json:"status"`
+	Note                 string  `json:"note"`
+	ReviewerDisplayName  string  `json:"reviewerDisplayName,omitempty"`
+	SubmittedAt          string  `json:"submittedAt"`
+	ReviewedAt           *string `json:"reviewedAt,omitempty"`
+}
+type PlatformAuditLog struct {
+	ID               string `json:"id"`
+	Action           string `json:"action"`
+	ResourceType     string `json:"resourceType"`
+	ResourceID       string `json:"resourceId"`
+	Result           string `json:"result"`
+	ActorDisplayName string `json:"actorDisplayName"`
+	ActorEmail       string `json:"actorEmail"`
+	RequestID        string `json:"requestId,omitempty"`
+	OccurredAt       string `json:"occurredAt"`
+}
 type AdminStore struct{ pool *pgxpool.Pool }
 
 var businessDomainCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,31}$`)
+
+var (
+	ErrDomainApplicationForbidden              = errors.New("仅目标领域管理员或平台管理员可以审批领域申请")
+	ErrDomainApplicationPlatformReviewRequired = errors.New("超出领域管理员权限范围，需要平台管理员审批")
+)
+
+func validateDomainApplicationReviewer(
+	platformAdministrator, domainAdministrator bool,
+) error {
+	if !platformAdministrator && !domainAdministrator {
+		return ErrDomainApplicationForbidden
+	}
+	return nil
+}
 
 // NewAdminStore 创建平台、领域和用户三级治理存储。
 func NewAdminStore(pool *pgxpool.Pool) *AdminStore { return &AdminStore{pool: pool} }
@@ -75,7 +120,7 @@ func (s *AdminStore) ListUsers(ctx context.Context, tenantID string) ([]UserSumm
 	var users []UserSummary
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT
-			  u.id,u.email,u.display_name,u.status,u.last_login_at::text,
+			  u.id,u.employee_no,u.email,u.display_name,u.status,u.last_login_at::text,u.created_at::text,
 			  EXISTS(
 			    SELECT 1
 			    FROM platform.user_roles AS assignment
@@ -116,8 +161,8 @@ func (s *AdminStore) ListUsers(ctx context.Context, tenantID string) ([]UserSumm
 			var user UserSummary
 			var domainsJSON []byte
 			if err := rows.Scan(
-				&user.ID, &user.Email, &user.DisplayName, &user.Status,
-				&user.LastLoginAt, &user.PlatformAdministrator, &domainsJSON,
+				&user.ID, &user.EmployeeNo, &user.Email, &user.DisplayName, &user.Status,
+				&user.LastLoginAt, &user.CreatedAt, &user.PlatformAdministrator, &domainsJSON,
 			); err != nil {
 				return err
 			}
@@ -129,6 +174,223 @@ func (s *AdminStore) ListUsers(ctx context.Context, tenantID string) ([]UserSumm
 		return rows.Err()
 	})
 	return users, err
+}
+
+// ListPlatformApprovals provides one metadata-only queue for platform
+// governance. Publication content remains inside its business domain; this
+// view exposes only the request identity, status and responsible domain.
+func (s *AdminStore) ListPlatformApprovals(
+	ctx context.Context, tenantID, actorID string, limit int,
+) (items []PlatformApproval, err error) {
+	if limit < 1 || limit > 200 {
+		return nil, errors.New("approval limit must be between 1 and 200")
+	}
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		allowed, checkErr := isPlatformAdministratorTx(ctx, tx, actorID)
+		if checkErr != nil {
+			return checkErr
+		}
+		if !allowed {
+			return errors.New("platform administrator permission is required")
+		}
+		// 跨领域审批中心只读取治理元数据；完成平台管理员复核后在当前
+		// 事务切换为系统读取模式，避免资产 RLS 把其他领域的队列静默过滤。
+		if _, setErr := tx.Exec(ctx, "SELECT set_config('app.access_mode','SYSTEM',true)"); setErr != nil {
+			return setErr
+		}
+		rows, queryErr := tx.Query(ctx, `SELECT
+			approval_id,kind,resource_id,resource_name,domain_id,domain_code,
+			domain_name,requester_user_id,requester_email,requester_display_name,
+			status,note,reviewer_display_name,submitted_at::text,reviewed_at::text
+		FROM (
+			SELECT application.id AS approval_id,'DOMAIN_ACCESS'::text AS kind,
+				domain.id AS resource_id,domain.name AS resource_name,
+				domain.id AS domain_id,domain.code::text AS domain_code,domain.name AS domain_name,
+				applicant.id AS requester_user_id,applicant.email::text AS requester_email,
+				applicant.display_name AS requester_display_name,application.status::text AS status,
+				application.reason AS note,COALESCE(reviewer.display_name,'') AS reviewer_display_name,
+				application.created_at AS submitted_at,application.reviewed_at
+			FROM platform.domain_access_applications AS application
+			JOIN platform.business_domains AS domain
+			  ON domain.id=application.domain_id AND domain.tenant_id=application.tenant_id
+			JOIN platform.users AS applicant
+			  ON applicant.id=application.applicant_user_id AND applicant.tenant_id=application.tenant_id
+			LEFT JOIN platform.users AS reviewer
+			  ON reviewer.id=application.reviewed_by AND reviewer.tenant_id=application.tenant_id
+			UNION ALL
+			SELECT request.id,'DATA_SOURCE',source.id,source.name,
+				domain.id,domain.code::text,domain.name,requester.id,requester.email::text,
+				requester.display_name,request.status,request.request_note,
+				COALESCE(reviewer.display_name,''),request.submitted_at,request.reviewed_at
+			FROM platform.data_source_publication_requests AS request
+			JOIN platform.data_sources AS source
+			  ON source.id=request.data_source_id AND source.tenant_id=request.tenant_id
+			JOIN platform.business_domains AS domain
+			  ON domain.id=source.domain_id AND domain.tenant_id=source.tenant_id
+			JOIN platform.users AS requester
+			  ON requester.id=request.requester_user_id AND requester.tenant_id=request.tenant_id
+			LEFT JOIN platform.users AS reviewer
+			  ON reviewer.id=request.reviewer_user_id AND reviewer.tenant_id=request.tenant_id
+			UNION ALL
+			SELECT request.id,'DATASET',dataset.id,dataset.name,
+				domain.id,domain.code::text,domain.name,requester.id,requester.email::text,
+				requester.display_name,request.status,request.request_note,
+				COALESCE(reviewer.display_name,''),request.submitted_at,request.reviewed_at
+			FROM platform.dataset_publication_requests AS request
+			JOIN platform.datasets AS dataset
+			  ON dataset.id=request.dataset_id AND dataset.tenant_id=request.tenant_id
+			JOIN platform.business_domains AS domain
+			  ON domain.id=dataset.domain_id AND domain.tenant_id=dataset.tenant_id
+			JOIN platform.users AS requester
+			  ON requester.id=request.requester_user_id AND requester.tenant_id=request.tenant_id
+			LEFT JOIN platform.users AS reviewer
+			  ON reviewer.id=request.reviewer_user_id AND reviewer.tenant_id=request.tenant_id
+		) AS approvals
+		ORDER BY submitted_at DESC,approval_id DESC
+		LIMIT $1`, limit)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item PlatformApproval
+			if scanErr := rows.Scan(
+				&item.ID, &item.Kind, &item.ResourceID, &item.ResourceName,
+				&item.DomainID, &item.DomainCode, &item.DomainName,
+				&item.RequesterUserID, &item.RequesterEmail,
+				&item.RequesterDisplayName, &item.Status, &item.Note,
+				&item.ReviewerDisplayName, &item.SubmittedAt, &item.ReviewedAt,
+			); scanErr != nil {
+				return scanErr
+			}
+			items = append(items, item)
+		}
+		return rows.Err()
+	})
+	return items, err
+}
+
+// ListPlatformAuditLogs returns an immutable, metadata-only operational trail.
+// Raw audit detail is deliberately omitted because it may contain resource
+// diagnostics that belong inside a business domain.
+func (s *AdminStore) ListPlatformAuditLogs(
+	ctx context.Context, tenantID string, limit int,
+) (items []PlatformAuditLog, err error) {
+	if limit < 1 || limit > 200 {
+		return nil, errors.New("audit log limit must be between 1 and 200")
+	}
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		rows, queryErr := tx.Query(ctx, `SELECT
+			log.id::text,log.action,log.resource_type,COALESCE(log.resource_id,''),
+			log.result,COALESCE(actor.display_name,'系统'),COALESCE(actor.email::text,''),
+			COALESCE(log.request_id,''),log.occurred_at::text
+		FROM platform.audit_logs AS log
+		LEFT JOIN platform.users AS actor
+		  ON actor.id=log.actor_user_id AND actor.tenant_id=log.tenant_id
+		ORDER BY log.occurred_at DESC,log.id DESC
+		LIMIT $1`, limit)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item PlatformAuditLog
+			if scanErr := rows.Scan(
+				&item.ID, &item.Action, &item.ResourceType, &item.ResourceID,
+				&item.Result, &item.ActorDisplayName, &item.ActorEmail,
+				&item.RequestID, &item.OccurredAt,
+			); scanErr != nil {
+				return scanErr
+			}
+			items = append(items, item)
+		}
+		return rows.Err()
+	})
+	return items, err
+}
+
+// UpdateUserStatus controls the lifecycle of one registered account. Disabling
+// an account revokes all live sessions and increments token_version so already
+// issued access tokens stop working immediately.
+func (s *AdminStore) UpdateUserStatus(
+	ctx context.Context, tenantID, actorID, userID, status string,
+) error {
+	status = strings.ToUpper(strings.TrimSpace(status))
+	if status != "ACTIVE" && status != "DISABLED" {
+		return errors.New("user status must be ACTIVE or DISABLED")
+	}
+	return database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		allowed, err := isPlatformAdministratorTx(ctx, tx, actorID)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return errors.New("only a platform administrator can update user status")
+		}
+		var currentStatus string
+		if err := tx.QueryRow(ctx, `SELECT status::text
+			FROM platform.users
+			WHERE id=$1::uuid AND deleted_at IS NULL
+			FOR UPDATE`, userID).Scan(&currentStatus); err != nil {
+			return err
+		}
+		if currentStatus == status {
+			return nil
+		}
+		if status == "DISABLED" {
+			if userID == actorID {
+				return errors.New("platform administrator cannot disable the current account")
+			}
+			platformAdministrator, err := isPlatformAdministratorTx(ctx, tx, userID)
+			if err != nil {
+				return err
+			}
+			if platformAdministrator {
+				return errors.New("remove the platform administrator identity before disabling this user")
+			}
+			var domainAdministrator bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(
+				SELECT 1 FROM platform.domain_memberships
+				WHERE user_id=$1::uuid AND status='ACTIVE'
+				  AND member_role='DOMAIN_ADMIN'
+			)`, userID).Scan(&domainAdministrator); err != nil {
+				return err
+			}
+			if domainAdministrator {
+				return errors.New("replace the domain administrator identity before disabling this user")
+			}
+		}
+		result, err := tx.Exec(ctx, `UPDATE platform.users
+			SET status=$2::platform.user_status,
+			    token_version=token_version+1,
+			    version=version+1
+			WHERE id=$1::uuid AND tenant_id=$3::uuid AND deleted_at IS NULL`,
+			userID, status, tenantID,
+		)
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() != 1 {
+			return errors.New("user was not found")
+		}
+		var revokedSessions int64
+		if status == "DISABLED" {
+			result, err := tx.Exec(ctx, `UPDATE platform.auth_sessions
+				SET revoked_at=now(),revoke_reason='USER_DISABLED',last_used_at=now()
+				WHERE user_id=$1::uuid AND revoked_at IS NULL`, userID)
+			if err != nil {
+				return err
+			}
+			revokedSessions = result.RowsAffected()
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+			tenant_id,actor_user_id,action,resource_type,resource_id,detail
+		) VALUES($1,$2,'UPDATE_USER_STATUS','USER',$3,jsonb_build_object(
+			'previousStatus',$4::text,'status',$5::text,
+			'revokedSessions',$6::bigint
+		))`, tenantID, actorID, userID, currentStatus, status, revokedSessions)
+		return err
+	})
 }
 
 // ListDomains 返回当前租户的业务领域目录，所有已登录用户均可用于切换上下文。
@@ -162,7 +424,8 @@ func (s *AdminStore) listDomains(
 			  domain.is_default,domain.version,domain.created_at::text,
 			  COALESCE((
 			    SELECT jsonb_agg(jsonb_build_object(
-			      'id',administrator.id,'email',administrator.email,
+			      'id',administrator.id,'employeeNo',administrator.employee_no,
+			      'email',administrator.email,
 			      'displayName',administrator.display_name
 			    ) ORDER BY administrator.display_name,administrator.email)
 			    FROM platform.domain_memberships AS administrator_membership
@@ -178,6 +441,16 @@ func (s *AdminStore) listDomains(
 			FROM platform.business_domains AS domain
 			WHERE (
 			    $2::boolean
+			    OR EXISTS(
+			      SELECT 1 FROM platform.user_roles AS assignment
+			      JOIN platform.roles AS role
+			        ON role.id=assignment.role_id
+			       AND role.tenant_id=assignment.tenant_id
+			      WHERE assignment.tenant_id=domain.tenant_id
+			        AND assignment.user_id=$1::uuid
+			        AND role.code::text='platform_admin'
+			        AND role.status='ACTIVE' AND role.deleted_at IS NULL
+			    )
 			    OR EXISTS(
 			      SELECT 1 FROM platform.domain_memberships AS membership
 			      WHERE membership.tenant_id=domain.tenant_id
@@ -228,9 +501,6 @@ func (s *AdminStore) CreateDomain(
 		return domain, errors.New("domain name is required")
 	}
 	administratorUserIDs = uniqueStrings(administratorUserIDs)
-	if len(administratorUserIDs) == 0 {
-		return domain, errors.New("at least one domain administrator is required")
-	}
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		platformAdministrator, err := isPlatformAdministratorTx(ctx, tx, actorID)
 		if err != nil {
@@ -240,15 +510,30 @@ func (s *AdminStore) CreateDomain(
 			return errors.New("only a platform administrator can create domains")
 		}
 		var administratorCount int
-		if err := tx.QueryRow(ctx, `SELECT count(DISTINCT id)
-			FROM platform.users
-			WHERE id=ANY($1::uuid[]) AND status='ACTIVE' AND deleted_at IS NULL`,
+		if err := tx.QueryRow(ctx, `SELECT count(DISTINCT user_account.id)
+			FROM platform.users AS user_account
+			WHERE user_account.id=ANY($1::uuid[])
+			  AND user_account.status='ACTIVE' AND user_account.deleted_at IS NULL
+			  AND NOT EXISTS(
+			    SELECT 1 FROM platform.user_roles AS assignment
+			    JOIN platform.roles AS role ON role.id=assignment.role_id
+			    WHERE assignment.user_id=user_account.id
+			      AND role.code::text='platform_admin'
+			      AND role.status='ACTIVE' AND role.deleted_at IS NULL
+			  )
+			  AND NOT EXISTS(
+			    SELECT 1 FROM platform.domain_memberships AS membership
+			    WHERE membership.tenant_id=user_account.tenant_id
+			      AND membership.user_id=user_account.id
+			      AND membership.status='ACTIVE'
+			      AND membership.member_role='MEMBER'
+			  )`,
 			administratorUserIDs,
 		).Scan(&administratorCount); err != nil {
 			return err
 		}
 		if administratorCount != len(administratorUserIDs) {
-			return errors.New("one or more domain administrators are not active users")
+			return errors.New("domain administrators must be active users without platform or ordinary-user identity")
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.business_domains(
 				tenant_id,code,name,description,created_by
@@ -305,9 +590,9 @@ func (s *AdminStore) AssignUserDomain(
 			return errors.New("only a platform administrator can assign domain memberships directly")
 		}
 		result, err := tx.Exec(ctx, `INSERT INTO platform.domain_memberships(
-				tenant_id,domain_id,user_id,assigned_by,status
+				tenant_id,domain_id,user_id,assigned_by,status,member_role
 			)
-			SELECT $1,domain.id,user_account.id,$2,'ACTIVE'
+			SELECT $1,domain.id,user_account.id,$2,'ACTIVE','MEMBER'
 			FROM platform.business_domains AS domain
 			CROSS JOIN platform.users AS user_account
 			WHERE domain.id=$3::uuid
@@ -316,8 +601,22 @@ func (s *AdminStore) AssignUserDomain(
 			  AND user_account.id=$4::uuid
 			  AND user_account.status='ACTIVE'
 			  AND user_account.deleted_at IS NULL
+			  AND NOT EXISTS(
+			    SELECT 1 FROM platform.user_roles AS assignment
+			    JOIN platform.roles AS role ON role.id=assignment.role_id
+			    WHERE assignment.user_id=user_account.id
+			      AND role.code::text='platform_admin'
+			      AND role.status='ACTIVE' AND role.deleted_at IS NULL
+			  )
+			  AND NOT EXISTS(
+			    SELECT 1 FROM platform.domain_memberships AS membership
+			    WHERE membership.tenant_id=user_account.tenant_id
+			      AND membership.user_id=user_account.id
+			      AND membership.status='ACTIVE'
+			      AND membership.member_role='DOMAIN_ADMIN'
+			  )
 			ON CONFLICT(tenant_id,domain_id,user_id) DO UPDATE
-			SET status='ACTIVE',assigned_by=EXCLUDED.assigned_by`,
+			SET status='ACTIVE',member_role='MEMBER',assigned_by=EXCLUDED.assigned_by`,
 			tenantID, actorID, domainID, userID,
 		)
 		if err != nil {
@@ -502,6 +801,27 @@ func (s *AdminStore) SetPlatformAdministrator(
 			return errors.New("active user was not found")
 		}
 		if enabled {
+			var domainAdministrator bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(
+				SELECT 1 FROM platform.domain_memberships
+				WHERE user_id=$1::uuid AND status='ACTIVE'
+				  AND member_role='DOMAIN_ADMIN'
+			)`, userID).Scan(&domainAdministrator); err != nil {
+				return err
+			}
+			if domainAdministrator {
+				return errors.New("replace the user's domain administrator identity before appointing a platform administrator")
+			}
+			if _, err := tx.Exec(ctx, `DELETE FROM platform.domain_memberships
+				WHERE tenant_id=$1::uuid AND user_id=$2::uuid`, tenantID, userID); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE platform.auth_sessions
+				SET business_domain_id=NULL,last_used_at=now()
+				WHERE tenant_id=$1::uuid AND user_id=$2::uuid
+				  AND business_domain_id IS NOT NULL AND revoked_at IS NULL`, tenantID, userID); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx, `INSERT INTO platform.user_roles(
 				tenant_id,user_id,role_id,assigned_by
 			)
@@ -651,6 +971,13 @@ func (s *AdminStore) ApplyDomainAccess(
 			  AND domain.status='ACTIVE' AND domain.deleted_at IS NULL
 			  AND applicant.status='ACTIVE' AND applicant.deleted_at IS NULL
 			  AND NOT EXISTS(
+			    SELECT 1 FROM platform.user_roles AS assignment
+			    JOIN platform.roles AS role ON role.id=assignment.role_id
+			    WHERE assignment.user_id=applicant.id
+			      AND role.code::text='platform_admin'
+			      AND role.status='ACTIVE' AND role.deleted_at IS NULL
+			  )
+			  AND NOT EXISTS(
 			    SELECT 1 FROM platform.domain_memberships AS membership
 			    WHERE membership.tenant_id=domain.tenant_id
 			      AND membership.domain_id=domain.id
@@ -774,14 +1101,50 @@ func (s *AdminStore) ReviewDomainApplication(
 		if status != "PENDING" {
 			return errors.New("domain application has already been decided")
 		}
+		platformAdministrator, err := isPlatformAdministratorTx(ctx, tx, reviewerID)
+		if err != nil {
+			return err
+		}
 		var domainAdministrator bool
 		if err := tx.QueryRow(ctx, `SELECT platform.user_is_domain_administrator($1::uuid)`,
 			domainID,
 		).Scan(&domainAdministrator); err != nil {
 			return err
 		}
-		if !domainAdministrator {
-			return errors.New("domain administrator permission is required")
+		if err := validateDomainApplicationReviewer(
+			platformAdministrator, domainAdministrator,
+		); err != nil {
+			return err
+		}
+		var applicantPlatformAdministrator, applicantDomainAdministrator, applicantTargetDomainAdministrator bool
+		if decision == "APPROVED" {
+			if err := tx.QueryRow(ctx, `SELECT
+				EXISTS(
+				  SELECT 1 FROM platform.user_roles AS assignment
+				  JOIN platform.roles AS role ON role.id=assignment.role_id
+				  WHERE assignment.user_id=$1::uuid
+				    AND role.code::text='platform_admin'
+				    AND role.status='ACTIVE' AND role.deleted_at IS NULL
+				),
+				EXISTS(
+				  SELECT 1 FROM platform.domain_memberships
+				  WHERE user_id=$1::uuid AND status='ACTIVE'
+				    AND member_role='DOMAIN_ADMIN'
+				),
+				EXISTS(
+				  SELECT 1 FROM platform.domain_memberships
+				  WHERE user_id=$1::uuid AND domain_id=$2::uuid
+				    AND status='ACTIVE' AND member_role='DOMAIN_ADMIN'
+				)`, applicantID, domainID).Scan(
+				&applicantPlatformAdministrator,
+				&applicantDomainAdministrator,
+				&applicantTargetDomainAdministrator,
+			); err != nil {
+				return err
+			}
+			if applicantDomainAdministrator && !applicantTargetDomainAdministrator && !platformAdministrator {
+				return ErrDomainApplicationPlatformReviewRequired
+			}
 		}
 		if _, err := tx.Exec(ctx, `UPDATE platform.domain_access_applications
 			SET status=$2::platform.domain_application_status,review_comment=$3,
@@ -789,18 +1152,22 @@ func (s *AdminStore) ReviewDomainApplication(
 			WHERE id=$1::uuid`, applicationID, decision, comment, reviewerID); err != nil {
 			return err
 		}
-		if decision == "APPROVED" {
+		if decision == "APPROVED" && !applicantPlatformAdministrator {
+			memberRole := "MEMBER"
+			if applicantDomainAdministrator {
+				memberRole = "DOMAIN_ADMIN"
+			}
 			if _, err := tx.Exec(ctx, `INSERT INTO platform.domain_memberships(
 					tenant_id,domain_id,user_id,assigned_by,status,member_role
-				) VALUES($1,$2,$3,$4,'ACTIVE','MEMBER')
+				) VALUES($1,$2,$3,$4,'ACTIVE',$5::platform.domain_member_role)
 				ON CONFLICT(tenant_id,domain_id,user_id) DO UPDATE
-				SET status='ACTIVE',member_role='MEMBER',assigned_by=EXCLUDED.assigned_by`,
-				tenantID, domainID, applicantID, reviewerID,
+				SET status='ACTIVE',member_role=EXCLUDED.member_role,assigned_by=EXCLUDED.assigned_by`,
+				tenantID, domainID, applicantID, reviewerID, memberRole,
 			); err != nil {
 				return err
 			}
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(
 				tenant_id,actor_user_id,action,resource_type,resource_id,detail
 			) VALUES($1,$2,'REVIEW_DOMAIN_APPLICATION','DOMAIN_APPLICATION',$3,
 				jsonb_build_object('domainId',$4::text,'applicantUserId',$5::text,
@@ -811,8 +1178,9 @@ func (s *AdminStore) ReviewDomainApplication(
 	})
 }
 
-// ReplaceDomainAdministrators replaces the explicit administrator set while
-// retaining removed administrators as ordinary members.
+// ReplaceDomainAdministrators replaces the explicit administrator set. Removed
+// administrators become unassigned unless they administer another domain; they
+// are never silently converted into ordinary users.
 func (s *AdminStore) ReplaceDomainAdministrators(
 	ctx context.Context, tenantID, actorID, domainID string, userIDs []string,
 ) error {
@@ -829,15 +1197,30 @@ func (s *AdminStore) ReplaceDomainAdministrators(
 			return errors.New("only a platform administrator can appoint domain administrators")
 		}
 		var validCount int
-		if err := tx.QueryRow(ctx, `SELECT count(DISTINCT id)
-			FROM platform.users
-			WHERE id=ANY($1::uuid[]) AND status='ACTIVE' AND deleted_at IS NULL`,
+		if err := tx.QueryRow(ctx, `SELECT count(DISTINCT user_account.id)
+			FROM platform.users AS user_account
+			WHERE user_account.id=ANY($1::uuid[])
+			  AND user_account.status='ACTIVE' AND user_account.deleted_at IS NULL
+			  AND NOT EXISTS(
+			    SELECT 1 FROM platform.user_roles AS assignment
+			    JOIN platform.roles AS role ON role.id=assignment.role_id
+			    WHERE assignment.user_id=user_account.id
+			      AND role.code::text='platform_admin'
+			      AND role.status='ACTIVE' AND role.deleted_at IS NULL
+			  )
+			  AND NOT EXISTS(
+			    SELECT 1 FROM platform.domain_memberships AS membership
+			    WHERE membership.tenant_id=user_account.tenant_id
+			      AND membership.user_id=user_account.id
+			      AND membership.status='ACTIVE'
+			      AND membership.member_role='MEMBER'
+			  )`,
 			userIDs,
 		).Scan(&validCount); err != nil {
 			return err
 		}
 		if validCount != len(userIDs) {
-			return errors.New("one or more domain administrators are not active users")
+			return errors.New("domain administrators must be active users without platform or ordinary-user identity")
 		}
 		var domainExists bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(
@@ -849,10 +1232,33 @@ func (s *AdminStore) ReplaceDomainAdministrators(
 		if !domainExists {
 			return errors.New("domain was not found")
 		}
-		if _, err := tx.Exec(ctx, `UPDATE platform.domain_memberships
-			SET member_role='MEMBER'
+		if _, err := tx.Exec(ctx, `DELETE FROM platform.domain_memberships
 			WHERE domain_id=$1::uuid AND member_role='DOMAIN_ADMIN'
 			  AND NOT(user_id=ANY($2::uuid[]))`, domainID, userIDs); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE platform.auth_sessions AS session
+			SET business_domain_id=NULL,last_used_at=now()
+			WHERE session.tenant_id=$1::uuid
+			  AND session.business_domain_id=$2::uuid
+			  AND session.revoked_at IS NULL
+			  AND NOT EXISTS(
+			    SELECT 1 FROM platform.domain_memberships AS membership
+			    WHERE membership.tenant_id=session.tenant_id
+			      AND membership.domain_id=$2::uuid
+			      AND membership.user_id=session.user_id
+			      AND membership.status='ACTIVE'
+			  )
+			  AND NOT EXISTS(
+			    SELECT 1 FROM platform.user_roles AS assignment
+			    JOIN platform.roles AS role ON role.id=assignment.role_id
+			    WHERE assignment.tenant_id=session.tenant_id
+			      AND assignment.user_id=session.user_id
+			      AND role.code::text='platform_admin'
+			      AND role.status='ACTIVE' AND role.deleted_at IS NULL
+			  )`,
+			tenantID, domainID,
+		); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO platform.domain_memberships(

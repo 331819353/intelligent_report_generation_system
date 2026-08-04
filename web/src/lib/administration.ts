@@ -15,12 +15,13 @@ export type BusinessDomain = {
 
 export type DomainAdministrator = {
   id: string
+  employeeNo: string
   email: string
   displayName: string
 }
 
 export type DomainCatalogItem = BusinessDomain & {
-  accessStatus: 'AVAILABLE' | 'PENDING' | 'APPROVED' | 'REJECTED' | 'MEMBER' | 'DOMAIN_ADMIN'
+  accessStatus: 'AVAILABLE' | 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'MEMBER' | 'DOMAIN_ADMIN'
 }
 
 export type DomainApplication = {
@@ -49,12 +50,44 @@ export type AdminUserDomain = {
 
 export type AdminUser = {
   id: string
+  employeeNo: string
   email: string
   displayName: string
   status: 'ACTIVE' | 'DISABLED' | 'LOCKED'
   platformAdministrator: boolean
   domains: AdminUserDomain[]
   lastLoginAt?: string
+  createdAt: string
+}
+
+export type PlatformApproval = {
+  id: string
+  kind: 'DOMAIN_ACCESS' | 'DATA_SOURCE' | 'DATASET'
+  resourceId: string
+  resourceName: string
+  domainId: string
+  domainCode: string
+  domainName: string
+  requesterUserId: string
+  requesterEmail: string
+  requesterDisplayName: string
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'WITHDRAWN' | 'CANCELLED'
+  note: string
+  reviewerDisplayName?: string
+  submittedAt: string
+  reviewedAt?: string
+}
+
+export type PlatformAuditLog = {
+  id: string
+  action: string
+  resourceType: string
+  resourceId: string
+  result: 'SUCCESS' | 'FAILURE' | 'DENIED'
+  actorDisplayName: string
+  actorEmail: string
+  requestId?: string
+  occurredAt: string
 }
 
 type ItemsResponse<T> = { items?: T[] }
@@ -67,11 +100,11 @@ const administrationRequest = <T,>(path: string, init: RequestInit = {}) =>
 /** 管理中心与领域切换器共用的平台治理 API。 */
 export const administrationAPI = {
   async canManage() {
-    const result = await administrationRequest<{ allowed: boolean }>('/v1/permissions/evaluate', {
-      method: 'POST',
-      body: JSON.stringify({ resourceType: 'USER', action: 'MANAGE' }),
-    })
-    return Boolean(result.allowed)
+    const result = await administrationRequest<{ platformAdministrator: boolean }>(
+      '/v1/platform-management/access',
+      { cache: 'no-store' },
+    )
+    return Boolean(result.platformAdministrator)
   },
   async listDomains() {
     const result = await administrationRequest<ItemsResponse<BusinessDomain>>('/v1/domains', {
@@ -91,7 +124,6 @@ export const administrationAPI = {
     code: string
     name: string
     description: string
-    administratorUserIds: string[]
   }) {
     return administrationRequest<BusinessDomain>('/v1/domains', {
       method: 'POST',
@@ -139,6 +171,24 @@ export const administrationAPI = {
       cache: 'no-store',
     })
     return safeItems(result)
+  },
+  async listPlatformApprovals(limit = 100) {
+    const result = await administrationRequest<ItemsResponse<PlatformApproval>>(`/v1/platform-management/approvals?limit=${limit}`, {
+      cache: 'no-store',
+    })
+    return safeItems(result)
+  },
+  async listPlatformAuditLogs(limit = 100) {
+    const result = await administrationRequest<ItemsResponse<PlatformAuditLog>>(`/v1/platform-management/audit-logs?limit=${limit}`, {
+      cache: 'no-store',
+    })
+    return safeItems(result)
+  },
+  async updateUserStatus(userID: string, status: 'ACTIVE' | 'DISABLED') {
+    return administrationRequest<void>(`/v1/users/${userID}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    })
   },
   async setPlatformAdministrator(userID: string, enabled: boolean) {
     return administrationRequest<void>(`/v1/users/${userID}/platform-administrator`, {

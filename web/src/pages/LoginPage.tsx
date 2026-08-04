@@ -16,11 +16,13 @@ export function LoginPage() {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const form = new FormData(event.currentTarget)
+    const employeeNo = String(form.get('employeeNo') ?? '').trim()
     const displayName = String(form.get('displayName') ?? '').trim()
-    const email = String(form.get('email') ?? '').trim()
+    const account = String(form.get(mode === 'register' ? 'email' : 'account') ?? '').trim()
+    const email = mode === 'register' ? account : ''
     const password = String(form.get('password') ?? '')
     const confirmPassword = String(form.get('confirmPassword') ?? '')
-    if (!email || !password || (mode === 'register' && !displayName)) {
+    if (!account || !password || (mode === 'register' && (!employeeNo || !displayName))) {
       setError(mode === 'register' ? '请完整填写注册信息' : '请输入账号和密码')
       return
     }
@@ -31,10 +33,13 @@ export function LoginPage() {
     setSubmitting(true)
     setError('')
     try {
-      if (mode === 'register') await register(displayName, email, password)
-      else await login(email, password)
-      const domains = await administrationAPI.listDomains()
-      navigate(domains.length > 0 ? '/data-sources' : '/domain-access')
+      if (mode === 'register') await register(employeeNo, displayName, email, password)
+      else await login(account, password)
+      const [domains, platformAdministrator] = await Promise.all([
+        administrationAPI.listDomains(),
+        administrationAPI.canManage(),
+      ])
+      navigate(platformAdministrator ? '/platform-management/domains' : domains.length > 0 ? '/data-sources' : '/domain-access')
     } catch (cause) {
       setError(cause instanceof RequestError
         ? cause.detail.message
@@ -53,7 +58,7 @@ export function LoginPage() {
           <h1>统一管理权限、数据源与数据集。</h1>
           <p>在一个清晰、可追溯的配置空间内完成访问控制、数据接入和数据集设计。</p>
           <ul className="login-benefits">
-            <li><ShieldCheck aria-hidden="true" weight="fill" /><span><strong>权限设定</strong><small>按平台、领域与用户管理固定权限</small></span></li>
+            <li><ShieldCheck aria-hidden="true" weight="fill" /><span><strong>平台管理</strong><small>统一管理领域、权限、审批与运行状态</small></span></li>
             <li><Database aria-hidden="true" weight="fill" /><span><strong>数据源配置</strong><small>集中维护数据库与文件数据连接</small></span></li>
             <li><Stack aria-hidden="true" weight="fill" /><span><strong>数据集配置</strong><small>设计、校验并发布可复用数据集</small></span></li>
           </ul>
@@ -68,14 +73,17 @@ export function LoginPage() {
           </div>
           <span className="eyebrow">{mode === 'register' ? '创建账号' : '欢迎回来'}</span>
           <h2>{mode === 'register' ? '注册数据配置账号' : '登录数据配置管理平台'}</h2>
-          <p className="login-form-intro">{mode === 'register' ? '新账号自动加入默认领域并获得固定用户权限。' : '使用组织账号进入你的数据配置空间。'}</p>
+          <p className="login-form-intro">{mode === 'register' ? '注册只创建账号，领域归属由申请或管理员分配。' : '使用工号或邮箱进入你的工作空间。'}</p>
           {mode === 'register' && <label>姓名<input name="displayName" autoComplete="name" placeholder="请输入姓名" /></label>}
-          <label>账号<input name="email" type="email" placeholder="name@company.com" /></label>
+          {mode === 'register' && <label>工号<input name="employeeNo" autoComplete="username" maxLength={32} placeholder="例如：A10248" /></label>}
+          {mode === 'register'
+            ? <label>邮箱<input name="email" type="email" autoComplete="email" placeholder="name@company.com" /></label>
+            : <label>工号或邮箱<input name="account" autoComplete="username" placeholder="工号 / name@company.com" /></label>}
           <label>密码<input name="password" type="password" autoComplete={mode === 'register' ? 'new-password' : 'current-password'} placeholder={mode === 'register' ? '至少 10 位，包含大小写字母和数字' : '请输入密码'} /></label>
           {mode === 'register' && <label>确认密码<input name="confirmPassword" type="password" autoComplete="new-password" placeholder="请再次输入密码" /></label>}
           {error && <p className="form-error" role="alert">{error}</p>}
           <button className="primary-button" type="submit" disabled={submitting}>{submitting ? mode === 'register' ? '正在注册…' : '正在登录…' : mode === 'register' ? '注册并进入' : '进入工作台'}</button>
-          <p className="form-hint">{mode === 'register' ? '注册后平台管理员可调整你的领域归属。' : '登录即代表你同意遵守平台的数据安全策略。'}</p>
+          <p className="form-hint">{mode === 'register' ? '注册后可申请加入领域；平台管理员也可以直接分配。' : '登录即代表你同意遵守平台的数据安全策略。'}</p>
         </form>
       </section>
     </main>

@@ -35,7 +35,7 @@ export function AppShell({ title = '数据配置管理平台', eyebrow = '配置
   const [domains, setDomains] = useState<BusinessDomain[]>([])
   const [selectedDomain, setSelectedDomain] = useState<BusinessDomain | null>(() => currentDomain())
   const [domainMenuOpen, setDomainMenuOpen] = useState(false)
-  const [canManage, setCanManage] = useState(false)
+  const [canManage, setCanManage] = useState<boolean | null>(null)
 
   useEffect(() => {
     // 真实登录令牌是三段式 JWT；组件测试使用的占位令牌不触发额外网络请求。
@@ -71,7 +71,9 @@ export function AppShell({ title = '数据配置管理平台', eyebrow = '配置
     window.addEventListener(domainCatalogChangedEvent, refreshDomains)
     void administrationAPI.canManage()
       .then(allowed => {
-        if (!cancelled) setCanManage(allowed)
+        if (!cancelled) {
+          setCanManage(allowed)
+        }
       })
       .catch(() => {
         if (!cancelled) setCanManage(false)
@@ -113,12 +115,14 @@ export function AppShell({ title = '数据配置管理平台', eyebrow = '配置
         <div className="brand-copy"><strong>数据配置管理平台</strong><span>Data Administration</span></div>
         <nav aria-label="主导航">
           <span className="sidebar-section-label">配置管理</span>
-          {canManage && <NavLink to="/permissions"><GearSix aria-hidden="true" size={18} />权限设定</NavLink>}
-          <NavLink to="/data-sources"><Database aria-hidden="true" size={18} />数据源配置</NavLink>
-          <NavLink to="/datasets"><Stack aria-hidden="true" size={18} />数据集配置</NavLink>
+          {canManage === true && <NavLink to="/platform-management/domains"><GearSix aria-hidden="true" size={18} />平台管理中心</NavLink>}
+          {canManage !== null && <>
+            <NavLink to="/data-sources"><Database aria-hidden="true" size={18} />数据源配置</NavLink>
+            <NavLink to="/datasets"><Stack aria-hidden="true" size={18} />数据集配置</NavLink>
+          </>}
         </nav>
         <div className="sidebar-footer">
-          <div className="domain-switcher-wrap" ref={domainSwitcherRef}>
+          {canManage !== null && <div className="domain-switcher-wrap" ref={domainSwitcherRef}>
             {domainMenuOpen && <div className="domain-menu" role="menu" aria-label="切换业务领域">
               <header><span>切换领域</span><small>{activeDomains.length} 个可用领域</small></header>
               {activeDomains.length > 0
@@ -134,9 +138,6 @@ export function AppShell({ title = '数据配置管理平台', eyebrow = '配置
                   {selectedDomain?.id === domain.id && <Check size={16} weight="bold" aria-hidden="true" />}
                 </button>)
                 : <p>暂无可用领域</p>}
-              {canManage && <NavLink to="/permissions" onClick={() => setDomainMenuOpen(false)}>
-                <GearSix size={15} aria-hidden="true" />权限设定
-              </NavLink>}
             </div>}
             <button
               className="domain-switcher"
@@ -149,7 +150,7 @@ export function AppShell({ title = '数据配置管理平台', eyebrow = '配置
               <span><small>当前领域</small><strong>{selectedDomain?.name || '选择业务领域'}</strong></span>
               <CaretUpDown size={15} aria-hidden="true" />
             </button>
-          </div>
+          </div>}
         </div>
       </aside>
       <main className="main-stage">

@@ -14,6 +14,7 @@ const accessLabels: Record<DomainCatalogItem['accessStatus'], string> = {
   PENDING: '审批中',
   APPROVED: '已通过',
   REJECTED: '已驳回，可重新申请',
+  CANCELLED: '可申请',
   MEMBER: '已加入',
   DOMAIN_ADMIN: '领域管理员',
 }

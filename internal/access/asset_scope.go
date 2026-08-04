@@ -32,7 +32,7 @@ var assetScopeTargets = map[string]assetScopeTarget{
 
 type AssetScopeStore struct{ pool *pgxpool.Pool }
 
-var ErrAssetSharingOwnerDomainRequired = errors.New("only the asset owner or domain administrator in the owning domain can change its sharing scope")
+var ErrAssetSharingOwnerDomainRequired = errors.New("only the asset owner, domain administrator or platform administrator can change its sharing scope")
 
 func NewAssetScopeStore(pool *pgxpool.Pool) *AssetScopeStore {
 	return &AssetScopeStore{pool: pool}
@@ -90,6 +90,7 @@ func (s *AssetScopeStore) Update(
 			  AND domain_id=platform.current_domain_id()
 			  AND (
 			    %s=$3::uuid
+			    OR platform.user_is_platform_administrator()
 			    OR platform.user_is_domain_administrator(domain_id)
 			  )`, target.table, target.ownerColumn)
 		result, updateErr := tx.Exec(ctx, query, resourceID, scope, actorID)

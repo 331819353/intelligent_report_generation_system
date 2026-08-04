@@ -29,6 +29,7 @@ func NewHandler(service *Service) http.Handler {
 // register 创建平台账号并直接签发登录令牌。
 func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	var request struct {
+		EmployeeNo  string `json:"employeeNo"`
 		Email       string `json:"email"`
 		DisplayName string `json:"displayName"`
 		Password    string `json:"password"`
@@ -38,15 +39,16 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pair, err := h.service.Register(r.Context(), RegisterInput{
-		Email: request.Email, DisplayName: request.DisplayName, Password: request.Password,
+		EmployeeNo: request.EmployeeNo, Email: request.Email,
+		DisplayName: request.DisplayName, Password: request.Password,
 		RequestID: r.Header.Get("X-Request-ID"), IPAddress: clientIP(r), UserAgent: r.UserAgent(),
 	})
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrInvalidRegistration):
-			writeAuthError(w, http.StatusBadRequest, "INVALID_REGISTRATION", "请填写有效的姓名和邮箱")
+			writeAuthError(w, http.StatusBadRequest, "INVALID_REGISTRATION", "请填写有效的姓名、工号和邮箱")
 		case errors.Is(err, ErrRegistrationConflict):
-			writeAuthError(w, http.StatusConflict, "ACCOUNT_ALREADY_EXISTS", "该邮箱已注册，请直接登录")
+			writeAuthError(w, http.StatusConflict, "ACCOUNT_ALREADY_EXISTS", "该工号或邮箱已注册，请直接登录")
 		case errors.Is(err, ErrWeakPassword):
 			writeAuthError(w, http.StatusBadRequest, "WEAK_PASSWORD", "密码需为 10–128 位，并同时包含大小写字母和数字")
 		case errors.Is(err, ErrRegistrationUnavailable):
@@ -72,6 +74,7 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 // login 解析登录请求并把客户端环境信息交给认证服务审计。
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	var request struct {
+		Account  string `json:"account"`
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
@@ -79,11 +82,15 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
 		return
 	}
-	if strings.TrimSpace(request.Email) == "" || request.Password == "" {
-		writeAuthError(w, http.StatusBadRequest, "INVALID_REQUEST", "email and password are required")
+	identifier := strings.TrimSpace(request.Account)
+	if identifier == "" {
+		identifier = strings.TrimSpace(request.Email)
+	}
+	if identifier == "" || request.Password == "" {
+		writeAuthError(w, http.StatusBadRequest, "INVALID_REQUEST", "employee number or email and password are required")
 		return
 	}
-	pair, err := h.service.Login(r.Context(), LoginInput{Email: request.Email, Password: request.Password, RequestID: r.Header.Get("X-Request-ID"), IPAddress: clientIP(r), UserAgent: r.UserAgent()})
+	pair, err := h.service.Login(r.Context(), LoginInput{Identifier: identifier, Password: request.Password, RequestID: r.Header.Get("X-Request-ID"), IPAddress: clientIP(r), UserAgent: r.UserAgent()})
 	if err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
 			writeAuthError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "account or password is invalid")

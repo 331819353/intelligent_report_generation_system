@@ -185,13 +185,16 @@ const taskVisibilityFilter = `created_at > COALESCE((
 func (store *PostgresStore) List(
 	ctx context.Context,
 	tenantID, view string,
-	limit int,
+	limit int, platformView bool,
 ) (page Page, err error) {
 	if store == nil || store.pool == nil {
 		return Page{}, ErrInvalidRequest
 	}
 	page.Items = make([]Task, 0)
 	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
+		if err := enablePlatformTaskView(ctx, tx, platformView); err != nil {
+			return err
+		}
 		filter := `true`
 		switch view {
 		case ViewActive:
@@ -242,13 +245,15 @@ func (store *PostgresStore) List(
 }
 
 func (store *PostgresStore) Find(
-	ctx context.Context,
-	tenantID, kind, taskID string,
+	ctx context.Context, tenantID, kind, taskID string, platformView bool,
 ) (task Task, err error) {
 	if store == nil || store.pool == nil {
 		return Task{}, ErrInvalidRequest
 	}
 	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
+		if err := enablePlatformTaskView(ctx, tx, platformView); err != nil {
+			return err
+		}
 		var scanErr error
 		task, scanErr = scanTask(tx.QueryRow(ctx, taskUnionSQL+`
 			SELECT `+taskSelectColumns+` FROM tasks
@@ -263,12 +268,15 @@ func (store *PostgresStore) Find(
 
 func (store *PostgresStore) Cancel(
 	ctx context.Context,
-	tenantID, actorID, kind, taskID string,
+	tenantID, actorID, kind, taskID string, platformView bool,
 ) error {
 	if store == nil || store.pool == nil {
 		return ErrInvalidRequest
 	}
 	return database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
+		if err := enablePlatformTaskView(ctx, tx, platformView); err != nil {
+			return err
+		}
 		var cancelled bool
 		query := `SELECT platform.cancel_background_task($1,$2::uuid,$3::uuid)`
 		args := []any{kind, taskID, actorID}
@@ -290,12 +298,15 @@ func (store *PostgresStore) Cancel(
 
 func (store *PostgresStore) Retry(
 	ctx context.Context,
-	tenantID, actorID, kind, taskID string,
+	tenantID, actorID, kind, taskID string, platformView bool,
 ) error {
 	if store == nil || store.pool == nil {
 		return ErrInvalidRequest
 	}
 	return database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
+		if err := enablePlatformTaskView(ctx, tx, platformView); err != nil {
+			return err
+		}
 		var retried bool
 		query := `SELECT platform.retry_background_task($1,$2::uuid,$3::uuid)`
 		args := []any{kind, taskID, actorID}
@@ -313,6 +324,14 @@ func (store *PostgresStore) Retry(
 		}
 		return nil
 	})
+}
+
+func enablePlatformTaskView(ctx context.Context, tx pgx.Tx, enabled bool) error {
+	if !enabled {
+		return nil
+	}
+	_, err := tx.Exec(ctx, "SELECT set_config('app.access_mode','SYSTEM',true)")
+	return err
 }
 
 type rowScanner interface{ Scan(...any) error }

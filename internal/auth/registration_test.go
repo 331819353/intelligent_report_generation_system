@@ -26,3 +26,21 @@ func TestStrongPassword(t *testing.T) {
 		})
 	}
 }
+
+func TestEmployeeNumberPattern(t *testing.T) {
+	t.Parallel()
+	tests := map[string]bool{
+		"A10248":           true,
+		"QA-DOMAIN-001":    true,
+		"EMP_9001":         true,
+		"ab":               false,
+		"A 10248":          false,
+		"-INVALID":         false,
+		"EMPLOYEE/FINANCE": false,
+	}
+	for value, want := range tests {
+		if got := employeeNoPattern.MatchString(value); got != want {
+			t.Fatalf("employeeNoPattern.MatchString(%q)=%v, want %v", value, got, want)
+		}
+	}
+}

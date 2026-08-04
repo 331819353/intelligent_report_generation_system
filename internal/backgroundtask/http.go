@@ -41,7 +41,16 @@ func NewHandler(
 				}
 			}
 			claims, _ := auth.ClaimsFromContext(request.Context())
-			page, err := service.List(request.Context(), claims.TenantID, view, limit)
+			platformView, permissionErr := permissions.Allowed(request.Context(), access.Check{
+				TenantID: claims.TenantID, UserID: claims.Subject,
+				ResourceType: "USER", Action: "MANAGE",
+			})
+			if permissionErr != nil {
+				platformView = false
+			}
+			page, err := service.List(
+				request.Context(), claims.TenantID, view, limit, platformView,
+			)
 			if err != nil {
 				writeServiceError(writer, err)
 				return
@@ -59,15 +68,30 @@ func NewHandler(
 			}
 			claims, _ := auth.ClaimsFromContext(request.Context())
 			kind := strings.ToUpper(strings.TrimSpace(request.PathValue("kind")))
-			task, err := service.Find(request.Context(), claims.TenantID, kind, request.PathValue("id"))
+			platformView, err := permissions.Allowed(request.Context(), access.Check{
+				TenantID: claims.TenantID, UserID: claims.Subject,
+				ResourceType: "USER", Action: "MANAGE",
+			})
+			if err != nil {
+				writeError(writer, http.StatusInternalServerError, "PERMISSION_EVALUATION_FAILED", "权限检查失败")
+				return
+			}
+			task, err := service.Find(
+				request.Context(), claims.TenantID, kind, request.PathValue("id"), platformView,
+			)
 			if err != nil {
 				writeServiceError(writer, err)
 				return
 			}
-			allowed, err := permissions.Allowed(request.Context(), access.Check{
-				TenantID: claims.TenantID, UserID: claims.Subject,
-				ResourceType: task.ResourceType, Action: "MANAGE", ObjectID: task.ResourceID,
-			})
+			// 平台管理员负责租户级任务控制面；领域成员仍必须具备任务
+			// 对应数据源或数据集的管理权限。
+			allowed := platformView
+			if !allowed {
+				allowed, err = permissions.Allowed(request.Context(), access.Check{
+					TenantID: claims.TenantID, UserID: claims.Subject,
+					ResourceType: task.ResourceType, Action: "MANAGE", ObjectID: task.ResourceID,
+				})
+			}
 			if err != nil {
 				writeError(writer, http.StatusInternalServerError, "PERMISSION_EVALUATION_FAILED", "权限检查失败")
 				return
@@ -77,7 +101,7 @@ func NewHandler(
 				return
 			}
 			task, err = service.Cancel(
-				request.Context(), claims.TenantID, claims.Subject, kind, request.PathValue("id"),
+				request.Context(), claims.TenantID, claims.Subject, kind, request.PathValue("id"), platformView,
 			)
 			if err != nil {
 				writeServiceError(writer, err)
@@ -96,15 +120,28 @@ func NewHandler(
 			}
 			claims, _ := auth.ClaimsFromContext(request.Context())
 			kind := strings.ToUpper(strings.TrimSpace(request.PathValue("kind")))
-			task, err := service.Find(request.Context(), claims.TenantID, kind, request.PathValue("id"))
+			platformView, err := permissions.Allowed(request.Context(), access.Check{
+				TenantID: claims.TenantID, UserID: claims.Subject,
+				ResourceType: "USER", Action: "MANAGE",
+			})
+			if err != nil {
+				writeError(writer, http.StatusInternalServerError, "PERMISSION_EVALUATION_FAILED", "权限检查失败")
+				return
+			}
+			task, err := service.Find(
+				request.Context(), claims.TenantID, kind, request.PathValue("id"), platformView,
+			)
 			if err != nil {
 				writeServiceError(writer, err)
 				return
 			}
-			allowed, err := permissions.Allowed(request.Context(), access.Check{
-				TenantID: claims.TenantID, UserID: claims.Subject,
-				ResourceType: task.ResourceType, Action: "MANAGE", ObjectID: task.ResourceID,
-			})
+			allowed := platformView
+			if !allowed {
+				allowed, err = permissions.Allowed(request.Context(), access.Check{
+					TenantID: claims.TenantID, UserID: claims.Subject,
+					ResourceType: task.ResourceType, Action: "MANAGE", ObjectID: task.ResourceID,
+				})
+			}
 			if err != nil {
 				writeError(writer, http.StatusInternalServerError, "PERMISSION_EVALUATION_FAILED", "权限检查失败")
 				return
@@ -114,7 +151,7 @@ func NewHandler(
 				return
 			}
 			task, err = service.Retry(
-				request.Context(), claims.TenantID, claims.Subject, kind, request.PathValue("id"),
+				request.Context(), claims.TenantID, claims.Subject, kind, request.PathValue("id"), platformView,
 			)
 			if err != nil {
 				writeServiceError(writer, err)

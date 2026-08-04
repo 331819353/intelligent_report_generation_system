@@ -28,9 +28,11 @@ func (s *PostgresStore) FindWorkspaceID(ctx context.Context) (string, error) {
 	return id, err
 }
 
-// FindUserByEmail 在指定租户内按邮箱加载登录用户。
-func (s *PostgresStore) FindUserByEmail(ctx context.Context, tenantID, email string) (LoginUser, error) {
-	return s.findUser(ctx, tenantID, `email = $1`, email)
+// FindUserByIdentifier 在指定租户内按工号或邮箱加载登录用户。
+func (s *PostgresStore) FindUserByIdentifier(
+	ctx context.Context, tenantID, identifier string,
+) (LoginUser, error) {
+	return s.findUser(ctx, tenantID, `(employee_no = $1 OR email = $1)`, identifier)
 }
 
 // FindUserByID 在指定租户内按标识加载用户。
@@ -38,7 +40,7 @@ func (s *PostgresStore) FindUserByID(ctx context.Context, tenantID, userID strin
 	return s.findUser(ctx, tenantID, `id = $1`, userID)
 }
 
-// RegisterUser 原子创建账号并绑定平台配置的默认身份与默认领域。
+// RegisterUser 原子创建账号及受限基础身份；领域归属必须另行申请或分配。
 func (s *PostgresStore) RegisterUser(ctx context.Context, input RegisterUserRecord) error {
 	tenantID, err := s.FindWorkspaceID(ctx)
 	if err != nil {
@@ -61,9 +63,9 @@ func (s *PostgresStore) RegisterUser(ctx context.Context, input RegisterUserReco
 		}
 		var userID string
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.users(
-				tenant_id,email,display_name,password_hash
-			) VALUES($1,$2,$3,$4) RETURNING id::text`, tenantID, input.Email,
-			input.DisplayName, input.PasswordHash).Scan(&userID); err != nil {
+				tenant_id,employee_no,email,display_name,password_hash
+			) VALUES($1,$2,$3,$4,$5) RETURNING id::text`, tenantID, input.EmployeeNo,
+			input.Email, input.DisplayName, input.PasswordHash).Scan(&userID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO platform.user_roles(
@@ -71,24 +73,11 @@ func (s *PostgresStore) RegisterUser(ctx context.Context, input RegisterUserReco
 			) VALUES($1,$2,$3,NULL)`, tenantID, userID, roleID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO platform.domain_memberships(
-				tenant_id,domain_id,user_id,assigned_by,status
-			)
-			SELECT $1,domain.id,$2,NULL,'ACTIVE'
-			FROM platform.business_domains AS domain
-			WHERE domain.tenant_id=$1 AND domain.is_default
-			  AND domain.status='ACTIVE' AND domain.deleted_at IS NULL
-			ON CONFLICT DO NOTHING`, tenantID, userID); err != nil {
-			return err
-		}
 		_, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
 				tenant_id,actor_user_id,action,resource_type,resource_id,detail
 			) VALUES($1::uuid,$2::uuid,'REGISTER','USER',$2::text,jsonb_build_object(
-				'roleCode',$3::text,'defaultDomainAssigned',EXISTS(
-				  SELECT 1 FROM platform.domain_memberships
-				  WHERE tenant_id=$1::uuid AND user_id=$2::uuid AND status='ACTIVE'
-				)
-			))`, tenantID, userID, roleCode)
+				'roleCode',$3::text,'employeeNo',$4::text,'defaultDomainAssigned',false
+			))`, tenantID, userID, roleCode, input.EmployeeNo)
 		return err
 	})
 	var pgError *pgconn.PgError
@@ -98,28 +87,41 @@ func (s *PostgresStore) RegisterUser(ctx context.Context, input RegisterUserReco
 	return err
 }
 
-// ResolveBusinessDomain only returns active domains to which the user has an
-// active membership. Empty input selects the default membership first.
+// ResolveBusinessDomain returns an active member domain, or any active domain
+// for a platform administrator. Empty input selects the default domain first.
 func (s *PostgresStore) ResolveBusinessDomain(
 	ctx context.Context, tenantID, userID, requestedDomainID string,
 ) (string, error) {
 	var domainID string
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT domain.id::text
-			FROM platform.domain_memberships AS membership
-			JOIN platform.business_domains AS domain
-			  ON domain.id=membership.domain_id
-			 AND domain.tenant_id=membership.tenant_id
-			WHERE membership.user_id=$1::uuid
-			  AND membership.status='ACTIVE'
+			FROM platform.business_domains AS domain
+			WHERE domain.tenant_id=$3::uuid
 			  AND domain.status='ACTIVE'
 			  AND domain.deleted_at IS NULL
 			  AND ($2::text='' OR domain.id::text=$2)
+			  AND (
+			    EXISTS(
+			      SELECT 1 FROM platform.user_roles AS assignment
+			      JOIN platform.roles AS role ON role.id=assignment.role_id
+			      WHERE assignment.tenant_id=domain.tenant_id
+			        AND assignment.user_id=$1::uuid
+			        AND role.code::text='platform_admin'
+			        AND role.status='ACTIVE' AND role.deleted_at IS NULL
+			    )
+			    OR EXISTS(
+			      SELECT 1 FROM platform.domain_memberships AS membership
+			      WHERE membership.tenant_id=domain.tenant_id
+			        AND membership.domain_id=domain.id
+			        AND membership.user_id=$1::uuid
+			        AND membership.status='ACTIVE'
+			    )
+			  )
 			ORDER BY
 			  CASE WHEN $2::text<>'' THEN 0
 			       WHEN domain.is_default THEN 0 ELSE 1 END,
 			  domain.name
-			LIMIT 1`, userID, requestedDomainID).Scan(&domainID)
+			LIMIT 1`, userID, requestedDomainID, tenantID).Scan(&domainID)
 	})
 	if errors.Is(err, pgx.ErrNoRows) && requestedDomainID == "" {
 		return "", nil
@@ -131,9 +133,9 @@ func (s *PostgresStore) ResolveBusinessDomain(
 func (s *PostgresStore) findUser(ctx context.Context, tenantID, predicate string, value any) (LoginUser, error) {
 	var user LoginUser
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		query := `SELECT id, tenant_id, email, display_name, password_hash, status, token_version FROM platform.users WHERE ` + predicate + ` AND deleted_at IS NULL`
+		query := `SELECT id,tenant_id,employee_no,email,display_name,password_hash,status,token_version FROM platform.users WHERE ` + predicate + ` AND deleted_at IS NULL`
 		return tx.QueryRow(ctx, query, value).
-			Scan(&user.ID, &user.TenantID, &user.Email, &user.DisplayName, &user.PasswordHash, &user.Status, &user.TokenVersion)
+			Scan(&user.ID, &user.TenantID, &user.EmployeeNo, &user.Email, &user.DisplayName, &user.PasswordHash, &user.Status, &user.TokenVersion)
 	})
 	return user, err
 }
@@ -226,13 +228,13 @@ func (s *PostgresStore) SetSessionDomain(
 }
 
 // RecordLoginFailure 记录安全审计事件；审计失败不覆盖原始登录结果。
-func (s *PostgresStore) RecordLoginFailure(ctx context.Context, tenantID, userID, email, requestID, ipAddress, userAgent string) {
+func (s *PostgresStore) RecordLoginFailure(ctx context.Context, tenantID, userID, identifier, requestID, ipAddress, userAgent string) {
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		var actor any
 		if userID != "" {
 			actor = userID
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,request_id,ip_address,user_agent,result,detail) VALUES ($1,$2,'LOGIN','AUTH_SESSION',$3,NULLIF($4,'')::inet,$5,'FAILURE',jsonb_build_object('email',$6::text))`, tenantID, actor, requestID, ipAddress, userAgent, email)
+		_, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,request_id,ip_address,user_agent,result,detail) VALUES ($1,$2,'LOGIN','AUTH_SESSION',$3,NULLIF($4,'')::inet,$5,'FAILURE',jsonb_build_object('identifier',$6::text))`, tenantID, actor, requestID, ipAddress, userAgent, identifier)
 		return err
 	})
 	if err != nil {

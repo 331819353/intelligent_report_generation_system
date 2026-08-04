@@ -1241,6 +1241,12 @@ func datasetActionAllowedTx(ctx context.Context, tx pgx.Tx, tenantID, actorID, d
 	var allowed bool
 	err := tx.QueryRow(ctx, `SELECT EXISTS(
 		SELECT 1 FROM platform.user_roles ur
+		JOIN platform.roles r ON r.id=ur.role_id AND r.tenant_id=ur.tenant_id
+		WHERE ur.tenant_id=$1 AND ur.user_id=$2
+		  AND r.code::text='platform_admin'
+		  AND r.status='ACTIVE' AND r.deleted_at IS NULL
+		UNION ALL
+		SELECT 1 FROM platform.user_roles ur
 		JOIN platform.roles r ON r.id=ur.role_id AND r.tenant_id=ur.tenant_id AND r.status='ACTIVE' AND r.deleted_at IS NULL
 		JOIN platform.role_permissions rp ON rp.role_id=ur.role_id AND rp.tenant_id=ur.tenant_id
 		JOIN platform.permissions p ON p.id=rp.permission_id AND p.tenant_id=rp.tenant_id

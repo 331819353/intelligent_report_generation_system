@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"errors"
 	"net/mail"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -25,6 +26,7 @@ var (
 type LoginUser struct {
 	ID           string
 	TenantID     string
+	EmployeeNo   string
 	Email        string
 	DisplayName  string
 	PasswordHash string
@@ -46,7 +48,7 @@ type Session struct {
 
 type Store interface {
 	FindWorkspaceID(ctx context.Context) (string, error)
-	FindUserByEmail(ctx context.Context, tenantID, email string) (LoginUser, error)
+	FindUserByIdentifier(ctx context.Context, tenantID, identifier string) (LoginUser, error)
 	FindUserByID(ctx context.Context, tenantID, userID string) (LoginUser, error)
 	CreateSession(ctx context.Context, session Session, userAgent, ipAddress string) error
 	FindSession(ctx context.Context, tenantID, sessionID string) (Session, error)
@@ -75,6 +77,8 @@ type Service struct {
 }
 
 type LoginInput struct {
+	Identifier string
+	// Email is retained for source compatibility with older internal callers.
 	Email     string
 	Password  string
 	RequestID string
@@ -83,6 +87,7 @@ type LoginInput struct {
 }
 
 type RegisterInput struct {
+	EmployeeNo  string
 	Email       string
 	DisplayName string
 	Password    string
@@ -92,6 +97,7 @@ type RegisterInput struct {
 }
 
 type RegisterUserRecord struct {
+	EmployeeNo   string
 	Email        string
 	DisplayName  string
 	PasswordHash string
@@ -110,15 +116,19 @@ func NewService(store Store, passwords PasswordManager, tokens TokenManager, ref
 	return &Service{store: store, passwords: passwords, tokens: tokens, refreshTTL: refreshTTL, now: time.Now}
 }
 
-// Register 创建平台账号，将其绑定到默认领域后直接登录。
+var employeeNoPattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9_-]{2,31}$`)
+
+// Register 创建无领域归属的平台账号，并在注册完成后直接登录。
 func (s *Service) Register(ctx context.Context, input RegisterInput) (TokenPair, error) {
 	store, ok := s.store.(registrationStore)
 	if !ok {
 		return TokenPair{}, ErrRegistrationUnavailable
 	}
+	input.EmployeeNo = strings.ToUpper(strings.TrimSpace(input.EmployeeNo))
 	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
 	input.DisplayName = strings.TrimSpace(input.DisplayName)
-	if input.DisplayName == "" || len([]rune(input.DisplayName)) > 100 {
+	if !employeeNoPattern.MatchString(input.EmployeeNo) ||
+		input.DisplayName == "" || len([]rune(input.DisplayName)) > 100 {
 		return TokenPair{}, ErrInvalidRegistration
 	}
 	address, err := mail.ParseAddress(input.Email)
@@ -133,12 +143,13 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (TokenPair,
 		return TokenPair{}, err
 	}
 	if err := store.RegisterUser(ctx, RegisterUserRecord{
-		Email: input.Email, DisplayName: input.DisplayName, PasswordHash: hash,
+		EmployeeNo: input.EmployeeNo, Email: input.Email,
+		DisplayName: input.DisplayName, PasswordHash: hash,
 	}); err != nil {
 		return TokenPair{}, err
 	}
 	return s.Login(ctx, LoginInput{
-		Email: input.Email, Password: input.Password,
+		Identifier: input.EmployeeNo, Password: input.Password,
 		RequestID: input.RequestID, IPAddress: input.IPAddress, UserAgent: input.UserAgent,
 	})
 }
@@ -165,11 +176,20 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error
 	if err != nil {
 		return TokenPair{}, ErrInvalidCredentials
 	}
-	user, err := s.store.FindUserByEmail(ctx, tenantID, input.Email)
+	identifier := strings.TrimSpace(input.Identifier)
+	if identifier == "" {
+		identifier = strings.TrimSpace(input.Email)
+	}
+	if strings.Contains(identifier, "@") {
+		identifier = strings.ToLower(identifier)
+	} else {
+		identifier = strings.ToUpper(identifier)
+	}
+	user, err := s.store.FindUserByIdentifier(ctx, tenantID, identifier)
 	// 所有身份验证失败统一返回同一错误，避免泄露租户或账号是否存在。
 	if err != nil || user.Status != UserStatusActive || !s.passwords.Verify(user.PasswordHash, input.Password) {
 		userID := user.ID
-		s.store.RecordLoginFailure(ctx, tenantID, userID, input.Email, input.RequestID, input.IPAddress, input.UserAgent)
+		s.store.RecordLoginFailure(ctx, tenantID, userID, identifier, input.RequestID, input.IPAddress, input.UserAgent)
 		return TokenPair{}, ErrInvalidCredentials
 	}
 	domainID, err := s.ResolveBusinessDomain(ctx, tenantID, user.ID, "")

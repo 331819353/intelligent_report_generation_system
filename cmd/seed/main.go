@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -30,6 +31,7 @@ func main() {
 	tenantCode := env("SEED_TENANT_CODE", "demo")
 	tenantName := env("SEED_TENANT_NAME", "演示组织")
 	email := env("SEED_ADMIN_EMAIL", "admin@example.com")
+	employeeNo := strings.ToUpper(strings.TrimSpace(env("SEED_ADMIN_EMPLOYEE_NO", "ADMIN001")))
 	password := os.Getenv("SEED_ADMIN_PASSWORD")
 	if password == "" {
 		fatal("seed admin", fmt.Errorf("SEED_ADMIN_PASSWORD is required"))
@@ -46,7 +48,13 @@ func main() {
 	}
 	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
 		var adminID string
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.users(tenant_id,email,display_name,password_hash,status) VALUES ($1,$2,'系统管理员',$3,'ACTIVE') ON CONFLICT (tenant_id,email) DO UPDATE SET password_hash=EXCLUDED.password_hash,status='ACTIVE',token_version=platform.users.token_version+1,deleted_at=NULL RETURNING id`, tenantID, email, hash).Scan(&adminID); err != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO platform.users(
+			tenant_id,employee_no,email,display_name,password_hash,status
+		) VALUES ($1,$2,$3,'系统管理员',$4,'ACTIVE')
+		ON CONFLICT (tenant_id,email) DO UPDATE SET
+			employee_no=EXCLUDED.employee_no,password_hash=EXCLUDED.password_hash,
+			status='ACTIVE',token_version=platform.users.token_version+1,deleted_at=NULL
+		RETURNING id`, tenantID, employeeNo, email, hash).Scan(&adminID); err != nil {
 			return err
 		}
 		if err := seedDomains(ctx, tx, tenantID, adminID); err != nil {
@@ -138,16 +146,9 @@ func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error 
 	); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO platform.domain_memberships(
-			tenant_id,domain_id,user_id,assigned_by,member_role
-		)
-		SELECT $1,domain.id,$2,$2,'DOMAIN_ADMIN'
-		FROM platform.business_domains AS domain
-		WHERE domain.status='ACTIVE' AND domain.deleted_at IS NULL
-		ON CONFLICT(tenant_id,domain_id,user_id) DO UPDATE
-		SET status='ACTIVE',member_role='DOMAIN_ADMIN'`,
-		tenantID, adminID,
-	)
+	// 平台管理员只负责控制面，不自动加入或管理任何业务领域。
+	_, err := tx.Exec(ctx, `DELETE FROM platform.domain_memberships
+		WHERE tenant_id=$1 AND user_id=$2`, tenantID, adminID)
 	return err
 }
 

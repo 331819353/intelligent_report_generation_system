@@ -55,8 +55,8 @@ type Page struct {
 }
 
 type Store interface {
-	List(context.Context, string, string, int) (Page, error)
-	Find(context.Context, string, string, string) (Task, error)
-	Cancel(context.Context, string, string, string, string) error
-	Retry(context.Context, string, string, string, string) error
+	List(context.Context, string, string, int, bool) (Page, error)
+	Find(context.Context, string, string, string, bool) (Task, error)
+	Cancel(context.Context, string, string, string, string, bool) error
+	Retry(context.Context, string, string, string, string, bool) error
 }
