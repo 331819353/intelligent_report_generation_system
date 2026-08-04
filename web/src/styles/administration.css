@@ -138,22 +138,20 @@
 .administration-add-slot {
   min-height: 72px;
   width: 100%;
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
-  gap: 3px 11px;
+  position: relative;
+  display: flex;
   align-items: center;
+  justify-content: center;
   border: 1px dashed #79a2ee;
   border-radius: 10px;
   padding: 12px 14px;
   background: #f8fbff;
   color: #2864dc;
-  text-align: left;
   transition: border-color .16s ease, background .16s ease, box-shadow .16s ease;
 }
 .administration-add-slot:hover { border-color: #2864dc; background: #f2f7ff; box-shadow: 0 5px 16px #245fc213; }
-.administration-add-slot > span { width: 34px; height: 34px; grid-row: 1 / span 2; display: grid; place-items: center; border: 1px solid #bfd2f6; border-radius: 50%; background: white; }
-.administration-add-slot strong { align-self: end; color: #245dc5; font-size: 10px; }
-.administration-add-slot small { align-self: start; color: #8190a6; font-size: 8px; }
+.administration-add-slot > span { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid #bfd2f6; border-radius: 50%; background: white; }
+.administration-add-slot strong, .administration-add-slot small { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 .domain-governance-list { display: grid; gap: 9px; }
 .domain-governance-list article { display: grid; grid-template-columns: 36px minmax(140px, .8fr) minmax(220px, 1.4fr) 60px auto; gap: 14px; align-items: center; border: 1px solid #e4e7ec; border-radius: 10px; padding: 13px 14px; }

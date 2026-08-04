@@ -34,6 +34,7 @@ import {
 import { notifyDomainCatalogChanged } from '../lib/domain-context'
 
 type ConfigurationView = 'domains' | 'permissions' | 'approvals' | 'tasks' | 'logs'
+type PermissionView = 'platform' | 'domains' | 'users'
 type DialogState =
   | { kind: 'platform-administrators' }
   | { kind: 'create-domain' }
@@ -59,6 +60,7 @@ export function ManagementCenterPage() {
   const [approvals, setApprovals] = useState<PlatformApproval[]>([])
   const [tasks, setTasks] = useState<BackgroundTask[]>([])
   const [auditLogs, setAuditLogs] = useState<PlatformAuditLog[]>([])
+  const [permissionView, setPermissionView] = useState<PermissionView>('platform')
   const [dialog, setDialog] = useState<DialogState>(null)
   const [loading, setLoading] = useState(true)
   const [busyKey, setBusyKey] = useState('')
@@ -406,6 +408,8 @@ export function ManagementCenterPage() {
                       users={users}
                       busyKey={busyKey}
                       signedInUserID={signedInUserID}
+                      permissionView={permissionView}
+                      onPermissionViewChange={setPermissionView}
                       onAddPlatform={() => setDialog({ kind: 'platform-administrators' })}
                       onRemovePlatform={user => void setPlatformAdministrator(user)}
                       onAddDomain={() => setDialog({ kind: 'domain-administrator' })}
@@ -476,7 +480,7 @@ function AddManagementSlot({ title, description, onClick }: {
   description: string
   onClick: () => void
 }) {
-  return <button className="administration-add-slot" type="button" onClick={onClick}>
+  return <button className="administration-add-slot" type="button" title={title} onClick={onClick}>
     <span><Plus size={19} weight="bold" /></span>
     <strong>{title}</strong>
     <small>{description}</small>
@@ -488,6 +492,8 @@ function PermissionGovernance({
   users,
   busyKey,
   signedInUserID,
+  permissionView,
+  onPermissionViewChange,
   onAddPlatform,
   onRemovePlatform,
   onAddDomain,
@@ -500,6 +506,8 @@ function PermissionGovernance({
   users: AdminUser[]
   busyKey: string
   signedInUserID: string
+  permissionView: PermissionView
+  onPermissionViewChange: (view: PermissionView) => void
   onAddPlatform: () => void
   onRemovePlatform: (user: AdminUser) => void
   onAddDomain: () => void
@@ -508,7 +516,6 @@ function PermissionGovernance({
   onManageUserDomains: (user: AdminUser) => void
   onStatus: (user: AdminUser) => void
 }) {
-  const [permissionView, setPermissionView] = useState<'platform' | 'domains' | 'users'>('platform')
   const platformAdministrators = users.filter(user => user.platformAdministrator)
   const domainAdministrators = users.filter(user => user.domains.some(domain => domain.memberRole === 'DOMAIN_ADMIN'))
   const ordinaryUsers = users.filter(user => !user.platformAdministrator && !user.domains.some(domain => domain.memberRole === 'DOMAIN_ADMIN'))
@@ -516,9 +523,9 @@ function PermissionGovernance({
     <header className="administration-view-heading platform-section-heading">
       <div><span className="eyebrow">SERVICE ADMINISTRATION</span><h2>权限管理</h2><p>在这里统一维护平台管理员、领域管理员和普通用户。</p></div>
       <div className="permission-view-switch" role="tablist" aria-label="权限管理对象">
-        <button type="button" role="tab" aria-selected={permissionView === 'platform'} className={permissionView === 'platform' ? 'active' : ''} onClick={() => setPermissionView('platform')}>平台管理员</button>
-        <button type="button" role="tab" aria-selected={permissionView === 'domains'} className={permissionView === 'domains' ? 'active' : ''} onClick={() => setPermissionView('domains')}>领域管理员</button>
-        <button type="button" role="tab" aria-selected={permissionView === 'users'} className={permissionView === 'users' ? 'active' : ''} onClick={() => setPermissionView('users')}>普通用户</button>
+        <button type="button" role="tab" aria-selected={permissionView === 'platform'} className={permissionView === 'platform' ? 'active' : ''} onClick={() => onPermissionViewChange('platform')}>平台管理员</button>
+        <button type="button" role="tab" aria-selected={permissionView === 'domains'} className={permissionView === 'domains' ? 'active' : ''} onClick={() => onPermissionViewChange('domains')}>领域管理员</button>
+        <button type="button" role="tab" aria-selected={permissionView === 'users'} className={permissionView === 'users' ? 'active' : ''} onClick={() => onPermissionViewChange('users')}>普通用户</button>
       </div>
     </header>
 
