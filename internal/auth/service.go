@@ -45,7 +45,7 @@ type Session struct {
 }
 
 type Store interface {
-	FindTenantID(ctx context.Context, code string) (string, error)
+	FindWorkspaceID(ctx context.Context) (string, error)
 	FindUserByEmail(ctx context.Context, tenantID, email string) (LoginUser, error)
 	FindUserByID(ctx context.Context, tenantID, userID string) (LoginUser, error)
 	CreateSession(ctx context.Context, session Session, userAgent, ipAddress string) error
@@ -75,16 +75,14 @@ type Service struct {
 }
 
 type LoginInput struct {
-	TenantCode string
-	Email      string
-	Password   string
-	RequestID  string
-	IPAddress  string
-	UserAgent  string
+	Email     string
+	Password  string
+	RequestID string
+	IPAddress string
+	UserAgent string
 }
 
 type RegisterInput struct {
-	TenantCode  string
 	Email       string
 	DisplayName string
 	Password    string
@@ -94,7 +92,6 @@ type RegisterInput struct {
 }
 
 type RegisterUserRecord struct {
-	TenantCode   string
 	Email        string
 	DisplayName  string
 	PasswordHash string
@@ -113,16 +110,15 @@ func NewService(store Store, passwords PasswordManager, tokens TokenManager, ref
 	return &Service{store: store, passwords: passwords, tokens: tokens, refreshTTL: refreshTTL, now: time.Now}
 }
 
-// Register 创建最小权限账号，将其绑定到租户的默认注册角色与默认领域后登录。
+// Register 创建平台账号，将其绑定到默认领域后直接登录。
 func (s *Service) Register(ctx context.Context, input RegisterInput) (TokenPair, error) {
 	store, ok := s.store.(registrationStore)
 	if !ok {
 		return TokenPair{}, ErrRegistrationUnavailable
 	}
-	input.TenantCode = strings.TrimSpace(input.TenantCode)
 	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
 	input.DisplayName = strings.TrimSpace(input.DisplayName)
-	if input.TenantCode == "" || input.DisplayName == "" || len([]rune(input.DisplayName)) > 100 {
+	if input.DisplayName == "" || len([]rune(input.DisplayName)) > 100 {
 		return TokenPair{}, ErrInvalidRegistration
 	}
 	address, err := mail.ParseAddress(input.Email)
@@ -137,13 +133,12 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (TokenPair,
 		return TokenPair{}, err
 	}
 	if err := store.RegisterUser(ctx, RegisterUserRecord{
-		TenantCode: input.TenantCode, Email: input.Email,
-		DisplayName: input.DisplayName, PasswordHash: hash,
+		Email: input.Email, DisplayName: input.DisplayName, PasswordHash: hash,
 	}); err != nil {
 		return TokenPair{}, err
 	}
 	return s.Login(ctx, LoginInput{
-		TenantCode: input.TenantCode, Email: input.Email, Password: input.Password,
+		Email: input.Email, Password: input.Password,
 		RequestID: input.RequestID, IPAddress: input.IPAddress, UserAgent: input.UserAgent,
 	})
 }
@@ -164,9 +159,9 @@ func strongPassword(value string) bool {
 	return lower && upper && digit
 }
 
-// Login 验证租户与用户凭据，创建服务端会话并签发令牌对。
+// Login 在单一平台工作区中验证用户凭据，创建服务端会话并签发令牌对。
 func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error) {
-	tenantID, err := s.store.FindTenantID(ctx, input.TenantCode)
+	tenantID, err := s.store.FindWorkspaceID(ctx)
 	if err != nil {
 		return TokenPair{}, ErrInvalidCredentials
 	}

@@ -1,3 +1,14 @@
+import {
+  ArrowCounterClockwise,
+  CheckCircle,
+  ChatCircleDots,
+  FileArrowUp,
+  PaperPlaneRight,
+  PlugsConnected,
+  Sparkle,
+  SpinnerGap,
+  X,
+} from '@phosphor-icons/react'
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
   dataSourceAPI,
@@ -46,16 +57,18 @@ const fieldLabels: Record<string, string> = {
   database: '数据库 / 服务名', username: '用户名', password: '密码', file: 'Excel / CSV 文件',
 }
 
-const initialMessage: DataSourceAIMessage = {
+const welcomeMessage: DataSourceAIMessage = {
   role: 'assistant',
-  content: '告诉我数据源类型和你已有的信息。我会逐项补齐、保存草稿并测试；测试通过后，仍由你点击发布。密码只在安全输入框填写，不会发送给模型。',
+  content: '你好，我是数据源配置助手。告诉我你想新建数据源，还是选择一个现有数据源进行修改；之后我们会通过对话逐步补齐信息。',
 }
 
 export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNotice }: Props) {
   const [open, setOpen] = useState(false)
+  const [modeChosen, setModeChosen] = useState(false)
   const [sourceId, setSourceId] = useState('')
+  const [workingSource, setWorkingSource] = useState<DataSourceRecord | null>(null)
   const [draft, setDraft] = useState<DataSourceAIDraft>(blankDraft)
-  const [messages, setMessages] = useState<DataSourceAIMessage[]>([initialMessage])
+  const [messages, setMessages] = useState<DataSourceAIMessage[]>([welcomeMessage])
   const [instruction, setInstruction] = useState('')
   const [password, setPassword] = useState('')
   const [file, setFile] = useState<File | null>(null)
@@ -65,35 +78,45 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
   const [busy, setBusy] = useState<'chat' | 'test' | 'publish' | ''>('')
   const [testedSource, setTestedSource] = useState<DataSourceRecord | null>(null)
   const [testPassed, setTestPassed] = useState(false)
+  const [submitted, setSubmitted] = useState(false)
   const logRef = useRef<HTMLDivElement | null>(null)
-  const selectedSource = useMemo(() => sources.find(source => source.id === sourceId), [sourceId, sources])
+  const listedSource = useMemo(() => sources.find(source => source.id === sourceId), [sourceId, sources])
+  const activeSource = workingSource || listedSource
   const effectiveMissingFields = useMemo(() => {
     const satisfied: Record<string, boolean> = {
-      code: Boolean(draft.code.trim()), name: Boolean(draft.name.trim()), type: Boolean(draft.type),
-      host: Boolean(draft.host.trim()), port: draft.port > 0 && draft.port <= 65535,
-      database: Boolean(draft.database.trim()), username: Boolean(draft.username.trim()),
-      password: Boolean(password || selectedSource), file: Boolean(file || selectedSource?.fileAssetId),
+      code: Boolean(draft.code.trim()),
+      name: Boolean(draft.name.trim()),
+      type: Boolean(draft.type),
+      host: Boolean(draft.host.trim()),
+      port: draft.port > 0 && draft.port <= 65535,
+      database: Boolean(draft.database.trim()),
+      username: Boolean(draft.username.trim()),
+      password: Boolean(password || activeSource),
+      file: Boolean(file || activeSource?.fileAssetId),
     }
     const required = ['code', 'name', 'type']
     if (draft.type === 'EXCEL') required.push('file')
     else required.push('host', 'port', 'database', 'username', 'password')
     return [...new Set([...missingFields, ...required])].filter(field => !satisfied[field])
-  }, [draft, file, missingFields, password, selectedSource])
+  }, [activeSource, draft, file, missingFields, password])
+  const recognized = Boolean(draft.code || draft.name || draft.host || draft.database || activeSource)
 
   useEffect(() => {
     const log = logRef.current
     if (log) log.scrollTop = log.scrollHeight
-  }, [messages, busy])
+  }, [busy, checks.length, effectiveMissingFields.length, fixes.length, messages, submitted, testPassed])
 
-  const resetConversation = (nextSourceId: string) => {
+  const resetConversation = (nextSourceId = '') => {
     const source = sources.find(item => item.id === nextSourceId)
+    setModeChosen(true)
     setSourceId(nextSourceId)
+    setWorkingSource(source || null)
     setDraft(source ? draftFromSource(source) : blankDraft())
     setMessages([{
       role: 'assistant',
       content: source
-        ? `正在修改“${source.name}”。请告诉我需要变更什么；未提到的现有配置会保留。`
-        : initialMessage.content,
+        ? `好的，我们来修改“${source.name}”。请直接告诉我需要变更什么，未提到的现有配置会保留。`
+        : '好的，我们来新建数据源。请直接描述你已有的信息，例如：“新建 MySQL，地址 db.internal:3306，库名 sales”。不完整也没关系，我会继续追问。',
     }])
     setInstruction('')
     setPassword('')
@@ -103,6 +126,24 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
     setFixes([])
     setTestedSource(null)
     setTestPassed(false)
+    setSubmitted(false)
+  }
+
+  const restart = () => {
+    setModeChosen(false)
+    setSourceId('')
+    setWorkingSource(null)
+    setDraft(blankDraft())
+    setMessages([welcomeMessage])
+    setInstruction('')
+    setPassword('')
+    setFile(null)
+    setMissingFields([])
+    setChecks([])
+    setFixes([])
+    setTestedSource(null)
+    setTestPassed(false)
+    setSubmitted(false)
   }
 
   const runTurn = async (
@@ -114,14 +155,15 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
     const userMessage: DataSourceAIMessage = { role: 'user', content: text }
     const history = [...messages, userMessage].slice(-16)
     setMessages(history)
+    setModeChosen(true)
     if (manageBusy) setBusy('chat')
     try {
-      const result = await dataSourceAPI.aiTurn(sourceIDOverride || sourceId || null, {
+      const result = await dataSourceAPI.aiTurn(sourceIDOverride || activeSource?.id || null, {
         instruction: text,
         history,
         draft,
-        passwordProvided: Boolean(password),
-        fileProvided: Boolean(file || selectedSource?.fileAssetId),
+        passwordProvided: Boolean(password || activeSource),
+        fileProvided: Boolean(file || activeSource?.fileAssetId),
         ...(failure ? { testFailure: failure } : {}),
       })
       setDraft(result.draft)
@@ -145,6 +187,7 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
     if (!text || busy) return
     setInstruction('')
     setTestPassed(false)
+    setSubmitted(false)
     void runTurn(text)
   }
 
@@ -161,20 +204,30 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
       }
       if (!fileAssetId) throw new Error('请先选择 Excel 或 CSV 文件')
       const input: ExcelDataSourceInput = {
-        code: value.code, name: value.name, description: value.description,
-        visibility: value.visibility, sharingScope: value.sharingScope,
-        type: 'EXCEL', fileAssetId,
+        code: value.code,
+        name: value.name,
+        description: value.description,
+        visibility: value.visibility,
+        sharingScope: value.sharingScope,
+        type: 'EXCEL',
+        fileAssetId,
       }
       return liveCurrent
         ? dataSourceAPI.update(liveCurrent.id, { ...input, expectedVersion: liveCurrent.version })
         : dataSourceAPI.create(input)
     }
     const input = {
-      code: value.code, name: value.name, description: value.description,
-      visibility: value.visibility, sharingScope: value.sharingScope,
+      code: value.code,
+      name: value.name,
+      description: value.description,
+      visibility: value.visibility,
+      sharingScope: value.sharingScope,
       type: value.type as Exclude<DataSourceType, 'EXCEL'>,
-      host: value.host, port: value.port, database: value.database,
-      username: value.username, password,
+      host: value.host,
+      port: value.port,
+      database: value.database,
+      username: value.username,
+      password,
     }
     return current
       ? dataSourceAPI.update(current.id, { ...input, expectedVersion: current.version })
@@ -184,52 +237,68 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
   const saveAndTest = async () => {
     if (busy) return
     if (effectiveMissingFields.length) {
-      setMessages(current => [...current, { role: 'assistant', content: `还缺少：${effectiveMissingFields.map(item => fieldLabels[item] || item).join('、')}` }])
+      setMessages(current => [...current, {
+        role: 'assistant',
+        content: `还缺少：${effectiveMissingFields.map(item => fieldLabels[item] || item).join('、')}。请继续在对话中告诉我，密码或文件请使用下面的安全区域。`,
+      }])
       return
     }
     setBusy('test')
     setTestPassed(false)
+    setSubmitted(false)
     try {
-      let saved = await persistDraft(draft, selectedSource)
-      onSourceChanged(saved)
-      if (!selectedSource) setSourceId(saved.id)
+      let saved = await persistDraft(draft, activeSource || undefined)
+      const wasAlreadyListed = sources.some(source => source.id === saved.id)
+      setWorkingSource(saved)
+      setSourceId(saved.id)
+      if (wasAlreadyListed) onSourceChanged(saved)
       if (draft.type === 'EXCEL') setFile(null)
       let retried = false
       while (true) {
         try {
           const test = await dataSourceAPI.test(saved.id)
           const latest = await dataSourceAPI.get(saved.id)
-          onSourceChanged(latest)
+          setWorkingSource(latest)
+          if (wasAlreadyListed) onSourceChanged(latest)
           setTestedSource(latest)
           setTestPassed(true)
           setPassword('')
           setMessages(current => [...current, {
             role: 'assistant',
-            content: `连接测试通过${test.serverVersion ? `，服务版本 ${test.serverVersion}` : ''}。请检查配置摘要，然后由你点击“提交发布”。`,
+            content: `连接成功${test.serverVersion ? `，服务版本为 ${test.serverVersion}` : ''}${test.latencyMs ? `，耗时 ${test.latencyMs}ms` : ''}。配置已经通过校验，请在下方确认发布并进入审核。`,
           }])
-          onNotice({ tone: 'success', message: `“${latest.name}”连接测试通过，等待你提交发布` })
+          onNotice({ tone: 'success', message: `“${latest.name}”连接成功，等待提交审核` })
           break
         } catch (cause) {
           if (!(cause instanceof DataSourceConnectionTestError)) throw cause
-          const result = await runTurn(`连接测试失败，请诊断并仅修复可以安全确定的问题。错误代码：${cause.code}`, {
-            code: cause.code, message: cause.message,
+          const result = await runTurn('连接测试失败。请根据错误诊断原因，并且只修复能够安全确定的参数。', {
+            code: cause.code,
+            message: cause.message,
           }, false, saved.id)
           if (!retried && result?.autoRetry) {
             retried = true
             saved = await persistDraft(result.draft, saved)
-            onSourceChanged(saved)
-            setMessages(current => [...current, { role: 'assistant', content: '已应用确定性的格式修复，正在自动重试一次。' }])
+            setWorkingSource(saved)
+            if (wasAlreadyListed) onSourceChanged(saved)
+            setMessages(current => [...current, {
+              role: 'assistant',
+              content: '我已应用可以确定的参数修复，正在自动重试连接。',
+            }])
             continue
           }
           setTestedSource(saved)
+          setMessages(current => [...current, {
+            role: 'assistant',
+            content: `仍未连接成功，暂时无法自动解决。具体原因：${cause.message}。请核对网络连通性、防火墙白名单、数据库监听地址及账号权限，然后把补充信息告诉我再试。`,
+          }])
           onNotice({ tone: 'error', message: cause.message })
           break
         }
       }
-      await onReload()
+      if (wasAlreadyListed) await onReload()
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : '保存或测试数据源失败'
-      setMessages(current => [...current, { role: 'assistant', content: `未能完成保存和测试：${message}` }])
+      setMessages(current => [...current, { role: 'assistant', content: `未能完成连接测试：${message}` }])
       onNotice({ tone: 'error', message })
     } finally {
       setBusy('')
@@ -240,36 +309,106 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
     if (!testedSource || busy) return
     setBusy('publish')
     try {
-      await dataSourceAPI.submitPublicationRequest(testedSource.id, '由数据源 AI 助手完成配置和连接测试，申请发布')
-      setMessages(current => [...current, { role: 'assistant', content: '发布申请已提交，配置会在现有权限审批通过后生效。' }])
+      await dataSourceAPI.submitPublicationRequest(
+        testedSource.id,
+        '由数据源 AI 助手完成配置与连接测试，提交发布审核',
+      )
+      const latest = await dataSourceAPI.get(testedSource.id)
+      setWorkingSource(latest)
+      setTestedSource(latest)
       setTestPassed(false)
+      setSubmitted(true)
+      setMessages(current => [...current, {
+        role: 'assistant',
+        content: '发布申请已提交。该数据源已经出现在数据源列表中，状态为“待审批”；领域管理员审批通过后才会正式生效。',
+      }])
+      onSourceChanged(latest)
       await onReload()
-      onNotice({ tone: 'success', message: `“${testedSource.name}”发布申请已提交` })
+      onNotice({ tone: 'success', message: `“${latest.name}”已提交审核` })
     } catch (cause) {
-      onNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '提交发布申请失败' })
+      const message = cause instanceof Error ? cause.message : '提交发布申请失败'
+      setMessages(current => [...current, { role: 'assistant', content: `提交失败：${message}` }])
+      onNotice({ tone: 'error', message })
     } finally {
       setBusy('')
     }
   }
 
-  return <aside className={`data-source-ai${open ? ' open' : ''}`} onMouseEnter={() => setOpen(true)} aria-label="数据源 AI 助手">
-    <button className="data-source-ai-rail" type="button" onClick={() => setOpen(current => !current)} aria-expanded={open}>
-      <span aria-hidden="true">AI</span><strong>数据源助手</strong>
-    </button>
+  return <aside className={`data-source-ai${open ? ' open' : ''}`} aria-label="数据源 AI 助手">
+    <div className="data-source-ai-launcher-wrap" onMouseEnter={() => setOpen(true)}>
+      <span className="data-source-ai-launcher-tip">用 AI 配置数据源</span>
+      <button className="data-source-ai-launcher" type="button" onClick={() => setOpen(current => !current)} aria-expanded={open} aria-label="打开数据源 AI 助手">
+        <Sparkle className="launcher-sparkle" size={17} weight="fill" />
+        <ChatCircleDots size={25} weight="fill" />
+        <span aria-hidden="true" />
+      </button>
+    </div>
     {open && <section className="data-source-ai-panel" role="dialog" aria-label="数据源 AI 配置对话">
-      <header><div><small>AI ASSISTANT</small><strong>数据源配置助手</strong></div><button type="button" aria-label="关闭数据源 AI 助手" onClick={() => setOpen(false)}>×</button></header>
-      <label className="data-source-ai-target">操作对象<select value={sourceId} disabled={Boolean(busy)} onChange={event => resetConversation(event.target.value)}><option value="">新建数据源</option>{sources.map(source => <option key={source.id} value={source.id}>修改：{source.name}</option>)}</select></label>
-      <div className="data-source-ai-log" ref={logRef} aria-live="polite">{messages.map((message, index) => <div className={`data-source-ai-message ${message.role}`} key={`${message.role}-${index}`}><small>{message.role === 'assistant' ? 'AI 助手' : '你'}</small><p>{message.content}</p></div>)}{busy === 'chat' && <div className="data-source-ai-thinking">正在理解并补全配置…</div>}</div>
-      <div className="data-source-ai-summary">
-        <div><span>名称</span><strong>{draft.name || '待补充'}</strong></div><div><span>类型</span><strong>{draft.type}</strong></div>
-        {draft.type !== 'EXCEL' && <><div><span>地址</span><strong>{draft.host ? `${draft.host}:${draft.port || '—'}` : '待补充'}</strong></div><div><span>数据库</span><strong>{draft.database || '待补充'}</strong></div></>}
+      <header>
+        <div className="data-source-ai-agent"><span><Sparkle size={18} weight="fill" /></span><div><small>AI DATA COPILOT</small><strong>数据源助手</strong></div></div>
+        <div className="data-source-ai-header-actions">
+          <button type="button" disabled={Boolean(busy)} aria-label="重新开始对话" title="重新开始" onClick={restart}><ArrowCounterClockwise size={17} /></button>
+          <button type="button" aria-label="关闭数据源 AI 助手" onClick={() => setOpen(false)}><X size={18} /></button>
+        </div>
+      </header>
+      <div className="data-source-ai-context"><span className="online-dot" />{modeChosen ? activeSource ? `正在配置：${activeSource.name}` : '正在新建数据源' : '在线 · 等待你的指令'}</div>
+      <div className="data-source-ai-log" ref={logRef} aria-live="polite">
+        {messages.map((message, index) => <div className={`data-source-ai-message ${message.role}`} key={`${message.role}-${index}`}>
+          {message.role === 'assistant' && <span className="data-source-ai-avatar"><Sparkle size={13} weight="fill" /></span>}
+          <div><small>{message.role === 'assistant' ? 'AI 助手' : '你'}</small><p>{message.content}</p></div>
+        </div>)}
+
+        {!modeChosen && <div className="data-source-ai-choices">
+          <button type="button" onClick={() => resetConversation('')}><Sparkle size={15} weight="fill" /><span><strong>新建数据源</strong><small>从一段描述开始</small></span></button>
+          {sources.map(source => <button type="button" key={source.id} onClick={() => resetConversation(source.id)}><PlugsConnected size={15} /><span><strong>修改 {source.name}</strong><small>{source.type} · {source.code}</small></span></button>)}
+        </div>}
+
+        {modeChosen && recognized && <div className="data-source-ai-inline-card configuration">
+          <header><span><Sparkle size={14} weight="fill" />已识别配置</span><small>{activeSource ? '修改' : '新建'}</small></header>
+          <dl>
+            <div><dt>名称</dt><dd>{draft.name || '待补充'}</dd></div>
+            <div><dt>类型</dt><dd>{draft.type}</dd></div>
+            {draft.type !== 'EXCEL' && <><div><dt>地址</dt><dd>{draft.host ? `${draft.host}:${draft.port || '—'}` : '待补充'}</dd></div><div><dt>数据库</dt><dd>{draft.database || '待补充'}</dd></div></>}
+          </dl>
+          {effectiveMissingFields.length > 0 && <p>还需要：{effectiveMissingFields.map(item => fieldLabels[item] || item).join('、')}</p>}
+        </div>}
+
+        {modeChosen && (draft.type === 'EXCEL'
+          ? <label className="data-source-ai-inline-card secret">
+            <span><FileArrowUp size={16} />安全上传数据文件</span>
+            <input type="file" accept=".xlsx,.xls,.csv" disabled={Boolean(busy)} onChange={event => { setFile(event.target.files?.[0] || null); setTestPassed(false) }} />
+            <small>{file?.name || activeSource?.fileAssetId ? file?.name || '沿用已上传文件' : '文件内容不会发送给配置模型'}</small>
+          </label>
+          : <label className="data-source-ai-inline-card secret">
+            <span><PlugsConnected size={16} />安全填写数据库密码</span>
+            <input type="password" autoComplete="new-password" disabled={Boolean(busy)} value={password} onChange={event => { setPassword(event.target.value); setTestPassed(false) }} placeholder={activeSource ? '留空则沿用已保存密码' : '密码不会进入对话'} />
+            <small>凭据只用于保存和测试，不会发送给 AI 模型</small>
+          </label>)}
+
+        {fixes.length > 0 && <div className="data-source-ai-inline-card diagnostic success"><strong><CheckCircle size={15} weight="fill" />已安全修复</strong>{fixes.map(item => <span key={item}>· {item}</span>)}</div>}
+        {checks.length > 0 && <div className="data-source-ai-inline-card diagnostic"><strong>建议检查</strong>{checks.map(item => <span key={item}>· {item}</span>)}</div>}
+
+        {modeChosen && recognized && effectiveMissingFields.length === 0 && !testPassed && !submitted && <div className="data-source-ai-inline-card action">
+          <span className="action-icon"><PlugsConnected size={20} weight="fill" /></span>
+          <div><strong>信息已齐全</strong><p>我会保存当前配置并测试连接；若失败，将自动诊断并尝试一次安全修复。</p><button type="button" disabled={Boolean(busy)} onClick={() => void saveAndTest()}>{busy === 'test' ? <><SpinnerGap className="spin" size={15} />正在连接…</> : <><PlugsConnected size={15} />测试连接</>}</button></div>
+        </div>}
+
+        {testPassed && testedSource && <div className="data-source-ai-inline-card action success">
+          <span className="action-icon"><CheckCircle size={21} weight="fill" /></span>
+          <div><strong>连接成功</strong><p>“{testedSource.name}”已通过连接校验。确认后提交发布审核，审批通过前不会生效。</p><button type="button" disabled={Boolean(busy)} onClick={() => void publish()}>{busy === 'publish' ? <><SpinnerGap className="spin" size={15} />提交中…</> : <><PaperPlaneRight size={15} weight="fill" />发布并提交审核</>}</button></div>
+        </div>}
+
+        {submitted && <div className="data-source-ai-inline-card action pending">
+          <span className="action-icon"><CheckCircle size={21} weight="fill" /></span>
+          <div><strong>已进入审核</strong><p>数据源列表已生成“待审批”记录。你可以关闭助手，等待领域管理员处理。</p></div>
+        </div>}
+        {busy === 'chat' && <div className="data-source-ai-thinking"><span /><span /><span />正在理解并整理参数</div>}
       </div>
-      {effectiveMissingFields.length > 0 && <p className="data-source-ai-missing">待补充：{effectiveMissingFields.map(item => fieldLabels[item] || item).join('、')}</p>}
-      {fixes.length > 0 && <div className="data-source-ai-advice success"><strong>已安全规范化</strong>{fixes.map(item => <span key={item}>• {item}</span>)}</div>}
-      {checks.length > 0 && <div className="data-source-ai-advice"><strong>建议检查</strong>{checks.map(item => <span key={item}>• {item}</span>)}</div>}
-      {draft.type === 'EXCEL' ? <label className="data-source-ai-secret">数据文件<input type="file" accept=".xlsx,.xls,.csv" onChange={event => setFile(event.target.files?.[0] || null)} /><small>{file?.name || selectedSource?.fileAssetId ? file?.name || '沿用已上传文件' : '文件内容不会发送到配置模型'}</small></label> : <label className="data-source-ai-secret">数据库密码<input type="password" autoComplete="new-password" value={password} onChange={event => setPassword(event.target.value)} placeholder={selectedSource ? '留空则沿用已保存密码' : '仅在安全输入框填写'} /><small>密码不进入对话或模型请求</small></label>}
-      <form className="data-source-ai-composer" onSubmit={submitMessage}><textarea rows={3} value={instruction} disabled={Boolean(busy)} onChange={event => setInstruction(event.target.value)} placeholder="例如：新建 MySQL，地址 db.internal:3306，库名 sales…" /><button type="submit" disabled={Boolean(busy) || !instruction.trim()}>发送</button></form>
-      <footer><button className="quiet-button" type="button" disabled={Boolean(busy)} onClick={() => resetConversation(sourceId)}>重置对话</button><button className="primary-button" type="button" disabled={Boolean(busy)} onClick={() => void saveAndTest()}>{busy === 'test' ? '保存并测试中…' : selectedSource ? '保存修改并测试' : '创建草稿并测试'}</button>{testPassed && <button className="data-source-ai-publish" type="button" disabled={Boolean(busy)} onClick={() => void publish()}>{busy === 'publish' ? '提交中…' : '提交发布'}</button>}</footer>
+      <form className="data-source-ai-composer" onSubmit={submitMessage}>
+        <textarea rows={2} value={instruction} disabled={Boolean(busy)} onChange={event => setInstruction(event.target.value)} placeholder="直接描述需求或继续补充信息…" />
+        <button type="submit" disabled={Boolean(busy) || !instruction.trim()} aria-label="发送消息"><PaperPlaneRight size={19} weight="fill" /></button>
+        <small>Enter 换行 · 密码与文件请使用会话中的安全区域</small>
+      </form>
     </section>}
   </aside>
 }

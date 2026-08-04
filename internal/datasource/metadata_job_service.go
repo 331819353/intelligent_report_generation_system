@@ -805,7 +805,7 @@ func metadataCompletionJobFailure(err error) (string, string) {
 	case "PROVIDER_UNAVAILABLE":
 		return "LLM_NOT_CONFIGURED", "LLM 服务未配置或当前不可用，请检查模型配置"
 	case "TENANT_AI_FORBIDDEN":
-		return "LLM_ACCESS_DENIED", "当前租户未启用 LLM 元数据完善能力"
+		return "LLM_ACCESS_DENIED", "当前平台未启用 LLM 元数据完善能力"
 	case "QUOTA_EXCEEDED":
 		return "LLM_QUOTA_EXCEEDED", "LLM 调用额度已用完，请补充额度后重新提交"
 	case "TIMEOUT":

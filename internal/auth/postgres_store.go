@@ -17,10 +17,14 @@ type PostgresStore struct{ pool *pgxpool.Pool }
 // NewPostgresStore 创建基于 PostgreSQL 的身份与会话存储。
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
-// FindTenantID 根据公开租户编码查询内部标识。
-func (s *PostgresStore) FindTenantID(ctx context.Context, code string) (string, error) {
+// FindWorkspaceID 返回平台唯一的内部工作区标识。租户不再是登录输入；如果
+// 数据库仍存在多个活动工作区则失败关闭，避免账号被解析到错误空间。
+func (s *PostgresStore) FindWorkspaceID(ctx context.Context) (string, error) {
 	var id string
-	err := s.pool.QueryRow(ctx, `SELECT id FROM platform.tenants WHERE code = $1 AND status = 'ACTIVE' AND deleted_at IS NULL`, code).Scan(&id)
+	err := s.pool.QueryRow(ctx, `SELECT min(id::text)
+		FROM platform.tenants
+		WHERE status='ACTIVE' AND deleted_at IS NULL
+		HAVING count(*)=1`).Scan(&id)
 	return id, err
 }
 
@@ -34,9 +38,9 @@ func (s *PostgresStore) FindUserByID(ctx context.Context, tenantID, userID strin
 	return s.findUser(ctx, tenantID, `id = $1`, userID)
 }
 
-// RegisterUser 原子创建账号并绑定租户配置的默认角色与默认领域。
+// RegisterUser 原子创建账号并绑定平台配置的默认身份与默认领域。
 func (s *PostgresStore) RegisterUser(ctx context.Context, input RegisterUserRecord) error {
-	tenantID, err := s.FindTenantID(ctx, input.TenantCode)
+	tenantID, err := s.FindWorkspaceID(ctx)
 	if err != nil {
 		return ErrRegistrationUnavailable
 	}

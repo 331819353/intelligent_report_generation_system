@@ -3505,7 +3505,7 @@ export function DatasetCenterPage() {
             <div><dt>业务名称</dt><dd>{detailAsset.businessName || '—'}</dd></div>
             <div className="wide"><dt>业务说明</dt><dd>{detailAsset.businessDescription || '—'}</dd></div>
             <div><dt>敏感级别</dt><dd>{detailAsset.sensitivityLevel || '—'}</dd></div>
-            <div><dt>可视状态</dt><dd>{detailAsset.visibility === 'TENANT_PUBLIC' ? '租户可见' : '仅授权可见'}</dd></div>
+            <div><dt>可视状态</dt><dd>{detailAsset.visibility === 'TENANT_PUBLIC' ? '领域可见' : '仅授权可见'}</dd></div>
             <div><dt>完善状态</dt><dd>{detailAsset.enrichmentStatus === 'SUCCEEDED' ? 'LLM 已完善' : detailAsset.enrichmentStatus || '—'}</dd></div>
           </dl>}
           <div className="dataset-detail-tag-list" aria-label="数据集标签"><strong>标签</strong>{(detail.tags || []).length > 0 ? (detail.tags || []).map(tag => <span key={tag}>{tag}</span>) : <small>暂无数据集标签</small>}</div>

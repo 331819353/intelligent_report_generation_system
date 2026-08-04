@@ -26,10 +26,9 @@ func NewHandler(service *Service) http.Handler {
 	return mux
 }
 
-// register 创建绑定默认权限角色的租户账号，并直接签发登录令牌。
+// register 创建平台账号并直接签发登录令牌。
 func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		TenantCode  string `json:"tenantCode"`
 		Email       string `json:"email"`
 		DisplayName string `json:"displayName"`
 		Password    string `json:"password"`
@@ -39,20 +38,19 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pair, err := h.service.Register(r.Context(), RegisterInput{
-		TenantCode: request.TenantCode, Email: request.Email,
-		DisplayName: request.DisplayName, Password: request.Password,
+		Email: request.Email, DisplayName: request.DisplayName, Password: request.Password,
 		RequestID: r.Header.Get("X-Request-ID"), IPAddress: clientIP(r), UserAgent: r.UserAgent(),
 	})
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrInvalidRegistration):
-			writeAuthError(w, http.StatusBadRequest, "INVALID_REGISTRATION", "请填写有效的租户、姓名和邮箱")
+			writeAuthError(w, http.StatusBadRequest, "INVALID_REGISTRATION", "请填写有效的姓名和邮箱")
 		case errors.Is(err, ErrRegistrationConflict):
 			writeAuthError(w, http.StatusConflict, "ACCOUNT_ALREADY_EXISTS", "该邮箱已注册，请直接登录")
 		case errors.Is(err, ErrWeakPassword):
 			writeAuthError(w, http.StatusBadRequest, "WEAK_PASSWORD", "密码需为 10–128 位，并同时包含大小写字母和数字")
 		case errors.Is(err, ErrRegistrationUnavailable):
-			writeAuthError(w, http.StatusForbidden, "REGISTRATION_UNAVAILABLE", "当前租户未开放自助注册或默认角色尚未配置")
+			writeAuthError(w, http.StatusForbidden, "REGISTRATION_UNAVAILABLE", "平台未开放自助注册或默认身份尚未配置")
 		default:
 			writeAuthError(w, http.StatusInternalServerError, "REGISTRATION_FAILED", "注册失败，请稍后重试")
 		}
@@ -61,35 +59,34 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	writeAuthJSON(w, http.StatusCreated, pair)
 }
 
-// me 返回访问令牌中的当前身份声明。
+// me 返回访问令牌中的当前用户声明；内部工作区标识不暴露给客户端。
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	claims, ok := ClaimsFromContext(r.Context())
 	if !ok {
 		writeAuthError(w, http.StatusUnauthorized, "ACCESS_TOKEN_REQUIRED", "valid bearer token is required")
 		return
 	}
-	writeAuthJSON(w, http.StatusOK, map[string]any{"userId": claims.Subject, "tenantId": claims.TenantID, "tokenVersion": claims.TokenVersion})
+	writeAuthJSON(w, http.StatusOK, map[string]any{"userId": claims.Subject, "tokenVersion": claims.TokenVersion})
 }
 
 // login 解析登录请求并把客户端环境信息交给认证服务审计。
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		TenantCode string `json:"tenantCode"`
-		Email      string `json:"email"`
-		Password   string `json:"password"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeAuthError(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
 		return
 	}
-	if strings.TrimSpace(request.TenantCode) == "" || strings.TrimSpace(request.Email) == "" || request.Password == "" {
-		writeAuthError(w, http.StatusBadRequest, "INVALID_REQUEST", "tenantCode, email and password are required")
+	if strings.TrimSpace(request.Email) == "" || request.Password == "" {
+		writeAuthError(w, http.StatusBadRequest, "INVALID_REQUEST", "email and password are required")
 		return
 	}
-	pair, err := h.service.Login(r.Context(), LoginInput{TenantCode: request.TenantCode, Email: request.Email, Password: request.Password, RequestID: r.Header.Get("X-Request-ID"), IPAddress: clientIP(r), UserAgent: r.UserAgent()})
+	pair, err := h.service.Login(r.Context(), LoginInput{Email: request.Email, Password: request.Password, RequestID: r.Header.Get("X-Request-ID"), IPAddress: clientIP(r), UserAgent: r.UserAgent()})
 	if err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
-			writeAuthError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "tenant, account or password is invalid")
+			writeAuthError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "account or password is invalid")
 			return
 		}
 		writeAuthError(w, http.StatusInternalServerError, "AUTHENTICATION_FAILED", "authentication service failed")

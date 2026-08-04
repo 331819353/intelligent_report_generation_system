@@ -129,7 +129,7 @@ const hasUnpublishedDraft = (source: DataSourceRecord) => source.hasUnpublishedC
   ?? publicationStatusOf(source) === 'UNPUBLISHED'
 const reviewStatusOf = (source: DataSourceRecord): DataSourceReviewStatus => source.reviewStatus || 'NOT_SUBMITTED'
 const lifecycleLabel = (source: DataSourceRecord) => reviewStatusOf(source) === 'PENDING'
-  ? '审核中'
+  ? '待审批'
   : reviewStatusOf(source) === 'REJECTED'
     ? '审核失败'
     : source.status === 'DRAFT' && validationStatusOf(source) === 'PASSED'
@@ -1069,7 +1069,7 @@ export function DataSourceCenterPage() {
         <button type="button" aria-label="关闭消息" onClick={() => setNotice(null)}>×</button>
       </div>}
       <section className="data-source-center" aria-label="数据源配置中心内容">
-        <header className="data-source-summary"><div><span className="eyebrow">数据源清单</span><h2>已有的数据源</h2><p>统一查看、修改和管理当前租户的数据连接。</p></div><strong aria-label={`${sources.length} 个数据源`}>{sources.length}<small> 个数据源</small></strong></header>
+        <header className="data-source-summary"><div><span className="eyebrow">数据源清单</span><h2>已有的数据源</h2><p>统一查看、修改和管理当前领域的数据连接。</p></div><strong aria-label={`${sources.length} 个数据源`}>{sources.length}<small> 个数据源</small></strong></header>
         <div className="data-source-filters" aria-label="数据源筛选">
           <label><span>搜索</span><input aria-label="搜索数据源" type="search" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="名称或编码" /></label>
           <label><span>类型</span><select aria-label="按类型筛选" value={typeFilter} onChange={event => setTypeFilter(event.target.value as DataSourceType | 'ALL')}><option value="ALL">全部类型</option><option value="MYSQL">MySQL</option><option value="ORACLE">Oracle</option><option value="EXCEL">Excel / CSV</option></select></label>
@@ -1248,7 +1248,7 @@ export function DataSourceCenterPage() {
               : metadataError ? <div className="data-source-structure-state error" role="alert">{metadataError}<button type="button" onClick={() => void loadTableStructures(dialog.source!.id)}>重新加载</button></div>
               : metadataTables.length === 0 ? <div className="data-source-structure-state">暂无物理表结构，请点击“新增数据表”从源库选择。</div>
               : <div className="data-source-table-list">{metadataTables.map(table => <details key={table.id} onToggle={event => { if (event.currentTarget.open) void loadColumns(table) }}>
-                  <summary><span><strong>{table.tableName}</strong><small>{[table.catalogName, table.schemaName, table.tableName].filter(Boolean).join('.')}</small></span><span><em className={`table-visibility-status ${table.visibility.toLowerCase()}`}>{table.visibility === 'TENANT_PUBLIC' ? '租户可见' : '仅授权可见'}</em><em className={`table-management-status ${table.managementStatus.toLowerCase()}`}>{table.managementStatus === 'DISABLED' ? '已停用' : '可用'}</em>{table.tableType || 'TABLE'} · {table.columnCount} 字段</span></summary>
+                  <summary><span><strong>{table.tableName}</strong><small>{[table.catalogName, table.schemaName, table.tableName].filter(Boolean).join('.')}</small></span><span><em className={`table-visibility-status ${table.visibility.toLowerCase()}`}>{table.visibility === 'TENANT_PUBLIC' ? '领域可见' : '仅授权可见'}</em><em className={`table-management-status ${table.managementStatus.toLowerCase()}`}>{table.managementStatus === 'DISABLED' ? '已停用' : '可用'}</em>{table.tableType || 'TABLE'} · {table.columnCount} 字段</span></summary>
                   <div className="data-source-table-actions" aria-label={`${table.tableName}操作`}>
                     <button className="action-edit" type="button" disabled={actionBusy || metadataTaskBusy} title={table.enrichmentStatus === 'SUCCEEDED' ? '修改业务元数据' : '补齐表和字段业务元数据并标记为已完善'} onClick={() => void openTableEditor(dialog.source!, table, table.enrichmentStatus === 'SUCCEEDED' ? 'EDIT' : 'MANUAL_COMPLETE')}>{table.enrichmentStatus === 'SUCCEEDED' ? '修改' : '手工完善'}</button>
                     {dialog.source!.type !== 'EXCEL' && <button className="action-refresh" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source!.status !== 'ACTIVE'} onClick={() => void refreshTableAsset(dialog.source!, table)}>{busyAction === `refresh-table:${table.id}` ? '正在提交…' : '刷新结构'}</button>}
@@ -1266,7 +1266,7 @@ export function DataSourceCenterPage() {
 
       {dialog?.mode === 'select-tables' && dialog.source && <Dialog title="新增数据表" wide onClose={closeDialog}>
         <div className="data-source-table-picker">
-          <header><div><strong>{dialog.source.name}</strong><span>{dialog.source.type === 'EXCEL' ? '解析并选择需要映射的 Sheet' : '从源库选择需要完善并纳入管理的数据表'}</span></div><small>LLM 默认读取最多 10 行格式脱敏样本辅助识别；可按本次任务改为不读取或使用原始样本，所有选择均写入审计并受租户策略约束。</small></header>
+          <header><div><strong>{dialog.source.name}</strong><span>{dialog.source.type === 'EXCEL' ? '解析并选择需要映射的 Sheet' : '从源库选择需要完善并纳入管理的数据表'}</span></div><small>LLM 默认读取最多 10 行格式脱敏样本辅助识别；可按本次任务改为不读取或使用原始样本，所有选择均写入审计并受平台策略约束。</small></header>
           {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
           {discoveryLoading ? <div className="data-source-structure-state" role="status">{dialog.source.type === 'EXCEL' ? '正在解析 Sheet 前 10 行并生成预览…' : '正在从数据源刷新表清单…'}</div> : <>
             {dialog.source.type === 'EXCEL' && fileInspection && <div className="file-inspection-summary" role="status"><strong>Sheet 结构解析完成</strong><span>{fileInspection.sheets.length} 个 Sheet · 每个最多预览 {fileInspection.sampleLimit} 行</span></div>}
@@ -1304,7 +1304,7 @@ export function DataSourceCenterPage() {
           <label>业务名称<input value={tableDraft.businessName} onChange={event => setTableDraft(current => ({ ...current, businessName: event.target.value }))} /></label>
           <label>业务说明<textarea rows={4} value={tableDraft.businessDescription} onChange={event => setTableDraft(current => ({ ...current, businessDescription: event.target.value }))} /></label>
           <label>标签<input value={tableDraft.tags} onChange={event => setTableDraft(current => ({ ...current, tags: event.target.value }))} placeholder="多个标签使用英文逗号分隔" /></label>
-          <div className="data-source-form-grid"><label>敏感级别<select value={tableDraft.sensitivityLevel} onChange={event => setTableDraft(current => ({ ...current, sensitivityLevel: event.target.value }))}><option value="PUBLIC">公开</option><option value="INTERNAL">内部</option><option value="CONFIDENTIAL">机密</option><option value="RESTRICTED">严格限制</option></select></label><label>可见范围<select value={tableDraft.visibility} onChange={event => setTableDraft(current => ({ ...current, visibility: event.target.value }))}><option value="PRIVATE">私有</option><option value="TENANT_PUBLIC">租户公开</option></select></label></div>
+          <div className="data-source-form-grid"><label>敏感级别<select value={tableDraft.sensitivityLevel} onChange={event => setTableDraft(current => ({ ...current, sensitivityLevel: event.target.value }))}><option value="PUBLIC">公开</option><option value="INTERNAL">内部</option><option value="CONFIDENTIAL">机密</option><option value="RESTRICTED">严格限制</option></select></label><label>可见范围<select value={tableDraft.visibility} onChange={event => setTableDraft(current => ({ ...current, visibility: event.target.value }))}><option value="PRIVATE">私有</option><option value="TENANT_PUBLIC">领域公开</option></select></label></div>
           <label className="data-source-checkbox"><input type="checkbox" checked={tableDraft.manualLocked} onChange={event => setTableDraft(current => ({ ...current, manualLocked: event.target.checked }))} />锁定人工修改，后续 LLM 刷新不自动覆盖</label>
           <section className="data-source-field-mapping" aria-label="字段映射">
             <header><div><span className="eyebrow">字段映射</span><strong>源字段与业务字段</strong><small id="field-tag-contract">人工编辑支持自由标签；LLM 自动完善只使用受控词表。多个标签用英文逗号分隔，保存时自动去空、去重（最多 30 个，每个不超过 50 字符）。</small></div><small>{columnDrafts.length} 个字段</small></header>

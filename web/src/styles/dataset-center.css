@@ -7,9 +7,6 @@
 .dataset-center-shell .sidebar nav a { border-radius: 9px; padding: 11px 13px; color: #626977; font-size: 14px; font-weight: 600; transition: background .15s ease, color .15s ease; }
 .dataset-center-shell .sidebar nav a:hover { background: #f5f7fa; color: #20242c; }
 .dataset-center-shell .sidebar nav a.active { background: #edf3ff; color: #2059c7; }
-.dataset-center-shell .tenant-chip { border-top-color: #eceef2; }
-.dataset-center-shell .tenant-chip span { color: #9aa0ab; }
-.dataset-center-shell .tenant-chip strong { color: #343941; font-size: 13px; }
 .dataset-center-shell .main-stage { padding: 0 34px 42px; }
 .dataset-center-shell .topbar { height: 92px; }
 .dataset-center-shell .topbar h1 { margin-top: 3px; color: #17191e; font-size: 25px; letter-spacing: -.025em; }

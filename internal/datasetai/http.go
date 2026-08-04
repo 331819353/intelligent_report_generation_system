@@ -166,9 +166,9 @@ func writePlanError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrContextStale):
 		writePlanJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_AI_CONTEXT_STALE", "message": "生成期间表结构发生变化，请重新生成方案"})
 	case errors.Is(err, aiplatform.ErrTenantAIForbidden):
-		writePlanJSON(w, http.StatusForbidden, map[string]string{"code": "AI_TENANT_FORBIDDEN", "message": "当前租户未启用数据集 AI 配置能力"})
+		writePlanJSON(w, http.StatusForbidden, map[string]string{"code": "AI_TENANT_FORBIDDEN", "message": "当前平台未启用数据集 AI 配置能力"})
 	case errors.Is(err, aiplatform.ErrQuotaExceeded):
-		writePlanJSON(w, http.StatusTooManyRequests, map[string]string{"code": "AI_QUOTA_EXCEEDED", "message": "当前租户 AI 配额已用尽，请稍后重试或联系管理员"})
+		writePlanJSON(w, http.StatusTooManyRequests, map[string]string{"code": "AI_QUOTA_EXCEEDED", "message": "当前平台 AI 配额已用尽，请稍后重试或联系管理员"})
 	case errors.Is(err, ErrProviderUnavailable):
 		writePlanJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "AI_PROVIDER_UNAVAILABLE", "message": "AI 配置服务暂时不可用，请联系管理员检查模型配置"})
 	case errors.Is(err, context.DeadlineExceeded) || errors.As(err, &providerErr) && providerErr.Code == aiplatform.ErrorCodeTimeout:

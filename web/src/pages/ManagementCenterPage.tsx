@@ -23,6 +23,7 @@ import { notifyDomainCatalogChanged } from '../lib/domain-context'
 
 type GovernanceView = 'platform' | 'domains' | 'users'
 type DialogState =
+  | { kind: 'platform-administrators' }
   | { kind: 'create-domain' }
   | { kind: 'domain-admins'; domain: BusinessDomain }
   | { kind: 'user-domains'; user: AdminUser }
@@ -138,6 +139,36 @@ export function ManagementCenterPage() {
     }
   }
 
+  const savePlatformAdministrators = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const selectedIDs = new Set(new FormData(event.currentTarget).getAll('userIds').map(String))
+    if (selectedIDs.size === 0) {
+      setError('平台至少需要保留一位管理员')
+      return
+    }
+    const currentIDs = new Set(platformAdministrators.map(user => user.id))
+    const additions = users.filter(user => selectedIDs.has(user.id) && !currentIDs.has(user.id))
+    const removals = platformAdministrators.filter(user => !selectedIDs.has(user.id))
+    setBusyKey('platform-administrators')
+    setError('')
+    try {
+      for (const user of additions) {
+        await administrationAPI.setPlatformAdministrator(user.id, true)
+      }
+      for (const user of removals) {
+        await administrationAPI.setPlatformAdministrator(user.id, false)
+      }
+      await load()
+      setDialog(null)
+      setNotice('平台管理员已更新')
+    } catch (cause) {
+      await load()
+      setError(cause instanceof Error ? cause.message : '平台管理员更新失败')
+    } finally {
+      setBusyKey('')
+    }
+  }
+
   const saveDomainAdministrators = async (
     event: FormEvent<HTMLFormElement>,
     domain: BusinessDomain,
@@ -206,12 +237,11 @@ export function ManagementCenterPage() {
     <AppShell
       title="权限设定"
       eyebrow="访问控制"
-      actions={view === 'domains'
-        ? <button className="primary-button" type="button" onClick={() => {
-          setError('')
-          setDialog({ kind: 'create-domain' })
-        }}><Plus size={17} weight="bold" />新建领域</button>
-        : undefined}
+      actions={view !== 'users' ? <button className="primary-button" type="button" onClick={() => {
+        setError('')
+        setNotice('')
+        setDialog(view === 'domains' ? { kind: 'create-domain' } : { kind: 'platform-administrators' })
+      }}><Plus size={17} weight="bold" />{view === 'domains' ? '新建领域' : '添加管理员'}</button> : undefined}
       className="administration-shell"
     >
       <section className="administration-stack">
@@ -273,6 +303,13 @@ export function ManagementCenterPage() {
         error={error}
         onClose={closeDialog}
         onSubmit={createDomain}
+      />}
+      {dialog?.kind === 'platform-administrators' && <PlatformAdministratorDialog
+        users={users}
+        busy={Boolean(busyKey)}
+        error={error}
+        onClose={closeDialog}
+        onSubmit={event => void savePlatformAdministrators(event)}
       />}
       {dialog?.kind === 'domain-admins' && <AdministratorDialog
         domain={dialog.domain}
@@ -446,6 +483,28 @@ function DomainDialog({ title, description, users, busy, error, onClose, onSubmi
       <label>说明<textarea name="description" placeholder="说明该领域承载的数据范围" /></label>
       <SelectionList label="领域管理员" name="administratorUserIds" users={users} />
       <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy}>{busy ? <SpinnerGap className="spin" size={16} /> : <CheckCircle size={16} />}{busy ? '正在创建…' : '创建领域'}</button></footer>
+    </form>
+  </DialogFrame>
+}
+
+function PlatformAdministratorDialog({ users, busy, error, onClose, onSubmit }: {
+  users: AdminUser[]
+  busy: boolean
+  error: string
+  onClose: () => void
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void
+}) {
+  const selected = new Set(users.filter(user => user.platformAdministrator).map(user => user.id))
+  return <DialogFrame
+    title="选择平台管理员"
+    description="管理员只能从已完成注册的用户中选择；平台始终至少保留一位管理员。"
+    busy={busy}
+    error={error}
+    onClose={onClose}
+  >
+    <form onSubmit={onSubmit}>
+      <SelectionList label="已注册用户" name="userIds" users={users} selected={selected} />
+      <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy}>{busy ? <SpinnerGap className="spin" size={16} /> : <Check size={16} />}{busy ? '保存中…' : '保存管理员'}</button></footer>
     </form>
   </DialogFrame>
 }

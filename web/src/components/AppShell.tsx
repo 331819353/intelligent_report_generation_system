@@ -150,10 +150,6 @@ export function AppShell({ title = '数据配置管理平台', eyebrow = '配置
               <CaretUpDown size={15} aria-hidden="true" />
             </button>
           </div>
-          <div className="tenant-chip">
-            <span className="tenant-avatar">演</span>
-            <span><small>当前租户</small><strong>演示组织</strong></span>
-          </div>
         </div>
       </aside>
       <main className="main-stage">

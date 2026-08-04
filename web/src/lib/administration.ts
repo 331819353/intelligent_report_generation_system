@@ -64,7 +64,7 @@ const safeItems = <T,>(value: ItemsResponse<T>) =>
 const administrationRequest = <T,>(path: string, init: RequestInit = {}) =>
   apiRequest<T>(path, { ...init, businessDomain: false })
 
-/** 管理中心与领域切换器共用的租户管理 API。 */
+/** 管理中心与领域切换器共用的平台治理 API。 */
 export const administrationAPI = {
   async canManage() {
     const result = await administrationRequest<{ allowed: boolean }>('/v1/permissions/evaluate', {

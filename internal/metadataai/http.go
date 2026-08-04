@@ -84,9 +84,9 @@ func writeServiceError(w http.ResponseWriter, err error, result GenerateResult) 
 	case errors.Is(err, ErrProviderUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "AI_PROVIDER_UNAVAILABLE", "metadata AI is not configured")
 	case errors.Is(err, aiplatform.ErrTenantAIForbidden):
-		writeJSON(w, http.StatusForbidden, map[string]any{"code": "AI_TENANT_FORBIDDEN", "message": "当前租户未启用该 AI 能力", "job": result.Job})
+		writeJSON(w, http.StatusForbidden, map[string]any{"code": "AI_TENANT_FORBIDDEN", "message": "当前平台未启用该 AI 能力", "job": result.Job})
 	case errors.Is(err, aiplatform.ErrQuotaExceeded):
-		writeJSON(w, http.StatusTooManyRequests, map[string]any{"code": "AI_QUOTA_EXCEEDED", "message": "当前租户 AI 配额已用尽", "job": result.Job})
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"code": "AI_QUOTA_EXCEEDED", "message": "当前平台 AI 配额已用尽", "job": result.Job})
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, "ASSET_NOT_FOUND", "table asset not found")
 	case errors.Is(err, context.DeadlineExceeded):

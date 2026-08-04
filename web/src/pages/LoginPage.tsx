@@ -5,7 +5,7 @@ import { RequestError } from '../lib/api'
 import { login, register } from '../lib/auth'
 import { administrationAPI } from '../lib/administration'
 
-/** 收集租户凭据、处理登录状态并进入工作台。 */
+/** 收集平台账号凭据、处理登录状态并进入工作台。 */
 export function LoginPage() {
   const navigate = useNavigate()
   const [mode, setMode] = useState<'login' | 'register'>('login')
@@ -16,13 +16,12 @@ export function LoginPage() {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const form = new FormData(event.currentTarget)
-    const tenantCode = String(form.get('tenantCode') ?? '')
     const displayName = String(form.get('displayName') ?? '').trim()
     const email = String(form.get('email') ?? '').trim()
     const password = String(form.get('password') ?? '')
     const confirmPassword = String(form.get('confirmPassword') ?? '')
-    if (!tenantCode || !email || !password || (mode === 'register' && !displayName)) {
-      setError(mode === 'register' ? '请完整填写注册信息' : '请输入租户、账号和密码')
+    if (!email || !password || (mode === 'register' && !displayName)) {
+      setError(mode === 'register' ? '请完整填写注册信息' : '请输入账号和密码')
       return
     }
     if (mode === 'register' && password !== confirmPassword) {
@@ -32,14 +31,14 @@ export function LoginPage() {
     setSubmitting(true)
     setError('')
     try {
-      if (mode === 'register') await register(tenantCode, displayName, email, password)
-      else await login(tenantCode, email, password)
+      if (mode === 'register') await register(displayName, email, password)
+      else await login(email, password)
       const domains = await administrationAPI.listDomains()
       navigate(domains.length > 0 ? '/data-sources' : '/domain-access')
     } catch (cause) {
       setError(cause instanceof RequestError
         ? cause.detail.message
-        : mode === 'register' ? '注册失败，请稍后重试' : '租户、账号或密码错误')
+        : mode === 'register' ? '注册失败，请稍后重试' : '账号或密码错误')
     } finally {
       setSubmitting(false)
     }
@@ -70,14 +69,13 @@ export function LoginPage() {
           <span className="eyebrow">{mode === 'register' ? '创建账号' : '欢迎回来'}</span>
           <h2>{mode === 'register' ? '注册数据配置账号' : '登录数据配置管理平台'}</h2>
           <p className="login-form-intro">{mode === 'register' ? '新账号自动加入默认领域并获得固定用户权限。' : '使用组织账号进入你的数据配置空间。'}</p>
-          <label>租户<input name="tenantCode" defaultValue="demo" placeholder="请输入租户编码" /></label>
           {mode === 'register' && <label>姓名<input name="displayName" autoComplete="name" placeholder="请输入姓名" /></label>}
           <label>账号<input name="email" type="email" placeholder="name@company.com" /></label>
           <label>密码<input name="password" type="password" autoComplete={mode === 'register' ? 'new-password' : 'current-password'} placeholder={mode === 'register' ? '至少 10 位，包含大小写字母和数字' : '请输入密码'} /></label>
           {mode === 'register' && <label>确认密码<input name="confirmPassword" type="password" autoComplete="new-password" placeholder="请再次输入密码" /></label>}
           {error && <p className="form-error" role="alert">{error}</p>}
           <button className="primary-button" type="submit" disabled={submitting}>{submitting ? mode === 'register' ? '正在注册…' : '正在登录…' : mode === 'register' ? '注册并进入' : '进入工作台'}</button>
-          <p className="form-hint">{mode === 'register' ? '注册后平台管理员可调整你的领域归属。' : '登录即代表你同意遵守所属租户的数据安全策略。'}</p>
+          <p className="form-hint">{mode === 'register' ? '注册后平台管理员可调整你的领域归属。' : '登录即代表你同意遵守平台的数据安全策略。'}</p>
         </form>
       </section>
     </main>

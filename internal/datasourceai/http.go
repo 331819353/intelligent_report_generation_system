@@ -70,9 +70,9 @@ func writeTurnError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrProviderUnavailable), errors.As(err, &providerErr) && providerErr.Code == aiplatform.ErrorCodeProviderUnavailable:
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "AI_PROVIDER_UNAVAILABLE", "message": "数据源 AI 助手暂时不可用，请联系管理员检查模型配置"})
 	case errors.Is(err, aiplatform.ErrTenantAIForbidden):
-		writeJSON(w, http.StatusForbidden, map[string]string{"code": "AI_TENANT_FORBIDDEN", "message": "当前租户未启用数据源 AI 配置能力"})
+		writeJSON(w, http.StatusForbidden, map[string]string{"code": "AI_TENANT_FORBIDDEN", "message": "当前平台未启用数据源 AI 配置能力"})
 	case errors.Is(err, aiplatform.ErrQuotaExceeded):
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"code": "AI_QUOTA_EXCEEDED", "message": "当前租户 AI 配额已用尽，请稍后重试"})
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"code": "AI_QUOTA_EXCEEDED", "message": "当前平台 AI 配额已用尽，请稍后重试"})
 	case errors.Is(err, context.DeadlineExceeded) || errors.As(err, &providerErr) && providerErr.Code == aiplatform.ErrorCodeTimeout:
 		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"code": "AI_TIMEOUT", "message": "数据源 AI 助手响应超时，请重试"})
 	case errors.Is(err, ErrInvalidOutput):

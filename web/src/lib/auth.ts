@@ -13,22 +13,22 @@ export type TokenPair = {
 const sessionKey = 'intelligent-report-auth'
 
 /** 登录成功后将令牌对保存到当前标签页会话。 */
-export async function login(tenantCode: string, email: string, password: string) {
+export async function login(email: string, password: string) {
   const tokens = await apiRequest<TokenPair>('/v1/auth/login', {
     method: 'POST',
     businessDomain: false,
-    body: JSON.stringify({ tenantCode, email, password }),
+    body: JSON.stringify({ email, password }),
   })
   sessionStorage.setItem(sessionKey, JSON.stringify(tokens))
   return tokens
 }
 
 /** 注册最小权限账号并保存服务端签发的登录令牌。 */
-export async function register(tenantCode: string, displayName: string, email: string, password: string) {
+export async function register(displayName: string, email: string, password: string) {
   const tokens = await apiRequest<TokenPair>('/v1/auth/register', {
     method: 'POST',
     businessDomain: false,
-    body: JSON.stringify({ tenantCode, displayName, email, password }),
+    body: JSON.stringify({ displayName, email, password }),
   })
   sessionStorage.setItem(sessionKey, JSON.stringify(tokens))
   return tokens
