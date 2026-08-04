@@ -26,12 +26,8 @@ type assetScopeTarget struct {
 }
 
 var assetScopeTargets = map[string]assetScopeTarget{
-	"DATA_SOURCE":    {table: "platform.data_sources", ownerColumn: "owner_user_id"},
-	"DATASET":        {table: "platform.datasets", ownerColumn: "created_by"},
-	"METRIC":         {table: "platform.metrics", ownerColumn: "created_by"},
-	"DIMENSION":      {table: "platform.semantic_dimensions", ownerColumn: "created_by"},
-	"SEMANTIC_TAG":   {table: "platform.semantic_tags", ownerColumn: "created_by"},
-	"SEMANTIC_ASSET": {table: "platform.semantic_term_assets", ownerColumn: "created_by"},
+	"DATA_SOURCE": {table: "platform.data_sources", ownerColumn: "owner_user_id"},
+	"DATASET":     {table: "platform.datasets", ownerColumn: "created_by"},
 }
 
 type AssetScopeStore struct{ pool *pgxpool.Pool }
@@ -104,48 +100,6 @@ func (s *AssetScopeStore) Update(
 			return ErrAssetSharingOwnerDomainRequired
 		}
 
-		// Narrowing a dataset also narrows every derived semantic asset. A
-		// wider metric/dimension than its parent is never left behind.
-		if resourceType == "DATASET" {
-			if _, updateErr = tx.Exec(ctx, `UPDATE platform.metrics
-				SET sharing_scope=CASE
-				  WHEN $2='PRIVATE' THEN 'PRIVATE'::platform.asset_share_scope
-				  ELSE sharing_scope
-				END
-				WHERE dataset_id=$1::uuid`, resourceID, scope); updateErr != nil {
-				return updateErr
-			}
-			if _, updateErr = tx.Exec(ctx, `UPDATE platform.semantic_dimensions
-				SET sharing_scope=CASE
-				  WHEN $2='PRIVATE' THEN 'PRIVATE'::platform.asset_share_scope
-				  ELSE sharing_scope
-				END
-				WHERE dataset_id=$1::uuid`, resourceID, scope); updateErr != nil {
-				return updateErr
-			}
-			if _, updateErr = tx.Exec(ctx, `UPDATE platform.dimension_where_decisions AS decision
-				SET sharing_scope=dimension.sharing_scope,
-				    domain_id=dimension.domain_id
-				FROM platform.semantic_dimensions AS dimension
-				WHERE dimension.id=decision.dimension_id
-				  AND dimension.dataset_id=$1::uuid`,
-				resourceID,
-			); updateErr != nil {
-				return updateErr
-			}
-		}
-		if resourceType == "DIMENSION" {
-			if _, updateErr = tx.Exec(ctx, `UPDATE platform.dimension_where_decisions AS decision
-				SET sharing_scope=dimension.sharing_scope,
-				    domain_id=dimension.domain_id
-				FROM platform.semantic_dimensions AS dimension
-				WHERE dimension.id=decision.dimension_id
-				  AND dimension.id=$1::uuid`,
-				resourceID,
-			); updateErr != nil {
-				return updateErr
-			}
-		}
 		_, updateErr = tx.Exec(ctx, `INSERT INTO platform.audit_logs(
 				tenant_id,actor_user_id,action,resource_type,resource_id,detail
 			) VALUES($1,$2,'UPDATE_SHARING',$3,$4,jsonb_build_object(

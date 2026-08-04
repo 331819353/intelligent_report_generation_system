@@ -36,7 +36,7 @@ Oracle 的非敏感连接选项放在 `config` 中：
 ```json
 {
   "oracleConnectMode": "SERVICE_NAME",
-  "schemas": ["REPORT_READER"]
+  "schemas": ["DATA_READER"]
 }
 ```
 
@@ -250,7 +250,7 @@ worksheet XML 超过 16 MiB 时使用临时文件。预算、取消或客户端�
 
 - `CONNECTOR_EGRESS_ALLOWLIST` 只接受 `IP/CIDR:port`，不接受 hostname-only
   授权；数据源仍可保存 DNS 名，但其全部 A/AAAA 结果都必须落入批准 CIDR；
-- `CONNECTOR_EGRESS_DENYLIST` 必须包含平台 PostgreSQL、Redis、MinIO、API 和云
+- `CONNECTOR_EGRESS_DENYLIST` 必须包含平台 PostgreSQL、MinIO、API 和云
   控制面网段，deny 优先；loopback、link-local、multicast、metadata 地址及全部
   IPv4-mapped IPv6 永久拒绝；
 - 校验通过后数据库驱动连接到选定的已验证 IP，原始 host 只保留在配置/池摘要语义中，

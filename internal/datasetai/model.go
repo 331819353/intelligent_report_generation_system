@@ -15,8 +15,6 @@ const (
 	maxInstructionRunes = 4000
 	maxPlanNodes        = 16
 	maxPlanComponents   = 32
-	maxHintTables       = 16
-	maxHintFields       = 32
 )
 
 const (
@@ -81,21 +79,6 @@ func (e *InvalidOutputError) Unwrap() error { return ErrInvalidOutput }
 type PlanRequest struct {
 	Instruction string     `json:"instruction"`
 	Current     *GraphPlan `json:"current,omitempty"`
-	Hints       *PlanHints `json:"hints,omitempty"`
-}
-
-// PlanHints are optional, structured planning constraints supplied by the user or the preceding
-// metric-authoring flow. They are never trusted as an asset grant: loadCatalog resolves every
-// referenced table and field again under the caller's tenant before the hints are sent to the
-// model. PreferredTableIDs remain ranking preferences; non-empty aggregation, field, and time
-// settings are checked again against the generated CREATE plan so they cannot be silently ignored.
-type PlanHints struct {
-	PreferredTableIDs []string        `json:"preferredTableIds"`
-	Aggregation       string          `json:"aggregation"`
-	MeasureFields     []PlanFieldHint `json:"measureFields"`
-	TimeField         *PlanFieldHint  `json:"timeField,omitempty"`
-	DimensionFields   []PlanFieldHint `json:"dimensionFields"`
-	TimeGrain         string          `json:"timeGrain"`
 }
 
 // TransformRequirement is a deterministic CREATE-mode constraint derived from explicit
@@ -105,11 +88,6 @@ type TransformRequirement struct {
 	ComponentType string `json:"componentType"`
 	Operation     string `json:"operation,omitempty"`
 	Reason        string `json:"reason"`
-}
-
-type PlanFieldHint struct {
-	TableID string `json:"tableId"`
-	Column  string `json:"column"`
 }
 
 // Proposal is reviewable UI state. It never writes a dataset and never contains SQL.
@@ -369,7 +347,6 @@ type plannerPromptEnvelope struct {
 	Instruction           string                 `json:"instruction"`
 	Mode                  string                 `json:"mode"`
 	Current               *GraphPlan             `json:"current,omitempty"`
-	Hints                 *PlanHints             `json:"hints,omitempty"`
 	TransformRequirements []TransformRequirement `json:"transformRequirements"`
 	ChangeSet             ChangeSet              `json:"changeSet"`
 	Assets                []CatalogTable         `json:"assets"`
@@ -378,7 +355,6 @@ type plannerPromptEnvelope struct {
 type intentPromptEnvelope struct {
 	Instruction           string                 `json:"instruction"`
 	Current               GraphPlan              `json:"current"`
-	Hints                 *PlanHints             `json:"hints,omitempty"`
 	EditContext           *promptEditContext     `json:"editContext,omitempty"`
 	TransformRequirements []TransformRequirement `json:"transformRequirements"`
 	Assets                []CatalogTable         `json:"assets"`
@@ -396,95 +372,7 @@ func normalizePlanRequest(input PlanRequest) (PlanRequest, error) {
 		}
 		input.Current = &current
 	}
-	if input.Hints != nil {
-		hints, err := normalizePlanHints(*input.Hints)
-		if err != nil {
-			return PlanRequest{}, err
-		}
-		input.Hints = &hints
-	}
 	return input, nil
-}
-
-func normalizePlanHints(value PlanHints) (PlanHints, error) {
-	if len(value.PreferredTableIDs) > maxHintTables || len(value.MeasureFields) > maxHintFields || len(value.DimensionFields) > maxHintFields {
-		return PlanHints{}, fmt.Errorf("%w: planning hints exceed limits", ErrInvalidRequest)
-	}
-	value.Aggregation = strings.ToUpper(strings.TrimSpace(value.Aggregation))
-	if !oneOf(value.Aggregation, "", "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "MIN", "MAX") {
-		return PlanHints{}, fmt.Errorf("%w: hint aggregation is invalid", ErrInvalidRequest)
-	}
-	value.TimeGrain = strings.ToUpper(strings.TrimSpace(value.TimeGrain))
-	if !oneOf(value.TimeGrain, "", "DAY", "WEEK", "MONTH", "QUARTER", "YEAR") {
-		return PlanHints{}, fmt.Errorf("%w: hint time grain is invalid", ErrInvalidRequest)
-	}
-	value.PreferredTableIDs = normalizeTextList(value.PreferredTableIDs)
-	for _, tableID := range value.PreferredTableIDs {
-		if !boundedText(tableID, 1, 128) {
-			return PlanHints{}, fmt.Errorf("%w: preferred table id is invalid", ErrInvalidRequest)
-		}
-	}
-	var err error
-	if value.MeasureFields, err = normalizePlanFieldHints(value.MeasureFields); err != nil {
-		return PlanHints{}, err
-	}
-	if value.DimensionFields, err = normalizePlanFieldHints(value.DimensionFields); err != nil {
-		return PlanHints{}, err
-	}
-	if value.TimeField != nil {
-		timeField, fieldErr := normalizePlanFieldHint(*value.TimeField)
-		if fieldErr != nil {
-			return PlanHints{}, fieldErr
-		}
-		value.TimeField = &timeField
-	}
-	tableIDs := map[string]bool{}
-	for _, tableID := range value.PreferredTableIDs {
-		tableIDs[tableID] = true
-	}
-	for _, field := range value.MeasureFields {
-		tableIDs[field.TableID] = true
-	}
-	if value.TimeField != nil {
-		tableIDs[value.TimeField.TableID] = true
-	}
-	for _, field := range value.DimensionFields {
-		tableIDs[field.TableID] = true
-	}
-	if len(tableIDs) > maxHintTables {
-		return PlanHints{}, fmt.Errorf("%w: planning hints reference too many tables", ErrInvalidRequest)
-	}
-	return value, nil
-}
-
-func normalizePlanFieldHints(values []PlanFieldHint) ([]PlanFieldHint, error) {
-	if values == nil {
-		return []PlanFieldHint{}, nil
-	}
-	result := make([]PlanFieldHint, 0, len(values))
-	seen := map[string]bool{}
-	for _, raw := range values {
-		value, err := normalizePlanFieldHint(raw)
-		if err != nil {
-			return nil, err
-		}
-		key := value.TableID + "\x00" + value.Column
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		result = append(result, value)
-	}
-	return result, nil
-}
-
-func normalizePlanFieldHint(value PlanFieldHint) (PlanFieldHint, error) {
-	value.TableID = strings.TrimSpace(value.TableID)
-	value.Column = strings.TrimSpace(value.Column)
-	if !boundedText(value.TableID, 1, 128) || !validPhysicalIdentifier(value.Column) {
-		return PlanFieldHint{}, fmt.Errorf("%w: hint field reference is invalid", ErrInvalidRequest)
-	}
-	return value, nil
 }
 
 func normalizeProposal(value Proposal, mode string) Proposal {

@@ -48,8 +48,6 @@ export type BackgroundTaskView = 'ACTIVE' | 'RECENT' | 'ALL'
 export type BackgroundTaskFocus =
   | 'DIM_MODELING'
   | 'DWD_MODELING'
-  | 'DWS_MODELING'
-  | 'ADS_MODELING'
 
 const backgroundTaskFocusKey = 'intelligent-report-background-task-focus'
 
@@ -65,8 +63,7 @@ export function takeBackgroundTaskFocus(): BackgroundTaskFocus | null {
   try {
     const value = sessionStorage.getItem(backgroundTaskFocusKey)
     sessionStorage.removeItem(backgroundTaskFocusKey)
-    return value === 'DIM_MODELING' || value === 'DWD_MODELING' ||
-      value === 'DWS_MODELING' || value === 'ADS_MODELING' ? value : null
+    return value === 'DIM_MODELING' || value === 'DWD_MODELING' ? value : null
   } catch {
     return null
   }

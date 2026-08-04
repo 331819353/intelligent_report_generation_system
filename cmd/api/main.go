@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -28,22 +27,13 @@ import (
 	"intelligent-report-generation-system/internal/httpserver"
 	"intelligent-report-generation-system/internal/materialization"
 	"intelligent-report-generation-system/internal/metadataai"
-	"intelligent-report-generation-system/internal/metric"
-	"intelligent-report-generation-system/internal/metricai"
-	"intelligent-report-generation-system/internal/metriccandidate"
-	"intelligent-report-generation-system/internal/metricsemantic"
 	"intelligent-report-generation-system/internal/observability"
 	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/policy"
 	"intelligent-report-generation-system/internal/queryruntime"
-	"intelligent-report-generation-system/internal/report"
-	"intelligent-report-generation-system/internal/semanticasset"
-	"intelligent-report-generation-system/internal/semanticgraph"
-	"intelligent-report-generation-system/internal/semanticmanagement"
-	"intelligent-report-generation-system/internal/semanticqa"
 )
 
-// main 装配 API 服务依赖，并负责启动、信号监听与优雅停机。
+// main assembles the access, data-source, and dataset configuration APIs.
 func main() {
 	cfg, err := config.LoadAPI()
 	if err != nil {
@@ -52,7 +42,7 @@ func main() {
 	}
 	logger := observability.NewLogger(cfg.LogLevel)
 	slog.SetDefault(logger)
-	// 数据库和对象存储属于进程级资源，初始化失败时直接终止启动。
+
 	startupCtx, startupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	pool, err := database.Open(startupCtx, cfg.DatabaseURL)
 	startupCancel()
@@ -61,6 +51,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+
 	warehouseStartupCtx, warehouseStartupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	warehousePool, err := database.Open(warehouseStartupCtx, cfg.WarehouseDatabaseURL)
 	warehouseStartupCancel()
@@ -69,27 +60,30 @@ func main() {
 		os.Exit(1)
 	}
 	defer warehousePool.Close()
+
 	passwords := auth.NewPasswordManager(cfg.AuthBcryptCost)
 	tokens := auth.NewTokenManager(cfg.AuthTokenIssuer, cfg.AuthAccessSecret, cfg.AuthAccessTTL)
 	authService := auth.NewService(auth.NewPostgresStore(pool), passwords, tokens, cfg.AuthRefreshTTL)
 	accessService := access.NewService(access.NewPostgresStore(pool))
 	accessAdminHandler := access.NewAdminHandler(authService, accessService, access.NewAdminStore(pool))
-	assetScopeHandler := access.NewAssetScopeHandler(
-		authService, access.NewAssetScopeStore(pool),
-	)
+	assetScopeHandler := access.NewAssetScopeHandler(authService, access.NewAssetScopeStore(pool))
+
 	dataSourceRepo := datasource.NewPostgresRepository(pool)
-	objectStorage, err := datasource.NewMinIOStorage(cfg.MinIOEndpoint, cfg.MinIOAccessKey, cfg.MinIOSecretKey, cfg.MinIOUseSSL)
+	objectStorage, err := datasource.NewMinIOStorage(
+		cfg.MinIOEndpoint, cfg.MinIOAccessKey, cfg.MinIOSecretKey, cfg.MinIOUseSSL,
+	)
 	if err != nil {
 		logger.Error("initialize object storage", "error", err)
 		os.Exit(1)
 	}
 	excelManager := datasource.NewExcelManager(dataSourceRepo, objectStorage, cfg.MinIOUploadsBucket)
-	credentialManager, err := datasource.NewCredentialManager(cfg.DataSourceCredentialKey, datasource.EnvSecretResolver{})
+	credentialManager, err := datasource.NewCredentialManager(
+		cfg.DataSourceCredentialKey, datasource.EnvSecretResolver{},
+	)
 	if err != nil {
 		logger.Error("initialize data source credential manager", "error", err)
 		os.Exit(1)
 	}
-	// 连接器按数据源类型注册：数据库走隔离的 Python 服务，文件走本地解析器。
 	connectorLimits := datasource.ConnectorLimits{
 		MaxRequestBytes:        cfg.ConnectorHTTPMaxRequestBytes,
 		MaxJSONResponseBytes:   cfg.ConnectorJSONMaxResponseBytes,
@@ -116,9 +110,7 @@ func main() {
 	)
 	dataSourceService.SetMetadataJobRepository(datasource.NewPostgresMetadataJobRepository(pool))
 	dataSourceService.SetConnectionTestJobRepository(datasource.NewPostgresConnectionTestRepository(pool))
-	excelHandler := datasource.NewExcelHandler(authService, accessService, excelManager)
-	assetRepository := asset.NewRepository(pool)
-	assetHandler := asset.NewHandler(authService, accessService, assetRepository, dataSourceService)
+
 	providerEndpoints := make([]aiplatform.ProviderEndpoint, 0, len(cfg.AIProviderEndpoints))
 	for _, endpoint := range cfg.AIProviderEndpoints {
 		providerEndpoints = append(providerEndpoints, aiplatform.ProviderEndpoint{
@@ -129,26 +121,39 @@ func main() {
 	modelProvider := aiplatform.NewMultiEndpointProviderPool(
 		providerEndpoints, &http.Client{Timeout: cfg.AIAttemptTimeout},
 	)
-	aiService, err := aiplatform.NewService(aiplatform.NewPostgresStore(pool), modelProvider, aiplatform.ServiceOptions{
-		Timeout: cfg.AIRequestTimeout, AttemptTimeout: cfg.AIAttemptTimeout,
-		MaxAttempts: cfg.AIMaxAttempts, BaseRetryDelay: cfg.AIRetryBaseDelay, MaxRetryDelay: cfg.AIRetryMaxDelay,
-		MaxInputBytes: cfg.AIMaxInputBytes, InputCostMicrosPerMTokens: cfg.AIInputCostMicrosPerMTokens,
-		OutputCostMicrosPerMTokens: cfg.AIOutputCostMicrosPerMTokens,
-	})
+	aiService, err := aiplatform.NewService(
+		aiplatform.NewPostgresStore(pool), modelProvider, aiplatform.ServiceOptions{
+			Timeout: cfg.AIRequestTimeout, AttemptTimeout: cfg.AIAttemptTimeout,
+			MaxAttempts: cfg.AIMaxAttempts, BaseRetryDelay: cfg.AIRetryBaseDelay,
+			MaxRetryDelay: cfg.AIRetryMaxDelay, MaxInputBytes: cfg.AIMaxInputBytes,
+			InputCostMicrosPerMTokens:  cfg.AIInputCostMicrosPerMTokens,
+			OutputCostMicrosPerMTokens: cfg.AIOutputCostMicrosPerMTokens,
+		},
+	)
 	if err != nil {
-		logger.Error("initialize AI orchestration", "error", err)
+		logger.Error("initialize dataset AI support", "error", err)
 		os.Exit(1)
 	}
+
 	datasetStore := dataset.NewPostgresStore(pool)
-	metricCandidateStore := metriccandidate.NewPostgresStore(pool)
 	materializationStore := materialization.NewPostgresStoreWithWarehouse(pool, warehousePool)
-	datasetStore.SetPublicationCommitSink(metricCandidateStore)
 	datasetStore.SetMappedPublicationCommitSink(materializationStore)
 	datasetStore.SetGovernedPublicationCommitSink(materializationStore)
 	datasetStore.SetMaterializationDeletionSink(materializationStore)
+
+	assetRepository := asset.NewRepository(pool)
 	assetRepository.SetManualCompletionSink(datasetStore)
 	metadataAIStore := metadataai.NewPostgresStore(pool)
 	metadataAIStore.SetEnrichmentCommitSink(datasetStore)
+	metadataAIService := metadataai.NewService(
+		metadataAIStore,
+		metadataai.NewOrchestratedProviderWithPrimaryFailover(aiService, cfg.AIPrimaryFailoverTimeout),
+		cfg.AIRequestTimeout,
+		cfg.AIConfidenceThreshold,
+	)
+	dataSourceService.SetTableCompleter(metadataAIService)
+	dataSourceService.SetMappedDatasetDraftEnsurer(datasetStore)
+
 	reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	reconciledDatasets, err := datasetStore.ReconcileMappedDatasets(reconcileCtx)
 	reconcileCancel()
@@ -159,40 +164,14 @@ func main() {
 	if reconciledDatasets > 0 {
 		logger.Info("mapped table datasets reconciled", "count", reconciledDatasets)
 	}
-	metadataAIProvider := metadataai.NewOrchestratedProviderWithPrimaryFailover(
-		aiService, cfg.AIPrimaryFailoverTimeout,
-	)
-	metadataAIService := metadataai.NewService(metadataAIStore, metadataAIProvider, cfg.AIRequestTimeout, cfg.AIConfidenceThreshold)
-	dataSourceService.SetTableCompleter(metadataAIService)
-	dataSourceService.SetMappedDatasetDraftEnsurer(datasetStore)
-	dataSourceHandler := datasource.NewHandler(authService, accessService, dataSourceService, credentialManager)
-	dataSourcePublicationApprovalService := datasource.NewPublicationApprovalService(dataSourceRepo, dataSourceService)
-	dataSourcePublicationApprovalHandler := datasource.NewPublicationApprovalHandler(
-		authService, accessService, dataSourcePublicationApprovalService, credentialManager,
-	)
-	metadataAIHandler := metadataai.NewHandler(authService, accessService, metadataAIService)
-	embeddingProvider := embedding.NewOpenAICompatibleProvider(
-		cfg.AIEmbeddingBaseURL, cfg.AIEmbeddingAPIKey, cfg.AIEmbeddingModel, cfg.AIEmbeddingDimensions,
-		&http.Client{Timeout: cfg.AIEmbeddingTimeout},
-	)
-	assetEmbeddingStore := assetembedding.NewPostgresStore(pool)
-	datasetAICatalog := datasetai.NewVersionAwareAssetCatalog(pool, assetRepository)
-	datasetAIService := datasetai.NewService(datasetAICatalog, aiService, datasetai.ServiceOptions{
-		Timeout: cfg.AIRequestTimeout, MaxProviderInputBytes: cfg.AIMaxInputBytes,
-		Retriever:     assetembedding.NewRetriever(assetEmbeddingStore, embeddingProvider),
-		RetrievalMode: cfg.DatasetAIRetrievalMode,
-	})
-	datasetAIHandler := datasetai.NewHandler(authService, accessService, datasetAIService)
+
 	datasetService := dataset.NewService(datasetStore)
 	datasetService.SetSemanticNamer(datasetsemanticnaming.NewGenerator(
-		datasetsemanticnaming.NewPostgresCatalog(pool),
-		aiService,
-		cfg.AIRequestTimeout,
+		datasetsemanticnaming.NewPostgresCatalog(pool), aiService, cfg.AIRequestTimeout,
 	))
 	datasetService.SetLLMTriggerStore(datasetStore)
 	queryConnectors := map[datasource.Type]queryruntime.QueryConnector{
-		datasource.TypeMySQL:  mysqlConnector,
-		datasource.TypeOracle: oracleConnector,
+		datasource.TypeMySQL: mysqlConnector, datasource.TypeOracle: oracleConnector,
 	}
 	queryService := queryruntime.NewService(
 		datasetStore,
@@ -203,94 +182,41 @@ func main() {
 		filequery.NewExecutor(excelManager),
 	)
 	queryService.SetFederatedExecutor(federation.NewExecutor(queryConnectors, excelManager))
-	queryService.SetWarehouseExecutor(queryruntime.NewSeparatedPostgresWarehouseExecutor(pool, warehousePool))
+	queryService.SetWarehouseExecutor(
+		queryruntime.NewSeparatedPostgresWarehouseExecutor(pool, warehousePool),
+	)
 	datasetService.SetPublicationValidator(queryService)
+
+	embeddingProvider := embedding.NewOpenAICompatibleProvider(
+		cfg.AIEmbeddingBaseURL, cfg.AIEmbeddingAPIKey, cfg.AIEmbeddingModel,
+		cfg.AIEmbeddingDimensions, &http.Client{Timeout: cfg.AIEmbeddingTimeout},
+	)
+	datasetAIService := datasetai.NewService(
+		datasetai.NewVersionAwareAssetCatalog(pool, assetRepository),
+		aiService,
+		datasetai.ServiceOptions{
+			Timeout: cfg.AIRequestTimeout, MaxProviderInputBytes: cfg.AIMaxInputBytes,
+			Retriever: assetembedding.NewRetriever(
+				assetembedding.NewPostgresStore(pool), embeddingProvider,
+			),
+			RetrievalMode: cfg.DatasetAIRetrievalMode,
+		},
+	)
+
+	dataSourceHandler := datasource.NewHandler(authService, accessService, dataSourceService, credentialManager)
+	dataSourceApprovalHandler := datasource.NewPublicationApprovalHandler(
+		authService,
+		accessService,
+		datasource.NewPublicationApprovalService(dataSourceRepo, dataSourceService),
+		credentialManager,
+	)
 	datasetHandler := dataset.NewHandler(authService, accessService, datasetService, queryService)
-	materializationHandler := materialization.NewControlHandler(
+	datasetApprovalHandler := dataset.NewPublicationApprovalHandler(
 		authService,
 		accessService,
-		materialization.NewControlService(materializationStore),
+		dataset.NewPublicationApprovalService(datasetStore, datasetService),
 	)
-	datasetPublicationApprovalService := dataset.NewPublicationApprovalService(datasetStore, datasetService)
-	datasetPublicationApprovalHandler := dataset.NewPublicationApprovalHandler(authService, accessService, datasetPublicationApprovalService)
-	metricStore := metric.NewPostgresStore(pool)
-	metricService := metric.NewService(metricStore, queryService)
-	metricService.SetPermissionChecker(accessService)
-	metricHandler := metric.NewHandler(authService, accessService, metricService)
-	metricCandidateHandler := metriccandidate.NewHandler(
-		authService, accessService, metriccandidate.NewService(metricCandidateStore, metricService),
-	)
-	metricAIService := metricai.NewService(metricai.NewPostgresRetriever(pool), aiService, metricai.ServiceOptions{Timeout: cfg.AIRequestTimeout})
-	metricAIHandler := metricai.NewHandler(authService, accessService, metricAIService)
-	metricSemanticService := metricsemantic.NewService(metricsemantic.NewPostgresStore(pool), embeddingProvider)
-	metricSemanticHandler := metricsemantic.NewHandler(authService, accessService, metricSemanticService)
-	semanticManagementStore := semanticmanagement.NewPostgresStoreWithWarehouse(pool, warehousePool)
-	semanticManagementService := semanticmanagement.NewService(semanticManagementStore)
-	semanticDimensionService := semanticmanagement.NewDimensionService(semanticManagementStore)
-	semanticManagementHandler := semanticmanagement.NewHandler(
-		authService, accessService, semanticManagementService, semanticDimensionService,
-	)
-	semanticAssetStore := semanticasset.NewPostgresStore(pool)
-	semanticAssetHandler := semanticasset.NewHandler(
-		authService, accessService, semanticasset.NewService(semanticAssetStore),
-	)
-	semanticQAStore := semanticqa.NewPostgresStore(pool)
-	semanticQAService := semanticqa.NewService(
-		semanticQAStore,
-		datasetService,
-		semanticqa.NewSemanticInterpreter(
-			semanticQAStore, aiService, embeddingProvider,
-		),
-	)
-	semanticQAService.SetMetricExecutor(metricService)
-	if !cfg.NebulaGraphEnabled {
-		logger.Error("NebulaGraph is required by the semantic question runtime")
-		os.Exit(1)
-	}
-	if cfg.NebulaGraphEnabled {
-		var tlsConfig *tls.Config
-		if cfg.NebulaGraphTLSEnabled {
-			tlsConfig, err = semanticgraph.LoadTLSConfig(
-				cfg.NebulaGraphCAFile, cfg.NebulaGraphTLSServerName,
-			)
-			if err != nil {
-				logger.Error("load NebulaGraph TLS configuration", "error", err)
-				os.Exit(1)
-			}
-		}
-		graphClient, graphErr := semanticgraph.NewNebulaClient(semanticgraph.NebulaConfig{
-			Addresses: cfg.NebulaGraphAddresses, Username: cfg.NebulaGraphUsername,
-			Password: cfg.NebulaGraphPassword, Space: cfg.NebulaGraphSpace,
-			Timeout: cfg.NebulaGraphTimeout, IdleTimeout: cfg.NebulaGraphIdleTimeout,
-			MinimumPoolSize: cfg.NebulaGraphPoolMinSize,
-			MaximumPoolSize: cfg.NebulaGraphPoolMaxSize,
-			TLSConfig:       tlsConfig, FailureThreshold: 3, OpenInterval: 15 * time.Second,
-		})
-		if graphErr != nil {
-			logger.Error("initialize NebulaGraph semantic runtime", "error", graphErr)
-			os.Exit(1)
-		}
-		defer graphClient.Close()
-		semanticQAService.SetSemanticGraph(semanticgraph.NewResilientGraph(
-			semanticgraph.NewRuntime(graphClient), semanticgraph.NewPostgresStore(pool),
-			5*time.Minute,
-		))
-		logger.Info("semantic question runtime uses NebulaGraph as relationship authority")
-	}
-	semanticQAHandler := semanticqa.NewHandler(
-		authService,
-		accessService,
-		semanticQAService,
-	)
-	reportService := report.NewService(report.NewPostgresStore(pool))
-	reportService.SetMetricQueryExecutor(metricService)
-	reportService.SetArtifactStore(objectStorage, cfg.MinIOReportsBucket)
-	reportHandler := report.NewHandler(authService, accessService, reportService)
-	backgroundTaskHandler := backgroundtask.NewHandler(
-		authService,
-		accessService,
-		backgroundtask.NewService(backgroundtask.NewPostgresStore(pool)),
-	)
+
 	api := http.NewServeMux()
 	api.Handle("/api/v1/auth/", auth.NewHandler(authService))
 	api.Handle("POST /api/v1/permissions/evaluate", auth.RequireAccessToken(authService, access.EvaluateHandler(accessService)))
@@ -304,56 +230,50 @@ func main() {
 	api.Handle("/api/v1/object-permissions", accessAdminHandler)
 	api.Handle("/api/v1/object-permissions/", accessAdminHandler)
 	api.Handle("/api/v1/asset-access/", assetScopeHandler)
-	api.Handle("/api/v1/background-tasks", backgroundTaskHandler)
-	api.Handle("/api/v1/background-tasks/", backgroundTaskHandler)
-	// Exact review routes take precedence over the general data-source subtree. The legacy
-	// /publish path now submits a review request instead of switching the runtime pointer.
-	api.Handle("POST /api/v1/data-sources/{id}/publish", dataSourcePublicationApprovalHandler)
-	api.Handle("POST /api/v1/data-sources/{id}/publish-requests", dataSourcePublicationApprovalHandler)
-	api.Handle("GET /api/v1/data-sources/{id}/publish-requests", dataSourcePublicationApprovalHandler)
-	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/withdraw", dataSourcePublicationApprovalHandler)
-	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/approve", dataSourcePublicationApprovalHandler)
-	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/reject", dataSourcePublicationApprovalHandler)
+	api.Handle("/api/v1/background-tasks", backgroundtask.NewHandler(
+		authService, accessService,
+		backgroundtask.NewService(backgroundtask.NewPostgresStore(pool)),
+	))
+	api.Handle("/api/v1/background-tasks/", backgroundtask.NewHandler(
+		authService, accessService,
+		backgroundtask.NewService(backgroundtask.NewPostgresStore(pool)),
+	))
+
+	api.Handle("POST /api/v1/data-sources/{id}/publish", dataSourceApprovalHandler)
+	api.Handle("POST /api/v1/data-sources/{id}/publish-requests", dataSourceApprovalHandler)
+	api.Handle("GET /api/v1/data-sources/{id}/publish-requests", dataSourceApprovalHandler)
+	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/withdraw", dataSourceApprovalHandler)
+	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/approve", dataSourceApprovalHandler)
+	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/reject", dataSourceApprovalHandler)
 	api.Handle("/api/v1/data-sources", dataSourceHandler)
 	api.Handle("/api/v1/data-sources/", dataSourceHandler)
-	api.Handle("/api/v1/excel-files", excelHandler)
-	api.Handle("/api/v1/excel-files/", excelHandler)
-	api.Handle("/api/v1/assets/", assetHandler)
-	api.Handle("/api/v1/metadata-diffs", assetHandler)
-	api.Handle("/api/v1/metadata-ai/", metadataAIHandler)
-	api.Handle("POST /api/v1/datasets/ai/proposals", datasetAIHandler)
-	api.Handle("POST /api/v1/datasets/{id}/ai/proposals", datasetAIHandler)
-	// Exact approval routes take precedence over the legacy dataset subtree. In particular,
-	// /publish now submits an approval request and cannot directly move the published pointer.
-	api.Handle("POST /api/v1/datasets/{id}/publish", datasetPublicationApprovalHandler)
-	api.Handle("POST /api/v1/datasets/{id}/publish-requests", datasetPublicationApprovalHandler)
-	api.Handle("GET /api/v1/datasets/{id}/publish-requests", datasetPublicationApprovalHandler)
-	api.Handle("POST /api/v1/datasets/{id}/publish-requests/{requestId}/approve", datasetPublicationApprovalHandler)
-	api.Handle("POST /api/v1/datasets/{id}/publish-requests/{requestId}/reject", datasetPublicationApprovalHandler)
-	api.Handle("/api/v1/datasets/{id}/materializations/builds", materializationHandler)
-	api.Handle("/api/v1/datasets/{id}/materializations/builds/", materializationHandler)
+	api.Handle("/api/v1/excel-files", datasource.NewExcelHandler(authService, accessService, excelManager))
+	api.Handle("/api/v1/excel-files/", datasource.NewExcelHandler(authService, accessService, excelManager))
+	api.Handle("/api/v1/assets/", asset.NewHandler(
+		authService, accessService, assetRepository, dataSourceService,
+	))
+	api.Handle("/api/v1/metadata-diffs", asset.NewHandler(
+		authService, accessService, assetRepository, dataSourceService,
+	))
+
+	api.Handle("POST /api/v1/datasets/ai/proposals", datasetai.NewHandler(authService, accessService, datasetAIService))
+	api.Handle("POST /api/v1/datasets/{id}/ai/proposals", datasetai.NewHandler(authService, accessService, datasetAIService))
+	api.Handle("POST /api/v1/datasets/{id}/publish", datasetApprovalHandler)
+	api.Handle("POST /api/v1/datasets/{id}/publish-requests", datasetApprovalHandler)
+	api.Handle("GET /api/v1/datasets/{id}/publish-requests", datasetApprovalHandler)
+	api.Handle("POST /api/v1/datasets/{id}/publish-requests/{requestId}/approve", datasetApprovalHandler)
+	api.Handle("POST /api/v1/datasets/{id}/publish-requests/{requestId}/reject", datasetApprovalHandler)
+	api.Handle("/api/v1/datasets/{id}/materializations/builds", materialization.NewControlHandler(
+		authService, accessService, materialization.NewControlService(materializationStore),
+	))
+	api.Handle("/api/v1/datasets/{id}/materializations/builds/", materialization.NewControlHandler(
+		authService, accessService, materialization.NewControlService(materializationStore),
+	))
 	api.Handle("/api/v1/datasets", datasetHandler)
 	api.Handle("/api/v1/datasets/", datasetHandler)
-	api.Handle("POST /api/v1/metrics/ai/proposals", metricAIHandler)
-	api.Handle("GET /api/v1/metrics/semantic-search", metricSemanticHandler)
-	api.Handle("/api/v1/semantic/", semanticManagementHandler)
-	api.Handle("/api/v1/semantic-assets", semanticAssetHandler)
-	api.Handle("/api/v1/semantic-assets/", semanticAssetHandler)
-	api.Handle("/api/v1/semantic-parsing-rules", semanticAssetHandler)
-	api.Handle("/api/v1/semantic-parsing-rules/", semanticAssetHandler)
-	api.Handle("/api/v1/semantic-qa/", semanticQAHandler)
-	api.Handle("/api/v1/questions", semanticQAHandler)
-	api.Handle("/api/v1/questions/", semanticQAHandler)
-	api.Handle("/api/v1/metric-candidates", metricCandidateHandler)
-	api.Handle("/api/v1/metric-candidates/", metricCandidateHandler)
-	api.Handle("/api/v1/metrics", metricHandler)
-	api.Handle("/api/v1/metrics/", metricHandler)
-	api.Handle("/api/v1/reports", reportHandler)
-	api.Handle("/api/v1/reports/", reportHandler)
-	server := httpserver.New(cfg, logger, api)
 
+	server := httpserver.New(cfg, logger, api)
 	serverErrors := make(chan error, 1)
-	// HTTP 服务放在独立协程中运行，主协程统一处理退出信号。
 	go func() {
 		logger.Info("api server starting", "addr", cfg.HTTPAddr, "environment", cfg.Environment)
 		serverErrors <- server.ListenAndServe()
@@ -361,7 +281,6 @@ func main() {
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-
 	select {
 	case sig := <-signals:
 		logger.Info("shutdown signal received", "signal", sig.String())

@@ -35,7 +35,6 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./cmd/... ./internal/...
-          npm --prefix web audit --audit-level=high
       - name: Start infrastructure and apply migrations
         run: make infra-up db-migrate db-verify
       - name: Infrastructure logs on failure

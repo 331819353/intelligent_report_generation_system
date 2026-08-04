@@ -602,7 +602,6 @@ type RevisionPage struct {
 
 // VersionUsage 汇总精确发布版本当前可见的引用和运行占用，不暴露下游资源标识。
 type VersionUsage struct {
-	ReportDraftReferences         int `json:"reportDraftReferences"`
 	DownstreamDraftReferences     int `json:"downstreamDraftReferences"`
 	DownstreamPublishedReferences int `json:"downstreamPublishedReferences"`
 	ActiveQueryRuns               int `json:"activeQueryRuns"`

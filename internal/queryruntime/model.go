@@ -5,7 +5,6 @@ import (
 
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasource"
-	"intelligent-report-generation-system/internal/metric"
 	"intelligent-report-generation-system/internal/policy"
 	"intelligent-report-generation-system/internal/querycompiler"
 )
@@ -37,7 +36,6 @@ type FederatedExecutor interface {
 // boundary deliberately accepts structured DSL plus trusted relation bindings,
 // never caller-authored SQL or physical relation names.
 type WarehouseExecutor interface {
-	Preflight(context.Context, string, dataset.Document, ResolvedPlan, map[string]any, policy.UserScope, []policy.RowPolicy, []policy.ColumnPolicy, int) (metric.QueryPreflightProof, error)
 	Execute(context.Context, string, string, dataset.Document, ResolvedPlan, map[string]any, policy.UserScope, []policy.RowPolicy, []policy.ColumnPolicy, int) (datasource.QueryResult, error)
 	Cancel(context.Context, string) (bool, error)
 }
@@ -119,7 +117,6 @@ type RunSourceRecord struct {
 type RunRecord struct {
 	ID, TenantID, DatasetID, DatasetVersionID, ActorID, SourceID string
 	CandidateCode                                                string
-	MetricID, MetricVersionID                                    string
 	ExecutionEngine                                              string
 	RunType                                                      string
 	PlanHash, ParameterHash                                      string
@@ -131,7 +128,6 @@ type RunRecord struct {
 type RuntimeStore interface {
 	Resolve(context.Context, string, dataset.Document) (ResolvedPlan, error)
 	ResolveVersion(context.Context, string, string, string, dataset.Document) (ResolvedPlan, error)
-	ResolveMaterializedVersion(context.Context, string, string, string, dataset.Document) (ResolvedPlan, error)
 	Start(context.Context, RunRecord) error
 	Finish(context.Context, string, string, string, int, int64, string, []datasource.QueryWarning, []datasource.QuerySourceStat) error
 	CancellableSources(context.Context, string, string, string, string) ([]RunSourceRecord, error)

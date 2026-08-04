@@ -90,55 +90,6 @@ WITH tasks AS (
 
   UNION ALL
   SELECT
-    'METRIC_EXTRACTION',job.id::text,dataset.name::text,
-    concat(dataset.code::text,' · 指标候选提取')::text,
-    job.status::text,'DATASET',job.dataset_id::text,
-    (job.ready_count+job.review_count+job.blocked_count)::bigint,job.total::bigint,
-    job.attempt,3,job.error_code::text,job.error_message::text,
-    job.created_at,job.started_at,
-    COALESCE(job.completed_at,job.heartbeat_at,job.started_at,job.created_at),
-    job.completed_at
-  FROM platform.metric_extraction_jobs AS job
-  JOIN platform.datasets AS dataset
-    ON dataset.id=job.dataset_id AND dataset.tenant_id=job.tenant_id
-
-  UNION ALL
-  SELECT
-    'METRIC_CANDIDATE_PREPARATION',job.id::text,dataset.name::text,
-    concat(dataset.code::text,' · 发布前指标候选准备')::text,
-    job.status::text,'DATASET',job.dataset_id::text,NULL::bigint,NULL::bigint,
-    job.attempt,3,job.error_code::text,job.error_message::text,
-    job.created_at,job.started_at,job.updated_at,job.completed_at
-  FROM platform.metric_candidate_preparation_jobs AS job
-  JOIN platform.datasets AS dataset
-    ON dataset.id=job.dataset_id AND dataset.tenant_id=job.tenant_id
-
-  UNION ALL
-  SELECT
-    'DIMENSION_MEMBER_REFRESH',job.id::text,dimension.name::text,
-    concat(dimension.code::text,' · ',job.field_code,' · 维度值刷新')::text,
-    job.status::text,'DATASET',job.dataset_id::text,
-    CASE WHEN job.member_count IS NULL THEN NULL::bigint ELSE job.member_count::bigint END,
-    CASE WHEN job.member_count IS NULL THEN NULL::bigint ELSE job.member_count::bigint END,
-    job.attempt,job.max_attempts,job.result_code::text,job.error_message::text,
-    job.created_at,job.started_at,job.updated_at,job.completed_at
-  FROM platform.dimension_member_refresh_jobs AS job
-  JOIN platform.semantic_dimensions AS dimension
-    ON dimension.id=job.dimension_id AND dimension.tenant_id=job.tenant_id
-
-  UNION ALL
-  SELECT
-    'DIMENSION_PROFILE',job.id::text,dataset.name::text,
-    concat(dataset.code::text,' · ',job.field_code,' · DWS 维度画像')::text,
-    job.status::text,'DATASET',job.dataset_id::text,NULL::bigint,NULL::bigint,
-    job.attempt,job.max_attempts,job.result_code::text,''::text,
-    job.created_at,job.started_at,job.updated_at,job.completed_at
-  FROM platform.dimension_profile_jobs AS job
-  JOIN platform.datasets AS dataset
-    ON dataset.id=job.dataset_id AND dataset.tenant_id=job.tenant_id
-
-  UNION ALL
-  SELECT
     CASE stage_job.stage
       WHEN 'DOMAIN_CLASSIFICATION' THEN 'ODS_DOMAIN_CLASSIFICATION'
       WHEN 'DIMENSION_MODELING' THEN 'DIM_MODELING'
@@ -206,47 +157,6 @@ WITH tasks AS (
     ON dataset.id=workflow.trigger_dataset_id
    AND dataset.tenant_id=workflow.tenant_id
   WHERE stage_job.manual_enabled
-
-  UNION ALL
-  SELECT
-    'DWS_MODELING',job.id::text,
-    concat(COALESCE(NULLIF(job.source_scope->>'subjectName',''),'综合分析'),'主题建模')::text,
-    concat(
-      jsonb_array_length(job.source_scope->'dwd'),' 张 DWD · ',
-      jsonb_array_length(job.source_scope->'dim'),' 张 DIM 规划上下文 · ',
-      job.group_key
-    )::text,
-    job.status::text,'DATASET',job.source_dwd_dataset_id::text,
-    (job.generated_count+job.updated_count+job.skipped_count)::bigint,
-    CASE WHEN jsonb_array_length(job.selection_json)=0
-      THEN NULL::bigint
-      ELSE jsonb_array_length(job.selection_json)::bigint END,
-    job.attempt,job.max_attempts,job.error_code::text,job.error_message::text,
-    job.requested_at,
-    CASE WHEN job.attempt>0 THEN job.requested_at ELSE NULL::timestamptz END,
-    job.updated_at,job.completed_at
-  FROM platform.dws_modeling_jobs AS job
-  JOIN platform.datasets AS dataset
-    ON dataset.id=job.source_dwd_dataset_id
-   AND dataset.tenant_id=job.tenant_id
-  WHERE job.group_key NOT LIKE 'legacy:%'
-
-  UNION ALL
-  SELECT
-    'ADS_MODELING',job.id::text,
-    concat(dataset.name,'应用建模')::text,
-    concat(dataset.code::text,' · DWS → ADS 应用数据草稿')::text,
-    job.status::text,'DATASET',job.source_dws_dataset_id::text,
-    (job.generated_count+job.updated_count+job.skipped_count)::bigint,
-    1::bigint,
-    job.attempt,job.max_attempts,job.error_code::text,job.error_message::text,
-    job.requested_at,
-    CASE WHEN job.attempt>0 THEN job.requested_at ELSE NULL::timestamptz END,
-    job.updated_at,job.completed_at
-  FROM platform.ads_modeling_jobs AS job
-  JOIN platform.datasets AS dataset
-    ON dataset.id=job.source_dws_dataset_id
-   AND dataset.tenant_id=job.tenant_id
 
   UNION ALL
   SELECT
@@ -501,8 +411,7 @@ func decorate(task *Task) {
 		task.ProgressText = "已合并到同领域代表任务"
 	}
 	if task.ErrorCode == "WAITING_DIM_PUBLICATION" ||
-		task.ErrorCode == "WAITING_ACTIVE_DWD_MATERIALIZATION" ||
-		task.ErrorCode == "WAITING_ACTIVE_DWS_MATERIALIZATION" {
+		task.ErrorCode == "WAITING_ACTIVE_DWD_MATERIALIZATION" {
 		task.ProgressText = task.ErrorMessage
 		task.ErrorCode = ""
 		task.ErrorMessage = ""
@@ -541,38 +450,26 @@ var kindLabels = map[string]string{
 	"DATA_SOURCE_CONNECTION_TEST":     "数据源连接测试",
 	"DATASET_BUILD":                   "数据集物化构建",
 	"DATASET_TAG_SUGGESTION":          "数据集标签建议",
-	"METRIC_EXTRACTION":               "指标候选提取",
-	"METRIC_CANDIDATE_PREPARATION":    "历史发布前指标准备",
-	"DIMENSION_MEMBER_REFRESH":        "维度值刷新",
-	"DIMENSION_PROFILE":               "DWS 维度画像",
 	"ODS_DOMAIN_CLASSIFICATION":       "领域分类",
 	"DIM_MODELING":                    "维度建模",
 	"DWD_FACT_MODELING":               "事实落地",
-	"DWS_MODELING":                    "LLM 市场通用 DWS 建模",
-	"ADS_MODELING":                    "ADS 应用数据建模",
-	"DATASET_MATERIALIZATION_CLEANUP": "DIM/DWD/DWS/ADS 仓库物理表清理",
+	"DATASET_MATERIALIZATION_CLEANUP": "数据集仓库物理表清理",
 }
 
 var cancellableKinds = map[string]bool{
-	"DATA_SOURCE_METADATA":         true,
-	"DATA_SOURCE_CONNECTION_TEST":  true,
-	"DATASET_BUILD":                true,
-	"DATASET_TAG_SUGGESTION":       true,
-	"METRIC_EXTRACTION":            true,
-	"METRIC_CANDIDATE_PREPARATION": true,
-	"DIMENSION_MEMBER_REFRESH":     true,
-	"DIMENSION_PROFILE":            true,
-	"ODS_DOMAIN_CLASSIFICATION":    true,
-	"DIM_MODELING":                 true,
-	"DWD_FACT_MODELING":            true,
+	"DATA_SOURCE_METADATA":        true,
+	"DATA_SOURCE_CONNECTION_TEST": true,
+	"DATASET_BUILD":               true,
+	"DATASET_TAG_SUGGESTION":      true,
+	"ODS_DOMAIN_CLASSIFICATION":   true,
+	"DIM_MODELING":                true,
+	"DWD_FACT_MODELING":           true,
 }
 
 var retryableKinds = map[string]bool{
 	"ODS_DOMAIN_CLASSIFICATION": true,
 	"DIM_MODELING":              true,
 	"DWD_FACT_MODELING":         true,
-	"DWS_MODELING":              true,
-	"ADS_MODELING":              false,
 	"DATASET_BUILD":             true,
 }
 

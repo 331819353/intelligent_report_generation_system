@@ -106,27 +106,7 @@ export type PublishedVersionSummary = Pick<PublishedVersionRecord,
 export type PublishedVersionPage = {
   items: PublishedVersionSummary[]; total: number; limit: number; offset: number
 }
-export type WarehouseLineageNode = {
-  datasetVersionId: string
-  datasetId: string
-  code: string
-  name: string
-  layer: DatasetLayer
-  status: PublishedVersionRecord['status']
-}
-export type WarehouseLineageEdge = {
-  fromDatasetVersionId: string
-  toDatasetVersionId: string
-  sourceType: 'DATASET_VERSION'
-}
-export type WarehouseLineage = {
-  rootDatasetVersionId: string
-  nodes: WarehouseLineageNode[]
-  edges: WarehouseLineageEdge[]
-  topologicalOrder: string[]
-}
 export type VersionUsage = {
-  reportDraftReferences: number
   downstreamDraftReferences: number
   downstreamPublishedReferences: number
   activeQueryRuns: number
@@ -151,9 +131,6 @@ export type DatasetPublicationRequest = {
   expectedDslHash: string; expectedPlanHash: string; requesterId: string; requestNote: string
   reviewerId?: string; reviewNote?: string; publishedVersionId?: string
   submittedAt: string; reviewedAt?: string; updatedAt: string
-  metricCandidateStatus: 'LEGACY' | 'PENDING' | 'SUCCEEDED' | 'PARTIAL' | 'FAILED'
-  metricCandidateTotal: number; metricCandidateReady: number; metricCandidateReview: number; metricCandidateBlocked: number
-  metricCandidateWarning?: string; metricCandidateErrorCode?: string; metricCandidateGeneratedAt?: string
 }
 export type DatasetPublicationRequestPage = {
   items: DatasetPublicationRequest[]; total: number; limit: number; offset: number
@@ -921,8 +898,6 @@ const datasetPath = (id: string) => `/v1/datasets/${encodeURIComponent(id)}`
 export type DatasetLLMTrigger =
   | 'DIM_MODELING'
   | 'DWD_MODELING'
-  | 'DWS_MODELING'
-  | 'ADS_MODELING'
 export type DatasetLLMTriggerResult = {
   trigger: DatasetLLMTrigger
   eligibleCount: number
@@ -962,8 +937,6 @@ export const datasetAPI = {
     const paths: Record<DatasetLLMTrigger, string> = {
       DIM_MODELING: 'trigger-dim-modeling',
       DWD_MODELING: 'trigger-dwd-modeling',
-      DWS_MODELING: 'trigger-dws-modeling',
-      ADS_MODELING: 'trigger-ads-modeling',
     }
     return apiRequest<DatasetLLMTriggerResult>(
       `/v1/datasets/${paths[trigger]}`,
@@ -1029,10 +1002,6 @@ export const datasetAPI = {
     return apiRequest<PublishedVersionPage>(`${datasetPath(id)}/versions?${query}`, { cache: 'no-store' })
   },
   getVersion: (id: string, versionId: string) => apiRequest<PublishedVersionRecord>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}`, { cache: 'no-store' }),
-  getWarehouseLineage: (datasetVersionId: string) => {
-    const query = new URLSearchParams({ datasetVersionId })
-    return apiRequest<WarehouseLineage>(`/v1/semantic-qa/warehouse-dag?${query}`, { cache: 'no-store' })
-  },
   getVersionUsage: (id: string, versionId: string) => apiRequest<VersionUsage>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}/usage`, { cache: 'no-store' }),
   rollbackVersion: (id: string, versionId: string, expectedVersion: number) => apiRequest<DatasetRecord>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}/rollback`, { method: 'POST', body: JSON.stringify({ expectedVersion }) }),
   transitionVersion: (id: string, versionId: string, input: VersionTransitionInput) => apiRequest<PublishedVersionRecord>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}/status`, { method: 'POST', body: JSON.stringify(input) }),

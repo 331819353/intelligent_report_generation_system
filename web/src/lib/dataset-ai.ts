@@ -96,71 +96,6 @@ export type DatasetAIProgressEvent = {
   message: string
 }
 
-export type DatasetAIFieldHint = { tableId: string; column: string }
-export type DatasetAIHintAggregation = '' | 'SUM' | 'AVG' | 'COUNT' | 'COUNT_DISTINCT' | 'MIN' | 'MAX'
-export type DatasetAIHintTimeGrain = '' | 'DAY' | 'WEEK' | 'MONTH' | 'QUARTER' | 'YEAR'
-/**
- * Metric-to-dataset planning hints. The API treats every physical reference as untrusted input
- * and resolves it again through the caller's authorized asset catalog before invoking the model.
- */
-export type DatasetAIPlanHints = {
-  preferredTableIds: string[]
-  aggregation: DatasetAIHintAggregation
-  measureFields: DatasetAIFieldHint[]
-  timeField?: DatasetAIFieldHint
-  dimensionFields: DatasetAIFieldHint[]
-  timeGrain: DatasetAIHintTimeGrain
-}
-
-const datasetAIHintAggregations = new Set<DatasetAIHintAggregation>(['', 'SUM', 'AVG', 'COUNT', 'COUNT_DISTINCT', 'MIN', 'MAX'])
-const datasetAIHintTimeGrains = new Set<DatasetAIHintTimeGrain>(['', 'DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR'])
-const physicalColumnPattern = /^[A-Za-z][A-Za-z0-9_$#]{0,127}$/
-
-/** Ignore stale or malformed navigation state; the API independently repeats these checks. */
-export function normalizeDatasetAIPlanHints(value: unknown): DatasetAIPlanHints | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const record = value as Record<string, unknown>
-  const normalizeFields = (raw: unknown): DatasetAIFieldHint[] | null => {
-    if (raw === undefined) return []
-    if (!Array.isArray(raw) || raw.length > 32) return null
-    const seen = new Set<string>()
-    const result: DatasetAIFieldHint[] = []
-    for (const item of raw) {
-      if (!item || typeof item !== 'object' || Array.isArray(item)) return null
-      const field = item as Record<string, unknown>
-      const tableId = typeof field.tableId === 'string' ? field.tableId.trim() : ''
-      const column = typeof field.column === 'string' ? field.column.trim() : ''
-      if (!tableId || tableId.length > 128 || !physicalColumnPattern.test(column)) return null
-      const key = `${tableId}\u0000${column}`
-      if (!seen.has(key)) result.push({ tableId, column })
-      seen.add(key)
-    }
-    return result
-  }
-  const preferredRaw = record.preferredTableIds
-  if (preferredRaw !== undefined && (!Array.isArray(preferredRaw) || preferredRaw.length > 16)) return undefined
-  const preferredTableIds: string[] = []
-  for (const value of preferredRaw ?? []) {
-    const tableId = typeof value === 'string' ? value.trim() : ''
-    if (!tableId || tableId.length > 128) return undefined
-    if (!preferredTableIds.includes(tableId)) preferredTableIds.push(tableId)
-  }
-  const aggregation = (typeof record.aggregation === 'string' ? record.aggregation.trim().toUpperCase() : '') as DatasetAIHintAggregation
-  const timeGrain = (typeof record.timeGrain === 'string' ? record.timeGrain.trim().toUpperCase() : '') as DatasetAIHintTimeGrain
-  if (!datasetAIHintAggregations.has(aggregation) || !datasetAIHintTimeGrains.has(timeGrain)) return undefined
-  const measureFields = normalizeFields(record.measureFields)
-  const dimensionFields = normalizeFields(record.dimensionFields)
-  if (!measureFields || !dimensionFields) return undefined
-  let timeField: DatasetAIFieldHint | undefined
-  if (record.timeField !== undefined && record.timeField !== null) {
-    const normalized = normalizeFields([record.timeField])
-    if (!normalized?.length) return undefined
-    timeField = normalized[0]
-  }
-  if (!preferredTableIds.length && !aggregation && !measureFields.length && !timeField && !dimensionFields.length && !timeGrain) return undefined
-  return { preferredTableIds, aggregation, measureFields, ...(timeField ? { timeField } : {}), dimensionFields, timeGrain }
-}
-
 export type MaterializedDatasetAIPlan = {
   draft: DatasetDraft
   graph: DesignerGraphV1
@@ -307,13 +242,12 @@ export async function requestDatasetAIProposal(
   datasetId: string | undefined,
   instruction: string,
   current?: DatasetAIGraphPlan,
-  hints?: DatasetAIPlanHints,
   onProgress?: (event: DatasetAIProgressEvent) => void,
 ): Promise<DatasetAIPlanResult> {
   const path = datasetId ? `/v1/datasets/${encodeURIComponent(datasetId)}/ai/proposals` : '/v1/datasets/ai/proposals'
   const init: RequestInit = {
     method: 'POST',
-    body: JSON.stringify({ instruction, ...(current ? { current } : {}), ...(hints ? { hints } : {}) }),
+    body: JSON.stringify({ instruction, ...(current ? { current } : {}) }),
   }
   if (!onProgress) return apiRequest<DatasetAIPlanResult>(path, init)
 

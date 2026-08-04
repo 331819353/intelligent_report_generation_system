@@ -2,13 +2,10 @@ import {
   Check,
   CheckCircle,
   Database,
-  GlobeHemisphereWest,
   LockKey,
   Plus,
   ShieldCheck,
   SpinnerGap,
-  ToggleLeft,
-  ToggleRight,
   UserCircle,
   UsersThree,
   X,
@@ -19,17 +16,10 @@ import {
   administrationAPI,
   type AdminRole,
   type AdminUser,
-  type BusinessDomain,
   type PermissionDefinition,
 } from '../lib/administration'
-import {
-  clearDomain,
-  notifyDomainCatalogChanged,
-  currentDomain,
-} from '../lib/domain-context'
 
-type ManagementView = 'domains' | 'members' | 'permissions'
-type CreateDialog = 'domain' | 'role' | null
+type PermissionView = 'permissions' | 'members'
 
 const resourceLabels: Record<string, string> = {
   TENANT: '租户',
@@ -37,10 +27,9 @@ const resourceLabels: Record<string, string> = {
   DATA_SOURCE: '数据源',
   DATA_ASSET: '数据资产',
   DATASET: '数据集',
-  METRIC: '指标',
-  REPORT: '报告',
-  AI: '智能能力',
 }
+
+const supportedPermissionResources = new Set(Object.keys(resourceLabels))
 
 const actionLabels: Record<string, string> = {
   READ: '查看',
@@ -51,55 +40,43 @@ const actionLabels: Record<string, string> = {
   EXECUTE: '执行',
 }
 
-const formatDate = (value?: string) => {
-  if (!value) return '尚未登录'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(date)
-}
-
-/** 提供领域、成员角色和角色权限的一体化管理员工作区。 */
+/** 提供角色权限配置与成员授权。 */
 export function ManagementCenterPage() {
-  const [view, setView] = useState<ManagementView>('domains')
-  const [domains, setDomains] = useState<BusinessDomain[]>([])
+  const [view, setView] = useState<PermissionView>('permissions')
   const [roles, setRoles] = useState<AdminRole[]>([])
   const [users, setUsers] = useState<AdminUser[]>([])
   const [permissions, setPermissions] = useState<PermissionDefinition[]>([])
   const [selectedRoleID, setSelectedRoleID] = useState('')
   const [permissionSelection, setPermissionSelection] = useState<string[]>([])
-  const [createDialog, setCreateDialog] = useState<CreateDialog>(null)
+  const [createRoleOpen, setCreateRoleOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [busyKey, setBusyKey] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
-  const [platformAdministrator, setPlatformAdministrator] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const [domainResult, nextRoles, nextUsers, nextPermissions] = await Promise.all([
-        administrationAPI.listManagedDomains()
-          .then(items => ({ items, platformAdministrator: true }))
-          .catch(async () => ({
-            items: await administrationAPI.listDomains(),
-            platformAdministrator: false,
-          })),
+      const [nextRoles, nextUsers, nextPermissions] = await Promise.all([
         administrationAPI.listRoles(),
         administrationAPI.listUsers(),
         administrationAPI.listPermissions(),
       ])
-      setDomains(domainResult.items)
-      setPlatformAdministrator(domainResult.platformAdministrator)
       setRoles(nextRoles)
       setUsers(nextUsers)
       setPermissions(nextPermissions)
-      setSelectedRoleID(nextRoles[0]?.id || '')
-      setPermissionSelection(nextRoles[0]?.permissionCodes ?? [])
+      setSelectedRoleID(current => {
+        const nextID = nextRoles.some(role => role.id === current)
+          ? current
+          : nextRoles[0]?.id || ''
+        setPermissionSelection(
+          nextRoles.find(role => role.id === nextID)?.permissionCodes ?? [],
+        )
+        return nextID
+      })
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '管理中心加载失败')
+      setError(cause instanceof Error ? cause.message : '权限设定加载失败')
     } finally {
       setLoading(false)
     }
@@ -111,56 +88,23 @@ export function ManagementCenterPage() {
   }, [load])
 
   const selectedRole = roles.find(role => role.id === selectedRoleID)
+  const groupedPermissions = useMemo(() => {
+    const groups = new Map<string, PermissionDefinition[]>()
+    permissions
+      .filter(permission => supportedPermissionResources.has(permission.resourceType))
+      .forEach(permission => {
+        const group = groups.get(permission.resourceType) ?? []
+        group.push(permission)
+        groups.set(permission.resourceType, group)
+      })
+    return [...groups.entries()]
+  }, [permissions])
+
   const selectRole = (roleID: string) => {
     setSelectedRoleID(roleID)
     setPermissionSelection(
       roles.find(role => role.id === roleID)?.permissionCodes ?? [],
     )
-  }
-
-  const groupedPermissions = useMemo(() => {
-    const groups = new Map<string, PermissionDefinition[]>()
-    permissions.forEach(permission => {
-      const group = groups.get(permission.resourceType) ?? []
-      group.push(permission)
-      groups.set(permission.resourceType, group)
-    })
-    return [...groups.entries()]
-  }, [permissions])
-
-  const activeDomainCount = domains.filter(domain => domain.status === 'ACTIVE').length
-  const customRoleCount = roles.filter(role => !role.system).length
-
-  const submitDomain = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const form = new FormData(event.currentTarget)
-    const input = {
-      code: String(form.get('code') ?? '').trim().toLowerCase(),
-      name: String(form.get('name') ?? '').trim(),
-      description: String(form.get('description') ?? '').trim(),
-      administratorUserIds: form.getAll('administratorUserIds').map(String),
-    }
-    if (!input.code || !input.name) {
-      setError('请填写领域名称和领域编码')
-      return
-    }
-    if (input.administratorUserIds.length === 0) {
-      setError('请至少指定一位领域管理员')
-      return
-    }
-    setBusyKey('create-domain')
-    setError('')
-    try {
-      const domain = await administrationAPI.createDomain(input)
-      setDomains(current => [...current, domain])
-      notifyDomainCatalogChanged()
-      setNotice(`领域“${domain.name}”已创建，可立即从侧栏切换`)
-      setCreateDialog(null)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '创建领域失败')
-    } finally {
-      setBusyKey('')
-    }
   }
 
   const submitRole = async (event: FormEvent<HTMLFormElement>) => {
@@ -178,43 +122,20 @@ export function ManagementCenterPage() {
     setBusyKey('create-role')
     setError('')
     try {
-      const role = await administrationAPI.createRole(input)
-      const normalized = {
-        ...role,
-        permissionCodes: role.permissionCodes ?? [],
-        userCount: role.userCount ?? 0,
+      const created = await administrationAPI.createRole(input)
+      const role = {
+        ...created,
+        permissionCodes: created.permissionCodes ?? [],
+        userCount: created.userCount ?? 0,
       }
-      setRoles(current => [...current, normalized])
-      setSelectedRoleID(normalized.id)
+      setRoles(current => [...current, role])
+      setSelectedRoleID(role.id)
       setPermissionSelection([])
       setView('permissions')
-      setNotice(`角色“${normalized.name}”已创建，请继续配置权限`)
-      setCreateDialog(null)
+      setCreateRoleOpen(false)
+      setNotice(`角色“${role.name}”已创建，请继续配置权限`)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '创建角色失败')
-    } finally {
-      setBusyKey('')
-    }
-  }
-
-  const toggleDomain = async (domain: BusinessDomain) => {
-    const nextStatus = domain.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'
-    setBusyKey(`domain:${domain.id}`)
-    setError('')
-    try {
-      const disablingCurrentDomain = nextStatus === 'DISABLED' && currentDomain()?.id === domain.id
-      const updated = await administrationAPI.updateDomainStatus(domain.id, nextStatus)
-      const nextDomains = domains.map(item => item.id === updated.id ? updated : item)
-      setDomains(nextDomains)
-      if (disablingCurrentDomain) {
-        clearDomain()
-        window.location.assign('/domain-access')
-      } else {
-        notifyDomainCatalogChanged()
-      }
-      setNotice(`领域“${updated.name}”已${updated.status === 'ACTIVE' ? '启用' : '停用'}`)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '更新领域状态失败')
     } finally {
       setBusyKey('')
     }
@@ -242,37 +163,7 @@ export function ManagementCenterPage() {
       }))
       setNotice(`${user.displayName}已${assigned ? '移除' : '分配'}“${role.name}”角色`)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '更新用户角色失败')
-    } finally {
-      setBusyKey('')
-    }
-  }
-
-  const toggleUserDomain = async (user: AdminUser, domain: BusinessDomain) => {
-    const assigned = (user.domains ?? []).some(item => item.id === domain.id)
-    setBusyKey(`user-domain:${user.id}:${domain.id}`)
-    setError('')
-    try {
-      if (assigned) {
-        await administrationAPI.revokeUserDomain(user.id, domain.id)
-      } else {
-        await administrationAPI.assignUserDomain(user.id, domain.id)
-      }
-      setUsers(current => current.map(item => item.id !== user.id ? item : {
-        ...item,
-        domains: assigned
-          ? (item.domains ?? []).filter(userDomain => userDomain.id !== domain.id)
-          : [...(item.domains ?? []), {
-            id: domain.id,
-            code: domain.code,
-            name: domain.name,
-            default: domain.default,
-            memberRole: 'MEMBER' as const,
-          }],
-      }))
-      setNotice(`${user.displayName}已${assigned ? '移出' : '加入'}“${domain.name}”领域`)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '更新用户领域失败')
+      setError(cause instanceof Error ? cause.message : '更新成员授权失败')
     } finally {
       setBusyKey('')
     }
@@ -280,7 +171,9 @@ export function ManagementCenterPage() {
 
   const togglePermission = (code: string) => {
     setPermissionSelection(current =>
-      current.includes(code) ? current.filter(item => item !== code) : [...current, code],
+      current.includes(code)
+        ? current.filter(item => item !== code)
+        : [...current, code],
     )
   }
 
@@ -289,7 +182,10 @@ export function ManagementCenterPage() {
     setBusyKey(`permissions:${selectedRole.id}`)
     setError('')
     try {
-      await administrationAPI.replaceRolePermissions(selectedRole.id, permissionSelection)
+      await administrationAPI.replaceRolePermissions(
+        selectedRole.id,
+        permissionSelection,
+      )
       setRoles(current => current.map(role => role.id === selectedRole.id
         ? { ...role, permissionCodes: [...permissionSelection] }
         : role))
@@ -301,34 +197,32 @@ export function ManagementCenterPage() {
     }
   }
 
-  const actions = view === 'domains' && !platformAdministrator ? null : <button
-    className="primary-button"
-    type="button"
-    onClick={() => {
-      setError('')
-      setCreateDialog(view === 'domains' ? 'domain' : 'role')
-    }}
-  >
-    <Plus size={17} weight="bold" />
-    {view === 'domains' ? '创建领域' : '创建角色'}
-  </button>
+  const customRoleCount = roles.filter(role => !role.system).length
 
   return (
-    <AppShell title="管理中心" eyebrow="组织与权限" actions={actions} className="administration-shell">
+    <AppShell
+      title="权限设定"
+      eyebrow="访问控制"
+      actions={<button className="primary-button" type="button" onClick={() => {
+        setError('')
+        setCreateRoleOpen(true)
+      }}><Plus size={17} weight="bold" />创建角色</button>}
+      className="administration-shell"
+    >
       <section className="administration-stack">
         <div className="administration-hero">
           <div>
-            <span className="eyebrow">ADMINISTRATION</span>
-            <h2>统一管理领域、成员与访问权限</h2>
-            <p>领域负责组织分析工作，角色负责定义能力边界；所有变更均由服务端鉴权并写入审计记录。</p>
+            <span className="eyebrow">PERMISSIONS</span>
+            <h2>配置角色权限与成员授权</h2>
+            <p>权限范围仅覆盖数据源、数据资产和数据集配置，所有变更均由服务端鉴权并记录审计。</p>
           </div>
           <ShieldCheck size={62} weight="duotone" aria-hidden="true" />
         </div>
 
-        <div className="administration-metrics" aria-label="管理中心概览">
-          <article><GlobeHemisphereWest size={20} weight="duotone" /><span>启用领域</span><strong>{activeDomainCount}</strong><small>共 {domains.length} 个领域</small></article>
-          <article><UsersThree size={20} weight="duotone" /><span>组织成员</span><strong>{users.length}</strong><small>当前租户账号</small></article>
+        <div className="administration-metrics" aria-label="权限设定概览">
           <article><LockKey size={20} weight="duotone" /><span>自定义角色</span><strong>{customRoleCount}</strong><small>另有 {roles.length - customRoleCount} 个系统角色</small></article>
+          <article><UsersThree size={20} weight="duotone" /><span>可授权成员</span><strong>{users.length}</strong><small>当前租户账号</small></article>
+          <article><ShieldCheck size={20} weight="duotone" /><span>权限能力</span><strong>{groupedPermissions.reduce((total, [, items]) => total + items.length, 0)}</strong><small>仅保留配置相关权限</small></article>
         </div>
 
         {(error || notice) && <div className={`administration-feedback ${error ? 'error' : 'success'}`} role={error ? 'alert' : 'status'}>
@@ -337,15 +231,12 @@ export function ManagementCenterPage() {
         </div>}
 
         <div className="administration-workspace">
-          <nav className="administration-tabs" aria-label="管理中心功能">
-            <button type="button" className={view === 'domains' ? 'active' : ''} onClick={() => setView('domains')}>
-              <GlobeHemisphereWest size={19} /><span><strong>领域管理</strong><small>创建和维护业务领域</small></span>
+          <nav className="administration-tabs" aria-label="权限设定功能">
+            <button type="button" className={view === 'permissions' ? 'active' : ''} onClick={() => setView('permissions')}>
+              <ShieldCheck size={19} /><span><strong>角色权限</strong><small>配置角色能力范围</small></span>
             </button>
             <button type="button" className={view === 'members' ? 'active' : ''} onClick={() => setView('members')}>
-              <UserCircle size={19} /><span><strong>成员与角色</strong><small>为成员分配职责</small></span>
-            </button>
-            <button type="button" className={view === 'permissions' ? 'active' : ''} onClick={() => setView('permissions')}>
-              <ShieldCheck size={19} /><span><strong>权限配置</strong><small>配置角色能力范围</small></span>
+              <UserCircle size={19} /><span><strong>成员授权</strong><small>为成员分配角色</small></span>
             </button>
             <div className="administration-security-note">
               <LockKey size={17} weight="duotone" />
@@ -355,27 +246,11 @@ export function ManagementCenterPage() {
 
           <section className="administration-panel">
             {loading
-              ? <div className="administration-empty" role="status"><SpinnerGap className="spin" size={32} /><strong>正在加载管理数据…</strong></div>
-              : error && domains.length === 0 && roles.length === 0
-                ? <div className="administration-empty"><LockKey size={34} /><strong>无法进入管理中心</strong><p>请确认当前账号拥有用户管理权限。</p><button className="quiet-button" type="button" onClick={() => void load()}>重新加载</button></div>
-                : <>
-                  {view === 'domains' && <DomainManagement
-                    domains={domains}
-                    platformAdministrator={platformAdministrator}
-                    busyKey={busyKey}
-                    onToggle={toggleDomain}
-                    onCreate={() => setCreateDialog('domain')}
-                  />}
-                  {view === 'members' && <MemberManagement
-                    users={users}
-                    roles={roles}
-                    domains={domains.filter(domain => domain.status === 'ACTIVE')}
-                    platformAdministrator={platformAdministrator}
-                    busyKey={busyKey}
-                    onToggleRole={toggleUserRole}
-                    onToggleDomain={toggleUserDomain}
-                  />}
-                  {view === 'permissions' && <PermissionManagement
+              ? <div className="administration-empty" role="status"><SpinnerGap className="spin" size={32} /><strong>正在加载权限数据…</strong></div>
+              : error && roles.length === 0
+                ? <div className="administration-empty"><LockKey size={34} /><strong>无法进入权限设定</strong><p>请确认当前账号拥有用户管理权限。</p><button className="quiet-button" type="button" onClick={() => void load()}>重新加载</button></div>
+                : view === 'permissions'
+                  ? <PermissionManagement
                     roles={roles}
                     selectedRole={selectedRole}
                     selectedRoleID={selectedRoleID}
@@ -385,129 +260,55 @@ export function ManagementCenterPage() {
                     onSelectRole={selectRole}
                     onTogglePermission={togglePermission}
                     onSave={() => void savePermissions()}
+                  />
+                  : <MemberAuthorization
+                    users={users}
+                    roles={roles}
+                    busyKey={busyKey}
+                    onToggleRole={toggleUserRole}
                   />}
-                </>}
           </section>
         </div>
       </section>
 
-      {createDialog && <CreateManagementDialog
-        type={createDialog}
-        users={users}
+      {createRoleOpen && <CreateRoleDialog
         busy={Boolean(busyKey)}
         error={error}
         onClose={() => {
           if (busyKey) return
-          setCreateDialog(null)
+          setCreateRoleOpen(false)
           setError('')
         }}
-        onSubmit={createDialog === 'domain' ? submitDomain : submitRole}
+        onSubmit={submitRole}
       />}
     </AppShell>
   )
 }
 
-function DomainManagement({
-  domains,
-  platformAdministrator,
-  busyKey,
-  onToggle,
-  onCreate,
-}: {
-  domains: BusinessDomain[]
-  platformAdministrator: boolean
-  busyKey: string
-  onToggle: (domain: BusinessDomain) => void
-  onCreate: () => void
-}) {
-  return <div className="administration-view">
-    <header className="administration-view-heading">
-      <div><span className="eyebrow">业务范围</span><h2>领域管理</h2><p>领域会出现在全局侧栏的切换器中，停用后不再允许进入。</p></div>
-      {platformAdministrator && <button className="quiet-button" type="button" onClick={onCreate}><Plus size={16} />创建领域</button>}
-    </header>
-    {domains.length === 0
-      ? <div className="administration-empty"><GlobeHemisphereWest size={34} /><strong>还没有业务领域</strong><p>创建第一个领域后，成员即可从侧栏切换。</p></div>
-      : <div className="domain-management-grid">
-        {domains.map(domain => <article key={domain.id} className={domain.status === 'ACTIVE' ? '' : 'disabled'}>
-          <header>
-            <span className="domain-management-avatar">{domain.name.slice(0, 1)}</span>
-            <span className={`domain-status ${domain.status.toLowerCase()}`}>{domain.status === 'ACTIVE' ? '已启用' : '已停用'}</span>
-          </header>
-          <div><h3>{domain.name}{domain.default && <em>默认</em>}</h3><code>{domain.code}</code></div>
-          <p>{domain.description || '暂未填写领域说明'}</p>
-          <p className="domain-administrators">领域管理员：{domain.administrators?.map(item => item.displayName).join('、') || '未指定'}</p>
-          <footer>
-            <small>创建于 {formatDate(domain.createdAt)}</small>
-            <button
-              type="button"
-              disabled={!platformAdministrator || domain.default || Boolean(busyKey)}
-              aria-label={`${domain.status === 'ACTIVE' ? '停用' : '启用'}${domain.name}`}
-              title={!platformAdministrator ? '仅平台管理员可以启停领域' : domain.default ? '默认领域不可停用' : undefined}
-              onClick={() => onToggle(domain)}
-            >
-              {busyKey === `domain:${domain.id}`
-                ? <SpinnerGap className="spin" size={20} />
-                : domain.status === 'ACTIVE'
-                  ? <ToggleRight size={24} weight="fill" />
-                  : <ToggleLeft size={24} />}
-            </button>
-          </footer>
-        </article>)}
-      </div>}
-  </div>
-}
-
-function MemberManagement({
+function MemberAuthorization({
   users,
   roles,
-  domains,
-  platformAdministrator,
   busyKey,
   onToggleRole,
-  onToggleDomain,
 }: {
   users: AdminUser[]
   roles: AdminRole[]
-  domains: BusinessDomain[]
-  platformAdministrator: boolean
   busyKey: string
   onToggleRole: (user: AdminUser, role: AdminRole) => void
-  onToggleDomain: (user: AdminUser, domain: BusinessDomain) => void
 }) {
   return <div className="administration-view">
     <header className="administration-view-heading">
-      <div><span className="eyebrow">IDENTITY & ACCESS</span><h2>成员与角色</h2><p>点击角色即可为成员分配或移除职责，变更立即生效。</p></div>
+      <div><span className="eyebrow">MEMBER ACCESS</span><h2>成员授权</h2><p>点击角色即可为成员授予或撤销对应配置权限，变更立即生效。</p></div>
     </header>
     {users.length === 0
-      ? <div className="administration-empty"><UsersThree size={34} /><strong>暂无可管理成员</strong></div>
+      ? <div className="administration-empty"><UsersThree size={34} /><strong>暂无可授权成员</strong></div>
       : <div className="member-management-list">
         {users.map(user => <article key={user.id}>
           <div className="member-identity">
             <span>{user.displayName.slice(0, 1)}</span>
             <div><strong>{user.displayName}</strong><small>{user.email}</small></div>
           </div>
-          <div className="member-meta"><span className={user.status.toLowerCase()}>{user.status === 'ACTIVE' ? '正常' : user.status}</span><small>最近登录：{formatDate(user.lastLoginAt)}</small></div>
-          <div className="member-domain-list" aria-label={`${user.displayName}的领域`}>
-            <small>领域</small>
-            {domains.map(domain => {
-              const assigned = (user.domains ?? []).some(item => item.id === domain.id)
-              const assignment = (user.domains ?? []).find(item => item.id === domain.id)
-              const domainAdministrator = assignment?.memberRole === 'DOMAIN_ADMIN'
-              const busy = busyKey === `user-domain:${user.id}:${domain.id}`
-              return <button
-                type="button"
-                key={domain.id}
-                className={assigned ? 'assigned' : ''}
-                aria-pressed={assigned}
-                disabled={!platformAdministrator || Boolean(busyKey) || domainAdministrator}
-                title={!platformAdministrator ? '仅平台管理员可以直接调整成员领域' : domainAdministrator ? '领域管理员须先由平台管理员完成替换' : undefined}
-                onClick={() => onToggleDomain(user, domain)}
-              >
-                {busy ? <SpinnerGap className="spin" size={13} /> : assigned && <Check size={13} weight="bold" />}
-                {domain.name}{domainAdministrator ? ' · 管理员' : ''}
-              </button>
-            })}
-          </div>
+          <div className="member-meta"><span className={user.status.toLowerCase()}>{user.status === 'ACTIVE' ? '正常' : user.status}</span><small>{user.roles.length} 个角色</small></div>
           <div className="member-role-list" aria-label={`${user.displayName}的角色`}>
             <small>角色</small>
             {roles.map(role => {
@@ -575,7 +376,7 @@ function PermissionManagement({
             <div>
               <span className="eyebrow">{selectedRole.system ? '系统角色 · 只读' : '自定义角色'}</span>
               <h2>{selectedRole.name}</h2>
-              <p>{selectedRole.description || '按业务职责勾选该角色可以使用的功能。'}</p>
+              <p>{selectedRole.description || '按业务职责勾选该角色可以使用的配置能力。'}</p>
             </div>
             {!selectedRole.system && <button className="primary-button" type="button" disabled={!dirty || Boolean(busyKey)} onClick={onSave}>
               {busyKey === `permissions:${selectedRole.id}` ? <SpinnerGap className="spin" size={16} /> : <CheckCircle size={16} />}
@@ -608,44 +409,34 @@ function PermissionManagement({
   </div>
 }
 
-function CreateManagementDialog({
-  type,
-  users,
+function CreateRoleDialog({
   busy,
   error,
   onClose,
   onSubmit,
 }: {
-  type: Exclude<CreateDialog, null>
-  users: AdminUser[]
   busy: boolean
   error: string
   onClose: () => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
 }) {
-  const isDomain = type === 'domain'
   return <div className="administration-dialog-backdrop" role="presentation" onMouseDown={event => {
     if (event.target === event.currentTarget) onClose()
   }}>
     <section className="administration-dialog" role="dialog" aria-modal="true" aria-labelledby="administration-dialog-title">
       <header>
-        <div><span className="eyebrow">{isDomain ? 'BUSINESS DOMAIN' : 'ACCESS ROLE'}</span><h2 id="administration-dialog-title">{isDomain ? '创建业务领域' : '创建自定义角色'}</h2><p>{isDomain ? '创建后会立即出现在侧栏领域切换器中。' : '创建后继续配置权限并分配给成员。'}</p></div>
+        <div><span className="eyebrow">ACCESS ROLE</span><h2 id="administration-dialog-title">创建自定义角色</h2><p>创建后继续配置权限并分配给成员。</p></div>
         <button type="button" aria-label="关闭" disabled={busy} onClick={onClose}><X size={19} /></button>
       </header>
       <form onSubmit={onSubmit}>
-        <label>{isDomain ? '领域名称' : '角色名称'}<input name="name" autoFocus placeholder={isDomain ? '例如：客户运营' : '例如：报告分析师'} /></label>
-        <label>{isDomain ? '领域编码' : '角色编码'}<input name="code" placeholder={isDomain ? 'customer-operations' : 'report_analyst'} /><small>以小写字母开头，可使用数字、下划线和短横线。</small></label>
-        <label>说明<textarea name="description" placeholder={isDomain ? '说明该领域负责的业务范围和分析目标' : '说明该角色的主要职责'} /></label>
-        {isDomain && <fieldset className="domain-administrator-picker">
-          <legend>领域管理员</legend>
-          <small>至少指定一位；创建后仅平台管理员可以调整。</small>
-          {users.filter(user => user.status === 'ACTIVE').map(user => <label key={user.id}>
-            <input type="checkbox" name="administratorUserIds" value={user.id} />
-            <span><strong>{user.displayName}</strong><small>{user.email}</small></span>
-          </label>)}
-        </fieldset>}
-        {error && <div className="administration-dialog-error" role="alert">{error}</div>}
-        <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy}>{busy ? <SpinnerGap className="spin" size={16} /> : <Plus size={16} />}{busy ? '正在创建…' : '确认创建'}</button></footer>
+        <label>角色名称<input name="name" autoFocus placeholder="例如：数据集管理员" /></label>
+        <label>角色编码<input name="code" placeholder="dataset_admin" /><small>以小写字母开头，可使用数字、下划线和短横线。</small></label>
+        <label>说明<textarea name="description" placeholder="说明该角色负责的数据配置范围" /></label>
+        {error && <div className="administration-feedback error" role="alert">{error}</div>}
+        <footer>
+          <button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button>
+          <button className="primary-button" type="submit" disabled={busy}>{busy ? <SpinnerGap className="spin" size={16} /> : <CheckCircle size={16} />}{busy ? '正在创建…' : '创建角色'}</button>
+        </footer>
       </form>
     </section>
   </div>

@@ -13,7 +13,6 @@ var (
 	ErrPublicationRequestConflict   = errors.New("dataset publication request version conflict")
 	ErrPublicationRequestNotPending = errors.New("dataset publication request is not pending")
 	ErrPublicationRequestCancelled  = errors.New("dataset publication request was cancelled after draft change")
-	ErrPublicationCandidatesFailed  = errors.New("dataset publication metric candidate generation failed")
 )
 
 const (
@@ -27,34 +26,25 @@ const (
 // are stored server-side but deliberately omitted from the response because they may contain
 // business filter values; reviewers see the exact hashes and draft identity instead.
 type PublicationRequest struct {
-	ID                         string          `json:"id"`
-	DatasetID                  string          `json:"datasetId"`
-	Status                     string          `json:"status"`
-	Version                    int64           `json:"version"`
-	DraftVersionID             string          `json:"draftVersionId"`
-	ExpectedDatasetVersion     int64           `json:"expectedDatasetVersion"`
-	ExpectedDraftRecordVersion int64           `json:"expectedDraftRecordVersion"`
-	ExpectedDSLHash            string          `json:"expectedDslHash"`
-	ExpectedPlanHash           string          `json:"expectedPlanHash"`
-	RequesterID                string          `json:"requesterId"`
-	RequestNote                string          `json:"requestNote"`
-	ReviewerID                 string          `json:"reviewerId,omitempty"`
-	ReviewNote                 string          `json:"reviewNote,omitempty"`
-	PublishedVersionID         string          `json:"publishedVersionId,omitempty"`
-	SubmittedAt                string          `json:"submittedAt"`
-	ReviewedAt                 string          `json:"reviewedAt,omitempty"`
-	UpdatedAt                  string          `json:"updatedAt"`
-	ValidationParameters       map[string]any  `json:"-"`
-	ReservedPublishedVersionID string          `json:"-"`
-	MetricCandidateResult      json.RawMessage `json:"-"`
-	MetricCandidateStatus      string          `json:"metricCandidateStatus"`
-	MetricCandidateTotal       int             `json:"metricCandidateTotal"`
-	MetricCandidateReady       int             `json:"metricCandidateReady"`
-	MetricCandidateReview      int             `json:"metricCandidateReview"`
-	MetricCandidateBlocked     int             `json:"metricCandidateBlocked"`
-	MetricCandidateWarning     string          `json:"metricCandidateWarning,omitempty"`
-	MetricCandidateErrorCode   string          `json:"metricCandidateErrorCode,omitempty"`
-	MetricCandidateGeneratedAt string          `json:"metricCandidateGeneratedAt,omitempty"`
+	ID                         string         `json:"id"`
+	DatasetID                  string         `json:"datasetId"`
+	Status                     string         `json:"status"`
+	Version                    int64          `json:"version"`
+	DraftVersionID             string         `json:"draftVersionId"`
+	ExpectedDatasetVersion     int64          `json:"expectedDatasetVersion"`
+	ExpectedDraftRecordVersion int64          `json:"expectedDraftRecordVersion"`
+	ExpectedDSLHash            string         `json:"expectedDslHash"`
+	ExpectedPlanHash           string         `json:"expectedPlanHash"`
+	RequesterID                string         `json:"requesterId"`
+	RequestNote                string         `json:"requestNote"`
+	ReviewerID                 string         `json:"reviewerId,omitempty"`
+	ReviewNote                 string         `json:"reviewNote,omitempty"`
+	PublishedVersionID         string         `json:"publishedVersionId,omitempty"`
+	SubmittedAt                string         `json:"submittedAt"`
+	ReviewedAt                 string         `json:"reviewedAt,omitempty"`
+	UpdatedAt                  string         `json:"updatedAt"`
+	ValidationParameters       map[string]any `json:"-"`
+	ReservedPublishedVersionID string         `json:"-"`
 }
 
 type PublicationRequestPage struct {
@@ -96,25 +86,6 @@ type SubmitPublicationPlan struct {
 	ParametersJSON   json.RawMessage
 }
 
-const (
-	PublicationCandidateLegacy    = "LEGACY"
-	PublicationCandidatePending   = "PENDING"
-	PublicationCandidateSucceeded = "SUCCEEDED"
-	PublicationCandidatePartial   = "PARTIAL"
-	PublicationCandidateFailed    = "FAILED"
-)
-
-type PublicationCandidatePreparation struct {
-	Status    string
-	Result    json.RawMessage
-	Total     int
-	Ready     int
-	Review    int
-	Blocked   int
-	Warning   string
-	ErrorCode string
-}
-
 // PublicationApprovalStore keeps request state and the final publication commit in one
 // transaction. ApproveAndPublish is the only approval path allowed to move the published pointer.
 type PublicationApprovalStore interface {
@@ -122,7 +93,6 @@ type PublicationApprovalStore interface {
 	SubmitPublicationRequest(context.Context, string, string, string, SubmitPublicationPlan) (PublicationRequest, error)
 	ListPublicationRequests(context.Context, string, string, int, int) ([]PublicationRequest, int, error)
 	GetPublicationRequest(context.Context, string, string, string) (PublicationRequest, error)
-	SavePublicationCandidatePreparation(context.Context, string, string, PublicationRequest, PublicationCandidatePreparation) (PublicationRequest, error)
 	ApproveAndPublish(context.Context, string, string, string, string, int64, string, PublishPlan) (PublicationRequest, VersionRecord, error)
 	RejectPublicationRequest(context.Context, string, string, string, string, RejectPublicationInput) (PublicationRequest, error)
 }

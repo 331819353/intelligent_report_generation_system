@@ -142,8 +142,8 @@ MANUAL_OWNED / SKIPPED`，因此一个模板不适用不会让其他安全结果
 `POST /api/v1/background-tasks/{kind}/{id}/retry`
 
 请求体和查询参数必须为空，权限检查与中止相同。当前仅对具有检查点或确定性幂等
-恢复协议的 `ODS_DOMAIN_CLASSIFICATION`、`DIM_MODELING`、`DWD_FACT_MODELING`
-和 `DWS_MODELING` 终态任务开放。失败、部分完成、已中止或普通跳过任务返回
+恢复协议的 `ODS_DOMAIN_CLASSIFICATION`、`DIM_MODELING` 和 `DWD_FACT_MODELING`
+终态任务开放。失败、部分完成、已中止或普通跳过任务返回
 `canRetry=true`；成功任务、运行中任务和同领域合并记录不允许重试。重试前两项
 建模任务会自动把其后的阶段重新排队，防止下游继续使用已失效的结构化结果。
 

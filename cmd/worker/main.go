@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -23,20 +21,12 @@ import (
 	"intelligent-report-generation-system/internal/materialization"
 	"intelligent-report-generation-system/internal/materializationworker"
 	"intelligent-report-generation-system/internal/metadataai"
-	"intelligent-report-generation-system/internal/metric"
-	"intelligent-report-generation-system/internal/metriccandidate"
-	"intelligent-report-generation-system/internal/metricsemantic"
 	"intelligent-report-generation-system/internal/observability"
 	"intelligent-report-generation-system/internal/platform/database"
-	"intelligent-report-generation-system/internal/semanticasset"
-	"intelligent-report-generation-system/internal/semanticcatalog"
-	"intelligent-report-generation-system/internal/semanticgraph"
-	"intelligent-report-generation-system/internal/semanticmanagement"
-	"intelligent-report-generation-system/internal/semanticqa"
 	"intelligent-report-generation-system/internal/warehouse"
 )
 
-// main 装配持久化元数据任务 worker；HTTP 提交后由该进程完成采样和 LLM 加工。
+// main runs only background work required by data-source and dataset configuration.
 func main() {
 	cfg, err := config.LoadWorker()
 	if err != nil {
@@ -56,6 +46,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+
 	warehouseStartupCtx, warehouseStartupCancel := context.WithTimeout(ctx, 10*time.Second)
 	warehousePool, err := database.Open(warehouseStartupCtx, cfg.WarehouseDatabaseURL)
 	warehouseStartupCancel()
@@ -66,14 +57,17 @@ func main() {
 	defer warehousePool.Close()
 
 	dataSourceRepo := datasource.NewPostgresRepository(pool)
-	jobRepo := datasource.NewPostgresMetadataJobRepository(pool)
-	objectStorage, err := datasource.NewMinIOStorage(cfg.MinIOEndpoint, cfg.MinIOAccessKey, cfg.MinIOSecretKey, cfg.MinIOUseSSL)
+	objectStorage, err := datasource.NewMinIOStorage(
+		cfg.MinIOEndpoint, cfg.MinIOAccessKey, cfg.MinIOSecretKey, cfg.MinIOUseSSL,
+	)
 	if err != nil {
 		logger.Error("initialize object storage", "error", err)
 		os.Exit(1)
 	}
 	excelManager := datasource.NewExcelManager(dataSourceRepo, objectStorage, cfg.MinIOUploadsBucket)
-	credentialManager, err := datasource.NewCredentialManager(cfg.DataSourceCredentialKey, datasource.EnvSecretResolver{})
+	credentialManager, err := datasource.NewCredentialManager(
+		cfg.DataSourceCredentialKey, datasource.EnvSecretResolver{},
+	)
 	if err != nil {
 		logger.Error("initialize data source credential manager", "error", err)
 		os.Exit(1)
@@ -96,8 +90,13 @@ func main() {
 		datasource.TypeOracle, cfg.ConnectorURL, cfg.ConnectorToken,
 		credentialManager, connectorLimits,
 	)
-	dataSourceService := datasource.NewService(dataSourceRepo, mysqlConnector, oracleConnector, datasource.NewExcelConnector(excelManager))
-	dataSourceService.SetMetadataJobRepository(jobRepo)
+	dataSourceService := datasource.NewService(
+		dataSourceRepo,
+		mysqlConnector,
+		oracleConnector,
+		datasource.NewExcelConnector(excelManager),
+	)
+	dataSourceService.SetMetadataJobRepository(datasource.NewPostgresMetadataJobRepository(pool))
 
 	providerEndpoints := make([]aiplatform.ProviderEndpoint, 0, len(cfg.AIProviderEndpoints))
 	for _, endpoint := range cfg.AIProviderEndpoints {
@@ -109,26 +108,36 @@ func main() {
 	modelProvider := aiplatform.NewMultiEndpointProviderPool(
 		providerEndpoints, &http.Client{Timeout: cfg.AIAttemptTimeout},
 	)
-	aiService, err := aiplatform.NewService(aiplatform.NewPostgresStore(pool), modelProvider, aiplatform.ServiceOptions{
-		Timeout: cfg.AIRequestTimeout, AttemptTimeout: cfg.AIAttemptTimeout,
-		MaxAttempts: cfg.AIMaxAttempts, BaseRetryDelay: cfg.AIRetryBaseDelay, MaxRetryDelay: cfg.AIRetryMaxDelay,
-		MaxInputBytes: cfg.AIMaxInputBytes, InputCostMicrosPerMTokens: cfg.AIInputCostMicrosPerMTokens,
-		OutputCostMicrosPerMTokens: cfg.AIOutputCostMicrosPerMTokens,
-	})
+	aiService, err := aiplatform.NewService(
+		aiplatform.NewPostgresStore(pool), modelProvider, aiplatform.ServiceOptions{
+			Timeout: cfg.AIRequestTimeout, AttemptTimeout: cfg.AIAttemptTimeout,
+			MaxAttempts: cfg.AIMaxAttempts, BaseRetryDelay: cfg.AIRetryBaseDelay,
+			MaxRetryDelay: cfg.AIRetryMaxDelay, MaxInputBytes: cfg.AIMaxInputBytes,
+			InputCostMicrosPerMTokens:  cfg.AIInputCostMicrosPerMTokens,
+			OutputCostMicrosPerMTokens: cfg.AIOutputCostMicrosPerMTokens,
+		},
+	)
 	if err != nil {
-		logger.Error("initialize AI orchestration", "error", err)
+		logger.Error("initialize dataset AI support", "error", err)
 		os.Exit(1)
 	}
+
 	datasetStore := dataset.NewPostgresStore(pool)
-	datasetService := dataset.NewService(datasetStore)
-	metricCandidateStore := metriccandidate.NewPostgresStore(pool)
 	materializationStore := materialization.NewPostgresStoreWithWarehouse(pool, warehousePool)
-	datasetStore.SetPublicationCommitSink(metricCandidateStore)
 	datasetStore.SetMappedPublicationCommitSink(materializationStore)
 	datasetStore.SetGovernedPublicationCommitSink(materializationStore)
 	datasetStore.SetMaterializationDeletionSink(materializationStore)
 	metadataAIStore := metadataai.NewPostgresStore(pool)
 	metadataAIStore.SetEnrichmentCommitSink(datasetStore)
+	metadataAIService := metadataai.NewService(
+		metadataAIStore,
+		metadataai.NewOrchestratedProviderWithPrimaryFailover(aiService, cfg.AIPrimaryFailoverTimeout),
+		cfg.AIRequestTimeout,
+		cfg.AIConfidenceThreshold,
+	)
+	dataSourceService.SetTableCompleter(metadataAIService)
+	dataSourceService.SetMappedDatasetDraftEnsurer(datasetStore)
+
 	reconcileCtx, reconcileCancel := context.WithTimeout(ctx, 30*time.Second)
 	reconciledDatasets, err := datasetStore.ReconcileMappedDatasets(reconcileCtx)
 	reconcileCancel()
@@ -139,226 +148,71 @@ func main() {
 	if reconciledDatasets > 0 {
 		logger.Info("mapped table datasets reconciled", "count", reconciledDatasets)
 	}
-	metadataAIService := metadataai.NewService(
-		metadataAIStore,
-		metadataai.NewOrchestratedProviderWithPrimaryFailover(
-			aiService, cfg.AIPrimaryFailoverTimeout,
-		),
-		cfg.AIRequestTimeout,
-		cfg.AIConfidenceThreshold,
-	)
-	dataSourceService.SetTableCompleter(metadataAIService)
-	dataSourceService.SetMappedDatasetDraftEnsurer(datasetStore)
 
 	workerID := uuid.NewString()
-	logger.Info("worker starting", "worker_id", workerID, "poll_interval", cfg.WorkerPollInterval.String(), "environment", cfg.Environment)
+	logger.Info(
+		"worker starting", "worker_id", workerID,
+		"poll_interval", cfg.WorkerPollInterval.String(), "environment", cfg.Environment,
+	)
 	embeddingProvider := embedding.NewOpenAICompatibleProvider(
-		cfg.AIEmbeddingBaseURL, cfg.AIEmbeddingAPIKey, cfg.AIEmbeddingModel, cfg.AIEmbeddingDimensions,
-		&http.Client{Timeout: cfg.AIEmbeddingTimeout},
+		cfg.AIEmbeddingBaseURL, cfg.AIEmbeddingAPIKey, cfg.AIEmbeddingModel,
+		cfg.AIEmbeddingDimensions, &http.Client{Timeout: cfg.AIEmbeddingTimeout},
 	)
 	go runMetadataJobWorker(ctx, logger, dataSourceService, workerID, cfg.WorkerPollInterval)
-	go runAssetEmbeddingWorker(ctx, logger, assetembedding.NewWorker(assetembedding.NewPostgresStore(pool), embeddingProvider), workerID, cfg.WorkerPollInterval)
-	metricEmbeddingWorker := metricsemantic.NewWorker(
-		metricsemantic.NewPostgresStore(pool), embeddingProvider,
+	go runAssetEmbeddingWorker(
+		ctx,
+		logger,
+		assetembedding.NewWorker(assetembedding.NewPostgresStore(pool), embeddingProvider),
+		workerID,
+		cfg.WorkerPollInterval,
 	)
-	for index := 1; index <= 8; index++ {
-		go runMetricEmbeddingWorker(
-			ctx, logger, metricEmbeddingWorker,
-			workerID+"-metric-vector-"+strconv.Itoa(index),
-			cfg.WorkerPollInterval,
-		)
-	}
-	go runSemanticCatalogWorker(ctx, logger, semanticcatalog.NewWorker(
-		semanticcatalog.NewPostgresStore(pool), embeddingProvider,
-	), workerID, cfg.WorkerPollInterval)
-	go runSemanticAssetEmbeddingWorker(
-		ctx, logger,
-		semanticasset.NewEmbeddingWorker(
-			semanticasset.NewPostgresStore(pool), embeddingProvider,
-		),
-		workerID, cfg.WorkerPollInterval,
-	)
-	go semanticasset.RunRuntimeProjectionWorker(
-		ctx, logger,
-		semanticasset.NewRuntimeProjectionWorker(semanticasset.NewPostgresStore(pool)),
-		workerID, cfg.WorkerPollInterval,
-	)
-	if !cfg.NebulaGraphEnabled {
-		logger.Error("NebulaGraph is required by the semantic release projection runtime")
-		os.Exit(1)
-	}
-	if cfg.NebulaGraphEnabled {
-		var nebulaTLSConfig *tls.Config
-		if cfg.NebulaGraphTLSEnabled {
-			nebulaTLSConfig, err = semanticgraph.LoadTLSConfig(
-				cfg.NebulaGraphCAFile, cfg.NebulaGraphTLSServerName,
-			)
-			if err != nil {
-				logger.Error("load NebulaGraph TLS configuration", "error", err)
-				os.Exit(1)
-			}
-		}
-		nebulaClient, nebulaErr := semanticgraph.NewNebulaClient(semanticgraph.NebulaConfig{
-			Addresses: cfg.NebulaGraphAddresses, Username: cfg.NebulaGraphUsername,
-			Password: cfg.NebulaGraphPassword, Space: cfg.NebulaGraphSpace,
-			Timeout: cfg.NebulaGraphTimeout, IdleTimeout: cfg.NebulaGraphIdleTimeout,
-			MinimumPoolSize: cfg.NebulaGraphPoolMinSize,
-			MaximumPoolSize: cfg.NebulaGraphPoolMaxSize, TLSConfig: nebulaTLSConfig,
-		})
-		if nebulaErr != nil {
-			logger.Error("initialize NebulaGraph projection client", "error", nebulaErr)
-			os.Exit(1)
-		}
-		defer nebulaClient.Close()
-		go semanticgraph.RunProjectionWorker(
-			ctx, logger,
-			semanticgraph.NewProjectionWorker(
-				semanticgraph.NewPostgresStore(pool),
-				semanticgraph.NewProjector(nebulaClient), cfg.NebulaGraphSpace,
-			),
-			workerID, cfg.WorkerPollInterval,
-		)
-	} else {
-		logger.Warn("NebulaGraph projection is disabled")
-	}
-	go semanticqa.RunDWSModelingWorker(
-		ctx, logger,
-		semanticqa.NewDWSModelingWorker(
-			semanticqa.NewPostgresStore(pool),
-			datasetService,
-			semanticqa.NewOrchestratedDWSAnalysisSelector(aiService),
-		),
-		workerID, cfg.WorkerPollInterval,
-	)
-	go semanticqa.RunADSModelingWorker(
-		ctx, logger,
-		semanticqa.NewADSModelingWorker(
-			semanticqa.NewPostgresStore(pool),
-			datasetService,
-		),
-		workerID, cfg.WorkerPollInterval,
-	)
+
 	odsResolver := materializationworker.NewODSResolver(
 		pool,
-		warehouse.NewStagerWithMaxBytes(
-			warehousePool, mysqlConnector, cfg.WarehouseStageMaxBytes,
-		),
-		warehouse.NewStagerWithMaxBytes(
-			warehousePool, oracleConnector, cfg.WarehouseStageMaxBytes,
-		),
-		warehouse.NewFileStagerWithMaxBytes(
-			warehousePool, excelManager, cfg.WarehouseStageMaxBytes,
-		),
+		warehouse.NewStagerWithMaxBytes(warehousePool, mysqlConnector, cfg.WarehouseStageMaxBytes),
+		warehouse.NewStagerWithMaxBytes(warehousePool, oracleConnector, cfg.WarehouseStageMaxBytes),
+		warehouse.NewFileStagerWithMaxBytes(warehousePool, excelManager, cfg.WarehouseStageMaxBytes),
 	)
 	odsResolver.SetFullProjector(warehouse.NewODSProjector(warehousePool))
-	postgresResolver := materializationworker.NewSeparatedPostgresResolver(
-		pool, warehousePool,
-	)
+	postgresResolver := materializationworker.NewSeparatedPostgresResolver(pool, warehousePool)
 	postgresResolver.SetODSRehydrator(odsResolver)
-	go runMaterializationWorker(ctx, logger, materializationworker.NewWorker(
-		materializationStore,
-		materializationworker.NewCompositeResolver(
-			odsResolver, postgresResolver,
+	go runMaterializationWorker(
+		ctx,
+		logger,
+		materializationworker.NewWorker(
+			materializationStore,
+			materializationworker.NewCompositeResolver(odsResolver, postgresResolver),
+			warehouse.NewExecutor(warehousePool),
 		),
-		warehouse.NewExecutor(warehousePool),
-	), workerID, cfg.WorkerPollInterval)
+		workerID,
+		cfg.WorkerPollInterval,
+	)
 	go runDatasetMaterializationCleanupWorker(
 		ctx, logger, materializationStore, workerID, cfg.WorkerPollInterval,
 	)
-	dimensionStore := semanticmanagement.NewPostgresStoreWithWarehouse(
-		pool, warehousePool,
-	)
-	go runDimensionMemberRefreshWorker(ctx, logger, semanticmanagement.NewDimensionRefreshWorker(
-		dimensionStore,
-	), workerID, cfg.WorkerPollInterval)
-	go runDimensionProfileWorker(ctx, logger, semanticmanagement.NewDimensionProfileWorker(
-		dimensionStore,
-	), workerID, cfg.WorkerPollInterval)
-	dimensionDecisionWorker :=
-		semanticmanagement.NewDimensionWhereDecisionWorker(
-			dimensionStore,
-			semanticmanagement.NewOrchestratedDimensionWherePolicyDesigner(
-				aiService, cfg.AIRequestTimeout,
-			),
-		)
-	for index := 1; index <= 2; index++ {
-		go runDimensionWhereDecisionWorker(
-			ctx, logger, dimensionDecisionWorker,
-			workerID+"-where-policy-"+strconv.Itoa(index),
-			cfg.WorkerPollInterval,
-		)
-	}
-	go runDatasetTagSuggestionWorker(ctx, logger, datasettagsuggestion.NewWorker(
-		datasettagsuggestion.NewPostgresStore(pool),
-		datasettagsuggestion.NewGenerator(aiService, cfg.AIRequestTimeout),
-	), workerID, cfg.WorkerPollInterval)
-	go runDWDModelingWorker(ctx, logger, dataset.NewDWDModelingWorker(
-		datasetStore,
-		dataset.NewOrchestratedDWDModelingPlanner(aiService, cfg.AIRequestTimeout),
-	), workerID, cfg.WorkerPollInterval)
-	metricCandidateWorker := metriccandidate.NewWorker(metricCandidateStore)
-	metricCandidateWorker.SetEnricher(metriccandidate.NewEnricher(
-		aiService, cfg.AIRequestTimeout, metricCandidateStore,
-	))
-	metricCandidateWorker.SetAutomaticApprover(metriccandidate.NewAutomaticApprover(
-		metricCandidateStore,
-		metriccandidate.NewService(
-			metricCandidateStore,
-			metric.NewService(metric.NewPostgresStore(pool)),
+	go runDatasetTagSuggestionWorker(
+		ctx,
+		logger,
+		datasettagsuggestion.NewWorker(
+			datasettagsuggestion.NewPostgresStore(pool),
+			datasettagsuggestion.NewGenerator(aiService, cfg.AIRequestTimeout),
 		),
-	))
-	runMetricExtractionWorker(
-		ctx, logger, metricCandidateWorker, workerID, cfg.WorkerPollInterval,
+		workerID,
+		cfg.WorkerPollInterval,
 	)
-	logger.Info("worker stopped")
-}
+	go runDWDModelingWorker(
+		ctx,
+		logger,
+		dataset.NewDWDModelingWorker(
+			datasetStore,
+			dataset.NewOrchestratedDWDModelingPlanner(aiService, cfg.AIRequestTimeout),
+		),
+		workerID,
+		cfg.WorkerPollInterval,
+	)
 
-func runDimensionProfileWorker(
-	ctx context.Context,
-	logger *slog.Logger,
-	worker *semanticmanagement.DimensionProfileWorker,
-	workerID string,
-	pollInterval time.Duration,
-) {
-	// Profile work is bounded to 60 seconds by the frozen job policy. The
-	// heartbeat keeps its owner/token/attempt fence alive and cancels the
-	// aggregate query immediately if that fence is lost.
-	const lease = 2 * time.Minute
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-		processed := false
-		tenantIDs, err := worker.TenantIDs(ctx)
-		if err != nil {
-			logger.Error("list dimension profile tenants", "error", err)
-		} else {
-			for _, tenantID := range tenantIDs {
-				didProcess, runErr := worker.ProcessNext(
-					ctx, tenantID, workerID, lease,
-				)
-				if runErr != nil {
-					logger.Error(
-						"process dimension profile",
-						"tenant_id", tenantID,
-						"error", runErr,
-					)
-				}
-				if didProcess {
-					processed = true
-				}
-			}
-		}
-		if processed {
-			timer.Reset(10 * time.Millisecond)
-		} else {
-			timer.Reset(pollInterval)
-		}
-	}
+	<-ctx.Done()
+	logger.Info("worker stopped")
 }
 
 func runDatasetTagSuggestionWorker(
@@ -368,44 +222,22 @@ func runDatasetTagSuggestionWorker(
 	workerID string,
 	pollInterval time.Duration,
 ) {
-	// The worker renews this lease at lease/3 while the external LLM call is
-	// running and cancels that call if the fenced heartbeat fails.
 	const lease = 2 * time.Minute
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
 		processed := false
 		tenantIDs, err := worker.TenantIDs(ctx)
 		if err != nil {
-			logger.Error("list dataset tag suggestion tenants", "error", err)
-		} else {
-			for _, tenantID := range tenantIDs {
-				didProcess, runErr := worker.ProcessNext(
-					ctx, tenantID, workerID, lease,
-				)
-				if runErr != nil {
-					logger.Error(
-						"process dataset tag suggestion",
-						"tenant_id", tenantID,
-						"error", runErr,
-					)
-				}
-				if didProcess {
-					processed = true
-				}
+			return false, err
+		}
+		for _, tenantID := range tenantIDs {
+			didProcess, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
+			if runErr != nil {
+				logger.Error("process dataset tag suggestion", "tenant_id", tenantID, "error", runErr)
 			}
+			processed = processed || didProcess
 		}
-		if processed {
-			timer.Reset(10 * time.Millisecond)
-		} else {
-			timer.Reset(pollInterval)
-		}
-	}
+		return processed, nil
+	}, func(err error) { logger.Error("list dataset tag suggestion tenants", "error", err) })
 }
 
 func runDWDModelingWorker(
@@ -415,101 +247,34 @@ func runDWDModelingWorker(
 	workerID string,
 	pollInterval time.Duration,
 ) {
-	// The worker keeps a heartbeat for the whole domain plan, including provider
-	// calls whose configured timeout can exceed the base lease. FACT branches run
-	// with bounded concurrency and checkpoint independently, so a crashed worker
-	// resumes only missing stages after ownership expires.
 	const lease = 2 * time.Minute
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
 		processed := false
 		tenantIDs, err := worker.TenantIDs(ctx)
 		if err != nil {
-			logger.Error("list DIM/DWD modeling tenants", "error", err)
-		} else {
-			for _, tenantID := range tenantIDs {
-				didProcess, runErr := worker.ProcessNext(
-					ctx, tenantID, workerID, lease,
+			return false, err
+		}
+		for _, tenantID := range tenantIDs {
+			didProcess, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
+			if runErr != nil {
+				var providerError *aiplatform.ProviderError
+				errors.As(runErr, &providerError)
+				providerStatus := 0
+				providerCode := ""
+				if providerError != nil {
+					providerStatus = providerError.StatusCode
+					providerCode = string(providerError.Code)
+				}
+				logger.Error(
+					"process dataset modeling", "tenant_id", tenantID,
+					"provider_status", providerStatus, "provider_code", providerCode,
+					"error", runErr,
 				)
-				if runErr != nil {
-					var providerError *aiplatform.ProviderError
-					errors.As(runErr, &providerError)
-					providerStatus := 0
-					providerCode := ""
-					if providerError != nil {
-						providerStatus = providerError.StatusCode
-						providerCode = string(providerError.Code)
-					}
-					logger.Error(
-						"process LLM DIM/DWD modeling",
-						"tenant_id", tenantID,
-						"provider_status", providerStatus,
-						"provider_code", providerCode,
-						"error", runErr,
-					)
-				}
-				if didProcess {
-					processed = true
-				}
 			}
+			processed = processed || didProcess
 		}
-		if processed {
-			timer.Reset(10 * time.Millisecond)
-		} else {
-			timer.Reset(pollInterval)
-		}
-	}
-}
-
-func runDimensionMemberRefreshWorker(
-	ctx context.Context,
-	logger *slog.Logger,
-	worker *semanticmanagement.DimensionRefreshWorker,
-	workerID string,
-	pollInterval time.Duration,
-) {
-	// The largest accepted refresh timeout is five minutes. A longer lease
-	// prevents healthy work from being reclaimed while still allowing recovery.
-	const lease = 10 * time.Minute
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-		processed := false
-		tenantIDs, err := worker.TenantIDs(ctx)
-		if err != nil {
-			logger.Error("list dimension member refresh tenants", "error", err)
-		} else {
-			for _, tenantID := range tenantIDs {
-				didProcess, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
-				if runErr != nil {
-					logger.Error(
-						"process dimension member refresh",
-						"tenant_id", tenantID,
-						"error", runErr,
-					)
-				}
-				if didProcess {
-					processed = true
-				}
-			}
-		}
-		if processed {
-			timer.Reset(10 * time.Millisecond)
-		} else {
-			timer.Reset(pollInterval)
-		}
-	}
+		return processed, nil
+	}, func(err error) { logger.Error("list dataset modeling tenants", "error", err) })
 }
 
 func runMaterializationWorker(
@@ -520,39 +285,21 @@ func runMaterializationWorker(
 	pollInterval time.Duration,
 ) {
 	const lease = 5 * time.Minute
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
 		processed := false
 		tenantIDs, err := worker.TenantIDs(ctx)
 		if err != nil {
-			logger.Error("list materialization tenants", "error", err)
-		} else {
-			for _, tenantID := range tenantIDs {
-				didProcess, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
-				if runErr != nil {
-					logger.Error(
-						"process dataset materialization",
-						"tenant_id", tenantID,
-						"error", runErr,
-					)
-				}
-				if didProcess {
-					processed = true
-				}
+			return false, err
+		}
+		for _, tenantID := range tenantIDs {
+			didProcess, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
+			if runErr != nil {
+				logger.Error("process dataset materialization", "tenant_id", tenantID, "error", runErr)
 			}
+			processed = processed || didProcess
 		}
-		if processed {
-			timer.Reset(10 * time.Millisecond)
-		} else {
-			timer.Reset(pollInterval)
-		}
-	}
+		return processed, nil
+	}, func(err error) { logger.Error("list materialization tenants", "error", err) })
 }
 
 func runDatasetMaterializationCleanupWorker(
@@ -563,269 +310,84 @@ func runDatasetMaterializationCleanupWorker(
 	pollInterval time.Duration,
 ) {
 	const lease = 8 * time.Minute
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
 		processed := false
 		tenantIDs, err := store.ListTenantIDs(ctx)
 		if err != nil {
-			logger.Error("list materialization cleanup tenants", "error", err)
-		} else {
-			for _, tenantID := range tenantIDs {
-				didProcess, runErr := store.ProcessNextDatasetMaterializationCleanup(
-					ctx, tenantID, workerID, lease,
+			return false, err
+		}
+		for _, tenantID := range tenantIDs {
+			didProcess, runErr := store.ProcessNextDatasetMaterializationCleanup(
+				ctx, tenantID, workerID, lease,
+			)
+			if runErr != nil {
+				logger.Error(
+					"cleanup dataset warehouse materializations",
+					"tenant_id", tenantID, "error", runErr,
 				)
-				if runErr != nil {
-					logger.Error(
-						"cleanup dataset warehouse materializations",
-						"tenant_id", tenantID,
-						"error", runErr,
-					)
-				}
-				if didProcess {
-					processed = true
-				}
 			}
+			processed = processed || didProcess
 		}
-		if processed {
-			timer.Reset(10 * time.Millisecond)
-		} else {
-			timer.Reset(pollInterval)
-		}
-	}
+		return processed, nil
+	}, func(err error) { logger.Error("list materialization cleanup tenants", "error", err) })
 }
 
-func runSemanticCatalogWorker(
+func runAssetEmbeddingWorker(
 	ctx context.Context,
 	logger *slog.Logger,
-	worker *semanticcatalog.Worker,
-	workerID string,
-	pollInterval time.Duration,
-) {
-	// The worker renews each embedding event at lease/3 while its provider
-	// batch is in flight and suppresses completion after a lost fence.
-	const lease = 2 * time.Minute
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-		processed := 0
-		tenantIDs, err := worker.TenantIDs(ctx)
-		if err != nil {
-			logger.Error("list semantic catalog tenants", "error", err)
-		} else {
-			for _, tenantID := range tenantIDs {
-				count, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
-				if runErr != nil {
-					logger.Error(
-						"process semantic catalog events",
-						"tenant_id", tenantID,
-						"error", runErr,
-					)
-				}
-				processed += count
-			}
-		}
-		if processed > 0 {
-			timer.Reset(10 * time.Millisecond)
-		} else {
-			timer.Reset(pollInterval)
-		}
-	}
-}
-
-func runSemanticAssetEmbeddingWorker(
-	ctx context.Context,
-	logger *slog.Logger,
-	worker *semanticasset.EmbeddingWorker,
+	worker *assetembedding.Worker,
 	workerID string,
 	pollInterval time.Duration,
 ) {
 	const lease = 2 * time.Minute
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-		processed := 0
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
+		processed := false
 		tenantIDs, err := worker.TenantIDs(ctx)
 		if err != nil {
-			logger.Error("list semantic asset tenants", "error", err)
-		} else {
-			for _, tenantID := range tenantIDs {
-				count, runErr := worker.ProcessNext(
-					ctx, tenantID, workerID, lease,
-				)
-				if runErr != nil {
-					logger.Error(
-						"process semantic asset embeddings",
-						"tenant_id", tenantID,
-						"error", runErr,
-					)
-				}
-				processed += count
+			return false, err
+		}
+		for _, tenantID := range tenantIDs {
+			count, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
+			if runErr != nil {
+				logger.Error("process asset embeddings", "tenant_id", tenantID, "error", runErr)
 			}
+			processed = processed || count > 0
 		}
-		if processed > 0 {
-			timer.Reset(10 * time.Millisecond)
-		} else {
-			timer.Reset(pollInterval)
-		}
-	}
+		return processed, nil
+	}, func(err error) { logger.Error("list asset embedding tenants", "error", err) })
 }
 
-func runAssetEmbeddingWorker(ctx context.Context, logger *slog.Logger, worker *assetembedding.Worker, workerID string, pollInterval time.Duration) {
-	const lease = 2 * time.Minute
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-		processed := 0
-		tenantIDs, err := worker.TenantIDs(ctx)
-		if err != nil {
-			logger.Error("list asset embedding tenants", "error", err)
-		} else {
-			for _, tenantID := range tenantIDs {
-				count, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
-				if runErr != nil {
-					logger.Error("process asset embeddings", "tenant_id", tenantID, "error", runErr)
-				}
-				processed += count
-			}
-		}
-		if processed > 0 {
-			timer.Reset(10 * time.Millisecond)
-		} else {
-			timer.Reset(pollInterval)
-		}
-	}
-}
-
-func runMetadataJobWorker(ctx context.Context, logger *slog.Logger, service *datasource.Service, workerID string, pollInterval time.Duration) {
+func runMetadataJobWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	service *datasource.Service,
+	workerID string,
+	pollInterval time.Duration,
+) {
 	const lease = 5 * time.Minute
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
 		processed := false
 		tenantIDs, err := service.MetadataJobTenantIDs(ctx)
 		if err != nil {
-			logger.Error("list metadata job tenants", "error", err)
-		} else {
-			for _, tenantID := range tenantIDs {
-				didProcess, runErr := service.ProcessNextMetadataJob(ctx, tenantID, workerID, lease)
-				if runErr != nil {
-					logger.Error("process metadata job", "tenant_id", tenantID, "error", runErr)
-				}
-				if didProcess {
-					processed = true
-				}
+			return false, err
+		}
+		for _, tenantID := range tenantIDs {
+			didProcess, runErr := service.ProcessNextMetadataJob(ctx, tenantID, workerID, lease)
+			if runErr != nil {
+				logger.Error("process metadata job", "tenant_id", tenantID, "error", runErr)
 			}
+			processed = processed || didProcess
 		}
-		if processed {
-			timer.Reset(10 * time.Millisecond)
-		} else {
-			timer.Reset(pollInterval)
-		}
-	}
+		return processed, nil
+	}, func(err error) { logger.Error("list metadata job tenants", "error", err) })
 }
 
-func runMetricExtractionWorker(ctx context.Context, logger *slog.Logger, worker *metriccandidate.Worker, workerID string, pollInterval time.Duration) {
-	// 规则提取、候选持久化和程序审批共用同一轮 worker 调度；租约覆盖
-	// 精确版本读取与候选批量写入，审批步骤本身仍使用指标事务边界。
-	const lease = 10 * time.Minute
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-		processed := false
-		tenantIDs, err := worker.TenantIDs(ctx)
-		if err != nil {
-			logger.Error("list metric extraction job tenants", "error", err)
-		} else {
-			for _, tenantID := range tenantIDs {
-				didProcess, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
-				if runErr != nil {
-					logger.Error("process metric extraction job", "tenant_id", tenantID, "error", runErr)
-				}
-				if didProcess {
-					processed = true
-				}
-			}
-		}
-		if processed {
-			timer.Reset(10 * time.Millisecond)
-		} else {
-			timer.Reset(pollInterval)
-		}
-	}
-}
-
-func runMetricEmbeddingWorker(ctx context.Context, logger *slog.Logger, worker *metricsemantic.Worker, workerID string, pollInterval time.Duration) {
-	const lease = 2 * time.Minute
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-		processed := false
-		tenantIDs, err := worker.TenantIDs(ctx)
-		if err != nil {
-			logger.Error("list metric embedding tenants", "error", err)
-		} else {
-			for _, tenantID := range tenantIDs {
-				didProcess, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
-				if runErr != nil {
-					logger.Error("process metric embedding", "tenant_id", tenantID, "error", runErr)
-				}
-				if didProcess {
-					processed = true
-				}
-			}
-		}
-		if processed {
-			timer.Reset(10 * time.Millisecond)
-		} else {
-			timer.Reset(pollInterval)
-		}
-	}
-}
-
-func runDimensionWhereDecisionWorker(
+func runTenantWorkerLoop(
 	ctx context.Context,
-	logger *slog.Logger,
-	worker *semanticmanagement.DimensionWhereDecisionWorker,
-	workerID string,
 	pollInterval time.Duration,
+	process func(context.Context) (bool, error),
+	onListError func(error),
 ) {
-	const lease = 2 * time.Minute
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {
@@ -834,28 +396,9 @@ func runDimensionWhereDecisionWorker(
 			return
 		case <-timer.C:
 		}
-		processed := false
-		tenantIDs, err := worker.TenantIDs(ctx)
+		processed, err := process(ctx)
 		if err != nil {
-			logger.Error(
-				"list dimension WHERE decision tenants",
-				"error", err,
-			)
-		} else {
-			for _, tenantID := range tenantIDs {
-				didProcess, runErr := worker.ProcessNext(
-					ctx, tenantID, workerID, lease,
-				)
-				if runErr != nil {
-					logger.Error(
-						"process dimension WHERE decision",
-						"tenant_id", tenantID, "error", runErr,
-					)
-				}
-				if didProcess {
-					processed = true
-				}
-			}
+			onListError(err)
 		}
 		if processed {
 			timer.Reset(10 * time.Millisecond)

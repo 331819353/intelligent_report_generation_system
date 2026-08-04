@@ -7,7 +7,7 @@
 
 系统核心业务后端继续使用 Go。数据库连接、连接测试、受控查询、元数据读取以及 Excel 解析由独立 Python Connector Service 承担。
 
-- Go：租户、认证、权限、数据源领域状态、密钥引用、数据集 DSL、查询计划、跨源编排、缓存、报告和审计。
+- Go：租户、认证、权限、数据源领域状态、密钥引用、数据集 DSL、查询计划、跨源编排和审计。
 - Python：MySQL、Oracle、Excel 的驱动适配和源端执行。
 - Oracle：`python-oracledb` Thin 模式，不依赖 Oracle Client、Instant Client、OCI 或 CGO。
 - MySQL：PyMySQL。

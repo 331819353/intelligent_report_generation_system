@@ -1,4 +1,4 @@
-.PHONY: fmt lint build ci-check run-api run-worker run-connection-test-worker dev-up dev-stop dev-restart dev-status dev-logs seed-dev frontend-lint frontend-build infra-config infra-up connector-up connector-status infra-down infra-reset infra-status infra-logs db-migrate db-verify warehouse-verify semantic-qa-verify db-shell warehouse-shell clean
+.PHONY: fmt lint build ci-check run-api run-worker run-connection-test-worker dev-up dev-stop dev-restart dev-status dev-logs seed-dev frontend-lint frontend-build infra-config infra-up connector-up connector-status infra-down infra-reset infra-status infra-logs db-migrate db-verify warehouse-verify db-shell warehouse-shell clean
 
 export GOCACHE ?= $(CURDIR)/.cache/go-build
 
@@ -30,7 +30,7 @@ infra-config:
 	@docker compose --env-file .env.example config --quiet
 
 infra-up:
-	@docker compose --env-file .env.example up -d --wait postgres postgres-warehouse redis minio
+	@docker compose --env-file .env.example up -d --wait postgres postgres-warehouse minio
 	@docker compose --env-file .env.example run --rm minio-init
 
 connector-up:
@@ -61,9 +61,6 @@ db-verify:
 
 warehouse-verify:
 	@./scripts/verify-warehouse.sh
-
-semantic-qa-verify:
-	@./scripts/verify-semantic-qa.sh
 
 db-shell:
 	@docker compose --env-file .env.example exec postgres psql -U report_admin -d intelligent_report_control

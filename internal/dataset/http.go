@@ -132,8 +132,6 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 	registerLLMTrigger("POST /api/v1/datasets/trigger-dwd-modeling", LLMTriggerDWDModeling)
 	// 兼容旧客户端；组合入口不再隐式触发 DIM，只执行明细建模。
 	registerLLMTrigger("POST /api/v1/datasets/trigger-dim-dwd-modeling", LLMTriggerDWDModeling)
-	registerLLMTrigger("POST /api/v1/datasets/trigger-dws-modeling", LLMTriggerDWSModeling)
-	registerLLMTrigger("POST /api/v1/datasets/trigger-ads-modeling", LLMTriggerADSModeling)
 	mux.Handle("GET /api/v1/datasets/{id}", protect("READ", objectID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, _ := auth.ClaimsFromContext(r.Context())
 		record, err := service.Get(r.Context(), claims.TenantID, r.PathValue("id"))
@@ -438,8 +436,6 @@ func writeDatasetError(w http.ResponseWriter, err error) {
 		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_PUBLICATION_REQUEST_CANCELLED", "message": "数据集草稿已变更，原发布审批申请已自动取消，请按最新草稿重新提交"})
 	case errors.Is(err, ErrPublicationRequestNotPending):
 		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_PUBLICATION_REQUEST_NOT_PENDING", "message": "发布审批申请当前状态不能执行该操作"})
-	case errors.Is(err, ErrPublicationCandidatesFailed):
-		writeDatasetJSON(w, http.StatusBadGateway, map[string]string{"code": "DATASET_METRIC_CANDIDATES_FAILED", "message": "指标候选生成失败，请重新提交发布审批"})
 	case errors.Is(err, ErrVersionRollbackUnavailable):
 		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_VERSION_ROLLBACK_UNAVAILABLE", "message": "发布版本缺少唯一且可验证的源草稿修订，无法安全回滚"})
 	case errors.Is(err, ErrVersionUnavailable):
@@ -470,7 +466,7 @@ func writeDatasetError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrInvalidTransition):
 		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_VERSION_TRANSITION_INVALID", "message": "数据集状态迁移无效"})
 	case errors.Is(err, ErrInUse):
-		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_IN_USE", "message": "数据集仍被指标、下游数据集、报告草稿或运行中查询占用，暂时不能删除"})
+		writeDatasetJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_IN_USE", "message": "数据集仍被下游数据集、构建任务或运行中查询占用，暂时不能删除"})
 	case errors.Is(err, ErrInvalidDocument):
 		// 不向客户端透出 PostgreSQL、源对象或内部实现错误。
 		writeDatasetJSON(w, http.StatusBadRequest, map[string]string{"code": "DSL-002-INVALID-DOCUMENT", "message": "数据集文档无效或引用的资源不可用"})

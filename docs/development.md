@@ -18,10 +18,9 @@ npm --prefix web install
 
 | 服务 | 地址 | 用途 |
 |---|---|---|
-| PostgreSQL（控制面） | `127.0.0.1:5432` | 系统、数据源、数据集、指标、配置、版本和审计 |
+| PostgreSQL（控制面） | `127.0.0.1:5432` | 权限、数据源、数据集、版本和审计 |
 | PostgreSQL（数据面） | `127.0.0.1:5433` | DIM、DWD、DWS、ADS 物理表和发布视图；ODS 明细不复制入仓 |
-| Redis | `127.0.0.1:6379` | 查询缓存、分布式状态和短期任务协调 |
-| MinIO API | `127.0.0.1:9000` | 报告 JSON、Excel、附件、快照和 PDF |
+| MinIO API | `127.0.0.1:9000` | Excel 上传和数据快照 |
 | MinIO Console | `http://127.0.0.1:9001` | 本地对象存储管理界面 |
 
 控制面 PostgreSQL 使用四个不同账号：`report_admin` 仅用于迁移；`report_app` 是 API
@@ -51,11 +50,10 @@ make db-migrate
 make db-verify
 ```
 
-`infra-up` 会等待两个 PostgreSQL、Redis 和 MinIO 健康，并自动创建：
+`infra-up` 会等待两个 PostgreSQL 和 MinIO 健康，并自动创建：
 
-- `reports`：已发布报告 JSON 和 PDF；
-- `uploads`：Excel、图片和附件；
-- `snapshots`：报告运行及数据快照。
+- `uploads`：Excel 和 CSV 源文件；
+- `snapshots`：数据集快照。
 
 `make db-verify` 在事务中创建两个临时租户，验证 RLS 数据隔离、跨租户角色关联阻断和审计日志不可变，最后回滚全部验证数据。
 
@@ -76,7 +74,7 @@ make infra-down
 make infra-reset
 ```
 
-`make infra-reset` 会删除本地 PostgreSQL、Redis 和 MinIO 数据卷，仅应用于开发环境。仓库中的 `.env.example` 使用公开的本地开发默认值；生产环境必须通过密钥系统注入独立强凭证。
+`make infra-reset` 会删除本地 PostgreSQL 和 MinIO 数据卷，仅应用于开发环境。仓库中的 `.env.example` 使用公开的本地开发默认值；生产环境必须通过密钥系统注入独立强凭证。
 
 如果当前机器暂未安装 Docker，可先执行不依赖 Docker 的静态检查：
 
@@ -102,11 +100,11 @@ export AI_MAX_ATTEMPTS="1"
 export AI_CONFIDENCE_THRESHOLD="0.8"
 ```
 
-模型序列按“主模型,后备模型”解释：DIM/DWD 建模和元数据补全先使用 MiniMax；MiniMax 出现结构化输出、本地合同、超时、限流或上游服务失败后，以独立审计请求切换 DeepSeek。认证、租户策略、配额、取消、非法请求、拒答和响应过大不会换模型重试。上述超时应按实际 Provider 延迟调整，并始终保持 `2 × AI_REQUEST_TIMEOUT < API_WRITE_TIMEOUT`。批量加工仍应使用持久化异步任务，不能通过无限放大同步 HTTP 超时替代。未设置 `AI_API_KEY` 时，元数据补全和数据集 DAG 提案等 AI 接口明确降级为不可用，非 AI 功能继续运行。元数据 AI API、数据集 API、结构化输出约束和审计字段分别见 `docs/api-metadata-ai.md`、`docs/api-datasets.md` 和 `docs/ai-orchestration.md`。
+模型序列按“主模型,后备模型”解释：DIM/DWD 建模和元数据补全先使用 MiniMax；MiniMax 出现结构化输出、本地合同、超时、限流或上游服务失败后，以独立审计请求切换 DeepSeek。认证、租户策略、配额、取消、非法请求、拒答和响应过大不会换模型重试。未设置 `AI_API_KEY` 时，元数据补全和数据集 DAG 提案接口明确降级为不可用，非 AI 功能继续运行。
 
 ## 一键启动本地服务
 
-推荐使用持久化开发服务入口。它会启动并等待双 PostgreSQL、Redis、MinIO、
+推荐使用持久化开发服务入口。它会启动并等待双 PostgreSQL、MinIO、
 Connector、API、通用 Worker、连接测试 Worker 和 Web，自动执行数据库迁移及应用
 镜像构建。所有服务均由 Docker Compose 托管并使用 `restart: unless-stopped`，不依赖
 当前终端会话存活：
@@ -175,7 +173,7 @@ make run-connection-test-worker
 - `CONNECTOR_SERVICE_URL` 使用 HTTPS；只有同一主机的 loopback HTTP 代理可例外。
 - Excel 测试只注入 `CONNECTION_TEST_MINIO_*`，必须启用 TLS，并使用独立的
   MinIO 身份。该身份只授予 uploads 桶所需对象前缀的 `GetObject`，不授予
-  `ListBucket`、`PutObject`、`DeleteObject` 或 reports/snapshots 桶权限。
+  `ListBucket`、`PutObject`、`DeleteObject` 或 snapshots 桶权限。
 - API、通用 worker 不注入连接测试 token 或其 MinIO 密钥；连接测试进程不注入
   通用 Connector token、通用 MinIO 密钥、API DSN 或通用 worker DSN。
 
@@ -190,7 +188,7 @@ make run-connection-test-worker
 make seed-dev
 ```
 
-默认租户和账号来自 `.env.example`。这个仅限开发环境的 Seed 会显式启用租户通用 AI，并在保留已有用途的前提下合并 `METADATA_COMPLETION` 和 `DATASET_DAG_GENERATION`；重复执行且策略已满足要求时不会空转策略版本。通用 AI 启用后指标创建提案立即可用，无需再授权 `METRIC_AUTHORING`。生产新租户始终默认禁用 AI，且只预置 `METADATA_COMPLETION`；模型密钥不等于启用通用 AI，仍必须由受信管理流程配置总开关与配额。认证接口参见 [身份认证 API](api-auth.md)。
+默认租户和账号来自 `.env.example`。这个仅限开发环境的 Seed 会显式启用租户 AI，并合并 `METADATA_COMPLETION` 和 `DATASET_DAG_GENERATION` 用途。生产新租户默认禁用 AI，模型密钥不等于启用 AI，仍必须由受信管理流程配置总开关与配额。认证接口参见 [身份认证 API](api-auth.md)。
 
 ## 质量检查与构建
 
@@ -202,12 +200,7 @@ make frontend-lint
 make frontend-build
 make db-verify
 make warehouse-verify
-make semantic-qa-verify
 ```
-
-Semantic QA 的空库迁移、租户开关、graph generation、ChangeSet、查询证据和 DWS
-自动任务说明分别见 [自动建模规则](semantic-qa-automation-rules.md)、
-[API](api-semantic-qa.md) 和[运维手册](semantic-qa-operations.md)。
 
 ## 外部数据库连接
 

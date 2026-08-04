@@ -1,18 +1,13 @@
 import {
   CaretUpDown,
-  ChartBar,
-  ChatCenteredDots,
   Check,
   Database,
   GearSix,
   GlobeHemisphereWest,
-  House,
   Stack,
-  TreeStructure,
-  UserPlus,
 } from '@phosphor-icons/react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { NavLink, useLocation } from 'react-router-dom'
+import { NavLink } from 'react-router-dom'
 import { administrationAPI, type BusinessDomain } from '../lib/administration'
 import {
   bindBusinessDomain,
@@ -35,8 +30,7 @@ type AppShellProps = {
 }
 
 /** 为后台业务页面提供统一侧栏、顶栏和内容容器。 */
-export function AppShell({ title = '智能报表平台', eyebrow = '工作台', children, actions, className = '' }: AppShellProps) {
-  const location = useLocation()
+export function AppShell({ title = '数据配置管理平台', eyebrow = '配置中心', children, actions, className = '' }: AppShellProps) {
   const domainSwitcherRef = useRef<HTMLDivElement>(null)
   const [domains, setDomains] = useState<BusinessDomain[]>([])
   const [selectedDomain, setSelectedDomain] = useState<BusinessDomain | null>(() => currentDomain())
@@ -116,26 +110,12 @@ export function AppShell({ title = '智能报表平台', eyebrow = '工作台', 
     <div className={`app-shell ${className}`.trim()}>
       <aside className="sidebar">
         <img className="brand-logo" src="/haier-logo.svg" alt="Haier 海尔" />
-        <div className="brand-copy"><strong>智能分析决策平台</strong><span>Decision Intelligence</span></div>
+        <div className="brand-copy"><strong>数据配置管理平台</strong><span>Data Administration</span></div>
         <nav aria-label="主导航">
-          <span className="sidebar-section-label">工作空间</span>
-          <NavLink to="/admin"><House aria-hidden="true" size={18} />工作台</NavLink>
-          <NavLink to="/domain-access"><UserPlus aria-hidden="true" size={18} />领域权限</NavLink>
-          <NavLink to="/data-sources"><Database aria-hidden="true" size={18} />数据源配置中心</NavLink>
-          <NavLink to="/datasets"><Stack aria-hidden="true" size={18} />数据集配置中心</NavLink>
-          <NavLink
-            to="/assets/overview"
-            className={({ isActive }) => isActive || location.pathname.startsWith('/assets/') ? 'active' : ''}
-          >
-            <TreeStructure aria-hidden="true" size={18} />资产管理中心
-          </NavLink>
-          <NavLink to="/assistant"><ChatCenteredDots aria-hidden="true" size={18} />智能问答</NavLink>
-          <span className="sidebar-section-label reports">报告</span>
-          <NavLink to="/report-studio/draft"><ChartBar aria-hidden="true" size={18} />报告设计器</NavLink>
-          {canManage && <>
-            <span className="sidebar-section-label reports">管理</span>
-            <NavLink to="/management"><GearSix aria-hidden="true" size={18} />管理中心</NavLink>
-          </>}
+          <span className="sidebar-section-label">配置管理</span>
+          {canManage && <NavLink to="/permissions"><GearSix aria-hidden="true" size={18} />权限设定</NavLink>}
+          <NavLink to="/data-sources"><Database aria-hidden="true" size={18} />数据源配置</NavLink>
+          <NavLink to="/datasets"><Stack aria-hidden="true" size={18} />数据集配置</NavLink>
         </nav>
         <div className="sidebar-footer">
           <div className="domain-switcher-wrap" ref={domainSwitcherRef}>
@@ -154,8 +134,8 @@ export function AppShell({ title = '智能报表平台', eyebrow = '工作台', 
                   {selectedDomain?.id === domain.id && <Check size={16} weight="bold" aria-hidden="true" />}
                 </button>)
                 : <p>暂无可用领域</p>}
-              {canManage && <NavLink to="/management" onClick={() => setDomainMenuOpen(false)}>
-                <GearSix size={15} aria-hidden="true" />管理领域
+              {canManage && <NavLink to="/permissions" onClick={() => setDomainMenuOpen(false)}>
+                <GearSix size={15} aria-hidden="true" />权限设定
               </NavLink>}
             </div>}
             <button

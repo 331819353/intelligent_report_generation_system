@@ -62,7 +62,7 @@ COMMENT ON SCHEMA warehouse_ods IS '外部源表或文件的不可变 ODS 物理
 COMMENT ON SCHEMA warehouse_dim IS '从 ODS 抽离并治理的人物、商品等实体说明信息';
 COMMENT ON SCHEMA warehouse_dwd IS '按业务动作组织的清洗转换事实明细';
 COMMENT ON SCHEMA warehouse_dws IS '在 PostgreSQL 内完成分组聚合的主题汇总';
-COMMENT ON SCHEMA warehouse_ads IS '由 DWS 组合形成的应用、报表和交付场景数据';
+COMMENT ON SCHEMA warehouse_ads IS '由 DWS 组合形成的应用和交付场景数据';
 COMMENT ON SCHEMA warehouse_published IS 'API 只读的稳定发布视图';
 COMMIT;
 SQL

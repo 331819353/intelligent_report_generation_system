@@ -81,7 +81,7 @@ export function DomainAccessPage() {
       const memberships = await administrationAPI.listDomains()
       selectDomain(memberships.find(item => item.id === domain.id) ?? domain)
       notifyDomainCatalogChanged()
-      window.location.assign('/admin')
+      window.location.assign('/data-sources')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '进入领域失败')
       await load()
@@ -107,7 +107,7 @@ export function DomainAccessPage() {
     <section className="domain-access-page">
       <header>
         <GlobeHemisphereWest size={44} weight="duotone" />
-        <div><h2>选择需要加入的业务领域</h2><p>领域之间的数据源、数据集、资产、问数和报表相互隔离。申请由目标领域管理员审批。</p></div>
+        <div><h2>选择需要加入的业务领域</h2><p>领域之间的权限、数据源和数据集相互隔离。申请由目标领域管理员审批。</p></div>
       </header>
       {error && <p className="form-error" role="alert">{error}</p>}
       {loading

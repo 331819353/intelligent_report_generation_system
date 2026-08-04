@@ -52,25 +52,11 @@ type Config struct {
 	DatasetAIRetrievalMode          string
 	DatabaseURL                     string
 	WarehouseDatabaseURL            string
-	RedisURL                        string
 	MinIOEndpoint                   string
 	MinIOAccessKey                  string
 	MinIOSecretKey                  string
 	MinIOUseSSL                     bool
 	MinIOUploadsBucket              string
-	MinIOReportsBucket              string
-	NebulaGraphEnabled              bool
-	NebulaGraphAddresses            []string
-	NebulaGraphUsername             string
-	NebulaGraphPassword             string
-	NebulaGraphSpace                string
-	NebulaGraphTimeout              time.Duration
-	NebulaGraphIdleTimeout          time.Duration
-	NebulaGraphPoolMinSize          int
-	NebulaGraphPoolMaxSize          int
-	NebulaGraphTLSEnabled           bool
-	NebulaGraphTLSServerName        string
-	NebulaGraphCAFile               string
 	AuthTokenIssuer                 string
 	AuthAccessSecret                string
 	AuthAccessTTL                   time.Duration
@@ -234,14 +220,6 @@ func loadApplication(process databaseProcess) (Config, error) {
 	if strings.TrimSpace(embeddingAPIKey) == "" {
 		embeddingAPIKey = aiAPIKey
 	}
-	nebulaGraphEnabled, err := parseEnvBool("NEBULA_GRAPH_ENABLED", false)
-	if err != nil {
-		return Config{}, err
-	}
-	nebulaGraphTLSEnabled, err := parseEnvBool("NEBULA_GRAPH_TLS_ENABLED", false)
-	if err != nil {
-		return Config{}, err
-	}
 	cfg := Config{
 		Environment:                     environment,
 		LogLevel:                        envOrDefault("APP_LOG_LEVEL", "info"),
@@ -273,25 +251,11 @@ func loadApplication(process databaseProcess) (Config, error) {
 		DatasetAIRetrievalMode:          strings.ToUpper(envOrDefault("DATASET_AI_RETRIEVAL_MODE", "HYBRID")),
 		DatabaseURL:                     databaseURL,
 		WarehouseDatabaseURL:            warehouseDatabaseURL,
-		RedisURL:                        envOrDefault("REDIS_URL", "redis://:local_redis_password@127.0.0.1:6379/0"),
 		MinIOEndpoint:                   envOrDefault("MINIO_ENDPOINT", "127.0.0.1:9000"),
 		MinIOAccessKey:                  envOrDefault("MINIO_ACCESS_KEY", "report_minio"),
 		MinIOSecretKey:                  envOrDefault("MINIO_SECRET_KEY", "local_minio_password"),
 		MinIOUseSSL:                     strings.EqualFold(os.Getenv("MINIO_USE_SSL"), "true"),
 		MinIOUploadsBucket:              envOrDefault("MINIO_BUCKET_UPLOADS", "uploads"),
-		MinIOReportsBucket:              envOrDefault("MINIO_BUCKET_REPORTS", "reports"),
-		NebulaGraphEnabled:              nebulaGraphEnabled,
-		NebulaGraphAddresses:            parseUniqueCSV(envOrDefault("NEBULA_GRAPH_ADDRESSES", "127.0.0.1:9669")),
-		NebulaGraphUsername:             envOrDefault("NEBULA_GRAPH_USERNAME", "root"),
-		NebulaGraphPassword:             envOrDefault("NEBULA_GRAPH_PASSWORD", "nebula"),
-		NebulaGraphSpace:                envOrDefault("NEBULA_GRAPH_SPACE", "smart_query_dev"),
-		NebulaGraphTimeout:              5 * time.Second,
-		NebulaGraphIdleTimeout:          5 * time.Minute,
-		NebulaGraphPoolMinSize:          1,
-		NebulaGraphPoolMaxSize:          30,
-		NebulaGraphTLSEnabled:           nebulaGraphTLSEnabled,
-		NebulaGraphTLSServerName:        strings.TrimSpace(os.Getenv("NEBULA_GRAPH_TLS_SERVER_NAME")),
-		NebulaGraphCAFile:               strings.TrimSpace(os.Getenv("NEBULA_GRAPH_CA_FILE")),
 		AuthTokenIssuer:                 envOrDefault("AUTH_TOKEN_ISSUER", "intelligent-report-system"),
 		AuthAccessSecret:                envOrDefault("AUTH_ACCESS_TOKEN_SECRET", "local_access_token_secret_change_me"),
 		AuthAccessTTL:                   15 * time.Minute,
@@ -327,8 +291,6 @@ func loadApplication(process databaseProcess) (Config, error) {
 		{"AI_RETRY_BASE_DELAY", &cfg.AIRetryBaseDelay},
 		{"AI_RETRY_MAX_DELAY", &cfg.AIRetryMaxDelay},
 		{"AI_EMBEDDING_TIMEOUT", &cfg.AIEmbeddingTimeout},
-		{"NEBULA_GRAPH_TIMEOUT", &cfg.NebulaGraphTimeout},
-		{"NEBULA_GRAPH_IDLE_TIMEOUT", &cfg.NebulaGraphIdleTimeout},
 		{"AUTH_ACCESS_TOKEN_TTL", &cfg.AuthAccessTTL},
 		{"AUTH_REFRESH_TOKEN_TTL", &cfg.AuthRefreshTTL},
 	}
@@ -353,8 +315,6 @@ func loadApplication(process databaseProcess) (Config, error) {
 		{"AI_MAX_ATTEMPTS", &cfg.AIMaxAttempts},
 		{"AI_MAX_INPUT_BYTES", &cfg.AIMaxInputBytes},
 		{"AI_EMBEDDING_DIMENSIONS", &cfg.AIEmbeddingDimensions},
-		{"NEBULA_GRAPH_POOL_MIN_SIZE", &cfg.NebulaGraphPoolMinSize},
-		{"NEBULA_GRAPH_POOL_MAX_SIZE", &cfg.NebulaGraphPoolMaxSize},
 		{"CONNECTOR_METADATA_SAMPLE_MAX_CELL_BYTES", &cfg.ConnectorSampleMaxCellBytes},
 		{"CONNECTOR_METADATA_SAMPLE_MAX_ROW_BYTES", &cfg.ConnectorSampleMaxRowBytes},
 		{"CONNECTOR_STREAM_MAX_CELL_BYTES", &cfg.ConnectorStreamMaxCellBytes},
@@ -534,42 +494,8 @@ func (c Config) Validate() error {
 			"production MinIO must use TLS unless it is loopback",
 		)
 	}
-	if strings.TrimSpace(c.MinIOUploadsBucket) == "" || strings.TrimSpace(c.MinIOReportsBucket) == "" {
-		return errors.New("MinIO bucket names must not be empty")
-	}
-	if c.NebulaGraphEnabled {
-		if len(c.NebulaGraphAddresses) < 1 || len(c.NebulaGraphAddresses) > 10 ||
-			strings.TrimSpace(c.NebulaGraphUsername) == "" ||
-			strings.TrimSpace(c.NebulaGraphPassword) == "" ||
-			!validNebulaSpace(c.NebulaGraphSpace) ||
-			c.NebulaGraphTimeout < 100*time.Millisecond || c.NebulaGraphTimeout > 30*time.Second ||
-			c.NebulaGraphIdleTimeout < time.Second || c.NebulaGraphIdleTimeout > time.Hour ||
-			c.NebulaGraphPoolMinSize < 1 || c.NebulaGraphPoolMaxSize < c.NebulaGraphPoolMinSize ||
-			c.NebulaGraphPoolMaxSize > 200 {
-			return errors.New("NebulaGraph connection or pool configuration is invalid")
-		}
-		for _, address := range c.NebulaGraphAddresses {
-			host, port, err := net.SplitHostPort(address)
-			if err != nil || strings.TrimSpace(host) == "" {
-				return errors.New("NEBULA_GRAPH_ADDRESSES contains an invalid host:port")
-			}
-			parsedPort, err := strconv.Atoi(port)
-			if err != nil || parsedPort < 1 || parsedPort > 65535 {
-				return errors.New("NEBULA_GRAPH_ADDRESSES contains an invalid port")
-			}
-		}
-		if c.NebulaGraphTLSEnabled &&
-			(strings.TrimSpace(c.NebulaGraphTLSServerName) == "" || strings.TrimSpace(c.NebulaGraphCAFile) == "") {
-			return errors.New("NebulaGraph TLS requires server name and CA file")
-		}
-	}
-	if strings.EqualFold(c.Environment, "production") {
-		if !c.NebulaGraphEnabled || !c.NebulaGraphTLSEnabled {
-			return errors.New("production requires NebulaGraph with TLS enabled")
-		}
-		if c.NebulaGraphPassword == "nebula" {
-			return errors.New("production must override NEBULA_GRAPH_PASSWORD")
-		}
+	if strings.TrimSpace(c.MinIOUploadsBucket) == "" {
+		return errors.New("MinIO uploads bucket name must not be empty")
 	}
 	credentialKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(c.DataSourceCredentialKey))
 	if err != nil || len(credentialKey) != 32 {
@@ -729,32 +655,4 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-func parseEnvBool(key string, fallback bool) (bool, error) {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback, nil
-	}
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return false, fmt.Errorf("parse %s: %w", key, err)
-	}
-	return parsed, nil
-}
-
-func validNebulaSpace(value string) bool {
-	value = strings.TrimSpace(value)
-	if len(value) < 1 || len(value) > 64 {
-		return false
-	}
-	for index, character := range value {
-		if (character >= 'a' && character <= 'z') ||
-			(character >= 'A' && character <= 'Z') ||
-			(index > 0 && character >= '0' && character <= '9') || character == '_' {
-			continue
-		}
-		return false
-	}
-	return true
 }

@@ -628,8 +628,6 @@ func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string
 		}
 		var inUse bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(
-			SELECT 1 FROM platform.metrics m WHERE m.dataset_id::text=$1 AND m.deleted_at IS NULL
-			UNION ALL
 			SELECT 1 FROM platform.dataset_dependencies dependency
 			JOIN platform.dataset_versions source_version ON source_version.id::text=dependency.source_id
 			JOIN platform.dataset_versions downstream_version ON downstream_version.id=dependency.dataset_version_id
@@ -644,11 +642,6 @@ func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string
 			  AND source_version.dataset_id::text=$1
 			  AND $2='ODS'
 			  AND downstream_version.layer IN ('DIM','DWD')
-			UNION ALL
-			SELECT 1 FROM platform.report_draft_dependencies dependency
-			JOIN platform.dataset_versions source_version ON source_version.id::text=dependency.dependency_id
-			JOIN platform.reports report ON report.id=dependency.report_id AND report.deleted_at IS NULL
-			WHERE dependency.dependency_type='DATASET_VERSION' AND source_version.dataset_id::text=$1
 			UNION ALL
 			SELECT 1 FROM platform.query_runs run WHERE run.dataset_id::text=$1 AND run.status='RUNNING'
 			UNION ALL
@@ -1024,7 +1017,7 @@ func (s *PostgresStore) ListVersions(ctx context.Context, tenantID, datasetID st
 	return items, total, err
 }
 
-// GetVersionUsage 汇总精确发布版本的报告草稿、下游数据集和运行中查询引用。
+// GetVersionUsage 汇总精确发布版本的下游数据集和运行中查询引用。
 func (s *PostgresStore) GetVersionUsage(ctx context.Context, tenantID, datasetID, versionID string) (usage VersionUsage, err error) {
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		// target 同时校验父数据集、精确版本及可见发布状态；不存在和跨租户版本统一按未找到处理。
@@ -1037,12 +1030,6 @@ func (s *PostgresStore) GetVersionUsage(ctx context.Context, tenantID, datasetID
 			  AND version.status IN ('PUBLISHED','STALE','DEPRECATED')
 		)
 		SELECT
-			(SELECT count(DISTINCT dependency.report_id)::int
-			 FROM platform.report_draft_dependencies AS dependency
-			 JOIN platform.reports AS report
-			   ON report.id=dependency.report_id AND report.tenant_id=dependency.tenant_id AND report.deleted_at IS NULL
-			 CROSS JOIN target
-			 WHERE dependency.dependency_type='DATASET_VERSION' AND dependency.dependency_id=target.id::text),
 			(SELECT count(DISTINCT dependency.dataset_version_id)::int
 			 FROM platform.dataset_dependencies AS dependency
 			 JOIN platform.dataset_versions AS downstream
@@ -1067,7 +1054,7 @@ func (s *PostgresStore) GetVersionUsage(ctx context.Context, tenantID, datasetID
 			 FROM platform.query_runs AS run,target
 			 WHERE run.dataset_version_id=target.id AND run.status='RUNNING')
 		FROM target`, datasetID, versionID).Scan(
-			&usage.ReportDraftReferences, &usage.DownstreamDraftReferences,
+			&usage.DownstreamDraftReferences,
 			&usage.DownstreamPublishedReferences, &usage.ActiveQueryRuns,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {

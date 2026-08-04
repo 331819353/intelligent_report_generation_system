@@ -253,17 +253,13 @@ func containsPurpose(values []string, purpose string) bool {
 	return false
 }
 
-// tenantPolicyAllowsPurpose keeps the common tenant AI switch as the hard boundary. Metric
-// authoring is the tenant's primary AI workflow and therefore does not require a second
-// per-purpose opt-in; legacy and all other AI purposes retain their explicit allowlist fence.
+// tenantPolicyAllowsPurpose keeps the common tenant AI switch as the hard boundary.
 func tenantPolicyAllowsPurpose(enabled bool, allowedPurposes []string, purpose string) bool {
 	if !enabled {
 		return false
 	}
-	// 指标起草与数据集标签建议都只产生待人工治理的提案；它们不会直接发布
-	// 指标或批准标签，因此沿用租户总 AI 开关而不静默扩张历史用途白名单。
-	return purpose == PurposeMetricAuthoring || purpose == PurposeDatasetTagSuggestion ||
-		purpose == PurposeSemanticQueryPlanning || purpose == PurposeDatasetSemanticNaming ||
+	// 标签建议和语义命名只产生待人工治理的数据集配置建议。
+	return purpose == PurposeDatasetTagSuggestion || purpose == PurposeDatasetSemanticNaming ||
 		containsPurpose(allowedPurposes, purpose)
 }
 

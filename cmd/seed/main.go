@@ -94,7 +94,7 @@ func seedDomains(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error
 func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error {
 	roles := []struct{ code, name string }{
 		{"platform_admin", "平台管理员"}, {"tenant_admin", "租户管理员"}, {"data_admin", "数据管理员"},
-		{"analyst", "分析师"}, {"report_designer", "报告设计师"}, {"viewer", "查看者"},
+		{"data_viewer", "数据查看者"},
 	}
 	permissions := []struct{ code, name, resource, action string }{
 		{"tenant.manage", "管理租户", "TENANT", "MANAGE"}, {"user.manage", "管理用户", "USER", "MANAGE"},
@@ -102,10 +102,6 @@ func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error 
 		{"dataset.read", "查看数据集", "DATASET", "READ"},
 		{"data_asset.read", "查看数据资产", "DATA_ASSET", "READ"}, {"data_asset.manage", "管理数据资产", "DATA_ASSET", "MANAGE"},
 		{"dataset.manage", "管理数据集", "DATASET", "MANAGE"}, {"dataset.publish", "审批发布数据集", "DATASET", "PUBLISH"},
-		{"metric.read", "查看指标", "METRIC", "READ"}, {"metric.publish", "发布指标", "METRIC", "PUBLISH"},
-		{"metric.manage", "管理指标", "METRIC", "MANAGE"}, {"report.read", "查看报告", "REPORT", "READ"},
-		{"report.create", "创建报告", "REPORT", "CREATE"}, {"report.update", "编辑报告", "REPORT", "UPDATE"},
-		{"report.publish", "发布报告", "REPORT", "PUBLISH"}, {"report.delete", "删除报告", "REPORT", "DELETE"},
 	}
 	roleIDs, permissionIDs := map[string]string{}, map[string]string{}
 	for _, role := range roles {
@@ -124,10 +120,8 @@ func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error 
 	}
 	grants := map[string][]string{
 		"platform_admin": allPermissionCodes(permissions), "tenant_admin": allPermissionCodes(permissions),
-		"data_admin":      {"data_source.manage", "data_source.publish", "data_asset.read", "data_asset.manage", "dataset.read", "dataset.manage", "dataset.publish", "metric.read", "metric.manage", "metric.publish", "report.read"},
-		"analyst":         {"data_asset.read", "dataset.read", "metric.read", "report.read", "report.create"},
-		"report_designer": {"data_asset.read", "dataset.read", "metric.read", "report.read", "report.create", "report.update", "report.publish"},
-		"viewer":          {"report.read"},
+		"data_admin":  {"data_source.manage", "data_source.publish", "data_asset.read", "data_asset.manage", "dataset.read", "dataset.manage", "dataset.publish"},
+		"data_viewer": {"data_asset.read", "dataset.read"},
 	}
 	for role, codes := range grants {
 		for _, code := range codes {
@@ -156,8 +150,7 @@ func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error 
 	return err
 }
 
-// seedDevelopmentAI 只为本地演示租户启用通用 AI，并合并仍需独立授权的用途。
-// 指标创建随通用 AI 开关启用，不写入 allowed_purposes。已有用途会被保留。
+// seedDevelopmentAI 只为本地演示租户启用数据源元数据与数据集设计所需的 AI 用途。
 func seedDevelopmentAI(ctx context.Context, tx pgx.Tx, tenantID string) error {
 	_, err := tx.Exec(ctx, `UPDATE platform.ai_tenant_policies
 		SET enabled=true,

@@ -8,10 +8,10 @@
 - 领域角色：`MEMBER` 为普通成员，`DOMAIN_ADMIN` 为领域管理员。领域管理员必须由平台管理员显式指定。
 - 功能权限：用户角色关联 `resource_type + action`。
 - 对象权限：可将特定对象的操作授权给用户或角色。
-- 角色：平台管理员、租户管理员、数据管理员、分析师、报告设计师、查看者。
+- 系统角色：平台管理员、租户管理员、数据管理员、数据查看者。
 - 判定：先校验当前领域成员资格，再评估功能权限或对象权限。`DOMAIN_ADMIN` 可以管理本领域资源，但不能访问其他领域。平台管理员默认只有控制面权限，没有未被指定领域的数据访问权。
 
-数据源、数据集、指标/维度/语义资产、问数运行和报表均由数据库 RLS 强制校验当前 `domain_id`。历史 `PLATFORM` 资产共享会在升级时收敛为 `DOMAIN`，新请求只接受 `PRIVATE` 或 `DOMAIN`。
+数据源、数资产和数据集由数据库 RLS 强制校验当前 `domain_id`。历史 `PLATFORM` 资产共享会在升级时收敛为 `DOMAIN`，新请求只接受 `PRIVATE` 或 `DOMAIN`。
 
 ## 领域管理与入域申请
 
@@ -59,8 +59,8 @@
 
 ```json
 {
-  "resourceType": "REPORT",
-  "action": "UPDATE",
+  "resourceType": "DATASET",
+  "action": "MANAGE",
   "objectId": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
@@ -83,7 +83,7 @@
 | `POST` | `/api/v1/object-permissions` | 向用户或角色授予对象操作权限 |
 | `DELETE` | `/api/v1/object-permissions/{id}` | 撤销对象权限 |
 
-数据资产中心新增 `DATA_ASSET:READ` 和 `DATA_ASSET:MANAGE`。默认 Seed 中数据管理员拥有读写权限，分析师与报告设计师拥有读取权限，查看者仍只拥有报告读取权限。
+数据资产使用 `DATA_ASSET:READ` 和 `DATA_ASSET:MANAGE`。默认 Seed 中数据管理员拥有读写权限，数据查看者拥有读取权限。
 
 对象授权请求：
 
@@ -91,8 +91,8 @@
 {
   "subjectType": "USER",
   "subjectId": "用户 UUID",
-  "objectType": "REPORT",
-  "objectId": "报告 UUID",
+  "objectType": "DATASET",
+  "objectId": "数据集 UUID",
   "action": "READ"
 }
 ```

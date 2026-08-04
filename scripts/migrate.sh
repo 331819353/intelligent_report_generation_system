@@ -56,6 +56,22 @@ for migration in "$ROOT_DIR"/migrations/*.up.sql; do
     continue
   fi
 
+  # 000150 already wrote the plain-domain DWD trigger in fresh databases.
+  # The later historical repair intentionally fails when there is nothing to
+  # replace, so record it as satisfied when its target definition is present.
+  if [ "$version" = "000161_plain_domain_dwd_trigger" ]; then
+    already_plain=$(docker compose --env-file "$ENV_FILE" exec -T postgres \
+      psql -At -U "${POSTGRES_USER:-report_admin}" -d "${POSTGRES_DB:-intelligent_report_control}" \
+      -c "SELECT position('''领域:''||domain.name AS domain_key' IN definition)=0 AND position('domain.name AS domain_key' IN definition)>0 FROM (SELECT pg_get_functiondef('platform.trigger_manual_dwd_modeling(uuid)'::regprocedure) AS definition) AS current_definition")
+    if [ "$already_plain" = "t" ]; then
+      docker compose --env-file "$ENV_FILE" exec -T postgres \
+        psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-report_admin}" -d "${POSTGRES_DB:-intelligent_report_control}" \
+        -c "INSERT INTO platform_schema_migrations(version) VALUES ('$version')" >/dev/null
+      echo "record $version (already satisfied)"
+      continue
+    fi
+  fi
+
   echo "apply $version"
   {
     echo 'BEGIN;'
@@ -133,45 +149,8 @@ GRANT USAGE,CREATE ON SCHEMA warehouse_dim,warehouse_ads TO :"worker_user";
 COMMENT ON SCHEMA warehouse_dim IS
   '从 ODS 抽离并治理的人物、商品等实体说明信息';
 COMMENT ON SCHEMA warehouse_ads IS
-  '由 DWS 组合形成的应用、报表和交付场景数据';
+  '由 DWS 组合形成的应用和交付场景数据';
 
--- 维度画像在独立数仓的只读事务中执行。temp_file_limit 只能由超级用户
--- 设置，因此用严格限幅的 SECURITY DEFINER 函数代替画像 worker 直接
--- set_config。函数不访问数据，也不能扩大到系统允许范围之外。
-CREATE OR REPLACE FUNCTION warehouse_published.apply_dimension_profile_resource_limits(
-  selected_timeout_seconds integer,
-  selected_work_mem_kb integer,
-  selected_temp_file_limit_kb integer
-)
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path=pg_catalog
-AS $profile_limits$
-BEGIN
-  IF selected_timeout_seconds NOT BETWEEN 1 AND 300
-    OR selected_work_mem_kb NOT BETWEEN 64 AND 262144
-    OR selected_temp_file_limit_kb NOT BETWEEN 1024 AND 1048576 THEN
-    RAISE EXCEPTION '维度画像资源预算越界' USING ERRCODE='23514';
-  END IF;
-  PERFORM set_config(
-    'statement_timeout',(selected_timeout_seconds*1000)::text,true
-  );
-  PERFORM set_config(
-    'lock_timeout',least(selected_timeout_seconds*1000,5000)::text,true
-  );
-  PERFORM set_config('work_mem',selected_work_mem_kb::text||'kB',true);
-  PERFORM set_config('temp_file_limit',selected_temp_file_limit_kb::text,true);
-  PERFORM set_config('max_parallel_workers_per_gather','0',true);
-  PERFORM set_config('enable_hashagg','off',true);
-END
-$profile_limits$;
-REVOKE ALL ON FUNCTION warehouse_published.apply_dimension_profile_resource_limits(
-  integer,integer,integer
-) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION warehouse_published.apply_dimension_profile_resource_limits(
-  integer,integer,integer
-) TO :"worker_user";
 COMMIT;
 SQL
 
@@ -197,130 +176,6 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA platform
 ALTER DEFAULT PRIVILEGES IN SCHEMA platform GRANT SELECT ON TABLES TO :"worker_user";
 ALTER DEFAULT PRIVILEGES IN SCHEMA platform GRANT USAGE, SELECT ON SEQUENCES TO :"worker_user";
 
--- 版本化语义图只能由通用 worker 原子投影；API 可读取并写查询证据，但不能
--- 伪造 generation、节点、边或投影水位。worker 不参与消费合同、人工
--- ChangeSet 和问题计划的控制面写入。
-SELECT format(
-  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.semantic_graph_generations, platform.semantic_graph_nodes, platform.semantic_graph_edges, platform.semantic_graph_projection_state FROM %I',
-  :'app_user'
-)
-WHERE to_regclass('platform.semantic_graph_generations') IS NOT NULL
-\gexec
-
-SELECT format(
-  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.semantic_qa_settings, platform.semantic_consumer_contracts, platform.semantic_consumer_contract_inputs, platform.warehouse_dag_change_sets, platform.warehouse_dag_change_operations, platform.warehouse_dag_change_validations, platform.warehouse_dag_runs, platform.warehouse_dag_stage_runs, platform.semantic_query_plans, platform.semantic_query_plan_evidence, platform.semantic_question_templates, platform.semantic_golden_question_sets, platform.semantic_golden_questions, platform.semantic_golden_question_runs FROM %I',
-  :'worker_user'
-)
-WHERE to_regclass('platform.semantic_qa_settings') IS NOT NULL
-\gexec
-
--- 问答运行状态是 API 编排事实。worker 可读取用于观测，但不能伪造状态迁移。
-SELECT format(
-  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.semantic_question_runs, platform.semantic_question_run_events, platform.semantic_question_artifacts FROM %I',
-  :'worker_user'
-)
-WHERE to_regclass('platform.semantic_question_runs') IS NOT NULL
-\gexec
-
--- 语义发布包和活动版本指针只允许 API 控制面事务修改。阶段 2 的投影 worker
--- 通过专用 SECURITY DEFINER 函数报告投影结果，不能直接改写发布清单或激活状态。
-SELECT format(
-  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.semantic_releases, platform.semantic_release_objects, platform.semantic_release_projections, platform.semantic_release_state, platform.semantic_release_events FROM %I',
-  :'worker_user'
-)
-WHERE to_regclass('platform.semantic_releases') IS NOT NULL
-\gexec
-
--- NebulaGraph 投影 worker 只能通过有界租约函数推进自己的投影；发布清单、
--- 其他投影和活动版本仍不可直接修改。GraphPlan 缓存只由在线 API 写入。
-SELECT format(
-  'REVOKE ALL ON FUNCTION platform.list_semantic_nebula_projection_tenants(), platform.claim_semantic_nebula_projection(uuid,text,integer), platform.heartbeat_semantic_nebula_projection(uuid,uuid,text,uuid,integer), platform.complete_semantic_nebula_projection(uuid,uuid,text,uuid,text,text,integer,jsonb), platform.fail_semantic_nebula_projection(uuid,uuid,text,uuid,text,jsonb) FROM PUBLIC, %I, %I, %I',
-  :'app_user',:'worker_user',:'connection_test_user'
-)
-WHERE to_regprocedure(
-  'platform.claim_semantic_nebula_projection(uuid,text,integer)'
-) IS NOT NULL
-\gexec
-SELECT format(
-  'GRANT EXECUTE ON FUNCTION platform.list_semantic_nebula_projection_tenants(), platform.claim_semantic_nebula_projection(uuid,text,integer), platform.heartbeat_semantic_nebula_projection(uuid,uuid,text,uuid,integer), platform.complete_semantic_nebula_projection(uuid,uuid,text,uuid,text,text,integer,jsonb), platform.fail_semantic_nebula_projection(uuid,uuid,text,uuid,text,jsonb) TO %I',
-  :'worker_user'
-)
-WHERE to_regprocedure(
-  'platform.claim_semantic_nebula_projection(uuid,text,integer)'
-) IS NOT NULL
-\gexec
-SELECT format(
-  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.semantic_graph_plan_cache FROM %I, %I',
-  :'worker_user',:'connection_test_user'
-)
-WHERE to_regclass('platform.semantic_graph_plan_cache') IS NOT NULL
-\gexec
-
--- PostgreSQL-backed release projections are written only by the generic semantic
--- runtime worker. API and connection-test roles can read the outputs but cannot
--- fabricate an execution registry or a versioned search index.
-SELECT format(
-  'REVOKE ALL ON FUNCTION platform.list_semantic_runtime_projection_tenants(), platform.claim_semantic_runtime_projection(uuid,text,integer), platform.complete_semantic_runtime_projection(uuid,uuid,text,uuid,text,text,integer,jsonb), platform.fail_semantic_runtime_projection(uuid,uuid,text,uuid,text,jsonb) FROM PUBLIC, %I, %I, %I',
-  :'app_user',:'worker_user',:'connection_test_user'
-)
-WHERE to_regprocedure(
-  'platform.claim_semantic_runtime_projection(uuid,text,integer)'
-) IS NOT NULL
-\gexec
-SELECT format(
-  'GRANT EXECUTE ON FUNCTION platform.list_semantic_runtime_projection_tenants(), platform.claim_semantic_runtime_projection(uuid,text,integer), platform.complete_semantic_runtime_projection(uuid,uuid,text,uuid,text,text,integer,jsonb), platform.fail_semantic_runtime_projection(uuid,uuid,text,uuid,text,jsonb) TO %I',
-  :'worker_user'
-)
-WHERE to_regprocedure(
-  'platform.claim_semantic_runtime_projection(uuid,text,integer)'
-) IS NOT NULL
-\gexec
-SELECT format(
-  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.semantic_execution_registry, platform.semantic_release_search_documents FROM %I, %I',
-  :'app_user',:'connection_test_user'
-)
-WHERE to_regclass('platform.semantic_execution_registry') IS NOT NULL
-\gexec
-
--- Tool Host audit is append-only for the API. Workers and connection-test
--- identities may inspect no call facts and cannot fabricate them.
-SELECT format(
-  'REVOKE ALL ON TABLE platform.semantic_tool_calls FROM %I, %I; REVOKE UPDATE, DELETE ON TABLE platform.semantic_tool_calls FROM %I; GRANT SELECT, INSERT ON TABLE platform.semantic_tool_calls TO %I',
-  :'worker_user',:'connection_test_user',:'app_user',:'app_user'
-)
-WHERE to_regclass('platform.semantic_tool_calls') IS NOT NULL
-\gexec
-
-SELECT format(
-  'REVOKE ALL ON FUNCTION platform.semantic_evaluation_set_passes(uuid,text,text) FROM PUBLIC, %I, %I; GRANT EXECUTE ON FUNCTION platform.semantic_evaluation_set_passes(uuid,text,text) TO %I',
-  :'worker_user',:'connection_test_user',:'app_user'
-)
-WHERE to_regprocedure(
-  'platform.semantic_evaluation_set_passes(uuid,text,text)'
-) IS NOT NULL
-\gexec
-
-SELECT format(
-  'REVOKE ALL ON FUNCTION platform.semantic_evaluation_security_set_passes(uuid,text,text) FROM PUBLIC, %I, %I; GRANT EXECUTE ON FUNCTION platform.semantic_evaluation_security_set_passes(uuid,text,text) TO %I',
-  :'worker_user',:'connection_test_user',:'app_user'
-)
-WHERE to_regprocedure(
-  'platform.semantic_evaluation_security_set_passes(uuid,text,text)'
-) IS NOT NULL
-\gexec
-
-SELECT format(
-  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.dws_modeling_jobs, platform.dws_modeling_outputs FROM %I',
-  :'app_user'
-)
-WHERE to_regclass('platform.dws_modeling_jobs') IS NOT NULL
-\gexec
-SELECT format(
-  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.ads_modeling_jobs, platform.ads_modeling_outputs FROM %I',
-  :'app_user'
-)
-WHERE to_regclass('platform.ads_modeling_jobs') IS NOT NULL
-\gexec
 SELECT format(
   'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.dwd_modeling_stage_jobs FROM %I',
   :'app_user'
@@ -355,53 +210,6 @@ SELECT format(
   :'app_user'
 )
 WHERE to_regprocedure('platform.trigger_manual_dwd_modeling(uuid)') IS NOT NULL
-\gexec
-SELECT format(
-  'REVOKE ALL ON FUNCTION platform.trigger_manual_dws_modeling(uuid) FROM PUBLIC, %I, %I',
-  :'worker_user',
-  :'connection_test_user'
-)
-WHERE to_regprocedure('platform.trigger_manual_dws_modeling(uuid)') IS NOT NULL
-\gexec
-SELECT format(
-  'GRANT EXECUTE ON FUNCTION platform.trigger_manual_dws_modeling(uuid) TO %I',
-  :'app_user'
-)
-WHERE to_regprocedure('platform.trigger_manual_dws_modeling(uuid)') IS NOT NULL
-\gexec
-SELECT format(
-  'REVOKE ALL ON FUNCTION platform.trigger_manual_dim_modeling(uuid,uuid[]), platform.trigger_manual_dwd_modeling(uuid,uuid[]), platform.trigger_manual_dws_modeling(uuid,uuid[]), platform.trigger_manual_ads_modeling(uuid,uuid[]) FROM PUBLIC, %I, %I',
-  :'worker_user',
-  :'connection_test_user'
-)
-WHERE to_regprocedure(
-  'platform.trigger_manual_ads_modeling(uuid,uuid[])'
-) IS NOT NULL
-\gexec
-SELECT format(
-  'GRANT EXECUTE ON FUNCTION platform.trigger_manual_dim_modeling(uuid,uuid[]), platform.trigger_manual_dwd_modeling(uuid,uuid[]), platform.trigger_manual_dws_modeling(uuid,uuid[]), platform.trigger_manual_ads_modeling(uuid,uuid[]) TO %I',
-  :'app_user'
-)
-WHERE to_regprocedure(
-  'platform.trigger_manual_ads_modeling(uuid,uuid[])'
-) IS NOT NULL
-\gexec
-SELECT format(
-  'REVOKE ALL ON FUNCTION platform.trigger_unscoped_dws_modeling(uuid) FROM PUBLIC, %I, %I',
-  :'worker_user',
-  :'connection_test_user'
-)
-WHERE to_regprocedure(
-  'platform.trigger_unscoped_dws_modeling(uuid)'
-) IS NOT NULL
-\gexec
-SELECT format(
-  'GRANT EXECUTE ON FUNCTION platform.trigger_unscoped_dws_modeling(uuid) TO %I',
-  :'app_user'
-)
-WHERE to_regprocedure(
-  'platform.trigger_unscoped_dws_modeling(uuid)'
-) IS NOT NULL
 \gexec
 SELECT format(
   'REVOKE ALL ON FUNCTION platform.cancel_dwd_modeling_stage_task(uuid,uuid), platform.retry_dwd_modeling_stage_task(uuid,uuid) FROM PUBLIC, %I, %I',
@@ -462,41 +270,6 @@ GRANT EXECUTE ON FUNCTION
   platform.complete_data_source_connection_test(uuid,uuid,text,bigint),
   platform.fail_data_source_connection_test(uuid,uuid,text,boolean)
 TO :"connection_test_user";
-
--- 语义维度画像任务由通用 worker 写入，API 只能读取。条件执行使本脚本在
--- 000071 尚未落地的分支上仍保持幂等。
-SELECT format(
-  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.dimension_profile_jobs FROM %I',
-  :'app_user'
-)
-WHERE to_regclass('platform.dimension_profile_jobs') IS NOT NULL
-\gexec
-
-SELECT format(
-  'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.dimension_members FROM %I',
-  :'app_user'
-)
-WHERE to_regclass('platform.dimension_members') IS NOT NULL
-\gexec
-
-SELECT format(
-  'REVOKE ALL ON FUNCTION platform.apply_dimension_profile_resource_limits(uuid,integer,text,uuid) FROM PUBLIC, %I, %I',
-  :'app_user',
-  :'connection_test_user'
-)
-WHERE to_regprocedure(
-  'platform.apply_dimension_profile_resource_limits(uuid,integer,text,uuid)'
-) IS NOT NULL
-\gexec
-
-SELECT format(
-  'GRANT EXECUTE ON FUNCTION platform.apply_dimension_profile_resource_limits(uuid,integer,text,uuid) TO %I',
-  :'worker_user'
-)
-WHERE to_regprocedure(
-  'platform.apply_dimension_profile_resource_limits(uuid,integer,text,uuid)'
-) IS NOT NULL
-\gexec
 
 -- 发布来源事实只能由 dataset_versions 触发器调用；运行角色不能直接把任意
 -- 复合行交给 SECURITY DEFINER helper 试探或绕开服务端发布路径。

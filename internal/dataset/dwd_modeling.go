@@ -4955,8 +4955,7 @@ func (worker *DWDModelingWorker) retireGeneratedDIMDraftTx(
 		rawDraftDSL                            json.RawMessage
 		deleted                                bool
 		publicationRequestCount                int64
-		metricCount, dependencyCount           int64
-		reportDependencyCount                  int64
+		dependencyCount                        int64
 		materializationCount, buildRunCount    int64
 		queryRunCount                          int64
 	)
@@ -4970,8 +4969,6 @@ func (worker *DWDModelingWorker) retireGeneratedDIMDraftTx(
 			    AND version.status IN ('PUBLISHED','STALE')),
 			(SELECT count(*) FROM platform.dataset_publication_requests AS request
 			  WHERE request.dataset_id=dataset.id),
-			(SELECT count(*) FROM platform.metrics AS metric
-			  WHERE metric.dataset_id=dataset.id AND metric.deleted_at IS NULL),
 			(SELECT count(*)
 			 FROM platform.dataset_dependencies AS dependency
 			 JOIN platform.dataset_versions AS source_version
@@ -4984,14 +4981,6 @@ func (worker *DWDModelingWorker) retireGeneratedDIMDraftTx(
 			 WHERE dependency.source_type='DATASET_VERSION'
 			   AND source_version.dataset_id=dataset.id
 			   AND downstream_version.status<>'DEPRECATED'),
-			(SELECT count(*)
-			 FROM platform.report_draft_dependencies AS dependency
-			 JOIN platform.dataset_versions AS source_version
-			   ON source_version.id::text=dependency.dependency_id
-			 JOIN platform.reports AS report
-			   ON report.id=dependency.report_id AND report.deleted_at IS NULL
-			 WHERE dependency.dependency_type='DATASET_VERSION'
-			   AND source_version.dataset_id=dataset.id),
 			(SELECT count(*) FROM platform.dataset_materializations AS materialization
 			  WHERE materialization.dataset_id=dataset.id),
 			(SELECT count(*) FROM platform.dataset_build_runs AS build
@@ -5015,8 +5004,8 @@ func (worker *DWDModelingWorker) retireGeneratedDIMDraftTx(
 		&datasetID, &datasetVersion, &datasetStatus, &deleted,
 		&draftStatus, &currentSchemaHash, &rawDraftDSL,
 		&generatedSchemaHash,
-		&publishedVersionCount, &publicationRequestCount, &metricCount,
-		&dependencyCount, &reportDependencyCount, &materializationCount,
+		&publishedVersionCount, &publicationRequestCount,
+		&dependencyCount, &materializationCount,
 		&buildRunCount, &queryRunCount,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -5066,9 +5055,7 @@ func (worker *DWDModelingWorker) retireGeneratedDIMDraftTx(
 		currentSchemaHash == generatedSchemaHash &&
 		publishedVersionCount == 0 &&
 		publicationRequestCount == 0 &&
-		metricCount == 0 &&
 		dependencyCount == 0 &&
-		reportDependencyCount == 0 &&
 		materializationCount == 0 &&
 		buildRunCount == 0 &&
 		queryRunCount == 0

@@ -8,32 +8,10 @@
 
 - `POST /datasets/trigger-dim-modeling`：以当前已发布 ODS 为输入提交 DIM 建模。
 - `POST /datasets/trigger-dwd-modeling`：以当前已发布 ODS 和可选 DIM 为输入提交 DWD 明细建模。
-- `POST /datasets/trigger-dws-modeling`：默认逐个当前已发布 DWD，并逐个 DIM 提交 DWS 规划任务。
-- `POST /datasets/trigger-ads-modeling`：默认逐个当前已发布 DWS 提交维度包含判定与 ADS 应用草稿任务。
 
-请求体为 `{"datasetIds":[]}`。空数组启用当前用户业务领域内的默认智能化全量流程；非空数组冻结用户已经框选的关系并继续使用既有显式流程，本轮默认关系发现不会改写它。默认 DWD 只复用覆盖当前全部已发布 ODS 的 DIM 批次，并在每次激活时清空父工作流可能残留的旧 FACT/DIM 选择范围，不能把上一次局部建模误当成默认全量。服务端在入队事务中完整校验当前领域、当前发布版本和层级组合：DIM 只接受 ODS，DWD 接受至少一个 ODS 与可选 DIM，DWS 默认接受 DWD 或单个 DIM，显式 DWS 接受至少一个 DWD 与可选 DIM，ADS 只接受 DWS。任一所选数据集不合规时整次请求返回 `422 DATASET_LLM_TRIGGER_SCOPE_INVALID`，不会部分入队。
+请求体为 `{"datasetIds":[]}`。空数组处理当前业务领域内全部符合条件的数据集；非空数组只处理明确选择的精确数据集。服务端在入队事务中校验当前领域、发布版本和层级组合，worker 只生成可评审草稿，不会直接发布。
 
-四层建模不随发布自动启动，只能通过以上入口人工提交。每个入口通过租户隔离的 `SECURITY DEFINER` 函数写入 durable outbox，API 角色不能直接修改 worker 表。worker 异步生成可评审草稿，不直接发布数据集。业务领域唯一取自当前用户所属领域和资产 `domain_id`；`领域:* / BUSINESS_DOMAIN` 历史标签不参与任务分组、检查点或发布校验。默认维度建模全量扫描 ODS，每张 ODS 独立分类并最多四路并发，可形成零至两张 DIM；精确 ODS 版本同时获得事实、维度、事实兼维度或其他建议标签。默认明细建模逐个非纯维 ODS：先把其他事实按批识别关联和主次，只保留当前表为主表的关系，再汇总关系进行第二轮设计。主题和应用建模按单个上游数据集创建任务，最多四路并发。
-
-响应包含 `eligibleCount`、`enqueuedCount`、`existingCount`、`blockedCount`，以及可选 `blockedReason`。主题建模没有已发布 DWD/DIM、但存在上游草稿时返回发布依赖提示；应用建模对应返回 `DWS_PUBLICATION_REQUIRED`。未选择数据集时，每张精确 DWD 创建一个独立 LLM 主题任务，并默认只生成一张统一多维主题表；维度组合由 `STANDARD / CUBE / ROLLUP / GROUPING_SETS` 表达，不再按分析模板拆成多张表。每张精确 DIM 还创建独立 `ENTITY_COUNT` 任务，只生成一个实体计数指标。显式选择时，无论选择一张还是多张 DWD，都只创建一个联合主题任务；例如 `DWD + DWD + DIM` 会一次性提交给规划器分析，继续沿用原有框选关系。默认 ADS 只比较单粒度 DWS 的受治理维度集合：源维度严格包含目标维度、两侧发布版本均已物化且源指标为可跨时间求和的流量指标时，先把细粒度 DWS 预聚合到目标粒度，再以完整维度键一对一关联两侧指标；维度互不包含、多粒度分组表、累计值和时点值均不强行合并。没有可证明路径时生成同粒度投影。显式 ADS 仍逐张处理所选 DWS，不执行本轮维度包含发现。上游物化尚未 `ACTIVE` 时，worker 进入依赖等待。
-
-非 ODS 数据集（DIM、DWD、DWS、ADS）在当前建模草稿生成后即自动登记 LLM 标签建议任务，发布形成新的不可变版本时再自动登记该版本，不提供人工触发入口。worker 只能从租户内 `ACTIVE / CONTROLLED` 词表选择标签，并仅生成 `SUGGESTED` 绑定，不自动批准；页面展示当前发布版本的建议标签，没有发布版本时展示当前草稿标签。任务身份包含精确版本、prompt 版本和 schema hash，同一草稿继续编辑时不会复活或改写已终结的审计任务。
-
-### 同步 DWS 指标与维度资产
-
-发布 DWS 精确版本时，系统直接信任保存后的字段角色：`MEASURE` 由纯代码规则生成
-指标入库任务，`DIMENSION / ATTRIBUTE / TIME / IDENTIFIER` 直接写入正式维度资产。
-资产发现阶段不调用 LLM；名称与描述已经在 DWS 草稿保存时由语义命名流程补全并
-持久化，入库阶段不会再次推断或改写。
-
-`POST /metric-candidates/identify` 需要全局 `METRIC:MANAGE` 和 `DATASET:READ`，由
-资产管理中心“同步 DWS 指标与维度”按钮发起一次幂等对账，为迁移前或异常遗漏的
-当前 DWS 补齐同一套程序化入库。指标规则结果自动接收为指标资产，维度直接以
-`PUBLISHED` 状态创建；两者都不进入人工审批中心，也不提供候选清单。
-
-维度身份自动入库不等于自动开放成员枚举。程序创建的维度默认
-`member_index_policy=NONE`，敏感性和高基数标记继续受治理策略约束；后续如需成员
-索引，必须由独立画像与索引治理流程显式放开。
+非 ODS 数据集在草稿保存和精确版本发布后会登记标签建议任务。标签只能来自租户内受控词表，结果以建议状态保存，不会自动批准。
 
 ## 校验并规范化
 
@@ -336,7 +314,7 @@ DWD 草稿和发布版本都记录对精确 ODS 版本的依赖。删除 ODS 时
 
 恢复只接受 `DISABLED` 数据集。服务端在数据集行锁内优先还原停用前的 `PUBLISHED`、`STALE` 或 `DRAFT` 状态；恢复已发布状态时只重新挂接停用时保存的精确 `PUBLISHED` 版本，不反向改写版本快照。迁移前只有审计轨迹能够证明最近一次相关生命周期动作是 `DISABLE` 的旧记录才会进入可恢复状态；没有可靠停用快照的兼容记录按安全约定恢复为可编辑 `DRAFT`，真正的 `DEPRECATED` 数据集不会暴露恢复入口。成功返回更新后的数据集并把聚合版本加一；重复恢复或状态不匹配返回 `409 DATASET_VERSION_TRANSITION_INVALID`。
 
-`DELETE /datasets/{id}` 同样需要管理权限和上述请求体。控制面始终采用软删除：目录和普通加载不再返回该数据集，发布版本被废弃，历史版本和审计记录不做物理清除。ODS 删除只停用平台元数据记录，绝不向外部源库生成 `DROP/DELETE`；数据库触发器同时覆盖软删除和受控物理清理，强制把来源表及字段置为 `INACTIVE`、表管理状态置为 `DISABLED`，避免其他维护路径产生孤儿活动资产。DIM/DWD/DWS/ADS 是平台 PostgreSQL 仓库中的派生表，删除事务会同时登记带租约和三次重试的物理清理 outbox；仓库 worker 随后删除该数据集的 `warehouse_published` 稳定视图、已退休历史视图和精确校验过的派生层物理表，并在工作台显示清理进度。API 仍只持有仓库只读账号，不因删除能力获得 DDL 权限。服务端会先检查该数据集全部精确版本；只要仍被活动指标、下游数据集、报告草稿、运行中查询或排队/运行中的物化构建占用，就返回 `409 DATASET_IN_USE` 且不修改任何状态。
+`DELETE /datasets/{id}` 同样需要管理权限和上述请求体。控制面始终采用软删除：目录和普通加载不再返回该数据集，发布版本被废弃，历史版本和审计记录不做物理清除。ODS 删除只停用平台元数据记录，绝不向外部源库生成 `DROP/DELETE`；数据库触发器同时覆盖软删除和受控物理清理，强制把来源表及字段置为 `INACTIVE`、表管理状态置为 `DISABLED`，避免其他维护路径产生孤儿活动资产。DIM/DWD/DWS/ADS 是平台 PostgreSQL 仓库中的派生表，删除事务会同时登记带租约和三次重试的物理清理 outbox；仓库 worker 随后删除该数据集的 `warehouse_published` 稳定视图、已退休历史视图和精确校验过的派生层物理表，并在数据集配置页显示清理进度。API 仍只持有仓库只读账号，不因删除能力获得 DDL 权限。服务端会先检查该数据集全部精确版本；只要仍被下游数据集、运行中查询或排队/运行中的物化构建占用，就返回 `409 DATASET_IN_USE` 且不修改任何状态。
 
 ## 发布审批与不可变版本
 
@@ -498,18 +476,17 @@ DIM/DWD 只允许展开受控 ODS 映射，混合虚拟 ODS 与数仓关系的�
 
 ## 发布版本占用统计
 
-`GET /datasets/{id}/versions/{versionId}/usage` 使用与精确版本加载相同的读取权限和父级/租户校验，只返回当前控制库中可见的聚合数量，不返回报告、下游数据集、用户或查询 ID：
+`GET /datasets/{id}/versions/{versionId}/usage` 使用与精确版本加载相同的读取权限和父级/租户校验，只返回当前控制库中可见的聚合数量，不返回下游数据集、用户或查询 ID：
 
 ```json
 {
-  "reportDraftReferences": 2,
   "downstreamDraftReferences": 1,
   "downstreamPublishedReferences": 3,
   "activeQueryRuns": 1
 }
 ```
 
-`reportDraftReferences` 按报告去重；下游数据集引用按精确下游版本去重，并把 `DRAFT` 与 `PUBLISHED/STALE/DEPRECATED` 分开；`activeQueryRuns` 只统计仍为 `RUNNING` 的查询。软删除的报告或下游数据集不计入。该响应是界面提示使用的即时快照，不是删除/状态迁移租约；已发布报告版本引用要等 T0601 建立不可变报告依赖表后才能纳入，强占用阻断和租约语义不能由这些计数替代。
+下游数据集引用按精确下游版本去重，并把 `DRAFT` 与 `PUBLISHED/STALE/DEPRECATED` 分开；`activeQueryRuns` 只统计仍为 `RUNNING` 的查询。软删除的下游数据集不计入。该响应是界面提示使用的即时快照，不是删除/状态迁移租约。
 
 ## 发布版本状态迁移
 
@@ -655,7 +632,7 @@ PostgreSQL 中由服务端解析的 `warehouse_published` 稳定视图。客户�
 | 504 | `AI_TIMEOUT` | 模型调用超时，原画布保持不变 |
 | 409 | `DATASET_VERSION_UNAVAILABLE` | 精确版本不是可执行的 PUBLISHED 状态或发布依赖已经漂移 |
 | 409 | `DATASET_VERSION_TRANSITION_INVALID` | 发布版本状态迁移不在允许的单向状态机内 |
-| 409 | `DATASET_IN_USE` | 数据集仍被指标、下游数据集、报告草稿或运行中查询占用，不能删除 |
+| 409 | `DATASET_IN_USE` | 数据集仍被下游数据集、构建任务或运行中查询占用，不能删除 |
 | 404 | `QUERY_RUN_NOT_FOUND` | 查询不存在、已结束或当前用户无权取消 |
 | 502 | `QUERY-004-EXECUTION-FAILED` | 数据源执行失败，内部错误不透出 |
 | 504 | `QUERY-003-TIMEOUT` | 查询超时且已发起取消 |

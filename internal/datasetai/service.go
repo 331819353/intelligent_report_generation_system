@@ -128,10 +128,9 @@ const changeIntentSystemPrompt = `你是企业数据集 DAG 修改意图解析�
 13. 字段穿过 GROUP 时必须明确 DIMENSION 或 METRIC 的角色；DIMENSION 的 grouping 必须始终为空，METRIC 必须填写 aggregation。如果日期需要年、年月、年季或年月日口径，必须在 GROUP 前新增独立 DATE_FORMAT TRANSFORM，并让 GROUP 使用转换产物。如果角色或聚合方式不能从用户要求唯一确定，返回 CLARIFY，不得猜测。REMOVE 后用途数组必须为空。
 14. 整体 REMOVE NODE/JOIN/GROUP 时，被删除组件内部的选列、关联条件或分组用途由 REMOVE 操作锁定，不要为这些随组件消失的内容生成 fieldChanges；但整体 ADD NODE/JOIN/GROUP 的每个选列和字段用途仍必须完整生成 fieldChanges。
 15. UPDATE NODE.tableId 是物理字段身份整体迁移：为旧 tableId 下每个原选中字段生成 REMOVE，为新 tableId 下每个最终选中字段生成 ADD；若用户明确表达同一逻辑字段延续，也可对新 binding 使用 KEEP。只有此场景允许同一 nodeId 同时绑定旧表和唯一一张新表。若 selectedColumns、GROUP/JOIN/END 数组结构本身不变，不要虚构这些字段的 UPDATE；tableId UPDATE 已授权同 nodeId+column 的旧、新 binding 迁移。
-16. hints 是已由服务端重新验证的用户偏好。若 hints 指定 tableId、column、aggregation 或 timeGrain，应在不突破 current 与授权操作边界的前提下优先精确落实；不得从 hints 推断 assets 之外的字段。
 17. COUNT/COUNT_DISTINCT 的字段用途必须绑定真实 field，不得把 *、COUNT(*)、表达式或“订单量/交易量”等结果名写入 column；统计记录数时优先选择 nullable=false 且 semanticType=IDENTIFIER 的字段。
 18. 用户要求日期格式化、文本清理/替换/截取/拼接、数值运算/取整/绝对值、类型转换、空值填充或条件映射时，必须使用独立 TRANSFORM 组件表达，不能把处理偷偷折叠进字段名称。条件“在…中”使用 CASE + IN，并在 conditionValues 中逐项声明 LITERAL 或 FIELD。
-19. 返回 READY 前必须逐项自检 fieldChanges：每个 FINAL_OUTPUT 从其 node 到 end 的路径上，每经过一个现有或新增 GROUP，都必须在 groupUses 中恰好声明一次 DIMENSION 或 METRIC；所有 DIMENSION 的 grouping 必须为空。日期时间粒度由 GROUP 前的独立 DATE_FORMAT TRANSFORM 表达。若字段角色、时间粒度或聚合方式不能从 instruction/hints 唯一确定，返回 CLARIFY，不能输出一个会被本地校验拒绝的 READY。
+19. 返回 READY 前必须逐项自检 fieldChanges：每个 FINAL_OUTPUT 从其 node 到 end 的路径上，每经过一个现有或新增 GROUP，都必须在 groupUses 中恰好声明一次 DIMENSION 或 METRIC；所有 DIMENSION 的 grouping 必须为空。日期时间粒度由 GROUP 前的独立 DATE_FORMAT TRANSFORM 表达。若字段角色、时间粒度或聚合方式不能从 instruction 唯一确定，返回 CLARIFY，不能输出一个会被本地校验拒绝的 READY。
 20. ADD/REMOVE 组件的 fields 和 inputChanges 必须始终为空。用户只要求“仅输出/不输出某字段”时，不等于取消上游选列：若字段仍保留选中但不再参与任何下游用途，使用 selectionAction=KEEP、purpose=SELECTED_ONLY 且三个用途数组为空；只有用户明确要求取消选择该字段时才使用 REMOVE，并且 operations 必须包含 UPDATE NODE:selectedColumns。
 21. 当 instruction 涉及流程重构时，必须在内部按“数据节点 → 源字段处理 → 关联前分组 → 关联 → 关联后分组 → 输出字段处理 → 结束节点”逐阶段审视；每阶段允许 0 到多个组件，只声明真实需要的变化。影响关联或分组口径的 TRANSFORM 放在对应组件前，仅展示转换放在最后一次 JOIN/GROUP 后。
 22. 多种处理类型拆成对应细粒度 TRANSFORM；每个新增中间组件都必须同时声明直接消费者的 input UPDATE/inputChanges，确保转换产物被下游规则、GROUP 或 END 实际使用。不得新增已连线但产物无人使用的装饰组件。
@@ -153,7 +152,6 @@ const plannerSystemPrompt = `你是企业数据集 DAG 配置助手，服务对�
 4. 关联只使用 INNER 或 LEFT；条件两侧必须来自各自输入分支内的已选字段且 canonicalType 兼容，同一个关联的全部条件必须使用同一对叶子节点。
 5. 分组必须同时包含至少一个维度和一个指标。所有维度的 grouping 必须为空；分组组件只消费上游字段，不负责日期转换。年、年月、年季或年月日必须先由独立 DATE_FORMAT TRANSFORM 产出 STRING 维度，再交给 GROUP。聚合只能是 SUM、AVG、COUNT、COUNT_DISTINCT、MIN、MAX。
 6. COUNT 和 COUNT_DISTINCT 也必须绑定当前 node 所属 assets 表中的一个真实、精确区分大小写且已选择的 column。禁止使用 *、COUNT(*)、COUNT_DISTINCT(*)、表达式或“交易量/订单量”等虚构结果字段作为 column。统计“订单数量/订单数/订单量”时使用订单实体表的订单主标识，不能改用支付、退款等表中的同名订单外键；经过 JOIN 后可能重复时使用 COUNT_DISTINCT。统计“支付记录数/支付次数”才使用支付实体主标识。其他记录数优先选择 nullable=false 且 semanticType=IDENTIFIER 的业务主标识字段；其次选择其他稳定、非空标识字段。聚合结果仍沿用该真实字段 binding，通过 aggregation 表达计数语义。
-7. hints 已由服务端按当前租户资产重新验证。preferredTableIds 只用于来源排序；CREATE 中非空的 aggregation、measureFields、dimensionFields、timeField、timeGrain 是结构化计算约束，必须按精确 binding 落实，不能因 instruction 中同时出现“明细”“每行”等粒度描述而静默忽略。若 aggregation 或 timeGrain 非空，最终方案必须包含真实接入主链且输出对应结果的 GROUP；timeGrain 还必须由 GROUP 前的 DATE_FORMAT 实现。不得根据 hints 扩张到 assets 之外。
 8. end.outputs 只保留用户目标需要的字段，code 使用稳定英文标识符且不重复。无法确信的关联键或业务假设写入 warnings/assumptions，但仍给出基于元数据最合理的可编辑方案。
 9. CREATE 根据 instruction 从零产生完整方案；MODIFY 不再解释自然语言，只执行服务端锁定的 changeSet，并返回修改后的完整方案而不是补丁。
 10. 组件 id 使用 node_1、join_1、group_1 等稳定格式；修改时必须复用未改变组件的 id，不得通过重编号隐式删除组件。
@@ -281,9 +279,6 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 		}
 	} else if validationErr == nil {
 		validationErr = annotateInvalidOutput(validateTransformRequirements(proposal.Plan, transformRequirements), InvalidOutputStagePlanValidation, false, result.RequestID)
-		if validationErr == nil {
-			validationErr = annotateInvalidOutput(validateCreatePlanHints(proposal.Plan, input.Hints), InvalidOutputStagePlanValidation, false, result.RequestID)
-		}
 		proposal.ChangeSet = ChangeSet{Operations: []ChangeOperation{}, FieldChanges: []FieldChange{}}
 	}
 	if validationErr != nil {
@@ -346,9 +341,6 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 			}
 		} else if validationErr == nil {
 			validationErr = annotateInvalidOutput(validateTransformRequirements(proposal.Plan, transformRequirements), InvalidOutputStagePlanValidation, true, result.RequestID)
-			if validationErr == nil {
-				validationErr = annotateInvalidOutput(validateCreatePlanHints(proposal.Plan, input.Hints), InvalidOutputStagePlanValidation, true, result.RequestID)
-			}
 			proposal.ChangeSet = ChangeSet{Operations: []ChangeOperation{}, FieldChanges: []FieldChange{}}
 		}
 		if validationErr != nil {
@@ -375,11 +367,6 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 	}
 	if err := validateTransformRequirements(proposal.Plan, transformRequirements); err != nil {
 		return PlanResult{}, annotateInvalidOutput(err, InvalidOutputStagePlanValidation, repairAttempted, result.RequestID)
-	}
-	if mode == "CREATE" {
-		if err := validateCreatePlanHints(proposal.Plan, input.Hints); err != nil {
-			return PlanResult{}, annotateInvalidOutput(err, InvalidOutputStagePlanValidation, repairAttempted, result.RequestID)
-		}
 	}
 	if mode == "MODIFY" {
 		if err := validateLockedTransformUsage(proposal.Plan, lockedChangeSet); err != nil {
@@ -1231,7 +1218,6 @@ func buildChangeIntentProviderRequest(input PlanRequest, catalog []CatalogTable)
 	promptJSON, err := json.Marshal(intentPromptEnvelope{
 		Instruction:           input.Instruction,
 		Current:               *input.Current,
-		Hints:                 input.Hints,
 		EditContext:           buildPromptEditContext(input.Current),
 		TransformRequirements: []TransformRequirement{},
 		Assets:                catalog,
@@ -1288,28 +1274,13 @@ type catalogCandidate struct {
 
 func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRequest, mode string, changeSet ChangeSet) (catalogLoadResult, error) {
 	currentColumns, currentOrder := currentCatalogReferences(input.Current)
-	hintColumns, hintOrder := hintCatalogReferences(input.Hints)
 	requiredColumns := cloneRequiredColumns(currentColumns)
 	requiredOrder := append([]string(nil), currentOrder...)
-	requiredSet := make(map[string]bool, len(currentOrder)+len(hintOrder))
+	requiredSet := make(map[string]bool, len(currentOrder))
 	currentSet := make(map[string]bool, len(currentOrder))
 	for _, id := range currentOrder {
 		requiredSet[id] = true
 		currentSet[id] = true
-	}
-	for _, tableID := range hintOrder {
-		if !requiredSet[tableID] {
-			requiredSet[tableID] = true
-			requiredOrder = append(requiredOrder, tableID)
-		}
-		columns := requiredColumns[tableID]
-		if columns == nil {
-			columns = map[string]bool{}
-			requiredColumns[tableID] = columns
-		}
-		for column := range hintColumns[tableID] {
-			columns[column] = true
-		}
 	}
 	retrieval := assetembedding.RetrievalResult{TableScores: map[string]float64{}, ColumnScores: map[string]float64{}, Degraded: true}
 	physicalRequiredOrder := make([]string, 0, len(requiredOrder))
@@ -1507,36 +1478,6 @@ func currentCatalogReferences(current *GraphPlan) (map[string]map[string]bool, [
 		for _, column := range node.SelectedColumns {
 			columns[column] = true
 		}
-	}
-	return result, order
-}
-
-func hintCatalogReferences(hints *PlanHints) (map[string]map[string]bool, []string) {
-	result := map[string]map[string]bool{}
-	order := []string{}
-	ensureTable := func(tableID string) map[string]bool {
-		columns, exists := result[tableID]
-		if !exists {
-			columns = map[string]bool{}
-			result[tableID] = columns
-			order = append(order, tableID)
-		}
-		return columns
-	}
-	if hints == nil {
-		return result, order
-	}
-	for _, tableID := range hints.PreferredTableIDs {
-		ensureTable(tableID)
-	}
-	for _, field := range hints.MeasureFields {
-		ensureTable(field.TableID)[field.Column] = true
-	}
-	if hints.TimeField != nil {
-		ensureTable(hints.TimeField.TableID)[hints.TimeField.Column] = true
-	}
-	for _, field := range hints.DimensionFields {
-		ensureTable(field.TableID)[field.Column] = true
 	}
 	return result, order
 }
@@ -1789,7 +1730,6 @@ func buildProviderRequest(input PlanRequest, mode string, changeSet ChangeSet, c
 		Instruction:           instruction,
 		Mode:                  mode,
 		Current:               input.Current,
-		Hints:                 input.Hints,
 		TransformRequirements: transformRequirements,
 		ChangeSet:             changeSet,
 		Assets:                catalog,
@@ -1957,9 +1897,9 @@ func repairInstruction(validationErr error) string {
 	case InvalidOutputReasonJoin:
 		guidance = "检查 JOIN 左右输入、叶子节点方向、字段已选状态和 canonicalType 兼容性。"
 	case InvalidOutputReasonGroup:
-		guidance = "每个 GROUP 同时保留至少一个维度和一个指标，并确保字段来自其输入分支；若 CREATE hints 指定 aggregation、measureFields 或 dimensionFields，必须生成并最终输出对应的分组指标与维度，不得以明细粒度为由忽略；时间粒度只能绑定日期时间字段。"
+		guidance = "每个 GROUP 同时保留至少一个维度和一个汇总字段，并确保字段来自其输入分支；时间粒度只能绑定日期时间字段。"
 	case InvalidOutputReasonTransform:
-		guidance = "逐项落实 transformRequirements 与 CREATE hints.timeGrain：每项必需 componentType 至少生成一个真实接入 DAG 的 TRANSFORM；若 requirement 声明 operation，规则必须使用该 operation。转换产物 key 必须是 transformId.outputId；不得用字段改名、GROUP 粒度或 END 名称代替；按时间汇总必须让 GROUP 使用并最终输出 DATE_FORMAT 产物。"
+		guidance = "逐项落实 transformRequirements：每项必需 componentType 至少生成一个真实接入 DAG 的 TRANSFORM；若 requirement 声明 operation，规则必须使用该 operation。转换产物 key 必须是 transformId.outputId；不得用字段改名、GROUP 粒度或 END 名称代替；按时间汇总必须让 GROUP 使用并最终输出 DATE_FORMAT 产物。"
 	case InvalidOutputReasonOutput:
 		guidance = "END 只能输出其输入实际产生的字段，字段与 code 均不得重复。转换产物以及由 GROUP 继续保留的转换字段都使用 transformId.outputId；物理字段使用 nodeId.column，禁止使用 groupId.结果名或自行构造聚合 key。"
 	case InvalidOutputReasonChangeScope:
@@ -1973,7 +1913,7 @@ func repairInstruction(validationErr error) string {
 		// model, but is deliberately excluded from the HTTP error contract.
 		detail = fmt.Sprintf("本地校验详情：%s。", metadata.Detail)
 	}
-	return fmt.Sprintf("上一次结构化输出未通过本地可信边界校验（错误分类 %s，阶段 %s）。%s%s 请依据原始 planner 输入中的 current、锁定的 changeSet、hints 和 assets 重新返回完整 JSON；只能修正 plan，绝不能新增、改写或扩大 changeSet。不要解释，并确保整张图是单根有向无环树。", metadata.ReasonCode, metadata.Stage, detail, guidance)
+	return fmt.Sprintf("上一次结构化输出未通过本地可信边界校验（错误分类 %s，阶段 %s）。%s%s 请依据原始 planner 输入中的 current、锁定的 changeSet 和 assets 重新返回完整 JSON；只能修正 plan，绝不能新增、改写或扩大 changeSet。不要解释，并确保整张图是单根有向无环树。", metadata.ReasonCode, metadata.Stage, detail, guidance)
 }
 
 func intentRepairInstruction(validationErr error) string {

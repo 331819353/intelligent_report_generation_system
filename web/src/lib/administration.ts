@@ -62,9 +62,6 @@ export type AdminUser = {
   displayName: string
   status: 'ACTIVE' | 'DISABLED' | 'LOCKED'
   roles: AdminUserRole[]
-  domains?: Array<Pick<BusinessDomain, 'id' | 'code' | 'name' | 'default'> & {
-    memberRole: 'MEMBER' | 'DOMAIN_ADMIN'
-  }>
   lastLoginAt?: string
 }
 
@@ -100,37 +97,6 @@ export const administrationAPI = {
       Boolean(item?.id && item?.code && item?.name && item?.status),
     )
   },
-  async listManagedDomains() {
-    const result = await administrationRequest<ItemsResponse<BusinessDomain>>('/v1/managed-domains', {
-      cache: 'no-store',
-    })
-    return safeItems(result).filter(item =>
-      Boolean(item?.id && item?.code && item?.name && item?.status),
-    )
-  },
-  async createDomain(input: {
-    code: string
-    name: string
-    description: string
-    administratorUserIds: string[]
-  }) {
-    return administrationRequest<BusinessDomain>('/v1/domains', {
-      method: 'POST',
-      body: JSON.stringify(input),
-    })
-  },
-  async updateDomainStatus(id: string, status: BusinessDomainStatus) {
-    return administrationRequest<BusinessDomain>(`/v1/domains/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ status }),
-    })
-  },
-  async replaceDomainAdministrators(id: string, userIds: string[]) {
-    return administrationRequest<void>(`/v1/domains/${id}/administrators`, {
-      method: 'PUT',
-      body: JSON.stringify({ userIds }),
-    })
-  },
   async listDomainCatalog() {
     const result = await administrationRequest<ItemsResponse<DomainCatalogItem>>('/v1/domain-catalog', {
       cache: 'no-store',
@@ -142,12 +108,6 @@ export const administrationAPI = {
       method: 'POST',
       body: JSON.stringify({ reason }),
     })
-  },
-  async listMyDomainApplications() {
-    const result = await administrationRequest<ItemsResponse<DomainApplication>>('/v1/domain-applications', {
-      cache: 'no-store',
-    })
-    return safeItems(result)
   },
   async listPendingDomainApplications(domainID: string) {
     const result = await administrationRequest<ItemsResponse<DomainApplication>>(`/v1/domains/${domainID}/applications`, {
@@ -199,17 +159,6 @@ export const administrationAPI = {
   },
   async revokeUserRole(userID: string, roleID: string) {
     return administrationRequest<void>(`/v1/users/${userID}/roles/${roleID}`, {
-      method: 'DELETE',
-    })
-  },
-  async assignUserDomain(userID: string, domainID: string) {
-    return administrationRequest<void>(`/v1/users/${userID}/domains`, {
-      method: 'POST',
-      body: JSON.stringify({ domainId: domainID }),
-    })
-  },
-  async revokeUserDomain(userID: string, domainID: string) {
-    return administrationRequest<void>(`/v1/users/${userID}/domains/${domainID}`, {
       method: 'DELETE',
     })
   },

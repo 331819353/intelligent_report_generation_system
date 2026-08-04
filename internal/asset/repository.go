@@ -347,7 +347,7 @@ func (r *Repository) ListDiffs(ctx context.Context, tenantID, dataSourceID strin
 	return
 }
 
-// Impact 列出依赖目标表的下游数据集、指标和报表组件。
+// Impact 列出依赖目标表的下游数据集。
 func (r *Repository) Impact(ctx context.Context, tenantID, tableID string) (items []Dependency, err error) {
 	items = []Dependency{}
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {

@@ -15,13 +15,8 @@ import (
 
 const (
 	PurposeMetadataCompletion    = "METADATA_COMPLETION"
-	PurposeReportGeneration      = "REPORT_GENERATION"
-	PurposeBlockEdit             = "BLOCK_EDIT"
-	PurposeConclusion            = "CONCLUSION_GENERATION"
 	PurposeDatasetDAGGeneration  = "DATASET_DAG_GENERATION"
-	PurposeMetricAuthoring       = "METRIC_AUTHORING"
 	PurposeDatasetTagSuggestion  = "DATASET_TAG_SUGGESTION"
-	PurposeSemanticQueryPlanning = "SEMANTIC_QUERY_PLANNING"
 	PurposeDatasetSemanticNaming = "DATASET_SEMANTIC_NAMING"
 )
 
@@ -123,7 +118,7 @@ type Service struct {
 	wait     func(context.Context, time.Duration) error
 }
 
-// NewService 创建可被元数据补全、报告生成和分块修改共用的模型编排服务。
+// NewService 创建可被元数据补全与数据集设计共用的模型编排服务。
 func NewService(store Store, provider Provider, options ServiceOptions) (*Service, error) {
 	if store == nil || provider == nil {
 		return nil, fmt.Errorf("%w: store 和 provider 不能为空", ErrInvalidInvocation)
@@ -339,9 +334,8 @@ func validateServiceOptions(options ServiceOptions) error {
 
 func allowedPurpose(purpose string) bool {
 	switch purpose {
-	case PurposeMetadataCompletion, PurposeReportGeneration, PurposeBlockEdit, PurposeConclusion,
-		PurposeDatasetDAGGeneration, PurposeMetricAuthoring, PurposeDatasetTagSuggestion,
-		PurposeSemanticQueryPlanning, PurposeDatasetSemanticNaming:
+	case PurposeMetadataCompletion, PurposeDatasetDAGGeneration,
+		PurposeDatasetTagSuggestion, PurposeDatasetSemanticNaming:
 		return true
 	default:
 		return false

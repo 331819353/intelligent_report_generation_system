@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -18,7 +17,6 @@ import (
 	"github.com/google/uuid"
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasource"
-	"intelligent-report-generation-system/internal/metric"
 	"intelligent-report-generation-system/internal/policy"
 	"intelligent-report-generation-system/internal/querycompiler"
 )
@@ -216,221 +214,6 @@ func (s *Service) PreviewRevision(ctx context.Context, tenantID, actorID, datase
 	}, input, "PREVIEW")
 }
 
-// PreviewMetric 执行指标服务端派生的计划，并复核它没有扩张精确数据集版本的来源边界。
-func (s *Service) PreviewMetric(ctx context.Context, tenantID, actorID string, candidate metric.QueryCandidate, input dataset.PreviewInput, validation bool) (dataset.PreviewResult, error) {
-	snapshot, err := s.prepareMetricSnapshot(ctx, tenantID, actorID, candidate)
-	if err != nil {
-		return dataset.PreviewResult{}, err
-	}
-	runType := "PREVIEW"
-	if validation {
-		runType = "VALIDATION"
-	}
-	return s.previewSnapshot(ctx, tenantID, actorID, snapshot, input, runType)
-}
-
-// PreflightMetric follows the exact immutable metric derivation and policy
-// resolution used by PreviewMetric, then requires the governed PostgreSQL
-// warehouse to parse and EXPLAIN the compiled statement without executing it.
-func (s *Service) PreflightMetric(
-	ctx context.Context,
-	tenantID, actorID string,
-	candidate metric.QueryCandidate,
-	input dataset.PreviewInput,
-) (metric.QueryPreflightProof, error) {
-	snapshot, err := s.prepareMetricSnapshot(ctx, tenantID, actorID, candidate)
-	if err != nil {
-		return metric.QueryPreflightProof{}, err
-	}
-	return s.preflightSnapshot(ctx, tenantID, actorID, snapshot, input)
-}
-
-func (s *Service) prepareMetricSnapshot(
-	ctx context.Context,
-	tenantID, actorID string,
-	candidate metric.QueryCandidate,
-) (runtimeSnapshot, error) {
-	if tenantID == "" || actorID == "" || candidate.MetricID == "" || candidate.MetricVersionID == "" ||
-		candidate.DatasetID == "" || candidate.DatasetVersionID == "" || candidate.PlanHash == "" {
-		return runtimeSnapshot{}, dataset.ErrPreviewInvalid
-	}
-	version, err := s.datasets.GetVersion(ctx, tenantID, candidate.DatasetID, candidate.DatasetVersionID)
-	if err != nil {
-		return runtimeSnapshot{}, err
-	}
-	if version.Status != "PUBLISHED" {
-		return runtimeSnapshot{}, dataset.ErrVersionUnavailable
-	}
-	original, err := dataset.DecodeAndNormalize(version.DSL)
-	if err != nil {
-		return runtimeSnapshot{}, dataset.ErrVersionUnavailable
-	}
-	derived, err := dataset.DecodeAndNormalize(candidate.DSL)
-	if err != nil || !sameMetricSourceEnvelope(original, derived, candidate) {
-		return runtimeSnapshot{}, dataset.ErrPreviewInvalid
-	}
-	materializedRoot := false
-	if version.Layer == dataset.LayerDIM ||
-		version.Layer == dataset.LayerDWD ||
-		version.Layer == dataset.LayerDWS ||
-		version.Layer == dataset.LayerADS {
-		derived, err = materializedMetricDocument(
-			original, derived, candidate.DatasetVersionID,
-		)
-		if err != nil {
-			return runtimeSnapshot{}, dataset.ErrPreviewUnsupported
-		}
-		materializedRoot = true
-	}
-	derivedDSL, err := json.Marshal(derived)
-	if err != nil {
-		return runtimeSnapshot{}, dataset.ErrPreviewInvalid
-	}
-	return runtimeSnapshot{
-		DatasetID: candidate.DatasetID, VersionID: candidate.DatasetVersionID,
-		MetricID: candidate.MetricID, MetricVersionID: candidate.MetricVersionID,
-		PlanHash: candidate.PlanHash, DSL: derivedDSL, ExactVersion: true,
-		MetricExecution: true, MaterializedRoot: materializedRoot,
-	}, nil
-}
-
-// sameMetricSourceEnvelope 禁止指标派生计划扩张精确版本的来源边界。
-// 唯一例外是指标服务声明并可逐项复核的参数化维度过滤。
-func sameMetricSourceEnvelope(
-	original, derived dataset.Document,
-	candidate metric.QueryCandidate,
-) bool {
-	addedParameterCount := 0
-	for _, binding := range candidate.FilterBindings {
-		if len(binding.ParameterCodes) > 0 {
-			addedParameterCount += len(binding.ParameterCodes)
-		} else {
-			addedParameterCount++
-		}
-	}
-	if !sameMetricDatasetIdentity(original.Dataset, derived.Dataset) ||
-		!reflect.DeepEqual(original.Nodes, derived.Nodes) ||
-		!reflect.DeepEqual(original.Joins, derived.Joins) ||
-		!reflect.DeepEqual(original.PreAggregations, derived.PreAggregations) ||
-		derived.FactContract != nil ||
-		derived.AnalysisContract != nil ||
-		!reflect.DeepEqual(original.ExecutionPolicy, derived.ExecutionPolicy) ||
-		len(derived.Filters) != len(original.Filters)+len(candidate.FilterBindings) ||
-		len(derived.Parameters) != len(original.Parameters)+addedParameterCount ||
-		!reflect.DeepEqual(
-			original.Filters,
-			derived.Filters[:len(original.Filters)],
-		) ||
-		!reflect.DeepEqual(
-			original.Parameters,
-			derived.Parameters[:len(original.Parameters)],
-		) {
-		return false
-	}
-	fields := make(map[string]dataset.Field, len(original.Fields))
-	for _, field := range original.Fields {
-		fields[field.ID] = field
-	}
-	seenBindings := map[string]bool{}
-	seenFilters := map[string]bool{}
-	seenParameters := map[string]bool{}
-	parameterOffset := len(original.Parameters)
-	for index, binding := range candidate.FilterBindings {
-		field, exists := fields[binding.FieldID]
-		bindingKey := binding.FieldID + "\x00" + binding.Operator
-		parameterCodes := binding.ParameterCodes
-		if len(parameterCodes) == 0 && binding.ParameterCode != "" {
-			parameterCodes = []string{binding.ParameterCode}
-		}
-		ordinaryOperator := binding.Operator == "EQUALS" ||
-			binding.Operator == "NOT_EQUALS" ||
-			binding.Operator == "IN" ||
-			binding.Operator == "NOT_IN"
-		if !exists || seenBindings[bindingKey] ||
-			binding.FilterID == "" || seenFilters[binding.FilterID] ||
-			len(parameterCodes) == 0 ||
-			binding.ParameterCode != parameterCodes[0] ||
-			binding.DataType != field.CanonicalType ||
-			!ordinaryOperator &&
-				!((binding.Operator == "GTE" || binding.Operator == "LT") &&
-					(field.CanonicalType == "DATE" ||
-						field.CanonicalType == "DATETIME")) {
-			return false
-		}
-		setOperator := binding.Operator == "IN" || binding.Operator == "NOT_IN"
-		if setOperator && len(parameterCodes) < 2 {
-			return false
-		}
-		for _, parameterCode := range parameterCodes {
-			if parameterCode == "" || seenParameters[parameterCode] {
-				return false
-			}
-			seenParameters[parameterCode] = true
-		}
-		seenBindings[bindingKey] = true
-		seenFilters[binding.FilterID] = true
-		filter := derived.Filters[len(original.Filters)+index]
-		parameterName := "语义维度过滤"
-		if setOperator {
-			parameterName = "语义维度集合过滤"
-		}
-		for parameterIndex, parameterCode := range parameterCodes {
-			parameter := derived.Parameters[parameterOffset+parameterIndex]
-			if parameter.Code != parameterCode ||
-				parameter.Name != parameterName ||
-				parameter.DataType != binding.DataType ||
-				parameter.MultiValue || !parameter.Required ||
-				parameter.DefaultValue != nil {
-				return false
-			}
-		}
-		parameterOffset += len(parameterCodes)
-		if filter.ID != binding.FilterID ||
-			filter.Stage != "PRE_AGGREGATION" || filter.Optional ||
-			filter.Expression.Type != binding.Operator ||
-			filter.Expression.Left == nil ||
-			filter.Expression.Right == nil ||
-			!reflect.DeepEqual(*filter.Expression.Left, field.Expression) {
-			return false
-		}
-		if setOperator {
-			if filter.Expression.Right.Type != "ARRAY" ||
-				len(filter.Expression.Right.Arguments) != len(parameterCodes) {
-				return false
-			}
-			for parameterIndex, parameterCode := range parameterCodes {
-				argument := filter.Expression.Right.Arguments[parameterIndex]
-				if argument.Type != "PARAM_REF" ||
-					argument.Code != parameterCode {
-					return false
-				}
-			}
-		} else if filter.Expression.Right.Type != "PARAM_REF" ||
-			filter.Expression.Right.Code != binding.ParameterCode {
-			return false
-		}
-	}
-	return parameterOffset == len(derived.Parameters)
-}
-
-// sameMetricDatasetIdentity 只比较会标识数据资产和改变数据源解析方式的属性。
-// layer 与语义合同属于源数据集整表合同；指标派生计划会主动移除它们并按聚合
-// 结构推断为 DWS，不能因此被误判为扩张了数据访问边界。
-func sameMetricDatasetIdentity(
-	original, derived dataset.Descriptor,
-) bool {
-	return original.Code == derived.Code &&
-		original.Name == derived.Name &&
-		original.Description == derived.Description &&
-		original.Domain == derived.Domain &&
-		original.Subject == derived.Subject &&
-		original.Type == derived.Type &&
-		reflect.DeepEqual(original.Grain, derived.Grain) &&
-		derived.SemanticContractVersion == "" &&
-		derived.ConsumerContractID == ""
-}
-
-// ValidatePublication 校验全部启用策略后执行一行试跑，结果样本只在进程内短暂存在并立即丢弃。
 func (s *Service) ValidatePublication(ctx context.Context, tenantID, actorID string, candidate dataset.PublicationCandidate) (dataset.PreviewResult, error) {
 	document, err := dataset.DecodeAndNormalize(candidate.DSL)
 	if err != nil {
@@ -460,75 +243,12 @@ func (s *Service) ValidatePublication(ctx context.Context, tenantID, actorID str
 }
 
 type runtimeSnapshot struct {
-	DatasetID        string
-	VersionID        string
-	CandidateCode    string
-	MetricID         string
-	MetricVersionID  string
-	PlanHash         string
-	DSL              json.RawMessage
-	ExactVersion     bool
-	MetricExecution  bool
-	MaterializedRoot bool
-}
-
-func (s *Service) preflightSnapshot(
-	ctx context.Context,
-	tenantID, actorID string,
-	snapshot runtimeSnapshot,
-	input dataset.PreviewInput,
-) (metric.QueryPreflightProof, error) {
-	document, err := dataset.DecodeAndNormalize(snapshot.DSL)
-	if err != nil {
-		return metric.QueryPreflightProof{}, dataset.ErrInvalidDocument
-	}
-	var resolved ResolvedPlan
-	if snapshot.MaterializedRoot {
-		resolved, err = s.store.ResolveMaterializedVersion(
-			ctx, tenantID, snapshot.DatasetID, snapshot.VersionID, document,
-		)
-	} else {
-		resolved, err = s.store.ResolveVersion(
-			ctx, tenantID, snapshot.DatasetID, snapshot.VersionID, document,
-		)
-	}
-	if err != nil {
-		return metric.QueryPreflightProof{}, err
-	}
-	if resolved.Engine != ExecutionPostgreSQL || s.warehouse == nil ||
-		len(resolved.Materializations) == 0 || len(resolved.Tables) == 0 {
-		return metric.QueryPreflightProof{}, dataset.ErrPreviewUnsupported
-	}
-	executionDocument := document
-	if resolved.ExecutionDocument != nil {
-		executionDocument = *resolved.ExecutionDocument
-	}
-	scope, rowPolicies, columnPolicies, err := s.policies.Load(
-		ctx, tenantID, actorID, "DATASET", snapshot.DatasetID,
-	)
-	if err != nil {
-		return metric.QueryPreflightProof{}, err
-	}
-	if len(rowPolicies) > 0 || len(columnPolicies) > 0 {
-		return metric.QueryPreflightProof{}, dataset.ErrPreviewUnsupported
-	}
-	maxRows := input.MaxRows
-	if maxRows == 0 {
-		maxRows = min(document.ExecutionPolicy.PreviewLimit, 100)
-	}
-	if maxRows < 1 || maxRows > document.ExecutionPolicy.PreviewLimit {
-		return metric.QueryPreflightProof{}, dataset.ErrPreviewInvalid
-	}
-	proof, err := s.warehouse.Preflight(
-		ctx, tenantID, executionDocument, resolved, input.Parameters, scope,
-		rowPolicies, columnPolicies, maxRows,
-	)
-	if err != nil {
-		return metric.QueryPreflightProof{}, err
-	}
-	proof.DatasetID = snapshot.DatasetID
-	proof.DatasetVersionID = snapshot.VersionID
-	return proof, nil
+	DatasetID     string
+	VersionID     string
+	CandidateCode string
+	PlanHash      string
+	DSL           json.RawMessage
+	ExactVersion  bool
 }
 
 func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string, snapshot runtimeSnapshot, input dataset.PreviewInput, runType string) (dataset.PreviewResult, error) {
@@ -539,11 +259,7 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	// DSL 中只有资产 ID；每次执行都从控制库重新解析物理白名单并加载当前策略，
 	// 因而草稿不能缓存旧表名或旧权限来绕过撤权。
 	var resolved ResolvedPlan
-	if snapshot.MaterializedRoot {
-		resolved, err = s.store.ResolveMaterializedVersion(
-			ctx, tenantID, snapshot.DatasetID, snapshot.VersionID, document,
-		)
-	} else if snapshot.ExactVersion {
+	if snapshot.ExactVersion {
 		resolved, err = s.store.ResolveVersion(ctx, tenantID, snapshot.DatasetID, snapshot.VersionID, document)
 	} else {
 		resolved, err = s.store.Resolve(ctx, tenantID, document)
@@ -569,11 +285,6 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
-	// 现有策略编译层位于聚合之后；指标若直接复用会导致行策略过晚生效，
-	// 因此首阶段对带数据策略的数据集失败关闭。
-	if snapshot.MetricExecution && (len(rowPolicies) > 0 || len(columnPolicies) > 0) {
-		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
-	}
 	maxRows := input.MaxRows
 	if maxRows == 0 {
 		maxRows = min(document.ExecutionPolicy.PreviewLimit, 100)
@@ -590,8 +301,7 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	baseRun := RunRecord{
 		ID: queryID, TenantID: tenantID, DatasetID: snapshot.DatasetID, DatasetVersionID: snapshot.VersionID,
 		CandidateCode: snapshot.CandidateCode,
-		MetricID:      snapshot.MetricID, MetricVersionID: snapshot.MetricVersionID,
-		ActorID: actorID, SourceID: resolved.SourceID, ExecutionEngine: resolved.Engine,
+		ActorID:       actorID, SourceID: resolved.SourceID, ExecutionEngine: resolved.Engine,
 		RunType: runType, Materializations: append([]ResolvedMaterialization(nil), resolved.Materializations...),
 	}
 	if resolved.Engine == ExecutionPostgreSQL {

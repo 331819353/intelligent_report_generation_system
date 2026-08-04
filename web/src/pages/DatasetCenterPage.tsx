@@ -12,9 +12,7 @@ import {
   datasetAIPlanFromEditor,
   datasetAIRequestContext,
   materializeDatasetAIPlan,
-  normalizeDatasetAIPlanHints,
   requestDatasetAIProposal,
-  type DatasetAIPlanHints,
   type DatasetAIPlanResult,
   type DatasetAIProgressEvent,
 } from '../lib/dataset-ai'
@@ -143,7 +141,6 @@ type DatasetEditorSnapshot = {
 type DatasetAIUndo = { before: DatasetEditorSnapshot; appliedFingerprint: string }
 type DatasetAIReviewLabels = { nodes: Record<string, string>; fields: Record<string, string> }
 type DatasetAIRetryAction = 'GENERATE' | 'APPLY' | null
-type PendingMetricAIAutoRun = { key: string; instruction: string }
 type DatasetAIErrorView = {
   title: string
   message: string
@@ -173,18 +170,6 @@ const modelingMonitorConfigs: ModelingMonitorConfig[] = [
     taskKinds: new Set(['DWD_FACT_MODELING']),
     idleTitle: '基于已审批发布的 DIM 和同批次事实分类生成 DWD 草稿',
   },
-  {
-    trigger: 'DWS_MODELING',
-    label: '主题建模',
-    taskKinds: new Set(['DWS_MODELING']),
-    idleTitle: '基于已发布明细模型形成主题分析草稿；草稿需先完成发布审批',
-  },
-  {
-    trigger: 'ADS_MODELING',
-    label: '应用建模',
-    taskKinds: new Set(['ADS_MODELING']),
-    idleTitle: '基于已发布 DWS 形成可评审的 ADS 应用数据草稿',
-  },
 ]
 const emptyModelingMonitorState = (): ModelingMonitorState => ({
   tasks: [],
@@ -196,8 +181,6 @@ const emptyModelingMonitorState = (): ModelingMonitorState => ({
 const emptyModelingMonitors = (): Record<DatasetLLMTrigger, ModelingMonitorState> => ({
   DIM_MODELING: emptyModelingMonitorState(),
   DWD_MODELING: emptyModelingMonitorState(),
-  DWS_MODELING: emptyModelingMonitorState(),
-  ADS_MODELING: emptyModelingMonitorState(),
 })
 
 const modelingSelectionError = (
@@ -208,8 +191,6 @@ const modelingSelectionError = (
   const allowed: Record<DatasetLLMTrigger, Set<DatasetLayer>> = {
     DIM_MODELING: new Set(['ODS']),
     DWD_MODELING: new Set(['ODS', 'DIM']),
-    DWS_MODELING: new Set(['DWD', 'DIM']),
-    ADS_MODELING: new Set(['DWS']),
   }
   const invalidState = selected.filter(dataset =>
     dataset.status !== 'PUBLISHED' || !dataset.currentPublishedVersionId
@@ -223,23 +204,11 @@ const modelingSelectionError = (
     const rules: Record<DatasetLLMTrigger, string> = {
       DIM_MODELING: '维度建模只能选择 ODS 数据集',
       DWD_MODELING: '明细建模只能选择 ODS 数据集和可选的 DIM 数据集',
-      DWS_MODELING: '主题建模只能选择 DWD 数据集和可选的 DIM 数据集',
-      ADS_MODELING: '应用建模只能选择 DWS 数据集',
     }
     return rules[trigger]
   }
   if (trigger === 'DWD_MODELING' && !selected.some(dataset => dataset.layer === 'ODS')) {
     return '明细建模至少需要选择一个 ODS 数据集，DIM 只能作为可选维度输入'
-  }
-  if (trigger === 'DWS_MODELING' && !selected.some(dataset => dataset.layer === 'DWD')) {
-    return '主题建模至少需要选择一个 DWD 数据集，DIM 只能作为联合分析上下文'
-  }
-  if (trigger === 'DWS_MODELING') {
-    const dwdCount = selected.filter(dataset => dataset.layer === 'DWD').length
-    const dimCount = selected.filter(dataset => dataset.layer === 'DIM').length
-    if (dwdCount > 32 || dimCount > 64) {
-      return '一次联合主题建模最多选择 32 个 DWD 和 64 个 DIM 数据集'
-    }
   }
   return ''
 }
@@ -464,9 +433,6 @@ const publicationStatusLabels: Record<string, string> = {
   REJECTED: '已拒绝',
   CANCELLED: '已取消',
 }
-const metricCandidateGenerationLabels: Record<string, string> = {
-  LEGACY: '历史流程', PENDING: '审批后加工', SUCCEEDED: '历史准备已完成', PARTIAL: '历史准备部分完成', FAILED: '历史准备失败',
-}
 type TransformPaletteCategory = 'TEXT' | 'NUMBER' | 'DATE' | 'WINDOW' | 'RULE'
 type TransformComponentMeta = {
   componentType: GraphTransformComponentType
@@ -576,13 +542,6 @@ const datasetAIChangeFieldLabels: Record<string, string> = {
   left: '左侧输入', right: '右侧输入', joinType: '关联方式', conditions: '关联条件',
   family: '处理分类', componentType: '组件类型', rules: '转换规则',
   input: '上游输入', dimensions: '分组维度', metrics: '汇总指标', outputs: '输出字段',
-}
-const metricAIAutoRunStoragePrefix = 'dataset-metric-ai-auto:'
-const metricAIAutoRunWasConsumed = (key: string) => {
-  try { return sessionStorage.getItem(`${metricAIAutoRunStoragePrefix}${key}`) === '1' } catch { return false }
-}
-const consumeMetricAIAutoRun = (key: string) => {
-  try { sessionStorage.setItem(`${metricAIAutoRunStoragePrefix}${key}`, '1') } catch { /* in-memory ref still protects this mount */ }
 }
 const isTime = (column: AssetColumn) => ['DATE', 'DATETIME', 'TIMESTAMP'].includes(column.canonicalType.toUpperCase()) || column.semanticType.toUpperCase() === 'DATE'
 const emptyDraft = (): DatasetDraft => ({ code: '', name: '', description: '', layer: 'DWD', nodes: [], fields: [], joins: [], filters: [], parameters: [], calculations: [], sorts: [], grainDescription: '', grainKeys: [], groupingEnabled: false, finalConfigured: false, finalGroupingEnabled: false })
@@ -1237,8 +1196,6 @@ export function DatasetCenterPage() {
   const [aiReviewLabels, setAIReviewLabels] = useState<DatasetAIReviewLabels>({ nodes: {}, fields: {} })
   const [aiRetryAction, setAIRetryAction] = useState<DatasetAIRetryAction>(null)
   const [aiLastInstruction, setAILastInstruction] = useState('')
-  const [aiPlanHints, setAIPlanHints] = useState<DatasetAIPlanHints | undefined>()
-  const [pendingMetricAIAutoRun, setPendingMetricAIAutoRun] = useState<PendingMetricAIAutoRun | null>(null)
   const canvasFullscreenTarget = useRef<HTMLElement | null>(null)
   const historySelectionRequest = useRef(0)
   const endPreviewRequest = useRef(0)
@@ -1248,26 +1205,18 @@ export function DatasetCenterPage() {
   const aiApplyRequest = useRef(0)
   const editorFingerprintRef = useRef('')
   const lastEditorFingerprintRef = useRef('')
-  const metricAIAutoRunKeys = useRef(new Set<string>())
   const selectFilteredCheckbox = useRef<HTMLInputElement | null>(null)
-  const autoGenerateDatasetAIPlan = useRef<(instruction: string) => void>(() => undefined)
   const modelingRunTaskIDs = useRef<Record<DatasetLLMTrigger, Set<string>>>({
     DIM_MODELING: new Set(),
     DWD_MODELING: new Set(),
-    DWS_MODELING: new Set(),
-    ADS_MODELING: new Set(),
   })
   const modelingRequestedAt = useRef<Record<DatasetLLMTrigger, number | null>>({
     DIM_MODELING: null,
     DWD_MODELING: null,
-    DWS_MODELING: null,
-    ADS_MODELING: null,
   })
   const modelingExpectedRef = useRef<Record<DatasetLLMTrigger, boolean>>({
     DIM_MODELING: false,
     DWD_MODELING: false,
-    DWS_MODELING: false,
-    ADS_MODELING: false,
   })
   const modelingSyncRequest = useRef(0)
 
@@ -1379,8 +1328,6 @@ export function DatasetCenterPage() {
       setModelingMonitors(current => ({
         DIM_MODELING: { ...current.DIM_MODELING, syncError: message },
         DWD_MODELING: { ...current.DWD_MODELING, syncError: message },
-        DWS_MODELING: { ...current.DWS_MODELING, syncError: message },
-        ADS_MODELING: { ...current.ADS_MODELING, syncError: message },
       }))
     }
   }, [loadDatasets])
@@ -1490,19 +1437,6 @@ export function DatasetCenterPage() {
     ? publicationRequests.find(item => item.draftVersionId === publicationRecord.draftVersionId &&
       item.expectedDraftRecordVersion === publicationRecord.draftRecordVersion) ?? null
     : null
-  const metricFlowState = location.state as {
-    returnTo?: unknown
-    metricAIRequirement?: unknown
-    preferredDatasetId?: unknown
-    safeDatasetExtension?: unknown
-  } | null
-  const metricReturnTo = typeof metricFlowState?.returnTo === 'string' && metricFlowState.returnTo.startsWith('/')
-    ? metricFlowState.returnTo
-    : ''
-  const metricAIRequirement = typeof metricFlowState?.metricAIRequirement === 'string' ? metricFlowState.metricAIRequirement : ''
-  const metricPreferredDatasetId = typeof metricFlowState?.preferredDatasetId === 'string' ? metricFlowState.preferredDatasetId : ''
-  const metricSafeDatasetExtension = metricFlowState?.safeDatasetExtension === true && Boolean(metricPreferredDatasetId)
-
   const currentEditorSnapshot = useMemo<DatasetEditorSnapshot>(() => ({
     draft, relationBoxes, groupBoxes, transformBoxes, endBox, nodePositions, metadata,
   }), [draft, endBox, groupBoxes, metadata, nodePositions, relationBoxes, transformBoxes])
@@ -1574,13 +1508,10 @@ export function DatasetCenterPage() {
     setAIReviewLabels({ nodes: {}, fields: {} })
     setAIRetryAction(null)
     setAILastInstruction('')
-    setAIPlanHints(undefined)
-    setPendingMetricAIAutoRun(null)
   }, [])
 
-  const openCreate = async (metricAIInstruction = '', metricAIAutoRunKey = '', metricAIHints?: DatasetAIPlanHints) => {
+  const openCreate = async () => {
     resetDatasetAI()
-    setAIPlanHints(metricAIHints)
     endPreviewRequest.current += 1
     setEditingRecord(null)
     setDraft(emptyDraft())
@@ -1604,12 +1535,6 @@ export function DatasetCenterPage() {
     setCanvasFullscreen(false)
     setFormError('')
     setDialog({ mode: 'create' })
-    if (metricAIInstruction.trim()) {
-      const instruction = metricAIInstruction.trim().slice(0, 4000)
-      setAIPrompt(instruction)
-      setCanvasNotice('已从指标提案带入新数据集构建目标，正在自动生成 AI 画布方案。')
-      if (metricAIAutoRunKey) setPendingMetricAIAutoRun({ key: metricAIAutoRunKey, instruction })
-    }
     setAssetsLoading(true)
     try {
       const items = await loadDesignerAssets(datasets)
@@ -1621,9 +1546,8 @@ export function DatasetCenterPage() {
     }
   }
 
-  const openEdit = useCallback(async (dataset: DatasetSummary | string, metricAIInstruction = '', metricAIAutoRunKey = '', metricAIHints?: DatasetAIPlanHints) => {
+  const openEdit = useCallback(async (dataset: DatasetSummary | string) => {
     resetDatasetAI()
-    setAIPlanHints(metricAIHints)
     endPreviewRequest.current += 1
     const id = typeof dataset === 'string' ? dataset : dataset.id
     setEditingRecord(null)
@@ -1671,12 +1595,6 @@ export function DatasetCenterPage() {
       setMetadata(loadedMetadata)
       setGeneratedCode(record.code)
       setEditingRecord(record)
-      if (metricAIInstruction.trim()) {
-        const instruction = metricAIInstruction.trim().slice(0, 4000)
-        setAIPrompt(instruction)
-        setCanvasNotice('已从指标提案带入数据集改造目标，正在自动生成 AI 画布方案。')
-        if (metricAIAutoRunKey) setPendingMetricAIAutoRun({ key: metricAIAutoRunKey, instruction })
-      }
     } catch (cause) {
       setFormError(cause instanceof Error ? cause.message : '加载数据集配置失败')
     } finally {
@@ -1715,23 +1633,13 @@ export function DatasetCenterPage() {
     if (openedRouteDatasetID.current === routeKey) return
     openedRouteDatasetID.current = routeKey
     if (datasetId === 'new') {
-      const state = location.state as { metricAIInstruction?: unknown; metricAIHints?: unknown } | null
-      const metricAIInstruction = typeof state?.metricAIInstruction === 'string' ? state.metricAIInstruction : ''
-      const metricAIHints = normalizeDatasetAIPlanHints(state?.metricAIHints)
-      const autoRunKey = metricAIInstruction.trim() ? `metric-ai:${routeKey}` : ''
-      const pendingInstruction = autoRunKey && !metricAIAutoRunWasConsumed(autoRunKey) ? metricAIInstruction : ''
-      queueMicrotask(() => void openCreate(pendingInstruction, pendingInstruction ? autoRunKey : '', metricAIHints))
+      queueMicrotask(() => void openCreate())
       return
     }
-    const state = location.state as { metricAIInstruction?: unknown; metricAIHints?: unknown } | null
-    const metricAIInstruction = typeof state?.metricAIInstruction === 'string' ? state.metricAIInstruction : ''
-    const metricAIHints = normalizeDatasetAIPlanHints(state?.metricAIHints)
-    const autoRunKey = metricAIInstruction.trim() ? `metric-ai:${routeKey}` : ''
-    const pendingInstruction = autoRunKey && !metricAIAutoRunWasConsumed(autoRunKey) ? metricAIInstruction : ''
-    queueMicrotask(() => void openEdit(datasetId, pendingInstruction, pendingInstruction ? autoRunKey : '', metricAIHints))
+    queueMicrotask(() => void openEdit(datasetId))
     // 路由参数是唯一触发源；打开动作内部会更新表资产状态，不能反向重复触发。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [datasetId, location.key, location.state, openEdit])
+  }, [datasetId, location.key, openEdit])
 
   const selectTable = async (table: AssetTable, position?: CanvasPoint) => {
     const nextNumber = draft.nodes.reduce((largest, node) => Math.max(largest, Number(node.id.replace('node_', '')) || 0), 0) + 1
@@ -2672,22 +2580,10 @@ export function DatasetCenterPage() {
       await loadDatasets()
       setDialog(null)
       setEditingRecord(null)
-      if (metricReturnTo) {
-        const savedSummary: DatasetSummary = {
-          id: saved.id, code: saved.code, name: saved.name, description: saved.description, type: saved.type,
-          status: saved.status, originTableId: saved.originTableId, layer: saved.layer, tags: saved.tags,
-          version: saved.version, dslHash: saved.dslHash,
-          currentPublishedVersionId: saved.currentPublishedVersionId, updatedAt: saved.updatedAt,
-        }
-        navigate('/datasets', { replace: true, state: location.state })
-        setNotice({ tone: 'success', message: `已保存“${saved.name}”，请继续提交发布申请` })
-        await openPublication(savedSummary)
-      } else {
-        if (datasetId) navigate('/datasets', { replace: true })
-        setNotice({ tone: 'success', message: semanticNamed
-          ? `已保存“${saved.name}”，LLM 已完成表名、字段名和受控标签语义校正`
-          : editingRecord ? `已保存“${saved.name}”的最新配置` : `已创建“${saved.name}”，可继续进入修改完善配置` })
-      }
+      if (datasetId) navigate('/datasets', { replace: true })
+      setNotice({ tone: 'success', message: semanticNamed
+        ? `已保存“${saved.name}”，LLM 已完成表名、字段名和受控标签语义校正`
+        : editingRecord ? `已保存“${saved.name}”的最新配置` : `已创建“${saved.name}”，可继续进入修改完善配置` })
     } catch (cause) {
       setFormError(cause instanceof Error ? cause.message : editingRecord ? '保存数据集失败' : '创建数据集失败')
     } finally {
@@ -3121,20 +3017,6 @@ export function DatasetCenterPage() {
         expectModelingTasks(trigger, false)
         modelingRequestedAt.current[trigger] = null
       }
-      if (result.blockedReason === 'DWD_PUBLICATION_REQUIRED') {
-        setNotice({
-          tone: 'error',
-          message: `主题建模尚未提交：${result.blockedCount ?? 0} 个明细模型仍是草稿。请先提交发布并完成审批，发布后再触发主题建模。`,
-        })
-        return
-      }
-      if (result.blockedReason === 'DWS_PUBLICATION_REQUIRED') {
-        setNotice({
-          tone: 'error',
-          message: `应用建模尚未提交：${result.blockedCount ?? 0} 个主题模型仍是草稿。请先提交发布并完成审批，发布后再触发应用建模。`,
-        })
-        return
-      }
       if (result.blockedReason === 'DIM_MODELING_REQUIRED') {
         setNotice({
           tone: 'error',
@@ -3170,11 +3052,7 @@ export function DatasetCenterPage() {
         })
         return
       }
-      const unit = trigger === 'DWS_MODELING'
-        ? '个主题'
-        : trigger === 'ADS_MODELING'
-          ? '个应用'
-          : '个批次'
+      const unit = '个批次'
       const existing = result.existingCount
         ? `；${result.existingCount} ${unit}已有待处理或运行中任务`
         : ''
@@ -3183,13 +3061,7 @@ export function DatasetCenterPage() {
         : ''
       const submitted = trigger === 'DIM_MODELING'
         ? `已提交 ${result.enqueuedCount} 个维度建模批次（纳入 ${result.eligibleCount} 张 ODS）`
-        : trigger === 'DWD_MODELING'
-          ? `已提交 ${result.enqueuedCount} 个明细建模批次（只执行事实落地；符合条件 ${result.eligibleCount} 个范围）`
-	          : trigger === 'DWS_MODELING'
-	            ? selectedIDs.length
-	              ? `已提交 ${result.enqueuedCount} 个联合主题任务（${selectedIDs.length} 个所选数据集一起分析）`
-	              : `已提交 ${result.enqueuedCount} 个主题任务（符合条件 ${result.eligibleCount} 个上游数据集，含 DWD / DIM）`
-	            : `已提交 ${result.enqueuedCount} 个应用任务（符合条件 ${result.eligibleCount} 张 DWS）`
+        : `已提交 ${result.enqueuedCount} 个明细建模批次（只执行事实落地；符合条件 ${result.eligibleCount} 个范围）`
       if (result.enqueuedCount > 0 || result.existingCount > 0) {
         rememberBackgroundTaskFocus(trigger)
       }
@@ -3198,11 +3070,7 @@ export function DatasetCenterPage() {
       }
       setNotice({
         tone: 'success',
-        message: `${selectedIDs.length ? `已按所选 ${selectedIDs.length} 个数据集校验并执行：` : '已按默认全量范围执行：'}${submitted}${existing}${noFact}${
-          trigger === 'DWS_MODELING'
-            ? '；主题规划通常会很快完成，任务中心将优先展示主题建模任务'
-            : ''
-        }`,
+        message: `${selectedIDs.length ? `已按所选 ${selectedIDs.length} 个数据集校验并执行：` : '已按默认全量范围执行：'}${submitted}${existing}${noFact}`,
       })
     } catch (cause) {
       expectModelingTasks(trigger, false)
@@ -3248,7 +3116,7 @@ export function DatasetCenterPage() {
     setAIBusy(true)
     setAIError(null)
     try {
-      const result = await requestDatasetAIProposal(editingRecord?.id, instruction, current, aiPlanHints, event => {
+      const result = await requestDatasetAIProposal(editingRecord?.id, instruction, current, event => {
         if (requestID !== aiRequest.current) return
         setAIProgressLogs(logs => [...logs, event].slice(-30))
       })
@@ -3294,25 +3162,6 @@ export function DatasetCenterPage() {
       if (requestID === aiRequest.current) setAIBusy(false)
     }
   }
-
-  autoGenerateDatasetAIPlan.current = instruction => { void generateDatasetAIPlan(instruction, true) }
-
-  useEffect(() => {
-    if (!pendingMetricAIAutoRun || dialog?.mode !== 'create' || assetsLoading || busyAction || aiBusy || aiApplying) return
-    const targetReady = datasetId === 'new' ? !editingRecord : editingRecord?.id === datasetId
-    if (!targetReady) return
-    if (metricAIAutoRunKeys.current.has(pendingMetricAIAutoRun.key) || metricAIAutoRunWasConsumed(pendingMetricAIAutoRun.key)) {
-      setPendingMetricAIAutoRun(null)
-      return
-    }
-    // Mark before invoking so React StrictMode's development effect replay and normal
-    // re-renders cannot submit the same metric handoff twice.
-    metricAIAutoRunKeys.current.add(pendingMetricAIAutoRun.key)
-    consumeMetricAIAutoRun(pendingMetricAIAutoRun.key)
-    const instruction = pendingMetricAIAutoRun.instruction
-    setPendingMetricAIAutoRun(null)
-    autoGenerateDatasetAIPlan.current(instruction)
-  }, [aiApplying, aiBusy, assetsLoading, busyAction, datasetId, dialog?.mode, editingRecord, pendingMetricAIAutoRun])
 
   const applyDatasetAIPlan = async () => {
     if (!aiResult || aiBusy || aiApplying) return
@@ -3512,14 +3361,6 @@ export function DatasetCenterPage() {
                   DWD_MODELING: {
                     ...current.DWD_MODELING,
                     logsPinned: config.trigger === 'DWD_MODELING' && willPin,
-                  },
-                  DWS_MODELING: {
-                    ...current.DWS_MODELING,
-                    logsPinned: config.trigger === 'DWS_MODELING' && willPin,
-                  },
-                  ADS_MODELING: {
-                    ...current.ADS_MODELING,
-                    logsPinned: config.trigger === 'ADS_MODELING' && willPin,
                   },
                 }
               })}
@@ -3746,7 +3587,7 @@ export function DatasetCenterPage() {
                   <div><dt>申请状态</dt><dd><span className={`dataset-publication-status ${selectedPublicationRequest.status.toLowerCase()}`}>{publicationStatusLabels[selectedPublicationRequest.status]}</span></dd></div>
                   <div><dt>冻结草稿</dt><dd>{selectedPublicationRequest.draftVersionId}</dd></div>
                   <div><dt>DSL 摘要</dt><dd>{selectedPublicationRequest.expectedDslHash.slice(0, 16)}…</dd></div>
-                  <div><dt>加工策略</dt><dd>{selectedPublicationRequest.status === 'PENDING' ? '审批通过后启动' : metricCandidateGenerationLabels[selectedPublicationRequest.metricCandidateStatus] ?? selectedPublicationRequest.metricCandidateStatus}</dd></div>
+                  <div><dt>加工策略</dt><dd>{selectedPublicationRequest.status === 'PENDING' ? '审批通过后启动' : '已按发布版本执行'}</dd></div>
                   <div><dt>申请说明</dt><dd>{selectedPublicationRequest.requestNote || '未填写'}</dd></div>
                   {selectedPublicationRequest.reviewNote && <div><dt>审批意见</dt><dd>{selectedPublicationRequest.reviewNote}</dd></div>}
                   {selectedPublicationRequest.publishedVersionId && <div><dt>发布版本</dt><dd>{selectedPublicationRequest.publishedVersionId}</dd></div>}
@@ -3759,7 +3600,6 @@ export function DatasetCenterPage() {
             </section>}
           </div>
 
-          {dialog.mode === 'publish' && metricReturnTo && currentDraftPublicationRequest?.status === 'APPROVED' && <section className="dataset-publication-metric-return" aria-label="继续指标设计"><div><strong>数据集已可用于指标设计</strong><small>指标 AI 将只读取本次审批生成的精确已发布版本。</small></div><button className="primary-button" type="button" onClick={() => navigate(metricReturnTo, { state: { metricAIRequirement, ...(metricPreferredDatasetId ? { preferredDatasetId: metricPreferredDatasetId } : {}), ...(metricSafeDatasetExtension ? { safeDatasetExtension: true } : {}) } })}>返回资产管理中心继续生成</button></section>}
           {formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}
           <footer className="dataset-publication-footer"><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>关闭</button></footer>
         </> : <div className="dataset-center-feedback error" role="alert">{formError || '无法加载数据集发布信息'}</div>}
@@ -3776,7 +3616,7 @@ export function DatasetCenterPage() {
         ? '系统会按当前精确草稿逐条提交审批申请，不会绕过审批直接上线。'
         : batchAction === 'disable'
           ? '停用即从可查询目录下架；草稿、发布快照和历史审计都会保留，之后可以逐条恢复。'
-          : '系统会逐条检查指标、下游数据集、报告草稿和运行中查询引用；被占用的数据集会保留并报告失败。'}</small>
+          : '系统会逐条检查下游数据集、构建任务和运行中查询引用；被占用的数据集会保留并返回失败原因。'}</small>
       {formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}
       <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeBatchDialog}>取消</button><button className={batchAction === 'delete' ? 'dataset-delete-button' : 'primary-button'} type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => void executeBatchAction()}>{actionBusy ? '正在处理…' : '确认执行'}</button></footer>
     </div></Dialog>}
@@ -3785,7 +3625,7 @@ export function DatasetCenterPage() {
 
     {dialog?.mode === 'restore' && dialog.dataset && <Dialog title="恢复数据集" eyebrow="生命周期操作" onClose={closeDialog}><div className="dataset-delete-confirm"><p>确认恢复“<strong>{dialog.dataset.name}</strong>”吗？</p><small>系统会优先恢复到停用前的发布、失效或草稿状态；迁移前没有可靠状态记录的数据集将安全恢复为草稿。</small>{formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="primary-button" type="button" disabled={actionBusy} onClick={() => void restoreDataset()}>{busyAction ? '正在恢复…' : '确认恢复'}</button></footer></div></Dialog>}
 
-    {dialog?.mode === 'delete' && dialog.dataset && <Dialog title="删除数据集" eyebrow="危险操作" onClose={closeDialog}><div className="dataset-delete-confirm"><p>确认删除“<strong>{dialog.dataset.name}</strong>”吗？数据集会从资产清单中移除，历史审计仍会保留。</p><small>仍被指标、下游数据集、报告草稿或运行中查询占用时，系统会拒绝删除。</small>{formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="dataset-delete-button" type="button" disabled={actionBusy} onClick={() => void deleteDataset()}>{busyAction ? '正在删除…' : '确认删除'}</button></footer></div></Dialog>}
+    {dialog?.mode === 'delete' && dialog.dataset && <Dialog title="删除数据集" eyebrow="危险操作" onClose={closeDialog}><div className="dataset-delete-confirm"><p>确认删除“<strong>{dialog.dataset.name}</strong>”吗？数据集会从资产清单中移除，历史审计仍会保留。</p><small>仍被下游数据集、构建任务或运行中查询占用时，系统会拒绝删除。</small>{formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="dataset-delete-button" type="button" disabled={actionBusy} onClick={() => void deleteDataset()}>{busyAction ? '正在删除…' : '确认删除'}</button></footer></div></Dialog>}
   </AppShell>
 }
 

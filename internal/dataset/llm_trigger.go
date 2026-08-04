@@ -18,8 +18,6 @@ type LLMTriggerKind string
 const (
 	LLMTriggerDIMModeling LLMTriggerKind = "DIM_MODELING"
 	LLMTriggerDWDModeling LLMTriggerKind = "DWD_MODELING"
-	LLMTriggerDWSModeling LLMTriggerKind = "DWS_MODELING"
-	LLMTriggerADSModeling LLMTriggerKind = "ADS_MODELING"
 )
 
 const maxLLMTriggerDatasetIDs = 200
@@ -92,10 +90,7 @@ func (s *Service) TriggerLLM(
 }
 
 func validLLMTriggerKind(kind LLMTriggerKind) bool {
-	return kind == LLMTriggerDIMModeling ||
-		kind == LLMTriggerDWDModeling ||
-		kind == LLMTriggerDWSModeling ||
-		kind == LLMTriggerADSModeling
+	return kind == LLMTriggerDIMModeling || kind == LLMTriggerDWDModeling
 }
 
 func normalizeLLMTriggerScope(scope LLMTriggerScope) (LLMTriggerScope, error) {
@@ -145,8 +140,6 @@ func validateLLMTriggerAssets(
 	allowed := map[LLMTriggerKind]map[Layer]bool{
 		LLMTriggerDIMModeling: {LayerODS: true},
 		LLMTriggerDWDModeling: {LayerODS: true, LayerDIM: true},
-		LLMTriggerDWSModeling: {LayerDWD: true, LayerDIM: true},
-		LLMTriggerADSModeling: {LayerDWS: true},
 	}[kind]
 	layerCounts := map[Layer]int{}
 	for _, asset := range assets {
@@ -160,17 +153,6 @@ func validateLLMTriggerAssets(
 			Message: "明细建模至少需要选择一个 ODS 数据集，DIM 只能作为可选维度输入",
 		}
 	}
-	if kind == LLMTriggerDWSModeling && layerCounts[LayerDWD] == 0 {
-		return &LLMTriggerScopeError{
-			Message: "主题建模至少需要选择一个 DWD 数据集，DIM 只能作为联合分析上下文",
-		}
-	}
-	if kind == LLMTriggerDWSModeling &&
-		(layerCounts[LayerDWD] > 32 || layerCounts[LayerDIM] > 64) {
-		return &LLMTriggerScopeError{
-			Message: "一次联合主题建模最多选择 32 个 DWD 和 64 个 DIM 数据集",
-		}
-	}
 	return nil
 }
 
@@ -180,10 +162,6 @@ func llmTriggerLayerRule(kind LLMTriggerKind) string {
 		return "维度建模只能选择 ODS 数据集"
 	case LLMTriggerDWDModeling:
 		return "明细建模只能选择 ODS 数据集和可选的 DIM 数据集"
-	case LLMTriggerDWSModeling:
-		return "主题建模只能选择 DWD 数据集和可选的 DIM 数据集"
-	case LLMTriggerADSModeling:
-		return "应用建模只能选择 DWS 数据集"
 	default:
 		return "所选数据集不符合建模层级规则"
 	}
@@ -259,14 +237,6 @@ func (s *PostgresStore) TriggerLLM(
 			triggerErr = triggerDWDModeling(
 				ctx, tx, actorID, selectedIDs, &result,
 			)
-		case LLMTriggerDWSModeling:
-			triggerErr = triggerDWSModeling(
-				ctx, tx, actorID, selectedIDs, &result,
-			)
-		case LLMTriggerADSModeling:
-			triggerErr = triggerADSModeling(
-				ctx, tx, actorID, selectedIDs, &result,
-			)
 		default:
 			return ErrInvalidDocument
 		}
@@ -291,9 +261,6 @@ func (s *PostgresStore) TriggerLLM(
 	})
 	if err != nil {
 		return LLMTriggerResult{}, err
-	}
-	if kind == LLMTriggerDWSModeling || kind == LLMTriggerADSModeling {
-		result.ExistingCount = result.EligibleCount - result.EnqueuedCount
 	}
 	if result.ExistingCount < 0 {
 		return LLMTriggerResult{}, errors.New("dataset LLM trigger count invariant failed")
@@ -342,52 +309,6 @@ func triggerDWDModeling(
 		// 一个纯维度领域无需 DWD，不应覆盖同一批次中其他领域已成功提交
 		// 或正在运行的事实落地结果。
 		result.BlockedReason = ""
-	}
-	return err
-}
-
-func triggerDWSModeling(
-	ctx context.Context,
-	tx pgx.Tx,
-	actorID string,
-	selectedIDs any,
-	result *LLMTriggerResult,
-) error {
-	query := `SELECT eligible_count,enqueued_count,blocked_count
-		FROM platform.trigger_manual_dws_modeling(
-			$1::uuid,$2::uuid[]
-		)`
-	args := []any{actorID, selectedIDs}
-	if selectedIDs == nil {
-		query = `SELECT eligible_count,enqueued_count,blocked_count
-			FROM platform.trigger_unscoped_dws_modeling($1::uuid)`
-		args = []any{actorID}
-	}
-	err := tx.QueryRow(ctx, query, args...).
-		Scan(&result.EligibleCount, &result.EnqueuedCount, &result.BlockedCount)
-	if err != nil {
-		return err
-	}
-	if result.EligibleCount == 0 && result.BlockedCount > 0 {
-		result.BlockedReason = "DWD_PUBLICATION_REQUIRED"
-	}
-	return nil
-}
-
-func triggerADSModeling(
-	ctx context.Context,
-	tx pgx.Tx,
-	actorID string,
-	selectedIDs any,
-	result *LLMTriggerResult,
-) error {
-	err := tx.QueryRow(ctx, `SELECT eligible_count,enqueued_count,blocked_count
-		FROM platform.trigger_manual_ads_modeling(
-			$1::uuid,$2::uuid[]
-		)`, actorID, selectedIDs,
-	).Scan(&result.EligibleCount, &result.EnqueuedCount, &result.BlockedCount)
-	if err == nil && result.EligibleCount == 0 && result.BlockedCount > 0 {
-		result.BlockedReason = "DWS_PUBLICATION_REQUIRED"
 	}
 	return err
 }

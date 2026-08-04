@@ -12,7 +12,6 @@ import (
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasource"
 	"intelligent-report-generation-system/internal/materialization"
-	"intelligent-report-generation-system/internal/metric"
 	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/querycompiler"
 )
@@ -46,54 +45,6 @@ func (s *PostgresStore) ResolveVersion(ctx context.Context, tenantID, datasetID,
 			return dataset.ErrVersionUnavailable
 		}
 		return err
-	})
-	return result, err
-}
-
-// ResolveMaterializedVersion resolves an execution-only one-node document to
-// the exact current warehouse version's ACTIVE materialization. It is used by
-// metric preview/publication so metrics read governed DIM/DWD/DWS/ADS output
-// instead of replaying the source DAG against mutable upstream contents.
-func (s *PostgresStore) ResolveMaterializedVersion(
-	ctx context.Context,
-	tenantID, datasetID, versionID string,
-	document dataset.Document,
-) (result ResolvedPlan, err error) {
-	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		if len(document.Nodes) != 1 ||
-			document.Nodes[0].Type != "DATASET" ||
-			document.Nodes[0].DatasetVersionID != versionID {
-			return dataset.ErrPreviewUnsupported
-		}
-		if err := dataset.ValidateVersionDependenciesInTx(
-			ctx, tx, datasetID, versionID,
-		); err != nil {
-			return err
-		}
-		binding, table, err := resolveActiveMaterializationTx(
-			ctx, tx, tenantID, document.Nodes[0],
-			map[dataset.Layer]bool{
-				dataset.LayerDIM: true, dataset.LayerDWD: true,
-				dataset.LayerDWS: true, dataset.LayerADS: true,
-			},
-			datasetID,
-		)
-		if err != nil {
-			if errors.Is(err, dataset.ErrInvalidDocument) ||
-				errors.Is(err, dataset.ErrPreviewUnsupported) {
-				return dataset.ErrVersionUnavailable
-			}
-			return err
-		}
-		result = ResolvedPlan{
-			Engine: ExecutionPostgreSQL,
-			Tables: map[string]querycompiler.TableRef{
-				document.Nodes[0].ID: table,
-			},
-			Nodes:            map[string]ResolvedNode{},
-			Materializations: []ResolvedMaterialization{binding},
-		}
-		return nil
 	})
 	return result, err
 }
@@ -533,14 +484,14 @@ func (s *PostgresStore) Start(ctx context.Context, run RunRecord) error {
 	err := database.WithTenantTx(ctx, s.pool, run.TenantID, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO platform.query_runs(
 				id,tenant_id,dataset_id,dataset_version_id,
-				metric_id,metric_version_id,actor_user_id,data_source_id,
+				actor_user_id,data_source_id,
 				execution_engine,run_type,plan_hash,parameter_hash,status
 			)
 			VALUES(
-				$1,$2,$3,$4,NULLIF($5,'')::uuid,NULLIF($6,'')::uuid,
-				$7,NULLIF($8,'')::uuid,$9,$10,$11,$12,'RUNNING'
+				$1,$2,$3,$4,$5,NULLIF($6,'')::uuid,
+				$7,$8,$9,$10,'RUNNING'
 			)`,
-			run.ID, run.TenantID, run.DatasetID, run.DatasetVersionID, run.MetricID, run.MetricVersionID,
+			run.ID, run.TenantID, run.DatasetID, run.DatasetVersionID,
 			run.ActorID, run.SourceID, run.ExecutionEngine, run.RunType,
 			run.PlanHash, run.ParameterHash)
 		if err != nil {
@@ -559,10 +510,6 @@ func (s *PostgresStore) Start(ctx context.Context, run RunRecord) error {
 	var pgError *pgconn.PgError
 	if errors.As(err, &pgError) && pgError.Code == "23505" {
 		return dataset.ErrQueryConflict
-	}
-	if errors.As(err, &pgError) && pgError.Code == "23503" &&
-		pgError.ConstraintName == "query_runs_metric_version_dataset_tenant_snapshot_check" {
-		return metric.ErrVersionUnavailable
 	}
 	return err
 }

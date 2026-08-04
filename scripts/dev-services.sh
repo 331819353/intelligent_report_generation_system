@@ -34,7 +34,7 @@ wait_for_http() {
 }
 
 start_all() {
-  compose up -d --wait postgres postgres-warehouse redis minio connector-service
+  compose up -d --wait postgres postgres-warehouse minio connector-service
   compose run --rm minio-init
   "$ROOT_DIR/scripts/migrate.sh"
   compose up -d --build --wait api worker connection-test-worker web
