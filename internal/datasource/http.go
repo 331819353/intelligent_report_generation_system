@@ -57,6 +57,8 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		created, err := service.Create(r.Context(), source)
 		if err != nil {
 			switch {
+			case errors.Is(err, ErrConnectionConflict):
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_CONNECTION_CONFLICT", "当前领域已存在相同连接地址、数据库/服务名和用户名的数据源，不能重复创建")
 			case errors.Is(err, ErrCodeConflict):
 				writeDSError(w, http.StatusConflict, "DATA_SOURCE_CODE_CONFLICT", "数据源编码已存在，请更换编码后重试")
 			case errors.Is(err, ErrQuotaExceeded):
@@ -94,6 +96,10 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		source.UpdatedBy = c.Subject
 		updated, err := service.Update(r.Context(), source)
 		if err != nil {
+			if errors.Is(err, ErrConnectionConflict) {
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_CONNECTION_CONFLICT", "当前领域已存在相同连接地址、数据库/服务名和用户名的数据源，不能保存重复连接")
+				return
+			}
 			if errors.Is(err, ErrVersionConflict) {
 				writeDSError(w, http.StatusConflict, "DATA_SOURCE_VERSION_CONFLICT", "data source changed; reload the latest version before saving")
 				return
@@ -363,6 +369,8 @@ func connectionConfigurationMessage(err error) string {
 		return "新建数据源必须填写密码；修改时留空会保留原密码"
 	case strings.Contains(message, "unsupported data source type"):
 		return "当前仅支持 MySQL、Oracle 和 Excel/CSV 数据源"
+	case strings.Contains(message, "invalid Oracle connection mode"):
+		return "Oracle 连接模式只能选择 Service Name 或 SID"
 	case strings.Contains(message, "sensitive fields are forbidden"):
 		return "请在 Password 输入框填写密码，不要把 password、secretRef 或连接串放入高级配置"
 	default:
@@ -371,21 +379,22 @@ func connectionConfigurationMessage(err error) string {
 }
 
 type dataSourceInput struct {
-	Code            string         `json:"code"`
-	Name            string         `json:"name"`
-	Description     string         `json:"description"`
-	OwnerID         string         `json:"ownerId"`
-	Visibility      Visibility     `json:"visibility"`
-	SharingScope    string         `json:"sharingScope"`
-	Type            Type           `json:"type"`
-	Host            string         `json:"host"`
-	Port            int            `json:"port"`
-	Database        string         `json:"database"`
-	Username        string         `json:"username"`
-	Password        string         `json:"password"`
-	Config          map[string]any `json:"config"`
-	FileAssetID     string         `json:"fileAssetId"`
-	ExpectedVersion int64          `json:"expectedVersion"`
+	Code              string         `json:"code"`
+	Name              string         `json:"name"`
+	Description       string         `json:"description"`
+	OwnerID           string         `json:"ownerId"`
+	Visibility        Visibility     `json:"visibility"`
+	SharingScope      string         `json:"sharingScope"`
+	Type              Type           `json:"type"`
+	Host              string         `json:"host"`
+	Port              int            `json:"port"`
+	Database          string         `json:"database"`
+	OracleConnectMode string         `json:"oracleConnectMode"`
+	Username          string         `json:"username"`
+	Password          string         `json:"password"`
+	Config            map[string]any `json:"config"`
+	FileAssetID       string         `json:"fileAssetId"`
+	ExpectedVersion   int64          `json:"expectedVersion"`
 }
 
 // sourceFromInput 将可展示配置与敏感凭据分流；密码只进入加密管理器，不写入 config。
@@ -397,7 +406,7 @@ func sourceFromInput(ctx context.Context, service *Service, credentials Credenti
 		Type: in.Type, FileAssetID: strings.TrimSpace(in.FileAssetID),
 		Version: in.ExpectedVersion,
 	}
-	config := make(map[string]any, len(in.Config)+4)
+	config := make(map[string]any, len(in.Config)+5)
 	for key, value := range in.Config {
 		if strings.EqualFold(key, "password") || strings.EqualFold(key, "secretRef") {
 			return Source{}, errors.New("sensitive fields are forbidden in config")
@@ -413,6 +422,15 @@ func sourceFromInput(ctx context.Context, service *Service, credentials Credenti
 	}
 
 	host, database, username := strings.TrimSpace(in.Host), strings.TrimSpace(in.Database), strings.TrimSpace(in.Username)
+	oracleConnectMode := strings.ToUpper(strings.TrimSpace(in.OracleConnectMode))
+	if in.Type == TypeOracle {
+		if oracleConnectMode == "" {
+			oracleConnectMode = "SERVICE_NAME"
+		}
+		if oracleConnectMode != "SERVICE_NAME" && oracleConnectMode != "SID" {
+			return Source{}, errors.New("invalid Oracle connection mode")
+		}
+	}
 	connectionProvided := host != "" || in.Port != 0 || database != "" || username != "" || in.Password != ""
 	if !connectionProvided {
 		// 更新时由 Service 按租户和 source ID 延用当前内部引用；创建时缺少
@@ -448,6 +466,11 @@ func sourceFromInput(ctx context.Context, service *Service, credentials Credenti
 	}
 	source.SecretRef = ref
 	config["host"], config["port"], config["database"], config["username"] = host, in.Port, database, username
+	if in.Type == TypeOracle {
+		config["oracleConnectMode"] = oracleConnectMode
+	} else {
+		delete(config, "oracleConnectMode")
+	}
 	return source, nil
 }
 

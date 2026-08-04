@@ -41,10 +41,11 @@ type ConnectionDraft = {
   host: string
   port: string
   database: string
+  oracleConnectMode: 'SERVICE_NAME' | 'SID'
   username: string
   password: string
 }
-type DialogState = { mode: 'create' | 'view' | 'edit' | 'delete' | 'select-tables' | 'edit-table' | 'delete-table'; source?: DataSourceRecord; table?: DataSourceTableRecord }
+type DialogState = { mode: 'create' | 'view' | 'edit' | 'review' | 'delete' | 'select-tables' | 'edit-table' | 'delete-table'; source?: DataSourceRecord; table?: DataSourceTableRecord }
 type TableEditorPurpose = 'EDIT' | 'MANUAL_COMPLETE'
 type Notice = { tone: 'success' | 'error'; message: string }
 type TableDraft = { businessName: string; businessDescription: string; tags: string; sensitivityLevel: string; visibility: string; manualLocked: boolean }
@@ -154,7 +155,7 @@ const tableDraftChanged = (draft: TableDraft, table: DataSourceTableRecord) => d
 
 const emptyDraft = (): ConnectionDraft => ({
   code: '', name: '', description: '', visibility: 'PRIVATE', sharingScope: 'PRIVATE',
-  type: 'MYSQL', host: '', port: '3306', database: '', username: '', password: '',
+  type: 'MYSQL', host: '', port: '3306', database: '', oracleConnectMode: 'SERVICE_NAME', username: '', password: '',
 })
 const configText = (source: DataSourceRecord, key: string) => {
   const value = source.config?.[key]
@@ -180,6 +181,7 @@ const draftFromSource = (source: DataSourceRecord): ConnectionDraft => ({
   host: configText(source, 'host'),
   port: configText(source, 'port') || (source.type === 'ORACLE' ? '1521' : '3306'),
   database: configText(source, 'database'),
+  oracleConnectMode: configText(source, 'oracleConnectMode') === 'SID' ? 'SID' : 'SERVICE_NAME',
   username: configText(source, 'username'),
   password: '',
 })
@@ -193,6 +195,7 @@ const normalizedDraft = (draft: ConnectionDraft) => ({
   host: draft.host.trim(),
   port: draft.port.trim(),
   database: draft.database.trim(),
+  oracleConnectMode: draft.oracleConnectMode,
   username: draft.username.trim(),
 })
 const draftMatchesSource = (draft: ConnectionDraft, source?: DataSourceRecord) => {
@@ -220,9 +223,12 @@ const connectionDraftError = (draft: ConnectionDraft, editing: boolean) => {
 const friendlyConnectionError = (cause: unknown) => {
   if (cause instanceof RequestError) {
     if (cause.detail.code === 'DATA_SOURCE_CONNECTION_CONFIGURATION_INVALID') return cause.detail.message
-    if (cause.detail.code.includes('AUTH')) return '用户名或密码校验失败，请确认账号可登录目标数据库'
-    if (cause.detail.code.includes('REFUSED')) return '目标地址拒绝连接，请确认 Host、Port、Docker 端口映射和数据库服务状态'
-    if (cause.detail.code.includes('TIMEOUT')) return '连接目标数据库超时，请检查网络、防火墙和 Host 是否可从配置服务所在容器访问'
+    if (cause.detail.code.includes('AUTH')) return '地址、端口和数据库名已通过；用户名或密码校验失败'
+    if (cause.detail.code === 'DATABASE_NOT_FOUND') return '地址和端口已通过；请确认数据库名，或 Oracle Service Name / SID 及连接模式'
+    if (cause.detail.code === 'DATABASE_HANDSHAKE_TIMEOUT') return '地址和端口已通过，但数据库握手超时；请确认数据库类型、Service Name / SID 和 TLS 要求'
+    if (cause.detail.code.includes('ADDRESS') || cause.detail.code.includes('DNS') || cause.detail.code.includes('NETWORK')) return '地址解析或 Ping 未通过；请确认 Host 可从连接器容器访问'
+    if (cause.detail.code.includes('REFUSED')) return '地址和 Ping 已通过，但目标端口拒绝连接；请确认 Port、端口映射和数据库监听状态'
+    if (cause.detail.code.includes('TIMEOUT')) return '连接目标端口超时，请检查端口、防火墙和安全组规则'
   }
   const message = cause instanceof Error ? cause.message : '测试数据源连接失败'
   if (/access denied|authentication|password/i.test(message)) return `认证失败：${message}`
@@ -243,6 +249,8 @@ export function DataSourceCenterPage() {
   const [fileInspection, setFileInspection] = useState<ExcelWorkbookInspection | null>(null)
   const [busyAction, setBusyAction] = useState('')
   const [formError, setFormError] = useState('')
+  const [publicationReviewNote, setPublicationReviewNote] = useState('')
+  const [publicationReviewAllowed, setPublicationReviewAllowed] = useState(false)
   const [keyword, setKeyword] = useState('')
   const [typeFilter, setTypeFilter] = useState<DataSourceType | 'ALL'>('ALL')
   const [statusFilter, setStatusFilter] = useState<DataSourceStatus | 'ALL'>('ALL')
@@ -281,6 +289,8 @@ export function DataSourceCenterPage() {
     currentDomainID,
     () => '',
   )
+  const permissionProbeSourceID = sources[0]?.id || ''
+  const canReviewPublications = Boolean(permissionProbeSourceID) && publicationReviewAllowed
 
   useEffect(() => {
     viewedSourceIdRef.current = dialog?.mode === 'view' ? dialog.source?.id || '' : ''
@@ -291,6 +301,19 @@ export function DataSourceCenterPage() {
     const timeout = window.setTimeout(() => setNotice(null), 4500)
     return () => window.clearTimeout(timeout)
   }, [notice])
+
+  useEffect(() => {
+    let active = true
+    if (!permissionProbeSourceID) {
+      return () => { active = false }
+    }
+    void dataSourceAPI.evaluatePermission(permissionProbeSourceID, 'PUBLISH').then(result => {
+      if (active) setPublicationReviewAllowed(result.allowed)
+    }).catch(() => {
+      if (active) setPublicationReviewAllowed(false)
+    })
+    return () => { active = false }
+  }, [permissionProbeSourceID, selectedDomainID])
 
   const filteredSources = useMemo(() => {
     const query = keyword.trim().toLocaleLowerCase()
@@ -794,7 +817,8 @@ export function DataSourceCenterPage() {
         editing.domainId === selectedDomainID
       ) ? { sharingScope: draft.sharingScope } : {}),
       type: draft.type as 'MYSQL' | 'ORACLE', host: draft.host.trim(), port: Number(draft.port),
-      database: draft.database.trim(), username: draft.username.trim(), password: draft.password,
+      database: draft.database.trim(), oracleConnectMode: draft.type === 'ORACLE' ? draft.oracleConnectMode : undefined,
+      username: draft.username.trim(), password: draft.password,
     }
     return editing
       ? dataSourceAPI.update(editing.id, { ...input, expectedVersion: editing.version })
@@ -1000,6 +1024,46 @@ export function DataSourceCenterPage() {
     }
   }
 
+  const openPublicationReview = (source: DataSourceRecord) => {
+    setPublicationReviewNote('')
+    setFormError('')
+    setDialog({ mode: 'review', source })
+  }
+
+  const reviewPublication = async (decision: 'APPROVED' | 'REJECTED') => {
+    const source = dialog?.mode === 'review' ? dialog.source : undefined
+    const reason = publicationReviewNote.trim()
+    if (!source?.reviewRequestId || !source.reviewRequestVersion || !canReviewPublications) return
+    if (decision === 'REJECTED' && !reason) {
+      setFormError('拒绝发布时必须填写审批意见')
+      return
+    }
+    setBusyAction(`review-${decision.toLowerCase()}:${source.id}`)
+    setFormError('')
+    try {
+      if (decision === 'APPROVED') {
+        await dataSourceAPI.approvePublicationRequest(
+          source.id, source.reviewRequestId, source.reviewRequestVersion, reason,
+        )
+      } else {
+        await dataSourceAPI.rejectPublicationRequest(
+          source.id, source.reviewRequestId, source.reviewRequestVersion, reason,
+        )
+      }
+      await loadSources()
+      setDialog(null)
+      setPublicationReviewNote('')
+      setNotice({
+        tone: 'success',
+        message: `“${source.name}”的发布申请已${decision === 'APPROVED' ? '通过并生效' : '拒绝'}`,
+      })
+    } catch (cause) {
+      setFormError(cause instanceof Error ? cause.message : '处理数据源发布审批失败')
+    } finally {
+      setBusyAction('')
+    }
+  }
+
   const deleteSource = async () => {
     const source = dialog?.source
     if (!source) return
@@ -1112,6 +1176,7 @@ export function DataSourceCenterPage() {
                       ))}
                     />
 	                  {reviewStatus === 'PENDING' ? <>
+	                    {canReviewPublications && <button className="action-approve" type="button" disabled={actionBusy} onClick={event => { event.stopPropagation(); openPublicationReview(source) }}>审批</button>}
 	                    {isRequester && <button className="action-withdraw" type="button" disabled={actionBusy} onClick={event => { event.stopPropagation(); void withdrawReview(source) }}>{busyAction === `review-withdraw:${source.id}` ? '撤销中…' : '撤销申请'}</button>}
 	                  </> : <>
 	                    <button className="action-edit" type="button" disabled={actionBusy || unavailable || source.type === 'EXCEL'} onClick={event => { event.stopPropagation(); openExisting('edit', source) }}>修改</button>
@@ -1157,7 +1222,8 @@ export function DataSourceCenterPage() {
 			{draft.type !== 'EXCEL' && <>
             <label>Host<input value={draft.host} onChange={event => updateDraft('host', event.target.value)} placeholder="db.example.internal" /></label>
             <label>Port<input inputMode="numeric" value={draft.port} onChange={event => updateDraft('port', event.target.value)} placeholder={draft.type === 'ORACLE' ? '1521' : '3306'} /></label>
-            <label>Database<input value={draft.database} onChange={event => updateDraft('database', event.target.value)} placeholder={draft.type === 'ORACLE' ? 'FREEPDB1' : 'sales'} /></label>
+            {draft.type === 'ORACLE' && <label>Oracle 连接模式<select value={draft.oracleConnectMode} onChange={event => updateDraft('oracleConnectMode', event.target.value as 'SERVICE_NAME' | 'SID')}><option value="SERVICE_NAME">Service Name</option><option value="SID">SID</option></select></label>}
+            <label>{draft.type === 'ORACLE' ? (draft.oracleConnectMode === 'SID' ? 'Oracle SID' : 'Oracle Service Name') : 'Database'}<input value={draft.database} onChange={event => updateDraft('database', event.target.value)} placeholder={draft.type === 'ORACLE' ? (draft.oracleConnectMode === 'SID' ? 'ORCL' : 'FREEPDB1') : 'sales'} /></label>
             <label>Username<input autoComplete="username" value={draft.username} onChange={event => updateDraft('username', event.target.value)} placeholder="report_reader" /></label>
             <label>Password<input aria-label="Password" type="password" autoComplete="new-password" value={draft.password} onChange={event => updateDraft('password', event.target.value)} placeholder={dialog.mode === 'edit' ? '留空表示保留原密码' : '请输入数据库密码'} /><small>{dialog.mode === 'edit' ? '密码不会回显；仅在需要更换时填写。' : '密码由服务端加密保存，不使用 JDBC 连接串。'}</small></label>
 			</>}
@@ -1328,6 +1394,15 @@ export function DataSourceCenterPage() {
 
       {dialog?.mode === 'delete-table' && dialog.source && dialog.table && <Dialog title="删除数据表资产" onClose={closeDialog}>
         <div className="data-source-delete"><p>确认从 PostgreSQL 删除表资产“<strong>{dialog.table.businessName || dialog.table.tableName}</strong>”吗？</p><p className="data-source-safe-note">该操作不会删除或修改源数据库中的原表，之后仍可通过“新增数据表”重新纳入。</p>{formError && <div className="data-source-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => { setDialog({ mode: 'view', source: dialog.source }); void loadTableStructures(dialog.source!.id) }}>取消</button><button className="data-source-delete-button" type="button" disabled={actionBusy} onClick={() => void deleteTableAsset()}>{actionBusy ? '正在删除…' : '确认删除资产'}</button></footer></div>
+      </Dialog>}
+
+      {dialog?.mode === 'review' && dialog.source && <Dialog title="审批数据源发布" onClose={closeDialog}>
+        <div className="data-source-review-dialog">
+          <p>请审核“<strong>{dialog.source.name}</strong>”的当前测试配置。审批通过后将立即切换为已发布版本；所属领域管理员或平台管理员均可处理该申请。</p>
+          <label>审批意见（拒绝时必填）<textarea rows={4} maxLength={1000} value={publicationReviewNote} onChange={event => { setPublicationReviewNote(event.target.value); setFormError('') }} placeholder="填写审批结论或拒绝原因" /><small>{publicationReviewNote.length} / 1000</small></label>
+          {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
+          <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="data-source-reject-button" type="button" disabled={actionBusy || !publicationReviewNote.trim()} onClick={() => void reviewPublication('REJECTED')}>{busyAction.startsWith('review-rejected:') ? '正在拒绝…' : '拒绝'}</button><button className="primary-button" type="button" disabled={actionBusy} onClick={() => void reviewPublication('APPROVED')}>{busyAction.startsWith('review-approved:') ? '正在通过并发布…' : '通过并发布'}</button></footer>
+        </div>
       </Dialog>}
 
       {dialog?.mode === 'delete' && dialog.source && <Dialog title="删除数据源" onClose={closeDialog}>

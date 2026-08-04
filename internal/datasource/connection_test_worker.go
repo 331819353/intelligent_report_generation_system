@@ -127,7 +127,9 @@ func safeConnectionTestFailure(testContextError, testError error, sourceType Typ
 	var connectorError *ConnectorServiceError
 	if errors.As(testError, &connectorError) {
 		switch connectorError.Code {
-		case "CONNECTION_TIMEOUT", "CONNECTION_DNS_FAILED", "CONNECTION_REFUSED", "NETWORK_UNREACHABLE":
+		case "CONNECTION_TIMEOUT", "CONNECTION_DNS_FAILED", "CONNECTION_REFUSED", "NETWORK_UNREACHABLE",
+			"ADDRESS_RESOLUTION_FAILED", "ADDRESS_UNREACHABLE", "PORT_REFUSED", "PORT_TIMEOUT",
+			"DATABASE_HANDSHAKE_TIMEOUT":
 			return connectorError.Code, true
 		case "CONNECTION_AUTH_FAILED", "DATABASE_NOT_FOUND":
 			return connectorError.Code, false

@@ -68,6 +68,7 @@ func (s *Service) Create(ctx context.Context, source Source) (Source, error) {
 	if err := source.Validate(); err != nil {
 		return Source{}, fmt.Errorf("%w: %v", ErrInvalidConfiguration, err)
 	}
+	source.ConnectionIdentity = sourceConnectionIdentity(source)
 	quota, err := s.repo.Quota(ctx, source.TenantID)
 	if err != nil {
 		return Source{}, err
@@ -185,6 +186,7 @@ func (s *Service) Update(ctx context.Context, source Source) (Source, error) {
 	if err := source.Validate(); err != nil {
 		return Source{}, err
 	}
+	source.ConnectionIdentity = sourceConnectionIdentity(source)
 	return s.repo.Update(ctx, source)
 }
 

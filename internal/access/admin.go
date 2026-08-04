@@ -69,6 +69,7 @@ type DomainApplication struct {
 type PlatformApproval struct {
 	ID                   string  `json:"id"`
 	Kind                 string  `json:"kind"`
+	Version              int64   `json:"version"`
 	ResourceID           string  `json:"resourceId"`
 	ResourceName         string  `json:"resourceName"`
 	DomainID             string  `json:"domainId"`
@@ -199,11 +200,11 @@ func (s *AdminStore) ListPlatformApprovals(
 			return setErr
 		}
 		rows, queryErr := tx.Query(ctx, `SELECT
-			approval_id,kind,resource_id,resource_name,domain_id,domain_code,
+			approval_id,kind,approval_version,resource_id,resource_name,domain_id,domain_code,
 			domain_name,requester_user_id,requester_email,requester_display_name,
 			status,note,reviewer_display_name,submitted_at::text,reviewed_at::text
 		FROM (
-			SELECT application.id AS approval_id,'DOMAIN_ACCESS'::text AS kind,
+			SELECT application.id AS approval_id,'DOMAIN_ACCESS'::text AS kind,0::bigint AS approval_version,
 				domain.id AS resource_id,domain.name AS resource_name,
 				domain.id AS domain_id,domain.code::text AS domain_code,domain.name AS domain_name,
 				applicant.id AS requester_user_id,applicant.email::text AS requester_email,
@@ -218,7 +219,7 @@ func (s *AdminStore) ListPlatformApprovals(
 			LEFT JOIN platform.users AS reviewer
 			  ON reviewer.id=application.reviewed_by AND reviewer.tenant_id=application.tenant_id
 			UNION ALL
-			SELECT request.id,'DATA_SOURCE',source.id,source.name,
+			SELECT request.id,'DATA_SOURCE',request.version,source.id,source.name,
 				domain.id,domain.code::text,domain.name,requester.id,requester.email::text,
 				requester.display_name,request.status,request.request_note,
 				COALESCE(reviewer.display_name,''),request.submitted_at,request.reviewed_at
@@ -232,7 +233,7 @@ func (s *AdminStore) ListPlatformApprovals(
 			LEFT JOIN platform.users AS reviewer
 			  ON reviewer.id=request.reviewer_user_id AND reviewer.tenant_id=request.tenant_id
 			UNION ALL
-			SELECT request.id,'DATASET',dataset.id,dataset.name,
+			SELECT request.id,'DATASET',request.version,dataset.id,dataset.name,
 				domain.id,domain.code::text,domain.name,requester.id,requester.email::text,
 				requester.display_name,request.status,request.request_note,
 				COALESCE(reviewer.display_name,''),request.submitted_at,request.reviewed_at
@@ -255,7 +256,7 @@ func (s *AdminStore) ListPlatformApprovals(
 		for rows.Next() {
 			var item PlatformApproval
 			if scanErr := rows.Scan(
-				&item.ID, &item.Kind, &item.ResourceID, &item.ResourceName,
+				&item.ID, &item.Kind, &item.Version, &item.ResourceID, &item.ResourceName,
 				&item.DomainID, &item.DomainCode, &item.DomainName,
 				&item.RequesterUserID, &item.RequesterEmail,
 				&item.RequesterDisplayName, &item.Status, &item.Note,

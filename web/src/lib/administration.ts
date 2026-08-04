@@ -63,6 +63,7 @@ export type AdminUser = {
 export type PlatformApproval = {
   id: string
   kind: 'DOMAIN_ACCESS' | 'DATA_SOURCE' | 'DATASET'
+  version: number
   resourceId: string
   resourceName: string
   domainId: string
@@ -96,6 +97,16 @@ const safeItems = <T,>(value: ItemsResponse<T>) =>
   Array.isArray(value.items) ? value.items : []
 const administrationRequest = <T,>(path: string, init: RequestInit = {}) =>
   apiRequest<T>(path, { ...init, businessDomain: false })
+const domainAssetRequest = <T,>(domainID: string, path: string, init: RequestInit = {}) => {
+  const headers: Record<string, string> = {}
+  new Headers(init.headers).forEach((value, key) => { headers[key] = value })
+  headers['X-Business-Domain-ID'] = domainID
+  return apiRequest<T>(path, {
+    ...init,
+    businessDomain: false,
+    headers,
+  })
+}
 
 /** 管理中心与领域切换器共用的平台治理 API。 */
 export const administrationAPI = {
@@ -177,6 +188,32 @@ export const administrationAPI = {
       cache: 'no-store',
     })
     return safeItems(result)
+  },
+  async reviewPublication(
+    approval: Pick<PlatformApproval, 'domainId' | 'id' | 'kind' | 'resourceId' | 'version'>,
+    decision: 'APPROVED' | 'REJECTED',
+  ) {
+    if (approval.kind === 'DOMAIN_ACCESS') {
+      return administrationRequest<void>(`/v1/domain-applications/${approval.id}/decision`, {
+        method: 'POST',
+        body: JSON.stringify({
+          decision,
+          comment: decision === 'APPROVED' ? '平台管理中心审核通过' : '平台管理中心审核拒绝',
+        }),
+      })
+    }
+    const collection = approval.kind === 'DATA_SOURCE' ? 'data-sources' : 'datasets'
+    const operation = decision === 'APPROVED' ? 'approve' : 'reject'
+    const body = approval.kind === 'DATA_SOURCE'
+      ? { expectedVersion: approval.version, reason: decision === 'APPROVED' ? '平台管理中心审核通过' : '平台管理中心审核拒绝' }
+      : decision === 'APPROVED'
+        ? { expectedVersion: approval.version, note: '平台管理中心审核通过' }
+        : { expectedVersion: approval.version, reason: '平台管理中心审核拒绝' }
+    return domainAssetRequest(
+      approval.domainId,
+      `/v1/${collection}/${encodeURIComponent(approval.resourceId)}/publish-requests/${encodeURIComponent(approval.id)}/${operation}`,
+      { method: 'POST', body: JSON.stringify(body) },
+    )
   },
   async listPlatformAuditLogs(limit = 100) {
     const result = await administrationRequest<ItemsResponse<PlatformAuditLog>>(`/v1/platform-management/audit-logs?limit=${limit}`, {

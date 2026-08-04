@@ -8,6 +8,7 @@ import ipaddress
 import json
 import math
 import socket
+import subprocess
 import threading
 import uuid
 from contextlib import contextmanager, closing
@@ -285,6 +286,12 @@ if ENVIRONMENT == "production" and not EGRESS_DENYLIST:
         "CONNECTOR_EGRESS_DENYLIST must contain at least one control-plane CIDR",
     )
 
+# Docker Desktop 的 DNS 代理可能把不存在的域名合成到 RFC 2544 基准测试网段。
+# 该网段不应成为数据库目标，否则“域名不存在”会被误判成数据库握手失败。
+BENCHMARK_TEST_NETWORKS = (
+    ipaddress.ip_network("198.18.0.0/15"),
+)
+
 
 class EgressDeniedError(RuntimeError):
     """不携带目标值的稳定出站拒绝。"""
@@ -308,6 +315,7 @@ def forbidden_special_address(address: ipaddress.IPv4Address | ipaddress.IPv6Add
         or address.is_link_local
         or address.is_multicast
         or address.is_reserved
+        or any(address in network for network in BENCHMARK_TEST_NETWORKS)
         or any(address in network for network in EGRESS_DENYLIST)
     )
 
@@ -662,13 +670,13 @@ def release_global_connections(count: int) -> None:
 
 
 @contextmanager
-def one_shot_connection(config: ConnectionConfig):
+def one_shot_connection(config: ConnectionConfig, pinned_host: str | None = None):
     """创建受全局硬配额保护且绝不返回连接池的短连接。"""
     if not reserve_global_connection(config.connect_timeout_seconds):
         raise TimeoutError("connector global connection limit exceeded")
     connection = None
     try:
-        connection = open_connection(config)
+        connection = open_connection(config, pinned_host)
         yield connection
     finally:
         try:
@@ -1012,9 +1020,9 @@ def oracle_dsn(config: ConnectionConfig, pinned_host: str | None = None) -> str:
     return oracledb.makedsn(host, config.port, service_name=config.database)
 
 
-def open_connection(config: ConnectionConfig):
+def open_connection(config: ConnectionConfig, pinned_host: str | None = None):
     """创建配置了连接和查询超时的 MySQL 或 Oracle 物理连接。"""
-    pinned_host = resolve_egress_target(config.host, config.port)
+    pinned_host = pinned_host or resolve_egress_target(config.host, config.port)
     password = config.password.get_secret_value()
     if config.source_type == "MYSQL":
         return pymysql.connect(
@@ -1335,9 +1343,29 @@ def connection_test_error_code(exc: Exception) -> str:
         for item in getattr(error, "args", ())
         if getattr(item, "full_code", "")
     }
-    if 1045 in mysql_codes or "ORA-01017" in oracle_codes or "invalid credential" in lowered or "access denied" in lowered:
+    if (
+        mysql_codes.intersection({1044, 1045})
+        or oracle_codes.intersection({"ORA-01017", "DPY-4001"})
+        or "invalid credential" in lowered
+        or "access denied" in lowered
+    ):
         return "CONNECTION_AUTH_FAILED"
-    if 1049 in mysql_codes or "ORA-12514" in oracle_codes or "DPY-6001" in oracle_codes or "unknown database" in lowered:
+    if (
+        1049 in mysql_codes
+        or oracle_codes.intersection(
+            {
+                "ORA-12154",
+                "ORA-12504",
+                "ORA-12505",
+                "ORA-12514",
+                "DPY-6001",
+                "DPY-6003",
+            },
+        )
+        or "unknown database" in lowered
+        or "service is not registered" in lowered
+        or "sid is not registered" in lowered
+    ):
         return "DATABASE_NOT_FOUND"
     if any(isinstance(item, socket.gaierror) for item in chain) or "name or service not known" in lowered or "resolution_failed" in lowered:
         return "CONNECTION_DNS_FAILED"
@@ -1348,6 +1376,108 @@ def connection_test_error_code(exc: Exception) -> str:
     if "network is unreachable" in lowered or "no route to host" in lowered or "egress_target_denied" in lowered:
         return "NETWORK_UNREACHABLE"
     return "CONNECTION_FAILED"
+
+
+class ConnectionTestStageError(RuntimeError):
+    """只携带分层连接检测的稳定错误码，不包含目标或驱动正文。"""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def resolve_connection_test_address(config: ConnectionConfig) -> str:
+    """阶段一：解析并授权地址，固定一个 IP 防止后续 DNS rebinding。"""
+    try:
+        target = resolve_egress_target(config.host, config.port)
+        infos = socket.getaddrinfo(target, config.port, type=socket.SOCK_STREAM)
+    except EgressDeniedError as exc:
+        code = (
+            "ADDRESS_RESOLUTION_FAILED"
+            if "RESOLUTION" in str(exc).upper()
+            else "ADDRESS_UNREACHABLE"
+        )
+        raise ConnectionTestStageError(code) from exc
+    except (socket.gaierror, ValueError) as exc:
+        raise ConnectionTestStageError("ADDRESS_RESOLUTION_FAILED") from exc
+    except OSError as exc:
+        raise ConnectionTestStageError("ADDRESS_UNREACHABLE") from exc
+    addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+    for info in infos:
+        try:
+            addresses.add(ipaddress.ip_address(info[4][0]))
+        except ValueError as exc:
+            raise ConnectionTestStageError("ADDRESS_RESOLUTION_FAILED") from exc
+    if not addresses:
+        raise ConnectionTestStageError("ADDRESS_RESOLUTION_FAILED")
+    if any(forbidden_special_address(address) for address in addresses):
+        raise ConnectionTestStageError("ADDRESS_UNREACHABLE")
+    return sorted(addresses, key=lambda item: (item.version, int(item)))[0].compressed
+
+
+def verify_connection_test_port(config: ConnectionConfig, pinned_host: str) -> None:
+    """阶段二：只建立 TCP 连接，明确区分端口拒绝、超时和路由失败。"""
+    try:
+        with socket.create_connection(
+            (pinned_host, config.port),
+            timeout=config.connect_timeout_seconds,
+        ):
+            return
+    except ConnectionRefusedError as exc:
+        raise ConnectionTestStageError("PORT_REFUSED") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise ConnectionTestStageError("PORT_TIMEOUT") from exc
+    except OSError as exc:
+        lowered = str(exc).lower()
+        code = (
+            "ADDRESS_UNREACHABLE"
+            if "network is unreachable" in lowered or "no route to host" in lowered
+            else "PORT_REFUSED"
+        )
+        raise ConnectionTestStageError(code) from exc
+
+
+def ping_connection_test_address(
+    config: ConnectionConfig,
+    pinned_host: str,
+) -> bool | None:
+    """阶段一：实际发送一次 ICMP Echo；运行环境不允许 ping 时返回未知。"""
+    command = [
+        "ping",
+        "-n",
+        "-c",
+        "1",
+        "-W",
+        str(max(1, math.ceil(config.connect_timeout_seconds))),
+    ]
+    if ipaddress.ip_address(pinned_host).version == 6:
+        command.append("-6")
+    command.append(pinned_host)
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=config.connect_timeout_seconds + 1,
+        )
+    except (FileNotFoundError, PermissionError):
+        return None
+    except subprocess.TimeoutExpired:
+        return False
+    return completed.returncode == 0
+
+
+def database_handshake_error_code(exc: Exception) -> str:
+    """阶段三/四：区分库或服务名、认证以及握手超时。"""
+    code = connection_test_error_code(exc)
+    if code == "CONNECTION_TIMEOUT":
+        return "DATABASE_HANDSHAKE_TIMEOUT"
+    if code in ("CONNECTION_DNS_FAILED", "NETWORK_UNREACHABLE"):
+        return "ADDRESS_UNREACHABLE"
+    if code == "CONNECTION_REFUSED":
+        return "PORT_REFUSED"
+    return code
 
 
 @app.get("/health/live")
@@ -1361,17 +1491,39 @@ def live() -> dict[str, str]:
     dependencies=[Depends(authorize_connection_test)],
 )
 def test_connection(config: ConnectionConfig) -> dict[str, Any]:
-    """执行轻量版本查询，验证连接并报告往返延迟。"""
+    """依次验证地址、端口、数据库/服务名和认证，再执行轻量查询。"""
     started = time.perf_counter()
     try:
+        pinned_host = resolve_connection_test_address(config)
+        address_pinged = ping_connection_test_address(config, pinned_host)
+        try:
+            verify_connection_test_port(config, pinned_host)
+        except ConnectionTestStageError as exc:
+            # ICMP 和 TCP 同时超时才归为地址不可达。若 TCP 明确返回 RST，
+            # 地址已被证明可达，应保留 PORT_REFUSED；若 ICMP 被禁但端口开放，
+            # 后续数据库握手仍可继续。
+            if exc.code == "PORT_TIMEOUT" and address_pinged is False:
+                raise ConnectionTestStageError("ADDRESS_UNREACHABLE") from exc
+            raise
         # 连接测试不进入普通查询池：草稿测试无论成功或失败都 one-shot 关闭，
         # 避免大量不同配置在 TTL 窗口内累积空闲数据库会话。
-        with one_shot_connection(config) as connection, closing(connection.cursor()) as cursor:
+        with one_shot_connection(config, pinned_host) as connection, closing(connection.cursor()) as cursor:
             cursor.execute("SELECT VERSION()" if config.source_type == "MYSQL" else "SELECT BANNER FROM V$VERSION WHERE ROWNUM = 1")
             version = str(cursor.fetchone()[0])
+    except ConnectionTestStageError as exc:
+        raise HTTPException(status_code=502, detail=exc.code) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=connection_test_error_code(exc)) from exc
-    return {"serverVersion": version, "latencyMs": int((time.perf_counter() - started) * 1000)}
+        raise HTTPException(status_code=502, detail=database_handshake_error_code(exc)) from exc
+    return {
+        "serverVersion": version,
+        "latencyMs": int((time.perf_counter() - started) * 1000),
+        "stages": [
+            {"stage": "ADDRESS", "status": "PASSED"},
+            {"stage": "PORT", "status": "PASSED"},
+            {"stage": "DATABASE", "status": "PASSED"},
+            {"stage": "AUTHENTICATION", "status": "PASSED"},
+        ],
+    }
 
 
 @app.post("/v1/connections/close", dependencies=[Depends(authorize)])

@@ -11,6 +11,7 @@ var (
 	ErrInvalidConfiguration       = errors.New("invalid data source configuration")
 	ErrQuotaExceeded              = errors.New("tenant data source quota exceeded")
 	ErrCodeConflict               = errors.New("data source code already exists")
+	ErrConnectionConflict         = errors.New("data source connection and username already exist in the domain")
 	ErrTestRequired               = errors.New("a successful connection test is required for the current data source version")
 	ErrTestExpired                = errors.New("the successful connection test for the current data source version has expired")
 	ErrSourceVersionChanged       = errors.New("data source configuration changed during the operation")
@@ -98,6 +99,7 @@ type Source struct {
 	ConfigVersion          int64             `json:"configVersion"`
 	PublishedConfigVersion int64             `json:"publishedConfigVersion,omitempty"`
 	ConfigHash             string            `json:"configHash,omitempty"`
+	ConnectionIdentity     string            `json:"-"`
 	ValidationStatus       ValidationStatus  `json:"validationStatus"`
 	PublicationStatus      PublicationStatus `json:"publicationStatus"`
 	HasUnpublishedChanges  bool              `json:"hasUnpublishedChanges"`

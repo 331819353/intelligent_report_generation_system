@@ -76,6 +76,7 @@ export type DataSourceConnectionInput = {
   host: string
   port: number
   database: string
+  oracleConnectMode?: 'SERVICE_NAME' | 'SID'
   username: string
   password: string
   config?: Record<string, unknown>
@@ -141,6 +142,7 @@ export type DataSourceAIDraft = {
   host: string
   port: number
   database: string
+  oracleConnectMode: 'SERVICE_NAME' | 'SID'
   username: string
   visibility: DataSourceVisibility
   sharingScope: AssetSharingScope

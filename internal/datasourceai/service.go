@@ -29,8 +29,10 @@ const (
 const systemPrompt = `你是数据源配置助手，只处理 MySQL、Oracle、Excel/CSV 数据源的新建与修改。
 你的任务是从用户自然语言和已有草稿中提取配置，保留未被用户修改的已有值，并通过简短多轮问题补齐缺失信息。
 严禁编造 Host、数据库名、用户名或文件；无法从对话确认的值必须保持空字符串。密码永远不在输出中，passwordProvided 仅表示用户已在安全输入框填写。
-code 必须以英文字母开头，只能包含英文字母、数字和下划线，最长 128 位；用户没有提供时应根据名称生成简短英文编码。
+数据库数据源的名称和 code 由系统根据类型、Host、端口、数据库/服务名和用户名自动生成；永远不要向用户询问名称或 code。
+code 必须以英文字母开头，只能包含英文字母、数字和下划线，最长 128 位。
 Host 只输出主机名或 IP，不包含协议、JDBC 前缀、端口、路径。MySQL 默认端口 3306，Oracle 默认端口 1521。
+Oracle 必须明确区分 SERVICE_NAME 和 SID；用户未说明时默认 SERVICE_NAME，绝不能把 Schema 或用户名当作服务名。
 测试失败时，根据稳定错误代码给出具体、可执行的检查建议；不要声称已经修复网络、账号或目标数据库。只有输入中明确可安全规范化的格式问题才能建议重试。
 reply 使用中文且简洁。suggestedAction 只能是 ASK、TEST 或 WAIT。`
 
@@ -87,12 +89,14 @@ func (s *Service) Turn(
 	if input.Instruction == "" {
 		return TurnResult{}, ErrInvalidRequest
 	}
+	var instructionPasswordMentioned bool
+	input.Instruction, instructionPasswordMentioned = redactInstructionSecrets(input.Instruction)
 	history, err := normalizeHistory(input.History)
 	if err != nil {
 		return TurnResult{}, err
 	}
 	mode := "CREATE"
-	baseline := Draft{Type: "MYSQL", Port: 3306, Visibility: "PRIVATE", SharingScope: "PRIVATE"}
+	baseline := Draft{Type: "MYSQL", Port: 3306, OracleConnectMode: "SERVICE_NAME", Visibility: "PRIVATE", SharingScope: "PRIVATE"}
 	if sourceID != "" {
 		mode = "UPDATE"
 		source, err := s.sources.Get(ctx, tenantID, sourceID)
@@ -103,6 +107,16 @@ func (s *Service) Turn(
 	}
 	draft := mergeDraft(baseline, input.Draft)
 	draft, fixes := safeRepairs(draft, input.TestFailure)
+	draft, identityFixes := ensureGeneratedIdentity(draft, mode == "CREATE")
+	fixes = uniqueStrings(append(fixes, identityFixes...))
+	parsed := parseStructuredInstruction(input.Instruction, draft)
+	parsed.PasswordMentioned = parsed.PasswordMentioned || instructionPasswordMentioned
+	// A complete key/value description is deterministic input. Parsing it locally
+	// avoids a slow provider round trip and makes the flow resilient to malformed
+	// structured output from the configured model.
+	if parsed.RecognizedFields >= 4 {
+		return localTurnResult(parsed, mode, input.PasswordProvided, input.FileProvided)
+	}
 	payload, err := json.Marshal(promptEnvelope{
 		Mode: mode, ExistingSourceID: sourceID, Instruction: input.Instruction,
 		History: history, Draft: draft, PasswordProvided: input.PasswordProvided,
@@ -133,6 +147,9 @@ func (s *Service) Turn(
 		},
 	})
 	if err != nil {
+		if parsed.RecognizedFields > 0 && canUseLocalFallback(err) {
+			return localTurnResult(parsed, mode, input.PasswordProvided, input.FileProvided)
+		}
 		var providerErr *aiplatform.ProviderError
 		if errors.As(err, &providerErr) && providerErr.Code == aiplatform.ErrorCodeProviderUnavailable {
 			return TurnResult{}, ErrProviderUnavailable
@@ -141,13 +158,22 @@ func (s *Service) Turn(
 	}
 	output, err := decodeOutput(invocation.ProviderResult.Content)
 	if err != nil {
+		if parsed.RecognizedFields > 0 && canUseLocalFallback(err) {
+			return localTurnResult(parsed, mode, input.PasswordProvided, input.FileProvided)
+		}
 		return TurnResult{}, err
 	}
 	resultDraft := mergeDraft(draft, output.Draft)
 	resultDraft, outputFixes := safeRepairs(resultDraft, input.TestFailure)
 	fixes = uniqueStrings(append(fixes, outputFixes...))
+	resultDraft, identityFixes = ensureGeneratedIdentity(resultDraft, mode == "CREATE")
+	fixes = uniqueStrings(append(fixes, identityFixes...))
 	if err := validateDraft(resultDraft); err != nil {
-		return TurnResult{}, fmt.Errorf("%w: %v", ErrInvalidOutput, err)
+		outputErr := fmt.Errorf("%w: %v", ErrInvalidOutput, err)
+		if parsed.RecognizedFields > 0 && canUseLocalFallback(outputErr) {
+			return localTurnResult(parsed, mode, input.PasswordProvided, input.FileProvided)
+		}
+		return TurnResult{}, outputErr
 	}
 	missing := missingFields(resultDraft, mode, input.PasswordProvided, input.FileProvided)
 	action := strings.ToUpper(strings.TrimSpace(output.SuggestedAction))
@@ -160,8 +186,12 @@ func (s *Service) Turn(
 	if input.TestFailure != nil && len(checks) == 0 {
 		checks = failureChecks(input.TestFailure.Code)
 	}
+	reply := cleanText(output.Reply, maxReplyRunes)
+	if len(identityFixes) > 0 {
+		reply = generatedIdentityReply(missing)
+	}
 	return TurnResult{
-		Reply: cleanText(output.Reply, maxReplyRunes), Draft: resultDraft,
+		Reply: reply, Draft: resultDraft,
 		MissingFields: missing, ReadyToTest: len(missing) == 0,
 		SuggestedAction: action, Diagnosis: cleanText(output.Diagnosis, 500),
 		SuggestedChecks: checks, AutoFixes: fixes,
@@ -182,7 +212,8 @@ func draftFromSource(source datasource.Source) Draft {
 		Code: source.Code, Name: source.Name, Description: source.Description,
 		Type: string(source.Type), Host: configText(source.Config, "host"),
 		Port: configInt(source.Config, "port"), Database: configText(source.Config, "database"),
-		Username: configText(source.Config, "username"), Visibility: string(source.Visibility),
+		OracleConnectMode: configText(source.Config, "oracleConnectMode"),
+		Username:          configText(source.Config, "username"), Visibility: string(source.Visibility),
 		SharingScope: source.SharingScope,
 	}
 }
@@ -210,6 +241,9 @@ func mergeDraft(base, update Draft) Draft {
 	if strings.TrimSpace(update.Database) != "" {
 		result.Database = update.Database
 	}
+	if strings.TrimSpace(update.OracleConnectMode) != "" {
+		result.OracleConnectMode = update.OracleConnectMode
+	}
 	if strings.TrimSpace(update.Username) != "" {
 		result.Username = update.Username
 	}
@@ -229,6 +263,10 @@ func normalizeDraft(value Draft) Draft {
 	value.Type = strings.ToUpper(strings.TrimSpace(value.Type))
 	value.Host = strings.TrimSpace(value.Host)
 	value.Database = strings.TrimSpace(value.Database)
+	value.OracleConnectMode = strings.ToUpper(strings.TrimSpace(value.OracleConnectMode))
+	if value.OracleConnectMode == "" {
+		value.OracleConnectMode = "SERVICE_NAME"
+	}
 	value.Username = strings.TrimSpace(value.Username)
 	value.Visibility = strings.ToUpper(strings.TrimSpace(value.Visibility))
 	value.SharingScope = strings.ToUpper(strings.TrimSpace(value.SharingScope))
@@ -297,6 +335,9 @@ func validateDraft(value Draft) error {
 	if value.Port < 0 || value.Port > 65535 {
 		return errors.New("invalid port")
 	}
+	if value.OracleConnectMode != "SERVICE_NAME" && value.OracleConnectMode != "SID" {
+		return errors.New("invalid Oracle connection mode")
+	}
 	if value.Host != "" && !validHost(value.Host) {
 		return errors.New("invalid host")
 	}
@@ -325,16 +366,16 @@ func validHost(value string) bool {
 
 func missingFields(value Draft, mode string, passwordProvided, fileProvided bool) []string {
 	missing := make([]string, 0, 7)
-	if value.Name == "" {
-		missing = append(missing, "name")
-	}
-	if value.Code == "" {
-		missing = append(missing, "code")
-	}
 	if value.Type == "" {
 		missing = append(missing, "type")
 	}
 	if value.Type == "EXCEL" {
+		if value.Name == "" {
+			missing = append(missing, "name")
+		}
+		if value.Code == "" {
+			missing = append(missing, "code")
+		}
 		if mode == "CREATE" && !fileProvided {
 			missing = append(missing, "file")
 		}
@@ -369,6 +410,7 @@ func normalizeHistory(values []Message) ([]Message, error) {
 			return nil, ErrInvalidRequest
 		}
 		content := cleanText(value.Content, maxMessageRunes)
+		content, _ = redactInstructionSecrets(content)
 		if content != "" {
 			result = append(result, Message{Role: role, Content: content})
 		}
@@ -403,14 +445,16 @@ func decodeOutput(raw []byte) (modelOutput, error) {
 func outputSchema() map[string]any {
 	stringField := func() map[string]any { return map[string]any{"type": "string"} }
 	draft := map[string]any{"type": "object", "additionalProperties": false,
-		"required": []string{"code", "name", "description", "type", "host", "port", "database", "username", "visibility", "sharingScope"},
+		"required": []string{"code", "name", "description", "type", "host", "port", "database", "oracleConnectMode", "username", "visibility", "sharingScope"},
 		"properties": map[string]any{
 			"code": stringField(), "name": stringField(), "description": stringField(),
 			"type": map[string]any{"type": "string", "enum": []string{"MYSQL", "ORACLE", "EXCEL"}},
 			"host": stringField(), "port": map[string]any{"type": "integer", "minimum": 0, "maximum": 65535},
-			"database": stringField(), "username": stringField(),
-			"visibility":   map[string]any{"type": "string", "enum": []string{"PRIVATE", "TENANT_PUBLIC"}},
-			"sharingScope": map[string]any{"type": "string", "enum": []string{"PRIVATE", "DOMAIN"}},
+			"database":          stringField(),
+			"oracleConnectMode": map[string]any{"type": "string", "enum": []string{"SERVICE_NAME", "SID"}},
+			"username":          stringField(),
+			"visibility":        map[string]any{"type": "string", "enum": []string{"PRIVATE", "TENANT_PUBLIC"}},
+			"sharingScope":      map[string]any{"type": "string", "enum": []string{"PRIVATE", "DOMAIN"}},
 		},
 	}
 	return map[string]any{"type": "object", "additionalProperties": false,
@@ -427,17 +471,23 @@ func outputSchema() map[string]any {
 func failureChecks(code string) []string {
 	switch strings.ToUpper(strings.TrimSpace(code)) {
 	case "CONNECTION_AUTH_FAILED":
-		return []string{"确认用户名和密码可直接登录目标数据库", "确认账号未锁定且允许从当前网络来源登录"}
-	case "CONNECTION_REFUSED":
-		return []string{"确认目标数据库服务已启动并监听配置端口", "检查 Docker 端口映射、安全组和防火墙规则"}
-	case "CONNECTION_DNS_FAILED":
-		return []string{"确认 Host 可在配置服务所在容器内解析", "必要时使用可路由的内网域名或 IP"}
-	case "NETWORK_UNREACHABLE", "CONNECTION_TIMEOUT":
-		return []string{"从配置服务所在网络检查到目标 Host 和 Port 的连通性", "检查路由、防火墙、安全组和出站白名单"}
+		return []string{"地址、端口和数据库/服务名已通过；确认用户名和密码可直接登录目标数据库", "确认账号未锁定且允许从当前网络来源登录"}
 	case "DATABASE_NOT_FOUND":
-		return []string{"确认 Database 或 Oracle Service Name/SID 拼写", "确认当前账号有权访问该库或服务"}
+		return []string{"地址和端口已通过；确认 Database 或 Oracle Service Name/SID 拼写", "确认 Oracle 连接模式是 SERVICE_NAME 还是 SID"}
+	case "PORT_REFUSED", "CONNECTION_REFUSED":
+		return []string{"地址解析已通过；确认数据库服务已启动并监听配置端口", "检查 Docker 端口映射、安全组和防火墙入站规则"}
+	case "PORT_TIMEOUT":
+		return []string{"地址解析已通过，但端口连接超时", "检查端口、防火墙、安全组和网络 ACL"}
+	case "ADDRESS_RESOLUTION_FAILED", "CONNECTION_DNS_FAILED":
+		return []string{"地址检查未通过；确认 Host 可在 Connector 容器内解析", "必要时使用可路由的内网域名或 IP"}
+	case "ADDRESS_UNREACHABLE", "NETWORK_UNREACHABLE":
+		return []string{"地址路由检查未通过；检查路由、出站白名单和网络隔离策略", "确认目标地址可从 Connector 所在网络访问"}
+	case "DATABASE_HANDSHAKE_TIMEOUT":
+		return []string{"地址和端口已通过，但数据库握手超时", "检查数据库监听协议、TLS 要求、Service Name/SID 和服务负载"}
+	case "CONNECTION_TIMEOUT":
+		return []string{"连接检测超时；重新执行分层检测以确认失败阶段", "检查网络、防火墙和数据库监听状态"}
 	default:
-		return []string{"检查 Host、Port、数据库名和用户名", "确认网络连通且目标数据库允许远程连接"}
+		return []string{"依次检查地址、端口、数据库/服务名和认证", "确认数据库监听协议与当前连接类型一致"}
 	}
 }
 

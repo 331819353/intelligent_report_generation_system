@@ -18,11 +18,14 @@ func (stub sourceReaderStub) Get(context.Context, string, string) (datasource.So
 type invokerStub struct {
 	result aiplatform.InvocationResult
 	input  aiplatform.Invocation
+	err    error
+	calls  int
 }
 
 func (stub *invokerStub) Invoke(_ context.Context, input aiplatform.Invocation) (aiplatform.InvocationResult, error) {
+	stub.calls++
 	stub.input = input
-	return stub.result, nil
+	return stub.result, stub.err
 }
 
 func modelResult(t *testing.T, value any) aiplatform.InvocationResult {
@@ -52,7 +55,7 @@ func TestTurnRepairsHostAndDoesNotSendPassword(t *testing.T) {
 	})
 	service := NewService(sourceReaderStub{}, invoker, 0)
 	result, err := service.Turn(context.Background(), "tenant", "actor", "", TurnRequest{
-		Instruction: "创建销售库", PasswordProvided: true,
+		Instruction: "创建销售库，密码：DataSource9!", PasswordProvided: true,
 		Draft: Draft{
 			Code: "sales", Name: "销售库", Type: "MYSQL",
 			Host: "http://localhost:3306/path", Database: "sales", Username: "reader",
@@ -70,6 +73,137 @@ func TestTurnRepairsHostAndDoesNotSendPassword(t *testing.T) {
 	prompt := invoker.input.Request.Messages[1].Parts[0].Text
 	if contains(prompt, "DataSource9!") || contains(prompt, `"password"`) {
 		t.Fatal("password material must not enter the model prompt")
+	}
+}
+
+func TestTurnParsesMarkdownConnectionDetailsLocally(t *testing.T) {
+	t.Parallel()
+	invoker := &invokerStub{}
+	service := NewService(sourceReaderStub{}, invoker, 0)
+	result, err := service.Turn(context.Background(), "tenant", "actor", "", TurnRequest{
+		Instruction: `MySQL
+| Host | ` + "`127.0.0.1`" + ` |
+| Port | ` + "`3306`" + ` |
+| Database/Service | ` + "`takeout_master`" + ` |
+| Schema | ` + "`takeout_master`" + ` |
+| 用户名 | ` + "`takeout_user`" + ` |
+| 密码 | ` + "`TakeoutUser2026X`" + ` |`,
+		PasswordProvided: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invoker.calls != 0 {
+		t.Fatalf("structured connection details should not call the model; got %d calls", invoker.calls)
+	}
+	if !result.ReadyToTest || result.Draft.Host != "host.docker.internal" ||
+		result.Draft.Database != "takeout_master" || result.Draft.Username != "takeout_user" {
+		t.Fatalf("unexpected local parse result: %+v", result)
+	}
+	if result.Draft.Name != "MYSQL_host.docker.internal:3306_takeout_master_takeout_user" ||
+		result.Draft.Code != "ds_mysql_host_docker_internal_3306_takeout_master_takeout_user" {
+		t.Fatalf("expected name and code to be derived from database: %+v", result.Draft)
+	}
+	if contains(result.Reply, "TakeoutUser2026X") {
+		t.Fatal("password material must not enter the assistant reply")
+	}
+}
+
+func TestTurnGeneratesDatabaseNameInsteadOfAsking(t *testing.T) {
+	t.Parallel()
+	invoker := &invokerStub{}
+	invoker.result = modelResult(t, map[string]any{
+		"reply": "请提供这个数据源的名称和 code。",
+		"draft": map[string]any{
+			"code": "", "name": "", "description": "", "type": "ORACLE",
+			"host": "host.docker.internal", "port": 11521, "database": "FREEPDB1", "username": "TAKEOUT_USER",
+			"visibility": "PRIVATE", "sharingScope": "PRIVATE",
+		},
+		"suggestedAction": "ASK", "diagnosis": "", "suggestedChecks": []string{},
+	})
+	result, err := NewService(sourceReaderStub{}, invoker, 0).Turn(
+		context.Background(), "tenant", "actor", "", TurnRequest{
+			Instruction:      "Oracle 主机 127.0.0.1 端口 11521 服务 FREEPDB1 用户 TAKEOUT_USER",
+			PasswordProvided: true,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.ReadyToTest || containsString(result.MissingFields, "name") || containsString(result.MissingFields, "code") {
+		t.Fatalf("generated identity must not be requested: %+v", result)
+	}
+	if result.Draft.Name != "ORACLE_host.docker.internal:11521_FREEPDB1_TAKEOUT_USER" ||
+		result.Draft.Code != "ds_oracle_host_docker_internal_11521_freepdb1_takeout_user" {
+		t.Fatalf("unexpected generated identity: %+v", result.Draft)
+	}
+	if contains(result.Reply, "请提供") || contains(result.Reply, "名称和 code") {
+		t.Fatalf("assistant must not ask for generated identity: %q", result.Reply)
+	}
+}
+
+func TestTurnParsesNaturalOracleConnectionWithoutModel(t *testing.T) {
+	t.Parallel()
+	invoker := &invokerStub{}
+	result, err := NewService(sourceReaderStub{}, invoker, 0).Turn(
+		context.Background(), "tenant", "actor", "", TurnRequest{
+			Instruction:      "Oracle 数据源，主机 127.0.0.1，端口 11521，服务名 FREEPDB1，用户名 TAKEOUT_USER。",
+			PasswordProvided: true,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invoker.calls != 0 {
+		t.Fatalf("deterministic natural connection details should not call the model; got %d calls", invoker.calls)
+	}
+	if !result.ReadyToTest || result.Draft.Name != "ORACLE_host.docker.internal:11521_FREEPDB1_TAKEOUT_USER" {
+		t.Fatalf("unexpected natural Oracle parse result: %+v", result)
+	}
+	if result.Draft.OracleConnectMode != "SERVICE_NAME" {
+		t.Fatalf("service name input must select SERVICE_NAME mode: %+v", result.Draft)
+	}
+	if containsString(result.MissingFields, "name") || containsString(result.MissingFields, "code") {
+		t.Fatalf("generated fields must not be requested: %+v", result.MissingFields)
+	}
+}
+
+func TestTurnParsesOracleSIDWithoutModel(t *testing.T) {
+	t.Parallel()
+	invoker := &invokerStub{}
+	result, err := NewService(sourceReaderStub{}, invoker, 0).Turn(
+		context.Background(), "tenant", "actor", "", TurnRequest{
+			Instruction:      "Oracle 数据源，Host: db.internal，Port: 1521，SID: ORCL，Username: REPORT_USER。",
+			PasswordProvided: true,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invoker.calls != 0 {
+		t.Fatalf("deterministic SID details should not call the model; got %d calls", invoker.calls)
+	}
+	if !result.ReadyToTest || result.Draft.Database != "ORCL" || result.Draft.OracleConnectMode != "SID" {
+		t.Fatalf("unexpected Oracle SID parse result: %+v", result)
+	}
+}
+
+func TestTurnFallsBackToLocalDraftWhenModelOutputIsInvalid(t *testing.T) {
+	t.Parallel()
+	invoker := &invokerStub{err: ErrInvalidOutput}
+	result, err := NewService(sourceReaderStub{}, invoker, 0).Turn(
+		context.Background(), "tenant", "actor", "", TurnRequest{
+			Instruction:      "用户名：reader",
+			PasswordProvided: true,
+			Draft: Draft{Code: "sales", Name: "销售库", Type: "MYSQL", Host: "db.internal",
+				Port: 3306, Database: "sales", Username: "reader"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invoker.calls != 1 || !result.ReadyToTest || result.Draft.Username != "reader" {
+		t.Fatalf("unexpected fallback result: calls=%d result=%+v", invoker.calls, result)
 	}
 }
 

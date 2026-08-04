@@ -76,7 +76,10 @@ var safeConnectorErrorCodes = map[string]bool{
 	"CONNECTION_AUTH_FAILED": true, "DATABASE_NOT_FOUND": true,
 	"CONNECTION_DNS_FAILED": true, "CONNECTION_REFUSED": true,
 	"CONNECTION_TIMEOUT": true, "NETWORK_UNREACHABLE": true,
-	"CONNECTION_FAILED": true,
+	"ADDRESS_RESOLUTION_FAILED": true, "ADDRESS_UNREACHABLE": true,
+	"PORT_REFUSED": true, "PORT_TIMEOUT": true,
+	"DATABASE_HANDSHAKE_TIMEOUT": true,
+	"CONNECTION_FAILED":          true,
 }
 
 // ConnectorLimits 在 Go/Connector 两侧使用相同数量级的硬边界。即使远端服务

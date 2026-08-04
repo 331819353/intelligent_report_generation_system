@@ -22,6 +22,9 @@ func TestSafeConnectionTestFailure(t *testing.T) {
 		{name: "timeout", ctxErr: context.DeadlineExceeded, source: TypeMySQL, wantCode: "CONNECTION_TIMEOUT", wantRetry: true},
 		{name: "auth", testErr: &ConnectorServiceError{Code: "CONNECTION_AUTH_FAILED"}, source: TypeMySQL, wantCode: "CONNECTION_AUTH_FAILED"},
 		{name: "dns", testErr: &ConnectorServiceError{Code: "CONNECTION_DNS_FAILED"}, source: TypeOracle, wantCode: "CONNECTION_DNS_FAILED", wantRetry: true},
+		{name: "address", testErr: &ConnectorServiceError{Code: "ADDRESS_RESOLUTION_FAILED"}, source: TypeOracle, wantCode: "ADDRESS_RESOLUTION_FAILED", wantRetry: true},
+		{name: "port", testErr: &ConnectorServiceError{Code: "PORT_REFUSED"}, source: TypeMySQL, wantCode: "PORT_REFUSED", wantRetry: true},
+		{name: "database handshake", testErr: &ConnectorServiceError{Code: "DATABASE_HANDSHAKE_TIMEOUT"}, source: TypeOracle, wantCode: "DATABASE_HANDSHAKE_TIMEOUT", wantRetry: true},
 		{name: "file", testErr: errors.New("opaque"), source: TypeExcel, wantCode: "FILE_UNAVAILABLE"},
 		{name: "unknown", testErr: errors.New("driver secret"), source: TypeMySQL, wantCode: "CONNECTION_FAILED"},
 	}
@@ -46,6 +49,7 @@ func TestConnectorCallOnlyExposesAllowlistedFailureCode(t *testing.T) {
 		forbidden string
 	}{
 		{name: "stable code", detail: "CONNECTION_AUTH_FAILED", wantCode: "CONNECTION_AUTH_FAILED"},
+		{name: "staged code", detail: "PORT_REFUSED", wantCode: "PORT_REFUSED"},
 		{name: "driver detail hidden", detail: "password=secret host=db.internal", forbidden: "secret"},
 	}
 	for _, test := range tests {

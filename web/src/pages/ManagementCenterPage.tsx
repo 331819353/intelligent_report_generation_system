@@ -158,19 +158,18 @@ export function ManagementCenterPage() {
     }
   }
 
-  const reviewDomainApplication = async (approval: PlatformApproval, decision: 'APPROVED' | 'REJECTED') => {
+  const reviewApproval = async (approval: PlatformApproval, decision: 'APPROVED' | 'REJECTED') => {
     setBusyKey(`approval:${approval.id}`)
     setError('')
     setNotice('')
     try {
-      await administrationAPI.reviewDomainApplication(
-        approval.id,
-        decision,
-        decision === 'APPROVED' ? '平台管理中心审核通过' : '平台管理中心审核拒绝',
-      )
+      await administrationAPI.reviewPublication(approval, decision)
       await load()
-      notifyDomainCatalogChanged()
-      setNotice(`“${approval.requesterDisplayName}”的领域申请已${decision === 'APPROVED' ? '通过' : '拒绝'}`)
+      if (approval.kind === 'DOMAIN_ACCESS') notifyDomainCatalogChanged()
+      const target = approval.kind === 'DOMAIN_ACCESS'
+        ? `“${approval.requesterDisplayName}”的领域申请`
+        : `“${approval.resourceName}”的发布申请`
+      setNotice(`${target}已${decision === 'APPROVED' ? '通过' : '拒绝'}`)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '审批处理失败')
     } finally {
@@ -419,7 +418,7 @@ export function ManagementCenterPage() {
                       onStatus={user => void updateUserStatus(user)}
                     />
                     : view === 'approvals'
-                      ? <ApprovalCenter approvals={approvals} busyKey={busyKey} onDecision={(approval, decision) => void reviewDomainApplication(approval, decision)} />
+                      ? <ApprovalCenter approvals={approvals} busyKey={busyKey} onDecision={(approval, decision) => void reviewApproval(approval, decision)} />
                       : view === 'tasks'
                         ? <BackgroundTaskCenter tasks={tasks} busyKey={busyKey} onOperate={(task, operation) => void operateTask(task, operation)} />
                         : <PlatformLogCenter logs={auditLogs} />}
@@ -641,7 +640,7 @@ function ApprovalCenter({ approvals, busyKey, onDecision }: {
   }
   return <div className="administration-view platform-approval-view">
     <header className="administration-view-heading platform-section-heading">
-      <div><span className="eyebrow">APPROVAL CENTER</span><h2>审批中心</h2><p>统一查看领域准入和资产发布队列；平台可处理准入申请，发布审批仍由所属领域管理员完成。</p></div>
+      <div><span className="eyebrow">APPROVAL CENTER</span><h2>审批中心</h2><p>统一查看并处理领域准入和资产发布队列；平台管理员与所属领域管理员均可审批发布申请。</p></div>
       <div className="platform-view-switch" aria-label="审批筛选">
         <button className={filter === 'PENDING' ? 'active' : ''} type="button" onClick={() => setFilter('PENDING')}>待处理</button>
         <button className={filter === 'ALL' ? 'active' : ''} type="button" onClick={() => setFilter('ALL')}>全部记录</button>
@@ -662,14 +661,12 @@ function ApprovalCenter({ approvals, busyKey, onDecision }: {
           <div className="approval-note"><span>{item.note || '未填写申请说明'}</span><small>{formatPlatformTime(item.submittedAt)}</small></div>
           <span className={`platform-status-badge ${item.status.toLowerCase()}`}>{approvalStatusLabels[item.status]}</span>
           <div className="approval-actions">
-            {item.kind === 'DOMAIN_ACCESS' && item.status === 'PENDING' ? <>
+            {item.status === 'PENDING' ? <>
               <button className="quiet-button danger-text" type="button" disabled={Boolean(busyKey)} onClick={() => onDecision(item, 'REJECTED')}>拒绝</button>
               <button className="primary-button compact" type="button" disabled={Boolean(busyKey)} onClick={() => onDecision(item, 'APPROVED')}>
                 {busyKey === `approval:${item.id}` && <SpinnerGap className="spin" size={13} />}通过
               </button>
-            </> : item.status === 'PENDING'
-              ? <small>领域管理员处理</small>
-              : <small>{item.reviewerDisplayName || '系统处理'}</small>}
+            </> : <small>{item.reviewerDisplayName || '系统处理'}</small>}
           </div>
         </article>)}
       </div>}

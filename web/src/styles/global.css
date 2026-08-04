@@ -615,6 +615,7 @@ textarea:focus-visible {
 .data-source-ai-choices strong { color: #293850; font-size: 11px; }
 .data-source-ai-choices small { color: #8490a2; font-size: 9px; }
 .data-source-ai-inline-card { align-self: flex-start; background: white; border: 1px solid #dfe7f1; border-radius: 14px; box-shadow: 0 3px 12px #20375e0a; margin-left: 35px; max-width: calc(100% - 35px); width: calc(100% - 35px); }
+.data-source-ai-inline-card.configuration.pinned { box-shadow: 0 8px 22px #20375e1a; flex: none; position: sticky; top: 0; z-index: 3; }
 .data-source-ai-inline-card.configuration > header { align-items: center; border-bottom: 1px solid #edf1f6; display: flex; justify-content: space-between; padding: 9px 11px; }
 .data-source-ai-inline-card.configuration > header span { align-items: center; color: #2864dc; display: flex; font-size: 10px; font-weight: 800; gap: 5px; }
 .data-source-ai-inline-card.configuration > header small { background: #eef3fd; border-radius: 5px; color: #5270a7; font-size: 8px; padding: 3px 6px; }

@@ -14,16 +14,17 @@ type Message struct {
 }
 
 type Draft struct {
-	Code         string `json:"code"`
-	Name         string `json:"name"`
-	Description  string `json:"description"`
-	Type         string `json:"type"`
-	Host         string `json:"host"`
-	Port         int    `json:"port"`
-	Database     string `json:"database"`
-	Username     string `json:"username"`
-	Visibility   string `json:"visibility"`
-	SharingScope string `json:"sharingScope"`
+	Code              string `json:"code"`
+	Name              string `json:"name"`
+	Description       string `json:"description"`
+	Type              string `json:"type"`
+	Host              string `json:"host"`
+	Port              int    `json:"port"`
+	Database          string `json:"database"`
+	OracleConnectMode string `json:"oracleConnectMode"`
+	Username          string `json:"username"`
+	Visibility        string `json:"visibility"`
+	SharingScope      string `json:"sharingScope"`
 }
 
 type TestFailure struct {

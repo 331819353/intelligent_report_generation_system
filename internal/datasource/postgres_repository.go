@@ -100,13 +100,13 @@ func (r *PostgresRepository) Create(ctx context.Context, s Source) (Source, erro
 		if _, err := tx.Exec(ctx, `INSERT INTO platform.data_sources(
 				id,tenant_id,code,name,description,owner_user_id,visibility,source_type,status,config,
 				secret_ref,file_asset_id,created_by,updated_by,validation_status,publication_status,
-				current_draft_version_id,sharing_scope)
+				current_draft_version_id,sharing_scope,connection_identity)
 			VALUES($1,$2,$3,$4,$5,NULLIF($6,'')::uuid,$7,$8,$9,$10,NULLIF($11,''),NULLIF($12,'')::uuid,
 				NULLIF($13,'')::uuid,NULLIF($14,'')::uuid,'UNTESTED','UNPUBLISHED',$15,
-				$16::platform.asset_share_scope)`,
+				$16::platform.asset_share_scope,NULLIF($17,''))`,
 			s.ID, s.TenantID, s.Code, s.Name, s.Description, s.OwnerID, s.Visibility, s.Type,
 			StatusDraft, config, s.SecretRef, s.FileAssetID, s.CreatedBy, s.UpdatedBy,
-			configVersionID, s.SharingScope); err != nil {
+			configVersionID, s.SharingScope, s.ConnectionIdentity); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO platform.data_source_versions(
@@ -122,6 +122,9 @@ func (r *PostgresRepository) Create(ctx context.Context, s Source) (Source, erro
 	if dataSourceCodeConflict(err) {
 		return Source{}, ErrCodeConflict
 	}
+	if dataSourceConnectionConflict(err) {
+		return Source{}, ErrConnectionConflict
+	}
 	return s, err
 }
 
@@ -131,6 +134,12 @@ func dataSourceCodeConflict(err error) bool {
 		return false
 	}
 	return databaseError.ConstraintName == "data_sources_tenant_code_active_key" || databaseError.ConstraintName == "data_sources_tenant_id_code_key"
+}
+
+func dataSourceConnectionConflict(err error) bool {
+	var databaseError *pgconn.PgError
+	return errors.As(err, &databaseError) && databaseError.Code == "23505" &&
+		databaseError.ConstraintName == "data_sources_domain_connection_identity_active_key"
 }
 
 // List 查询租户下未软删除的数据源。
@@ -230,11 +239,11 @@ func (r *PostgresRepository) Update(ctx context.Context, s Source) (Source, erro
 				last_tested_version_id=NULL,last_tested_config_hash=NULL,test_expires_at=NULL,last_tested_at=NULL,
 				status=CASE WHEN current_published_version_id IS NULL THEN 'DRAFT'::platform.data_source_status ELSE status END,
 				last_error=CASE WHEN current_published_version_id IS NULL THEN NULL ELSE last_error END,
-				updated_by=NULLIF($12,'')::uuid,version=version+1
+				updated_by=NULLIF($12,'')::uuid,connection_identity=NULLIF($15,''),version=version+1
 			WHERE id=$13 AND version=$14 AND deleted_at IS NULL`,
 			s.Code, s.Name, s.Description, s.OwnerID, s.Visibility, s.SharingScope, s.Type,
 			config, s.SecretRef, s.FileAssetID, configVersionID, s.UpdatedBy, s.ID,
-			expectedVersion)
+			expectedVersion, s.ConnectionIdentity)
 		if err != nil {
 			return err
 		}
@@ -245,6 +254,9 @@ func (r *PostgresRepository) Update(ctx context.Context, s Source) (Source, erro
 	})
 	if dataSourceCodeConflict(err) {
 		return Source{}, ErrCodeConflict
+	}
+	if dataSourceConnectionConflict(err) {
+		return Source{}, ErrConnectionConflict
 	}
 	return s, err
 }

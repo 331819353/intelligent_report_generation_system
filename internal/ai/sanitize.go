@@ -9,12 +9,14 @@ import (
 )
 
 var (
-	bearerPattern        = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`)
-	standaloneKeyPattern = regexp.MustCompile(`\b(?:sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16})\b`)
-	jwtPattern           = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)
-	secretValuePattern   = regexp.MustCompile(`(?i)(["']?(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret)["']?\s*[:=]\s*["']?)([^"'\s,;}]{4,})`)
-	credentialURLPattern = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@`)
-	privateKeyPattern    = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
+	bearerPattern               = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`)
+	standaloneKeyPattern        = regexp.MustCompile(`\b(?:sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16})\b`)
+	jwtPattern                  = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)
+	secretValuePattern          = regexp.MustCompile(`(?i)(["']?(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret)["']?\s*[:=]\s*["']?)([^"'\s,;}]{4,})`)
+	localizedSecretValuePattern = regexp.MustCompile("((?:密码|口令)\\s*[:=：]\\s*[\\\"'`]?)([^\\\"'`\\s,;}|]{4,})")
+	markdownSecretRowPattern    = regexp.MustCompile("(?im)(\\|\\s*(?:密码|口令|password|passwd|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|secret)\\s*\\|\\s*`?)([^`|\\r\\n]{4,})(`?\\s*\\|)")
+	credentialURLPattern        = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@`)
+	privateKeyPattern           = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
 )
 
 // sanitizeProviderRequest 复制、规范化并脱敏请求；调用方原对象不会被修改。
@@ -80,6 +82,8 @@ func redactSensitiveText(text string) (string, int) {
 		{standaloneKeyPattern, "[已脱敏密钥]"},
 		{jwtPattern, "[已脱敏令牌]"},
 		{secretValuePattern, "${1}[已脱敏]"},
+		{localizedSecretValuePattern, "${1}[已脱敏]"},
+		{markdownSecretRowPattern, "${1}[已脱敏]${3}"},
 		{credentialURLPattern, "${1}[已脱敏]@"},
 	}
 	count := 0
