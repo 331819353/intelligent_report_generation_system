@@ -62,6 +62,23 @@ var (
 	ErrConnectorResourceLimitExceeded = errors.New("connector resource limit exceeded")
 )
 
+// ConnectorServiceError 只携带隔离连接器返回的稳定枚举，不包含驱动正文。
+type ConnectorServiceError struct{ Code string }
+
+func (e *ConnectorServiceError) Error() string {
+	if e == nil || e.Code == "" {
+		return "connector service request failed"
+	}
+	return "connector service request failed: " + e.Code
+}
+
+var safeConnectorErrorCodes = map[string]bool{
+	"CONNECTION_AUTH_FAILED": true, "DATABASE_NOT_FOUND": true,
+	"CONNECTION_DNS_FAILED": true, "CONNECTION_REFUSED": true,
+	"CONNECTION_TIMEOUT": true, "NETWORK_UNREACHABLE": true,
+	"CONNECTION_FAILED": true,
+}
+
 // ConnectorLimits 在 Go/Connector 两侧使用相同数量级的硬边界。即使远端服务
 // 配置漂移或被替换，客户端也会在 JSON 解码和 NDJSON 消费前独立失败关闭。
 type ConnectorLimits struct {
@@ -357,6 +374,16 @@ func (c *PythonConnector) call(ctx context.Context, path string, input, output a
 	if response.StatusCode/100 != 2 {
 		if response.StatusCode == http.StatusRequestEntityTooLarge {
 			return ErrConnectorResourceLimitExceeded
+		}
+		var failure struct {
+			Detail string `json:"detail"`
+		}
+		raw, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
+		if json.Unmarshal(raw, &failure) == nil {
+			failure.Detail = strings.ToUpper(strings.TrimSpace(failure.Detail))
+			if safeConnectorErrorCodes[failure.Detail] {
+				return &ConnectorServiceError{Code: failure.Detail}
+			}
 		}
 		return fmt.Errorf("connector service returned %s", response.Status)
 	}

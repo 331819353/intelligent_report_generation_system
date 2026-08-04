@@ -1,6 +1,7 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { AppShell } from '../components/AppShell'
 import { AssetSharingSelect } from '../components/AssetSharingSelect'
+import { DataSourceAIAssistant } from '../components/DataSourceAIAssistant'
 import { RequestError } from '../lib/api'
 import { currentSubject } from '../lib/auth'
 import { currentDomainID, subscribeDomainChange } from '../lib/domain-context'
@@ -487,14 +488,6 @@ export function DataSourceCenterPage() {
     return () => { active = false }
   }, [runConnectionTest, selectedDomainID])
 
-  const openCreate = () => {
-    setDraft(emptyDraft())
-		setExcelFile(null)
-		setExcelAsset(null)
-    setFileInspection(null)
-    setFormError('')
-    setDialog({ mode: 'create' })
-  }
   const openExisting = (mode: DialogState['mode'], source: DataSourceRecord) => {
     if (mode === 'view' && (reviewStatusOf(source) === 'PENDING' || reviewStatusOf(source) === 'REJECTED')) {
       setNotice({
@@ -1069,7 +1062,7 @@ export function DataSourceCenterPage() {
       ))
     : []
   return (
-    <AppShell title="数据源配置中心" eyebrow="工作栏" actions={<button className="primary-button" type="button" disabled={actionBusy} onClick={openCreate}>新建数据源</button>}>
+    <AppShell title="数据源配置中心" eyebrow="工作栏">
       {notice && <div className={`data-source-toast ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'} aria-live="polite">
         <span className="data-source-toast-icon" aria-hidden="true">{notice.tone === 'success' ? '✓' : '!'}</span>
         <span>{notice.message}</span>
@@ -1084,7 +1077,7 @@ export function DataSourceCenterPage() {
           <small>显示 {filteredSources.length} / {sources.length}</small>
         </div>
         {loading ? <div className="data-source-empty">正在加载数据源…</div> : sources.length === 0
-          ? <div className="data-source-empty"><strong>还没有数据源</strong><span>点击右上角“新建数据源”开始配置。</span></div>
+          ? <div className="data-source-empty"><strong>还没有数据源</strong><span>将鼠标移到右侧“数据源助手”，通过对话开始配置。</span></div>
 	          : filteredSources.length === 0 ? <div className="data-source-empty"><strong>没有符合条件的数据源</strong><span>请调整搜索词或筛选条件。</span></div>
 	          : <div className="data-source-list" role="list" aria-label="已有数据源清单">{filteredSources.map(source => {
 	              const reviewStatus = reviewStatusOf(source)
@@ -1340,6 +1333,15 @@ export function DataSourceCenterPage() {
       {dialog?.mode === 'delete' && dialog.source && <Dialog title="删除数据源" onClose={closeDialog}>
         <div className="data-source-delete"><p>确认删除“<strong>{dialog.source.name}</strong>”吗？该操作会关闭连接池并从数据源清单移除。</p>{formError && <div className="data-source-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="data-source-delete-button" type="button" disabled={actionBusy} onClick={() => void deleteSource()}>{actionBusy ? '正在删除…' : '确认删除'}</button></footer></div>
       </Dialog>}
+      <DataSourceAIAssistant
+        sources={sources}
+        onSourceChanged={source => setSources(current => {
+          const exists = current.some(item => item.id === source.id)
+          return exists ? current.map(item => item.id === source.id ? source : item) : [source, ...current]
+        })}
+        onReload={loadSources}
+        onNotice={setNotice}
+      />
     </AppShell>
   )
 }

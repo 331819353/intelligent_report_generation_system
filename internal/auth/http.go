@@ -13,16 +13,52 @@ import (
 
 type Handler struct{ service *Service }
 
-// NewHandler 注册登录、刷新、登出和当前用户接口。
+// NewHandler 注册登录、注册、刷新、登出和当前用户接口。
 func NewHandler(service *Service) http.Handler {
 	h := &Handler{service: service}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/login", h.login)
+	mux.HandleFunc("POST /api/v1/auth/register", h.register)
 	mux.HandleFunc("POST /api/v1/auth/refresh", h.refresh)
 	mux.HandleFunc("POST /api/v1/auth/logout", h.logout)
 	mux.Handle("PUT /api/v1/auth/domain", RequireTenantAccessToken(service, http.HandlerFunc(h.switchDomain)))
 	mux.Handle("GET /api/v1/auth/me", RequireAccessToken(service, http.HandlerFunc(h.me)))
 	return mux
+}
+
+// register 创建绑定默认权限角色的租户账号，并直接签发登录令牌。
+func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		TenantCode  string `json:"tenantCode"`
+		Email       string `json:"email"`
+		DisplayName string `json:"displayName"`
+		Password    string `json:"password"`
+	}
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeAuthError(w, http.StatusBadRequest, "INVALID_REQUEST", "请输入有效的注册信息")
+		return
+	}
+	pair, err := h.service.Register(r.Context(), RegisterInput{
+		TenantCode: request.TenantCode, Email: request.Email,
+		DisplayName: request.DisplayName, Password: request.Password,
+		RequestID: r.Header.Get("X-Request-ID"), IPAddress: clientIP(r), UserAgent: r.UserAgent(),
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidRegistration):
+			writeAuthError(w, http.StatusBadRequest, "INVALID_REGISTRATION", "请填写有效的租户、姓名和邮箱")
+		case errors.Is(err, ErrRegistrationConflict):
+			writeAuthError(w, http.StatusConflict, "ACCOUNT_ALREADY_EXISTS", "该邮箱已注册，请直接登录")
+		case errors.Is(err, ErrWeakPassword):
+			writeAuthError(w, http.StatusBadRequest, "WEAK_PASSWORD", "密码需为 10–128 位，并同时包含大小写字母和数字")
+		case errors.Is(err, ErrRegistrationUnavailable):
+			writeAuthError(w, http.StatusForbidden, "REGISTRATION_UNAVAILABLE", "当前租户未开放自助注册或默认角色尚未配置")
+		default:
+			writeAuthError(w, http.StatusInternalServerError, "REGISTRATION_FAILED", "注册失败，请稍后重试")
+		}
+		return
+	}
+	writeAuthJSON(w, http.StatusCreated, pair)
 }
 
 // me 返回访问令牌中的当前身份声明。

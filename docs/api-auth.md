@@ -16,6 +16,23 @@
 
 成功返回访问令牌、轮换刷新令牌及各自过期时间。登录失败统一返回 `INVALID_CREDENTIALS`，不暴露租户、账号或密码具体哪一项错误。用户没有任何领域成员关系时仍可登录，以便访问领域目录并提交入域申请；此时不能调用数据源、数据集或资产接口。
 
+## 注册
+
+`POST /register`
+
+```json
+{
+  "tenantCode": "demo",
+  "displayName": "张三",
+  "email": "zhangsan@example.com",
+  "password": "DataSource9!"
+}
+```
+
+密码必须为 10–128 位，同时包含大写字母、小写字母和数字，且不能含空白或控制字符。注册成功返回与登录相同的令牌对。账号创建、默认角色绑定、默认业务域成员关系和注册审计在同一事务中完成，任一步失败都不会留下半个账号。
+
+租户设置 `selfRegistrationEnabled` 控制是否允许自助注册；`selfRegistrationRoleCode` 指定默认角色。迁移后的默认角色是 `data_source_editor`：允许配置、测试数据源和管理相关数据资产，但不具备 `DATA_SOURCE:PUBLISH` 审批权限。租户管理员可在权限体系中调整角色，或关闭自助注册。
+
 ## 刷新令牌
 
 `POST /refresh`
@@ -54,7 +71,7 @@ Authorization: Bearer <access-token>
 - 访问令牌使用 HS256，生产密钥必须来自密钥管理系统且不少于 32 字符；
 - 禁用用户、提升 `token_version` 或撤销会话都会使访问令牌失效；
 - 当前领域被停用或成员关系被撤销时，会话降级为“无领域”控制面会话，不继续携带失效领域，也不会获得其他领域数据；
-- 成功登录、失败登录和退出均写入不可变审计日志；
+- 注册、成功登录、失败登录和退出均写入不可变审计日志；
 - 前端当前将令牌保存在 `sessionStorage`，正式公网发布前应迁移为同站 HttpOnly/Secure/SameSite Cookie 或等价的 BFF 会话方案。
 
 ## 本地开发账号

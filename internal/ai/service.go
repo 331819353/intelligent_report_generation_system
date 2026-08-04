@@ -14,10 +14,11 @@ import (
 )
 
 const (
-	PurposeMetadataCompletion    = "METADATA_COMPLETION"
-	PurposeDatasetDAGGeneration  = "DATASET_DAG_GENERATION"
-	PurposeDatasetTagSuggestion  = "DATASET_TAG_SUGGESTION"
-	PurposeDatasetSemanticNaming = "DATASET_SEMANTIC_NAMING"
+	PurposeMetadataCompletion      = "METADATA_COMPLETION"
+	PurposeDatasetDAGGeneration    = "DATASET_DAG_GENERATION"
+	PurposeDatasetTagSuggestion    = "DATASET_TAG_SUGGESTION"
+	PurposeDatasetSemanticNaming   = "DATASET_SEMANTIC_NAMING"
+	PurposeDataSourceConfiguration = "DATA_SOURCE_CONFIGURATION"
 )
 
 var (
@@ -335,7 +336,8 @@ func validateServiceOptions(options ServiceOptions) error {
 func allowedPurpose(purpose string) bool {
 	switch purpose {
 	case PurposeMetadataCompletion, PurposeDatasetDAGGeneration,
-		PurposeDatasetTagSuggestion, PurposeDatasetSemanticNaming:
+		PurposeDatasetTagSuggestion, PurposeDatasetSemanticNaming,
+		PurposeDataSourceConfiguration:
 		return true
 	default:
 		return false

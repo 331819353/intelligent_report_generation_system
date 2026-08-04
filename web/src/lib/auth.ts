@@ -23,6 +23,17 @@ export async function login(tenantCode: string, email: string, password: string)
   return tokens
 }
 
+/** 注册最小权限账号并保存服务端签发的登录令牌。 */
+export async function register(tenantCode: string, displayName: string, email: string, password: string) {
+  const tokens = await apiRequest<TokenPair>('/v1/auth/register', {
+    method: 'POST',
+    businessDomain: false,
+    body: JSON.stringify({ tenantCode, displayName, email, password }),
+  })
+  sessionStorage.setItem(sessionKey, JSON.stringify(tokens))
+  return tokens
+}
+
 /** 读取当前令牌；不存在或格式损坏时返回空。 */
 export function currentTokens(): TokenPair | null {
   const value = sessionStorage.getItem(sessionKey)

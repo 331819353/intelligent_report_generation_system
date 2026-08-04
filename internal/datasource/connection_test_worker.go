@@ -69,7 +69,7 @@ func (w *ConnectionTestWorker) ProcessNext(
 		return true, ctx.Err()
 	}
 	if testErr != nil || errors.Is(testContextErr, context.DeadlineExceeded) {
-		code, retryable := safeConnectionTestFailure(testContextErr, claim.Source.Type)
+		code, retryable := safeConnectionTestFailure(testContextErr, testErr, claim.Source.Type)
 		_, failErr := w.repository.FailConnectionTest(
 			ctx, claim.TenantID, claim.Job.ID, claim.LeaseToken,
 			code, retryable,
@@ -117,12 +117,21 @@ func (w *ConnectionTestWorker) heartbeat(
 	}
 }
 
-func safeConnectionTestFailure(testContextError error, sourceType Type) (string, bool) {
+func safeConnectionTestFailure(testContextError, testError error, sourceType Type) (string, bool) {
 	if errors.Is(testContextError, context.DeadlineExceeded) {
 		return "CONNECTION_TIMEOUT", true
 	}
 	if sourceType == TypeExcel {
 		return "FILE_UNAVAILABLE", false
+	}
+	var connectorError *ConnectorServiceError
+	if errors.As(testError, &connectorError) {
+		switch connectorError.Code {
+		case "CONNECTION_TIMEOUT", "CONNECTION_DNS_FAILED", "CONNECTION_REFUSED", "NETWORK_UNREACHABLE":
+			return connectorError.Code, true
+		case "CONNECTION_AUTH_FAILED", "DATABASE_NOT_FOUND":
+			return connectorError.Code, false
+		}
 	}
 	return "CONNECTION_FAILED", false
 }

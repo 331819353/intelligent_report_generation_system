@@ -94,7 +94,7 @@ func seedDomains(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error
 func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error {
 	roles := []struct{ code, name string }{
 		{"platform_admin", "平台管理员"}, {"tenant_admin", "租户管理员"}, {"data_admin", "数据管理员"},
-		{"data_viewer", "数据查看者"},
+		{"data_source_editor", "数据源配置员"}, {"data_viewer", "数据查看者"},
 	}
 	permissions := []struct{ code, name, resource, action string }{
 		{"tenant.manage", "管理租户", "TENANT", "MANAGE"}, {"user.manage", "管理用户", "USER", "MANAGE"},
@@ -120,8 +120,9 @@ func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error 
 	}
 	grants := map[string][]string{
 		"platform_admin": allPermissionCodes(permissions), "tenant_admin": allPermissionCodes(permissions),
-		"data_admin":  {"data_source.manage", "data_source.publish", "data_asset.read", "data_asset.manage", "dataset.read", "dataset.manage", "dataset.publish"},
-		"data_viewer": {"data_asset.read", "dataset.read"},
+		"data_admin":         {"data_source.manage", "data_source.publish", "data_asset.read", "data_asset.manage", "dataset.read", "dataset.manage", "dataset.publish"},
+		"data_source_editor": {"data_source.manage", "data_asset.read", "data_asset.manage", "dataset.read"},
+		"data_viewer":        {"data_asset.read", "dataset.read"},
 	}
 	for role, codes := range grants {
 		for _, code := range codes {
@@ -156,11 +157,11 @@ func seedDevelopmentAI(ctx context.Context, tx pgx.Tx, tenantID string) error {
 		SET enabled=true,
 			allowed_purposes=ARRAY(
 				SELECT DISTINCT requested.purpose
-				FROM unnest(allowed_purposes || ARRAY['METADATA_COMPLETION','DATASET_DAG_GENERATION']::text[]) AS requested(purpose)
+				FROM unnest(allowed_purposes || ARRAY['METADATA_COMPLETION','DATASET_DAG_GENERATION','DATA_SOURCE_CONFIGURATION']::text[]) AS requested(purpose)
 				ORDER BY requested.purpose
 			)
 		WHERE tenant_id=$1
-			AND (NOT enabled OR NOT (allowed_purposes @> ARRAY['METADATA_COMPLETION','DATASET_DAG_GENERATION']::text[]))`, tenantID)
+			AND (NOT enabled OR NOT (allowed_purposes @> ARRAY['METADATA_COMPLETION','DATASET_DAG_GENERATION','DATA_SOURCE_CONFIGURATION']::text[]))`, tenantID)
 	return err
 }
 

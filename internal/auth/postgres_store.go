@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"intelligent-report-generation-system/internal/platform/database"
 )
@@ -31,6 +32,66 @@ func (s *PostgresStore) FindUserByEmail(ctx context.Context, tenantID, email str
 // FindUserByID 在指定租户内按标识加载用户。
 func (s *PostgresStore) FindUserByID(ctx context.Context, tenantID, userID string) (LoginUser, error) {
 	return s.findUser(ctx, tenantID, `id = $1`, userID)
+}
+
+// RegisterUser 原子创建账号并绑定租户配置的默认角色与默认领域。
+func (s *PostgresStore) RegisterUser(ctx context.Context, input RegisterUserRecord) error {
+	tenantID, err := s.FindTenantID(ctx, input.TenantCode)
+	if err != nil {
+		return ErrRegistrationUnavailable
+	}
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		var registrationEnabled bool
+		var roleCode string
+		if err := tx.QueryRow(ctx, `SELECT
+			COALESCE(lower(settings->>'selfRegistrationEnabled')<>'false',true),
+			COALESCE(NULLIF(btrim(settings->>'selfRegistrationRoleCode'),''),'data_source_editor')
+			FROM platform.tenants WHERE id=$1 AND status='ACTIVE' AND deleted_at IS NULL`, tenantID).
+			Scan(&registrationEnabled, &roleCode); err != nil || !registrationEnabled {
+			return ErrRegistrationUnavailable
+		}
+		var roleID string
+		if err := tx.QueryRow(ctx, `SELECT id::text FROM platform.roles
+			WHERE tenant_id=$2 AND code=$1 AND status='ACTIVE' AND deleted_at IS NULL`, roleCode, tenantID).Scan(&roleID); err != nil {
+			return ErrRegistrationUnavailable
+		}
+		var userID string
+		if err := tx.QueryRow(ctx, `INSERT INTO platform.users(
+				tenant_id,email,display_name,password_hash
+			) VALUES($1,$2,$3,$4) RETURNING id::text`, tenantID, input.Email,
+			input.DisplayName, input.PasswordHash).Scan(&userID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.user_roles(
+				tenant_id,user_id,role_id,assigned_by
+			) VALUES($1,$2,$3,NULL)`, tenantID, userID, roleID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.domain_memberships(
+				tenant_id,domain_id,user_id,assigned_by,status
+			)
+			SELECT $1,domain.id,$2,NULL,'ACTIVE'
+			FROM platform.business_domains AS domain
+			WHERE domain.tenant_id=$1 AND domain.is_default
+			  AND domain.status='ACTIVE' AND domain.deleted_at IS NULL
+			ON CONFLICT DO NOTHING`, tenantID, userID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+				tenant_id,actor_user_id,action,resource_type,resource_id,detail
+			) VALUES($1::uuid,$2::uuid,'REGISTER','USER',$2::text,jsonb_build_object(
+				'roleCode',$3::text,'defaultDomainAssigned',EXISTS(
+				  SELECT 1 FROM platform.domain_memberships
+				  WHERE tenant_id=$1::uuid AND user_id=$2::uuid AND status='ACTIVE'
+				)
+			))`, tenantID, userID, roleCode)
+		return err
+	})
+	var pgError *pgconn.PgError
+	if errors.As(err, &pgError) && pgError.Code == "23505" {
+		return ErrRegistrationConflict
+	}
+	return err
 }
 
 // ResolveBusinessDomain only returns active domains to which the user has an

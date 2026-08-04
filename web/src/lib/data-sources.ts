@@ -122,6 +122,51 @@ export type DataSourceTestResult = {
   expiresAt?: string
 }
 
+export class DataSourceConnectionTestError extends Error {
+  readonly code: string
+
+  constructor(code: string, message: string) {
+    super(message)
+    this.name = 'DataSourceConnectionTestError'
+    this.code = code
+  }
+}
+
+export type DataSourceAIMessage = { role: 'user' | 'assistant'; content: string }
+export type DataSourceAIDraft = {
+  code: string
+  name: string
+  description: string
+  type: DataSourceType
+  host: string
+  port: number
+  database: string
+  username: string
+  visibility: DataSourceVisibility
+  sharingScope: AssetSharingScope
+}
+export type DataSourceAITestFailure = { code: string; message: string }
+export type DataSourceAITurnInput = {
+  instruction: string
+  history: DataSourceAIMessage[]
+  draft: DataSourceAIDraft
+  passwordProvided: boolean
+  fileProvided: boolean
+  testFailure?: DataSourceAITestFailure
+}
+export type DataSourceAITurnResult = {
+  reply: string
+  draft: DataSourceAIDraft
+  missingFields: string[]
+  readyToTest: boolean
+  suggestedAction: 'ASK' | 'TEST' | 'WAIT'
+  diagnosis: string
+  suggestedChecks: string[]
+  autoFixes: string[]
+  autoRetry: boolean
+  requestId: string
+}
+
 export type ConnectionTestJobStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED'
 export type ConnectionTestJob = {
   id: string
@@ -381,7 +426,7 @@ const waitForConnectionTest = async (
   }
   rememberConnectionTest(job)
   if (job.status === 'SUCCEEDED') return connectionTestResult(job)
-  throw new Error(job.errorMessage || (job.status === 'CANCELLED'
+  throw new DataSourceConnectionTestError(job.errorCode || 'CONNECTION_FAILED', job.errorMessage || (job.status === 'CANCELLED'
     ? '数据源配置已变化，请重新测试'
     : '连接测试失败，请检查配置后重试'))
 }
@@ -414,6 +459,12 @@ export const dataSourceAPI = {
     method: 'POST',
     body: JSON.stringify(input),
   }),
+  aiTurn: (sourceId: string | null, input: DataSourceAITurnInput) => apiRequest<DataSourceAITurnResult>(
+    sourceId
+      ? `/v1/data-sources/${encodeURIComponent(sourceId)}/ai/turns`
+      : '/v1/data-sources/ai/turns',
+    { method: 'POST', body: JSON.stringify(input) },
+  ),
   uploadExcel: (file: File) => {
     const body = new FormData()
     body.set('file', file)

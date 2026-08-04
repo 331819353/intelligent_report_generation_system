@@ -7,6 +7,15 @@
 - `POST /api/v1/data-sources`
 - `PUT /api/v1/data-sources/{id}`
 
+Web 端不再提供传统“新建数据源”按钮。用户通过页面右侧的 AI 助手多轮描述新建或修改要求，助手提取下列非敏感草稿字段、追问缺失项，并调用现有创建/更新接口保存：
+
+- `POST /api/v1/data-sources/ai/turns`：新建配置对话；
+- `POST /api/v1/data-sources/{id}/ai/turns`：基于服务端加载的现有数据源继续修改对话。
+
+两个对话接口都要求 `DATA_SOURCE:MANAGE`，并受租户 AI 开关、用途 `DATA_SOURCE_CONFIGURATION`、配额、超时、结构化输出校验和摘要审计约束。请求包含当前非敏感草稿、最多 16 条对话、`passwordProvided` / `fileProvided` 布尔值和可选的稳定测试错误码；密码、文件内容、密钥引用和驱动原始错误不会发送给模型或写入 AI 审计。
+
+模型只负责理解、补全和诊断，不能直接测试或发布。前端保存草稿后仍调用专用连接测试 worker；仅对协议/JDBC 前缀、Host 与端口拆分、本机容器地址和默认端口等确定性格式问题自动修复，并最多自动重试一次。认证失败、库不存在或网络不可达只返回具体检查建议。连接测试通过后必须由用户点击“提交发布”，随后继续走现有版本冻结和 `DATA_SOURCE:PUBLISH` 审批。
+
 MySQL 示例：
 
 ```json

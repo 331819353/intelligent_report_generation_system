@@ -21,6 +21,7 @@ import (
 	"intelligent-report-generation-system/internal/datasetai"
 	"intelligent-report-generation-system/internal/datasetsemanticnaming"
 	"intelligent-report-generation-system/internal/datasource"
+	"intelligent-report-generation-system/internal/datasourceai"
 	"intelligent-report-generation-system/internal/embedding"
 	"intelligent-report-generation-system/internal/federation"
 	"intelligent-report-generation-system/internal/filequery"
@@ -204,6 +205,10 @@ func main() {
 	)
 
 	dataSourceHandler := datasource.NewHandler(authService, accessService, dataSourceService, credentialManager)
+	dataSourceAIHandler := datasourceai.NewHandler(
+		authService, accessService,
+		datasourceai.NewService(dataSourceService, aiService, cfg.AIRequestTimeout),
+	)
 	dataSourceApprovalHandler := datasource.NewPublicationApprovalHandler(
 		authService,
 		accessService,
@@ -245,6 +250,8 @@ func main() {
 	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/withdraw", dataSourceApprovalHandler)
 	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/approve", dataSourceApprovalHandler)
 	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/reject", dataSourceApprovalHandler)
+	api.Handle("POST /api/v1/data-sources/ai/turns", dataSourceAIHandler)
+	api.Handle("POST /api/v1/data-sources/{id}/ai/turns", dataSourceAIHandler)
 	api.Handle("/api/v1/data-sources", dataSourceHandler)
 	api.Handle("/api/v1/data-sources/", dataSourceHandler)
 	api.Handle("/api/v1/excel-files", datasource.NewExcelHandler(authService, accessService, excelManager))

@@ -94,7 +94,7 @@ export async function apiResponse(path: string, init: APIRequestInit = {}): Prom
   let current = tokens()
   let response = await request(current?.accessToken)
   // 认证端点不参与自动刷新，防止失败请求形成递归循环。
-  if (response.status === 401 && !['/v1/auth/login', '/v1/auth/refresh', '/v1/auth/logout'].includes(path) && current?.refreshToken) {
+  if (response.status === 401 && !['/v1/auth/login', '/v1/auth/register', '/v1/auth/refresh', '/v1/auth/logout'].includes(path) && current?.refreshToken) {
     try { current = await refreshTokens(); response = await request(current.accessToken) } catch { expireSession() }
   }
   if (!response.ok) {

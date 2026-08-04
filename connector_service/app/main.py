@@ -1315,6 +1315,41 @@ def stream_error_event(code: str) -> bytes:
     return encode_stream_event({"type": "error", "code": code})
 
 
+def connection_test_error_code(exc: Exception) -> str:
+    """把驱动异常收敛为不含主机、账号和驱动正文的稳定诊断代码。"""
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and len(chain) < 6:
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    lowered = " ".join(str(item).lower() for item in chain)
+    mysql_codes = {
+        int(item.args[0])
+        for item in chain
+        if isinstance(item, pymysql.MySQLError)
+        and item.args and isinstance(item.args[0], int)
+    }
+    oracle_codes = {
+        str(getattr(item, "full_code", "")).upper()
+        for error in chain
+        for item in getattr(error, "args", ())
+        if getattr(item, "full_code", "")
+    }
+    if 1045 in mysql_codes or "ORA-01017" in oracle_codes or "invalid credential" in lowered or "access denied" in lowered:
+        return "CONNECTION_AUTH_FAILED"
+    if 1049 in mysql_codes or "ORA-12514" in oracle_codes or "DPY-6001" in oracle_codes or "unknown database" in lowered:
+        return "DATABASE_NOT_FOUND"
+    if any(isinstance(item, socket.gaierror) for item in chain) or "name or service not known" in lowered or "resolution_failed" in lowered:
+        return "CONNECTION_DNS_FAILED"
+    if any(isinstance(item, ConnectionRefusedError) for item in chain) or "connection refused" in lowered:
+        return "CONNECTION_REFUSED"
+    if any(isinstance(item, TimeoutError) for item in chain) or "timed out" in lowered or "timeout" in lowered:
+        return "CONNECTION_TIMEOUT"
+    if "network is unreachable" in lowered or "no route to host" in lowered or "egress_target_denied" in lowered:
+        return "NETWORK_UNREACHABLE"
+    return "CONNECTION_FAILED"
+
+
 @app.get("/health/live")
 def live() -> dict[str, str]:
     """返回不依赖外部数据库的进程存活状态。"""
@@ -1335,7 +1370,7 @@ def test_connection(config: ConnectionConfig) -> dict[str, Any]:
             cursor.execute("SELECT VERSION()" if config.source_type == "MYSQL" else "SELECT BANNER FROM V$VERSION WHERE ROWNUM = 1")
             version = str(cursor.fetchone()[0])
     except Exception as exc:
-        raise HTTPException(status_code=502, detail="CONNECTION_TEST_FAILED") from exc
+        raise HTTPException(status_code=502, detail=connection_test_error_code(exc)) from exc
     return {"serverVersion": version, "latencyMs": int((time.perf_counter() - started) * 1000)}
 
 
