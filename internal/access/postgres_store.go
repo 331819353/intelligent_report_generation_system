@@ -13,33 +13,36 @@ type PostgresStore struct{ pool *pgxpool.Pool }
 // NewPostgresStore 创建 PostgreSQL 权限判定存储。
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
-// Allowed 同时评估角色权限与对象级授权，任一命中即可放行。
+// Allowed 按平台、领域、用户三级固定边界判定权限。平台管理员只拥有控制面
+// 权限；领域管理员拥有本领域完整数据权限；普通领域成员可配置但不能发布。
 func (s *PostgresStore) Allowed(ctx context.Context, check Check) (allowed bool, err error) {
 	err = database.WithTenantTx(ctx, s.pool, check.TenantID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT EXISTS (
-          SELECT 1 FROM platform.user_roles ur
-          JOIN platform.roles r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id AND r.status='ACTIVE' AND r.deleted_at IS NULL
-          JOIN platform.role_permissions rp ON rp.tenant_id=ur.tenant_id AND rp.role_id=ur.role_id
-          JOIN platform.permissions p ON p.tenant_id=rp.tenant_id AND p.id=rp.permission_id
-          WHERE ur.tenant_id=$1 AND ur.user_id=$2 AND p.resource_type=$3 AND p.action=$4
-            AND ($3 IN ('TENANT','USER') OR (
-              platform.current_domain_id() IS NOT NULL
-              AND platform.user_has_active_domain_membership(platform.current_domain_id())
-            ))
+          SELECT 1
+          FROM platform.user_roles AS assignment
+          JOIN platform.roles AS role
+            ON role.id=assignment.role_id
+           AND role.tenant_id=assignment.tenant_id
+          WHERE assignment.tenant_id=$1 AND assignment.user_id=$2
+            AND role.code::text='platform_admin'
+            AND role.status='ACTIVE' AND role.deleted_at IS NULL
+            AND $3 IN ('TENANT','USER')
           UNION ALL
           SELECT 1
-          WHERE $3 NOT IN ('TENANT','USER')
-            AND platform.current_domain_id() IS NOT NULL
-            AND platform.user_is_domain_administrator(platform.current_domain_id())
-          UNION ALL
-          SELECT 1 FROM platform.object_permissions op
-          WHERE op.tenant_id=$1 AND op.object_type=$3 AND op.object_id=$5 AND op.action=$4
-            AND platform.current_domain_id() IS NOT NULL
-            AND platform.user_has_active_domain_membership(platform.current_domain_id())
-            AND (op.subject_type='USER' AND op.subject_id=$2 OR op.subject_type='ROLE' AND EXISTS (
-              SELECT 1 FROM platform.user_roles ur JOIN platform.roles r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
-              WHERE ur.tenant_id=$1 AND ur.user_id=$2 AND ur.role_id=op.subject_id AND r.status='ACTIVE' AND r.deleted_at IS NULL))
-        )`, check.TenantID, check.UserID, check.ResourceType, check.Action, nullableUUID(check.ObjectID)).Scan(&allowed)
+          FROM platform.domain_memberships AS membership
+          JOIN platform.business_domains AS domain
+            ON domain.id=membership.domain_id
+           AND domain.tenant_id=membership.tenant_id
+          WHERE membership.tenant_id=$1 AND membership.user_id=$2
+            AND membership.domain_id=platform.current_domain_id()
+            AND membership.status='ACTIVE'
+            AND domain.status='ACTIVE' AND domain.deleted_at IS NULL
+            AND $3 IN ('DATA_SOURCE','DATA_ASSET','DATASET')
+            AND (
+              membership.member_role='DOMAIN_ADMIN'
+              OR $4 IN ('READ','MANAGE')
+            )
+        )`, check.TenantID, check.UserID, check.ResourceType, check.Action).Scan(&allowed)
 	})
 	return allowed, err
 }

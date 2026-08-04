@@ -66,7 +66,7 @@ func main() {
 	tokens := auth.NewTokenManager(cfg.AuthTokenIssuer, cfg.AuthAccessSecret, cfg.AuthAccessTTL)
 	authService := auth.NewService(auth.NewPostgresStore(pool), passwords, tokens, cfg.AuthRefreshTTL)
 	accessService := access.NewService(access.NewPostgresStore(pool))
-	accessAdminHandler := access.NewAdminHandler(authService, accessService, access.NewAdminStore(pool))
+	accessAdminHandler := access.NewAdminHandler(authService, access.NewAdminStore(pool))
 	assetScopeHandler := access.NewAssetScopeHandler(authService, access.NewAssetScopeStore(pool))
 
 	dataSourceRepo := datasource.NewPostgresRepository(pool)
@@ -225,15 +225,14 @@ func main() {
 	api := http.NewServeMux()
 	api.Handle("/api/v1/auth/", auth.NewHandler(authService))
 	api.Handle("POST /api/v1/permissions/evaluate", auth.RequireAccessToken(authService, access.EvaluateHandler(accessService)))
+	api.Handle("/api/v1/domain-catalog", accessAdminHandler)
+	api.Handle("/api/v1/domain-applications", accessAdminHandler)
+	api.Handle("/api/v1/domain-applications/", accessAdminHandler)
+	api.Handle("/api/v1/managed-domains", accessAdminHandler)
 	api.Handle("/api/v1/domains", accessAdminHandler)
 	api.Handle("/api/v1/domains/", accessAdminHandler)
-	api.Handle("/api/v1/roles", accessAdminHandler)
-	api.Handle("/api/v1/roles/", accessAdminHandler)
 	api.Handle("/api/v1/users", accessAdminHandler)
 	api.Handle("/api/v1/users/", accessAdminHandler)
-	api.Handle("/api/v1/permissions", accessAdminHandler)
-	api.Handle("/api/v1/object-permissions", accessAdminHandler)
-	api.Handle("/api/v1/object-permissions/", accessAdminHandler)
 	api.Handle("/api/v1/asset-access/", assetScopeHandler)
 	api.Handle("/api/v1/background-tasks", backgroundtask.NewHandler(
 		authService, accessService,

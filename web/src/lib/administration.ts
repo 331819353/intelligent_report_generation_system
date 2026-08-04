@@ -39,21 +39,12 @@ export type DomainApplication = {
   createdAt: string
 }
 
-export type AdminRole = {
+export type AdminUserDomain = {
   id: string
   code: string
   name: string
-  description: string
-  status: 'ACTIVE' | 'DISABLED'
-  system: boolean
-  permissionCodes: string[]
-  userCount: number
-}
-
-export type AdminUserRole = {
-  id: string
-  code: string
-  name: string
+  default: boolean
+  memberRole: 'MEMBER' | 'DOMAIN_ADMIN'
 }
 
 export type AdminUser = {
@@ -61,16 +52,9 @@ export type AdminUser = {
   email: string
   displayName: string
   status: 'ACTIVE' | 'DISABLED' | 'LOCKED'
-  roles: AdminUserRole[]
+  platformAdministrator: boolean
+  domains: AdminUserDomain[]
   lastLoginAt?: string
-}
-
-export type PermissionDefinition = {
-  code: string
-  name: string
-  resourceType: string
-  action: string
-  description: string
 }
 
 type ItemsResponse<T> = { items?: T[] }
@@ -97,6 +81,35 @@ export const administrationAPI = {
       Boolean(item?.id && item?.code && item?.name && item?.status),
     )
   },
+  async listManagedDomains() {
+    const result = await administrationRequest<ItemsResponse<BusinessDomain>>('/v1/managed-domains', {
+      cache: 'no-store',
+    })
+    return safeItems(result)
+  },
+  async createDomain(input: {
+    code: string
+    name: string
+    description: string
+    administratorUserIds: string[]
+  }) {
+    return administrationRequest<BusinessDomain>('/v1/domains', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  },
+  async updateDomainStatus(domainID: string, status: BusinessDomainStatus) {
+    return administrationRequest<BusinessDomain>(`/v1/domains/${domainID}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    })
+  },
+  async replaceDomainAdministrators(domainID: string, userIds: string[]) {
+    return administrationRequest<void>(`/v1/domains/${domainID}/administrators`, {
+      method: 'PUT',
+      body: JSON.stringify({ userIds }),
+    })
+  },
   async listDomainCatalog() {
     const result = await administrationRequest<ItemsResponse<DomainCatalogItem>>('/v1/domain-catalog', {
       cache: 'no-store',
@@ -121,44 +134,26 @@ export const administrationAPI = {
       body: JSON.stringify({ decision, comment }),
     })
   },
-  async listRoles() {
-    const result = await administrationRequest<ItemsResponse<AdminRole>>('/v1/roles', {
-      cache: 'no-store',
-    })
-    return safeItems(result)
-  },
-  async createRole(input: { code: string; name: string; description: string }) {
-    return administrationRequest<AdminRole>('/v1/roles', {
-      method: 'POST',
-      body: JSON.stringify(input),
-    })
-  },
   async listUsers() {
     const result = await administrationRequest<ItemsResponse<AdminUser>>('/v1/users', {
       cache: 'no-store',
     })
     return safeItems(result)
   },
-  async listPermissions() {
-    const result = await administrationRequest<ItemsResponse<PermissionDefinition>>('/v1/permissions', {
-      cache: 'no-store',
-    })
-    return safeItems(result)
-  },
-  async replaceRolePermissions(roleID: string, permissionCodes: string[]) {
-    return administrationRequest<void>(`/v1/roles/${roleID}/permissions`, {
+  async setPlatformAdministrator(userID: string, enabled: boolean) {
+    return administrationRequest<void>(`/v1/users/${userID}/platform-administrator`, {
       method: 'PUT',
-      body: JSON.stringify({ permissionCodes }),
+      body: JSON.stringify({ enabled }),
     })
   },
-  async assignUserRole(userID: string, roleID: string) {
-    return administrationRequest<void>(`/v1/users/${userID}/roles`, {
+  async assignUserDomain(userID: string, domainID: string) {
+    return administrationRequest<void>(`/v1/users/${userID}/domains`, {
       method: 'POST',
-      body: JSON.stringify({ roleId: roleID }),
+      body: JSON.stringify({ domainId: domainID }),
     })
   },
-  async revokeUserRole(userID: string, roleID: string) {
-    return administrationRequest<void>(`/v1/users/${userID}/roles/${roleID}`, {
+  async revokeUserDomain(userID: string, domainID: string) {
+    return administrationRequest<void>(`/v1/users/${userID}/domains/${domainID}`, {
       method: 'DELETE',
     })
   },

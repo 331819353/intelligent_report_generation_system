@@ -8,7 +8,7 @@ import (
 	"intelligent-report-generation-system/internal/auth"
 )
 
-// Require 构造对象权限中间件，拒绝未认证或无权访问的请求。
+// Require 构造固定层级权限中间件，拒绝未认证或无权访问的请求。
 func Require(service *Service, resourceType, action string, objectID func(*http.Request) string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := auth.ClaimsFromContext(r.Context())

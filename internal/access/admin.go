@@ -12,21 +12,6 @@ import (
 	"intelligent-report-generation-system/internal/platform/database"
 )
 
-type Role struct {
-	ID              string   `json:"id"`
-	Code            string   `json:"code"`
-	Name            string   `json:"name"`
-	Description     string   `json:"description"`
-	Status          string   `json:"status"`
-	System          bool     `json:"system"`
-	PermissionCodes []string `json:"permissionCodes"`
-	UserCount       int      `json:"userCount"`
-}
-type UserRole struct {
-	ID   string `json:"id"`
-	Code string `json:"code"`
-	Name string `json:"name"`
-}
 type UserDomain struct {
 	ID         string `json:"id"`
 	Code       string `json:"code"`
@@ -35,20 +20,13 @@ type UserDomain struct {
 	MemberRole string `json:"memberRole"`
 }
 type UserSummary struct {
-	ID          string       `json:"id"`
-	Email       string       `json:"email"`
-	DisplayName string       `json:"displayName"`
-	Status      string       `json:"status"`
-	Roles       []UserRole   `json:"roles"`
-	Domains     []UserDomain `json:"domains"`
-	LastLoginAt *string      `json:"lastLoginAt,omitempty"`
-}
-type PermissionDefinition struct {
-	Code         string `json:"code"`
-	Name         string `json:"name"`
-	ResourceType string `json:"resourceType"`
-	Action       string `json:"action"`
-	Description  string `json:"description"`
+	ID                    string       `json:"id"`
+	Email                 string       `json:"email"`
+	DisplayName           string       `json:"displayName"`
+	Status                string       `json:"status"`
+	PlatformAdministrator bool         `json:"platformAdministrator"`
+	Domains               []UserDomain `json:"domains"`
+	LastLoginAt           *string      `json:"lastLoginAt,omitempty"`
 }
 type BusinessDomain struct {
 	ID             string                `json:"id"`
@@ -85,81 +63,31 @@ type DomainApplication struct {
 	ReviewedAt           string `json:"reviewedAt,omitempty"`
 	CreatedAt            string `json:"createdAt"`
 }
-type ObjectGrant struct {
-	SubjectType string `json:"subjectType"`
-	SubjectID   string `json:"subjectId"`
-	ObjectType  string `json:"objectType"`
-	ObjectID    string `json:"objectId"`
-	Action      string `json:"action"`
-}
-
 type AdminStore struct{ pool *pgxpool.Pool }
 
 var businessDomainCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,31}$`)
 
-// NewAdminStore 创建角色和对象授权的管理存储。
+// NewAdminStore 创建平台、领域和用户三级治理存储。
 func NewAdminStore(pool *pgxpool.Pool) *AdminStore { return &AdminStore{pool: pool} }
 
-// ListRoles 返回租户角色及其已绑定权限代码。
-func (s *AdminStore) ListRoles(ctx context.Context, tenantID string) ([]Role, error) {
-	var roles []Role
-	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT
-			  r.id,r.code,r.name,r.description,r.is_system,r.status,
-			  COALESCE(
-			    array_agg(p.code::text ORDER BY p.code)
-			      FILTER (WHERE p.id IS NOT NULL),
-			    ARRAY[]::text[]
-			  ),
-			  COUNT(DISTINCT ur.user_id)
-			FROM platform.roles r
-			LEFT JOIN platform.role_permissions rp
-			  ON rp.tenant_id=r.tenant_id AND rp.role_id=r.id
-			LEFT JOIN platform.permissions p
-			  ON p.tenant_id=rp.tenant_id AND p.id=rp.permission_id
-			LEFT JOIN platform.user_roles ur
-			  ON ur.tenant_id=r.tenant_id AND ur.role_id=r.id
-			WHERE r.deleted_at IS NULL
-			GROUP BY r.id,r.code,r.name,r.description,r.is_system,r.status
-			ORDER BY r.is_system DESC,r.code`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var r Role
-			if err := rows.Scan(
-				&r.ID, &r.Code, &r.Name, &r.Description, &r.System, &r.Status,
-				&r.PermissionCodes, &r.UserCount,
-			); err != nil {
-				return err
-			}
-			roles = append(roles, r)
-		}
-		return rows.Err()
-	})
-	return roles, err
-}
-
-// ListUsers 返回租户用户和角色绑定，用于管理中心分配职责。
+// ListUsers 返回平台身份与领域归属；不暴露可自由组合的角色权限。
 func (s *AdminStore) ListUsers(ctx context.Context, tenantID string) ([]UserSummary, error) {
 	var users []UserSummary
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT
 			  u.id,u.email,u.display_name,u.status,u.last_login_at::text,
-			  COALESCE((
-			    SELECT jsonb_agg(
-			      jsonb_build_object('id',role.id,'code',role.code,'name',role.name)
-			      ORDER BY role.code
-			    )
+			  EXISTS(
+			    SELECT 1
 			    FROM platform.user_roles AS assignment
 			    JOIN platform.roles AS role
 			      ON role.id=assignment.role_id
 			     AND role.tenant_id=assignment.tenant_id
 			    WHERE assignment.tenant_id=u.tenant_id
 			      AND assignment.user_id=u.id
+			      AND role.code::text='platform_admin'
+			      AND role.status='ACTIVE'
 			      AND role.deleted_at IS NULL
-			  ),'[]'::jsonb),
+			  ),
 			  COALESCE((
 			    SELECT jsonb_agg(
 			      jsonb_build_object(
@@ -186,14 +114,11 @@ func (s *AdminStore) ListUsers(ctx context.Context, tenantID string) ([]UserSumm
 		defer rows.Close()
 		for rows.Next() {
 			var user UserSummary
-			var rolesJSON, domainsJSON []byte
+			var domainsJSON []byte
 			if err := rows.Scan(
 				&user.ID, &user.Email, &user.DisplayName, &user.Status,
-				&user.LastLoginAt, &rolesJSON, &domainsJSON,
+				&user.LastLoginAt, &user.PlatformAdministrator, &domainsJSON,
 			); err != nil {
-				return err
-			}
-			if err := json.Unmarshal(rolesJSON, &user.Roles); err != nil {
 				return err
 			}
 			if err := json.Unmarshal(domainsJSON, &user.Domains); err != nil {
@@ -204,32 +129,6 @@ func (s *AdminStore) ListUsers(ctx context.Context, tenantID string) ([]UserSumm
 		return rows.Err()
 	})
 	return users, err
-}
-
-// ListPermissions 返回租户内可授予角色的稳定权限目录。
-func (s *AdminStore) ListPermissions(ctx context.Context, tenantID string) ([]PermissionDefinition, error) {
-	var permissions []PermissionDefinition
-	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT code,name,resource_type,action,description
-			FROM platform.permissions
-			ORDER BY resource_type,action,code`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var permission PermissionDefinition
-			if err := rows.Scan(
-				&permission.Code, &permission.Name, &permission.ResourceType,
-				&permission.Action, &permission.Description,
-			); err != nil {
-				return err
-			}
-			permissions = append(permissions, permission)
-		}
-		return rows.Err()
-	})
-	return permissions, err
 }
 
 // ListDomains 返回当前租户的业务领域目录，所有已登录用户均可用于切换上下文。
@@ -578,6 +477,83 @@ func isPlatformAdministratorTx(
 	return allowed, err
 }
 
+// SetPlatformAdministrator changes only the fixed platform identity. The last
+// platform administrator cannot be removed, so the tenant always retains a
+// control-plane owner.
+func (s *AdminStore) SetPlatformAdministrator(
+	ctx context.Context, tenantID, actorID, userID string, enabled bool,
+) error {
+	return database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		allowed, err := isPlatformAdministratorTx(ctx, tx, actorID)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return errors.New("only a platform administrator can change the platform identity")
+		}
+		var activeUser bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1 FROM platform.users
+			WHERE id=$1::uuid AND status='ACTIVE' AND deleted_at IS NULL
+		)`, userID).Scan(&activeUser); err != nil {
+			return err
+		}
+		if !activeUser {
+			return errors.New("active user was not found")
+		}
+		if enabled {
+			if _, err := tx.Exec(ctx, `INSERT INTO platform.user_roles(
+				tenant_id,user_id,role_id,assigned_by
+			)
+			SELECT $1,$2,role.id,$3
+			FROM platform.roles AS role
+			WHERE role.code::text='platform_admin'
+			  AND role.status='ACTIVE' AND role.deleted_at IS NULL
+			ON CONFLICT(tenant_id,user_id,role_id) DO NOTHING`,
+				tenantID, userID, actorID,
+			); err != nil {
+				return err
+			}
+		} else {
+			var assigned, lastAdministrator bool
+			if err := tx.QueryRow(ctx, `SELECT
+				EXISTS(
+				  SELECT 1 FROM platform.user_roles AS assignment
+				  JOIN platform.roles AS role ON role.id=assignment.role_id
+				  WHERE assignment.user_id=$1::uuid
+				    AND role.code::text='platform_admin'
+				    AND role.status='ACTIVE' AND role.deleted_at IS NULL
+				),
+				(SELECT count(*) <= 1
+				 FROM platform.user_roles AS assignment
+				 JOIN platform.roles AS role ON role.id=assignment.role_id
+				 WHERE role.code::text='platform_admin'
+				   AND role.status='ACTIVE' AND role.deleted_at IS NULL)`,
+				userID,
+			).Scan(&assigned, &lastAdministrator); err != nil {
+				return err
+			}
+			if assigned && lastAdministrator {
+				return errors.New("tenant must retain at least one platform administrator")
+			}
+			if assigned {
+				if _, err := tx.Exec(ctx, `DELETE FROM platform.user_roles AS assignment
+					USING platform.roles AS role
+					WHERE assignment.role_id=role.id
+					  AND assignment.user_id=$1::uuid
+					  AND role.code::text='platform_admin'`, userID); err != nil {
+					return err
+				}
+			}
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+			tenant_id,actor_user_id,action,resource_type,resource_id,detail
+		) VALUES($1,$2,'SET_PLATFORM_ADMINISTRATOR','USER',$3,
+			jsonb_build_object('enabled',$4::boolean))`, tenantID, actorID, userID, enabled)
+		return err
+	})
+}
+
 // IsDomainAdministrator verifies an explicit active administrator designation
 // for one domain. Global roles are intentionally not treated as implicit data
 // access to that domain.
@@ -915,107 +891,4 @@ func uniqueStrings(values []string) []string {
 		result = append(result, value)
 	}
 	return result
-}
-
-// CreateRole 创建租户自定义角色并记录审计事件。
-func (s *AdminStore) CreateRole(ctx context.Context, tenantID, actorID, code, name, description string) (Role, error) {
-	var role Role
-	code = strings.TrimSpace(code)
-	name = strings.TrimSpace(name)
-	if code == "" || name == "" {
-		return role, errors.New("role code and name are required")
-	}
-	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.roles(tenant_id,code,name,description) VALUES($1,$2,$3,$4) RETURNING id,code,name,description,is_system,status`, tenantID, code, name, description).Scan(&role.ID, &role.Code, &role.Name, &role.Description, &role.System, &role.Status); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail) VALUES($1,$2,'CREATE','ROLE',$3,jsonb_build_object('code',$4::text))`, tenantID, actorID, role.ID, code)
-		return err
-	})
-	return role, err
-}
-
-// ReplaceRolePermissions 在事务中以新集合完整替换角色权限。
-func (s *AdminStore) ReplaceRolePermissions(ctx context.Context, tenantID, actorID, roleID string, codes []string) error {
-	return database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		var system bool
-		if err := tx.QueryRow(ctx, `SELECT is_system FROM platform.roles WHERE id=$1 AND deleted_at IS NULL`, roleID).Scan(&system); err != nil {
-			return err
-		}
-		if system {
-			return errors.New("system role permissions are read-only")
-		}
-		if _, err := tx.Exec(ctx, `DELETE FROM platform.role_permissions WHERE role_id=$1`, roleID); err != nil {
-			return err
-		}
-		if len(codes) > 0 {
-			result, err := tx.Exec(ctx, `INSERT INTO platform.role_permissions(tenant_id,role_id,permission_id,granted_by) SELECT $1,$2,id,$3 FROM platform.permissions WHERE code=ANY($4::citext[])`, tenantID, roleID, actorID, codes)
-			if err != nil {
-				return err
-			}
-			if result.RowsAffected() != int64(len(codes)) {
-				return errors.New("one or more permission codes are invalid")
-			}
-		}
-		_, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail) VALUES($1,$2,'UPDATE_PERMISSIONS','ROLE',$3,jsonb_build_object('permissionCodes',$4::text[]))`, tenantID, actorID, roleID, codes)
-		return err
-	})
-}
-
-// AssignUserRole 为租户用户分配角色，重复分配保持幂等。
-func (s *AdminStore) AssignUserRole(ctx context.Context, tenantID, actorID, userID, roleID string) error {
-	return database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		result, err := tx.Exec(ctx, `INSERT INTO platform.user_roles(tenant_id,user_id,role_id,assigned_by) SELECT $1,u.id,r.id,$2 FROM platform.users u CROSS JOIN platform.roles r WHERE u.id=$3 AND u.deleted_at IS NULL AND r.id=$4 AND r.deleted_at IS NULL ON CONFLICT DO NOTHING`, tenantID, actorID, userID, roleID)
-		if err != nil {
-			return err
-		}
-		if result.RowsAffected() != 1 {
-			return errors.New("user or role not found, or assignment already exists")
-		}
-		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail) VALUES($1,$2,'ASSIGN_ROLE','USER',$3,jsonb_build_object('roleId',$4::text))`, tenantID, actorID, userID, roleID)
-		return err
-	})
-}
-
-// RevokeUserRole 解除用户与角色关系并写入审计日志。
-func (s *AdminStore) RevokeUserRole(ctx context.Context, tenantID, actorID, userID, roleID string) error {
-	return database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		result, err := tx.Exec(ctx, `DELETE FROM platform.user_roles WHERE user_id=$1 AND role_id=$2`, userID, roleID)
-		if err != nil {
-			return err
-		}
-		if result.RowsAffected() != 1 {
-			return pgx.ErrNoRows
-		}
-		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail) VALUES($1,$2,'REVOKE_ROLE','USER',$3,jsonb_build_object('roleId',$4::text))`, tenantID, actorID, userID, roleID)
-		return err
-	})
-}
-
-// GrantObject 创建或更新用户、角色对具体对象的动作授权。
-func (s *AdminStore) GrantObject(ctx context.Context, tenantID, actorID string, g ObjectGrant) (string, error) {
-	var id string
-	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `INSERT INTO platform.object_permissions(tenant_id,subject_type,subject_id,object_type,object_id,action,granted_by) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`, tenantID, g.SubjectType, g.SubjectID, g.ObjectType, g.ObjectID, g.Action, actorID).Scan(&id); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail) VALUES($1,$2,'GRANT_OBJECT','OBJECT_PERMISSION',$3,jsonb_build_object('objectType',$4::text,'objectId',$5::text,'subjectType',$6::text,'subjectId',$7::text,'action',$8::text))`, tenantID, actorID, id, g.ObjectType, g.ObjectID, g.SubjectType, g.SubjectID, g.Action)
-		return err
-	})
-	return id, err
-}
-
-// RevokeObject 删除对象级授权并记录撤权审计。
-func (s *AdminStore) RevokeObject(ctx context.Context, tenantID, actorID, id string) error {
-	return database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		result, err := tx.Exec(ctx, `DELETE FROM platform.object_permissions WHERE id=$1`, id)
-		if err != nil {
-			return err
-		}
-		if result.RowsAffected() != 1 {
-			return pgx.ErrNoRows
-		}
-		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id) VALUES($1,$2,'REVOKE_OBJECT','OBJECT_PERMISSION',$3)`, tenantID, actorID, id)
-		return err
-	})
 }
