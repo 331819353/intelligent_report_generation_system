@@ -478,6 +478,15 @@ export type SemanticGraphStatus = {
   lastErrorCode?: string
 }
 
+export type SemanticQASettings = {
+  enabled: boolean
+  graphProjectionEnabled: boolean
+  questionChangeEnabled: boolean
+  minimumPathConfidence: number
+  maximumPathHops: number
+  updatedAt: string
+}
+
 export type SemanticQueryToken = {
   text: string
   normalized: string
@@ -701,6 +710,10 @@ const newQueryID = () => typeof crypto !== 'undefined' && typeof crypto.randomUU
 
 export const semanticChatAPI = {
   graphStatus: () => apiRequest<SemanticGraphStatus>('/v1/semantic-qa/graph/status'),
+
+  settings: () => apiRequest<SemanticQASettings>('/v1/semantic-qa/settings', {
+    cache: 'no-store',
+  }),
 
   askQuestion: async ({
     question, conversationId, parentQuestionId,

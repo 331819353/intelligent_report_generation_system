@@ -124,6 +124,41 @@ export type SemanticReleaseProjection = {
   updatedAt: string
 }
 
+export type SemanticReleaseObjectType =
+  | 'DOMAIN'
+  | 'BUSINESS_TERM'
+  | 'ENTITY'
+  | 'SEMANTIC_MODEL'
+  | 'MEASURE'
+  | 'METRIC'
+  | 'DIMENSION'
+  | 'DIMENSION_VALUE'
+  | 'TIME'
+  | 'COHORT'
+  | 'RELATION'
+  | 'DATASET'
+  | 'TABLE_COLUMN'
+  | 'POLICY'
+  | 'QUALITY_RULE'
+  | 'CERTIFIED_EXAMPLE'
+  | 'PARSING_RULE'
+
+export type SemanticReleaseObject = {
+  id: string
+  objectType: SemanticReleaseObjectType
+  objectId: string
+  objectVersion: string
+  domainId?: string
+  ownerId: string
+  certification: 'CERTIFIED'
+  sensitivity: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED'
+  validFrom: string
+  validTo?: string
+  contract: Record<string, unknown>
+  contentHash: string
+  createdAt: string
+}
+
 export type SemanticRelease = {
   id: string
   semanticVersion: string
@@ -144,6 +179,42 @@ export type SemanticRelease = {
   validatedAt?: string
   activatedAt?: string
   projections: SemanticReleaseProjection[]
+  objects?: SemanticReleaseObject[]
+}
+
+export type SemanticReleaseValidationIssue = {
+  code: string
+  objectType?: string
+  objectId?: string
+  field?: string
+  message: string
+}
+
+export type SemanticReleaseValidation = {
+  status: string
+  issues: SemanticReleaseValidationIssue[]
+  counts: Record<string, number>
+}
+
+export type BootstrapSemanticReleaseInput = {
+  semanticVersion: string
+  defaultTimezone: string
+  defaultCalendar: 'GREGORIAN' | 'ISO_WEEK' | 'FISCAL'
+  completePeriodPolicy: 'EXCLUDE_INCOMPLETE' | 'INCLUDE_INCOMPLETE' | 'NOT_APPLICABLE'
+  notes?: string
+}
+
+export type BootstrapSemanticReleasePreview = {
+  eligible: boolean
+  sourceCounts: Record<string, number>
+  candidateCount: number
+  issues: Array<{
+    code: string
+    severity: 'BLOCKER' | 'WARNING'
+    objectType?: string
+    objectId?: string
+    message: string
+  }>
 }
 
 export type SemanticReleaseState = {
@@ -204,6 +275,46 @@ export const semanticAssetAPI = {
       `/v1/semantic-assets/releases?${queryString({ limit, offset })}`,
       { cache: 'no-store' },
     ),
+
+  release: (id: string) =>
+    apiRequest<SemanticRelease>(
+      `/v1/semantic-assets/releases/${encodeURIComponent(id)}`,
+      { cache: 'no-store' },
+    ),
+
+  previewBootstrapRelease: (input: BootstrapSemanticReleaseInput) =>
+    apiRequest<BootstrapSemanticReleasePreview>(
+      '/v1/semantic-assets/releases/bootstrap/preview',
+      { method: 'POST', body: JSON.stringify(input) },
+    ),
+
+  bootstrapRelease: (input: BootstrapSemanticReleaseInput) =>
+    apiRequest<SemanticRelease>('/v1/semantic-assets/releases/bootstrap', {
+      method: 'POST', body: JSON.stringify(input),
+    }),
+
+  validateRelease: (id: string, expectedVersion: number) =>
+    apiRequest<SemanticRelease>(
+      `/v1/semantic-assets/releases/${encodeURIComponent(id)}/validate`,
+      { method: 'POST', body: JSON.stringify({ expectedVersion }) },
+    ),
+
+  activateRelease: (
+    id: string,
+    expectedVersion: number,
+    expectedStateVersion: number,
+    evaluationSetId = '',
+  ) => apiRequest<SemanticReleaseState>(
+    `/v1/semantic-assets/releases/${encodeURIComponent(id)}/activate`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        expectedVersion,
+        expectedStateVersion,
+        ...(evaluationSetId ? { evaluationSetId } : {}),
+      }),
+    },
+  ),
 
   evaluatePermission: (action: 'READ' | 'MANAGE') =>
     apiRequest<{ allowed: boolean }>('/v1/permissions/evaluate', {

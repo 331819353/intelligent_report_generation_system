@@ -1,14 +1,12 @@
-import { NavLink } from 'react-router-dom'
+import { ArrowLeftIcon, LockKeyIcon } from '@phosphor-icons/react'
+import { Link } from 'react-router-dom'
 
-/** 资产管理中心区分可执行资产、向量语义资产和确定性解析规则。 */
+/** 原生编辑器只维护类型化草稿；统一目录和发布治理回到资产中心。 */
 export function AssetManagementTabs() {
   return (
-    <nav className="asset-management-tabs" aria-label="资产管理分类">
-      <NavLink to="/assets/overview">治理总览</NavLink>
-      <NavLink to="/assets/metrics">指标与维度</NavLink>
-      <NavLink to="/assets/semantics">业务词汇</NavLink>
-      <NavLink to="/assets/dimension-values">维值决策图</NavLink>
-      <NavLink to="/assets/parsing-rules">解析规则</NavLink>
+    <nav className="asset-management-tabs asset-editor-context" aria-label="类型化资产编辑器上下文">
+      <Link to="/assets/overview"><ArrowLeftIcon size={15} weight="bold" />返回统一资产中心</Link>
+      <span><LockKeyIcon size={14} weight="duotone" />当前为类型化草稿编辑器；保存不会直接修改线上活动语义版本</span>
     </nav>
   )
 }
