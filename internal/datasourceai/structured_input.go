@@ -21,7 +21,7 @@ var (
 	repeatedUnderscore      = regexp.MustCompile(`_+`)
 	naturalHostPattern      = regexp.MustCompile("(?i)(?:host|主机|地址)\\s*(?:为|是|[:：=])?\\s*[`'\"]?([A-Za-z0-9.-]+)")
 	naturalPortPattern      = regexp.MustCompile("(?i)(?:port|端口)\\s*(?:为|是|[:：=])?\\s*[`'\"]?([0-9]{1,5})")
-	naturalDatabasePattern  = regexp.MustCompile("(?i)(?:database(?:/service)?|service(?:[ _-]?name)?|数据库|服务名?|库名)\\s*(?:为|是|[:：=])?\\s*[`'\"]?([A-Za-z0-9_$#.-]+)")
+	naturalDatabasePattern  = regexp.MustCompile("(?i)(?:database(?:[ _-]?name|/service(?:[ _-]?name)?)?|(?:oracle\\s*)?service(?:[ _-]?name)?|数据库(?:名称)?|服务(?:名(?:称)?)?|库名)\\s*(?:为|是|[:：=])?\\s*[`'\"]?([A-Za-z0-9_$#.-]+)")
 	naturalSIDPattern       = regexp.MustCompile("(?i)(?:oracle\\s*)?sid\\s*(?:为|是|[:：=])?\\s*[`'\"]?([A-Za-z0-9_$#.-]+)")
 	naturalUsernamePattern  = regexp.MustCompile("(?i)(?:username|user|用户名|用户|账号|账户)\\s*(?:为|是|[:：=])?\\s*[`'\"]?([A-Za-z0-9_$#.@-]+)")
 )
@@ -29,6 +29,7 @@ var (
 type parsedInstruction struct {
 	Draft             Draft
 	RecognizedFields  int
+	Recognized        map[string]bool
 	PasswordMentioned bool
 }
 
@@ -40,8 +41,8 @@ func redactInstructionSecrets(value string) (string, bool) {
 }
 
 func parseStructuredInstruction(instruction string, base Draft) parsedInstruction {
-	result := parsedInstruction{Draft: base}
-	seen := map[string]bool{}
+	result := parsedInstruction{Draft: base, Recognized: map[string]bool{}}
+	seen := result.Recognized
 	apply := func(rawKey, rawValue string) {
 		key := normalizeStructuredKey(rawKey)
 		value := cleanStructuredValue(rawValue)
@@ -62,10 +63,13 @@ func parseStructuredInstruction(instruction string, base Draft) parsedInstructio
 				result.Draft.Port = port
 				seen["port"] = true
 			}
-		case "database", "database/service", "databaseservice", "数据库", "数据库/服务名", "库名":
+		case "database", "database_name", "databasename", "dbname",
+			"database/service", "database/service_name", "databaseservice", "databaseservicename",
+			"数据库", "数据库名称", "数据库/服务名", "数据库/服务名称", "库名":
 			result.Draft.Database = value
 			seen["database"] = true
-		case "service", "service_name", "servicename", "服务名":
+		case "service", "service_name", "servicename", "oracle_service_name", "oracleservicename",
+			"服务名", "服务名称", "oracle服务名", "oracle服务名称":
 			result.Draft.Database = value
 			result.Draft.OracleConnectMode = "SERVICE_NAME"
 			seen["database"] = true
@@ -127,6 +131,38 @@ func parseStructuredInstruction(instruction string, base Draft) parsedInstructio
 	}
 	result.RecognizedFields = len(seen)
 	return result
+}
+
+// applyRecognizedFields reapplies only values explicitly present in the current
+// instruction. The parsed draft also contains the previous baseline, so merging
+// the whole draft would incorrectly override unrelated fields returned by the
+// model.
+func applyRecognizedFields(value Draft, parsed parsedInstruction) Draft {
+	if parsed.Recognized["type"] {
+		value.Type = parsed.Draft.Type
+	}
+	if parsed.Recognized["host"] {
+		value.Host = parsed.Draft.Host
+	}
+	if parsed.Recognized["port"] {
+		value.Port = parsed.Draft.Port
+	}
+	if parsed.Recognized["database"] {
+		value.Database = parsed.Draft.Database
+	}
+	if parsed.Recognized["oracleConnectMode"] {
+		value.OracleConnectMode = parsed.Draft.OracleConnectMode
+	}
+	if parsed.Recognized["username"] {
+		value.Username = parsed.Draft.Username
+	}
+	if parsed.Recognized["name"] {
+		value.Name = parsed.Draft.Name
+	}
+	if parsed.Recognized["code"] {
+		value.Code = parsed.Draft.Code
+	}
+	return value
 }
 
 func normalizeStructuredKey(value string) string {

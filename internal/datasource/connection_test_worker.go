@@ -58,7 +58,28 @@ func (w *ConnectionTestWorker) ProcessNext(
 	heartbeatDone := make(chan error, 1)
 	go w.heartbeat(testCtx, cancelTest, claim, lease, heartbeatDone)
 
-	result, testErr := connector.Test(testCtx, claim.Source)
+	var stageUpdateErr error
+	var result TestResult
+	var testErr error
+	if staged, ok := connector.(StagedConnectionTester); ok &&
+		(claim.Source.Type == TypeMySQL || claim.Source.Type == TypeOracle) {
+		result, testErr = staged.TestWithProgress(
+			testCtx,
+			claim.Source,
+			func(stage ConnectionTestStage) error {
+				stageUpdateErr = w.repository.UpdateConnectionTestStage(
+					testCtx,
+					claim.TenantID,
+					claim.Job.ID,
+					claim.LeaseToken,
+					stage,
+				)
+				return stageUpdateErr
+			},
+		)
+	} else {
+		result, testErr = connector.Test(testCtx, claim.Source)
+	}
 	testContextErr := testCtx.Err()
 	cancelTest()
 	heartbeatErr := <-heartbeatDone
@@ -67,6 +88,9 @@ func (w *ConnectionTestWorker) ProcessNext(
 	}
 	if ctx.Err() != nil {
 		return true, ctx.Err()
+	}
+	if stageUpdateErr != nil {
+		return true, stageUpdateErr
 	}
 	if testErr != nil || errors.Is(testContextErr, context.DeadlineExceeded) {
 		code, retryable := safeConnectionTestFailure(testContextErr, testErr, claim.Source.Type)

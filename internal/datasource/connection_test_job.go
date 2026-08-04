@@ -16,6 +16,7 @@ var (
 )
 
 type ConnectionTestJobStatus string
+type ConnectionTestStage string
 
 const (
 	ConnectionTestQueued    ConnectionTestJobStatus = "QUEUED"
@@ -25,6 +26,14 @@ const (
 	ConnectionTestCancelled ConnectionTestJobStatus = "CANCELLED"
 )
 
+const (
+	ConnectionTestStageQueued         ConnectionTestStage = "QUEUED"
+	ConnectionTestStageAddress        ConnectionTestStage = "ADDRESS"
+	ConnectionTestStagePort           ConnectionTestStage = "PORT"
+	ConnectionTestStageDatabase       ConnectionTestStage = "DATABASE"
+	ConnectionTestStageAuthentication ConnectionTestStage = "AUTHENTICATION"
+)
+
 // ConnectionTestJob 是 API 可见的安全任务快照。租约、worker 身份、配置摘要和
 // 凭据均不会序列化到该对象。
 type ConnectionTestJob struct {
@@ -32,6 +41,7 @@ type ConnectionTestJob struct {
 	DataSourceID    string                  `json:"dataSourceId"`
 	ConfigVersionID string                  `json:"configVersionId"`
 	Status          ConnectionTestJobStatus `json:"status"`
+	Stage           ConnectionTestStage     `json:"stage"`
 	Attempt         int                     `json:"attempt"`
 	MaxAttempts     int                     `json:"maxAttempts"`
 	ErrorCode       string                  `json:"errorCode,omitempty"`
@@ -70,6 +80,14 @@ type ConnectionTestWorkerRepository interface {
 	ListConnectionTestTenantIDs(context.Context) ([]string, error)
 	ClaimConnectionTest(context.Context, string, string, time.Duration) (*ConnectionTestClaim, error)
 	HeartbeatConnectionTest(context.Context, string, string, string, time.Duration) error
+	UpdateConnectionTestStage(context.Context, string, string, string, ConnectionTestStage) error
 	CompleteConnectionTest(context.Context, string, string, string, string, int64) error
 	FailConnectionTest(context.Context, string, string, string, string, bool) (ConnectionTestJobStatus, error)
+}
+
+// StagedConnectionTester exposes only safe stage names while a database test
+// runs. Target values, driver errors and credentials remain inside the isolated
+// connector boundary.
+type StagedConnectionTester interface {
+	TestWithProgress(context.Context, Source, func(ConnectionTestStage) error) (TestResult, error)
 }

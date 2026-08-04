@@ -111,6 +111,7 @@ export type ExcelFileAsset = {
   version: number
   versionId: string
   sizeBytes: number
+  sha256: string
   workbookSummary: Record<string, unknown>
   inspection?: ExcelWorkbookInspection
 }
@@ -170,11 +171,13 @@ export type DataSourceAITurnResult = {
 }
 
 export type ConnectionTestJobStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED'
+export type ConnectionTestStage = 'QUEUED' | 'ADDRESS' | 'PORT' | 'DATABASE' | 'AUTHENTICATION'
 export type ConnectionTestJob = {
   id: string
   dataSourceId: string
   configVersionId: string
   status: ConnectionTestJobStatus
+  stage: ConnectionTestStage
   attempt: number
   maxAttempts: number
   errorCode?: string
@@ -322,7 +325,10 @@ const connectionTestIdempotencyKey = () => {
   return `connection-test-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-type ConnectionTestWaitOptions = { signal?: AbortSignal }
+type ConnectionTestWaitOptions = {
+  signal?: AbortSignal
+  onProgress?: (job: ConnectionTestJob) => void
+}
 type StoredConnectionTest = {
   sourceId: string
   jobId: string
@@ -421,10 +427,12 @@ const waitForConnectionTest = async (
   options: ConnectionTestWaitOptions = {},
 ) => {
   let job = initial
+  options.onProgress?.(job)
   while (job.status === 'QUEUED' || job.status === 'RUNNING') {
     rememberConnectionTest(job)
     await waitForConnectionTestDelay(options.signal)
     job = await getConnectionTest(sourceId, job.id, options)
+    options.onProgress?.(job)
   }
   rememberConnectionTest(job)
   if (job.status === 'SUCCEEDED') return connectionTestResult(job)
@@ -479,6 +487,7 @@ export const dataSourceAPI = {
     body.set('config', JSON.stringify({ skipEmptyRows: true }))
     return apiRequest<ExcelFileAsset>(`/v1/excel-files/${encodeURIComponent(fileAssetId)}/versions`, { method: 'POST', body })
   },
+  inspectExcelAsset: (fileAssetId: string) => apiRequest<ExcelWorkbookInspection>(`/v1/excel-files/${encodeURIComponent(fileAssetId)}/inspection`, { method: 'POST', body: '{}' }),
   inspectExcelSource: (id: string) => apiRequest<ExcelWorkbookInspection>(`/v1/data-sources/${encodeURIComponent(id)}/file-inspection`, { method: 'POST', body: '{}' }),
   update: (id: string, input: DataSourceUpdateInput) => apiRequest<DataSourceRecord>(`/v1/data-sources/${encodeURIComponent(id)}`, {
     method: 'PUT',

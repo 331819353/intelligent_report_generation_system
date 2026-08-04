@@ -188,6 +188,43 @@ func TestTurnParsesOracleSIDWithoutModel(t *testing.T) {
 	}
 }
 
+func TestTurnKeepsRecognizedOracleServiceNameWhenModelDraftOmitsIt(t *testing.T) {
+	t.Parallel()
+	invoker := &invokerStub{}
+	invoker.result = modelResult(t, map[string]any{
+		"reply": "已识别 Oracle 服务名 FREEPDB1，可以测试连接。",
+		"draft": map[string]any{
+			"code": "", "name": "", "description": "", "type": "ORACLE",
+			"host": "host.docker.internal", "port": 1521, "database": "", "username": "TAKEOUT_USER",
+			"oracleConnectMode": "SERVICE_NAME", "visibility": "PRIVATE", "sharingScope": "PRIVATE",
+		},
+		"suggestedAction": "TEST", "diagnosis": "", "suggestedChecks": []string{},
+	})
+	result, err := NewService(sourceReaderStub{}, invoker, 0).Turn(
+		context.Background(), "tenant", "actor", "", TurnRequest{
+			Instruction:      "Oracle Service Name: FREEPDB1",
+			PasswordProvided: true,
+			Draft: Draft{
+				Type: "ORACLE", Host: "host.docker.internal", Port: 1521,
+				Username: "TAKEOUT_USER", OracleConnectMode: "SERVICE_NAME",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invoker.calls != 1 {
+		t.Fatalf("partial instruction should use the model once; got %d calls", invoker.calls)
+	}
+	if !result.ReadyToTest || result.Draft.Database != "FREEPDB1" {
+		t.Fatalf("recognized service name must be retained in structured draft: %+v", result)
+	}
+	if result.Draft.Name != "ORACLE_host.docker.internal:1521_FREEPDB1_TAKEOUT_USER" ||
+		result.Draft.Code != "ds_oracle_host_docker_internal_1521_freepdb1_takeout_user" {
+		t.Fatalf("identity must be generated after retaining service name: %+v", result.Draft)
+	}
+}
+
 func TestTurnFallsBackToLocalDraftWhenModelOutputIsInvalid(t *testing.T) {
 	t.Parallel()
 	invoker := &invokerStub{err: ErrInvalidOutput}

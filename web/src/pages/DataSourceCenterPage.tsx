@@ -45,7 +45,7 @@ type ConnectionDraft = {
   username: string
   password: string
 }
-type DialogState = { mode: 'create' | 'view' | 'edit' | 'review' | 'delete' | 'select-tables' | 'edit-table' | 'delete-table'; source?: DataSourceRecord; table?: DataSourceTableRecord }
+type DialogState = { mode: 'create' | 'view' | 'edit' | 'delete' | 'select-tables' | 'edit-table' | 'delete-table'; source?: DataSourceRecord; table?: DataSourceTableRecord }
 type TableEditorPurpose = 'EDIT' | 'MANUAL_COMPLETE'
 type Notice = { tone: 'success' | 'error'; message: string }
 type TableDraft = { businessName: string; businessDescription: string; tags: string; sensitivityLevel: string; visibility: string; manualLocked: boolean }
@@ -249,8 +249,6 @@ export function DataSourceCenterPage() {
   const [fileInspection, setFileInspection] = useState<ExcelWorkbookInspection | null>(null)
   const [busyAction, setBusyAction] = useState('')
   const [formError, setFormError] = useState('')
-  const [publicationReviewNote, setPublicationReviewNote] = useState('')
-  const [publicationReviewAllowed, setPublicationReviewAllowed] = useState(false)
   const [keyword, setKeyword] = useState('')
   const [typeFilter, setTypeFilter] = useState<DataSourceType | 'ALL'>('ALL')
   const [statusFilter, setStatusFilter] = useState<DataSourceStatus | 'ALL'>('ALL')
@@ -289,9 +287,6 @@ export function DataSourceCenterPage() {
     currentDomainID,
     () => '',
   )
-  const permissionProbeSourceID = sources[0]?.id || ''
-  const canReviewPublications = Boolean(permissionProbeSourceID) && publicationReviewAllowed
-
   useEffect(() => {
     viewedSourceIdRef.current = dialog?.mode === 'view' ? dialog.source?.id || '' : ''
   }, [dialog?.mode, dialog?.source?.id])
@@ -301,19 +296,6 @@ export function DataSourceCenterPage() {
     const timeout = window.setTimeout(() => setNotice(null), 4500)
     return () => window.clearTimeout(timeout)
   }, [notice])
-
-  useEffect(() => {
-    let active = true
-    if (!permissionProbeSourceID) {
-      return () => { active = false }
-    }
-    void dataSourceAPI.evaluatePermission(permissionProbeSourceID, 'PUBLISH').then(result => {
-      if (active) setPublicationReviewAllowed(result.allowed)
-    }).catch(() => {
-      if (active) setPublicationReviewAllowed(false)
-    })
-    return () => { active = false }
-  }, [permissionProbeSourceID, selectedDomainID])
 
   const filteredSources = useMemo(() => {
     const query = keyword.trim().toLocaleLowerCase()
@@ -1024,46 +1006,6 @@ export function DataSourceCenterPage() {
     }
   }
 
-  const openPublicationReview = (source: DataSourceRecord) => {
-    setPublicationReviewNote('')
-    setFormError('')
-    setDialog({ mode: 'review', source })
-  }
-
-  const reviewPublication = async (decision: 'APPROVED' | 'REJECTED') => {
-    const source = dialog?.mode === 'review' ? dialog.source : undefined
-    const reason = publicationReviewNote.trim()
-    if (!source?.reviewRequestId || !source.reviewRequestVersion || !canReviewPublications) return
-    if (decision === 'REJECTED' && !reason) {
-      setFormError('拒绝发布时必须填写审批意见')
-      return
-    }
-    setBusyAction(`review-${decision.toLowerCase()}:${source.id}`)
-    setFormError('')
-    try {
-      if (decision === 'APPROVED') {
-        await dataSourceAPI.approvePublicationRequest(
-          source.id, source.reviewRequestId, source.reviewRequestVersion, reason,
-        )
-      } else {
-        await dataSourceAPI.rejectPublicationRequest(
-          source.id, source.reviewRequestId, source.reviewRequestVersion, reason,
-        )
-      }
-      await loadSources()
-      setDialog(null)
-      setPublicationReviewNote('')
-      setNotice({
-        tone: 'success',
-        message: `“${source.name}”的发布申请已${decision === 'APPROVED' ? '通过并生效' : '拒绝'}`,
-      })
-    } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : '处理数据源发布审批失败')
-    } finally {
-      setBusyAction('')
-    }
-  }
-
   const deleteSource = async () => {
     const source = dialog?.source
     if (!source) return
@@ -1152,15 +1094,20 @@ export function DataSourceCenterPage() {
 	              const canTest = !unavailable && reviewStatus !== 'PENDING'
 	              const pendingDraft = hasUnpublishedDraft(source)
 	              const canPublish = !unavailable && pendingDraft && reviewStatus !== 'PENDING' && validationStatusOf(source) === 'PASSED'
+	              const subtitle = `${typeLabels[source.type]} · ${source.code}${source.description ? ` · ${source.description}` : ''} · ${publicationLabels[publicationStatusOf(source)]}`
+	              const host = configText(source, 'host') || (source.type === 'EXCEL' ? '文件数据源' : '—')
+	              const port = configText(source, 'port') || '—'
+	              const database = configText(source, 'database') || '—'
+	              const username = configText(source, 'username') || '—'
 	              return <article className={`data-source-card${reviewLocked ? ' review-locked' : ''}`} role="listitem" key={source.id}>
 	                <button className="data-source-card-open" type="button" disabled={reviewLocked} title={reviewStatus === 'PENDING' ? '审核完成前不能配置数据表' : reviewStatus === 'REJECTED' ? '修改并重新提交审核后才能配置数据表' : undefined} aria-label={`管理${source.name}的数据表资产`} onClick={() => openExisting('view', source)}>
 	                  <span className={`data-source-icon ${source.type.toLowerCase()}`}>{source.type === 'EXCEL' ? 'XL' : 'DB'}</span>
-	                  <span className="data-source-main"><span><strong role="heading" aria-level={3}>{source.name}</strong><span className={`data-source-status ${reviewStatus === 'PENDING' ? 'review-pending' : reviewStatus === 'REJECTED' ? 'review-rejected' : source.status.toLowerCase()}`}>{lifecycleLabel(source)}</span>{pendingDraft && reviewStatus !== 'PENDING' && reviewStatus !== 'REJECTED' && <span className={`data-source-status validation-${validationStatusOf(source).toLowerCase()}`}>{validationLabels[validationStatusOf(source)]}</span>}</span><span className="data-source-subtitle">{typeLabels[source.type]} · {source.code}{source.description ? ` · ${source.description}` : ''} · {publicationLabels[publicationStatusOf(source)]}</span>{reviewStatus === 'REJECTED' && <span className="data-source-review-reason">驳回原因：{source.reviewNote || '审核人未填写原因'}</span>}</span>
+	                  <span className="data-source-main"><span><strong role="heading" aria-level={3} title={source.name}>{source.name}</strong><span className={`data-source-status ${reviewStatus === 'PENDING' ? 'review-pending' : reviewStatus === 'REJECTED' ? 'review-rejected' : source.status.toLowerCase()}`}>{lifecycleLabel(source)}</span>{pendingDraft && reviewStatus !== 'PENDING' && reviewStatus !== 'REJECTED' && <span className={`data-source-status validation-${validationStatusOf(source).toLowerCase()}`}>{validationLabels[validationStatusOf(source)]}</span>}</span><span className="data-source-subtitle" title={subtitle}>{subtitle}</span>{reviewStatus === 'REJECTED' && <span className="data-source-review-reason">驳回原因：{source.reviewNote || '审核人未填写原因'}</span>}</span>
 	                  <span className="data-source-card-facts">
-                    <span><small>Host</small><strong>{configText(source, 'host') || (source.type === 'EXCEL' ? '文件数据源' : '—')}</strong></span>
-                    <span><small>Port</small><strong>{configText(source, 'port') || '—'}</strong></span>
-                    <span><small>Database</small><strong>{configText(source, 'database') || '—'}</strong></span>
-                    <span><small>Username</small><strong>{configText(source, 'username') || '—'}</strong></span>
+                    <span><small>Host</small><strong title={host}>{host}</strong></span>
+                    <span><small>Port</small><strong title={port}>{port}</strong></span>
+                    <span><small>Database</small><strong title={database}>{database}</strong></span>
+                    <span><small>Username</small><strong title={username}>{username}</strong></span>
                   </span>
 	                </button>
 	                <div className="data-source-actions">
@@ -1176,7 +1123,6 @@ export function DataSourceCenterPage() {
                       ))}
                     />
 	                  {reviewStatus === 'PENDING' ? <>
-	                    {canReviewPublications && <button className="action-approve" type="button" disabled={actionBusy} onClick={event => { event.stopPropagation(); openPublicationReview(source) }}>审批</button>}
 	                    {isRequester && <button className="action-withdraw" type="button" disabled={actionBusy} onClick={event => { event.stopPropagation(); void withdrawReview(source) }}>{busyAction === `review-withdraw:${source.id}` ? '撤销中…' : '撤销申请'}</button>}
 	                  </> : <>
 	                    <button className="action-edit" type="button" disabled={actionBusy || unavailable || source.type === 'EXCEL'} onClick={event => { event.stopPropagation(); openExisting('edit', source) }}>修改</button>
@@ -1394,15 +1340,6 @@ export function DataSourceCenterPage() {
 
       {dialog?.mode === 'delete-table' && dialog.source && dialog.table && <Dialog title="删除数据表资产" onClose={closeDialog}>
         <div className="data-source-delete"><p>确认从 PostgreSQL 删除表资产“<strong>{dialog.table.businessName || dialog.table.tableName}</strong>”吗？</p><p className="data-source-safe-note">该操作不会删除或修改源数据库中的原表，之后仍可通过“新增数据表”重新纳入。</p>{formError && <div className="data-source-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => { setDialog({ mode: 'view', source: dialog.source }); void loadTableStructures(dialog.source!.id) }}>取消</button><button className="data-source-delete-button" type="button" disabled={actionBusy} onClick={() => void deleteTableAsset()}>{actionBusy ? '正在删除…' : '确认删除资产'}</button></footer></div>
-      </Dialog>}
-
-      {dialog?.mode === 'review' && dialog.source && <Dialog title="审批数据源发布" onClose={closeDialog}>
-        <div className="data-source-review-dialog">
-          <p>请审核“<strong>{dialog.source.name}</strong>”的当前测试配置。审批通过后将立即切换为已发布版本；所属领域管理员或平台管理员均可处理该申请。</p>
-          <label>审批意见（拒绝时必填）<textarea rows={4} maxLength={1000} value={publicationReviewNote} onChange={event => { setPublicationReviewNote(event.target.value); setFormError('') }} placeholder="填写审批结论或拒绝原因" /><small>{publicationReviewNote.length} / 1000</small></label>
-          {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
-          <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="data-source-reject-button" type="button" disabled={actionBusy || !publicationReviewNote.trim()} onClick={() => void reviewPublication('REJECTED')}>{busyAction.startsWith('review-rejected:') ? '正在拒绝…' : '拒绝'}</button><button className="primary-button" type="button" disabled={actionBusy} onClick={() => void reviewPublication('APPROVED')}>{busyAction.startsWith('review-approved:') ? '正在通过并发布…' : '通过并发布'}</button></footer>
-        </div>
       </Dialog>}
 
       {dialog?.mode === 'delete' && dialog.source && <Dialog title="删除数据源" onClose={closeDialog}>

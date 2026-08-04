@@ -1318,9 +1318,12 @@ def encode_stream_event(event: dict[str, Any]) -> bytes:
     )
 
 
-def stream_error_event(code: str) -> bytes:
+def stream_error_event(code: str, stage: str = "") -> bytes:
     """错误事件只返回枚举代码，不包含驱动文本、SQL 或数据值。"""
-    return encode_stream_event({"type": "error", "code": code})
+    event = {"type": "error", "code": code}
+    if stage:
+        event["stage"] = stage
+    return encode_stream_event(event)
 
 
 def connection_test_error_code(exc: Exception) -> str:
@@ -1480,6 +1483,112 @@ def database_handshake_error_code(exc: Exception) -> str:
     return code
 
 
+def connection_test_failure_stage(code: str) -> str:
+    """把稳定错误码映射到 UI 可见阶段，不泄露驱动或目标信息。"""
+    if code in (
+        "ADDRESS_RESOLUTION_FAILED",
+        "ADDRESS_UNREACHABLE",
+        "CONNECTION_DNS_FAILED",
+        "NETWORK_UNREACHABLE",
+    ):
+        return "ADDRESS"
+    if code in ("PORT_REFUSED", "PORT_TIMEOUT", "CONNECTION_REFUSED"):
+        return "PORT"
+    if code == "CONNECTION_AUTH_FAILED":
+        return "AUTHENTICATION"
+    return "DATABASE"
+
+
+def connection_test_stream_events(config: ConnectionConfig) -> Iterator[bytes]:
+    """流式返回真实检测阶段；事件只包含固定枚举和安全结果摘要。"""
+    started = time.perf_counter()
+    yield encode_stream_event(
+        {"type": "stage", "stage": "ADDRESS", "status": "RUNNING"},
+    )
+    try:
+        pinned_host = resolve_connection_test_address(config)
+        address_pinged = ping_connection_test_address(config, pinned_host)
+    except ConnectionTestStageError as exc:
+        yield stream_error_event(exc.code, "ADDRESS")
+        return
+    yield encode_stream_event(
+        {"type": "stage", "stage": "ADDRESS", "status": "PASSED"},
+    )
+
+    yield encode_stream_event(
+        {"type": "stage", "stage": "PORT", "status": "RUNNING"},
+    )
+    try:
+        verify_connection_test_port(config, pinned_host)
+    except ConnectionTestStageError as exc:
+        code = (
+            "ADDRESS_UNREACHABLE"
+            if exc.code == "PORT_TIMEOUT" and address_pinged is False
+            else exc.code
+        )
+        yield stream_error_event(code, connection_test_failure_stage(code))
+        return
+    yield encode_stream_event(
+        {"type": "stage", "stage": "PORT", "status": "PASSED"},
+    )
+
+    yield encode_stream_event(
+        {"type": "stage", "stage": "DATABASE", "status": "RUNNING"},
+    )
+    try:
+        with one_shot_connection(
+            config,
+            pinned_host,
+        ) as connection, closing(connection.cursor()) as cursor:
+            cursor.execute(
+                "SELECT VERSION()"
+                if config.source_type == "MYSQL"
+                else "SELECT BANNER FROM V$VERSION WHERE ROWNUM = 1",
+            )
+            version = str(cursor.fetchone()[0])
+    except Exception as exc:
+        code = database_handshake_error_code(exc)
+        if code == "CONNECTION_AUTH_FAILED":
+            # 认证失败本身证明地址、端口及服务入口已经可用。
+            yield encode_stream_event(
+                {"type": "stage", "stage": "DATABASE", "status": "PASSED"},
+            )
+            yield encode_stream_event(
+                {
+                    "type": "stage",
+                    "stage": "AUTHENTICATION",
+                    "status": "RUNNING",
+                },
+            )
+        yield stream_error_event(code, connection_test_failure_stage(code))
+        return
+
+    yield encode_stream_event(
+        {"type": "stage", "stage": "DATABASE", "status": "PASSED"},
+    )
+    yield encode_stream_event(
+        {
+            "type": "stage",
+            "stage": "AUTHENTICATION",
+            "status": "RUNNING",
+        },
+    )
+    yield encode_stream_event(
+        {
+            "type": "stage",
+            "stage": "AUTHENTICATION",
+            "status": "PASSED",
+        },
+    )
+    yield encode_stream_event(
+        {
+            "type": "complete",
+            "serverVersion": version,
+            "latencyMs": int((time.perf_counter() - started) * 1000),
+        },
+    )
+
+
 @app.get("/health/live")
 def live() -> dict[str, str]:
     """返回不依赖外部数据库的进程存活状态。"""
@@ -1524,6 +1633,19 @@ def test_connection(config: ConnectionConfig) -> dict[str, Any]:
             {"stage": "AUTHENTICATION", "status": "PASSED"},
         ],
     }
+
+
+@app.post(
+    "/v1/connections/test/stream",
+    dependencies=[Depends(authorize_connection_test)],
+)
+def stream_connection_test(config: ConnectionConfig) -> StreamingResponse:
+    """以有界 NDJSON 事件实时报告地址、端口、服务和认证阶段。"""
+    return StreamingResponse(
+        connection_test_stream_events(config),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/v1/connections/close", dependencies=[Depends(authorize)])

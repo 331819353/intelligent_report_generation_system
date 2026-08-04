@@ -164,6 +164,10 @@ func (s *Service) Turn(
 		return TurnResult{}, err
 	}
 	resultDraft := mergeDraft(draft, output.Draft)
+	// Explicit values parsed from the user's current message take precedence over
+	// model output. This keeps the displayed structured draft consistent with the
+	// assistant reply even when the model mentions a value but omits it from draft.
+	resultDraft = applyRecognizedFields(resultDraft, parsed)
 	resultDraft, outputFixes := safeRepairs(resultDraft, input.TestFailure)
 	fixes = uniqueStrings(append(fixes, outputFixes...))
 	resultDraft, identityFixes = ensureGeneratedIdentity(resultDraft, mode == "CREATE")

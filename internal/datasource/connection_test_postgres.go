@@ -20,7 +20,7 @@ func NewPostgresConnectionTestRepository(pool *pgxpool.Pool) *PostgresConnection
 }
 
 const connectionTestJobProjection = `job.id::text,job.data_source_id::text,
-	job.data_source_version_id::text,job.status,job.attempt,job.max_attempts,
+	job.data_source_version_id::text,job.status,job.stage,job.attempt,job.max_attempts,
 	job.error_code,job.error_message,COALESCE(attestation.server_version,''),
 	COALESCE(attestation.latency_ms,0),job.created_at,job.started_at,job.completed_at,
 	attestation.completed_at,attestation.expires_at`
@@ -98,7 +98,7 @@ func (r *PostgresConnectionTestRepository) LatestConnectionTest(
 func scanConnectionTestJob(row rowScanner, job *ConnectionTestJob) error {
 	return row.Scan(
 		&job.ID, &job.DataSourceID, &job.ConfigVersionID, &job.Status,
-		&job.Attempt, &job.MaxAttempts, &job.ErrorCode, &job.ErrorMessage,
+		&job.Stage, &job.Attempt, &job.MaxAttempts, &job.ErrorCode, &job.ErrorMessage,
 		&job.ServerVersion, &job.LatencyMS, &job.RequestedAt, &job.StartedAt,
 		&job.CompletedAt, &job.TestedAt, &job.ExpiresAt,
 	)
@@ -178,13 +178,36 @@ func (r *PostgresConnectionTestRepository) ClaimConnectionTest(
 		claim = &ConnectionTestClaim{
 			Job: ConnectionTestJob{
 				ID: jobID, DataSourceID: sourceID, ConfigVersionID: versionID,
-				Status: ConnectionTestRunning, Attempt: attempt, MaxAttempts: maxAttempts,
+				Status: ConnectionTestRunning, Stage: ConnectionTestStageQueued,
+				Attempt: attempt, MaxAttempts: maxAttempts,
 			},
 			TenantID: tenantID, LeaseToken: leaseToken, Source: source,
 		}
 		return nil
 	})
 	return claim, err
+}
+
+func (r *PostgresConnectionTestRepository) UpdateConnectionTestStage(
+	ctx context.Context,
+	tenantID, jobID, leaseToken string,
+	stage ConnectionTestStage,
+) error {
+	return database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
+		var updated bool
+		if err := tx.QueryRow(ctx,
+			`SELECT platform.update_data_source_connection_test_stage(
+				$1::uuid,$2::uuid,$3
+			)`,
+			jobID, leaseToken, stage,
+		).Scan(&updated); err != nil {
+			return err
+		}
+		if !updated {
+			return ErrConnectionTestLeaseLost
+		}
+		return nil
+	})
 }
 
 func (r *PostgresConnectionTestRepository) HeartbeatConnectionTest(

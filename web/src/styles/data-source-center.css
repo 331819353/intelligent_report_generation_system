@@ -19,11 +19,11 @@
 .data-source-icon { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 12px; background: #e8efff; color: #1d4ed8; font-size: 12px; font-weight: 900; }
 .data-source-icon.oracle { background: #fff1f2; color: #be123c; }
 .data-source-icon.excel { background: #ecfdf3; color: #047857; }
-.data-source-main { display: grid; gap: 6px; }
-.data-source-main > span:first-child { display: flex; align-items: center; gap: 10px; }
-.data-source-main [role="heading"] { margin: 0; font-size: 16px; }
-.data-source-subtitle { color: var(--muted); font-size: 12px; }
-.data-source-status { border-radius: 999px; padding: 4px 8px; background: #f2f4f7; color: #475467; font-size: 10px; font-weight: 800; }
+.data-source-main { min-width: 0; display: grid; gap: 6px; overflow: hidden; }
+.data-source-main > span:first-child { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.data-source-main [role="heading"] { min-width: 0; flex: 1 1 auto; display: block; overflow: hidden; margin: 0; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }
+.data-source-subtitle { display: block; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.data-source-status { flex: 0 0 auto; border-radius: 999px; padding: 4px 8px; background: #f2f4f7; color: #475467; font-size: 10px; font-weight: 800; }
 .data-source-status.active { background: #dcfce7; color: #047857; }
 .data-source-status.syncing { background: #dbeafe; color: #1d4ed8; }
 .data-source-status.error { background: #fee2e2; color: #b42318; }
@@ -37,7 +37,7 @@
 .data-source-card-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .data-source-card-facts > span { min-width: 0; padding: 8px 10px; border-radius: 8px; background: #f8fafc; }
 .data-source-card-facts small { display: block; color: var(--muted); font-size: 10px; }
-.data-source-card-facts strong { display: block; overflow-wrap: anywhere; margin-top: 3px; font-size: 12px; }
+.data-source-card-facts strong { display: block; overflow: hidden; margin-top: 3px; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .data-source-actions { display: flex; flex-wrap: nowrap; justify-content: flex-end; align-items: center; gap: 6px; }
 .data-source-actions button { border: 1px solid transparent; border-radius: 7px; padding: 7px 9px; font-size: 11px; font-weight: 800; white-space: nowrap; }
 .data-source-actions .action-edit { border-color: #fde68a; background: #fffbeb; color: #a16207; }
@@ -48,7 +48,6 @@
 .data-source-actions .action-resume { border-color: #a7f3d0; background: #ecfdf3; color: #047857; }
 .data-source-actions .action-delete { border-color: #fecaca; background: #fef2f2; color: #b42318; }
 .data-source-actions .action-withdraw { border-color: #d0d5dd; background: white; color: #475467; }
-.data-source-actions .action-approve { border-color: #a7f3d0; background: #ecfdf3; color: #047857; }
 .data-source-actions .action-reject { border-color: #fecaca; background: #fef2f2; color: #b42318; }
 .data-source-actions button:hover:not(:disabled) { filter: brightness(.96); box-shadow: 0 2px 8px #10182812; }
 .data-source-actions button:disabled { cursor: not-allowed; opacity: .45; }
@@ -121,9 +120,7 @@
 .excel-sheet-preview th, .excel-sheet-preview td { min-width: 110px; padding: 7px 9px; border-bottom: 1px solid #edf0f3; white-space: nowrap; }
 .excel-sheet-preview th strong, .excel-sheet-preview th small { display: block; }
 .excel-sheet-preview th small { margin-top: 2px; color: #047857; font-weight: 500; }
-.data-source-detail, .data-source-delete, .data-source-review-dialog { display: grid; gap: 18px; padding: 22px 24px 24px; }
-.data-source-review-dialog p { margin: 0; color: #475467; line-height: 1.7; }
-.data-source-review-dialog label small { justify-self: end; }
+.data-source-detail, .data-source-delete { display: grid; gap: 18px; padding: 22px 24px 24px; }
 .data-source-reject-button { border: 1px solid #dc2626; border-radius: 8px; padding: 10px 16px; background: #dc2626; color: white; font-weight: 700; }
 .data-source-reject-button:disabled { cursor: not-allowed; opacity: .45; }
 .data-source-detail > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }

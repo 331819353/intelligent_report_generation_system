@@ -255,6 +255,7 @@ REVOKE ALL ON FUNCTION
   platform.list_connection_test_job_tenant_ids(),
   platform.claim_data_source_connection_test(text,integer),
   platform.heartbeat_data_source_connection_test(uuid,uuid,integer),
+  platform.update_data_source_connection_test_stage(uuid,uuid,text),
   platform.complete_data_source_connection_test(uuid,uuid,text,bigint),
   platform.fail_data_source_connection_test(uuid,uuid,text,boolean)
 FROM :"app_user", :"worker_user", :"connection_test_user";
@@ -267,6 +268,7 @@ GRANT EXECUTE ON FUNCTION
   platform.list_connection_test_job_tenant_ids(),
   platform.claim_data_source_connection_test(text,integer),
   platform.heartbeat_data_source_connection_test(uuid,uuid,integer),
+  platform.update_data_source_connection_test_stage(uuid,uuid,text),
   platform.complete_data_source_connection_test(uuid,uuid,text,bigint),
   platform.fail_data_source_connection_test(uuid,uuid,text,boolean)
 TO :"connection_test_user";

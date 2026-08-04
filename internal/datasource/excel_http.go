@@ -72,6 +72,29 @@ func NewExcelHandler(authService *auth.Service, permissions *access.Service, man
 	}
 	mux.Handle("POST /api/v1/excel-files", upload(false))
 	mux.Handle("POST /api/v1/excel-files/{id}/versions", upload(true))
+	mux.Handle("POST /api/v1/excel-files/{id}/inspection", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		maxBytes, err := manager.MaxFileBytes(r.Context(), claims.TenantID)
+		if err != nil {
+			writeDSError(w, http.StatusInternalServerError, "EXCEL_QUOTA_FAILED", "failed to load upload quota")
+			return
+		}
+		inspection, err := manager.Inspect(r.Context(), claims.TenantID, r.PathValue("id"), maxBytes)
+		if err != nil {
+			writeDSError(w, http.StatusBadRequest, "EXCEL_INSPECTION_FAILED", safeFileError(err))
+			return
+		}
+		columns := 0
+		for _, sheet := range inspection.Sheets {
+			columns += len(sheet.Columns)
+		}
+		if err := manager.Audit(r.Context(), claims.TenantID, claims.Subject, "INSPECT_UPLOADED_FILE", r.PathValue("id"), map[string]any{
+			"sheets": len(inspection.Sheets), "columns": columns, "sampleLimit": inspection.SampleLimit,
+		}); err != nil {
+			slog.ErrorContext(r.Context(), "uploaded file inspection audit failed", "asset_id", r.PathValue("id"), "error", err)
+		}
+		writeDSJSON(w, http.StatusOK, inspection)
+	})))
 	mux.Handle("GET /api/v1/excel-files/{id}/versions", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, _ := auth.ClaimsFromContext(r.Context())
 		versions, err := manager.Versions(r.Context(), claims.TenantID, r.PathValue("id"))
