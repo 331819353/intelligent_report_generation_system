@@ -99,7 +99,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error
 	}
 	domainID, err := s.ResolveBusinessDomain(ctx, tenantID, user.ID, "")
 	if err != nil {
-		return TokenPair{}, ErrNoActiveBusinessDomain
+		return TokenPair{}, ErrDomainForbidden
 	}
 
 	sessionID, err := randomUUID()
@@ -129,20 +129,16 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 	if err != nil || session.RevokedAt != nil || session.ExpiresAt.Before(s.now()) || session.UserStatus != UserStatusActive || !hmac.Equal(session.RefreshTokenHash, oldHash) {
 		return TokenPair{}, ErrInvalidRefresh
 	}
-	domainID, err := s.ResolveBusinessDomain(
-		ctx, tenantID, session.UserID, session.DomainID,
-	)
-	if err != nil {
-		_ = s.store.RevokeSession(
-			ctx, tenantID, sessionID, oldHash, "BUSINESS_DOMAIN_UNAVAILABLE",
-		)
-		return TokenPair{}, ErrInvalidRefresh
-	}
-	if session.DomainID == "" {
-		if err := s.setSessionDomain(
-			ctx, tenantID, sessionID, session.UserID, domainID,
+	if session.DomainID != "" {
+		if _, err := s.ResolveBusinessDomain(
+			ctx, tenantID, session.UserID, session.DomainID,
 		); err != nil {
-			return TokenPair{}, ErrInvalidRefresh
+			if clearErr := s.setSessionDomain(
+				ctx, tenantID, sessionID, session.UserID, "",
+			); clearErr != nil {
+				return TokenPair{}, ErrInvalidRefresh
+			}
+			session.DomainID = ""
 		}
 	}
 	newToken, newHash, err := NewRefreshToken(tenantID, sessionID)
@@ -180,23 +176,17 @@ func (s *Service) ValidateAccessSession(
 	if err != nil || session.RevokedAt != nil || session.ExpiresAt.Before(s.now()) || session.UserID != claims.Subject {
 		return Session{}, errors.New("access session has been revoked")
 	}
-	domainID, err := s.ResolveBusinessDomain(
-		ctx, claims.TenantID, claims.Subject, session.DomainID,
-	)
-	if err != nil {
-		_ = s.store.RevokeSession(
-			ctx, claims.TenantID, claims.SessionID,
-			session.RefreshTokenHash, "BUSINESS_DOMAIN_UNAVAILABLE",
-		)
-		return Session{}, ErrDomainForbidden
-	}
-	if session.DomainID == "" {
-		if err := s.setSessionDomain(
-			ctx, claims.TenantID, claims.SessionID, claims.Subject, domainID,
+	if session.DomainID != "" {
+		if _, err := s.ResolveBusinessDomain(
+			ctx, claims.TenantID, claims.Subject, session.DomainID,
 		); err != nil {
-			return Session{}, errors.New("bind access session business domain")
+			if clearErr := s.setSessionDomain(
+				ctx, claims.TenantID, claims.SessionID, claims.Subject, "",
+			); clearErr != nil {
+				return Session{}, ErrDomainForbidden
+			}
+			session.DomainID = ""
 		}
-		session.DomainID = domainID
 	}
 	return session, nil
 }
@@ -224,7 +214,7 @@ func (s *Service) ResolveBusinessDomain(
 	domainID, err := store.ResolveBusinessDomain(
 		ctx, tenantID, userID, requestedDomainID,
 	)
-	if err != nil || domainID == "" {
+	if err != nil || (requestedDomainID != "" && domainID == "") {
 		return "", ErrDomainForbidden
 	}
 	return domainID, nil
@@ -253,7 +243,7 @@ func (s *Service) setSessionDomain(
 ) error {
 	store, ok := s.store.(businessDomainStore)
 	if !ok {
-		if domainID == compatibilityDomainID {
+		if domainID == "" || domainID == compatibilityDomainID {
 			return nil
 		}
 		return ErrDomainForbidden

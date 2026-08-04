@@ -5,12 +5,11 @@ import {
   type AssetSharingScope,
 } from '../lib/asset-access'
 import { currentSubject } from '../lib/auth'
-import { currentDomainID, subscribeDomainChange } from '../lib/domain-context'
+import { currentDomain, currentDomainID, subscribeDomainChange } from '../lib/domain-context'
 
 const labels: Record<AssetSharingScope, string> = {
   PRIVATE: '仅自己',
   DOMAIN: '领域内共享',
-  PLATFORM: '平台共享',
 }
 
 export function AssetSharingSelect({
@@ -37,8 +36,10 @@ export function AssetSharingSelect({
     currentDomainID,
     () => '',
   )
-  const isOwner = Boolean(ownerUserID) &&
-    ownerUserID === currentSubject() &&
+  const subject = currentSubject()
+  const canManage = (Boolean(ownerUserID) && ownerUserID === subject) ||
+    Boolean(currentDomain()?.administrators?.some(item => item.id === subject))
+  const isOwner = canManage &&
     Boolean(assetDomainID) &&
     assetDomainID === selectedDomainID
 
@@ -59,7 +60,7 @@ export function AssetSharingSelect({
   if (!isOwner) {
     return <span
       className={`asset-sharing-select scope-${value.toLowerCase()} is-readonly`}
-      title="仅资产持有者可以在资产所属领域修改共享状态"
+      title="仅资产持有者或领域管理员可以在资产所属领域修改共享状态"
       onClick={event => event.stopPropagation()}
     >
       <span className="asset-sharing-select-label">{labels[value]}</span>
@@ -68,7 +69,7 @@ export function AssetSharingSelect({
 
   return <label
     className={`asset-sharing-select scope-${value.toLowerCase()}${error ? ' has-error' : ''}`}
-    title={error || '平台共享只允许跨领域读取；编辑仍限定在资产所属领域'}
+    title={error || '资产只能在所属领域内共享'}
     onClick={event => event.stopPropagation()}
   >
     <span className="asset-sharing-select-label">{busy ? '更新中' : labels[value]}</span>
@@ -83,7 +84,6 @@ export function AssetSharingSelect({
     >
       <option value="PRIVATE">仅自己</option>
       <option value="DOMAIN">领域内共享</option>
-      <option value="PLATFORM">平台共享</option>
     </select>
   </label>
 }

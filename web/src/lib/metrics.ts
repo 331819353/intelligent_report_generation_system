@@ -58,7 +58,7 @@ export type MetricRecord = {
   name: string
   description: string
   domainId?: string
-  sharingScope?: 'PRIVATE' | 'DOMAIN' | 'PLATFORM'
+  sharingScope?: 'PRIVATE' | 'DOMAIN'
   ownerUserId?: string
   type: MetricType
   status: MetricStatus

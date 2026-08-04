@@ -8,6 +8,7 @@ import { LoginPage } from '../pages/LoginPage'
 import { MetricCatalogPage } from '../pages/MetricCatalogPage'
 import { MetricCenterPage } from '../pages/MetricCenterPage'
 import { ManagementCenterPage } from '../pages/ManagementCenterPage'
+import { DomainAccessPage } from '../pages/DomainAccessPage'
 import { SemanticAssetPage } from '../pages/SemanticAssetPage'
 import { AssetOverviewPage } from '../pages/AssetOverviewPage'
 import { SemanticParsingRulePage } from '../pages/SemanticParsingRulePage'
@@ -37,6 +38,7 @@ export function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/admin" element={<RequireAuth><AdminPage /></RequireAuth>} />
       <Route path="/management" element={<RequireAuth><ManagementCenterPage /></RequireAuth>} />
+      <Route path="/domain-access" element={<RequireAuth><DomainAccessPage /></RequireAuth>} />
       <Route path="/data-sources" element={<RequireAuth><DataSourceCenterPage /></RequireAuth>} />
       <Route path="/datasets" element={<RequireAuth><DatasetCenterPage /></RequireAuth>} />
       <Route path="/datasets/:datasetId/edit" element={<RequireAuth><DatasetCenterPage /></RequireAuth>} />

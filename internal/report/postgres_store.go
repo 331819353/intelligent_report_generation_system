@@ -746,9 +746,17 @@ func allowedTx(ctx context.Context, tx pgx.Tx, tenantID, actorID, action, report
       JOIN platform.role_permissions rp ON rp.tenant_id=ur.tenant_id AND rp.role_id=ur.role_id
       JOIN platform.permissions p ON p.tenant_id=rp.tenant_id AND p.id=rp.permission_id
       WHERE ur.tenant_id=$1 AND ur.user_id=$2 AND p.resource_type='REPORT' AND p.action=$3
+        AND platform.current_domain_id() IS NOT NULL
+        AND platform.user_has_active_domain_membership(platform.current_domain_id())
+      UNION ALL
+      SELECT 1
+      WHERE platform.current_domain_id() IS NOT NULL
+        AND platform.user_is_domain_administrator(platform.current_domain_id())
       UNION ALL
       SELECT 1 FROM platform.object_permissions op
       WHERE op.tenant_id=$1 AND op.object_type='REPORT' AND op.object_id=$4 AND op.action=$3
+        AND platform.current_domain_id() IS NOT NULL
+        AND platform.user_has_active_domain_membership(platform.current_domain_id())
         AND (op.subject_type='USER' AND op.subject_id=$2 OR op.subject_type='ROLE' AND EXISTS (
           SELECT 1 FROM platform.user_roles ur JOIN platform.roles r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
           WHERE ur.tenant_id=$1 AND ur.user_id=$2 AND ur.role_id=op.subject_id AND r.status='ACTIVE' AND r.deleted_at IS NULL))

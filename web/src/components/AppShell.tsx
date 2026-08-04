@@ -9,6 +9,7 @@ import {
   House,
   Stack,
   TreeStructure,
+  UserPlus,
 } from '@phosphor-icons/react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
@@ -20,6 +21,7 @@ import {
   switchBusinessDomain,
 } from '../lib/auth'
 import {
+  clearDomain,
   currentDomain,
   domainCatalogChangedEvent,
 } from '../lib/domain-context'
@@ -53,7 +55,7 @@ export function AppShell({ title = '智能报表平台', eyebrow = '工作台', 
         const stored = currentDomain()
         if (stored && !active.some(item => item.id === stored.id)) {
           setSelectedDomain(null)
-          forceLogout('BUSINESS_DOMAIN_DISABLED')
+          clearDomain()
           return
         }
         const next = active.find(item => item.id === stored?.id)
@@ -118,6 +120,7 @@ export function AppShell({ title = '智能报表平台', eyebrow = '工作台', 
         <nav aria-label="主导航">
           <span className="sidebar-section-label">工作空间</span>
           <NavLink to="/admin"><House aria-hidden="true" size={18} />工作台</NavLink>
+          <NavLink to="/domain-access"><UserPlus aria-hidden="true" size={18} />领域权限</NavLink>
           <NavLink to="/data-sources"><Database aria-hidden="true" size={18} />数据源配置中心</NavLink>
           <NavLink to="/datasets"><Stack aria-hidden="true" size={18} />数据集配置中心</NavLink>
           <NavLink

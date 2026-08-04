@@ -5,7 +5,7 @@ export type DataSourceStatus = 'DRAFT' | 'ACTIVE' | 'DISABLED' | 'SYNCING' | 'ER
 export type DataSourceValidationStatus = 'UNTESTED' | 'PASSED' | 'FAILED'
 export type DataSourcePublicationStatus = 'UNPUBLISHED' | 'PUBLISHED'
 export type DataSourceVisibility = 'PRIVATE' | 'TENANT_PUBLIC'
-export type AssetSharingScope = 'PRIVATE' | 'DOMAIN' | 'PLATFORM'
+export type AssetSharingScope = 'PRIVATE' | 'DOMAIN'
 export type DataSourceReviewStatus = 'NOT_SUBMITTED' | 'PENDING' | 'APPROVED' | 'REJECTED' | 'WITHDRAWN'
 
 export type DataSourceRecord = {

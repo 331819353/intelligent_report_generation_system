@@ -174,7 +174,7 @@ const draftFromSource = (source: DataSourceRecord): ConnectionDraft => ({
   name: source.name,
   description: source.description || '',
   visibility: source.visibility || 'PRIVATE',
-  sharingScope: source.sharingScope || (source.visibility === 'TENANT_PUBLIC' ? 'PLATFORM' : 'PRIVATE'),
+  sharingScope: source.sharingScope || (source.visibility === 'TENANT_PUBLIC' ? 'DOMAIN' : 'PRIVATE'),
   type: source.type === 'ORACLE' ? 'ORACLE' : 'MYSQL',
   host: configText(source, 'host'),
   port: configText(source, 'port') || (source.type === 'ORACLE' ? '1521' : '3306'),
@@ -1110,7 +1110,7 @@ export function DataSourceCenterPage() {
                     <AssetSharingSelect
                       resourceType="DATA_SOURCE"
                       resourceID={source.id}
-                      value={source.sharingScope || (source.visibility === 'TENANT_PUBLIC' ? 'PLATFORM' : 'PRIVATE')}
+                      value={source.sharingScope || (source.visibility === 'TENANT_PUBLIC' ? 'DOMAIN' : 'PRIVATE')}
                       ownerUserID={source.ownerId}
                       assetDomainID={source.domainId}
                       disabled={actionBusy || unavailable}
@@ -1150,7 +1150,7 @@ export function DataSourceCenterPage() {
                 dialog.source?.domainId !== selectedDomainID
               ) ? '仅数据源持有者可以在资产所属领域修改共享状态' : undefined}
               onChange={event => setDraft(current => ({ ...current, sharingScope: event.target.value as AssetSharingScope }))}
-            ><option value="PRIVATE">仅自己</option><option value="DOMAIN">领域内共享</option><option value="PLATFORM">平台共享（跨领域只读）</option></select>{dialog.mode === 'edit' && (
+            ><option value="PRIVATE">仅自己</option><option value="DOMAIN">领域内共享</option></select>{dialog.mode === 'edit' && (
               dialog.source?.ownerId !== signedInSubject ||
               dialog.source?.domainId !== selectedDomainID
             ) && <small>仅数据源持有者可以在资产所属领域修改共享状态。</small>}</label>

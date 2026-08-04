@@ -55,6 +55,12 @@ function expireSession(reason = 'SESSION_EXPIRED') {
   window.dispatchEvent(new CustomEvent('auth-expired', { detail: { reason } }))
 }
 
+/** 领域失效只清理领域上下文，保留登录会话供用户重新申请或选择领域。 */
+function requireDomainSelection() {
+  sessionStorage.removeItem(currentDomainKey)
+  if (window.location.pathname !== '/domain-access') window.location.assign('/domain-access')
+}
+
 let refreshRequest: Promise<StoredTokens> | null = null
 /** 合并并发刷新请求，避免同一旧刷新令牌被重复轮换。 */
 async function refreshTokens(): Promise<StoredTokens> {
@@ -94,8 +100,8 @@ export async function apiResponse(path: string, init: APIRequestInit = {}): Prom
   if (!response.ok) {
     const fallback: APIError = { code: 'REQUEST_FAILED', message: '请求失败，请稍后重试' }
     const detail = await response.json().catch(() => fallback) as APIError
-    if (response.status === 403 && detail.code === 'BUSINESS_DOMAIN_FORBIDDEN') {
-      expireSession('BUSINESS_DOMAIN_UNAVAILABLE')
+    if (response.status === 403 && (detail.code === 'BUSINESS_DOMAIN_FORBIDDEN' || detail.code === 'BUSINESS_DOMAIN_REQUIRED')) {
+      requireDomainSelection()
     } else if (response.status === 401 && detail.code === 'BUSINESS_DOMAIN_SESSION_DISABLED') {
       expireSession('BUSINESS_DOMAIN_DISABLED')
     }

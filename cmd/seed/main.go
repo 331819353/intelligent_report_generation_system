@@ -144,12 +144,13 @@ func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error 
 		return err
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO platform.domain_memberships(
-			tenant_id,domain_id,user_id,assigned_by
+			tenant_id,domain_id,user_id,assigned_by,member_role
 		)
-		SELECT $1,domain.id,$2,$2
+		SELECT $1,domain.id,$2,$2,'DOMAIN_ADMIN'
 		FROM platform.business_domains AS domain
 		WHERE domain.status='ACTIVE' AND domain.deleted_at IS NULL
-		ON CONFLICT(tenant_id,domain_id,user_id) DO UPDATE SET status='ACTIVE'`,
+		ON CONFLICT(tenant_id,domain_id,user_id) DO UPDATE
+		SET status='ACTIVE',member_role='DOMAIN_ADMIN'`,
 		tenantID, adminID,
 	)
 	return err

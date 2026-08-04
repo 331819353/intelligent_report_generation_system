@@ -52,7 +52,7 @@ func NewAssetScopeHandler(
 			if errors.Is(err, ErrAssetSharingOwnerDomainRequired) {
 				status = http.StatusForbidden
 				code = "ASSET_SHARING_OWNER_DOMAIN_REQUIRED"
-				message = "only the asset owner in the owning domain can change its sharing scope"
+				message = "only the asset owner or domain administrator in the owning domain can change its sharing scope"
 			}
 			writeError(
 				w, status, code, message,

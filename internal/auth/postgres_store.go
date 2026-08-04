@@ -56,6 +56,9 @@ func (s *PostgresStore) ResolveBusinessDomain(
 			  domain.name
 			LIMIT 1`, userID, requestedDomainID).Scan(&domainID)
 	})
+	if errors.Is(err, pgx.ErrNoRows) && requestedDomainID == "" {
+		return "", nil
+	}
 	return domainID, err
 }
 
@@ -76,7 +79,7 @@ func (s *PostgresStore) CreateSession(ctx context.Context, session Session, user
 		if _, err := tx.Exec(ctx, `INSERT INTO platform.auth_sessions(
 				id,tenant_id,user_id,business_domain_id,refresh_token_hash,
 				user_agent,ip_address,expires_at
-			) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,'')::inet,$8)`,
+			) VALUES($1,$2,$3,NULLIF($4,'')::uuid,$5,$6,NULLIF($7,'')::inet,$8)`,
 			session.ID, session.TenantID, session.UserID, session.DomainID,
 			session.RefreshTokenHash, userAgent, ipAddress, session.ExpiresAt,
 		); err != nil {
@@ -141,7 +144,7 @@ func (s *PostgresStore) SetSessionDomain(
 ) error {
 	return database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		result, err := tx.Exec(ctx, `UPDATE platform.auth_sessions
-			SET business_domain_id=$1,last_used_at=now()
+			SET business_domain_id=NULLIF($1,'')::uuid,last_used_at=now()
 			WHERE id=$2
 			  AND user_id=$3
 			  AND revoked_at IS NULL`,

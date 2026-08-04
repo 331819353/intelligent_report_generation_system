@@ -2,7 +2,7 @@ import { CheckCircle, FlowArrow, Sparkle } from '@phosphor-icons/react'
 import { FormEvent, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { login } from '../lib/auth'
-import { RequestError } from '../lib/api'
+import { administrationAPI } from '../lib/administration'
 
 /** 收集租户凭据、处理登录状态并进入工作台。 */
 export function LoginPage() {
@@ -25,11 +25,10 @@ export function LoginPage() {
     setError('')
     try {
       await login(tenantCode, email, password)
-      navigate('/admin')
+      const domains = await administrationAPI.listDomains()
+      navigate(domains.length > 0 ? '/admin' : '/domain-access')
     } catch (cause) {
-      setError(cause instanceof RequestError && cause.detail.code === 'NO_ACTIVE_BUSINESS_DOMAIN'
-        ? '当前账号没有可用的所属领域，请联系管理员分配或启用领域'
-        : '租户、账号或密码错误')
+      setError('租户、账号或密码错误')
     } finally {
       setSubmitting(false)
     }

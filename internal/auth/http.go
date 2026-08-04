@@ -56,20 +56,13 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 			writeAuthError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "tenant, account or password is invalid")
 			return
 		}
-		if errors.Is(err, ErrNoActiveBusinessDomain) {
-			writeAuthError(
-				w, http.StatusForbidden, "NO_ACTIVE_BUSINESS_DOMAIN",
-				"account has no active assigned business domain",
-			)
-			return
-		}
 		writeAuthError(w, http.StatusInternalServerError, "AUTHENTICATION_FAILED", "authentication service failed")
 		return
 	}
 	writeAuthJSON(w, http.StatusOK, pair)
 }
 
-// switchDomain 在服务端同步当前会话领域，后续停用领域时可精确撤销会话。
+// switchDomain 在服务端同步当前会话领域；停用或撤权时会话退回无领域控制面。
 func (h *Handler) switchDomain(w http.ResponseWriter, r *http.Request) {
 	claims, ok := ClaimsFromContext(r.Context())
 	if !ok {
@@ -211,10 +204,10 @@ func requireAccessToken(
 				}
 			}
 		}
-		if domainID == "" {
+		if useRequestedDomain && domainID == "" {
 			writeAuthError(
-				w, http.StatusUnauthorized, "BUSINESS_DOMAIN_SESSION_DISABLED",
-				"the business domain bound to this session is no longer available",
+				w, http.StatusForbidden, "BUSINESS_DOMAIN_REQUIRED",
+				"an active business domain membership is required",
 			)
 			return
 		}
@@ -229,8 +222,8 @@ func RequireAccessToken(service *Service, next http.Handler) http.Handler {
 	return requireAccessToken(service, true, next)
 }
 
-// RequireTenantAccessToken 用于租户管理控制面：忽略客户端领域请求头，
-// 但仍要求当前会话绑定的领域有效，领域停用后管理员同样会被强制退出。
+// RequireTenantAccessToken 用于租户管理控制面：忽略客户端领域请求头。
+// 无领域用户仍可登录并在控制面申请领域，但无法进入任何数据面接口。
 func RequireTenantAccessToken(service *Service, next http.Handler) http.Handler {
 	return requireAccessToken(service, false, next)
 }

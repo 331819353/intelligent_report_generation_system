@@ -10,6 +10,33 @@ export type BusinessDomain = {
   default: boolean
   version: number
   createdAt: string
+  administrators: DomainAdministrator[]
+}
+
+export type DomainAdministrator = {
+  id: string
+  email: string
+  displayName: string
+}
+
+export type DomainCatalogItem = BusinessDomain & {
+  accessStatus: 'AVAILABLE' | 'PENDING' | 'APPROVED' | 'REJECTED' | 'MEMBER' | 'DOMAIN_ADMIN'
+}
+
+export type DomainApplication = {
+  id: string
+  domainId: string
+  domainCode: string
+  domainName: string
+  applicantUserId: string
+  applicantEmail: string
+  applicantDisplayName: string
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED'
+  reason: string
+  reviewComment: string
+  reviewedBy?: string
+  reviewedAt?: string
+  createdAt: string
 }
 
 export type AdminRole = {
@@ -35,7 +62,9 @@ export type AdminUser = {
   displayName: string
   status: 'ACTIVE' | 'DISABLED' | 'LOCKED'
   roles: AdminUserRole[]
-  domains?: Array<Pick<BusinessDomain, 'id' | 'code' | 'name' | 'default'>>
+  domains?: Array<Pick<BusinessDomain, 'id' | 'code' | 'name' | 'default'> & {
+    memberRole: 'MEMBER' | 'DOMAIN_ADMIN'
+  }>
   lastLoginAt?: string
 }
 
@@ -71,7 +100,20 @@ export const administrationAPI = {
       Boolean(item?.id && item?.code && item?.name && item?.status),
     )
   },
-  async createDomain(input: { code: string; name: string; description: string }) {
+  async listManagedDomains() {
+    const result = await administrationRequest<ItemsResponse<BusinessDomain>>('/v1/managed-domains', {
+      cache: 'no-store',
+    })
+    return safeItems(result).filter(item =>
+      Boolean(item?.id && item?.code && item?.name && item?.status),
+    )
+  },
+  async createDomain(input: {
+    code: string
+    name: string
+    description: string
+    administratorUserIds: string[]
+  }) {
     return administrationRequest<BusinessDomain>('/v1/domains', {
       method: 'POST',
       body: JSON.stringify(input),
@@ -81,6 +123,42 @@ export const administrationAPI = {
     return administrationRequest<BusinessDomain>(`/v1/domains/${id}`, {
       method: 'PATCH',
       body: JSON.stringify({ status }),
+    })
+  },
+  async replaceDomainAdministrators(id: string, userIds: string[]) {
+    return administrationRequest<void>(`/v1/domains/${id}/administrators`, {
+      method: 'PUT',
+      body: JSON.stringify({ userIds }),
+    })
+  },
+  async listDomainCatalog() {
+    const result = await administrationRequest<ItemsResponse<DomainCatalogItem>>('/v1/domain-catalog', {
+      cache: 'no-store',
+    })
+    return safeItems(result)
+  },
+  async applyDomain(domainID: string, reason: string) {
+    return administrationRequest<DomainApplication>(`/v1/domains/${domainID}/applications`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    })
+  },
+  async listMyDomainApplications() {
+    const result = await administrationRequest<ItemsResponse<DomainApplication>>('/v1/domain-applications', {
+      cache: 'no-store',
+    })
+    return safeItems(result)
+  },
+  async listPendingDomainApplications(domainID: string) {
+    const result = await administrationRequest<ItemsResponse<DomainApplication>>(`/v1/domains/${domainID}/applications`, {
+      cache: 'no-store',
+    })
+    return safeItems(result)
+  },
+  async reviewDomainApplication(id: string, decision: 'APPROVED' | 'REJECTED', comment = '') {
+    return administrationRequest<void>(`/v1/domain-applications/${id}/decision`, {
+      method: 'POST',
+      body: JSON.stringify({ decision, comment }),
     })
   },
   async listRoles() {

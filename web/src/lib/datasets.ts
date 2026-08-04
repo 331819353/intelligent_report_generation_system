@@ -78,7 +78,7 @@ export type DatasetSummary = {
   originTableId?: string; originTableName?: string; originDataSourceName?: string; layer: DatasetLayer; tags: string[]
   version: number; dslHash: string; currentPublishedVersionId?: string; updatedAt: string
 }
-export type AssetSharingScope = 'PRIVATE' | 'DOMAIN' | 'PLATFORM'
+export type AssetSharingScope = 'PRIVATE' | 'DOMAIN'
 export type DatasetPage = {
   items: DatasetSummary[]; total: number; limit: number; offset: number
 }

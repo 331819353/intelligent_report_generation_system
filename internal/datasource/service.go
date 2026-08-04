@@ -62,7 +62,7 @@ func (s *Service) Create(ctx context.Context, source Source) (Source, error) {
 	if source.SharingScope == "" {
 		source.SharingScope = "PRIVATE"
 	}
-	if source.SharingScope != "PRIVATE" && source.SharingScope != "DOMAIN" && source.SharingScope != "PLATFORM" {
+	if source.SharingScope != "PRIVATE" && source.SharingScope != "DOMAIN" {
 		return Source{}, fmt.Errorf("%w: invalid sharing scope", ErrInvalidConfiguration)
 	}
 	if err := source.Validate(); err != nil {
@@ -177,7 +177,7 @@ func (s *Service) Update(ctx context.Context, source Source) (Source, error) {
 	if source.SharingScope == "" {
 		source.SharingScope = "PRIVATE"
 	}
-	if source.SharingScope != "PRIVATE" && source.SharingScope != "DOMAIN" && source.SharingScope != "PLATFORM" {
+	if source.SharingScope != "PRIVATE" && source.SharingScope != "DOMAIN" {
 		return Source{}, fmt.Errorf("%w: invalid sharing scope", ErrInvalidConfiguration)
 	}
 	source.CreatedBy = current.CreatedBy

@@ -36,7 +36,7 @@ var assetScopeTargets = map[string]assetScopeTarget{
 
 type AssetScopeStore struct{ pool *pgxpool.Pool }
 
-var ErrAssetSharingOwnerDomainRequired = errors.New("only the asset owner in the owning domain can change its sharing scope")
+var ErrAssetSharingOwnerDomainRequired = errors.New("only the asset owner or domain administrator in the owning domain can change its sharing scope")
 
 func NewAssetScopeStore(pool *pgxpool.Pool) *AssetScopeStore {
 	return &AssetScopeStore{pool: pool}
@@ -84,15 +84,18 @@ func (s *AssetScopeStore) Update(
 		return AssetSharing{}, err
 	}
 	scope = strings.ToUpper(strings.TrimSpace(scope))
-	if scope != "PRIVATE" && scope != "DOMAIN" && scope != "PLATFORM" {
-		return AssetSharing{}, errors.New("sharingScope must be PRIVATE, DOMAIN or PLATFORM")
+	if scope != "PRIVATE" && scope != "DOMAIN" {
+		return AssetSharing{}, errors.New("sharingScope must be PRIVATE or DOMAIN")
 	}
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		query := fmt.Sprintf(`UPDATE %s
 			SET sharing_scope=$2::platform.asset_share_scope
 			WHERE id=$1::uuid
-			  AND %s=$3::uuid
-			  AND domain_id=platform.current_domain_id()`, target.table, target.ownerColumn)
+			  AND domain_id=platform.current_domain_id()
+			  AND (
+			    %s=$3::uuid
+			    OR platform.user_is_domain_administrator(domain_id)
+			  )`, target.table, target.ownerColumn)
 		result, updateErr := tx.Exec(ctx, query, resourceID, scope, actorID)
 		if updateErr != nil {
 			return updateErr
@@ -107,8 +110,6 @@ func (s *AssetScopeStore) Update(
 			if _, updateErr = tx.Exec(ctx, `UPDATE platform.metrics
 				SET sharing_scope=CASE
 				  WHEN $2='PRIVATE' THEN 'PRIVATE'::platform.asset_share_scope
-				  WHEN $2='DOMAIN' AND sharing_scope='PLATFORM'
-				    THEN 'DOMAIN'::platform.asset_share_scope
 				  ELSE sharing_scope
 				END
 				WHERE dataset_id=$1::uuid`, resourceID, scope); updateErr != nil {
@@ -117,8 +118,6 @@ func (s *AssetScopeStore) Update(
 			if _, updateErr = tx.Exec(ctx, `UPDATE platform.semantic_dimensions
 				SET sharing_scope=CASE
 				  WHEN $2='PRIVATE' THEN 'PRIVATE'::platform.asset_share_scope
-				  WHEN $2='DOMAIN' AND sharing_scope='PLATFORM'
-				    THEN 'DOMAIN'::platform.asset_share_scope
 				  ELSE sharing_scope
 				END
 				WHERE dataset_id=$1::uuid`, resourceID, scope); updateErr != nil {

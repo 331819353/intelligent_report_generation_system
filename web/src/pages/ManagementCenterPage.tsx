@@ -23,10 +23,10 @@ import {
   type PermissionDefinition,
 } from '../lib/administration'
 import {
+  clearDomain,
   notifyDomainCatalogChanged,
   currentDomain,
 } from '../lib/domain-context'
-import { forceLogout } from '../lib/auth'
 
 type ManagementView = 'domains' | 'members' | 'permissions'
 type CreateDialog = 'domain' | 'role' | null
@@ -74,18 +74,25 @@ export function ManagementCenterPage() {
   const [busyKey, setBusyKey] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [platformAdministrator, setPlatformAdministrator] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const [nextDomains, nextRoles, nextUsers, nextPermissions] = await Promise.all([
-        administrationAPI.listDomains(),
+      const [domainResult, nextRoles, nextUsers, nextPermissions] = await Promise.all([
+        administrationAPI.listManagedDomains()
+          .then(items => ({ items, platformAdministrator: true }))
+          .catch(async () => ({
+            items: await administrationAPI.listDomains(),
+            platformAdministrator: false,
+          })),
         administrationAPI.listRoles(),
         administrationAPI.listUsers(),
         administrationAPI.listPermissions(),
       ])
-      setDomains(nextDomains)
+      setDomains(domainResult.items)
+      setPlatformAdministrator(domainResult.platformAdministrator)
       setRoles(nextRoles)
       setUsers(nextUsers)
       setPermissions(nextPermissions)
@@ -131,9 +138,14 @@ export function ManagementCenterPage() {
       code: String(form.get('code') ?? '').trim().toLowerCase(),
       name: String(form.get('name') ?? '').trim(),
       description: String(form.get('description') ?? '').trim(),
+      administratorUserIds: form.getAll('administratorUserIds').map(String),
     }
     if (!input.code || !input.name) {
       setError('请填写领域名称和领域编码')
+      return
+    }
+    if (input.administratorUserIds.length === 0) {
+      setError('请至少指定一位领域管理员')
       return
     }
     setBusyKey('create-domain')
@@ -195,7 +207,8 @@ export function ManagementCenterPage() {
       const nextDomains = domains.map(item => item.id === updated.id ? updated : item)
       setDomains(nextDomains)
       if (disablingCurrentDomain) {
-        forceLogout('BUSINESS_DOMAIN_DISABLED')
+        clearDomain()
+        window.location.assign('/domain-access')
       } else {
         notifyDomainCatalogChanged()
       }
@@ -254,6 +267,7 @@ export function ManagementCenterPage() {
             code: domain.code,
             name: domain.name,
             default: domain.default,
+            memberRole: 'MEMBER' as const,
           }],
       }))
       setNotice(`${user.displayName}已${assigned ? '移出' : '加入'}“${domain.name}”领域`)
@@ -287,7 +301,7 @@ export function ManagementCenterPage() {
     }
   }
 
-  const actions = <button
+  const actions = view === 'domains' && !platformAdministrator ? null : <button
     className="primary-button"
     type="button"
     onClick={() => {
@@ -347,6 +361,7 @@ export function ManagementCenterPage() {
                 : <>
                   {view === 'domains' && <DomainManagement
                     domains={domains}
+                    platformAdministrator={platformAdministrator}
                     busyKey={busyKey}
                     onToggle={toggleDomain}
                     onCreate={() => setCreateDialog('domain')}
@@ -355,6 +370,7 @@ export function ManagementCenterPage() {
                     users={users}
                     roles={roles}
                     domains={domains.filter(domain => domain.status === 'ACTIVE')}
+                    platformAdministrator={platformAdministrator}
                     busyKey={busyKey}
                     onToggleRole={toggleUserRole}
                     onToggleDomain={toggleUserDomain}
@@ -377,6 +393,7 @@ export function ManagementCenterPage() {
 
       {createDialog && <CreateManagementDialog
         type={createDialog}
+        users={users}
         busy={Boolean(busyKey)}
         error={error}
         onClose={() => {
@@ -392,11 +409,13 @@ export function ManagementCenterPage() {
 
 function DomainManagement({
   domains,
+  platformAdministrator,
   busyKey,
   onToggle,
   onCreate,
 }: {
   domains: BusinessDomain[]
+  platformAdministrator: boolean
   busyKey: string
   onToggle: (domain: BusinessDomain) => void
   onCreate: () => void
@@ -404,7 +423,7 @@ function DomainManagement({
   return <div className="administration-view">
     <header className="administration-view-heading">
       <div><span className="eyebrow">业务范围</span><h2>领域管理</h2><p>领域会出现在全局侧栏的切换器中，停用后不再允许进入。</p></div>
-      <button className="quiet-button" type="button" onClick={onCreate}><Plus size={16} />创建领域</button>
+      {platformAdministrator && <button className="quiet-button" type="button" onClick={onCreate}><Plus size={16} />创建领域</button>}
     </header>
     {domains.length === 0
       ? <div className="administration-empty"><GlobeHemisphereWest size={34} /><strong>还没有业务领域</strong><p>创建第一个领域后，成员即可从侧栏切换。</p></div>
@@ -416,13 +435,14 @@ function DomainManagement({
           </header>
           <div><h3>{domain.name}{domain.default && <em>默认</em>}</h3><code>{domain.code}</code></div>
           <p>{domain.description || '暂未填写领域说明'}</p>
+          <p className="domain-administrators">领域管理员：{domain.administrators?.map(item => item.displayName).join('、') || '未指定'}</p>
           <footer>
             <small>创建于 {formatDate(domain.createdAt)}</small>
             <button
               type="button"
-              disabled={domain.default || Boolean(busyKey)}
+              disabled={!platformAdministrator || domain.default || Boolean(busyKey)}
               aria-label={`${domain.status === 'ACTIVE' ? '停用' : '启用'}${domain.name}`}
-              title={domain.default ? '默认领域不可停用' : undefined}
+              title={!platformAdministrator ? '仅平台管理员可以启停领域' : domain.default ? '默认领域不可停用' : undefined}
               onClick={() => onToggle(domain)}
             >
               {busyKey === `domain:${domain.id}`
@@ -441,6 +461,7 @@ function MemberManagement({
   users,
   roles,
   domains,
+  platformAdministrator,
   busyKey,
   onToggleRole,
   onToggleDomain,
@@ -448,6 +469,7 @@ function MemberManagement({
   users: AdminUser[]
   roles: AdminRole[]
   domains: BusinessDomain[]
+  platformAdministrator: boolean
   busyKey: string
   onToggleRole: (user: AdminUser, role: AdminRole) => void
   onToggleDomain: (user: AdminUser, domain: BusinessDomain) => void
@@ -469,21 +491,20 @@ function MemberManagement({
             <small>领域</small>
             {domains.map(domain => {
               const assigned = (user.domains ?? []).some(item => item.id === domain.id)
-              const activeAssignedCount = domains.filter(item =>
-                (user.domains ?? []).some(userDomain => userDomain.id === item.id),
-              ).length
+              const assignment = (user.domains ?? []).find(item => item.id === domain.id)
+              const domainAdministrator = assignment?.memberRole === 'DOMAIN_ADMIN'
               const busy = busyKey === `user-domain:${user.id}:${domain.id}`
               return <button
                 type="button"
                 key={domain.id}
                 className={assigned ? 'assigned' : ''}
                 aria-pressed={assigned}
-                disabled={Boolean(busyKey) || (assigned && activeAssignedCount <= 1)}
-                title={assigned && activeAssignedCount <= 1 ? '成员必须至少保留一个可用领域' : undefined}
+                disabled={!platformAdministrator || Boolean(busyKey) || domainAdministrator}
+                title={!platformAdministrator ? '仅平台管理员可以直接调整成员领域' : domainAdministrator ? '领域管理员须先由平台管理员完成替换' : undefined}
                 onClick={() => onToggleDomain(user, domain)}
               >
                 {busy ? <SpinnerGap className="spin" size={13} /> : assigned && <Check size={13} weight="bold" />}
-                {domain.name}
+                {domain.name}{domainAdministrator ? ' · 管理员' : ''}
               </button>
             })}
           </div>
@@ -589,12 +610,14 @@ function PermissionManagement({
 
 function CreateManagementDialog({
   type,
+  users,
   busy,
   error,
   onClose,
   onSubmit,
 }: {
   type: Exclude<CreateDialog, null>
+  users: AdminUser[]
   busy: boolean
   error: string
   onClose: () => void
@@ -613,6 +636,14 @@ function CreateManagementDialog({
         <label>{isDomain ? '领域名称' : '角色名称'}<input name="name" autoFocus placeholder={isDomain ? '例如：客户运营' : '例如：报告分析师'} /></label>
         <label>{isDomain ? '领域编码' : '角色编码'}<input name="code" placeholder={isDomain ? 'customer-operations' : 'report_analyst'} /><small>以小写字母开头，可使用数字、下划线和短横线。</small></label>
         <label>说明<textarea name="description" placeholder={isDomain ? '说明该领域负责的业务范围和分析目标' : '说明该角色的主要职责'} /></label>
+        {isDomain && <fieldset className="domain-administrator-picker">
+          <legend>领域管理员</legend>
+          <small>至少指定一位；创建后仅平台管理员可以调整。</small>
+          {users.filter(user => user.status === 'ACTIVE').map(user => <label key={user.id}>
+            <input type="checkbox" name="administratorUserIds" value={user.id} />
+            <span><strong>{user.displayName}</strong><small>{user.email}</small></span>
+          </label>)}
+        </fieldset>}
         {error && <div className="administration-dialog-error" role="alert">{error}</div>}
         <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy}>{busy ? <SpinnerGap className="spin" size={16} /> : <Plus size={16} />}{busy ? '正在创建…' : '确认创建'}</button></footer>
       </form>

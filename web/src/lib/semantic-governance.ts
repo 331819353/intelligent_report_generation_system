@@ -116,7 +116,7 @@ export type Dimension = {
   name: string
   description: string
   domainId?: string
-  sharingScope?: 'PRIVATE' | 'DOMAIN' | 'PLATFORM'
+  sharingScope?: 'PRIVATE' | 'DOMAIN'
   dimensionType: DimensionType
   memberIndexPolicy: MemberIndexPolicy
   highCardinality: boolean

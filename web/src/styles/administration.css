@@ -282,3 +282,24 @@
   .member-domain-list, .member-role-list { grid-column: 1 / -1; }
   .permission-group-list > section > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+.domain-access-page { display: grid; gap: 24px; padding: 28px; }
+.domain-access-page > header { display: flex; align-items: center; gap: 18px; }
+.domain-access-page > header h2 { margin: 0 0 6px; }
+.domain-access-page > header p { margin: 0; color: var(--text-secondary); }
+.domain-access-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+.domain-access-grid article { display: grid; gap: 14px; padding: 20px; border: 1px solid var(--border-color); border-radius: 14px; background: var(--surface); }
+.domain-access-grid article h3 { margin: 0; }
+.domain-access-grid article p { min-height: 42px; margin: 0; color: var(--text-secondary); }
+.domain-access-status { display: inline-flex; align-items: center; gap: 6px; width: fit-content; font-size: 13px; color: var(--text-secondary); }
+.domain-access-status.pending { color: #a16207; }
+.domain-access-status.member, .domain-access-status.domain_admin { color: #15803d; }
+.domain-administrator-picker { display: grid; gap: 8px; margin: 0; padding: 14px; border: 1px solid var(--border-color); border-radius: 10px; }
+.domain-administrator-picker > label { display: flex; align-items: center; gap: 10px; }
+.domain-administrator-picker > label span { display: grid; }
+.domain-administrators { min-height: auto !important; font-size: 12px; }
+.domain-review-queue { display: grid; gap: 12px; margin-top: 12px; }
+.domain-review-queue > header h2, .domain-review-queue > header p { margin: 0 0 4px; }
+.domain-review-queue > article { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(240px, 2fr) auto; align-items: center; gap: 16px; padding: 16px; border: 1px solid var(--border-color); border-radius: 12px; background: var(--surface); }
+.domain-review-queue > article > div { display: grid; gap: 3px; }
+.domain-review-queue small { color: var(--text-secondary); }
+.domain-review-actions { display: flex !important; grid-auto-flow: column; }

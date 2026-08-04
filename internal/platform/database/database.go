@@ -29,7 +29,7 @@ func WithAccessContext(ctx context.Context, userID, domainID string) context.Con
 // AccessContextFromContext reads a previously validated request access context.
 func AccessContextFromContext(ctx context.Context) (AccessContext, bool) {
 	value, ok := ctx.Value(accessContextKey{}).(AccessContext)
-	return value, ok && value.UserID != "" && value.DomainID != ""
+	return value, ok && value.UserID != ""
 }
 
 // Open 建立 PostgreSQL 连接池，并通过探活确保连接可用。

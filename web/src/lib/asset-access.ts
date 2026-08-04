@@ -1,6 +1,6 @@
 import { apiRequest } from './api'
 
-export type AssetSharingScope = 'PRIVATE' | 'DOMAIN' | 'PLATFORM'
+export type AssetSharingScope = 'PRIVATE' | 'DOMAIN'
 export type AssetResourceType =
   | 'DATA_SOURCE'
   | 'DATASET'
