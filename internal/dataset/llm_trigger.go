@@ -18,6 +18,7 @@ type LLMTriggerKind string
 const (
 	LLMTriggerDIMModeling LLMTriggerKind = "DIM_MODELING"
 	LLMTriggerDWDModeling LLMTriggerKind = "DWD_MODELING"
+	LLMTriggerDWSModeling LLMTriggerKind = "DWS_MODELING"
 )
 
 const maxLLMTriggerDatasetIDs = 200
@@ -90,7 +91,8 @@ func (s *Service) TriggerLLM(
 }
 
 func validLLMTriggerKind(kind LLMTriggerKind) bool {
-	return kind == LLMTriggerDIMModeling || kind == LLMTriggerDWDModeling
+	return kind == LLMTriggerDIMModeling || kind == LLMTriggerDWDModeling ||
+		kind == LLMTriggerDWSModeling
 }
 
 func normalizeLLMTriggerScope(scope LLMTriggerScope) (LLMTriggerScope, error) {
@@ -140,6 +142,7 @@ func validateLLMTriggerAssets(
 	allowed := map[LLMTriggerKind]map[Layer]bool{
 		LLMTriggerDIMModeling: {LayerODS: true},
 		LLMTriggerDWDModeling: {LayerODS: true, LayerDIM: true},
+		LLMTriggerDWSModeling: {LayerDIM: true, LayerDWD: true},
 	}[kind]
 	layerCounts := map[Layer]int{}
 	for _, asset := range assets {
@@ -153,6 +156,11 @@ func validateLLMTriggerAssets(
 			Message: "明细建模至少需要选择一个 ODS 数据集，DIM 只能作为可选维度输入",
 		}
 	}
+	if kind == LLMTriggerDWSModeling && layerCounts[LayerDWD] == 0 {
+		return &LLMTriggerScopeError{
+			Message: "主题建模至少需要选择一个 DWD 数据集，DIM 只能作为可选维度上下文",
+		}
+	}
 	return nil
 }
 
@@ -162,6 +170,8 @@ func llmTriggerLayerRule(kind LLMTriggerKind) string {
 		return "维度建模只能选择 ODS 数据集"
 	case LLMTriggerDWDModeling:
 		return "明细建模只能选择 ODS 数据集和可选的 DIM 数据集"
+	case LLMTriggerDWSModeling:
+		return "主题建模只能选择 DWD 数据集和可选的 DIM 数据集"
 	default:
 		return "所选数据集不符合建模层级规则"
 	}
@@ -235,6 +245,10 @@ func (s *PostgresStore) TriggerLLM(
 			)
 		case LLMTriggerDWDModeling:
 			triggerErr = triggerDWDModeling(
+				ctx, tx, actorID, selectedIDs, &result,
+			)
+		case LLMTriggerDWSModeling:
+			triggerErr = triggerDWSModeling(
 				ctx, tx, actorID, selectedIDs, &result,
 			)
 		default:
@@ -311,4 +325,105 @@ func triggerDWDModeling(
 		result.BlockedReason = ""
 	}
 	return err
+}
+
+func triggerDWSModeling(
+	ctx context.Context,
+	tx pgx.Tx,
+	actorID string,
+	selectedIDs any,
+	result *LLMTriggerResult,
+) error {
+	// 主题建模曾随旧语义问答模块退役。当前入口只恢复数据集中心需要的
+	// durable DWS 草稿任务：每张所选 DWD 是一个独立事实范围，所选 DIM
+	// 只作为 LLM 语义上下文；任务不会发布或物化生成的数据集。
+	err := tx.QueryRow(ctx, `WITH current_assets AS (
+			SELECT dataset.id AS dataset_id,dataset.domain_id,
+				dataset.code,dataset.name,version.id AS version_id,
+				version.layer,version.schema_hash,version.dsl_json
+			FROM platform.datasets AS dataset
+			JOIN platform.dataset_versions AS version
+			  ON version.tenant_id=dataset.tenant_id
+			 AND version.dataset_id=dataset.id
+			 AND version.id=dataset.current_published_version_id
+			 AND version.status='PUBLISHED'
+			WHERE dataset.tenant_id=platform.current_tenant_id()
+			  AND dataset.domain_id=platform.current_domain_id()
+			  AND dataset.status='PUBLISHED' AND dataset.deleted_at IS NULL
+			  AND version.layer IN ('DIM','DWD')
+			  AND ($2::uuid[] IS NULL OR dataset.id=ANY($2::uuid[]))
+		), scopes AS (
+			SELECT fact.dataset_id,fact.version_id,
+				'single-dwd:'||fact.dataset_id::text AS group_key,
+				jsonb_build_object(
+				  'groupKey','single-dwd:'||fact.dataset_id::text,
+				  'domainId',fact.domain_id::text,
+				  'subjectName',COALESCE(NULLIF(fact.dsl_json#>>'{dataset,subject}',''),fact.name),
+				  'dwd',jsonb_build_array(jsonb_build_object(
+				    'datasetId',fact.dataset_id::text,'versionId',fact.version_id::text,
+				    'dslHash',fact.schema_hash,'code',fact.code,'name',fact.name
+				  )),
+				  'dim',COALESCE((SELECT jsonb_agg(jsonb_build_object(
+				    'datasetId',dimension.dataset_id::text,'versionId',dimension.version_id::text,
+				    'dslHash',dimension.schema_hash,'code',dimension.code,'name',dimension.name
+				  ) ORDER BY dimension.code,dimension.dataset_id)
+				  FROM current_assets AS dimension WHERE dimension.layer='DIM'),'[]'::jsonb)
+				) AS source_scope
+			FROM current_assets AS fact WHERE fact.layer='DWD'
+		), normalized AS (
+			SELECT scope.*,encode(public.digest(
+				convert_to(scope.source_scope::text,'UTF8'),'sha256'
+			),'hex') AS scope_hash
+			FROM scopes AS scope
+		), activated AS (
+			INSERT INTO platform.dws_modeling_jobs(
+				tenant_id,source_dwd_dataset_id,source_dwd_version_id,
+				requested_by,group_key,source_scope,scope_hash,
+				not_before,next_attempt_at
+			)
+			SELECT platform.current_tenant_id(),dataset_id,version_id,
+				$1::uuid,group_key,source_scope,scope_hash,now(),now()
+			FROM normalized
+			ON CONFLICT(tenant_id,source_dwd_version_id,scope_hash) DO UPDATE
+			SET requested_by=EXCLUDED.requested_by,status='PENDING',
+				not_before=now(),next_attempt_at=now(),requested_at=now(),
+				attempt=0,lease_owner='',lease_token=NULL,lease_expires_at=NULL,
+				ai_request_id=NULL,generated_count=0,updated_count=0,skipped_count=0,
+				result_json='{}'::jsonb,error_code='',error_message='',
+				started_at=NULL,completed_at=NULL,updated_at=now()
+			WHERE platform.dws_modeling_jobs.status IN (
+				'SUCCEEDED','PARTIAL','FAILED','SKIPPED'
+			)
+			RETURNING id
+		), blocked AS (
+			SELECT count(*)::bigint AS total
+			FROM platform.datasets AS dataset
+			JOIN platform.dataset_versions AS version
+			  ON version.tenant_id=dataset.tenant_id
+			 AND version.dataset_id=dataset.id
+			 AND version.id=dataset.current_draft_version_id
+			WHERE $2::uuid[] IS NULL
+			  AND dataset.tenant_id=platform.current_tenant_id()
+			  AND dataset.domain_id=platform.current_domain_id()
+			  AND dataset.current_published_version_id IS NULL
+			  AND dataset.deleted_at IS NULL AND version.layer='DWD'
+		)
+		SELECT (SELECT count(*) FROM normalized),
+			(SELECT count(*) FROM activated),(SELECT total FROM blocked)`,
+		actorID, selectedIDs,
+	).Scan(
+		&result.EligibleCount, &result.EnqueuedCount, &result.BlockedCount,
+	)
+	if err != nil {
+		return err
+	}
+	// SQL 入口用 eligible-enqueued 表示同一精确范围已经存在活跃任务。
+	result.ExistingCount = result.EligibleCount - result.EnqueuedCount
+	if result.ExistingCount < 0 {
+		return errors.New("DWS modeling trigger count invariant failed")
+	}
+	if result.EligibleCount == 0 && result.BlockedCount > 0 {
+		result.BlockedReason = "DWD_PUBLICATION_REQUIRED"
+	}
+	return nil
 }

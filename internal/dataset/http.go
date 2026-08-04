@@ -130,6 +130,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 	}
 	registerLLMTrigger("POST /api/v1/datasets/trigger-dim-modeling", LLMTriggerDIMModeling)
 	registerLLMTrigger("POST /api/v1/datasets/trigger-dwd-modeling", LLMTriggerDWDModeling)
+	registerLLMTrigger("POST /api/v1/datasets/trigger-dws-modeling", LLMTriggerDWSModeling)
 	// 兼容旧客户端；组合入口不再隐式触发 DIM，只执行明细建模。
 	registerLLMTrigger("POST /api/v1/datasets/trigger-dim-dwd-modeling", LLMTriggerDWDModeling)
 	mux.Handle("GET /api/v1/datasets/{id}", protect("READ", objectID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

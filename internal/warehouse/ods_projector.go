@@ -21,8 +21,8 @@ type ODSProjectionInput struct {
 }
 
 // ODSProjector applies a published ODS projection to a fully staged immutable
-// source and writes a run-scoped transient table. DIM/DWD can therefore consume
-// the complete frozen source while ODS itself remains a virtual source mapping.
+// source and writes a run-scoped transient table so DIM/DWD can consume the
+// complete frozen source without trusting client-provided physical relations.
 type ODSProjector struct {
 	transactions stagingTransactionFactory
 }
@@ -73,9 +73,9 @@ func (projector *ODSProjector) Project(
 	if err != nil {
 		return StageResult{}, err
 	}
-	// ODS publication intentionally disables materialization. This server-owned
-	// clone enables the compiler only for the transient projection that feeds a
-	// DIM/DWD build; it does not mutate or publish an ODS materialization policy.
+	// Legacy ODS versions may predate source-backed materialization. This
+	// server-owned clone enables the compiler for the transient projection that
+	// feeds a DIM/DWD build without mutating the immutable published DSL.
 	projectionDocument := input.Document
 	projectionDocument.ExecutionPolicy.Materialization.Enabled = true
 	projectionDocument.ExecutionPolicy.Materialization.RefreshMode = "ON_DEMAND"

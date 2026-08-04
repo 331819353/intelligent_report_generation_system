@@ -35,6 +35,11 @@ func ValidateLayerDependencies(ctx context.Context, document Document, resolver 
 	if layer == "" {
 		layer = InferLayer(document)
 	}
+	if IsPreAggregatedSourceMapping(document) {
+		// The physical table itself is the immutable analytical-grain source;
+		// there is no governed DWD/DIM version to resolve for this narrow mode.
+		return nil
+	}
 	var expected map[Layer]bool
 	switch layer {
 	case LayerDIM:

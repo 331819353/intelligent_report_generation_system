@@ -160,6 +160,28 @@ WITH tasks AS (
 
   UNION ALL
   SELECT
+    'DWS_MODELING',job.id::text,
+    concat(
+      COALESCE(NULLIF(btrim(job.source_scope->>'subjectName'),''),dataset.name),
+      '主题建模'
+    )::text,
+    concat(
+      '触发源：',dataset.name,' · ',dataset.code::text,
+      ' · ',jsonb_array_length(job.source_scope->'dwd'),' 张 DWD / ',
+      jsonb_array_length(job.source_scope->'dim'),' 张 DIM'
+    )::text,
+    job.status::text,'DATASET',job.source_dwd_dataset_id::text,
+    (job.generated_count+job.updated_count+job.skipped_count)::bigint,
+    NULL::bigint,
+    job.attempt,job.max_attempts,job.error_code::text,job.error_message::text,
+    job.requested_at,job.started_at,job.updated_at,job.completed_at
+  FROM platform.dws_modeling_jobs AS job
+  JOIN platform.datasets AS dataset
+    ON dataset.id=job.source_dwd_dataset_id
+   AND dataset.tenant_id=job.tenant_id
+
+  UNION ALL
+  SELECT
     'DATASET_MATERIALIZATION_CLEANUP',job.id::text,dataset.name::text,
     concat(dataset.code::text,' · ',job.layer,' · 仓库物理表清理')::text,
     job.status::text,'DATASET',job.dataset_id::text,
@@ -472,6 +494,7 @@ var kindLabels = map[string]string{
 	"ODS_DOMAIN_CLASSIFICATION":       "领域分类",
 	"DIM_MODELING":                    "维度建模",
 	"DWD_FACT_MODELING":               "事实落地",
+	"DWS_MODELING":                    "主题建模",
 	"DATASET_MATERIALIZATION_CLEANUP": "数据集仓库物理表清理",
 }
 
@@ -489,6 +512,7 @@ var retryableKinds = map[string]bool{
 	"ODS_DOMAIN_CLASSIFICATION": true,
 	"DIM_MODELING":              true,
 	"DWD_FACT_MODELING":         true,
+	"DWS_MODELING":              true,
 	"DATASET_BUILD":             true,
 }
 

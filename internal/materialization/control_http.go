@@ -241,7 +241,7 @@ func writeMaterializationError(writer http.ResponseWriter, err error) {
 	case errors.Is(err, ErrInvalidTransition):
 		writeControlError(
 			writer, http.StatusConflict, "MATERIALIZATION_INVALID_TRANSITION",
-			"只有排队中的物化构建可以取消",
+			"只有排队中或执行中的物化构建可以停止",
 		)
 	case errors.Is(err, ErrConflict), errors.Is(err, ErrIdempotencyConflict):
 		writeControlError(

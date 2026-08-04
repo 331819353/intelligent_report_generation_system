@@ -1,6 +1,19 @@
 package datasource
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
+
+type metadataCompletionTestError struct {
+	code string
+}
+
+func (e metadataCompletionTestError) Error() string { return e.code }
+
+func (e metadataCompletionTestError) MetadataCompletionFailureCode() string {
+	return e.code
+}
 
 func TestMetadataSampleRowLimit(t *testing.T) {
 	t.Parallel()
@@ -31,5 +44,27 @@ func TestMetadataSampleRowLimit(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestMetadataCompletionPersistenceFailureDoesNotRetry(t *testing.T) {
+	t.Parallel()
+	err := metadataCompletionTestError{code: "PERSISTENCE_ERROR"}
+	if metadataCompletionShouldRetry(err) {
+		t.Fatal("persistence failures must not trigger another model call")
+	}
+	code, message := metadataCompletionJobFailure(err)
+	if code != "LLM_RESULT_SAVE_FAILED" {
+		t.Fatalf("failure code = %q, want LLM_RESULT_SAVE_FAILED", code)
+	}
+	if message == "" {
+		t.Fatal("safe persistence failure message must not be empty")
+	}
+}
+
+func TestMetadataCompletionUnknownFailureStillRetries(t *testing.T) {
+	t.Parallel()
+	if !metadataCompletionShouldRetry(errors.New("temporary failure")) {
+		t.Fatal("unclassified completion failures should preserve existing retry behavior")
 	}
 }

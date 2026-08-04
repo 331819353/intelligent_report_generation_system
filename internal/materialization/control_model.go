@@ -2,6 +2,7 @@ package materialization
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -14,15 +15,21 @@ const (
 // materialization. Execution plans, input snapshots, SQL and physical
 // identifiers are deliberately absent and are always derived by the server.
 type CreateBuildInput struct {
-	Mode         RunMode `json:"mode,omitempty"`
-	PartitionKey string  `json:"partitionKey,omitempty"`
-	MaxAttempts  *int    `json:"maxAttempts,omitempty"`
+	Mode               RunMode `json:"mode,omitempty"`
+	PartitionKey       string  `json:"partitionKey,omitempty"`
+	MaxAttempts        *int    `json:"maxAttempts,omitempty"`
+	PublishedVersionID string  `json:"publishedVersionId"`
+	// RequestID identifies one user-triggered DAG execution. Reusing the same
+	// UUID safely retries the same request; a new UUID creates a new build even
+	// when the published version and frozen inputs have not changed.
+	RequestID string `json:"requestId,omitempty"`
 }
 
 type RegisterCurrentRequest struct {
-	Mode         RunMode
-	PartitionKey string
-	MaxAttempts  int
+	Mode              RunMode
+	PartitionKey      string
+	MaxAttempts       int
+	ExpectedVersionID string
 }
 
 // BuildNode is a safe control-plane projection of one persisted node run. It
@@ -119,16 +126,20 @@ type ControlStore interface {
 	) (Run, bool, error)
 	ListBuilds(context.Context, string, string, int, int) ([]Run, int, error)
 	GetBuild(context.Context, string, string, string) (BuildDetail, error)
-	CancelQueued(context.Context, string, string, string, string) (Run, error)
+	CancelActive(context.Context, string, string, string, string) (Run, error)
 }
 
 func buildFromRun(run Run) Build {
+	partitionKey := run.PartitionKey
+	if strings.HasPrefix(partitionKey, "run:") {
+		partitionKey = ""
+	}
 	return Build{
 		ID: run.ID, DatasetID: run.DatasetID,
 		DatasetVersionID: run.DatasetVersionID,
 		Layer:            run.Layer, Mode: run.Mode, Status: run.Status,
 		PlanHash: run.PlanHash, InputSnapshotHash: run.InputSnapshotHash,
-		PartitionKey: run.PartitionKey, RequestedBy: run.RequestedBy,
+		PartitionKey: partitionKey, RequestedBy: run.RequestedBy,
 		Attempt: run.Attempt, MaxAttempts: run.MaxAttempts,
 		CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt,
 		StartedAt: run.StartedAt, CompletedAt: run.CompletedAt,

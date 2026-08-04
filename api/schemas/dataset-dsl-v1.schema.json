@@ -58,6 +58,10 @@
           "description": "数仓加工层级；历史 DSL 可省略并由服务端确定性推断",
           "enum": ["ODS", "DIM", "DWD", "DWS", "ADS"]
         },
+        "sourceMode": {
+          "description": "仅由服务端来源分类器写入；表示物理源表已具备可信汇总粒度",
+          "const": "PRE_AGGREGATED"
+        },
         "semanticContractVersion": { "const": "1.0" },
         "consumerContractId": { "type": "string", "format": "uuid" }
       }

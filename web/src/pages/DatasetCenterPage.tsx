@@ -2,7 +2,6 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowDownIcon, ArrowUpIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DotsSixVerticalIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MagnifyingGlassIcon, MathOperationsIcon, PlusIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTSlashIcon, TreeStructureIcon, XIcon, type Icon } from '@phosphor-icons/react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
-import { AssetSharingSelect } from '../components/AssetSharingSelect'
 import { DatasetAIDock } from '../components/dataset/DatasetAIDock'
 import { DatasetComponentToolbar } from '../components/dataset/DatasetComponentToolbar'
 import { DatasetDesignWorkspace } from '../components/dataset/DatasetDesignWorkspace'
@@ -57,6 +56,7 @@ import {
   type AssetTable,
   type AssetTablePreview,
   type DatasetDraft,
+  type DatasetDAGRun,
   type DatasetLayer,
   type DatasetLLMTrigger,
   type DatasetPreview,
@@ -94,8 +94,8 @@ type CanvasEdgeTarget =
 type PendingEdgeInsertion = { inserted: RelationInput; source: RelationInput; target: CanvasEdgeTarget }
 type NodePreviewState = { loading: boolean; data?: AssetTablePreview; error?: string; suggestion?: string }
 type VersionPreviewState = { versionID: string; loading: boolean; data?: DatasetPreview; error?: string }
-type DialogState = { mode: 'create' | 'view' | 'metadata' | 'edit-metadata' | 'history' | 'publish' | 'publish-review' | 'disable' | 'restore' | 'delete'; dataset?: DatasetSummary }
-type DatasetBatchAction = 'publish' | 'disable' | 'delete'
+type DialogState = { mode: 'create' | 'view' | 'metadata' | 'edit-metadata' | 'history' | 'publish' | 'unpublish' | 'delete'; dataset?: DatasetSummary }
+type DatasetBatchAction = 'publish' | 'run' | 'stop' | 'delete'
 type DatasetBatchOutcome = { dataset: DatasetSummary; error?: string }
 type Notice = { tone: 'success' | 'error'; message: string }
 type ModelingLogEntry = {
@@ -170,6 +170,12 @@ const modelingMonitorConfigs: ModelingMonitorConfig[] = [
     taskKinds: new Set(['DWD_FACT_MODELING']),
     idleTitle: '基于已审批发布的 DIM 和同批次事实分类生成 DWD 草稿',
   },
+  {
+    trigger: 'DWS_MODELING',
+    label: '主题建模',
+    taskKinds: new Set(['DWS_MODELING']),
+    idleTitle: '通过 LLM 基于已发布的 DWD 与可选 DIM 上下文创建 DWS DAG 草稿',
+  },
 ]
 const emptyModelingMonitorState = (): ModelingMonitorState => ({
   tasks: [],
@@ -181,6 +187,7 @@ const emptyModelingMonitorState = (): ModelingMonitorState => ({
 const emptyModelingMonitors = (): Record<DatasetLLMTrigger, ModelingMonitorState> => ({
   DIM_MODELING: emptyModelingMonitorState(),
   DWD_MODELING: emptyModelingMonitorState(),
+  DWS_MODELING: emptyModelingMonitorState(),
 })
 
 const modelingSelectionError = (
@@ -191,6 +198,7 @@ const modelingSelectionError = (
   const allowed: Record<DatasetLLMTrigger, Set<DatasetLayer>> = {
     DIM_MODELING: new Set(['ODS']),
     DWD_MODELING: new Set(['ODS', 'DIM']),
+    DWS_MODELING: new Set(['DWD', 'DIM']),
   }
   const invalidState = selected.filter(dataset =>
     dataset.status !== 'PUBLISHED' || !dataset.currentPublishedVersionId
@@ -204,15 +212,20 @@ const modelingSelectionError = (
     const rules: Record<DatasetLLMTrigger, string> = {
       DIM_MODELING: '维度建模只能选择 ODS 数据集',
       DWD_MODELING: '明细建模只能选择 ODS 数据集和可选的 DIM 数据集',
+      DWS_MODELING: '主题建模只能选择 DWD 数据集和可选的 DIM 数据集',
     }
     return rules[trigger]
   }
   if (trigger === 'DWD_MODELING' && !selected.some(dataset => dataset.layer === 'ODS')) {
     return '明细建模至少需要选择一个 ODS 数据集，DIM 只能作为可选维度输入'
   }
+  if (trigger === 'DWS_MODELING' && !selected.some(dataset => dataset.layer === 'DWD')) {
+    return '主题建模至少需要选择一个 DWD 数据集，DIM 只能作为可选维度上下文'
+  }
   return ''
 }
 const activeBackgroundTaskStatuses = new Set<BackgroundTaskStatus>(['QUEUED', 'RUNNING'])
+const activeDAGRunStatuses = new Set<DatasetDAGRun['status']>(['QUEUED', 'RUNNING'])
 const backgroundTaskStatusLabels: Record<BackgroundTaskStatus, string> = {
   QUEUED: '排队中',
   RUNNING: '执行中',
@@ -223,6 +236,7 @@ const backgroundTaskStatusLabels: Record<BackgroundTaskStatus, string> = {
   SKIPPED: '已跳过',
   STALE: '已失效',
 }
+
 const isActiveModelingTask = (task: BackgroundTask) =>
   activeBackgroundTaskStatuses.has(task.status)
 const modelingProgress = (tasks: BackgroundTask[]) => {
@@ -795,9 +809,10 @@ function publishedDatasetAsset(dataset: DatasetSummary, version: PublishedVersio
   }
 }
 
-async function loadDesignerAssets(datasetItems: DatasetSummary[]): Promise<AssetTable[]> {
+async function loadDesignerAssets(datasetItems: DatasetSummary[], excludedDatasetID = ''): Promise<AssetTable[]> {
   const rawTablesPromise = loadAllTables()
   const published = datasetItems.filter(dataset =>
+    dataset.id !== excludedDatasetID &&
     designerAssetLayers.includes(dataset.layer) && Boolean(dataset.currentPublishedVersionId),
   )
   const versionResults = await Promise.allSettled(published.map(async dataset => {
@@ -1144,6 +1159,7 @@ export function DatasetCenterPage() {
   const [dialog, setDialog] = useState<DialogState | null>(null)
   const [selectedDatasetIDs, setSelectedDatasetIDs] = useState<Set<string>>(new Set())
   const [batchAction, setBatchAction] = useState<DatasetBatchAction | null>(null)
+  const [dagRuns, setDAGRuns] = useState<Record<string, DatasetDAGRun>>({})
   const [draft, setDraft] = useState<DatasetDraft>(emptyDraft)
   const [relationBoxes, setRelationBoxes] = useState<RelationBox[]>([])
   const [groupBoxes, setGroupBoxes] = useState<GroupBox[]>([])
@@ -1209,20 +1225,39 @@ export function DatasetCenterPage() {
   const modelingRunTaskIDs = useRef<Record<DatasetLLMTrigger, Set<string>>>({
     DIM_MODELING: new Set(),
     DWD_MODELING: new Set(),
+    DWS_MODELING: new Set(),
   })
   const modelingRequestedAt = useRef<Record<DatasetLLMTrigger, number | null>>({
     DIM_MODELING: null,
     DWD_MODELING: null,
+    DWS_MODELING: null,
   })
   const modelingExpectedRef = useRef<Record<DatasetLLMTrigger, boolean>>({
     DIM_MODELING: false,
     DWD_MODELING: false,
+    DWS_MODELING: false,
   })
   const modelingSyncRequest = useRef(0)
+  const dagSyncRequest = useRef(0)
 
   const loadDatasets = useCallback(async () => {
     setDatasets(await loadAllDatasets())
   }, [])
+
+  const refreshDAGRuns = useCallback(async () => {
+    const request = ++dagSyncRequest.current
+    const targets = datasets.filter(dataset => dataset.currentPublishedVersionId)
+    const entries = await Promise.all(targets.map(async dataset => {
+      try {
+        const page = await datasetAPI.listDAGRuns(dataset.id, 1, 0)
+        return [dataset.id, page.items[0]] as const
+      } catch {
+        return [dataset.id, undefined] as const
+      }
+    }))
+    if (request !== dagSyncRequest.current) return
+    setDAGRuns(Object.fromEntries(entries.filter((entry): entry is readonly [string, DatasetDAGRun] => Boolean(entry[1]))))
+  }, [datasets])
 
   const expectModelingTasks = useCallback((
     trigger: DatasetLLMTrigger,
@@ -1328,6 +1363,7 @@ export function DatasetCenterPage() {
       setModelingMonitors(current => ({
         DIM_MODELING: { ...current.DIM_MODELING, syncError: message },
         DWD_MODELING: { ...current.DWD_MODELING, syncError: message },
+        DWS_MODELING: { ...current.DWS_MODELING, syncError: message },
       }))
     }
   }, [loadDatasets])
@@ -1347,6 +1383,12 @@ export function DatasetCenterPage() {
   }, [refreshModelingTasks])
 
   useEffect(() => {
+    void refreshDAGRuns()
+    const timer = window.setInterval(() => void refreshDAGRuns(), 3_000)
+    return () => window.clearInterval(timer)
+  }, [refreshDAGRuns])
+
+  useEffect(() => {
     if (!notice) return
     const timer = window.setTimeout(() => setNotice(null), 4500)
     return () => window.clearTimeout(timer)
@@ -1359,14 +1401,14 @@ export function DatasetCenterPage() {
   }, [])
 
   const sourceGroups = useMemo(() => {
-    const publishedODSOrigins = new Set(datasets
-      .filter(dataset => dataset.layer === 'ODS' && dataset.currentPublishedVersionId && dataset.originTableId)
+    const publishedMappedOrigins = new Set(datasets
+      .filter(dataset => dataset.id !== editingRecord?.id && dataset.currentPublishedVersionId && dataset.originTableId)
       .map(dataset => dataset.originTableId!))
     return designerAssetLayers.map(layer => {
       const label = designerLayerLabels[layer]
       const layerTables = tables.filter(table => {
         if (table.sourceKind === 'DATASET') return table.datasetLayer === layer
-        return layer === 'ODS' && !publishedODSOrigins.has(table.id)
+        return layer === 'ODS' && !publishedMappedOrigins.has(table.id)
       }).sort((left, right) => (left.businessName || left.tableName).localeCompare(
         right.businessName || right.tableName, 'zh-CN',
       ))
@@ -1393,7 +1435,7 @@ export function DatasetCenterPage() {
         physicalSourceGroups: [...physicalSourceGroups.values()],
       }
     })
-  }, [datasets, tables])
+  }, [datasets, editingRecord?.id, tables])
 
   const filtered = useMemo(() => {
     const query = keyword.trim().toLocaleLowerCase()
@@ -1411,6 +1453,19 @@ export function DatasetCenterPage() {
   const selectedDatasets = useMemo(
     () => datasets.filter(dataset => selectedDatasetIDs.has(dataset.id)),
     [datasets, selectedDatasetIDs],
+  )
+  const selectedActiveDAGCount = useMemo(
+    () => selectedDatasets.reduce((total, dataset) => total + Number(Boolean(
+      dagRuns[dataset.id] && activeDAGRunStatuses.has(dagRuns[dataset.id].status),
+    )), 0),
+    [dagRuns, selectedDatasets],
+  )
+  const selectedRunnableCount = useMemo(
+    () => selectedDatasets.reduce((total, dataset) => total + Number(Boolean(
+      dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId &&
+      (!dagRuns[dataset.id] || !activeDAGRunStatuses.has(dagRuns[dataset.id].status)),
+    )), 0),
+    [dagRuns, selectedDatasets],
   )
   const filteredSelectedCount = useMemo(
     () => filtered.reduce((total, dataset) => total + Number(selectedDatasetIDs.has(dataset.id)), 0),
@@ -1576,7 +1631,10 @@ export function DatasetCenterPage() {
         datasetAPI.get(id),
         datasets.length ? Promise.resolve(datasets) : loadAllDatasets(),
       ])
-      const availableTables = tables.length ? tables : await loadAllTables()
+      // 编辑器与新建入口必须加载同一份分层资产目录。仅加载物理表会与
+      // sourceGroups 的“已有 ODS 隐藏物理表”规则组合成空列表；同时排除当前
+      // 数据集自身，避免用户把其发布版本拖回画布形成自引用。
+      const availableTables = await loadDesignerAssets(availableDatasets, id)
       const hydrated = await hydrateDatasetDraft(record, availableTables, availableDatasets)
       const graph = (hydrated as DatasetDraft & { designer?: DesignerGraphV1 }).designer ?? hydrateDesignerGraph(record.dsl, hydrated.nodes, hydrated.joins, hydrated.fields)
       const loadedMetadata: DatasetMetadataForm = {
@@ -1601,14 +1659,14 @@ export function DatasetCenterPage() {
       setAssetsLoading(false)
       setBusyAction('')
     }
-  }, [datasets, resetDatasetAI, selectedBusinessDomainName, tables])
+  }, [datasets, resetDatasetAI, selectedBusinessDomainName])
 
   const loadNodePreview = useCallback(async (node: DesignerNode) => {
     setNodePreviews(current => ({ ...current, [node.id]: { loading: true } }))
     try {
       const data = node.table.sourceKind === 'DATASET' && node.table.datasetId && node.table.datasetVersionId
         ? await datasetAPI.previewVersion(node.table.datasetId, node.table.datasetVersionId, crypto.randomUUID(), {}, 5)
-        : await datasetAPI.tablePreview(node.table.id, 5)
+        : await datasetAPI.tablePreview(node.table.id, 10)
       setNodePreviews(current => ({ ...current, [node.id]: { loading: false, data: withDesignerNodePreviewMetadata(node, data) } }))
     } catch (cause) {
       setNodePreviews(current => ({ ...current, [node.id]: { loading: false, error: cause instanceof Error ? cause.message : '加载数据预览失败' } }))
@@ -2267,8 +2325,8 @@ export function DatasetCenterPage() {
     try {
       const queryID = crypto.randomUUID()
       const data = editingRecord
-        ? await datasetAPI.previewDraft(editingRecord.id, editingRecord.version, candidateDSL, queryID, {}, 5)
-        : await datasetAPI.previewCandidate(candidateDSL, queryID, {}, 5)
+        ? await datasetAPI.previewDraft(editingRecord.id, editingRecord.version, candidateDSL, queryID, {}, 10)
+        : await datasetAPI.previewCandidate(candidateDSL, queryID, {}, 10)
       if (componentPreviewRequests.current[key] !== request || editorFingerprintRef.current !== previewFingerprint) return
       setComponentPreviews(current => ({
         ...current,
@@ -2301,8 +2359,8 @@ export function DatasetCenterPage() {
       // 已保存数据集绑定乐观锁基线；新建画布使用独立候选审计，两者都不保存候选。
       const queryID = crypto.randomUUID()
       const data = record
-        ? await datasetAPI.previewDraft(record.id, record.version, candidateDSL, queryID, {}, 5)
-        : await datasetAPI.previewCandidate(candidateDSL, queryID, {}, 5)
+        ? await datasetAPI.previewDraft(record.id, record.version, candidateDSL, queryID, {}, 10)
+        : await datasetAPI.previewCandidate(candidateDSL, queryID, {}, 10)
       if (request !== endPreviewRequest.current || editorFingerprintRef.current !== previewFingerprint) return
       setEndPreview({
         loading: false,
@@ -2591,8 +2649,8 @@ export function DatasetCenterPage() {
     }
   }
 
-  const openPublication = async (dataset: DatasetSummary, mode: 'publish' | 'publish-review' = 'publish') => {
-    setDialog({ mode, dataset })
+  const openPublication = async (dataset: DatasetSummary) => {
+    setDialog({ mode: 'publish', dataset })
     setPublicationRecord(null)
     setPublicationRequests([])
     setPublicationCapabilities({ manage: false, publish: false })
@@ -2675,10 +2733,14 @@ export function DatasetCenterPage() {
       await refreshPublication(publicationRecord.id)
       setPublicationDecisionNote('')
       setSelectedPublicationRequestID(result.request.id)
-      const processing = publicationRecord.layer === 'ODS'
-        ? '指标候选提取'
-        : `${publicationRecord.layer} PostgreSQL 物化`
-      setNotice({ tone: 'success', message: `“${publicationRecord.name}”审批通过并发布为 V${result.publishedVersion.versionNo}；${processing}任务已启动` })
+      const sourceMappedDWS = publicationRecord.originTableId &&
+        publicationRecord.dsl.dataset.sourceMode === 'PRE_AGGREGATED'
+      const processing = sourceMappedDWS
+        ? '源端汇总映射已生效'
+        : publicationRecord.layer === 'ODS'
+          ? '指标候选提取任务已启动'
+          : `${publicationRecord.layer} PostgreSQL 物化任务已启动`
+      setNotice({ tone: 'success', message: `“${publicationRecord.name}”审批通过并发布为 V${result.publishedVersion.versionNo}；${processing}` })
     } catch (cause) {
       setFormError(cause instanceof Error ? cause.message : '审批并发布数据集失败')
     } finally {
@@ -2717,7 +2779,7 @@ export function DatasetCenterPage() {
     setBusyAction(`view:${dataset.id}`)
     const [recordResult, previewResult, assetResult, columnsResult] = await Promise.allSettled([
       datasetAPI.get(dataset.id),
-      datasetAPI.preview(dataset.id, crypto.randomUUID(), {}, 5),
+      datasetAPI.preview(dataset.id, crypto.randomUUID(), {}, 10),
       dataset.originTableId ? datasetAPI.table(dataset.originTableId) : Promise.resolve(null),
       dataset.originTableId ? datasetAPI.allColumns(dataset.originTableId) : Promise.resolve({ items: [] }),
     ])
@@ -2869,31 +2931,60 @@ export function DatasetCenterPage() {
     }
   }
 
-  const disableDataset = async () => {
-    const dataset = dialog?.dataset
-    if (!dataset) return
-    setBusyAction(`disable:${dataset.id}`)
+  const runDatasetDAG = async (dataset: DatasetSummary) => {
+    if (dataset.status !== 'PUBLISHED' || !dataset.currentPublishedVersionId) {
+      setNotice({ tone: 'error', message: `“${dataset.name}”没有当前已发布版本，请先发布再运行 DAG` })
+      return
+    }
+    setBusyAction(`dag-run:${dataset.id}`)
     try {
-      await datasetAPI.disable(dataset.id, dataset.version)
-      await loadDatasets()
-      setDialog(null)
-      setNotice({ tone: 'success', message: `已停用“${dataset.name}”` })
-    } catch (cause) { setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '停用数据集失败' }) }
-    finally { setBusyAction('') }
+      const record = await datasetAPI.get(dataset.id)
+      if (record.status !== 'PUBLISHED' || record.currentPublishedVersionId !== dataset.currentPublishedVersionId) {
+        throw new Error('当前发布版本已变化，请刷新后重试')
+      }
+      const published = await datasetAPI.getVersion(dataset.id, record.currentPublishedVersionId)
+      if (published.status !== 'PUBLISHED') throw new Error('当前版本尚未发布')
+      const run = await datasetAPI.runDAG(dataset.id, published.id, crypto.randomUUID())
+      setDAGRuns(current => ({ ...current, [dataset.id]: run }))
+      setNotice({ tone: 'success', message: `“${dataset.name}”已按发布 V${published.versionNo} 提交完整替换入仓 DAG；目标会先重建为空表再写入，当前${run.status === 'RUNNING' ? '执行中' : '排队中'}` })
+    } catch (cause) {
+      setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : 'DAG 运行失败' })
+    } finally {
+      setBusyAction('')
+    }
   }
 
-  const restoreDataset = async () => {
+  const stopDatasetDAG = async (dataset: DatasetSummary) => {
+    const materializationRun = dagRuns[dataset.id]
+    if (!materializationRun || !activeDAGRunStatuses.has(materializationRun.status)) return
+    setBusyAction(`dag-stop:${dataset.id}`)
+    try {
+      const stopped = await datasetAPI.stopDAG(dataset.id, materializationRun.id)
+      setDAGRuns(current => ({ ...current, [dataset.id]: stopped }))
+      setNotice({ tone: 'success', message: `已停止“${dataset.name}”的本次 DAG 运行` })
+    } catch (cause) {
+      setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '停止 DAG 失败' })
+    } finally {
+      setBusyAction('')
+    }
+  }
+
+  const unpublishDataset = async () => {
     const dataset = dialog?.dataset
-    if (!dataset) return
-    setBusyAction(`restore:${dataset.id}`)
+    if (!dataset?.currentPublishedVersionId || dataset.status !== 'PUBLISHED') return
+    setBusyAction(`unpublish:${dataset.id}`)
     setFormError('')
     try {
-      const restored = await datasetAPI.restore(dataset.id, dataset.version)
+      await datasetAPI.transitionVersion(dataset.id, dataset.currentPublishedVersionId, {
+        expectedVersion: dataset.version,
+        expectedStatus: 'PUBLISHED',
+        targetStatus: 'STALE',
+      })
       await loadDatasets()
       setDialog(null)
-      setNotice({ tone: 'success', message: `已恢复“${dataset.name}”（${statusLabels[restored.status] ?? restored.status}）` })
+      setNotice({ tone: 'success', message: `已下架“${dataset.name}”；配置和历史版本仍保留` })
     } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : '恢复数据集失败')
+      setFormError(cause instanceof Error ? cause.message : '下架数据集失败')
     } finally {
       setBusyAction('')
     }
@@ -2940,10 +3031,19 @@ export function DatasetCenterPage() {
   const executeBatchAction = async () => {
     if (!batchAction || !selectedDatasets.length || busyAction) return
     const activeAction = batchAction
+    const actionDatasets = activeAction === 'stop'
+      ? selectedDatasets.filter(dataset => dagRuns[dataset.id] && activeDAGRunStatuses.has(dagRuns[dataset.id].status))
+      : activeAction === 'run'
+        ? selectedDatasets.filter(dataset =>
+            dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId &&
+            (!dagRuns[dataset.id] || !activeDAGRunStatuses.has(dagRuns[dataset.id].status))
+          )
+      : selectedDatasets
+    if (!actionDatasets.length) return
     setBusyAction(`batch:${activeAction}`)
     setFormError('')
     try {
-      const outcomes = await mapDatasetBatch(selectedDatasets, async dataset => {
+      const outcomes = await mapDatasetBatch(actionDatasets, async dataset => {
         if (activeAction === 'publish') {
           if (dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED') {
             throw new Error('当前状态不能提交发布申请')
@@ -2958,11 +3058,24 @@ export function DatasetCenterPage() {
           })
           return
         }
-        if (activeAction === 'disable') {
-          if (!['DRAFT', 'PUBLISHED', 'STALE'].includes(dataset.status)) {
-            throw new Error('当前状态不能停用')
+        if (activeAction === 'stop') {
+          const run = dagRuns[dataset.id]
+          if (!run || !activeDAGRunStatuses.has(run.status)) {
+            throw new Error('当前没有运行中的 DAG')
           }
-          await datasetAPI.disable(dataset.id, dataset.version)
+          await datasetAPI.stopDAG(dataset.id, run.id)
+          return
+        }
+        if (activeAction === 'run') {
+          const record = await datasetAPI.get(dataset.id)
+          if (record.status !== 'PUBLISHED' || !record.currentPublishedVersionId ||
+            record.currentPublishedVersionId !== dataset.currentPublishedVersionId) {
+            throw new Error('当前发布版本已变化，请刷新后重试')
+          }
+          const published = await datasetAPI.getVersion(dataset.id, record.currentPublishedVersionId)
+          if (published.status !== 'PUBLISHED') throw new Error('当前版本尚未发布')
+          const run = await datasetAPI.runDAG(dataset.id, published.id, crypto.randomUUID())
+          setDAGRuns(current => ({ ...current, [dataset.id]: run }))
           return
         }
         await datasetAPI.delete(dataset.id, dataset.version)
@@ -2970,9 +3083,12 @@ export function DatasetCenterPage() {
       const failures = outcomes.filter(outcome => outcome.error)
       const succeeded = outcomes.length - failures.length
       setSelectedDatasetIDs(new Set(failures.map(outcome => outcome.dataset.id)))
-      await loadDatasets()
+      if (activeAction === 'publish' || activeAction === 'delete') await loadDatasets()
+      if (activeAction === 'run' || activeAction === 'stop') {
+        await refreshDAGRuns()
+      }
       setBatchAction(null)
-      const actionLabel = activeAction === 'publish' ? '提交发布申请' : activeAction === 'disable' ? '停用（下架）' : '删除'
+      const actionLabel = activeAction === 'publish' ? '提交发布申请' : activeAction === 'run' ? '运行 DAG' : activeAction === 'stop' ? '停止 DAG' : '删除'
       if (!failures.length) {
         setNotice({ tone: 'success', message: `批量${actionLabel}完成，共处理 ${succeeded} 个数据集` })
       } else {
@@ -3052,6 +3168,13 @@ export function DatasetCenterPage() {
         })
         return
       }
+      if (result.blockedReason === 'DWD_PUBLICATION_REQUIRED') {
+        setNotice({
+          tone: 'error',
+          message: `主题建模尚未提交：${result.blockedCount ?? 0} 个 DWD/DIM 仍是草稿。请先完成发布，再由 LLM 创建 DWS DAG。`,
+        })
+        return
+      }
       const unit = '个批次'
       const existing = result.existingCount
         ? `；${result.existingCount} ${unit}已有待处理或运行中任务`
@@ -3059,9 +3182,14 @@ export function DatasetCenterPage() {
       const noFact = trigger === 'DWD_MODELING' && result.blockedCount
         ? `；${result.blockedCount} 个纯维度领域无需创建 DWD`
         : ''
+      const unpublished = trigger === 'DWS_MODELING' && result.blockedCount
+        ? `；另有 ${result.blockedCount} 个 DWD/DIM 草稿未纳入，发布后才可参与主题建模`
+        : ''
       const submitted = trigger === 'DIM_MODELING'
         ? `已提交 ${result.enqueuedCount} 个维度建模批次（纳入 ${result.eligibleCount} 张 ODS）`
-        : `已提交 ${result.enqueuedCount} 个明细建模批次（只执行事实落地；符合条件 ${result.eligibleCount} 个范围）`
+        : trigger === 'DWD_MODELING'
+          ? `已提交 ${result.enqueuedCount} 个明细建模批次（只执行事实落地；符合条件 ${result.eligibleCount} 个范围）`
+          : `已提交 ${result.enqueuedCount} 个主题建模任务（LLM 创建 DWS DAG 草稿；符合条件 ${result.eligibleCount} 个范围）`
       if (result.enqueuedCount > 0 || result.existingCount > 0) {
         rememberBackgroundTaskFocus(trigger)
       }
@@ -3070,7 +3198,7 @@ export function DatasetCenterPage() {
       }
       setNotice({
         tone: 'success',
-        message: `${selectedIDs.length ? `已按所选 ${selectedIDs.length} 个数据集校验并执行：` : '已按默认全量范围执行：'}${submitted}${existing}${noFact}`,
+        message: `${selectedIDs.length ? `已按所选 ${selectedIDs.length} 个数据集校验并执行：` : '已按默认全量范围执行：'}${submitted}${existing}${noFact}${unpublished}`,
       })
     } catch (cause) {
       expectModelingTasks(trigger, false)
@@ -3362,6 +3490,10 @@ export function DatasetCenterPage() {
                     ...current.DWD_MODELING,
                     logsPinned: config.trigger === 'DWD_MODELING' && willPin,
                   },
+                  DWS_MODELING: {
+                    ...current.DWS_MODELING,
+                    logsPinned: config.trigger === 'DWS_MODELING' && willPin,
+                  },
                 }
               })}
             />)}
@@ -3373,7 +3505,8 @@ export function DatasetCenterPage() {
         <strong>已选择 {selectedDatasets.length} 个</strong>
         <div>
           <button className="action-publish" type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => { setFormError(''); setBatchAction('publish') }}>批量提交发布申请</button>
-          <button className="action-pause" type="button" disabled={actionBusy || !selectedDatasets.length} title="停用即从可查询目录下架，保留草稿和历史，可恢复" onClick={() => { setFormError(''); setBatchAction('disable') }}>批量停用（下架）</button>
+          <button className="action-resume" type="button" disabled={actionBusy || !selectedRunnableCount} title="逐个锁定所选数据集的当前发布版本，执行一次完整替换入仓 DAG" onClick={() => { setFormError(''); setBatchAction('run') }}>批量运行</button>
+          <button className="action-pause" type="button" disabled={actionBusy || !selectedActiveDAGCount} title="停止所选数据集中正在排队或执行的本次 DAG" onClick={() => { setFormError(''); setBatchAction('stop') }}>批量停止</button>
           <button className="action-delete" type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => { setFormError(''); setBatchAction('delete') }}>批量删除</button>
           <button className="quiet-button" type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => setSelectedDatasetIDs(new Set())}>清空选择</button>
         </div>
@@ -3387,18 +3520,15 @@ export function DatasetCenterPage() {
             <dl><div><dt>类型</dt><dd>{typeLabels[dataset.type] ?? dataset.type}</dd></div><div><dt>版本</dt><dd>V{dataset.version}</dd></div><div><dt>更新时间</dt><dd>{new Date(dataset.updatedAt).toLocaleString('zh-CN', { hour12: false })}</dd></div></dl>
           </div>
           <div className="dataset-asset-actions">
-            <AssetSharingSelect
-              resourceType="DATASET"
-              resourceID={dataset.id}
-              value={dataset.sharingScope || 'PRIVATE'}
-              ownerUserID={dataset.ownerUserId}
-              assetDomainID={dataset.domainId}
-              disabled={actionBusy}
-              onChange={sharingScope => setDatasets(current => current.map(item =>
-                item.id === dataset.id ? { ...item, sharingScope } : item
-              ))}
-            />
-            <button className="action-edit" type="button" disabled={actionBusy} onClick={() => void openEdit(dataset)}>修改</button><button className="action-publish" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title={dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED' ? '请先恢复可用状态再提交发布申请' : '冻结当前草稿并提交发布申请'} onClick={() => void openPublication(dataset)}>发布申请</button><button className="action-review" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title={dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED' ? '当前状态不可处理发布审批' : '查看并处理发布申请'} onClick={() => void openPublication(dataset, 'publish-review')}>发布审批</button><button className="action-history" type="button" disabled={actionBusy} onClick={() => void openHistory(dataset)}>历史版本</button>{dataset.status === 'DISABLED' ? <button className="action-resume" type="button" disabled={actionBusy} title="恢复到停用前的数据集状态" onClick={() => { setFormError(''); setDialog({ mode: 'restore', dataset }) }}>恢复</button> : <button className="action-pause" type="button" disabled={actionBusy || dataset.status === 'DEPRECATED'} title={dataset.status === 'DEPRECATED' ? '已废弃数据集不能再次停用' : '停用会从可查询目录下架，保留配置和历史并可恢复'} onClick={() => { setFormError(''); setDialog({ mode: 'disable', dataset }) }}>停用（下架）</button>}<button className="action-delete" type="button" disabled={actionBusy} onClick={() => { setFormError(''); setDialog({ mode: 'delete', dataset }) }}>删除</button>
+            <button className="action-edit" type="button" disabled={actionBusy} onClick={() => void openEdit(dataset)}>修改</button>
+            {dagRuns[dataset.id] && activeDAGRunStatuses.has(dagRuns[dataset.id].status)
+              ? <button className="action-pause" type="button" disabled={actionBusy} title={`停止本次 DAG${dagRuns[dataset.id]?.status === 'QUEUED' ? '排队' : '执行'}`} onClick={() => void stopDatasetDAG(dataset)}>停止</button>
+              : <button className="action-resume" type="button" disabled={actionBusy || dataset.status !== 'PUBLISHED' || !dataset.currentPublishedVersionId} title={dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId ? '立即执行一次当前发布版本的 DAG' : '请先发布数据集再运行 DAG'} onClick={() => void runDatasetDAG(dataset)}>运行</button>}
+            {dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId
+              ? <button className="action-pause" type="button" disabled={actionBusy} title="撤下当前发布版本，保留配置和历史" onClick={() => { setFormError(''); setDialog({ mode: 'unpublish', dataset }) }}>下架</button>
+              : <button className="action-publish" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title={dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED' ? '当前数据集状态不能发布' : '提交发布申请并在同一入口处理审批'} onClick={() => void openPublication(dataset)}>发布</button>}
+            <button className="action-history" type="button" disabled={actionBusy} onClick={() => void openHistory(dataset)}>历史版本</button>
+            <button className="action-delete" type="button" disabled={actionBusy} onClick={() => { setFormError(''); setDialog({ mode: 'delete', dataset }) }}>删除</button>
           </div>
         </article>)}</div>}
     </section>
@@ -3514,7 +3644,7 @@ export function DatasetCenterPage() {
               : <table><thead><tr><th>#</th><th>字段编码</th><th>业务名称</th><th>业务说明</th><th>类型 / 语义</th><th>角色</th><th>可视状态</th></tr></thead><tbody>{completeDetailFields.map((field, index) => <tr key={field.id}><td>{index + 1}</td><td><strong>{field.code}</strong>{field.physicalName && <small>{field.physicalName}</small>}</td><td><strong>{field.name}</strong></td><td>{field.description || '—'}</td><td><strong>{field.canonicalType || '—'}</strong><small>{field.semanticType || '未识别'}</small></td><td>{field.role || '—'}</td><td>{field.visible ? '可见' : '不可见'}<small>{field.nullable ? '可空' : '必填'}</small></td></tr>)}</tbody></table>}
           </div>
         </section>
-        <section className="dataset-detail-preview" aria-label="预览数据"><div><h3>预览数据</h3><span>前 5 行</span></div>{detailPreview ? <PreviewRows preview={detailPreview} /> : <div className="dataset-center-feedback error" role="alert">{detailPreviewError || '暂无可预览数据'}</div>}</section>
+        <section className="dataset-detail-preview" aria-label="当前草稿 DAG 演示结果"><div><h3>当前草稿 DAG 结果</h3><span>前 10 行 · 仅演示，不入仓</span></div>{detailPreview ? <PreviewRows preview={detailPreview} /> : <div className="dataset-center-feedback error" role="alert">{detailPreviewError || '暂无可预览数据'}</div>}</section>
         <footer><button className="quiet-button" type="button" onClick={closeDialog}>关闭</button><button className="quiet-button" type="button" onClick={openMetadataEdit}>修改元信息</button><button className="primary-button" type="button" onClick={() => { setDialog(null); void openEdit(detail) }}>修改 DAG</button></footer>
       </div> : <div className="dataset-center-feedback error" role="alert">{formError}</div>}
     </Dialog>}
@@ -3554,14 +3684,14 @@ export function DatasetCenterPage() {
 
     {dialog?.mode === 'history' && dialog.dataset && <Dialog title={`${dialog.dataset.name} · 历史版本`} eyebrow="发布快照与安全回滚" wide onClose={closeDialog}><PublishedVersionHistoryPanel record={historyRecord} items={historyItems} selected={selectedHistoryVersion} preview={historyPreview} loading={busyAction.startsWith('history:') || busyAction.startsWith('version:')} busy={actionBusy} confirming={historyConfirm} error={formError} onSelect={versionID => void selectHistoryVersion(versionID)} onStartRollback={() => setHistoryConfirm(true)} onCancelRollback={() => { setHistoryConfirm(false); setFormError('') }} onRollback={() => void rollbackHistoryVersion()} onClose={closeDialog} /></Dialog>}
 
-    {(dialog?.mode === 'publish' || dialog?.mode === 'publish-review') && dialog.dataset && <Dialog
-      title={`${dialog.dataset.name} · ${dialog.mode === 'publish' ? '发布申请' : '发布审批'}`}
-      eyebrow={dialog.mode === 'publish' ? '冻结草稿并提交申请' : '审批发布申请'}
+    {dialog?.mode === 'publish' && dialog.dataset && <Dialog
+      title={`${dialog.dataset.name} · 发布`}
+      eyebrow="发布申请与审批"
       wide
       onClose={closeDialog}
     >
       <div className="dataset-publication">
-        {busyAction.startsWith('publication:') ? <Empty>正在加载{dialog.mode === 'publish' ? '发布申请' : '发布审批'}信息…</Empty> : publicationRecord ? <>
+        {busyAction.startsWith('publication:') ? <Empty>正在加载发布信息…</Empty> : publicationRecord ? <>
           <section className="dataset-publication-current" aria-label="当前发布候选">
             <div><span>当前草稿</span><strong>草稿 V{publicationRecord.draftVersionNo}</strong><small>{publicationRecord.dslHash.slice(0, 12)}…</small></div>
             <div><span>数据集聚合版本</span><strong>V{publicationRecord.version}</strong><small>提交时会冻结当前精确版本</small></div>
@@ -3569,7 +3699,7 @@ export function DatasetCenterPage() {
           </section>
 
           <div className="dataset-publication-body">
-            {dialog.mode === 'publish' && <section className="dataset-publication-submit" aria-label="提交发布申请">
+            <section className="dataset-publication-submit" aria-label="提交发布申请">
               <header><div><span>申请人操作</span><h3>提交当前草稿</h3></div><small>{publicationCapabilities.manage ? '具备提交权限' : '仅可查看'}</small></header>
               <p>系统只冻结当前草稿版本、DSL 与校验参数。审批通过后才生成不可变发布版本，并启动指标提取或 DIM/DWD/DWS/ADS PostgreSQL 加工。</p>
               <label>申请说明（选填）<textarea value={publicationNote} onChange={event => setPublicationNote(event.target.value)} placeholder="例如：订单与客户区域关联已由 AI 完成，请审批用于指标设计" /></label>
@@ -3577,9 +3707,9 @@ export function DatasetCenterPage() {
               {currentDraftPublicationRequest?.status === 'APPROVED' && <div className="dataset-publication-hint success">当前精确草稿已审批发布。再次修改并保存后可提交新的审批。</div>}
               {publicationRequests[0]?.status === 'CANCELLED' && !currentDraftPublicationRequest && <div className="dataset-publication-hint">上次申请已因草稿变更自动取消；当前草稿可重新提交审批。</div>}
               <button className="primary-button" type="button" disabled={actionBusy || !publicationCapabilities.manage || currentDraftPublicationRequest?.status === 'APPROVED' || currentDraftPublicationRequest?.status === 'PENDING'} onClick={() => void submitPublicationRequest()}>{busyAction === 'publication-submit' ? '正在提交申请…' : '提交发布申请'}</button>
-            </section>}
+            </section>
 
-            {dialog.mode === 'publish-review' && <section className="dataset-publication-review" aria-label="审批发布申请">
+            <section className="dataset-publication-review" aria-label="审批发布申请">
               <header><div><span>审批人操作</span><h3>审批并发布</h3></div><small>{publicationCapabilities.publish ? '具备审批权限' : '仅可查看'}</small></header>
               {!publicationRequests.length ? <div className="dataset-publication-empty">暂无发布申请</div> : <>
                 <label>选择申请<select aria-label="选择发布申请" value={selectedPublicationRequestID} onChange={event => { setSelectedPublicationRequestID(event.target.value); setPublicationDecisionNote(''); setFormError('') }}>{publicationRequests.map(request => <option key={request.id} value={request.id}>{publicationStatusLabels[request.status]} · 草稿记录 V{request.expectedDraftRecordVersion} · {new Date(request.submittedAt).toLocaleString('zh-CN', { hour12: false })}</option>)}</select></label>
@@ -3597,7 +3727,7 @@ export function DatasetCenterPage() {
                   <div className="dataset-publication-review-actions"><button className="dataset-publication-reject" type="button" disabled={actionBusy || !publicationCapabilities.publish || !publicationDecisionNote.trim()} onClick={() => void rejectPublicationRequest()}>{busyAction === 'publication-reject' ? '正在拒绝…' : '拒绝'}</button><button className="primary-button" type="button" disabled={actionBusy || !publicationCapabilities.publish} onClick={() => void approvePublicationRequest()}>{busyAction === 'publication-approve' ? '正在批准并登记加工…' : '审批通过并启动加工'}</button></div>
                 </>}
               </>}
-            </section>}
+            </section>
           </div>
 
           {formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}
@@ -3607,23 +3737,23 @@ export function DatasetCenterPage() {
     </Dialog>}
 
     {batchAction && <Dialog
-      title={batchAction === 'publish' ? '批量提交发布申请' : batchAction === 'disable' ? '批量停用（下架）' : '批量删除数据集'}
+      title={batchAction === 'publish' ? '批量提交发布申请' : batchAction === 'run' ? '批量运行 DAG' : batchAction === 'stop' ? '批量停止 DAG' : '批量删除数据集'}
       eyebrow={batchAction === 'delete' ? '危险操作' : '批量操作'}
       onClose={closeBatchDialog}
     ><div className="dataset-delete-confirm">
-      <p>确认对已选择的 <strong>{selectedDatasets.length}</strong> 个数据集执行{batchAction === 'publish' ? '发布申请' : batchAction === 'disable' ? '停用（下架）' : '删除'}吗？</p>
+      <p>确认对已选择的 <strong>{batchAction === 'run' ? selectedRunnableCount : batchAction === 'stop' ? selectedActiveDAGCount : selectedDatasets.length}</strong> 个{batchAction === 'stop' ? '活动 DAG' : '数据集'}执行{batchAction === 'publish' ? '发布申请' : batchAction === 'run' ? '运行' : batchAction === 'stop' ? '停止' : '删除'}吗？</p>
       <small>{batchAction === 'publish'
         ? '系统会按当前精确草稿逐条提交审批申请，不会绕过审批直接上线。'
-        : batchAction === 'disable'
-          ? '停用即从可查询目录下架；草稿、发布快照和历史审计都会保留，之后可以逐条恢复。'
+        : batchAction === 'run'
+          ? '只运行每个数据集的当前已发布版本；每次均重建空白目标后完整写入，不会追加旧数据，草稿修改不会进入数仓。'
+        : batchAction === 'stop'
+          ? '仅停止当前排队或执行中的这一次 DAG，不改变数据集发布状态和历史版本。'
           : '系统会逐条检查下游数据集、构建任务和运行中查询引用；被占用的数据集会保留并返回失败原因。'}</small>
       {formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}
-      <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeBatchDialog}>取消</button><button className={batchAction === 'delete' ? 'dataset-delete-button' : 'primary-button'} type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => void executeBatchAction()}>{actionBusy ? '正在处理…' : '确认执行'}</button></footer>
+      <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeBatchDialog}>取消</button><button className={batchAction === 'delete' ? 'dataset-delete-button' : 'primary-button'} type="button" disabled={actionBusy || (batchAction === 'run' ? !selectedRunnableCount : batchAction === 'stop' ? !selectedActiveDAGCount : !selectedDatasets.length)} onClick={() => void executeBatchAction()}>{actionBusy ? '正在处理…' : '确认执行'}</button></footer>
     </div></Dialog>}
 
-    {dialog?.mode === 'disable' && dialog.dataset && <Dialog title="停用（下架）数据集" eyebrow="生命周期操作" onClose={closeDialog}><div className="dataset-delete-confirm"><p>确认停用“<strong>{dialog.dataset.name}</strong>”吗？</p><small>停用即从可查询目录下架；草稿、发布快照与历史审计都会保留，之后可以恢复。</small>{formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="primary-button" type="button" disabled={actionBusy} onClick={() => void disableDataset()}>{busyAction ? '正在停用…' : '确认停用'}</button></footer></div></Dialog>}
-
-    {dialog?.mode === 'restore' && dialog.dataset && <Dialog title="恢复数据集" eyebrow="生命周期操作" onClose={closeDialog}><div className="dataset-delete-confirm"><p>确认恢复“<strong>{dialog.dataset.name}</strong>”吗？</p><small>系统会优先恢复到停用前的发布、失效或草稿状态；迁移前没有可靠状态记录的数据集将安全恢复为草稿。</small>{formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="primary-button" type="button" disabled={actionBusy} onClick={() => void restoreDataset()}>{busyAction ? '正在恢复…' : '确认恢复'}</button></footer></div></Dialog>}
+    {dialog?.mode === 'unpublish' && dialog.dataset && <Dialog title="下架数据集" eyebrow="发布生命周期" onClose={closeDialog}><div className="dataset-delete-confirm"><p>确认下架“<strong>{dialog.dataset.name}</strong>”的当前发布版本吗？</p><small>下架后不再提供当前发布版本；草稿、发布快照和历史审计仍会保留，需要上线时可重新提交发布。</small>{formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="primary-button" type="button" disabled={actionBusy} onClick={() => void unpublishDataset()}>{busyAction ? '正在下架…' : '确认下架'}</button></footer></div></Dialog>}
 
     {dialog?.mode === 'delete' && dialog.dataset && <Dialog title="删除数据集" eyebrow="危险操作" onClose={closeDialog}><div className="dataset-delete-confirm"><p>确认删除“<strong>{dialog.dataset.name}</strong>”吗？数据集会从资产清单中移除，历史审计仍会保留。</p><small>仍被下游数据集、构建任务或运行中查询占用时，系统会拒绝删除。</small>{formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="dataset-delete-button" type="button" disabled={actionBusy} onClick={() => void deleteDataset()}>{busyAction ? '正在删除…' : '确认删除'}</button></footer></div></Dialog>}
   </AppShell>

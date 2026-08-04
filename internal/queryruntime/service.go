@@ -53,12 +53,16 @@ func NewService(datasets DatasetStore, sources SourceStore, policies PolicyStore
 
 // Preview 执行当前草稿的小样本查询，响应和审计都不会返回或保存 SQL、参数明文或结果样本。
 func (s *Service) Preview(ctx context.Context, tenantID, actorID, datasetID string, input dataset.PreviewInput) (dataset.PreviewResult, error) {
-	if tenantID == "" || actorID == "" || datasetID == "" {
+	if tenantID == "" || actorID == "" || datasetID == "" ||
+		input.MaxRows < 0 || input.MaxRows > odsSourcePreviewRows {
 		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
 	}
 	record, err := s.datasets.Get(ctx, tenantID, datasetID)
 	if err != nil {
 		return dataset.PreviewResult{}, err
+	}
+	if input.MaxRows == 0 {
+		input.MaxRows = odsSourcePreviewRows
 	}
 	return s.previewSnapshot(ctx, tenantID, actorID, runtimeSnapshot{
 		DatasetID: record.ID, VersionID: record.DraftVersionID, PlanHash: record.PlanHash, DSL: record.DSL,
@@ -189,9 +193,9 @@ func (s *Service) PreviewVersion(ctx context.Context, tenantID, actorID, dataset
 
 // PreviewRevision 使用调用者当前权限、数据策略和仍有效的资产映射执行一份不可变
 // 草稿修订。修订不是发布依赖快照，因此物理资产必须经 Resolve 重新解析，不能借用
-// ResolveVersion 绕开资产撤权。历史页面固定为小样本，客户端不能提高五行上限。
+// ResolveVersion 绕开资产撤权。历史草稿固定为十行演示样本。
 func (s *Service) PreviewRevision(ctx context.Context, tenantID, actorID, datasetID, revisionID string, input dataset.PreviewInput) (dataset.PreviewResult, error) {
-	if tenantID == "" || actorID == "" || datasetID == "" || revisionID == "" || input.MaxRows < 0 || input.MaxRows > 5 {
+	if tenantID == "" || actorID == "" || datasetID == "" || revisionID == "" || input.MaxRows < 0 || input.MaxRows > odsSourcePreviewRows {
 		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
 	}
 	revision, err := s.datasets.GetRevision(ctx, tenantID, datasetID, revisionID)
@@ -206,7 +210,7 @@ func (s *Service) PreviewRevision(ctx context.Context, tenantID, actorID, datase
 		return dataset.PreviewResult{}, dataset.ErrInvalidDocument
 	}
 	if input.MaxRows == 0 {
-		input.MaxRows = min(prepared.Document.ExecutionPolicy.PreviewLimit, 5)
+		input.MaxRows = min(prepared.Document.ExecutionPolicy.PreviewLimit, odsSourcePreviewRows)
 	}
 	return s.previewSnapshot(ctx, tenantID, actorID, runtimeSnapshot{
 		DatasetID: revision.DatasetID, VersionID: revision.DraftVersionID,
@@ -340,12 +344,7 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 }
 
 func editablePreviewRowLimit(document dataset.Document) int {
-	if document.Dataset.Layer == dataset.LayerODS ||
-		document.Dataset.Layer == dataset.LayerDIM ||
-		document.Dataset.Layer == dataset.LayerDWD {
-		return odsSourcePreviewRows
-	}
-	return 5
+	return odsSourcePreviewRows
 }
 
 func (s *Service) loadSources(ctx context.Context, tenantID string, resolved ResolvedPlan, quota datasource.Quota) (map[string]datasource.Source, error) {

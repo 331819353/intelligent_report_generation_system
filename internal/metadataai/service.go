@@ -180,7 +180,12 @@ func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID strin
 				ctx, tenantID, actorID, job, input, providerResult, s.threshold,
 			)
 			if saveErr != nil {
-				return GenerateResult{Job: job, Suggestions: suggestions}, saveErr
+				job, saveErr = s.recordFailure(
+					ctx, tenantID, actorID, job, "PERSISTENCE_ERROR", saveErr,
+				)
+				return GenerateResult{Job: job, Suggestions: suggestions}, metadataCompletionFailure{
+					code: "PERSISTENCE_ERROR", cause: saveErr,
+				}
 			}
 			return GenerateResult{Job: job, Suggestions: suggestions}, callErr
 		}
@@ -220,6 +225,9 @@ func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID strin
 			code = "SOURCE_CHANGED"
 		}
 		job, err = s.recordFailure(ctx, tenantID, actorID, job, code, err)
+		if code == "PERSISTENCE_ERROR" {
+			err = metadataCompletionFailure{code: code, cause: err}
+		}
 		return GenerateResult{Job: job, Suggestions: []Suggestion{}}, err
 	}
 	return GenerateResult{Job: job, Suggestions: suggestions}, nil

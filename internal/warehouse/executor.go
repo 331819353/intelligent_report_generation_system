@@ -204,25 +204,24 @@ func validateTenantOwnedInputs(
 	digest := sha256.Sum256([]byte("tenant\x00" + tenantID))
 	tenantFragment := hex.EncodeToString(digest[:])[:12]
 	for _, table := range tables {
+		stageSchema, stageName, stageErr := materialization.GenerateStagingIdentifier(
+			tenantID, runID, table.NodeID,
+		)
+		runScopedStage := stageErr == nil &&
+			table.Schema == stageSchema && table.Name == stageName
 		valid := false
 		switch targetLayer {
 		case materialization.LayerODS:
-			valid = table.Schema == "warehouse_staging" &&
-				strings.HasPrefix(table.Name, "stage_t"+tenantFragment+"_") &&
-				warehouseStagingName.MatchString(table.Name)
+			valid = runScopedStage
 		case materialization.LayerDWD, materialization.LayerDIM:
-			stageSchema, stageName, stageErr := materialization.GenerateStagingIdentifier(
-				tenantID, runID, table.NodeID,
-			)
-			valid = stageErr == nil &&
-				table.Schema == stageSchema &&
-				table.Name == stageName
+			valid = runScopedStage
 			if targetLayer == materialization.LayerDWD {
 				valid = valid ||
 					warehouseLayerInput(table, "dim", "warehouse_dim", tenantFragment)
 			}
 		case materialization.LayerDWS:
-			valid = warehouseLayerInput(table, "dwd", "warehouse_dwd", tenantFragment) ||
+			valid = runScopedStage ||
+				warehouseLayerInput(table, "dwd", "warehouse_dwd", tenantFragment) ||
 				warehouseLayerInput(table, "dim", "warehouse_dim", tenantFragment)
 		case materialization.LayerADS:
 			valid = warehouseLayerInput(table, "dws", "warehouse_dws", tenantFragment)
@@ -237,7 +236,6 @@ func validateTenantOwnedInputs(
 var (
 	warehousePhysicalName  = regexp.MustCompile(`^(ods|dim|dwd|dws|ads)_t[0-9a-f]{12}_d[0-9a-f]{12}_r[0-9a-f]{12}$`)
 	warehousePublishedName = regexp.MustCompile(`^(ods|dim|dwd|dws|ads)_t[0-9a-f]{12}_d[0-9a-f]{12}$`)
-	warehouseStagingName   = regexp.MustCompile(`^stage_t[0-9a-f]{12}_r[0-9a-f]{12}_n[0-9a-f]{12}$`)
 )
 
 func warehouseLayerInput(

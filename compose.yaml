@@ -38,8 +38,8 @@ services:
       start_period: 5s
     networks: [report_net]
 
-  # 数据仓库数据库：只保存 DIM/DWD/DWS/ADS 物理表和稳定发布视图。
-  # ODS 明细保留在精确来源版本中，控制面仅保存其字段映射合同。
+  # 数据仓库数据库：保存 ODS/DIM/DWD/DWS/ADS 物理表和稳定发布视图。
+  # ODS 正式运行按精确发布来源版本全量写入，预览仍只读取受控样本。
   postgres-warehouse:
     image: pgvector/pgvector:pg17
     restart: unless-stopped

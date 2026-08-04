@@ -14,7 +14,7 @@ import (
 	"intelligent-report-generation-system/internal/platform/database"
 )
 
-// ErrMappedDatasetUnsupportedColumn identifies a deterministic downstream ODS
+// ErrMappedDatasetUnsupportedColumn identifies a deterministic downstream mapped-dataset
 // contract failure. It is surfaced to the metadata worker instead of being
 // silently treated as a successful mapping.
 var ErrMappedDatasetUnsupportedColumn = mappedDatasetUnsupportedColumnError{}
@@ -78,6 +78,11 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 		return Document{}, errors.New("mapped dataset table name is required")
 	}
 	code := "mapped_" + strings.ReplaceAll(tableUUID.String(), "-", "")
+	layer := ClassifyMappedDatasetLayer(table, columns)
+	sourceMode := SourceMode("")
+	if layer == LayerDWS {
+		sourceMode = SourceModePreAggregated
+	}
 	projection := make([]string, 0, len(columns))
 	fields := make([]Field, 0, len(columns))
 	endOutputs := make([]map[string]any, 0, len(columns))
@@ -124,7 +129,7 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 			"name": fieldName,
 			"code": fieldCode,
 		})
-		if column.PrimaryKey {
+		if column.PrimaryKey || layer == LayerDWS && (role == "IDENTIFIER" || role == "TIME") {
 			grainCodes = append(grainCodes, fieldCode)
 		}
 		if role == "TIME" && defaultTimeField == "" {
@@ -132,6 +137,9 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 		}
 	}
 	grainDescription := "每行代表" + name + "中的一条记录"
+	if layer == LayerDWS {
+		grainDescription = "每行代表" + name + "中一个源端既有的汇总统计粒度"
+	}
 	if len(grainCodes) == 0 {
 		// ODS must preserve source rows even when the source does not declare a
 		// business key. The first column is not evidence of uniqueness.
@@ -146,7 +154,8 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 			Description: strings.TrimSpace(table.BusinessDescription),
 			Domain:      mappedDatasetDomain(table.Domain),
 			Type:        "SINGLE_SOURCE",
-			Layer:       LayerODS,
+			Layer:       layer,
+			SourceMode:  sourceMode,
 		},
 		Nodes: []Node{{
 			ID:            "node_1",
@@ -178,13 +187,14 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 			}(),
 		},
 		ExecutionPolicy: ExecutionPolicy{
-			Mode:            "REALTIME",
-			TimeoutMS:       5000,
-			PreviewLimit:    100,
-			ResultLimit:     10000,
+			Mode:            "MATERIALIZED_PREFERRED",
+			TimeoutMS:       30000,
+			PreviewLimit:    10,
+			ResultLimit:     100000,
 			CacheTTLSeconds: 300,
 			Materialization: MaterializationPolicy{
-				Enabled: false,
+				Enabled:     true,
+				RefreshMode: "ON_DEMAND",
 			},
 		},
 		Designer: map[string]any{
@@ -204,10 +214,53 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 	}, nil
 }
 
+// ClassifyMappedDatasetLayer classifies only high-confidence source-side
+// aggregates as DWS. Ambiguous tables fail conservatively to ODS so event,
+// transaction, and snapshot detail is never promoted merely because it has
+// numeric fields. The business name/description are supplied by metadata AI,
+// while field semantics and keys come from the trusted technical snapshot.
+func ClassifyMappedDatasetLayer(table MappedDatasetTable, columns []MappedDatasetColumn) Layer {
+	measureCount := 0
+	grainEvidence := 0
+	for _, column := range columns {
+		role := mappedDatasetFieldRole(column)
+		if role == "MEASURE" {
+			measureCount++
+		}
+		if column.PrimaryKey || role == "IDENTIFIER" || role == "TIME" {
+			grainEvidence++
+		}
+	}
+	if measureCount == 0 || grainEvidence == 0 {
+		return LayerODS
+	}
+
+	technical := "_" + strings.ToUpper(strings.TrimSpace(table.TableName)) + "_"
+	for _, marker := range []string{
+		"_AGG_", "_SUMMARY_", "_ROLLUP_", "_KPI_", "_METRIC_",
+		"_METRICS_", "_STAT_", "_STATS_", "_DWS_", "_REPORT_",
+	} {
+		if strings.Contains(technical, marker) {
+			return LayerDWS
+		}
+	}
+	businessEvidence := strings.TrimSpace(table.BusinessName) + " " +
+		strings.TrimSpace(table.BusinessDescription)
+	for _, marker := range []string{
+		"汇总", "聚合", "统计表", "指标统计", "运营指标", "分析宽表", "汇总宽表",
+	} {
+		if strings.Contains(businessEvidence, marker) {
+			return LayerDWS
+		}
+	}
+	return LayerODS
+}
+
 const mappedDatasetDefaultPublishKey = "system-mapped-default-v1"
 
 type mappedDatasetState struct {
 	ID                   string
+	Layer                Layer
 	Deleted              bool
 	Status               string
 	Version              int64
@@ -240,7 +293,7 @@ func (s *PostgresStore) EnsureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 	return err
 }
 
-// EnsureMappedDatasetDraft 为 LLM 最终未能完整补全的物理表创建可编辑的 ODS
+// EnsureMappedDatasetDraft 为 LLM 最终未能完整补全的物理表创建可编辑的映射
 // 草稿。该路径绝不发布数据集，也不会覆盖用户已经保存、回滚或提交审批的草稿。
 func (s *PostgresStore) EnsureMappedDatasetDraft(
 	ctx context.Context,
@@ -369,6 +422,21 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 	if err != nil {
 		return false, err
 	}
+	if exists && !state.Deleted && state.Layer != prepared.Document.Dataset.Layer {
+		retired, retireErr := s.retireReclassifiedMappedDatasetTx(
+			ctx, tx, tenantID, actorID, table, state, prepared.Document.Dataset.Layer,
+		)
+		if retireErr != nil {
+			return false, retireErr
+		}
+		if !retired {
+			// Published or user-modified datasets keep their immutable layer. A
+			// later reconcile can retry after downstream use has been removed.
+			return false, nil
+		}
+		state = mappedDatasetState{}
+		exists = false
+	}
 	if exists && state.Deleted {
 		return s.regenerateDeletedMappedDatasetTx(ctx, tx, tenantID, actorID, table, state, prepared)
 	}
@@ -415,6 +483,91 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 		return false, nil
 	}
 	return s.publishMappedDatasetDefaultTx(ctx, tx, tenantID, actorID, table.ID, state, prepared)
+}
+
+// retireReclassifiedMappedDatasetTx releases a pristine system-mapped identity
+// when the trusted source classifier changes its layer. The old publication is
+// retained as deprecated history under a retired code; the same source table
+// then receives a fresh dataset identity, satisfying the published-layer
+// immutability contract instead of rewriting an existing version in place.
+func (s *PostgresStore) retireReclassifiedMappedDatasetTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, actorID string,
+	table MappedDatasetTable,
+	state mappedDatasetState,
+	target Layer,
+) (bool, error) {
+	if state.ID == "" || state.Deleted || state.Status != "PUBLISHED" ||
+		state.Layer == target || state.PublicationRequests != 0 ||
+		state.HumanDraftMutations != 0 {
+		return false, nil
+	}
+	publication, exists, err := loadMappedDatasetPublicationFenceTx(
+		ctx, tx, tenantID, state.ID, false,
+	)
+	if err != nil || !exists || !state.canSystemAdvance(publication) {
+		return false, err
+	}
+	var inUse bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM platform.dataset_dependencies dependency
+		JOIN platform.dataset_versions source_version
+		  ON source_version.id::text=dependency.source_id
+		JOIN platform.dataset_versions downstream_version
+		  ON downstream_version.id=dependency.dataset_version_id
+		JOIN platform.datasets downstream_dataset
+		  ON downstream_dataset.id=downstream_version.dataset_id
+		 AND downstream_dataset.deleted_at IS NULL
+		WHERE dependency.source_type='DATASET_VERSION'
+		  AND source_version.dataset_id=$1
+		  AND downstream_version.status<>'DEPRECATED'
+		UNION ALL
+		SELECT 1 FROM platform.query_runs
+		 WHERE dataset_id=$1 AND status='RUNNING'
+		UNION ALL
+		SELECT 1 FROM platform.dataset_build_runs
+		 WHERE dataset_id=$1 AND status IN ('QUEUED','RUNNING')
+	)`, state.ID).Scan(&inUse); err != nil {
+		return false, err
+	}
+	if inUse {
+		return false, nil
+	}
+	// Release the source identity before soft deletion so the database-level
+	// mapped-asset deletion trigger does not deactivate the physical table.
+	if tag, err := tx.Exec(ctx, `UPDATE platform.datasets
+		SET origin_table_id=NULL
+		WHERE id=$1 AND tenant_id=$2 AND origin_table_id=$3`,
+		state.ID, tenantID, table.ID); err != nil {
+		return false, err
+	} else if tag.RowsAffected() != 1 {
+		return false, nil
+	}
+	if _, err := tx.Exec(ctx, `UPDATE platform.dataset_versions
+		SET status='DEPRECATED',updated_by=$1
+		WHERE dataset_id=$2 AND tenant_id=$3 AND status IN ('PUBLISHED','STALE')`,
+		actorID, state.ID, tenantID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE platform.datasets SET
+		status='DEPRECATED',current_published_version_id=NULL,
+		code=left(code,96)||'_reclassified_'||substr(id::text,1,8),
+		deleted_at=now(),version=version+1,updated_by=$1,updated_at=now()
+		WHERE id=$2 AND tenant_id=$3 AND deleted_at IS NULL`,
+		actorID, state.ID, tenantID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+		tenant_id,actor_user_id,action,resource_type,resource_id,detail
+	) VALUES($1,$2,'AUTO_RECLASSIFY_MAPPED_DATASET_LAYER','DATASET',$3,
+		jsonb_build_object('originTableId',$4::text,'fromLayer',$5::text,
+			'toLayer',$6::text,'previousPublishedVersionId',$7::text))`,
+		tenantID, actorID, state.ID, table.ID, state.Layer, target,
+		publication.VersionID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *PostgresStore) ensureMappedDatasetDraftTx(
@@ -636,8 +789,9 @@ func (s *PostgresStore) refreshSystemMappedDraftTx(
 	return true, nil
 }
 
-// regenerateDeletedMappedDatasetTx 在来源表重新完成映射时恢复同一个数据集主对象，
-// 保留已废弃的历史发布快照，并从现有可变草稿生成一个新的不可变发布版本。
+// regenerateDeletedMappedDatasetTx 在来源表重新完成映射时恢复同一个数据集主对象。
+// 已发布过的对象由最新不可变发布快照证明草稿未被修改；从未发布的降级草稿则
+// 仅在它仍是纯系统持有状态时恢复。两种路径都从现有草稿生成新的不可变发布版本。
 func (s *PostgresStore) regenerateDeletedMappedDatasetTx(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -655,9 +809,11 @@ func (s *PostgresStore) regenerateDeletedMappedDatasetTx(
 	if err != nil {
 		return false, err
 	}
-	if !exists || !state.canSystemAdvance(publication) {
+	pristineUnpublishedDraft := !exists && state.canRegenerateUnpublishedDraft()
+	if !pristineUnpublishedDraft && (!exists || !state.canSystemAdvance(publication)) {
 		// 删除不会授权系统丢弃用户已经保存或提交审批的草稿。只有当前草稿仍是
-		// 最近一次不可变发布所使用的精确修订时，重新映射才可恢复并发布。
+		// 最近一次不可变发布所使用的精确修订，或从未发布且始终由系统持有时，
+		// 重新映射才可恢复并发布。
 		return false, nil
 	}
 	var draftRecordVersion int64
@@ -842,7 +998,7 @@ func (s *PostgresStore) refreshMappedDatasetTx(
 }
 
 func loadMappedDatasetStateTx(ctx context.Context, tx pgx.Tx, tenantID, tableID string) (state mappedDatasetState, exists bool, err error) {
-	err = tx.QueryRow(ctx, `SELECT dataset.id::text,dataset.deleted_at IS NOT NULL,dataset.status,dataset.version,
+	err = tx.QueryRow(ctx, `SELECT dataset.id::text,dataset.layer,dataset.deleted_at IS NOT NULL,dataset.status,dataset.version,
 		COALESCE(draft.id::text,''),COALESCE(draft.version_no,0),COALESCE(draft.record_version,0),
 		COALESCE(draft.schema_hash,''),COALESCE(draft.plan_hash,''),
 		(SELECT count(*) FROM platform.dataset_versions AS published
@@ -868,7 +1024,7 @@ func loadMappedDatasetStateTx(ctx context.Context, tx pgx.Tx, tenantID, tableID 
 		  ON draft.id=dataset.current_draft_version_id AND draft.dataset_id=dataset.id AND draft.tenant_id=dataset.tenant_id
 		WHERE dataset.tenant_id::text=$1 AND dataset.origin_table_id::text=$2
 		FOR UPDATE OF dataset,draft`, tenantID, tableID).Scan(
-		&state.ID, &state.Deleted, &state.Status, &state.Version,
+		&state.ID, &state.Layer, &state.Deleted, &state.Status, &state.Version,
 		&state.DraftVersionID, &state.DraftVersionNo, &state.DraftRecordVersion,
 		&state.DSLHash, &state.PlanHash, &state.PublishedCount,
 		&state.RevisionCount, &state.ExactCreateCount, &state.MappedAfterDeletion,
@@ -1001,6 +1157,16 @@ func (state mappedDatasetState) canSystemRefreshDraft() bool {
 		state.HumanDraftMutations == 0
 }
 
+func (state mappedDatasetState) canRegenerateUnpublishedDraft() bool {
+	return state.Deleted && state.Status == "DEPRECATED" && state.Version > 1 &&
+		state.DraftVersionID != "" && state.DraftVersionNo == 1 &&
+		state.DraftRecordVersion > 0 && state.Version == state.DraftRecordVersion+1 &&
+		int64(state.RevisionCount) == state.DraftRecordVersion &&
+		state.PublishedCount == 0 && state.ExactCreateCount == 1 &&
+		state.PendingApprovalCount == 0 && state.PublicationRequests == 0 &&
+		state.HumanDraftMutations == 0 && state.DSLHash != "" && state.PlanHash != ""
+}
+
 func (state mappedDatasetState) canSystemAdvance(publication mappedDatasetPublicationFence) bool {
 	return state.PendingApprovalCount == 0 &&
 		state.DraftVersionID != "" &&
@@ -1063,9 +1229,9 @@ func (s *PostgresStore) enqueueMappedMaterializationTx(
 	tenantID string,
 	published VersionRecord,
 ) error {
-	// ODS is a virtual governed mapping over the immutable source. Publishing
-	// it must not copy source rows into the warehouse; DWD is the first layer
-	// that performs a full extraction and physical materialization.
+	// publishTx already registered the source-backed build through
+	// enqueuePublicationProcessing in the same transaction. This compatibility
+	// hook remains intentionally idempotent for the system-mapped caller.
 	return nil
 }
 

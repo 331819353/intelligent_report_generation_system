@@ -677,7 +677,7 @@ export function DataSourceCenterPage() {
         currentTable = await dataSourceAPI.completeTableManually(
           table.id, currentTable.businessVersion, currentTable.structureHash,
         )
-        setNotice({ tone: 'success', message: `已完成“${currentTable.businessName || currentTable.tableName}”的手工完善，并生成或刷新 ODS 数据集` })
+        setNotice({ tone: 'success', message: `已完成“${currentTable.businessName || currentTable.tableName}”的手工完善，并生成或刷新对应 ODS/DWS 数据集` })
       } else {
         setNotice({ tone: 'success', message: saved === 0 ? '没有需要保存的修改' : `已修改表资产“${table.businessName || table.tableName}”` })
       }
@@ -1312,7 +1312,7 @@ export function DataSourceCenterPage() {
 
       {dialog?.mode === 'edit-table' && dialog.source && dialog.table && <Dialog title={tableEditorPurpose === 'MANUAL_COMPLETE' ? '手工完善数据表' : '修改数据表资产'} wide onClose={closeDialog}>
         <form className="data-source-form" onSubmit={event => { event.preventDefault(); void saveTableAsset(tableEditorPurpose === 'MANUAL_COMPLETE') }}>
-          {tableEditorPurpose === 'MANUAL_COMPLETE' && <div className="data-source-manual-completion-note" role="note"><strong>补齐 LLM 未完成的业务元数据</strong><span>表和每个活动字段都必须填写业务名称、业务说明和至少一个标签；字段还必须选择语义类型。提交完成后系统会锁定人工结果、标记当前结构已完善，并生成或刷新对应 ODS 数据集。</span></div>}
+          {tableEditorPurpose === 'MANUAL_COMPLETE' && <div className="data-source-manual-completion-note" role="note"><strong>补齐 LLM 未完成的业务元数据</strong><span>表和每个活动字段都必须填写业务名称、业务说明和至少一个标签；字段还必须选择语义类型。提交完成后系统会锁定人工结果、标记当前结构已完善，并按源表粒度生成或刷新对应 ODS/DWS 数据集。</span></div>}
           <label>业务名称<input value={tableDraft.businessName} onChange={event => setTableDraft(current => ({ ...current, businessName: event.target.value }))} /></label>
           <label>业务说明<textarea rows={4} value={tableDraft.businessDescription} onChange={event => setTableDraft(current => ({ ...current, businessDescription: event.target.value }))} /></label>
           <label>标签<input value={tableDraft.tags} onChange={event => setTableDraft(current => ({ ...current, tags: event.target.value }))} placeholder="多个标签使用英文逗号分隔" /></label>

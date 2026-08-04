@@ -18,8 +18,8 @@ type PublicationCommitSink interface {
 	EnqueueDatasetMetricExtractionTx(context.Context, pgx.Tx, string, string, VersionRecord) error
 }
 
-// MappedPublicationCommitSink 为历史装配兼容接口。ODS 已改为虚拟来源映射，
-// 当前发布流程不再调用该接口登记物化 build。
+// MappedPublicationCommitSink 在源端 ODS 或预聚合 DWS 发布事务内登记精确版本的
+// 全量入仓任务。
 type MappedPublicationCommitSink interface {
 	EnqueueMappedDatasetMaterializationTx(context.Context, pgx.Tx, string, string, VersionRecord) error
 }
@@ -73,7 +73,7 @@ func (s *PostgresStore) SetPublicationCommitSink(sink PublicationCommitSink) {
 	s.publicationSink = sink
 }
 
-// SetMappedPublicationCommitSink 保留历史装配兼容；ODS 不再登记物化 build。
+// SetMappedPublicationCommitSink 接入源端 ODS/DWS 发布后的全量入仓 outbox。
 func (s *PostgresStore) SetMappedPublicationCommitSink(sink MappedPublicationCommitSink) {
 	s.mappedPublicationSink = sink
 }
@@ -84,7 +84,7 @@ func (s *PostgresStore) SetGovernedPublicationCommitSink(sink GovernedPublicatio
 	s.governedPublicationSink = sink
 }
 
-// SetMaterializationDeletionSink 接入 DIM/DWD/DWS/ADS 仓库物理对象清理 outbox。
+// SetMaterializationDeletionSink 接入 ODS/DIM/DWD/DWS/ADS 仓库物理对象清理 outbox。
 // 应只在进程启动装配阶段调用。
 func (s *PostgresStore) SetMaterializationDeletionSink(sink MaterializationDeletionSink) {
 	s.materializationDeletionSink = sink
@@ -136,6 +136,9 @@ func createDatasetTxWithOptions(
 	originTableID string,
 	options derivedWriteOptions,
 ) (string, error) {
+	if prepared.Document.Dataset.SourceMode != "" && originTableID == "" {
+		return "", fmt.Errorf("%w: sourceMode is reserved for mapped physical sources", ErrInvalidDocument)
+	}
 	var datasetID, versionID string
 	if err := tx.QueryRow(ctx, `INSERT INTO platform.datasets(
 		tenant_id,code,name,description,dataset_type,layer,origin_table_id,
@@ -217,7 +220,7 @@ func (s *PostgresStore) Get(ctx context.Context, tenantID, id string) (record Re
 	return record, err
 }
 
-// loadDatasetDisplayTags 优先展示当前发布版本的 LLM/人工治理语义标签；自动 ODS
+// loadDatasetDisplayTags 优先展示当前发布版本的 LLM/人工治理语义标签；自动映射
 // 数据集尚未完成标签建议任务时，回退到来源表已经由 LLM 完善的表标签。
 func loadDatasetDisplayTags(
 	ctx context.Context,
@@ -300,10 +303,20 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 func (s *PostgresStore) Update(ctx context.Context, tenantID, actorID, id string, input UpdateInput, prepared Prepared) (Record, error) {
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		var version int64
-		var versionID string
+		var versionID, originTableID, currentSourceMode string
 		// 行锁把版本检查、草稿覆盖和派生索引重建串成一个原子操作；expectedVersion
 		// 防止后保存的浏览器静默覆盖另一位用户已经提交的草稿。
-		err := tx.QueryRow(ctx, `SELECT version,current_draft_version_id::text FROM platform.datasets WHERE id::text=$1 AND deleted_at IS NULL FOR UPDATE`, id).Scan(&version, &versionID)
+		err := tx.QueryRow(ctx, `SELECT dataset.version,dataset.current_draft_version_id::text,
+			COALESCE(dataset.origin_table_id::text,''),
+			COALESCE(draft.dsl_json#>>'{dataset,sourceMode}','')
+			FROM platform.datasets AS dataset
+			JOIN platform.dataset_versions AS draft
+			  ON draft.id=dataset.current_draft_version_id
+			 AND draft.dataset_id=dataset.id
+			 AND draft.tenant_id=dataset.tenant_id
+			WHERE dataset.id::text=$1 AND dataset.deleted_at IS NULL
+			FOR UPDATE OF dataset,draft`, id).
+			Scan(&version, &versionID, &originTableID, &currentSourceMode)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -312,6 +325,15 @@ func (s *PostgresStore) Update(ctx context.Context, tenantID, actorID, id string
 		}
 		if version != input.ExpectedVersion {
 			return ErrConflict
+		}
+		if prepared.Document.Dataset.SourceMode != "" && originTableID == "" {
+			return ErrInvalidDocument
+		}
+		if string(prepared.Document.Dataset.SourceMode) != currentSourceMode {
+			// sourceMode is assigned only by the trusted physical-table classifier.
+			// Human edits may preserve the mapped mode, but cannot promote an ODS
+			// source to DWS or turn a modeled dataset into a source mapping.
+			return ErrInvalidDocument
 		}
 		var draftRecordVersion int64
 		err = tx.QueryRow(ctx, `UPDATE platform.dataset_versions SET layer=$1,dsl_json=$2,schema_hash=$3,logical_plan_json=$4,plan_hash=$5,record_version=record_version+1,updated_by=$6 WHERE id=$7 AND status='DRAFT' RETURNING record_version`,
@@ -584,14 +606,14 @@ type datasetCommandExecutor interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
 
-// deactivateMappedODSAssetTx 只停用控制面 PostgreSQL 中的表/字段资产记录。
+// deactivateMappedAssetTx 只停用控制面 PostgreSQL 中的表/字段资产记录。
 // 该路径没有源库连接器，也不生成 DROP/DELETE 源表语句，因此不会修改物理源表。
-func deactivateMappedODSAssetTx(
+func deactivateMappedAssetTx(
 	ctx context.Context,
 	tx datasetCommandExecutor,
-	tenantID, originTableID, layer string,
+	tenantID, originTableID string,
 ) (bool, error) {
-	if originTableID == "" || layer != string(LayerODS) {
+	if originTableID == "" {
 		return false, nil
 	}
 	if _, err := tx.Exec(ctx, `UPDATE platform.metadata_columns
@@ -608,7 +630,7 @@ func deactivateMappedODSAssetTx(
 }
 
 // Delete 只做软删除；检测全部精确版本的下游占用后再隐藏目录项并废弃发布版本。
-// 映射 ODS 同步停用其控制面元数据记录，使其重新出现在“新增数据表”候选中。
+// 映射源数据集同步停用其控制面元数据记录，使其重新出现在“新增数据表”候选中。
 func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string, input LifecycleInput) error {
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		var version int64
@@ -655,7 +677,7 @@ func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string
 		}
 		physicalMaterializationCount := 0
 		physicalCleanupQueued := false
-		if layer == string(LayerDIM) || layer == string(LayerDWD) ||
+		if layer == string(LayerODS) || layer == string(LayerDIM) || layer == string(LayerDWD) ||
 			layer == string(LayerDWS) || layer == string(LayerADS) {
 			if s.materializationDeletionSink == nil {
 				return errors.New("dataset materialization deletion sink is not configured")
@@ -716,8 +738,8 @@ func (s *PostgresStore) Delete(ctx context.Context, tenantID, actorID, id string
 			deleted_at=now(),version=version+1,updated_by=$1 WHERE id::text=$2`, actorID, id); err != nil {
 			return err
 		}
-		metadataAssetDeactivated, err := deactivateMappedODSAssetTx(
-			ctx, tx, tenantID, originTableID, layer,
+		metadataAssetDeactivated, err := deactivateMappedAssetTx(
+			ctx, tx, tenantID, originTableID,
 		)
 		if err != nil {
 			return err
@@ -899,6 +921,20 @@ func (s *PostgresStore) enqueuePublicationProcessing(
 	tenantID, actorID string,
 	record VersionRecord,
 ) error {
+	if record.Layer == LayerODS || record.Layer == LayerDWS {
+		document, err := DecodeAndNormalize(record.DSL)
+		if err != nil {
+			return err
+		}
+		if IsSourceBackedMaterialization(document) {
+			if s.mappedPublicationSink == nil {
+				return errors.New("source-backed dataset materialization sink is not configured")
+			}
+			return s.mappedPublicationSink.EnqueueMappedDatasetMaterializationTx(
+				ctx, tx, tenantID, actorID, record,
+			)
+		}
+	}
 	if s.publicationSink != nil {
 		if err := s.publicationSink.EnqueueDatasetMetricExtractionTx(
 			ctx, tx, tenantID, actorID, record,

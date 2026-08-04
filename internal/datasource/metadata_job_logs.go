@@ -232,6 +232,8 @@ func metadataAIRoundLogMessage(number int, status, errorCode string) (string, st
 		return "WARN", prefix + "达到处理时限，准备重试"
 	case "INVALID_OUTPUT":
 		return "WARN", prefix + "输出未通过业务校验，准备重试"
+	case "PERSISTENCE_ERROR":
+		return "ERROR", prefix + "结果保存失败，已停止模型重试"
 	default:
 		return "ERROR", prefix + "未完成"
 	}

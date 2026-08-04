@@ -10,7 +10,7 @@ import (
 	"intelligent-report-generation-system/internal/dataset"
 )
 
-const odsSourcePreviewRows = 100
+const odsSourcePreviewRows = 10
 
 // expandVirtualODSNodesTx resolves published ODS versions as logical mappings,
 // not warehouse relations. For DWD preview it also unfolds one-source DIM

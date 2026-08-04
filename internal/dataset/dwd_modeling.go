@@ -3963,7 +3963,7 @@ func buildLLMDesignedDIMDocument(
 		},
 		ExecutionPolicy: ExecutionPolicy{
 			Mode: "MATERIALIZED_PREFERRED", TimeoutMS: 30_000,
-			PreviewLimit: 200, ResultLimit: 100_000, CacheTTLSeconds: 300,
+			PreviewLimit: 10, ResultLimit: 100_000, CacheTTLSeconds: 300,
 			Materialization: MaterializationPolicy{
 				Enabled: true, RefreshMode: "ON_DEMAND",
 			},
@@ -4246,7 +4246,7 @@ func buildLLMDesignedDWDDocument(
 		},
 		ExecutionPolicy: ExecutionPolicy{
 			Mode: "MATERIALIZED_PREFERRED", TimeoutMS: 30_000,
-			PreviewLimit: 200, ResultLimit: 100_000, CacheTTLSeconds: 300,
+			PreviewLimit: 10, ResultLimit: 100_000, CacheTTLSeconds: 300,
 			Materialization: MaterializationPolicy{
 				Enabled: true, RefreshMode: "ON_DEMAND",
 			},

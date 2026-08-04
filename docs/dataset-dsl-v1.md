@@ -24,12 +24,12 @@ Schema 负责结构和基础类型校验；服务端领域校验额外检查标�
 
 未知字段、未知版本和多余 JSON 文档一律失败关闭。相同输入经过规范化后得到相同的 DSL JSON、逻辑计划和哈希。V1 内仅做向前兼容读取；未来大版本通过显式迁移器升级，不原地改写已发布版本。
 
-`dataset.domain` 与 `dataset.subject` 分别保存用户配置的业务领域和主题。两者是可选的版本化治理信息，修改后会形成新的 DSL 摘要并随草稿、发布版本和回滚快照保留；它们不改变查询逻辑，也不替代 `dataset.layer` 的单一物理落层语义。
+`dataset.domain` 与 `dataset.subject` 分别保存用户配置的业务领域和主题。两者是可选的版本化治理信息，修改后会形成新的 DSL 摘要并随草稿、发布版本和回滚快照保留；它们不改变查询逻辑，也不替代 `dataset.layer` 的单一物理落层语义。`dataset.sourceMode=PRE_AGGREGATED` 是服务端来源分类器专用标记，公开创建/编辑不能新增、删除或改变该值。
 
 ## 领域约束
 
-- 数据层级：`ODS` 只能包含一个物理 `TABLE` 节点且不能 Join、分组或聚合；`DIM` 保留实体说明粒度并禁止业务聚合；`DWD` 保持事实明细粒度，允许字段转换和 Join，但不能包含业务分组或聚合；`DWS` 必须声明输出业务粒度并至少包含一个聚合指标；`ADS` 面向消费场景组合 DWS，可投影、Join 或二次聚合，但不强制再次聚合。
-- 显式声明 `dataset.layer` 的新 DSL 执行严格层级方向：`ODS <- TABLE`、`DIM <- ODS`、`DWD <- 至少一个 ODS + 可选 DIM`、`DWS <- 一个或多个 DWD`、`ADS <- DWS`。DIM/DWD/DWS/ADS 的每个节点都必须固定精确发布版本的 `DATASET`，不能混用 `TABLE` 与 `DATASET`，也不能用物理表绕开治理层。
+- 数据层级：`ODS` 只能包含一个物理 `TABLE` 节点且不能 Join、分组或聚合；`DIM` 保留实体说明粒度并禁止业务聚合；`DWD` 保持事实明细粒度，允许字段转换和 Join，但不能包含业务分组或聚合；普通 `DWS` 必须声明输出业务粒度并至少包含一个聚合指标；`ADS` 面向消费场景组合 DWS，可投影、Join 或二次聚合，但不强制再次聚合。唯一例外是系统分类生成的 `DWS / sourceMode=PRE_AGGREGATED`：它必须是单个物理 `TABLE`、至少一个度量和明确粒度键，保留源端已有汇总行，不允许 Join、去重或再次分组聚合。
+- 显式声明 `dataset.layer` 的新 DSL 执行严格层级方向：`ODS <- TABLE`、`DIM <- ODS`、`DWD <- 至少一个 ODS + 可选 DIM`、普通 `DWS <- 一个或多个 DWD/DIM`、`ADS <- DWS`。DIM/DWD/普通 DWS/ADS 的每个节点都必须固定精确发布版本的 `DATASET`，不能混用 `TABLE` 与 `DATASET`，也不能用物理表绕开治理层；受系统所有权和 DSL 双重校验的源端已汇总 DWS 使用上述窄例外。
 - 缺少 `dataset.layer` 的历史 DSL 继续按确定性规则推断并保留旧 TABLE 执行兼容，不追溯改写其规范正文或哈希。该兼容只用于读取和迁移既有资产；新客户端必须显式写入层级。无论是否为兼容文档，只要使用 `DATASET` 节点，其精确版本、层级和当前 ACTIVE 物化约束都不会放宽。
 - 节点类型：`TABLE`、`DATASET`；单个数据集最多 16 个节点，避免校验和跨源执行无界扇出。`DATASET` 节点必须固定已发布的 `datasetVersionId`。`SINGLE_SOURCE` 可包含同一数据源内的多张表，不能按节点数量误判为跨源。
 - Join 类型：`INNER`、`LEFT`、`RIGHT`、`FULL`；必须声明基数和至少一个条件。可选的 `relationshipType` 为 `DIRECT / ROLE_PLAYING / BRIDGE`，`relationshipRole` 保存如 `ORDERING_USER / PAYING_USER / SHIPPING_REGION` 的稳定业务角色，`fanoutPolicy` 为 `SAFE / DEDUPLICATE / UNSAFE`。角色扮演和 Bridge 必须声明角色；Bridge 还必须声明扇出策略。`manualConfirmed` 会随草稿保存，修改 Join 字段、类型、基数或关系语义后设计器会重新置为未确认。
@@ -100,6 +100,6 @@ Schema 负责结构和基础类型校验；服务端领域校验额外检查标�
 
 发布前重新执行 DSL 规范化、派生哈希、物理资产、固定文件版本、全部启用行列策略、人工 Join 确认和最小查询试跑。跨源执行器根据受限节点输入返回基数和扇出风险；单数据源 MySQL/Oracle 为每条等值 Join 在源数据库内按键分组，只返回两侧重复键组数、最大重复度和双侧重复键组数，不返回业务键值。探测会应用节点源过滤和可证明只引用单节点的聚合前过滤；跨节点过滤尚不参与两侧基础键集合裁剪，因此结果是保守上界。非等值 Join 当前返回稳定操作符路径并失败关闭。必填且没有默认值的参数由发布请求显式提供，只参与类型校验、受控查询和不可逆摘要，不进入发布版本、幂等响应或错误正文。校验失败使用稳定 `path/code/reason` 指向 DSL 位置，并且不创建半份版本或移动发布指针。
 
-严格 DIM/DWD/DWS/ADS 的 `DATASET` 节点只按层级解析服务端可信输入。DIM/DWD 的 ODS 节点要求固定版本仍是当前 `PUBLISHED`，随后展开为该 ODS 合同中的精确物理来源；交互预览对每个来源最多采样 100 行后执行目标 DAG，正式构建则全量回源、投影 ODS 字段合同并把结果首次落入数仓。DWD 的 DIM 上游以及 DWS/ADS 的上游不递归重放 DAG，必须存在同一精确版本、schema hash 一致的当前 `ACTIVE` PostgreSQL 物化，执行器只读取服务端解析出的 `warehouse_published` 稳定视图。指针漂移、版本失效、来源摘要变化、层级不符、物化或稳定视图异常都会失败关闭，不会改读草稿或其他发布版本。
+严格 DIM/DWD/普通 DWS/ADS 的 `DATASET` 节点只按层级解析服务端可信输入。DIM/DWD 的 ODS 节点要求固定版本仍是当前 `PUBLISHED`，随后展开为该 ODS 合同中的精确物理来源；交互预览对每个来源最多采样 10 行后执行目标 DAG，正式构建则全量回源、投影 ODS 字段合同并把结果首次落入数仓。DWD 的 DIM 上游以及普通 DWS/ADS 的上游不递归重放 DAG，必须存在同一精确版本、schema hash 一致的当前 `ACTIVE` PostgreSQL 物化，执行器只读取服务端解析出的 `warehouse_published` 稳定视图。单表 ODS 与源端已汇总 DWS 发布后按其精确来源快照全量写入 `warehouse_ods` / `warehouse_dws`，源端已汇总 DWS 不再重复聚合。指针漂移、版本失效、来源摘要变化、层级不符、物化或稳定视图异常都会失败关闭，不会改读草稿或其他发布版本。
 
-运行时不会保存或信任客户端 SQL。MySQL/Oracle 由 T0303 安全编译器生成参数化只读查询；Excel/CSV 按固定文件版本在受限执行器中解释同一 DSL；ODS 与 DIM/DWD 的来源预览按节点裁剪、每源最多读取 100 行，并在网关执行受控 DAG。DWD/DIM 正式构建的来源阶段全量抽取，目标加工以及 DWS/ADS 执行由 PostgreSQL 方言编译器从同一结构化 DSL 生成参数化查询。PostgreSQL 执行事务会再次锁定并复核精确版本、当前发布指针、ACTIVE 物化、摘要、稳定视图和读取权限。发布试跑的 Join 风险探测与最终查询共用超时、取消和审计生命周期，风险告警不包含实际业务键。各路径统一执行参数规范化、行列权限、结果上限和不含明文的查询审计；PostgreSQL 路径另保存本次实际使用的精确 materialization ID 与摘要。
+运行时不会保存或信任客户端 SQL。MySQL/Oracle 由 T0303 安全编译器生成参数化只读查询；Excel/CSV 按固定文件版本在受限执行器中解释同一 DSL；ODS 与 DIM/DWD 的来源预览按节点裁剪、每源最多读取 10 行，并在网关执行受控 DAG。DWD/DIM 正式构建的来源阶段全量抽取，目标加工以及 DWS/ADS 执行由 PostgreSQL 方言编译器从同一结构化 DSL 生成参数化查询。PostgreSQL 执行事务会再次锁定并复核精确版本、当前发布指针、ACTIVE 物化、摘要、稳定视图和读取权限。发布试跑的 Join 风险探测与最终查询共用超时、取消和审计生命周期，风险告警不包含实际业务键。各路径统一执行参数规范化、行列权限、结果上限和不含明文的查询审计；PostgreSQL 路径另保存本次实际使用的精确 materialization ID 与摘要。

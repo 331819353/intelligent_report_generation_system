@@ -28,7 +28,8 @@ func validateDWDPublicationDependenciesTx(
 	datasetID, draftVersionID string,
 ) error {
 	var layer, targetDomainID, targetDomain string
-	err := tx.QueryRow(ctx, `SELECT version.layer,
+	var dslJSON json.RawMessage
+	err := tx.QueryRow(ctx, `SELECT version.layer,version.dsl_json,
 			dataset.domain_id::text,business_domain.name
 		FROM platform.dataset_versions AS version
 		JOIN platform.datasets AS dataset
@@ -45,7 +46,7 @@ func validateDWDPublicationDependenciesTx(
 		  AND dataset.deleted_at IS NULL
 		FOR SHARE OF dataset,version`,
 		datasetID, draftVersionID,
-	).Scan(&layer, &targetDomainID, &targetDomain)
+	).Scan(&layer, &dslJSON, &targetDomainID, &targetDomain)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrConflict
 	}
@@ -60,7 +61,15 @@ func validateDWDPublicationDependenciesTx(
 			Reason: "发布数据集必须填写业务领域",
 		}}}
 	}
-	if layer != string(LayerODS) {
+	preAggregatedSource := false
+	if layer == string(LayerDWS) {
+		document, decodeErr := DecodeAndNormalize(dslJSON)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		preAggregatedSource = IsPreAggregatedSourceMapping(document)
+	}
+	if layer != string(LayerODS) && !preAggregatedSource {
 		var dependencyCount, mismatchedCount int
 		err = tx.QueryRow(ctx, `SELECT count(*)::integer,
 				count(*) FILTER(
@@ -95,7 +104,7 @@ func validateDWDPublicationDependenciesTx(
 			}}}
 		}
 	}
-	if layer != string(LayerDWD) {
+	if layer != string(LayerDWD) || preAggregatedSource {
 		return nil
 	}
 

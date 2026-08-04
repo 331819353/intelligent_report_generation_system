@@ -151,6 +151,14 @@ func Validate(document Document) error {
 	} else {
 		validateLayerContract(&issues, document)
 	}
+	if document.Dataset.SourceMode != "" &&
+		document.Dataset.SourceMode != SourceModePreAggregated {
+		add("dataset.sourceMode", "仅支持 PRE_AGGREGATED")
+	}
+	if document.Dataset.SourceMode == SourceModePreAggregated &&
+		document.Dataset.Layer != LayerDWS {
+		add("dataset.sourceMode", "PRE_AGGREGATED 只能用于源端已汇总的 DWS")
+	}
 	if document.Dataset.SemanticContractVersion != "" &&
 		document.Dataset.SemanticContractVersion != "1.0" {
 		add("dataset.semanticContractVersion", "当前仅支持 1.0")
@@ -618,6 +626,7 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 	}
 	hasAggregation := documentHasBusinessAggregation(document)
 	hasGrouping := len(document.GroupBy) > 0 || len(document.Having) > 0 || len(document.PreAggregations) > 0
+	preAggregatedSource := IsPreAggregatedSourceMapping(document)
 	switch document.Dataset.Layer {
 	case LayerODS:
 		if document.Distinct {
@@ -664,7 +673,7 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 		if document.Distinct {
 			add("distinct", "DWS 使用显式聚合合同，不能使用 DIM 去重开关")
 		}
-		if document.layerSpecified {
+		if document.layerSpecified && !preAggregatedSource {
 			for index, node := range document.Nodes {
 				if node.Type != "DATASET" {
 					add(fmt.Sprintf("nodes[%d].type", index), "显式 DWS 只能引用已发布 DWD 或 DIM 数据集版本")
@@ -674,7 +683,16 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 		if document.OutputGrain.Description == "" || len(document.OutputGrain.KeyFields) == 0 {
 			add("outputGrain", "DWS 必须显式声明输出业务粒度和粒度键")
 		}
-		if !hasAggregation {
+		if preAggregatedSource {
+			if document.Dataset.Type != "SINGLE_SOURCE" || len(document.Nodes) != 1 ||
+				document.Nodes[0].Type != "TABLE" || len(document.Joins) > 0 ||
+				hasGrouping || hasAggregation || document.Distinct {
+				add("dataset.sourceMode", "PRE_AGGREGATED DWS 必须保持单个物理表的既有汇总粒度")
+			}
+			if !documentHasMeasureField(document) {
+				add("fields", "PRE_AGGREGATED DWS 至少需要一个度量字段")
+			}
+		} else if !hasAggregation {
 			add("dataset.layer", "DWS 至少需要一个聚合指标")
 		}
 	case LayerADS:
@@ -696,6 +714,50 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 			add("dataset.consumerContractId", "语义合同 1.0 的 ADS 必须绑定已发布消费合同")
 		}
 	}
+}
+
+// IsPreAggregatedSourceMapping identifies the narrow server-owned exception
+// used when a physical source table already represents aggregate rows.
+func IsPreAggregatedSourceMapping(document Document) bool {
+	return document.Dataset.Layer == LayerDWS &&
+		document.Dataset.SourceMode == SourceModePreAggregated
+}
+
+// IsSourceBackedMaterialization identifies the only datasets that may copy a
+// physical source directly into a warehouse layer. ODS preserves source rows;
+// PRE_AGGREGATED DWS preserves a source-side aggregate grain. Both contracts
+// must remain a single trusted TABLE node without joins.
+func IsSourceBackedMaterialization(document Document) bool {
+	if document.Dataset.Layer != LayerODS &&
+		!IsPreAggregatedSourceMapping(document) {
+		return false
+	}
+	return len(document.Nodes) == 1 &&
+		document.Nodes[0].Type == "TABLE" &&
+		len(document.Joins) == 0
+}
+
+// EnableSourceBackedMaterialization upgrades legacy published source mappings
+// in memory. Their immutable DSL/hash remains unchanged; the server-owned
+// build path only enables the execution policy required to materialize the
+// exact published graph.
+func EnableSourceBackedMaterialization(document Document) (Document, bool) {
+	if !IsSourceBackedMaterialization(document) {
+		return Document{}, false
+	}
+	document.ExecutionPolicy.Mode = "MATERIALIZED_PREFERRED"
+	document.ExecutionPolicy.Materialization.Enabled = true
+	document.ExecutionPolicy.Materialization.RefreshMode = "ON_DEMAND"
+	return document, true
+}
+
+func documentHasMeasureField(document Document) bool {
+	for _, field := range document.Fields {
+		if field.Role == "MEASURE" {
+			return true
+		}
+	}
+	return false
 }
 
 // documentHasBusinessAggregation 只识别合法承载业务聚合的位置：关联前分组指标和
@@ -1666,6 +1728,7 @@ func normalize(document Document) Document {
 	document.Dataset.Subject = strings.TrimSpace(document.Dataset.Subject)
 	document.Dataset.Type = upper(document.Dataset.Type)
 	document.Dataset.Layer = Layer(upper(string(document.Dataset.Layer)))
+	document.Dataset.SourceMode = SourceMode(upper(string(document.Dataset.SourceMode)))
 	document.Dataset.SemanticContractVersion = strings.TrimSpace(document.Dataset.SemanticContractVersion)
 	document.Dataset.ConsumerContractID = strings.TrimSpace(document.Dataset.ConsumerContractID)
 	for i := range document.Nodes {

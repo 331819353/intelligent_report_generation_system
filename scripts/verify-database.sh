@@ -63,7 +63,8 @@ BEGIN
     'data_source_connection_test_jobs','metadata_tables','metadata_columns',
     'datasets','dataset_versions','dataset_draft_revisions',
     'dataset_publication_requests','dataset_dependencies',
-    'dataset_materializations','dataset_build_runs'
+    'dataset_materializations','dataset_build_runs',
+    'dws_modeling_jobs','dws_modeling_outputs'
   ] LOOP
     IF to_regclass('platform.'||relation_name) IS NULL THEN
       RAISE EXCEPTION 'missing retained relation platform.%', relation_name;
@@ -80,7 +81,7 @@ BEGIN
     'metrics','metric_versions','metric_candidates',
     'reports','report_drafts','report_versions',
     'semantic_question_runs','semantic_releases','semantic_graph_nodes',
-    'dws_modeling_jobs','ads_modeling_jobs'
+    'ads_modeling_jobs'
   ] LOOP
     IF to_regclass('platform.'||relation_name) IS NOT NULL THEN
       RAISE EXCEPTION 'decommissioned relation still exists: platform.%', relation_name;

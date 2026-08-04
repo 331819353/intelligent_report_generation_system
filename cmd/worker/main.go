@@ -210,6 +210,16 @@ func main() {
 		workerID,
 		cfg.WorkerPollInterval,
 	)
+	go runDWSModelingWorker(
+		ctx,
+		logger,
+		dataset.NewDWSModelingWorker(
+			datasetStore,
+			dataset.NewOrchestratedDWSModelingPlanner(aiService),
+		),
+		workerID,
+		cfg.WorkerPollInterval,
+	)
 
 	<-ctx.Done()
 	logger.Info("worker stopped")
@@ -275,6 +285,31 @@ func runDWDModelingWorker(
 		}
 		return processed, nil
 	}, func(err error) { logger.Error("list dataset modeling tenants", "error", err) })
+}
+
+func runDWSModelingWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	worker *dataset.DWSModelingWorker,
+	workerID string,
+	pollInterval time.Duration,
+) {
+	const lease = 2 * time.Minute
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
+		processed := false
+		tenantIDs, err := worker.TenantIDs(ctx)
+		if err != nil {
+			return false, err
+		}
+		for _, tenantID := range tenantIDs {
+			didProcess, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
+			if runErr != nil {
+				logger.Error("process DWS theme modeling", "tenant_id", tenantID, "error", runErr)
+			}
+			processed = processed || didProcess
+		}
+		return processed, nil
+	}, func(err error) { logger.Error("list DWS modeling tenants", "error", err) })
 }
 
 func runMaterializationWorker(

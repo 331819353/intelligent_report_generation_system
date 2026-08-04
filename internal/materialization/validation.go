@@ -82,6 +82,10 @@ func (plan BuildPlan) Validate() error {
 		plan.Target.RefreshMode != string(plan.Mode) || !plan.Target.StableViewName {
 		return ErrInvalidRequest
 	}
+	sourceBacked := isSourceBackedPlan(plan)
+	if plan.Layer == LayerODS && !sourceBacked {
+		return ErrInvalidRequest
+	}
 
 	nodes := make(map[string]PlanNode, len(plan.Nodes))
 	materializeID := ""
@@ -110,7 +114,7 @@ func (plan BuildPlan) Validate() error {
 		} else if len(node.DependsOn) == 0 || len(node.InputOrdinals) != 0 {
 			return ErrInvalidRequest
 		}
-		if (plan.Layer == LayerDWS || plan.Layer == LayerADS) &&
+		if (plan.Layer == LayerDWS || plan.Layer == LayerADS) && !sourceBacked &&
 			node.Engine != EnginePostgres {
 			return ErrInvalidRequest
 		}
@@ -121,7 +125,8 @@ func (plan BuildPlan) Validate() error {
 			return ErrInvalidRequest
 		}
 	}
-	if materializeID == "" || (plan.Layer == LayerDWS && !hasAggregate) {
+	if materializeID == "" ||
+		(plan.Layer == LayerDWS && !sourceBacked && !hasAggregate) {
 		return ErrInvalidRequest
 	}
 
@@ -158,6 +163,53 @@ func (plan BuildPlan) Validate() error {
 	return nil
 }
 
+// isSourceBackedPlan recognizes the only direct source-to-warehouse topology:
+// one frozen source extract, one run-scoped PostgreSQL stage, then one atomic
+// materialization. It is valid only for ODS and PRE_AGGREGATED DWS requests;
+// the latter semantic condition is revalidated from the published DSL by the
+// control plane and worker resolver.
+func isSourceBackedPlan(plan BuildPlan) bool {
+	if (plan.Layer != LayerODS && plan.Layer != LayerDWS) || len(plan.Nodes) != 3 {
+		return false
+	}
+	var extractID, stageID string
+	for _, node := range plan.Nodes {
+		switch node.Kind {
+		case NodeExtract:
+			if extractID != "" || node.Engine != EngineSourceDB ||
+				len(node.DependsOn) != 0 || len(node.InputOrdinals) != 1 {
+				return false
+			}
+			extractID = node.ID
+		case NodeStage:
+			if stageID != "" || node.Engine != EnginePostgres ||
+				len(node.DependsOn) != 1 || len(node.InputOrdinals) != 0 {
+				return false
+			}
+			stageID = node.ID
+		case NodeMaterialize:
+			if node.Engine != EnginePostgres || len(node.DependsOn) != 1 ||
+				len(node.InputOrdinals) != 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	if extractID == "" || stageID == "" {
+		return false
+	}
+	for _, node := range plan.Nodes {
+		if node.Kind == NodeStage && node.DependsOn[0] != extractID {
+			return false
+		}
+		if node.Kind == NodeMaterialize && node.DependsOn[0] != stageID {
+			return false
+		}
+	}
+	return true
+}
+
 func (request RegisterRequest) Validate() error {
 	if err := request.Plan.Validate(); err != nil {
 		return err
@@ -178,8 +230,15 @@ func (request RegisterRequest) Validate() error {
 			return err
 		}
 	}
-	if request.Plan.Layer == LayerODS && len(inputs) != 1 {
+	sourceBacked := isSourceBackedPlan(request.Plan)
+	if sourceBacked && len(inputs) != 1 {
 		return ErrInvalidRequest
+	}
+	for _, input := range inputs {
+		isSource := input.Type == InputSourceTable || input.Type == InputFileVersion
+		if isSource != sourceBacked {
+			return ErrInvalidRequest
+		}
 	}
 	if !hasRequiredWarehouseInput(request.Plan.Layer, inputs) {
 		return ErrInvalidRequest
@@ -206,7 +265,8 @@ func hasRequiredWarehouseInput(layer Layer, inputs []InputSnapshot) bool {
 	case LayerDWS:
 		// Factless entity-count DWS datasets aggregate a governed DIM directly;
 		// ordinary and multi-fact DWS datasets aggregate one or more DWDs.
-		return inputLayers[string(LayerDWD)] ||
+		return inputLayers["SOURCE"] ||
+			inputLayers[string(LayerDWD)] ||
 			inputLayers[string(LayerDIM)]
 	default:
 		return true
@@ -283,8 +343,11 @@ func validateInput(input InputSnapshot, target Layer) error {
 			return ErrInvalidRequest
 		}
 	case LayerDWS:
-		if (input.Type != InputDatasetVersion && input.Type != InputMaterialization) ||
-			(input.Layer != string(LayerDWD) && input.Layer != string(LayerDIM)) {
+		sourceInput := (input.Type == InputSourceTable || input.Type == InputFileVersion) &&
+			input.Layer == "SOURCE"
+		warehouseInput := (input.Type == InputDatasetVersion || input.Type == InputMaterialization) &&
+			(input.Layer == string(LayerDWD) || input.Layer == string(LayerDIM))
+		if !sourceInput && !warehouseInput {
 			return ErrInvalidRequest
 		}
 	case LayerADS:

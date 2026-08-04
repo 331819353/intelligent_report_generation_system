@@ -61,6 +61,7 @@ export type DatasetDraft = {
   finalConfigured?: boolean; finalGroupingEnabled?: boolean
   preAggregation?: PreAggregationDraft; preAggregations?: PreAggregationDraft[]; finalOutputKeys?: string[]
   semanticContractVersion?: string; consumerContractId?: string
+  sourceMode?: 'PRE_AGGREGATED'
   factContract?: Record<string, unknown>; analysisContract?: Record<string, unknown>
   designer?: DesignerGraphV1
 }
@@ -149,6 +150,16 @@ export type DatasetPreviewColumn = {
   canonicalType?: string; semanticType?: string; role?: string; nullable: boolean
   groupingPlaceholder?: string
 }
+export type DatasetDAGRunStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED'
+export type DatasetDAGRun = {
+  id: string; datasetId: string; datasetVersionId: string; layer: DatasetLayer
+  mode: 'FULL' | 'INCREMENTAL' | 'BACKFILL'; status: DatasetDAGRunStatus
+  attempt: number; maxAttempts: number; createdAt: string; updatedAt: string
+  startedAt?: string; completedAt?: string; errorCode?: string; errorMessage?: string
+}
+export type DatasetDAGRunPage = {
+  items: DatasetDAGRun[]; total: number; limit: number; offset: number
+}
 export type DatasetDraftPreview = DatasetPreview & {
   dslHash: string; planHash: string; baseVersion: number
 }
@@ -159,6 +170,7 @@ export type AssetTablePreview = {
 export type DatasetDSL = Record<string, unknown> & {
   dslVersion: string; dataset: {
     code: string; name: string; description?: string; domain?: string; subject?: string; type: string; layer?: DatasetLayer
+    sourceMode?: 'PRE_AGGREGATED'
     semanticContractVersion?: string; consumerContractId?: string
   }
   nodes: Array<Record<string, unknown>>; fields: Array<Record<string, unknown>>
@@ -219,7 +231,7 @@ const executableTransformComponentType = (transform: GraphTransform): GraphTrans
 }
 export const datasetLayerChoices = (draft: DatasetDraft): DatasetLayer[] => {
   const datasetNodes = draft.nodes.filter(node => node.table.sourceKind === 'DATASET')
-  if (datasetNodes.length !== draft.nodes.length) return ['ODS']
+  if (datasetNodes.length !== draft.nodes.length) return draft.sourceMode === 'PRE_AGGREGATED' ? ['DWS'] : ['ODS']
   const upstreamLayers = new Set(datasetNodes.map(node => node.table.datasetLayer).filter(Boolean))
   if (!upstreamLayers.size) throw new Error('无法识别上游数据集层级')
   if ([...upstreamLayers].every(layer => layer === 'ODS' || layer === 'DIM') && upstreamLayers.has('ODS')) {
@@ -235,16 +247,18 @@ const modeledDatasetLayer = (draft: DatasetDraft): DatasetLayer => {
   const choices = datasetLayerChoices(draft)
   return draft.layer && choices.includes(draft.layer) ? draft.layer : choices[0]
 }
-const modeledExecutionPolicy = (layer: DatasetLayer) => layer === 'ODS'
-  ? { mode: 'REALTIME', timeoutMs: 5000, previewLimit: 100, resultLimit: 10000, cacheTtlSeconds: 300, materialization: { enabled: false } }
-  : {
-      mode: 'MATERIALIZED_PREFERRED',
-      timeoutMs: 30000,
-      previewLimit: 200,
-      resultLimit: 100000,
-      cacheTtlSeconds: 300,
-      materialization: { enabled: true, refreshMode: 'ON_DEMAND' },
-    }
+const modeledExecutionPolicy = (layer: DatasetLayer, sourceMode?: DatasetDraft['sourceMode']) => {
+  void layer
+  void sourceMode
+  return {
+    mode: 'MATERIALIZED_PREFERRED',
+    timeoutMs: 30000,
+    previewLimit: 10,
+    resultLimit: 100000,
+    cacheTtlSeconds: 300,
+    materialization: { enabled: true, refreshMode: 'ON_DEMAND' },
+  }
+}
 const fieldID = (node: DesignerNode, column: AssetColumn) => `field_${identifier(node.alias)}_${identifier(column.columnName)}`
 const fieldCode = (node: DesignerNode, column: AssetColumn, multiple: boolean) => identifier(multiple ? `${node.alias}_${column.columnName}` : column.columnName)
 
@@ -649,6 +663,7 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
       ...(draft.domain?.trim() ? { domain: draft.domain.trim() } : {}),
       ...(draft.subject?.trim() ? { subject: draft.subject.trim() } : {}),
       type: sourceCount > 1 ? 'CROSS_SOURCE' : 'SINGLE_SOURCE', layer,
+      ...(draft.sourceMode ? { sourceMode: draft.sourceMode } : {}),
       ...(draft.semanticContractVersion ? { semanticContractVersion: draft.semanticContractVersion } : {}),
       ...(draft.consumerContractId ? { consumerContractId: draft.consumerContractId } : {}),
     },
@@ -667,7 +682,7 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
     sorts: draft.sorts.flatMap(item => fieldIDs.get(item.fieldId) ? [{ fieldId: fieldIDs.get(item.fieldId)!, direction: item.direction }] : []),
     parameters: draft.parameters.map(item => ({ ...item, code: identifier(item.code) })),
     outputGrain: { description: grainDescription, keyFields: grainKeys },
-    executionPolicy: modeledExecutionPolicy(layer),
+    executionPolicy: modeledExecutionPolicy(layer, draft.sourceMode),
     designer: serializeDesignerGraph(designer),
   }
 }
@@ -769,6 +784,7 @@ export function buildDatasetDSL(draft: DatasetDraft): DatasetDSL {
       ...(draft.domain?.trim() ? { domain: draft.domain.trim() } : {}),
       ...(draft.subject?.trim() ? { subject: draft.subject.trim() } : {}),
       type: sourceCount > 1 ? 'CROSS_SOURCE' : 'SINGLE_SOURCE', layer,
+      ...(draft.sourceMode ? { sourceMode: draft.sourceMode } : {}),
       ...(draft.semanticContractVersion ? { semanticContractVersion: draft.semanticContractVersion } : {}),
       ...(draft.consumerContractId ? { consumerContractId: draft.consumerContractId } : {}),
     },
@@ -788,7 +804,7 @@ export function buildDatasetDSL(draft: DatasetDraft): DatasetDSL {
     sorts: draft.sorts.filter(item => item.fieldId).map(item => ({ fieldId: fieldIDs.get(item.fieldId) ?? item.fieldId, direction: item.direction })),
     parameters: draft.parameters.map(item => ({ ...item, code: identifier(item.code) })),
     outputGrain: { description: draft.grainDescription.trim(), keyFields: grainKeys },
-    executionPolicy: modeledExecutionPolicy(layer),
+    executionPolicy: modeledExecutionPolicy(layer, draft.sourceMode),
   }
 }
 
@@ -898,6 +914,7 @@ const datasetPath = (id: string) => `/v1/datasets/${encodeURIComponent(id)}`
 export type DatasetLLMTrigger =
   | 'DIM_MODELING'
   | 'DWD_MODELING'
+  | 'DWS_MODELING'
 export type DatasetLLMTriggerResult = {
   trigger: DatasetLLMTrigger
   eligibleCount: number
@@ -927,7 +944,7 @@ export const datasetAPI = {
     return { ...response, items: response.items.filter(column => !column.assetStatus || column.assetStatus === 'ACTIVE') }
   },
   allColumns: (tableID: string) => apiRequest<{ items: AssetColumn[] }>(`/v1/assets/tables/${encodeURIComponent(tableID)}/columns`, { cache: 'no-store' }),
-  tablePreview: (tableID: string, maxRows = 5) => apiRequest<AssetTablePreview>(`/v1/assets/tables/${encodeURIComponent(tableID)}/preview?maxRows=${maxRows}`, { cache: 'no-store' }),
+  tablePreview: (tableID: string, maxRows = 10) => apiRequest<AssetTablePreview>(`/v1/assets/tables/${encodeURIComponent(tableID)}/preview?maxRows=${maxRows}`, { cache: 'no-store' }),
   // 指标等下游编辑器只能从租户内目录显式选择数据集，不能猜测或写死资源标识。
   list: (limit = 50, offset = 0) => {
     const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
@@ -937,6 +954,7 @@ export const datasetAPI = {
     const paths: Record<DatasetLLMTrigger, string> = {
       DIM_MODELING: 'trigger-dim-modeling',
       DWD_MODELING: 'trigger-dwd-modeling',
+      DWS_MODELING: 'trigger-dws-modeling',
     }
     return apiRequest<DatasetLLMTriggerResult>(
       `/v1/datasets/${paths[trigger]}`,
@@ -954,8 +972,8 @@ export const datasetAPI = {
     return apiRequest<DatasetRevisionPage>(`${datasetPath(id)}/revisions?${query}`, { cache: 'no-store' })
   },
   getRevision: (id: string, revisionId: string) => apiRequest<DatasetRevisionRecord>(`${datasetPath(id)}/revisions/${encodeURIComponent(revisionId)}`, { cache: 'no-store' }),
-  previewRevision: (id: string, revisionId: string, queryId: string, parameters: Record<string, unknown>, maxRows = 5) => apiRequest<DatasetPreview>(`${datasetPath(id)}/revisions/${encodeURIComponent(revisionId)}/preview`, { method: 'POST', cache: 'no-store', body: JSON.stringify({ queryId, parameters, maxRows }) }),
-  previewCandidate: (dsl: DatasetDSL, queryId: string, parameters: Record<string, unknown>, maxRows = 5) => apiRequest<DatasetCandidatePreview>('/v1/datasets/candidate/preview', { method: 'POST', cache: 'no-store', body: JSON.stringify({ queryId, dsl, parameters, maxRows }) }),
+  previewRevision: (id: string, revisionId: string, queryId: string, parameters: Record<string, unknown>, maxRows = 10) => apiRequest<DatasetPreview>(`${datasetPath(id)}/revisions/${encodeURIComponent(revisionId)}/preview`, { method: 'POST', cache: 'no-store', body: JSON.stringify({ queryId, parameters, maxRows }) }),
+  previewCandidate: (dsl: DatasetDSL, queryId: string, parameters: Record<string, unknown>, maxRows = 10) => apiRequest<DatasetCandidatePreview>('/v1/datasets/candidate/preview', { method: 'POST', cache: 'no-store', body: JSON.stringify({ queryId, dsl, parameters, maxRows }) }),
   rollbackRevision: (id: string, revisionId: string, expectedVersion: number) => apiRequest<DatasetRecord>(`${datasetPath(id)}/revisions/${encodeURIComponent(revisionId)}/rollback`, { method: 'POST', body: JSON.stringify({ expectedVersion }) }),
   validate: (dsl: DatasetDSL) => apiRequest<{ valid: boolean; dslHash: string; planHash: string; logicalPlan: unknown }>('/v1/datasets/validate', { method: 'POST', body: JSON.stringify({ dsl }) }),
   create: (dsl: DatasetDSL) => apiRequest<DatasetRecord>('/v1/datasets', { method: 'POST', body: JSON.stringify({ code: dsl.dataset.code, name: dsl.dataset.name, description: dsl.dataset.description ?? '', type: dsl.dataset.type, dsl }) }),
@@ -1005,9 +1023,22 @@ export const datasetAPI = {
   getVersionUsage: (id: string, versionId: string) => apiRequest<VersionUsage>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}/usage`, { cache: 'no-store' }),
   rollbackVersion: (id: string, versionId: string, expectedVersion: number) => apiRequest<DatasetRecord>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}/rollback`, { method: 'POST', body: JSON.stringify({ expectedVersion }) }),
   transitionVersion: (id: string, versionId: string, input: VersionTransitionInput) => apiRequest<PublishedVersionRecord>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}/status`, { method: 'POST', body: JSON.stringify(input) }),
+  listDAGRuns: (id: string, limit = 20, offset = 0) => {
+    const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+    return apiRequest<DatasetDAGRunPage>(`${datasetPath(id)}/materializations/builds?${query}`, { cache: 'no-store' })
+  },
+  runDAG: (id: string, publishedVersionId: string, requestId: string) => apiRequest<DatasetDAGRun>(`${datasetPath(id)}/materializations/builds`, {
+    method: 'POST',
+    cache: 'no-store',
+    body: JSON.stringify({ mode: 'FULL', publishedVersionId, requestId, maxAttempts: 3 }),
+  }),
+  stopDAG: (id: string, runId: string) => apiRequest<DatasetDAGRun>(`${datasetPath(id)}/materializations/builds/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
+    cache: 'no-store',
+  }),
   evaluatePermission: (id: string, action: DatasetPermissionAction) => apiRequest<{ allowed: boolean }>('/v1/permissions/evaluate', { method: 'POST', body: JSON.stringify({ resourceType: 'DATASET', action, objectId: id }) }),
-  preview: (id: string, queryId: string, parameters: Record<string, unknown>, maxRows = 100) => apiRequest<DatasetPreview>(`${datasetPath(id)}/preview`, { method: 'POST', cache: 'no-store', body: JSON.stringify({ queryId, parameters, maxRows }) }),
-  previewDraft: (id: string, expectedVersion: number, dsl: DatasetDSL, queryId: string, parameters: Record<string, unknown>, maxRows = 5) => apiRequest<DatasetDraftPreview>(`${datasetPath(id)}/draft/preview`, { method: 'POST', cache: 'no-store', body: JSON.stringify({ queryId, expectedVersion, dsl, parameters, maxRows }) }),
+  preview: (id: string, queryId: string, parameters: Record<string, unknown>, maxRows = 10) => apiRequest<DatasetPreview>(`${datasetPath(id)}/preview`, { method: 'POST', cache: 'no-store', body: JSON.stringify({ queryId, parameters, maxRows }) }),
+  previewDraft: (id: string, expectedVersion: number, dsl: DatasetDSL, queryId: string, parameters: Record<string, unknown>, maxRows = 10) => apiRequest<DatasetDraftPreview>(`${datasetPath(id)}/draft/preview`, { method: 'POST', cache: 'no-store', body: JSON.stringify({ queryId, expectedVersion, dsl, parameters, maxRows }) }),
   previewVersion: (id: string, versionId: string, queryId: string, parameters: Record<string, unknown>, maxRows = 100) => apiRequest<DatasetPreview>(`${datasetPath(id)}/versions/${encodeURIComponent(versionId)}/preview`, { method: 'POST', cache: 'no-store', body: JSON.stringify({ queryId, parameters, maxRows }) }),
   cancel: (id: string, queryId: string) => apiRequest<{ cancelled: boolean }>(`${datasetPath(id)}/query-runs/${encodeURIComponent(queryId)}/cancel`, { method: 'POST', body: '{}' }),
 }

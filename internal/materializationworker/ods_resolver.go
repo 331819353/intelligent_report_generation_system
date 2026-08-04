@@ -24,7 +24,6 @@ import (
 )
 
 const odsStageBatchSize = 1000
-const odsPreviewRows = 100
 const odsStageTimeout = 30 * time.Minute
 
 type databaseStager interface {
@@ -42,9 +41,10 @@ type odsProjector interface {
 	) (warehouse.StageResult, error)
 }
 
-// ODSResolver reloads a published single-table ODS contract, validates its
-// frozen SOURCE input and stages the exact remote/file version into PostgreSQL.
-// It never accepts physical names, SQL or connection details from the claim.
+// ODSResolver reloads a published single-table source-backed contract,
+// validates its frozen SOURCE input and stages the exact remote/file version
+// into PostgreSQL. It serves ODS and PRE_AGGREGATED DWS only, and never accepts
+// physical names, SQL or connection details from the claim.
 type ODSResolver struct {
 	pool            *pgxpool.Pool
 	databaseStagers map[datasource.Type]databaseStager
@@ -76,8 +76,9 @@ func NewODSResolver(
 	}
 }
 
-// CompositeResolver keeps PostgreSQL-only DIM/DWD/DWS/ADS resolution separate from
-// source extraction. Layer identity is loaded again by each concrete resolver.
+// CompositeResolver keeps warehouse-input resolution separate from source
+// extraction. Layer identity and the source-backed DWS exception are loaded
+// again by each concrete resolver.
 type CompositeResolver struct {
 	ods      Resolver
 	postgres Resolver
@@ -94,12 +95,16 @@ func (resolver *CompositeResolver) Resolve(
 	if resolver == nil {
 		return ResolvedBuild{}, errors.New("materialization resolver is not configured")
 	}
-	if claim.Layer == materialization.LayerODS {
-		return ResolvedBuild{}, executionError(
-			CodeODSUnsupported,
-			"ODS is a virtual source mapping and cannot be materialized",
-			nil,
-		)
+	usesSource := claim.Layer == materialization.LayerODS
+	for _, input := range claim.Inputs {
+		usesSource = usesSource || input.Type == materialization.InputSourceTable ||
+			input.Type == materialization.InputFileVersion
+	}
+	if usesSource {
+		if resolver.ods == nil {
+			return ResolvedBuild{}, errors.New("source materialization resolver is not configured")
+		}
+		return resolver.ods.Resolve(ctx, claim)
 	}
 	if resolver.postgres == nil {
 		return ResolvedBuild{}, errors.New("PostgreSQL materialization resolver is not configured")
@@ -129,7 +134,7 @@ func (resolver *ODSResolver) Resolve(
 	if resolver == nil || resolver.pool == nil {
 		return ResolvedBuild{}, errors.New("ODS materialization resolver is not configured")
 	}
-	if err := validateODSClaim(claim); err != nil {
+	if err := validateSourceClaim(claim); err != nil {
 		return ResolvedBuild{}, err
 	}
 	plan, err := resolver.loadPlan(ctx, claim)
@@ -144,7 +149,7 @@ func (resolver *ODSResolver) Resolve(
 	stageCtx, cancel := context.WithTimeout(ctx, odsStageTimeout)
 	defer cancel()
 	result, err := resolver.stage(
-		stageCtx, claim, plan, odsPreviewRows, true,
+		stageCtx, claim, plan, warehouse.MaxODSRows, false,
 	)
 	if err != nil {
 		return ResolvedBuild{}, mapODSStageError(ctx, stageCtx, err)
@@ -180,7 +185,7 @@ func (resolver *ODSResolver) Resolve(
 	}, nil
 }
 
-func validateODSClaim(claim materialization.Claim) error {
+func validateSourceClaim(claim materialization.Claim) error {
 	request := materialization.RegisterRequest{
 		Plan: claim.Plan, Inputs: claim.Inputs,
 		PartitionKey: claim.PartitionKey, MaxAttempts: claim.MaxAttempts,
@@ -190,24 +195,25 @@ func validateODSClaim(claim materialization.Claim) error {
 		claim.Plan.DatasetVersionID != claim.DatasetVersionID ||
 		claim.Plan.Layer != claim.Layer ||
 		claim.Plan.Mode != claim.Mode ||
-		claim.Layer != materialization.LayerODS {
+		(claim.Layer != materialization.LayerODS &&
+			claim.Layer != materialization.LayerDWS) {
 		return executionError(
 			CodeTrustedPlanInvalid,
-			"the registered ODS build plan is invalid",
+			"the registered source-backed build plan is invalid",
 			err,
 		)
 	}
 	if claim.Mode != materialization.RunModeFull {
 		return executionError(
 			CodeRefreshModeUnsupported,
-			"incremental and backfill ODS materialization are not supported",
+			"incremental and backfill source materialization are not supported",
 			nil,
 		)
 	}
 	if claim.Plan.Target.RelationKind != "TABLE" {
 		return executionError(
 			CodePartitionedTableUnsupported,
-			"partitioned ODS materialization is not supported",
+			"partitioned source materialization is not supported",
 			nil,
 		)
 	}
@@ -217,7 +223,7 @@ func validateODSClaim(claim materialization.Claim) error {
 			claim.Inputs[0].Type != materialization.InputFileVersion) {
 		return executionError(
 			CodeTrustedPlanInvalid,
-			"the registered ODS build must contain one frozen source input",
+			"the registered source-backed build must contain one frozen source input",
 			nil,
 		)
 	}
@@ -230,7 +236,7 @@ func validateODSClaim(claim materialization.Claim) error {
 				node.InputOrdinals[0] != 1 {
 				return executionError(
 					CodeTrustedPlanInvalid,
-					"the ODS extraction node does not match its frozen source input",
+					"the source extraction node does not match its frozen input",
 					nil,
 				)
 			}
@@ -239,7 +245,7 @@ func validateODSClaim(claim materialization.Claim) error {
 		if node.Engine != materialization.EnginePostgres {
 			return executionError(
 				CodePostgresExecutionRequired,
-				"ODS transformations after extraction must execute in PostgreSQL",
+				"source transformations after extraction must execute in PostgreSQL",
 				nil,
 			)
 		}
@@ -247,7 +253,7 @@ func validateODSClaim(claim materialization.Claim) error {
 	if extracts != 1 {
 		return executionError(
 			CodeTrustedPlanInvalid,
-			"the ODS build must contain exactly one extraction node",
+			"the source-backed build must contain exactly one extraction node",
 			nil,
 		)
 	}
@@ -276,7 +282,7 @@ func (resolver *ODSResolver) loadPlan(
 			if errors.Is(err, pgx.ErrNoRows) {
 				return executionError(
 					CodeTargetVersionUnavailable,
-					"the target published ODS version is unavailable",
+					"the target published source-backed version is unavailable",
 					err,
 				)
 			}
@@ -286,22 +292,21 @@ func (resolver *ODSResolver) loadPlan(
 		if err != nil {
 			return executionError(
 				CodeTargetContractChanged,
-				"the target published ODS contract is invalid",
+				"the target published source-backed contract is invalid",
 				err,
 			)
 		}
-		if storedLayer != string(materialization.LayerODS) ||
+		if storedLayer != string(claim.Layer) ||
 			prepared.DSLHash != plan.schemaHash ||
-			prepared.Document.Dataset.Layer != dataset.LayerODS ||
-			len(prepared.Document.Nodes) != 1 ||
-			prepared.Document.Nodes[0].Type != "TABLE" {
+			string(prepared.Document.Dataset.Layer) != string(claim.Layer) ||
+			!dataset.IsSourceBackedMaterialization(prepared.Document) {
 			return executionError(
 				CodeTargetContractChanged,
-				"the target published ODS contract no longer matches the registered build",
+				"the target published source-backed contract no longer matches the registered build",
 				nil,
 			)
 		}
-		plan.document = prepared.Document
+		plan.document, _ = dataset.EnableSourceBackedMaterialization(prepared.Document)
 		plan.node = prepared.Document.Nodes[0]
 		plan.input = claim.Inputs[0]
 		if err := validateODSNodeInput(plan.node, plan.input); err != nil {

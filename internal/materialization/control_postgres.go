@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -50,16 +51,22 @@ func (store *PostgresStore) RegisterCurrent(
 	tenantID, actorID, datasetID string,
 	control RegisterCurrentRequest,
 ) (run Run, created bool, err error) {
+	validPartition := control.PartitionKey == ""
+	if strings.HasPrefix(control.PartitionKey, "run:") {
+		validPartition = validUUID(strings.TrimPrefix(control.PartitionKey, "run:"))
+	}
 	if store == nil || store.pool == nil ||
 		!validUUID(tenantID) || !validUUID(actorID) || !validUUID(datasetID) ||
-		control.Mode != RunModeFull || control.PartitionKey != "" ||
-		control.MaxAttempts < 1 || control.MaxAttempts > 10 {
+		control.Mode != RunModeFull || !validPartition ||
+		control.MaxAttempts < 1 || control.MaxAttempts > 10 ||
+		!validUUID(control.ExpectedVersionID) {
 		return Run{}, false, ErrInvalidRequest
 	}
 	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
 		var txErr error
 		run, created, txErr = store.registerCurrentTx(
-			ctx, tx, tenantID, actorID, datasetID, "", control, false,
+			ctx, tx, tenantID, actorID, datasetID,
+			control.ExpectedVersionID, control, false,
 		)
 		return txErr
 	})
@@ -69,9 +76,8 @@ func (store *PostgresStore) RegisterCurrent(
 	return run, created, nil
 }
 
-// EnqueueMappedDatasetMaterializationTx is retained for wiring compatibility.
-// Mapped ODS publication no longer calls this hook; ODS is a virtual source
-// mapping and therefore never registers a warehouse build.
+// EnqueueMappedDatasetMaterializationTx registers the exact source-backed ODS
+// or PRE_AGGREGATED DWS version in the caller's publication transaction.
 func (store *PostgresStore) EnqueueMappedDatasetMaterializationTx(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -81,24 +87,19 @@ func (store *PostgresStore) EnqueueMappedDatasetMaterializationTx(
 	if store == nil || tx == nil ||
 		!validUUID(tenantID) || !validUUID(actorID) ||
 		!validUUID(version.DatasetID) || !validUUID(version.ID) ||
-		version.Status != "PUBLISHED" || version.Layer != dataset.LayerODS {
+		version.Status != "PUBLISHED" {
 		return ErrInvalidRequest
 	}
-	var mapped bool
-	if err := tx.QueryRow(ctx, `SELECT origin_table_id IS NOT NULL
-		FROM platform.datasets
-		WHERE id=$1 AND current_published_version_id=$2
-		  AND status='PUBLISHED' AND deleted_at IS NULL
-		FOR SHARE`, version.DatasetID, version.ID).Scan(&mapped); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrConflict
-		}
-		return err
-	}
-	if !mapped {
+	document, err := dataset.DecodeAndNormalize(version.DSL)
+	if err != nil || !dataset.IsSourceBackedMaterialization(document) {
 		return ErrInvalidRequest
 	}
-	return nil
+	_, _, err = store.registerCurrentTx(
+		ctx, tx, tenantID, actorID, version.DatasetID, version.ID,
+		RegisterCurrentRequest{Mode: RunModeFull, MaxAttempts: 3},
+		true,
+	)
+	return err
 }
 
 // EnqueueGovernedDatasetMaterializationTx freezes the exact DIM/DWD/DWS/ADS version
@@ -138,13 +139,6 @@ func (store *PostgresStore) registerCurrentTx(
 	target, err := loadPublishedBuildTargetTx(ctx, tx, datasetID)
 	if err != nil {
 		return Run{}, false, err
-	}
-	// ODS is a governed virtual mapping over the immutable source, not a
-	// warehouse materialization target. Reject the control-plane entry point
-	// as well as the worker path so a manual/API registration cannot recreate
-	// an ODS warehouse copy.
-	if target.Layer == LayerODS {
-		return Run{}, false, ErrInvalidRequest
 	}
 	if expectedVersionID != "" && target.VersionID != expectedVersionID {
 		return Run{}, false, ErrConflict
@@ -324,11 +318,17 @@ func loadPublishedBuildTargetTx(
 	if err != nil ||
 		prepared.DSLHash != target.SchemaHash ||
 		string(prepared.Document.Dataset.Layer) != storedLayer ||
-		ownerLayer != storedLayer ||
-		!prepared.Document.ExecutionPolicy.Materialization.Enabled {
+		ownerLayer != storedLayer {
 		return publishedBuildTarget{}, ErrConflict
 	}
 	target.Document = prepared.Document
+	if !target.Document.ExecutionPolicy.Materialization.Enabled {
+		var eligible bool
+		target.Document, eligible = dataset.EnableSourceBackedMaterialization(target.Document)
+		if !eligible {
+			return publishedBuildTarget{}, ErrConflict
+		}
+	}
 	return target, nil
 }
 
@@ -338,18 +338,14 @@ func deriveCurrentInputsTx(
 	targetDatasetID string,
 	target publishedBuildTarget,
 ) ([]InputSnapshot, []int, error) {
-	switch target.Layer {
-	case LayerODS:
-		if len(target.Document.Nodes) != 1 ||
-			target.Document.Nodes[0].Type != "TABLE" ||
-			len(target.Document.Joins) != 0 {
-			return nil, nil, ErrInvalidRequest
-		}
+	if dataset.IsSourceBackedMaterialization(target.Document) {
 		input, err := deriveSourceInputTx(ctx, tx, target.Document.Nodes[0])
 		if err != nil {
 			return nil, nil, err
 		}
 		return []InputSnapshot{input}, []int{1}, nil
+	}
+	switch target.Layer {
 	case LayerDIM, LayerDWD, LayerDWS, LayerADS:
 		allowedLayers := map[Layer]bool{LayerODS: true}
 		if target.Layer == LayerDWD {
@@ -706,7 +702,7 @@ func deriveBuildPlan(
 			RelationKind: "TABLE", RefreshMode: string(mode), StableViewName: true,
 		},
 	}
-	if target.Layer == LayerODS {
+	if dataset.IsSourceBackedMaterialization(target.Document) {
 		plan.Nodes = []PlanNode{
 			{
 				ID: "extract", Kind: NodeExtract, Engine: EngineSourceDB,
@@ -980,7 +976,7 @@ func loadBuildMaterializationTx(
 	return &item, nil
 }
 
-func (store *PostgresStore) CancelQueued(
+func (store *PostgresStore) CancelActive(
 	ctx context.Context,
 	tenantID, actorID, datasetID, buildID string,
 ) (run Run, err error) {
@@ -1002,12 +998,16 @@ func (store *PostgresStore) CancelQueued(
 		if err != nil {
 			return err
 		}
-		if current.Status != RunQueued {
+		if current.Status != RunQueued && current.Status != RunRunning {
 			return ErrInvalidTransition
 		}
+		fromStatus := current.Status
 		run, err = scanRun(tx.QueryRow(ctx, `UPDATE platform.dataset_build_runs
-			SET status='CANCELLED',completed_at=now(),updated_at=now()
-			WHERE id=$1 AND dataset_id=$2 AND status='QUEUED'
+			SET status='CANCELLED',error_code='USER_CANCELLED',
+				error_message='cancelled by user',
+				lease_owner='',lease_token=NULL,lease_expires_at=NULL,
+				completed_at=now(),updated_at=now()
+			WHERE id=$1 AND dataset_id=$2 AND status IN ('QUEUED','RUNNING')
 			RETURNING `+runSelectColumns, buildID, datasetID))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrInvalidTransition
@@ -1021,9 +1021,9 @@ func (store *PostgresStore) CancelQueued(
 			$1,$2,'CANCEL_MATERIALIZATION_BUILD','DATASET_BUILD_RUN',$3,
 			jsonb_build_object(
 				'datasetId',$4::text,'datasetVersionId',$5::text,
-				'fromStatus','QUEUED','toStatus','CANCELLED'
+				'fromStatus',$6::text,'toStatus','CANCELLED'
 			)
-		)`, tenantID, actorID, run.ID, datasetID, run.DatasetVersionID)
+		)`, tenantID, actorID, run.ID, datasetID, run.DatasetVersionID, fromStatus)
 		return err
 	})
 	if err != nil {

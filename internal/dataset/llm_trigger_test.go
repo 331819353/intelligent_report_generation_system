@@ -32,6 +32,8 @@ func TestValidateLLMTriggerAssetsEnforcesLayerRules(t *testing.T) {
 		{name: "DIM accepts ODS", kind: LLMTriggerDIMModeling, layer: LayerODS, valid: true},
 		{name: "DIM rejects DIM", kind: LLMTriggerDIMModeling, layer: LayerDIM},
 		{name: "DWD accepts ODS", kind: LLMTriggerDWDModeling, layer: LayerODS, valid: true},
+		{name: "DWS accepts DWD", kind: LLMTriggerDWSModeling, layer: LayerDWD, valid: true},
+		{name: "DWS rejects ODS", kind: LLMTriggerDWSModeling, layer: LayerODS},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -47,6 +49,18 @@ func TestValidateLLMTriggerAssetsEnforcesLayerRules(t *testing.T) {
 				t.Fatalf("expected scope error, got %v", err)
 			}
 		})
+	}
+}
+
+func TestValidateLLMTriggerAssetsRequiresDWDForDWS(t *testing.T) {
+	selected := []string{"0afedb1c-567f-4ed0-96f4-87fddfd4b02c"}
+	err := validateLLMTriggerAssets(
+		LLMTriggerDWSModeling,
+		selected,
+		[]llmTriggerAsset{{ID: selected[0], Layer: LayerDIM}},
+	)
+	if !errors.Is(err, ErrLLMTriggerScopeInvalid) {
+		t.Fatalf("expected DWS DWD requirement, got %v", err)
 	}
 }
 

@@ -778,7 +778,7 @@ func metadataCompletionShouldRetry(err error) bool {
 	switch code {
 	case "SOURCE_CHANGED", "STRUCTURE_CHANGED", "PROCESSING_LEASE_LOST",
 		"TENANT_AI_FORBIDDEN", "QUOTA_EXCEEDED", "INVALID_TARGET_SCOPE",
-		"ODS_DATASET_UNSUPPORTED_COLUMN":
+		"ODS_DATASET_UNSUPPORTED_COLUMN", "PERSISTENCE_ERROR":
 		return false
 	default:
 		return true
@@ -814,6 +814,8 @@ func metadataCompletionJobFailure(err error) (string, string) {
 		return "LLM_OUTPUT_INVALID", "LLM 返回的表名、字段或标签不完整，请重试或改为手工完善"
 	case "PARTIAL_OUTPUT":
 		return "LLM_OUTPUT_PARTIAL", "LLM 已保存可用的表名、字段和标签，剩余缺失项请在 ODS 数据集中手工完善"
+	case "PERSISTENCE_ERROR":
+		return "LLM_RESULT_SAVE_FAILED", "LLM 已返回结果，但元数据保存失败；请联系管理员检查数据库迁移与运行状态后重试"
 	case "INVALID_TARGET_SCOPE":
 		return "LLM_TARGET_SCOPE_INVALID", "当前表没有可处理的元数据目标，请刷新表结构后重试"
 	case "ODS_DATASET_UNSUPPORTED_COLUMN":

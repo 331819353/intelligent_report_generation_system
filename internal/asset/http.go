@@ -89,7 +89,15 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 			writeError(w, 404, "ASSET_NOT_FOUND", "table asset not found")
 			return
 		}
-		result, err := sampler.SampleTable(r.Context(), claims.TenantID, item.DataSourceID, datasource.MetadataTable{CatalogName: item.CatalogName, SchemaName: item.SchemaName, Name: item.TableName, Type: item.TableType}, maxRows)
+		columns, err := repo.ListColumns(r.Context(), claims.TenantID, item.ID)
+		if err != nil {
+			writeError(w, 404, "ASSET_NOT_FOUND", "table asset not found")
+			return
+		}
+		result, err := sampler.SampleTable(
+			r.Context(), claims.TenantID, item.DataSourceID,
+			metadataTableForPreview(item, columns), maxRows,
+		)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "sample table asset", "table_id", item.ID, "data_source_id", item.DataSourceID, "error", err)
 			writeError(w, 502, "ASSET_PREVIEW_FAILED", "failed to sample table asset")
@@ -192,6 +200,35 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 		writeJSON(w, 200, map[string]any{"items": items})
 	})))
 	return mux
+}
+
+// metadataTableForPreview restores the active column projection that is stored
+// separately from the table asset. The connector intentionally treats an empty
+// projection as an empty result, so passing only the table identity would make
+// every database-backed node preview return zero rows without an error.
+func metadataTableForPreview(table Table, columns []Column) datasource.MetadataTable {
+	metadataColumns := make([]datasource.MetadataColumn, 0, len(columns))
+	for _, column := range columns {
+		if column.AssetStatus != "" && column.AssetStatus != "ACTIVE" {
+			continue
+		}
+		metadataColumns = append(metadataColumns, datasource.MetadataColumn{
+			Name:            column.ColumnName,
+			OrdinalPosition: column.OrdinalPosition,
+			SourceComment:   column.SourceComment,
+			NativeType:      column.NativeType,
+			CanonicalType:   column.CanonicalType,
+			Nullable:        column.Nullable,
+		})
+	}
+	return datasource.MetadataTable{
+		CatalogName:   table.CatalogName,
+		SchemaName:    table.SchemaName,
+		Name:          table.TableName,
+		Type:          table.TableType,
+		SourceComment: table.SourceComment,
+		Columns:       metadataColumns,
+	}
 }
 
 // decode 严格解析资产修改请求并输出统一参数错误。

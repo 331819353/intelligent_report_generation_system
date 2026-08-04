@@ -19,27 +19,36 @@ func (service *ControlService) Register(
 	input CreateBuildInput,
 ) (BuildDetail, bool, error) {
 	if service == nil || service.store == nil ||
-		!validUUID(tenantID) || !validUUID(actorID) || !validUUID(datasetID) {
+		!validUUID(tenantID) || !validUUID(actorID) || !validUUID(datasetID) ||
+		!validUUID(input.PublishedVersionID) {
 		return BuildDetail{}, false, ErrInvalidRequest
 	}
 	mode := input.Mode
 	if mode == "" {
 		mode = RunModeFull
 	}
+	partitionKey := input.PartitionKey
+	if input.RequestID != "" {
+		if partitionKey != "" || !validUUID(input.RequestID) {
+			return BuildDetail{}, false, ErrInvalidRequest
+		}
+		partitionKey = "run:" + input.RequestID
+	}
 	maxAttempts := 3
 	if input.MaxAttempts != nil {
 		maxAttempts = *input.MaxAttempts
 	}
 	if mode != RunModeFull ||
-		input.PartitionKey != strings.TrimSpace(input.PartitionKey) ||
-		input.PartitionKey != "" ||
+		partitionKey != strings.TrimSpace(partitionKey) ||
+		(input.PartitionKey != "") ||
 		maxAttempts < 1 || maxAttempts > 10 {
 		return BuildDetail{}, false, ErrInvalidRequest
 	}
 	run, created, err := service.store.RegisterCurrent(
 		ctx, tenantID, actorID, datasetID,
 		RegisterCurrentRequest{
-			Mode: mode, PartitionKey: input.PartitionKey, MaxAttempts: maxAttempts,
+			Mode: mode, PartitionKey: partitionKey, MaxAttempts: maxAttempts,
+			ExpectedVersionID: input.PublishedVersionID,
 		},
 	)
 	if err != nil {
@@ -93,7 +102,7 @@ func (service *ControlService) Cancel(
 		!validUUID(datasetID) || !validUUID(buildID) {
 		return BuildDetail{}, ErrInvalidRequest
 	}
-	if _, err := service.store.CancelQueued(ctx, tenantID, actorID, datasetID, buildID); err != nil {
+	if _, err := service.store.CancelActive(ctx, tenantID, actorID, datasetID, buildID); err != nil {
 		return BuildDetail{}, err
 	}
 	return service.store.GetBuild(ctx, tenantID, datasetID, buildID)

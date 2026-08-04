@@ -30,6 +30,13 @@ const (
 	LayerADS Layer = "ADS"
 )
 
+// SourceMode marks a system-owned physical source whose rows already carry a
+// governed analytical grain. PRE_AGGREGATED is intentionally distinct from a
+// modeled DWS: it preserves the source rows instead of aggregating DWD inputs.
+type SourceMode string
+
+const SourceModePreAggregated SourceMode = "PRE_AGGREGATED"
+
 // PublicationOrigin 是数据库持久化的不可变发布来源。调用方不能在请求或
 // PublishPlan 中提供它；各服务端提交路径在进入 package-private publishTx 时固定。
 type PublicationOrigin string
@@ -155,6 +162,7 @@ type Descriptor struct {
 	Subject                 string       `json:"subject,omitempty"`
 	Type                    string       `json:"type"`
 	Layer                   Layer        `json:"layer,omitempty"`
+	SourceMode              SourceMode   `json:"sourceMode,omitempty"`
 	SemanticContractVersion string       `json:"semanticContractVersion,omitempty"`
 	ConsumerContractID      string       `json:"consumerContractId,omitempty"`
 	Grain                   *OutputGrain `json:"grain,omitempty"`
