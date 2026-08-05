@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	aiplatform "intelligent-report-generation-system/internal/ai"
+	askdatadimension "intelligent-report-generation-system/internal/askdata/dimension"
 	askdatasearch "intelligent-report-generation-system/internal/askdata/search"
 	"intelligent-report-generation-system/internal/assetembedding"
 	"intelligent-report-generation-system/internal/config"
@@ -180,6 +181,18 @@ func main() {
 		),
 		workerID,
 		cfg.WorkerPollInterval,
+	)
+	dimensionProfileWorker, err := askdatadimension.NewWorker(
+		askdatadimension.NewPostgresProfileStore(pool),
+		askdatadimension.NewPostgresWarehouseScanner(warehousePool),
+		askdatadimension.DefaultWorkerOptions(),
+	)
+	if err != nil {
+		logger.Error("initialize AskData dimension profile worker", "error", err)
+		os.Exit(1)
+	}
+	go runAskDataDimensionProfileWorker(
+		ctx, logger, dimensionProfileWorker, workerID, cfg.WorkerPollInterval,
 	)
 
 	odsResolver := materializationworker.NewODSResolver(
@@ -430,6 +443,32 @@ func runAskDataEmbeddingWorker(
 		}
 		return processed, nil
 	}, func(err error) { logger.Error("list AskData embedding tenants", "error", err) })
+}
+
+func runAskDataDimensionProfileWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	worker *askdatadimension.Worker,
+	workerID string,
+	pollInterval time.Duration,
+) {
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
+		processed := false
+		tenantIDs, err := worker.TenantIDs(ctx)
+		if err != nil {
+			return false, err
+		}
+		for _, tenantID := range tenantIDs {
+			didProcess, runErr := worker.ProcessNext(
+				ctx, tenantID, workerID, askdatadimension.DefaultDimensionProfileLease,
+			)
+			if runErr != nil {
+				logger.Error("process AskData dimension profile", "tenant_id", tenantID, "error", runErr)
+			}
+			processed = processed || didProcess
+		}
+		return processed, nil
+	}, func(err error) { logger.Error("list AskData dimension profile tenants", "error", err) })
 }
 
 func runMetadataJobWorker(

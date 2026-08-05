@@ -87,7 +87,8 @@ BEGIN
     'dimension_members','dimension_member_aliases','semantic_aliases',
     'search_documents','embedding_outbox','releases','release_objects',
     'release_projections','release_projection_artifacts','release_state',
-    'release_events','graph_plan_cache'
+    'release_events','graph_plan_cache','dimension_profile_jobs',
+    'dimension_profiles','dimension_profile_members'
   ] LOOP
     IF to_regclass('askdata.'||relation_name) IS NULL THEN
       RAISE EXCEPTION 'missing askdata relation: askdata.%', relation_name;
@@ -196,6 +197,14 @@ SELECT (
   AND NOT has_table_privilege(:'app_user','askdata.release_events','INSERT')
   AND has_table_privilege(:'worker_user','askdata.embedding_outbox','UPDATE')
   AND has_table_privilege(:'worker_user','askdata.graph_plan_cache','INSERT')
+  AND NOT has_table_privilege(:'app_user','askdata.dimension_profile_jobs','INSERT')
+  AND NOT has_table_privilege(:'app_user','askdata.dimension_profile_jobs','UPDATE')
+  AND has_table_privilege(:'worker_user','askdata.dimension_profile_jobs','INSERT')
+  AND has_table_privilege(:'worker_user','askdata.dimension_profile_jobs','UPDATE')
+  AND has_table_privilege(:'worker_user','askdata.dimension_profiles','INSERT')
+  AND NOT has_table_privilege(:'worker_user','askdata.dimension_profiles','UPDATE')
+  AND has_table_privilege(:'worker_user','askdata.dimension_profile_members','INSERT')
+  AND NOT has_table_privilege(:'worker_user','askdata.dimension_profile_members','UPDATE')
   AND NOT has_table_privilege(:'worker_user','askdata.entities','INSERT')
   AND NOT has_table_privilege(:'worker_user','askdata.release_objects','INSERT')
   AND NOT has_table_privilege(:'worker_user','askdata.release_projections','UPDATE')

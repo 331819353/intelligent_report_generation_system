@@ -306,6 +306,7 @@ flowchart LR
 | `000219_askdata_release_evaluation_gate` | DB-007 | Wilson、安全、覆盖率和 release 激活门禁函数 |
 | `000220_askdata_release_approvals` | DB-008 | 双人审批、职责分离和审批审计 |
 | `000221_retired_semantic_tenant_trigger_cleanup` | OPS-001 | 清理 `000195` 遗留的租户初始化触发器，恢复空库 seed 能力 |
+| `000222_askdata_dimension_profile_runtime` | DIM-002 | 有界扫描任务、画像 generation 和成员观测证据 |
 
 每个迁移必须同时有 `.up.sql` 和 `.down.sql`。Down 只用于开发回退，不得在生产通过回滚 `000195` 恢复旧表。
 
@@ -450,13 +451,19 @@ flowchart LR
 - 完成标准：基数、NULL、保留默认值、变化率、敏感性、样本预算、FULL/EXACT_ONLY/ON_DEMAND/NONE 决策可审计。
 - 验证：V-GO-ASKDATA。
 
-### [ ] DIM-002 — 有界成员扫描 Worker
+### [x] DIM-002 — 有界成员扫描 Worker
 
 - 优先级：P0
 - 依赖：DIM-001、REG-004
 - 文件范围：`internal/askdata/dimension/worker.go`、`postgres_store.go`、`cmd/worker/main.go`。
 - 完成标准：只读 DWS/ADS；statement timeout、最大成员数、租约、重试、refresh generation；不扫描敏感禁止维度。
 - 验证：V-GO-ALL + warehouse integration test。
+
+> 2026-08-05 完成：新增独立、强制 RLS 的 profile job/profile/member observation
+> generation 表；Worker 只对当前 PUBLISHED + ACTIVE DWS/ADS 的精确 snapshot 发放租约，
+> 使用只读 repeatable-read Warehouse 事务、statement timeout、行/成员/字节上限和安全标识符；
+> RESTRICTED/NONE 维度直接 SKIPPED。失败指数退避，配置或源版本变化后旧 generation
+> 标记 STALE；画像及策略决策均以内容 hash 追加写入，不会自动创建认证成员。
 
 ### [ ] DIM-003 — 成员规范化、别名候选与 LLM 异常判断
 
@@ -468,7 +475,7 @@ flowchart LR
 
 > 2026-08-05 进度：canonical/alias 分离、`dimension_id + normalized_value`
 > 成员键、保留/哨兵值排除、敏感值 LLM 禁入和高风险候选禁止自动合并均已完成；
-> 待 DIM-002 扫描 Worker 接入真实 generation 后再勾选。
+> DIM-002 已提供真实 generation 观测证据，下一轮按单 TODO 边界完成正式接线与验证后再勾选。
 
 ### [x] SEARCH-001 — 分类检索文档构建器
 
@@ -1140,4 +1147,6 @@ PILOT-001~004
 
 ## 21. 推荐立即开始的任务
 
-当前最合理的第一个实现任务是 `CONTRACT-001`，随后依次完成 `CONTRACT-002`、`CONTRACT-003` 和 `CONTRACT-004`。在四个合同冻结前，不建议并行创建数据库表、前端类型、LLM Prompt 或 Tool Host，否则不同 Codex 任务很容易产生不兼容的重复协议。
+下一轮优先完成 `DIM-003`，将已实现的规范化与异常判断合同正式接到 DIM-002 的
+generation 观测证据上；之后执行 `SEARCH-004`，保证 LLM 只能在 SQL/RLS/图约束后的
+候选集合内重排。任何 `WEB-*` 任务仍必须先提交页面设计稿并取得用户确认。

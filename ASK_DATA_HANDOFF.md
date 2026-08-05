@@ -7,10 +7,11 @@
 ## 1. 当前状态
 
 - 当前 Wave：Wave 0 已全部完成；Wave 1 注册表主链已完成；Wave 2A LLM
-  认知协议已完成；Wave 2B 已完成画像合同和检索主链，成员扫描尚未接入。
+  认知协议已完成；Wave 2B 已完成画像合同、有界成员扫描 Worker 和检索主链，
+  下一任务是把规范化/异常判断合同接入真实 generation（`DIM-003`）。
 - 已完成：`CONTRACT-001`～`CONTRACT-004`、`BASE-001`、`BASE-002`、
   `DB-001`～`DB-003`、`REG-001`～`REG-004`、`AI-001`～`AI-004`、
-  `DIM-001`、`SEARCH-001`～`SEARCH-003`。
+  `DIM-001`～`DIM-002`、`SEARCH-001`～`SEARCH-003`。
 - 部分完成：`DB-004` 的 release manifest、四投影、lease、READY 收敛、
   `release_state` 和 GraphPlan cache 已完成；ACTIVE 激活函数必须等待 `DB-007`
   评测门禁和 `DB-008` 双人审批，当前故意不存在。
@@ -19,8 +20,8 @@
 - 生产准确率状态：尚未评测，不得宣称达到 95%。
 - 人工业务输入：`HUMAN-001`～`HUMAN-006` 均尚未提供。
 - 2026-08-05 本地运行环境已按用户要求全量重置：控制库、数仓、MinIO、历史
-  NebulaGraph/Redis 卷均已删除并重新初始化；当前 tenant/user/dataset/askdata domain
-  计数均为 0，没有导入种子业务数据。
+  NebulaGraph/Redis 卷均已删除并重新初始化；随后 seed 已创建 1 个 demo tenant、
+  2 个用户，dataset/askdata domain 仍均为 0，没有导入业务语义资产。
 - 当前 Compose 运行态健康：API `127.0.0.1:8080`、Web `127.0.0.1:5173`、
   Connector `127.0.0.1:8090`，API/Worker/Connection Test Worker、PostgreSQL、
   Warehouse PostgreSQL 和 MinIO 均为 healthy。
@@ -88,10 +89,10 @@ DATABASE_URL='postgres://...' go run ./cmd/askdata-inventory \
 ### 2.7 `askdata` 数据库控制面
 
 - 迁移：`000213`～`000216` 为 askdata 主体，`000221` 清理退役语义运行时遗留的
-  tenant 初始化触发器；均包含 `.up.sql` 与 `.down.sql`，`000217`～`000220`
-  仍按 TODO 为后续问数运行时和评测门禁预留。
+  tenant 初始化触发器，`000222` 增加有界画像运行时；均包含 `.up.sql` 与
+  `.down.sql`，`000217`～`000220` 仍按 TODO 为后续问数运行时和评测门禁预留。
 - `askdata` 与已退役的 `platform.semantic_*` 完全隔离；没有恢复历史运行时表。
-- 26 张控制面/投影表全部启用并强制 RLS；所有数据库外键均包含 `tenant_id`。
+- 29 张控制面/投影/画像表全部启用并强制 RLS；所有数据库外键均包含 `tenant_id`。
 - 认证版本及其 metric-measure、hierarchy-level 子链接不可原地修改。
 - 通用质量目标、别名目标、成员父子关系由触发器验证同 tenant/domain 和认证状态。
 - 维度成员策略固定为 `FULL/EXACT_ONLY/ON_DEMAND/NONE`：高基数只能
@@ -106,8 +107,8 @@ DATABASE_URL='postgres://...' go run ./cmd/askdata-inventory \
 
 - `report_app`：可编辑 registry DRAFT、写检索文档、创建密封 release；不能写
   embedding/projection worker 状态，也不能直接更新 release 生命周期。
-- `report_worker`：可处理 embedding outbox、投影 artifact、GraphPlan cache，并只能
-  通过 lease 函数推进 release projection；不能写权威语义对象。
+- `report_worker`：可处理 embedding outbox、投影 artifact、GraphPlan cache 和有界
+  画像 job；profile/member observation 只能追加写，不能更新，且不能写权威语义对象。
 - `report_connection_tester` 与 PUBLIC：无 `askdata` schema 权限。
 
 ### 2.8 Go 语义注册表与发布包
@@ -156,7 +157,17 @@ DATABASE_URL='postgres://...' go run ./cmd/askdata-inventory \
   成员 key 为 `dimension_version_id + normalized_value`，避免跨维度同值误绑。
 - UNKNOWN/NULL/N/A/测试等哨兵值不会成为成员候选，只记录 catalog version、hash 和计数。
 - `cognition.go`：LLM 只能基于稳定 member ID/evidence 提出聚类、别名、层级或哨兵异常；
-  LLM proposal、敏感成员及中高风险合并都不能自动应用。该部分待 `DIM-002` 真实 generation 接入后勾选。
+  LLM proposal、敏感成员及中高风险合并都不能自动应用。合同已存在，待 `DIM-003`
+  把它接到真实 generation 观测证据并补齐流程测试后勾选。
+- `worker.go` / `postgres_store.go`：只同步当前 PUBLISHED + ACTIVE DWS/ADS 的精确
+  materialization snapshot；任务以 input hash 和递增 generation 幂等，具备租约、
+  `FOR UPDATE SKIP LOCKED`、最多 3 次指数退避、配置/源版本过期检测。
+- Warehouse 扫描限定 `warehouse_published`，使用 `READ ONLY + REPEATABLE READ`、
+  `statement_timeout`、最大行数/成员数/样本字节，并通过服务端引用安全转义列名。
+  RESTRICTED 或 `NONE` 维度直接记为 SKIPPED，不读取任何业务行。
+- `dimension_profile_jobs`、`dimension_profiles`、`dimension_profile_members` 保存可审计的
+  扫描预算、实际用量、profile/policy hash 和规范化成员观测；这些是候选证据，绝不因
+  Worker 运行而自动升级为 `dimension_members` 认证资产。
 
 ### 2.12 分类文档、Embedding Worker 与混合检索
 
@@ -200,8 +211,8 @@ go test ./...
 ./scripts/dev-services.sh status
 ```
 
-- 216 个迁移版本已执行完成，范围为 `000001`～`000221`；`000192` 不存在，
-  `000217`～`000220` 按 TODO 保留给后续运行时和评测迁移。
+- 217 个迁移版本已执行完成，范围为 `000001`～`000222`；`000192` 不存在，
+  `000217`～`000220` 按 TODO 保留给后续问数运行时和评测迁移。
 - API live/ready、Connector live、Web 首页均返回 HTTP 200，四个应用容器均 healthy。
 - `000221` 已移除 `000195` 遗留、仍引用已删除表的 tenant trigger；`make seed-dev`
   已在空库成功创建 demo tenant 与管理员。
@@ -218,14 +229,17 @@ ENV_FILE=.env.example ./scripts/verify-database.sh
 ENV_FILE=.env.example ./scripts/verify-warehouse.sh
 ```
 
-- `000213`～`000216` 完成一次完整空 schema down→up 往返；`000221` 已在现有库
-  完成向前迁移并通过遗留 trigger/function 不存在断言。
+- `000213`～`000216` 完成一次完整空 schema down→up 往返；`000221`、`000222`
+  已在现有库完成向前迁移；画像三表的强制 RLS、tenant 复合外键和 app/worker
+  最小权限均由数据库验收脚本断言。
 - PostgreSQL 实测角色权限、跨领域 RLS、全部 tenant 复合外键、HNSW、四投影函数和
   “激活函数不存在”安全断言。
 - Registry integration test 实测 app role tenant transaction、乐观锁、稳定分页、
   跨领域不可见。
 - Search integration test 实测 worker 角色 embedding claim SQL，以及 app 角色下
   exact/lexical/vector 三类查询的 USER RLS、release pin 和空 release 失败关闭路径。
+- Dimension integration test 实测 worker 同步 SQL 的数值参数类型，以及 Warehouse
+  reader 的只读有界扫描、NULL/基数统计、成员截断和 snapshot 行数漂移检测。
 - 回滚事务中的真实 DWS fixture 实测：DRAFT 导入、认证依赖、release object、四投影
   claim/complete→READY、GraphPlan cache，以及源 DWS 失效后 release 失败关闭。
 
@@ -258,12 +272,13 @@ ENV_FILE=.env.example ./scripts/verify-warehouse.sh
 - 当前机器存在 Git 忽略的 `.env` 以供运行；交接、日志和提交时不得回显其内容。
 - 数据库 integration test 使用 `ASKDATA_INTEGRATION_DATABASE_URL`、
   `ASKDATA_INTEGRATION_ADMIN_DATABASE_URL` 和 `ASKDATA_INTEGRATION_WORKER_DATABASE_URL`
-  显式开启，默认单元测试会跳过外部数据库。
+  显式开启；画像扫描另使用 `ASKDATA_INTEGRATION_WAREHOUSE_DATABASE_URL` 和
+  `ASKDATA_INTEGRATION_WAREHOUSE_ADMIN_DATABASE_URL`，默认单元测试会跳过外部数据库。
 
 ## 5. 下一步
 
-1. `DIM-002`：增加真实 Warehouse 只读、statement timeout、最大成员数、generation、lease
-   和 profile/member 持久化；完成后接通已实现的 normalize/anomaly 合同并勾选 `DIM-003`。
+1. `DIM-003`：把已实现的 normalize/anomaly 合同接入 `DIM-002` 的 profile generation，
+   形成可复核的 alias/层级/哨兵异常候选；高风险和敏感成员仍禁止自动合并。
 2. `SEARCH-004`：让 LLM 只在 SQL/RLS/图约束后的候选集合内重排；deterministic block 不可覆盖。
 3. `REG-005` 仍需要 `HUMAN-001`～`HUMAN-003` 才能形成首批业务语义资产；当前不能生成正式认证资产。
 4. `GRAPH-001` 先做 NebulaGraph 服务端/Go Client 兼容 POC，通过后才修改 Compose。

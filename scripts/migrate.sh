@@ -359,7 +359,12 @@ GRANT INSERT, UPDATE, DELETE ON TABLE
   askdata.embedding_outbox,
   askdata.search_documents,
   askdata.release_projection_artifacts,
-  askdata.graph_plan_cache
+  askdata.graph_plan_cache,
+  askdata.dimension_profile_jobs
+TO :"worker_user";
+GRANT INSERT ON TABLE
+  askdata.dimension_profiles,
+  askdata.dimension_profile_members
 TO :"worker_user";
 
 GRANT EXECUTE ON FUNCTION
