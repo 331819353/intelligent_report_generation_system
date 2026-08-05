@@ -85,15 +85,10 @@ sh -n scripts/migrate.sh
 
 ## 模型配置
 
-模型配置只能通过运行环境注入。`AI_API_KEY` 不得写入仓库：
+模型配置只能通过运行环境注入。API Key 不得写入仓库：
 
 ```bash
-export AI_BASE_URL="https://mgallery.haier.net/v1/"
-export AI_MODEL="MiniMax-M2"
-export AI_MODELS="MiniMax-M2"
-export AI_API_KEY="<MiniMax 网关密钥>"
 export AI_PROVIDER_SELECTION_MODE="round_robin"
-export AI_RESPONSE_FORMAT="prompt"
 export AI_DEEPSEEK_BASE_URL="https://api.deepseek.com"
 export AI_DEEPSEEK_MODELS="deepseek-v4-flash"
 export AI_DEEPSEEK_API_KEY="<DeepSeek 密钥>"
@@ -106,6 +101,9 @@ export AI_GLM_API_KEY="<GLM 密钥>"
 export AI_GLM_THINKING_ENABLED="true"
 export AI_GLM_RESPONSE_FORMAT="json_object"
 export AI_GLM_MAX_OUTPUT_TOKENS="65536"
+export AI_EMBEDDING_BASE_URL="https://mgallery.haier.net/v1/"
+export AI_EMBEDDING_MODEL="Qwen3-Embedding-4B"
+export AI_EMBEDDING_API_KEY="<独立向量模型密钥>"
 export API_WRITE_TIMEOUT="240s"
 export AI_REQUEST_TIMEOUT="100s"
 export AI_ATTEMPT_TIMEOUT="90s"
@@ -114,9 +112,9 @@ export AI_MAX_ATTEMPTS="1"
 export AI_CONFIDENCE_THRESHOLD="0.8"
 ```
 
-当前本地模型池由 `MiniMax-M2`、`deepseek-v4-flash` 和 `glm-5.2` 组成，未指定模型的调用按等权轮询顺序分发；同一审计请求内的网络重试固定在已选模型，避免重试改变模型语义。需要领域级失败转移时，从当前模型开始按环形顺序选择下一个模型，并创建新的独立审计请求。
+当前本地模型池由 `deepseek-v4-flash` 和 `glm-5.2` 组成，未指定模型的调用按此顺序等权轮询分发；同一审计请求内的网络重试固定在已选模型，避免重试改变模型语义。需要领域级失败转移时，从当前模型切换到另一个模型，并创建新的独立审计请求。
 
-MiniMax 官方目前只为 `MiniMax-Text-01` 声明 `response_format` 支持，`MiniMax-M2` 使用 `prompt` 模式：不发送该参数，而是把规范化的 JSON Schema 作为系统输出合同并执行本地严格校验。DeepSeek 和 GLM 使用 `json_object` 加相同的本地校验。GLM 的 65536 Token 上限是端点级覆盖，用于避免思考过程耗尽短任务的输出预算。认证、租户策略、配额、取消、非法请求、拒答和响应过大不会换模型重试。未配置任何模型密钥时，元数据补全和数据集 DAG 提案接口明确降级为不可用，非 AI 功能继续运行。
+DeepSeek 和 GLM 使用 `json_object`，应用同时把规范化的 JSON Schema 作为系统输出合同并执行本地严格校验。GLM 的 65536 Token 上限是端点级覆盖，用于避免思考过程耗尽短任务的输出预算。向量模型使用独立端点和密钥，不参与聊天模型轮询。认证、租户策略、配额、取消、非法请求、拒答和响应过大不会换模型重试。未配置任何模型密钥时，元数据补全和数据集 DAG 提案接口明确降级为不可用，非 AI 功能继续运行。
 
 ## 一键启动本地服务
 
