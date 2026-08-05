@@ -272,10 +272,11 @@ func (s *Service) Invoke(ctx context.Context, input Invocation) (InvocationResul
 	if callErr != nil {
 		classified := NormalizeProviderError(callErr)
 		persistErr := s.persistFailure(ctx, input.TenantID, record.ID, FailureRecord{Attempts: attempts, ErrorCode: string(classified.Code), LatencyMS: latency})
+		failedProviderResult := ProviderResult{Model: provider.Model()}
 		if persistErr != nil {
-			return InvocationResult{RequestID: record.ID, Attempts: attempts, RedactionCount: redactionCount}, errors.Join(callErr, persistErr)
+			return InvocationResult{RequestID: record.ID, ProviderResult: failedProviderResult, Attempts: attempts, RedactionCount: redactionCount}, errors.Join(callErr, persistErr)
 		}
-		return InvocationResult{RequestID: record.ID, Attempts: attempts, RedactionCount: redactionCount}, callErr
+		return InvocationResult{RequestID: record.ID, ProviderResult: failedProviderResult, Attempts: attempts, RedactionCount: redactionCount}, callErr
 	}
 	usage := result.Usage
 	cost := calculateCostMicros(usage.PromptTokens, usage.CompletionTokens, s.options)

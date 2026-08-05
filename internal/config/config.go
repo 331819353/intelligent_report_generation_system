@@ -34,6 +34,7 @@ type Config struct {
 	AIModels                        []string
 	AIAPIKey                        string
 	AIProviderEndpoints             []AIProviderEndpoint
+	AIProviderSelectionMode         string
 	AIRequestTimeout                time.Duration
 	AIAttemptTimeout                time.Duration
 	AIPrimaryFailoverTimeout        time.Duration
@@ -77,10 +78,14 @@ type Config struct {
 }
 
 type AIProviderEndpoint struct {
-	Name    string
-	BaseURL string
-	APIKey  string
-	Models  []string
+	Name            string
+	BaseURL         string
+	APIKey          string
+	Models          []string
+	ThinkingEnabled bool
+	ReasoningEffort string
+	ResponseFormat  string
+	MaxOutputTokens int
 }
 
 type databaseProcess struct {
@@ -176,42 +181,78 @@ func loadApplication(process databaseProcess) (Config, error) {
 	if len(aiModels) == 0 {
 		aiModels = []string{aiModel}
 	}
+	providerThinkingEnabled, err := envBool("AI_THINKING_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	providerMaxOutputTokens, err := envOptionalInt("AI_MAX_OUTPUT_TOKENS_OVERRIDE")
+	if err != nil {
+		return Config{}, err
+	}
 	aiProviderEndpoints := []AIProviderEndpoint{}
 	if strings.TrimSpace(aiAPIKey) != "" {
 		aiProviderEndpoints = append(aiProviderEndpoints, AIProviderEndpoint{
 			Name: "gateway", BaseURL: aiBaseURL, APIKey: aiAPIKey,
-			Models: append([]string(nil), aiModels...),
+			Models:          append([]string(nil), aiModels...),
+			ThinkingEnabled: providerThinkingEnabled,
+			ReasoningEffort: envOrDefault("AI_REASONING_EFFORT", ""),
+			ResponseFormat:  envOrDefault("AI_RESPONSE_FORMAT", ""),
+			MaxOutputTokens: providerMaxOutputTokens,
 		})
 	}
 	for _, endpoint := range []struct {
 		name, baseURLKey, defaultBaseURL, apiKeyKey, modelsKey string
+		thinkingKey, reasoningEffortKey, responseFormatKey     string
+		maxOutputTokensKey                                     string
 	}{
 		{
 			"deepseek", "AI_DEEPSEEK_BASE_URL",
 			"https://api.deepseek.com", "AI_DEEPSEEK_API_KEY",
 			"AI_DEEPSEEK_MODELS",
+			"AI_DEEPSEEK_THINKING_ENABLED", "AI_DEEPSEEK_REASONING_EFFORT",
+			"AI_DEEPSEEK_RESPONSE_FORMAT",
+			"AI_DEEPSEEK_MAX_OUTPUT_TOKENS",
 		},
 		{
 			"glm", "AI_GLM_BASE_URL",
 			"https://open.bigmodel.cn/api/paas/v4", "AI_GLM_API_KEY",
 			"AI_GLM_MODELS",
+			"AI_GLM_THINKING_ENABLED", "AI_GLM_REASONING_EFFORT",
+			"AI_GLM_RESPONSE_FORMAT",
+			"AI_GLM_MAX_OUTPUT_TOKENS",
 		},
 		{
 			"minimax", "AI_MINIMAX_BASE_URL",
 			"https://api.minimaxi.com/v1", "AI_MINIMAX_API_KEY",
 			"AI_MINIMAX_MODELS",
+			"AI_MINIMAX_THINKING_ENABLED", "AI_MINIMAX_REASONING_EFFORT",
+			"AI_MINIMAX_RESPONSE_FORMAT",
+			"AI_MINIMAX_MAX_OUTPUT_TOKENS",
 		},
 	} {
 		apiKey := strings.TrimSpace(os.Getenv(endpoint.apiKeyKey))
 		if apiKey == "" {
 			continue
 		}
+		thinkingEnabled, err := envBool(endpoint.thinkingKey, false)
+		if err != nil {
+			return Config{}, err
+		}
+		maxOutputTokens, err := envOptionalInt(endpoint.maxOutputTokensKey)
+		if err != nil {
+			return Config{}, err
+		}
 		aiProviderEndpoints = append(
 			aiProviderEndpoints,
 			AIProviderEndpoint{
-				Name:    endpoint.name,
-				BaseURL: envOrDefault(endpoint.baseURLKey, endpoint.defaultBaseURL),
-				APIKey:  apiKey, Models: parseUniqueCSV(os.Getenv(endpoint.modelsKey)),
+				Name:            endpoint.name,
+				BaseURL:         envOrDefault(endpoint.baseURLKey, endpoint.defaultBaseURL),
+				APIKey:          apiKey,
+				Models:          parseUniqueCSV(os.Getenv(endpoint.modelsKey)),
+				ThinkingEnabled: thinkingEnabled,
+				ReasoningEffort: envOrDefault(endpoint.reasoningEffortKey, ""),
+				ResponseFormat:  envOrDefault(endpoint.responseFormatKey, ""),
+				MaxOutputTokens: maxOutputTokens,
 			},
 		)
 	}
@@ -235,6 +276,7 @@ func loadApplication(process databaseProcess) (Config, error) {
 		AIModels:                        aiModels,
 		AIAPIKey:                        aiAPIKey,
 		AIProviderEndpoints:             aiProviderEndpoints,
+		AIProviderSelectionMode:         strings.ToLower(envOrDefault("AI_PROVIDER_SELECTION_MODE", "primary")),
 		AIRequestTimeout:                25 * time.Second,
 		AIAttemptTimeout:                8 * time.Second,
 		AIPrimaryFailoverTimeout:        8 * time.Second,
@@ -443,6 +485,27 @@ func (c Config) Validate() error {
 				)
 			}
 		}
+		if effort := strings.ToLower(strings.TrimSpace(endpoint.ReasoningEffort)); effort != "" && effort != "low" && effort != "medium" && effort != "high" {
+			return errors.New(
+				"configured AI provider reasoning effort must be low, medium, or high",
+			)
+		}
+		if format := strings.ToLower(strings.TrimSpace(endpoint.ResponseFormat)); format != "" && format != "json_schema" && format != "json_object" && format != "prompt" {
+			return errors.New(
+				"configured AI provider response format must be json_schema, json_object, or prompt",
+			)
+		}
+		if endpoint.MaxOutputTokens < 0 || endpoint.MaxOutputTokens > 1_000_000 {
+			return errors.New(
+				"configured AI provider max output tokens must be between 1 and 1000000",
+			)
+		}
+	}
+	if c.AIProviderSelectionMode != "primary" &&
+		c.AIProviderSelectionMode != "round_robin" {
+		return errors.New(
+			"AI_PROVIDER_SELECTION_MODE must be primary or round_robin",
+		)
 	}
 	if c.AIEmbeddingTimeout <= 0 || c.AIEmbeddingTimeout > 2*time.Minute {
 		return errors.New("AI_EMBEDDING_TIMEOUT must be greater than zero and at most 2 minutes")
@@ -655,4 +718,31 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envBool(key string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("parse %s: %w", key, err)
+	}
+	return parsed, nil
+}
+
+func envOptionalInt(key string) (int, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 1 {
+		if err == nil {
+			err = errors.New("value must be greater than zero")
+		}
+		return 0, fmt.Errorf("parse %s: %w", key, err)
+	}
+	return parsed, nil
 }

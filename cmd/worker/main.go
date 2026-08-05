@@ -103,10 +103,15 @@ func main() {
 		providerEndpoints = append(providerEndpoints, aiplatform.ProviderEndpoint{
 			Name: endpoint.Name, BaseURL: endpoint.BaseURL,
 			APIKey: endpoint.APIKey, Models: endpoint.Models,
+			ThinkingEnabled: endpoint.ThinkingEnabled,
+			ReasoningEffort: endpoint.ReasoningEffort,
+			ResponseFormat:  endpoint.ResponseFormat,
+			MaxOutputTokens: endpoint.MaxOutputTokens,
 		})
 	}
 	modelProvider := aiplatform.NewMultiEndpointProviderPool(
-		providerEndpoints, &http.Client{Timeout: cfg.AIAttemptTimeout},
+		providerEndpoints, cfg.AIProviderSelectionMode,
+		&http.Client{Timeout: cfg.AIAttemptTimeout},
 	)
 	aiService, err := aiplatform.NewService(
 		aiplatform.NewPostgresStore(pool), modelProvider, aiplatform.ServiceOptions{

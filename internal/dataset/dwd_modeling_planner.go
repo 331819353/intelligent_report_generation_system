@@ -1083,10 +1083,10 @@ func dwdStageRepairMessages(
 // prepareDWDStageRetry keeps one immutable audit record per model call. The
 // primary model receives the original request; once it returns invalid
 // structured output, fails local validation, times out or has a recoverable
-// provider failure, the next call explicitly selects the configured fallback
-// model. Authentication, invalid-request, tenant-policy, quota, refusal and
-// oversized-response failures remain fail-closed because changing models
-// cannot make them safe or valid.
+// provider failure, the next call explicitly selects the next configured
+// model in the provider chain. Authentication, invalid-request, tenant-policy,
+// quota, refusal and oversized-response failures remain fail-closed because
+// changing models cannot make them safe or valid.
 func (planner *OrchestratedDWDModelingPlanner) prepareDWDStageRetry(
 	ctx context.Context,
 	invocation *aiplatform.Invocation,
@@ -1100,21 +1100,27 @@ func (planner *OrchestratedDWDModelingPlanner) prepareDWDStageRetry(
 		ctx.Err() != nil {
 		return false
 	}
-	switchedToFallback := false
-	if strings.TrimSpace(invocation.PreferredModel) == "" &&
-		dwdModelingFallbackEligible(ctx, invokeErr) {
-		if fallbackModel := configuredDWDFallbackModel(planner.invoker); fallbackModel != "" {
-			invocation.PreferredModel = fallbackModel
-			switchedToFallback = true
+	switchedModel := false
+	if dwdModelingFallbackEligible(ctx, invokeErr) {
+		currentModel := strings.TrimSpace(invocation.PreferredModel)
+		if model := strings.TrimSpace(result.ProviderResult.Model); model != "" {
+			currentModel = model
+		}
+		if nextModel := configuredDWDNextModel(
+			planner.invoker,
+			currentModel,
+		); nextModel != "" {
+			invocation.PreferredModel = nextModel
+			switchedModel = true
 		}
 	}
 	if !repairableDWDModelingError(invokeErr) {
-		if switchedToFallback {
+		if switchedModel {
 			invocation.Request.Messages = append(
 				[]aiplatform.Message(nil), baseMessages...,
 			)
 		}
-		return switchedToFallback
+		return switchedModel
 	}
 	invocation.Request.Messages = dwdStageRepairMessages(
 		baseMessages, result, invokeErr,
@@ -1123,7 +1129,7 @@ func (planner *OrchestratedDWDModelingPlanner) prepareDWDStageRetry(
 	return true
 }
 
-func configuredDWDFallbackModel(invoker dwdAIInvoker) string {
+func configuredDWDNextModel(invoker dwdAIInvoker, current string) string {
 	catalog, ok := invoker.(dwdAIModelCatalog)
 	if !ok {
 		return ""
@@ -1132,12 +1138,28 @@ func configuredDWDFallbackModel(invoker dwdAIInvoker) string {
 	if len(models) < 2 {
 		return ""
 	}
-	primary := strings.TrimSpace(models[0])
-	fallback := strings.TrimSpace(models[1])
-	if fallback == "" || strings.EqualFold(primary, fallback) {
-		return ""
+	current = strings.TrimSpace(current)
+	currentIndex := 0
+	if current != "" {
+		currentIndex = -1
+		for index, model := range models {
+			if strings.EqualFold(strings.TrimSpace(model), current) {
+				currentIndex = index
+				break
+			}
+		}
+		if currentIndex < 0 {
+			return ""
+		}
 	}
-	return fallback
+	currentModel := strings.TrimSpace(models[currentIndex])
+	for offset := 1; offset < len(models); offset++ {
+		next := strings.TrimSpace(models[(currentIndex+offset)%len(models)])
+		if next != "" && !strings.EqualFold(next, currentModel) {
+			return next
+		}
+	}
+	return ""
 }
 
 func dwdModelingFallbackEligible(ctx context.Context, err error) bool {

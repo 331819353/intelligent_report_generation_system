@@ -20,11 +20,33 @@ type OpenAICompatibleProvider struct {
 	baseURL string
 	apiKey  string
 	model   string
+	options ProviderOptions
 	http    *http.Client
+}
+
+// ProviderOptions contains optional OpenAI-compatible request extensions that
+// are enabled per endpoint instead of being sent to every provider.
+type ProviderOptions struct {
+	ThinkingEnabled bool
+	ReasoningEffort string
+	ResponseFormat  string
+	MaxOutputTokens int
 }
 
 // NewOpenAICompatibleProvider 创建不持有业务上下文的通用模型提供方。
 func NewOpenAICompatibleProvider(baseURL, apiKey, model string, client *http.Client) *OpenAICompatibleProvider {
+	return NewOpenAICompatibleProviderWithOptions(
+		baseURL, apiKey, model, ProviderOptions{}, client,
+	)
+}
+
+// NewOpenAICompatibleProviderWithOptions creates a provider with endpoint-level
+// reasoning extensions such as DeepSeek's thinking and reasoning_effort fields.
+func NewOpenAICompatibleProviderWithOptions(
+	baseURL, apiKey, model string,
+	options ProviderOptions,
+	client *http.Client,
+) *OpenAICompatibleProvider {
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -35,7 +57,13 @@ func NewOpenAICompatibleProvider(baseURL, apiKey, model string, client *http.Cli
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		apiKey:  strings.TrimSpace(apiKey),
 		model:   strings.TrimSpace(model),
-		http:    &securedClient,
+		options: ProviderOptions{
+			ThinkingEnabled: options.ThinkingEnabled,
+			ReasoningEffort: strings.ToLower(strings.TrimSpace(options.ReasoningEffort)),
+			ResponseFormat:  strings.ToLower(strings.TrimSpace(options.ResponseFormat)),
+			MaxOutputTokens: options.MaxOutputTokens,
+		},
+		http: &securedClient,
 	}
 }
 
@@ -91,7 +119,7 @@ func (p *OpenAICompatibleProvider) Complete(ctx context.Context, request Provide
 	if err != nil {
 		return ProviderResult{}, err
 	}
-	payload, err := json.Marshal(newWireRequest(p.model, normalized))
+	payload, err := json.Marshal(newWireRequest(p.model, normalized, p.options))
 	if err != nil {
 		return ProviderResult{}, invalidRequest(err)
 	}
@@ -189,11 +217,18 @@ func normalizeStructuredOutputEnvelope(content []byte) []byte {
 }
 
 type wireRequest struct {
-	Model           string             `json:"model"`
-	Messages        []wireMessage      `json:"messages"`
-	ResponseFormat  wireResponseFormat `json:"response_format"`
-	Temperature     *float64           `json:"temperature,omitempty"`
-	MaxOutputTokens int                `json:"max_tokens,omitempty"`
+	Model           string              `json:"model"`
+	Messages        []wireMessage       `json:"messages"`
+	ResponseFormat  *wireResponseFormat `json:"response_format,omitempty"`
+	Temperature     *float64            `json:"temperature,omitempty"`
+	MaxOutputTokens int                 `json:"max_tokens,omitempty"`
+	Thinking        *wireThinking       `json:"thinking,omitempty"`
+	ReasoningEffort string              `json:"reasoning_effort,omitempty"`
+	Stream          bool                `json:"stream"`
+}
+
+type wireThinking struct {
+	Type string `json:"type"`
 }
 
 type wireMessage struct {
@@ -213,8 +248,8 @@ type wireImageURL struct {
 }
 
 type wireResponseFormat struct {
-	Type       string         `json:"type"`
-	JSONSchema wireJSONSchema `json:"json_schema"`
+	Type       string          `json:"type"`
+	JSONSchema *wireJSONSchema `json:"json_schema,omitempty"`
 }
 
 type wireJSONSchema struct {
@@ -225,26 +260,61 @@ type wireJSONSchema struct {
 }
 
 // newWireRequest 把领域消息转换成兼容协议，不传递审计和租户字段。
-func newWireRequest(model string, request ProviderRequest) wireRequest {
-	messages := make([]wireMessage, len(request.Messages))
-	for i, message := range request.Messages {
-		messages[i] = wireMessage{Role: message.Role, Content: wireMessageContent(message.Parts)}
+func newWireRequest(
+	model string,
+	request ProviderRequest,
+	options ProviderOptions,
+) wireRequest {
+	responseFormat := strings.ToLower(strings.TrimSpace(options.ResponseFormat))
+	if responseFormat == "" {
+		responseFormat = "json_schema"
 	}
-	return wireRequest{
+	schemaInPrompt := responseFormat == "json_object" || responseFormat == "prompt"
+	extraMessages := 0
+	if schemaInPrompt {
+		extraMessages = 1
+	}
+	messages := make([]wireMessage, 0, len(request.Messages)+extraMessages)
+	if schemaInPrompt {
+		messages = append(messages, wireMessage{
+			Role: MessageRoleSystem,
+			Content: "Return only one JSON object that conforms exactly to this JSON Schema. " +
+				"Do not include Markdown or explanatory text.\n" + string(request.ResponseSchema.Schema),
+		})
+	}
+	for _, message := range request.Messages {
+		messages = append(messages, wireMessage{
+			Role: message.Role, Content: wireMessageContent(message.Parts),
+		})
+	}
+	wire := wireRequest{
 		Model:           model,
 		Messages:        messages,
 		Temperature:     request.Temperature,
 		MaxOutputTokens: request.MaxOutputTokens,
-		ResponseFormat: wireResponseFormat{
+		ReasoningEffort: strings.ToLower(strings.TrimSpace(options.ReasoningEffort)),
+		Stream:          false,
+	}
+	if options.MaxOutputTokens > 0 {
+		wire.MaxOutputTokens = options.MaxOutputTokens
+	}
+	if responseFormat == "json_schema" {
+		wire.ResponseFormat = &wireResponseFormat{
 			Type: "json_schema",
-			JSONSchema: wireJSONSchema{
+			JSONSchema: &wireJSONSchema{
 				Name:        request.ResponseSchema.Name,
 				Description: request.ResponseSchema.Description,
 				Strict:      true,
 				Schema:      request.ResponseSchema.Schema,
 			},
-		},
+		}
+	} else if responseFormat == "json_object" {
+		wire.ResponseFormat = &wireResponseFormat{Type: "json_object"}
 	}
+	if options.ThinkingEnabled {
+		wire.Thinking = &wireThinking{Type: "enabled"}
+	}
+	return wire
 }
 
 // wireMessageContent 让单段纯文本兼容旧模型，视觉消息使用多模态片段数组。

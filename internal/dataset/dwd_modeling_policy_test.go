@@ -1331,6 +1331,47 @@ func TestDWDModelingFallbackRejectsPermanentProviderErrors(t *testing.T) {
 	}
 }
 
+func TestConfiguredDWDNextModelWalksEntireProviderChain(t *testing.T) {
+	invoker := &scriptedDIMValidationInvoker{
+		models: "MiniMax-M2,deepseek-v4-flash,glm-5.2",
+	}
+	if next := configuredDWDNextModel(invoker, ""); next != "deepseek-v4-flash" {
+		t.Fatalf("primary next model = %q, want deepseek-v4-flash", next)
+	}
+	if next := configuredDWDNextModel(invoker, "deepseek-v4-flash"); next != "glm-5.2" {
+		t.Fatalf("secondary next model = %q, want glm-5.2", next)
+	}
+	if next := configuredDWDNextModel(invoker, "glm-5.2"); next != "MiniMax-M2" {
+		t.Fatalf("wrapped next model = %q, want MiniMax-M2", next)
+	}
+}
+
+func TestDWDModelingFallbackContinuesFromRoundRobinSelection(t *testing.T) {
+	invoker := &scriptedDIMValidationInvoker{
+		models: "MiniMax-M2,deepseek-v4-flash,glm-5.2",
+	}
+	planner := NewOrchestratedDWDModelingPlanner(invoker, time.Second)
+	invocation := aiplatform.Invocation{}
+	switched := planner.prepareDWDStageRetry(
+		context.Background(),
+		&invocation,
+		nil,
+		aiplatform.InvocationResult{ProviderResult: aiplatform.ProviderResult{
+			Model: "glm-5.2",
+		}},
+		&aiplatform.ProviderError{Code: aiplatform.ErrorCodeTimeout},
+		"repair",
+		false,
+	)
+	if !switched || invocation.PreferredModel != "MiniMax-M2" {
+		t.Fatalf(
+			"switched=%v preferred=%q, want wrapped MiniMax fallback",
+			switched,
+			invocation.PreferredModel,
+		)
+	}
+}
+
 func TestRetryableDWDClassificationFailureRequiresBatchInvalidOutput(
 	t *testing.T,
 ) {

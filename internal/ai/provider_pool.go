@@ -4,6 +4,12 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync/atomic"
+)
+
+const (
+	ProviderSelectionPrimary    = "primary"
+	ProviderSelectionRoundRobin = "round_robin"
 )
 
 // ProviderSelector lets the orchestration service pin the primary provider for
@@ -26,31 +32,49 @@ type ModelProviderChainSelector interface {
 	FallbackModels() []string
 }
 
-// PrimaryFallbackProvider always selects the first configured model by default.
-// The second configured model is available only through an explicit fallback
-// request from a domain workflow after the primary call fails validation or
-// reaches its failover deadline.
+// PrimaryFallbackProvider owns an ordered provider pool. Its selection mode is
+// either fixed-primary or round-robin; explicit model routing never advances
+// the round-robin cursor.
 type PrimaryFallbackProvider struct {
 	providers []Provider
+	selection string
+	next      atomic.Uint64
 }
 
 type ProviderEndpoint struct {
-	Name    string
-	BaseURL string
-	APIKey  string
-	Models  []string
+	Name            string
+	BaseURL         string
+	APIKey          string
+	Models          []string
+	ThinkingEnabled bool
+	ReasoningEffort string
+	ResponseFormat  string
+	MaxOutputTokens int
 }
 
 // NewPrimaryFallbackProvider creates an ordered provider pool and drops nil or
 // unconfigured entries.
 func NewPrimaryFallbackProvider(providers ...Provider) *PrimaryFallbackProvider {
+	return newProviderPool(ProviderSelectionPrimary, providers...)
+}
+
+// NewRoundRobinProvider distributes unpinned invocations equally across all
+// configured providers. Retries remain pinned by Service to the selected model.
+func NewRoundRobinProvider(providers ...Provider) *PrimaryFallbackProvider {
+	return newProviderPool(ProviderSelectionRoundRobin, providers...)
+}
+
+func newProviderPool(selection string, providers ...Provider) *PrimaryFallbackProvider {
 	configured := make([]Provider, 0, len(providers))
 	for _, provider := range providers {
 		if provider != nil && provider.Configured() {
 			configured = append(configured, provider)
 		}
 	}
-	return &PrimaryFallbackProvider{providers: configured}
+	return &PrimaryFallbackProvider{
+		providers: configured,
+		selection: strings.ToLower(strings.TrimSpace(selection)),
+	}
 }
 
 // NewOpenAICompatibleProviderPool creates one compatible provider per model.
@@ -76,6 +100,7 @@ func NewOpenAICompatibleProviderPool(
 // credentials/endpoints while preserving the configured provider/model order.
 func NewMultiEndpointProviderPool(
 	endpoints []ProviderEndpoint,
+	selection string,
 	client *http.Client,
 ) Provider {
 	providers := []Provider{}
@@ -90,13 +115,28 @@ func NewMultiEndpointProviderPool(
 				continue
 			}
 			seen[key] = true
-			providers = append(providers, NewOpenAICompatibleProvider(
-				endpoint.BaseURL, endpoint.APIKey, model, client,
-			))
+			providers = append(
+				providers,
+				NewOpenAICompatibleProviderWithOptions(
+					endpoint.BaseURL,
+					endpoint.APIKey,
+					model,
+					ProviderOptions{
+						ThinkingEnabled: endpoint.ThinkingEnabled,
+						ReasoningEffort: endpoint.ReasoningEffort,
+						ResponseFormat:  endpoint.ResponseFormat,
+						MaxOutputTokens: endpoint.MaxOutputTokens,
+					},
+					client,
+				),
+			)
 		}
 	}
 	if len(providers) == 1 {
 		return providers[0]
+	}
+	if strings.EqualFold(selection, ProviderSelectionRoundRobin) {
+		return NewRoundRobinProvider(providers...)
 	}
 	return NewPrimaryFallbackProvider(providers...)
 }
@@ -126,6 +166,10 @@ func (p *PrimaryFallbackProvider) Configured() bool {
 func (p *PrimaryFallbackProvider) SelectProvider() Provider {
 	if !p.Configured() {
 		return nil
+	}
+	if p.selection == ProviderSelectionRoundRobin && len(p.providers) > 1 {
+		index := (p.next.Add(1) - 1) % uint64(len(p.providers))
+		return p.providers[index]
 	}
 	return p.providers[0]
 }

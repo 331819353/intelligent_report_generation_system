@@ -407,14 +407,19 @@ func (p *OrchestratedProvider) completeBatch(
 			Temperature:    &temperature, MaxOutputTokens: 4096,
 		},
 	}
-	fallbackModel := configuredFallbackModel(p.invoker.Model())
+	configuredModels := p.invoker.Model()
+	hasFallback := configuredFallbackModel(configuredModels, "") != ""
 	primaryCtx := ctx
 	primaryCancel := func() {}
-	if fallbackModel != "" && p.primaryFailover > 0 {
+	if hasFallback && p.primaryFailover > 0 {
 		primaryCtx, primaryCancel = context.WithTimeout(ctx, p.primaryFailover)
 	}
 	result, err := p.invoker.Invoke(primaryCtx, invocation)
 	primaryCancel()
+	fallbackModel := configuredFallbackModel(
+		configuredModels,
+		result.ProviderResult.Model,
+	)
 	var validationErr error
 	previousUsage := Usage{}
 	var invalidContent json.RawMessage
@@ -525,12 +530,33 @@ func (p *OrchestratedProvider) completeBatch(
 	), nil
 }
 
-func configuredFallbackModel(models string) string {
+func configuredFallbackModel(models, current string) string {
 	parts := strings.Split(models, ",")
 	if len(parts) < 2 {
 		return ""
 	}
-	return strings.TrimSpace(parts[1])
+	current = strings.TrimSpace(current)
+	currentIndex := 0
+	if current != "" {
+		currentIndex = -1
+		for index, model := range parts {
+			if strings.EqualFold(strings.TrimSpace(model), current) {
+				currentIndex = index
+				break
+			}
+		}
+		if currentIndex < 0 {
+			return ""
+		}
+	}
+	currentModel := strings.TrimSpace(parts[currentIndex])
+	for offset := 1; offset < len(parts); offset++ {
+		candidate := strings.TrimSpace(parts[(currentIndex+offset)%len(parts)])
+		if candidate != "" && !strings.EqualFold(candidate, currentModel) {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func metadataFallbackEligible(ctx context.Context, err error) bool {
