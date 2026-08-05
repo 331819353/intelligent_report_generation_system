@@ -3,6 +3,8 @@ package dataset
 import (
 	"errors"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestNormalizeLLMTriggerScopeDeduplicatesAndSorts(t *testing.T) {
@@ -84,5 +86,12 @@ func TestValidateLLMTriggerAssetsRejectsUnavailableSelection(t *testing.T) {
 	)
 	if !errors.Is(err, ErrLLMTriggerScopeInvalid) {
 		t.Fatalf("expected unavailable selection error, got %v", err)
+	}
+}
+
+func TestMapLLMTriggerPostgresErrorMapsDomainAuthorization(t *testing.T) {
+	err := mapLLMTriggerPostgresError(&pgconn.PgError{Code: "42501"})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expected forbidden error, got %v", err)
 	}
 }

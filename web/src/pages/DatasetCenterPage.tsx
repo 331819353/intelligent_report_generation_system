@@ -1317,6 +1317,7 @@ export function DatasetCenterPage() {
           refreshCatalog = true
           const failed = selected.filter(task => ['FAILED', 'CANCELLED', 'STALE'].includes(task.status))
           const partial = selected.filter(task => task.status === 'PARTIAL')
+          const skipped = selected.filter(task => task.status === 'SKIPPED')
           if (failed.length) {
             completionNotices.push({
               tone: 'error',
@@ -1326,6 +1327,11 @@ export function DatasetCenterPage() {
             completionNotices.push({
               tone: 'error',
               message: `${config.label}部分完成：${partial.length} 个任务需要处理。悬停“${config.label}”可查看运行日志。`,
+            })
+          } else if (skipped.length) {
+            completionNotices.push({
+              tone: 'error',
+              message: `${config.label}未生成结果：${skipped.length} 个任务已跳过。悬停“${config.label}”可查看具体原因后重试。`,
             })
           } else {
             completionNotices.push({

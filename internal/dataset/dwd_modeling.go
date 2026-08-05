@@ -2892,7 +2892,11 @@ func validateDWDPlanningSnapshotTx(
 		return err
 	}
 	if currentSnapshotHash != expectedSnapshotHash {
-		return errDWDModelingSubjectChange
+		return fmt.Errorf(
+			"%w: expected snapshot %s, current snapshot %s, current assets %d",
+			errDWDModelingSubjectChange, expectedSnapshotHash,
+			currentSnapshotHash, len(sameDomain),
+		)
 	}
 	return nil
 }
@@ -4769,12 +4773,29 @@ func validateDWDClaimTx(
 		  ON business_domain.id=dataset.domain_id
 		 AND business_domain.tenant_id=dataset.tenant_id
 		 AND business_domain.status='ACTIVE'
-		JOIN platform.domain_memberships AS membership
-		  ON membership.tenant_id=actor.tenant_id
-		 AND membership.user_id=actor.id
-		 AND membership.domain_id=business_domain.id
-		 AND membership.status='ACTIVE'
 		WHERE job.id=$1::uuid
+		  AND (
+		    EXISTS(
+		      SELECT 1
+		      FROM platform.domain_memberships AS membership
+		      WHERE membership.tenant_id=actor.tenant_id
+		        AND membership.user_id=actor.id
+		        AND membership.domain_id=business_domain.id
+		        AND membership.status='ACTIVE'
+		    )
+		    OR EXISTS(
+		      SELECT 1
+		      FROM platform.user_roles AS assignment
+		      JOIN platform.roles AS role
+		        ON role.id=assignment.role_id
+		       AND role.tenant_id=assignment.tenant_id
+		       AND role.code::text='platform_admin'
+		       AND role.status='ACTIVE'
+		       AND role.deleted_at IS NULL
+		      WHERE assignment.tenant_id=actor.tenant_id
+		        AND assignment.user_id=actor.id
+		    )
+		  )
 	)`, claim.ID).Scan(&subjectCurrent)
 	if err != nil {
 		return err

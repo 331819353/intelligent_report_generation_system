@@ -26,6 +26,8 @@ ODS 的 sourceTables 只包含技术/业务元数据，不包含样本行；DIM/
 每个 tagId 最多返回一次。confidence 表示现有证据对该标签的支持程度；rationale 只简述元数据证据，不得包含业务数据值、凭据、SQL 或原始行。
 标签数量由证据决定，可以返回空数组；不要为了凑数输出弱相关标签。输出只能是 JSON Schema 指定的对象。`
 
+const maxTagSuggestionRepairContent = 32 << 10
+
 type Generator struct {
 	invoker Invoker
 	timeout time.Duration
@@ -95,9 +97,7 @@ func (generator *Generator) Generate(
 		// 请求。标签只会选取少量受控词条，4096 足够容纳结构化理由。
 		MaxOutputTokens: 4096,
 	}
-	callCtx, cancel := context.WithTimeout(ctx, generator.timeout)
-	defer cancel()
-	result, err := generator.invoker.Invoke(callCtx, aiplatform.Invocation{
+	invocation := aiplatform.Invocation{
 		TenantID:      claim.TenantID,
 		ActorID:       claim.ActorID,
 		Purpose:       aiplatform.PurposeDatasetTagSuggestion,
@@ -105,10 +105,50 @@ func (generator *Generator) Generate(
 		ResourceType:  "DATASET_VERSION",
 		ResourceID:    claim.DatasetVersionID,
 		Request:       request,
-	})
+	}
+	result, invokeErr := generator.invoke(ctx, invocation)
+	if invokeErr == nil {
+		completion, outputErr := tagSuggestionCompletion(result, taxonomy, inputHash)
+		if outputErr == nil {
+			return completion, nil
+		}
+		invokeErr = fmt.Errorf("%w: %v", ErrInvalidOutput, outputErr)
+	}
+	repairContent, repairDiagnostic, repairable := tagSuggestionRepairDetails(
+		result, invokeErr,
+	)
+	if !repairable {
+		return Completion{}, invokeErr
+	}
+	repair := invocation
+	repair.Request.Messages = tagSuggestionRepairMessages(
+		request.Messages, repairContent, repairDiagnostic,
+	)
+	repaired, err := generator.invoke(ctx, repair)
 	if err != nil {
 		return Completion{}, err
 	}
+	completion, err := tagSuggestionCompletion(repaired, taxonomy, inputHash)
+	if err != nil {
+		return Completion{}, fmt.Errorf("%w: repaired provider output", ErrInvalidOutput)
+	}
+	return completion, nil
+}
+
+func (generator *Generator) invoke(
+	ctx context.Context,
+	invocation aiplatform.Invocation,
+) (aiplatform.InvocationResult, error) {
+	callCtx, cancel := context.WithTimeout(ctx, generator.timeout)
+	defer cancel()
+	return generator.invoker.Invoke(callCtx, invocation)
+}
+
+func tagSuggestionCompletion(
+	result aiplatform.InvocationResult,
+	taxonomy map[string]TaxonomyTag,
+	inputHash string,
+) (Completion, error) {
 	output, err := decodeProviderOutput(result.ProviderResult.Content)
 	if err != nil {
 		return Completion{}, err
@@ -128,6 +168,52 @@ func (generator *Generator) Generate(
 		OutputHash:  hex.EncodeToString(outputSum[:]),
 		Suggestions: suggestions,
 	}, nil
+}
+
+func tagSuggestionRepairDetails(
+	result aiplatform.InvocationResult,
+	err error,
+) (content []byte, diagnostic string, repairable bool) {
+	if candidate, safeDiagnostic, ok := aiplatform.InvalidOutputDetails(err); ok {
+		return candidate, safeDiagnostic, true
+	}
+	if errors.Is(err, ErrInvalidOutput) {
+		return result.ProviderResult.Content,
+			"output violates the controlled-tag response contract", true
+	}
+	return nil, "", false
+}
+
+func tagSuggestionRepairMessages(
+	base []aiplatform.Message,
+	candidate []byte,
+	diagnostic string,
+) []aiplatform.Message {
+	messages := append([]aiplatform.Message(nil), base...)
+	if len(candidate) > 0 && len(candidate) <= maxTagSuggestionRepairContent {
+		messages = append(messages, aiplatform.Message{
+			Role: aiplatform.MessageRoleAssistant,
+			Parts: []aiplatform.ContentPart{{
+				Type: aiplatform.ContentTypeText,
+				Text: string(candidate),
+			}},
+		})
+	}
+	instruction := `上一份标签建议未通过结构校验。请根据最初输入重新输出一份完整 JSON：
+1. 根对象只能包含 items；items 可以为空。
+2. 每项只能包含 tagId、confidence、rationale，tagId 必须来自 controlledTaxonomy 且不得重复。
+3. confidence 必须在 0 到 1 之间；rationale 保持简短。
+4. 不要输出 Markdown、解释过程或 JSON 之外的内容。`
+	if strings.TrimSpace(diagnostic) != "" {
+		instruction += "\n结构诊断：" + strings.TrimSpace(diagnostic)
+	}
+	return append(messages, aiplatform.Message{
+		Role: aiplatform.MessageRoleUser,
+		Parts: []aiplatform.ContentPart{{
+			Type: aiplatform.ContentTypeText,
+			Text: instruction,
+		}},
+	})
 }
 
 func inputDigest(payload []byte) string {

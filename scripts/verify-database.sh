@@ -111,8 +111,54 @@ BEGIN
      to_regprocedure('platform.trigger_manual_dwd_modeling(uuid)') IS NULL THEN
     RAISE EXCEPTION 'retained dataset modeling boundaries are missing';
   END IF;
+  IF to_regprocedure(
+       'platform.modeling_actor_can_access_current_domain(uuid)'
+     ) IS NULL OR
+     position(
+       'modeling_actor_can_access_current_domain(actor_id)' IN
+       pg_get_functiondef(
+         'platform.trigger_manual_dim_modeling(uuid,uuid[])'::regprocedure
+       )
+     )=0 OR
+     position(
+       'modeling_actor_can_access_current_domain(actor_id)' IN
+       pg_get_functiondef(
+         'platform.trigger_manual_dwd_modeling(uuid)'::regprocedure
+       )
+     )=0 THEN
+    RAISE EXCEPTION 'dataset modeling domain authorization boundary is missing';
+  END IF;
+  IF position(
+       'dataset-tag-suggestion-v7' IN
+       pg_get_functiondef(
+         'platform.enqueue_dataset_tag_suggestion()'::regprocedure
+       )
+     )=0 THEN
+    RAISE EXCEPTION 'dataset tag suggestion enqueue prompt is not v7';
+  END IF;
 END
 $$;
+
+SELECT (
+  has_function_privilege(
+    :'app_user','platform.semantic_tag_can_read(uuid)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user','platform.semantic_tag_can_write(uuid)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user','platform.semantic_tag_can_read(uuid)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user','platform.semantic_tag_can_write(uuid)','EXECUTE'
+  )
+) AS dataset_tag_policy_helpers_executable
+\gset
+\if :dataset_tag_policy_helpers_executable
+\else
+  \echo 'dataset tag policy helper runtime privileges are missing'
+  \quit 1
+\endif
 
 SELECT 'retained permission, data-source and dataset schema passed' AS result;
 SQL

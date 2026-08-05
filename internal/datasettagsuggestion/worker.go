@@ -87,17 +87,7 @@ func (worker *Worker) ProcessNext(
 		return true, heartbeatErr
 	}
 	if err != nil {
-		classification := aiplatform.ClassifyError(err)
-		code := "AI_INVALID_OUTPUT"
-		retryable := classification.Retryable
-		if classification.Code != "" && classification.Code != aiplatform.ErrorCodeCompletionFailed {
-			code = string(classification.Code)
-		} else if errors.Is(err, ErrInputLimit) {
-			code = "INPUT_LIMIT_EXCEEDED"
-			retryable = false
-		} else if errors.Is(err, ErrInvalidRequest) {
-			retryable = false
-		}
+		code, retryable := classifyGenerationError(err)
 		return true, errors.Join(err, worker.fail(ctx, *claim, workerID, code, retryable))
 	}
 	if err := worker.store.Complete(ctx, *claim, workerID, completion); err != nil {
@@ -107,6 +97,25 @@ func (worker *Worker) ProcessNext(
 		return true, errors.Join(err, worker.fail(ctx, *claim, workerID, "RESULT_WRITE_FAILED", true))
 	}
 	return true, nil
+}
+
+func classifyGenerationError(err error) (code string, retryable bool) {
+	classification := aiplatform.ClassifyError(err)
+	code = "AI_INVALID_OUTPUT"
+	retryable = classification.Retryable
+	if classification.Code != "" &&
+		classification.Code != aiplatform.ErrorCodeCompletionFailed {
+		code = string(classification.Code)
+	} else if errors.Is(err, ErrInputLimit) {
+		return "INPUT_LIMIT_EXCEEDED", false
+	} else if errors.Is(err, ErrInvalidRequest) {
+		return code, false
+	}
+	if classification.Code == aiplatform.ErrorCodeInvalidOutput ||
+		errors.Is(err, ErrInvalidOutput) {
+		return "AI_INVALID_OUTPUT", true
+	}
+	return code, retryable
 }
 
 func (worker *Worker) heartbeat(

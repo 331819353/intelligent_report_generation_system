@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"intelligent-report-generation-system/internal/platform/database"
 )
 
@@ -274,12 +275,24 @@ func (s *PostgresStore) TriggerLLM(
 		return triggerErr
 	})
 	if err != nil {
-		return LLMTriggerResult{}, err
+		return LLMTriggerResult{}, mapLLMTriggerPostgresError(err)
 	}
 	if result.ExistingCount < 0 {
 		return LLMTriggerResult{}, errors.New("dataset LLM trigger count invariant failed")
 	}
 	return result, nil
+}
+
+func mapLLMTriggerPostgresError(err error) error {
+	if err == nil || errors.Is(err, ErrForbidden) ||
+		errors.Is(err, ErrLLMTriggerScopeInvalid) {
+		return err
+	}
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) && postgresError.Code == "42501" {
+		return ErrForbidden
+	}
+	return err
 }
 
 func triggerDIMModeling(

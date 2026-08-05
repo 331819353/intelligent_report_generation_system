@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	PromptVersion      = "dataset-tag-suggestion-v6"
+	PromptVersion      = "dataset-tag-suggestion-v7"
 	MaxSuggestions     = 256
 	MaxTaxonomyTags    = 1024
 	MaxTaxonomyAliases = 4096
@@ -31,6 +31,7 @@ const (
 
 var (
 	ErrInvalidRequest = errors.New("dataset tag suggestion request is invalid")
+	ErrInvalidOutput  = errors.New("dataset tag suggestion output is invalid")
 	ErrLeaseLost      = errors.New("dataset tag suggestion lease was lost")
 	ErrSubjectChanged = errors.New("dataset tag suggestion subject changed")
 	ErrInputLimit     = errors.New("dataset tag suggestion input exceeds safety limit")
