@@ -259,6 +259,8 @@ func tenantPolicyAllowsPurpose(enabled bool, allowedPurposes []string, purpose s
 		return false
 	}
 	// 标签建议和语义命名只产生待人工治理的数据集配置建议。
+	// SEMANTIC_QUESTION 风险更高，必须显式存在于 allowed_purposes 中；
+	// 不能复用这两个历史低风险用途的隐式授权分支。
 	return purpose == PurposeDatasetTagSuggestion || purpose == PurposeDatasetSemanticNaming ||
 		containsPurpose(allowedPurposes, purpose)
 }

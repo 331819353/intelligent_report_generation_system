@@ -876,7 +876,7 @@ func (s *PostgresStore) publishTx(
 		DSLVersion, plan.Prepared.DSLJSON, plan.Prepared.DSLHash, plan.Prepared.LogicalPlanJSON,
 		plan.Prepared.PlanHash, actorID, draftVersionID, draftRecordVersion, origin).
 		Scan(&publishedVersionID); err != nil {
-		return err
+		return fmt.Errorf("insert publishing dataset version: %w", err)
 	}
 	if err := replaceDerived(ctx, tx, tenantID, datasetID, publishedVersionID, plan.Prepared.Document, false); err != nil {
 		return err
@@ -887,7 +887,7 @@ func (s *PostgresStore) publishTx(
 		return err
 	}
 	if tag, err := tx.Exec(ctx, `UPDATE platform.dataset_versions SET status='PUBLISHED' WHERE id=$1 AND status='PUBLISHING'`, publishedVersionID); err != nil {
-		return err
+		return fmt.Errorf("complete publishing dataset version: %w", err)
 	} else if tag.RowsAffected() != 1 {
 		return ErrConflict
 	}

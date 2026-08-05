@@ -258,6 +258,22 @@ func ClassifyMappedDatasetLayer(table MappedDatasetTable, columns []MappedDatase
 
 const mappedDatasetDefaultPublishKey = "system-mapped-default-v1"
 
+func mappedDatasetRefreshPublishKey(
+	metadataVersion, datasetVersion, draftRecordVersion int64,
+	structureHash, dslHash string,
+) string {
+	if len(structureHash) > 16 {
+		structureHash = structureHash[:16]
+	}
+	if len(dslHash) > 16 {
+		dslHash = dslHash[:16]
+	}
+	return fmt.Sprintf(
+		"system-mapped-refresh-%d-%d-%d-%s-%s",
+		metadataVersion, datasetVersion, draftRecordVersion, structureHash, dslHash,
+	)
+}
+
 type mappedDatasetState struct {
 	ID                   string
 	Layer                Layer
@@ -961,17 +977,12 @@ func (s *PostgresStore) refreshMappedDatasetTx(
 	if err != nil {
 		return false, err
 	}
-	structurePrefix := table.StructureHash
-	if len(structurePrefix) > 16 {
-		structurePrefix = structurePrefix[:16]
-	}
-	dslPrefix := prepared.DSLHash
-	if len(dslPrefix) > 16 {
-		dslPrefix = dslPrefix[:16]
-	}
 	plan := PublishPlan{
-		IdempotencyKey: fmt.Sprintf("system-mapped-refresh-%d-%s-%s", table.MetadataVersion, structurePrefix, dslPrefix),
-		RequestHash:    requestHash, ExpectedVersion: datasetVersion, DraftVersionID: state.DraftVersionID,
+		IdempotencyKey: mappedDatasetRefreshPublishKey(
+			table.MetadataVersion, datasetVersion, draftRecordVersion,
+			table.StructureHash, prepared.DSLHash,
+		),
+		RequestHash: requestHash, ExpectedVersion: datasetVersion, DraftVersionID: state.DraftVersionID,
 		ExpectedDraftRecordVersion: draftRecordVersion, ExpectedDSLHash: prepared.DSLHash, Prepared: prepared,
 	}
 	var published VersionRecord

@@ -166,3 +166,54 @@ func TestNewWireRequestOmitsUnconfiguredReasoningExtensions(t *testing.T) {
 		t.Fatalf("json_schema must be present by default")
 	}
 }
+
+func TestDeepSeekAndGLMWireContractsCarryApplicationToolMessages(t *testing.T) {
+	request := ProviderRequest{
+		Messages: []Message{
+			{Role: MessageRoleUser, Parts: []ContentPart{{Type: ContentTypeText, Text: "识别销售额"}}},
+			{Role: MessageRoleAssistant, Parts: []ContentPart{{Type: ContentTypeText, Text: `{"action":"CALL_TOOL"}`}}},
+			{
+				Role: MessageRoleTool, ToolCallID: "call-search-1", ToolName: "search_semantic_objects",
+				Parts: []ContentPart{{Type: ContentTypeText, Text: `{"candidates":[]}`}},
+			},
+		},
+		ResponseSchema: JSONSchema{Name: "action", Schema: json.RawMessage(
+			`{"type":"object","additionalProperties":false,"required":["ok"],"properties":{"ok":{"type":"boolean"}}}`,
+		)},
+		MaxOutputTokens: 8_192,
+	}
+	for _, fixture := range []struct {
+		name    string
+		model   string
+		options ProviderOptions
+	}{
+		{
+			name: "DeepSeek", model: "deepseek-v4-flash",
+			options: ProviderOptions{ThinkingEnabled: true, ReasoningEffort: "high", ResponseFormat: "json_object"},
+		},
+		{
+			name: "GLM", model: "glm-5.2",
+			options: ProviderOptions{ThinkingEnabled: true, ResponseFormat: "json_object", MaxOutputTokens: 65_536},
+		},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			if err := ValidateProviderRequest(request); err != nil {
+				t.Fatalf("ValidateProviderRequest() error = %v", err)
+			}
+			wire := newWireRequest(fixture.model, request, fixture.options)
+			if len(wire.Messages) != 4 { // schema contract + three application messages
+				t.Fatalf("wire messages = %d, want 4", len(wire.Messages))
+			}
+			tool := wire.Messages[3]
+			if tool.Role != MessageRoleTool || tool.ToolCallID != "call-search-1" || tool.Name != "search_semantic_objects" {
+				t.Fatalf("tool wire message = %#v", tool)
+			}
+			if tool.Content != `{"candidates":[]}` {
+				t.Fatalf("tool content = %#v", tool.Content)
+			}
+			if wire.MaxOutputTokens != request.MaxOutputTokens {
+				t.Fatalf("max tokens = %d, want reserved request budget %d", wire.MaxOutputTokens, request.MaxOutputTokens)
+			}
+		})
+	}
+}

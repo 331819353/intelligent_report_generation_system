@@ -18,6 +18,7 @@ import (
 
 var schemaNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 var quotedOutputDiagnosticPattern = regexp.MustCompile(`"[^"\r\n]*"`)
+var toolMessageIdentityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$`)
 
 var supportedSchemaKeywords = map[string]bool{
 	"$comment": true, "$defs": true, "$ref": true,
@@ -61,18 +62,35 @@ func normalizeProviderRequest(request ProviderRequest) (ProviderRequest, map[str
 		return ProviderRequest{}, nil, invalidRequest(errors.New("messages count is invalid"))
 	}
 	hasUserMessage := false
+	hasAssistantMessage := false
 	normalizedMessages := make([]Message, len(request.Messages))
 	for i, message := range request.Messages {
-		if message.Role != MessageRoleSystem && message.Role != MessageRoleUser && message.Role != MessageRoleAssistant {
+		if message.Role != MessageRoleSystem && message.Role != MessageRoleUser && message.Role != MessageRoleAssistant && message.Role != MessageRoleTool {
 			return ProviderRequest{}, nil, invalidRequest(fmt.Errorf("messages[%d] has invalid role", i))
 		}
 		if message.Role == MessageRoleUser {
 			hasUserMessage = true
 		}
+		if message.Role == MessageRoleAssistant {
+			hasAssistantMessage = true
+		}
+		if message.Role == MessageRoleTool {
+			if !hasAssistantMessage || !toolMessageIdentityPattern.MatchString(message.ToolCallID) || !toolMessageIdentityPattern.MatchString(message.ToolName) {
+				return ProviderRequest{}, nil, invalidRequest(fmt.Errorf("messages[%d] has invalid tool identity or ordering", i))
+			}
+		} else if message.ToolCallID != "" || message.ToolName != "" {
+			return ProviderRequest{}, nil, invalidRequest(fmt.Errorf("messages[%d] has tool metadata on a non-tool role", i))
+		}
 		if len(message.Parts) == 0 || len(message.Parts) > MaxPartsPerMessage {
 			return ProviderRequest{}, nil, invalidRequest(fmt.Errorf("messages[%d] parts count is invalid", i))
 		}
-		normalizedMessages[i] = Message{Role: message.Role, Parts: append([]ContentPart(nil), message.Parts...)}
+		if message.Role == MessageRoleTool && len(message.Parts) != 1 {
+			return ProviderRequest{}, nil, invalidRequest(fmt.Errorf("messages[%d] tool result must contain exactly one text part", i))
+		}
+		normalizedMessages[i] = Message{
+			Role: message.Role, Parts: append([]ContentPart(nil), message.Parts...),
+			ToolCallID: message.ToolCallID, ToolName: message.ToolName,
+		}
 		for j, part := range message.Parts {
 			switch part.Type {
 			case ContentTypeText:

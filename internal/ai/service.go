@@ -19,6 +19,9 @@ const (
 	PurposeDatasetTagSuggestion    = "DATASET_TAG_SUGGESTION"
 	PurposeDatasetSemanticNaming   = "DATASET_SEMANTIC_NAMING"
 	PurposeDataSourceConfiguration = "DATA_SOURCE_CONFIGURATION"
+	// PurposeSemanticQuestion is reserved for the bounded AskData cognition
+	// protocol. It never authorizes arbitrary SQL or bypasses the tenant policy.
+	PurposeSemanticQuestion = "SEMANTIC_QUESTION"
 )
 
 var (
@@ -338,7 +341,7 @@ func allowedPurpose(purpose string) bool {
 	switch purpose {
 	case PurposeMetadataCompletion, PurposeDatasetDAGGeneration,
 		PurposeDatasetTagSuggestion, PurposeDatasetSemanticNaming,
-		PurposeDataSourceConfiguration:
+		PurposeDataSourceConfiguration, PurposeSemanticQuestion:
 		return true
 	default:
 		return false

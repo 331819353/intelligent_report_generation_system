@@ -1,6 +1,9 @@
 package dataset
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestBuildMappedDatasetDocumentPreservesDatabaseCodeColumnType(t *testing.T) {
 	document, err := BuildMappedDatasetDocument(
@@ -170,5 +173,33 @@ func TestMappedDatasetCanRegeneratePristineUnpublishedDraft(t *testing.T) {
 				t.Fatal("non-pristine unpublished draft must not be regenerated")
 			}
 		})
+	}
+}
+
+func TestMappedDatasetRefreshPublishKeySeparatesRepeatedSchemaTransitions(t *testing.T) {
+	t.Parallel()
+	structureHash := "559101175c64d4191b712eb1e42c0b9708cc1c0b489dcd97c09c2fc259580704"
+	dslHash := "677beddb97212077bafe1374229d2facdf9a5b70b173cbfbf5689d7f4b9f49e0"
+
+	first := mappedDatasetRefreshPublishKey(1, 7, 4, structureHash, dslHash)
+	replay := mappedDatasetRefreshPublishKey(1, 7, 4, structureHash, dslHash)
+	reversion := mappedDatasetRefreshPublishKey(1, 9, 5, structureHash, dslHash)
+	if first != replay {
+		t.Fatal("the same refresh transition must retain a stable idempotency key")
+	}
+	if first == reversion {
+		t.Fatal("a later transition back to the same schema must receive a distinct idempotency key")
+	}
+}
+
+func TestMappedDatasetRefreshPublishKeyFitsDatabaseLimit(t *testing.T) {
+	t.Parallel()
+	key := mappedDatasetRefreshPublishKey(
+		math.MaxInt64, math.MaxInt64, math.MaxInt64,
+		"559101175c64d4191b712eb1e42c0b9708cc1c0b489dcd97c09c2fc259580704",
+		"677beddb97212077bafe1374229d2facdf9a5b70b173cbfbf5689d7f4b9f49e0",
+	)
+	if len(key) > 128 {
+		t.Fatalf("refresh idempotency key length = %d, want at most 128", len(key))
 	}
 }

@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS askdata.embedding_outbox;
+DROP TABLE IF EXISTS askdata.search_documents;
+DROP TABLE IF EXISTS askdata.semantic_aliases;
+DROP TABLE IF EXISTS askdata.dimension_member_aliases;
+DROP TABLE IF EXISTS askdata.dimension_members;
+DROP FUNCTION IF EXISTS askdata.enqueue_embedding_document();
+DROP FUNCTION IF EXISTS askdata.prepare_search_document_embedding();
+DROP FUNCTION IF EXISTS askdata.validate_search_document_subject();
+DROP FUNCTION IF EXISTS askdata.validate_member_dependency();
+DROP FUNCTION IF EXISTS askdata.validate_semantic_alias_subject();

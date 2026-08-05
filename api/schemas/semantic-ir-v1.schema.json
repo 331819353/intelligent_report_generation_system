@@ -1,0 +1,125 @@
+{
+  "title": "Semantic IR V1",
+  "description": "Version-pinned semantic query contract accepted by the deterministic Go compiler.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "irVersion",
+    "semanticReleaseId",
+    "semanticContentHash",
+    "modelVersionId",
+    "metrics",
+    "groupBy",
+    "filters",
+    "timeRange",
+    "comparison",
+    "sort",
+    "limit"
+  ],
+  "properties": {
+    "irVersion": { "const": "1.0" },
+    "semanticReleaseId": { "$ref": "#/$defs/stableId" },
+    "semanticContentHash": { "$ref": "#/$defs/contentHash" },
+    "modelVersionId": { "$ref": "#/$defs/stableId" },
+    "metrics": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": { "$ref": "#/$defs/metric" }
+    },
+    "groupBy": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/groupBy" }
+    },
+    "filters": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/filter" }
+    },
+    "timeRange": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["dimensionVersionId", "start", "endExclusive", "timezone"],
+      "properties": {
+        "dimensionVersionId": { "$ref": "#/$defs/stableId" },
+        "start": { "$ref": "#/$defs/date" },
+        "endExclusive": { "$ref": "#/$defs/date" },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "comparison": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["type", "periods"],
+      "properties": {
+        "type": { "enum": ["YEAR_OVER_YEAR", "MONTH_OVER_MONTH", "PERIOD_OVER_PERIOD"] },
+        "periods": { "type": "integer", "minimum": 1, "maximum": 120 }
+      }
+    },
+    "sort": {
+      "type": "array",
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/sort" }
+    },
+    "limit": { "type": "integer", "minimum": 1, "maximum": 10000 }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$"
+    },
+    "contentHash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[0-1])$"
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metricVersionId", "alias"],
+      "properties": {
+        "metricVersionId": { "$ref": "#/$defs/stableId" },
+        "alias": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" }
+      }
+    },
+    "groupBy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dimensionVersionId", "grain"],
+      "properties": {
+        "dimensionVersionId": { "$ref": "#/$defs/stableId" },
+        "grain": { "enum": [null, "DAY", "WEEK", "MONTH", "QUARTER", "YEAR"] }
+      }
+    },
+    "filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dimensionVersionId", "operator", "memberVersionIds"],
+      "properties": {
+        "dimensionVersionId": { "$ref": "#/$defs/stableId" },
+        "operator": { "enum": ["EQUALS", "NOT_EQUALS", "IN", "NOT_IN", "IS_NULL", "IS_NOT_NULL"] },
+        "memberVersionIds": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stableId" }
+        }
+      }
+    },
+    "sort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetType", "targetVersionId", "direction", "nulls"],
+      "properties": {
+        "targetType": { "enum": ["METRIC", "DIMENSION"] },
+        "targetVersionId": { "$ref": "#/$defs/stableId" },
+        "direction": { "enum": ["ASC", "DESC"] },
+        "nulls": { "enum": ["FIRST", "LAST"] }
+      }
+    }
+  }
+}

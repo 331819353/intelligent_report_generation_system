@@ -315,5 +315,78 @@ WHERE to_regprocedure(
   'platform.dataset_version_effective_domain(uuid)'
 ) IS NOT NULL
 \gexec
+
+-- askdata is a fail-closed control-plane schema. Reset all runtime grants on
+-- every deployment, then grant only the API authoring surface and the worker
+-- projection/outbox surface. The connection-test role has no askdata access.
+REVOKE ALL ON SCHEMA askdata FROM PUBLIC, :"connection_test_user";
+GRANT USAGE ON SCHEMA askdata TO :"app_user", :"worker_user";
+REVOKE ALL ON ALL TABLES IN SCHEMA askdata
+  FROM :"app_user", :"worker_user", :"connection_test_user";
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA askdata
+  FROM :"app_user", :"worker_user", :"connection_test_user";
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA askdata
+  FROM PUBLIC, :"app_user", :"worker_user", :"connection_test_user";
+
+GRANT SELECT ON ALL TABLES IN SCHEMA askdata TO :"app_user", :"worker_user";
+GRANT INSERT, UPDATE, DELETE ON TABLE
+  askdata.domains,
+  askdata.entities,
+  askdata.semantic_models,
+  askdata.measures,
+  askdata.metrics,
+  askdata.metric_versions,
+  askdata.metric_version_measures,
+  askdata.dimensions,
+  askdata.hierarchies,
+  askdata.hierarchy_levels,
+  askdata.relationships,
+  askdata.quality_rules,
+  askdata.business_terms,
+  askdata.dimension_members,
+  askdata.dimension_member_aliases,
+  askdata.semantic_aliases,
+  askdata.search_documents
+TO :"app_user";
+GRANT INSERT ON TABLE
+  askdata.audit_events,
+  askdata.releases,
+  askdata.release_objects
+TO :"app_user";
+
+GRANT INSERT ON TABLE askdata.audit_events TO :"worker_user";
+GRANT INSERT, UPDATE, DELETE ON TABLE
+  askdata.embedding_outbox,
+  askdata.search_documents,
+  askdata.release_projection_artifacts,
+  askdata.graph_plan_cache
+TO :"worker_user";
+
+GRANT EXECUTE ON FUNCTION
+  askdata.current_tenant_id(),
+  askdata.current_actor_id(),
+  askdata.current_domain_id(),
+  askdata.system_access(),
+  askdata.tenant_matches(uuid),
+  askdata.domain_can_access(uuid),
+  askdata.json_is_safe(jsonb),
+  askdata.release_manifest_hash(uuid)
+TO :"app_user", :"worker_user";
+GRANT EXECUTE ON FUNCTION
+  askdata.start_release_projection(uuid,uuid,jsonb)
+TO :"app_user";
+GRANT EXECUTE ON FUNCTION
+  askdata.list_release_projection_tenants(),
+  askdata.claim_release_projection(uuid,text,integer),
+  askdata.complete_release_projection(uuid,uuid,text,uuid,text,text,integer,jsonb),
+  askdata.fail_release_projection(uuid,uuid,text,uuid,text,boolean)
+TO :"worker_user";
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA askdata REVOKE ALL ON TABLES
+  FROM PUBLIC, :"app_user", :"worker_user", :"connection_test_user";
+ALTER DEFAULT PRIVILEGES IN SCHEMA askdata REVOKE ALL ON SEQUENCES
+  FROM PUBLIC, :"app_user", :"worker_user", :"connection_test_user";
+ALTER DEFAULT PRIVILEGES IN SCHEMA askdata REVOKE ALL ON FUNCTIONS
+  FROM PUBLIC, :"app_user", :"worker_user", :"connection_test_user";
 COMMIT;
 SQL

@@ -41,7 +41,10 @@ func sanitizeProviderRequest(input ProviderRequest, maxInputBytes int) (Provider
 	redactions += count
 	result.ResponseSchema.Description = description
 	for messageIndex, message := range normalized.Messages {
-		result.Messages[messageIndex] = Message{Role: message.Role, Parts: make([]ContentPart, len(message.Parts))}
+		result.Messages[messageIndex] = Message{
+			Role: message.Role, Parts: make([]ContentPart, len(message.Parts)),
+			ToolCallID: message.ToolCallID, ToolName: message.ToolName,
+		}
 		for partIndex, part := range message.Parts {
 			switch part.Type {
 			case ContentTypeText:
@@ -93,6 +96,14 @@ func redactSensitiveText(text string) (string, int) {
 		text = item.pattern.ReplaceAllString(text, item.replace)
 	}
 	return text, count
+}
+
+// ContainsSensitiveText lets model-adjacent document builders fail closed
+// before credentials can enter an embedding corpus. It deliberately exposes no
+// redacted value or matching secret.
+func ContainsSensitiveText(text string) bool {
+	_, count := redactSensitiveText(text)
+	return count > 0
 }
 
 func invalidProviderRequest(format string, args ...any) error {

@@ -62,8 +62,10 @@ type ContentPart struct {
 
 // Message 由一个角色和一组有序内容片段组成。
 type Message struct {
-	Role  MessageRole   `json:"role"`
-	Parts []ContentPart `json:"parts"`
+	Role       MessageRole   `json:"role"`
+	Parts      []ContentPart `json:"parts"`
+	ToolCallID string        `json:"toolCallId,omitempty"`
+	ToolName   string        `json:"toolName,omitempty"`
 }
 
 // JSONSchema 描述模型必须严格遵守的结构化输出合同。

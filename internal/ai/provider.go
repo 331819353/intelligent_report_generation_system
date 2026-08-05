@@ -232,8 +232,10 @@ type wireThinking struct {
 }
 
 type wireMessage struct {
-	Role    MessageRole `json:"role"`
-	Content any         `json:"content"`
+	Role       MessageRole `json:"role"`
+	Content    any         `json:"content"`
+	ToolCallID string      `json:"tool_call_id,omitempty"`
+	Name       string      `json:"name,omitempty"`
 }
 
 type wireContentPart struct {
@@ -285,6 +287,7 @@ func newWireRequest(
 	for _, message := range request.Messages {
 		messages = append(messages, wireMessage{
 			Role: message.Role, Content: wireMessageContent(message.Parts),
+			ToolCallID: message.ToolCallID, Name: message.ToolName,
 		})
 	}
 	wire := wireRequest{
@@ -295,7 +298,10 @@ func newWireRequest(
 		ReasoningEffort: strings.ToLower(strings.TrimSpace(options.ReasoningEffort)),
 		Stream:          false,
 	}
-	if options.MaxOutputTokens > 0 {
+	// Endpoint configuration is a hard maximum, not an override. Otherwise a
+	// provider-level 65k setting could bypass the smaller quota reservation made
+	// by Service for an 8k cognition round.
+	if options.MaxOutputTokens > 0 && (wire.MaxOutputTokens == 0 || wire.MaxOutputTokens > options.MaxOutputTokens) {
 		wire.MaxOutputTokens = options.MaxOutputTokens
 	}
 	if responseFormat == "json_schema" {

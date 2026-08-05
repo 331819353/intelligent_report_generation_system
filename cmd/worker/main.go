@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	aiplatform "intelligent-report-generation-system/internal/ai"
+	askdatasearch "intelligent-report-generation-system/internal/askdata/search"
 	"intelligent-report-generation-system/internal/assetembedding"
 	"intelligent-report-generation-system/internal/config"
 	"intelligent-report-generation-system/internal/dataset"
@@ -168,6 +169,15 @@ func main() {
 		ctx,
 		logger,
 		assetembedding.NewWorker(assetembedding.NewPostgresStore(pool), embeddingProvider),
+		workerID,
+		cfg.WorkerPollInterval,
+	)
+	go runAskDataEmbeddingWorker(
+		ctx,
+		logger,
+		askdatasearch.NewEmbeddingWorker(
+			askdatasearch.NewPostgresEmbeddingStore(pool), embeddingProvider,
+		),
 		workerID,
 		cfg.WorkerPollInterval,
 	)
@@ -395,6 +405,31 @@ func runAssetEmbeddingWorker(
 		}
 		return processed, nil
 	}, func(err error) { logger.Error("list asset embedding tenants", "error", err) })
+}
+
+func runAskDataEmbeddingWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	worker *askdatasearch.EmbeddingWorker,
+	workerID string,
+	pollInterval time.Duration,
+) {
+	const lease = 2 * time.Minute
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
+		processed := false
+		tenantIDs, err := worker.TenantIDs(ctx)
+		if err != nil {
+			return false, err
+		}
+		for _, tenantID := range tenantIDs {
+			count, runErr := worker.ProcessNext(ctx, tenantID, workerID, lease)
+			if runErr != nil {
+				logger.Error("process AskData embeddings", "tenant_id", tenantID, "error", runErr)
+			}
+			processed = processed || count > 0
+		}
+		return processed, nil
+	}, func(err error) { logger.Error("list AskData embedding tenants", "error", err) })
 }
 
 func runMetadataJobWorker(
