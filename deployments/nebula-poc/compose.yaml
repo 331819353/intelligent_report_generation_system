@@ -1,0 +1,193 @@
+name: askdata-nebula-poc
+
+# GRAPH-001 only: isolated, ephemeral compatibility harness. Production
+# services belong in the repository-root compose.yaml after GRAPH-002.
+services:
+  nebula-metad:
+    image: docker.io/vesoft/nebula-metad:v3.8.0
+    environment:
+      USER: root
+      TZ: Asia/Shanghai
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --local_ip=nebula-metad
+      - --ws_ip=nebula-metad
+      - --port=9559
+      - --ws_http_port=19559
+      - --data_path=/data/meta
+      - --log_dir=/logs
+      - --v=0
+      - --minloglevel=0
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://nebula-metad:19559/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+    tmpfs:
+      - /data/meta
+      - /logs
+    networks: [nebula-poc]
+
+  nebula-storaged:
+    image: docker.io/vesoft/nebula-storaged:v3.8.0
+    environment:
+      USER: root
+      TZ: Asia/Shanghai
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --local_ip=nebula-storaged
+      - --ws_ip=nebula-storaged
+      - --port=9779
+      - --ws_http_port=19779
+      - --data_path=/data/storage
+      - --log_dir=/logs
+      - --v=0
+      - --minloglevel=0
+    depends_on:
+      nebula-metad:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://nebula-storaged:19779/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+    tmpfs:
+      - /data/storage
+      - /logs
+    networks: [nebula-poc]
+
+  nebula-graphd-a:
+    image: docker.io/vesoft/nebula-graphd:v3.8.0
+    environment:
+      USER: root
+      TZ: Asia/Shanghai
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --port=9669
+      - --local_ip=nebula-graphd-a
+      - --ws_ip=nebula-graphd-a
+      - --ws_http_port=19669
+      - --log_dir=/logs
+      - --v=0
+      - --minloglevel=0
+    depends_on:
+      nebula-metad:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://nebula-graphd-a:19669/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+    ports:
+      - "127.0.0.1:${ASKDATA_NEBULA_POC_PORT_A:-19669}:9669"
+    tmpfs: [/logs]
+    networks: [nebula-poc]
+
+  nebula-init:
+    image: docker.io/vesoft/nebula-console:v3.8.0
+    entrypoint: [""]
+    command:
+      - sh
+      - -ec
+      - |
+        for attempt in $$(seq 1 30); do
+          if nebula-console -addr nebula-graphd-a -port 9669 -u root -p nebula \
+            -e 'ADD HOSTS "nebula-storaged":9779'; then
+            exit 0
+          fi
+          sleep 1
+        done
+        exit 1
+    depends_on:
+      nebula-graphd-a:
+        condition: service_healthy
+    restart: "no"
+    networks: [nebula-poc]
+
+  nebula-graphd-b:
+    image: docker.io/vesoft/nebula-graphd:v3.8.0
+    environment:
+      USER: root
+      TZ: Asia/Shanghai
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --port=9669
+      - --local_ip=nebula-graphd-b
+      - --ws_ip=nebula-graphd-b
+      - --ws_http_port=19669
+      - --log_dir=/logs
+      - --v=0
+      - --minloglevel=0
+    depends_on:
+      nebula-storaged:
+        condition: service_healthy
+      nebula-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://nebula-graphd-b:19669/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+    ports:
+      - "127.0.0.1:${ASKDATA_NEBULA_POC_PORT_B:-29669}:9669"
+    tmpfs: [/logs]
+    networks: [nebula-poc]
+
+  nebula-graphd-tls:
+    image: docker.io/vesoft/nebula-graphd:v3.8.0
+    environment:
+      USER: root
+      TZ: Asia/Shanghai
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --port=9669
+      - --local_ip=nebula-graphd-tls
+      - --ws_ip=nebula-graphd-tls
+      - --ws_http_port=19669
+      - --log_dir=/logs
+      - --enable_graph_ssl=true
+      - --ca_path=/certs/ca.crt
+      - --cert_path=/certs/server.crt
+      - --key_path=/certs/server.key
+      - --v=0
+      - --minloglevel=0
+    depends_on:
+      nebula-storaged:
+        condition: service_healthy
+      nebula-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://nebula-graphd-tls:19669/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+    ports:
+      - "127.0.0.1:${ASKDATA_NEBULA_POC_TLS_PORT:-39669}:9669"
+    volumes:
+      - type: bind
+        source: ${ASKDATA_NEBULA_POC_CERT_DIR:?run scripts/verify-nebula-poc.sh}
+        target: /certs
+        read_only: true
+    tmpfs: [/logs]
+    networks: [nebula-poc]
+
+  nebula-blackhole:
+    image: docker.io/library/busybox:1.37.0
+    command: ["nc", "-lk", "-p", "9669", "-e", "tail"]
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "9669"]
+      interval: 1s
+      timeout: 1s
+      retries: 10
+    ports:
+      - "127.0.0.1:${ASKDATA_NEBULA_POC_BLACKHOLE_PORT:-49669}:9669"
+    networks: [nebula-poc]
+
+networks:
+  nebula-poc:
+    driver: bridge

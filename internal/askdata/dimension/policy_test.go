@@ -16,7 +16,8 @@ func TestProfileMathHashAndBudgetValidation(t *testing.T) {
 		RowCount:    1_000, NullCount: 100, DistinctCount: 110,
 		PreviousDistinctCount: &previous, AddedDistinctCount: 20, RemovedDistinctCount: 10,
 		ReservedValues: []ReservedValueObservation{{
-			Code: "UNKNOWN", NormalizedValueHash: askdata.HashBytes([]byte("unknown")), Count: 50,
+			Code: "UNKNOWN", NormalizedValueHash: askdata.HashBytes([]byte("unknown")),
+			CatalogVersion: "reserved-member-values-v1", Count: 50,
 		}},
 		Budget: ScanBudget{MaxRows: 10_000, MaxDistinctValues: 1_000, MaxSampleBytes: 1 << 20, StatementTimeoutMS: 5_000},
 		Usage:  ScanUsage{RowsScanned: 1_000, DistinctCaptured: 110, SampleBytes: 4_096},

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -170,6 +171,8 @@ func buildProfileResult(
 		result.RawDistinct < 0 || int64(len(result.Members)) > claim.Budget.MaxDistinctValues {
 		return Profile{}, PolicyDecision{}, nil, ErrInvalidProfileWork
 	}
+	highCardinality := claim.HighCardinalityHint || result.Truncated ||
+		result.RawDistinct > claim.Budget.MaxDistinctValues
 
 	type accumulatedMember struct {
 		normalized NormalizedMember
@@ -186,13 +189,15 @@ func buildProfileResult(
 			return Profile{}, PolicyDecision{}, nil, ErrInvalidProfileWork
 		}
 		normalized, reserved, normalizeErr := NormalizeMember(
-			askdata.ID(claim.DimensionVersionID), raw.Value, nil, claim.Sensitivity, catalog,
+			askdata.ID(claim.DimensionVersionID), raw.Value, nil, claim.Sensitivity,
+			claim.MemberIndexPolicy, highCardinality, catalog,
 		)
 		if errors.Is(normalizeErr, ErrReservedMemberValue) && reserved != nil {
 			key := reserved.Code + "\x00" + string(reserved.NormalizedValueHash)
 			observation := reservedByKey[key]
 			observation.Code = reserved.Code
 			observation.NormalizedValueHash = reserved.NormalizedValueHash
+			observation.CatalogVersion = reserved.CatalogVersion
 			observation.Count += raw.Count
 			reservedByKey[key] = observation
 			currentKeys[reserved.NormalizedValueHash] = struct{}{}
@@ -206,9 +211,20 @@ func buildProfileResult(
 		if accumulated == nil {
 			accumulated = &accumulatedMember{normalized: normalized, aliases: map[string]struct{}{}}
 			membersByHash[normalized.MemberKeyHash] = accumulated
-		} else if normalized.CanonicalValue != accumulated.normalized.CanonicalValue &&
-			len(accumulated.aliases) < 64 {
-			accumulated.aliases[normalized.CanonicalValue] = struct{}{}
+		} else if normalized.CanonicalValue != accumulated.normalized.CanonicalValue {
+			// The warehouse scanner has a deterministic order, but callers of
+			// buildProfileResult do not have to. Keep the canonical display and
+			// alias set stable for the same normalized generation evidence.
+			if normalized.CanonicalValue < accumulated.normalized.CanonicalValue {
+				accumulated.aliases[accumulated.normalized.CanonicalValue] = struct{}{}
+				delete(accumulated.aliases, normalized.CanonicalValue)
+				accumulated.normalized.CanonicalValue = normalized.CanonicalValue
+			} else {
+				accumulated.aliases[normalized.CanonicalValue] = struct{}{}
+			}
+		}
+		if accumulated.count > math.MaxInt64-raw.Count {
+			return Profile{}, PolicyDecision{}, nil, ErrInvalidProfileWork
 		}
 		accumulated.count += raw.Count
 	}
@@ -224,6 +240,9 @@ func buildProfileResult(
 			aliases = append(aliases, alias)
 		}
 		sort.Strings(aliases)
+		if len(aliases) > 64 {
+			aliases = aliases[:64]
+		}
 		observation := MemberObservation{
 			DimensionVersionID: askdata.ID(claim.DimensionVersionID), Generation: claim.Generation,
 			MemberKeyHash:   accumulated.normalized.MemberKeyHash,
@@ -232,22 +251,7 @@ func buildProfileResult(
 			ObservedAliases: aliases, ObservedCount: accumulated.count,
 			Sensitivity: claim.Sensitivity, EligibleForLLM: accumulated.normalized.EligibleForLLM,
 		}
-		payload, marshalErr := json.Marshal(struct {
-			DimensionVersionID askdata.ID           `json:"dimensionVersionId"`
-			Generation         int64                `json:"generation"`
-			MemberKeyHash      askdata.ContentHash  `json:"memberKeyHash"`
-			CanonicalLabel     string               `json:"canonicalLabel"`
-			NormalizedValue    string               `json:"normalizedValue"`
-			ObservedAliases    []string             `json:"observedAliases"`
-			ObservedCount      int64                `json:"observedCount"`
-			Sensitivity        registry.Sensitivity `json:"sensitivity"`
-			EligibleForLLM     bool                 `json:"eligibleForLlm"`
-		}{
-			observation.DimensionVersionID, observation.Generation,
-			observation.MemberKeyHash, observation.CanonicalLabel,
-			observation.NormalizedValue, observation.ObservedAliases,
-			observation.ObservedCount, observation.Sensitivity, observation.EligibleForLLM,
-		})
+		payload, marshalErr := memberObservationPayload(observation)
 		if marshalErr != nil {
 			return Profile{}, PolicyDecision{}, nil, marshalErr
 		}
@@ -289,9 +293,8 @@ func buildProfileResult(
 		TenantID: askdata.ID(claim.TenantID), DomainID: askdata.ID(claim.DomainID),
 		DimensionVersionID: askdata.ID(claim.DimensionVersionID), Generation: claim.Generation,
 		SourceSnapshotHash: askdata.ContentHash(claim.SourceSnapshotHash), Sensitivity: claim.Sensitivity,
-		HighCardinalityHint: claim.HighCardinalityHint || result.Truncated ||
-			result.RawDistinct > claim.Budget.MaxDistinctValues,
-		RowCount: result.RowCount, NullCount: result.NullCount, DistinctCount: distinctCount,
+		HighCardinalityHint: highCardinality,
+		RowCount:            result.RowCount, NullCount: result.NullCount, DistinctCount: distinctCount,
 		PreviousDistinctCount: previousDistinctCount,
 		AddedDistinctCount:    added, RemovedDistinctCount: removed,
 		ReservedValues: reserved, Budget: claim.Budget,
@@ -348,7 +351,16 @@ func scanErrorCode(err error) string {
 	}
 }
 
-func validateMemberObservations(claim ScanClaim, observations []MemberObservation) error {
+func validateMemberObservations(
+	claim ScanClaim,
+	profile Profile,
+	observations []MemberObservation,
+) error {
+	expectedLLMEligibility := memberLabelsEligibleForLLM(
+		claim.Sensitivity,
+		claim.MemberIndexPolicy,
+		claim.HighCardinalityHint || profile.HighCardinalityHint,
+	)
 	seen := map[askdata.ContentHash]struct{}{}
 	for _, observation := range observations {
 		if observation.DimensionVersionID != askdata.ID(claim.DimensionVersionID) ||
@@ -363,17 +375,52 @@ func validateMemberObservations(claim ScanClaim, observations []MemberObservatio
 		if err := observation.ContentHash.Validate(); err != nil {
 			return ErrInvalidProfileWork
 		}
+		payload, err := memberObservationPayload(observation)
+		if err != nil || askdata.HashBytes(payload) != observation.ContentHash ||
+			normalizeMemberKey(observation.CanonicalLabel) != observation.NormalizedValue ||
+			askdata.HashBytes([]byte(string(observation.DimensionVersionID)+"\x00"+observation.NormalizedValue)) != observation.MemberKeyHash {
+			return ErrInvalidProfileWork
+		}
+		previousAlias := ""
+		for _, alias := range observation.ObservedAliases {
+			display, err := normalizeMemberDisplay(alias)
+			if err != nil || display != alias || normalizeMemberKey(alias) != observation.NormalizedValue ||
+				alias == observation.CanonicalLabel || (previousAlias != "" && alias <= previousAlias) {
+				return ErrInvalidProfileWork
+			}
+			previousAlias = alias
+		}
 		if _, duplicate := seen[observation.MemberKeyHash]; duplicate {
 			return ErrInvalidProfileWork
 		}
 		seen[observation.MemberKeyHash] = struct{}{}
-		if observation.EligibleForLLM &&
-			(observation.Sensitivity == registry.SensitivityConfidential ||
-				observation.Sensitivity == registry.SensitivityRestricted) {
+		// eligible_for_llm is persisted for auditability, not authority. Recompute
+		// it from the claimed dimension policy on every write/read boundary so a
+		// forged true (or stale true after a policy change) fails closed.
+		if observation.EligibleForLLM != expectedLLMEligibility {
 			return ErrInvalidProfileWork
 		}
 	}
 	return nil
+}
+
+func memberObservationPayload(observation MemberObservation) ([]byte, error) {
+	return json.Marshal(struct {
+		DimensionVersionID askdata.ID           `json:"dimensionVersionId"`
+		Generation         int64                `json:"generation"`
+		MemberKeyHash      askdata.ContentHash  `json:"memberKeyHash"`
+		CanonicalLabel     string               `json:"canonicalLabel"`
+		NormalizedValue    string               `json:"normalizedValue"`
+		ObservedAliases    []string             `json:"observedAliases"`
+		ObservedCount      int64                `json:"observedCount"`
+		Sensitivity        registry.Sensitivity `json:"sensitivity"`
+		EligibleForLLM     bool                 `json:"eligibleForLlm"`
+	}{
+		observation.DimensionVersionID, observation.Generation,
+		observation.MemberKeyHash, observation.CanonicalLabel,
+		observation.NormalizedValue, observation.ObservedAliases,
+		observation.ObservedCount, observation.Sensitivity, observation.EligibleForLLM,
+	})
 }
 
 func profileResultMatchesClaim(claim ScanClaim, profile Profile, decision PolicyDecision) error {

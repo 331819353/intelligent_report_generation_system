@@ -206,6 +206,7 @@ askdata.tool_calls
 askdata.query_feedback
 askdata.evaluation_sets
 askdata.evaluation_cases
+askdata.evaluation_case_reviews
 askdata.evaluation_runs
 ```
 
@@ -401,6 +402,36 @@ Bundle = MetricVersion + SemanticModel + GroupDimensions
 
 阈值不应全局写死。首批可以用“成员数、变化率、敏感性、平均文本长度、查询频率”决定策略，经过压测后再调整。
 
+`EXACT_ONLY` 的落地边界固定如下：调用侧只在内存中规范化原始 span，并提交
+`SHA256(dimension_version_id + NUL + normalized_value)`；数据库函数同时固定当前
+tenant/actor/domain、release ID/hash、`POSTGRES_REGISTRY=READY` 水位、精确 DIMENSION/MEMBER
+manifest、成员有效期和唯一候选。MEMBER manifest 只保存 `dimensionVersionId` 与最多 64 个
+排序且唯一的 opaque `aliasVersionIds`，不得保存 label、lookup hash 或可反查的 alias content
+hash。CONFIDENTIAL/RESTRICTED 分别要求 `LOOKUP_CONFIDENTIAL_MEMBER`/
+`LOOKUP_RESTRICTED_MEMBER` 的真实 USER 或 ACTIVE ROLE 对象授权；不存在、无权限、歧义、过期、
+错误 hash 和未固定发布统一为零行，历史 run 允许继续读取其固定的 `SUPERSEDED` release。
+
+数据库命中返回的 Go 合同仅包含成员/维度版本 ID、content hash 和 label-free evidence，并以
+私有 payload/proof 绑定这些字段；调用方只能使用只读 accessor，复制后替换 ID、hash 或 evidence
+会失败。原问句敏感 span 不进入 SQL、日志或 evidence；进入 LLM 前，对当前问句、继承上下文
+以及所有嵌套 fact 字符串执行等长 Unicode 遮罩，覆盖 NFKC、case-fold、全角和邻接变体。
+Reviewer 回显该 span 或其规范化变体时失败关闭。Understanding 的普通 `ExactMatch` 一律拒绝
+MEMBER，当前不存在公开的 label-bearing grant，因此 EXACT_ONLY 即使是 PUBLIC/INTERNAL 也不把
+命中 label 重新注入模型。
+
+画像本地 observation 仍按 `PUBLIC/INTERNAL + FULL + low-cardinality` 重算 label 资格，并可做
+确定性 alias 检查；但给模型的 `DIMENSION_PROFILE` PromptFact 是独立的聚合载荷，不含 label、
+normalized value、member hash 或派生 member ID。成员型 LLM reviewer 在实现从 PostgreSQL
+`profile_generation` 权威重载并绑定证据前必须保持禁用，不能由公开 Worker、自定义 Store 或
+Scanner 间接铸造模型可见的成员标签。
+
+Reranker 对显式 MEMBER candidate 在 request 规范化和反序列化 evidence 校验两层都失败关闭；
+在建立 release-pinned authoritative candidate loader/capability 前，不把 MEMBER definition 或
+negative examples 送入 reviewer。这里的 Go `internal/` 请求结构只允许由经过 SQL/RLS/release
+过滤的可信 typed producer 构造，不是网络或插件输入合同；未来 ORCH 接线不得把这些结构直接
+暴露给不可信调用方。若该信任边界改变，必须先为 candidate provenance 和敏感成员扫描结果增加
+不可伪造的持久化证明，否则所有 caller-supplied label-bearing LLM 路径都应保持禁用。
+
 ## 8. NebulaGraph 语义图设计
 
 ### 8.1 定位
@@ -460,6 +491,36 @@ VID = tenant_id + ":" + object_type + ":" + stable_object_id + ":" + version
 每个 Tag 和 Edge 同时保存 `tenant_id` 与 `release_hash`；只有 Graph Service 能访问 NebulaGraph，浏览器、LLM 和普通 API 用户都不能提交 nGQL。Graph Service 只接受稳定对象 ID 的 typed request，并由服务端生成参数化/转义后的有界 nGQL。
 
 对极高隔离要求的大租户可使用独立 Space 或独立集群。官方 `nebula-go` 的 Session Pool 与单个用户、单个 Space 绑定，因此如果采用每租户 Space，需要维护多 Session Pool 和生命周期管理；服务端与 Go Client 必须锁定兼容版本，不能依赖 master/nightly。参考：[NebulaGraph 官方 Go Client](https://github.com/vesoft-inc/nebula-go)。
+
+#### 8.3.1 已落地的开发基线
+
+截至 2026-08-06，开发环境锁定 NebulaGraph metad/storaged/graphd 与
+`github.com/vesoft-inc/nebula-go/v3` `v3.8.0`。共享 Space 使用
+`partition_num=1`、`replica_factor=1`、`FIXED_STRING(256)` VID；这只是开发拓扑，不能外推
+生产 partition、副本或容量。
+
+当前 init 只创建 GraphPlan Adapter 已冻结并实际使用的 Schema 子集：
+
+```text
+Tags: semantic_model, metric, dimension, member
+Edges: MODELED_BY, HAS_DIMENSION, HAS_MEMBER, JOINS_TO
+```
+
+每个对象均保存 tenant/domain/release 属性，`JOINS_TO` 保存关系版本、Join 类型、基数、fanout
+policy 与认证状态。8.2 的完整目标模型仍由后续 Projector/Resolver 合同逐步扩展；未被 typed
+Adapter 消费的 Tag/Edge 不得提前创建成看似稳定的生产合同。
+
+运行权限按进程分离：API 只持有目标 Space 的 `GUEST`，Worker 只持有 `USER`，bootstrap root
+仅用于 init。首次空卷时先轮换厂商默认 root，再注册 Storage 和创建 Schema/角色；已有 Space、
+Schema 或角色与冻结合同不一致时失败关闭。metad/storaged 只在 internal 集群网，graphd 同时加入
+internal 客户端网；API/Worker 不能解析 Meta/Storage。graphd 本身不发布端口，本地调试与隔离
+验收仅在 init 成功后启动无凭据 TCP proxy，并只绑定宿主 loopback。
+
+正式验收的 project 与 Space 必须由同一随机 nonce 严格关联。验收 Compose 通过专用 override
+重置 API、Worker 和 Connection Test Worker 的 service `env_file`，配置展开禁用 env file
+解析，因此不会间接读取开发者 `.env`。Go integration 在任何写入前必须反查目标 project 的
+proxy published endpoint 和 Compose ownership label，并对四类 Tag、四类 Edge 分别执行
+tenant/release 真实排除；只有 Resolve 成功、目标关系消失且无关对照关系仍存在才算隔离通过。
 
 ### 8.4 发布投影与降级
 
@@ -582,16 +643,36 @@ stateDiagram-v2
     EXECUTING --> RESULT_VERIFYING
     RESULT_VERIFYING --> ANSWERED
 
+    RECEIVED --> BLOCKED
+    AUTHORIZED --> BLOCKED
+    CONTEXT_READY --> BLOCKED
+    UNDERSTANDING --> CLARIFICATION_REQUIRED
     BINDING --> CLARIFICATION_REQUIRED
     GRAPH_VALIDATING --> CLARIFICATION_REQUIRED
+    RETRIEVING --> CLARIFICATION_REQUIRED
+    PLAN_VALIDATING --> CLARIFICATION_REQUIRED
+    RESULT_VERIFYING --> CLARIFICATION_REQUIRED
     RESULT_VERIFYING --> BINDING: bounded correction
     PLAN_VALIDATING --> BINDING: semantic repair
     UNDERSTANDING --> BLOCKED
+    RETRIEVING --> BLOCKED
+    BINDING --> BLOCKED
+    GRAPH_VALIDATING --> BLOCKED
+    IR_READY --> BLOCKED
     PLAN_VALIDATING --> BLOCKED
+    EXECUTING --> BLOCKED
+    RESULT_VERIFYING --> BLOCKED
     CLARIFICATION_REQUIRED --> [*]
     ANSWERED --> [*]
     BLOCKED --> [*]
 ```
+
+图中省略非终态的同态 checkpoint。可执行规范以数据库
+`askdata.valid_question_run_transition` 与 Go `orchestrator.CanTransition` 的一致矩阵为准；
+所有 BLOCK/CLARIFY 边都必须保存稳定原因和可重放事件，三个终态本身不可再更新。
+Understanding、Binding Bundle、GraphPlan、Semantic IR、QueryPlan、Result hash 只能在各自
+治理阶段首次出现并按上游顺序形成连续链；除 PLAN/RESULT → BINDING 的显式纠错会清空
+Binding 之后的陈旧链外，已有 hash 不得清空或覆盖，ANSWERED 前也不得一次性补写历史阶段。
 
 ### 10.4 循环预算和终止条件
 
@@ -686,6 +767,17 @@ Strict E2E Correctness =
 
 按业务域、用户角色、语言变体、问题复杂度和线上频率分层抽样。开发集用于调优，Validation 用于阈值，Sealed 集在发布前不可查看，Production Regression 来自经审批的线上问题。每条 Sealed Case 需两名独立评审确认问句、预期 IR、结果 hash 和安全期望。
 
+数据库实现必须把“独立评审”和“当前内容”作为可重算事实，而不是信任调用方汇总值：case
+保存脱敏策略 hash、expected path/IR/result hash 和当前内容编辑者；原作者及当前内容编辑者均
+不得评审同一 content hash，每条 case 只有两个唯一 review slot。Seal 在同一事务锁定 set、
+case、review，重新确认两条当前 APPROVED 事实后才计算稳定 manifest hash；USER 模式随后不再
+读取密封问句和评审，只有 SYSTEM 评测 worker 可读。评测运行只追加写，必须固定 set/case
+content hash、release ID/semantic version/content hash、expected/actual path/IR/result 和数仓
+snapshot/freshness；等价结论在 hash 不同时必须绑定 comparison report hash，敏感泄漏必须由
+worker 显式写入且不能使用默认 false。Production Regression 未密封或 set 已 RETIRED 时不得
+新增运行。用户反馈只绑定原 actor 的终态 question run，使用结构化 issue type，不能直接修改
+答案或生产语义。
+
 ### 11.5 为什么这套设计能达到 95%
 
 | 主要错误来源 | 架构控制 | 结果 |
@@ -714,7 +806,7 @@ Strict E2E Correctness =
 | Chart | Apache ECharts | 折线、柱状、饼图和组合图覆盖问数结果 |
 | Control Plane | PostgreSQL 17 | 已部署；事务、RLS、版本、outbox 和审计适合语义事实源 |
 | Vector | pgvector `halfvec` + HNSW + lexical/RRF | 复用现有能力；高维向量和混合检索可控 |
-| Graph | NebulaGraph + 官方 `nebula-go` | 适合大规模关系遍历；Go Client 可直接集成；服务/客户端版本需 POC 后锁定 |
+| Graph | NebulaGraph `v3.8.0` + 官方 `nebula-go/v3 v3.8.0` | 兼容 POC 已锁定 3.x fbthrift 客户端；禁止 master/nightly 和不兼容的 v5 gRPC 客户端 |
 | Warehouse | 现有独立 PostgreSQL DWS/ADS | 首期减少 SQL 方言和跨源不确定性，提高正确率 |
 | Object Storage | 现有 MinIO | 保存大评测结果、离线报告和可重放非敏感工件 |
 | Cache | 首期 PostgreSQL 缓存；规模后可选 Redis | 减少首期组件，缓存不作为语义事实源 |
@@ -793,12 +885,25 @@ GET    /api/v1/askdata/evaluations/{id}
 
 不要只提示“问题不清楚，请重新输入”。
 
+### 14.1 WEB-001 已确认实现基线（2026-08-06）
+
+- 用户已确认方案 3「证据驾驶舱」，实现继续复用现有 248px `AppShell`、Haier Logo、
+  `#2864DC` 主色、白色细边框卡片、Phosphor 图标和全局字体，不建立第二套设计系统。
+- `/ask-data` 已接入 `RequireAuth + RequireBusinessDomain`；左栏承载会话筛选和常用问题，
+  中栏承载业务语言提问、受控阶段、结论、ECharts 渠道贡献图和语义化表格，右栏承载
+  问题理解、口径权限、数据链路、质量新鲜度和反馈。
+- `WEB-001` 只包含页面内 typed mock 和确定性 650ms 状态演示；不创建 run、不连接 SSE、
+  不持久化会话/反馈，也不把模拟状态解释为真实后台结果。真实合同继续由 `WEB-002` 接入。
+- 1280px 使用三栏；1180px 以下改为“会话 + 问答”两栏，证据面板移到下一行；继续遵循
+  全站 1100px 桌面最小宽度。设计对照、差异修正和可访问性检查记录在 `design-qa.md`。
+
 ## 15. 安全、隐私与治理
 
 1. 召回、GraphPlan、编译和执行均固定 `tenant_id + domain_id + actor_id + release_hash`。
 2. 语义描述和认证样例按不可信数据处理，进入模型前去除可执行指令特征，防止元数据提示注入。
 3. LLM 不获得数据库凭据、任意 SQL 工具、完整结果行或未授权对象描述。
-4. 高敏维度成员不向量化、不进入模型上下文；结果继续使用现有列掩码和行策略。
+4. 高敏维度成员不向量化、不进入模型上下文、日志或 evidence label；EXACT_ONLY 只走上述
+   release-pinned 数据库函数，未授权与不存在保持同一零行结果；结果继续使用现有列掩码和行策略。
 5. NebulaGraph 无 RLS，因此只能位于服务网络内，由 Graph Service 统一加 tenant/release 条件。
 6. Query Runtime 使用独立只读账号、稳定视图白名单、只读事务、参数绑定和超时。
 7. 缓存键必须包含 tenant、actor policy scope、semantic release、IR hash 和 warehouse snapshot/freshness；禁止跨租户复用 ANN/结果缓存。
@@ -843,15 +948,24 @@ Span 只记录对象 ID、候选数量、分数区间、版本和耗时，不记
 
 ### 17.1 开发环境
 
-在现有 `compose.yaml` 增加：
+现有 `compose.yaml` 已落地：
 
 ```text
 nebula-metad
 nebula-storaged
 nebula-graphd
+nebula-init
+nebula-verify
+nebula-loopback-proxy  # 仅显式本地访问/验收，且必须等待 init 成功
 ```
 
-使用单副本、固定本地卷和初始化 Job 创建 Space/Tag/Edge。API 仅持有图只读账号，Worker 持有投影写账号。开发和 CI 使用独立 Space，测试结束删除测试 Space，不删除生产式共享卷。
+使用单副本、固定命名卷和幂等初始化 Job 创建并核验 Space/Tag/Edge。API 仅持有图只读账号，
+Worker 持有投影写账号；Connection Test Worker、Connector 和 Web 不持有图凭据，也不加入图
+客户端网络。本地非 Compose 进程通过角色 wrapper 删除 root、bootstrap 和另一运行角色的
+canonical secret。正式 Graph Compose 验收必须使用同一 nonce 派生的唯一 project/Space、随机
+loopback 端口和独立卷，并用专用 override 禁止所有应用 service `env_file`；退出只删除该隔离
+project 的容器/网络/卷，不操作开发共享 Space 或其持久卷。
+CI 使用相同隔离流程。开发明文连接、单副本和环境变量凭据不能直接提升为生产配置。
 
 ### 17.2 生产环境
 

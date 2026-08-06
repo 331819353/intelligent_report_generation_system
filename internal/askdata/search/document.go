@@ -16,6 +16,7 @@ import (
 	"intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/registry"
+	"intelligent-report-generation-system/internal/askdata/security"
 )
 
 type ObjectType string
@@ -156,11 +157,11 @@ func BuildDimensionDocument(input DimensionDocumentInput) (Document, error) {
 }
 
 func BuildMemberDocument(input MemberDocumentInput) (Document, error) {
-	if input.MemberIndexPolicy != registry.MemberIndexFull || input.HighCardinality {
-		return Document{}, errors.New("only non-high-cardinality FULL members may build vector documents")
-	}
-	if input.Sensitivity != registry.SensitivityPublic && input.Sensitivity != registry.SensitivityInternal {
-		return Document{}, errors.New("confidential or restricted members cannot enter search documents")
+	exposure, err := security.DecideMemberExposure(
+		input.Sensitivity, input.MemberIndexPolicy, input.HighCardinality,
+	)
+	if err != nil || !exposure.Embedding {
+		return Document{}, errors.New("member policy forbids label-bearing search documents")
 	}
 	if err := input.DimensionVersionID.Validate(); err != nil {
 		return Document{}, fmt.Errorf("dimensionVersionId: %w", err)

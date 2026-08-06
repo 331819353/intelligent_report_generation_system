@@ -82,6 +82,16 @@ func TestBuildMessagesAppliesStageFactPolicyAndEscapesPromptInjectionMarkers(t *
 	if _, err := BuildMessages(PromptInput{Stage: StageUnderstanding, Facts: []PromptFact{quality}}); err == nil || !strings.Contains(err.Error(), "not visible") {
 		t.Fatalf("BuildMessages() error = %v, want stage visibility rejection", err)
 	}
+	profile, err := NewPromptFact(
+		"evidence-profile-1", FactDimensionProfile,
+		json.RawMessage(`{"dimensionVersionId":"dimension-region-v1","generation":2}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildMessages(PromptInput{Stage: StageAssetReview, Facts: []PromptFact{profile}}); err != nil {
+		t.Fatalf("asset review must accept bounded dimension profile evidence: %v", err)
+	}
 }
 
 func TestPromptFactsRejectPhysicalQueriesCredentialsAndHashDrift(t *testing.T) {

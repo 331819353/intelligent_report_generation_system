@@ -71,7 +71,7 @@ type promptEnvelope struct {
 var stageFactPolicy = map[Stage]map[FactKind]struct{}{
 	StageAssetReview: factSet(
 		FactAssetEvidence, FactSemanticContract, FactQualityEvidence,
-		FactPolicyEvidence, FactEvaluationEvidence,
+		FactPolicyEvidence, FactEvaluationEvidence, FactDimensionProfile,
 	),
 	StageUnderstanding: factSet(
 		FactConversation, FactExactMatches, FactRuleParse, FactPolicyEvidence,

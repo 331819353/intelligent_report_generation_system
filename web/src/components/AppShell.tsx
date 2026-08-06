@@ -1,5 +1,6 @@
 import {
   CaretUpDown,
+  ChatCircleDots,
   Check,
   Database,
   GearSix,
@@ -23,6 +24,7 @@ import {
 
 type AppShellProps = {
   title?: string
+  titleMeta?: ReactNode
   eyebrow?: string
   children: ReactNode
   actions?: ReactNode
@@ -30,7 +32,7 @@ type AppShellProps = {
 }
 
 /** 为后台业务页面提供统一侧栏、顶栏和内容容器。 */
-export function AppShell({ title = '数据配置管理平台', eyebrow = '配置中心', children, actions, className = '' }: AppShellProps) {
+export function AppShell({ title = '数据配置管理平台', titleMeta, eyebrow = '配置中心', children, actions, className = '' }: AppShellProps) {
   const domainSwitcherRef = useRef<HTMLDivElement>(null)
   const [domains, setDomains] = useState<BusinessDomain[]>([])
   const [selectedDomain, setSelectedDomain] = useState<BusinessDomain | null>(() => currentDomain())
@@ -119,6 +121,7 @@ export function AppShell({ title = '数据配置管理平台', eyebrow = '配置
           {canManage !== null && <>
             <NavLink to="/data-sources"><Database aria-hidden="true" size={18} />数据源配置</NavLink>
             <NavLink to="/datasets"><Stack aria-hidden="true" size={18} />数据集配置</NavLink>
+            <NavLink to="/ask-data"><ChatCircleDots aria-hidden="true" size={18} />智能问数</NavLink>
           </>}
         </nav>
         <div className="sidebar-footer">
@@ -155,7 +158,7 @@ export function AppShell({ title = '数据配置管理平台', eyebrow = '配置
       </aside>
       <main className="main-stage">
         <header className="topbar">
-          <div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1></div>
+          <div><span className="eyebrow">{eyebrow}</span><div className="topbar-title-row"><h1>{title}</h1>{titleMeta}</div></div>
           <div className="topbar-actions">{actions}</div>
         </header>
         {children}

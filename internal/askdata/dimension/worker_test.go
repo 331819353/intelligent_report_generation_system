@@ -67,6 +67,7 @@ func (scanner *warehouseScannerFixture) Scan(context.Context, ScanClaim) (ScanRe
 func TestDimensionProfileWorkerPersistsNormalizedGeneration(t *testing.T) {
 	t.Parallel()
 	claim := validScanClaim()
+	claim.MemberIndexPolicy = registry.MemberIndexFull
 	store := &profileStoreFixture{claim: &claim}
 	scanner := &warehouseScannerFixture{result: ScanResult{
 		RowCount: 4, NullCount: 1, RawDistinct: 2,
@@ -134,7 +135,8 @@ func TestDimensionProfileGenerationComputesMemberSetChange(t *testing.T) {
 	claim.PreviousComplete = true
 	east, _, err := NormalizeMember(
 		askdata.ID(claim.DimensionVersionID), "华东", nil,
-		registry.SensitivityInternal, DefaultReservedValueCatalog(),
+		registry.SensitivityInternal, claim.MemberIndexPolicy,
+		claim.HighCardinalityHint, DefaultReservedValueCatalog(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -156,9 +158,54 @@ func TestDimensionProfileGenerationComputesMemberSetChange(t *testing.T) {
 	}
 }
 
+func TestProfileObservationsRecomputeLLMEligibilityFromClaimPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		policy          registry.MemberIndexPolicy
+		highCardinality bool
+		wantEligible    bool
+	}{
+		{name: "full low cardinality", policy: registry.MemberIndexFull, wantEligible: true},
+		{name: "exact only", policy: registry.MemberIndexExactOnly},
+		{name: "on demand", policy: registry.MemberIndexOnDemand},
+		{name: "none", policy: registry.MemberIndexNone},
+		{name: "full high cardinality", policy: registry.MemberIndexFull, highCardinality: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			claim := validScanClaim()
+			claim.MemberIndexPolicy = test.policy
+			claim.HighCardinalityHint = test.highCardinality
+			profile, _, observations, err := buildProfileResult(claim, ScanResult{
+				RowCount: 1, RawDistinct: 1, SampleBytes: int64(len("华东")),
+				Members: []RawMember{{Value: "华东", Count: 1}},
+			}, DefaultPolicyConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(observations) != 1 || observations[0].EligibleForLLM != test.wantEligible {
+				t.Fatalf("observations=%#v, want eligible=%v", observations, test.wantEligible)
+			}
+			if err := validateMemberObservations(claim, profile, observations); err != nil {
+				t.Fatalf("authoritative observations rejected: %v", err)
+			}
+
+			forged := append([]MemberObservation(nil), observations...)
+			forged[0].EligibleForLLM = !test.wantEligible
+			payload, err := memberObservationPayload(forged[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			forged[0].ContentHash = askdata.HashBytes(payload)
+			if err := validateMemberObservations(claim, profile, forged); err == nil {
+				t.Fatal("forged persisted eligibility bypassed claim policy")
+			}
+		})
+	}
+}
+
 func validScanClaim() ScanClaim {
 	options := DefaultWorkerOptions()
-	return ScanClaim{
+	claim := ScanClaim{
 		ID:                     "11111111-1111-4111-8111-111111111111",
 		TenantID:               "22222222-2222-4222-8222-222222222222",
 		DomainID:               "33333333-3333-4333-8333-333333333333",
@@ -177,4 +224,5 @@ func validScanClaim() ScanClaim {
 		MemberIndexPolicy: registry.MemberIndexExactOnly,
 		Budget:            options.Budget, Attempt: 1, MaxAttempts: options.MaxAttempts,
 	}
+	return claim
 }

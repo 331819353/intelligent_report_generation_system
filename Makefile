@@ -70,13 +70,13 @@ warehouse-shell:
 
 # 应用进程与开发种子数据。
 run-api:
-	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; env -u WORKER_DATABASE_URL -u CONNECTION_TEST_DATABASE_URL -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_APP_PASSWORD -u POSTGRES_WORKER_USER -u POSTGRES_WORKER_PASSWORD -u POSTGRES_CONNECTION_TEST_USER -u POSTGRES_CONNECTION_TEST_PASSWORD -u CONNECTOR_CONNECTION_TEST_TOKEN -u CONNECTION_TEST_MINIO_ACCESS_KEY -u CONNECTION_TEST_MINIO_SECRET_KEY go run ./cmd/api
+	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; env -u WORKER_DATABASE_URL -u CONNECTION_TEST_DATABASE_URL -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_APP_PASSWORD -u POSTGRES_WORKER_USER -u POSTGRES_WORKER_PASSWORD -u POSTGRES_CONNECTION_TEST_USER -u POSTGRES_CONNECTION_TEST_PASSWORD -u CONNECTOR_CONNECTION_TEST_TOKEN -u CONNECTION_TEST_MINIO_ACCESS_KEY -u CONNECTION_TEST_MINIO_SECRET_KEY ./scripts/run-with-nebula-role.sh api go run ./cmd/api
 
 run-worker:
-	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; env -u DATABASE_URL -u CONNECTION_TEST_DATABASE_URL -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_APP_USER -u POSTGRES_APP_PASSWORD -u POSTGRES_WORKER_PASSWORD -u POSTGRES_CONNECTION_TEST_USER -u POSTGRES_CONNECTION_TEST_PASSWORD -u CONNECTOR_CONNECTION_TEST_TOKEN -u CONNECTION_TEST_MINIO_ACCESS_KEY -u CONNECTION_TEST_MINIO_SECRET_KEY go run ./cmd/worker
+	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; env -u DATABASE_URL -u CONNECTION_TEST_DATABASE_URL -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_APP_USER -u POSTGRES_APP_PASSWORD -u POSTGRES_WORKER_PASSWORD -u POSTGRES_CONNECTION_TEST_USER -u POSTGRES_CONNECTION_TEST_PASSWORD -u CONNECTOR_CONNECTION_TEST_TOKEN -u CONNECTION_TEST_MINIO_ACCESS_KEY -u CONNECTION_TEST_MINIO_SECRET_KEY ./scripts/run-with-nebula-role.sh worker go run ./cmd/worker
 
 run-connection-test-worker:
-	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; env -u DATABASE_URL -u WORKER_DATABASE_URL -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_APP_USER -u POSTGRES_APP_PASSWORD -u POSTGRES_WORKER_USER -u POSTGRES_WORKER_PASSWORD -u POSTGRES_CONNECTION_TEST_PASSWORD -u CONNECTOR_INTERNAL_TOKEN -u MINIO_ACCESS_KEY -u MINIO_SECRET_KEY go run ./cmd/connection-test-worker
+	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; env -u DATABASE_URL -u WORKER_DATABASE_URL -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_APP_USER -u POSTGRES_APP_PASSWORD -u POSTGRES_WORKER_USER -u POSTGRES_WORKER_PASSWORD -u POSTGRES_CONNECTION_TEST_PASSWORD -u CONNECTOR_INTERNAL_TOKEN -u MINIO_ACCESS_KEY -u MINIO_SECRET_KEY ./scripts/run-with-nebula-role.sh none go run ./cmd/connection-test-worker
 
 # 由 Docker Compose 持久化应用与基础设施进程，不随调用终端退出。
 dev-up:
@@ -95,7 +95,7 @@ dev-logs:
 	@./scripts/dev-services.sh logs
 
 seed-dev:
-	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; go run ./cmd/seed
+	@set -a; . ./.env.example; if [ -f ./.env ]; then . ./.env; fi; set +a; ./scripts/run-with-nebula-role.sh none go run ./cmd/seed
 
 clean:
 	@rm -rf bin .cache coverage.out web/dist .vite

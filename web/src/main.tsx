@@ -7,6 +7,7 @@ import './styles/dataset-designer.css'
 import './styles/data-source-center.css'
 import './styles/dataset-center.css'
 import './styles/administration.css'
+import './styles/ask-data.css'
 
 // 在严格模式和浏览器路由上下文中挂载应用根组件。
 createRoot(document.getElementById('root')!).render(

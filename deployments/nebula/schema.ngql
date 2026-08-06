@@ -1,0 +1,8 @@
+CREATE TAG IF NOT EXISTS semantic_model(tenant_id string, domain_id string, release_hash string, object_id string, version_id string, version_no int);
+CREATE TAG IF NOT EXISTS metric(tenant_id string, domain_id string, release_hash string, object_id string, version_id string, version_no int);
+CREATE TAG IF NOT EXISTS dimension(tenant_id string, domain_id string, release_hash string, object_id string, version_id string, version_no int);
+CREATE TAG IF NOT EXISTS member(tenant_id string, domain_id string, release_hash string, object_id string, version_id string, version_no int, member_status string);
+CREATE EDGE IF NOT EXISTS MODELED_BY(tenant_id string, domain_id string, release_hash string);
+CREATE EDGE IF NOT EXISTS HAS_DIMENSION(tenant_id string, domain_id string, release_hash string);
+CREATE EDGE IF NOT EXISTS HAS_MEMBER(tenant_id string, domain_id string, release_hash string);
+CREATE EDGE IF NOT EXISTS JOINS_TO(tenant_id string, domain_id string, release_hash string, relationship_version_id string, join_type string, cardinality string, fanout_policy string, certified bool);

@@ -435,6 +435,8 @@ textarea:focus-visible {
   letter-spacing: -.03em;
 }
 
+.topbar-title-row { display: flex; align-items: center; gap: 10px; }
+
 .topbar-actions { display: flex; align-items: center; gap: 9px; }
 @media (max-width: 1200px) {
   .login-story { padding-inline: 54px; }

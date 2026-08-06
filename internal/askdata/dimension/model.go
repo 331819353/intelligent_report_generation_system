@@ -15,7 +15,7 @@ import (
 	"intelligent-report-generation-system/internal/askdata/registry"
 )
 
-const ProfileSchemaVersion = "1.0"
+const ProfileSchemaVersion = "1.1"
 
 type ScanBudget struct {
 	MaxRows            int64 `json:"maxRows"`
@@ -45,6 +45,7 @@ type ScanUsage struct {
 type ReservedValueObservation struct {
 	Code                string              `json:"code"`
 	NormalizedValueHash askdata.ContentHash `json:"normalizedValueHash"`
+	CatalogVersion      string              `json:"catalogVersion"`
 	Count               int64               `json:"count"`
 }
 
@@ -142,12 +143,21 @@ func (profile Profile) validate(requireHash bool) error {
 	}
 	seenReserved := map[string]struct{}{}
 	var reservedCount int64
+	reservedCatalogVersion := ""
 	for index, observation := range profile.ReservedValues {
-		if !stableCode(observation.Code) || observation.Count < 1 {
+		if !stableCode(observation.Code) || observation.Count < 1 ||
+			strings.TrimSpace(observation.CatalogVersion) == "" ||
+			len(observation.CatalogVersion) > 64 ||
+			strings.TrimSpace(observation.CatalogVersion) != observation.CatalogVersion {
 			return fmt.Errorf("reservedValues[%d] code or count is invalid", index)
 		}
 		if err := observation.NormalizedValueHash.Validate(); err != nil {
 			return fmt.Errorf("reservedValues[%d].normalizedValueHash: %w", index, err)
+		}
+		if reservedCatalogVersion == "" {
+			reservedCatalogVersion = observation.CatalogVersion
+		} else if observation.CatalogVersion != reservedCatalogVersion {
+			return errors.New("reserved values must use one catalog version per profile generation")
 		}
 		identity := observation.Code + "\x00" + string(observation.NormalizedValueHash)
 		if _, duplicate := seenReserved[identity]; duplicate {

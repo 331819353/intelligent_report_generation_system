@@ -16,6 +16,10 @@ set -a
 . "$ENV_FILE"
 set +a
 
+compose() {
+  docker compose --env-file "$ROOT_DIR/.env.example" --env-file "$ENV_FILE" "$@"
+}
+
 APP_ROLE=${POSTGRES_APP_USER:-report_app}
 WORKER_ROLE=${POSTGRES_WORKER_USER:-report_worker}
 CONNECTION_TEST_ROLE=${POSTGRES_CONNECTION_TEST_USER:-report_connection_tester}
@@ -36,7 +40,7 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 # 迁移登记表位于 platform 模式之外，确保首次初始化前也可创建。
-docker compose --env-file "$ENV_FILE" exec -T postgres \
+compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-report_admin}" -d "${POSTGRES_DB:-intelligent_report_control}" <<'SQL'
 CREATE TABLE IF NOT EXISTS platform_schema_migrations (
   version text PRIMARY KEY,
@@ -48,7 +52,7 @@ SQL
 for migration in "$ROOT_DIR"/migrations/*.up.sql; do
   [ -f "$migration" ] || continue
   version=$(basename "$migration" .up.sql)
-  applied=$(docker compose --env-file "$ENV_FILE" exec -T postgres \
+  applied=$(compose exec -T postgres \
     psql -At -U "${POSTGRES_USER:-report_admin}" -d "${POSTGRES_DB:-intelligent_report_control}" \
     -c "SELECT 1 FROM platform_schema_migrations WHERE version = '$version'" || true)
   if [ "$applied" = "1" ]; then
@@ -60,11 +64,11 @@ for migration in "$ROOT_DIR"/migrations/*.up.sql; do
   # The later historical repair intentionally fails when there is nothing to
   # replace, so record it as satisfied when its target definition is present.
   if [ "$version" = "000161_plain_domain_dwd_trigger" ]; then
-    already_plain=$(docker compose --env-file "$ENV_FILE" exec -T postgres \
+    already_plain=$(compose exec -T postgres \
       psql -At -U "${POSTGRES_USER:-report_admin}" -d "${POSTGRES_DB:-intelligent_report_control}" \
       -c "SELECT position('''领域:''||domain.name AS domain_key' IN definition)=0 AND position('domain.name AS domain_key' IN definition)>0 FROM (SELECT pg_get_functiondef('platform.trigger_manual_dwd_modeling(uuid)'::regprocedure) AS definition) AS current_definition")
     if [ "$already_plain" = "t" ]; then
-      docker compose --env-file "$ENV_FILE" exec -T postgres \
+      compose exec -T postgres \
         psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-report_admin}" -d "${POSTGRES_DB:-intelligent_report_control}" \
         -c "INSERT INTO platform_schema_migrations(version) VALUES ('$version')" >/dev/null
       echo "record $version (already satisfied)"
@@ -78,13 +82,13 @@ for migration in "$ROOT_DIR"/migrations/*.up.sql; do
     cat "$migration"
     printf "\nINSERT INTO platform_schema_migrations(version) VALUES ('%s');\n" "$version"
     echo 'COMMIT;'
-  } | docker compose --env-file "$ENV_FILE" exec -T postgres \
+  } | compose exec -T postgres \
       psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-report_admin}" -d "${POSTGRES_DB:-intelligent_report_control}"
 done
 
 # 已有本地数据卷不会重新执行 docker-entrypoint-initdb.d，因此迁移脚本还要
 # 幂等补齐后台执行角色。密码仅作为 psql 变量参与 format(%L)，不拼接 SQL。
-docker compose --env-file "$ENV_FILE" exec -T postgres \
+compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-report_admin}" -d "${POSTGRES_DB:-intelligent_report_control}" \
   --set=app_user="$APP_ROLE" \
   --set=worker_user="${POSTGRES_WORKER_USER:-report_worker}" \
@@ -136,7 +140,7 @@ SQL
 
 # 数仓使用独立 PostgreSQL，控制面迁移不会在该实例创建 schema。已有数据卷
 # 不会重放 docker-entrypoint-initdb.d，因此这里幂等补齐新分层数据面。
-docker compose --env-file "$ENV_FILE" exec -T postgres-warehouse \
+compose exec -T postgres-warehouse \
   psql -v ON_ERROR_STOP=1 \
   -U "${WAREHOUSE_POSTGRES_USER:-warehouse_admin}" \
   -d "${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}" \
@@ -154,7 +158,7 @@ COMMENT ON SCHEMA warehouse_ads IS
 COMMIT;
 SQL
 
-docker compose --env-file "$ENV_FILE" exec -T postgres \
+compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-report_admin}" -d "${POSTGRES_DB:-intelligent_report_control}" \
   --set=app_user="${POSTGRES_APP_USER:-report_app}" \
   --set=worker_user="${POSTGRES_WORKER_USER:-report_worker}" \
@@ -329,6 +333,50 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA askdata
   FROM PUBLIC, :"app_user", :"worker_user", :"connection_test_user";
 
 GRANT SELECT ON ALL TABLES IN SCHEMA askdata TO :"app_user", :"worker_user";
+-- Raw dimension-member material is never a general registry read surface.
+-- The API may perform governed authoring DML, while runtime lookup goes only
+-- through the hash-only SECURITY DEFINER function below. The profile worker
+-- receives just the two hash-history columns needed for generation diffs.
+REVOKE SELECT ON TABLE
+  askdata.dimension_members,
+  askdata.dimension_member_aliases,
+  askdata.dimension_profile_members
+FROM PUBLIC, :"app_user", :"worker_user", :"connection_test_user";
+-- Table-level REVOKE does not clear historical column ACLs. Reset every
+-- column ACL on all three sensitive tables before granting the safe views.
+REVOKE SELECT(
+  id,tenant_id,domain_id,member_id,version_no,dimension_version_id,
+  member_key,member_key_hash,canonical_label,parent_member_version_id,
+  sensitivity,valid_from,valid_to,status,content_hash,created_by,created_at,
+  updated_at
+)
+  ON TABLE askdata.dimension_members
+  FROM PUBLIC, :"app_user", :"worker_user", :"connection_test_user";
+REVOKE SELECT(
+  id,tenant_id,domain_id,dimension_version_id,member_version_id,alias,
+  normalized_alias,source,priority,status,content_hash,created_by,created_at,
+  updated_at,alias_key_hash
+)
+  ON TABLE askdata.dimension_member_aliases
+  FROM PUBLIC, :"app_user", :"worker_user", :"connection_test_user";
+REVOKE SELECT(
+  id,tenant_id,domain_id,dimension_version_id,profile_id,generation,
+  member_key_hash,canonical_label,normalized_value,observed_aliases,
+  observed_count,sensitivity,eligible_for_llm,content_hash,created_at
+)
+  ON TABLE askdata.dimension_profile_members
+  FROM PUBLIC, :"app_user", :"worker_user", :"connection_test_user";
+GRANT SELECT(
+  id,tenant_id,domain_id,member_id,version_no,dimension_version_id,
+  parent_member_version_id,sensitivity,valid_from,valid_to,status,content_hash,
+  created_by,created_at,updated_at
+) ON TABLE askdata.dimension_members TO :"app_user";
+GRANT SELECT(
+  id,tenant_id,domain_id,dimension_version_id,member_version_id,source,
+  priority,status,content_hash,created_by,created_at,updated_at
+) ON TABLE askdata.dimension_member_aliases TO :"app_user";
+GRANT SELECT(profile_id,member_key_hash)
+  ON TABLE askdata.dimension_profile_members TO :"worker_user";
 GRANT INSERT, UPDATE, DELETE ON TABLE
   askdata.domains,
   askdata.entities,
@@ -353,6 +401,22 @@ GRANT INSERT ON TABLE
   askdata.releases,
   askdata.release_objects
 TO :"app_user";
+GRANT INSERT, UPDATE ON TABLE
+  askdata.question_runs
+TO :"app_user";
+GRANT INSERT, UPDATE, DELETE ON TABLE
+  askdata.evaluation_sets,
+  askdata.evaluation_cases,
+  askdata.evaluation_case_reviews
+TO :"app_user";
+GRANT INSERT, UPDATE ON TABLE
+  askdata.query_feedback
+TO :"app_user";
+GRANT INSERT ON TABLE
+  askdata.question_run_events,
+  askdata.question_artifacts,
+  askdata.tool_calls
+TO :"app_user";
 
 GRANT INSERT ON TABLE askdata.audit_events TO :"worker_user";
 GRANT INSERT, UPDATE, DELETE ON TABLE
@@ -364,7 +428,8 @@ GRANT INSERT, UPDATE, DELETE ON TABLE
 TO :"worker_user";
 GRANT INSERT ON TABLE
   askdata.dimension_profiles,
-  askdata.dimension_profile_members
+  askdata.dimension_profile_members,
+  askdata.evaluation_runs
 TO :"worker_user";
 
 GRANT EXECUTE ON FUNCTION
@@ -375,10 +440,16 @@ GRANT EXECUTE ON FUNCTION
   askdata.tenant_matches(uuid),
   askdata.domain_can_access(uuid),
   askdata.json_is_safe(jsonb),
+  askdata.question_audit_json_is_safe(jsonb),
+  askdata.question_runtime_can_access(uuid,uuid,uuid),
+  askdata.evaluation_control_can_access(uuid,uuid),
+  askdata.evaluation_case_can_access(uuid,uuid,uuid),
   askdata.release_manifest_hash(uuid)
 TO :"app_user", :"worker_user";
 GRANT EXECUTE ON FUNCTION
-  askdata.start_release_projection(uuid,uuid,jsonb)
+  askdata.start_release_projection(uuid,uuid,jsonb),
+  askdata.seal_evaluation_set(uuid,uuid),
+  askdata.lookup_exact_dimension_member(uuid,text,uuid,text)
 TO :"app_user";
 GRANT EXECUTE ON FUNCTION
   askdata.list_release_projection_tenants(),

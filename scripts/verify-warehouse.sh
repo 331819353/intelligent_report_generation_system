@@ -15,7 +15,11 @@ set -a
 . "$ENV_FILE"
 set +a
 
-docker compose --env-file "$ENV_FILE" exec -T postgres-warehouse \
+compose() {
+  docker compose --env-file "$ROOT_DIR/.env.example" --env-file "$ENV_FILE" "$@"
+}
+
+compose exec -T postgres-warehouse \
   psql -v ON_ERROR_STOP=1 \
   -U "${WAREHOUSE_POSTGRES_USER:-warehouse_admin}" \
   -d "${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}" \

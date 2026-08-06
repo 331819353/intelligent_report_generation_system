@@ -16,6 +16,8 @@ import (
 
 var ErrReservedMemberValue = errors.New("dimension member is a reserved or sentinel value")
 
+var ErrInvalidMemberLookup = errors.New("dimension member lookup value is invalid")
+
 type ReservedValueCatalog struct {
 	Version string
 	Values  map[string]string
@@ -65,6 +67,8 @@ func NormalizeMember(
 	canonical string,
 	aliases []string,
 	sensitivity registry.Sensitivity,
+	memberIndexPolicy registry.MemberIndexPolicy,
+	highCardinality bool,
 	catalog ReservedValueCatalog,
 ) (NormalizedMember, *ReservedMember, error) {
 	if err := dimensionVersionID.Validate(); err != nil {
@@ -89,7 +93,7 @@ func NormalizeMember(
 		CanonicalValue:     canonicalDisplay, NormalizedValue: normalized,
 		MemberKeyHash:  askdata.HashBytes([]byte(string(dimensionVersionID) + "\x00" + normalized)),
 		Sensitivity:    sensitivity,
-		EligibleForLLM: sensitivity == registry.SensitivityPublic || sensitivity == registry.SensitivityInternal,
+		EligibleForLLM: memberLabelsEligibleForLLM(sensitivity, memberIndexPolicy, highCardinality),
 	}
 	seen := map[string]struct{}{normalized: {}}
 	for index, alias := range aliases {
@@ -115,6 +119,41 @@ func NormalizeMember(
 	}
 	sort.Slice(result.Aliases, func(i, j int) bool { return result.Aliases[i].NormalizedAlias < result.Aliases[j].NormalizedAlias })
 	return result, nil, nil
+}
+
+// memberLabelsEligibleForLLM is the single fail-closed policy gate for raw
+// member labels. Sensitivity alone is insufficient: only a low-cardinality
+// FULL index may expose PUBLIC/INTERNAL labels to an LLM. EXACT_ONLY,
+// ON_DEMAND and NONE remain label-free even when their sensitivity is low.
+func memberLabelsEligibleForLLM(
+	sensitivity registry.Sensitivity,
+	memberIndexPolicy registry.MemberIndexPolicy,
+	highCardinality bool,
+) bool {
+	return !highCardinality && memberIndexPolicy == registry.MemberIndexFull &&
+		(sensitivity == registry.SensitivityPublic || sensitivity == registry.SensitivityInternal)
+}
+
+// MemberLookupKeyHash prepares the only value accepted by the governed
+// EXACT_ONLY database lookup. The raw member value is normalized and discarded
+// by the caller before SQL is executed; neither labels nor aliases are used as
+// SQL parameters. The hash algorithm intentionally matches member_key_hash and
+// dimension_member_aliases.alias_key_hash.
+func MemberLookupKeyHash(
+	dimensionVersionID askdata.ID, value string,
+) (askdata.ContentHash, error) {
+	if err := dimensionVersionID.Validate(); err != nil {
+		return "", ErrInvalidMemberLookup
+	}
+	display, err := normalizeMemberDisplay(value)
+	if err != nil || display == "" {
+		return "", ErrInvalidMemberLookup
+	}
+	normalized := normalizeMemberKey(display)
+	if _, reserved := DefaultReservedValueCatalog().Values[normalized]; reserved {
+		return "", ErrInvalidMemberLookup
+	}
+	return askdata.HashBytes([]byte(string(dimensionVersionID) + "\x00" + normalized)), nil
 }
 
 func normalizeMemberDisplay(value string) (string, error) {

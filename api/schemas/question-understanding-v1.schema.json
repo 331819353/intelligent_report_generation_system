@@ -100,6 +100,7 @@
             "SEMANTIC_CONTRACT",
             "CERTIFIED_EXAMPLE",
             "DIMENSION_PROFILE",
+            "CANDIDATE_SET",
             "DATA_QUALITY",
             "QUERY_PLAN",
             "QUERY_RESULT",

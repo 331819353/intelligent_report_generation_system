@@ -13,7 +13,7 @@ if [ -n "$duplicates" ]; then
 fi
 
 # 在进入测试前只扫描 Git 跟踪文件，既拦截误提交，也避免读取并回显本地忽略的 .env。
-if git grep -q -E 'sk-[A-Za-z0-9_-]{20,}' -- .; then
+if git grep -q -E '(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}' -- .; then
   echo 'possible API key committed to repository' >&2
   exit 1
 fi

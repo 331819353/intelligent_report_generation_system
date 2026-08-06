@@ -5,6 +5,7 @@ import { DataSourceCenterPage } from '../pages/DataSourceCenterPage'
 import { LoginPage } from '../pages/LoginPage'
 import { ManagementCenterPage } from '../pages/ManagementCenterPage'
 import { DomainAccessPage } from '../pages/DomainAccessPage'
+import { AskDataPage } from '../pages/AskDataPage'
 import { RequireAuth } from '../components/RequireAuth'
 import { RequirePlatformAdministrator } from '../components/RequirePlatformAdministrator'
 import { RequireBusinessDomain } from '../components/RequireBusinessDomain'
@@ -31,6 +32,7 @@ export function App() {
       <Route path="/data-sources" element={<RequireAuth><RequireBusinessDomain><DataSourceCenterPage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="/datasets" element={<RequireAuth><RequireBusinessDomain><DatasetCenterPage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="/datasets/:datasetId/edit" element={<RequireAuth><RequireBusinessDomain><DatasetCenterPage /></RequireBusinessDomain></RequireAuth>} />
+      <Route path="/ask-data" element={<RequireAuth><RequireBusinessDomain><AskDataPage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="*" element={<Navigate to="/data-sources" replace />} />
     </Routes>
   )

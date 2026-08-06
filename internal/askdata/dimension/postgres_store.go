@@ -194,7 +194,7 @@ func synchronizeProfileJobs(ctx context.Context, tx pgx.Tx, tenantID string, opt
 			materialization.row_count AS expected_row_count,dimension.sensitivity,
 			dimension.member_index_policy,dimension.high_cardinality,
 			encode(public.digest(convert_to(concat_ws(E'\\x1f',
-				'dimension-profile-v1',dimension.content_hash,model.content_hash,
+				'dimension-profile-v2',dimension.content_hash,model.content_hash,
 				materialization.snapshot_hash,model.dataset_schema_hash,field.field_code::text,
 				dimension.sensitivity,dimension.member_index_policy,dimension.high_cardinality::text,
 				($2::bigint)::text,($3::bigint)::text,($4::bigint)::text,
@@ -327,7 +327,7 @@ func (store *PostgresProfileStore) Complete(
 ) error {
 	if store == nil || store.pool == nil || validateScanClaim(claim, workerID) != nil ||
 		profileResultMatchesClaim(claim, profile, decision) != nil ||
-		validateMemberObservations(claim, observations) != nil {
+		validateMemberObservations(claim, profile, observations) != nil {
 		return ErrInvalidProfileWork
 	}
 	profileJSON, err := json.Marshal(profile)

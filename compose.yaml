@@ -107,6 +107,168 @@ services:
     restart: "no"
     networks: [report_net]
 
+  # AskData 语义图的可重建开发投影；PostgreSQL 仍是权威事实源。
+  nebula-metad:
+    image: docker.io/vesoft/nebula-metad:v3.8.0
+    restart: unless-stopped
+    environment:
+      USER: root
+      TZ: Asia/Shanghai
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --local_ip=nebula-metad
+      - --ws_ip=nebula-metad
+      - --port=9559
+      - --ws_http_port=19559
+      - --data_path=/data/meta
+      - --log_dir=/logs
+      - --v=0
+      - --minloglevel=0
+    volumes:
+      - nebula_meta_data:/data/meta
+      - nebula_meta_logs:/logs
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://nebula-metad:19559/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    networks: [askdata_graph_cluster_net]
+
+  nebula-storaged:
+    image: docker.io/vesoft/nebula-storaged:v3.8.0
+    restart: unless-stopped
+    environment:
+      USER: root
+      TZ: Asia/Shanghai
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --local_ip=nebula-storaged
+      - --ws_ip=nebula-storaged
+      - --port=9779
+      - --ws_http_port=19779
+      - --data_path=/data/storage
+      - --log_dir=/logs
+      - --v=0
+      - --minloglevel=0
+    depends_on:
+      nebula-metad:
+        condition: service_healthy
+    volumes:
+      - nebula_storage_data:/data/storage
+      - nebula_storage_logs:/logs
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://nebula-storaged:19779/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    networks: [askdata_graph_cluster_net]
+
+  nebula-graphd:
+    image: docker.io/vesoft/nebula-graphd:v3.8.0
+    restart: unless-stopped
+    environment:
+      USER: root
+      TZ: Asia/Shanghai
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --port=9669
+      - --local_ip=nebula-graphd
+      - --ws_ip=nebula-graphd
+      - --ws_http_port=19669
+      - --log_dir=/logs
+      - --enable_authorize=true
+      - --auth_type=password
+      - --v=0
+      - --minloglevel=0
+    depends_on:
+      nebula-metad:
+        condition: service_healthy
+    volumes:
+      - nebula_graph_logs:/logs
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://nebula-graphd:19669/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    # 集群控制面与客户端面分网；API/Worker 不能解析 metad/storaged。
+    networks:
+      askdata_graph_cluster_net: {}
+      askdata_graph_client_net:
+        aliases: [nebula-graphd-client]
+
+  # 一次性、幂等完成 Storage 注册、Space/Schema 和最小权限账号初始化。
+  nebula-init:
+    image: docker.io/vesoft/nebula-console:v3.8.0
+    entrypoint: [""]
+    command: ["/bin/sh", "/opt/askdata-nebula/init.sh"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      NEBULA_GRAPH_ADDR: nebula-graphd-client
+      NEBULA_GRAPH_PORT: "9669"
+      NEBULA_SPACE: ${ASKDATA_NEBULA_SPACE:-askdata_semantic}
+      NEBULA_ROOT_PASSWORD: ${ASKDATA_NEBULA_ROOT_PASSWORD:?ASKDATA_NEBULA_ROOT_PASSWORD is required}
+      NEBULA_BOOTSTRAP_ROOT_PASSWORD: ${ASKDATA_NEBULA_BOOTSTRAP_ROOT_PASSWORD:?ASKDATA_NEBULA_BOOTSTRAP_ROOT_PASSWORD is required}
+      NEBULA_API_USER: ${ASKDATA_NEBULA_API_USER:-askdata_api}
+      NEBULA_API_PASSWORD: ${ASKDATA_NEBULA_API_PASSWORD:?ASKDATA_NEBULA_API_PASSWORD is required}
+      NEBULA_WORKER_USER: ${ASKDATA_NEBULA_WORKER_USER:-askdata_worker}
+      NEBULA_WORKER_PASSWORD: ${ASKDATA_NEBULA_WORKER_PASSWORD:?ASKDATA_NEBULA_WORKER_PASSWORD is required}
+    depends_on:
+      nebula-storaged:
+        # storaged 的 HTTP status 只在 ADD HOSTS 后才就绪；init 必须先负责注册。
+        condition: service_started
+      nebula-graphd:
+        condition: service_healthy
+    volumes:
+      - ./deployments/nebula/init.sh:/opt/askdata-nebula/init.sh:ro
+      - ./deployments/nebula/schema.ngql:/opt/askdata-nebula/schema.ngql:ro
+    restart: "no"
+    networks: [askdata_graph_client_net]
+
+  # 只在显式 verification profile 中运行，不进入默认开发常驻栈。
+  nebula-verify:
+    image: docker.io/vesoft/nebula-console:v3.8.0
+    profiles: ["verification"]
+    entrypoint: [""]
+    command: ["/bin/sh", "/opt/askdata-nebula/verify.sh"]
+    environment:
+      NEBULA_GRAPH_ADDR: nebula-graphd-client
+      NEBULA_GRAPH_PORT: "9669"
+      NEBULA_SPACE: ${ASKDATA_NEBULA_SPACE:-askdata_semantic}
+      NEBULA_ROOT_PASSWORD: ${ASKDATA_NEBULA_ROOT_PASSWORD:?ASKDATA_NEBULA_ROOT_PASSWORD is required}
+      NEBULA_BOOTSTRAP_ROOT_PASSWORD: ${ASKDATA_NEBULA_BOOTSTRAP_ROOT_PASSWORD:?ASKDATA_NEBULA_BOOTSTRAP_ROOT_PASSWORD is required}
+      NEBULA_API_USER: ${ASKDATA_NEBULA_API_USER:-askdata_api}
+      NEBULA_API_PASSWORD: ${ASKDATA_NEBULA_API_PASSWORD:?ASKDATA_NEBULA_API_PASSWORD is required}
+      NEBULA_WORKER_USER: ${ASKDATA_NEBULA_WORKER_USER:-askdata_worker}
+      NEBULA_WORKER_PASSWORD: ${ASKDATA_NEBULA_WORKER_PASSWORD:?ASKDATA_NEBULA_WORKER_PASSWORD is required}
+    depends_on:
+      nebula-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./deployments/nebula/verify.sh:/opt/askdata-nebula/verify.sh:ro
+    restart: "no"
+    networks: [askdata_graph_client_net]
+
+  # init 成功后才显式启动的本地调试/验收代理；graphd 本身永不发布宿主端口。
+  nebula-loopback-proxy:
+    image: docker.io/alpine/socat:1.8.0.3
+    profiles: ["graph-access", "verification"]
+    restart: unless-stopped
+    command: ["TCP-LISTEN:9669,fork,reuseaddr,nodelay", "TCP:nebula-graphd-client:9669,nodelay"]
+    depends_on:
+      nebula-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${ASKDATA_NEBULA_PORT:-9669}:9669"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9669"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks: [askdata_graph_client_net, askdata_graph_host_net]
+
   # 隔离数据库驱动与外部查询执行的 Python 服务。
   connector-service:
     build:
@@ -157,6 +319,16 @@ services:
       MINIO_ENDPOINT: minio:9000
       MINIO_CONSOLE_ENDPOINT: http://minio:9001
       CONNECTOR_SERVICE_URL: http://connector-service:8090
+      ASKDATA_NEBULA_ADDRESSES: nebula-graphd-client:9669
+      ASKDATA_NEBULA_SPACE: ${ASKDATA_NEBULA_SPACE:-askdata_semantic}
+      ASKDATA_NEBULA_USERNAME: ${ASKDATA_NEBULA_API_USER:-askdata_api}
+      ASKDATA_NEBULA_PASSWORD: ${ASKDATA_NEBULA_API_PASSWORD:?ASKDATA_NEBULA_API_PASSWORD is required}
+      ASKDATA_NEBULA_TLS_ENABLED: "false"
+      # env_file 是共享的；显式清空 canonical secret，API 只保留上面的 GUEST 凭据。
+      ASKDATA_NEBULA_ROOT_PASSWORD: ""
+      ASKDATA_NEBULA_BOOTSTRAP_ROOT_PASSWORD: ""
+      ASKDATA_NEBULA_API_PASSWORD: ""
+      ASKDATA_NEBULA_WORKER_PASSWORD: ""
     command: ["/app/api"]
     ports:
       - "127.0.0.1:8080:8080"
@@ -169,13 +341,15 @@ services:
         condition: service_healthy
       connector-service:
         condition: service_healthy
+      nebula-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health/ready"]
       interval: 5s
       timeout: 3s
       retries: 20
       start_period: 5s
-    networks: [report_net]
+    networks: [report_net, askdata_graph_client_net]
 
   # 通用 Worker 使用控制库 worker 账号和仓库写入账号。
   worker:
@@ -187,6 +361,16 @@ services:
       WAREHOUSE_WORKER_DATABASE_URL: postgres://${WAREHOUSE_WORKER_USER:-report_warehouse_worker}:${WAREHOUSE_WORKER_PASSWORD:-local_warehouse_worker_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
       MINIO_ENDPOINT: minio:9000
       CONNECTOR_SERVICE_URL: http://connector-service:8090
+      ASKDATA_NEBULA_ADDRESSES: nebula-graphd-client:9669
+      ASKDATA_NEBULA_SPACE: ${ASKDATA_NEBULA_SPACE:-askdata_semantic}
+      ASKDATA_NEBULA_USERNAME: ${ASKDATA_NEBULA_WORKER_USER:-askdata_worker}
+      ASKDATA_NEBULA_PASSWORD: ${ASKDATA_NEBULA_WORKER_PASSWORD:?ASKDATA_NEBULA_WORKER_PASSWORD is required}
+      ASKDATA_NEBULA_TLS_ENABLED: "false"
+      # Worker 只持有 USER 投影写账号，不持有 root/API canonical secret。
+      ASKDATA_NEBULA_ROOT_PASSWORD: ""
+      ASKDATA_NEBULA_BOOTSTRAP_ROOT_PASSWORD: ""
+      ASKDATA_NEBULA_API_PASSWORD: ""
+      ASKDATA_NEBULA_WORKER_PASSWORD: ""
     command: ["/app/worker"]
     depends_on:
       postgres:
@@ -197,13 +381,15 @@ services:
         condition: service_healthy
       connector-service:
         condition: service_healthy
+      nebula-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "kill -0 1"]
       interval: 10s
       timeout: 3s
       retries: 3
       start_period: 3s
-    networks: [report_net]
+    networks: [report_net, askdata_graph_client_net]
 
   # 连接测试 Worker 仅持有专用控制库、Connector 和 uploads 读取凭据。
   connection-test-worker:
@@ -214,6 +400,16 @@ services:
       CONNECTION_TEST_DATABASE_URL: postgres://${POSTGRES_CONNECTION_TEST_USER:-report_connection_tester}:${POSTGRES_CONNECTION_TEST_PASSWORD:-local_connection_test_password}@postgres:5432/${POSTGRES_DB:-intelligent_report_control}?sslmode=disable
       CONNECTION_TEST_MINIO_ENDPOINT: minio:9000
       CONNECTOR_SERVICE_URL: http://connector-service:8090
+      # 共享 env_file 不得让连接测试进程获得任何图凭据。
+      ASKDATA_NEBULA_ADDRESSES: ""
+      ASKDATA_NEBULA_SPACE: ""
+      ASKDATA_NEBULA_USERNAME: ""
+      ASKDATA_NEBULA_PASSWORD: ""
+      ASKDATA_NEBULA_TLS_ENABLED: ""
+      ASKDATA_NEBULA_ROOT_PASSWORD: ""
+      ASKDATA_NEBULA_BOOTSTRAP_ROOT_PASSWORD: ""
+      ASKDATA_NEBULA_API_PASSWORD: ""
+      ASKDATA_NEBULA_WORKER_PASSWORD: ""
     command: ["/app/connection-test-worker"]
     depends_on:
       postgres:
@@ -256,7 +452,20 @@ volumes:
   postgres_control_data:
   postgres_warehouse_data:
   minio_data:
+  nebula_meta_data:
+  nebula_meta_logs:
+  nebula_storage_data:
+  nebula_storage_logs:
+  nebula_graph_logs:
 
 networks:
   report_net:
+    driver: bridge
+  askdata_graph_cluster_net:
+    driver: bridge
+    internal: true
+  askdata_graph_client_net:
+    driver: bridge
+    internal: true
+  askdata_graph_host_net:
     driver: bridge

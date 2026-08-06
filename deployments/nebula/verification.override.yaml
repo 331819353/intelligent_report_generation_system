@@ -1,0 +1,12 @@
+services:
+  # Formal GRAPH-002 verification must never load the developer's optional
+  # root .env through application service env_file declarations. The graph
+  # services receive every verification value explicitly from the wrapper.
+  api:
+    env_file: !reset []
+
+  worker:
+    env_file: !reset []
+
+  connection-test-worker:
+    env_file: !reset []

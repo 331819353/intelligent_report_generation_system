@@ -34,10 +34,24 @@ wait_for_http() {
 }
 
 start_all() {
-  compose up -d --wait postgres postgres-warehouse minio connector-service
+  compose up -d \
+    postgres postgres-warehouse minio connector-service \
+    nebula-metad nebula-storaged nebula-graphd
+  compose up -d --wait \
+    postgres postgres-warehouse minio connector-service \
+    nebula-metad nebula-graphd
   compose run --rm minio-init
+  compose up \
+    --no-deps \
+    --force-recreate \
+    --abort-on-container-exit \
+    --exit-code-from nebula-init \
+    nebula-init
+  compose up -d --wait nebula-storaged
+  compose --profile graph-access up -d --wait nebula-loopback-proxy
   "$ROOT_DIR/scripts/migrate.sh"
   compose up -d --build --wait api worker connection-test-worker web
+  compose rm -f nebula-init >/dev/null
   wait_for_http api http://127.0.0.1:8080/health/ready
   wait_for_http connector-service http://127.0.0.1:8090/health/live
   wait_for_http web http://127.0.0.1:5173/
@@ -51,7 +65,7 @@ stop_all() {
 status_all() {
   failed=0
   running=$(compose ps --status running --services)
-  for name in api worker connection-test-worker web; do
+  for name in api worker connection-test-worker web nebula-metad nebula-storaged nebula-graphd nebula-loopback-proxy; do
     if printf '%s\n' "$running" | grep -Fx "$name" >/dev/null 2>&1; then
       printf '%-24s running\n' "$name"
     else
@@ -79,7 +93,8 @@ status_all() {
 }
 
 show_logs() {
-  compose logs --tail=100 api worker connection-test-worker web
+  compose logs --tail=100 api worker connection-test-worker web \
+    nebula-metad nebula-storaged nebula-graphd nebula-init nebula-loopback-proxy
 }
 
 case "${1:-}" in

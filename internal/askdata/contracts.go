@@ -103,6 +103,7 @@ const (
 	EvidenceKindSemanticContract EvidenceKind = "SEMANTIC_CONTRACT"
 	EvidenceKindCertifiedExample EvidenceKind = "CERTIFIED_EXAMPLE"
 	EvidenceKindDimensionProfile EvidenceKind = "DIMENSION_PROFILE"
+	EvidenceKindCandidateSet     EvidenceKind = "CANDIDATE_SET"
 	EvidenceKindDataQuality      EvidenceKind = "DATA_QUALITY"
 	EvidenceKindQueryPlan        EvidenceKind = "QUERY_PLAN"
 	EvidenceKindQueryResult      EvidenceKind = "QUERY_RESULT"
@@ -115,7 +116,7 @@ var validEvidenceKinds = map[EvidenceKind]struct{}{
 	EvidenceKindExactAlias: {}, EvidenceKindLexicalMatch: {},
 	EvidenceKindVectorMatch: {}, EvidenceKindGraphPath: {},
 	EvidenceKindSemanticContract: {}, EvidenceKindCertifiedExample: {},
-	EvidenceKindDimensionProfile: {}, EvidenceKindDataQuality: {},
+	EvidenceKindDimensionProfile: {}, EvidenceKindCandidateSet: {}, EvidenceKindDataQuality: {},
 	EvidenceKindQueryPlan: {}, EvidenceKindQueryResult: {},
 	EvidenceKindPolicy: {}, EvidenceKindRule: {}, EvidenceKindConversation: {},
 }
