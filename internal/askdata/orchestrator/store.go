@@ -1177,6 +1177,9 @@ func (snapshot ReplaySnapshot) Validate() error {
 		}
 		callsByID[call.CallID] = call
 	}
+	if err := validateToolReplayBindings(snapshot.Artifacts, callsByID); err != nil {
+		return err
+	}
 	return validateEventFactReferences(snapshot.Events, artifactsByHash, callsByID)
 }
 

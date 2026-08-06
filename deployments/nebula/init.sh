@@ -284,7 +284,15 @@ capture_query root "$admin_password" \
 ensure_role() {
   role_user=$1
   expected_role=$2
-  capture_query root "$admin_password" "SHOW ROLES IN $space" || fail 'could not inspect graph roles'
+  attempt=0
+  while [ "$attempt" -lt "$schema_attempts" ]; do
+    if capture_query root "$admin_password" "SHOW ROLES IN $space"; then
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  [ "$attempt" -lt "$schema_attempts" ] || fail 'could not inspect graph roles'
   actual_roles=$(printf '%s\n' "$LAST_OUTPUT" | awk -F '|' -v wanted="$role_user" '
     /^\|/ {
       account=$2; role=$3
@@ -299,7 +307,15 @@ ensure_role() {
   elif [ "$actual_roles" != "$expected_role" ]; then
     fail "$role_user has an unexpected role in $space"
   fi
-  capture_query root "$admin_password" "SHOW ROLES IN $space" || fail 'could not verify graph roles'
+  attempt=0
+  while [ "$attempt" -lt "$schema_attempts" ]; do
+    if capture_query root "$admin_password" "SHOW ROLES IN $space"; then
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  [ "$attempt" -lt "$schema_attempts" ] || fail 'could not verify graph roles'
   verified_roles=$(printf '%s\n' "$LAST_OUTPUT" | awk -F '|' -v wanted="$role_user" '
     /^\|/ {
       account=$2; role=$3

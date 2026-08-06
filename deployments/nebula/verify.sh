@@ -88,9 +88,19 @@ cleanup_verification_space() {
   capture_query root "$root_password" "DROP SPACE IF EXISTS $verification_space" >/dev/null 2>&1 || true
 }
 trap cleanup_verification_space EXIT INT TERM
-capture_query root "$root_password" \
-  "CREATE SPACE $verification_space(partition_num=1, replica_factor=1, vid_type=FIXED_STRING(32))" ||
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+  if capture_query root "$root_password" \
+    "CREATE SPACE IF NOT EXISTS $verification_space(partition_num=1, replica_factor=1, vid_type=FIXED_STRING(32))"; then
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+[ "$attempt" -lt 60 ] || {
+  printf '%s\n' "$LAST_OUTPUT" >&2
   fail 'could not create the role-isolation verification Space'
+}
 attempt=0
 while [ "$attempt" -lt 60 ]; do
   if capture_query root "$root_password" "USE $verification_space; RETURN 1 AS ready"; then

@@ -290,10 +290,26 @@ func insertPOCEdge(
 		}
 	}
 	statement := fmt.Sprintf(
-		"INSERT EDGE %s(%s) VALUES %s->%s:(%s)",
-		edgeName, strings.Join(columns, ","), strconv.Quote(fromVID), strconv.Quote(toVID), strings.Join(values, ","),
+		"INSERT EDGE %s(%s) VALUES %s:(%s)",
+		edgeName, strings.Join(columns, ","), pocEdgeIdentity(edgeName, fromVID, toVID, extra), strings.Join(values, ","),
 	)
 	return executePOCMutation(pool, statement, parameters)
+}
+
+func pocEdgeIdentity(edgeName, fromVID, toVID string, extra map[string]interface{}) string {
+	identity := strconv.Quote(fromVID) + "->" + strconv.Quote(toVID)
+	if edgeName != "JOINS_TO" {
+		return identity
+	}
+	versionID, ok := extra["relationship_version_id"].(string)
+	if !ok {
+		return identity
+	}
+	rank, err := askgraph.BuildRelationshipEdgeRank(askdata.ID(versionID))
+	if err != nil {
+		return identity
+	}
+	return identity + "@" + strconv.FormatInt(rank, 10)
 }
 
 func executePOCMutation(pool *nebula.SessionPool, statement string, parameters map[string]interface{}) error {

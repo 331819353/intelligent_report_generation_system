@@ -112,6 +112,10 @@ func TestAssistantAndToolMessagesRoundTripThroughAIValidation(t *testing.T) {
 		SchemaVersion: toolhost.SchemaVersion,
 		CallID:        "call-search-1", Tool: toolhost.ToolSearchSemanticObjects,
 		Status: toolhost.ResponseSuccess, Result: result,
+		EvidenceRefs: []askdata.EvidenceRef{{
+			EvidenceID: "search-result", Kind: askdata.EvidenceKindCandidateSet,
+			SourceID: "release-search-v1", ContentHash: askdata.HashBytes([]byte("search-result")),
+		}},
 		ResultHash: askdata.HashBytes(result), MadeProgress: true,
 	}
 	toolMessage, err := ToolMessage(toolResponse)

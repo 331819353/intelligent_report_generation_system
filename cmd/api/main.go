@@ -12,6 +12,7 @@ import (
 
 	"intelligent-report-generation-system/internal/access"
 	aiplatform "intelligent-report-generation-system/internal/ai"
+	askdatahttp "intelligent-report-generation-system/internal/askdata/http"
 	"intelligent-report-generation-system/internal/asset"
 	"intelligent-report-generation-system/internal/assetembedding"
 	"intelligent-report-generation-system/internal/auth"
@@ -208,6 +209,9 @@ func main() {
 			RetrievalMode: cfg.DatasetAIRetrievalMode,
 		},
 	)
+	questionHandler := askdatahttp.NewHandler(
+		authService, askdatahttp.NewPostgresService(pool),
+	)
 
 	dataSourceHandler := datasource.NewHandler(authService, accessService, dataSourceService, credentialManager)
 	dataSourceAIHandler := datasourceai.NewHandler(
@@ -229,6 +233,8 @@ func main() {
 
 	api := http.NewServeMux()
 	api.Handle("/api/v1/auth/", auth.NewHandler(authService))
+	api.Handle("/api/v1/questions", questionHandler)
+	api.Handle("/api/v1/questions/", questionHandler)
 	api.Handle("POST /api/v1/permissions/evaluate", auth.RequireAccessToken(authService, access.EvaluateHandler(accessService)))
 	api.Handle("/api/v1/domain-catalog", accessAdminHandler)
 	api.Handle("/api/v1/domain-applications", accessAdminHandler)

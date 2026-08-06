@@ -149,6 +149,10 @@ BEGIN
 
   IF to_regprocedure('askdata.start_release_projection(uuid,uuid,jsonb)') IS NULL
     OR to_regprocedure('askdata.claim_release_projection(uuid,text,integer)') IS NULL
+    OR to_regprocedure('askdata.list_release_projection_tenants(text)') IS NULL
+    OR to_regprocedure('askdata.claim_release_projection(uuid,text,text,integer)') IS NULL
+    OR to_regprocedure('askdata.heartbeat_release_projection(uuid,uuid,text,uuid,integer)') IS NULL
+    OR to_regprocedure('askdata.load_release_graph_projection(uuid,uuid,text,uuid)') IS NULL
     OR to_regprocedure('askdata.complete_release_projection(uuid,uuid,text,uuid,text,text,integer,jsonb)') IS NULL
     OR to_regprocedure('askdata.fail_release_projection(uuid,uuid,text,uuid,text,boolean)') IS NULL
     OR to_regprocedure('askdata.activate_release(uuid,uuid)') IS NOT NULL THEN
@@ -431,6 +435,24 @@ BEGIN
          AND indexdef LIKE '%WHERE (status = ''ACTIVE''%'
   ) THEN
     RAISE EXCEPTION 'release four-projection or single-active invariant is missing';
+  END IF;
+
+  IF EXISTS(
+    SELECT 1
+    FROM unnest(ARRAY[
+      'askdata.list_release_projection_tenants(text)'::regprocedure,
+      'askdata.claim_release_projection(uuid,text,text,integer)'::regprocedure,
+      'askdata.heartbeat_release_projection(uuid,uuid,text,uuid,integer)'::regprocedure,
+      'askdata.load_release_graph_projection(uuid,uuid,text,uuid)'::regprocedure
+    ]) AS required_function(oid)
+    JOIN pg_proc AS procedure ON procedure.oid=required_function.oid
+    WHERE NOT procedure.prosecdef
+      OR NOT EXISTS(
+        SELECT 1 FROM unnest(procedure.proconfig) AS setting
+        WHERE setting LIKE 'search_path=%pg_catalog%askdata%'
+      )
+  ) THEN
+    RAISE EXCEPTION 'graph projection worker functions must be SECURITY DEFINER with a pinned search path';
   END IF;
 
   IF to_regprocedure(
@@ -792,8 +814,29 @@ SELECT (
   AND has_function_privilege(
     :'worker_user','askdata.claim_release_projection(uuid,text,integer)','EXECUTE'
   )
+  AND has_function_privilege(
+    :'worker_user','askdata.list_release_projection_tenants(text)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user','askdata.claim_release_projection(uuid,text,text,integer)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user',
+    'askdata.heartbeat_release_projection(uuid,uuid,text,uuid,integer)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user',
+    'askdata.load_release_graph_projection(uuid,uuid,text,uuid)','EXECUTE'
+  )
   AND NOT has_function_privilege(
     :'app_user','askdata.claim_release_projection(uuid,text,integer)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'app_user','askdata.claim_release_projection(uuid,text,text,integer)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user',
+    'askdata.load_release_graph_projection(uuid,uuid,text,uuid)','EXECUTE'
   )
   AND NOT has_function_privilege(
     :'connection_test_user','askdata.release_manifest_hash(uuid)','EXECUTE'
@@ -1585,6 +1628,115 @@ SELECT (
 \if :askdata_sensitive_active_role_can_use_restricted_action
 \else
   \echo 'active ROLE restricted-member action was not honored'
+  \quit 1
+\endif
+
+RESET ROLE;
+UPDATE askdata.releases
+SET status='PROJECTING'
+WHERE id=:'askdata_sensitive_release_id';
+INSERT INTO askdata.release_projections(
+  tenant_id,domain_id,release_id,target,status,expected_content_hash
+) VALUES(
+  :'askdata_sensitive_tenant_id',:'askdata_sensitive_domain_id',
+  :'askdata_sensitive_release_id','NEBULA_GRAPH','PENDING',
+  :'askdata_sensitive_release_hash'
+);
+
+SET LOCAL ROLE :"worker_user";
+SELECT (
+  (SELECT count(*)=1 FROM askdata.list_release_projection_tenants('NEBULA_GRAPH')
+   WHERE tenant_id=:'askdata_sensitive_tenant_id')
+  AND
+  (SELECT count(*)=0 FROM askdata.list_release_projection_tenants('POSTGRES_REGISTRY')
+   WHERE tenant_id=:'askdata_sensitive_tenant_id')
+) AS graph_projection_target_listing_isolated
+\gset askdata_sensitive_
+\if :askdata_sensitive_graph_projection_target_listing_isolated
+\else
+  \echo 'target-scoped graph projection tenant listing leaked another target'
+  \quit 1
+\endif
+
+SELECT * FROM askdata.claim_release_projection(
+  :'askdata_sensitive_tenant_id','NEBULA_GRAPH','verify-graph-worker',60
+)
+\gset askdata_graph_claim_
+SELECT (
+  :'askdata_graph_claim_target'='NEBULA_GRAPH'
+  AND :'askdata_graph_claim_release_id'=:'askdata_sensitive_release_id'
+  AND :'askdata_graph_claim_content_hash'=:'askdata_sensitive_release_hash'
+  AND :'askdata_graph_claim_attempt'::integer=1
+) AS graph_projection_target_claim_isolated
+\gset askdata_sensitive_
+\if :askdata_sensitive_graph_projection_target_claim_isolated
+\else
+  \echo 'target-scoped graph projection claim returned the wrong release or target'
+  \quit 1
+\endif
+
+SELECT (
+  NOT askdata.heartbeat_release_projection(
+    :'askdata_sensitive_tenant_id',:'askdata_graph_claim_projection_id',
+    'verify-graph-worker',gen_random_uuid(),60
+  )
+  AND askdata.heartbeat_release_projection(
+    :'askdata_sensitive_tenant_id',:'askdata_graph_claim_projection_id',
+    'verify-graph-worker',:'askdata_graph_claim_lease_token',60
+  )
+) AS graph_projection_heartbeat_is_lease_bound
+\gset askdata_sensitive_
+\if :askdata_sensitive_graph_projection_heartbeat_is_lease_bound
+\else
+  \echo 'graph projection heartbeat accepted a stale lease or rejected the live lease'
+  \quit 1
+\endif
+
+SELECT (
+  count(*)=11
+  AND count(*) FILTER(WHERE element_kind='VERTEX')=6
+  AND count(*) FILTER(WHERE element_kind='EDGE' AND graph_type='HAS_MEMBER')=5
+  AND count(*) FILTER(WHERE graph_type='member' AND member_status='EXPIRED')=1
+  AND bool_and(object_id<>'' OR from_object_id<>'')
+) AS graph_projection_snapshot_is_complete_and_label_free
+FROM askdata.load_release_graph_projection(
+  :'askdata_sensitive_tenant_id',:'askdata_graph_claim_projection_id',
+  'verify-graph-worker',:'askdata_graph_claim_lease_token'
+)
+\gset askdata_sensitive_
+\if :askdata_sensitive_graph_projection_snapshot_is_complete_and_label_free
+\else
+  \echo 'lease-bound graph projection snapshot was incomplete or exposed the wrong shape'
+  \quit 1
+\endif
+
+SELECT set_config(
+  'verify.askdata_graph_claim_projection_id',
+  :'askdata_graph_claim_projection_id',true
+);
+DO $$
+BEGIN
+  PERFORM * FROM askdata.load_release_graph_projection(
+    current_setting('verify.askdata_sensitive_tenant_id')::uuid,
+    current_setting('verify.askdata_graph_claim_projection_id')::uuid,
+    'verify-graph-worker',gen_random_uuid()
+  );
+  RAISE EXCEPTION 'graph snapshot accepted a stale lease';
+EXCEPTION WHEN SQLSTATE '55000' THEN
+  NULL;
+END
+$$;
+
+SELECT askdata.complete_release_projection(
+  :'askdata_sensitive_tenant_id',:'askdata_graph_claim_projection_id',
+  'verify-graph-worker',:'askdata_graph_claim_lease_token',
+  :'askdata_sensitive_release_hash','verify-graph-projection-v1',11,
+  '{"proofType":"CANONICAL_MUTATION_ACK"}'::jsonb
+) AS graph_projection_completed
+\gset askdata_sensitive_
+\if :askdata_sensitive_graph_projection_completed
+\else
+  \echo 'graph projection completion rejected the current target lease'
   \quit 1
 \endif
 

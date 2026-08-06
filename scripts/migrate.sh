@@ -453,7 +453,11 @@ GRANT EXECUTE ON FUNCTION
 TO :"app_user";
 GRANT EXECUTE ON FUNCTION
   askdata.list_release_projection_tenants(),
+  askdata.list_release_projection_tenants(text),
   askdata.claim_release_projection(uuid,text,integer),
+  askdata.claim_release_projection(uuid,text,text,integer),
+  askdata.heartbeat_release_projection(uuid,uuid,text,uuid,integer),
+  askdata.load_release_graph_projection(uuid,uuid,text,uuid),
   askdata.complete_release_projection(uuid,uuid,text,uuid,text,text,integer,jsonb),
   askdata.fail_release_projection(uuid,uuid,text,uuid,text,boolean)
 TO :"worker_user";

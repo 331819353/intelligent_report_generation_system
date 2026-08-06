@@ -12,7 +12,7 @@ import (
 	"unicode/utf8"
 
 	"intelligent-report-generation-system/internal/askdata"
-	"intelligent-report-generation-system/internal/askdata/ir"
+	"intelligent-report-generation-system/internal/askdata/ircontract"
 )
 
 const (
@@ -88,29 +88,29 @@ type ClarificationOption struct {
 // subset assigned to the selected tool. This avoids an arbitrary map crossing
 // the LLM/tool trust boundary.
 type ToolArguments struct {
-	Release               askdata.ReleaseRef    `json:"release"`
-	Mention               *string               `json:"mention"`
-	ObjectTypes           []ObjectType          `json:"objectTypes"`
-	DomainIDs             []askdata.ID          `json:"domainIds"`
-	ObjectVersionIDs      []askdata.ID          `json:"objectVersionIds"`
-	DimensionVersionID    *askdata.ID           `json:"dimensionVersionId"`
-	QuestionSummary       *string               `json:"questionSummary"`
-	ModelVersionIDs       []askdata.ID          `json:"modelVersionIds"`
-	MetricVersionIDs      []askdata.ID          `json:"metricVersionIds"`
-	DimensionVersionIDs   []askdata.ID          `json:"dimensionVersionIds"`
-	MemberVersionIDs      []askdata.ID          `json:"memberVersionIds"`
-	TimeRange             *ir.TimeRange         `json:"timeRange"`
-	SemanticIR            *ir.SemanticIR        `json:"semanticIr"`
-	PlanHash              *askdata.ContentHash  `json:"planHash"`
-	GraphPlanHash         *askdata.ContentHash  `json:"graphPlanHash"`
-	LeftPlanHash          *askdata.ContentHash  `json:"leftPlanHash"`
-	RightPlanHash         *askdata.ContentHash  `json:"rightPlanHash"`
-	Limit                 *int                  `json:"limit"`
-	MaxRows               *int                  `json:"maxRows"`
-	ValidationType        *ValidationType       `json:"validationType"`
-	ConflictCode          *string               `json:"conflictCode"`
-	ClarificationQuestion *string               `json:"clarificationQuestion"`
-	ClarificationOptions  []ClarificationOption `json:"clarificationOptions"`
+	Release               askdata.ReleaseRef     `json:"release"`
+	Mention               *string                `json:"mention"`
+	ObjectTypes           []ObjectType           `json:"objectTypes"`
+	DomainIDs             []askdata.ID           `json:"domainIds"`
+	ObjectVersionIDs      []askdata.ID           `json:"objectVersionIds"`
+	DimensionVersionID    *askdata.ID            `json:"dimensionVersionId"`
+	QuestionSummary       *string                `json:"questionSummary"`
+	ModelVersionIDs       []askdata.ID           `json:"modelVersionIds"`
+	MetricVersionIDs      []askdata.ID           `json:"metricVersionIds"`
+	DimensionVersionIDs   []askdata.ID           `json:"dimensionVersionIds"`
+	MemberVersionIDs      []askdata.ID           `json:"memberVersionIds"`
+	TimeRange             *ircontract.TimeRange  `json:"timeRange"`
+	SemanticIR            *ircontract.SemanticIR `json:"semanticIr"`
+	PlanHash              *askdata.ContentHash   `json:"planHash"`
+	GraphPlanHash         *askdata.ContentHash   `json:"graphPlanHash"`
+	LeftPlanHash          *askdata.ContentHash   `json:"leftPlanHash"`
+	RightPlanHash         *askdata.ContentHash   `json:"rightPlanHash"`
+	Limit                 *int                   `json:"limit"`
+	MaxRows               *int                   `json:"maxRows"`
+	ValidationType        *ValidationType        `json:"validationType"`
+	ConflictCode          *string                `json:"conflictCode"`
+	ClarificationQuestion *string                `json:"clarificationQuestion"`
+	ClarificationOptions  []ClarificationOption  `json:"clarificationOptions"`
 }
 
 // NewArguments returns the schema-valid empty parameter vocabulary pinned to
@@ -332,8 +332,8 @@ func (arguments ToolArguments) ValidateFor(tool ToolName) error {
 	if arguments.Limit != nil && (*arguments.Limit < 1 || *arguments.Limit > 100) {
 		return errors.New("limit must be between 1 and 100")
 	}
-	if arguments.MaxRows != nil && (*arguments.MaxRows < 1 || *arguments.MaxRows > ir.MaxLimit) {
-		return fmt.Errorf("maxRows must be between 1 and %d", ir.MaxLimit)
+	if arguments.MaxRows != nil && (*arguments.MaxRows < 1 || *arguments.MaxRows > ircontract.MaxLimit) {
+		return fmt.Errorf("maxRows must be between 1 and %d", ircontract.MaxLimit)
 	}
 	if arguments.ValidationType != nil && !validValidationType(*arguments.ValidationType) {
 		return errors.New("validationType is invalid")
@@ -479,7 +479,8 @@ func (response Response) Validate() error {
 		return fmt.Errorf("result exceeds %d bytes", MaxToolResultBytes)
 	}
 	if response.Status == ResponseSuccess {
-		if response.Error != nil || len(bytes.TrimSpace(response.Result)) == 0 {
+		if response.Error != nil || len(bytes.TrimSpace(response.Result)) == 0 ||
+			len(response.EvidenceRefs) < 1 {
 			return errors.New("successful response requires result and no error")
 		}
 		var result any
@@ -495,13 +496,22 @@ func (response Response) Validate() error {
 		if askdata.HashBytes(response.Result) != response.ResultHash {
 			return errors.New("resultHash does not match result bytes")
 		}
-	} else if response.Error == nil || len(bytes.TrimSpace(response.Result)) != 0 {
+		if err := rejectUnsafeResultKeys(response.Result); err != nil {
+			return errors.New("result contains a forbidden field")
+		}
+	} else if response.Error == nil || len(bytes.TrimSpace(response.Result)) != 0 ||
+		response.ResultHash != "" || response.MadeProgress || len(response.EvidenceRefs) != 0 {
 		return errors.New("rejected or failed response requires error and no result")
 	}
+	seenEvidence := map[askdata.ID]bool{}
 	for index, evidence := range response.EvidenceRefs {
 		if err := evidence.Validate(); err != nil {
 			return fmt.Errorf("evidenceRefs[%d]: %w", index, err)
 		}
+		if seenEvidence[evidence.EvidenceID] {
+			return fmt.Errorf("evidenceRefs[%d] is duplicated", index)
+		}
+		seenEvidence[evidence.EvidenceID] = true
 	}
 	if response.Error != nil {
 		if !isUpperCode(response.Error.Code) || strings.TrimSpace(response.Error.Message) == "" || utf8.RuneCountInString(response.Error.Message) > 512 {

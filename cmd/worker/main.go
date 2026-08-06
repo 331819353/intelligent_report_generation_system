@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/google/uuid"
 	aiplatform "intelligent-report-generation-system/internal/ai"
 	askdatadimension "intelligent-report-generation-system/internal/askdata/dimension"
+	askdatagraph "intelligent-report-generation-system/internal/askdata/graph"
 	askdatasearch "intelligent-report-generation-system/internal/askdata/search"
 	"intelligent-report-generation-system/internal/assetembedding"
 	"intelligent-report-generation-system/internal/config"
@@ -57,6 +59,36 @@ func main() {
 		os.Exit(1)
 	}
 	defer warehousePool.Close()
+
+	graphTLSEnabled, err := strconv.ParseBool(envOrDefault("ASKDATA_NEBULA_TLS_ENABLED", "false"))
+	if err != nil {
+		logger.Error("parse AskData NebulaGraph TLS configuration", "error", err)
+		os.Exit(1)
+	}
+	graphPool, err := askdatagraph.OpenSessionPool(
+		os.Getenv("ASKDATA_NEBULA_ADDRESSES"),
+		os.Getenv("ASKDATA_NEBULA_USERNAME"),
+		os.Getenv("ASKDATA_NEBULA_PASSWORD"),
+		os.Getenv("ASKDATA_NEBULA_SPACE"),
+		graphTLSEnabled,
+	)
+	if err != nil {
+		logger.Error("initialize AskData NebulaGraph worker session", "error", err)
+		os.Exit(1)
+	}
+	defer graphPool.Close()
+	graphWriter, err := askdatagraph.NewNebulaProjector(graphPool)
+	if err != nil {
+		logger.Error("initialize AskData graph projection writer", "error", err)
+		os.Exit(1)
+	}
+	graphProjector, err := askdatagraph.NewProjector(
+		askdatagraph.NewPostgresProjectionStore(pool), graphWriter,
+	)
+	if err != nil {
+		logger.Error("initialize AskData release projector", "error", err)
+		os.Exit(1)
+	}
 
 	dataSourceRepo := datasource.NewPostgresRepository(pool)
 	objectStorage, err := datasource.NewMinIOStorage(
@@ -193,6 +225,9 @@ func main() {
 	}
 	go runAskDataDimensionProfileWorker(
 		ctx, logger, dimensionProfileWorker, workerID, cfg.WorkerPollInterval,
+	)
+	go runAskDataGraphProjectionWorker(
+		ctx, logger, graphProjector, workerID, cfg.WorkerPollInterval,
 	)
 
 	odsResolver := materializationworker.NewODSResolver(
@@ -469,6 +504,39 @@ func runAskDataDimensionProfileWorker(
 		}
 		return processed, nil
 	}, func(err error) { logger.Error("list AskData dimension profile tenants", "error", err) })
+}
+
+func runAskDataGraphProjectionWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	projector *askdatagraph.Projector,
+	workerID string,
+	pollInterval time.Duration,
+) {
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
+		processed := false
+		tenantIDs, err := projector.TenantIDs(ctx)
+		if err != nil {
+			return false, err
+		}
+		for _, tenantID := range tenantIDs {
+			didProcess, runErr := projector.ProcessNext(
+				ctx, tenantID, workerID, askdatagraph.DefaultProjectionLease,
+			)
+			if runErr != nil {
+				logger.Error("process AskData graph projection", "tenant_id", tenantID, "error", runErr)
+			}
+			processed = processed || didProcess
+		}
+		return processed, nil
+	}, func(err error) { logger.Error("list AskData graph projection tenants", "error", err) })
+}
+
+func envOrDefault(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func runMetadataJobWorker(

@@ -62,8 +62,18 @@ func TestNebulaComposeRolesPersistenceAndGraphPlan(t *testing.T) {
 	readerPool := waitForComposeSessionPool(t, readerUser, readerPassword, addresses, space)
 	writerPool := waitForComposeSessionPool(t, writerUser, writerPassword, addresses, space)
 
-	if err := seedPOCGraph(writerPool, request); err != nil {
-		t.Fatalf("writer could not seed the frozen GraphPlan schema: %v", err)
+	projector, err := askgraph.NewNebulaProjector(writerPool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := composeProjectionSnapshot(request)
+	proof, err := projector.Apply(context.Background(), snapshot, func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatalf("release projector could not rebuild the frozen GraphPlan schema: %v", err)
+	}
+	expectedProof, err := snapshot.Proof()
+	if err != nil || proof != expectedProof {
+		t.Fatalf("release projector proof = %#v, expected %#v, err=%v", proof, expectedProof, err)
 	}
 	assertComposeGraphPlan(t, readerPool, request)
 	assertComposeRealScopeIsolation(t, readerPool, writerPool, request)
@@ -106,6 +116,53 @@ func TestNebulaComposeRolesPersistenceAndGraphPlan(t *testing.T) {
 		}
 		readerPool.Close()
 		writerPool.Close()
+	}
+}
+
+func composeProjectionSnapshot(request askgraph.PlanRequest) askgraph.ProjectionSnapshot {
+	metricOrders := request.MetricRefs[0]
+	metricRevenue := request.MetricRefs[1]
+	modelLines := request.ModelRefs[0]
+	modelOrders := request.ModelRefs[1]
+	dimensionRegion := request.DimensionRefs[0]
+	memberEast := request.MemberRefs[0]
+	return askgraph.ProjectionSnapshot{
+		TenantID: request.Scope.TenantID, DomainID: request.DomainID,
+		ReleaseID: request.Scope.Release.ReleaseID, SemanticVersion: "compose-v1",
+		ContentHash: request.Scope.Release.ContentHash, ManifestCount: 7,
+		Vertices: []askgraph.ProjectionVertex{
+			{Type: askgraph.ObjectTypeMetric, Ref: metricOrders},
+			{Type: askgraph.ObjectTypeMetric, Ref: metricRevenue},
+			{Type: askgraph.ObjectTypeSemanticModel, Ref: modelLines},
+			{Type: askgraph.ObjectTypeSemanticModel, Ref: modelOrders},
+			{Type: askgraph.ObjectTypeDimension, Ref: dimensionRegion},
+			{Type: askgraph.ObjectTypeMember, Ref: memberEast, MemberStatus: askgraph.MemberStatusActive},
+		},
+		Edges: []askgraph.ProjectionEdge{
+			{
+				Type: askgraph.ProjectionEdgeModeledBy, FromType: askgraph.ObjectTypeMetric, From: metricOrders,
+				ToType: askgraph.ObjectTypeSemanticModel, To: modelOrders,
+			},
+			{
+				Type: askgraph.ProjectionEdgeModeledBy, FromType: askgraph.ObjectTypeMetric, From: metricRevenue,
+				ToType: askgraph.ObjectTypeSemanticModel, To: modelLines,
+			},
+			{
+				Type: askgraph.ProjectionEdgeHasDimension, FromType: askgraph.ObjectTypeSemanticModel, From: modelOrders,
+				ToType: askgraph.ObjectTypeDimension, To: dimensionRegion,
+			},
+			{
+				Type: askgraph.ProjectionEdgeHasMember, FromType: askgraph.ObjectTypeDimension, From: dimensionRegion,
+				ToType: askgraph.ObjectTypeMember, To: memberEast,
+			},
+			{
+				Type: askgraph.ProjectionEdgeJoinsTo, FromType: askgraph.ObjectTypeSemanticModel, From: modelOrders,
+				ToType: askgraph.ObjectTypeSemanticModel, To: modelLines,
+				RelationshipVersionID: "relationship-orders-lines@v1",
+				JoinType:              registry.JoinInner, Cardinality: registry.CardinalityOneToMany,
+				FanoutPolicy: registry.FanoutCertifiedPre, Certified: true,
+			},
+		},
 	}
 }
 

@@ -90,6 +90,14 @@ root_query() {
     -p "$ASKDATA_NEBULA_ROOT_PASSWORD" -e "$query" >/dev/null
 }
 
+root_query_output() {
+  local query=$1
+  compose --profile verification run --rm --no-deps \
+    --entrypoint nebula-console nebula-verify \
+    -addr nebula-graphd-client -port 9669 -u root \
+    -p "$ASKDATA_NEBULA_ROOT_PASSWORD" -e "$query"
+}
+
 assert_expected_failure \
   'nebula init failed: production refuses local development NebulaGraph passwords' \
   compose run --rm --no-deps -e APP_ENV=production nebula-init
@@ -179,6 +187,27 @@ export ASKDATA_NEBULA_COMPOSE_WRITER_PASSWORD="$ASKDATA_NEBULA_WORKER_PASSWORD"
 go test ./internal/askdata/graph -run '^TestNebulaComposeRolesPersistenceAndGraphPlan$' -count=1 -v
 
 compose --profile verification run --rm --no-deps nebula-verify
+
+# GRAPH-004 disaster-rebuild proof: remove the entire isolated Space, wait for
+# metadata convergence, recreate only the frozen schema/roles through init,
+# then let the application projector rebuild all vertices and edges again.
+root_query "DROP SPACE $ASKDATA_NEBULA_SPACE"
+space_drop_attempt=0
+while [[ "$space_drop_attempt" -lt 60 ]]; do
+  if ! root_query_output 'SHOW SPACES' 2>/dev/null | grep -Fq "$ASKDATA_NEBULA_SPACE"; then
+    break
+  fi
+  space_drop_attempt=$((space_drop_attempt + 1))
+  sleep 1
+done
+if [[ "$space_drop_attempt" -ge 60 ]]; then
+  printf 'isolated NebulaGraph Space did not finish dropping\n' >&2
+  exit 1
+fi
+run_init
+compose --profile verification run --rm --no-deps nebula-verify
+export ASKDATA_NEBULA_COMPOSE_RECREATE=0
+go test ./internal/askdata/graph -run '^TestNebulaComposeRolesPersistenceAndGraphPlan$' -count=1 -v
 
 # Intentionally corrupt isolated objects and prove init rejects exact drift.
 root_query 'CREATE SPACE graph002_partition_drift(partition_num=10, replica_factor=1, vid_type=FIXED_STRING(256))'

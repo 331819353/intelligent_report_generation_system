@@ -10,7 +10,7 @@ import (
 	"unicode/utf8"
 
 	"intelligent-report-generation-system/internal/askdata"
-	"intelligent-report-generation-system/internal/askdata/ir"
+	"intelligent-report-generation-system/internal/askdata/ircontract"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
 )
 
@@ -84,7 +84,7 @@ type BindingProposal struct {
 }
 
 type PlanProposal struct {
-	SemanticIR ir.SemanticIR              `json:"semanticIr"`
+	SemanticIR ircontract.SemanticIR      `json:"semanticIr"`
 	Confidence askdata.ConfidenceEvidence `json:"confidence"`
 }
 

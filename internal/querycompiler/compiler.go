@@ -1,6 +1,7 @@
 package querycompiler
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,17 @@ const (
 	PostgreSQL Dialect = "POSTGRESQL"
 )
 
+// LimitKind selects which already-validated Dataset DSL ceiling applies to a
+// compilation. Existing callers default to PREVIEW; governed formal-query
+// adapters must opt in to RESULT explicitly and still cannot exceed the
+// document's result limit.
+type LimitKind string
+
+const (
+	LimitPreview LimitKind = "PREVIEW"
+	LimitResult  LimitKind = "RESULT"
+)
+
 var safeIdentifier = regexp.MustCompile(`^[\p{L}][\p{L}\p{N}_$#]{0,127}$`)
 var safeMaskCharacter = regexp.MustCompile(`^[\p{L}\p{N}*•]$`)
 
@@ -45,13 +57,15 @@ type Input struct {
 	RowPolicies    []policy.RowPolicy
 	ColumnPolicies []policy.ColumnPolicy
 	MaxRows        int
+	LimitKind      LimitKind
 }
 
 // CompiledQuery 是可直接交给只读 Connector 的参数化查询计划。
 type CompiledQuery struct {
-	SQL     string
-	Args    []any
-	MaxRows int
+	SQL      string
+	Args     []any
+	MaxRows  int
+	PlanHash string
 }
 
 type compiler struct {
@@ -85,9 +99,20 @@ func Compile(input Input) (CompiledQuery, error) {
 		// never collapsed by caller-authored metadata.
 		return CompiledQuery{}, errors.New("secure compiler requires a single-source dataset outside the governed PostgreSQL warehouse")
 	}
-	if input.MaxRows < 1 || input.MaxRows > input.Document.ExecutionPolicy.PreviewLimit {
-		return CompiledQuery{}, errors.New("preview row limit is invalid")
+	limitKind := input.LimitKind
+	if limitKind == "" {
+		limitKind = LimitPreview
 	}
+	limitCeiling := input.Document.ExecutionPolicy.PreviewLimit
+	if limitKind == LimitResult {
+		limitCeiling = input.Document.ExecutionPolicy.ResultLimit
+	} else if limitKind != LimitPreview {
+		return CompiledQuery{}, errors.New("query limit kind is invalid")
+	}
+	if input.MaxRows < 1 || input.MaxRows > limitCeiling {
+		return CompiledQuery{}, errors.New("query row limit is invalid")
+	}
+	input.LimitKind = limitKind
 	parameters, err := NormalizeParameters(input.Document.Parameters, input.Parameters)
 	if err != nil {
 		return CompiledQuery{}, err
@@ -135,7 +160,81 @@ func Compile(input Input) (CompiledQuery, error) {
 	if strings.ContainsAny(sql, ";\x00") || strings.Contains(sql, "--") || strings.Contains(sql, "/*") {
 		return CompiledQuery{}, errors.New("compiled query contains a forbidden token")
 	}
-	return CompiledQuery{SQL: sql, Args: c.args, MaxRows: input.MaxRows}, nil
+	planHash, err := compiledPlanHash(input, sql)
+	if err != nil {
+		return CompiledQuery{}, err
+	}
+	return CompiledQuery{SQL: sql, Args: c.args, MaxRows: input.MaxRows, PlanHash: planHash}, nil
+}
+
+type compiledPlanParameter struct {
+	Code       string `json:"code"`
+	DataType   string `json:"dataType"`
+	MultiValue bool   `json:"multiValue"`
+	Required   bool   `json:"required"`
+}
+
+type compiledPlanColumn struct {
+	Name string `json:"name"`
+	Type string `json:"type,omitempty"`
+}
+
+type compiledPlanTable struct {
+	NodeID  string               `json:"nodeId"`
+	Schema  string               `json:"schema"`
+	Name    string               `json:"name"`
+	Columns []compiledPlanColumn `json:"columns"`
+}
+
+// compiledPlanHash fingerprints only executable shape: SQL placeholders,
+// limit contract, parameter types and the trusted physical whitelist. Runtime
+// values are intentionally excluded so plan artifacts cannot become a side
+// channel for question parameters or policy attributes.
+func compiledPlanHash(input Input, sql string) (string, error) {
+	parameters := make([]compiledPlanParameter, 0, len(input.Document.Parameters))
+	for _, parameter := range input.Document.Parameters {
+		parameters = append(parameters, compiledPlanParameter{
+			Code: parameter.Code, DataType: parameter.DataType,
+			MultiValue: parameter.MultiValue, Required: parameter.Required,
+		})
+	}
+	tableIDs := make([]string, 0, len(input.Tables))
+	for nodeID := range input.Tables {
+		tableIDs = append(tableIDs, nodeID)
+	}
+	sort.Strings(tableIDs)
+	tables := make([]compiledPlanTable, 0, len(tableIDs))
+	for _, nodeID := range tableIDs {
+		ref := input.Tables[nodeID]
+		columnNames := make([]string, 0, len(ref.Columns))
+		for column, available := range ref.Columns {
+			if available {
+				columnNames = append(columnNames, column)
+			}
+		}
+		sort.Strings(columnNames)
+		columns := make([]compiledPlanColumn, 0, len(columnNames))
+		for _, column := range columnNames {
+			columns = append(columns, compiledPlanColumn{Name: column, Type: ref.ColumnTypes[column]})
+		}
+		tables = append(tables, compiledPlanTable{
+			NodeID: ref.NodeID, Schema: ref.Schema, Name: ref.Name, Columns: columns,
+		})
+	}
+	payload, err := json.Marshal(struct {
+		Version    string                  `json:"version"`
+		Dialect    Dialect                 `json:"dialect"`
+		LimitKind  LimitKind               `json:"limitKind"`
+		MaxRows    int                     `json:"maxRows"`
+		SQL        string                  `json:"sql"`
+		Parameters []compiledPlanParameter `json:"parameters"`
+		Tables     []compiledPlanTable     `json:"tables"`
+	}{"querycompiler-plan-v1", input.Dialect, input.LimitKind, input.MaxRows, sql, parameters, tables})
+	if err != nil {
+		return "", fmt.Errorf("marshal compiled plan fingerprint: %w", err)
+	}
+	digest := sha256.Sum256(payload)
+	return fmt.Sprintf("%x", digest[:]), nil
 }
 
 // NormalizeParameters 按 DSL 参数定义应用默认值和类型约束，并拒绝未声明参数。
