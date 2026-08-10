@@ -79,6 +79,36 @@ func TestRetrieverDegradesToExactAndLexicalWhenVectorUnavailable(t *testing.T) {
 	}
 }
 
+func TestRetrieverMergesGovernedDictionaryHitsIntoIndependentExactLane(t *testing.T) {
+	retriever, err := NewRetriever(retrievalStoreFixture{}, DefaultRankConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := askdata.HashBytes([]byte("governed dictionary hit"))
+	result, err := retriever.Retrieve(context.Background(), RetrievalRequest{
+		Scope: testPolicyScope(t), Mention: "销售额", ObjectTypes: []ObjectType{ObjectMetric},
+		DeterministicExact: []RawHit{{
+			ObjectType: ObjectMetric, ObjectVersionID: "metric-governed-v1",
+			InputHash: hash, Score: 1,
+		}},
+	})
+	if err != nil || len(result.Candidates) != 1 || len(result.Candidates[0].Evidence) != 1 ||
+		result.Candidates[0].Evidence[0].Source != SourceExact ||
+		result.Candidates[0].ObjectVersionID != "metric-governed-v1" {
+		t.Fatalf("dictionary exact result = %#v/%v", result, err)
+	}
+	_, err = retriever.Retrieve(context.Background(), RetrievalRequest{
+		Scope: testPolicyScope(t), Mention: "销售额", ObjectTypes: []ObjectType{ObjectMetric},
+		DeterministicExact: []RawHit{{
+			ObjectType: ObjectMetric, ObjectVersionID: "metric-governed-v1",
+			InputHash: hash, Score: 0.99,
+		}},
+	})
+	if !errors.Is(err, ErrInvalidRetrieval) {
+		t.Fatalf("untrusted exact score error = %v", err)
+	}
+}
+
 func testPolicyScope(t *testing.T) askdata.PolicyScope {
 	t.Helper()
 	release := askdata.ReleaseRef{

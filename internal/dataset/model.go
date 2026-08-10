@@ -310,19 +310,20 @@ type TransformOutput struct {
 
 // Field 描述数据集输出字段及其语义角色。
 type Field struct {
-	ID            string     `json:"id"`
-	Code          string     `json:"code"`
-	Name          string     `json:"name"`
-	Description   string     `json:"description,omitempty"`
-	Role          string     `json:"role"`
-	Expression    Expression `json:"expression"`
-	CanonicalType string     `json:"canonicalType"`
-	SemanticType  string     `json:"semanticType,omitempty"`
-	Aggregation   string     `json:"aggregation,omitempty"`
-	Format        string     `json:"format,omitempty"`
-	Unit          string     `json:"unit,omitempty"`
-	Nullable      bool       `json:"nullable"`
-	Visible       *bool      `json:"visible,omitempty"`
+	ID               string     `json:"id"`
+	Code             string     `json:"code"`
+	Name             string     `json:"name"`
+	Description      string     `json:"description,omitempty"`
+	Role             string     `json:"role"`
+	Expression       Expression `json:"expression"`
+	CanonicalType    string     `json:"canonicalType"`
+	SemanticType     string     `json:"semanticType,omitempty"`
+	SensitivityLevel string     `json:"sensitivityLevel,omitempty"`
+	Aggregation      string     `json:"aggregation,omitempty"`
+	Format           string     `json:"format,omitempty"`
+	Unit             string     `json:"unit,omitempty"`
+	Nullable         bool       `json:"nullable"`
+	Visible          *bool      `json:"visible,omitempty"`
 }
 
 // Filter 描述聚合前或聚合后的布尔表达式。

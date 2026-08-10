@@ -19,7 +19,13 @@ const (
 	MaxFilters          = 32
 	MaxMembersPerFilter = 100
 	MaxSorts            = 8
-	MaxLimit            = 10_000
+	DefaultTopN         = 10
+	MaxTopN             = 1_000
+	MaxResultRows       = 10_000
+	// MaxLimit remains the execution/result safety ceiling consumed by the
+	// tool host and validator. SemanticIR.Limit is a TopN contract and uses
+	// MaxTopN instead.
+	MaxLimit = MaxResultRows
 )
 
 var outputAliasPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
@@ -68,6 +74,8 @@ type TimeRange struct {
 	Start              string     `json:"start"`
 	EndExclusive       string     `json:"endExclusive"`
 	Timezone           string     `json:"timezone"`
+	RequestedPeriod    string     `json:"requestedPeriod,omitempty"`
+	Grain              TimeGrain  `json:"grain,omitempty"`
 }
 
 type ComparisonType string
@@ -104,11 +112,34 @@ const (
 	NullsLast  NullOrdering = "LAST"
 )
 
+type RankBy string
+
+const (
+	RankByCurrentValue RankBy = "CURRENT_VALUE"
+	RankByDelta        RankBy = "DELTA"
+	RankByRatio        RankBy = "RATIO"
+)
+
+type OtherPolicy string
+
+const (
+	OtherNone               OtherPolicy = "NONE"
+	OtherAggregateRemainder OtherPolicy = "AGGREGATE_REMAINDER"
+)
+
+type TieBreaking string
+
+const (
+	TieIncludeAll       TieBreaking = "INCLUDE_ALL"
+	TieDeterministicCut TieBreaking = "DETERMINISTIC_CUT"
+)
+
 type Sort struct {
 	TargetType      SortTargetType `json:"targetType"`
 	TargetVersionID askdata.ID     `json:"targetVersionId"`
 	Direction       SortDirection  `json:"direction"`
 	Nulls           NullOrdering   `json:"nulls"`
+	RankBy          RankBy         `json:"rankBy"`
 }
 
 // SemanticIR contains only stable semantic IDs and bounded logical operators.
@@ -118,6 +149,7 @@ type SemanticIR struct {
 	IRVersion           string              `json:"irVersion"`
 	SemanticReleaseID   askdata.ID          `json:"semanticReleaseId"`
 	SemanticContentHash askdata.ContentHash `json:"semanticContentHash"`
+	DomainID            askdata.ID          `json:"domainId"`
 	ModelVersionID      askdata.ID          `json:"modelVersionId"`
 	Metrics             []Metric            `json:"metrics"`
 	GroupBy             []GroupBy           `json:"groupBy"`
@@ -126,6 +158,8 @@ type SemanticIR struct {
 	Comparison          *Comparison         `json:"comparison"`
 	Sort                []Sort              `json:"sort"`
 	Limit               int                 `json:"limit"`
+	OtherPolicy         OtherPolicy         `json:"otherPolicy"`
+	TieBreaking         TieBreaking         `json:"tieBreaking"`
 }
 
 // Decode rejects unknown fields and returns the normalized form that must be
@@ -151,6 +185,9 @@ func (value SemanticIR) Validate() error {
 	}
 	if err := value.SemanticContentHash.Validate(); err != nil {
 		return fmt.Errorf("semanticContentHash: %w", err)
+	}
+	if err := value.DomainID.Validate(); err != nil {
+		return fmt.Errorf("domainId: %w", err)
 	}
 	if err := value.ModelVersionID.Validate(); err != nil {
 		return fmt.Errorf("modelVersionId: %w", err)
@@ -248,6 +285,7 @@ func (value SemanticIR) Validate() error {
 	if len(value.Sort) > MaxSorts {
 		return fmt.Errorf("sort exceeds %d items", MaxSorts)
 	}
+	seenSorts := make(map[string]struct{}, len(value.Sort))
 	for index, sortValue := range value.Sort {
 		if err := sortValue.TargetVersionID.Validate(); err != nil {
 			return fmt.Errorf("sort[%d].targetVersionId: %w", index, err)
@@ -270,9 +308,33 @@ func (value SemanticIR) Validate() error {
 		if sortValue.Nulls != NullsFirst && sortValue.Nulls != NullsLast {
 			return fmt.Errorf("sort[%d].nulls is invalid", index)
 		}
+		if sortValue.RankBy != RankByCurrentValue && sortValue.RankBy != RankByDelta &&
+			sortValue.RankBy != RankByRatio {
+			return fmt.Errorf("sort[%d].rankBy is invalid", index)
+		}
+		if value.Comparison == nil && sortValue.RankBy != RankByCurrentValue {
+			return fmt.Errorf("sort[%d].rankBy requires comparison", index)
+		}
+		if sortValue.TargetType == SortTargetDimension && sortValue.RankBy != RankByCurrentValue {
+			return fmt.Errorf("sort[%d].dimension target only supports CURRENT_VALUE", index)
+		}
+		key := string(sortValue.TargetType) + "\x00" + string(sortValue.TargetVersionID)
+		if _, duplicate := seenSorts[key]; duplicate {
+			return fmt.Errorf("sort[%d] duplicates a sort target", index)
+		}
+		seenSorts[key] = struct{}{}
 	}
-	if value.Limit < 1 || value.Limit > MaxLimit {
-		return fmt.Errorf("limit must be between 1 and %d", MaxLimit)
+	if value.Limit < 1 || value.Limit > MaxTopN {
+		return fmt.Errorf("limit must be between 1 and %d", MaxTopN)
+	}
+	if value.OtherPolicy != OtherNone && value.OtherPolicy != OtherAggregateRemainder {
+		return errors.New("otherPolicy is invalid")
+	}
+	if value.TieBreaking != TieIncludeAll && value.TieBreaking != TieDeterministicCut {
+		return errors.New("tieBreaking is invalid")
+	}
+	if value.OtherPolicy == OtherAggregateRemainder && (len(value.Sort) == 0 || len(value.GroupBy) == 0) {
+		return errors.New("AGGREGATE_REMAINDER requires sort and groupBy")
 	}
 	return nil
 }
@@ -297,6 +359,17 @@ func (value TimeRange) Validate() error {
 	}
 	if _, err := time.LoadLocation(value.Timezone); err != nil {
 		return errors.New("timezone must be a known IANA timezone")
+	}
+	if (value.RequestedPeriod == "") != (value.Grain == "") {
+		return errors.New("requestedPeriod and grain must be supplied together")
+	}
+	if value.RequestedPeriod != "" {
+		if !regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`).MatchString(value.RequestedPeriod) {
+			return errors.New("requestedPeriod is invalid")
+		}
+		if !validTimeGrain(value.Grain) {
+			return errors.New("grain is invalid")
+		}
 	}
 	return nil
 }

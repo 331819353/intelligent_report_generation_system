@@ -1,0 +1,85 @@
+{
+  "title": "Time Contract V1",
+  "description": "Version-pinned timezone, calendar, incomplete-period and comparison alignment contract included in a semantic release.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "tenantId",
+    "domainId",
+    "timeContractId",
+    "versionNo",
+    "status",
+    "timezone",
+    "weekStart",
+    "weekNumbering",
+    "fiscalYearStartMonth",
+    "fiscalMonthRule",
+    "comparisonAlignment",
+    "monthEndOverflowRule",
+    "supportedGrains",
+    "dataAvailableThroughExpr",
+    "expectedLagHours",
+    "contentHash"
+  ],
+  "properties": {
+    "id": { "$ref": "#/$defs/uuid" },
+    "tenantId": { "$ref": "#/$defs/uuid" },
+    "domainId": { "$ref": "#/$defs/uuid" },
+    "timeContractId": { "$ref": "#/$defs/uuid" },
+    "versionNo": { "type": "integer", "minimum": 1 },
+    "status": { "enum": ["DRAFT", "CERTIFIED", "DEPRECATED"] },
+    "timezone": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "weekStart": { "enum": ["MONDAY", "SUNDAY"] },
+    "weekNumbering": { "enum": ["ISO", "US"] },
+    "fiscalYearStartMonth": { "type": "integer", "minimum": 1, "maximum": 12 },
+    "fiscalMonthRule": { "enum": ["CALENDAR", "FOUR_FOUR_FIVE", "CUSTOM_TABLE"] },
+    "incompletePeriodPolicy": { "enum": ["MTD", "FULL_PERIOD", "LAST_COMPLETE"] },
+    "comparisonAlignment": { "enum": ["SAME_DAY_COUNT", "SAME_CALENDAR_RANGE"] },
+    "monthEndOverflowRule": { "enum": ["CLAMP_TO_LAST_DAY", "SKIP"] },
+    "supportedGrains": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "DAY",
+          "WEEK",
+          "MONTH",
+          "QUARTER",
+          "YEAR",
+          "FISCAL_MONTH",
+          "FISCAL_QUARTER",
+          "FISCAL_YEAR"
+        ]
+      }
+    },
+    "dataAvailableThroughExpr": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "expectedLagHours": { "type": "integer", "minimum": 0 },
+    "calendarDatasetVersionId": { "$ref": "#/$defs/uuid" },
+    "contentHash": { "$ref": "#/$defs/contentHash" },
+    "createdAt": { "type": "string" },
+    "updatedAt": { "type": "string" }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "contentHash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

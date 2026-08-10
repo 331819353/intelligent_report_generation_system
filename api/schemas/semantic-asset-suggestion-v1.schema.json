@@ -1,0 +1,39 @@
+{
+  "title": "Semantic Asset Suggestion v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "suggestions"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "semantic-asset-suggestion-v1" },
+    "suggestions": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "payloadJson", "evidence"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["METRIC", "DIMENSION", "ALIAS", "RELATIONSHIP", "CONFLICT"]
+          },
+          "payloadJson": { "type": "string", "minLength": 2, "maxLength": 131072 },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["evidenceId", "contentHash"],
+              "properties": {
+                "evidenceId": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "contentHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

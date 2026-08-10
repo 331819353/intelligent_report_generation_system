@@ -95,14 +95,15 @@ func BuildVID(tenantID askdata.ID, objectType ObjectType, ref ObjectVersionRef) 
 // PlanRequest has no raw text, graph identifier or nGQL field. All candidates
 // must already have passed registry/retrieval authorization for Scope.
 type PlanRequest struct {
-	Scope         askdata.PolicyScope `json:"scope"`
-	DomainID      askdata.ID          `json:"domainId"`
-	MetricRefs    []ObjectVersionRef  `json:"metricRefs"`
-	ModelRefs     []ObjectVersionRef  `json:"modelRefs"`
-	DimensionRefs []ObjectVersionRef  `json:"dimensionRefs"`
-	MemberRefs    []ObjectVersionRef  `json:"memberRefs"`
-	MaxJoinHops   int                 `json:"maxJoinHops"`
-	MaxPaths      int                 `json:"maxPaths"`
+	Scope                    askdata.PolicyScope `json:"scope"`
+	DomainID                 askdata.ID          `json:"domainId"`
+	MetricRefs               []ObjectVersionRef  `json:"metricRefs"`
+	ModelRefs                []ObjectVersionRef  `json:"modelRefs"`
+	DimensionRefs            []ObjectVersionRef  `json:"dimensionRefs"`
+	MemberRefs               []ObjectVersionRef  `json:"memberRefs"`
+	MemberDimensionAmbiguous bool                `json:"memberDimensionAmbiguous"`
+	MaxJoinHops              int                 `json:"maxJoinHops"`
+	MaxPaths                 int                 `json:"maxPaths"`
 }
 
 // Normalize returns a canonical request without mutating the caller's slices.
@@ -148,6 +149,10 @@ func (request PlanRequest) Validate() error {
 	}
 	if len(request.MemberRefs) > 0 && len(request.DimensionRefs) == 0 {
 		return fmt.Errorf("%w: memberRefs require dimensionRefs", ErrInvalidPlanRequest)
+	}
+	if request.MemberDimensionAmbiguous &&
+		(len(request.MemberRefs) == 0 || len(request.DimensionRefs) < 2) {
+		return fmt.Errorf("%w: member ambiguity requires member candidates across dimensions", ErrInvalidPlanRequest)
 	}
 	if request.MaxJoinHops < 1 || request.MaxJoinHops > MaxJoinHops {
 		return fmt.Errorf("%w: maxJoinHops must be between 1 and %d", ErrInvalidPlanRequest, MaxJoinHops)
@@ -202,10 +207,14 @@ type JoinStep struct {
 type JoinRiskCode string
 
 const (
-	JoinRiskOneToMany      JoinRiskCode = "JOIN_ONE_TO_MANY"
-	JoinRiskManyToMany     JoinRiskCode = "JOIN_MANY_TO_MANY"
-	JoinRiskPreaggregation JoinRiskCode = "JOIN_PREAGG_REQUIRED"
-	JoinRiskFanoutBlocked  JoinRiskCode = "JOIN_FANOUT_BLOCKED"
+	JoinRiskOneToOneSafe                  JoinRiskCode = "ONE_TO_ONE_SAFE"
+	JoinRiskOneToOneBlock                 JoinRiskCode = "ONE_TO_ONE_BLOCK"
+	JoinRiskManyToOneSafe                 JoinRiskCode = "MANY_TO_ONE_SAFE"
+	JoinRiskManyToOneBlock                JoinRiskCode = "MANY_TO_ONE_BLOCK"
+	JoinRiskOneToManyPreAggregateRequired JoinRiskCode = "ONE_TO_MANY_PRE_AGGREGATE_REQUIRED"
+	JoinRiskOneToManyBlock                JoinRiskCode = "ONE_TO_MANY_BLOCK"
+	JoinRiskManyToManyBridgeRequired      JoinRiskCode = "MANY_TO_MANY_BRIDGE_REQUIRED"
+	JoinRiskManyToManyBlock               JoinRiskCode = "MANY_TO_MANY_BLOCK"
 )
 
 type JoinPath struct {
@@ -304,6 +313,8 @@ type GraphPlan struct {
 	Scope                askdata.PolicyScope      `json:"scope"`
 	DomainID             askdata.ID               `json:"domainId"`
 	RequestHash          askdata.ContentHash      `json:"requestHash"`
+	Degraded             bool                     `json:"degraded"`
+	DegradationReason    string                   `json:"degradationReason"`
 	Models               []ObjectVersionRef       `json:"models"`
 	MetricModels         []MetricModelBinding     `json:"metricModels"`
 	CompatibleDimensions []DimensionCompatibility `json:"compatibleDimensions"`
@@ -364,6 +375,10 @@ func (plan GraphPlan) Validate() error {
 	}
 	if err := plan.RequestHash.Validate(); err != nil {
 		return fmt.Errorf("requestHash: %w", err)
+	}
+	if (!plan.Degraded && plan.DegradationReason != "") ||
+		(plan.Degraded && !validDegradationReason(plan.DegradationReason)) {
+		return errors.New("graph degradation state is invalid")
 	}
 	if err := validateRefSet(plan.Scope.TenantID, ObjectTypeSemanticModel, "models", plan.Models, 0, MaxModelCandidates); err != nil {
 		return err
@@ -463,19 +478,41 @@ func (plan GraphPlan) EvidenceRef() (askdata.EvidenceRef, error) {
 	}, nil
 }
 
+// WithDegradation preserves the GraphPlan contract while making degraded
+// provenance part of the content-addressed plan and its Evidence hash.
+func (plan GraphPlan) WithDegradation(reason string) (GraphPlan, error) {
+	if err := plan.Validate(); err != nil {
+		return GraphPlan{}, err
+	}
+	if !validDegradationReason(reason) {
+		return GraphPlan{}, errors.New("graph degradation reason is invalid")
+	}
+	plan.Degraded = true
+	plan.DegradationReason = reason
+	var err error
+	plan.PlanHash, err = plan.contentHash()
+	if err != nil {
+		return GraphPlan{}, err
+	}
+	return plan, plan.Validate()
+}
+
 func (plan GraphPlan) contentHash() (askdata.ContentHash, error) {
 	payload := struct {
-		PlanVersion  string                   `json:"planVersion"`
-		Scope        askdata.PolicyScope      `json:"scope"`
-		DomainID     askdata.ID               `json:"domainId"`
-		RequestHash  askdata.ContentHash      `json:"requestHash"`
-		Models       []ObjectVersionRef       `json:"models"`
-		MetricModels []MetricModelBinding     `json:"metricModels"`
-		Dimensions   []DimensionCompatibility `json:"compatibleDimensions"`
-		Members      []MemberOwnership        `json:"memberOwnerships"`
-		Paths        []JoinPath               `json:"joinPaths"`
+		PlanVersion       string                   `json:"planVersion"`
+		Scope             askdata.PolicyScope      `json:"scope"`
+		DomainID          askdata.ID               `json:"domainId"`
+		RequestHash       askdata.ContentHash      `json:"requestHash"`
+		Degraded          bool                     `json:"degraded"`
+		DegradationReason string                   `json:"degradationReason,omitempty"`
+		Models            []ObjectVersionRef       `json:"models"`
+		MetricModels      []MetricModelBinding     `json:"metricModels"`
+		Dimensions        []DimensionCompatibility `json:"compatibleDimensions"`
+		Members           []MemberOwnership        `json:"memberOwnerships"`
+		Paths             []JoinPath               `json:"joinPaths"`
 	}{
-		plan.PlanVersion, plan.Scope, plan.DomainID, plan.RequestHash, plan.Models,
+		plan.PlanVersion, plan.Scope, plan.DomainID, plan.RequestHash,
+		plan.Degraded, plan.DegradationReason, plan.Models,
 		plan.MetricModels, plan.CompatibleDimensions, plan.MemberOwnerships, plan.JoinPaths,
 	}
 	hash, _, err := registry.CanonicalContentHash(payload)
@@ -540,13 +577,17 @@ func validateJoinStep(step JoinStep, index int) error {
 	default:
 		return fmt.Errorf("steps[%d].cardinality is invalid", index)
 	}
-	switch step.FanoutPolicy {
-	case registry.FanoutBlock, registry.FanoutCertifiedPre, registry.FanoutSafe:
-	default:
+	if !registry.ValidFanoutPolicy(step.FanoutPolicy) {
 		return fmt.Errorf("steps[%d].fanoutPolicy is invalid", index)
 	}
-	if step.Cardinality == registry.CardinalityManyToMany && step.FanoutPolicy == registry.FanoutSafe {
-		return fmt.Errorf("steps[%d] declares MANY_TO_MANY as SAFE", index)
+	bridgeProof := ""
+	if step.FanoutPolicy == registry.FanoutBridgeRequired {
+		// The exact bridge ID remains in the authoritative relationship contract
+		// loaded by the compiler; GraphPlan carries only the risk combination.
+		bridgeProof = "certified-relationship-contract"
+	}
+	if registry.ValidateRelationshipCombination(step.Cardinality, step.FanoutPolicy, bridgeProof) != nil {
+		return fmt.Errorf("steps[%d] cardinality/fanoutPolicy combination is invalid", index)
 	}
 	return nil
 }
@@ -555,21 +596,10 @@ func derivePathRisk(steps []JoinStep) (bool, []JoinRiskCode) {
 	allowed := true
 	seen := make(map[JoinRiskCode]struct{})
 	for _, step := range steps {
-		switch step.Cardinality {
-		case registry.CardinalityManyToOne, registry.CardinalityOneToMany:
-			// A path is canonicalized by stable endpoint ID rather than by a
-			// fact-to-dimension orientation. Either directional spelling therefore
-			// represents a to-many boundary and must surface the same fanout risk.
-			seen[JoinRiskOneToMany] = struct{}{}
-		case registry.CardinalityManyToMany:
-			seen[JoinRiskManyToMany] = struct{}{}
-		}
-		switch step.FanoutPolicy {
-		case registry.FanoutBlock:
+		code := JoinRiskCode(string(step.Cardinality) + "_" + string(step.FanoutPolicy))
+		seen[code] = struct{}{}
+		if step.FanoutPolicy == registry.FanoutBlock {
 			allowed = false
-			seen[JoinRiskFanoutBlocked] = struct{}{}
-		case registry.FanoutCertifiedPre:
-			seen[JoinRiskPreaggregation] = struct{}{}
 		}
 	}
 	codes := make([]JoinRiskCode, 0, len(seen))

@@ -142,8 +142,7 @@ func assertGraphPlanAdapter(t *testing.T, pool *nebula.SessionPool) {
 		t.Fatal(err)
 	}
 	if !plan.JoinPaths[0].Allowed ||
-		!containsRisk(plan.JoinPaths[0].RiskCodes, askgraph.JoinRiskPreaggregation) ||
-		!containsRisk(plan.JoinPaths[0].RiskCodes, askgraph.JoinRiskOneToMany) {
+		!containsRisk(plan.JoinPaths[0].RiskCodes, askgraph.JoinRiskOneToManyPreAggregateRequired) {
 		t.Fatalf("unexpected POC join risk: %#v", plan.JoinPaths[0])
 	}
 	if plan.MemberOwnerships[0].Status != askgraph.MemberStatusActive ||
@@ -237,7 +236,7 @@ func seedPOCGraph(pool *nebula.SessionPool, request askgraph.PlanRequest) error 
 		{"JOINS_TO", vids[modelOrders.VersionID], vids[modelLines.VersionID], map[string]interface{}{
 			"relationship_version_id": "relationship-orders-lines@v1",
 			"join_type":               string(registry.JoinInner), "cardinality": string(registry.CardinalityOneToMany),
-			"fanout_policy": string(registry.FanoutCertifiedPre), "certified": true,
+			"fanout_policy": string(registry.FanoutPreAggregateRequired), "certified": true,
 		}},
 	}
 	for _, edge := range edges {

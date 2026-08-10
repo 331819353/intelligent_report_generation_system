@@ -25,7 +25,7 @@ func TestCanonicalJSONNormalizesOrderWhitespaceAndNumbers(t *testing.T) {
 }
 
 func TestBuildReleaseManifestIsOrderIndependentAndPinsExactVersions(t *testing.T) {
-	first := releaseObject(ReleaseObjectMetric, "11111111-1111-4111-8111-111111111111", "21111111-1111-4111-8111-111111111111", `{"name":"订单数","version":1}`)
+	first := releaseObject(ReleaseObjectMetric, "11111111-1111-4111-8111-111111111111", "21111111-1111-4111-8111-111111111111", `{"type":"METRIC","name":"订单数","version":1,"additivity":"FULLY_ADDITIVE","unit":"COUNT"}`)
 	second := releaseObject(ReleaseObjectDimension, "12222222-2222-4222-8222-222222222222", "22222222-2222-4222-8222-222222222222", `{"name":"区域","version":1}`)
 	left, err := BuildReleaseManifest([]ReleaseObject{first, second})
 	if err != nil {
@@ -39,8 +39,12 @@ func TestBuildReleaseManifestIsOrderIndependentAndPinsExactVersions(t *testing.T
 		t.Fatalf("order changed release hash: %s != %s", left.ContentHash, right.ContentHash)
 	}
 	changed := first
-	changed.Contract = []byte(`{"name":"订单数","version":2}`)
-	changed.ContentHash = askdata.HashBytes(changed.Contract)
+	changedContract, err := CanonicalJSON([]byte(`{"type":"METRIC","name":"订单数","version":2,"additivity":"FULLY_ADDITIVE","unit":"COUNT"}`))
+	if err != nil {
+		t.Fatalf("CanonicalJSON(changed) error = %v", err)
+	}
+	changed.Contract = changedContract
+	changed.ContentHash = askdata.HashBytes(changedContract)
 	next, err := BuildReleaseManifest([]ReleaseObject{changed, second})
 	if err != nil {
 		t.Fatalf("BuildReleaseManifest(changed) error = %v", err)
@@ -54,12 +58,12 @@ func TestBuildReleaseManifestIsOrderIndependentAndPinsExactVersions(t *testing.T
 }
 
 func TestBuildReleaseManifestRejectsContractHashMismatchAndDuplicates(t *testing.T) {
-	object := releaseObject(ReleaseObjectMetric, "11111111-1111-4111-8111-111111111111", "21111111-1111-4111-8111-111111111111", `{"name":"订单数"}`)
+	object := releaseObject(ReleaseObjectMetric, "11111111-1111-4111-8111-111111111111", "21111111-1111-4111-8111-111111111111", `{"type":"METRIC","name":"订单数","additivity":"FULLY_ADDITIVE","unit":"COUNT"}`)
 	object.ContentHash = askdata.HashBytes([]byte("wrong"))
 	if _, err := BuildReleaseManifest([]ReleaseObject{object}); err == nil {
 		t.Fatal("BuildReleaseManifest() accepted mismatched content hash")
 	}
-	object = releaseObject(ReleaseObjectMetric, "11111111-1111-4111-8111-111111111111", "21111111-1111-4111-8111-111111111111", `{"name":"订单数"}`)
+	object = releaseObject(ReleaseObjectMetric, "11111111-1111-4111-8111-111111111111", "21111111-1111-4111-8111-111111111111", `{"type":"METRIC","name":"订单数","additivity":"FULLY_ADDITIVE","unit":"COUNT"}`)
 	if _, err := BuildReleaseManifest([]ReleaseObject{object, object}); err == nil {
 		t.Fatal("BuildReleaseManifest() accepted duplicate exact versions")
 	}

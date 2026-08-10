@@ -1,0 +1,29 @@
+{
+  "type": "insight-text",
+  "version": "1.0.0",
+  "renderer": "TEXT",
+  "displayName": "智能结论",
+  "category": "CONTENT",
+  "minSize": { "w": 3, "h": 2 },
+  "recommendedSize": { "w": 8, "h": 4 },
+  "dataContract": {
+    "dimensions": { "min": 0, "max": 8 },
+    "measures": { "min": 1, "max": 8 },
+    "timeField": { "required": false },
+    "roles": ["DIMENSION", "VALUE", "TIME", "DETAIL"]
+  },
+  "stackingRequiresAdditive": false,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["insightRole"],
+    "properties": {
+	  "title": { "type": "string" },
+	  "subtitle": { "type": "string" },
+      "insightRole": { "type": "string", "enum": ["SUMMARY", "TREND", "COMPARISON", "ANOMALY", "ACTION"] }
+    }
+  },
+  "defaultOptions": { "insightRole": "SUMMARY" },
+  "mobilePolicy": { "supported": true, "defaultLegendMode": "HIDDEN", "labelDegradation": "ELLIPSIS" },
+  "supportedInteractions": []
+}

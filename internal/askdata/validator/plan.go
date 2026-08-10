@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -20,10 +21,11 @@ import (
 const ValidationVersion = "semantic-query-validation-v1"
 
 var (
-	ErrInvalidValidator   = errors.New("semantic query validator is invalid")
-	ErrPlanNotExecutable  = errors.New("semantic query plan is not executable")
-	ErrPlanRejected       = errors.New("semantic query plan was rejected")
-	ErrExplainUnavailable = errors.New("semantic query EXPLAIN is unavailable")
+	ErrInvalidValidator           = errors.New("semantic query validator is invalid")
+	ErrPlanNotExecutable          = errors.New("semantic query plan is not executable")
+	ErrPlanRejected               = errors.New("semantic query plan was rejected")
+	ErrExplainUnavailable         = errors.New("semantic query EXPLAIN is unavailable")
+	ErrCoverageValidationRequired = errors.New("time coverage validation is required")
 )
 
 const (
@@ -147,6 +149,41 @@ func NewValidator(explainer Explainer, limits Limits) (*Validator, error) {
 // replay-verifiable but have no Args and must be rehydrated by the compiler
 // before this method can call EXPLAIN.
 func (validator *Validator) Validate(ctx context.Context, artifact compiler.QueryArtifact) (ValidationArtifact, error) {
+	if artifact.ResolvedTimeSpec != nil {
+		return ValidationArtifact{}, ErrCoverageValidationRequired
+	}
+	return validator.validate(ctx, artifact)
+}
+
+// ValidateCovered is the mandatory Plan Validation entry point for queries
+// with time ranges. NONE short-circuits before artifact inspection or EXPLAIN;
+// FULL/TRUNCATED require the exact post-coverage time spec and sources.
+func (validator *Validator) ValidateCovered(
+	ctx context.Context,
+	artifact compiler.QueryArtifact,
+	coverage CoverageVerdict,
+) (ValidationArtifact, error) {
+	if validator == nil || validator.explainer == nil || validator.limits.Validate() != nil {
+		return ValidationArtifact{}, ErrInvalidValidator
+	}
+	if err := ctx.Err(); err != nil {
+		return ValidationArtifact{}, err
+	}
+	if coverage.Validate() != nil {
+		return ValidationArtifact{}, ErrInvalidCoverage
+	}
+	if coverage.Relation == CoverageNone {
+		return ValidationArtifact{}, reject(CodeTimeCoverageNone)
+	}
+	if artifact.ResolvedTimeSpec == nil ||
+		!reflect.DeepEqual(*artifact.ResolvedTimeSpec, coverage.ResolvedTimeSpec) ||
+		!coverageMatchesArtifact(coverage.MaterializationIDs, artifact.Plans) {
+		return ValidationArtifact{}, ErrInvalidCoverage
+	}
+	return validator.validate(ctx, artifact)
+}
+
+func (validator *Validator) validate(ctx context.Context, artifact compiler.QueryArtifact) (ValidationArtifact, error) {
 	if validator == nil || validator.explainer == nil || validator.limits.Validate() != nil {
 		return ValidationArtifact{}, ErrInvalidValidator
 	}
@@ -212,6 +249,22 @@ func (validator *Validator) Validate(ctx context.Context, artifact compiler.Quer
 		return ValidationArtifact{}, err
 	}
 	return result, nil
+}
+
+func coverageMatchesArtifact(ids []string, plans []compiler.QueryPlan) bool {
+	expected := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		expected[id] = true
+	}
+	actual := make(map[string]bool, len(plans))
+	for _, plan := range plans {
+		id := string(plan.Source.MaterializationID)
+		if !expected[id] {
+			return false
+		}
+		actual[id] = true
+	}
+	return len(actual) == len(expected)
 }
 
 func (artifact ValidationArtifact) Validate() error {
@@ -282,9 +335,9 @@ var forbiddenSQLWords = map[string]bool{
 }
 
 var allowedSQLFunctions = map[string]bool{
-	"ABS": true, "AVG": true, "CAST": true, "CEIL": true, "COALESCE": true,
+	"ABS": true, "ARRAY_AGG": true, "AVG": true, "CAST": true, "CEIL": true, "COALESCE": true,
 	"COUNT": true, "DATE_TRUNC": true, "DENSE_RANK": true, "EXTRACT": true,
-	"FLOOR": true, "LOWER": true, "MAX": true, "MIN": true, "RANK": true,
+	"FLOOR": true, "LOWER": true, "MAX": true, "MIN": true, "NULLIF": true, "RANK": true,
 	"REPLACE": true, "ROUND": true, "ROW_NUMBER": true, "STRPOS": true,
 	"SUBSTRING": true, "SUM": true, "TO_CHAR": true, "TRIM": true, "UPPER": true,
 	"CUBE": true, "ROLLUP": true,
@@ -538,7 +591,7 @@ func tokenizeSQL(sql string) ([]sqlToken, error) {
 			result = append(result, sqlToken{kind: sqlNumber, value: sql[start:index]})
 			continue
 		}
-		if strings.ContainsRune("(),.+*=<>!|", r) {
+		if strings.ContainsRune("(),.+*=<>!|[]", r) {
 			value := string(r)
 			index += size
 			if (index < len(sql) && strings.Contains("<>!=|", value) && sql[index] == '=') ||

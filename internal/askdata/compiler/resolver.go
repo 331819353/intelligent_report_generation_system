@@ -99,28 +99,39 @@ type ModelContract struct {
 }
 
 type MeasureContract struct {
-	MeasureID        askdata.ID               `json:"measureId"`
-	MeasureVersionID askdata.ID               `json:"measureVersionId"`
-	ModelVersionID   askdata.ID               `json:"modelVersionId"`
-	ContentHash      askdata.ContentHash      `json:"contentHash"`
-	FormulaAST       json.RawMessage          `json:"formulaAst"`
-	Aggregation      registry.Aggregation     `json:"aggregation"`
-	Additivity       registry.Additivity      `json:"additivity"`
-	DataType         registry.NumericDataType `json:"dataType"`
-	Unit             string                   `json:"unit,omitempty"`
+	MeasureID                   askdata.ID                           `json:"measureId"`
+	MeasureVersionID            askdata.ID                           `json:"measureVersionId"`
+	ModelVersionID              askdata.ID                           `json:"modelVersionId"`
+	ContentHash                 askdata.ContentHash                  `json:"contentHash"`
+	FormulaAST                  json.RawMessage                      `json:"formulaAst"`
+	Aggregation                 registry.Aggregation                 `json:"aggregation"`
+	Additivity                  registry.Additivity                  `json:"additivity"`
+	SemiAdditiveTimeAggregation registry.SemiAdditiveTimeAggregation `json:"semiAdditiveTimeAggregation,omitempty"`
+	AggregationRestriction      registry.AggregationRestriction      `json:"aggregationRestriction,omitempty"`
+	NonAdditiveDimensions       []string                             `json:"nonAdditiveDimensions"`
+	DataType                    registry.NumericDataType             `json:"dataType"`
+	Unit                        string                               `json:"unit,omitempty"`
+	Currency                    string                               `json:"currency,omitempty"`
+	ZeroDenominatorPolicy       registry.ZeroDenominatorPolicy       `json:"zeroDenominatorPolicy"`
 }
 
 type MetricContract struct {
-	MetricVersionID  askdata.ID          `json:"metricVersionId"`
-	ModelVersionID   askdata.ID          `json:"modelVersionId"`
-	ContentHash      askdata.ContentHash `json:"contentHash"`
-	FormulaAST       json.RawMessage     `json:"formulaAst"`
-	DefaultFilterAST json.RawMessage     `json:"defaultFilterAst"`
-	Unit             string              `json:"unit,omitempty"`
-	TimeGrain        string              `json:"timeGrain"`
-	Additivity       registry.Additivity `json:"additivity"`
-	NullPolicy       string              `json:"nullPolicy"`
-	Measures         []MeasureContract   `json:"measures"`
+	MetricVersionID             askdata.ID                           `json:"metricVersionId"`
+	ModelVersionID              askdata.ID                           `json:"modelVersionId"`
+	ContentHash                 askdata.ContentHash                  `json:"contentHash"`
+	FormulaAST                  json.RawMessage                      `json:"formulaAst"`
+	DefaultFilterAST            json.RawMessage                      `json:"defaultFilterAst"`
+	Unit                        string                               `json:"unit,omitempty"`
+	Currency                    string                               `json:"currency,omitempty"`
+	TimeGrain                   string                               `json:"timeGrain"`
+	Additivity                  registry.Additivity                  `json:"additivity"`
+	SemiAdditiveTimeAggregation registry.SemiAdditiveTimeAggregation `json:"semiAdditiveTimeAggregation,omitempty"`
+	AggregationRestriction      registry.AggregationRestriction      `json:"aggregationRestriction,omitempty"`
+	NonAdditiveDimensions       []string                             `json:"nonAdditiveDimensions"`
+	ZeroDenominatorPolicy       registry.ZeroDenominatorPolicy       `json:"zeroDenominatorPolicy"`
+	DisplayPrecision            int16                                `json:"displayPrecision"`
+	NullPolicy                  string                               `json:"nullPolicy"`
+	Measures                    []MeasureContract                    `json:"measures"`
 }
 
 type DimensionContract struct {
@@ -152,6 +163,7 @@ type RelationshipContract struct {
 	JoinType              registry.JoinType     `json:"joinType"`
 	Cardinality           registry.Cardinality  `json:"cardinality"`
 	FanoutPolicy          registry.FanoutPolicy `json:"fanoutPolicy"`
+	BridgeModelVersionID  askdata.ID            `json:"bridgeModelVersionId,omitempty"`
 }
 
 type ContractSnapshot struct {
@@ -275,6 +287,9 @@ func (resolution Resolution) Validate() error {
 func buildContractLookup(request ResolveRequest) (ContractLookup, *graph.JoinPath, error) {
 	artifact := request.BuildArtifact
 	semanticIR := artifact.IR
+	if semanticIR.DomainID != artifact.DomainID {
+		return ContractLookup{}, nil, ErrInvalidResolveRequest
+	}
 	lookup := ContractLookup{
 		Scope: artifact.Scope, DomainID: artifact.DomainID, IRHash: artifact.IRHash,
 		ModelVersionID: semanticIR.ModelVersionID,
@@ -375,7 +390,7 @@ func validateSnapshot(lookup ContractLookup, path *graph.JoinPath, snapshot Cont
 		return fmt.Errorf("%w: release manifest proof mismatch", ErrContractUnavailable)
 	}
 	switch snapshot.ReleaseStatus {
-	case "READY", "ACTIVE", "SUPERSEDED":
+	case "READY", "ACTIVE", "SUPERSEDED", "RETAINED":
 	default:
 		return fmt.Errorf("%w: release is not resolvable", ErrContractUnavailable)
 	}
@@ -436,7 +451,11 @@ func validateResolvedContracts(lookup ContractLookup, path *graph.JoinPath, snap
 	seenMetrics := map[askdata.ID]struct{}{}
 	for index, metric := range snapshot.Metrics {
 		if metric.MetricVersionID.Validate() != nil || metric.ModelVersionID != model.ModelVersionID ||
-			metric.ContentHash.Validate() != nil || !validAdditivity(metric.Additivity) ||
+			metric.ContentHash.Validate() != nil || validateResolvedAdditivity(
+			metric.Additivity, metric.SemiAdditiveTimeAggregation, metric.AggregationRestriction,
+			metric.NonAdditiveDimensions, metric.Unit, metric.Currency, metric.ZeroDenominatorPolicy,
+		) != nil ||
+			metric.DisplayPrecision < 0 || metric.DisplayPrecision > 12 ||
 			!validNullPolicy(metric.NullPolicy) || !validMetricTimeGrain(metric.TimeGrain) ||
 			len(metric.Measures) < 1 || len(metric.Measures) > MaxResolvedMeasures ||
 			validateCanonicalObject(metric.FormulaAST, MaxContractASTBytes) != nil ||
@@ -452,7 +471,10 @@ func validateResolvedContracts(lookup ContractLookup, path *graph.JoinPath, snap
 		for measureIndex, measure := range metric.Measures {
 			if measure.MeasureID.Validate() != nil || measure.MeasureVersionID.Validate() != nil ||
 				measure.ModelVersionID != model.ModelVersionID ||
-				!validAggregation(measure.Aggregation) || !validAdditivity(measure.Additivity) ||
+				!validAggregation(measure.Aggregation) || validateResolvedAdditivity(
+				measure.Additivity, measure.SemiAdditiveTimeAggregation, measure.AggregationRestriction,
+				measure.NonAdditiveDimensions, measure.Unit, measure.Currency, measure.ZeroDenominatorPolicy,
+			) != nil ||
 				!validNumericDataType(measure.DataType) ||
 				measure.ContentHash.Validate() != nil || validateCanonicalObject(measure.FormulaAST, MaxContractASTBytes) != nil {
 				return fmt.Errorf("%w: metrics[%d].measures[%d]", ErrContractUnavailable, index, measureIndex)
@@ -560,6 +582,13 @@ func validateRelationshipPath(path *graph.JoinPath, relationships []Relationship
 			validateCanonicalObject(relationship.JoinAST, MaxContractASTBytes) != nil {
 			return fmt.Errorf("%w: relationship contract", ErrContractUnavailable)
 		}
+		bridgeModelVersionID := string(relationship.BridgeModelVersionID)
+		if (relationship.BridgeModelVersionID != "" && relationship.BridgeModelVersionID.Validate() != nil) ||
+			registry.ValidateRelationshipCombination(
+				relationship.Cardinality, relationship.FanoutPolicy, bridgeModelVersionID,
+			) != nil {
+			return fmt.Errorf("%w: relationship fanout contract", ErrContractUnavailable)
+		}
 		if _, duplicate := byID[relationship.RelationshipVersionID]; duplicate {
 			return fmt.Errorf("%w: duplicate relationship", ErrContractUnavailable)
 		}
@@ -588,6 +617,13 @@ func normalizeSnapshot(snapshot ContractSnapshot) (ContractSnapshot, error) {
 	sort.Slice(result.Model.Fields, func(i, j int) bool { return result.Model.Fields[i].FieldID < result.Model.Fields[j].FieldID })
 	result.Metrics = append([]MetricContract(nil), snapshot.Metrics...)
 	for index := range result.Metrics {
+		if result.Metrics[index].ZeroDenominatorPolicy == "" {
+			result.Metrics[index].ZeroDenominatorPolicy = registry.ZeroDenominatorNull
+		}
+		result.Metrics[index].NonAdditiveDimensions = append([]string(nil), snapshot.Metrics[index].NonAdditiveDimensions...)
+		sort.Slice(result.Metrics[index].NonAdditiveDimensions, func(i, j int) bool {
+			return result.Metrics[index].NonAdditiveDimensions[i] < result.Metrics[index].NonAdditiveDimensions[j]
+		})
 		result.Metrics[index].FormulaAST, err = canonicalObject(result.Metrics[index].FormulaAST)
 		if err != nil {
 			return ContractSnapshot{}, err
@@ -598,6 +634,16 @@ func normalizeSnapshot(snapshot ContractSnapshot) (ContractSnapshot, error) {
 		}
 		result.Metrics[index].Measures = append([]MeasureContract(nil), result.Metrics[index].Measures...)
 		for measureIndex := range result.Metrics[index].Measures {
+			if result.Metrics[index].Measures[measureIndex].ZeroDenominatorPolicy == "" {
+				result.Metrics[index].Measures[measureIndex].ZeroDenominatorPolicy = registry.ZeroDenominatorNull
+			}
+			result.Metrics[index].Measures[measureIndex].NonAdditiveDimensions = append(
+				[]string(nil), result.Metrics[index].Measures[measureIndex].NonAdditiveDimensions...,
+			)
+			sort.Slice(result.Metrics[index].Measures[measureIndex].NonAdditiveDimensions, func(i, j int) bool {
+				return result.Metrics[index].Measures[measureIndex].NonAdditiveDimensions[i] <
+					result.Metrics[index].Measures[measureIndex].NonAdditiveDimensions[j]
+			})
 			result.Metrics[index].Measures[measureIndex].FormulaAST, err = canonicalObject(result.Metrics[index].Measures[measureIndex].FormulaAST)
 			if err != nil {
 				return ContractSnapshot{}, err
@@ -844,6 +890,42 @@ func validAdditivity(value registry.Additivity) bool {
 	return value == registry.Additive || value == registry.SemiAdditive || value == registry.NonAdditive
 }
 
+func validateResolvedAdditivity(
+	additivity registry.Additivity,
+	semi registry.SemiAdditiveTimeAggregation,
+	restriction registry.AggregationRestriction,
+	nonAdditiveDimensions []string,
+	unit, currency string,
+	zeroPolicy registry.ZeroDenominatorPolicy,
+) error {
+	if !validAdditivity(additivity) || strings.TrimSpace(unit) == "" ||
+		(zeroPolicy != registry.ZeroDenominatorNull && zeroPolicy != registry.ZeroDenominatorZero) {
+		return ErrContractUnavailable
+	}
+	if strings.EqualFold(strings.TrimSpace(unit), "CURRENCY") && strings.TrimSpace(currency) == "" {
+		return ErrContractUnavailable
+	}
+	if additivity == registry.SemiAdditive && semi != registry.SemiAdditivePeriodEnd &&
+		semi != registry.SemiAdditivePeriodBegin && semi != registry.SemiAdditivePeriodAverage {
+		return ErrContractUnavailable
+	}
+	if additivity == registry.NonAdditive && restriction != registry.PostAggregate {
+		return ErrContractUnavailable
+	}
+	seen := make(map[string]struct{}, len(nonAdditiveDimensions))
+	for _, raw := range nonAdditiveDimensions {
+		id := askdata.ID(raw)
+		if id.Validate() != nil {
+			return ErrContractUnavailable
+		}
+		if _, duplicate := seen[raw]; duplicate {
+			return ErrContractUnavailable
+		}
+		seen[raw] = struct{}{}
+	}
+	return nil
+}
+
 func validNumericDataType(value registry.NumericDataType) bool {
 	return value == registry.NumericInteger || value == registry.NumericDecimal
 }
@@ -872,7 +954,7 @@ func validCardinality(value registry.Cardinality) bool {
 }
 
 func validFanoutPolicy(value registry.FanoutPolicy) bool {
-	return value == registry.FanoutBlock || value == registry.FanoutCertifiedPre || value == registry.FanoutSafe
+	return registry.ValidFanoutPolicy(value)
 }
 
 func validMetricTimeGrain(value string) bool {

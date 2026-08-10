@@ -246,7 +246,7 @@ func TestSessionQueryRunnerDecodesNebulaPath(t *testing.T) {
 	if step.RelationshipVersionID != "relationship-orders-lines@v1" ||
 		step.FromModelVersionID != "model-orders@v1" || step.ToModelVersionID != "model-lines@v1" ||
 		step.Direction != TraversalForward || step.Cardinality != registry.CardinalityOneToMany ||
-		step.FanoutPolicy != registry.FanoutCertifiedPre {
+		step.FanoutPolicy != registry.FanoutPreAggregateRequired {
 		t.Fatalf("unexpected decoded step: %#v", step)
 	}
 
@@ -312,7 +312,7 @@ func nebulaPathResult(t *testing.T, request PlanRequest, certified bool) *nebula
 				"relationship_version_id": stringNebulaValue("relationship-orders-lines@v1"),
 				"join_type":               stringNebulaValue(string(registry.JoinInner)),
 				"cardinality":             stringNebulaValue(string(registry.CardinalityOneToMany)),
-				"fanout_policy":           stringNebulaValue(string(registry.FanoutCertifiedPre)),
+				"fanout_policy":           stringNebulaValue(string(registry.FanoutPreAggregateRequired)),
 				"certified":               boolNebulaValue(certified),
 			},
 		}},

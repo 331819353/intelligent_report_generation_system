@@ -1,0 +1,13 @@
+DROP TABLE IF EXISTS platform.report_template_versions;
+DROP TABLE IF EXISTS platform.report_templates;
+DROP TABLE IF EXISTS platform.component_template_versions;
+DROP TABLE IF EXISTS platform.component_templates;
+DROP TABLE IF EXISTS platform.report_narrative_template_versions;
+DROP TABLE IF EXISTS platform.report_theme_versions;
+DROP TABLE IF EXISTS platform.report_layout_template_versions;
+DROP TABLE IF EXISTS platform.report_structure_template_versions;
+DROP TABLE IF EXISTS platform.report_narrative_templates;
+DROP TABLE IF EXISTS platform.report_themes;
+DROP TABLE IF EXISTS platform.report_layout_templates;
+DROP TABLE IF EXISTS platform.report_structure_templates;
+DROP FUNCTION IF EXISTS platform.enforce_component_template_state();

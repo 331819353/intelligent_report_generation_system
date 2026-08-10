@@ -34,6 +34,11 @@ func TestRegistryErrorCodeIsStable(t *testing.T) {
 		{ErrRegistryNotFound, "REG_NOT_FOUND"},
 		{ErrRegistryVersionConflict, "REG_VERSION_CONFLICT"},
 		{ErrRegistryConflict, "REG_CONFLICT"},
+		{ErrRegistryPermissionDenied, "REG_PERMISSION_DENIED"},
+		{ErrRegistryIdempotencyConflict, "REG_IDEMPOTENCY_CONFLICT"},
+		{ErrRegistryDraftInUse, "REG_DRAFT_IN_USE"},
+		{ErrRegistryInvalidRequest, "REG_INVALID_REQUEST"},
+		{&AdditivityError{Code: AdditivityMissing, ObjectVersionID: validationRow}, AdditivityMissing},
 		{ValidationErrors{Issues: []ValidationIssue{{Code: "X", Path: "x"}}}, "REG_VALIDATION_FAILED"},
 		{errors.New("database unavailable"), "REG_INTERNAL"},
 	}

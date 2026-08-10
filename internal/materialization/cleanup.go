@@ -53,10 +53,26 @@ func (store *PostgresStore) EnqueueDatasetMaterializationCleanupTx(
 		return 0, ErrInvalidRequest
 	}
 	var expectedCount int
-	if err := tx.QueryRow(ctx, `SELECT count(*)::integer
-		FROM platform.dataset_materializations
-		WHERE tenant_id=$1 AND dataset_id=$2 AND layer=$3
-		  AND status IN ('ACTIVE','RETIRED')`,
+	if err := tx.QueryRow(ctx, `WITH cleanup_targets AS (
+			SELECT snapshot.physical_schema,snapshot.physical_name
+			FROM platform.materialization_snapshots AS snapshot
+			JOIN platform.dataset_materializations AS materialization
+			  ON materialization.id=snapshot.materialization_id
+			 AND materialization.tenant_id=snapshot.tenant_id
+			WHERE materialization.tenant_id=$1
+			  AND materialization.dataset_id=$2 AND materialization.layer=$3
+			  AND materialization.status IN ('ACTIVE','RETIRED')
+			UNION
+			SELECT materialization.physical_schema,materialization.physical_name
+			FROM platform.dataset_materializations AS materialization
+			WHERE materialization.tenant_id=$1
+			  AND materialization.dataset_id=$2 AND materialization.layer=$3
+			  AND materialization.status IN ('ACTIVE','RETIRED')
+			  AND NOT EXISTS(
+				SELECT 1 FROM platform.materialization_snapshots AS snapshot
+				WHERE snapshot.materialization_id=materialization.id
+			  )
+		) SELECT count(*)::integer FROM cleanup_targets`,
 		tenantID, datasetID, layer).Scan(&expectedCount); err != nil {
 		return 0, err
 	}
@@ -189,12 +205,40 @@ func (store *PostgresStore) loadCleanupTargets(
 		if !active {
 			return ErrLeaseLost
 		}
-		rows, err := tx.Query(ctx, `SELECT build_run_id::text,status,relation_kind,
+		rows, err := tx.Query(ctx, `WITH targets AS (
+			SELECT snapshot.build_run_id,snapshot.snapshot_started_at,
+			  CASE
+				WHEN materialization.status='ACTIVE'
+				 AND snapshot.build_run_id=materialization.build_run_id THEN 'ACTIVE'
+				ELSE 'RETIRED'
+			  END AS cleanup_status,
+			  materialization.relation_kind,snapshot.physical_schema,
+			  snapshot.physical_name,materialization.published_schema,
+			  materialization.published_name
+			FROM platform.materialization_snapshots AS snapshot
+			JOIN platform.dataset_materializations AS materialization
+			  ON materialization.id=snapshot.materialization_id
+			 AND materialization.tenant_id=snapshot.tenant_id
+			WHERE materialization.tenant_id=$1
+			  AND materialization.dataset_id=$2 AND materialization.layer=$3
+			  AND materialization.status IN ('ACTIVE','RETIRED')
+			UNION ALL
+			SELECT materialization.build_run_id,materialization.created_at,
+			  materialization.status,materialization.relation_kind,
+			  materialization.physical_schema,materialization.physical_name,
+			  materialization.published_schema,materialization.published_name
+			FROM platform.dataset_materializations AS materialization
+			WHERE materialization.tenant_id=$1
+			  AND materialization.dataset_id=$2 AND materialization.layer=$3
+			  AND materialization.status IN ('ACTIVE','RETIRED')
+			  AND NOT EXISTS(
+				SELECT 1 FROM platform.materialization_snapshots AS snapshot
+				WHERE snapshot.materialization_id=materialization.id
+			  )
+		) SELECT build_run_id::text,cleanup_status,relation_kind,
 			physical_schema,physical_name,published_schema,published_name
-			FROM platform.dataset_materializations
-			WHERE tenant_id=$1 AND dataset_id=$2 AND layer=$3
-			  AND status IN ('ACTIVE','RETIRED')
-			ORDER BY activated_at,id`,
+			FROM targets
+			ORDER BY snapshot_started_at,build_run_id`,
 			claim.TenantID, claim.DatasetID, claim.Layer)
 		if err != nil {
 			return err

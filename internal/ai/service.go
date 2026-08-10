@@ -21,7 +21,10 @@ const (
 	PurposeDataSourceConfiguration = "DATA_SOURCE_CONFIGURATION"
 	// PurposeSemanticQuestion is reserved for the bounded AskData cognition
 	// protocol. It never authorizes arbitrary SQL or bypasses the tenant policy.
-	PurposeSemanticQuestion = "SEMANTIC_QUESTION"
+	PurposeSemanticQuestion     = "SEMANTIC_QUESTION"
+	PurposeReportGeneration     = "REPORT_GENERATION"
+	PurposeReportBlockEdit      = "BLOCK_EDIT"
+	PurposeConclusionGeneration = "CONCLUSION_GENERATION"
 )
 
 var (
@@ -51,6 +54,7 @@ type Invocation struct {
 // InvocationResult 返回结构化模型结果和可审计但不含业务正文的运行摘要。
 type InvocationResult struct {
 	RequestID      string
+	Provider       string
 	ProviderResult ProviderResult
 	Attempts       int
 	CostMicros     int64
@@ -277,9 +281,9 @@ func (s *Service) Invoke(ctx context.Context, input Invocation) (InvocationResul
 		persistErr := s.persistFailure(ctx, input.TenantID, record.ID, FailureRecord{Attempts: attempts, ErrorCode: string(classified.Code), LatencyMS: latency})
 		failedProviderResult := ProviderResult{Model: provider.Model()}
 		if persistErr != nil {
-			return InvocationResult{RequestID: record.ID, ProviderResult: failedProviderResult, Attempts: attempts, RedactionCount: redactionCount}, errors.Join(callErr, persistErr)
+			return InvocationResult{RequestID: record.ID, Provider: provider.Name(), ProviderResult: failedProviderResult, Attempts: attempts, RedactionCount: redactionCount}, errors.Join(callErr, persistErr)
 		}
-		return InvocationResult{RequestID: record.ID, ProviderResult: failedProviderResult, Attempts: attempts, RedactionCount: redactionCount}, callErr
+		return InvocationResult{RequestID: record.ID, Provider: provider.Name(), ProviderResult: failedProviderResult, Attempts: attempts, RedactionCount: redactionCount}, callErr
 	}
 	usage := result.Usage
 	cost := calculateCostMicros(usage.PromptTokens, usage.CompletionTokens, s.options)
@@ -289,10 +293,10 @@ func (s *Service) Invoke(ctx context.Context, input Invocation) (InvocationResul
 		TotalTokens: usage.TotalTokens, CostMicros: cost, LatencyMS: latency,
 	}
 	if err := s.persistCompletion(ctx, input.TenantID, record.ID, completion); err != nil {
-		return InvocationResult{RequestID: record.ID, ProviderResult: result, Attempts: attempts, CostMicros: cost, RedactionCount: redactionCount}, err
+		return InvocationResult{RequestID: record.ID, Provider: provider.Name(), ProviderResult: result, Attempts: attempts, CostMicros: cost, RedactionCount: redactionCount}, err
 	}
 	result.Usage = usage
-	return InvocationResult{RequestID: record.ID, ProviderResult: result, Attempts: attempts, CostMicros: cost, RedactionCount: redactionCount}, nil
+	return InvocationResult{RequestID: record.ID, Provider: provider.Name(), ProviderResult: result, Attempts: attempts, CostMicros: cost, RedactionCount: redactionCount}, nil
 }
 
 func (s *Service) persistCompletion(ctx context.Context, tenantID, requestID string, record CompletionRecord) error {
@@ -341,7 +345,8 @@ func allowedPurpose(purpose string) bool {
 	switch purpose {
 	case PurposeMetadataCompletion, PurposeDatasetDAGGeneration,
 		PurposeDatasetTagSuggestion, PurposeDatasetSemanticNaming,
-		PurposeDataSourceConfiguration, PurposeSemanticQuestion:
+		PurposeDataSourceConfiguration, PurposeSemanticQuestion,
+		PurposeReportGeneration, PurposeReportBlockEdit, PurposeConclusionGeneration:
 		return true
 	default:
 		return false

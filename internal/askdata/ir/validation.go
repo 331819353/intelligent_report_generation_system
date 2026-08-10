@@ -162,7 +162,7 @@ func buildSemanticIR(request BuildRequest, selection buildSelection) (SemanticIR
 	if err != nil {
 		return SemanticIR{}, fmt.Errorf("%w: comparison: %v", ErrInvalidBuildRequest, err)
 	}
-	sorts, err := buildSort(request, bundle, sortDimensions)
+	sorts, err := buildSort(request, bundle, sortDimensions, comparison)
 	if err != nil {
 		return SemanticIR{}, fmt.Errorf("%w: sort: %v", ErrInvalidBuildRequest, err)
 	}
@@ -176,8 +176,10 @@ func buildSemanticIR(request BuildRequest, selection buildSelection) (SemanticIR
 	return SemanticIR{
 		IRVersion: Version, SemanticReleaseID: request.BindingResult.Scope.Release.ReleaseID,
 		SemanticContentHash: request.BindingResult.Scope.Release.ContentHash,
+		DomainID:            request.BindingResult.DomainID,
 		ModelVersionID:      selection.Model, Metrics: metrics, GroupBy: groupBy, Filters: filters,
 		TimeRange: timeRange, Comparison: comparison, Sort: sorts, Limit: limit,
+		OtherPolicy: OtherNone, TieBreaking: TieIncludeAll,
 	}, nil
 }
 
@@ -331,6 +333,7 @@ func buildTimeRange(
 	return &TimeRange{
 		DimensionVersionID: *dimension, Start: resolved.Start,
 		EndExclusive: resolved.EndExclusive, Timezone: resolved.Timezone,
+		RequestedPeriod: string(resolved.Expression), Grain: TimeGrain(resolved.Grain),
 	}, nil
 }
 
@@ -402,6 +405,7 @@ func buildSort(
 	request BuildRequest,
 	bundle binding.Bundle,
 	sortDimensions []binding.DimensionBinding,
+	comparison *Comparison,
 ) ([]Sort, error) {
 	orderings, origin, err := effectiveOrderings(request.BindingRequest.UnderstandingResult)
 	if err != nil {
@@ -443,9 +447,13 @@ func buildSort(
 		}
 		seen[key] = struct{}{}
 		direction := SortDirection(ordering.Direction)
+		rankBy := RankBy(ordering.RankBy)
+		if rankBy == "" && comparison == nil {
+			rankBy = RankByCurrentValue
+		}
 		result = append(result, Sort{
 			TargetType: candidate.targetType, TargetVersionID: candidate.versionID,
-			Direction: direction, Nulls: NullsLast,
+			Direction: direction, Nulls: NullsLast, RankBy: rankBy,
 		})
 	}
 	return result, nil

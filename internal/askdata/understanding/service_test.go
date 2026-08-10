@@ -83,6 +83,45 @@ func TestUnderstandingServiceBuildsBoundedFactsAndAcceptsCompleteIntent(t *testi
 	}
 }
 
+func TestUnderstandingServicePinsDomainFromSelectedSessionScope(t *testing.T) {
+	t.Parallel()
+	request := completeUnderstandingRequestForTest(t)
+	reviewer := understandingReviewerFunc(func(_ context.Context, input UnderstandingReviewInput) (UnderstandingProposal, error) {
+		proposal := completeProposalForTest(t, request, input)
+		proposal.Understanding.DomainHypotheses = []DomainHypothesis{}
+		return proposal, nil
+	})
+	service, err := NewUnderstandingService(reviewer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Understand(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := evidenceByKindForTest(t, result.EvidenceRefs, askdata.EvidenceKindPolicy)
+	want := []DomainHypothesis{{
+		DomainID: request.ContextRequest.Scope.DomainIDs[0], Score: 1,
+		EvidenceRefs: []askdata.EvidenceRef{policy},
+	}}
+	if !reflect.DeepEqual(result.Current.DomainHypotheses, want) {
+		t.Fatalf("domain hypotheses = %#v, want policy-pinned %#v", result.Current.DomainHypotheses, want)
+	}
+	var policyFact struct {
+		DomainID askdata.ID `json:"domainId"`
+	}
+	input, err := BuildUnderstandingReviewInput(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(input.Facts[3].Payload, &policyFact); err != nil || policyFact.DomainID != want[0].DomainID {
+		t.Fatalf("policy fact = %#v, %v", policyFact, err)
+	}
+	if strings.Contains(string(input.Facts[3].Payload), "domainIds") {
+		t.Fatalf("policy fact exposed a domain-routing collection: %s", input.Facts[3].Payload)
+	}
+}
+
 func TestUnderstandingServiceKeepsInheritedMentionsOnTheirSourceQuestion(t *testing.T) {
 	t.Parallel()
 	scope := contextScopeForTest(t, "actor-1", "release-v1", "analyst")
@@ -216,7 +255,7 @@ func TestUnderstandingServiceFailsClosedOnModelAuthorityViolations(t *testing.T)
 			mutate: func(proposal *UnderstandingProposal) {
 				proposal.Understanding.DomainHypotheses[0].DomainID = "finance"
 			},
-			want: "outside policy scope",
+			want: "outside the selected domain",
 		},
 		{
 			name: "invented evidence",

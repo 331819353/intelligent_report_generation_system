@@ -88,13 +88,12 @@ func scoreSelections(selections []selectedCandidate, path *graph.JoinPath) Score
 		result.Graph = math.Max(0, 1-0.05*float64(len(path.Steps)-1))
 		for _, risk := range path.RiskCodes {
 			switch risk {
-			case graph.JoinRiskOneToMany:
-				result.RiskPenalty += 0.04
-			case graph.JoinRiskManyToMany:
+			case graph.JoinRiskOneToManyPreAggregateRequired:
+				result.RiskPenalty += 0.07
+			case graph.JoinRiskManyToManyBridgeRequired:
 				result.RiskPenalty += 0.10
-			case graph.JoinRiskPreaggregation:
-				result.RiskPenalty += 0.03
-			case graph.JoinRiskFanoutBlocked:
+			case graph.JoinRiskOneToOneBlock, graph.JoinRiskManyToOneBlock,
+				graph.JoinRiskOneToManyBlock, graph.JoinRiskManyToManyBlock:
 				result.RiskPenalty += 1
 			}
 		}

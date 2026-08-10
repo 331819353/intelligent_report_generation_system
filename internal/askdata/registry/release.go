@@ -17,18 +17,22 @@ import (
 type ReleaseObjectType string
 
 const (
-	ReleaseObjectDomain        ReleaseObjectType = "DOMAIN"
-	ReleaseObjectEntity        ReleaseObjectType = "ENTITY"
-	ReleaseObjectSemanticModel ReleaseObjectType = "SEMANTIC_MODEL"
-	ReleaseObjectMeasure       ReleaseObjectType = "MEASURE"
-	ReleaseObjectMetric        ReleaseObjectType = "METRIC"
-	ReleaseObjectDimension     ReleaseObjectType = "DIMENSION"
-	ReleaseObjectMember        ReleaseObjectType = "MEMBER"
-	ReleaseObjectHierarchy     ReleaseObjectType = "HIERARCHY"
-	ReleaseObjectRelationship  ReleaseObjectType = "RELATIONSHIP"
-	ReleaseObjectQualityRule   ReleaseObjectType = "QUALITY_RULE"
-	ReleaseObjectBusinessTerm  ReleaseObjectType = "BUSINESS_TERM"
-	ReleaseObjectExample       ReleaseObjectType = "CERTIFIED_EXAMPLE"
+	ReleaseObjectDomain          ReleaseObjectType = "DOMAIN"
+	ReleaseObjectEntity          ReleaseObjectType = "ENTITY"
+	ReleaseObjectSemanticModel   ReleaseObjectType = "SEMANTIC_MODEL"
+	ReleaseObjectMeasure         ReleaseObjectType = "MEASURE"
+	ReleaseObjectMetric          ReleaseObjectType = "METRIC"
+	ReleaseObjectMetricDimension ReleaseObjectType = "METRIC_DIMENSION"
+	ReleaseObjectDimension       ReleaseObjectType = "DIMENSION"
+	ReleaseObjectMember          ReleaseObjectType = "MEMBER"
+	ReleaseObjectHierarchy       ReleaseObjectType = "HIERARCHY"
+	ReleaseObjectRelationship    ReleaseObjectType = "RELATIONSHIP"
+	ReleaseObjectQualityRule     ReleaseObjectType = "QUALITY_RULE"
+	ReleaseObjectBusinessTerm    ReleaseObjectType = "BUSINESS_TERM"
+	ReleaseObjectExample         ReleaseObjectType = "CERTIFIED_EXAMPLE"
+	ReleaseObjectTimeContract    ReleaseObjectType = "TIME_CONTRACT"
+	ReleaseObjectKPIBundle       ReleaseObjectType = "KPI_BUNDLE"
+	ReleaseObjectEvalCase        ReleaseObjectType = "EVAL_CASE"
 )
 
 type ReleaseObject struct {
@@ -100,6 +104,15 @@ func BuildReleaseManifest(objects []ReleaseObject) (ReleaseManifest, error) {
 		seen[key] = struct{}{}
 		manifest.Objects[index] = object
 	}
+	if err := ValidateReleaseManifest(manifest.Objects); err != nil {
+		return ReleaseManifest{}, err
+	}
+	if err := validateTimeContractDependencyClosure(manifest.Objects); err != nil {
+		return ReleaseManifest{}, err
+	}
+	if err := validateKPIBundleDependencyClosure(manifest.Objects); err != nil {
+		return ReleaseManifest{}, err
+	}
 	sort.Slice(manifest.Objects, func(left, right int) bool {
 		leftObject, rightObject := manifest.Objects[left], manifest.Objects[right]
 		if leftObject.Type != rightObject.Type {
@@ -124,13 +137,85 @@ func BuildReleaseManifest(objects []ReleaseObject) (ReleaseManifest, error) {
 func validReleaseObjectType(value ReleaseObjectType) bool {
 	switch value {
 	case ReleaseObjectDomain, ReleaseObjectEntity, ReleaseObjectSemanticModel,
-		ReleaseObjectMeasure, ReleaseObjectMetric, ReleaseObjectDimension,
+		ReleaseObjectMeasure, ReleaseObjectMetric, ReleaseObjectMetricDimension, ReleaseObjectDimension,
 		ReleaseObjectMember, ReleaseObjectHierarchy, ReleaseObjectRelationship,
-		ReleaseObjectQualityRule, ReleaseObjectBusinessTerm, ReleaseObjectExample:
+		ReleaseObjectQualityRule, ReleaseObjectBusinessTerm, ReleaseObjectExample,
+		ReleaseObjectKPIBundle, ReleaseObjectEvalCase:
+		return true
+	case ReleaseObjectTimeContract:
 		return true
 	default:
 		return false
 	}
+}
+
+func validateTimeContractDependencyClosure(objects []ReleaseObject) error {
+	timeContracts := make(map[string]struct{})
+	for _, object := range objects {
+		if object.Type == ReleaseObjectTimeContract {
+			timeContracts[object.ObjectVersionID] = struct{}{}
+		}
+	}
+	for index, object := range objects {
+		if object.Type != ReleaseObjectSemanticModel {
+			continue
+		}
+		var contract struct {
+			TimeContractVersionID string `json:"timeContractVersionId"`
+		}
+		if err := json.Unmarshal(object.Contract, &contract); err != nil {
+			return fmt.Errorf("objects[%d] semantic model contract is invalid: %w", index, err)
+		}
+		if contract.TimeContractVersionID == "" {
+			return fmt.Errorf("objects[%d] TIME_CONTRACT_MISSING: semantic model has no time-contract dependency", index)
+		}
+		if _, exists := timeContracts[contract.TimeContractVersionID]; !exists {
+			return fmt.Errorf("objects[%d] TIME_CONTRACT_MISSING: release omits time contract version %s", index, contract.TimeContractVersionID)
+		}
+	}
+	return nil
+}
+
+func validateKPIBundleDependencyClosure(objects []ReleaseObject) error {
+	metricVersions := map[string]struct{}{}
+	dimensionVersions := map[string]struct{}{}
+	for _, object := range objects {
+		switch object.Type {
+		case ReleaseObjectMetric:
+			metricVersions[object.ObjectVersionID] = struct{}{}
+		case ReleaseObjectDimension:
+			dimensionVersions[object.ObjectVersionID] = struct{}{}
+		}
+	}
+	for index, object := range objects {
+		if object.Type != ReleaseObjectKPIBundle {
+			continue
+		}
+		var contract kpiBundleContractDocument
+		if err := json.Unmarshal(object.Contract, &contract); err != nil ||
+			contract.Type != "KPI_BUNDLE" || contract.KPIBundleID != object.ObjectID {
+			return fmt.Errorf("objects[%d] KPI_BUNDLE_CONTRACT_INVALID", index)
+		}
+		for itemIndex, item := range contract.Items {
+			if _, exists := metricVersions[item.MetricVersionID]; !exists {
+				return fmt.Errorf("objects[%d] KPI_BUNDLE_METRIC_MISSING: items[%d] omits metric version %s",
+					index, itemIndex, item.MetricVersionID)
+			}
+			for dimensionIndex, dimensionID := range item.GroupByDimensionVersionIDs {
+				if _, exists := dimensionVersions[dimensionID]; !exists {
+					return fmt.Errorf("objects[%d] KPI_BUNDLE_DIMENSION_MISSING: items[%d].groupByDimensionVersionIds[%d] omits dimension version %s",
+						index, itemIndex, dimensionIndex, dimensionID)
+				}
+			}
+		}
+		for dimensionIndex, dimensionID := range contract.DefaultDimensionVersionIDs {
+			if _, exists := dimensionVersions[dimensionID]; !exists {
+				return fmt.Errorf("objects[%d] KPI_BUNDLE_DIMENSION_MISSING: defaultDimensionVersionIds[%d] omits dimension version %s",
+					index, dimensionIndex, dimensionID)
+			}
+		}
+	}
+	return nil
 }
 
 func ReleaseIdempotencyKey(tenantID, domainID, semanticVersion string, hash askdata.ContentHash) (askdata.ContentHash, error) {

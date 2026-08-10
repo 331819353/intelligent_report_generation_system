@@ -141,15 +141,18 @@ func importedMeasure(model SemanticModel, asset InventoryAsset, field InventoryF
 		return Measure{}, fmt.Errorf("measure field %s must be INTEGER or DECIMAL", field.FieldID)
 	}
 	aggregation := Aggregation(strings.ToUpper(firstNonEmpty(field.Aggregation, "SUM")))
-	additivity := Additivity(strings.ToUpper(field.Additivity))
-	if additivity == "" {
+	additivitySuggestion := Additivity(strings.ToUpper(field.Additivity))
+	if additivitySuggestion == "ADDITIVE" {
+		additivitySuggestion = FullyAdditive
+	}
+	if additivitySuggestion == "" {
 		switch aggregation {
 		case AggregationAverage, AggregationCountDistinct:
-			additivity = NonAdditive
+			additivitySuggestion = NonAdditive
 		case AggregationMinimum, AggregationMaximum:
-			additivity = SemiAdditive
+			additivitySuggestion = SemiAdditive
 		default:
-			additivity = Additive
+			additivitySuggestion = FullyAdditive
 		}
 	}
 	measureID := stableImportID("measure", asset.DatasetID, field.FieldID)
@@ -165,8 +168,10 @@ func importedMeasure(model SemanticModel, asset InventoryAsset, field InventoryF
 			OwnerID: actorID,
 		},
 		SemanticModelVersionID: model.ID, Code: field.Code, Name: firstNonEmpty(field.Name, field.Code),
-		FormulaAST: formula, Aggregation: aggregation, Additivity: additivity,
-		DataType: dataType, Unit: field.Unit,
+		FormulaAST: formula, Aggregation: aggregation,
+		AdditivitySuggestion:  additivitySuggestion,
+		ZeroDenominatorPolicy: ZeroDenominatorNull,
+		DataType:              dataType, Unit: field.Unit,
 	}
 	measure.ContentHash = contentHashForContract(measureContract(measure))
 	return measure, measure.Validate()

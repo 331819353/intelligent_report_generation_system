@@ -203,6 +203,43 @@ func TestNoMatchAndSingleBundleNeverInventClarificationOptions(t *testing.T) {
 	}
 }
 
+func TestTopNComparisonWithoutRankByAlwaysProducesThreeChoiceClarification(t *testing.T) {
+	calibrator, err := FitCalibrator(calibrationInputsForTest(), directFitConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingRequest := jointBindingFixture(t)
+	understandingRequest, understandingResult, _ := understandingFixture(
+		t, "销售额地区华东同比前10", []string{"销售额"}, []string{"地区"}, []string{"华东"},
+	)
+	bindingRequest.UnderstandingRequest = understandingRequest
+	bindingRequest.UnderstandingResult = understandingResult
+	bindingRequest.Config.TopBundles = 1
+	bindingResult, err := Bind(bindingRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := calibrator.Decide(DecisionRequest{
+		BindingRequest: bindingRequest, BindingResult: bindingResult,
+		Presentations: presentationsForResult(bindingResult),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Disposition != DispositionClarify || decision.Clarification == nil ||
+		decision.Clarification.ConflictCode != "TOPN_COMPARISON_RANK_BY_REQUIRED" ||
+		len(decision.Clarification.Options) != 3 {
+		t.Fatalf("unexpected rankBy clarification: %#v", decision)
+	}
+	wantLabels := []string{"按当期值", "按增长额", "按增长率"}
+	for index, option := range decision.Clarification.Options {
+		if option.Label != wantLabels[index] || option.BundleHash != bindingResult.Bundles[0].BundleHash ||
+			len(option.EvidenceRefs) == 0 {
+			t.Fatalf("rankBy option[%d] = %#v", index, option)
+		}
+	}
+}
+
 func TestClarificationRejectsInventedBundleUnsafeTextAndCrossBundleEvidence(t *testing.T) {
 	config := directFitConfig()
 	config.MinDirectMargin = 0.9

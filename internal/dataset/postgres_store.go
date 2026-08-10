@@ -1469,12 +1469,13 @@ func replaceDerivedWithOptions(
 		visible := field.Visible == nil || *field.Visible
 		if _, err := tx.Exec(ctx, `INSERT INTO platform.dataset_fields(
 			tenant_id,dataset_version_id,field_id,field_code,field_name,description,
-			expression_json,canonical_type,semantic_type,field_role,aggregation,
+			expression_json,canonical_type,semantic_type,sensitivity_level,field_role,aggregation,
 			nullable,visible,ordinal_position
-		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,
+			COALESCE(NULLIF($10,''),'INTERNAL')::platform.asset_sensitivity,$11,$12,$13,$14,$15)`,
 			tenantID, versionID, field.ID, field.Code, field.Name, field.Description,
-			expression, field.CanonicalType, field.SemanticType, field.Role,
-			field.Aggregation, field.Nullable, visible, i+1); err != nil {
+			expression, field.CanonicalType, field.SemanticType, field.SensitivityLevel,
+			field.Role, field.Aggregation, field.Nullable, visible, i+1); err != nil {
 			return err
 		}
 	}

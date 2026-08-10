@@ -34,6 +34,10 @@ func TestRegistryCatalogContainsEveryGovernedTool(t *testing.T) {
 		if index > 0 && definitions[index-1].Name >= definition.Name {
 			t.Fatal("definitions are not in stable tool-name order")
 		}
+		requiredCharge, known := RequiredBudgetCharge(definition.Name)
+		if !known || definition.Charge != requiredCharge {
+			t.Fatalf("definition %s charge = %#v, required security charge = %#v", definition.Name, definition.Charge, requiredCharge)
+		}
 		seen[definition.Name] = true
 		for _, schema := range []json.RawMessage{definition.ArgumentSchema, definition.ResultSchema} {
 			var document struct {
@@ -76,6 +80,31 @@ func TestRegistryCatalogContainsEveryGovernedTool(t *testing.T) {
 		ToolExecuteQueryPlan, ToolGetCertifiedExamples, ToolGetSemanticContracts, ToolSearchSemanticObjects,
 	}) {
 		t.Fatalf("available tools = %#v, %v", available, err)
+	}
+}
+
+func TestResolveGraphPlanSchemaRequiresDegradationEvidence(t *testing.T) {
+	registry, err := NewRegistry(stubHandlers())
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, ok := registry.Definition(ToolResolveGraphPlan)
+	if !ok {
+		t.Fatal("resolve_graph_plan definition is missing")
+	}
+	var schema struct {
+		Required   []string                  `json:"required"`
+		Properties map[string]map[string]any `json:"properties"`
+	}
+	if err := json.Unmarshal(definition.ResultSchema, &schema); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, field := range schema.Required {
+		found = found || field == "graphDegraded"
+	}
+	if !found || schema.Properties["graphDegraded"]["type"] != "boolean" {
+		t.Fatalf("resolve_graph_plan result schema = %s", definition.ResultSchema)
 	}
 }
 
@@ -193,6 +222,7 @@ func TestRegistryEnforcesFormalQueryUnits(t *testing.T) {
 				EvidenceIDs: []askdata.ID{evidence.EvidenceID},
 			},
 			EvidenceRefs: []askdata.EvidenceRef{evidence}, MadeProgress: true,
+			QueryScanBytes: 4096,
 		}, nil
 	}
 	registry, err := NewRegistry(handlers)
@@ -211,8 +241,33 @@ func TestRegistryEnforcesFormalQueryUnits(t *testing.T) {
 	invocation.Budget.FormalQueriesRemaining = 2
 	accepted, err := registry.Execute(context.Background(), invocation)
 	if err != nil || accepted.Response.Status != ResponseSuccess ||
-		accepted.Charge != (BudgetCharge{ToolCalls: 1, FormalQueries: 2}) {
+		accepted.Charge != (BudgetCharge{ToolCalls: 1, FormalQueries: 2}) || accepted.QueryScanBytes != 4096 {
 		t.Fatalf("formal pair execution = %#v, %v", accepted, err)
+	}
+}
+
+func TestRegistryRejectsQueryScanMeasurementFromNonQueryTool(t *testing.T) {
+	handlers := stubHandlers()
+	evidence := toolEvidence("search-scan-forgery")
+	handlers.SearchSemanticObjects = func(
+		context.Context, AuthorizationContext, SearchSemanticObjectsInput,
+	) (ToolOutput[SearchSemanticObjectsResult], error) {
+		return ToolOutput[SearchSemanticObjectsResult]{
+			Result: SearchSemanticObjectsResult{
+				Candidates: []CandidateSummary{}, EvidenceIDs: []askdata.ID{evidence.EvidenceID},
+			},
+			EvidenceRefs: []askdata.EvidenceRef{evidence}, MadeProgress: true, QueryScanBytes: 1,
+		}, nil
+	}
+	registry, err := NewRegistry(handlers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := registry.Execute(context.Background(), searchInvocation(t))
+	if err != nil || execution.Response.Status != ResponseFailed || execution.Response.Error == nil ||
+		execution.Response.Error.Code != "TOOL_RESULT_REJECTED" || execution.QueryScanBytes != 0 ||
+		execution.Validate() != nil {
+		t.Fatalf("forged scan measurement was not rejected: %#v, %v", execution, err)
 	}
 }
 
@@ -337,9 +392,10 @@ func TestEveryTypedResultContractSanitizesToEvidenceBoundObject(t *testing.T) {
 	hash := askdata.HashBytes([]byte("result-contract"))
 	semanticIR := ircontract.SemanticIR{
 		IRVersion: ircontract.Version, SemanticReleaseID: "release-tools-v1",
-		SemanticContentHash: askdata.HashBytes([]byte("release-tools-v1")), ModelVersionID: "model-sales-v1",
+		SemanticContentHash: askdata.HashBytes([]byte("release-tools-v1")), DomainID: "sales", ModelVersionID: "model-sales-v1",
 		Metrics: []ircontract.Metric{{MetricVersionID: "metric-sales-v1", Alias: "net_sales"}},
 		GroupBy: []ircontract.GroupBy{}, Filters: []ircontract.Filter{}, Sort: []ircontract.Sort{}, Limit: 100,
+		OtherPolicy: ircontract.OtherNone, TieBreaking: ircontract.TieIncludeAll,
 	}
 	contracts := []struct {
 		name   ToolName

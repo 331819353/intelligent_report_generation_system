@@ -1,0 +1,13 @@
+DROP POLICY IF EXISTS platform_data_request_events_access ON platform.data_request_events;
+DROP POLICY IF EXISTS platform_data_requests_access ON platform.data_requests;
+DROP TRIGGER IF EXISTS platform_data_request_events_guard ON platform.data_request_events;
+DROP TRIGGER IF EXISTS platform_data_requests_guard ON platform.data_requests;
+DROP TABLE IF EXISTS platform.data_request_events;
+DROP TABLE IF EXISTS platform.data_requests;
+DROP FUNCTION IF EXISTS platform.guard_data_request_event();
+DROP FUNCTION IF EXISTS platform.guard_data_request_mutation();
+DROP FUNCTION IF EXISTS platform.data_request_event_can_access(uuid,uuid,uuid);
+DROP FUNCTION IF EXISTS platform.data_request_can_access(uuid,uuid,uuid,uuid[],uuid,uuid);
+DROP FUNCTION IF EXISTS platform.data_request_actor_is_domain_admin(uuid,uuid,uuid);
+DROP FUNCTION IF EXISTS platform.data_request_fields_valid(jsonb);
+DROP FUNCTION IF EXISTS platform.data_request_context_valid(jsonb);

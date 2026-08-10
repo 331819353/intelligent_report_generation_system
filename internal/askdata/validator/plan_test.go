@@ -62,7 +62,7 @@ func TestValidatorAcceptsLivePlanAndPersistsOnlyExplainSummary(t *testing.T) {
 		t.Fatalf("unexpected validation result: %#v", validated)
 	}
 	request := explainer.requests[0]
-	if !strings.HasPrefix(request.SQL, "SELECT ") || !reflect.DeepEqual(request.Args, []any{500}) ||
+	if !strings.HasPrefix(request.SQL, "SELECT ") || !reflect.DeepEqual(request.Args, []any{10000}) ||
 		request.StatementTimeoutMS != 10000 || request.LockTimeoutMS != 1000 || request.Timezone != "UTC" ||
 		request.QueryPlanHash != artifact.Plans[0].PlanHash ||
 		request.CompiledPlanHash != artifact.Plans[0].CompiledPlanHash {
@@ -190,6 +190,21 @@ func TestLimitsCannotDisableSafetyCeilings(t *testing.T) {
 	}
 }
 
+func TestValidateSQLAcceptsGovernedOrderedPeriodAggregate(t *testing.T) {
+	source := compiler.PhysicalSource{
+		NodeID: "semantic_model", DatasetVersionID: "dataset-sales-v1",
+		MaterializationID: "materialization-sales-v1", PublishedSchema: "warehouse_published",
+		PublishedName: "dws_sales_orders", Columns: []compiler.PhysicalColumn{
+			{Code: "inventory_qty", CanonicalType: "DECIMAL"},
+			{Code: "order_date", CanonicalType: "DATE"},
+		},
+	}
+	sql := `SELECT (ARRAY_AGG("semantic_model"."inventory_qty" ORDER BY "semantic_model"."order_date" DESC NULLS LAST))[1] AS "inventory_qty" FROM "warehouse_published"."dws_sales_orders" "semantic_model"`
+	if err := validateSQL(sql, source); err != nil {
+		t.Fatalf("governed period aggregate was rejected: %v", err)
+	}
+}
+
 func TestValidationArtifactReplayCannotBypassExplainLimits(t *testing.T) {
 	artifact, ctx := liveQueryArtifact(t)
 	validator, err := NewValidator(&recordingExplainer{raw: safeExplainJSON()}, DefaultLimits())
@@ -239,6 +254,15 @@ func liveQueryArtifactForSourceAndMetricFormula(
 	publishedName string,
 	metricFormula json.RawMessage,
 ) (compiler.QueryArtifact, context.Context) {
+	return liveQueryArtifactWithAdditivity(t, publishedName, metricFormula, registry.FullyAdditive)
+}
+
+func liveQueryArtifactWithAdditivity(
+	t *testing.T,
+	publishedName string,
+	metricFormula json.RawMessage,
+	additivity registry.Additivity,
+) (compiler.QueryArtifact, context.Context) {
 	t.Helper()
 	request, err := testfixture.SemanticMetricBuildRequest()
 	if err != nil {
@@ -272,13 +296,21 @@ func liveQueryArtifactForSourceAndMetricFormula(
 			ContentHash:      validatorHash("metric-sales-v1"),
 			FormulaAST:       append(json.RawMessage(nil), metricFormula...),
 			DefaultFilterAST: json.RawMessage(`{"type":"TRUE"}`), TimeGrain: "NONE",
-			Additivity: registry.Additive, NullPolicy: "PRESERVE",
+			Additivity: additivity, Unit: "CNY", DisplayPrecision: 4,
+			AggregationRestriction: func() registry.AggregationRestriction {
+				if additivity == registry.NonAdditive {
+					return registry.PostAggregate
+				}
+				return ""
+			}(),
+			ZeroDenominatorPolicy: registry.ZeroDenominatorNull, NullPolicy: "PRESERVE",
 			Measures: []compiler.MeasureContract{{
 				MeasureID: "measure-sales", MeasureVersionID: "measure-sales-v1",
 				ModelVersionID: "model-sales-v1", ContentHash: validatorHash("measure-sales-v1"),
 				FormulaAST:  json.RawMessage(`{"fieldId":"net_sales","type":"FIELD_REF"}`),
 				Aggregation: registry.AggregationSum, Additivity: registry.Additive,
 				DataType: registry.NumericDecimal, Unit: "CNY",
+				ZeroDenominatorPolicy: registry.ZeroDenominatorNull,
 			}},
 		}},
 		Dimensions: []compiler.DimensionContract{}, Members: []compiler.MemberContract{},

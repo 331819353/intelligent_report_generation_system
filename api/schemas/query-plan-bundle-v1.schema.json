@@ -1,0 +1,150 @@
+{
+  "title": "Query Plan Bundle V1",
+  "description": "Release-pinned KPI bundle expanded into independently compiled semantic plans.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "bundleId",
+    "kpiBundleVersionId",
+    "semanticReleaseId",
+    "semanticContentHash",
+    "scope",
+    "sharedContext",
+    "plans",
+    "maxConcurrentPlans",
+    "bundleHash"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "query-plan-bundle-v1" },
+    "bundleId": { "$ref": "#/$defs/stableId" },
+    "kpiBundleVersionId": { "$ref": "#/$defs/uuid" },
+    "semanticReleaseId": { "$ref": "#/$defs/stableId" },
+    "semanticContentHash": { "$ref": "#/$defs/contentHash" },
+    "scope": { "$ref": "#/$defs/policyScope" },
+    "sharedContext": { "$ref": "#/$defs/sharedContext" },
+    "plans": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "items": { "$ref": "#/$defs/plan" }
+    },
+    "maxConcurrentPlans": { "type": "integer", "minimum": 1, "maximum": 4 },
+    "bundleHash": { "$ref": "#/$defs/contentHash" }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$"
+    },
+    "contentHash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "policyScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tenantId", "actorId", "domainIds", "roleIds", "release", "policyHash"],
+      "properties": {
+        "tenantId": { "$ref": "#/$defs/stableId" },
+        "actorId": { "$ref": "#/$defs/stableId" },
+        "domainIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stableId" }
+        },
+        "roleIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stableId" }
+        },
+        "release": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["releaseId", "contentHash"],
+          "properties": {
+            "releaseId": { "$ref": "#/$defs/stableId" },
+            "contentHash": { "$ref": "#/$defs/contentHash" }
+          }
+        },
+        "policyHash": { "$ref": "#/$defs/contentHash" }
+      }
+    },
+    "sharedContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["domainId", "resolvedTimeSpec", "filters"],
+      "properties": {
+        "domainId": { "$ref": "#/$defs/stableId" },
+        "resolvedTimeSpec": { "$ref": "#/$defs/resolvedTimeSpec" },
+        "filters": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "semantic-ir-v1.schema.json#/$defs/filter" }
+        }
+      }
+    },
+    "resolvedTimeSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestedPeriod",
+        "grain",
+        "policyApplied",
+        "policySource",
+        "resolvedStart",
+        "resolvedEndExclusive",
+        "dataAvailableThrough",
+        "truncatedByDataAvailability",
+        "periodFallbackApplied",
+        "timezone"
+      ],
+      "properties": {
+        "requestedPeriod": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
+        "grain": { "enum": ["DAY", "WEEK", "MONTH", "QUARTER", "YEAR"] },
+        "policyApplied": { "enum": ["MTD", "FULL_PERIOD", "LAST_COMPLETE"] },
+        "policySource": { "enum": ["METRIC", "TIME_CONTRACT", "DOMAIN", "PLATFORM_DEFAULT"] },
+        "resolvedStart": { "type": "string", "format": "date-time" },
+        "resolvedEndExclusive": { "type": "string", "format": "date-time" },
+        "dataAvailableThrough": { "type": "string", "format": "date-time" },
+        "truncatedByDataAvailability": { "type": "boolean" },
+        "periodFallbackApplied": { "type": "boolean" },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "calendarVersionId": { "type": "string", "maxLength": 0 },
+        "comparison": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "periods", "alignment", "resolvedStart", "resolvedEndExclusive", "overflowApplied"],
+          "properties": {
+            "type": { "enum": ["YEAR_OVER_YEAR", "MONTH_OVER_MONTH", "PERIOD_OVER_PERIOD"] },
+            "periods": { "type": "integer", "minimum": 1, "maximum": 120 },
+            "alignment": { "enum": ["SAME_DAY_COUNT", "SAME_CALENDAR_RANGE"] },
+            "resolvedStart": { "type": "string", "format": "date-time" },
+            "resolvedEndExclusive": { "type": "string", "format": "date-time" },
+            "overflowApplied": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["planId", "role", "semanticIr", "irHash", "chartType"],
+      "properties": {
+        "planId": { "type": "string", "pattern": "^p[1-6]$" },
+        "role": { "enum": ["HEADLINE", "TREND", "BREAKDOWN"] },
+        "semanticIr": { "$ref": "semantic-ir-v1.schema.json" },
+        "irHash": { "$ref": "#/$defs/contentHash" },
+        "chartType": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    }
+  }
+}

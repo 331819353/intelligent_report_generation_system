@@ -84,6 +84,11 @@ func (model SemanticModel) Validate() error {
 	if model.PrimaryTimeFieldID != "" && !semanticCodePattern.MatchString(model.PrimaryTimeFieldID) {
 		validation.add(validationCodeInvalidID, "primaryTimeFieldId", "must be a stable logical field ID")
 	}
+	if model.TimeContractVersionID != "" {
+		validateUUID(&validation, "timeContractVersionId", model.TimeContractVersionID, true)
+	} else if model.Status == VersionStatusCertified {
+		validation.add(TimeContractMissing, "timeContractVersionId", "CERTIFIED semantic models require a time contract version")
+	}
 	return validation.result()
 }
 
@@ -104,13 +109,17 @@ func (measure Measure) Validate() error {
 	if !validAggregation(measure.Aggregation) {
 		validation.add(validationCodeInvalidEnum, "aggregation", "unsupported aggregation")
 	}
-	if !validAdditivity(measure.Additivity) {
+	if measure.Additivity != "" && !validAdditivity(measure.Additivity) {
 		validation.add(validationCodeInvalidEnum, "additivity", "unsupported additivity")
 	}
+	validateAdditivityFields(&validation, measure.SemiAdditiveTimeAggregation,
+		measure.AggregationRestriction, measure.NonAdditiveDimensions, measure.ZeroDenominatorPolicy,
+		measure.DisplayPrecision, measure.AdditivitySuggestion, measure.AdditivityConfirmedBy,
+		measure.AdditivityConfirmedAt != nil)
 	if measure.DataType != NumericInteger && measure.DataType != NumericDecimal {
 		validation.add(validationCodeInvalidEnum, "dataType", "must be INTEGER or DECIMAL")
 	}
-	if (measure.Aggregation == AggregationAverage || measure.Aggregation == AggregationCountDistinct) && measure.Additivity != NonAdditive {
+	if measure.Additivity != "" && (measure.Aggregation == AggregationAverage || measure.Aggregation == AggregationCountDistinct) && measure.Additivity != NonAdditive {
 		validation.add(validationCodeInvalidAdditivity, "additivity", "AVG and COUNT_DISTINCT must be NON_ADDITIVE")
 	}
 	if (measure.Aggregation == AggregationMinimum || measure.Aggregation == AggregationMaximum) && measure.Additivity == Additive {
@@ -142,14 +151,21 @@ func (metric MetricVersion) Validate() error {
 	validateUUID(&validation, "semanticModelVersionId", metric.SemanticModelVersionID, true)
 	validateJSONObject(&validation, "formulaAst", metric.FormulaAST, 131072)
 	validateJSONObject(&validation, "defaultFiltersAst", metric.DefaultFiltersAST, 65536)
-	if !validAdditivity(metric.Additivity) {
+	if metric.Additivity != "" && !validAdditivity(metric.Additivity) {
 		validation.add(validationCodeInvalidEnum, "additivity", "unsupported additivity")
 	}
+	validateAdditivityFields(&validation, metric.SemiAdditiveTimeAggregation,
+		metric.AggregationRestriction, metric.NonAdditiveDimensions, metric.ZeroDenominatorPolicy,
+		metric.DisplayPrecision, metric.AdditivitySuggestion, metric.AdditivityConfirmedBy,
+		metric.AdditivityConfirmedAt != nil)
 	if !oneOf(metric.TimeGrain, "NONE", "DAY", "WEEK", "MONTH", "QUARTER", "YEAR") {
 		validation.add(validationCodeInvalidEnum, "timeGrain", "unsupported time grain")
 	}
 	if !oneOf(metric.NullPolicy, "PRESERVE", "ZERO", "REJECT") {
 		validation.add(validationCodeInvalidEnum, "nullPolicy", "unsupported null policy")
+	}
+	if metric.IncompletePeriodPolicyOverride != "" && !validIncompletePeriodPolicy(metric.IncompletePeriodPolicyOverride) {
+		validation.add(validationCodeInvalidEnum, "incompletePeriodPolicyOverride", "unsupported incomplete-period policy")
 	}
 	if len(metric.MeasureVersionIDs) == 0 || len(metric.MeasureVersionIDs) > 64 {
 		validation.add(validationCodeInvalidDependency, "measureVersionIds", "must contain 1 to 64 measure versions")
@@ -210,14 +226,19 @@ func (relationship Relationship) Validate() error {
 	if relationship.Type == RelationshipModelJoin && relationship.JoinType == JoinNone {
 		validation.add(validationCodeInvalidDependency, "joinType", "MODEL_JOIN requires an executable join type")
 	}
-	if !oneOf(string(relationship.Cardinality), "ONE_TO_ONE", "MANY_TO_ONE", "ONE_TO_MANY", "MANY_TO_MANY") {
+	if !ValidCardinality(relationship.Cardinality) {
 		validation.add(validationCodeInvalidEnum, "cardinality", "unsupported cardinality")
 	}
-	if !oneOf(string(relationship.FanoutPolicy), "BLOCK", "CERTIFIED_PREAGG", "SAFE") {
+	if !ValidFanoutPolicy(relationship.FanoutPolicy) {
 		validation.add(validationCodeInvalidEnum, "fanoutPolicy", "unsupported fanout policy")
 	}
-	if relationship.Cardinality == CardinalityManyToMany && relationship.FanoutPolicy == FanoutSafe {
-		validation.add(validationCodeUnsafeFanout, "fanoutPolicy", "MANY_TO_MANY cannot be declared SAFE")
+	if relationship.BridgeModelVersionID != "" {
+		validateUUID(&validation, "bridgeModelVersionId", relationship.BridgeModelVersionID, true)
+	}
+	if ValidateRelationshipCombination(
+		relationship.Cardinality, relationship.FanoutPolicy, relationship.BridgeModelVersionID,
+	) != nil {
+		validation.add(validationCodeUnsafeFanout, "fanoutPolicy", "cardinality and fanoutPolicy combination is unsafe")
 	}
 	validateJSONObject(&validation, "joinAst", relationship.JoinAST, 65536)
 	return validation.result()
@@ -260,6 +281,7 @@ func (rule QualityRule) Validate() error {
 func (term BusinessTerm) Validate() error {
 	validation := validator{}
 	validateVersionIdentity(&validation, term.VersionIdentity, "")
+	validateGovernedBusinessTerm(&validation, term)
 	validateCodeName(&validation, term.Code, term.Name)
 	if strings.TrimSpace(term.Definition) == "" || len(term.Definition) > 4000 {
 		validation.add(validationCodeRequired, "definition", "must contain 1 to 4000 characters")
@@ -377,7 +399,51 @@ func validAggregation(value Aggregation) bool {
 }
 
 func validAdditivity(value Additivity) bool {
-	return value == Additive || value == SemiAdditive || value == NonAdditive
+	return value == FullyAdditive || value == SemiAdditive || value == NonAdditive
+}
+
+func validateAdditivityFields(
+	validation *validator,
+	semiAggregation SemiAdditiveTimeAggregation,
+	restriction AggregationRestriction,
+	nonAdditiveDimensions []string,
+	zeroPolicy ZeroDenominatorPolicy,
+	displayPrecision int16,
+	suggestion Additivity,
+	confirmedBy string,
+	confirmedAt bool,
+) {
+	if semiAggregation != "" && semiAggregation != SemiAdditivePeriodEnd &&
+		semiAggregation != SemiAdditivePeriodBegin && semiAggregation != SemiAdditivePeriodAverage {
+		validation.add(validationCodeInvalidEnum, "semiAdditiveTimeAggregation", "unsupported semi-additive time aggregation")
+	}
+	if restriction != "" && restriction != PreAggregate && restriction != PostAggregate {
+		validation.add(validationCodeInvalidEnum, "aggregationRestriction", "unsupported aggregation restriction")
+	}
+	if zeroPolicy != "" && zeroPolicy != ZeroDenominatorNull && zeroPolicy != ZeroDenominatorZero {
+		validation.add(validationCodeInvalidEnum, "zeroDenominatorPolicy", "must be NULL or ZERO")
+	}
+	if displayPrecision < 0 || displayPrecision > 12 {
+		validation.add(validationCodeInvalidEnum, "displayPrecision", "must be between 0 and 12")
+	}
+	if suggestion != "" && !validAdditivity(suggestion) {
+		validation.add(validationCodeInvalidEnum, "additivitySuggestion", "unsupported additivity suggestion")
+	}
+	if (confirmedBy == "") != !confirmedAt {
+		validation.add(validationCodeInvalidDependency, "additivityConfirmedAt", "confirmation actor and time must be set together")
+	}
+	if confirmedBy != "" {
+		validateUUID(validation, "additivityConfirmedBy", confirmedBy, true)
+	}
+	seen := make(map[string]bool, len(nonAdditiveDimensions))
+	for index, id := range nonAdditiveDimensions {
+		path := fmt.Sprintf("nonAdditiveDimensions[%d]", index)
+		validateUUID(validation, path, id, true)
+		if seen[id] {
+			validation.add(validationCodeDuplicate, path, "dimension version is duplicated")
+		}
+		seen[id] = true
+	}
 }
 
 func validSensitivity(value Sensitivity) bool {

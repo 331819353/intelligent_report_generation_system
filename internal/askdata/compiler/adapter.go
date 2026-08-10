@@ -16,7 +16,7 @@ import (
 	"intelligent-report-generation-system/internal/querycompiler"
 )
 
-const AdapterVersion = "semantic-query-adapter-v1"
+const AdapterVersion = "semantic-query-adapter-v2"
 
 var (
 	ErrInvalidAdaptRequest = errors.New("semantic query adapt request is invalid")
@@ -67,6 +67,7 @@ type QueryPlan struct {
 	CompiledPlanHash askdata.ContentHash `json:"compiledPlanHash"`
 	PlanHash         askdata.ContentHash `json:"planHash"`
 	compiled         *querycompiler.CompiledQuery
+	parameterValues  map[string]any
 }
 
 type ComparisonContract struct {
@@ -74,26 +75,46 @@ type ComparisonContract struct {
 	Periods int               `json:"periods"`
 }
 
+// MetricAggregationContract carries the release-pinned aggregation behavior
+// into result verification. ADD-004 can project it to result columns without
+// re-reading mutable registry state.
+type MetricAggregationContract struct {
+	MetricVersionID             askdata.ID                           `json:"metricVersionId"`
+	ResultColumnName            string                               `json:"resultColumnName"`
+	Additivity                  registry.Additivity                  `json:"additivity"`
+	SemiAdditiveTimeAggregation registry.SemiAdditiveTimeAggregation `json:"semiAdditiveTimeAggregation,omitempty"`
+	AggregationRestriction      registry.AggregationRestriction      `json:"aggregationRestriction,omitempty"`
+	NonAdditiveDimensions       []string                             `json:"nonAdditiveDimensions"`
+	TotalsNotSummable           bool                                 `json:"totalsNotSummable"`
+	Unit                        string                               `json:"unit"`
+	Currency                    string                               `json:"currency,omitempty"`
+	DisplayPrecision            int16                                `json:"displayPrecision"`
+	ZeroDenominatorPolicy       registry.ZeroDenominatorPolicy       `json:"zeroDenominatorPolicy"`
+}
+
 // QueryArtifact is the replay-safe QUERY_PLAN boundary. SQL and parameter
 // values are intentionally not JSON fields; only their deterministic shape
 // hashes enter the artifact.
 type QueryArtifact struct {
-	Version           string              `json:"version"`
-	Scope             askdata.PolicyScope `json:"scope"`
-	DomainID          askdata.ID          `json:"domainId"`
-	IRHash            askdata.ContentHash `json:"irHash"`
-	BuildArtifactHash askdata.ContentHash `json:"buildArtifactHash"`
-	ResolutionHash    askdata.ContentHash `json:"resolutionHash"`
-	GraphPlanHash     askdata.ContentHash `json:"graphPlanHash"`
-	Timezone          string              `json:"timezone,omitempty"`
-	Comparison        *ComparisonContract `json:"comparison,omitempty"`
-	Plans             []QueryPlan         `json:"plans"`
-	PlanHash          askdata.ContentHash `json:"planHash"`
+	Version            string                      `json:"version"`
+	Scope              askdata.PolicyScope         `json:"scope"`
+	DomainID           askdata.ID                  `json:"domainId"`
+	IRHash             askdata.ContentHash         `json:"irHash"`
+	BuildArtifactHash  askdata.ContentHash         `json:"buildArtifactHash"`
+	ResolutionHash     askdata.ContentHash         `json:"resolutionHash"`
+	GraphPlanHash      askdata.ContentHash         `json:"graphPlanHash"`
+	Timezone           string                      `json:"timezone,omitempty"`
+	Comparison         *ComparisonContract         `json:"comparison,omitempty"`
+	ResolvedTimeSpec   *ir.ResolvedTimeSpec        `json:"resolvedTimeSpec,omitempty"`
+	MetricAggregations []MetricAggregationContract `json:"metricAggregations"`
+	Plans              []QueryPlan                 `json:"plans"`
+	PlanHash           askdata.ContentHash         `json:"planHash"`
 }
 
 type AdaptRequest struct {
-	ResolveRequest ResolveRequest
-	Resolution     Resolution
+	ResolveRequest   ResolveRequest
+	Resolution       Resolution
+	ResolvedTimeSpec *ir.ResolvedTimeSpec
 }
 
 // Adapt replays the entire Binding -> Semantic IR boundary, verifies the
@@ -104,14 +125,30 @@ func Adapt(request AdaptRequest) (QueryArtifact, error) {
 	if err := validateAdaptRequest(request); err != nil {
 		return QueryArtifact{}, err
 	}
-	semanticIR := request.ResolveRequest.BuildArtifact.IR
-	resolution := request.Resolution
+	return compileResolvedArtifact(
+		request.ResolveRequest.BuildArtifact.IR, request.Resolution, request.ResolvedTimeSpec,
+	)
+}
+
+func compileResolvedArtifact(
+	semanticIR ir.SemanticIR,
+	resolution Resolution,
+	resolvedTimeSpec *ir.ResolvedTimeSpec,
+) (QueryArtifact, error) {
+	queryIR, err := applyResolvedTimeSpec(semanticIR, resolvedTimeSpec)
+	if err != nil {
+		return QueryArtifact{}, err
+	}
 	if len(resolution.Relationships) != 0 ||
 		(resolution.GraphPath != nil && len(resolution.GraphPath.Steps) != 0) {
 		return QueryArtifact{}, fmt.Errorf("%w: Semantic IR v1 has one model and cannot adapt a join path", ErrUnsupportedQuery)
 	}
 
-	document, source, parameterValues, shapes, err := buildQueryDocument(semanticIR, resolution)
+	document, source, parameterValues, shapes, err := buildQueryDocument(queryIR, resolution)
+	if err != nil {
+		return QueryArtifact{}, err
+	}
+	metricPlans, err := planMetrics(resolution.Metrics, queryIR)
 	if err != nil {
 		return QueryArtifact{}, err
 	}
@@ -119,10 +156,19 @@ func Adapt(request AdaptRequest) (QueryArtifact, error) {
 		Version: AdapterVersion, Scope: resolution.Scope, DomainID: resolution.DomainID,
 		IRHash: resolution.IRHash, BuildArtifactHash: resolution.BuildArtifactHash,
 		ResolutionHash: resolution.ResolutionHash, GraphPlanHash: resolution.GraphPlanHash,
-		Plans: []QueryPlan{},
+		MetricAggregations: metricAggregationContracts(resolution.Metrics, metricPlans, queryIR.Metrics),
+		Plans:              []QueryPlan{},
 	}
-	if semanticIR.TimeRange != nil {
-		artifact.Timezone = semanticIR.TimeRange.Timezone
+	if queryIR.TimeRange != nil {
+		artifact.Timezone = queryIR.TimeRange.Timezone
+	}
+	if resolvedTimeSpec != nil {
+		copy := *resolvedTimeSpec
+		if copy.Comparison != nil {
+			comparisonCopy := *copy.Comparison
+			copy.Comparison = &comparisonCopy
+		}
+		artifact.ResolvedTimeSpec = &copy
 	}
 	if semanticIR.Comparison != nil {
 		artifact.Comparison = &ComparisonContract{
@@ -130,17 +176,17 @@ func Adapt(request AdaptRequest) (QueryArtifact, error) {
 		}
 	}
 
-	current, err := compileQueryPlan(QueryRoleCurrent, document, source, shapes, parameterValues, semanticIR.Limit)
+	current, err := compileQueryPlan(QueryRoleCurrent, document, source, shapes, parameterValues, ir.MaxResultRows)
 	if err != nil {
 		return QueryArtifact{}, err
 	}
 	artifact.Plans = append(artifact.Plans, current)
 	if semanticIR.Comparison != nil {
-		baselineValues, err := baselineParameterValues(semanticIR, resolution, parameterValues)
+		baselineValues, err := baselineParameterValues(queryIR, resolution, parameterValues, resolvedTimeSpec)
 		if err != nil {
 			return QueryArtifact{}, err
 		}
-		baseline, err := compileQueryPlan(QueryRoleBaseline, document, source, shapes, baselineValues, semanticIR.Limit)
+		baseline, err := compileQueryPlan(QueryRoleBaseline, document, source, shapes, baselineValues, ir.MaxResultRows)
 		if err != nil {
 			return QueryArtifact{}, err
 		}
@@ -167,6 +213,7 @@ func validateAdaptRequest(request AdaptRequest) error {
 	resolution := request.Resolution
 	if !reflect.DeepEqual(resolution.Scope, buildArtifact.Scope) || resolution.DomainID != buildArtifact.DomainID ||
 		resolution.IRHash != buildArtifact.IRHash || resolution.BuildArtifactHash != buildArtifact.ArtifactHash ||
+		resolution.DomainID != buildArtifact.IR.DomainID ||
 		resolution.Model.ModelVersionID != buildArtifact.IR.ModelVersionID ||
 		resolution.Scope.Release.ReleaseID != buildArtifact.IR.SemanticReleaseID ||
 		resolution.Scope.Release.ContentHash != buildArtifact.IR.SemanticContentHash ||
@@ -174,6 +221,65 @@ func validateAdaptRequest(request AdaptRequest) error {
 		return fmt.Errorf("%w: resolution is not bound to the exact IR artifact", ErrInvalidAdaptRequest)
 	}
 	return nil
+}
+
+func applyResolvedTimeSpec(semanticIR ir.SemanticIR, spec *ir.ResolvedTimeSpec) (ir.SemanticIR, error) {
+	if spec == nil {
+		return semanticIR, nil
+	}
+	if semanticIR.TimeRange == nil || validateResolvedTimeSpec(*spec) != nil {
+		return ir.SemanticIR{}, fmt.Errorf("%w: resolved time spec", ErrInvalidAdaptRequest)
+	}
+	if semanticIR.TimeRange.RequestedPeriod != "" && semanticIR.TimeRange.RequestedPeriod != spec.RequestedPeriod {
+		return ir.SemanticIR{}, fmt.Errorf("%w: resolved period does not match IR", ErrInvalidAdaptRequest)
+	}
+	if (semanticIR.Comparison == nil) != (spec.Comparison == nil) {
+		return ir.SemanticIR{}, fmt.Errorf("%w: resolved comparison does not match IR", ErrInvalidAdaptRequest)
+	}
+	if semanticIR.Comparison != nil && (spec.Comparison.Periods != semanticIR.Comparison.Periods ||
+		spec.Comparison.Type != resolvedComparisonType(semanticIR.Comparison.Type, spec.Grain)) {
+		return ir.SemanticIR{}, fmt.Errorf("%w: resolved comparison contract mismatch", ErrInvalidAdaptRequest)
+	}
+	loc, err := time.LoadLocation(spec.Timezone)
+	if err != nil || !isLocalMidnight(spec.ResolvedStart, loc) || !isLocalMidnight(spec.ResolvedEndExclusive, loc) {
+		return ir.SemanticIR{}, fmt.Errorf("%w: resolved time boundary", ErrInvalidAdaptRequest)
+	}
+	result := semanticIR
+	timeRange := *semanticIR.TimeRange
+	timeRange.Start = spec.ResolvedStart.In(loc).Format("2006-01-02")
+	timeRange.EndExclusive = spec.ResolvedEndExclusive.In(loc).Format("2006-01-02")
+	timeRange.Timezone = spec.Timezone
+	result.TimeRange = &timeRange
+	return result, nil
+}
+
+func resolvedComparisonType(value ir.ComparisonType, grain string) string {
+	switch value {
+	case ir.ComparisonYearOverYear:
+		return "YEAR_OVER_YEAR"
+	case ir.ComparisonMonthOverMonth:
+		return "MONTH_OVER_MONTH"
+	case ir.ComparisonPeriodOverPeriod:
+		switch registry.TimeGrain(grain) {
+		case registry.TimeGrainWeek:
+			return "WEEK_OVER_WEEK"
+		case registry.TimeGrainMonth, registry.TimeGrainFiscalMonth:
+			return "MONTH_OVER_MONTH"
+		case registry.TimeGrainQuarter, registry.TimeGrainFiscalQuarter:
+			return "QUARTER_OVER_QUARTER"
+		case registry.TimeGrainYear, registry.TimeGrainFiscalYear:
+			return "YEAR_OVER_YEAR"
+		default:
+			return "PERIOD_OVER_PERIOD"
+		}
+	default:
+		return ""
+	}
+}
+
+func isLocalMidnight(value time.Time, loc *time.Location) bool {
+	local := value.In(loc)
+	return local.Hour() == 0 && local.Minute() == 0 && local.Second() == 0 && local.Nanosecond() == 0
 }
 
 func buildQueryDocument(
@@ -214,6 +320,33 @@ func buildQueryDocument(
 	for _, metric := range resolution.Metrics {
 		metricsByID[metric.MetricVersionID] = metric
 	}
+	metricPlans, err := planMetrics(resolution.Metrics, semanticIR)
+	if err != nil {
+		return dataset.Document{}, PhysicalSource{}, nil, nil, err
+	}
+	useTimeReduction := false
+	for _, plan := range metricPlans {
+		useTimeReduction = useTimeReduction || plan.UseTimeReduction
+	}
+	var timeReductionField FieldContract
+	var timeReduction *dataset.PreAggregation
+	preAggregationGroups := map[string]struct{}{}
+	if useTimeReduction {
+		if resolution.Model.PrimaryTimeFieldID == nil {
+			return dataset.Document{}, PhysicalSource{}, nil, nil,
+				aggregationFailure(SemiAdditiveTimeDimensionMissingCode, "")
+		}
+		var exists bool
+		timeReductionField, exists = fieldsByID[*resolution.Model.PrimaryTimeFieldID]
+		if !exists || (timeReductionField.CanonicalType != "DATE" && timeReductionField.CanonicalType != "DATETIME") {
+			return dataset.Document{}, PhysicalSource{}, nil, nil,
+				aggregationFailure(SemiAdditiveTimeDimensionMissingCode, "")
+		}
+		timeReduction = &dataset.PreAggregation{
+			ID: "askdata_time_reduction", NodeID: source.NodeID,
+			GroupBy: []dataset.PreAggregationGroup{}, Metrics: []dataset.PreAggregationMetric{},
+		}
+	}
 
 	visible := true
 	outputFields := make([]dataset.Field, 0, len(semanticIR.GroupBy)+len(semanticIR.Metrics))
@@ -247,13 +380,33 @@ func buildQueryDocument(
 		})
 		groupBy = append(groupBy, fieldID)
 		fieldIDByDimension[group.DimensionVersionID] = fieldID
+		if timeReduction != nil {
+			if _, duplicate := preAggregationGroups[field.Code]; !duplicate {
+				timeReduction.GroupBy = append(timeReduction.GroupBy, dataset.PreAggregationGroup{Field: field.Code})
+				preAggregationGroups[field.Code] = struct{}{}
+			}
+		}
+	}
+	if timeReduction != nil {
+		if _, duplicate := preAggregationGroups[timeReductionField.Code]; !duplicate {
+			timeReduction.GroupBy = append(timeReduction.GroupBy, dataset.PreAggregationGroup{Field: timeReductionField.Code})
+			preAggregationGroups[timeReductionField.Code] = struct{}{}
+		}
 	}
 	for _, selected := range semanticIR.Metrics {
 		metric, exists := metricsByID[selected.MetricVersionID]
 		if !exists {
 			return dataset.Document{}, PhysicalSource{}, nil, nil, fmt.Errorf("%w: metric contract is missing", ErrInvalidAdaptRequest)
 		}
-		expression, canonicalType, err := compileMetricExpression(metric, fieldsByID)
+		var expression dataset.Expression
+		var canonicalType string
+		if timeReduction == nil {
+			expression, canonicalType, err = compileMetricExpression(metric, fieldsByID)
+		} else {
+			var inner []dataset.PreAggregationMetric
+			expression, canonicalType, inner, err = compileMetricExpressionPreAggregated(metric, fieldsByID, timeReductionField)
+			timeReduction.Metrics = append(timeReduction.Metrics, inner...)
+		}
 		if err != nil {
 			return dataset.Document{}, PhysicalSource{}, nil, nil, fmt.Errorf("metric %s: %w", selected.MetricVersionID, err)
 		}
@@ -389,17 +542,27 @@ func buildQueryDocument(
 	if previewLimit > 5000 {
 		previewLimit = 5000
 	}
+	node := dataset.Node{
+		ID: source.NodeID, Type: "DATASET", DatasetVersionID: string(source.DatasetVersionID),
+		Alias: source.NodeID, Projection: projection, SourceFilters: []dataset.SourceFilter{},
+	}
+	preAggregations := []dataset.PreAggregation{}
+	if timeReduction != nil {
+		for _, filter := range filters {
+			expression := cloneDatasetExpression(filter.Expression)
+			node.SourceFilters = append(node.SourceFilters, dataset.SourceFilter{Expression: &expression})
+		}
+		filters = []dataset.Filter{}
+		preAggregations = append(preAggregations, *timeReduction)
+	}
 	document := dataset.Document{
 		DSLVersion: dataset.DSLVersion,
 		Dataset: dataset.Descriptor{
 			Code: "askdata_query_" + string(semanticIRHash[:16]),
 			Name: "AskData governed query", Type: "SINGLE_SOURCE",
 		},
-		Nodes: []dataset.Node{{
-			ID: source.NodeID, Type: "DATASET", DatasetVersionID: string(source.DatasetVersionID),
-			Alias: source.NodeID, Projection: projection, SourceFilters: []dataset.SourceFilter{},
-		}},
-		Joins: []dataset.Join{}, Transforms: []dataset.Transform{}, PreAggregations: []dataset.PreAggregation{},
+		Nodes: []dataset.Node{node},
+		Joins: []dataset.Join{}, Transforms: []dataset.Transform{}, PreAggregations: preAggregations,
 		Fields: outputFields, Filters: filters, GroupBy: groupBy, Having: []dataset.Filter{}, Sorts: sorts,
 		Parameters: parameters,
 		OutputGrain: dataset.OutputGrain{
@@ -408,7 +571,7 @@ func buildQueryDocument(
 		},
 		ExecutionPolicy: dataset.ExecutionPolicy{
 			Mode: "REALTIME", TimeoutMS: 25000, PreviewLimit: previewLimit,
-			ResultLimit: semanticIR.Limit, CacheTTLSeconds: 0,
+			ResultLimit: ir.MaxResultRows, CacheTTLSeconds: 0,
 		},
 	}
 	if err := dataset.Validate(document); err != nil {
@@ -447,6 +610,7 @@ func compileQueryPlan(
 		ParameterShapes: append([]ParameterShape(nil), shapes...),
 		DSLHash:         askdata.ContentHash(prepared.DSLHash), LogicalPlanHash: askdata.ContentHash(prepared.PlanHash),
 		CompiledPlanHash: askdata.ContentHash(compiled.PlanHash), compiled: &compiled,
+		parameterValues: cloneParameterValues(parameterValues),
 	}
 	plan.PlanHash, err = queryPlanHash(plan)
 	if err != nil {
@@ -462,6 +626,9 @@ func (artifact QueryArtifact) Validate() error {
 		artifact.ResolutionHash.Validate() != nil || artifact.GraphPlanHash.Validate() != nil ||
 		artifact.PlanHash.Validate() != nil {
 		return ErrInvalidQueryPlan
+	}
+	if err := validateMetricAggregationContracts(artifact.MetricAggregations); err != nil {
+		return err
 	}
 	if artifact.Comparison == nil {
 		if len(artifact.Plans) != 1 || artifact.Plans[0].Role != QueryRoleCurrent {
@@ -480,6 +647,23 @@ func (artifact QueryArtifact) Validate() error {
 			return ErrInvalidQueryPlan
 		}
 	}
+	if artifact.ResolvedTimeSpec != nil {
+		loc, err := time.LoadLocation(artifact.ResolvedTimeSpec.Timezone)
+		if err != nil || validateResolvedTimeSpec(*artifact.ResolvedTimeSpec) != nil ||
+			artifact.Timezone != artifact.ResolvedTimeSpec.Timezone ||
+			(artifact.Comparison == nil) != (artifact.ResolvedTimeSpec.Comparison == nil) ||
+			!plansHaveTimeBoundaries(artifact.Plans) {
+			return ErrInvalidQueryPlan
+		}
+		if artifact.Comparison != nil {
+			comparison := artifact.ResolvedTimeSpec.Comparison
+			if comparison.Type != resolvedComparisonType(artifact.Comparison.Type, artifact.ResolvedTimeSpec.Grain) ||
+				comparison.Periods != artifact.Comparison.Periods ||
+				!isLocalMidnight(comparison.ResolvedStart, loc) || !isLocalMidnight(comparison.ResolvedEndExclusive, loc) {
+				return ErrInvalidQueryPlan
+			}
+		}
+	}
 	for index := range artifact.Plans {
 		if err := artifact.Plans[index].validate(); err != nil {
 			return err
@@ -493,6 +677,20 @@ func (artifact QueryArtifact) Validate() error {
 		return ErrInvalidQueryPlan
 	}
 	return nil
+}
+
+func plansHaveTimeBoundaries(plans []QueryPlan) bool {
+	for _, plan := range plans {
+		start, end := false, false
+		for _, shape := range plan.ParameterShapes {
+			start = start || shape.Code == "time_start"
+			end = end || shape.Code == "time_end_exclusive"
+		}
+		if !start || !end {
+			return false
+		}
+	}
+	return len(plans) > 0
 }
 
 func (plan QueryPlan) validate() error {
@@ -640,6 +838,7 @@ func baselineParameterValues(
 	semanticIR ir.SemanticIR,
 	resolution Resolution,
 	current map[string]any,
+	resolved *ir.ResolvedTimeSpec,
 ) (map[string]any, error) {
 	if semanticIR.TimeRange == nil || semanticIR.Comparison == nil || resolution.TimeDimensionVersionID == nil {
 		return nil, fmt.Errorf("%w: comparison time contract", ErrInvalidAdaptRequest)
@@ -652,9 +851,24 @@ func baselineParameterValues(
 	if !exists {
 		return nil, fmt.Errorf("%w: comparison time field", ErrInvalidAdaptRequest)
 	}
-	shifted, err := shiftComparisonRange(*semanticIR.TimeRange, *semanticIR.Comparison)
-	if err != nil {
-		return nil, err
+	shifted := *semanticIR.TimeRange
+	if resolved != nil {
+		if resolved.Comparison == nil {
+			return nil, fmt.Errorf("%w: resolved comparison", ErrInvalidAdaptRequest)
+		}
+		loc, err := time.LoadLocation(resolved.Timezone)
+		if err != nil {
+			return nil, fmt.Errorf("%w: resolved comparison timezone", ErrInvalidAdaptRequest)
+		}
+		shifted.Start = resolved.Comparison.ResolvedStart.In(loc).Format("2006-01-02")
+		shifted.EndExclusive = resolved.Comparison.ResolvedEndExclusive.In(loc).Format("2006-01-02")
+		shifted.Timezone = resolved.Timezone
+	} else {
+		var err error
+		shifted, err = shiftComparisonRange(*semanticIR.TimeRange, *semanticIR.Comparison)
+		if err != nil {
+			return nil, err
+		}
 	}
 	start, end, err := timeBoundaryValues(shifted, field.CanonicalType)
 	if err != nil {
@@ -764,6 +978,7 @@ func queryPlanHash(plan QueryPlan) (askdata.ContentHash, error) {
 	copy := plan
 	copy.PlanHash = ""
 	copy.compiled = nil
+	copy.parameterValues = nil
 	payload, err := registry.CanonicalValue(copy)
 	if err != nil {
 		return "", fmt.Errorf("hash query plan: %w", err)
@@ -777,6 +992,7 @@ func queryArtifactHash(artifact QueryArtifact) (askdata.ContentHash, error) {
 	copy.Plans = append([]QueryPlan(nil), artifact.Plans...)
 	for index := range copy.Plans {
 		copy.Plans[index].compiled = nil
+		copy.Plans[index].parameterValues = nil
 	}
 	payload, err := registry.CanonicalValue(copy)
 	if err != nil {
@@ -789,6 +1005,7 @@ func samePlanShape(left, right QueryPlan) bool {
 	left.Role, right.Role = "", ""
 	left.PlanHash, right.PlanHash = "", ""
 	left.compiled, right.compiled = nil, nil
+	left.parameterValues, right.parameterValues = nil, nil
 	return reflect.DeepEqual(left, right)
 }
 

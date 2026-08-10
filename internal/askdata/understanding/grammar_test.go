@@ -59,6 +59,24 @@ func TestRuleParserSupportsComparisonRankingSortingAndGroupingVariants(t *testin
 	}
 }
 
+func TestRuleParserCapturesExplicitTopNRankBasisWithoutInventingGrouping(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		question string
+		rankBy   RankBy
+	}{
+		{"销售额同比按当期值前10", RankByCurrentValue},
+		{"销售额同比按增长额前10", RankByDelta},
+		{"销售额同比按同比增长率前10", RankByRatio},
+	}
+	for _, test := range tests {
+		result := parseRulesForTest(t, test.question, referenceForTest(), 0)
+		if result.Ranking == nil || result.Ranking.RankBy != test.rankBy || len(result.Groupings) != 0 {
+			t.Fatalf("%q: ranking=%#v groupings=%#v", test.question, result.Ranking, result.Groupings)
+		}
+	}
+}
+
 func TestRuleParserSurfacesGrammarConflictsInsteadOfChoosing(t *testing.T) {
 	t.Parallel()
 	tests := []struct{ question, reason string }{

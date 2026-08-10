@@ -1,0 +1,28 @@
+{
+  "baseUrl": "http://127.0.0.1:8080",
+  "seed": 42,
+  "databaseLabel": "postgres-16-pgvector-hnsw",
+  "graphLabel": "nebula-3.8.0-three-hop",
+  "llmLabel": "governed-provider-fault-proxy",
+  "scale": {
+    "tenants": 20,
+    "domains": 5,
+    "searchDocuments": 200000,
+    "maxFullMembersPerDomain": 50000,
+    "maxOnDemandMembersPerDomain": 5000000,
+    "dailyQuestionRuns": 10000,
+    "peakConcurrentQuestions": 50,
+    "publishedReports": 2000,
+    "graphVertices": 100000,
+    "graphEdges": 500000
+  },
+  "scenarios": [
+    {"scenario":"FAST_PATH","method":"POST","path":"/api/v1/questions","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"question":"replace-with-certified-question"},"concurrency":20,"requests":1000,"timeoutMs":25000,"thresholds":{"maxP95Ms":8000,"maxP99Ms":25000,"minSuccessRate":0.99}},
+    {"scenario":"COMPLEX_LOOP","method":"POST","path":"/api/v1/questions","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"question":"replace-with-complex-question"},"concurrency":20,"requests":1000,"timeoutMs":30000,"thresholds":{"maxP95Ms":18000,"maxP99Ms":30000,"minSuccessRate":0.99}},
+    {"scenario":"WAREHOUSE_POOL","method":"POST","path":"/api/v1/questions","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"question":"replace-with-warehouse-question"},"concurrency":50,"requests":1000,"timeoutMs":30000,"thresholds":{"maxP95Ms":18000,"maxP99Ms":30000,"minSuccessRate":0.99}},
+    {"scenario":"VECTOR_RECALL","method":"POST","path":"/api/v1/askdata/evaluation/retrieval","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"fixtureSet":"sealed-retrieval-capacity"},"concurrency":20,"requests":1000,"timeoutMs":10000,"thresholds":{"maxP95Ms":1000,"maxP99Ms":3000,"minSuccessRate":0.99,"minRecallAtK":0.99}},
+    {"scenario":"GRAPH_3_HOPS","method":"POST","path":"/api/v1/askdata/evaluation/graph","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"fixtureSet":"three-hop-capacity"},"concurrency":20,"requests":1000,"timeoutMs":5000,"thresholds":{"maxP95Ms":500,"maxP99Ms":2000,"minSuccessRate":0.99}},
+    {"scenario":"LLM_DEGRADATION","method":"POST","path":"/api/v1/askdata/evaluation/faults","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"fault":"PROVIDER_RATE_LIMIT","fixtureMode":true},"concurrency":20,"requests":500,"timeoutMs":30000,"thresholds":{"maxP95Ms":18000,"maxP99Ms":30000,"minSuccessRate":0.99}},
+    {"scenario":"KPI_BUNDLE","method":"POST","path":"/api/v1/questions","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"question":"replace-with-kpi-bundle-question"},"concurrency":16,"requests":500,"timeoutMs":30000,"thresholds":{"maxP95Ms":25000,"maxP99Ms":30000,"minSuccessRate":0.99}}
+  ]
+}

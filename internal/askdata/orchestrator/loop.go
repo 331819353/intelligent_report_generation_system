@@ -2,32 +2,55 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
+
 	"intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/cognition"
+	"intelligent-report-generation-system/internal/askdata/observability"
+	"intelligent-report-generation-system/internal/askdata/security"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
 )
 
 const MaxLoopTranscriptBytes = 512 << 10
 
 var (
-	ErrInvalidLoop          = errors.New("question cognition loop is invalid")
-	ErrLoopBudgetExhausted  = errors.New("question cognition loop budget is exhausted")
-	ErrLoopTimeout          = errors.New("question cognition loop timed out")
-	ErrLoopNoProgress       = errors.New("question cognition loop made no progress")
-	ErrLoopEvidenceRejected = errors.New("question cognition loop rejected action evidence")
-	ErrLoopToolUnavailable  = errors.New("question cognition loop tool is unavailable")
-	ErrLoopToolBlocked      = errors.New("question cognition loop tool was blocked")
-	ErrLoopToolFailed       = errors.New("question cognition loop tool failed")
-	ErrLoopCognitionFailed  = errors.New("question cognition loop model call failed")
+	ErrInvalidLoop              = errors.New("question cognition loop is invalid")
+	ErrLoopBudgetExhausted      = errors.New("question cognition loop budget is exhausted")
+	ErrLoopTimeout              = errors.New("question cognition loop timed out")
+	ErrLoopNoProgress           = errors.New("question cognition loop made no progress")
+	ErrLoopEvidenceRejected     = errors.New("question cognition loop rejected action evidence")
+	ErrLoopToolUnavailable      = errors.New("question cognition loop tool is unavailable")
+	ErrLoopToolBlocked          = errors.New("question cognition loop tool was blocked")
+	ErrLoopToolFailed           = errors.New("question cognition loop tool failed")
+	ErrLoopCognitionFailed      = errors.New("question cognition loop model call failed")
+	ErrLoopCostAccountingFailed = errors.New("question cognition loop cost accounting failed")
+	ErrLoopRunCostExceeded      = errors.New("question cognition loop run cost exceeded")
 )
+
+// RunCostExceededError preserves the governed quota decision so the durable
+// runner can create a bounded clarification without exposing query results or
+// provider payloads.
+type RunCostExceededError struct {
+	Decision observability.QuotaDecision
+}
+
+func (err *RunCostExceededError) Error() string {
+	return ErrLoopRunCostExceeded.Error()
+}
+
+func (err *RunCostExceededError) Unwrap() error {
+	return ErrLoopRunCostExceeded
+}
 
 type CognitionRunner interface {
 	Execute(context.Context, cognition.RoundRequest) (cognition.RoundResult, error)
@@ -38,17 +61,26 @@ type GovernedToolRegistry interface {
 	Execute(context.Context, toolhost.Invocation) (toolhost.Execution, error)
 }
 
+type LoopCostGovernor interface {
+	RecordCost(context.Context, observability.CostRecord) (bool, error)
+	Check(context.Context, observability.QuotaCheckRequest) (observability.QuotaDecision, error)
+}
+
 type LoopOptions struct {
-	PromptVersion   string
-	PreferredModel  string
-	MaxOutputTokens int
-	ResourceType    string
+	PromptVersion        string
+	PreferredModel       string
+	MaxOutputTokens      int
+	ResourceType         string
+	DefaultBudgetClass   RunBudgetClass
+	BudgetCatalog        *BudgetCatalog
+	BudgetMetricRecorder BudgetMetricRecorder
+	CostGovernor         LoopCostGovernor
 }
 
 func DefaultLoopOptions() LoopOptions {
 	return LoopOptions{
 		PromptVersion: "askdata-question-loop-v1", MaxOutputTokens: 8192,
-		ResourceType: "ASKDATA_QUESTION_RUN",
+		ResourceType: "ASKDATA_QUESTION_RUN", DefaultBudgetClass: BudgetClassSingleQueryComplex,
 	}
 }
 
@@ -56,6 +88,9 @@ func (options LoopOptions) Validate() error {
 	if strings.TrimSpace(options.PromptVersion) == "" || len(options.PromptVersion) > 128 ||
 		options.MaxOutputTokens < 1 || options.MaxOutputTokens > 8192 ||
 		askdata.ID(options.ResourceType).Validate() != nil {
+		return ErrInvalidLoop
+	}
+	if _, valid := runTypeForBudgetClass(options.DefaultBudgetClass); !valid {
 		return ErrInvalidLoop
 	}
 	return nil
@@ -69,6 +104,7 @@ type GovernedFact struct {
 type LoopRequest struct {
 	Run              Run
 	Stage            cognition.Stage
+	BudgetClass      RunBudgetClass
 	Facts            []GovernedFact
 	Authorization    toolhost.AuthorizationContext
 	SeenActionHashes []askdata.ContentHash
@@ -131,8 +167,25 @@ func (loop *Loop) Run(ctx context.Context, request LoopRequest) (LoopResult, err
 	if err != nil {
 		return result, err
 	}
+	budgetClass := request.BudgetClass
+	if budgetClass == "" {
+		budgetClass = loop.options.DefaultBudgetClass
+	}
+	budget, err := loop.resolveBudget(request.Run.DomainID, budgetClass)
+	if err != nil {
+		return result, ErrInvalidLoop
+	}
+	effectiveLimits := constrainLoopLimits(request.Run.Limits, budget)
+	if result.Usage.validate(effectiveLimits) != nil {
+		result.Usage.Exhausted = true
+		return result, ErrLoopBudgetExhausted
+	}
+	monitor, err := NewBudgetMonitor(request.Run.DomainID, budget, loop.options.BudgetMetricRecorder)
+	if err != nil {
+		return result, ErrInvalidLoop
+	}
 	started := time.Now()
-	remainingDuration := request.Run.Limits.MaxDurationMS - request.Run.Usage.ElapsedMS
+	remainingDuration := effectiveLimits.MaxDurationMS - request.Run.Usage.ElapsedMS
 	if remainingDuration <= 0 {
 		result.Usage.Exhausted = true
 		return result, ErrLoopBudgetExhausted
@@ -140,7 +193,7 @@ func (loop *Loop) Run(ctx context.Context, request LoopRequest) (LoopResult, err
 	loopContext, cancel := context.WithTimeout(ctx, time.Duration(remainingDuration)*time.Millisecond)
 	defer cancel()
 
-	available, err := loop.availableTools(request.Stage, request.Authorization, result.Usage, request.Run.Limits)
+	available, err := loop.availableTools(request.Stage, request.Authorization, result.Usage, effectiveLimits)
 	if err != nil {
 		return result, err
 	}
@@ -153,7 +206,7 @@ func (loop *Loop) Run(ctx context.Context, request LoopRequest) (LoopResult, err
 	result.Transcript = cloneMessages(messages)
 
 	for {
-		if err := reserveCognitionStep(request.Run.Limits, result.Usage); err != nil {
+		if err := reserveCognitionStep(effectiveLimits, result.Usage); err != nil {
 			result.Usage.Exhausted = true
 			return result, err
 		}
@@ -177,6 +230,13 @@ func (loop *Loop) Run(ctx context.Context, request LoopRequest) (LoopResult, err
 			}
 			return result, classified
 		}
+		if err := loop.accountCognitionCost(loopContext, request.Run, budgetClass, round); err != nil {
+			return result, err
+		}
+		if hardTimeoutObserved(ctx, monitor, result.Usage) {
+			result.Usage.Exhausted = true
+			return result, ErrLoopTimeout
+		}
 		if err := validateCognitionRound(round, request.Stage, result.SeenActionHashes); err != nil {
 			return result, err
 		}
@@ -196,22 +256,31 @@ func (loop *Loop) Run(ctx context.Context, request LoopRequest) (LoopResult, err
 		if containsToolCallID(result.SeenToolCallIDs, call.CallID) {
 			return result, ErrLoopNoProgress
 		}
-		available, err = loop.availableTools(request.Stage, request.Authorization, result.Usage, request.Run.Limits)
+		available, err = loop.availableTools(request.Stage, request.Authorization, result.Usage, effectiveLimits)
 		if err != nil {
 			return result, err
 		}
 		if !containsToolName(available, call.Tool) {
 			return result, ErrLoopToolUnavailable
 		}
-		if result.Usage.StepCount >= request.Run.Limits.MaxSteps {
+		if result.Usage.StepCount >= effectiveLimits.MaxSteps {
 			result.Usage.Exhausted = true
 			return result, ErrLoopBudgetExhausted
 		}
+		allowance := remainingToolBudget(effectiveLimits, result.Usage)
+		call, err = security.SanitizeToolCall(security.ToolSecurityContext{
+			Authorization:  request.Authorization,
+			Budget:         allowance,
+			AvailableTools: append([]toolhost.ToolName(nil), available...),
+		}, call)
+		if err != nil {
+			return result, ErrLoopToolBlocked
+		}
+		round.Action.ToolCall = &call
 		assistantMessage, err := cognition.AssistantMessage(round)
 		if err != nil {
 			return result, ErrInvalidLoop
 		}
-		allowance := remainingToolBudget(request.Run.Limits, result.Usage)
 		execution, err := loop.tools.Execute(loopContext, toolhost.Invocation{
 			Authorization: request.Authorization,
 			Budget:        allowance,
@@ -228,12 +297,19 @@ func (loop *Loop) Run(ctx context.Context, request LoopRequest) (LoopResult, err
 			execution.Response.Tool != call.Tool || !chargeFitsAllowance(execution.Charge, allowance) {
 			return result, ErrInvalidLoop
 		}
+		if err := loop.accountQueryCost(loopContext, request.Run, budgetClass, call, execution); err != nil {
+			return result, err
+		}
 		result.ToolExecutions = append(result.ToolExecutions, cloneToolExecution(execution))
 		result.Usage.StepCount++
 		result.Usage.ToolCallsUsed += execution.Charge.ToolCalls
 		result.Usage.FormalQueriesUsed += execution.Charge.FormalQueries
 		result.Usage.ValidationQueriesUsed += execution.Charge.ValidationQueries
 		updateLoopElapsed(&result.Usage, request.Run.Usage.ElapsedMS, started)
+		if hardTimeoutObserved(ctx, monitor, result.Usage) {
+			result.Usage.Exhausted = true
+			return result, ErrLoopTimeout
+		}
 		result.SeenToolCallIDs = append(result.SeenToolCallIDs, call.CallID)
 		toolMessage, err := cognition.ToolMessage(execution.Response)
 		if err != nil {
@@ -260,6 +336,152 @@ func (loop *Loop) Run(ctx context.Context, request LoopRequest) (LoopResult, err
 			return result, ErrLoopNoProgress
 		}
 	}
+}
+
+func (loop *Loop) accountCognitionCost(
+	ctx context.Context,
+	run Run,
+	budgetClass RunBudgetClass,
+	round cognition.RoundResult,
+) error {
+	if loop.options.CostGovernor == nil {
+		return nil
+	}
+	if round.Usage.PromptTokens < 1 || round.Usage.CompletionTokens < 1 ||
+		round.CostMicros < 0 || askdata.ID(round.AIRequestID).Validate() != nil {
+		return ErrLoopCostAccountingFailed
+	}
+	createdAt := time.Now().UTC()
+	record := observability.CostRecord{
+		ID:    deterministicCostRecordID(run.ID, "llm", askdata.ID(round.AIRequestID)),
+		RunID: run.ID, TenantID: run.TenantID, DomainID: run.DomainID, ActorID: run.ActorID,
+		QuestionType: string(budgetClass), Provider: safeCostLabel(round.Provider, "governed-ai"),
+		Model:        safeCostLabel(round.ProviderModel, "governed-model"),
+		PromptTokens: int64(round.Usage.PromptTokens), CompletionTokens: int64(round.Usage.CompletionTokens),
+		CostCents: costMicrosToCents(round.CostMicros), CreatedAt: createdAt,
+	}
+	return loop.recordAndCheckCost(ctx, run, record, createdAt)
+}
+
+func (loop *Loop) accountQueryCost(
+	ctx context.Context,
+	run Run,
+	budgetClass RunBudgetClass,
+	call toolhost.CallRequest,
+	execution toolhost.Execution,
+) error {
+	if loop.options.CostGovernor == nil ||
+		(execution.Charge.FormalQueries == 0 && execution.Charge.ValidationQueries == 0) {
+		return nil
+	}
+	if execution.QueryScanBytes <= 0 {
+		return ErrLoopCostAccountingFailed
+	}
+	createdAt := time.Now().UTC()
+	record := observability.CostRecord{
+		ID:    deterministicCostRecordID(run.ID, "query", call.CallID),
+		RunID: run.ID, TenantID: run.TenantID, DomainID: run.DomainID, ActorID: run.ActorID,
+		QuestionType: string(budgetClass), Provider: "warehouse",
+		Model:          safeCostLabel(string(call.Tool), "governed-query"),
+		QueryScanBytes: execution.QueryScanBytes, CreatedAt: createdAt,
+	}
+	return loop.recordAndCheckCost(ctx, run, record, createdAt)
+}
+
+func (loop *Loop) recordAndCheckCost(
+	ctx context.Context,
+	run Run,
+	record observability.CostRecord,
+	at time.Time,
+) error {
+	if record.Validate() != nil {
+		return ErrLoopCostAccountingFailed
+	}
+	// Cost attribution must survive the question deadline or a disconnected
+	// caller. WithoutCancel retains tenant/access values while the short local
+	// deadline keeps the accounting path bounded.
+	accountingContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	if _, err := loop.options.CostGovernor.RecordCost(accountingContext, record); err != nil {
+		return fmt.Errorf("%w: %v", ErrLoopCostAccountingFailed, err)
+	}
+	decision, err := loop.options.CostGovernor.Check(accountingContext, observability.QuotaCheckRequest{
+		TenantID: run.TenantID, DomainID: run.DomainID, ActorID: run.ActorID, RunID: run.ID,
+		At: at, Reserve: observability.QuotaUsage{},
+	})
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrLoopCostAccountingFailed, err)
+	}
+	if decision.Status == observability.QuotaRunCostExceeded && !decision.Allowed && decision.RequireClarification {
+		return &RunCostExceededError{Decision: decision}
+	}
+	if !decision.Allowed || decision.Status == observability.QuotaRunCostExceeded {
+		return ErrLoopCostAccountingFailed
+	}
+	return nil
+}
+
+func deterministicCostRecordID(runID askdata.ID, kind string, sourceID askdata.ID) askdata.ID {
+	value := strings.Join([]string{string(runID), kind, string(sourceID)}, "\x00")
+	return askdata.ID(uuid.NewSHA1(uuid.NameSpaceOID, []byte(value)).String())
+}
+
+func safeCostLabel(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if costSafeLabel(value) {
+		return value
+	}
+	digest := sha256.Sum256([]byte(value))
+	return fallback + "-" + fmt.Sprintf("%x", digest[:8])
+}
+
+func costSafeLabel(value string) bool {
+	if len(value) < 1 || len(value) > 128 || value[0] > 127 ||
+		!((value[0] >= 'A' && value[0] <= 'Z') || (value[0] >= 'a' && value[0] <= 'z') ||
+			(value[0] >= '0' && value[0] <= '9')) {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if !((character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') ||
+			(character >= '0' && character <= '9') || strings.ContainsRune("._:/-", rune(character))) {
+			return false
+		}
+	}
+	return true
+}
+
+func costMicrosToCents(costMicros int64) int64 {
+	if costMicros <= 0 {
+		return 0
+	}
+	cents := costMicros / 10_000
+	if costMicros%10_000 != 0 {
+		cents++
+	}
+	return cents
+}
+
+func (loop *Loop) resolveBudget(domainID askdata.ID, class RunBudgetClass) (RunBudget, error) {
+	if loop.options.BudgetCatalog != nil {
+		return loop.options.BudgetCatalog.Resolve(domainID, class)
+	}
+	return DefaultRunBudget(class)
+}
+
+func constrainLoopLimits(persisted BudgetLimits, budget RunBudget) BudgetLimits {
+	result := persisted
+	result.MaxLLMCalls = minInt(result.MaxLLMCalls, budget.MaxLLMCalls)
+	result.MaxToolCalls = minInt(result.MaxToolCalls, budget.MaxToolCalls)
+	result.MaxFormalQueries = minInt(result.MaxFormalQueries, budget.MaxPrimaryQueries)
+	result.MaxValidationQueries = minInt(result.MaxValidationQueries, budget.MaxValidationQueries)
+	result.MaxDurationMS = minInt64(result.MaxDurationMS, int64(budget.HardTimeout/time.Millisecond))
+	return result
+}
+
+func hardTimeoutObserved(ctx context.Context, monitor *BudgetMonitor, usage BudgetUsage) bool {
+	observation, err := monitor.Observe(ctx, RunBudgetUsageFromLegacy(usage))
+	return err == nil && observation.HardTimeoutReached
 }
 
 func validateLoopRequest(request LoopRequest) (map[askdata.ID]askdata.EvidenceRef, []cognition.PromptFact, error) {
@@ -566,6 +788,20 @@ func containsToolCallID(values []askdata.ID, target askdata.ID) bool {
 
 func maxInt(left, right int) int {
 	if left > right {
+		return left
+	}
+	return right
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func minInt64(left, right int64) int64 {
+	if left < right {
 		return left
 	}
 	return right

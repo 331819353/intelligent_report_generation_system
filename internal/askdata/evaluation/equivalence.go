@@ -767,6 +767,7 @@ func compareIR(expected, actual ir.SemanticIR) []Difference {
 		{"ir.irVersion", expected.IRVersion, actual.IRVersion},
 		{"ir.semanticReleaseId", expected.SemanticReleaseID, actual.SemanticReleaseID},
 		{"ir.semanticContentHash", expected.SemanticContentHash, actual.SemanticContentHash},
+		{"ir.domainId", expected.DomainID, actual.DomainID},
 		{"ir.modelVersionId", expected.ModelVersionID, actual.ModelVersionID},
 		{"ir.metrics", expected.Metrics, actual.Metrics},
 		{"ir.groupBy", expected.GroupBy, actual.GroupBy},

@@ -1,0 +1,28 @@
+{
+  "type": "filter-control",
+  "version": "1.0.0",
+  "renderer": "CONTROL",
+  "displayName": "筛选控件",
+  "category": "CONTROL",
+  "minSize": { "w": 3, "h": 1 },
+  "recommendedSize": { "w": 4, "h": 2 },
+  "dataContract": {
+    "dimensions": { "min": 1, "max": 1 },
+    "measures": { "min": 0, "max": 0 },
+    "timeField": { "required": false },
+    "roles": ["DIMENSION", "TIME"]
+  },
+  "stackingRequiresAdditive": false,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [],
+    "properties": {
+	  "title": { "type": "string" },
+      "showLabel": { "type": "boolean" }
+    }
+  },
+  "defaultOptions": { "showLabel": true },
+  "mobilePolicy": { "supported": true, "defaultLegendMode": "HIDDEN", "labelDegradation": "ELLIPSIS" },
+  "supportedInteractions": ["CLICK_FILTER"]
+}

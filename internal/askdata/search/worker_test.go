@@ -10,6 +10,7 @@ import (
 type embeddingProviderFixture struct {
 	configured bool
 	model      string
+	dimension  int
 	vectors    [][]float32
 	err        error
 	inputs     []string
@@ -17,7 +18,12 @@ type embeddingProviderFixture struct {
 
 func (provider *embeddingProviderFixture) Configured() bool { return provider.configured }
 func (provider *embeddingProviderFixture) Model() string    { return provider.model }
-func (provider *embeddingProviderFixture) Dimensions() int  { return 2_560 }
+func (provider *embeddingProviderFixture) Dimensions() int {
+	if provider.dimension == 0 {
+		return SearchEmbeddingDimension
+	}
+	return provider.dimension
+}
 func (provider *embeddingProviderFixture) Embed(_ context.Context, input []string) ([][]float32, error) {
 	provider.inputs = append([]string(nil), input...)
 	return provider.vectors, provider.err
@@ -99,5 +105,17 @@ func TestEmbeddingWorkerFailsClosedOnProviderAndDimensionErrors(t *testing.T) {
 				t.Fatalf("failure code = %q", store.failed["event-1"])
 			}
 		})
+	}
+}
+
+func TestEmbeddingWorkerRejectsConfiguredModelDimensionMismatchBeforeClaim(t *testing.T) {
+	store := &embeddingStoreFixture{}
+	provider := &embeddingProviderFixture{
+		configured: true, model: "Qwen3-Embedding-4B", dimension: 1_536,
+	}
+	if _, err := NewEmbeddingWorker(store, provider).ProcessNext(
+		context.Background(), "tenant-1", "worker-1", time.Minute,
+	); !errors.Is(err, ErrEmbeddingModelMismatch) {
+		t.Fatalf("error = %v", err)
 	}
 }

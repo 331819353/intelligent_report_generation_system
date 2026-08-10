@@ -29,11 +29,13 @@ const (
 	ObjectMember           ObjectType = "MEMBER"
 	ObjectBusinessTerm     ObjectType = "BUSINESS_TERM"
 	ObjectCertifiedExample ObjectType = "CERTIFIED_EXAMPLE"
+	ObjectReportAsset      ObjectType = "REPORT_ASSET"
 
 	ViewNameAlias          ViewType = "NAME_ALIAS"
 	ViewDefinitionQuestion ViewType = "DEFINITION_QUESTION"
 	ViewDimensionValue     ViewType = "DIMENSION_VALUE"
 	ViewExampleIntent      ViewType = "EXAMPLE_INTENT"
+	ViewReportPrior        ViewType = "REPORT_PRIOR"
 
 	IndexLexical IndexPolicy = "LEXICAL"
 	IndexVector  IndexPolicy = "VECTOR"
@@ -44,6 +46,7 @@ const (
 	memberDocumentVersion    = "member-search-v1"
 	termDocumentVersion      = "term-search-v1"
 	exampleDocumentVersion   = "certified-example-search-v1"
+	reportDocumentVersion    = "report-asset-search-v1"
 
 	maxDocumentRunes = 32_768
 )
@@ -98,6 +101,17 @@ type CertifiedExampleDocumentInput struct {
 	QuestionTemplate, IntentSummary string
 	MetricNames, DimensionNames     []string
 	Sensitivity                     registry.Sensitivity
+}
+
+// ReportAssetDocumentInput deliberately has no narrative/free-text conclusion
+// field. A certified report asset contributes only governed semantic context
+// and presentation priors; it can never turn historical prose into a fact.
+type ReportAssetDocumentInput struct {
+	ObjectVersionID, ReportID, ReportVersionID, SemanticReleaseID askdata.ID
+	ReportTitle, ReportDescription, SectionPurpose, BlockTitle    string
+	ComponentType, ComponentVersion, NarrativeRole                string
+	MetricVersionIDs, DimensionVersionIDs, MemberVersionIDs       []askdata.ID
+	Sensitivity                                                   registry.Sensitivity
 }
 
 func BuildMetricDocument(input MetricDocumentInput) (Document, error) {
@@ -240,6 +254,63 @@ func BuildCertifiedExampleDocument(input CertifiedExampleDocumentInput) (Documen
 	)
 }
 
+func BuildReportAssetDocument(input ReportAssetDocumentInput) (Document, error) {
+	for name, id := range map[string]askdata.ID{
+		"reportId": input.ReportID, "reportVersionId": input.ReportVersionID,
+		"semanticReleaseId": input.SemanticReleaseID,
+	} {
+		if err := id.Validate(); err != nil {
+			return Document{}, fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	metrics, err := normalizeIDs(input.MetricVersionIDs, 16)
+	if err != nil || len(metrics) == 0 {
+		return Document{}, errors.New("metricVersionIds must contain 1 to 16 unique IDs")
+	}
+	dimensions, err := normalizeIDs(input.DimensionVersionIDs, 32)
+	if err != nil {
+		return Document{}, fmt.Errorf("dimensionVersionIds: %w", err)
+	}
+	members, err := normalizeIDs(input.MemberVersionIDs, 64)
+	if err != nil {
+		return Document{}, fmt.Errorf("memberVersionIds: %w", err)
+	}
+	componentType, err := normalizeText(input.ComponentType, 128)
+	if err != nil || componentType == "" {
+		return Document{}, errors.New("componentType is required")
+	}
+	componentVersion, err := normalizeText(input.ComponentVersion, 64)
+	if err != nil || componentVersion == "" {
+		return Document{}, errors.New("componentVersion is required")
+	}
+	metadata := struct {
+		Name                string       `json:"name"`
+		ReportID            askdata.ID   `json:"reportId"`
+		ReportVersionID     askdata.ID   `json:"reportVersionId"`
+		SemanticReleaseID   askdata.ID   `json:"semanticReleaseId"`
+		MetricVersionIDs    []askdata.ID `json:"metricVersionIds"`
+		DimensionVersionIDs []askdata.ID `json:"dimensionVersionIds"`
+		MemberVersionIDs    []askdata.ID `json:"memberVersionIds"`
+		ComponentType       string       `json:"componentType"`
+		ComponentVersion    string       `json:"componentVersion"`
+		NarrativeRole       string       `json:"narrativeRole,omitempty"`
+	}{
+		input.ReportTitle, input.ReportID, input.ReportVersionID, input.SemanticReleaseID,
+		metrics, dimensions, members, componentType, componentVersion, input.NarrativeRole,
+	}
+	return buildDocument(
+		ObjectReportAsset, input.ObjectVersionID, ViewReportPrior, input.Sensitivity,
+		reportDocumentVersion, []field{
+			{"report_title", input.ReportTitle}, {"report_description", input.ReportDescription},
+			{"section_purpose", input.SectionPurpose}, {"block_title", input.BlockTitle},
+			{"component_type", componentType}, {"narrative_role", input.NarrativeRole},
+			{"metric_version_ids", joinIDs(metrics)},
+			{"dimension_version_ids", joinIDs(dimensions)},
+			{"member_version_ids", joinIDs(members)},
+		}, metadata,
+	)
+}
+
 type field struct{ name, value string }
 
 func buildDocument(
@@ -327,6 +398,34 @@ func normalizeList(values []string, maximum int) ([]string, error) {
 	}
 	sort.Slice(result, func(i, j int) bool { return strings.ToLower(result[i]) < strings.ToLower(result[j]) })
 	return result, nil
+}
+
+func normalizeIDs(values []askdata.ID, maximum int) ([]askdata.ID, error) {
+	if len(values) > maximum {
+		return nil, fmt.Errorf("exceeds %d items", maximum)
+	}
+	result := make([]askdata.ID, 0, len(values))
+	seen := map[askdata.ID]struct{}{}
+	for _, value := range values {
+		if err := value.Validate(); err != nil {
+			return nil, err
+		}
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result, nil
+}
+
+func joinIDs(values []askdata.ID) string {
+	items := make([]string, len(values))
+	for index := range values {
+		items[index] = string(values[index])
+	}
+	return strings.Join(items, " / ")
 }
 
 func normalizeText(value string, maximum int) (string, error) {

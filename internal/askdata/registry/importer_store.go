@@ -91,14 +91,22 @@ func insertSemanticModelDraft(ctx context.Context, tx pgx.Tx, model SemanticMode
 func insertMeasureDraft(ctx context.Context, tx pgx.Tx, measure Measure) error {
 	tag, err := tx.Exec(ctx, `INSERT INTO askdata.measures(
 		id,tenant_id,domain_id,measure_id,version_no,semantic_model_version_id,
-		code,name,description,formula_ast,aggregation,additivity,data_type,unit,
+		code,name,description,formula_ast,aggregation,additivity,
+		semi_additive_time_aggregation,aggregation_restriction,non_additive_dimensions,
+		data_type,unit,currency,zero_denominator_policy,display_precision,
+		additivity_suggestion,additivity_confirmed_by,additivity_confirmed_at,
 		status,content_hash,owner_id
-	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'DRAFT',$15,$16)
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,'')::text,
+		NULLIF($13,'')::text,NULLIF($14,'')::text,$15,$16,$17,NULLIF($18,'')::text,
+		$19,$20,NULLIF($21,'')::text,NULLIF($22,'')::uuid,$23,'DRAFT',$24,$25)
 	ON CONFLICT(tenant_id,measure_id,version_no) DO NOTHING`,
 		measure.ID, measure.TenantID, measure.DomainID, measure.ObjectID,
 		measure.VersionNo, measure.SemanticModelVersionID, measure.Code,
 		measure.Name, measure.Description, measure.FormulaAST, measure.Aggregation,
-		measure.Additivity, measure.DataType, measure.Unit, measure.ContentHash, measure.OwnerID)
+		measure.Additivity, measure.SemiAdditiveTimeAggregation, measure.AggregationRestriction,
+		measure.NonAdditiveDimensions, measure.DataType, measure.Unit, measure.Currency,
+		measure.ZeroDenominatorPolicy, measure.DisplayPrecision, measure.AdditivitySuggestion,
+		measure.AdditivityConfirmedBy, measure.AdditivityConfirmedAt, measure.ContentHash, measure.OwnerID)
 	if err != nil {
 		return err
 	}

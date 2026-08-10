@@ -1,0 +1,17 @@
+DROP TRIGGER IF EXISTS report_share_asset_events ON platform.report_shares;
+DROP TRIGGER IF EXISTS report_asset_projection_events ON platform.reports;
+DROP TRIGGER IF EXISTS report_object_permission_action_guard ON platform.object_permissions;
+DROP TRIGGER IF EXISTS report_asset_status_guard ON platform.reports;
+DROP TRIGGER IF EXISTS report_asset_events_immutable ON platform.report_asset_events;
+DROP FUNCTION IF EXISTS platform.append_report_share_asset_event();
+DROP FUNCTION IF EXISTS platform.append_report_asset_projection_event();
+DROP FUNCTION IF EXISTS platform.guard_report_permission_action();
+DROP FUNCTION IF EXISTS platform.guard_report_asset_status_transition();
+DROP FUNCTION IF EXISTS platform.reject_report_asset_event_mutation();
+DROP POLICY IF EXISTS report_asset_events_insert ON platform.report_asset_events;
+DROP POLICY IF EXISTS report_asset_events_read ON platform.report_asset_events;
+DROP INDEX IF EXISTS platform.report_asset_name_search_idx;
+DROP INDEX IF EXISTS platform.report_asset_domain_owner_updated_idx;
+DROP INDEX IF EXISTS platform.report_asset_domain_status_updated_idx;
+DROP INDEX IF EXISTS platform.report_asset_events_timeline_idx;
+DROP TABLE IF EXISTS platform.report_asset_events;

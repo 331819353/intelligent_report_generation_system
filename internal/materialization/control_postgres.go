@@ -956,10 +956,20 @@ func loadBuildMaterializationTx(
 	var item BuildMaterialization
 	var rowCount, sizeBytes pgtype.Int8
 	var activatedAt pgtype.Timestamptz
-	err := tx.QueryRow(ctx, `SELECT id::text,dataset_version_id::text,layer,status,
-		schema_hash,snapshot_hash,row_count,size_bytes,activated_at
-		FROM platform.dataset_materializations
-		WHERE build_run_id=$1`, buildID).
+	err := tx.QueryRow(ctx, `SELECT materialization.id::text,
+		materialization.dataset_version_id::text,materialization.layer,
+		CASE
+		  WHEN snapshot.snapshot_completed_at IS NULL THEN 'BUILDING'
+		  WHEN snapshot.quality_status='FAIL' THEN 'FAILED'
+		  ELSE materialization.status
+		END,
+		snapshot.schema_hash,snapshot.snapshot_hash,snapshot.row_count,
+		snapshot.size_bytes,snapshot.snapshot_completed_at
+		FROM platform.materialization_snapshots AS snapshot
+		JOIN platform.dataset_materializations AS materialization
+		  ON materialization.id=snapshot.materialization_id
+		 AND materialization.tenant_id=snapshot.tenant_id
+		WHERE snapshot.build_run_id=$1`, buildID).
 		Scan(
 			&item.ID, &item.DatasetVersionID, &item.Layer, &item.Status,
 			&item.SchemaHash, &item.SnapshotHash, &rowCount, &sizeBytes, &activatedAt,

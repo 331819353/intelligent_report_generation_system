@@ -19,12 +19,13 @@ type RetrievalStore interface {
 }
 
 type RetrievalRequest struct {
-	Scope          askdata.PolicyScope
-	Mention        string
-	ObjectTypes    []ObjectType
-	Embedding      []float32
-	EmbeddingModel string
-	TopKPerType    int
+	Scope              askdata.PolicyScope
+	Mention            string
+	ObjectTypes        []ObjectType
+	Embedding          []float32
+	EmbeddingModel     string
+	TopKPerType        int
+	DeterministicExact []RawHit
 }
 
 type RetrievalResult struct {
@@ -64,7 +65,7 @@ func (retriever *Retriever) Retrieve(ctx context.Context, request RetrievalReque
 	}
 	mention = strings.ToLower(mention)
 	objectTypes := append([]ObjectType(nil), request.ObjectTypes...)
-	if len(objectTypes) == 0 || len(objectTypes) > 5 {
+	if len(objectTypes) == 0 || len(objectTypes) > 6 {
 		return RetrievalResult{}, ErrInvalidRetrieval
 	}
 	sort.Slice(objectTypes, func(i, j int) bool { return objectTypes[i] < objectTypes[j] })
@@ -85,6 +86,20 @@ func (retriever *Retriever) Retrieve(ctx context.Context, request RetrievalReque
 	if err != nil {
 		return RetrievalResult{}, err
 	}
+	dictionaryExact, err := validateDeterministicExactHits(objectTypes, request.DeterministicExact)
+	if err != nil {
+		return RetrievalResult{}, err
+	}
+	exact = append(dictionaryExact, exact...)
+	sort.SliceStable(exact, func(left, right int) bool {
+		if exact[left].Score != exact[right].Score {
+			return exact[left].Score > exact[right].Score
+		}
+		if exact[left].ObjectType != exact[right].ObjectType {
+			return exact[left].ObjectType < exact[right].ObjectType
+		}
+		return exact[left].ObjectVersionID < exact[right].ObjectVersionID
+	})
 	lexical, err := retriever.store.Lexical(ctx, request.Scope, mention, objectTypes, queryLimit)
 	if err != nil {
 		return RetrievalResult{}, err
@@ -111,6 +126,34 @@ func (retriever *Retriever) Retrieve(ctx context.Context, request RetrievalReque
 	result.Candidates, err = MergeRRF(exact, lexical, vector, rank)
 	if err != nil {
 		return RetrievalResult{}, err
+	}
+	return result, nil
+}
+
+func validateDeterministicExactHits(
+	objectTypes []ObjectType,
+	hits []RawHit,
+) ([]RawHit, error) {
+	requested := make(map[ObjectType]struct{}, len(objectTypes))
+	for _, objectType := range objectTypes {
+		requested[objectType] = struct{}{}
+	}
+	result := []RawHit{}
+	seen := map[string]struct{}{}
+	for _, hit := range hits {
+		if !validRetrievalObjectType(hit.ObjectType) || hit.ObjectVersionID.Validate() != nil ||
+			hit.InputHash.Validate() != nil || hit.Score != 1 {
+			return nil, ErrInvalidRetrieval
+		}
+		if _, wanted := requested[hit.ObjectType]; !wanted {
+			continue
+		}
+		key := string(hit.ObjectType) + "\x00" + string(hit.ObjectVersionID)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, hit)
 	}
 	return result, nil
 }

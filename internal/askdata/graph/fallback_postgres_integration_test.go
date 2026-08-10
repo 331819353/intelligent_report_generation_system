@@ -99,8 +99,8 @@ func TestPostgresFallbackAndCertifiedCacheAgainstRuntimeRole(t *testing.T) {
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO askdata.metric_versions(
 			id,tenant_id,domain_id,metric_id,version_no,semantic_model_version_id,
-			formula_ast,additivity,status,content_hash,owner_id
-		) VALUES($1,$2,$3,$4,1,$5,'{}','ADDITIVE','CERTIFIED',$6,$7)`,
+			formula_ast,unit,additivity,status,content_hash,owner_id
+		) VALUES($1,$2,$3,$4,1,$5,'{}','COUNT','FULLY_ADDITIVE','CERTIFIED',$6,$7)`,
 			metricVersionIDs[index], tenantID, domainID, metricIDs[index],
 			modelVersionIDs[index], strings.Repeat(string(rune('3'+index)), 64), actorID); err != nil {
 			t.Fatal(err)
@@ -131,7 +131,7 @@ func TestPostgresFallbackAndCertifiedCacheAgainstRuntimeRole(t *testing.T) {
 		right_model_version_id,relationship_type,join_type,cardinality,join_ast,
 		fanout_policy,status,content_hash,owner_id
 	) VALUES($1,$2,$3,$4,1,$5,$6,'MODEL_JOIN','INNER','ONE_TO_MANY','{}',
-		'CERTIFIED_PREAGG','CERTIFIED',$7,$8)`, relationshipVersionID, tenantID,
+		'SAFE','CERTIFIED',$7,$8)`, relationshipVersionID, tenantID,
 		domainID, relationshipID, modelVersionIDs[0], modelVersionIDs[1],
 		strings.Repeat("8", 64), actorID); err != nil {
 		t.Fatal(err)
@@ -254,7 +254,7 @@ func TestPostgresFallbackAndCertifiedCacheAgainstRuntimeRole(t *testing.T) {
 		FromModelVersionID: leftRef.VersionID,
 		ToModelVersionID:   rightRef.VersionID,
 		Direction:          direction, JoinType: registry.JoinInner,
-		Cardinality: registry.CardinalityOneToMany, FanoutPolicy: registry.FanoutCertifiedPre,
+		Cardinality: registry.CardinalityOneToMany, FanoutPolicy: registry.FanoutSafe,
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -277,6 +277,10 @@ func TestPostgresFallbackAndCertifiedCacheAgainstRuntimeRole(t *testing.T) {
 		}},
 		[]JoinPath{expectedPath},
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedPlan, err = expectedPlan.WithDegradation(DegradationNebulaUnavailable)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,12 +329,27 @@ func TestPostgresFallbackAndCertifiedCacheAgainstRuntimeRole(t *testing.T) {
 	if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+pgx.Identifier{appRole}.Sanitize()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolvePostgresFallbackTx(ctx, tx, request); !errors.Is(err, ErrPostgresFallbackUnavailable) {
-		t.Fatalf("fallback accepted stale graph projection: %v", err)
+	if _, err := resolvePostgresFallbackTx(ctx, tx, request); err != nil {
+		t.Fatalf("registry fallback depended on stale graph projection: %v", err)
 	}
 	_, _, hit, err = loadCertifiedPlanCacheTx(ctx, tx, request, requestHash)
 	if err != nil || hit {
 		t.Fatalf("cache replayed stale graph projection hit=%t error=%v", hit, err)
+	}
+
+	outsideRelease := request
+	outsideObjectID, outsideVersionID := askdata.ID(uuid.NewString()), askdata.ID(uuid.NewString())
+	outsideRelease.MetricRefs = append([]ObjectVersionRef(nil), request.MetricRefs...)
+	outsideRelease.MetricRefs[0] = ObjectVersionRef{
+		ObjectID: outsideObjectID, VersionID: outsideVersionID, Version: 1,
+	}
+	outsideRelease, err = outsideRelease.Normalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolvePostgresFallbackTx(ctx, tx, outsideRelease); !errors.Is(err, ErrGraphFallbackBlocked) ||
+		strings.Contains(err.Error(), string(outsideObjectID)) || strings.Contains(err.Error(), string(outsideVersionID)) {
+		t.Fatalf("release trimming did not fail closed without leaking object identity: %v", err)
 	}
 
 	accessCtx := database.WithAccessContext(context.Background(), actorID, domainID)

@@ -130,11 +130,20 @@ const (
 	SortDescending SortDirection = "DESC"
 )
 
+type RankBy string
+
+const (
+	RankByCurrentValue RankBy = "CURRENT_VALUE"
+	RankByDelta        RankBy = "DELTA"
+	RankByRatio        RankBy = "RATIO"
+)
+
 type OrderingMention struct {
 	Text       string        `json:"text"`
 	Span       Span          `json:"span"`
 	TargetText string        `json:"targetText"`
 	Direction  SortDirection `json:"direction"`
+	RankBy     RankBy        `json:"rankBy"`
 }
 
 type NeededEvidence string
@@ -302,9 +311,17 @@ func (understanding QuestionUnderstanding) Validate() error {
 		if ordering.Direction != SortAscending && ordering.Direction != SortDescending {
 			return fmt.Errorf("ordering[%d].direction is invalid", index)
 		}
+		if ordering.RankBy != "" && ordering.RankBy != RankByCurrentValue &&
+			ordering.RankBy != RankByDelta && ordering.RankBy != RankByRatio {
+			return fmt.Errorf("ordering[%d].rankBy is invalid", index)
+		}
+		if len(understanding.Comparisons) == 0 &&
+			(ordering.RankBy == RankByDelta || ordering.RankBy == RankByRatio) {
+			return fmt.Errorf("ordering[%d].rankBy requires comparison", index)
+		}
 	}
-	if understanding.Limit != nil && (*understanding.Limit < 1 || *understanding.Limit > 10_000) {
-		return errors.New("limit must be between 1 and 10000")
+	if understanding.Limit != nil && (*understanding.Limit < 1 || *understanding.Limit > 1_000) {
+		return errors.New("limit must be between 1 and 1000")
 	}
 	if len(understanding.UnresolvedSpans) > MaxUnresolvedSpans {
 		return fmt.Errorf("unresolvedSpans exceeds %d items", MaxUnresolvedSpans)

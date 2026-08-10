@@ -59,7 +59,8 @@ func (store *PostgresEmbeddingStore) ClaimBatch(
 			FROM askdata.search_documents AS document
 			WHERE event.search_document_id=document.id AND event.tenant_id=document.tenant_id
 			  AND event.input_hash=document.input_hash AND event.status='SUCCEEDED'
-			  AND document.embedding_status='SUCCEEDED' AND document.embedding_model<>$1`, model); err != nil {
+			  AND document.embedding_status='SUCCEEDED'
+			  AND (document.embedding_model<>$1 OR document.embedding_dim<>2560)`, model); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `WITH expired AS (
@@ -69,7 +70,7 @@ func (store *PostgresEmbeddingStore) ClaimBatch(
 			WHERE status='RUNNING' AND lease_expires_at<=now() AND attempt>=max_attempts
 			RETURNING search_document_id,input_hash
 		) UPDATE askdata.search_documents AS document SET
-			embedding_status='FAILED',embedding=NULL,embedding_model='',embedding_version='',
+			embedding_status='FAILED',embedding=NULL,embedding_model='',embedding_version='',embedding_dim=0,
 			embedding_error_code='LEASE_EXPIRED',embedded_at=NULL,updated_at=now()
 		FROM expired WHERE document.id=expired.search_document_id
 		  AND document.input_hash=expired.input_hash`); err != nil {
@@ -78,7 +79,7 @@ func (store *PostgresEmbeddingStore) ClaimBatch(
 		rows, err := tx.Query(ctx, `WITH picked AS (
 			SELECT event.id,event.domain_id,event.search_document_id,event.input_hash,
 			       event.attempt,event.max_attempts,document.document,
-			       document.embedding_status,document.embedding_model
+			       document.embedding_status,document.embedding_model,document.embedding_dim
 			FROM askdata.embedding_outbox AS event
 			JOIN askdata.search_documents AS document
 			  ON document.tenant_id=event.tenant_id AND document.id=event.search_document_id
@@ -103,7 +104,8 @@ func (store *PostgresEmbeddingStore) ClaimBatch(
 		) SELECT claimed.id::text,claimed.domain_id::text,claimed.search_document_id::text,
 		         claimed.input_hash,picked.document,claimed.lease_token::text,
 		         claimed.attempt,claimed.max_attempts,
-		         (picked.embedding_status='SUCCEEDED' AND picked.embedding_model=$4) AS current
+		         (picked.embedding_status='SUCCEEDED' AND picked.embedding_model=$4
+		          AND picked.embedding_dim=2560) AS current
 		FROM claimed JOIN picked ON picked.id=claimed.id
 		ORDER BY claimed.id`, limit, workerID, int64(lease/time.Second), model)
 		if err != nil {
@@ -112,6 +114,8 @@ func (store *PostgresEmbeddingStore) ClaimBatch(
 		for rows.Next() {
 			var claim EmbeddingClaim
 			claim.TenantID = tenantID
+			claim.ExpectedModel = model
+			claim.ExpectedDimension = SearchEmbeddingDimension
 			if err := rows.Scan(
 				&claim.ID, &claim.DomainID, &claim.SearchDocumentID, &claim.InputHash,
 				&claim.Text, &claim.LeaseToken, &claim.Attempt, &claim.MaxAttempts, &claim.Current,
@@ -131,7 +135,7 @@ func (store *PostgresEmbeddingStore) ClaimBatch(
 				continue
 			}
 			tag, err := tx.Exec(ctx, `UPDATE askdata.search_documents SET
-				embedding_status='RUNNING',embedding=NULL,embedding_model='',embedding_version='',
+				embedding_status='RUNNING',embedding=NULL,embedding_model='',embedding_version='',embedding_dim=0,
 				embedding_error_code='',embedded_at=NULL,updated_at=now()
 				WHERE id=$1 AND input_hash=$2
 				  AND embedding_status IN ('PENDING','FAILED','RUNNING','SUCCEEDED')`,
@@ -157,16 +161,21 @@ func (store *PostgresEmbeddingStore) Acknowledge(
 func (store *PostgresEmbeddingStore) Complete(
 	ctx context.Context, claim EmbeddingClaim, workerID, model string, vector []float32,
 ) error {
-	if err := validateEmbeddingClaim(claim, workerID); err != nil || strings.TrimSpace(model) == "" ||
-		len(model) > 128 || len(vector) != 2_560 {
+	if strings.TrimSpace(model) == "" || len(model) > 128 ||
+		claim.ExpectedModel == "" || model != claim.ExpectedModel ||
+		claim.ExpectedDimension != SearchEmbeddingDimension || len(vector) != claim.ExpectedDimension {
+		return ErrEmbeddingModelMismatch
+	}
+	if err := validateEmbeddingClaim(claim, workerID); err != nil {
 		return ErrInvalidEmbeddingWork
 	}
 	return database.WithTenantTx(ctx, store.pool, claim.TenantID, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `UPDATE askdata.search_documents SET
-			embedding=$1::halfvec,embedding_model=$2,embedding_version=$2,
+			embedding=$1::halfvec,embedding_model=$2,embedding_version=$2,embedding_dim=$3,
 			embedding_status='SUCCEEDED',embedding_error_code='',embedded_at=now(),updated_at=now()
-			WHERE id=$3 AND input_hash=$4 AND embedding_status='RUNNING'`,
-			formatEmbeddingVector(vector), model, claim.SearchDocumentID, claim.InputHash)
+			WHERE id=$4 AND input_hash=$5 AND embedding_status='RUNNING'`,
+			formatEmbeddingVector(vector), model, claim.ExpectedDimension,
+			claim.SearchDocumentID, claim.InputHash)
 		if err != nil {
 			return err
 		}
@@ -198,7 +207,7 @@ func (store *PostgresEmbeddingStore) Fail(
 			terminal = true
 		}
 		if _, err := tx.Exec(ctx, `UPDATE askdata.search_documents SET
-			embedding_status=$1,embedding=NULL,embedding_model='',embedding_version='',
+			embedding_status=$1,embedding=NULL,embedding_model='',embedding_version='',embedding_dim=0,
 			embedding_error_code=$2,embedded_at=NULL,updated_at=now()
 			WHERE id=$3 AND input_hash=$4 AND embedding_status='RUNNING'`,
 			status, code, claim.SearchDocumentID, claim.InputHash); err != nil {

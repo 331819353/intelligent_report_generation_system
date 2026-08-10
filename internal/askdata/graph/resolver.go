@@ -23,6 +23,7 @@ const (
 	ResolutionSourcePostgresFallback  ResolutionSource = "POSTGRES_FALLBACK"
 	DegradationNebulaUnavailable      string           = "NEBULA_UNAVAILABLE"
 	DegradationNebulaResultIncomplete string           = "NEBULA_RESULT_INCOMPLETE"
+	DegradationNebulaCircuitOpen      string           = "NEBULA_CIRCUIT_OPEN"
 )
 
 type PrimaryPlanner interface {
@@ -54,12 +55,13 @@ func (resolution Resolution) Validate(request PlanRequest) error {
 	}
 	switch resolution.Source {
 	case ResolutionSourceNebula:
-		if resolution.Degraded || resolution.DegradationReason != "" {
+		if resolution.Degraded || resolution.DegradationReason != "" || resolution.Plan.Degraded {
 			return errors.New("primary graph resolution cannot be degraded")
 		}
 	case ResolutionSourceCertifiedCache, ResolutionSourcePostgresFallback:
-		if !resolution.Degraded || (resolution.DegradationReason != DegradationNebulaUnavailable &&
-			resolution.DegradationReason != DegradationNebulaResultIncomplete) {
+		if !resolution.Degraded || !resolution.Plan.Degraded ||
+			resolution.Plan.DegradationReason != resolution.DegradationReason ||
+			!validDegradationReason(resolution.DegradationReason) {
 			return errors.New("degraded graph resolution reason is invalid")
 		}
 	default:
@@ -72,6 +74,13 @@ type Resolver struct {
 	primary  PrimaryPlanner
 	cache    CertifiedPlanCache
 	fallback FallbackPlanner
+	breaker  *CircuitBreaker
+	metrics  *GraphDegradationMetrics
+}
+
+type ResolverOptions struct {
+	Circuit *CircuitBreaker
+	Metrics *GraphDegradationMetrics
 }
 
 func NewResolver(
@@ -79,10 +88,30 @@ func NewResolver(
 	cache CertifiedPlanCache,
 	fallback FallbackPlanner,
 ) (*Resolver, error) {
+	return NewResolverWithOptions(primary, cache, fallback, ResolverOptions{})
+}
+
+func NewResolverWithOptions(
+	primary PrimaryPlanner,
+	cache CertifiedPlanCache,
+	fallback FallbackPlanner,
+	options ResolverOptions,
+) (*Resolver, error) {
 	if primary == nil || cache == nil || fallback == nil {
 		return nil, ErrGraphResolutionUnavailable
 	}
-	return &Resolver{primary: primary, cache: cache, fallback: fallback}, nil
+	breaker := options.Circuit
+	if breaker == nil {
+		breaker, _ = NewCircuitBreaker(DefaultGraphFailureThreshold, DefaultGraphCircuitOpenDuration)
+	}
+	metrics := options.Metrics
+	if metrics == nil {
+		metrics, _ = NewGraphDegradationMetrics(DefaultGraphDegradedAlertPermillion, nil)
+	}
+	return &Resolver{
+		primary: primary, cache: cache, fallback: fallback,
+		breaker: breaker, metrics: metrics,
+	}, nil
 }
 
 func (resolver *Resolver) Resolve(ctx context.Context, request PlanRequest) (Resolution, error) {
@@ -97,26 +126,36 @@ func (resolver *Resolver) Resolve(ctx context.Context, request PlanRequest) (Res
 		return Resolution{}, err
 	}
 
-	primaryPlan, primaryErr := resolver.primary.Resolve(ctx, normalized)
-	if primaryErr == nil {
-		primaryErr = validatePlanForRequest(primaryPlan, normalized, requestHash)
-	}
-	if primaryErr == nil && len(primaryPlan.MetricModels) == 0 {
-		primaryErr = ErrGraphPlanIncomplete
-	}
-	if primaryErr == nil {
-		resolution := Resolution{Plan: primaryPlan, Source: ResolutionSourceNebula}
-		if err := resolution.Validate(normalized); err != nil {
-			return Resolution{}, fmt.Errorf("%w: primary validation", ErrGraphResolutionUnavailable)
+	primaryErr := error(ErrGraphCircuitOpen)
+	reason := DegradationNebulaCircuitOpen
+	if resolver.breaker.AllowPrimary() {
+		var primaryPlan GraphPlan
+		primaryPlan, primaryErr = resolver.primary.Resolve(ctx, normalized)
+		if primaryErr == nil {
+			primaryErr = validatePlanForRequest(primaryPlan, normalized, requestHash)
 		}
-		return resolution, nil
-	}
-	if isContextError(primaryErr) {
-		return Resolution{}, primaryErr
-	}
-	reason := DegradationNebulaUnavailable
-	if errors.Is(primaryErr, ErrGraphPlanIncomplete) {
-		reason = DegradationNebulaResultIncomplete
+		if primaryErr == nil && len(primaryPlan.MetricModels) == 0 {
+			primaryErr = ErrGraphPlanIncomplete
+		}
+		if primaryErr == nil {
+			resolver.breaker.RecordSuccess()
+			resolution := Resolution{Plan: primaryPlan, Source: ResolutionSourceNebula}
+			if err := resolution.Validate(normalized); err != nil {
+				return Resolution{}, fmt.Errorf("%w: primary validation", ErrGraphResolutionUnavailable)
+			}
+			resolver.metrics.Observe(false)
+			return resolution, nil
+		}
+		if isContextError(primaryErr) {
+			return Resolution{}, primaryErr
+		}
+		if !errors.Is(primaryErr, ErrGraphPlanIncomplete) {
+			resolver.breaker.RecordFailure()
+		}
+		reason = DegradationNebulaUnavailable
+		if errors.Is(primaryErr, ErrGraphPlanIncomplete) {
+			reason = DegradationNebulaResultIncomplete
+		}
 	}
 
 	cachePlan, cacheHit, cacheErr := resolver.cache.Load(ctx, normalized)
@@ -124,11 +163,15 @@ func (resolver *Resolver) Resolve(ctx context.Context, request PlanRequest) (Res
 		cacheErr = validatePlanForRequest(cachePlan, normalized, requestHash)
 	}
 	if cacheErr == nil && cacheHit {
+		cachePlan, cacheErr = cachePlan.WithDegradation(reason)
+	}
+	if cacheErr == nil && cacheHit {
 		resolution := Resolution{
 			Plan: cachePlan, Source: ResolutionSourceCertifiedCache,
 			Degraded: true, DegradationReason: reason,
 		}
 		if err := resolution.Validate(normalized); err == nil {
+			resolver.metrics.Observe(true)
 			return resolution, nil
 		}
 		cacheErr = ErrCertifiedCacheInvalid
@@ -138,6 +181,9 @@ func (resolver *Resolver) Resolve(ctx context.Context, request PlanRequest) (Res
 	}
 
 	fallbackPlan, fallbackErr := resolver.fallback.Resolve(ctx, normalized)
+	if fallbackErr == nil {
+		fallbackPlan, fallbackErr = fallbackPlan.WithDegradation(reason)
+	}
 	if fallbackErr == nil {
 		fallbackErr = validatePlanForRequest(fallbackPlan, normalized, requestHash)
 	}
@@ -159,7 +205,21 @@ func (resolver *Resolver) Resolve(ctx context.Context, request PlanRequest) (Res
 	if err := resolution.Validate(normalized); err != nil {
 		return Resolution{}, fmt.Errorf("%w: fallback validation", ErrGraphResolutionUnavailable)
 	}
+	resolver.metrics.Observe(true)
 	return resolution, nil
+}
+
+func (resolver *Resolver) MetricsSnapshot() GraphDegradationRate {
+	if resolver == nil {
+		return GraphDegradationRate{Name: "graph_degraded_rate"}
+	}
+	return resolver.metrics.Snapshot()
+}
+
+func validDegradationReason(reason string) bool {
+	return reason == DegradationNebulaUnavailable ||
+		reason == DegradationNebulaResultIncomplete ||
+		reason == DegradationNebulaCircuitOpen
 }
 
 func normalizePlanRequest(request PlanRequest) (PlanRequest, askdata.ContentHash, error) {

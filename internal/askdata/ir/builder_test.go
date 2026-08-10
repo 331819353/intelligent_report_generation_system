@@ -34,6 +34,7 @@ func TestBuildSemanticIRFromReplayValidatedBinding(t *testing.T) {
 	}
 	if artifact.IR.SemanticReleaseID != request.BindingResult.Scope.Release.ReleaseID ||
 		artifact.IR.SemanticContentHash != request.BindingResult.Scope.Release.ContentHash ||
+		artifact.IR.DomainID != request.BindingResult.DomainID ||
 		artifact.IR.ModelVersionID != "model-sales-v1" || len(artifact.IR.Metrics) != 1 ||
 		len(artifact.IR.GroupBy) != 1 || len(artifact.IR.Filters) != 1 {
 		t.Fatalf("unexpected semantic IR: %#v", artifact.IR)
@@ -46,6 +47,7 @@ func TestBuildSemanticIRFromReplayValidatedBinding(t *testing.T) {
 	}
 	if artifact.IR.TimeRange == nil || artifact.IR.TimeRange.DimensionVersionID != "dimension-order-date-v1" ||
 		artifact.IR.TimeRange.Start != "2026-01-01" || artifact.IR.TimeRange.EndExclusive != "2027-01-01" ||
+		artifact.IR.TimeRange.RequestedPeriod != "CURRENT_YEAR" || artifact.IR.TimeRange.Grain != TimeGrainYear ||
 		artifact.IR.Comparison == nil || artifact.IR.Comparison.Type != ComparisonYearOverYear ||
 		artifact.IR.Limit != 5 {
 		t.Fatalf("unexpected time/comparison/limit: %#v", artifact.IR)
@@ -91,6 +93,12 @@ func TestBuildSemanticIRFromReplayValidatedBinding(t *testing.T) {
 	tamperedRaw, _ := json.Marshal(tampered)
 	if _, err := DecodeBuildArtifact(tamperedRaw, request); !errors.Is(err, ErrInvalidBuildArtifact) {
 		t.Fatalf("tampered artifact error = %v", err)
+	}
+	tampered = artifact
+	tampered.IR.DomainID = "finance"
+	tamperedRaw, _ = json.Marshal(tampered)
+	if _, err := DecodeBuildArtifact(tamperedRaw, request); !errors.Is(err, ErrInvalidBuildArtifact) {
+		t.Fatalf("tampered domain error = %v", err)
 	}
 }
 
@@ -196,7 +204,7 @@ func semanticIRBuildFixture(t *testing.T) BuildRequest {
 	if err != nil {
 		t.Fatal(err)
 	}
-	question := "今年华东销售额按地区同比前5名"
+	question := "今年华东销售额按地区同比按当期值前5名"
 	normalized, err := understanding.NormalizeQuestion(question)
 	if err != nil {
 		t.Fatal(err)
@@ -249,7 +257,7 @@ func semanticIRBuildFixture(t *testing.T) BuildRequest {
 			Time: irTimeValue(rules), Comparisons: rules.Comparisons,
 			Ordering: []understanding.OrderingMention{{
 				Text: rules.Ranking.Text, Span: rules.Ranking.Span,
-				TargetText: "销售额", Direction: rules.Ranking.Direction,
+				TargetText: "销售额", Direction: rules.Ranking.Direction, RankBy: rules.Ranking.RankBy,
 			}},
 			Limit: irIntPointer(rules.Ranking.Limit), UnresolvedSpans: []understanding.UnresolvedSpan{},
 		}

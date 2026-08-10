@@ -67,6 +67,23 @@ func (worker *Worker) ProcessNext(
 	var activation materialization.Activation
 	var failureQuality []materialization.QualityResult
 	if err == nil {
+		physical, identifierErr := materialization.GeneratePhysicalIdentifier(
+			claim.TenantID, claim.DatasetID, claim.ID, claim.Layer,
+		)
+		if identifierErr != nil {
+			err = executionError(
+				CodeWarehouseBuildFailed,
+				"the warehouse target identity is invalid",
+				identifierErr,
+			)
+		} else {
+			_, err = worker.store.BeginSnapshot(workCtx, *claim, materialization.SnapshotStart{
+				SchemaHash: resolved.SchemaHash, SnapshotVersion: claim.ID,
+				Physical: physical, RelationKind: claim.Plan.Target.RelationKind,
+			})
+		}
+	}
+	if err == nil {
 		activation, failureQuality, err = worker.execute(workCtx, *claim, resolved)
 	}
 	if err != nil {
@@ -342,8 +359,10 @@ func (worker *Worker) execute(
 	return materialization.Activation{
 		Physical: physical, RelationKind: claim.Plan.Target.RelationKind,
 		SchemaHash: resolved.SchemaHash, SnapshotHash: snapshotHash,
-		RowCount: buildResult.RowCount, SizeBytes: buildResult.SizeBytes,
-		Watermark: watermark, Quality: quality,
+		SnapshotVersion: claim.ID,
+		RowCount:        buildResult.RowCount, SizeBytes: buildResult.SizeBytes,
+		DataAvailableThrough: buildResult.DataAvailableThrough,
+		Watermark:            watermark, Quality: quality,
 	}, nil, nil
 }
 

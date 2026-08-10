@@ -132,11 +132,92 @@ func TestImportedDraftPersistsOnlyAgainstCurrentPublishedActiveDWS(t *testing.T)
 	if modelStatus != "DRAFT" || measureCount != len(draft.Measures) || dimensionCount != len(draft.Dimensions) {
 		t.Fatalf("imported status/counts = %s/%d/%d", modelStatus, measureCount, dimensionCount)
 	}
+	if _, err := tx.Exec(ctx, `SAVEPOINT missing_time_contract`); err != nil {
+		t.Fatalf("create missing-time-contract savepoint: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE askdata.semantic_models SET status='CERTIFIED' WHERE id=$1`, draft.SemanticModel.ID); err == nil || !strings.Contains(err.Error(), TimeContractMissing) {
+		t.Fatalf("certification without time contract error = %v", err)
+	}
+	if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT missing_time_contract`); err != nil {
+		t.Fatalf("rollback missing-time-contract savepoint: %v", err)
+	}
+
+	timeContractID := uuid.NewString()
+	timeContractVersion := TimeContractVersion{
+		ID: uuid.NewString(), TenantID: record.TenantID, DomainID: record.DomainID,
+		TimeContractID: timeContractID, VersionNo: 1, Status: VersionStatusDraft,
+		Timezone: "Asia/Shanghai", WeekStart: WeekStartMonday, WeekNumbering: WeekNumberingISO,
+		FiscalYearStartMonth: 1, FiscalMonthRule: FiscalMonthCalendar,
+		IncompletePeriodPolicy:   IncompletePeriodMTD,
+		ComparisonAlignment:      ComparisonSameDayCount,
+		MonthEndOverflowRule:     MonthEndClampToLastDay,
+		SupportedGrains:          []TimeGrain{TimeGrainDay, TimeGrainMonth},
+		DataAvailableThroughExpr: "MATERIALIZATION_MAX_PRIMARY_TIME", ExpectedLagHours: 26,
+	}
+	timeContractVersion.ContentHash = mustTimeContractHash(t, timeContractVersion)
+	supportedGrains := make([]string, len(timeContractVersion.SupportedGrains))
+	for index, grain := range timeContractVersion.SupportedGrains {
+		supportedGrains[index] = string(grain)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO askdata.time_contracts(
+		id,tenant_id,domain_id,code,name,owner_user_id
+	) VALUES($1,$2,$3,$4,$5,$6)`, timeContractID, record.TenantID,
+		record.DomainID, "integration_"+timeContractID[:8], "集成时间合同", actorID); err != nil {
+		t.Fatalf("insert time contract: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO askdata.time_contract_versions(
+		id,tenant_id,domain_id,time_contract_id,version_no,status,timezone,
+		week_start,week_numbering,fiscal_year_start_month,fiscal_month_rule,
+		incomplete_period_policy,comparison_alignment,month_end_overflow_rule,
+		supported_grains,data_available_through_expr,expected_lag_hours,content_hash
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+		timeContractVersion.ID, timeContractVersion.TenantID, timeContractVersion.DomainID,
+		timeContractVersion.TimeContractID, timeContractVersion.VersionNo,
+		timeContractVersion.Status, timeContractVersion.Timezone, timeContractVersion.WeekStart,
+		timeContractVersion.WeekNumbering, timeContractVersion.FiscalYearStartMonth,
+		timeContractVersion.FiscalMonthRule, timeContractVersion.IncompletePeriodPolicy,
+		timeContractVersion.ComparisonAlignment, timeContractVersion.MonthEndOverflowRule,
+		supportedGrains, timeContractVersion.DataAvailableThroughExpr,
+		timeContractVersion.ExpectedLagHours, timeContractVersion.ContentHash); err != nil {
+		t.Fatalf("insert time contract version: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE askdata.time_contract_versions SET status='CERTIFIED' WHERE id=$1`, timeContractVersion.ID); err != nil {
+		t.Fatalf("certify time contract version: %v", err)
+	}
+	timeContractVersion.Status = VersionStatusCertified
+	if _, err := tx.Exec(ctx, `SAVEPOINT immutable_time_contract`); err != nil {
+		t.Fatalf("create immutable-time-contract savepoint: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE askdata.time_contract_versions SET expected_lag_hours=27 WHERE id=$1`, timeContractVersion.ID); err == nil || !strings.Contains(err.Error(), TimeContractVersionImmutable) {
+		t.Fatalf("certified time contract mutation error = %v", err)
+	}
+	if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT immutable_time_contract`); err != nil {
+		t.Fatalf("rollback immutable-time-contract savepoint: %v", err)
+	}
+
+	draft.SemanticModel.TimeContractVersionID = timeContractVersion.ID
+	draft.SemanticModel.ContentHash = contentHashForContract(semanticModelContract(draft.SemanticModel))
+	if _, err := tx.Exec(ctx, `UPDATE askdata.semantic_models
+		SET time_contract_version_id=$1,content_hash=$2 WHERE id=$3`,
+		draft.SemanticModel.TimeContractVersionID, draft.SemanticModel.ContentHash,
+		draft.SemanticModel.ID); err != nil {
+		t.Fatalf("bind model time contract: %v", err)
+	}
 	if _, err := tx.Exec(ctx, `UPDATE askdata.semantic_models SET status='CERTIFIED' WHERE id=$1`, draft.SemanticModel.ID); err != nil {
 		t.Fatalf("certify imported model: %v", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE askdata.measures SET status='CERTIFIED' WHERE semantic_model_version_id=$1`, draft.SemanticModel.ID); err != nil {
-		t.Fatalf("certify imported measures: %v", err)
+	if len(draft.Measures) > 0 {
+		if _, err := tx.Exec(ctx, `SAVEPOINT imported_measure_additivity`); err != nil {
+			t.Fatalf("create imported-measure additivity savepoint: %v", err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE askdata.measures SET status='CERTIFIED'
+			WHERE semantic_model_version_id=$1`, draft.SemanticModel.ID); err == nil ||
+			!strings.Contains(err.Error(), "certified_requires_additivity") {
+			t.Fatalf("unconfirmed imported measure certification error = %v", err)
+		}
+		if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT imported_measure_additivity`); err != nil {
+			t.Fatalf("rollback imported-measure additivity savepoint: %v", err)
+		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE askdata.dimensions SET status='CERTIFIED' WHERE semantic_model_version_id=$1`, draft.SemanticModel.ID); err != nil {
 		t.Fatalf("certify imported dimensions: %v", err)
@@ -146,24 +227,31 @@ func TestImportedDraftPersistsOnlyAgainstCurrentPublishedActiveDWS(t *testing.T)
 	if err != nil {
 		t.Fatalf("SemanticModelReleaseObject() error = %v", err)
 	}
-	manifest, err := BuildReleaseManifest([]ReleaseObject{releaseObject})
+	timeContractObject, err := TimeContractReleaseObject(timeContractVersion)
+	if err != nil {
+		t.Fatalf("TimeContractReleaseObject() error = %v", err)
+	}
+	manifest, err := BuildReleaseManifest([]ReleaseObject{releaseObject, timeContractObject})
 	if err != nil {
 		t.Fatalf("BuildReleaseManifest() error = %v", err)
 	}
 	releaseID := uuid.NewString()
 	if _, err := tx.Exec(ctx, `INSERT INTO askdata.releases(
 		id,tenant_id,domain_id,semantic_version,content_hash,object_count,created_by,updated_by
-	) VALUES($1,$2,$3,$4,$5,1,$6,$6)`, releaseID, record.TenantID,
-		record.DomainID, "integration-"+releaseID[:8], manifest.ContentHash, actorID); err != nil {
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$7)`, releaseID, record.TenantID,
+		record.DomainID, "integration-"+releaseID[:8], manifest.ContentHash,
+		len(manifest.Objects), actorID); err != nil {
 		t.Fatalf("insert integration release: %v", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO askdata.release_objects(
-		tenant_id,domain_id,release_id,object_type,object_id,object_version_id,
-		content_hash,sensitivity,contract_json
-	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, record.TenantID, record.DomainID,
-		releaseID, releaseObject.Type, releaseObject.ObjectID, releaseObject.ObjectVersionID,
-		releaseObject.ContentHash, releaseObject.Sensitivity, releaseObject.Contract); err != nil {
-		t.Fatalf("insert integration release object: %v", err)
+	for _, object := range manifest.Objects {
+		if _, err := tx.Exec(ctx, `INSERT INTO askdata.release_objects(
+			tenant_id,domain_id,release_id,object_type,object_id,object_version_id,
+			content_hash,sensitivity,contract_json
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, record.TenantID, record.DomainID,
+			releaseID, object.Type, object.ObjectID, object.ObjectVersionID,
+			object.ContentHash, object.Sensitivity, object.Contract); err != nil {
+			t.Fatalf("insert integration release object %s: %v", object.Type, err)
+		}
 	}
 	if _, err := tx.Exec(ctx, `SELECT
 		set_config('app.tenant_id',$1,true),set_config('app.domain_id',$2,true),
@@ -221,8 +309,9 @@ func TestImportedDraftPersistsOnlyAgainstCurrentPublishedActiveDWS(t *testing.T)
 	staleReleaseID := uuid.NewString()
 	if _, err := tx.Exec(ctx, `INSERT INTO askdata.releases(
 		id,tenant_id,domain_id,semantic_version,content_hash,object_count,created_by,updated_by
-	) VALUES($1,$2,$3,$4,$5,1,$6,$6)`, staleReleaseID, record.TenantID,
-		record.DomainID, "integration-stale-"+staleReleaseID[:8], manifest.ContentHash, actorID); err != nil {
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$7)`, staleReleaseID, record.TenantID,
+		record.DomainID, "integration-stale-"+staleReleaseID[:8], manifest.ContentHash,
+		len(manifest.Objects), actorID); err != nil {
 		t.Fatalf("insert stale-source release: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO askdata.release_objects(
@@ -269,7 +358,7 @@ func TestPostgresStoreTenantTransactionOptimisticLockAndPagination(t *testing.T)
 	WHERE membership.status='ACTIVE' AND domain.status='ACTIVE'
 	  AND domain.deleted_at IS NULL AND user_account.deleted_at IS NULL
 	ORDER BY membership.created_at LIMIT 1`).Scan(&tenantID, &domainID, &actorID, &otherDomainID); err != nil {
-		t.Fatalf("select integration identity: %v", err)
+		t.Skipf("no active domain identity integration fixture: %v", err)
 	}
 	tag, err := adminPool.Exec(ctx, `INSERT INTO askdata.domains(id,tenant_id,code,name,owner_id)
 		SELECT id,tenant_id,code,name,$3 FROM platform.business_domains

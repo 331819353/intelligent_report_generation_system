@@ -1,0 +1,29 @@
+{
+  "type": "image",
+  "version": "1.0.0",
+  "renderer": "IMAGE",
+  "displayName": "图片",
+  "category": "CONTENT",
+  "minSize": { "w": 2, "h": 2 },
+  "recommendedSize": { "w": 6, "h": 4 },
+  "dataContract": {
+    "dimensions": { "min": 0, "max": 0 },
+    "measures": { "min": 0, "max": 0 },
+    "timeField": { "required": false },
+    "roles": []
+  },
+  "stackingRequiresAdditive": false,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [],
+    "properties": {
+	  "title": { "type": "string" },
+	  "subtitle": { "type": "string" },
+      "imageAssetId": { "type": "string" }
+    }
+  },
+  "defaultOptions": {},
+  "mobilePolicy": { "supported": true, "defaultLegendMode": "HIDDEN", "labelDegradation": "NONE" },
+  "supportedInteractions": []
+}

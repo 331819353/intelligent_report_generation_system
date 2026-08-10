@@ -52,14 +52,15 @@ func (runner *scriptedLoopCognition) Execute(
 }
 
 type fakeLoopTools struct {
-	available    []toolhost.ToolName
-	evidence     askdata.EvidenceRef
-	progress     bool
-	status       toolhost.ResponseStatus
-	charge       toolhost.BudgetCharge
-	responseCall askdata.ID
-	responseTool toolhost.ToolName
-	calls        []toolhost.Invocation
+	available      []toolhost.ToolName
+	evidence       askdata.EvidenceRef
+	progress       bool
+	status         toolhost.ResponseStatus
+	charge         toolhost.BudgetCharge
+	queryScanBytes int64
+	responseCall   askdata.ID
+	responseTool   toolhost.ToolName
+	calls          []toolhost.Invocation
 }
 
 func (tools *fakeLoopTools) AvailableTools(
@@ -122,7 +123,7 @@ func (tools *fakeLoopTools) Execute(
 	}
 	execution := toolhost.Execution{
 		DefinitionHash: askdata.HashBytes([]byte("loop-tool-definition")), Charge: charge,
-		DurationMS: 1, Response: response,
+		QueryScanBytes: tools.queryScanBytes, DurationMS: 1, Response: response,
 	}
 	if execution.Validate() != nil {
 		return toolhost.Execution{}, errors.New("invalid fake tool execution")

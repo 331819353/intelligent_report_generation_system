@@ -1,0 +1,89 @@
+{
+  "title": "Insight Artifact v1",
+  "description": "Closed generated or human-edited report insight with shared citations.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "id", "evidenceHash", "promptVersion", "modelPolicy",
+    "verifierVersion", "policyWordlistVersion", "content", "citations", "status",
+    "humanEdited", "humanEditedBy", "humanEditedAt"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "id": { "$ref": "#/$defs/stableId" },
+    "evidenceHash": { "$ref": "#/$defs/contentHash" },
+    "promptVersion": { "$ref": "#/$defs/stableId" },
+    "modelPolicy": { "$ref": "#/$defs/stableId" },
+    "verifierVersion": { "$ref": "#/$defs/stableId" },
+    "policyWordlistVersion": { "$ref": "#/$defs/stableId" },
+    "content": { "$ref": "#/$defs/content" },
+    "citations": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/citation" } },
+    "status": { "enum": ["CURRENT", "STALE", "FAILED"] },
+    "humanEdited": { "type": "boolean" },
+    "humanEditedBy": { "oneOf": [{ "$ref": "#/$defs/stableId" }, { "type": "null" }] },
+    "humanEditedAt": { "oneOf": [{ "type": "string", "minLength": 20, "maxLength": 64 }, { "type": "null" }] }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$"
+    },
+    "contentHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "findings", "risks", "actions"],
+      "properties": {
+        "summary": { "type": "string", "maxLength": 4096 },
+        "findings": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 4096 } },
+        "risks": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 4096 } },
+        "actions": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 4096 } }
+      }
+    },
+    "textSpan": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": { "type": "integer", "minimum": 0, "maximum": 32768 }
+    },
+    "resultCellCitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["textSpan", "kind", "rowKey", "columnKey"],
+      "properties": {
+        "textSpan": { "$ref": "#/$defs/textSpan" },
+        "kind": { "const": "RESULT_CELL" },
+        "rowKey": { "type": "string", "minLength": 3, "maxLength": 8192 },
+        "columnKey": { "$ref": "#/$defs/stableId" }
+      }
+    },
+    "contractCitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["textSpan", "kind", "contractId"],
+      "properties": {
+        "textSpan": { "$ref": "#/$defs/textSpan" },
+        "kind": { "const": "CONTRACT" },
+        "contractId": { "$ref": "#/$defs/stableId" }
+      }
+    },
+    "timeSpecCitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["textSpan", "kind"],
+      "properties": {
+        "textSpan": { "$ref": "#/$defs/textSpan" },
+        "kind": { "const": "TIME_SPEC" }
+      }
+    },
+    "citation": {
+      "oneOf": [
+        { "$ref": "#/$defs/resultCellCitation" },
+        { "$ref": "#/$defs/contractCitation" },
+        { "$ref": "#/$defs/timeSpecCitation" }
+      ]
+    }
+  }
+}

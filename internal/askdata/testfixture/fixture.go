@@ -144,17 +144,19 @@ func Standard() Set {
 	month := ir.TimeGrainMonth
 	directIR := ir.SemanticIR{
 		IRVersion: ir.Version, SemanticReleaseID: release.ReleaseID, SemanticContentHash: release.ContentHash,
-		ModelVersionID: "sales-orders-model@v1",
-		Metrics:        []ir.Metric{{MetricVersionID: "sales-net-amount@v1", Alias: "net_sales"}},
-		GroupBy:        []ir.GroupBy{{DimensionVersionID: "sales-stat-month@v1", Grain: &month}},
+		DomainID: "sales", ModelVersionID: "sales-orders-model@v1",
+		Metrics: []ir.Metric{{MetricVersionID: "sales-net-amount@v1", Alias: "net_sales"}},
+		GroupBy: []ir.GroupBy{{DimensionVersionID: "sales-stat-month@v1", Grain: &month}},
 		Filters: []ir.Filter{{
 			DimensionVersionID: "sales-region@v1", Operator: ir.FilterIn,
 			MemberVersionIDs: []askdata.ID{"sales-region-east@v1"},
 		}},
-		TimeRange:  &ir.TimeRange{DimensionVersionID: "sales-order-date@v1", Start: "2026-01-01", EndExclusive: "2027-01-01", Timezone: "Asia/Shanghai"},
-		Comparison: nil,
-		Sort:       []ir.Sort{{TargetType: ir.SortTargetMetric, TargetVersionID: "sales-net-amount@v1", Direction: ir.SortDescending, Nulls: ir.NullsLast}},
-		Limit:      500,
+		TimeRange:   &ir.TimeRange{DimensionVersionID: "sales-order-date@v1", Start: "2026-01-01", EndExclusive: "2027-01-01", Timezone: "Asia/Shanghai"},
+		Comparison:  nil,
+		Sort:        []ir.Sort{{TargetType: ir.SortTargetMetric, TargetVersionID: "sales-net-amount@v1", Direction: ir.SortDescending, Nulls: ir.NullsLast, RankBy: ir.RankByCurrentValue}},
+		Limit:       500,
+		OtherPolicy: ir.OtherNone,
+		TieBreaking: ir.TieIncludeAll,
 	}
 	return Set{
 		FixtureVersion: FixtureVersion,

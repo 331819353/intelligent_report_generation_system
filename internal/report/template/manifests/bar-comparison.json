@@ -1,0 +1,34 @@
+{
+  "type": "bar-comparison",
+  "version": "1.0.0",
+  "renderer": "ECHARTS",
+  "displayName": "对比柱状图",
+  "category": "CHART",
+  "minSize": { "w": 4, "h": 3 },
+  "recommendedSize": { "w": 6, "h": 5 },
+  "dataContract": {
+    "dimensions": { "min": 1, "max": 2 },
+    "measures": { "min": 1, "max": 5 },
+    "timeField": { "required": false },
+    "roles": ["X_AXIS", "Y_AXIS", "SERIES", "COLOR", "LABEL", "TOOLTIP"]
+  },
+  "stackingRequiresAdditive": false,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [],
+    "properties": {
+	  "title": { "type": "string" },
+	  "subtitle": { "type": "string" },
+      "showLegend": { "type": "boolean" },
+      "showLabel": { "type": "boolean" },
+      "orientation": { "type": "string", "enum": ["HORIZONTAL", "VERTICAL"] },
+      "topN": { "type": "integer", "minimum": 1, "maximum": 1000 },
+      "colorPaletteRef": { "type": "string" },
+      "animation": { "type": "boolean" }
+    }
+  },
+  "defaultOptions": { "showLegend": true, "showLabel": false, "orientation": "VERTICAL", "animation": true },
+  "mobilePolicy": { "supported": true, "defaultLegendMode": "HIDDEN", "labelDegradation": "HIDE_WHEN_DENSE" },
+  "supportedInteractions": ["CLICK_FILTER", "DRILL_DOWN", "ZOOM"]
+}

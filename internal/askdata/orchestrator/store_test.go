@@ -8,11 +8,21 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
 	"intelligent-report-generation-system/internal/platform/database"
 )
+
+func TestPersistenceMapsRetainedReleaseToGovernedError(t *testing.T) {
+	err := mapPersistenceError(&pgconn.PgError{
+		Code: "23514", Message: "RELEASE_NOT_RUNNABLE: semantic release cannot create a new question run",
+	})
+	if !errors.Is(err, ErrReleaseNotRunnable) {
+		t.Fatalf("mapped error = %v", err)
+	}
+}
 
 func TestValidateActorScopeFailsClosedWithoutExactAccessContext(t *testing.T) {
 	scope, domainID := testPolicyScope(t)
@@ -30,6 +40,40 @@ func TestValidateActorScopeFailsClosedWithoutExactAccessContext(t *testing.T) {
 	ctx := database.WithAccessContext(context.Background(), string(scope.ActorID), string(domainID))
 	if tenantID, err := validateActorScope(ctx, scope, domainID); err != nil || tenantID != string(scope.TenantID) {
 		t.Fatalf("valid scope = %q, %v", tenantID, err)
+	}
+}
+
+func TestPrepareCreateAcceptsOnlyOneGovernedSeedSource(t *testing.T) {
+	scope, domainID := testPolicyScope(t)
+	ctx := database.WithAccessContext(context.Background(), string(scope.ActorID), string(domainID))
+	semanticIR := json.RawMessage(`{"irVersion":"semantic-ir-v1"}`)
+	base := CreateRunRequest{
+		Scope: scope, DomainID: domainID, ConversationID: askdata.ID(uuid.NewString()),
+		IdempotencyKeyHash: testHash("1"), QuestionHash: testHash("2"),
+	}
+	base.SeedContext = &SeedContext{
+		Source: SeedSourceSavedQuestion, SavedQuestionID: askdata.ID(uuid.NewString()),
+		SemanticIR: semanticIR, SemanticIRHash: askdata.HashBytes(semanticIR),
+		PinnedReleaseID: scope.Release.ReleaseID,
+	}
+	if _, _, err := prepareCreateRequest(ctx, base); err != nil {
+		t.Fatalf("saved question seed error = %v", err)
+	}
+
+	forged := base
+	copy := *base.SeedContext
+	copy.ReportVersionID = askdata.ID(uuid.NewString())
+	forged.SeedContext = &copy
+	if _, _, err := prepareCreateRequest(ctx, forged); !errors.Is(err, ErrInvalidRun) {
+		t.Fatalf("mixed seed source error = %v", err)
+	}
+
+	unknown := base
+	copy = *base.SeedContext
+	copy.Source = "UNTRUSTED"
+	unknown.SeedContext = &copy
+	if _, _, err := prepareCreateRequest(ctx, unknown); !errors.Is(err, ErrInvalidRun) {
+		t.Fatalf("unknown seed source error = %v", err)
 	}
 }
 

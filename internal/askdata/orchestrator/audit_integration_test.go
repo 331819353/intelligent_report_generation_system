@@ -78,6 +78,7 @@ func TestPostgresCheckpointLoopAtomicallyTerminalizesBudgetAndReplays(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertPersistedBudgetConsumption(t, ctx, root, created.Run)
 	run := advanceIntegrationTo(t, actorContext, store, scope, created.Run, StateUnderstanding)
 	usage := run.Usage
 	usage.StepCount, usage.LLMCallsUsed = run.Limits.MaxLLMCalls, run.Limits.MaxLLMCalls
@@ -89,6 +90,7 @@ func TestPostgresCheckpointLoopAtomicallyTerminalizesBudgetAndReplays(t *testing
 		t.Fatal(err)
 	}
 	run = checkpoint.Run
+	assertPersistedBudgetConsumption(t, ctx, root, run)
 	exhausted := run.Usage
 	exhausted.Exhausted = true
 	termination, err := BuildBudgetTermination(BudgetTerminationRequest{
@@ -124,6 +126,22 @@ func TestPostgresCheckpointLoopAtomicallyTerminalizesBudgetAndReplays(t *testing
 	collision.Failure = &LoopFailure{Code: "DIFFERENT_FAILURE", Status: EventFailed}
 	if _, err := store.CheckpointLoop(actorContext, collision); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("checkpoint collision error = %v", err)
+	}
+}
+
+func assertPersistedBudgetConsumption(t *testing.T, ctx context.Context, tx pgx.Tx, run Run) {
+	t.Helper()
+	var raw []byte
+	if err := tx.QueryRow(ctx, `SELECT budget_consumed_json
+		FROM askdata.question_runs WHERE id=$1`, run.ID).Scan(&raw); err != nil {
+		t.Fatalf("read persisted budget consumption: %v", err)
+	}
+	var persisted BudgetUsage
+	if err := askdata.DecodeStrictJSON(raw, &persisted); err != nil {
+		t.Fatalf("decode persisted budget consumption: %v", err)
+	}
+	if persisted != run.Usage {
+		t.Fatalf("persisted budget consumption = %+v, want %+v", persisted, run.Usage)
 	}
 }
 

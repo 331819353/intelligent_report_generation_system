@@ -15,17 +15,19 @@ import (
 )
 
 var (
-	ErrInvalidRun           = errors.New("invalid question run")
-	ErrIllegalTransition    = errors.New("illegal question run state transition")
-	ErrTerminalRun          = errors.New("question run is terminal")
-	ErrVersionConflict      = errors.New("question run version conflict")
-	ErrRunNotFound          = errors.New("question run was not found")
-	ErrIdempotencyConflict  = errors.New("question run idempotency conflict")
-	ErrReplayCorrupt        = errors.New("question run replay is corrupt")
-	ErrPinnedScopeMismatch  = errors.New("question run pinned scope does not match")
-	ErrInvalidAccessContext = errors.New("question run requires an authenticated actor and domain")
-	ErrNoProgress           = errors.New("question run checkpoint made no progress")
-	ErrPersistence          = errors.New("question run persistence failed")
+	ErrInvalidRun                = errors.New("invalid question run")
+	ErrIllegalTransition         = errors.New("illegal question run state transition")
+	ErrTerminalRun               = errors.New("question run is terminal")
+	ErrVersionConflict           = errors.New("question run version conflict")
+	ErrRunNotFound               = errors.New("question run was not found")
+	ErrIdempotencyConflict       = errors.New("question run idempotency conflict")
+	ErrReplayCorrupt             = errors.New("question run replay is corrupt")
+	ErrPinnedScopeMismatch       = errors.New("question run pinned scope does not match")
+	ErrInvalidAccessContext      = errors.New("question run requires an authenticated actor and domain")
+	ErrReleaseNotRunnable        = errors.New("semantic release cannot create a new question run")
+	ErrReleaseProjectionMismatch = errors.New("semantic release projections do not match")
+	ErrNoProgress                = errors.New("question run checkpoint made no progress")
+	ErrPersistence               = errors.New("question run persistence failed")
 )
 
 var completionCodePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,127}$`)
@@ -44,7 +46,10 @@ const (
 	StatePlanValidating        State = "PLAN_VALIDATING"
 	StateExecuting             State = "EXECUTING"
 	StateResultVerifying       State = "RESULT_VERIFYING"
+	StateAnswerVerifying       State = "ANSWER_VERIFYING"
 	StateClarificationRequired State = "CLARIFICATION_REQUIRED"
+	StateClarificationExpired  State = "CLARIFICATION_EXPIRED"
+	StateOutOfScope            State = "OUT_OF_SCOPE"
 	StateAnswered              State = "ANSWERED"
 	StateBlocked               State = "BLOCKED"
 )
@@ -53,8 +58,9 @@ var validStates = map[State]struct{}{
 	StateReceived: {}, StateAuthorized: {}, StateContextReady: {},
 	StateUnderstanding: {}, StateRetrieving: {}, StateBinding: {},
 	StateGraphValidating: {}, StateIRReady: {}, StatePlanValidating: {},
-	StateExecuting: {}, StateResultVerifying: {},
-	StateClarificationRequired: {}, StateAnswered: {}, StateBlocked: {},
+	StateExecuting: {}, StateResultVerifying: {}, StateAnswerVerifying: {},
+	StateClarificationRequired: {}, StateClarificationExpired: {}, StateOutOfScope: {},
+	StateAnswered: {}, StateBlocked: {},
 }
 
 type Disposition string
@@ -114,7 +120,7 @@ var validArtifactTypes = map[ArtifactType]struct{}{
 }
 
 // BudgetLimits are immutable after the run is created. The maxima deliberately
-// match migration 000217 and the architecture's bounded agent-loop defaults.
+// match migration 000246 and the architecture's governed budget envelope.
 type BudgetLimits struct {
 	MaxSteps             int   `json:"maxSteps"`
 	MaxLLMCalls          int   `json:"maxLlmCalls"`
@@ -134,10 +140,10 @@ func DefaultBudgetLimits() BudgetLimits {
 func (limits BudgetLimits) Validate() error {
 	if limits.MaxSteps < 1 || limits.MaxSteps > 32 ||
 		limits.MaxLLMCalls < 1 || limits.MaxLLMCalls > 4 ||
-		limits.MaxToolCalls < 0 || limits.MaxToolCalls > 8 ||
-		limits.MaxFormalQueries < 0 || limits.MaxFormalQueries > 2 ||
+		limits.MaxToolCalls < 0 || limits.MaxToolCalls > 10 ||
+		limits.MaxFormalQueries < 0 || limits.MaxFormalQueries > 6 ||
 		limits.MaxValidationQueries < 0 || limits.MaxValidationQueries > 3 ||
-		limits.MaxDurationMS < 100 || limits.MaxDurationMS > 25_000 {
+		limits.MaxDurationMS < 100 || limits.MaxDurationMS > 30_000 {
 		return fmt.Errorf("%w: budget limits exceed the governed bounds", ErrInvalidRun)
 	}
 	return nil
@@ -224,32 +230,36 @@ type HashUpdates struct {
 }
 
 type Run struct {
-	ID                 askdata.ID
-	TenantID           askdata.ID
-	DomainID           askdata.ID
-	ActorID            askdata.ID
-	ConversationID     askdata.ID
-	ParentRunID        askdata.ID
-	TraceID            askdata.ID
-	IdempotencyKeyHash askdata.ContentHash
-	QuestionHash       askdata.ContentHash
-	PolicyScopeHash    askdata.ContentHash
-	Release            askdata.ReleaseRef
-	State              State
-	Disposition        Disposition
-	CompletionCode     string
-	CompletionArtifact askdata.ContentHash
-	Hashes             RunHashes
-	Limits             BudgetLimits
-	Usage              BudgetUsage
-	RecordVersion      int64
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	CompletedAt        *time.Time
+	ID                    askdata.ID
+	TenantID              askdata.ID
+	DomainID              askdata.ID
+	ActorID               askdata.ID
+	ConversationID        askdata.ID
+	ParentRunID           askdata.ID
+	TraceID               askdata.ID
+	IdempotencyKeyHash    askdata.ContentHash
+	QuestionHash          askdata.ContentHash
+	PolicyScopeHash       askdata.ContentHash
+	Release               askdata.ReleaseRef
+	State                 State
+	Disposition           Disposition
+	CompletionCode        string
+	CompletionArtifact    askdata.ContentHash
+	Hashes                RunHashes
+	Limits                BudgetLimits
+	Usage                 BudgetUsage
+	ClarificationDeadline *time.Time
+	BudgetFrozenAt        *time.Time
+	BudgetConsumed        *BudgetUsage
+	RecordVersion         int64
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+	CompletedAt           *time.Time
 }
 
 func (run Run) Terminal() bool {
-	return run.State == StateClarificationRequired || run.State == StateAnswered || run.State == StateBlocked
+	return run.State == StateClarificationRequired || run.State == StateClarificationExpired ||
+		run.State == StateOutOfScope || run.State == StateAnswered || run.State == StateBlocked
 }
 
 func (run Run) PinnedRelease() askdata.ReleaseRef { return run.Release }
@@ -299,6 +309,17 @@ func (run Run) Validate() error {
 	if run.RecordVersion < 1 {
 		return fmt.Errorf("%w: record version must be positive", ErrInvalidRun)
 	}
+	clarificationState := run.State == StateClarificationRequired || run.State == StateClarificationExpired
+	if clarificationState {
+		if run.ClarificationDeadline == nil || run.BudgetFrozenAt == nil || run.BudgetConsumed == nil ||
+			run.ClarificationDeadline.IsZero() || run.BudgetFrozenAt.IsZero() ||
+			!run.ClarificationDeadline.After(*run.BudgetFrozenAt) ||
+			run.BudgetConsumed.validate(run.Limits) != nil || *run.BudgetConsumed != run.Usage {
+			return fmt.Errorf("%w: clarification budget snapshot is invalid", ErrInvalidRun)
+		}
+	} else if run.ClarificationDeadline != nil || run.BudgetFrozenAt != nil || run.BudgetConsumed != nil {
+		return fmt.Errorf("%w: non-clarification run carries a frozen budget", ErrInvalidRun)
+	}
 	if run.Usage.Exhausted && !run.Terminal() {
 		return fmt.Errorf("%w: exhausted budget requires a terminal state", ErrInvalidRun)
 	}
@@ -323,11 +344,11 @@ func (run Run) Validate() error {
 		if run.Disposition != DispositionDirect || !run.Hashes.completeAnswerChain() {
 			return fmt.Errorf("%w: answered run is missing its governed completion chain", ErrInvalidRun)
 		}
-	case StateClarificationRequired:
+	case StateClarificationRequired, StateClarificationExpired:
 		if run.Disposition != DispositionClarify {
 			return fmt.Errorf("%w: clarification disposition is invalid", ErrInvalidRun)
 		}
-	case StateBlocked:
+	case StateBlocked, StateOutOfScope:
 		if run.Disposition != DispositionRefuse {
 			return fmt.Errorf("%w: blocked disposition is invalid", ErrInvalidRun)
 		}
@@ -341,7 +362,13 @@ func CanTransition(from, to State) bool {
 	if _, ok := validStates[from]; !ok {
 		return false
 	}
-	if _, ok := validStates[to]; !ok || isTerminalState(from) {
+	if _, ok := validStates[to]; !ok {
+		return false
+	}
+	if from == StateClarificationRequired {
+		return to == StateClarificationExpired
+	}
+	if isTerminalState(from) {
 		return false
 	}
 	if from == to {
@@ -355,11 +382,13 @@ func CanTransition(from, to State) bool {
 	case StateContextReady:
 		return to == StateUnderstanding || to == StateBlocked
 	case StateUnderstanding:
-		return to == StateRetrieving || to == StateClarificationRequired || to == StateBlocked
+		return to == StateRetrieving || to == StateClarificationRequired ||
+			to == StateOutOfScope || to == StateBlocked
 	case StateRetrieving:
 		return to == StateBinding || to == StateClarificationRequired || to == StateBlocked
 	case StateBinding:
-		return to == StateGraphValidating || to == StateClarificationRequired || to == StateBlocked
+		return to == StateGraphValidating || to == StateClarificationRequired ||
+			to == StateOutOfScope || to == StateBlocked
 	case StateGraphValidating:
 		return to == StateIRReady || to == StateClarificationRequired || to == StateBlocked
 	case StateIRReady:
@@ -370,15 +399,18 @@ func CanTransition(from, to State) bool {
 	case StateExecuting:
 		return to == StateResultVerifying || to == StateBlocked
 	case StateResultVerifying:
-		return to == StateAnswered || to == StateBinding ||
+		return to == StateAnswerVerifying || to == StateBinding ||
 			to == StateClarificationRequired || to == StateBlocked
+	case StateAnswerVerifying:
+		return to == StateAnswered || to == StateBlocked
 	default:
 		return false
 	}
 }
 
 func isTerminalState(state State) bool {
-	return state == StateClarificationRequired || state == StateAnswered || state == StateBlocked
+	return state == StateClarificationRequired || state == StateClarificationExpired ||
+		state == StateOutOfScope || state == StateAnswered || state == StateBlocked
 }
 
 type CompletionRef struct {
@@ -388,11 +420,12 @@ type CompletionRef struct {
 }
 
 type Transition struct {
-	ExpectedVersion int64
-	TargetState     State
-	Usage           BudgetUsage
-	Hashes          HashUpdates
-	Completion      *CompletionRef
+	ExpectedVersion      int64
+	TargetState          State
+	Usage                BudgetUsage
+	Hashes               HashUpdates
+	Completion           *CompletionRef
+	ClarificationTimeout time.Duration
 }
 
 // Apply validates and constructs the next durable run snapshot. Budget usage
@@ -424,6 +457,19 @@ func Apply(current Run, transition Transition) (Run, error) {
 	next.RecordVersion++
 	next.UpdatedAt = time.Now().UTC()
 	beforeHashes := next.Hashes
+	if next.State == StateClarificationRequired {
+		timeout := transition.ClarificationTimeout
+		if timeout == 0 {
+			timeout = DefaultClarificationTimeout
+		}
+		frozen, err := FreezeBudget(next.Usage, next.Limits, next.UpdatedAt, timeout)
+		if err != nil {
+			return Run{}, err
+		}
+		next.ClarificationDeadline = &frozen.Deadline
+		next.BudgetFrozenAt = &frozen.FrozenAt
+		next.BudgetConsumed = &frozen.Consumed
+	}
 
 	correction := transition.TargetState == StateBinding &&
 		(current.State == StatePlanValidating || current.State == StateResultVerifying)
@@ -489,9 +535,9 @@ func Apply(current Run, transition Transition) (Run, error) {
 		switch next.State {
 		case StateAnswered:
 			next.Disposition = DispositionDirect
-		case StateClarificationRequired:
+		case StateClarificationRequired, StateClarificationExpired:
 			next.Disposition = DispositionClarify
-		case StateBlocked:
+		case StateBlocked, StateOutOfScope:
 			next.Disposition = DispositionRefuse
 		}
 		completed := next.UpdatedAt
@@ -513,9 +559,9 @@ func completionArtifactType(state State) ArtifactType {
 	switch state {
 	case StateAnswered:
 		return ArtifactAnswer
-	case StateClarificationRequired:
+	case StateClarificationRequired, StateClarificationExpired:
 		return ArtifactClarification
-	case StateBlocked:
+	case StateBlocked, StateOutOfScope:
 		return ArtifactBlock
 	default:
 		return ""

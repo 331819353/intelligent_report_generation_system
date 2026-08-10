@@ -59,6 +59,7 @@ type RoundResult struct {
 	Action         Action
 	ActionHash     askdata.ContentHash
 	AIRequestID    string
+	Provider       string
 	ProviderModel  string
 	Attempts       int
 	Usage          ai.Usage
@@ -178,8 +179,9 @@ func (executor *Executor) Execute(ctx context.Context, input RoundRequest) (Roun
 
 	return RoundResult{
 		Action: action, ActionHash: actionHash,
-		AIRequestID: invocation.RequestID, ProviderModel: invocation.ProviderResult.Model,
-		Attempts: invocation.Attempts, Usage: invocation.ProviderResult.Usage,
+		AIRequestID: invocation.RequestID, Provider: invocation.Provider,
+		ProviderModel: invocation.ProviderResult.Model,
+		Attempts:      invocation.Attempts, Usage: invocation.ProviderResult.Usage,
 		CostMicros: invocation.CostMicros, RedactionCount: invocation.RedactionCount,
 	}, nil
 }

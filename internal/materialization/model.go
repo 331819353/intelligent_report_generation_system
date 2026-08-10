@@ -237,14 +237,16 @@ type PhysicalIdentifier struct {
 }
 
 type Activation struct {
-	Physical     PhysicalIdentifier
-	RelationKind string
-	SchemaHash   string
-	SnapshotHash string
-	RowCount     int64
-	SizeBytes    int64
-	Watermark    json.RawMessage
-	Quality      []QualityResult
+	Physical             PhysicalIdentifier
+	RelationKind         string
+	SchemaHash           string
+	SnapshotHash         string
+	SnapshotVersion      string
+	RowCount             int64
+	SizeBytes            int64
+	DataAvailableThrough *time.Time
+	Watermark            json.RawMessage
+	Quality              []QualityResult
 }
 
 type Materialization struct {
@@ -271,6 +273,7 @@ type Repository interface {
 	Heartbeat(context.Context, Claim, time.Duration) (Claim, error)
 	StartNode(context.Context, Claim, string) error
 	FinishNode(context.Context, Claim, string, NodeResult) error
+	BeginSnapshot(context.Context, Claim, SnapshotStart) (MaterializationSnapshot, error)
 	Fail(context.Context, Claim, string, string, []QualityResult) error
 	Activate(context.Context, Claim, Activation) (Materialization, error)
 }

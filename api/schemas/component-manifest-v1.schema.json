@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.intelligent-report.local/component-manifest-v1.schema.json",
+  "title": "Component Manifest v1",
+  "description": "Registration contract that drives report editor forms, AI option constraints, compatibility checks and runtime rendering.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type",
+    "version",
+    "renderer",
+    "displayName",
+    "category",
+    "minSize",
+    "recommendedSize",
+    "dataContract",
+    "stackingRequiresAdditive",
+    "optionSchema",
+    "defaultOptions",
+    "mobilePolicy",
+    "supportedInteractions"
+  ],
+  "properties": {
+    "type": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$", "maxLength": 64 },
+    "version": { "$ref": "#/$defs/semver" },
+    "renderer": { "enum": ["ECHARTS", "REACT", "TEXT", "IMAGE", "CONTROL"] },
+    "displayName": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "category": { "enum": ["CHART", "TABLE", "CONTENT", "CONTROL"] },
+    "minSize": { "$ref": "#/$defs/gridSize" },
+    "recommendedSize": { "$ref": "#/$defs/gridSize" },
+    "dataContract": { "$ref": "#/$defs/dataContract" },
+    "stackingRequiresAdditive": {
+      "type": "boolean",
+      "description": "When true, all bound metrics must be fully additive before stacking is allowed."
+    },
+    "optionSchema": { "$ref": "#/$defs/optionSchema" },
+    "defaultOptions": {
+      "type": "object",
+      "maxProperties": 64,
+      "description": "Validated by the same optionSchema at registry load time."
+    },
+    "mobilePolicy": { "$ref": "#/$defs/mobilePolicy" },
+    "supportedInteractions": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/interactionKind" }
+    },
+    "migration": { "$ref": "#/$defs/migration" }
+  },
+  "$defs": {
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "maxLength": 64
+    },
+    "gridSize": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["w", "h"],
+      "properties": {
+        "w": { "type": "integer", "minimum": 1, "maximum": 24 },
+        "h": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    },
+    "cardinality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "max"],
+      "properties": {
+        "min": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "max": { "type": "integer", "minimum": 0, "maximum": 32 }
+      }
+    },
+    "dataContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dimensions", "measures", "timeField", "roles"],
+      "properties": {
+        "dimensions": { "$ref": "#/$defs/cardinality" },
+        "measures": { "$ref": "#/$defs/cardinality" },
+        "timeField": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required"],
+          "properties": { "required": { "type": "boolean" } }
+        },
+        "roles": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/bindingRole" }
+        }
+      }
+    },
+    "bindingRole": {
+      "enum": ["DIMENSION", "SERIES", "X_AXIS", "Y_AXIS", "VALUE", "CATEGORY", "TIME", "COLOR", "SIZE", "LABEL", "DETAIL", "TOOLTIP"]
+    },
+    "optionSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "additionalProperties", "required", "properties"],
+      "properties": {
+        "type": { "const": "object" },
+        "additionalProperties": { "const": false },
+        "required": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]{0,63}$", "maxLength": 64 }
+        },
+        "properties": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": { "pattern": "^[a-z][A-Za-z0-9]{0,63}$" },
+          "additionalProperties": { "$ref": "#/$defs/optionPropertySchema" }
+        }
+      }
+    },
+    "optionPropertySchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["boolean", "string", "integer", "number"] },
+        "description": { "type": "string", "maxLength": 4096 },
+        "enum": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "maxLength": 4096 }
+        },
+        "minimum": { "type": "number" },
+        "maximum": { "type": "number" }
+      }
+    },
+    "mobilePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["supported", "defaultLegendMode", "labelDegradation"],
+      "properties": {
+        "supported": { "type": "boolean" },
+        "defaultLegendMode": { "enum": ["VISIBLE", "HIDDEN", "SCROLL"] },
+        "labelDegradation": { "enum": ["NONE", "HIDE_WHEN_DENSE", "ELLIPSIS", "ROTATE"] }
+      }
+    },
+    "interactionKind": {
+      "enum": ["CLICK_FILTER", "DRILL_DOWN", "BRUSH", "ZOOM", "SORT", "PAGINATE"]
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "migratorId"],
+      "properties": {
+        "from": { "$ref": "#/$defs/semver" },
+        "migratorId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,127}$", "maxLength": 128 }
+      }
+    }
+  }
+}

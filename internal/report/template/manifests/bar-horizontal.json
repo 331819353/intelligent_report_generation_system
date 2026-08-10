@@ -1,0 +1,33 @@
+{
+  "type": "bar-horizontal",
+  "version": "1.0.0",
+  "renderer": "ECHARTS",
+  "displayName": "横向条形图",
+  "category": "CHART",
+  "minSize": { "w": 4, "h": 3 },
+  "recommendedSize": { "w": 7, "h": 6 },
+  "dataContract": {
+    "dimensions": { "min": 1, "max": 2 },
+    "measures": { "min": 1, "max": 3 },
+    "timeField": { "required": false },
+    "roles": ["X_AXIS", "Y_AXIS", "SERIES", "COLOR", "LABEL", "TOOLTIP"]
+  },
+  "stackingRequiresAdditive": false,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [],
+    "properties": {
+	  "title": { "type": "string" },
+	  "subtitle": { "type": "string" },
+      "showLegend": { "type": "boolean" },
+      "showLabel": { "type": "boolean" },
+      "orientation": { "type": "string", "enum": ["HORIZONTAL"] },
+      "topN": { "type": "integer", "minimum": 1, "maximum": 1000 },
+      "colorPaletteRef": { "type": "string" }
+    }
+  },
+  "defaultOptions": { "showLegend": false, "showLabel": true, "orientation": "HORIZONTAL", "topN": 10 },
+  "mobilePolicy": { "supported": true, "defaultLegendMode": "HIDDEN", "labelDegradation": "ELLIPSIS" },
+  "supportedInteractions": ["CLICK_FILTER", "DRILL_DOWN", "ZOOM"]
+}

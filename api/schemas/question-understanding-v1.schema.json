@@ -60,7 +60,7 @@
       "maxItems": 8,
       "items": { "$ref": "#/$defs/orderingMention" }
     },
-    "limit": { "type": ["integer", "null"], "minimum": 1, "maximum": 10000 },
+    "limit": { "type": ["integer", "null"], "minimum": 1, "maximum": 1000 },
     "unresolvedSpans": {
       "type": "array",
       "maxItems": 32,
@@ -174,12 +174,13 @@
     "orderingMention": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["text", "span", "targetText", "direction"],
+      "required": ["text", "span", "targetText", "direction", "rankBy"],
       "properties": {
         "text": { "type": "string", "minLength": 1, "maxLength": 512 },
         "span": { "$ref": "#/$defs/span" },
         "targetText": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "direction": { "enum": ["ASC", "DESC"] }
+        "direction": { "enum": ["ASC", "DESC"] },
+        "rankBy": { "enum": ["", "CURRENT_VALUE", "DELTA", "RATIO"] }
       }
     },
     "unresolvedSpan": {

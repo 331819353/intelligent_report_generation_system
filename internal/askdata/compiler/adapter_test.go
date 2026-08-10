@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/ir"
@@ -35,12 +36,20 @@ func TestAdaptProducesReplaySafeGoldenCompiledQuery(t *testing.T) {
 	if len(artifact.Plans) != 1 || artifact.PlanHash.Validate() != nil {
 		t.Fatalf("unexpected query artifact: %#v", artifact)
 	}
+	if len(artifact.MetricAggregations) != 1 ||
+		artifact.MetricAggregations[0].MetricVersionID != "metric-sales-v1" ||
+		artifact.MetricAggregations[0].ResultColumnName != artifact.Plans[0].Document.Fields[0].Code ||
+		artifact.MetricAggregations[0].Additivity != registry.FullyAdditive ||
+		artifact.MetricAggregations[0].TotalsNotSummable ||
+		artifact.MetricAggregations[0].DisplayPrecision != 0 {
+		t.Fatalf("unexpected metric aggregation contract: %#v", artifact.MetricAggregations)
+	}
 	compiled, ok := artifact.Plans[0].CompiledQuery()
 	if !ok {
 		t.Fatal("live adapter did not retain the in-process compiled query")
 	}
 	wantSQL := `SELECT "secure_base"."metric_e767c85023bc65e498835c26d9a550f11b82fb10617f5eb4e7f94778" AS "metric_e767c85023bc65e498835c26d9a550f11b82fb10617f5eb4e7f94778" FROM (SELECT SUM("semantic_model"."net_sales") AS "metric_e767c85023bc65e498835c26d9a550f11b82fb10617f5eb4e7f94778" FROM "warehouse_published"."dws_sales_orders" "semantic_model") "secure_base" LIMIT $1`
-	if compiled.SQL != wantSQL || !reflect.DeepEqual(compiled.Args, []any{500}) ||
+	if compiled.SQL != wantSQL || !reflect.DeepEqual(compiled.Args, []any{10000}) ||
 		compiled.PlanHash != string(artifact.Plans[0].CompiledPlanHash) {
 		t.Fatalf("compiled query differs from golden:\nSQL: %s\nargs: %#v\nhash: %s", compiled.SQL, compiled.Args, compiled.PlanHash)
 	}
@@ -70,6 +79,111 @@ func TestAdaptProducesReplaySafeGoldenCompiledQuery(t *testing.T) {
 	if !errors.Is(tampered.Validate(), ErrInvalidQueryPlan) {
 		t.Fatal("tampered physical whitelist must fail closed")
 	}
+	tampered = replayed
+	tampered.MetricAggregations[0].TotalsNotSummable = true
+	tampered.PlanHash, err = queryArtifactHash(tampered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(tampered.Validate(), ErrInvalidQueryPlan) {
+		t.Fatal("rehashed inconsistent additivity contract must fail closed")
+	}
+}
+
+func TestRetainedReleaseRecompilesTheSamePlanHash(t *testing.T) {
+	request, buildArtifact, scope := resolverBuildFixture(t)
+	ctx := database.WithAccessContext(context.Background(), string(scope.ActorID), "sales")
+	compile := func(status string) QueryArtifact {
+		t.Helper()
+		snapshot := metricOnlySnapshot(t, scope.Release)
+		snapshot.ReleaseStatus = status
+		resolver, err := NewResolver(&memoryContractStore{snapshot: snapshot})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolution, err := resolver.Resolve(ctx, ResolveRequest{
+			BuildRequest: request, BuildArtifact: buildArtifact,
+		})
+		if err != nil {
+			t.Fatalf("resolve %s release: %v", status, err)
+		}
+		artifact, err := Adapt(AdaptRequest{
+			ResolveRequest: ResolveRequest{BuildRequest: request, BuildArtifact: buildArtifact},
+			Resolution:     resolution,
+		})
+		if err != nil {
+			t.Fatalf("compile %s release: %v", status, err)
+		}
+		return artifact
+	}
+	ready, retained := compile("READY"), compile("RETAINED")
+	if ready.PlanHash != retained.PlanHash || len(ready.Plans) != 1 || len(retained.Plans) != 1 ||
+		ready.Plans[0].PlanHash != retained.Plans[0].PlanHash ||
+		ready.Plans[0].CompiledPlanHash != retained.Plans[0].CompiledPlanHash {
+		t.Fatalf("retained recompilation drifted: ready=%#v retained=%#v", ready, retained)
+	}
+}
+
+func TestPinnedArtifactRehydrationReauthorizesViewerAndPreservesPlanShape(t *testing.T) {
+	request, buildArtifact, sourceScope := resolverBuildFixture(t)
+	snapshot := metricOnlySnapshot(t, sourceScope.Release)
+	resolver, err := NewResolver(&memoryContractStore{snapshot: snapshot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceContext := database.WithAccessContext(context.Background(), string(sourceScope.ActorID), "sales")
+	resolution, err := resolver.Resolve(sourceContext, ResolveRequest{
+		BuildRequest: request, BuildArtifact: buildArtifact,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := Adapt(AdaptRequest{
+		ResolveRequest: ResolveRequest{BuildRequest: request, BuildArtifact: buildArtifact},
+		Resolution:     resolution,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted QueryArtifact
+	if askdata.DecodeStrictJSON(raw, &persisted) != nil {
+		t.Fatal("decode persisted query artifact")
+	}
+	viewerScope, err := askdata.NewPolicyScope(
+		sourceScope.TenantID, "viewer-query", sourceScope.DomainIDs,
+		[]askdata.ID{"viewer"}, sourceScope.Release,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rehydrator, err := NewPinnedArtifactRehydrator(&memoryContractStore{snapshot: snapshot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewerContext := database.WithAccessContext(context.Background(), string(viewerScope.ActorID), "sales")
+	live, err := rehydrator.Rehydrate(viewerContext, viewerScope, buildArtifact.IR, persisted.PlanHash, persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.Scope.ActorID != viewerScope.ActorID || live.PlanHash == persisted.PlanHash ||
+		len(live.Plans) != len(persisted.Plans) || live.Plans[0].PlanHash != persisted.Plans[0].PlanHash {
+		t.Fatalf("viewer rehydration drifted: persisted=%#v live=%#v", persisted, live)
+	}
+	if _, executable := live.Plans[0].CompiledQuery(); !executable {
+		t.Fatal("rehydrated viewer plan is not executable")
+	}
+	if _, executable := persisted.Plans[0].CompiledQuery(); executable {
+		t.Fatal("persisted artifact unexpectedly retained executable arguments")
+	}
+	if _, err := rehydrator.Rehydrate(
+		viewerContext, viewerScope, buildArtifact.IR, askdata.HashBytes([]byte("tampered")), persisted,
+	); err == nil {
+		t.Fatal("wrong fixed plan hash was accepted")
+	}
 }
 
 func TestComparisonBuildsCurrentAndBaselineWithoutPersistingValues(t *testing.T) {
@@ -88,15 +202,15 @@ func TestComparisonBuildsCurrentAndBaselineWithoutPersistingValues(t *testing.T)
 		len(document.Parameters) != 3 || document.ExecutionPolicy.ResultLimit != 10000 {
 		t.Fatalf("generated document did not preserve stable fields/parameters: %#v", document)
 	}
-	current, err := compileQueryPlan(QueryRoleCurrent, document, source, shapes, currentValues, semanticIR.Limit)
+	current, err := compileQueryPlan(QueryRoleCurrent, document, source, shapes, currentValues, ir.MaxResultRows)
 	if err != nil {
 		t.Fatal(err)
 	}
-	baselineValues, err := baselineParameterValues(semanticIR, resolution, currentValues)
+	baselineValues, err := baselineParameterValues(semanticIR, resolution, currentValues, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseline, err := compileQueryPlan(QueryRoleBaseline, document, source, shapes, baselineValues, semanticIR.Limit)
+	baseline, err := compileQueryPlan(QueryRoleBaseline, document, source, shapes, baselineValues, ir.MaxResultRows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,12 +271,47 @@ func TestComparisonRangeClampsCalendarBoundaries(t *testing.T) {
 	}
 }
 
+func TestResolvedTimeSpecDrivesCurrentAndBaselinePlanParameters(t *testing.T) {
+	semanticIR, resolution := comparisonAdapterFixture(t)
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	semanticIR.TimeRange.RequestedPeriod = "CURRENT_MONTH"
+	semanticIR.TimeRange.Grain = ir.TimeGrainMonth
+	resolved := &ir.ResolvedTimeSpec{
+		RequestedPeriod: "CURRENT_MONTH", Grain: "MONTH", PolicyApplied: "MTD", PolicySource: "TIME_CONTRACT",
+		ResolvedStart: time.Date(2026, time.August, 1, 0, 0, 0, 0, loc), ResolvedEndExclusive: time.Date(2026, time.August, 8, 0, 0, 0, 0, loc),
+		DataAvailableThrough: time.Date(2026, time.August, 7, 12, 0, 0, 0, loc), TruncatedByDataAvailability: true,
+		Timezone: "Asia/Shanghai", Comparison: &ir.ResolvedComparison{
+			Type: "YEAR_OVER_YEAR", Periods: 1, Alignment: "SAME_DAY_COUNT",
+			ResolvedStart: time.Date(2025, time.August, 1, 0, 0, 0, 0, loc), ResolvedEndExclusive: time.Date(2025, time.August, 8, 0, 0, 0, 0, loc),
+		},
+	}
+	queryIR, err := applyResolvedTimeSpec(semanticIR, resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, currentValues, _, err := buildQueryDocument(queryIR, resolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineValues, err := baselineParameterValues(queryIR, resolution, currentValues, resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentValues["time_start"] != "2026-08-01" || currentValues["time_end_exclusive"] != "2026-08-08" ||
+		baselineValues["time_start"] != "2025-08-01" || baselineValues["time_end_exclusive"] != "2025-08-08" {
+		t.Fatalf("resolved time was not applied: current=%#v baseline=%#v", currentValues, baselineValues)
+	}
+}
+
 func comparisonAdapterFixture(t *testing.T) (ir.SemanticIR, Resolution) {
 	t.Helper()
 	month := ir.TimeGrainMonth
 	semanticIR := ir.SemanticIR{
 		IRVersion: ir.Version, SemanticReleaseID: "release-query-v1",
-		SemanticContentHash: hash("release-query-v1"), ModelVersionID: "model-sales-v1",
+		SemanticContentHash: hash("release-query-v1"), DomainID: "sales", ModelVersionID: "model-sales-v1",
 		Metrics: []ir.Metric{{MetricVersionID: "metric-sales-v1", Alias: "net_sales"}},
 		GroupBy: []ir.GroupBy{{DimensionVersionID: "dimension-order-date-v1", Grain: &month}},
 		Filters: []ir.Filter{{
@@ -176,9 +325,9 @@ func comparisonAdapterFixture(t *testing.T) (ir.SemanticIR, Resolution) {
 		Comparison: &ir.Comparison{Type: ir.ComparisonYearOverYear, Periods: 1},
 		Sort: []ir.Sort{{
 			TargetType: ir.SortTargetMetric, TargetVersionID: "metric-sales-v1",
-			Direction: ir.SortDescending, Nulls: ir.NullsLast,
+			Direction: ir.SortDescending, Nulls: ir.NullsLast, RankBy: ir.RankByCurrentValue,
 		}},
-		Limit: 10000,
+		Limit: 1000, OtherPolicy: ir.OtherNone, TieBreaking: ir.TieIncludeAll,
 	}
 	if err := semanticIR.Validate(); err != nil {
 		t.Fatal(err)
@@ -201,9 +350,11 @@ func comparisonAdapterFixture(t *testing.T) (ir.SemanticIR, Resolution) {
 		Metrics: []MetricContract{{
 			MetricVersionID: "metric-sales-v1", FormulaAST: json.RawMessage(`{"measureId":"measure-sales","type":"MEASURE_REF"}`),
 			DefaultFilterAST: json.RawMessage(`{"left":{"fieldId":"order_status","type":"FIELD_REF"},"right":{"type":"LITERAL","value":"PAID"},"type":"EQUALS"}`),
-			NullPolicy:       "PRESERVE", Measures: []MeasureContract{{
+			Additivity:       registry.FullyAdditive, Unit: "CNY", ZeroDenominatorPolicy: registry.ZeroDenominatorNull,
+			NullPolicy: "PRESERVE", Measures: []MeasureContract{{
 				MeasureID: "measure-sales", MeasureVersionID: "measure-sales-v1", FormulaAST: json.RawMessage(`{"fieldId":"net_sales","type":"FIELD_REF"}`),
-				Aggregation: registry.AggregationSum, DataType: registry.NumericDecimal,
+				Aggregation: registry.AggregationSum, Additivity: registry.FullyAdditive,
+				DataType: registry.NumericDecimal, Unit: "CNY", ZeroDenominatorPolicy: registry.ZeroDenominatorNull,
 			}},
 		}},
 		Dimensions: []DimensionContract{

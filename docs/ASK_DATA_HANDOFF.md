@@ -7,6 +7,47 @@
 > 页面门禁：任何新增页面、流程或显著视觉状态的 `WEB-*`、`WEB-RPT-*` 编码开始前，必须先提交页面设计稿并
 > 取得用户确认；纯 API Client、类型和测试接线不触发页面门禁，但仍必须满足 TODO 依赖。
 
+## 2026-08-10 后端收敛交接（当前权威状态）
+
+本节覆盖后文按日期累积的历史“下一步”快照；后文仍保留实现过程和设计决策，不应用其中的旧阻塞关系
+判断当前完成度。本轮范围是**除前端页面外的全部软件模块**。
+
+### 已完成后端能力
+
+- `RPT-001` 已完成报告 DSL 规范化、12 阶段校验、富文本清洗、规范 JSON 和稳定 hash，并通过常规、
+  竞态和基准验证。报告主链已继续完成运行时、筛选交互服务、Insight Engine/Method Registry、AI
+  两阶段生成与局部修改、真实 CSV/XLSX/PDF/PNG 导出、无匿名分享、模板版本保留与受控升级。
+- `FUSE-001`～`005` 已完成：问数加入报告、报告资产投影/单人认证、从报告发起问数、图表推荐、依赖
+  影响分析及预览/确认式升级。升级确认会固定当前 actor/release 重新编译 Semantic IR，用同一受治理
+  runtime 对比样本，只在确认 token 未过期时追加编译制品和一个新草稿修订，不改写旧版本。
+- 发布控制面已完成 `DB-007/008`、`REL-001`～`006`：数据库从事实重算 Wilson 门禁、LLM 评审仅提供
+  建议、双人审批职责分离、单事务 ACTIVE 切换及失败关闭。没有业务评测事实时仍不会激活。
+- 评测/运营后端已完成端到端 equivalence runner、反馈归因、Shadow/Canary 统计、密封集轮换/曝光
+  退役、误差预算、保存问题、反馈工单与主动学习；明细取数已补齐敏感推导/安全会签、受控导出桥和
+  重复申请资产化聚类。
+- 运维后端已完成严格配置、独立 Worker 入口、结构化观测、质量/成本视图、四级配额与成本归集。
+  灾备演练、生产容量 POC 和压测报告仍必须在目标环境实际执行，不能由单元测试替代。
+
+### 数据库与安全边界
+
+- 当前迁移序列到 `000280_report_semantic_upgrade_compilations`。`000276`～`000280` 分别补齐报告语义
+  IR 重建、依赖索引重建、融合引用、认证问法/报告种子上下文，以及不可变升级编译制品。
+- `platform.report_semantic_compilations` 强制 RLS 且禁止更新/删除；应用角色仅有 `SELECT,INSERT`，
+  Worker/连接测试角色无表级权限。运行时只经 SECURITY DEFINER loader 读取与 READY 不可变报告版本、
+  当前查看者权限、组件、plan hash、release/hash 和 IR hash 全部精确匹配的制品。
+- 分享 token 只用于定位，永不授予匿名权限；保存问题和报告升级均按当前查看者策略重新执行，不能复用
+  他人结果或旧权限快照。
+
+### 已验证与仍需外部完成
+
+- 已通过：全仓 Go 测试、AskData/Report/DataRequest 竞态测试、`go vet ./...`、Compose 配置检查、主库
+  migrate/verify、独立数据库 `000280` up/down/up、`git diff --check`。
+- 前端页面仍按用户指定排除：全部 `WEB-*`、`WEB-RPT-*`，以及混合任务 `ADD-002`、`RPT-006`、
+  `RPT-008`、`RPT-011` 中的页面/打印样式部分。它们的后端范围已完成。
+- 仍需真实业务/生产输入：`EVAL-008`～`010` 的业务黄金样本与 150 条双人评审、`OPS-003/004`、
+  `OBS-003`、`PILOT-001`～`004`。在这些完成前不得宣称 Recall 门槛、95% 准确率、灾备 RTO/RPO 或
+  生产容量已经验收。
+
 ## 0. 板块蓝图同步（2026-08-06）
 
 TODO 已按**功能区（板块 B01～B13）**重新组织，见 `ASK_DATA_CODEX_TODO.md` §0 与 §22～§32。交接时必须先读本节。
@@ -19,28 +60,31 @@ TODO 已按**功能区（板块 B01～B13）**重新组织，见 `ASK_DATA_CODEX
 
 | 板块 | 名称 | 状态 | 关键缺口 |
 |---|---|---|---|
-| B01 | 平台底座与权限 | 部分：`SEC-003` 完成 | `SEC-001`、`SEC-002`、`SEC-004` |
-| B02 | 数据接入与元数据 | 仓库基线已有 | 明细取数申请 `DR-001`～`DR-003` |
-| B03 | 数仓建模与物化 | 仓库基线已有 | 数据快照版本 `SNAP-001` |
-| B04 | 语义资产治理 | 主链完成 | 时间合同、可加性、批量导入、词典、KPI Bundle 全部待建 |
-| B05 | 语义发布与投影 | READY 完成，ACTIVE 门禁故意关闭 | `RETAIN-001`、`PROJ-002`、`DB-007/008`、`REL-001`～`006` |
-| B06 | 检索与语义图谱 | 主链完成 | `GRAPH-006` 降级矩阵、`SEARCH-005/006` |
-| B07 | 问句理解与联合绑定 | 主链完成 | `NLU-007`～`009` 单域约束、Release Pin、超范围分类 |
-| B08 | 查询编译与执行 | 主链完成 | `QUERY-007`～`011` TopN/枚举拆分/Bundle/缓存/PARTIAL |
-| B09 | 编排与问数 API | Loop 与 API 完成 | `ORCH-006`～`009`、`ANS-001`～`004` 叙述校验 |
-| B10 | 问数工作台前端 | 仅 `WEB-001` mock 完成 | `WEB-002`～`013` |
-| B11 | 报表引擎与融合 | **全部待建** | `RPT-*` 21 项、`FUSE-*` 5 项、`WEB-RPT-*` 6 项 |
-| B12 | 评测、反馈与运营 | 基础完成 | `EVAL-003`～`012`、`FB-*`、`SQ-001` |
-| B13 | 运维、可观测与成本 | 仅 `OPS-001` 完成 | `OPS-002`～`006`、`OBS-001`～`003` |
+| B01 | 平台底座与权限 | `SEC-001`～`SEC-004` 全部完成 | — |
+| B02 | 数据接入与元数据 | 明细取数、敏感会签、受控导出与资产化聚类后端完成 | 前端入口及真实审批责任人配置 |
+| B03 | 数仓建模与物化 | 仓库基线 + `SNAP-001` 数据快照版本完成 | 后续增量物化与运维增强 |
+| B04 | 语义资产治理 | 后端主链、DRAFT、时间/可加性、导入、词典、KPI 与建议器完成 | `ADD-002` 前端补录入口 |
+| B05 | 语义发布与投影 | READY、评测门禁、双人审批、ACTIVE 原子激活与保留策略完成 | 真实业务审批/评测事实 |
+| B06 | 检索与语义图谱 | 主链、降级、Recall@K 评测器与 ANN/Exact 审计完成 | 正式人工黄金集 |
+| B07 | 问句理解与联合绑定 | 主链、`NLU-007` 登录后已选领域强制 Pin、`NLU-008` 会话 Release Pin/澄清超时与 `NLU-009` 范围白名单/正确拒答完成 | — |
+| B08 | 查询编译与执行 | 主链、`ADD-003/004`、`QUERY-007`～`011` 全部完成 | — |
+| B09 | 编排与问数 API | Loop/API、答案校验重生成、预算/幂等与叙述观测门禁完成 | — |
+| B10 | 问数工作台前端 | `WEB-001`～`WEB-006` 与 `WEB-011` 明细取数申请工作区完成 | `WEB-007`～`010`、`WEB-012/013` |
+| B11 | 报表引擎与融合 | 后端引擎、发布/回滚/导出/分享/升级与 `FUSE-001`～`005` 完成 | 前端运行时/筛选/打印及全部 `WEB-RPT-*` |
+| B12 | 评测、反馈与运营 | 软件控制面、密封集、误差预算、保存问题与反馈闭环完成 | 正式黄金样本与人工评审 |
+| B13 | 运维、可观测与成本 | 配置、独立 Worker、观测、看板、配额与成本后端完成 | 灾备、容量、生产 POC 实际演练 |
 
 ### 0.3 本次新增的任务数量
 
 | 来源 | 新增任务 |
 |---|---|
 | 产品/技术设计文档第五部分的口径裁定与功能补全 | `TIME-001`～`004`、`ADD-001`～`004`、`IMPORT-001`～`005`、`TERM-001/002`、`KPI-001`、`RETAIN-001`、`SNAP-001`、`PROJ-002`、`GRAPH-006`、`SEARCH-006`、`NLU-007`～`009`、`QUERY-007`～`011`、`ORCH-007`～`009`、`ANS-001`～`004`、`WEB-008`～`013`、`EVAL-008`～`012`、`SQ-001`、`FB-001/002`、`DR-001`～`003`、`OBS-003`、`OPS-006` |
-| 原计划完全缺失的报表板块 | `RPT-CONTRACT-001`～`004`、`RPT-DB-001`～`005`、`RPT-001`～`012`、`FUSE-001`～`005`、`WEB-RPT-001`～`006` |
+| 原计划完全缺失的报表板块 | `RPT-CONTRACT-001`～`004`、`RPT-DB-001`～`005`、`RPT-001`～`013`、`FUSE-001`～`005`、`WEB-RPT-001`～`007` |
 
-合计新增 **17 个迁移编号（`000225`～`000241`）** 与 **9 个 JSON Schema 合同**，均已在 TODO §22 预留，不得重复占用。
+基线预留 **17 个迁移编号（`000225`～`000241`）** 与 **9 个 JSON Schema 合同**；实施中为
+`IMPORT-005`、`SEARCH-006`、`NLU-008`、`DR-001`、`ORCH-008`、`ANS-003`、`ORCH-009` 追加 `000242`～`000248`；后续迁移已推进至
+`000273_report_rollback_integrity`；`000274_askdata_quota_runtime` 已被配额任务占用，`000275_report_asset_governance` 已由 `RPT-013` 实现并在本地应用；后续已顺序推进到 `000280_report_semantic_upgrade_compilations`，当前迁移分配以 TODO §22.1
+为准，不得重复占用。
 
 ### 0.4 新增的不可违反约束
 
@@ -48,7 +92,7 @@ TODO 已按**功能区（板块 B01～B13）**重新组织，见 `ASK_DATA_CODEX
 
 11. 报告数据绑定必须声明 `bindingMode`，`SEMANTIC_IR` 与 `DATASET_FIELD` 二选一；只有前者能反哺问数。
 12. 不可加指标（比率、去重）绝不得被 `SUM`/`AVG`；半可加指标缺时间聚合声明则编译失败。
-13. 未结束周期默认 `MTD`，策略优先级为 指标级 > 业务域级 > 平台默认；实际区间必须对用户可见。
+13. 未结束周期默认 `MTD`，策略优先级为 指标级 > 时间合同级 > 业务域级 > 平台默认；实际区间必须对用户可见。
 14. 任何叙述性文字必须通过事实校验；校验失败降级为结构化答案，**不得输出未校验文本**。
 15. 报告分享不存在匿名类型，令牌只定位不授权。
 16. 被引用的 Semantic Release 不得 `RETIRED`，必须进入 `RETAINED` 保留态。
@@ -62,35 +106,56 @@ TODO 已按**功能区（板块 B01～B13）**重新组织，见 `ASK_DATA_CODEX
   规范化/异常候选接线，以及分类文档、Embedding、混合检索和受约束 LLM 重排主链。
   Wave 2C 已完成 NebulaGraph 服务端/Go Client 兼容 POC、正式开发 Compose/初始化、
   GraphPlan 合同/Adapter、按 release/lease 幂等运行的正式 Projector Worker，以及
-  Nebula/认证缓存/PostgreSQL 有界降级 Resolver；`SEARCH-005` 仍依赖未提供的人工黄金集，
-  图主链已完成。Wave 3A 已完成确定性问句规范化、原文
+  Nebula/认证缓存/PostgreSQL 有界降级 Resolver，以及 `GRAPH-006` 六行失败关闭矩阵、熔断、指标和
+  Evidence/SSE/UI 降级证据，以及 `SEARCH-006` label-free 查询向量、ANN/Exact `recall@K` 定期审计、
+  小集合 exact 路由与 embedding 模型/维度门禁；`SEARCH-005` 仍依赖未提供的人工黄金集，B06 除该人工
+  评测门禁外已完成。
+  Wave 3A 已完成确定性问句规范化、原文
   span 回映、时间/比较/
   查询语法解析、安全会话上下文合并、受控 LLM 完整理解与取证计划、联合候选 Binder/
-  Bundle Beam Search，以及基于 held-out 验证集的置信度校准与定向澄清；Wave 3A 已完成，
+  Bundle Beam Search、基于 held-out 验证集的置信度校准与定向澄清、`NLU-007` 登录后已选业务域
+  的策略强制 Pin，以及 `NLU-008` 会话 Release Pin、Release 漂移确认、澄清预算冻结/恢复与超时终态，
+  `NLU-009` 15 类范围白名单、定义短路径与正确拒答出口；
+  Wave 3A 已完成，
   Wave 3B 已完成 Binding Bundle -> Semantic IR、pinned Semantic Contract Resolver、
   IR -> Dataset Query DSL Adapter、计划 Validator/安全 EXPLAIN、只读问数执行适配，以及规则优先的
   结果核验/异常分析；Wave 3B 已完成。
   Wave 4B 已提前完成无外部依赖的 `EVAL-001` 结果
-  规范化与等价判定，以及 `EVAL-002` mention/binding 指标和校准训练/验证输入合同。Wave 3C 的 `DB-005` 问数
+  规范化与等价判定、`EVAL-002` mention/binding 指标和校准训练/验证输入合同，以及 `EVAL-003`
+  纯内存 Fixture Regression Runner。Wave 3C 的 `DB-005` 问数
   运行/审计控制面、`ORCH-002` Question 状态机/PostgreSQL Store，以及 Wave 4B 的
   `DB-006` 评测集、双人评审、追加式评测运行与结构化反馈迁移均已完成。Wave 4C 的
   `SEC-003` 敏感成员敏感度下限、数据库内 EXACT_ONLY、label-free evidence/LLM 遮罩和
   不披露授权边界也已完成；`ORCH-001` Typed Tool Registry、`ORCH-003` LLM 中枢 Agent Loop、
-  `ORCH-004` 审计/预算/幂等和 `ORCH-005` Question API/SSE 已完成，`ORCH-006` Conversation 与
-  运行保留策略是下一条编排主线。用户已确认
+  `ORCH-004` 审计/预算/幂等、`ORCH-005` Question API/SSE、`ORCH-006` Conversation/运行保留策略和
+  `ORCH-008` RunType 独立预算/P95 与熔断分离、`QUERY-009` 认证 Query Plan Bundle 独立编译/校验、
+  四并发执行与逐项 PARTIAL 聚合，以及 `QUERY-011` P1～P6/Q1 确定性 outcome 与报告导出门禁
+  已完成。用户已确认
   `DB-004` 以 release/
   READY 投影水位为完成边界，ACTIVE 原子切换归属 `REL-005` 并继续按门禁保持关闭；当前
   剩余任务的依赖/人工输入阻塞
-  见“下一步”。用户已确认 `WEB-001` 方案 3「证据驾驶舱」，受保护 `/ask-data` React
-  typed mock、ECharts 图表、关键交互和设计 QA 均已完成；`WEB-002` 的 `ORCH-005` 依赖已满足，
-  尚未接入真实 Question API/SSE。
+  见“下一步”。用户已确认 `WEB-001` 方案 3「证据驾驶舱」、`WEB-003` 方案 1「运行中纵向时间线」、
+  `WEB-004` 方案 1「内联双候选决策卡」、`WEB-005` 方案 1「KPI 总览 + 趋势与渠道并列」和
+  `WEB-006` 方案 3「两步结构化反馈弹窗」、`TIME-003` 方案 2「轻量时间口径 disclosure + 证据同步」、
+  `GRAPH-006` 方案 1「琥珀色次级关系降级证据」、`NLU-008` 方案 1「原位口径更新卡 + 右侧
+  Release Pin 证据」、`WEB-011` 方案 3「我的申请主从工作区」，以及 `ANS-003` 方案 2「证据优先的
+  结构化结果 + 文字结论隐藏说明 + 答案层级」。
+  受保护 `/ask-data` 工作台、真实 Question API/SSE client/hook、受控运行进度、取消、失败关闭和终态
+  可访问提示、定向澄清、真实治理证据投影、防分叉消费合同、结果 KPI/图表/表格、有界分页和绑定终态
+  run 的结构化反馈均已完成；`REG-006` DRAFT 语义管理 API 已完成，下一项前端主线 `WEB-007`
+  仍被未完成的 `REL-005` 阻塞。
 - 已完成：`CONTRACT-001`～`CONTRACT-004`、`BASE-001`、`BASE-002`、
   `DB-001`～`DB-004`、`REG-001`～`REG-004`、`AI-001`～`AI-004`、
   `DIM-001`～`DIM-003`、`SEARCH-001`～`SEARCH-004`、`GRAPH-001`～`GRAPH-003`、
-  `NLU-001`～`NLU-004`、`DB-005`、`ORCH-002`、`DB-006`、`EVAL-001`、`EVAL-002`、
-  `SEC-003`、`WEB-001`、`GRAPH-004`、`GRAPH-005`、`NLU-005`、`NLU-006`、`QUERY-001`、
+  `NLU-001`～`NLU-004`、`DB-005`、`ORCH-002`、`DB-006`、`EVAL-001`、`EVAL-002`、`EVAL-003`、
+  `SEC-001`、`SEC-003`、`WEB-001`、`GRAPH-004`、`GRAPH-005`、`NLU-005`、`NLU-006`、`QUERY-001`、
   `QUERY-002`、`QUERY-003`、`QUERY-004`、`QUERY-005`、`QUERY-006`、`ORCH-001`、`ORCH-003`、
-  `ORCH-004`、`ORCH-005`。
+  `ORCH-004`、`ORCH-005`、`ORCH-006`、`REG-006`、`WEB-002`、`WEB-003`、`WEB-004`、`WEB-005`、`WEB-006`、
+  `TIME-001`、`TIME-002`、`TIME-003`、`TIME-004`、`SNAP-001`、`ADD-001`、`ADD-003`、`ADD-004`、
+  `IMPORT-001`、`IMPORT-002`、`IMPORT-003`、`IMPORT-004`、`IMPORT-005`、`TERM-001`、`TERM-002`、`KPI-001`、
+  `RETAIN-001`、`PROJ-002`、`GRAPH-006`、`SEARCH-006`、`NLU-007`、`NLU-008`、`DR-001`、
+  `QUERY-007`、`QUERY-008`、`QUERY-009`、`QUERY-010`、`QUERY-011`、`WEB-011`、`NLU-009`、`ORCH-007`、`ORCH-008`、`ORCH-009`、`RPT-CONTRACT-001`、
+  `RPT-CONTRACT-002`、`RPT-CONTRACT-003`、`ANS-001`、`RPT-CONTRACT-004`、`ANS-002`、`ANS-003`、`RPT-DB-001`、`RPT-DB-002`、`RPT-DB-003`、`RPT-DB-004`、`RPT-DB-005`、`RPT-001`、`RPT-002`、`RPT-003`、`RPT-004`、`RPT-005`、`RPT-007`、`RPT-013`。
 - 发布边界：`DB-004` 已完成 release manifest、四投影、lease、READY 收敛、`release_state`
   和 GraphPlan cache；ACTIVE 激活属于 `REL-005`，必须等待 `DB-007` 评测门禁和 `DB-008`
   双人审批，当前故意不存在。
@@ -98,9 +163,23 @@ TODO 已按**功能区（板块 B01～B13）**重新组织，见 `ASK_DATA_CODEX
   因此正式导入结果为空；使用回滚事务中的历史 DWS 合成发布夹具已验证真实导入链路。
 - 生产准确率状态：尚未评测，不得宣称达到 95%。
 - 板块视图：2026-08-06 已按功能区把计划重组为 B01～B13 十三个板块（见 §0 与 TODO §0）。
-  已完成任务全部集中在 B04～B09 的问数主链；**B11 报表引擎与问数报表融合板块 32 项任务全部未开工**，
-  是当前最大的未开工面。口径类（时间合同、指标可加性）、资产建设产能（批量导入）与叙述层校验
-  三条闭环也全部待建，已分别落为 `TIME-*`、`ADD-*`、`IMPORT-*`、`ANS-*` 任务。
+  B04～B10 问数主链已有多项完成，B11 已冻结 Report Definition v1、13 个组件 Manifest、41 类操作协议
+  以及与问数共享坐标/失效规则的 Evidence Bundle/Insight Artifact；
+  **报表板块仍有 18 项任务待完成**，是当前最大的建设面；`RPT-013` 已补齐报告清单、权限、发布状态与上下架后端治理，`WEB-RPT-007` 已完成用户确认稿与核心链路但仍保留生产交互缺口；`RPT-001`～`005` 与 `RPT-007` 已闭环 DSL 规范化、阶段校验、
+  富文本清洗、稳定 hash、41 类原子操作、可验证 Undo/Redo 与 Go/TS 确定性布局。时间口径链 `TIME-001`～`004` 已闭环合同、确定性编译、四处统一展示和
+  数据可用边界分流。指标可加性存储与三道独立关卡 `ADD-001`、编译规则 `ADD-003`、统一结果与合计/
+  堆叠合同 `ADD-004` 已完成；批量导入的存储/状态机/可恢复 Worker `IMPORT-001` 和动态模板
+  `IMPORT-002`、四层校验/报告 `IMPORT-003`、批量提交/审批/撤回 `IMPORT-004` 与对称导出
+  `IMPORT-005` 已完成；版本化业务词、冲突裁决与安全正则 `TERM-001`、Release 固定的 Aho-Corasick
+  确定性匹配 `TERM-002` 和认证默认答案组合 `KPI-001` 也已完成；Batch 8 主链闭环。B05 的
+  `RETAIN-001` Release 引用计数、历史保留与可重建投影清理，以及 `PROJ-002` 四投影哈希运行门禁也已
+  完成；B06 的 `GRAPH-006` 图不可用六行降级矩阵、熔断、观测和用户确认的证据视觉状态已闭环，
+  `SEARCH-006` ANN/Exact 召回对照作业也已闭环；`NLU-007` 已按用户澄清改为“登录后、进入问数前已选
+  领域”的强制单域合同并完成；`NLU-008` 的会话 Release Pin、澄清超时和方案 1 可见状态也已完成。
+  `DR-001` 后端申请合同、用户确认的 `WEB-011` 主从申请工作区与 `NLU-009` 15 类范围白名单、严格
+  公开工件、正确拒答统计和 `SCOPE_DETAIL_LIST` 预填出口现已闭环。`ANS-001/002/003` 已冻结 Answer Artifact、
+  Unicode citation、共享 stale 合同、问数/报告共用的叙述事实校验器，以及两次失败后只保留 L1 的降级
+  编排与用户可见状态；答案校验重生成闭环已由 `ORCH-007` 收敛，观测门禁仍归属 `ANS-004`。
 - 人工业务输入：用户已确认 `HUMAN-005` 的开发部分采用 v3.8.0、单副本共享 Space、持久卷、
   API GUEST/Worker USER 和环境变量开发凭据；生产容量、TLS、备份、多副本及
   `HUMAN-001`～`HUMAN-004`、`HUMAN-006` 仍未提供。
@@ -213,6 +292,9 @@ DATABASE_URL='postgres://...' go run ./cmd/askdata-inventory \
   record version 乐观锁；列表使用 `(updated_at,id)` keyset cursor；跨领域查询表现为 Not Found。
 - `canonical.go` / `release.go` / `object_contract.go`：JSON 键排序、数字规范化、
   精确对象版本排序、稳定 content/release hash 和幂等 release ID。
+- `admin.go` / `admin_store.go` 与 `internal/askdata/http/admin.go`：认证业务域内的 DRAFT-only
+  管理 CRUD、稳定分页、乐观锁、逐次权限复核和 audit-backed 幂等写；只允许创建 DRAFT manifest，
+  不提供 validate/project/evaluate/approve/activate 生命周期入口。
 - `importer.go` / `importer_store.go`：只读 current published + active DWS/ADS；复用
   Dataset DSL 稳定 field ID；确定性生成 model/measure/dimension DRAFT，绝不自动认证。
 
@@ -1051,6 +1133,1086 @@ docker compose ps
   真实 app/admin PostgreSQL 回滚 fixture 另验证 ACTIVE release、实际 role scope 和同域跨 actor RLS。
   本任务未新增页面、迁移或真实模型调用，未触发页面设计确认门禁。
 
+### 2.42 ORCH-006 Conversation 与运行保留策略（已完成）
+
+- `internal/askdata/orchestrator/retention.go` 新增原问句与运行工件保留合同。默认 `HASH_ONLY`，不产生
+  可恢复原文；`ENCRYPTED_SHORT_TERM` 使用独立 AES-256-GCM 密钥和随机 nonce，认证上下文固定
+  tenant/domain/actor/conversation/run/policy/release/question hash/expiry，跨上下文调包、篡改和过期读取
+  都失败关闭。
+- 原问句 TTL 上限 7 天，artifact payload TTL 上限 365 天且不得短于原问句 TTL。到期 PurgePlan 只列出
+  待清理 payload，继续保留 ArtifactDigest、状态、disposition、预算、事件/工件/Tool 计数、artifact
+  hashes 和可复算 statistics hash；数据库追加式审计身份与统计不因清理改变。
+- `internal/config` 与 `.env.example` 新增 `ASKDATA_QUESTION_RETENTION_MODE`、
+  `ASKDATA_QUESTION_RETENTION_TTL`、`ASKDATA_RUN_ARTIFACT_TTL` 和可选
+  `ASKDATA_QUESTION_ENCRYPTION_KEY`。hash-only 模式拒绝意外加载密钥；加密模式必须显式提供独立
+  base64 32 字节密钥。
+- `PostgresStore.CreateRun` 对同 tenant/domain/actor/conversation 使用事务级 advisory lock，以首个 run
+  为 release anchor；同 release 可继续，release 漂移在写入前返回 `ErrPinnedScopeMismatch`。上下文继承
+  只接受同 tenant/actor/domain/conversation/release 的完整 ANSWERED 治理链，policy 变化返回 scope reset。
+- 本任务未新增页面或迁移；密钥未写入仓库。
+
+### 2.43 WEB-002 Question API Client 与 SSE 状态（已完成）
+
+- `web/src/lib/ask-data-api.ts` 冻结 ORCH-005 的 Operation、Run、Completion、Budget、PublicEvent
+  TypeScript 合同，提供 create/get/clarify client。所有调用复用现有 `apiRequest/apiResponse`，继承
+  Bearer token、`X-Business-Domain-ID`、并发 refresh 合并与单次 401 refresh/replay；没有另建认证旁路。
+- SSE 采用 authenticated fetch stream，而不是无法附加认证和业务域 header 的原生 EventSource。
+  增量 decoder 支持 chunk/CRLF/comment/multiline/retry；客户端再次限制 16 KiB payload，并校验状态/
+  事件枚举、hash、时间、event ID 与连续 index。断线后携带持久 `Last-Event-ID` 有界退避续传，重复
+  event 去重，gap/replay/payload 错误失败关闭；refresh stream error 与普通网络断开才允许重试。
+- `web/src/hooks/use-ask-data-question.ts` 提供创建、恢复、澄清子 run、终态回读、取消与 reset；旧请求由
+  AbortController 和 generation 双重隔离，迟到事件不能覆盖新 run。稳定错误映射区分认证、Release
+  不可用、scope 漂移、冲突、游标/stream、网络和服务错误。
+- 使用 Node 内置 TypeScript test runner 新增 5 条单测，覆盖 SSE 分块、retry、断线游标、重复事件、
+  event gap、取消和错误映射；无需引入新的第三方测试依赖。
+- 现有 `AskDataPage` 未改，仍保持 WEB-001 mock；真实进度 UI 消费这些 hooks 归属 WEB-003，需先通过
+  页面设计确认门禁。
+
+### 2.44 WEB-003 会话和运行进度 UI（已完成）
+
+- 用户在三份运行状态设计方向中确认方案 1；设计真值为
+  `/Users/susanmartinez/.codex/generated_images/019fd77d-fc16-7c13-93c2-72eb947fc395/exec-858b6505-95ec-4a17-9f45-55a93cb4cf59.png`。
+  1280×720 浏览器实现、完整对照和中栏聚焦对照保存在 `design-qa-artifacts/web-003-*`，根目录
+  `design-qa.md` 最终为 `passed`。
+- `ConversationProgress` 把公开 Question 状态投影成“接收、权限、理解、检索、口径、关系、计划、
+  执行、核验、完成”十步时间线。只使用固定受控文案和公开时间戳；`stage`、`code`、hash、prompt、SQL、
+  Tool payload 与思维链不会直接出现在进度文案中。SSE 创建/连接/已连接/重连、取消和终态都有明确
+  `role=status`/`aria-live` 语义。
+- `ConversationOutcome` 为客户端错误、取消、BLOCKED、CLARIFICATION_REQUIRED 和 ANSWERED 提供可访问
+  终态。WEB-003 只显示 completion artifact 的短引用和证据计数，不提前解释结果；真实澄清选择归
+  `WEB-004`，结果表/图归 `WEB-005`。
+- `AskDataPage` 已接入 WEB-002 `useAskDataQuestion` 的 create/cancel 生命周期。WEB-001 会话数据仍是
+  确定性页面快照；选中的运行中会话作为设计/交互基线。真实运行开始后会隐藏静态口径、质量分与反馈，
+  改为“等待受控证据”，防止把示例数据当作本轮事实。
+- 新增纯状态投影单测，覆盖 RESULT_VERIFYING、BLOCKED 和有界纠错回到 BINDING；前端测试总数为 8。
+  应用内浏览器验证取消进入空闲态、会话恢复、证据折叠、真实创建失败关闭、静态证据隐藏和 1120×800
+  两栏响应式，无控制台错误。当前 `127.0.0.1:8080` 旧 API 容器未包含本工作区最新 Question 路由，
+  因此成功 SSE 的浏览器 E2E 未在该容器执行；WEB-002 fetch-stream 单测与 WEB-003 状态投影测试已覆盖
+  客户端合同，运行镜像更新后可补成功链路回归。
+
+### 2.45 WEB-004 定向澄清与证据面板（已完成）
+
+- 用户确认方案 1「内联双候选决策卡」并授权补齐实现所需合同；设计真值为
+  `/Users/susanmartinez/.codex/generated_images/019fd77d-fc16-7c13-93c2-72eb947fc395/exec-131de369-22bd-4012-851e-2123c3092bbf.png`。
+  1280×720 浏览器实现、完整/中栏聚焦对照和 1120×800 响应式截图保存在
+  `design-qa-artifacts/web-004-*`，根目录 `design-qa.md` 最终为 `passed`。
+- Question 公共完成工件新增 `clarificationId`，候选新增 `difference`、`evidenceIds` 与可选完整治理证据。
+  公共证据只投影定义、Owner、语义版本/状态、实际时区/区间、质量分/状态和数据新鲜度；缺少或非法字段
+  会被拒绝/隐藏，真实运行不会以设计稿中的王敏、李楠、v3.2、v2.8、98.7 等示例值补齐。
+- `POST /api/v1/questions/{runId}/clarifications` 的 body 固定为
+  `clarificationId + optionId + runVersion`。服务端校验父运行状态/版本、完成工件 UUID 和允许候选，并以
+  父 run 与澄清工件身份派生稳定消费键；同一选择可重放，第二个不同选择稳定返回“已消费”，从服务端
+  阻止不同请求幂等键造成 child run 分叉。前端另有同一选择的在途去重。
+- 新增 `ClarificationCard`、`EvidencePanel` 和纯证据完整性/格式化模块。两个候选、差异、Owner、版本、
+  实际时间、质量与新鲜度来自同一公共 DTO；原生 radio/label、提交、取消、region 和 disclosure 语义
+  可访问。选择候选会同步更新右栏证据驾驶舱。
+- 本次只前置实现 WEB-004 必需的原子澄清消费子合同；`NLU-008` 的会话 Release Pin、澄清 deadline、
+  budget freeze/resume 和被取代 Release 的重新绑定仍未实现，`NLU-008` 保持待办。
+
+### 2.46 WEB-005 结果表格与图表（已完成）
+
+- 用户确认方案 1「KPI 总览 + 趋势与渠道并列」；设计真值为
+  `/Users/susanmartinez/.codex/generated_images/019fd77d-fc16-7c13-93c2-72eb947fc395/exec-80d3bd85-26fd-4b71-99b5-a251ae49347d.png`。
+  1280×720 浏览器实现、完整/结果区聚焦对照和 1120×800 响应式截图保存在
+  `design-qa-artifacts/web-005-*`，根目录 `design-qa.md` 最终为 `passed`。
+- `CompletionView` 新增可选 `question-result-v1` 结果投影。公开合同只接受带治理证据的结果摘要、比较、
+  dataset/column、精确字符串或 null cell、有界预览、总行数和 presentation view；最多 4 个 dataset、
+  16 列、100 行、800 个 cell 和 8 个 view。顶层 prompt、SQL 和未受控 result rows 不会进入公共响应。
+- 服务端分别校验 STRING/INTEGER/DECIMAL/DATE/DATETIME、DIMENSION/MEASURE、schema/行列形状和实际时间；
+  `LINE` 需要日期维度与数值度量，`BAR` 需要 2～20 个分类，`KPI` 只允许单行数值，`TABLE` 保持完整
+  schema。推荐视图不合格时只能按确定顺序回退到另一个合格 view。
+- 新增 `ResultWorkspace` 与纯结果投影模块：呈现 KPI、比较、折线、柱状、原生 table、5/10/20 每页行数、
+  分页、当前页 CSV 和新鲜度。cell 保留精确字符串；超出 JavaScript 安全整数范围的值不进入图表。
+  真实 `ANSWERED` 运行和设计快照使用同一组件；缺失或非法结果回退到受控 `ConversationOutcome`。
+- 大结果只公开有界预览与 `totalRows`；前端明确显示已加载前缀并仅在该前缀内分页，完整结果不发回模型。
+  `EvidencePanel` 复用相同治理证据。合计行和不可加指标仍由 `ADD-004` / `WEB-009` 决定，本任务没有
+  根据设计 mock 伪造合计行为。
+
+### 2.47 WEB-006 结构化反馈（已完成）
+
+- 用户确认方案 3「两步结构化反馈弹窗」；设计真值为
+  `/Users/susanmartinez/.codex/generated_images/019fd77d-fc16-7c13-93c2-72eb947fc395/exec-6b81b56c-e1b7-436f-85ab-4b8ad96cda0a.png`。
+  1280×720 同状态完整/聚焦对照与 1120×800、800×800 响应式截图保存在
+  `design-qa-artifacts/web-006-*`；根目录 `design-qa.md` 最终为 `passed`。
+- 新增 `POST /api/v1/questions/{runId}/feedback`：只接受 actor 自有终态运行及精确 `runVersion`，正向为
+  `ACCURATE + NONE`，负向为 `INACCURATE` 加九类治理问题之一；说明可选、最多 2,000 字符并拒绝控制字符。
+  handler 使用严格 JSON shape，未知字段、非法组合和无效版本在进入 backend 前失败关闭。
+- 反馈写入现有 `askdata.query_feedback`，绑定 tenant/domain/actor/run/release hash/policy hash；每个 actor/run
+  使用事务咨询锁。完全相同的内容返回原收据，内容变化才递增 `record_version`，并发冲突返回稳定错误。
+  提交路径只追加反馈记录，不修改 Question answer、完成工件、Release 或任何生产语义对象。
+- 新增原生 `FeedbackDialog` 两步流程：第一步用 fieldset/legend/radio 选择 9 类问题，第二步确认分类并补充
+  详情；含关闭、返回、提交中、失败和成功态。实时 `ANSWERED` 与设计快照使用同一入口；“有用”也提交
+  公共正向反馈。前端分类模型与 API builder 都有纯函数测试，权限类文案明确进入人工复核。
+
+### 2.48 TIME-001 TimeContract 合同、存储与版本化（已完成）
+
+- `000225_askdata_time_contract` 已建立 `time_contracts` 和不可变 `time_contract_versions`，两表都有
+  tenant/domain 复合外键、强制 RLS、owner、时间戳、稳定 code/version 唯一性；开发回退文件完整。
+  `semantic_models.time_contract_version_id`、`domains.default_incomplete_period_policy` 和
+  `metric_versions.incomplete_period_policy_override` 已纳入数据库约束与运行角色授权。
+- `internal/askdata/registry/timecontract.go` 定义完整 Go/JSON 合同、8 类粒度、IANA 时区校验、财务日历依赖、
+  对比对齐、月末溢出、数据可用截止表达式、预期延迟、粒度检查和规范 SHA-256。策略解析顺序固定为
+  `METRIC > TIME_CONTRACT > DOMAIN > PLATFORM_DEFAULT`，平台默认是产品决策 D01 的 `MTD` 并回传 source。
+- 平台数据集版本生命周期没有 `ACTIVE` 枚举，因此 `TIME_CALENDAR_NOT_ACTIVE` 的权威解释是：日历版本必须
+  是同 tenant/domain 数据集的 current `PUBLISHED` version。数据库 trigger 与 Go resolver 对缺失、跨域、
+  非当前、非发布版本使用同一失败关闭边界；没有写入任何 `HUMAN-007` 尚未提供的企业日历常量。
+- `model_certify.go` 和数据库认证 trigger 都拒绝未绑定已认证时间合同的 semantic model。Release 新增
+  `TIME_CONTRACT` 对象；Go `BuildReleaseManifest` 与数据库 `DRAFT -> VALIDATING` trigger 都要求每个模型的
+  精确时间合同版本在依赖闭包内。已认证合同的任何 UPDATE/DELETE 返回
+  `TIME_CONTRACT_VERSION_IMMUTABLE`，合同变化只能新建版本并重新走 Release。
+- `api/schemas/time-contract-v1.schema.json` 关闭额外字段并与 Go/DDL 枚举一致。单元测试覆盖严格 JSON
+  round-trip、未知字段、四层优先级、时区/日历/粒度、hash 稳定性、认证和 manifest；独立回滚事务集成测试
+  覆盖数据库认证、财务日历、不可变和 Release 闭包。`000225` 已应用到本地开发控制库。
+
+### 2.49 TIME-002 确定性时间编译器（已完成）
+
+- Semantic IR 的 `timeRange` 新增 `requestedPeriod` 与 `grain`；理解层已有的 `ResolvedTime.Expression/Grain`
+  不再在 IR 边界丢失。规范化器把旧合同稳定补为 `ABSOLUTE/DAY`，Schema 的 canonical 输出则要求两个字段，
+  从而兼顾旧工件重放与新查询的确定性语义。
+- `internal/askdata/compiler/time.go` 输出 `ir.ResolvedTimeSpec` / `ResolvedComparison`。计算只使用认证时间合同的
+  IANA 业务时区，所有范围均为 `[start,endExclusive)`；支持 `MTD`、`FULL_PERIOD`、`LAST_COMPLETE`，记录
+  `PolicyApplied/PolicySource`、data watermark、裁剪和周期回退。业务时区覆盖 IR 中的用户时区，日历日推进
+  使用 `AddDate`，不会把 DST 日错误近似成固定 24 小时。
+- 对比期实现 `YEAR_OVER_YEAR`、`MONTH_OVER_MONTH` 及按粒度映射的周/季/期环比；
+  `SAME_DAY_COUNT` 保证当前期和对比期日历天数相同，`SAME_CALENDAR_RANGE` 平移两端。
+  2 月 29 日、3 月 31 日等不存在目标日遵循 `CLAMP_TO_LAST_DAY` 或返回
+  `TIME_COMPARISON_UNDEFINED`；不支持粒度、空区间、缺失日历分别返回 TODO 规定的稳定错误。
+- `compiler/calendar.go` 定义 `FiscalCalendarResolver`：实现方必须基于认证 calendar dataset 的
+  `fiscal_period_key` 查询 `min(date)` 与 `max(date)+1 day`。财月、财季、财年当前期、上一完整期和对比期
+  均只能走该接口；无版本、resolver 或匹配行返回 `TIME_CALENDAR_LOOKUP_FAILED`，编译器没有财务月份近似。
+- `QueryArtifact` 可绑定并哈希 `resolvedTimeSpec`；绑定后当前期和 BASELINE 参数都使用解析后的边界，重放校验
+  同时核对时区、比较类型/期数、午夜边界和 `time_start/time_end_exclusive` 参数形状。未提供解析结果时保留
+  既有绝对区间兼容路径，避免破坏已存在的 QUERY-003 工件。
+- 测试覆盖月/季/年、T+1 MTD、LAST_COMPLETE、闰日、月末两种溢出、America/New_York DST、四月起始的
+  `CURRENT_FISCAL_QUARTER`、财政上一完整期、错误码，以及 60 组任意日期区间和 SAME_DAY_COUNT 属性断言。
+  本任务无页面改动，没有触发设计确认门禁。
+
+### 2.50 TIME-003 resolvedTimeSpec 输出与四处统一渲染（已完成）
+
+- `internal/askdata/answer/timespec.go` 提供唯一 Go `RenderTimeSpec`，输出 `RangeLabel`、`AsOfLabel`、
+  `PolicyLabel`、`ComparisonLabel`、`TruncatedHint`；非法 spec、非法时区或不支持 locale 均返回空视图，
+  不发布不完整时间说明。`compiler/artifact.go` 暴露稳定的解析时间 artifact 边界和同源校验入口。
+- `web/src/askdata/format/timespec.ts` 实现同名、同逻辑浏览器渲染器；Go/TypeScript 共用
+  `internal/askdata/testfixture/timespec/render-v1.json` 的 20 组 fixture，五个字段逐字符相等。用例覆盖
+  MTD 裁剪、无对比、FULL_PERIOD、LAST_COMPLETE 回退、周/月/季/年、财月/财季/财年、绝对范围、
+  闰日与月末 overflow。
+- Question API 的浏览器结果合同新增原始 `resolvedTimeSpec` 和服务端生成的 `timeSpec`。公共投影先使用
+  compiler 规则校验 spec，再调用 Go renderer；payload 中即使带伪造 `timeSpec` 也会被重新生成，测试已
+  验证“DO NOT TRUST”不会进入响应。
+- `ResultWorkspace` 的 KPI 摘要、裁剪提示、同比说明、详情 disclosure 和新鲜度，`EvidencePanel` 的
+  “与结果一致”时间区，`web/src/report/runtime/timespec.ts` 的报告副标题以及
+  `web/src/export/timespec-footer.ts` 的导出页脚均消费统一 renderer。CSV 当前页导出会追加时间口径、
+  实际区间、数据截止、可选对比说明与裁剪提示。
+- 页面采用用户确认的方案 2：KPI 下方显示紧凑摘要、橙色裁剪提示和蓝色“查看/收起时间口径”控件；
+  展开后显示浅蓝锚定详情卡；EvidencePanel 标记“与结果一致”。1280×720 完整/结果区聚焦对照、
+  1120×800 响应式、两处展开收起与控制台检查全部通过，`design-qa.md` 最终为 `passed`。
+- B11 的真实报告页面和 PDF Worker 尚未开工；本任务只冻结其副标题/页脚 runtime bridge，没有虚构页面。
+  后续 `RPT-011` 与导出 Worker 必须直接复用该 bridge/renderer，不能重新拼时间字符串。
+
+### 2.51 SNAP-001 schema 身份与数据快照版本分离（已完成）
+
+- 迁移 `000230_warehouse_data_snapshot_version` 新增强制 RLS 的
+  `platform.materialization_snapshots`。刷新批次以 build-run UUID 作为 `snapshot_version`，开始事实先写，
+  完成后一次性补齐 `snapshot_hash`、`snapshot_completed_at`、`data_available_through`、行数、大小与
+  `OK|WARN|FAIL`；完成记录不可更新或删除。
+- `platform.dataset_materializations` 由“每次刷新一个 ID”收敛为“每个 schema 一个稳定 ID”：同一规范化
+  Dataset DSL `schema_hash` 的刷新原位切换当前物理表并追加 snapshot；schema 变化仍走
+  `BUILDING → ACTIVE`、退役旧物化。这样 Semantic Model/Release 固定的 `materializationId` 不会因日常
+  数据刷新失效。
+- Worker 在仓库 Build 前调用 `BeginSnapshot`，失败路径把进行中 snapshot 完成成 `FAIL`，成功激活与快照
+  完成、质量事实、build 终态和稳定视图切换保持同一控制事务边界。Warehouse Executor 只对 DSL 声明的
+  `DATE|DATETIME outputGrain.timeField` 计算 `max()` watermark；读取端不扫描仓库事实。
+- `GetLatestSnapshot` 只依赖控制面 reader，按完成时间读取最新已完成记录并忽略中断刷新。
+  `registry.EvaluateReleaseRuntimeState` 只比较 schema hash；snapshot 变化不改变 Release，FAIL 仅产生
+  `QUALITY_WARNING` 或阻断。快照完成触发 `materialization_snapshot_completed` 通知，为
+  `QUERY-010 InvalidateBySnapshot` 提供主动失效入口；缓存 key 后续仍包含 snapshot version，通知丢失不会
+  破坏正确性。
+- 历史 build detail 与物理清理路径已改读 snapshot 历史：同 schema 多次刷新仍能审计每次构建，删除数据集
+  时会清理全部历史物理表，不留下只存在于快照表的仓库对象。本任务没有页面，不触发设计确认门禁。
+
+### 2.52 TIME-004 数据可用边界与 PARTIAL/NO_DATA 分流（已完成）
+
+- `internal/askdata/validator/coverage.go` 新增受封装的 `CoverageVerdict`：严格按半开区间将请求判定为
+  `FULL`、`TRUNCATED` 或 `NONE`，分别映射正常执行、`PARTIAL` 和 `NO_DATA`；结果码为
+  `TIME_COVERAGE_TRUNCATED` / `TIME_COVERAGE_NONE`。
+- `CoverageControl` 只依赖 SNAP-001 的 `SnapshotControlReader`，逐个读取控制面最新已完成快照；多模型
+  查询取所有水位的最小值，不为覆盖判定扫描仓库事实表。水位缺失、来源重复或返回的 materialization
+  身份不一致均失败关闭。
+- `TRUNCATED` 会把 `dataAvailableThrough + 1 个业务日` 写回 `ResolvedTimeSpec.ResolvedEndExclusive`，
+  设置 `TruncatedByDataAvailability=true`，并按 `SAME_DAY_COUNT` / `SAME_CALENDAR_RANGE` 同步缩短对比期。
+  Evidence 记录请求区间、实际区间、水位、`timeRangeTruncated` 和用户提示。
+- 带时间范围的 QueryArtifact 必须走 `Validator.ValidateCovered`：`NONE` 在任何 artifact/SQL 检查和 EXPLAIN
+  之前短路，`FULL/TRUNCATED` 则校验工件使用的 spec 与物化来源和 verdict 完全一致后才进入既有安全
+  EXPLAIN。旧 `Validate` 遇到时间工件直接返回 `ErrCoverageValidationRequired`，不能绕过门禁。
+- 本任务没有页面或视觉状态实现，不触发设计确认门禁；统一的 PARTIAL 页面展示与“禁止加入报告”仍归属
+  后续 `QUERY-011` / `WEB-013`。
+
+### 2.53 ADD-001 指标可加性字段与三道关卡（已完成）
+
+- 迁移 `000226_askdata_metric_additivity` 为模型内 `measures` 与命名指标 `metric_versions` 增加同构的
+  `FULLY_ADDITIVE|SEMI_ADDITIVE|NON_ADDITIVE` 事实、半可加时间算法、聚合限制、不可加维度、单位/币种、
+  零分母策略、显示精度、启发式建议和确认审计字段。现有数据库以 `measures` 作为度量版本层，因此未另造
+  与既有模型冲突的 `measure_versions` 表。
+- 旧的必填 `ADDITIVE|SEMI_ADDITIVE|NON_ADDITIVE` 值只迁移为非权威 suggestion（其中 `ADDITIVE` 规范化为
+  `FULLY_ADDITIVE`）；新的事实列保持 NULL。导入器也只写 suggestion，任何认证、Release 或编译路径都不读
+  suggestion，防止迁移或启发式结果被静默当成业务确认。
+- 数据库关卡以 CHECK/FK 分别拒绝非法枚举、缺少半可加时间算法、错误的不可加聚合方式、非法零分母/精度、
+  不完整确认对和缺少认证必填事实；`CERTIFIED` 完整性约束使用 `NOT VALID` 部署，避免历史认证行阻塞迁移，
+  但所有新写入或更新仍立即受约束。
+- 应用认证关卡提供 `ValidateAdditivity`、`CertifyMetric` 与 `CertifyMeasure`，严格返回五个规定错误码；管理员
+  DRAFT 写入在事实变化时由服务端刷新 `confirmedBy/At`，清空事实时同步清空审计，客户端不能伪造确认人。
+- Release 静态关卡在创建 manifest 前重新读取 metric/measure immutable contract，聚合并稳定排序全部失败
+  对象；即使绕过认证 helper，也无法发布缺少权威事实的对象。三层均有相互独立的测试。
+- 本任务没有页面或视觉状态实现，不触发设计确认门禁；启发式、补录清单和指标中心批量确认仍归属
+  `ADD-002`，编译正确性下一步归属 `ADD-003`。
+
+### 2.54 EVAL-003 Fixture Regression Runner（已完成）
+
+- `internal/askdata/evaluation/runner.go` 新增 `fixture-regression-v1`：固定九类失败阶段，按稳定 case ID
+  运行 synthetic fixture，并生成带可复算 content hash 的 case/stage 报告。报告不保存原问句或结果行。
+- 内置纯内存 pipeline 从 synthetic 用户/域/模型/指标/维度/成员/关系资产执行权限裁剪、确定性召回、
+  成员歧义/过期判断、fanout 阻断、IR 构造、计划校验和结果读取；不使用 expected disposition 驱动实际
+  路径，也不访问真实模型、数据库、图服务或数仓。
+- 直接回答复用 EVAL-001 比较完整 Semantic IR 和规范结果；早停路径精确比较 DIRECT/CLARIFY/REFUSE/
+  NO_DATA 与稳定 reason code。IR、结果或敏感泄漏回归分别落入 IR、VALIDATION、SECURITY。
+- `cmd/askdata-eval` 默认执行内置六类 hard cases；`-fixture` 只接受有界、严格 JSON 且显式 synthetic 的
+  外部 fixture。全部通过返回 0，回归失败输出完整机器报告后返回 1，无效输入/运行器错误返回 2。
+- `EVAL-004` 仍需 `HUMAN-001～004` 和可用 DWS/ADS，不能用 synthetic runner 冒充真实 E2E 评测。
+
+### 2.55 ADD-003 可加性编译规则（已完成）
+
+- `AggregationPlanner` 在 Dataset DSL/SQL 生成前读取 release-pinned 指标事实，返回稳定的
+  `ADDITIVITY_MISSING`、`SEMI_ADDITIVE_TIME_AGG_MISSING`、`NON_ADDITIVE_SUM_ATTEMPT`、
+  `INCOMPATIBLE_UNIT` 和 `NON_ADDITIVE_DIMENSION_COLLAPSED`；半可加缺查询时间维度另以
+  `SEMI_ADDITIVE_TIME_DIMENSION_MISSING` 失败关闭。单位/币种不一致和不可加维度被折叠均不会进入 SQL。
+- 比率公式继续从其精确 Measure 集展开：先产生 `SUM`/其他受控原子聚合，再在聚合之上执行除法；每个
+  denominator 都包裹 `NULLIF(...,0)`，`zeroDenominatorPolicy=ZERO` 才显式转 0，且不会被通用 nullPolicy
+  意外覆盖。去重指标在目标分组粒度直接生成 `COUNT(DISTINCT ...)`，不对分组结果求和。
+- 半可加不是把明细值直接塞进与 GROUP BY 冲突的窗口函数，而是使用单源两阶段计划：内层按所有目标
+  非时间维度和原始时间点先聚合，外层按时间桶或跨时间范围执行 ordered `ARRAY_AGG` 期初/期末取值，
+  `PERIOD_AVERAGE` 使用期间快照均值。两阶段之前先应用成员、时间和指标默认过滤。
+- Dataset DSL 将既有 PreAggregation 安全扩展到无 Join 的单源阶段，并只增加 `PERIOD_BEGIN`、
+  `PERIOD_END`、`NULLIF` 三个受控表达式；SQL Compiler 仅在 PostgreSQL 接受 ordered period aggregate，
+  SQL Validator 白名单同步接受编译器生成的 `ARRAY_AGG`/`NULLIF` 和数组下标语法。
+- `semantic-query-adapter-v2` 新增带哈希的 `MetricAggregationContract`，固定指标版本、可加性、半可加算法、
+  不可加维度、单位/币种、零分母和 `totalsNotSummable`，为 `ADD-004` 提供不依赖可变注册表的结果合同桥。
+- 本任务没有页面或视觉状态实现，不触发设计确认门禁；合计行、重算合计和图表堆叠限制仍归属 `ADD-004`
+  与后续 `WEB-009`。
+
+### 2.56 ADD-004 结果契约与合计行/堆叠限制（已完成）
+
+- Query Artifact 的 release-pinned `MetricAggregationContract` 继续补齐稳定 `resultColumnName` 与
+  `displayPrecision`；Resolver 从认证指标读取显示精度。序列化工件仍不包含 SQL、参数值或可变注册表引用，
+  结果规范化可仅凭查询工件和执行工件把每列投影为 `DIMENSION|TIME|METRIC` 及完整可加性元数据。
+- `compiler.BuildRecomputedTotalPlan` 从原计划派生只保留目标指标、移除展示分组/排序且结果上限为 1 的验证
+  查询；成员、时间、默认过滤、物化白名单和 live 参数绑定全部继承。多个不可加指标在同一角色合并为一条
+  查询，CURRENT/BASELINE 各至多一条，并按查询次数计入既有 `maxValidationQueries <= 3`。
+- 重算输出只接受单行、列名完全匹配的 exact decimal string；float、缺列、多行或查询失败均失败关闭。
+  预算耗尽时不产生查询、不填 `RecomputedTotal`，下游因此只能隐藏，不得退化为分组行求和。
+- `web/src/shared/totals.ts` 是三端唯一实现：问数、报告、导出模块只重新导出同一函数引用；完全可加返回
+  `SUM`，半可加/不可加只在存在合法重算值时返回 `RECOMPUTED`，否则返回带说明的 `HIDDEN`。行求和以
+  `BigInt` 对齐小数位，不经过 `Number`，覆盖 `0.1 + 0.2` 与超安全整数 decimal。
+- 新增 `component-manifest-v1.schema.json`，将 `stackingRequiresAdditive` 固定为必填布尔值；共享组件可用性
+  规则对非完全可加指标关闭堆叠/占比能力，供后续 FUSE-004、WEB-009 和报告编辑器直接复用。
+- 本任务没有页面或显著视觉状态改动，不触发设计确认门禁；真实合计行、脚注、禁用 tooltip 仍归属
+  `WEB-009`，实施时必须遵守其页面门禁。
+
+### 2.57 IMPORT-001 语义资产导入存储与状态机（已完成）
+
+- `000227_askdata_semantic_import` 新增 `semantic_imports` 与 `semantic_import_rows`：12 类资产、7 个批次状态、
+  4 个行状态、上传幂等键、行号唯一键、租约/尝试次数/完成时间、DRAFT 版本追踪和严格错误数组均受数据库
+  CHECK/FK/trigger/RLS 独立保护；所有外键均包含 `tenant_id`。
+- `PostgresStore` 提供幂等 `CreateImport`、跨租户失败关闭的读取、SECURITY DEFINER tenant list/claim/heartbeat、
+  最多 500 行的幂等写入、完成/失败和审计。合法状态边由数据库守卫；非法跳转、身份字段变更、非
+  `VALID -> COMMITTED` 行变更均拒绝。
+- `CommitValidRows` 将对象创建器注入同一事务，只读取 `VALID` 行并强制返回 `DRAFT`；任何非 DRAFT 或中途
+  错误整批回滚。`WithdrawImport` 同样把实际 DRAFT/Release 引用检查留给 IMPORT-004 的注入实现，删除成功后
+  才原子转为 `WITHDRAWN`，批次事实与版本 ID 审计仍保留。
+- `FileRowSource` 只接受无凭据/查询参数的 `minio://` 或 `s3://` URI，读取后校验固定 SHA-256，再将单 Sheet
+  CSV/XLS/XLSX 的表头和数据转为稳定 JSON 行；行号不含表头且跨重试不变。Worker 每 500 行提交、并行续租，
+  基于已落库最大行号继续；确定性文件/合同错误记为 `FAILED`，基础设施或 lease 错误留待重试。
+- `cmd/worker` 已注册导入 Worker；`IMPORT-003` 已将启动时的 `UnavailableValidator` 失败关闭守卫替换为
+  生产四层校验器，文件解析后的行必须完整通过校验后才可提交。
+- 本任务没有新增页面或显著视觉状态，不触发设计确认门禁；上传入口已随主链补齐，模板、校验报告与
+  提交接口分别由 `IMPORT-002`～`004` 收口。
+- 随 `IMPORT-003` 验收补齐上传入口：API 对 multipart 字段、域、资产类型、扩展名和 50 MiB 上限严格
+  校验，按 SHA-256 内容寻址写入 MinIO 后只创建 `UPLOADED` 批次；响应不返回内部 MinIO URI。
+
+### 2.58 IMPORT-002 按业务域动态生成导入模板（已完成）
+
+- `TemplateDefinitionFor` 固化 TODO 指定的 12 类资产逐列合同；生成器同时支持 CSV 与 XLSX，XLSX 固定为
+  `Import`、`References`、`Instructions` 三 sheet，主表带说明行、冻结窗格、筛选与 10,000 行枚举下拉。
+- `PostgresTemplateCatalog` 在 tenant/domain RLS 事务内读取稳定可用的 MODEL、DIMENSION、METRIC、
+  HIERARCHY，按类型/code/id 确定性排序并限制 10,000 条；对照表只供查阅，人工引用仍统一填写 code。
+- `GET /api/v1/askdata/semantic/imports/template` 已接入认证 Admin Handler，只接受精确单值的
+  `assetType`、`domainId`、`format`，请求域必须等于认证域；CSV/XLSX 以 no-store、nosniff 附件返回。
+- `FileRowSource` 对多 sheet XLSX 只解析 `Import`，并跳过精确模板说明标记，使生成模板可以直接进入
+  IMPORT-003 且首条业务数据仍为 row 1。测试覆盖 12 类精确列、全部格式、引用顺序、枚举下拉、空域、
+  真实 PostgreSQL 空域查询与生成文件 round-trip。
+- 本任务没有页面或显著视觉状态，不触发设计确认门禁；上传、四层校验/报告和提交继续分别归属
+  `IMPORT-001`、`IMPORT-003`、`IMPORT-004`。
+
+### 2.59 IMPORT-003 四层校验器与可下载报告（已完成）
+
+- `FourLayerValidator` 通过 `PreparedRowValidator` 在校验前读取完整但有界（最多 100,000 行）的批次上下文，
+  因而能确定性检查跨行公式环、层级连续性与同批 code；Worker 仍只按 500 行写库，并从已持久化最大行号
+  恢复。空文件/超行数是确定性失败，目录/数据库故障保留为可重试基础设施错误。
+- L1 严格模板列、必填、类型、日期、数组、枚举和安全 JSON AST；L2 使用 tenant/domain RLS 目录解析
+  认证语义对象、当前 PUBLISHED + ACTIVE DWS/ADS、逻辑字段、Owner/角色及同批引用；L3 校验公式 DAG、
+  模型内指标—维度兼容、层级连续、cardinality/fanout、可加性和时间粒度；L4 校验名称/别名、词典冲突、
+  负向上下文、敏感性及画像高基数策略。
+- 所有问题都有非空 `expected`；只有 `IMPORT_IMPACT_REQUIRES_REVIEW` 是非阻断警告，已有认证 code 的新草稿
+  行仍为 `VALID`，但 IMPORT-004 提交必须要求 `acknowledgeImpact=true`。敏感成员原值表继续不授予 Worker
+  SELECT；目录只使用非敏感注册表与聚合画像事实。
+- `ReportService` 与 `GET /api/v1/askdata/semantic/imports/{id}/report?format=xlsx` 输出原始模板列并追加
+  `errorCode/errorMessage/expected/actual`，保留模板说明标记，修复后可由同一 `FileRowSource` 直接重读。
+  报告查询同时校验 tenant、domain、批次状态及行数事实，响应使用 no-store/nosniff 附件边界。
+- 本任务没有页面或显著视觉状态，不触发设计确认门禁；下一步是 IMPORT-004 批量 DRAFT 创建、影响确认、
+  批量审批与按批次撤回。
+
+### 2.60 SEC-001 三阶段授权裁剪（已完成）
+
+- `internal/policy/authorization.go` 新增 label-free `SemanticObjectRef` 和可重放 `SemanticAccessSnapshot`。
+  PostgreSQL resolver 在每次阶段调用中重新验证认证 actor、scope 中全部 ACTIVE role、全部 domain membership、
+  pinned release ID/content hash，以及阶段对应的 READY 投影；不读取 mutable active-release pointer，也不返回
+  name、definition、alias、物理表或 SQL。跨租户、跨域、角色增删和投影漂移均失败关闭。
+- `internal/askdata/security/authorization.go` 固定 `BEFORE_RECALL`、`BEFORE_BINDING`、
+  `BEFORE_EXECUTION` 三个不可互换入口。召回前 receipt 提供唯一可进入检索的 label-free release object 集；
+  绑定前和执行前必须对请求对象集合获得精确全量授权，不能用部分裁剪或早期 receipt 绕过阶段间撤权。
+- `AuthorizationReceipt` 同时绑定 stage、PolicyScope hash、pinned release、domain、阶段输入 hash、授权对象集和
+  policy snapshot hash；内外两层 hash 均可重放校验。公开错误只区分 invalid/denied/unavailable，不透传可能
+  含未授权名称的存储诊断。`BuildAskDataCacheKey` 同时绑定完整 PolicyScope、IR hash、warehouse snapshot、
+  freshness 与 engine version，保留旧数据集缓存合同不变。
+- 单元测试覆盖三阶段独立调用、跨租户/跨域/跨角色、绑定部分放行、绑定后撤权再执行、snapshot/receipt 篡改、
+  cache scope 漂移和候选名称无泄漏；可选 PostgreSQL integration 使用真实 RLS/roles/membership/release/
+  projection 复核正向三阶段与三类越权。本任务没有数据库迁移、页面、外部模型或正式业务数据写入。
+
+### 2.61 IMPORT-004 批量提交、批量审批与批次撤回（已完成）
+
+- 用户已确认采用“先补齐存储前置再完整实现 12 类”的方案。`000228_askdata_terms_and_kpi_bundle` 新增
+  `metric_dimensions/*_versions`、版本化 `business_terms/*_versions`、`certified_examples/*_versions`、
+  `kpi_bundles/*_versions`、`evaluation_case_assets/*_versions`，并补齐既有 measure/metric/dimension/
+  relationship 与 Release object 合同。该迁移已实际执行 down→up，回滚只在新表和新 Release 对象均无
+  事实时允许，且恢复旧状态迁移函数；新的数据库守卫允许完成批次进入 `COMMITTED -> WITHDRAWN`。
+- `PostgresDraftCreator` 把 12 类通过校验的行写入权威 DRAFT 版本表，所有 code/owner/role/数据集引用在提交
+  事务中重新解析。修改认证对象时复用稳定 object ID、递增 version_no；MODEL 绑定当前 PUBLISHED + ACTIVE
+  DWS/ADS，且已修复对不存在的 `dataset_materializations.updated_at` 排序，改按 activated/created 时间。
+  HIERARCHY 的一行一级合同可在同一批次合并为单个版本；MEMBER aliases 与成员版本同事务创建。
+- `TERM(MEMBER).targetCode` 固定为 `dimensionCode::canonicalValue`。L1 按该合同校验，L2/提交仅把绑定
+  dimension version 的 SHA-256 传给 `askdata.resolve_governed_import_member`；函数为固定 search_path 的
+  SECURITY DEFINER，只向 SYSTEM 或域/平台管理员返回 opaque member/version ID，不返回原值或别名，
+  app/worker 仍无敏感成员表 SELECT 权限。
+- commit 强制域 Owner、`all`/`rowNos` 二选一和影响告警确认；逐行创建中任一失败会回滚此前已建 DRAFT 并
+  返回失败 rowNo。bulk-certify 对选中对象加锁、按依赖拓扑排序，在外层预检 savepoint + 单对象 savepoint
+  中运行数据库单对象关卡及 TERM/层级/关系/example/KPI/eval 专项静态检查；任一失败整批零变更并返回稳定
+  失败清单，成功才逐对象认证并写一对象一审计。member aliases 与 parent metric 状态也在同一事务更新。
+- selective withdraw 先按唯一 version 分组（多行层级只处理一次），只删除仍为 DRAFT、没有 Release manifest
+  或其他 DRAFT 引用的版本；拒绝项逐行返回 `VERSION_NOT_DRAFT`、`VERSION_REFERENCED`、
+  `VERSION_NOT_FOUND` 及引用者，批次进入 WITHDRAWN 并保留拒绝对象，不做级联删除。
+- API 已接入 `POST /api/v1/askdata/semantic/imports/{id}/commit`、`.../{id}/withdraw` 与
+  `POST /api/v1/askdata/semantic/bulk-certify`；严格 JSON、域绑定、错误状态和 row/failure 清单均有 HTTP 测试。
+  本任务没有页面或显著视觉状态，不触发设计确认门禁；下一项为无页面的 `IMPORT-005` 对称导出。
+
+### 2.62 IMPORT-005 对称导出（已完成）
+
+- `ExportService` 与 `PostgresExportCatalog` 覆盖 MODEL、MEASURE、METRIC、METRIC_DIMENSION、DIMENSION、
+  MEMBER、HIERARCHY、RELATIONSHIP、TERM、CERTIFIED_EXAMPLE、KPI_BUNDLE、EVAL_CASE 全部 12 类；输出列
+  直接消费 IMPORT-002 `TemplateDefinition`，多资产按治理顺序分 sheet，单资产使用 `Import` sheet 并附
+  `ExportInfo`，可由现有导入解析器直接重读。规范内容 hash 不依赖 XLSX ZIP 元数据和行输入顺序。
+- 未指定 Release 时按稳定身份取最新 `CERTIFIED`；指定 Release 时只取 manifest 固定版本。所有语义引用
+  输出 code 而非 UUID。为保证历史指标展示元数据不漂移，`000242_askdata_semantic_export` 将 metric
+  name/description 纳入 `metric_versions` 并回填旧版本，旧写入路径的空值仍安全回退稳定身份。
+- `CONFIDENTIAL`/`RESTRICTED` MEMBER 行及指向这些成员的 MEMBER TERM 不进入导出；省略数写入
+  `ExportInfo`、同步响应头和异步任务结果。成员原值/别名的数据库权限没有放宽。
+- `GET /api/v1/askdata/semantic/exports` 严格校验 domain、12 类去重列表、可选 Release 和 xlsx 格式。
+  不超过 5,000 行同步返回；更大请求创建持久任务并返回 202、状态 URL、鉴权下载 URL 与有效期。
+  请求创建时固定精确版本 manifest，避免 Worker 执行期间 current head 变化。
+- `semantic_export_jobs` 强制 RLS、不可变 manifest、状态形状和 PENDING/RUNNING/READY/FAILED 跳转；Worker
+  无表级 SELECT/INSERT/UPDATE/DELETE，只能调用固定 search_path 的 list/claim/complete/fail 函数，租约
+  到期可恢复、存储失败最多重试 5 次。产物以 `semantic-exports/<tenant>/<domain>/<job>/<hash>.xlsx`
+  写入 MinIO，下载再次校验 tenant/domain/created_by、READY 与过期时间。
+- `000242` 已实际执行 down→up；原 TODO 预留的 `000229_askdata_release_retention` 保持给 RETAIN-001，
+  没有发生编号占用。本任务没有页面或显著视觉状态，不触发设计确认门禁；Batch 8 下一项为无页面的
+  `TERM-001` 业务词典版本化与冲突检测。
+
+### 2.63 TERM-001 业务词典版本化与冲突检测（已完成）
+
+- TERM 管理合同已覆盖稳定身份、完整版本字段、内容 hash、目标/角色引用校验与 PENDING 审批隔离；管理
+  API 仍复用 `/api/v1/askdata/semantic/terms` 的通用 CRUD，应用角色真实创建、读取、更新和删除均已验证。
+  `FEEDBACK` 与 `FEEDBACK_CANDIDATE` 只能生成 PENDING DRAFT，数据库 Release/别名门禁只接受
+  `CERTIFIED + APPROVED`。
+- `TermService.DetectConflicts` 和 bulk-certify 共用同一冲突函数：相同稳定 term/type、半开生效期重叠、
+  同 priority 且不同 target 时返回所有阻断候选并保持整批零变更；认证时锁定稳定身份行，封闭并发竞态。
+  不同 priority 必须携带显式 Owner note 才能通过，并把所有 shadow 候选写入认证审计；首尾相接的非重叠
+  生效期可并存。
+- `REGEX_SAFE` 使用严格语法解析 + Go RE2 编译，只允许字面量、字符类、首尾锚点与 `{n,m}`（m≤32），
+  拒绝反向引用、分组/嵌套量词、lookaround、分支、点号与无界量词；输入上限 64KiB，匹配 deadline 10ms。
+  负向上下文为空、与 term 相同或互为子串时在草稿校验和认证预检中拒绝。
+- 无需新增迁移：`000228_askdata_terms_and_kpi_bundle` 已由 IMPORT-004 提供完整表与 Release 门禁，
+  `000229` 继续严格保留给 RETAIN-001。本任务无页面或显著视觉状态；下一项为同样无页面的 `TERM-002`。
+
+### 2.64 TERM-002 Trie/Aho-Corasick 最长匹配与负向上下文裁剪（已完成）
+
+- `understanding.DictionaryMatcher` 复用 NLU-001 `NormalizeQuestion` 与 origin span 映射，在 rune 级
+  Aho-Corasick 自动机中完成精确全量匹配；候选按 span 长度降序、priority 降序、term 字典序和版本 ID
+  稳定排序后贪心占位。输出同时携带原文/规范化 span、term/target version、target code、match mode、
+  priority 与 evidence hash。
+- 缓存按 tenant/domain/release ID 分区并保存 Release content hash；相同 Release ID 的 hash 变化会原子
+  替换旧快照。PostgreSQL Loader 只读取指定 READY/ACTIVE Release manifest 中内容 hash 一致且
+  `CERTIFIED + APPROVED` 的 BUSINESS_TERM，因此未发布、PENDING 或漂移版本不会进入自动机。
+- 有效期使用 `[valid_from, valid_to)`，非空角色集合要求与请求角色相交，负向上下文按规范化文本 ±N
+  rune 窗口裁剪；所有裁剪及重叠/残余覆盖均保留稳定 reason。`PREFIX`、`SUFFIX`、`REGEX_SAFE` 第二轮
+  只处理精确命中未覆盖区间；正则使用 RE2 并保留 10ms deadline，`VECTOR` 明确排除于确定性匹配。
+- `dictionarysearch` adapter 把已完成政策裁剪的命中转换为 SEARCH-003 的 trusted exact lane 与 NLU-005
+  `ExactMatch` evidence；SEARCH exact 权重仍由 `RankConfig.ExactWeight` 独立配置。MEMBER 不进入通用
+  ExactMatch，继续服从既有专用成员和敏感标签路径。
+- 无新增迁移、页面或显著视觉状态；下一项为同样无页面的 `KPI-001`。
+
+### 2.65 KPI-001 KPI Bundle 版本化对象与认证（已完成）
+
+- `KPIBundle`、`KPIBundleItem` 与 canonical Release contract 已成为权威 Go 合同；item 数量限定 1～8，
+  role 只接受 HEADLINE/TREND/BREAKDOWN，必须至少一个 HEADLINE，order 必须从 1 连续且唯一。每个 item
+  的 chart type 与 legacy default chart type 都通过统一 Component Manifest catalogue 校验。
+- 版本化 CRUD 已接入现有语义管理 backend 与 `/api/v1/askdata/semantic/kpi-bundles`；创建/更新前要求
+  metric version 为同 tenant/domain CERTIFIED，group-by dimension 必须存在同域 CERTIFIED 且
+  `compatible=true` 的 metric-dimension 版本。认证入口复用完全相同的结构、引用和内容 hash 校验，避免
+  管理 API、批量导入和 bulk-certify 三套规则漂移。
+- Release manifest 对 KPI Bundle 新增依赖闭包：Bundle 引用的全部 metric/dimension version 必须同时
+  固定在同一 manifest。PostgreSQL Loader 只消费指定 READY/ACTIVE Release 中 object/version/hash 完全
+  一致的 CERTIFIED Bundle，并在读取时再次验证依赖闭包；旧/新 Release 切换会确定性回退/前进版本。
+- `KPIBundleMatcher` 对 applicable question pattern 与已识别 metric 覆盖度使用独立权重，稳定输出
+  `KPIBundleCandidate`。唯一高分可选中；前两名 margin 小于门槛时不猜测，返回
+  `clarificationRequired=true`；无命中返回空。匹配器只能加载认证 Release 中的 Bundle，没有 LLM 临时
+  拼装路径；多计划执行和独立预算已由 QUERY-009 闭环。
+- `000228` 已包含所需表、RLS 和 Release 数据库门禁，无新增迁移；本任务无页面或显著视觉状态。下一项
+  按 TODO 为同样无页面的 `RETAIN-001`。
+
+### 2.66 RETAIN-001 Release 引用计数与 RETAINED 保留态（已完成）
+
+- `000229_askdata_release_retention` 新增 `release_references`、`RETAINED/RETIRED` 状态与
+  `retained_at/retention_until/retired_at`，引用身份覆盖报告版本、认证问法、保存问题、KPI Bundle 和
+  黄金用例。引用行保存受控名称与 Owner 快照，使 `Retire` 在源对象后续改名或尚未建表时仍能返回完整
+  影响清单；表、函数和角色授权均启用 tenant/domain RLS 与失败关闭。
+- `AddReference`、`ReleaseReference`、`CountActiveReferences`、引用列表和 `Retire` 已进入 PostgreSQL
+  Store。有活跃引用的 `SUPERSEDED` Release 自动转为 `RETAINED` 并设置 24 个日历月的最早退役时间；
+  活跃引用返回 `RELEASE_RETIRE_BLOCKED`，保留期未满返回 `RELEASE_RETENTION_NOT_EXPIRED`，满足条件后
+  才能进入不可变 `RETIRED`。认证问法、KPI Bundle、密封评测集已接入自动引用；报告版本与保存问题尚未
+  建表，后续任务可直接复用通用 Store API。
+- 问数入口对 `SUPERSEDED/RETAINED/RETIRED` 的全新 run 返回 `RELEASE_NOT_RUNNABLE`；已有 pinned run
+  的精确重放与恢复仍可读取 `RETAINED`，编译器也允许历史固定快照重编译。相同 IR 在 READY 与 RETAINED
+  快照上产出相同 Query Artifact、Plan Hash 与 Compiled Plan Hash。
+- `ReleaseProjectionCleanupWorker` 先断言对象版本、合同、manifest 与 content hash 完整，再调用注入式
+  graph/member 外部清理器；任一外部清理失败都不会提交数据库清理水位。成功后只删除 release-scoped
+  GraphPlan/search 工件并把 SEARCH/NEBULA 投影置 `STALE`，保留注册表事实、manifest 以及
+  POSTGRES_REGISTRY/EXECUTION_SEMANTIC_LAYER 编译合同。全局 search 文档按对象版本共享，故不物理删除，
+  由 Release 投影失效与后续重建负责可见性。
+- `000229` 已完成 down→up 回放并实际落库；真实 app/admin/worker 角色验证引用生命周期、影响清单、
+  跨租户 RLS、清理失败关闭、过期退役和历史 run 重放。本任务无页面或显著视觉状态；下一项按 TODO 为
+  同样无页面的 `PROJ-002`。
+
+### 2.67 PROJ-002 投影一致性四哈希校验与失败关闭（已完成）
+
+- `ProjectionGuard.AssertRunnable(ctx, releaseID)` 通过已授权的 tenant/domain 上下文和 USER-mode RLS
+  读取 Release 与四条投影水位。数据库目标映射为逻辑 `REGISTRY/SEARCH/GRAPH/MEMBER`；Release 仅允许
+  READY/ACTIVE，每条投影必须存在、状态为 READY，且 expected/applied hash 同时等于 Release content
+  hash。缺失行、非 READY、expected/applied 漂移均返回 `ReleaseProjectionMismatchError`，差异包含投影、
+  期望/实际 hash、状态和最后更新时间；跨租户只得到 MISSING，不泄露 Release hash。
+- 成功与失败决定缓存 30 秒。缓存命中先执行一次 release/projection revision 聚合读取（Release
+  `updated_at`、投影数量和最大 `updated_at`），因此跨进程状态、哈希、增删变更会在下一次断言立即使
+  完整快照缓存失效；同 revision 才复用决定。`Invalidate(releaseID)`/`InvalidateAll` 供已知写端主动
+  失效，既避免每次运行重复读取四条完整投影，又不把 30 秒 TTL 变成错误放行窗口。
+- 问数 PostgreSQL Store 在 `AUTHORIZED → CONTEXT_READY` 前调用同一守卫。失败不推进状态、不消耗
+  run version，而是以同版本追加 `ERROR/BLOCKED/RELEASE_PROJECTION_MISMATCH` 审计事件，details 只含
+  Release hash 与结构化差异；HTTP 公共错误映射为 409。READY/ACTIVE 激活函数按既有 `REL-005` 边界
+  仍故意不存在，未来激活入口必须先复用同一 `AssertRunnable`，本任务未绕过评测和双人审批门禁。
+- 单元测试逐一覆盖 REGISTRY/SEARCH/GRAPH/MEMBER 哈希漂移、非 READY、缺行、Release 状态、30 秒命中、
+  revision/显式失效与访问上下文；真实 app-role/RLS 覆盖四哈希放行、跨进程图投影漂移立即拦截和跨租户
+  隐藏，真实 Question Store 覆盖差异写入可重放审计链。本任务无页面或显著视觉状态；下一项按 TODO 为
+  同样无页面的 `GRAPH-006`。
+
+### 2.68 SEC-002 Prompt Injection 与工具参数净化（已完成）
+
+- `internal/askdata/security/prompt.go` 对外提供稳定安全合同，底层 leaf guard 对 JSON 对象中的键和值做
+  NFKC、case-fold 和有界递归检测。每次判定只保存来源、`UNTRUSTED_DATA`、`executable=false`、
+  `ALLOW/BLOCK/REFUSE`、稳定原因码和规范内容 hash，不保存或回显原始攻击文本；创建工具、任意
+  SQL/nGQL、tenant/domain/release 切换、预算和凭据扩张统一 REFUSE，系统角色/控制指令劫持统一 BLOCK。
+- `cognition.NewPromptFact` 在事实入界时检测，`BuildMessages` 在发给 Provider 前重新检测，防止调用方手工
+  伪造 PromptFact 绕过构造器。语义描述、认证样例、查询结果和其他阶段事实均在 JSON envelope 中显式
+  标记为不可执行的不可信数据；物理查询/凭据键的原有闭集门禁继续保留。
+- `SanitizeToolCall` 紧邻 Tool Host 执行前重放 closed `ToolArguments` 校验，要求工具来自阶段、权限和当前
+  剩余预算共同生成的 allowlist，独立核对 catalog budget cost、pinned release 和单一 run domain，检测
+  所有自由文本参数，并通过严格 JSON 往返生成无共享引用的深拷贝。工具合同没有 tenant、SQL、nGQL 或
+  预算字段，unknown 参数不能通过严格 decoder；Registry 仍在 handler 前再次执行权限/范围/预算门禁。
+- 安全集覆盖语义描述、样例、结果、Unicode/分隔符变体、键名注入、工具发明、跨 domain/release、预算
+  耗尽和 unknown 参数；Loop 级断言被阻断调用不会触达 Tool Host。未新增数据库迁移、页面、外部模型
+  调用或业务 fixture；下一项为依赖已满足且同样无页面的 `SEC-004`。
+
+### 2.69 GRAPH-006 图不可用降级矩阵（已完成）
+
+- `ClassifyQueryShape` 将单模型单/多指标、唯一 1-hop SAFE、跨模型多跳、不安全 fanout/预聚合和成员跨维度
+  歧义冻结为六个互斥分类。允许项生成与正常路径同构的 `GraphPlan`；多跳与不安全 Join 分别结构化返回
+  `GRAPH_UNAVAILABLE`/`GRAPH_UNSAFE_JOIN` 的 `BLOCKED`，歧义返回
+  `MEMBER_DIMENSION_AMBIGUOUS` 的 `CLARIFICATION_REQUIRED`，不会产生可执行猜测。
+- PostgreSQL fallback 只依赖权威注册表并继续执行 USER-mode app-role RLS、固定 Release 裁剪、认证关系和
+  SAFE fanout 校验。Nebula 投影暂时陈旧时允许矩阵内降级，不放宽任何越权或 Release 外对象；认证缓存仍
+  要求 READY Graph 投影。降级原因进入 `GraphPlan` 内容 hash，且 `graphDegraded` 已贯穿 Tool Result、
+  Evidence Artifact、审计详情和公共 SSE，普通事件不误标。
+- Resolver 默认连续 3 次主图失败后熔断 30 秒，开启期间直接执行 fallback 且不触达 Nebula；
+  `graph_degraded_rate` 记录总量/降级量，首次越过 5% 阈值时告警。测试覆盖六行矩阵、128 组随机多跳、
+  同构结构、熔断零主调用、指标越阈值、Evidence/SSE 以及真实 PostgreSQL RLS/Release 裁剪。
+- 显著视觉状态按页面门禁先设计后实现。用户确认方案 1 后，EvidencePanel 保留绿色 ANSWERED/认证主状态，
+  增加琥珀色次级降级角标和关系校验证据块；来源、1-hop SAFE、Fanout、结果状态与原因 disclosure 均可见。
+  `design-qa.md` 的最终结果为 passed；1280×720 完整/聚焦对照、折叠/展开、1120×800 响应式和零控制台
+  error/warning 均已验证。无新增迁移；下一项按 TODO 为无页面的 `SEARCH-006`。
+
+### 2.70 SEC-004 缓存隔离与故障测试（已完成）
+
+- `BuildAskDataCacheKey` 不再依赖隐式结构序列化，而是使用版本化安全信封逐项绑定 tenant、actor、完整
+  PolicyScope hash、release ID/hash、IR、warehouse snapshot、freshness 和 engine version。缺失 hash、
+  非规范 engine 或控制字符直接不生成键；未来结构演进不会意外遗漏既有隔离维度。
+- 并发安全集用 64 个 tenant/actor 在相同 release、IR、snapshot、freshness 和 engine 下重复构造缓存键，
+  验证同一请求稳定、跨 tenant/actor/domain/role/release/IR/snapshot/freshness/engine 均不碰撞、不命中。
+- 图故障注入将 tenant A 的有效 GraphPlan 同时伪装为 tenant B 的认证 cache 与 PostgreSQL fallback；Resolver
+  在两处重放 request/scope/policy/release hash 后均失败关闭。向量故障注入同时返回 foreign-tenant 毒化
+  hit 和错误，Retriever 丢弃整个 vector lane，只合并同一 PolicyScope 下的 exact+lexical 事实。
+- AI 主模型失败不会自动切到 fallback；显式 fallback 作为独立调用，64 租户并发下每个 Start/Fail 审计
+  都保持原 tenant/request 绑定。专项竞态和全仓门禁均通过。未实现 `QUERY-010` 的结果缓存条目、反向索引
+  或 snapshot 主动失效，也未新增数据库迁移、页面或真实外部依赖；`QUERY-010` 现已解除 SEC-004 依赖。
+
+### 2.71 SEARCH-006 ANN/Exact 召回对照作业（已完成）
+
+- `000243_askdata_search_recall_audit` 增加 label-free `search_query_samples` 与 append-only
+  `search_recall_audits`，并给 `search_documents` 增加 `embedding_dim`。在线向量检索只通过受限
+  SECURITY DEFINER 入口记录固定 tenant/domain/Release/doc type/model/dimension 的 embedding，不保存
+  问句原文；API 无样本 SELECT 权限，也无 search document 的 embedding/model/dimension INSERT/UPDATE
+  权限，Worker 仅能读取/清理样本并追加聚合审计。
+- `RecallAuditor` 每小时检查、每租户 24 小时最多执行一次，按最近 7 天、domain/doc type、稳定 hash
+  采样最多 100 条，30 天后清理。ANN 与 exact 分别使用独立只读连接和低优先级 timeout；一次取 Top 30
+  后计算 `recall@10/20/30` 与双方 p95 延迟。默认阈值 0.99，低于阈值只记录并告警，不自动改 HNSW。
+- 在线路由先以最多 1,000 行的 bounded candidate estimate 判断；少于 1,000 关闭 index/bitmap scan 走
+  exact，否则设置 `hnsw.ef_search=100` 走 ANN。Embedding Claim 固定当前模型与 2,560 维，完成写入前
+  重放校验，不一致返回 `SEARCH_EMBEDDING_MODEL_MISMATCH`；数据库形状约束确保成功向量的 model/dim
+  同时存在，非成功状态必须清零。
+- 单元测试覆盖已知交集、强制退化 ANN、三种 K、p95、24 小时间隔、候选路由和模型/维度拒绝；真实
+  PostgreSQL app/worker/admin 用例创建 30 条已知 halfvec，证明在线小集合走 exact、只记录一条不可由
+  app 读取的样本、ANN/Exact 均返回完整 Top 30，并追加三条 recall=1 审计。迁移已 down→up，Worker
+  镜像已重建并健康运行；本任务无页面。下一项为 `NLU-007`。
+
+### 2.72 NLU-007 登录后已选业务域强制约束（已完成）
+
+- 用户明确：业务域在登录后、进入智能问数前已经选定。原 TODO 的概率 Domain Routing、领域二选一
+  澄清卡与 `SCOPE_CROSS_DOMAIN` 分支不符合产品口径，已同步修订产品设计、技术设计和 TODO；此前生成
+  的三份领域澄清预览均作废，未进入代码或产品真值。
+- Question API 既有 `RequireAccessToken`、session `business_domain_id` 与 `resolveActiveScope` 已将每个
+  Question Run 绑定到唯一当前领域和该域 ACTIVE Release。`UnderstandingService` 的 Policy Fact 从
+  `domainIds[]` 收窄为单值 `domainId`；模型省略领域时，服务端用 Policy Evidence 确定性写入
+  `score=1` 的唯一领域，模型返回其他领域时失败关闭，模型不再拥有领域路由权。
+- Joint Binder 在构造 beam 前要求 PolicyScope 恰好包含一个领域且与 GraphPlan `domainId` 相同。
+  检索与图计划本身已经在该领域 Release 内完成授权裁剪，因此其他领域对象无法进入候选，不需要先构造
+  跨域 Bundle 再事后过滤。
+- Semantic IR 增加必填单值 `domainId`，JSON Schema、Build Artifact、Resolver、Compiler、合成 Fixture、
+  Fixture Runner 和 IR 等价比较全部纳入该字段；缺失、多值或持久化篡改都会被验证/重放拒绝。
+- 本任务没有迁移、Compose 或页面改动。选定领域之外的产品级 `OUT_OF_SCOPE` 分类与引导统一留给
+  `NLU-009`，不会复活领域澄清卡。下一项按 TODO 为 `NLU-008`。
+
+### 2.73 NLU-008 会话 Release Pin 与澄清超时（已完成）
+
+- 新增 `000244_askdata_conversation_release_pin`：`askdata.conversations` 按 tenant/domain/actor 隔离，
+  新会话从空 Pin 开始；Question Run 新增 `clarification_deadline`、`budget_frozen_at` 与
+  `budget_consumed_json`，状态机增加 append-only `CLARIFICATION_EXPIRED`。
+- 首轮 run 只有在 `BINDING -> GRAPH_VALIDATING` 成功时才 Pin 当前 ACTIVE。后续追问相同 ACTIVE
+  直接复用；`SUPERSEDED/RETAINED` 返回结构化 `RELEASE_DRIFT_CONFIRM_REQUIRED`，最多列出 20 个
+  指标/维度变化，不静默切换；`RETIRED` 强制改用新 ACTIVE 并重新绑定。确认接口使用行锁，精确重复
+  确认返回 `replayed=true`，历史 run 始终按原 Release 可重放。
+- 进入澄清时冻结预算并设置默认 30 分钟 deadline（`ASKDATA_CLARIFICATION_TIMEOUT` 可配置）。运行时读取、
+  澄清提交与 Worker 共用一个事务过期函数；超时后不可再选择。按时恢复时 child run 从等待前消耗量
+  继续，等待时长不占预算；Release 已变化则丢弃旧 Bundle 并从 `BINDING` 重验。
+- 修正运行推进后的创建幂等重放：身份、scope、Release 与 limits 仍需精确相同，但当前累计 usage 不再与
+  初始 usage 比较，避免同一请求在后续状态推进后误报幂等冲突。澄清消费键仍绑定父 run、工件与选择，
+  不会分叉出两个 child run。
+- 用户确认方案 1「原位口径更新卡 + 右侧 Release Pin 证据」后，`/ask-data` 已接入版本差异、指标/维度
+  变化、确认重跑、只看历史和澄清超时状态。1280×720 完整/聚焦对照与 1120×800、720×900 响应式
+  通过，记录在 `design-qa.md` 和 `design-qa-artifacts/nlu-008-*`。
+- API 角色获得会话 Pin 最小权限；Worker 只获得超时所需的列级 UPDATE/INSERT。迁移已真实应用，且完成
+  同事务 down→up→rollback；数据库 schema/权限验证、PostgreSQL 生命周期集成、全仓 Go test/vet、
+  前端 26 条测试/lint/build 与 `git diff --check` 全部通过。
+- `DR-001` 已解除后端申请出口依赖；`NLU-009` 仍须等待 `WEB-011` 页面方案确认与实现，不能先形成
+  缺少用户可见出口的 OUT_OF_SCOPE 流程。
+
+### 2.74 DR-001 明细取数申请工单（已完成）
+
+- 先修正 TODO 中的循环依赖：产品 §5.24 已明确申请可从问数工作台主动发起，不必先拒答，因此实施顺序
+  固定为 `DR-001 后端 → WEB-011 页面 → NLU-009 分类接线`。`NLU-009` 不再反向阻塞后端申请合同。
+- `000233_platform_data_requests` 新增 tenant/domain 受控的申请与事件表、完整状态形状 CHECK、数据库
+  状态机触发器、强制 RLS 与最小角色权限。API 只允许读取、创建和按状态机更新申请；事件表只可追加，
+  通用 Worker 和连接测试角色没有任何访问权限。
+- `internal/datarequest` 提供严格 JSON HTTP、服务合同和 PostgreSQL Store；正式路径为
+  `/api/v1/data-requests`、`/{id}`、`/{id}/submit`、`/{id}/transition`。创建时固定登录 session 的唯一
+  业务域；主动入口必须使用空上下文，有来源 run 时只允许申请人本人当前领域的 run，并只验证固定
+  Release 内的 metric/dimension/member ID 和解析时间，不存在结果行或 SQL 输入字段。
+- `requiredFields` 只能引用当前 RLS 可见的 PUBLISHED 数据集字段。DR-001 暂以 ACTIVE
+  `DOMAIN_ADMIN` 形成可运行审批集合；未编造 `HUMAN-011` 尚未提供的数据 Owner、安全会签人或业务 SLA，
+  敏感推导与会签门禁继续归属 `DR-002`。
+- 真实生命周期测试发现同一时钟刻度内按 `created_at,id` 排序会使事件链偶发乱序，因此追加
+  `000245_platform_data_request_event_sequence`，用 `sequence_no = record_version` 作为权威单调顺序；
+  时间戳只保留审计含义。该任务没有占用报表预留编号；`000234` 后续已由 `RPT-DB-001` 正式使用。
+- 真实 PostgreSQL 回滚事务覆盖主动申请、字段治理校验、审批人解析、跨用户 RLS、身份/context 不一致、
+  陈旧版本冲突及六步完整闭环。当前开发库与全新隔离库均通过 schema/权限验证；未新增页面。
+
+### 2.75 QUERY-010 缓存 Key 与快照失效（已完成）
+
+- `internal/askdata/queryruntime` 新增独立结果缓存：Key 严格按 tenant ID、PolicyScope hash、Semantic
+  Release hash、规范化 IR hash、按 materialization ID 排序的 snapshot version 五段以 `\x1f` 拼接后
+  整体 SHA-256。Scope/Release 不一致、Policy hash 缺失、IR hash 非法、快照为空/重复/不完整或含歧义
+  分隔符时直接不缓存，不会回退到弱 Key。
+- 缓存条目保存 `result_hash`、`asOf=min(snapshot_completed_at)`、`row_count`、`created_at` 和默认一小时
+  TTL；结果 payload 仅以隔离副本读写。普通查询携带当前快照版本，因此刷新后自然 miss；`forceFresh`
+  还要求当前快照集合与条目完全一致，缺少当前版本证明或版本变化时跳过缓存。
+- 反向索引使用 tenant + materialization ID → cache key；覆盖写、显式删除、TTL 淘汰和任一物化主动失效
+  都会清理所有相关索引桶。`internal/materialization/invalidate.go` 新增 LISTEN 投影器，消费 `000230`
+  已有 `materialization_snapshot_completed` 通知并立即定向清除；畸形通知不会停止后续消费，通知丢失也
+  不影响 snapshot-version Key 的正确性。
+- 属性测试随机验证不同 PolicyScope 不共用 Key/条目，并覆盖快照变化、主动通知失效、forceFresh、缺段
+  不缓存、payload 隔离和反向索引全生命周期；专项 race、全仓 Go、vet、数据库和仓库门禁均通过。
+  本任务未新增迁移、页面或外部服务。
+
+### 2.76 QUERY-008 Cardinality 与 FanoutPolicy 枚举拆分（已完成）
+
+- `askdata.relationships` 的 `cardinality` 与 `fanout_policy` 已收敛为两个正交枚举；`000226` 追加四项
+  CHECK、bridge model 同 tenant/domain 外键，并移除 fanout 默认值。历史上能机械证明等价的预聚合
+  拼写只做重命名，矩阵外旧组合则清空为人工复核 holding state，绝不推断成 `SAFE`。
+- `registry.ValidateRelationshipCombination` 是认证、管理输入、导入 L3、Graph、Resolver 与编译器共用的
+  应用侧矩阵。数据库仍以独立 CHECK 做第二道门禁；`MANY_TO_MANY + BRIDGE_REQUIRED` 还必须携带
+  bridge model ID，NULL holding row 无法认证、进入 Graph 或编译。
+- Graph 风险码已改为稳定的 `<cardinality>_<fanoutPolicy>` 八种组合码，Binder 按预聚合、bridge 和
+  BLOCK 分级惩罚。`CompileJoin` 只接收 Release-pinned relationship/source facts 和受限标识符，分别
+  生成直接 Join、右侧预聚合、两侧预聚合 + bridge 去重 SQL；任意 BLOCK/NULL 直接返回
+  `PLAN_JOIN_BLOCKED` 且不产生 SQL。
+- `CompileJoin` 是 QUERY-008 冻结的安全编译边界；既有 QUERY-001/003 明确冻结 Semantic IR v1 为
+  单模型，`Adapt` 继续对多模型 GraphPath 失败关闭，不在本任务中绕开该合同或静默接线。
+- 单元与属性测试覆盖完整矩阵、非法组合、缺桥、NULL、AST/标识符注入和风险码；真实 PostgreSQL
+  fixture 验证预聚合/bridge 结果与手写正确 SQL 等价。全新隔离数据库已从零回放全部迁移并通过
+  `verify-database.sh`，验证完成后临时库已删除。开发库确认关系表无存量行后，在单事务内补齐已登记
+  批次的 QUERY-008 DDL，并再次通过数据库门禁及真实数据库拒绝/认证失败关闭集成测试。
+
+### 2.77 QUERY-007 排序、TopN、并列与 Other 编译（已完成）
+
+- Semantic IR 与结构化理解合同已补齐 `rankBy=CURRENT_VALUE|DELTA|RATIO`、
+  `otherPolicy=NONE|AGGREGATE_REMAINDER`、`tieBreaking=INCLUDE_ALL|DETERMINISTIC_CUT`；TopN 默认
+  10、硬上限 1,000，执行结果上限继续独立保持 10,000。对比查询的排序依据不得缺省，维度排序只允许
+  `CURRENT_VALUE`，排序目标仍只接受已选 metric/groupBy 的稳定版本 ID。
+- `CompileSort`/`CompileLimit` 只消费 Release-pinned 目标到编译器列别名的绑定：并列全收使用
+  `RANK() <= N`，确定截断使用分组稳定键参与的 `ROW_NUMBER() <= N`。伴随元数据 SQL 可返回
+  `tiesIncluded`、`tiesCut` 与实际行数；ASC 与 DESC 共享同一边界，BottomN 不另开不一致逻辑。
+- `CompileOther` 复用 `AggregationPlanner`：全可加指标生成 total-minus-top；半可加和不可加指标禁止
+  相减，只能读取针对 `remainder_rows` 的重算关系。Other 行携带 `is_remainder=true` 与归并成员数，
+  分组空值通过空的 typed projection 保持原列类型，不会把日期/数值键误推成 text。
+- 规则层识别按当期值、增长额、增长率三种显式依据，并排除这些“按…”短语的分组误判。Binder 在
+  TopN + comparison 缺少 `rankBy` 时，无论只有一个还是多个 Bundle 都强制返回三个证据绑定的澄清项，
+  不允许置信度门槛静默默认。
+- 单元测试覆盖非法排序目标、0/1001、默认 10、两种并列 SQL/标记、三类可加性、同比缺省澄清、
+  DELTA 与 BottomN。PostgreSQL 集成 fixture 覆盖边界并列实际 3/2 行和 remainder 数值/成员数；未提供
+  integration DSN 时按仓库惯例跳过外部数据库用例。
+
+### 2.78 WEB-011 明细取数申请入口（已完成）
+
+- 用户确认方案 3「我的申请主从工作区」后，`/ask-data` 顶栏增加“问数 / 我的申请”；申请列表、详情、
+  六态进度、驳回原因、审计事件与交付优先级完整落地。所属领域固定为登录 session 的唯一业务域，
+  侧栏、工作区和弹窗均只读显示且没有领域选择器。
+- `web/src/askdata/api/dataRequest.ts` 对接 DR-001 真实 list/get/create/submit/transition；可申请字段只从
+  当前领域 RLS 可见的 PUBLISHED 数据集版本加载。真实库字段为空时展示明确空状态并禁用提交，不把
+  结果行或模拟字段混入正式路径。
+- 新建弹窗支持主动入口和来源 run 预填。上下文清洗器只保留 metric/dimension/member UUID 与解析时间，
+  丢弃 rows、result、SQL、answer 和未知扩展；有来源 run 时才发送上下文。敏感级按所选字段最高等级
+  实时只读展示，真实会签门禁继续归属 DR-002。
+- 申请状态按 `record_version` 和事件 `sequence_no` 展示；当前测试用户同时是申请人和领域管理员，因此
+  `SUBMITTED` 提供后端真实支持的批准/驳回动作，不伪造状态机不存在的撤回。生命周期批准、开始处理、
+  交付与关闭均通过真实/快照交互验证。
+- 设计同状态对照、1280×720、1120×800、720×900、真实 API 空状态和完整交互通过。证据位于
+  `design-qa.md` 与 `design-qa-artifacts/web-011-*`，最终结果 `passed`。
+
+### 2.79 NLU-009 问题类型白名单与 OUT_OF_SCOPE（已完成）
+
+- `internal/askdata/understanding/scope_lexicon.go` 冻结 15 类词表、结构阈值、版本和规范内容 hash；Classifier
+  深拷贝 Release 固定配置。规则优先级避免“列出各区域销售额”被弱明细词误伤，只有规则无法确定时才
+  调用 LLM 兜底，未知枚举或错误会记录 `RULE_FALLBACK_REJECTED` 并保留规则候选。
+- `ScopeVerdict` 固定 type/outcome/reason/action 组合。`DETAIL_LIST` 指向平台内
+  `DATA_REQUEST_DIALOG`，预测、临时公式、未启用贡献分解、跨域分别提供受控重述/指标建设出口，未治理
+  数据源失败关闭。跨域说明遵循用户确认口径：领域在登录后已固定，问数页面内不提供切换器。
+- NextAction 只保存 target 与 `CURRENT_QUESTION` 预填方式，不持久化原始问题。`ParsedContext` 复用
+  DR-001 的 UUID/时间白名单；HTTP Block 工件公开投影严格拒绝未知字段、rows/SQL、动作篡改和不合法
+  type/outcome 组合。
+- `definition_card.go` 提供只依赖 Registry 的口径卡短路径，类型上没有查询执行器；固定零数据查询、
+  最多 1 次 LLM，并验证 pinned metric version、显示安全公式与证据。评测累计正确拒答和错误拒答，
+  只有类型匹配的 `OUT_OF_SCOPE` 才进入正确拒答分子。
+- 前端 `ConversationOutcome` 读取公开 ScopeVerdict；只有 `SCOPE_DETAIL_LIST` 显示“发起明细取数申请”，
+  点击后切换到已确认工作区并预填本地当前问题、来源 run 与受控上下文。应用内浏览器截图为
+  `design-qa-artifacts/nlu-009-scope-detail-exit.png` 和 `web-011-scope-detail.png`。
+- 15 类各 3 条（45 条）矩阵、定义零查询、非法 LLM 枚举、正确拒答统计、严格公开工件、前端出口、
+  全仓 Go test/vet、32 条前端测试、lint/build 与 `git diff --check` 均通过。全仓 gofmt 门禁仍发现工作区
+  中与本任务无关、尚未格式化的 `orchestrator/budget.go` 与未跟踪 `runner.go`；本任务未改写这些并行
+  工作文件，新增/修改的 NLU/HTTP 文件本身 `gofmt` 通过。
+
+### 2.80 ORCH-008 RunType 预算修订（已完成）
+
+- `budget.go` 冻结 Fast/Complex 单查询、Bundle、Definition 四档预算；`RunBudget.Limits()` 映射到
+  Question Run 标量上限。`BudgetCatalog` 按 domain/class 解析严格配置，覆盖只能在 4 LLM、10 Tool、
+  6 正式查询、3 验证查询、30 秒、4 并发的治理包络内生效。
+- Loop 请求可显式选择预算档，执行前把持久化限制与解析预算逐项取较小值。Fast/Definition 会真实减少
+  模型、工具、查询与时间额度；默认仍为 Complex，现有 Run 与重放语义不变。
+- `runner.go` 提供完整消费快照、单次 P95 指标、独立 HardTimeout 观察、按 PARTIAL → 证据澄清 →
+  TIMEOUT 的确定性熔断结果，以及排除澄清等待的 ActiveBudgetClock。P95 越线不会设置 exhausted 或
+  interrupt。
+- `000246_askdata_run_budget_consumption` 不改写 `000244`：扩大 Bundle 所需的数据库治理包络，并以名称
+  排在生命周期守卫之后的 BEFORE trigger，从权威单调计数生成所有状态的 `budget_consumed_json`。
+  非澄清 Run 的 Go replay 会核对 JSON 与标量一致但不误当作冻结状态；澄清 child 继续复用相同精确快照。
+- 严格配置、四档预算、领域收紧、20 分钟冻结、P95/HardTimeout 分离、熔断分流和完整 JSON 单测通过；
+  迁移已在开发库应用，真实 app/admin PostgreSQL 创建/更新与消费快照一致，down→up 在回滚事务中通过。
+
+### 2.81 RPT-CONTRACT-001 Report Definition v1（已完成）
+
+- 新建 `api/schemas/report-definition-v1.schema.json`，所有声明为 object 的节点均显式
+  `additionalProperties:false`，并以 `$defs` 复用 block/zone/slot/component。顶层必含 metadata、
+  template/theme、固定画布、Data Context、全局筛选、页面树、顶层组件表、交互、运行策略和来源。
+- 新建 `internal/report/model.go` 与 `decode.go`。`Decode` 先限制 5 MB、24 层、普通字符串 4096 字符、
+  富文本 64 KB，拒绝 SQL/连接串/凭据字段/脚本/HTML 事件属性，再复用 askdata strict decoder 拒绝
+  未知字段、重复键和尾随 JSON；`Validate` 可单独调用且仍执行同一内容守卫。
+- 顶层组件表由 `slot.componentId` 引用，page/section/block/zone/slot/component 各自全局唯一；Validator
+  同时校验页面/章节/分块/槽位/组件上限、画布和网格边界、Data Context/筛选/交互引用。
+- 数据绑定严格二选一：`SEMANTIC_IR` 固定 Release ID/hash、完整 Semantic IR 与 Query Plan hash，且
+  三者一致；`DATASET_FIELD` 只能引用定义内 Data Context 的逻辑字段。默认参数使用关闭的类型化数组，
+  避免开放 JSON map 破坏全对象闭合约束；组件公共 options 由下一项 Manifest 按 type/version 再收窄。
+- 新建 `simple-report.json`、`multi-page-report.json`、`ask-data-report.json` 三份契约示例与契约
+  测试；全部示例解码后 marshal/decode 保持结构体相等，负测覆盖 TODO 指定的全部边界和悬空/重复引用。
+
+### 2.82 RPT-CONTRACT-002 Component Manifest v1（已完成）
+
+- 完整更新 `api/schemas/component-manifest-v1.schema.json`，冻结 renderer/category、网格尺寸、数据角色、
+  optionSchema 子集、移动策略、交互和 migration。Manifest 顶层及所有固定子对象关闭未知字段；只有
+  option 属性名和默认值表作为受控动态对象，并在 Go 中由同一 optionSchema 二次校验。
+- 新建 `internal/report/template/manifest.go`、`registry.go` 与 13 个 `manifests/*.json`。注册表使用
+  `go:embed` 直接加载唯一 JSON 真值，按 type@version 唯一索引并返回深拷贝，避免调用方污染全局配置。
+- `OptionSchema.ValidateJSON` 同时服务默认选项和运行时组件；`ValidateComponent` 复用它并检查最小尺寸、
+  维度/度量区间、DATASET_FIELD 角色与 SEMANTIC_IR 数量/时间要求。三份 Report Definition 示例的所有
+  被引用组件已逐一通过 Manifest 兼容验证。
+- `CheckUpgrade` 对 patch/minor 执行向后兼容门禁，对 major 要求精确上一版本和注册 migrator；NewRegistry
+  按同组件版本排序并逐相邻版本检查，CI 不会静默接受破坏性升级。
+
+### 2.83 RPT-CONTRACT-003 Report Operation v1（已完成）
+
+- 新建 `api/schemas/report-operation-v1.schema.json`：41 个操作各自使用 `oneOf`、`op.const` 和专属/复用
+  的关闭 payload Schema，所有操作 envelope 都只允许 op/targetId/payload；UNDO/REDO 不在枚举内。
+- 新建 `internal/report/operation/model.go`：Bundle 上限 USER/IMPORT/SYSTEM 100、AI 30；41 个 payload
+  都是具体 Go 类型。解码逐层核对必填字段，未知字段、错 payload、空操作、非法 source/ID/revision
+  在应用前拒绝。
+- 新建 `guard.go`：AI 必须提供 aiRunId/scope；模板应用、页删、章节删和超过 5 个删除返回
+  `REPORT_OP_NOT_ALLOWED_FOR_AI`。scope guard 从当前定义构造完整祖先索引并核对 reportId、scope 真实
+  层级和 targetId 全部路径，越界返回 `REPORT_OP_OUT_OF_SCOPE`。
+- 41 项正例和 41 项 payload 负例、100/30/5 上限、AI 禁止操作、跨页越界、精确 Block 内放行、Schema
+  41 分支与 Go 枚举对齐均已自动化。
+
+### 2.84 QUERY-009 Query Plan Bundle 多计划运行（已完成）
+
+- `api/schemas/query-plan-bundle-v1.schema.json` 与 `compiler.QueryPlanBundle` 冻结同序合同：完整
+  PolicyScope、Release ID/hash、共享 resolved time/filters、1～6 个按 `p1...p6` 排序的独立 Semantic IR、
+  role/chart type、逐项 IR hash、1～4 并发和整体 Bundle hash。合同不包含 SQL、参数或结果行。
+- `BuildQueryPlanBundle` 只接受 CERTIFIED KPI Bundle；先重算 Release Manifest 并与 scope 的 Release hash
+  精确对拍，再证明 Bundle ReleaseObject、每个 metric→model 绑定、group/filter/time dimension 均存在于
+  同一 manifest。DRAFT/临时组合稳定返回 `BUNDLE_NOT_CERTIFIED`；计划超过 6、输入指标合同超过 8 或
+  并发超过 4 均失败关闭。
+- 每个 KPI item 确定性展开为单指标 Semantic IR，HEADLINE 使用 limit=1，其余沿用 TopN=10；时间区间、
+  比较和筛选来自同一共享上下文，时间 group-by 才附着粒度。全部 IR 规范化并独立 hash，任何计划、
+  Release、Policy 或 chart 篡改均不能通过 replay。
+- `BundlePipelineProcessor` 明确串接 `CompileBundlePlan → ValidateCovered → Execute`。编译产物必须重新匹配
+  scope/domain/IR/resolved time，Validation 与 Execution hash 必须逐层闭合；每个 plan 从根 run UUID
+  确定性派生独立执行 UUID，因此并发执行不会复用校验或撞 active-run 门禁。
+- `BundleRunner` 使用 BUNDLE 预算、`errgroup.SetLimit` 和 30 秒共享 deadline，最多四项同时执行；单项
+  编译、校验、执行、权限或超时失败只影响该项，不取消兄弟计划。结果始终保持输入顺序并只公开稳定
+  failure code；全部成功为 `ANSWERED`，任一失败为 `PARTIAL`，硬超时保留已完成工件。
+- 测试覆盖 3 项全成功、执行失败、权限裁剪、6/8 上限、并发峰值 4、硬超时后保留完成项、DRAFT 拒绝、
+  Release/model 漂移、Schema 上限和 hash 篡改；专项 race 无数据竞争。本任务无迁移、页面或外部调用。
+
+### 2.85 QUERY-011 PARTIAL 触发条件与结果状态分流（已完成）
+
+- 新建 `internal/askdata/validator/outcome.go`，冻结 `query-outcome-v1`、P1～P6/Q1 Evidence 和
+  `outcomeHash`。时间 coverage 必须来自 sealed verdict；权限裁剪只接受请求/授权数量；Bundle、成员策略
+  与多源条件都要求仍有非空成功子集。全失败/全过滤、重复 ID、阻断质量规则和篡改 hash 均失败关闭。
+- `DetermineOutcome` 固定按 P1～P6、Q1 累积并规范排序。任一 P 命中为 `PARTIAL`；只有非阻断质量告警
+  时为 `QUALITY_WARNING`；两者并存仍为 `PARTIAL`，同时保留 `qualityWarnings[]`。公开合同不含无权限
+  指标名称或 ID。
+- 新增受保护的 `/api/v1/questions/{runId}/add-to-report`。入口要求 Idempotency-Key、规范 report UUID
+  和精确 runVersion，只从 actor-scoped ANSWER completion artifact 读取已校验 outcome；客户端不能自报
+  ANSWERED。`PARTIAL` 在报告后端调用前返回 `409 RESULT_PARTIAL_NOT_EXPORTABLE`，提示缩小范围或确认后
+  重跑；非 PARTIAL 才进入独立报告 bounded-context 接口。
+- 本任务只冻结并执行导出门禁，不伪造尚未实现的 report intent/outbox。真实报告持久化接线缺失时，
+  完整结果明确返回 `REPORT_ADD_UNAVAILABLE`；后续报告任务实现同一接口即可复用门禁。
+- 测试覆盖 P1～P6、Q1、P1+Q1、P2 不泄漏、矛盾子集、PARTIAL 拒绝、Q1 放行、客户端 outcome 注入拒绝
+  和可信 outcome hash 传递；专项 race、全仓 Go、vet、CI 与 diff 检查全部通过。无迁移、页面或外部调用。
+
+### 2.86 ANS-001 Answer Artifact 与引用合同（已完成）
+
+- 新建 `api/schemas/answer-artifact-v1.schema.json` 与 `internal/askdata/answer/model.go`。Schema 和 Go
+  同时关闭未知字段；结构化层固定 headline/cards/chart/tableRef，指标值只允许 decimal 字符串。strict
+  decoder 拒绝重复键、尾随 JSON 和错类型，Normalizer 固定 nil/空数组并按 citation span 排序。
+- citation 使用 `[start,end)` Unicode code-point 区间，统一指向 `summary + 换行 + findings` 的规范文本；
+  越界、空区间和重叠均拒绝。RESULT_CELL、CONTRACT、TIME_SPEC 是关闭联合，其中结果单元格直接复用
+  `internal/askdata/shared.CellRef`，rowKey 以 Query group-by 顺序规范百分号编码为 `key=value|...`，可逆
+  解析且拒绝重复键、非规范转义和分隔符碰撞。
+- Prompt/模型、校验器/词表、Evidence/Result hash、Semantic Release 和图表规则统一投影到
+  `shared.Provenance`，与报告共用一个 fail-closed `IsStale`。降级工件强制 narrative 为空且
+  `passed=false/degraded=true`，因此未校验叙述不能伪装成完整 Answer。
+- 复用既有 `askdata.question_artifacts` ANSWER 类型和不可更新/删除 trigger。PostgreSQL integration 现写入
+  真实 Answer Artifact、重放后 strict decode，并在管理员嵌套事务内验证原地 UPDATE 被数据库拒绝。
+
+### 2.87 RPT-CONTRACT-004 Evidence Bundle 与 Insight Artifact（已完成）
+
+- 新建 `api/schemas/evidence-bundle-v1.schema.json`、`insight-artifact-v1.schema.json` 与
+  `internal/report/insight/model.go`。Evidence Bundle v1.1 固定两类来源、Dataset/Snapshot/Query/Filter、
+  asOf、实际半开时间区间、分析方法/版本、证据算法、事实、质量告警和 generatedAt；语义来源要求 Release/
+  IR hash 非空，直接 Dataset 查询要求两者为 null。
+- Fact 的 current/previous/change 全部是规范 decimal 字符串，禁止 float/指数；PERIOD_COMPARISON 强制
+  基期和变化率成对存在。facts.cellRefs 与 Answer citations 是同一个 `shared.CellRef/Citation` Go 类型，
+  契约测试从 Evidence cellRef 构建 Answer citation 再解析回同一坐标。
+- Evidence Bundle 规范 JSON 计算内容 hash。Insight Artifact 精确绑定该 hash，固定 Prompt/模型/校验器/
+  词表与 CURRENT/STALE/FAILED；人工编辑为 true 时编辑人/时间必填，为 false 时二者必须 null，FAILED
+  内容与引用必须为空。
+- 九项指定 stale 因素及词表/Evidence hash 全部通过 ANS-001 的同一个 `shared.IsStale`，没有报告侧副本。
+  两份 Schema round-trip、两种 source、九项失效、float 拒绝、坐标互解析、人工编辑、hash 篡改与未知字段
+  均已自动化。
+
+### 2.88 ANS-002 叙述事实校验器（已完成）
+
+- `internal/askdata/answer` 已形成 `extractor → matcher → verifier` 的确定性边界：抽取中文/阿拉伯数值、
+  万/亿、百分比/百分点、时间、单位、Binding 对象和禁用断言，所有 span 都使用 ANS-001 的 Unicode
+  code-point 坐标。对象采用最长匹配，已知但未绑定的指标/维度/成员直接报幻觉。
+- 数值比较使用 `math/big.Rat` 和显示精度容差；只接受引用单元格或显式声明的差、比、百分比、占比、
+  同比派生，绝不搜索任意 cell 组合。时间只接受 resolvedTimeSpec 当期/对比期，单位从 RESULT_CELL 或
+  Metric CONTRACT 的 unit/currency 核对。
+- 校验器与 `wordlist/v1.json` 均按 Release 版本固定，因果、预测、外部事实、越界建议默认拦截；贡献分解
+  模式只放行治理词表中的弱化表达，强因果仍失败。六个错误码输出元素、原文、Unicode span、原因和期望。
+- Answer 的 Result hash/Semantic Release 与验证证据强绑定；报告 `VerifiableInsight` 先验证 Evidence hash、
+  状态和人工编辑标记，再进入同一个 `Verifier.VerifyNarrative`。契约测试证明同一 Evidence 在问数和报告
+  链路返回完全相同的 `VerifyReport`。
+- 测试覆盖每个错误码至少三条负例、中文数值等价、百分比/百分点、容差边界、同比派生、随机组合反例、
+  幻觉对象与贡献模式；专项 race、全仓 Go test 与 vet 均通过。无迁移、页面、外部调用或业务数据写入。
+
+### 2.89 ANS-003 三层答案与失败降级（已完成）
+
+- `internal/askdata/answer/composer.go` 最多生成两次 L2；首次失败只向重试传递去原文、去 span 的结构化
+  失败码/期望，第二次失败统一调用 `ToStructured` 清空 narrative/citations，写入稳定降级提示。
+  `DefaultAskDataInterpretationEnabled=false` 固定 Ask Data 不生成 L3，报告侧若显式开启仍必须走 ANS-002。
+- `AnswerVerificationRunner` 强校验 actor/domain/policy/release/result hash 与 input artifact/result/binding，
+  执行 `RESULT_VERIFYING → ANSWER_VERIFYING → ANSWERED`；逐次失败审计只含 code/count/version，completion
+  分为 `ANSWER_VERIFIED`、`ANSWER_DEGRADED`。迁移 `000247` 同步 PostgreSQL 状态与事件约束。
+- Question HTTP 公开投影只返回已核验 L2 或稳定 L1 提示；SSE 严格接受
+  `answer.verifying/answer.degraded` 对应状态。降级但非 PARTIAL 的持久化 outcome 仍通过 add-to-report，
+  未核验文字不会进入报告输入。
+- 用户确认方案 2。前端新增 `AnswerSummary`、L1/L2/L3 层级状态、蓝灰降级说明、重新生成和查看校验依据；
+  登录领域继续只读锁定。前端快照、SSE、浏览器主要交互与控制台均通过；1280×720 同状态完整/聚焦对照
+  和 1120×800 响应式证据记录在 `design-qa.md`，最终结果为 `passed`。
+
+### 2.90 ORCH-007 ANSWER_VERIFYING 阶段接入状态机（已完成）
+
+- 复用 ANS-003 的 `AnswerVerificationRunner` 把结果验证后的唯一成功出口固定为
+  `RESULT_VERIFYING → ANSWER_VERIFYING → ANSWERED`；`EXECUTING → ANSWERED` 等跨级路径由 Go 状态矩阵和
+  PostgreSQL 约束双重失败关闭。
+- 首轮失败以去原文、去 span 的结构化元素/原因码/期望证据驱动唯一一次重生成。连续失败只提交
+  `ToStructured` 生成的 L1；失败事件详情不含叙述、prompt 或结果行，终态只可能是
+  `ANSWER_VERIFIED` 或 `ANSWER_DEGRADED`。
+- 答案模型余量同时受 LLM call、step 与 hard duration 限制，且上限为两次。预算已耗尽时不调用模型；
+  只剩一次调用时失败后不再重生成，直接降级并持久化 `usage.exhausted=true`。
+- SSE 事件严格按持久化 index 输出 `answer.verifying`、失败 checkpoint 与 `answer.degraded`；从任意已确认
+  `Last-Event-ID` 恢复均只发送后继事件，保证顺序与去重。
+
+### 2.91 ORCH-009 幂等键中间件（已完成）
+
+- `internal/platform/idempotency` 是 Ask Data、Data Request 与 Report V2 共用的唯一 HTTP 幂等边界；
+  Question API 与 `POST /api/v1/data-requests` 已在认证之后接线，`internal/report/http.WithIdempotency`
+  冻结报告侧复用入口。尚未开放的 release activate、report operations/publish 只预留同一 allowlist，
+  本任务不越权开放其业务路由。
+- body hash 基于拒绝重复 key/尾随值/过深嵌套后的规范 JSON；同一 actor/endpoint/key 的字段顺序差异可精确
+  重放，内容变化返回 `IDEMPOTENCY_KEY_REUSED`。并发抢占只允许一个请求执行业务，其他请求得到
+  `IDEMPOTENCY_IN_FLIGHT`。
+- 2xx/4xx 的有效 JSON status/body 由 `000248_askdata_idempotency_records` 保存 24 小时；读取时重新计算
+  response hash。5xx、panic、超时或不可重放响应释放 IN_FLIGHT，不会永久锁死 key。
+- actor-scoped RLS 阻止跨 tenant/actor 读取。API 角色可抢占/完成/释放自身记录；Worker 只能读取并按
+  `(expires_at,id)` 有界删除到期批次，后台主循环已接入，未到期 COMPLETED 由 trigger 禁止删除。
+
+### 2.92 RPT-DB-001 报告主对象、草稿、修订与版本（已完成）
+
+- `000234_report_v2_core` 建立 Report V2 主对象、每报告唯一草稿、不可变修订链与不可变发布版本；
+  `internal/report/store.Repository` 提供创建、读取、乐观锁保存、修订列表和版本读写的统一边界。
+- 草稿保存先锁定当前 draft，再比较 expected revision；成功路径在同一事务更新 draft、追加连续 revision
+  并重建索引。并发使用相同 base revision 时只有一个提交，冲突返回权威 current revision 与最多 100 条
+  operation 摘要。
+- 四张核心表 FORCE RLS 同时校验 tenant、选定 domain 和报告对象权限。owner、平台/租户/领域管理员及
+  USER/ROLE VIEW/EDIT/PUBLISH grant 按动作生效；VIEW-only 可读不可写，跨 tenant 无法观察对象。
+- revision 内容和 version 定义/删除由数据库 trigger 拒绝。JSONB 读回会重新规范化并核对持久化 hash，
+  不把 PostgreSQL 重排后的非 canonical 文本误当发布工件；约 4.9 MiB 定义已验证完整写入和读回。
+
+### 2.93 RPT-DB-002 模板、主题与组件模板（已完成）
+
+- `000235_report_v2_templates` 建立结构、布局、主题、叙述、报告组合与组件模板的 12 张 FORCE RLS 表；
+  报告模板版本以四个外键固定子模板版本，不把四类模板压成一个不可治理的大 JSON。版本字段执行严格
+  SemVer，`1.10.0` 按数值高于 `1.9.0`，前导零等非法版本在 Go 与数据库两侧失败关闭。
+- `PostgresTemplateStore` 支持按 `(reportTemplateId, version)` 或精确不可变 version ID 解析组合；主模板
+  与四个子版本必须处于已发布/已弃用/保留态。五份 JSONB 读回后重新规范化并分别校验 content hash，
+  跨 tenant 不暴露对象是否存在。
+- 13 个内置组件由同一 embedded registry 驱动编译器与数据库 seed。迁移只建立显式 placeholder，API
+  启动时在一个事务内替换为完整 manifest；二次执行只核对 type/version/hash，不覆盖任何真实内容漂移。
+  `000256` 为已经应用旧 000235 的数据库补齐同一 hydration 触发器和 SemVer 约束。
+- 组件版本只允许 `ACTIVE → DEPRECATED → RETAINED`，manifest、hash、version、migrator 与所属模板身份
+  均不可变。`000236` 的 dependency 索引删除保护按 `type@version` 查询，已被发布报告引用时返回
+  `REPORT_TEMPLATE_IN_USE`，不扫描 Report Definition JSON。
+
+### 2.94 RPT-DB-003 组件索引与依赖索引（已完成）
+
+- `compiler.BuildIndexes` 从已校验的 Report Definition 确定性投影组件位置与全部版本依赖。每个组件必须
+  恰好落在一个 slot；声明但暂未被组件消费的 dataContext 仍写入 DatasetVersion 依赖，避免影响分析漏掉
+  报告级过滤/预取上下文。同一依赖只保留一行，`component_ids` 与组件索引均稳定排序。
+- 草稿保存时，definition、revision 和“先删后插”的草稿索引位于同一事务；任何一步失败或显式回滚都
+  不留下半套索引。发布版本的组件/依赖索引随 version 同事务插入，随后 UPDATE/DELETE 由不可变 trigger
+  返回 SQLSTATE 55000。
+- `report-admin rebuild-indexes` 接受 tenant/actor/domain/report 四个显式坐标并复用对象权限。命令锁定
+  report/draft 后重建并逐行核对草稿索引；版本索引完整时只验证，整组缺失时从不可变 definition 回填，
+  部分缺失或内容不一致失败关闭，不用“修复”覆盖取证证据。
+- 四张索引表全部 FORCE RLS，并调用 `report_v2_can_access` 区分 VIEW/EDIT/PUBLISH，不再只按 tenant 放行。
+  `000261` 为已应用早期 `000236` 的安装补齐同一对象策略和 tenant-aware 组件引用删除保护；影响分析使用
+  `(tenant_id, dependency_type, dependency_id)` 索引，全程不扫描 definition JSON。
+- 从空库顺序执行全部迁移的 nonce 数据库测试覆盖真实 `report_app` owner/VIEW-only/跨 tenant、事务回滚、
+  发布、增量重建、版本索引回填和不可变保护，退出时强制删除临时库。随机定义属性测试另执行 200 组，
+  覆盖索引完整性、去重与排序。
+
+### 2.95 RPT-DB-004 AI 运行、证据与结论工件（已完成）
+
+- `reportai.PostgresStore` 支持 `PLAN`、`GENERATE_DRAFT`、`SCOPED_EDIT`、`INSIGHT` 四种运行，数据库
+  强制运行只能从 RUNNING 单向进入 SUCCEEDED/FAILED/REJECTED，终态记录不可重写或删除。请求摘要使用
+  闭合字段白名单和字符串/数组类型检查，不保存完整 prompt、数据样例、原始值或 transcript。
+- AI 操作全部追加留痕；REJECTED 必须带稳定拒绝码。VALID 操作创建时不得声称已应用，仅在成功运行的
+  草稿提交事务中允许一次性写入正数 applied revision，之后操作内容、校验结果和应用修订均冻结。
+- Evidence Bundle 为不可变快照。Insight 生成、重生成和人工编辑均追加新行，并在同一事务把旧 CURRENT
+  置 STALE；人工编辑保留编辑者和时间。Artifact 合同稳定 ID 与数据库版本行 UUID 分离，避免重生成
+  覆盖历史或触发行主键冲突。
+- 四张表均 FORCE RLS。AI run 额外按发起 actor 隔离；Evidence/Insight 使用报告 VIEW/EDIT 对象权限，
+  tenant 和当前已选 domain 仍为不可绕过边界。`000257/000261/000265` 为早期 `000237` 安装补齐摘要
+  完整性、对象策略和生命周期 trigger。
+- 真实 PostgreSQL 测试覆盖四种 kind、拒绝码、摘要白名单、VIEW-only/跨 tenant、终态/证据不可变、
+  两次生成的 CURRENT/STALE 切换及人工编辑追加留痕；迁移上下行事务演练、专项 race 和全仓回归均通过。
+
+### 2.96 RPT-DB-005 无匿名分享记录（已完成）
+
+- Go 与数据库把分享类型闭合为 INTERNAL_USER/INTERNAL_GROUP/EXTERNAL_ACCOUNT；没有 PUBLIC/ANONYMOUS，
+  EXTERNAL_ACCOUNT 在 MVP 固定拒绝。创建要求报告 EDIT 权限，默认期限 30 天、数据库上限 180 天。
+- 32 字节随机 token 只在创建响应返回一次，库内仅保存 SHA-256 hash，Record JSON 不暴露 hash。
+  AccessShare 先拒绝匿名，再用 hash 定位，随后核对 user/group principal 和报告 VIEW 权限，最后始终以
+  viewer 身份读取固定版本或当前发布版本；令牌不承载授权，也不能绕过 tenant/domain。
+- 分享行仅允许访问计数、创建者撤销、SYSTEM 过期标记三种单用途更新；报告/版本、principal、token hash、
+  过滤快照和期限不可变。撤销提交后调用缓存失效合同，访问路径实时检查期限，所以 Worker 延迟不影响拒绝。
+- `ExpiryWorker` 按 tenant 及 `(expires_at,id)` 有界索引，以最多 500 行和 SKIP LOCKED 标记 `expired_at`；
+  app/worker 都不具备直接执行主体校验或生命周期 trigger 函数的权限。
+- 真实 PostgreSQL 覆盖用户/用户组、无报告权限不提权、跨 tenant、实时与后台双重过期、撤销、访问计数、
+  非法主体、180 天 CHECK 和不可变字段。`000267` 另前向修复早期 report version trigger 错绑，恢复合法
+  artifact READY 推进而不放宽定义不可变边界。
+
+### 2.97 RPT-001 DSL 规范化、校验与哈希（已完成）
+
+- `NormalizeWithRegistry` 不修改调用方对象，固定执行字符串/枚举规范化、Schema/Manifest 默认值合并、
+  nil 集合空数组化、语义无关集合稳定排序、分阶段校验、规范 JSON 与 SHA-256；默认 Registry 使用
+  13 个 embedded Manifest，显式 false 等指针值不会被模板默认覆盖。
+- ID、引用、结构/布局、Manifest/option schema、数据角色五个阶段之间短路；每个阶段内部累积所有问题，
+  一次返回稳定 code/path/message 集合。交互目标先排序，再按 source/event/targets/action/id 排序，页面、
+  分块、组件、筛选、参数、映射与 provenance 引用均有稳定键。
+- 规范 JSON 把所有对象转换为字典序键、保留 `json.Number` 精度、移除多余空白并限制为 5 MiB；hash 只对
+  最终 UTF-8 字节计算。V1 minor 兼容读取统一落为 1.0；大版本必须走 `migrate/v1_to_v2` 显式适配器，
+  适配器在深拷贝上运行并拒绝缺失迁移器、错误版本与超限输出。
+- 富文本清洗允许有限排版/链接标签和安全属性，拒绝危险 URL 协议，删除 script/style/iframe/svg 等节点
+  及其内容；`target=_blank` 自动补 `noopener noreferrer`，属性稳定排序。Decode 和 Normalize 共用清洗器，
+  清洗后的字节参与 hash。
+- 大定义安全扫描用字符级无损候选门禁后再运行 SQL/连接串/脚本正则，近 5 MB 基准在 Apple M4 上 5 次
+  平均约 51.6 ms；属性、分阶段负测、XSS、显式迁移和专项 race 均通过。
+
+### 2.98 RPT-002 Operation、逆操作与并发控制（已完成）
+
+- 41 类协议操作全部由 `operation.Apply` 在深拷贝上逐项执行，失败返回 index/code/message 并丢弃工作副本；
+  `ApplyAndValidate` 复用 RPT-001 的完整规范化、布局、Manifest/options、dataContract 与 hash 路径。
+  BLOCK_COPY 复制完整嵌套值，避免派生 zone/slot ID 时污染源分块。
+- `Invert/InvertBundle` 在每个操作的准确前态上生成逆操作并反序排列。删除携带删除前快照，更新/移动/
+  resize/reorder 恢复旧值，merge/split 恢复原 slot 映射；模板和主题一律生成整定义 snapshot 恢复，避免
+  模板副作用无法逆转。空 insight 前态通过 COMPONENT_UPDATE 恢复，不构造协议禁止的空 Insight payload。
+- 存储顺序固定为 EDIT 授权、AI 独立能力、baseRevision、AI scope、纯函数应用/校验、规范 hash、同事务
+  同步 reports identity、更新唯一草稿、追加修订、重建索引和 AI 审计 applied revision。Report ID 不可由
+  REPORT_CREATE 替换；任何后续失败都会回滚主对象、草稿、修订和索引。
+- `REPORT_AI_EDIT` 映射为租户权限 `report.ai_edit/REPORT/AI_EDIT`，由 `000269` 为内置平台/租户/数据管理
+  角色登记；对象 REPORT_EDIT 与该能力必须同时满足。Handler 不再在授权前读取/预演定义；只有权限和
+  baseRevision 均通过后的 scope/内容拒绝进入 AI rejection 审计。
+- 409 响应包含 expected/current revision 与自 base 以来最多 100 条 `rN:OP,...` 摘要；ApplyError 包含失败
+  operationIndex。Undo/Redo 修订只追加，双栈校验 inverse_of_revision_no，支持多级撤销/重做，普通新编辑
+  清空 redo 分支，损坏链立即失败关闭。
+- 单元测试覆盖 41 类应用/逆操作、120 步随机序列全撤销、失败原子性、整快照、slot ID 和双栈；真实
+  PostgreSQL 覆盖 AI 权限/scope、无修订拒绝、连续 Undo/Redo、设置同步、模板恢复、并发一成功一 409、
+  RLS 和 revision 不可变。
+
+### 2.99 RPT-003 Go/TypeScript 确定性布局引擎（已完成）
+
+- `compiler/layout.go` 完成 24 列边界、运行时像素换算、NONE/VERTICAL 深拷贝紧凑、四种区域高度和
+  显式模板优先级重分配；桌面碰撞由 x 扫描线 + AVL y 区间树实现，复杂度 `O((n+k) log n)`，边接触不
+  误报，输出稳定排序。
+- Report Slot 允许省略 componentId 作为设计期空槽。Merge 同区、连续矩形、至多一个非空组件与
+  Manifest minSize 四道门禁使用固定错误码；服务端推导几何、组件和排序后的 mergedFrom，Split 必须
+  与 provenance、几何及组件同时一致。正常外部 payload 不能清空 provenance。
+- Mobile 按 order/visible 独立转成全宽 block，AUTO/FIXED/ASPECT_RATIO 和 STACK/CAROUSEL/
+  PRIMARY_ONLY/COLLAPSE 均有确定性结果；PRIMARY_ONLY 只能指向可见非筛选槽位，其他槽位不进入查询，
+  筛选区进入 drawer，Manifest 图例/标签降级策略随组件下发。
+- `web/src/report/designer/layout/` 实现同规则实时预览库；Go 与 TypeScript 共用
+  `api/examples/report-layout-contract-v1.json`，对碰撞和 merge 错误码做双端契约测试。Schema 补齐
+  primarySlotId/mergedFrom 条件约束，多页示例已同步。
+- 随机暴力碰撞对照、300 分块 `<10ms`、四高度、模板切换、四 slotMode、PRIMARY_ONLY 零隐藏查询、
+  merge/split 完整恢复、Manifest mobilePolicy 和双端 fixture 均通过。
+
+### 2.100 RPT-007 数据绑定双模型与查询编排（已完成）
+
+- Schema 与 Go runtime 共同执行严格 `SEMANTIC_IR` / `DATASET_FIELD` 二选一。六类编译期拒绝使用稳定
+  错误码；语义 model/metric/dimension/member 均核对认证事实，单位/币种在运行时与 PostgreSQL 发布
+  校验两处检查。`RETAINED` 可重编译，`RETIRED` 和 content hash 漂移拒绝。
+- 语义查询固定 Release ID/hash、IR 与 Plan hash，由受治理 runner 重新编译或读取固定 Artifact；Dataset
+  查询只携带逻辑字段、筛选、参数与 limit，Report 边界无 SQL，并标记 `uncertifiedDefinition=true`。
+- QueryHash 包含 policy scope；同哈希组件合并，不同查看者不合并。默认并发 8、硬上限 16，超时与最大
+  行数失败关闭。当前查看者 context 每次传入 Semantic/Dataset runner，发布权限不替代查看权限；
+  `NO_PERMISSION` 不携带结果或绑定详情。
+- 单测覆盖六类拒绝、RETAINED/RETIRED、固定身份篡改、三组件单执行、策略隔离、低权限结果裁剪、无
+  SQL、并发、超时与行数上限；全仓 Go test/vet 和数据库验证通过。
+
+### 2.101 RPT-004 发布编译与不可变制品（已完成）
+
+- `publication.Publisher` 按固定 14 步执行，支持选择精确历史 revision；Schema/领域/Manifest/权限依赖/
+  布局与双端预览/交互/Insight 分阶段失败关闭，规范化与索引在数据库写入前后独立复核。发布后只消费
+  immutable version，不回读草稿。
+- Report Definition provenance 新增可选的分析方法 SemVer、Prompt version 与模型策略固定字段；依赖索引
+  增加 `ANALYSIS_METHOD/PROMPT_VERSION/MODEL_POLICY`。旧 v1 工件未携带这些可选字段时 canonical
+  hash 不变，避免破坏历史重放。
+- 对象存储临时键与正式 `object_uri` 统一保留 `report-v2/` 前缀。DB 失败会删除 `.tmp`；Promote 或
+  pointer 失败保留可恢复状态，补偿 Worker 按已提交 `object_uri` 幂等推进。请求幂等 hash 包含 revision、
+  双端预览 hash 和发布选项；重放不产生新版本。
+- `000272_report_publication_version_pins` 为不可变版本的 `SEMANTIC_RELEASE` 依赖自动写入
+  `askdata.release_references(reference_type='REPORT_VERSION')`。真实 PostgreSQL 集成验证 ACTIVE 发布被
+  引用后，SUPERSEDED 自动转 RETAINED，活跃引用阻止 RETIRED；安全定义器不向应用/Worker 角色开放。
+- 14 步失败矩阵断言版本行/对象副作用边界；另覆盖历史修订、STALE 默认拒绝/显式确认审计、固定字段、
+  幂等、DB 清理、对象 Promote 故障和补偿修复。无新增页面或显著视觉状态，未触发设计确认门禁。
+
+### 2.102 RPT-005 重新发布式回滚（已完成）
+
+- `POST /api/v1/reports/{id}/rollback` 已接入发布权限与 actor-scoped 幂等；原因必填、trim 后最多 1000
+  Unicode 字符且禁止控制符，目标必须为同报告 READY version。回滚仍执行发布第 3～14 步，不存在
+  force/bypass 分支。
+- 新 version 记录固定 `rollback_of_version_no` 与 `rollback_reason`，沿用临时对象、事务版本、Promote、
+  pointer 和补偿恢复流程。回滚的回滚只是在更高 version 上引用上一次回滚 version，历史 definition/hash
+  从不更新。
+- API 对依赖/Manifest/布局等重校验失败返回结构化 `issues`。存储事务再次核对目标状态、definition hash
+  与 source revision，修复了真实幂等回执 INSERT 中 UUID/text 参数推断冲突。
+- `000273_report_rollback_integrity` 增加 `(report_id, rollback_of_version_no)` 自引用外键，以及原因 trim/
+  长度/控制字符 CHECK。真实 PostgreSQL 覆盖正常指针切换、历史不可变、伪造 definition 拒绝、缺失目标
+  外键和 Release 依赖重放。
+
 ## 3. 验证记录
 
 在仓库根目录执行：
@@ -1063,6 +2225,110 @@ ENV_FILE=.env.example ./scripts/check-compose.sh
 ```
 
 结果：全部通过。
+
+2026-08-08 `NLU-008` 验证：
+
+```sh
+go test ./internal/askdata/http ./internal/askdata/orchestrator -count=1
+ASKDATA_INTEGRATION_DATABASE_URL='postgres://report_app:...@127.0.0.1:5432/...' \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL='postgres://report_admin:...@127.0.0.1:5432/...' \
+  go test ./internal/askdata/orchestrator \
+  -run 'TestQuestionStateMatrixMatchesPostgres|TestPostgresStoreQuestionLifecycleResumeAndPinnedRelease' \
+  -count=1 -v
+go test ./... -count=1
+go vet ./...
+npm --prefix web test
+npm --prefix web run lint
+npm --prefix web run build
+./scripts/ci-check.sh
+./scripts/verify-database.sh
+git diff --check
+```
+
+- 全部通过；前端共 26 条测试。PostgreSQL 集成覆盖首轮 Pin、Release 漂移不静默切换、显式确认、
+  澄清冻结/恢复、超时终态、追加事件重放与历史精确幂等重放。
+- `000244` 已真实应用，并用同一事务执行 down→up→rollback；down 完整恢复旧状态机/触发器函数，
+  schema、RLS、API 会话权限和 Worker 列级过期权限验证通过。
+- 应用内浏览器完成主操作确认重跑、次操作查看历史、控制台和 1280/1120/720 响应式检查；视觉对照
+  记录在 `design-qa.md`，最终结果为 `passed`。
+
+2026-08-08 `DR-001` 验证：
+
+```sh
+go test ./internal/datarequest -count=1
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+  go test ./internal/datarequest \
+  -run TestPostgresStoreActiveRequestLifecycleAndRLS -count=1 -v
+go test ./... -count=1
+go vet ./...
+./scripts/ci-check.sh
+./scripts/migrate.sh
+./scripts/verify-database.sh
+./scripts/verify-warehouse.sh
+git diff --check
+```
+
+- 全部通过。真实 PostgreSQL 用例覆盖无拒答主动申请、空预填边界、PUBLISHED 字段验证、跨用户 RLS、
+  身份与数据库 context 不一致、乐观锁和 `DRAFT → ... → CLOSED` 六步闭环；六条事件序号严格递增。
+- `000233` 与 `000245` 已真实应用；`000245` 完成 down→up→rollback。另用 `template0` 创建全新隔离库，
+  从零回放全部迁移并通过 `verify-database.sh` 后删除；当前开发库及 warehouse 验证也通过。
+- 本任务没有新增页面、没有调用外部模型、没有写入正式业务数据；集成夹具全部在回滚事务中清理。
+
+2026-08-08 `QUERY-010` 验证：
+
+```sh
+go test -race ./internal/askdata/queryruntime ./internal/materialization
+gofmt -w $(rg --files internal/askdata -g '*.go')
+go test ./internal/askdata/...
+go test ./...
+./scripts/migrate.sh
+./scripts/verify-database.sh
+./scripts/verify-warehouse.sh
+go vet ./...
+test "$(gofmt -l cmd internal | wc -l | tr -d ' ')" = "0"
+git diff --check
+```
+
+- 全部通过。数据库门禁确认既有 `000230` snapshot 完成触发器、通知合同、RLS 和仓库边界仍有效；
+  本任务没有新增或回放额外迁移。
+- 256 组随机 PolicyScope 属性检查没有碰撞或跨权限命中；主动失效用真实缓存实例消费完成 payload，
+  不等待 TTL 即 miss。专项 race 未发现数据竞争。
+
+2026-08-08 `QUERY-008` 验证：
+
+```sh
+go test ./internal/askdata/... -count=1
+go vet ./internal/askdata/...
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+  go test ./internal/askdata/compiler \
+    -run TestPostgresPreaggregateAndBridgeSQLMatchHandwrittenCorrectResults -count=1 -v
+POSTGRES_DB=<isolated-query008-db> ENV_FILE=/dev/null ./scripts/migrate.sh
+POSTGRES_DB=<isolated-query008-db> ENV_FILE=/dev/null ./scripts/verify-database.sh
+git diff --check
+```
+
+- 全部通过。隔离库从空库应用全部迁移，数据库门禁确认 nullable 人工复核状态、无 fanout 默认、四项
+  CHECK、bridge FK 和矩阵定义；验证结束后使用明确库名强制删除临时库。
+- SQL 等价 fixture 覆盖一对多右侧重复行及桥表重复边，生成 SQL 与手写正确 SQL 的行数和聚合总值
+  一致；开发库 integration 还验证非法组合与缺桥分别命中命名 CHECK、NULL holding row 无法认证。
+  默认测试不依赖外部数据库，未设置 integration DSN 时仅跳过 PostgreSQL 用例。
+
+2026-08-08 `QUERY-007` 验证：
+
+```sh
+test "$(gofmt -l internal/askdata | wc -l | tr -d ' ')" = "0"
+go test ./internal/askdata/... -count=1
+go vet ./internal/askdata/...
+git diff --check
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+  go test ./internal/askdata/compiler \
+    -run TestPostgresTopNTiesAndRemainderMatchPolicies -count=1 -v
+```
+
+- 格式检查、V-GO-ASKDATA、vet 与 diff 检查均通过。当前环境和本地忽略配置都未提供 integration admin
+  DSN，因此 PostgreSQL 专项未在本轮执行；测试本身使用事务内临时表并回滚，配置 DSN 后可直接复验。
+- 默认测试覆盖所有验收分支，并确认 10/1,000 的 TopN 合同不会再次挤占独立的 10,000 行执行安全上限。
 
 2026-08-05 `DIM-003` 验证：
 
@@ -1835,6 +3101,1119 @@ git diff --check
   确认 actor 可取得 ACTIVE release/role policy 和自身 pinned run，同域 observer 因 RLS 只能得到 not found。
   单元/HTTP 用例确认响应和 SSE 不含注入到 audit Details/payload 中的 prompt、SQL、result rows 或内部错误。
 
+2026-08-06 `ORCH-006` 验证：
+
+```sh
+go test ./internal/askdata/orchestrator ./internal/config -count=1
+go test -race ./internal/askdata/orchestrator ./internal/config -count=1
+ASKDATA_INTEGRATION_DATABASE_URL="$DATABASE_URL" \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL="postgres://..." \
+  go test ./internal/askdata/orchestrator \
+  -run TestPostgresStoreQuestionLifecycleResumeAndPinnedRelease -count=1 -v
+test "$(gofmt -l cmd internal | wc -l | tr -d ' ')" = "0"
+go test ./... -count=1
+go vet ./...
+git diff --check
+```
+
+- 全部通过。单元覆盖 hash-only 无可恢复材料、AES-GCM 随机 nonce/认证上下文/篡改/过期、非法 mode/key/
+  TTL、会话 tenant/actor/domain/conversation/release 约束、policy reset，以及 artifact payload 到期前后
+  statistics hash 不变。真实 PostgreSQL 回滚夹具确认同 release 会话可继续，新 scope 试图静默切换
+  release 时在 INSERT 前失败关闭。全仓与 race 均通过。
+
+2026-08-06 `WEB-002` 验证：
+
+```sh
+npm --prefix web run test
+npm --prefix web run lint
+npm --prefix web run build
+git diff --check
+```
+
+- 全部通过；5 条 Node TypeScript 单测全部通过。production build 保持既有约 1.39 MB 主 chunk，Vite
+  继续提示既有的 500 kB chunk size warning，本任务未增加运行时依赖，也未改页面视觉。
+
+2026-08-06 `WEB-003` 验证：
+
+```sh
+npm --prefix web run test
+npm --prefix web run lint
+npm --prefix web run build
+git diff --check
+```
+
+- 全部通过；8 条 Node TypeScript 单测通过。production build 保持既有约 1.43 MB 主 chunk，Vite 继续
+  提示既有的 500 kB chunk size warning；未增加运行时依赖。
+- 应用内浏览器固定 1280×720 与选定设计同状态对照，完整和中栏聚焦比较均无未解决 P0/P1/P2；另在
+  1120×800 验证无横向溢出、证据面板正确移到下一行。取消、会话恢复、证据折叠、真实 API 失败关闭、
+  静态证据隐藏和控制台 0 error 均已验证，详见 `design-qa.md`。
+
+2026-08-07 `WEB-004` 验证：
+
+```sh
+go test ./internal/askdata/http -count=1
+go test ./internal/askdata/... -count=1
+go test ./... -count=1
+npm --prefix web run test
+npm --prefix web run lint
+npm --prefix web run build
+git diff --check
+```
+
+- 全部通过；前端共 11 条 Node TypeScript 单测。Go 用例覆盖公共证据投影、工件身份/run version 绑定、
+  稳定澄清消费键、陈旧版本拒绝和竞争选择防分叉；前端用例覆盖证据完整性、确定性格式化与提交合同。
+- production build 主 chunk 约 1.45 MB，Vite 继续提示既有 500 kB chunk size warning，未新增运行时依赖。
+- 应用内浏览器固定 1280×720 与确认设计同状态完成完整和中栏聚焦对照，无未解决 P0/P1/P2；1120×800
+  无横向溢出。已实测候选切换与右栏同步、继续、取消、会话恢复和折叠，DOM/可访问性检查确认原生
+  radio group/label、region、按钮和 disclosure 语义，控制台 0 error。详见 `design-qa.md`。
+
+2026-08-07 `WEB-005` 验证：
+
+```sh
+go test ./internal/askdata/http -count=1
+go test ./... -count=1
+npm --prefix web run test
+npm --prefix web run lint
+npm --prefix web run build
+```
+
+- 全部通过；前端共 14 条 Node TypeScript 单测。Go 用例覆盖只发布合格结果投影和拒绝不合格推荐形状；
+  前端用例覆盖稳定 view 选择、不安全大整数回退 table 和精确格式化。
+- production build 主 chunk 约 1.50 MB，Vite 仅提示 500 kB chunk size warning。
+- 应用内浏览器固定 1280×720 与确认设计同状态完成完整和结果区聚焦对照，无未解决 P0/P1/P2；
+  1120×800 document/viewport/scroll width 均为 1120。已实测趋势/渠道/明细 tab、查看明细、第 2 页、
+  每页 10 行和证据 disclosure；DOM 检查确认 tab、table、select、pagination navigation 和按钮语义，
+  最终干净会话控制台 0 error、0 warning。详见 `design-qa.md`。
+
+2026-08-07 `WEB-006` 验证：
+
+```sh
+go test ./internal/askdata/http -count=1
+go test ./... -count=1
+npm --prefix web run test
+npm --prefix web run lint
+npm --prefix web run build
+git diff --check
+```
+
+- 全部通过；前端共 16 条 Node TypeScript 单测。Go 用例覆盖严格反馈形状、终态/version 绑定、内容精确重放
+  和变更升版；前端覆盖九类选项、权限类人工复核文案、正负反馈构造与公共 API 接线。
+- production build 主 chunk 约 1.53 MB，Vite 仅提示既有 500 kB chunk size warning。
+- 应用内浏览器固定 1280×720 与确认设计同状态完成两轮完整和聚焦对照，无未解决 P0/P1/P2；1120×800、
+  800×800 均无横向溢出。已实测分类选择、下一步、返回保留、详情提交、成功关闭、有用反馈和显式关闭；
+  DOM 检查确认原生 dialog、fieldset/legend、radio/label 和按钮语义，最终控制台 0 error、0 warning。
+  原生 Escape 的 `cancel` handler 已实现，但应用内浏览器合成键盘事件未能触发浏览器默认 dialog 行为，
+  这是本轮唯一残余自动化覆盖缺口。详见 `design-qa.md`。
+
+2026-08-07 `TIME-001` 验证：
+
+```sh
+go test ./internal/askdata/registry -count=1
+go test ./internal/askdata/... -count=1
+go vet ./internal/askdata/...
+go test ./... -count=1
+ENV_FILE=.env ./scripts/migrate.sh
+ENV_FILE=.env ./scripts/verify-database.sh
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+  go test ./internal/askdata/registry \
+  -run TestTimeContractDatabaseGuardsCertificationImmutabilityAndReleaseClosure \
+  -count=1 -v
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过；`000225_askdata_time_contract` 已在本地开发控制库登记。`verify-database.sh` 确认两张新表
+  强制 RLS、所有新外键含 tenant、API 角色有受控 DML、worker 无写权限，且激活 API 仍故意不存在。
+- 单元测试覆盖严格 JSON round-trip、unknown field、四层策略 source、非法时区、缺失/非当前日历、
+  8 类粒度、hash 稳定性、认证和 Go Release 闭包。独立 admin 回滚事务集成测试在无业务 fixture 的空库上
+  验证 `TIME_CALENDAR_REQUIRED`、`TIME_CONTRACT_MISSING`、`TIME_CONTRACT_VERSION_IMMUTABLE` 与数据库
+  Release 闭包；未生成或保留任何企业日历数据。
+- 既有依赖真实 current PUBLISHED DWS/ADS 的 importer integration 在当前空业务库仍会按设计 skip；TIME-001
+  的独立集成用例不依赖该 fixture 并已通过。全仓 Go 测试、askdata vet、CI 静态检查和 diff whitespace
+  检查均通过。
+
+2026-08-07 `TIME-002` 验证：
+
+```sh
+go test ./internal/askdata/compiler ./internal/askdata/ir ./internal/askdata/ircontract -count=1
+go test ./internal/askdata/... -count=1
+go vet ./internal/askdata/...
+go test ./... -count=1
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。时间编译测试覆盖自然月/季/年、MTD T+1、LAST_COMPLETE、闰日同比、3 月 31 日环比的
+  CLAMP/SKIP、纽约 DST 和四月起始财政季度；60 组属性用例确认所有成功区间 `end > start`，且
+  `SAME_DAY_COUNT` 当前期/对比期天数恒等。
+- IR builder 测试确认相对时间表达式和粒度进入 canonical IR；查询适配测试确认 current/baseline 参数来自
+  `ResolvedTimeSpec`。全仓回归未发现既有绝对时间工件、查询编译、验证或运行链路退化。
+- 本任务没有数据库迁移、外部服务调用或页面改动；没有写入或猜测 `HUMAN-007` 尚未提供的企业日历值。
+
+2026-08-07 `TIME-003` 验证：
+
+```sh
+go test ./internal/askdata/answer ./internal/askdata/compiler ./internal/askdata/http
+go test ./...
+go vet ./...
+cd web && npm test && npm run build && npm run lint
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。共享 fixture 共 20 组；Go/TypeScript 五个展示字段逐字符相等，专项测试覆盖裁剪、无对比和
+  LAST_COMPLETE。HTTP 测试确认不信任 payload 提供的 `timeSpec`，并从校验后的 `resolvedTimeSpec` 重建。
+- 应用内浏览器在真实本地登录和 ACTIVE“企业经营”领域下验证 1280×720 结果状态；结果 disclosure 与证据
+  时间 section 的展开/收起均可用，最终控制台 0 error、0 warning。1120×800 下 document scroll width =
+  viewport width = 1120，无重叠和横向溢出。
+- 用户确认的方案 2、实现截图、完整/聚焦对照、响应式截图与逐轮 P2 修正记录见 `design-qa.md` 和
+  `design-qa-artifacts/time-003-*`；最终 `final result: passed`。前端 production build 仅有既有的大 chunk warning。
+
+2026-08-07 `SNAP-001` 验证：
+
+```sh
+go test ./...
+go vet ./...
+ENV_FILE=.env ./scripts/migrate.sh
+ENV_FILE=.env ./scripts/verify-database.sh
+ENV_FILE=.env ./scripts/verify-warehouse.sh
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。专项测试覆盖 Worker 必须先登记 snapshot 再构建、完成时传递业务 watermark、连续 10 次同
+  schema 刷新 Release 仍 ACTIVE、schema 变化才 STALE，以及 FAIL 快照警告/阻断两种查询策略。
+- 数据库验证以回滚 fixture 证明最新已完成读取会忽略开始时间更晚但未完成的刷新、能返回最新 FAIL 状态，
+  且完成快照不可修改；迁移、RLS、完成通知、质量 FK 分离和控制面索引均通过静态与真实 SQL 断言。
+- Warehouse 验证通过；time watermark 只允许来自 `DATE|DATETIME` 输出字段。`SnapshotService` 的依赖合同
+  只有 control reader，mock 断言读取路径没有 warehouse 连接。
+
+2026-08-07 `TIME-004` 验证：
+
+```sh
+go test ./internal/askdata/compiler ./internal/askdata/validator
+go test ./...
+go vet ./...
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。专项测试覆盖 `FULL/TRUNCATED/NONE`、多模型最小水位、`end == available` 为 FULL、
+  SAME_DAY_COUNT/SAME_CALENDAR_RANGE 对比期同步裁剪、缺失水位失败关闭和非空用户提示。
+- `NONE` 用例断言 EXPLAIN/仓库查询计数为 0；绕过覆盖门禁的带时间计划同样在 EXPLAIN 前失败关闭。
+  本任务无数据库迁移、页面改动或外部服务调用。
+
+2026-08-07 `ADD-001` 验证：
+
+```sh
+go test ./internal/askdata/...
+go test ./...
+go vet ./...
+ENV_FILE=.env ./scripts/verify-database.sh
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+  go test ./internal/askdata/registry \
+  -run TestAdditivityDatabaseChecksRemainIndependentOfApplicationGate -count=1
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过；`000226_askdata_metric_additivity` 已在本地开发控制库登记。数据库验证确认 20 个新增字段和
+  两层共 12 个核心 CHECK/FK 均存在，管理员回滚事务进一步证明：缺失事实、旧枚举、半可加缺算法和
+  不可加错误限制会被数据库独立拒绝，字段齐全的 `FULLY_ADDITIVE` 认证指标可写入且没有残留夹具。
+- 单元测试逐项覆盖五个规定错误码、suggestion 不能绕过认证、完整 DRAFT 可认证，以及 Release 对多个缺失
+  对象的整包拒绝和稳定清单。全仓回归还验证导入器只写 suggestion，旧 `ADDITIVE` SQL fixture 已改为新
+  事实词汇和完整认证字段。
+- Down migration 在存在未确认事实时主动拒绝有损回滚；正常回滚只对非空权威事实恢复旧枚举，不会把
+  suggestion 倒灌为事实。本任务没有页面改动或外部服务调用。
+
+2026-08-07 `ADD-003` 验证：
+
+```sh
+go test ./internal/askdata/compiler ./internal/askdata/validator ./internal/dataset ./internal/querycompiler -count=1
+go test -race ./internal/askdata/compiler ./internal/askdata/validator -count=1
+go test ./...
+go vet ./...
+ENV_FILE=.env ./scripts/verify-database.sh
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。专项测试穷举 0/1/2/3 个分组维度的 8 种组合，逐棵检查比率 Dataset AST 的 DIVIDE 位于
+  聚合之上且 denominator 是 `NULLIF(AGGREGATE,0)`；编译 SQL 不出现对比率的外层 `AVG`。去重用例确认
+  目标 grain 生成 `COUNT(DISTINCT ...)`，不产生 `SUM(COUNT(...))`。
+- 半可加用例覆盖按月 `PERIOD_END`、按季 `PERIOD_BEGIN` 和跨两年无时间分组的
+  `PERIOD_AVERAGE`，并断言成员/时间过滤全部进入内层快照汇总。混合单位、混合币种、缺少半可加声明、
+  不可加维度折叠和非法后聚合均返回稳定代码；Query Artifact 的重哈希不允许伪造 totals 标记。
+- SQL Validator 专项验证受控 ordered aggregate；本地 PostgreSQL 直接执行
+  `(ARRAY_AGG(value ORDER BY time DESC NULLS LAST))[1]` 返回最新时间点值。数据库全量验证无回归；当前无
+  READY 真实语义 Release，因此既有 Postgres Resolver integration 按设计 skip，未冒充真实业务数据测试。
+- 本任务无迁移、页面改动或外部模型调用。
+
+2026-08-07 `ADD-004` 验证：
+
+```sh
+go test ./internal/askdata/compiler ./internal/askdata/validator -count=1
+go test -race ./internal/askdata/compiler ./internal/askdata/validator -count=1
+go test ./...
+go vet ./...
+npm --prefix web test
+npm --prefix web run lint
+npm --prefix web run build
+ENV_FILE=.env ./scripts/verify-database.sh
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。Go 专项覆盖结果列治理元数据、精确长 decimal、无分组重算 SQL、预算从 2/3 扣到 3/3、
+  3/3 时不再产生查询，以及 float 重算结果失败关闭；compiler/validator race 无数据竞争。
+- Web 共 25 项测试通过，其中 ADD-004 契约测试覆盖三类可加性、问数/报告/导出函数引用一致、
+  `0.1 + 0.2 = 0.3`、超安全整数精确求和、Manifest 可加性门禁和非完全可加图表不可用。
+- Production build 通过；Vite 仍报告既有单 bundle 大于 500 kB 的非阻断 warning。本任务未新增页面、
+  数据库迁移或外部模型调用。
+
+2026-08-07 `IMPORT-001` 验证：
+
+```sh
+go test ./internal/askdata/registry/import -count=1
+go test -race ./internal/askdata/registry/import ./cmd/worker -count=1
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+ASKDATA_INTEGRATION_WORKER_DATABASE_URL=<local-worker-dsn> \
+  go test ./internal/askdata/registry/import -run TestPostgresImport -count=1 -v
+go test ./... -count=1
+go vet ./...
+ENV_FILE=.env ./scripts/migrate.sh
+ENV_FILE=.env ./scripts/verify-database.sh
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过；`000227` 已登记到本地控制库。专项单元测试覆盖全部合法边、8 条非法边、CSV 文件 hash/断点
+  行号、尾随 JSON 拒绝、确定性失败关闭，以及 10,000 行中断后从 1,500 行继续并最终形成 20 个 500 行批次。
+- 三角色数据库 integration 使用临时双租户 fixture，实测重复上传返回同一 ID、7 条非法数据库跳转被拒、
+  非 DRAFT 创建器整批回滚、1+2 行部分/剩余提交最终进入 `COMMITTED`、跨租户读取只返回 not found，以及
+  `VALIDATED -> WITHDRAWN`；夹具和审计均在测试后清理。
+- 数据库全量验证确认两表强制 RLS、状态/行 trigger、幂等约束、lease 函数 SECURITY DEFINER + 固定
+  search path，以及 API/Worker/Connection Test 三角色最小权限。本任务没有页面、外部模型或业务数据写入。
+
+2026-08-07 `IMPORT-002` 验证：
+
+```sh
+go test ./internal/askdata/registry/import ./internal/askdata/http -count=1
+go test -race ./internal/askdata/registry/import ./internal/askdata/http -count=1
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+ASKDATA_INTEGRATION_WORKER_DATABASE_URL=<local-worker-dsn> \
+  go test ./internal/askdata/registry/import -run 'TestPostgresImport|TestPostgresTemplateCatalog' -count=1 -v
+go test ./... -count=1
+go vet ./...
+ENV_FILE=.env ./scripts/migrate.sh
+ENV_FILE=.env ./scripts/verify-database.sh
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。合同测试以独立硬编码期望核对 12 类列名，并逐类生成 CSV/XLSX；XLSX 校验三 sheet、引用
+  确定性顺序和枚举下拉。生成模板写入样例数据后由实际 `FileRowSource` 重新解析，首条数据 row 为 1。
+- HTTP 测试覆盖成功下载、安全响应头、域越权、重复/多余参数、小写资产类型和非法格式；三角色数据库
+  integration 继续通过，真实 PostgreSQL catalog 对空业务域返回空引用。没有页面、迁移或业务数据写入。
+
+2026-08-07 `IMPORT-003` 验证：
+
+```sh
+go test ./internal/askdata/registry/import ./internal/askdata/http -count=1
+go test -race ./internal/askdata/registry/import ./internal/askdata/http -count=1
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+ASKDATA_INTEGRATION_WORKER_DATABASE_URL=<local-worker-dsn> \
+  go test ./internal/askdata/registry/import -run TestPostgresImport -count=1 -v
+go test ./... -count=1
+go vet ./...
+ENV_FILE=.env ./scripts/migrate.sh
+ENV_FILE=.env ./scripts/verify-database.sh
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。专项测试覆盖 17 个治理错误码、12 类合法行、L1 短路、同批引用、A↔B 公式环、兼容性、
+  层级断层、fanout、可加性、时间合同、画像高基数、影响警告仍为 VALID，以及每个错误均可通过数据库
+  错误对象约束。报告 XLSX 的原始列 + 四个修复列已由真实模板解析器 round-trip。
+- 上传 API 测试覆盖内容寻址对象键、服务端 MIME、大小/扩展名/路径拒绝、域越权与 multipart 歧义；HTTP
+  报告覆盖安全头和参数拒绝。app/worker 双角色真实 catalog、报告行读取、跨租户 not found 及既有 IMPORT-001
+  integration 全部通过；敏感成员原值权限未放宽。本任务没有页面、外部模型或正式业务数据写入。
+
+2026-08-07 `IMPORT-004` 验证：
+
+```sh
+go test ./internal/askdata/... -count=1
+go test -race ./internal/askdata/registry/import ./internal/askdata/registry ./internal/askdata/http -count=1
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+ASKDATA_INTEGRATION_WORKER_DATABASE_URL=<local-worker-dsn> \
+  go test ./internal/askdata/registry/import -count=1 -v
+go test ./... -count=1
+go vet ./...
+ENV_FILE=.env.example ./scripts/migrate.sh
+ENV_FILE=.env.example ./scripts/verify-database.sh
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。真实 PostgreSQL 覆盖 12 类 DRAFT 落表、HIERARCHY 多行合并、提交中途失败零残留、影响确认、
+  整批认证原子拒绝/成功与 N 条对象审计、同稳定对象新增版本，以及自由 DRAFT、Release 引用、已认证三类撤回。
+- `000228` 已 down→up 回放；数据库验证确认新增权威版本表、Release 合同、成员哈希解析函数、app/admin/
+  worker 最小权限和 `COMMITTED -> WITHDRAWN` 状态边。没有页面、外部模型或正式业务数据写入。
+
+2026-08-07 `IMPORT-005` 验证：
+
+```sh
+go test ./internal/askdata/... -count=1
+go test -race ./internal/askdata/registry/import ./internal/askdata/registry ./internal/askdata/http -count=1
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+ASKDATA_INTEGRATION_WORKER_DATABASE_URL=<local-worker-dsn> \
+  go test ./internal/askdata/registry/import -count=1 -v
+go test ./... -count=1
+go vet ./...
+ENV_FILE=.env.example ./scripts/migrate.sh
+ENV_FILE=.env.example ./scripts/verify-database.sh
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。专项测试核对 12 类每一列和每个输入值、单资产工作簿经真实导入解析器 round-trip 后 hash
+  不变、当前 metric v2 与 Release 固定 v1 内容不同，以及 CONFIDENTIAL MEMBER 和关联 MEMBER TERM 均省略。
+- HTTP 覆盖同步附件、异步 202、状态、鉴权下载、过期 410、跨域和参数歧义；三角色 PostgreSQL 覆盖
+  精确版本 manifest、租约完成、可重试失败、永久失败、跨租户 not found 和 Worker 无任务表权限。
+  `000242` 已 down→up 回放，000229 仍保留给 RETAIN-001；数据库总校验确认 RLS、状态守卫、固定 search
+ path 的 SECURITY DEFINER 函数及最小权限。没有页面、外部模型或正式业务数据写入。
+
+2026-08-07 `TERM-001` 验证：
+
+```sh
+go test ./internal/askdata/registry ./internal/askdata/http -count=1
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+ASKDATA_INTEGRATION_WORKER_DATABASE_URL=<local-worker-dsn> \
+  go test ./internal/askdata/... -count=1
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+ASKDATA_INTEGRATION_WORKER_DATABASE_URL=<local-worker-dsn> \
+  go test -race ./internal/askdata/registry ./internal/askdata/registry/import ./internal/askdata/http -count=1
+go test ./... -count=1
+go vet ./...
+ENV_FILE=.env.example ./scripts/verify-database.sh
+ENV_FILE=.env.example ./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。应用角色真实 CRUD 覆盖完整版本字段、目标引用和 PENDING 重置；真实 PostgreSQL 认证覆盖
+  同优先级不同目标返回候选且零变更、不同优先级缺 note 拒绝/有 note 通过并审计 shadow，以及相邻但不
+  重叠的生效期均可认证。认证失败后仍遵守同一稳定身份最多一个 DRAFT 的既有导入合同。
+- 单元/HTTP 覆盖受限正则合法/危险构造、已取消上下文的超时保护、64KiB 输入上限、负向上下文矛盾及
+  conflict 候选结构化响应。全量数据库验证继续确认强制 RLS、Release 只接受 APPROVED 词条与最小权限。
+  无新增迁移、页面、外部模型或正式业务数据写入。
+
+2026-08-07 `TERM-002` 验证：
+
+```sh
+go test ./internal/askdata/understanding ./internal/askdata/understanding/dictionarysearch \
+  ./internal/askdata/understanding/dictionarypostgres ./internal/askdata/search -count=1
+go test ./internal/askdata/understanding \
+  -run TestDictionaryTenThousandTermsWarmMatchUnderOneMillisecond -count=3 -v
+go test -race ./internal/askdata/understanding \
+  ./internal/askdata/understanding/dictionarysearch ./internal/askdata/search -count=1
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+  go test ./internal/askdata/understanding/dictionarypostgres -count=1 -v
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+ASKDATA_INTEGRATION_WORKER_DATABASE_URL=<local-worker-dsn> \
+ASKDATA_INTEGRATION_WAREHOUSE_DATABASE_URL=<local-warehouse-reader-dsn> \
+ASKDATA_INTEGRATION_WAREHOUSE_ADMIN_DATABASE_URL=<local-warehouse-admin-dsn> \
+  go test ./internal/askdata/... -count=1
+go test ./... -count=1
+go vet ./...
+ENV_FILE=.env.example ./scripts/verify-database.sh
+ENV_FILE=.env.example ./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。专项覆盖最长/priority/字典序重叠、残余 PREFIX/SUFFIX/REGEX、负向原因、有效期、角色、
+  Release hash 缓存替换、全半角/大小写/数字单位 span 与取消传播；10,000 词条、500 字问句的 warmed
+  median 正常构建连续三次 `<1ms`，竞态构建另行通过功能检查。
+- 真实 PostgreSQL 夹具确认 app-role/RLS 只加载 Release 固定的 APPROVED 词条，排除未发布和 PENDING
+  候选，并验证 target code、角色命中和负向裁剪。全量数据库与 CI 门禁继续通过；未运行外部模型、页面
+  或写入正式业务数据。
+
+2026-08-07 `KPI-001` 验证：
+
+```sh
+go test ./internal/askdata/registry ./internal/askdata/registry/import \
+  ./internal/askdata/http -count=1
+go test -race ./internal/askdata/registry ./internal/askdata/registry/import \
+  ./internal/askdata/http -count=1
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+  go test ./internal/askdata/registry \
+    -run 'TestKPIBundleAdminRoundTripAndReferenceValidation|TestPostgresKPIBundleMatcherPinsAndRollsBackReleaseVersion' \
+    -count=1 -v
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+ASKDATA_INTEGRATION_WORKER_DATABASE_URL=<local-worker-dsn> \
+ASKDATA_INTEGRATION_WAREHOUSE_DATABASE_URL=<local-warehouse-reader-dsn> \
+ASKDATA_INTEGRATION_WAREHOUSE_ADMIN_DATABASE_URL=<local-warehouse-admin-dsn> \
+  go test ./internal/askdata/... -count=1
+go test ./... -count=1
+go vet ./...
+ENV_FILE=.env.example ./scripts/verify-database.sh
+ENV_FILE=.env.example ./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。单元/HTTP 覆盖 item 0/9、HEADLINE、order、Component Manifest、CRUD 路由、Release
+  metric/dimension 闭包，以及唯一命中、低 margin 澄清、无命中和版本回退；竞态检查无数据竞争。
+- 真实 PostgreSQL 覆盖非认证指标、跨域指标、不兼容维度、完整 CRUD/认证预检，以及 app-role/RLS 下
+  同一 Bundle 的 v1/v2 随双 Release 精确切换。全量数据库与 CI 门禁继续通过；未执行新迁移、外部模型、
+  页面或正式业务数据写入。
+
+2026-08-07 `RETAIN-001` 验证：
+
+```sh
+go test ./internal/askdata/registry ./internal/askdata/compiler \
+  ./internal/askdata/orchestrator ./internal/askdata/http -count=1
+go test -race ./internal/askdata/registry ./internal/askdata/compiler \
+  ./internal/askdata/orchestrator ./internal/askdata/http -count=1
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+ASKDATA_INTEGRATION_WORKER_DATABASE_URL=<local-worker-dsn> \
+  go test ./internal/askdata/registry ./internal/askdata/orchestrator \
+    -run 'TestReleaseRetentionPostgresLifecycleAndRLS|TestPostgresStoreQuestionLifecycleResumeAndPinnedRelease' \
+    -count=1 -v
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+ASKDATA_INTEGRATION_WORKER_DATABASE_URL=<local-worker-dsn> \
+ASKDATA_INTEGRATION_WAREHOUSE_DATABASE_URL=<local-warehouse-reader-dsn> \
+ASKDATA_INTEGRATION_WAREHOUSE_ADMIN_DATABASE_URL=<local-warehouse-admin-dsn> \
+  go test ./internal/askdata/... -count=1
+go test ./... -count=1
+go vet ./...
+ENV_FILE=.env.example ./scripts/verify-database.sh
+ENV_FILE=.env.example ./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。`000229` 先执行 down→up 回放并再次迁移到最新定义；专项覆盖引用验证、幂等恢复、计数、
+  完整受影响清单、24 月保留期、投影清理顺序与外部失败关闭，以及 Retained 编译 Plan Hash 一致性。
+- 真实 PostgreSQL 覆盖认证资产自动引用、ACTIVE→SUPERSEDED→RETAINED、跨租户 RLS、保留期前拒绝、
+  到期 RETIRED、投影清理后注册表/manifest/编译合同完整；真实 Question Store 覆盖已有 run 重放/恢复与
+  新 run 拒绝。未运行外部模型、页面或写入正式业务数据。
+
+2026-08-07 `PROJ-002` 验证：
+
+```sh
+go test ./internal/askdata/registry ./internal/askdata/orchestrator \
+  ./internal/askdata/http -count=1
+go test -race ./internal/askdata/registry ./internal/askdata/orchestrator \
+  ./internal/askdata/http -count=1
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+  go test ./internal/askdata/registry \
+    -run TestProjectionGuardPostgresFourHashRLSAndInvalidation -count=1 -v
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+  go test ./internal/askdata/orchestrator \
+    -run TestPostgresStoreQuestionLifecycleResumeAndPinnedRelease -count=1 -v
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+ASKDATA_INTEGRATION_WORKER_DATABASE_URL=<local-worker-dsn> \
+ASKDATA_INTEGRATION_WAREHOUSE_DATABASE_URL=<local-warehouse-reader-dsn> \
+ASKDATA_INTEGRATION_WAREHOUSE_ADMIN_DATABASE_URL=<local-warehouse-admin-dsn> \
+  go test ./internal/askdata/... -count=1
+go test ./... -count=1
+go vet ./...
+ENV_FILE=.env.example ./scripts/verify-database.sh
+ENV_FILE=.env.example ./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。专项覆盖四个投影各自 hash/status/缺行差异、Release READY/ACTIVE 限制、缓存命中、TTL、
+  revision/显式失效、结构化 HTTP 错误和错误上下文失败关闭；竞态检查无数据竞争。
+- 真实 PostgreSQL app-role/RLS 覆盖完整四哈希放行、管理连接制造的跨进程 GRAPH 漂移在下一次断言即时
+  拦截、主动失效和跨租户不可见；真实 Question Store 覆盖守卫调用及 mismatch ERROR 事件的持久化、
+  hash 链重放和状态不推进。未执行新迁移、外部模型、页面或正式业务数据写入。
+
+2026-08-07 `SEC-001` 验证：
+
+```sh
+go test ./internal/policy ./internal/askdata/security
+go vet ./internal/policy ./internal/askdata/security
+test "$(gofmt -l cmd internal | wc -l | tr -d ' ')" = "0"
+go test ./...
+```
+
+- 全部通过。`authorization_integration_test.go` 在配置 AskData app/admin DSN 时额外验证真实 PostgreSQL
+  tenant RLS、ACTIVE roles、domain membership、pinned release/hash 和三类 READY projection；默认全量
+  Go 门禁不依赖外部数据库，缺少 DSN 时只跳过该 integration。
+- 本任务未执行数据库迁移、Compose、外部模型或页面验证，也未读取或回显 API key。
+
+2026-08-07 `SEC-002` 验证：
+
+```sh
+go test ./internal/askdata/security ./internal/askdata/search \
+  ./internal/askdata/cognition ./internal/askdata/toolhost \
+  ./internal/askdata/orchestrator
+test "$(gofmt -l cmd internal | wc -l | tr -d ' ')" = "0"
+go test ./...
+go vet ./...
+git diff --check
+```
+
+- 安全 fixture 全部得到 BLOCK/REFUSE，工具升级、作用域切换、任意 SQL/nGQL 和预算扩张均失败关闭；
+  编排层断言被拦截调用不会进入 Tool Host。V-GO-ALL、vet 与 diff 检查全部通过。
+- 本任务未执行数据库迁移、Compose、外部模型或页面验证，也未读取或回显 API key。
+
+2026-08-07 `GRAPH-006` 验证：
+
+```sh
+go test -race ./internal/askdata/graph ./internal/askdata/toolhost \
+  ./internal/askdata/orchestrator ./internal/askdata/http -count=1
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+ASKDATA_INTEGRATION_APP_ROLE=report_app \
+  go test ./internal/askdata/graph \
+    -run TestPostgresFallbackAndCertifiedCacheAgainstRuntimeRole -count=1 -v
+go test ./...
+go vet ./...
+cd web && npm test && npm run lint && npm run build
+ENV_FILE=.env.example ./scripts/verify-database.sh
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过；前端 25 项测试通过，Vite 仅保留既有的大 chunk 提示。真实 PostgreSQL 用例覆盖图投影陈旧时
+  注册表 fallback 仍可用、认证 cache 仍失败关闭、app-role RLS、Release 外对象不泄露和 SAFE 关系裁剪。
+- Docker Web 已重建到当前工作区版本，并在已认证的 `127.0.0.1:5173/ask-data` 完成 Design QA；证据文件
+  位于 `design-qa-artifacts/graph-006-*`。未调用外部模型、未写入正式业务数据，也未回显本地凭据。
+
+2026-08-07 `SEC-004` 验证：
+
+```sh
+go test -race ./internal/policy ./internal/askdata/security \
+  ./internal/askdata/graph ./internal/askdata/search ./internal/ai -count=1
+test "$(gofmt -l cmd internal | wc -l | tr -d ' ')" = "0"
+go test ./...
+go vet ./...
+git diff --check
+```
+
+- 全部通过。安全集覆盖 64 租户并发缓存键、跨 scope/release/freshness 负例、图 cache/fallback 毒化、
+  vector error 携带毒化 hit 以及主/备用模型失败审计；竞态检查无数据竞争。
+- 本任务未执行数据库迁移、Compose、页面或真实外部模型验证，也未读取或回显 API key。
+
+2026-08-07 `SEARCH-006` 验证：
+
+```sh
+go test -race ./internal/askdata/search ./cmd/worker -count=1
+go vet ./internal/askdata/search ./cmd/worker
+ASKDATA_INTEGRATION_DATABASE_URL=<local-app-dsn> \
+ASKDATA_INTEGRATION_WORKER_DATABASE_URL=<local-worker-dsn> \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL=<local-admin-dsn> \
+  go test ./internal/askdata/search \
+    -run TestPostgresRecallAuditRecordsLabelFreeSampleAndComparesExact -count=1 -v
+go test ./...
+go vet ./...
+ENV_FILE=.env.example ./scripts/verify-database.sh
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。`000243` 在本地完成 down→up 回放；真实 PostgreSQL 用例覆盖三角色列级权限、RLS、
+  SECURITY DEFINER 样本写、app 原始向量不可读、30 条 halfvec 的 exact/ANN 对照、三种 K 聚合落库与
+  fixture 清理。专项 race 未发现数据竞争。
+- Backend 镜像已重建，Worker 强制替换后为 healthy，启动日志无错误；未调用外部 embedding/LLM，
+  未保存或输出问句原文、凭据或正式业务数据。
+
+2026-08-08 `NLU-007` 验证：
+
+```sh
+go test ./internal/askdata/understanding ./internal/askdata/binding \
+  ./internal/askdata/ir ./internal/askdata/compiler -count=1
+go test ./internal/askdata/testfixture ./internal/askdata/evaluation \
+  ./internal/askdata/toolhost ./cmd/askdata-eval -count=1
+go test ./...
+go vet ./...
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。测试覆盖模型省略领域后的 Policy Pin、foreign domain 失败关闭、单值 Policy Fact、
+  多领域 scope/错误 Graph domain 在 beam 前拒绝、IR 缺失/多值/篡改拒绝，以及 Fixture Runner/IR
+  等价比较不漏检 `domainId`。
+- 本任务未执行数据库迁移、Compose、页面或外部模型调用；先前领域澄清设计预览已按用户最新口径废弃，
+  没有作为项目资产或实现依据落地。
+
+2026-08-08 `WEB-011 + NLU-009` 验证：
+
+```sh
+go test ./internal/askdata/understanding ./internal/askdata/http -count=1
+go test ./... -count=1
+go vet ./...
+npm --prefix web test
+npm --prefix web run lint
+npm --prefix web run build
+git diff --check
+```
+
+- 全部通过；NLU 专项覆盖 15 类各 3 条、弱“列出”歧义、定义零数据查询、非法 LLM 枚举、正确拒答
+  统计、严格公开 Block 工件和原问句不落工件。前端共 32 条测试，Vite 仅保留既有大 chunk 提示。
+- 应用内浏览器在 1280×720 验证 `SCOPE_DETAIL_LIST → 申请弹窗`：按钮只在明细拒答出现，点击后切换
+  “我的申请”，原问题、来源 run、语义上下文与固定“企业经营”领域正确预填；页面 `scrollWidth` 等于
+  1280，弹窗无遮挡。此前主从工作区已完成 1120×800、720×900 和真实 API 空字段状态验收。
+- `git diff --check` 通过。全仓 gofmt-only 门禁发现并行工作区已有的
+  `internal/askdata/orchestrator/budget.go`、`runner.go` 尚未格式化；为避免覆盖非本任务修改没有代为重写，
+  本任务触及的 Go 文件均已单独 gofmt。
+
+2026-08-08 `ORCH-008` 验证：
+
+```sh
+go test ./internal/config ./internal/askdata/orchestrator -count=1
+go test ./internal/askdata/... -count=1
+ASKDATA_INTEGRATION_DATABASE_URL='postgres://report_app:...@127.0.0.1:5432/...' \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL='postgres://report_admin:...@127.0.0.1:5432/...' \
+  go test ./internal/askdata/orchestrator -run 'Test(Postgres|QuestionStateMatrix)' -count=1
+./scripts/migrate.sh
+git diff --check
+```
+
+- 全部通过。`000246` 已应用到开发库，随后在单事务中执行 down→up→rollback；新上限未使用时可逆，
+  存在 10 Tool/6 正式查询/30 秒 Run 时 down 会失败关闭。真实 Store 测试同时断言 INSERT 与后续更新的
+  `budget_consumed_json` 精确等于 LLM/Tool/正式/验证查询、step、elapsed 和 exhausted 标量。
+- 未调用外部模型、未读取或输出 API key、未改动页面，也没有写入正式业务数据。
+
+2026-08-08 `RPT-CONTRACT-001` 验证：
+
+```sh
+go test ./internal/report -count=1
+go vet ./internal/report
+go test ./... -count=1
+go vet ./...
+git diff --check
+```
+
+- 全部通过。契约测试覆盖三份示例 round-trip、Schema 闭合与核心 `$defs`、未知字段、24 层、20 页面、
+  5 MB、SQL/script/onclick 与恶意字符串、悬空组件引用，以及 page/section/block/zone/slot/component 六类
+  命名空间重复 ID。
+- 本任务没有页面改动、数据库迁移、外部服务调用或业务数据写入，也未修改并行工作区的 ORCH 文件。
+
+2026-08-08 `RPT-CONTRACT-002` 验证：
+
+```sh
+go test ./internal/report/... -count=1
+go vet ./internal/report/...
+go test ./... -count=1
+go vet ./...
+for file in api/schemas/component-manifest-v1.schema.json \
+  internal/report/template/manifests/*.json; do jq empty "$file"; done
+git diff --check
+```
+
+- 全部通过。13 个 MVP Manifest、未知 option、错误枚举/整数、维度/度量/角色越界、最小尺寸、三份报告
+  集成、注册表深拷贝、minor 新增必填项和 major 缺/有 migrator 均有自动化覆盖。
+- 本任务无页面、迁移、外部服务或业务数据写入；原本未跟踪的 Manifest Schema 已在本任务范围内补全，
+  其他并行工作区文件未改写。
+
+2026-08-08 `RPT-CONTRACT-003` 验证：
+
+```sh
+go test ./internal/report/... -count=1
+go vet ./internal/report/...
+go test ./... -count=1
+go vet ./...
+jq '.["$defs"].operation.oneOf | length' api/schemas/report-operation-v1.schema.json
+git diff --check
+```
+
+- 全部通过；Schema 分支数固定为 41。专项测试逐项覆盖 41 个 payload 的成功解析/round-trip 和错误结构，
+  以及全量 Bundle/AI/删除上限与固定错误码。
+- 本任务无页面、迁移、外部服务或业务数据写入，也未修改其他并行工作区文件。
+
+2026-08-08 `QUERY-009` 验证：
+
+```sh
+jq empty api/schemas/query-plan-bundle-v1.schema.json
+go test -race ./internal/askdata/compiler ./internal/askdata/orchestrator -count=1
+go test ./... -count=1
+go vet ./...
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。专项测试覆盖三计划全成功、单项执行失败、权限裁剪、六计划峰值并发精确为 4、以 100ms
+  领域覆盖收紧并验证硬 deadline 保留已完成计划（默认预算另固定为 30 秒）、DRAFT/临时组合拒绝、6/8 上限、Release/model 漂移、
+  Schema 上限、公开错误不泄漏与 Bundle hash 篡改；race 未发现数据竞争。
+- 未新增数据库迁移、页面或外部服务调用，未读取凭据、执行真实数仓查询或写入业务数据。B08 下一项
+  `QUERY-011` 的依赖现已全部满足。
+
+2026-08-08 `QUERY-011` 验证：
+
+```sh
+go test -race ./internal/askdata/validator ./internal/askdata/http -count=1
+go test ./... -count=1
+go vet ./...
+./scripts/ci-check.sh
+git diff --check
+```
+
+- 全部通过。专项测试逐项覆盖 P1～P6、Q1、P1+Q1、矛盾子集失败关闭、权限数量隐私、服务端 artifact
+  信任边界、PARTIAL 报告拒绝和质量告警放行；race 未发现数据竞争。
+- 无数据库迁移、页面或显著视觉状态，不触发设计稿门禁；无外部服务调用、真实报告写入或业务数据写入。
+  B08 查询编译与执行新增链已闭环。`ANS-001` 已在下一批完成，当前 P0 依赖清理链为
+  `ANS-002 → ANS-003/ORCH-007`。
+
+2026-08-08 `ANS-001`、`RPT-CONTRACT-004` 验证：
+
+```sh
+go test ./internal/askdata/shared ./internal/askdata/answer ./internal/report/insight \
+  ./internal/askdata/orchestrator -count=1
+go vet ./internal/askdata/shared ./internal/askdata/answer ./internal/report/insight \
+  ./internal/askdata/orchestrator
+go test ./... -count=1
+go vet ./...
+git diff --check
+```
+
+- 专项测试覆盖 Answer/Evidence/Insight 三份 Schema round-trip、未知字段、Unicode citation 越界/重叠、
+  rowKey 百分号编码与 group-by 顺序、两类 Evidence 来源、decimal/float 边界、Answer 六类与 Insight 九类
+  stale、Evidence hash 绑定、降级 Answer、人工编辑 Insight 和数据库追加式工件合同。
+- PostgreSQL integration 需要既有 `ASKDATA_INTEGRATION_*` 环境变量时执行；测试用真实 Answer Artifact
+  进入 ANSWER completion，Resume 后重放同一 payload，并以管理员子事务证明 UPDATE 被不可变 trigger
+  拒绝。本批次没有页面、迁移、浏览器操作、外部服务调用或业务数据写入，不触发设计确认门禁。
+
+2026-08-08 `ANS-002` 验证：
+
+```sh
+go test -race ./internal/askdata/answer ./internal/report/insight -count=1
+go vet ./internal/askdata/answer ./internal/report/insight
+go test ./... -count=1
+go vet ./...
+git diff --check
+```
+
+- 专项测试覆盖六个固定失败码各至少三条负例、中文数值与量词等价、百分比/百分点隔离、精确容差边界、
+  显式同比派生、随机 cell 组合拒绝、幻觉成员和贡献模式；race 未发现数据竞争。
+- 报告侧先验证不可变 Evidence Bundle，再与问数侧进入同一 `VerifyNarrative`；同 Evidence 幻觉数字返回
+  完全相同的结构化 `VerifyReport`。全仓 Go test 与 vet 通过；无迁移、页面或外部服务调用。
+
+2026-08-09 `ANS-003` 验证：
+
+```sh
+go test -race ./internal/askdata/answer ./internal/askdata/orchestrator ./internal/askdata/http -count=1
+go test ./... -count=1
+go vet ./...
+npm --prefix web test
+npm --prefix web run lint
+npm --prefix web run build
+git diff --check
+```
+
+- 专项覆盖首轮通过、失败后去拒绝原文重试、连续两次失败、L3 默认关闭、跨 run/release/result 证据拒绝、
+  公开投影只出已核验文字/稳定提示、SSE 事件对应、非 PARTIAL 降级加入报告与前端快照。
+- 用户确认方案 2 后完成 Product Design 实现与阻塞式 QA；1280×720 完整/聚焦对照、1120×800
+  响应式、说明折叠/展开、查看校验依据、视图切换、重新生成与浏览器控制台全部通过，
+  `design-qa.md` 最终结果为 `passed`。
+- `000247` 为 `ANSWER_VERIFYING`、`OUT_OF_SCOPE` 和审计约束的迁移来源；本任务不调用外部模型，不读取或
+  输出 API key，不写入正式业务数据。
+
+2026-08-09 `ORCH-007` 验证：
+
+```sh
+go test -race ./internal/askdata/orchestrator ./internal/askdata/http ./internal/askdata/answer -count=1
+go test ./... -count=1
+go vet ./...
+git diff --check
+```
+
+- 六类验收覆盖一次通过、失败后结构化重生成通过、连续失败清空未核验叙述、非法
+  `EXECUTING → ANSWERED`、LLM/step 预算耗尽直接降级，以及 SSE 失败序列与断线游标恢复。
+- 无新增迁移、页面或显著视觉状态，不触发设计确认门禁；不调用外部模型、不读取凭据、不写入业务数据。
+
+2026-08-09 `ORCH-009` 验证：
+
+```sh
+go test -race ./internal/platform/idempotency ./internal/askdata/http \
+  ./internal/datarequest ./internal/report/http -count=1
+go test ./... -count=1
+go vet ./...
+git diff --check
+# 000248 down → up + RLS/lifecycle assertions in one ROLLBACK transaction
+```
+
+- 覆盖缺键、规范等价重放、异 body 冲突、真实并发 IN_FLIGHT、24 小时过期、跨 tenant/actor、5xx 释放、
+  data-request 生产接线和 Report wrapper；业务 mock 在重放/并发场景只执行一次。
+- PostgreSQL 回滚事务覆盖 app actor RLS、COMPLETED 24 小时保留、到期删除、response hash 篡改拒绝与
+  owner replay；`000248` down/up 对称。无页面或显著视觉状态，不触发设计确认门禁。
+
+2026-08-09 `RPT-DB-001` 验证：
+
+```sh
+go test ./internal/report/store -count=1
+go vet ./internal/report/store
+# 一次性临时库：000251 → 000234 down，000234 → 000238 up
+# 使用真实 report_app 运行并发/RLS/不可变/近 5 MiB integration，随后删除临时库
+git diff --check
+```
+
+- 并发相同 expected revision 恰好一个成功、一个 `ErrRevisionConflict`；修订号连续且 base revision 正确。
+- owner、VIEW-only、跨 tenant 三类身份路径通过；version/revision UPDATE/DELETE 均返回 SQLSTATE 55000。
+- 5,141,122 字节 canonical 定义写入/读回 hash 一致；测试同时捕获并修复 JSONB 文本重排问题。
+- 无页面或显著视觉状态，不触发设计确认门禁；临时数据库已自动删除，未写入共享业务数据。
+
+2026-08-09 `RPT-DB-002` 验证：
+
+```sh
+go test -race ./internal/report/template ./internal/report/store -count=1
+go test ./... -count=1
+go vet ./...
+sh -n scripts/migrate.sh scripts/verify-database.sh
+git diff --check
+# 临时库 A：回滚后重放新版 000234/000235/000236，真实 report_app integration
+# 临时库 B：克隆已部署的 13 个旧 placeholder，应用 000256 后运行同一 integration
+```
+
+- 四类子模板与报告组合按版本 ID 解析正确，五份 canonical JSON/hash 一致；跨 tenant 不可见。
+- 13 个完整 embedded manifest 全部可解码、hash 正确且二次 seed 幂等；旧库 placeholder 前向升级通过。
+- `ACTIVE → DEPRECATED → RETAINED` 合法，逆向/跳级、非法 SemVer 与引用中版本删除均由数据库拒绝。
+- 迁移链测试同时修复 `000253.down` 先删函数后删依赖触发器的回滚顺序；两个临时库均已删除。
+- 无页面或显著视觉状态，不触发设计确认门禁；未写入共享业务数据。
+
+2026-08-10 `RPT-DB-003` 验证：
+
+```sh
+go test -race ./internal/report/compiler ./internal/report \
+  ./internal/report/store ./cmd/report-admin -count=1
+REPORT_FRESH_MIGRATION_ADMIN_DATABASE_URL='postgres://<admin>/postgres' \
+REPORT_FRESH_MIGRATION_APP_DATABASE_URL='postgres://<app>/postgres' \
+  go test ./internal/report/store \
+  -run TestFreshReportMigrationsAndStoreLifecycle -count=1 -v
+./scripts/migrate.sh
+./scripts/verify-database.sh
+go test ./... -count=1
+go vet ./...
+sh -n scripts/migrate.sh scripts/verify-database.sh
+git diff --check
+```
+
+- nonce 数据库从空库依序应用全部 up migration，再以真实 `report_app` 执行完整 Store 生命周期；owner、
+  VIEW-only、跨 tenant、同事务回滚、近 5 MiB version、四表精确索引、缺失版本索引回填与 SQLSTATE
+  55000 均通过，临时库在退出路径强制删除。
+- 属性测试随机生成 200 组 Report Definition，验证组件全覆盖且只落位一次、依赖去重、全部声明
+  DatasetVersion 与 Semantic IR 版本依赖、稳定排序；重建结果与增量维护逐行一致。
+- 全库 V-DB 在收敛过程中同时发现并修复三类已部署链问题：5 条 AskData 外键缺 tenant 坐标
+  （`000262`）、`000249` 重建搜索触发器时丢失 SECURITY DEFINER/search_path（`000263`），以及早期
+  `000256` 仍保留平台组件 `FOR ALL` 可写策略（`000264`）。本地幂等过期索引的非仓库 schema 漂移也
+  已恢复为 `000248` 定义的无条件 `(expires_at,id)` 索引。
+- 无页面或显著视觉状态，不触发设计确认门禁；未调用外部模型，测试夹具业务数据均在回滚事务或临时库。
+
+2026-08-10 `RPT-DB-004` 验证：
+
+```sh
+go test -race ./internal/report/reportai ./internal/report/insight ./internal/report/store -count=1
+ASKDATA_INTEGRATION_DATABASE_URL='postgres://report_app:...@127.0.0.1:5432/...' \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL='postgres://report_admin:...@127.0.0.1:5432/...' \
+  go test -race ./internal/report/reportai \
+  -run TestPostgresReportAIAuditInsightAppendOnlyAndRLS -count=1 -v
+./scripts/verify-database.sh
+go test ./... -count=1
+go vet ./...
+sh -n scripts/migrate.sh scripts/verify-database.sh
+git diff --check
+```
+
+- 四类 AI run、有效/拒绝操作、拒绝码、摘要字段白名单、终态单向不可变均通过真实 PostgreSQL 验证。
+- Evidence UPDATE 与 Insight DELETE 被 SQLSTATE 55000 拒绝；两次生成和一次人工编辑得到一条 CURRENT、
+  两条 STALE，且稳定 artifact ID、版本行 UUID、编辑人和时间均符合合同。
+- owner、VIEW-only、跨 tenant/actor 的可见与写入边界通过；`000265` down/up 在同一事务演练后回滚，
+  从空库全迁移和 V-DB 同步通过。无页面或显著视觉状态，不触发设计确认门禁。
+
+2026-08-10 `RPT-DB-005` 验证：
+
+```sh
+go test -race ./internal/report/sharing ./internal/report/http ./cmd/worker -count=1
+ASKDATA_INTEGRATION_DATABASE_URL='postgres://report_app:...@127.0.0.1:5432/...' \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL='postgres://report_admin:...@127.0.0.1:5432/...' \
+ASKDATA_INTEGRATION_WORKER_DATABASE_URL='postgres://report_worker:...@127.0.0.1:5432/...' \
+  go test -race ./internal/report/sharing \
+  -run TestPostgresShareAuthorizationExpiryRevocationAndRLS -count=1 -v
+REPORT_FRESH_MIGRATION_ADMIN_DATABASE_URL='postgres://report_admin:...@127.0.0.1:5432/postgres' \
+REPORT_FRESH_MIGRATION_APP_DATABASE_URL='postgres://report_app:...@127.0.0.1:5432/postgres' \
+  go test ./internal/report/store -run TestFreshReportMigrationsAndStoreLifecycle -count=1 -v
+./scripts/verify-database.sh
+go test ./... -count=1
+go vet ./...
+sh -n scripts/migrate.sh scripts/verify-database.sh
+git diff --check
+```
+
+- INTERNAL_USER/INTERNAL_GROUP、无权限令牌不提权、跨 tenant、固定/当前版本读取和访问计数通过。
+- Worker 尚未运行时的实时过期、worker role 的有界过期标记、撤销立即拒绝和缓存失效合同通过；原 token
+  只返回一次且响应不泄露 hash。
+- 180 天上限、无效 principal、分享身份字段不可变与 trigger 权限边界分别返回预期 SQLSTATE；266～268
+  down/up 在同一事务演练后回滚，空库全迁移、全仓测试、V-DB 通过。无页面或显著视觉状态。
+
+2026-08-10 `RPT-001` 验证：
+
+```sh
+go test ./internal/report ./internal/report/compiler ./internal/report/compiler/migrate \
+  ./internal/report/template ./internal/report/store -count=1
+go test -race ./internal/report ./internal/report/compiler ./internal/report/compiler/migrate \
+  ./internal/report/template ./internal/report/store -count=1
+go test ./internal/report/compiler -run '^$' \
+  -bench '^BenchmarkNormalizeNearFiveMegabytes$' -benchtime=5x -count=1
+go test ./... -count=1
+go vet ./...
+sh -n scripts/migrate.sh scripts/verify-database.sh
+git diff --check
+```
+
+- 幂等、语义顺序/nil 等价、值变化改 hash、步骤 6～10 分阶段短路并阶段内累积、XSS 清洗、V1 minor 与
+  显式 V1→V2 迁移器均通过；调用方定义未被修改，规范对象键为字典序。
+- 近 5 MB 基准 5 次平均 `51,572,033 ns/op`（约 51.6 ms，87.26 MB/s），显著低于 500 ms 门槛。
+- 专项 race、全仓测试/vet、脚本语法和差异检查全部通过。无页面或显著视觉状态，不触发设计确认门禁。
+
+2026-08-10 `RPT-002` 验证：
+
+```sh
+go test -race ./internal/report/operation ./internal/report/store ./internal/report/http -count=1
+ASKDATA_INTEGRATION_DATABASE_URL='postgres://report_app:...@127.0.0.1:5432/...' \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL='postgres://report_admin:...@127.0.0.1:5432/...' \
+  go test -race ./internal/report/store \
+  -run 'TestPostgresStoreOperationUndoRedoAndAIGuards|TestPostgresStoreReportLifecycleConcurrencyImmutabilityAndRLS' \
+  -count=1 -v
+REPORT_FRESH_MIGRATION_ADMIN_DATABASE_URL='postgres://report_admin:...@127.0.0.1:5432/postgres' \
+REPORT_FRESH_MIGRATION_APP_DATABASE_URL='postgres://report_app:...@127.0.0.1:5432/postgres' \
+  go test ./internal/report/store -run TestFreshReportMigrationsAndStoreLifecycle -count=1 -v
+go test ./... -count=1
+go vet ./...
+./scripts/verify-database.sh
+sh -n scripts/migrate.sh scripts/verify-database.sh
+git diff --check
+```
+
+- 41 类操作、逐类逆操作、120 步随机全撤销、失败 index/原子性、模板/主题 snapshot、slot merge/split 和
+  多级 Undo/Redo 通过；HTTP 409/ApplyError 结构化细节通过。
+- 真实库确认对象 EDIT 与 AI 独立能力同时生效，拒绝/越 scope 不增 revision；连续撤销/重做、主对象设置
+  同步、模板恢复、并发一成功一冲突、RLS 与不可变链通过。`000269` down/up 事务回放和空库全迁移通过。
+- 全仓 test/vet、V-DB、脚本语法和差异检查全部通过。无页面或显著视觉状态，不触发设计确认门禁。
+
+2026-08-10 `RPT-003` 验证：
+
+```sh
+go test ./...
+go vet ./...
+npm --prefix web test
+npm --prefix web run build
+npm --prefix web run lint
+./scripts/verify-database.sh
+git diff --check
+```
+
+- 全仓 Go test/vet、39 条 Web 测试、TypeScript 编译、Vite build、ESLint、V-DB 和差异检查全部通过；
+  Vite 仅保留既有的大 chunk 提示。
+- 布局专项覆盖随机暴力对照和 300 分块时限、逻辑/像素坐标、紧凑策略、四高度、空区模板优先级、
+  四项 merge 拒绝、派生 provenance、严格 Split、移动端四模式/抽屉/Manifest 策略与 Go/TS 共享夹具。
+- 本任务只提供布局编译器和前端实时预览纯函数，没有新增页面或显著视觉状态，不触发设计确认门禁。
+
+2026-08-10 `RPT-007` 验证：
+
+```sh
+go test ./internal/report/runtime ./internal/report/publication -count=1
+go test ./...
+go vet ./...
+./scripts/verify-database.sh
+git diff --check
+```
+
+- 六类稳定绑定拒绝、RETAINED 历史重编译、固定语义身份、逻辑 Dataset 请求、无 SQL、hash 去重、策略
+  隔离、查看者权限重应用、并发/超时/行数上限与发布依赖单位检查全部通过。
+- 全仓 Go test/vet 和 V-DB 通过；无页面或显著视觉状态，不触发设计确认门禁。
+
+2026-08-10 `RPT-004` 验证：
+
+```sh
+go test ./internal/report/... -count=1
+ASKDATA_INTEGRATION_DATABASE_URL='postgres://report_app:...@127.0.0.1:5432/...' \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL='postgres://report_admin:...@127.0.0.1:5432/...' \
+  go test ./internal/report/store \
+  -run TestPostgresStoreReportLifecycleConcurrencyImmutabilityAndRLS -count=1 -v
+go test ./...
+go vet ./...
+./scripts/migrate.sh
+./scripts/verify-database.sh
+git diff --check
+```
+
+- 发布专项、真实 PostgreSQL 历史修订/不可变版本/Release 引用保留、全仓 test/vet、幂等迁移、V-DB 与
+  差异检查全部通过。迁移记录与权限发生的本地漂移已由 `migrate.sh` 重新同步，复跑 V-DB 通过。
+- `000271_data_request_governance` 已先占用，RPT-004 使用无冲突的
+  `000272_report_publication_version_pins`；本地已真实应用，未回写或泄漏 `.env` 凭据。
+- 本任务没有页面或显著视觉状态，不触发设计确认门禁；下一项为同样无页面的 `RPT-005`。
+
+2026-08-10 `RPT-005` 验证：
+
+```sh
+go test ./internal/report/publication ./internal/report/http ./internal/report/store -count=1
+ASKDATA_INTEGRATION_DATABASE_URL='postgres://report_app:...@127.0.0.1:5432/...' \
+ASKDATA_INTEGRATION_ADMIN_DATABASE_URL='postgres://report_admin:...@127.0.0.1:5432/...' \
+  go test ./internal/report/store \
+  -run TestPostgresStoreReportLifecycleConcurrencyImmutabilityAndRLS -count=1 -v
+perl -e '...down + up in one transaction...' \
+  migrations/000273_report_rollback_integrity.down.sql \
+  migrations/000273_report_rollback_integrity.up.sql | psql ...
+go test ./... -count=1
+go vet ./...
+./scripts/verify-database.sh
+git diff --check
+```
+
+- 正常/幂等回滚、原因/权限/目标拒绝、依赖失败 issues、连续回滚、HTTP 失败清单、真实数据库 pointer/
+  immutable lineage/伪造 definition/外键均通过；`000273` down→up→rollback 事务回放通过。
+- 本任务没有页面或显著视觉状态。下一项 `RPT-006` 包含八种组件状态、错误边界和懒加载的真实运行时
+  视觉，必须先提交设计页面并由用户确认，再落地 Go/React 实现。
+
+### 2.103 报告资产治理产品缺口补全（已确认并落地核心链路）
+
+- 用户在 `RPT-006` 运行时设计评审中指出：原范围直接进入“看报告”，缺少“现在已经做了哪些报告”以及
+  权限、修改、发布、下架等资产管理入口。该反馈已确认为真实产品缺口，不并入运行时内部勉强解决。
+- 产品基线新增“报告资产中心与生命周期”，技术基线新增 §5.35；TODO 新增 `RPT-013` 后端资产治理和
+  `WEB-RPT-007` 报告资产中心。`RPT-013` 已完成，B11 当前剩余 18 项。
+- 生命周期固定推导为 `DRAFT_ONLY/PUBLISHED/CHANGED/OFFLINE`。下架是保留草稿、修订、不可变版本和
+  当前版本指针的软下架，但普通 runtime、指定版本 URL 和分享都必须返回 `REPORT_OFFLINE`；上架前重新
+  校验固定制品和依赖。权限仍与领域、数据集、行列级策略取交集，不能放大数据可见范围。
+- 用户已明确确认方案 2“视觉资产库 + 轻量治理检查器”作为报告默认入口，并再次澄清：点击方案 2 的
+  “新建报告”必须进入其提供的完整报告页面，而不是另起空白表单。实现固定为：
+  `GET /reports?snapshot=assets` → 点击“新建报告” → `/reports/new?snapshot=runtime-draft`；目标页显示
+  `待发布/r1/保存草稿/发布报告`，不伪造已发布版本。
+
+### 2.104 `RPT-013` 与报告双页面实现验证
+
+- 后端新增 `internal/report/asset/*`、`000275_report_asset_governance` 和报告 HTTP 路由：固定当前领域的
+  资产列表、scope/生命周期/Owner/类型/搜索/游标、服务端 `allowedActions`，用户/角色六动作权限，统一
+  资产事件时间线，以及带原因的 archive/restore。恢复已发布报告前重新校验对象制品 hash、规范 JSON、
+  固定组件版本和数据依赖；恢复从未发布报告回到 `DRAFT_ONLY`。
+- `PostgresStore.GetVersion` 统一在读取当前版或指定版前检查主对象状态；分享服务同样复用该入口，因此
+  下架报告稳定返回 `REPORT_OFFLINE`，不能经版本 URL 或分享绕过。archive/restore、grant/revoke 已纳入
+  actor-scoped 共享幂等中间件。
+- 前端新增 `ReportAssetsPage`、`ReportRuntimePage`、真实 ECharts 预览与八态组件。资产列表接服务端筛选
+  和游标，权限面板即时授权/撤销，生命周期面板展示事件；下架/上架原因必填，上架明确展示制品/组件/
+  依赖重校验。运行时具有 Block + Component 双层错误边界，`NO_PERMISSION` 不泄露绑定标题。
+- 视觉证据：`design-qa-artifacts/report-assets-final-live.png`、`report-runtime-final-viewport.png`、两张
+  `*-comparison-final.png` 和 1120×800 响应式截图；`design-qa.md` 已记录 `final result: passed`。
+- 验证：Web lint、41 条测试、production build；全仓 Go test/vet；空库全迁移；真实 PostgreSQL
+  授权/越权、shared 列表、并发下架、offline runtime、恢复、撤销与时间线；迁移本地应用及 V-DB 均通过。
+- 边界：`RPT-013` 已完成。`RPT-006` 的不可变加载/计划/执行器与视觉已实现，但生产页面尚未把批量查询
+  结果绑定到全部组件；`WEB-RPT-007` 仍缺 Owner/类型/更新时间前端筛选、发布恢复中专态、版本差异和
+  后续设计器/发布页面，因此两项保持未完成，避免把确认稿 fixture 当作生产结果。
+
 ## 4. 工作区注意事项
 
 - 用户在本次实施前已有多项 `docs/*` 删除状态；这些文件未被恢复或修改。
@@ -1842,12 +4221,32 @@ git diff --check
   `可信智能问数与智能报表一体化平台_*.md` 为产品与技术基线，其第五部分与前四部分冲突时以第五部分为准。
 - TODO 已按功能区划分为 B01～B13 个板块（见 TODO §0）。领任务时先确认所属板块，再确认 Wave 与 Batch；
   不要把新任务放到任何板块之外。
-- 新增迁移编号 `000225`～`000241` 已在 TODO §22.1 预留到具体任务，新 Schema 已在 §22.2 预留，不得重复占用。
+- 新增迁移编号中 `000225` 已由 `TIME-001` 使用并完成，`000229` 已由 `RETAIN-001` 使用并完成，
+  `000230` 已由 `SNAP-001` 使用并完成，`000242` 已由 `IMPORT-005` 使用并完成，`000243` 已由
+  `SEARCH-006` 使用并完成，`000244` 已由 `NLU-008` 使用并完成，`000245` 已由 `DR-001` 用于事件
+  单调序号修复，`000246` 已由 `ORCH-008` 用于全状态预算消费快照，`000247` 已由 `ANS-003` 用于
+  `ANSWER_VERIFYING` 状态与审计约束，`000248` 已由 `ORCH-009` 用于共享幂等重放与清理；`000234` 已由
+  `RPT-DB-001` 用于 Report V2 核心存储，`000235` 已由 `RPT-DB-002` 使用模板表，`000236` 已由
+  `RPT-DB-003` 使用组件/依赖索引与引用保护，`000237` 已由 `RPT-DB-004` 使用 AI 运行/操作/证据/结论表，
+  `000238` 已由 `RPT-DB-005` 使用无匿名分享记录；`000256` 为已应用旧 000235 的 hydration/SemVer 前向
+  修复，`000261` 为早期索引表补齐对象级 RLS 与 tenant-aware 引用保护，`000262`～`000264` 分别修复
+  历史跨租户外键、搜索触发器安全属性回退和旧平台组件可写策略，`000265` 为 AI 运行/操作生命周期、
+  摘要白名单和触发器权限的前向修复，`000266/000268` 为分享生命周期/RLS/过期 Worker 与安全触发器，
+  `000267` 修复早期 report version trigger 错绑，`000269` 为 RPT-002 登记独立 REPORT_AI_EDIT 能力，
+  `000271` 已由 DR-002/003 使用数据申请治理，`000272` 已由 RPT-004 使用固定依赖与 Report Version
+  Release 引用保留，`000273` 已由 RPT-005 使用回滚目标自外键与原因完整性；`000274` 已由配额运行时
+  占用，`000275` 已由 `RPT-013` 实现报告资产事件、上下架完整性和列表索引，并已在本地开发库应用及通过 V-DB。
+  `000259/000260` 已存在于工作区并由后续报告任务接续，但不得据此
+  把后续分享或导出任务标为完成；其余预留迁移继续按
+  TODO §22.1 分配到具体任务，新 Schema 仍按 §22.2 分配，不得重复占用。
 - 报表板块（B11）新建独立 Report V2 bounded context：不修改历史迁移，不假定旧报告表仍存在，
   不恢复 `000195` 删除的旧运行时。
 - 不要恢复历史 `platform.semantic_*` 运行时；新控制面使用 `askdata` schema。
-- `WEB-001` 的方案 3 已取得用户确认并完成。后续新增页面、流程或显著视觉状态仍须先出设计稿
-  并取得用户确认；`WEB-002` 的 `ORCH-005` 依赖已满足，纯 API Client/类型接线不触发页面门禁。
+- `WEB-001` 方案 3、`WEB-003` 方案 1、`WEB-004` 方案 1、`WEB-005` 方案 1、`WEB-006` 方案 3、
+  `TIME-003` 方案 2、`GRAPH-006` 方案 1、`NLU-008` 方案 1、`WEB-011` 方案 3、`ANS-003` 方案 2 与
+  报告资产中心方案 2/用户提供的报告工作台均已取得确认。后续新增页面、流程或显著视觉状态仍须先出
+  设计稿并取得用户确认；下一项
+  `WEB-007` 的 `REG-006` 依赖已解除，当前仍受 `REL-005` 阻塞；依赖满足后仍须先出语义管理与发布页面设计稿。
   `WEB-010`～`013` 与全部 `WEB-RPT-*` 均需先过设计稿门禁。
 - 本地开发验证使用 `.env.example`；不要把用户给出的 API key 补写到 `.env.example`。
 - 当前机器存在 Git 忽略的 `.env` 以供运行；交接、日志和提交时不得回显其内容。
@@ -1865,56 +4264,90 @@ git diff --check
   显式开启；画像扫描另使用 `ASKDATA_INTEGRATION_WAREHOUSE_DATABASE_URL` 和
   `ASKDATA_INTEGRATION_WAREHOUSE_ADMIN_DATABASE_URL`，默认单元测试会跳过外部数据库。
 
-## 5. 下一步
+## 5. 历史下一步快照（仅供追溯）
+
+> 本节记录当时尚未实现的依赖关系，已被文首“2026-08-10 后端收敛交接”覆盖；不得再据此恢复已经
+> 完成的阻塞或删除现有发布门禁。
 
 ### 5.1 立即可执行（不依赖人工业务输入）
 
-1. `ORCH-006` Conversation 与运行保留策略；`ORCH-005` 已完成。原问句必须按明确策略选择
-   加密短期保留或仅 hash，运行工件 TTL/删除不能破坏不可变统计，会话继承必须继续固定 tenant/actor/
-   release。该任务是后端策略与配置，不涉及新增页面。
-2. `WEB-002` 的依赖已满足，可按 ORCH-005 已冻结合同接真实 API Client/SSE；纯 client/types/hooks 接线
-   不触发页面门禁，但若扩展页面流程或显著视觉状态仍须先提交设计稿确认。
-3. **Batch 7 口径闭环**可与上述并行启动：`TIME-001` → `TIME-002` → `TIME-003` → `TIME-004`，
-   以及 `ADD-001` → `ADD-003`。这两条链路是 95% 正确率的最大单点风险，且不依赖真实业务数据即可
-   完成合同、编译器与校验器（业务取值由 `HUMAN-007`/`HUMAN-008` 后续填入）。
-4. **Batch 8 资产建设产能**：`IMPORT-001` → `IMPORT-002` → `IMPORT-003` → `IMPORT-004`。
-   没有批量导入，一个业务域 20～50 指标 + 20～40 维度 + 数千成员的建设周期无法满足 4～8 周目标，
-   该能力属于 Wave 1 必需项，**不可后置**。
-5. **Batch 10 报表合同层**：`RPT-CONTRACT-001`～`004` 可立即冻结。报表板块在原计划中完全缺失，
-   合同不冻结就开始前端会导致编辑器、AI 与运行时结构分裂。
+1. `WEB-006`、`REG-006` 已完成。按 B10 顺序的下一项是 `WEB-007` 语义管理与发布页面，但其剩余依赖
+   `REL-005` 尚未完成；`REL-005` 又被 `EVAL-005`、`REL-004`、`DB-008` 阻塞，当前停止在真实依赖卡点，
+   不得提前出设计或编码。解除依赖后，仍须先提交页面设计稿
+   并取得用户确认，再实现指标/维度/成员策略/术语/关系/release/投影/评测审查与显式激活确认。
+2. `EVAL-003` 已完成；下一项 `EVAL-004` 依赖未提供的 `HUMAN-001～004` 和可用 DWS/ADS，当前不能
+   进入真实端到端评测。`QUERY-007`～`011` 已完成 TopN/Other、关系 fanout 安全矩阵、认证 Bundle
+   独立编译/校验/四并发/PARTIAL 聚合、权限隔离结果缓存、P1～P6/Q1 统一 outcome 和报告导出门禁，
+   B08 新增链已闭环。`ANS-001/002/003` 已完成 Answer Artifact、共享叙述事实校验器与两次失败降级，
+   `ORCH-007` 已完成预算内重生成与 SSE 可恢复闭环，`ORCH-009` 已完成跨问数/取数申请/报告共享幂等
+   边界；`ANS-004` 仍由未完成的 `OBS-001` 阻塞。发布链的 `REL-001` 仍受需要人工黄金集的
+   `SEARCH-005` 阻塞。
+3. **Batch 7 口径闭环**的时间链 `TIME-001`～`004`、前置 `SNAP-001`、可加性三关 `ADD-001`、编译规则
+   `ADD-003` 与统一结果合同 `ADD-004` 已完成。真实问数/报告页面视觉状态仍归属 `WEB-009`，届时必须先
+   提交设计稿并取得用户确认。`ADD-002` 为独立
+   P1 建议补录能力，包含指标中心批量确认视觉状态，实施其页面部分前同样必须先过设计稿门禁。
+4. **Batch 8 资产建设产能**：`IMPORT-001`～`005`、`TERM-001/002` 与 `KPI-001` 已完成，12 类资产已具备模板、四层校验、
+   权威 DRAFT 提交、整批认证、选择性撤回、当前/Release 对称导出，以及版本化业务词、冲突裁决、
+   `REGEX_SAFE`、PENDING 候选隔离、Release 固定的确定性词典匹配与人工认证 KPI 默认答案组合。Batch 8
+   主链已闭环；B05 的 `RETAIN-001` Release 引用计数、RETAINED 保留态、历史重放和可重建投影清理也已
+   完成，`PROJ-002` 四投影哈希一致性运行门禁也已闭环，`GRAPH-006` 图不可用六行降级矩阵、熔断、
+   观测、Evidence/SSE 与用户确认的证据视觉状态也已完成；`SEARCH-006` 的 label-free 查询样本、
+   ANN/Exact `recall@10/20/30`、小集合 exact 路由与模型/维度门禁也已完成；`NLU-007` 已按用户确认的
+   “登录后进入问数前选定领域”口径完成 Policy Pin、Binding 单域门禁和 IR/编译/评测全链固定；`NLU-008`
+   已完成会话 Release Pin、显式漂移确认、澄清预算冻结/恢复、超时 Worker 与用户确认的方案 1 可见状态。
+   `DR-001 → WEB-011 → NLU-009` 已按既定顺序闭环：主动/拒答申请共用同一入口，领域固定，预填无结果
+   行，15 类范围白名单和正确拒答统计已完成。B07 当前无遗留；后续叙述层仍归属 `ANS-*`。
+5. **Batch 10 报表合同与核心存储**：`RPT-CONTRACT-001`～`004`、`RPT-DB-001`～`005`、`RPT-001`～`005`、`RPT-007` 与 `RPT-013` 已完成，Answer
+   citations、Evidence cellRefs、`IsStale`、报告主对象、草稿乐观锁、不可变修订/版本、对象权限 RLS、
+   四类模板组合、13 个组件 manifest、组件/依赖索引、同事务维护、不可变版本索引与管理重建已闭环。
+   四类 AI 运行、脱敏摘要、操作拒绝审计、Evidence 不可变、Insight 追加版本与人工编辑留痕，以及
+   无匿名分享、令牌只定位不授权、实时/后台双重过期和撤销均已闭环；DSL 12 步规范化、分阶段校验、
+   富文本清洗、字典序 JSON、稳定 hash、41 类原子 Operation、差异冲突、多级 Undo/Redo、24 列桌面网格、
+   区域高度、slot merge/split、独立移动布局、双绑定校验、按查看者策略隔离的查询编排，以及固定 14 步
+   发布、不可变对象制品、跨存储故障恢复、语义 Release 引用保留、重新发布式回滚，以及报告清单/
+   权限/统一时间线/软下架和恢复校验后端闭环。用户已确认“报告资产中心方案 2 → 待发布报告工作台”，
+   两页核心链路已落地；下一步继续收敛 `RPT-006` 的真实查询结果绑定，并在已确认资产中心内补齐
+   `WEB-RPT-007` 剩余筛选/恢复中/版本入口，涉及新的设计器或发布页面时仍须按各自页面门禁确认。
 
 ### 5.2 治理边界（已确认，不得改动）
 
-6. `DB-004` 以 READY/投影基础完成，ACTIVE 原子切换归属 `REL-005`；`REG-006` 只负责 DRAFT 管理 API，
+5. `DB-004` 以 READY/投影基础完成，ACTIVE 原子切换归属 `REL-005`；`REG-006` 只负责 DRAFT 管理 API，
    发布生命周期 endpoint 分属 `REL-001`～`REL-005`；Wave 5 未完成的配置任务已改号为 `OPS-005`。
    不要恢复旧边界或重复编号。
-7. `askdata.activate_release` 必须继续不存在，直到 `DB-007` 评测门禁、`DB-008` 双人审批和
+6. `askdata.activate_release` 必须继续不存在，直到 `DB-007` 评测门禁、`DB-008` 双人审批和
    `REL-005` 同时完成；Projector/Resolver 的完成不构成放宽激活门禁的理由。
-8. 产品决策 D01～D04 已确认并写入设计文档：未结束周期默认 `MTD`；报表资产认证**单人审批**
+7. 产品决策 D01～D04 已确认并写入设计文档：未结束周期默认 `MTD`；报表资产认证**单人审批**
    （语义 Release 激活仍为双人审批，两者不得混同）；报告分享**不允许匿名**；明细取数申请入口
    **在本平台内**。相关任务为 `TIME-001`、`FUSE-002`、`RPT-DB-005`、`DR-001`。
 
 ### 5.3 人工输入阻塞
 
-9. `REG-005` 仍需要 `HUMAN-001`～`HUMAN-003`；`SEARCH-005` 仍需要 `HUMAN-002`～`HUMAN-004`，
+8. `REG-005` 仍需要 `HUMAN-001`～`HUMAN-003`；`SEARCH-005` 仍需要 `HUMAN-002`～`HUMAN-004`，
    当前不能生成正式认证资产或宣称 Recall@K / 95% 准确率。
-10. 新增人工门禁 `HUMAN-007`～`HUMAN-013`（业务日历与时间策略、指标可加性、报告模板与叙述规范、
+9. 新增人工门禁 `HUMAN-007`～`HUMAN-013`（业务日历与时间策略、指标可加性、报告模板与叙述规范、
     报表资产认证责任人、明细取数审批链、配额与成本策略、容量与压测目标）。未提供前，Codex 可以
     建设合同、校验器、导入工具和测试夹具，**但不得编造业务答案**。
 
 ### 5.4 排期风险提示
 
-11. B11 报表板块共 32 项任务且全部待建，是当前最大的未开工面；其中 6 项前端任务需逐个通过设计稿
+10. B11 报表板块 34 项中 `RPT-CONTRACT-001`～`004`、`RPT-DB-001`～`005`、`RPT-001`～`005`、`RPT-007` 与 `RPT-013` 已完成，仍有 18 项，是当前最大的建设面；其中 7 项前端任务需逐个通过设计稿
     门禁，排期时必须为设计评审预留时间，不能按纯编码估算。
-12. `EVAL-011` 密封集分片轮换必须在首次运行密封集**之前**完成。一旦按旧方式反复使用整套密封集，
+11. `EVAL-011` 密封集分片轮换必须在首次运行密封集**之前**完成。一旦按旧方式反复使用整套密封集，
     密封性即不可恢复，95% 论证将失效。
 
 ## 6. 接手验证命令
 
 ```sh
 git status --short
-go test ./internal/askdata/...
+go test ./... -count=1
+go test -race ./internal/askdata/... ./internal/report/... ./internal/datarequest/... -count=1
+go vet ./...
 ./scripts/check-compose.sh
+./scripts/migrate.sh
+./scripts/verify-database.sh
+git diff --check
+
+# 以下为有对应外部环境时执行的专项验证。
 ./scripts/verify-nebula-compose.sh
 ./scripts/verify-nebula-poc.sh
 ./scripts/dev-services.sh status
@@ -1924,8 +4357,6 @@ ASKDATA_INTEGRATION_WORKER_DATABASE_URL='postgres://report_worker:...@127.0.0.1:
   go test ./internal/askdata/... -count=1
 ENV_FILE=.env.example ./scripts/verify-database.sh
 ENV_FILE=.env.example ./scripts/verify-warehouse.sh
-go test ./...
-go vet ./...
 ./scripts/ci-check.sh
 npm --prefix web run lint
 npm --prefix web run build

@@ -1,0 +1,293 @@
+{
+  "schemaVersion": "1.0",
+  "metadata": {
+    "id": "report_monthly_operations",
+    "code": "monthly_operations",
+    "name": "月度经营分析报告",
+    "description": "包含总览、区域分析和显式联动的多页报告示例",
+    "reportType": "REPORT",
+    "locale": "zh-CN"
+  },
+  "templateRef": {
+    "reportTemplateId": "tpl_monthly_operations",
+    "reportTemplateVersion": "1.3.0",
+    "structureTemplateVersion": "1.2.0",
+    "layoutTemplateVersion": "1.1.0",
+    "narrativeTemplateVersion": "1.0.2"
+  },
+  "themeRef": {
+    "themeId": "theme_corporate_light",
+    "version": "2.0.0"
+  },
+  "canvas": {
+    "desktop": {
+      "designWidth": 1920,
+      "columns": 24,
+      "baseCellWidth": 80,
+      "baseRowHeight": 54,
+      "gapX": 12,
+      "gapY": 12,
+      "paddingX": 24,
+      "paddingY": 24
+    },
+    "mobile": {
+      "columns": 1,
+      "gapY": 12,
+      "paddingX": 12,
+      "paddingY": 12
+    }
+  },
+  "dataContexts": [
+    {
+      "id": "operations_context",
+      "datasetId": "dataset_operations",
+      "datasetVersionId": "dataset_operations_v8",
+      "alias": "经营分析数据",
+      "defaultParameters": [
+        { "name": "currency", "type": "STRING", "stringValue": "CNY" },
+        { "name": "includeForecast", "type": "BOOLEAN", "booleanValue": false }
+      ],
+      "queryPolicy": {
+        "timeoutMs": 8000,
+        "maxRows": 5000,
+        "cacheTtlSeconds": 600
+      }
+    }
+  ],
+  "globalFilters": [
+    {
+      "id": "filter_month",
+      "type": "DATE_RANGE",
+      "fieldRef": { "dataContextId": "operations_context", "field": "order_date" },
+      "scope": { "type": "REPORT", "targetIds": [] },
+      "defaultValue": { "mode": "RELATIVE", "unit": "MONTH", "offset": 0 }
+    }
+  ],
+  "pages": [
+    {
+      "id": "page_executive",
+      "name": "管理层总览",
+      "order": 1,
+      "sections": [
+        {
+          "id": "section_executive_summary",
+          "name": "核心摘要",
+          "order": 1,
+          "blocks": [
+            {
+              "id": "block_revenue_kpi",
+              "type": "KPI_GROUP",
+              "layout": {
+                "desktop": { "x": 0, "y": 0, "w": 8, "h": 4 },
+                "mobile": { "order": 1, "visible": true, "heightMode": "FIXED", "slotMode": "STACK", "fixedHeight": 240 }
+              },
+              "zones": [
+                {
+                  "id": "zone_revenue_kpi",
+                  "type": "CONTENT",
+                  "layout": {
+                    "heightMode": "FIXED",
+                    "minHeight": 180,
+                    "fixedHeight": 216,
+                    "columns": 1,
+                    "rows": 1,
+                    "overflow": "CLIP",
+                    "emptyPriority": 100
+                  },
+                  "slots": [
+                    {
+                      "id": "slot_revenue_kpi",
+                      "grid": { "x": 0, "y": 0, "w": 1, "h": 1 },
+                      "componentId": "component_revenue_kpi"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "block_region_chart",
+              "type": "CHART",
+              "layout": {
+                "desktop": { "x": 8, "y": 0, "w": 16, "h": 7 },
+                "mobile": { "order": 2, "visible": true, "heightMode": "ASPECT_RATIO", "slotMode": "PRIMARY_ONLY", "aspectRatio": 1.6, "primarySlotId": "slot_region_chart" }
+              },
+              "zones": [
+                {
+                  "id": "zone_region_chart",
+                  "type": "CONTENT",
+                  "layout": {
+                    "heightMode": "FR",
+                    "minHeight": 240,
+                    "fr": 1,
+                    "columns": 1,
+                    "rows": 1,
+                    "overflow": "CLIP",
+                    "emptyPriority": 100
+                  },
+                  "slots": [
+                    {
+                      "id": "slot_region_chart",
+                      "grid": { "x": 0, "y": 0, "w": 1, "h": 1 },
+                      "componentId": "component_region_chart"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "page_region_detail",
+      "name": "区域明细",
+      "order": 2,
+      "sections": [
+        {
+          "id": "section_region_detail",
+          "name": "区域经营明细",
+          "order": 1,
+          "blocks": [
+            {
+              "id": "block_region_table",
+              "type": "TABLE",
+              "layout": {
+                "desktop": { "x": 0, "y": 0, "w": 24, "h": 10 },
+                "mobile": { "order": 1, "visible": true, "heightMode": "AUTO", "slotMode": "COLLAPSE" }
+              },
+              "zones": [
+                {
+                  "id": "zone_region_table",
+                  "type": "CONTENT",
+                  "layout": {
+                    "heightMode": "AUTO",
+                    "minHeight": 320,
+                    "columns": 1,
+                    "rows": 1,
+                    "overflow": "SCROLL",
+                    "emptyPriority": 100
+                  },
+                  "slots": [
+                    {
+                      "id": "slot_region_table",
+                      "grid": { "x": 0, "y": 0, "w": 1, "h": 1 },
+                      "componentId": "component_region_table"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "block_method_note",
+              "type": "CONTENT",
+              "layout": {
+                "desktop": { "x": 0, "y": 10, "w": 24, "h": 3 },
+                "mobile": { "order": 2, "visible": true, "heightMode": "AUTO", "slotMode": "STACK" }
+              },
+              "zones": [
+                {
+                  "id": "zone_method_note",
+                  "type": "FOOTER",
+                  "layout": {
+                    "heightMode": "AUTO",
+                    "minHeight": 80,
+                    "columns": 1,
+                    "rows": 1,
+                    "overflow": "EXPAND",
+                    "emptyPriority": 20
+                  },
+                  "slots": [
+                    {
+                      "id": "slot_method_note",
+                      "grid": { "x": 0, "y": 0, "w": 1, "h": 1 },
+                      "componentId": "component_method_note"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "components": [
+    {
+      "id": "component_revenue_kpi",
+      "templateRef": { "type": "metric-card", "version": "1.0.0" },
+      "dataBinding": {
+        "bindingMode": "DATASET_FIELD",
+        "dataContextId": "operations_context",
+        "dimensions": [],
+        "measures": [
+          { "role": "VALUE", "field": "revenue" }
+        ]
+      },
+      "options": { "title": "营业收入", "numberFormat": "CURRENCY_CNY" }
+    },
+    {
+      "id": "component_region_chart",
+      "templateRef": { "type": "bar-horizontal", "version": "1.0.0" },
+      "dataBinding": {
+        "bindingMode": "DATASET_FIELD",
+        "dataContextId": "operations_context",
+        "dimensions": [
+          { "role": "Y_AXIS", "field": "region_name" }
+        ],
+        "measures": [
+          { "role": "X_AXIS", "field": "revenue" }
+        ]
+      },
+      "options": { "title": "区域收入对比", "orientation": "HORIZONTAL", "topN": 10, "showLabel": true }
+    },
+    {
+      "id": "component_region_table",
+      "templateRef": { "type": "data-table", "version": "1.0.0" },
+      "dataBinding": {
+        "bindingMode": "DATASET_FIELD",
+        "dataContextId": "operations_context",
+        "dimensions": [
+          { "role": "DIMENSION", "field": "region_name" },
+          { "role": "DIMENSION", "field": "product_category" }
+        ],
+        "measures": [
+          { "role": "VALUE", "field": "revenue" },
+          { "role": "VALUE", "field": "gross_margin" }
+        ]
+      },
+      "options": { "title": "区域经营明细", "tablePageSize": 50 }
+    },
+    {
+      "id": "component_method_note",
+      "templateRef": { "type": "rich-text", "version": "1.0.0" },
+      "options": { "richText": "数据口径：营业收入按已发布经营数据集版本计算。" }
+    }
+  ],
+  "interactions": [
+    {
+      "id": "interaction_region_filter",
+      "sourceComponentId": "component_region_chart",
+      "event": "CLICK",
+      "action": "FILTER",
+      "targetComponentIds": ["component_region_table"],
+      "fieldMappings": [
+        { "sourceField": "region_name", "targetField": "region_name" }
+      ]
+    }
+  ],
+  "runtimePolicy": {
+    "refreshMode": "INTERVAL",
+    "refreshIntervalSeconds": 900,
+    "maxConcurrentQueries": 8,
+    "componentTimeoutMs": 15000,
+    "exportEnabled": true,
+    "failureMode": "PARTIAL"
+  },
+  "provenance": {
+    "createdFrom": "AI",
+    "sourceQuestionRunIds": [],
+    "aiRunIds": ["ai_run_monthly_operations_001"],
+    "promptVersions": ["report-ai-v1"],
+    "modelPolicies": ["governed-default-v1"]
+  }
+}

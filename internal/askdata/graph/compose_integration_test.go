@@ -160,7 +160,7 @@ func composeProjectionSnapshot(request askgraph.PlanRequest) askgraph.Projection
 				ToType: askgraph.ObjectTypeSemanticModel, To: modelLines,
 				RelationshipVersionID: "relationship-orders-lines@v1",
 				JoinType:              registry.JoinInner, Cardinality: registry.CardinalityOneToMany,
-				FanoutPolicy: registry.FanoutCertifiedPre, Certified: true,
+				FanoutPolicy: registry.FanoutPreAggregateRequired, Certified: true,
 			},
 		},
 	}
@@ -409,7 +409,7 @@ func assertComposeRealScopeIsolation(
 		"relationship_version_id": "relationship-orders-lines@v1",
 		"join_type":               string(registry.JoinInner),
 		"cardinality":             string(registry.CardinalityOneToMany),
-		"fanout_policy":           string(registry.FanoutCertifiedPre),
+		"fanout_policy":           string(registry.FanoutPreAggregateRequired),
 		"certified":               true,
 	}
 

@@ -349,13 +349,17 @@ func Validate(document Document) error {
 		}
 		preAggregatedNodes[item.NodeID] = true
 		join, exists := joinsByID[item.JoinID]
-		if !exists {
-			add(path+".joinId", "引用的关联组件不存在")
-		} else if item.JoinSide == "LEFT" && join.LeftNodeID != item.NodeID || item.JoinSide == "RIGHT" && join.RightNodeID != item.NodeID {
-			add(path+".joinSide", "分组组件连接的槽位与 Join 节点不一致")
-		}
-		if !oneOf(item.JoinSide, "LEFT", "RIGHT") {
-			add(path+".joinSide", "必须为 LEFT 或 RIGHT")
+		singleSourceStage := len(document.Nodes) == 1 && len(document.Joins) == 0 &&
+			item.JoinID == "" && item.JoinSide == ""
+		if !singleSourceStage {
+			if !exists {
+				add(path+".joinId", "引用的关联组件不存在")
+			} else if item.JoinSide == "LEFT" && join.LeftNodeID != item.NodeID || item.JoinSide == "RIGHT" && join.RightNodeID != item.NodeID {
+				add(path+".joinSide", "分组组件连接的槽位与 Join 节点不一致")
+			}
+			if !oneOf(item.JoinSide, "LEFT", "RIGHT") {
+				add(path+".joinSide", "必须为 LEFT 或 RIGHT")
+			}
 		}
 		if len(item.GroupBy) == 0 {
 			add(path+".groupBy", "至少需要一个分组字段")
@@ -493,6 +497,9 @@ func Validate(document Document) error {
 		}
 		if !oneOf(field.CanonicalType, "STRING", "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "DATETIME") {
 			add(path+".canonicalType", "不支持的规范类型")
+		}
+		if field.SensitivityLevel != "" && !oneOf(field.SensitivityLevel, "PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED") {
+			add(path+".sensitivityLevel", "不支持的敏感级别")
 		}
 		validateExpression(&issues, path+".expression", field.Expression, nodeIDs, parameterCodes)
 		if field.Expression.Type != "WINDOW" && expressionHasWindow(field.Expression) {
@@ -1860,6 +1867,7 @@ func normalize(document Document) Document {
 		field.ID, field.Code, field.Name = strings.TrimSpace(field.ID), strings.TrimSpace(field.Code), strings.TrimSpace(field.Name)
 		field.Description, field.Role, field.CanonicalType = strings.TrimSpace(field.Description), upper(field.Role), upper(field.CanonicalType)
 		field.SemanticType, field.Aggregation = upper(field.SemanticType), upper(field.Aggregation)
+		field.SensitivityLevel = upper(field.SensitivityLevel)
 		field.Format, field.Unit = strings.TrimSpace(field.Format), strings.TrimSpace(field.Unit)
 		if field.Visible == nil {
 			visible := true
@@ -2219,11 +2227,40 @@ func validateExpression(issues *[]ValidationIssue, path string, expression Expre
 		}
 		validateRequiredExpression(issues, path+".argument", expression.Argument, nodes, parameters)
 	case "AGGREGATE":
-		if !oneOf(expression.Function, "SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT") {
+		if !oneOf(expression.Function, "SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT", "PERIOD_END", "PERIOD_BEGIN") {
 			add(".function", "不支持的聚合函数")
 		}
 		if expression.Function != "COUNT" || expression.Argument != nil {
 			validateRequiredExpression(issues, path+".argument", expression.Argument, nodes, parameters)
+		}
+		orderedPeriod := expression.Function == "PERIOD_END" || expression.Function == "PERIOD_BEGIN"
+		if orderedPeriod {
+			if len(expression.OrderBy) != 1 {
+				add(".orderBy", "期初/期末聚合必须声明唯一时间排序字段")
+			}
+			for index, item := range expression.OrderBy {
+				itemPath := fmt.Sprintf("%s.orderBy[%d]", path, index)
+				validateExpression(issues, itemPath+".expression", item.Expression, nodes, parameters)
+				if expressionHasAggregate(item.Expression) || expressionHasWindow(item.Expression) {
+					add(fmt.Sprintf(".orderBy[%d].expression", index), "期初/期末排序字段不能包含聚合或窗口")
+				}
+				expected := "ASC"
+				if expression.Function == "PERIOD_END" {
+					expected = "DESC"
+				}
+				if item.Direction != expected {
+					add(fmt.Sprintf(".orderBy[%d].direction", index), "期初必须 ASC，期末必须 DESC")
+				}
+			}
+		} else if len(expression.OrderBy) != 0 {
+			add(".orderBy", "普通聚合不接受排序字段")
+		}
+	case "NULLIF":
+		if len(expression.Arguments) != 2 {
+			add(".arguments", "NULLIF 必须包含两个参数")
+		}
+		for index := range expression.Arguments {
+			validateExpression(issues, fmt.Sprintf("%s.arguments[%d]", path, index), expression.Arguments[index], nodes, parameters)
 		}
 	case "WINDOW":
 		if !oneOf(expression.Function, "ROW_NUMBER", "RANK", "DENSE_RANK", "SUM", "AVG", "COUNT", "MIN", "MAX") {

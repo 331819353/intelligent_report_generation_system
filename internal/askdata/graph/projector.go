@@ -298,7 +298,7 @@ func validCardinality(value registry.Cardinality) bool {
 }
 
 func validFanoutPolicy(value registry.FanoutPolicy) bool {
-	return value == registry.FanoutBlock || value == registry.FanoutCertifiedPre || value == registry.FanoutSafe
+	return registry.ValidFanoutPolicy(value)
 }
 
 func (snapshot ProjectionSnapshot) Proof() (ProjectionProof, error) {

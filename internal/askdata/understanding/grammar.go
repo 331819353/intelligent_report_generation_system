@@ -16,7 +16,7 @@ import (
 
 const (
 	RuleParseVersion = "question-rules-v1"
-	MaxRuleLimit     = 10_000
+	MaxRuleLimit     = 1_000
 )
 
 const (
@@ -40,6 +40,7 @@ type RankingRule struct {
 	Span      Span          `json:"span"`
 	Limit     int           `json:"limit"`
 	Direction SortDirection `json:"direction"`
+	RankBy    RankBy        `json:"rankBy,omitempty"`
 }
 
 type SortRule struct {
@@ -374,7 +375,33 @@ func parseRankingRules(question NormalizedQuestion) (*RankingRule, []UnresolvedS
 	if err != nil {
 		return nil, nil, err
 	}
-	return &RankingRule{Text: text, Span: span, Limit: value.limit, Direction: value.direction}, []UnresolvedSpan{}, nil
+	return &RankingRule{
+		Text: text, Span: span, Limit: value.limit, Direction: value.direction,
+		RankBy: explicitRankBy(question.Normalized),
+	}, []UnresolvedSpan{}, nil
+}
+
+func explicitRankBy(question string) RankBy {
+	type marker struct {
+		expression *regexp.Regexp
+		value      RankBy
+	}
+	markers := []marker{
+		{regexp.MustCompile(`按(?:当期|当前|本期)(?:值|数值)?`), RankByCurrentValue},
+		{regexp.MustCompile(`按(?:增长额|增量|变化额|差值)`), RankByDelta},
+		{regexp.MustCompile(`按(?:(?:同比|环比)?(?:增长率|增幅|涨幅)|比率)`), RankByRatio},
+	}
+	result := RankBy("")
+	for _, candidate := range markers {
+		if !candidate.expression.MatchString(question) {
+			continue
+		}
+		if result != "" && result != candidate.value {
+			return ""
+		}
+		result = candidate.value
+	}
+	return result
 }
 
 var sortRules = []literalRule[SortDirection]{
@@ -503,7 +530,10 @@ func falseGroupingBy(text string, span Span) bool {
 		return false
 	}
 	remainder := string(runes[span.End:])
-	for _, prefix := range []string{"揭", "摩", "钮", "键", "压"} {
+	for _, prefix := range []string{
+		"揭", "摩", "钮", "键", "压",
+		"当期", "当前", "本期", "增长额", "增量", "变化额", "差值", "同比增长率", "环比增长率", "增长率", "增幅", "涨幅", "比率",
+	} {
 		if strings.HasPrefix(remainder, prefix) {
 			return true
 		}

@@ -14,22 +14,24 @@ func TestCanTransitionMatchesGovernedLifecycle(t *testing.T) {
 	states := []State{
 		StateReceived, StateAuthorized, StateContextReady, StateUnderstanding,
 		StateRetrieving, StateBinding, StateGraphValidating, StateIRReady,
-		StatePlanValidating, StateExecuting, StateResultVerifying,
-		StateClarificationRequired, StateAnswered, StateBlocked,
+		StatePlanValidating, StateExecuting, StateResultVerifying, StateAnswerVerifying,
+		StateClarificationRequired, StateClarificationExpired, StateOutOfScope, StateAnswered, StateBlocked,
 	}
 	allowed := map[State]map[State]bool{
 		StateReceived:              {StateReceived: true, StateAuthorized: true, StateBlocked: true},
 		StateAuthorized:            {StateAuthorized: true, StateContextReady: true, StateBlocked: true},
 		StateContextReady:          {StateContextReady: true, StateUnderstanding: true, StateBlocked: true},
-		StateUnderstanding:         {StateUnderstanding: true, StateRetrieving: true, StateClarificationRequired: true, StateBlocked: true},
+		StateUnderstanding:         {StateUnderstanding: true, StateRetrieving: true, StateClarificationRequired: true, StateOutOfScope: true, StateBlocked: true},
 		StateRetrieving:            {StateRetrieving: true, StateBinding: true, StateClarificationRequired: true, StateBlocked: true},
-		StateBinding:               {StateBinding: true, StateGraphValidating: true, StateClarificationRequired: true, StateBlocked: true},
+		StateBinding:               {StateBinding: true, StateGraphValidating: true, StateClarificationRequired: true, StateOutOfScope: true, StateBlocked: true},
 		StateGraphValidating:       {StateGraphValidating: true, StateIRReady: true, StateClarificationRequired: true, StateBlocked: true},
 		StateIRReady:               {StateIRReady: true, StatePlanValidating: true, StateBlocked: true},
 		StatePlanValidating:        {StatePlanValidating: true, StateExecuting: true, StateBinding: true, StateClarificationRequired: true, StateBlocked: true},
 		StateExecuting:             {StateExecuting: true, StateResultVerifying: true, StateBlocked: true},
-		StateResultVerifying:       {StateResultVerifying: true, StateAnswered: true, StateBinding: true, StateClarificationRequired: true, StateBlocked: true},
-		StateClarificationRequired: {}, StateAnswered: {}, StateBlocked: {},
+		StateResultVerifying:       {StateResultVerifying: true, StateAnswerVerifying: true, StateBinding: true, StateClarificationRequired: true, StateBlocked: true},
+		StateAnswerVerifying:       {StateAnswerVerifying: true, StateAnswered: true, StateBlocked: true},
+		StateClarificationRequired: {StateClarificationExpired: true},
+		StateClarificationExpired:  {}, StateOutOfScope: {}, StateAnswered: {}, StateBlocked: {},
 	}
 	for _, from := range states {
 		for _, to := range states {
@@ -90,9 +92,10 @@ func TestApplyTerminalCompletionShapes(t *testing.T) {
 		artifact    ArtifactType
 		disposition Disposition
 	}{
-		{"answered", StateResultVerifying, StateAnswered, ArtifactAnswer, DispositionDirect},
+		{"answered", StateAnswerVerifying, StateAnswered, ArtifactAnswer, DispositionDirect},
 		{"clarification", StateBinding, StateClarificationRequired, ArtifactClarification, DispositionClarify},
 		{"blocked", StateUnderstanding, StateBlocked, ArtifactBlock, DispositionRefuse},
+		{"out of scope", StateUnderstanding, StateOutOfScope, ArtifactBlock, DispositionRefuse},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -120,7 +123,7 @@ func TestApplyTerminalCompletionShapes(t *testing.T) {
 }
 
 func TestApplyFailsClosedForIncompleteAnswerAndWrongArtifact(t *testing.T) {
-	run := validRun(StateResultVerifying)
+	run := validRun(StateAnswerVerifying)
 	run.Hashes = completeHashes()
 	run.Hashes.Result = ""
 	_, err := Apply(run, Transition{
@@ -211,7 +214,7 @@ func TestApplyEnforcesGovernedHashStagesAndDependencies(t *testing.T) {
 		t.Fatalf("binding without understanding error = %v", err)
 	}
 
-	late := validRun(StateResultVerifying)
+	late := validRun(StateAnswerVerifying)
 	understandingHash := testHash("1")
 	graphHash, semanticIRHash, queryPlanHash := testHash("3"), testHash("4"), testHash("5")
 	if _, err := Apply(late, Transition{
@@ -277,6 +280,20 @@ func TestApplyRejectsIllegalJumpWithoutChangingInput(t *testing.T) {
 	}
 	if run != original {
 		t.Fatal("Apply() mutated the input run on an illegal transition")
+	}
+}
+
+func TestApplyRejectsExecutingToAnsweredEvenWithCompletion(t *testing.T) {
+	run := validRun(StateExecuting)
+	run.Hashes = completeHashes()
+	_, err := Apply(run, Transition{
+		ExpectedVersion: run.RecordVersion, TargetState: StateAnswered, Usage: run.Usage,
+		Completion: &CompletionRef{
+			Code: "ANSWER_VERIFIED", ArtifactType: ArtifactAnswer, ArtifactHash: testHash("f"),
+		},
+	})
+	if !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("EXECUTING -> ANSWERED error = %v, want ErrIllegalTransition", err)
 	}
 }
 

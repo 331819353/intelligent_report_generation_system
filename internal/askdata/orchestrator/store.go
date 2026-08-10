@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -44,6 +45,29 @@ type CreateRunRequest struct {
 	IdempotencyKeyHash askdata.ContentHash
 	QuestionHash       askdata.ContentHash
 	Limits             BudgetLimits
+	InitialUsage       BudgetUsage
+	SeedContext        *SeedContext
+}
+
+type SeedSource string
+
+const (
+	SeedSourceReportComponent SeedSource = "REPORT_COMPONENT"
+	SeedSourceSavedQuestion   SeedSource = "SAVED_QUESTION"
+)
+
+// SeedContext is a server-verified semantic prior. It contains no result rows
+// or narrative and is persisted atomically with the run. Exactly one governed
+// source is present so a historical Release can never be pinned by a caller-
+// supplied IR without proving the report component or saved question first.
+type SeedContext struct {
+	Source          SeedSource
+	ReportVersionID askdata.ID
+	ComponentID     askdata.ID
+	SavedQuestionID askdata.ID
+	SemanticIR      json.RawMessage
+	SemanticIRHash  askdata.ContentHash
+	PinnedReleaseID askdata.ID
 }
 
 type CreateResult struct {
@@ -72,20 +96,39 @@ type TransitionEventInput struct {
 }
 
 type TransitionRequest struct {
-	Scope           askdata.PolicyScope
-	DomainID        askdata.ID
-	RunID           askdata.ID
-	ExpectedVersion int64
-	TargetState     State
-	Usage           BudgetUsage
-	Hashes          HashUpdates
-	Completion      *CompletionArtifactInput
-	Event           TransitionEventInput
+	Scope                askdata.PolicyScope
+	DomainID             askdata.ID
+	RunID                askdata.ID
+	ExpectedVersion      int64
+	TargetState          State
+	Usage                BudgetUsage
+	Hashes               HashUpdates
+	Completion           *CompletionArtifactInput
+	Event                TransitionEventInput
+	ClarificationTimeout time.Duration
 }
 
 type TransitionResult struct {
 	Run   Run
 	Event Event
+}
+
+type RecordArtifactRequest struct {
+	Scope               askdata.PolicyScope
+	DomainID            askdata.ID
+	RunID               askdata.ID
+	ExpectedRunVersion  int64
+	Type                ArtifactType
+	SchemaVersion       string
+	EvidenceIDs         []askdata.ID
+	Payload             json.RawMessage
+	ExpectedContentHash askdata.ContentHash
+}
+
+type RecordArtifactResult struct {
+	Artifact Artifact
+	Event    Event
+	Replayed bool
 }
 
 type ResumeRequest struct {
@@ -164,6 +207,7 @@ type ToolCall struct {
 
 type ReplaySnapshot struct {
 	Run       Run
+	Seed      *SeedContext
 	Events    []Event
 	Artifacts []Artifact
 	ToolCalls []ToolCall
@@ -173,17 +217,43 @@ type transactionRunner func(
 	context.Context, pgx.TxOptions, string, func(pgx.Tx) error,
 ) error
 
+type releaseProjectionGuard interface {
+	AssertRunnable(context.Context, string) error
+}
+
+type historicalReleaseProjectionGuard interface {
+	AssertHistoricalRunnable(context.Context, string) error
+}
+
 type PostgresStore struct {
-	pool   *pgxpool.Pool
-	runner transactionRunner
+	pool                 *pgxpool.Pool
+	runner               transactionRunner
+	projectionGuard      releaseProjectionGuard
+	clarificationTimeout time.Duration
 }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
-	return &PostgresStore{pool: pool}
+	return NewPostgresStoreWithClarificationTimeout(pool, DefaultClarificationTimeout)
+}
+
+func NewPostgresStoreWithClarificationTimeout(pool *pgxpool.Pool, timeout time.Duration) *PostgresStore {
+	if timeout <= 0 || timeout > 24*time.Hour {
+		timeout = DefaultClarificationTimeout
+	}
+	return &PostgresStore{
+		pool: pool, projectionGuard: registry.NewProjectionGuard(pool), clarificationTimeout: timeout,
+	}
 }
 
 func newPostgresStoreWithRunner(runner transactionRunner) *PostgresStore {
 	return &PostgresStore{runner: runner}
+}
+
+func newPostgresStoreWithRunnerAndProjectionGuard(
+	runner transactionRunner,
+	guard releaseProjectionGuard,
+) *PostgresStore {
+	return &PostgresStore{runner: runner, projectionGuard: guard}
 }
 
 func (store *PostgresStore) CreateRun(ctx context.Context, request CreateRunRequest) (CreateResult, error) {
@@ -216,7 +286,7 @@ func (store *PostgresStore) CreateRun(ctx context.Context, request CreateRunRequ
 			if !found {
 				return err
 			}
-			if !runMatchesCreate(existing, prepared) {
+			if !runMatchesCreate(existing, prepared) || !seedMatchesRunTx(ctx, tx, existing, prepared.request.SeedContext) {
 				return ErrIdempotencyConflict
 			}
 			if err := validateRunReplayTx(ctx, tx, existing); err != nil {
@@ -257,6 +327,7 @@ func (store *PostgresStore) Transition(ctx context.Context, request TransitionRe
 	}
 
 	var result TransitionResult
+	var projectionFailure error
 	err = store.withActorTx(ctx, pgx.TxOptions{}, tenantID, func(tx pgx.Tx) error {
 		current, err := loadRunByIDTx(ctx, tx, request.Scope, request.DomainID, request.RunID, true)
 		if err != nil {
@@ -282,6 +353,44 @@ func (store *PostgresStore) Transition(ctx context.Context, request TransitionRe
 		}).Validate(); err != nil {
 			return err
 		}
+		if current.State == StateAuthorized && request.TargetState == StateContextReady &&
+			store.projectionGuard != nil {
+			if current.RecordVersion != request.ExpectedVersion {
+				return ErrVersionConflict
+			}
+			guardContext := registry.WithProjectionGuardScope(
+				ctx, string(current.TenantID), string(current.DomainID),
+			)
+			reportSeeded, seedErr := reportSeededRunTx(ctx, tx, current)
+			if seedErr != nil {
+				return seedErr
+			}
+			var guardErr error
+			if historicalGuard, ok := store.projectionGuard.(historicalReleaseProjectionGuard); reportSeeded && ok {
+				guardErr = historicalGuard.AssertHistoricalRunnable(guardContext, string(current.Release.ReleaseID))
+			} else {
+				guardErr = store.projectionGuard.AssertRunnable(guardContext, string(current.Release.ReleaseID))
+			}
+			if guardErr != nil {
+				failure, mismatch := governedProjectionFailure(guardErr)
+				if !mismatch {
+					return guardErr
+				}
+				last := existingEvents[len(existingEvents)-1]
+				event, eventErr := newLoopAuditEvent(current, last.Index+1, last.Hash, loopAuditEventInput{
+					Type: EventError, Stage: string(StateContextReady), Status: EventBlocked,
+					Code: registry.ReleaseProjectionMismatchCode, Details: failure.details,
+				})
+				if eventErr != nil {
+					return eventErr
+				}
+				if eventErr := insertEventTx(ctx, tx, event); eventErr != nil {
+					return eventErr
+				}
+				projectionFailure = failure.err
+				return nil
+			}
+		}
 		var completionRef *CompletionRef
 		if completion != nil {
 			completion.TenantID = current.TenantID
@@ -297,6 +406,7 @@ func (store *PostgresStore) Transition(ctx context.Context, request TransitionRe
 		next, err := Apply(current, Transition{
 			ExpectedVersion: request.ExpectedVersion, TargetState: request.TargetState,
 			Usage: request.Usage, Hashes: request.Hashes, Completion: completionRef,
+			ClarificationTimeout: firstNonZeroDuration(request.ClarificationTimeout, store.clarificationTimeout),
 		})
 		if err != nil {
 			return err
@@ -320,6 +430,11 @@ func (store *PostgresStore) Transition(ctx context.Context, request TransitionRe
 		if err != nil {
 			return err
 		}
+		if current.State == StateBinding && persisted.State == StateGraphValidating {
+			if err := pinConversationAfterBindingTx(ctx, tx, persisted); err != nil {
+				return err
+			}
+		}
 		event, err := buildTransitionEvent(persisted, current.State, lastIndex+1, previousHash, request.Event)
 		if err != nil {
 			return err
@@ -340,7 +455,162 @@ func (store *PostgresStore) Transition(ctx context.Context, request TransitionRe
 	if err != nil {
 		return TransitionResult{}, mapPersistenceError(err)
 	}
+	if projectionFailure != nil {
+		return TransitionResult{}, projectionFailure
+	}
 	return result, nil
+}
+
+// RecordArtifact appends a non-terminal stage artifact without changing the
+// run state or budget. It is the durable boundary for SEMANTIC_IR, QUERY_PLAN
+// and other replay inputs that must remain available to cross-product flows.
+func (store *PostgresStore) RecordArtifact(ctx context.Context, request RecordArtifactRequest) (RecordArtifactResult, error) {
+	tenantID, err := validateActorScope(ctx, request.Scope, request.DomainID)
+	if err != nil {
+		return RecordArtifactResult{}, err
+	}
+	if !canonicalUUID(request.RunID) || request.ExpectedRunVersion < 1 ||
+		request.Type == ArtifactAnswer || request.Type == ArtifactClarification || request.Type == ArtifactBlock ||
+		!schemaVersionPattern.MatchString(request.SchemaVersion) {
+		return RecordArtifactResult{}, fmt.Errorf("%w: stage artifact request is invalid", ErrInvalidRun)
+	}
+	if _, valid := validArtifactTypes[request.Type]; !valid {
+		return RecordArtifactResult{}, fmt.Errorf("%w: stage artifact type is invalid", ErrInvalidRun)
+	}
+	payload, err := canonicalAuditObject(request.Payload, maxArtifactPayloadBytes)
+	if err != nil {
+		return RecordArtifactResult{}, err
+	}
+	if request.ExpectedContentHash != "" && askdata.HashBytes(payload) != request.ExpectedContentHash {
+		return RecordArtifactResult{}, fmt.Errorf("%w: stage artifact content hash mismatch", ErrInvalidRun)
+	}
+	evidence, err := normalizedEvidenceIDs(request.EvidenceIDs)
+	if err != nil {
+		return RecordArtifactResult{}, err
+	}
+	var result RecordArtifactResult
+	err = store.withActorTx(ctx, pgx.TxOptions{}, tenantID, func(tx pgx.Tx) error {
+		current, err := loadRunByIDTx(ctx, tx, request.Scope, request.DomainID, request.RunID, true)
+		if err != nil {
+			return err
+		}
+		if !runMatchesScope(current, request.Scope, request.DomainID) {
+			return ErrPinnedScopeMismatch
+		}
+		if current.Terminal() || current.RecordVersion != request.ExpectedRunVersion {
+			return ErrVersionConflict
+		}
+		artifact := Artifact{TenantID: current.TenantID, DomainID: current.DomainID,
+			ActorID: current.ActorID, RunID: current.ID, Release: current.Release,
+			PolicyScopeHash: current.PolicyScopeHash, RunVersion: current.RecordVersion,
+			Type: request.Type, SchemaVersion: request.SchemaVersion, EvidenceIDs: evidence, Payload: payload}
+		artifact.Hash, err = computeArtifactHash(artifact)
+		if err != nil {
+			return err
+		}
+		var existing Artifact
+		existing, err = loadArtifactByHashTx(ctx, tx, current, artifact.Hash)
+		if err == nil {
+			result = RecordArtifactResult{Artifact: existing, Replayed: true}
+			return nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		index, err := nextArtifactIndexTx(ctx, tx, current)
+		if err != nil {
+			return err
+		}
+		artifact.ID, artifact.Index = askdata.ID(uuid.NewString()), index
+		if err := artifact.Validate(); err != nil {
+			return err
+		}
+		if err := insertArtifactTx(ctx, tx, artifact); err != nil {
+			return err
+		}
+		eventIndex, previousHash, err := lastEventPositionTx(ctx, tx, current)
+		if err != nil {
+			return err
+		}
+		event, err := newLoopAuditEvent(current, eventIndex+1, previousHash, loopAuditEventInput{
+			Type: EventArtifactRecorded, Stage: string(current.State), Status: EventSucceeded,
+			Code: "STAGE_ARTIFACT_RECORDED", ArtifactHash: artifact.Hash, EvidenceIDs: evidence,
+			Details: mustCanonicalAudit(map[string]any{"artifactType": artifact.Type, "contentHash": askdata.HashBytes(payload)}),
+		})
+		if err != nil {
+			return err
+		}
+		if err := insertEventTx(ctx, tx, event); err != nil {
+			return err
+		}
+		result = RecordArtifactResult{Artifact: artifact, Event: event}
+		return nil
+	})
+	return result, mapPersistenceError(err)
+}
+
+func reportSeededRunTx(ctx context.Context, tx pgx.Tx, run Run) (bool, error) {
+	var exists bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM askdata.question_seed_contexts
+		WHERE tenant_id=$1 AND question_run_id=$2 AND pinned_release_id=$3
+		UNION ALL
+		SELECT 1 FROM askdata.question_saved_seed_contexts
+		WHERE tenant_id=$1 AND question_run_id=$2 AND pinned_release_id=$3
+	)`,
+		run.TenantID, run.ID, run.Release.ReleaseID).Scan(&exists)
+	return exists, err
+}
+
+func firstNonZeroDuration(values ...time.Duration) time.Duration {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return DefaultClarificationTimeout
+}
+
+type releaseProjectionFailure struct {
+	details json.RawMessage
+	err     error
+}
+
+type ReleaseProjectionMismatchError struct {
+	ReleaseID     string
+	ReleaseStatus string
+	ContentHash   string
+	Mismatches    []registry.ProjectionMismatch
+}
+
+func (failure *ReleaseProjectionMismatchError) Error() string {
+	if failure == nil {
+		return ErrReleaseProjectionMismatch.Error()
+	}
+	return fmt.Sprintf("%s: release %s has %d projection mismatches",
+		registry.ReleaseProjectionMismatchCode, failure.ReleaseID, len(failure.Mismatches))
+}
+
+func (*ReleaseProjectionMismatchError) Unwrap() error { return ErrReleaseProjectionMismatch }
+
+func governedProjectionFailure(err error) (releaseProjectionFailure, bool) {
+	var source *registry.ReleaseProjectionMismatchError
+	if !errors.As(err, &source) {
+		return releaseProjectionFailure{}, false
+	}
+	details, detailErr := registry.CanonicalValue(map[string]any{
+		"releaseId": source.ReleaseID, "releaseStatus": source.ReleaseStatus,
+		"contentHash": source.ContentHash, "mismatches": source.Mismatches,
+	})
+	if detailErr != nil {
+		return releaseProjectionFailure{}, false
+	}
+	failure := &ReleaseProjectionMismatchError{
+		ReleaseID: source.ReleaseID, ReleaseStatus: source.ReleaseStatus,
+		ContentHash: source.ContentHash,
+		Mismatches:  append([]registry.ProjectionMismatch(nil), source.Mismatches...),
+	}
+	return releaseProjectionFailure{details: json.RawMessage(details), err: failure}, true
 }
 
 func (store *PostgresStore) Resume(ctx context.Context, request ResumeRequest) (ReplaySnapshot, error) {
@@ -374,7 +644,11 @@ func (store *PostgresStore) Resume(ctx context.Context, request ResumeRequest) (
 		if err != nil {
 			return err
 		}
-		snapshot = ReplaySnapshot{Run: run, Events: events, Artifacts: artifacts, ToolCalls: tools}
+		seed, err := loadSeedContextTx(ctx, tx, run)
+		if err != nil {
+			return err
+		}
+		snapshot = ReplaySnapshot{Run: run, Seed: seed, Events: events, Artifacts: artifacts, ToolCalls: tools}
 		return snapshot.Validate()
 	})
 	if err != nil {
@@ -443,12 +717,40 @@ func prepareCreateRequest(ctx context.Context, request CreateRunRequest) (string
 	if request.ParentRunID != "" && request.ConversationID == "" {
 		return "", preparedCreate{}, fmt.Errorf("%w: parent run requires a conversation ID", ErrInvalidRun)
 	}
+	if request.SeedContext != nil {
+		seed := request.SeedContext
+		if request.ConversationID == "" || seedSource(seed) == "" || !canonicalUUID(seed.PinnedReleaseID) ||
+			seed.PinnedReleaseID != request.Scope.Release.ReleaseID || seed.SemanticIRHash.Validate() != nil ||
+			len(seed.SemanticIR) == 0 || len(seed.SemanticIR) > maxArtifactPayloadBytes || !json.Valid(seed.SemanticIR) {
+			return "", preparedCreate{}, fmt.Errorf("%w: semantic seed context is invalid", ErrInvalidRun)
+		}
+		switch seedSource(seed) {
+		case SeedSourceReportComponent:
+			if !canonicalUUID(seed.ReportVersionID) || seed.ComponentID.Validate() != nil || seed.SavedQuestionID != "" {
+				return "", preparedCreate{}, fmt.Errorf("%w: report seed source is invalid", ErrInvalidRun)
+			}
+		case SeedSourceSavedQuestion:
+			if !canonicalUUID(seed.SavedQuestionID) || seed.ReportVersionID != "" || seed.ComponentID != "" {
+				return "", preparedCreate{}, fmt.Errorf("%w: saved question seed source is invalid", ErrInvalidRun)
+			}
+		}
+		var object map[string]json.RawMessage
+		if unmarshalErr := json.Unmarshal(seed.SemanticIR, &object); unmarshalErr != nil || object == nil {
+			return "", preparedCreate{}, fmt.Errorf("%w: seed semantic IR is invalid", ErrInvalidRun)
+		} else if canonical, marshalErr := json.Marshal(object); marshalErr != nil ||
+			!bytes.Equal(canonical, seed.SemanticIR) || askdata.HashBytes(canonical) != seed.SemanticIRHash {
+			return "", preparedCreate{}, fmt.Errorf("%w: seed semantic IR is not canonical", ErrInvalidRun)
+		}
+	}
 	limits := request.Limits
 	if limits.IsZero() {
 		limits = DefaultBudgetLimits()
 	}
 	if err := limits.Validate(); err != nil {
 		return "", preparedCreate{}, err
+	}
+	if err := request.InitialUsage.validate(limits); err != nil || request.InitialUsage.Exhausted {
+		return "", preparedCreate{}, fmt.Errorf("%w: initial budget usage is invalid", ErrInvalidRun)
 	}
 	request.Limits = limits
 	run := Run{
@@ -458,7 +760,7 @@ func prepareCreateRequest(ctx context.Context, request CreateRunRequest) (string
 		TraceID: askdata.ID(uuid.NewString()), IdempotencyKeyHash: request.IdempotencyKeyHash,
 		QuestionHash: request.QuestionHash, PolicyScopeHash: request.Scope.PolicyHash,
 		Release: request.Scope.Release, State: StateReceived, Disposition: DispositionPending,
-		Limits: limits, RecordVersion: 1,
+		Limits: limits, Usage: request.InitialUsage, RecordVersion: 1,
 	}
 	if err := run.Validate(); err != nil {
 		return "", preparedCreate{}, err
@@ -503,13 +805,25 @@ func createRunTx(ctx context.Context, tx pgx.Tx, prepared preparedCreate) (Run, 
 	if existing, found, err := findRunByIdempotencyTx(ctx, tx, prepared); err != nil {
 		return Run{}, false, err
 	} else if found {
-		if !runMatchesCreate(existing, prepared) {
+		if !runMatchesCreate(existing, prepared) || !seedMatchesRunTx(ctx, tx, existing, prepared.request.SeedContext) {
 			return Run{}, false, ErrIdempotencyConflict
 		}
 		if err := validateRunReplayTx(ctx, tx, existing); err != nil {
 			return Run{}, false, err
 		}
 		return existing, true, nil
+	}
+	if prepared.run.ConversationID != "" {
+		if err := lockConversationTx(ctx, tx, prepared.run); err != nil {
+			return Run{}, false, err
+		}
+		pin, err := ensureConversationTx(ctx, tx, prepared.run, prepared.request.SeedContext)
+		if err != nil {
+			return Run{}, false, err
+		}
+		if pin.ReleaseID != "" && pin != prepared.run.Release {
+			return Run{}, false, ErrPinnedScopeMismatch
+		}
 	}
 	if prepared.run.ParentRunID != "" {
 		parent, err := loadRunByIDTx(
@@ -519,7 +833,9 @@ func createRunTx(ctx context.Context, tx pgx.Tx, prepared preparedCreate) (Run, 
 			return Run{}, false, err
 		}
 		if parent.ConversationID != prepared.run.ConversationID ||
-			!runMatchesScope(parent, prepared.request.Scope, prepared.request.DomainID) {
+			parent.TenantID != prepared.run.TenantID || parent.DomainID != prepared.run.DomainID ||
+			parent.ActorID != prepared.run.ActorID || parent.State != StateClarificationRequired ||
+			parent.BudgetConsumed == nil || prepared.run.Usage != *parent.BudgetConsumed {
 			return Run{}, false, ErrPinnedScopeMismatch
 		}
 	}
@@ -532,13 +848,29 @@ func createRunTx(ctx context.Context, tx pgx.Tx, prepared preparedCreate) (Run, 
 		if err != nil {
 			return Run{}, false, err
 		}
-		if !found || !runMatchesCreate(existing, prepared) {
+		if !found || !runMatchesCreate(existing, prepared) || !seedMatchesRunTx(ctx, tx, existing, prepared.request.SeedContext) {
 			return Run{}, false, ErrIdempotencyConflict
 		}
 		if err := validateRunReplayTx(ctx, tx, existing); err != nil {
 			return Run{}, false, err
 		}
 		return existing, true, nil
+	}
+	if prepared.request.SeedContext != nil {
+		seed := prepared.request.SeedContext
+		if seedSource(seed) == SeedSourceSavedQuestion {
+			if _, err := tx.Exec(ctx, `INSERT INTO askdata.question_saved_seed_contexts(
+				tenant_id,question_run_id,saved_question_id,semantic_ir_json,semantic_ir_hash,pinned_release_id
+			) VALUES($1,$2,$3,$4,$5,$6)`, run.TenantID, run.ID, seed.SavedQuestionID,
+				seed.SemanticIR, seed.SemanticIRHash, seed.PinnedReleaseID); err != nil {
+				return Run{}, false, err
+			}
+		} else if _, err := tx.Exec(ctx, `INSERT INTO askdata.question_seed_contexts(
+			tenant_id,question_run_id,report_version_id,component_id,semantic_ir_json,semantic_ir_hash,pinned_release_id
+		) VALUES($1,$2,$3,$4,$5,$6,$7)`, run.TenantID, run.ID, seed.ReportVersionID,
+			seed.ComponentID, seed.SemanticIR, seed.SemanticIRHash, seed.PinnedReleaseID); err != nil {
+			return Run{}, false, err
+		}
 	}
 	event, err := newEvent(run, 1, "", TransitionEventInput{
 		Stage: string(StateReceived), Status: EventSucceeded, Code: "RUN_RECEIVED",
@@ -551,6 +883,233 @@ func createRunTx(ctx context.Context, tx pgx.Tx, prepared preparedCreate) (Run, 
 		return Run{}, false, err
 	}
 	return run, false, nil
+}
+
+func lockConversationTx(ctx context.Context, tx pgx.Tx, run Run) error {
+	key := strings.Join([]string{
+		string(run.TenantID), string(run.DomainID), string(run.ActorID), string(run.ConversationID),
+	}, ":")
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))`, key)
+	return err
+}
+
+func ensureConversationTx(ctx context.Context, tx pgx.Tx, run Run, seed *SeedContext) (askdata.ReleaseRef, error) {
+	var err error
+	if seed == nil {
+		_, err = tx.Exec(ctx, `INSERT INTO askdata.conversations(
+			id,tenant_id,domain_id,actor_id
+		) VALUES($1,$2,$3,$4)
+		ON CONFLICT(tenant_id,id) DO NOTHING`, run.ConversationID, run.TenantID, run.DomainID, run.ActorID)
+	} else if seedSource(seed) == SeedSourceSavedQuestion {
+		_, err = tx.Exec(ctx, `INSERT INTO askdata.conversations(
+			id,tenant_id,domain_id,actor_id,pinned_release_id,pinned_at,pin_source,
+			saved_question_id
+		) VALUES($1,$2,$3,$4,$5,clock_timestamp(),'SAVED_QUESTION',$6)
+		ON CONFLICT(tenant_id,id) DO NOTHING`, run.ConversationID, run.TenantID, run.DomainID,
+			run.ActorID, seed.PinnedReleaseID, seed.SavedQuestionID)
+	} else {
+		_, err = tx.Exec(ctx, `INSERT INTO askdata.conversations(
+			id,tenant_id,domain_id,actor_id,pinned_release_id,pinned_at,pin_source,
+			report_version_id,report_component_id
+		) VALUES($1,$2,$3,$4,$5,clock_timestamp(),'REPORT_COMPONENT',$6,$7)
+		ON CONFLICT(tenant_id,id) DO NOTHING`, run.ConversationID, run.TenantID, run.DomainID,
+			run.ActorID, seed.PinnedReleaseID, seed.ReportVersionID, seed.ComponentID)
+	}
+	if err != nil {
+		return askdata.ReleaseRef{}, err
+	}
+	var releaseID, contentHash, pinSource, reportVersionID, reportComponentID, savedQuestionID string
+	err = tx.QueryRow(ctx, `SELECT COALESCE(conversation.pinned_release_id::text,''),
+		COALESCE(release.content_hash,''),conversation.pin_source,
+		COALESCE(conversation.report_version_id::text,''),COALESCE(conversation.report_component_id,''),
+		COALESCE(conversation.saved_question_id::text,'')
+	FROM askdata.conversations AS conversation
+	LEFT JOIN askdata.releases AS release
+	  ON release.id=conversation.pinned_release_id
+	 AND release.tenant_id=conversation.tenant_id
+	 AND release.domain_id=conversation.domain_id
+	WHERE conversation.tenant_id=$1 AND conversation.id=$2
+	  AND conversation.domain_id=$3 AND conversation.actor_id=$4
+	FOR UPDATE OF conversation`, run.TenantID, run.ConversationID, run.DomainID, run.ActorID,
+	).Scan(&releaseID, &contentHash, &pinSource, &reportVersionID, &reportComponentID, &savedQuestionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return askdata.ReleaseRef{}, ErrPinnedScopeMismatch
+	}
+	if err != nil {
+		return askdata.ReleaseRef{}, err
+	}
+	if seed != nil {
+		source := seedSource(seed)
+		if releaseID != string(seed.PinnedReleaseID) ||
+			(source == SeedSourceReportComponent && (pinSource != string(source) || reportVersionID != string(seed.ReportVersionID) ||
+				reportComponentID != string(seed.ComponentID) || savedQuestionID != "")) ||
+			(source == SeedSourceSavedQuestion && (pinSource != string(source) || savedQuestionID != string(seed.SavedQuestionID) ||
+				reportVersionID != "" || reportComponentID != "")) {
+			return askdata.ReleaseRef{}, ErrPinnedScopeMismatch
+		}
+	}
+	if seed == nil && pinSource != "ASKDATA" {
+		return askdata.ReleaseRef{}, ErrPinnedScopeMismatch
+	}
+	if releaseID == "" {
+		return askdata.ReleaseRef{}, nil
+	}
+	return askdata.ReleaseRef{ReleaseID: askdata.ID(releaseID), ContentHash: askdata.ContentHash(contentHash)}, nil
+}
+
+func seedMatchesRunTx(ctx context.Context, tx pgx.Tx, run Run, expected *SeedContext) bool {
+	if expected != nil && seedSource(expected) == SeedSourceSavedQuestion {
+		var savedQuestionID, pinnedReleaseID string
+		var semanticIR []byte
+		var semanticIRHash askdata.ContentHash
+		err := tx.QueryRow(ctx, `SELECT saved_question_id::text,semantic_ir_json,
+			semantic_ir_hash,pinned_release_id::text FROM askdata.question_saved_seed_contexts
+			WHERE tenant_id=$1 AND question_run_id=$2`, run.TenantID, run.ID,
+		).Scan(&savedQuestionID, &semanticIR, &semanticIRHash, &pinnedReleaseID)
+		canonical, canonicalErr := canonicalSeedPayload(semanticIR)
+		return err == nil && canonicalErr == nil && savedQuestionID == string(expected.SavedQuestionID) &&
+			semanticIRHash == expected.SemanticIRHash && pinnedReleaseID == string(expected.PinnedReleaseID) &&
+			bytes.Equal(canonical, expected.SemanticIR)
+	}
+	var reportVersionID, componentID, pinnedReleaseID string
+	var semanticIR []byte
+	var semanticIRHash askdata.ContentHash
+	err := tx.QueryRow(ctx, `SELECT report_version_id::text,component_id,semantic_ir_json,
+		semantic_ir_hash,pinned_release_id::text FROM askdata.question_seed_contexts
+		WHERE tenant_id=$1 AND question_run_id=$2`, run.TenantID, run.ID,
+	).Scan(&reportVersionID, &componentID, &semanticIR, &semanticIRHash, &pinnedReleaseID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return expected == nil
+	}
+	if err != nil || expected == nil {
+		return false
+	}
+	canonical, canonicalErr := canonicalSeedPayload(semanticIR)
+	return canonicalErr == nil && reportVersionID == string(expected.ReportVersionID) && componentID == string(expected.ComponentID) &&
+		semanticIRHash == expected.SemanticIRHash && pinnedReleaseID == string(expected.PinnedReleaseID) &&
+		bytes.Equal(canonical, expected.SemanticIR)
+}
+
+func seedSource(seed *SeedContext) SeedSource {
+	if seed == nil {
+		return ""
+	}
+	if seed.Source == SeedSourceReportComponent || seed.Source == SeedSourceSavedQuestion {
+		return seed.Source
+	}
+	if seed.Source != "" {
+		return ""
+	}
+	// Backward-compatible inference for internal callers created before the
+	// discriminant was introduced. Persisted values are always explicit.
+	if seed.ReportVersionID != "" && seed.ComponentID != "" && seed.SavedQuestionID == "" {
+		return SeedSourceReportComponent
+	}
+	if seed.SavedQuestionID != "" && seed.ReportVersionID == "" && seed.ComponentID == "" {
+		return SeedSourceSavedQuestion
+	}
+	return ""
+}
+
+func loadSeedContextTx(ctx context.Context, tx pgx.Tx, run Run) (*SeedContext, error) {
+	var source SeedSource
+	var reportVersionID, componentID, savedQuestionID string
+	var semanticIR []byte
+	var semanticIRHash askdata.ContentHash
+	var pinnedReleaseID string
+	err := tx.QueryRow(ctx, `
+		SELECT source,report_version_id,component_id,saved_question_id,
+		       semantic_ir_json,semantic_ir_hash,pinned_release_id
+		FROM (
+		  SELECT 'REPORT_COMPONENT'::text AS source,report_version_id::text,
+		         component_id,''::text AS saved_question_id,semantic_ir_json,
+		         semantic_ir_hash,pinned_release_id::text
+		  FROM askdata.question_seed_contexts
+		  WHERE tenant_id=$1 AND question_run_id=$2
+		  UNION ALL
+		  SELECT 'SAVED_QUESTION'::text AS source,''::text AS report_version_id,
+		         ''::text AS component_id,saved_question_id::text,semantic_ir_json,
+		         semantic_ir_hash,pinned_release_id::text
+		  FROM askdata.question_saved_seed_contexts
+		  WHERE tenant_id=$1 AND question_run_id=$2
+		) AS seed`, run.TenantID, run.ID,
+	).Scan(&source, &reportVersionID, &componentID, &savedQuestionID, &semanticIR, &semanticIRHash, &pinnedReleaseID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	semanticIR, err = canonicalSeedPayload(semanticIR)
+	if err != nil || askdata.HashBytes(semanticIR) != semanticIRHash {
+		return nil, ErrReplayCorrupt
+	}
+	seed := &SeedContext{
+		Source: source, ReportVersionID: askdata.ID(reportVersionID), ComponentID: askdata.ID(componentID),
+		SavedQuestionID: askdata.ID(savedQuestionID), SemanticIR: append(json.RawMessage(nil), semanticIR...),
+		SemanticIRHash: semanticIRHash, PinnedReleaseID: askdata.ID(pinnedReleaseID),
+	}
+	if seedSource(seed) == "" || seed.PinnedReleaseID != run.Release.ReleaseID || seed.SemanticIRHash.Validate() != nil {
+		return nil, ErrReplayCorrupt
+	}
+	return seed, nil
+}
+
+func canonicalSeedPayload(raw []byte) (json.RawMessage, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return nil, ErrReplayCorrupt
+	}
+	canonical, err := json.Marshal(object)
+	if err != nil {
+		return nil, err
+	}
+	return canonical, nil
+}
+
+func pinConversationAfterBindingTx(ctx context.Context, tx pgx.Tx, run Run) error {
+	if run.ConversationID == "" {
+		return nil
+	}
+	tag, err := tx.Exec(ctx, `UPDATE askdata.conversations SET
+		pinned_release_id=$1,
+		pinned_at=COALESCE(pinned_at,clock_timestamp()),
+		pin_drift_acknowledged=CASE
+		  WHEN pinned_release_id IS NULL THEN false
+		  ELSE pin_drift_acknowledged
+		END,
+		updated_at=clock_timestamp()
+	WHERE tenant_id=$2 AND id=$3 AND domain_id=$4 AND actor_id=$5
+	  AND (pinned_release_id IS NULL OR pinned_release_id=$1)`,
+		run.Release.ReleaseID, run.TenantID, run.ConversationID, run.DomainID, run.ActorID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrPinnedScopeMismatch
+	}
+	return nil
+}
+
+func findConversationAnchorTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	run Run,
+) (Run, bool, error) {
+	anchor, err := scanRun(tx.QueryRow(ctx, runSelect+`
+		WHERE tenant_id=$1 AND domain_id=$2 AND actor_id=$3 AND conversation_id=$4
+		ORDER BY created_at,id LIMIT 1`,
+		run.TenantID, run.DomainID, run.ActorID, run.ConversationID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Run{}, false, nil
+	}
+	return anchor, err == nil, err
+}
+
+func conversationPinMatches(anchor, candidate Run) bool {
+	return anchor.TenantID == candidate.TenantID && anchor.DomainID == candidate.DomainID &&
+		anchor.ActorID == candidate.ActorID && anchor.ConversationID == candidate.ConversationID &&
+		anchor.Release == candidate.Release
 }
 
 func findRunByIdempotencyTx(
@@ -585,16 +1144,22 @@ func insertRunTx(ctx context.Context, tx pgx.Tx, run Run) (Run, bool, error) {
 		id,tenant_id,domain_id,actor_id,conversation_id,parent_run_id,trace_id,
 		idempotency_key_hash,question_hash,policy_scope_hash,release_id,
 		release_content_hash,max_steps,max_llm_calls,max_tool_calls,
-		max_formal_queries,max_validation_queries,max_duration_ms
+		max_formal_queries,max_validation_queries,max_duration_ms,
+		step_count,llm_calls_used,tool_calls_used,formal_queries_used,
+		validation_queries_used,elapsed_ms,budget_exhausted
 	) VALUES(
-		$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+		$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+		$19,$20,$21,$22,$23,$24,$25
 	) ON CONFLICT ON CONSTRAINT askdata_question_runs_idempotency_key DO NOTHING
 	RETURNING `+runColumns,
 		run.ID, run.TenantID, run.DomainID, run.ActorID, nullableID(run.ConversationID),
 		nullableID(run.ParentRunID), run.TraceID, run.IdempotencyKeyHash, run.QuestionHash,
 		run.PolicyScopeHash, run.Release.ReleaseID, run.Release.ContentHash,
 		run.Limits.MaxSteps, run.Limits.MaxLLMCalls, run.Limits.MaxToolCalls,
-		run.Limits.MaxFormalQueries, run.Limits.MaxValidationQueries, run.Limits.MaxDurationMS)
+		run.Limits.MaxFormalQueries, run.Limits.MaxValidationQueries, run.Limits.MaxDurationMS,
+		run.Usage.StepCount, run.Usage.LLMCallsUsed, run.Usage.ToolCallsUsed,
+		run.Usage.FormalQueriesUsed, run.Usage.ValidationQueriesUsed,
+		run.Usage.ElapsedMS, run.Usage.Exhausted)
 	created, err := scanRun(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Run{}, false, nil
@@ -623,9 +1188,10 @@ func updateRunTx(ctx context.Context, tx pgx.Tx, current, next Run) (Run, error)
 		graph_plan_hash=$7,semantic_ir_hash=$8,query_plan_hash=$9,result_hash=$10,
 		step_count=$11,llm_calls_used=$12,tool_calls_used=$13,
 		formal_queries_used=$14,validation_queries_used=$15,elapsed_ms=$16,
-		budget_exhausted=$17,record_version=record_version+1
-	WHERE id=$18 AND tenant_id=$19 AND domain_id=$20 AND actor_id=$21
-	  AND record_version=$22 AND current_state=$23
+		budget_exhausted=$17,clarification_deadline=$18,budget_frozen_at=$19,
+		budget_consumed_json=$20,record_version=record_version+1
+	WHERE id=$21 AND tenant_id=$22 AND domain_id=$23 AND actor_id=$24
+	  AND record_version=$25 AND current_state=$26
 	RETURNING `+runColumns,
 		next.State, next.Disposition, next.CompletionCode, nullableHash(next.CompletionArtifact),
 		nullableHash(next.Hashes.Understanding), nullableHash(next.Hashes.BindingBundle),
@@ -634,6 +1200,7 @@ func updateRunTx(ctx context.Context, tx pgx.Tx, current, next Run) (Run, error)
 		next.Usage.StepCount, next.Usage.LLMCallsUsed, next.Usage.ToolCallsUsed,
 		next.Usage.FormalQueriesUsed, next.Usage.ValidationQueriesUsed,
 		next.Usage.ElapsedMS, next.Usage.Exhausted,
+		nullableTime(next.ClarificationDeadline), nullableTime(next.BudgetFrozenAt), nullableBudget(next.BudgetConsumed),
 		current.ID, current.TenantID, current.DomainID, current.ActorID,
 		current.RecordVersion, current.State)
 	updated, err := scanRun(row)
@@ -653,7 +1220,8 @@ const runColumns = `
 	COALESCE(semantic_ir_hash,''),COALESCE(query_plan_hash,''),COALESCE(result_hash,''),
 	max_steps,max_llm_calls,max_tool_calls,max_formal_queries,max_validation_queries,
 	max_duration_ms,step_count,llm_calls_used,tool_calls_used,formal_queries_used,
-	validation_queries_used,elapsed_ms,budget_exhausted,record_version,
+	validation_queries_used,elapsed_ms,budget_exhausted,clarification_deadline,
+	budget_frozen_at,budget_consumed_json,record_version,
 	created_at,updated_at,completed_at`
 
 const runSelect = `SELECT ` + runColumns + ` FROM askdata.question_runs`
@@ -666,7 +1234,8 @@ func scanRun(row rowScanner) (Run, error) {
 	var releaseID, state, disposition string
 	var idempotencyHash, questionHash, policyHash, releaseHash string
 	var completionHash, understandingHash, bindingHash, graphHash, irHash, planHash, resultHash string
-	var completed sql.NullTime
+	var clarificationDeadline, budgetFrozenAt, completed sql.NullTime
+	var budgetConsumed []byte
 	err := row.Scan(
 		&id, &tenantID, &domainID, &actorID, &conversationID, &parentID, &traceID,
 		&idempotencyHash, &questionHash, &policyHash, &releaseID, &releaseHash,
@@ -676,7 +1245,8 @@ func scanRun(row rowScanner) (Run, error) {
 		&run.Limits.MaxFormalQueries, &run.Limits.MaxValidationQueries, &run.Limits.MaxDurationMS,
 		&run.Usage.StepCount, &run.Usage.LLMCallsUsed, &run.Usage.ToolCallsUsed,
 		&run.Usage.FormalQueriesUsed, &run.Usage.ValidationQueriesUsed, &run.Usage.ElapsedMS,
-		&run.Usage.Exhausted, &run.RecordVersion, &run.CreatedAt, &run.UpdatedAt, &completed,
+		&run.Usage.Exhausted, &clarificationDeadline, &budgetFrozenAt, &budgetConsumed,
+		&run.RecordVersion, &run.CreatedAt, &run.UpdatedAt, &completed,
 	)
 	if err != nil {
 		return Run{}, err
@@ -688,6 +1258,26 @@ func scanRun(row rowScanner) (Run, error) {
 	run.Release = askdata.ReleaseRef{ReleaseID: askdata.ID(releaseID), ContentHash: askdata.ContentHash(releaseHash)}
 	run.State, run.Disposition = State(state), Disposition(disposition)
 	run.CompletionArtifact = askdata.ContentHash(completionHash)
+	if clarificationDeadline.Valid {
+		value := clarificationDeadline.Time
+		run.ClarificationDeadline = &value
+	}
+	if budgetFrozenAt.Valid {
+		value := budgetFrozenAt.Time
+		run.BudgetFrozenAt = &value
+	}
+	if len(budgetConsumed) > 0 {
+		var usage BudgetUsage
+		if err := askdata.DecodeStrictJSON(budgetConsumed, &usage); err != nil {
+			return Run{}, fmt.Errorf("%w: budget consumption snapshot is invalid", ErrReplayCorrupt)
+		}
+		if usage != run.Usage {
+			return Run{}, fmt.Errorf("%w: budget consumption snapshot does not match scalar usage", ErrReplayCorrupt)
+		}
+		if run.State == StateClarificationRequired || run.State == StateClarificationExpired {
+			run.BudgetConsumed = &usage
+		}
+	}
 	run.Hashes = RunHashes{
 		Understanding: askdata.ContentHash(understandingHash), BindingBundle: askdata.ContentHash(bindingHash),
 		GraphPlan: askdata.ContentHash(graphHash), SemanticIR: askdata.ContentHash(irHash),
@@ -715,6 +1305,24 @@ func nullableHash(hash askdata.ContentHash) any {
 		return nil
 	}
 	return hash
+}
+
+func nullableTime(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return value.UTC()
+}
+
+func nullableBudget(value *BudgetUsage) any {
+	if value == nil {
+		return nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return raw
 }
 
 func prepareCompletionArtifact(request TransitionRequest, input CompletionArtifactInput) (Artifact, error) {
@@ -794,10 +1402,19 @@ func buildTransitionEvent(
 ) (Event, error) {
 	expectedStage := string(run.State)
 	expectedStatus := EventSucceeded
-	if run.State == StateBlocked || run.State == StateClarificationRequired {
+	if run.State == StateBlocked || run.State == StateOutOfScope ||
+		run.State == StateClarificationRequired || run.State == StateClarificationExpired {
 		expectedStatus = EventBlocked
 	}
 	expectedCode := "STATE_" + string(run.State)
+	if run.State == StateAnswerVerifying && previousState == StateResultVerifying {
+		expectedStatus = EventStarted
+		expectedCode = "ANSWER_VERIFYING"
+	}
+	if run.State == StateAnswerVerifying && previousState == StateAnswerVerifying {
+		expectedStatus = EventFailed
+		expectedCode = "ANSWER_VERIFICATION_FAILED"
+	}
 	if run.State == StateBinding && (previousState == StatePlanValidating || previousState == StateResultVerifying) {
 		expectedCode = "SEMANTIC_CORRECTION"
 	}
@@ -1126,6 +1743,14 @@ func (snapshot ReplaySnapshot) Validate() error {
 	if err := snapshot.Run.Validate(); err != nil {
 		return fmt.Errorf("%w: persisted run is invalid", ErrReplayCorrupt)
 	}
+	if snapshot.Seed != nil {
+		seed := snapshot.Seed
+		if snapshot.Run.ConversationID == "" || seedSource(seed) == "" ||
+			seed.PinnedReleaseID != snapshot.Run.Release.ReleaseID || seed.SemanticIRHash.Validate() != nil ||
+			len(seed.SemanticIR) == 0 || !json.Valid(seed.SemanticIR) || askdata.HashBytes(seed.SemanticIR) != seed.SemanticIRHash {
+			return fmt.Errorf("%w: persisted semantic seed is invalid", ErrReplayCorrupt)
+		}
+	}
 	statesByVersion, err := replayEventStates(snapshot.Run, snapshot.Events)
 	if err != nil {
 		return err
@@ -1150,8 +1775,12 @@ func (snapshot ReplaySnapshot) Validate() error {
 			return fmt.Errorf("%w: artifact chain identity or version is invalid", ErrReplayCorrupt)
 		}
 		if artifact.Hash == snapshot.Run.CompletionArtifact {
+			expectedVersion := snapshot.Run.RecordVersion - 1
+			if snapshot.Run.State == StateClarificationExpired {
+				expectedVersion--
+			}
 			completionFound = artifact.Type == completionArtifactType(snapshot.Run.State) &&
-				artifact.RunVersion == snapshot.Run.RecordVersion-1
+				artifact.RunVersion == expectedVersion
 		}
 		if _, duplicate := artifactsByHash[artifact.Hash]; duplicate {
 			return fmt.Errorf("%w: duplicate artifact hash", ErrReplayCorrupt)
@@ -1216,10 +1845,14 @@ func validateEventFactReferences(
 				continue
 			}
 			artifact, exists := artifacts[event.ArtifactHash]
-			if !exists || !isTerminalState(event.State) || artifact.RunVersion != event.RunVersion-1 {
+			expectedVersion := event.RunVersion - 1
+			if event.State == StateClarificationExpired {
+				expectedVersion--
+			}
+			if !exists || !isTerminalState(event.State) || artifact.RunVersion != expectedVersion {
 				return fmt.Errorf("%w: terminal transition does not bind its completion artifact", ErrReplayCorrupt)
 			}
-			if _, duplicate := referencedArtifacts[event.ArtifactHash]; duplicate {
+			if _, duplicate := referencedArtifacts[event.ArtifactHash]; duplicate && event.State != StateClarificationExpired {
 				return fmt.Errorf("%w: completion artifact has multiple events", ErrReplayCorrupt)
 			}
 			referencedArtifacts[event.ArtifactHash] = struct{}{}
@@ -1256,7 +1889,8 @@ func replayEventStates(run Run, events []Event) (map[int64]State, error) {
 			currentVersion, currentState = 1, StateReceived
 			statesByVersion[1] = StateReceived
 		} else {
-			if isTerminalState(currentState) {
+			if isTerminalState(currentState) &&
+				!(currentState == StateClarificationRequired && event.State == StateClarificationExpired) {
 				return nil, fmt.Errorf("%w: event was appended after terminal completion", ErrReplayCorrupt)
 			}
 			switch event.RunVersion {
@@ -1269,16 +1903,33 @@ func replayEventStates(run Run, events []Event) (map[int64]State, error) {
 					return nil, fmt.Errorf("%w: event contains an illegal state transition", ErrReplayCorrupt)
 				}
 				expectedStatus := EventSucceeded
-				if event.State == StateBlocked || event.State == StateClarificationRequired {
+				if event.State == StateBlocked || event.State == StateOutOfScope ||
+					event.State == StateClarificationRequired || event.State == StateClarificationExpired {
 					expectedStatus = EventBlocked
 				}
 				expectedCode := "STATE_" + string(event.State)
+				if event.State == StateAnswerVerifying && currentState == StateResultVerifying {
+					expectedStatus = EventStarted
+					expectedCode = "ANSWER_VERIFYING"
+				}
+				if event.State == StateAnswerVerifying && currentState == StateAnswerVerifying {
+					expectedStatus = EventFailed
+					expectedCode = "ANSWER_VERIFICATION_FAILED"
+				}
 				if event.State == StateBinding &&
 					(currentState == StatePlanValidating || currentState == StateResultVerifying) {
 					expectedCode = "SEMANTIC_CORRECTION"
 				}
 				if isTerminalState(event.State) {
-					expectedCode = run.CompletionCode
+					// Expiry appends a second terminal transition while retaining the
+					// original clarification artifact and its original reason code.
+					// The current run stores CLARIFICATION_EXPIRED, so only the new
+					// expiry event is compared with the current completion code.
+					if event.State == StateClarificationRequired && run.State == StateClarificationExpired {
+						expectedCode = event.Code
+					} else {
+						expectedCode = run.CompletionCode
+					}
 				}
 				if event.Stage != string(event.State) || event.Status != expectedStatus || event.Code != expectedCode {
 					return nil, fmt.Errorf("%w: transition event semantics contradict its state", ErrReplayCorrupt)
@@ -1481,6 +2132,16 @@ func loadArtifactsTx(ctx context.Context, tx pgx.Tx, run Run) ([]Artifact, error
 	return result, rows.Err()
 }
 
+func loadArtifactByHashTx(ctx context.Context, tx pgx.Tx, run Run, hash askdata.ContentHash) (Artifact, error) {
+	return scanArtifact(tx.QueryRow(ctx, `SELECT
+		id::text,tenant_id::text,domain_id::text,actor_id::text,question_run_id::text,
+		release_id::text,release_content_hash,policy_scope_hash,artifact_index,run_version,
+		artifact_type,schema_version,artifact_hash,evidence_ids,payload_json,created_at
+		FROM askdata.question_artifacts
+		WHERE tenant_id=$1 AND domain_id=$2 AND actor_id=$3 AND question_run_id=$4
+		  AND artifact_hash=$5`, run.TenantID, run.DomainID, run.ActorID, run.ID, hash))
+}
+
 func scanArtifact(row rowScanner) (Artifact, error) {
 	var artifact Artifact
 	var id, tenant, domain, actor, runID, releaseID, releaseHash, policyHash string
@@ -1680,7 +2341,7 @@ func mapPersistenceError(err error) error {
 	for _, sentinel := range []error{
 		ErrInvalidRun, ErrIllegalTransition, ErrTerminalRun, ErrVersionConflict,
 		ErrRunNotFound, ErrIdempotencyConflict, ErrReplayCorrupt,
-		ErrPinnedScopeMismatch, ErrInvalidAccessContext, ErrNoProgress,
+		ErrPinnedScopeMismatch, ErrInvalidAccessContext, ErrReleaseNotRunnable, ErrNoProgress,
 	} {
 		if errors.Is(err, sentinel) {
 			return err
@@ -1691,6 +2352,9 @@ func mapPersistenceError(err error) error {
 	}
 	var pgError *pgconn.PgError
 	if errors.As(err, &pgError) {
+		if strings.Contains(pgError.Message, registry.ReleaseNotRunnableCode) {
+			return ErrReleaseNotRunnable
+		}
 		switch pgError.Code {
 		case "40001":
 			return ErrVersionConflict

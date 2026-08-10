@@ -332,6 +332,9 @@ textarea:focus-visible {
   box-shadow: 0 4px 14px #2864dc0f;
 }
 
+.domain-switcher.is-locked { cursor: default; }
+.domain-switcher.is-locked:hover { border-color: #dbe4f3; background: #f7faff; box-shadow: none; }
+
 .domain-switcher > span { min-width: 0; display: grid; gap: 2px; }
 .domain-switcher small { color: #8290a5; font-size: 8px; }
 .domain-switcher strong { overflow: hidden; color: #2059c7; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }

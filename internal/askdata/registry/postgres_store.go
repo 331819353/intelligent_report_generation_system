@@ -181,6 +181,7 @@ func (store *PostgresStore) CreateMetricVersion(ctx context.Context, metric Metr
 	if metric.NullPolicy == "" {
 		metric.NullPolicy = "PRESERVE"
 	}
+	applyAdditivityDefaultsToMetric(&metric)
 	if metric.ObjectID != metric.MetricID {
 		return MetricVersion{}, ValidationErrors{Issues: []ValidationIssue{{Code: validationCodeInvalidDependency, Path: "objectId", Message: "must equal metricId"}}}
 	}
@@ -196,13 +197,22 @@ func (store *PostgresStore) CreateMetricVersion(ctx context.Context, metric Metr
 	err := database.WithTenantTx(ctx, store.pool, metric.TenantID, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO askdata.metric_versions(
 			id,tenant_id,domain_id,metric_id,version_no,semantic_model_version_id,
-			formula_ast,default_filters_ast,unit,time_grain,additivity,null_policy,
-			status,content_hash,owner_id
-		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'DRAFT',$13,$14)`,
+			formula_ast,default_filters_ast,unit,currency,time_grain,additivity,
+			semi_additive_time_aggregation,aggregation_restriction,non_additive_dimensions,
+			zero_denominator_policy,display_precision,additivity_suggestion,
+			additivity_confirmed_by,additivity_confirmed_at,null_policy,
+			incomplete_period_policy_override,status,content_hash,owner_id
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,'')::text,$11,NULLIF($12,'')::text,
+			NULLIF($13,'')::text,NULLIF($14,'')::text,$15,$16,$17,NULLIF($18,'')::text,
+			NULLIF($19,'')::uuid,$20,$21,NULLIF($22,'')::text,'DRAFT',$23,$24)`,
 			metric.ID, metric.TenantID, metric.DomainID, metric.MetricID, metric.VersionNo,
 			metric.SemanticModelVersionID, metric.FormulaAST, metric.DefaultFiltersAST,
-			metric.Unit, metric.TimeGrain, metric.Additivity, metric.NullPolicy,
-			metric.ContentHash, metric.OwnerID); err != nil {
+			metric.Unit, metric.Currency, metric.TimeGrain, metric.Additivity,
+			metric.SemiAdditiveTimeAggregation, metric.AggregationRestriction,
+			metric.NonAdditiveDimensions, metric.ZeroDenominatorPolicy, metric.DisplayPrecision,
+			metric.AdditivitySuggestion, metric.AdditivityConfirmedBy, metric.AdditivityConfirmedAt,
+			metric.NullPolicy, emptyStringToNil(string(metric.IncompletePeriodPolicyOverride)), metric.ContentHash,
+			metric.OwnerID); err != nil {
 			return err
 		}
 		for index, measureID := range dependencies {
@@ -232,8 +242,13 @@ func (store *PostgresStore) GetMetricVersion(ctx context.Context, tenantID, doma
 			version.metric_id::text,version.version_no,version.status,version.content_hash,
 			version.owner_id::text,version.created_at,version.updated_at,
 			version.semantic_model_version_id::text,version.formula_ast,
-			version.default_filters_ast,version.unit,version.time_grain,
-			version.additivity,version.null_policy,
+			version.default_filters_ast,version.unit,COALESCE(version.currency,''),version.time_grain,
+			COALESCE(version.additivity,''),COALESCE(version.semi_additive_time_aggregation,''),
+			COALESCE(version.aggregation_restriction,''),version.non_additive_dimensions,
+			version.zero_denominator_policy,version.display_precision,
+			COALESCE(version.additivity_suggestion,''),COALESCE(version.additivity_confirmed_by::text,''),
+			version.additivity_confirmed_at,version.null_policy,
+			COALESCE(version.incomplete_period_policy_override,''),
 			COALESCE(array_agg(link.measure_version_id::text ORDER BY link.ordinal)
 				FILTER(WHERE link.measure_version_id IS NOT NULL),'{}'::text[])
 		FROM askdata.metric_versions AS version
@@ -244,8 +259,13 @@ func (store *PostgresStore) GetMetricVersion(ctx context.Context, tenantID, doma
 			&metric.ID, &metric.TenantID, &metric.DomainID, &metric.MetricID,
 			&metric.VersionNo, &metric.Status, &metric.ContentHash, &metric.OwnerID,
 			&metric.CreatedAt, &metric.UpdatedAt, &metric.SemanticModelVersionID,
-			&metric.FormulaAST, &metric.DefaultFiltersAST, &metric.Unit,
-			&metric.TimeGrain, &metric.Additivity, &metric.NullPolicy,
+			&metric.FormulaAST, &metric.DefaultFiltersAST, &metric.Unit, &metric.Currency,
+			&metric.TimeGrain, &metric.Additivity, &metric.SemiAdditiveTimeAggregation,
+			&metric.AggregationRestriction, &metric.NonAdditiveDimensions,
+			&metric.ZeroDenominatorPolicy, &metric.DisplayPrecision,
+			&metric.AdditivitySuggestion, &metric.AdditivityConfirmedBy, &metric.AdditivityConfirmedAt,
+			&metric.NullPolicy,
+			&metric.IncompletePeriodPolicyOverride,
 			&metric.MeasureVersionIDs,
 		)
 	})
@@ -375,12 +395,23 @@ func decodeMetricCursor(encoded string) (metricCursor, error) {
 
 func timePointer(value time.Time) *time.Time { return &value }
 
+func emptyStringToNil(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
 func registryUniqueConflict(err error) bool {
 	var databaseError *pgconn.PgError
 	return errors.As(err, &databaseError) && databaseError.Code == "23505"
 }
 
 func RegistryErrorCode(err error) string {
+	var additivity *AdditivityError
+	if errors.As(err, &additivity) {
+		return additivity.Code
+	}
 	switch {
 	case errors.Is(err, ErrRegistryNotFound):
 		return "REG_NOT_FOUND"
@@ -388,6 +419,14 @@ func RegistryErrorCode(err error) string {
 		return "REG_VERSION_CONFLICT"
 	case errors.Is(err, ErrRegistryConflict):
 		return "REG_CONFLICT"
+	case errors.Is(err, ErrRegistryPermissionDenied):
+		return "REG_PERMISSION_DENIED"
+	case errors.Is(err, ErrRegistryIdempotencyConflict):
+		return "REG_IDEMPOTENCY_CONFLICT"
+	case errors.Is(err, ErrRegistryDraftInUse):
+		return "REG_DRAFT_IN_USE"
+	case errors.Is(err, ErrRegistryInvalidRequest):
+		return "REG_INVALID_REQUEST"
 	default:
 		var validation ValidationErrors
 		if errors.As(err, &validation) {

@@ -58,11 +58,35 @@ type Config struct {
 	MinIOSecretKey                  string
 	MinIOUseSSL                     bool
 	MinIOUploadsBucket              string
+	ReportExportRendererURL         string
+	ReportExportRendererToken       string
 	AuthTokenIssuer                 string
 	AuthAccessSecret                string
 	AuthAccessTTL                   time.Duration
 	AuthRefreshTTL                  time.Duration
 	AuthBcryptCost                  int
+	AskDataQuestionRetentionMode    string
+	AskDataQuestionRetentionTTL     time.Duration
+	AskDataRunArtifactTTL           time.Duration
+	AskDataClarificationTimeout     time.Duration
+	AskDataQuestionEncryptionKey    string
+	AskDataBudgetOverrides          []AskDataBudgetOverride
+	AskDataNebulaAddresses          []string
+	AskDataNebulaSpace              string
+	AskDataNebulaUsername           string
+	AskDataNebulaPassword           string
+	AskDataNebulaTLSEnabled         bool
+	AskDataGraphWriteEnabled        bool
+	AskDataRetrievalThreshold       float64
+	AskDataBindingThreshold         float64
+	AskDataProjectionLease          time.Duration
+	AskDataProfileScanLimit         int
+	AskDataReleaseRetentionCount    int
+	AskDataEvaluationMinimumCases   int
+	AskDataEvaluationStrictMinimum  float64
+	AskDataEvaluationWilsonMinimum  float64
+	AskDataShadowCanaryMode         string
+	AskDataCanaryPercent            int
 	ConnectorURL                    string
 	ConnectorToken                  string
 	ConnectorHTTPMaxRequestBytes    int64
@@ -117,6 +141,8 @@ var (
 			"POSTGRES_CONNECTION_TEST_USER", "POSTGRES_CONNECTION_TEST_PASSWORD",
 			"PGPASSWORD", "PGPASSFILE", "PGSERVICE", "PGSERVICEFILE",
 			"CONNECTOR_CONNECTION_TEST_TOKEN",
+			"ASKDATA_NEBULA_ROOT_PASSWORD", "ASKDATA_NEBULA_BOOTSTRAP_ROOT_PASSWORD",
+			"ASKDATA_NEBULA_WORKER_USER", "ASKDATA_NEBULA_WORKER_PASSWORD",
 			"CONNECTION_TEST_MINIO_ACCESS_KEY",
 			"CONNECTION_TEST_MINIO_SECRET_KEY",
 		},
@@ -138,6 +164,8 @@ var (
 			"POSTGRES_CONNECTION_TEST_USER", "POSTGRES_CONNECTION_TEST_PASSWORD",
 			"PGPASSWORD", "PGPASSFILE", "PGSERVICE", "PGSERVICEFILE",
 			"CONNECTOR_CONNECTION_TEST_TOKEN",
+			"ASKDATA_NEBULA_ROOT_PASSWORD", "ASKDATA_NEBULA_BOOTSTRAP_ROOT_PASSWORD",
+			"ASKDATA_NEBULA_API_USER", "ASKDATA_NEBULA_API_PASSWORD",
 			"CONNECTION_TEST_MINIO_ACCESS_KEY",
 			"CONNECTION_TEST_MINIO_SECRET_KEY",
 		},
@@ -174,6 +202,10 @@ func loadApplication(process databaseProcess) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	askDataBudgetOverrides, err := ParseAskDataBudgetOverrides(os.Getenv("ASKDATA_RUN_BUDGET_OVERRIDES"))
+	if err != nil {
+		return Config{}, err
+	}
 	aiBaseURL := envOrDefault("AI_BASE_URL", "https://mgallery.haier.net/v1/")
 	aiAPIKey := os.Getenv("AI_API_KEY")
 	aiModel := envOrDefault("AI_MODEL", "MiniMax-M2")
@@ -184,6 +216,15 @@ func loadApplication(process databaseProcess) (Config, error) {
 	providerThinkingEnabled, err := envBool("AI_THINKING_ENABLED", false)
 	if err != nil {
 		return Config{}, err
+	}
+	askDataNebulaTLS, err := envBool("ASKDATA_NEBULA_TLS_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	isWorkerProcess := process.urlKey == workerDatabaseProcess.urlKey
+	defaultNebulaUser, defaultNebulaPassword := "askdata_api", "local_nebula_read_1"
+	if isWorkerProcess {
+		defaultNebulaUser, defaultNebulaPassword = "askdata_worker", "local_nebula_write_1"
 	}
 	providerMaxOutputTokens, err := envOptionalInt("AI_MAX_OUTPUT_TOKENS_OVERRIDE")
 	if err != nil {
@@ -298,11 +339,35 @@ func loadApplication(process databaseProcess) (Config, error) {
 		MinIOSecretKey:                  envOrDefault("MINIO_SECRET_KEY", "local_minio_password"),
 		MinIOUseSSL:                     strings.EqualFold(os.Getenv("MINIO_USE_SSL"), "true"),
 		MinIOUploadsBucket:              envOrDefault("MINIO_BUCKET_UPLOADS", "uploads"),
+		ReportExportRendererURL:         envOrDefault("REPORT_EXPORT_RENDERER_URL", "http://127.0.0.1:8091"),
+		ReportExportRendererToken:       envOrDefault("REPORT_EXPORT_RENDERER_TOKEN", "local_report_export_renderer_token"),
 		AuthTokenIssuer:                 envOrDefault("AUTH_TOKEN_ISSUER", "intelligent-report-system"),
 		AuthAccessSecret:                envOrDefault("AUTH_ACCESS_TOKEN_SECRET", "local_access_token_secret_change_me"),
 		AuthAccessTTL:                   15 * time.Minute,
 		AuthRefreshTTL:                  7 * 24 * time.Hour,
 		AuthBcryptCost:                  12,
+		AskDataQuestionRetentionMode:    strings.ToUpper(envOrDefault("ASKDATA_QUESTION_RETENTION_MODE", "HASH_ONLY")),
+		AskDataQuestionRetentionTTL:     24 * time.Hour,
+		AskDataRunArtifactTTL:           30 * 24 * time.Hour,
+		AskDataClarificationTimeout:     30 * time.Minute,
+		AskDataQuestionEncryptionKey:    os.Getenv("ASKDATA_QUESTION_ENCRYPTION_KEY"),
+		AskDataBudgetOverrides:          askDataBudgetOverrides,
+		AskDataNebulaAddresses:          parseUniqueCSV(envOrDefault("ASKDATA_NEBULA_ADDRESSES", "127.0.0.1:9669")),
+		AskDataNebulaSpace:              envOrDefault("ASKDATA_NEBULA_SPACE", "askdata_semantic"),
+		AskDataNebulaUsername:           envOrDefault("ASKDATA_NEBULA_USERNAME", defaultNebulaUser),
+		AskDataNebulaPassword:           envOrDefault("ASKDATA_NEBULA_PASSWORD", defaultNebulaPassword),
+		AskDataNebulaTLSEnabled:         askDataNebulaTLS,
+		AskDataGraphWriteEnabled:        isWorkerProcess,
+		AskDataRetrievalThreshold:       0.70,
+		AskDataBindingThreshold:         0.80,
+		AskDataProjectionLease:          2 * time.Minute,
+		AskDataProfileScanLimit:         100_000,
+		AskDataReleaseRetentionCount:    10,
+		AskDataEvaluationMinimumCases:   2_000,
+		AskDataEvaluationStrictMinimum:  0.96,
+		AskDataEvaluationWilsonMinimum:  0.95,
+		AskDataShadowCanaryMode:         strings.ToUpper(envOrDefault("ASKDATA_SHADOW_CANARY_MODE", "OFF")),
+		AskDataCanaryPercent:            0,
 		ConnectorURL:                    envOrDefault("CONNECTOR_SERVICE_URL", "http://127.0.0.1:8090"),
 		ConnectorToken:                  envOrDefault("CONNECTOR_INTERNAL_TOKEN", defaultConnectorToken),
 		ConnectorHTTPMaxRequestBytes:    1 << 20,
@@ -335,6 +400,10 @@ func loadApplication(process databaseProcess) (Config, error) {
 		{"AI_EMBEDDING_TIMEOUT", &cfg.AIEmbeddingTimeout},
 		{"AUTH_ACCESS_TOKEN_TTL", &cfg.AuthAccessTTL},
 		{"AUTH_REFRESH_TOKEN_TTL", &cfg.AuthRefreshTTL},
+		{"ASKDATA_QUESTION_RETENTION_TTL", &cfg.AskDataQuestionRetentionTTL},
+		{"ASKDATA_RUN_ARTIFACT_TTL", &cfg.AskDataRunArtifactTTL},
+		{"ASKDATA_CLARIFICATION_TIMEOUT", &cfg.AskDataClarificationTimeout},
+		{"ASKDATA_PROJECTION_LEASE", &cfg.AskDataProjectionLease},
 	}
 	if value := os.Getenv("AUTH_PASSWORD_BCRYPT_COST"); value != "" {
 		cost, err := strconv.Atoi(value)
@@ -357,6 +426,10 @@ func loadApplication(process databaseProcess) (Config, error) {
 		{"AI_MAX_ATTEMPTS", &cfg.AIMaxAttempts},
 		{"AI_MAX_INPUT_BYTES", &cfg.AIMaxInputBytes},
 		{"AI_EMBEDDING_DIMENSIONS", &cfg.AIEmbeddingDimensions},
+		{"ASKDATA_PROFILE_SCAN_LIMIT", &cfg.AskDataProfileScanLimit},
+		{"ASKDATA_RELEASE_RETENTION_COUNT", &cfg.AskDataReleaseRetentionCount},
+		{"ASKDATA_EVALUATION_MINIMUM_CASES", &cfg.AskDataEvaluationMinimumCases},
+		{"ASKDATA_CANARY_PERCENT", &cfg.AskDataCanaryPercent},
 		{"CONNECTOR_METADATA_SAMPLE_MAX_CELL_BYTES", &cfg.ConnectorSampleMaxCellBytes},
 		{"CONNECTOR_METADATA_SAMPLE_MAX_ROW_BYTES", &cfg.ConnectorSampleMaxRowBytes},
 		{"CONNECTOR_STREAM_MAX_CELL_BYTES", &cfg.ConnectorStreamMaxCellBytes},
@@ -400,6 +473,23 @@ func loadApplication(process databaseProcess) (Config, error) {
 	for _, item := range costOptions {
 		if value := os.Getenv(item.key); value != "" {
 			parsed, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				return Config{}, fmt.Errorf("parse %s: %w", item.key, err)
+			}
+			*item.target = parsed
+		}
+	}
+	for _, item := range []struct {
+		key    string
+		target *float64
+	}{
+		{"ASKDATA_RETRIEVAL_THRESHOLD", &cfg.AskDataRetrievalThreshold},
+		{"ASKDATA_BINDING_THRESHOLD", &cfg.AskDataBindingThreshold},
+		{"ASKDATA_EVALUATION_STRICT_MINIMUM", &cfg.AskDataEvaluationStrictMinimum},
+		{"ASKDATA_EVALUATION_WILSON_MINIMUM", &cfg.AskDataEvaluationWilsonMinimum},
+	} {
+		if value := os.Getenv(item.key); value != "" {
+			parsed, err := strconv.ParseFloat(value, 64)
 			if err != nil {
 				return Config{}, fmt.Errorf("parse %s: %w", item.key, err)
 			}
@@ -542,6 +632,18 @@ func (c Config) Validate() error {
 	if c.AuthBcryptCost < 10 || c.AuthBcryptCost > 14 {
 		return errors.New("AUTH_PASSWORD_BCRYPT_COST must be between 10 and 14")
 	}
+	if err := validateAskDataRetentionConfig(c); err != nil {
+		return err
+	}
+	if c.AskDataClarificationTimeout < time.Minute || c.AskDataClarificationTimeout > 24*time.Hour {
+		return errors.New("ASKDATA_CLARIFICATION_TIMEOUT must be between 1m and 24h")
+	}
+	if err := validateAskDataBudgetOverrides(c.AskDataBudgetOverrides); err != nil {
+		return err
+	}
+	if err := validateAskDataOperationalConfig(c); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.ConnectorURL) == "" || len(c.ConnectorToken) < 24 {
 		return errors.New("connector service URL or internal token is invalid")
 	}
@@ -559,6 +661,14 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.MinIOUploadsBucket) == "" {
 		return errors.New("MinIO uploads bucket name must not be empty")
+	}
+	if c.ReportExportRendererURL != "" && !validAIBaseURL(c.ReportExportRendererURL) {
+		return errors.New("REPORT_EXPORT_RENDERER_URL must use HTTPS or loopback HTTP")
+	}
+	if strings.EqualFold(c.Environment, "production") &&
+		(strings.TrimSpace(os.Getenv("REPORT_EXPORT_RENDERER_URL")) == "" ||
+			len(strings.TrimSpace(os.Getenv("REPORT_EXPORT_RENDERER_TOKEN"))) < 24) {
+		return errors.New("production report export renderer URL and token are required")
 	}
 	credentialKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(c.DataSourceCredentialKey))
 	if err != nil || len(credentialKey) != 32 {
@@ -607,6 +717,107 @@ func (c Config) Validate() error {
 				return fmt.Errorf("%s must be explicitly configured in production", key)
 			}
 		}
+	}
+	return nil
+}
+
+func validateAskDataOperationalConfig(c Config) error {
+	if len(c.AskDataNebulaAddresses) < 1 || len(c.AskDataNebulaAddresses) > 16 {
+		return errors.New("ASKDATA_NEBULA_ADDRESSES must contain between 1 and 16 endpoints")
+	}
+	for _, endpoint := range c.AskDataNebulaAddresses {
+		host, port, err := net.SplitHostPort(strings.TrimSpace(endpoint))
+		if err != nil || strings.TrimSpace(host) == "" || strings.TrimSpace(port) == "" {
+			return errors.New("ASKDATA_NEBULA_ADDRESSES contains an invalid endpoint")
+		}
+	}
+	if !stableConfigCode(c.AskDataNebulaSpace, false) || !stableConfigCode(c.AskDataNebulaUsername, true) ||
+		len(strings.TrimSpace(c.AskDataNebulaPassword)) < 12 {
+		return errors.New("AskData Nebula space or process credential is invalid")
+	}
+	if c.AskDataRetrievalThreshold <= 0 || c.AskDataRetrievalThreshold > 1 ||
+		c.AskDataBindingThreshold <= 0 || c.AskDataBindingThreshold > 1 ||
+		c.AskDataBindingThreshold < c.AskDataRetrievalThreshold {
+		return errors.New("AskData retrieval and binding thresholds are invalid")
+	}
+	if c.AskDataProjectionLease < 10*time.Second || c.AskDataProjectionLease > 30*time.Minute ||
+		c.AskDataProfileScanLimit < 1_000 || c.AskDataProfileScanLimit > 10_000_000 ||
+		c.AskDataReleaseRetentionCount < 2 || c.AskDataReleaseRetentionCount > 100 {
+		return errors.New("AskData projection, profile, or release retention configuration is invalid")
+	}
+	if c.AskDataEvaluationMinimumCases < 2_000 || c.AskDataEvaluationMinimumCases > 100_000 ||
+		c.AskDataEvaluationStrictMinimum < .96 || c.AskDataEvaluationStrictMinimum > 1 ||
+		c.AskDataEvaluationWilsonMinimum < .95 || c.AskDataEvaluationWilsonMinimum > c.AskDataEvaluationStrictMinimum {
+		return errors.New("AskData evaluation gate configuration is below the governed minimum")
+	}
+	switch strings.ToUpper(strings.TrimSpace(c.AskDataShadowCanaryMode)) {
+	case "OFF", "SHADOW":
+		if c.AskDataCanaryPercent != 0 {
+			return errors.New("ASKDATA_CANARY_PERCENT must be zero outside CANARY mode")
+		}
+	case "CANARY":
+		if c.AskDataCanaryPercent != 5 && c.AskDataCanaryPercent != 20 && c.AskDataCanaryPercent != 50 {
+			return errors.New("ASKDATA_CANARY_PERCENT must be 5, 20, or 50")
+		}
+	default:
+		return errors.New("ASKDATA_SHADOW_CANARY_MODE must be OFF, SHADOW, or CANARY")
+	}
+	if strings.EqualFold(c.Environment, "production") {
+		if !c.AskDataNebulaTLSEnabled {
+			return errors.New("production AskData Nebula TLS must be enabled")
+		}
+		for _, key := range []string{
+			"ASKDATA_NEBULA_ADDRESSES", "ASKDATA_NEBULA_SPACE", "ASKDATA_NEBULA_USERNAME",
+			"ASKDATA_NEBULA_PASSWORD", "ASKDATA_NEBULA_TLS_ENABLED", "ASKDATA_RETRIEVAL_THRESHOLD",
+			"ASKDATA_BINDING_THRESHOLD", "ASKDATA_PROJECTION_LEASE", "ASKDATA_PROFILE_SCAN_LIMIT",
+			"ASKDATA_RELEASE_RETENTION_COUNT", "ASKDATA_EVALUATION_MINIMUM_CASES",
+			"ASKDATA_EVALUATION_STRICT_MINIMUM", "ASKDATA_EVALUATION_WILSON_MINIMUM",
+			"ASKDATA_SHADOW_CANARY_MODE", "ASKDATA_CANARY_PERCENT",
+		} {
+			if _, configured := os.LookupEnv(key); !configured {
+				return fmt.Errorf("%s must be explicitly configured in production", key)
+			}
+		}
+	}
+	return nil
+}
+
+func stableConfigCode(value string, allowDash bool) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 1 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') &&
+			(character < '0' || character > '9') && character != '_' && (!allowDash || character != '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateAskDataRetentionConfig(c Config) error {
+	mode := strings.ToUpper(strings.TrimSpace(c.AskDataQuestionRetentionMode))
+	if mode != "HASH_ONLY" && mode != "ENCRYPTED_SHORT_TERM" {
+		return errors.New("ASKDATA_QUESTION_RETENTION_MODE must be HASH_ONLY or ENCRYPTED_SHORT_TERM")
+	}
+	if c.AskDataQuestionRetentionTTL <= 0 || c.AskDataQuestionRetentionTTL > 7*24*time.Hour {
+		return errors.New("ASKDATA_QUESTION_RETENTION_TTL must be greater than zero and at most 168h")
+	}
+	if c.AskDataRunArtifactTTL < c.AskDataQuestionRetentionTTL ||
+		c.AskDataRunArtifactTTL > 365*24*time.Hour {
+		return errors.New("ASKDATA_RUN_ARTIFACT_TTL must be at least the question TTL and at most 8760h")
+	}
+	keyText := strings.TrimSpace(c.AskDataQuestionEncryptionKey)
+	if mode == "HASH_ONLY" {
+		if keyText != "" {
+			return errors.New("ASKDATA_QUESTION_ENCRYPTION_KEY must be unset in HASH_ONLY mode")
+		}
+		return nil
+	}
+	key, err := base64.StdEncoding.DecodeString(keyText)
+	if err != nil || len(key) != 32 {
+		return errors.New("ASKDATA_QUESTION_ENCRYPTION_KEY must be base64-encoded 32 bytes in ENCRYPTED_SHORT_TERM mode")
 	}
 	return nil
 }

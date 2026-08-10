@@ -1,0 +1,31 @@
+{
+  "type": "data-table",
+  "version": "1.0.0",
+  "renderer": "REACT",
+  "displayName": "数据表格",
+  "category": "TABLE",
+  "minSize": { "w": 6, "h": 4 },
+  "recommendedSize": { "w": 12, "h": 8 },
+  "dataContract": {
+    "dimensions": { "min": 0, "max": 16 },
+    "measures": { "min": 1, "max": 16 },
+    "timeField": { "required": false },
+    "roles": ["DIMENSION", "VALUE", "TIME", "LABEL", "DETAIL"]
+  },
+  "stackingRequiresAdditive": false,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [],
+    "properties": {
+	  "title": { "type": "string" },
+	  "subtitle": { "type": "string" },
+      "numberFormat": { "type": "string" },
+      "nullPolicy": { "type": "string", "enum": ["GAP", "ZERO", "HIDE"] },
+      "tablePageSize": { "type": "integer", "minimum": 1, "maximum": 1000 }
+    }
+  },
+  "defaultOptions": { "nullPolicy": "GAP", "tablePageSize": 50 },
+  "mobilePolicy": { "supported": true, "defaultLegendMode": "HIDDEN", "labelDegradation": "ELLIPSIS" },
+  "supportedInteractions": ["CLICK_FILTER", "DRILL_DOWN", "SORT", "PAGINATE"]
+}

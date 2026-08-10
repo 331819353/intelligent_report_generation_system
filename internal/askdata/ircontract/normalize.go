@@ -15,6 +15,20 @@ import (
 // order of Sort is preserved because it defines multi-column sort precedence.
 func Normalize(value SemanticIR) SemanticIR {
 	normalized := value
+	if normalized.OtherPolicy == "" {
+		normalized.OtherPolicy = OtherNone
+	}
+	if normalized.TieBreaking == "" {
+		normalized.TieBreaking = TieIncludeAll
+	}
+	if value.TimeRange != nil {
+		timeRange := *value.TimeRange
+		if timeRange.RequestedPeriod == "" && timeRange.Grain == "" {
+			timeRange.RequestedPeriod = "ABSOLUTE"
+			timeRange.Grain = TimeGrainDay
+		}
+		normalized.TimeRange = &timeRange
+	}
 	normalized.Metrics = append([]Metric(nil), value.Metrics...)
 	normalized.GroupBy = append([]GroupBy(nil), value.GroupBy...)
 	normalized.Filters = make([]Filter, len(value.Filters))
@@ -26,6 +40,13 @@ func Normalize(value SemanticIR) SemanticIR {
 		})
 	}
 	normalized.Sort = append([]Sort(nil), value.Sort...)
+	if normalized.Comparison == nil {
+		for index := range normalized.Sort {
+			if normalized.Sort[index].RankBy == "" {
+				normalized.Sort[index].RankBy = RankByCurrentValue
+			}
+		}
+	}
 	if normalized.Metrics == nil {
 		normalized.Metrics = []Metric{}
 	}

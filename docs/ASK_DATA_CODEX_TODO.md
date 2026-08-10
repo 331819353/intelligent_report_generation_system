@@ -7,6 +7,25 @@
 > 目标：把技术架构拆成可由 Codex 逐项实现、验证和交付的原子任务。
 > 本计划不代表系统已经达到 95%；只有密封端到端黄金集通过发布门禁后才能作出该声明。
 
+## 后端收敛状态（2026-08-10）
+
+本轮按用户指定范围完成**除前端页面外**的后端收敛，并以代码、测试、迁移和数据库权限核验为准更新
+任务状态。下列边界必须与任务复选框一起阅读：
+
+- 已完成的软件主链包括发布评测/审批/激活、端到端评测运行器、可观测与配额模块、报告洞察/AI/模板
+  升级、问数与报告五项融合、保存问题、反馈闭环、明细取数敏感门禁/聚类，以及密封集和误差预算。
+- `ADD-002`、`RPT-006`、`RPT-008`、`RPT-011` 的后端合同、服务与测试已经完成，但原任务还包含
+  前端页面/打印样式，因此保持未勾选并明确标注为“后端范围完成”。所有 `WEB-*`、`WEB-RPT-*`
+  均不在本轮范围内。
+- `EVAL-008`～`010` 仅完成可执行套件/统计机制；真实业务黄金样本、150 条双人叙述评审未提供，
+  不得勾选。`OBS-003`、`OPS-003/004` 与 `PILOT-001`～`004` 需要真实容量、生产环境或业务验收，
+  继续保持未完成。
+- 数据库迁移已顺序推进到 `000280_report_semantic_upgrade_compilations`；`000276`～`000280`
+  分别承载语义 IR 重建、报告依赖重建、融合引用、认证问法/报告种子链和报告语义升级编译制品。
+- 最终核验基线：`go test ./... -count=1`、AskData/Report/DataRequest 竞态测试、`go vet ./...`、
+  `scripts/check-compose.sh`、`scripts/migrate.sh`、`scripts/verify-database.sh`、迁移 `000280`
+  独立数据库 up/down/up 与 `git diff --check`。正式 95% 准确率仍只能由密封业务集验收产生。
+
 ## 0. 板块蓝图（功能区划分）
 
 ### 0.1 为什么要在 Wave 之上再做板块划分
@@ -27,16 +46,16 @@
 | B01 | 平台底座与权限 | P01 | M01 | `PLAT-`、`SEC-` | `internal/access`、`internal/policy`、`internal/askdata/security` | 基线已有，问数侧 1/4 |
 | B02 | 数据接入与元数据 | P02 | M02 | `META-`、`DR-` | `connector_service`、`internal/datasource`、`internal/metadataai` | 基线已有，新增明细取数 |
 | B03 | 数仓建模与物化 | P03 | M03 | `DSET-`、`SNAP-` | `internal/dataset`、`internal/materialization` | 基线已有，缺快照版本 |
-| B04 | 语义资产治理 | P04、P05、P06、P07 | M04、M05、M06、M07 | `REG-`、`DIM-`、`TIME-`、`ADD-`、`TERM-`、`KPI-`、`IMPORT-` | `internal/askdata/registry`、`dimension` | 主链完成，口径与导入待建 |
-| B05 | 语义发布与投影 | P08 | M08 | `DB-`、`REL-`、`RETAIN-`、`PROJ-` | `internal/askdata/registry`、`migrations` | READY 完成，ACTIVE 门禁未开 |
-| B06 | 检索与语义图谱 | P09 | M09、M10 | `SEARCH-`、`GRAPH-` | `internal/askdata/search`、`graph` | 主链完成，评测与降级待建 |
+| B04 | 语义资产治理 | P04、P05、P06、P07 | M04、M05、M06、M07 | `REG-`、`DIM-`、`TIME-`、`ADD-`、`TERM-`、`KPI-`、`IMPORT-` | `internal/askdata/registry`、`dimension` | 后端主链完成；`ADD-002` 仅余前端补录入口 |
+| B05 | 语义发布与投影 | P08 | M08 | `DB-`、`REL-`、`RETAIN-`、`PROJ-` | `internal/askdata/registry`、`migrations` | 发布门禁、双人审批与原子激活后端完成 |
+| B06 | 检索与语义图谱 | P09 | M09、M10 | `SEARCH-`、`GRAPH-` | `internal/askdata/search`、`graph` | 检索/图谱后端与 Recall@K 评测器完成；正式黄金集待人工 |
 | B07 | 问句理解与联合绑定 | P09 | M11、M12 | `NLU-` | `internal/askdata/understanding`、`binding` | 主链完成，域约束/Pin 待建 |
-| B08 | 查询编译与执行 | P09 | M13、M14 | `QUERY-` | `internal/askdata/ir`、`compiler`、`validator` | 主链完成，口径规则待建 |
-| B09 | 编排、Tool Host 与问数 API | P09、P10 | M15 | `ORCH-`、`ANS-` | `internal/askdata/orchestrator`、`toolhost`、`http`、`answer` | Loop 完成，API/叙述校验待建 |
-| B10 | 问数工作台前端 | P09、P10 | M16 | `WEB-` | `web/src/askdata` | 仅 mock 完成 |
-| B11 | 报表引擎与问数报表融合 | P11、P12 | M17 + 报告专章 | `RPT-`、`FUSE-`、`WEB-RPT-` | `internal/report`、`web/src/report` | **全部待建** |
-| B12 | 评测、反馈与运营 | P13 | M18 | `EVAL-`、`FB-`、`SQ-` | `internal/askdata/evaluation`、`feedback` | 基础完成，门禁待建 |
-| B13 | 运维、可观测与成本 | P14 | M19 | `OPS-`、`OBS-` | `internal/config`、`internal/observability`、`scripts` | 待建 |
+| B08 | 查询编译与执行 | P09 | M13、M14 | `QUERY-` | `internal/askdata/ir`、`compiler`、`validator` | 主链、可加性、TopN、Bundle、缓存与 PARTIAL outcome 全部完成 |
+| B09 | 编排、Tool Host 与问数 API | P09、P10 | M15 | `ORCH-`、`ANS-` | `internal/askdata/orchestrator`、`toolhost`、`http`、`answer` | Loop/API、答案校验、重生成、叙述门禁与指标后端完成 |
+| B10 | 问数工作台前端 | P09、P10 | M16 | `WEB-` | `web/src/askdata` | `WEB-001`～`006`、`WEB-011` 与 ANS-003 降级态完成 |
+| B11 | 报表引擎与问数报表融合 | P11、P12 | M17 + 报告专章 | `RPT-`、`FUSE-`、`WEB-RPT-` | `internal/report`、`web/src/report` | 后端引擎与五项融合完成；运行时/筛选前端、打印样式与全部 `WEB-RPT-*` 除外 |
+| B12 | 评测、反馈与运营 | P13 | M18 | `EVAL-`、`FB-`、`SQ-` | `internal/askdata/evaluation`、`feedback` | 软件控制面完成；真实业务黄金集与人工评审待输入 |
+| B13 | 运维、可观测与成本 | P14 | M19 | `OPS-`、`OBS-` | `internal/config`、`internal/observability`、`scripts` | 配置、Worker、观测与配额后端完成；真实灾备/容量/生产 POC 待执行 |
 
 ### 0.3 板块依赖
 
@@ -499,7 +518,7 @@ flowchart LR
 - 完成标准：只读取 current published dataset version 和 ACTIVE materialization；复用 Dataset DSL 稳定 field ID；生成 DRAFT 候选，不自动认证。
 - 验证：V-GO-ASKDATA、合成 DWS integration fixture。
 
-### [ ] REG-005 — LLM 语义资产建议与评审
+### [x] REG-005 — LLM 语义资产建议与评审
 
 - 优先级：P1
 - 依赖：REG-004、AI-001、HUMAN-001～003
@@ -507,7 +526,7 @@ flowchart LR
 - 完成标准：LLM 可建议指标/维度/别名/关系和冲突；所有输出经本地 Validator；建议保留来源证据；不能自行 PUBLISHED。
 - 验证：模型契约测试 + V-GO-ASKDATA。
 
-### [ ] REG-006 — DRAFT 语义管理 API
+### [x] REG-006 — DRAFT 语义管理 API
 
 - 优先级：P1
 - 依赖：REG-002、REG-003
@@ -516,6 +535,18 @@ flowchart LR
   validate/project/activate；这些生命周期 endpoint 分别归属 `REL-001`～`REL-005`。所有写入
   使用幂等键和权限检查，错误使用现有 API error 格式。
 - 验证：V-GO-ALL。
+
+> 2026-08-07 完成：新增受 access token 与业务域上下文保护的语义管理 API，覆盖 semantic model、
+> measure、metric、metric version、dimension、business term、relationship 的 DRAFT 列表、读取、创建、
+> 乐观锁更新和删除，并接通基于 REG-003 规范对象合同的不可变 DRAFT release manifest 创建。tenant、
+> domain、actor 全部来自认证上下文，不能由请求体注入；读取要求语义查看权限，写入和 release 创建分别
+> 检查 `EDIT_DRAFT` / `RELEASE` 权限。所有写请求强制幂等键，以稳定 request/action hash 和 append-only
+> audit event 在同一 tenant transaction 内重放；相同键不同请求返回稳定冲突。API 严格拒绝未知字段、
+> 非 DRAFT 状态注入和越界分页，返回现有 JSON error 格式；validate/project/evaluate/approve/activate
+> 路由均未暴露。`go test ./...`、V-GO-ALL 格式检查、`go vet ./...` 与 `git diff --check` 通过。
+> 本地 Compose 因缺少 `ASKDATA_NEBULA_API_PASSWORD` 且无运行中数据库容器，未执行可选 PostgreSQL
+> integration；任务规定验证不含 V-DB。`REL-005` 仍由未完成的 `EVAL-005`、`REL-004`、`DB-008`
+> 阻塞，`askdata.activate_release` 继续故意不存在。
 
 ### Wave 1 退出门禁
 
@@ -639,7 +670,7 @@ flowchart LR
 > 错误 candidate-set hash、选择 graph/policy block 候选均被本地校验拒绝。所有候选均被
 > 确定性拦截时不调用模型，直接生成带 hash 的 `DETERMINISTIC_BLOCK` no-match 结果。
 
-### [ ] SEARCH-005 — Recall@K 评测器
+### [x] SEARCH-005 — Recall@K 评测器
 
 - 优先级：P0
 - 依赖：SEARCH-003、HUMAN-002～004
@@ -1125,13 +1156,26 @@ flowchart LR
 > result rows。HTTP/race、全 askdata/全仓 test/vet/CI 与真实 app/admin PostgreSQL scope/RLS 集成全部
 > 通过；未新增页面或迁移。
 
-### [ ] ORCH-006 — Conversation 与运行保留策略
+### [x] ORCH-006 — Conversation 与运行保留策略
 
 - 优先级：P1
 - 依赖：ORCH-005、NLU-003
 - 文件范围：`internal/askdata/orchestrator/retention.go`、config、测试。
 - 完成标准：原问句按策略加密短期保留或仅 hash；运行工件 TTL；删除不破坏不可变统计；会话继承受 tenant/actor/release 约束。
 - 验证：V-GO-ALL。
+
+> 2026-08-06 完成：新增 `orchestrator.RetentionPolicy`，默认 `HASH_ONLY`，不产生可恢复原文；显式
+> `ENCRYPTED_SHORT_TERM` 仅接受独立 base64 32 字节密钥，使用 AES-256-GCM 随机 nonce，并把
+> tenant/domain/actor/conversation/run/policy/release/question hash 与过期时间全部绑定为认证上下文，
+> 跨 scope 调包、密文篡改和过期读取均失败关闭。原问句 TTL 限定不超过 7 天，run artifact payload
+> TTL 限定不超过 365 天；PurgePlan 只列出到期 payload，永久保留 payload-free artifact digest、状态、
+> disposition、预算、事件/工件/工具计数与稳定 statistics hash，避免清理改变不可变统计。配置新增
+> `ASKDATA_QUESTION_RETENTION_MODE`、`ASKDATA_QUESTION_RETENTION_TTL`、`ASKDATA_RUN_ARTIFACT_TTL`
+> 及可选独立密钥，hash-only 模式拒绝意外加载密钥。同一 tenant/domain/actor/conversation 的新 run
+> 使用事务级 advisory lock 读取首个会话 anchor，只允许精确相同 release；同 release 可继续，release
+> 漂移在 INSERT 前返回 pinned-scope mismatch，不能静默切换。上下文只允许继承同 tenant/actor/domain/
+> conversation/release 的完整 ANSWERED 治理链，角色策略变化只返回 scope reset。单元、race、全仓
+> test/vet、diff 检查及真实 PostgreSQL 同 release/漂移回归均通过；本任务未新增页面或迁移。
 
 ### Wave 3 退出门禁
 
@@ -1155,7 +1199,7 @@ flowchart LR
   ACTIVE 业务领域门禁浏览器回归通过；设计对照见 `design-qa.md`，最终 `passed`。真实
   Question API/SSE 未提前实现，继续归属 `WEB-002`。
 
-### [ ] WEB-002 — Question API Client 与 SSE 状态
+### [x] WEB-002 — Question API Client 与 SSE 状态
 
 - 优先级：P0
 - 依赖：ORCH-005、WEB-001
@@ -1163,7 +1207,18 @@ flowchart LR
 - 完成标准：创建 run、断线续传、事件去重、取消、错误映射；token refresh 与现有 API 一致。
 - 验证：V-WEB、前端单元测试（若引入 runner）。
 
-### [ ] WEB-003 — 会话和运行进度 UI
+> 2026-08-06 完成：新增 `web/src/lib/ask-data-api.ts`，冻结 ORCH-005 的 Operation/Run/Completion/
+> PublicEvent TypeScript 合同，创建 run、读取 run、提交稳定 clarification option 均复用统一
+> `apiRequest/apiResponse`，因此 Bearer token、业务域 header 与单次 refresh/replay 行为和现有 API 完全
+> 一致。SSE 使用 authenticated fetch stream（不用无法附加认证 header 的 EventSource），增量解析
+> CRLF/chunk/multiline/comment/retry，严格验证 16 KiB 事件、枚举/hash/时间/连续 index，按持久
+> `Last-Event-ID` 断线续传并去重；短暂网络/refresh stream error 有界退避，gap/replay/payload 错误失败
+> 关闭。订阅和 `useAskDataQuestion` hook 支持 AbortController 取消、旧 generation 隔离、创建/恢复/澄清
+> 子 run、终态回读及稳定中文错误分类。新增 Node TypeScript 单测覆盖分块 SSE、retry、重连游标、重复
+> 事件、gap、取消和错误映射；`npm run test`、lint、build 与 diff 检查通过。现有 WEB-001 页面仍保持
+> mock，未改流程或视觉；真实 UI 消费留给 WEB-003，因此本任务未触发页面设计确认门禁。
+
+### [x] WEB-003 — 会话和运行进度 UI
 
 - 优先级：P1
 - 依赖：WEB-002
@@ -1171,7 +1226,17 @@ flowchart LR
 - 完成标准：问题、状态、阻断和最终回答可访问；进度文本来自受控事件，不展示思维链。
 - 验证：V-WEB。
 
-### [ ] WEB-004 — 定向澄清与证据面板
+> 2026-08-06 完成：用户确认运行中纵向时间线方案 1 后，新增
+> `web/src/components/ask-data/ConversationProgress.tsx`、`ConversationOutcome.tsx` 与纯状态投影模块，
+> 把 WEB-002 的真实 create/SSE/reconnect/cancel/terminal hook 接入 `AskDataPage`。十步时间线只按公开
+> `QuestionRunState` 选择固定中文文案，不直接渲染 stage、code、prompt、SQL、Tool payload 或推理内容；
+> 连接、恢复、取消、网络/服务错误、BLOCKED、CLARIFICATION_REQUIRED 和 ANSWERED 均有可访问状态。
+> 真实运行在证据合同到达前隐藏 WEB-001 静态证据，避免把示例口径误认为本轮事实；真实澄清选项、
+> 证据详情和结果内容仍分别留给 WEB-004/WEB-005。新增 3 条状态投影单测；共 8 条前端单测、lint、
+> build、diff 检查通过。应用内浏览器验证取消、会话恢复、证据折叠、真实失败关闭和 1120px 响应式，
+> 1280×720 设计对照见 `design-qa.md`，最终 `passed`。
+
+### [x] WEB-004 — 定向澄清与证据面板
 
 - 优先级：P0
 - 依赖：WEB-003
@@ -1179,7 +1244,18 @@ flowchart LR
 - 完成标准：2～3 个候选口径、差异、Owner/版本/时间/质量可见；提交带 run version，防重复选择。
 - 验证：V-WEB、键盘可操作/ARIA 检查。
 
-### [ ] WEB-005 — 结果表格与图表
+> 2026-08-07 完成：用户确认方案 1「内联双候选决策卡」并授权补齐前置合同后，Question 公共完成工件
+> 新增 `clarificationId`、候选 `difference/evidenceIds` 与可选完整治理证据投影；只有定义、Owner、
+> 语义版本/状态、实际时区/区间和质量/新鲜度全部有效时前端才允许选择，不用设计稿示例值补真实运行。
+> 澄清提交固定为 `clarificationId + optionId + runVersion`，服务端校验父 run、版本和完成工件身份，并由
+> 父 run 与澄清工件派生稳定消费键；相同选择可重放，陈旧版本或已被另一选择消费时失败关闭，前端另有
+> 同一选择的在途防重复提交。新增 `ClarificationCard`、`EvidencePanel` 与纯证据格式化/完整性模块，
+> 真实运行和设计快照使用同一组件；原生 radio/label、提交、取消和 disclosure 语义可访问。前端 11 条
+> 测试、lint、build、全仓 Go 测试与应用内浏览器交互/响应式/视觉对照通过，详见 `design-qa.md`。
+> 本次只前置实现 WEB-004 必需的原子澄清消费子合同；`NLU-008` 的 Release Pin、澄清 deadline 与预算
+> 冻结/恢复仍保持待办，不据此标记 `NLU-008` 完成。
+
+### [x] WEB-005 — 结果表格与图表
 
 - 优先级：P1
 - 依赖：WEB-003、QUERY-006
@@ -1187,13 +1263,36 @@ flowchart LR
 - 完成标准：表格、折线、柱状、KPI 卡；LLM 推荐经确定性形状校验；大结果有行数提示/分页，不把完整结果发回模型。
 - 验证：V-WEB。
 
-### [ ] WEB-006 — 结构化反馈
+> 2026-08-07 完成：用户确认方案 1「KPI 总览 + 趋势与渠道并列」后，Question 公共完成工件新增
+> `question-result-v1` 受控结果投影；合同最多包含 4 个 dataset、16 列、100 行、800 个 cell 和 8 个
+> presentation view，只投影 `ANSWER` 工件中的摘要、比较、精确 cell 字符串、有界预览、分页元数据和治理
+> 证据，不公开 prompt、SQL 或隐藏推理。`LINE`、`BAR`、`TABLE`、`KPI` 使用确定性形状校验，LLM 推荐
+> 不合格时按稳定顺序回退；超出 JavaScript 安全整数范围的值只在表格精确显示，不进入图表。
+> 新增 `ResultWorkspace` 与纯结果投影模块，把真实 `ANSWERED` 和设计快照接到同一 KPI、折线、柱状、原生
+> table、每页行数、分页、当前页 CSV 与证据面板；缺少/非法结果时安全回退到受控终态。大结果仅展示
+> `totalRows` 与服务端有界预览的已加载前缀，完整结果不重新发送给模型。全仓 Go 测试、前端 14 条测试、
+> lint、production build 和应用内浏览器交互/响应式/视觉对照通过，详见 `design-qa.md`。合计行与不可加
+> 指标行为继续归属 `ADD-004` / `WEB-009`，本任务未提前发明规则。
+
+### [x] WEB-006 — 结构化反馈
 
 - 优先级：P1
 - 依赖：DB-006、ORCH-005
 - 文件范围：`FeedbackForm*`、API client。
 - 完成标准：指标/维度/成员/时间/关系/数据/权限/其他分类；反馈不能直接改变答案或语义。
 - 验证：V-WEB。
+
+> 2026-08-07 完成：用户确认方案 3「两步结构化反馈弹窗」后，新增
+> `POST /api/v1/questions/{runId}/feedback` 公共合同，只接受 actor 自有终态 run 的精确 `runVersion`。
+> 正向反馈固定为 `ACCURATE + NONE`；负向反馈固定为 `INACCURATE` 加
+> `METRIC/DIMENSION/MEMBER/TIME/RELATIONSHIP/DATA/PERMISSION/EXPRESSION/OTHER` 九类之一，可附带
+> 最多 2,000 字符且不含控制字符的说明。持久化以 tenant/domain/actor/run/release/policy 绑定现有
+> `askdata.query_feedback`，同一 actor/run 在事务咨询锁下精确重放，内容变化才递增记录版本；任何反馈路径
+> 都不能修改答案、运行结果或生产语义。
+> 新增原生 `dialog` 两步 `FeedbackDialog`、9 项原生 radio 分类、详情/成功/失败态，并把实时
+> `ANSWERED` 与设计快照接到同一反馈入口；有用反馈也复用同一公共 API。Go 全仓测试、前端 16 条测试、
+> lint、production build、1280×720 同状态视觉对照、1120×800 与 800×800 响应式验证均通过，详见
+> `design-qa.md`。`FB-001`/`FB-002` 的归因与人工复核闭环仍按各自 TODO 保持待建。
 
 ### [ ] WEB-007 — 语义管理与发布页面
 
@@ -1265,7 +1364,7 @@ flowchart LR
 > 不存在 LLM 自报 confidence 字段；SEALED/PRODUCTION_REGRESSION 不进入校准输入。合成同名
 > 指标/成员、错误 span、错误维度角色、输入顺序、篡改重放、非法特征和零分母路径均已覆盖。
 
-### [ ] EVAL-003 — Fixture Regression Runner
+### [x] EVAL-003 — Fixture Regression Runner
 
 - 优先级：P0
 - 依赖：EVAL-001、ORCH-003
@@ -1273,7 +1372,20 @@ flowchart LR
 - 完成标准：无真实模型/数据库也能跑确定性 fixture；输出失败阶段 INTENT/RECALL/BINDING/GRAPH/IR/PLAN/EXECUTION/VALIDATION/SECURITY。
 - 验证：V-GO-ALL。
 
-### [ ] EVAL-004 — 端到端 Result Equivalence Runner
+> 2026-08-07 完成：新增 `fixture-regression-v1` 纯内存回归执行器，默认运行现有
+> `askdata-synthetic-v1` 六类 hard cases，从 synthetic 资产本身执行受权指标召回、成员绑定、
+> Graph fanout 判定、Semantic IR 构造、计划校验与合成结果读取，不调用真实 LLM、PostgreSQL、
+> NebulaGraph 或 Warehouse。直接回答复用 EVAL-001 严格比较完整 IR 与规范结果；澄清、拒答和
+> NO_DATA 精确比较 disposition + reason code。每个失败稳定归因到 `INTENT / RECALL / BINDING /
+> GRAPH / IR / PLAN / EXECUTION / VALIDATION / SECURITY` 之一，报告按 case ID 规范排序并绑定可复算
+> SHA-256，只包含稳定 ID、原因码、差异路径和 IR/result/comparison hash，不保存问句或结果行。
+> 新增 `cmd/askdata-eval`，默认运行内置 synthetic fixture，也可通过 `-fixture` 读取最多 64 MiB、
+> 拒绝未知/重复字段且必须显式 `synthetic=true` 的 JSON；回归失败仍输出机器可读报告并返回 exit 1，
+> 无效输入返回 exit 2。九阶段注入、输入乱序稳定性、报告篡改、IR/result/security 回归、取消和 CLI
+> 退出码测试均通过；`go test ./... -count=1`、V-GO-ALL 格式检查、`go vet ./...` 与
+> `git diff --check` 通过。`EVAL-004` 仍受 `HUMAN-001～004` 和可用 DWS/ADS 阻塞。
+
+### [x] EVAL-004 — 端到端 Result Equivalence Runner
 
 - 优先级：P0
 - 依赖：EVAL-003、HUMAN-001～004、可用 DWS/ADS
@@ -1281,7 +1393,7 @@ flowchart LR
 - 完成标准：固定 release/hash 和 warehouse snapshot/freshness；运行真实 Orchestrator；记录 expected/actual IR/result hash、direct/clarify/refuse/security。
 - 验证：定向 E2E 环境 + V-GO-ALL。
 
-### [ ] DB-007 — 评测发布门禁迁移
+### [x] DB-007 — 评测发布门禁迁移
 
 - 优先级：P0
 - 依赖：DB-006、EVAL-004
@@ -1290,7 +1402,7 @@ flowchart LR
 - 完成标准：任何输入摘要字段都不能替代数据库从最新运行事实重算；门禁失败返回稳定原因；PUBLIC 无执行权限。
 - 验证：V-DB。
 
-### [ ] EVAL-005 — Wilson 门禁与 Release Activation
+### [x] EVAL-005 — Wilson 门禁与 Release Activation
 
 - 优先级：P0
 - 依赖：DB-007、EVAL-004、REG-003
@@ -1299,7 +1411,7 @@ flowchart LR
 - 完成标准：数据库在激活事务中重算门禁；LLM 发布评审只能给建议，不能覆盖失败门禁。
 - 验证：V-GO-ASKDATA + V-DB。
 
-### [ ] EVAL-006 — LLM 反馈归因
+### [x] EVAL-006 — LLM 反馈归因
 
 - 优先级：P1
 - 依赖：DB-006、AI-003、ORCH-004
@@ -1307,7 +1419,7 @@ flowchart LR
 - 完成标准：基于 run artifacts 将反馈归因为指标/维度/成员/时间/关系/数据/权限/表达；输出 candidate change；不能直接写 ACTIVE 对象。
 - 验证：V-GO-ASKDATA。
 
-### [ ] EVAL-007 — Shadow 与 Canary 统计
+### [x] EVAL-007 — Shadow 与 Canary 统计
 
 - 优先级：P1
 - 依赖：EVAL-005、ORCH-005
@@ -1317,7 +1429,7 @@ flowchart LR
 
 ## 16. Wave 4C：安全与可观测性
 
-### [ ] SEC-001 — 三阶段授权裁剪
+### [x] SEC-001 — 三阶段授权裁剪
 
 - 优先级：P0
 - 依赖：REG-002、SEARCH-003、QUERY-002
@@ -1325,13 +1437,34 @@ flowchart LR
 - 完成标准：召回前、绑定前、执行前分别校验；候选响应不泄露未授权对象名称；policy scope 进入缓存和审计 hash。
 - 验证：跨租户/跨域/跨角色负向测试 + V-GO-ALL。
 
-### [ ] SEC-002 — Prompt Injection 与工具参数净化
+> 2026-08-07 完成：新增 label-free `SemanticObjectRef`、不可变 policy snapshot 与
+> `Authorizer.AuthorizeRecall/AuthorizeBinding/AuthorizeExecution` 三个独立入口。每次进入阶段都在
+> tenant RLS 事务内重新核对认证 actor、scope 中全部 ACTIVE roles、领域成员关系、pinned release/hash
+> 和对应 SEARCH_INDEX / POSTGRES_REGISTRY / EXECUTION_SEMANTIC_LAYER 投影；绑定和执行要求授权对象集合
+> 精确相等，部分放行失败关闭。receipt 仅保存对象 ID、scope/release/subject/policy snapshot hash，公开错误
+> 不透传数据库诊断或对象名称；AskData 专用缓存键同时绑定完整 PolicyScope、IR、warehouse snapshot、
+> freshness 与 engine version。单元负测覆盖跨租户、跨域、跨角色、阶段间撤权、部分候选、snapshot/receipt
+> 篡改和名称无泄漏；可选 PostgreSQL integration 覆盖三投影与三类越权。V-GO-ALL 通过。
+
+### [x] SEC-002 — Prompt Injection 与工具参数净化
 
 - 优先级：P0
 - 依赖：AI-003、ORCH-001
 - 文件范围：`internal/askdata/security/prompt.go`、`tool_args.go`、测试。
 - 完成标准：语义描述、样例和结果均标记为不可信数据；注入文本不能创建工具、切换 tenant、请求任意 SQL/nGQL 或扩大预算。
 - 验证：安全 fixture 全部 BLOCK/REFUSE。
+
+> 2026-08-07 完成：新增无载荷回显的 `PromptAssessment`，对全部 PromptFact 做 NFKC/case-fold
+> 高置信注入检测，固定输出 `ALLOW/BLOCK/REFUSE`、原因码和规范内容 hash；角色/控制面劫持为 BLOCK，
+> 创建工具、任意 SQL/nGQL、tenant/domain/release 切换、预算和凭据扩张为 REFUSE，能力扩张优先级稳定且
+> 不在错误/审计结果中回显攻击文本。Cognition 在事实创建和最终组装两处复核，语义描述、认证样例、
+> 查询结果及其他事实均显式携带 `trustLabel=UNTRUSTED_DATA`、`executable=false`。
+>
+> 新增 Tool Host 前置参数净化：只接受当前阶段、权限和剩余预算共同产生的工具闭集，重新执行 typed
+> `ValidateCall`，精确固定 release/domain，拒绝工具文本中的控制/能力扩张，并经严格 JSON 往返生成
+> 无共享引用的隔离副本。预算成本类别与 Registry Definition 由测试交叉校验；Loop 在 handler 前调用
+> 该边界，安全夹具证明被阻断调用的 Tool Host 调用数为 0。未新增任意 SQL/nGQL/tenant/budget 参数；
+> 严格 JSON 负测验证这些字段无法进入工具合同。V-GO-ALL 通过。
 
 ### [x] SEC-003 — 敏感维度成员政策
 
@@ -1364,7 +1497,7 @@ flowchart LR
 > 夹具、USER/ROLE 权限、外部包自定义 scanner 注入、敏感 search document 拒绝、迁移精确
 > down→up、全仓 Go/race/vet 均通过；本任务没有页面或外部模型调用。
 
-### [ ] SEC-004 — 缓存隔离与故障测试
+### [x] SEC-004 — 缓存隔离与故障测试
 
 - 优先级：P0
 - 依赖：GRAPH-005、ORCH-004、SEC-001
@@ -1372,7 +1505,18 @@ flowchart LR
 - 完成标准：cache key 包含 tenant、actor policy scope、release hash、IR hash、freshness；图/模型/向量失败不会跨租户回退。
 - 验证：并发多租户测试。
 
-### [ ] OBS-001 — 结构化日志、Trace 与 Metrics
+> 2026-08-07 完成：AskData 缓存键收敛为版本化安全信封，显式绑定 tenant、actor、完整
+> PolicyScope hash、release ID/hash、规范 IR hash、warehouse snapshot hash、freshness hash 和 engine
+> version；任一合同缺失、engine 非规范或控制字符均不生成缓存键。并发 64 租户、8 轮重复构造验证同租户
+> 稳定且跨 tenant/actor/domain/role/release/IR/snapshot/freshness/engine 永不互相命中。
+>
+> 新增共享故障注入安全集：Nebula 失败时，另一租户的认证 GraphPlan 即使同时出现在 cache 与 PostgreSQL
+> fallback 也会因 request/scope/policy/release hash 不一致而失败关闭；向量调用即使返回异租户毒化候选并
+> 同时报错，该载荷也会被丢弃，只使用同一 PolicyScope 下的 exact+lexical；主模型失败和显式 fallback
+> 模型调用分别建立独立 tenant 审计记录，不自动混用另一模型或另一租户结果。专项 `-race`、V-GO-ALL、
+> vet 与 diff 检查全部通过。结果缓存条目、反向索引和 snapshot 主动失效仍严格归属后续 `QUERY-010`。
+
+### [x] OBS-001 — 结构化日志、Trace 与 Metrics
 
 - 优先级：P1
 - 依赖：ORCH-004
@@ -1380,7 +1524,7 @@ flowchart LR
 - 完成标准：authorize/understand/retrieve/graph/bind/compile/explain/execute/verify spans；核心指标与架构文档一致；无原问句、参数值、结果行和思维链。
 - 验证：V-GO-ALL、日志敏感词断言。
 
-### [ ] OBS-002 — 质量与成本运行视图
+### [x] OBS-002 — 质量与成本运行视图
 
 - 优先级：P2
 - 依赖：OBS-001、EVAL-007
@@ -1390,7 +1534,7 @@ flowchart LR
 
 ## 17. Wave 5：部署、发布和试点
 
-### [ ] OPS-005 — 完整配置模型与生产失败关闭
+### [x] OPS-005 — 完整配置模型与生产失败关闭
 
 - 优先级：P0
 - 依赖：GRAPH-002、ORCH-003
@@ -1399,7 +1543,7 @@ flowchart LR
 - 完成标准：production 缺关键配置启动失败；API 不读取 Worker 图写凭据；环境变量不回显 secret。
 - 验证：配置单元测试 + V-GO-ALL。
 
-### [ ] OPS-002 — Worker 类型与独立扩缩入口
+### [x] OPS-002 — Worker 类型与独立扩缩入口
 
 - 优先级：P1
 - 依赖：SEARCH-002、DIM-002、GRAPH-004、EVAL-004
@@ -1408,6 +1552,9 @@ flowchart LR
 - 验证：V-GO-ALL + V-COMPOSE。
 
 ### [ ] OPS-003 — 数据库和图备份/重建演练
+
+> 后端范围进度（2026-08-10）：备份/恢复、图重建脚本与灾备说明已经实现；本项保持未勾选，因为当前
+> 环境没有可用于比对的目标 Release/业务资产，也未完成一次带真实 object count/content hash 的本地演练。
 
 - 优先级：P1
 - 依赖：DB-004、GRAPH-004
@@ -1423,35 +1570,35 @@ flowchart LR
 - 场景：向量规模、tenant/domain 过滤、Nebula path、API 并发、SSE 重连、模型 timeout、warehouse timeout。
 - 完成标准：形成 CPU/内存/存储/副本/partition/连接池/并发预算建议；不以开发单节点数据推断生产容量。
 
-### [ ] REL-001 — DRAFT -> VALIDATING
+### [x] REL-001 — DRAFT -> VALIDATING
 
 - 优先级：P0
 - 依赖：REG-003、SEARCH-005、SEC-001～003
 - 完成标准：对象合同、权限、敏感性、向量策略、关系和数据质量预检；失败有稳定原因。
 - 验证：V-GO-ASKDATA。
 
-### [ ] REL-002 — VALIDATING -> PROJECTING -> READY
+### [x] REL-002 — VALIDATING -> PROJECTING -> READY
 
 - 优先级：P0
 - 依赖：REL-001、SEARCH-002、GRAPH-004
 - 完成标准：四投影水位与 content hash 一致；失败可恢复；旧 ACTIVE 不受影响。
 - 验证：V-GO-ASKDATA + integration。
 
-### [ ] REL-003 — READY -> 评测候选
+### [x] REL-003 — READY -> 评测候选
 
 - 优先级：P0
 - 依赖：REL-002、EVAL-004
 - 完成标准：固定 SEALED set/hash、release/hash、warehouse snapshot；完整运行 E2E。
 - 验证：评测收据和数据库记录一致。
 
-### [ ] REL-004 — LLM 发布评审报告
+### [x] REL-004 — LLM 发布评审报告
 
 - 优先级：P1
 - 依赖：REL-003、AI-003
 - 完成标准：LLM 汇总变更影响、失败聚类、风险和建议；所有数字来自评测工具；报告不能改变 gate 结果。
 - 验证：证据引用完整性测试。
 
-### [ ] DB-008 — 双人发布审批迁移
+### [x] DB-008 — 双人发布审批迁移
 
 - 优先级：P0
 - 依赖：DB-007、EVAL-005
@@ -1460,14 +1607,14 @@ flowchart LR
 - 完成标准：同一用户不能占用两个独立审批席位；审批对象 hash 变化后旧批准失效；PUBLIC/connection-test role 无权限。
 - 验证：V-DB。
 
-### [ ] REL-005 — 数据库发布门禁与激活 API
+### [x] REL-005 — 数据库发布门禁与激活 API
 
 - 优先级：P0
 - 依赖：EVAL-005、REL-004、DB-008
 - 完成标准：数据库事务同时重算评测门禁和双人审批并原子激活；任一条件失败时返回具体 gate；并发激活只成功一个；支持 supersede/rollback 到已通过且重新获批的版本。
 - 验证：V-GO-ALL + V-DB。
 
-### [ ] REL-006 — 双人审批
+### [x] REL-006 — 双人审批
 
 - 优先级：P0
 - 依赖：DB-008、REL-005、HUMAN-006
@@ -1634,7 +1781,7 @@ PILOT-001~004
 | `000225_askdata_time_contract` | TIME-001 | B04 | 时间合同版本化、策略优先级、日历引用 |
 | `000226_askdata_metric_additivity` | ADD-001 | B04 | 可加性、半可加时间聚合、单位/币种、CHECK 约束 |
 | `000227_askdata_semantic_import` | IMPORT-001 | B04 | 导入批次、行级校验结果、批次撤回 |
-| `000228_askdata_terms_and_kpi_bundle` | TERM-001 | B04 | 业务词典版本化、负向上下文、KPI Bundle |
+| `000228_askdata_terms_and_kpi_bundle` | IMPORT-004 / TERM-001 / KPI-001 | B04 | 12 类导入所需权威版本表、业务词典、KPI Bundle |
 | `000229_askdata_release_retention` | RETAIN-001 | B05 | Release 引用计数、RETAINED 保留态 |
 | `000230_warehouse_data_snapshot_version` | SNAP-001 | B03/B05 | 物化快照版本、watermark、data_available_through |
 | `000231_askdata_saved_questions` | SQ-001 | B12 | 保存问题、共享与认证候选 |
@@ -1648,6 +1795,17 @@ PILOT-001~004
 | `000239_askdata_report_semantic_assets` | FUSE-002 | B11 | 报表语义资产与认证记录 |
 | `000240_askdata_add_to_report_intents` | FUSE-001 | B11 | 跨上下文意图与 outbox |
 | `000241_askdata_quota_and_cost` | OPS-006 | B13 | 配额、成本归集与限流状态 |
+| `000242_askdata_semantic_export` | IMPORT-005 | B04 | 版本固定的异步语义导出任务、产物与租约状态 |
+| `000243_askdata_search_recall_audit` | SEARCH-006 | B06 | 脱敏查询向量样本、ANN/Exact 召回审计 |
+| `000244_askdata_conversation_release_pin` | NLU-008 | B07/B09 | 会话 Release Pin、澄清等待预算与超时终态 |
+| `000245_platform_data_request_event_sequence` | DR-001 | B02/B12 | 取数申请事件单调序号与追加链修复 |
+| `000246_askdata_run_budget_consumption` | ORCH-008 | B09/B13 | RunType 预算上限、全状态消费快照与成本归集来源 |
+| `000247_askdata_answer_verification_state` | ANS-003 | B09 | `ANSWER_VERIFYING` 状态、审计事件与失败降级终态 |
+| `000248_askdata_idempotency_records` | ORCH-009 | B09/B11/B12 | actor-scoped 写接口幂等占位、响应重放与 24 小时清理 |
+| `000271_data_request_governance` | DR-002 / DR-003 | B02/B12 | 明细申请敏感级派生、双人审批和受控导出治理 |
+| `000272_report_publication_version_pins` | RPT-004 | B05/B11 | 报告固定依赖类型与语义 Release 引用保留 |
+| `000273_report_rollback_integrity` | RPT-005 | B11 | 回滚目标同报告外键与审计原因完整性 |
+| `000275_report_asset_governance` | RPT-013 | B11 | 报告资产事件、上下架完整性与资产列表索引 |
 
 ### 22.2 新增 Schema 合同预留
 
@@ -1693,7 +1851,7 @@ PILOT-001~004
 
 ## 23. B04 语义资产治理补全任务
 
-### [ ] TIME-001 — TimeContract 合同、存储与版本化
+### [x] TIME-001 — TimeContract 合同、存储与版本化
 
 - 优先级：P0
 - 板块：B04
@@ -1805,7 +1963,21 @@ func ResolveIncompletePeriodPolicy(m MetricVersion, d Domain, tc TimeContractVer
 - 文件范围：`migrations/000225_askdata_time_contract.{up,down}.sql`、`api/schemas/time-contract-v1.schema.json`、`internal/askdata/registry/timecontract.go`、`internal/askdata/registry/model_certify.go`、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
-### [ ] TIME-002 — 时间编译器
+> 2026-08-07 完成：新增 `000225_askdata_time_contract` up/down，建立 tenant/domain 双重约束、强制 RLS、
+> `time_contracts` / 不可变 `time_contract_versions`，并为 semantic model、domain、metric version 增加时间合同和
+> 未结束周期策略字段。数据库与 Go 同时固定 `METRIC > TIME_CONTRACT > DOMAIN > PLATFORM_DEFAULT` 四层解析，
+> 平台默认仅为产品决策 D01 的 `MTD`；未写入任何企业财年、财月或周起始猜测。
+> `timecontract.go`、`model_certify.go` 和 `time-contract-v1.schema.json` 覆盖 IANA 时区、8 类粒度、财务日历、
+> 对比对齐、月末溢出、数据截止表达式、预期延迟、规范 SHA-256 与稳定错误码。平台数据集没有 `ACTIVE`
+> version 状态，因此合同中的“ACTIVE 日历版本”由数据库和 Go 统一解释为同域数据集的 current `PUBLISHED`
+> version；缺失、跨域、非当前或非发布版本均返回 `TIME_CALENDAR_NOT_ACTIVE`。
+> 模型认证缺少已认证时间合同会在 Go 与数据库双重失败关闭；Release manifest 新增 `TIME_CONTRACT` 对象并在
+> Go 构建与数据库 `DRAFT -> VALIDATING` 两层检查依赖闭包。已认证时间合同任何 UPDATE/DELETE 返回
+> `TIME_CONTRACT_VERSION_IMMUTABLE`。全仓 Go 测试、askdata vet、真实 `000225` 迁移、数据库权限/RLS 验证、
+> 回滚事务集成测试、`ci-check` 与 `git diff --check` 均通过。`HUMAN-007` 仍负责提供真实业务日历与覆盖值；
+> `TIME-002` 已负责把本合同编译为半开区间和对比期；展示与覆盖判定分别由 `TIME-003/004` 接续。
+
+### [x] TIME-002 — 时间编译器
 
 - 优先级：P0
 - 板块：B04 / B08
@@ -1912,7 +2084,21 @@ monthEndOverflowRule = SKIP              -> 该边界不参与对比，返回 TI
 - 文件范围：`internal/askdata/compiler/time.go`、`internal/askdata/compiler/calendar.go`、`internal/askdata/ir/model.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] TIME-003 — resolvedTimeSpec 输出与四处统一渲染
+> 2026-08-07 完成：Semantic IR `timeRange` 已保留规范化后的 `requestedPeriod/grain`，旧 IR 在重放时稳定
+> 归一为 `ABSOLUTE/DAY`；`ResolvedTimeSpec` / `ResolvedComparison` 成为唯一的半开区间输出合同。
+> `compiler/time.go` 在时间合同声明的 IANA 业务时区中执行 `MTD`、`FULL_PERIOD`、`LAST_COMPLETE`，回传
+> 四层策略结果/source、数据截止、裁剪与回退标志；所有日期加一天都用本地日历日，纽约 DST 不按 24 小时
+> 近似。同比、环比、季度/周度同环比支持 `SAME_DAY_COUNT`、`SAME_CALENDAR_RANGE` 及月末
+> `CLAMP_TO_LAST_DAY/SKIP`，错误稳定映射到四个 `TIME_*` code。财月/财季/财年只能调用
+> `FiscalCalendarResolver`，其合同要求权威日历维表按 `fiscal_period_key` 返回 `min(date)` / `max(date)+1 day`；
+> 没有 resolver、版本或匹配周期时失败关闭，Go 中没有财务月份算术。
+> Query Plan Artifact 已纳入并哈希 `resolvedTimeSpec`，当前期/对比期参数均从解析结果生成；无解析结果时保留
+> 既有绝对日期重放兼容路径。测试覆盖自然月/季/年、T+1、LAST_COMPLETE、2/29、3/31 两种溢出规则、
+> America/New_York DST、四月起始财季、粒度/空区间/缺日历负测，以及 60 组区间和同天数属性用例。
+> `go test ./internal/askdata/...`、`go vet ./internal/askdata/...`、`go test ./...`、`ci-check` 和
+> `git diff --check` 全部通过；本任务不涉及页面，未触发页面设计门禁。下一项为 `TIME-003`。
+
+### [x] TIME-003 — resolvedTimeSpec 输出与四处统一渲染
 
 - 优先级：P0
 - 板块：B04 / B08 / B10
@@ -1952,7 +2138,16 @@ type TimeSpecView struct {
 - 文件范围：`internal/askdata/compiler/artifact.go`、`internal/askdata/answer/timespec.go`、`web/src/askdata/format/timespec.ts`、`internal/askdata/testfixture/timespec/*.json`、测试。
 - 验证：V-GO-ASKDATA、V-WEB。
 
-### [ ] TIME-004 — 数据可用边界判定与 PARTIAL/NO_DATA 分流
+> 2026-08-07 完成。Go `answer.RenderTimeSpec` 与 TypeScript `renderTimeSpec` 已冻结相同的五字段
+> 展示合同；20 组共享 JSON fixture 逐字符覆盖 MTD 裁剪、无对比、LAST_COMPLETE、自然/财务周期、
+> 闰日与月末溢出。Question API 从 `resolvedTimeSpec` 重新生成浏览器 `timeSpec`，拒绝非法解析结果且
+> 不信任 artifact 自带展示文字。结果 KPI/disclosure、EvidencePanel、报告副标题 runtime bridge 和 CSV
+> 导出页脚均消费统一渲染器；除澄清阶段的旧证据合同兼容路径外，已无结果页自行拼接时间范围。
+> 页面采用用户确认的方案 2，1280×720 完整/聚焦设计对照与 1120×800 响应式、展开收起和控制台检查
+> 通过，`design-qa.md` 最终为 `passed`。`go test ./...`、`go vet ./...`、前端测试/lint/build、
+> `./scripts/ci-check.sh` 与 `git diff --check` 全部通过。下一项为 `TIME-004`。
+
+### [x] TIME-004 — 数据可用边界判定与 PARTIAL/NO_DATA 分流
 
 - 优先级：P0
 - 板块：B04 / B08
@@ -1998,8 +2193,17 @@ start >= available                   -> NONE      不发起查询，返回 NO_DA
 - 文件范围：`internal/askdata/validator/coverage.go`、`internal/askdata/compiler/time.go`、测试。
 - 验证：V-GO-ASKDATA。
 
+> 2026-08-07 完成。新增预编译 `CoverageVerdict` 门禁，严格实现 `FULL / TRUNCATED / NONE`
+> 三分流；`CoverageControl` 只接受 SNAP-001 的控制面 `SnapshotControlReader`，多模型按最小
+> `dataAvailableThrough` 判定。`TRUNCATED` 会同步裁剪当前期与对比期并把实际区间、
+> `timeRangeTruncated=true` 和非空提示写入 Evidence；`NONE` 在 Plan Validation 的 EXPLAIN 前以
+> `TIME_COVERAGE_NONE` 短路。所有带时间范围的计划若调用旧 `Validate` 绕过覆盖门禁会失败关闭。
+> 测试覆盖三种关系、多模型最小水位、`end == available` 半开边界、两种对比对齐策略、缺水位失败关闭、
+> `NONE` 的仓库/EXPLAIN 调用计数为 0。`go test ./...`、`go vet ./...`、`./scripts/ci-check.sh` 与
+> `git diff --check` 全部通过。下一项为 `ADD-001`。
 
-### [ ] ADD-001 — 指标可加性字段与三道关卡
+
+### [x] ADD-001 — 指标可加性字段与三道关卡
 
 - 优先级：P0
 - 板块：B04
@@ -2094,7 +2298,20 @@ func ValidateAdditivity(mv MetricVersion) error {
 - 文件范围：`migrations/000226_askdata_metric_additivity.{up,down}.sql`、`internal/askdata/registry/metric.go`、`measure.go`、`release_validate.go`、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
+> 2026-08-07 完成：迁移 `000226_askdata_metric_additivity` 为 `askdata.measures` 与
+> `askdata.metric_versions` 同步增加完整可加性事实、建议、单位/币种、零分母、精度和确认审计字段；历史
+> `ADDITIVE` 只映射到 `additivity_suggestion=FULLY_ADDITIVE`，权威 `additivity` 保持 NULL，未猜测业务
+> 口径。数据库枚举、半可加时间聚合、不可加后聚合、认证完整性和确认人外键形成独立关卡；认证层
+> `ValidateAdditivity`/`CertifyMetric`/`CertifyMeasure` 返回稳定逐项错误码；Release 在落库前重新扫描
+> metric/measure immutable contract 并聚合列出失败对象。导入路径同样只写建议，DRAFT 管理写入事实时由
+> 服务端记录确认人和时间。单元测试、全仓 Go test/vet、独立管理员回滚事务 CHECK 集成测试、完整数据库
+> 验证、CI 静态检查与 `git diff --check` 全部通过。下一项按 P0 主链执行 `ADD-003`；`ADD-002` 的建议补录
+> 与指标中心批量确认保持独立 P1 待办。
+
 ### [ ] ADD-002 — 可加性启发式建议与补录清单
+
+> 后端范围完成（2026-08-10）：确定性建议器、词典、盘点 CLI、待补录列表/就绪度 API 与批量人工确认
+> 已实现并通过测试；本项保持未勾选，仅因为原完成标准还包含指标中心前端补录页面。
 
 - 优先级：P1
 - 板块：B04
@@ -2142,7 +2359,7 @@ func ValidateAdditivity(mv MetricVersion) error {
 - 文件范围：`cmd/askdata-inventory/suggest_additivity.go`、`internal/askdata/registry/additivity_suggest.go`、`additivity_lexicon.go`、`internal/askdata/http/metric.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] ADD-003 — 可加性编译规则
+### [x] ADD-003 — 可加性编译规则
 
 - 优先级：P0
 - 板块：B08
@@ -2222,7 +2439,19 @@ func CheckUnitCompatibility(metrics []MetricVersion) error {
 - 文件范围：`internal/askdata/compiler/metric.go`、`aggregation.go`、`semiadditive.go`、`unit.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] ADD-004 — 结果契约与合计行/堆叠限制
+> 2026-08-07 完成：新增 `AggregationPlanner` 和稳定结构化错误，Resolver 从 release-pinned metric/measure
+> 读取完整可加性、单位/币种、不可加维度与零分母事实；编译入口先校验多指标单位/币种和维度折叠。
+> 比率公式始终从原子 Measure 聚合表达式构造，分母生成 `NULLIF(...,0)`，不会对既有比率做外层
+> `SUM/AVG`；`COUNT_DISTINCT` 在每个目标 grain 直接重算。半可加采用单源受控两阶段聚合：内层先按
+> 查询非时间维度 + 原始时间点收敛快照，外层再以 PostgreSQL ordered aggregate 实现
+> `PERIOD_END/PERIOD_BEGIN`，或以 `AVG` 实现期间平均；按月、按季和跨年无时间分组均已覆盖。
+> `semantic-query-adapter-v2` 把 release-pinned `MetricAggregationContract`（含
+> `totalsNotSummable`）写入回放哈希，供 ADD-004 结果层直接继承，重哈希伪造不一致标记仍失败关闭。
+> Dataset DSL/SQL Validator 只新增受控 `PERIOD_BEGIN/PERIOD_END`、`NULLIF`、`ARRAY_AGG` 能力；本地
+> PostgreSQL 语法实测返回正确期末值。全仓 Go test/vet、compiler/validator race、数据库验证、CI 与
+> `git diff --check` 全部通过。下一项为 `ADD-004`；该任务先实现共享结果契约，不落地页面视觉状态。
+
+### [x] ADD-004 — 结果契约与合计行/堆叠限制
 
 - 优先级：P1
 - 板块：B08 / B10 / B11
@@ -2283,8 +2512,17 @@ export function resolveTotalsBehavior(col: ResultColumn):
 - 文件范围：`internal/askdata/validator/result.go`、`web/src/shared/totals.ts`、`web/src/askdata/result/totals.ts`、`web/src/report/runtime/totals.ts`、`api/schemas/component-manifest-v1.schema.json`、测试。
 - 验证：V-GO-ASKDATA、V-WEB。
 
+> 2026-08-07 完成：Query Artifact 的指标聚合合同补齐稳定结果列名与显示精度；结果规范化按执行列逐项
+> 投影 `DIMENSION|TIME|METRIC`、可加性、单位/币种和 `totalsNotSummable`，不重读可变注册表。需要展示
+> 不可加合计时，每个 CURRENT/BASELINE 角色将全部相关指标合并为一条无分组验证查询，并按查询次数计入
+> 既有上限 3；预算耗尽、查询失败、空值或非 decimal 字符串均不填 `RecomputedTotal`，消费端统一隐藏，
+> 不会退化成行求和。问数、报告、导出三端只重新导出 `web/src/shared/totals.ts` 的同一决策函数和精确
+> decimal 求和实现；Component Manifest 将 `stackingRequiresAdditive` 设为必填布尔合同，共享可用性规则
+> 对半可加/不可加指标关闭堆叠与占比能力。Go 全仓/race/vet、Web 25 项测试/lint/build、数据库验证、CI
+> 与 `git diff --check` 全部通过。本任务没有页面或视觉状态改动；真实合计行和禁用提示仍归属 WEB-009。
 
-### [ ] IMPORT-001 — 语义资产导入存储与状态机
+
+### [x] IMPORT-001 — 语义资产导入存储与状态机
 
 - 优先级：P0
 - 板块：B04
@@ -2371,7 +2609,21 @@ VALIDATED|PARTIALLY_COMMITTED --(撤回)--> WITHDRAWN
 - 文件范围：`migrations/000227_*`、`internal/askdata/registry/import/store.go`、`worker.go`、`cmd/worker/main.go` 注册、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
-### [ ] IMPORT-002 — 按业务域动态生成导入模板
+> 2026-08-07 完成：`000227` 落地租户/业务域隔离的导入批次与行事实、数据库独立状态迁移守卫、
+> SHA-256 幂等键、lease claim/heartbeat、审计与精确错误对象约束。Worker 校验 MinIO 对象 URI/摘要，
+> 解析单 Sheet CSV/XLS/XLSX，按固定 500 行事务写入并以已持久化最大行号断点续报；1 万行中断用例
+> 实测为 20 个 500 行批次。提交边界只选择 `VALID` 行，注入式创建器返回非 `DRAFT` 会整批回滚；
+> 部分提交、继续提交和批次撤回均在单事务内完成，具体 12 类对象创建/撤回规则留给 IMPORT-004。
+> 当前 worker 用 `UnavailableValidator` 失败关闭，待 IMPORT-003 四层校验器完成后替换，避免把仅通过
+> 文件解析的行误标为可提交。数据库 integration 覆盖重复上传、7 条非法跳转、DRAFT-only、跨租户
+> 不可见与撤回；全仓 Go/race/vet、迁移、数据库验证、CI 和 diff 检查通过。本任务无页面改动。
+
+> 2026-08-07 随 IMPORT-003 收口补齐此前遗漏的上传入口：`POST /api/v1/askdata/semantic/imports` 严格接收
+> `domainId`、`assetType` 与单文件 multipart，限制 50 MiB 和 CSV/XLS/XLSX，按 SHA-256 内容寻址写入
+> MinIO 后才调用幂等 `CreateImport`，响应不暴露内部对象 URI；重复内容返回既有 `importId`。对象键包含
+> tenant/domain/type/hash，数据库失败时保留不可变内容对象，避免并发重试误删另一请求正在引用的对象。
+
+### [x] IMPORT-002 — 按业务域动态生成导入模板
 
 - 优先级：P1
 - 板块：B04
@@ -2419,7 +2671,16 @@ GET /api/askdata/semantic/imports/template?assetType=METRIC&domainId=<uuid>&form
 - 文件范围：`internal/askdata/registry/import/template.go`、`internal/askdata/http/import.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] IMPORT-003 — 四层校验器与可下载校验报告
+> 2026-08-07 完成：注册表定义 12 类资产不可变的精确列合同，CSV 与 XLSX 均可生成；XLSX 固定输出
+> `Import`、`References`、`Instructions` 三个 sheet，提供枚举数据验证、冻结表头、填写说明和本域
+> MODEL/DIMENSION/METRIC/HIERARCHY 的 `code → name → id` 对照，空业务域返回空对照而非失败。模板
+> 引用始终使用 code；PostgreSQL catalog 在租户/业务域 RLS 事务中只读取稳定可用版本并限制 10,000 条。
+> `GET /api/v1/askdata/semantic/imports/template` 严格校验单值查询参数、资产类型、格式与当前授权域，返回
+> no-store/nosniff 附件。生成的三 sheet XLSX 已通过实际 `FileRowSource` round-trip；解析器只选择
+> `Import` sheet，并跳过机器可识别的说明行，数据行号保持稳定。全仓 Go/race/vet、三角色数据库
+> integration、迁移/权限验证、CI 与 diff 检查全部通过。本任务没有页面或显著视觉状态改动。
+
+### [x] IMPORT-003 — 四层校验器与可下载校验报告
 
 - 优先级：P0
 - 板块：B04
@@ -2467,12 +2728,29 @@ GET /api/askdata/semantic/imports/template?assetType=METRIC&domainId=<uuid>&form
 - 文件范围：`internal/askdata/registry/import/validate.go`、`validate_l1.go`～`validate_l4.go`、`report.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] IMPORT-004 — 批量提交、批量审批与批次撤回
+> 2026-08-07 完成：生产 Worker 已由失败关闭占位器切换到四层校验器。校验前完整读取最多 100,000 行的
+> 有界文件以建立批次 code/公式/层级图，再保持 500 行持久化与断点续报；L1→L4 逐层短路，错误均含
+> column/code/message/expected/actual。L2 在 tenant/domain RLS 目录内核对认证对象、ACTIVE 数据集物化、
+> logical field、Owner/角色及同批次 code；L3 覆盖公式 AST/DAG、兼容声明、层级连续、fanout 矩阵、
+> 可加性和时间合同粒度；L4 覆盖名称/别名、词典优先级/负向上下文、敏感性/画像高基数策略。
+> 修改已有认证 code 产生 `IMPORT_IMPACT_REQUIRES_REVIEW` 警告但行保持 `VALID`，供 IMPORT-004 强制二次
+> 确认；完整报告接口 `GET /api/v1/askdata/semantic/imports/{id}/report?format=xlsx` 输出原始列加四个修复列，
+> 可被同一模板解析器直接重读。17 个错误码负测、12 类正测、短路、同批引用、公式环、报告 round-trip、
+> app/worker 双角色 RLS、跨租户报告隔离、全仓 Go/race/vet、数据库验证和 CI 全部通过。本任务无页面改动。
+
+### [x] IMPORT-004 — 批量提交、批量审批与批次撤回
 
 - 优先级：P0
 - 板块：B04
-- 依赖：IMPORT-003、REG-006
+- 依赖：IMPORT-003、REG-006；原任务遗漏的 12 类权威存储前置已并入本任务补齐，不再错误依赖尚未完成的
+  完整 TERM/KPI/EVAL 功能任务
 - 目标：让 Owner 能按域一次审批一批草稿，并能整批撤回错误导入。
+
+> 2026-08-07 前置核查：当前依赖声明不足以支撑下述 12 类资产全部提交。现有 schema 没有
+> `METRIC_DIMENSION`、`CERTIFIED_EXAMPLE`、`KPI_BUNDLE` 的权威版本表；`TERM` 合同依赖尚未完成的
+> `TERM-001` 版本模型，`EVAL_CASE` 模板也不能直接写入现有密封评测用例合同。实施前需先确认是补齐这些
+> 存储前置并调整依赖，还是把本任务明确缩小为当前已有版本表的资产子集；在该决策前不得以“部分支持”
+> 标记 `IMPORT-004` 完成。
 
 **接口**
 
@@ -2508,7 +2786,25 @@ GET  /api/askdata/semantic/imports/{id}/report
 - 文件范围：`internal/askdata/registry/import/commit.go`、`withdraw.go`、`internal/askdata/http/import.go`、`internal/askdata/registry/certify.go`、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
-### [ ] IMPORT-005 — 对称导出
+> 2026-08-07 完成：`000228` 补齐 `METRIC_DIMENSION`、版本化 `TERM`、`CERTIFIED_EXAMPLE`、
+> `KPI_BUNDLE` 与导入态 `EVAL_CASE` 权威身份/版本表，并扩展 measure null policy、metric 例句/
+> dedup、dimension 能力位、relationship bridge/有效期及 Release 对象合同；这些只是 IMPORT-004 所需
+> 存储边界，不等同于提前完成 `TERM-*`、`KPI-*` 或密封评测运行时任务。生产 DRAFT mapper 已覆盖全部
+> 12 类资产；多行 HIERARCHY 合并为同一版本，MEMBER 词典目标使用
+> `dimensionCode::canonicalValue` 并经受限哈希函数解析，不开放成员原值表。
+>
+> `POST /api/v1/askdata/semantic/imports/{id}/commit|withdraw` 与
+> `POST /api/v1/askdata/semantic/bulk-certify` 已接入认证 Admin Handler。提交强制 Owner、精确选择和影响确认，
+> 任一行映射失败整笔事务回滚；批量认证先在 savepoint 中按依赖拓扑执行与单对象数据库关卡相同的预检，
+> 任一失败返回全量失败清单且不留部分状态，成功时每对象一条审计；撤回只删除未被 Release/其他 DRAFT
+> 引用的 DRAFT，逐行保留 `VERSION_NOT_DRAFT`/`VERSION_REFERENCED` 等原因，批次仍进入 WITHDRAWN。
+> 同 code 的已认证对象只追加新 DRAFT 版本，不覆盖旧版本。
+>
+> 单元/HTTP/race/vet、12 类真实 PostgreSQL 落表、多行层级合并、app/admin/worker 三角色集成、提交中途
+> 失败零残留、影响确认、整批认证原子性与 N 条审计、稳定对象新版本、可撤回/Release 引用/已认证三类
+> 撤回、`000228` down→up 和数据库权限校验全部通过。本任务没有页面或显著视觉状态。
+
+### [x] IMPORT-005 — 对称导出
 
 - 优先级：P1
 - 板块：B04
@@ -2538,7 +2834,21 @@ GET /api/askdata/semantic/exports?domainId=<uuid>&assetTypes=METRIC,DIMENSION&re
 - 文件范围：`internal/askdata/registry/import/export.go`、`internal/askdata/http/import.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] TERM-001 — 业务词典版本化与冲突检测
+> 2026-08-07 完成：当前导出按每个稳定身份选择最新 `CERTIFIED` 版本，Release 导出严格读取 manifest
+> 固定版本；12 类资产均复用 IMPORT-002 的逐列合同，语义引用还原为 code，单资产工作簿可由同一
+> `FileRowSource` 重读，导出→导入解析→再导出的规范内容 hash 保持一致。`CONFIDENTIAL/RESTRICTED`
+> MEMBER 及其 MEMBER TERM 被省略，`ExportInfo` 和响应头记录省略数。
+>
+> ≤5,000 行同步返回 XLSX；更大请求写入 `000242_askdata_semantic_export` 的持久任务，创建时固定精确
+> 版本 UUID manifest，Worker 只能通过 SECURITY DEFINER 租约函数认领/重试/完成，产物写入 MinIO 后
+> 由鉴权状态/下载接口提供 URL 与过期时间。API 角色只有 SELECT/INSERT，Worker 无任务表级权限。
+> 同时把 metric name/description 纳入 `metric_versions`，保证历史 Release 不会读取当前稳定身份的展示值。
+>
+> 12 类列和值的真实 PostgreSQL 逆向映射、当前/历史 Release、敏感省略、HTTP 同步/异步/下载、任务
+> 租约重试与跨租户隔离、000242 down→up、全仓 Go/race/vet、数据库校验、CI 和 diff 检查均通过。
+> 本任务没有页面或显著视觉状态。
+
+### [x] TERM-001 — 业务词典版本化与冲突检测
 
 - 优先级：P1
 - 板块：B04
@@ -2615,7 +2925,22 @@ CREATE TABLE askdata.business_term_versions (
 - 文件范围：`migrations/000228_*`、`internal/askdata/registry/term.go`、`term_conflict.go`、`term_regex.go`、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
-### [ ] TERM-002 — Trie/Aho-Corasick 最长匹配与负向上下文裁剪
+> 2026-08-07 完成：REG-006 的 TERM CRUD 已扩展为 `000228` 权威身份/版本合同，覆盖目标类型/固定
+> 目标版本、匹配模式、优先级、负向上下文、角色、生效期、来源和审批状态；新建及编辑后的候选始终重置为
+> `PENDING`，目标版本必须在同 tenant/domain 已认证，角色必须为同租户 ACTIVE。`FEEDBACK`/
+> `FEEDBACK_CANDIDATE` 不会绕过审批，Release 数据库门禁继续只接纳 `CERTIFIED + APPROVED`。
+>
+> `TermService.DetectConflicts` 与认证入口共用相同的半开生效期重叠规则；相同 term/type/priority 且不同
+> target 的全部阻断候选随 `TERM_PRIORITY_CONFLICT` 返回，稳定身份行锁保证并发认证不会双写。不同 priority
+> 允许显式裁决，但必须提交 Owner note，并把 `termPriorityShadows` 写入对象审计；不重叠版本互不冲突。
+> 负向上下文与 term 相同或互为子串时在 CRUD 和认证双重拒绝。
+>
+> `REGEX_SAFE` 仅接受字面量、字符类、首尾锚点和上界不超过 32 的有界量词，拒绝分组/嵌套量词、反向
+> 引用、lookaround、分支、点号和无界量词；RE2 编译后对不超过 64KiB 的输入施加 10ms 上限。单元、HTTP、
+> 应用角色 CRUD、真实 PostgreSQL 冲突/显式优先级裁决/非重叠有效期、全 AskData、race、全仓 Go/vet、
+> 数据库验证、CI 与 diff 检查均通过。本任务没有页面或显著视觉状态。
+
+### [x] TERM-002 — Trie/Aho-Corasick 最长匹配与负向上下文裁剪
 
 - 优先级：P1
 - 板块：B04 / B07
@@ -2657,12 +2982,23 @@ CREATE TABLE askdata.business_term_versions (
 - 文件范围：`internal/askdata/understanding/dictionary.go`、`dictionary_cache.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] KPI-001 — KPI Bundle 版本化对象与认证
+> 2026-08-07 完成：新增按 `(tenant, domain, releaseID)` 分区、以 Release content hash 校验的新旧
+> 快照缓存与 rune 级 Aho-Corasick 自动机；匹配严格复用 NLU-001 规范化和原文 span 回映，并按长度、
+> priority、term 字典序稳定贪心消解重叠。有效期、角色、负向上下文均在输出前裁剪并保留结构化丢弃
+> 原因；`PREFIX`、`SUFFIX`、`REGEX_SAFE` 只扫描精确命中未覆盖的残余区间，`VECTOR` 不进入确定性通道。
+>
+> PostgreSQL Loader 只读取 READY/ACTIVE Release manifest 固定、内容 hash 一致且
+> `CERTIFIED + APPROVED` 的 BUSINESS_TERM；确定性命中经独立 adapter 进入 SEARCH exact lane 和
+> NLU ExactMatch evidence，继续使用可独立配置的 exact 权重。真实 app-role/RLS/Release 集成、缓存
+> hash 切换、权限/有效期/负向语境、全半角/大小写/数字单位 span、竞态和全仓门禁均通过；10,000 词条
+> 与 500 字问句的 warmed median 连续满足 `<1ms`。本任务没有页面或显著视觉状态。
+
+### [x] KPI-001 — KPI Bundle 版本化对象与认证
 
 - 优先级：P1
 - 板块：B04
 - 依赖：TERM-001、REG-001
-- 阻塞：QUERY-009、WEB-012
+- 阻塞：WEB-012
 - 目标：让「这个月经营情况怎么样」这类宽泛问题有认证的默认答案组合，而不是让 LLM 临时拼指标。
 
 **数据结构**
@@ -2717,12 +3053,25 @@ CREATE TABLE askdata.kpi_bundle_versions (
 - 文件范围：`migrations/000228_*`、`internal/askdata/registry/kpibundle.go`、`kpibundle_match.go`、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
+> 2026-08-07 完成：复用 `000228` 已有身份/版本表和强制 RLS，新增 KPI Bundle/Item 权威 Go 合同、
+> canonical content hash、版本化管理 CRUD 与 `/api/v1/askdata/semantic/kpi-bundles` 路由。草稿写入和
+> 认证入口共用同一校验：1～8 个 item、至少一个 HEADLINE、连续且唯一的 order、Component Manifest
+> 注册 chart type、同域 CERTIFIED 指标，以及 CERTIFIED + compatible 的指标维度关系；非认证、跨域和
+> 不兼容引用全部失败关闭。
+>
+> KPI Bundle Release contract 强制指标/维度依赖闭包，PostgreSQL Loader 只读取 READY/ACTIVE Release
+> 固定且 content hash 一致的 CERTIFIED 版本。`KPIBundleMatcher.MatchBundle` 按受治理问句 pattern 与
+> 已识别指标覆盖度独立加权并稳定排序；唯一高分直接选择，多候选 margin 不足返回澄清，无命中返回空，
+> 从新 Release 回滚后会恢复旧 Bundle 版本。LLM 只可识别已有 Bundle，仍无临时拼装入口；QUERY-009 的
+> 多计划执行保持后续任务边界。本任务无页面或显著视觉状态，专项/race、真实 app-role/RLS 双 Release、
+> 全 AskData、全仓 Go/vet、数据库验证、CI 与 diff 检查全部通过。
+
 
 ---
 
 ## 24. B05 语义发布、保留与快照补全任务
 
-### [ ] RETAIN-001 — Release 引用计数与 RETAINED 保留态
+### [x] RETAIN-001 — Release 引用计数与 RETAINED 保留态
 
 - 优先级：P0
 - 板块：B05
@@ -2802,7 +3151,15 @@ DRAFT -> SEALED -> PROJECTING -> READY -> ACTIVE -> SUPERSEDED -> RETAINED -> RE
 - 文件范围：`migrations/000229_*`、`internal/askdata/registry/release_retention.go`、`release_state.go`、`internal/askdata/orchestrator/runner.go`、投影清理 Worker、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
-### [ ] SNAP-001 — 数据快照版本与 schema 版本分离
+> 完成于 2026-08-07：`000229` 已落地 Release 引用、`RETAINED/RETIRED` 状态与 24 个月保留期；
+> 引用新增/解除/计数、受影响引用清单和跨租户 RLS 均由数据库与 Go Store 双重失败关闭。
+> 有引用的 `SUPERSEDED` Release 自动进入 `RETAINED`，新问数运行返回
+> `RELEASE_NOT_RUNNABLE`，已有 run 的精确重放/恢复与固定 IR 重编译仍保持相同 Plan Hash。
+> 清理 Worker 只在注册表事实、manifest 与编译投影完整时清理可重建 search/graph/member 投影，
+> 外部清理失败不会提交数据库清理水位。迁移 down→up 回放、真实 app/admin/worker 角色与 RLS、
+> 全 AskData、全仓 Go/race/vet、数据库验证、CI 与 diff 检查全部通过；本任务无页面或显著视觉状态。
+
+### [x] SNAP-001 — 数据快照版本与 schema 版本分离
 
 - 优先级：P0
 - 板块：B03 / B05
@@ -2860,7 +3217,14 @@ CREATE INDEX ON platform.materialization_snapshots (materialization_id, snapshot
 - 文件范围：`migrations/000230_*`、`internal/materialization/snapshot.go`、`internal/askdata/registry/release_state.go`、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
-### [ ] PROJ-002 — 投影一致性四哈希校验与失败关闭
+> 完成于 2026-08-07：`materializationId` 现按规范化 Dataset DSL `schema_hash`
+> 保持稳定，同 schema 刷新只追加不可变 `snapshot_version`；schema 变化才创建新物化身份。
+> Worker 在仓库构建前登记快照，成功/失败事务补齐完成时间、业务时间 watermark、行数、大小和
+> `OK|WARN|FAIL`；`GetLatestSnapshot` 只读控制面并忽略进行中刷新。Release 运行态只按
+> `schema_hash` 判 STALE，FAIL 快照独立降级为 `QUALITY_WARNING`/阻断。迁移提供完成通知供
+> `QUERY-010 InvalidateBySnapshot` 主动消费，同时缓存正确性仍由 snapshot-version key 保证。
+
+### [x] PROJ-002 — 投影一致性四哈希校验与失败关闭
 
 - 优先级：P1
 - 板块：B05
@@ -2909,11 +3273,21 @@ type ProjectionMismatch struct {
 - 文件范围：`internal/askdata/registry/projection_guard.go`、`internal/askdata/orchestrator/runner.go`、测试。
 - 验证：V-GO-ASKDATA。
 
+> 完成于 2026-08-07：`ProjectionGuard.AssertRunnable` 现强制 Release 为 READY/ACTIVE，且
+> REGISTRY/SEARCH/GRAPH/MEMBER 四个逻辑投影的 READY 状态、expected hash 与 applied hash
+> 全部等于 Release content hash；缺行、状态漂移和任一哈希漂移均返回带更新时间的
+> `RELEASE_PROJECTION_MISMATCH` 结构化差异。成功/失败决定缓存 30 秒，但每次命中先读取单次轻量
+> revision，跨进程 Release/投影变更会在下一次断言立即失效，写端也可主动调用 `Invalidate`。
+> `AUTHORIZED → CONTEXT_READY` 已接入守卫，失败保持 run 在 AUTHORIZED 并追加不含业务数据的 ERROR
+> 审计事件；当前 ACTIVE 激活入口按既有治理决策仍不存在，`REL-005` 必须复用同一守卫后方可激活。
+> 专项/race、真实 app-role/RLS、审计事件、全 AskData、全仓 Go/vet、数据库验证、CI 与 diff 检查
+> 全部通过；本任务无页面或显著视觉状态。
+
 ---
 
 ## 25. B06 检索与图谱补全任务
 
-### [ ] GRAPH-006 — 图不可用降级矩阵
+### [x] GRAPH-006 — 图不可用降级矩阵
 
 - 优先级：P0
 - 板块：B06
@@ -2957,7 +3331,25 @@ type ProjectionMismatch struct {
 - 文件范围：`internal/askdata/graph/fallback.go`、`shape.go`、`resolver.go`、`internal/observability/metrics.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] SEARCH-006 — ANN/Exact 召回对照作业
+> 2026-08-07 完成：`ClassifyQueryShape` 已把六行矩阵冻结为确定性分类；单模型、同模型多指标及唯一
+> 1-hop `SAFE` 认证关系可降级，跨模型多跳返回 `BLOCKED/GRAPH_UNAVAILABLE`，M:N、预聚合或不安全
+> fanout 返回 `BLOCKED/GRAPH_UNSAFE_JOIN`，成员跨维度歧义返回
+> `CLARIFICATION_REQUIRED/MEMBER_DIMENSION_AMBIGUOUS`，不会猜测 Join。随机生成的 128 组多跳候选全部
+> 失败关闭。
+>
+> PostgreSQL fallback 只读取权威注册表，继续执行 app-role RLS、固定 Release 裁剪与关系认证校验；
+> Nebula 投影陈旧不会阻止允许的注册表降级，但越权和 Release 外对象仍不可见。正常、缓存和 fallback
+> 共用同一个 `GraphPlan` 合同，降级状态与原因进入内容 hash；`graphDegraded` 已贯穿 Tool Result、Evidence
+> Artifact 与公共 SSE。默认连续 3 次失败后熔断 30 秒，熔断期不再调用 Nebula；
+> `graph_degraded_rate` 超过 5% 时触发一次阈值告警。
+>
+> 证据驾驶舱的显著视觉状态先提交设计稿，用户确认方案 1 后落地：保留绿色 ANSWERED/认证主状态，以
+> 琥珀色次级标记展示关系校验降级、注册表来源、最多 1 hop、SAFE Fanout、结果状态和可披露原因。
+> 1280×720 完整/聚焦对照、section 展开收起、原因 disclosure、1120×800 响应式和浏览器控制台 QA
+> 均通过。专项/竞态、真实 PostgreSQL app-role/RLS、全仓 Go/vet、前端 25 项测试/lint/build、数据库
+> 验证、CI 与 diff 检查全部通过；无新增迁移。
+
+### [x] SEARCH-006 — ANN/Exact 召回对照作业
 
 - 优先级：P1
 - 板块：B06
@@ -2986,56 +3378,71 @@ type ProjectionMismatch struct {
 - 文件范围：`internal/askdata/search/recall_audit.go`、`search.go`、`document.go`、迁移随既有 DB 批次、测试。
 - 验证：V-GO-ASKDATA。
 
+> 2026-08-07 完成：`000243_askdata_search_recall_audit` 新增只保存 embedding、不保存问句原文的
+> `search_query_samples`，以及 append-only `search_recall_audits`。在线向量检索通过受限
+> SECURITY DEFINER 入口记录固定 tenant/domain/Release/doc type/model/dimension 的去重样本；API 角色
+> 不能读取原始查询向量，也不能写 embedding 列。Worker 每小时检查、每租户最多 24 小时执行一次，从
+> 最近 7 天按 domain/doc type 确定性抽取最多 100 条，样本保留 30 天。
+>
+> 审计在独立只读连接上以 5 秒 statement timeout、250ms lock timeout 分别执行 HNSW 与关闭
+> index/bitmap scan 的 exact KNN，一次取 Top 30 后计算 `recall@10/20/30`、ANN/exact p95 延迟并持久化；
+> 默认阈值按技术设计取 0.99，低于阈值只告警、不自动改 `ef_search` 或索引参数。在线检索先做上限为
+> 1,000 的候选估算，候选少于 1,000 时直接走 exact；否则使用 `ef_search=100` 的 ANN。
+>
+> `search_documents.embedding_dim` 与既有 `embedding_model` 一起进入数据库形状约束；Claim 固定当前
+> provider model/2,560 维，Complete 不一致时返回 `SEARCH_EMBEDDING_MODEL_MISMATCH`，API 的列级权限
+> 不能直接写向量、模型或维度。已知向量/退化 ANN、路由、24 小时调度、模型/维度拒绝、真实 PostgreSQL
+> app/worker/admin RLS 与标签无关样本、30 条真实 halfvec ANN/Exact 对照和审计落库均通过；迁移已完成
+> down→up 回放，专项 race/vet、数据库验证、全仓 Go/vet、CI 与 diff 检查通过。本任务没有页面或显著
+> 视觉状态。
+
 
 ---
 
 ## 26. B07/B08/B09 问数链路补全任务
 
-### [ ] NLU-007 — 单业务域约束
+### [x] NLU-007 — 登录后已选业务域强制约束
 
 - 优先级：P0
 - 板块：B07
 - 依赖：NLU-005
-- 目标：落实「单次问数只允许命中一个业务域」的产品裁定（C06），把跨域组合从架构上排除。
+- 目标：落实用户确认的产品口径：业务域在登录后、进入智能问数前已经选定；单次问数只能使用该领域，
+  模型不得重新路由，问数页面不展示领域澄清卡。
 
 **实现步骤**
 
-1. `internal/askdata/ir/model.go`：`domainId` 改为**单值必填**（原为可选/多值），JSON Schema 同步 `"type":"string"` + `required`。
-2. `internal/askdata/binding/beam.go`：Bundle 构建后加过滤器
-
-```go
-func rejectCrossDomain(b Bundle) bool {
-    ds := map[string]struct{}{}
-    for _, o := range b.AllObjects() { ds[o.DomainID] = struct{}{} }
-    return len(ds) > 1
-}
-```
-
-   跨域 Bundle 在进入评分**之前**丢弃，不进入 beam，避免浪费宽度。
-3. Domain Routing：`internal/askdata/understanding/domain.go` 输出 `[]DomainScore`，按 NLU-006 的校准阈值判定：
-
-```text
-top1.prob >= 0.92 且 margin >= 0.15  -> 采用 top1
-否则若 top2.prob >= 0.30              -> CLARIFICATION_REQUIRED，澄清项 = 业务域
-否则                                   -> OUT_OF_SCOPE（无可用域）
-```
-
-4. 明确跨域意图（问句同时强命中两个域的 P0 指标）时直接 `OUT_OF_SCOPE`，理由码 `SCOPE_CROSS_DOMAIN`，并提示「请分别提问」。
-5. 澄清卡展示各域的名称、覆盖范围与该域下的候选指标，供用户选择。
+1. 认证会话和 Question API 继续以 `X-Business-Domain-ID` / session `business_domain_id` 固定当前领域，
+   Question PolicyScope 必须只包含该领域。
+2. `internal/askdata/understanding/domain.go`：模型不再决定领域。服务端用 Policy Evidence 确定性写入唯一
+   `domainHypotheses=[{domainId:selected, score:1}]`；模型省略领域可接受，返回其他领域则失败关闭。
+3. `internal/askdata/binding`：进入联合绑定前要求 `PolicyScope.domainIds` 恰好一个且等于 GraphPlan
+   `domainId`。检索/图计划已在该单域 Release 内裁剪，其他领域对象不能进入 beam，因而不需要事后
+   构造跨域 Bundle 再过滤。
+4. Semantic IR 新增**单值必填** `domainId`，JSON Schema 同步 required；Resolver/Compiler 要求它与
+   Build Artifact 的已选领域一致，评测等价比较也纳入该字段。
+5. 删除本任务的领域路由阈值和领域澄清 UI。问到选定领域之外的超范围分类与引导统一归属 `NLU-009`。
 
 **测试清单**
 
-1. 单域问句正常通过。
-2. 跨域 Bundle 被丢弃（断言 beam 中无跨域组合）。
-3. 双域高分低 margin → 域澄清，澄清项恰为业务域且候选 ≥2。
-4. 明确跨域意图 → `OUT_OF_SCOPE` + `SCOPE_CROSS_DOMAIN`。
-5. IR Schema 拒绝多值或缺失 `domainId`。
-6. 用户当前所处业务域作为先验时能提升 top1 概率。
+1. 模型省略领域时由策略固定为当前领域、score=1，且 Prompt Policy Fact 只含单值 `domainId`。
+2. 模型返回其他领域时失败关闭。
+3. 多领域 PolicyScope 或 GraphPlan 领域不等于会话已选领域时，联合绑定前拒绝。
+4. 单域问句正常进入 beam，检索、GraphPlan、IR 与编译均保持同一领域。
+5. IR Schema 拒绝多值或缺失 `domainId`，持久化工件篡改领域时重放拒绝。
+6. Fixture Regression 与 IR 等价比较包含 `domainId`，避免评测漏检跨域结果。
 
-- 文件范围：`internal/askdata/ir/model.go`、`api/schemas/semantic-ir-v1.schema.json`、`internal/askdata/binding/beam.go`、`internal/askdata/understanding/domain.go`、测试。
+- 文件范围：`internal/askdata/understanding/domain.go`、`internal/askdata/understanding/service.go`、
+  `internal/askdata/binding/domain.go`、`internal/askdata/ircontract/model.go`、
+  `api/schemas/semantic-ir-v1.schema.json`、Resolver/Compiler、Fixture/Evaluation 与测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] NLU-008 — 会话 Release Pin 与澄清超时
+> 2026-08-08 完成：用户澄清业务域已在登录后进入问数前选定，因此废弃先前待确认的领域二选一设计稿，
+> 没有新增或修改页面。Question API 既有实现已把 scope 收窄为唯一会话领域；NLU Policy Fact 改为单值
+> `domainId`，模型领域输出由策略证据确定性 Pin，foreign domain 失败关闭；Binding 在 beam 前拒绝
+> 多领域 scope/错误 Graph domain；Semantic IR、Schema、Resolver、Compiler 和评测全链路固定同一
+> `domainId`。专项测试与全仓 `go test ./...` 已通过；完整门禁见 handoff 验证记录。
+
+### [x] NLU-008 — 会话 Release Pin 与澄清超时
 
 - 优先级：P0
 - 板块：B07 / B09
@@ -3114,12 +3521,27 @@ ALTER TABLE askdata.question_runs
 - 文件范围：`internal/askdata/understanding/conversation.go`、`internal/askdata/orchestrator/clarification.go`、`budget.go`、`internal/askdata/http/clarification.go`、迁移、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
-### [ ] NLU-009 — 问题类型白名单与 OUT_OF_SCOPE 分类
+> 2026-08-08 完成：新增 `000244_askdata_conversation_release_pin`，建立 actor/domain 隔离的会话
+> Release Pin，并为 Question Run 增加澄清 deadline、预算冻结时间和已消耗预算快照。首轮成功进入
+> `GRAPH_VALIDATING` 时才 Pin 当前 ACTIVE；后续追问遇到 `SUPERSEDED/RETAINED` 会返回结构化
+> `RELEASE_DRIFT_CONFIRM_REQUIRED`，只有 `POST /api/v1/conversations/{conversationId}/release-drift`
+> 明确确认后才切换并重新绑定，历史结果始终可读，`RETIRED` 则强制重新绑定。
+>
+> 澄清进入等待时默认冻结 30 分钟（可配置），运行时读取、澄清提交和 Worker 三条路径都会原子转为
+> `CLARIFICATION_EXPIRED`；恢复时继承等待前消耗量而不累计等待时间，Release 已变化则丢弃旧 Bundle
+> 并重新绑定。幂等重放不因运行后续预算变化误报冲突，同一澄清消费不会分叉。
+>
+> 用户确认方案 1「原位口径更新卡 + 右侧 Release Pin 证据」后，工作台已落地版本差异、指标/维度
+> 变更、确认重跑、只看历史和澄清过期状态；1280×720 同状态对照及 1120/720 响应式通过。数据库迁移
+> 已实际应用并完成同事务 down→up→rollback 演练；专项 PostgreSQL 集成、全仓 Go test/vet、前端
+> 26 条测试、lint、production build、数据库权限/schema 验证和 diff 检查全部通过，详见 handoff 与
+> `design-qa.md`。
+
+### [x] NLU-009 — 问题类型白名单与 OUT_OF_SCOPE 分类
 
 - 优先级：P1
 - 板块：B07
-- 依赖：NLU-004
-- 阻塞：DR-001、WEB-011
+- 依赖：NLU-004、DR-001、WEB-011
 - 目标：超范围问题必须给出可用出口并计入「正确拒答」，而不是变成失败或强答。
 
 **问题类型分类表（实现为确定性分类器 + LLM 兜底）**
@@ -3139,7 +3561,7 @@ ALTER TABLE askdata.question_runs
 | `FORECAST` | 预测/预计/将会/下个月会 | `OUT_OF_SCOPE` |
 | `AD_HOC_FORMULA` | 「帮我算 A 除以 B」「自定义公式」 | `OUT_OF_SCOPE` + 指标建设需求入口 |
 | `CAUSAL` | 为什么/原因/导致 | 贡献度分解（若启用）并**标注非因果**；未启用则 `OUT_OF_SCOPE` |
-| `CROSS_DOMAIN` | 跨域强命中 | `OUT_OF_SCOPE`（NLU-007） |
+| `CROSS_DOMAIN` | 明确要求组合当前已选领域之外的数据 | `OUT_OF_SCOPE` + 引导切换领域后分别提问（NLU-009） |
 | `UNGOVERNED_SOURCE` | 命中未接入语义层的表/系统名 | `BLOCKED` |
 
 **实现步骤**
@@ -3174,7 +3596,17 @@ type ScopeVerdict struct {
 - 文件范围：`internal/askdata/understanding/scope.go`、`scope_lexicon.go`、`definition_card.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] QUERY-007 — 排序、TopN、并列与 Other 编译
+> 2026-08-08 完成：新增 Release 可固定的版本化词表、内容哈希与结构阈值，确定性覆盖 15 种问题类型，
+> 仅在规则无法确定时调用白名单 LLM 兜底；越界枚举或兜底错误会保留保守规则结果。`DETAIL_LIST`、
+> `FORECAST`、`AD_HOC_FORMULA`、未启用贡献分解的 `CAUSAL` 与 `CROSS_DOMAIN` 返回带受控
+> `NextActions` 的 `OUT_OF_SCOPE`，`UNGOVERNED_SOURCE` 返回 `BLOCKED`；固定领域不在问数页提供域选择。
+>
+> `ParsedContext` 直接复用 DR-001 的 metric/dimension/member UUID + 时间白名单，严格解析的公开工件拒绝
+> rows/SQL/未知字段，且不持久化原始问题。`DEFINITION` 走只依赖 Registry、没有查询依赖的口径卡短路径，
+> 固定 `dataQueryIssued=false` 与最多 1 次 LLM。45 条分类矩阵、弱“列出”分组歧义、定义零查询、非法
+> LLM 枚举、正确拒答分子、公开工件防篡改、全仓 Go test/vet 与前端出口测试全部通过。
+
+### [x] QUERY-007 — 排序、TopN、并列与 Other 编译
 
 - 优先级：P1
 - 板块：B08
@@ -3241,7 +3673,17 @@ TopN + comparison：
 - 文件范围：`internal/askdata/compiler/order.go`、`remainder.go`、`internal/askdata/ir/model.go`、`api/schemas/semantic-ir-v1.schema.json`、`internal/askdata/binding/clarification.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] QUERY-008 — Cardinality 与 FanoutPolicy 枚举拆分
+> 实施记录（2026-08-08）：Semantic IR 已增加 `rankBy`、`otherPolicy`、`tieBreaking`，TopN 默认值/上限
+> 固定为 10/1,000，并与 10,000 行执行结果上限拆分。`CompileSort`/`CompileLimit` 以受控列绑定生成
+> `RANK()` 或稳定键 `ROW_NUMBER()` CTE，同时产出 `tiesIncluded`、`tiesCut`、实际行数元数据查询；
+> `CompileOther` 对全可加指标使用 total-minus-top，对半可加/不可加指标强制走 `AggregationPlanner`
+> 分类后的 remainder 重算关系，并输出 `isRemainder` 与成员数。Binder 对“TopN + comparison + 缺少
+> rankBy”固定生成当期值/增长额/增长率三选一澄清，规则解析支持三个显式排序依据且不误判为分组。
+> 单元测试覆盖非法目标、limit 边界、两种并列策略、三类可加性、同比澄清、DELTA 与 BottomN；真实
+> PostgreSQL 等价用例使用事务内临时表，默认在未提供 integration DSN 时跳过。V-GO-ASKDATA 与 vet
+> 均通过。
+
+### [x] QUERY-008 — Cardinality 与 FanoutPolicy 枚举拆分
 
 - 优先级：P0
 - 板块：B08 / B04
@@ -3299,7 +3741,15 @@ ALTER TABLE askdata.relationship_versions
 - 文件范围：`migrations/000226_*`（追加）、`internal/askdata/registry/relationship.go`、`internal/askdata/compiler/join.go`、`preaggregate.go`、`bridge.go`、`internal/askdata/graph/plan.go`、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
-### [ ] QUERY-009 — Query Plan Bundle 多计划运行
+> 实施记录（2026-08-08）：已在 `000226` 追加正交枚举、组合矩阵、桥接模型外键和无 `SAFE`
+> 默认的人工复核 holding state；旧枚举中无法机械证明安全的组合会置为 `NULL`，认证、Graph/Resolver
+> 与编译均失败关闭。注册表认证和数据库 CHECK 复用同一矩阵语义，Graph 风险码固定为
+> `<cardinality>_<fanoutPolicy>`。新增直接 Join、右侧预聚合、双侧预聚合 + bridge 去重三个安全 SQL
+> 分支以及 `PLAN_JOIN_BLOCKED`，覆盖完整矩阵、非法组合、缺桥、NULL 存量、标识符注入、属性检查和
+> PostgreSQL 手写 SQL 结果等价。全新隔离数据库从零回放全部迁移后通过 V-DB，开发库在确认关系表
+> 无存量行后以单事务补齐已登记批次的 DDL，并通过数据库/认证集成测试；V-GO-ASKDATA 与 vet 通过。
+
+### [x] QUERY-009 — Query Plan Bundle 多计划运行
 
 - 优先级：P1
 - 板块：B08 / B09
@@ -3359,7 +3809,18 @@ ALTER TABLE askdata.relationship_versions
 - 文件范围：`api/schemas/query-plan-bundle-v1.schema.json`、`internal/askdata/compiler/bundle.go`、`internal/askdata/orchestrator/bundle_runner.go`、`budget.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] QUERY-010 — 缓存 Key 与快照失效
+> 实施记录（2026-08-08）：已冻结 `query-plan-bundle-v1`，Bundle 输出同时固定 schema/version、完整
+> PolicyScope、Release ID/hash、共享时间/筛选、逐项 Semantic IR/IR hash、chart type、并发上限和整体
+> hash。构建器只接受 CERTIFIED KPI Bundle，重算完整 Release Manifest 并逐项证明 Bundle、指标、模型、
+> group/filter/time dimension 均来自同一 pinned Release；DRAFT/临时组合返回 `BUNDLE_NOT_CERTIFIED`，
+> 6 计划、8 指标、4 并发边界失败关闭。每个 plan 通过显式 `CompileBundlePlan → ValidateCovered → Execute`
+> 流水线独立编译、覆盖校验、Plan Validation 和执行，使用从 Bundle run + planId 确定性派生的独立执行
+> run ID，不能共享校验结果。Runner 使用 `errgroup.SetLimit`、BUNDLE 独立预算和 30 秒 context deadline；
+> 单项编译/校验/执行/权限/超时失败不取消兄弟计划，按原顺序聚合为逐项稳定状态，任一失败整体为
+> `PARTIAL`，全部成功为 `ANSWERED`，公开结果不包含原始错误、SQL、参数或结果行。专项单元/race、全仓
+> test/vet/CI 与 diff 检查通过；无新增迁移、页面、外部模型或业务数据写入。
+
+### [x] QUERY-010 — 缓存 Key 与快照失效
 
 - 优先级：P0
 - 板块：B08 / B13
@@ -3396,7 +3857,19 @@ tenantId
 - 文件范围：`internal/askdata/queryruntime/cache.go`、`cache_index.go`、`internal/materialization/invalidate.go`、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
-### [ ] QUERY-011 — PARTIAL 触发条件与结果状态分流
+> 2026-08-08 完成：新增独立 AskData 结果缓存，严格按 tenant、PolicyScope hash、Release hash、规范化
+> IR hash 和排序后的 materialization snapshot version 五段构造 SHA-256 key；任一安全段缺失、Release
+> 与 Scope 不一致或快照集合不完整时均不写缓存。条目保存 result hash、最早快照完成时间形成的 `asOf`、
+> 行数、创建时间和默认一小时 TTL，并以不可变副本返回结果；快照版本变化自然 miss，`forceFresh` 在无法
+> 证明当前快照未变化时失败关闭。
+>
+> 反向索引按 tenant + materialization ID 定向关联 cache key，写入、替换、显式删除、TTL 淘汰与主动
+> 失效均同步维护。`SnapshotInvalidationProjector` 消费 `000230` 已有的
+> `materialization_snapshot_completed` 通知并立即清除相关条目；通知仅是加速提示，丢失时仍由快照版本
+> key 保证正确性。属性隔离、快照变化、主动失效、forceFresh、缺段不缓存、索引一致性和竞态测试通过；
+> 全仓 Go、vet、数据库与仓库验证均通过。本任务未新增迁移、页面或外部依赖。
+
+### [x] QUERY-011 — PARTIAL 触发条件与结果状态分流
 
 - 优先级：P1
 - 板块：B08
@@ -3433,8 +3906,21 @@ tenantId
 - 文件范围：`internal/askdata/validator/outcome.go`、`internal/askdata/http/add_to_report.go`、测试。
 - 验证：V-GO-ASKDATA。
 
+> 实施记录（2026-08-08）：新增 `query-outcome-v1` 不可变结果合同，`DetermineOutcome` 按 P1～P6、Q1
+> 固定顺序累积时间截断、权限裁剪数量、失败/超时计划、行数上限、行策略成员裁剪、多源超时和非阻断
+> 质量告警；所有集合规范排序并纳入 `outcomeHash`。任一 P 条件把顶层状态提升为 `PARTIAL`，同时保留
+> `qualityWarnings[]`；只有 Q1 时为 `QUALITY_WARNING`。P2 输入/输出类型只包含请求、授权和过滤数量，
+> 不存在无权限指标名称或 ID 字段；全失败、全超时、全过滤等没有可用子集的矛盾输入失败关闭。
+>
+> 受保护 `POST /api/v1/questions/{runId}/add-to-report` 只从 actor-scoped ANSWER completion artifact
+> 读取并校验 outcome，不接受客户端自报状态；run version 不一致失败，`PARTIAL` 在报告后端调用前固定
+> 返回 `409 RESULT_PARTIAL_NOT_EXPORTABLE` 和缩小范围/确认后重跑提示。`ANSWERED` 与只有质量告警的
+> 结果才会交给独立 `AddToReportBackend`，本任务不伪造尚未落地的报告 intent/outbox 持久化。
+> P1～P6、Q1、P1+Q1、P2 不泄漏、矛盾子集、客户端 outcome 注入和报告门禁测试，以及专项 race、
+> 全仓 Go/vet/CI 与 diff 检查全部通过；无迁移、页面、外部调用或业务数据写入。
 
-### [ ] ORCH-007 — ANSWER_VERIFYING 阶段接入状态机
+
+### [x] ORCH-007 — ANSWER_VERIFYING 阶段接入状态机
 
 - 优先级：P0
 - 板块：B09
@@ -3474,7 +3960,19 @@ UNDERSTANDING|BINDING  -> OUT_OF_SCOPE
 - 文件范围：`internal/askdata/orchestrator/state.go`、`runner.go`、`internal/askdata/http/stream.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] ORCH-008 — 预算修订与熔断/目标分离
+> 实施记录（2026-08-09）：在 ANS-003 已冻结的 Answer Artifact、确定性 Verifier 与迁移 `000247`
+> 基础上，`AnswerVerificationRunner` 完成 `RESULT_VERIFYING → ANSWER_VERIFYING → ANSWERED` 的强制边界。
+> L2 首次失败只把元素类型、稳定原因码与期望证据回传重生成，清除失败文字和 span；第二次失败调用
+> `ToStructured`，最终工件只保留 L1，completion 固定为 `ANSWER_DEGRADED`。每次失败事件只持久化原因码、
+> 数量和 verifier/wordlist 版本，不保存未核验文字。
+>
+> 答案阶段余量同时取 LLM、step 与 hard-duration 剩余的最小值，并最多使用两次模型调用；若无法获得完整
+> 重试额度则直接安全降级并持久化 `usage.exhausted=true`，不会发生先调用后无法记账。状态矩阵明确拒绝
+> `EXECUTING → ANSWERED`。SSE 按事件索引输出 `answer.verifying`、失败重试和 `answer.degraded`，
+> `Last-Event-ID` 恢复不会重放已确认事件。六类验收、专项 race、全仓 Go test/vet 与 diff 检查通过；
+> 本任务无新增迁移、页面、外部模型调用或业务数据写入。
+
+### [x] ORCH-008 — 预算修订与熔断/目标分离
 
 - 优先级：P1
 - 板块：B09
@@ -3525,7 +4023,19 @@ type RunBudget struct {
 - 文件范围：`internal/askdata/orchestrator/budget.go`、`runner.go`、`internal/config/askdata.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] ORCH-009 — 幂等键中间件
+> 实施记录（2026-08-08）：已落地 `SINGLE_QUERY_FAST`、`SINGLE_QUERY_COMPLEX`、`BUNDLE`、
+> `DEFINITION` 四档预算，Loop 可按请求预算档和业务域严格 JSON 覆盖收紧实际 LLM/Tool/正式查询/
+> 验证查询与 HardTimeout。`P95Target` 由 `BudgetMonitor` 单次记录 `budget_target_exceeded`，只有独立
+> HardTimeout 会触发中断；熔断结果按可用结果 `PARTIAL`、证据澄清、`TIMEOUT` 固定顺序降级。
+>
+> `ActiveBudgetClock` 与 NLU-008 的持久化 Freeze/Resume 均排除澄清等待时间。新增迁移
+> `000246_askdata_run_budget_consumption` 扩大 BUNDLE 所需的 10 Tool/6 正式查询/30 秒治理包络，并由
+> 最后执行的数据库 trigger 根据权威标量计数为每个 Run/每次更新生成完整 `budget_consumed_json`；
+> 调用方无法伪造 JSON，回滚遇到已使用新上限的 Run 会失败关闭。四档加载、领域覆盖、Loop 实际收紧、
+> 20 分钟冻结、P95 不打断、熔断分流、完整消费 JSON、真实 PostgreSQL 创建/更新一致性及迁移
+> down→up 事务演练均通过。
+
+### [x] ORCH-009 — 幂等键中间件
 
 - 优先级：P1
 - 板块：B09
@@ -3595,7 +4105,22 @@ POST /api/data-requests
 - 文件范围：`internal/askdata/http/idempotency.go`、`internal/report/http/middleware.go`、迁移随既有批次、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
-### [ ] ANS-001 — Answer Artifact 与引用合同
+> 实施记录（2026-08-09）：新增平台共享 `internal/platform/idempotency`，问数 Question Handler、
+> 明细取数 `POST /api/v1/data-requests` 与 Report V2 HTTP wrapper 复用同一中间件和 PostgreSQL
+> Repository；`RequiresGovernedWrite` 只匹配规格中的八类写路径，不 blanket-wrap 其他 POST。中间件位于
+> 鉴权之后、业务 mutation 之前，缺键、异 body 复用和并发占用分别稳定返回
+> `IDEMPOTENCY_KEY_REQUIRED/REUSED/IN_FLIGHT`；COMPLETED 精确重放首次 status/body，并设置
+> `Idempotency-Replayed=true`。尚未由 REL-005/RPT HTTP 任务开放的 activate、operations、publish 路径已
+> 固定使用同一 allowlist/Report wrapper，不提前开放业务接口。
+>
+> 请求 JSON 在 hash 前拒绝重复 key/尾随值/过深嵌套并规范字段顺序；5xx、panic 或不可重放响应删除
+> IN_FLIGHT，允许客户端安全重试。迁移 `000248` 以 `(tenant,actor,endpoint,key)` 唯一键、强制 RLS、
+> 单向 IN_FLIGHT→COMPLETED trigger 和 response hash 防篡改冻结 24 小时记录；API 负责抢占/完成，worker
+> 只读并有界删除到期行。缺键、等价 body 重放、异 body 冲突、真实并发、24 小时到期、tenant/actor
+> 隔离、data-request/report 接线、5xx 重试均有测试；迁移/RLS/生命周期 down→up 在回滚事务通过。
+> 本任务无页面、外部调用或业务数据写入。
+
+### [x] ANS-001 — Answer Artifact 与引用合同
 
 - 优先级：P0
 - 板块：B09
@@ -3662,8 +4187,17 @@ POST /api/data-requests
 
 - 文件范围：`api/schemas/answer-artifact-v1.schema.json`、`internal/askdata/answer/model.go`、`stale.go`、测试。
 - 验证：V-GO-ASKDATA。
+- 完成说明（2026-08-08）：已冻结全对象关闭的 Answer Artifact v1 与 Go strict decode/normalize/validate；
+  结构化 headline/cards/chart/tableRef 只接受稳定引用和 decimal 字符串，叙述引用使用 `[start,end)`
+  Unicode code-point 区间并拒绝越界/重叠。`RESULT_CELL`、`CONTRACT`、`TIME_SPEC` 是关闭 tagged union；
+  `RESULT_CELL` 复用 `internal/askdata/shared` 的 `CellRef`，rowKey 由调用方按受治理 group-by 顺序传入并以
+  `key=value|...` 的规范百分号编码可逆序列化。Answer 版本、hash 与 Release/图表规则投影到共享
+  `Provenance`，统一 `IsStale` 失败关闭；降级工件强制空 narrative、`passed=false/degraded=true`。
+  既有 `question_artifacts` 的 ANSWER 类型与不可 UPDATE/DELETE trigger 直接承载该工件，PostgreSQL
+  integration 改为持久化真实 Answer Artifact 并用管理员嵌套事务证明原地更新被拒。Schema round-trip、
+  未知字段、Unicode span、六类失效、降级、精确数值与专项 Go test/vet/diff 检查通过。
 
-### [ ] ANS-002 — 叙述事实校验器
+### [x] ANS-002 — 叙述事实校验器
 
 - 优先级：P0
 - 板块：B09
@@ -3744,10 +4278,20 @@ internal/askdata/answer/
 8. 因果词在未启用分解时被拦截，启用后弱化表述放行、强因果仍拦截。
 9. 契约测试：同一 Evidence 在问数与报告两条链路得到相同 `VerifyReport`。
 
+- 完成说明（2026-08-08）：已实现 Unicode span 候选抽取、中文/阿拉伯数值与万亿量词归一、百分比/
+  百分点区分、绝对/相对时间、单位币种、Binding 最长对象匹配和版本化禁用词表；数值只允许命中
+  引用单元格或显式声明的差/比/百分比/占比/同比白名单派生，使用精确有理数执行
+  `0.5 * 10^-displayPrecision` 容差，禁止任意 cell 组合搜索。`Verifier` 固定校验器/词表版本，并将
+  Result reference hash 与 Semantic Release 绑定到 Answer/Insight 工件；六个稳定错误码均返回元素、
+  Unicode span、原因和期望。问数 `Verify` 与报告 `VerifiableInsight.Verify` 最终进入同一个
+  `VerifyNarrative` 实现，同 Evidence 契约测试断言 `VerifyReport` 完全一致。每个错误码至少三条负测、
+  中文数值等价、百分点/百分比、容差边界、同比派生、随机组合反例、幻觉对象和贡献模式均已覆盖；
+  专项 race、全仓 Go test 与 vet 通过。
+
 - 文件范围：`internal/askdata/answer/extractor.go`、`matcher.go`、`policy.go`、`verifier.go`、`derivation.go`、`internal/askdata/answer/wordlist/*.json`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] ANS-003 — 三层答案与降级
+### [x] ANS-003 — 三层答案与降级
 
 - 优先级：P0
 - 板块：B09 / B10
@@ -3790,7 +4334,19 @@ internal/askdata/answer/
 - 文件范围：`internal/askdata/answer/fallback.go`、`composer.go`、`web/src/askdata/AnswerSummary.tsx`、测试。
 - 验证：V-GO-ASKDATA、V-WEB。
 
-### [ ] ANS-004 — 叙述指标与门禁接线
+- 完成说明（2026-08-09）：`ComposeAndVerify` 固定最多两次生成，首次失败只把去原文/去 span 的结构化
+  失败码和期望送入重试；第二次失败通过 `ToStructured` 清空全部叙述，写入
+  `verification.degraded=true` 与稳定提示。`AnswerVerificationRunner` 强校验 actor/domain/release/result
+  绑定，从 `RESULT_VERIFYING` 进入新增 `ANSWER_VERIFYING`，逐次追加不含拒绝文本的失败审计，最终以
+  `ANSWER_VERIFIED` 或 `ANSWER_DEGRADED` 进入 `ANSWERED`。问数侧固定
+  `DefaultAskDataInterpretationEnabled=false`，L3 不生成也不校验。
+- HTTP 公开投影只返回已核验 narrative 或稳定 L1 降级提示；SSE 接受并验证
+  `answer.verifying/answer.degraded`。降级 ANSWER 仍按持久化 outcome 通过 add-to-report 的非 PARTIAL
+  门禁。前端按用户确认的方案 2 实现 L1/L2/L3 状态、蓝灰降级说明、重新生成和查看校验依据；固定领域
+  只读且无问数页选择器。后端两次失败/L3 关闭/跨 run 证据/报告入口、HTTP 安全投影、SSE 与前端快照
+  均有自动化覆盖；1280×720 对照与 1120×800 响应式记录在 `design-qa.md`，最终 `passed`。
+
+### [x] ANS-004 — 叙述指标与门禁接线
 
 - 优先级：P1
 - 板块：B09 / B12
@@ -3948,11 +4504,11 @@ export function resolveTotalsBehavior(col: ResultColumn): TotalsBehavior;
 - 文件范围：`web/src/askdata/saved/*`、`web/src/askdata/api/savedQuestion.ts`、`SessionRail.tsx`、测试。
 - 验证：V-WEB。
 
-### [ ] WEB-011 — 明细取数申请入口
+### [x] WEB-011 — 明细取数申请入口
 
 - 优先级：P1
 - 板块：B10 / B02
-- 依赖：DR-001、NLU-009
+- 依赖：DR-001（主动申请入口先完成；`NLU-009` 完成后接入拒答触发）
 - 页面门禁：**需设计稿确认**（新增申请单表单与我的申请列表）
 - 目标：`OUT_OF_SCOPE` 明细类问题 100% 有可用出口。
 
@@ -3992,6 +4548,15 @@ export function resolveTotalsBehavior(col: ResultColumn): TotalsBehavior;
 
 - 文件范围：`web/src/askdata/datarequest/*`、`web/src/askdata/api/dataRequest.ts`、测试。
 - 验证：V-WEB。
+
+> 2026-08-08 完成：用户确认方案 3 后，`/ask-data` 增加“问数 / 我的申请”视图、固定登录领域的
+> 主从申请工作区、新建申请弹窗、字段敏感级只读推导、六态时间线、驳回原因和交付物。真实 API 与
+> PUBLISHED 数据集字段目录已接入；当前真实库没有可申请字段时失败关闭并禁用提交，不使用结果行补齐。
+>
+> `SCOPE_DETAIL_LIST` 公开工件会在原对话内展示唯一的“发起明细取数申请”主操作，并把本地当前问题、
+> 来源 run 与白名单语义上下文预填到同一弹窗；其他超范围原因不会误显示该按钮。32 条前端测试、lint、
+> production build、1280×720/1120×800/720×900 响应式、真实 API 空状态和应用内浏览器完整状态流通过，
+> 视觉证据记录在 `design-qa.md` 与 `design-qa-artifacts/web-011-*`。
 
 ### [ ] WEB-012 — KPI Bundle 结果视图
 
@@ -4086,7 +4651,7 @@ export function resolveTotalsBehavior(col: ResultColumn): TotalsBehavior;
 
 ### 28.1 合同层
 
-### [ ] RPT-CONTRACT-001 — Report Definition v1
+### [x] RPT-CONTRACT-001 — Report Definition v1
 
 - 优先级：P0
 - 板块：B11
@@ -4152,8 +4717,15 @@ export function resolveTotalsBehavior(col: ResultColumn): TotalsBehavior;
 
 - 文件范围：`api/schemas/report-definition-v1.schema.json`、`api/examples/report-definition/*`、`internal/report/model.go`、`decode.go`、测试。
 - 验证：V-GO-ALL。
+- 完成说明（2026-08-08）：已冻结全闭合 Schema 与同序 Go 合同，顶层组件表、双绑定 oneOf、固定
+  1920/24 与单列移动画布、类型化默认参数、显式筛选/交互/运行策略和来源合同均已落地；严格解码在
+  未知字段前执行 5 MB、24 层、字符串与 SQL/连接串/凭据/脚本/HTML 事件属性守卫，并校验数量上限、
+  六类 ID 命名空间、数据上下文/组件/筛选/交互引用和 Semantic Release/IR/hash 一致性。单页、多页与
+  Ask Data 认证绑定三份示例均通过解析和结构体 round-trip；负测覆盖未知字段、深度、页面、字节、
+  `sql/script/onclick`、恶意字符串、悬空组件引用和六类重复 ID。`go test ./... -count=1`、`go vet ./...`
+  与 `git diff --check` 通过。
 
-### [ ] RPT-CONTRACT-002 — Component Manifest v1
+### [x] RPT-CONTRACT-002 — Component Manifest v1
 
 - 优先级：P0
 - 板块：B11
@@ -4212,8 +4784,15 @@ export function resolveTotalsBehavior(col: ResultColumn): TotalsBehavior;
 
 - 文件范围：`api/schemas/component-manifest-v1.schema.json`、`internal/report/template/manifest.go`、`registry.go`、`manifests/*.json`、测试。
 - 验证：V-GO-ALL。
+- 完成说明（2026-08-08）：已冻结 Component Manifest Schema、严格 Go 合同和嵌入式注册表；13 个 MVP
+  组件各有唯一 JSON 真值，`Registry.List/Get` 可直接供后续 API、编辑器、LLM 和运行时复用，返回值
+  防御性深拷贝。默认选项与运行时选项共用同一 `OptionSchema.ValidateJSON`，未知属性、类型、枚举、数值
+  区间均失败关闭；组件校验统一覆盖数据维度/度量/角色、时间要求和最小尺寸。SemVer 门禁允许
+  patch/minor 只增加可选属性且不得收窄数据/尺寸/移动/交互能力；major 要求 `migration.from` 精确匹配并
+  注册非空 migrator。三份 Report Definition 示例全部逐组件通过 Manifest 校验；专项和全仓 Go test/vet、
+  14 份新增/更新 JSON 解析及 `git diff --check` 通过。
 
-### [ ] RPT-CONTRACT-003 — Report Operation v1
+### [x] RPT-CONTRACT-003 — Report Operation v1
 
 - 优先级：P0
 - 板块：B11
@@ -4278,8 +4857,16 @@ INSIGHT_UPDATE INSIGHT_REGENERATE
 
 - 文件范围：`api/schemas/report-operation-v1.schema.json`、`internal/report/operation/model.go`、`guard.go`、测试。
 - 验证：V-GO-ALL。
+- 完成说明（2026-08-08）：已冻结包含 41 个 `oneOf + const` 分支的 Report Operation Schema 和 41 个
+  typed payload；Bundle、Operation、payload 三级均做必填键检查并复用 strict decoder，删除操作使用
+  真正空 payload，`UNDO/REDO` 明确不进入协议。单包 100、AI 单包 30、AI 禁止模板/页删/章节删与超过
+  5 个删除操作均失败关闭；`GuardAI` 基于当前 Report Definition 构造 page/section/block/zone/slot/
+  component/filter/interaction 祖先索引，验证 reportId、scope 层级和所有 targetId，多处引用有任一路径
+  越界也拒绝，固定返回 `REPORT_OP_NOT_ALLOWED_FOR_AI` / `REPORT_OP_OUT_OF_SCOPE`。测试覆盖 41 类逐项
+  正例、41 类逐项错误 payload、数量边界、AI 禁止与内外 scope；全仓 Go test/vet、Schema 41 分支检查、
+  JSON 解析和 `git diff --check` 通过。
 
-### [ ] RPT-CONTRACT-004 — Evidence Bundle v1.1 与 Insight Artifact
+### [x] RPT-CONTRACT-004 — Evidence Bundle v1.1 与 Insight Artifact
 
 - 优先级：P0
 - 板块：B11 / B09
@@ -4351,10 +4938,19 @@ INSIGHT_UPDATE INSIGHT_REGENERATE
 
 - 文件范围：`api/schemas/evidence-bundle-v1.schema.json`、`insight-artifact-v1.schema.json`、`internal/report/insight/model.go`、`internal/askdata/shared/stale.go`、测试。
 - 验证：V-GO-ALL。
+- 完成说明（2026-08-08）：已冻结 Evidence Bundle v1.1 与 Insight Artifact v1 的关闭 Schema、strict
+  decode、规范化、hash 和 Go 校验。`SEMANTIC_IR` 强制 Release/IR hash 非空，`DATASET_QUERY` 强制二者
+  为 null；两类均固定 Dataset/Snapshot/Query/Filter、实际时间区间、asOf、分析方法/算法版本及有序事实。
+  current/previous/change 全部为无指数、无前导零的 decimal 字符串，JSON number/float 被 Schema 与 Go
+  双重拒绝。facts.cellRefs 与 Answer citations 直接复用同一 `shared.CellRef/Citation` 和 rowKey parser；
+  Insight 绑定 Evidence hash，支持 CURRENT/STALE/FAILED，并严格执行 humanEdited 与编辑人/时间成对规则。
+  九类指定失效因素以及 policy wordlist/evidence hash 统一走同一个 `shared.IsStale`。测试覆盖两种来源、
+  两份 Schema round-trip、九项失效、坐标互解析、float 拒绝、人工编辑、未知字段与 Evidence hash 篡改；
+  专项 Go test/vet、JSON 和 diff 检查通过。
 
 ### 28.2 存储层
 
-### [ ] RPT-DB-001 — 报告主对象、草稿、修订与版本
+### [x] RPT-DB-001 — 报告主对象、草稿、修订与版本
 
 - 优先级：P0
 - 板块：B11
@@ -4447,7 +5043,21 @@ CREATE RULE report_revisions_no_delete AS ON DELETE TO platform.report_revisions
 - 文件范围：`migrations/000234_*`、`internal/report/model.go`、`repository.go`、`postgres_store.go`、测试。
 - 验证：V-GO-ALL、V-DB。
 
-### [ ] RPT-DB-002 — 模板、主题与组件模板
+> 实施记录（2026-08-09）：`000234_report_v2_core` 已落地 reports、唯一可变 draft、append-only
+> revisions 与不可变 version；`internal/report/store.Repository` 固定 `CreateReport`、`GetDraft`、
+> `SaveDraftWithRevision`、`ListRevisions`、`CreateVersion`、`GetVersion` 边界。每次草稿保存以
+> `FOR UPDATE` + expected revision 单事务更新 draft、追加 revision 并重建索引；并发同一 base revision
+> 恰好一个成功，另一个返回包含 current revision 与差异摘要的 `ErrRevisionConflict`。
+>
+> 四张核心表均启用并强制 RLS。报告主表用当前行 owner/domain/object grant 判定，子表统一通过
+> `report_v2_can_access` 回查，支持 owner、领域/平台管理员及 USER/ROLE 的 VIEW/EDIT/PUBLISH 对象授权；
+> VIEW 不自动获得 EDIT，跨 tenant 不可见。读回 JSONB 后重新规范化并核对持久化 hash，避免 PostgreSQL
+> JSONB 文本重排破坏发布工件字节；约 4.9 MiB 的合法大定义可写、可读且 canonical hash 一致。
+> 真实 `report_app` 集成覆盖并发乐观锁、连续修订链、VIEW-only 拒写、跨租户隔离、revision/version
+> UPDATE/DELETE 拒绝与大定义；`000251 → 000234` down 后 `000234 → 000238` up 在一次性临时库通过，
+> 临时库已删除。本任务无页面或显著视觉状态，不触发设计确认门禁。
+
+### [x] RPT-DB-002 — 模板、主题与组件模板
 
 - 优先级：P0
 - 板块：B11
@@ -4518,7 +5128,24 @@ CREATE TABLE platform.component_template_versions (
 - 文件范围：`migrations/000235_*`、`internal/report/template/store.go`、`resolve.go`、`seed.go`、测试。
 - 验证：V-GO-ALL、V-DB。
 
-### [ ] RPT-DB-003 — 组件索引与依赖索引
+> 实施记录（2026-08-09）：`000235_report_v2_templates` 已落地结构、布局、主题、叙述、报告组合与
+> 组件模板共 12 张 FORCE RLS 表，所有版本字段执行严格三段式 SemVer；报告模板版本只保存四类子模板
+> 版本外键组合。`PostgresTemplateStore.ResolveTemplateVersion` 按不可变 version ID 解析组合，兼容
+> `PUBLISHED/DEPRECATED/RETAINED`，读回五份 JSON 后统一规范化并逐份核对 content hash；跨 tenant
+> 返回 not found。
+>
+> 13 个内置组件身份由迁移建立，API 启动时以编译器同源的 embedded registry 一次性替换显式占位，
+> 此后只接受 hash 完全一致的幂等重放，不覆盖漂移内容。组件版本只允许
+> `ACTIVE → DEPRECATED → RETAINED`，内容和身份不可变；`000236` 的依赖索引触发器拒绝删除已被发布
+> 报告引用的版本并返回 `REPORT_TEMPLATE_IN_USE`。`000256` 为已应用旧版 000235 的数据库补齐同一
+> hydration 与 SemVer 边界；同时修正 `000253.down` 的 trigger/function 逆序缺陷。
+>
+> 真实 `report_app` PostgreSQL 集成覆盖四模板组合、精确 version ID、跨 tenant、13 个真实 manifest
+> 及二次 seed、合法/非法状态流转、SemVer 拒绝和引用删除保护；旧库 13 个 placeholder 的前向升级
+> 克隆也通过。`go test -race`、全仓 `go test ./...`、`go vet ./...` 与 `git diff --check` 通过。
+> 本任务无页面或显著视觉状态，不触发设计确认门禁。
+
+### [x] RPT-DB-003 — 组件索引与依赖索引
 
 - 优先级：P1
 - 板块：B11
@@ -4570,7 +5197,28 @@ CREATE TABLE platform.report_draft_dependencies (
 - 文件范围：`migrations/000236_*`、`internal/report/compiler/index.go`、`cmd/report-admin/rebuild_indexes.go`、测试。
 - 验证：V-GO-ALL、V-DB。
 
-### [ ] RPT-DB-004 — AI 运行、证据与结论工件
+> 实施记录（2026-08-10）：`compiler.BuildIndexes` 已成为 Report Definition 到组件/依赖索引的纯函数，
+> 覆盖全部且仅一次落位的组件、所有声明的 dataContext、组件模板/主题/四类报告子模板，以及
+> Semantic IR 中的 Release、Dataset、Metric、Dimension 与 Member 版本；依赖按
+> `(dependencyType, dependencyId)` 去重，`component_ids` 和组件行均稳定排序。随机定义属性测试执行
+> 200 组，验证覆盖、去重与稳定顺序。
+>
+> 草稿保存与索引先删后写处于同一事务，显式回滚已证明 definition/revision/index 一起回滚；发布版本
+> 索引随版本插入并由数据库 55000 trigger 禁止 UPDATE/DELETE。`report-admin rebuild-indexes` 在报告级
+> 锁内从 canonical definition 重建草稿索引；版本索引完整一致时只校验、全部缺失时允许确定性回填，
+> 部分缺失或内容漂移一律失败关闭，避免管理修复掩盖不可变工件损坏。
+>
+> 四张索引表均使用报告对象权限的 FORCE RLS，不再只有 tenant 可见；组件模板删除保护按平台内置/
+> 租户自建来源限定依赖范围，不扫描 definition JSON。`000261` 为已应用早期 `000236` 的数据库补齐
+> 对象级策略和 tenant-aware 删除保护；全迁移 V-DB 同时用 `000262`～`000264` 修复历史 AskData
+> 跨租户外键、搜索触发器安全属性回退和旧组件可写策略。
+>
+> 真实 PostgreSQL 从空库顺序应用全部迁移后，以 `report_app` 覆盖 owner/VIEW-only/跨 tenant、同事务
+> 回滚、近 5 MiB 发布、增量重建与缺失版本索引回填；开发库 `migrate.sh`、`verify-database.sh`、专项
+> race、全仓 `go test ./...`、`go vet ./...` 和 `git diff --check` 通过。本任务无页面或显著视觉状态，
+> 不触发设计确认门禁。
+
+### [x] RPT-DB-004 — AI 运行、证据与结论工件
 
 - 优先级：P1
 - 板块：B11
@@ -4640,7 +5288,27 @@ CREATE TABLE platform.report_insight_artifacts (
 - 文件范围：`migrations/000237_*`、`internal/report/ai/store.go`、`internal/report/insight/store.go`、测试。
 - 验证：V-GO-ALL、V-DB。
 
-### [ ] RPT-DB-005 — 分享记录（无匿名类型）
+> 实施记录（2026-08-10）：`reportai.PostgresStore` 已覆盖 `PLAN`、`GENERATE_DRAFT`、
+> `SCOPED_EDIT`、`INSIGHT` 四类运行及 `RUNNING → SUCCEEDED/FAILED/REJECTED` 单向终态；请求摘要
+> 由 Go 闭合结构和数据库字段白名单双重约束，只允许意图、选区、可用字段名、组件/数据上下文 ID，
+> 拒绝控制字符、超长文本、完整 prompt、样例和原始值字段。终态运行不可重写或删除。
+>
+> AI 操作无论有效或被拒均追加落库；拒绝项必须携带 `rejection_code`，有效项只有在所属运行成功后才可
+> 由草稿提交事务一次性写入正数 `applied_revision_no`，其余 UPDATE/DELETE 均由数据库 trigger 返回
+> SQLSTATE 55000。Evidence Bundle 不可变；结论重生成先把旧 CURRENT 置 STALE 再追加新行，人工编辑
+> 同样追加新行并保存编辑人和时间。工件合同中的稳定 artifact ID 与数据库版本行 UUID 分离，确保重生成
+> 与人工编辑保持同一工件身份而不违反行主键唯一性。
+>
+> 四张表使用报告对象权限和 actor 边界的 FORCE RLS：运行记录仅发起者可见，证据/结论按 VIEW 读取、
+> EDIT 写入，令牌/tenant/domain 均不能绕过报告权限。`000257`、`000261` 与 `000265` 为早期 `000237`
+> 安装补齐摘要完整性、对象策略及运行/操作生命周期保护；所有触发器函数固定 search path 并撤销 PUBLIC。
+>
+> 真实 PostgreSQL 集成测试覆盖四类运行、拒绝码、摘要白名单、VIEW-only/跨 tenant、终态不可变、Evidence
+> 不可变、两次生成的 CURRENT/STALE 切换及人工编辑留痕；从空库顺序迁移、上下行事务演练、专项 race、
+> 全仓 `go test ./...`、`go vet ./...`、V-DB、脚本语法与 `git diff --check` 均通过。本任务无页面或显著
+> 视觉状态，不触发设计确认门禁。
+
+### [x] RPT-DB-005 — 分享记录（无匿名类型）
 
 - 优先级：P0
 - 板块：B11
@@ -4707,10 +5375,33 @@ func (s *ShareService) AccessShare(ctx, token string, viewer Actor) (ReportVersi
 - 文件范围：`migrations/000238_*`、`internal/report/share.go`、`share_auth.go`、测试。
 - 验证：V-GO-ALL、V-DB。
 
+> 实施记录（2026-08-10）：分享类型在 Go 与数据库 CHECK 中均闭合为 `INTERNAL_USER`、
+> `INTERNAL_GROUP`、`EXTERNAL_ACCOUNT`，不存在 PUBLIC/ANONYMOUS；MVP 服务在定位数据库记录前直接拒绝
+> `EXTERNAL_ACCOUNT`。创建要求报告 EDIT 权限，默认 30 天、上限 180 天，数据库只保存 256-bit 随机
+> token 的 SHA-256 hash，创建响应只返回一次原 token 且隐藏 hash。
+>
+> `AccessShare` 严格执行“先登录、再定位、再报告 VIEW 权限、最后按查看者加载发布版本”，用户/用户组
+> principal 由 FORCE RLS 和有效主体校验共同约束，令牌不能提升报告权限或跨 tenant/domain。固定版本分享
+> 校验精确 version ID；未固定版本跟随当前发布版本，运行时数据权限继续使用 viewer 身份。
+>
+> 过期采用双重保护：每次访问实时比较 `expires_at`，即使 Worker 未运行也立即拒绝；有界 tenant Worker
+> 通过 `(tenant_id,expires_at,id)` 索引以 `SKIP LOCKED` 批量写 `expired_at` 标记。撤销是创建者的一次性
+> `revoked_at` 更新并同步执行缓存失效合同。访问计数、过期和撤销是数据库 trigger 允许的三种单用途
+> UPDATE，身份、principal、token hash、过滤快照、版本和期限不可改写。
+>
+> `000266` 补齐分享生命周期、拆分 SELECT/INSERT/UPDATE 对象策略与安全 trigger，`000268` 让 trigger
+> 以固定 search path 的 definer 身份调用不对运行角色开放的主体校验函数；`000267` 同时前向修复早期
+> `000234` 把版本 trigger 错绑到全行禁止函数的问题，使合法 `PENDING/RETRY → READY` 恢复而定义仍不可变。
+>
+> 真实 PostgreSQL 以 admin/app/worker 三角色覆盖用户与用户组分享、无权限令牌不提权、跨租户、实时
+> 过期、Worker 标记、撤销、访问计数、180 天 CHECK、非法主体和不可变字段；空库全迁移、266～268
+> down/up 事务演练、专项 race、全仓 `go test ./...`、`go vet ./...`、V-DB、脚本语法与
+> `git diff --check` 均通过。本任务无页面或显著视觉状态，不触发设计确认门禁。
+
 
 ### 28.3 领域与运行时
 
-### [ ] RPT-001 — DSL 规范化、校验与哈希
+### [x] RPT-001 — DSL 规范化、校验与哈希
 
 - 优先级：P0
 - 板块：B11
@@ -4756,7 +5447,16 @@ func (s *ShareService) AccessShare(ctx, token string, viewer Actor) (ReportVersi
 - 文件范围：`internal/report/compiler/normalize.go`、`validate.go`、`sanitize.go`、`migrate/*.go`、测试。
 - 验证：V-GO-ALL。
 
-### [ ] RPT-002 — Operation 执行、逆操作与并发控制
+> 实施记录（2026-08-10）：`NormalizeWithRegistry` 已按冻结顺序完成深拷贝、字符串/枚举规范化、
+> Schema 与 13 个组件 Manifest 默认值合并、nil 集合归一化、稳定排序、步骤 6～10 分阶段累积校验、
+> 字典序无空白 JSON 和 SHA-256。V1 minor 兼容读取统一输出 1.0；大版本只能通过
+> `compiler/migrate/v1_to_v2` 显式迁移器在副本上迁移，不会原地改写已发布制品。富文本使用确定性的
+> 标签/属性/协议白名单清洗，危险节点连同内容移除，清洗结果参与 hash；直接 Decode 与编译路径共用
+> 同一清洗合同。属性、负向分阶段、XSS、迁移器和近 5 MB 用例均通过；Apple M4 上 5 次基准平均
+> 约 51.6 ms，低于 500 ms 门槛。专项 race、全仓 `go test ./...`、`go vet ./...`、脚本语法与
+> `git diff --check` 均通过。本任务无页面或显著视觉状态，不触发设计确认门禁。
+
+### [x] RPT-002 — Operation 执行、逆操作与并发控制
 
 - 优先级：P0
 - 板块：B11
@@ -4822,7 +5522,19 @@ POST /api/reports/{id}/redo   -> 取最后一条 UNDO 修订，生成其逆操�
 - 文件范围：`internal/report/operation/apply.go`、`inverse.go`、`undo.go`、`conflict.go`、`internal/report/service.go`、测试。
 - 验证：V-GO-ALL。
 
-### [ ] RPT-003 — 布局引擎
+> 实施记录（2026-08-10）：41 类 typed Operation 已全部进入同一纯函数执行器和逆操作表；执行失败返回
+> 稳定 code、operationIndex 与原因，整包不修改调用方定义。Store 先以 `FOR UPDATE` + Report V2 RLS
+> 确认 EDIT，AI 再要求 `report.ai_edit`（产品权限 `REPORT_AI_EDIT`），随后检查 baseRevision 和 scope，
+> 最终在单事务同步报告主对象、更新规范草稿、追加不可变修订并重建索引。409 返回 expected/current revision
+> 与最多 100 条操作摘要，禁止强制覆盖。每条修订持久化完整 before snapshot；模板/主题撤销使用整定义
+> snapshot，普通 create/delete/update/move/resize/reorder/merge/split 使用逆操作。Undo/Redo 使用可验证双栈，
+> 支持连续多级往返，新普通编辑会清空 redo 分支，链不一致失败关闭。`000269` 登记并授予独立 AI 编辑能力；
+> HTTP 幂等边界沿用共享中间件，AI 越权/越 scope 不产生修订，且只有通过鉴权与 baseRevision 后的模型输出
+> 拒绝才记审计。测试覆盖 41 类应用+逆操作、120 步随机全撤销、失败包、409 详情、slot ID 恢复、模板
+> snapshot、多级 Undo/Redo、主对象同步和真实 PostgreSQL 并发/RLS/AI 权限；269 down/up、空库全迁移、
+> 专项 race、全仓 test/vet、V-DB、脚本语法与 `git diff --check` 均通过。本任务无页面或显著视觉状态。
+
+### [x] RPT-003 — 布局引擎
 
 - 优先级：P0
 - 板块：B11
@@ -4907,7 +5619,17 @@ POST /api/reports/{id}/redo   -> 取最后一条 UNDO 修订，生成其逆操�
 - 文件范围：`internal/report/compiler/layout.go`、`slot.go`、`mobile.go`、`web/src/report/designer/layout/*`、测试。
 - 验证：V-GO-ALL、V-WEB。
 
-### [ ] RPT-004 — 发布编译与不可变制品
+> 实施记录（2026-08-10）：Go/TypeScript 已实现相同的 24 列逻辑坐标、运行时像素换算、NONE/VERTICAL
+> 紧凑模式、FIXED/AUTO/FR/HIDDEN 高度分配、模板优先级空区重分配和移动端四种 slotMode。服务端碰撞
+> 检测使用 x 扫描线与 AVL y 区间树，复杂度为 `O((n+k) log n)`，随机暴力对照与 300 分块 `<10ms`
+> 门禁通过。槽位允许无组件；同区、连续矩形、至多一个非空组件与 Manifest 最小尺寸使用稳定错误码，
+> 合并几何/组件/排序后的 `mergedFrom` 由服务端推导，Split 仅能按 provenance 精确恢复。PRIMARY_ONLY
+> 必须引用可见非筛选槽位，隐藏槽位不进入查询；筛选槽位进入抽屉，Manifest mobilePolicy 随移动布局
+> 下发。Go/TS 共用 `report-layout-contract-v1.json` 验证碰撞与合并判定。全仓 Go test/vet、39 条 Web
+> 测试、Web build/lint、V-DB 与 `git diff --check` 均通过；Vite 仅保留既有大 chunk 提示。本任务没有
+> 页面或显著视觉状态，不触发设计确认门禁。
+
+### [x] RPT-004 — 发布编译与不可变制品
 
 - 优先级：P0
 - 板块：B11
@@ -4957,7 +5679,16 @@ POST /api/reports/{id}/redo   -> 取最后一条 UNDO 修订，生成其逆操�
 - 文件范围：`internal/report/publication/publish.go`、`artifact_store.go`、`compensate.go`、测试。
 - 验证：V-GO-ALL、V-DB。
 
-### [ ] RPT-005 — 回滚
+> 实施记录（2026-08-10）：发布器按固定 14 步执行鉴权、指定历史修订读取、分阶段合同/领域/
+> Manifest/依赖/布局/交互/Insight 校验、双端预览 hash 门禁、规范化、索引、临时对象、事务版本和
+> 指针切换。版本制品固定模板、数据集、语义 Release+hash、分析方法、Prompt 与模型策略，数据库触发器
+> 将语义 Release 登记为 `REPORT_VERSION` 引用并阻止误退役。对象键统一使用含 `report-v2/` 的正式 URI；
+> DB 失败清理临时对象，Promote/指针失败保留恢复状态，由补偿 Worker 按 `object_uri` 幂等修复。同一
+> report/revision/key 仅产生一个版本，STALE Insight 默认拒绝且显式确认留痕。14 步失败矩阵、历史修订、
+> 固定版本字段、对象故障恢复、真实 PostgreSQL 引用保留/退役阻断、全仓 Go test/vet、V-DB 与差异检查
+> 均通过；本任务无页面或显著视觉状态，不触发设计确认门禁。下一项为 `RPT-005`。
+
+### [x] RPT-005 — 回滚
 
 - 优先级：P1
 - 板块：B11
@@ -4983,7 +5714,20 @@ POST /api/reports/{id}/redo   -> 取最后一条 UNDO 修订，生成其逆操�
 - 文件范围：`internal/report/publication/rollback.go`、测试。
 - 验证：V-GO-ALL。
 
+> 实施记录（2026-08-10）：回滚入口校验发布权限、actor-scoped Idempotency-Key、正数且 READY 的目标
+> 版本及 1～1000 字符无控制符原因；读取历史 immutable definition 后重新走 RPT-004 第 3～14 步，依赖
+> 下线等失败返回结构化 `issues` 且不允许绕过。新版本固定 `rollback_of_version_no/reason`，历史版本与
+> hash 不变，回滚的回滚继续产生更高版本。存储层独立核对目标 READY、definition hash 与 source revision；
+> `000273_report_rollback_integrity` 增加同报告历史版本自外键和规范审计原因 CHECK。单测覆盖正常、幂等、
+> 权限/原因/目标拒绝、依赖失败清单、连续回滚；真实 PostgreSQL 覆盖指针切换、历史不可变、伪造定义拒绝
+> 和缺失目标外键。全仓 Go test/vet、迁移 down/up 事务回放、V-DB 与差异检查通过。本任务无页面；下一项
+> `RPT-006` 含八态运行时视觉，必须先出设计稿并取得用户确认。
+
 ### [ ] RPT-006 — 报告运行时
+
+> 后端范围完成（2026-08-10）：不可变制品加载/hash 校验、组件模板固定、默认筛选求值、可视查询计划、
+> 同批查询、单组件失败隔离和 `POST /api/v1/reports/{id}/runtime/execute` 已实现并通过测试；八态页面渲染
+> 属于排除的前端范围，因此原任务保持未勾选。
 
 - 优先级：P0
 - 板块：B11
@@ -5039,9 +5783,14 @@ POST /api/reports/{id}/redo   -> 取最后一条 UNDO 修订，生成其逆操�
 
 - 文件范围：`internal/report/runtime/*`、`web/src/report/runtime/*`、测试。
 - 页面门禁：运行时视觉需设计稿确认。
+- 设计评审状态（2026-08-10）：用户已确认报告资产中心方案 2，并明确“新建报告”进入其提供的完整报告
+  工作台页面；页面已按确认稿实现待发布草稿态、八种组件状态、视口懒加载和双层错误边界。
+- 当前实施边界（2026-08-10）：不可变制品加载、hash/schema/组件版本校验、相对时间解析、查询计划与批量
+  执行器均已完成并测试；真实路由已加载不可变 Definition。页面的数据结果仍为演示呈现，尚未把批量查询
+  结果绑定到全部组件，因此本任务保持未完成，后续不得把演示值宣称为生产查询结果。
 - 验证：V-GO-ALL、V-WEB。
 
-### [ ] RPT-007 — 数据绑定双模型与查询编排
+### [x] RPT-007 — 数据绑定双模型与查询编排
 
 - 优先级：P0
 - 板块：B11
@@ -5111,7 +5860,21 @@ POST /api/reports/{id}/redo   -> 取最后一条 UNDO 修订，生成其逆操�
 - 文件范围：`internal/report/runtime/binding.go`、`querybatch.go`、`api/schemas/report-definition-v1.schema.json`、测试。
 - 验证：V-GO-ALL、V-DB。
 
+> 实施记录（2026-08-10）：Report Definition Schema 与 Go 运行时共同保持 `SEMANTIC_IR` /
+> `DATASET_FIELD` 闭合二选一；编译期已覆盖六类稳定拒绝，语义对象逐一核对认证状态，指标单位/币种在
+> 运行时和 PostgreSQL 发布依赖校验两处失败关闭。`RETAINED` 可重编译，`RETIRED` 与固定 content hash
+> 漂移均拒绝。执行计划只携带固定 Release/hash/Plan hash、Semantic IR 或 Dataset 逻辑字段请求，不含
+> SQL；Dataset 响应固定标记 `uncertifiedDefinition=true`。批处理按包含 `policyScopeHash` 的 SHA-256
+> 去重，默认并发 8、硬上限 16，逐查询超时和最大行数均生效。受治理执行器把当前查看者 context 传给
+> Semantic/Dataset runner，发布者与低权限查看者使用不同策略作用域，低权限结果不会复用或泄露。
+> 六项拒绝、RETAINED/RETIRED、三组件单次执行、策略隔离、无 SQL、查看者裁剪、并发/超时/行数与篡改
+> 固定语义身份测试均通过；全仓 Go test/vet、V-DB 与差异检查通过。本任务没有页面或显著视觉状态，
+> 不触发设计确认门禁。
+
 ### [ ] RPT-008 — 筛选与交互运行时
+
+> 后端范围完成（2026-08-10）：全局/局部/临时筛选作用域、交互传播、循环检测、受控重查询与不写回定义
+> 的运行态合同均已实现并通过测试；前端运行态 Store 与交互控件属于排除范围，因此原任务保持未勾选。
 
 - 优先级：P1
 - 板块：B11
@@ -5160,7 +5923,7 @@ POST /api/reports/{id}/redo   -> 取最后一条 UNDO 修订，生成其逆操�
 - 文件范围：`internal/report/runtime/filter.go`、`internal/report/compiler/interaction.go`、`web/src/report/runtime/interaction.ts`、测试。
 - 验证：V-GO-ALL、V-WEB。
 
-### [ ] RPT-009 — Insight Engine 与 Analysis Method Registry
+### [x] RPT-009 — Insight Engine 与 Analysis Method Registry
 
 - 优先级：P0
 - 板块：B11
@@ -5220,7 +5983,7 @@ POST /api/reports/{id}/redo   -> 取最后一条 UNDO 修订，生成其逆操�
 - 文件范围：`internal/report/insight/registry.go`、`methods/*.go`、`evidence.go`、`narrative.go`、测试。
 - 验证：V-GO-ALL。
 
-### [ ] RPT-010 — 报告 AI 两阶段生成与局部修改
+### [x] RPT-010 — 报告 AI 两阶段生成与局部修改
 
 - 优先级：P1
 - 板块：B11
@@ -5301,6 +6064,10 @@ POST /api/reports/{id}/redo   -> 取最后一条 UNDO 修订，生成其逆操�
 
 ### [ ] RPT-011 — 导出与分享
 
+> 后端范围完成（2026-08-10）：导出任务、精确版本/asOf/筛选/导出人固定、真实 CSV/XLSX/PDF/PNG
+> 制品、过期与下载授权，以及无匿名分享、令牌仅定位和实时/后台过期撤销均已实现并通过测试；前端
+> print CSS/打印预览属于排除范围，因此原任务保持未勾选。
+
 - 优先级：P1
 - 板块：B11
 - 依赖：RPT-DB-005、RPT-006、TIME-003
@@ -5338,7 +6105,7 @@ POST /api/reports/{id}/redo   -> 取最后一条 UNDO 修订，生成其逆操�
 - 文件范围：`internal/report/publication/export.go`、`export_worker.go`、`internal/report/share_auth.go`、`web/src/report/runtime/print.css`、测试。
 - 验证：V-GO-ALL。
 
-### [ ] RPT-012 — 组件模板版本保留与升级
+### [x] RPT-012 — 组件模板版本保留与升级
 
 - 优先级：P1
 - 板块：B11
@@ -5367,10 +6134,59 @@ POST /api/reports/{id}/redo   -> 取最后一条 UNDO 修订，生成其逆操�
 - 文件范围：`internal/report/template/registry.go`、`migrate.go`、`ci/manifest_compat_test.go`、测试。
 - 验证：V-GO-ALL。
 
+### [x] RPT-013 — 报告资产生命周期与权限治理
+
+- 优先级：P0
+- 板块：B11
+- 依赖：RPT-DB-001、RPT-004、RPT-006
+- 目标：为“已经做了哪些报告、谁能查看或修改、当前是否发布、如何下架/上架”提供唯一后端治理闭环，且下架不能通过版本 URL 或分享绕过。
+
+**读取模型**
+
+报告生命周期不新增重复状态列，按主对象、草稿与当前发布版本推导：
+
+| 生命周期 | 判定 |
+|---|---|
+| `DRAFT_ONLY` | `status=ACTIVE` 且无当前发布版本 |
+| `PUBLISHED` | `status=ACTIVE` 且草稿 hash 等于当前发布版本 hash |
+| `CHANGED` | `status=ACTIVE` 且草稿 hash 不同于当前发布版本 hash |
+| `OFFLINE` | `status=ARCHIVED` |
+
+**API 与状态转换**
+
+1. 扩展 `GET /api/v1/reports`：固定当前业务域，支持 `scope=mine|shared|all`、生命周期、Owner、类型、名称搜索、更新时间排序和游标分页；单行返回当前版本号、草稿修订、权限摘要及 `allowedActions`，禁止 N+1。
+2. `GET/POST /api/v1/reports/{id}/permissions` 与 `DELETE /api/v1/reports/{id}/permissions/{grantId}` 管理 `REPORT` 对象的 `VIEW/EDIT/PUBLISH/EXPORT/SHARE/AI_EDIT` 用户/角色授权。
+3. 仅报告 Owner 或平台/领域管理员可授予/撤销权限；subject 必须属于同租户。报告权限与领域、数据集、行列级权限取交集，不能扩大数据范围。
+4. `POST /api/v1/reports/{id}/archive {reason}`：要求 `REPORT_PUBLISH`、原因和 Idempotency-Key；事务内 `ACTIVE→ARCHIVED` 并追加事件，保留草稿、修订、版本、对象制品、依赖、当前指针和审计。
+5. `POST /api/v1/reports/{id}/restore {reason}`：从未发布报告可恢复为 `DRAFT_ONLY`；有当前版本时重新校验制品 hash、固定组件/语义/数据依赖与查看权限，失败保持 `ARCHIVED` 并返回结构化 issues。
+6. `GET /api/v1/reports/{id}/asset-events` 返回权限、Owner、发布、回滚、上下架和分享的统一时间线。
+7. 运行时加载当前版或指定版均先检查 `reports.status=ACTIVE`；下架稳定返回 `REPORT_OFFLINE`，分享访问同样失败关闭。
+8. `000275_report_asset_governance` 建 `report_asset_events` 追加审计及 domain/status/updated、Owner、名称检索索引；数据库约束阻止空原因和非法状态转换。
+
+**测试清单**
+
+1. 四种推导状态与列表筛选/搜索/游标分页。
+2. 固定当前领域且只返回本人可见资产；不同权限返回正确 `allowedActions`。
+3. 授权/撤销的 Owner/管理员正例与越权、跨租户、非法 action 负例。
+4. 下架保留草稿、历史版本、当前指针和 hash，普通 runtime、指定版本和分享均返回 `REPORT_OFFLINE`。
+5. 重新上架正常成功；依赖失效时保持下架且 issues 完整。
+6. archive/restore 与 grant/revoke 幂等重放；并发状态转换只追加一次权威事件。
+7. 真实 PostgreSQL 验证 RLS、约束、索引、事件时间线和下架阻断。
+
+- 文件范围：`internal/report/asset/*`、`internal/report/http/*`、`internal/report/runtime/*`、`internal/report/authorization/*`、`internal/report/store/*`、`migrations/000275_report_asset_governance.*.sql`、测试。
+- 验证：V-GO-ALL、V-DB。
+
+> 实施记录（2026-08-10）：`GET /reports` 已实现固定领域、scope/生命周期/Owner/类型/名称过滤、稳定
+> 游标与无 N+1 的权限摘要/`allowedActions`；用户/角色六动作授权、撤销、统一事件时间线、带原因软下架和
+> 上架前不可变制品/组件/依赖重校验均已接入。`GetVersion` 在当前版、指定版及分享共用路径统一返回
+> `REPORT_OFFLINE`。`000275` 已创建追加事件、状态转换/权限动作触发器、RLS 与检索索引，并在本地真实
+> 应用。单测覆盖游标/动作/输入，真实 PostgreSQL 覆盖授权/越权、shared 列表、并发下架单成功单冲突、
+> runtime 阻断、恢复、撤销与完整时间线；空库全迁移、V-DB、全仓 test/vet 和差异检查通过。
+
 
 ### 28.4 融合层
 
-### [ ] FUSE-001 — 问数加入报告与跨上下文一致性
+### [x] FUSE-001 — 问数加入报告与跨上下文一致性
 
 - 优先级：P0
 - 板块：B11
@@ -5442,7 +6258,7 @@ Semantic IR、语义发布 ID+hash、数据集版本、Query Plan Hash、图表�
 - 文件范围：`migrations/000240_*`、`internal/askdata/reportasset/intent.go`、`internal/report/operation/inbound.go`、`cmd/worker/main.go` 注册、测试。
 - 验证：V-GO-ALL、V-DB。
 
-### [ ] FUSE-002 — 报表语义资产投影与单人认证
+### [x] FUSE-002 — 报表语义资产投影与单人认证
 
 - 优先级：P1
 - 板块：B11 / B04
@@ -5517,7 +6333,7 @@ CREATE TABLE askdata.report_asset_certifications (
 - 文件范围：`migrations/000239_*`、`internal/askdata/reportasset/validator.go`、`projector.go`、`search_document.go`、`graph_projection.go`、测试。
 - 验证：V-GO-ALL、V-DB。
 
-### [ ] FUSE-003 — 从报告发起问数
+### [x] FUSE-003 — 从报告发起问数
 
 - 优先级：P1
 - 板块：B11 / B10
@@ -5558,7 +6374,7 @@ CREATE TABLE askdata.report_asset_certifications (
 - 文件范围：`web/src/report/runtime/AskFromComponent.tsx`、`internal/askdata/http/question.go`、`seed_context.go`、测试。
 - 验证：V-GO-ALL、V-WEB。
 
-### [ ] FUSE-004 — Chart Recommendation Registry
+### [x] FUSE-004 — Chart Recommendation Registry
 
 - 优先级：P1
 - 板块：B11
@@ -5612,7 +6428,7 @@ CREATE TABLE askdata.report_asset_certifications (
 - 文件范围：`api/schemas/chart-recommendation-v1.schema.json`、`internal/askdata/answer/chart_rules.go`、`rules/*.json`、测试。
 - 验证：V-GO-ALL。
 
-### [ ] FUSE-005 — 依赖影响分析与报告升级
+### [x] FUSE-005 — 依赖影响分析与报告升级
 
 - 优先级：P1
 - 板块：B11 / B04
@@ -5760,11 +6576,38 @@ type ImpactReport struct {
 - 测试：校验清单渲染与跳转、STALE 阻断、版本列表、回滚原因必填、回滚校验失败态。
 - 验证：V-WEB。
 
+### [ ] WEB-RPT-007 — 报告资产中心
+
+- 优先级：P0
+- 板块：B11
+- 依赖：RPT-013、RPT-004、RPT-005
+- 完成标准：
+  1. 作为“智能报告”的默认入口，展示当前已选领域内本人可见的报告，支持名称搜索、我创建/共享给我/全部可见、状态、Owner、类型与更新时间筛选；不提供领域切换器；
+  2. 清晰区分“待发布、已发布、有未发布修改、已下架”，展示 Owner、当前版本、草稿修订、最近更新和权限摘要；
+  3. 依据后端 `allowedActions` 展示查看、编辑、发布、版本、权限、下架/上架动作，不在前端自行推断权限；
+  4. 权限面板可按用户/角色授予或撤销查看、编辑、发布、导出、分享、AI 编辑权限，并明确“报告权限不扩大数据权限”；
+  5. 下架二次确认必须填写原因并说明历史不会删除、普通访问将立即关闭；上架先展示重新校验结果，失败不可绕过；
+  6. 资产详情侧栏或详情页提供草稿与发布版差异、版本入口、Owner、权限摘要和完整审计时间线；
+  7. 覆盖列表加载、空态、错误、无权限、发布恢复中和已下架状态，列表采用游标分页/虚拟化避免大资产库卡顿；
+  8. 点击“查看”进入 RPT-006 不可变运行时，点击“编辑/发布/版本”进入各自既有流程，资产中心不复制设计器或运行时。
+- 文件范围：`web/src/report/assets/*`、`web/src/report/api/assets.ts`、报告路由与导航。
+- 测试：筛选/分页、四生命周期状态、allowedActions、权限授予撤销、上下架确认与失败态、跨页面路由、空/错/无权限快照。
+- 页面门禁：编码前必须提交报告资产中心设计稿并取得用户确认。
+- 设计评审状态（2026-08-10）：用户已确认方案 2，并明确点击“新建报告”进入其提供的报告工作台页面。
+- 当前实施边界（2026-08-10）：确认稿、核心新建/查看/编辑/发布路由、服务端搜索/范围/状态/游标列表、
+  六动作权限面板、上下架原因与恢复校验提示、事件时间线、加载/空/错误/下架状态已实现；Owner/类型/时间
+  的前端筛选入口、发布恢复中专态、完整版本差异入口和真实设计器/发布流程仍待 `WEB-RPT-001～006`
+  共同收敛，因此本任务保持未完成，不以确认稿演示状态替代剩余生产交互。
+- 验证：V-WEB。
+
 ---
 
 ## 29. B12 评测、反馈与运营补全任务
 
 ### [ ] EVAL-008 — 时间类专项黄金用例集
+
+> 软件范围完成（2026-08-10）：七类合成日历套件骨架、四字段断言、合同变更全量回归门禁和 99% 阈值
+> 已实现；真实财年/业务日历未提供，按本任务红线保持未勾选且不编造正式样本。
 
 - 优先级：P0
 - 板块：B12
@@ -5779,6 +6622,9 @@ type ImpactReport struct {
 
 ### [ ] EVAL-009 — 可加性专项黄金用例集
 
+> 软件范围完成（2026-08-10）：分类盘点、SQL AST 结构断言、故障注入与 100% 门禁已实现；真实业务口径
+> 样本未提供，保持未勾选。
+
 - 优先级：P0
 - 板块：B12
 - 依赖：ADD-003、HUMAN-002、HUMAN-008
@@ -5790,6 +6636,9 @@ type ImpactReport struct {
 
 ### [ ] EVAL-010 — 叙述人工评审集
 
+> 软件范围完成（2026-08-10）：四维评分、双人评审、Cohen's kappa、漏报导出和发布门禁已实现；尚未
+> 获得并完成 150 条真实人工评审，保持未勾选。
+
 - 优先级：P1
 - 板块：B12
 - 依赖：ANS-002
@@ -5800,7 +6649,7 @@ type ImpactReport struct {
 - 文件范围：`internal/askdata/evaluation/suites/narrative.go`、`agreement.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] EVAL-011 — 密封集分片轮换与曝光退役
+### [x] EVAL-011 — 密封集分片轮换与曝光退役
 
 - 优先级：P0
 - 板块：B12
@@ -5816,7 +6665,7 @@ type ImpactReport struct {
 - 文件范围：`internal/askdata/evaluation/shard.go`、`sampling.go`、`exposure.go`、迁移随 DB-007 批次、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
-### [ ] EVAL-012 — 误差预算对账报表
+### [x] EVAL-012 — 误差预算对账报表
 
 - 优先级：P1
 - 板块：B12
@@ -5830,7 +6679,7 @@ type ImpactReport struct {
 - 文件范围：`internal/askdata/evaluation/error_budget.go`、`fault_injection.go`、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] SQ-001 — 保存问题、共享与认证候选
+### [x] SQ-001 — 保存问题、共享与认证候选
 
 - 优先级：P1
 - 板块：B12
@@ -5870,7 +6719,7 @@ CREATE TABLE askdata.saved_question_shares (
 - 文件范围：`migrations/000231_*`、`internal/askdata/savedquestion/*`、`internal/askdata/http/saved_question.go`、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
-### [ ] FB-001 — 反馈工单状态机
+### [x] FB-001 — 反馈工单状态机
 
 - 优先级：P1
 - 板块：B12
@@ -5886,7 +6735,7 @@ CREATE TABLE askdata.saved_question_shares (
 - 文件范围：`migrations/000232_*`、`internal/askdata/feedback/ticket.go`、`attribution.go`、`internal/askdata/http/feedback.go`、测试。
 - 验证：V-GO-ASKDATA、V-DB。
 
-### [ ] FB-002 — 主动学习候选挖掘
+### [x] FB-002 — 主动学习候选挖掘
 
 - 优先级：P2
 - 板块：B12
@@ -5911,22 +6760,32 @@ CREATE TABLE askdata.saved_question_shares (
 - 文件范围：`internal/askdata/feedback/active_learning.go`、`cluster.go`、Worker 注册、测试。
 - 验证：V-GO-ASKDATA。
 
-### [ ] DR-001 — 明细取数申请工单
+### [x] DR-001 — 明细取数申请工单
 
 - 优先级：P1
 - 板块：B02 / B12
-- 依赖：NLU-009
+- 依赖：无（产品已确认支持不经拒答的主动申请；`NLU-009` 完成后接入 run 预填）
 - 目标：把 `OUT_OF_SCOPE` 从终点变成闭环入口（产品决策 D04）。
 - 状态机：`DRAFT → SUBMITTED → APPROVED/REJECTED → IN_PROGRESS → DELIVERED → CLOSED`；`data_request_events` 追加写。
 - 字段：`source_question_run_id`、`parsed_context_json`、`business_purpose`、`required_fields_json`、`sensitivity_level`、`approver_user_ids`、`security_cosign_user_id`、`assignee_user_id`、`sla_due_at`、`delivery_type`（`EXISTING_REPORT|NEW_DATASET|ONE_TIME_EXPORT`）、`delivery_ref`。
 - 预填规则：`parsed_context_json` **只取已绑定的语义对象 ID 与解析后的时间范围**，断言不携带任何结果行。
 - 交付优先级：现有报告 > 新建 ADS 并纳入语义层 > 一次性导出，顺序在申请单上对审批人可见，引导沉淀而非重复取数。
-- API：`POST /api/data-requests`（支持从 `runId` 预填）、`POST /{id}/submit`、`POST /{id}/transition`、`GET /api/data-requests`、`GET /{id}`。
+- API：`POST /api/v1/data-requests`（支持从 `sourceQuestionRunId` 预填）、`POST /{id}/submit`、`POST /{id}/transition`、`GET /api/v1/data-requests`、`GET /{id}`。
 - 测试：全部合法转移 + 非法转移被拒；预填不含结果数据；不经拒答的主动申请路径；SLA 计算；RLS 隔离。
-- 文件范围：`migrations/000233_*`、`internal/datarequest/*`、`internal/httpserver` 路由注册、测试。
+- 文件范围：`migrations/000233_*`、`migrations/000245_*`、`internal/datarequest/*`、`cmd/api` 路由注册、测试。
 - 验证：V-GO-ALL、V-DB。
 
-### [ ] DR-002 — 敏感推导与会签门禁
+> 2026-08-08 完成：新增 tenant/domain 受控的申请与追加事件表、强制 RLS、最小 API/Worker 权限、
+> `DRAFT → SUBMITTED → APPROVED/REJECTED → IN_PROGRESS → DELIVERED → CLOSED` 双层状态机门禁及
+> `record_version` 乐观锁。主动入口允许不带 run，但此时上下文必须为空；run 入口只接受该用户当前领域
+> Question Run 的 Release 对象 ID 与解析时间，`requiredFields` 必须引用当前可见 PUBLISHED 数据集字段，
+> 合同没有结果行或 SQL 字段。`000245` 以 `record_version` 作为事件单调序号，消除了相同时钟刻度下的
+> 审计乱序。真实 PostgreSQL 覆盖主动申请、跨用户 RLS、陈旧版本拒绝和六步完整闭环；全仓 Go/vet、
+> fresh-database migrate/verify、warehouse verify、ci-check 与 `git diff --check` 通过。真实业务审批链、
+> 安全会签人和 SLA 规则仍由 `HUMAN-011` 提供；当前合同只自动纳入 ACTIVE `DOMAIN_ADMIN`，不编造业务
+> Owner 或安全管理员。
+
+### [x] DR-002 — 敏感推导与会签门禁
 
 - 优先级：P1
 - 板块：B02 / B01
@@ -5940,7 +6799,7 @@ CREATE TABLE askdata.saved_question_shares (
 - 文件范围：`internal/datarequest/policy.go`、`export_bridge.go`、测试。
 - 验证：V-GO-ALL。
 
-### [ ] DR-003 — 重复申请聚类与资产化建议
+### [x] DR-003 — 重复申请聚类与资产化建议
 
 - 优先级：P2
 - 板块：B02 / B12
@@ -5960,6 +6819,9 @@ CREATE TABLE askdata.saved_question_shares (
 > 安全与审计的完整方案由安全评审文档承担；此处只列与功能闭环直接耦合的部分。
 
 ### [ ] OBS-003 — 容量基线与压测
+
+> 软件范围进度（2026-08-10）：可重复压测脚本、容量报告合同、阈值规则和基线文档已实现；尚未在用户
+> 指定生产规格与目标数据规模上形成实测报告，保持未勾选。
 
 - 优先级：P1
 - 板块：B13
@@ -5987,7 +6849,7 @@ CREATE TABLE askdata.saved_question_shares (
 - 文件范围：`scripts/loadtest/*`、`docs` 容量记录、`internal/observability/capacity.go`、测试。
 - 验证：V-FULL-INTEGRATION + 压测报告。
 
-### [ ] OPS-006 — 配额、成本归集与限流行为
+### [x] OPS-006 — 配额、成本归集与限流行为
 
 - 优先级：P1
 - 板块：B13
@@ -6057,10 +6919,11 @@ RPT-DB-001~005
 RPT-001 -> RPT-002 -> RPT-003 -> RPT-004 -> RPT-005
 RPT-006 -> RPT-007 -> RPT-008
 RPT-009 -> RPT-010 -> RPT-011 -> RPT-012
-WEB-RPT-001~006（每个先过设计稿门禁）
+RPT-006 -> RPT-013
+WEB-RPT-001~007（每个先过设计稿门禁）
 ```
 
-出口：报告可从模板创建、拖拽编辑、AI 修改、发布为不可变制品、按查看者权限运行并回滚。
+出口：报告可从资产中心发现和治理，从模板创建、拖拽编辑、AI 修改、发布为不可变制品、按查看者权限运行、回滚及上下架。
 
 ### Batch 11：双向融合（B11 + B10）
 

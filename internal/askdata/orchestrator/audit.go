@@ -76,9 +76,10 @@ type preparedCognitionAudit struct {
 }
 
 type preparedToolAudit struct {
-	call     ToolCall
-	artifact Artifact
-	charge   toolhost.BudgetCharge
+	call          ToolCall
+	artifact      Artifact
+	charge        toolhost.BudgetCharge
+	graphDegraded bool
 }
 
 type toolReplayEnvelope struct {
@@ -219,7 +220,7 @@ func (store *PostgresStore) CheckpointLoop(
 			toolEvent, err := newLoopAuditEvent(current, eventIndex+1, previousHash, loopAuditEventInput{
 				Type: EventToolResult, Stage: string(request.Stage), Status: EventStatus(tool.call.Status),
 				Code: toolEventCode(tool.call), ToolCallID: tool.call.CallID,
-				EvidenceIDs: tool.call.EvidenceIDs, Details: toolAuditDetails(tool.call),
+				EvidenceIDs: tool.call.EvidenceIDs, Details: toolAuditDetails(tool.call, tool.graphDegraded),
 				DurationMS: &tool.call.DurationMS,
 			})
 			if err != nil {
@@ -500,7 +501,27 @@ func prepareToolAudit(current Run, action cognition.Action, execution toolhost.E
 		return preparedToolAudit{}, err
 	}
 	artifact.Hash = artifactHash
-	return preparedToolAudit{call: call, artifact: artifact, charge: execution.Charge}, nil
+	graphDegraded, err := graphDegradedResult(execution)
+	if err != nil {
+		return preparedToolAudit{}, err
+	}
+	return preparedToolAudit{
+		call: call, artifact: artifact, charge: execution.Charge, graphDegraded: graphDegraded,
+	}, nil
+}
+
+func graphDegradedResult(execution toolhost.Execution) (bool, error) {
+	if execution.Response.Status != toolhost.ResponseSuccess ||
+		execution.Response.Tool != toolhost.ToolResolveGraphPlan {
+		return false, nil
+	}
+	var result struct {
+		GraphDegraded bool `json:"graphDegraded"`
+	}
+	if err := json.Unmarshal(execution.Response.Result, &result); err != nil {
+		return false, fmt.Errorf("%w: graph tool degradation evidence is invalid", ErrInvalidRun)
+	}
+	return result.GraphDegraded, nil
 }
 
 type loopAuditEventInput struct {
@@ -576,7 +597,11 @@ func loadReplaySnapshotTx(ctx context.Context, tx pgx.Tx, run Run) (ReplaySnapsh
 	if err != nil {
 		return ReplaySnapshot{}, err
 	}
-	snapshot := ReplaySnapshot{Run: run, Events: events, Artifacts: artifacts, ToolCalls: tools}
+	seed, err := loadSeedContextTx(ctx, tx, run)
+	if err != nil {
+		return ReplaySnapshot{}, err
+	}
+	snapshot := ReplaySnapshot{Run: run, Seed: seed, Events: events, Artifacts: artifacts, ToolCalls: tools}
 	return snapshot, snapshot.Validate()
 }
 
@@ -903,12 +928,12 @@ func validateDecisionTarget(
 			return fmt.Errorf("%w: clarification decision requires clarification state", ErrInvalidRun)
 		}
 	case cognition.ActionBlock:
-		if target != StateBlocked {
+		if target != StateBlocked && target != StateOutOfScope {
 			return fmt.Errorf("%w: block decision requires blocked state", ErrInvalidRun)
 		}
 	case cognition.ActionFinalize:
-		if target != StateAnswered {
-			return fmt.Errorf("%w: final decision requires answered state", ErrInvalidRun)
+		if target != StateAnswerVerifying {
+			return fmt.Errorf("%w: final decision requires answer verification", ErrInvalidRun)
 		}
 	default:
 		if isTerminalState(target) {
@@ -974,10 +999,11 @@ func cognitionAuditDetails(execution CognitionExecution) json.RawMessage {
 	})
 }
 
-func toolAuditDetails(call ToolCall) json.RawMessage {
+func toolAuditDetails(call ToolCall, graphDegraded bool) json.RawMessage {
 	return mustCanonicalAudit(map[string]any{
 		"tool": call.Tool, "requestHash": call.RequestHash, "resultHash": call.ResultHash,
 		"callHash": call.CallHash, "budget": call.Budget, "errorCode": call.ErrorCode,
+		"graphDegraded": graphDegraded,
 	})
 }
 

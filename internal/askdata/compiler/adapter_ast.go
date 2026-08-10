@@ -73,49 +73,116 @@ type astTranslator struct {
 	measureVersions   map[askdata.ID]askdata.ID
 	referencedFields  map[askdata.ID]struct{}
 	referencedMeasure map[askdata.ID]struct{}
+	zeroPolicy        registry.ZeroDenominatorPolicy
+}
+
+type compiledMeasureInput struct {
+	contract MeasureContract
+	scalar   dataset.Expression
 }
 
 func compileMetricExpression(
 	metric MetricContract,
 	fields map[askdata.ID]FieldContract,
 ) (dataset.Expression, string, error) {
+	inputs, err := compileMetricMeasureInputs(metric, fields)
+	if err != nil {
+		return dataset.Expression{}, "", err
+	}
+	measureExpressions := make(map[askdata.ID]dataset.Expression, len(inputs)*2)
+	measureTypes := make(map[askdata.ID]string, len(inputs)*2)
+	measureVersions := make(map[askdata.ID]askdata.ID, len(inputs)*2)
+	for _, input := range inputs {
+		argument := input.scalar
+		aggregated := dataset.Expression{
+			Type: "AGGREGATE", Function: string(input.contract.Aggregation), Argument: &argument,
+		}
+		if err := registerMeasureExpression(
+			input.contract, aggregated, measureExpressions, measureTypes, measureVersions,
+		); err != nil {
+			return dataset.Expression{}, "", err
+		}
+	}
+	return compileMetricFormula(metric, measureExpressions, measureTypes, measureVersions)
+}
+
+func compileMetricExpressionPreAggregated(
+	metric MetricContract,
+	fields map[askdata.ID]FieldContract,
+	timeField FieldContract,
+) (dataset.Expression, string, []dataset.PreAggregationMetric, error) {
+	inputs, err := compileMetricMeasureInputs(metric, fields)
+	if err != nil {
+		return dataset.Expression{}, "", nil, err
+	}
+	measureExpressions := make(map[askdata.ID]dataset.Expression, len(inputs)*2)
+	measureTypes := make(map[askdata.ID]string, len(inputs)*2)
+	measureVersions := make(map[askdata.ID]askdata.ID, len(inputs)*2)
+	preAggregations := make([]dataset.PreAggregationMetric, 0, len(inputs))
+	for _, input := range inputs {
+		fieldCode := preAggregatedMeasureField(metric.MetricVersionID, input.contract.MeasureVersionID)
+		scalar := input.scalar
+		preAggregations = append(preAggregations, dataset.PreAggregationMetric{
+			Field: fieldCode, Function: string(input.contract.Aggregation), Expression: &scalar,
+		})
+		var outer dataset.Expression
+		if metric.Additivity == registry.SemiAdditive {
+			outer, err = semiAdditiveMeasureExpression(metric, fieldCode, timeField)
+		} else {
+			outer, err = reaggregateMeasureExpression(metric, input.contract, fieldCode)
+		}
+		if err != nil {
+			return dataset.Expression{}, "", nil, err
+		}
+		if err := registerMeasureExpression(
+			input.contract, outer, measureExpressions, measureTypes, measureVersions,
+		); err != nil {
+			return dataset.Expression{}, "", nil, err
+		}
+	}
+	expression, canonicalType, err := compileMetricFormula(metric, measureExpressions, measureTypes, measureVersions)
+	return expression, canonicalType, preAggregations, err
+}
+
+func compileMetricMeasureInputs(
+	metric MetricContract,
+	fields map[askdata.ID]FieldContract,
+) ([]compiledMeasureInput, error) {
 	defaultFilter, err := decodeSemanticAST(metric.DefaultFilterAST)
 	if err != nil {
-		return dataset.Expression{}, "", fmt.Errorf("default filter AST: %w", err)
+		return nil, fmt.Errorf("default filter AST: %w", err)
 	}
 	var predicate *dataset.Expression
 	if defaultFilter.Type != "TRUE" {
 		translator := astTranslator{fields: fields, referencedFields: map[askdata.ID]struct{}{}}
 		converted, err := translator.translate(defaultFilter, astFilter, 0)
 		if err != nil {
-			return dataset.Expression{}, "", fmt.Errorf("default filter AST: %w", err)
+			return nil, fmt.Errorf("default filter AST: %w", err)
 		}
 		if !semanticBooleanType(defaultFilter.Type) {
-			return dataset.Expression{}, "", errors.New("default filter root must be boolean")
+			return nil, errors.New("default filter root must be boolean")
 		}
 		predicate = &converted
 	}
 
-	measureExpressions := make(map[askdata.ID]dataset.Expression, len(metric.Measures)*2)
-	measureTypes := make(map[askdata.ID]string, len(metric.Measures)*2)
-	measureVersions := make(map[askdata.ID]askdata.ID, len(metric.Measures)*2)
+	inputs := make([]compiledMeasureInput, 0, len(metric.Measures))
 	for _, measure := range metric.Measures {
 		formula, err := decodeSemanticAST(measure.FormulaAST)
 		if err != nil {
-			return dataset.Expression{}, "", fmt.Errorf("measure %s formula AST: %w", measure.MeasureVersionID, err)
+			return nil, fmt.Errorf("measure %s formula AST: %w", measure.MeasureVersionID, err)
 		}
 		translator := astTranslator{fields: fields, referencedFields: map[askdata.ID]struct{}{}}
 		scalar, err := translator.translate(formula, astMeasure, 0)
 		if err != nil {
-			return dataset.Expression{}, "", fmt.Errorf("measure %s formula AST: %w", measure.MeasureVersionID, err)
+			return nil, fmt.Errorf("measure %s formula AST: %w", measure.MeasureVersionID, err)
 		}
 		if len(translator.referencedFields) == 0 || semanticBooleanType(formula.Type) || formula.Type == "ARRAY" {
-			return dataset.Expression{}, "", fmt.Errorf("measure %s formula must reference a numeric model field", measure.MeasureVersionID)
+			return nil, fmt.Errorf("measure %s formula must reference a numeric model field", measure.MeasureVersionID)
 		}
 		if measure.Aggregation != registry.AggregationCount &&
 			measure.Aggregation != registry.AggregationCountDistinct &&
 			!semanticNumericExpression(formula, fields) {
-			return dataset.Expression{}, "", fmt.Errorf("measure %s formula is not provably numeric", measure.MeasureVersionID)
+			return nil, fmt.Errorf("measure %s formula is not provably numeric", measure.MeasureVersionID)
 		}
 		if predicate != nil {
 			condition := cloneDatasetExpression(*predicate)
@@ -125,27 +192,42 @@ func compileMetricExpression(
 				Else: &dataset.Expression{Type: "LITERAL", Value: nil},
 			}
 		}
-		argument := scalar
-		aggregated := dataset.Expression{
-			Type: "AGGREGATE", Function: string(measure.Aggregation), Argument: &argument,
-		}
-		for _, reference := range []askdata.ID{measure.MeasureID, measure.MeasureVersionID} {
-			if existing, duplicate := measureVersions[reference]; duplicate && existing != measure.MeasureVersionID {
-				return dataset.Expression{}, "", fmt.Errorf("measure reference %s is ambiguous", reference)
-			}
-			measureExpressions[reference] = aggregated
-			measureTypes[reference] = string(measure.DataType)
-			measureVersions[reference] = measure.MeasureVersionID
-		}
+		inputs = append(inputs, compiledMeasureInput{contract: measure, scalar: scalar})
 	}
+	return inputs, nil
+}
 
+func registerMeasureExpression(
+	measure MeasureContract,
+	expression dataset.Expression,
+	expressions map[askdata.ID]dataset.Expression,
+	types map[askdata.ID]string,
+	versions map[askdata.ID]askdata.ID,
+) error {
+	for _, reference := range []askdata.ID{measure.MeasureID, measure.MeasureVersionID} {
+		if existing, duplicate := versions[reference]; duplicate && existing != measure.MeasureVersionID {
+			return fmt.Errorf("measure reference %s is ambiguous", reference)
+		}
+		expressions[reference] = expression
+		types[reference] = string(measure.DataType)
+		versions[reference] = measure.MeasureVersionID
+	}
+	return nil
+}
+
+func compileMetricFormula(
+	metric MetricContract,
+	measureExpressions map[askdata.ID]dataset.Expression,
+	measureTypes map[askdata.ID]string,
+	measureVersions map[askdata.ID]askdata.ID,
+) (dataset.Expression, string, error) {
 	formula, err := decodeSemanticAST(metric.FormulaAST)
 	if err != nil {
 		return dataset.Expression{}, "", fmt.Errorf("metric formula AST: %w", err)
 	}
 	translator := astTranslator{
-		fields: fields, measures: measureExpressions, measureVersions: measureVersions,
-		referencedMeasure: map[askdata.ID]struct{}{},
+		measures: measureExpressions, measureVersions: measureVersions,
+		referencedMeasure: map[askdata.ID]struct{}{}, zeroPolicy: metric.ZeroDenominatorPolicy,
 	}
 	expression, err := translator.translate(formula, astMetric, 0)
 	if err != nil {
@@ -159,13 +241,32 @@ func compileMetricExpression(
 			return dataset.Expression{}, "", fmt.Errorf("metric formula does not reference measure %s", measure.MeasureVersionID)
 		}
 	}
-	if metric.NullPolicy == "ZERO" {
+	zeroDenominatorMustRemainNull := metric.ZeroDenominatorPolicy == registry.ZeroDenominatorNull &&
+		semanticASTContainsType(formula, "DIVIDE")
+	if metric.NullPolicy == "ZERO" && !zeroDenominatorMustRemainNull {
 		expression = dataset.Expression{Type: "COALESCE", Arguments: []dataset.Expression{
 			expression, {Type: "LITERAL", Value: float64(0)},
 		}}
 	}
 	canonicalType := metricExpressionType(formula, measureTypes)
 	return expression, canonicalType, nil
+}
+
+func semanticASTContainsType(node semanticAST, target string) bool {
+	if node.Type == target {
+		return true
+	}
+	for _, child := range []*semanticAST{node.Argument, node.Left, node.Right, node.Lower, node.Upper} {
+		if child != nil && semanticASTContainsType(*child, target) {
+			return true
+		}
+	}
+	for _, child := range node.Arguments {
+		if semanticASTContainsType(child, target) {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeSemanticAST(raw json.RawMessage) (semanticAST, error) {
@@ -366,9 +467,28 @@ func (translator *astTranslator) translate(node semanticAST, mode astMode, depth
 		}
 		arguments, err := translator.translateArguments(node.Arguments, mode, depth)
 		return dataset.Expression{Type: "ARRAY", Arguments: arguments}, err
-	case "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COALESCE":
+	case "ADD", "SUBTRACT", "MULTIPLY", "COALESCE":
 		arguments, err := translator.translateArguments(node.Arguments, mode, depth)
 		return dataset.Expression{Type: node.Type, Arguments: arguments}, err
+	case "DIVIDE":
+		arguments, err := translator.translateArguments(node.Arguments, mode, depth)
+		if err != nil {
+			return dataset.Expression{}, err
+		}
+		if mode == astMetric {
+			for index := 1; index < len(arguments); index++ {
+				arguments[index] = dataset.Expression{Type: "NULLIF", Arguments: []dataset.Expression{
+					arguments[index], {Type: "LITERAL", Value: float64(0)},
+				}}
+			}
+		}
+		result := dataset.Expression{Type: "DIVIDE", Arguments: arguments}
+		if mode == astMetric && translator.zeroPolicy == registry.ZeroDenominatorZero {
+			result = dataset.Expression{Type: "COALESCE", Arguments: []dataset.Expression{
+				result, {Type: "LITERAL", Value: float64(0)},
+			}}
+		}
+		return result, nil
 	case "ABS", "FLOOR", "CEIL":
 		argument, err := translator.translate(*node.Argument, mode, depth+1)
 		return dataset.Expression{Type: node.Type, Argument: &argument}, err

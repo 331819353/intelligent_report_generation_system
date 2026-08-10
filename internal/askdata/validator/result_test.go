@@ -15,6 +15,7 @@ import (
 	"intelligent-report-generation-system/internal/askdata/compiler"
 	"intelligent-report-generation-system/internal/askdata/evaluation"
 	"intelligent-report-generation-system/internal/askdata/ir"
+	"intelligent-report-generation-system/internal/askdata/registry"
 	"intelligent-report-generation-system/internal/askdata/testfixture"
 )
 
@@ -35,6 +36,80 @@ func TestEvaluateResultRulesAcceptsValidatedMetricResult(t *testing.T) {
 		if !check.Passed {
 			t.Fatalf("%s did not pass: %#v", code, check)
 		}
+	}
+}
+
+func TestNormalizeResultColumnsCarriesPinnedAdditivityAndExactTotal(t *testing.T) {
+	query, ctx := liveQueryArtifactWithAdditivity(
+		t, "dws_sales_orders",
+		json.RawMessage(`{"measureVersionId":"measure-sales-v1","type":"MEASURE_REF"}`),
+		registry.NonAdditive,
+	)
+	request := resultRuleFixtureForQuery(t, query, ctx, decimalResultRows("0.1"))
+	withoutTotal, err := NormalizeResultColumns(query, request.Execution, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	column := withoutTotal.Plans[0].Columns[0]
+	if column.Role != "METRIC" || column.MetricVersionID != "metric-sales-v1" ||
+		column.Additivity != registry.NonAdditive || !column.TotalsNotSummable ||
+		column.RecomputedTotal != nil || column.Unit != "CNY" || column.DisplayPrecision != 4 {
+		t.Fatalf("unexpected normalized result column: %#v", column)
+	}
+
+	exact := "0.300000000000000000000000000000000001"
+	withTotal, err := NormalizeResultColumns(query, request.Execution, RecomputedTotalValues{
+		compiler.QueryRoleCurrent: {"metric-sales-v1": exact},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total := withTotal.Plans[0].Columns[0].RecomputedTotal; total == nil || *total != exact {
+		t.Fatalf("exact recomputed total = %v", total)
+	}
+}
+
+func TestPlanRecomputedTotalsChargesBudgetAndFailsClosed(t *testing.T) {
+	query, _ := liveQueryArtifactWithAdditivity(
+		t, "dws_sales_orders",
+		json.RawMessage(`{"measureVersionId":"measure-sales-v1","type":"MEASURE_REF"}`),
+		registry.NonAdditive,
+	)
+	planned, err := PlanRecomputedTotals(query, true, ValidationQueryBudget{MaxQueries: 3, UsedQueries: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(planned.Queries) != 1 || planned.ValidationQueriesUsed != 3 || planned.BudgetExhausted {
+		t.Fatalf("unexpected total validation plan: %#v", planned)
+	}
+	validationQuery := planned.Queries[0]
+	if len(validationQuery.Plan.Document.GroupBy) != 0 || len(validationQuery.Plan.Document.Fields) != 1 {
+		t.Fatalf("total query retained display grain: %#v", validationQuery.Plan.Document)
+	}
+	compiled, live := validationQuery.Plan.CompiledQuery()
+	if !live || strings.Contains(compiled.SQL, " GROUP BY ") {
+		t.Fatalf("total query is not executable and ungrouped: live=%v sql=%s", live, compiled.SQL)
+	}
+	values, err := ParseRecomputedTotalRow(validationQuery,
+		[]ExecutionColumn{{Name: validationQuery.ColumnNames[0], DataTypeOID: pgtype.NumericOID}},
+		[][]any{{"0.300000000000000000000000000000000001"}},
+	)
+	if err != nil || values["metric-sales-v1"] != "0.300000000000000000000000000000000001" {
+		t.Fatalf("parsed total = %#v, %v", values, err)
+	}
+
+	exhausted, err := PlanRecomputedTotals(query, true, ValidationQueryBudget{MaxQueries: 3, UsedQueries: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exhausted.Queries) != 0 || !exhausted.BudgetExhausted || exhausted.ValidationQueriesUsed != 3 {
+		t.Fatalf("exhausted budget did not hide unsafe totals: %#v", exhausted)
+	}
+	if _, err := ParseRecomputedTotalRow(validationQuery,
+		[]ExecutionColumn{{Name: validationQuery.ColumnNames[0], DataTypeOID: pgtype.NumericOID}},
+		[][]any{{float64(0.3)}},
+	); !errors.Is(err, ErrInvalidResultContract) {
+		t.Fatalf("floating recomputed total error = %v", err)
 	}
 }
 
@@ -90,7 +165,7 @@ func TestEvaluateResultRulesRequiresExactWarehouseType(t *testing.T) {
 	columnName := request.Query.Plans[0].Document.Fields[0].Code
 	result, err := buildExecutionResult(executionRequest, []executedPlan{testExecutedPlan(
 		t, compiler.QueryRoleCurrent,
-		[]ResultColumn{{Name: columnName, DataTypeOID: pgtype.Float8OID}},
+		[]ExecutionColumn{{Name: columnName, DataTypeOID: pgtype.Float8OID}},
 		[][]any{{12.5}},
 	)})
 	if err != nil {
@@ -327,7 +402,7 @@ func resultRuleFixtureForQuery(
 	columnName := executionRequest.Query.Plans[0].Document.Fields[0].Code
 	result, err := buildExecutionResult(executionRequest, []executedPlan{testExecutedPlan(
 		t, compiler.QueryRoleCurrent,
-		[]ResultColumn{{Name: columnName, DataTypeOID: pgtype.NumericOID}}, rows,
+		[]ExecutionColumn{{Name: columnName, DataTypeOID: pgtype.NumericOID}}, rows,
 	)})
 	if err != nil {
 		t.Fatal(err)

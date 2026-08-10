@@ -7,6 +7,7 @@
     "irVersion",
     "semanticReleaseId",
     "semanticContentHash",
+    "domainId",
     "modelVersionId",
     "metrics",
     "groupBy",
@@ -14,12 +15,15 @@
     "timeRange",
     "comparison",
     "sort",
-    "limit"
+    "limit",
+    "otherPolicy",
+    "tieBreaking"
   ],
   "properties": {
     "irVersion": { "const": "1.0" },
     "semanticReleaseId": { "$ref": "#/$defs/stableId" },
     "semanticContentHash": { "$ref": "#/$defs/contentHash" },
+    "domainId": { "$ref": "#/$defs/stableId" },
     "modelVersionId": { "$ref": "#/$defs/stableId" },
     "metrics": {
       "type": "array",
@@ -40,12 +44,14 @@
     "timeRange": {
       "type": ["object", "null"],
       "additionalProperties": false,
-      "required": ["dimensionVersionId", "start", "endExclusive", "timezone"],
+      "required": ["dimensionVersionId", "start", "endExclusive", "timezone", "requestedPeriod", "grain"],
       "properties": {
         "dimensionVersionId": { "$ref": "#/$defs/stableId" },
         "start": { "$ref": "#/$defs/date" },
         "endExclusive": { "$ref": "#/$defs/date" },
-        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 }
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "requestedPeriod": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
+        "grain": { "enum": ["DAY", "WEEK", "MONTH", "QUARTER", "YEAR"] }
       }
     },
     "comparison": {
@@ -62,7 +68,9 @@
       "maxItems": 8,
       "items": { "$ref": "#/$defs/sort" }
     },
-    "limit": { "type": "integer", "minimum": 1, "maximum": 10000 }
+    "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
+    "otherPolicy": { "enum": ["NONE", "AGGREGATE_REMAINDER"] },
+    "tieBreaking": { "enum": ["INCLUDE_ALL", "DETERMINISTIC_CUT"] }
   },
   "$defs": {
     "stableId": {
@@ -113,12 +121,13 @@
     "sort": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["targetType", "targetVersionId", "direction", "nulls"],
+      "required": ["targetType", "targetVersionId", "direction", "nulls", "rankBy"],
       "properties": {
         "targetType": { "enum": ["METRIC", "DIMENSION"] },
         "targetVersionId": { "$ref": "#/$defs/stableId" },
         "direction": { "enum": ["ASC", "DESC"] },
-        "nulls": { "enum": ["FIRST", "LAST"] }
+        "nulls": { "enum": ["FIRST", "LAST"] },
+        "rankBy": { "enum": ["CURRENT_VALUE", "DELTA", "RATIO"] }
       }
     }
   }

@@ -181,6 +181,164 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA platform GRANT SELECT ON TABLES TO :"worker_u
 ALTER DEFAULT PRIVILEGES IN SCHEMA platform GRANT USAGE, SELECT ON SEQUENCES TO :"worker_user";
 
 SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.report_v2_can_access(uuid,text[]), platform.report_v2_row_can_access(uuid,uuid,uuid,text[]) TO %I, %I',
+  :'app_user',:'worker_user'
+)
+WHERE to_regprocedure('platform.report_v2_can_access(uuid,text[])') IS NOT NULL
+\gexec
+
+-- 报告语义运行时只能经精确版本/来源运行/计划哈希校验入口读取不可执行
+-- Query Artifact；API 与导出 worker 均按被认证的当前查看者上下文调用，连接
+-- 测试角色不能调用或读写用户执行审计。
+SELECT format(
+  'REVOKE ALL ON FUNCTION platform.load_report_runtime_query_artifact(uuid,uuid,text) FROM PUBLIC, %I',
+  :'connection_test_user'
+)
+WHERE to_regprocedure(
+  'platform.load_report_runtime_query_artifact(uuid,uuid,text)'
+) IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.load_report_runtime_query_artifact(uuid,uuid,text) TO %I, %I',
+  :'app_user',:'worker_user'
+)
+WHERE to_regprocedure(
+  'platform.load_report_runtime_query_artifact(uuid,uuid,text)'
+) IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE ALL ON FUNCTION platform.load_report_runtime_compilation_artifact(uuid,uuid,text) FROM PUBLIC, %I',
+  :'connection_test_user'
+)
+WHERE to_regprocedure(
+  'platform.load_report_runtime_compilation_artifact(uuid,uuid,text)'
+) IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.load_report_runtime_compilation_artifact(uuid,uuid,text) TO %I, %I',
+  :'app_user',:'worker_user'
+)
+WHERE to_regprocedure(
+  'platform.load_report_runtime_compilation_artifact(uuid,uuid,text)'
+) IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE ALL ON TABLE platform.report_semantic_compilations FROM %I, %I, %I',
+  :'app_user',:'worker_user',:'connection_test_user'
+)
+WHERE to_regclass('platform.report_semantic_compilations') IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT SELECT,INSERT ON TABLE platform.report_semantic_compilations TO %I',
+  :'app_user'
+)
+WHERE to_regclass('platform.report_semantic_compilations') IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE ALL ON TABLE platform.semantic_query_execution_runs FROM %I',
+  :'connection_test_user'
+)
+WHERE to_regclass('platform.semantic_query_execution_runs') IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE DELETE ON TABLE platform.semantic_query_execution_runs FROM %I, %I',
+  :'app_user',:'worker_user'
+)
+WHERE to_regclass('platform.semantic_query_execution_runs') IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT SELECT,INSERT,UPDATE ON TABLE platform.semantic_query_execution_runs TO %I, %I',
+  :'app_user',:'worker_user'
+)
+WHERE to_regclass('platform.semantic_query_execution_runs') IS NOT NULL
+\gexec
+
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.list_report_export_tenants() TO %I',
+  :'worker_user'
+)
+WHERE to_regprocedure('platform.list_report_export_tenants()') IS NOT NULL
+\gexec
+
+-- 明细取数工单是用户/审批人控制面：API 仅可读、创建和按状态机更新。
+-- 通用 worker 只能读取/完成受控导出队列，不能访问申请正文或审计事件；
+-- 连接测试角色没有任何取数申请权限。
+SELECT format(
+  'REVOKE DELETE ON TABLE platform.data_requests FROM %I',
+  :'app_user'
+)
+WHERE to_regclass('platform.data_requests') IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE UPDATE,DELETE ON TABLE platform.data_request_events FROM %I',
+  :'app_user'
+)
+WHERE to_regclass('platform.data_request_events') IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE ALL ON TABLE platform.data_requests, platform.data_request_events FROM %I, %I',
+  :'worker_user',:'connection_test_user'
+)
+WHERE to_regclass('platform.data_requests') IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT SELECT,INSERT,UPDATE ON TABLE platform.data_requests TO %I',
+  :'app_user'
+)
+WHERE to_regclass('platform.data_requests') IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT SELECT,INSERT ON TABLE platform.data_request_events TO %I',
+  :'app_user'
+)
+WHERE to_regclass('platform.data_request_events') IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE DELETE ON TABLE platform.data_request_export_jobs FROM %I',
+  :'app_user'
+)
+WHERE to_regclass('platform.data_request_export_jobs') IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT SELECT,INSERT,UPDATE ON TABLE platform.data_request_export_jobs TO %I',
+  :'app_user'
+)
+WHERE to_regclass('platform.data_request_export_jobs') IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE INSERT,DELETE ON TABLE platform.data_request_export_jobs FROM %I',
+  :'worker_user'
+)
+WHERE to_regclass('platform.data_request_export_jobs') IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT SELECT,UPDATE ON TABLE platform.data_request_export_jobs TO %I',
+  :'worker_user'
+)
+WHERE to_regclass('platform.data_request_export_jobs') IS NOT NULL
+\gexec
+SELECT format(
+  'REVOKE ALL ON TABLE platform.data_request_export_jobs FROM %I',
+  :'connection_test_user'
+)
+WHERE to_regclass('platform.data_request_export_jobs') IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.data_request_context_valid(jsonb), platform.data_request_fields_valid(jsonb), platform.data_request_actor_is_domain_admin(uuid,uuid,uuid), platform.data_request_can_access(uuid,uuid,uuid,uuid[],uuid,uuid), platform.data_request_event_can_access(uuid,uuid,uuid) TO %I',
+  :'app_user'
+)
+WHERE to_regprocedure(
+  'platform.data_request_can_access(uuid,uuid,uuid,uuid[],uuid,uuid)'
+) IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION platform.data_request_event_can_access(uuid,uuid,uuid) TO %I',
+  :'worker_user'
+)
+WHERE to_regprocedure('platform.data_request_event_can_access(uuid,uuid,uuid)') IS NOT NULL
+\gexec
+
+SELECT format(
   'REVOKE INSERT, UPDATE, DELETE ON TABLE platform.dwd_modeling_stage_jobs FROM %I',
   :'app_user'
 )
@@ -333,6 +491,8 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA askdata
   FROM PUBLIC, :"app_user", :"worker_user", :"connection_test_user";
 
 GRANT SELECT ON ALL TABLES IN SCHEMA askdata TO :"app_user", :"worker_user";
+REVOKE SELECT ON TABLE askdata.semantic_export_jobs FROM :"worker_user";
+REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLE askdata.search_query_samples FROM :"app_user";
 -- Raw dimension-member material is never a general registry read surface.
 -- The API may perform governed authoring DML, while runtime lookup goes only
 -- through the hash-only SECURITY DEFINER function below. The profile worker
@@ -391,19 +551,60 @@ GRANT INSERT, UPDATE, DELETE ON TABLE
   askdata.relationships,
   askdata.quality_rules,
   askdata.business_terms,
+  askdata.business_term_versions,
+  askdata.metric_dimensions,
+  askdata.metric_dimension_versions,
+  askdata.certified_examples,
+  askdata.certified_example_versions,
+  askdata.kpi_bundles,
+  askdata.kpi_bundle_versions,
+  askdata.evaluation_case_assets,
+  askdata.evaluation_case_versions,
+  askdata.time_contracts,
+  askdata.time_contract_versions,
+  askdata.semantic_imports,
+  askdata.semantic_import_rows,
   askdata.dimension_members,
   askdata.dimension_member_aliases,
-  askdata.semantic_aliases,
-  askdata.search_documents
+  askdata.semantic_aliases
 TO :"app_user";
+GRANT INSERT(
+  tenant_id,domain_id,object_type,object_version_id,view_type,sensitivity,
+  index_policy,document,metadata,input_hash
+) ON TABLE askdata.search_documents TO :"app_user";
+GRANT UPDATE(
+  sensitivity,index_policy,document,metadata,input_hash
+) ON TABLE askdata.search_documents TO :"app_user";
+GRANT INSERT ON TABLE askdata.semantic_export_jobs TO :"app_user";
 GRANT INSERT ON TABLE
   askdata.audit_events,
   askdata.releases,
   askdata.release_objects
 TO :"app_user";
 GRANT INSERT, UPDATE ON TABLE
-  askdata.question_runs
+  askdata.release_references
 TO :"app_user";
+GRANT INSERT, UPDATE ON TABLE
+  askdata.conversations,
+  askdata.question_runs,
+  askdata.idempotency_records,
+  askdata.saved_questions,
+  askdata.feedback_tickets,
+  askdata.add_to_report_intents
+TO :"app_user";
+GRANT UPDATE ON TABLE
+  askdata.active_learning_candidates,
+  askdata.report_semantic_assets
+TO :"app_user";
+GRANT INSERT ON TABLE
+  askdata.saved_question_dependencies,
+  askdata.saved_question_shares,
+  askdata.feedback_ticket_events,
+  askdata.report_asset_certifications,
+  askdata.add_to_report_outbox,
+  askdata.narrative_verification_failures
+TO :"app_user";
+GRANT DELETE ON TABLE askdata.idempotency_records TO :"app_user", :"worker_user";
 GRANT INSERT, UPDATE, DELETE ON TABLE
   askdata.evaluation_sets,
   askdata.evaluation_cases,
@@ -415,8 +616,26 @@ TO :"app_user";
 GRANT INSERT ON TABLE
   askdata.question_run_events,
   askdata.question_artifacts,
-  askdata.tool_calls
+  askdata.tool_calls,
+  askdata.question_seed_contexts,
+  askdata.question_saved_seed_contexts
 TO :"app_user";
+
+-- 澄清超时 worker 只能复用与 API 相同的受触发器保护列；不给表级
+-- UPDATE/INSERT，避免后台角色绕过 Question runtime 的追加式边界。
+GRANT UPDATE(
+  current_state,disposition,completion_code,completion_artifact_hash,
+  understanding_hash,binding_bundle_hash,graph_plan_hash,semantic_ir_hash,
+  query_plan_hash,result_hash,step_count,llm_calls_used,tool_calls_used,
+  formal_queries_used,validation_queries_used,elapsed_ms,budget_exhausted,
+  clarification_deadline,budget_frozen_at,budget_consumed_json,record_version
+) ON TABLE askdata.question_runs TO :"worker_user";
+GRANT INSERT(
+  id,tenant_id,domain_id,actor_id,question_run_id,release_id,
+  release_content_hash,policy_scope_hash,event_index,run_version,state,
+  event_type,stage,status,code,tool_call_id,ai_request_id,action_hash,
+  artifact_hash,evidence_ids,summary_json,event_hash,duration_ms
+) ON TABLE askdata.question_run_events TO :"worker_user";
 
 GRANT INSERT ON TABLE askdata.audit_events TO :"worker_user";
 GRANT INSERT, UPDATE, DELETE ON TABLE
@@ -426,11 +645,30 @@ GRANT INSERT, UPDATE, DELETE ON TABLE
   askdata.graph_plan_cache,
   askdata.dimension_profile_jobs
 TO :"worker_user";
+GRANT INSERT, UPDATE ON TABLE
+  askdata.semantic_imports,
+  askdata.semantic_import_rows
+TO :"worker_user";
 GRANT INSERT ON TABLE
   askdata.dimension_profiles,
   askdata.dimension_profile_members,
-  askdata.evaluation_runs
+  askdata.evaluation_runs,
+  askdata.evaluation_narrative_results,
+  askdata.search_recall_audits,
+  askdata.active_learning_candidates,
+  askdata.report_semantic_assets,
+  askdata.narrative_verification_failures
 TO :"worker_user";
+GRANT UPDATE ON TABLE
+  askdata.saved_questions,
+  askdata.active_learning_candidates,
+  askdata.report_semantic_assets,
+  askdata.report_asset_extraction_outbox,
+  askdata.report_asset_projection_outbox,
+  askdata.add_to_report_intents,
+  askdata.add_to_report_outbox
+TO :"worker_user";
+GRANT DELETE ON TABLE askdata.search_query_samples TO :"worker_user";
 
 GRANT EXECUTE ON FUNCTION
   askdata.current_tenant_id(),
@@ -444,12 +682,41 @@ GRANT EXECUTE ON FUNCTION
   askdata.question_runtime_can_access(uuid,uuid,uuid),
   askdata.evaluation_control_can_access(uuid,uuid),
   askdata.evaluation_case_can_access(uuid,uuid,uuid),
-  askdata.release_manifest_hash(uuid)
+  askdata.release_manifest_hash(uuid),
+  askdata.release_registry_facts_complete(uuid)
 TO :"app_user", :"worker_user";
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION askdata.list_add_to_report_tenants() TO %I',
+  :'worker_user'
+)
+WHERE to_regprocedure('askdata.list_add_to_report_tenants()') IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION askdata.list_report_asset_projection_tenants() TO %I',
+  :'worker_user'
+)
+WHERE to_regprocedure('askdata.list_report_asset_projection_tenants()') IS NOT NULL
+\gexec
 GRANT EXECUTE ON FUNCTION
   askdata.start_release_projection(uuid,uuid,jsonb),
   askdata.seal_evaluation_set(uuid,uuid),
-  askdata.lookup_exact_dimension_member(uuid,text,uuid,text)
+  askdata.record_release_error_budget(uuid,uuid,uuid,jsonb,uuid),
+  askdata.plan_evaluation_batch(uuid,uuid,text,uuid),
+  askdata.expose_evaluation_shard(uuid,smallint,uuid),
+  askdata.recompute_release_evaluation_gate(uuid,uuid,uuid,uuid),
+  askdata.record_release_review_report(uuid,uuid,uuid,text,text,jsonb,uuid),
+  askdata.submit_release_approval(uuid,uuid,uuid,text,text,text,text,uuid),
+  askdata.activate_release(uuid,uuid,uuid,uuid,bigint),
+  askdata.load_quota_usage_snapshots(uuid,uuid,uuid,timestamptz),
+  askdata.record_cost_usage(uuid,uuid,uuid,uuid,text,text,text,bigint,bigint,bigint,bigint),
+  askdata.lookup_exact_dimension_member(uuid,text,uuid,text),
+  askdata.retire_release(uuid)
+TO :"app_user";
+GRANT EXECUTE ON FUNCTION
+  askdata.record_cost_usage(uuid,uuid,uuid,uuid,text,text,text,bigint,bigint,bigint,bigint)
+TO :"worker_user";
+GRANT EXECUTE ON FUNCTION
+  askdata.record_search_query_sample(uuid,uuid,text,text,text,text,integer,text)
 TO :"app_user";
 GRANT EXECUTE ON FUNCTION
   askdata.list_release_projection_tenants(),
@@ -459,7 +726,28 @@ GRANT EXECUTE ON FUNCTION
   askdata.heartbeat_release_projection(uuid,uuid,text,uuid,integer),
   askdata.load_release_graph_projection(uuid,uuid,text,uuid),
   askdata.complete_release_projection(uuid,uuid,text,uuid,text,text,integer,jsonb),
-  askdata.fail_release_projection(uuid,uuid,text,uuid,text,boolean)
+  askdata.fail_release_projection(uuid,uuid,text,uuid,text,boolean),
+  askdata.cleanup_retained_release_projections(uuid)
+TO :"worker_user";
+GRANT EXECUTE ON FUNCTION
+  askdata.semantic_import_errors_valid(jsonb)
+TO :"app_user", :"worker_user";
+GRANT EXECUTE ON FUNCTION
+  askdata.resolve_governed_import_member(uuid,uuid,text)
+TO :"app_user", :"worker_user";
+GRANT EXECUTE ON FUNCTION
+  askdata.list_semantic_import_tenants(),
+  askdata.claim_semantic_import(uuid,text,integer),
+  askdata.heartbeat_semantic_import(uuid,uuid,text,uuid,integer)
+TO :"worker_user";
+GRANT EXECUTE ON FUNCTION
+  askdata.semantic_export_asset_types_valid(text[])
+TO :"app_user";
+GRANT EXECUTE ON FUNCTION
+  askdata.list_semantic_export_tenants(),
+  askdata.claim_semantic_export(uuid,text,integer),
+  askdata.complete_semantic_export(uuid,uuid,text,uuid,text,text,integer,integer),
+  askdata.fail_semantic_export(uuid,uuid,text,uuid,text,boolean)
 TO :"worker_user";
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA askdata REVOKE ALL ON TABLES

@@ -230,8 +230,8 @@ func normalizeRequest(request Request) (Request, requestState, error) {
 	if !reflect.DeepEqual(request.UnderstandingRequest.ContextRequest.Scope, graphRequest.Scope) {
 		return Request{}, requestState{}, fmt.Errorf("%w: understanding and graph scope mismatch", ErrInvalidBindingRequest)
 	}
-	if !effectiveDomainContains(request.UnderstandingResult, graphRequest.DomainID) {
-		return Request{}, requestState{}, fmt.Errorf("%w: graph domain is not an understanding hypothesis", ErrInvalidBindingRequest)
+	if err := validateSelectedGraphDomain(graphRequest.Scope, graphRequest.DomainID); err != nil {
+		return Request{}, requestState{}, fmt.Errorf("%w: %v", ErrInvalidBindingRequest, err)
 	}
 	config, err := request.Config.normalize()
 	if err != nil {
@@ -472,19 +472,6 @@ func addUnderstandingMentions(
 		mention := value.ValueMentions[index]
 		result[MentionRef{origin, MentionMember, index}] = mentionValue{member: &mention}
 	}
-}
-
-func effectiveDomainContains(result understanding.UnderstandingResult, domainID askdata.ID) bool {
-	values := result.Current.DomainHypotheses
-	if len(values) == 0 && result.Context.Inherited != nil {
-		values = result.Context.Inherited.DomainHypotheses
-	}
-	for _, value := range values {
-		if value.DomainID == domainID {
-			return true
-		}
-	}
-	return false
 }
 
 func effectiveTime(result understanding.UnderstandingResult) (*TimeBinding, error) {

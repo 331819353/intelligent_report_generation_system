@@ -68,7 +68,7 @@ type ExecutionRequest struct {
 	Validation ValidationArtifact
 }
 
-type ResultColumn struct {
+type ExecutionColumn struct {
 	Name        string `json:"name"`
 	DataTypeOID uint32 `json:"dataTypeOid"`
 }
@@ -78,7 +78,7 @@ type PlanExecution struct {
 	QueryPlanHash    askdata.ContentHash `json:"queryPlanHash"`
 	CompiledPlanHash askdata.ContentHash `json:"compiledPlanHash"`
 	MaxRows          int                 `json:"maxRows"`
-	Columns          []ResultColumn      `json:"columns"`
+	Columns          []ExecutionColumn   `json:"columns"`
 	RowCount         int                 `json:"rowCount"`
 	ResultHash       askdata.ContentHash `json:"resultHash"`
 }
@@ -390,7 +390,7 @@ type canonicalCell struct {
 
 type executedPlan struct {
 	role          compiler.QueryRole
-	columns       []ResultColumn
+	columns       []ExecutionColumn
 	rows          [][]any
 	canonicalRows [][]canonicalCell
 }
@@ -425,7 +425,7 @@ func buildExecutionResult(request ExecutionRequest, outputs []executedPlan) (Exe
 		artifact.Plans = append(artifact.Plans, PlanExecution{
 			Role: queryPlan.Role, QueryPlanHash: queryPlan.PlanHash,
 			CompiledPlanHash: queryPlan.CompiledPlanHash, MaxRows: validation.MaxRows,
-			Columns: append([]ResultColumn(nil), output.columns...), RowCount: len(output.rows),
+			Columns: append([]ExecutionColumn(nil), output.columns...), RowCount: len(output.rows),
 			ResultHash: planHash,
 		})
 		artifact.TotalRows += len(output.rows)
@@ -448,7 +448,7 @@ func planResultHash(plan compiler.QueryPlan, output executedPlan) (askdata.Conte
 		Role             compiler.QueryRole  `json:"role"`
 		QueryPlanHash    askdata.ContentHash `json:"queryPlanHash"`
 		CompiledPlanHash askdata.ContentHash `json:"compiledPlanHash"`
-		Columns          []ResultColumn      `json:"columns"`
+		Columns          []ExecutionColumn   `json:"columns"`
 		Rows             [][]canonicalCell   `json:"rows"`
 	}{plan.Role, plan.PlanHash, plan.CompiledPlanHash, output.columns, output.canonicalRows})
 	if err != nil {
@@ -580,11 +580,11 @@ func (runner *postgresExecutionRunner) Run(
 			return nil, errResultInvalid
 		}
 		output := executedPlan{
-			role: plan.Role, columns: make([]ResultColumn, len(descriptions)),
+			role: plan.Role, columns: make([]ExecutionColumn, len(descriptions)),
 			rows: make([][]any, 0, compiled.MaxRows), canonicalRows: make([][]canonicalCell, 0, compiled.MaxRows),
 		}
 		for index, field := range descriptions {
-			output.columns[index] = ResultColumn{Name: field.Name, DataTypeOID: field.DataTypeOID}
+			output.columns[index] = ExecutionColumn{Name: field.Name, DataTypeOID: field.DataTypeOID}
 			usedBytes += len(field.Name) + 16
 		}
 		for rows.Next() {

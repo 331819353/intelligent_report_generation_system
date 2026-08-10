@@ -1,0 +1,34 @@
+{
+  "type": "area-stacked",
+  "version": "1.0.0",
+  "renderer": "ECHARTS",
+  "displayName": "堆叠面积图",
+  "category": "CHART",
+  "minSize": { "w": 5, "h": 4 },
+  "recommendedSize": { "w": 8, "h": 5 },
+  "dataContract": {
+    "dimensions": { "min": 1, "max": 2 },
+    "measures": { "min": 1, "max": 5 },
+    "timeField": { "required": false },
+    "roles": ["X_AXIS", "Y_AXIS", "SERIES", "COLOR", "TIME", "TOOLTIP"]
+  },
+  "stackingRequiresAdditive": true,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [],
+    "properties": {
+	  "title": { "type": "string" },
+	  "subtitle": { "type": "string" },
+      "showLegend": { "type": "boolean" },
+      "showLabel": { "type": "boolean" },
+      "smooth": { "type": "boolean" },
+      "colorPaletteRef": { "type": "string" },
+      "nullPolicy": { "type": "string", "enum": ["ZERO", "HIDE"] },
+      "animation": { "type": "boolean" }
+    }
+  },
+  "defaultOptions": { "showLegend": true, "showLabel": false, "smooth": false, "nullPolicy": "ZERO", "animation": true },
+  "mobilePolicy": { "supported": true, "defaultLegendMode": "SCROLL", "labelDegradation": "HIDE_WHEN_DENSE" },
+  "supportedInteractions": ["CLICK_FILTER", "DRILL_DOWN", "BRUSH", "ZOOM"]
+}

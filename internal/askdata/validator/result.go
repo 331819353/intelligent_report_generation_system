@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"regexp"
 	"sort"
 	"time"
 
@@ -17,12 +18,19 @@ import (
 	"intelligent-report-generation-system/internal/dataset"
 )
 
-const ResultRuleVersion = "semantic-result-rules-v1"
+const (
+	ResultRuleVersion         = "semantic-result-rules-v1"
+	ResultContractVersion     = "semantic-result-contract-v1"
+	MaxTotalValidationQueries = 3
+)
 
 var (
 	ErrInvalidResultEvidence = errors.New("semantic result evidence is invalid")
 	ErrResultRuleFailure     = errors.New("semantic result failed deterministic rules")
+	ErrInvalidResultContract = errors.New("semantic result contract is invalid")
 )
+
+var exactResultDecimalPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?$`)
 
 type RuleSeverity string
 
@@ -93,6 +101,209 @@ type ResultRuleRequest struct {
 	IR        ir.SemanticIR
 	Execution ExecutionResult
 	Evidence  ResultEvidence
+}
+
+// ResultColumn is the shared governed column contract consumed by AskData,
+// report runtime and export adapters. Numeric totals remain decimal strings;
+// no layer may coerce them through float64.
+type ResultColumn struct {
+	Name              string              `json:"name"`
+	Role              string              `json:"role"` // DIMENSION|METRIC|TIME
+	MetricVersionID   askdata.ID          `json:"metricVersionId,omitempty"`
+	Additivity        registry.Additivity `json:"additivity,omitempty"`
+	TotalsNotSummable bool                `json:"totalsNotSummable"`
+	RecomputedTotal   *string             `json:"recomputedTotal,omitempty"`
+	Unit              string              `json:"unit,omitempty"`
+	Currency          string              `json:"currency,omitempty"`
+	DisplayPrecision  int                 `json:"displayPrecision"`
+}
+
+type ResultPlanContract struct {
+	Role    compiler.QueryRole `json:"role"`
+	Columns []ResultColumn     `json:"columns"`
+}
+
+type ResultContract struct {
+	Version       string               `json:"version"`
+	QueryPlanHash askdata.ContentHash  `json:"queryPlanHash"`
+	Plans         []ResultPlanContract `json:"plans"`
+}
+
+type RecomputedTotalValues map[compiler.QueryRole]map[askdata.ID]string
+
+type ValidationQueryBudget struct {
+	MaxQueries  int `json:"maxQueries"`
+	UsedQueries int `json:"usedQueries"`
+}
+
+type TotalValidationQuery struct {
+	Role             compiler.QueryRole `json:"role"`
+	MetricVersionIDs []askdata.ID       `json:"metricVersionIds"`
+	ColumnNames      []string           `json:"columnNames"`
+	Plan             compiler.QueryPlan `json:"plan"`
+}
+
+type RecomputedTotalPlan struct {
+	Queries               []TotalValidationQuery `json:"queries"`
+	ValidationQueriesUsed int                    `json:"validationQueriesUsed"`
+	BudgetExhausted       bool                   `json:"budgetExhausted"`
+}
+
+// NormalizeResultColumns projects release-pinned aggregation facts onto the
+// exact columns returned by QUERY-005. Missing recomputed values are retained
+// as nil so every consumer deterministically hides the unsafe total.
+func NormalizeResultColumns(
+	query compiler.QueryArtifact,
+	execution ExecutionResult,
+	totals RecomputedTotalValues,
+) (ResultContract, error) {
+	if query.Validate() != nil || execution.Artifact.Validate() != nil ||
+		execution.Artifact.QueryArtifactPlanHash != query.PlanHash ||
+		len(execution.Artifact.Plans) != len(query.Plans) {
+		return ResultContract{}, ErrInvalidResultContract
+	}
+	metrics := make(map[string]compiler.MetricAggregationContract, len(query.MetricAggregations))
+	for _, metric := range query.MetricAggregations {
+		metrics[metric.ResultColumnName] = metric
+	}
+	contract := ResultContract{
+		Version: ResultContractVersion, QueryPlanHash: query.PlanHash,
+		Plans: make([]ResultPlanContract, 0, len(query.Plans)),
+	}
+	for index, plan := range query.Plans {
+		executed := execution.Artifact.Plans[index]
+		if executed.Role != plan.Role || executed.QueryPlanHash != plan.PlanHash ||
+			executed.CompiledPlanHash != plan.CompiledPlanHash {
+			return ResultContract{}, ErrInvalidResultContract
+		}
+		fields := make(map[string]dataset.Field, len(plan.Document.Fields))
+		for _, field := range plan.Document.Fields {
+			fields[field.Code] = field
+		}
+		resultPlan := ResultPlanContract{Role: plan.Role, Columns: make([]ResultColumn, 0, len(executed.Columns))}
+		seenMetrics := make(map[askdata.ID]struct{}, len(metrics))
+		for _, executedColumn := range executed.Columns {
+			field, exists := fields[executedColumn.Name]
+			if !exists {
+				return ResultContract{}, ErrInvalidResultContract
+			}
+			column := ResultColumn{Name: executedColumn.Name}
+			if metric, metricColumn := metrics[executedColumn.Name]; metricColumn {
+				if field.Role != "MEASURE" {
+					return ResultContract{}, ErrInvalidResultContract
+				}
+				column.Role = "METRIC"
+				column.MetricVersionID = metric.MetricVersionID
+				column.Additivity = metric.Additivity
+				column.TotalsNotSummable = metric.TotalsNotSummable
+				column.Unit = metric.Unit
+				column.Currency = metric.Currency
+				column.DisplayPrecision = int(metric.DisplayPrecision)
+				if value, available := totals[plan.Role][metric.MetricVersionID]; available {
+					if !metric.TotalsNotSummable || !exactResultDecimalPattern.MatchString(value) {
+						return ResultContract{}, ErrInvalidResultContract
+					}
+					copy := value
+					column.RecomputedTotal = &copy
+				}
+				seenMetrics[metric.MetricVersionID] = struct{}{}
+			} else {
+				if field.Role == "MEASURE" {
+					return ResultContract{}, ErrInvalidResultContract
+				}
+				column.Role = "DIMENSION"
+				if field.Role == "TIME" || field.Code == plan.Document.OutputGrain.TimeField {
+					column.Role = "TIME"
+				}
+			}
+			resultPlan.Columns = append(resultPlan.Columns, column)
+		}
+		if len(seenMetrics) != len(metrics) {
+			return ResultContract{}, ErrInvalidResultContract
+		}
+		contract.Plans = append(contract.Plans, resultPlan)
+	}
+	return contract, nil
+}
+
+// PlanRecomputedTotals reserves at most one ungrouped validation query for
+// each result role. All unsafe metrics in a role share that query.
+func PlanRecomputedTotals(
+	query compiler.QueryArtifact,
+	displayTotals bool,
+	budget ValidationQueryBudget,
+) (RecomputedTotalPlan, error) {
+	if query.Validate() != nil || budget.MaxQueries < 0 || budget.MaxQueries > MaxTotalValidationQueries ||
+		budget.UsedQueries < 0 || budget.UsedQueries > budget.MaxQueries {
+		return RecomputedTotalPlan{}, ErrInvalidResultContract
+	}
+	result := RecomputedTotalPlan{
+		Queries: []TotalValidationQuery{}, ValidationQueriesUsed: budget.UsedQueries,
+	}
+	if !displayTotals {
+		return result, nil
+	}
+	metricIDs := make([]askdata.ID, 0, len(query.MetricAggregations))
+	columnNames := make([]string, 0, len(query.MetricAggregations))
+	for _, metric := range query.MetricAggregations {
+		if metric.TotalsNotSummable {
+			metricIDs = append(metricIDs, metric.MetricVersionID)
+			columnNames = append(columnNames, metric.ResultColumnName)
+		}
+	}
+	if len(metricIDs) == 0 {
+		return result, nil
+	}
+	for _, plan := range query.Plans {
+		if result.ValidationQueriesUsed >= budget.MaxQueries {
+			result.BudgetExhausted = true
+			break
+		}
+		totalPlan, err := compiler.BuildRecomputedTotalPlan(plan, columnNames)
+		if err != nil {
+			return RecomputedTotalPlan{}, ErrInvalidResultContract
+		}
+		result.Queries = append(result.Queries, TotalValidationQuery{
+			Role: plan.Role, MetricVersionIDs: append([]askdata.ID(nil), metricIDs...),
+			ColumnNames: append([]string(nil), columnNames...), Plan: totalPlan,
+		})
+		result.ValidationQueriesUsed++
+	}
+	return result, nil
+}
+
+// ParseRecomputedTotalRow accepts the exact one-row output of a planned total
+// query. Any malformed or partial result fails closed; callers then omit all
+// recomputed values and the shared consumer rule hides those totals.
+func ParseRecomputedTotalRow(
+	query TotalValidationQuery,
+	columns []ExecutionColumn,
+	rows [][]any,
+) (map[askdata.ID]string, error) {
+	if len(query.MetricVersionIDs) == 0 || len(query.MetricVersionIDs) != len(query.ColumnNames) ||
+		len(columns) != len(query.ColumnNames) || len(rows) != 1 || len(rows[0]) != len(columns) {
+		return nil, ErrInvalidResultContract
+	}
+	byName := make(map[string]int, len(columns))
+	for index, column := range columns {
+		if _, duplicate := byName[column.Name]; duplicate {
+			return nil, ErrInvalidResultContract
+		}
+		byName[column.Name] = index
+	}
+	result := make(map[askdata.ID]string, len(query.MetricVersionIDs))
+	for index, metricID := range query.MetricVersionIDs {
+		columnIndex, exists := byName[query.ColumnNames[index]]
+		if !exists || metricID.Validate() != nil {
+			return nil, ErrInvalidResultContract
+		}
+		value, ok := rows[0][columnIndex].(string)
+		if !ok || !exactResultDecimalPattern.MatchString(value) {
+			return nil, ErrInvalidResultContract
+		}
+		result[metricID] = value
+	}
+	return result, nil
 }
 
 type RuleCheck struct {
@@ -442,7 +653,7 @@ func resultScalarType(canonical string) (evaluation.ScalarType, error) {
 	}
 }
 
-func resultColumnTypesMatch(columns []ResultColumn, schema []evaluation.Column) bool {
+func resultColumnTypesMatch(columns []ExecutionColumn, schema []evaluation.Column) bool {
 	if len(columns) != len(schema) {
 		return false
 	}

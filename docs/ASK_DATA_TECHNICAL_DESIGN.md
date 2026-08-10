@@ -227,11 +227,13 @@ askdata.evaluation_runs
 
 ### 5.1 标准理解合同
 
-模型第一次输出的不是 SQL，而是带原文 span 的结构化合同：
+用户进入智能问数前，认证会话已经固定唯一业务域；Question API 将策略范围收窄为该领域。模型第一次
+输出的不是 SQL，而是带原文 span 的结构化合同。`domainHypotheses` 不再承担路由：模型可省略该字段的
+候选内容，服务端会用策略证据确定性写入唯一领域、`score=1`；模型返回其他领域时失败关闭。
 
 ```json
 {
-  "domainHypotheses": [{"domainId": "sales", "score": 0.96}],
+  "domainHypotheses": [{"domainId": "sales", "score": 1}],
   "metricMentions": [
     {"text": "销售额", "start": 11, "end": 14, "aggregationHint": "DEFAULT"}
   ],
@@ -782,7 +784,7 @@ worker 显式写入且不能使用默认 false。Production Regression 未密封
 
 | 主要错误来源 | 架构控制 | 结果 |
 |---|---|---|
-| 同名指标/维度 | 业务域路由 + 词典 + 多路召回 + 图兼容 | 把模糊全库选择收缩成可证明候选 |
+| 同名指标/维度 | 会话已选业务域强制 Pin + 词典 + 多路召回 + 图兼容 | 先排除其他领域，再把域内模糊选择收缩成可证明候选 |
 | 维度值识别错 | 先维度后成员 + 描述/值复合 key + 层级/别名 | 避免全局值碰撞 |
 | 模型幻觉对象 | 稳定 ID 绑定 + 注册表校验 | 未发布对象无法进入 IR |
 | Join/粒度错误 | NebulaGraph 路径 + 基数/fanout 验证 | 在 SQL 前阻断重复聚合 |
@@ -854,6 +856,12 @@ GET    /api/v1/questions/{runId}
 GET    /api/v1/questions/{runId}/events
 POST   /api/v1/questions/{runId}/clarifications
 POST   /api/v1/questions/{runId}/feedback
+POST   /api/v1/conversations/{conversationId}/release-drift
+POST   /api/v1/data-requests
+GET    /api/v1/data-requests
+GET    /api/v1/data-requests/{requestId}
+POST   /api/v1/data-requests/{requestId}/submit
+POST   /api/v1/data-requests/{requestId}/transition
 
 GET    /api/v1/askdata/metrics
 POST   /api/v1/askdata/metrics
@@ -884,6 +892,455 @@ GET    /api/v1/askdata/evaluations/{id}
   policy/release 的 child run；不接收自由文本。原问句短期加密保留、工件 TTL 和会话删除属于
   `ORCH-006`，不由 HTTP 层提前定义。
 
+### 13.5 NLU-008 会话 Release Pin 与澄清等待（2026-08-08）
+
+- `askdata.conversations` 按 tenant/domain/actor 保存 nullable `pinned_release_id`；新会话不继承历史
+  Pin，首轮 run 只有在 `BINDING` 成功转入 `GRAPH_VALIDATING` 时才原子写入当前 ACTIVE Release。
+- 创建后续 run 时先重放会话 Pin：相同 ACTIVE 直接使用；`SUPERSEDED/RETAINED` 且未确认返回
+  `RELEASE_DRIFT_CONFIRM_REQUIRED + ReleaseDriftView`，列出最多 20 个指标/维度变化；显式确认接口
+  在行锁下切换到新 ACTIVE，精确重复确认返回 `replayed=true`。历史 run 继续按原 Release 重放。
+- `question_runs` 保存 `clarification_deadline`、`budget_frozen_at` 与 `budget_consumed_json`。进入
+  `CLARIFICATION_REQUIRED` 时固定当前预算快照和默认 30 分钟 deadline；恢复 child run 使用该快照
+  作为初始消耗量，等待时长不进入运行预算。
+- 运行时读取、澄清提交和 `ClarificationExpiryWorker` 共用同一事务过期函数；deadline 到达后写入
+  append-only `CLARIFICATION_EXPIRED` 事件并拒绝后续应答。等待期间 Release 变化时，不复用旧 Bundle，
+  child run 固定新 ACTIVE 并从 `BINDING` 重新验证。
+- API 角色拥有会话 Pin 的最小列权限；Worker 只拥有过期所需的 Question Run 更新列与事件插入列。
+  down 迁移完整恢复旧状态机函数，已在真实 PostgreSQL 中通过 down→up→rollback 演练和权限验证。
+
+### 13.6 DR-001 明细取数申请合同（2026-08-08）
+
+- `platform.data_requests` 保存租户、登录后固定的唯一业务域、申请人、可选来源 run、业务用途、
+  PUBLISHED 数据集字段引用、SLA、审批/处理/交付状态与 `record_version`；不保存 SQL、查询参数或结果行。
+- 有来源 run 时，只允许申请人本人当前领域的 Question Run，并把上下文限制为该 run 固定 Release 中的
+  metric/dimension/member ID 与解析后的时间范围；主动申请不要求先触发拒答，但上下文必须从空开始。
+- `platform.data_request_events` 只允许 INSERT；`sequence_no = data_requests.record_version`，数据库触发器
+  与 Go 状态机共同验证事件链。时间戳仅作审计，不能作为同一时钟刻度内的权威顺序。
+- 两张表均启用并强制 RLS。申请人、审批人、会签人和处理人仅在当前 ACTIVE 领域成员关系下可见；
+  通用 Worker 无表权限，API 对事件只有 SELECT/INSERT，不能更新或删除历史。
+- DR-001 暂以 ACTIVE `DOMAIN_ADMIN` 形成可运行审批集合；真实数据 Owner、安全会签人和 SLA 规则由
+  `HUMAN-011` 提供后接入，敏感级推导与会签门禁仍严格归属 `DR-002`。
+
+### 13.7 NLU-009 问题范围白名单与正确拒答（2026-08-08）
+
+- 问题类型冻结为 15 个枚举。规则按未治理数据源、跨领域、预测、临时公式、定义、因果、强明细词、
+  排名、比较、比例、多指标、分组、筛选、Bundle、弱明细词、单指标顺序决策；“列出各区域销售额”
+  因存在受治理指标 + 分组维度，优先归为 `GROUPED_ANALYSIS`，不会被弱“列出”误判为明细。
+- `ScopeLexicon` 同时固定版本、规范排序后的内容 hash 与结构阈值；Classifier 构造时深拷贝。只有规则
+  不能确定时才把 15 项闭集交给 LLM，模型返回未知枚举或错误时保留保守规则候选并记录
+  `RULE_FALLBACK_REJECTED`。
+- `OUT_OF_SCOPE` 使用关闭的 `NextAction(kind,target,prefill)` 合同。`DETAIL_LIST` 唯一指向平台内
+  `DATA_REQUEST_DIALOG`；动作不保存原始问题，前端只从当前会话本地状态预填。跨领域说明要求先在平台
+  既有入口切换登录领域后分别提问，问数页本身没有领域选择器。
+- DR-001 预填只接受规范化 metric/dimension/member UUID 与时间范围。Block 工件的公开投影使用严格
+  JSON 解码并重新验证 type/outcome/reason/action 组合，任何 rows、SQL、未知字段、动作目标篡改或
+  非拒答上下文都会被丢弃。
+- `DEFINITION` 口径卡服务只依赖 `MetricDefinitionRegistry`，类型上没有 Warehouse/Query 依赖；卡片
+  固定 `dataQueryIssued=false`、最多 1 次 LLM，并拒绝物理查询文本、版本漂移或无证据合同。
+- 评测分别累计正确分类、正确拒答与错误拒答；类型正确且 outcome 为 `OUT_OF_SCOPE` 才进入正确拒答
+  分子，避免把诚实拒答当成执行失败。
+
+### 13.8 ORCH-008 RunType 预算与熔断/目标分离（2026-08-08）
+
+- 预算冻结为 `SINGLE_QUERY_FAST`、`SINGLE_QUERY_COMPLEX`、`BUNDLE`、`DEFINITION` 四档；
+  `RunType` 保持三值，两个单查询执行路径由 `RunBudgetClass` 区分。业务域只能通过严格 JSON 完整覆盖
+  一档预算，未知字段、重复 domain/class、越过全局治理包络或非 Bundle 并发值均失败关闭。
+- Loop 先解析 domain override，再以持久化上限与所选预算逐项取更小值；覆盖只能收紧当前运行，不能
+  扩权。BUNDLE 的全局包络为 2 LLM、10 Tool、6 正式查询、2 验证查询、30 秒与最多 4 并发计划。
+- `P95Target` 与 `HardTimeout` 是两个控制面：越过 P95 只单次记录 `budget_target_exceeded`，不取消
+  cognition/tool；达到 HardTimeout 才中断。熔断后的确定性顺序为已有可用结果 `PARTIAL`、已有治理
+  证据且可定向询问时 `CLARIFICATION`，否则 `TIMEOUT`。
+- 澄清等待同时由内存 `ActiveBudgetClock.Freeze/Resume` 和 NLU-008 的持久化预算快照排除，20 分钟等待
+  不减少剩余 HardTimeout。`budget_consumed_json` 不由调用方提供：数据库根据单调标量计数在 INSERT/
+  UPDATE 最后阶段生成，覆盖 LLM、Tool、正式/验证查询、step、有效耗时与 exhausted，作为 OPS-006 和
+  EVAL-012 的唯一 Run 消费来源。
+
+### 13.9 RPT-CONTRACT-001 Report Definition v1（2026-08-08）
+
+- `api/schemas/report-definition-v1.schema.json` 与 `internal/report/model.go` 冻结同序合同：
+  `Report → Page → Section → Block → Zone → Slot → Component`。组件只保存在顶层表，槽位只能通过
+  `componentId` 引用；page/section/block/zone/slot/component 分别使用全报告唯一命名空间。
+- V1 固定桌面 1920 设计宽、24 列、80×54 基准格、12 间距与 24 内边距；移动端固定单列、12 间距/
+  内边距。布局保存逻辑坐标，Block 同时声明移动端 order/visible/heightMode/slotMode，Zone 声明
+  `AUTO/FIXED/FR/HIDDEN`、高度边界、网格与溢出策略。
+- `dataBinding` 是关闭的二选一联合：`SEMANTIC_IR` 必须内嵌已固定 Release ID/hash 的 Semantic IR、
+  Query Plan hash，可选来源 Question Run；`DATASET_FIELD` 必须引用定义内 Data Context 和逻辑字段角色。
+  两者不能混合，任何路径均不能保存 SQL。无数据组件允许省略绑定。
+- 为同时满足可配置参数和 `additionalProperties:false`，`defaultParameters` 冻结为类型化数组
+  `{name,type,stringValue|numberValue|booleanValue}`，不采用开放键值对象。组件 `options` 只暴露
+  renderer-independent V1 闭集，下一项 Component Manifest 再按组件 type/version 收窄。
+- `report.Decode` 复用统一 strict JSON decoder，并在类型解码前执行 5 MB、24 层、普通字符串 4096
+  字符/富文本 64 KB 以及 SQL、连接串、凭据字段、脚本和 HTML 事件属性守卫。Go Validator 继续执行
+  页面/章节/分块/槽位/组件数量、布局边界、引用完整性、枚举和 Semantic IR 一致性校验。
+- `api/examples/report-definition/` 提供单页数据集报告、多页混合内容报告和 Ask Data 认证语义报告；契约
+  测试覆盖三例 round-trip、Schema 对象闭合、核心 `$defs`、全部必需负向边界与六类 ID 重复。
+
+### 13.10 RPT-CONTRACT-002 Component Manifest v1（2026-08-08）
+
+- `api/schemas/component-manifest-v1.schema.json` 与 `internal/report/template/manifest.go` 冻结同序合同：
+  type/version、renderer/category、最小/推荐尺寸、维度/度量/时间/角色数据合同、可加性堆叠标记、关闭的
+  optionSchema、默认选项、移动策略、交互能力和可选迁移引用。
+- 13 个 MVP 组件 Manifest 位于 `internal/report/template/manifests/*.json` 并由 `go:embed` 进入同一个
+  `Registry`；注册表按 `type@version` 唯一索引，`List/Get` 返回防御性深拷贝。后续编辑器表单、LLM
+  允许属性、数据兼容、最小尺寸和运行时解析必须读取该注册表或它的 API 投影，不得再内嵌副本。
+- `OptionSchema.ValidateJSON` 同时校验 Manifest 的 `defaultOptions` 和运行时组件 options：只支持受控的
+  boolean/string/integer/number，拒绝未知属性、重复键、错误类型、枚举外值和越界数值。报告组件校验再
+  复用同一 Schema，并校验 DATASET_FIELD 角色或 SEMANTIC_IR 的维度/指标数量、时间要求和 Block 尺寸。
+- Patch/minor 升级只能新增可选属性；不能增加 required、删除或改型已有属性、收窄 enum/数值区间、
+  增加 minSize、收窄数据合同、删除角色/交互或关闭移动支持。Major 升级必须声明上一版本和已注册的
+  migrator，缺任一项即构建注册表失败。
+- 契约测试枚举 13 个 Manifest，验证 strict decode、注册表隔离、默认/运行时共用选项校验、数据数量与
+  角色、最小尺寸、三份 Report Definition 集成，以及 minor-required/major-migrator CI 负例。
+
+### 13.11 RPT-CONTRACT-003 Report Operation v1（2026-08-08）
+
+- `api/schemas/report-operation-v1.schema.json` 将 41 个操作逐一建模为 `oneOf + op.const + typed payload`；
+  不存在通用 payload object，也不包含 UNDO/REDO。Go 中每个操作都有独立 payload 类型，Bundle、
+  Operation 与 payload 均使用严格 JSON 解码和显式必填键检查。
+- 来源冻结为 USER/AI/IMPORT/SYSTEM。单 Bundle 最多 100 个操作，AI 最多 30 个且必须带 aiRunId 与
+  page 起始的层级 scope；非 AI 不得夹带 aiRunId。AI 不能直接 TEMPLATE_APPLY、PAGE_DELETE、
+  SECTION_DELETE，其他 `*_DELETE` 合计超过 5 个也必须退出协议等待人工确认。
+- `GuardAI` 在解析完成、进入应用层之前读取当前 Report Definition，先核对 bundle.reportId，再为
+  page/section/block/zone/slot/component 以及显式 filter/interaction 构造祖先路径。scope 必须真实存在且
+  page→section→block 祖先一致；每个 targetId 的全部引用路径均须落在 scope 内，避免共享组件通过另一
+  槽位产生跨范围副作用。
+- AI 白名单违规返回 `REPORT_OP_NOT_ALLOWED_FOR_AI`，当前定义缺失、报告不匹配、scope 不存在或目标越界
+  返回 `REPORT_OP_OUT_OF_SCOPE`。这两个错误在 Decode 阶段产生，不会进入后续 apply/审计事务。
+- 契约测试覆盖 41 个操作的正例 round-trip 与逐项错误 payload，100/30/5 数量门禁、AI 禁止模板、
+  内外 scope，以及 Schema 分支与 Go 冻结枚举完全一致。
+
+### 13.12 QUERY-009 Query Plan Bundle 多计划运行（2026-08-08）
+
+- `query-plan-bundle-v1` 是 KPI Bundle 的执行边界，不是新的临时组合入口。合同固定完整 PolicyScope、
+  Semantic Release ID/hash、共享 resolved time/filters、逐项 Semantic IR/IR hash/role/chart type、并发上限
+  与 Bundle hash；不携带 SQL、参数或结果行。
+- 构建前重算完整 Release Manifest，并要求 CERTIFIED KPI Bundle ReleaseObject、指标、指标绑定模型、
+  group/filter/time dimension 全部来自同一 pinned Release。状态不是 CERTIFIED 时返回
+  `BUNDLE_NOT_CERTIFIED`；计划/指标/并发上限分别为 6/8/4，不能由领域配置扩权。
+- 每个 KPI item 确定性展开成独立 Semantic IR。所有计划共享 PolicyScope、Release、Domain、时间与筛选，
+  但各自规范化和计算 IR hash；HEADLINE 使用单值 limit，TREND/BREAKDOWN 使用既有 TopN 默认值。只有
+  时间维度 group-by 附着共享粒度，避免把普通分类维度误当时间截断。
+- 运行流水线逐项执行普通 compiler、TIME-004 coverage、Plan Validation 与只读 executor。每层都重新
+  核对 scope/domain/IR/time 与上层 hash；plan 以根 run UUID + planId 派生独立执行 UUID，任何计划都
+  不能共享另一项的 Validation Artifact。
+- `BundleRunner` 使用 `errgroup.SetLimit` 和 ORCH-008 的 BUNDLE 独立预算；默认最多四并发、30 秒硬
+  deadline。单项失败不取消兄弟计划，结果按原计划顺序保存稳定 failure code；全成功为 `ANSWERED`，
+  任一编译/校验/执行/权限/超时失败为 `PARTIAL`，硬超时仍返回此前完成的安全工件。
+
+### 13.13 QUERY-011 PARTIAL 与质量告警结果合同（2026-08-08）
+
+- `query-outcome-v1` 是 ANSWER completion artifact 内的确定性分流合同。`DetermineOutcome` 只读取可信的
+  coverage、权限数量、Bundle 计划结果、行数截断、行策略、多源和质量规则证据，按 P1～P6、Q1 固定
+  顺序累积；集合规范排序后计算 `outcomeHash`，重放时任何标记、顺序或状态篡改都会失败。
+- P1 时间可用区间截断、P2 多指标非空授权子集、P3 Bundle 非空成功子集中的失败/超时、P4 明确行上限
+  截断、P5 行策略保留非空子集、P6 多源保留非空响应子集任一成立时均为 `PARTIAL`。P2 合同只有计数，
+  不含被过滤指标名称/ID；全过滤、全失败或全超时不伪装成半成功，而作为无可用结果在上游失败关闭。
+- Q1 只投影未通过的非阻断 WARNING 规则和治理 EvidenceRef。单独 Q1 为 `QUALITY_WARNING`；与任一 P
+  条件并存时顶层仍为 `PARTIAL`，`qualityWarnings[]` 不丢失，保证状态路由与质量说明正交。
+- `POST /api/v1/questions/{runId}/add-to-report` 要求 Idempotency-Key 和精确 runVersion，只从当前 actor
+  可见的持久化 ANSWER completion artifact 读取 outcome。`PARTIAL` 在任何报告调用前返回
+  `RESULT_PARTIAL_NOT_EXPORTABLE`；非 PARTIAL 才交给报告 bounded context 的 `AddToReportBackend`。
+  报告 intent/outbox 的事务实现仍由后续报告任务负责，本边界在其缺失时返回服务不可用，不制造成功。
+
+### 13.14 ANS-001 Answer Artifact 与共享引用坐标（2026-08-08）
+
+- `api/schemas/answer-artifact-v1.schema.json` 与 `internal/askdata/answer/model.go` 冻结 L1 结构化层、L2
+  叙述层、验证结果和版本来源。顶层及全部嵌套对象关闭未知字段；精确指标值只接受 decimal 字符串，
+  headline/cards/chart/tableRef 只能引用稳定 metric/result/dataset/column ID。
+- citation span 固定为 `[start,end)` 两整数数组，使用与 NLU-001 相同的 Unicode code-point 偏移。引用面
+  是 `summary + "\n" + findings...`，解码后按 span 规范排序，越界、空区间和相互重叠均失败关闭。
+- `internal/askdata/shared/coordinate.go` 是问数与报告唯一坐标实现。`CellRef` 固定 `rowKey + columnKey`；
+  rowKey 由调用方按受治理 Query group-by 顺序提供，序列化为 `key=value|...`，保留字符以外的 UTF-8
+  字节使用大写百分号编码。Parser 要求规范编码、键唯一并保持原顺序，避免 map 顺序或分隔符碰撞。
+- Citation 是关闭的三分联合：RESULT_CELL 只允许 CellRef，CONTRACT 只允许 contractId，TIME_SPEC 不带
+  外部坐标。降级 Answer 必须 narrative 全空、`passed=false/degraded=true`，未经校验文字无法进入工件。
+- `internal/askdata/shared/stale.go` 提供唯一 `Provenance/IsStale`。Answer 将 Prompt、模型策略、校验器、
+  词表、Evidence/Result hash、Semantic Release 与图表规则映射到该结构；任一变化或非法当前来源均 stale。
+  工件继续写入既有 `askdata.question_artifacts` 的 ANSWER 类型，由数据库不可 UPDATE/DELETE trigger 保护。
+
+### 13.15 RPT-CONTRACT-004 Evidence Bundle v1.1 与 Insight Artifact（2026-08-08）
+
+- `api/schemas/evidence-bundle-v1.schema.json` 与 `internal/report/insight/model.go` 固定来源、精确 Dataset/
+  Snapshot/Query/Filter、asOf、实际半开时间区间、分析方法/版本、证据算法版本、事实、质量告警与生成时间。
+  `SEMANTIC_IR` 要求 semanticReleaseId/semanticIrHash 非空；`DATASET_QUERY` 要求二者为 null；两者都必须
+  固定 datasetVersionId，不允许从当前可变注册表补值。
+- Fact 的 currentValue、previousValue、changeRate 只允许规范 decimal 字符串，禁止 JSON number、指数和
+  非规范前导零；PERIOD_COMPARISON 必须同时提供基期与变化率。每个 Fact 至少一个 `shared.CellRef`，
+  因而问数点击来源与报告结论点击来源在编译期就是同一类型，不能各自解析 rowKey。
+- Evidence Bundle 规范化后计算内容 hash。Insight Artifact 必须精确绑定该 hash，冻结 Prompt/模型/
+  校验器/词表，内容分 summary/findings/risks/actions，citation span 指向四段按固定顺序换行拼接的文本。
+  CURRENT/STALE/FAILED 是关闭状态；FAILED 必须内容/引用全空。人工编辑允许不携带自动引用，但
+  `humanEdited=true` 必须同时记录稳定 editor ID 与规范 RFC3339 时间，false 时二者必须为 null。
+- Dataset Version、Snapshot、Query、Filter、分析方法、证据算法、Prompt、模型、校验器九类指定因素，
+  加上词表与 Evidence hash，全部通过 ANS-001 的同一个 `shared.IsStale` 比较；非法来源同样 stale。
+- 契约测试同时把 Go 规范 JSON 送入严格 Schema 校验，覆盖两类来源、坐标互解析、九类失效、float 拒绝、
+  Evidence hash 绑定、人工编辑成对字段和未知字段，避免 Schema、Go、问数与报告四方漂移。
+
+### 13.16 ANS-002 叙述事实校验边界（2026-08-08）
+
+- `answer.ResultEvidence` 只接收精确 decimal 结果单元格、显示精度、Metric Contract 单位/币种，以及由
+  确定性上游显式声明的派生关系；每条派生只能选择差、比、百分比、占比、同比五类固定规则，校验器
+  不枚举任意单元格组合。Result hash 与 `BindingEvidence` 的 Semantic Release 必须和叙述工件一致。
+- 提取层以 Unicode code-point span 识别阿拉伯/中文数值、万/亿、百分比/百分点、绝对/相对时间、单位、
+  币种和 Binding 对象；数值使用 `math/big.Rat` 与 `0.5 * 10^-displayPrecision` 比较，避免 float 漂移。
+  对象按绑定词汇最长匹配，已知但未绑定对象失败关闭。
+- `wordlist/v1.json` 与 `answer-fact-verifier-v1` 由 Release 固定。因果、预测、外部事实和越界建议默认
+  拒绝；贡献分解模式只放行治理词表中的弱化表达，`由于/导致/受…影响` 等强因果仍拒绝。
+- `VerifyReport` 返回元素、原文 span、稳定错误码和期望证据。Ask Data 的 `Verify` 与报告
+  `VerifiableInsight.Verify` 都进入同一 `VerifyNarrative`；报告入口先验证 Evidence hash、状态与人工编辑
+  标记，不能绕过共享校验器。
+
+### 13.17 ANS-003 分层生成与失败降级（2026-08-09）
+
+- Ask Data 的答案层固定为 L1 结构化结果、L2 已核验叙述、L3 业务解读。L1 只来自结果工件，不经过模型；
+  L2 必须通过 ANS-002；L3 使用同一校验器，但问数侧
+  `DefaultAskDataInterpretationEnabled=false`，只有后续报告链可显式开启。
+- `ComposeAndVerify` 最多消耗两次模型调用。首次失败只向重试传递稳定失败码、元素和期望，清除被拒文字
+  与 Unicode span，避免把幻觉原文重新注入 Prompt；第二次失败统一进入 `ToStructured`，叙述、引用全部
+  清空，`passed=false/degraded=true/attempts=2`，提示固定为「本次未生成文字结论，请查看数据与口径。」。
+- `AnswerVerificationRunner` 在 actor/domain/policy/release/result hash 全部匹配后，执行
+  `RESULT_VERIFYING → ANSWER_VERIFYING → ANSWERED`。每次失败追加只含失败码、数量和校验器/词表版本的
+  审计事件；最终 completion code 只可能是 `ANSWER_VERIFIED` 或 `ANSWER_DEGRADED`，不会把失败叙述写入
+  artifact、SSE 或日志。`000247_askdata_answer_verification_state` 同步数据库状态、事件和 Tool Call 约束。
+- Question HTTP 公开视图严格解析 Answer Artifact 或封装中的 `answer`：只有 `passed=true` 的 L2 才返回
+  summary/findings；降级只返回 L1 状态与稳定提示。SSE 增加 `answer.verifying`、`answer.degraded` 并校验
+  event/state/code 对应，客户端不能把未知事件或伪造降级状态混入时间线。
+- 前端 `AnswerSummary` 显示「结构化结果已核验 / 文字结论未展示」，提供可折叠原因、重新生成和查看校验
+  依据；证据驾驶舱显示 L1 已展示、L2 已隐藏、L3 问数默认关闭。非 PARTIAL 的降级答案继续通过报告入口，
+  但不携带 narrative。用户确认的方案 2、视觉对照、交互和响应式验收记录在 `design-qa.md`。
+
+### 13.18 ORCH-007 答案事实校验阶段闭环（2026-08-09）
+
+- 结果事实验证成功后不能直接完成 Run，唯一出口是 `RESULT_VERIFYING → ANSWER_VERIFYING`。答案阶段先生成
+  L2，再通过 ANS-002 的同一 `Verifier` 校验；只有 `passed=true` 的叙述能进入 ANSWER completion。
+- 首次失败在 `ANSWER_VERIFYING` 写追加式 checkpoint，并只把 `element/reason/expected` 作为下一次模型输入；
+  `text/span` 必须清空。第二次失败或预算不足统一执行 `ToStructured`，只保留 L1 和 provenance，
+  `narrativeDegraded=true`，未校验文字不能进入工件、事件或 SSE。
+- 可用模型次数为 `min(2, remaining LLM calls, remaining steps)`；hard duration 已耗尽时为 0。没有完整重试
+  额度而发生降级时，终态预算快照标记 `exhausted=true`。每个实际模型调用同时增加 LLM 和 step 计数。
+- 公开事件映射固定为 `ANSWER_VERIFYING/ANSWER_VERIFICATION_FAILED → answer.verifying`、
+  `ANSWER_DEGRADED → answer.degraded`；流按持久化 event index 和 `Last-Event-ID` 恢复，禁止跳号和重复回放。
+- `ANSWERED` 只允许从 `ANSWER_VERIFYING` 到达；`EXECUTING → ANSWERED` 等绕过验证边界的路径失败关闭。
+
+### 13.19 ORCH-009 共享 HTTP 幂等边界（2026-08-09）
+
+- 平台只保留一套 `internal/platform/idempotency`：Ask Data Question、明细取数创建和 Report V2 HTTP
+  wrapper 共用 Repository、规范 body hash、IN_FLIGHT 抢占和响应重放；中间件必须位于认证之后、业务
+  mutation 之前。路由 allowlist 只包含规格中的八类写入口，不按 POST 全量匹配。
+- 幂等坐标为 `(tenantId, actorId, method+path, Idempotency-Key)`。请求 JSON 拒绝重复 key、尾随值和超过
+  64 层嵌套后再规范化；对象字段顺序不影响 hash。相同坐标、不同 request hash 返回 409 REUSED，
+  IN_FLIGHT 返回 409，COMPLETED 精确返回首次 status/body。
+- `000248_askdata_idempotency_records` 只允许 INSERT 为 IN_FLIGHT、一次 UPDATE 为 COMPLETED；身份、请求
+  hash、创建/到期时间不可变，响应必须是小于 2 MiB 的 UTF-8 JSON 且 SHA-256 匹配。强制 RLS 同时绑定
+  tenant 与 actor，跨 actor 不可观察记录。
+- 成功和治理 4xx 保存 24 小时；5xx、panic、取消或非 JSON 响应释放 IN_FLIGHT 以允许安全重试。Worker
+  仅能读取并按 `(expires_at,id)`、最多 500 条/租户删除到期记录；未到期 COMPLETED 由 trigger 失败关闭。
+- REL-005 和 Report HTTP 尚未开放的 activate/operations/publish 不由本任务提前实现；其未来 handler
+  必须复用已经冻结的 allowlist/Report wrapper，不能建立第二张幂等表或第二套中间件。
+
+### 13.20 RPT-DB-001 Report V2 核心存储边界（2026-08-09）
+
+- `platform.reports` 保存报告身份与当前发布指针；`report_drafts` 每报告恰好一行且是唯一可变定义；
+  `report_revisions` 与 `report_versions` 是不可变历史。Store 只暴露一次性
+  `SaveDraftWithRevision`，禁止调用方拆开“更新草稿”和“追加修订”。
+- 草稿保存以 `SELECT ... FOR UPDATE` 锁定当前行，expected revision 不匹配时返回权威 current revision
+  和有界 operation 摘要；匹配时在同一事务应用并校验 Operation、更新 canonical JSON/hash、追加
+  `base+1` revision，并重建草稿索引。版本号分配前锁定 report 行，避免并发发布得到相同 version number。
+- 核心四表均 FORCE RLS。报告行策略直接基于当前行的 tenant/domain/owner 与 USER/ROLE 对象 grant，
+  从而兼容 `INSERT ... RETURNING`；子表通过 SECURITY DEFINER 的 `report_v2_can_access(reportId,actions)`
+  回查同一授权逻辑。对象 grant 不能绕过 tenant 或选定 domain，VIEW 不蕴含 EDIT/PUBLISH。
+- PostgreSQL JSONB 的输出文本不是 canonical JSON。Draft/Version 扫描必须重新执行 Report Definition
+  Normalize，并与持久化 definition hash 比较；不一致立即失败关闭，只有核验后的 canonical bytes 可交给
+  发布/运行时。定义上限仍为 5 MiB，数据库和 Go 边界共同执行。
+- revision 的 UPDATE/DELETE 与 version 定义字段/DELETE 由数据库 trigger 返回 SQLSTATE 55000；仅
+  publication 补偿所需的 `PENDING/RETRY → READY` artifact state 转换可变，定义内容始终冻结。
+
+### 13.21 RPT-DB-002 版本化模板与组件注册边界（2026-08-09）
+
+- 报告模板是 `structure/layout/theme/narrative` 四类不可变子模板版本的组合引用。解析入口以精确
+  `reportTemplateVersionId` 为主，兼容按模板 ID + SemVer 查询；主版本和四个子版本都必须处于
+  `PUBLISHED/DEPRECATED/RETAINED`，DRAFT 不进入报告运行时。
+- 六类版本字段使用严格 `major.minor.patch`，禁止前导零；排序使用数值元组而非字符串，因此
+  `1.10.0 > 1.9.0`。模板 JSONB 读回后必须重新 canonicalize，并逐个核对主、结构、布局、主题、叙述
+  content hash；任一漂移都使组合解析失败关闭。
+- 13 个组件 Manifest 的唯一事实源是编译期 embedded registry。`000235` 只创建平台身份和显式
+  `embedded-registry` placeholder；API startup seed 在单事务内写入同一 Manifest 的 canonical JSON/hash。
+  仅 placeholder 可发生一次内容替换，真实内容后续只能 hash 一致地重放，避免启动过程静默覆盖数据库漂移。
+  `000256` 为已应用旧 000235 的安装补齐这一升级窗口与 SemVer 约束。
+- 组件版本除 status 外全部不可变，状态单向为 `ACTIVE → DEPRECATED → RETAINED`。删除保护不扫描
+  Report Definition JSON，而是用 `report_version_dependencies(dependency_type, dependency_id)` 查询
+  `COMPONENT_TEMPLATE/type@version`；命中后返回 SQLSTATE 55000 / `REPORT_TEMPLATE_IN_USE`。
+- 模板与组件 12 张表全部 FORCE RLS。租户模板只能在当前 tenant 解析；平台内置组件只读可见。
+  状态与引用保护函数固定 search path 且撤销 PUBLIC/runtime execute，调用仅由数据库 trigger 完成。
+
+### 13.22 RPT-DB-003 可重建索引边界（2026-08-10）
+
+- Report Definition 的组件位置是索引主键事实源：每个组件必须且只能出现在一个 page/section/block/slot，
+  否则定义校验失败，不能等到数据库主键冲突后才发现。`BuildIndexes` 是无 I/O 纯函数，输出按组件 ID
+  稳定排序的 ComponentIndex，以及按 `(dependencyType, dependencyId)` 去重排序的 DependencyIndex。
+- 依赖投影是“定义完整依赖”而非“当前查询碰巧用到的依赖”：全部 dataContext 的 DatasetVersion、
+  Semantic IR 内的 DatasetVersion/SemanticRelease/Metric/Dimension/MemberVersion、组件模板、Theme 和
+  Structure/Layout/Narrative/Report Template 都必须进入索引。报告级依赖没有组件消费者时允许
+  `component_ids=[]`；多个组件引用同一版本时只保留一行并合并全部组件 ID。
+- 草稿索引属于 mutable projection。Store 在锁定 draft 并验证 expected revision 后，于同一 PostgreSQL
+  事务内写 definition/revision、删除该报告旧索引并插入新索引；事务回滚必须同时撤销三者。发布版本
+  索引与 version 同事务写入，此后 UPDATE/DELETE 由数据库 trigger 返回 55000，运行时不得从草稿读取。
+- 管理重建必须锁定 report 与 draft，先从经 canonical/hash 核验的 definition 计算期望值，再逐行核对。
+  草稿可直接替换；不可变版本只允许“两个索引集合都为空”时回填。任一集合部分缺失、额外行或字段漂移
+  都视为工件损坏并失败关闭，不能通过重建命令静默洗掉取证差异。
+- 四张索引表 FORCE RLS 并复用 `report_v2_can_access`：VIEW/EDIT/PUBLISH 才能读，草稿写要求 EDIT，
+  版本插入要求 PUBLISH/EDIT。`000261` 为已应用早期 `000236` 的安装替换 tenant-only 策略，并让组件
+  删除保护区分平台内置版本（检查所有租户）与租户自建版本（只检查所属租户）。影响分析始终走
+  `(tenant_id,dependency_type,dependency_id)`，禁止扫描 Report Definition JSON。
+- `report-admin rebuild-indexes` 只接受显式 tenant/actor/domain/report UUID，使用与线上 Store 相同的
+  request context 和对象权限，不提供绕过 RLS 的超级用户快捷路径。结果返回 draft revision、组件/依赖
+  数量、已验证版本数与回填版本数，便于审计和重放。
+
+### 13.23 RPT-DB-004 AI 审计与结论工件边界（2026-08-10）
+
+- 报告 AI 运行只允许 `PLAN`、`GENERATE_DRAFT`、`SCOPED_EDIT`、`INSIGHT`，并执行
+  `RUNNING → SUCCEEDED/FAILED/REJECTED` 单向状态机。请求身份、模型策略、脱敏摘要和作用域创建后不可变，
+  终态行禁止再次更新或删除；失败/拒绝必须带错误码，成功不得伪造错误码。
+- `request_summary_json` 是闭合审计摘要，不是 prompt 存档。允许字段限定为意图、选区、可用字段名、
+  组件 ID 与数据上下文 ID；Go 层拒绝无效 UTF-8、控制字符和超长值，数据库层再次拒绝未知 key 和错误
+  值类型。完整 prompt、数据样例、原始值和模型 transcript 均不得进入该列。
+- AI 操作始终追加记录，`REJECTED` 必须保存稳定 `rejection_code`。创建时不允许预填应用修订；只有
+  所属运行已经 SUCCEEDED、操作为 VALID 时，草稿提交事务才可把 `applied_revision_no` 从 NULL 一次性
+  更新为正数。操作内容、校验结果及已应用修订此后不可重写或删除。
+- Evidence Bundle 是不可变取证快照。Insight 重生成和人工编辑都使用“旧 CURRENT 置 STALE + 新行追加”
+  的同一事务模型，不覆盖历史；人工编辑行必须同时记录 `human_edited=true`、编辑者与时间。工件 JSON
+  的稳定 artifact ID 跨生成保留，数据库行 ID 仅标识一次版本写入，两者不得混用。
+- 四张表全部 FORCE RLS。AI run 同时要求报告对象权限和 actor 隔离；Evidence/Insight 读取要求 VIEW，
+  写入要求 EDIT，且 tenant 与当前选定 domain 必须匹配。生命周期和不可变 trigger 使用固定 search path，
+  撤销 PUBLIC/runtime 直接执行权限，防止调用方绕过 Store 拼接非法状态。
+
+### 13.24 RPT-DB-005 无匿名分享边界（2026-08-10）
+
+- 分享类型是闭合集合 `INTERNAL_USER|INTERNAL_GROUP|EXTERNAL_ACCOUNT`，数据库不存在 PUBLIC/ANONYMOUS。
+  EXTERNAL_ACCOUNT 只预留数据形状，MVP 服务固定返回 `SHARE_EXTERNAL_NOT_IMPLEMENTED`。创建者必须具有
+  报告 EDIT 权限，期限默认 30 天、严格大于创建时间且不得超过 180 天。
+- 分享令牌使用 32 字节 CSPRNG，数据库只存 SHA-256 hash；原 token 仅在创建响应出现一次，Record 的
+  JSON 序列化显式隐藏 hash。令牌只定位记录：访问顺序固定为登录、hash 定位、principal 匹配、报告
+  VIEW 授权、按查看者加载发布版本。固定版本记录精确 version ID，未固定版本跟随当前发布指针。
+- `report_shares` 使用拆分的 SELECT/INSERT/UPDATE FORCE RLS。INTERNAL_USER 要求当前 user 即 principal，
+  INTERNAL_GROUP 要求当前 user 仍属于有效 role；两者还必须满足 tenant、当前已选 domain 与报告对象权限。
+  主体校验函数为不可公开调用的 SECURITY DEFINER，生命周期 trigger 同样固定 search path 并代为调用，
+  避免运行角色枚举任意租户主体。
+- 访问、撤销、过期是分享行仅允许的三种单用途更新：访问只能把计数加一并写数据库时间；撤销只能由
+  创建者单向写 `revoked_at`；SYSTEM Worker 只能为已过期限写 `expired_at`。ID、报告/版本、principal、
+  token hash、过滤快照、创建身份和期限全部不可变，其他 UPDATE 返回 SQLSTATE 55000。
+- 正确性不依赖后台任务：AccessShare 始终实时判断 `expires_at`。Worker 只把过期事实物化为标记，按
+  `(tenant_id,expires_at,id)` 使用 `FOR UPDATE SKIP LOCKED` 和最多 500 行批次；撤销提交后立即触发缓存
+  失效合同。早期安装若把 report version trigger 绑定到全行禁止函数，由 `000267` 前向重绑至内容不可变、
+  生命周期可推进的 guard。
+
+### 13.25 RPT-001 规范化与内容安全边界（2026-08-10）
+
+- 规范化是发布、对比、撤销与缓存身份的唯一入口：先深拷贝，再固定执行字符串/枚举归一化、Schema 与
+  组件 Manifest 默认合并、nil 集合归一化、稳定排序、阶段校验、规范 JSON 和 SHA-256。调用方对象及已
+  发布制品不得原地修改；显式 false 等指针值优先于模板默认值。
+- 校验按 ID 唯一、引用完整、结构/布局、Manifest/options、dataContract 五阶段短路；每个阶段内部累积
+  全部稳定问题，避免用户逐个修复。交互排序键包含已排序 targets，页面/section/block 使用 order+id，
+  其余语义无关集合均使用完整稳定键。
+- 规范 JSON 的所有对象键按字典序输出、数字使用 `json.Number` 保精度、无额外空白且最大 5 MiB；最终
+  SHA-256 只覆盖清洗和默认值合并后的 UTF-8 字节。V1 minor 兼容输入统一输出 1.0；任何 major 升级必须
+  通过 `compiler/migrate/v1_to_v2` 显式、非原地适配器。
+- 富文本采用确定性 HTML fragment sanitizer：仅允许有限排版和链接标签/属性，危险协议被移除，
+  script/style/iframe/svg 等节点连同内容删除，`target=_blank` 强制补 rel 防护，属性稳定排序；Decode 与
+  Normalize 共用同一清洗器，结果参与 hash。
+- 内容安全扫描不因性能门槛而放宽：字符串长度、SQL、连接串、脚本/事件属性规则保持不变，只在正则前
+  使用不排除任何命中的字符候选判断。近 5 MB 定义在 Apple M4 的 5 次基准平均约 51.6 ms，低于
+  500 ms 合同。
+
+### 13.26 RPT-002 原子 Operation 与追加式撤销边界（2026-08-10）
+
+- Report Mutation 的权威顺序是：对象 EDIT 授权，AI 独立能力授权，baseRevision 校验，AI scope guard，
+  深拷贝逐项应用，RPT-001 完整校验/规范 hash，以及同事务同步 reports identity、更新 draft、追加 revision、
+  重建 index 和标记 AI audit。任一步失败都不留下主对象、草稿、修订或索引的部分状态。
+- 41 类 Operation 使用闭合 typed payload。ApplyError 稳定返回操作下标、code、message；revision 冲突返回
+  expected/current 与最多 100 条增量操作摘要。服务端不提供跳过 expected revision 的入口，AI 冲突必须
+  重新规划。
+- 每条 revision 保存 canonical 前态 snapshot；普通操作同时保留最小逆操作，模板/主题使用 REPORT_CREATE
+  整定义恢复。逆 bundle 必须基于每步准确前态生成并反序执行；Report ID 永远不能由快照替换。
+- Undo/Redo 不进入 41 类外部协议，而是追加 source=UNDO/REDO 的正常 revision，并用
+  inverse_of_revision_no 验证双栈。多级 redo 可继续消费未重做的 undo；普通新操作清空 redo 分支；链指针
+  与栈顶不一致时失败关闭，不尝试猜测历史。
+- AI 修改同时要求对象 `EDIT` 与租户能力 `report.ai_edit`（产品名 REPORT_AI_EDIT）。`000269` 为既有租户
+  登记 `REPORT/AI_EDIT` 并授予内置管理角色；scope 与内容校验必须位于权限/baseRevision 之后。无权限、
+  stale base 不记录“模型输出被拒”；只有实际 guard/definition rejection 进入追加式 AI 审计。
+- HTTP mutation 继续复用平台共享幂等中间件。409、失败 operationIndex 和稳定 guard code 是客户端刷新、
+  重放或放弃的唯一依据；没有强制覆盖或删除 revision 的路径。
+
+### 13.27 RPT-003 双端确定性布局边界（2026-08-10）
+
+- Report Definition 只保存 24 列逻辑坐标；像素宽高由容器宽度、padding、gap 与 rowHeight 在运行时换算，
+  不写回 JSON。删除/移动后的 NONE 或 VERTICAL 紧凑策略由布局模板传入，函数始终在深拷贝上执行。
+- 桌面碰撞使用 x 扫描线和按 y 维护 maxEnd 的 AVL 区间树，复杂度为 `O((n+k) log n)`；边相接不算
+  重叠，输出按稳定 ID 排序。越界、碰撞、可见区域缺 minHeight 与移动主槽位缺失使用固定布局错误码，
+  且进入 RPT-001/RPT-002 共用校验路径。
+- 区域高度先解析 FIXED/AUTO/FR/HIDDEN，再按 FR 权重和 min/max 分配；空区域释放的高度只按调用方提供
+  的布局模板优先级重分配，不存在全局写死的内容/结论顺序。Go 与 TypeScript 保持同一舍入和上限规则。
+- 空槽位是合法设计态，`componentId` 可省略；合并必须同区、无洞无凹、至多一个非空组件并满足目标
+  最小尺寸。服务端忽略客户端提交的派生几何/组件归属，自行生成边界、排序后的 `mergedFrom` 和组件；
+  Split 只接受 provenance 完全匹配且能重建相同几何/组件的原槽位。
+- 移动布局独立按 order/visible/heightMode/slotMode 转换并固定全宽。PRIMARY_ONLY 只允许可见非筛选
+  primarySlotId，未选槽位既不渲染也不进入 ExecutionPlan；筛选区进入抽屉，组件携带 Manifest 的
+  supported、默认图例和标签降级策略，供移动渲染器确定性消费。
+- `api/examples/report-layout-contract-v1.json` 是 Go/TypeScript 碰撞与合并判定的共享夹具；双端不能各自
+  维护隐藏规则。300 分块时延门禁、随机暴力对照、四高度/四 slotMode、模板优先级切换、merge/split
+  provenance 与完整 Web/Go 回归共同守住该边界。
+
+### 13.28 RPT-007 双绑定与查看时查询边界（2026-08-10）
+
+- `DataBinding` 是严格闭合联合：`SEMANTIC_IR` 只允许固定 `semanticQueryRef`，`DATASET_FIELD` 只允许
+  `dataContextId + dimensions + measures`。Manifest dataContract 在动态依赖查询之前校验；歧义绑定、
+  退役 Release、未认证对象、混合单位/币种、组件合同越界和非 ACTIVE Dataset 使用固定错误码。
+- 语义绑定固定 Release ID、content hash、完整 Semantic IR 与 query plan hash。`RETAINED` 只为既有
+  报告重放开放，`RETIRED` 或 hash 漂移失败关闭；运行时 runner 必须重新走确定性编译或读取固定 Plan
+  Artifact，并在执行前比较固定计划身份。发布依赖校验在 RLS 事务内再次核对 Release 四投影、对象成员
+  与指标单位/币种。
+- Dataset 绑定只下发逻辑 dataset version、字段角色、筛选、参数和限制，Report 模块没有 SQL 字段或
+  SQL 拼接边界；API 计划显式标记 `uncertifiedDefinition=true`，避免被误当作认证问数口径。
+- QueryHash 对除 timeout 外的完整结构化请求做 SHA-256，因而字段、筛选、参数、limit 或
+  `policyScopeHash` 任一差异都不会合并。相同哈希只执行一次并分发；默认并发 8、硬上限 16，调用方
+  timeout 与 maxRows 同时由 context 和受治理执行器约束。
+- 发布权限不能替代查看权限。`GovernedQueryExecutor` 每次把当前查看者 context 与 policy scope 交给
+  Semantic/Dataset runner；不同查看者策略不得共享批查询组，`NO_PERMISSION` 响应不带结果或绑定信息。
+  runner 超过请求行数、固定 Release/IR 身份不一致或请求 union 非法时均失败关闭。
+
+### 13.29 RPT-004 不可变发布与跨存储恢复（2026-08-10）
+
+- 发布器是固定 14 步状态机。第 2 步按调用方选择的 revision 读取可重放快照；第 3～9 步依次执行
+  Schema、领域、Manifest、数据依赖/权限、桌面与移动布局、交互图和 Insight 证据/过期校验。桌面与
+  移动预览都必须提交与该修订相同的 definition hash，避免预览后草稿漂移仍被发布。
+- 第 10～11 步重新规范化定义并生成组件/依赖索引；存储层再次独立 `Prepare`，比较 canonical bytes、
+  hash 与索引，拒绝上层伪造的 prepared 结果。不可变定义固定模板、主题、组件、Dataset version、语义
+  Release ID/hash、分析方法 SemVer、Prompt version 和模型策略标识。
+- 对象存储使用 `<prefix>/<tenant>/<report>/<version>.tmp.json`，数据库只记录同一前缀下的正式
+  `object_uri`。临时写成功而数据库失败时立即清理；数据库成功但 Promote 或 current pointer 切换失败
+  时保留 `PENDING` 恢复事实，补偿 Worker 只依据已提交版本的 `object_uri` 重试，不能重新读取草稿。
+- `(reportId, sourceRevisionNo, actor, Idempotency-Key)` 的请求 hash 同时包含预览 hash 和发布选项；相同
+  请求重放已有版本，不分配新版本号，不同 payload 复用 key 则拒绝。STALE Insight 默认失败关闭，只有
+  显式 `acknowledgeStaleInsights` 才放行并写审计。
+- `000272_report_publication_version_pins` 扩展固定依赖闭集，并在不可变版本写入 `SEMANTIC_RELEASE`
+  依赖时创建 `REPORT_VERSION` release reference。引用的 SUPERSEDED Release 自动进入 RETAINED，存在
+  活跃引用时不能 RETIRED；应用、通用 Worker 和连接测试角色都不能直接执行安全定义器函数。
+
+### 13.30 RPT-005 重新发布式回滚（2026-08-10）
+
+- 回滚不是 current pointer 的逆向切换，也不更新历史 version。入口按 `targetVersionNo` 读取 READY 的
+  immutable definition，以新的幂等 operation `ROLLBACK` 重新执行 RPT-004 第 3～14 步，成功后生成
+  单调递增的新 version 并按正常对象 Promote/指针切换流程发布。
+- 每次回滚继续要求 `REPORT_PUBLISH`，Idempotency-Key 绑定 actor/report/operation；原因去首尾空白后必须
+  为 1～1000 个 Unicode 字符且不含控制符。新 version 固定 `rollback_of_version_no` 和
+  `rollback_reason`，因此连续回滚自然形成不可变 lineage，不需要特殊“反向”状态机。
+- 依赖、Manifest、布局、交互和 Insight 重新校验失败时，API 返回稳定 step code 与结构化 issues；没有
+  force 参数。历史 Dataset/Release/组件不可再运行时，回滚必须失败，不能因为它曾经发布成功而跳过当前
+  治理门禁。
+- 存储层不信任 Publisher：在事务内再次读取目标 version，要求同报告、READY、definition hash 和
+  source revision 完全一致。`000273_report_rollback_integrity` 用自引用外键确保目标 version 存在，并
+  以数据库 CHECK 固定 trim/长度/控制字符约束；不可变 trigger 继续禁止事后修改 lineage 或原因。
+
 ## 14. React 页面设计
 
 新增 `/ask-data` 工作台：
@@ -912,6 +1369,26 @@ GET    /api/v1/askdata/evaluations/{id}
   不持久化会话/反馈，也不把模拟状态解释为真实后台结果。真实合同继续由 `WEB-002` 接入。
 - 1280px 使用三栏；1180px 以下改为“会话 + 问答”两栏，证据面板移到下一行；继续遵循
   全站 1100px 桌面最小宽度。设计对照、差异修正和可访问性检查记录在 `design-qa.md`。
+
+### 14.2 NLU-008 已确认可见状态（2026-08-08）
+
+- 用户确认方案 1「原位口径更新卡 + 右侧 Release Pin 证据」。Release 漂移不新建页面：在原问题位置
+  展示过期提示、旧/新语义版本、指标/维度变化和两条明确出口。
+- 主操作先确认新 ACTIVE Pin，再以同一业务域重新分析；次操作只恢复历史 run，不创建新查询。右侧证据
+  同步显示 pinned/active Release 和影响范围，避免用户只看到按钮而看不到变更依据。
+- 1280×720 与确认稿完成完整/聚焦视觉对照；1120×800 和 720×900 均无裁切或横向溢出。验收证据记录
+  在 `design-qa.md` 和 `design-qa-artifacts/nlu-008-*`。
+
+### 14.3 WEB-011 已确认取数申请工作区（2026-08-08）
+
+- 用户确认方案 3「我的申请主从工作区」。问数顶栏使用“问数 / 我的申请”两视图；左侧申请列表、右侧
+  详情、六态进度、审计记录和交付优先级共用既有 AppShell、Haier 蓝与 Phosphor 图标。
+- 所属领域由登录 session 固定，只读显示且不可切换。主动入口和 `SCOPE_DETAIL_LIST` 拒答出口复用同一
+  申请弹窗；后者带来源 run、本地当前问题与严格语义上下文，其他超范围原因不显示明细申请按钮。
+- 字段只来自当前领域 RLS 可见的 PUBLISHED 数据集版本；敏感级随字段选择取最高值并只读展示，真实
+  后端的安全会签和审批人业务规则仍归属 DR-002/HUMAN-011，不在前端伪造完成。
+- 设计真值、1280×720 同状态对照、1120/720 响应式、真实 API 空状态、拒答预填弹窗和完整状态机交互
+  记录在 `design-qa.md` 与 `design-qa-artifacts/web-011-*`、`nlu-009-scope-detail-exit.png`。
 
 ## 15. 安全、隐私与治理
 

@@ -67,15 +67,224 @@ BEGIN
     'data_source_connection_test_jobs','metadata_tables','metadata_columns',
     'datasets','dataset_versions','dataset_draft_revisions',
     'dataset_publication_requests','dataset_dependencies',
-    'dataset_materializations','dataset_build_runs',
-    'dws_modeling_jobs','dws_modeling_outputs'
+    'dataset_materializations','materialization_snapshots','dataset_build_runs',
+    'dws_modeling_jobs','dws_modeling_outputs','data_requests','data_request_events',
+    'data_request_export_jobs'
   ] LOOP
     IF to_regclass('platform.'||relation_name) IS NULL THEN
       RAISE EXCEPTION 'missing retained relation platform.%', relation_name;
     END IF;
   END LOOP;
+
 END
 $$;
+
+DO $$
+BEGIN
+  IF to_regprocedure('platform.data_request_context_valid(jsonb)') IS NULL
+    OR to_regprocedure('platform.data_request_fields_valid(jsonb)') IS NULL
+    OR to_regprocedure(
+      'platform.data_request_can_access(uuid,uuid,uuid,uuid[],uuid,uuid)'
+    ) IS NULL
+    OR to_regprocedure('platform.data_request_event_can_access(uuid,uuid,uuid)') IS NULL
+    OR to_regprocedure('platform.guard_data_request_mutation()') IS NULL
+    OR to_regprocedure('platform.guard_data_request_event()') IS NULL
+    OR to_regprocedure(
+      'platform.derive_data_request_sensitivity(uuid,uuid,uuid,jsonb,jsonb)'
+    ) IS NULL
+    OR NOT EXISTS(
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema='platform' AND table_name='data_request_events'
+        AND column_name='sequence_no' AND data_type='bigint' AND is_nullable='YES'
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema='platform' AND table_name='data_request_events'
+        AND column_name='audit_no' AND data_type='bigint' AND is_nullable='NO'
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_constraint
+      WHERE conrelid='platform.data_request_events'::regclass
+        AND conname='platform_data_request_events_request_sequence_key'
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_class AS relation
+      WHERE relation.oid='platform.data_requests'::regclass
+        AND relation.relrowsecurity AND relation.relforcerowsecurity
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_class AS relation
+      WHERE relation.oid='platform.data_request_events'::regclass
+        AND relation.relrowsecurity AND relation.relforcerowsecurity
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_class AS relation
+      WHERE relation.oid='platform.data_request_export_jobs'::regclass
+        AND relation.relrowsecurity AND relation.relforcerowsecurity
+    ) THEN
+    RAISE EXCEPTION 'detail data request schema or least-privilege boundary is incomplete';
+  END IF;
+END
+$$;
+
+SELECT (
+  has_table_privilege(:'app_user','platform.data_requests','SELECT')
+  AND has_table_privilege(:'app_user','platform.data_requests','INSERT')
+  AND has_table_privilege(:'app_user','platform.data_requests','UPDATE')
+  AND NOT has_table_privilege(:'app_user','platform.data_requests','DELETE')
+  AND has_table_privilege(:'app_user','platform.data_request_events','SELECT')
+  AND has_table_privilege(:'app_user','platform.data_request_events','INSERT')
+  AND NOT has_table_privilege(:'app_user','platform.data_request_events','UPDATE')
+  AND NOT has_table_privilege(:'app_user','platform.data_request_events','DELETE')
+  AND NOT has_table_privilege(:'worker_user','platform.data_requests','SELECT')
+  AND NOT has_table_privilege(:'worker_user','platform.data_requests','INSERT')
+  AND NOT has_table_privilege(:'worker_user','platform.data_requests','UPDATE')
+  AND NOT has_table_privilege(:'worker_user','platform.data_requests','DELETE')
+  AND NOT has_table_privilege(:'worker_user','platform.data_request_events','SELECT')
+  AND NOT has_table_privilege(:'worker_user','platform.data_request_events','INSERT')
+  AND NOT has_table_privilege(:'worker_user','platform.data_request_events','UPDATE')
+  AND NOT has_table_privilege(:'worker_user','platform.data_request_events','DELETE')
+  AND has_table_privilege(:'app_user','platform.data_request_export_jobs','SELECT')
+  AND has_table_privilege(:'app_user','platform.data_request_export_jobs','INSERT')
+  AND has_table_privilege(:'app_user','platform.data_request_export_jobs','UPDATE')
+  AND NOT has_table_privilege(:'app_user','platform.data_request_export_jobs','DELETE')
+  AND has_table_privilege(:'worker_user','platform.data_request_export_jobs','SELECT')
+  AND NOT has_table_privilege(:'worker_user','platform.data_request_export_jobs','INSERT')
+  AND has_table_privilege(:'worker_user','platform.data_request_export_jobs','UPDATE')
+  AND NOT has_table_privilege(:'worker_user','platform.data_request_export_jobs','DELETE')
+  AND NOT has_table_privilege(:'connection_test_user','platform.data_request_export_jobs','SELECT')
+  AND NOT has_table_privilege(:'connection_test_user','platform.data_request_export_jobs','INSERT')
+  AND NOT has_table_privilege(:'connection_test_user','platform.data_request_export_jobs','UPDATE')
+  AND NOT has_table_privilege(:'connection_test_user','platform.data_request_export_jobs','DELETE')
+) AS data_request_privileges_secure
+\gset
+\if :data_request_privileges_secure
+\else
+  \echo 'detail data request least-privilege boundary is incomplete'
+  \quit 1
+\endif
+
+DO $$
+BEGIN
+  IF NOT EXISTS(
+    SELECT 1
+    FROM pg_class AS relation
+    JOIN pg_namespace AS namespace ON namespace.oid=relation.relnamespace
+    WHERE namespace.nspname='platform'
+      AND relation.relname='materialization_snapshots'
+      AND relation.relrowsecurity AND relation.relforcerowsecurity
+  )
+    OR to_regprocedure(
+      'platform.enforce_materialization_snapshot_transition()'
+    ) IS NULL
+    OR to_regprocedure(
+      'platform.notify_materialization_snapshot_completed()'
+    ) IS NULL
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_trigger
+      WHERE tgrelid='platform.materialization_snapshots'::regclass
+        AND tgname='materialization_snapshots_immutable' AND NOT tgisinternal
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_trigger
+      WHERE tgrelid='platform.materialization_snapshots'::regclass
+        AND tgname='materialization_snapshots_notify_completion'
+        AND NOT tgisinternal
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_constraint
+      WHERE conrelid='platform.materialization_snapshots'::regclass
+        AND conname='materialization_snapshots_completion_shape_check'
+        AND contype='c'
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_constraint
+      WHERE conrelid='platform.data_quality_results'::regclass
+        AND conname='data_quality_results_materialization_fk'
+        AND contype='f'
+        AND position(
+          'materialization_id, tenant_id' IN pg_get_constraintdef(oid)
+        )>0
+        AND position('build_run_id' IN pg_get_constraintdef(oid))=0
+    ) THEN
+    RAISE EXCEPTION 'materialization snapshot separation boundary is incomplete';
+  END IF;
+END
+$$;
+
+-- Exercise latest-completed semantics without touching warehouse relations.
+-- FK triggers are disabled only while creating rollback-only synthetic control
+-- facts; lifecycle triggers are restored for every assertion below.
+BEGIN;
+SELECT gen_random_uuid() AS tenant_id,
+       gen_random_uuid() AS materialization_id,
+       gen_random_uuid() AS old_build_id,
+       gen_random_uuid() AS interrupted_build_id,
+       gen_random_uuid() AS failed_build_id
+\gset snapshot_verify_
+SET LOCAL session_replication_role=replica;
+INSERT INTO platform.materialization_snapshots(
+  tenant_id,materialization_id,build_run_id,schema_hash,snapshot_version,
+  snapshot_hash,physical_schema,physical_name,snapshot_started_at,
+  snapshot_completed_at,data_available_through,row_count,size_bytes,quality_status
+) VALUES
+(
+  :'snapshot_verify_tenant_id',:'snapshot_verify_materialization_id',
+  :'snapshot_verify_old_build_id',repeat('a',64),'refresh-old',repeat('1',64),
+  'warehouse_dws','dws_taaaaaaaaaaaa_dbbbbbbbbbbbb_r111111111111',
+  now()-interval '3 hours',now()-interval '2 hours',
+  now()-interval '4 hours',10,100,'OK'
+),
+(
+  :'snapshot_verify_tenant_id',:'snapshot_verify_materialization_id',
+  :'snapshot_verify_interrupted_build_id',repeat('a',64),'refresh-interrupted',
+  repeat('2',64),'warehouse_dws',
+  'dws_taaaaaaaaaaaa_dbbbbbbbbbbbb_r222222222222',
+  now()+interval '1 hour',NULL,NULL,NULL,NULL,'WARN'
+),
+(
+  :'snapshot_verify_tenant_id',:'snapshot_verify_materialization_id',
+  :'snapshot_verify_failed_build_id',repeat('a',64),'refresh-failed',repeat('3',64),
+  'warehouse_dws','dws_taaaaaaaaaaaa_dbbbbbbbbbbbb_r333333333333',
+  now()-interval '90 minutes',now()-interval '1 hour',NULL,NULL,NULL,'FAIL'
+);
+SET LOCAL session_replication_role=origin;
+SELECT set_config(
+  'verify.snapshot_materialization_id',
+  :'snapshot_verify_materialization_id',
+  true
+);
+DO $$
+DECLARE selected_version text;
+DECLARE selected_quality text;
+BEGIN
+  SELECT snapshot_version,quality_status
+  INTO selected_version,selected_quality
+  FROM platform.materialization_snapshots
+  WHERE materialization_id=current_setting(
+    'verify.snapshot_materialization_id'
+  )::uuid
+    AND snapshot_completed_at IS NOT NULL
+  ORDER BY snapshot_completed_at DESC,id DESC
+  LIMIT 1;
+  IF selected_version<>'refresh-failed' OR selected_quality<>'FAIL' THEN
+    RAISE EXCEPTION 'latest completed snapshot did not ignore interrupted refresh';
+  END IF;
+END
+$$;
+DO $$
+BEGIN
+  BEGIN
+    UPDATE platform.materialization_snapshots
+    SET row_count=11
+    WHERE snapshot_version='refresh-old';
+    RAISE EXCEPTION 'completed snapshot unexpectedly remained mutable';
+  EXCEPTION WHEN check_violation THEN
+    NULL;
+  END;
+END
+$$;
+ROLLBACK;
 
 DO $$
 DECLARE
@@ -90,14 +299,29 @@ BEGIN
     'audit_events','domains','entities','semantic_models','measures','metrics',
     'metric_versions','metric_version_measures','dimensions','hierarchies',
     'hierarchy_levels','relationships','quality_rules','business_terms',
+    'business_term_versions','metric_dimensions','metric_dimension_versions',
+    'certified_examples','certified_example_versions','kpi_bundles',
+    'kpi_bundle_versions','evaluation_case_assets','evaluation_case_versions',
+    'time_contracts','time_contract_versions',
     'dimension_members','dimension_member_aliases','semantic_aliases',
-    'search_documents','embedding_outbox','releases','release_objects',
+    'search_documents','embedding_outbox','search_query_samples',
+    'search_recall_audits','releases','release_objects',
     'release_projections','release_projection_artifacts','release_state',
     'release_events','graph_plan_cache','dimension_profile_jobs',
-    'dimension_profiles','dimension_profile_members','question_runs',
+    'dimension_profiles','dimension_profile_members','semantic_imports',
+    'semantic_import_rows','semantic_export_jobs','conversations','question_runs',
     'question_run_events','question_artifacts','tool_calls','evaluation_sets',
     'evaluation_cases','evaluation_case_reviews','evaluation_runs',
-    'query_feedback'
+    'evaluation_shard_states','evaluation_shard_rotations','evaluation_batch_plans',
+    'evaluation_narrative_results','release_error_budget_receipts',
+    'release_evaluation_gate_receipts','release_review_reports','release_approvals',
+    'query_feedback','idempotency_records','quotas','cost_records',
+    'saved_questions','saved_question_dependencies','saved_question_shares',
+    'feedback_tickets','feedback_ticket_events','active_learning_candidates',
+    'report_semantic_assets','report_asset_certifications',
+    'add_to_report_intents','add_to_report_outbox',
+    'report_asset_extraction_outbox','report_asset_projection_outbox',
+    'question_seed_contexts','narrative_verification_failures'
   ] LOOP
     IF to_regclass('askdata.'||relation_name) IS NULL THEN
       RAISE EXCEPTION 'missing askdata relation: askdata.%', relation_name;
@@ -112,6 +336,24 @@ BEGIN
       RAISE EXCEPTION 'askdata.% must enable and force RLS', relation_name;
     END IF;
   END LOOP;
+
+  IF (
+    SELECT count(*) FROM pg_attribute
+    WHERE attrelid='askdata.evaluation_cases'::regclass
+      AND attname IN ('shard_id','usage_count','exposed_at','retired_at','retire_reason')
+      AND NOT attisdropped
+  )<>5 THEN
+    RAISE EXCEPTION 'DB-007 sealed shard governance columns are incomplete';
+  END IF;
+  IF to_regprocedure('askdata.recompute_release_evaluation_gate(uuid,uuid,uuid,uuid)') IS NULL
+    OR to_regprocedure('askdata.record_release_error_budget(uuid,uuid,uuid,jsonb,uuid)') IS NULL
+    OR to_regprocedure('askdata.plan_evaluation_batch(uuid,uuid,text,uuid)') IS NULL
+    OR to_regprocedure('askdata.submit_release_approval(uuid,uuid,uuid,text,text,text,text,uuid)') IS NULL
+    OR to_regprocedure('askdata.activate_release(uuid,uuid,uuid,uuid,bigint)') IS NULL
+    OR to_regprocedure('askdata.load_quota_usage_snapshots(uuid,uuid,uuid,timestamptz)') IS NULL
+    OR to_regprocedure('askdata.record_cost_usage(uuid,uuid,uuid,uuid,text,text,text,bigint,bigint,bigint,bigint)') IS NULL THEN
+    RAISE EXCEPTION 'DB-007/DB-008 release gate functions are incomplete';
+  END IF;
 
   IF EXISTS(
     SELECT 1
@@ -128,6 +370,84 @@ BEGIN
       )
   ) THEN
     RAISE EXCEPTION 'every askdata foreign key must include tenant_id';
+  END IF;
+
+  IF (
+    SELECT count(*)
+    FROM pg_attribute
+    WHERE attrelid IN ('askdata.measures'::regclass,'askdata.metric_versions'::regclass)
+      AND attname IN (
+        'additivity','semi_additive_time_aggregation','aggregation_restriction',
+        'non_additive_dimensions','currency','zero_denominator_policy',
+        'display_precision','additivity_suggestion','additivity_confirmed_by',
+        'additivity_confirmed_at'
+      ) AND NOT attisdropped
+  )<>20 THEN
+    RAISE EXCEPTION 'ADD-001 measure/metric additivity columns are incomplete';
+  END IF;
+
+  IF (
+    SELECT count(*)
+    FROM pg_constraint
+    WHERE conrelid IN ('askdata.measures'::regclass,'askdata.metric_versions'::regclass)
+      AND conname IN (
+        'askdata_measures_additivity_enum','askdata_measures_semi_additive_agg',
+        'askdata_measures_non_additive_restriction','askdata_measures_zero_denominator_check',
+        'askdata_measures_certified_requires_additivity','askdata_measures_additivity_confirmer_fk',
+        'askdata_metric_versions_additivity_enum','askdata_metric_versions_semi_additive_agg',
+        'askdata_metric_versions_non_additive_restriction','askdata_metric_versions_zero_denominator_check',
+        'askdata_metric_versions_certified_requires_additivity','askdata_metric_versions_additivity_confirmer_fk'
+      )
+  )<>12 THEN
+    RAISE EXCEPTION 'ADD-001 independent database gates are incomplete';
+  END IF;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid='askdata.relationships'::regclass
+      AND attname='cardinality' AND NOT attisdropped AND NOT attnotnull
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid='askdata.relationships'::regclass
+      AND attname='fanout_policy' AND NOT attisdropped AND NOT attnotnull
+      AND NOT EXISTS(
+        SELECT 1 FROM pg_attrdef
+        WHERE adrelid='askdata.relationships'::regclass
+          AND adnum=pg_attribute.attnum
+      )
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid='askdata.relationships'::regclass
+      AND attname='bridge_model_version_id' AND NOT attisdropped
+      AND format_type(atttypid,atttypmod)='uuid'
+  ) THEN
+    RAISE EXCEPTION 'QUERY-008 relationship enum columns or fail-closed defaults are incomplete';
+  END IF;
+
+  IF (
+    SELECT count(*) FROM pg_constraint
+    WHERE conrelid='askdata.relationships'::regclass AND convalidated
+      AND conname IN (
+        'rel_cardinality_enum','rel_fanout_enum','rel_combination_valid',
+        'rel_bridge_required','askdata_relationships_bridge_model_fk'
+      )
+  )<>5 OR NOT EXISTS(
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='askdata.relationships'::regclass
+      AND conname='rel_combination_valid'
+      AND position('ONE_TO_ONE' IN pg_get_constraintdef(oid))>0
+      AND position('MANY_TO_ONE' IN pg_get_constraintdef(oid))>0
+      AND position('ONE_TO_MANY' IN pg_get_constraintdef(oid))>0
+      AND position('MANY_TO_MANY' IN pg_get_constraintdef(oid))>0
+      AND position('PRE_AGGREGATE_REQUIRED' IN pg_get_constraintdef(oid))>0
+      AND position('BRIDGE_REQUIRED' IN pg_get_constraintdef(oid))>0
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='askdata.relationships'::regclass
+      AND conname='rel_bridge_required'
+      AND position('bridge_model_version_id IS NOT NULL' IN pg_get_constraintdef(oid))>0
+  ) THEN
+    RAISE EXCEPTION 'QUERY-008 relationship matrix database gates are incomplete';
   END IF;
 
   IF NOT EXISTS(
@@ -147,6 +467,19 @@ BEGIN
     RAISE EXCEPTION 'askdata halfvec(2560) HNSW index is missing';
   END IF;
 
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid='askdata.search_documents'::regclass
+      AND attname='embedding_dim' AND NOT attisdropped
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='askdata.search_documents'::regclass
+      AND conname='askdata_search_documents_embedding_shape_check'
+      AND position('embedding_dim = 2560' IN pg_get_constraintdef(oid))>0
+  ) THEN
+    RAISE EXCEPTION 'SEARCH-006 embedding model/dimension gate is incomplete';
+  END IF;
+
   IF to_regprocedure('askdata.start_release_projection(uuid,uuid,jsonb)') IS NULL
     OR to_regprocedure('askdata.claim_release_projection(uuid,text,integer)') IS NULL
     OR to_regprocedure('askdata.list_release_projection_tenants(text)') IS NULL
@@ -155,8 +488,155 @@ BEGIN
     OR to_regprocedure('askdata.load_release_graph_projection(uuid,uuid,text,uuid)') IS NULL
     OR to_regprocedure('askdata.complete_release_projection(uuid,uuid,text,uuid,text,text,integer,jsonb)') IS NULL
     OR to_regprocedure('askdata.fail_release_projection(uuid,uuid,text,uuid,text,boolean)') IS NULL
+    OR to_regprocedure('askdata.validate_time_contract_version()') IS NULL
+    OR to_regprocedure('askdata.validate_semantic_model_time_contract()') IS NULL
+    OR to_regprocedure('askdata.validate_release_time_contract_closure()') IS NULL
     OR to_regprocedure('askdata.activate_release(uuid,uuid)') IS NOT NULL THEN
     RAISE EXCEPTION 'askdata projection boundary is incomplete or unsafe activation exists before evaluation gates';
+  END IF;
+
+  IF to_regprocedure('askdata.semantic_import_errors_valid(jsonb)') IS NULL
+    OR to_regprocedure('askdata.enforce_semantic_import_transition()') IS NULL
+    OR to_regprocedure('askdata.enforce_semantic_import_row_transition()') IS NULL
+    OR to_regprocedure('askdata.list_semantic_import_tenants()') IS NULL
+    OR to_regprocedure('askdata.claim_semantic_import(uuid,text,integer)') IS NULL
+    OR to_regprocedure(
+      'askdata.heartbeat_semantic_import(uuid,uuid,text,uuid,integer)'
+    ) IS NULL
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_trigger
+      WHERE tgrelid='askdata.semantic_imports'::regclass
+        AND tgname='askdata_semantic_imports_transition_guard'
+        AND NOT tgisinternal
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_trigger
+      WHERE tgrelid='askdata.semantic_import_rows'::regclass
+        AND tgname='askdata_semantic_import_rows_transition_guard'
+        AND NOT tgisinternal
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_constraint
+      WHERE conrelid='askdata.semantic_imports'::regclass
+        AND conname='askdata_semantic_imports_file_idempotency_key'
+        AND contype='u'
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_constraint
+      WHERE conrelid='askdata.semantic_import_rows'::regclass
+        AND conname='askdata_semantic_import_rows_number_key'
+        AND contype='u'
+    )
+    OR NOT askdata.semantic_import_errors_valid('[]'::jsonb)
+    OR askdata.semantic_import_errors_valid('[{"code":"MISSING_FIELDS"}]'::jsonb)
+    OR position(
+      'illegal semantic import transition' IN pg_get_functiondef(
+        'askdata.enforce_semantic_import_transition()'::regprocedure
+      )
+    )=0
+    OR position(
+      'FOR UPDATE SKIP LOCKED' IN pg_get_functiondef(
+        'askdata.claim_semantic_import(uuid,text,integer)'::regprocedure
+      )
+    )=0 THEN
+    RAISE EXCEPTION 'semantic import storage, transition, or lease boundary is incomplete';
+  END IF;
+
+  IF to_regprocedure('askdata.validate_governed_import_version()') IS NULL
+    OR to_regprocedure('askdata.resolve_governed_import_member(uuid,uuid,text)') IS NULL
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_proc AS procedure
+      WHERE procedure.oid='askdata.resolve_governed_import_member(uuid,uuid,text)'::regprocedure
+        AND procedure.prosecdef AND procedure.provolatile='s'
+        AND procedure.proisstrict AND procedure.proretset
+        AND EXISTS(
+          SELECT 1 FROM unnest(procedure.proconfig) AS setting
+          WHERE setting LIKE 'search_path=%pg_catalog%askdata%platform%'
+        )
+        AND position('member_key_hash' IN pg_get_functiondef(procedure.oid))>0
+        AND position('canonical_label' IN pg_get_functiondef(procedure.oid))=0
+        AND position('member_key,' IN pg_get_functiondef(procedure.oid))=0
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_constraint
+      WHERE conrelid='askdata.release_objects'::regclass
+        AND conname='release_objects_object_type_check'
+        AND position('KPI_BUNDLE' IN pg_get_constraintdef(oid))>0
+        AND position('METRIC_DIMENSION' IN pg_get_constraintdef(oid))>0
+        AND position('EVAL_CASE' IN pg_get_constraintdef(oid))>0
+    ) THEN
+    RAISE EXCEPTION 'missing governed import version contracts';
+  END IF;
+
+  IF EXISTS(
+    SELECT 1
+    FROM unnest(ARRAY[
+      'askdata.list_semantic_import_tenants()'::regprocedure,
+      'askdata.claim_semantic_import(uuid,text,integer)'::regprocedure,
+      'askdata.heartbeat_semantic_import(uuid,uuid,text,uuid,integer)'::regprocedure
+    ]) AS required_function(oid)
+    JOIN pg_proc AS procedure ON procedure.oid=required_function.oid
+    WHERE NOT procedure.prosecdef
+      OR NOT EXISTS(
+        SELECT 1 FROM unnest(procedure.proconfig) AS setting
+        WHERE setting LIKE 'search_path=%pg_catalog%askdata%'
+      )
+  ) THEN
+    RAISE EXCEPTION 'semantic import worker functions must be SECURITY DEFINER with a pinned search path';
+  END IF;
+
+  IF to_regprocedure('askdata.semantic_export_asset_types_valid(text[])') IS NULL
+    OR to_regprocedure('askdata.enforce_semantic_export_transition()') IS NULL
+    OR to_regprocedure('askdata.list_semantic_export_tenants()') IS NULL
+    OR to_regprocedure('askdata.claim_semantic_export(uuid,text,integer)') IS NULL
+    OR to_regprocedure(
+      'askdata.complete_semantic_export(uuid,uuid,text,uuid,text,text,integer,integer)'
+    ) IS NULL
+    OR to_regprocedure(
+      'askdata.fail_semantic_export(uuid,uuid,text,uuid,text,boolean)'
+    ) IS NULL
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_trigger
+      WHERE tgrelid='askdata.semantic_export_jobs'::regclass
+        AND tgname='askdata_semantic_export_jobs_transition_guard'
+        AND NOT tgisinternal
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema='askdata' AND table_name='metric_versions'
+        AND column_name='name' AND is_nullable='NO'
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema='askdata' AND table_name='metric_versions'
+        AND column_name='description' AND is_nullable='NO'
+    )
+    OR NOT askdata.semantic_export_asset_types_valid(ARRAY['METRIC','DIMENSION'])
+    OR askdata.semantic_export_asset_types_valid(ARRAY['METRIC','METRIC'])
+    OR position(
+      'FOR UPDATE SKIP LOCKED' IN pg_get_functiondef(
+        'askdata.claim_semantic_export(uuid,text,integer)'::regprocedure
+      )
+    )=0 THEN
+    RAISE EXCEPTION 'semantic export storage, pinned manifest, or lease boundary is incomplete';
+  END IF;
+
+  IF EXISTS(
+    SELECT 1
+    FROM unnest(ARRAY[
+      'askdata.list_semantic_export_tenants()'::regprocedure,
+      'askdata.claim_semantic_export(uuid,text,integer)'::regprocedure,
+      'askdata.complete_semantic_export(uuid,uuid,text,uuid,text,text,integer,integer)'::regprocedure,
+      'askdata.fail_semantic_export(uuid,uuid,text,uuid,text,boolean)'::regprocedure
+    ]) AS required_function(oid)
+    JOIN pg_proc AS procedure ON procedure.oid=required_function.oid
+    WHERE NOT procedure.prosecdef
+      OR NOT EXISTS(
+        SELECT 1 FROM unnest(procedure.proconfig) AS setting
+        WHERE setting LIKE 'search_path=%pg_catalog%askdata%'
+      )
+  ) THEN
+    RAISE EXCEPTION 'semantic export worker functions must be SECURITY DEFINER with a pinned search path';
   END IF;
 
   IF to_regprocedure('askdata.question_audit_json_is_safe(jsonb)') IS NULL
@@ -170,6 +650,12 @@ BEGIN
       'askdata.valid_question_run_transition(text,text)'
     ) IS NULL
     OR to_regprocedure('askdata.enforce_question_run_lifecycle()') IS NULL
+    OR to_regprocedure('askdata.enforce_conversation_release_pin()') IS NULL
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_trigger
+      WHERE tgrelid='askdata.conversations'::regclass
+        AND tgname='askdata_conversations_release_pin' AND NOT tgisinternal
+    )
     OR NOT EXISTS(
       SELECT 1 FROM pg_trigger
       WHERE tgrelid='askdata.question_runs'::regclass
@@ -207,6 +693,13 @@ BEGIN
       WHERE conrelid='askdata.question_run_events'::regclass
         AND conname='askdata_question_run_events_type_shape_check'
         AND contype='c'
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_attribute
+      WHERE attrelid='askdata.question_runs'::regclass
+        AND attname IN ('clarification_deadline','budget_frozen_at','budget_consumed_json')
+        AND NOT attisdropped
+      GROUP BY attrelid HAVING count(*)=3
     ) THEN
     RAISE EXCEPTION 'askdata question runtime audit boundary is incomplete';
   END IF;
@@ -723,6 +1216,30 @@ BEGIN
 END
 $$;
 
+DO $$
+BEGIN
+  IF to_regprocedure('askdata.enforce_idempotency_record()') IS NULL
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_trigger
+      WHERE tgrelid='askdata.idempotency_records'::regclass
+        AND tgname='askdata_idempotency_records_lifecycle' AND NOT tgisinternal
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_constraint
+      WHERE conrelid='askdata.idempotency_records'::regclass
+        AND conname='askdata_idempotency_records_key' AND contype='u'
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_indexes
+      WHERE schemaname='askdata'
+        AND indexname='askdata_idempotency_records_expiry_idx'
+        AND indexdef NOT LIKE '% WHERE %'
+    ) THEN
+    RAISE EXCEPTION 'shared idempotency lifecycle or cleanup boundary is incomplete';
+  END IF;
+END
+$$;
+
 SELECT (
   NOT has_schema_privilege('public','askdata','USAGE')
   AND has_schema_privilege(:'app_user','askdata','USAGE')
@@ -730,11 +1247,70 @@ SELECT (
   AND NOT has_schema_privilege(:'connection_test_user','askdata','USAGE')
   AND has_table_privilege(:'app_user','askdata.metric_versions','INSERT')
   AND has_table_privilege(:'app_user','askdata.metric_versions','UPDATE')
+  AND has_table_privilege(:'app_user','askdata.time_contracts','INSERT')
+  AND has_table_privilege(:'app_user','askdata.time_contracts','UPDATE')
+  AND has_table_privilege(:'app_user','askdata.time_contract_versions','INSERT')
+  AND has_table_privilege(:'app_user','askdata.time_contract_versions','UPDATE')
+  AND NOT has_table_privilege(:'worker_user','askdata.time_contract_versions','INSERT')
+  AND has_table_privilege(:'app_user','askdata.business_term_versions','INSERT')
+  AND has_table_privilege(:'app_user','askdata.metric_dimension_versions','INSERT')
+  AND has_table_privilege(:'app_user','askdata.certified_example_versions','INSERT')
+  AND has_table_privilege(:'app_user','askdata.kpi_bundle_versions','INSERT')
+  AND has_table_privilege(:'app_user','askdata.evaluation_case_versions','INSERT')
+  AND NOT has_table_privilege(:'worker_user','askdata.kpi_bundle_versions','INSERT')
+  AND has_table_privilege(:'app_user','askdata.semantic_imports','INSERT')
+  AND has_table_privilege(:'app_user','askdata.semantic_imports','UPDATE')
+  AND has_table_privilege(:'app_user','askdata.semantic_import_rows','UPDATE')
+  AND has_table_privilege(:'worker_user','askdata.semantic_imports','UPDATE')
+  AND has_table_privilege(:'worker_user','askdata.semantic_import_rows','INSERT')
+  AND has_table_privilege(:'worker_user','askdata.semantic_import_rows','UPDATE')
+  AND NOT has_table_privilege(:'worker_user','askdata.semantic_imports','DELETE')
+  AND NOT has_table_privilege(:'worker_user','askdata.semantic_import_rows','DELETE')
+  AND has_table_privilege(:'app_user','askdata.semantic_export_jobs','SELECT')
+  AND has_table_privilege(:'app_user','askdata.semantic_export_jobs','INSERT')
+  AND NOT has_table_privilege(:'app_user','askdata.semantic_export_jobs','UPDATE')
+  AND NOT has_table_privilege(:'app_user','askdata.semantic_export_jobs','DELETE')
+  AND NOT has_table_privilege(:'worker_user','askdata.semantic_export_jobs','SELECT')
+  AND NOT has_table_privilege(:'worker_user','askdata.semantic_export_jobs','INSERT')
+  AND NOT has_table_privilege(:'worker_user','askdata.semantic_export_jobs','UPDATE')
+  AND NOT has_table_privilege(:'worker_user','askdata.semantic_export_jobs','DELETE')
   AND has_table_privilege(:'app_user','askdata.releases','INSERT')
   AND NOT has_table_privilege(:'app_user','askdata.releases','UPDATE')
   AND NOT has_table_privilege(:'app_user','askdata.embedding_outbox','INSERT')
+  AND NOT has_table_privilege(:'app_user','askdata.search_documents','INSERT')
+  AND NOT has_table_privilege(:'app_user','askdata.search_documents','UPDATE')
+  AND has_column_privilege(:'app_user','askdata.search_documents','document','INSERT')
+  AND has_column_privilege(:'app_user','askdata.search_documents','document','UPDATE')
+  AND NOT has_column_privilege(:'app_user','askdata.search_documents','embedding','INSERT')
+  AND NOT has_column_privilege(:'app_user','askdata.search_documents','embedding','UPDATE')
+  AND NOT has_column_privilege(:'app_user','askdata.search_documents','embedding_model','INSERT')
+  AND NOT has_column_privilege(:'app_user','askdata.search_documents','embedding_model','UPDATE')
+  AND NOT has_column_privilege(:'app_user','askdata.search_documents','embedding_dim','INSERT')
+  AND NOT has_column_privilege(:'app_user','askdata.search_documents','embedding_dim','UPDATE')
+  AND NOT has_table_privilege(:'app_user','askdata.search_query_samples','INSERT')
+  AND NOT has_table_privilege(:'app_user','askdata.search_query_samples','SELECT')
+  AND NOT has_table_privilege(:'app_user','askdata.search_query_samples','UPDATE')
+  AND NOT has_table_privilege(:'app_user','askdata.search_query_samples','DELETE')
+  AND has_table_privilege(:'worker_user','askdata.search_query_samples','SELECT')
+  AND has_table_privilege(:'worker_user','askdata.search_query_samples','DELETE')
+  AND NOT has_table_privilege(:'worker_user','askdata.search_query_samples','UPDATE')
+  AND has_table_privilege(:'worker_user','askdata.search_recall_audits','INSERT')
+  AND NOT has_table_privilege(:'app_user','askdata.search_recall_audits','INSERT')
+  AND has_function_privilege(
+    :'app_user',
+    'askdata.record_search_query_sample(uuid,uuid,text,text,text,text,integer,text)',
+    'EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'worker_user',
+    'askdata.record_search_query_sample(uuid,uuid,text,text,text,text,integer,text)',
+    'EXECUTE'
+  )
   AND NOT has_table_privilege(:'app_user','askdata.release_projections','UPDATE')
   AND NOT has_table_privilege(:'app_user','askdata.release_events','INSERT')
+  AND has_table_privilege(:'app_user','askdata.conversations','INSERT')
+  AND has_table_privilege(:'app_user','askdata.conversations','UPDATE')
+  AND NOT has_table_privilege(:'app_user','askdata.conversations','DELETE')
   AND has_table_privilege(:'app_user','askdata.question_runs','INSERT')
   AND has_table_privilege(:'app_user','askdata.question_runs','UPDATE')
   AND NOT has_table_privilege(:'app_user','askdata.question_runs','DELETE')
@@ -744,6 +1320,10 @@ SELECT (
   AND NOT has_table_privilege(:'app_user','askdata.question_artifacts','UPDATE')
   AND has_table_privilege(:'app_user','askdata.tool_calls','INSERT')
   AND NOT has_table_privilege(:'app_user','askdata.tool_calls','UPDATE')
+  AND has_table_privilege(:'app_user','askdata.idempotency_records','SELECT')
+  AND has_table_privilege(:'app_user','askdata.idempotency_records','INSERT')
+  AND has_table_privilege(:'app_user','askdata.idempotency_records','UPDATE')
+  AND has_table_privilege(:'app_user','askdata.idempotency_records','DELETE')
   AND has_table_privilege(:'app_user','askdata.evaluation_sets','INSERT')
   AND has_table_privilege(:'app_user','askdata.evaluation_sets','UPDATE')
   AND has_table_privilege(:'app_user','askdata.evaluation_sets','DELETE')
@@ -781,8 +1361,16 @@ SELECT (
   AND NOT has_table_privilege(:'worker_user','askdata.question_runs','INSERT')
   AND NOT has_table_privilege(:'worker_user','askdata.question_runs','UPDATE')
   AND NOT has_table_privilege(:'worker_user','askdata.question_run_events','INSERT')
+  AND has_column_privilege(:'worker_user','askdata.question_runs','current_state','UPDATE')
+  AND has_column_privilege(:'worker_user','askdata.question_runs','record_version','UPDATE')
+  AND has_column_privilege(:'worker_user','askdata.question_run_events','event_hash','INSERT')
   AND NOT has_table_privilege(:'worker_user','askdata.question_artifacts','INSERT')
   AND NOT has_table_privilege(:'worker_user','askdata.tool_calls','INSERT')
+  AND has_table_privilege(:'worker_user','askdata.idempotency_records','SELECT')
+  AND NOT has_table_privilege(:'worker_user','askdata.idempotency_records','INSERT')
+  AND NOT has_table_privilege(:'worker_user','askdata.idempotency_records','UPDATE')
+  AND has_table_privilege(:'worker_user','askdata.idempotency_records','DELETE')
+  AND NOT has_table_privilege(:'connection_test_user','askdata.idempotency_records','SELECT')
   AND has_table_privilege(:'worker_user','askdata.evaluation_runs','INSERT')
   AND NOT has_table_privilege(:'worker_user','askdata.evaluation_runs','UPDATE')
   AND NOT has_table_privilege(:'worker_user','askdata.evaluation_runs','DELETE')
@@ -842,6 +1430,70 @@ SELECT (
     :'connection_test_user','askdata.release_manifest_hash(uuid)','EXECUTE'
   )
   AND has_function_privilege(
+    :'app_user','askdata.semantic_import_errors_valid(jsonb)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user','askdata.semantic_import_errors_valid(jsonb)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user','askdata.resolve_governed_import_member(uuid,uuid,text)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user','askdata.resolve_governed_import_member(uuid,uuid,text)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user','askdata.resolve_governed_import_member(uuid,uuid,text)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user','askdata.list_semantic_import_tenants()','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user','askdata.claim_semantic_import(uuid,text,integer)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user',
+    'askdata.heartbeat_semantic_import(uuid,uuid,text,uuid,integer)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'app_user','askdata.list_semantic_import_tenants()','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'app_user','askdata.claim_semantic_import(uuid,text,integer)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user','askdata.list_semantic_import_tenants()','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user','askdata.semantic_export_asset_types_valid(text[])','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'worker_user','askdata.semantic_export_asset_types_valid(text[])','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user','askdata.list_semantic_export_tenants()','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user','askdata.claim_semantic_export(uuid,text,integer)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user',
+    'askdata.complete_semantic_export(uuid,uuid,text,uuid,text,text,integer,integer)',
+    'EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user',
+    'askdata.fail_semantic_export(uuid,uuid,text,uuid,text,boolean)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'app_user','askdata.list_semantic_export_tenants()','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'app_user','askdata.claim_semantic_export(uuid,text,integer)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user','askdata.list_semantic_export_tenants()','EXECUTE'
+  )
+  AND has_function_privilege(
     :'app_user','askdata.question_audit_json_is_safe(jsonb)','EXECUTE'
   )
   AND NOT has_function_privilege(
@@ -873,6 +1525,57 @@ SELECT (
   )
   AND has_function_privilege(
     :'app_user','askdata.seal_evaluation_set(uuid,uuid)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user','askdata.record_release_error_budget(uuid,uuid,uuid,jsonb,uuid)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user','askdata.plan_evaluation_batch(uuid,uuid,text,uuid)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user','askdata.expose_evaluation_shard(uuid,smallint,uuid)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user','askdata.recompute_release_evaluation_gate(uuid,uuid,uuid,uuid)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user','askdata.record_release_review_report(uuid,uuid,uuid,text,text,jsonb,uuid)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user','askdata.submit_release_approval(uuid,uuid,uuid,text,text,text,text,uuid)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user','askdata.activate_release(uuid,uuid,uuid,uuid,bigint)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user','askdata.load_quota_usage_snapshots(uuid,uuid,uuid,timestamptz)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user','askdata.record_cost_usage(uuid,uuid,uuid,uuid,text,text,text,bigint,bigint,bigint,bigint)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user','askdata.record_cost_usage(uuid,uuid,uuid,uuid,text,text,text,bigint,bigint,bigint,bigint)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'worker_user','askdata.load_quota_usage_snapshots(uuid,uuid,uuid,timestamptz)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user','askdata.load_quota_usage_snapshots(uuid,uuid,uuid,timestamptz)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user','askdata.record_cost_usage(uuid,uuid,uuid,uuid,text,text,text,bigint,bigint,bigint,bigint)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'worker_user','askdata.recompute_release_evaluation_gate(uuid,uuid,uuid,uuid)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'worker_user','askdata.activate_release(uuid,uuid,uuid,uuid,bigint)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user','askdata.recompute_release_evaluation_gate(uuid,uuid,uuid,uuid)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user','askdata.activate_release(uuid,uuid,uuid,uuid,bigint)','EXECUTE'
   )
   AND NOT has_function_privilege(
     :'worker_user','askdata.seal_evaluation_set(uuid,uuid)','EXECUTE'
@@ -906,7 +1609,8 @@ SELECT (
       'askdata.enforce_evaluation_case_review()'::regprocedure,
       'askdata.refresh_evaluation_case_review_count()'::regprocedure,
       'askdata.enforce_evaluation_run_append()'::regprocedure,
-      'askdata.enforce_query_feedback()'::regprocedure
+      'askdata.enforce_query_feedback()'::regprocedure,
+      'askdata.enforce_idempotency_record()'::regprocedure
     ]) AS lifecycle_helper(function_oid)
     WHERE has_function_privilege(
       runtime_role.role_name,lifecycle_helper.function_oid,'EXECUTE'
@@ -917,6 +1621,43 @@ SELECT (
 \if :askdata_runtime_privileges_secure
 \else
   \echo 'askdata runtime privileges are unsafe'
+  \quit 1
+\endif
+
+SELECT (
+  has_table_privilege(:'app_user','askdata.saved_questions','INSERT,UPDATE')
+  AND has_table_privilege(:'app_user','askdata.saved_question_dependencies','INSERT')
+  AND has_table_privilege(:'app_user','askdata.saved_question_shares','INSERT')
+  AND has_table_privilege(:'app_user','askdata.feedback_tickets','INSERT,UPDATE')
+  AND has_table_privilege(:'app_user','askdata.feedback_ticket_events','INSERT')
+  AND has_table_privilege(:'app_user','askdata.active_learning_candidates','UPDATE')
+  AND NOT has_table_privilege(:'app_user','askdata.active_learning_candidates','INSERT')
+  AND has_table_privilege(:'app_user','askdata.report_semantic_assets','UPDATE')
+  AND NOT has_table_privilege(:'app_user','askdata.report_semantic_assets','INSERT')
+  AND has_table_privilege(:'app_user','askdata.report_asset_certifications','INSERT')
+  AND has_table_privilege(:'app_user','askdata.add_to_report_intents','INSERT,UPDATE')
+  AND has_table_privilege(:'app_user','askdata.add_to_report_outbox','INSERT')
+  AND NOT has_table_privilege(:'app_user','askdata.add_to_report_outbox','UPDATE')
+  AND has_table_privilege(:'app_user','askdata.narrative_verification_failures','INSERT')
+  AND NOT has_table_privilege(:'app_user','askdata.quotas','INSERT,UPDATE,DELETE')
+  AND NOT has_table_privilege(:'app_user','askdata.cost_records','INSERT,UPDATE,DELETE')
+  AND has_table_privilege(:'worker_user','askdata.saved_questions','UPDATE')
+  AND NOT has_table_privilege(:'worker_user','askdata.saved_questions','INSERT')
+  AND has_table_privilege(:'worker_user','askdata.active_learning_candidates','INSERT,UPDATE')
+  AND has_table_privilege(:'worker_user','askdata.report_semantic_assets','INSERT,UPDATE')
+  AND has_table_privilege(:'worker_user','askdata.report_asset_extraction_outbox','UPDATE')
+  AND has_table_privilege(:'worker_user','askdata.report_asset_projection_outbox','UPDATE')
+  AND has_table_privilege(:'worker_user','askdata.add_to_report_intents','UPDATE')
+  AND has_table_privilege(:'worker_user','askdata.add_to_report_outbox','UPDATE')
+  AND has_table_privilege(:'worker_user','askdata.narrative_verification_failures','INSERT')
+  AND NOT has_table_privilege(:'connection_test_user','askdata.saved_questions','INSERT,UPDATE,DELETE')
+  AND NOT has_table_privilege(:'connection_test_user','askdata.feedback_tickets','INSERT,UPDATE,DELETE')
+  AND NOT has_table_privilege(:'connection_test_user','askdata.cost_records','INSERT,UPDATE,DELETE')
+) AS askdata_late_module_dml_secure
+\gset
+\if :askdata_late_module_dml_secure
+\else
+  \echo 'AskData late-module runtime DML privileges are unsafe'
   \quit 1
 \endif
 
@@ -1547,14 +2288,14 @@ DO $$
 BEGIN
   INSERT INTO askdata.search_documents(
     tenant_id,domain_id,object_type,object_version_id,view_type,sensitivity,
-    index_policy,document,input_hash,embedding_status
+    index_policy,document,input_hash
   ) VALUES(
     current_setting('verify.askdata_sensitive_tenant_id')::uuid,
     current_setting('verify.askdata_sensitive_domain_id')::uuid,'MEMBER',
     current_setting('verify.askdata_sensitive_confidential_member_id')::uuid,
     'DIMENSION_VALUE',
     'CONFIDENTIAL','LEXICAL','synthetic sensitive member document',
-    repeat('8',64),'PENDING'
+    repeat('8',64)
   );
   RAISE EXCEPTION 'a sensitive MEMBER search document was accepted';
 EXCEPTION WHEN check_violation THEN
@@ -2929,10 +3670,638 @@ ROLLBACK;
 DO $$
 DECLARE
   relation_name text;
+  policy_count integer;
+  helper_is_definer boolean;
+  helper_config text[];
+BEGIN
+  FOREACH relation_name IN ARRAY ARRAY[
+    'reports','report_drafts','report_revisions','report_versions'
+  ] LOOP
+    IF to_regclass('platform.'||relation_name) IS NULL THEN
+      RAISE EXCEPTION 'Report V2 relation is missing: platform.%', relation_name;
+    END IF;
+    IF NOT EXISTS(
+      SELECT 1 FROM pg_class AS relation
+      WHERE relation.oid=to_regclass('platform.'||relation_name)
+        AND relation.relrowsecurity AND relation.relforcerowsecurity
+    ) THEN
+      RAISE EXCEPTION 'Report V2 RLS/FORCE RLS is missing: platform.%', relation_name;
+    END IF;
+    SELECT count(*) INTO policy_count
+    FROM pg_policy AS policy
+    WHERE policy.polrelid=to_regclass('platform.'||relation_name)
+      AND (
+        position('report_v2_' IN COALESCE(pg_get_expr(policy.polqual,policy.polrelid),''))>0
+        OR position('report_v2_' IN COALESCE(pg_get_expr(policy.polwithcheck,policy.polrelid),''))>0
+      );
+    IF policy_count=0 THEN
+      RAISE EXCEPTION 'Report V2 object-permission policy is missing: platform.%', relation_name;
+    END IF;
+  END LOOP;
+
+  IF to_regprocedure('platform.report_v2_can_access(uuid,text[])') IS NULL
+     OR to_regprocedure('platform.report_v2_row_can_access(uuid,uuid,uuid,text[])') IS NULL THEN
+    RAISE EXCEPTION 'Report V2 object-permission helpers are missing';
+  END IF;
+  SELECT procedure.prosecdef,procedure.proconfig
+  INTO helper_is_definer,helper_config
+  FROM pg_proc AS procedure
+  WHERE procedure.oid='platform.report_v2_can_access(uuid,text[])'::regprocedure;
+  IF NOT helper_is_definer OR NOT ('search_path=pg_catalog, platform'=ANY(helper_config)) THEN
+    RAISE EXCEPTION 'Report V2 object-permission helper is not hardened';
+  END IF;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='platform.report_drafts'::regclass
+      AND conname='report_v2_draft_report_fk' AND contype='f'
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='platform.report_revisions'::regclass
+      AND conname='report_v2_revision_sequence_key' AND contype='u'
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='platform.report_versions'::regclass
+      AND conname='report_v2_version_number_key' AND contype='u'
+  ) THEN
+    RAISE EXCEPTION 'Report V2 draft/revision/version integrity constraints are incomplete';
+  END IF;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='platform.report_versions'::regclass
+      AND conname='report_v2_rollback_target_fk' AND contype='f'
+      AND confrelid='platform.report_versions'::regclass
+      AND confdeltype='r'
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='platform.report_versions'::regclass
+      AND conname='report_v2_rollback_shape_check' AND contype='c'
+      AND position('btrim(rollback_reason)' IN pg_get_constraintdef(oid))>0
+      AND position('[[:cntrl:]]' IN pg_get_constraintdef(oid))>0
+  ) THEN
+    RAISE EXCEPTION 'Report V2 rollback lineage or audit-reason constraint is incomplete';
+  END IF;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid='platform.report_revisions'::regclass
+      AND tgname='report_v2_revisions_immutable' AND NOT tgisinternal
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid='platform.report_versions'::regclass
+      AND tgname='report_v2_versions_definition_immutable' AND NOT tgisinternal
+  ) THEN
+    RAISE EXCEPTION 'Report V2 immutable triggers are missing';
+  END IF;
+END
+$$;
+
+DO $$
+DECLARE
+  relation_name text;
+  version_relation text;
+BEGIN
+  FOREACH relation_name IN ARRAY ARRAY[
+    'report_structure_templates','report_layout_templates','report_themes',
+    'report_narrative_templates','report_structure_template_versions',
+    'report_layout_template_versions','report_theme_versions',
+    'report_narrative_template_versions','report_templates',
+    'report_template_versions','component_templates',
+    'component_template_versions'
+  ] LOOP
+    IF to_regclass('platform.'||relation_name) IS NULL OR NOT EXISTS(
+      SELECT 1 FROM pg_class AS relation
+      WHERE relation.oid=to_regclass('platform.'||relation_name)
+        AND relation.relrowsecurity AND relation.relforcerowsecurity
+    ) THEN
+      RAISE EXCEPTION 'Report V2 template RLS/FORCE RLS is missing: platform.%', relation_name;
+    END IF;
+  END LOOP;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_policy AS policy
+    WHERE policy.polrelid='platform.component_templates'::regclass
+      AND policy.polname='component_templates_write'
+      AND position(
+        'is_system_access' IN COALESCE(
+          pg_get_expr(policy.polwithcheck,policy.polrelid),''
+        )
+      )>0
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_policy AS policy
+    WHERE policy.polrelid='platform.component_template_versions'::regclass
+      AND policy.polname='component_template_versions_write'
+      AND position(
+        'is_system_access' IN COALESCE(
+          pg_get_expr(policy.polwithcheck,policy.polrelid),''
+        )
+      )>0
+  ) THEN
+    RAISE EXCEPTION 'platform component manifests are not SYSTEM-only writable';
+  END IF;
+
+  FOREACH version_relation IN ARRAY ARRAY[
+    'report_structure_template_versions','report_layout_template_versions',
+    'report_theme_versions','report_narrative_template_versions',
+    'report_template_versions','component_template_versions'
+  ] LOOP
+    IF NOT EXISTS(
+      SELECT 1 FROM pg_constraint
+      WHERE conrelid=to_regclass('platform.'||version_relation)
+        AND conname=version_relation||'_version_check'
+        AND contype='c'
+        AND position(
+          '^(0|[1-9][0-9]*)' IN pg_get_constraintdef(oid)
+        )>0
+    ) THEN
+      RAISE EXCEPTION 'Report V2 SemVer constraint is missing: platform.%', version_relation;
+    END IF;
+  END LOOP;
+
+  IF to_regprocedure('platform.enforce_component_template_state()') IS NULL
+    OR to_regprocedure(
+      'platform.protect_referenced_component_template_version()'
+    ) IS NULL
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_trigger
+      WHERE tgrelid='platform.component_template_versions'::regclass
+        AND tgname='component_template_version_guard' AND NOT tgisinternal
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_trigger
+      WHERE tgrelid='platform.component_template_versions'::regclass
+        AND tgname='component_template_version_delete_guard'
+        AND NOT tgisinternal
+    ) THEN
+    RAISE EXCEPTION 'Report V2 component state or reference guard is missing';
+  END IF;
+
+  IF (SELECT count(*)
+      FROM platform.component_templates AS template
+      JOIN platform.component_template_versions AS version
+        ON version.component_template_id=template.id
+      WHERE template.tenant_id IS NULL AND version.version='1.0.0'
+        AND version.status IN('ACTIVE','DEPRECATED','RETAINED')
+        AND version.manifest_json->>'type'=template.type
+        AND version.manifest_json->>'version'=version.version
+        AND version.manifest_json ? 'dataContract'
+        AND version.manifest_json ? 'optionSchema'
+        AND NOT version.manifest_json ? 'seed')<>13 THEN
+    RAISE EXCEPTION 'Report V2 bundled component manifests are incomplete or still placeholders';
+  END IF;
+END
+$$;
+
+SELECT (
+  NOT has_function_privilege(
+    :'app_user','platform.enforce_component_template_state()','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'worker_user','platform.enforce_component_template_state()','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user','platform.enforce_component_template_state()','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'app_user',
+    'platform.protect_referenced_component_template_version()','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'worker_user',
+    'platform.protect_referenced_component_template_version()','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user',
+    'platform.protect_referenced_component_template_version()','EXECUTE'
+  )
+) AS report_v2_template_guard_privileges_ok
+\gset
+\if :report_v2_template_guard_privileges_ok
+\else
+  \echo 'Report V2 template guard privileges failed'
+  \quit 1
+\endif
+
+DO $$
+DECLARE
+  relation_name text;
+BEGIN
+  FOREACH relation_name IN ARRAY ARRAY[
+    'report_draft_component_indexes','report_draft_dependencies',
+    'report_version_component_indexes','report_version_dependencies'
+  ] LOOP
+    IF to_regclass('platform.'||relation_name) IS NULL OR NOT EXISTS(
+      SELECT 1 FROM pg_class AS relation
+      WHERE relation.oid=to_regclass('platform.'||relation_name)
+        AND relation.relrowsecurity AND relation.relforcerowsecurity
+    ) OR NOT EXISTS(
+      SELECT 1 FROM pg_policy AS policy
+      WHERE policy.polrelid=to_regclass('platform.'||relation_name)
+        AND (
+          position('report_v2_can_access' IN COALESCE(
+            pg_get_expr(policy.polqual,policy.polrelid),''
+          ))>0
+          OR position('report_v2_can_access' IN COALESCE(
+            pg_get_expr(policy.polwithcheck,policy.polrelid),''
+          ))>0
+        )
+    ) THEN
+      RAISE EXCEPTION 'Report V2 index relation access boundary is incomplete: platform.%', relation_name;
+    END IF;
+  END LOOP;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname='platform' AND indexname='report_draft_dependencies_impact_idx'
+      AND indexdef LIKE '%tenant_id, dependency_type, dependency_id%'
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname='platform' AND indexname='report_version_dependencies_impact_idx'
+      AND indexdef LIKE '%tenant_id, dependency_type, dependency_id%'
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid='platform.report_version_component_indexes'::regclass
+      AND tgname='report_v2_version_component_indexes_immutable'
+      AND NOT tgisinternal
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid='platform.report_version_dependencies'::regclass
+      AND tgname='report_v2_version_dependencies_immutable'
+      AND NOT tgisinternal
+  ) THEN
+    RAISE EXCEPTION 'Report V2 impact indexes or immutable version guards are missing';
+  END IF;
+
+  IF to_regprocedure(
+       'platform.retain_report_version_release(uuid,uuid,uuid,uuid)'
+     ) IS NULL
+    OR to_regprocedure(
+       'platform.sync_report_version_release_reference()'
+     ) IS NULL
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_proc
+      WHERE oid='platform.retain_report_version_release(uuid,uuid,uuid,uuid)'::regprocedure
+        AND prosecdef
+        AND 'search_path=pg_catalog, platform, askdata'=ANY(proconfig)
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_proc
+      WHERE oid='platform.sync_report_version_release_reference()'::regprocedure
+        AND prosecdef
+        AND 'search_path=pg_catalog, platform, askdata'=ANY(proconfig)
+    )
+    OR NOT EXISTS(
+      SELECT 1 FROM pg_trigger
+      WHERE tgrelid='platform.report_version_dependencies'::regclass
+        AND tgname='report_version_dependency_release_reference'
+        AND NOT tgisinternal
+        AND position('sync_report_version_release_reference' IN pg_get_triggerdef(oid))>0
+    ) THEN
+    RAISE EXCEPTION 'Report version semantic-release retention binding is incomplete';
+  END IF;
+
+  IF EXISTS(
+    SELECT 1 FROM (VALUES
+      ('platform.report_draft_dependencies'::regclass),
+      ('platform.report_version_dependencies'::regclass)
+    ) AS relation(oid)
+    WHERE NOT EXISTS(
+      SELECT 1 FROM pg_constraint
+      WHERE conrelid=relation.oid
+        AND contype='c'
+        AND position('ANALYSIS_METHOD' IN pg_get_constraintdef(oid))>0
+        AND position('PROMPT_VERSION' IN pg_get_constraintdef(oid))>0
+        AND position('MODEL_POLICY' IN pg_get_constraintdef(oid))>0
+    )
+  ) THEN
+    RAISE EXCEPTION 'Report fixed analysis/prompt/model dependency pins are incomplete';
+  END IF;
+
+  IF position(
+       'report_version_dependencies' IN pg_get_functiondef(
+         'platform.protect_referenced_component_template_version()'::regprocedure
+       )
+     )=0
+    OR position(
+       'component_tenant_id' IN pg_get_functiondef(
+         'platform.protect_referenced_component_template_version()'::regprocedure
+       )
+     )=0
+    OR position(
+       'definition_json' IN pg_get_functiondef(
+         'platform.protect_referenced_component_template_version()'::regprocedure
+       )
+     )>0 THEN
+    RAISE EXCEPTION 'component reference protection must use tenant-aware dependency indexes';
+  END IF;
+END
+$$;
+
+SELECT (
+  NOT has_function_privilege(
+    :'app_user','platform.retain_report_version_release(uuid,uuid,uuid,uuid)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'worker_user','platform.retain_report_version_release(uuid,uuid,uuid,uuid)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user','platform.retain_report_version_release(uuid,uuid,uuid,uuid)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'app_user','platform.sync_report_version_release_reference()','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'worker_user','platform.sync_report_version_release_reference()','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user','platform.sync_report_version_release_reference()','EXECUTE'
+  )
+) AS report_version_release_reference_privileges_ok
+\gset
+\if :report_version_release_reference_privileges_ok
+\else
+  \echo 'Report version release-reference privilege boundary failed'
+  \quit 1
+\endif
+
+DO $$
+DECLARE
+  relation_name text;
+  function_name text;
+BEGIN
+  FOREACH relation_name IN ARRAY ARRAY[
+    'report_ai_runs','report_ai_operations',
+    'report_evidence_artifacts','report_insight_artifacts'
+  ] LOOP
+    IF to_regclass('platform.'||relation_name) IS NULL OR NOT EXISTS(
+      SELECT 1 FROM pg_class AS relation
+      WHERE relation.oid=to_regclass('platform.'||relation_name)
+        AND relation.relrowsecurity AND relation.relforcerowsecurity
+    ) THEN
+      RAISE EXCEPTION 'Report AI relation RLS/FORCE RLS is missing: platform.%', relation_name;
+    END IF;
+  END LOOP;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_policy AS policy
+    WHERE policy.polrelid='platform.report_ai_runs'::regclass
+      AND position('report_v2_can_access' IN COALESCE(
+        pg_get_expr(policy.polqual,policy.polrelid),''
+      ))>0
+      AND position('actor_user_id' IN COALESCE(
+        pg_get_expr(policy.polqual,policy.polrelid),''
+      ))>0
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_policy AS policy
+    WHERE policy.polrelid='platform.report_ai_operations'::regclass
+      AND position('report_ai_runs' IN COALESCE(
+        pg_get_expr(policy.polqual,policy.polrelid),''
+      ))>0
+  ) OR EXISTS(
+    SELECT 1
+    FROM unnest(ARRAY[
+      'platform.report_evidence_artifacts'::regclass,
+      'platform.report_insight_artifacts'::regclass
+    ]) AS relation(oid)
+    WHERE NOT EXISTS(
+      SELECT 1 FROM pg_policy AS policy
+      WHERE policy.polrelid=relation.oid
+        AND position('report_v2_can_access' IN COALESCE(
+          pg_get_expr(policy.polqual,policy.polrelid),''
+        ))>0
+    )
+  ) THEN
+    RAISE EXCEPTION 'Report AI object/actor access policies are incomplete';
+  END IF;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='platform.report_ai_runs'::regclass
+      AND conname='report_ai_runs_error_shape_check' AND contype='c'
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='platform.report_ai_operations'::regclass
+      AND conname='report_ai_operations_applied_revision_check' AND contype='c'
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname='platform' AND indexname='report_current_insight_key'
+      AND indexdef LIKE '% WHERE (status = ''CURRENT''%'
+  ) THEN
+    RAISE EXCEPTION 'Report AI lifecycle constraints or current-insight key are incomplete';
+  END IF;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid='platform.report_ai_runs'::regclass
+      AND tgname='report_ai_run_lifecycle_guard' AND NOT tgisinternal
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid='platform.report_ai_operations'::regclass
+      AND tgname='report_ai_operation_lifecycle_guard' AND NOT tgisinternal
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid='platform.report_evidence_artifacts'::regclass
+      AND tgname='report_evidence_artifact_guard' AND NOT tgisinternal
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid='platform.report_insight_artifacts'::regclass
+      AND tgname='report_insight_artifact_guard' AND NOT tgisinternal
+  ) THEN
+    RAISE EXCEPTION 'Report AI append-only lifecycle triggers are incomplete';
+  END IF;
+
+  FOREACH function_name IN ARRAY ARRAY[
+    'guard_report_ai_summary','guard_report_ai_run_lifecycle',
+    'guard_report_ai_operation_lifecycle','guard_report_evidence_artifact',
+    'guard_report_insight_artifact'
+  ] LOOP
+    IF to_regprocedure('platform.'||function_name||'()') IS NULL OR NOT EXISTS(
+      SELECT 1 FROM pg_proc AS procedure
+      WHERE procedure.oid=to_regprocedure('platform.'||function_name||'()')
+        AND 'search_path=pg_catalog, platform'=ANY(procedure.proconfig)
+    ) THEN
+      RAISE EXCEPTION 'Report AI hardened trigger function is missing: platform.%', function_name;
+    END IF;
+  END LOOP;
+
+  IF position(
+       'selectionIds' IN pg_get_functiondef(
+         'platform.guard_report_ai_summary()'::regprocedure
+       )
+     )=0 OR position(
+       'availableFields' IN pg_get_functiondef(
+         'platform.guard_report_ai_summary()'::regprocedure
+       )
+     )=0 OR position(
+       'jsonb_array_elements' IN pg_get_functiondef(
+         'platform.guard_report_ai_summary()'::regprocedure
+       )
+     )=0 THEN
+    RAISE EXCEPTION 'Report AI request-summary whitelist is incomplete';
+  END IF;
+END
+$$;
+
+SELECT (
+  NOT has_function_privilege(:'app_user','platform.guard_report_ai_summary()','EXECUTE')
+  AND NOT has_function_privilege(:'worker_user','platform.guard_report_ai_summary()','EXECUTE')
+  AND NOT has_function_privilege(:'connection_test_user','platform.guard_report_ai_summary()','EXECUTE')
+  AND NOT has_function_privilege(:'app_user','platform.guard_report_ai_run_lifecycle()','EXECUTE')
+  AND NOT has_function_privilege(:'worker_user','platform.guard_report_ai_run_lifecycle()','EXECUTE')
+  AND NOT has_function_privilege(:'connection_test_user','platform.guard_report_ai_run_lifecycle()','EXECUTE')
+  AND NOT has_function_privilege(:'app_user','platform.guard_report_ai_operation_lifecycle()','EXECUTE')
+  AND NOT has_function_privilege(:'worker_user','platform.guard_report_ai_operation_lifecycle()','EXECUTE')
+  AND NOT has_function_privilege(:'connection_test_user','platform.guard_report_ai_operation_lifecycle()','EXECUTE')
+  AND NOT has_function_privilege(:'app_user','platform.guard_report_evidence_artifact()','EXECUTE')
+  AND NOT has_function_privilege(:'worker_user','platform.guard_report_evidence_artifact()','EXECUTE')
+  AND NOT has_function_privilege(:'connection_test_user','platform.guard_report_evidence_artifact()','EXECUTE')
+  AND NOT has_function_privilege(:'app_user','platform.guard_report_insight_artifact()','EXECUTE')
+  AND NOT has_function_privilege(:'worker_user','platform.guard_report_insight_artifact()','EXECUTE')
+  AND NOT has_function_privilege(:'connection_test_user','platform.guard_report_insight_artifact()','EXECUTE')
+) AS report_ai_trigger_privileges_ok
+\gset
+\if :report_ai_trigger_privileges_ok
+\else
+  \echo 'Report AI trigger privilege boundary failed'
+  \quit 1
+\endif
+
+DO $$
+DECLARE share_type_definition text;
+BEGIN
+  IF to_regclass('platform.report_shares') IS NULL OR NOT EXISTS(
+    SELECT 1 FROM pg_class AS relation
+    WHERE relation.oid='platform.report_shares'::regclass
+      AND relation.relrowsecurity AND relation.relforcerowsecurity
+  ) THEN
+    RAISE EXCEPTION 'Report share FORCE RLS boundary is missing';
+  END IF;
+
+  IF EXISTS(
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema='platform' AND table_name='report_shares'
+      AND column_name='share_token'
+  ) OR NOT EXISTS(
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema='platform' AND table_name='report_shares'
+      AND column_name='share_token_hash'
+  ) THEN
+    RAISE EXCEPTION 'Report shares must persist only the token hash';
+  END IF;
+
+  SELECT pg_get_constraintdef(oid) INTO share_type_definition
+  FROM pg_constraint
+  WHERE conrelid='platform.report_shares'::regclass
+    AND position('share_type' IN pg_get_constraintdef(oid))>0;
+  IF share_type_definition IS NULL
+     OR position('INTERNAL_USER' IN share_type_definition)=0
+     OR position('INTERNAL_GROUP' IN share_type_definition)=0
+     OR position('EXTERNAL_ACCOUNT' IN share_type_definition)=0
+     OR position('ANONYMOUS' IN share_type_definition)>0
+     OR position('PUBLIC' IN share_type_definition)>0 THEN
+    RAISE EXCEPTION 'Report share type is not the closed authenticated set';
+  END IF;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema='platform' AND table_name='report_shares'
+      AND column_name='expired_at' AND data_type='timestamp with time zone'
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname='platform' AND indexname='report_shares_expiry_idx'
+      AND indexdef LIKE '%tenant_id, expires_at, id%'
+      AND indexdef LIKE '%expired_at IS NULL%'
+  ) THEN
+    RAISE EXCEPTION 'Report share expiry marker or bounded worker index is missing';
+  END IF;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_policy
+    WHERE polrelid='platform.report_shares'::regclass AND polname='report_shares_read'
+      AND polcmd='r' AND position('report_v2_can_access' IN
+        COALESCE(pg_get_expr(polqual,polrelid),''))>0
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_policy
+    WHERE polrelid='platform.report_shares'::regclass AND polname='report_shares_create'
+      AND polcmd='a' AND position('report_v2_can_access' IN
+        COALESCE(pg_get_expr(polwithcheck,polrelid),''))>0
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_policy
+    WHERE polrelid='platform.report_shares'::regclass AND polname='report_shares_update'
+      AND polcmd='w' AND position('principal_id' IN
+        COALESCE(pg_get_expr(polqual,polrelid),''))>0
+  ) OR EXISTS(
+    SELECT 1 FROM pg_policy
+    WHERE polrelid='platform.report_shares'::regclass AND polcmd='d'
+  ) THEN
+    RAISE EXCEPTION 'Report share locate/authorize/mutate RLS policies are incomplete';
+  END IF;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid='platform.report_shares'::regclass
+      AND tgname='report_share_lifecycle_guard' AND NOT tgisinternal
+      AND position('guard_report_share_lifecycle' IN pg_get_triggerdef(oid))>0
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid='platform.report_versions'::regclass
+      AND tgname='report_v2_versions_definition_immutable' AND NOT tgisinternal
+      AND position('guard_report_v2_version_mutation' IN pg_get_triggerdef(oid))>0
+  ) THEN
+    RAISE EXCEPTION 'Report share/version lifecycle trigger binding is incomplete';
+  END IF;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_proc
+    WHERE oid='platform.guard_report_share_lifecycle()'::regprocedure
+      AND prosecdef AND 'search_path=pg_catalog, platform'=ANY(proconfig)
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_proc
+    WHERE oid='platform.report_share_principal_valid(uuid,text,uuid)'::regprocedure
+      AND prosecdef AND 'search_path=pg_catalog, platform'=ANY(proconfig)
+  ) THEN
+    RAISE EXCEPTION 'Report share trigger/principal helper security attributes are incomplete';
+  END IF;
+END
+$$;
+
+SELECT (
+  NOT has_function_privilege(:'app_user','platform.guard_report_share_lifecycle()','EXECUTE')
+  AND NOT has_function_privilege(:'worker_user','platform.guard_report_share_lifecycle()','EXECUTE')
+  AND NOT has_function_privilege(:'connection_test_user','platform.guard_report_share_lifecycle()','EXECUTE')
+  AND NOT has_function_privilege(:'app_user','platform.report_share_principal_valid(uuid,text,uuid)','EXECUTE')
+  AND NOT has_function_privilege(:'worker_user','platform.report_share_principal_valid(uuid,text,uuid)','EXECUTE')
+  AND NOT has_function_privilege(:'connection_test_user','platform.report_share_principal_valid(uuid,text,uuid)','EXECUTE')
+) AS report_share_trigger_privileges_ok
+\gset
+\if :report_share_trigger_privileges_ok
+\else
+  \echo 'Report share trigger privilege boundary failed'
+  \quit 1
+\endif
+
+SELECT (
+  has_function_privilege(:'app_user','platform.report_v2_can_access(uuid,text[])','EXECUTE')
+  AND has_function_privilege(:'app_user','platform.report_v2_row_can_access(uuid,uuid,uuid,text[])','EXECUTE')
+  AND has_function_privilege(:'worker_user','platform.report_v2_can_access(uuid,text[])','EXECUTE')
+  AND has_function_privilege(:'worker_user','platform.report_v2_row_can_access(uuid,uuid,uuid,text[])','EXECUTE')
+  AND NOT has_function_privilege(:'connection_test_user','platform.report_v2_can_access(uuid,text[])','EXECUTE')
+  AND NOT has_function_privilege(:'connection_test_user','platform.report_v2_row_can_access(uuid,uuid,uuid,text[])','EXECUTE')
+) AS report_v2_helper_privileges_ok
+\gset
+\if :report_v2_helper_privileges_ok
+\else
+  \echo 'Report V2 helper privileges failed'
+  \quit 1
+\endif
+
+DO $$
+DECLARE
+  relation_name text;
 BEGIN
   FOREACH relation_name IN ARRAY ARRAY[
     'metrics','metric_versions','metric_candidates',
-    'reports','report_drafts','report_versions',
     'semantic_question_runs','semantic_releases','semantic_graph_nodes',
     'ads_modeling_jobs'
   ] LOOP
@@ -2947,9 +4316,25 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM platform.permissions
-    WHERE resource_type IN ('METRIC','REPORT','AI')
+    WHERE resource_type IN ('METRIC','AI')
+       OR (resource_type='REPORT' AND NOT (
+         code='report.ai_edit' AND action='AI_EDIT'
+       ))
   ) THEN
     RAISE EXCEPTION 'decommissioned permission resources still exist';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM platform.tenants tenant
+    WHERE tenant.status='ACTIVE' AND tenant.deleted_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM platform.permissions permission
+        WHERE permission.tenant_id=tenant.id
+          AND permission.code='report.ai_edit'
+          AND permission.resource_type='REPORT'
+          AND permission.action='AI_EDIT'
+      )
+  ) THEN
+    RAISE EXCEPTION 'REPORT_AI_EDIT tenant capability is missing';
   END IF;
   IF EXISTS (
     SELECT 1 FROM platform.roles
@@ -3025,6 +4410,163 @@ SELECT (
 \if :dataset_tag_policy_helpers_executable
 \else
   \echo 'dataset tag policy helper runtime privileges are missing'
+  \quit 1
+\endif
+
+DO $$
+BEGIN
+  IF to_regprocedure(
+       'platform.load_report_runtime_query_artifact(uuid,uuid,text)'
+     ) IS NULL
+    OR to_regprocedure(
+       'platform.load_report_runtime_compilation_artifact(uuid,uuid,text)'
+     ) IS NULL
+    OR to_regclass('platform.report_semantic_compilations') IS NULL
+    OR to_regclass('platform.semantic_query_execution_runs') IS NULL
+    OR to_regprocedure('askdata.list_add_to_report_tenants()') IS NULL
+    OR to_regprocedure('askdata.list_report_asset_projection_tenants()') IS NULL THEN
+    RAISE EXCEPTION 'report runtime or report-asset worker boundaries are missing';
+  END IF;
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_class
+    WHERE oid='platform.semantic_query_execution_runs'::regclass
+      AND relrowsecurity AND relforcerowsecurity
+  ) THEN
+    RAISE EXCEPTION 'semantic query execution audit must force RLS';
+  END IF;
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_class
+    WHERE oid='platform.report_semantic_compilations'::regclass
+      AND relrowsecurity AND relforcerowsecurity
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid='platform.report_semantic_compilations'::regclass
+      AND tgname='report_semantic_compilations_immutable' AND NOT tgisinternal
+  ) THEN
+    RAISE EXCEPTION 'report semantic upgrade compilations must be immutable and force RLS';
+  END IF;
+END
+$$;
+
+SELECT (
+  has_function_privilege(
+    :'app_user',
+    'platform.load_report_runtime_query_artifact(uuid,uuid,text)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user',
+    'platform.load_report_runtime_query_artifact(uuid,uuid,text)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user',
+    'platform.load_report_runtime_query_artifact(uuid,uuid,text)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user',
+    'platform.load_report_runtime_compilation_artifact(uuid,uuid,text)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user',
+    'platform.load_report_runtime_compilation_artifact(uuid,uuid,text)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user',
+    'platform.load_report_runtime_compilation_artifact(uuid,uuid,text)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user','askdata.list_add_to_report_tenants()','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user','askdata.list_report_asset_projection_tenants()','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'app_user','askdata.list_report_asset_projection_tenants()','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user','askdata.list_report_asset_projection_tenants()','EXECUTE'
+  )
+  AND has_table_privilege(
+    :'app_user','platform.semantic_query_execution_runs','SELECT,INSERT,UPDATE'
+  )
+  AND has_table_privilege(
+    :'worker_user','platform.semantic_query_execution_runs','SELECT,INSERT,UPDATE'
+  )
+  AND NOT has_table_privilege(
+    :'app_user','platform.semantic_query_execution_runs','DELETE'
+  )
+  AND NOT has_table_privilege(
+    :'worker_user','platform.semantic_query_execution_runs','DELETE'
+  )
+  AND NOT has_table_privilege(
+    :'connection_test_user','platform.semantic_query_execution_runs','SELECT,INSERT,UPDATE,DELETE'
+  )
+  AND has_table_privilege(
+    :'app_user','platform.report_semantic_compilations','SELECT,INSERT'
+  )
+  AND NOT has_table_privilege(
+    :'app_user','platform.report_semantic_compilations','UPDATE,DELETE'
+  )
+  AND NOT has_table_privilege(
+    :'worker_user','platform.report_semantic_compilations','SELECT,INSERT,UPDATE,DELETE'
+  )
+  AND NOT has_table_privilege(
+    :'connection_test_user','platform.report_semantic_compilations','SELECT,INSERT,UPDATE,DELETE'
+  )
+) AS report_runtime_worker_privileges_secure
+\gset
+\if :report_runtime_worker_privileges_secure
+\else
+  \echo 'report runtime or report-asset worker privileges are unsafe'
+  \quit 1
+\endif
+
+DO $$
+BEGIN
+  IF to_regclass('askdata.question_saved_seed_contexts') IS NULL OR NOT EXISTS(
+    SELECT 1 FROM pg_class
+    WHERE oid='askdata.question_saved_seed_contexts'::regclass
+      AND relrowsecurity AND relforcerowsecurity
+  ) THEN
+    RAISE EXCEPTION 'saved-question semantic seed storage must force RLS';
+  END IF;
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='askdata.conversations'::regclass
+      AND conname='conversations_pin_source_check'
+      AND position('SAVED_QUESTION' IN pg_get_constraintdef(oid))>0
+  ) OR NOT EXISTS(
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='askdata.conversations'::regclass
+      AND conname='askdata_conversations_report_source_shape'
+      AND position('saved_question_id' IN pg_get_constraintdef(oid))>0
+  ) THEN
+    RAISE EXCEPTION 'conversation saved-question source discriminant is incomplete';
+  END IF;
+  IF position(
+    'COALESCE(saved_pin_valid,false)' IN
+    pg_get_functiondef('askdata.enforce_conversation_release_pin()'::regprocedure)
+  )=0 THEN
+    RAISE EXCEPTION 'saved-question conversation pin must fail closed on a missing source';
+  END IF;
+END
+$$;
+
+SELECT (
+  has_table_privilege(:'app_user','askdata.question_seed_contexts','SELECT,INSERT')
+  AND has_table_privilege(:'app_user','askdata.question_saved_seed_contexts','SELECT,INSERT')
+  AND NOT has_table_privilege(:'app_user','askdata.question_seed_contexts','UPDATE,DELETE')
+  AND NOT has_table_privilege(:'app_user','askdata.question_saved_seed_contexts','UPDATE,DELETE')
+  AND has_table_privilege(:'worker_user','askdata.question_seed_contexts','SELECT')
+  AND has_table_privilege(:'worker_user','askdata.question_saved_seed_contexts','SELECT')
+  AND NOT has_table_privilege(:'worker_user','askdata.question_saved_seed_contexts','INSERT,UPDATE,DELETE')
+  AND NOT has_table_privilege(
+    :'connection_test_user','askdata.question_saved_seed_contexts','SELECT,INSERT,UPDATE,DELETE'
+  )
+) AS semantic_seed_privileges_secure
+\gset
+\if :semantic_seed_privileges_secure
+\else
+  \echo 'semantic seed table privileges are unsafe'
   \quit 1
 \endif
 

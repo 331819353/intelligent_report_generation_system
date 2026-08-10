@@ -78,6 +78,7 @@ type Store interface {
 	Heartbeat(context.Context, materialization.Claim, time.Duration) (materialization.Claim, error)
 	StartNode(context.Context, materialization.Claim, string) error
 	FinishNode(context.Context, materialization.Claim, string, materialization.NodeResult) error
+	BeginSnapshot(context.Context, materialization.Claim, materialization.SnapshotStart) (materialization.MaterializationSnapshot, error)
 	Fail(context.Context, materialization.Claim, string, string, []materialization.QualityResult) error
 	Activate(context.Context, materialization.Claim, materialization.Activation) (materialization.Materialization, error)
 }

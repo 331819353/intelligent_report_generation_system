@@ -36,19 +36,20 @@ func (options streamOptions) validate() bool {
 }
 
 type PublicEvent struct {
-	EventID      askdata.ID               `json:"eventId"`
-	EventIndex   int                      `json:"eventIndex"`
-	RunVersion   int64                    `json:"runVersion"`
-	State        orchestrator.State       `json:"state"`
-	Type         orchestrator.EventType   `json:"type"`
-	Stage        string                   `json:"stage,omitempty"`
-	Status       orchestrator.EventStatus `json:"status"`
-	Code         string                   `json:"code,omitempty"`
-	ActionHash   askdata.ContentHash      `json:"actionHash,omitempty"`
-	ArtifactHash askdata.ContentHash      `json:"artifactHash,omitempty"`
-	EvidenceIDs  []askdata.ID             `json:"evidenceIds"`
-	DurationMS   *int64                   `json:"durationMs,omitempty"`
-	CreatedAt    time.Time                `json:"createdAt"`
+	EventID       askdata.ID               `json:"eventId"`
+	EventIndex    int                      `json:"eventIndex"`
+	RunVersion    int64                    `json:"runVersion"`
+	State         orchestrator.State       `json:"state"`
+	Type          orchestrator.EventType   `json:"type"`
+	Stage         string                   `json:"stage,omitempty"`
+	Status        orchestrator.EventStatus `json:"status"`
+	Code          string                   `json:"code,omitempty"`
+	ActionHash    askdata.ContentHash      `json:"actionHash,omitempty"`
+	ArtifactHash  askdata.ContentHash      `json:"artifactHash,omitempty"`
+	EvidenceIDs   []askdata.ID             `json:"evidenceIds"`
+	GraphDegraded bool                     `json:"graphDegraded"`
+	DurationMS    *int64                   `json:"durationMs,omitempty"`
+	CreatedAt     time.Time                `json:"createdAt"`
 }
 
 func newPublicEvent(event orchestrator.Event) PublicEvent {
@@ -56,9 +57,24 @@ func newPublicEvent(event orchestrator.Event) PublicEvent {
 		EventID: event.ID, EventIndex: event.Index, RunVersion: event.RunVersion,
 		State: event.State, Type: event.Type, Stage: event.Stage, Status: event.Status,
 		Code: event.Code, ActionHash: event.ActionHash, ArtifactHash: event.ArtifactHash,
-		EvidenceIDs: append([]askdata.ID(nil), event.EvidenceIDs...),
-		DurationMS:  event.DurationMS, CreatedAt: event.CreatedAt,
+		EvidenceIDs:   append([]askdata.ID(nil), event.EvidenceIDs...),
+		GraphDegraded: publicGraphDegraded(event),
+		DurationMS:    event.DurationMS, CreatedAt: event.CreatedAt,
 	}
+}
+
+func publicGraphDegraded(event orchestrator.Event) bool {
+	if event.Type != orchestrator.EventToolResult || len(event.Details) == 0 {
+		return false
+	}
+	var details struct {
+		Tool          string `json:"tool"`
+		GraphDegraded bool   `json:"graphDegraded"`
+	}
+	if json.Unmarshal(event.Details, &details) != nil || details.Tool != "resolve_graph_plan" {
+		return false
+	}
+	return details.GraphDegraded
 }
 
 func (handler *Handler) streamEvents(writer http.ResponseWriter, request *http.Request) {
@@ -182,7 +198,7 @@ func writeSnapshotEvents(
 			return cursor, false
 		}
 		if _, err := fmt.Fprintf(
-			writer, "id: %d\nevent: question.run\ndata: %s\n\n", event.Index, payload,
+			writer, "id: %d\nevent: %s\ndata: %s\n\n", event.Index, publicEventName(event), payload,
 		); err != nil {
 			return cursor, false
 		}
@@ -190,6 +206,19 @@ func writeSnapshotEvents(
 		flusher.Flush()
 	}
 	return cursor, true
+}
+
+func publicEventName(event orchestrator.Event) string {
+	if event.State == orchestrator.StateAnswerVerifying {
+		switch event.Code {
+		case "ANSWER_VERIFYING", "ANSWER_VERIFICATION_FAILED":
+			return "answer.verifying"
+		}
+	}
+	if event.Code == "ANSWER_DEGRADED" {
+		return "answer.degraded"
+	}
+	return "question.run"
 }
 
 func writeStreamError(writer http.ResponseWriter, flusher http.Flusher, code string) {

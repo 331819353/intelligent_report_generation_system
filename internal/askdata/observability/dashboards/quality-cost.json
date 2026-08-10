@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 39,
+  "uid": "askdata-quality-cost",
+  "title": "AskData Quality and Cost",
+  "tags": ["askdata", "quality", "cost"],
+  "refresh": "1m",
+  "time": {"from": "now-24h", "to": "now"},
+  "templating": {
+    "list": [
+      {"name": "domain", "type": "query", "label": "Domain", "query": "label_values(askdata_e2e_strict_accuracy, domain_id)", "includeAll": true},
+      {"name": "release", "type": "query", "label": "Release", "query": "label_values(askdata_e2e_strict_accuracy{domain_id=~\"$domain\"}, release_id)", "includeAll": true},
+      {"name": "model", "type": "query", "label": "Model", "query": "label_values(askdata_e2e_strict_accuracy{domain_id=~\"$domain\",release_id=~\"$release\"}, model)", "includeAll": true}
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "title": "Strict accuracy", "type": "stat",
+      "targets": [{"refId": "A", "expr": "askdata_e2e_strict_accuracy{domain_id=~\"$domain\",release_id=~\"$release\",model=~\"$model\"}"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "thresholds": {"mode": "absolute", "steps": [{"color": "red"}, {"color": "green", "value": 0.96}]}}}
+    },
+    {
+      "id": 2, "title": "Direct answer coverage", "type": "stat",
+      "targets": [{"refId": "A", "expr": "askdata_direct_answer_coverage{domain_id=~\"$domain\",release_id=~\"$release\",model=~\"$model\"}"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+    },
+    {
+      "id": 3, "title": "Clarification rate", "type": "stat",
+      "targets": [{"refId": "A", "expr": "askdata_clarification_rate{domain_id=~\"$domain\",release_id=~\"$release\",model=~\"$model\"}"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+    },
+    {
+      "id": 4, "title": "Failures by stage", "type": "timeseries",
+      "targets": [{"refId": "A", "expr": "sum by(stage,error_code) (rate(askdata_stage_errors_total{domain_id=~\"$domain\"}[5m]))", "legendFormat": "{{stage}} / {{error_code}}"}]
+    },
+    {
+      "id": 5, "title": "Question latency P95", "type": "timeseries",
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum by(le,run_type,outcome) (rate(askdata_question_latency_seconds_bucket{domain_id=~\"$domain\"}[5m])))"}],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 6, "title": "LLM calls per question", "type": "timeseries",
+      "targets": [{"refId": "A", "expr": "sum by(run_type) (rate(askdata_llm_calls_per_question_sum{domain_id=~\"$domain\"}[5m])) / clamp_min(sum by(run_type) (rate(askdata_llm_calls_per_question_count{domain_id=~\"$domain\"}[5m])), 1e-9)"}]
+    },
+    {
+      "id": 7, "title": "Tool calls per question", "type": "timeseries",
+      "targets": [{"refId": "A", "expr": "sum by(run_type) (rate(askdata_tool_calls_per_question_sum{domain_id=~\"$domain\"}[5m])) / clamp_min(sum by(run_type) (rate(askdata_tool_calls_per_question_count{domain_id=~\"$domain\"}[5m])), 1e-9)"}]
+    },
+    {
+      "id": 8, "title": "Cost per answer", "type": "timeseries",
+      "targets": [{"refId": "A", "expr": "sum by(run_type) (rate(askdata_cost_per_answer_sum{domain_id=~\"$domain\"}[5m])) / clamp_min(sum by(run_type) (rate(askdata_cost_per_answer_count{domain_id=~\"$domain\"}[5m])), 1e-9)"}],
+      "fieldConfig": {"defaults": {"unit": "µs"}}
+    },
+    {
+      "id": 9, "title": "Data request volume (30d)", "type": "stat",
+      "targets": [{"refId": "A", "expr": "sum(data_request_volume_30d{domain_id=~\"$domain\"})"}]
+    },
+    {
+      "id": 10, "title": "Data request approval duration", "type": "timeseries",
+      "targets": [{"refId": "A", "expr": "max by(quantile) (data_request_approval_duration_seconds{domain_id=~\"$domain\"})", "legendFormat": "P{{quantile}}"}],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 11, "title": "Data request delivery duration", "type": "timeseries",
+      "targets": [{"refId": "A", "expr": "max by(quantile) (data_request_delivery_duration_seconds{domain_id=~\"$domain\"})", "legendFormat": "P{{quantile}}"}],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 12, "title": "Data request assetization conversion", "type": "stat",
+      "targets": [{"refId": "A", "expr": "max(data_request_assetization_conversion_rate{domain_id=~\"$domain\"})"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+    }
+  ]
+}

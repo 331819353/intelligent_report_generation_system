@@ -253,6 +253,11 @@ func (service *UnderstandingService) Understand(ctx context.Context, request Und
 	if err != nil {
 		return UnderstandingResult{}, err
 	}
+	proposal, err = pinProposalToSelectedDomain(proposal, request.ContextRequest.Scope)
+	if err != nil {
+		return UnderstandingResult{}, fmt.Errorf("%w: %v", ErrInvalidUnderstandingProposal, err)
+	}
+	proposal = normalizeUnderstandingProposal(proposal)
 	if err := proposal.validateAgainst(request, input.AllowedEvidenceRefs); err != nil {
 		return UnderstandingResult{}, err
 	}
@@ -307,9 +312,9 @@ func BuildUnderstandingReviewInput(request UnderstandingRequest) (UnderstandingR
 		EvidenceID: askdata.ID("nlu-rule:" + string(ruleHash)), Kind: askdata.EvidenceKindRule,
 		SourceID: request.ContextRequest.TurnID, ContentHash: ruleHash,
 	}
-	policyRef := askdata.EvidenceRef{
-		EvidenceID: askdata.ID("nlu-policy:" + string(request.ContextRequest.Scope.PolicyHash)), Kind: askdata.EvidenceKindPolicy,
-		SourceID: request.ContextRequest.Scope.Release.ReleaseID, ContentHash: request.ContextRequest.Scope.PolicyHash,
+	policyRef, err := selectedDomainPolicyEvidence(request.ContextRequest.Scope)
+	if err != nil {
+		return UnderstandingReviewInput{}, fmt.Errorf("%w: selected domain", ErrInvalidUnderstandingRequest)
 	}
 	for _, ref := range []askdata.EvidenceRef{contextRef, ruleRef, policyRef} {
 		if err := ref.Validate(); err != nil {
@@ -348,12 +353,16 @@ func BuildUnderstandingReviewInput(request UnderstandingRequest) (UnderstandingR
 		Rules    RuleParseResult     `json:"rules"`
 		Evidence askdata.EvidenceRef `json:"evidence"`
 	}{request.ContextRequest.Rules, ruleRef}
+	selectedDomainID, err := selectedDomainFromScope(request.ContextRequest.Scope)
+	if err != nil {
+		return UnderstandingReviewInput{}, fmt.Errorf("%w: selected domain", ErrInvalidUnderstandingRequest)
+	}
 	policyPayload := struct {
-		DomainIDs  []askdata.ID        `json:"domainIds"`
+		DomainID   askdata.ID          `json:"domainId"`
 		Release    askdata.ReleaseRef  `json:"release"`
 		PolicyHash askdata.ContentHash `json:"policyHash"`
 		Evidence   askdata.EvidenceRef `json:"evidence"`
-	}{append([]askdata.ID(nil), request.ContextRequest.Scope.DomainIDs...), request.ContextRequest.Scope.Release, request.ContextRequest.Scope.PolicyHash, policyRef}
+	}{selectedDomainID, request.ContextRequest.Scope.Release, request.ContextRequest.Scope.PolicyHash, policyRef}
 
 	facts := make([]cognition.PromptFact, 0, 4)
 	for _, item := range []struct {
@@ -666,6 +675,9 @@ func (request UnderstandingRequest) validate() error {
 	if err := request.ContextRequest.validate(); err != nil {
 		return fmt.Errorf("%w: context request: %v", ErrInvalidUnderstandingRequest, err)
 	}
+	if _, err := selectedDomainFromScope(request.ContextRequest.Scope); err != nil {
+		return fmt.Errorf("%w: selected domain", ErrInvalidUnderstandingRequest)
+	}
 	if err := request.Context.Validate(request.ContextRequest); err != nil {
 		return fmt.Errorf("%w: context: %v", ErrInvalidUnderstandingRequest, err)
 	}
@@ -847,17 +859,13 @@ func (proposal UnderstandingProposal) validateAgainst(request UnderstandingReque
 	if err := validateCitations(proposal.EvidenceRefs, proposal.EvidenceRefs, allowedSet); err != nil {
 		return err
 	}
-	allowedDomains := map[askdata.ID]struct{}{}
-	for _, id := range request.ContextRequest.Scope.DomainIDs {
-		allowedDomains[id] = struct{}{}
-	}
-	for index, hypothesis := range proposal.Understanding.DomainHypotheses {
-		if _, authorized := allowedDomains[hypothesis.DomainID]; !authorized {
-			return fmt.Errorf("%w: domainHypotheses[%d] is outside policy scope", ErrInvalidUnderstandingProposal, index)
-		}
+	for _, hypothesis := range proposal.Understanding.DomainHypotheses {
 		if err := validateCitations(hypothesis.EvidenceRefs, proposal.EvidenceRefs, allowedSet); err != nil {
 			return err
 		}
+	}
+	if err := validatePinnedSelectedDomain(proposal.Understanding, request.ContextRequest.Scope); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidUnderstandingProposal, err)
 	}
 	for _, conflict := range proposal.Conflicts {
 		if err := validateCitations(conflict.EvidenceRefs, proposal.EvidenceRefs, allowedSet); err != nil {
@@ -951,12 +959,15 @@ func validateAuthoritativeUnderstanding(proposal UnderstandingProposal, request 
 	}
 	if rules.Ranking != nil {
 		if understanding.Limit == nil || *understanding.Limit != rules.Ranking.Limit ||
-			!hasOrderingRule(understanding.Ordering, rules.Ranking.Text, rules.Ranking.Span, rules.Ranking.Direction) {
+			!hasOrderingRule(
+				understanding.Ordering, rules.Ranking.Text, rules.Ranking.Span,
+				rules.Ranking.Direction, rules.Ranking.RankBy,
+			) {
 			return fmt.Errorf("%w: deterministic ranking evidence was changed or omitted", ErrInvalidUnderstandingProposal)
 		}
 	}
 	for _, rule := range rules.Sorts {
-		if !hasOrderingRule(understanding.Ordering, rule.Text, rule.Span, rule.Direction) {
+		if !hasOrderingRule(understanding.Ordering, rule.Text, rule.Span, rule.Direction, "") {
 			return fmt.Errorf("%w: deterministic sort evidence was changed or omitted", ErrInvalidUnderstandingProposal)
 		}
 	}
@@ -1130,10 +1141,17 @@ func residualRune(value rune) bool {
 	return !unicode.IsSpace(value) && !unicode.IsPunct(value) && !unicode.IsSymbol(value) && !unicode.IsControl(value)
 }
 
-func hasOrderingRule(values []OrderingMention, text string, span Span, direction SortDirection) bool {
+func hasOrderingRule(
+	values []OrderingMention,
+	text string,
+	span Span,
+	direction SortDirection,
+	rankBy RankBy,
+) bool {
 	for _, value := range values {
 		if value.Span == span {
-			return value.Text == text && value.Direction == direction
+			return value.Text == text && value.Direction == direction &&
+				(rankBy == "" || value.RankBy == rankBy)
 		}
 	}
 	return false

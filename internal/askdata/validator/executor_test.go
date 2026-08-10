@@ -84,7 +84,7 @@ func TestExecutorReturnsRowsInProcessAndAuditsOnlyHashes(t *testing.T) {
 		context.Context, compiler.QueryArtifact, ValidationArtifact, ExecutorOptions,
 	) ([]executedPlan, error) {
 		return []executedPlan{testExecutedPlan(t, compiler.QueryRoleCurrent,
-			[]ResultColumn{{Name: "net_sales", DataTypeOID: pgtype.TextOID}}, [][]any{{secret}})}, nil
+			[]ExecutionColumn{{Name: "net_sales", DataTypeOID: pgtype.TextOID}}, [][]any{{secret}})}, nil
 	}}
 	audit := &recordingSemanticAudit{}
 	executor, err := newExecutorWithRunner(runner, audit, DefaultExecutorOptions())
@@ -183,7 +183,7 @@ func TestExecutorDiscardsSuccessfulRowsWhenCompletionAuditFails(t *testing.T) {
 		context.Context, compiler.QueryArtifact, ValidationArtifact, ExecutorOptions,
 	) ([]executedPlan, error) {
 		return []executedPlan{testExecutedPlan(t, compiler.QueryRoleCurrent,
-			[]ResultColumn{{Name: "net_sales", DataTypeOID: pgtype.TextOID}}, [][]any{{"must-not-return"}})}, nil
+			[]ExecutionColumn{{Name: "net_sales", DataTypeOID: pgtype.TextOID}}, [][]any{{"must-not-return"}})}, nil
 	}}
 	audit := &recordingSemanticAudit{finishErr: errors.New("audit unavailable")}
 	executor, err := newExecutorWithRunner(runner, audit, DefaultExecutorOptions())
@@ -206,7 +206,7 @@ func TestExecutorRejectsRowsBeyondValidatedMaximum(t *testing.T) {
 		context.Context, compiler.QueryArtifact, ValidationArtifact, ExecutorOptions,
 	) ([]executedPlan, error) {
 		return []executedPlan{testExecutedPlan(t, compiler.QueryRoleCurrent,
-			[]ResultColumn{{Name: "net_sales", DataTypeOID: pgtype.Int8OID}}, rows)}, nil
+			[]ExecutionColumn{{Name: "net_sales", DataTypeOID: pgtype.Int8OID}}, rows)}, nil
 	}}
 	audit := &recordingSemanticAudit{}
 	executor, err := newExecutorWithRunner(runner, audit, DefaultExecutorOptions())
@@ -322,12 +322,12 @@ func validatedExecutionRequest(t *testing.T) (ExecutionRequest, context.Context)
 func testExecutedPlan(
 	t *testing.T,
 	role compiler.QueryRole,
-	columns []ResultColumn,
+	columns []ExecutionColumn,
 	rows [][]any,
 ) executedPlan {
 	t.Helper()
 	result := executedPlan{
-		role: role, columns: append([]ResultColumn(nil), columns...), rows: cloneResultRows(rows),
+		role: role, columns: append([]ExecutionColumn(nil), columns...), rows: cloneResultRows(rows),
 		canonicalRows: make([][]canonicalCell, len(rows)),
 	}
 	for rowIndex, row := range rows {

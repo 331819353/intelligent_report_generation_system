@@ -18,6 +18,9 @@ type ToolOutput[T any] struct {
 	Result       T
 	EvidenceRefs []askdata.EvidenceRef
 	MadeProgress bool
+	// QueryScanBytes is populated only by governed warehouse query handlers.
+	// It never comes from a model or a client-supplied tool argument.
+	QueryScanBytes int64
 }
 
 type SearchSemanticObjectsInput struct {
@@ -178,6 +181,7 @@ type ResolveGraphPlanResult struct {
 	RelationshipIDs []askdata.ID        `json:"relationshipIds"`
 	Risks           []GraphRisk         `json:"risks"`
 	FallbackUsed    bool                `json:"fallbackUsed"`
+	GraphDegraded   bool                `json:"graphDegraded"`
 	EvidenceIDs     []askdata.ID        `json:"evidenceIds"`
 }
 
@@ -628,7 +632,7 @@ func catalogRegistrations(handlers Handlers) ([]toolRegistration, error) {
 		}
 	}
 	if err := add(ToolResolveGraphPlan, PermissionGraphResolve, standard, 3_000, 128<<10,
-		[]string{"graphPlanHash", "modelVersionIds", "relationshipIds", "risks", "fallbackUsed", "evidenceIds"},
+		[]string{"graphPlanHash", "modelVersionIds", "relationshipIds", "risks", "fallbackUsed", "graphDegraded", "evidenceIds"},
 		wrapTypedHandler(handlers.ResolveGraphPlan, bundleInput, nil)); err != nil {
 		return nil, err
 	}
@@ -712,7 +716,7 @@ func wrapTypedHandler[I any, R resultContract](
 		}
 		return toolExecutionOutput{
 			result: result, evidenceRefs: append([]askdata.EvidenceRef(nil), output.EvidenceRefs...),
-			madeProgress: output.MadeProgress,
+			madeProgress: output.MadeProgress, queryScanBytes: output.QueryScanBytes,
 		}, nil
 	}
 }
@@ -776,7 +780,7 @@ func resultFieldSchema(field string) (any, error) {
 	integerSchema := map[string]any{"type": "integer"}
 	objectArray := map[string]any{"type": "array", "items": map[string]any{"type": "object"}}
 	switch field {
-	case "truncated", "fallbackUsed", "valid", "allowed", "safe", "noDataConfirmed", "covered", "equivalent":
+	case "truncated", "fallbackUsed", "graphDegraded", "valid", "allowed", "safe", "noDataConfirmed", "covered", "equivalent":
 		return map[string]any{"type": "boolean"}, nil
 	case "planCount", "maxRows", "maxPlanRows", "leftCount", "rightCount", "joinedCount",
 		"fanoutPermillion", "rowCount", "count", "distinctCount", "differenceCount", "confidencePermillion":

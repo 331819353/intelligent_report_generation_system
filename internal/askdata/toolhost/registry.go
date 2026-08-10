@@ -83,6 +83,33 @@ func (allowance BudgetAllowance) allows(charge BudgetCharge) bool {
 		allowance.ValidationQueriesRemaining >= charge.ValidationQueries
 }
 
+// AllowsTool exposes the immutable catalog cost categories to security
+// boundaries that must independently reject a forged or stale allowlist.
+func (allowance BudgetAllowance) AllowsTool(tool ToolName) bool {
+	if allowance.Validate() != nil {
+		return false
+	}
+	charge, known := RequiredBudgetCharge(tool)
+	return known && allowance.allows(charge)
+}
+
+func RequiredBudgetCharge(tool ToolName) (BudgetCharge, bool) {
+	charge := BudgetCharge{ToolCalls: 1}
+	switch tool {
+	case ToolExecuteQueryPlan:
+		charge.FormalQueries = 1
+	case ToolCompareCandidateResults:
+		charge.FormalQueries = 2
+	case ToolProbeJoinCardinality, ToolExecuteValidationQuery:
+		charge.ValidationQueries = 1
+	default:
+		if !IsKnownTool(tool) {
+			return BudgetCharge{}, false
+		}
+	}
+	return charge, true
+}
+
 type AuthorizationContext struct {
 	Scope       askdata.PolicyScope
 	DomainID    askdata.ID
@@ -165,6 +192,7 @@ type Invocation struct {
 type Execution struct {
 	DefinitionHash askdata.ContentHash `json:"definitionHash"`
 	Charge         BudgetCharge        `json:"charge"`
+	QueryScanBytes int64               `json:"queryScanBytes,omitempty"`
 	DurationMS     int64               `json:"durationMs"`
 	TimedOut       bool                `json:"timedOut"`
 	Response       Response            `json:"response"`
@@ -172,7 +200,9 @@ type Execution struct {
 
 func (execution Execution) Validate() error {
 	zeroCharge := execution.Charge == (BudgetCharge{})
-	if execution.DefinitionHash.Validate() != nil || execution.DurationMS < 0 || execution.DurationMS > 600_000 ||
+	if execution.DefinitionHash.Validate() != nil || execution.QueryScanBytes < 0 || execution.QueryScanBytes > 1<<50 ||
+		execution.QueryScanBytes > 0 && execution.Charge.FormalQueries == 0 && execution.Charge.ValidationQueries == 0 ||
+		execution.DurationMS < 0 || execution.DurationMS > 600_000 ||
 		execution.Response.Validate() != nil || (!zeroCharge && execution.Charge.Validate() != nil) ||
 		execution.Response.Status == ResponseSuccess && zeroCharge ||
 		execution.Response.Status == ResponseFailed && zeroCharge ||
@@ -183,9 +213,10 @@ func (execution Execution) Validate() error {
 }
 
 type toolExecutionOutput struct {
-	result       resultContract
-	evidenceRefs []askdata.EvidenceRef
-	madeProgress bool
+	result         resultContract
+	evidenceRefs   []askdata.EvidenceRef
+	madeProgress   bool
+	queryScanBytes int64
 }
 
 type resultContract interface {
@@ -336,6 +367,19 @@ func (registry *Registry) Execute(ctx context.Context, invocation Invocation) (E
 			DurationMS: duration, TimedOut: timedOut, Response: response,
 		}, nil
 	}
+	if output.queryScanBytes < 0 || output.queryScanBytes > 1<<50 ||
+		output.queryScanBytes > 0 && definition.Charge.FormalQueries == 0 && definition.Charge.ValidationQueries == 0 {
+		response := failedToolResponse(
+			invocation.Call, ResponseFailed, "TOOL_RESULT_REJECTED", "工具结果未通过脱敏合同校验。", false,
+		)
+		if response.Validate() != nil {
+			return Execution{}, ErrInvalidRegistry
+		}
+		return Execution{
+			DefinitionHash: definition.DefinitionHash, Charge: definition.Charge,
+			DurationMS: duration, Response: response,
+		}, nil
+	}
 	result, evidence, err := sanitizeToolResult(output, definition.MaxResultBytes)
 	if err != nil {
 		response := failedToolResponse(
@@ -359,7 +403,7 @@ func (registry *Registry) Execute(ctx context.Context, invocation Invocation) (E
 	}
 	return Execution{
 		DefinitionHash: definition.DefinitionHash, Charge: definition.Charge,
-		DurationMS: duration, Response: response,
+		QueryScanBytes: output.queryScanBytes, DurationMS: duration, Response: response,
 	}, nil
 }
 

@@ -261,7 +261,7 @@ func graphProjectionFixture(t *testing.T) ProjectionSnapshot {
 				ToType: ObjectTypeSemanticModel, To: modelLines,
 				RelationshipVersionID: "70000000-0000-4000-8000-000000000001",
 				JoinType:              registry.JoinInner, Cardinality: registry.CardinalityOneToMany,
-				FanoutPolicy: registry.FanoutCertifiedPre, Certified: true,
+				FanoutPolicy: registry.FanoutPreAggregateRequired, Certified: true,
 			},
 		},
 	}

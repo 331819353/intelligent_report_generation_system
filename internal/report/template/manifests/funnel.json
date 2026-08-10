@@ -1,0 +1,32 @@
+{
+  "type": "funnel",
+  "version": "1.0.0",
+  "renderer": "ECHARTS",
+  "displayName": "漏斗图",
+  "category": "CHART",
+  "minSize": { "w": 4, "h": 4 },
+  "recommendedSize": { "w": 6, "h": 6 },
+  "dataContract": {
+    "dimensions": { "min": 1, "max": 1 },
+    "measures": { "min": 1, "max": 1 },
+    "timeField": { "required": false },
+    "roles": ["CATEGORY", "VALUE", "COLOR", "LABEL", "TOOLTIP"]
+  },
+  "stackingRequiresAdditive": false,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [],
+    "properties": {
+	  "title": { "type": "string" },
+	  "subtitle": { "type": "string" },
+      "showLegend": { "type": "boolean" },
+      "showLabel": { "type": "boolean" },
+      "colorPaletteRef": { "type": "string" },
+      "animation": { "type": "boolean" }
+    }
+  },
+  "defaultOptions": { "showLegend": false, "showLabel": true, "animation": true },
+  "mobilePolicy": { "supported": true, "defaultLegendMode": "HIDDEN", "labelDegradation": "ELLIPSIS" },
+  "supportedInteractions": ["CLICK_FILTER", "DRILL_DOWN"]
+}

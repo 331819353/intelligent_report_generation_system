@@ -391,7 +391,11 @@ func (store *PostgresStore) Fail(
 		if err := assertLeaseTx(ctx, tx, claim); err != nil {
 			return err
 		}
-		if err := insertQualityTx(ctx, tx, claim, "", quality); err != nil {
+		materializationID, err := failSnapshotTx(ctx, tx, claim)
+		if err != nil {
+			return err
+		}
+		if err := insertQualityTx(ctx, tx, claim, materializationID, quality); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE platform.build_node_runs SET
@@ -433,6 +437,7 @@ func (store *PostgresStore) Activate(
 	if activation.RelationKind != claim.Plan.Target.RelationKind ||
 		!hashPattern.MatchString(activation.SchemaHash) ||
 		!hashPattern.MatchString(activation.SnapshotHash) ||
+		activation.SnapshotVersion != claim.ID ||
 		activation.RowCount < 0 || activation.SizeBytes < 0 {
 		return Materialization{}, ErrInvalidRequest
 	}
@@ -487,8 +492,22 @@ func (store *PostgresStore) Activate(
 		if totalNodes != len(claim.Plan.Nodes) || incompleteNodes != 0 {
 			return ErrInvalidTransition
 		}
+		snapshot, err := loadSnapshotByBuildRunTx(ctx, tx, claim.ID)
+		if err != nil || snapshot.SnapshotCompletedAt != nil ||
+			snapshot.SchemaHash != activation.SchemaHash ||
+			snapshot.SnapshotVersion != activation.SnapshotVersion {
+			if err != nil {
+				return err
+			}
+			return ErrInvalidTransition
+		}
 		if gateFailed {
-			if err := insertQualityTx(ctx, tx, claim, "", activation.Quality); err != nil {
+			if err := insertQualityTx(
+				ctx, tx, claim, snapshot.MaterializationID, activation.Quality,
+			); err != nil {
+				return err
+			}
+			if _, err := failSnapshotTx(ctx, tx, claim); err != nil {
 				return err
 			}
 			tag, err := tx.Exec(ctx, `UPDATE platform.dataset_build_runs SET
@@ -519,36 +538,54 @@ func (store *PostgresStore) Activate(
 		previousErr := tx.QueryRow(ctx, `SELECT build_run_id::text,physical_schema
 			FROM platform.dataset_materializations
 			WHERE dataset_id=$1 AND status='ACTIVE'
-			FOR UPDATE`, claim.DatasetID).Scan(&previousBuildRunID, &previousPhysicalSchema)
+			FOR UPDATE`, claim.DatasetID).
+			Scan(&previousBuildRunID, &previousPhysicalSchema)
 		if previousErr != nil && !errors.Is(previousErr, pgx.ErrNoRows) {
 			return previousErr
 		}
 
 		if _, err := tx.Exec(ctx, `UPDATE platform.dataset_materializations SET
 			status='RETIRED',retired_at=now()
-			WHERE dataset_id=$1 AND status='ACTIVE'`, claim.DatasetID); err != nil {
+			WHERE dataset_id=$1 AND status='ACTIVE' AND id<>$2`,
+			claim.DatasetID, snapshot.MaterializationID); err != nil {
 			return err
 		}
 		watermark := activation.Watermark
 		if len(watermark) == 0 {
 			watermark = json.RawMessage(`{}`)
 		}
-		row := tx.QueryRow(ctx, `INSERT INTO platform.dataset_materializations(
-			tenant_id,dataset_id,dataset_version_id,build_run_id,layer,status,
-			relation_kind,refresh_mode,physical_schema,physical_name,
-			published_schema,published_name,schema_hash,snapshot_hash,
-			row_count,size_bytes,watermark_json,activated_at
-		) VALUES(
-			$1,$2,$3,$4,$5,'ACTIVE',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now()
-		)
-		RETURNING id::text,tenant_id::text,dataset_id::text,dataset_version_id::text,
+		var currentStatus string
+		if err := tx.QueryRow(ctx, `SELECT status
+			FROM platform.dataset_materializations
+			WHERE id=$1 FOR UPDATE`, snapshot.MaterializationID).Scan(&currentStatus); err != nil {
+			return err
+		}
+		var row pgx.Row
+		if currentStatus == "BUILDING" {
+			row = tx.QueryRow(ctx, `UPDATE platform.dataset_materializations SET
+				status='ACTIVE',snapshot_hash=$1,row_count=$2,size_bytes=$3,
+				watermark_json=$4,activated_at=now()
+				WHERE id=$5 AND build_run_id=$6 AND status='BUILDING'
+				RETURNING id::text,tenant_id::text,dataset_id::text,dataset_version_id::text,
+				build_run_id::text,layer,status,physical_schema,physical_name,
+				published_schema,published_name,schema_hash,snapshot_hash,row_count,size_bytes,activated_at`,
+				activation.SnapshotHash, activation.RowCount, activation.SizeBytes,
+				watermark, snapshot.MaterializationID, claim.ID)
+		} else if currentStatus == "ACTIVE" {
+			row = tx.QueryRow(ctx, `UPDATE platform.dataset_materializations SET
+				build_run_id=$1,refresh_mode=$2,physical_schema=$3,physical_name=$4,
+				snapshot_hash=$5,row_count=$6,size_bytes=$7,
+				watermark_json=$8,activated_at=now()
+				WHERE id=$9 AND status='ACTIVE' AND schema_hash=$10
+				RETURNING id::text,tenant_id::text,dataset_id::text,dataset_version_id::text,
 			build_run_id::text,layer,status,physical_schema,physical_name,
-			published_schema,published_name,schema_hash,snapshot_hash,row_count,size_bytes,activated_at`,
-			claim.TenantID, claim.DatasetID, claim.DatasetVersionID, claim.ID, claim.Layer,
-			activation.RelationKind, claim.Mode, activation.Physical.Schema, activation.Physical.Name,
-			activation.Physical.PublishedSchema, activation.Physical.PublishedName,
-			activation.SchemaHash, activation.SnapshotHash, activation.RowCount,
-			activation.SizeBytes, watermark)
+				published_schema,published_name,schema_hash,snapshot_hash,row_count,size_bytes,activated_at`,
+				claim.ID, claim.Mode, activation.Physical.Schema, activation.Physical.Name,
+				activation.SnapshotHash, activation.RowCount, activation.SizeBytes,
+				watermark, snapshot.MaterializationID, activation.SchemaHash)
+		} else {
+			return ErrInvalidTransition
+		}
 		if err := row.Scan(
 			&materialization.ID, &materialization.TenantID, &materialization.DatasetID,
 			&materialization.DatasetVersionID, &materialization.BuildRunID,
@@ -557,6 +594,11 @@ func (store *PostgresStore) Activate(
 			&materialization.Physical.PublishedSchema, &materialization.Physical.PublishedName,
 			&materialization.SchemaHash, &materialization.SnapshotHash,
 			&materialization.RowCount, &materialization.SizeBytes, &materialization.ActivatedAt,
+		); err != nil {
+			return err
+		}
+		if err := completeSnapshotTx(
+			ctx, tx, claim, activation, snapshotQualityStatus(activation.Quality),
 		); err != nil {
 			return err
 		}

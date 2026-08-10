@@ -100,7 +100,7 @@ func TestJoinPathRiskAndGraphPlanHashesAreDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if path.Allowed || !reflect.DeepEqual(path.RiskCodes, []JoinRiskCode{JoinRiskFanoutBlocked, JoinRiskOneToMany}) {
+	if path.Allowed || !reflect.DeepEqual(path.RiskCodes, []JoinRiskCode{JoinRiskOneToManyBlock}) {
 		t.Fatalf("unexpected path risk: %#v", path)
 	}
 
@@ -155,8 +155,48 @@ func TestJoinPathRiskDoesNotDependOnRelationshipOrientation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(path.RiskCodes, []JoinRiskCode{JoinRiskOneToMany}) {
+	if !reflect.DeepEqual(path.RiskCodes, []JoinRiskCode{JoinRiskManyToOneSafe}) {
 		t.Fatalf("orientation-dependent join risk: %#v", path.RiskCodes)
+	}
+}
+
+func TestJoinPathRiskCodesCoverCardinalityFanoutMatrix(t *testing.T) {
+	tests := []struct {
+		cardinality registry.Cardinality
+		policy      registry.FanoutPolicy
+		code        JoinRiskCode
+		allowed     bool
+	}{
+		{registry.CardinalityOneToOne, registry.FanoutSafe, JoinRiskOneToOneSafe, true},
+		{registry.CardinalityOneToOne, registry.FanoutBlock, JoinRiskOneToOneBlock, false},
+		{registry.CardinalityManyToOne, registry.FanoutSafe, JoinRiskManyToOneSafe, true},
+		{registry.CardinalityManyToOne, registry.FanoutBlock, JoinRiskManyToOneBlock, false},
+		{registry.CardinalityOneToMany, registry.FanoutPreAggregateRequired, JoinRiskOneToManyPreAggregateRequired, true},
+		{registry.CardinalityOneToMany, registry.FanoutBlock, JoinRiskOneToManyBlock, false},
+		{registry.CardinalityManyToMany, registry.FanoutBridgeRequired, JoinRiskManyToManyBridgeRequired, true},
+		{registry.CardinalityManyToMany, registry.FanoutBlock, JoinRiskManyToManyBlock, false},
+	}
+	for _, test := range tests {
+		path, err := NewJoinPath([]JoinStep{{
+			Hop: 1, RelationshipVersionID: "relationship-matrix@v1",
+			FromModelVersionID: "model-left@v1", ToModelVersionID: "model-right@v1",
+			Direction: TraversalForward, JoinType: registry.JoinInner,
+			Cardinality: test.cardinality, FanoutPolicy: test.policy,
+		}})
+		if err != nil {
+			t.Fatalf("%s/%s: %v", test.cardinality, test.policy, err)
+		}
+		if path.Allowed != test.allowed || !reflect.DeepEqual(path.RiskCodes, []JoinRiskCode{test.code}) {
+			t.Errorf("%s/%s path = %#v", test.cardinality, test.policy, path)
+		}
+	}
+	if _, err := NewJoinPath([]JoinStep{{
+		Hop: 1, RelationshipVersionID: "relationship-invalid@v1",
+		FromModelVersionID: "model-left@v1", ToModelVersionID: "model-right@v1",
+		Direction: TraversalForward, JoinType: registry.JoinInner,
+		Cardinality: registry.CardinalityManyToMany, FanoutPolicy: registry.FanoutSafe,
+	}}); err == nil {
+		t.Fatal("invalid cardinality/fanout matrix was accepted")
 	}
 }
 

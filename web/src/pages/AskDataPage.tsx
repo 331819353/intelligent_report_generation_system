@@ -4,7 +4,7 @@ import {
   ChartBarHorizontal,
   ChatCircleDots,
   CheckCircle,
-  ClockCounterClockwise,
+  ClipboardText,
   Database,
   LinkSimple,
   MagnifyingGlass,
@@ -23,10 +23,35 @@ import { init, use as registerEChartsComponents } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { AppShell } from '../components/AppShell'
+import { ClarificationCard } from '../components/ask-data/ClarificationCard'
+import { ConversationOutcome } from '../components/ask-data/ConversationOutcome'
+import { ConversationProgress } from '../components/ask-data/ConversationProgress'
+import { EvidencePanel } from '../components/ask-data/EvidencePanel'
+import { FeedbackDialog } from '../components/ask-data/FeedbackDialog'
+import { ResultWorkspace } from '../components/ask-data/ResultWorkspace'
+import { ReleaseDriftCard } from '../components/ask-data/ReleaseDriftCard'
+import { ReleaseDriftEvidencePanel } from '../components/ask-data/ReleaseDriftEvidencePanel'
+import { latestQuestionState } from '../components/ask-data/conversation-progress'
+import { questionResultReady } from '../components/ask-data/result-presentation'
+import { useAskDataQuestion } from '../hooks/use-ask-data-question'
+import { MyDataRequests } from '../askdata/datarequest/MyDataRequests'
+import type { DataRequestPrefill } from '../askdata/datarequest/DataRequestDialog'
+import {
+  mapAskDataError,
+  questionAPI,
+  type ClarificationOption,
+  type QuestionFeedbackSubmission,
+  type QuestionResult,
+  type QuestionRun,
+  type QuestionRunEvent,
+  type QuestionRunState,
+  type ReleaseDrift,
+} from '../lib/ask-data-api'
 
-type RunPhase = 'idle' | 'loading' | 'complete'
-type Feedback = 'helpful' | 'unhelpful' | 'report' | null
-type Session = { id: string; title: string; meta: string; status: 'complete' | 'attention' }
+type WorkbenchMode = 'idle' | 'snapshot-release-drift' | 'snapshot-clarification' | 'snapshot-running' | 'snapshot-complete' | 'snapshot-result' | 'snapshot-answer-degraded' | 'snapshot-scope-detail' | 'live'
+type WorkspaceView = 'ask' | 'requests'
+type Feedback = 'helpful' | 'report' | null
+type Session = { id: string; title: string; meta: string; status: 'release-drift' | 'clarification' | 'running' | 'complete' | 'attention' }
 type SessionGroup = { label: string; items: Session[] }
 type Contribution = { channel: string; delta: number; impact: number }
 type EvidenceSectionProps = {
@@ -38,13 +63,15 @@ type EvidenceSectionProps = {
   children: ReactNode
 }
 
-const DEFAULT_QUESTION = '哪些渠道导致本月毛利率下降？'
+const DEFAULT_QUESTION = '本月销售额是多少？'
+const MARGIN_QUESTION = '哪些渠道导致本月毛利率下降？'
 
 const SESSION_GROUPS: SessionGroup[] = [
   {
     label: '今天',
     items: [
-      { id: 'margin', title: '本月毛利率下降原因', meta: '刚刚 · 已完成', status: 'complete' },
+      { id: 'sales', title: DEFAULT_QUESTION, meta: '10:38 · 待确认', status: 'release-drift' },
+      { id: 'margin', title: MARGIN_QUESTION, meta: '10:35 · 已完成', status: 'complete' },
       { id: 'revenue', title: '华东区收入同比变化', meta: '10:32 · 已完成', status: 'complete' },
       { id: 'inventory', title: '冰箱库存周转异常', meta: '09:18 · 待确认', status: 'attention' },
     ],
@@ -73,6 +100,280 @@ const CONTRIBUTIONS: Contribution[] = [
 ]
 
 const EVIDENCE_SECTIONS = ['intent', 'policy', 'lineage', 'quality'] as const
+
+const DEMO_RELEASE_DRIFT: ReleaseDrift = {
+  conversationId: '00000000-0000-4000-8000-000000000121',
+  pinnedAt: '2026-08-08T10:15:00+08:00',
+  previous: {
+    releaseId: '00000000-0000-4000-8000-000000000123', contentHash: 'b'.repeat(64),
+    semanticVersion: '2026.08', status: 'SUPERSEDED',
+  },
+  active: {
+    releaseId: '00000000-0000-4000-8000-000000000124', contentHash: 'c'.repeat(64),
+    semanticVersion: '2026.08.1', status: 'ACTIVE',
+  },
+  changes: [
+    {
+      objectType: 'METRIC', objectId: '00000000-0000-4000-8000-000000000125', name: '已支付订单销售额',
+      fromVersion: 'v3.2', toVersion: 'v3.3', changeKind: 'UPDATED', summary: '退款扣除规则更新',
+    },
+    {
+      objectType: 'DIMENSION', objectId: '00000000-0000-4000-8000-000000000126', name: '销售渠道',
+      fromVersion: 'v2.8', toVersion: 'v2.9', changeKind: 'UPDATED', summary: '渠道归类规则更新',
+    },
+  ],
+}
+
+const DEMO_PROGRESS_STATES: QuestionRunState[] = [
+  'RECEIVED',
+  'AUTHORIZED',
+  'UNDERSTANDING',
+  'RETRIEVING',
+  'BINDING',
+  'GRAPH_VALIDATING',
+  'IR_READY',
+  'EXECUTING',
+  'RESULT_VERIFYING',
+]
+
+const DEMO_RUNNING_EVENTS: QuestionRunEvent[] = DEMO_PROGRESS_STATES.map((state, index) => ({
+  eventId: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+  eventIndex: index + 1,
+  runVersion: index + 1,
+  state,
+  type: 'STATE_TRANSITION',
+  status: state === 'RESULT_VERIFYING' ? 'STARTED' : 'SUCCEEDED',
+  evidenceIds: [],
+	graphDegraded: false,
+  createdAt: `2026-08-06T10:38:${String(21 + index).padStart(2, '0')}+08:00`,
+}))
+
+const DEMO_COMPLETE_EVENTS: QuestionRunEvent[] = [
+  ...DEMO_RUNNING_EVENTS.map(event => event.state === 'RESULT_VERIFYING' ? { ...event, status: 'SUCCEEDED' as const } : event),
+  {
+    eventId: '00000000-0000-4000-8000-000000000010',
+    eventIndex: 10,
+    runVersion: 10,
+    state: 'ANSWERED',
+    type: 'STATE_TRANSITION',
+    status: 'SUCCEEDED',
+    evidenceIds: [],
+		graphDegraded: false,
+    createdAt: '2026-08-06T10:38:31+08:00',
+  },
+]
+
+const DEMO_CLARIFICATION_RUN: QuestionRun = {
+  runId: '00000000-0000-4000-8000-000000000120',
+  conversationId: '00000000-0000-4000-8000-000000000121',
+  state: 'CLARIFICATION_REQUIRED',
+  disposition: 'CLARIFY',
+  completion: {
+    code: 'METRIC_DEFINITION_AMBIGUOUS',
+    artifactType: 'CLARIFICATION',
+    artifactHash: 'a'.repeat(64),
+    evidenceIds: ['evidence:paid-sales', 'evidence:net-sales'],
+    clarification: {
+      clarificationId: '00000000-0000-4000-8000-000000000122',
+      conflictCode: 'METRIC_DEFINITION_AMBIGUOUS',
+      message: '检测到 2 个可用口径，请选择本次分析使用的定义。',
+      options: [
+        {
+          optionId: 'clarification-option:paid-sales',
+          label: '已支付订单销售额',
+          difference: '是否扣除已确认退款',
+          evidenceIds: ['evidence:paid-sales'],
+          evidence: {
+            definition: '已支付订单金额，扣除取消订单，不扣除后续退款。',
+            owner: { id: 'owner:finance-data', displayName: '王敏 · 财务数据组' },
+            semanticVersion: 'v3.2',
+            semanticStatus: 'CERTIFIED',
+            time: { label: '本月 MTD', start: '2026-08-01', end: '2026-08-06', timezone: 'Asia/Shanghai' },
+            quality: { status: 'PASS', scorePermillion: 987000, dataAsOf: '2026-08-06T10:30:00+08:00', rulesPassed: 12, rulesTotal: 12 },
+          },
+        },
+        {
+          optionId: 'clarification-option:net-sales',
+          label: '净销售额',
+          difference: '是否扣除已确认退款',
+          evidenceIds: ['evidence:net-sales'],
+          evidence: {
+            definition: '已支付订单金额，扣除取消订单和已确认退款。',
+            owner: { id: 'owner:business-analysis', displayName: '李楠 · 经营分析组' },
+            semanticVersion: 'v2.8',
+            semanticStatus: 'CERTIFIED',
+            time: { label: '本月 MTD', start: '2026-08-01', end: '2026-08-06', timezone: 'Asia/Shanghai' },
+            quality: { status: 'PASS', scorePermillion: 979000, dataAsOf: '2026-08-06T10:26:00+08:00', rulesPassed: 11, rulesTotal: 11 },
+          },
+        },
+      ],
+    },
+  },
+  release: { releaseId: '00000000-0000-4000-8000-000000000123', contentHash: 'b'.repeat(64) },
+  hashes: {},
+  budget: {
+    limits: { maxSteps: 16, maxLlmCalls: 4, maxToolCalls: 8, maxFormalQueries: 2, maxValidationQueries: 3, maxDurationMs: 25_000 },
+    usage: { stepCount: 7, llmCallsUsed: 2, toolCallsUsed: 4, formalQueriesUsed: 0, validationQueriesUsed: 0, elapsedMs: 1_860, exhausted: false },
+  },
+  recordVersion: 12,
+  lastEventId: 12,
+  createdAt: '2026-08-06T10:38:00+08:00',
+  updatedAt: '2026-08-06T10:38:06+08:00',
+  completedAt: '2026-08-06T10:38:06+08:00',
+}
+
+const DEMO_SCOPE_DETAIL_RUN: QuestionRun = {
+  ...DEMO_CLARIFICATION_RUN,
+  runId: '00000000-0000-4000-8000-000000000131',
+  state: 'BLOCKED',
+  disposition: 'REFUSE',
+  completion: {
+    code: 'SCOPE_DETAIL_LIST', artifactType: 'BLOCK', artifactHash: 'd'.repeat(64), evidenceIds: [],
+    scopeVerdict: {
+      schemaVersion: 'question-scope-verdict-v1', type: 'DETAIL_LIST', outcome: 'OUT_OF_SCOPE',
+      reason: 'SCOPE_DETAIL_LIST',
+      userMessage: '智能问数仅返回受治理的汇总分析，明细数据请提交取数申请。',
+      nextActions: [{
+        kind: 'DATA_REQUEST', label: '发起明细取数申请',
+        payload: { target: 'DATA_REQUEST_DIALOG', prefill: 'CURRENT_QUESTION' },
+      }],
+      parsedContext: {
+        metricIds: ['00000000-0000-4000-8000-000000000132'],
+        dimensionIds: ['00000000-0000-4000-8000-000000000133'],
+        timeRange: {
+          start: '2026-08-01T00:00:00+08:00', endExclusive: '2026-09-01T00:00:00+08:00',
+          timezone: 'Asia/Shanghai', grain: 'MONTH',
+        },
+      },
+      lexiconVersion: 'askdata-scope-lexicon-2026.08', lexiconHash: 'e'.repeat(64), classificationSource: 'RULE',
+    },
+  },
+  recordVersion: 8,
+  lastEventId: 8,
+  completedAt: '2026-08-08T10:38:06+08:00',
+}
+
+const DEMO_RESULT_DETAIL_ROWS: QuestionResult['datasets'][number]['rows'] = [
+  { rank: '1', channel: '电商渠道', sales: '6102430', share: '47.5', orders: '12358', average_order_value: '494.05' },
+  { rank: '2', channel: '线下门店', sales: '3248760', share: '25.3', orders: '8721', average_order_value: '372.33' },
+  { rank: '3', channel: '经销商渠道', sales: '2156890', share: '16.8', orders: '6142', average_order_value: '351.45' },
+  { rank: '4', channel: '企业客户', sales: '921430', share: '7.2', orders: '1258', average_order_value: '732.46' },
+  { rank: '5', channel: '其他渠道', sales: '416810', share: '3.2', orders: '980', average_order_value: '424.29' },
+  ...Array.from({ length: 43 }, (_, index) => {
+    const rank = index + 6
+    const sales = Math.max(18_000, 398_000 - index * 8_100)
+    const orders = Math.max(42, 920 - index * 17)
+    return {
+      rank: String(rank), channel: `渠道明细 ${String(rank).padStart(2, '0')}`,
+      sales: String(sales), share: (sales / 12_846_320 * 100).toFixed(1),
+      orders: String(orders), average_order_value: (sales / orders).toFixed(2),
+    }
+  }),
+]
+
+const DEMO_RESULT: QuestionResult = {
+  schemaVersion: 'question-result-v1',
+  title: '本月已支付订单销售额',
+  resolvedTimeSpec: {
+    requestedPeriod: 'CURRENT_MONTH', grain: 'MONTH', policyApplied: 'MTD', policySource: 'TIME_CONTRACT',
+    resolvedStart: '2026-08-01T00:00:00+08:00', resolvedEndExclusive: '2026-08-07T00:00:00+08:00',
+    dataAvailableThrough: '2026-08-06T10:30:00+08:00', truncatedByDataAvailability: true,
+    periodFallbackApplied: false, timezone: 'Asia/Shanghai',
+    comparison: {
+      type: 'YEAR_OVER_YEAR', periods: 1, alignment: 'SAME_DAY_COUNT',
+      resolvedStart: '2025-08-01T00:00:00+08:00', resolvedEndExclusive: '2025-08-07T00:00:00+08:00', overflowApplied: false,
+    },
+  },
+  timeSpec: {
+    rangeLabel: '2026-08-01 至 2026-08-06', asOfLabel: '数据截止 2026-08-06', policyLabel: '本月至今（MTD）',
+    comparisonLabel: '对比期 2025-08-01 至 2025-08-06，按相同天数对齐',
+    truncatedHint: '数据仅更新至 2026-08-06，结果已按可用范围裁剪',
+  },
+  summary: {
+    metricLabel: '已支付订单销售额', value: '12846320', formattedValue: '¥12,846,320', unit: 'CNY',
+    comparison: {
+      label: '较上年同期', direction: 'UP', changePermillion: 86000, formattedChange: '+8.6%',
+      baselineStart: '2025-08-01', baselineEnd: '2025-08-06',
+    },
+    time: { label: '本月 MTD', start: '2026-08-01', end: '2026-08-06', timezone: 'Asia/Shanghai' },
+  },
+  evidenceIds: ['evidence:paid-sales'],
+  evidence: DEMO_CLARIFICATION_RUN.completion?.clarification?.options[0].evidence,
+  datasets: [
+    {
+      id: 'dataset:sales-trend', label: '每日销售额趋势', page: 1, pageSize: 6, totalRows: 6,
+      columns: [
+        { key: 'day', label: '日期', type: 'DATE', role: 'DIMENSION' },
+        { key: 'sales', label: '销售额（元）', type: 'DECIMAL', role: 'MEASURE' },
+      ],
+      rows: [
+        { day: '2026-08-01', sales: '1976540' }, { day: '2026-08-02', sales: '1982310' },
+        { day: '2026-08-03', sales: '2067890' }, { day: '2026-08-04', sales: '2128650' },
+        { day: '2026-08-05', sales: '2324110' }, { day: '2026-08-06', sales: '2366820' },
+      ],
+    },
+    {
+      id: 'dataset:channel-contribution', label: '渠道销售额贡献', page: 1, pageSize: 5, totalRows: 5,
+      columns: [
+        { key: 'channel', label: '渠道', type: 'STRING', role: 'DIMENSION' },
+        { key: 'sales', label: '销售额（元）', type: 'DECIMAL', role: 'MEASURE' },
+      ],
+      rows: [
+        { channel: '电商渠道', sales: '6102430' }, { channel: '线下门店', sales: '3248760' },
+        { channel: '经销商渠道', sales: '2156890' }, { channel: '企业客户', sales: '921430' },
+        { channel: '其他渠道', sales: '416810' },
+      ],
+    },
+    {
+      id: 'dataset:channel-detail', label: '渠道销售额明细', page: 1, pageSize: 5, totalRows: 48,
+      columns: [
+        { key: 'rank', label: '排名', type: 'INTEGER', role: 'DIMENSION' },
+        { key: 'channel', label: '渠道', type: 'STRING', role: 'DIMENSION' },
+        { key: 'sales', label: '销售额（元）', type: 'DECIMAL', role: 'MEASURE' },
+        { key: 'share', label: '占比', type: 'DECIMAL', role: 'MEASURE' },
+        { key: 'orders', label: '订单数', type: 'INTEGER', role: 'MEASURE' },
+        { key: 'average_order_value', label: '客单价（元）', type: 'DECIMAL', role: 'MEASURE' },
+      ],
+      rows: DEMO_RESULT_DETAIL_ROWS,
+    },
+  ],
+  views: [
+    { id: 'view:trend', type: 'LINE', label: '趋势', datasetId: 'dataset:sales-trend', dimensionKeys: ['day'], measureKeys: ['sales'] },
+    { id: 'view:channel', type: 'BAR', label: '渠道', datasetId: 'dataset:channel-contribution', dimensionKeys: ['channel'], measureKeys: ['sales'] },
+    { id: 'view:detail', type: 'TABLE', label: '明细', datasetId: 'dataset:channel-detail', dimensionKeys: ['rank', 'channel'], measureKeys: ['sales', 'share', 'orders', 'average_order_value'] },
+  ],
+  defaultViewId: 'view:trend',
+  recommendedViewId: 'view:trend',
+}
+
+const DEMO_RESULT_RUN: QuestionRun = {
+  ...DEMO_CLARIFICATION_RUN,
+  runId: '00000000-0000-4000-8000-000000000130',
+  parentRunId: DEMO_CLARIFICATION_RUN.runId,
+  state: 'ANSWERED',
+  disposition: 'DIRECT',
+  completion: {
+    code: 'ANSWER_READY', artifactType: 'ANSWER', artifactHash: 'c'.repeat(64),
+    evidenceIds: DEMO_RESULT.evidenceIds, result: DEMO_RESULT,
+  },
+  recordVersion: 18,
+  lastEventId: 18,
+  updatedAt: '2026-08-07T10:38:31+08:00',
+  completedAt: '2026-08-07T10:38:31+08:00',
+}
+
+const DEMO_DEGRADED_RUN: QuestionRun = {
+  ...DEMO_RESULT_RUN,
+  completion: {
+    ...DEMO_RESULT_RUN.completion!,
+    code: 'ANSWER_DEGRADED',
+    answer: {
+      schemaVersion: '1.0', narrativeDegraded: true,
+      hint: '本次未生成文字结论，请查看数据与口径。',
+      verification: { attempts: 2, passed: false },
+    },
+  },
+}
 
 registerEChartsComponents([BarChart, GridComponent, TitleComponent, TooltipComponent, AriaComponent, CanvasRenderer])
 
@@ -155,21 +456,71 @@ function EvidenceSection({ id, title, icon, open, onToggle, children }: Evidence
   )
 }
 
-/** WEB-001 typed mock：在真实工作台壳内验证问数信息结构与关键交互。 */
+/** WEB-003：真实 Question API/SSE 生命周期 + 受控事件进度；历史会话仍沿用 WEB-001 快照。 */
 export function AskDataPage() {
-  const [question, setQuestion] = useState(DEFAULT_QUESTION)
-  const [phase, setPhase] = useState<RunPhase>('complete')
+  const snapshot = new URLSearchParams(window.location.search).get('snapshot')
+  const dataRequestSnapshot = snapshot === 'data-requests'
+  const scopeDetailSnapshot = snapshot === 'scope-detail'
+  const answerDegradedSnapshot = snapshot === 'answer-degraded'
+  const designSnapshot = dataRequestSnapshot || scopeDetailSnapshot || answerDegradedSnapshot
+  const [question, setQuestion] = useState(scopeDetailSnapshot ? '导出本月订单明细' : DEFAULT_QUESTION)
+  const [mode, setMode] = useState<WorkbenchMode>(scopeDetailSnapshot
+    ? 'snapshot-scope-detail'
+    : answerDegradedSnapshot ? 'snapshot-answer-degraded' : 'snapshot-release-drift')
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(dataRequestSnapshot ? 'requests' : 'ask')
+  const [dataRequestDialogOpen, setDataRequestDialogOpen] = useState(false)
+  const [dataRequestPrefill, setDataRequestPrefill] = useState<DataRequestPrefill | undefined>()
   const [sessionQuery, setSessionQuery] = useState('')
-  const [selectedSession, setSelectedSession] = useState('margin')
+  const [selectedSession, setSelectedSession] = useState('sales')
+  const [selectedClarificationOption, setSelectedClarificationOption] = useState<ClarificationOption | undefined>(
+    DEMO_CLARIFICATION_RUN.completion?.clarification?.options[0],
+  )
   const [expandedResult, setExpandedResult] = useState(false)
   const [feedback, setFeedback] = useState<Feedback>(null)
+  const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false)
+  const [feedbackBusy, setFeedbackBusy] = useState(false)
+  const [feedbackError, setFeedbackError] = useState('')
   const [openEvidence, setOpenEvidence] = useState<Record<string, boolean>>(() => Object.fromEntries(EVIDENCE_SECTIONS.map(id => [id, true])))
   const sessionSearchRef = useRef<HTMLInputElement>(null)
-  const runTimerRef = useRef<number | null>(null)
+  const {
+    state: questionState,
+    createQuestion,
+    submitClarification,
+    confirmReleaseDrift,
+    cancel: cancelQuestion,
+    reset: resetQuestion,
+  } = useAskDataQuestion()
 
-  useEffect(() => () => {
-    if (runTimerRef.current !== null) window.clearTimeout(runTimerRef.current)
-  }, [])
+  const activeReleaseDrift = mode === 'snapshot-release-drift'
+    ? DEMO_RELEASE_DRIFT
+    : mode === 'live' && questionState.error?.kind === 'RELEASE_DRIFT'
+      ? questionState.error.releaseDrift
+      : undefined
+
+  const liveClarificationRun = mode === 'live' && questionState.run?.state === 'CLARIFICATION_REQUIRED'
+    ? questionState.run
+    : undefined
+  const activeClarificationRun = mode === 'snapshot-clarification' ? DEMO_CLARIFICATION_RUN : liveClarificationRun
+  const liveResultRun = mode === 'live' && questionState.run?.state === 'ANSWERED' && questionResultReady(questionState.run.completion?.result)
+    ? questionState.run
+    : undefined
+  const activeResultRun = mode === 'snapshot-answer-degraded' ? DEMO_DEGRADED_RUN : mode === 'snapshot-result' ? DEMO_RESULT_RUN : liveResultRun
+  const graphDegraded = mode === 'snapshot-result' || mode === 'snapshot-answer-degraded' || questionState.events.some(event => event.graphDegraded)
+
+  const liveActive = mode === 'live' && ['CREATING', 'CONNECTING', 'STREAMING', 'RECONNECTING'].includes(questionState.phase)
+  const progressEvents = mode === 'snapshot-running'
+    ? DEMO_RUNNING_EVENTS
+    : mode === 'snapshot-complete' ? DEMO_COMPLETE_EVENTS : questionState.events
+  const progressState: QuestionRunState = mode === 'snapshot-running'
+    ? 'RESULT_VERIFYING'
+    : mode === 'snapshot-complete'
+      ? 'ANSWERED'
+      : questionState.run?.state
+        ?? latestQuestionState(questionState.operation?.state ?? 'RECEIVED', questionState.events)
+  const progressPhase = mode === 'snapshot-running'
+    ? 'PREVIEW' as const
+    : mode === 'snapshot-complete' ? 'TERMINAL' as const : questionState.phase
+  const showProgress = mode === 'snapshot-running' || mode === 'snapshot-complete' || mode === 'live' && questionState.phase !== 'IDLE'
 
   const filteredGroups = useMemo(() => {
     const normalized = sessionQuery.trim().toLocaleLowerCase()
@@ -181,56 +532,194 @@ export function AskDataPage() {
 
   const submitQuestion = (event: FormEvent) => {
     event.preventDefault()
-    if (!question.trim() || phase === 'loading') return
-    if (runTimerRef.current !== null) window.clearTimeout(runTimerRef.current)
-    setPhase('loading')
+    if (!question.trim() || liveActive) return
+    setMode('live')
+    setSelectedSession('')
     setFeedback(null)
+    setFeedbackDialogOpen(false)
+    setFeedbackError('')
     setExpandedResult(false)
-    runTimerRef.current = window.setTimeout(() => {
-      setPhase('complete')
-      setSelectedSession('margin')
-      runTimerRef.current = null
-    }, 650)
+    void createQuestion(question)
   }
 
   const startNewQuestion = () => {
-    if (runTimerRef.current !== null) window.clearTimeout(runTimerRef.current)
-    runTimerRef.current = null
+    setWorkspaceView('ask')
+    resetQuestion()
     setQuestion('')
-    setPhase('idle')
+    setMode('idle')
     setSelectedSession('')
     setFeedback(null)
+    setFeedbackDialogOpen(false)
+    setFeedbackError('')
     setExpandedResult(false)
   }
 
   const choosePrompt = (prompt: string) => {
+    resetQuestion()
     setQuestion(prompt)
-    setPhase('idle')
+    setMode('idle')
+    setSelectedSession('')
+    setFeedbackDialogOpen(false)
   }
 
   const chooseSession = (session: Session) => {
+    resetQuestion()
     setSelectedSession(session.id)
-    setQuestion(session.id === 'margin' ? DEFAULT_QUESTION : session.title)
-    setPhase(session.status === 'attention' ? 'idle' : 'complete')
+    setQuestion(session.id === 'margin' ? MARGIN_QUESTION : session.title)
+    setMode(session.id === 'sales'
+      ? 'snapshot-release-drift'
+      : session.status === 'clarification'
+      ? 'snapshot-clarification'
+      : session.status === 'running' ? 'snapshot-running' : session.status === 'attention' ? 'idle' : 'snapshot-complete')
+    if (session.status === 'clarification') {
+      setSelectedClarificationOption(DEMO_CLARIFICATION_RUN.completion?.clarification?.options[0])
+    }
     setFeedback(null)
+    setFeedbackDialogOpen(false)
+    setFeedbackError('')
+  }
+
+  const retryQuestion = () => {
+    if (!question.trim()) return
+    setMode('live')
+    setFeedback(null)
+    setFeedbackDialogOpen(false)
+    setFeedbackError('')
+    void createQuestion(question)
+  }
+
+  const retryNarrative = () => {
+    if (mode === 'snapshot-answer-degraded') {
+      setMode('snapshot-running')
+      setSelectedSession('')
+      return
+    }
+    retryQuestion()
+  }
+
+  const cancelVisibleRun = () => {
+    if (mode === 'live') {
+      cancelQuestion()
+      return
+    }
+    setMode('idle')
+    setSelectedSession('')
+  }
+
+  const cancelClarification = () => {
+    resetQuestion()
+    setMode('idle')
+    setSelectedSession('')
+    setSelectedClarificationOption(undefined)
+  }
+
+  const continueClarification = (optionId: string) => {
+    if (mode === 'snapshot-clarification') {
+      setMode('snapshot-running')
+      setSelectedSession('')
+      return
+    }
+    void submitClarification(optionId)
+  }
+
+  const switchReleaseAndAnalyze = () => {
+    if (!activeReleaseDrift) return
+    if (mode === 'snapshot-release-drift') {
+      setMode('snapshot-running')
+      setSelectedSession('')
+      return
+    }
+    void confirmReleaseDrift(question, activeReleaseDrift)
+  }
+
+  const viewHistoricalResult = () => {
+    resetQuestion()
+    setMode('snapshot-result')
+    setSelectedSession('sales')
   }
 
   const toggleEvidence = (id: string) => {
     setOpenEvidence(current => ({ ...current, [id]: !current[id] }))
   }
 
+  const submitStructuredFeedback = async (submission: QuestionFeedbackSubmission) => {
+    try {
+      if (mode === 'live') await questionAPI.feedback(submission)
+      setFeedback('report')
+      setFeedbackError('')
+    } catch (error) {
+      throw mapAskDataError(error)
+    }
+  }
+
+  const submitHelpfulFeedback = async () => {
+    if (!activeResultRun || feedbackBusy || feedback === 'helpful') return
+    setFeedbackBusy(true)
+    setFeedbackError('')
+    try {
+      if (mode === 'live') {
+        await questionAPI.feedback({
+          runId: activeResultRun.runId,
+          runVersion: activeResultRun.recordVersion,
+          rating: 'ACCURATE',
+          issueType: 'NONE',
+          comment: '',
+        })
+      }
+      setFeedback('helpful')
+    } catch (error) {
+      setFeedbackError(mapAskDataError(error).message)
+    } finally {
+      setFeedbackBusy(false)
+    }
+  }
+
+  const openStructuredFeedback = () => {
+    setFeedbackError('')
+    setFeedbackDialogOpen(true)
+  }
+
+  const openManualDataRequest = () => {
+    setDataRequestPrefill(undefined)
+    setDataRequestDialogOpen(true)
+  }
+
+  const openScopeDataRequest = (verdict: NonNullable<QuestionRun['completion']>['scopeVerdict']) => {
+    if (!verdict || verdict.reason !== 'SCOPE_DETAIL_LIST') return
+    setDataRequestPrefill({
+      ...(mode === 'snapshot-scope-detail'
+        ? { sourceQuestionRunId: DEMO_SCOPE_DETAIL_RUN.runId }
+        : questionState.run?.runId ? { sourceQuestionRunId: questionState.run.runId } : {}),
+      requestText: question,
+      parsedContext: verdict.parsedContext,
+    })
+    setWorkspaceView('requests')
+    setDataRequestDialogOpen(true)
+  }
+
   return (
     <AppShell
-      className="ask-data-shell"
+      className={`ask-data-shell ${workspaceView === 'requests' ? 'data-request-mode-shell' : ''} ${workspaceView === 'ask' && activeResultRun ? 'ask-data-result-shell' : ''} ${workspaceView === 'ask' && activeReleaseDrift ? 'ask-data-drift-shell' : ''}`.trim()}
       eyebrow="可信问数"
       title="问数工作台"
-      titleMeta={<span className="ask-release-badge"><span />企业经营 · Release 2026.08</span>}
+      titleMeta={<span className="ask-release-badge"><span />企业经营 · Release {designSnapshot ? '2026.08.1' : activeReleaseDrift?.active.semanticVersion ?? '2026.08'}</span>}
+      lockBusinessDomain
       actions={<>
-        <button className="quiet-button ask-topbar-button" type="button" onClick={() => sessionSearchRef.current?.focus()}><ClockCounterClockwise size={15} aria-hidden="true" />历史会话</button>
-        <button className="primary-button ask-topbar-button" type="button" onClick={startNewQuestion}><Plus size={15} aria-hidden="true" />开始新问题</button>
+        <div className="ask-workspace-tabs" role="tablist" aria-label="问数工作台视图">
+          <button type="button" role="tab" aria-selected={workspaceView === 'ask'} onClick={() => setWorkspaceView('ask')}><ChatCircleDots size={15} weight={workspaceView === 'ask' ? 'fill' : 'regular'} aria-hidden="true" />问数</button>
+          <button type="button" role="tab" aria-selected={workspaceView === 'requests'} onClick={() => setWorkspaceView('requests')}><ClipboardText size={15} weight={workspaceView === 'requests' ? 'fill' : 'regular'} aria-hidden="true" />我的申请</button>
+        </div>
+        {workspaceView === 'ask'
+          ? <button className="primary-button ask-topbar-button" type="button" onClick={startNewQuestion}><Plus size={15} aria-hidden="true" />开始新问题</button>
+          : <button className="primary-button ask-topbar-button" type="button" onClick={openManualDataRequest}><Plus size={15} aria-hidden="true" />新建取数申请</button>}
       </>}
     >
-      <div className="ask-workbench">
+      {workspaceView === 'requests' ? <MyDataRequests
+        snapshot={designSnapshot}
+        dialogOpen={dataRequestDialogOpen}
+        dialogPrefill={dataRequestPrefill}
+        onDialogOpenChange={setDataRequestDialogOpen}
+      /> : <div className="ask-workbench">
         <aside className="ask-session-rail" aria-label="问数会话">
           <div className="ask-rail-heading">
             <span>会话</span>
@@ -264,7 +753,7 @@ export function AskDataPage() {
 
         <section className="ask-conversation" aria-label="问数对话与结果">
           <form className="ask-question-composer" onSubmit={submitQuestion}>
-            <header><strong>用业务语言提问</strong><small>智能问数</small></header>
+            <header><strong>用业务语言提问</strong></header>
             <label className="ask-composer-field">
               <span className="sr-only">输入业务问题</span>
               <textarea
@@ -279,41 +768,60 @@ export function AskDataPage() {
             <div className="ask-composer-footer">
               <div className="ask-smart-suggestions">
                 <span><Sparkle size={11} weight="fill" aria-hidden="true" />智能建议</span>
-                <button type="button" onClick={() => choosePrompt('按渠道查看本月毛利率变化')}>按渠道查看毛利率变化</button>
-                <button type="button" onClick={() => choosePrompt('本月毛利率和上月相比如何？')}>本月毛利率同比环比</button>
-                <button type="button" onClick={() => choosePrompt('毛利率下降的主要原因是什么？')}>毛利率下降 TOP 原因</button>
+                <button type="button" onClick={() => choosePrompt('本月销售额按什么口径统计？')}>本月销售额按什么口径统计</button>
+                <button type="button" onClick={() => choosePrompt('销售额是否包含退款？')}>销售额包含退款吗</button>
+                <button type="button" onClick={() => choosePrompt('查看销售额口径说明')}>查看口径说明</button>
               </div>
-              <button type="submit" aria-label="发送问题" disabled={!question.trim() || phase === 'loading'}><PaperPlaneRight size={18} weight="fill" /></button>
+              <button type="submit" aria-label="发送问题" disabled={!question.trim() || liveActive}><PaperPlaneRight size={18} weight="fill" /></button>
             </div>
           </form>
 
-          {phase !== 'idle' && <section className="ask-dialogue-context" aria-label="本轮分析进度">
-            <div className="ask-user-message"><small>我 · 现在</small><p>{question}</p></div>
-            <div className="ask-assistant-message">
-              <span><ChatCircleDots size={17} weight="duotone" aria-hidden="true" /></span>
-              <div><small>智能助手 · 现在</small><p>{phase === 'loading' ? '已理解你的问题，正在核验毛利率口径与渠道数据。' : '已识别到本月毛利率环比下降，正在展示主要影响渠道与已验证证据。'}</p></div>
-            </div>
-            <div className="ask-run-status" role="status" aria-live="polite">
-              {['理解问题', '确认口径', '验证数据'].map((label, index) => <div className={phase === 'loading' && index === 2 ? '' : 'is-complete'} key={label}>
-                {phase === 'loading' && index === 2 ? <span className="ask-status-spinner" /> : <CheckCircle size={15} weight="fill" aria-hidden="true" />}
-                <span><strong>{label}</strong><small>{index === 0 ? '识别指标与维度' : index === 1 ? '毛利率、本月 vs 上月' : phase === 'loading' ? '正在完成核验' : '数据校验完成'}</small></span>
-              </div>)}
-            </div>
-          </section>}
+          {showProgress && <ConversationProgress
+            phase={progressPhase}
+            currentState={progressState}
+            events={progressEvents}
+            onCancel={liveActive || mode === 'snapshot-running' ? cancelVisibleRun : undefined}
+          />}
 
-          {phase === 'idle' && <section className="ask-empty-state">
+          {activeClarificationRun && <ClarificationCard
+            run={activeClarificationRun}
+            submitting={mode === 'live' && questionState.phase === 'CREATING'}
+            error={mode === 'live' ? questionState.error : undefined}
+            onSubmit={continueClarification}
+            onCancel={cancelClarification}
+            onSelectionChange={setSelectedClarificationOption}
+          />}
+
+          {activeReleaseDrift && <ReleaseDriftCard
+            drift={activeReleaseDrift}
+            busy={mode === 'live' && questionState.phase === 'CREATING'}
+            error={mode === 'live' && questionState.error?.kind !== 'RELEASE_DRIFT' ? questionState.error?.message : undefined}
+            onConfirm={switchReleaseAndAnalyze}
+            onHistory={viewHistoricalResult}
+          />}
+
+          {activeResultRun?.completion?.result && <ResultWorkspace
+            result={activeResultRun.completion.result}
+            answer={activeResultRun.completion.answer}
+            onRetryNarrative={activeResultRun.completion.answer?.narrativeDegraded ? retryNarrative : undefined}
+          />}
+
+          {mode === 'live' && !activeReleaseDrift && !activeClarificationRun && !activeResultRun && <ConversationOutcome state={questionState} onRetry={retryQuestion} onDataRequest={openScopeDataRequest} />}
+
+          {mode === 'snapshot-scope-detail' && <ConversationOutcome
+            state={{ phase: 'TERMINAL', run: DEMO_SCOPE_DETAIL_RUN, events: [], lastEventId: DEMO_SCOPE_DETAIL_RUN.lastEventId }}
+            onRetry={() => setMode('idle')}
+            onDataRequest={openScopeDataRequest}
+          />}
+
+          {mode === 'idle' && <section className="ask-empty-state">
             <div><Sparkle size={22} weight="duotone" /></div>
             <h2>准备好分析这个问题</h2>
             <p>发送后将先确认业务口径，再查询已发布的数据资产。</p>
             <button className="primary-button" type="button" onClick={() => document.querySelector<HTMLFormElement>('.ask-question-composer')?.requestSubmit()} disabled={!question.trim()}>开始分析</button>
           </section>}
 
-          {phase === 'loading' && <section className="ask-loading-state" aria-label="正在分析">
-            <span className="ask-loader-ring" />
-            <div><strong>正在验证数据</strong><p>已匹配“渠道毛利分析”口径，正在检查数据新鲜度。</p></div>
-          </section>}
-
-          {phase === 'complete' && <div className="ask-result-stream">
+          {mode === 'snapshot-complete' && <div className="ask-result-stream">
             <section className="ask-answer-card">
               <p><strong>本月毛利率下降主要由以下渠道贡献：</strong><em>直营网渠道</em>和<em>经销渠道</em>，两者合计解释本次下降的 93%。</p>
             </section>
@@ -344,56 +852,81 @@ export function AskDataPage() {
         </section>
 
         <aside className="ask-evidence-panel" aria-label="理解与证据驾驶舱">
+          {activeReleaseDrift ? <ReleaseDriftEvidencePanel question={question} drift={activeReleaseDrift} /> : activeClarificationRun ? <EvidencePanel
+            question={question}
+            run={activeClarificationRun}
+            option={selectedClarificationOption}
+          /> : activeResultRun?.completion?.result ? <EvidencePanel
+            question={question}
+            run={activeResultRun}
+            result={activeResultRun.completion.result}
+            graphDegraded={graphDegraded}
+            answer={activeResultRun.completion.answer}
+          /> : <>
           <header className="ask-evidence-heading">
-            <div><span className="ask-live-dot" /><span><strong>理解与证据驾驶舱</strong><small>答案可追溯、口径可核验</small></span></div>
-            <span className="ask-trust-score">96</span>
+            <div><span className={`ask-live-dot ${mode === 'live' ? 'is-pending' : ''}`.trim()} /><span><strong>理解与证据驾驶舱</strong><small>{mode === 'live' ? '仅展示已确认的受控证据' : '答案可追溯、口径可核验'}</small></span></div>
+            <span className={`ask-trust-score ${mode === 'live' ? 'is-pending' : ''}`.trim()}>{mode === 'live' ? '—' : mode === 'snapshot-scope-detail' ? '100' : '96'}</span>
           </header>
 
-          <div className="ask-evidence-sections">
+          {mode === 'live' ? <div className="ask-live-evidence-state" role="status">
+            <span><ShieldCheck size={22} weight="duotone" aria-hidden="true" /></span>
+            <strong>等待受控证据</strong>
+            <p>指标、口径、数据链路与质量信息通过校验后才会显示。</p>
+          </div> : <div className="ask-evidence-sections">
             <EvidenceSection id="intent" title="问题理解" icon={<Sparkle size={14} weight="fill" />} open={openEvidence.intent} onToggle={toggleEvidence}>
               <dl className="ask-evidence-grid">
-                <div><dt>意图</dt><dd>归因分析</dd></div>
-                <div><dt>指标</dt><dd>综合毛利率</dd></div>
-                <div><dt>维度</dt><dd>销售渠道</dd></div>
-                <div><dt>时间</dt><dd>本月环比</dd></div>
+                <div><dt>意图</dt><dd>{mode === 'snapshot-scope-detail' ? '明细取数' : '归因分析'}</dd></div>
+                <div><dt>指标</dt><dd>{mode === 'snapshot-scope-detail' ? '订单' : '综合毛利率'}</dd></div>
+                <div><dt>范围</dt><dd>{mode === 'snapshot-scope-detail' ? '逐行明细' : '销售渠道'}</dd></div>
+                <div><dt>时间</dt><dd>{mode === 'snapshot-scope-detail' ? '本月' : '本月环比'}</dd></div>
               </dl>
-              <p className="ask-confidence-note"><CheckCircle size={13} weight="fill" />语义绑定置信度 98%</p>
+              <p className="ask-confidence-note"><CheckCircle size={13} weight="fill" />{mode === 'snapshot-scope-detail' ? '确定性范围分类已验证' : '语义绑定置信度 98%'}</p>
             </EvidenceSection>
 
             <EvidenceSection id="policy" title="口径与权限" icon={<ShieldCheck size={14} weight="fill" />} open={openEvidence.policy} onToggle={toggleEvidence}>
               <div className="ask-source-card">
                 <span className="ask-source-icon blue"><Database size={14} /></span>
-                <span><strong>综合毛利率</strong><small>财务经营口径 · v3.2</small></span>
-                <span className="ask-source-status">已发布</span>
+                <span><strong>{mode === 'snapshot-scope-detail' ? '可信问数范围门禁' : '综合毛利率'}</strong><small>{mode === 'snapshot-scope-detail' ? 'SCOPE_DETAIL_LIST · 规则固定' : '财务经营口径 · v3.2'}</small></span>
+                <span className="ask-source-status">{mode === 'snapshot-scope-detail' ? '已阻断查询' : '已发布'}</span>
               </div>
-              <p className="ask-policy-note"><ShieldCheck size={12} weight="fill" />已按“家电经营分析”领域权限过滤</p>
+              <p className="ask-policy-note"><ShieldCheck size={12} weight="fill" />{mode === 'snapshot-scope-detail' ? '领域固定为“企业经营”，拒答不返回任何结果行' : '已按“家电经营分析”领域权限过滤'}</p>
             </EvidenceSection>
 
-            <EvidenceSection id="lineage" title="数据链路" icon={<LinkSimple size={14} />} open={openEvidence.lineage} onToggle={toggleEvidence}>
+            {mode !== 'snapshot-scope-detail' && <EvidenceSection id="lineage" title="数据链路" icon={<LinkSimple size={14} />} open={openEvidence.lineage} onToggle={toggleEvidence}>
               <ol className="ask-lineage-list">
                 <li><span>1</span><div><strong>DWS 渠道经营日汇总</strong><small>dws_channel_operation_daily</small></div></li>
                 <li><span>2</span><div><strong>DWD 销售订单明细</strong><small>dwd_sales_order_detail</small></div></li>
                 <li><span>3</span><div><strong>ERP 销售与返利</strong><small>两张受控源表</small></div></li>
               </ol>
-            </EvidenceSection>
+            </EvidenceSection>}
 
-            <EvidenceSection id="quality" title="质量与新鲜度" icon={<Pulse size={14} weight="bold" />} open={openEvidence.quality} onToggle={toggleEvidence}>
+            {mode !== 'snapshot-scope-detail' && <EvidenceSection id="quality" title="质量与新鲜度" icon={<Pulse size={14} weight="bold" />} open={openEvidence.quality} onToggle={toggleEvidence}>
               <div className="ask-quality-score"><strong>98.7</strong><span>质量分<small>通过 12 项规则</small></span></div>
               <dl className="ask-freshness-list"><div><dt>数据截至</dt><dd>08-05 23:00</dd></div><div><dt>最近刷新</dt><dd>38 分钟前</dd></div></dl>
-            </EvidenceSection>
-          </div>
+            </EvidenceSection>}
+          </div>}
 
-          <section className="ask-feedback-card">
+          </>}
+
+          {activeResultRun && <section className="ask-feedback-card">
             <h2>这个答案有帮助吗？</h2>
             <div>
-              <button type="button" aria-label="答案有帮助" aria-pressed={feedback === 'helpful'} onClick={() => setFeedback(feedback === 'helpful' ? null : 'helpful')}><ThumbsUp size={15} /></button>
-              <button type="button" aria-label="答案没有帮助" aria-pressed={feedback === 'unhelpful'} onClick={() => setFeedback(feedback === 'unhelpful' ? null : 'unhelpful')}><ThumbsDown size={15} /></button>
-              <button type="button" aria-pressed={feedback === 'report'} onClick={() => setFeedback(feedback === 'report' ? null : 'report')}><WarningCircle size={14} />报告问题</button>
+              <button type="button" aria-label="答案有帮助" aria-pressed={feedback === 'helpful'} disabled={feedbackBusy} onClick={() => void submitHelpfulFeedback()}><ThumbsUp size={15} /></button>
+              <button type="button" aria-label="答案没有帮助" aria-pressed={feedback === 'report'} disabled={feedbackBusy} onClick={openStructuredFeedback}><ThumbsDown size={15} /></button>
+              <button type="button" aria-pressed={feedback === 'report'} disabled={feedbackBusy} onClick={openStructuredFeedback}><WarningCircle size={14} />报告问题</button>
             </div>
-            {feedback && <p role="status">{feedback === 'helpful' ? '感谢反馈，我们会继续保持。' : feedback === 'unhelpful' ? '已记录，后续会用于改进回答。' : '问题已标记，提交会进入人工复核。'}</p>}
-          </section>
+            {feedback && <p role="status">{feedback === 'helpful' ? '感谢反馈，我们会继续保持。' : '反馈已进入人工复核，不会直接修改答案。'}</p>}
+            {feedbackError && <p className="is-error" role="alert">{feedbackError}</p>}
+          </section>}
         </aside>
-      </div>
+      </div>}
+
+      {workspaceView === 'ask' && activeResultRun && <FeedbackDialog
+        open={feedbackDialogOpen}
+        run={activeResultRun}
+        onClose={() => setFeedbackDialogOpen(false)}
+        onSubmit={submitStructuredFeedback}
+      />}
     </AppShell>
   )
 }

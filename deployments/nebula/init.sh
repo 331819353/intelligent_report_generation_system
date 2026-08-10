@@ -10,7 +10,7 @@ api_user=${NEBULA_API_USER:?NEBULA_API_USER is required}
 api_password=${NEBULA_API_PASSWORD:?NEBULA_API_PASSWORD is required}
 worker_user=${NEBULA_WORKER_USER:?NEBULA_WORKER_USER is required}
 worker_password=${NEBULA_WORKER_PASSWORD:?NEBULA_WORKER_PASSWORD is required}
-schema_source=/opt/askdata-nebula/schema.ngql
+schema_source=${NEBULA_SCHEMA_SOURCE:-/opt/askdata-nebula/schema.ngql}
 schema_attempts=${NEBULA_SCHEMA_CONVERGENCE_ATTEMPTS:-60}
 
 fail() {
@@ -177,6 +177,7 @@ while [ "$attempt" -lt 90 ]; do
   sleep 1
 done
 [ "$attempt" -lt 90 ] || fail 'storage host did not become ONLINE on NebulaGraph v3.8.0'
+[ -f "$schema_source" ] || fail "NebulaGraph schema file does not exist: $schema_source"
 
 capture_query root "$admin_password" \
   "CREATE SPACE IF NOT EXISTS $space(partition_num=1, replica_factor=1, vid_type=FIXED_STRING(256))" ||

@@ -359,6 +359,7 @@ services:
     environment:
       WORKER_DATABASE_URL: postgres://${POSTGRES_WORKER_USER:-report_worker}:${POSTGRES_WORKER_PASSWORD:-local_worker_password}@postgres:5432/${POSTGRES_DB:-intelligent_report_control}?sslmode=disable
       WAREHOUSE_WORKER_DATABASE_URL: postgres://${WAREHOUSE_WORKER_USER:-report_warehouse_worker}:${WAREHOUSE_WORKER_PASSWORD:-local_warehouse_worker_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
+      WORKER_TASK_TYPES: ${WORKER_TASK_TYPES:-}
       MINIO_ENDPOINT: minio:9000
       CONNECTOR_SERVICE_URL: http://connector-service:8090
       ASKDATA_NEBULA_ADDRESSES: nebula-graphd-client:9669
@@ -390,6 +391,122 @@ services:
       retries: 3
       start_period: 3s
     networks: [report_net, askdata_graph_client_net]
+
+  # AskData 独立扩缩入口；profile 默认不启用，避免与通用 Worker 重复消费。
+  askdata-embedding-worker:
+    profiles: ["askdata-workers"]
+    image: intelligent-report-system-backend:dev
+    restart: unless-stopped
+    env_file: *app-env-files
+    environment:
+      WORKER_TASK_TYPES: EMBEDDING
+      WORKER_DATABASE_URL: postgres://${POSTGRES_WORKER_USER:-report_worker}:${POSTGRES_WORKER_PASSWORD:-local_worker_password}@postgres:5432/${POSTGRES_DB:-intelligent_report_control}?sslmode=disable
+      WAREHOUSE_WORKER_DATABASE_URL: postgres://${WAREHOUSE_WORKER_USER:-report_warehouse_worker}:${WAREHOUSE_WORKER_PASSWORD:-local_warehouse_worker_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
+      ASKDATA_NEBULA_USERNAME: ${ASKDATA_NEBULA_WORKER_USER:-askdata_worker}
+      ASKDATA_NEBULA_PASSWORD: ${ASKDATA_NEBULA_WORKER_PASSWORD:?ASKDATA_NEBULA_WORKER_PASSWORD is required}
+      ASKDATA_NEBULA_ROOT_PASSWORD: ""
+      ASKDATA_NEBULA_BOOTSTRAP_ROOT_PASSWORD: ""
+      ASKDATA_NEBULA_API_PASSWORD: ""
+      ASKDATA_NEBULA_WORKER_PASSWORD: ""
+    command: ["/app/worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    networks: [report_net]
+
+  askdata-profile-worker:
+    profiles: ["askdata-workers"]
+    image: intelligent-report-system-backend:dev
+    restart: unless-stopped
+    env_file: *app-env-files
+    environment:
+      WORKER_TASK_TYPES: PROFILE
+      WORKER_DATABASE_URL: postgres://${POSTGRES_WORKER_USER:-report_worker}:${POSTGRES_WORKER_PASSWORD:-local_worker_password}@postgres:5432/${POSTGRES_DB:-intelligent_report_control}?sslmode=disable
+      WAREHOUSE_WORKER_DATABASE_URL: postgres://${WAREHOUSE_WORKER_USER:-report_warehouse_worker}:${WAREHOUSE_WORKER_PASSWORD:-local_warehouse_worker_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
+      ASKDATA_NEBULA_USERNAME: ${ASKDATA_NEBULA_WORKER_USER:-askdata_worker}
+      ASKDATA_NEBULA_PASSWORD: ${ASKDATA_NEBULA_WORKER_PASSWORD:?ASKDATA_NEBULA_WORKER_PASSWORD is required}
+      ASKDATA_NEBULA_ROOT_PASSWORD: ""
+      ASKDATA_NEBULA_BOOTSTRAP_ROOT_PASSWORD: ""
+      ASKDATA_NEBULA_API_PASSWORD: ""
+      ASKDATA_NEBULA_WORKER_PASSWORD: ""
+    command: ["/app/worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-warehouse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    networks: [report_net]
+
+  askdata-projector-worker:
+    profiles: ["askdata-workers"]
+    image: intelligent-report-system-backend:dev
+    restart: unless-stopped
+    env_file: *app-env-files
+    environment:
+      WORKER_TASK_TYPES: PROJECTOR
+      WORKER_DATABASE_URL: postgres://${POSTGRES_WORKER_USER:-report_worker}:${POSTGRES_WORKER_PASSWORD:-local_worker_password}@postgres:5432/${POSTGRES_DB:-intelligent_report_control}?sslmode=disable
+      WAREHOUSE_WORKER_DATABASE_URL: postgres://${WAREHOUSE_WORKER_USER:-report_warehouse_worker}:${WAREHOUSE_WORKER_PASSWORD:-local_warehouse_worker_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
+      ASKDATA_NEBULA_ADDRESSES: nebula-graphd-client:9669
+      ASKDATA_NEBULA_SPACE: ${ASKDATA_NEBULA_SPACE:-askdata_semantic}
+      ASKDATA_NEBULA_USERNAME: ${ASKDATA_NEBULA_WORKER_USER:-askdata_worker}
+      ASKDATA_NEBULA_PASSWORD: ${ASKDATA_NEBULA_WORKER_PASSWORD:?ASKDATA_NEBULA_WORKER_PASSWORD is required}
+      ASKDATA_NEBULA_TLS_ENABLED: "false"
+      ASKDATA_NEBULA_ROOT_PASSWORD: ""
+      ASKDATA_NEBULA_BOOTSTRAP_ROOT_PASSWORD: ""
+      ASKDATA_NEBULA_API_PASSWORD: ""
+      ASKDATA_NEBULA_WORKER_PASSWORD: ""
+    command: ["/app/worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nebula-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    networks: [report_net, askdata_graph_client_net]
+
+  askdata-evaluator-worker:
+    profiles: ["askdata-workers"]
+    image: intelligent-report-system-backend:dev
+    restart: unless-stopped
+    env_file: *app-env-files
+    environment:
+      WORKER_TASK_TYPES: EVALUATOR
+      WORKER_DATABASE_URL: postgres://${POSTGRES_WORKER_USER:-report_worker}:${POSTGRES_WORKER_PASSWORD:-local_worker_password}@postgres:5432/${POSTGRES_DB:-intelligent_report_control}?sslmode=disable
+      WAREHOUSE_WORKER_DATABASE_URL: postgres://${WAREHOUSE_WORKER_USER:-report_warehouse_worker}:${WAREHOUSE_WORKER_PASSWORD:-local_warehouse_worker_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
+      ASKDATA_NEBULA_USERNAME: ${ASKDATA_NEBULA_WORKER_USER:-askdata_worker}
+      ASKDATA_NEBULA_PASSWORD: ${ASKDATA_NEBULA_WORKER_PASSWORD:?ASKDATA_NEBULA_WORKER_PASSWORD is required}
+      ASKDATA_NEBULA_ROOT_PASSWORD: ""
+      ASKDATA_NEBULA_BOOTSTRAP_ROOT_PASSWORD: ""
+      ASKDATA_NEBULA_API_PASSWORD: ""
+      ASKDATA_NEBULA_WORKER_PASSWORD: ""
+    command: ["/app/worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    networks: [report_net]
 
   # 连接测试 Worker 仅持有专用控制库、Connector 和 uploads 读取凭据。
   connection-test-worker:

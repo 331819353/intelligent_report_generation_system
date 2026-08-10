@@ -120,7 +120,7 @@ func TestCrossModelBundleRequiresAllowedCertifiedPath(t *testing.T) {
 		t.Fatalf("fanout-blocked path produced a bundle: %#v", blocked)
 	}
 
-	request = relationalBindingFixture(t, registry.FanoutCertifiedPre)
+	request = relationalBindingFixture(t, registry.FanoutPreAggregateRequired)
 	allowed, err := Bind(request)
 	if err != nil {
 		t.Fatal(err)
@@ -262,6 +262,35 @@ func TestBindingResultStrictDecodeAndReplay(t *testing.T) {
 	unknown := strings.Replace(string(raw), `"version":`, `"sql":"select secret from table","version":`, 1)
 	if _, err := DecodeResult([]byte(unknown), request); err == nil {
 		t.Fatal("DecodeResult accepted an unknown physical field")
+	}
+}
+
+func TestBindingRequiresTheSingleSelectedSessionDomain(t *testing.T) {
+	t.Parallel()
+	release := askdata.ReleaseRef{
+		ReleaseID:   "release-binding-domain-v1",
+		ContentHash: askdata.HashBytes([]byte("release-binding-domain-v1")),
+	}
+	selected, err := askdata.NewPolicyScope(
+		"tenant-binding", "actor-binding", []askdata.ID{"sales"}, []askdata.ID{"analyst"}, release,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSelectedGraphDomain(selected, "sales"); err != nil {
+		t.Fatalf("selected domain rejected: %v", err)
+	}
+	multiple, err := askdata.NewPolicyScope(
+		"tenant-binding", "actor-binding", []askdata.ID{"finance", "sales"}, []askdata.ID{"analyst"}, release,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSelectedGraphDomain(multiple, "sales"); err == nil {
+		t.Fatal("multi-domain policy scope must not enter joint binding")
+	}
+	if err := validateSelectedGraphDomain(selected, "finance"); err == nil {
+		t.Fatal("a graph domain different from the selected session domain must be rejected")
 	}
 }
 
@@ -552,8 +581,16 @@ func understandingFixture(
 				DomainID: "sales", Score: 1, EvidenceRefs: []askdata.EvidenceRef{policy},
 			}},
 			MetricMentions: []understanding.MetricMention{}, DimensionMentions: []understanding.DimensionMention{},
-			ValueMentions: []understanding.ValueMention{}, Comparisons: []understanding.ComparisonMention{},
+			ValueMentions: []understanding.ValueMention{}, Comparisons: append([]understanding.ComparisonMention{}, rules.Comparisons...),
 			Ordering: []understanding.OrderingMention{}, UnresolvedSpans: []understanding.UnresolvedSpan{},
+		}
+		if rules.Ranking != nil && len(metrics) > 0 {
+			current.Ordering = []understanding.OrderingMention{{
+				Text: rules.Ranking.Text, Span: rules.Ranking.Span, TargetText: metrics[0],
+				Direction: rules.Ranking.Direction, RankBy: rules.Ranking.RankBy,
+			}}
+			limit := rules.Ranking.Limit
+			current.Limit = &limit
 		}
 		requests := []understanding.UnderstandingEvidenceRequest{}
 		for _, text := range metrics {

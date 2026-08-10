@@ -17,6 +17,7 @@ func TestSemanticIRCanonicalHashIsStable(t *testing.T) {
 		IRVersion:           ir.Version,
 		SemanticReleaseID:   "release-2026-08",
 		SemanticContentHash: askdata.HashBytes([]byte("release")),
+		DomainID:            "sales",
 		ModelVersionID:      "sales-model@v4",
 		Metrics: []ir.Metric{
 			{MetricVersionID: "order_count@v2", Alias: "order_count"},
@@ -29,7 +30,7 @@ func TestSemanticIRCanonicalHashIsStable(t *testing.T) {
 		},
 		TimeRange:  &ir.TimeRange{DimensionVersionID: "order_date@v2", Start: "2026-01-01", EndExclusive: "2026-08-06", Timezone: "Asia/Shanghai"},
 		Comparison: &ir.Comparison{Type: ir.ComparisonYearOverYear, Periods: 1},
-		Sort:       []ir.Sort{{TargetType: ir.SortTargetMetric, TargetVersionID: "net_sales@v3", Direction: ir.SortDescending, Nulls: ir.NullsLast}},
+		Sort:       []ir.Sort{{TargetType: ir.SortTargetMetric, TargetVersionID: "net_sales@v3", Direction: ir.SortDescending, Nulls: ir.NullsLast, RankBy: ir.RankByCurrentValue}},
 		Limit:      500,
 	}
 	permuted := base
@@ -70,6 +71,22 @@ func TestSemanticIRDecodeRejectsPhysicalFields(t *testing.T) {
 	}
 }
 
+func TestSemanticIRRequiresOneSelectedDomainID(t *testing.T) {
+	document := validIR()
+	document.DomainID = ""
+	if err := document.Validate(); err == nil || !strings.Contains(err.Error(), "domainId") {
+		t.Fatalf("Validate() error = %v, want required domainId", err)
+	}
+	raw, err := json.Marshal(validIR())
+	if err != nil {
+		t.Fatal(err)
+	}
+	multiple := strings.Replace(string(raw), `"domainId":"sales"`, `"domainId":["sales","finance"]`, 1)
+	if _, err := ir.Decode([]byte(multiple)); err == nil {
+		t.Fatal("Decode() accepted a multi-valued domainId")
+	}
+}
+
 func TestSemanticIRRejectsUnboundAndInvalidReferences(t *testing.T) {
 	document := validIR()
 	document.Filters[0].MemberVersionIDs = nil
@@ -88,13 +105,16 @@ func validIR() ir.SemanticIR {
 		IRVersion:           ir.Version,
 		SemanticReleaseID:   "release-2026-08",
 		SemanticContentHash: askdata.HashBytes([]byte("release")),
+		DomainID:            "sales",
 		ModelVersionID:      "sales-model@v4",
 		Metrics:             []ir.Metric{{MetricVersionID: "net_sales@v3", Alias: "net_sales"}},
 		GroupBy:             []ir.GroupBy{},
 		Filters:             []ir.Filter{{DimensionVersionID: "sales_region@v5", Operator: ir.FilterIn, MemberVersionIDs: []askdata.ID{"east_china@v2"}}},
 		TimeRange:           nil,
 		Comparison:          nil,
-		Sort:                []ir.Sort{{TargetType: ir.SortTargetMetric, TargetVersionID: "net_sales@v3", Direction: ir.SortDescending, Nulls: ir.NullsLast}},
+		Sort:                []ir.Sort{{TargetType: ir.SortTargetMetric, TargetVersionID: "net_sales@v3", Direction: ir.SortDescending, Nulls: ir.NullsLast, RankBy: ir.RankByCurrentValue}},
 		Limit:               500,
+		OtherPolicy:         ir.OtherNone,
+		TieBreaking:         ir.TieIncludeAll,
 	}
 }

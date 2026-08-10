@@ -6,6 +6,8 @@ import { LoginPage } from '../pages/LoginPage'
 import { ManagementCenterPage } from '../pages/ManagementCenterPage'
 import { DomainAccessPage } from '../pages/DomainAccessPage'
 import { AskDataPage } from '../pages/AskDataPage'
+import { ReportAssetsPage } from '../pages/ReportAssetsPage'
+import { ReportRuntimePage } from '../pages/ReportRuntimePage'
 import { RequireAuth } from '../components/RequireAuth'
 import { RequirePlatformAdministrator } from '../components/RequirePlatformAdministrator'
 import { RequireBusinessDomain } from '../components/RequireBusinessDomain'
@@ -33,6 +35,8 @@ export function App() {
       <Route path="/datasets" element={<RequireAuth><RequireBusinessDomain><DatasetCenterPage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="/datasets/:datasetId/edit" element={<RequireAuth><RequireBusinessDomain><DatasetCenterPage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="/ask-data" element={<RequireAuth><RequireBusinessDomain><AskDataPage /></RequireBusinessDomain></RequireAuth>} />
+      <Route path="/reports" element={<RequireAuth><RequireBusinessDomain><ReportAssetsPage /></RequireBusinessDomain></RequireAuth>} />
+      <Route path="/reports/:reportId" element={<RequireAuth><RequireBusinessDomain><ReportRuntimePage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="*" element={<Navigate to="/data-sources" replace />} />
     </Routes>
   )

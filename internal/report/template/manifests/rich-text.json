@@ -1,0 +1,27 @@
+{
+  "type": "rich-text",
+  "version": "1.0.0",
+  "renderer": "TEXT",
+  "displayName": "富文本",
+  "category": "CONTENT",
+  "minSize": { "w": 2, "h": 1 },
+  "recommendedSize": { "w": 8, "h": 3 },
+  "dataContract": {
+    "dimensions": { "min": 0, "max": 0 },
+    "measures": { "min": 0, "max": 0 },
+    "timeField": { "required": false },
+    "roles": []
+  },
+  "stackingRequiresAdditive": false,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["richText"],
+    "properties": {
+      "richText": { "type": "string" }
+    }
+  },
+  "defaultOptions": { "richText": "" },
+  "mobilePolicy": { "supported": true, "defaultLegendMode": "HIDDEN", "labelDegradation": "ELLIPSIS" },
+  "supportedInteractions": []
+}

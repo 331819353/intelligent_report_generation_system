@@ -1,0 +1,137 @@
+{
+  "schemaVersion": "1.0",
+  "metadata": {
+    "id": "report_sales_overview",
+    "code": "sales_overview",
+    "name": "销售经营总览",
+    "description": "单页经营报告示例",
+    "reportType": "REPORT",
+    "locale": "zh-CN"
+  },
+  "templateRef": {
+    "reportTemplateId": "tpl_sales_overview",
+    "reportTemplateVersion": "1.0.0",
+    "structureTemplateVersion": "1.0.0",
+    "layoutTemplateVersion": "1.0.0",
+    "narrativeTemplateVersion": "1.0.0"
+  },
+  "themeRef": {
+    "themeId": "theme_corporate_light",
+    "version": "1.0.0"
+  },
+  "canvas": {
+    "desktop": {
+      "designWidth": 1920,
+      "columns": 24,
+      "baseCellWidth": 80,
+      "baseRowHeight": 54,
+      "gapX": 12,
+      "gapY": 12,
+      "paddingX": 24,
+      "paddingY": 24
+    },
+    "mobile": {
+      "columns": 1,
+      "gapY": 12,
+      "paddingX": 12,
+      "paddingY": 12
+    }
+  },
+  "dataContexts": [
+    {
+      "id": "sales_context",
+      "datasetId": "dataset_sales",
+      "datasetVersionId": "dataset_sales_v12",
+      "alias": "销售主题数据",
+      "defaultParameters": [],
+      "queryPolicy": {
+        "timeoutMs": 5000,
+        "maxRows": 10000,
+        "cacheTtlSeconds": 300
+      }
+    }
+  ],
+  "globalFilters": [],
+  "pages": [
+    {
+      "id": "page_overview",
+      "name": "经营总览",
+      "order": 1,
+      "sections": [
+        {
+          "id": "section_trend",
+          "name": "销售趋势",
+          "order": 1,
+          "blocks": [
+            {
+              "id": "block_sales_trend",
+              "type": "CHART",
+              "layout": {
+                "desktop": { "x": 0, "y": 0, "w": 12, "h": 6 },
+                "mobile": { "order": 1, "visible": true, "heightMode": "AUTO", "slotMode": "STACK" }
+              },
+              "zones": [
+                {
+                  "id": "zone_sales_content",
+                  "type": "CONTENT",
+                  "layout": {
+                    "heightMode": "AUTO",
+                    "minHeight": 180,
+                    "columns": 1,
+                    "rows": 1,
+                    "overflow": "EXPAND",
+                    "emptyPriority": 100
+                  },
+                  "slots": [
+                    {
+                      "id": "slot_sales_chart",
+                      "grid": { "x": 0, "y": 0, "w": 1, "h": 1 },
+                      "componentId": "component_sales_chart"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "components": [
+    {
+      "id": "component_sales_chart",
+      "templateRef": { "type": "line-trend", "version": "1.0.0" },
+      "dataBinding": {
+        "bindingMode": "DATASET_FIELD",
+        "dataContextId": "sales_context",
+        "dimensions": [
+          { "role": "X_AXIS", "field": "month" }
+        ],
+        "measures": [
+          { "role": "Y_AXIS", "field": "sales_amount" }
+        ]
+      },
+      "options": {
+        "title": "月度销售趋势",
+        "showLegend": false,
+        "showLabel": false,
+        "smooth": true,
+        "nullPolicy": "GAP"
+      }
+    }
+  ],
+  "interactions": [],
+  "runtimePolicy": {
+    "refreshMode": "ON_OPEN",
+    "refreshIntervalSeconds": 0,
+    "maxConcurrentQueries": 4,
+    "componentTimeoutMs": 10000,
+    "exportEnabled": true,
+    "failureMode": "PARTIAL"
+  },
+  "provenance": {
+    "createdFrom": "TEMPLATE",
+    "sourceQuestionRunIds": [],
+    "aiRunIds": []
+  }
+}

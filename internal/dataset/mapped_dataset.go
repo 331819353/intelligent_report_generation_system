@@ -55,6 +55,7 @@ type MappedDatasetColumn struct {
 	BusinessDescription string
 	CanonicalType       string
 	SemanticType        string
+	SensitivityLevel    string
 	Nullable            bool
 	PrimaryKey          bool
 }
@@ -113,16 +114,17 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 		role := mappedDatasetFieldRole(column)
 		visible := true
 		fields = append(fields, Field{
-			ID:            fieldID,
-			Code:          fieldCode,
-			Name:          fieldName,
-			Description:   strings.TrimSpace(column.BusinessDescription),
-			Role:          role,
-			Expression:    Expression{Type: "FIELD_REF", NodeID: "node_1", Field: physicalName},
-			CanonicalType: mappedDatasetColumnCanonicalType(table, column),
-			SemanticType:  strings.ToUpper(strings.TrimSpace(column.SemanticType)),
-			Nullable:      column.Nullable,
-			Visible:       &visible,
+			ID:               fieldID,
+			Code:             fieldCode,
+			Name:             fieldName,
+			Description:      strings.TrimSpace(column.BusinessDescription),
+			Role:             role,
+			Expression:       Expression{Type: "FIELD_REF", NodeID: "node_1", Field: physicalName},
+			CanonicalType:    mappedDatasetColumnCanonicalType(table, column),
+			SemanticType:     strings.ToUpper(strings.TrimSpace(column.SemanticType)),
+			SensitivityLevel: strings.ToUpper(strings.TrimSpace(column.SensitivityLevel)),
+			Nullable:         column.Nullable,
+			Visible:          &visible,
 		})
 		endOutputs = append(endOutputs, map[string]any{
 			"key":  "node_1." + physicalName,
@@ -396,7 +398,7 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 	}
 
 	rows, err := tx.Query(ctx, `SELECT column_name,business_name,business_description,
-		canonical_type,semantic_type,nullable,is_primary_key
+		canonical_type,semantic_type,sensitivity_level::text,nullable,is_primary_key
 		FROM platform.metadata_columns
 		WHERE table_id=$1 AND tenant_id=$2 AND asset_status='ACTIVE'
 		ORDER BY ordinal_position,id
@@ -408,7 +410,8 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 	for rows.Next() {
 		var column MappedDatasetColumn
 		if err := rows.Scan(&column.ColumnName, &column.BusinessName, &column.BusinessDescription,
-			&column.CanonicalType, &column.SemanticType, &column.Nullable, &column.PrimaryKey); err != nil {
+			&column.CanonicalType, &column.SemanticType, &column.SensitivityLevel,
+			&column.Nullable, &column.PrimaryKey); err != nil {
 			rows.Close()
 			return false, err
 		}
@@ -702,7 +705,7 @@ func loadMappedDatasetInputTx(
 		return MappedDatasetTable{}, nil, false, err
 	}
 	rows, err := tx.Query(ctx, `SELECT column_name,business_name,business_description,
-		canonical_type,semantic_type,nullable,is_primary_key
+		canonical_type,semantic_type,sensitivity_level::text,nullable,is_primary_key
 		FROM platform.metadata_columns
 		WHERE table_id=$1 AND tenant_id=$2 AND asset_status='ACTIVE'
 		ORDER BY ordinal_position,id
@@ -715,7 +718,7 @@ func loadMappedDatasetInputTx(
 		var column MappedDatasetColumn
 		if err := rows.Scan(
 			&column.ColumnName, &column.BusinessName, &column.BusinessDescription,
-			&column.CanonicalType, &column.SemanticType, &column.Nullable,
+			&column.CanonicalType, &column.SemanticType, &column.SensitivityLevel, &column.Nullable,
 			&column.PrimaryKey,
 		); err != nil {
 			rows.Close()

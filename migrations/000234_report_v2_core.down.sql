@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS platform.report_publication_idempotency;
+ALTER TABLE IF EXISTS platform.reports DROP CONSTRAINT IF EXISTS report_v2_current_version_fk;
+DROP TABLE IF EXISTS platform.report_versions;
+DROP TABLE IF EXISTS platform.report_revisions;
+DROP TABLE IF EXISTS platform.report_drafts;
+DROP TABLE IF EXISTS platform.reports;
+DROP FUNCTION IF EXISTS platform.reject_report_v2_immutable_mutation();
+DROP FUNCTION IF EXISTS platform.guard_report_v2_version_mutation();
+DROP FUNCTION IF EXISTS platform.report_v2_can_access(uuid,text[]);
+DROP FUNCTION IF EXISTS platform.report_v2_row_can_access(uuid,uuid,uuid,text[]);

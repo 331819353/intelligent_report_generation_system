@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"intelligent-report-generation-system/internal/dataset"
@@ -44,11 +46,12 @@ type BuildInput struct {
 }
 
 type BuildResult struct {
-	Schema        string
-	Table         string
-	QualifiedName string
-	RowCount      int64
-	SizeBytes     int64
+	Schema               string
+	Table                string
+	QualifiedName        string
+	RowCount             int64
+	SizeBytes            int64
+	DataAvailableThrough *time.Time
 }
 
 type transaction interface {
@@ -146,6 +149,19 @@ func (executor *Executor) Build(ctx context.Context, input BuildInput) (BuildRes
 			return BuildResult{}, fmt.Errorf("%w: business key has %d null rows and %d duplicate rows", ErrQualityFailed, nulls, duplicates)
 		}
 	}
+	var dataAvailableThrough *time.Time
+	if input.Document.OutputGrain.TimeField != "" {
+		var watermark pgtype.Timestamptz
+		query := "SELECT max(" + quoteIdentifier(input.Document.OutputGrain.TimeField) +
+			")::timestamptz FROM " + qualified
+		if err := tx.QueryRow(ctx, query).Scan(&watermark); err != nil {
+			return BuildResult{}, fmt.Errorf("read warehouse business-time watermark: %w", err)
+		}
+		if watermark.Valid {
+			value := watermark.Time.UTC()
+			dataAvailableThrough = &value
+		}
+	}
 	if _, err := tx.Exec(ctx, "ANALYZE "+qualified); err != nil {
 		return BuildResult{}, fmt.Errorf("analyze warehouse table: %w", err)
 	}
@@ -163,6 +179,7 @@ func (executor *Executor) Build(ctx context.Context, input BuildInput) (BuildRes
 	return BuildResult{
 		Schema: schema, Table: table, QualifiedName: schema + "." + table,
 		RowCount: rowCount, SizeBytes: sizeBytes,
+		DataAvailableThrough: dataAvailableThrough,
 	}, nil
 }
 
@@ -255,19 +272,29 @@ func warehouseLayerInput(
 }
 
 func validateOutputContract(document dataset.Document, keys []string) error {
-	fields := make(map[string]bool, len(document.Fields))
+	fields := make(map[string]string, len(document.Fields))
 	for _, field := range document.Fields {
 		if !outputIdentifier.MatchString(field.Code) {
 			return fmt.Errorf("%w: output field %q is not a portable PostgreSQL identifier", ErrInvalidBuild, field.Code)
 		}
-		fields[field.Code] = true
+		fields[field.Code] = field.CanonicalType
 	}
 	seen := map[string]bool{}
 	for _, key := range keys {
-		if !outputIdentifier.MatchString(key) || !fields[key] || seen[key] {
+		if _, exists := fields[key]; !outputIdentifier.MatchString(key) || !exists || seen[key] {
 			return fmt.Errorf("%w: business key %q is invalid", ErrInvalidBuild, key)
 		}
 		seen[key] = true
+	}
+	if timeField := document.OutputGrain.TimeField; timeField != "" {
+		canonicalType, exists := fields[timeField]
+		if !exists || (canonicalType != "DATE" && canonicalType != "DATETIME") {
+			return fmt.Errorf(
+				"%w: output time field %q must be DATE or DATETIME",
+				ErrInvalidBuild,
+				timeField,
+			)
+		}
 	}
 	return nil
 }

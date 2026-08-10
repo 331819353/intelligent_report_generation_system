@@ -6,3 +6,10 @@ CREATE EDGE IF NOT EXISTS MODELED_BY(tenant_id string, domain_id string, release
 CREATE EDGE IF NOT EXISTS HAS_DIMENSION(tenant_id string, domain_id string, release_hash string);
 CREATE EDGE IF NOT EXISTS HAS_MEMBER(tenant_id string, domain_id string, release_hash string);
 CREATE EDGE IF NOT EXISTS JOINS_TO(tenant_id string, domain_id string, release_hash string, relationship_version_id string, join_type string, cardinality string, fanout_policy string, certified bool);
+CREATE TAG IF NOT EXISTS report_version(tenant_id string, domain_id string, release_hash string, report_id string, report_version_id string);
+CREATE TAG IF NOT EXISTS report_component(tenant_id string, domain_id string, release_hash string, report_id string, report_version_id string, asset_id string, component_id string, content_hash string);
+CREATE EDGE IF NOT EXISTS REPORT_HAS_COMPONENT(tenant_id string, domain_id string, release_hash string);
+CREATE EDGE IF NOT EXISTS REPORT_USES_METRIC(tenant_id string, domain_id string, release_hash string);
+CREATE EDGE IF NOT EXISTS REPORT_GROUPS_BY_DIMENSION(tenant_id string, domain_id string, release_hash string);
+CREATE EDGE IF NOT EXISTS REPORT_FILTERS_MEMBER(tenant_id string, domain_id string, release_hash string);
+CREATE EDGE IF NOT EXISTS REPORT_USES_MODEL(tenant_id string, domain_id string, release_hash string);

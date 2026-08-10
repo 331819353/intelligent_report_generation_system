@@ -1,0 +1,901 @@
+package askdatahttp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/google/uuid"
+
+	"intelligent-report-generation-system/internal/askdata"
+	"intelligent-report-generation-system/internal/askdata/registry"
+	registryimport "intelligent-report-generation-system/internal/askdata/registry/import"
+	"intelligent-report-generation-system/internal/auth"
+)
+
+const (
+	maxAdminBodyBytes      = 8 << 20
+	adminIdempotencyDomain = "askdata-semantic-admin-v1\x00"
+)
+
+type adminIdentityResolver func(context.Context) (registry.AdminScope, error)
+
+type importCommitter interface {
+	Commit(context.Context, registryimport.CommitInput) (registryimport.CommitResult, error)
+}
+
+type importWithdrawer interface {
+	Withdraw(context.Context, registryimport.WithdrawInput) (registryimport.WithdrawResult, error)
+}
+
+type semanticBulkCertifier interface {
+	BulkCertify(
+		context.Context, registry.AdminScope, string, []string, string,
+	) (registry.BulkCertificationResult, error)
+}
+
+type semanticExporter interface {
+	Count(context.Context, registryimport.ExportSelection) (int, error)
+	Generate(context.Context, registryimport.ExportSelection) (registryimport.ExportArtifact, error)
+}
+
+type adminIdempotencyProvider interface {
+	IdempotencyRepository() IdempotencyRepository
+}
+
+type ImportMutationServices struct {
+	Commit          importCommitter
+	Withdraw        importWithdrawer
+	Certify         semanticBulkCertifier
+	Export          semanticExporter
+	ExportJobs      registryimport.ExportJobReader
+	ExportArtifacts registryimport.ImportObjectStorage
+	ReleaseReview   *registry.ReleaseReviewService
+}
+
+type AdminHandler struct {
+	backend         registry.AdminBackend
+	lifecycle       registry.ReleaseLifecycleBackend
+	additivity      registry.AdditivityAdminBackend
+	identity        adminIdentityResolver
+	template        *registryimport.TemplateService
+	upload          *registryimport.UploadService
+	report          *registryimport.ReportService
+	commit          importCommitter
+	withdraw        importWithdrawer
+	certify         semanticBulkCertifier
+	export          semanticExporter
+	exportJobs      registryimport.ExportJobReader
+	exportArtifacts registryimport.ImportObjectStorage
+	releaseReview   *registry.ReleaseReviewService
+}
+
+func NewAdminHandler(
+	authService *auth.Service,
+	backend registry.AdminBackend,
+	template ...*registryimport.TemplateService,
+) http.Handler {
+	protected := newProtectedAdminHandler(backend, authenticatedAdminScope, template...)
+	if provider, ok := backend.(adminIdempotencyProvider); ok && provider.IdempotencyRepository() != nil {
+		protected = idempotencyMiddleware(provider.IdempotencyRepository(), authenticatedIdentity, protected)
+	}
+	return auth.RequireAccessToken(authService, protected)
+}
+
+func NewAdminHandlerWithImportServices(
+	authService *auth.Service,
+	backend registry.AdminBackend,
+	template *registryimport.TemplateService,
+	upload *registryimport.UploadService,
+	report *registryimport.ReportService,
+	mutations ...ImportMutationServices,
+) http.Handler {
+	protected := newProtectedAdminHandlerWithImports(
+		backend, authenticatedAdminScope, template, upload, report, mutations...,
+	)
+	if provider, ok := backend.(adminIdempotencyProvider); ok && provider.IdempotencyRepository() != nil {
+		protected = idempotencyMiddleware(provider.IdempotencyRepository(), authenticatedIdentity, protected)
+	}
+	return auth.RequireAccessToken(authService, protected)
+}
+
+func newProtectedAdminHandler(
+	backend registry.AdminBackend,
+	identity adminIdentityResolver,
+	template ...*registryimport.TemplateService,
+) http.Handler {
+	var templateService *registryimport.TemplateService
+	if len(template) == 1 {
+		templateService = template[0]
+	}
+	return newProtectedAdminHandlerWithImports(backend, identity, templateService, nil, nil)
+}
+
+func newProtectedAdminHandlerWithImports(
+	backend registry.AdminBackend,
+	identity adminIdentityResolver,
+	template *registryimport.TemplateService,
+	upload *registryimport.UploadService,
+	report *registryimport.ReportService,
+	mutations ...ImportMutationServices,
+) http.Handler {
+	var mutationServices ImportMutationServices
+	if len(mutations) == 1 {
+		mutationServices = mutations[0]
+	}
+	handler := &AdminHandler{
+		backend: backend, identity: identity, template: template, upload: upload,
+		report: report, commit: mutationServices.Commit,
+		withdraw: mutationServices.Withdraw, certify: mutationServices.Certify,
+		export: mutationServices.Export, exportJobs: mutationServices.ExportJobs,
+		exportArtifacts: mutationServices.ExportArtifacts, releaseReview: mutationServices.ReleaseReview,
+	}
+	if additivity, ok := backend.(registry.AdditivityAdminBackend); ok {
+		handler.additivity = additivity
+	}
+	if lifecycle, ok := backend.(registry.ReleaseLifecycleBackend); ok {
+		handler.lifecycle = lifecycle
+	}
+	mux := http.NewServeMux()
+	for _, path := range []string{
+		"models", "measures", "metrics", "metric-versions",
+		"dimensions", "terms", "kpi-bundles", "relationships",
+	} {
+		collection := "/api/v1/askdata/semantic/" + path
+		item := collection + "/{id}"
+		mux.HandleFunc("GET "+collection, handler.listDrafts)
+		mux.HandleFunc("POST "+collection, handler.createDraft)
+		mux.HandleFunc("GET "+item, handler.getDraft)
+		mux.HandleFunc("PUT "+item, handler.updateDraft)
+		mux.HandleFunc("DELETE "+item, handler.deleteDraft)
+	}
+	mux.HandleFunc("POST /api/v1/askdata/semantic/releases", handler.createReleaseDraft)
+	if handler.lifecycle != nil {
+		mux.HandleFunc("GET /api/v1/askdata/semantic/releases/{id}/lifecycle", handler.getReleaseLifecycle)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/validate-project", handler.validateAndProjectRelease)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/evaluation-batches", handler.planReleaseEvaluationBatch)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/error-budget", handler.recordReleaseErrorBudget)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/gate", handler.recomputeReleaseGate)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/review-report", handler.recordReleaseReviewReport)
+		if handler.releaseReview != nil {
+			mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/review-report/generate", handler.generateReleaseReviewReport)
+		}
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/approvals", handler.submitReleaseApproval)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/activate", handler.activateRelease)
+	}
+	if handler.additivity != nil {
+		mux.HandleFunc(
+			"POST /api/v1/askdata/semantic/metrics/additivity/confirm",
+			handler.bulkConfirmAdditivity,
+		)
+		mux.HandleFunc(
+			"GET /api/v1/askdata/semantic/domains/{id}/readiness",
+			handler.getDomainReadiness,
+		)
+	}
+	if handler.template != nil {
+		mux.HandleFunc(
+			"GET /api/v1/askdata/semantic/imports/template",
+			handler.downloadImportTemplate,
+		)
+	}
+	if handler.upload != nil {
+		mux.HandleFunc(
+			"POST /api/v1/askdata/semantic/imports",
+			handler.uploadImport,
+		)
+	}
+	if handler.report != nil {
+		mux.HandleFunc(
+			"GET /api/v1/askdata/semantic/imports/{id}/report",
+			handler.downloadImportReport,
+		)
+	}
+	if handler.commit != nil {
+		mux.HandleFunc(
+			"POST /api/v1/askdata/semantic/imports/{id}/commit",
+			handler.commitImport,
+		)
+	}
+	if handler.withdraw != nil {
+		mux.HandleFunc(
+			"POST /api/v1/askdata/semantic/imports/{id}/withdraw",
+			handler.withdrawImport,
+		)
+	}
+	if handler.certify != nil {
+		mux.HandleFunc(
+			"POST /api/v1/askdata/semantic/bulk-certify",
+			handler.bulkCertify,
+		)
+	}
+	if handler.export != nil {
+		mux.HandleFunc(
+			"GET /api/v1/askdata/semantic/exports",
+			handler.requestSemanticExport,
+		)
+	}
+	if handler.exportJobs != nil {
+		mux.HandleFunc(
+			"GET /api/v1/askdata/semantic/exports/{id}",
+			handler.getSemanticExport,
+		)
+		if handler.exportArtifacts != nil {
+			mux.HandleFunc(
+				"GET /api/v1/askdata/semantic/exports/{id}/download",
+				handler.downloadSemanticExport,
+			)
+		}
+	}
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Cache-Control", "no-store")
+		writer.Header().Set("X-Content-Type-Options", "nosniff")
+		mux.ServeHTTP(writer, request)
+	})
+}
+
+func (handler *AdminHandler) getReleaseLifecycle(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	result, err := handler.lifecycle.GetReleaseLifecycle(request.Context(), scope, request.PathValue("id"))
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (handler *AdminHandler) validateAndProjectRelease(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok || !requireLifecycleIdempotency(writer, request) {
+		return
+	}
+	var input struct{}
+	if _, err := decodeAdminJSON(writer, request, &input); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.lifecycle.ValidateAndStartProjection(request.Context(), scope, request.PathValue("id"))
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, result)
+}
+
+func (handler *AdminHandler) planReleaseEvaluationBatch(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok || !requireLifecycleIdempotency(writer, request) {
+		return
+	}
+	var input registry.EvaluationBatchPlanInput
+	if _, err := decodeAdminJSON(writer, request, &input); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.lifecycle.PlanEvaluationBatch(request.Context(), scope, request.PathValue("id"), input)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, result)
+}
+
+func (handler *AdminHandler) recordReleaseErrorBudget(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok || !requireLifecycleIdempotency(writer, request) {
+		return
+	}
+	var input registry.ErrorBudgetAttachmentInput
+	if _, err := decodeAdminJSON(writer, request, &input); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	reportHash, err := handler.lifecycle.RecordErrorBudget(request.Context(), scope, request.PathValue("id"), input)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{"reportHash": reportHash})
+}
+
+func (handler *AdminHandler) recomputeReleaseGate(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok || !requireLifecycleIdempotency(writer, request) {
+		return
+	}
+	var input registry.ReleaseGateInput
+	if _, err := decodeAdminJSON(writer, request, &input); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.lifecycle.RecomputeReleaseGate(request.Context(), scope, request.PathValue("id"), input)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (handler *AdminHandler) recordReleaseReviewReport(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok || !requireLifecycleIdempotency(writer, request) {
+		return
+	}
+	var input registry.ReleaseReviewReportInput
+	if _, err := decodeAdminJSON(writer, request, &input); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	reportHash, err := handler.lifecycle.RecordReleaseReviewReport(request.Context(), scope, request.PathValue("id"), input)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{"reportHash": reportHash})
+}
+
+func (handler *AdminHandler) generateReleaseReviewReport(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok || !requireLifecycleIdempotency(writer, request) {
+		return
+	}
+	var input struct {
+		EvaluationSetID   string `json:"evaluationSetId"`
+		EvaluationBatchID string `json:"evaluationBatchId"`
+		PromptVersion     string `json:"promptVersion"`
+		PreferredModel    string `json:"preferredModel"`
+	}
+	if _, err := decodeAdminJSON(writer, request, &input); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	releaseID := request.PathValue("id")
+	gate, err := handler.lifecycle.RecomputeReleaseGate(request.Context(), scope, releaseID, registry.ReleaseGateInput{
+		EvaluationSetID: input.EvaluationSetID, EvaluationBatchID: input.EvaluationBatchID,
+	})
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	canonicalFacts, err := registry.CanonicalJSON(gate.Facts)
+	if err != nil || len(gate.ReceiptHash) != 64 {
+		writeAdminError(writer, registry.ErrReleaseReviewInvalid)
+		return
+	}
+	evidenceHash := askdata.HashBytes(canonicalFacts)
+	result, err := handler.releaseReview.GenerateAndRecord(request.Context(), registry.GenerateReleaseReviewRequest{
+		Scope: scope, ReleaseID: releaseID, EvaluationSetID: input.EvaluationSetID,
+		EvaluationBatchID: input.EvaluationBatchID, Gate: gate,
+		PromptVersion: input.PromptVersion, PreferredModel: input.PreferredModel,
+		Evidence: []registry.ReleaseReviewEvidence{{
+			EvidenceID: askdata.ID("release-gate-" + gate.ReceiptHash[:16]), Kind: "EVALUATION_GATE",
+			ContentHash: evidenceHash, Payload: canonicalFacts,
+		}},
+	})
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, result)
+}
+
+func (handler *AdminHandler) submitReleaseApproval(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok || !requireLifecycleIdempotency(writer, request) {
+		return
+	}
+	var input registry.ReleaseApprovalInput
+	if _, err := decodeAdminJSON(writer, request, &input); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.lifecycle.SubmitReleaseApproval(request.Context(), scope, request.PathValue("id"), input)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, result)
+}
+
+func (handler *AdminHandler) activateRelease(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok || !requireLifecycleIdempotency(writer, request) {
+		return
+	}
+	var input registry.ReleaseActivationInput
+	if _, err := decodeAdminJSON(writer, request, &input); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.lifecycle.ActivateRelease(request.Context(), scope, request.PathValue("id"), input)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func requireLifecycleIdempotency(writer http.ResponseWriter, request *http.Request) bool {
+	if _, err := requireIdempotencyKey(request); err != nil {
+		writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+		return false
+	}
+	return true
+}
+
+func authenticatedAdminScope(ctx context.Context) (registry.AdminScope, error) {
+	identity, err := authenticatedIdentity(ctx)
+	if err != nil {
+		return registry.AdminScope{}, err
+	}
+	return registry.AdminScope{
+		TenantID: string(identity.TenantID), DomainID: string(identity.DomainID),
+		ActorID: string(identity.ActorID),
+	}, nil
+}
+
+func (handler *AdminHandler) listDrafts(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	resource, err := adminResourceFromPath(request.URL.Path)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	query := request.URL.Query()
+	for key := range query {
+		if key != "cursor" && key != "limit" && key != "additivityStatus" && key != "suggestion" {
+			writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+			return
+		}
+	}
+	additivityStatus := strings.ToUpper(strings.TrimSpace(query.Get("additivityStatus")))
+	if additivityStatus != "" {
+		if resource != registry.AdminResourceMetric || additivityStatus != "UNCONFIRMED" || handler.additivity == nil {
+			writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+			return
+		}
+		group := registry.Additivity(strings.ToUpper(strings.TrimSpace(query.Get("suggestion"))))
+		limit := 50
+		if raw := query.Get("limit"); raw != "" {
+			limit, err = strconv.Atoi(raw)
+			if err != nil {
+				writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+				return
+			}
+		}
+		page, err := handler.additivity.ListUnconfirmedAdditivity(
+			request.Context(), scope, group, query.Get("cursor"), limit,
+		)
+		if err != nil {
+			writeAdminError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, page)
+		return
+	}
+	if query.Get("suggestion") != "" {
+		writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+		return
+	}
+	limit := 50
+	if raw := query.Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil {
+			writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+			return
+		}
+	}
+	page, err := handler.backend.ListDrafts(
+		request.Context(), scope, resource, query.Get("cursor"), limit,
+	)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, page)
+}
+
+func (handler *AdminHandler) getDomainReadiness(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	if request.URL.RawQuery != "" || request.PathValue("id") != scope.DomainID || handler.additivity == nil {
+		writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+		return
+	}
+	result, err := handler.additivity.GetAdditivityReadiness(request.Context(), scope)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (handler *AdminHandler) bulkConfirmAdditivity(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	if request.URL.RawQuery != "" || handler.additivity == nil {
+		writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+		return
+	}
+	var input registry.BulkAdditivityConfirmation
+	canonical, err := decodeAdminJSON(writer, request, &input)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	command, err := newAdminCommand(request, scope, canonical)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.additivity.BulkConfirmAdditivity(
+		request.Context(), scope, input, command,
+	)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (handler *AdminHandler) getDraft(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	if request.URL.RawQuery != "" {
+		writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+		return
+	}
+	resource, err := adminResourceFromPath(request.URL.Path)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	resourceID, err := adminResourceID(request.PathValue("id"))
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.backend.GetDraft(request.Context(), scope, resource, resourceID)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (handler *AdminHandler) createDraft(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	if request.URL.RawQuery != "" {
+		writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+		return
+	}
+	resource, err := adminResourceFromPath(request.URL.Path)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	mutation, canonical, err := decodeAdminMutation(writer, request, resource)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	command, err := newAdminCommand(request, scope, canonical)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.backend.CreateDraft(
+		request.Context(), scope, resource, mutation, command,
+	)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if result.Replayed {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, result)
+}
+
+func (handler *AdminHandler) updateDraft(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	if request.URL.RawQuery != "" {
+		writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+		return
+	}
+	resource, err := adminResourceFromPath(request.URL.Path)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	resourceID, err := adminResourceID(request.PathValue("id"))
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	mutation, canonical, err := decodeAdminMutation(writer, request, resource)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	command, err := newAdminCommand(request, scope, canonical)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.backend.UpdateDraft(
+		request.Context(), scope, resource, resourceID, mutation, command,
+	)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (handler *AdminHandler) deleteDraft(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	if request.URL.RawQuery != "" {
+		writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+		return
+	}
+	resource, err := adminResourceFromPath(request.URL.Path)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	resourceID, err := adminResourceID(request.PathValue("id"))
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	var input registry.DeleteDraftInput
+	canonical, err := decodeAdminJSON(writer, request, &input)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	command, err := newAdminCommand(request, scope, canonical)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.backend.DeleteDraft(
+		request.Context(), scope, resource, resourceID, input, command,
+	)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (handler *AdminHandler) createReleaseDraft(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	if request.URL.RawQuery != "" {
+		writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+		return
+	}
+	var input registry.ReleaseDraftInput
+	canonical, err := decodeAdminJSON(writer, request, &input)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	command, err := newAdminCommand(request, scope, canonical)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.backend.CreateAdminReleaseDraft(
+		request.Context(), scope, input, command,
+	)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if result.Replayed {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, result)
+}
+
+func (handler *AdminHandler) resolveScope(
+	writer http.ResponseWriter,
+	request *http.Request,
+) (registry.AdminScope, bool) {
+	if handler == nil || handler.backend == nil || handler.identity == nil {
+		writeAdminError(writer, errors.New("semantic admin service is not configured"))
+		return registry.AdminScope{}, false
+	}
+	scope, err := handler.identity(request.Context())
+	if err != nil {
+		writeAdminError(writer, ErrUnauthenticated)
+		return registry.AdminScope{}, false
+	}
+	return scope, true
+}
+
+func adminResourceFromPath(path string) (registry.AdminResource, error) {
+	trimmed := strings.TrimPrefix(path, "/api/v1/askdata/semantic/")
+	segment := strings.SplitN(trimmed, "/", 2)[0]
+	switch segment {
+	case "models":
+		return registry.AdminResourceSemanticModel, nil
+	case "measures":
+		return registry.AdminResourceMeasure, nil
+	case "metrics":
+		return registry.AdminResourceMetric, nil
+	case "metric-versions":
+		return registry.AdminResourceMetricVersion, nil
+	case "dimensions":
+		return registry.AdminResourceDimension, nil
+	case "terms":
+		return registry.AdminResourceBusinessTerm, nil
+	case "kpi-bundles":
+		return registry.AdminResourceKPIBundle, nil
+	case "relationships":
+		return registry.AdminResourceRelationship, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported semantic resource", registry.ErrRegistryInvalidRequest)
+	}
+}
+
+func adminResourceID(raw string) (string, error) {
+	parsed, err := uuid.Parse(raw)
+	if err != nil || parsed.String() != strings.ToLower(raw) {
+		return "", fmt.Errorf("%w: resource ID must be a canonical UUID", registry.ErrRegistryInvalidRequest)
+	}
+	return raw, nil
+}
+
+func decodeAdminMutation(
+	writer http.ResponseWriter,
+	request *http.Request,
+	resource registry.AdminResource,
+) (registry.AdminMutation, []byte, error) {
+	var mutation registry.AdminMutation
+	var target any
+	switch resource {
+	case registry.AdminResourceSemanticModel:
+		mutation.SemanticModel = &registry.SemanticModelDraftInput{}
+		target = mutation.SemanticModel
+	case registry.AdminResourceMeasure:
+		mutation.Measure = &registry.MeasureDraftInput{}
+		target = mutation.Measure
+	case registry.AdminResourceMetric:
+		mutation.Metric = &registry.MetricDraftInput{}
+		target = mutation.Metric
+	case registry.AdminResourceMetricVersion:
+		mutation.MetricVersion = &registry.MetricVersionDraftInput{}
+		target = mutation.MetricVersion
+	case registry.AdminResourceDimension:
+		mutation.Dimension = &registry.DimensionDraftInput{}
+		target = mutation.Dimension
+	case registry.AdminResourceBusinessTerm:
+		mutation.BusinessTerm = &registry.BusinessTermDraftInput{}
+		target = mutation.BusinessTerm
+	case registry.AdminResourceKPIBundle:
+		mutation.KPIBundle = &registry.KPIBundleDraftInput{}
+		target = mutation.KPIBundle
+	case registry.AdminResourceRelationship:
+		mutation.Relationship = &registry.RelationshipDraftInput{}
+		target = mutation.Relationship
+	default:
+		return registry.AdminMutation{}, nil, registry.ErrRegistryInvalidRequest
+	}
+	canonical, err := decodeAdminJSON(writer, request, target)
+	return mutation, canonical, err
+}
+
+func decodeAdminJSON(writer http.ResponseWriter, request *http.Request, target any) ([]byte, error) {
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if request.Body == nil || err != nil || strings.ToLower(mediaType) != "application/json" {
+		return nil, registry.ErrRegistryInvalidRequest
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, maxAdminBodyBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return nil, registry.ErrRegistryInvalidRequest
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, registry.ErrRegistryInvalidRequest
+	}
+	canonical, err := registry.CanonicalValue(target)
+	if err != nil {
+		return nil, registry.ErrRegistryInvalidRequest
+	}
+	return canonical, nil
+}
+
+func newAdminCommand(
+	request *http.Request,
+	scope registry.AdminScope,
+	canonicalBody []byte,
+) (registry.AdminCommand, error) {
+	key, err := requireIdempotencyKey(request)
+	if err != nil {
+		return registry.AdminCommand{}, registry.ErrRegistryInvalidRequest
+	}
+	keyHash := askdata.HashBytes([]byte(adminIdempotencyDomain + key))
+	requestID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(
+		scope.TenantID+"\x00"+scope.ActorID+"\x00"+string(keyHash),
+	)).String()
+	actionMaterial := append([]byte(request.Method+"\x00"+request.URL.Path+"\x00"), canonicalBody...)
+	return registry.AdminCommand{
+		RequestID: requestID, ActionHash: askdata.HashBytes(actionMaterial),
+	}, nil
+}
+
+func writeAdminError(writer http.ResponseWriter, err error) {
+	var validation registry.ValidationErrors
+	switch {
+	case errors.Is(err, ErrUnauthenticated):
+		writeError(writer, http.StatusUnauthorized, "REG_AUTHENTICATION_REQUIRED", "valid semantic administration access is required")
+	case errors.Is(err, registry.ErrRegistryPermissionDenied):
+		writeError(writer, http.StatusForbidden, "REG_PERMISSION_DENIED", "semantic administration permission is required")
+	case errors.As(err, &validation):
+		writeJSON(writer, http.StatusBadRequest, map[string]any{
+			"code": "REG_VALIDATION_FAILED", "message": "semantic draft validation failed",
+			"issues": validation.Issues,
+		})
+	case errors.Is(err, registry.ErrRegistryInvalidRequest):
+		writeError(writer, http.StatusBadRequest, "REG_INVALID_REQUEST", "semantic administration request is invalid")
+	case errors.Is(err, registry.ErrRegistryNotFound):
+		writeError(writer, http.StatusNotFound, "REG_NOT_FOUND", "semantic draft was not found")
+	case errors.Is(err, registry.ErrRegistryVersionConflict):
+		writeError(writer, http.StatusConflict, "REG_VERSION_CONFLICT", "semantic draft changed or is no longer editable")
+	case errors.Is(err, registry.ErrRegistryIdempotencyConflict):
+		writeError(writer, http.StatusConflict, "REG_IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different semantic write")
+	case errors.Is(err, registry.ErrRegistryDraftInUse):
+		writeError(writer, http.StatusConflict, "REG_DRAFT_IN_USE", "semantic draft is referenced by another object")
+	case errors.Is(err, registry.ErrRegistryConflict):
+		writeError(writer, http.StatusConflict, "REG_CONFLICT", "semantic draft conflicts with an existing object")
+	case errors.Is(err, registry.ErrReleasePreflightFailed):
+		writeError(writer, http.StatusUnprocessableEntity, "RELEASE_PREFLIGHT_FAILED", "semantic release preflight did not pass")
+	case errors.Is(err, registry.ErrReleaseStateConflict):
+		writeError(writer, http.StatusConflict, "RELEASE_STATE_VERSION_CONFLICT", "semantic release state changed concurrently")
+	case errors.Is(err, registry.ErrReleaseApprovalFailed):
+		writeError(writer, http.StatusUnprocessableEntity, "RELEASE_APPROVALS_REQUIRED", "semantic release requires two independent approvals")
+	case errors.Is(err, registry.ErrReleaseGateFailed):
+		writeError(writer, http.StatusUnprocessableEntity, "RELEASE_GATE_FAILED", "semantic release evaluation gate did not pass")
+	case errors.Is(err, registry.ErrReleaseReviewInvalid):
+		writeError(writer, http.StatusUnprocessableEntity, "RELEASE_REVIEW_INVALID", "semantic release review evidence or model output is invalid")
+	default:
+		writeError(writer, http.StatusInternalServerError, "REG_SERVICE_FAILED", "semantic administration service failed")
+	}
+}

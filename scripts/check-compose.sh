@@ -4,7 +4,7 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 COMPOSE_FILE="$ROOT_DIR/compose.yaml"
 
-required_services="postgres postgres-warehouse minio minio-init nebula-metad nebula-storaged nebula-graphd nebula-init nebula-loopback-proxy connector-service api worker connection-test-worker web"
+required_services="postgres postgres-warehouse minio minio-init nebula-metad nebula-storaged nebula-graphd nebula-init nebula-loopback-proxy connector-service api worker askdata-embedding-worker askdata-profile-worker askdata-projector-worker askdata-evaluator-worker connection-test-worker web"
 # 检查开发环境依赖服务是否全部声明。
 for service in $required_services; do
   if ! grep -q "^  $service:" "$COMPOSE_FILE"; then
@@ -69,10 +69,17 @@ for schema_marker in \
   "CREATE TAG IF NOT EXISTS metric" \
   "CREATE TAG IF NOT EXISTS dimension" \
   "CREATE TAG IF NOT EXISTS member" \
+  "CREATE TAG IF NOT EXISTS report_version" \
+  "CREATE TAG IF NOT EXISTS report_component" \
   "CREATE EDGE IF NOT EXISTS MODELED_BY" \
   "CREATE EDGE IF NOT EXISTS HAS_DIMENSION" \
   "CREATE EDGE IF NOT EXISTS HAS_MEMBER" \
-  "CREATE EDGE IF NOT EXISTS JOINS_TO"; do
+  "CREATE EDGE IF NOT EXISTS JOINS_TO" \
+  "CREATE EDGE IF NOT EXISTS REPORT_HAS_COMPONENT" \
+  "CREATE EDGE IF NOT EXISTS REPORT_USES_METRIC" \
+  "CREATE EDGE IF NOT EXISTS REPORT_GROUPS_BY_DIMENSION" \
+  "CREATE EDGE IF NOT EXISTS REPORT_FILTERS_MEMBER" \
+  "CREATE EDGE IF NOT EXISTS REPORT_USES_MODEL"; do
   if ! grep -q "$schema_marker" "$ROOT_DIR/deployments/nebula/schema.ngql"; then
     echo "missing NebulaGraph schema marker: $schema_marker" >&2
     exit 1
@@ -80,7 +87,7 @@ for schema_marker in \
 done
 
 compose_json=$(docker compose --env-file "$ROOT_DIR/.env.example" --file "$COMPOSE_FILE" \
-  --profile graph-access --profile verification config --format json)
+  --profile graph-access --profile verification --profile askdata-workers config --format json)
 jq -e '
   def hasnet($service; $network): .services[$service].networks | has($network);
   (.services["nebula-metad"].ports == null) and
@@ -96,6 +103,14 @@ jq -e '
   (.services["nebula-loopback-proxy"].ports | all(.host_ip == "127.0.0.1")) and
   hasnet("api"; "askdata_graph_client_net") and
   hasnet("worker"; "askdata_graph_client_net") and
+  hasnet("askdata-projector-worker"; "askdata_graph_client_net") and
+  (hasnet("askdata-embedding-worker"; "askdata_graph_client_net") | not) and
+  (hasnet("askdata-profile-worker"; "askdata_graph_client_net") | not) and
+  (hasnet("askdata-evaluator-worker"; "askdata_graph_client_net") | not) and
+  (.services["askdata-embedding-worker"].environment.WORKER_TASK_TYPES == "EMBEDDING") and
+  (.services["askdata-profile-worker"].environment.WORKER_TASK_TYPES == "PROFILE") and
+  (.services["askdata-projector-worker"].environment.WORKER_TASK_TYPES == "PROJECTOR") and
+  (.services["askdata-evaluator-worker"].environment.WORKER_TASK_TYPES == "EVALUATOR") and
   (hasnet("api"; "askdata_graph_cluster_net") | not) and
   (hasnet("worker"; "askdata_graph_cluster_net") | not) and
   (hasnet("connection-test-worker"; "askdata_graph_client_net") | not) and

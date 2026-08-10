@@ -7,17 +7,29 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
 	"intelligent-report-generation-system/internal/access"
 	aiplatform "intelligent-report-generation-system/internal/ai"
+	"intelligent-report-generation-system/internal/askdata"
+	askdatacompiler "intelligent-report-generation-system/internal/askdata/compiler"
+	askdatafeedback "intelligent-report-generation-system/internal/askdata/feedback"
 	askdatahttp "intelligent-report-generation-system/internal/askdata/http"
+	"intelligent-report-generation-system/internal/askdata/registry"
+	registryimport "intelligent-report-generation-system/internal/askdata/registry/import"
+	askdatareportasset "intelligent-report-generation-system/internal/askdata/reportasset"
+	"intelligent-report-generation-system/internal/askdata/savedquestion"
+	askdatavalidator "intelligent-report-generation-system/internal/askdata/validator"
 	"intelligent-report-generation-system/internal/asset"
 	"intelligent-report-generation-system/internal/assetembedding"
 	"intelligent-report-generation-system/internal/auth"
 	"intelligent-report-generation-system/internal/backgroundtask"
 	"intelligent-report-generation-system/internal/config"
+	"intelligent-report-generation-system/internal/datarequest"
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasetai"
 	"intelligent-report-generation-system/internal/datasetsemanticnaming"
@@ -31,9 +43,44 @@ import (
 	"intelligent-report-generation-system/internal/metadataai"
 	"intelligent-report-generation-system/internal/observability"
 	"intelligent-report-generation-system/internal/platform/database"
+	platformidempotency "intelligent-report-generation-system/internal/platform/idempotency"
 	"intelligent-report-generation-system/internal/policy"
 	"intelligent-report-generation-system/internal/queryruntime"
+	reportasset "intelligent-report-generation-system/internal/report/asset"
+	reportauthorization "intelligent-report-generation-system/internal/report/authorization"
+	reporthttp "intelligent-report-generation-system/internal/report/http"
+	reportinsight "intelligent-report-generation-system/internal/report/insight"
+	reportpublication "intelligent-report-generation-system/internal/report/publication"
+	reportai "intelligent-report-generation-system/internal/report/reportai"
+	reportruntime "intelligent-report-generation-system/internal/report/runtime"
+	reportsharing "intelligent-report-generation-system/internal/report/sharing"
+	reportstore "intelligent-report-generation-system/internal/report/store"
+	reporttemplate "intelligent-report-generation-system/internal/report/template"
 )
+
+type savedQuestionLauncher struct{ service *askdatahttp.PostgresService }
+
+func (launcher savedQuestionLauncher) LaunchSavedQuestion(
+	ctx context.Context, input savedquestion.LaunchInput,
+) (savedquestion.LaunchResult, error) {
+	questionHash := askdata.HashBytes([]byte("askdata-saved-question-open-v1\x00" + strings.TrimSpace(input.Question.QuestionText)))
+	idempotencyHash := askdata.HashBytes([]byte("askdata-saved-question-idempotency-v1\x00" + input.IdempotencyKey))
+	conversationID := askdata.ID(uuid.NewSHA1(uuid.NameSpaceOID, []byte(
+		string(input.Identity.TenantID)+":"+string(input.Identity.ActorID)+":"+input.IdempotencyKey,
+	)).String())
+	result, err := launcher.service.CreateQuestion(ctx, askdatahttp.RequestIdentity{
+		TenantID: input.Identity.TenantID, DomainID: input.Identity.DomainID, ActorID: input.Identity.ActorID,
+	}, askdatahttp.CreateQuestionInput{
+		QuestionHash: questionHash, IdempotencyKeyHash: idempotencyHash, ConversationID: conversationID,
+		SavedQuestionID: input.Question.ID,
+	})
+	if err != nil {
+		return savedquestion.LaunchResult{}, err
+	}
+	return savedquestion.LaunchResult{
+		RunID: result.Snapshot.Run.ID, ConversationID: result.Snapshot.Run.ConversationID, Replayed: result.Replayed,
+	}, nil
+}
 
 // main assembles the access, data-source, and dataset configuration APIs.
 func main() {
@@ -53,6 +100,13 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+	manifestSeedCtx, manifestSeedCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	err = reporttemplate.SeedBundledComponents(manifestSeedCtx, pool)
+	manifestSeedCancel()
+	if err != nil {
+		logger.Error("seed bundled report component manifests", "error", err)
+		os.Exit(1)
+	}
 
 	warehouseStartupCtx, warehouseStartupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	warehousePool, err := database.Open(warehouseStartupCtx, cfg.WarehouseDatabaseURL)
@@ -209,8 +263,58 @@ func main() {
 			RetrievalMode: cfg.DatasetAIRetrievalMode,
 		},
 	)
-	questionHandler := askdatahttp.NewHandler(
-		authService, askdatahttp.NewPostgresService(pool),
+	questionService := askdatahttp.NewPostgresServiceWithClarificationTimeout(
+		pool, cfg.AskDataClarificationTimeout,
+	)
+	questionHandler := askdatahttp.NewHandler(authService, questionService)
+	savedQuestionHandler := savedquestion.NewHandler(
+		authService, savedquestion.NewPostgresRepository(pool),
+		savedQuestionLauncher{service: questionService},
+	)
+	feedbackTicketHandler := askdatafeedback.NewHandler(
+		authService, askdatafeedback.NewPostgresRepository(pool),
+	)
+	reportAssetHandler := askdatareportasset.NewCertificationHandler(
+		authService, askdatareportasset.NewPostgresProjectionRuntimeStore(pool),
+	)
+	dataRequestHandler := datarequest.NewHandlerWithIdempotency(
+		authService, datarequest.NewService(datarequest.NewPostgresStore(pool)),
+		platformidempotency.NewPostgresRepository(pool),
+	)
+	semanticImportStore := registryimport.NewPostgresStore(pool)
+	semanticExportService := registryimport.NewExportService(
+		registryimport.NewPostgresExportCatalog(pool),
+	)
+	semanticRegistryStore := registry.NewPostgresStore(pool)
+	releaseReviewer, err := registry.NewReleaseReviewer(aiService)
+	if err != nil {
+		logger.Error("initialize semantic release reviewer", "error", err)
+		os.Exit(1)
+	}
+	releaseReviewService, err := registry.NewReleaseReviewService(releaseReviewer, semanticRegistryStore)
+	if err != nil {
+		logger.Error("initialize semantic release review service", "error", err)
+		os.Exit(1)
+	}
+	semanticAdminHandler := askdatahttp.NewAdminHandlerWithImportServices(
+		authService,
+		semanticRegistryStore,
+		registryimport.NewTemplateService(registryimport.NewPostgresTemplateCatalog(pool)),
+		registryimport.NewUploadService(objectStorage, semanticImportStore, cfg.MinIOUploadsBucket),
+		registryimport.NewReportService(semanticImportStore),
+		askdatahttp.ImportMutationServices{
+			Commit: registryimport.NewCommitService(
+				semanticImportStore, registryimport.NewPostgresDraftCreator(),
+			),
+			Withdraw: registryimport.NewWithdrawService(
+				semanticImportStore, registryimport.NewPostgresDraftWithdrawer(),
+			),
+			Certify:         registry.NewCertificationService(pool),
+			Export:          semanticExportService,
+			ExportJobs:      registryimport.NewPostgresExportJobStore(pool),
+			ExportArtifacts: objectStorage,
+			ReleaseReview:   releaseReviewService,
+		},
 	)
 
 	dataSourceHandler := datasource.NewHandler(authService, accessService, dataSourceService, credentialManager)
@@ -230,11 +334,132 @@ func main() {
 		accessService,
 		dataset.NewPublicationApprovalService(datasetStore, datasetService),
 	)
+	reportArtifacts, err := reportpublication.NewMinIOArtifactStoreWithCredentials(
+		cfg.MinIOEndpoint, cfg.MinIOAccessKey, cfg.MinIOSecretKey, cfg.MinIOUseSSL, cfg.MinIOUploadsBucket,
+	)
+	if err != nil {
+		logger.Error("initialize report artifact store", "error", err)
+		os.Exit(1)
+	}
+	reportRepository := reportstore.NewPostgresStore(pool)
+	reportAuthorizer := reportauthorization.NewPostgresAuthorizer(pool)
+	reportComponentRegistry, err := reporttemplate.NewDefaultRegistry()
+	if err != nil {
+		logger.Error("initialize report component registry", "error", err)
+		os.Exit(1)
+	}
+	reportAIGenerator, err := reportai.NewOrchestratedGenerator(aiService)
+	if err != nil {
+		logger.Error("initialize report AI generator", "error", err)
+		os.Exit(1)
+	}
+	reportInsightRegistry := reportinsight.NewRegistry()
+	reportDatasetRunner, err := reportruntime.NewDatasetVersionRunner(queryService)
+	if err != nil {
+		logger.Error("initialize report dataset runtime", "error", err)
+		os.Exit(1)
+	}
+	reportSemanticContractStore := askdatacompiler.NewPostgresContractStore(pool)
+	reportSemanticRehydrator, err := askdatacompiler.NewPinnedArtifactRehydrator(reportSemanticContractStore)
+	if err != nil {
+		logger.Error("initialize report semantic compiler", "error", err)
+		os.Exit(1)
+	}
+	reportCoverage, err := askdatavalidator.NewCoverageControl(materializationStore)
+	if err != nil {
+		logger.Error("initialize report semantic coverage", "error", err)
+		os.Exit(1)
+	}
+	reportPlanValidator, err := askdatavalidator.NewValidator(
+		askdatavalidator.NewPostgresExplainer(warehousePool), askdatavalidator.DefaultLimits(),
+	)
+	if err != nil {
+		logger.Error("initialize report semantic validator", "error", err)
+		os.Exit(1)
+	}
+	reportPlanExecutor, err := askdatavalidator.NewExecutor(
+		warehousePool,
+		queryruntime.NewPostgresSemanticMaterializationRevalidator(pool),
+		queryruntime.NewPostgresSemanticQuestionAuditStore(pool),
+	)
+	if err != nil {
+		logger.Error("initialize report semantic executor", "error", err)
+		os.Exit(1)
+	}
+	reportSemanticRunner, err := reportruntime.NewSemanticRuntimeRunner(
+		reportruntime.NewPostgresSemanticArtifactSource(pool),
+		reportruntime.NewPostgresViewerScopeResolver(pool),
+		reportSemanticRehydrator, reportCoverage, reportPlanValidator, reportPlanExecutor,
+	)
+	if err != nil {
+		logger.Error("initialize report semantic runtime", "error", err)
+		os.Exit(1)
+	}
+	reportUpgradeCompiler, err := askdatacompiler.NewPinnedIRCompiler(reportSemanticContractStore)
+	if err != nil {
+		logger.Error("initialize report semantic upgrade compiler", "error", err)
+		os.Exit(1)
+	}
+	reportRuntime := reportruntime.GovernedQueryExecutor{
+		Dataset: reportDatasetRunner, Semantic: reportSemanticRunner,
+	}
+	reportDependencyValidator := reportpublication.NewPostgresDependencyValidator(pool)
+	reportUpgradeService := &reportpublication.UpgradeService{
+		Repository: reportRepository, Dependencies: reportDependencyValidator,
+		Recompiler: reportpublication.GovernedComponentRecompiler{
+			Scopes: reportruntime.NewPostgresViewerScopeResolver(pool), Compiler: reportUpgradeCompiler,
+		},
+		Comparator:   reportpublication.RuntimeSampleComparator{Runtime: reportSemanticRunner, Limit: 100},
+		Components:   reportComponentRegistry,
+		Compilations: reportpublication.NewPostgresCompilationStore(pool),
+	}
+	reportPublisher := &reportpublication.Publisher{
+		Repository: reportRepository, Artifacts: reportArtifacts, Authorizer: reportAuthorizer,
+		Dependencies:      reportDependencyValidator,
+		Insights:          reportpublication.NewPostgresInsightValidator(pool),
+		ArtifactURIPrefix: reportArtifacts.URI("report-v2"),
+	}
+	reportAssetRepository := reportasset.NewPostgresRepository(pool)
+	reportAssetService := reportasset.Service{
+		Repository: reportAssetRepository, Artifacts: reportArtifacts,
+		Manifests: reportComponentRegistry, Dependencies: reportDependencyValidator,
+	}
+	reportHandler := reporthttp.NewHandler(
+		authService, platformidempotency.NewPostgresRepository(pool), reportRepository, reportPublisher,
+		reportruntime.Loader{Versions: reportRepository, Artifacts: reportArtifacts, Manifests: reportComponentRegistry},
+		reportsharing.Service{Repository: reportsharing.NewPostgresRepository(pool),
+			Authorizer: reportAuthorizer, Versions: reportRepository},
+		reportpublication.NewExportJobStore(pool),
+		reportinsight.NewPostgresStore(pool),
+		reportai.NewPostgresStore(pool),
+		reportAssetService,
+		reporthttp.AIOptions{
+			PlanGenerator: reportAIGenerator, EditGenerator: reportAIGenerator,
+			Fields: reportai.NewPostgresFieldCatalog(pool), Components: reportComponentRegistry,
+			Methods: reportInsightRegistry, Runtime: reportRuntime, Upgrade: reportUpgradeService,
+		},
+	)
 
 	api := http.NewServeMux()
 	api.Handle("/api/v1/auth/", auth.NewHandler(authService))
 	api.Handle("/api/v1/questions", questionHandler)
 	api.Handle("/api/v1/questions/", questionHandler)
+	api.Handle("/api/v1/conversations/", questionHandler)
+	api.Handle("/api/v1/add-to-report-intents/", questionHandler)
+	api.Handle("/api/v1/askdata/saved-questions", savedQuestionHandler)
+	api.Handle("/api/v1/askdata/saved-questions/", savedQuestionHandler)
+	api.Handle("/api/v1/askdata/feedback-tickets", feedbackTicketHandler)
+	api.Handle("/api/v1/askdata/feedback-tickets/", feedbackTicketHandler)
+	api.Handle("/api/v1/askdata/active-learning-candidates", feedbackTicketHandler)
+	api.Handle("/api/v1/askdata/active-learning-candidates/", feedbackTicketHandler)
+	api.Handle("/api/v1/askdata/report-assets", reportAssetHandler)
+	api.Handle("/api/v1/askdata/report-assets/", reportAssetHandler)
+	api.Handle("/api/v1/reports", reportHandler)
+	api.Handle("/api/v1/reports/", reportHandler)
+	api.Handle("/api/v1/report-shares/", reportHandler)
+	api.Handle("/api/v1/data-requests", dataRequestHandler)
+	api.Handle("/api/v1/data-requests/", dataRequestHandler)
+	api.Handle("/api/v1/askdata/semantic/", semanticAdminHandler)
 	api.Handle("POST /api/v1/permissions/evaluate", auth.RequireAccessToken(authService, access.EvaluateHandler(accessService)))
 	api.Handle("/api/v1/domain-catalog", accessAdminHandler)
 	api.Handle("/api/v1/domain-applications", accessAdminHandler)

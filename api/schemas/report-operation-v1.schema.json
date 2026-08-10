@@ -1,0 +1,447 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.intelligent-report.local/report-operation-v1.schema.json",
+  "title": "Report Operation v1",
+  "description": "Closed operation bundle used by human, AI, import and system report mutations.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "reportId", "baseRevision", "source", "aiRunId", "scope", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "reportId": { "$ref": "#/$defs/stableId" },
+    "baseRevision": { "type": "integer", "minimum": 0 },
+    "source": { "enum": ["USER", "AI", "IMPORT", "SYSTEM"] },
+    "aiRunId": { "oneOf": [{ "$ref": "#/$defs/stableId" }, { "type": "null" }] },
+    "scope": { "oneOf": [{ "$ref": "#/$defs/scope" }, { "type": "null" }] },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/operation" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "source": { "const": "AI" } }, "required": ["source"] },
+      "then": {
+        "properties": {
+          "aiRunId": { "$ref": "#/$defs/stableId" },
+          "scope": { "$ref": "#/$defs/scope" },
+          "operations": { "type": "array", "minItems": 1, "maxItems": 30, "items": { "$ref": "#/$defs/operation" } }
+        }
+      },
+      "else": { "properties": { "aiRunId": { "type": "null" } } }
+    }
+  ],
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$",
+      "maxLength": 128
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pageId"],
+      "properties": {
+        "pageId": { "$ref": "#/$defs/stableId" },
+        "sectionId": { "$ref": "#/$defs/stableId" },
+        "blockId": { "$ref": "#/$defs/stableId" }
+      },
+      "dependentRequired": { "blockId": ["sectionId"] }
+    },
+    "operation": {
+      "oneOf": [
+        { "$ref": "#/$defs/reportCreateOperation" },
+        { "$ref": "#/$defs/reportSettingsUpdateOperation" },
+        { "$ref": "#/$defs/templateApplyOperation" },
+        { "$ref": "#/$defs/themeUpdateOperation" },
+        { "$ref": "#/$defs/pageCreateOperation" },
+        { "$ref": "#/$defs/pageUpdateOperation" },
+        { "$ref": "#/$defs/pageDeleteOperation" },
+        { "$ref": "#/$defs/pageReorderOperation" },
+        { "$ref": "#/$defs/sectionCreateOperation" },
+        { "$ref": "#/$defs/sectionUpdateOperation" },
+        { "$ref": "#/$defs/sectionDeleteOperation" },
+        { "$ref": "#/$defs/sectionReorderOperation" },
+        { "$ref": "#/$defs/blockCreateOperation" },
+        { "$ref": "#/$defs/blockMoveOperation" },
+        { "$ref": "#/$defs/blockResizeOperation" },
+        { "$ref": "#/$defs/blockUpdateOperation" },
+        { "$ref": "#/$defs/blockCopyOperation" },
+        { "$ref": "#/$defs/blockDeleteOperation" },
+        { "$ref": "#/$defs/zoneCreateOperation" },
+        { "$ref": "#/$defs/zoneUpdateOperation" },
+        { "$ref": "#/$defs/zoneDeleteOperation" },
+        { "$ref": "#/$defs/zoneReorderOperation" },
+        { "$ref": "#/$defs/slotCreateOperation" },
+        { "$ref": "#/$defs/slotMergeOperation" },
+        { "$ref": "#/$defs/slotSplitOperation" },
+        { "$ref": "#/$defs/slotUpdateOperation" },
+        { "$ref": "#/$defs/slotDeleteOperation" },
+        { "$ref": "#/$defs/componentCreateOperation" },
+        { "$ref": "#/$defs/componentUpdateOperation" },
+        { "$ref": "#/$defs/componentReplaceOperation" },
+        { "$ref": "#/$defs/componentCopyOperation" },
+        { "$ref": "#/$defs/componentDeleteOperation" },
+        { "$ref": "#/$defs/dataBindingUpdateOperation" },
+        { "$ref": "#/$defs/filterCreateOperation" },
+        { "$ref": "#/$defs/filterUpdateOperation" },
+        { "$ref": "#/$defs/filterDeleteOperation" },
+        { "$ref": "#/$defs/interactionCreateOperation" },
+        { "$ref": "#/$defs/interactionUpdateOperation" },
+        { "$ref": "#/$defs/interactionDeleteOperation" },
+        { "$ref": "#/$defs/insightUpdateOperation" },
+        { "$ref": "#/$defs/insightRegenerateOperation" }
+      ]
+    },
+    "reportCreateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "REPORT_CREATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/reportCreatePayload" } }
+    },
+    "reportSettingsUpdateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "REPORT_SETTINGS_UPDATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/reportSettingsUpdatePayload" } }
+    },
+    "templateApplyOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "TEMPLATE_APPLY" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/templateApplyPayload" } }
+    },
+    "themeUpdateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "THEME_UPDATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/themeUpdatePayload" } }
+    },
+    "pageCreateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "PAGE_CREATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/pageCreatePayload" } }
+    },
+    "pageUpdateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "PAGE_UPDATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/namePayload" } }
+    },
+    "pageDeleteOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "PAGE_DELETE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/emptyPayload" } }
+    },
+    "pageReorderOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "PAGE_REORDER" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/orderPayload" } }
+    },
+    "sectionCreateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "SECTION_CREATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/sectionCreatePayload" } }
+    },
+    "sectionUpdateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "SECTION_UPDATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/namePayload" } }
+    },
+    "sectionDeleteOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "SECTION_DELETE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/emptyPayload" } }
+    },
+    "sectionReorderOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "SECTION_REORDER" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/orderPayload" } }
+    },
+    "blockCreateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "BLOCK_CREATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/blockCreatePayload" } }
+    },
+    "blockMoveOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "BLOCK_MOVE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/blockMovePayload" } }
+    },
+    "blockResizeOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "BLOCK_RESIZE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/blockResizePayload" } }
+    },
+    "blockUpdateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "BLOCK_UPDATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/blockUpdatePayload" } }
+    },
+    "blockCopyOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "BLOCK_COPY" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/copyPayload" } }
+    },
+    "blockDeleteOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "BLOCK_DELETE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/emptyPayload" } }
+    },
+    "zoneCreateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "ZONE_CREATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/zoneCreatePayload" } }
+    },
+    "zoneUpdateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "ZONE_UPDATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/zoneUpdatePayload" } }
+    },
+    "zoneDeleteOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "ZONE_DELETE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/emptyPayload" } }
+    },
+    "zoneReorderOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "ZONE_REORDER" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/orderPayload" } }
+    },
+    "slotCreateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "SLOT_CREATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/slotCreatePayload" } }
+    },
+    "slotMergeOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "SLOT_MERGE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/slotMergePayload" } }
+    },
+    "slotSplitOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "SLOT_SPLIT" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/slotSplitPayload" } }
+    },
+    "slotUpdateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "SLOT_UPDATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/slotUpdatePayload" } }
+    },
+    "slotDeleteOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "SLOT_DELETE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/emptyPayload" } }
+    },
+    "componentCreateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "COMPONENT_CREATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/componentCreatePayload" } }
+    },
+    "componentUpdateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "COMPONENT_UPDATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/componentUpdatePayload" } }
+    },
+    "componentReplaceOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "COMPONENT_REPLACE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/componentReplacePayload" } }
+    },
+    "componentCopyOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "COMPONENT_COPY" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/copyPayload" } }
+    },
+    "componentDeleteOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "COMPONENT_DELETE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/emptyPayload" } }
+    },
+    "dataBindingUpdateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "DATA_BINDING_UPDATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/dataBindingUpdatePayload" } }
+    },
+    "filterCreateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "FILTER_CREATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/filterCreatePayload" } }
+    },
+    "filterUpdateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "FILTER_UPDATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/filterUpdatePayload" } }
+    },
+    "filterDeleteOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "FILTER_DELETE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/emptyPayload" } }
+    },
+    "interactionCreateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "INTERACTION_CREATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/interactionCreatePayload" } }
+    },
+    "interactionUpdateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "INTERACTION_UPDATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/interactionUpdatePayload" } }
+    },
+    "interactionDeleteOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "INTERACTION_DELETE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/emptyPayload" } }
+    },
+    "insightUpdateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "INSIGHT_UPDATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/insightUpdatePayload" } }
+    },
+    "insightRegenerateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "INSIGHT_REGENERATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/insightRegeneratePayload" } }
+    },
+    "emptyPayload": { "type": "object", "additionalProperties": false, "maxProperties": 0 },
+    "namePayload": {
+      "type": "object", "additionalProperties": false, "required": ["name"],
+      "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 4096 } }
+    },
+    "orderPayload": {
+      "type": "object", "additionalProperties": false, "required": ["order"],
+      "properties": { "order": { "type": "integer", "minimum": 1 } }
+    },
+    "copyPayload": {
+      "type": "object", "additionalProperties": false, "required": ["newId"],
+      "properties": { "newId": { "$ref": "#/$defs/stableId" } }
+    },
+    "reportCreatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["definition"],
+      "properties": { "definition": { "$ref": "report-definition-v1.schema.json" } }
+    },
+    "reportSettingsUpdatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["metadata", "runtimePolicy"],
+      "properties": {
+        "metadata": { "$ref": "report-definition-v1.schema.json#/$defs/metadata" },
+        "runtimePolicy": { "$ref": "report-definition-v1.schema.json#/$defs/runtimePolicy" }
+      }
+    },
+    "templateApplyPayload": {
+      "type": "object", "additionalProperties": false, "required": ["templateRef"],
+      "properties": { "templateRef": { "$ref": "report-definition-v1.schema.json#/$defs/templateRef" } }
+    },
+    "themeUpdatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["themeRef"],
+      "properties": { "themeRef": { "$ref": "report-definition-v1.schema.json#/$defs/themeRef" } }
+    },
+    "pageCreatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["page"],
+      "properties": { "page": { "$ref": "report-definition-v1.schema.json#/$defs/page" } }
+    },
+    "sectionCreatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["section"],
+      "properties": { "section": { "$ref": "report-definition-v1.schema.json#/$defs/section" } }
+    },
+    "blockCreatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["block"],
+      "properties": { "block": { "$ref": "report-definition-v1.schema.json#/$defs/block" } }
+    },
+    "blockMovePayload": {
+      "type": "object", "additionalProperties": false, "required": ["x", "y"],
+      "properties": { "x": { "type": "integer", "minimum": 0, "maximum": 23 }, "y": { "type": "integer", "minimum": 0 } }
+    },
+    "blockResizePayload": {
+      "type": "object", "additionalProperties": false, "required": ["w", "h"],
+      "properties": { "w": { "type": "integer", "minimum": 1, "maximum": 24 }, "h": { "type": "integer", "minimum": 1 } }
+    },
+    "blockUpdatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["type"],
+      "properties": { "type": { "enum": ["ANALYSIS_CARD", "KPI_GROUP", "CHART", "TABLE", "CONTENT", "FILTER"] } }
+    },
+    "zoneCreatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["zone"],
+      "properties": { "zone": { "$ref": "report-definition-v1.schema.json#/$defs/zone" } }
+    },
+    "zoneUpdatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["type", "layout"],
+      "properties": {
+        "type": { "enum": ["HEADER", "FILTER", "INSIGHT", "CONTENT", "FOOTER"] },
+        "layout": { "$ref": "report-definition-v1.schema.json#/$defs/zoneLayout" }
+      }
+    },
+    "slotCreatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["slot"],
+      "properties": { "slot": { "$ref": "report-definition-v1.schema.json#/$defs/slot" } }
+    },
+    "slotMergePayload": {
+      "type": "object", "additionalProperties": false, "required": ["slotIds", "newSlot"],
+      "properties": {
+        "slotIds": { "type": "array", "minItems": 2, "maxItems": 16, "uniqueItems": true, "items": { "$ref": "#/$defs/stableId" } },
+        "newSlot": { "$ref": "report-definition-v1.schema.json#/$defs/slot" }
+      }
+    },
+    "slotSplitPayload": {
+      "type": "object", "additionalProperties": false, "required": ["slots"],
+      "properties": { "slots": { "type": "array", "minItems": 2, "maxItems": 16, "items": { "$ref": "report-definition-v1.schema.json#/$defs/slot" } } }
+    },
+    "slotUpdatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["grid", "componentId"],
+      "properties": {
+        "grid": { "$ref": "report-definition-v1.schema.json#/$defs/slotGrid" },
+        "componentId": { "$ref": "#/$defs/stableId" }
+      }
+    },
+    "componentCreatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["component"],
+      "properties": { "component": { "$ref": "report-definition-v1.schema.json#/$defs/component" } }
+    },
+    "componentUpdatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["options"],
+      "properties": { "options": { "$ref": "report-definition-v1.schema.json#/$defs/componentOptions" } }
+    },
+    "componentReplacePayload": {
+      "type": "object", "additionalProperties": false, "required": ["component"],
+      "properties": { "component": { "$ref": "report-definition-v1.schema.json#/$defs/component" } }
+    },
+    "dataBindingUpdatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["mode", "dataBinding"],
+      "properties": {
+        "mode": { "enum": ["SET", "CLEAR"] },
+        "dataBinding": { "oneOf": [{ "$ref": "report-definition-v1.schema.json#/$defs/dataBinding" }, { "type": "null" }] }
+      },
+      "oneOf": [
+        { "properties": { "mode": { "const": "SET" }, "dataBinding": { "$ref": "report-definition-v1.schema.json#/$defs/dataBinding" } } },
+        { "properties": { "mode": { "const": "CLEAR" }, "dataBinding": { "type": "null" } } }
+      ]
+    },
+    "filterCreatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["filter"],
+      "properties": { "filter": { "$ref": "report-definition-v1.schema.json#/$defs/globalFilter" } }
+    },
+    "filterUpdatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["filter"],
+      "properties": { "filter": { "$ref": "report-definition-v1.schema.json#/$defs/globalFilter" } }
+    },
+    "interactionCreatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["interaction"],
+      "properties": { "interaction": { "$ref": "report-definition-v1.schema.json#/$defs/interaction" } }
+    },
+    "interactionUpdatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["interaction"],
+      "properties": { "interaction": { "$ref": "report-definition-v1.schema.json#/$defs/interaction" } }
+    },
+    "insightUpdatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["richText", "evidenceId"],
+      "properties": {
+        "richText": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "evidenceId": { "$ref": "#/$defs/stableId" }
+      }
+    },
+    "insightRegeneratePayload": {
+      "type": "object", "additionalProperties": false, "required": ["evidenceId", "analysisMethod", "analysisMethodVersion"],
+      "properties": {
+        "evidenceId": { "$ref": "#/$defs/stableId" },
+        "analysisMethod": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "analysisMethodVersion": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    }
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "title": "Evidence Bundle v1.1",
+  "description": "Closed deterministic evidence contract shared by Ask Data and Report insights.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "sourceType", "semanticReleaseId", "semanticIrHash",
+    "datasetVersionId", "dataSnapshotVersion", "queryPlanHash", "filterHash",
+    "asOf", "resolvedTimeRange", "analysisMethod", "analysisMethodVersion",
+    "evidenceAlgorithmVersion", "facts", "qualityWarnings", "generatedAt"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.1" },
+    "sourceType": { "enum": ["SEMANTIC_IR", "DATASET_QUERY"] },
+    "semanticReleaseId": { "oneOf": [{ "$ref": "#/$defs/stableId" }, { "type": "null" }] },
+    "semanticIrHash": { "oneOf": [{ "$ref": "#/$defs/contentHash" }, { "type": "null" }] },
+    "datasetVersionId": { "$ref": "#/$defs/stableId" },
+    "dataSnapshotVersion": { "$ref": "#/$defs/stableId" },
+    "queryPlanHash": { "$ref": "#/$defs/contentHash" },
+    "filterHash": { "$ref": "#/$defs/contentHash" },
+    "asOf": { "type": "string", "minLength": 20, "maxLength": 64 },
+    "resolvedTimeRange": { "$ref": "#/$defs/resolvedTimeRange" },
+    "analysisMethod": { "enum": ["CURRENT_VALUE", "PERIOD_COMPARISON", "TREND", "ANOMALY_POINT", "TOP_N", "CONTRIBUTION", "MAX_CHANGE", "TARGET_ACHIEVEMENT", "GROUP_DIFFERENCE", "SHARE_OF_TOTAL", "DATA_COMPLETENESS", "DISTRIBUTION", "RANKING", "SNAPSHOT"] },
+    "analysisMethodVersion": { "$ref": "#/$defs/stableId" },
+    "evidenceAlgorithmVersion": { "$ref": "#/$defs/stableId" },
+    "facts": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "$ref": "#/$defs/fact" } },
+    "qualityWarnings": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/qualityWarning" } },
+    "generatedAt": { "type": "string", "minLength": 20, "maxLength": 64 }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$"
+    },
+    "contentHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "decimal": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+    },
+    "resolvedTimeRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "endExclusive", "timezone"],
+      "properties": {
+        "start": { "type": "string", "minLength": 20, "maxLength": 64 },
+        "endExclusive": { "type": "string", "minLength": 20, "maxLength": 64 },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "cellRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rowKey", "columnKey"],
+      "properties": {
+        "rowKey": { "type": "string", "minLength": 3, "maxLength": 8192 },
+        "columnKey": { "$ref": "#/$defs/stableId" }
+      }
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "metricVersionId", "currentValue", "previousValue", "changeRate", "unit", "cellRefs"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "metricVersionId": { "$ref": "#/$defs/stableId" },
+        "currentValue": { "$ref": "#/$defs/decimal" },
+        "previousValue": { "oneOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "changeRate": { "oneOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "unit": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "cellRefs": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/cellRef" } }
+      }
+    },
+    "qualityWarning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
+        "severity": { "enum": ["INFO", "WARNING", "BLOCKING"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
+    }
+  }
+}

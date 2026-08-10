@@ -29,9 +29,34 @@ const (
 type Additivity string
 
 const (
-	Additive     Additivity = "ADDITIVE"
-	SemiAdditive Additivity = "SEMI_ADDITIVE"
-	NonAdditive  Additivity = "NON_ADDITIVE"
+	FullyAdditive Additivity = "FULLY_ADDITIVE"
+	SemiAdditive  Additivity = "SEMI_ADDITIVE"
+	NonAdditive   Additivity = "NON_ADDITIVE"
+	// Additive is retained as a Go source-compatibility alias. Its serialized
+	// value is the certified FULLY_ADDITIVE contract, never the legacy enum.
+	Additive Additivity = FullyAdditive
+)
+
+type SemiAdditiveTimeAggregation string
+
+const (
+	SemiAdditivePeriodEnd     SemiAdditiveTimeAggregation = "PERIOD_END"
+	SemiAdditivePeriodBegin   SemiAdditiveTimeAggregation = "PERIOD_BEGIN"
+	SemiAdditivePeriodAverage SemiAdditiveTimeAggregation = "PERIOD_AVERAGE"
+)
+
+type AggregationRestriction string
+
+const (
+	PreAggregate  AggregationRestriction = "PRE_AGGREGATE"
+	PostAggregate AggregationRestriction = "POST_AGGREGATE"
+)
+
+type ZeroDenominatorPolicy string
+
+const (
+	ZeroDenominatorNull ZeroDenominatorPolicy = "NULL"
+	ZeroDenominatorZero ZeroDenominatorPolicy = "ZERO"
 )
 
 type NumericDataType string
@@ -97,9 +122,10 @@ const (
 type FanoutPolicy string
 
 const (
-	FanoutBlock        FanoutPolicy = "BLOCK"
-	FanoutCertifiedPre FanoutPolicy = "CERTIFIED_PREAGG"
-	FanoutSafe         FanoutPolicy = "SAFE"
+	FanoutBlock                FanoutPolicy = "BLOCK"
+	FanoutPreAggregateRequired FanoutPolicy = "PRE_AGGREGATE_REQUIRED"
+	FanoutBridgeRequired       FanoutPolicy = "BRIDGE_REQUIRED"
+	FanoutSafe                 FanoutPolicy = "SAFE"
 )
 
 type VersionIdentity struct {
@@ -125,30 +151,40 @@ type Entity struct {
 
 type SemanticModel struct {
 	VersionIdentity
-	Code               string              `json:"code"`
-	Name               string              `json:"name"`
-	Description        string              `json:"description"`
-	EntityVersionID    string              `json:"entityVersionId,omitempty"`
-	DatasetID          string              `json:"datasetId"`
-	DatasetVersionID   string              `json:"datasetVersionId"`
-	MaterializationID  string              `json:"materializationId"`
-	DatasetSchemaHash  askdata.ContentHash `json:"datasetSchemaHash"`
-	Layer              string              `json:"layer"`
-	GrainContract      json.RawMessage     `json:"grainContract"`
-	PrimaryTimeFieldID string              `json:"primaryTimeFieldId,omitempty"`
+	Code                  string              `json:"code"`
+	Name                  string              `json:"name"`
+	Description           string              `json:"description"`
+	EntityVersionID       string              `json:"entityVersionId,omitempty"`
+	DatasetID             string              `json:"datasetId"`
+	DatasetVersionID      string              `json:"datasetVersionId"`
+	MaterializationID     string              `json:"materializationId"`
+	DatasetSchemaHash     askdata.ContentHash `json:"datasetSchemaHash"`
+	Layer                 string              `json:"layer"`
+	GrainContract         json.RawMessage     `json:"grainContract"`
+	PrimaryTimeFieldID    string              `json:"primaryTimeFieldId,omitempty"`
+	TimeContractVersionID string              `json:"timeContractVersionId,omitempty"`
 }
 
 type Measure struct {
 	VersionIdentity
-	SemanticModelVersionID string          `json:"semanticModelVersionId"`
-	Code                   string          `json:"code"`
-	Name                   string          `json:"name"`
-	Description            string          `json:"description"`
-	FormulaAST             json.RawMessage `json:"formulaAst"`
-	Aggregation            Aggregation     `json:"aggregation"`
-	Additivity             Additivity      `json:"additivity"`
-	DataType               NumericDataType `json:"dataType"`
-	Unit                   string          `json:"unit,omitempty"`
+	SemanticModelVersionID      string                      `json:"semanticModelVersionId"`
+	Code                        string                      `json:"code"`
+	Name                        string                      `json:"name"`
+	Description                 string                      `json:"description"`
+	FormulaAST                  json.RawMessage             `json:"formulaAst"`
+	Aggregation                 Aggregation                 `json:"aggregation"`
+	Additivity                  Additivity                  `json:"additivity,omitempty"`
+	SemiAdditiveTimeAggregation SemiAdditiveTimeAggregation `json:"semiAdditiveTimeAggregation,omitempty"`
+	AggregationRestriction      AggregationRestriction      `json:"aggregationRestriction,omitempty"`
+	NonAdditiveDimensions       []string                    `json:"nonAdditiveDimensions"`
+	DataType                    NumericDataType             `json:"dataType"`
+	Unit                        string                      `json:"unit,omitempty"`
+	Currency                    string                      `json:"currency,omitempty"`
+	ZeroDenominatorPolicy       ZeroDenominatorPolicy       `json:"zeroDenominatorPolicy"`
+	DisplayPrecision            int16                       `json:"displayPrecision"`
+	AdditivitySuggestion        Additivity                  `json:"additivitySuggestion,omitempty"`
+	AdditivityConfirmedBy       string                      `json:"additivityConfirmedBy,omitempty"`
+	AdditivityConfirmedAt       *time.Time                  `json:"additivityConfirmedAt,omitempty"`
 }
 
 type Metric struct {
@@ -167,15 +203,25 @@ type Metric struct {
 
 type MetricVersion struct {
 	VersionIdentity
-	MetricID               string          `json:"metricId"`
-	SemanticModelVersionID string          `json:"semanticModelVersionId"`
-	FormulaAST             json.RawMessage `json:"formulaAst"`
-	DefaultFiltersAST      json.RawMessage `json:"defaultFiltersAst"`
-	Unit                   string          `json:"unit,omitempty"`
-	TimeGrain              string          `json:"timeGrain"`
-	Additivity             Additivity      `json:"additivity"`
-	NullPolicy             string          `json:"nullPolicy"`
-	MeasureVersionIDs      []string        `json:"measureVersionIds"`
+	MetricID                       string                      `json:"metricId"`
+	SemanticModelVersionID         string                      `json:"semanticModelVersionId"`
+	FormulaAST                     json.RawMessage             `json:"formulaAst"`
+	DefaultFiltersAST              json.RawMessage             `json:"defaultFiltersAst"`
+	Unit                           string                      `json:"unit,omitempty"`
+	Currency                       string                      `json:"currency,omitempty"`
+	TimeGrain                      string                      `json:"timeGrain"`
+	Additivity                     Additivity                  `json:"additivity,omitempty"`
+	SemiAdditiveTimeAggregation    SemiAdditiveTimeAggregation `json:"semiAdditiveTimeAggregation,omitempty"`
+	AggregationRestriction         AggregationRestriction      `json:"aggregationRestriction,omitempty"`
+	NonAdditiveDimensions          []string                    `json:"nonAdditiveDimensions"`
+	ZeroDenominatorPolicy          ZeroDenominatorPolicy       `json:"zeroDenominatorPolicy"`
+	DisplayPrecision               int16                       `json:"displayPrecision"`
+	AdditivitySuggestion           Additivity                  `json:"additivitySuggestion,omitempty"`
+	AdditivityConfirmedBy          string                      `json:"additivityConfirmedBy,omitempty"`
+	AdditivityConfirmedAt          *time.Time                  `json:"additivityConfirmedAt,omitempty"`
+	NullPolicy                     string                      `json:"nullPolicy"`
+	IncompletePeriodPolicyOverride IncompletePeriodPolicy      `json:"incompletePeriodPolicyOverride,omitempty"`
+	MeasureVersionIDs              []string                    `json:"measureVersionIds"`
 }
 
 type Dimension struct {
@@ -201,13 +247,14 @@ type Hierarchy struct {
 
 type Relationship struct {
 	VersionIdentity
-	LeftModelVersionID  string           `json:"leftModelVersionId"`
-	RightModelVersionID string           `json:"rightModelVersionId"`
-	Type                RelationshipType `json:"type"`
-	JoinType            JoinType         `json:"joinType"`
-	Cardinality         Cardinality      `json:"cardinality"`
-	JoinAST             json.RawMessage  `json:"joinAst"`
-	FanoutPolicy        FanoutPolicy     `json:"fanoutPolicy"`
+	LeftModelVersionID   string           `json:"leftModelVersionId"`
+	RightModelVersionID  string           `json:"rightModelVersionId"`
+	Type                 RelationshipType `json:"type"`
+	JoinType             JoinType         `json:"joinType"`
+	Cardinality          Cardinality      `json:"cardinality"`
+	JoinAST              json.RawMessage  `json:"joinAst"`
+	FanoutPolicy         FanoutPolicy     `json:"fanoutPolicy"`
+	BridgeModelVersionID string           `json:"bridgeModelVersionId,omitempty"`
 }
 
 type QualityRule struct {
@@ -222,10 +269,26 @@ type QualityRule struct {
 
 type BusinessTerm struct {
 	VersionIdentity
-	Code       string   `json:"code"`
-	Name       string   `json:"name"`
-	Definition string   `json:"definition"`
-	Aliases    []string `json:"aliases"`
+	Term              string     `json:"term"`
+	TermType          string     `json:"termType"`
+	TargetObjectType  string     `json:"targetObjectType"`
+	TargetVersionID   string     `json:"targetVersionId"`
+	TargetCode        string     `json:"targetCode"`
+	MatchMode         string     `json:"matchMode"`
+	MatchPattern      string     `json:"matchPattern,omitempty"`
+	Priority          int        `json:"priority"`
+	NegativeContexts  []string   `json:"negativeContexts"`
+	ApplicableRoleIDs []string   `json:"applicableRoleIds"`
+	ValidFrom         *time.Time `json:"validFrom,omitempty"`
+	ValidTo           *time.Time `json:"validTo,omitempty"`
+	Source            string     `json:"source"`
+	ReviewStatus      string     `json:"reviewStatus"`
+	ReviewedBy        string     `json:"reviewedBy,omitempty"`
+	ReviewedAt        *time.Time `json:"reviewedAt,omitempty"`
+	Code              string     `json:"code"`
+	Name              string     `json:"name"`
+	Definition        string     `json:"definition"`
+	Aliases           []string   `json:"aliases"`
 }
 
 type MetricPage struct {

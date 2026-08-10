@@ -58,6 +58,9 @@ func TestImporterCreatesDeterministicDraftsFromCurrentPublishedDWSADS(t *testing
 	if draft.SemanticModel.PrimaryTimeFieldID != "field_month" || draft.Dimensions[0].MemberIndexPolicy != MemberIndexExactOnly {
 		t.Fatalf("semantic field identity/policy was not preserved: %#v", draft)
 	}
+	if draft.Measures[0].Additivity != "" || draft.Measures[0].AdditivitySuggestion != FullyAdditive {
+		t.Fatalf("importer confirmed a suggestion as fact: %#v", draft.Measures[0])
+	}
 	second, err := importer.Import(context.Background(), testTenantID, testDomainID, validationOwner)
 	if err != nil {
 		t.Fatalf("second Import() error = %v", err)

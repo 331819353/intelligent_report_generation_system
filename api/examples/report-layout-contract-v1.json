@@ -1,0 +1,73 @@
+{
+  "collisionCases": [
+    {
+      "name": "touching edges do not collide",
+      "blocks": [
+        { "id": "block_a", "x": 0, "y": 0, "w": 6, "h": 4 },
+        { "id": "block_b", "x": 6, "y": 0, "w": 6, "h": 4 }
+      ],
+      "expected": []
+    },
+    {
+      "name": "overlap is reported in stable id order",
+      "blocks": [
+        { "id": "block_z", "x": 0, "y": 0, "w": 8, "h": 5 },
+        { "id": "block_a", "x": 4, "y": 2, "w": 8, "h": 5 },
+        { "id": "block_c", "x": 12, "y": 0, "w": 4, "h": 2 }
+      ],
+      "expected": [["block_a", "block_z"]]
+    }
+  ],
+  "mergeCases": [
+    {
+      "name": "slot from another zone is missing",
+      "slots": [
+        { "id": "slot_a", "x": 0, "y": 0, "w": 1, "h": 1, "componentId": "component_a" }
+      ],
+      "slotIds": ["slot_a", "slot_other_zone"],
+      "minimum": { "w": 1, "h": 1 },
+      "expectedCode": "REPORT_SLOT_MERGE_NOT_RECTANGULAR"
+    },
+    {
+      "name": "continuous rectangle",
+      "slots": [
+        { "id": "slot_a", "x": 0, "y": 0, "w": 2, "h": 2, "componentId": "component_a" },
+        { "id": "slot_b", "x": 2, "y": 0, "w": 2, "h": 2, "componentId": "" }
+      ],
+      "slotIds": ["slot_a", "slot_b"],
+      "minimum": { "w": 4, "h": 2 },
+      "expectedCode": ""
+    },
+    {
+      "name": "hole or concave union",
+      "slots": [
+        { "id": "slot_a", "x": 0, "y": 0, "w": 1, "h": 1, "componentId": "" },
+        { "id": "slot_b", "x": 1, "y": 0, "w": 1, "h": 1, "componentId": "" },
+        { "id": "slot_c", "x": 0, "y": 1, "w": 1, "h": 1, "componentId": "" }
+      ],
+      "slotIds": ["slot_a", "slot_b", "slot_c"],
+      "minimum": { "w": 1, "h": 1 },
+      "expectedCode": "REPORT_SLOT_MERGE_NOT_RECTANGULAR"
+    },
+    {
+      "name": "multiple components",
+      "slots": [
+        { "id": "slot_a", "x": 0, "y": 0, "w": 1, "h": 1, "componentId": "component_a" },
+        { "id": "slot_b", "x": 1, "y": 0, "w": 1, "h": 1, "componentId": "component_b" }
+      ],
+      "slotIds": ["slot_a", "slot_b"],
+      "minimum": { "w": 1, "h": 1 },
+      "expectedCode": "REPORT_SLOT_MERGE_MULTIPLE_COMPONENTS"
+    },
+    {
+      "name": "below manifest minimum",
+      "slots": [
+        { "id": "slot_a", "x": 0, "y": 0, "w": 1, "h": 1, "componentId": "component_a" },
+        { "id": "slot_b", "x": 1, "y": 0, "w": 1, "h": 1, "componentId": "" }
+      ],
+      "slotIds": ["slot_a", "slot_b"],
+      "minimum": { "w": 3, "h": 2 },
+      "expectedCode": "REPORT_SLOT_MERGE_BELOW_MIN_SIZE"
+    }
+  ]
+}

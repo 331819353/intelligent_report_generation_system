@@ -9,32 +9,60 @@ import (
 )
 
 type semanticModelContractDocument struct {
-	Type               string              `json:"type"`
-	ModelID            string              `json:"modelId"`
-	VersionNo          int                 `json:"versionNo"`
-	Code               string              `json:"code"`
-	Name               string              `json:"name"`
-	DatasetID          string              `json:"datasetId"`
-	DatasetVersionID   string              `json:"datasetVersionId"`
-	MaterializationID  string              `json:"materializationId"`
-	DatasetSchemaHash  askdata.ContentHash `json:"datasetSchemaHash"`
-	Layer              string              `json:"layer"`
-	GrainContract      json.RawMessage     `json:"grainContract"`
-	PrimaryTimeFieldID string              `json:"primaryTimeFieldId,omitempty"`
+	Type                  string              `json:"type"`
+	ModelID               string              `json:"modelId"`
+	VersionNo             int                 `json:"versionNo"`
+	Code                  string              `json:"code"`
+	Name                  string              `json:"name"`
+	DatasetID             string              `json:"datasetId"`
+	DatasetVersionID      string              `json:"datasetVersionId"`
+	MaterializationID     string              `json:"materializationId"`
+	DatasetSchemaHash     askdata.ContentHash `json:"datasetSchemaHash"`
+	Layer                 string              `json:"layer"`
+	GrainContract         json.RawMessage     `json:"grainContract"`
+	PrimaryTimeFieldID    string              `json:"primaryTimeFieldId,omitempty"`
+	TimeContractVersionID string              `json:"timeContractVersionId,omitempty"`
 }
 
 type measureContractDocument struct {
-	Type                   string          `json:"type"`
-	MeasureID              string          `json:"measureId"`
-	VersionNo              int             `json:"versionNo"`
-	SemanticModelVersionID string          `json:"semanticModelVersionId"`
-	Code                   string          `json:"code"`
-	Name                   string          `json:"name"`
-	FormulaAST             json.RawMessage `json:"formulaAst"`
-	Aggregation            Aggregation     `json:"aggregation"`
-	Additivity             Additivity      `json:"additivity"`
-	DataType               NumericDataType `json:"dataType"`
-	Unit                   string          `json:"unit,omitempty"`
+	Type                        string                      `json:"type"`
+	MeasureID                   string                      `json:"measureId"`
+	VersionNo                   int                         `json:"versionNo"`
+	SemanticModelVersionID      string                      `json:"semanticModelVersionId"`
+	Code                        string                      `json:"code"`
+	Name                        string                      `json:"name"`
+	FormulaAST                  json.RawMessage             `json:"formulaAst"`
+	Aggregation                 Aggregation                 `json:"aggregation"`
+	Additivity                  Additivity                  `json:"additivity,omitempty"`
+	SemiAdditiveTimeAggregation SemiAdditiveTimeAggregation `json:"semiAdditiveTimeAggregation,omitempty"`
+	AggregationRestriction      AggregationRestriction      `json:"aggregationRestriction,omitempty"`
+	NonAdditiveDimensions       []string                    `json:"nonAdditiveDimensions"`
+	DataType                    NumericDataType             `json:"dataType"`
+	Unit                        string                      `json:"unit,omitempty"`
+	Currency                    string                      `json:"currency,omitempty"`
+	ZeroDenominatorPolicy       ZeroDenominatorPolicy       `json:"zeroDenominatorPolicy"`
+	DisplayPrecision            int16                       `json:"displayPrecision"`
+}
+
+type metricContractDocument struct {
+	Type                           string                      `json:"type"`
+	MetricID                       string                      `json:"metricId"`
+	VersionNo                      int                         `json:"versionNo"`
+	SemanticModelVersionID         string                      `json:"semanticModelVersionId"`
+	FormulaAST                     json.RawMessage             `json:"formulaAst"`
+	DefaultFiltersAST              json.RawMessage             `json:"defaultFiltersAst"`
+	Unit                           string                      `json:"unit,omitempty"`
+	Currency                       string                      `json:"currency,omitempty"`
+	TimeGrain                      string                      `json:"timeGrain"`
+	Additivity                     Additivity                  `json:"additivity,omitempty"`
+	SemiAdditiveTimeAggregation    SemiAdditiveTimeAggregation `json:"semiAdditiveTimeAggregation,omitempty"`
+	AggregationRestriction         AggregationRestriction      `json:"aggregationRestriction,omitempty"`
+	NonAdditiveDimensions          []string                    `json:"nonAdditiveDimensions"`
+	ZeroDenominatorPolicy          ZeroDenominatorPolicy       `json:"zeroDenominatorPolicy"`
+	DisplayPrecision               int16                       `json:"displayPrecision"`
+	NullPolicy                     string                      `json:"nullPolicy"`
+	IncompletePeriodPolicyOverride IncompletePeriodPolicy      `json:"incompletePeriodPolicyOverride,omitempty"`
+	MeasureVersionIDs              []string                    `json:"measureVersionIds"`
 }
 
 type dimensionContractDocument struct {
@@ -57,6 +85,7 @@ func semanticModelContract(model SemanticModel) semanticModelContractDocument {
 		DatasetVersionID: model.DatasetVersionID, MaterializationID: model.MaterializationID,
 		DatasetSchemaHash: model.DatasetSchemaHash, Layer: model.Layer,
 		GrainContract: model.GrainContract, PrimaryTimeFieldID: model.PrimaryTimeFieldID,
+		TimeContractVersionID: model.TimeContractVersionID,
 	}
 }
 
@@ -66,7 +95,11 @@ func measureContract(measure Measure) measureContractDocument {
 		SemanticModelVersionID: measure.SemanticModelVersionID,
 		Code:                   measure.Code, Name: measure.Name, FormulaAST: measure.FormulaAST,
 		Aggregation: measure.Aggregation, Additivity: measure.Additivity,
-		DataType: measure.DataType, Unit: measure.Unit,
+		SemiAdditiveTimeAggregation: measure.SemiAdditiveTimeAggregation,
+		AggregationRestriction:      measure.AggregationRestriction,
+		NonAdditiveDimensions:       append([]string(nil), measure.NonAdditiveDimensions...),
+		DataType:                    measure.DataType, Unit: measure.Unit, Currency: measure.Currency,
+		ZeroDenominatorPolicy: measure.ZeroDenominatorPolicy, DisplayPrecision: measure.DisplayPrecision,
 	}
 }
 
@@ -114,6 +147,9 @@ func SemanticModelReleaseObject(model SemanticModel) (ReleaseObject, error) {
 	if model.Status != VersionStatusCertified {
 		return ReleaseObject{}, errors.New("semantic model must be CERTIFIED before release")
 	}
+	if model.TimeContractVersionID == "" {
+		return ReleaseObject{}, errors.New("TIME_CONTRACT_MISSING: semantic model release requires a time contract version")
+	}
 	return NewReleaseObject(ReleaseObjectSemanticModel, model.ObjectID, model.ID,
 		SensitivityInternal, semanticModelContract(model), model.ContentHash)
 }
@@ -121,6 +157,9 @@ func SemanticModelReleaseObject(model SemanticModel) (ReleaseObject, error) {
 func MeasureReleaseObject(measure Measure) (ReleaseObject, error) {
 	if measure.Status != VersionStatusCertified {
 		return ReleaseObject{}, errors.New("measure must be CERTIFIED before release")
+	}
+	if err := ValidateMeasureAdditivity(measure); err != nil {
+		return ReleaseObject{}, err
 	}
 	return NewReleaseObject(ReleaseObjectMeasure, measure.ObjectID, measure.ID,
 		SensitivityInternal, measureContract(measure), measure.ContentHash)
@@ -138,24 +177,23 @@ func MetricVersionReleaseObject(metric MetricVersion) (ReleaseObject, error) {
 	if metric.Status != VersionStatusCertified {
 		return ReleaseObject{}, errors.New("metric version must be CERTIFIED before release")
 	}
+	if err := ValidateAdditivity(metric); err != nil {
+		return ReleaseObject{}, err
+	}
 	dependencies := append([]string(nil), metric.MeasureVersionIDs...)
 	sort.Strings(dependencies)
-	contract := struct {
-		Type                   string          `json:"type"`
-		MetricID               string          `json:"metricId"`
-		VersionNo              int             `json:"versionNo"`
-		SemanticModelVersionID string          `json:"semanticModelVersionId"`
-		FormulaAST             json.RawMessage `json:"formulaAst"`
-		DefaultFiltersAST      json.RawMessage `json:"defaultFiltersAst"`
-		Unit                   string          `json:"unit,omitempty"`
-		TimeGrain              string          `json:"timeGrain"`
-		Additivity             Additivity      `json:"additivity"`
-		NullPolicy             string          `json:"nullPolicy"`
-		MeasureVersionIDs      []string        `json:"measureVersionIds"`
-	}{
-		"METRIC", metric.MetricID, metric.VersionNo, metric.SemanticModelVersionID,
-		metric.FormulaAST, metric.DefaultFiltersAST, metric.Unit, metric.TimeGrain,
-		metric.Additivity, metric.NullPolicy, dependencies,
+	contract := metricContractDocument{
+		Type: "METRIC", MetricID: metric.MetricID, VersionNo: metric.VersionNo,
+		SemanticModelVersionID: metric.SemanticModelVersionID,
+		FormulaAST:             metric.FormulaAST, DefaultFiltersAST: metric.DefaultFiltersAST,
+		Unit: metric.Unit, Currency: metric.Currency, TimeGrain: metric.TimeGrain,
+		Additivity:                  metric.Additivity,
+		SemiAdditiveTimeAggregation: metric.SemiAdditiveTimeAggregation,
+		AggregationRestriction:      metric.AggregationRestriction,
+		NonAdditiveDimensions:       append([]string(nil), metric.NonAdditiveDimensions...),
+		ZeroDenominatorPolicy:       metric.ZeroDenominatorPolicy, DisplayPrecision: metric.DisplayPrecision,
+		NullPolicy: metric.NullPolicy, IncompletePeriodPolicyOverride: metric.IncompletePeriodPolicyOverride,
+		MeasureVersionIDs: dependencies,
 	}
 	return NewReleaseObject(ReleaseObjectMetric, metric.MetricID, metric.ID,
 		SensitivityInternal, contract, metric.ContentHash)

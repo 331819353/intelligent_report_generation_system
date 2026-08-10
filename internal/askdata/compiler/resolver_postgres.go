@@ -254,7 +254,9 @@ func loadMetricContract(
 	var manifestHash, status string
 	err := tx.QueryRow(ctx, `SELECT metric.id::text,metric.semantic_model_version_id::text,
 		metric.content_hash,object.content_hash,metric.status,metric.formula_ast,
-		metric.default_filters_ast,metric.unit,metric.time_grain,metric.additivity,metric.null_policy
+		metric.default_filters_ast,metric.unit,COALESCE(metric.currency,''),metric.time_grain,metric.additivity,
+		COALESCE(metric.semi_additive_time_aggregation,''),COALESCE(metric.aggregation_restriction,''),
+		metric.non_additive_dimensions,metric.zero_denominator_policy,metric.display_precision,metric.null_policy
 	FROM askdata.release_objects AS object
 	JOIN askdata.metric_versions AS metric
 	  ON metric.tenant_id=object.tenant_id AND metric.domain_id=object.domain_id
@@ -264,7 +266,9 @@ func loadMetricContract(
 		lookup.Scope.TenantID, lookup.DomainID, lookup.Scope.Release.ReleaseID, metricVersionID).Scan(
 		&metric.MetricVersionID, &metric.ModelVersionID, &metric.ContentHash,
 		&manifestHash, &status, &metric.FormulaAST, &metric.DefaultFilterAST,
-		&metric.Unit, &metric.TimeGrain, &metric.Additivity, &metric.NullPolicy,
+		&metric.Unit, &metric.Currency, &metric.TimeGrain, &metric.Additivity,
+		&metric.SemiAdditiveTimeAggregation, &metric.AggregationRestriction,
+		&metric.NonAdditiveDimensions, &metric.ZeroDenominatorPolicy, &metric.DisplayPrecision, &metric.NullPolicy,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MetricContract{}, fmt.Errorf("%w: metric %s", ErrContractUnavailable, metricVersionID)
@@ -277,7 +281,9 @@ func loadMetricContract(
 	}
 	rows, err := tx.Query(ctx, `SELECT measure.measure_id::text,measure.id::text,measure.semantic_model_version_id::text,
 		measure.content_hash,object.content_hash,measure.status,measure.formula_ast,
-		measure.aggregation,measure.additivity,measure.data_type,measure.unit
+		measure.aggregation,measure.additivity,COALESCE(measure.semi_additive_time_aggregation,''),
+		COALESCE(measure.aggregation_restriction,''),measure.non_additive_dimensions,measure.data_type,
+		measure.unit,COALESCE(measure.currency,''),measure.zero_denominator_policy
 	FROM askdata.metric_version_measures AS link
 	JOIN askdata.measures AS measure
 	  ON measure.tenant_id=link.tenant_id AND measure.domain_id=link.domain_id
@@ -299,7 +305,9 @@ func loadMetricContract(
 		if err := rows.Scan(
 			&measure.MeasureID, &measure.MeasureVersionID, &measure.ModelVersionID, &measure.ContentHash,
 			&measureManifestHash, &measureStatus, &measure.FormulaAST, &measure.Aggregation,
-			&measure.Additivity, &measure.DataType, &measure.Unit,
+			&measure.Additivity, &measure.SemiAdditiveTimeAggregation, &measure.AggregationRestriction,
+			&measure.NonAdditiveDimensions, &measure.DataType, &measure.Unit, &measure.Currency,
+			&measure.ZeroDenominatorPolicy,
 		); err != nil {
 			return MetricContract{}, fmt.Errorf("scan metric measure: %w", err)
 		}
@@ -419,7 +427,7 @@ func loadRelationshipContract(
 		object.content_hash,relationship.status,relationship.relationship_type,
 		relationship.left_model_version_id::text,relationship.right_model_version_id::text,
 		relationship.join_ast,relationship.join_type,relationship.cardinality,
-		relationship.fanout_policy
+		relationship.fanout_policy,COALESCE(relationship.bridge_model_version_id::text,'')
 	FROM askdata.release_objects AS object
 	JOIN askdata.relationships AS relationship
 	  ON relationship.tenant_id=object.tenant_id AND relationship.domain_id=object.domain_id
@@ -431,6 +439,7 @@ func loadRelationshipContract(
 		&result.RelationshipVersionID, &result.ContentHash, &manifestHash, &status,
 		&relationshipType, &result.LeftModelVersionID, &result.RightModelVersionID,
 		&result.JoinAST, &result.JoinType, &result.Cardinality, &result.FanoutPolicy,
+		&result.BridgeModelVersionID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RelationshipContract{}, fmt.Errorf("%w: relationship %s", ErrContractUnavailable, relationshipVersionID)

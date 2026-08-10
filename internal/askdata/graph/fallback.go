@@ -23,7 +23,99 @@ var (
 	ErrPostgresFallbackUnavailable = errors.New("postgres graph fallback is unavailable")
 	ErrFallbackAccessDenied        = errors.New("postgres graph fallback access context is invalid")
 	ErrFallbackLimitExceeded       = errors.New("postgres graph fallback bound was exceeded")
+	ErrGraphFallbackBlocked        = errors.New("graph fallback is blocked")
+	ErrGraphFallbackClarification  = errors.New("graph fallback requires clarification")
 )
+
+const (
+	GraphUnavailableCode       = "GRAPH_UNAVAILABLE"
+	GraphUnsafeJoinCode        = "GRAPH_UNSAFE_JOIN"
+	GraphMemberAmbiguousCode   = "MEMBER_DIMENSION_AMBIGUOUS"
+	FallbackDispositionBlocked = "BLOCKED"
+	FallbackDispositionClarify = "CLARIFICATION_REQUIRED"
+)
+
+type ShapeClass string
+
+const (
+	ShapeSingleModelSingleMetric  ShapeClass = "SINGLE_MODEL_SINGLE_METRIC"
+	ShapeSingleModelMultiMetric   ShapeClass = "SINGLE_MODEL_MULTI_METRIC"
+	ShapeCrossModelSafeOneHop     ShapeClass = "CROSS_MODEL_SAFE_ONE_HOP"
+	ShapeCrossModelMultiHop       ShapeClass = "CROSS_MODEL_MULTI_HOP"
+	ShapeUnsafeOrPreaggregate     ShapeClass = "UNSAFE_OR_PREAGGREGATE"
+	ShapeMemberDimensionAmbiguous ShapeClass = "MEMBER_DIMENSION_AMBIGUOUS"
+)
+
+type FallbackCandidates struct {
+	Request          PlanRequest
+	MetricModels     []MetricModelBinding
+	MemberOwnerships []MemberOwnership
+	JoinPaths        []JoinPath
+}
+
+type GraphFallbackError struct {
+	Code        string     `json:"code"`
+	Disposition string     `json:"disposition"`
+	Shape       ShapeClass `json:"shape"`
+}
+
+func (failure *GraphFallbackError) Error() string {
+	if failure == nil {
+		return ErrGraphFallbackBlocked.Error()
+	}
+	return fmt.Sprintf("%s: %s (%s)", failure.Code, failure.Disposition, failure.Shape)
+}
+
+func (failure *GraphFallbackError) Unwrap() error {
+	if failure != nil && failure.Disposition == FallbackDispositionClarify {
+		return ErrGraphFallbackClarification
+	}
+	return ErrGraphFallbackBlocked
+}
+
+// ClassifyQueryShape is the deterministic GRAPH-006 matrix classifier. It is
+// deliberately independent from PostgreSQL so every matrix row is unit-testable.
+func ClassifyQueryShape(candidates FallbackCandidates) ShapeClass {
+	if candidates.Request.MemberDimensionAmbiguous || memberOwnershipAmbiguous(candidates) {
+		return ShapeMemberDimensionAmbiguous
+	}
+	for _, path := range candidates.JoinPaths {
+		for _, step := range path.Steps {
+			if step.Cardinality == registry.CardinalityManyToMany ||
+				step.FanoutPolicy != registry.FanoutSafe {
+				return ShapeUnsafeOrPreaggregate
+			}
+		}
+	}
+	models := make(map[askdata.ID]struct{}, len(candidates.MetricModels))
+	for _, binding := range candidates.MetricModels {
+		models[binding.ModelVersionID] = struct{}{}
+	}
+	if len(models) <= 1 {
+		if len(candidates.Request.MetricRefs) <= 1 {
+			return ShapeSingleModelSingleMetric
+		}
+		return ShapeSingleModelMultiMetric
+	}
+	if len(candidates.JoinPaths) == 1 && len(candidates.JoinPaths[0].Steps) == 1 &&
+		candidates.JoinPaths[0].Allowed &&
+		candidates.JoinPaths[0].Steps[0].FanoutPolicy == registry.FanoutSafe {
+		return ShapeCrossModelSafeOneHop
+	}
+	return ShapeCrossModelMultiHop
+}
+
+func memberOwnershipAmbiguous(candidates FallbackCandidates) bool {
+	owners := make(map[askdata.ID]askdata.ID, len(candidates.MemberOwnerships))
+	for _, ownership := range candidates.MemberOwnerships {
+		if owner, exists := owners[ownership.MemberVersionID]; exists &&
+			owner != ownership.DimensionVersionID {
+			return true
+		}
+		owners[ownership.MemberVersionID] = ownership.DimensionVersionID
+	}
+	return false
+}
 
 type PostgresCertifiedPlanCache struct{ pool *pgxpool.Pool }
 
@@ -127,6 +219,10 @@ func NewPostgresFallback(pool *pgxpool.Pool) *PostgresFallback {
 }
 
 func (fallback *PostgresFallback) Resolve(ctx context.Context, request PlanRequest) (GraphPlan, error) {
+	return fallback.ResolveFallback(ctx, request)
+}
+
+func (fallback *PostgresFallback) ResolveFallback(ctx context.Context, request PlanRequest) (GraphPlan, error) {
 	if fallback == nil || fallback.pool == nil {
 		return GraphPlan{}, ErrPostgresFallbackUnavailable
 	}
@@ -197,6 +293,20 @@ func resolvePostgresFallbackTx(ctx context.Context, tx pgx.Tx, normalized PlanRe
 			return GraphPlan{}, err
 		}
 	}
+	candidates := FallbackCandidates{
+		Request: normalized, MetricModels: metricModels,
+		MemberOwnerships: members, JoinPaths: paths,
+	}
+	shape := ClassifyQueryShape(candidates)
+	if shape == ShapeMemberDimensionAmbiguous {
+		return GraphPlan{}, fallbackMatrixFailure(shape)
+	}
+	if err := validateFallbackCandidateCompleteness(normalized, metricModels, dimensions, members); err != nil {
+		return GraphPlan{}, err
+	}
+	if failure := fallbackMatrixFailure(shape); failure != nil {
+		return GraphPlan{}, failure
+	}
 	planModels := append([]ObjectVersionRef(nil), models...)
 	requestedModels := refIndex(normalized.ModelRefs)
 	for _, path := range paths {
@@ -208,9 +318,79 @@ func resolvePostgresFallbackTx(ctx context.Context, tx pgx.Tx, normalized PlanRe
 			)
 		}
 	}
-	return NewGraphPlan(
+	plan, err := NewGraphPlan(
 		normalized, planModels, metricModels, dimensions, members, paths,
 	)
+	if err != nil {
+		return GraphPlan{}, err
+	}
+	return plan.WithDegradation(DegradationNebulaUnavailable)
+}
+
+func validateFallbackCandidateCompleteness(
+	request PlanRequest,
+	metricModels []MetricModelBinding,
+	dimensions []DimensionCompatibility,
+	members []MemberOwnership,
+) error {
+	metricCounts := make(map[askdata.ID]int, len(metricModels))
+	for _, binding := range metricModels {
+		metricCounts[binding.MetricVersionID]++
+	}
+	for _, metric := range request.MetricRefs {
+		if metricCounts[metric.VersionID] != 1 {
+			return &GraphFallbackError{
+				Code: GraphUnavailableCode, Disposition: FallbackDispositionBlocked,
+				Shape: ClassifyQueryShape(FallbackCandidates{Request: request, MetricModels: metricModels}),
+			}
+		}
+	}
+	dimensionCounts := make(map[askdata.ID]int, len(dimensions))
+	for _, dimension := range dimensions {
+		dimensionCounts[dimension.DimensionVersionID]++
+	}
+	for _, dimension := range request.DimensionRefs {
+		if dimensionCounts[dimension.VersionID] == 0 {
+			return &GraphFallbackError{
+				Code: GraphUnavailableCode, Disposition: FallbackDispositionBlocked,
+				Shape: ClassifyQueryShape(FallbackCandidates{Request: request, MetricModels: metricModels}),
+			}
+		}
+	}
+	memberCounts := make(map[askdata.ID]int, len(members))
+	for _, member := range members {
+		memberCounts[member.MemberVersionID]++
+	}
+	for _, member := range request.MemberRefs {
+		if memberCounts[member.VersionID] != 1 {
+			return &GraphFallbackError{
+				Code: GraphUnavailableCode, Disposition: FallbackDispositionBlocked,
+				Shape: ClassifyQueryShape(FallbackCandidates{
+					Request: request, MetricModels: metricModels, MemberOwnerships: members,
+				}),
+			}
+		}
+	}
+	return nil
+}
+
+func fallbackMatrixFailure(shape ShapeClass) error {
+	switch shape {
+	case ShapeSingleModelSingleMetric, ShapeSingleModelMultiMetric, ShapeCrossModelSafeOneHop:
+		return nil
+	case ShapeMemberDimensionAmbiguous:
+		return &GraphFallbackError{
+			Code: GraphMemberAmbiguousCode, Disposition: FallbackDispositionClarify, Shape: shape,
+		}
+	case ShapeUnsafeOrPreaggregate:
+		return &GraphFallbackError{
+			Code: GraphUnsafeJoinCode, Disposition: FallbackDispositionBlocked, Shape: shape,
+		}
+	default:
+		return &GraphFallbackError{
+			Code: GraphUnavailableCode, Disposition: FallbackDispositionBlocked, Shape: shape,
+		}
+	}
 }
 
 func validateFallbackAccessContext(ctx context.Context, request PlanRequest) error {
@@ -242,15 +422,6 @@ func fallbackReleaseCertified(ctx context.Context, tx pgx.Tx, request PlanReques
 		      AND projection.domain_id=release.domain_id
 		      AND projection.release_id=release.id
 		      AND projection.target='POSTGRES_REGISTRY'
-		      AND projection.status='READY'
-		      AND projection.applied_content_hash=release.content_hash
-		  )
-		  AND EXISTS(
-		    SELECT 1 FROM askdata.release_projections AS projection
-		    WHERE projection.tenant_id=release.tenant_id
-		      AND projection.domain_id=release.domain_id
-		      AND projection.release_id=release.id
-		      AND projection.target='NEBULA_GRAPH'
 		      AND projection.status='READY'
 		      AND projection.applied_content_hash=release.content_hash
 		  )

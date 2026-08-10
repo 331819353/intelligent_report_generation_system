@@ -15,7 +15,7 @@ import (
 
 const (
 	BuildArtifactVersion = "semantic-ir-build-v1"
-	DefaultLimit         = 500
+	DefaultLimit         = DefaultTopN
 	MaxBuildEvidence     = 256
 )
 

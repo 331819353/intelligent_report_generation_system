@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"intelligent-report-generation-system/internal/embedding"
@@ -10,13 +11,18 @@ import (
 
 const MaxEmbeddingBatchSize = 16
 
-var ErrInvalidEmbeddingWork = errors.New("askdata embedding work is invalid")
+var (
+	ErrInvalidEmbeddingWork   = errors.New("askdata embedding work is invalid")
+	ErrEmbeddingModelMismatch = errors.New("SEARCH_EMBEDDING_MODEL_MISMATCH")
+)
 
 type EmbeddingClaim struct {
 	ID, TenantID, DomainID, SearchDocumentID string
 	InputHash, Text, LeaseToken              string
 	Attempt, MaxAttempts                     int
 	Current                                  bool
+	ExpectedModel                            string
+	ExpectedDimension                        int
 }
 
 type EmbeddingStore interface {
@@ -48,6 +54,10 @@ func (worker *EmbeddingWorker) ProcessNext(
 ) (int, error) {
 	if worker == nil || worker.store == nil || worker.provider == nil || !worker.provider.Configured() {
 		return 0, nil
+	}
+	if strings.TrimSpace(worker.provider.Model()) == "" ||
+		worker.provider.Dimensions() != SearchEmbeddingDimension {
+		return 0, ErrEmbeddingModelMismatch
 	}
 	claims, err := worker.store.ClaimBatch(
 		ctx, tenantID, workerID, worker.provider.Model(), lease, MaxEmbeddingBatchSize,
@@ -82,7 +92,7 @@ func (worker *EmbeddingWorker) ProcessNext(
 		return len(claims), errors.Join(combined, embedErr)
 	}
 	for index, document := range documents {
-		if len(vectors[index]) != 2_560 {
+		if len(vectors[index]) != SearchEmbeddingDimension {
 			combined = errors.Join(combined, worker.store.Fail(ctx, document, workerID, "EMBEDDING_DIMENSION_MISMATCH"))
 			continue
 		}

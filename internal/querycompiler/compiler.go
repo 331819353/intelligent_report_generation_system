@@ -1034,10 +1034,41 @@ func (c *compiler) expression(expression dataset.Expression, aliases map[string]
 		if function == "COUNT_DISTINCT" {
 			return "COUNT(DISTINCT " + argument + ")", nil
 		}
+		if function == "PERIOD_END" || function == "PERIOD_BEGIN" {
+			if c.input.Dialect != PostgreSQL || len(expression.OrderBy) != 1 {
+				return "", errors.New("ordered period aggregate requires PostgreSQL and one time field")
+			}
+			order, err := c.expression(expression.OrderBy[0].Expression, aliases)
+			if err != nil {
+				return "", err
+			}
+			direction := expression.OrderBy[0].Direction
+			expected := "ASC"
+			if function == "PERIOD_END" {
+				expected = "DESC"
+			}
+			if direction != expected {
+				return "", errors.New("ordered period aggregate direction is invalid")
+			}
+			return "(ARRAY_AGG(" + argument + " ORDER BY " + order + " " + direction + " NULLS LAST))[1]", nil
+		}
 		if !oneOf(function, "SUM", "AVG", "MIN", "MAX", "COUNT") {
 			return "", errors.New("unsupported aggregate")
 		}
 		return function + "(" + argument + ")", nil
+	case "NULLIF":
+		if len(expression.Arguments) != 2 {
+			return "", errors.New("NULLIF requires two arguments")
+		}
+		left, err := c.expression(expression.Arguments[0], aliases)
+		if err != nil {
+			return "", err
+		}
+		right, err := c.expression(expression.Arguments[1], aliases)
+		if err != nil {
+			return "", err
+		}
+		return "NULLIF(" + left + "," + right + ")", nil
 	case "WINDOW":
 		if !oneOf(expression.Function, "ROW_NUMBER", "RANK", "DENSE_RANK", "SUM", "AVG", "COUNT", "MIN", "MAX") {
 			return "", errors.New("unsupported window function")

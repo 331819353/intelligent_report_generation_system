@@ -3,8 +3,10 @@ import {
   ChatCircleDots,
   Check,
   Database,
+  FileText,
   GearSix,
   GlobeHemisphereWest,
+  LockSimple,
   Stack,
 } from '@phosphor-icons/react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -29,10 +31,11 @@ type AppShellProps = {
   children: ReactNode
   actions?: ReactNode
   className?: string
+  lockBusinessDomain?: boolean
 }
 
 /** 为后台业务页面提供统一侧栏、顶栏和内容容器。 */
-export function AppShell({ title = '数据配置管理平台', titleMeta, eyebrow = '配置中心', children, actions, className = '' }: AppShellProps) {
+export function AppShell({ title = '数据配置管理平台', titleMeta, eyebrow = '配置中心', children, actions, className = '', lockBusinessDomain = false }: AppShellProps) {
   const domainSwitcherRef = useRef<HTMLDivElement>(null)
   const [domains, setDomains] = useState<BusinessDomain[]>([])
   const [selectedDomain, setSelectedDomain] = useState<BusinessDomain | null>(() => currentDomain())
@@ -122,11 +125,12 @@ export function AppShell({ title = '数据配置管理平台', titleMeta, eyebro
             <NavLink to="/data-sources"><Database aria-hidden="true" size={18} />数据源配置</NavLink>
             <NavLink to="/datasets"><Stack aria-hidden="true" size={18} />数据集配置</NavLink>
             <NavLink to="/ask-data"><ChatCircleDots aria-hidden="true" size={18} />智能问数</NavLink>
+            <NavLink to="/reports"><FileText aria-hidden="true" size={18} />智能报告</NavLink>
           </>}
         </nav>
         <div className="sidebar-footer">
           {canManage !== null && <div className="domain-switcher-wrap" ref={domainSwitcherRef}>
-            {domainMenuOpen && <div className="domain-menu" role="menu" aria-label="切换业务领域">
+            {!lockBusinessDomain && domainMenuOpen && <div className="domain-menu" role="menu" aria-label="切换业务领域">
               <header><span>切换领域</span><small>{activeDomains.length} 个可用领域</small></header>
               {activeDomains.length > 0
                 ? activeDomains.map(domain => <button
@@ -142,7 +146,11 @@ export function AppShell({ title = '数据配置管理平台', titleMeta, eyebro
                 </button>)
                 : <p>暂无可用领域</p>}
             </div>}
-            <button
+            {lockBusinessDomain ? <div className="domain-switcher is-locked" aria-label={`当前固定领域：${selectedDomain?.name || '未选择业务领域'}`}>
+              <GlobeHemisphereWest size={18} weight="duotone" aria-hidden="true" />
+              <span><small>当前领域 · 已锁定</small><strong>{selectedDomain?.name || '未选择业务领域'}</strong></span>
+              <LockSimple size={15} aria-hidden="true" />
+            </div> : <button
               className="domain-switcher"
               type="button"
               aria-haspopup="menu"
@@ -152,7 +160,7 @@ export function AppShell({ title = '数据配置管理平台', titleMeta, eyebro
               <GlobeHemisphereWest size={18} weight="duotone" aria-hidden="true" />
               <span><small>当前领域</small><strong>{selectedDomain?.name || '选择业务领域'}</strong></span>
               <CaretUpDown size={15} aria-hidden="true" />
-            </button>
+            </button>}
           </div>}
         </div>
       </aside>

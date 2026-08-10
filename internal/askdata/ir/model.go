@@ -4,6 +4,8 @@
 package ir
 
 import (
+	"time"
+
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/ircontract"
 )
@@ -16,6 +18,9 @@ const (
 	MaxMembersPerFilter = ircontract.MaxMembersPerFilter
 	MaxSorts            = ircontract.MaxSorts
 	MaxLimit            = ircontract.MaxLimit
+	DefaultTopN         = ircontract.DefaultTopN
+	MaxTopN             = ircontract.MaxTopN
+	MaxResultRows       = ircontract.MaxResultRows
 )
 
 type Metric = ircontract.Metric
@@ -52,6 +57,33 @@ const (
 )
 
 type Comparison = ircontract.Comparison
+
+// ResolvedTimeSpec is the deterministic, replay-safe result of applying a
+// certified Time Contract to the relative request retained in Semantic IR.
+// All intervals are half-open and carry the business timezone offset.
+type ResolvedTimeSpec struct {
+	RequestedPeriod             string              `json:"requestedPeriod"`
+	Grain                       string              `json:"grain"`
+	PolicyApplied               string              `json:"policyApplied"`
+	PolicySource                string              `json:"policySource"`
+	ResolvedStart               time.Time           `json:"resolvedStart"`
+	ResolvedEndExclusive        time.Time           `json:"resolvedEndExclusive"`
+	DataAvailableThrough        time.Time           `json:"dataAvailableThrough"`
+	TruncatedByDataAvailability bool                `json:"truncatedByDataAvailability"`
+	PeriodFallbackApplied       bool                `json:"periodFallbackApplied"`
+	Timezone                    string              `json:"timezone"`
+	CalendarVersionID           string              `json:"calendarVersionId,omitempty"`
+	Comparison                  *ResolvedComparison `json:"comparison,omitempty"`
+}
+
+type ResolvedComparison struct {
+	Type                 string    `json:"type"`
+	Periods              int       `json:"periods"`
+	Alignment            string    `json:"alignment"`
+	ResolvedStart        time.Time `json:"resolvedStart"`
+	ResolvedEndExclusive time.Time `json:"resolvedEndExclusive"`
+	OverflowApplied      bool      `json:"overflowApplied"`
+}
 type SortTargetType = ircontract.SortTargetType
 
 const (
@@ -71,6 +103,28 @@ type NullOrdering = ircontract.NullOrdering
 const (
 	NullsFirst = ircontract.NullsFirst
 	NullsLast  = ircontract.NullsLast
+)
+
+type RankBy = ircontract.RankBy
+
+const (
+	RankByCurrentValue = ircontract.RankByCurrentValue
+	RankByDelta        = ircontract.RankByDelta
+	RankByRatio        = ircontract.RankByRatio
+)
+
+type OtherPolicy = ircontract.OtherPolicy
+
+const (
+	OtherNone               = ircontract.OtherNone
+	OtherAggregateRemainder = ircontract.OtherAggregateRemainder
+)
+
+type TieBreaking = ircontract.TieBreaking
+
+const (
+	TieIncludeAll       = ircontract.TieIncludeAll
+	TieDeterministicCut = ircontract.TieDeterministicCut
 )
 
 type Sort = ircontract.Sort

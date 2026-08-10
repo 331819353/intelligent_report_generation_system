@@ -77,6 +77,40 @@ func TestPrepareLoopCheckpointBindsEveryDecisionToolAndBudget(t *testing.T) {
 	}
 }
 
+func TestPrepareGraphToolAuditPersistsDegradedEvidence(t *testing.T) {
+	loopRequest, conversation := loopRequestFixture(t, StateRetrieving, cognition.StageCandidateJudgment)
+	arguments := toolhost.NewArguments(loopRequest.Run.Release)
+	arguments.ModelVersionIDs = []askdata.ID{"model-sales-v1"}
+	arguments.MetricVersionIDs = []askdata.ID{"metric-sales-v1"}
+	action := cognition.Action{ToolCall: &toolhost.CallRequest{
+		SchemaVersion: toolhost.SchemaVersion, CallID: "call-graph-loop",
+		Tool: toolhost.ToolResolveGraphPlan, Arguments: arguments,
+	}}
+	result := json.RawMessage(`{"graphPlanHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","modelVersionIds":["model-sales-v1"],"relationshipIds":[],"risks":[],"fallbackUsed":true,"graphDegraded":true,"evidenceIds":["conversation-loop"]}`)
+	execution := toolhost.Execution{
+		DefinitionHash: askdata.HashBytes([]byte("graph-tool-definition")),
+		Charge:         toolhost.BudgetCharge{ToolCalls: 1}, DurationMS: 1,
+		Response: toolhost.Response{
+			SchemaVersion: toolhost.SchemaVersion, CallID: "call-graph-loop",
+			Tool: toolhost.ToolResolveGraphPlan, Status: toolhost.ResponseSuccess,
+			Result: result, ResultHash: askdata.HashBytes(result), MadeProgress: true,
+			EvidenceRefs: []askdata.EvidenceRef{conversation},
+		},
+	}
+	prepared, err := prepareToolAudit(loopRequest.Run, action, execution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prepared.graphDegraded || !strings.Contains(string(prepared.artifact.Payload), `"graphDegraded":true`) {
+		t.Fatalf("degraded Evidence artifact = %s", prepared.artifact.Payload)
+	}
+	details := toolAuditDetails(prepared.call, prepared.graphDegraded)
+	if !strings.Contains(string(details), `"graphDegraded":true`) ||
+		strings.Contains(string(details), "graph-tool-definition") {
+		t.Fatalf("public-safe graph audit details = %s", details)
+	}
+}
+
 func TestBudgetTerminationChoosesClarificationOrFailsClosed(t *testing.T) {
 	loopRequest, _ := loopRequestFixture(t, StateUnderstanding, cognition.StageUnderstanding)
 	run := loopRequest.Run

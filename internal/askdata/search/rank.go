@@ -151,5 +151,5 @@ func sourceEvidenceKind(source RetrievalSource) askdata.EvidenceKind {
 
 func validRetrievalObjectType(value ObjectType) bool {
 	return value == ObjectMetric || value == ObjectDimension || value == ObjectMember ||
-		value == ObjectBusinessTerm || value == ObjectCertifiedExample
+		value == ObjectBusinessTerm || value == ObjectCertifiedExample || value == ObjectReportAsset
 }

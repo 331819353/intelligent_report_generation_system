@@ -1,0 +1,32 @@
+{
+  "type": "scatter",
+  "version": "1.0.0",
+  "renderer": "ECHARTS",
+  "displayName": "散点图",
+  "category": "CHART",
+  "minSize": { "w": 5, "h": 4 },
+  "recommendedSize": { "w": 8, "h": 6 },
+  "dataContract": {
+    "dimensions": { "min": 0, "max": 2 },
+    "measures": { "min": 2, "max": 3 },
+    "timeField": { "required": false },
+    "roles": ["X_AXIS", "Y_AXIS", "SIZE", "COLOR", "DETAIL", "TOOLTIP"]
+  },
+  "stackingRequiresAdditive": false,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [],
+    "properties": {
+	  "title": { "type": "string" },
+	  "subtitle": { "type": "string" },
+      "showLegend": { "type": "boolean" },
+      "showLabel": { "type": "boolean" },
+      "colorPaletteRef": { "type": "string" },
+      "animation": { "type": "boolean" }
+    }
+  },
+  "defaultOptions": { "showLegend": true, "showLabel": false, "animation": true },
+  "mobilePolicy": { "supported": true, "defaultLegendMode": "HIDDEN", "labelDegradation": "HIDE_WHEN_DENSE" },
+  "supportedInteractions": ["CLICK_FILTER", "BRUSH", "ZOOM"]
+}

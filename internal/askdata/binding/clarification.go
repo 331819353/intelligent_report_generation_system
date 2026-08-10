@@ -13,6 +13,7 @@ import (
 	"intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
+	"intelligent-report-generation-system/internal/askdata/understanding"
 )
 
 const (
@@ -147,6 +148,25 @@ func (calibrator *Calibrator) Decide(request DecisionRequest) (ConfidenceDecisio
 		})
 	}
 	top := decision.CalibratedBundles[0]
+	if rankByClarificationRequired(request.BindingRequest.UnderstandingResult) {
+		confidenceEvidence, evidenceErr := boundedConfidenceEvidence(
+			request.BindingResult.Bundles[:1], modelEvidence,
+		)
+		if evidenceErr != nil {
+			return ConfidenceDecision{}, evidenceErr
+		}
+		clarification, clarificationErr := buildRankByClarification(request.BindingResult.Bundles[0])
+		if clarificationErr != nil {
+			return ConfidenceDecision{}, clarificationErr
+		}
+		decision.Disposition = DispositionClarify
+		decision.Confidence = askdata.ConfidenceEvidence{
+			Score: top.Probability, Margin: top.Margin, Evidence: confidenceEvidence,
+			ReasonCodes: []string{"TOPN_COMPARISON_RANK_BY_REQUIRED"},
+		}
+		decision.Clarification = &clarification
+		return finalizeConfidenceDecision(decision)
+	}
 	direct := calibrator.model.DirectEnabled && top.Probability >= calibrator.model.DirectThreshold &&
 		top.Margin >= calibrator.model.MinDirectMargin
 	reasonCodes := []string{}
@@ -199,6 +219,32 @@ func (calibrator *Calibrator) Decide(request DecisionRequest) (ConfidenceDecisio
 	}
 	decision.Clarification = &clarification
 	return finalizeConfidenceDecision(decision)
+}
+
+func rankByClarificationRequired(result understanding.UnderstandingResult) bool {
+	comparisons := result.Current.Comparisons
+	ordering := result.Current.Ordering
+	limit := result.Current.Limit
+	if inherited := result.Context.Inherited; inherited != nil {
+		if len(comparisons) == 0 {
+			comparisons = inherited.Comparisons
+		}
+		if len(ordering) == 0 {
+			ordering = inherited.Ordering
+		}
+		if limit == nil {
+			limit = inherited.Limit
+		}
+	}
+	if len(comparisons) == 0 || len(ordering) == 0 || limit == nil {
+		return false
+	}
+	for _, value := range ordering {
+		if value.RankBy == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (decision ConfidenceDecision) ValidateAgainst(
@@ -312,6 +358,43 @@ func buildClarification(
 			EvidenceRefs: append([]askdata.EvidenceRef(nil), presentation.EvidenceRefs...),
 		}
 		clarification.Options = append(clarification.Options, option)
+	}
+	if _, err := clarification.ToolArguments(askdata.ReleaseRef{
+		ReleaseID: "validation-only", ContentHash: askdata.HashBytes([]byte("validation-only")),
+	}); err != nil {
+		return Clarification{}, err
+	}
+	return clarification, nil
+}
+
+func buildRankByClarification(bundle Bundle) (Clarification, error) {
+	type rankByOption struct {
+		id         string
+		label      string
+		difference string
+	}
+	values := []rankByOption{
+		{id: "current", label: "按当期值", difference: "按本期指标值确定 Top N。"},
+		{id: "delta", label: "按增长额", difference: "按当期值与对比期值的差额确定 Top N。"},
+		{id: "ratio", label: "按增长率", difference: "按当期值相对对比期值的增长率确定 Top N。"},
+	}
+	evidence := normalizeEvidenceRefs(bundle.EvidenceRefs)
+	if len(evidence) > 16 {
+		evidence = evidence[:16]
+	}
+	clarification := Clarification{
+		ConflictCode: "TOPN_COMPARISON_RANK_BY_REQUIRED",
+		Question:     "Top N 与同比或环比组合时，请选择排序依据。",
+		Options:      make([]ClarificationOption, 0, len(values)),
+	}
+	for _, value := range values {
+		clarification.Options = append(clarification.Options, ClarificationOption{
+			OptionID:   askdata.ID("rank-by-" + value.id + ":" + string(bundle.BundleHash)),
+			BundleHash: bundle.BundleHash, Label: value.label, Difference: value.difference,
+			MetricVersionIDs: metricVersionIDs(bundle), DimensionVersionIDs: dimensionVersionIDs(bundle),
+			MemberVersionIDs: memberVersionIDs(bundle), ModelVersionIDs: append([]askdata.ID(nil), bundle.ModelVersionIDs...),
+			EvidenceRefs: append([]askdata.EvidenceRef(nil), evidence...),
+		})
 	}
 	if _, err := clarification.ToolArguments(askdata.ReleaseRef{
 		ReleaseID: "validation-only", ContentHash: askdata.HashBytes([]byte("validation-only")),

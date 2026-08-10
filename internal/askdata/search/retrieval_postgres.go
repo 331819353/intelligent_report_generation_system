@@ -3,7 +3,9 @@ package search
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -21,15 +23,23 @@ func NewPostgresRetrievalStore(pool *pgxpool.Pool) *PostgresRetrievalStore {
 }
 
 const eligibleSearchDocumentsSQL = ` FROM askdata.search_documents AS document
-	JOIN askdata.release_objects AS release_object
+	LEFT JOIN askdata.release_objects AS release_object
 	  ON release_object.tenant_id=document.tenant_id
 	 AND release_object.domain_id=document.domain_id
 	 AND release_object.object_type=document.object_type
 	 AND release_object.object_version_id=document.object_version_id
+	 AND release_object.release_id=$1
+	LEFT JOIN askdata.report_semantic_assets AS report_asset
+	  ON document.object_type='REPORT_ASSET'
+	 AND report_asset.tenant_id=document.tenant_id
+	 AND report_asset.domain_id=document.domain_id
+	 AND report_asset.id=document.object_version_id
+	 AND report_asset.semantic_release_id=$1
+	 AND report_asset.state='CERTIFIED'
 	JOIN askdata.releases AS release
-	  ON release.tenant_id=release_object.tenant_id
-	 AND release.domain_id=release_object.domain_id
-	 AND release.id=release_object.release_id
+	  ON release.tenant_id=document.tenant_id
+	 AND release.domain_id=document.domain_id
+	 AND release.id=$1
 	JOIN askdata.release_projections AS projection
 	  ON projection.tenant_id=release.tenant_id
 	 AND projection.domain_id=release.domain_id
@@ -42,7 +52,9 @@ const eligibleSearchDocumentsSQL = ` FROM askdata.search_documents AS document
 	  AND projection.expected_content_hash=release.content_hash
 	  AND projection.applied_content_hash=release.content_hash
 	  AND document.domain_id=ANY($3::uuid[])
-	  AND document.object_type=ANY($4::text[]) `
+	  AND document.object_type=ANY($4::text[])
+	  AND ((document.object_type='REPORT_ASSET' AND report_asset.id IS NOT NULL)
+	       OR (document.object_type<>'REPORT_ASSET' AND release_object.object_version_id IS NOT NULL)) `
 
 const exactRetrievalSQL = `WITH scored AS (
 	SELECT document.object_type,document.object_version_id,document.input_hash,
@@ -75,12 +87,19 @@ const vectorRetrievalSQL = `WITH scored AS (
 	SELECT document.object_type,document.object_version_id,document.input_hash,
 	  (1-(document.embedding <=> $5::halfvec))::float8 AS score` + eligibleSearchDocumentsSQL + `
 	  AND document.embedding_status='SUCCEEDED' AND document.embedding IS NOT NULL
-	  AND document.embedding_model=$6
+	  AND document.embedding_model=$6 AND document.embedding_dim=2560
 ), ranked AS (
 	SELECT *,row_number() OVER(PARTITION BY object_type ORDER BY score DESC,object_version_id) AS type_rank
 	FROM scored WHERE score>=0
 ) SELECT object_type,object_version_id::text,input_hash,score
 	FROM ranked WHERE type_rank<=$7 ORDER BY object_type,type_rank,object_version_id`
+
+const vectorCandidateEstimateSQL = `SELECT count(*) FROM (
+	SELECT 1` + eligibleSearchDocumentsSQL + `
+	  AND document.embedding_status='SUCCEEDED' AND document.embedding IS NOT NULL
+	  AND document.embedding_model=$5 AND document.embedding_dim=2560
+	LIMIT $6
+) AS bounded_candidates`
 
 func (store *PostgresRetrievalStore) Exact(
 	ctx context.Context, scope askdata.PolicyScope, mention string, objectTypes []ObjectType, limit int,
@@ -98,7 +117,59 @@ func (store *PostgresRetrievalStore) Vector(
 	ctx context.Context, scope askdata.PolicyScope, vector []float32, model string,
 	objectTypes []ObjectType, limit int,
 ) ([]RawHit, error) {
-	return store.query(ctx, scope, vectorRetrievalSQL, "", model, vector, objectTypes, limit)
+	if len(vector) != SearchEmbeddingDimension || strings.TrimSpace(model) == "" || len(model) > 128 {
+		return nil, ErrInvalidRetrieval
+	}
+	tenantID, domainIDs, releaseID, types, err := validateRetrievalStoreRequest(ctx, scope, objectTypes, limit)
+	if err != nil {
+		return nil, err
+	}
+	hits := []RawHit{}
+	err = database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
+		var candidateEstimate int
+		if err := tx.QueryRow(ctx, vectorCandidateEstimateSQL,
+			releaseID, string(scope.Release.ContentHash), domainIDs, types,
+			strings.TrimSpace(model), ExactVectorCandidateThreshold,
+		).Scan(&candidateEstimate); err != nil {
+			return err
+		}
+		route, err := RouteVectorSearch(candidateEstimate)
+		if err != nil {
+			return err
+		}
+		if route == VectorRouteExact {
+			if _, err := tx.Exec(ctx, `SELECT
+				set_config('enable_indexscan','off',true),
+				set_config('enable_bitmapscan','off',true)`); err != nil {
+				return err
+			}
+		} else if _, err := tx.Exec(
+			ctx, `SELECT set_config('hnsw.ef_search',$1,true)`,
+			strconv.Itoa(DefaultRecallAuditEFSearch),
+		); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, vectorRetrievalSQL,
+			releaseID, string(scope.Release.ContentHash), domainIDs, types,
+			formatEmbeddingVector(vector), strings.TrimSpace(model), limit,
+		)
+		if err != nil {
+			return err
+		}
+		hits, err = scanRetrievalRows(rows)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Sampling is deliberately best-effort and uses a separate bounded write so
+	// evidence collection can never fail or roll back the online query.
+	if err := store.recordQuerySamples(
+		ctx, scope, vector, strings.TrimSpace(model), objectTypes,
+	); err != nil {
+		slog.Warn("record AskData recall sample", "error", err)
+	}
+	return hits, nil
 }
 
 func (store *PostgresRetrievalStore) query(
@@ -124,20 +195,27 @@ func (store *PostgresRetrievalStore) query(
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var hit RawHit
-			if err := rows.Scan(&hit.ObjectType, &hit.ObjectVersionID, &hit.InputHash, &hit.Score); err != nil {
-				return err
-			}
-			if !validRetrievalObjectType(hit.ObjectType) || math.IsNaN(hit.Score) || math.IsInf(hit.Score, 0) || hit.Score < 0 {
-				return errors.New("database returned an invalid semantic retrieval score")
-			}
-			hits = append(hits, hit)
-		}
-		return rows.Err()
+		hits, err = scanRetrievalRows(rows)
+		return err
 	})
 	return hits, err
+}
+
+func scanRetrievalRows(rows pgx.Rows) ([]RawHit, error) {
+	defer rows.Close()
+	hits := []RawHit{}
+	for rows.Next() {
+		var hit RawHit
+		if err := rows.Scan(&hit.ObjectType, &hit.ObjectVersionID, &hit.InputHash, &hit.Score); err != nil {
+			return nil, err
+		}
+		if !validRetrievalObjectType(hit.ObjectType) || math.IsNaN(hit.Score) ||
+			math.IsInf(hit.Score, 0) || hit.Score < 0 {
+			return nil, errors.New("database returned an invalid semantic retrieval score")
+		}
+		hits = append(hits, hit)
+	}
+	return hits, rows.Err()
 }
 
 func validateRetrievalStoreRequest(

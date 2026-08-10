@@ -1,0 +1,39 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "proposals"],
+  "properties": {
+    "schemaVersion": {"type": "string", "const": "feedback-attribution-v1"},
+    "proposals": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "candidateType", "targetObjectIds", "evidence", "confidence", "rationaleCode"],
+        "properties": {
+          "category": {"type": "string", "enum": ["METRIC", "DIMENSION", "MEMBER", "TIME", "RELATIONSHIP", "DATA", "PERMISSION", "EXPRESSION"]},
+          "candidateType": {"type": "string", "enum": ["METRIC_DEFINITION", "DIMENSION_DEFINITION", "MEMBER_ALIAS", "TIME_CONTRACT", "RELATIONSHIP", "DATA_QUALITY_RULE", "PERMISSION_POLICY_REVIEW", "EXPRESSION_POLICY"]},
+          "targetObjectIds": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["evidenceId", "contentHash"],
+              "properties": {
+                "evidenceId": {"type": "string", "minLength": 1, "maxLength": 128},
+                "contentHash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              }
+            }
+          },
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "rationaleCode": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,127}$"}
+        }
+      }
+    }
+  }
+}
