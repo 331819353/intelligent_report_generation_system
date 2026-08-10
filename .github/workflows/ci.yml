@@ -49,8 +49,8 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./cmd/... ./internal/...
-      - name: Start infrastructure and apply migrations
-        run: make infra-up db-migrate db-verify
+      - name: Start infrastructure, apply migrations, and verify database
+        run: make infra-up db-migrate db-seed-report-components db-verify
       - name: AskData PostgreSQL integration tests
         env:
           ASKDATA_INTEGRATION_DATABASE_URL: postgres://report_app:local_report_password@127.0.0.1:5432/intelligent_report_control?sslmode=disable

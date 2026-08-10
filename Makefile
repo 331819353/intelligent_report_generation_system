@@ -1,4 +1,4 @@
-.PHONY: fmt lint build ci-check run-api run-worker run-connection-test-worker dev-up dev-stop dev-restart dev-status dev-logs seed-dev frontend-lint frontend-build infra-config infra-up connector-up connector-status infra-down infra-reset infra-status infra-logs db-migrate db-verify warehouse-verify db-shell warehouse-shell clean
+.PHONY: fmt lint build ci-check run-api run-worker run-connection-test-worker dev-up dev-stop dev-restart dev-status dev-logs seed-dev frontend-lint frontend-build infra-config infra-up connector-up connector-status infra-down infra-reset infra-status infra-logs db-migrate db-seed-report-components db-verify warehouse-verify db-shell warehouse-shell clean
 
 export GOCACHE ?= $(CURDIR)/.cache/go-build
 
@@ -55,6 +55,15 @@ infra-logs:
 # 数据库迁移、约束验证和交互式终端。
 db-migrate:
 	@./scripts/migrate.sh
+
+db-seed-report-components:
+	@explicit_database_url="$${DATABASE_URL:-}"; \
+	set -a; \
+	. ./.env.example; \
+	if [ -f ./.env ]; then . ./.env; fi; \
+	set +a; \
+	if [ -n "$$explicit_database_url" ]; then export DATABASE_URL="$$explicit_database_url"; fi; \
+	go run ./cmd/report-component-seed
 
 db-verify:
 	@./scripts/verify-database.sh

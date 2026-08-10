@@ -1,8 +1,9 @@
-# 智能问数系统技术架构与实施方案
+# 智能分析决策平台——智能问数领域技术架构与实施方案
 
 > 面向当前 `intelligent_report_generation_system` 仓库，技术栈为 Golang + React，图数据库采用 NebulaGraph，向量检索复用 PostgreSQL + pgvector。
-> 文档版本：1.0；设计日期：2026-08-05；默认业务时区：Asia/Shanghai。
+> 文档版本：1.1；原始设计日期：2026-08-05；状态复核日期：2026-08-10；默认业务时区：Asia/Shanghai。
 > Codex 原子任务计划：[ASK_DATA_CODEX_TODO.md](./ASK_DATA_CODEX_TODO.md)。
+> 本文只描述智能问数 bounded context；平台级定位、模块闭环和当前缺口以[功能模块与业务闭环审视](./智能分析决策平台_功能模块与业务闭环审视.md)为准。
 
 ## 1. 技术结论
 
@@ -37,11 +38,11 @@
 | 多模型与 AI 审计 | `internal/ai` | 复用 Provider Pool、严格 JSON Schema、重试、Token/成本审计；扩展问数 Purpose 和循环协议 |
 | React 权限与 API 基础 | `web/src` | 新增问数工作台、澄清卡片、结果可视化、执行解释和反馈界面 |
 
-### 2.2 必须重新建设的能力
+### 2.2 历史建设起点与当前状态
 
-历史迁移 `000026`～`000193` 曾设计指标、维度、语义 QA、NebulaGraph、黄金集和 Tool Host，但 `000195_remove_decommissioned_features.up.sql` 已明确删除这些运行时表，`scripts/verify-database.sh` 也要求它们不存在；当前 Go API、Worker 和 React 中没有可运行的智能问数服务。
+历史迁移 `000026`～`000193` 曾设计指标、维度、语义 QA、NebulaGraph、黄金集和 Tool Host，随后由 `000195_remove_decommissioned_features.up.sql` 删除。本文最初据此提出在独立 `askdata` schema 重建能力；该建设工作此后已通过 `000213` 及后续迁移，以及 `internal/askdata/*`、Question API/SSE 和 React 问数工作台落地。因此，历史迁移被删除不再等价于「当前没有可运行的智能问数服务」。
 
-因此不要回滚 `000195`，也不要假设历史表仍存在。建议从后续新迁移开始，在控制库中新建独立 `askdata` schema，避免与退役的 `platform.semantic_*` 名称和验证规则冲突。历史迁移可以作为设计素材，但必须用当前业务边界重新实现、测试和上线。
+当前仍应保留的边界是：不要回滚 `000195`，不要恢复退役的 `platform.semantic_*` 表；`askdata` schema 继续作为问数领域的权威存储。现阶段主要缺口已经转为真实业务语义资产、目标环境门禁、真实会话/资产动作前端、跨报告与决策的端到端闭环，详见 TODO 第 33～34 节。
 
 ### 2.3 首期准确率适用范围
 
