@@ -66,6 +66,19 @@ type registrationStore interface {
 	RegisterUser(context.Context, RegisterUserRecord) error
 }
 
+type profileStore interface {
+	LoadCurrentProfile(context.Context, string, string, string) (CurrentProfile, error)
+}
+
+type CurrentProfile struct {
+	UserID      string   `json:"userId"`
+	DisplayName string   `json:"displayName"`
+	AvatarURL   string   `json:"avatarUrl"`
+	Status      string   `json:"status"`
+	DomainID    string   `json:"domainId,omitempty"`
+	Roles       []string `json:"roles"`
+}
+
 const compatibilityDomainID = "00000000-0000-0000-0000-000000000000"
 
 type Service struct {
@@ -114,6 +127,18 @@ type TokenPair struct {
 // NewService 组合身份存储、密码校验与令牌签发能力。
 func NewService(store Store, passwords PasswordManager, tokens TokenManager, refreshTTL time.Duration) *Service {
 	return &Service{store: store, passwords: passwords, tokens: tokens, refreshTTL: refreshTTL, now: time.Now}
+}
+
+func (s *Service) CurrentProfile(ctx context.Context, tenantID, userID, domainID string) (CurrentProfile, error) {
+	store, ok := s.store.(profileStore)
+	if !ok {
+		user, err := s.store.FindUserByID(ctx, tenantID, userID)
+		if err != nil {
+			return CurrentProfile{}, err
+		}
+		return CurrentProfile{UserID: user.ID, DisplayName: user.DisplayName, Status: string(user.Status), DomainID: domainID, Roles: []string{}}, nil
+	}
+	return store.LoadCurrentProfile(ctx, tenantID, userID, domainID)
 }
 
 var employeeNoPattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9_-]{2,31}$`)

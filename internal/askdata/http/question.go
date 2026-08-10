@@ -152,6 +152,12 @@ func newProtectedHandler(
 	mux.HandleFunc("GET /api/v1/questions/{runId}/events", handler.streamEvents)
 	mux.HandleFunc("POST /api/v1/questions/{runId}/clarifications", handler.submitClarification)
 	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/release-drift", handler.confirmReleaseDrift)
+	mux.HandleFunc("GET /api/v1/conversations", handler.listConversations)
+	mux.HandleFunc("GET /api/v1/conversations/{conversationId}", handler.getConversation)
+	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/pin", handler.pinConversation)
+	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/unpin", handler.unpinConversation)
+	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/archive", handler.archiveConversation)
+	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/restore", handler.restoreConversation)
 	mux.HandleFunc("POST /api/v1/questions/{runId}/feedback", handler.submitFeedback)
 	mux.HandleFunc("POST /api/v1/questions/{runId}/add-to-report", handler.addToReport)
 	mux.HandleFunc("GET /api/v1/add-to-report-intents/{intentId}", handler.getAddToReportIntent)
@@ -161,6 +167,112 @@ func newProtectedHandler(
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
 		mux.ServeHTTP(writer, request)
 	})
+}
+
+func (handler *Handler) listConversations(writer http.ResponseWriter, request *http.Request) {
+	identity, ok := handler.resolveIdentity(writer, request)
+	if !ok {
+		return
+	}
+	backend, ok := handler.backend.(ConversationHistoryBackend)
+	if !ok {
+		writeServiceError(writer, ErrQuestionServiceFailure)
+		return
+	}
+	limit := 50
+	var err error
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil {
+			writeServiceError(writer, ErrInvalidRequest)
+			return
+		}
+	}
+	archived := request.URL.Query().Get("archived") == "true"
+	page, err := backend.ListConversations(request.Context(), identity, strings.TrimSpace(request.URL.Query().Get("search")), archived, limit, request.URL.Query().Get("cursor"))
+	if err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, page)
+}
+func (handler *Handler) getConversation(writer http.ResponseWriter, request *http.Request) {
+	identity, ok := handler.resolveIdentity(writer, request)
+	if !ok {
+		return
+	}
+	backend, ok := handler.backend.(ConversationHistoryBackend)
+	if !ok {
+		writeServiceError(writer, ErrQuestionServiceFailure)
+		return
+	}
+	id, err := parseRunID(request.PathValue("conversationId"))
+	if err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	limit := 50
+	if raw := request.URL.Query().Get("runLimit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil {
+			writeServiceError(writer, ErrInvalidRequest)
+			return
+		}
+	}
+	detail, err := backend.GetConversation(request.Context(), identity, id, limit, request.URL.Query().Get("runCursor"))
+	if err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, detail)
+}
+func (handler *Handler) pinConversation(writer http.ResponseWriter, request *http.Request) {
+	handler.mutateConversation(writer, request, "PIN")
+}
+func (handler *Handler) unpinConversation(writer http.ResponseWriter, request *http.Request) {
+	handler.mutateConversation(writer, request, "UNPIN")
+}
+func (handler *Handler) archiveConversation(writer http.ResponseWriter, request *http.Request) {
+	handler.mutateConversation(writer, request, "ARCHIVE")
+}
+func (handler *Handler) restoreConversation(writer http.ResponseWriter, request *http.Request) {
+	handler.mutateConversation(writer, request, "RESTORE")
+}
+func (handler *Handler) mutateConversation(writer http.ResponseWriter, request *http.Request, operation string) {
+	identity, ok := handler.resolveIdentity(writer, request)
+	if !ok {
+		return
+	}
+	backend, ok := handler.backend.(ConversationHistoryBackend)
+	if !ok {
+		writeServiceError(writer, ErrQuestionServiceFailure)
+		return
+	}
+	if _, err := requireIdempotencyKey(request); err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	id, err := parseRunID(request.PathValue("conversationId"))
+	if err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	var input ConversationMutationInput
+	if err = decodeStrictJSON(writer, request, &input); err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	var result ConversationSummary
+	if operation == "PIN" || operation == "UNPIN" {
+		result, err = backend.SetConversationPinned(request.Context(), identity, id, input, operation == "PIN")
+	} else {
+		result, err = backend.SetConversationArchived(request.Context(), identity, id, input, operation == "ARCHIVE")
+	}
+	if err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
 }
 
 func authenticatedIdentity(ctx context.Context) (RequestIdentity, error) {
@@ -466,6 +578,7 @@ type RunView struct {
 	CreatedAt      time.Time                `json:"createdAt"`
 	UpdatedAt      time.Time                `json:"updatedAt"`
 	CompletedAt    *time.Time               `json:"completedAt,omitempty"`
+	AllowedActions []string                 `json:"allowedActions"`
 }
 
 type RunBudgetView struct {
@@ -623,7 +736,26 @@ func newRunView(snapshot orchestrator.ReplaySnapshot) RunView {
 	if run.Terminal() {
 		view.Completion = publicCompletion(snapshot)
 	}
+	view.AllowedActions = allowedRunActions(view)
 	return view
+}
+
+// allowedRunActions is derived only from the server-validated completion
+// projection. Clients must not infer export, report or decision eligibility
+// from a visual state or from payload fields that failed sanitization.
+func allowedRunActions(view RunView) []string {
+	result := []string{}
+	completion := view.Completion
+	if completion == nil || completion.ArtifactType != orchestrator.ArtifactAnswer ||
+		completion.ArtifactHash.Validate() != nil || completion.Answer == nil {
+		return result
+	}
+	result = append(result, "SAVE", "SHARE", "EXPORT", "CREATE_DECISION")
+	if completion.Result != nil && completion.Outcome != nil &&
+		completion.Outcome.Status == validator.OutcomeAnswered {
+		result = append(result, "ADD_TO_REPORT")
+	}
+	return result
 }
 
 func publicCompletion(snapshot orchestrator.ReplaySnapshot) *CompletionView {

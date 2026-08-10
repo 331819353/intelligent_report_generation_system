@@ -24,6 +24,25 @@
 
 ### 已完成后端能力
 
+- 本轮补齐统一工作箱、真实会话历史、首页个性化读模型、报告关注、报告订阅/调度/站内分发、用户停用
+  与全量 Owner Transfer SPI、受控运行配置，以及完整 Decision bounded context。API/Worker 已在
+  `cmd/api`、`cmd/worker` 接线；前端页面不属于本轮交付范围。
+- 工作箱支持 `kind=APPROVAL|TASK` 的服务端分类分页/计数、actor 已读、来源状态自动消失和受权详情/
+  ActionCommand；详情仅返回来源对象、权威版本、固定版本/hash、有界差异/证据/风险摘要与字段约束，
+  不复制业务事实或泄露无权标题。
+- 会话历史支持 pinned/unpinned 稳定 keyset、搜索、置顶/取消置顶、归档、run 级分页和最新 ANSWER 标签；
+  报告关注与保存问题分页、`auth/me` 共同补齐首页后端读模型。
+- 报告调度固定已发布版本、时区和业务日历，覆盖 DST、lease、错过窗口、重试/自动暂停、手工恢复/
+  幂等补跑、接收者当前权限重检、站内 delivery 和已读；未在 `HUMAN-015` 前扩展外部渠道。
+- 用户停用以预览 → 计划 → 原子执行/失败重试处理 Transfer/AutoClose/ReadOnly/Block；覆盖数据、语义、
+  Release、报告/模板/计划、保存问题、反馈/取数、决策/行动/审批和 runtime config。认证事实只允许专用
+  SYSTEM owner-transfer 事务修改 owner 元数据，数据库/服务只阻断最后一名活跃平台/领域管理员。
+- 运行配置完成无密钥白名单、canonical hash、草稿/提交/审批/驳回、分阶段 rollout、失败停止、有效版本、
+  回滚和 append-only 审计；创建者不能自批，Worker 使用 tenant discovery 最小权限。
+- 决策完成四份公共 schema/共享正反 fixture、独立 `decision` schema、三类可验证 Evidence 服务端固定、
+  审批、行动、due/overdue 通知、Outcome 当前策略重放、人工复盘、关闭/重开。列表用单查询支持四 scope、
+  筛选/排序/keyset/总数/scopeCounts/Owner/证据/行动摘要，并提供策略目录和 Evidence prefill；HUMAN-014
+  未确认前明确拒绝 `decisionType`，不固化候选枚举。
 - `RPT-001` 已完成报告 DSL 规范化、12 阶段校验、富文本清洗、规范 JSON 和稳定 hash，并通过常规、
   竞态和基准验证。报告主链已继续完成运行时、筛选交互服务、Insight Engine/Method Registry、AI
   两阶段生成与局部修改、真实 CSV/XLSX/PDF/PNG 导出、无匿名分享、模板版本保留与受控升级。
@@ -40,8 +59,12 @@
 
 ### 数据库与安全边界
 
-- 当前迁移序列到 `000280_report_semantic_upgrade_compilations`。`000276`～`000280` 分别补齐报告语义
-  IR 重建、依赖索引重建、融合引用、认证问法/报告种子上下文，以及不可变升级编译制品。
+- 当前迁移序列到 `000297_release_gate_receipt_hash_ambiguity`。`000281`～`000297` 新增/修复 Decision、
+  统一工作箱、会话历史、报告调度、Owner Transfer、运行配置、报告关注、审批追加事实/worker discovery、
+  状态机、delivery read、runtime reject/trigger、认证语义转交覆盖、最后管理员保护及评估回执变量歧义。
+- `scripts/migrate.sh` 对新增控制面重置宽授权后按 API/Worker 职责最小授权；`scripts/verify-database.sh`
+  已逐表检查迁移记录、FORCE RLS、状态机/append-only 触发器、SECURITY DEFINER 和 app/worker/
+  connection-test 权限边界。
 - `platform.report_semantic_compilations` 强制 RLS 且禁止更新/删除；应用角色仅有 `SELECT,INSERT`，
   Worker/连接测试角色无表级权限。运行时只经 SECURITY DEFINER loader 读取与 READY 不可变报告版本、
   当前查看者权限、组件、plan hash、release/hash 和 IR hash 全部精确匹配的制品。
@@ -50,13 +73,16 @@
 
 ### 已验证与仍需外部完成
 
-- 已通过：全仓 Go 测试、AskData/Report/DataRequest 竞态测试、`go vet ./...`、Compose 配置检查、主库
-  migrate/verify、独立数据库 `000280` up/down/up、`git diff --check`。
+- 已通过：新增模块定向/真实 PostgreSQL 测试、共享 Decision Go/TypeScript 合同、Web 单测、主库
+  migrate/verify。全仓 Go、race、vet、compose/CI 和最终差异检查的本轮终态命令见本节末尾新增验证记录。
 - 前端页面仍按用户指定排除：全部 `WEB-*`、`WEB-RPT-*`，以及混合任务 `ADD-002`、`RPT-006`、
   `RPT-008`、`RPT-011` 中的页面/打印样式部分。它们的后端范围已完成。
+- `ASK_DATA_CAPACITY_BASELINE.md` / `ASK_DATA_DISASTER_RECOVERY.md` 已扩展平台混合负载、资源预算、
+  RTO/RPO 计量点、全控制库/对象存储/数仓/Nebula/队列恢复顺序、闭包检查，以及调度/导出/通知/决策
+  跨恢复点的确定行为。`OPS-007` 仍需目标拓扑混合压测、故障注入、实际恢复收据和三方签署。
 - 仍需真实业务/生产输入：`EVAL-008`～`010` 的业务黄金样本与 150 条双人评审、`OPS-003/004`、
-  `OBS-003`、`PILOT-001`～`004`。在这些完成前不得宣称 Recall 门槛、95% 准确率、灾备 RTO/RPO 或
-  生产容量已经验收。
+  `OBS-003`、`OPS-007` 目标环境部分、`PILOT-001`～`004`。在这些完成前不得宣称 Recall 门槛、95%
+  准确率、灾备 RTO/RPO 或生产容量已经验收。
 
 ## 0. 板块蓝图同步（2026-08-06）
 
@@ -70,7 +96,7 @@ TODO 已按**功能区（板块 B01～B13）**重新组织，见 `ASK_DATA_CODEX
 
 | 板块 | 名称 | 状态 | 关键缺口 |
 |---|---|---|---|
-| B01 | 平台底座与权限 | `SEC-001`～`SEC-004` 全部完成 | 业务导航/统一待办及用户停用后的跨模块 Owner 转交 `PLAT-LIFE-001` |
+| B01 | 平台底座与权限 | 安全基线、统一工作箱及用户停用/Owner Transfer 后端完成 | 业务导航和用户生命周期页面 |
 | B02 | 数据接入与元数据 | 明细取数、敏感会签、受控导出与资产化聚类后端完成 | 前端入口及真实审批责任人配置 |
 | B03 | 数仓建模与物化 | 仓库基线 + `SNAP-001` 数据快照版本完成 | 后续增量物化与运维增强 |
 | B04 | 语义资产治理 | 后端主链、DRAFT、时间/可加性、导入、词典、KPI 与建议器完成 | `ADD-002` 前端补录入口 |
@@ -80,10 +106,10 @@ TODO 已按**功能区（板块 B01～B13）**重新组织，见 `ASK_DATA_CODEX
 | B08 | 查询编译与执行 | 主链、`ADD-003/004`、`QUERY-007`～`011` 全部完成 | — |
 | B09 | 编排与问数 API | Loop/API、答案校验重生成、预算/幂等与叙述观测门禁完成 | — |
 | B10 | 问数工作台前端 | `WEB-001`～`WEB-006` 与 `WEB-011` 明细取数申请工作区完成 | `WEB-007`～`010`、`WEB-012`～`016`；尤其是真实会话和分析资产动作 |
-| B11 | 报表引擎与融合 | 后端引擎、发布/回滚/导出/分享/升级与 `FUSE-001`～`005` 完成 | 前端运行时/筛选/打印及 `WEB-RPT-001`～`008`；订阅/定时分发 `RPT-014` |
+| B11 | 报表引擎与融合 | 后端引擎、发布/回滚/导出/分享/升级、融合及订阅/调度/站内分发完成 | 前端运行时/筛选/打印及 `WEB-RPT-001`～`008` |
 | B12 | 评测、反馈与运营 | 软件控制面、密封集、误差预算、保存问题与反馈闭环完成 | 正式黄金样本与人工评审 |
-| B13 | 运维、可观测与成本 | 配置、独立 Worker、观测、看板、配额与成本后端完成 | 运行配置变更中心 `OPS-008`；AskData 灾备/容量专项待实测；报告、任务和决策的平台级扩展 `OPS-007`；生产 POC |
-| B14 | 决策协同与行动复盘 | 新增 P15/M20，尚无代码 | `DEC-CONTRACT-001`、`DEC-DB-001`、`DEC-001`～`003`、`WEB-DEC-001` |
+| B13 | 运维、可观测与成本 | 配置、独立 Worker、观测、看板、配额/成本、运行配置后端及平台 DR/容量合同完成 | `OPS-008` 页面；目标环境灾备/容量/生产 POC 与签署 |
+| B14 | 决策协同与行动复盘 | 合同、数据库、服务/Worker、Evidence、审批、行动、复盘和列表后端完成 | `WEB-DEC-001`、HUMAN-014 与业务旅程 E2E |
 
 ### 0.3 本次新增的任务数量
 
@@ -4225,6 +4251,32 @@ git diff --check
   结果绑定到全部组件；`WEB-RPT-007` 仍缺 Owner/类型/更新时间前端筛选、发布恢复中专态、版本差异和
   后续设计器/发布页面，因此两项保持未完成，避免把确认稿 fixture 当作生产结果。
 
+### 2.105 跨模块后端补全（统一工作箱、调度、生命周期、配置与决策）
+
+- API 新增/补全：`/api/v1/work-items` 分类分页及 `/{type}/{id}` 详情、`/api/v1/conversations` 与 run
+  分页/搜索/pin/unpin/archive、`/api/v1/auth/me`、保存问题游标、报告 follows、report schedules/
+  subscriptions/deliveries/backfill/read、user lifecycle preview/execute/retry、runtime config
+  draft/submit/approve/reject/rollout/rollback，以及 Decision list/detail/create/submit/approve/action/outcome/
+  evidence-prefill/approval-policies。
+- Worker 新增报告 schedule/delivery、runtime rollout 与 decision due/overdue；tenant discovery 只经
+  SECURITY DEFINER 返回有待处理工作的 tenant，连接测试角色无执行权。
+- 数据库迁移 `000281`～`000297` 已在本地真实应用；所有新表 tenant/domain scoped，控制面表强制 RLS。
+  Decision Evidence/options/events/approval facts、delivery/lifecycle/runtime 事件保持 append-only；决策、
+  行动、runtime config 和最后管理员规则均有数据库守卫。
+- 真实库测试覆盖：Decision 完整审批→行动→复盘→关闭/重开、Evidence 固定与跨域拒绝；工作项分类/
+  详情/通知消失；报告计划 DST、补跑、无权/下架、重复和已读；生命周期跨上下文转交/失败回滚/认证事实
+  保护/最后管理员；runtime reject、自批拒绝、rollout/回滚；会话 pin/keyset/run 分页；report follow
+  撤权/下架/幂等。
+- 额外修复了四类由全量集成测试发现的旧回归：graph rebuild 命令 UUID 预校验、Top-N fixture 列绑定、
+  Release Evaluation Gate `receipt_hash` PL/pgSQL 歧义，以及 KPI/可加性/数据集测试夹具与最新审计/Owner
+  约束不一致；失败测试事务现在总会 rollback，不再阻塞 pool close。
+- 最终验证通过：带 app/admin/worker 真实库的 `go test ./... -count=1`、新增模块 `go test -race`、
+  `go vet ./...`、52 条 Web/共享合同测试、Web lint/TypeScript/Vite build、`ci-check.sh`、Compose 静态与
+  Nebula 凭据隔离、主库 migrate/verify、warehouse verify、`000296/000297` down→up 回滚事务回放和
+  `git diff --check`。Vite 仍有已登记 `PERF-001` 的主 chunk >500 kB 警告，不属于本轮后端范围。
+- 未完成项严格限于前端页面/页面 E2E、HUMAN-001～015 业务输入、正式黄金样本，以及必须在目标拓扑
+  实测和签署的容量/灾备/Shadow/Canary/Pilot；这些不应被本地软件测试标为完成。
+
 ## 4. 工作区注意事项
 
 - 用户在本次实施前已有多项 `docs/*` 删除状态；这些文件未被恢复或修改。
@@ -4247,7 +4299,9 @@ git diff --check
   `000271` 已由 DR-002/003 使用数据申请治理，`000272` 已由 RPT-004 使用固定依赖与 Report Version
   Release 引用保留，`000273` 已由 RPT-005 使用回滚目标自外键与原因完整性；`000274` 已由配额运行时
   占用，`000275` 已由 `RPT-013` 实现报告资产事件、上下架完整性和列表索引，并已在本地开发库应用及通过 V-DB。
-  `000259/000260` 已存在于工作区并由后续报告任务接续，但不得据此
+  `000281`～`000297` 已依次用于 Decision、工作箱、会话历史、报告调度、Owner Transfer、运行配置、
+  报告关注及其安全/状态机前向修复，最后一个编号为 Release Evaluation Gate 回执变量歧义修复；不得
+  复用这些编号。`000259/000260` 已存在于工作区并由后续报告任务接续，但不得据此
   把后续分享或导出任务标为完成；其余预留迁移继续按
   TODO §22.1 分配到具体任务，新 Schema 仍按 §22.2 分配，不得重复占用。
 - 报表板块（B11）新建独立 Report V2 bounded context：不修改历史迁移，不假定旧报告表仍存在，

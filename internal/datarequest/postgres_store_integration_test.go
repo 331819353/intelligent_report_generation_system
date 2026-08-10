@@ -256,8 +256,9 @@ func createDataRequestFixture(t *testing.T, ctx context.Context, tx pgx.Tx) data
 		t.Fatalf("disable fixture triggers: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO platform.datasets(
-		id,tenant_id,code,name,dataset_type,status,layer,domain_id,sharing_scope,created_by,updated_by
-	) VALUES($1,$2,$3,'Data request fields','SINGLE_SOURCE','PUBLISHED','DWS',$4,'DOMAIN',$5,$5)`,
+		id,tenant_id,code,name,dataset_type,status,layer,domain_id,sharing_scope,
+		created_by,updated_by,owner_user_id
+	) VALUES($1,$2,$3,'Data request fields','SINGLE_SOURCE','PUBLISHED','DWS',$4,'DOMAIN',$5,$5,$5)`,
 		datasetID, fixture.tenantID, "datareq_fields_"+suffix, fixture.domainID,
 		fixture.approverID); err != nil {
 		t.Fatalf("insert dataset fixture: %v", err)

@@ -1,0 +1,40 @@
+{
+  "title": "Decision Outcome Review v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "decisionId", "metrics", "status", "conclusion", "notes", "reviewedAt", "recordVersion"],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "decisionId": { "$ref": "#/$defs/uuid" },
+    "metrics": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/metric" } },
+    "status": { "enum": ["PENDING", "GENERATED", "CONFIRMED", "INCONCLUSIVE"] },
+    "conclusion": { "enum": ["ACHIEVED", "PARTIALLY_ACHIEVED", "NOT_ACHIEVED", "INCONCLUSIVE"] },
+    "notes": { "type": "string", "maxLength": 4096 },
+    "reviewedAt": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$" },
+    "recordVersion": { "type": "integer", "minimum": 1 }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "decimal": { "type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$", "maxLength": 128 },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metricVersionId", "semanticIRHash", "semanticReleaseId", "semanticReleaseHash", "baselineValue", "currentValue", "targetDirection", "targetValue", "reviewAt", "policyScopeHash", "resultHash", "drifted"],
+      "properties": {
+        "metricVersionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "semanticIRHash": { "$ref": "#/$defs/hash" },
+        "semanticReleaseId": { "$ref": "#/$defs/uuid" },
+        "semanticReleaseHash": { "$ref": "#/$defs/hash" },
+        "baselineValue": { "$ref": "#/$defs/decimal" },
+        "currentValue": { "oneOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "targetDirection": { "enum": ["INCREASE", "DECREASE", "AT_LEAST", "AT_MOST", "RANGE"] },
+        "targetValue": { "oneOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "reviewAt": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$" },
+        "policyScopeHash": { "$ref": "#/$defs/hash" },
+        "resultHash": { "oneOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "drifted": { "type": "boolean" }
+      }
+    }
+  }
+}

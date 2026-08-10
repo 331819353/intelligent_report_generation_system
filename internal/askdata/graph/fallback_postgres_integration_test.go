@@ -130,7 +130,7 @@ func TestPostgresFallbackAndCertifiedCacheAgainstRuntimeRole(t *testing.T) {
 		id,tenant_id,domain_id,relationship_id,version_no,left_model_version_id,
 		right_model_version_id,relationship_type,join_type,cardinality,join_ast,
 		fanout_policy,status,content_hash,owner_id
-	) VALUES($1,$2,$3,$4,1,$5,$6,'MODEL_JOIN','INNER','ONE_TO_MANY','{}',
+	) VALUES($1,$2,$3,$4,1,$5,$6,'MODEL_JOIN','INNER','MANY_TO_ONE','{}',
 		'SAFE','CERTIFIED',$7,$8)`, relationshipVersionID, tenantID,
 		domainID, relationshipID, modelVersionIDs[0], modelVersionIDs[1],
 		strings.Repeat("8", 64), actorID); err != nil {
@@ -254,7 +254,7 @@ func TestPostgresFallbackAndCertifiedCacheAgainstRuntimeRole(t *testing.T) {
 		FromModelVersionID: leftRef.VersionID,
 		ToModelVersionID:   rightRef.VersionID,
 		Direction:          direction, JoinType: registry.JoinInner,
-		Cardinality: registry.CardinalityOneToMany, FanoutPolicy: registry.FanoutSafe,
+		Cardinality: registry.CardinalityManyToOne, FanoutPolicy: registry.FanoutSafe,
 	}})
 	if err != nil {
 		t.Fatal(err)

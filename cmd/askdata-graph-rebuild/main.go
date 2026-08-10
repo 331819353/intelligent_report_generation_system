@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	askdatagraph "intelligent-report-generation-system/internal/askdata/graph"
 	"intelligent-report-generation-system/internal/platform/database"
 )
@@ -57,7 +58,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	if flags.NArg() != 0 || strings.TrimSpace(tenantID) == "" || strings.TrimSpace(releaseID) == "" ||
+	if flags.NArg() != 0 || !canonicalUUID(tenantID) || !canonicalUUID(releaseID) ||
 		strings.TrimSpace(databaseURL) == "" || timeout < time.Minute || timeout > time.Hour {
 		fmt.Fprintln(stderr, "tenant-id, release-id and database-url are required; timeout must be between 1m and 1h")
 		return 2
@@ -132,6 +133,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func canonicalUUID(value string) bool {
+	parsed, err := uuid.Parse(strings.TrimSpace(value))
+	return err == nil && parsed.String() == value
 }
 
 func firstEnv(names ...string) string {

@@ -27,6 +27,7 @@ import (
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasettagsuggestion"
 	"intelligent-report-generation-system/internal/datasource"
+	"intelligent-report-generation-system/internal/decision"
 	"intelligent-report-generation-system/internal/embedding"
 	"intelligent-report-generation-system/internal/federation"
 	"intelligent-report-generation-system/internal/filequery"
@@ -38,12 +39,15 @@ import (
 	platformidempotency "intelligent-report-generation-system/internal/platform/idempotency"
 	"intelligent-report-generation-system/internal/policy"
 	"intelligent-report-generation-system/internal/queryruntime"
+	reportauthorization "intelligent-report-generation-system/internal/report/authorization"
 	reportinbound "intelligent-report-generation-system/internal/report/inbound"
 	reportpublication "intelligent-report-generation-system/internal/report/publication"
 	reportruntime "intelligent-report-generation-system/internal/report/runtime"
+	reportschedule "intelligent-report-generation-system/internal/report/schedule"
 	reportsharing "intelligent-report-generation-system/internal/report/sharing"
 	reportstore "intelligent-report-generation-system/internal/report/store"
 	reporttemplate "intelligent-report-generation-system/internal/report/template"
+	"intelligent-report-generation-system/internal/runtimeconfig"
 	"intelligent-report-generation-system/internal/warehouse"
 )
 
@@ -315,6 +319,18 @@ func main() {
 		logger.Error("initialize report export worker", "error", err)
 		os.Exit(1)
 	}
+	reportScheduleWorker, err := reportschedule.NewWorker(
+		reportschedule.NewPostgresStore(pool), reportauthorization.NewPostgresAuthorizer(pool),
+	)
+	if err != nil {
+		logger.Error("initialize report schedule worker", "error", err)
+		os.Exit(1)
+	}
+	runtimeConfigWorker, err := runtimeconfig.NewWorker(pool)
+	if err != nil {
+		logger.Error("initialize runtime configuration worker", "error", err)
+		os.Exit(1)
+	}
 	metadataAIStore := metadataai.NewPostgresStore(pool)
 	metadataAIStore.SetEnrichmentCommitSink(datasetStore)
 	metadataAIService := metadataai.NewService(
@@ -407,6 +423,8 @@ func main() {
 	)
 	go runReportPublicationRecoveryWorker(ctx, logger, reportRecoveryWorker, cfg.WorkerPollInterval)
 	go runReportExportWorker(ctx, logger, reportExportWorker, workerID, cfg.WorkerPollInterval)
+	go runReportScheduleWorker(ctx, logger, reportScheduleWorker, cfg.WorkerPollInterval)
+	go runRuntimeConfigWorker(ctx, logger, runtimeConfigWorker, cfg.WorkerPollInterval)
 	go runAskDataClarificationExpiryWorker(
 		ctx, logger, askdataorchestrator.NewClarificationExpiryWorker(pool),
 		cfg.WorkerPollInterval,
@@ -417,6 +435,14 @@ func main() {
 	go runReportShareExpiryWorker(
 		ctx, logger, reportsharing.NewExpiryWorker(pool), cfg.WorkerPollInterval,
 	)
+	decisionDueService, err := decision.NewService(
+		decision.NewPostgresStore(pool), decision.NewPostgresEvidenceVerifier(pool), nil,
+	)
+	if err != nil {
+		logger.Error("initialize decision due worker", "error", err)
+		os.Exit(1)
+	}
+	go runDecisionDueWorker(ctx, logger, decisionDueService, cfg.WorkerPollInterval)
 	go runAskDataSemanticImportWorker(
 		ctx,
 		logger,
@@ -938,6 +964,52 @@ func runReportShareExpiryWorker(
 		}
 		return processed, nil
 	}, func(err error) { logger.Error("list report share expiry tenants", "error", err) })
+}
+
+func runReportScheduleWorker(ctx context.Context, logger *slog.Logger, worker *reportschedule.Worker, pollInterval time.Duration) {
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
+		processed := false
+		tenantIDs, err := worker.TenantIDs(ctx)
+		if err != nil {
+			return false, err
+		}
+		for _, tenantID := range tenantIDs {
+			count, runErr := worker.ProcessTenant(ctx, tenantID, 200)
+			if runErr != nil {
+				logger.Error("process report schedules", "tenant_id", tenantID, "error", runErr)
+			}
+			processed = processed || count > 0
+		}
+		return processed, nil
+	}, func(err error) { logger.Error("list report schedule tenants", "error", err) })
+}
+
+func runDecisionDueWorker(ctx context.Context, logger *slog.Logger, service *decision.Service, pollInterval time.Duration) {
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
+		count, err := service.ProcessDue(ctx, 500)
+		if err != nil {
+			return false, err
+		}
+		return count > 0, nil
+	}, func(err error) { logger.Error("process decision review and action deadlines", "error", err) })
+}
+
+func runRuntimeConfigWorker(ctx context.Context, logger *slog.Logger, worker *runtimeconfig.Worker, pollInterval time.Duration) {
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
+		processed := false
+		tenantIDs, err := worker.TenantIDs(ctx)
+		if err != nil {
+			return false, err
+		}
+		for _, tenantID := range tenantIDs {
+			count, runErr := worker.ProcessTenant(ctx, tenantID, 200)
+			if runErr != nil {
+				logger.Error("process runtime configuration rollout", "tenant_id", tenantID, "error", runErr)
+			}
+			processed = processed || count > 0
+		}
+		return processed, nil
+	}, func(err error) { logger.Error("list runtime configuration rollout tenants", "error", err) })
 }
 
 func runAskDataSemanticImportWorker(

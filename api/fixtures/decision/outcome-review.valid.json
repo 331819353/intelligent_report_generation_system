@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0",
+  "decisionId": "11111111-1111-4111-8111-111111111111",
+  "metrics": [
+    {
+      "metricVersionId": "gross-margin-v3",
+      "semanticIRHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "semanticReleaseId": "99999999-9999-4999-8999-999999999999",
+      "semanticReleaseHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "baselineValue": "0.3100",
+      "currentValue": "0.3250",
+      "targetDirection": "AT_LEAST",
+      "targetValue": "0.3200",
+      "reviewAt": "2026-09-30T09:00:00Z",
+      "policyScopeHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "resultHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "drifted": false
+    }
+  ],
+  "status": "CONFIRMED",
+  "conclusion": "ACHIEVED",
+  "notes": "达到阈值，但不据此声称因果关系。",
+  "reviewedAt": "2026-09-30T10:00:00Z",
+  "recordVersion": 2
+}

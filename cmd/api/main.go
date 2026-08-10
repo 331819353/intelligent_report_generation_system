@@ -35,6 +35,7 @@ import (
 	"intelligent-report-generation-system/internal/datasetsemanticnaming"
 	"intelligent-report-generation-system/internal/datasource"
 	"intelligent-report-generation-system/internal/datasourceai"
+	"intelligent-report-generation-system/internal/decision"
 	"intelligent-report-generation-system/internal/embedding"
 	"intelligent-report-generation-system/internal/federation"
 	"intelligent-report-generation-system/internal/filequery"
@@ -48,14 +49,19 @@ import (
 	"intelligent-report-generation-system/internal/queryruntime"
 	reportasset "intelligent-report-generation-system/internal/report/asset"
 	reportauthorization "intelligent-report-generation-system/internal/report/authorization"
+	reportfollow "intelligent-report-generation-system/internal/report/follow"
 	reporthttp "intelligent-report-generation-system/internal/report/http"
 	reportinsight "intelligent-report-generation-system/internal/report/insight"
 	reportpublication "intelligent-report-generation-system/internal/report/publication"
 	reportai "intelligent-report-generation-system/internal/report/reportai"
 	reportruntime "intelligent-report-generation-system/internal/report/runtime"
+	reportschedule "intelligent-report-generation-system/internal/report/schedule"
 	reportsharing "intelligent-report-generation-system/internal/report/sharing"
 	reportstore "intelligent-report-generation-system/internal/report/store"
 	reporttemplate "intelligent-report-generation-system/internal/report/template"
+	"intelligent-report-generation-system/internal/runtimeconfig"
+	"intelligent-report-generation-system/internal/userlifecycle"
+	"intelligent-report-generation-system/internal/workitem"
 )
 
 type savedQuestionLauncher struct{ service *askdatahttp.PostgresService }
@@ -122,6 +128,22 @@ func main() {
 	authService := auth.NewService(auth.NewPostgresStore(pool), passwords, tokens, cfg.AuthRefreshTTL)
 	accessService := access.NewService(access.NewPostgresStore(pool))
 	accessAdminHandler := access.NewAdminHandler(authService, access.NewAdminStore(pool))
+	userLifecycleService, err := userlifecycle.NewService(pool, access.NewAdminStore(pool))
+	if err != nil {
+		logger.Error("initialize user lifecycle service", "error", err)
+		os.Exit(1)
+	}
+	userLifecycleHandler := userlifecycle.NewHandler(
+		authService, platformidempotency.NewPostgresRepository(pool), userLifecycleService,
+	)
+	runtimeConfigService, err := runtimeconfig.NewService(pool, access.NewAdminStore(pool))
+	if err != nil {
+		logger.Error("initialize runtime configuration service", "error", err)
+		os.Exit(1)
+	}
+	runtimeConfigHandler := runtimeconfig.NewHandler(
+		authService, platformidempotency.NewPostgresRepository(pool), runtimeConfigService,
+	)
 	assetScopeHandler := access.NewAssetScopeHandler(authService, access.NewAssetScopeStore(pool))
 
 	dataSourceRepo := datasource.NewPostgresRepository(pool)
@@ -400,6 +422,27 @@ func main() {
 		logger.Error("initialize report semantic upgrade compiler", "error", err)
 		os.Exit(1)
 	}
+	decisionOutcomeRunner, err := decision.NewGovernedOutcomeRunner(
+		pool, reportruntime.NewPostgresViewerScopeResolver(pool), reportUpgradeCompiler,
+		reportCoverage, reportPlanValidator, reportPlanExecutor,
+	)
+	if err != nil {
+		logger.Error("initialize decision outcome runner", "error", err)
+		os.Exit(1)
+	}
+	decisionService, err := decision.NewService(
+		decision.NewPostgresStore(pool), decision.NewPostgresEvidenceVerifier(pool), decisionOutcomeRunner,
+	)
+	if err != nil {
+		logger.Error("initialize decision service", "error", err)
+		os.Exit(1)
+	}
+	decisionHandler := decision.NewHandler(
+		authService, platformidempotency.NewPostgresRepository(pool), decisionService,
+	)
+	workItemHandler := workitem.NewHandler(
+		authService, platformidempotency.NewPostgresRepository(pool), workitem.NewStore(pool),
+	)
 	reportRuntime := reportruntime.GovernedQueryExecutor{
 		Dataset: reportDatasetRunner, Semantic: reportSemanticRunner,
 	}
@@ -424,6 +467,26 @@ func main() {
 		Repository: reportAssetRepository, Artifacts: reportArtifacts,
 		Manifests: reportComponentRegistry, Dependencies: reportDependencyValidator,
 	}
+	reportScheduleService, err := reportschedule.NewService(
+		reportschedule.NewPostgresStore(pool), reportAuthorizer,
+	)
+	if err != nil {
+		logger.Error("initialize report schedule service", "error", err)
+		os.Exit(1)
+	}
+	reportScheduleHandler := reportschedule.NewHandler(
+		authService, platformidempotency.NewPostgresRepository(pool), reportScheduleService,
+	)
+	reportFollowService, err := reportfollow.NewService(
+		reportfollow.NewStore(pool), reportauthorization.NewPostgresAuthorizer(pool),
+	)
+	if err != nil {
+		logger.Error("initialize report follow service", "error", err)
+		os.Exit(1)
+	}
+	reportFollowHandler := reportfollow.NewHandler(
+		authService, platformidempotency.NewPostgresRepository(pool), reportFollowService,
+	)
 	reportHandler := reporthttp.NewHandler(
 		authService, platformidempotency.NewPostgresRepository(pool), reportRepository, reportPublisher,
 		reportruntime.Loader{Versions: reportRepository, Artifacts: reportArtifacts, Manifests: reportComponentRegistry},
@@ -445,6 +508,7 @@ func main() {
 	api.Handle("/api/v1/questions", questionHandler)
 	api.Handle("/api/v1/questions/", questionHandler)
 	api.Handle("/api/v1/conversations/", questionHandler)
+	api.Handle("/api/v1/conversations", questionHandler)
 	api.Handle("/api/v1/add-to-report-intents/", questionHandler)
 	api.Handle("/api/v1/askdata/saved-questions", savedQuestionHandler)
 	api.Handle("/api/v1/askdata/saved-questions/", savedQuestionHandler)
@@ -456,7 +520,20 @@ func main() {
 	api.Handle("/api/v1/askdata/report-assets/", reportAssetHandler)
 	api.Handle("/api/v1/reports", reportHandler)
 	api.Handle("/api/v1/reports/", reportHandler)
+	api.Handle("GET /api/v1/reports/{id}/schedules", reportScheduleHandler)
+	api.Handle("POST /api/v1/reports/{id}/schedules", reportScheduleHandler)
+	api.Handle("/api/v1/report-schedules/", reportScheduleHandler)
+	api.Handle("/api/v1/report-deliveries", reportScheduleHandler)
+	api.Handle("/api/v1/report-deliveries/", reportScheduleHandler)
+	api.Handle("/api/v1/report-follows", reportFollowHandler)
+	api.Handle("POST /api/v1/reports/{id}/follow", reportFollowHandler)
+	api.Handle("DELETE /api/v1/reports/{id}/follow", reportFollowHandler)
 	api.Handle("/api/v1/report-shares/", reportHandler)
+	api.Handle("/api/v1/decisions", decisionHandler)
+	api.Handle("/api/v1/decisions/", decisionHandler)
+	api.Handle("/api/v1/work-items", workItemHandler)
+	api.Handle("/api/v1/work-items/", workItemHandler)
+	api.Handle("/api/v1/runtime-config/", runtimeConfigHandler)
 	api.Handle("/api/v1/data-requests", dataRequestHandler)
 	api.Handle("/api/v1/data-requests/", dataRequestHandler)
 	api.Handle("/api/v1/askdata/semantic/", semanticAdminHandler)
@@ -470,6 +547,9 @@ func main() {
 	api.Handle("/api/v1/domains/", accessAdminHandler)
 	api.Handle("/api/v1/users", accessAdminHandler)
 	api.Handle("/api/v1/users/", accessAdminHandler)
+	api.Handle("GET /api/v1/users/{id}/deactivation-preview", userLifecycleHandler)
+	api.Handle("POST /api/v1/users/{id}/deactivation-batches", userLifecycleHandler)
+	api.Handle("/api/v1/user-lifecycle-batches/", userLifecycleHandler)
 	api.Handle("/api/v1/asset-access/", assetScopeHandler)
 	api.Handle("/api/v1/background-tasks", backgroundtask.NewHandler(
 		authService, accessService,

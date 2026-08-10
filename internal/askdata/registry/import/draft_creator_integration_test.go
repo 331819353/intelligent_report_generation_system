@@ -437,8 +437,8 @@ func seedDraftCreatorReferences(t *testing.T, ctx context.Context, tx pgx.Tx) dr
 		{`INSERT INTO platform.roles(id,tenant_id,code,name) VALUES($1,$2,'analyst','Analyst')`, []any{roleID, fixture.tenantID}},
 		{`INSERT INTO askdata.domains(id,tenant_id,code,name,owner_id)
 		 VALUES($1,$2,$3,'Draft Creator Domain',$4)`, []any{fixture.domainID, fixture.tenantID, "draft_" + suffix, fixture.actorID}},
-		{`INSERT INTO platform.datasets(id,tenant_id,code,name,dataset_type,status,created_by,updated_by,layer,domain_id)
-		 VALUES($1,$2,$3,'Sales DWS','SINGLE_SOURCE','PUBLISHED',$4,$4,'DWS',$5)`, []any{datasetID, fixture.tenantID, "sales_" + suffix, fixture.actorID, fixture.domainID}},
+		{`INSERT INTO platform.datasets(id,tenant_id,code,name,dataset_type,status,created_by,updated_by,owner_user_id,layer,domain_id)
+		 VALUES($1,$2,$3,'Sales DWS','SINGLE_SOURCE','PUBLISHED',$4,$4,$4,'DWS',$5)`, []any{datasetID, fixture.tenantID, "sales_" + suffix, fixture.actorID, fixture.domainID}},
 		{`INSERT INTO platform.dataset_versions(
 		 id,tenant_id,dataset_id,version_no,status,dsl_version,dsl_json,schema_hash,
 		 logical_plan_json,plan_hash,created_by,updated_by,created_at,published_at,published_by,

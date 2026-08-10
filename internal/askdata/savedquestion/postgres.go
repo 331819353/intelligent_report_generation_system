@@ -2,9 +2,12 @@ package savedquestion
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -82,6 +85,90 @@ func (repository *PostgresRepository) List(ctx context.Context, identity Identit
 		return rows.Err()
 	})
 	return result, err
+}
+
+type listCursor struct {
+	SortValue string `json:"sortValue"`
+	ID        string `json:"id"`
+	Order     string `json:"order"`
+}
+
+func (repository *PostgresRepository) ListPage(ctx context.Context, identity Identity, limit int, cursor, order string) (Page, error) {
+	if repository == nil || repository.pool == nil || identity.Validate() != nil || limit < 1 || limit > 200 {
+		return Page{}, ErrInvalid
+	}
+	order = strings.ToUpper(strings.TrimSpace(order))
+	if order == "" {
+		order = "UPDATED_DESC"
+	}
+	if order != "UPDATED_DESC" && order != "CREATED_DESC" && order != "NAME_ASC" {
+		return Page{}, ErrInvalid
+	}
+	var position listCursor
+	if cursor != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(cursor)
+		if err != nil || json.Unmarshal(raw, &position) != nil || position.Order != order || askdata.ID(position.ID).Validate() != nil || position.SortValue == "" {
+			return Page{}, ErrInvalid
+		}
+		if order != "NAME_ASC" {
+			if _, err = time.Parse(time.RFC3339Nano, position.SortValue); err != nil {
+				return Page{}, ErrInvalid
+			}
+		}
+	}
+	query := `SELECT ` + savedQuestionColumns + ` FROM askdata.saved_questions WHERE tenant_id=$1 AND domain_id=$2 AND status<>'ARCHIVED'`
+	args := []any{identity.TenantID, identity.DomainID}
+	if cursor != "" {
+		if order == "NAME_ASC" {
+			query += ` AND (lower(name),id)>(lower($3),$4::uuid)`
+		} else if order == "CREATED_DESC" {
+			query += ` AND (created_at,id)<($3::timestamptz,$4::uuid)`
+		} else {
+			query += ` AND (updated_at,id)<($3::timestamptz,$4::uuid)`
+		}
+		args = append(args, position.SortValue, position.ID)
+	}
+	if order == "NAME_ASC" {
+		query += ` ORDER BY lower(name),id`
+	} else if order == "CREATED_DESC" {
+		query += ` ORDER BY created_at DESC,id DESC`
+	} else {
+		query += ` ORDER BY updated_at DESC,id DESC`
+	}
+	args = append(args, limit+1)
+	query += ` LIMIT $` + fmt.Sprint(len(args))
+	result := Page{Items: []SavedQuestion{}}
+	err := database.WithTenantTx(ctx, repository.pool, string(identity.TenantID), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			item, scanErr := scanSavedQuestion(rows)
+			if scanErr != nil {
+				return scanErr
+			}
+			result.Items = append(result.Items, item)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return Page{}, err
+	}
+	if len(result.Items) > limit {
+		last := result.Items[limit-1]
+		value := last.UpdatedAt.Format(time.RFC3339Nano)
+		if order == "CREATED_DESC" {
+			value = last.CreatedAt.Format(time.RFC3339Nano)
+		} else if order == "NAME_ASC" {
+			value = last.Name
+		}
+		raw, _ := json.Marshal(listCursor{SortValue: value, ID: string(last.ID), Order: order})
+		result.NextCursor = base64.RawURLEncoding.EncodeToString(raw)
+		result.Items = result.Items[:limit]
+	}
+	return result, nil
 }
 
 func (repository *PostgresRepository) Get(ctx context.Context, identity Identity, id askdata.ID) (SavedQuestion, error) {

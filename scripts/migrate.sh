@@ -478,6 +478,58 @@ WHERE to_regprocedure(
 ) IS NOT NULL
 \gexec
 
+-- Cross-context inbox, report scheduling, lifecycle and runtime configuration
+-- are control-plane tables. Reset the earlier broad platform grants and keep
+-- mutation rights aligned with their API/worker responsibilities.
+REVOKE ALL ON TABLE
+  platform.work_item_receipts,
+  platform.report_schedules,
+  platform.report_subscriptions,
+  platform.report_deliveries,
+  platform.report_delivery_events,
+  platform.user_lifecycle_batches,
+  platform.user_lifecycle_batch_items,
+  platform.user_lifecycle_events,
+  platform.runtime_config_versions,
+  platform.runtime_config_effective,
+  platform.runtime_config_rollout_nodes,
+  platform.runtime_config_events,
+  platform.report_follows
+FROM :"app_user", :"worker_user", :"connection_test_user";
+
+GRANT SELECT,INSERT,UPDATE ON TABLE platform.work_item_receipts TO :"app_user";
+GRANT SELECT,INSERT,DELETE ON TABLE platform.report_follows TO :"app_user";
+GRANT SELECT,INSERT,UPDATE ON TABLE
+  platform.report_schedules,platform.report_subscriptions
+TO :"app_user";
+-- Manual backfill is authorized by the API and then executes in SYSTEM mode;
+-- ordinary user-mode delivery inserts remain rejected by RLS.
+GRANT SELECT,INSERT,UPDATE ON TABLE platform.report_deliveries TO :"app_user";
+GRANT SELECT,INSERT ON TABLE platform.report_delivery_events TO :"app_user";
+GRANT SELECT,INSERT,UPDATE ON TABLE
+  platform.user_lifecycle_batches,platform.user_lifecycle_batch_items
+TO :"app_user";
+GRANT SELECT,INSERT ON TABLE platform.user_lifecycle_events TO :"app_user";
+GRANT SELECT,INSERT,UPDATE ON TABLE
+  platform.runtime_config_versions,platform.runtime_config_effective,
+  platform.runtime_config_rollout_nodes
+TO :"app_user";
+GRANT SELECT,INSERT ON TABLE platform.runtime_config_events TO :"app_user";
+
+GRANT SELECT,INSERT,UPDATE ON TABLE
+  platform.report_schedules,platform.report_subscriptions,platform.report_deliveries
+TO :"worker_user";
+GRANT SELECT,INSERT ON TABLE platform.report_delivery_events TO :"worker_user";
+GRANT SELECT,UPDATE ON TABLE
+  platform.runtime_config_versions,platform.runtime_config_effective,
+  platform.runtime_config_rollout_nodes
+TO :"worker_user";
+GRANT SELECT,INSERT ON TABLE platform.runtime_config_events TO :"worker_user";
+
+GRANT EXECUTE ON FUNCTION
+  platform.report_schedule_work_tenants(),platform.runtime_config_rollout_tenants()
+TO :"worker_user";
+
 -- askdata is a fail-closed control-plane schema. Reset all runtime grants on
 -- every deployment, then grant only the API authoring surface and the worker
 -- projection/outbox surface. The connection-test role has no askdata access.
@@ -682,6 +734,8 @@ GRANT EXECUTE ON FUNCTION
   askdata.question_runtime_can_access(uuid,uuid,uuid),
   askdata.evaluation_control_can_access(uuid,uuid),
   askdata.evaluation_case_can_access(uuid,uuid,uuid),
+  askdata.feedback_ticket_can_access(uuid,uuid,uuid,uuid),
+  askdata.saved_question_can_read(uuid,uuid,uuid,uuid,text),
   askdata.release_manifest_hash(uuid),
   askdata.release_registry_facts_complete(uuid)
 TO :"app_user", :"worker_user";
@@ -749,6 +803,42 @@ GRANT EXECUTE ON FUNCTION
   askdata.complete_semantic_export(uuid,uuid,text,uuid,text,text,integer,integer),
   askdata.fail_semantic_export(uuid,uuid,text,uuid,text,boolean)
 TO :"worker_user";
+
+-- Decision is an independent fail-closed schema. Evidence and event tables
+-- are append-only at the database layer; no runtime role receives DELETE.
+REVOKE ALL ON SCHEMA decision FROM PUBLIC, :"connection_test_user";
+GRANT USAGE ON SCHEMA decision TO :"app_user", :"worker_user";
+REVOKE ALL ON ALL TABLES IN SCHEMA decision
+  FROM :"app_user", :"worker_user", :"connection_test_user";
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA decision
+  FROM PUBLIC, :"app_user", :"worker_user", :"connection_test_user";
+GRANT SELECT ON ALL TABLES IN SCHEMA decision TO :"app_user";
+GRANT INSERT ON TABLE
+  decision.decisions,decision.decision_options,decision.decision_evidence,
+  decision.decision_approvals,decision.decision_approval_events,
+  decision.action_items,decision.action_events,
+  decision.outcome_metrics,decision.outcome_reviews,decision.decision_events,
+  decision.decision_notifications
+TO :"app_user";
+GRANT UPDATE ON TABLE
+  decision.decisions,decision.action_items,
+  decision.outcome_metrics,decision.outcome_reviews,decision.decision_notifications
+TO :"app_user";
+GRANT SELECT,UPDATE ON TABLE
+  decision.decisions,decision.action_items,decision.decision_notifications
+TO :"worker_user";
+GRANT SELECT ON TABLE decision.decision_events,decision.action_events TO :"worker_user";
+GRANT INSERT ON TABLE decision.decision_events,decision.decision_notifications TO :"worker_user";
+GRANT EXECUTE ON FUNCTION
+  decision.current_tenant_id(),decision.current_actor_id(),
+  decision.current_domain_id(),decision.system_access(),decision.can_access(uuid)
+TO :"app_user", :"worker_user";
+GRANT EXECUTE ON FUNCTION decision.list_work_tenants() TO :"worker_user", :"app_user";
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA decision REVOKE ALL ON TABLES
+  FROM PUBLIC, :"app_user", :"worker_user", :"connection_test_user";
+ALTER DEFAULT PRIVILEGES IN SCHEMA decision REVOKE ALL ON FUNCTIONS
+  FROM PUBLIC, :"app_user", :"worker_user", :"connection_test_user";
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA askdata REVOKE ALL ON TABLES
   FROM PUBLIC, :"app_user", :"worker_user", :"connection_test_user";

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"intelligent-report-generation-system/internal/askdata"
@@ -21,6 +22,14 @@ type Repository interface {
 	Share(context.Context, Identity, askdata.ID, ShareInput) error
 	Promote(context.Context, Identity, askdata.ID) error
 	Archive(context.Context, Identity, askdata.ID) error
+}
+
+type Page struct {
+	Items      []SavedQuestion `json:"items"`
+	NextCursor string          `json:"nextCursor,omitempty"`
+}
+type PagedRepository interface {
+	ListPage(context.Context, Identity, int, string, string) (Page, error)
 }
 
 type LaunchInput struct {
@@ -67,12 +76,37 @@ func (handler *HTTPHandler) list(writer http.ResponseWriter, request *http.Reque
 	if !ok {
 		return
 	}
+	limit := 50
+	var err error
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil {
+			writeSavedError(writer, ErrInvalid)
+			return
+		}
+	}
+	if repository, ok := handler.repository.(PagedRepository); ok {
+		page, pageErr := repository.ListPage(request.Context(), identity, limit, request.URL.Query().Get("cursor"), request.URL.Query().Get("order"))
+		if pageErr != nil {
+			writeSavedError(writer, pageErr)
+			return
+		}
+		writeSavedJSON(writer, http.StatusOK, page)
+		return
+	}
 	items, err := handler.repository.List(request.Context(), identity)
 	if err != nil {
 		writeSavedError(writer, err)
 		return
 	}
-	writeSavedJSON(writer, http.StatusOK, map[string]any{"items": items})
+	if limit < 1 || limit > 200 {
+		writeSavedError(writer, ErrInvalid)
+		return
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	writeSavedJSON(writer, http.StatusOK, Page{Items: items})
 }
 
 func (handler *HTTPHandler) create(writer http.ResponseWriter, request *http.Request) {

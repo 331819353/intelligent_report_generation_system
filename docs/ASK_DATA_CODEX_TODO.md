@@ -80,7 +80,7 @@
 | B11 | 报表引擎与问数报表融合 | P11、P12 | M17 + 报告专章 | `RPT-`、`FUSE-`、`WEB-RPT-` | `internal/report`、`web/src/report` | 后端引擎与五项融合完成；运行时/筛选前端、打印样式与全部 `WEB-RPT-*` 除外 |
 | B12 | 评测、反馈与运营 | P13 | M18 | `EVAL-`、`FB-`、`SQ-` | `internal/askdata/evaluation`、`feedback` | 软件控制面完成；真实业务黄金集与人工评审待输入 |
 | B13 | 运维、可观测与成本 | P14 | M19 | `OPS-`、`OBS-` | `internal/config`、`internal/observability`、`scripts` | 配置、Worker、观测与配额后端完成；真实灾备/容量/生产 POC 待执行 |
-| B14 | 决策协同与行动复盘 | P15 | M20 | `DEC-`、`WEB-DEC-` | `internal/decision`、`web/src/decision` | 定位修订后新增；当前完全未建 |
+| B14 | 决策协同与行动复盘 | P15 | M20 | `DEC-`、`WEB-DEC-` | `internal/decision`、`web/src/decision` | 合同、存储、状态机、行动/复盘和聚合读接口已完成；页面/E2E 与 HUMAN-014 待完成 |
 
 ### 0.3 板块依赖
 
@@ -7010,13 +7010,13 @@ OBS-003 -> OPS-006
 
 | 产品模块 | 已有任务 | 本次确认的未闭环部分 |
 |---|---|---|
-| P01 | `PLAT-UX-001`、`TASK-001`、`PLAT-LIFE-001` | 业务导航、统一待办、用户停用后的 Owner/任务转交和孤儿资产防护 |
+| P01 | `PLAT-UX-001`、`TASK-001`、`PLAT-LIFE-001` | 统一待办后端已闭环；仍缺业务导航和用户生命周期页面，停用/转交后端已完成 |
 | P04～P08 | `WEB-007`、`ADD-002` | 语义模型、指标、维度、词典、KPI、导入、Release、评测和审批的业务页面 |
 | P09/P10 | `WEB-008`～`010`、`WEB-012/013` | 时间/可加性/KPI Bundle/降级状态、保存问题和团队共享 |
-| P11 | `RPT-006`、`RPT-008`、`RPT-011`、`WEB-RPT-001`～`007` | 报告运行时/筛选/打印的混合任务前端，以及完整设计器、发布、版本和资产中心 |
+| P11 | `RPT-006`、`RPT-008`、`RPT-011`、`WEB-RPT-001`～`008` | 报告订阅/调度/站内分发后端已闭环；仍余运行时/筛选/打印的混合任务前端和报告页面接线 |
 | P12 | `FUSE-001`～`005` 的后端已完成，`WEB-010/012`、`WEB-RPT-*` 仍未完成 | 问数入报告、报告发起问数、资产认证和升级差异的用户入口 |
 | P13 | `EVAL-008`～`010`、`FB-001/002`、`SQ-001` | 后端机制存在，但真实样本、反馈运营、主动学习和用户回通知未完成 |
-| P14 | `OBS-003`、`OPS-003/004`、`OPS-007/008`、`PILOT-001`～`004` | AskData 专项手册已有；仍缺受控运行配置页面、报告/任务/决策的平台级灾备容量，以及目标环境 Shadow/Canary 和业务签署 |
+| P14 | `OBS-003`、`OPS-003/004`、`OPS-007/008`、`PILOT-001`～`004` | 平台级容量/灾备软件合同和运行配置后端已完成；仍缺配置页面、目标拓扑实测、Shadow/Canary 和业务签署 |
 
 以下任务是原 TODO 未覆盖的新缺口。
 
@@ -7034,7 +7034,7 @@ OBS-003 -> OPS-006
 - 页面门禁：**需确认全局导航与首页设计稿**。
 - 验证：V-WEB + 四角色路由 E2E。
 
-### [ ] TASK-001 — 统一业务待办、审批与通知中心
+### [x] TASK-001 — 统一业务待办、审批与通知中心
 
 - 优先级：P1
 - 板块：B01 / B02 / B04 / B05 / B11 / B12 / B14
@@ -7043,6 +7043,20 @@ OBS-003 -> OPS-006
 - 完成标准：跨模块读模型不复制业务事实；每条待办包含类型、对象、当前状态、发起人、SLA、领域和可执行动作；点击返回源模块处理；已处理、撤回或无权项自动消失；支持站内已读/未读、超期和去重。
 - 安全：待办摘要不得泄漏未授权指标、成员或报告标题。
 - 验证：V-GO-ALL + V-WEB + 跨租户/跨领域负向集成测试。
+
+> 2026-08-10 前端接线记录：信息架构按产品确认拆为 `/approvals`「审批中心」和
+> `/tasks`「任务中心」，两页生产路径均调用 `GET /api/v1/work-items` 与
+> `POST /api/v1/work-items/{type}/{id}/read`，不使用 fixture 补齐真实空态。审批中心已将
+> `DOMAIN_ACCESS_APPROVAL`、`DATA_SOURCE_PUBLICATION`、`DATASET_PUBLICATION`、
+> `DATA_REQUEST` 和 `RUNTIME_CONFIG_APPROVAL` 的可安全执行动作路由到现有来源写接口；
+> 驳回原因必填，所有按钮仍以服务端 `allowedActions` 为显示依据。
+
+> 2026-08-10 后端完成记录：`GET /api/v1/work-items` 已支持服务端 `kind=APPROVAL|TASK`、分类后的
+> `total/unreadTotal/nextCursor`；新增 `GET /api/v1/work-items/{type}/{id}` 返回受权来源对象、权威
+> record version、固定版本/hash、有界差异/证据/风险摘要和动作字段约束。决策审批、行动、复盘、反馈、
+> 报告交付和运行配置均返回与来源状态一致的 `allowedActions/ActionCommand`，终态/撤回/无权通知自动
+> 消失；运行配置 reject 与 409 冲突合同已补齐。真实 PostgreSQL 测试覆盖分类分页、详情越权、通知
+> 去重/消失和动作版本约束。
 
 ### [ ] PLAT-LIFE-001 — 用户停用、Owner 转交与孤儿资产防护
 
@@ -7059,6 +7073,13 @@ OBS-003 -> OPS-006
   6. 新 bounded context 必须通过 Owner Transfer SPI 接入该清单。
 - 页面门禁：**需确认用户生命周期与跨模块转交设计稿**。
 - 验证：V-GO-ALL + V-WEB + 多模块停用/失败补偿 E2E。
+
+> 2026-08-10 后端完成记录：`internal/userlifecycle` 已提供责任预览、按 bounded-context SPI 分类、
+> TRANSFER/AUTO_CLOSE/READ_ONLY/BLOCK、幂等批次、失败可重试、原子停用、session 撤销、通知转交和
+> 审计。覆盖数据/语义/Release、保存问题、报告/模板/计划/订阅/交付、取数/反馈、决策/行动、审批与
+> runtime config；认证语义版本只允许专用 SYSTEM owner-transfer 事务修改 owner 元数据。数据库与服务
+> 双层只阻断最后一名活跃平台/领域管理员。当前未勾选仅因用户生命周期页面和 V-WEB 属于本轮排除的
+> 前端范围。
 
 ### [ ] WEB-014 — 真实会话历史、搜索与恢复
 
@@ -7104,6 +7125,34 @@ OBS-003 -> OPS-006
 - 页面门禁：**需设计稿确认**。
 - 验证：V-WEB + 普通用户首页 E2E。
 
+> 2026-08-10 前端接线记录：`/home` 的生产路径已分别调用
+> `GET /api/v1/conversations`、`GET /api/v1/askdata/saved-questions`、
+> `GET /api/v1/reports`、`GET /api/v1/decisions` 和 `GET /api/v1/work-items`；
+> 某一模块失败时使用局部错误态，无数据时使用真实空态。仅带开发期 `snapshot=home`
+> 的视觉回归路由保留 fixture，不得用于 E2E 或业务验收。当前“关注报告”等后端缺口见
+> `HOME-BE-001`，不能用“最近更新报告”伪装为用户关注关系。
+
+### [x] HOME-BE-001 — 首页个性化读模型与展示字段补全
+
+- 优先级：P1
+- 板块：B01 / B10 / B11 / B14
+- 依赖：TASK-001、WEB-014、RPT-013、DEC-001
+- 触发证据：分析首页已接入现有分域接口，但现有合同不足以表达已关注报告、当前用户展示信息和完整待办摘要。
+- 后端 TODO：
+  1. 增加当前用户资料读接口，或扩展 `GET /api/v1/auth/me`，最少返回 `userId/displayName/avatarUrl/status` 与当前领域内角色摘要；不得要求普通用户调用平台管理员 `GET /users`；
+  2. 增加报告关注关系的查询/关注/取消关注接口，返回 actor/domain scoped 的 `followedAt` 和报告当前可见状态；关注不得扩大报告权限，报告下架或撤权后不返回受限标题；
+  3. `GET /api/v1/work-items` 已返回 `nextCursor/total/unreadTotal`、服务端权威 `priority`、`requesterDisplayName` 和 `assigneeDisplayName`；仍需补充可直接打开的已实现前端 route，并与 `TASK-001` 的 `kind=APPROVAL|TASK` 分类查询及来源动作上下文合同保持一致；
+  4. 为保存问题列表增加 `limit/cursor/order`，或提供独立的首页快捷问题读模型，避免首页为取得 3 条建议而读取全部保存问题；
+  5. 如保留多接口聚合方式，明确各子模块超时与缓存策略；如新增 `/api/v1/home` 聚合接口，响应仍需按来源模块独立标记成功/失败，不得把一个子模块故障升级为整页失败。
+- 前端 TODO：报告关注接口就绪后恢复“关注报告”标签，替换当前“最近报告”；当前用户资料接口就绪后替换顶栏占位头像；来源 route 合同完整后直接消费 `sourceHref`，删除临时路由映射。
+- 安全：聚合/关注/待办接口必须执行当前 token + 领域 + 对象权限校验；计数和错误信息同样不得泄漏无权对象存在性。
+- 验证：V-GO-ALL + V-WEB + 普通用户/跨领域/撤权/报告下架/局部故障 E2E。
+
+> 2026-08-10 后端完成记录：`GET /api/v1/auth/me` 返回 actor 展示资料与当前领域角色；报告关注提供
+> actor/domain scoped 的列表、关注和取消关注，重复写幂等且下架/撤权后不泄露标题；保存问题已支持
+> 稳定 `limit/cursor/order`；工作项分类、详情与来源动作合同已完成。各读模型继续独立失败，未新增会把
+> 子模块故障升级为整页失败的聚合单点。
+
 ### [ ] WEB-RPT-008 — 报告运行时、筛选、发布、导出与分享真实接线
 
 - 优先级：P0
@@ -7119,7 +7168,7 @@ OBS-003 -> OPS-006
   6. 删除生产路径的静态财务/经营数字和 timer 伪刷新。
 - 验证：V-WEB + 发布报告加载/筛选/导出/分享 E2E。
 
-### [ ] RPT-014 — 报告订阅、定时生成与受控分发
+### [x] RPT-014 — 报告订阅、定时生成与受控分发
 
 - 优先级：P1
 - 板块：B11 / B13
@@ -7133,6 +7182,12 @@ OBS-003 -> OPS-006
   4. 重试、补跑、错过窗口、连续失败暂停和手工恢复有状态机和审计；
   5. 报告下架、分享撤销或版本不可用时计划失败关闭。
 - 验证：V-GO-ALL + V-DB + 时区/DST/无权/下架负向集成测试。
+
+> 2026-08-10 完成记录：`internal/report/schedule` 与迁移 `000284/000287/000292` 已实现显式时区和
+> 业务日历、DST、worker tenant discovery、lease/重试、窗口错过、连续失败暂停、手工恢复/补跑、
+> 站内唯一 delivery、接收者当前权限重检和已读确认。唯一键保证同订阅/计划时点不重复投递；真实
+> PostgreSQL 集成覆盖正常、无权、下架/版本不可用、重复补跑和 read 边界。按既定口径首期仅支持站内，
+> 未在 HUMAN-015 前虚构邮件/即时消息渠道。
 
 ### [ ] WEB-OPS-001 — 反馈、主动学习与语义质量运营工作台
 
@@ -7162,7 +7217,10 @@ OBS-003 -> OPS-006
 - 优先级：P1
 - 板块：B13
 - 依赖：OBS-003、OPS-003、OPS-004、RPT-014、DEC-003
-- 当前证据：`ASK_DATA_CAPACITY_BASELINE.md` 与 `ASK_DATA_DISASTER_RECOVERY.md` 只覆盖 AskData 运行、`askdata` 语义事实和 Nebula 图重建；它们不能证明整个平台已完成容量或灾备签署。
+- 当前证据：`ASK_DATA_CAPACITY_BASELINE.md` 与 `ASK_DATA_DISASTER_RECOVERY.md` 已扩展登录/领域、问数、
+  报告 runtime/导出/调度、工作箱和决策，明确全控制库一致恢复点、对象存储/数仓/Nebula/队列启用顺序、
+  闭包校验、确定性重放、RTO/RPO 计量点和降级红线。当前缺口仅为目标拓扑混合负载、故障注入、实际
+  恢复收据和业务 Owner/运维/安全签署；因此本任务保持未完成，不能用本地验证替代生产结论。
 - 目标：将报告运行/导出/定时分发、统一待办/通知和决策行动/复盘纳入平台级容量模型、恢复顺序和一致性校验。
 - 完成标准：
   1. 为登录/领域、问数、报告运行、导出、调度、任务通知和决策分别定义流量模型、资源预算、RTO/RPO 与降级边界；
@@ -7189,6 +7247,11 @@ OBS-003 -> OPS-006
 - 页面门禁：**需确认运行配置与变更差异设计稿**。
 - 验证：V-GO-ALL + V-WEB + 配置校验/灰度/失败回滚 E2E。
 
+> 2026-08-10 后端完成记录：`internal/runtimeconfig` 与迁移 `000286/000293/000294` 已实现无密钥配置
+> 白名单、canonical hash、兼容性/影响摘要、草稿/提交/审批/驳回、四类 consumer rollout、失败停止、
+> effective 指针、回滚与 append-only 审计；创建者不能自批，状态机与事实不可变由数据库触发器守住，
+> Worker 仅获 rollout 最小权限。当前未勾选仅因 J-P14-01 页面和 V-WEB 属于本轮排除的前端范围。
+
 ### [ ] PERF-001 — 前端路由级分块与性能预算
 
 - 优先级：P1
@@ -7199,7 +7262,7 @@ OBS-003 -> OPS-006
 
 ### 33.2 B14 决策协同与行动复盘任务
 
-### [ ] DEC-CONTRACT-001 — Decision、Evidence、Action 与 Outcome Review 公共合同
+### [x] DEC-CONTRACT-001 — Decision、Evidence、Action 与 Outcome Review 公共合同
 
 - 优先级：P0
 - 板块：B14
@@ -7209,7 +7272,7 @@ OBS-003 -> OPS-006
 - 红线：不接受 Raw SQL、数据结果全量行、隐藏思维链、客户端传 tenant/domain/actor 作为权威范围。
 - 验证：JSON Schema 正反 fixture + Go/TS 契约测试。
 
-### [ ] DEC-DB-001 — 决策、证据、审批、行动和复盘存储
+### [x] DEC-DB-001 — 决策、证据、审批、行动和复盘存储
 
 - 优先级：P0
 - 板块：B14
@@ -7219,7 +7282,7 @@ OBS-003 -> OPS-006
 - 约束：全部 tenant/domain scoped + FORCE RLS；子表引用必须同租户/同域；Evidence/Event/Approval 只追加；状态转换和最后 Owner 约束在数据库/服务双层守住；历史证据不因来源下架被删除。
 - 验证：V-DB + 跨租户/跨域/篡改/并发负向集成测试。
 
-### [ ] DEC-001 — 决策领域服务、状态机与 Evidence 固定
+### [x] DEC-001 — 决策领域服务、状态机与 Evidence 固定
 
 - 优先级：P0
 - 板块：B14
@@ -7234,7 +7297,7 @@ OBS-003 -> OPS-006
 - 文件范围：`internal/decision/*`、`internal/decision/http/*`、测试。
 - 验证：V-GO-ALL + V-DB。
 
-### [ ] DEC-002 — 行动项、截止时间、阻塞升级与通知
+### [x] DEC-002 — 行动项、截止时间、阻塞升级与通知
 
 - 优先级：P0
 - 板块：B14 / B01
@@ -7244,7 +7307,7 @@ OBS-003 -> OPS-006
 - 完成标准：责任人、截止时间、交付物引用、阻塞原因和完成证据；超期、阻塞和转交生成去重站内通知；负责人失效时转交 Owner 待办；决策未审批不得创建生效行动。
 - 验证：虚拟时钟单测 + 真实 PostgreSQL 并发/通知去重集成测试。
 
-### [ ] DEC-003 — 结果指标重放、效果复盘与决策关闭
+### [x] DEC-003 — 结果指标重放、效果复盘与决策关闭
 
 - 优先级：P0
 - 板块：B14 / B08 / B09
@@ -7258,6 +7321,12 @@ OBS-003 -> OPS-006
   5. 未达成可重开、新建行动或生成新问数种子，形成下一轮分析。
 - 验证：V-GO-ALL + 权限变更/口径漂移/无数据/未达成四类 E2E。
 
+> 2026-08-10 决策后端完成记录：四份公共 schema 和 Go/TypeScript 共享正反 fixture 已通过红线测试；
+> `decision` schema 的 13 张事实/策略/通知表全部 FORCE RLS，Evidence/options/event/approval facts 只追加，
+> 决策与行动状态机有服务/数据库双层守卫。服务已覆盖三类来源 Evidence 服务端固定、手工无证据模式、
+> 审批职责分离、行动阻塞/完成/重开、超期通知、Outcome 当前策略重放、漂移/无权/无数据、人工确认、
+> 关闭/重开和 worker due discovery；真实 PostgreSQL E2E 覆盖完整主链、越权、并发和通知去重。
+
 ### [ ] WEB-DEC-001 — 决策中心、审批、行动看板与复盘页
 
 - 优先级：P0
@@ -7267,6 +7336,35 @@ OBS-003 -> OPS-006
 - 页面：我发起的/待我审批/我负责行动/待复盘列表；决策详情的证据、备选方案、审批、行动、时间线和结果分页；从问数/报告预填创建弹窗；行动看板；结果复盘对比。
 - 安全：Evidence 按当前权限展示「可查看/已下架/无权」，无权时不显示指标值和报告标题；口径漂移显示差异，不改写原证据。
 - 验证：V-WEB + 五角色主/异常流程 E2E。
+
+> 2026-08-10 前端接线记录：已按确认稿实现 `/decisions` 决策组合清单。生产路径并行调用
+> `GET /api/v1/decisions?scope=MINE|APPROVALS|ACTIONS|REVIEWS`，打开详情调用
+> `GET /api/v1/decisions/{id}`，手工草稿调用 `POST /api/v1/decisions`，草稿提交调用
+> `POST /api/v1/decisions/{id}/submit`；写请求均携带新的 actor-scoped `Idempotency-Key`。
+> 搜索、状态、证据模式和复盘日期目前只对已受权读取的最多 200 条当前页结果做前端过滤；无数据时使用真实空态，
+> 仅开发期 `snapshot=decisions` 保留视觉回归 fixture。审批动作仍归 `/approvals` 专门处理，决策页不重复构造审批入口。
+
+### [x] DEC-LIST-BE-001 — 决策中心列表聚合、筛选与创建辅助读接口
+
+- 优先级：P0
+- 板块：B14 / B01
+- 依赖：DEC-001～003、HOME-BE-001
+- 触发证据：`/decisions` 已接入现有决策接口，但当前 `GET /api/v1/decisions` 只返回 Decision 主记录，无法无 N+1 地呈现确认稿中的负责人资料、证据摘要、行动进度、类型和各范围总数；创建接口要求调用方直接填写审批策略编码，但没有普通用户可读的策略目录。
+- 后端 TODO：
+  1. 扩展 `GET /api/v1/decisions`，支持服务端 `q/status/evidenceMode/decisionType/reviewFrom/reviewTo/owner/sort` 过滤和稳定游标分页，并返回过滤后的 `total`；所有条件仍固定当前 tenant/domain/actor 可见范围；
+  2. 单行受权投影增加 `ownerDisplayName/ownerAvatarUrl/ownerDepartment/evidenceCount/verifiedEvidenceCount/actionTotal/actionDone/actionBlocked/nextActionDueAt/allowedActions`，使用单次聚合查询，禁止前端逐行调用详情形成 N+1；撤权后不得泄露人员或证据标题；
+  3. 冻结 `decisionType` 业务枚举及迁移（设计候选为策略决策/资源方案/行动方案/流程优化），未确认 HUMAN-014 前前端继续使用已有 `evidenceMode` 列，不从标题推测类型；
+  4. 增加当前 actor 在四个 scope 下的真实计数接口或随列表返回 `scopeCounts={mine,approvals,actions,reviews}`，计数必须与同一权限快照一致；
+  5. 增加普通领域成员可读的审批策略目录，例如 `GET /api/v1/decisions/approval-policies`，只返回当前领域 ACTIVE 策略的 `id/name/requiredApprovals/approverSummary`，不得暴露无关领域审批人；
+  6. 补齐 `GET /api/v1/auth/me` 或等价自助资料读模型，返回当前 actor 的稳定 ID 和展示资料；创建页不得长期依赖前端解码 JWT；
+  7. 为“从问数答案/报告版本创建决策”提供受权预填/创建合同，服务端从来源 Artifact 固定 Evidence Ref/Hash/Release/Data Snapshot，前端不得提交自造的已验证证据字段。
+- 验证：列表筛选/分页/总数契约测试 + 无 N+1 查询断言 + 五角色越权负测 + 策略下架/人员撤权并发测试 + V-WEB。
+
+> 2026-08-10 后端完成记录：列表以单条 CTE 聚合查询支持四 scope、`q/status/evidenceMode/reviewFrom/
+> reviewTo/owner/sort`、稳定游标、过滤总数和同快照 `scopeCounts`；返回受权 Owner 展示资料、证据计数、
+> 行动进度/最近截止和 `allowedActions`。新增当前领域 ACTIVE 审批策略目录（不暴露审批人 ID）、
+> `auth/me` 和 Evidence prefill。`decisionType` 在 HUMAN-014 未确认前被服务端明确拒绝，不持久化候选枚举、
+> 不从标题推测类型；其余列表/策略/预填合同已由真实 PostgreSQL E2E 覆盖。
 
 ### [ ] E2E-BIZ-001 — 业务人员「分析到决策」端到端旅程门禁
 

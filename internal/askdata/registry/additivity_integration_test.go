@@ -40,9 +40,9 @@ func TestAdditivityDatabaseChecksRemainIndependentOfApplicationGate(t *testing.T
 		id,tenant_id,domain_id,metric_id,version_no,semantic_model_version_id,
 		formula_ast,default_filters_ast,unit,time_grain,additivity,
 		zero_denominator_policy,display_precision,additivity_suggestion,
-		null_policy,status,content_hash,owner_id
+		additivity_suggestion_rule_id,null_policy,status,content_hash,owner_id
 	) VALUES($1,$2,$3,$4,1,$5,'{"type":"TRUE"}'::jsonb,'{"type":"TRUE"}'::jsonb,
-		'COUNT','NONE',NULL,'NULL',2,'FULLY_ADDITIVE','PRESERVE','DRAFT',$6,$7)`,
+		'COUNT','NONE',NULL,'NULL',2,'FULLY_ADDITIVE','TEST_FIXTURE','PRESERVE','DRAFT',$6,$7)`,
 		metricID, uuid.New(), uuid.New(), uuid.New(), uuid.New(), strings.Repeat("a", 64), uuid.New()); err != nil {
 		t.Fatalf("insert unconfirmed draft: %v", err)
 	}

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "1.0",
+  "id": "11111111-1111-4111-8111-111111111111",
+  "tenantId": "22222222-2222-4222-8222-222222222222",
+  "domainId": "33333333-3333-4333-8333-333333333333",
+  "ownerUserId": "44444444-4444-4444-8444-444444444444",
+  "title": "非法决策",
+  "question": "是否执行？",
+  "decision": "执行",
+  "expectedEffect": "变化",
+  "risks": [],
+  "status": "DRAFT",
+  "evidenceMode": "MANUAL_WITHOUT_PLATFORM_EVIDENCE",
+  "options": [],
+  "approvalPolicy": { "policyId": "standard", "requiredApprovals": 1, "approverUserIds": ["77777777-7777-4777-8777-777777777777"] },
+  "reviewAt": "2026-09-30T09:00:00Z",
+  "recordVersion": 1,
+  "rawSql": "select * from secret_table"
+}

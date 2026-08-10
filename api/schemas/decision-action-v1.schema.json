@@ -1,0 +1,21 @@
+{
+  "title": "Decision Action v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "decisionId", "title", "description", "assigneeUserId", "dueAt", "status", "blockReason", "completionEvidence", "deliverableRefs", "recordVersion"],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "id": { "$ref": "#/$defs/uuid" },
+    "decisionId": { "$ref": "#/$defs/uuid" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "description": { "type": "string", "maxLength": 4096 },
+    "assigneeUserId": { "$ref": "#/$defs/uuid" },
+    "dueAt": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$" },
+    "status": { "enum": ["TODO", "DOING", "BLOCKED", "DONE", "CANCELED"] },
+    "blockReason": { "type": "string", "maxLength": 2048 },
+    "completionEvidence": { "type": "string", "maxLength": 2048 },
+    "deliverableRefs": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 512 } },
+    "recordVersion": { "type": "integer", "minimum": 1 }
+  },
+  "$defs": { "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" } }
+}

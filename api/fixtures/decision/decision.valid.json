@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0",
+  "id": "11111111-1111-4111-8111-111111111111",
+  "tenantId": "22222222-2222-4222-8222-222222222222",
+  "domainId": "33333333-3333-4333-8333-333333333333",
+  "ownerUserId": "44444444-4444-4444-8444-444444444444",
+  "title": "季度资源配置决策",
+  "question": "是否调整下一季度资源配置？",
+  "decision": "按审批后的受控方案执行",
+  "expectedEffect": "在复盘日核验目标指标变化",
+  "risks": ["短期波动", "归因不确定"],
+  "status": "IN_REVIEW",
+  "evidenceMode": "PLATFORM_VERIFIED",
+  "options": [
+    { "id": "55555555-5555-4555-8555-555555555555", "title": "调整", "description": "采用受控调整方案", "selected": true },
+    { "id": "66666666-6666-4666-8666-666666666666", "title": "保持", "description": "保持当前方案", "selected": false }
+  ],
+  "approvalPolicy": {
+    "policyId": "standard-single-approval",
+    "requiredApprovals": 1,
+    "approverUserIds": ["77777777-7777-4777-8777-777777777777"]
+  },
+  "reviewAt": "2026-09-30T09:00:00Z",
+  "recordVersion": 3
+}

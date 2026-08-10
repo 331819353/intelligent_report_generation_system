@@ -98,10 +98,159 @@ func TestPostgresQuestionScopeResolutionUsesActiveReleaseRolesAndActorRLS(t *tes
 	}
 }
 
+type historyRunStore struct {
+	conversationID askdata.ID
+	now            time.Time
+}
+
+func (store historyRunStore) CreateRun(context.Context, orchestrator.CreateRunRequest) (orchestrator.CreateResult, error) {
+	return orchestrator.CreateResult{}, errors.New("history test does not create runs through the stub")
+}
+
+func (store historyRunStore) Resume(_ context.Context, request orchestrator.ResumeRequest) (orchestrator.ReplaySnapshot, error) {
+	return orchestrator.ReplaySnapshot{Run: orchestrator.Run{
+		ID: request.RunID, TenantID: request.Scope.TenantID, DomainID: request.DomainID,
+		ActorID: request.Scope.ActorID, ConversationID: store.conversationID,
+		Release: request.Scope.Release, PolicyScopeHash: request.Scope.PolicyHash,
+		State: orchestrator.StateReceived, RecordVersion: 1, CreatedAt: store.now, UpdatedAt: store.now,
+	}}, nil
+}
+
+func TestPostgresConversationHistoryPaginationMutationsAndIsolation(t *testing.T) {
+	adminURL := os.Getenv("ASKDATA_INTEGRATION_ADMIN_DATABASE_URL")
+	appURL := os.Getenv("ASKDATA_INTEGRATION_DATABASE_URL")
+	if adminURL == "" || appURL == "" {
+		t.Skip("set ASKDATA_INTEGRATION_ADMIN_DATABASE_URL and ASKDATA_INTEGRATION_DATABASE_URL")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	adminPool, err := pgxpool.New(ctx, adminURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adminPool.Close()
+	appConfig, err := pgxpool.ParseConfig(appURL)
+	if err != nil || appConfig.ConnConfig.User == "" {
+		t.Fatalf("parse app database role: %v", err)
+	}
+	appPool, err := pgxpool.New(ctx, appURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer appPool.Close()
+	root, err := adminPool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Rollback(ctx) }()
+	fixture := createQuestionHTTPFixture(t, ctx, root)
+	secondRunID, secondConversationID, thirdRunID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	if _, err = root.Exec(ctx, `INSERT INTO askdata.question_runs(
+		id,tenant_id,domain_id,actor_id,conversation_id,trace_id,idempotency_key_hash,question_hash,
+		policy_scope_hash,release_id,release_content_hash)
+		SELECT $1,tenant_id,domain_id,actor_id,conversation_id,$2,$3,question_hash,policy_scope_hash,release_id,release_content_hash
+		FROM askdata.question_runs WHERE tenant_id=$4 AND id=$5`, secondRunID, uuid.NewString(),
+		askdata.HashBytes([]byte("history-second-run")), fixture.tenantID, fixture.runID); err != nil {
+		t.Fatalf("insert second run: %v", err)
+	}
+	if _, err = root.Exec(ctx, `INSERT INTO askdata.conversations(id,tenant_id,domain_id,actor_id)
+		VALUES($1,$2,$3,$4)`, secondConversationID, fixture.tenantID, fixture.domainID, fixture.actorID); err != nil {
+		t.Fatalf("insert second conversation: %v", err)
+	}
+	if _, err = root.Exec(ctx, `INSERT INTO askdata.question_runs(
+		id,tenant_id,domain_id,actor_id,conversation_id,trace_id,idempotency_key_hash,question_hash,
+		policy_scope_hash,release_id,release_content_hash)
+		SELECT $1,tenant_id,domain_id,actor_id,$2,$3,$4,question_hash,policy_scope_hash,release_id,release_content_hash
+		FROM askdata.question_runs WHERE tenant_id=$5 AND id=$6`, thirdRunID, secondConversationID,
+		uuid.NewString(), askdata.HashBytes([]byte("history-third-run")), fixture.tenantID, fixture.runID); err != nil {
+		t.Fatalf("insert third run: %v", err)
+	}
+	if _, err = root.Exec(ctx, `UPDATE askdata.conversations SET record_version=record_version+1,updated_at=clock_timestamp()
+		WHERE tenant_id=$1 AND id IN($2,$3)`, fixture.tenantID, fixture.conversationID, secondConversationID); err != nil {
+		t.Fatalf("refresh conversations: %v", err)
+	}
+	if _, err = root.Exec(ctx, "SET LOCAL ROLE "+pgx.Identifier{appConfig.ConnConfig.User}.Sanitize()); err != nil {
+		t.Fatal(err)
+	}
+	runner := func(ctx context.Context, tenantID string, fn func(pgx.Tx) error) error {
+		nested, err := root.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = nested.Rollback(ctx) }()
+		access, ok := database.AccessContextFromContext(ctx)
+		if !ok {
+			return orchestrator.ErrInvalidAccessContext
+		}
+		if _, err = nested.Exec(ctx, `SELECT set_config('app.tenant_id',$1,true),
+			set_config('app.access_mode','USER',true),set_config('app.user_id',$2,true),
+			set_config('app.domain_id',$3,true)`, tenantID, access.UserID, access.DomainID); err != nil {
+			return err
+		}
+		if err = fn(nested); err != nil {
+			return err
+		}
+		return nested.Commit(ctx)
+	}
+	now := time.Now().UTC()
+	service := &PostgresService{pool: appPool, scopeRunner: runner, runs: historyRunStore{conversationID: askdata.ID(fixture.conversationID), now: now}}
+	identity := RequestIdentity{TenantID: askdata.ID(fixture.tenantID), DomainID: askdata.ID(fixture.domainID), ActorID: askdata.ID(fixture.actorID)}
+	actorContext := database.WithAccessContext(ctx, fixture.actorID, fixture.domainID)
+	summary, err := service.conversationByID(actorContext, identity, askdata.ID(fixture.conversationID))
+	if err != nil || summary.RunCount != 2 {
+		t.Fatalf("conversation summary = %#v, %v", summary, err)
+	}
+	summary, err = service.SetConversationPinned(actorContext, identity, summary.ConversationID, ConversationMutationInput{ExpectedVersion: summary.RecordVersion}, true)
+	if err != nil || !summary.Pinned {
+		t.Fatalf("pin conversation = %#v, %v", summary, err)
+	}
+	first, err := service.ListConversations(actorContext, identity, "", false, 1, "")
+	if err != nil || len(first.Items) != 1 || first.Items[0].ConversationID != summary.ConversationID || first.NextCursor == "" {
+		t.Fatalf("first history page = %#v, %v", first, err)
+	}
+	second, err := service.ListConversations(actorContext, identity, "", false, 1, first.NextCursor)
+	if err != nil || len(second.Items) != 1 || second.Items[0].ConversationID == first.Items[0].ConversationID {
+		t.Fatalf("second history page = %#v, %v", second, err)
+	}
+	if _, err = service.ListConversations(actorContext, identity, "", false, 1, "not-a-cursor"); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("invalid history cursor error = %v", err)
+	}
+	detail, err := service.GetConversation(actorContext, identity, summary.ConversationID, 1, "")
+	if err != nil || len(detail.Runs) != 1 || detail.NextRunCursor == "" {
+		t.Fatalf("first run page = %#v, %v", detail, err)
+	}
+	nextDetail, err := service.GetConversation(actorContext, identity, summary.ConversationID, 1, detail.NextRunCursor)
+	if err != nil || len(nextDetail.Runs) != 1 || nextDetail.Runs[0].RunID == detail.Runs[0].RunID {
+		t.Fatalf("second run page = %#v, %v", nextDetail, err)
+	}
+	summary, err = service.SetConversationPinned(actorContext, identity, summary.ConversationID, ConversationMutationInput{ExpectedVersion: summary.RecordVersion}, false)
+	if err != nil || summary.Pinned {
+		t.Fatalf("unpin conversation = %#v, %v", summary, err)
+	}
+	summary, err = service.SetConversationArchived(actorContext, identity, summary.ConversationID, ConversationMutationInput{ExpectedVersion: summary.RecordVersion}, true)
+	if err != nil || !summary.Archived {
+		t.Fatalf("archive conversation = %#v, %v", summary, err)
+	}
+	archived, err := service.ListConversations(actorContext, identity, "", true, 10, "")
+	if err != nil || len(archived.Items) != 1 || archived.Items[0].ConversationID != summary.ConversationID {
+		t.Fatalf("archived history = %#v, %v", archived, err)
+	}
+	if _, err = service.SetConversationArchived(actorContext, identity, summary.ConversationID, ConversationMutationInput{ExpectedVersion: summary.RecordVersion - 1}, false); !errors.Is(err, orchestrator.ErrVersionConflict) {
+		t.Fatalf("stale restore error = %v", err)
+	}
+	observerIdentity := RequestIdentity{TenantID: identity.TenantID, DomainID: identity.DomainID, ActorID: askdata.ID(fixture.observerID)}
+	observerContext := database.WithAccessContext(ctx, fixture.observerID, fixture.domainID)
+	observerPage, err := service.ListConversations(observerContext, observerIdentity, "", false, 10, "")
+	if err != nil || len(observerPage.Items) != 0 {
+		t.Fatalf("cross-actor history = %#v, %v", observerPage, err)
+	}
+}
+
 type questionHTTPFixture struct {
 	tenantID, actorID, observerID, domainID string
 	actorRoleID, observerRoleID             string
-	releaseID, releaseHash, runID           string
+	releaseID, releaseHash, conversationID  string
+	runID                                   string
 }
 
 func createQuestionHTTPFixture(t *testing.T, ctx context.Context, tx pgx.Tx) questionHTTPFixture {
@@ -186,13 +335,18 @@ func createQuestionHTTPFixture(t *testing.T, ctx context.Context, tx pgx.Tx) que
 	if err != nil {
 		t.Fatal(err)
 	}
+	fixture.conversationID = uuid.NewString()
+	if _, err := tx.Exec(ctx, `INSERT INTO askdata.conversations(id,tenant_id,domain_id,actor_id)
+		VALUES($1,$2,$3,$4)`, fixture.conversationID, fixture.tenantID, fixture.domainID, fixture.actorID); err != nil {
+		t.Fatalf("insert conversation: %v", err)
+	}
 	fixture.runID = uuid.NewString()
 	if _, err := tx.Exec(ctx, `INSERT INTO askdata.question_runs(
 		id,tenant_id,domain_id,actor_id,conversation_id,trace_id,
 		idempotency_key_hash,question_hash,policy_scope_hash,release_id,release_content_hash
 	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
 		fixture.runID, fixture.tenantID, fixture.domainID, fixture.actorID,
-		uuid.NewString(), uuid.NewString(), askdata.HashBytes([]byte("idempotency")),
+		fixture.conversationID, uuid.NewString(), askdata.HashBytes([]byte("idempotency")),
 		askdata.HashBytes([]byte("question")), scope.PolicyHash, fixture.releaseID, fixture.releaseHash,
 	); err != nil {
 		t.Fatalf("insert question run: %v", err)

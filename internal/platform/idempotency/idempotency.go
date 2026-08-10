@@ -300,7 +300,7 @@ func decodeCanonicalValue(decoder *json.Decoder, depth int) (any, error) {
 // RequiresGovernedWrite is the common route allowlist. It intentionally does
 // not blanket-wrap every POST route.
 func RequiresGovernedWrite(request *http.Request) bool {
-	if request == nil || request.Method != http.MethodPost && request.Method != http.MethodDelete {
+	if request == nil || request.Method != http.MethodPost && request.Method != http.MethodPut && request.Method != http.MethodDelete {
 		return false
 	}
 	segments := strings.Split(strings.Trim(request.URL.Path, "/"), "/")
@@ -309,11 +309,41 @@ func RequiresGovernedWrite(request *http.Request) bool {
 	}
 	if len(segments) == 3 {
 		return segments[2] == "questions" || segments[2] == "data-requests" ||
-			segments[2] == "reports"
+			segments[2] == "reports" || segments[2] == "decisions"
+	}
+	if segments[2] == "work-items" {
+		return request.Method == http.MethodPost && len(segments) == 6 && segments[3] != "" && segments[4] != "" && segments[5] == "read"
+	}
+	if segments[2] == "report-schedules" {
+		return (request.Method == http.MethodPost && len(segments) >= 5 && segments[3] != "") ||
+			(request.Method == http.MethodDelete && len(segments) == 6 && segments[3] != "" && segments[4] == "subscriptions" && segments[5] != "")
+	}
+	if segments[2] == "report-deliveries" {
+		return request.Method == http.MethodPost && len(segments) == 5 && segments[3] != "" && segments[4] == "read"
+	}
+	if segments[2] == "users" {
+		return request.Method == http.MethodPost && len(segments) == 5 && segments[3] != "" && segments[4] == "deactivation-batches"
+	}
+	if segments[2] == "runtime-config" {
+		if request.Method != http.MethodPost || len(segments) < 4 || segments[3] != "versions" {
+			return false
+		}
+		return len(segments) == 4 ||
+			(len(segments) == 6 && segments[4] != "" && (segments[5] == "submit" || segments[5] == "approve" || segments[5] == "apply" || segments[5] == "rollback")) ||
+			(len(segments) == 8 && segments[4] != "" && segments[5] == "rollout-nodes" && segments[6] != "" && segments[7] == "restart-ack")
+	}
+	if segments[2] == "decisions" {
+		if request.Method == http.MethodPut {
+			return len(segments) == 4 && segments[3] != ""
+		}
+		return request.Method == http.MethodPost && len(segments) >= 5 && segments[3] != ""
 	}
 	if len(segments) == 5 && segments[2] == "questions" && segments[3] != "" {
 		return segments[4] == "clarifications" || segments[4] == "feedback" ||
 			segments[4] == "add-to-report"
+	}
+	if len(segments) == 5 && segments[2] == "conversations" && segments[3] != "" {
+		return request.Method == http.MethodPost && (segments[4] == "release-drift" || segments[4] == "pin" || segments[4] == "archive" || segments[4] == "restore")
 	}
 	if len(segments) == 7 && segments[2] == "askdata" && segments[3] == "semantic" &&
 		segments[4] == "releases" && segments[5] != "" {
@@ -327,9 +357,12 @@ func RequiresGovernedWrite(request *http.Request) bool {
 	}
 	if len(segments) == 5 && segments[3] != "" {
 		switch segments[4] {
-		case "operations", "undo", "redo", "publish", "rollback", "shares", "exports", "permissions", "archive", "restore":
+		case "operations", "undo", "redo", "publish", "rollback", "shares", "exports", "permissions", "archive", "restore", "follow":
 			return true
 		}
+	}
+	if len(segments) == 5 && segments[2] == "reports" && segments[3] != "" && segments[4] == "schedules" {
+		return request.Method == http.MethodPost
 	}
 	if len(segments) == 6 && segments[3] != "" && segments[4] == "insights" {
 		return segments[5] == "evidence"

@@ -56,7 +56,17 @@ func remainderQueryFixture() ir.SemanticIR {
 
 func remainderLimitFixture(t *testing.T, query ir.SemanticIR) CompiledLimit {
 	t.Helper()
-	sort := mustCompileSort(t, query)
+	sort, err := CompileSort(SortCompileRequest{
+		Query: query,
+		Columns: []SortColumnBinding{{
+			TargetType: ir.SortTargetMetric, TargetVersionID: "metric-sales-v1",
+			CurrentColumn: "sales",
+		}},
+		StableGroupColumns: []string{"region"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	limit := 2
 	compiled, err := CompileLimit(LimitCompileRequest{
 		SourceRelation: "rank_input", OutputColumns: []string{"region", "sales", "inventory", "margin"},

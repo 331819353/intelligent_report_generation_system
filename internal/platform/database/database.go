@@ -32,6 +32,13 @@ func AccessContextFromContext(ctx context.Context) (AccessContext, bool) {
 	return value, ok && value.UserID != ""
 }
 
+// WithoutAccessContext preserves cancellation and unrelated request metadata
+// while forcing the next tenant transaction into SYSTEM mode. Callers must
+// complete their control-plane authorization before using it.
+func WithoutAccessContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, accessContextKey{}, AccessContext{})
+}
+
 // Open 建立 PostgreSQL 连接池，并通过探活确保连接可用。
 func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.New(ctx, databaseURL)

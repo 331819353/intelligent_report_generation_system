@@ -69,9 +69,9 @@ func TestKPIBundleAdminRoundTripAndReferenceValidation(t *testing.T) {
 			id,tenant_id,domain_id,metric_id,version_no,semantic_model_version_id,
 			formula_ast,default_filters_ast,unit,time_grain,additivity,
 			zero_denominator_policy,display_precision,additivity_suggestion,
-			null_policy,status,content_hash,owner_id
+			additivity_suggestion_rule_id,null_policy,status,content_hash,owner_id
 		) VALUES($1,$2,$3,$4,1,$5,'{"type":"TRUE"}'::jsonb,'{"type":"TRUE"}'::jsonb,
-			'COUNT','NONE','FULLY_ADDITIVE','NULL',2,'FULLY_ADDITIVE','PRESERVE',$6,$7,$8)`,
+			'COUNT','NONE','FULLY_ADDITIVE','NULL',2,'FULLY_ADDITIVE','TEST_FIXTURE','PRESERVE',$6,$7,$8)`,
 			fixture.id, tenantID, fixture.domain, uuid.NewString(), uuid.NewString(), fixture.status,
 			strings.Repeat("a", 64), actorID); err != nil {
 			t.Fatal(err)
@@ -212,6 +212,7 @@ func TestPostgresKPIBundleMatcherPinsAndRollsBackReleaseVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
 	if _, err := tx.Exec(ctx, `INSERT INTO platform.tenants(id,code,name) VALUES($1,$2,'KPI matcher integration')`,
 		tenantID, "kpim_"+suffix); err != nil {
 		t.Fatal(err)
@@ -252,9 +253,9 @@ func TestPostgresKPIBundleMatcherPinsAndRollsBackReleaseVersion(t *testing.T) {
 		id,tenant_id,domain_id,metric_id,version_no,semantic_model_version_id,
 		formula_ast,default_filters_ast,unit,time_grain,additivity,
 		zero_denominator_policy,display_precision,additivity_suggestion,
-		null_policy,status,content_hash,owner_id
+		additivity_suggestion_rule_id,null_policy,status,content_hash,owner_id
 	) VALUES($1,$2,$3,$4,1,$5,'{"type":"TRUE"}'::jsonb,'{"type":"TRUE"}'::jsonb,
-		'COUNT','NONE','FULLY_ADDITIVE','NULL',2,'FULLY_ADDITIVE','PRESERVE','CERTIFIED',$6,$7)`,
+		'COUNT','NONE','FULLY_ADDITIVE','NULL',2,'FULLY_ADDITIVE','TEST_FIXTURE','PRESERVE','CERTIFIED',$6,$7)`,
 		metricVersionID, tenantID, domainID, metricID, uuid.NewString(), metricHash, actorID); err != nil {
 		t.Fatal(err)
 	}

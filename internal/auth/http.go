@@ -61,14 +61,25 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	writeAuthJSON(w, http.StatusCreated, pair)
 }
 
-// me 返回访问令牌中的当前用户声明；内部工作区标识不暴露给客户端。
+// me 返回服务端实时用户资料与当前领域角色；内部工作区标识、密码和
+// 管理员用户清单不暴露给客户端。
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	claims, ok := ClaimsFromContext(r.Context())
 	if !ok {
 		writeAuthError(w, http.StatusUnauthorized, "ACCESS_TOKEN_REQUIRED", "valid bearer token is required")
 		return
 	}
-	writeAuthJSON(w, http.StatusOK, map[string]any{"userId": claims.Subject, "tokenVersion": claims.TokenVersion})
+	access, _ := database.AccessContextFromContext(r.Context())
+	profile, err := h.service.CurrentProfile(r.Context(), claims.TenantID, claims.Subject, access.DomainID)
+	if err != nil {
+		writeAuthError(w, http.StatusInternalServerError, "CURRENT_PROFILE_FAILED", "failed to load current user profile")
+		return
+	}
+	writeAuthJSON(w, http.StatusOK, map[string]any{
+		"userId": profile.UserID, "displayName": profile.DisplayName, "avatarUrl": profile.AvatarURL,
+		"status": profile.Status, "domainId": profile.DomainID, "roles": profile.Roles,
+		"tokenVersion": claims.TokenVersion,
+	})
 }
 
 // login 解析登录请求并把客户端环境信息交给认证服务审计。

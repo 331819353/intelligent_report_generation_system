@@ -4570,5 +4570,220 @@ SELECT (
   \quit 1
 \endif
 
+-- Verify the post-280 cross-context backend: decision facts, unified inbox,
+-- conversation history, scheduling/delivery, lifecycle transfer, runtime
+-- configuration and report follows. These checks intentionally cover both
+-- object existence and the effective least-privilege boundary.
+DO $$
+DECLARE
+  expected_versions text[] := ARRAY[
+    '000281_decision_domain','000282_unified_work_inbox',
+    '000283_conversation_history','000284_report_scheduling',
+    '000285_user_owner_transfer','000286_runtime_config_control',
+    '000287_backend_control_boundary_repairs','000288_report_follows',
+    '000289_decision_approval_audit_and_worker_discovery',
+    '000290_decision_state_machine_guards','000291_decision_insert_rls_repair',
+    '000292_report_delivery_read_boundary',
+    '000293_runtime_config_rejection_and_guards',
+    '000294_runtime_config_trigger_execution_repair',
+    '000295_owner_transfer_semantic_coverage',
+    '000296_last_active_administrator_guard',
+    '000297_release_gate_receipt_hash_ambiguity'
+  ];
+BEGIN
+  IF (SELECT count(*) FROM platform_schema_migrations
+      WHERE version=ANY(expected_versions))<>cardinality(expected_versions) THEN
+    RAISE EXCEPTION 'post-280 backend migration set is incomplete';
+  END IF;
+END
+$$;
+
+DO $$
+DECLARE
+  relation_name text;
+  relation_oid regclass;
+  row_security boolean;
+  force_row_security boolean;
+BEGIN
+  FOREACH relation_name IN ARRAY ARRAY[
+    'platform.work_item_receipts','platform.report_schedules',
+    'platform.report_subscriptions','platform.report_deliveries',
+    'platform.report_delivery_events','platform.user_lifecycle_batches',
+    'platform.user_lifecycle_batch_items','platform.user_lifecycle_events',
+    'platform.runtime_config_versions','platform.runtime_config_effective',
+    'platform.runtime_config_rollout_nodes','platform.runtime_config_events',
+    'platform.report_follows','decision.approval_policies',
+    'decision.approval_policy_approvers','decision.decisions',
+    'decision.decision_options','decision.decision_evidence',
+    'decision.decision_approvals','decision.decision_approval_events',
+    'decision.action_items','decision.action_events','decision.outcome_metrics',
+    'decision.outcome_reviews','decision.decision_events',
+    'decision.decision_notifications'
+  ] LOOP
+    relation_oid := to_regclass(relation_name);
+    IF relation_oid IS NULL THEN
+      RAISE EXCEPTION 'missing backend relation %', relation_name;
+    END IF;
+    SELECT relrowsecurity,relforcerowsecurity
+    INTO row_security,force_row_security
+    FROM pg_class WHERE oid=relation_oid;
+    IF NOT row_security OR NOT force_row_security THEN
+      RAISE EXCEPTION 'backend relation % must force RLS', relation_name;
+    END IF;
+  END LOOP;
+
+  IF NOT EXISTS(SELECT 1 FROM information_schema.columns
+      WHERE table_schema='askdata' AND table_name='conversations'
+        AND column_name='record_version' AND is_nullable='NO')
+    OR NOT EXISTS(SELECT 1 FROM information_schema.columns
+      WHERE table_schema='askdata' AND table_name='conversations'
+        AND column_name='archived_at')
+    OR NOT EXISTS(SELECT 1 FROM information_schema.columns
+      WHERE table_schema='askdata' AND table_name='conversations'
+        AND column_name='is_pinned' AND is_nullable='NO')
+    OR NOT EXISTS(SELECT 1 FROM information_schema.columns
+      WHERE table_schema='platform' AND table_name='runtime_config_versions'
+        AND column_name='rejected_by')
+    OR NOT EXISTS(SELECT 1 FROM information_schema.columns
+      WHERE table_schema='platform' AND table_name='runtime_config_versions'
+        AND column_name='rejection_reason' AND is_nullable='NO') THEN
+    RAISE EXCEPTION 'conversation or runtime configuration evolution is incomplete';
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF to_regprocedure('platform.report_schedule_work_tenants()') IS NULL
+    OR to_regprocedure('platform.runtime_config_rollout_tenants()') IS NULL
+    OR to_regprocedure('platform.user_has_open_responsibility(uuid)') IS NULL
+    OR to_regprocedure('platform.user_is_last_active_administrator(uuid)') IS NULL
+    OR to_regprocedure('platform.guard_report_delivery_user_mutation()') IS NULL
+    OR to_regprocedure('platform.guard_runtime_config_version_mutation()') IS NULL
+    OR to_regprocedure('platform.guard_runtime_config_rollout_mutation()') IS NULL
+    OR to_regprocedure('decision.list_work_tenants()') IS NULL
+    OR to_regprocedure('decision.can_access(uuid)') IS NULL
+    OR to_regprocedure('decision.status_transition_allowed(text,text)') IS NULL
+    OR to_regprocedure('decision.action_transition_allowed(text,text)') IS NULL THEN
+    RAISE EXCEPTION 'post-280 backend function boundary is incomplete';
+  END IF;
+
+  IF NOT (SELECT prosecdef FROM pg_proc
+      WHERE oid='platform.guard_runtime_config_version_mutation()'::regprocedure)
+    OR position('other_user.status' IN pg_get_functiondef(
+      'platform.user_is_last_active_administrator(uuid)'::regprocedure))=0
+    OR position('DOMAIN_ADMIN' IN pg_get_functiondef(
+      'platform.user_is_last_active_administrator(uuid)'::regprocedure))=0
+    OR position('platform.user_is_last_active_administrator(selected_user_id)'
+      IN pg_get_functiondef(
+        'platform.user_has_open_responsibility(uuid)'::regprocedure))=0
+    OR position('DECLARE computed_receipt_hash text;' IN pg_get_functiondef(
+      'askdata.recompute_release_evaluation_gate(uuid,uuid,uuid,uuid)'::regprocedure))=0 THEN
+    RAISE EXCEPTION 'last-administrator or runtime guard definition is unsafe';
+  END IF;
+
+  IF (SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND (
+      (tgrelid='platform.report_deliveries'::regclass
+        AND tgname='report_deliveries_user_mutation_guard')
+      OR (tgrelid='platform.report_delivery_events'::regclass
+        AND tgname='report_delivery_events_immutable')
+      OR (tgrelid='platform.users'::regclass
+        AND tgname='users_guard_responsibility')
+      OR (tgrelid='platform.user_lifecycle_events'::regclass
+        AND tgname='user_lifecycle_events_immutable')
+      OR (tgrelid='platform.runtime_config_versions'::regclass
+        AND tgname='runtime_config_versions_mutation_guard')
+      OR (tgrelid='platform.runtime_config_rollout_nodes'::regclass
+        AND tgname='runtime_config_rollout_mutation_guard')
+      OR (tgrelid='platform.runtime_config_events'::regclass
+        AND tgname='runtime_config_events_immutable')
+      OR (tgrelid='decision.decisions'::regclass
+        AND tgname='decision_mutation_guard')
+      OR (tgrelid='decision.action_items'::regclass
+        AND tgname='decision_action_mutation_guard')
+      OR (tgrelid='decision.decision_evidence'::regclass
+        AND tgname='decision_evidence_immutable')
+      OR (tgrelid='decision.decision_options'::regclass
+        AND tgname='decision_options_immutable')
+      OR (tgrelid='decision.action_events'::regclass
+        AND tgname='action_events_immutable')
+      OR (tgrelid='decision.decision_events'::regclass
+        AND tgname='decision_events_immutable')
+      OR (tgrelid='decision.decision_approvals'::regclass
+        AND tgname='decision_approvals_immutable')
+      OR (tgrelid='decision.decision_approval_events'::regclass
+        AND tgname='decision_approval_events_immutable')
+    ))<>15 THEN
+    RAISE EXCEPTION 'post-280 state-machine or append-only triggers are incomplete';
+  END IF;
+END
+$$;
+
+SELECT (
+  has_table_privilege(:'app_user','platform.work_item_receipts','SELECT,INSERT,UPDATE')
+  AND NOT has_table_privilege(:'app_user','platform.work_item_receipts','DELETE')
+  AND has_table_privilege(:'app_user','platform.report_follows','SELECT,INSERT,DELETE')
+  AND NOT has_table_privilege(:'app_user','platform.report_follows','UPDATE')
+  AND has_table_privilege(:'app_user','platform.report_schedules','SELECT,INSERT,UPDATE')
+  AND NOT has_table_privilege(:'app_user','platform.report_schedules','DELETE')
+  AND has_table_privilege(:'app_user','platform.report_deliveries','SELECT,INSERT,UPDATE')
+  AND NOT has_table_privilege(:'app_user','platform.report_deliveries','DELETE')
+  AND has_table_privilege(:'app_user','platform.user_lifecycle_batches','SELECT,INSERT,UPDATE')
+  AND NOT has_table_privilege(:'app_user','platform.user_lifecycle_batches','DELETE')
+  AND has_table_privilege(:'app_user','platform.user_lifecycle_events','SELECT,INSERT')
+  AND NOT has_table_privilege(:'app_user','platform.user_lifecycle_events','UPDATE,DELETE')
+  AND has_table_privilege(:'app_user','platform.runtime_config_versions','SELECT,INSERT,UPDATE')
+  AND NOT has_table_privilege(:'app_user','platform.runtime_config_versions','DELETE')
+  AND has_table_privilege(:'worker_user','platform.report_deliveries','SELECT,INSERT,UPDATE')
+  AND NOT has_table_privilege(:'worker_user','platform.report_deliveries','DELETE')
+  AND has_table_privilege(:'worker_user','platform.runtime_config_versions','SELECT,UPDATE')
+  AND NOT has_table_privilege(:'worker_user','platform.runtime_config_versions','INSERT,DELETE')
+  AND NOT has_table_privilege(:'worker_user','platform.work_item_receipts','SELECT,INSERT,UPDATE,DELETE')
+  AND NOT has_table_privilege(:'worker_user','platform.user_lifecycle_batches','SELECT,INSERT,UPDATE,DELETE')
+  AND NOT has_table_privilege(:'worker_user','platform.report_follows','SELECT,INSERT,UPDATE,DELETE')
+  AND NOT has_table_privilege(:'connection_test_user','platform.work_item_receipts','SELECT,INSERT,UPDATE,DELETE')
+  AND NOT has_table_privilege(:'connection_test_user','platform.report_schedules','SELECT,INSERT,UPDATE,DELETE')
+  AND NOT has_table_privilege(:'connection_test_user','platform.report_deliveries','SELECT,INSERT,UPDATE,DELETE')
+  AND NOT has_table_privilege(:'connection_test_user','platform.user_lifecycle_batches','SELECT,INSERT,UPDATE,DELETE')
+  AND NOT has_table_privilege(:'connection_test_user','platform.runtime_config_versions','SELECT,INSERT,UPDATE,DELETE')
+  AND NOT has_table_privilege(:'connection_test_user','platform.report_follows','SELECT,INSERT,UPDATE,DELETE')
+  AND has_function_privilege(:'worker_user','platform.report_schedule_work_tenants()','EXECUTE')
+  AND has_function_privilege(:'worker_user','platform.runtime_config_rollout_tenants()','EXECUTE')
+  AND NOT has_function_privilege(:'connection_test_user','platform.report_schedule_work_tenants()','EXECUTE')
+) AS backend_platform_privileges_secure
+\gset
+\if :backend_platform_privileges_secure
+\else
+  \echo 'post-280 platform backend privileges are unsafe'
+  \quit 1
+\endif
+
+SELECT (
+  has_schema_privilege(:'app_user','decision','USAGE')
+  AND has_schema_privilege(:'worker_user','decision','USAGE')
+  AND NOT has_schema_privilege(:'connection_test_user','decision','USAGE')
+  AND has_table_privilege(:'app_user','decision.decisions','SELECT,INSERT,UPDATE')
+  AND NOT has_table_privilege(:'app_user','decision.decisions','DELETE')
+  AND has_table_privilege(:'app_user','decision.decision_evidence','SELECT,INSERT')
+  AND NOT has_table_privilege(:'app_user','decision.decision_evidence','UPDATE,DELETE')
+  AND has_table_privilege(:'app_user','decision.decision_approval_events','SELECT,INSERT')
+  AND NOT has_table_privilege(:'app_user','decision.decision_approval_events','UPDATE,DELETE')
+  AND has_table_privilege(:'worker_user','decision.decisions','SELECT,UPDATE')
+  AND NOT has_table_privilege(:'worker_user','decision.decisions','INSERT,DELETE')
+  AND has_table_privilege(:'worker_user','decision.decision_notifications','SELECT,INSERT,UPDATE')
+  AND NOT has_table_privilege(:'worker_user','decision.decision_notifications','DELETE')
+  AND NOT has_table_privilege(:'worker_user','decision.decision_approvals','SELECT,INSERT,UPDATE,DELETE')
+  AND NOT has_table_privilege(:'connection_test_user','decision.decisions','SELECT,INSERT,UPDATE,DELETE')
+  AND has_function_privilege(:'worker_user','decision.list_work_tenants()','EXECUTE')
+  AND has_function_privilege(:'app_user','decision.can_access(uuid)','EXECUTE')
+  AND NOT has_function_privilege(:'connection_test_user','decision.list_work_tenants()','EXECUTE')
+) AS decision_privileges_secure
+\gset
+\if :decision_privileges_secure
+\else
+  \echo 'decision least-privilege boundary is unsafe'
+  \quit 1
+\endif
+
 SELECT 'retained platform and askdata permission/schema checks passed' AS result;
 SQL

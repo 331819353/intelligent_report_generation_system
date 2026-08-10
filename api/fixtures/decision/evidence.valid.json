@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0",
+  "sourceType": "ANSWER_ARTIFACT",
+  "sourceId": "88888888-8888-4888-8888-888888888888",
+  "sourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "semanticReleaseId": "99999999-9999-4999-8999-999999999999",
+  "semanticReleaseHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "dataSnapshotId": null,
+  "asOf": "2026-08-10T01:00:00Z",
+  "policyScopeHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "summary": "已验证答案的最小证据摘要",
+  "verified": true
+}

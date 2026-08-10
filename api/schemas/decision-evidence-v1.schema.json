@@ -1,0 +1,23 @@
+{
+  "title": "Decision Evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "sourceType", "sourceId", "sourceHash", "semanticReleaseId", "semanticReleaseHash", "dataSnapshotId", "asOf", "policyScopeHash", "summary", "verified"],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "sourceType": { "enum": ["ANSWER_ARTIFACT", "REPORT_VERSION", "INSIGHT_ARTIFACT"] },
+    "sourceId": { "$ref": "#/$defs/uuid" },
+    "sourceHash": { "$ref": "#/$defs/hash" },
+    "semanticReleaseId": { "$ref": "#/$defs/uuid" },
+    "semanticReleaseHash": { "$ref": "#/$defs/hash" },
+    "dataSnapshotId": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+    "asOf": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$" },
+    "policyScopeHash": { "$ref": "#/$defs/hash" },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 2048 },
+    "verified": { "const": true }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

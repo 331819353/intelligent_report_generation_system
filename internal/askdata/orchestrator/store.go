@@ -882,6 +882,12 @@ func createRunTx(ctx context.Context, tx pgx.Tx, prepared preparedCreate) (Run, 
 	if err := insertEventTx(ctx, tx, event); err != nil {
 		return Run{}, false, err
 	}
+	if _, err := tx.Exec(ctx, `UPDATE askdata.conversations
+		SET record_version=record_version+1,updated_at=clock_timestamp()
+		WHERE tenant_id=$1 AND domain_id=$2 AND actor_id=$3 AND id=$4`,
+		run.TenantID, run.DomainID, run.ActorID, run.ConversationID); err != nil {
+		return Run{}, false, err
+	}
 	return run, false, nil
 }
 

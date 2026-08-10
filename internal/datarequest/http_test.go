@@ -138,6 +138,7 @@ func TestCreateDataRequestUsesSharedIdempotencyBoundary(t *testing.T) {
 	identity := testIdentity()
 	store := &fakeStore{}
 	service := NewService(store)
+	service.now = func() time.Time { return time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC) }
 	repository := &dataRequestIdempotencyRepository{}
 	protected := newProtectedHandler(service, func(context.Context) (Identity, error) {
 		return identity, nil

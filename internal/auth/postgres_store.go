@@ -40,6 +40,33 @@ func (s *PostgresStore) FindUserByID(ctx context.Context, tenantID, userID strin
 	return s.findUser(ctx, tenantID, `id = $1`, userID)
 }
 
+func (s *PostgresStore) LoadCurrentProfile(ctx context.Context, tenantID, userID, domainID string) (CurrentProfile, error) {
+	result := CurrentProfile{Roles: []string{}, DomainID: domainID}
+	err := database.WithTenantTx(database.WithoutAccessContext(ctx), s.pool, tenantID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT id::text,display_name,status::text FROM platform.users WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL`, tenantID, userID).Scan(&result.UserID, &result.DisplayName, &result.Status); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `SELECT role_code FROM (
+		  SELECT role.code::text AS role_code FROM platform.user_roles assignment JOIN platform.roles role ON role.tenant_id=assignment.tenant_id AND role.id=assignment.role_id WHERE assignment.tenant_id=$1 AND assignment.user_id=$2 AND role.status='ACTIVE' AND role.deleted_at IS NULL
+		  UNION
+		  SELECT membership.member_role::text FROM platform.domain_memberships membership WHERE membership.tenant_id=$1 AND membership.user_id=$2 AND membership.domain_id=NULLIF($3,'')::uuid AND membership.status='ACTIVE'
+		) roles ORDER BY role_code`, tenantID, userID, domainID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var role string
+			if err = rows.Scan(&role); err != nil {
+				return err
+			}
+			result.Roles = append(result.Roles, role)
+		}
+		return rows.Err()
+	})
+	return result, err
+}
+
 // RegisterUser 原子创建账号及受限基础身份；领域归属必须另行申请或分配。
 func (s *PostgresStore) RegisterUser(ctx context.Context, input RegisterUserRecord) error {
 	tenantID, err := s.FindWorkspaceID(ctx)
