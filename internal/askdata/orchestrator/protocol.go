@@ -45,16 +45,16 @@ func NextState(current State, action cognition.ActionType) (State, bool) {
 	case cognition.ActionCallTool:
 		return current, true
 	case cognition.ActionClarify:
-		// cognition.stageAllowsAction and the run state graph disagree here:
-		// PLAN_SELECTION permits CLARIFY, but the state graph gives IR_READY only
-		// PLAN_VALIDATING and BLOCKED. Emitting CLARIFICATION_REQUIRED there would
-		// be rejected by enforce_question_run_lifecycle at write time. The
-		// protocol resolves the conflict by failing closed: a clarification the
-		// lifecycle cannot represent becomes a BLOCK, so the run ends with an
-		// explicit reason instead of dying on a trigger.
+		// Every model-driven state can clarify. Migration 000301 widened the
+		// state graph to allow IR_READY -> CLARIFICATION_REQUIRED, resolving the
+		// contradiction where PLAN_SELECTION permitted CLARIFY but the lifecycle
+		// had no way to represent it. A clarification is a better outcome than a
+		// block whenever the user could actually resolve the ambiguity.
 		if clarifiableStates[current] {
 			return StateClarificationRequired, true
 		}
+		// Deterministic states have no model to clarify with; failing closed here
+		// keeps the protocol from ever emitting a transition the trigger rejects.
 		return StateBlocked, true
 	case cognition.ActionBlock:
 		return StateBlocked, true
@@ -67,15 +67,17 @@ func NextState(current State, action cognition.ActionType) (State, bool) {
 }
 
 // clarifiableStates lists the states askdata.valid_question_run_transition
-// actually allows to reach CLARIFICATION_REQUIRED. IR_READY is deliberately
-// absent: the state graph makes it a narrow pass-through to plan validation.
+// allows to reach CLARIFICATION_REQUIRED. It must stay in step with the SQL
+// state graph; TestClarifiableStatesMatchTheStateGraph pins the two together.
 var clarifiableStates = map[State]bool{
 	StateUnderstanding:   true,
 	StateRetrieving:      true,
 	StateBinding:         true,
 	StateGraphValidating: true,
+	StateIRReady:         true,
 	StatePlanValidating:  true,
 	StateResultVerifying: true,
+	StateAnswerVerifying: true,
 }
 
 type stageAdvance struct {

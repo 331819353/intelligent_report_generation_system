@@ -54,11 +54,11 @@ func TestEveryProtocolTransitionIsPermittedByTheStateGraph(t *testing.T) {
 		StateRetrieving:      {StateBinding, StateClarificationRequired, StateBlocked},
 		StateBinding:         {StateGraphValidating, StateClarificationRequired, StateOutOfScope, StateBlocked},
 		StateGraphValidating: {StateIRReady, StateClarificationRequired, StateBlocked},
-		StateIRReady:         {StatePlanValidating, StateBlocked},
+		StateIRReady:         {StatePlanValidating, StateClarificationRequired, StateBlocked},
 		StatePlanValidating:  {StateExecuting, StateBinding, StateClarificationRequired, StateBlocked},
 		StateExecuting:       {StateResultVerifying, StateBlocked},
 		StateResultVerifying: {StateAnswerVerifying, StateBinding, StateClarificationRequired, StateBlocked},
-		StateAnswerVerifying: {StateAnswered, StateBlocked},
+		StateAnswerVerifying: {StateAnswered, StateClarificationRequired, StateBlocked},
 	}
 	allows := func(from, to State) bool {
 		for _, candidate := range permitted[from] {
@@ -79,8 +79,8 @@ func TestEveryProtocolTransitionIsPermittedByTheStateGraph(t *testing.T) {
 			t.Fatalf("protocol advances %s -> %s which the state graph forbids", from, to)
 		}
 	}
-	// 澄清与阻断产出的迁移必须都被状态图接受。IR_READY 不允许澄清，
-	// 协议必须失败关闭为 BLOCKED，而不是产出一条会被触发器拒绝的迁移。
+	// 澄清与阻断产出的迁移必须都被状态图接受。迁移 000301 之后每个模型驱动状态
+	// 都能澄清；确定性状态没有可澄清的对象，仍然失败关闭为 BLOCKED。
 	for state := range stageByState {
 		clarify, _ := NextState(state, cognition.ActionClarify)
 		if !allows(state, clarify) {
@@ -109,9 +109,9 @@ func TestClarifiableStatesMatchTheStateGraph(t *testing.T) {
 		StateGraphValidating: true,
 		StatePlanValidating:  true,
 		StateResultVerifying: true,
-		StateIRReady:         false,
+		StateIRReady:         true,
 		StateExecuting:       false,
-		StateAnswerVerifying: false,
+		StateAnswerVerifying: true,
 	}
 	for state, expected := range graphAllowsClarify {
 		if clarifiableStates[state] != expected {
@@ -158,5 +158,17 @@ func TestBoundedCorrectionsAreExactlyTheTwoRetreatEdges(t *testing.T) {
 	}
 	if MaxBoundedCorrections < 1 {
 		t.Fatal("bounded correction cap must permit at least one retreat")
+	}
+}
+
+// 迁移 000301 之后，每个由模型驱动的状态都必须能真正走到 CLARIFICATION_REQUIRED。
+// 这条断言防止 clarifiableStates 再次退化成失败关闭，从而悄悄吃掉一次
+// 用户本可以回答的澄清机会。
+func TestEveryModelDrivenStateCanActuallyClarify(t *testing.T) {
+	for state := range stageByState {
+		next, ok := NextState(state, cognition.ActionClarify)
+		if !ok || next != StateClarificationRequired {
+			t.Fatalf("model-driven state %s must be able to clarify, got %s", state, next)
+		}
 	}
 }
