@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { DatasetCenterPage } from '../pages/DatasetCenterPage'
 import { DataSourceCenterPage } from '../pages/DataSourceCenterPage'
+import { DataSourceAssetsPage } from '../pages/DataSourceAssetsPage'
 import { LoginPage } from '../pages/LoginPage'
 import { ManagementCenterPage } from '../pages/ManagementCenterPage'
 import { DomainAccessPage } from '../pages/DomainAccessPage'
@@ -48,6 +49,9 @@ export function App() {
       <Route path="/platform-settings" element={<Navigate to="/platform-management/domains" replace />} />
       <Route path="/permissions" element={<Navigate to="/platform-management/permissions" replace />} />
       <Route path="/data-sources" element={<RequireAuth><RequireBusinessDomain><DataSourceCenterPage /></RequireBusinessDomain></RequireAuth>} />
+      <Route path="/data-sources/:sourceId/assets" element={<RequireAuth><RequireBusinessDomain><DataSourceAssetsPage /></RequireBusinessDomain></RequireAuth>} />
+      <Route path="/data-sources/:sourceId/assets/discover" element={<RequireAuth><RequireBusinessDomain><DataSourceAssetsPage /></RequireBusinessDomain></RequireAuth>} />
+      <Route path="/data-sources/:sourceId/assets/:tableId" element={<RequireAuth><RequireBusinessDomain><DataSourceAssetsPage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="/datasets" element={<RequireAuth><RequireBusinessDomain><DatasetCenterPage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="/datasets/:datasetId/edit" element={<RequireAuth><RequireBusinessDomain><DatasetCenterPage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="/ask-data" element={<RequireAuth><RequireBusinessDomain><AskDataPage /></RequireBusinessDomain></RequireAuth>} />

@@ -10,6 +10,12 @@ import (
 
 var ErrAssetIneligible = errors.New("report semantic asset is not eligible for projection")
 
+// ErrAssetSourceGone marks outbox work whose source report version no longer
+// exists or never reached READY. It is permanent: no amount of retrying can
+// make a deleted version reappear, so the work is terminalised rather than
+// re-queued.
+var ErrAssetSourceGone = errors.New("report asset source version is gone")
+
 type GraphVertex struct {
 	Type        string              `json:"type"`
 	ID          askdata.ID          `json:"id"`

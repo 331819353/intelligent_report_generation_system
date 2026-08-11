@@ -1,4 +1,5 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   ArrowClockwise,
   CheckCircle,
@@ -365,6 +366,7 @@ const friendlyConnectionError = (cause: unknown) => {
 
 /** 提供数据源目录、结构化连接配置和完整生命周期操作，浏览器永不接收已保存密码。 */
 export function DataSourceCenterPage() {
+  const navigate = useNavigate()
   const searchParams = new URLSearchParams(window.location.search)
   const designSnapshot = import.meta.env.DEV && Boolean(searchParams.get('snapshot'))
   const qaViewport1920 = designSnapshot && searchParams.get('qa') === '1920'
@@ -1226,6 +1228,7 @@ export function DataSourceCenterPage() {
           : selectedPendingDraft
             ? '提交发布审批'
             : '完善业务元数据'
+  const openAssetWorkspace = (source: DataSourceRecord) => navigate(`/data-sources/${source.id}/assets${designSnapshot ? '?snapshot=data-source-assets' : ''}`)
   return (
     <AppShell
       className={`data-source-shell${selectedSource ? ' has-detail' : ''}${qaViewport1920 ? ' qa-viewport-1920' : ''}`}
@@ -1294,7 +1297,7 @@ export function DataSourceCenterPage() {
                   <div className="data-source-actions" role="cell">
                     <AppButton className="action-test" type="button" disabled={actionBusy || !canTest} onClick={() => void testConnection(source)}>{busyAction === `test:${source.id}` ? '测试中…' : '测试连接'}</AppButton>
                     <AppButton className="action-edit" type="button" disabled={actionBusy || unavailable || reviewStatus === 'PENDING' || source.type === 'EXCEL'} aria-label={`编辑${source.name}`} onClick={() => openExisting('edit', source)}><PencilSimple size={15} /><span>编辑</span></AppButton>
-                    <AppButton text circle className="action-more" type="button" disabled={reviewLocked} aria-label={`管理${source.name}的数据表资产`} title={reviewLocked ? '审核完成后可管理数据表资产' : '管理数据表资产'} onClick={() => openExisting('view', source)}><DotsThree size={19} weight="bold" /></AppButton>
+                    <AppButton text circle className="action-more" type="button" disabled={reviewLocked} aria-label={`管理${source.name}的数据表资产`} title={reviewLocked ? '审核完成后可管理数据表资产' : '管理数据表资产'} onClick={() => openAssetWorkspace(source)}><DotsThree size={19} weight="bold" /></AppButton>
                   </div>
                 </article>
               })}</div>}
@@ -1311,7 +1314,7 @@ export function DataSourceCenterPage() {
         <div className="data-source-inspector-actions">
           <AppButton variant="primary" className="action-test" type="button" disabled={actionBusy || !selectedCanTest} onClick={() => void testConnection(selectedSource)}>{busyAction === `test:${selectedSource.id}` ? '测试中…' : '测试连接'}</AppButton>
           <AppButton className="action-edit" type="button" disabled={actionBusy || selectedUnavailable || selectedReviewStatus === 'PENDING' || selectedSource.type === 'EXCEL'} onClick={() => openExisting('edit', selectedSource)}><PencilSimple size={15} />编辑</AppButton>
-          <AppButton className="action-assets" type="button" disabled={selectedReviewStatus === 'PENDING' || selectedReviewStatus === 'REJECTED'} onClick={() => openExisting('view', selectedSource)}>管理资产</AppButton>
+          <AppButton className="action-assets" type="button" disabled={selectedReviewStatus === 'PENDING' || selectedReviewStatus === 'REJECTED'} onClick={() => openAssetWorkspace(selectedSource)}>管理资产</AppButton>
         </div>
 
         <div className="data-source-inspector-scroll">
@@ -1361,7 +1364,7 @@ export function DataSourceCenterPage() {
             else if (selectedReviewStatus === 'REJECTED') openExisting('edit', selectedSource)
             else if (validationStatusOf(selectedSource) !== 'PASSED') void testConnection(selectedSource)
             else if (selectedCanPublish) void publishSource(selectedSource)
-            else openExisting('view', selectedSource)
+            else openAssetWorkspace(selectedSource)
           }}>{selectedReviewStatus === 'PENDING' ? selectedIsRequester ? '撤销申请' : '等待审批' : selectedReviewStatus === 'REJECTED' ? '去修改' : validationStatusOf(selectedSource) !== 'PASSED' ? '重新测试' : selectedCanPublish ? '提交审批' : '去完善'}</AppButton>
         </footer>
       </aside>}

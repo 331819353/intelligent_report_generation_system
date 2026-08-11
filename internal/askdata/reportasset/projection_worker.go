@@ -64,6 +64,13 @@ func (worker *ProjectionRuntimeWorker) ProcessNext(ctx context.Context, tenantID
 	} else if claim != nil {
 		runErr := worker.store.Extract(ctx, *claim)
 		finishErr := worker.store.FinishExtraction(ctx, *claim, runErr)
+		if errors.Is(runErr, ErrAssetSourceGone) {
+			// Handled: the row was terminalised with its reason recorded. This is
+			// the worker doing its job, so it must not surface as a worker error —
+			// otherwise every orphaned row logs on every tick and buries the
+			// failures an operator actually needs to see.
+			return true, finishErr
+		}
 		return true, errors.Join(runErr, finishErr)
 	}
 	claim, err := worker.store.ClaimProjection(ctx, tenantID, lease)

@@ -70,6 +70,14 @@ func (store *PostgresProjectionRuntimeStore) Extract(ctx context.Context, claim 
 		var raw []byte
 		var domainID, reportTitle, description string
 		err := tx.QueryRow(ctx, `SELECT version.definition_json,COALESCE(report.domain_id::text,''),report.name,version.definition_json->'metadata'->>'description' FROM platform.report_versions version JOIN platform.reports report ON report.id=version.report_id AND report.tenant_id=version.tenant_id WHERE version.id=$1 AND version.report_id=$2 AND version.artifact_state='READY'`, claim.ReportVersionID, claim.ReportID).Scan(&raw, &domainID, &reportTitle, &description)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The report version this outbox row points at is gone (or never
+			// reached READY). Retrying can never succeed, so this is reported as
+			// permanent rather than as a transient failure — otherwise the row is
+			// re-claimed every poll tick and floods the log with an error nobody
+			// can act on.
+			return ErrAssetSourceGone
+		}
 		if err != nil {
 			return err
 		}
@@ -117,7 +125,15 @@ func (store *PostgresProjectionRuntimeStore) FinishExtraction(ctx context.Contex
 		if runErr != nil {
 			state, code = "FAILED", "REPORT_ASSET_EXTRACTION_FAILED"
 		}
-		tag, err := tx.Exec(ctx, `UPDATE askdata.report_asset_extraction_outbox SET state=$1,error_code=$2,next_attempt_at=CASE WHEN $1='FAILED' THEN now()+(LEAST(300,power(2,attempt)::integer)*interval '1 second') ELSE next_attempt_at END,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$3 AND state='RUNNING' AND lease_token=$4`, state, code, claim.ID, claim.LeaseToken)
+		// A permanently unprocessable row exhausts its attempt budget so the
+		// claim predicate (attempt<10) never picks it up again. The row stays
+		// FAILED with a distinct code, so the reason survives for audit instead
+		// of being silently dropped.
+		terminal := errors.Is(runErr, ErrAssetSourceGone)
+		if terminal {
+			code = "REPORT_ASSET_SOURCE_GONE"
+		}
+		tag, err := tx.Exec(ctx, `UPDATE askdata.report_asset_extraction_outbox SET state=$1,error_code=$2,attempt=CASE WHEN $5 THEN 10 ELSE attempt END,next_attempt_at=CASE WHEN $1='FAILED' THEN now()+(LEAST(300,power(2,attempt)::integer)*interval '1 second') ELSE next_attempt_at END,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$3 AND state='RUNNING' AND lease_token=$4`, state, code, claim.ID, claim.LeaseToken, terminal)
 		if err != nil || tag.RowsAffected() != 1 {
 			return errors.Join(err, ErrAssetIneligible)
 		}

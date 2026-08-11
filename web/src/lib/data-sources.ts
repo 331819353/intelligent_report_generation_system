@@ -198,12 +198,14 @@ export type DataSourceTableRecord = {
   schemaName: string
   tableName: string
   tableType: string
+  sourceComment?: string
   businessName: string
   businessDescription: string
   tags: string[]
   sensitivityLevel: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED'
   visibility: 'PRIVATE' | 'TENANT_PUBLIC'
   manualLocked: boolean
+  assetStatus?: string
   businessVersion: number
   structureHash: string
   managementStatus: 'ENABLED' | 'DISABLED'
@@ -211,6 +213,35 @@ export type DataSourceTableRecord = {
   columnCount: number
   metadataVersion: number
   lastSyncAt: string
+}
+
+export type DataSourceTablePreview = {
+  columns: string[]
+  rows: unknown[][]
+  rowCount: number
+}
+
+export type MetadataAISuggestionValue = {
+  targetId: string
+  businessName: string
+  businessDescription: string
+  tags: string[]
+  sensitivityLevel: DataSourceTableRecord['sensitivityLevel']
+  semanticType?: string
+  confidence: number
+}
+
+export type MetadataAISuggestion = {
+  id: string
+  jobId: string
+  targetType: 'TABLE' | 'COLUMN'
+  targetId: string
+  value: MetadataAISuggestionValue
+  confidence: number
+  status: 'PENDING' | 'APPLIED' | 'ACCEPTED' | 'REJECTED'
+  pendingReason?: string
+  createdAt: string
+  decidedAt?: string
 }
 
 export type DiscoveredTableRecord = {
@@ -536,7 +567,11 @@ export const dataSourceAPI = {
   getMetadataJob: (sourceId: string, jobId: string) => apiRequest<MetadataJob>(`/v1/data-sources/${encodeURIComponent(sourceId)}/metadata-jobs/${encodeURIComponent(jobId)}`, { cache: 'no-store' }),
   latestActiveMetadataJob: (sourceId: string) => apiRequest<{ job: MetadataJob | null }>(`/v1/data-sources/${encodeURIComponent(sourceId)}/metadata-jobs/latest-active`, { cache: 'no-store' }),
   tables: listAllTables,
+  table: (tableId: string) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}`, { cache: 'no-store' }),
   columns: (tableId: string) => apiRequest<{ items: DataSourceColumnRecord[] }>(`/v1/assets/tables/${encodeURIComponent(tableId)}/columns`, { cache: 'no-store' }),
+  previewTable: (tableId: string, maxRows = 5) => apiRequest<DataSourceTablePreview>(`/v1/assets/tables/${encodeURIComponent(tableId)}/preview?maxRows=${Math.min(5, Math.max(1, maxRows))}`, { cache: 'no-store' }),
+  metadataSuggestions: (status = 'PENDING', limit = 500) => apiRequest<{ items: MetadataAISuggestion[]; total: number }>(`/v1/metadata-ai/suggestions?status=${encodeURIComponent(status)}&limit=${Math.min(500, Math.max(1, limit))}`, { cache: 'no-store' }),
+  decideMetadataSuggestion: (suggestionId: string, decision: 'ACCEPT' | 'REJECT') => apiRequest<MetadataAISuggestion>(`/v1/metadata-ai/suggestions/${encodeURIComponent(suggestionId)}/decision`, { method: 'POST', body: JSON.stringify({ decision }) }),
   updateTable: (tableId: string, input: { businessName: string; businessDescription: string; tags: string[]; sensitivityLevel: string; visibility: string; manualLocked: boolean; expectedVersion: number }) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/business-metadata`, { method: 'PUT', body: JSON.stringify(input) }),
   updateColumn: (columnId: string, input: DataSourceColumnBusinessMetadataInput) => apiRequest<DataSourceColumnRecord>(`/v1/assets/columns/${encodeURIComponent(columnId)}/business-metadata`, { method: 'PUT', body: JSON.stringify(input) }),
   completeTableManually: (tableId: string, expectedVersion: number, expectedStructureHash: string) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/manual-completion`, {

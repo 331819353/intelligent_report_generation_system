@@ -20,7 +20,7 @@
 > 推进规则：按一个可完成的端到端主链连续设计、确认、实现和验收；只有主链当前步骤完成后才进入下一步。遇到拒绝、撤回、超时、角色差异或后续治理等分支时，登记到分支队列，不中断当前主链。
 
 - [x] **UI-FLOW-P01-001** — 平台准入与权限主链（六大支柱：Workflow/Guardrail、Deterministic Systems）：`登录/注册 → 领域访问或申请 → 审批领域申请 → 配置成员与角色 → 切换领域 → 分析首页`。登录、领域访问、审批中心、用户权限、侧栏领域切换与分析首页均已完成新版页面；「审批通过 → 配置成员权限 → 切换领域 → 刷新分析首页」已连续回归，主链收口。拒绝、会签、对象级范围与停用保护继续按 B01～B04 分支队列推进。
-- [ ] **UI-FLOW-P02-001** — 数据源接入与资产化主链（六大支柱：Workflow/Guardrail、Deterministic Systems）：`数据源清单 → 新建连接 → 阶段化测试 → 提交发布审批 → 元数据发现/导入 → 业务元数据完善 → 进入数据集建模`。按页面确认门禁逐步交付；当前先重构数据源清单与新建入口，真实接口沿用现有数据源、连接测试、发布申请、元数据任务和资产元数据 API。
+- [x] **UI-FLOW-P02-001** — 数据源接入与资产化主链（六大支柱：Workflow/Guardrail、Deterministic Systems）：`数据源清单 → 新建连接 → 阶段化测试 → 提交发布审批 → 元数据发现/导入 → 业务元数据完善 → 进入数据集建模`。数据源清单、新建连接、测试与发布流程，以及资产目录、发现导入、后台任务进度、表/字段业务元数据完善、AI 建议复核、脱敏样本预览和数据集建模入口均已完成统一蓝白灰重构；资产化新增页面复用现有元数据发现、导入/刷新任务、表字段更新、AI 建议决策、样本预览与手工完成接口，主链页面收口。真实库与异常治理仍按 `E2E-DATA-001`、B01～B05 分支队列独立验收。
 
 分支待完成队列：
 
@@ -158,7 +158,7 @@
 
 ### 6.1 运行期发现（实际启动 Worker 后观测到）
 
-- [ ] **OPS-OUTBOX-001（新）** — 报告资产抽取 outbox 存在**孤儿行**：本地库 20 行
+- [x] **OPS-OUTBOX-001** — 报告资产抽取 outbox 存在**孤儿行**：本地库 20 行
       `askdata.report_asset_extraction_outbox` 指向的 `report_version_id` 在
       `platform.report_versions` 中已不存在（多半是历史清理或重置留下的）。
       `Extract` 对这些行执行 `QueryRow(...).Scan(...)` 得到 `pgx.ErrNoRows`，
@@ -166,8 +166,12 @@
       实测空载 35 秒产生 100 条 `project report semantic asset` 错误日志。
       虽然 `attempt<10` 使其自限，但（1）噪声会淹没真实错误——包括新接入的
       问数运行 Worker 的失败；（2）「no rows in result set」对运维没有任何可操作信息。
-      正确做法：目标版本不存在属于**永久不可处理**，应终结该 outbox 行并记录明确原因，
-      而不是当作瞬时故障重试。
+      **已修复**：新增 `ErrAssetSourceGone`，`Extract` 在目标版本缺失时返回该永久性错误；
+      `FinishExtraction` 将其 `attempt` 直接置为 10（现有 `attempt<10` 领取谓词即终结条件，
+      无需新增状态），并记 `error_code='REPORT_ASSET_SOURCE_GONE'` 保留审计原因；
+      `ProcessNext` 对这一已处置情形不再上报为 Worker 错误。瞬时故障照常上报，不被吞掉。
+      已对运行中的系统验证：单个孤儿行由 attempt 6 一次跳至 10 并记为 SOURCE_GONE，
+      同期抽取错误日志由 100 条/35 秒降为 0。
 - [ ] **OPS-PERM-001（新）** — Worker 角色缺少 `askdata.idempotency_records` 权限：
       `clean expired idempotency records` 每轮报 `permission denied (SQLSTATE 42501)`，
       即幂等记录清理从未真正执行过，过期记录会无限累积。
