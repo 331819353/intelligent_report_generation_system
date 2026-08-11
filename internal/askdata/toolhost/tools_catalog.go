@@ -157,12 +157,24 @@ type LookupDimensionValuesResult struct {
 	EvidenceIDs        []askdata.ID            `json:"evidenceIds"`
 }
 
+// CertifiedExampleSummary is a certified question together with the governed
+// semantic objects it is expected to bind to.
+//
+// It deliberately carries expected *components* rather than a serialised
+// Semantic IR. askdata.certified_example_versions stores exactly these columns
+// and no IR, so an IR-shaped contract could only ever be satisfied by
+// synthesising one at read time. Carrying components is also the safer
+// contract: an example is a retrieval prior, and the binder must re-resolve it
+// against the release currently pinned to the run rather than replay a frozen
+// plan that may reference superseded object versions.
 type CertifiedExampleSummary struct {
-	ExampleID            askdata.ID            `json:"exampleId"`
-	QuestionSummary      string                `json:"questionSummary"`
-	SemanticIR           ircontract.SemanticIR `json:"semanticIr"`
-	SemanticIRHash       askdata.ContentHash   `json:"semanticIrHash"`
-	SimilarityPermillion int                   `json:"similarityPermillion"`
+	ExampleID                askdata.ID          `json:"exampleId"`
+	QuestionSummary          string              `json:"questionSummary"`
+	ExpectedMetricVersionIDs []askdata.ID        `json:"expectedMetricVersionIds"`
+	ExpectedDimensionIDs     []askdata.ID        `json:"expectedDimensionVersionIds"`
+	ExpectedTimeExpression   string              `json:"expectedTimeExpression,omitempty"`
+	ContentHash              askdata.ContentHash `json:"contentHash"`
+	SimilarityPermillion     int                 `json:"similarityPermillion"`
 }
 
 type GetCertifiedExamplesResult struct {
@@ -370,9 +382,15 @@ func (result GetCertifiedExamplesResult) ValidateResult(known map[askdata.ID]ask
 	}
 	seen := map[askdata.ID]bool{}
 	for _, example := range result.Examples {
+		// Expected objects are bounded and must be canonical stable IDs: an
+		// example may not smuggle an unbounded or malformed object set into the
+		// binder, and it may not carry any executable plan of its own.
 		if example.ExampleID.Validate() != nil || seen[example.ExampleID] ||
-			!boundedText(example.QuestionSummary, 2048) || example.SemanticIR.Validate() != nil ||
-			example.SemanticIRHash.Validate() != nil || example.SimilarityPermillion < 0 ||
+			!boundedText(example.QuestionSummary, 2048) ||
+			validateStableIDs(example.ExpectedMetricVersionIDs, MaxArgumentIDs) != nil ||
+			validateStableIDs(example.ExpectedDimensionIDs, MaxArgumentIDs) != nil ||
+			!optionalBoundedText(example.ExpectedTimeExpression, 512) ||
+			example.ContentHash.Validate() != nil || example.SimilarityPermillion < 0 ||
 			example.SimilarityPermillion > 1_000_000 {
 			return ErrInvalidInvocation
 		}

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"intelligent-report-generation-system/internal/askdata"
-	"intelligent-report-generation-system/internal/askdata/ircontract"
 )
 
 func TestRegistryCatalogContainsEveryGovernedTool(t *testing.T) {
@@ -390,13 +389,6 @@ func TestEveryTypedResultContractSanitizesToEvidenceBoundObject(t *testing.T) {
 	evidence := toolEvidence("all-result-contracts")
 	evidenceIDs := []askdata.ID{evidence.EvidenceID}
 	hash := askdata.HashBytes([]byte("result-contract"))
-	semanticIR := ircontract.SemanticIR{
-		IRVersion: ircontract.Version, SemanticReleaseID: "release-tools-v1",
-		SemanticContentHash: askdata.HashBytes([]byte("release-tools-v1")), DomainID: "sales", ModelVersionID: "model-sales-v1",
-		Metrics: []ircontract.Metric{{MetricVersionID: "metric-sales-v1", Alias: "net_sales"}},
-		GroupBy: []ircontract.GroupBy{}, Filters: []ircontract.Filter{}, Sort: []ircontract.Sort{}, Limit: 100,
-		OtherPolicy: ircontract.OtherNone, TieBreaking: ircontract.TieIncludeAll,
-	}
 	contracts := []struct {
 		name   ToolName
 		result resultContract
@@ -416,8 +408,11 @@ func TestEveryTypedResultContractSanitizesToEvidenceBoundObject(t *testing.T) {
 		}},
 		{ToolGetCertifiedExamples, GetCertifiedExamplesResult{
 			Examples: []CertifiedExampleSummary{{
-				ExampleID: "example-sales-v1", QuestionSummary: "销售额", SemanticIR: semanticIR,
-				SemanticIRHash: hash, SimilarityPermillion: 900_000,
+				ExampleID: "example-sales-v1", QuestionSummary: "销售额",
+				ExpectedMetricVersionIDs: []askdata.ID{"metric-sales-v1"},
+				ExpectedDimensionIDs:     []askdata.ID{"dimension-region-v1"},
+				ExpectedTimeExpression:   "LAST_MONTH",
+				ContentHash:              hash, SimilarityPermillion: 900_000,
 			}}, EvidenceIDs: evidenceIDs,
 		}},
 		{ToolResolveGraphPlan, ResolveGraphPlanResult{
@@ -550,5 +545,50 @@ func toolEvidence(id askdata.ID) askdata.EvidenceRef {
 	return askdata.EvidenceRef{
 		EvidenceID: id, Kind: askdata.EvidenceKindRule, SourceID: "release-tools-v1",
 		ContentHash: askdata.HashBytes([]byte("tool-evidence:" + string(id))),
+	}
+}
+
+// 认证问法只是检索先验：它携带「期望绑定的语义对象」而不是可执行计划。
+// 契约必须拒绝越界的对象集合与畸形标识，避免示例把未经校验的对象或
+// 一份冻结的计划夹带进绑定阶段。
+func TestCertifiedExampleContractCarriesComponentsNotAnExecutablePlan(t *testing.T) {
+	evidence := toolEvidence("certified-example-contract")
+	known := map[askdata.ID]askdata.EvidenceRef{evidence.EvidenceID: evidence}
+	hash := askdata.HashBytes([]byte("example"))
+	valid := CertifiedExampleSummary{
+		ExampleID: "example-sales-v1", QuestionSummary: "上月各区域销售额",
+		ExpectedMetricVersionIDs: []askdata.ID{"metric-sales-v1"},
+		ExpectedDimensionIDs:     []askdata.ID{"dimension-region-v1"},
+		ExpectedTimeExpression:   "LAST_MONTH",
+		ContentHash:              hash, SimilarityPermillion: 812_000,
+	}
+	accepted := GetCertifiedExamplesResult{
+		Examples: []CertifiedExampleSummary{valid}, EvidenceIDs: []askdata.ID{evidence.EvidenceID},
+	}
+	if err := accepted.ValidateResult(known); err != nil {
+		t.Fatalf("well-formed example rejected: %v", err)
+	}
+
+	oversized := make([]askdata.ID, MaxArgumentIDs+1)
+	for index := range oversized {
+		oversized[index] = "metric-sales-v1"
+	}
+	for name, mutate := range map[string]func(*CertifiedExampleSummary){
+		"unbounded metric set":    func(value *CertifiedExampleSummary) { value.ExpectedMetricVersionIDs = oversized },
+		"unbounded dimension set": func(value *CertifiedExampleSummary) { value.ExpectedDimensionIDs = oversized },
+		"malformed content hash":  func(value *CertifiedExampleSummary) { value.ContentHash = "not-a-hash" },
+		"similarity out of range": func(value *CertifiedExampleSummary) { value.SimilarityPermillion = 1_000_001 },
+		"oversized time expression": func(value *CertifiedExampleSummary) {
+			value.ExpectedTimeExpression = strings.Repeat("x", 513)
+		},
+	} {
+		broken := valid
+		mutate(&broken)
+		result := GetCertifiedExamplesResult{
+			Examples: []CertifiedExampleSummary{broken}, EvidenceIDs: []askdata.ID{evidence.EvidenceID},
+		}
+		if err := result.ValidateResult(known); err == nil {
+			t.Fatalf("%s must be rejected", name)
+		}
 	}
 }
