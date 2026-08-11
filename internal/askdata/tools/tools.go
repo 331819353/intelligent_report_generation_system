@@ -53,6 +53,7 @@ type Services struct {
 	Graph     *graph.Resolver
 	Compiler  *compiler.PinnedIRCompiler
 	Validator *validator.Validator
+	Executor  *validator.Executor
 }
 
 // RunContext identifies the question run a handler set belongs to.
@@ -70,28 +71,85 @@ func (run RunContext) validate() error {
 	return nil
 }
 
+// planEntry is one plan's progress through compile → validate → execute.
+type planEntry struct {
+	artifact   compiler.QueryArtifact
+	validation validator.ValidationArtifact
+	validated  bool
+}
+
 // planCache holds the plans compiled during one run. It is intentionally not
 // backed by storage: plan hashes are run-scoped by construction.
 type planCache struct {
 	mutex sync.Mutex
-	plans map[askdata.ContentHash]compiler.QueryArtifact
+	plans map[askdata.ContentHash]planEntry
 }
 
 func newPlanCache() *planCache {
-	return &planCache{plans: map[askdata.ContentHash]compiler.QueryArtifact{}}
+	return &planCache{plans: map[askdata.ContentHash]planEntry{}}
 }
 
 func (cache *planCache) put(hash askdata.ContentHash, artifact compiler.QueryArtifact) {
 	cache.mutex.Lock()
 	defer cache.mutex.Unlock()
-	cache.plans[hash] = artifact
+	cache.plans[hash] = planEntry{artifact: artifact}
 }
 
 func (cache *planCache) get(hash askdata.ContentHash) (compiler.QueryArtifact, bool) {
 	cache.mutex.Lock()
 	defer cache.mutex.Unlock()
-	artifact, ok := cache.plans[hash]
-	return artifact, ok
+	entry, ok := cache.plans[hash]
+	return entry.artifact, ok
+}
+
+// markValidated records the validation artifact a plan passed with. Execution
+// requires it, so a plan can never be executed without having been validated
+// in this same run.
+func (cache *planCache) markValidated(hash askdata.ContentHash, validation validator.ValidationArtifact) {
+	cache.mutex.Lock()
+	defer cache.mutex.Unlock()
+	entry, ok := cache.plans[hash]
+	if !ok {
+		return
+	}
+	entry.validation, entry.validated = validation, true
+	cache.plans[hash] = entry
+}
+
+func (cache *planCache) getValidated(
+	hash askdata.ContentHash,
+) (compiler.QueryArtifact, validator.ValidationArtifact, bool) {
+	cache.mutex.Lock()
+	defer cache.mutex.Unlock()
+	entry, ok := cache.plans[hash]
+	if !ok || !entry.validated {
+		return compiler.QueryArtifact{}, validator.ValidationArtifact{}, false
+	}
+	return entry.artifact, entry.validation, true
+}
+
+// resultCache holds the result hash each executed plan produced, so candidate
+// comparison can work from hashes without holding result rows across calls.
+type resultCache struct {
+	mutex   sync.Mutex
+	results map[askdata.ContentHash]askdata.ContentHash
+}
+
+func newResultCache() *resultCache {
+	return &resultCache{results: map[askdata.ContentHash]askdata.ContentHash{}}
+}
+
+func (cache *resultCache) put(planHash, resultHash askdata.ContentHash) {
+	cache.mutex.Lock()
+	defer cache.mutex.Unlock()
+	cache.results[planHash] = resultHash
+}
+
+func (cache *resultCache) get(planHash askdata.ContentHash) (askdata.ContentHash, bool) {
+	cache.mutex.Lock()
+	defer cache.mutex.Unlock()
+	resultHash, ok := cache.results[planHash]
+	return resultHash, ok
 }
 
 // Binding is one run's handler set together with the state the chain needs.
@@ -99,6 +157,7 @@ type Binding struct {
 	services Services
 	run      RunContext
 	plans    *planCache
+	results  *resultCache
 }
 
 // NewBinding prepares the tool handlers for a single question run.
@@ -106,7 +165,37 @@ func NewBinding(services Services, run RunContext) (*Binding, error) {
 	if err := run.validate(); err != nil {
 		return nil, err
 	}
-	return &Binding{services: services, run: run, plans: newPlanCache()}, nil
+	return &Binding{
+		services: services, run: run,
+		plans: newPlanCache(), results: newResultCache(),
+	}, nil
+}
+
+// Handlers exposes this run's tool implementations in the shape the Tool Host
+// registry expects. Every handler re-checks that the invocation belongs to this
+// run before touching a service.
+func (binding *Binding) Handlers() toolhost.Handlers {
+	return toolhost.Handlers{
+		SearchSemanticObjects:   binding.searchSemanticObjects,
+		GetSemanticContracts:    binding.getSemanticContracts,
+		LookupDimensionValues:   binding.lookupDimensionValues,
+		GetCertifiedExamples:    binding.getCertifiedExamples,
+		ResolveGraphPlan:        binding.resolveGraphPlan,
+		ValidateSemanticBundle:  binding.validateSemanticBundle,
+		GetDataQualityStatus:    binding.getDataQualityStatus,
+		CompileSemanticQuery:    binding.compileSemanticQuery,
+		ValidateQueryPlan:       binding.validateQueryPlan,
+		ProbeJoinCardinality:    binding.probeJoinCardinality,
+		ExecuteQueryPlan:        binding.executeQueryPlan,
+		ExecuteValidationQuery:  binding.executeValidationQuery,
+		CompareCandidateResults: binding.compareCandidateResults,
+		RequestClarification:    binding.requestClarification,
+	}
+}
+
+// NewRegistry builds the governed Tool Host registry for this run.
+func (binding *Binding) NewRegistry() (*toolhost.Registry, error) {
+	return toolhost.NewRegistry(binding.Handlers())
 }
 
 // authorize rejects any invocation whose authorization context does not match

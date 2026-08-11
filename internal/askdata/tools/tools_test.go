@@ -7,6 +7,7 @@ import (
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/compiler"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
+	"intelligent-report-generation-system/internal/askdata/validator"
 )
 
 func testRun(t *testing.T) RunContext {
@@ -140,5 +141,49 @@ func TestBindingRequiresACompleteRunContext(t *testing.T) {
 		if _, err := NewBinding(Services{}, broken); err == nil {
 			t.Fatalf("%s must be rejected", name)
 		}
+	}
+}
+
+// 全部 14 个工具都必须有实现，否则 toolhost.NewRegistry 会拒绝构造。
+// 这条断言把「适配层完整」变成编译期之外的可执行事实。
+func TestBindingBuildsTheCompleteGovernedToolRegistry(t *testing.T) {
+	binding, err := NewBinding(Services{}, testRun(t))
+	if err != nil {
+		t.Fatalf("NewBinding() error = %v", err)
+	}
+	registry, err := binding.NewRegistry()
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	definitions, err := registry.Definitions()
+	if err != nil {
+		t.Fatalf("Definitions() error = %v", err)
+	}
+	if len(definitions) != 14 {
+		t.Fatalf("registry exposes %d tools, want 14", len(definitions))
+	}
+}
+
+// 未经校验的计划绝不能执行：编译过但没校验过的哈希必须被拒绝，
+// 执行路径不会隐式补一次校验。
+func TestExecutionRequiresAPlanValidatedInThisRun(t *testing.T) {
+	binding, err := NewBinding(Services{}, testRun(t))
+	if err != nil {
+		t.Fatalf("NewBinding() error = %v", err)
+	}
+	hash := askdata.HashBytes([]byte("plan"))
+	binding.plans.put(hash, compiler.QueryArtifact{PlanHash: hash})
+	if _, _, ok := binding.plans.getValidated(hash); ok {
+		t.Fatal("a compiled but unvalidated plan must not be executable")
+	}
+	binding.plans.markValidated(hash, validator.ValidationArtifact{QueryArtifactPlanHash: hash})
+	if _, _, ok := binding.plans.getValidated(hash); !ok {
+		t.Fatal("a validated plan must be executable within its own run")
+	}
+	// 未知计划不能通过 markValidated 凭空产生。
+	unknown := askdata.HashBytes([]byte("unknown"))
+	binding.plans.markValidated(unknown, validator.ValidationArtifact{})
+	if _, _, ok := binding.plans.getValidated(unknown); ok {
+		t.Fatal("validating an unknown plan must not create it")
 	}
 }

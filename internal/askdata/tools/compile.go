@@ -203,6 +203,7 @@ func (binding *Binding) validateQueryPlan(
 	if err != nil {
 		return output, err
 	}
+	binding.plans.markValidated(artifact.PlanHash, validation)
 	evidence := binding.evidence(askdata.EvidenceKindQueryPlan, binding.run.DomainID, payload)
 	output.Result = toolhost.ValidateQueryPlanResult{
 		Allowed: true, ValidationHash: validation.ValidationHash,

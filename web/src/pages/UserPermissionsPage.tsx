@@ -6,7 +6,6 @@ import {
   CheckCircle,
   Crown,
   Cube,
-  Database,
   DownloadSimple,
   Eye,
   FileText,
@@ -38,27 +37,22 @@ type AccessDraft = { domainId: string; role: AccessRole }
 type StatusFilter = 'ALL' | AdminUser['status']
 type RoleFilter = 'ALL' | 'PLATFORM_ADMIN' | AccessRole
 
-const roleLabels: Record<AccessRole, string> = {
-  MEMBER: '普通成员',
-  DOMAIN_ADMIN: '领域管理员',
-}
-
 const statusLabels: Record<AdminUser['status'], string> = {
   ACTIVE: '启用',
   DISABLED: '已停用',
   LOCKED: '已锁定',
 }
 
-const capabilities: Record<AccessRole, Array<{ icon: typeof Eye; label: string }>> = {
+const capabilityGroups: Record<AccessRole, Array<{ icon: typeof Eye; label: string; items: string[] }>> = {
   MEMBER: [
-    { icon: Eye, label: '查看领域内数据资产' },
-    { icon: Database, label: '配置数据源与数据集' },
-    { icon: FileText, label: '创建分析与编辑报告' },
+    { icon: Eye, label: '数据权限', items: ['查看'] },
+    { icon: FileText, label: '功能权限', items: ['新建分析', '编辑报告'] },
+    { icon: ShieldCheck, label: '管理权限', items: ['无管理权限'] },
   ],
   DOMAIN_ADMIN: [
-    { icon: ShieldCheck, label: '管理领域成员与角色' },
-    { icon: CheckCircle, label: '审批数据源与数据集发布' },
-    { icon: DownloadSimple, label: '查看并导出领域数据' },
+    { icon: Eye, label: '数据权限', items: ['查看', '导出'] },
+    { icon: FileText, label: '功能权限', items: ['新建分析', '编辑分析', '发布审批'] },
+    { icon: ShieldCheck, label: '管理权限', items: ['成员管理', '配置管理'] },
   ],
 }
 
@@ -460,7 +454,7 @@ export function UserPermissionsPage() {
             <header><h2>编辑成员权限</h2><AppButton text circle type="button" aria-label="关闭编辑面板" onClick={() => chooseUser('')}><X size={18} /></AppButton></header>
             <section className="user-access-identity">
               <img src={avatarFor(selected)} alt="" />
-              <div><strong>{selected.displayName}<span className={`user-account-badge is-${selected.status.toLocaleLowerCase()}`}>{statusLabels[selected.status]}</span></strong><small>工号：{selected.employeeNo || '—'}</small><small>邮箱：{selected.email}</small><small>最近登录：{formatDateTime(selected.lastLoginAt)}</small></div>
+              <div><strong>{selected.displayName}<span className={`user-account-badge is-${selected.status.toLocaleLowerCase()}`}>{statusLabels[selected.status]}</span></strong><small>工号：{selected.employeeNo || '—'}</small><small>邮箱：{selected.email}</small><small>身份：{primaryRole(selected)}</small><small>最近登录：{formatDateTime(selected.lastLoginAt)}</small></div>
             </section>
 
             {selected.platformAdministrator ? <section className="user-access-fixed"><Crown size={22} weight="duotone" /><div><strong>平台管理员为固定最高权限</strong><p>平台管理员不保存领域归属。如需调整，请前往角色配置页移除平台管理员身份。</p></div></section> : <>
@@ -474,7 +468,7 @@ export function UserPermissionsPage() {
                     return <article className={roleDomainID === domain.id ? 'is-active' : ''} key={domain.id} onClick={() => setRoleDomainID(domain.id)}>
                       <span className="user-domain-icon"><Icon size={20} weight="duotone" /></span>
                       <div><strong>{domain.name}</strong><small>{domain.code}</small></div>
-                      <span>{roleLabels[item.role]}</span>
+                      <p>{domain.description}</p>
                       <AppButton text circle type="button" aria-label={`移除${domain.name}`} onClick={event => { event.stopPropagation(); removeDomain(domain.id) }}><X size={14} /></AppButton>
                     </article>
                   })}
@@ -491,7 +485,7 @@ export function UserPermissionsPage() {
 
               <section className="user-effective-access">
                 <header><h3>生效权限</h3><AppButton link type="button" onClick={() => setNotice('详细权限由服务端按角色与领域实时计算。')}>查看详情</AppButton></header>
-                <div>{capabilities[currentRole].map(item => { const Icon = item.icon; return <span key={item.label}><Icon size={16} weight="duotone" />{item.label}</span> })}</div>
+                <div className="user-effective-groups">{capabilityGroups[currentRole].map(group => { const Icon = group.icon; return <div key={group.label}><strong><Icon size={16} weight="duotone" />{group.label}</strong><span>{group.items.map(item => <i key={item}>{item}</i>)}</span></div> })}</div>
                 <p>生效权限将基于该成员的角色与所属领域自动计算。</p>
               </section>
             </>}
