@@ -1,0 +1,516 @@
+{
+  "title": "Cognition Action V1",
+  "description": "Closed LLM action protocol. Exactly one action payload is accepted by Go validation after this structural schema check.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "stage",
+    "action",
+    "decisionSummary",
+    "evidenceRefs",
+    "toolCall",
+    "bindingProposal",
+    "planProposal",
+    "anomalyAnalysis",
+    "verification",
+    "finalDecision",
+    "clarification",
+    "block"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "stage": {
+      "enum": [
+        "ASSET_REVIEW",
+        "UNDERSTANDING",
+        "CANDIDATE_JUDGMENT",
+        "DISAMBIGUATION",
+        "PLAN_SELECTION",
+        "ANOMALY_ANALYSIS",
+        "RESULT_VERIFICATION",
+        "FEEDBACK_ATTRIBUTION",
+        "RELEASE_REVIEW"
+      ]
+    },
+    "action": {
+      "enum": [
+        "CALL_TOOL",
+        "PROPOSE_BINDING",
+        "PROPOSE_PLAN",
+        "ANALYZE_ANOMALY",
+        "VERIFY_RESULT",
+        "FINALIZE",
+        "CLARIFY",
+        "BLOCK"
+      ]
+    },
+    "decisionSummary": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "evidenceRefs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/evidenceRef" }
+    },
+    "toolCall": { "anyOf": [{ "$ref": "#/$defs/toolCall" }, { "type": "null" }] },
+    "bindingProposal": { "anyOf": [{ "$ref": "#/$defs/bindingProposal" }, { "type": "null" }] },
+    "planProposal": { "anyOf": [{ "$ref": "#/$defs/planProposal" }, { "type": "null" }] },
+    "anomalyAnalysis": { "anyOf": [{ "$ref": "#/$defs/anomalyAnalysis" }, { "type": "null" }] },
+    "verification": { "anyOf": [{ "$ref": "#/$defs/verification" }, { "type": "null" }] },
+    "finalDecision": { "anyOf": [{ "$ref": "#/$defs/finalDecision" }, { "type": "null" }] },
+    "clarification": { "anyOf": [{ "$ref": "#/$defs/clarification" }, { "type": "null" }] },
+    "block": { "anyOf": [{ "$ref": "#/$defs/block" }, { "type": "null" }] }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$"
+    },
+    "contentHash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[0-1])$"
+    },
+    "evidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidenceId", "kind", "sourceId", "contentHash"],
+      "properties": {
+        "evidenceId": { "$ref": "#/$defs/stableId" },
+        "kind": {
+          "enum": [
+            "EXACT_ALIAS",
+            "LEXICAL_MATCH",
+            "VECTOR_MATCH",
+            "GRAPH_PATH",
+            "SEMANTIC_CONTRACT",
+            "CERTIFIED_EXAMPLE",
+            "DIMENSION_PROFILE",
+            "CANDIDATE_SET",
+            "DATA_QUALITY",
+            "QUERY_PLAN",
+            "QUERY_RESULT",
+            "POLICY",
+            "RULE",
+            "CONVERSATION"
+          ]
+        },
+        "sourceId": { "$ref": "#/$defs/stableId" },
+        "contentHash": { "$ref": "#/$defs/contentHash" }
+      }
+    },
+    "confidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score", "margin", "evidence", "reasonCodes"],
+      "properties": {
+        "score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "margin": { "type": "number", "minimum": 0, "maximum": 1 },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/evidenceRef" }
+        },
+        "reasonCodes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" }
+        }
+      }
+    },
+    "releaseRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["releaseId", "contentHash"],
+      "properties": {
+        "releaseId": { "$ref": "#/$defs/stableId" },
+        "contentHash": { "$ref": "#/$defs/contentHash" }
+      }
+    },
+    "timeRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dimensionVersionId", "start", "endExclusive", "timezone"],
+      "properties": {
+        "dimensionVersionId": { "$ref": "#/$defs/stableId" },
+        "start": { "$ref": "#/$defs/date" },
+        "endExclusive": { "$ref": "#/$defs/date" },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metricVersionId", "alias"],
+      "properties": {
+        "metricVersionId": { "$ref": "#/$defs/stableId" },
+        "alias": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" }
+      }
+    },
+    "groupBy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dimensionVersionId", "grain"],
+      "properties": {
+        "dimensionVersionId": { "$ref": "#/$defs/stableId" },
+        "grain": { "enum": [null, "DAY", "WEEK", "MONTH", "QUARTER", "YEAR"] }
+      }
+    },
+    "filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dimensionVersionId", "operator", "memberVersionIds"],
+      "properties": {
+        "dimensionVersionId": { "$ref": "#/$defs/stableId" },
+        "operator": { "enum": ["EQUALS", "NOT_EQUALS", "IN", "NOT_IN", "IS_NULL", "IS_NOT_NULL"] },
+        "memberVersionIds": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stableId" }
+        }
+      }
+    },
+    "sort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetType", "targetVersionId", "direction", "nulls"],
+      "properties": {
+        "targetType": { "enum": ["METRIC", "DIMENSION"] },
+        "targetVersionId": { "$ref": "#/$defs/stableId" },
+        "direction": { "enum": ["ASC", "DESC"] },
+        "nulls": { "enum": ["FIRST", "LAST"] }
+      }
+    },
+    "semanticIr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "irVersion",
+        "semanticReleaseId",
+        "semanticContentHash",
+        "modelVersionId",
+        "metrics",
+        "groupBy",
+        "filters",
+        "timeRange",
+        "comparison",
+        "sort",
+        "limit"
+      ],
+      "properties": {
+        "irVersion": { "const": "1.0" },
+        "semanticReleaseId": { "$ref": "#/$defs/stableId" },
+        "semanticContentHash": { "$ref": "#/$defs/contentHash" },
+        "modelVersionId": { "$ref": "#/$defs/stableId" },
+        "metrics": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/metric" }
+        },
+        "groupBy": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/groupBy" }
+        },
+        "filters": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/filter" }
+        },
+        "timeRange": { "anyOf": [{ "$ref": "#/$defs/timeRange" }, { "type": "null" }] },
+        "comparison": { "anyOf": [{ "$ref": "#/$defs/comparison" }, { "type": "null" }] },
+        "sort": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/sort" }
+        },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 10000 }
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "periods"],
+      "properties": {
+        "type": { "enum": ["YEAR_OVER_YEAR", "MONTH_OVER_MONTH", "PERIOD_OVER_PERIOD"] },
+        "periods": { "type": "integer", "minimum": 1, "maximum": 120 }
+      }
+    },
+    "clarificationOption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["optionId", "label", "evidenceRefs"],
+      "properties": {
+        "optionId": { "$ref": "#/$defs/stableId" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/evidenceRef" }
+        }
+      }
+    },
+    "toolArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "release",
+        "mention",
+        "objectTypes",
+        "domainIds",
+        "objectVersionIds",
+        "dimensionVersionId",
+        "questionSummary",
+        "modelVersionIds",
+        "metricVersionIds",
+        "dimensionVersionIds",
+        "memberVersionIds",
+        "timeRange",
+        "semanticIr",
+        "planHash",
+        "graphPlanHash",
+        "leftPlanHash",
+        "rightPlanHash",
+        "limit",
+        "maxRows",
+        "validationType",
+        "conflictCode",
+        "clarificationQuestion",
+        "clarificationOptions"
+      ],
+      "properties": {
+        "release": { "$ref": "#/$defs/releaseRef" },
+        "mention": { "type": ["string", "null"], "minLength": 1, "maxLength": 512 },
+        "objectTypes": {
+          "type": "array",
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": { "enum": ["METRIC", "DIMENSION", "MODEL", "TERM"] }
+        },
+        "domainIds": { "$ref": "#/$defs/idArray" },
+        "objectVersionIds": { "$ref": "#/$defs/idArray" },
+        "dimensionVersionId": { "anyOf": [{ "$ref": "#/$defs/stableId" }, { "type": "null" }] },
+        "questionSummary": { "type": ["string", "null"], "minLength": 1, "maxLength": 2048 },
+        "modelVersionIds": { "$ref": "#/$defs/idArray" },
+        "metricVersionIds": { "$ref": "#/$defs/idArray" },
+        "dimensionVersionIds": { "$ref": "#/$defs/idArray" },
+        "memberVersionIds": { "$ref": "#/$defs/idArray" },
+        "timeRange": { "anyOf": [{ "$ref": "#/$defs/timeRange" }, { "type": "null" }] },
+        "semanticIr": { "anyOf": [{ "$ref": "#/$defs/semanticIr" }, { "type": "null" }] },
+        "planHash": { "anyOf": [{ "$ref": "#/$defs/contentHash" }, { "type": "null" }] },
+        "graphPlanHash": { "anyOf": [{ "$ref": "#/$defs/contentHash" }, { "type": "null" }] },
+        "leftPlanHash": { "anyOf": [{ "$ref": "#/$defs/contentHash" }, { "type": "null" }] },
+        "rightPlanHash": { "anyOf": [{ "$ref": "#/$defs/contentHash" }, { "type": "null" }] },
+        "limit": { "type": ["integer", "null"], "minimum": 1, "maximum": 100 },
+        "maxRows": { "type": ["integer", "null"], "minimum": 1, "maximum": 10000 },
+        "validationType": {
+          "enum": [null, "MEMBER_EXISTS", "TIME_COVERAGE", "JOIN_CARDINALITY", "AGGREGATION_CONSISTENCY", "EMPTY_RESULT"]
+        },
+        "conflictCode": { "type": ["string", "null"], "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
+        "clarificationQuestion": { "type": ["string", "null"], "minLength": 1, "maxLength": 512 },
+        "clarificationOptions": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/clarificationOption" }
+        }
+      }
+    },
+    "idArray": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/stableId" }
+    },
+    "toolCall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "callId", "tool", "arguments"],
+      "properties": {
+        "schemaVersion": { "const": "1.0" },
+        "callId": { "$ref": "#/$defs/stableId" },
+        "tool": {
+          "enum": [
+            "search_semantic_objects",
+            "get_semantic_contracts",
+            "lookup_dimension_values",
+            "get_certified_examples",
+            "resolve_graph_plan",
+            "validate_semantic_bundle",
+            "get_data_quality_status",
+            "compile_semantic_query",
+            "validate_query_plan",
+            "probe_join_cardinality",
+            "execute_query_plan",
+            "execute_validation_query",
+            "compare_candidate_results",
+            "request_clarification"
+          ]
+        },
+        "arguments": { "$ref": "#/$defs/toolArguments" }
+      }
+    },
+    "metricBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mentionIndex", "metricVersionId"],
+      "properties": {
+        "mentionIndex": { "type": "integer", "minimum": 0, "maximum": 63 },
+        "metricVersionId": { "$ref": "#/$defs/stableId" }
+      }
+    },
+    "dimensionBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mentionIndex", "dimensionVersionId", "role"],
+      "properties": {
+        "mentionIndex": { "type": "integer", "minimum": 0, "maximum": 63 },
+        "dimensionVersionId": { "$ref": "#/$defs/stableId" },
+        "role": { "enum": ["GROUP_BY", "FILTER", "TIME", "SORT"] }
+      }
+    },
+    "memberBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mentionIndex", "dimensionVersionId", "memberVersionId"],
+      "properties": {
+        "mentionIndex": { "type": "integer", "minimum": 0, "maximum": 63 },
+        "dimensionVersionId": { "$ref": "#/$defs/stableId" },
+        "memberVersionId": { "$ref": "#/$defs/stableId" }
+      }
+    },
+    "bindingProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modelVersionId", "metricBindings", "dimensionBindings", "memberBindings", "confidence"],
+      "properties": {
+        "modelVersionId": { "$ref": "#/$defs/stableId" },
+        "metricBindings": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/metricBinding" }
+        },
+        "dimensionBindings": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/dimensionBinding" }
+        },
+        "memberBindings": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/memberBinding" }
+        },
+        "confidence": { "$ref": "#/$defs/confidence" }
+      }
+    },
+    "planProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticIr", "confidence"],
+      "properties": {
+        "semanticIr": { "$ref": "#/$defs/semanticIr" },
+        "confidence": { "$ref": "#/$defs/confidence" }
+      }
+    },
+    "anomalyAnalysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "summary", "recommendedAction", "evidenceRefs"],
+      "properties": {
+        "category": { "enum": ["METRIC", "DIMENSION", "MEMBER", "TIME", "RELATIONSHIP", "PLAN", "DATA", "SECURITY", "PERMISSION", "EXPRESSION"] },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "recommendedAction": { "enum": ["RETRIEVE", "REBIND", "REPLAN", "RETRY_VALIDATE", "CLARIFY", "BLOCK"] },
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/evidenceRef" }
+        }
+      }
+    },
+    "verificationCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "passed", "evidenceRefs"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
+        "passed": { "type": "boolean" },
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/evidenceRef" }
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "summary", "checks"],
+      "properties": {
+        "verdict": { "enum": ["PASS", "RETRY", "CLARIFY", "BLOCK"] },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/verificationCheck" }
+        }
+      }
+    },
+    "finalDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "summary", "evidenceRefs"],
+      "properties": {
+        "outcome": { "enum": ["ANSWER", "NO_DATA", "ASSET_REVIEW_COMPLETE", "FEEDBACK_RECORDED", "RELEASE_REVIEW_COMPLETE"] },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/evidenceRef" }
+        }
+      }
+    },
+    "clarification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conflictCode", "question", "options"],
+      "properties": {
+        "conflictCode": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
+        "question": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "options": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/clarificationOption" }
+        }
+      }
+    },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "publicMessage", "evidenceRefs"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
+        "publicMessage": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/evidenceRef" }
+        }
+      }
+    }
+  }
+}

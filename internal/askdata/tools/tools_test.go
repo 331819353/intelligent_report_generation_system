@@ -2,9 +2,12 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/askdata"
+	"intelligent-report-generation-system/internal/askdata/cognition"
 	"intelligent-report-generation-system/internal/askdata/compiler"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
 	"intelligent-report-generation-system/internal/askdata/validator"
@@ -185,5 +188,55 @@ func TestExecutionRequiresAPlanValidatedInThisRun(t *testing.T) {
 	binding.plans.markValidated(unknown, validator.ValidationArtifact{})
 	if _, _, ok := binding.plans.getValidated(unknown); ok {
 		t.Fatal("validating an unknown plan must not create it")
+	}
+}
+
+type stubProvider struct {
+	configured bool
+	calls      int
+}
+
+func (provider *stubProvider) Configured() bool { return provider.configured }
+
+func (provider *stubProvider) Invoke(
+	context.Context, ai.Invocation,
+) (ai.InvocationResult, error) {
+	provider.calls++
+	return ai.InvocationResult{}, errors.New("stub provider does not answer")
+}
+
+// 未配置模型提供方时必须报 ErrCognitionUnavailable，并且绝不能调用 Provider。
+// 问数无法在没有模型的情况下从自然语言走到受治理查询，这里必须显式失败，
+// 不能把「没有模型」表现成一次畸形的模型响应。
+func TestCognitionRunnerFailsLoudlyWithoutAConfiguredProvider(t *testing.T) {
+	if _, err := NewCognitionRunner(nil, cognition.ExecutorOptions{}); err != ErrCognitionUnavailable {
+		t.Fatalf("nil provider = %v", err)
+	}
+
+	provider := &stubProvider{configured: false}
+	runner, err := NewCognitionRunner(provider, cognition.ExecutorOptions{})
+	if err != nil {
+		t.Fatalf("NewCognitionRunner() error = %v", err)
+	}
+	if _, err := runner.Execute(context.Background(), cognition.RoundRequest{
+		TenantID: "tenant-1", ActorID: "actor-1", Stage: cognition.StageUnderstanding,
+		PromptVersion: "askdata-cognition-v1",
+	}); err != ErrCognitionUnavailable {
+		t.Fatalf("unconfigured provider = %v", err)
+	}
+	if provider.calls != 0 {
+		t.Fatalf("unconfigured provider was invoked %d times", provider.calls)
+	}
+}
+
+// 构造期就要绑定封闭动作协议：schema 无效时应在启动失败，
+// 而不是等到每一次提问才失败。
+func TestCognitionRunnerBindsTheClosedActionProtocolAtConstruction(t *testing.T) {
+	runner, err := NewCognitionRunner(&stubProvider{configured: true}, cognition.ExecutorOptions{})
+	if err != nil {
+		t.Fatalf("NewCognitionRunner() error = %v", err)
+	}
+	if runner.executor == nil {
+		t.Fatal("runner has no cognition executor")
 	}
 }
