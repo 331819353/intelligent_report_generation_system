@@ -111,11 +111,12 @@
 - [ ] **WEB-OPS-001** — 反馈、主动学习与语义质量运营工作台。
 - [ ] **WEB-OBS-001** — 运营、可观测、配额与成本治理页。
 - [ ] **OPS-008** — 运行配置版本与受控变更中心（页面）。
-- [ ] **PERF-001** — 前端路由级分块与性能预算（当前主块 2.10 MB / gzip 616 KB；antd 与 echarts 是主要来源，均可按路由懒加载）。
-- [x] **UI-MIGRATE-001** — element-plus → Ant Design 组件库迁移收口：依赖、锁文件与源码中
-      不再有任何 element-plus / Vue 引用；统一按钮入口为 `web/src/components/AppButton.tsx`
-      （底层 antd `Button`，保留 `variant/plain/text/link/round/circle` 业务语义）；
-      `main.tsx` 通过 `ConfigProvider` 固定主题 token 与 `zh_CN` locale。
+- [ ] **PERF-001** — 前端路由级分块与性能预算（当前主块 1.99 MB / gzip 569 KB；Ant Design 已移除，后续重点拆分 ECharts 与重型业务路由）。
+- [x] **UI-MIGRATE-001** — element-plus / Ant Design → 原生 React + CSS 组件收口：依赖、锁文件与源码中
+      不再有 element-plus、Vue 或 antd 引用；统一按钮入口为 `web/src/components/AppButton.tsx`
+      （底层原生 `button`，以自有 CSS 保留 `variant/plain/text/link/round/circle` 业务语义）；
+      `main.tsx` 不再注入第三方组件主题，所有已重构页面选择器统一使用 `.app-button`。
+      登录、首页、领域访问、用户权限、报告中心与数据源页已在 1920×1080 回归；
       `npm run lint`、`npm run test`、`npm run build` 全部通过。
 
 ## 7. M6 门禁与生产化

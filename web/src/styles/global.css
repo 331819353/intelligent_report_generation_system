@@ -61,7 +61,9 @@ button:disabled { cursor: not-allowed; }
 .app-button:hover:not(:disabled) { border-color: #7eb2e8; background: #f7fbff; color: #0868c9; }
 .app-button:focus-visible { outline: 0; box-shadow: 0 0 0 3px #1677ff24; }
 .app-button:active:not(:disabled) { transform: translateY(1px); }
-.app-button:disabled { color: #98a2b3; opacity: .56; }
+.app-button:disabled { border-color: #e1e6ed; background: #f5f7fa; color: #98a2b3; opacity: 1; }
+.app-button.is-text:disabled,
+.app-button.is-link:disabled { border-color: transparent; background: transparent; }
 .app-button.is-primary { border-color: #0872d3; background: #0872d3; color: #fff; }
 .app-button.is-primary:hover:not(:disabled) { border-color: #0665bb; background: #0665bb; color: #fff; }
 .app-button.is-primary:disabled { border-color: #cddff0; background: #e8f0f8; color: #93a7ba; opacity: 1; }
