@@ -34,6 +34,9 @@ type Props = {
   onSourceChanged: (source: DataSourceRecord) => void
   onReload: () => Promise<unknown>
   onNotice: (notice: Notice) => void
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+  hideLauncher?: boolean
 }
 
 const blankDraft = (): DataSourceAIDraft => ({
@@ -162,8 +165,14 @@ const prepareChatInstruction = (input: string) => {
   return { text, password: detectedPassword }
 }
 
-export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNotice }: Props) {
-  const [open, setOpen] = useState(false)
+export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNotice, open: controlledOpen, onOpenChange, hideLauncher = false }: Props) {
+  const [internalOpen, setInternalOpen] = useState(false)
+  const open = controlledOpen ?? internalOpen
+  const setOpen = (next: boolean | ((current: boolean) => boolean)) => {
+    const value = typeof next === 'function' ? next(open) : next
+    if (controlledOpen === undefined) setInternalOpen(value)
+    onOpenChange?.(value)
+  }
   const [modeChosen, setModeChosen] = useState(false)
   const [sourceId, setSourceId] = useState('')
   const [workingSource, setWorkingSource] = useState<DataSourceRecord | null>(null)
@@ -679,15 +688,15 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
     }
   }
 
-  return <aside className={`data-source-ai${open ? ' open' : ''}`} aria-label="数据源 AI 助手">
-    <div className="data-source-ai-launcher-wrap" onMouseEnter={() => setOpen(true)}>
+  return <aside className={`data-source-ai${open ? ' open' : ''}${hideLauncher ? ' without-launcher' : ''}`} aria-label="数据源 AI 助手">
+    {!hideLauncher && <div className="data-source-ai-launcher-wrap" onMouseEnter={() => setOpen(true)}>
       <span className="data-source-ai-launcher-tip">用 AI 配置数据源</span>
       <AppButton variant="primary" className="data-source-ai-launcher" type="button" onClick={() => setOpen(current => !current)} aria-expanded={open} aria-label="打开数据源 AI 助手">
         <Sparkle className="launcher-sparkle" size={17} weight="fill" />
         <ChatCircleDots size={25} weight="fill" />
         <span aria-hidden="true" />
       </AppButton>
-    </div>
+    </div>}
     {open && <section className="data-source-ai-panel" role="dialog" aria-label="数据源 AI 配置对话">
       <header>
         <div className="data-source-ai-agent"><span><Sparkle size={18} weight="fill" /></span><div><small>AI DATA COPILOT</small><strong>数据源助手</strong></div></div>

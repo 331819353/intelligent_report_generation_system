@@ -1,12 +1,16 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
+  ArrowClockwise,
   CheckCircle,
+  Circle,
   ClockCountdown,
   Database,
+  DotsThree,
   FileXls,
   MagnifyingGlass,
+  PencilSimple,
   Plus,
-  ShieldCheck,
+  Sparkle,
   WarningCircle,
   X,
 } from '@phosphor-icons/react'
@@ -81,7 +85,53 @@ const snapshotSources: DataSourceRecord[] = [
     hasUnpublishedChanges: true, reviewStatus: 'REJECTED', reviewNote: '连接凭据已过期，请轮换后重新测试。',
     reviewRequesterId: 'snapshot-user', reviewReviewerId: 'snapshot-owner', updatedAt: '2026-08-09T14:20:00+08:00', version: 9,
   },
+  {
+    id: 'snapshot-member-mysql', tenantId: 'snapshot-tenant', code: 'member_behavior', name: '会员行为日志库',
+    description: '会员访问、活动参与与转化行为数据', ownerId: 'snapshot-user', domainId: 'snapshot-enterprise-operations',
+    visibility: 'TENANT_PUBLIC', sharingScope: 'DOMAIN', type: 'MYSQL', status: 'ACTIVE',
+    config: { host: 'member-db.internal', port: 3306, database: 'member_analytics', username: 'report_reader' },
+    configVersionId: 'snapshot-member-config-v4', publishedVersionId: 'snapshot-member-published-v4', configVersion: 4,
+    publishedConfigVersion: 4, validationStatus: 'PASSED', publicationStatus: 'PUBLISHED', hasUnpublishedChanges: false,
+    reviewStatus: 'APPROVED', lastTestedAt: '2026-08-11T08:42:00+08:00', updatedAt: '2026-08-11T08:42:00+08:00', version: 5,
+  },
+  {
+    id: 'snapshot-marketing-mysql', tenantId: 'snapshot-tenant', code: 'marketing_campaign', name: '营销活动数据库',
+    description: '营销活动、触达批次与转化效果数据', ownerId: 'snapshot-user', domainId: 'snapshot-enterprise-operations',
+    visibility: 'TENANT_PUBLIC', sharingScope: 'DOMAIN', type: 'MYSQL', status: 'ACTIVE',
+    config: { host: 'marketing-db.internal', port: 3306, database: 'campaign_prod', username: 'campaign_reader' },
+    configVersionId: 'snapshot-marketing-config-v2', publishedVersionId: 'snapshot-marketing-published-v2', configVersion: 2,
+    publishedConfigVersion: 2, validationStatus: 'PASSED', publicationStatus: 'PUBLISHED', hasUnpublishedChanges: false,
+    reviewStatus: 'APPROVED', lastTestedAt: '2026-08-11T07:56:00+08:00', updatedAt: '2026-08-11T07:56:00+08:00', version: 3,
+  },
+  {
+    id: 'snapshot-supplier-oracle', tenantId: 'snapshot-tenant', code: 'supplier_mdm', name: '供应商主数据',
+    description: '供应商主数据、资质与合作关系信息', ownerId: 'snapshot-user', domainId: 'snapshot-enterprise-operations',
+    visibility: 'TENANT_PUBLIC', sharingScope: 'DOMAIN', type: 'ORACLE', status: 'ACTIVE',
+    config: { host: 'supplier-oracle.internal', port: 1521, database: 'SUPMDM', username: 'mdm_reader' },
+    configVersionId: 'snapshot-supplier-config-v5', publishedVersionId: 'snapshot-supplier-published-v5', configVersion: 5,
+    publishedConfigVersion: 5, validationStatus: 'PASSED', publicationStatus: 'PUBLISHED', hasUnpublishedChanges: false,
+    reviewStatus: 'APPROVED', lastTestedAt: '2026-08-10T18:21:00+08:00', updatedAt: '2026-08-10T18:21:00+08:00', version: 6,
+  },
+  {
+    id: 'snapshot-store-excel', tenantId: 'snapshot-tenant', code: 'store_master_csv', name: '门店静态信息',
+    description: '门店层级、区域归属与经营状态信息', ownerId: 'snapshot-user', domainId: 'snapshot-enterprise-operations',
+    visibility: 'PRIVATE', sharingScope: 'PRIVATE', type: 'EXCEL', status: 'ERROR', config: {},
+    fileAssetId: 'snapshot-store-file', fileVersionId: 'snapshot-store-file-v2', configVersionId: 'snapshot-store-config-v2',
+    configVersion: 2, validationStatus: 'FAILED', publicationStatus: 'UNPUBLISHED', hasUnpublishedChanges: true,
+    reviewStatus: 'NOT_SUBMITTED', updatedAt: '2026-08-10T15:08:00+08:00', version: 3,
+  },
 ]
+
+const snapshotSourceMetrics: Record<string, { readiness: number; tables: string; fields: string; business: string; latency: string }> = {
+  'snapshot-sales-mysql': { readiness: 86, tables: '128 / 150', fields: '1,024 / 1,200', business: '86 / 120', latency: '26 ms' },
+  'snapshot-finance-oracle': { readiness: 64, tables: '42 / 66', fields: '430 / 672', business: '28 / 48', latency: '152 ms' },
+  'snapshot-channel-excel': { readiness: 52, tables: '6 / 8', fields: '54 / 76', business: '20 / 38', latency: '—' },
+  'snapshot-inventory-mysql': { readiness: 31, tables: '18 / 58', fields: '206 / 612', business: '8 / 44', latency: '连接失败' },
+  'snapshot-member-mysql': { readiness: 78, tables: '96 / 118', fields: '824 / 1,040', business: '62 / 88', latency: '38 ms' },
+  'snapshot-marketing-mysql': { readiness: 57, tables: '34 / 60', fields: '316 / 552', business: '24 / 52', latency: '120 ms' },
+  'snapshot-supplier-oracle': { readiness: 70, tables: '56 / 80', fields: '486 / 690', business: '38 / 60', latency: '45 ms' },
+  'snapshot-store-excel': { readiness: 45, tables: '9 / 20', fields: '82 / 180', business: '12 / 36', latency: '—' },
+}
 type ConnectionDraft = {
   code: string
   name: string
@@ -187,6 +237,31 @@ const lifecycleLabel = (source: DataSourceRecord) => reviewStatusOf(source) === 
     : source.status === 'DRAFT' && validationStatusOf(source) === 'PASSED'
   ? '待上线'
   : statusLabels[source.status]
+const formatDataSourceTime = (value?: string) => {
+  if (!value) return '尚未测试'
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime())
+    ? value
+    : parsed.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+const connectionHealth = (source: DataSourceRecord) => {
+  if (validationStatusOf(source) === 'FAILED' || source.status === 'ERROR') return { tone: 'error', label: '异常', detail: '连接失败' }
+  if (validationStatusOf(source) === 'PASSED') return { tone: 'healthy', label: '健康', detail: snapshotSourceMetrics[source.id]?.latency || '验证通过' }
+  return { tone: 'warning', label: '待验证', detail: '尚无测试收据' }
+}
+const metadataSummary = (source: DataSourceRecord) => snapshotSourceMetrics[source.id] || {
+  readiness: null,
+  tables: '查看资产', fields: '查看资产', business: '待完善', latency: validationStatusOf(source) === 'PASSED' ? '验证通过' : '—',
+}
+const lifecycleSteps = (source: DataSourceRecord) => {
+  const summary = metadataSummary(source)
+  return [
+    { label: '已连接', complete: Boolean(source.configVersionId || source.fileAssetId) },
+    { label: '已验证', complete: validationStatusOf(source) === 'PASSED' },
+    { label: '已发布', complete: publicationStatusOf(source) === 'PUBLISHED' },
+    { label: '完善元数据', complete: summary.readiness === 100 },
+  ]
+}
 const formatFileSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
 const fileSourceIdentity = (filename: string) => {
   const extensionMatch = filename.match(/\.([^.]+)$/)
@@ -305,6 +380,9 @@ export function DataSourceCenterPage() {
   const [keyword, setKeyword] = useState('')
   const [typeFilter, setTypeFilter] = useState<DataSourceType | 'ALL'>('ALL')
   const [statusFilter, setStatusFilter] = useState<DataSourceStatus | 'ALL'>('ALL')
+  const [selectedSourceId, setSelectedSourceId] = useState(designSnapshot ? snapshotSources[0].id : '')
+  const [detailDismissed, setDetailDismissed] = useState(false)
+  const [assistantOpen, setAssistantOpen] = useState(false)
   const [metadataTables, setMetadataTables] = useState<DataSourceTableRecord[]>([])
   const [metadataColumns, setMetadataColumns] = useState<Record<string, DataSourceColumnRecord[]>>({})
   const [metadataLoading, setMetadataLoading] = useState(false)
@@ -363,6 +441,17 @@ export function DataSourceCenterPage() {
     drafts: sources.filter(source => hasUnpublishedDraft(source) && reviewStatusOf(source) !== 'PENDING').length,
     attention: sources.filter(source => source.status === 'ERROR' || reviewStatusOf(source) === 'REJECTED').length,
   }), [sources])
+  const selectedSource = useMemo(
+    () => sources.find(source => source.id === selectedSourceId) || null,
+    [selectedSourceId, sources],
+  )
+  useEffect(() => {
+    if (sources.length === 0) {
+      if (selectedSourceId) setSelectedSourceId('')
+      return
+    }
+    if (!detailDismissed && !sources.some(source => source.id === selectedSourceId)) setSelectedSourceId(sources[0].id)
+  }, [detailDismissed, selectedSourceId, sources])
   const replacingFileSource = useMemo(() => {
     if (draft.type !== 'EXCEL' || !draft.code.trim()) return null
     const code = draft.code.trim().toLocaleLowerCase()
@@ -1141,13 +1230,36 @@ export function DataSourceCenterPage() {
         assetTableKey(asset) === discoveredTableKey(table) && asset.managementStatus !== 'DISABLED',
       ))
     : []
+  const selectedReviewStatus = selectedSource ? reviewStatusOf(selectedSource) : 'NOT_SUBMITTED'
+  const selectedUnavailable = selectedSource ? selectedSource.status === 'SYNCING' || selectedSource.status === 'DELETING' : false
+  const selectedPendingDraft = selectedSource ? hasUnpublishedDraft(selectedSource) : false
+  const selectedCanTest = Boolean(selectedSource && !selectedUnavailable && selectedReviewStatus !== 'PENDING')
+  const selectedCanPublish = Boolean(selectedSource && !selectedUnavailable && selectedPendingDraft && selectedReviewStatus !== 'PENDING' && validationStatusOf(selectedSource) === 'PASSED')
+  const selectedSummary = selectedSource ? metadataSummary(selectedSource) : null
+  const selectedHealth = selectedSource ? connectionHealth(selectedSource) : null
+  const selectedLifecycle = selectedSource ? lifecycleSteps(selectedSource) : []
+  const selectedIsRequester = Boolean(selectedSource && (!signedInSubject || selectedSource.reviewRequesterId === signedInSubject))
+  const selectedNextAction = !selectedSource
+    ? ''
+    : selectedReviewStatus === 'PENDING'
+      ? '等待发布审批'
+      : selectedReviewStatus === 'REJECTED'
+        ? '修改配置并重新验证'
+        : validationStatusOf(selectedSource) !== 'PASSED'
+          ? '重新测试连接'
+          : selectedPendingDraft
+            ? '提交发布审批'
+            : '完善业务元数据'
   return (
     <AppShell
-      className="data-source-shell"
+      className={`data-source-shell${selectedSource ? ' has-detail' : ''}`}
       title="数据资产"
       eyebrow="数据与治理"
-      titleMeta={<span className="data-source-title-meta">接入、验证并沉淀可用于分析的数据资产</span>}
-      actions={<AppButton variant="primary" className="data-source-create-button" onClick={openCreate}><Plus size={17} weight="bold" />新建数据源</AppButton>}
+      titleMeta={<span className="data-source-title-meta">管理当前领域的数据连接、验证状态与元数据资产</span>}
+      actions={<>
+        <AppButton className="data-source-ai-entry" type="button" onClick={() => setAssistantOpen(true)}><Sparkle size={17} weight="fill" />AI 配置</AppButton>
+        <AppButton variant="primary" className="data-source-create-button" onClick={openCreate}><Plus size={17} weight="bold" />新建数据源</AppButton>
+      </>}
     >
       {notice && <div className={`data-source-toast ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'} aria-live="polite">
         <span className="data-source-toast-icon" aria-hidden="true">{notice.tone === 'success' ? <CheckCircle size={17} weight="fill" /> : <WarningCircle size={17} weight="fill" />}</span>
@@ -1155,84 +1267,127 @@ export function DataSourceCenterPage() {
         <AppButton text circle aria-label="关闭消息" onClick={() => setNotice(null)}><X size={16} /></AppButton>
       </div>}
       <section className="data-source-center" aria-label="数据源配置中心内容">
-        <section className="data-source-journey" aria-labelledby="data-source-journey-title">
-          <header><div><span className="eyebrow">接入主链</span><h2 id="data-source-journey-title">数据源接入与资产化</h2><p>连接配置通过验证和审批后，继续发现元数据并完善业务口径。</p></div><span className="data-source-journey-status"><ShieldCheck size={17} weight="fill" />主链能力已接通</span></header>
-          <ol>
-            <li className="is-current"><span>1</span><div><strong>连接配置</strong><small>录入来源与凭据</small></div></li>
-            <li><span>2</span><div><strong>测试验证</strong><small>生成连接收据</small></div></li>
-            <li><span>3</span><div><strong>发布审批</strong><small>确认用途与风险</small></div></li>
-            <li><span>4</span><div><strong>元数据入库</strong><small>发现表与字段</small></div></li>
-            <li><span>5</span><div><strong>资产完善</strong><small>补齐口径与敏感级</small></div></li>
-          </ol>
+        <section className="data-source-summary-strip" aria-label="数据源状态概览">
+          <article><span className="is-blue"><Database size={20} weight="duotone" /></span><small>全部</small><strong>{sources.length}</strong></article>
+          <article><span className="is-green"><CheckCircle size={20} weight="duotone" /></span><small>运行中</small><strong>{sourceOverview.active}</strong></article>
+          <article><span className="is-orange"><ClockCountdown size={20} weight="duotone" /></span><small>待审批</small><strong>{sourceOverview.pending}</strong></article>
+          <article><span className="is-red"><WarningCircle size={20} weight="duotone" /></span><small>需要处理</small><strong>{sourceOverview.attention}</strong></article>
         </section>
-        <section className="data-source-metrics" aria-label="数据源状态概览">
-          <article><span className="is-blue"><Database size={19} weight="duotone" /></span><div><small>全部数据源</small><strong>{sources.length}</strong></div></article>
-          <article><span className="is-green"><CheckCircle size={19} weight="duotone" /></span><div><small>运行中</small><strong>{sourceOverview.active}</strong></div></article>
-          <article><span className="is-orange"><ClockCountdown size={19} weight="duotone" /></span><div><small>待审批</small><strong>{sourceOverview.pending}</strong></div></article>
-          <article><span className="is-red"><WarningCircle size={19} weight="duotone" /></span><div><small>需要处理</small><strong>{sourceOverview.attention}</strong></div></article>
-        </section>
+
         <section className="data-source-catalog" aria-labelledby="data-source-catalog-title">
-          <header><div><h2 id="data-source-catalog-title">数据源清单</h2><p>统一查看当前领域内的连接、验证和发布状态。</p></div><span>共 {sources.length} 个 · {sourceOverview.drafts} 个草稿待处理</span></header>
-        <div className="data-source-filters" aria-label="数据源筛选">
-          <label className="data-source-search"><span>搜索</span><span className="data-source-search-control"><MagnifyingGlass size={17} /><input aria-label="搜索数据源" type="search" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索名称、编码或用途" /></span></label>
-          <label><span>类型</span><select aria-label="按类型筛选" value={typeFilter} onChange={event => setTypeFilter(event.target.value as DataSourceType | 'ALL')}><option value="ALL">全部类型</option><option value="MYSQL">MySQL</option><option value="ORACLE">Oracle</option><option value="EXCEL">Excel / CSV</option></select></label>
-          <label><span>状态</span><select aria-label="按状态筛选" value={statusFilter} onChange={event => setStatusFilter(event.target.value as DataSourceStatus | 'ALL')}><option value="ALL">全部状态</option>{Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-          <small>显示 {filteredSources.length} / {sources.length}</small>
-        </div>
-        {loading ? <div className="data-source-empty">正在加载数据源…</div> : sources.length === 0
-          ? <div className="data-source-empty"><strong>还没有数据源</strong><span>将鼠标移到右侧“数据源助手”，通过对话开始配置。</span></div>
-	          : filteredSources.length === 0 ? <div className="data-source-empty"><strong>没有符合条件的数据源</strong><span>请调整搜索词或筛选条件。</span></div>
-	          : <div className="data-source-list" role="list" aria-label="已有数据源清单">{filteredSources.map(source => {
-	              const reviewStatus = reviewStatusOf(source)
-	              const reviewLocked = reviewStatus === 'PENDING' || reviewStatus === 'REJECTED'
-	              const isRequester = !signedInSubject || source.reviewRequesterId === signedInSubject
-	              const canToggle = reviewStatus !== 'PENDING' && reviewStatus !== 'REJECTED' && (source.status === 'ACTIVE' || source.status === 'DISABLED')
-	              const unavailable = source.status === 'SYNCING' || source.status === 'DELETING'
-	              const canTest = !unavailable && reviewStatus !== 'PENDING'
-	              const pendingDraft = hasUnpublishedDraft(source)
-	              const canPublish = !unavailable && pendingDraft && reviewStatus !== 'PENDING' && validationStatusOf(source) === 'PASSED'
-	              const subtitle = `${typeLabels[source.type]} · ${source.code}${source.description ? ` · ${source.description}` : ''} · ${publicationLabels[publicationStatusOf(source)]}`
-	              const host = configText(source, 'host') || (source.type === 'EXCEL' ? '文件数据源' : '—')
-	              const port = configText(source, 'port') || '—'
-	              const database = configText(source, 'database') || '—'
-	              const username = configText(source, 'username') || '—'
-	              return <article className={`data-source-card${reviewLocked ? ' review-locked' : ''}`} role="listitem" key={source.id}>
-	                <AppButton className="data-source-card-open" type="button" disabled={reviewLocked} title={reviewStatus === 'PENDING' ? '审核完成前不能配置数据表' : reviewStatus === 'REJECTED' ? '修改并重新提交审核后才能配置数据表' : undefined} aria-label={`管理${source.name}的数据表资产`} onClick={() => openExisting('view', source)}>
-                  <span className={`data-source-icon ${source.type.toLowerCase()}`}>{source.type === 'EXCEL' ? <FileXls size={24} weight="duotone" /> : <Database size={24} weight="duotone" />}</span>
-	                  <span className="data-source-main"><span><strong role="heading" aria-level={3} title={source.name}>{source.name}</strong><span className={`data-source-status ${reviewStatus === 'PENDING' ? 'review-pending' : reviewStatus === 'REJECTED' ? 'review-rejected' : source.status.toLowerCase()}`}>{lifecycleLabel(source)}</span>{pendingDraft && reviewStatus !== 'PENDING' && reviewStatus !== 'REJECTED' && <span className={`data-source-status validation-${validationStatusOf(source).toLowerCase()}`}>{validationLabels[validationStatusOf(source)]}</span>}</span><span className="data-source-subtitle" title={subtitle}>{subtitle}</span>{reviewStatus === 'REJECTED' && <span className="data-source-review-reason">驳回原因：{source.reviewNote || '审核人未填写原因'}</span>}</span>
-	                  <span className="data-source-card-facts">
-                    <span><small>Host</small><strong title={host}>{host}</strong></span>
-                    <span><small>Port</small><strong title={port}>{port}</strong></span>
-                    <span><small>Database</small><strong title={database}>{database}</strong></span>
-                    <span><small>Username</small><strong title={username}>{username}</strong></span>
-                  </span>
-	                </AppButton>
-	                <div className="data-source-actions">
-                    <AssetSharingSelect
-                      resourceType="DATA_SOURCE"
-                      resourceID={source.id}
-                      value={source.sharingScope || (source.visibility === 'TENANT_PUBLIC' ? 'DOMAIN' : 'PRIVATE')}
-                      ownerUserID={source.ownerId}
-                      assetDomainID={source.domainId}
-                      disabled={actionBusy || unavailable}
-                      onChange={sharingScope => setSources(current => current.map(item =>
-                        item.id === source.id ? { ...item, sharingScope } : item
-                      ))}
-                    />
-	                  {reviewStatus === 'PENDING' ? <>
-	                    {isRequester && <AppButton className="action-withdraw" type="button" disabled={actionBusy} onClick={event => { event.stopPropagation(); void withdrawReview(source) }}>{busyAction === `review-withdraw:${source.id}` ? '撤销中…' : '撤销申请'}</AppButton>}
-	                  </> : <>
-	                    <AppButton className="action-edit" type="button" disabled={actionBusy || unavailable || source.type === 'EXCEL'} onClick={event => { event.stopPropagation(); openExisting('edit', source) }}>修改</AppButton>
-	                    <AppButton className="action-test" type="button" disabled={actionBusy || !canTest} onClick={event => { event.stopPropagation(); void testConnection(source) }}>{busyAction === `test:${source.id}` ? '测试中…' : '测试连接'}</AppButton>
-	                    {pendingDraft && <AppButton className="action-publish" type="button" disabled={actionBusy || !canPublish} title={canPublish ? '提交当前测试版本进入发布审核' : '当前草稿必须先通过连接测试'} onClick={event => { event.stopPropagation(); void publishSource(source) }}>{busyAction === `review-submit:${source.id}` ? '提交中…' : reviewStatus === 'REJECTED' ? '重新提交' : '发布'}</AppButton>}
-	                    <AppButton className={source.status === 'DISABLED' ? 'action-resume' : 'action-pause'} type="button" disabled={actionBusy || !canToggle} onClick={event => { event.stopPropagation(); void changeStatus(source) }}>{source.status === 'DISABLED' ? '恢复' : '暂停'}</AppButton>
-	                    <AppButton variant="danger" plain className="action-delete" type="button" disabled={actionBusy || unavailable} onClick={event => { event.stopPropagation(); openExisting('delete', source) }}>删除</AppButton>
-	                  </>}
-	                </div>
-	              </article>
-            })}</div>}
+          <div className="data-source-filters" aria-label="数据源筛选">
+            <label className="data-source-search"><span className="data-source-search-control"><MagnifyingGlass size={18} /><input aria-label="搜索数据源" type="search" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索数据源名称、编码或用途" /></span></label>
+            <label><select aria-label="按类型筛选" value={typeFilter} onChange={event => setTypeFilter(event.target.value as DataSourceType | 'ALL')}><option value="ALL">全部类型</option><option value="MYSQL">MySQL</option><option value="ORACLE">Oracle</option><option value="EXCEL">Excel / CSV</option></select></label>
+            <label><select aria-label="按状态筛选" value={statusFilter} onChange={event => setStatusFilter(event.target.value as DataSourceStatus | 'ALL')}><option value="ALL">全部状态</option>{Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            <AppButton className="data-source-filter-reset" type="button" aria-label="重置筛选" title="重置筛选" onClick={() => { setKeyword(''); setTypeFilter('ALL'); setStatusFilter('ALL') }}><ArrowClockwise size={17} /><span>重置</span></AppButton>
+          </div>
+
+          <div className="data-source-table" role="table" aria-labelledby="data-source-catalog-title">
+            <div className="data-source-table-head" role="row">
+              <span role="columnheader" id="data-source-catalog-title">数据源名称</span>
+              <span role="columnheader">类型</span>
+              <span role="columnheader">连接健康</span>
+              <span role="columnheader">最近测试</span>
+              <span role="columnheader">元数据资产</span>
+              <span role="columnheader">操作</span>
+            </div>
+            {loading ? <div className="data-source-empty">正在加载数据源…</div> : sources.length === 0
+              ? <div className="data-source-empty"><strong>还没有数据源</strong><span>点击右上角“新建数据源”或“AI 配置”开始接入。</span></div>
+              : filteredSources.length === 0 ? <div className="data-source-empty"><strong>没有符合条件的数据源</strong><span>请调整搜索词或筛选条件。</span></div>
+              : <div className="data-source-list" role="rowgroup">{filteredSources.map(source => {
+                const reviewStatus = reviewStatusOf(source)
+                const reviewLocked = reviewStatus === 'PENDING' || reviewStatus === 'REJECTED'
+                const unavailable = source.status === 'SYNCING' || source.status === 'DELETING'
+                const canTest = !unavailable && reviewStatus !== 'PENDING'
+                const subtitle = `${typeLabels[source.type]} · ${source.code}${source.description ? ` · ${source.description}` : ''}`
+                const health = connectionHealth(source)
+                const summary = metadataSummary(source)
+                const isSelected = selectedSourceId === source.id
+                return <article className={`data-source-card${isSelected ? ' is-selected' : ''}${reviewLocked ? ' review-locked' : ''}`} role="row" aria-selected={isSelected} key={source.id}>
+                  <AppButton className="data-source-card-open" type="button" aria-label={`查看${source.name}详情`} onClick={() => { setSelectedSourceId(source.id); setDetailDismissed(false) }}>
+                    <span className="data-source-name-cell" role="cell">
+                      <span className={`data-source-icon ${source.type.toLowerCase()}`}>{source.type === 'EXCEL' ? <FileXls size={23} weight="duotone" /> : <Database size={23} weight="duotone" />}</span>
+                      <span className="data-source-main"><strong title={source.name}>{source.name}</strong><small title={subtitle}>{subtitle}</small></span>
+                    </span>
+                    <span className="data-source-type-cell" role="cell"><strong>{source.type === 'EXCEL' ? '文件数据源' : '数据库'}</strong><small>{typeLabels[source.type]}</small></span>
+                    <span className={`data-source-health-cell is-${health.tone}`} role="cell"><strong><i />{health.label}</strong><small>{health.detail}</small></span>
+                    <span className="data-source-test-cell" role="cell"><strong className={`is-${validationStatusOf(source).toLowerCase()}`}>{validationLabels[validationStatusOf(source)]}</strong><small>{formatDataSourceTime(source.lastTestedAt || source.updatedAt)}</small></span>
+                    <span className="data-source-readiness-cell" role="cell"><strong>{summary.readiness === null ? publicationLabels[publicationStatusOf(source)] : `${summary.readiness}%`}</strong>{summary.readiness === null ? <small>进入资产查看进度</small> : <progress aria-label={`${source.name}元数据完善度`} max="100" value={summary.readiness} />}</span>
+                  </AppButton>
+                  <div className="data-source-actions" role="cell">
+                    <AppButton className="action-test" type="button" disabled={actionBusy || !canTest} onClick={() => void testConnection(source)}>{busyAction === `test:${source.id}` ? '测试中…' : '测试连接'}</AppButton>
+                    <AppButton className="action-edit" type="button" disabled={actionBusy || unavailable || reviewStatus === 'PENDING' || source.type === 'EXCEL'} aria-label={`编辑${source.name}`} onClick={() => openExisting('edit', source)}><PencilSimple size={15} /><span>编辑</span></AppButton>
+                    <AppButton text circle className="action-more" type="button" disabled={reviewLocked} aria-label={`管理${source.name}的数据表资产`} title={reviewLocked ? '审核完成后可管理数据表资产' : '管理数据表资产'} onClick={() => openExisting('view', source)}><DotsThree size={19} weight="bold" /></AppButton>
+                  </div>
+                </article>
+              })}</div>}
+          </div>
+          <footer className="data-source-list-footer"><span>共 {filteredSources.length} 条</span><span>当前领域 · 企业经营</span></footer>
         </section>
       </section>
+
+      {selectedSource && selectedSummary && selectedHealth && <aside className="data-source-inspector" aria-label={`${selectedSource.name}详情`}>
+        <header>
+          <div><strong>{selectedSource.name}</strong><small>{selectedSource.code}</small></div>
+          <AppButton text circle type="button" aria-label="关闭数据源详情" onClick={() => { setDetailDismissed(true); setSelectedSourceId('') }}><X size={19} /></AppButton>
+        </header>
+        <div className="data-source-inspector-actions">
+          <AppButton variant="primary" className="action-test" type="button" disabled={actionBusy || !selectedCanTest} onClick={() => void testConnection(selectedSource)}>{busyAction === `test:${selectedSource.id}` ? '测试中…' : '测试连接'}</AppButton>
+          <AppButton className="action-edit" type="button" disabled={actionBusy || selectedUnavailable || selectedReviewStatus === 'PENDING' || selectedSource.type === 'EXCEL'} onClick={() => openExisting('edit', selectedSource)}><PencilSimple size={15} />编辑</AppButton>
+          <AppButton className="action-assets" type="button" disabled={selectedReviewStatus === 'PENDING' || selectedReviewStatus === 'REJECTED'} onClick={() => openExisting('view', selectedSource)}>管理资产</AppButton>
+        </div>
+
+        <div className="data-source-inspector-scroll">
+          <section className="data-source-inspector-card lifecycle-card">
+            <header><strong>生命周期状态</strong><span className={`data-source-status ${selectedReviewStatus === 'PENDING' ? 'review-pending' : selectedReviewStatus === 'REJECTED' ? 'review-rejected' : selectedSource.status.toLowerCase()}`}>{lifecycleLabel(selectedSource)}</span></header>
+            <ol>{selectedLifecycle.map((step, index) => <li className={step.complete ? 'is-complete' : ''} key={step.label}>{step.complete ? <CheckCircle size={21} weight="fill" /> : <Circle size={21} />}<span>{step.label}<small>{index === 0 ? '连接配置' : index === 1 ? formatDataSourceTime(selectedSource.lastTestedAt) : index === 2 ? publicationLabels[publicationStatusOf(selectedSource)] : selectedSummary.readiness === null ? '进入资产查看' : `${selectedSummary.readiness}%`}</small></span></li>)}</ol>
+          </section>
+
+          <section className="data-source-inspector-card">
+            <header><strong>连接信息</strong></header>
+            <dl className="connection-facts">
+              <div><dt>数据源类型</dt><dd>{typeLabels[selectedSource.type]}</dd></div>
+              <div><dt>Host / IP</dt><dd>{configText(selectedSource, 'host') || (selectedSource.type === 'EXCEL' ? '文件数据源' : '—')}</dd></div>
+              <div><dt>端口</dt><dd>{configText(selectedSource, 'port') || '—'}</dd></div>
+              <div><dt>数据库</dt><dd>{configText(selectedSource, 'database') || '—'}</dd></div>
+              <div><dt>用户名</dt><dd>{configText(selectedSource, 'username') || '—'}</dd></div>
+              <div><dt>描述</dt><dd>{selectedSource.description || '未填写'}</dd></div>
+            </dl>
+          </section>
+
+          <section className="data-source-inspector-card">
+            <header><strong>最近测试结果</strong><span className={`receipt-status is-${validationStatusOf(selectedSource).toLowerCase()}`}>{validationLabels[validationStatusOf(selectedSource)]}</span></header>
+            <dl className="receipt-facts">
+              <div><dt>测试时间</dt><dd>{formatDataSourceTime(selectedSource.lastTestedAt || selectedSource.updatedAt)}</dd></div>
+              <div><dt>连接健康</dt><dd>{selectedHealth.label}</dd></div>
+              <div><dt>响应延迟</dt><dd>{selectedHealth.detail}</dd></div>
+              <div><dt>配置版本</dt><dd>v{selectedSource.configVersion || selectedSource.version}</dd></div>
+            </dl>
+          </section>
+
+          <section className="data-source-inspector-card metadata-card">
+            <header><strong>元数据资产</strong><span>{selectedSummary.readiness === null ? '查看实际进度' : `${selectedSummary.readiness}%`}</span></header>
+            {selectedSummary.readiness !== null && <progress aria-label="元数据完善度" max="100" value={selectedSummary.readiness} />}
+            <dl><div><dt>数据表</dt><dd>{selectedSummary.tables}</dd></div><div><dt>字段</dt><dd>{selectedSummary.fields}</dd></div><div><dt>业务指标</dt><dd>{selectedSummary.business}</dd></div></dl>
+          </section>
+
+          <section className="data-source-inspector-card sharing-card">
+            <header><strong>共享范围</strong></header>
+            <dl><div><dt>所属领域</dt><dd>企业经营</dd></div><div><dt>当前范围</dt><dd><AssetSharingSelect resourceType="DATA_SOURCE" resourceID={selectedSource.id} value={selectedSource.sharingScope || (selectedSource.visibility === 'TENANT_PUBLIC' ? 'DOMAIN' : 'PRIVATE')} ownerUserID={selectedSource.ownerId} assetDomainID={selectedSource.domainId} disabled={actionBusy || selectedUnavailable} onChange={sharingScope => setSources(current => current.map(item => item.id === selectedSource.id ? { ...item, sharingScope } : item))} /></dd></div></dl>
+          </section>
+        </div>
+
+        <footer className="data-source-next-action">
+          <div><Sparkle size={18} weight="fill" /><span><strong>下一步：{selectedNextAction}</strong><small>{selectedReviewStatus === 'PENDING' ? '审核通过后继续元数据发现与资产完善。' : selectedReviewStatus === 'REJECTED' ? (selectedSource.reviewNote || '根据审核意见修改配置后重新提交。') : validationStatusOf(selectedSource) !== 'PASSED' ? '生成新的连接测试收据，确认当前配置可用。' : selectedPendingDraft ? '固定当前已验证版本并进入发布审核。' : '补充业务定义、指标口径与血缘关系。'}</small></span></div>
+          <AppButton variant="primary" type="button" disabled={actionBusy || (selectedReviewStatus === 'PENDING' && !selectedIsRequester)} onClick={() => {
+            if (selectedReviewStatus === 'PENDING') void withdrawReview(selectedSource)
+            else if (selectedReviewStatus === 'REJECTED') openExisting('edit', selectedSource)
+            else if (validationStatusOf(selectedSource) !== 'PASSED') void testConnection(selectedSource)
+            else if (selectedCanPublish) void publishSource(selectedSource)
+            else openExisting('view', selectedSource)
+          }}>{selectedReviewStatus === 'PENDING' ? selectedIsRequester ? '撤销申请' : '等待审批' : selectedReviewStatus === 'REJECTED' ? '去修改' : validationStatusOf(selectedSource) !== 'PASSED' ? '重新测试' : selectedCanPublish ? '提交审批' : '去完善'}</AppButton>
+        </footer>
+      </aside>}
 
 		{(dialog?.mode === 'create' || dialog?.mode === 'edit') && <Dialog title={dialog.mode === 'edit' ? '修改数据源' : '新建数据源'} wide={draft.type === 'EXCEL'} onClose={closeDialog}>
         <form className="data-source-form" onSubmit={submitConnection}>
@@ -1445,10 +1600,17 @@ export function DataSourceCenterPage() {
       </Dialog>}
       <DataSourceAIAssistant
         sources={sources}
-        onSourceChanged={source => setSources(current => {
-          const exists = current.some(item => item.id === source.id)
-          return exists ? current.map(item => item.id === source.id ? source : item) : [source, ...current]
-        })}
+        open={assistantOpen}
+        onOpenChange={setAssistantOpen}
+        hideLauncher
+        onSourceChanged={source => {
+          setSources(current => {
+            const exists = current.some(item => item.id === source.id)
+            return exists ? current.map(item => item.id === source.id ? source : item) : [source, ...current]
+          })
+          setDetailDismissed(false)
+          setSelectedSourceId(source.id)
+        }}
         onReload={loadSources}
         onNotice={setNotice}
       />

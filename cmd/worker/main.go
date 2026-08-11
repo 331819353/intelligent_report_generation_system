@@ -24,6 +24,8 @@ import (
 	askdatareportasset "intelligent-report-generation-system/internal/askdata/reportasset"
 	askdatasearch "intelligent-report-generation-system/internal/askdata/search"
 	askdatatools "intelligent-report-generation-system/internal/askdata/tools"
+	askdataunderstanding "intelligent-report-generation-system/internal/askdata/understanding"
+	dictionarypostgres "intelligent-report-generation-system/internal/askdata/understanding/dictionarypostgres"
 	askdatavalidator "intelligent-report-generation-system/internal/askdata/validator"
 	"intelligent-report-generation-system/internal/assetembedding"
 	"intelligent-report-generation-system/internal/config"
@@ -477,19 +479,29 @@ func main() {
 		logger.Error("initialize AskData pinned IR compiler", "error", err)
 		os.Exit(1)
 	}
+	// 认证业务词典作为确定性精确命中进入检索：Owner 认证过的企业黑话与同义词
+	// 必须压过词法相似度，否则认证本身没有产生任何效果。
+	askDataDictionary, err := askdataunderstanding.NewDictionaryMatcher(
+		dictionarypostgres.NewLoader(pool), askdataunderstanding.NewDictionaryCache(),
+	)
+	if err != nil {
+		logger.Error("initialize AskData business dictionary", "error", err)
+		os.Exit(1)
+	}
 	askDataCognition, err := askdatatools.NewCognitionRunner(aiService, askdatacognition.ExecutorOptions{})
 	if err != nil {
 		logger.Error("initialize AskData cognition runner", "error", err)
 		os.Exit(1)
 	}
 	askDataAssembler, err := askdatatools.NewAssembler(askdatatools.Services{
-		Reader:    askdataregistry.NewQueryReader(pool),
-		Retriever: askDataRetriever,
-		Embedder:  askdatatools.BatchEmbedder{Provider: embeddingProvider},
-		Graph:     askDataGraphResolver,
-		Compiler:  askDataPinnedCompiler,
-		Validator: reportPlanValidator,
-		Executor:  reportPlanExecutor,
+		Reader:     askdataregistry.NewQueryReader(pool),
+		Retriever:  askDataRetriever,
+		Embedder:   askdatatools.BatchEmbedder{Provider: embeddingProvider},
+		Graph:      askDataGraphResolver,
+		Compiler:   askDataPinnedCompiler,
+		Validator:  reportPlanValidator,
+		Executor:   reportPlanExecutor,
+		Dictionary: askDataDictionary,
 	}, askDataCognition, askdataorchestrator.DefaultLoopOptions())
 	if err != nil {
 		logger.Error("initialize AskData question assembler", "error", err)

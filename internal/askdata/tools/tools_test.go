@@ -11,6 +11,7 @@ import (
 	"intelligent-report-generation-system/internal/askdata/compiler"
 	"intelligent-report-generation-system/internal/askdata/orchestrator"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
+	"intelligent-report-generation-system/internal/askdata/understanding"
 	"intelligent-report-generation-system/internal/askdata/validator"
 )
 
@@ -278,5 +279,60 @@ func TestAssemblerBuildsAFreshBindingPerRun(t *testing.T) {
 func TestAssemblerRequiresACognitionRunner(t *testing.T) {
 	if _, err := NewAssembler(Services{}, nil, orchestrator.LoopOptions{}); err != ErrCognitionUnavailable {
 		t.Fatalf("assembler without cognition = %v", err)
+	}
+}
+
+type stubDictionary struct {
+	result understanding.DictionaryMatchResult
+	err    error
+	calls  int
+}
+
+func (dictionary *stubDictionary) Match(
+	context.Context, understanding.DictionaryMatchRequest,
+) (understanding.DictionaryMatchResult, error) {
+	dictionary.calls++
+	return dictionary.result, dictionary.err
+}
+
+// 没有配置词典时检索照常进行：词典是精确度辅助，缺失只影响召回质量，
+// 不影响正确性，不能让问题失败。
+func TestRetrievalWorksWithoutADictionary(t *testing.T) {
+	binding, err := NewBinding(Services{}, testRun(t))
+	if err != nil {
+		t.Fatalf("NewBinding() error = %v", err)
+	}
+	hits, refs := binding.dictionaryHits(context.Background(), "销售额")
+	if hits != nil || refs != nil {
+		t.Fatal("a missing dictionary must contribute nothing, not fail")
+	}
+}
+
+// 词典报错同样只降级，不冒泡成问题失败。
+func TestDictionaryFailureDegradesInsteadOfFailingTheQuestion(t *testing.T) {
+	dictionary := &stubDictionary{err: errors.New("dictionary unavailable")}
+	binding, err := NewBinding(Services{Dictionary: dictionary}, testRun(t))
+	if err != nil {
+		t.Fatalf("NewBinding() error = %v", err)
+	}
+	hits, refs := binding.dictionaryHits(context.Background(), "销售额")
+	if hits != nil || refs != nil {
+		t.Fatal("a failing dictionary must degrade silently")
+	}
+	if dictionary.calls != 1 {
+		t.Fatalf("dictionary was consulted %d times", dictionary.calls)
+	}
+}
+
+// 空 mention 不查词典，避免无意义的加载与缓存扰动。
+func TestDictionaryIsNotConsultedForAnEmptyMention(t *testing.T) {
+	dictionary := &stubDictionary{}
+	binding, err := NewBinding(Services{Dictionary: dictionary}, testRun(t))
+	if err != nil {
+		t.Fatalf("NewBinding() error = %v", err)
+	}
+	binding.dictionaryHits(context.Background(), "   ")
+	if dictionary.calls != 0 {
+		t.Fatal("dictionary must not be consulted for a blank mention")
 	}
 }

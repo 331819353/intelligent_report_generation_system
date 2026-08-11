@@ -70,6 +70,12 @@
 - [ ] **SEM-READ-002（新）** — 补齐读取接口尚未覆盖的对象类型：维度成员、层级、认证问法、
       指标维度绑定、评测用例（导入通道支持 12 类，读取接口目前覆盖 8 类）。
 - [ ] **WEB-007** — 语义管理与发布页面：按优先级切片交付——可加性/时间确认待办 → 指标建设与审批 → 维度成员/别名/层级 → 模型关系与评审 → 词典/黑话/KPI/认证问法 → 发布中心（Readiness/投影/评测/双人审批/激活/回滚）。
+- [x] **SEM-DICT-WIRE-001（新）** — 认证业务词典接入查询期：`dictionarypostgres.Loader` +
+      `understanding.DictionaryMatcher` + `dictionarysearch.ExactHits` 此前是死代码，
+      词条可以认证发布但从不参与回答。现已在 `cmd/worker` 构造并注入
+      `tools.Services.Dictionary`，命中以确定性精确命中进入检索
+      （`RetrievalRequest.DeterministicExact`），压过词法相似度。
+      词典缺失或报错只降级检索精度，不让问题失败。
 - [ ] **EVAL-008** — 时间类专项黄金用例集。
 - [ ] **EVAL-009** — 可加性专项黄金用例集。
 - [ ] **EVAL-010** — 叙述人工评审集。

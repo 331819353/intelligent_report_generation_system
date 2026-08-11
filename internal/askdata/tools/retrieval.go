@@ -3,11 +3,15 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
+	"time"
 
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/registry"
 	"intelligent-report-generation-system/internal/askdata/search"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
+	"intelligent-report-generation-system/internal/askdata/understanding"
+	"intelligent-report-generation-system/internal/askdata/understanding/dictionarysearch"
 )
 
 // searchSemanticObjects runs governed hybrid retrieval.
@@ -32,6 +36,11 @@ func (binding *Binding) searchSemanticObjects(
 		Scope: binding.run.Scope, Mention: input.Mention,
 		ObjectTypes: retrievalObjectTypes(input.ObjectTypes), TopKPerType: input.Limit,
 	}
+	// Certified business vocabulary enters retrieval as deterministic exact
+	// hits. A term that an Owner certified to mean a specific metric must beat
+	// lexical similarity, otherwise certifying it changed nothing.
+	dictionaryHits, dictionaryRefs := binding.dictionaryHits(ctx, input.Mention)
+	request.DeterministicExact = dictionaryHits
 	if binding.services.Embedder != nil {
 		vector, model, err := binding.services.Embedder.Embed(ctx, input.Mention)
 		// A failing embedding service degrades retrieval; it does not fail the
@@ -73,7 +82,7 @@ func (binding *Binding) searchSemanticObjects(
 		Candidates: candidates, Truncated: result.Degraded,
 		EvidenceIDs: []askdata.ID{evidence.EvidenceID},
 	}
-	output.EvidenceRefs = append([]askdata.EvidenceRef{evidence}, refs...)
+	output.EvidenceRefs = append(append([]askdata.EvidenceRef{evidence}, refs...), dictionaryRefs...)
 	output.MadeProgress = len(candidates) > 0
 	return output, nil
 }
@@ -326,4 +335,38 @@ func strongestSource(evidence []search.SourceEvidence) string {
 		return "LEXICAL"
 	}
 	return best
+}
+
+// dictionaryHits resolves certified business terms in the mention and projects
+// them into deterministic exact hits.
+//
+// Failures here degrade retrieval rather than failing the question: the
+// dictionary is a precision aid, and losing it costs recall quality, not
+// correctness. Dropped terms (expired, out of scope, negative context) are
+// discarded by the matcher itself and never reach retrieval.
+func (binding *Binding) dictionaryHits(
+	ctx context.Context,
+	mention string,
+) ([]search.RawHit, []askdata.EvidenceRef) {
+	if binding.services.Dictionary == nil || strings.TrimSpace(mention) == "" {
+		return nil, nil
+	}
+	result, err := binding.services.Dictionary.Match(ctx, understanding.DictionaryMatchRequest{
+		Scope: binding.run.Scope, Question: mention, Now: time.Now().UTC(),
+	})
+	if err != nil || len(result.Hits) == 0 {
+		return nil, nil
+	}
+	hits, err := dictionarysearch.ExactHits(binding.run.Scope, mention, result.Hits)
+	if err != nil {
+		return nil, nil
+	}
+	refs := make([]askdata.EvidenceRef, 0, len(result.Hits))
+	for _, hit := range result.Hits {
+		refs = append(refs, askdata.EvidenceRef{
+			EvidenceID: askdata.ID(hit.EvidenceHash), Kind: askdata.EvidenceKindExactAlias,
+			SourceID: hit.TermVersionID, ContentHash: hit.EvidenceHash,
+		})
+	}
+	return hits, refs
 }

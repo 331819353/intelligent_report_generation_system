@@ -28,6 +28,7 @@ import (
 	"intelligent-report-generation-system/internal/askdata/registry"
 	"intelligent-report-generation-system/internal/askdata/search"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
+	"intelligent-report-generation-system/internal/askdata/understanding"
 	"intelligent-report-generation-system/internal/askdata/validator"
 )
 
@@ -43,17 +44,27 @@ type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, string, error)
 }
 
+// DictionaryMatcher resolves governed business vocabulary in a question.
+//
+// It is optional: without it retrieval still works, but released business terms
+// — the enterprise's own jargon, abbreviations and synonyms — never steer it,
+// which is precisely the value of having certified them.
+type DictionaryMatcher interface {
+	Match(context.Context, understanding.DictionaryMatchRequest) (understanding.DictionaryMatchResult, error)
+}
+
 // Services holds the run-independent capabilities the tools are built on.
 // Nil members disable their tools rather than panicking: a deployment without a
 // graph or without an embedding provider stays usable and degrades visibly.
 type Services struct {
-	Reader    *registry.QueryReader
-	Retriever *search.Retriever
-	Embedder  Embedder
-	Graph     *graph.Resolver
-	Compiler  *compiler.PinnedIRCompiler
-	Validator *validator.Validator
-	Executor  *validator.Executor
+	Reader     *registry.QueryReader
+	Retriever  *search.Retriever
+	Embedder   Embedder
+	Graph      *graph.Resolver
+	Compiler   *compiler.PinnedIRCompiler
+	Validator  *validator.Validator
+	Executor   *validator.Executor
+	Dictionary DictionaryMatcher
 }
 
 // RunContext identifies the question run a handler set belongs to.
