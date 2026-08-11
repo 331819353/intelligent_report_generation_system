@@ -367,6 +367,7 @@ const friendlyConnectionError = (cause: unknown) => {
 export function DataSourceCenterPage() {
   const searchParams = new URLSearchParams(window.location.search)
   const designSnapshot = import.meta.env.DEV && Boolean(searchParams.get('snapshot'))
+  const qaViewport1920 = designSnapshot && searchParams.get('qa') === '1920'
   const [sources, setSources] = useState<DataSourceRecord[]>(designSnapshot ? snapshotSources : [])
   const [loading, setLoading] = useState(!designSnapshot)
   const [notice, setNotice] = useState<Notice | null>(null)
@@ -442,16 +443,9 @@ export function DataSourceCenterPage() {
     attention: sources.filter(source => source.status === 'ERROR' || reviewStatusOf(source) === 'REJECTED').length,
   }), [sources])
   const selectedSource = useMemo(
-    () => sources.find(source => source.id === selectedSourceId) || null,
-    [selectedSourceId, sources],
+    () => sources.find(source => source.id === selectedSourceId) || (!detailDismissed ? sources[0] || null : null),
+    [detailDismissed, selectedSourceId, sources],
   )
-  useEffect(() => {
-    if (sources.length === 0) {
-      if (selectedSourceId) setSelectedSourceId('')
-      return
-    }
-    if (!detailDismissed && !sources.some(source => source.id === selectedSourceId)) setSelectedSourceId(sources[0].id)
-  }, [detailDismissed, selectedSourceId, sources])
   const replacingFileSource = useMemo(() => {
     if (draft.type !== 'EXCEL' || !draft.code.trim()) return null
     const code = draft.code.trim().toLocaleLowerCase()
@@ -1092,24 +1086,6 @@ export function DataSourceCenterPage() {
 	    await testDraftConnection()
 	  }
 
-  const changeStatus = async (source: DataSourceRecord) => {
-    const resume = source.status === 'DISABLED'
-    setBusyAction(`status:${source.id}`)
-    setNotice(null)
-    try {
-      if (resume) await dataSourceAPI.enable(source.id)
-      else await dataSourceAPI.disable(source.id)
-      const latest = await loadSources()
-      const updated = latest?.find(item => item.id === source.id)
-      if (updated) setDialog(current => current?.mode === 'view' && current.source?.id === updated.id ? { ...current, source: updated } : current)
-      setNotice({ tone: 'success', message: `已${resume ? '恢复' : '暂停'}“${source.name}”` })
-    } catch (cause) {
-      setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : `${resume ? '恢复' : '暂停'}数据源失败` })
-    } finally {
-      setBusyAction('')
-    }
-  }
-
   const testConnection = async (source: DataSourceRecord) => {
     setBusyAction(`test:${source.id}`)
     setNotice(null)
@@ -1252,7 +1228,7 @@ export function DataSourceCenterPage() {
             : '完善业务元数据'
   return (
     <AppShell
-      className={`data-source-shell${selectedSource ? ' has-detail' : ''}`}
+      className={`data-source-shell${selectedSource ? ' has-detail' : ''}${qaViewport1920 ? ' qa-viewport-1920' : ''}`}
       title="数据资产"
       eyebrow="数据与治理"
       titleMeta={<span className="data-source-title-meta">管理当前领域的数据连接、验证状态与元数据资产</span>}
@@ -1302,10 +1278,11 @@ export function DataSourceCenterPage() {
                 const subtitle = `${typeLabels[source.type]} · ${source.code}${source.description ? ` · ${source.description}` : ''}`
                 const health = connectionHealth(source)
                 const summary = metadataSummary(source)
-                const isSelected = selectedSourceId === source.id
+                const isSelected = selectedSource?.id === source.id
                 return <article className={`data-source-card${isSelected ? ' is-selected' : ''}${reviewLocked ? ' review-locked' : ''}`} role="row" aria-selected={isSelected} key={source.id}>
                   <AppButton className="data-source-card-open" type="button" aria-label={`查看${source.name}详情`} onClick={() => { setSelectedSourceId(source.id); setDetailDismissed(false) }}>
                     <span className="data-source-name-cell" role="cell">
+                      <span className={`data-source-selection-indicator${isSelected ? ' is-selected' : ''}`} aria-hidden="true">{isSelected ? '✓' : ''}</span>
                       <span className={`data-source-icon ${source.type.toLowerCase()}`}>{source.type === 'EXCEL' ? <FileXls size={23} weight="duotone" /> : <Database size={23} weight="duotone" />}</span>
                       <span className="data-source-main"><strong title={source.name}>{source.name}</strong><small title={subtitle}>{subtitle}</small></span>
                     </span>

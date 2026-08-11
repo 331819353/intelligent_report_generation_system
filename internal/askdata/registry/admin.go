@@ -17,15 +17,19 @@ import (
 type AdminResource string
 
 const (
-	AdminResourceSemanticModel AdminResource = "SEMANTIC_MODEL"
-	AdminResourceMeasure       AdminResource = "MEASURE"
-	AdminResourceMetric        AdminResource = "METRIC"
-	AdminResourceMetricVersion AdminResource = "METRIC_VERSION"
-	AdminResourceDimension     AdminResource = "DIMENSION"
-	AdminResourceBusinessTerm  AdminResource = "BUSINESS_TERM"
-	AdminResourceKPIBundle     AdminResource = "KPI_BUNDLE"
-	AdminResourceRelationship  AdminResource = "RELATIONSHIP"
-	AdminResourceRelease       AdminResource = "SEMANTIC_RELEASE"
+	AdminResourceSemanticModel    AdminResource = "SEMANTIC_MODEL"
+	AdminResourceMeasure          AdminResource = "MEASURE"
+	AdminResourceMetric           AdminResource = "METRIC"
+	AdminResourceMetricVersion    AdminResource = "METRIC_VERSION"
+	AdminResourceDimension        AdminResource = "DIMENSION"
+	AdminResourceBusinessTerm     AdminResource = "BUSINESS_TERM"
+	AdminResourceKPIBundle        AdminResource = "KPI_BUNDLE"
+	AdminResourceRelationship     AdminResource = "RELATIONSHIP"
+	AdminResourceMember           AdminResource = "MEMBER"
+	AdminResourceHierarchy        AdminResource = "HIERARCHY"
+	AdminResourceCertifiedExample AdminResource = "CERTIFIED_EXAMPLE"
+	AdminResourceMetricDimension  AdminResource = "METRIC_DIMENSION"
+	AdminResourceRelease          AdminResource = "SEMANTIC_RELEASE"
 )
 
 const (

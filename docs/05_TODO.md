@@ -67,8 +67,17 @@
       已改为：`ListObjects`/`GetObject` 支持状态过滤，不带 `status` 时返回全部状态，
       `?status=DRAFT|CERTIFIED|ACTIVE|DEPRECATED` 精确过滤，未知状态在存储层拒绝；
       写路径（Create/Update/Delete/可加性确认）仍固定 `DRAFT`，语义不变。
-- [ ] **SEM-READ-002（新）** — 补齐读取接口尚未覆盖的对象类型：维度成员、层级、认证问法、
-      指标维度绑定、评测用例（导入通道支持 12 类，读取接口目前覆盖 8 类）。
+- [x] **SEM-READ-002** — 补齐读取接口：新增维度成员、层级、认证问法、指标维度绑定
+      四类的列表/详情（`members`、`hierarchies`、`certified-examples`、`metric-dimensions`），
+      沿用同一套状态过滤与游标分页；这四类目前只能经导入通道写入，因此**只注册 GET**，
+      不注册未实现的写入路由。
+      **评测用例（EVAL_CASE）刻意不开放读取接口**：`evaluation_case_versions` 含
+      `set_type='SEALED'` 的密封集正文，而密封集正文不可显示、被查看样本必须立即退役
+      （02 §10.1、03 J-P08-04、06 §4.10）。开放普通读取会让持有 `SEMANTIC_VIEW` 的人
+      直接读到密封题面，使 95% 门禁失效。
+- [ ] **SEM-READ-003（新）** — 若确需查看密封评测用例，需单独设计**带退役副作用**的
+      受控接口：读取即标记该样本退役并记账，且与 `EVAL-*` 的分片轮换一致。
+      在此之前不得以任何形式暴露密封题面。
 - [ ] **WEB-007** — 语义管理与发布页面：按优先级切片交付——可加性/时间确认待办 → 指标建设与审批 → 维度成员/别名/层级 → 模型关系与评审 → 词典/黑话/KPI/认证问法 → 发布中心（Readiness/投影/评测/双人审批/激活/回滚）。
 - [x] **SEM-DICT-WIRE-001（新）** — 认证业务词典接入查询期：`dictionarypostgres.Loader` +
       `understanding.DictionaryMatcher` + `dictionarysearch.ExactHits` 此前是死代码，

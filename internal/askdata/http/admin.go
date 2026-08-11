@@ -155,6 +155,22 @@ func newProtectedAdminHandlerWithImports(
 		mux.HandleFunc("PUT "+item, handler.updateDraft)
 		mux.HandleFunc("DELETE "+item, handler.deleteDraft)
 	}
+	// 只读对象类型：成员、层级、认证问法与指标维度绑定目前只能经导入通道写入，
+	// 因此只注册 GET，不注册 POST/PUT/DELETE——注册一个没有实现的写入路由，
+	// 会把「不支持」变成运行期错误。
+	//
+	// 评测用例（EVAL_CASE）**刻意不在此列**：evaluation_case_versions 含
+	// set_type='SEALED' 的密封集正文，而密封集正文不可显示、被查看样本必须立即退役
+	// （02 §10.1、03 J-P08-04、06 §4.10）。开放一个普通读取接口会让持有
+	// SEMANTIC_VIEW 的人直接读到密封题面，使 95% 门禁失效。
+	// 若确需查看，应走单独的、带退役副作用的受控接口，见 05_TODO SEM-READ-002。
+	for _, path := range []string{
+		"members", "hierarchies", "certified-examples", "metric-dimensions",
+	} {
+		collection := "/api/v1/askdata/semantic/" + path
+		mux.HandleFunc("GET "+collection, handler.listDrafts)
+		mux.HandleFunc("GET "+collection+"/{id}", handler.getDraft)
+	}
 	mux.HandleFunc("POST /api/v1/askdata/semantic/releases", handler.createReleaseDraft)
 	if handler.lifecycle != nil {
 		mux.HandleFunc("GET /api/v1/askdata/semantic/releases/{id}/lifecycle", handler.getReleaseLifecycle)
@@ -773,6 +789,14 @@ func adminResourceFromPath(path string) (registry.AdminResource, error) {
 		return registry.AdminResourceKPIBundle, nil
 	case "relationships":
 		return registry.AdminResourceRelationship, nil
+	case "members":
+		return registry.AdminResourceMember, nil
+	case "hierarchies":
+		return registry.AdminResourceHierarchy, nil
+	case "certified-examples":
+		return registry.AdminResourceCertifiedExample, nil
+	case "metric-dimensions":
+		return registry.AdminResourceMetricDimension, nil
 	default:
 		return "", fmt.Errorf("%w: unsupported semantic resource", registry.ErrRegistryInvalidRequest)
 	}

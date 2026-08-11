@@ -1059,6 +1059,22 @@ func getObjectTx(
 		var value Relationship
 		err = scanRelationship(tx.QueryRow(ctx, relationshipAdminSelect+` WHERE id=$1 AND domain_id=$2 AND ($3::text IS NULL OR status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
 		return value, adminNoRows(err)
+	case AdminResourceMember:
+		var value DimensionMember
+		err = scanDimensionMember(tx.QueryRow(ctx, dimensionMemberAdminSelect+` WHERE id=$1 AND domain_id=$2 AND ($3::text IS NULL OR status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
+		return value, adminNoRows(err)
+	case AdminResourceHierarchy:
+		var value Hierarchy
+		err = scanHierarchy(tx.QueryRow(ctx, hierarchyAdminSelect+` WHERE hierarchy.id=$1 AND hierarchy.domain_id=$2 AND ($3::text IS NULL OR hierarchy.status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
+		return value, adminNoRows(err)
+	case AdminResourceCertifiedExample:
+		var value CertifiedExample
+		err = scanCertifiedExample(tx.QueryRow(ctx, certifiedExampleAdminSelect+` WHERE id=$1 AND domain_id=$2 AND ($3::text IS NULL OR status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
+		return value, adminNoRows(err)
+	case AdminResourceMetricDimension:
+		var value MetricDimension
+		err = scanMetricDimension(tx.QueryRow(ctx, metricDimensionAdminSelect+` WHERE id=$1 AND domain_id=$2 AND ($3::text IS NULL OR status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
+		return value, adminNoRows(err)
 	default:
 		return nil, fmt.Errorf("%w: unsupported semantic resource", ErrRegistryInvalidRequest)
 	}
@@ -1208,6 +1224,69 @@ func listObjectsTx(
 			items = append(items, item)
 		}
 		return finishAdminPage(items, limit, func(value Relationship) (time.Time, string) { return value.UpdatedAt, value.ID }, rows.Err())
+	case AdminResourceMember:
+		rows, err := tx.Query(ctx, dimensionMemberAdminSelect+suffix, args...)
+		if err != nil {
+			return AdminPage{}, err
+		}
+		defer rows.Close()
+		items := []DimensionMember{}
+		for rows.Next() {
+			var item DimensionMember
+			if err := scanDimensionMember(rows, &item); err != nil {
+				return AdminPage{}, err
+			}
+			items = append(items, item)
+		}
+		return finishAdminPage(items, limit, func(value DimensionMember) (time.Time, string) { return value.UpdatedAt, value.ID }, rows.Err())
+	case AdminResourceHierarchy:
+		hierarchySuffix := ` WHERE hierarchy.domain_id=$1 AND ($5::text IS NULL OR hierarchy.status=$5)
+			AND ($2::timestamptz IS NULL OR (hierarchy.updated_at,hierarchy.id)<($2,$3::uuid))
+			ORDER BY hierarchy.updated_at DESC,hierarchy.id DESC LIMIT $4`
+		rows, err := tx.Query(ctx, hierarchyAdminSelect+hierarchySuffix, args...)
+		if err != nil {
+			return AdminPage{}, err
+		}
+		defer rows.Close()
+		items := []Hierarchy{}
+		for rows.Next() {
+			var item Hierarchy
+			if err := scanHierarchy(rows, &item); err != nil {
+				return AdminPage{}, err
+			}
+			items = append(items, item)
+		}
+		return finishAdminPage(items, limit, func(value Hierarchy) (time.Time, string) { return value.UpdatedAt, value.ID }, rows.Err())
+	case AdminResourceCertifiedExample:
+		rows, err := tx.Query(ctx, certifiedExampleAdminSelect+suffix, args...)
+		if err != nil {
+			return AdminPage{}, err
+		}
+		defer rows.Close()
+		items := []CertifiedExample{}
+		for rows.Next() {
+			var item CertifiedExample
+			if err := scanCertifiedExample(rows, &item); err != nil {
+				return AdminPage{}, err
+			}
+			items = append(items, item)
+		}
+		return finishAdminPage(items, limit, func(value CertifiedExample) (time.Time, string) { return value.UpdatedAt, value.ID }, rows.Err())
+	case AdminResourceMetricDimension:
+		rows, err := tx.Query(ctx, metricDimensionAdminSelect+suffix, args...)
+		if err != nil {
+			return AdminPage{}, err
+		}
+		defer rows.Close()
+		items := []MetricDimension{}
+		for rows.Next() {
+			var item MetricDimension
+			if err := scanMetricDimension(rows, &item); err != nil {
+				return AdminPage{}, err
+			}
+			items = append(items, item)
+		}
+		return finishAdminPage(items, limit, func(value MetricDimension) (time.Time, string) { return value.UpdatedAt, value.ID }, rows.Err())
 	default:
 		return AdminPage{}, fmt.Errorf("%w: unsupported semantic resource", ErrRegistryInvalidRequest)
 	}
@@ -1325,6 +1404,38 @@ const kpiBundleAdminSelect = `SELECT
 	  ON identity.id=version.kpi_bundle_id AND identity.tenant_id=version.tenant_id
 	 AND identity.domain_id=version.domain_id`
 
+const dimensionMemberAdminSelect = `SELECT
+	id::text,tenant_id::text,domain_id::text,member_id::text,version_no,status,
+	content_hash,created_by::text,created_at,updated_at,dimension_version_id::text,
+	member_key,member_key_hash,canonical_label,
+	COALESCE(parent_member_version_id::text,''),sensitivity
+	FROM askdata.dimension_members`
+
+const hierarchyAdminSelect = `SELECT
+	hierarchy.id::text,hierarchy.tenant_id::text,hierarchy.domain_id::text,
+	hierarchy.hierarchy_id::text,hierarchy.version_no,hierarchy.status,
+	hierarchy.content_hash,hierarchy.owner_id::text,hierarchy.created_at,hierarchy.updated_at,
+	hierarchy.code::text,hierarchy.name,hierarchy.description,
+	COALESCE((
+	  SELECT array_agg(level.dimension_version_id::text ORDER BY level.ordinal)
+	  FROM askdata.hierarchy_levels AS level
+	  WHERE level.hierarchy_version_id=hierarchy.id AND level.tenant_id=hierarchy.tenant_id
+	),'{}'::text[])
+	FROM askdata.hierarchies AS hierarchy`
+
+const certifiedExampleAdminSelect = `SELECT
+	id::text,tenant_id::text,domain_id::text,certified_example_id::text,version_no,status,
+	content_hash,owner_id::text,created_at,updated_at,question,
+	expected_metric_version_ids::text[],expected_dimension_version_ids::text[],
+	expected_time_expression,notes
+	FROM askdata.certified_example_versions`
+
+const metricDimensionAdminSelect = `SELECT
+	id::text,tenant_id::text,domain_id::text,metric_dimension_id::text,version_no,status,
+	content_hash,owner_id::text,created_at,updated_at,
+	metric_version_id::text,dimension_version_id::text,compatible,role
+	FROM askdata.metric_dimension_versions`
+
 const relationshipAdminSelect = `SELECT
 	id::text,tenant_id::text,domain_id::text,relationship_id::text,version_no,status,
 	content_hash,owner_id::text,created_at,updated_at,left_model_version_id::text,
@@ -1411,6 +1522,36 @@ func scanKPIBundle(row rowScanner, value *KPIBundle) error {
 		return err
 	}
 	return json.Unmarshal(items, &value.Items)
+}
+
+func scanDimensionMember(row rowScanner, value *DimensionMember) error {
+	return row.Scan(&value.ID, &value.TenantID, &value.DomainID, &value.ObjectID,
+		&value.VersionNo, &value.Status, &value.ContentHash, &value.OwnerID,
+		&value.CreatedAt, &value.UpdatedAt, &value.DimensionVersionID,
+		&value.MemberKey, &value.MemberKeyHash, &value.CanonicalLabel,
+		&value.ParentMemberVersionID, &value.Sensitivity)
+}
+
+func scanHierarchy(row rowScanner, value *Hierarchy) error {
+	return row.Scan(&value.ID, &value.TenantID, &value.DomainID, &value.ObjectID,
+		&value.VersionNo, &value.Status, &value.ContentHash, &value.OwnerID,
+		&value.CreatedAt, &value.UpdatedAt, &value.Code, &value.Name,
+		&value.Description, &value.DimensionVersionIDs)
+}
+
+func scanCertifiedExample(row rowScanner, value *CertifiedExample) error {
+	return row.Scan(&value.ID, &value.TenantID, &value.DomainID, &value.ObjectID,
+		&value.VersionNo, &value.Status, &value.ContentHash, &value.OwnerID,
+		&value.CreatedAt, &value.UpdatedAt, &value.Question,
+		&value.ExpectedMetricVersionIDs, &value.ExpectedDimensionVersionIDs,
+		&value.ExpectedTimeExpression, &value.Notes)
+}
+
+func scanMetricDimension(row rowScanner, value *MetricDimension) error {
+	return row.Scan(&value.ID, &value.TenantID, &value.DomainID, &value.ObjectID,
+		&value.VersionNo, &value.Status, &value.ContentHash, &value.OwnerID,
+		&value.CreatedAt, &value.UpdatedAt, &value.MetricVersionID,
+		&value.DimensionVersionID, &value.Compatible, &value.Role)
 }
 
 func scanRelationship(row rowScanner, value *Relationship) error {

@@ -245,6 +245,39 @@ type Hierarchy struct {
 	DimensionVersionIDs []string `json:"dimensionVersionIds"`
 }
 
+// DimensionMember is one governed member value of a dimension. Its identity
+// table records created_by rather than owner_id; that is surfaced as OwnerID so
+// every governed object reads the same way.
+type DimensionMember struct {
+	VersionIdentity
+	DimensionVersionID    string `json:"dimensionVersionId"`
+	MemberKey             string `json:"memberKey"`
+	MemberKeyHash         string `json:"memberKeyHash"`
+	CanonicalLabel        string `json:"canonicalLabel"`
+	ParentMemberVersionID string `json:"parentMemberVersionId,omitempty"`
+	Sensitivity           string `json:"sensitivity"`
+}
+
+// CertifiedExample is a certified question and the objects it should bind to.
+// It never carries a stored plan; see toolhost.CertifiedExampleSummary.
+type CertifiedExample struct {
+	VersionIdentity
+	Question                    string   `json:"question"`
+	ExpectedMetricVersionIDs    []string `json:"expectedMetricVersionIds"`
+	ExpectedDimensionVersionIDs []string `json:"expectedDimensionVersionIds"`
+	ExpectedTimeExpression      string   `json:"expectedTimeExpression,omitempty"`
+	Notes                       string   `json:"notes,omitempty"`
+}
+
+// MetricDimension is a governed metric/dimension compatibility binding.
+type MetricDimension struct {
+	VersionIdentity
+	MetricVersionID    string `json:"metricVersionId"`
+	DimensionVersionID string `json:"dimensionVersionId"`
+	Compatible         bool   `json:"compatible"`
+	Role               string `json:"role"`
+}
+
 type Relationship struct {
 	VersionIdentity
 	LeftModelVersionID   string           `json:"leftModelVersionId"`

@@ -555,3 +555,60 @@ func decodeAdminResult(t *testing.T, response *httptest.ResponseRecorder) regist
 	}
 	return result
 }
+
+// 新增的四类只读对象必须能被读取，且不能暴露写入路由——
+// 它们目前只能经导入通道写入，注册未实现的写入路由会把「不支持」变成运行期错误。
+func TestReadOnlySemanticResourcesExposeOnlyReads(t *testing.T) {
+	scope := testAdminScope()
+	backend := &fakeAdminBackend{listPage: registry.AdminPage{Items: []registry.DimensionMember{}}}
+	handler := testAdminHandler(backend, scope)
+
+	readable := map[string]registry.AdminResource{
+		"members":            registry.AdminResourceMember,
+		"hierarchies":        registry.AdminResourceHierarchy,
+		"certified-examples": registry.AdminResourceCertifiedExample,
+		"metric-dimensions":  registry.AdminResourceMetricDimension,
+	}
+	for path, resource := range readable {
+		list := httptest.NewRequest(http.MethodGet, "/api/v1/askdata/semantic/"+path+"?limit=10", nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, list)
+		if response.Code != http.StatusOK || backend.lastResource != resource {
+			t.Fatalf("GET %s = %d resource=%s", path, response.Code, backend.lastResource)
+		}
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+			target := "/api/v1/askdata/semantic/" + path
+			if method != http.MethodPost {
+				target += "/" + uuid.NewString()
+			}
+			write := httptest.NewRequest(method, target, strings.NewReader(`{}`))
+			write.Header.Set("Content-Type", "application/json")
+			write.Header.Set("Idempotency-Key", "read-only-probe-0001")
+			writeResponse := httptest.NewRecorder()
+			handler.ServeHTTP(writeResponse, write)
+			if writeResponse.Code == http.StatusOK || writeResponse.Code == http.StatusCreated {
+				t.Fatalf("%s %s must not be routed, got %d", method, target, writeResponse.Code)
+			}
+		}
+	}
+}
+
+// 密封集正文不可显示：评测用例绝不能有普通读取路由，否则持有 SEMANTIC_VIEW
+// 的人可以直接读到密封题面，使 95% 门禁失效。
+func TestSealedEvaluationCasesHaveNoReadRoute(t *testing.T) {
+	scope := testAdminScope()
+	backend := &fakeAdminBackend{}
+	handler := testAdminHandler(backend, scope)
+
+	for _, path := range []string{"evaluation-cases", "eval-cases"} {
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/askdata/semantic/"+path, nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code == http.StatusOK {
+			t.Fatalf("GET %s must not expose sealed evaluation content", path)
+		}
+	}
+	if backend.listCalls != 0 {
+		t.Fatalf("sealed evaluation read reached the backend %d times", backend.listCalls)
+	}
+}
