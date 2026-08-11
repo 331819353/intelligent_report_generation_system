@@ -17,10 +17,12 @@ import {
   ShieldCheck,
   User,
   WarningCircle,
+  X,
 } from '@phosphor-icons/react'
 import { useEffect, useMemo, useState, type ComponentType } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
+import { AppButton } from '../components/AppButton'
 import { currentDomain } from '../lib/domain-context'
 import { formatHomeTime, workItemDestination, workTypeLabel } from '../lib/home-data'
 import { homeAPI, type WorkInboxItem } from '../lib/home-api'
@@ -157,6 +159,7 @@ function WorkCenterPage({ mode }: { mode: WorkCenterMode }) {
   const [selectedID, setSelectedID] = useState(mode === 'tasks' ? snapshotItems[10].objectId : snapshotItems[0].objectId)
   const [reloadRevision, setReloadRevision] = useState(0)
   const [notice, setNotice] = useState('')
+  const [nextPath, setNextPath] = useState('')
   const [actionMode, setActionMode] = useState<InlineTaskAction | null>(null)
   const [actionNote, setActionNote] = useState('')
   const [busyAction, setBusyAction] = useState(false)
@@ -248,7 +251,13 @@ function WorkCenterPage({ mode }: { mode: WorkCenterMode }) {
         setItems(current => current.filter(value => value.objectId !== item.objectId))
         setReloadRevision(value => value + 1)
       }
-      setNotice(action === 'APPROVE' ? '事项已批准，来源状态已同步更新' : action === 'REJECT' ? '事项已驳回，意见已提交给申请人' : '事项已开始处理')
+      const accessApproved = action === 'APPROVE' && item.type === 'DOMAIN_ACCESS_APPROVAL'
+      setNextPath(accessApproved
+        ? `/platform-management/users?userId=${encodeURIComponent(item.requesterUserId ?? '')}&from=approval${snapshot ? '&snapshot=user-permissions' : ''}`
+        : '')
+      setNotice(accessApproved
+        ? '领域申请已批准，可继续确认成员角色与生效权限'
+        : action === 'APPROVE' ? '事项已批准，来源状态已同步更新' : action === 'REJECT' ? '事项已驳回，意见已提交给申请人' : '事项已开始处理')
       setActionMode(null)
       setActionNote('')
     } catch (cause) {
@@ -339,6 +348,6 @@ function WorkCenterPage({ mode }: { mode: WorkCenterMode }) {
         </> : <div className="tasks-state"><ClipboardText size={28} /><strong>选择一项任务</strong><small>查看来源、SLA 和可执行动作</small></div>}
       </aside>
     </section>
-    {notice && <div className="home-notice" role="status"><ClipboardText size={17} /><span>{notice}</span><button type="button" aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div>}
+    {notice && <div className="home-notice" role="status"><ClipboardText size={17} /><span>{notice}</span>{nextPath && <AppButton link className="home-notice-next" type="button" onClick={() => navigate(nextPath)}>配置成员权限<CaretRight size={14} /></AppButton>}<AppButton text circle type="button" aria-label="关闭提示" onClick={() => { setNotice(''); setNextPath('') }}><X size={15} /></AppButton></div>}
   </AppShell>
 }

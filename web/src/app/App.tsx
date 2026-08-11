@@ -13,6 +13,7 @@ import { ReportPublishReviewPage } from '../pages/ReportPublishReviewPage'
 import { HomePage } from '../pages/HomePage'
 import { ApprovalsPage, TasksPage } from '../pages/TasksPage'
 import { DecisionsPage } from '../pages/DecisionsPage'
+import { UserPermissionsPage } from '../pages/UserPermissionsPage'
 import { RequireAuth } from '../components/RequireAuth'
 import { RequirePlatformAdministrator } from '../components/RequirePlatformAdministrator'
 import { RequireBusinessDomain } from '../components/RequireBusinessDomain'
@@ -37,6 +38,7 @@ export function App() {
       <Route path="/tasks" element={<RequireAuth><RequireBusinessDomain><TasksPage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="/decisions" element={<RequireAuth><RequireBusinessDomain><DecisionsPage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="/platform-management" element={<Navigate to="/platform-management/domains" replace />} />
+      <Route path="/platform-management/users" element={<RequireAuth><RequirePlatformAdministrator><UserPermissionsPage /></RequirePlatformAdministrator></RequireAuth>} />
       <Route path="/platform-management/:section" element={<RequireAuth><RequirePlatformAdministrator><ManagementCenterPage /></RequirePlatformAdministrator></RequireAuth>} />
       <Route path="/platform-settings" element={<Navigate to="/platform-management/domains" replace />} />
       <Route path="/permissions" element={<Navigate to="/platform-management/permissions" replace />} />

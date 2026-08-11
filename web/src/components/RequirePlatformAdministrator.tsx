@@ -1,5 +1,5 @@
 import { PropsWithChildren, useEffect, useState } from 'react'
-import { Navigate } from 'react-router-dom'
+import { Navigate, useLocation } from 'react-router-dom'
 import { administrationAPI } from '../lib/administration'
 
 /**
@@ -7,9 +7,12 @@ import { administrationAPI } from '../lib/administration'
  * 直接访问路由做授权，避免普通用户短暂看到管理页面或触发管理数据请求。
  */
 export function RequirePlatformAdministrator({ children }: PropsWithChildren) {
+  const location = useLocation()
+  const designSnapshot = import.meta.env.DEV && Boolean(new URLSearchParams(location.search).get('snapshot'))
   const [allowed, setAllowed] = useState<boolean | null>(null)
 
   useEffect(() => {
+    if (designSnapshot) return undefined
     let cancelled = false
     void administrationAPI.canManage()
       .then(result => {
@@ -19,9 +22,10 @@ export function RequirePlatformAdministrator({ children }: PropsWithChildren) {
         if (!cancelled) setAllowed(false)
       })
     return () => { cancelled = true }
-  }, [])
+  }, [designSnapshot])
 
-  if (allowed === null) return null
-  if (!allowed) return <Navigate to="/data-sources" replace />
+  const resolvedAllowed = designSnapshot ? true : allowed
+  if (resolvedAllowed === null) return null
+  if (!resolvedAllowed) return <Navigate to="/data-sources" replace />
   return children
 }

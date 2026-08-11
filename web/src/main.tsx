@@ -16,6 +16,7 @@ import './styles/shell-v2.css'
 import './styles/home.css'
 import './styles/tasks.css'
 import './styles/decisions.css'
+import './styles/user-permissions.css'
 
 // 在严格模式和浏览器路由上下文中挂载应用根组件。
 createRoot(document.getElementById('root')!).render(

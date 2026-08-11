@@ -1,0 +1,144 @@
+package tools
+
+import (
+	"context"
+	"testing"
+
+	"intelligent-report-generation-system/internal/askdata"
+	"intelligent-report-generation-system/internal/askdata/compiler"
+	"intelligent-report-generation-system/internal/askdata/toolhost"
+)
+
+func testRun(t *testing.T) RunContext {
+	t.Helper()
+	domainID := askdata.ID("11111111-1111-4111-8111-111111111111")
+	scope, err := askdata.NewPolicyScope(
+		"33333333-3333-4333-8333-333333333333",
+		"44444444-4444-4444-8444-444444444444",
+		[]askdata.ID{domainID},
+		[]askdata.ID{"55555555-5555-4555-8555-555555555555"},
+		askdata.ReleaseRef{
+			ReleaseID:   "22222222-2222-4222-8222-222222222222",
+			ContentHash: askdata.HashBytes([]byte("release")),
+		},
+	)
+	if err != nil {
+		t.Fatalf("build policy scope: %v", err)
+	}
+	return RunContext{
+		Scope: scope, DomainID: domainID,
+		RunID: "66666666-6666-4666-8666-666666666666",
+	}
+}
+
+func testAuthorization(run RunContext) toolhost.AuthorizationContext {
+	return toolhost.AuthorizationContext{
+		Scope: run.Scope, DomainID: run.DomainID,
+		Permissions: []toolhost.Permission{toolhost.PermissionSemanticRead},
+	}
+}
+
+// 一个 Binding 只服务它自己的 Run：授权上下文的领域、策略哈希或 Release
+// 与该 Run 不一致时必须拒绝，否则一次调用可能在别的 actor 的策略范围内执行。
+func TestBindingRefusesAuthorizationFromAnotherRun(t *testing.T) {
+	run := testRun(t)
+	binding, err := NewBinding(Services{}, run)
+	if err != nil {
+		t.Fatalf("NewBinding() error = %v", err)
+	}
+	if err := binding.authorize(testAuthorization(run)); err != nil {
+		t.Fatalf("matching authorization rejected: %v", err)
+	}
+
+	foreignDomain := testAuthorization(run)
+	foreignDomain.DomainID = "77777777-7777-4777-8777-777777777777"
+	if err := binding.authorize(foreignDomain); err == nil {
+		t.Fatal("a foreign domain must be rejected")
+	}
+
+	foreignRelease := testAuthorization(run)
+	foreignRelease.Scope.Release = askdata.ReleaseRef{
+		ReleaseID:   "88888888-8888-4888-8888-888888888888",
+		ContentHash: askdata.HashBytes([]byte("other-release")),
+	}
+	if err := binding.authorize(foreignRelease); err == nil {
+		t.Fatal("a different pinned release must be rejected")
+	}
+
+	foreignPolicy := testAuthorization(run)
+	foreignPolicy.Scope.PolicyHash = askdata.HashBytes([]byte("other-policy"))
+	if err := binding.authorize(foreignPolicy); err == nil {
+		t.Fatal("a different policy scope must be rejected")
+	}
+}
+
+// 计划哈希是 Run 内作用域：另一个 Run 编译出的计划不能在这里被校验或执行，
+// 否则调用方可以执行在别的策略范围下编译的计划。
+func TestPlanHashesAreScopedToTheRunThatCompiledThem(t *testing.T) {
+	run := testRun(t)
+	binding, err := NewBinding(Services{}, run)
+	if err != nil {
+		t.Fatalf("NewBinding() error = %v", err)
+	}
+	hash := askdata.HashBytes([]byte("plan"))
+	if _, ok := binding.plans.get(hash); ok {
+		t.Fatal("a fresh run must not resolve any plan hash")
+	}
+	binding.plans.put(hash, compiler.QueryArtifact{PlanHash: hash})
+	if _, ok := binding.plans.get(hash); !ok {
+		t.Fatal("a plan compiled in this run must resolve")
+	}
+
+	other, err := NewBinding(Services{}, testRun(t))
+	if err != nil {
+		t.Fatalf("NewBinding() error = %v", err)
+	}
+	if _, ok := other.plans.get(hash); ok {
+		t.Fatal("a plan compiled in another run must not resolve")
+	}
+}
+
+// 未配置的能力必须显式报 ErrToolUnavailable，不能返回一个伪造的空成功结果，
+// 否则「没接线」会被当成「没有数据」。
+func TestUnavailableCapabilitiesFailExplicitlyInsteadOfReturningEmptySuccess(t *testing.T) {
+	run := testRun(t)
+	binding, err := NewBinding(Services{}, run)
+	if err != nil {
+		t.Fatalf("NewBinding() error = %v", err)
+	}
+	authorization := testAuthorization(run)
+	ctx := context.Background()
+
+	if _, err := binding.searchSemanticObjects(ctx, authorization,
+		toolhost.SearchSemanticObjectsInput{Mention: "销售额", Limit: 10}); err != ErrToolUnavailable {
+		t.Fatalf("search without a retriever = %v", err)
+	}
+	if _, err := binding.getSemanticContracts(ctx, authorization,
+		toolhost.GetSemanticContractsInput{}); err != ErrToolUnavailable {
+		t.Fatalf("contracts without a reader = %v", err)
+	}
+	if _, err := binding.resolveGraphPlan(ctx, authorization,
+		toolhost.SemanticBundleInput{}); err != ErrToolUnavailable {
+		t.Fatalf("graph plan without a resolver = %v", err)
+	}
+	if _, err := binding.compileSemanticQuery(ctx, authorization,
+		toolhost.CompileSemanticQueryInput{}); err != ErrToolUnavailable {
+		t.Fatalf("compile without a compiler = %v", err)
+	}
+}
+
+// Run 上下文必须完整且固定 Release，否则不允许构造任何工具处理器。
+func TestBindingRequiresACompleteRunContext(t *testing.T) {
+	valid := testRun(t)
+	for name, mutate := range map[string]func(*RunContext){
+		"missing run id":  func(run *RunContext) { run.RunID = "" },
+		"missing domain":  func(run *RunContext) { run.DomainID = "" },
+		"missing release": func(run *RunContext) { run.Scope.Release = askdata.ReleaseRef{} },
+	} {
+		broken := valid
+		mutate(&broken)
+		if _, err := NewBinding(Services{}, broken); err == nil {
+			t.Fatalf("%s must be rejected", name)
+		}
+	}
+}

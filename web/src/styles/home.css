@@ -182,6 +182,7 @@
 .home-notice > svg { flex: none; color: #1677ff; }
 .home-notice .ant-btn { width: 26px; height: 26px; min-width: 26px; padding: 0; color: #718096; }
 .home-notice .ant-btn:hover { background: #e9f1ff; color: #1677ff; }
+.home-notice .ant-btn.home-notice-next { width: auto; min-width: max-content; padding: 0 5px; color: #0872d3; font-weight: 650; }
 
 @keyframes home-spin { to { transform: rotate(360deg); } }
 
