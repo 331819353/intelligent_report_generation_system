@@ -83,6 +83,15 @@ type PermissionGrant struct {
 	CreatedAt   time.Time  `json:"createdAt"`
 }
 
+type PublicationImpact struct {
+	VisibleCount      int `json:"visibleCount"`
+	EditableCount     int `json:"editableCount"`
+	ActiveShareCount  int `json:"activeShareCount"`
+	SubscriptionCount int `json:"subscriptionCount"`
+	CurrentVersionNo  int `json:"currentVersionNo"`
+	TargetVersionNo   int `json:"targetVersionNo"`
+}
+
 type GrantInput struct {
 	SubjectType string     `json:"subjectType"`
 	SubjectID   askdata.ID `json:"subjectId"`

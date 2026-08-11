@@ -1,5 +1,5 @@
 import { PropsWithChildren, useEffect, useState } from 'react'
-import { Navigate } from 'react-router-dom'
+import { Navigate, useLocation } from 'react-router-dom'
 import { administrationAPI } from '../lib/administration'
 
 /**
@@ -7,9 +7,12 @@ import { administrationAPI } from '../lib/administration'
  * 活动领域；尚未加入领域的普通用户进入领域申请页。
  */
 export function RequireBusinessDomain({ children }: PropsWithChildren) {
+  const location = useLocation()
+  const designSnapshot = import.meta.env.DEV && Boolean(new URLSearchParams(location.search).get('snapshot'))
   const [destination, setDestination] = useState<'allowed' | 'platform' | 'access' | null>(null)
 
   useEffect(() => {
+    if (designSnapshot) return undefined
     let cancelled = false
     void Promise.all([
       administrationAPI.canManage(),
@@ -23,10 +26,11 @@ export function RequireBusinessDomain({ children }: PropsWithChildren) {
       if (!cancelled) setDestination('access')
     })
     return () => { cancelled = true }
-  }, [])
+  }, [designSnapshot])
 
-  if (destination === null) return null
-  if (destination === 'platform') return <Navigate to="/platform-management/domains" replace />
-  if (destination === 'access') return <Navigate to="/domain-access" replace />
+  const resolvedDestination = designSnapshot ? 'allowed' : destination
+  if (resolvedDestination === null) return null
+  if (resolvedDestination === 'platform') return <Navigate to="/platform-management/domains" replace />
+  if (resolvedDestination === 'access') return <Navigate to="/domain-access" replace />
   return children
 }

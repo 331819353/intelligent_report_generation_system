@@ -1,6 +1,7 @@
-import { Database, ShieldCheck, Stack } from '@phosphor-icons/react'
+import { Eye, EyeSlash, LockKey, ShieldCheck, User, UserFocus } from '@phosphor-icons/react'
 import { FormEvent, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { AppButton } from '../components/AppButton'
 import { RequestError } from '../lib/api'
 import { login, register } from '../lib/auth'
 import { administrationAPI } from '../lib/administration'
@@ -10,7 +11,16 @@ export function LoginPage() {
   const navigate = useNavigate()
   const [mode, setMode] = useState<'login' | 'register'>('login')
   const [error, setError] = useState('')
+  const [supportNote, setSupportNote] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [passwordVisible, setPasswordVisible] = useState(false)
+
+  function switchMode(nextMode: 'login' | 'register') {
+    setMode(nextMode)
+    setError('')
+    setSupportNote('')
+    setPasswordVisible(false)
+  }
 
   /** 校验必填字段并提交登录请求，期间阻止重复提交。 */
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -39,7 +49,7 @@ export function LoginPage() {
         administrationAPI.listDomains(),
         administrationAPI.canManage(),
       ])
-      navigate(platformAdministrator ? '/platform-management/domains' : domains.length > 0 ? '/data-sources' : '/domain-access')
+      navigate(domains.length > 0 ? '/home' : platformAdministrator ? '/platform-management/domains' : '/domain-access')
     } catch (cause) {
       setError(cause instanceof RequestError
         ? cause.detail.message
@@ -51,40 +61,70 @@ export function LoginPage() {
 
   return (
     <main className="login-page">
-      <section className="login-story">
-        <div className="login-brand"><img className="brand-logo" src="/haier-logo.svg" alt="Haier 海尔" /><div><strong>数据配置管理平台</strong><span>Data Administration</span></div></div>
-        <div className="login-story-copy">
-          <span className="eyebrow">DATA ADMINISTRATION</span>
-          <h1>统一管理权限、数据源与数据集。</h1>
-          <p>在一个清晰、可追溯的配置空间内完成访问控制、数据接入和数据集设计。</p>
-          <ul className="login-benefits">
-            <li><ShieldCheck aria-hidden="true" weight="fill" /><span><strong>平台管理</strong><small>统一管理领域、权限、审批与运行状态</small></span></li>
-            <li><Database aria-hidden="true" weight="fill" /><span><strong>数据源配置</strong><small>集中维护数据库与文件数据连接</small></span></li>
-            <li><Stack aria-hidden="true" weight="fill" /><span><strong>数据集配置</strong><small>设计、校验并发布可复用数据集</small></span></li>
-          </ul>
-        </div>
-        <p className="login-story-footer">ACCESS · SOURCE · DATASET</p>
-      </section>
-      <section className="login-panel">
-        <form onSubmit={submit}>
-          <div className="login-mode-switch" role="tablist" aria-label="账号操作">
-            <button type="button" role="tab" aria-selected={mode === 'login'} className={mode === 'login' ? 'active' : ''} onClick={() => { setMode('login'); setError('') }}>登录</button>
-            <button type="button" role="tab" aria-selected={mode === 'register'} className={mode === 'register' ? 'active' : ''} onClick={() => { setMode('register'); setError('') }}>注册</button>
+      <section className="login-story" aria-labelledby="login-story-title">
+        <header className="login-brand">
+          <img className="brand-logo" src="/haier-logo.svg" alt="Haier 海尔" />
+          <div>
+            <strong>智能分析决策平台</strong>
+            <span>INTELLIGENT ANALYTICS &amp; DECISION PLATFORM</span>
           </div>
-          <span className="eyebrow">{mode === 'register' ? '创建账号' : '欢迎回来'}</span>
-          <h2>{mode === 'register' ? '注册数据配置账号' : '登录数据配置管理平台'}</h2>
-          <p className="login-form-intro">{mode === 'register' ? '注册只创建账号，领域归属由申请或管理员分配。' : '使用工号或邮箱进入你的工作空间。'}</p>
-          {mode === 'register' && <label>姓名<input name="displayName" autoComplete="name" placeholder="请输入姓名" /></label>}
-          {mode === 'register' && <label>工号<input name="employeeNo" autoComplete="username" maxLength={32} placeholder="例如：A10248" /></label>}
+        </header>
+
+        <div className="login-story-copy">
+          <h1 id="login-story-title">深海洞察 · 智见未来</h1>
+          <p>汇聚数据价值，洞察业务本质，驱动智能决策。</p>
+        </div>
+
+        <div className="login-landscape" aria-hidden="true">
+          <img src="/login-data-landscape.png" alt="" />
+          <span className="login-landscape-label label-insight">洞察</span>
+          <span className="login-landscape-label label-analysis">分析</span>
+          <span className="login-landscape-label label-decision">决策</span>
+        </div>
+
+        <footer className="login-story-footer">
+          <span><ShieldCheck size={24} weight="regular" aria-hidden="true" />安全连接</span>
+          <i aria-hidden="true" />
+          <span><LockKey size={23} weight="regular" aria-hidden="true" />权限隔离</span>
+          <i aria-hidden="true" />
+          <span>© 2026 Haier. All Rights Reserved.</span>
+        </footer>
+      </section>
+
+      <section className="login-panel">
+        <form onSubmit={submit} data-mode={mode}>
+          <div className="login-mode-switch" role="tablist" aria-label="账号操作">
+            <AppButton text type="button" role="tab" aria-selected={mode === 'login'} className={mode === 'login' ? 'login-mode-tab active' : 'login-mode-tab'} onClick={() => switchMode('login')}>登录</AppButton>
+            <AppButton text type="button" role="tab" aria-selected={mode === 'register'} className={mode === 'register' ? 'login-mode-tab active' : 'login-mode-tab'} onClick={() => switchMode('register')}>注册</AppButton>
+          </div>
+
+          {mode === 'register' && <p className="login-form-intro">注册只创建平台账号，所属业务领域将在登录后申请或由管理员分配。</p>}
+
+          {mode === 'register' && <label className="login-field">姓名<div className="login-input"><UserFocus size={24} aria-hidden="true" /><input name="displayName" autoComplete="name" placeholder="请输入姓名" /></div></label>}
+          {mode === 'register' && <label className="login-field">工号<div className="login-input"><User size={24} aria-hidden="true" /><input name="employeeNo" autoComplete="username" maxLength={32} placeholder="例如：A10248" /></div></label>}
           {mode === 'register'
-            ? <label>邮箱<input name="email" type="email" autoComplete="email" placeholder="name@company.com" /></label>
-            : <label>工号或邮箱<input name="account" autoComplete="username" placeholder="工号 / name@company.com" /></label>}
-          <label>密码<input name="password" type="password" autoComplete={mode === 'register' ? 'new-password' : 'current-password'} placeholder={mode === 'register' ? '至少 10 位，包含大小写字母和数字' : '请输入密码'} /></label>
-          {mode === 'register' && <label>确认密码<input name="confirmPassword" type="password" autoComplete="new-password" placeholder="请再次输入密码" /></label>}
+            ? <label className="login-field">邮箱<div className="login-input"><User size={24} aria-hidden="true" /><input name="email" type="email" autoComplete="email" placeholder="name@company.com" /></div></label>
+            : <label className="login-field">工号或邮箱<div className="login-input"><User size={24} aria-hidden="true" /><input name="account" autoComplete="username" placeholder="请输入工号或邮箱" autoFocus /></div></label>}
+
+          <label className="login-field">密码
+            <div className="login-input">
+              <LockKey size={24} aria-hidden="true" />
+              <input name="password" type={passwordVisible ? 'text' : 'password'} autoComplete={mode === 'register' ? 'new-password' : 'current-password'} placeholder={mode === 'register' ? '至少 10 位，包含大小写字母和数字' : '请输入密码'} />
+              <AppButton text circle type="button" className="login-password-toggle" aria-label={passwordVisible ? '隐藏密码' : '显示密码'} onClick={() => setPasswordVisible((visible) => !visible)}>{passwordVisible ? <Eye size={24} /> : <EyeSlash size={24} />}</AppButton>
+            </div>
+          </label>
+
+          {mode === 'register' && <label className="login-field">确认密码<div className="login-input"><LockKey size={24} aria-hidden="true" /><input name="confirmPassword" type={passwordVisible ? 'text' : 'password'} autoComplete="new-password" placeholder="请再次输入密码" /></div></label>}
+
+          {mode === 'login' && <div className="login-assistance"><AppButton link type="button" onClick={() => { setSupportNote('请联系平台管理员完成密码重置。'); setError('') }}>忘记密码？</AppButton></div>}
+          {supportNote && <p className="form-notice" role="status">{supportNote}</p>}
           {error && <p className="form-error" role="alert">{error}</p>}
-          <button className="primary-button" type="submit" disabled={submitting}>{submitting ? mode === 'register' ? '正在注册…' : '正在登录…' : mode === 'register' ? '注册并进入' : '进入工作台'}</button>
-          <p className="form-hint">{mode === 'register' ? '注册后可申请加入领域；平台管理员也可以直接分配。' : '登录即代表你同意遵守平台的数据安全策略。'}</p>
+
+          <AppButton variant="primary" size="large" className="login-submit" type="submit" disabled={submitting}>{submitting ? mode === 'register' ? '正在注册…' : '正在登录…' : mode === 'register' ? '注册并进入' : '进入工作台'}</AppButton>
+
+          <p className="form-hint"><ShieldCheck size={26} weight="regular" aria-hidden="true" />{mode === 'register' ? '注册即代表你同意遵守平台的账号与数据安全策略。' : '登录即代表你同意遵守平台的数据安全策略。'}</p>
         </form>
+        <time dateTime="2026-08-11" className="login-panel-date">2026-08-11&nbsp;&nbsp; 星期二</time>
       </section>
     </main>
   )

@@ -201,6 +201,82 @@ func (repository *PostgresRepository) ListPermissions(ctx context.Context, ident
 	return result, err
 }
 
+func (repository *PostgresRepository) PublicationImpact(ctx context.Context, identity store.Identity, reportID askdata.ID) (PublicationImpact, error) {
+	var err error
+	ctx, err = repository.context(ctx, identity, reportID)
+	if err != nil {
+		return PublicationImpact{}, err
+	}
+	result := PublicationImpact{}
+	err = database.WithTenantTx(ctx, repository.pool, string(identity.TenantID), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT
+			COALESCE(permission_summary.visible_count,1),
+			COALESCE(permission_summary.editable_count,1),
+			COALESCE(share_summary.active_count,0),
+			COALESCE(subscription_summary.active_count,0),
+			COALESCE(version_summary.current_version_no,0),
+			COALESCE(version_summary.current_version_no,0)+1
+		FROM platform.reports report
+		LEFT JOIN LATERAL (
+			SELECT count(DISTINCT subject_id) FILTER(WHERE action='VIEW')+1 AS visible_count,
+			       count(DISTINCT subject_id) FILTER(WHERE action='EDIT')+1 AS editable_count
+			FROM platform.object_permissions permission
+			WHERE permission.tenant_id=report.tenant_id AND permission.object_type='REPORT'
+			  AND permission.object_id=report.id
+		) permission_summary ON true
+		LEFT JOIN LATERAL (
+			SELECT count(*) AS active_count FROM platform.report_shares share
+			WHERE share.tenant_id=report.tenant_id AND share.report_id=report.id
+			  AND share.revoked_at IS NULL AND share.expired_at IS NULL AND share.expires_at>now()
+		) share_summary ON true
+		LEFT JOIN LATERAL (
+			SELECT count(*) AS active_count
+			FROM platform.report_subscriptions subscription
+			JOIN platform.report_schedules schedule ON schedule.tenant_id=subscription.tenant_id
+			 AND schedule.id=subscription.schedule_id
+			WHERE schedule.report_id=report.id AND schedule.state='ACTIVE' AND subscription.state='ACTIVE'
+		) subscription_summary ON true
+		LEFT JOIN LATERAL (
+			SELECT COALESCE(max(version_no),0) AS current_version_no
+			FROM platform.report_versions version WHERE version.report_id=report.id
+		) version_summary ON true
+		WHERE report.id=$1 AND report.domain_id=$2
+		  AND platform.report_v2_can_access(report.id,ARRAY['PUBLISH']::text[])`, reportID, identity.DomainID).
+			Scan(&result.VisibleCount, &result.EditableCount, &result.ActiveShareCount,
+				&result.SubscriptionCount, &result.CurrentVersionNo, &result.TargetVersionNo)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PublicationImpact{}, ErrNotFound
+	}
+	return result, err
+}
+
+func (repository *PostgresRepository) RecordPublishReview(
+	ctx context.Context, identity store.Identity, reportID, reviewRunID, versionID askdata.ID,
+	versionNo int, comment string, acknowledgedIssueCodes []string,
+) error {
+	var err error
+	ctx, err = repository.context(ctx, identity, reportID, reviewRunID, versionID)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(map[string]any{
+		"reviewRunId": reviewRunID, "versionId": versionID, "versionNo": versionNo,
+		"humanComment": strings.TrimSpace(comment), "acknowledgedIssueCodes": acknowledgedIssueCodes,
+	})
+	if err != nil || len(payload) > 32<<10 {
+		return errors.New("report publication review receipt is invalid")
+	}
+	return database.WithTenantTx(ctx, repository.pool, string(identity.TenantID), func(tx pgx.Tx) error {
+		_, execErr := tx.Exec(ctx, `INSERT INTO platform.report_asset_events(
+			tenant_id,report_id,event_type,actor_user_id,payload_json
+		) SELECT $1,$2,'PUBLISH_REVIEWED',$3,$4
+		WHERE EXISTS(SELECT 1 FROM platform.report_versions WHERE id=$5 AND report_id=$2)`,
+			identity.TenantID, reportID, identity.ActorID, payload, versionID)
+		return execErr
+	})
+}
+
 func (repository *PostgresRepository) Grant(ctx context.Context, identity store.Identity, reportID askdata.ID, input GrantInput) (PermissionGrant, bool, error) {
 	var err error
 	ctx, err = repository.context(ctx, identity, reportID, input.SubjectID)

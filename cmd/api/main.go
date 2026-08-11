@@ -498,6 +498,8 @@ func main() {
 		reportAssetService,
 		reporthttp.AIOptions{
 			PlanGenerator: reportAIGenerator, EditGenerator: reportAIGenerator,
+			Reviewer: reportAIGenerator,
+			Selector: reportAIGenerator, Contexts: reportai.NewPostgresFieldCatalog(pool),
 			Fields: reportai.NewPostgresFieldCatalog(pool), Components: reportComponentRegistry,
 			Methods: reportInsightRegistry, Runtime: reportRuntime, Upgrade: reportUpgradeService,
 		},
@@ -520,6 +522,8 @@ func main() {
 	api.Handle("/api/v1/askdata/report-assets/", reportAssetHandler)
 	api.Handle("/api/v1/reports", reportHandler)
 	api.Handle("/api/v1/reports/", reportHandler)
+	api.Handle("/api/v1/report-data-contexts", reportHandler)
+	api.Handle("/api/v1/report-component-manifests", reportHandler)
 	api.Handle("GET /api/v1/reports/{id}/schedules", reportScheduleHandler)
 	api.Handle("POST /api/v1/reports/{id}/schedules", reportScheduleHandler)
 	api.Handle("/api/v1/report-schedules/", reportScheduleHandler)

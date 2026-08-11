@@ -35,6 +35,35 @@ export type ReleaseDrift = {
   changes: ReleaseChange[]
 }
 export type ReleasePinResult = { conversationId: string; release: ReleaseDescriptor; replayed: boolean }
+export type ConversationSummary = {
+  conversationId: string
+  latestRunId: string
+  label: string
+  state: QuestionRunState
+  pinned: boolean
+  archived: boolean
+  release: ReleaseRef
+  releaseDrifted: boolean
+  clarificationPending: boolean
+  narrativeDegraded: boolean
+  runCount: number
+  recordVersion: number
+  updatedAt: string
+}
+export type ConversationPage = { items: ConversationSummary[]; nextCursor?: string }
+export type ConversationDetail = {
+  conversation: ConversationSummary
+  runs: QuestionRun[]
+  nextRunCursor?: string
+}
+export type AddToReportResult = {
+  intentId: string
+  reportId: string
+  runId: string
+  status: 'PENDING_CONFIRMATION' | 'PENDING' | 'APPLIED'
+  previewHash?: string
+  replayed: boolean
+}
 export type RunHashes = {
   understandingHash?: string
   bindingBundleHash?: string
@@ -492,6 +521,59 @@ export const questionAPI = {
         comment: submission.comment,
         runVersion: submission.runVersion,
       }),
+    })
+  },
+
+  listConversations(input: { search?: string; archived?: boolean; limit?: number; cursor?: string; signal?: AbortSignal } = {}) {
+    const query = new URLSearchParams({ limit: String(input.limit ?? 50) })
+    if (input.search?.trim()) query.set('search', input.search.trim())
+    if (input.archived) query.set('archived', 'true')
+    if (input.cursor) query.set('cursor', input.cursor)
+    return apiRequest<ConversationPage>(`/v1/conversations?${query}`, { signal: input.signal })
+  },
+
+  getConversation(conversationId: string, input: { runLimit?: number; runCursor?: string; signal?: AbortSignal } = {}) {
+    const query = new URLSearchParams({ runLimit: String(input.runLimit ?? 50) })
+    if (input.runCursor) query.set('runCursor', input.runCursor)
+    return apiRequest<ConversationDetail>(`/v1/conversations/${encodeURIComponent(requireRunID(conversationId))}?${query}`, { signal: input.signal })
+  },
+
+  mutateConversation(conversationId: string, action: 'pin' | 'unpin' | 'archive' | 'restore', expectedVersion: number) {
+    return apiRequest<ConversationSummary>(`/v1/conversations/${encodeURIComponent(requireRunID(conversationId))}/${action}`, {
+      method: 'POST', headers: { 'Idempotency-Key': createIdempotencyKey() }, body: JSON.stringify({ expectedVersion }),
+    })
+  },
+
+  renameConversation(conversationId: string, expectedVersion: number, label: string) {
+    const normalized = label.trim()
+    if (!normalized || normalized !== label || [...normalized].length > 120) {
+      throw new AskDataClientError({ kind: 'INVALID_REQUEST', code: 'CONVERSATION_LABEL_INVALID', message: '会话名称需为 1～120 个字符，且首尾不能有空格。' })
+    }
+    return apiRequest<ConversationSummary>(`/v1/conversations/${encodeURIComponent(requireRunID(conversationId))}/rename`, {
+      method: 'POST', headers: { 'Idempotency-Key': createIdempotencyKey() }, body: JSON.stringify({ expectedVersion, label: normalized }),
+    })
+  },
+
+  addToReport(input: { runId: string; reportId: string; runVersion: number; targetPageId?: string; targetSectionId?: string }) {
+    return apiRequest<AddToReportResult>(`/v1/questions/${encodeURIComponent(requireRunID(input.runId))}/add-to-report`, {
+      method: 'POST', headers: { 'Idempotency-Key': createIdempotencyKey() }, body: JSON.stringify({
+        reportId: requireRunID(input.reportId), runVersion: input.runVersion,
+        ...(input.targetPageId ? { targetPageId: input.targetPageId } : {}),
+        ...(input.targetSectionId ? { targetSectionId: input.targetSectionId } : {}),
+      }),
+    })
+  },
+
+  getAddToReportIntent(intentId: string) {
+    return apiRequest<AddToReportResult>(`/v1/add-to-report-intents/${encodeURIComponent(requireRunID(intentId))}`)
+  },
+
+  confirmAddToReport(intentId: string, previewHash: string) {
+    if (!/^[0-9a-f]{64}$/.test(previewHash)) {
+      throw new AskDataClientError({ kind: 'INVALID_REQUEST', code: 'ADD_TO_REPORT_PREVIEW_INVALID', message: '报告变更预览已失效，请重新生成。' })
+    }
+    return apiRequest<AddToReportResult>(`/v1/add-to-report-intents/${encodeURIComponent(requireRunID(intentId))}/confirm`, {
+      method: 'POST', body: JSON.stringify({ previewHash }),
     })
   },
 }

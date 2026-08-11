@@ -158,6 +158,7 @@ func newProtectedHandler(
 	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/unpin", handler.unpinConversation)
 	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/archive", handler.archiveConversation)
 	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/restore", handler.restoreConversation)
+	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/rename", handler.renameConversation)
 	mux.HandleFunc("POST /api/v1/questions/{runId}/feedback", handler.submitFeedback)
 	mux.HandleFunc("POST /api/v1/questions/{runId}/add-to-report", handler.addToReport)
 	mux.HandleFunc("GET /api/v1/add-to-report-intents/{intentId}", handler.getAddToReportIntent)
@@ -237,6 +238,37 @@ func (handler *Handler) archiveConversation(writer http.ResponseWriter, request 
 }
 func (handler *Handler) restoreConversation(writer http.ResponseWriter, request *http.Request) {
 	handler.mutateConversation(writer, request, "RESTORE")
+}
+func (handler *Handler) renameConversation(writer http.ResponseWriter, request *http.Request) {
+	identity, ok := handler.resolveIdentity(writer, request)
+	if !ok {
+		return
+	}
+	backend, ok := handler.backend.(ConversationHistoryBackend)
+	if !ok {
+		writeServiceError(writer, ErrQuestionServiceFailure)
+		return
+	}
+	if _, err := requireIdempotencyKey(request); err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	id, err := parseRunID(request.PathValue("conversationId"))
+	if err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	var input ConversationRenameInput
+	if err = decodeStrictJSON(writer, request, &input); err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	result, err := backend.RenameConversation(request.Context(), identity, id, input)
+	if err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
 }
 func (handler *Handler) mutateConversation(writer http.ResponseWriter, request *http.Request, operation string) {
 	identity, ok := handler.resolveIdentity(writer, request)

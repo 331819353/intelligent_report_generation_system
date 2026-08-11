@@ -5,7 +5,10 @@ bin/
 .runtime/
 .vite/
 artifacts/
+# 设计走查产物是本地评审材料，体积大且不参与构建，不纳入版本库。
 design-qa.md
+design-qa-artifacts/
+design-audit-artifacts/
 coverage.out
 *.test
 *.log

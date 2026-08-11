@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.intelligent-report.local/report-context-v1.schema.json",
+  "title": "Report Data Context Selection v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["dataContextId", "reportName", "rationale", "confidence"],
+  "properties": {
+    "dataContextId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "reportName": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "rationale": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "confidence": { "enum": ["HIGH", "MEDIUM", "LOW"] }
+  }
+}

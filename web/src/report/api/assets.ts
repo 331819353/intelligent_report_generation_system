@@ -26,6 +26,11 @@ export type AssetEvent = {
   createdAt: string
 }
 
+export type CreatedReportShare = {
+  share: { id: string; reportId: string; shareType: 'INTERNAL_USER' | 'INTERNAL_GROUP'; principalId: string; expiresAt: string }
+  token: string
+}
+
 type AssetPage = { items: Array<Omit<ReportAsset, 'previewKind' | 'ownerAvatar'>>; nextCursor?: string }
 
 const previewKinds: ReportAsset['previewKind'][] = ['operations', 'sales', 'quality', 'inventory', 'channel', 'cashflow']
@@ -79,5 +84,10 @@ export const reportAssetsAPI = {
   },
   listEvents(reportId: string) {
     return apiRequest<{ items: AssetEvent[] }>(`/v1/reports/${encodeURIComponent(reportId)}/asset-events?limit=100`)
+  },
+  createShare(reportId: string, input: { shareType: 'INTERNAL_USER' | 'INTERNAL_GROUP'; principalId: string; expiresAt?: string }) {
+    return apiRequest<CreatedReportShare>(`/v1/reports/${encodeURIComponent(reportId)}/shares`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
+    })
   },
 }

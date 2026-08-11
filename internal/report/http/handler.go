@@ -33,6 +33,9 @@ import (
 type AIOptions struct {
 	PlanGenerator reportai.PlanGenerator
 	EditGenerator reportai.ScopedEditGenerator
+	Reviewer      reportai.PublishReviewGenerator
+	Selector      reportai.DataContextSelector
+	Contexts      reportai.DataContextCatalog
 	Fields        reportai.FieldCatalog
 	Components    *template.Registry
 	Methods       *insight.Registry
@@ -74,6 +77,10 @@ func NewHandler(
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/reports", handler.list)
 	mux.HandleFunc("POST /api/v1/reports", handler.create)
+	mux.HandleFunc("POST /api/v1/reports/blank", handler.createBlank)
+	mux.HandleFunc("GET /api/v1/report-data-contexts", handler.dataContexts)
+	mux.HandleFunc("GET /api/v1/report-component-manifests", handler.componentManifests)
+	mux.HandleFunc("POST /api/v1/reports/ai/create", handler.createAI)
 	mux.HandleFunc("GET /api/v1/reports/{id}", handler.get)
 	mux.HandleFunc("GET /api/v1/reports/{id}/draft", handler.getDraft)
 	mux.HandleFunc("GET /api/v1/reports/{id}/revisions", handler.listRevisions)
@@ -83,6 +90,7 @@ func NewHandler(
 	mux.HandleFunc("POST /api/v1/reports/{id}/undo", handler.undo)
 	mux.HandleFunc("POST /api/v1/reports/{id}/redo", handler.redo)
 	mux.HandleFunc("POST /api/v1/reports/{id}/publish", handler.publish)
+	mux.HandleFunc("POST /api/v1/reports/{id}/publish-review", handler.publishReview)
 	mux.HandleFunc("POST /api/v1/reports/{id}/rollback", handler.rollback)
 	mux.HandleFunc("GET /api/v1/reports/{id}/versions", handler.listVersions)
 	mux.HandleFunc("GET /api/v1/reports/{id}/versions/{versionNo}", handler.getVersion)
@@ -173,6 +181,241 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	writeJSON(writer, http.StatusCreated, map[string]any{"report": report, "draft": draft})
+}
+
+func (handler *Handler) createAI(writer http.ResponseWriter, request *http.Request) {
+	identity, ok := handler.identity(writer, request)
+	if !ok {
+		return
+	}
+	if handler.repository == nil || handler.aiAudit == nil || handler.ai.Selector == nil || handler.ai.Contexts == nil ||
+		handler.ai.PlanGenerator == nil || handler.ai.Components == nil || handler.ai.Methods == nil {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_AI_UNAVAILABLE", "report AI creation is unavailable")
+		return
+	}
+	var body struct {
+		Intent string `json:"intent"`
+	}
+	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.Intent) == "" {
+		writeError(writer, http.StatusBadRequest, "REPORT_AI_REQUEST_INVALID", "report AI creation request is invalid")
+		return
+	}
+	body.Intent = strings.TrimSpace(body.Intent)
+	reportID := askdata.ID(uuid.NewString())
+	ctx := reportai.WithInvocationIdentity(request.Context(), reportai.InvocationIdentity{
+		TenantID: identity.TenantID, ActorID: identity.ActorID, ReportID: reportID,
+	})
+	candidates, err := handler.ai.Contexts.Candidates(ctx, identity, 24)
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	if len(candidates) == 0 {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_CONTEXT_UNAVAILABLE", "no governed semantic asset is available for report AI")
+		return
+	}
+	selection, err := reportai.SelectDataContext(ctx, handler.ai.Selector, reportai.DataContextSelectionRequest{
+		Intent: body.Intent, Candidates: candidates,
+	})
+	if err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_CONTEXT_REJECTED", "report AI could not select a governed semantic asset")
+		return
+	}
+	var selected reportai.DataContextCandidate
+	for _, candidate := range candidates {
+		if candidate.DataContext.ID == selection.DataContextID {
+			selected = candidate
+			break
+		}
+	}
+	base := newAIReportDefinition(reportID, selection.ReportName, body.Intent, selected.DataContext)
+	reportRecord, initial, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
+		ID: reportID, Code: base.Metadata.Code, Name: base.Metadata.Name,
+		ReportType: base.Metadata.ReportType, Definition: base,
+	})
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	pageID := initial.Definition.Pages[0].ID
+	scope := operation.Scope{PageID: &pageID}
+	scopeJSON, _ := json.Marshal(scope)
+	run, err := handler.aiAudit.StartRun(request.Context(), identity, reportai.StartRunInput{
+		ReportID: reportID, Kind: reportai.RunGenerateDraft, PromptVersion: "report-plan-v1",
+		ModelPolicy: "governed-default", Summary: reportai.RequestSummary{
+			Intent: body.Intent, SelectionIDs: []string{string(selected.DataContext.ID)}, AvailableFields: selected.Fields,
+		}, BaseRevision: &initial.RevisionNo, Scope: scopeJSON,
+	})
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	plan, generationErr := reportai.GeneratePlan(ctx, handler.ai.PlanGenerator, reportai.PlanRequest{
+		Intent: body.Intent, AllowedFieldNames: selected.Fields,
+		AllowedComponents: reportAIComponentTypes(handler.ai.Components),
+		AllowedMethods:    reportAIAnalysisMethods(handler.ai.Methods), TemplateVersions: []string{"1.0.0"},
+	}, handler.ai.Components, handler.ai.Methods)
+	if generationErr != nil {
+		_ = handler.aiAudit.FinishRun(request.Context(), identity, run.ID, reportai.RunFailed, map[string]any{"stage": "plan"}, "REPORT_AI_PLAN_REJECTED")
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_PLAN_REJECTED", "report AI plan was rejected")
+		return
+	}
+	generated, instantiateErr := reportai.Instantiate(plan, reportai.InstantiateInput{
+		Base: initial.Definition, DataContextID: selected.DataContext.ID, AllowedFields: selected.Fields,
+		AllMetricsAdditive: false, EstimatedRows: 20,
+	}, handler.ai.Components, handler.ai.Methods)
+	if instantiateErr != nil {
+		_ = handler.aiAudit.FinishRun(request.Context(), identity, run.ID, reportai.RunRejected, map[string]any{"stage": "instantiate"}, "REPORT_AI_DRAFT_REJECTED")
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_DRAFT_REJECTED", "report AI draft was rejected")
+		return
+	}
+	generated.Provenance.AIRunIDs = []askdata.ID{run.ID}
+	generated.Provenance.PromptVersions = []string{"report-context-v1", "report-plan-v1"}
+	generated.Provenance.ModelPolicies = []string{"governed-default"}
+	createOperation := operation.Operation{Op: operation.ReportCreate, TargetID: reportID,
+		Payload: &operation.ReportCreatePayload{Definition: generated}}
+	if err := handler.aiAudit.CompletePreview(request.Context(), identity, run.ID, []operation.Operation{createOperation}, map[string]any{
+		"sectionCount": len(plan.Sections), "dataContextId": selected.DataContext.ID,
+	}); err != nil {
+		writeError(writer, http.StatusInternalServerError, "REPORT_AI_AUDIT_FAILED", "report AI audit failed")
+		return
+	}
+	draft, revision, err := handler.repository.SaveDraftWithRevision(request.Context(), identity, reportID, store.SaveInput{
+		ExpectedRevision: initial.RevisionNo, Operations: []operation.Operation{createOperation},
+		Source: string(operation.SourceAI), AIRunID: run.ID, Scope: &scope,
+	})
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{
+		"report": reportRecord, "draft": draft, "revision": revision, "aiRunId": run.ID,
+		"selection": selection, "plan": plan,
+	})
+}
+
+func newAIReportDefinition(reportID askdata.ID, name, intent string, dataContext reportmodel.DataContext) reportmodel.ReportDefinition {
+	return newReportDefinition(reportID, name, intent, dataContext, reportmodel.CreatedAI)
+}
+
+func newReportDefinition(
+	reportID askdata.ID, name, description string,
+	dataContext reportmodel.DataContext, createdFrom reportmodel.CreatedFrom,
+) reportmodel.ReportDefinition {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "AI 智能报告"
+	}
+	prefix := "ai_report_"
+	if createdFrom != reportmodel.CreatedAI {
+		prefix = "report_"
+	}
+	code := prefix + strings.ReplaceAll(string(reportID), "-", "")[:16]
+	return reportmodel.ReportDefinition{
+		SchemaVersion: reportmodel.SchemaVersion,
+		Metadata:      reportmodel.Metadata{ID: reportID, Code: code, Name: name, Description: description, ReportType: reportmodel.ReportTypeReport, Locale: "zh-CN"},
+		TemplateRef:   reportmodel.TemplateReference{ReportTemplateID: "report_ai_default", ReportTemplateVersion: "1.0.0", StructureTemplateVersion: "1.0.0", LayoutTemplateVersion: "1.0.0", NarrativeTemplateVersion: "1.0.0"},
+		ThemeRef:      reportmodel.ThemeReference{ThemeID: "theme_corporate_light", Version: "1.0.0"},
+		Canvas:        reportmodel.Canvas{Desktop: reportmodel.DesktopCanvas{DesignWidth: 1920, Columns: 24, BaseCellWidth: 80, BaseRowHeight: 54, GapX: 12, GapY: 12, PaddingX: 24, PaddingY: 24}, Mobile: reportmodel.MobileCanvas{Columns: 1, GapY: 12, PaddingX: 12, PaddingY: 12}},
+		DataContexts:  []reportmodel.DataContext{dataContext}, GlobalFilters: []reportmodel.GlobalFilter{},
+		Pages:      []reportmodel.Page{{ID: askdata.ID(uuid.NewString()), Name: "报告正文", Order: 1, Sections: []reportmodel.Section{}}},
+		Components: []reportmodel.Component{}, Interactions: []reportmodel.Interaction{},
+		RuntimePolicy: reportmodel.RuntimePolicy{RefreshMode: reportmodel.RefreshOnOpen, MaxConcurrentQueries: 4, ComponentTimeoutMS: 10_000, ExportEnabled: true, FailureMode: reportmodel.FailurePartial},
+		Provenance:    reportmodel.Provenance{CreatedFrom: createdFrom, SourceQuestionRunIDs: []askdata.ID{}, AIRunIDs: []askdata.ID{}},
+	}
+}
+
+// componentManifests 暴露已注册的组件模板合同（角色白名单、维度/度量上下限、
+// 默认选项）。设计器的数据绑定面板需要它才能只提交合法的绑定。
+func (handler *Handler) componentManifests(writer http.ResponseWriter, request *http.Request) {
+	if _, ok := handler.identity(writer, request); !ok {
+		return
+	}
+	if handler.ai.Components == nil {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_COMPONENT_REGISTRY_UNAVAILABLE", "component manifest registry is unavailable")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": handler.ai.Components.List()})
+}
+
+// dataContexts 暴露当前用户可见的受治理数据上下文（已发布数据集版本及其允许字段）。
+// 报告的空白新建与 DATASET_FIELD 数据绑定都依赖它，因此它不能依赖模型提供方。
+func (handler *Handler) dataContexts(writer http.ResponseWriter, request *http.Request) {
+	identity, ok := handler.identity(writer, request)
+	if !ok {
+		return
+	}
+	if handler.ai.Contexts == nil {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_DATA_CONTEXT_UNAVAILABLE", "governed data context catalog is unavailable")
+		return
+	}
+	candidates, err := handler.ai.Contexts.Candidates(request.Context(), identity, 30)
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": candidates})
+}
+
+// createBlank 在不调用任何模型的情况下创建一份空白报告草稿。它是报告主链的
+// 保底入口：未配置 LLM 提供方时，用户依然可以新建、绑定数据并发布报告。
+// 画布、运行策略与查询策略在服务端固定，客户端不能自带这些受治理字段。
+func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Request) {
+	identity, ok := handler.identity(writer, request)
+	if !ok {
+		return
+	}
+	if handler.repository == nil || handler.ai.Contexts == nil {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_DATA_CONTEXT_UNAVAILABLE", "governed data context catalog is unavailable")
+		return
+	}
+	var body struct {
+		Name          string     `json:"name"`
+		Description   string     `json:"description"`
+		DataContextID askdata.ID `json:"dataContextId"`
+	}
+	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.Name) == "" {
+		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "report name is required")
+		return
+	}
+	candidates, err := handler.ai.Contexts.Candidates(request.Context(), identity, 30)
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	if len(candidates) == 0 {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_DATA_CONTEXT_EMPTY", "no published dataset version is available in this business domain")
+		return
+	}
+	// 数据上下文只能取自服务端候选，客户端 ID 不作为可信引用。
+	selected := candidates[0]
+	if body.DataContextID != "" {
+		found := false
+		for _, candidate := range candidates {
+			if candidate.DataContext.ID == body.DataContextID {
+				selected, found = candidate, true
+				break
+			}
+		}
+		if !found {
+			writeError(writer, http.StatusUnprocessableEntity, "REPORT_DATA_CONTEXT_REJECTED", "the requested data context is not available to this actor")
+			return
+		}
+	}
+	reportID := askdata.ID(uuid.NewString())
+	definition := newReportDefinition(
+		reportID, strings.TrimSpace(body.Name), strings.TrimSpace(body.Description),
+		selected.DataContext, reportmodel.CreatedManually,
+	)
+	reportRecord, draft, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
+		ID: reportID, Code: definition.Metadata.Code, Name: definition.Metadata.Name,
+		ReportType: definition.Metadata.ReportType, Definition: definition,
+	})
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{"report": reportRecord, "draft": draft})
 }
 
 func (handler *Handler) get(writer http.ResponseWriter, request *http.Request) {
@@ -511,14 +754,36 @@ func (handler *Handler) publish(writer http.ResponseWriter, request *http.Reques
 		AcknowledgeStaleInsights bool                `json:"acknowledgeStaleInsights"`
 		DesktopPreviewHash       askdata.ContentHash `json:"desktopPreviewHash"`
 		MobilePreviewHash        askdata.ContentHash `json:"mobilePreviewHash"`
+		ReviewRunID              askdata.ID          `json:"reviewRunId"`
+		HumanComment             string              `json:"humanComment"`
+		AcknowledgedIssueCodes   []string            `json:"acknowledgedIssueCodes"`
 	}
 	if decodeJSON(request, &body) != nil {
 		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "request body is invalid")
 		return
 	}
+	if body.SourceRevisionNo == nil || handler.aiAudit == nil {
+		writeError(writer, http.StatusBadRequest, "REPORT_PUBLISH_REVIEW_REQUIRED", "a completed AI publication review is required")
+		return
+	}
+	warningCodes, err := handler.aiAudit.ValidatePublicationReview(request.Context(), identity, body.ReviewRunID, id, *body.SourceRevisionNo)
+	if err != nil {
+		writeError(writer, http.StatusConflict, "REPORT_PUBLISH_REVIEW_STALE", "publication review is missing or no longer matches the selected revision")
+		return
+	}
+	acknowledged := map[string]struct{}{}
+	for _, code := range body.AcknowledgedIssueCodes {
+		acknowledged[strings.TrimSpace(code)] = struct{}{}
+	}
+	for _, code := range warningCodes {
+		if _, exists := acknowledged[code]; !exists {
+			writeError(writer, http.StatusUnprocessableEntity, "REPORT_PUBLISH_WARNING_UNACKNOWLEDGED", "all AI-reviewed publication warnings must be acknowledged")
+			return
+		}
+	}
 	version, err := handler.publisher.Publish(request.Context(), identity, publication.PublishRequest{
 		ReportID: id, SourceRevisionNo: body.SourceRevisionNo,
-		AcknowledgeStaleInsights: body.AcknowledgeStaleInsights,
+		AcknowledgeStaleInsights: body.AcknowledgeStaleInsights || containsString(body.AcknowledgedIssueCodes, "REPORT_INSIGHT_STALE"),
 		DesktopPreviewHash:       body.DesktopPreviewHash, MobilePreviewHash: body.MobilePreviewHash,
 		IdempotencyKey: request.Header.Get("Idempotency-Key"),
 	})
@@ -526,7 +791,128 @@ func (handler *Handler) publish(writer http.ResponseWriter, request *http.Reques
 		writeReportError(writer, err)
 		return
 	}
+	if handler.assetRepo != nil {
+		if auditErr := handler.assetRepo.RecordPublishReview(request.Context(), identity, id, body.ReviewRunID,
+			version.ID, version.VersionNo, body.HumanComment, body.AcknowledgedIssueCodes); auditErr != nil {
+			writeError(writer, http.StatusInternalServerError, "REPORT_PUBLISH_REVIEW_AUDIT_FAILED", "report was published but the human review receipt could not be recorded")
+			return
+		}
+	}
 	writeJSON(writer, http.StatusCreated, version)
+}
+
+func (handler *Handler) publishReview(writer http.ResponseWriter, request *http.Request) {
+	identity, reportID, ok := handler.subject(writer, request)
+	if !ok {
+		return
+	}
+	// 发布评审的裁决部分完全由确定性门禁产生，模型只负责叙述；因此缺少模型
+	// 提供方不应阻断发布，只有缺少发布器、资产库或审计存储才是真正不可用。
+	if handler.publisher == nil || handler.assetRepo == nil || handler.aiAudit == nil {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_PUBLISH_REVIEW_UNAVAILABLE", "publication review is unavailable")
+		return
+	}
+	var body struct {
+		SourceRevisionNo *int64 `json:"sourceRevisionNo,omitempty"`
+	}
+	if decodeJSON(request, &body) != nil {
+		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "request body is invalid")
+		return
+	}
+	preflight, err := handler.publisher.Preflight(request.Context(), identity, publication.PreflightRequest{
+		ReportID: reportID, SourceRevisionNo: body.SourceRevisionNo,
+	})
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	impact, err := handler.assetRepo.PublicationImpact(request.Context(), identity, reportID)
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	gates := make([]reportai.PublishGateSummary, 0, len(preflight.Checks))
+	for _, check := range preflight.Checks {
+		codes := make([]string, 0, len(check.Issues))
+		for _, issue := range check.Issues {
+			if !containsString(codes, issue.Code) {
+				codes = append(codes, issue.Code)
+			}
+		}
+		gates = append(gates, reportai.PublishGateSummary{ID: check.ID, Label: check.Label,
+			Status: string(check.Status), IssueCodes: codes, Summary: check.Summary})
+	}
+	refs := publicationDependencyRefs(preflight.Draft.Definition)
+	requestSummary := reportai.PublishReviewRequest{
+		ReportTitle: preflight.Draft.Definition.Metadata.Name, SourceRevisionNo: preflight.Draft.RevisionNo,
+		TargetVersionNo: impact.TargetVersionNo, DefinitionHash: preflight.Draft.DefinitionHash,
+		Gates: gates, BlockerCodes: preflight.BlockerCodes, WarningCodes: preflight.WarningCodes,
+		DependencyRefs: refs, Impact: reportai.PublishImpactSummary{
+			VisibleCount: impact.VisibleCount, EditableCount: impact.EditableCount,
+			SubscriptionCount: impact.SubscriptionCount, ActiveShareCount: impact.ActiveShareCount,
+		},
+	}
+	run, err := handler.aiAudit.StartRun(request.Context(), identity, reportai.StartRunInput{
+		ReportID: reportID, Kind: reportai.RunPublishReview, PromptVersion: "report-publish-review-v1",
+		ModelPolicy: "governed-default", Summary: reportai.RequestSummary{
+			Intent: "发布评审", SelectionIDs: append(append([]string{}, preflight.BlockerCodes...), preflight.WarningCodes...),
+		}, BaseRevision: &preflight.Draft.RevisionNo,
+	})
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	ctx := reportai.WithInvocationIdentity(request.Context(), reportai.InvocationIdentity{
+		TenantID: identity.TenantID, ActorID: identity.ActorID, ReportID: reportID,
+	})
+	// 未配置模型提供方或模型评审失败时，回退到由确定性门禁直接生成的评审结论。
+	// 两条路径的发布裁决完全一致，模型永远不能放宽门禁；来源记入审计与响应。
+	review := reportai.DeterministicPublishReview(requestSummary)
+	if handler.ai.Reviewer != nil {
+		if generated, reviewErr := reportai.ReviewPublication(ctx, handler.ai.Reviewer, requestSummary); reviewErr == nil {
+			review = generated
+		}
+	}
+	if err := handler.aiAudit.FinishRun(request.Context(), identity, run.ID, reportai.RunSucceeded, map[string]any{
+		"recommendation": review.Recommendation, "warningCodes": preflight.WarningCodes,
+		"blockerCodes": preflight.BlockerCodes, "definitionHash": preflight.Draft.DefinitionHash,
+		"checkCount": len(preflight.Checks), "riskCount": len(review.Risks),
+		"reviewSource": review.Source,
+	}, ""); err != nil {
+		writeError(writer, http.StatusInternalServerError, "REPORT_AI_AUDIT_FAILED", "report AI audit failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"reviewRunId": run.ID, "checkedAt": time.Now().UTC(), "preflight": preflight,
+		"impact": impact, "dependencyRefs": refs, "review": review,
+	})
+}
+
+func publicationDependencyRefs(definition reportmodel.ReportDefinition) []string {
+	result := []string{}
+	for _, dataContext := range definition.DataContexts {
+		result = append(result, "dataset:"+string(dataContext.DatasetVersionID))
+	}
+	for _, component := range definition.Components {
+		if component.DataBinding == nil || component.DataBinding.SemanticQueryRef == nil {
+			continue
+		}
+		ref := component.DataBinding.SemanticQueryRef
+		value := "semantic:" + string(ref.SemanticReleaseID) + "@" + string(ref.SemanticContentHash)
+		if !containsString(result, value) {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (handler *Handler) rollback(writer http.ResponseWriter, request *http.Request) {

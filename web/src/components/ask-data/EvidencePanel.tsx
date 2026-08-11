@@ -53,7 +53,7 @@ export function EvidencePanel({ question, run, option, result, graphDegraded = f
 
   return <>
     <header className="ask-evidence-heading">
-			<div><span className={`ask-live-dot ${ready ? '' : 'is-pending'}`.trim()} /><span className="ask-evidence-heading-copy"><strong>理解与证据驾驶舱</strong><small>{ready ? result ? '答案口径与证据同步' : '所选口径与证据同步' : '等待完整受控证据'}</small></span>{graphDegraded && <span className="ask-graph-degraded-badge"><ShareNetwork size={10} weight="bold" aria-hidden="true" />关系校验已降级</span>}</div>
+			<div><span className={`ask-live-dot ${ready ? '' : 'is-pending'}`.trim()} /><span className="ask-evidence-heading-copy"><strong>证据与可信度</strong><small>{ready ? result ? '答案口径与证据同步' : '所选口径与证据同步' : '等待完整受控证据'}</small></span>{graphDegraded && <span className="ask-graph-degraded-badge"><ShareNetwork size={10} weight="bold" aria-hidden="true" />关系校验已降级</span>}</div>
       <span className={`ask-trust-score ${ready ? '' : 'is-pending'}`.trim()}>{trust}</span>
     </header>
     {!ready || !resolvedOption || !evidence ? <div className="ask-live-evidence-state" role="status">

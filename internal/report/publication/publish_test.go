@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -302,6 +303,23 @@ func TestPublisherSuccessIdempotencyAndFrozenVersionPins(t *testing.T) {
 		if strings.HasSuffix(key, ".tmp") || !strings.HasPrefix(key, "report-v2/") {
 			t.Fatalf("unexpected artifact key %q", key)
 		}
+	}
+}
+
+func TestPublisherPreflightUsesPublishGatesWithoutWritingArtifacts(t *testing.T) {
+	harness := newPublicationHarness(t)
+	harness.publisher.Insights = insightValidatorFunc(func(context.Context, store.Identity, askdata.ID, bool) compiler.ValidationIssues {
+		return compiler.ValidationIssues{{Code: "REPORT_INSIGHT_STALE", Path: "components", Message: "stale insight requires review"}}
+	})
+	result, err := harness.publisher.Preflight(context.Background(), harness.identity, PreflightRequest{ReportID: harness.request.ReportID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Checks) != 6 || !slices.Contains(result.WarningCodes, "REPORT_INSIGHT_STALE") || len(result.BlockerCodes) != 0 {
+		t.Fatalf("unexpected preflight result: %#v", result)
+	}
+	if len(harness.repository.inputs) != 0 || len(harness.artifacts.objects) != 0 {
+		t.Fatal("preflight must not create versions or write publication artifacts")
 	}
 }
 

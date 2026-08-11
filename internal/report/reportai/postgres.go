@@ -26,6 +26,7 @@ const (
 	RunGenerateDraft RunKind = "GENERATE_DRAFT"
 	RunScopedEdit    RunKind = "SCOPED_EDIT"
 	RunInsight       RunKind = "INSIGHT"
+	RunPublishReview RunKind = "PUBLISH_REVIEW"
 )
 
 type RunState string
@@ -96,15 +97,19 @@ func (s *PostgresStore) StartRun(ctx context.Context, identity store.Identity, i
 	}
 	ctx = database.WithAccessContext(ctx, string(identity.ActorID), string(identity.DomainID))
 	result := Run{ID: askdata.ID(uuid.NewString()), ReportID: input.ReportID, Kind: input.Kind, State: RunRunning, RequestSummary: summary}
+	requiredAction := "EDIT"
+	if input.Kind == RunPublishReview {
+		requiredAction = "PUBLISH"
+	}
 	err = database.WithTenantTx(ctx, s.pool, string(identity.TenantID), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `INSERT INTO platform.report_ai_runs(
 			id,tenant_id,report_id,kind,actor_user_id,prompt_version,model_policy,
 			request_summary_json,base_revision_no,scope_json,state
 		) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,'')::jsonb,'RUNNING'
-		WHERE platform.report_v2_can_access($3,ARRAY['EDIT']::text[])
+		WHERE platform.report_v2_can_access($3,ARRAY[$11]::text[])
 		RETURNING created_at`, result.ID, identity.TenantID, input.ReportID, input.Kind,
 			identity.ActorID, input.PromptVersion, input.ModelPolicy, summaryJSON,
-			input.BaseRevision, string(input.Scope)).Scan(&result.CreatedAt)
+			input.BaseRevision, string(input.Scope), requiredAction).Scan(&result.CreatedAt)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Run{}, store.ErrNotFound
@@ -280,5 +285,39 @@ func normalizeSummary(input RequestSummary) (RequestSummary, error) {
 }
 
 func validRunKind(kind RunKind) bool {
-	return kind == RunPlan || kind == RunGenerateDraft || kind == RunScopedEdit || kind == RunInsight
+	return kind == RunPlan || kind == RunGenerateDraft || kind == RunScopedEdit || kind == RunInsight || kind == RunPublishReview
+}
+
+func (s *PostgresStore) ValidatePublicationReview(
+	ctx context.Context, identity store.Identity, runID, reportID askdata.ID, sourceRevision int64,
+) ([]string, error) {
+	if s == nil || s.pool == nil || identity.Validate() != nil || runID.Validate() != nil ||
+		reportID.Validate() != nil || sourceRevision < 0 {
+		return nil, errors.New("invalid publication review receipt")
+	}
+	ctx = database.WithAccessContext(ctx, string(identity.ActorID), string(identity.DomainID))
+	warnings := []string{}
+	err := database.WithTenantTx(ctx, s.pool, string(identity.TenantID), func(tx pgx.Tx) error {
+		var raw json.RawMessage
+		if err := tx.QueryRow(ctx, `SELECT response_summary_json
+			FROM platform.report_ai_runs
+			WHERE id=$1 AND report_id=$2 AND kind='PUBLISH_REVIEW' AND state='SUCCEEDED'
+			  AND base_revision_no=$3 AND platform.report_v2_can_access(report_id,ARRAY['PUBLISH']::text[])`,
+			runID, reportID, sourceRevision).Scan(&raw); err != nil {
+			return err
+		}
+		var summary struct {
+			WarningCodes   []string `json:"warningCodes"`
+			DefinitionHash string   `json:"definitionHash"`
+		}
+		if json.Unmarshal(raw, &summary) != nil || len(summary.DefinitionHash) != 64 || len(summary.WarningCodes) > 100 {
+			return errors.New("publication review receipt is malformed")
+		}
+		warnings = summary.WarningCodes
+		return nil
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	return warnings, err
 }

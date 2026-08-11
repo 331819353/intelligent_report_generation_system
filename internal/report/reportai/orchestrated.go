@@ -17,8 +17,14 @@ import (
 //go:embed schemas/report-plan-v1.schema.json
 var reportPlanSchema json.RawMessage
 
+//go:embed schemas/report-context-v1.schema.json
+var reportContextSchema json.RawMessage
+
 //go:embed schemas/report-operation-v1.schema.json
 var reportOperationSchema json.RawMessage
+
+//go:embed schemas/report-publish-review-v1.schema.json
+var reportPublishReviewSchema json.RawMessage
 
 type invocationIdentityKey struct{}
 
@@ -76,6 +82,35 @@ func (generator *OrchestratedGenerator) GenerateReportPlan(ctx context.Context, 
 	return plan, nil
 }
 
+func (generator *OrchestratedGenerator) SelectDataContext(ctx context.Context, request DataContextSelectionRequest) (DataContextSelection, error) {
+	identity, err := invocationIdentity(ctx)
+	if err != nil || generator == nil || generator.AI == nil || strings.TrimSpace(request.Intent) == "" ||
+		len(request.Candidates) == 0 || len(request.Candidates) > 30 {
+		return DataContextSelection{}, errors.New("report AI data context selector is unavailable")
+	}
+	payload, err := json.Marshal(request)
+	if err != nil || len(payload) > 512<<10 {
+		return DataContextSelection{}, errors.New("report AI data context request exceeds safe bounds")
+	}
+	result, err := generator.AI.Invoke(ctx, aiplatform.Invocation{
+		TenantID: string(identity.TenantID), ActorID: string(identity.ActorID),
+		Purpose: aiplatform.PurposeReportGeneration, PromptVersion: "report-context-v1",
+		ResourceType: "REPORT", ResourceID: string(identity.ReportID),
+		Request: structuredRequest(
+			"Choose exactly one governed dataContextId from candidates for the user's report intent. Base the choice only on candidate names, descriptions and allowed fields. Return a concise report name and rationale. Never emit SQL or raw data.",
+			payload, "report_context_v1", reportContextSchema,
+		),
+	})
+	if err != nil {
+		return DataContextSelection{}, err
+	}
+	var selection DataContextSelection
+	if err := json.Unmarshal(result.ProviderResult.Content, &selection); err != nil {
+		return DataContextSelection{}, fmt.Errorf("decode report AI data context selection: %w", err)
+	}
+	return selection, nil
+}
+
 func (generator *OrchestratedGenerator) GenerateScopedOperations(ctx context.Context, request ScopedContext) (operation.Bundle, error) {
 	identity, err := invocationIdentity(ctx)
 	if err != nil || generator == nil || generator.AI == nil {
@@ -106,6 +141,34 @@ func (generator *OrchestratedGenerator) GenerateScopedOperations(ctx context.Con
 		return operation.Bundle{}, fmt.Errorf("decode report AI operations: %w", err)
 	}
 	return bundle, nil
+}
+
+func (generator *OrchestratedGenerator) ReviewPublication(ctx context.Context, request PublishReviewRequest) (PublishReview, error) {
+	identity, err := invocationIdentity(ctx)
+	if err != nil || generator == nil || generator.AI == nil {
+		return PublishReview{}, errors.New("report AI publication reviewer is unavailable")
+	}
+	payload, err := json.Marshal(request)
+	if err != nil || len(payload) > 256<<10 {
+		return PublishReview{}, errors.New("report AI publication review request exceeds safe bounds")
+	}
+	result, err := generator.AI.Invoke(ctx, aiplatform.Invocation{
+		TenantID: string(identity.TenantID), ActorID: string(identity.ActorID),
+		Purpose: aiplatform.PurposeReportGeneration, PromptVersion: "report-publish-review-v1",
+		ResourceType: "REPORT", ResourceID: string(identity.ReportID),
+		Request: structuredRequest(
+			"You are the cognitive reviewer for report publication. Explain only the supplied deterministic gates, issue codes, pinned dependency references and aggregate impact counts. Never invent raw data, SQL, users or dependencies. BLOCK when blockerCodes is non-empty, CONDITIONAL when only warningCodes is non-empty, otherwise ALLOW. Return one risk for every supplied blocker or warning code and no other risks. Human reviewers make the final decision.",
+			payload, "report_publish_review_v1", reportPublishReviewSchema,
+		),
+	})
+	if err != nil {
+		return PublishReview{}, err
+	}
+	var review PublishReview
+	if err := json.Unmarshal(result.ProviderResult.Content, &review); err != nil {
+		return PublishReview{}, fmt.Errorf("decode report AI publication review: %w", err)
+	}
+	return review, nil
 }
 
 func invocationIdentity(ctx context.Context) (InvocationIdentity, error) {
@@ -141,3 +204,5 @@ func normalizedStrings(values []string) []string {
 
 var _ PlanGenerator = (*OrchestratedGenerator)(nil)
 var _ ScopedEditGenerator = (*OrchestratedGenerator)(nil)
+var _ DataContextSelector = (*OrchestratedGenerator)(nil)
+var _ PublishReviewGenerator = (*OrchestratedGenerator)(nil)

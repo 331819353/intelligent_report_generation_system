@@ -31,6 +31,118 @@ func (function scopedGeneratorFunc) GenerateScopedOperations(ctx context.Context
 	return function(ctx, request)
 }
 
+type contextSelectorFunc func(context.Context, DataContextSelectionRequest) (DataContextSelection, error)
+
+func (function contextSelectorFunc) SelectDataContext(ctx context.Context, request DataContextSelectionRequest) (DataContextSelection, error) {
+	return function(ctx, request)
+}
+
+type publishReviewerFunc func(context.Context, PublishReviewRequest) (PublishReview, error)
+
+func (function publishReviewerFunc) ReviewPublication(ctx context.Context, request PublishReviewRequest) (PublishReview, error) {
+	return function(ctx, request)
+}
+
+func TestPublicationReviewCannotOverrideDeterministicGates(t *testing.T) {
+	request := PublishReviewRequest{
+		ReportTitle: "月度经营报告", SourceRevisionNo: 24, TargetVersionNo: 13,
+		DefinitionHash: strings.Repeat("a", 64), Gates: []PublishGateSummary{
+			{ID: "SEMANTIC", Label: "口径与语义", Status: "PASSED"},
+			{ID: "FRESHNESS", Label: "数据新鲜度", Status: "PASSED"},
+			{ID: "PERMISSION", Label: "权限泄漏", Status: "PASSED"},
+			{ID: "EXECUTION", Label: "组件可执行性", Status: "PASSED"},
+			{ID: "RESPONSIVE", Label: "移动端适配", Status: "PASSED"},
+			{ID: "FACT", Label: "事实与结论核验", Status: "WARNING", IssueCodes: []string{"REPORT_INSIGHT_STALE"}},
+		}, WarningCodes: []string{"REPORT_INSIGHT_STALE"},
+	}
+	valid := PublishReview{Recommendation: "CONDITIONAL", Headline: "建议有条件发布", Summary: "存在一项需人工确认的风险。", Risks: []PublishRisk{{
+		Code: "REPORT_INSIGHT_STALE", Title: "结论待确认", Explanation: "结论证据已过期。",
+		Evidence: "确定性门禁返回 REPORT_INSIGHT_STALE。", SuggestedAction: "重新生成或显式确认。",
+	}}}
+	got, err := ReviewPublication(context.Background(), publishReviewerFunc(func(context.Context, PublishReviewRequest) (PublishReview, error) {
+		return valid, nil
+	}), request)
+	if err != nil || got.Recommendation != "CONDITIONAL" {
+		t.Fatalf("expected controlled conditional review, got %#v, %v", got, err)
+	}
+	_, err = ReviewPublication(context.Background(), publishReviewerFunc(func(context.Context, PublishReviewRequest) (PublishReview, error) {
+		invalid := valid
+		invalid.Recommendation = "ALLOW"
+		return invalid, nil
+	}), request)
+	if err == nil {
+		t.Fatal("expected deterministic warning to reject an AI ALLOW recommendation")
+	}
+}
+
+// 未配置模型提供方时平台仍必须可发布：确定性评审要给出与门禁完全一致的裁决，
+// 为每个问题码生成一条风险，并明确标注结论来源不是模型。
+func TestDeterministicPublishReviewMatchesTheGatesWithoutAModel(t *testing.T) {
+	gates := []PublishGateSummary{
+		{ID: "SEMANTIC", Label: "口径与语义", Status: "PASSED"},
+		{ID: "FRESHNESS", Label: "数据新鲜度", Status: "PASSED"},
+		{ID: "PERMISSION", Label: "权限泄漏", Status: "PASSED"},
+		{ID: "EXECUTION", Label: "组件可执行性", Status: "PASSED"},
+		{ID: "RESPONSIVE", Label: "移动端适配", Status: "PASSED"},
+		{ID: "FACT", Label: "事实与结论核验", Status: "WARNING",
+			IssueCodes: []string{"REPORT_INSIGHT_STALE"}, Summary: "结论证据已过期。"},
+	}
+	base := PublishReviewRequest{
+		ReportTitle: "月度经营报告", SourceRevisionNo: 24, TargetVersionNo: 13,
+		DefinitionHash: strings.Repeat("a", 64), Gates: gates,
+	}
+
+	clean := DeterministicPublishReview(base)
+	if clean.Recommendation != "ALLOW" || clean.Source != PublishReviewSourceDeterministic || len(clean.Risks) != 0 {
+		t.Fatalf("expected a clean deterministic ALLOW review, got %#v", clean)
+	}
+
+	conditional := base
+	conditional.WarningCodes = []string{"REPORT_INSIGHT_STALE"}
+	warned := DeterministicPublishReview(conditional)
+	if warned.Recommendation != "CONDITIONAL" || len(warned.Risks) != 1 ||
+		warned.Risks[0].Code != "REPORT_INSIGHT_STALE" {
+		t.Fatalf("expected one deterministic risk per warning code, got %#v", warned)
+	}
+	if !strings.Contains(warned.Risks[0].Explanation, "结论证据已过期") {
+		t.Fatalf("expected the risk to quote the deterministic gate summary, got %q", warned.Risks[0].Explanation)
+	}
+
+	blocked := base
+	blocked.BlockerCodes = []string{"REPORT_DEPENDENCY_INVALID"}
+	blocked.WarningCodes = []string{"REPORT_INSIGHT_STALE"}
+	stopped := DeterministicPublishReview(blocked)
+	if stopped.Recommendation != "BLOCK" || len(stopped.Risks) != 2 {
+		t.Fatalf("expected blockers to force BLOCK with a risk per code, got %#v", stopped)
+	}
+
+	// 确定性评审必须满足与模型评审同一套结构约束，二者对发布链路完全等价。
+	if err := validatePublishReview(blocked, stopped); err != nil {
+		t.Fatalf("deterministic review must satisfy the AI review contract: %v", err)
+	}
+}
+
+func TestSelectDataContextCannotEscapeGovernedCandidates(t *testing.T) {
+	definition := reportAIBaseDefinition(t)
+	candidate := DataContextCandidate{DataContext: definition.DataContexts[0], Name: "Sales", Fields: []string{"month", "sales_amount"}}
+	request := DataContextSelectionRequest{Intent: "sales report", Candidates: []DataContextCandidate{candidate}}
+	valid := DataContextSelection{DataContextID: candidate.DataContext.ID, ReportName: "Sales report", Rationale: "Matches the requested subject", Confidence: "HIGH"}
+	selection, err := SelectDataContext(context.Background(), contextSelectorFunc(func(context.Context, DataContextSelectionRequest) (DataContextSelection, error) {
+		return valid, nil
+	}), request)
+	if err != nil || selection.DataContextID != candidate.DataContext.ID {
+		t.Fatalf("valid selection = %#v, err=%v", selection, err)
+	}
+	_, err = SelectDataContext(context.Background(), contextSelectorFunc(func(context.Context, DataContextSelectionRequest) (DataContextSelection, error) {
+		escaped := valid
+		escaped.DataContextID = "secret_context"
+		return escaped, nil
+	}), request)
+	if err == nil {
+		t.Fatal("selector escaped the governed candidate allowlist")
+	}
+}
+
 func TestInstantiateIsDeterministicAndPassesFullDefinitionValidation(t *testing.T) {
 	base := reportAIBaseDefinition(t)
 	components := reportAIComponents(t)

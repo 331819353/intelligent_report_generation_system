@@ -7,7 +7,12 @@ import { ManagementCenterPage } from '../pages/ManagementCenterPage'
 import { DomainAccessPage } from '../pages/DomainAccessPage'
 import { AskDataPage } from '../pages/AskDataPage'
 import { ReportAssetsPage } from '../pages/ReportAssetsPage'
-import { ReportRuntimePage } from '../pages/ReportRuntimePage'
+import { ReportPage } from '../pages/ReportPage'
+import { ReportEditorPage } from '../pages/ReportEditorPage'
+import { ReportPublishReviewPage } from '../pages/ReportPublishReviewPage'
+import { HomePage } from '../pages/HomePage'
+import { ApprovalsPage, TasksPage } from '../pages/TasksPage'
+import { DecisionsPage } from '../pages/DecisionsPage'
 import { RequireAuth } from '../components/RequireAuth'
 import { RequirePlatformAdministrator } from '../components/RequirePlatformAdministrator'
 import { RequireBusinessDomain } from '../components/RequireBusinessDomain'
@@ -27,6 +32,10 @@ export function App() {
     <Routes key={domainRevision}>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/domain-access" element={<RequireAuth><DomainAccessPage /></RequireAuth>} />
+      <Route path="/home" element={<RequireAuth><RequireBusinessDomain><HomePage /></RequireBusinessDomain></RequireAuth>} />
+      <Route path="/approvals" element={<RequireAuth><RequireBusinessDomain><ApprovalsPage /></RequireBusinessDomain></RequireAuth>} />
+      <Route path="/tasks" element={<RequireAuth><RequireBusinessDomain><TasksPage /></RequireBusinessDomain></RequireAuth>} />
+      <Route path="/decisions" element={<RequireAuth><RequireBusinessDomain><DecisionsPage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="/platform-management" element={<Navigate to="/platform-management/domains" replace />} />
       <Route path="/platform-management/:section" element={<RequireAuth><RequirePlatformAdministrator><ManagementCenterPage /></RequirePlatformAdministrator></RequireAuth>} />
       <Route path="/platform-settings" element={<Navigate to="/platform-management/domains" replace />} />
@@ -35,9 +44,12 @@ export function App() {
       <Route path="/datasets" element={<RequireAuth><RequireBusinessDomain><DatasetCenterPage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="/datasets/:datasetId/edit" element={<RequireAuth><RequireBusinessDomain><DatasetCenterPage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="/ask-data" element={<RequireAuth><RequireBusinessDomain><AskDataPage /></RequireBusinessDomain></RequireAuth>} />
+      <Route path="/ask-data/conversations/:conversationId" element={<RequireAuth><RequireBusinessDomain><AskDataPage /></RequireBusinessDomain></RequireAuth>} />
       <Route path="/reports" element={<RequireAuth><RequireBusinessDomain><ReportAssetsPage /></RequireBusinessDomain></RequireAuth>} />
-      <Route path="/reports/:reportId" element={<RequireAuth><RequireBusinessDomain><ReportRuntimePage /></RequireBusinessDomain></RequireAuth>} />
-      <Route path="*" element={<Navigate to="/data-sources" replace />} />
+      <Route path="/reports/new" element={<RequireAuth><RequireBusinessDomain><ReportEditorPage /></RequireBusinessDomain></RequireAuth>} />
+      <Route path="/reports/:reportId/publish-review" element={<RequireAuth><RequireBusinessDomain><ReportPublishReviewPage /></RequireBusinessDomain></RequireAuth>} />
+      <Route path="/reports/:reportId" element={<RequireAuth><RequireBusinessDomain><ReportPage /></RequireBusinessDomain></RequireAuth>} />
+      <Route path="*" element={<Navigate to="/home" replace />} />
     </Routes>
   )
 }

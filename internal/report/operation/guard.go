@@ -72,6 +72,14 @@ func GuardAI(bundle Bundle, current *report.ReportDefinition) error {
 		return &GuardError{Code: CodeOutOfScope, Message: err.Error()}
 	}
 	for indexValue, operation := range bundle.Operations {
+		if operation.Op == ReportCreate {
+			payload := operation.Payload.(*ReportCreatePayload)
+			if operation.TargetID != current.Metadata.ID || payload.Definition.Metadata.ID != current.Metadata.ID ||
+				len(current.Pages) != 1 || len(current.Pages[0].Sections) != 0 || len(current.Components) != 0 {
+				return &GuardError{Code: CodeNotAllowedForAI, Message: "REPORT_CREATE is allowed only for the initial blank AI draft"}
+			}
+			continue
+		}
 		paths := index[operation.TargetID]
 		if len(paths) == 0 {
 			return &GuardError{

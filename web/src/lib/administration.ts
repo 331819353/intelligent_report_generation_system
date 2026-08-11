@@ -165,6 +165,12 @@ export const administrationAPI = {
       body: JSON.stringify({ reason }),
     })
   },
+  async listMyDomainApplications() {
+    const result = await administrationRequest<ItemsResponse<DomainApplication>>('/v1/domain-applications', {
+      cache: 'no-store',
+    })
+    return safeItems(result)
+  },
   async listPendingDomainApplications(domainID: string) {
     const result = await administrationRequest<ItemsResponse<DomainApplication>>(`/v1/domains/${domainID}/applications`, {
       cache: 'no-store',

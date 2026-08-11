@@ -44,11 +44,17 @@ type ConversationMutationInput struct {
 	ExpectedVersion int64 `json:"expectedVersion"`
 }
 
+type ConversationRenameInput struct {
+	ExpectedVersion int64  `json:"expectedVersion"`
+	Label           string `json:"label"`
+}
+
 type ConversationHistoryBackend interface {
 	ListConversations(context.Context, RequestIdentity, string, bool, int, string) (ConversationPage, error)
 	GetConversation(context.Context, RequestIdentity, askdata.ID, int, string) (ConversationDetail, error)
 	SetConversationPinned(context.Context, RequestIdentity, askdata.ID, ConversationMutationInput, bool) (ConversationSummary, error)
 	SetConversationArchived(context.Context, RequestIdentity, askdata.ID, ConversationMutationInput, bool) (ConversationSummary, error)
+	RenameConversation(context.Context, RequestIdentity, askdata.ID, ConversationRenameInput) (ConversationSummary, error)
 }
 
 type conversationCursor struct {
@@ -111,7 +117,7 @@ func (service *PostgresService) ListConversations(ctx context.Context, identity 
 		    AND artifact.artifact_type='ANSWER'
 		  ORDER BY run.conversation_id,artifact.created_at DESC,artifact.artifact_index DESC
 		)
-		SELECT conversation.id::text,ranked.id::text,COALESCE(latest_label.label,'分析会话'),ranked.current_state,
+		SELECT conversation.id::text,ranked.id::text,COALESCE(conversation.custom_label,latest_label.label,'分析会话'),ranked.current_state,
 		  conversation.is_pinned,conversation.archived_at IS NOT NULL,ranked.release_id::text,ranked.release_content_hash,
 		  COALESCE(active.id<>ranked.release_id OR active.content_hash<>ranked.release_content_hash,false),
 		  ranked.current_state='CLARIFICATION_REQUIRED',COALESCE(latest_label.degraded,false),ranked.run_count,
@@ -120,7 +126,7 @@ func (service *PostgresService) ListConversations(ctx context.Context, identity 
 		LEFT JOIN latest_label ON latest_label.conversation_id=conversation.id LEFT JOIN active ON true
 		WHERE conversation.tenant_id=$1 AND conversation.domain_id=$2 AND conversation.actor_id=$3
 		  AND (($4 AND conversation.archived_at IS NOT NULL) OR (NOT $4 AND conversation.archived_at IS NULL))
-		  AND ($5='' OR COALESCE(latest_label.label,'分析会话') ILIKE '%'||replace(replace(replace($5,'\\','\\\\'),'%','\\%'),'_','\\_')||'%' ESCAPE '\\')
+		  AND ($5='' OR COALESCE(conversation.custom_label,latest_label.label,'分析会话') ILIKE '%'||replace(replace(replace($5,'\\','\\\\'),'%','\\%'),'_','\\_')||'%' ESCAPE '\\')
 		  AND ($6::boolean IS NULL
 		    OR (conversation.is_pinned=$6 AND (conversation.updated_at,conversation.id)<($7,$8::uuid))
 		    OR ($6 AND NOT conversation.is_pinned))
@@ -217,6 +223,44 @@ func (service *PostgresService) SetConversationPinned(ctx context.Context, ident
 func (service *PostgresService) SetConversationArchived(ctx context.Context, identity RequestIdentity, id askdata.ID, input ConversationMutationInput, archived bool) (ConversationSummary, error) {
 	return service.mutateConversation(ctx, identity, id, input, "ARCHIVE", archived)
 }
+
+func (service *PostgresService) RenameConversation(ctx context.Context, identity RequestIdentity, id askdata.ID, input ConversationRenameInput) (ConversationSummary, error) {
+	label, err := normalizeConversationLabel(input.Label)
+	if service == nil || service.pool == nil || identity.validate() != nil || !canonicalUUID(id) || input.ExpectedVersion < 1 || err != nil {
+		return ConversationSummary{}, ErrInvalidRequest
+	}
+	err = service.scopeRunner(ctx, string(identity.TenantID), func(tx pgx.Tx) error {
+		tag, updateErr := tx.Exec(ctx, `UPDATE askdata.conversations SET
+			custom_label=$1,record_version=record_version+1,updated_at=clock_timestamp()
+			WHERE tenant_id=$2 AND domain_id=$3 AND actor_id=$4 AND id=$5
+			  AND record_version=$6 AND archived_at IS NULL`, label, identity.TenantID,
+			identity.DomainID, identity.ActorID, id, input.ExpectedVersion)
+		if updateErr != nil {
+			return updateErr
+		}
+		if tag.RowsAffected() != 1 {
+			return orchestrator.ErrVersionConflict
+		}
+		return nil
+	})
+	if err != nil {
+		return ConversationSummary{}, err
+	}
+	return service.conversationByID(ctx, identity, id)
+}
+
+func normalizeConversationLabel(raw string) (string, error) {
+	label := strings.TrimSpace(raw)
+	if raw != label || label == "" || len([]rune(label)) > 120 {
+		return "", ErrInvalidRequest
+	}
+	for _, character := range label {
+		if character < 32 || character == 127 {
+			return "", ErrInvalidRequest
+		}
+	}
+	return label, nil
+}
 func (service *PostgresService) mutateConversation(ctx context.Context, identity RequestIdentity, id askdata.ID, input ConversationMutationInput, operation string, value bool) (ConversationSummary, error) {
 	if service == nil || identity.validate() != nil || !canonicalUUID(id) || input.ExpectedVersion < 1 {
 		return ConversationSummary{}, ErrInvalidRequest
@@ -263,7 +307,7 @@ func (service *PostgresService) conversationByID(ctx context.Context, identity R
 			  AND run.conversation_id=$4 AND artifact.artifact_type='ANSWER'
 			ORDER BY artifact.created_at DESC,artifact.artifact_index DESC LIMIT 1
 		)
-		SELECT conversation.id::text,latest.id::text,COALESCE(label.value,'分析会话'),latest.current_state,
+		SELECT conversation.id::text,latest.id::text,COALESCE(conversation.custom_label,label.value,'分析会话'),latest.current_state,
 		  conversation.is_pinned,conversation.archived_at IS NOT NULL,latest.release_id::text,latest.release_content_hash,
 		  COALESCE(active.id<>latest.release_id OR active.content_hash<>latest.release_content_hash,false),
 		  latest.current_state='CLARIFICATION_REQUIRED',COALESCE(label.degraded,false),

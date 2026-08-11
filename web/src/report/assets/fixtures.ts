@@ -1,6 +1,6 @@
 import type { ReportAsset } from './model'
 
-const commonActions = ['VIEW', 'EDIT', 'PUBLISH', 'VERSIONS', 'PERMISSIONS', 'ARCHIVE'] as const
+const commonActions = ['VIEW', 'EDIT', 'PUBLISH', 'VERSIONS', 'PERMISSIONS', 'ARCHIVE', 'SHARE'] as const
 
 export const reportAssetFixtures: ReportAsset[] = [
   {
