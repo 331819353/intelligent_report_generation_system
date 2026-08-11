@@ -110,10 +110,10 @@ func TestAdminDraftTermSQLRoundTripInRollbackTransaction(t *testing.T) {
 		t.Fatalf("created result = %#v", created)
 	}
 
-	loadedValue, err := getDraftTx(ctx, tx, scope.DomainID,
-		AdminResourceBusinessTerm, created.ResourceID, false)
+	loadedValue, err := getObjectTx(ctx, tx, scope.DomainID,
+		AdminResourceBusinessTerm, created.ResourceID, StatusDraft, false)
 	if err != nil {
-		t.Fatalf("getDraftTx() error = %v", err)
+		t.Fatalf("getObjectTx() error = %v", err)
 	}
 	loaded := loadedValue.(BusinessTerm)
 	if loaded.Code != input.Code || loaded.Status != VersionStatusDraft ||
@@ -123,10 +123,10 @@ func TestAdminDraftTermSQLRoundTripInRollbackTransaction(t *testing.T) {
 		t.Fatalf("loaded term = %#v", loaded)
 	}
 
-	page, err := listDraftsTx(ctx, tx, scope.DomainID,
-		AdminResourceBusinessTerm, metricCursor{}, 200)
+	page, err := listObjectsTx(ctx, tx, scope.DomainID,
+		AdminResourceBusinessTerm, StatusDraft, metricCursor{}, 200)
 	if err != nil {
-		t.Fatalf("listDraftsTx() error = %v", err)
+		t.Fatalf("listObjectsTx() error = %v", err)
 	}
 	found := false
 	for _, item := range page.Items.([]BusinessTerm) {
@@ -156,8 +156,8 @@ func TestAdminDraftTermSQLRoundTripInRollbackTransaction(t *testing.T) {
 	if deleted.ResourceID != created.ResourceID || deleted.Status != "DRAFT" {
 		t.Fatalf("deleted result = %#v", deleted)
 	}
-	if _, err := getDraftTx(ctx, tx, scope.DomainID,
-		AdminResourceBusinessTerm, created.ResourceID, false); err != ErrRegistryNotFound {
+	if _, err := getObjectTx(ctx, tx, scope.DomainID,
+		AdminResourceBusinessTerm, created.ResourceID, StatusDraft, false); err != ErrRegistryNotFound {
 		t.Fatalf("get deleted draft error = %v", err)
 	}
 }

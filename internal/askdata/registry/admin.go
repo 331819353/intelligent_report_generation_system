@@ -265,6 +265,41 @@ type AdminPage struct {
 	NextCursor string `json:"nextCursor,omitempty"`
 }
 
+// 语义对象的生命周期状态。指标标识表使用 ACTIVE 表示已认证，其余对象使用
+// CERTIFIED；读接口按原样透传，不做跨对象的状态归一化。
+const (
+	StatusDraft      = "DRAFT"
+	StatusCertified  = "CERTIFIED"
+	StatusActive     = "ACTIVE"
+	StatusDeprecated = "DEPRECATED"
+)
+
+// AdminListFilter 描述语义对象读取接口的分页与状态过滤条件。
+// Status 为空表示不过滤，返回该领域下全部状态的对象。
+type AdminListFilter struct {
+	Status string
+	Cursor string
+	Limit  int
+}
+
+func validObjectStatusFilter(status string) bool {
+	switch status {
+	case "", StatusDraft, StatusCertified, StatusActive, StatusDeprecated:
+		return true
+	default:
+		return false
+	}
+}
+
+// statusArg 把空状态映射为 SQL NULL，让查询里的
+// `($n::text IS NULL OR status=$n)` 谓词在不过滤时短路。
+func statusArg(status string) any {
+	if status == "" {
+		return nil
+	}
+	return status
+}
+
 type AdminWriteResult struct {
 	ResourceType    AdminResource       `json:"resourceType"`
 	ResourceID      string              `json:"resourceId"`
@@ -280,6 +315,8 @@ type AdminWriteResult struct {
 type AdminBackend interface {
 	ListDrafts(context.Context, AdminScope, AdminResource, string, int) (AdminPage, error)
 	GetDraft(context.Context, AdminScope, AdminResource, string) (any, error)
+	ListObjects(context.Context, AdminScope, AdminResource, AdminListFilter) (AdminPage, error)
+	GetObject(context.Context, AdminScope, AdminResource, string) (any, error)
 	CreateDraft(context.Context, AdminScope, AdminResource, AdminMutation, AdminCommand) (AdminWriteResult, error)
 	UpdateDraft(context.Context, AdminScope, AdminResource, string, AdminMutation, AdminCommand) (AdminWriteResult, error)
 	DeleteDraft(context.Context, AdminScope, AdminResource, string, DeleteDraftInput, AdminCommand) (AdminWriteResult, error)

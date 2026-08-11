@@ -1,4 +1,5 @@
-import { Button, type ButtonProps } from 'antd'
+import Button from 'antd/es/button'
+import type { ButtonProps } from 'antd/es/button'
 import type { ReactNode } from 'react'
 
 export type AppButtonProps = Omit<ButtonProps, 'type' | 'size' | 'htmlType' | 'danger' | 'ghost' | 'shape' | 'variant' | 'color'> & {

@@ -1,5 +1,5 @@
 import { StrictMode } from 'react'
-import { ConfigProvider } from 'antd'
+import ConfigProvider from 'antd/es/config-provider'
 import zhCN from 'antd/locale/zh_CN'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'

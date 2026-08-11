@@ -99,8 +99,17 @@ npm --prefix web install && npm --prefix web run dev
 3. Owner 认证：`POST /api/v1/askdata/semantic/bulk-certify`；
 4. 创建并激活 Release：`POST /api/v1/askdata/semantic/releases` → `/validate-project` → `/gate` → `/approvals` → `/activate`。
 
-> 语义资产目前**只有导入与导出通道，没有管理界面**，也没有按对象类型的读取接口。
-> 在语义中心页面（`WEB-007`）交付前，这一段只能通过 API 完成。详见 [docs/05_TODO.md](./docs/05_TODO.md)。
+导入后可以按对象类型核对结果（不带 `status` 返回全部状态，也可显式过滤）：
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" '127.0.0.1:8080/api/v1/askdata/semantic/metrics?status=CERTIFIED&limit=50'
+```
+
+对象类型：`models`、`measures`、`metrics`、`metric-versions`、`dimensions`、`terms`、`kpi-bundles`、`relationships`。
+
+> 语义资产目前**只有 API，没有管理界面**（语义中心页面 `WEB-007` 未交付）；
+> 维度成员、层级、认证问法与指标维度绑定的读取接口尚未覆盖（`SEM-READ-002`）。
+> 详见 [docs/05_TODO.md](./docs/05_TODO.md)。
 
 没有 `ACTIVE` 发布时，问数会明确返回 `QUESTION_RELEASE_UNAVAILABLE`，不会伪造答案。
 

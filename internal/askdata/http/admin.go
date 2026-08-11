@@ -455,7 +455,8 @@ func (handler *AdminHandler) listDrafts(writer http.ResponseWriter, request *htt
 	}
 	query := request.URL.Query()
 	for key := range query {
-		if key != "cursor" && key != "limit" && key != "additivityStatus" && key != "suggestion" {
+		if key != "cursor" && key != "limit" && key != "additivityStatus" &&
+			key != "suggestion" && key != "status" {
 			writeAdminError(writer, registry.ErrRegistryInvalidRequest)
 			return
 		}
@@ -497,9 +498,12 @@ func (handler *AdminHandler) listDrafts(writer http.ResponseWriter, request *htt
 			return
 		}
 	}
-	page, err := handler.backend.ListDrafts(
-		request.Context(), scope, resource, query.Get("cursor"), limit,
-	)
+	// 不带 status 时返回该领域下全部状态的对象。导入核对、Release 候选评审与
+	// 语义工作台读取的都是 CERTIFIED 对象，只返回 DRAFT 会让这些场景看不到数据。
+	page, err := handler.backend.ListObjects(request.Context(), scope, resource, registry.AdminListFilter{
+		Status: strings.ToUpper(strings.TrimSpace(query.Get("status"))),
+		Cursor: query.Get("cursor"), Limit: limit,
+	})
 	if err != nil {
 		writeAdminError(writer, err)
 		return
@@ -573,7 +577,8 @@ func (handler *AdminHandler) getDraft(writer http.ResponseWriter, request *http.
 		writeAdminError(writer, err)
 		return
 	}
-	result, err := handler.backend.GetDraft(request.Context(), scope, resource, resourceID)
+	// 与列表一致：详情读取不限定 DRAFT，否则已认证对象无法查看。
+	result, err := handler.backend.GetObject(request.Context(), scope, resource, resourceID)
 	if err != nil {
 		writeAdminError(writer, err)
 		return

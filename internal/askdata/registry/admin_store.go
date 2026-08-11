@@ -40,10 +40,72 @@ func (store *PostgresStore) ListDrafts(
 			return err
 		}
 		var listErr error
-		page, listErr = listDraftsTx(ctx, tx, scope.DomainID, resource, position, limit)
+		page, listErr = listObjectsTx(ctx, tx, scope.DomainID, resource, StatusDraft, position, limit)
 		return listErr
 	})
 	return page, normalizeAdminStoreError(err)
+}
+
+// ListObjects reads governed semantic objects at any lifecycle status. It is the
+// read counterpart of ListDrafts: the draft APIs deliberately only ever see
+// DRAFT rows because they feed the editing path, but inspecting an import,
+// reviewing a release candidate and building the semantic workbench all need to
+// read CERTIFIED and DEPRECATED objects too. Permission, tenant isolation and
+// cursor semantics are identical to ListDrafts.
+func (store *PostgresStore) ListObjects(
+	ctx context.Context,
+	scope AdminScope,
+	resource AdminResource,
+	filter AdminListFilter,
+) (AdminPage, error) {
+	if err := store.validateAdminRequest(ctx, scope); err != nil {
+		return AdminPage{}, err
+	}
+	if filter.Limit < 1 || filter.Limit > 200 {
+		return AdminPage{}, fmt.Errorf("%w: limit must be between 1 and 200", ErrRegistryInvalidRequest)
+	}
+	if !validObjectStatusFilter(filter.Status) {
+		return AdminPage{}, fmt.Errorf("%w: status filter is not a known lifecycle status", ErrRegistryInvalidRequest)
+	}
+	position, err := decodeMetricCursor(filter.Cursor)
+	if err != nil {
+		return AdminPage{}, fmt.Errorf("%w: cursor is invalid", ErrRegistryInvalidRequest)
+	}
+	var page AdminPage
+	err = database.WithTenantTx(ctx, store.pool, scope.TenantID, func(tx pgx.Tx) error {
+		if err := requireSemanticPermissionTx(ctx, tx, scope, AdminActionView, ""); err != nil {
+			return err
+		}
+		var listErr error
+		page, listErr = listObjectsTx(ctx, tx, scope.DomainID, resource, filter.Status, position, filter.Limit)
+		return listErr
+	})
+	return page, normalizeAdminStoreError(err)
+}
+
+// GetObject reads a single governed semantic object at any lifecycle status.
+func (store *PostgresStore) GetObject(
+	ctx context.Context,
+	scope AdminScope,
+	resource AdminResource,
+	resourceID string,
+) (any, error) {
+	if err := store.validateAdminRequest(ctx, scope); err != nil {
+		return nil, err
+	}
+	if !canonicalAdminUUID(resourceID) {
+		return nil, fmt.Errorf("%w: resource ID must be a canonical UUID", ErrRegistryInvalidRequest)
+	}
+	var result any
+	err := database.WithTenantTx(ctx, store.pool, scope.TenantID, func(tx pgx.Tx) error {
+		if err := requireSemanticPermissionTx(ctx, tx, scope, AdminActionView, resourceID); err != nil {
+			return err
+		}
+		var getErr error
+		result, getErr = getObjectTx(ctx, tx, scope.DomainID, resource, resourceID, "", false)
+		return getErr
+	})
+	return result, normalizeAdminStoreError(err)
 }
 
 func (store *PostgresStore) GetDraft(
@@ -64,7 +126,7 @@ func (store *PostgresStore) GetDraft(
 			return err
 		}
 		var getErr error
-		result, getErr = getDraftTx(ctx, tx, scope.DomainID, resource, resourceID, false)
+		result, getErr = getObjectTx(ctx, tx, scope.DomainID, resource, resourceID, StatusDraft, false)
 		return getErr
 	})
 	return result, normalizeAdminStoreError(err)
@@ -563,7 +625,7 @@ func updateDraftTx(
 	resourceID string,
 	payload any,
 ) (AdminWriteResult, error) {
-	existing, err := getDraftTx(ctx, tx, scope.DomainID, resource, resourceID, true)
+	existing, err := getObjectTx(ctx, tx, scope.DomainID, resource, resourceID, StatusDraft, true)
 	if err != nil {
 		return AdminWriteResult{}, err
 	}
@@ -899,7 +961,7 @@ func deleteDraftTx(
 	resourceID string,
 	input DeleteDraftInput,
 ) (AdminWriteResult, error) {
-	existing, err := getDraftTx(ctx, tx, domainID, resource, resourceID, true)
+	existing, err := getObjectTx(ctx, tx, domainID, resource, resourceID, StatusDraft, true)
 	if err != nil {
 		return AdminWriteResult{}, err
 	}
@@ -939,12 +1001,13 @@ func deleteDraftTx(
 	return result, nil
 }
 
-func getDraftTx(
+func getObjectTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	domainID string,
 	resource AdminResource,
 	resourceID string,
+	status string,
 	forUpdate bool,
 ) (any, error) {
 	lock := ""
@@ -955,15 +1018,15 @@ func getDraftTx(
 	switch resource {
 	case AdminResourceSemanticModel:
 		var value SemanticModel
-		err = scanSemanticModel(tx.QueryRow(ctx, semanticModelAdminSelect+` WHERE id=$1 AND domain_id=$2 AND status='DRAFT'`+lock, resourceID, domainID), &value)
+		err = scanSemanticModel(tx.QueryRow(ctx, semanticModelAdminSelect+` WHERE id=$1 AND domain_id=$2 AND ($3::text IS NULL OR status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
 		return value, adminNoRows(err)
 	case AdminResourceMeasure:
 		var value Measure
-		err = scanMeasure(tx.QueryRow(ctx, measureAdminSelect+` WHERE id=$1 AND domain_id=$2 AND status='DRAFT'`+lock, resourceID, domainID), &value)
+		err = scanMeasure(tx.QueryRow(ctx, measureAdminSelect+` WHERE id=$1 AND domain_id=$2 AND ($3::text IS NULL OR status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
 		return value, adminNoRows(err)
 	case AdminResourceMetric:
 		var value Metric
-		err = scanMetric(tx.QueryRow(ctx, metricSelect+` WHERE id=$1 AND domain_id=$2 AND status='DRAFT'`+lock, resourceID, domainID), &value)
+		err = scanMetric(tx.QueryRow(ctx, metricSelect+` WHERE id=$1 AND domain_id=$2 AND ($3::text IS NULL OR status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
 		return value, adminNoRows(err)
 	case AdminResourceMetricVersion:
 		var value MetricVersion
@@ -976,36 +1039,37 @@ func getDraftTx(
 					Scan(&value.MeasureVersionIDs)
 			}
 		} else {
-			err = scanMetricVersion(tx.QueryRow(ctx, metricVersionAdminSelect+` WHERE version.id=$1 AND version.domain_id=$2 AND version.status='DRAFT'
-				GROUP BY version.id`, resourceID, domainID), &value)
+			err = scanMetricVersion(tx.QueryRow(ctx, metricVersionAdminSelect+` WHERE version.id=$1 AND version.domain_id=$2 AND ($3::text IS NULL OR version.status=$3)
+				GROUP BY version.id`, resourceID, domainID, statusArg(status)), &value)
 		}
 		return value, adminNoRows(err)
 	case AdminResourceDimension:
 		var value Dimension
-		err = scanDimension(tx.QueryRow(ctx, dimensionAdminSelect+` WHERE id=$1 AND domain_id=$2 AND status='DRAFT'`+lock, resourceID, domainID), &value)
+		err = scanDimension(tx.QueryRow(ctx, dimensionAdminSelect+` WHERE id=$1 AND domain_id=$2 AND ($3::text IS NULL OR status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
 		return value, adminNoRows(err)
 	case AdminResourceBusinessTerm:
 		var value BusinessTerm
-		err = scanBusinessTerm(tx.QueryRow(ctx, businessTermAdminSelect+` WHERE id=$1 AND domain_id=$2 AND status='DRAFT'`+lock, resourceID, domainID), &value)
+		err = scanBusinessTerm(tx.QueryRow(ctx, businessTermAdminSelect+` WHERE id=$1 AND domain_id=$2 AND ($3::text IS NULL OR status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
 		return value, adminNoRows(err)
 	case AdminResourceKPIBundle:
 		var value KPIBundle
-		err = scanKPIBundle(tx.QueryRow(ctx, kpiBundleAdminSelect+` WHERE version.id=$1 AND version.domain_id=$2 AND version.status='DRAFT'`+lock, resourceID, domainID), &value)
+		err = scanKPIBundle(tx.QueryRow(ctx, kpiBundleAdminSelect+` WHERE version.id=$1 AND version.domain_id=$2 AND ($3::text IS NULL OR version.status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
 		return value, adminNoRows(err)
 	case AdminResourceRelationship:
 		var value Relationship
-		err = scanRelationship(tx.QueryRow(ctx, relationshipAdminSelect+` WHERE id=$1 AND domain_id=$2 AND status='DRAFT'`+lock, resourceID, domainID), &value)
+		err = scanRelationship(tx.QueryRow(ctx, relationshipAdminSelect+` WHERE id=$1 AND domain_id=$2 AND ($3::text IS NULL OR status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
 		return value, adminNoRows(err)
 	default:
 		return nil, fmt.Errorf("%w: unsupported semantic resource", ErrRegistryInvalidRequest)
 	}
 }
 
-func listDraftsTx(
+func listObjectsTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	domainID string,
 	resource AdminResource,
+	status string,
 	position metricCursor,
 	limit int,
 ) (AdminPage, error) {
@@ -1013,10 +1077,10 @@ func listDraftsTx(
 	if position.ID != "" {
 		cursorID = position.ID
 	}
-	suffix := ` WHERE domain_id=$1 AND status='DRAFT'
+	suffix := ` WHERE domain_id=$1 AND ($5::text IS NULL OR status=$5)
 		AND ($2::timestamptz IS NULL OR (updated_at,id)<($2,$3::uuid))
 		ORDER BY updated_at DESC,id DESC LIMIT $4`
-	args := []any{domainID, position.UpdatedAt, cursorID, limit + 1}
+	args := []any{domainID, position.UpdatedAt, cursorID, limit + 1, statusArg(status)}
 	switch resource {
 	case AdminResourceSemanticModel:
 		rows, err := tx.Query(ctx, semanticModelAdminSelect+suffix, args...)
@@ -1064,7 +1128,7 @@ func listDraftsTx(
 		}
 		return finishAdminPage(items, limit, func(value Metric) (time.Time, string) { return value.UpdatedAt, value.ID }, rows.Err())
 	case AdminResourceMetricVersion:
-		metricSuffix := ` WHERE version.domain_id=$1 AND version.status='DRAFT'
+		metricSuffix := ` WHERE version.domain_id=$1 AND ($5::text IS NULL OR version.status=$5)
 			AND ($2::timestamptz IS NULL OR (version.updated_at,version.id)<($2,$3::uuid))
 			GROUP BY version.id ORDER BY version.updated_at DESC,version.id DESC LIMIT $4`
 		rows, err := tx.Query(ctx, metricVersionAdminSelect+metricSuffix, args...)
@@ -1112,7 +1176,7 @@ func listDraftsTx(
 		}
 		return finishAdminPage(items, limit, func(value BusinessTerm) (time.Time, string) { return value.UpdatedAt, value.ID }, rows.Err())
 	case AdminResourceKPIBundle:
-		bundleSuffix := ` WHERE version.domain_id=$1 AND version.status='DRAFT'
+		bundleSuffix := ` WHERE version.domain_id=$1 AND ($5::text IS NULL OR version.status=$5)
 			AND ($2::timestamptz IS NULL OR (version.updated_at,version.id)<($2,$3::uuid))
 			ORDER BY version.updated_at DESC,version.id DESC LIMIT $4`
 		rows, err := tx.Query(ctx, kpiBundleAdminSelect+bundleSuffix, args...)

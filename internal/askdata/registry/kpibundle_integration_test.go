@@ -137,7 +137,7 @@ func TestKPIBundleAdminRoundTripAndReferenceValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create KPI bundle = %v", err)
 	}
-	loadedValue, err := getDraftTx(ctx, tx, domainID, AdminResourceKPIBundle, created.ResourceID, false)
+	loadedValue, err := getObjectTx(ctx, tx, domainID, AdminResourceKPIBundle, created.ResourceID, StatusDraft, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestKPIBundleAdminRoundTripAndReferenceValidation(t *testing.T) {
 	if err := validateKPIBundleCertification(ctx, tx, loaded.ID); err != nil {
 		t.Fatalf("certification validation = %v", err)
 	}
-	page, err := listDraftsTx(ctx, tx, domainID, AdminResourceKPIBundle, metricCursor{}, 200)
+	page, err := listObjectsTx(ctx, tx, domainID, AdminResourceKPIBundle, StatusDraft, metricCursor{}, 200)
 	if err != nil || len(page.Items.([]KPIBundle)) != 1 {
 		t.Fatalf("list KPI bundles = %#v/%v", page, err)
 	}
@@ -163,7 +163,7 @@ func TestKPIBundleAdminRoundTripAndReferenceValidation(t *testing.T) {
 		DeleteDraftInput{ExpectedUpdatedAt: updated.UpdatedAt}); err != nil {
 		t.Fatalf("delete KPI bundle = %v", err)
 	}
-	if _, err := getDraftTx(ctx, tx, domainID, AdminResourceKPIBundle, created.ResourceID, false); !errors.Is(err, ErrRegistryNotFound) {
+	if _, err := getObjectTx(ctx, tx, domainID, AdminResourceKPIBundle, created.ResourceID, StatusDraft, false); !errors.Is(err, ErrRegistryNotFound) {
 		t.Fatalf("get deleted KPI bundle = %v", err)
 	}
 }

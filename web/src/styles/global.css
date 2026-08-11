@@ -15,13 +15,6 @@
   --canvas: #f7f8fa;
   --surface-subtle: #fafbfc;
   --blue-soft: #edf3ff;
-  --el-color-primary: #2864dc;
-  --el-color-primary-light-3: #6790e5;
-  --el-color-primary-light-5: #93b2ed;
-  --el-color-primary-light-7: #bfd3f5;
-  --el-color-primary-light-8: #d4e1f8;
-  --el-color-primary-light-9: #eaf0fc;
-  --el-color-primary-dark-2: #2050b0;
 }
 
 * { box-sizing: border-box; }

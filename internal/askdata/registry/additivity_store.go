@@ -241,7 +241,7 @@ func (store *PostgresStore) BulkConfirmAdditivity(
 			return err
 		}
 		for _, id := range ids {
-			value, err := getDraftTx(ctx, tx, scope.DomainID, AdminResourceMetricVersion, id, true)
+			value, err := getObjectTx(ctx, tx, scope.DomainID, AdminResourceMetricVersion, id, StatusDraft, true)
 			if err != nil {
 				return err
 			}

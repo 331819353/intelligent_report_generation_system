@@ -25,6 +25,7 @@ type fakeAdminBackend struct {
 	lastScope       registry.AdminScope
 	lastResource    registry.AdminResource
 	lastResourceID  string
+	lastListFilter  registry.AdminListFilter
 	lastMutation    registry.AdminMutation
 	lastDelete      registry.DeleteDraftInput
 	lastRelease     registry.ReleaseDraftInput
@@ -58,6 +59,29 @@ func (backend *fakeAdminBackend) ListDrafts(
 }
 
 func (backend *fakeAdminBackend) GetDraft(
+	_ context.Context,
+	scope registry.AdminScope,
+	resource registry.AdminResource,
+	resourceID string,
+) (any, error) {
+	backend.getCalls++
+	backend.lastScope, backend.lastResource, backend.lastResourceID = scope, resource, resourceID
+	return backend.getValue, backend.err
+}
+
+func (backend *fakeAdminBackend) ListObjects(
+	_ context.Context,
+	scope registry.AdminScope,
+	resource registry.AdminResource,
+	filter registry.AdminListFilter,
+) (registry.AdminPage, error) {
+	backend.listCalls++
+	backend.lastScope, backend.lastResource = scope, resource
+	backend.lastListFilter = filter
+	return backend.listPage, backend.err
+}
+
+func (backend *fakeAdminBackend) GetObject(
 	_ context.Context,
 	scope registry.AdminScope,
 	resource registry.AdminResource,
@@ -483,6 +507,37 @@ func TestSemanticAdminMapsStableErrorsAndRequiresBearerBeforeBackend(t *testing.
 func testAdminScope() registry.AdminScope {
 	return registry.AdminScope{
 		TenantID: uuid.NewString(), DomainID: uuid.NewString(), ActorID: uuid.NewString(),
+	}
+}
+
+// 语义读取接口必须能看到已认证对象：导入核对、Release 候选评审和语义工作台
+// 读的都是 CERTIFIED，而不是 DRAFT。不带 status 时不过滤状态。
+func TestAdminListReadsEveryLifecycleStatusAndHonoursTheStatusFilter(t *testing.T) {
+	scope := testAdminScope()
+	backend := &fakeAdminBackend{listPage: registry.AdminPage{Items: []registry.Metric{}}}
+	handler := testAdminHandler(backend, scope)
+
+	unfiltered := httptest.NewRequest(http.MethodGet, "/api/v1/askdata/semantic/metrics?limit=25", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, unfiltered)
+	if response.Code != http.StatusOK || backend.lastListFilter.Status != "" {
+		t.Fatalf("unfiltered list = %d status=%q", response.Code, backend.lastListFilter.Status)
+	}
+
+	certified := httptest.NewRequest(http.MethodGet, "/api/v1/askdata/semantic/metrics?status=certified", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, certified)
+	if response.Code != http.StatusOK || backend.lastListFilter.Status != registry.StatusCertified {
+		t.Fatalf("certified list = %d status=%q", response.Code, backend.lastListFilter.Status)
+	}
+
+	// 详情同样不再限定 DRAFT。
+	backend.getValue = registry.Metric{ID: uuid.NewString(), Status: registry.StatusActive}
+	detail := httptest.NewRequest(http.MethodGet, "/api/v1/askdata/semantic/metrics/"+uuid.NewString(), nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, detail)
+	if response.Code != http.StatusOK || backend.getCalls != 1 {
+		t.Fatalf("detail = %d calls=%d", response.Code, backend.getCalls)
 	}
 }
 

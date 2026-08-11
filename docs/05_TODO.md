@@ -28,10 +28,15 @@
 
 - [ ] **ADD-002** — 可加性启发式建议与补录清单（含指标中心批量确认页，先过设计稿门禁）。
 - [ ] **SEM-CTX-001** — 业务补充信息采集与治理：指标口径的业务说明、维度值定义与组织信息映射、企业内部黑话/缩写词条、数据过滤规则（指标默认过滤与行级安全过滤）的采集模板、批量导入与 Owner 认证流；产出物进入 Release 并作为检索与 LLM 上下文证据。
-- [ ] **SEM-READ-001（新，阻塞 WEB-007）** — 语义对象读取接口：当前 `internal/askdata/http/admin.go` 只有
-      导入、批量认证、可加性确认、Release 与导出/Readiness，**没有任何按对象类型的列表/详情接口**
-      （模型、指标、维度、成员、词典、认证问法、KPI Bundle）。没有读取接口就无法交付语义中心页面，
-      也无法在导入后核对结果。需按对象类型补 `GET` 列表与详情，权限裁剪与检索一致。
+- [x] **SEM-READ-001** — 语义对象读取接口。**上一版描述有误**：按对象类型的列表/详情路由一直存在
+      （`GET/POST /api/v1/askdata/semantic/{models|measures|metrics|metric-versions|dimensions|terms|kpi-bundles|relationships}`，
+      由 `internal/askdata/http/admin.go` 循环拼接注册，因此不出现在字面量路由清单里）。
+      真实缺口是这些读取接口**硬编码 `status='DRAFT'`**，导入并认证之后的 CERTIFIED 对象一律看不到。
+      已改为：`ListObjects`/`GetObject` 支持状态过滤，不带 `status` 时返回全部状态，
+      `?status=DRAFT|CERTIFIED|ACTIVE|DEPRECATED` 精确过滤，未知状态在存储层拒绝；
+      写路径（Create/Update/Delete/可加性确认）仍固定 `DRAFT`，语义不变。
+- [ ] **SEM-READ-002（新）** — 补齐读取接口尚未覆盖的对象类型：维度成员、层级、认证问法、
+      指标维度绑定、评测用例（导入通道支持 12 类，读取接口目前覆盖 8 类）。
 - [ ] **WEB-007** — 语义管理与发布页面：按优先级切片交付——可加性/时间确认待办 → 指标建设与审批 → 维度成员/别名/层级 → 模型关系与评审 → 词典/黑话/KPI/认证问法 → 发布中心（Readiness/投影/评测/双人审批/激活/回滚）。
 - [ ] **EVAL-008** — 时间类专项黄金用例集。
 - [ ] **EVAL-009** — 可加性专项黄金用例集。
