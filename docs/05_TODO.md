@@ -31,6 +31,16 @@
 ## 1. 共用引擎（M4 前置，最高优先级）
 
 - [ ] **AI-005** — 报告与问数统一 LLM 引擎阶段协议：冻结「识别—分析—规划—指派」的阶段合同、事件流与审计字段；两条链路共用，不展示隐藏思维链。
+      **已产出待确认提案：[07_AI-005_阶段协议提案](./07_AI-005_阶段协议提案.md)**，把既有的三张约束表
+      （`valid_question_run_transition` 状态图、`allowedToolsForCognitionStage` 阶段→工具、
+      `stageAllowsAction` 阶段→动作）连接为完整的阶段—状态映射，不新增权限也不放宽门禁。
+      提案中有三个必须裁定的开放问题：`UNDERSTANDING` 阶段缺少「完成」动作、
+      有界纠错次数上限、报告引擎是否共用同一张阶段表。
+      **AI-005 未确认前，问数 Worker 的 FRESH 执行路径不实现**（见下 ASK-WORKER-001）。
+- [ ] **ASK-WORKER-001（新）** — 问数运行 Worker：领取 → 构造工具绑定与 Loop → 按 AI-005 协议驱动阶段
+      → 心跳 → 释放。租约基座已完成（迁移 `000300` + `orchestrator.LeaseStore`）；
+      `ABANDONED` 领取终结为 `BLOCKED` 的分支不依赖 AI-005，可先行交付。
+      交付后 `orchestrator.NewLoop` 才首次拥有生产调用方，问数运行才会离开 `RECEIVED`。
 
 ## 2. M1 数据建模收口（P02/P03）
 
