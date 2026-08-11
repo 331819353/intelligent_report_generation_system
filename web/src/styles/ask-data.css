@@ -1056,8 +1056,7 @@
   .ask-data-shell .sidebar { width: 72px; grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); padding: 20px 10px; }
   .ask-data-shell .sidebar .brand-logo { width: 52px; }
   .ask-data-shell .sidebar .brand-copy,
-  .ask-data-shell .sidebar-section-label,
-  .ask-data-shell .sidebar-footer { display: none; }
+  .ask-data-shell .sidebar-section-label { display: none; }
   .ask-data-shell .sidebar nav { grid-column: 1; align-items: stretch; margin-top: 18px; }
   .ask-data-shell .sidebar nav a { min-height: 44px; justify-content: center; padding: 10px; font-size: 0; }
   .ask-data-shell .sidebar nav a svg { width: 20px; height: 20px; }

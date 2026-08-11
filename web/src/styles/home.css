@@ -28,8 +28,8 @@
 
 .home-shell .topbar .eyebrow { display: none; }
 .home-shell .topbar-title-row { display: grid; gap: 3px; }
-.home-shell .topbar h1 { margin: 0; color: #26354a; font-size: 30px; font-weight: 720; letter-spacing: -.035em; line-height: 1.15; }
-.home-title-meta { color: #748197; font-size: 13px; font-weight: 520; letter-spacing: 0; }
+.home-shell .topbar h1 { margin: 0; color: #26354a; font-size: 32px; font-weight: 720; letter-spacing: -.035em; line-height: 1.15; }
+.home-title-meta { color: #748197; font-size: 14px; font-weight: 520; letter-spacing: 0; }
 
 .home-layout {
   position: relative;
@@ -79,16 +79,16 @@
 
 .home-resume-copy { min-width: 0; align-self: center; }
 .home-resume-copy h3 { overflow: hidden; margin: 0 0 7px; color: #26354a; font-size: 21px; font-weight: 700; letter-spacing: -.02em; text-overflow: ellipsis; white-space: nowrap; }
-.home-resume-copy > p { margin: 0; color: #728097; font-size: 13px; }
+.home-resume-copy > p { margin: 0; color: #728097; font-size: 14px; }
 .home-resume-copy > p span { margin: 0 8px; color: #b3bdca; }
-.home-resume-trust { min-width: 0; display: flex; align-items: center; gap: 7px; margin-top: 14px; color: #6f7e93; font-size: 12px; }
+.home-resume-trust { min-width: 0; display: flex; align-items: center; gap: 7px; margin-top: 14px; color: #6f7e93; font-size: 13px; }
 .home-resume-trust > svg { flex: none; color: #13a36d; }
 .home-resume-trust > svg:nth-of-type(2) { color: #1677ff; }
 .home-resume-trust strong { color: #30946f; font-weight: 650; }
 .home-resume-trust i { width: 1px; height: 14px; margin: 0 4px; background: #dfe6ef; }
-.home-resume-trust .ant-btn-link { min-height: 24px; height: auto; gap: 3px; padding: 0 4px; color: #1677ff; font-size: 12px; }
+.home-resume-trust .ant-btn-link { min-height: 24px; height: auto; gap: 3px; padding: 0 4px; color: #1677ff; font-size: 13px; }
 .home-resume-button.ant-btn { width: 185px; height: 44px; border-radius: 5px; font-size: 15px; font-weight: 650; box-shadow: none; }
-.home-resume-state { min-height: 105px; display: flex; align-items: center; justify-content: center; gap: 9px; color: #748197; font-size: 12px; }
+.home-resume-state { min-height: 105px; display: flex; align-items: center; justify-content: center; gap: 9px; color: #748197; font-size: 13px; }
 .home-resume-state.is-error { color: #b42318; }
 
 .home-question-launcher { min-height: 164px; padding: 18px 24px 17px; }
@@ -101,10 +101,10 @@
 .home-question-input-row input::placeholder { color: #9aa6b6; }
 .home-question-input-row label:has(input[aria-invalid="true"]) { border-color: #e0605a; }
 .home-ask-button.ant-btn { width: 185px; height: 44px; border-radius: 5px; font-size: 15px; font-weight: 650; box-shadow: none; }
-.home-question-error { display: flex; align-items: center; gap: 5px; margin: 6px 0 0; color: #b42318; font-size: 11px; }
+.home-question-error { display: flex; align-items: center; gap: 5px; margin: 6px 0 0; color: #b42318; font-size: 12px; }
 .home-suggestions { min-height: 27px; display: flex; align-items: center; gap: 8px; margin-top: 10px; overflow: hidden; }
-.home-suggestions > span { flex: none; color: #66758a; font-size: 12px; font-weight: 620; }
-.home-suggestions .ant-btn { max-width: 290px; min-height: 25px; height: 25px; overflow: hidden; border-color: #d6e2f2; border-radius: 5px; padding: 0 10px; background: #f8fbff; color: #1677ff; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.home-suggestions > span { flex: none; color: #66758a; font-size: 13px; font-weight: 620; }
+.home-suggestions .ant-btn { max-width: 290px; min-height: 29px; height: 29px; overflow: hidden; border-color: #d6e2f2; border-radius: 5px; padding: 0 10px; background: #f8fbff; color: #1677ff; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .home-suggestions .ant-btn:hover { border-color: #a9c8ef; background: #f2f7ff; color: #0868cc; }
 
 .home-lower-grid { display: grid; grid-template-columns: minmax(0, 1.72fr) minmax(360px, .98fr); gap: 10px; }
@@ -115,7 +115,7 @@
 .home-task-rail > header h2 span { margin-left: 5px; color: #1677ff; font-weight: 730; }
 
 .home-work-tabs { height: 39px; display: flex; align-items: stretch; gap: 20px; margin: 0 24px; border-bottom: 1px solid #dfe7f0; }
-.home-work-tabs .ant-btn { position: relative; min-width: 46px; height: 39px; border: 0; border-radius: 0; padding: 0 5px; background: transparent; color: #5e6b7e; font-size: 12px; font-weight: 620; }
+.home-work-tabs .ant-btn { position: relative; min-width: 46px; height: 39px; border: 0; border-radius: 0; padding: 0 5px; background: transparent; color: #5e6b7e; font-size: 13px; font-weight: 620; }
 .home-work-tabs .ant-btn:hover { background: transparent; color: #1677ff; }
 .home-work-tabs .ant-btn[aria-selected="true"] { color: #1677ff; }
 .home-work-tabs .ant-btn[aria-selected="true"]::after { position: absolute; right: 4px; bottom: -1px; left: 4px; height: 2px; background: #1677ff; content: ''; }
@@ -123,7 +123,7 @@
 .home-work-table { margin: 0 24px; }
 .home-work-row.ant-btn {
   width: 100%;
-  min-height: 53px;
+  min-height: 58px;
   display: grid;
   grid-template-columns: 34px minmax(210px, 1.45fr) minmax(125px, .9fr) 105px 96px 18px;
   align-items: center;
@@ -134,7 +134,7 @@
   padding: 0;
   background: transparent;
   color: #6f7e92;
-  font-size: 11px;
+  font-size: 12px;
   text-align: left;
   box-shadow: none;
 }
@@ -143,42 +143,42 @@
 .home-work-type.is-report { border-color: #d9ebe5; background: #f2fbf7; color: #15a171; }
 .home-work-type.is-decision { border-color: #e4ddf8; background: #f7f4ff; color: #7357d9; }
 .home-work-name { min-width: 0; }
-.home-work-name strong { display: block; overflow: hidden; color: #35445a; font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.home-work-name strong { display: block; overflow: hidden; color: #35445a; font-size: 14px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .home-work-meta,
 .home-work-time { overflow: hidden; color: #748197; text-overflow: ellipsis; white-space: nowrap; }
 .home-work-status { display: inline-flex; align-items: center; gap: 5px; color: #17996b; white-space: nowrap; }
 .home-work-status.is-progress { color: #e39120; }
 .home-work-status.is-published { color: #17996b; }
 .home-work-arrow { justify-self: end; color: #7f8ca0; }
-.home-view-all.ant-btn { min-height: 40px; width: 100%; justify-content: center; gap: 5px; border: 0; background: transparent; color: #1677ff; font-size: 11px; font-weight: 650; }
+.home-view-all.ant-btn { min-height: 40px; width: 100%; justify-content: center; gap: 5px; border: 0; background: transparent; color: #1677ff; font-size: 13px; font-weight: 650; }
 
-.home-data-state { min-height: 264px; display: grid; place-items: center; align-content: center; gap: 7px; color: #7d8795; font-size: 10px; text-align: center; }
-.home-data-state > strong { color: #3c4657; font-size: 12px; }
+.home-data-state { min-height: 264px; display: grid; place-items: center; align-content: center; gap: 7px; color: #7d8795; font-size: 12px; text-align: center; }
+.home-data-state > strong { color: #3c4657; font-size: 14px; }
 .home-data-state > svg { color: #149064; }
 .home-data-state.is-error > svg { color: #c2413b; }
 .home-data-state .ant-btn,
-.home-task-empty .ant-btn { gap: 5px; border-color: #c9d8f1; border-radius: 5px; color: #1677ff; font-size: 10px; font-weight: 650; }
+.home-task-empty .ant-btn { gap: 5px; border-color: #c9d8f1; border-radius: 5px; color: #1677ff; font-size: 12px; font-weight: 650; }
 .home-loading-dot { width: 18px; height: 18px; border: 2px solid #d7e2f5; border-top-color: #1677ff; border-radius: 50%; animation: home-spin .75s linear infinite; }
 
 .home-task-list { margin: 0 24px; }
-.home-task-item { min-height: 72px; display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; align-items: center; gap: 10px; border-bottom: 1px solid #e5ebf2; }
+.home-task-item { min-height: 76px; display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; align-items: center; gap: 10px; border-bottom: 1px solid #e5ebf2; }
 .home-task-item:last-child { border-bottom: 0; }
 .home-task-dot { width: 8px; height: 8px; border-radius: 50%; background: #4a8fea; }
 .home-task-dot.is-high { background: #f05252; }
 .home-task-dot.is-medium { background: #f39a24; }
 .home-task-dot.is-low { background: #4a8fea; }
 .home-task-copy { min-width: 0; }
-.home-task-copy h3 { overflow: hidden; margin: 0 0 6px; color: #35445a; font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.home-task-copy p { overflow: hidden; margin: 0; color: #748197; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.home-task-copy h3 { overflow: hidden; margin: 0 0 6px; color: #35445a; font-size: 14px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.home-task-copy p { overflow: hidden; margin: 0; color: #748197; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .home-task-copy p span { margin: 0 5px; color: #b1bbc8; }
-.home-task-item > .ant-btn { min-height: 30px; height: 30px; gap: 3px; padding: 0 2px 0 8px; color: #1677ff; font-size: 11px; font-weight: 650; }
+.home-task-item > .ant-btn { min-height: 32px; height: 32px; gap: 3px; padding: 0 2px 0 8px; color: #1677ff; font-size: 13px; font-weight: 650; }
 .home-task-empty { min-height: 288px; display: grid; place-items: center; align-content: center; gap: 6px; color: #7d8795; text-align: center; }
 .home-task-empty > svg { color: #149064; }
 .home-task-empty.is-error > svg { color: #c2413b; }
-.home-task-empty strong { color: #3c4657; font-size: 12px; }
-.home-task-empty span { font-size: 10px; }
+.home-task-empty strong { color: #3c4657; font-size: 14px; }
+.home-task-empty span { font-size: 12px; }
 
-.home-notice { position: fixed; right: 28px; bottom: 24px; z-index: 90; max-width: 420px; display: flex; align-items: center; gap: 9px; border: 1px solid #cddcf5; border-radius: 7px; padding: 10px 11px; background: #f7faff; box-shadow: 0 12px 30px #2138581f; color: #3b4b64; font-size: 11px; }
+.home-notice { position: fixed; right: 28px; bottom: 24px; z-index: 90; max-width: 420px; display: flex; align-items: center; gap: 9px; border: 1px solid #cddcf5; border-radius: 7px; padding: 10px 11px; background: #f7faff; box-shadow: 0 12px 30px #2138581f; color: #3b4b64; font-size: 13px; }
 .home-notice > svg { flex: none; color: #1677ff; }
 .home-notice .ant-btn { width: 26px; height: 26px; min-width: 26px; padding: 0; color: #718096; }
 .home-notice .ant-btn:hover { background: #e9f1ff; color: #1677ff; }

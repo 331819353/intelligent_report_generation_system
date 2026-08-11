@@ -28,6 +28,7 @@ createRoot(document.getElementById('root')!).render(
         colorPrimary: '#0872d3',
         borderRadius: 5,
         controlHeight: 40,
+        fontSize: 14,
         fontFamily: 'Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
       },
     }}>

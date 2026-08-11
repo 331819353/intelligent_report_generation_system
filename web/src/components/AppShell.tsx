@@ -417,7 +417,7 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
             {domainMenuOpen && <div className="domain-menu sidebar-domain-menu" role="menu" aria-label="切换业务领域">
               <header>
                 <strong>切换领域</strong>
-                <NavLink to={designSnapshot ? '/domain-access?snapshot=domain-access-v2' : '/domain-access'} onClick={() => setDomainMenuOpen(false)}>管理领域访问<ArrowSquareOut size={13} /></NavLink>
+                <NavLink to={designSnapshot ? '/domain-access?snapshot=domain-access-v2' : '/domain-access'} onClick={() => setDomainMenuOpen(false)}>管理领域访问<ArrowSquareOut size={14} /></NavLink>
               </header>
               <div className="domain-menu-section-label">当前领域</div>
               {activeDomains.length > 0
@@ -436,7 +436,7 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
                     key={domain.id}
                     onClick={() => chooseDomain(domain)}
                   >
-                    <span className="domain-option-icon"><DomainIcon size={20} weight="duotone" /></span>
+                    <span className="domain-option-icon"><DomainIcon size={24} weight="duotone" /></span>
                     <span className="domain-option-copy">
                       <span className="domain-option-title"><strong>{domain.name}</strong>{isCurrent && <em>当前</em>}</span>
                       <small>角色：{domainRoleLabel(domain, currentSubject(), canManage, designSnapshot)}</small>
@@ -446,7 +446,7 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
                   </AppButton>
                 })
                 : <p>暂无可用领域</p>}
-              <footer><Info size={15} /><span>切换后将刷新当前工作台数据与内容</span></footer>
+              <footer><Info size={16} /><span>切换后将刷新当前工作台数据与内容</span></footer>
             </div>}
             <AppButton
               text

@@ -562,7 +562,7 @@ textarea:focus-visible {
 .domain-menu > button > span:nth-child(2) { min-width: 0; display: grid; gap: 2px; }
 .domain-menu > button strong, .domain-menu > button small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .domain-menu > button strong { color: #344054; font-size: 9px; }
-.domain-menu > button small { color: #8c96a5; font-size: 7px; }
+.domain-menu > button small { color: #8c96a5; font-size: 13px; }
 
 .domain-option-icon {
   width: 27px;
