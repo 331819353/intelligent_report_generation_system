@@ -193,9 +193,15 @@ func (store *postgresCleanupStore) DeleteExpired(
 	}
 	deleted := 0
 	err := database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
+		// Deliberately no FOR UPDATE SKIP LOCKED. Row locking would require the
+		// UPDATE privilege, and the cleanup worker holds only SELECT and DELETE —
+		// granting UPDATE would let it rewrite idempotency records, which it must
+		// never be able to do. The lock is not needed for correctness either: the
+		// DELETE below is guarded by id and expires_at, so two workers racing the
+		// same row simply means one deletes it and the other affects no rows.
 		rows, err := tx.Query(ctx, `SELECT id::text FROM askdata.idempotency_records
 			WHERE tenant_id=$1 AND expires_at<=$2
-			ORDER BY expires_at,id FOR UPDATE SKIP LOCKED LIMIT $3`, tenantID, now.UTC(), limit)
+			ORDER BY expires_at,id LIMIT $3`, tenantID, now.UTC(), limit)
 		if err != nil {
 			return err
 		}

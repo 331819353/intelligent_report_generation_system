@@ -172,9 +172,16 @@
       `ProcessNext` 对这一已处置情形不再上报为 Worker 错误。瞬时故障照常上报，不被吞掉。
       已对运行中的系统验证：单个孤儿行由 attempt 6 一次跳至 10 并记为 SOURCE_GONE，
       同期抽取错误日志由 100 条/35 秒降为 0。
-- [ ] **OPS-PERM-001（新）** — Worker 角色缺少 `askdata.idempotency_records` 权限：
-      `clean expired idempotency records` 每轮报 `permission denied (SQLSTATE 42501)`，
-      即幂等记录清理从未真正执行过，过期记录会无限累积。
+- [x] **OPS-PERM-001** — 幂等记录清理每轮报 `permission denied (SQLSTATE 42501)`，
+      清理从未真正执行过，过期记录会无限累积。
+      **原描述不准确**：`report_worker` 对 `askdata.idempotency_records` 是有
+      `SELECT,DELETE` 的，缺的是 `UPDATE`——而清理用的是 `SELECT ... FOR UPDATE SKIP LOCKED`，
+      行锁需要 `UPDATE` 权限。已实测复现：不带 `FOR UPDATE` 可查，带上即 42501。
+      **修复取最小权限方向**：去掉 `FOR UPDATE SKIP LOCKED`，而不是给 Worker 授予 `UPDATE`。
+      授予 `UPDATE` 会让清理进程有能力改写幂等记录，这是它绝不应该具备的能力；
+      而行锁对正确性并非必需——后续 DELETE 以 `id + expires_at` 为条件，
+      两个 Worker 抢同一行时一个删除成功、另一个影响 0 行。
+      已对运行中的 Worker 验证：空载 25 秒 ERROR 日志由 127 条降为 0 条。
 
 ## 7. M6 门禁与生产化
 

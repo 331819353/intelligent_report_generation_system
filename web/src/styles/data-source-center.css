@@ -816,13 +816,12 @@
   .data-source-inspector { top: 64px; width: calc(100vw - 64px); }
 }
 
-/* 仅用于开发态 1920×1080 视觉回归：在 1280×720 浏览器画布内做等密度缩放。 */
+/* 仅用于开发态 1920×1080 视觉回归：保持 1:1 CSS 像素，不再缩放进较小画布。 */
 .data-source-shell.qa-viewport-1920 {
   width: 1920px;
+  min-width: 1920px;
   height: 1080px;
   min-height: 1080px;
-  transform: scale(0.6666667);
-  transform-origin: top left;
 }
 .data-source-shell.qa-viewport-1920 > .main-stage { height: 1008px; min-height: 1008px; }
 .data-source-shell.qa-viewport-1920.has-detail .topbar,
@@ -847,4 +846,4 @@
 .data-source-shell.qa-viewport-1920 .connection-facts,
 .data-source-shell.qa-viewport-1920 .receipt-facts,
 .data-source-shell.qa-viewport-1920 .sharing-card dl { grid-template-columns: minmax(0, 1fr); }
-body:has(.data-source-shell.qa-viewport-1920) { overflow: hidden; }
+body:has(.data-source-shell.qa-viewport-1920) { min-width: 1920px; min-height: 1080px; overflow: auto; }

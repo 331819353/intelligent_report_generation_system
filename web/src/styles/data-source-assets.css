@@ -397,8 +397,8 @@
   .asset-discovered-list > label > em { display: none; }
 }
 
-/* 开发态 1920×1080 视觉回归，在 1280×720 内等密度呈现。 */
-.data-source-assets-shell.qa-viewport-1920 { width: 1920px; height: 1080px; min-height: 1080px; transform: scale(.6666667); transform-origin: top left; }
+/* 开发态 1920×1080 视觉回归：保持 1:1 CSS 像素，不再缩放进较小画布。 */
+.data-source-assets-shell.qa-viewport-1920 { width: 1920px; min-width: 1920px; height: 1080px; min-height: 1080px; }
 .app-shell-v2.data-source-assets-shell.qa-viewport-1920 > .main-stage { height: 1008px; min-height: 1008px; }
 .data-source-assets-shell.qa-viewport-1920 .asset-catalog-layout,
 .data-source-assets-shell.qa-viewport-1920 .asset-discover-layout { grid-template-columns: minmax(0, 1fr) 360px; }
@@ -408,4 +408,4 @@
 .data-source-assets-shell.qa-viewport-1920 .asset-summary-strip article > span { width: 34px; height: 34px; }
 .data-source-assets-shell.qa-viewport-1920 .asset-summary-strip small { font-size: 13px; }
 .data-source-assets-shell.qa-viewport-1920 .asset-summary-strip strong { font-size: 23px; }
-body:has(.data-source-assets-shell.qa-viewport-1920) { overflow: hidden; }
+body:has(.data-source-assets-shell.qa-viewport-1920) { min-width: 1920px; min-height: 1080px; overflow: auto; }
