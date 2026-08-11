@@ -76,6 +76,18 @@
       `tools.Services.Dictionary`，命中以确定性精确命中进入检索
       （`RetrievalRequest.DeterministicExact`），压过词法相似度。
       词典缺失或报错只降级检索精度，不让问题失败。
+- [ ] **SEM-QUALITY-001（新，需产品裁定）** — 数据质量规则目前**无法被创作，也无法被执行**：
+      `askdata.quality_rules` 表、`registry.QualityRule` 类型、`QUALITY_RULE` Release 对象类型、
+      `get_data_quality_status` 工具与 Owner 转交覆盖都齐备，但
+      （1）导入通道 12 类资产不含 `QUALITY_RULE`，没有任何写入路径；
+      （2）`rule_ast` 仅被校验为「安全的 JSON 对象且 ≤64KB」，**没有定义任何规则语言**——
+      没有节点类型、没有算子、没有求值器，全仓没有任何代码读取并执行 `rule_ast`。
+      因此**先补导入通道是错的**：那只会让人创作出无人能执行的规则，
+      `get_data_quality_status` 会从「UNKNOWN（没有规则）」变成「规则存在但 Passed=false」，
+      反而更容易被误读为数据质量不合格。
+      需要先裁定规则语言与求值时机（规则能表达什么、由谁执行、何时执行、针对哪个快照），
+      再决定是补齐这条链路还是删除该未落地的合同。
+      当前工具按 `UNKNOWN` 如实上报，不伪造质量结论。
 - [ ] **EVAL-008** — 时间类专项黄金用例集。
 - [ ] **EVAL-009** — 可加性专项黄金用例集。
 - [ ] **EVAL-010** — 叙述人工评审集。
