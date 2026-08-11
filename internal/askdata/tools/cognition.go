@@ -63,3 +63,32 @@ func (runner *CognitionRunner) Execute(
 	}
 	return runner.executor.Execute(ctx, request)
 }
+
+// BatchEmbeddingProvider is the platform's embedding client shape.
+type BatchEmbeddingProvider interface {
+	Embed(ctx context.Context, values []string) ([][]float32, error)
+	Model() string
+	Configured() bool
+}
+
+// BatchEmbedder adapts the batch embedding client to the single-mention
+// Embedder the retrieval tool needs.
+//
+// An unconfigured or failing provider reports an error rather than an empty
+// vector: the caller degrades retrieval to lexical + exact and marks the result,
+// which is honest, whereas a zero vector would silently poison ranking.
+type BatchEmbedder struct{ Provider BatchEmbeddingProvider }
+
+func (embedder BatchEmbedder) Embed(ctx context.Context, text string) ([]float32, string, error) {
+	if embedder.Provider == nil || !embedder.Provider.Configured() {
+		return nil, "", ErrToolUnavailable
+	}
+	vectors, err := embedder.Provider.Embed(ctx, []string{text})
+	if err != nil {
+		return nil, "", err
+	}
+	if len(vectors) != 1 || len(vectors[0]) == 0 {
+		return nil, "", fmt.Errorf("%w: embedding provider returned no vector", ErrToolUnavailable)
+	}
+	return vectors[0], embedder.Provider.Model(), nil
+}

@@ -13,14 +13,17 @@ import (
 
 	"github.com/google/uuid"
 	aiplatform "intelligent-report-generation-system/internal/ai"
+	askdatacognition "intelligent-report-generation-system/internal/askdata/cognition"
 	askdatacompiler "intelligent-report-generation-system/internal/askdata/compiler"
 	askdatadimension "intelligent-report-generation-system/internal/askdata/dimension"
 	askdatafeedback "intelligent-report-generation-system/internal/askdata/feedback"
 	askdatagraph "intelligent-report-generation-system/internal/askdata/graph"
 	askdataorchestrator "intelligent-report-generation-system/internal/askdata/orchestrator"
+	askdataregistry "intelligent-report-generation-system/internal/askdata/registry"
 	registryimport "intelligent-report-generation-system/internal/askdata/registry/import"
 	askdatareportasset "intelligent-report-generation-system/internal/askdata/reportasset"
 	askdatasearch "intelligent-report-generation-system/internal/askdata/search"
+	askdatatools "intelligent-report-generation-system/internal/askdata/tools"
 	askdatavalidator "intelligent-report-generation-system/internal/askdata/validator"
 	"intelligent-report-generation-system/internal/assetembedding"
 	"intelligent-report-generation-system/internal/config"
@@ -443,6 +446,67 @@ func main() {
 		os.Exit(1)
 	}
 	go runDecisionDueWorker(ctx, logger, decisionDueService, cfg.WorkerPollInterval)
+	// 问数运行 Worker：领取 RECEIVED 的运行并按 AI-005 阶段协议驱动状态机。
+	// 图解析、向量检索与执行器缺失时对应工具报不可用，运行会带明确原因码失败关闭，
+	// 而不是永远停在 RECEIVED。
+	askDataGraphClient, err := askdatagraph.NewClient(graphPool)
+	if err != nil {
+		logger.Error("initialize AskData graph client", "error", err)
+		os.Exit(1)
+	}
+	askDataGraphResolver, err := askdatagraph.NewResolver(
+		askDataGraphClient,
+		askdatagraph.NewPostgresCertifiedPlanCache(pool),
+		askdatagraph.NewPostgresFallback(pool),
+	)
+	if err != nil {
+		logger.Error("initialize AskData graph resolver", "error", err)
+		os.Exit(1)
+	}
+	askDataRetriever, err := askdatasearch.NewRetriever(
+		askdatasearch.NewPostgresRetrievalStore(pool), askdatasearch.DefaultRankConfig(),
+	)
+	if err != nil {
+		logger.Error("initialize AskData retriever", "error", err)
+		os.Exit(1)
+	}
+	askDataPinnedCompiler, err := askdatacompiler.NewPinnedIRCompiler(
+		askdatacompiler.NewPostgresContractStore(pool),
+	)
+	if err != nil {
+		logger.Error("initialize AskData pinned IR compiler", "error", err)
+		os.Exit(1)
+	}
+	askDataCognition, err := askdatatools.NewCognitionRunner(aiService, askdatacognition.ExecutorOptions{})
+	if err != nil {
+		logger.Error("initialize AskData cognition runner", "error", err)
+		os.Exit(1)
+	}
+	askDataAssembler, err := askdatatools.NewAssembler(askdatatools.Services{
+		Reader:    askdataregistry.NewQueryReader(pool),
+		Retriever: askDataRetriever,
+		Embedder:  askdatatools.BatchEmbedder{Provider: embeddingProvider},
+		Graph:     askDataGraphResolver,
+		Compiler:  askDataPinnedCompiler,
+		Validator: reportPlanValidator,
+		Executor:  reportPlanExecutor,
+	}, askDataCognition, askdataorchestrator.DefaultLoopOptions())
+	if err != nil {
+		logger.Error("initialize AskData question assembler", "error", err)
+		os.Exit(1)
+	}
+	askDataLeases := askdataorchestrator.NewLeaseStore(pool)
+	questionRunWorkerOptions := askdataorchestrator.DefaultRunWorkerOptions()
+	questionRunWorkerOptions.WorkerID = workerID
+	questionRunWorker, err := askdataorchestrator.NewRunWorker(
+		askDataLeases, askdataorchestrator.NewPostgresStore(pool),
+		askDataAssembler, questionRunWorkerOptions,
+	)
+	if err != nil {
+		logger.Error("initialize AskData question run worker", "error", err)
+		os.Exit(1)
+	}
+	go runAskDataQuestionRunWorker(ctx, logger, questionRunWorker, askDataLeases, cfg.WorkerPollInterval)
 	go runAskDataSemanticImportWorker(
 		ctx,
 		logger,
@@ -1177,4 +1241,28 @@ func runTenantWorkerLoop(
 			timer.Reset(pollInterval)
 		}
 	}
+}
+
+func runAskDataQuestionRunWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	worker *askdataorchestrator.RunWorker,
+	leases *askdataorchestrator.LeaseStore,
+	pollInterval time.Duration,
+) {
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
+		processed := false
+		tenantIDs, err := leases.ListTenantIDs(ctx)
+		if err != nil {
+			return false, err
+		}
+		for _, tenantID := range tenantIDs {
+			didProcess, runErr := worker.ProcessNext(ctx, tenantID)
+			if runErr != nil {
+				logger.Error("process AskData question run", "tenant_id", tenantID, "error", runErr)
+			}
+			processed = processed || didProcess
+		}
+		return processed, nil
+	}, func(err error) { logger.Error("list AskData question run tenants", "error", err) })
 }

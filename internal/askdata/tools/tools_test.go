@@ -9,6 +9,7 @@ import (
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/cognition"
 	"intelligent-report-generation-system/internal/askdata/compiler"
+	"intelligent-report-generation-system/internal/askdata/orchestrator"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
 	"intelligent-report-generation-system/internal/askdata/validator"
 )
@@ -238,5 +239,44 @@ func TestCognitionRunnerBindsTheClosedActionProtocolAtConstruction(t *testing.T)
 	}
 	if runner.executor == nil {
 		t.Fatal("runner has no cognition executor")
+	}
+}
+
+// Assembler 必须每个 Run 建一个新的 Binding：计划哈希是 Run 内作用域的，
+// 复用 Binding 会让一个 Run 能校验或执行另一个 actor 策略范围下编译的计划。
+func TestAssemblerBuildsAFreshBindingPerRun(t *testing.T) {
+	runner, err := NewCognitionRunner(&stubProvider{configured: true}, cognition.ExecutorOptions{})
+	if err != nil {
+		t.Fatalf("NewCognitionRunner() error = %v", err)
+	}
+	assembler, err := NewAssembler(Services{}, runner, orchestrator.LoopOptions{})
+	if err != nil {
+		t.Fatalf("NewAssembler() error = %v", err)
+	}
+	run := testRun(t)
+	first, authorization, err := assembler.Assemble(context.Background(), orchestrator.RunAssembly{
+		Scope: run.Scope, DomainID: run.DomainID, RunID: run.RunID,
+	})
+	if err != nil || first == nil {
+		t.Fatalf("Assemble() = %v, %v", first, err)
+	}
+	if authorization.Validate() != nil {
+		t.Fatalf("assembled authorization is invalid: %#v", authorization)
+	}
+	if authorization.DomainID != run.DomainID || authorization.Scope.Release != run.Scope.Release {
+		t.Fatal("authorization must carry the run's own domain and pinned release")
+	}
+	second, _, err := assembler.Assemble(context.Background(), orchestrator.RunAssembly{
+		Scope: run.Scope, DomainID: run.DomainID, RunID: run.RunID,
+	})
+	if err != nil || second == first {
+		t.Fatal("each assembly must produce its own Loop over a fresh binding")
+	}
+}
+
+// 没有认知运行器就无法组装：问数不能在没有模型的情况下执行。
+func TestAssemblerRequiresACognitionRunner(t *testing.T) {
+	if _, err := NewAssembler(Services{}, nil, orchestrator.LoopOptions{}); err != ErrCognitionUnavailable {
+		t.Fatalf("assembler without cognition = %v", err)
 	}
 }

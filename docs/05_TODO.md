@@ -43,10 +43,13 @@
       提案中有三个必须裁定的开放问题：`UNDERSTANDING` 阶段缺少「完成」动作、
       有界纠错次数上限、报告引擎是否共用同一张阶段表。
       **AI-005 未确认前，问数 Worker 的 FRESH 执行路径不实现**（见下 ASK-WORKER-001）。
-- [ ] **ASK-WORKER-001（新）** — 问数运行 Worker：领取 → 构造工具绑定与 Loop → 按 AI-005 协议驱动阶段
-      → 心跳 → 释放。租约基座已完成（迁移 `000300` + `orchestrator.LeaseStore`）；
-      `ABANDONED` 领取终结为 `BLOCKED` 的分支不依赖 AI-005，可先行交付。
-      交付后 `orchestrator.NewLoop` 才首次拥有生产调用方，问数运行才会离开 `RECEIVED`。
+- [x] **ASK-WORKER-001** — 问数运行 Worker 已接线：`cmd/worker` 每轮按租户领取运行，
+      由 `tools.Assembler` 组装 `Binding → Registry → CognitionRunner → Loop`，
+      按 AI-005 协议交替推进确定性状态与认知阶段，心跳续租并在结束时释放。
+      `orchestrator.NewLoop`、`toolhost.NewRegistry`、`search.NewRetriever`、`graph.NewClient`
+      至此均首次拥有生产调用方。
+      **仍未验证**：尚未在真实依赖（ACTIVE Release + 已配置模型提供方 + 数仓）上
+      跑通一次从 `RECEIVED` 到 `ANSWERED` 的完整运行，见 `E2E-P1-001`。
 
 ## 2. M1 数据建模收口（P02/P03）
 
