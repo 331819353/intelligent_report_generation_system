@@ -156,6 +156,22 @@
       登录、首页、领域访问、用户权限、报告中心与数据源页已在 1920×1080 回归；
       `npm run lint`、`npm run test`、`npm run build` 全部通过。
 
+### 6.1 运行期发现（实际启动 Worker 后观测到）
+
+- [ ] **OPS-OUTBOX-001（新）** — 报告资产抽取 outbox 存在**孤儿行**：本地库 20 行
+      `askdata.report_asset_extraction_outbox` 指向的 `report_version_id` 在
+      `platform.report_versions` 中已不存在（多半是历史清理或重置留下的）。
+      `Extract` 对这些行执行 `QueryRow(...).Scan(...)` 得到 `pgx.ErrNoRows`，
+      按普通错误上抛，Worker 每个轮询周期重试并打一条 ERROR。
+      实测空载 35 秒产生 100 条 `project report semantic asset` 错误日志。
+      虽然 `attempt<10` 使其自限，但（1）噪声会淹没真实错误——包括新接入的
+      问数运行 Worker 的失败；（2）「no rows in result set」对运维没有任何可操作信息。
+      正确做法：目标版本不存在属于**永久不可处理**，应终结该 outbox 行并记录明确原因，
+      而不是当作瞬时故障重试。
+- [ ] **OPS-PERM-001（新）** — Worker 角色缺少 `askdata.idempotency_records` 权限：
+      `clean expired idempotency records` 每轮报 `permission denied (SQLSTATE 42501)`，
+      即幂等记录清理从未真正执行过，过期记录会无限累积。
+
 ## 7. M6 门禁与生产化
 
 - [ ] **E2E-P1-001** — 一期「报告先设计、对话后引用」端到端门禁（真实依赖，fixture 不得签署）。
