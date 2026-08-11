@@ -254,8 +254,8 @@ body { min-width: 0; }
 .sidebar-domain-wrap { position: relative; min-width: 0; }
 .sidebar-domain-menu {
   right: auto;
-  bottom: -38px;
-  left: calc(100% - 58px);
+  bottom: 0;
+  left: calc(100% - 10px);
   width: 356px;
   border-color: #d8e1ed;
   border-radius: 8px;
@@ -280,7 +280,7 @@ body { min-width: 0; }
 .domain-menu-section-label { padding: 8px 13px 5px; color: #7d899b; font-size: 10px; font-weight: 620; }
 .sidebar-domain-menu > .domain-option.ant-btn {
   width: 100%;
-  min-height: 91px;
+  min-height: 110px;
   height: auto;
   display: grid;
   grid-template-columns: 38px minmax(0, 1fr) 18px;
@@ -381,6 +381,11 @@ body { min-width: 0; }
 .domain-switch-feedback .ant-btn { width: 26px; height: 26px; min-width: 26px; margin: 0 0 0 3px; padding: 0; color: #718096; }
 
 @keyframes domain-option-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 1360px) {
+  .sidebar-domain-menu { bottom: -38px; left: calc(100% - 58px); }
+  .sidebar-domain-menu > .domain-option.ant-btn { min-height: 91px; }
+}
 
 .app-shell-v2 > .main-stage {
   grid-column: 2;

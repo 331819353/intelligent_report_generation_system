@@ -283,7 +283,7 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
     [domains],
   )
 
-  const chooseDomain = async (domain: BusinessDomain) => {
+  const chooseDomain = (domain: BusinessDomain) => {
     if (domain.id === selectedDomain?.id) {
       setDomainMenuOpen(false)
       return
@@ -291,23 +291,25 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
     setSwitchingDomainID(domain.id)
     setDomainSwitchFeedback(null)
     if (designSnapshot) {
-      selectDomain(domain)
       setSelectedDomain(domain)
       setDomainMenuOpen(false)
       setSwitchingDomainID('')
       setDomainSwitchFeedback({ kind: 'success', text: `已切换至${domain.name}，工作台内容已刷新` })
+      try {
+        selectDomain(domain)
+      } catch {
+        setDomainSwitchFeedback({ kind: 'error', text: '设计预览无法保存领域上下文，请刷新后重试' })
+      }
       return
     }
-    try {
-      await switchBusinessDomain(domain)
-      setSelectedDomain(domain)
-      setDomainMenuOpen(false)
-      setDomainSwitchFeedback({ kind: 'success', text: `已切换至${domain.name}，工作台内容已刷新` })
-    } catch {
-      setDomainSwitchFeedback({ kind: 'error', text: `${domain.name}暂时无法进入，请检查访问权限后重试` })
-    } finally {
-      setSwitchingDomainID('')
-    }
+    void switchBusinessDomain(domain)
+      .then(() => {
+        setSelectedDomain(domain)
+        setDomainMenuOpen(false)
+        setDomainSwitchFeedback({ kind: 'success', text: `已切换至${domain.name}，工作台内容已刷新` })
+      })
+      .catch(() => setDomainSwitchFeedback({ kind: 'error', text: `${domain.name}暂时无法进入，请检查访问权限后重试` }))
+      .finally(() => setSwitchingDomainID(''))
   }
 
   const signOut = async () => {
@@ -432,7 +434,7 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
                     aria-checked={isCurrent}
                     disabled={Boolean(switchingDomainID && !switching)}
                     key={domain.id}
-                    onClick={() => void chooseDomain(domain)}
+                    onClick={() => chooseDomain(domain)}
                   >
                     <span className="domain-option-icon"><DomainIcon size={20} weight="duotone" /></span>
                     <span className="domain-option-copy">

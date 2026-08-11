@@ -24,7 +24,12 @@ export function App() {
   const [domainRevision, setDomainRevision] = useState(0)
 
   useEffect(() => {
-    const refreshCurrentRoute = () => setDomainRevision(revision => revision + 1)
+    const refreshCurrentRoute = () => {
+      // 视觉回归快照需要在当前页面内展示切换后的状态；生产环境仍通过
+      // 重新挂载当前路由，确保所有领域级数据和权限上下文完整刷新。
+      const snapshot = import.meta.env.DEV && new URLSearchParams(window.location.search).has('snapshot')
+      if (!snapshot) setDomainRevision(revision => revision + 1)
+    }
     window.addEventListener(domainChangedEvent, refreshCurrentRoute)
     return () => window.removeEventListener(domainChangedEvent, refreshCurrentRoute)
   }, [])
