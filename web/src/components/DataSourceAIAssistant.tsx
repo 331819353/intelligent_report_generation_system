@@ -10,6 +10,7 @@ import {
   X,
 } from '@phosphor-icons/react'
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { AppButton } from './AppButton'
 import { RequestError } from '../lib/api'
 import { md5Hex } from '../lib/md5'
 import {
@@ -681,18 +682,18 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
   return <aside className={`data-source-ai${open ? ' open' : ''}`} aria-label="数据源 AI 助手">
     <div className="data-source-ai-launcher-wrap" onMouseEnter={() => setOpen(true)}>
       <span className="data-source-ai-launcher-tip">用 AI 配置数据源</span>
-      <button className="data-source-ai-launcher" type="button" onClick={() => setOpen(current => !current)} aria-expanded={open} aria-label="打开数据源 AI 助手">
+      <AppButton variant="primary" className="data-source-ai-launcher" type="button" onClick={() => setOpen(current => !current)} aria-expanded={open} aria-label="打开数据源 AI 助手">
         <Sparkle className="launcher-sparkle" size={17} weight="fill" />
         <ChatCircleDots size={25} weight="fill" />
         <span aria-hidden="true" />
-      </button>
+      </AppButton>
     </div>
     {open && <section className="data-source-ai-panel" role="dialog" aria-label="数据源 AI 配置对话">
       <header>
         <div className="data-source-ai-agent"><span><Sparkle size={18} weight="fill" /></span><div><small>AI DATA COPILOT</small><strong>数据源助手</strong></div></div>
         <div className="data-source-ai-header-actions">
-          <button type="button" disabled={Boolean(busy)} aria-label="重新开始对话" title="重新开始" onClick={restart}><ArrowCounterClockwise size={17} /></button>
-          <button type="button" aria-label="关闭数据源 AI 助手" onClick={() => setOpen(false)}><X size={18} /></button>
+          <AppButton text circle type="button" disabled={Boolean(busy)} aria-label="重新开始对话" title="重新开始" onClick={restart}><ArrowCounterClockwise size={17} /></AppButton>
+          <AppButton text circle type="button" aria-label="关闭数据源 AI 助手" onClick={() => setOpen(false)}><X size={18} /></AppButton>
         </div>
       </header>
       <div className="data-source-ai-context"><span className="online-dot" />{modeChosen ? activeSource ? `正在配置：${activeSource.name}` : '正在新建数据源' : '在线 · 等待你的指令'}</div>
@@ -724,8 +725,8 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
         </div>)}
 
         {!modeChosen && <div className="data-source-ai-choices">
-          <button type="button" onClick={() => resetConversation('')}><Sparkle size={15} weight="fill" /><span><strong>新建数据源</strong><small>从一段描述开始</small></span></button>
-          {sources.map(source => <button type="button" key={source.id} onClick={() => resetConversation(source.id)}><PlugsConnected size={15} /><span><strong>修改 {source.name}</strong><small>{source.type} · {source.code}</small></span></button>)}
+          <AppButton type="button" onClick={() => resetConversation('')}><Sparkle size={15} weight="fill" /><span><strong>新建数据源</strong><small>从一段描述开始</small></span></AppButton>
+          {sources.map(source => <AppButton type="button" key={source.id} onClick={() => resetConversation(source.id)}><PlugsConnected size={15} /><span><strong>修改 {source.name}</strong><small>{source.type} · {source.code}</small></span></AppButton>)}
         </div>}
 
         {modeChosen && assistantTurnCompleted && (!testFailureCode || passwordFailure) && (draft.type === 'EXCEL'
@@ -760,7 +761,7 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
 
         {modeChosen && recognized && effectiveMissingFields.length === 0 && !testPassed && !submitted && !testFailureCode && <div className="data-source-ai-inline-card action">
           <span className="action-icon"><PlugsConnected size={20} weight="fill" /></span>
-          <div><strong>信息已齐全</strong><p>{draft.type === 'EXCEL' ? '我会保存当前附件并验证文件版本可用性。' : '我会保存当前配置并测试连接；若失败，将自动诊断并尝试一次安全修复。'}</p><button type="button" disabled={Boolean(busy)} onClick={() => void saveAndTest()}>{busy === 'test' ? <><SpinnerGap className="spin" size={15} />正在验证…</> : <><PlugsConnected size={15} />{draft.type === 'EXCEL' ? '验证附件' : '测试连接'}</>}</button></div>
+          <div><strong>信息已齐全</strong><p>{draft.type === 'EXCEL' ? '我会保存当前附件并验证文件版本可用性。' : '我会保存当前配置并测试连接；若失败，将自动诊断并尝试一次安全修复。'}</p><AppButton type="button" disabled={Boolean(busy)} onClick={() => void saveAndTest()}>{busy === 'test' ? <><SpinnerGap className="spin" size={15} />正在验证…</> : <><PlugsConnected size={15} />{draft.type === 'EXCEL' ? '验证附件' : '测试连接'}</>}</AppButton></div>
         </div>}
 
         {busy === 'test' && draft.type !== 'EXCEL' && <div className="data-source-ai-inline-card diagnostic test-progress">
@@ -789,7 +790,7 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
 
         {testPassed && testedSource && <div className="data-source-ai-inline-card action success">
           <span className="action-icon"><CheckCircle size={21} weight="fill" /></span>
-          <div><strong>{testedSource.type === 'EXCEL' ? '附件解析与验证成功' : '连接成功'}</strong><p>“{testedSource.name}”已通过{testedSource.type === 'EXCEL' ? '文件可用性校验' : '连接校验'}。点击发布即可完成提交；审批通过前不会生效。</p><button type="button" disabled={Boolean(busy)} onClick={() => void publish()}>{busy === 'publish' ? <><SpinnerGap className="spin" size={15} />发布中…</> : <><PaperPlaneRight size={15} weight="fill" />发布</>}</button></div>
+          <div><strong>{testedSource.type === 'EXCEL' ? '附件解析与验证成功' : '连接成功'}</strong><p>“{testedSource.name}”已通过{testedSource.type === 'EXCEL' ? '文件可用性校验' : '连接校验'}。点击发布即可完成提交；审批通过前不会生效。</p><AppButton type="button" disabled={Boolean(busy)} onClick={() => void publish()}>{busy === 'publish' ? <><SpinnerGap className="spin" size={15} />发布中…</> : <><PaperPlaneRight size={15} weight="fill" />发布</>}</AppButton></div>
         </div>}
 
         {submitted && <div className="data-source-ai-inline-card action pending">
@@ -800,10 +801,10 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
         </div>
       </div>
       <form className="data-source-ai-composer" onSubmit={submitMessage}>
-        <button className="data-source-ai-attachment" type="button" disabled={Boolean(busy)} aria-label="添加 Excel 附件" title="添加 Excel / CSV 附件" onClick={() => attachmentInputRef.current?.click()}><FileArrowUp size={18} /></button>
+        <AppButton text circle className="data-source-ai-attachment" type="button" disabled={Boolean(busy)} aria-label="添加 Excel 附件" title="添加 Excel / CSV 附件" onClick={() => attachmentInputRef.current?.click()}><FileArrowUp size={18} /></AppButton>
         <input ref={attachmentInputRef} className="data-source-ai-attachment-input" type="file" accept=".xlsx,.xls,.csv" disabled={Boolean(busy)} onChange={event => { const selected = event.target.files?.[0]; if (selected) void attachAndCreateExcelSource(selected) }} />
         <textarea rows={2} value={instruction} disabled={Boolean(busy)} onChange={event => setInstruction(event.target.value)} placeholder="直接描述需求或继续补充信息…" />
-        <button className="data-source-ai-send" type="submit" disabled={Boolean(busy) || !instruction.trim()} aria-label="发送消息"><PaperPlaneRight size={19} weight="fill" /></button>
+        <AppButton variant="primary" circle className="data-source-ai-send" type="submit" disabled={Boolean(busy) || !instruction.trim()} aria-label="发送消息"><PaperPlaneRight size={19} weight="fill" /></AppButton>
         <small>可直接添加 Excel / CSV 附件 · 原始内容不会发送给配置模型</small>
       </form>
     </section>}

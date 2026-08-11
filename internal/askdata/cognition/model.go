@@ -39,14 +39,20 @@ const (
 type ActionType string
 
 const (
-	ActionCallTool       ActionType = "CALL_TOOL"
-	ActionProposeBinding ActionType = "PROPOSE_BINDING"
-	ActionProposePlan    ActionType = "PROPOSE_PLAN"
-	ActionAnalyzeAnomaly ActionType = "ANALYZE_ANOMALY"
-	ActionVerifyResult   ActionType = "VERIFY_RESULT"
-	ActionFinalize       ActionType = "FINALIZE"
-	ActionClarify        ActionType = "CLARIFY"
-	ActionBlock          ActionType = "BLOCK"
+	ActionCallTool ActionType = "CALL_TOOL"
+	// ActionProposeUnderstanding closes the UNDERSTANDING stage. Without it the
+	// stage has no successful exit at all: Loop.Run returns on any non-CALL_TOOL
+	// action, and UNDERSTANDING otherwise permits only CLARIFY and BLOCK, so a
+	// model that understood the question could only clarify, block, or call tools
+	// until the budget ran out.
+	ActionProposeUnderstanding ActionType = "PROPOSE_UNDERSTANDING"
+	ActionProposeBinding       ActionType = "PROPOSE_BINDING"
+	ActionProposePlan          ActionType = "PROPOSE_PLAN"
+	ActionAnalyzeAnomaly       ActionType = "ANALYZE_ANOMALY"
+	ActionVerifyResult         ActionType = "VERIFY_RESULT"
+	ActionFinalize             ActionType = "FINALIZE"
+	ActionClarify              ActionType = "CLARIFY"
+	ActionBlock                ActionType = "BLOCK"
 )
 
 type MetricBinding struct {
@@ -158,6 +164,32 @@ type FinalDecision struct {
 	EvidenceRefs []askdata.EvidenceRef `json:"evidenceRefs"`
 }
 
+// UnderstandingProposal is the model's reading of the question at the end of
+// the UNDERSTANDING stage. It carries no bindings: naming a metric or dimension
+// is the binder's job, and an understanding that could assert bindings would let
+// the model skip joint binding entirely.
+type UnderstandingProposal struct {
+	IntentSummary   string   `json:"intentSummary"`
+	UnresolvedSpans []string `json:"unresolvedSpans"`
+}
+
+func (proposal UnderstandingProposal) Validate() error {
+	summary := strings.TrimSpace(proposal.IntentSummary)
+	if summary == "" || len(summary) > 2048 {
+		return errors.New("intentSummary must be 1-2048 characters")
+	}
+	if len(proposal.UnresolvedSpans) > 32 {
+		return errors.New("unresolvedSpans exceeds the safe bound")
+	}
+	for _, span := range proposal.UnresolvedSpans {
+		span = strings.TrimSpace(span)
+		if span == "" || len(span) > 256 {
+			return errors.New("each unresolved span must be 1-256 characters")
+		}
+	}
+	return nil
+}
+
 type Clarification struct {
 	ConflictCode string                         `json:"conflictCode"`
 	Question     string                         `json:"question"`
@@ -173,19 +205,20 @@ type BlockDecision struct {
 // Action contains a closed set of nullable payloads. Exactly one payload must
 // be populated and it must match Action and Stage.
 type Action struct {
-	SchemaVersion   string                `json:"schemaVersion"`
-	Stage           Stage                 `json:"stage"`
-	Action          ActionType            `json:"action"`
-	DecisionSummary string                `json:"decisionSummary"`
-	EvidenceRefs    []askdata.EvidenceRef `json:"evidenceRefs"`
-	ToolCall        *toolhost.CallRequest `json:"toolCall"`
-	BindingProposal *BindingProposal      `json:"bindingProposal"`
-	PlanProposal    *PlanProposal         `json:"planProposal"`
-	AnomalyAnalysis *AnomalyAnalysis      `json:"anomalyAnalysis"`
-	Verification    *Verification         `json:"verification"`
-	FinalDecision   *FinalDecision        `json:"finalDecision"`
-	Clarification   *Clarification        `json:"clarification"`
-	Block           *BlockDecision        `json:"block"`
+	SchemaVersion   string                 `json:"schemaVersion"`
+	Stage           Stage                  `json:"stage"`
+	Action          ActionType             `json:"action"`
+	DecisionSummary string                 `json:"decisionSummary"`
+	EvidenceRefs    []askdata.EvidenceRef  `json:"evidenceRefs"`
+	ToolCall        *toolhost.CallRequest  `json:"toolCall"`
+	Understanding   *UnderstandingProposal `json:"understanding"`
+	BindingProposal *BindingProposal       `json:"bindingProposal"`
+	PlanProposal    *PlanProposal          `json:"planProposal"`
+	AnomalyAnalysis *AnomalyAnalysis       `json:"anomalyAnalysis"`
+	Verification    *Verification          `json:"verification"`
+	FinalDecision   *FinalDecision         `json:"finalDecision"`
+	Clarification   *Clarification         `json:"clarification"`
+	Block           *BlockDecision         `json:"block"`
 }
 
 func Decode(raw []byte) (Action, error) {
@@ -227,6 +260,7 @@ func (action Action) Validate() error {
 		action.PlanProposal != nil, action.AnomalyAnalysis != nil,
 		action.Verification != nil, action.FinalDecision != nil,
 		action.Clarification != nil, action.Block != nil,
+		action.Understanding != nil,
 	} {
 		if present {
 			payloadCount++
@@ -242,6 +276,13 @@ func (action Action) Validate() error {
 		}
 		if err := toolhost.ValidateCall(*action.ToolCall, toolhost.DefaultArgumentValidator{}); err != nil {
 			return fmt.Errorf("toolCall: %w", err)
+		}
+	case ActionProposeUnderstanding:
+		if action.Understanding == nil {
+			return errors.New("PROPOSE_UNDERSTANDING requires understanding")
+		}
+		if err := action.Understanding.Validate(); err != nil {
+			return fmt.Errorf("understanding: %w", err)
 		}
 	case ActionProposeBinding:
 		if action.BindingProposal == nil {
@@ -479,7 +520,7 @@ func stageAllowsAction(stage Stage, action ActionType) bool {
 	case StageAssetReview, StageFeedbackAttribution, StageReleaseReview:
 		return action == ActionAnalyzeAnomaly || action == ActionFinalize
 	case StageUnderstanding:
-		return action == ActionClarify
+		return action == ActionProposeUnderstanding || action == ActionClarify
 	case StageCandidateJudgment, StageDisambiguation:
 		return action == ActionProposeBinding || action == ActionClarify
 	case StagePlanSelection:
@@ -550,4 +591,11 @@ func stableCode(value string) bool {
 		return false
 	}
 	return true
+}
+
+// StageAllowsActionForTest exposes the stage/action matrix so the orchestrator's
+// AI-005 protocol table can assert it is a subset of this contract rather than
+// duplicating it.
+func StageAllowsActionForTest(stage Stage, action ActionType) bool {
+	return stageAllowsAction(stage, action)
 }

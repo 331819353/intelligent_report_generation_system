@@ -23,7 +23,7 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     {/* 界面语言为简体中文，必须显式指定 antd locale，
         否则分页、空态、确认弹窗等内置文案会回落为英文。 */}
-    <ConfigProvider locale={zhCN} theme={{
+    <ConfigProvider locale={zhCN} button={{ autoInsertSpace: false }} theme={{
       token: {
         colorPrimary: '#0872d3',
         borderRadius: 5,

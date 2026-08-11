@@ -1,4 +1,16 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import {
+  CheckCircle,
+  ClockCountdown,
+  Database,
+  FileXls,
+  MagnifyingGlass,
+  Plus,
+  ShieldCheck,
+  WarningCircle,
+  X,
+} from '@phosphor-icons/react'
+import { AppButton } from '../components/AppButton'
 import { AppShell } from '../components/AppShell'
 import { AssetSharingSelect } from '../components/AssetSharingSelect'
 import { DataSourceAIAssistant } from '../components/DataSourceAIAssistant'
@@ -31,6 +43,45 @@ const statusLabels: Record<DataSourceStatus, string> = {
   DRAFT: '待验证', ACTIVE: '运行中', DISABLED: '已暂停', SYNCING: '同步中', ERROR: '异常', DELETING: '删除中',
 }
 const typeLabels: Record<DataSourceType, string> = { MYSQL: 'MySQL', ORACLE: 'Oracle', EXCEL: 'Excel / CSV' }
+
+const snapshotSources: DataSourceRecord[] = [
+  {
+    id: 'snapshot-sales-mysql', tenantId: 'snapshot-tenant', code: 'sales_core', name: '销售业务核心库',
+    description: '销售订单、渠道与客户经营数据', ownerId: 'snapshot-user', domainId: 'snapshot-enterprise-operations',
+    visibility: 'TENANT_PUBLIC', sharingScope: 'DOMAIN', type: 'MYSQL', status: 'ACTIVE',
+    config: { host: 'sales-db.internal', port: 3306, database: 'sales_prod', username: 'report_reader' },
+    configVersionId: 'snapshot-sales-config-v3', publishedVersionId: 'snapshot-sales-published-v3', configVersion: 3,
+    publishedConfigVersion: 3, validationStatus: 'PASSED', publicationStatus: 'PUBLISHED', hasUnpublishedChanges: false,
+    reviewStatus: 'APPROVED', lastTestedAt: '2026-08-11T09:18:00+08:00', updatedAt: '2026-08-11T09:18:00+08:00', version: 8,
+  },
+  {
+    id: 'snapshot-finance-oracle', tenantId: 'snapshot-tenant', code: 'finance_erp', name: '财务 ERP',
+    description: '总账、成本中心与预算执行数据', ownerId: 'snapshot-user', domainId: 'snapshot-enterprise-operations',
+    visibility: 'PRIVATE', sharingScope: 'PRIVATE', type: 'ORACLE', status: 'DRAFT',
+    config: { host: 'finance-oracle.internal', port: 1521, database: 'FINPRD', username: 'bi_reader' },
+    configVersionId: 'snapshot-finance-config-v2', configVersion: 2, validationStatus: 'PASSED', publicationStatus: 'UNPUBLISHED',
+    hasUnpublishedChanges: true, reviewStatus: 'PENDING', reviewRequestId: 'snapshot-finance-review', reviewRequestVersion: 1,
+    reviewRequesterId: 'snapshot-user', reviewSubmittedAt: '2026-08-11T10:32:00+08:00', updatedAt: '2026-08-11T10:32:00+08:00', version: 4,
+  },
+  {
+    id: 'snapshot-channel-excel', tenantId: 'snapshot-tenant', code: 'channel_targets_xlsx', name: '渠道月度目标',
+    description: '渠道团队每月维护的目标与预算文件', ownerId: 'snapshot-user', domainId: 'snapshot-enterprise-operations',
+    visibility: 'TENANT_PUBLIC', sharingScope: 'DOMAIN', type: 'EXCEL', status: 'ACTIVE', config: {},
+    fileAssetId: 'snapshot-file', fileVersionId: 'snapshot-file-v5', configVersionId: 'snapshot-channel-config-v5',
+    publishedVersionId: 'snapshot-channel-published-v5', configVersion: 5, publishedConfigVersion: 5,
+    validationStatus: 'PASSED', publicationStatus: 'PUBLISHED', hasUnpublishedChanges: false, reviewStatus: 'APPROVED',
+    lastTestedAt: '2026-08-10T16:42:00+08:00', updatedAt: '2026-08-10T16:42:00+08:00', version: 7,
+  },
+  {
+    id: 'snapshot-inventory-mysql', tenantId: 'snapshot-tenant', code: 'inventory_legacy', name: '库存历史库',
+    description: '旧库存系统，等待凭据轮换后重新验证', ownerId: 'snapshot-user', domainId: 'snapshot-enterprise-operations',
+    visibility: 'PRIVATE', sharingScope: 'PRIVATE', type: 'MYSQL', status: 'ERROR',
+    config: { host: 'inventory-db.internal', port: 3306, database: 'inventory', username: 'legacy_reader' },
+    configVersionId: 'snapshot-inventory-config-v6', configVersion: 6, validationStatus: 'FAILED', publicationStatus: 'UNPUBLISHED',
+    hasUnpublishedChanges: true, reviewStatus: 'REJECTED', reviewNote: '连接凭据已过期，请轮换后重新测试。',
+    reviewRequesterId: 'snapshot-user', reviewReviewerId: 'snapshot-owner', updatedAt: '2026-08-09T14:20:00+08:00', version: 9,
+  },
+]
 type ConnectionDraft = {
   code: string
   name: string
@@ -239,8 +290,10 @@ const friendlyConnectionError = (cause: unknown) => {
 
 /** 提供数据源目录、结构化连接配置和完整生命周期操作，浏览器永不接收已保存密码。 */
 export function DataSourceCenterPage() {
-  const [sources, setSources] = useState<DataSourceRecord[]>([])
-  const [loading, setLoading] = useState(true)
+  const searchParams = new URLSearchParams(window.location.search)
+  const designSnapshot = import.meta.env.DEV && Boolean(searchParams.get('snapshot'))
+  const [sources, setSources] = useState<DataSourceRecord[]>(designSnapshot ? snapshotSources : [])
+  const [loading, setLoading] = useState(!designSnapshot)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [dialog, setDialog] = useState<DialogState | null>(null)
   const [draft, setDraft] = useState<ConnectionDraft>(emptyDraft)
@@ -304,6 +357,12 @@ export function DataSourceCenterPage() {
       return matchesKeyword && (typeFilter === 'ALL' || source.type === typeFilter) && (statusFilter === 'ALL' || source.status === statusFilter)
     })
   }, [keyword, sources, statusFilter, typeFilter])
+  const sourceOverview = useMemo(() => ({
+    active: sources.filter(source => source.status === 'ACTIVE').length,
+    pending: sources.filter(source => reviewStatusOf(source) === 'PENDING').length,
+    drafts: sources.filter(source => hasUnpublishedDraft(source) && reviewStatusOf(source) !== 'PENDING').length,
+    attention: sources.filter(source => source.status === 'ERROR' || reviewStatusOf(source) === 'REJECTED').length,
+  }), [sources])
   const replacingFileSource = useMemo(() => {
     if (draft.type !== 'EXCEL' || !draft.code.trim()) return null
     const code = draft.code.trim().toLocaleLowerCase()
@@ -311,6 +370,11 @@ export function DataSourceCenterPage() {
   }, [draft.code, draft.type, sources])
 
   const loadSources = useCallback(async () => {
+    if (designSnapshot) {
+      setSources(snapshotSources)
+      setLoading(false)
+      return snapshotSources
+    }
     try {
       const page = await dataSourceAPI.list()
       const items = Array.isArray(page.items) ? page.items : []
@@ -322,7 +386,7 @@ export function DataSourceCenterPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [designSnapshot])
 
   const runConnectionTest = useCallback((sourceId: string) => {
     const existing = connectionTestPollers.current.get(sourceId)
@@ -461,6 +525,7 @@ export function DataSourceCenterPage() {
   }
 
   useEffect(() => {
+    if (designSnapshot) return undefined
     let active = true
     dataSourceAPI.list().then(page => {
       if (!active) return
@@ -491,7 +556,16 @@ export function DataSourceCenterPage() {
       if (active) setLoading(false)
     })
     return () => { active = false }
-  }, [runConnectionTest, selectedDomainID])
+  }, [designSnapshot, runConnectionTest, selectedDomainID])
+
+  const openCreate = () => {
+    setFormError('')
+    setDraft(emptyDraft())
+    setExcelFile(null)
+    setExcelAsset(null)
+    setFileInspection(null)
+    setDialog({ mode: 'create' })
+  }
 
   const openExisting = (mode: DialogState['mode'], source: DataSourceRecord) => {
     if (mode === 'view' && (reviewStatusOf(source) === 'PENDING' || reviewStatusOf(source) === 'REJECTED')) {
@@ -1068,16 +1142,39 @@ export function DataSourceCenterPage() {
       ))
     : []
   return (
-    <AppShell title="数据源配置中心" eyebrow="工作栏">
+    <AppShell
+      className="data-source-shell"
+      title="数据资产"
+      eyebrow="数据与治理"
+      titleMeta={<span className="data-source-title-meta">接入、验证并沉淀可用于分析的数据资产</span>}
+      actions={<AppButton variant="primary" className="data-source-create-button" onClick={openCreate}><Plus size={17} weight="bold" />新建数据源</AppButton>}
+    >
       {notice && <div className={`data-source-toast ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'} aria-live="polite">
-        <span className="data-source-toast-icon" aria-hidden="true">{notice.tone === 'success' ? '✓' : '!'}</span>
+        <span className="data-source-toast-icon" aria-hidden="true">{notice.tone === 'success' ? <CheckCircle size={17} weight="fill" /> : <WarningCircle size={17} weight="fill" />}</span>
         <span>{notice.message}</span>
-        <button type="button" aria-label="关闭消息" onClick={() => setNotice(null)}>×</button>
+        <AppButton text circle aria-label="关闭消息" onClick={() => setNotice(null)}><X size={16} /></AppButton>
       </div>}
       <section className="data-source-center" aria-label="数据源配置中心内容">
-        <header className="data-source-summary"><div><span className="eyebrow">数据源清单</span><h2>已有的数据源</h2><p>统一查看、修改和管理当前领域的数据连接。</p></div><strong aria-label={`${sources.length} 个数据源`}>{sources.length}<small> 个数据源</small></strong></header>
+        <section className="data-source-journey" aria-labelledby="data-source-journey-title">
+          <header><div><span className="eyebrow">接入主链</span><h2 id="data-source-journey-title">数据源接入与资产化</h2><p>连接配置通过验证和审批后，继续发现元数据并完善业务口径。</p></div><span className="data-source-journey-status"><ShieldCheck size={17} weight="fill" />主链能力已接通</span></header>
+          <ol>
+            <li className="is-current"><span>1</span><div><strong>连接配置</strong><small>录入来源与凭据</small></div></li>
+            <li><span>2</span><div><strong>测试验证</strong><small>生成连接收据</small></div></li>
+            <li><span>3</span><div><strong>发布审批</strong><small>确认用途与风险</small></div></li>
+            <li><span>4</span><div><strong>元数据入库</strong><small>发现表与字段</small></div></li>
+            <li><span>5</span><div><strong>资产完善</strong><small>补齐口径与敏感级</small></div></li>
+          </ol>
+        </section>
+        <section className="data-source-metrics" aria-label="数据源状态概览">
+          <article><span className="is-blue"><Database size={19} weight="duotone" /></span><div><small>全部数据源</small><strong>{sources.length}</strong></div></article>
+          <article><span className="is-green"><CheckCircle size={19} weight="duotone" /></span><div><small>运行中</small><strong>{sourceOverview.active}</strong></div></article>
+          <article><span className="is-orange"><ClockCountdown size={19} weight="duotone" /></span><div><small>待审批</small><strong>{sourceOverview.pending}</strong></div></article>
+          <article><span className="is-red"><WarningCircle size={19} weight="duotone" /></span><div><small>需要处理</small><strong>{sourceOverview.attention}</strong></div></article>
+        </section>
+        <section className="data-source-catalog" aria-labelledby="data-source-catalog-title">
+          <header><div><h2 id="data-source-catalog-title">数据源清单</h2><p>统一查看当前领域内的连接、验证和发布状态。</p></div><span>共 {sources.length} 个 · {sourceOverview.drafts} 个草稿待处理</span></header>
         <div className="data-source-filters" aria-label="数据源筛选">
-          <label><span>搜索</span><input aria-label="搜索数据源" type="search" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="名称或编码" /></label>
+          <label className="data-source-search"><span>搜索</span><span className="data-source-search-control"><MagnifyingGlass size={17} /><input aria-label="搜索数据源" type="search" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索名称、编码或用途" /></span></label>
           <label><span>类型</span><select aria-label="按类型筛选" value={typeFilter} onChange={event => setTypeFilter(event.target.value as DataSourceType | 'ALL')}><option value="ALL">全部类型</option><option value="MYSQL">MySQL</option><option value="ORACLE">Oracle</option><option value="EXCEL">Excel / CSV</option></select></label>
           <label><span>状态</span><select aria-label="按状态筛选" value={statusFilter} onChange={event => setStatusFilter(event.target.value as DataSourceStatus | 'ALL')}><option value="ALL">全部状态</option>{Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
           <small>显示 {filteredSources.length} / {sources.length}</small>
@@ -1100,8 +1197,8 @@ export function DataSourceCenterPage() {
 	              const database = configText(source, 'database') || '—'
 	              const username = configText(source, 'username') || '—'
 	              return <article className={`data-source-card${reviewLocked ? ' review-locked' : ''}`} role="listitem" key={source.id}>
-	                <button className="data-source-card-open" type="button" disabled={reviewLocked} title={reviewStatus === 'PENDING' ? '审核完成前不能配置数据表' : reviewStatus === 'REJECTED' ? '修改并重新提交审核后才能配置数据表' : undefined} aria-label={`管理${source.name}的数据表资产`} onClick={() => openExisting('view', source)}>
-	                  <span className={`data-source-icon ${source.type.toLowerCase()}`}>{source.type === 'EXCEL' ? 'XL' : 'DB'}</span>
+	                <AppButton className="data-source-card-open" type="button" disabled={reviewLocked} title={reviewStatus === 'PENDING' ? '审核完成前不能配置数据表' : reviewStatus === 'REJECTED' ? '修改并重新提交审核后才能配置数据表' : undefined} aria-label={`管理${source.name}的数据表资产`} onClick={() => openExisting('view', source)}>
+                  <span className={`data-source-icon ${source.type.toLowerCase()}`}>{source.type === 'EXCEL' ? <FileXls size={24} weight="duotone" /> : <Database size={24} weight="duotone" />}</span>
 	                  <span className="data-source-main"><span><strong role="heading" aria-level={3} title={source.name}>{source.name}</strong><span className={`data-source-status ${reviewStatus === 'PENDING' ? 'review-pending' : reviewStatus === 'REJECTED' ? 'review-rejected' : source.status.toLowerCase()}`}>{lifecycleLabel(source)}</span>{pendingDraft && reviewStatus !== 'PENDING' && reviewStatus !== 'REJECTED' && <span className={`data-source-status validation-${validationStatusOf(source).toLowerCase()}`}>{validationLabels[validationStatusOf(source)]}</span>}</span><span className="data-source-subtitle" title={subtitle}>{subtitle}</span>{reviewStatus === 'REJECTED' && <span className="data-source-review-reason">驳回原因：{source.reviewNote || '审核人未填写原因'}</span>}</span>
 	                  <span className="data-source-card-facts">
                     <span><small>Host</small><strong title={host}>{host}</strong></span>
@@ -1109,7 +1206,7 @@ export function DataSourceCenterPage() {
                     <span><small>Database</small><strong title={database}>{database}</strong></span>
                     <span><small>Username</small><strong title={username}>{username}</strong></span>
                   </span>
-	                </button>
+	                </AppButton>
 	                <div className="data-source-actions">
                     <AssetSharingSelect
                       resourceType="DATA_SOURCE"
@@ -1123,17 +1220,18 @@ export function DataSourceCenterPage() {
                       ))}
                     />
 	                  {reviewStatus === 'PENDING' ? <>
-	                    {isRequester && <button className="action-withdraw" type="button" disabled={actionBusy} onClick={event => { event.stopPropagation(); void withdrawReview(source) }}>{busyAction === `review-withdraw:${source.id}` ? '撤销中…' : '撤销申请'}</button>}
+	                    {isRequester && <AppButton className="action-withdraw" type="button" disabled={actionBusy} onClick={event => { event.stopPropagation(); void withdrawReview(source) }}>{busyAction === `review-withdraw:${source.id}` ? '撤销中…' : '撤销申请'}</AppButton>}
 	                  </> : <>
-	                    <button className="action-edit" type="button" disabled={actionBusy || unavailable || source.type === 'EXCEL'} onClick={event => { event.stopPropagation(); openExisting('edit', source) }}>修改</button>
-	                    <button className="action-test" type="button" disabled={actionBusy || !canTest} onClick={event => { event.stopPropagation(); void testConnection(source) }}>{busyAction === `test:${source.id}` ? '测试中…' : '测试连接'}</button>
-	                    {pendingDraft && <button className="action-publish" type="button" disabled={actionBusy || !canPublish} title={canPublish ? '提交当前测试版本进入发布审核' : '当前草稿必须先通过连接测试'} onClick={event => { event.stopPropagation(); void publishSource(source) }}>{busyAction === `review-submit:${source.id}` ? '提交中…' : reviewStatus === 'REJECTED' ? '重新提交' : '发布'}</button>}
-	                    <button className={source.status === 'DISABLED' ? 'action-resume' : 'action-pause'} type="button" disabled={actionBusy || !canToggle} onClick={event => { event.stopPropagation(); void changeStatus(source) }}>{source.status === 'DISABLED' ? '恢复' : '暂停'}</button>
-	                    <button className="action-delete" type="button" disabled={actionBusy || unavailable} onClick={event => { event.stopPropagation(); openExisting('delete', source) }}>删除</button>
+	                    <AppButton className="action-edit" type="button" disabled={actionBusy || unavailable || source.type === 'EXCEL'} onClick={event => { event.stopPropagation(); openExisting('edit', source) }}>修改</AppButton>
+	                    <AppButton className="action-test" type="button" disabled={actionBusy || !canTest} onClick={event => { event.stopPropagation(); void testConnection(source) }}>{busyAction === `test:${source.id}` ? '测试中…' : '测试连接'}</AppButton>
+	                    {pendingDraft && <AppButton className="action-publish" type="button" disabled={actionBusy || !canPublish} title={canPublish ? '提交当前测试版本进入发布审核' : '当前草稿必须先通过连接测试'} onClick={event => { event.stopPropagation(); void publishSource(source) }}>{busyAction === `review-submit:${source.id}` ? '提交中…' : reviewStatus === 'REJECTED' ? '重新提交' : '发布'}</AppButton>}
+	                    <AppButton className={source.status === 'DISABLED' ? 'action-resume' : 'action-pause'} type="button" disabled={actionBusy || !canToggle} onClick={event => { event.stopPropagation(); void changeStatus(source) }}>{source.status === 'DISABLED' ? '恢复' : '暂停'}</AppButton>
+	                    <AppButton variant="danger" plain className="action-delete" type="button" disabled={actionBusy || unavailable} onClick={event => { event.stopPropagation(); openExisting('delete', source) }}>删除</AppButton>
 	                  </>}
 	                </div>
 	              </article>
             })}</div>}
+        </section>
       </section>
 
 		{(dialog?.mode === 'create' || dialog?.mode === 'edit') && <Dialog title={dialog.mode === 'edit' ? '修改数据源' : '新建数据源'} wide={draft.type === 'EXCEL'} onClose={closeDialog}>
@@ -1200,10 +1298,10 @@ export function DataSourceCenterPage() {
 	          </div>}
 	          {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
 				{draft.type === 'EXCEL'
-				  ? <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="primary-button" type="submit" disabled={actionBusy}>{actionBusy ? replacingFileSource ? '正在覆盖源文件…' : '正在上传并创建…' : replacingFileSource ? '覆盖并更新源文件' : '上传并创建数据源'}</button></footer>
+				  ? <footer><AppButton className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</AppButton><AppButton variant="primary" className="primary-button" type="submit" disabled={actionBusy}>{actionBusy ? replacingFileSource ? '正在覆盖源文件…' : '正在上传并创建…' : replacingFileSource ? '覆盖并更新源文件' : '上传并创建数据源'}</AppButton></footer>
 				  : <footer className="data-source-config-footer">
-				      <button className="test-connection-button" type="submit" disabled={actionBusy}>{busyAction.startsWith('form-test:') ? '正在保存并测试…' : '测试连接'}</button>
-				      <span><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="primary-button" type="button" disabled={actionBusy || !currentDraftTested} title={currentDraftTested ? '提交当前测试版本进入发布审核' : '请先测试当前表单并确保连接成功'} onClick={() => void submitDraftForReview()}>{busyAction.startsWith('review-submit:') ? '正在提交…' : '发布'}</button></span>
+				      <AppButton className="test-connection-button" type="submit" disabled={actionBusy}>{busyAction.startsWith('form-test:') ? '正在保存并测试…' : '测试连接'}</AppButton>
+				      <span><AppButton className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</AppButton><AppButton variant="primary" className="primary-button" type="button" disabled={actionBusy || !currentDraftTested} title={currentDraftTested ? '提交当前测试版本进入发布审核' : '请先测试当前表单并确保连接成功'} onClick={() => void submitDraftForReview()}>{busyAction.startsWith('review-submit:') ? '正在提交…' : '发布'}</AppButton></span>
 				    </footer>}
 	        </form>
       </Dialog>}
@@ -1211,7 +1309,7 @@ export function DataSourceCenterPage() {
       {dialog?.mode === 'view' && dialog.source && <Dialog title="数据表资产" wide onClose={closeDialog}>
         <div className="data-source-detail">
           <div className="data-source-detail-actions" aria-label="表资产操作">
-            <button className="action-add-table" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void openTableSelection(dialog.source!)}>新增数据表</button>
+            <AppButton variant="primary" className="action-add-table" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void openTableSelection(dialog.source!)}>新增数据表</AppButton>
             {dialog.source.type === 'EXCEL'
               ? <label className={`data-source-file-reupload${fileReuploadDisabled ? ' disabled' : ''}`}><span aria-hidden="true">↻</span>{busyAction === `reupload-file:${dialog.source.id}` ? '正在重新上传…' : '重新上传文件'}<input aria-label="重新上传源文件" type="file" accept=".xlsx,.xls,.csv" disabled={fileReuploadDisabled} onChange={event => {
                 const input = event.currentTarget
@@ -1221,7 +1319,7 @@ export function DataSourceCenterPage() {
               }} /></label>
               : <><label className="data-source-sample-mode"><span>LLM 样本</span><select aria-label="LLM 样本授权" value={sampleDataMode} disabled={actionBusy || metadataTaskBusy} onChange={event => setSampleDataMode(event.target.value as MetadataSampleMode)}><option value="MASK">默认读取 10 行（格式脱敏）</option><option value="DENY">不读取业务行</option><option value="RAW">10 行原始样本（高风险）</option></select></label>
                 <label className="data-source-refresh-mode"><span>刷新方式</span><select aria-label="元数据刷新方式" value={refreshMode} disabled={actionBusy || metadataTaskBusy} onChange={event => setRefreshMode(event.target.value as MetadataRefreshMode)}><option value="INCREMENTAL">增量刷新（仅变化字段）</option><option value="FULL">全量刷新（全部重新处理）</option></select></label>
-                <button className="action-refresh-all" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void refreshAllTableAssets(dialog.source!)}>{busyAction === `refresh-tables:${dialog.source.id}` ? '正在提交…' : `开始${refreshMode === 'INCREMENTAL' ? '增量' : '全量'}刷新`}</button></>}
+                <AppButton className="action-refresh-all" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source.status !== 'ACTIVE'} onClick={() => void refreshAllTableAssets(dialog.source!)}>{busyAction === `refresh-tables:${dialog.source.id}` ? '正在提交…' : `开始${refreshMode === 'INCREMENTAL' ? '增量' : '全量'}刷新`}</AppButton></>}
           </div>
           <div className="data-source-job-state" role="note">{dialog.source.type === 'EXCEL'
             ? '重新上传会复用当前文件资产并生成不可变新版本；完成后请点击“新增数据表”重新解析并映射 Sheet。已发布数据集继续引用原固定文件版本。'
@@ -1237,7 +1335,7 @@ export function DataSourceCenterPage() {
                 const failedTable = tableForMetadataFailure(failure, metadataTables)
                 return <li key={`${failure.catalogName || ''}:${failure.schemaName || ''}:${failure.tableName}:${failure.errorCode || ''}:${index}`}>
                   <span><strong>{metadataJobFailureTable(failure)}</strong><span>：{metadataJobFailureMessage(failure)}</span></span>
-                  <button type="button" disabled={actionBusy || metadataTaskActive || !failedTable} title={failedTable ? '填写完整表与字段业务元数据并提交为已完善资产' : '正在等待表资产加载'} onClick={() => failedTable && void openTableEditor(dialog.source!, failedTable, 'MANUAL_COMPLETE')}>手工完善</button>
+                  <AppButton type="button" disabled={actionBusy || metadataTaskActive || !failedTable} title={failedTable ? '填写完整表与字段业务元数据并提交为已完善资产' : '正在等待表资产加载'} onClick={() => failedTable && void openTableEditor(dialog.source!, failedTable, 'MANUAL_COMPLETE')}>手工完善</AppButton>
                 </li>
               })}
             </ul>}
@@ -1257,22 +1355,22 @@ export function DataSourceCenterPage() {
           <section className="data-source-structure" aria-label="表结构">
             <header><div><span className="eyebrow">物理元数据</span><h3>表结构</h3></div><strong>{metadataTables.length}<small> 张表</small></strong></header>
             {metadataLoading ? <div className="data-source-structure-state" role="status">正在加载表结构…</div>
-              : metadataError ? <div className="data-source-structure-state error" role="alert">{metadataError}<button type="button" onClick={() => void loadTableStructures(dialog.source!.id)}>重新加载</button></div>
+              : metadataError ? <div className="data-source-structure-state error" role="alert">{metadataError}<AppButton type="button" onClick={() => void loadTableStructures(dialog.source!.id)}>重新加载</AppButton></div>
               : metadataTables.length === 0 ? <div className="data-source-structure-state">暂无物理表结构，请点击“新增数据表”从源库选择。</div>
               : <div className="data-source-table-list">{metadataTables.map(table => <details key={table.id} onToggle={event => { if (event.currentTarget.open) void loadColumns(table) }}>
                   <summary><span><strong>{table.tableName}</strong><small>{[table.catalogName, table.schemaName, table.tableName].filter(Boolean).join('.')}</small></span><span><em className={`table-visibility-status ${table.visibility.toLowerCase()}`}>{table.visibility === 'TENANT_PUBLIC' ? '领域可见' : '仅授权可见'}</em><em className={`table-management-status ${table.managementStatus.toLowerCase()}`}>{table.managementStatus === 'DISABLED' ? '已停用' : '可用'}</em>{table.tableType || 'TABLE'} · {table.columnCount} 字段</span></summary>
                   <div className="data-source-table-actions" aria-label={`${table.tableName}操作`}>
-                    <button className="action-edit" type="button" disabled={actionBusy || metadataTaskBusy} title={table.enrichmentStatus === 'SUCCEEDED' ? '修改业务元数据' : '补齐表和字段业务元数据并标记为已完善'} onClick={() => void openTableEditor(dialog.source!, table, table.enrichmentStatus === 'SUCCEEDED' ? 'EDIT' : 'MANUAL_COMPLETE')}>{table.enrichmentStatus === 'SUCCEEDED' ? '修改' : '手工完善'}</button>
-                    {dialog.source!.type !== 'EXCEL' && <button className="action-refresh" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source!.status !== 'ACTIVE'} onClick={() => void refreshTableAsset(dialog.source!, table)}>{busyAction === `refresh-table:${table.id}` ? '正在提交…' : '刷新结构'}</button>}
-                    <button className={table.managementStatus === 'DISABLED' ? 'action-resume' : 'action-pause'} type="button" disabled={actionBusy} onClick={() => void changeTableStatus(dialog.source!, table)}>{table.managementStatus === 'DISABLED' ? '恢复' : '停用'}</button>
-                    <button className="action-delete" type="button" disabled={actionBusy} onClick={() => { setFormError(''); setDialog({ mode: 'delete-table', source: dialog.source!, table }) }}>删除</button>
+                    <AppButton className="action-edit" type="button" disabled={actionBusy || metadataTaskBusy} title={table.enrichmentStatus === 'SUCCEEDED' ? '修改业务元数据' : '补齐表和字段业务元数据并标记为已完善'} onClick={() => void openTableEditor(dialog.source!, table, table.enrichmentStatus === 'SUCCEEDED' ? 'EDIT' : 'MANUAL_COMPLETE')}>{table.enrichmentStatus === 'SUCCEEDED' ? '修改' : '手工完善'}</AppButton>
+                    {dialog.source!.type !== 'EXCEL' && <AppButton className="action-refresh" type="button" disabled={actionBusy || metadataTaskBusy || dialog.source!.status !== 'ACTIVE'} onClick={() => void refreshTableAsset(dialog.source!, table)}>{busyAction === `refresh-table:${table.id}` ? '正在提交…' : '刷新结构'}</AppButton>}
+                    <AppButton className={table.managementStatus === 'DISABLED' ? 'action-resume' : 'action-pause'} type="button" disabled={actionBusy} onClick={() => void changeTableStatus(dialog.source!, table)}>{table.managementStatus === 'DISABLED' ? '恢复' : '停用'}</AppButton>
+                    <AppButton variant="danger" plain className="action-delete" type="button" disabled={actionBusy} onClick={() => { setFormError(''); setDialog({ mode: 'delete-table', source: dialog.source!, table }) }}>删除</AppButton>
                   </div>
                   {columnLoading[table.id] ? <div className="data-source-column-state">正在加载字段…</div>
                     : metadataColumns[table.id] ? <div className="data-source-column-scroll"><table><thead><tr><th>#</th><th>物理字段</th><th>原始类型</th><th>标准类型</th><th>可空</th><th>状态</th></tr></thead><tbody>{metadataColumns[table.id].map(column => <tr key={column.id}><td>{column.ordinalPosition}</td><td><strong>{column.columnName}</strong></td><td>{column.nativeType || '—'}</td><td>{column.canonicalType || '—'}</td><td>{column.nullable ? '是' : '否'}</td><td>{column.assetStatus === 'ACTIVE' ? '可见' : '不可见'}</td></tr>)}</tbody></table></div>
                     : null}
                 </details>)}</div>}
           </section>
-          <footer><button className="quiet-button" type="button" onClick={closeDialog}>关闭</button></footer>
+          <footer><AppButton className="quiet-button" type="button" onClick={closeDialog}>关闭</AppButton></footer>
         </div>
       </Dialog>}
 
@@ -1306,7 +1404,7 @@ export function DataSourceCenterPage() {
               return <label className={imported ? 'imported' : ''} key={key}><input type="checkbox" disabled={imported || actionBusy} checked={selectedTableKeys.includes(key)} onChange={() => setSelectedTableKeys(current => current.includes(key) ? current.filter(item => item !== key) : [...current, key])} /><span><strong>{table.name}</strong><small>{[table.catalogName, table.schemaName, table.name].filter(Boolean).join('.')} · {table.columns.length} 字段</small></span><em>{imported ? '已入库' : canRemanage ? '可重新纳管' : table.type}</em></label>
             })}</div>}
           </>}
-          <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => returnToTableAssets(dialog.source!)}>取消</button><button className="primary-button" type="button" disabled={actionBusy || discoveryLoading || selectedTableKeys.length === 0} onClick={() => void importSelectedTables()}>{actionBusy ? '正在提交完善任务…' : dialog.source.type === 'EXCEL' ? `提交 ${selectedTableKeys.length} 个 Sheet 映射` : `新增 ${selectedTableKeys.length} 张表`}</button></footer>
+          <footer><AppButton className="quiet-button" type="button" disabled={actionBusy} onClick={() => returnToTableAssets(dialog.source!)}>取消</AppButton><AppButton variant="primary" className="primary-button" type="button" disabled={actionBusy || discoveryLoading || selectedTableKeys.length === 0} onClick={() => void importSelectedTables()}>{actionBusy ? '正在提交完善任务…' : dialog.source.type === 'EXCEL' ? `提交 ${selectedTableKeys.length} 个 Sheet 映射` : `新增 ${selectedTableKeys.length} 张表`}</AppButton></footer>
         </div>
       </Dialog>}
 
@@ -1334,16 +1432,16 @@ export function DataSourceCenterPage() {
                 </tr>)}</tbody></table></div>}
           </section>
           {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
-          <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => returnToTableAssets(dialog.source!)}>取消</button>{tableEditorPurpose === 'MANUAL_COMPLETE' && <button className="quiet-button" type="button" disabled={actionBusy || tableEditorLoading} onClick={() => void saveTableAsset(false)}>{actionBusy ? '正在保存…' : '仅保存，稍后完成'}</button>}<button className="primary-button" type="submit" disabled={actionBusy || tableEditorLoading}>{actionBusy ? tableEditorPurpose === 'MANUAL_COMPLETE' ? '正在校验并完成…' : '正在保存…' : tableEditorPurpose === 'MANUAL_COMPLETE' ? '保存并完成手工完善' : '保存修改'}</button></footer>
+          <footer><AppButton className="quiet-button" type="button" disabled={actionBusy} onClick={() => returnToTableAssets(dialog.source!)}>取消</AppButton>{tableEditorPurpose === 'MANUAL_COMPLETE' && <AppButton className="quiet-button" type="button" disabled={actionBusy || tableEditorLoading} onClick={() => void saveTableAsset(false)}>{actionBusy ? '正在保存…' : '仅保存，稍后完成'}</AppButton>}<AppButton variant="primary" className="primary-button" type="submit" disabled={actionBusy || tableEditorLoading}>{actionBusy ? tableEditorPurpose === 'MANUAL_COMPLETE' ? '正在校验并完成…' : '正在保存…' : tableEditorPurpose === 'MANUAL_COMPLETE' ? '保存并完成手工完善' : '保存修改'}</AppButton></footer>
         </form>
       </Dialog>}
 
       {dialog?.mode === 'delete-table' && dialog.source && dialog.table && <Dialog title="删除数据表资产" onClose={closeDialog}>
-        <div className="data-source-delete"><p>确认从 PostgreSQL 删除表资产“<strong>{dialog.table.businessName || dialog.table.tableName}</strong>”吗？</p><p className="data-source-safe-note">该操作不会删除或修改源数据库中的原表，之后仍可通过“新增数据表”重新纳入。</p>{formError && <div className="data-source-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={() => { setDialog({ mode: 'view', source: dialog.source }); void loadTableStructures(dialog.source!.id) }}>取消</button><button className="data-source-delete-button" type="button" disabled={actionBusy} onClick={() => void deleteTableAsset()}>{actionBusy ? '正在删除…' : '确认删除资产'}</button></footer></div>
+        <div className="data-source-delete"><p>确认从 PostgreSQL 删除表资产“<strong>{dialog.table.businessName || dialog.table.tableName}</strong>”吗？</p><p className="data-source-safe-note">该操作不会删除或修改源数据库中的原表，之后仍可通过“新增数据表”重新纳入。</p>{formError && <div className="data-source-feedback error" role="alert">{formError}</div>}<footer><AppButton className="quiet-button" type="button" disabled={actionBusy} onClick={() => { setDialog({ mode: 'view', source: dialog.source }); void loadTableStructures(dialog.source!.id) }}>取消</AppButton><AppButton variant="danger" className="data-source-delete-button" type="button" disabled={actionBusy} onClick={() => void deleteTableAsset()}>{actionBusy ? '正在删除…' : '确认删除资产'}</AppButton></footer></div>
       </Dialog>}
 
       {dialog?.mode === 'delete' && dialog.source && <Dialog title="删除数据源" onClose={closeDialog}>
-        <div className="data-source-delete"><p>确认删除“<strong>{dialog.source.name}</strong>”吗？该操作会关闭连接池并从数据源清单移除。</p>{formError && <div className="data-source-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="data-source-delete-button" type="button" disabled={actionBusy} onClick={() => void deleteSource()}>{actionBusy ? '正在删除…' : '确认删除'}</button></footer></div>
+        <div className="data-source-delete"><p>确认删除“<strong>{dialog.source.name}</strong>”吗？该操作会关闭连接池并从数据源清单移除。</p>{formError && <div className="data-source-feedback error" role="alert">{formError}</div>}<footer><AppButton className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</AppButton><AppButton variant="danger" className="data-source-delete-button" type="button" disabled={actionBusy} onClick={() => void deleteSource()}>{actionBusy ? '正在删除…' : '确认删除'}</AppButton></footer></div>
       </Dialog>}
       <DataSourceAIAssistant
         sources={sources}
@@ -1359,5 +1457,5 @@ export function DataSourceCenterPage() {
 }
 
 function Dialog({ title, children, wide = false, onClose }: { title: string; children: ReactNode; wide?: boolean; onClose: () => void }) {
-  return <div className="data-source-dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><section className={`data-source-dialog${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="data-source-dialog-title"><header><div><span className="eyebrow">数据源配置</span><h2 id="data-source-dialog-title">{title}</h2></div><button type="button" aria-label={`关闭${title}`} onClick={onClose}>×</button></header>{children}</section></div>
+  return <div className="data-source-dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><section className={`data-source-dialog${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="data-source-dialog-title"><header><div><span className="eyebrow">数据源配置</span><h2 id="data-source-dialog-title">{title}</h2></div><AppButton text circle aria-label={`关闭${title}`} onClick={onClose}><X size={18} /></AppButton></header>{children}</section></div>
 }

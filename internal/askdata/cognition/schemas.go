@@ -10,7 +10,7 @@ import (
 )
 
 var actionOrder = []ActionType{
-	ActionCallTool, ActionProposeBinding, ActionProposePlan,
+	ActionCallTool, ActionProposeUnderstanding, ActionProposeBinding, ActionProposePlan,
 	ActionAnalyzeAnomaly, ActionVerifyResult, ActionFinalize,
 	ActionClarify, ActionBlock,
 }
