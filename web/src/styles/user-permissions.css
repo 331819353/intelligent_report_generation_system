@@ -51,7 +51,7 @@
 .user-permissions-search:focus-within { border-color: #409eff; box-shadow: 0 0 0 2px #409eff22; }
 .user-permissions-search input { min-width: 0; border: 0; outline: 0; background: transparent; color: #2b3b51; font-size: 13px; }
 .user-permissions-search input::placeholder { color: #98a4b5; }
-.user-permissions-search .ant-btn { width: 26px; height: 26px; min-height: 26px; margin: 0; padding: 0; }
+.user-permissions-search .app-button { width: 26px; height: 26px; min-height: 26px; margin: 0; padding: 0; }
 
 .user-permissions-filters { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .user-permissions-filters label { display: block; }
@@ -71,8 +71,8 @@
 .user-permissions-filters select:focus,
 .user-access-add-domain select:focus,
 .user-access-role select:focus { border-color: #409eff; box-shadow: 0 0 0 2px #409eff22; }
-.user-permissions-filters .ant-btn { min-width: 72px; margin: 0; border-radius: 5px; font-size: 12px; }
-.user-permissions-filters .ant-btn:last-child { min-width: 100px; }
+.user-permissions-filters .app-button { min-width: 72px; margin: 0; border-radius: 5px; font-size: 12px; }
+.user-permissions-filters .app-button:last-child { min-width: 100px; }
 
 .user-permissions-feedback {
   min-height: 42px;
@@ -89,7 +89,7 @@
   font-size: 12px;
 }
 .user-permissions-feedback.is-error { border-color: #f0c7c3; background: #fff7f6; color: #b6433b; }
-.user-permissions-feedback .ant-btn { width: 27px; height: 27px; min-height: 27px; margin: 0; padding: 0; color: inherit; }
+.user-permissions-feedback .app-button { width: 27px; height: 27px; min-height: 27px; margin: 0; padding: 0; color: inherit; }
 
 .user-permissions-workspace {
   width: calc(100% - 500px);
@@ -152,7 +152,7 @@
 .user-status-dot.is-active i { background: #12a36d; }
 .user-status-dot.is-disabled i { background: #aeb8c4; }
 .user-status-dot.is-locked i { background: #e28a17; }
-.user-permissions-row .ant-btn { min-width: 0; height: 32px; min-height: 32px; margin: 0; padding: 0; color: #0872d3; font-size: 13px; font-weight: 650; }
+.user-permissions-row .app-button { min-width: 0; height: 32px; min-height: 32px; margin: 0; padding: 0; color: #0872d3; font-size: 13px; font-weight: 650; }
 
 .user-permissions-state { min-height: 260px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: #8795a8; text-align: center; }
 .user-permissions-state > svg { color: #5f91cc; }
@@ -160,7 +160,7 @@
 .user-permissions-state small { font-size: 11px; }
 
 .user-permissions-pagination { min-height: 58px; display: flex; align-items: center; justify-content: center; gap: 9px; border-top: 1px solid #e7ecf2; padding: 8px 14px; color: #6b798d; font-size: 13px; }
-.user-permissions-pagination .ant-btn { width: 29px; height: 29px; min-height: 29px; margin: 0; border: 1px solid #d7e0ea; border-radius: 4px; padding: 0; }
+.user-permissions-pagination .app-button { width: 29px; height: 29px; min-height: 29px; margin: 0; border: 1px solid #d7e0ea; border-radius: 4px; padding: 0; }
 .user-page-size,
 .user-page-input { height: 31px; display: inline-flex; align-items: center; gap: 13px; border: 1px solid #d6dfe9; border-radius: 4px; padding: 0 10px; background: #fff; color: #495a70; }
 .user-page-current { width: 31px; height: 31px; display: grid; place-items: center; border-radius: 4px; background: #0872d3; color: #fff; }
@@ -184,7 +184,7 @@
 }
 .user-access-editor > header { min-height: 64px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e7ecf2; padding: 0 18px; }
 .user-access-editor > header h2 { margin: 0; color: #293a50; font-size: 17px; font-weight: 720; }
-.user-access-editor > header .ant-btn { width: 30px; height: 30px; min-height: 30px; margin: 0; padding: 0; color: #748197; }
+.user-access-editor > header .app-button { width: 30px; height: 30px; min-height: 30px; margin: 0; padding: 0; color: #748197; }
 
 .user-access-identity { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 13px; border-bottom: 1px solid #e7ecf2; padding: 14px 18px; }
 .user-access-identity > img { width: 54px; height: 54px; border-radius: 50%; object-fit: cover; }
@@ -208,7 +208,7 @@
 .user-access-domains h3 span,
 .user-access-role header small { color: #7d8ba0; font-size: 12px; font-weight: 500; }
 .user-access-domain-list { display: grid; gap: 6px; }
-.user-access-domains > header .ant-btn { height: 34px; min-height: 34px; margin: 0; border-radius: 4px; padding: 0 9px; color: #0872d3; font-size: 12px; }
+.user-access-domains > header .app-button { height: 34px; min-height: 34px; margin: 0; border-radius: 4px; padding: 0 9px; color: #0872d3; font-size: 12px; }
 .user-access-domain-list article {
   min-height: 62px;
   display: grid;
@@ -231,17 +231,17 @@
 .user-access-domain-list strong { overflow: hidden; color: #33445a; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .user-access-domain-list small { overflow: hidden; color: #7c8da5; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .user-access-domain-list article > p { display: -webkit-box; overflow: hidden; margin: 0; color: #62738a; font-size: 11px; line-height: 1.55; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.user-access-domain-list .ant-btn { width: 28px; height: 28px; min-height: 28px; margin: 0; padding: 0; color: #79879a; }
+.user-access-domain-list .app-button { width: 28px; height: 28px; min-height: 28px; margin: 0; padding: 0; color: #79879a; }
 .user-access-empty-domain { min-height: 48px; display: flex; align-items: center; gap: 9px; border: 1px dashed #cfd9e5; border-radius: 5px; padding: 8px 10px; color: #77869b; font-size: 12px; }
 .user-access-add-domain { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .user-access-add-domain select { min-width: 0; width: 100%; height: 36px; }
-.user-access-add-domain .ant-btn { height: 36px; min-height: 36px; margin: 0; border-radius: 5px; font-size: 12px; }
+.user-access-add-domain .app-button { height: 36px; min-height: 36px; margin: 0; border-radius: 5px; font-size: 12px; }
 
 .user-access-role label { display: grid; grid-template-columns: 62px minmax(0, 1fr); align-items: center; gap: 8px; color: #607089; font-size: 13px; }
 .user-access-role select { min-width: 0; width: 100%; height: 36px; }
 .user-access-role p,
 .user-effective-access p { margin: 0; color: #75849a; font-size: 12px; line-height: 1.6; }
-.user-effective-access header .ant-btn { height: 30px; min-height: 30px; margin: 0; padding: 0; font-size: 12px; }
+.user-effective-access header .app-button { height: 30px; min-height: 30px; margin: 0; padding: 0; font-size: 12px; }
 .user-effective-groups { display: grid; gap: 6px; }
 .user-effective-groups > div { display: grid; grid-template-columns: 90px minmax(0, 1fr); align-items: center; gap: 7px; }
 .user-effective-groups strong { display: inline-flex; align-items: center; gap: 6px; color: #51627a; font-size: 12px; }
@@ -254,8 +254,8 @@
 .user-access-fixed p { margin: 5px 0 0; color: #687990; font-size: 12px; line-height: 1.65; }
 
 .user-access-editor > footer { margin-top: auto; display: grid; gap: 4px; padding: 11px 18px 14px; text-align: center; }
-.user-access-editor > footer .ant-btn:first-child { width: 100%; min-height: 46px; margin: 0; border-radius: 5px; font-size: 13px; font-weight: 700; }
-.user-access-editor > footer .ant-btn:last-child { height: 30px; min-height: 30px; margin: 0; padding: 0; font-size: 12px; }
+.user-access-editor > footer .app-button:first-child { width: 100%; min-height: 46px; margin: 0; border-radius: 5px; font-size: 13px; font-weight: 700; }
+.user-access-editor > footer .app-button:last-child { height: 30px; min-height: 30px; margin: 0; padding: 0; font-size: 12px; }
 
 @media (max-width: 1500px) {
   .user-permissions-heading,

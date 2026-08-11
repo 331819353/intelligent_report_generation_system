@@ -226,7 +226,7 @@ body { min-width: 0; }
 .sidebar-planned-link:disabled { cursor: not-allowed; opacity: 1; }
 
 .sidebar-nav-branch { display: grid; gap: 2px; }
-.sidebar-nav-parent.ant-btn {
+.sidebar-nav-parent.app-button {
   width: 100%;
   min-height: 42px;
   justify-content: flex-start;
@@ -240,8 +240,8 @@ body { min-width: 0; }
   font-size: 14px;
   font-weight: 680;
 }
-.sidebar-nav-parent.ant-btn:hover,
-.sidebar-nav-branch.is-active > .sidebar-nav-parent.ant-btn { background: #f5f8fd; color: #2059c7; }
+.sidebar-nav-parent.app-button:hover,
+.sidebar-nav-branch.is-active > .sidebar-nav-parent.app-button { background: #f5f8fd; color: #2059c7; }
 .sidebar-nav-parent > svg:first-child { flex: none; color: #788596; }
 .sidebar-nav-branch.is-active > .sidebar-nav-parent svg:first-child { color: #2864dc; }
 .sidebar-nav-parent > span { flex: 1; text-align: left; }
@@ -278,7 +278,7 @@ body { min-width: 0; }
 }
 .sidebar-domain-menu > header > a:hover { color: #0868cc; }
 .domain-menu-section-label { padding: 9px 14px 6px; color: #7d899b; font-size: 13px; font-weight: 620; }
-.sidebar-domain-menu > .domain-option.ant-btn {
+.sidebar-domain-menu > .domain-option.app-button {
   width: 100%;
   min-height: 116px;
   height: auto;
@@ -297,9 +297,9 @@ body { min-width: 0; }
   white-space: normal;
   box-shadow: none;
 }
-.sidebar-domain-menu > .domain-option.ant-btn:hover { background: #f8fbff; }
-.sidebar-domain-menu > .domain-option.ant-btn[aria-checked="true"] { background: #edf5ff; box-shadow: inset 3px 0 #1677ff; }
-.sidebar-domain-menu > .domain-option.ant-btn:disabled { color: #8793a5; opacity: .58; }
+.sidebar-domain-menu > .domain-option.app-button:hover { background: #f8fbff; }
+.sidebar-domain-menu > .domain-option.app-button[aria-checked="true"] { background: #edf5ff; box-shadow: inset 3px 0 #1677ff; }
+.sidebar-domain-menu > .domain-option.app-button:disabled { color: #8793a5; opacity: .58; }
 .sidebar-domain-menu .domain-option-icon {
   width: 46px;
   height: 46px;
@@ -313,7 +313,7 @@ body { min-width: 0; }
 .domain-option-title { min-width: 0; display: flex; align-items: center; gap: 7px; }
 .sidebar-domain-menu .domain-option-title strong { overflow: hidden; color: #2f4058; font-size: 17px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
 .domain-option-title em { flex: none; border-radius: 4px; padding: 2px 6px; background: #1677ff; color: #fff; font-size: 11px; font-style: normal; font-weight: 700; line-height: 1.35; }
-.sidebar-domain-menu > .domain-option.ant-btn .domain-option-copy > small { color: #738198; font-size: 13px; line-height: 1.45; }
+.sidebar-domain-menu > .domain-option.app-button .domain-option-copy > small { color: #738198; font-size: 13px; line-height: 1.45; }
 .domain-option-description {
   display: -webkit-box;
   overflow: hidden;
@@ -378,13 +378,13 @@ body { min-width: 0; }
 .domain-switch-feedback.is-error { border-color: #efc4c0; background: #fff7f6; color: #a33a35; }
 .domain-switch-feedback > svg { flex: none; color: #15966a; }
 .domain-switch-feedback.is-error > svg { color: #c54b45; }
-.domain-switch-feedback .ant-btn { width: 26px; height: 26px; min-width: 26px; margin: 0 0 0 3px; padding: 0; color: #718096; }
+.domain-switch-feedback .app-button { width: 26px; height: 26px; min-width: 26px; margin: 0 0 0 3px; padding: 0; color: #718096; }
 
 @keyframes domain-option-spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 1360px) {
   .sidebar-domain-menu { bottom: -38px; left: calc(100% - 58px); }
-  .sidebar-domain-menu > .domain-option.ant-btn { min-height: 110px; }
+  .sidebar-domain-menu > .domain-option.app-button { min-height: 110px; }
 }
 
 .app-shell-v2 > .main-stage {
@@ -413,7 +413,7 @@ body { min-width: 0; }
 .app-shell-v2.is-sidebar-collapsed .sidebar nav a,
 .app-shell-v2.is-sidebar-collapsed .sidebar-planned-link,
 .app-shell-v2.is-sidebar-collapsed .sidebar-collapse,
-.app-shell-v2.is-sidebar-collapsed .sidebar-nav-parent.ant-btn { justify-content: center; padding-inline: 8px; }
+.app-shell-v2.is-sidebar-collapsed .sidebar-nav-parent.app-button { justify-content: center; padding-inline: 8px; }
 .app-shell-v2.is-sidebar-collapsed .sidebar-domain-selector { display: flex; justify-content: center; padding-inline: 8px; }
 .app-shell-v2.is-sidebar-collapsed .sidebar-domain-menu { bottom: 0; left: 52px; width: min(388px, calc(100vw - 92px)); }
 
@@ -435,7 +435,7 @@ body { min-width: 0; }
   .app-shell-v2 .sidebar nav a,
   .app-shell-v2 .sidebar-planned-link,
   .app-shell-v2 .sidebar-collapse,
-  .app-shell-v2 .sidebar-nav-parent.ant-btn { justify-content: center; padding-inline: 8px; }
+  .app-shell-v2 .sidebar-nav-parent.app-button { justify-content: center; padding-inline: 8px; }
   .app-shell-v2 .sidebar-domain-selector { display: flex; justify-content: center; padding-inline: 8px; }
   .app-shell-v2 .sidebar-domain-menu { bottom: 0; left: 52px; width: min(388px, calc(100vw - 92px)); }
   .app-shell-v2 > .main-stage { padding-inline: 22px; }
@@ -455,6 +455,6 @@ body { min-width: 0; }
   .app-shell-v2 .topbar h1 { font-size: 23px; }
   .utility-popover { right: 8px; width: min(340px, calc(100vw - 82px)); }
   .app-shell-v2 .sidebar-domain-menu { left: 46px; width: min(344px, calc(100vw - 70px)); }
-  .sidebar-domain-menu > .domain-option.ant-btn { min-height: 100px; }
+  .sidebar-domain-menu > .domain-option.app-button { min-height: 100px; }
   .domain-switch-feedback { right: 12px; bottom: 12px; max-width: calc(100vw - 88px); }
 }

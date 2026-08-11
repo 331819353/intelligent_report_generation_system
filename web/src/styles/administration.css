@@ -372,7 +372,7 @@
   border-bottom: 1px solid #dce4ee;
 }
 .domain-access-tabs { align-self: stretch; display: flex; align-items: flex-end; gap: 8px; }
-.domain-access-tabs .ant-btn {
+.domain-access-tabs .app-button {
   position: relative;
   min-width: 76px;
   min-height: 44px;
@@ -385,9 +385,9 @@
   font-size: 13px;
   font-weight: 650;
 }
-.domain-access-tabs .ant-btn:hover,
-.domain-access-tabs .ant-btn.is-active { background: transparent; color: #0668c9; }
-.domain-access-tabs .ant-btn.is-active::after { position: absolute; right: 8px; bottom: -1px; left: 8px; height: 3px; border-radius: 3px 3px 0 0; background: #0872d3; content: ''; }
+.domain-access-tabs .app-button:hover,
+.domain-access-tabs .app-button.is-active { background: transparent; color: #0668c9; }
+.domain-access-tabs .app-button.is-active::after { position: absolute; right: 8px; bottom: -1px; left: 8px; height: 3px; border-radius: 3px 3px 0 0; background: #0872d3; content: ''; }
 .domain-access-tools { min-width: 0; display: flex; align-items: center; gap: 16px; padding-bottom: 10px; }
 .domain-access-search {
   width: min(320px, 28vw);
@@ -406,8 +406,8 @@
 .domain-access-search:focus-within { border-color: #409eff; box-shadow: 0 0 0 2px #409eff22; }
 .domain-access-search input { min-width: 0; border: 0; outline: 0; background: transparent; color: #2b3b51; font-size: 13px; }
 .domain-access-search input::placeholder { color: #98a4b5; }
-.domain-access-search .ant-btn { width: 26px; height: 26px; min-height: 26px; margin: 0; padding: 0; }
-.domain-access-tools > .ant-btn { margin: 0; color: #0872d3; font-size: 12px; font-weight: 650; }
+.domain-access-search .app-button { width: 26px; height: 26px; min-height: 26px; margin: 0; padding: 0; }
+.domain-access-tools > .app-button { margin: 0; color: #0872d3; font-size: 12px; font-weight: 650; }
 
 .domain-access-isolation-note,
 .domain-access-feedback {
@@ -427,8 +427,8 @@
 .domain-access-isolation-note > svg { color: #0872d3; }
 .domain-access-isolation-note span { display: flex; gap: 7px; }
 .domain-access-isolation-note strong { color: #2f4056; }
-.domain-access-isolation-note .ant-btn,
-.domain-access-feedback .ant-btn { width: 28px; height: 28px; min-height: 28px; margin: 0; padding: 0; }
+.domain-access-isolation-note .app-button,
+.domain-access-feedback .app-button { width: 28px; height: 28px; min-height: 28px; margin: 0; padding: 0; }
 .domain-access-feedback.is-error { border-color: #f1c9c4; background: #fff7f6; color: #b6433b; }
 .domain-access-feedback.is-info { border-color: #cfe1f6; background: #f4f9ff; color: #486b94; }
 
@@ -518,8 +518,8 @@
 .domain-status-badge.is-pending { background: #fff3df; color: #e48111; }
 .domain-status-badge.is-rejected { background: #fff0ef; color: #c64e45; }
 .domain-catalog-action { display: flex; justify-content: flex-end; }
-.domain-catalog-action .ant-btn { min-width: 82px; margin: 0; border-radius: 4px; font-size: 12px; }
-.domain-catalog-action .ant-btn.is-plain { color: #0872d3; }
+.domain-catalog-action .app-button { min-width: 82px; margin: 0; border-radius: 4px; font-size: 12px; }
+.domain-catalog-action .app-button.is-plain { color: #0872d3; }
 
 .domain-catalog-pagination {
   min-height: 76px;
@@ -531,7 +531,7 @@
   color: #6c7a8e;
   font-size: 12px;
 }
-.domain-catalog-pagination .ant-btn { width: 30px; height: 30px; min-height: 30px; margin: 0; border: 1px solid #d7e0ea; border-radius: 4px; padding: 0; }
+.domain-catalog-pagination .app-button { width: 30px; height: 30px; min-height: 30px; margin: 0; border: 1px solid #d7e0ea; border-radius: 4px; padding: 0; }
 .domain-page-size,
 .domain-page-input { height: 32px; display: inline-flex; align-items: center; gap: 16px; border: 1px solid #d6dfe9; border-radius: 4px; padding: 0 11px; background: #fff; color: #495a70; }
 .domain-page-current { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 4px; background: #0872d3; color: #fff; }
@@ -543,7 +543,7 @@
 .domain-access-empty > svg { color: #5a91cf; }
 .domain-access-empty strong { color: #42536a; font-size: 14px; }
 .domain-access-empty span { font-size: 12px; }
-.domain-access-empty .ant-btn { margin: 4px 0 0; }
+.domain-access-empty .app-button { margin: 4px 0 0; }
 
 .domain-access-detail {
   min-width: 0;
@@ -558,7 +558,7 @@
 .domain-access-detail > header > div { min-width: 0; display: grid; gap: 7px; }
 .domain-access-detail h2 { margin: 0; color: #26354a; font-size: 22px; font-weight: 720; }
 .domain-access-detail code { color: #6e809c; font-family: inherit; font-size: 12px; }
-.domain-access-detail > header .ant-btn { width: 32px; height: 32px; min-height: 32px; margin: 0; padding: 0; color: #6a7890; }
+.domain-access-detail > header .app-button { width: 32px; height: 32px; min-height: 32px; margin: 0; padding: 0; color: #6a7890; }
 .domain-access-detail > section { display: grid; gap: 10px; padding: 15px 24px; }
 .domain-access-detail h3 { margin: 0; color: #33445a; font-size: 12px; font-weight: 700; }
 .domain-access-detail p { margin: 0; color: #5e6d82; font-size: 12px; line-height: 1.85; }
@@ -567,7 +567,7 @@
 .domain-administrator-summary { display: flex; align-items: center; gap: 8px; color: #526279; font-size: 12px; }
 .domain-administrator-summary svg { color: #6e829f; }
 .domain-access-detail > footer { margin-top: auto; display: grid; gap: 9px; padding: 20px 24px 24px; text-align: center; }
-.domain-access-detail > footer .ant-btn { width: 100%; min-height: 48px; margin: 0; border-radius: 4px; font-size: 14px; }
+.domain-access-detail > footer .app-button { width: 100%; min-height: 48px; margin: 0; border-radius: 4px; font-size: 14px; }
 .domain-access-detail > footer small { color: #75849a; font-size: 11px; }
 
 .domain-application-header,
@@ -594,7 +594,7 @@
 .domain-application-dialog > header span { color: #0872d3; font-size: 11px; font-weight: 720; letter-spacing: .06em; }
 .domain-application-dialog h2 { margin: 0; color: #29394f; font-size: 20px; }
 .domain-application-dialog p { margin: 0; color: #748197; font-size: 12px; }
-.domain-application-dialog > header .ant-btn { width: 30px; height: 30px; min-height: 30px; margin: 0; padding: 0; }
+.domain-application-dialog > header .app-button { width: 30px; height: 30px; min-height: 30px; margin: 0; padding: 0; }
 .domain-application-dialog form { display: grid; gap: 18px; padding: 22px 24px 24px; }
 .domain-application-dialog label { position: relative; display: grid; gap: 8px; color: #35455b; font-size: 13px; font-weight: 650; }
 .domain-application-dialog label b { color: #dc4037; }
@@ -604,7 +604,7 @@
 .domain-application-policy { display: flex; align-items: center; gap: 9px; border-radius: 5px; padding: 10px 12px; background: #f3f8fe; color: #61738a; font-size: 11px; }
 .domain-application-policy svg { flex: none; color: #0872d3; }
 .domain-application-dialog form > footer { display: flex; justify-content: flex-end; gap: 10px; }
-.domain-application-dialog form > footer .ant-btn { min-width: 96px; margin: 0; border-radius: 4px; }
+.domain-application-dialog form > footer .app-button { min-width: 96px; margin: 0; border-radius: 4px; }
 
 @media (max-width: 1440px) {
   .domain-access-workspace.has-detail { grid-template-columns: minmax(0, 1fr); }

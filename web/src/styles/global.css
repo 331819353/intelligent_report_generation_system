@@ -32,7 +32,62 @@ body {
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
-.app-shell-v2 .ant-btn + .ant-btn { margin-left: 0; }
+.app-button {
+  appearance: none;
+  min-width: 0;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 0;
+  border: 1px solid #cbd7e5;
+  border-radius: 5px;
+  padding: 8px 15px;
+  background: #fff;
+  color: #344054;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+  box-shadow: none;
+  user-select: none;
+  transition: border-color .15s ease, background .15s ease, color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.app-button > svg { flex: none; }
+.app-button:hover:not(:disabled) { border-color: #7eb2e8; background: #f7fbff; color: #0868c9; }
+.app-button:focus-visible { outline: 0; box-shadow: 0 0 0 3px #1677ff24; }
+.app-button:active:not(:disabled) { transform: translateY(1px); }
+.app-button:disabled { color: #98a2b3; opacity: .56; }
+.app-button.is-primary { border-color: #0872d3; background: #0872d3; color: #fff; }
+.app-button.is-primary:hover:not(:disabled) { border-color: #0665bb; background: #0665bb; color: #fff; }
+.app-button.is-primary:disabled { border-color: #cddff0; background: #e8f0f8; color: #93a7ba; opacity: 1; }
+.app-button.is-text,
+.app-button.is-link { min-height: 32px; border-color: transparent; padding-inline: 8px; background: transparent; box-shadow: none; }
+.app-button.is-text { color: #526176; }
+.app-button.is-link { color: #0872d3; }
+.app-button.is-text:hover:not(:disabled),
+.app-button.is-link:hover:not(:disabled) { border-color: transparent; background: #edf5ff; color: #0668c9; }
+.app-button.is-plain { background: #fff; }
+.app-button.is-primary.is-plain { border-color: #87b7e8; background: #fff; color: #0872d3; }
+.app-button.app-button--success { border-color: #15966a; background: #15966a; color: #fff; }
+.app-button.app-button--warning { border-color: #d97706; background: #d97706; color: #fff; }
+.app-button.app-button--danger { border-color: #d24d46; background: #d24d46; color: #fff; }
+.app-button.app-button--info { border-color: #5f6f84; background: #5f6f84; color: #fff; }
+.app-button.app-button--success.is-plain { border-color: #8bd6ba; background: #fff; color: #08734d; }
+.app-button.app-button--warning.is-plain { border-color: #f0bf7c; background: #fff; color: #b45f06; }
+.app-button.app-button--danger.is-plain { border-color: #efb4b0; background: #fff; color: #c2413b; }
+.app-button.app-button--info.is-plain { border-color: #bdc7d4; background: #fff; color: #526176; }
+.app-button.is-small { min-height: 32px; padding: 5px 11px; font-size: 12px; }
+.app-button.is-large { min-height: 48px; padding: 11px 20px; font-size: 16px; }
+.app-button.is-round { border-radius: 999px; }
+.app-button.is-circle { width: 40px; min-width: 40px; height: 40px; min-height: 40px; border-radius: 50%; padding: 0; }
+.app-button.is-circle.is-small { width: 32px; min-width: 32px; height: 32px; min-height: 32px; }
+.app-button.is-circle.is-large { width: 48px; min-width: 48px; height: 48px; min-height: 48px; }
+.app-shell-v2 .app-button + .app-button { margin-left: 0; }
 a, button, input, select, textarea { -webkit-tap-highlight-color: transparent; }
 h1, h2, h3, p { margin-top: 0; }
 
@@ -238,8 +293,8 @@ textarea:focus-visible {
   border-bottom: 1px solid #edf0f4;
 }
 
-.login-mode-switch .ant-btn + .ant-btn { margin-left: 0; }
-.login-mode-switch .login-mode-tab.ant-btn {
+.login-mode-switch .app-button + .app-button { margin-left: 0; }
+.login-mode-switch .login-mode-tab.app-button {
   position: relative;
   min-height: 62px;
   margin: 0;
@@ -252,8 +307,8 @@ textarea:focus-visible {
   font-weight: 650;
 }
 
-.login-mode-switch .login-mode-tab.ant-btn:hover,
-.login-mode-switch .login-mode-tab.ant-btn:focus-visible { background: transparent; color: var(--login-primary); }
+.login-mode-switch .login-mode-tab.app-button:hover,
+.login-mode-switch .login-mode-tab.app-button:focus-visible { background: transparent; color: var(--login-primary); }
 
 .login-mode-switch .login-mode-tab.active {
   color: var(--login-primary);
@@ -316,7 +371,7 @@ textarea:focus-visible {
 }
 
 .login-input input::placeholder { color: #9aa4b4; }
-.login-password-toggle.ant-btn {
+.login-password-toggle.app-button {
   width: 44px;
   min-height: 44px;
   border: 0;
@@ -324,7 +379,7 @@ textarea:focus-visible {
   background: transparent;
   color: #778399;
 }
-.login-password-toggle.ant-btn:hover { background: #f2f6fb; color: var(--login-primary); }
+.login-password-toggle.app-button:hover { background: #f2f6fb; color: var(--login-primary); }
 
 .login-assistance {
   display: flex;
@@ -332,7 +387,7 @@ textarea:focus-visible {
   margin: -15px 0 53px;
 }
 
-.login-assistance .ant-btn {
+.login-assistance .app-button {
   min-height: 32px;
   padding: 0;
   color: #0069d8;
@@ -340,7 +395,7 @@ textarea:focus-visible {
   font-weight: 620;
 }
 
-.login-submit.ant-btn {
+.login-submit.app-button {
   width: 100%;
   min-height: 76px;
   margin: 0;
@@ -353,8 +408,8 @@ textarea:focus-visible {
   letter-spacing: .05em;
 }
 
-.login-submit.ant-btn:hover:not(:disabled) { border-color: #004d93; background: #004d93; }
-.login-submit.ant-btn:focus-visible { box-shadow: 0 0 0 4px #1677ff26; }
+.login-submit.app-button:hover:not(:disabled) { border-color: #004d93; background: #004d93; }
+.login-submit.app-button:focus-visible { box-shadow: 0 0 0 4px #1677ff26; }
 .form-error,
 .form-notice { margin: -22px 0 24px; font-size: 14px; line-height: 1.55; }
 .form-error { color: #c0362c; }
@@ -628,11 +683,11 @@ textarea:focus-visible {
   .login-story-footer { right: 36px; bottom: 38px; left: 50px; gap: 17px; font-size: 12px; }
   .login-panel { padding-inline: 54px; }
   .login-panel form { margin-inline: auto; }
-  .login-mode-switch .login-mode-tab.ant-btn { font-size: 22px; }
+  .login-mode-switch .login-mode-tab.app-button { font-size: 22px; }
   .login-field { margin-bottom: 28px; }
   .login-input { min-height: 62px; }
   .login-input input { height: 58px; font-size: 15px; }
-  .login-submit.ant-btn { min-height: 62px; font-size: 19px; }
+  .login-submit.app-button { min-height: 62px; font-size: 19px; }
   .login-panel-date { bottom: 38px; }
 }
 
@@ -731,7 +786,7 @@ textarea:focus-visible {
   pointer-events: none;
   position: fixed;
   right: 24px;
-  z-index: 70;
+  z-index: 120;
 }
 
 .data-source-ai-launcher-wrap {
@@ -926,12 +981,12 @@ textarea:focus-visible {
   .login-panel { min-height: 720px; padding: 70px 28px 96px; }
   .login-panel form { width: min(520px, 100%); }
   .login-mode-switch { margin-bottom: 38px; }
-  .login-mode-switch .login-mode-tab.ant-btn { min-height: 54px; font-size: 20px; }
+  .login-mode-switch .login-mode-tab.app-button { min-height: 54px; font-size: 20px; }
   .login-field { gap: 9px; margin-bottom: 24px; font-size: 14px; }
   .login-input { min-height: 58px; padding-inline: 14px; }
   .login-input input { height: 54px; font-size: 14px; }
   .login-assistance { margin: -11px 0 28px; }
-  .login-submit.ant-btn { min-height: 60px; font-size: 18px; }
+  .login-submit.app-button { min-height: 60px; font-size: 18px; }
   .form-hint { margin-top: 22px; font-size: 12px; }
   .login-panel-date { bottom: 32px; font-size: 12px; }
   .data-source-ai { bottom: 12px; right: 12px; }

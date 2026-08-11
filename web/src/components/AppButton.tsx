@@ -1,8 +1,6 @@
-import Button from 'antd/es/button'
-import type { ButtonProps } from 'antd/es/button'
-import type { ReactNode } from 'react'
+import type { ButtonHTMLAttributes, ReactNode } from 'react'
 
-export type AppButtonProps = Omit<ButtonProps, 'type' | 'size' | 'htmlType' | 'danger' | 'ghost' | 'shape' | 'variant' | 'color'> & {
+export type AppButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'type'> & {
   type?: 'button' | 'submit' | 'reset'
   variant?: 'default' | 'primary' | 'success' | 'warning' | 'danger' | 'info'
   size?: 'default' | 'small' | 'large'
@@ -15,7 +13,7 @@ export type AppButtonProps = Omit<ButtonProps, 'type' | 'size' | 'htmlType' | 'd
 }
 
 /**
- * 项目按钮统一入口。底层使用 React 生态的 Ant Design Button，保留现有业务层语义。
+ * 项目按钮统一入口。使用原生 button 与项目 CSS，避免第三方运行时样式影响页面布局。
  */
 export function AppButton({
   variant = 'default',
@@ -33,16 +31,22 @@ export function AppButton({
 }: AppButtonProps) {
   const visualType = link ? 'link' : text ? 'text' : variant === 'default' || plain ? 'default' : 'primary'
   const variantClass = variant !== 'default' && variant !== 'primary' ? `app-button--${variant}` : ''
+  const visualClass = `is-${visualType}`
+  const sizeClass = `is-${size}`
 
-  return <Button
+  return <button
     {...props}
-    htmlType={type}
-    type={visualType}
-    danger={variant === 'danger'}
-    ghost={plain && variant !== 'default'}
-    shape={circle ? 'circle' : round ? 'round' : 'default'}
-    size={size === 'default' ? 'middle' : size}
-    className={['app-button', variantClass, plain ? 'is-plain' : '', className].filter(Boolean).join(' ')}
+    type={type}
+    className={[
+      'app-button',
+      visualClass,
+      sizeClass,
+      variantClass,
+      plain ? 'is-plain' : '',
+      round ? 'is-round' : '',
+      circle ? 'is-circle' : '',
+      className,
+    ].filter(Boolean).join(' ')}
     disabled={disabled}
-  >{children}</Button>
+  >{children}</button>
 }

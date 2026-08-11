@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"intelligent-report-generation-system/internal/askdata"
+	"intelligent-report-generation-system/internal/platform/database"
 )
 
 var ErrInvalidLease = errors.New("question run lease request is invalid")
@@ -29,6 +30,7 @@ const (
 
 // LeasedRun is one claimed question run plus the token proving ownership.
 type LeasedRun struct {
+	TenantID           askdata.ID
 	RunID              askdata.ID
 	DomainID           askdata.ID
 	ActorID            askdata.ID
@@ -107,8 +109,55 @@ func (store *LeaseStore) Claim(
 	if err != nil {
 		return LeasedRun{}, false, err
 	}
+	claimed.TenantID = askdata.ID(tenantID)
 	claimed.ResumeMode = ResumeMode(mode)
 	return claimed, true, nil
+}
+
+// ActorRoleIDs resolves the roles a run's actor holds right now.
+//
+// Roles are read at execution time rather than taken from the claim, because a
+// question executes under the actor's *current* permissions. If those changed
+// since the run was created, the rebuilt scope will not match the run's pinned
+// policy hash and Transition rejects it — which is the intended outcome, not a
+// bug to work around.
+func (store *LeaseStore) ActorRoleIDs(
+	ctx context.Context,
+	tenantID, actorID askdata.ID,
+) ([]askdata.ID, error) {
+	if store == nil || store.pool == nil || tenantID.Validate() != nil || actorID.Validate() != nil {
+		return nil, ErrInvalidLease
+	}
+	roleIDs := []askdata.ID{}
+	err := database.WithTenantTx(ctx, store.pool, string(tenantID), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT role.id::text
+			FROM platform.user_roles AS assignment
+			JOIN platform.roles AS role
+			  ON role.tenant_id=assignment.tenant_id AND role.id=assignment.role_id
+			WHERE assignment.tenant_id=$1 AND assignment.user_id=$2
+			  AND role.status='ACTIVE' AND role.deleted_at IS NULL
+			ORDER BY role.id
+			LIMIT $3`, string(tenantID), string(actorID), askdata.MaxPolicyRoles+1)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var roleID string
+			if err := rows.Scan(&roleID); err != nil {
+				return err
+			}
+			roleIDs = append(roleIDs, askdata.ID(roleID))
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(roleIDs) == 0 || len(roleIDs) > askdata.MaxPolicyRoles {
+		return nil, ErrPinnedScopeMismatch
+	}
+	return roleIDs, nil
 }
 
 // Heartbeat extends a held lease. It returns false when the lease has already
