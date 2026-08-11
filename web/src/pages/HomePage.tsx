@@ -15,7 +15,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AppButton } from '../components/AppButton'
 import { AppShell } from '../components/AppShell'
-import { currentDomain } from '../lib/domain-context'
+import { currentDomain, subscribeDomainChange } from '../lib/domain-context'
 import {
   conversationToHomeWork,
   decisionToHomeWork,
@@ -124,6 +124,7 @@ export function HomePage() {
   const [activeFilter, setActiveFilter] = useState<HomeWorkFilter>('all')
   const [notice, setNotice] = useState('')
   const [reloadRevision, setReloadRevision] = useState(0)
+  const [pageDomainName, setPageDomainName] = useState(() => snapshot ? '企业经营' : currentDomain()?.name ?? '当前领域')
   const [suggestions, setSuggestions] = useState(snapshot ? snapshotSuggestions : [])
   const [work, setWork] = useState<Record<HomeWorkKind, LoadState<HomeWorkItem>>>(() => ({
     question: initialWorkState('question'),
@@ -133,6 +134,14 @@ export function HomePage() {
   const [taskState, setTaskState] = useState<LoadState<HomeTaskItem>>(snapshot
     ? { status: 'ready', items: snapshotTasks }
     : { status: 'loading', items: [] })
+
+  useEffect(() => subscribeDomainChange(() => {
+    setPageDomainName(currentDomain()?.name ?? '当前领域')
+    if (snapshot) return
+    setWork({ question: { status: 'loading', items: [] }, report: { status: 'loading', items: [] }, decision: { status: 'loading', items: [] } })
+    setTaskState({ status: 'loading', items: [] })
+    setReloadRevision(value => value + 1)
+  }), [snapshot])
 
   useEffect(() => {
     if (snapshot) return undefined
@@ -179,7 +188,6 @@ export function HomePage() {
           : { status: 'ready' as const, error: undefined }
     : work[activeFilter]
   const continueItem = work.question.items[0]
-  const pageDomainName = snapshot ? '企业经营' : currentDomain()?.name ?? '当前领域'
   const pageDate = snapshot ? '2026 年 8 月 11 日' : formatPageDate(new Date())
 
   const reloadHome = () => {

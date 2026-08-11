@@ -1,20 +1,26 @@
 import {
+  ArrowSquareOut,
   Bell,
   BookOpenText,
+  Buildings,
   CaretDown,
   ChatCircleDots,
   Check,
   ClipboardText,
+  Cube,
   Database,
+  Factory,
   FileText,
   GearSix,
   GlobeHemisphereWest,
   House,
+  Info,
   Path,
   Question,
   ShieldCheck,
   SidebarSimple,
   SignOut,
+  SpinnerGap,
   Stack,
   UserCircle,
   WarningCircle,
@@ -25,6 +31,7 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { administrationAPI, type BusinessDomain } from '../lib/administration'
 import {
   bindBusinessDomain,
+  currentSubject,
   currentTokens,
   forceLogout,
   logout,
@@ -34,6 +41,7 @@ import {
   clearDomain,
   currentDomain,
   domainCatalogChangedEvent,
+  selectDomain,
 } from '../lib/domain-context'
 import { formatHomeTime, workItemDestination, workTypeLabel } from '../lib/home-data'
 import { homeAPI, type WorkInboxItem } from '../lib/home-api'
@@ -76,9 +84,22 @@ const snapshotDomain: BusinessDomain = {
 
 const snapshotDomains: BusinessDomain[] = [
   snapshotDomain,
-  { ...snapshotDomain, id: 'snapshot-supply-chain', code: 'SUPPLY_CHAIN', name: '供应链管理', description: '供应链履约、库存与质量分析', default: false },
-  { ...snapshotDomain, id: 'snapshot-channel-sales', code: 'CHANNEL_SALES', name: '渠道销售', description: '渠道、门店与销售经营分析', default: false },
+  { ...snapshotDomain, id: 'snapshot-supply-chain', code: 'SUPPLY_CHAIN', name: '供应链管理', description: '供应链计划、采购、库存、物流等端到端供应链运营分析。', default: false },
+  { ...snapshotDomain, id: 'snapshot-manufacturing-quality', code: 'MANUFACTURING_QUALITY', name: '制造质量', description: '制造过程质量监控、质量追溯与改进分析，保障产品质量。', default: false },
 ]
+
+function domainVisual(code: string) {
+  if (code.includes('SUPPLY')) return { icon: Cube, tone: 'violet' }
+  if (code.includes('MANUFACTURING') || code.includes('QUALITY')) return { icon: Factory, tone: 'green' }
+  return { icon: Buildings, tone: 'cyan' }
+}
+
+function domainRoleLabel(domain: BusinessDomain, subject: string, canManage: boolean | null, snapshot: boolean) {
+  if (snapshot) return domain.code.includes('ENTERPRISE') ? '领域管理员' : '领域成员'
+  if (domain.administrators.some(item => item.id === subject)) return '领域管理员'
+  if (canManage) return '平台管理员'
+  return '领域成员'
+}
 
 const navigation: NavGroup[] = [
   {
@@ -138,11 +159,15 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
   const location = useLocation()
   const domainSwitcherRef = useRef<HTMLDivElement>(null)
   const utilityRef = useRef<HTMLDivElement>(null)
-  const designSnapshot = import.meta.env.DEV && Boolean(new URLSearchParams(window.location.search).get('snapshot'))
+  const searchParams = new URLSearchParams(window.location.search)
+  const designSnapshot = import.meta.env.DEV && Boolean(searchParams.get('snapshot'))
+  const domainSwitchPreview = designSnapshot && searchParams.get('domainMenu') === 'open'
   const hasRealAccessToken = currentTokens()?.accessToken.split('.').length === 3
   const [domains, setDomains] = useState<BusinessDomain[]>(designSnapshot ? snapshotDomains : [])
-  const [selectedDomain, setSelectedDomain] = useState<BusinessDomain | null>(() => currentDomain() ?? (designSnapshot ? snapshotDomain : null))
-  const [domainMenuOpen, setDomainMenuOpen] = useState(false)
+  const [selectedDomain, setSelectedDomain] = useState<BusinessDomain | null>(() => designSnapshot ? snapshotDomain : currentDomain())
+  const [domainMenuOpen, setDomainMenuOpen] = useState(domainSwitchPreview)
+  const [switchingDomainID, setSwitchingDomainID] = useState('')
+  const [domainSwitchFeedback, setDomainSwitchFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
   const [canManage, setCanManage] = useState<boolean | null>(designSnapshot ? true : hasRealAccessToken ? null : false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [permissionNavigationOpen, setPermissionNavigationOpen] = useState(true)
@@ -247,22 +272,41 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
     }
   }, [domainMenuOpen, openUtility])
 
+  useEffect(() => {
+    if (!domainSwitchFeedback) return undefined
+    const timer = window.setTimeout(() => setDomainSwitchFeedback(null), 3600)
+    return () => window.clearTimeout(timer)
+  }, [domainSwitchFeedback])
+
   const activeDomains = useMemo(
     () => domains.filter(item => item.status === 'ACTIVE'),
     [domains],
   )
 
   const chooseDomain = async (domain: BusinessDomain) => {
-    setDomainMenuOpen(false)
+    if (domain.id === selectedDomain?.id) {
+      setDomainMenuOpen(false)
+      return
+    }
+    setSwitchingDomainID(domain.id)
+    setDomainSwitchFeedback(null)
     if (designSnapshot) {
+      selectDomain(domain)
       setSelectedDomain(domain)
+      setDomainMenuOpen(false)
+      setSwitchingDomainID('')
+      setDomainSwitchFeedback({ kind: 'success', text: `已切换至${domain.name}，工作台内容已刷新` })
       return
     }
     try {
       await switchBusinessDomain(domain)
       setSelectedDomain(domain)
+      setDomainMenuOpen(false)
+      setDomainSwitchFeedback({ kind: 'success', text: `已切换至${domain.name}，工作台内容已刷新` })
     } catch {
-      forceLogout('BUSINESS_DOMAIN_UNAVAILABLE')
+      setDomainSwitchFeedback({ kind: 'error', text: `${domain.name}暂时无法进入，请检查访问权限后重试` })
+    } finally {
+      setSwitchingDomainID('')
     }
   }
 
@@ -369,21 +413,38 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
         <div className="sidebar-footer">
           <div className="sidebar-domain-wrap" ref={domainSwitcherRef}>
             {domainMenuOpen && <div className="domain-menu sidebar-domain-menu" role="menu" aria-label="切换业务领域">
-              <header><span>切换领域</span><small>{activeDomains.length} 个可用领域</small></header>
+              <header>
+                <strong>切换领域</strong>
+                <NavLink to={designSnapshot ? '/domain-access?snapshot=domain-access-v2' : '/domain-access'} onClick={() => setDomainMenuOpen(false)}>管理领域访问<ArrowSquareOut size={13} /></NavLink>
+              </header>
+              <div className="domain-menu-section-label">当前领域</div>
               {activeDomains.length > 0
-                ? activeDomains.map(domain => <AppButton
-                  text
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={selectedDomain?.id === domain.id}
-                  key={domain.id}
-                  onClick={() => void chooseDomain(domain)}
-                >
-                  <span className="domain-option-icon">{domain.name.slice(0, 1)}</span>
-                  <span><strong>{domain.name}</strong><small>{domain.description || domain.code}</small></span>
-                  {selectedDomain?.id === domain.id && <Check size={16} weight="bold" aria-hidden="true" />}
-                </AppButton>)
+                ? activeDomains.map(domain => {
+                  const visual = domainVisual(domain.code)
+                  const DomainIcon = visual.icon
+                  const isCurrent = selectedDomain?.id === domain.id
+                  const switching = switchingDomainID === domain.id
+                  return <AppButton
+                    text
+                    className={`domain-option is-${visual.tone}`}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={isCurrent}
+                    disabled={Boolean(switchingDomainID && !switching)}
+                    key={domain.id}
+                    onClick={() => void chooseDomain(domain)}
+                  >
+                    <span className="domain-option-icon"><DomainIcon size={20} weight="duotone" /></span>
+                    <span className="domain-option-copy">
+                      <span className="domain-option-title"><strong>{domain.name}</strong>{isCurrent && <em>当前</em>}</span>
+                      <small>角色：{domainRoleLabel(domain, currentSubject(), canManage, designSnapshot)}</small>
+                      <span className="domain-option-description">{domain.description || domain.code}</span>
+                    </span>
+                    {switching && <SpinnerGap className="domain-option-spinner" size={17} />}
+                  </AppButton>
+                })
                 : <p>暂无可用领域</p>}
+              <footer><Info size={15} /><span>切换后将刷新当前工作台数据与内容</span></footer>
             </div>}
             <AppButton
               text
@@ -412,6 +473,11 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
         </header>
         {children}
       </main>
+      {domainSwitchFeedback && <div className={`domain-switch-feedback is-${domainSwitchFeedback.kind}`} role="status">
+        {domainSwitchFeedback.kind === 'success' ? <Check size={16} weight="bold" /> : <WarningCircle size={16} />}
+        <span>{domainSwitchFeedback.text}</span>
+        <AppButton text circle type="button" aria-label="关闭领域切换提示" onClick={() => setDomainSwitchFeedback(null)}><X size={14} /></AppButton>
+      </div>}
     </div>
   )
 }
