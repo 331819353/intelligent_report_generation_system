@@ -379,6 +379,25 @@ func EvaluateReleasePreflight(
 					relationship.FanoutPolicy != FanoutPreAggregateRequired && relationship.FanoutPolicy != FanoutBridgeRequired) {
 				result.Issues = append(result.Issues, lifecycleIssue("RELEASE_RELATIONSHIP_FANOUT_UNSAFE", object))
 			}
+		case ReleaseObjectRowAccessPolicy:
+			var policy struct {
+				ModelVersionID       string          `json:"modelVersionId"`
+				PredicateAST         json.RawMessage `json:"predicateAst"`
+				SubjectAttributeKeys []string        `json:"subjectAttributeKeys"`
+			}
+			if json.Unmarshal(object.Contract, &policy) != nil ||
+				strings.TrimSpace(policy.ModelVersionID) == "" || len(policy.PredicateAST) == 0 {
+				result.Issues = append(result.Issues, lifecycleIssue("RELEASE_ROW_ACCESS_POLICY_INVALID", object))
+				continue
+			}
+			// A predicate that no longer parses, or that stopped referencing the
+			// subject, must not reach ACTIVE: it would silently widen access
+			// rather than fail, which is the one failure mode a row access
+			// control may never have.
+			keys, err := ParseRowAccessPredicate(policy.PredicateAST)
+			if err != nil || strings.Join(keys, ",") != strings.Join(sortedAdminAliases(policy.SubjectAttributeKeys), ",") {
+				result.Issues = append(result.Issues, lifecycleIssue("RELEASE_ROW_ACCESS_POLICY_UNSAFE", object))
+			}
 		case ReleaseObjectQualityRule:
 			var quality struct {
 				Severity string          `json:"severity"`

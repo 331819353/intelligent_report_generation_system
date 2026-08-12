@@ -269,6 +269,46 @@ func NewAdminHandler(authService *auth.Service, store *AdminStore) http.Handler 
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"escalationLevel": level})
 	})))
+	mux.Handle("GET /api/v1/users/{id}/subject-attributes", authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		items, err := store.ListSubjectAttributes(r.Context(), c.TenantID, c.Subject, r.PathValue("id"))
+		if err != nil {
+			writeSubjectAttributeError(w, err)
+			return
+		}
+		if items == nil {
+			items = []SubjectAttribute{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	})))
+	mux.Handle("PUT /api/v1/users/{id}/subject-attributes/{key}", authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		var in struct {
+			AttributeValues []string `json:"attributeValues"`
+		}
+		if !decodeAdmin(w, r, &in) {
+			return
+		}
+		attribute, err := store.SetSubjectAttribute(
+			r.Context(), c.TenantID, c.Subject, r.PathValue("id"),
+			r.PathValue("key"), in.AttributeValues,
+		)
+		if err != nil {
+			writeSubjectAttributeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, attribute)
+	})))
+	mux.Handle("DELETE /api/v1/users/{id}/subject-attributes/{key}", authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		if err := store.DeleteSubjectAttribute(
+			r.Context(), c.TenantID, c.Subject, r.PathValue("id"), r.PathValue("key"),
+		); err != nil {
+			writeSubjectAttributeError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})))
 	mux.Handle("GET /api/v1/users", platformManaged(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		users, err := store.ListUsers(r.Context(), c.TenantID)
@@ -380,4 +420,15 @@ func decodeAdmin(w http.ResponseWriter, r *http.Request, target any) bool {
 		return false
 	}
 	return true
+}
+
+func writeSubjectAttributeError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrSubjectAttributeForbidden):
+		writeError(w, http.StatusForbidden, "SUBJECT_ATTRIBUTE_FORBIDDEN", err.Error())
+	case errors.Is(err, ErrSubjectAttributeInvalid):
+		writeError(w, http.StatusBadRequest, "SUBJECT_ATTRIBUTE_INVALID", err.Error())
+	default:
+		writeError(w, http.StatusBadRequest, "SUBJECT_ATTRIBUTE_FAILED", err.Error())
+	}
 }

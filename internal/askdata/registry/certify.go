@@ -389,6 +389,17 @@ func validateCertificationCandidate(ctx context.Context, tx pgx.Tx, candidate ce
 			candidate.VersionID).Scan(&valid); err != nil || !valid {
 			return errors.New("HIERARCHY_LEVELS_INVALID: hierarchy requires two to thirty-two contiguous levels")
 		}
+	case "row_access_policies":
+		// Certifying a predicate that no longer references the subject would
+		// turn a row access control into a filter everyone shares.
+		var predicate []byte
+		if err := tx.QueryRow(ctx, `SELECT predicate_ast FROM askdata.row_access_policies
+			WHERE id=$1`, candidate.VersionID).Scan(&predicate); err != nil {
+			return errors.New("ROW_ACCESS_POLICY_INVALID: row access policy was not found")
+		}
+		if _, err := ParseRowAccessPredicate(predicate); err != nil {
+			return errors.New("ROW_ACCESS_POLICY_INVALID: predicate must be boolean and reference at least one subject attribute")
+		}
 	case "quality_rules":
 		// Certifying a rule bound to a check nothing executes would create an
 		// object that can only ever report "unproven".

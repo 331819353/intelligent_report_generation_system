@@ -222,6 +222,10 @@ type MetricVersion struct {
 	NullPolicy                     string                      `json:"nullPolicy"`
 	IncompletePeriodPolicyOverride IncompletePeriodPolicy      `json:"incompletePeriodPolicyOverride,omitempty"`
 	MeasureVersionIDs              []string                    `json:"measureVersionIds"`
+	// BusinessDefinition is the caliber in prose: what this metric counts, what
+	// it excludes, and when it is the wrong metric to use. It is retrieval and
+	// LLM context evidence only and never participates in binding (02 §5).
+	BusinessDefinition string `json:"businessDefinition"`
 }
 
 type Dimension struct {
@@ -256,6 +260,11 @@ type DimensionMember struct {
 	CanonicalLabel        string `json:"canonicalLabel"`
 	ParentMemberVersionID string `json:"parentMemberVersionId,omitempty"`
 	Sensitivity           string `json:"sensitivity"`
+	// Definition says what this value means in business terms. It inherits the
+	// member's sensitivity: the definition of a CONFIDENTIAL or RESTRICTED
+	// member is as identifying as its label and is withheld from embeddings,
+	// the LLM and logs on exactly the same rule.
+	Definition string `json:"definition"`
 }
 
 // CertifiedExample is a certified question and the objects it should bind to.
@@ -288,6 +297,18 @@ type Relationship struct {
 	JoinAST              json.RawMessage  `json:"joinAst"`
 	FanoutPolicy         FanoutPolicy     `json:"fanoutPolicy"`
 	BridgeModelVersionID string           `json:"bridgeModelVersionId,omitempty"`
+}
+
+// RowAccessPolicy scopes which rows of one semantic model a reader may see.
+// The predicate is validated by ParseRowAccessPredicate and translated by the
+// compiler; the semantic layer never evaluates it.
+type RowAccessPolicy struct {
+	VersionIdentity
+	ModelVersionID       string          `json:"modelVersionId"`
+	Code                 string          `json:"code"`
+	Name                 string          `json:"name"`
+	PredicateAST         json.RawMessage `json:"predicateAst"`
+	SubjectAttributeKeys []string        `json:"subjectAttributeKeys"`
 }
 
 type QualityRule struct {

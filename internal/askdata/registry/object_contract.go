@@ -63,6 +63,7 @@ type metricContractDocument struct {
 	NullPolicy                     string                      `json:"nullPolicy"`
 	IncompletePeriodPolicyOverride IncompletePeriodPolicy      `json:"incompletePeriodPolicyOverride,omitempty"`
 	MeasureVersionIDs              []string                    `json:"measureVersionIds"`
+	BusinessDefinition             string                      `json:"businessDefinition,omitempty"`
 }
 
 type dimensionContractDocument struct {
@@ -193,7 +194,7 @@ func MetricVersionReleaseObject(metric MetricVersion) (ReleaseObject, error) {
 		NonAdditiveDimensions:       append([]string(nil), metric.NonAdditiveDimensions...),
 		ZeroDenominatorPolicy:       metric.ZeroDenominatorPolicy, DisplayPrecision: metric.DisplayPrecision,
 		NullPolicy: metric.NullPolicy, IncompletePeriodPolicyOverride: metric.IncompletePeriodPolicyOverride,
-		MeasureVersionIDs: dependencies,
+		MeasureVersionIDs: dependencies, BusinessDefinition: metric.BusinessDefinition,
 	}
 	return NewReleaseObject(ReleaseObjectMetric, metric.MetricID, metric.ID,
 		SensitivityInternal, contract, metric.ContentHash)
@@ -246,6 +247,36 @@ func QualityRuleReleaseObject(rule QualityRule) (ReleaseObject, error) {
 		},
 		rule.ContentHash,
 	)
+}
+
+// RowAccessPolicyReleaseObject freezes a row access policy into the Release, so
+// which rows a reader may see is pinned by the same immutable manifest as what
+// the numbers mean.
+func RowAccessPolicyReleaseObject(policy RowAccessPolicy) (ReleaseObject, error) {
+	if policy.Status != VersionStatusCertified {
+		return ReleaseObject{}, errors.New("row access policy must be CERTIFIED before release")
+	}
+	if err := policy.Validate(); err != nil {
+		return ReleaseObject{}, err
+	}
+	return NewReleaseObject(
+		ReleaseObjectRowAccessPolicy,
+		policy.ObjectID,
+		policy.ID,
+		SensitivityInternal,
+		rowAccessPolicyContract(policy),
+		policy.ContentHash,
+	)
+}
+
+func rowAccessPolicyContract(policy RowAccessPolicy) map[string]any {
+	return map[string]any{
+		"type": "ROW_ACCESS_POLICY", "rowAccessPolicyId": policy.ObjectID,
+		"versionNo": policy.VersionNo, "modelVersionId": policy.ModelVersionID,
+		"code": policy.Code, "name": policy.Name,
+		"predicateAst":         json.RawMessage(policy.PredicateAST),
+		"subjectAttributeKeys": sortedAdminAliases(policy.SubjectAttributeKeys),
+	}
 }
 
 func BusinessTermReleaseObject(term BusinessTerm) (ReleaseObject, error) {

@@ -11,6 +11,7 @@ export type SemanticResource =
   | 'kpi-bundles'
   | 'relationships'
   | 'quality-rules'
+  | 'row-access-policies'
   | 'members'
   | 'hierarchies'
   | 'certified-examples'
@@ -43,6 +44,9 @@ export type SemanticObject = {
   formulaAst?: Record<string, unknown>
   additivity?: string
   additivitySuggestion?: string
+  // Governed business caliber (SEM-CTX-001): retrieval and LLM context evidence
+  // only, never a binding fact.
+  businessDefinition?: string
   timeGrain?: string
   unit?: string
   currency?: string
@@ -54,6 +58,9 @@ export type SemanticObject = {
   targetVersionId?: string
   ruleAst?: Record<string, unknown>
   severity?: 'INFO' | 'WARNING' | 'BLOCKING'
+  modelVersionId?: string
+  predicateAst?: Record<string, unknown>
+  subjectAttributeKeys?: string[]
   term?: string
   aliases?: string[]
   definition?: string
@@ -101,6 +108,17 @@ export type AdditivityCandidate = {
 export type AdditivityCandidatePage = {
   items: AdditivityCandidate[]
   nextCursor?: string
+}
+
+// Coverage for one subject attribute referenced by a certified row access
+// policy. Fail-closed is silent by design: a policy whose attribute nobody
+// holds denies everyone every row, and this is what makes that visible before
+// the policy is released rather than after the model goes quiet.
+export type RowAccessAttributeCoverage = {
+  attributeKey: string
+  policyCount: number
+  memberCount: number
+  coveredMemberCount: number
 }
 
 export type SemanticWriteResult = {
@@ -380,6 +398,8 @@ export const semanticAPI = {
     if (suggestion) query.set('suggestion', suggestion)
     return apiRequest<AdditivityCandidatePage>(`${semanticBase}/metrics?${query}`)
   },
+  rowAccessCoverage: () =>
+    apiRequest<{ items: RowAccessAttributeCoverage[] }>(`${semanticBase}/row-access-coverage`),
   refreshAdditivitySuggestions: () =>
     apiRequest<AdditivitySuggestionRefreshResult>(`${semanticBase}/metrics/additivity/suggestions`, {
       method: 'POST', body: JSON.stringify({}),

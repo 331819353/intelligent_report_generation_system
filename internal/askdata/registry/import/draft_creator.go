@@ -374,11 +374,12 @@ func createMemberDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, val
 	_, err = tx.Exec(ctx, `INSERT INTO askdata.dimension_members(
 		id,tenant_id,domain_id,member_id,version_no,dimension_version_id,
 		member_key,member_key_hash,canonical_label,parent_member_version_id,
-		sensitivity,valid_from,valid_to,status,content_hash,created_by
-	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,'')::uuid,$11,$12,$13,
-		'DRAFT',$14,$15)`, versionID, batch.TenantID, batch.DomainID, objectID, versionNo,
+		sensitivity,valid_from,valid_to,definition,status,content_hash,created_by
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,'')::uuid,$11,$12,$13,$14,
+		'DRAFT',$15,$16)`, versionID, batch.TenantID, batch.DomainID, objectID, versionNo,
 		dimensionVersionID, values["canonicalValue"], lookupHash, values["displayLabel"],
-		parentVersionID, values["sensitivity"], validFrom, validTo, hash, batch.CreatedBy)
+		parentVersionID, values["sensitivity"], validFrom, validTo,
+		values["definition"], hash, batch.CreatedBy)
 	if err != nil {
 		return DraftReference{}, err
 	}

@@ -28,6 +28,7 @@ const (
 	ReleaseObjectHierarchy       ReleaseObjectType = "HIERARCHY"
 	ReleaseObjectRelationship    ReleaseObjectType = "RELATIONSHIP"
 	ReleaseObjectQualityRule     ReleaseObjectType = "QUALITY_RULE"
+	ReleaseObjectRowAccessPolicy ReleaseObjectType = "ROW_ACCESS_POLICY"
 	ReleaseObjectBusinessTerm    ReleaseObjectType = "BUSINESS_TERM"
 	ReleaseObjectExample         ReleaseObjectType = "CERTIFIED_EXAMPLE"
 	ReleaseObjectTimeContract    ReleaseObjectType = "TIME_CONTRACT"
@@ -139,7 +140,8 @@ func validReleaseObjectType(value ReleaseObjectType) bool {
 	case ReleaseObjectDomain, ReleaseObjectEntity, ReleaseObjectSemanticModel,
 		ReleaseObjectMeasure, ReleaseObjectMetric, ReleaseObjectMetricDimension, ReleaseObjectDimension,
 		ReleaseObjectMember, ReleaseObjectHierarchy, ReleaseObjectRelationship,
-		ReleaseObjectQualityRule, ReleaseObjectBusinessTerm, ReleaseObjectExample,
+		ReleaseObjectQualityRule, ReleaseObjectRowAccessPolicy,
+		ReleaseObjectBusinessTerm, ReleaseObjectExample,
 		ReleaseObjectKPIBundle, ReleaseObjectEvalCase:
 		return true
 	case ReleaseObjectTimeContract:

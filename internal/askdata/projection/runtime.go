@@ -327,7 +327,14 @@ func searchDocumentShape(objectType string) (string, string, bool) {
 }
 
 func searchDocumentText(contract map[string]any) string {
-	keys := []string{"name", "code", "description", "term", "definition", "question", "targetCode", "defaultTimeExpression"}
+	// businessDefinition is the governed metric caliber (SEM-CTX-001). Before it
+	// existed a metric version contract held only IDs and ASTs, so metrics were
+	// never independently searchable and a question phrased in caliber terms
+	// ("含税还是不含税") could not recall the metric it was about.
+	keys := []string{
+		"name", "code", "description", "businessDefinition", "term", "definition",
+		"question", "targetCode", "defaultTimeExpression",
+	}
 	parts := make([]string, 0, len(keys)+8)
 	for _, key := range keys {
 		if value, ok := contract[key].(string); ok && strings.TrimSpace(value) != "" {

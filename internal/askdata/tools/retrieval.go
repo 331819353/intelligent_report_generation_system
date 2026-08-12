@@ -462,11 +462,12 @@ func contractSummary(row registry.ContractRow) (toolhost.SemanticContractSummary
 		return toolhost.SemanticContractSummary{}, false
 	}
 	var document struct {
-		Name          string `json:"name"`
-		Code          string `json:"code"`
-		Definition    string `json:"definition"`
-		Unit          string `json:"unit"`
-		GrainContract string `json:"grainContract"`
+		Name               string `json:"name"`
+		Code               string `json:"code"`
+		Definition         string `json:"definition"`
+		BusinessDefinition string `json:"businessDefinition"`
+		Unit               string `json:"unit"`
+		GrainContract      string `json:"grainContract"`
 	}
 	// A malformed contract document is not fatal: the object still exists in the
 	// release, and the binder can work from identity plus hash alone.
@@ -476,6 +477,13 @@ func contractSummary(row registry.ContractRow) (toolhost.SemanticContractSummary
 		name = document.Code
 	}
 	definition := document.Definition
+	if definition == "" {
+		// A metric version carries its caliber as businessDefinition: what it
+		// counts, what it excludes and when it is the wrong metric (SEM-CTX-001).
+		// That is precisely the context the planner needs to tell two similarly
+		// named metrics apart, so it is preferred over falling back to the name.
+		definition = document.BusinessDefinition
+	}
 	if definition == "" {
 		// Physical measures are release-governed metric candidates but their
 		// executable contract may only carry name, unit and aggregation. Reusing

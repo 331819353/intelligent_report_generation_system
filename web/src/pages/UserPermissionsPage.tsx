@@ -23,6 +23,7 @@ import {
 } from '@phosphor-icons/react'
 import { useEffect, useMemo, useState } from 'react'
 import { AppButton } from '../components/AppButton'
+import { SubjectAttributesPanel } from '../components/SubjectAttributesPanel'
 import { AppShell } from '../components/AppShell'
 import {
   administrationAPI,
@@ -610,6 +611,15 @@ export function UserPermissionsPage() {
                 <div className="user-effective-groups">{capabilityGroups[currentRole].map(group => { const Icon = group.icon; return <div key={group.label}><strong><Icon size={16} weight="duotone" />{group.label}</strong><span>{group.items.map(item => <i key={item}>{item}</i>)}</span></div> })}</div>
                 <p>生效权限将基于该成员的角色与所属领域自动计算。</p>
               </section>
+
+              <SubjectAttributesPanel
+                userID={selected.id}
+                disabled={busy || selected.platformAdministrator}
+                onNotice={(tone, message) => {
+                  if (tone === 'success') { setNotice(message); setError('') }
+                  else { setError(message) }
+                }}
+              />
             </>}
 
             <footer>

@@ -591,6 +591,18 @@ func buildQueryDocument(
 		ID: source.NodeID, Type: "DATASET", DatasetVersionID: string(source.DatasetVersionID),
 		Alias: source.NodeID, Projection: projection, SourceFilters: []dataset.SourceFilter{},
 	}
+	// Row access policies are applied at the source, before any aggregation, so
+	// a reader can never see an excluded row's contribution inside a total. This
+	// is the single place they are applied, and every model that carries one -
+	// anchor or joined - gets its own; a join must never become a way to read
+	// rows of a model the reader could not read directly.
+	anchorRowAccess, err := compileRowAccessPolicies(
+		resolution.Model.RowAccessPolicies, fieldsByID, resolution.subjectAttributes,
+	)
+	if err != nil {
+		return dataset.Document{}, PhysicalSource{}, nil, nil, err
+	}
+	node.SourceFilters = append(node.SourceFilters, anchorRowAccess...)
 	joins, err := buildDatasetJoins(resolution)
 	if err != nil {
 		return dataset.Document{}, PhysicalSource{}, nil, nil, err
@@ -607,11 +619,19 @@ func buildQueryDocument(
 	// Built after the time-reduction block, which appends source filters to the
 	// anchor node. Copying the node before that would silently drop them.
 	nodes := []dataset.Node{node}
+	rowAccessByNode, err := joinedRowAccessFilters(resolution, fieldsByID)
+	if err != nil {
+		return dataset.Document{}, PhysicalSource{}, nil, nil, err
+	}
 	for _, joined := range joinedSources {
+		filters := rowAccessByNode[joined.NodeID]
+		if filters == nil {
+			filters = []dataset.SourceFilter{}
+		}
 		nodes = append(nodes, dataset.Node{
 			ID: joined.NodeID, Type: "DATASET", DatasetVersionID: string(joined.DatasetVersionID),
 			Alias: joined.NodeID, Projection: joinedProjection[joined.NodeID],
-			SourceFilters: []dataset.SourceFilter{},
+			SourceFilters: filters,
 		})
 	}
 	document := dataset.Document{

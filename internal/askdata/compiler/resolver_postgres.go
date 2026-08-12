@@ -55,6 +55,9 @@ func (store *PostgresContractStore) LoadContractSnapshot(
 	if err := loadReleaseProof(ctx, tx, lookup, &snapshot); err != nil {
 		return ContractSnapshot{}, err
 	}
+	if err := loadSubjectAttributes(ctx, tx, lookup, &snapshot); err != nil {
+		return ContractSnapshot{}, err
+	}
 	if err := loadModelContract(ctx, tx, lookup, lookup.ModelVersionID, &snapshot.Model); err != nil {
 		return ContractSnapshot{}, err
 	}
@@ -275,6 +278,86 @@ func loadReleaseProof(ctx context.Context, tx pgx.Tx, lookup ContractLookup, sna
 	return nil
 }
 
+// loadSubjectAttributes reads the READING actor's administered attributes.
+//
+// The database function refuses to resolve anyone other than the session actor,
+// so this cannot become a way to compile a query under someone else's scope. An
+// actor with no attributes at all is normal and not an error: it simply means
+// every row access policy that references one will deny their rows.
+func loadSubjectAttributes(
+	ctx context.Context,
+	tx pgx.Tx,
+	lookup ContractLookup,
+	snapshot *ContractSnapshot,
+) error {
+	rows, err := tx.Query(ctx, `SELECT attribute_key,attribute_values
+		FROM askdata.resolve_subject_attributes($1,$2)`,
+		lookup.Scope.TenantID, lookup.Scope.ActorID)
+	if err != nil {
+		return fmt.Errorf("resolve subject attributes: %w", err)
+	}
+	defer rows.Close()
+	resolved := map[string][]string{}
+	for rows.Next() {
+		var key string
+		var values []string
+		if err := rows.Scan(&key, &values); err != nil {
+			return fmt.Errorf("resolve subject attributes: %w", err)
+		}
+		resolved[key] = values
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("resolve subject attributes: %w", err)
+	}
+	snapshot.subjectAttributes = resolved
+	return nil
+}
+
+// loadRowAccessPolicies reads the model's release-pinned row access predicates.
+//
+// Only policies present in the SAME release object set as the model are used,
+// so a policy cannot be added or removed underneath a pinned run, and a
+// certified-but-unreleased policy can never silently widen access.
+func loadRowAccessPolicies(
+	ctx context.Context,
+	tx pgx.Tx,
+	lookup ContractLookup,
+	modelVersionID askdata.ID,
+	target *ModelContract,
+) error {
+	rows, err := tx.Query(ctx, `SELECT policy.id::text,policy.code::text,policy.content_hash,
+		policy.predicate_ast,policy.subject_attribute_keys,object.content_hash
+	FROM askdata.release_objects AS object
+	JOIN askdata.row_access_policies AS policy
+	  ON policy.tenant_id=object.tenant_id AND policy.domain_id=object.domain_id
+	 AND policy.id=object.object_version_id
+	WHERE object.tenant_id=$1 AND object.domain_id=$2 AND object.release_id=$3
+	  AND object.object_type='ROW_ACCESS_POLICY'
+	  AND policy.model_version_id=$4 AND policy.status='CERTIFIED'
+	ORDER BY policy.code,policy.id`,
+		lookup.Scope.TenantID, lookup.DomainID, lookup.Scope.Release.ReleaseID, modelVersionID)
+	if err != nil {
+		return fmt.Errorf("load row access policies: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var policy RowAccessPolicyContract
+		var manifestHash string
+		if err := rows.Scan(&policy.PolicyVersionID, &policy.Code, &policy.ContentHash,
+			&policy.PredicateAST, &policy.SubjectAttributeKeys, &manifestHash); err != nil {
+			return fmt.Errorf("load row access policies: %w", err)
+		}
+		// A policy whose stored content drifted from the manifest must not be
+		// applied in either direction: silently using the drifted predicate could
+		// widen access, and silently skipping it definitely would.
+		if manifestHash != string(policy.ContentHash) {
+			return fmt.Errorf("%w: row access policy content drifted from the release manifest", ErrContractUnavailable)
+		}
+		target.RowAccessPolicies = append(target.RowAccessPolicies, policy)
+	}
+	return rows.Err()
+}
+
 func loadModelContract(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -357,6 +440,9 @@ func loadModelContract(
 	if primaryTimeFieldID != "" {
 		value := askdata.ID(primaryTimeFieldID)
 		target.PrimaryTimeFieldID = &value
+	}
+	if err := loadRowAccessPolicies(ctx, tx, lookup, modelVersionID, target); err != nil {
+		return err
 	}
 	target.GrainContract, err = canonicalObject(target.GrainContract)
 	if err != nil {

@@ -822,3 +822,75 @@
   .semantic-flow li { padding-block: 8px; }
   .semantic-summary article { padding-block: 10px; }
 }
+
+/* Governed metric caliber (SEM-CTX-001): prose for people and for LLM context,
+   edited only while the metric version is still a draft. */
+.semantic-detail-caliber { display: grid; gap: 6px; border: 1px solid #dce5ef; border-radius: 9px; padding: 12px 14px; background: #fbfcfe; }
+.semantic-detail-caliber > strong { color: #2d3f58; font-size: 14px; }
+.semantic-detail-caliber > small { color: #7c8a9d; font-size: 12px; line-height: 1.55; }
+.semantic-detail-caliber > p { margin: 0; color: #4a5c74; font-size: 13px; line-height: 1.65; }
+.semantic-detail-caliber textarea { min-height: 96px; width: 100%; resize: vertical; border: 1px solid #cdd8e5; border-radius: 7px; outline: 0; padding: 9px 11px; background: #fff; color: #34455d; font: inherit; font-size: 13px; line-height: 1.6; }
+.semantic-detail-caliber > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.semantic-detail-caliber > div > span { color: #8b98aa; font-size: 11px; }
+
+/* Row access policies (SEM-CTX-001). The coverage strip exists because the
+   fail-closed rule is silent: an attribute nobody holds denies everyone. */
+.semantic-row-access { margin-top: 12px; overflow: hidden; border: 1px solid #d8e2ed; border-radius: 10px; background: #fff; }
+.semantic-row-access > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e6ecf3; padding: 11px 14px; background: #fbfcfe; }
+.semantic-row-access > header > div { min-width: 0; display: grid; gap: 3px; }
+.semantic-row-access > header span { color: #2471df; font-size: 11px; font-weight: 760; }
+.semantic-row-access h3 { margin: 0; color: #304159; font-size: 16px; }
+.semantic-row-access > header p { max-width: 78ch; margin: 0; color: #7c8a9d; font-size: 12px; line-height: 1.6; }
+.semantic-row-access > header p strong { color: #9a3d3d; }
+.semantic-row-access-coverage { display: flex; align-items: flex-start; gap: 10px; margin: 12px 14px 0; border: 1px solid #abdac9; border-radius: 9px; padding: 11px 13px; background: #f2fbf7; }
+.semantic-row-access-coverage.is-warning { border-color: #f0c9a4; background: #fff8f0; }
+.semantic-row-access-coverage > svg { flex: none; margin-top: 1px; color: #087654; }
+.semantic-row-access-coverage.is-warning > svg { color: #b4711a; }
+.semantic-row-access-coverage > div { min-width: 0; display: grid; gap: 6px; }
+.semantic-row-access-coverage strong { color: #23503f; font-size: 14px; }
+.semantic-row-access-coverage.is-warning strong { color: #7d4d12; }
+.semantic-row-access-coverage ul { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.semantic-row-access-coverage li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
+.semantic-row-access-coverage code { border-radius: 4px; padding: 1px 6px; background: #eaf3ff; color: #24446f; font-size: 11px; }
+.semantic-row-access-coverage li span { color: #6b7f92; }
+.semantic-row-access-coverage li em { color: #0b7a56; font-style: normal; font-weight: 700; }
+.semantic-row-access-coverage li.is-warning em { color: #b4711a; }
+.semantic-row-access-coverage small { color: #5f7a6e; font-size: 11px; line-height: 1.55; }
+.semantic-row-access-coverage.is-warning small { color: #8a6a44; }
+.semantic-row-access-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0; padding: 12px 14px; list-style: none; }
+.semantic-row-access-list li { min-width: 0; display: grid; align-content: start; gap: 9px; border: 1px solid #dce5ef; border-radius: 9px; padding: 11px 12px; background: #fbfcfe; }
+.semantic-row-access-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.semantic-row-access-head strong { overflow: hidden; color: #2d3f58; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-row-access-list dl { display: grid; gap: 4px; margin: 0; }
+.semantic-row-access-list dl > div { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.semantic-row-access-list dt { flex: none; color: #8391a3; font-size: 11px; }
+.semantic-row-access-list dd { min-width: 0; overflow: hidden; margin: 0; color: #3b4d67; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-row-access-list footer { display: flex; flex-wrap: wrap; gap: 6px; }
+.semantic-row-access-dialog { width: min(720px, 100%); max-height: 86vh; overflow: auto; border-radius: 12px; background: #fff; }
+.semantic-row-access-dialog > header { position: sticky; top: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; border-bottom: 1px solid #e6ecf3; padding: 14px 18px; background: #fff; }
+.semantic-row-access-dialog > header > div { display: grid; gap: 2px; }
+.semantic-row-access-dialog > header span { color: #2471df; font-size: 11px; font-weight: 760; }
+.semantic-row-access-dialog h2 { margin: 0; color: #23324a; font-size: 18px; }
+.semantic-row-access-dialog > header button { border: 0; border-radius: 7px; padding: 5px; background: transparent; color: #7b8a9d; cursor: pointer; }
+.semantic-row-access-form { display: grid; gap: 12px; padding: 16px 18px; }
+.semantic-row-access-form label { display: grid; gap: 4px; }
+.semantic-row-access-form label > span { color: #4f6077; font-size: 12px; font-weight: 700; }
+.semantic-row-access-form input,
+.semantic-row-access-form select { min-height: 38px; width: 100%; border: 1px solid #cdd8e5; border-radius: 7px; outline: 0; padding: 0 10px; background: #fff; color: #34455d; font: inherit; font-size: 13px; }
+.semantic-row-access-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.semantic-row-access-conditions { display: grid; gap: 10px; border: 1px solid #dce5ef; border-radius: 9px; padding: 12px; background: #fbfcfe; }
+.semantic-row-access-conditions > header { display: grid; gap: 2px; }
+.semantic-row-access-conditions > header strong { color: #2d3f58; font-size: 13px; }
+.semantic-row-access-conditions > header small { color: #7c8a9d; font-size: 11px; line-height: 1.5; }
+.semantic-row-access-condition { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; gap: 8px; border-top: 1px solid #edf1f5; padding-top: 10px; }
+.semantic-row-access-condition > small { grid-column: 1 / -1; color: #8391a3; font-size: 11px; }
+.semantic-row-access-error { display: flex; align-items: center; gap: 7px; margin: 0; border: 1px solid #fda29b; border-radius: 8px; padding: 9px 11px; background: #fffbfa; color: #b42318; font-size: 12px; }
+.semantic-row-access-dialog > footer { position: sticky; bottom: 0; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid #e6ecf3; padding: 12px 18px; background: #fff; }
+.semantic-row-access-confirm { width: min(440px, 100%); display: grid; gap: 10px; border-radius: 12px; padding: 18px 20px; background: #fff; }
+.semantic-row-access-confirm strong { color: #101828; font-size: 16px; }
+.semantic-row-access-confirm p { margin: 0; color: #667085; font-size: 12px; line-height: 1.65; }
+.semantic-row-access-confirm > footer { display: flex; justify-content: flex-end; gap: 8px; }
+@media (max-width: 1280px) {
+  .semantic-row-access-list { grid-template-columns: minmax(0, 1fr); }
+  .semantic-row-access-condition { grid-template-columns: minmax(0, 1fr); }
+}

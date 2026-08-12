@@ -189,6 +189,32 @@ func loadCertifiedCoreReleaseObjectsTx(ctx context.Context, tx pgx.Tx, domainID 
 	}
 	bundleRows.Close()
 
+	// Row access policies travel with the release so which rows a reader may see
+	// is pinned by the same manifest as what the numbers mean. A release that
+	// dropped them would silently widen access.
+	policyRows, err := tx.Query(ctx, rowAccessPolicyAdminSelect+` WHERE domain_id=$1 AND status='CERTIFIED' ORDER BY id`, domainID)
+	if err != nil {
+		return nil, err
+	}
+	for policyRows.Next() {
+		var value RowAccessPolicy
+		if err := scanRowAccessPolicy(policyRows, &value); err != nil {
+			policyRows.Close()
+			return nil, err
+		}
+		object, err := RowAccessPolicyReleaseObject(value)
+		if err != nil {
+			policyRows.Close()
+			return nil, err
+		}
+		objects = append(objects, object)
+	}
+	if err := policyRows.Err(); err != nil {
+		policyRows.Close()
+		return nil, err
+	}
+	policyRows.Close()
+
 	// Certified quality rules travel with the release so a run can resolve what
 	// the release promised to check, not what happens to be certified now.
 	qualityRows, err := tx.Query(ctx, qualityRuleAdminSelect+` WHERE domain_id=$1 AND status='CERTIFIED' ORDER BY id`, domainID)

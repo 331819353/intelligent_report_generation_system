@@ -572,6 +572,32 @@ func createDraftTx(
 			return AdminWriteResult{}, err
 		}
 		return versionWriteResult(resource, bundle.VersionIdentity), nil
+	case AdminResourceRowAccessPolicy:
+		input := payload.(*RowAccessPolicyDraftInput)
+		identity, err := newVersionIdentity(scope, input.VersionedDraftInput, requestID, resource)
+		if err != nil {
+			return AdminWriteResult{}, err
+		}
+		identity.ID = recordID
+		policy := RowAccessPolicy{VersionIdentity: identity,
+			ModelVersionID: input.ModelVersionID, Code: input.Code, Name: input.Name,
+			PredicateAST: input.PredicateAST,
+		}
+		// The referenced attribute set is derived from the predicate, never
+		// accepted from the caller: the two must agree by construction.
+		keys, err := ParseRowAccessPredicate(policy.PredicateAST)
+		if err != nil {
+			return AdminWriteResult{}, fmt.Errorf("%w: %w", ErrRegistryInvalidRequest, err)
+		}
+		policy.SubjectAttributeKeys = keys
+		policy.ContentHash = rowAccessPolicyContentHash(policy)
+		if err := policy.Validate(); err != nil {
+			return AdminWriteResult{}, err
+		}
+		if err := insertRowAccessPolicyAdminTx(ctx, tx, &policy); err != nil {
+			return AdminWriteResult{}, err
+		}
+		return versionWriteResult(resource, policy.VersionIdentity), nil
 	case AdminResourceQualityRule:
 		input := payload.(*QualityRuleDraftInput)
 		identity, err := newVersionIdentity(scope, input.VersionedDraftInput, requestID, resource)
@@ -806,14 +832,15 @@ func updateDraftTx(
 			additivity_suggestion=NULLIF($13,'')::text,
 			additivity_confirmed_by=NULLIF($14,'')::uuid,additivity_confirmed_at=$15,
 			null_policy=$16,incomplete_period_policy_override=NULLIF($17,'')::text,
-			content_hash=$18,owner_id=$19
-			WHERE id=$20 AND domain_id=$21 AND status='DRAFT' AND updated_at=$22`,
+			business_definition=$18,content_hash=$19,owner_id=$20
+			WHERE id=$21 AND domain_id=$22 AND status='DRAFT' AND updated_at=$23`,
 			current.SemanticModelVersionID, current.FormulaAST, current.DefaultFiltersAST,
 			current.Unit, current.Currency, current.TimeGrain, current.Additivity,
 			current.SemiAdditiveTimeAggregation, current.AggregationRestriction,
 			current.NonAdditiveDimensions, current.ZeroDenominatorPolicy, current.DisplayPrecision,
 			current.AdditivitySuggestion, current.AdditivityConfirmedBy, current.AdditivityConfirmedAt,
-			current.NullPolicy, current.IncompletePeriodPolicyOverride, current.ContentHash, current.OwnerID,
+			current.NullPolicy, current.IncompletePeriodPolicyOverride, current.BusinessDefinition,
+			current.ContentHash, current.OwnerID,
 			current.ID, current.DomainID, input.ExpectedUpdatedAt)
 		if err != nil {
 			return AdminWriteResult{}, err
@@ -957,6 +984,35 @@ func updateDraftTx(
 			RETURNING updated_at`, items, current.DefaultDimensionVersionIDs,
 			current.DefaultTimeExpression, current.DefaultChartTypes, current.RoleMapping,
 			current.ApplicableQuestionPatterns, current.ContentHash, current.OwnerID,
+			current.ID, current.DomainID, input.ExpectedUpdatedAt).Scan(&current.UpdatedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return AdminWriteResult{}, ErrRegistryVersionConflict
+		}
+		return versionWriteResult(resource, current.VersionIdentity), err
+	case AdminResourceRowAccessPolicy:
+		current, input := existing.(RowAccessPolicy), payload.(*RowAccessPolicyDraftInput)
+		if err := validateVersionedUpdate(input.VersionedDraftInput, current.VersionIdentity); err != nil {
+			return AdminWriteResult{}, err
+		}
+		current.ModelVersionID, current.Code = input.ModelVersionID, input.Code
+		current.Name, current.PredicateAST = input.Name, input.PredicateAST
+		current.OwnerID = updatedAdminOwner(input.OwnerID, current.OwnerID)
+		keys, err := ParseRowAccessPredicate(current.PredicateAST)
+		if err != nil {
+			return AdminWriteResult{}, fmt.Errorf("%w: %w", ErrRegistryInvalidRequest, err)
+		}
+		current.SubjectAttributeKeys = keys
+		current.ContentHash = rowAccessPolicyContentHash(current)
+		if err := current.Validate(); err != nil {
+			return AdminWriteResult{}, err
+		}
+		err = tx.QueryRow(ctx, `UPDATE askdata.row_access_policies SET
+			model_version_id=$1,code=$2,name=$3,predicate_ast=$4,
+			subject_attribute_keys=$5,content_hash=$6,owner_id=$7,updated_at=now()
+			WHERE id=$8 AND domain_id=$9 AND status='DRAFT' AND updated_at=$10
+			RETURNING updated_at`,
+			current.ModelVersionID, current.Code, current.Name, current.PredicateAST,
+			current.SubjectAttributeKeys, current.ContentHash, current.OwnerID,
 			current.ID, current.DomainID, input.ExpectedUpdatedAt).Scan(&current.UpdatedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return AdminWriteResult{}, ErrRegistryVersionConflict
@@ -1144,6 +1200,10 @@ func getObjectTx(
 		var value KPIBundle
 		err = scanKPIBundle(tx.QueryRow(ctx, kpiBundleAdminSelect+` WHERE version.id=$1 AND version.domain_id=$2 AND ($3::text IS NULL OR version.status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
 		return value, adminNoRows(err)
+	case AdminResourceRowAccessPolicy:
+		var value RowAccessPolicy
+		err = scanRowAccessPolicy(tx.QueryRow(ctx, rowAccessPolicyAdminSelect+` WHERE id=$1 AND domain_id=$2 AND ($3::text IS NULL OR status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
+		return value, adminNoRows(err)
 	case AdminResourceQualityRule:
 		var value QualityRule
 		err = scanQualityRule(tx.QueryRow(ctx, qualityRuleAdminSelect+` WHERE id=$1 AND domain_id=$2 AND ($3::text IS NULL OR status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
@@ -1302,6 +1362,21 @@ func listObjectsTx(
 			items = append(items, item)
 		}
 		return finishAdminPage(items, limit, func(value KPIBundle) (time.Time, string) { return value.UpdatedAt, value.ID }, rows.Err())
+	case AdminResourceRowAccessPolicy:
+		rows, err := tx.Query(ctx, rowAccessPolicyAdminSelect+suffix, args...)
+		if err != nil {
+			return AdminPage{}, err
+		}
+		defer rows.Close()
+		items := []RowAccessPolicy{}
+		for rows.Next() {
+			var item RowAccessPolicy
+			if err := scanRowAccessPolicy(rows, &item); err != nil {
+				return AdminPage{}, err
+			}
+			items = append(items, item)
+		}
+		return finishAdminPage(items, limit, func(value RowAccessPolicy) (time.Time, string) { return value.UpdatedAt, value.ID }, rows.Err())
 	case AdminResourceQualityRule:
 		rows, err := tx.Query(ctx, qualityRuleAdminSelect+suffix, args...)
 		if err != nil {
@@ -1453,7 +1528,8 @@ const metricVersionAdminSelect = `SELECT
 	version.additivity_confirmed_at,version.null_policy,
 	COALESCE(version.incomplete_period_policy_override,''),
 	COALESCE(array_agg(link.measure_version_id::text ORDER BY link.ordinal)
-		FILTER(WHERE link.measure_version_id IS NOT NULL),'{}'::text[])
+		FILTER(WHERE link.measure_version_id IS NOT NULL),'{}'::text[]),
+	version.business_definition
 	FROM askdata.metric_versions AS version
 	LEFT JOIN askdata.metric_version_measures AS link
 	  ON link.metric_version_id=version.id AND link.tenant_id=version.tenant_id`
@@ -1466,7 +1542,7 @@ const metricVersionCoreAdminSelect = `SELECT
 	COALESCE(aggregation_restriction,''),non_additive_dimensions,
 	zero_denominator_policy,display_precision,COALESCE(additivity_suggestion,''),
 	COALESCE(additivity_confirmed_by::text,''),additivity_confirmed_at,null_policy,
-	COALESCE(incomplete_period_policy_override,'')
+	COALESCE(incomplete_period_policy_override,''),business_definition
 	FROM askdata.metric_versions `
 
 const dimensionAdminSelect = `SELECT
@@ -1516,7 +1592,7 @@ const dimensionMemberAdminSelect = `SELECT
 	id::text,tenant_id::text,domain_id::text,member_id::text,version_no,status,
 	content_hash,created_by::text,created_at,updated_at,dimension_version_id::text,
 	member_key,member_key_hash,canonical_label,
-	COALESCE(parent_member_version_id::text,''),sensitivity
+	COALESCE(parent_member_version_id::text,''),sensitivity,definition
 	FROM askdata.dimension_members`
 
 const hierarchyAdminSelect = `SELECT
@@ -1580,7 +1656,7 @@ func scanMetricVersion(row rowScanner, value *MetricVersion) error {
 		&value.NonAdditiveDimensions, &value.ZeroDenominatorPolicy, &value.DisplayPrecision,
 		&value.AdditivitySuggestion, &value.AdditivityConfirmedBy, &value.AdditivityConfirmedAt,
 		&value.NullPolicy, &value.IncompletePeriodPolicyOverride,
-		&value.MeasureVersionIDs)
+		&value.MeasureVersionIDs, &value.BusinessDefinition)
 	value.ObjectID = value.MetricID
 	return err
 }
@@ -1593,7 +1669,7 @@ func scanMetricVersionCore(row rowScanner, value *MetricVersion) error {
 		&value.Additivity, &value.SemiAdditiveTimeAggregation, &value.AggregationRestriction,
 		&value.NonAdditiveDimensions, &value.ZeroDenominatorPolicy, &value.DisplayPrecision,
 		&value.AdditivitySuggestion, &value.AdditivityConfirmedBy, &value.AdditivityConfirmedAt,
-		&value.NullPolicy, &value.IncompletePeriodPolicyOverride)
+		&value.NullPolicy, &value.IncompletePeriodPolicyOverride, &value.BusinessDefinition)
 	value.ObjectID = value.MetricID
 	return err
 }
@@ -1637,7 +1713,7 @@ func scanDimensionMember(row rowScanner, value *DimensionMember) error {
 		&value.VersionNo, &value.Status, &value.ContentHash, &value.OwnerID,
 		&value.CreatedAt, &value.UpdatedAt, &value.DimensionVersionID,
 		&value.MemberKey, &value.MemberKeyHash, &value.CanonicalLabel,
-		&value.ParentMemberVersionID, &value.Sensitivity)
+		&value.ParentMemberVersionID, &value.Sensitivity, &value.Definition)
 }
 
 func scanHierarchy(row rowScanner, value *Hierarchy) error {
@@ -1660,6 +1736,34 @@ func scanMetricDimension(row rowScanner, value *MetricDimension) error {
 		&value.VersionNo, &value.Status, &value.ContentHash, &value.OwnerID,
 		&value.CreatedAt, &value.UpdatedAt, &value.MetricVersionID,
 		&value.DimensionVersionID, &value.Compatible, &value.Role)
+}
+
+const rowAccessPolicyAdminSelect = `SELECT
+	id::text,tenant_id::text,domain_id::text,policy_id::text,version_no,status,
+	content_hash,owner_id::text,created_at,updated_at,model_version_id::text,
+	code::text,name,predicate_ast,subject_attribute_keys
+	FROM askdata.row_access_policies`
+
+func scanRowAccessPolicy(row rowScanner, value *RowAccessPolicy) error {
+	return row.Scan(&value.ID, &value.TenantID, &value.DomainID, &value.ObjectID,
+		&value.VersionNo, &value.Status, &value.ContentHash, &value.OwnerID,
+		&value.CreatedAt, &value.UpdatedAt, &value.ModelVersionID, &value.Code,
+		&value.Name, &value.PredicateAST, &value.SubjectAttributeKeys)
+}
+
+func insertRowAccessPolicyAdminTx(ctx context.Context, tx pgx.Tx, value *RowAccessPolicy) error {
+	return tx.QueryRow(ctx, `INSERT INTO askdata.row_access_policies(
+		id,tenant_id,domain_id,policy_id,version_no,model_version_id,code,name,
+		predicate_ast,subject_attribute_keys,status,content_hash,owner_id
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'DRAFT',$11,$12)
+	RETURNING created_at,updated_at`, value.ID, value.TenantID, value.DomainID,
+		value.ObjectID, value.VersionNo, value.ModelVersionID, value.Code, value.Name,
+		value.PredicateAST, value.SubjectAttributeKeys, value.ContentHash, value.OwnerID).
+		Scan(&value.CreatedAt, &value.UpdatedAt)
+}
+
+func rowAccessPolicyContentHash(value RowAccessPolicy) askdata.ContentHash {
+	return contentHashForContract(rowAccessPolicyContract(value))
 }
 
 const qualityRuleAdminSelect = `SELECT
@@ -1751,17 +1855,17 @@ func insertMetricVersionAdminTx(ctx context.Context, tx pgx.Tx, value *MetricVer
 		semi_additive_time_aggregation,aggregation_restriction,non_additive_dimensions,
 		zero_denominator_policy,display_precision,additivity_suggestion,
 		additivity_confirmed_by,additivity_confirmed_at,null_policy,
-		incomplete_period_policy_override,status,content_hash,owner_id
+		incomplete_period_policy_override,business_definition,status,content_hash,owner_id
 	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,'')::text,$11,NULLIF($12,'')::text,
 		NULLIF($13,'')::text,NULLIF($14,'')::text,$15,$16,$17,NULLIF($18,'')::text,
-		NULLIF($19,'')::uuid,$20,$21,NULLIF($22,'')::text,'DRAFT',$23,$24)
+		NULLIF($19,'')::uuid,$20,$21,NULLIF($22,'')::text,$23,'DRAFT',$24,$25)
 	RETURNING created_at,updated_at`, value.ID, value.TenantID, value.DomainID, value.MetricID,
 		value.VersionNo, value.SemanticModelVersionID, value.FormulaAST,
 		value.DefaultFiltersAST, value.Unit, value.Currency, value.TimeGrain, value.Additivity,
 		value.SemiAdditiveTimeAggregation, value.AggregationRestriction, value.NonAdditiveDimensions,
 		value.ZeroDenominatorPolicy, value.DisplayPrecision, value.AdditivitySuggestion,
 		value.AdditivityConfirmedBy, value.AdditivityConfirmedAt, value.NullPolicy,
-		value.IncompletePeriodPolicyOverride, value.ContentHash,
+		value.IncompletePeriodPolicyOverride, value.BusinessDefinition, value.ContentHash,
 		value.OwnerID).Scan(&value.CreatedAt, &value.UpdatedAt); err != nil {
 		return err
 	}
@@ -1950,6 +2054,7 @@ func metricVersionContentHash(metric MetricVersion) askdata.ContentHash {
 		NullPolicy:                     metric.NullPolicy,
 		IncompletePeriodPolicyOverride: metric.IncompletePeriodPolicyOverride,
 		MeasureVersionIDs:              dependencies,
+		BusinessDefinition:             metric.BusinessDefinition,
 	}
 	return contentHashForContract(contract)
 }
@@ -2069,6 +2174,8 @@ func adminTable(resource AdminResource) (string, error) {
 		return "business_term_versions", nil
 	case AdminResourceKPIBundle:
 		return "kpi_bundle_versions", nil
+	case AdminResourceRowAccessPolicy:
+		return "row_access_policies", nil
 	case AdminResourceQualityRule:
 		return "quality_rules", nil
 	case AdminResourceRelationship:

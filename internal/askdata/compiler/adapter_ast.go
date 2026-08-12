@@ -20,6 +20,7 @@ type semanticAST struct {
 	MeasureVersionID askdata.ID      `json:"measureVersionId,omitempty"`
 	MeasureID        askdata.ID      `json:"measureId,omitempty"`
 	TargetType       string          `json:"targetType,omitempty"`
+	AttributeKey     string          `json:"attributeKey,omitempty"`
 	Value            json.RawMessage `json:"value,omitempty"`
 	Argument         *semanticAST    `json:"argument,omitempty"`
 	Arguments        []semanticAST   `json:"arguments,omitempty"`
@@ -32,7 +33,7 @@ type semanticAST struct {
 
 var semanticASTKeys = map[string]bool{
 	"type": true, "fieldId": true, "measureVersionId": true, "measureId": true,
-	"targetType": true, "value": true, "argument": true, "arguments": true,
+	"targetType": true, "attributeKey": true, "value": true, "argument": true, "arguments": true,
 	"left": true, "right": true, "lower": true, "upper": true,
 }
 
@@ -65,9 +66,17 @@ const (
 	astMeasure astMode = iota + 1
 	astMetric
 	astFilter
+	// astRowPolicy is astFilter plus SUBJECT_ATTRIBUTE. It is a distinct mode so
+	// a reader attribute can never appear in a metric formula or a default
+	// filter, where it would silently make a governed number reader-dependent.
+	astRowPolicy
 )
 
 type astTranslator struct {
+	// subjectAttributes holds the reading actor's administered values. A key
+	// that is absent is NOT an empty list: it means the reader has no grant, and
+	// the policy referencing it must deny every row.
+	subjectAttributes map[string][]string
 	fields            map[askdata.ID]FieldContract
 	measures          map[askdata.ID]dataset.Expression
 	measureVersions   map[askdata.ID]askdata.ID
@@ -335,6 +344,13 @@ func validateSemanticAST(node semanticAST, depth int) error {
 		if err := exact([]string{"type"}); err != nil {
 			return err
 		}
+	case "SUBJECT_ATTRIBUTE":
+		if err := exact([]string{"type", "attributeKey"}); err != nil {
+			return err
+		}
+		if !subjectAttributeKeyPattern.MatchString(node.AttributeKey) {
+			return errors.New("SUBJECT_ATTRIBUTE requires a stable attribute key")
+		}
 	case "ARRAY":
 		if err := exact([]string{"type", "arguments"}); err != nil {
 			return err
@@ -395,7 +411,11 @@ func validateSemanticAST(node semanticAST, depth int) error {
 		if node.Left == nil || node.Right == nil {
 			return fmt.Errorf("%s requires both operands", node.Type)
 		}
-		if (node.Type == "IN" || node.Type == "NOT_IN") && node.Right.Type != "ARRAY" {
+		// SUBJECT_ATTRIBUTE resolves to an ARRAY of the reader's granted values,
+		// so it is the one non-literal collection an IN may compare against.
+		// Translation still refuses it outside a row access policy.
+		if (node.Type == "IN" || node.Type == "NOT_IN") &&
+			node.Right.Type != "ARRAY" && node.Right.Type != "SUBJECT_ATTRIBUTE" {
 			return fmt.Errorf("%s right operand must be ARRAY", node.Type)
 		}
 		children = append(children, node.Left, node.Right)
@@ -451,7 +471,7 @@ func (translator *astTranslator) translate(node semanticAST, mode astMode, depth
 		}
 		return dataset.Expression{Type: "LITERAL", Value: value}, nil
 	case "TRUE", "FALSE":
-		if mode != astFilter {
+		if mode != astFilter && mode != astRowPolicy {
 			return dataset.Expression{}, fmt.Errorf("%s is allowed only in a default filter", node.Type)
 		}
 		left := dataset.Expression{Type: "LITERAL", Value: float64(1)}
@@ -461,8 +481,29 @@ func (translator *astTranslator) translate(node semanticAST, mode astMode, depth
 		}
 		right := dataset.Expression{Type: "LITERAL", Value: rightValue}
 		return dataset.Expression{Type: "EQUALS", Left: &left, Right: &right}, nil
+	case "SUBJECT_ATTRIBUTE":
+		if mode != astRowPolicy {
+			return dataset.Expression{}, errors.New("SUBJECT_ATTRIBUTE is allowed only in a row access policy")
+		}
+		values, granted := translator.subjectAttributes[node.AttributeKey]
+		if !granted || len(values) == 0 {
+			// Fail closed. An ungranted attribute is not "no restriction": it is
+			// a reader the policy has nothing to match, so they get no rows. The
+			// caller turns this sentinel into a FALSE predicate.
+			return dataset.Expression{}, errSubjectAttributeUnmatched
+		}
+		if len(values) > 1000 {
+			return dataset.Expression{}, errors.New("subject attribute exceeds the bindable value limit")
+		}
+		arguments := make([]dataset.Expression, 0, len(values))
+		for _, value := range values {
+			// Values are bound as literals, never interpolated, exactly like any
+			// other governed literal reaching the query compiler.
+			arguments = append(arguments, dataset.Expression{Type: "LITERAL", Value: value})
+		}
+		return dataset.Expression{Type: "ARRAY", Arguments: arguments}, nil
 	case "ARRAY":
-		if mode != astFilter {
+		if mode != astFilter && mode != astRowPolicy {
 			return dataset.Expression{}, errors.New("ARRAY is allowed only in a default filter")
 		}
 		arguments, err := translator.translateArguments(node.Arguments, mode, depth)
@@ -499,7 +540,7 @@ func (translator *astTranslator) translate(node semanticAST, mode astMode, depth
 		argument, err := translator.translate(*node.Argument, mode, depth+1)
 		return dataset.Expression{Type: "CAST", TargetType: node.TargetType, Argument: &argument}, err
 	case "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "IN", "NOT_IN":
-		if mode != astFilter {
+		if mode != astFilter && mode != astRowPolicy {
 			return dataset.Expression{}, fmt.Errorf("%s is allowed only in a default filter", node.Type)
 		}
 		left, err := translator.translate(*node.Left, mode, depth+1)
@@ -509,7 +550,7 @@ func (translator *astTranslator) translate(node semanticAST, mode astMode, depth
 		right, err := translator.translate(*node.Right, mode, depth+1)
 		return dataset.Expression{Type: node.Type, Left: &left, Right: &right}, err
 	case "BETWEEN":
-		if mode != astFilter {
+		if mode != astFilter && mode != astRowPolicy {
 			return dataset.Expression{}, errors.New("BETWEEN is allowed only in a default filter")
 		}
 		left, err := translator.translate(*node.Left, mode, depth+1)
@@ -523,13 +564,13 @@ func (translator *astTranslator) translate(node semanticAST, mode astMode, depth
 		upper, err := translator.translate(*node.Upper, mode, depth+1)
 		return dataset.Expression{Type: "BETWEEN", Left: &left, Lower: &lower, Upper: &upper}, err
 	case "IS_NULL", "IS_NOT_NULL", "NOT":
-		if mode != astFilter {
+		if mode != astFilter && mode != astRowPolicy {
 			return dataset.Expression{}, fmt.Errorf("%s is allowed only in a default filter", node.Type)
 		}
 		argument, err := translator.translate(*node.Argument, mode, depth+1)
 		return dataset.Expression{Type: node.Type, Argument: &argument}, err
 	case "AND", "OR":
-		if mode != astFilter {
+		if mode != astFilter && mode != astRowPolicy {
 			return dataset.Expression{}, fmt.Errorf("%s is allowed only in a default filter", node.Type)
 		}
 		arguments, err := translator.translateArguments(node.Arguments, mode, depth)

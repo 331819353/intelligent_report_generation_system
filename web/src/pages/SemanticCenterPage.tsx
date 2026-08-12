@@ -44,6 +44,7 @@ import { AppShell } from "../components/AppShell";
 import { SemanticOperationsPanel } from "../components/semantic/SemanticOperationsPanel";
 import { AdditivityBacklogPanel } from "../components/semantic/AdditivityBacklogPanel";
 import { QualityRulesPanel } from "../components/semantic/QualityRulesPanel";
+import { RowAccessPoliciesPanel } from "../components/semantic/RowAccessPoliciesPanel";
 import { RequestError } from "../lib/api";
 import { currentDomain, currentDomainID } from "../lib/domain-context";
 import {
@@ -937,6 +938,7 @@ export function SemanticCenterPage() {
     EvaluationSetCatalogItem[]
   >([]);
   const [qualityRules, setQualityRules] = useState<SemanticObject[]>([]);
+  const [rowAccessPolicies, setRowAccessPolicies] = useState<SemanticObject[]>([]);
   const [readiness, setReadiness] = useState<AdditivityReadiness>(
     designSnapshot
       ? snapshotReadiness
@@ -984,6 +986,7 @@ export function SemanticCenterPage() {
   const [evaluationReviewAcknowledged, setEvaluationReviewAcknowledged] =
     useState(false);
   const [detailObject, setDetailObject] = useState<SemanticObject | null>(null);
+  const [caliberDraft, setCaliberDraft] = useState("");
   const [receiptRelease, setReceiptRelease] =
     useState<ReleaseCatalogItem | null>(null);
   const [releaseDiagnostic, setReleaseDiagnostic] =
@@ -1015,6 +1018,7 @@ export function SemanticCenterPage() {
       semanticAPI.evaluationSets(100),
       semanticAPI.timeContracts(100),
       semanticAPI.list("quality-rules", undefined, 200),
+      semanticAPI.list("row-access-policies", undefined, 200),
       datasetAPI.list(200, 0),
       domainId
         ? semanticAPI.readiness(domainId)
@@ -1036,6 +1040,7 @@ export function SemanticCenterPage() {
           evaluationPage,
           timePage,
           qualityRulePage,
+          rowAccessPolicyPage,
           datasetPage,
           readinessResult,
         ]) => {
@@ -1090,6 +1095,7 @@ export function SemanticCenterPage() {
           setEvaluationSets(pageItems(evaluationPage));
           setTimeContracts(pageItems(timePage));
           setQualityRules(pageItems(qualityRulePage));
+          setRowAccessPolicies(pageItems(rowAccessPolicyPage));
           setDatasets(
             pageItems(datasetPage).filter(
               (item) =>
@@ -3319,6 +3325,60 @@ export function SemanticCenterPage() {
   // After a bulk additivity confirmation the authoritative facts changed, so the
   // metric list and the domain readiness are both refetched from the server
   // rather than patched locally.
+  // Opening a detail drawer seeds the caliber editor from the object being
+  // viewed, so the textarea can never show one metric's caliber while another
+  // metric is on screen.
+  const openDetailObject = (item: SemanticObject) => {
+    setCaliberDraft(String(item.businessDefinition ?? ""));
+    setDetailObject(item);
+  };
+
+  // Saving the caliber goes through the ordinary governed metric-version update:
+  // it takes the optimistic lock, recomputes the content hash server-side and is
+  // refused once the version is certified.
+  const saveMetricCaliber = async () => {
+    if (!detailObject) return;
+    setBusy("metric-caliber");
+    try {
+      await semanticAPI.update("metric-versions", detailObject.id, {
+        objectId: detailObject.objectId,
+        versionNo: detailObject.versionNo,
+        expectedUpdatedAt: detailObject.updatedAt,
+        metricId: detailObject.metricId,
+        semanticModelVersionId: detailObject.semanticModelVersionId,
+        formulaAst: detailObject.formulaAst,
+        defaultFiltersAst: detailObject.defaultFiltersAst,
+        unit: detailObject.unit,
+        currency: detailObject.currency,
+        timeGrain: detailObject.timeGrain,
+        additivity: detailObject.additivity,
+        semiAdditiveTimeAggregation: detailObject.semiAdditiveTimeAggregation,
+        aggregationRestriction: detailObject.aggregationRestriction,
+        nonAdditiveDimensions: detailObject.nonAdditiveDimensions ?? [],
+        zeroDenominatorPolicy: detailObject.zeroDenominatorPolicy,
+        displayPrecision: detailObject.displayPrecision,
+        nullPolicy: detailObject.nullPolicy,
+        incompletePeriodPolicyOverride:
+          detailObject.incompletePeriodPolicyOverride,
+        measureVersionIds: detailObject.measureVersionIds ?? [],
+        businessDefinition: caliberDraft.trim(),
+      });
+      await reloadAdditivityState();
+      setDetailObject(null);
+      setNotice({
+        tone: "success",
+        message: "指标口径已保存；该版本内容 Hash 已随之更新。",
+      });
+    } catch (cause) {
+      setNotice({
+        tone: "error",
+        message: cause instanceof Error ? cause.message : "指标口径保存失败",
+      });
+    } finally {
+      setBusy("");
+    }
+  };
+
   const reloadAdditivityState = async () => {
     try {
       const [metricsPage, metricIdentityPage, readinessResult] =
@@ -3780,7 +3840,7 @@ export function SemanticCenterPage() {
                       <span role="cell">
                         <AppButton
                           className="semantic-row-button"
-                          onClick={() => setDetailObject(item)}
+                          onClick={() => openDetailObject(item)}
                         >
                           <Eye size={15} />
                           查看
@@ -3791,7 +3851,7 @@ export function SemanticCenterPage() {
                             onClick={() =>
                               activeTab === "models"
                                 ? openBuilder(item)
-                                : setDetailObject(item)
+                                : openDetailObject(item)
                             }
                           >
                             继续完善
@@ -4070,6 +4130,14 @@ export function SemanticCenterPage() {
                     models={objects.models}
                     rules={qualityRules}
                     onChanged={setQualityRules}
+                    onNotice={(tone, message) => setNotice({ tone, message })}
+                  />
+                )}
+                {!designSnapshot && (
+                  <RowAccessPoliciesPanel
+                    models={objects.models}
+                    policies={rowAccessPolicies}
+                    onChanged={setRowAccessPolicies}
                     onNotice={(tone, message) => setNotice({ tone, message })}
                   />
                 )}
@@ -4710,6 +4778,45 @@ export function SemanticCenterPage() {
                     "暂无补充说明。"}
                 </p>
               </div>
+              {activeTab === "metrics" && (
+                <div className="semantic-detail-caliber">
+                  <strong>口径说明</strong>
+                  <small>
+                    统计什么、排除什么、什么场景下不该用它。仅作检索与 LLM
+                    上下文证据，不参与绑定；保存后会改变该指标版本的内容
+                    Hash，因此只能在草稿状态修改。
+                  </small>
+                  {detailObject.status === "DRAFT" ? (
+                    <>
+                      <textarea
+                        value={caliberDraft}
+                        maxLength={4000}
+                        placeholder="例：不含税收入，排除内部关联交易；跨期调整不回溯。"
+                        onChange={(event) => setCaliberDraft(event.target.value)}
+                      />
+                      <div>
+                        <span>{caliberDraft.length}/4000</span>
+                        <AppButton
+                          variant="primary"
+                          disabled={
+                            busy === "metric-caliber" ||
+                            caliberDraft ===
+                              String(detailObject.businessDefinition ?? "")
+                          }
+                          onClick={() => void saveMetricCaliber()}
+                        >
+                          {busy === "metric-caliber" ? "正在保存…" : "保存口径"}
+                        </AppButton>
+                      </div>
+                    </>
+                  ) : (
+                    <p>
+                      {String(detailObject.businessDefinition ?? "") ||
+                        "该版本未填写口径说明；认证后不可修改，需要新建草稿版本。"}
+                    </p>
+                  )}
+                </div>
+              )}
               <dl>
                 <div>
                   <dt>状态</dt>

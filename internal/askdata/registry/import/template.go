@@ -156,7 +156,7 @@ var templateColumnNames = map[AssetType][]string{
 		"additivity", "unit", "currency", "nullPolicy",
 	},
 	AssetMetric: {
-		"code", "name", "description", "modelCode", "formula", "defaultFilter",
+		"code", "name", "description", "businessDefinition", "modelCode", "formula", "defaultFilter",
 		"unit", "currency", "additivity", "semiAdditiveTimeAggregation",
 		"aggregationRestriction", "nonAdditiveDimensionCodes", "timeGrain", "dedupKey",
 		"displayPrecision", "zeroDenominatorPolicy", "incompletePeriodPolicyOverride",
@@ -170,7 +170,7 @@ var templateColumnNames = map[AssetType][]string{
 	},
 	AssetMember: {
 		"dimensionCode", "canonicalValue", "displayLabel", "aliases", "hierarchyPath",
-		"validFrom", "validTo", "sensitivity",
+		"validFrom", "validTo", "sensitivity", "definition",
 	},
 	AssetHierarchy: {"code", "name", "levelOrder", "dimensionCode", "parentDimensionCode"},
 	AssetRelationship: {
@@ -225,6 +225,10 @@ var templateEnumValues = map[string][]string{
 
 func templateColumnDescription(name string, enum bool) string {
 	switch name {
+	case "businessDefinition":
+		return "指标口径的业务说明：统计什么、排除什么、什么场景下不该用它；仅作检索与 LLM 上下文证据，不参与绑定"
+	case "definition":
+		return "该维度值在业务上的含义；敏感成员的定义与其标签同级保护，不进入向量、LLM 与日志"
 	case "validFrom", "validTo":
 		return "ISO 8601 日期或时间；留空表示开放边界"
 	case "formula", "defaultFilter", "joinAst":

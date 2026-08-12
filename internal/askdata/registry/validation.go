@@ -151,6 +151,9 @@ func (metric MetricVersion) Validate() error {
 	validateUUID(&validation, "semanticModelVersionId", metric.SemanticModelVersionID, true)
 	validateJSONObject(&validation, "formulaAst", metric.FormulaAST, 131072)
 	validateJSONObject(&validation, "defaultFiltersAst", metric.DefaultFiltersAST, 65536)
+	// Business caliber is prose for humans and for LLM context, so it is bounded
+	// and control-character free but never parsed as a contract.
+	validateBusinessProse(&validation, "businessDefinition", metric.BusinessDefinition, 4000)
 	if metric.Additivity != "" && !validAdditivity(metric.Additivity) {
 		validation.add(validationCodeInvalidEnum, "additivity", "unsupported additivity")
 	}
@@ -274,6 +277,27 @@ func (hierarchy Hierarchy) Validate() error {
 	return validation.result()
 }
 
+func (policy RowAccessPolicy) Validate() error {
+	validation := validator{}
+	validateVersionIdentity(&validation, policy.VersionIdentity, "")
+	validateUUID(&validation, "modelVersionId", policy.ModelVersionID, true)
+	validateCodeName(&validation, policy.Code, policy.Name)
+	validateJSONObject(&validation, "predicateAst", policy.PredicateAST, 65536)
+	keys, err := ParseRowAccessPredicate(policy.PredicateAST)
+	if err != nil {
+		validation.add(validationCodeInvalidAST, "predicateAst",
+			"must be a boolean semantic predicate referencing at least one SUBJECT_ATTRIBUTE")
+		return validation.result()
+	}
+	// The denormalised key list is what coverage reporting reads, so it must
+	// agree exactly with the predicate rather than being separately authored.
+	if strings.Join(keys, ",") != strings.Join(sortedAdminAliases(policy.SubjectAttributeKeys), ",") {
+		validation.add(validationCodeInvalidDependency, "subjectAttributeKeys",
+			"must list exactly the subject attributes the predicate references")
+	}
+	return validation.result()
+}
+
 func (rule QualityRule) Validate() error {
 	validation := validator{}
 	validateVersionIdentity(&validation, rule.VersionIdentity, "")
@@ -358,6 +382,28 @@ func validateCodeName(validation *validator, code, name string) {
 	}
 	if strings.TrimSpace(name) == "" || len(name) > 200 {
 		validation.add(validationCodeRequired, "name", "must contain 1 to 200 characters")
+	}
+}
+
+// validateBusinessProse bounds governed free text that exists to be read by a
+// person or given to the model as context. It is deliberately not parsed: this
+// text never becomes a binding fact (02 §5), so the only guarantees needed are
+// that it fits, is valid UTF-8 and carries no control characters that could
+// disturb a prompt or a log line.
+func validateBusinessProse(validation *validator, path, value string, maxRunes int) {
+	if value == "" {
+		return
+	}
+	if !utf8.ValidString(value) || utf8.RuneCountInString(value) > maxRunes {
+		validation.add(validationCodeRequired, path,
+			fmt.Sprintf("must be valid UTF-8 of at most %d characters", maxRunes))
+		return
+	}
+	for _, character := range value {
+		if character != '\n' && character != '\t' && character < 0x20 || character == 0x7f {
+			validation.add(validationCodeRequired, path, "must not contain control characters")
+			return
+		}
 	}
 }
 

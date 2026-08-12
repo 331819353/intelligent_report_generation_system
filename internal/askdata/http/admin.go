@@ -86,6 +86,7 @@ type AdminHandler struct {
 	timeContracts      registry.TimeContractCatalogBackend
 	timeContractAdmin  registry.TimeContractAdminBackend
 	releaseComposer    registry.ReleaseComposer
+	rowAccessCoverage  registry.RowAccessCoverageBackend
 }
 
 func NewAdminHandler(
@@ -173,6 +174,9 @@ func newProtectedAdminHandlerWithImports(
 	if composer, ok := backend.(registry.ReleaseComposer); ok {
 		handler.releaseComposer = composer
 	}
+	if coverage, ok := backend.(registry.RowAccessCoverageBackend); ok {
+		handler.rowAccessCoverage = coverage
+	}
 	mux := http.NewServeMux()
 	for _, path := range []string{
 		"models", "measures", "metrics", "metric-versions",
@@ -180,6 +184,8 @@ func newProtectedAdminHandlerWithImports(
 		// Governed data quality rules bind a semantic object to a check the
 		// materialization pipeline already runs; see registry/quality_rule.go.
 		"quality-rules",
+		// Governed row access predicates; see registry/row_access_policy.go.
+		"row-access-policies",
 	} {
 		collection := "/api/v1/askdata/semantic/" + path
 		item := collection + "/{id}"
@@ -204,6 +210,12 @@ func newProtectedAdminHandlerWithImports(
 		collection := "/api/v1/askdata/semantic/" + path
 		mux.HandleFunc("GET "+collection, handler.listDrafts)
 		mux.HandleFunc("GET "+collection+"/{id}", handler.getDraft)
+	}
+	if handler.rowAccessCoverage != nil {
+		mux.HandleFunc(
+			"GET /api/v1/askdata/semantic/row-access-coverage",
+			handler.getRowAccessCoverage,
+		)
 	}
 	if handler.releaseCatalog != nil {
 		mux.HandleFunc("GET /api/v1/askdata/semantic/releases", handler.listReleaseCatalog)
@@ -915,6 +927,25 @@ func (handler *AdminHandler) getDomainReadiness(writer http.ResponseWriter, requ
 // domain. The request body is empty on purpose: candidates and their suggested
 // values are derived server-side, so the browser cannot propose an additivity
 // value for a metric. Confirmation remains a separate, explicit human act.
+// getRowAccessCoverage answers "if this policy were released, who would still
+// be able to read anything?" before the answer becomes "nobody".
+func (handler *AdminHandler) getRowAccessCoverage(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	if request.URL.RawQuery != "" || handler.rowAccessCoverage == nil {
+		writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+		return
+	}
+	items, err := handler.rowAccessCoverage.GetRowAccessCoverage(request.Context(), scope)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
+}
+
 func (handler *AdminHandler) refreshAdditivitySuggestions(writer http.ResponseWriter, request *http.Request) {
 	scope, ok := handler.resolveScope(writer, request)
 	if !ok {
@@ -1184,6 +1215,8 @@ func adminResourceFromPath(path string) (registry.AdminResource, error) {
 		return registry.AdminResourceRelationship, nil
 	case "quality-rules":
 		return registry.AdminResourceQualityRule, nil
+	case "row-access-policies":
+		return registry.AdminResourceRowAccessPolicy, nil
 	case "members":
 		return registry.AdminResourceMember, nil
 	case "hierarchies":
@@ -1240,6 +1273,9 @@ func decodeAdminMutation(
 	case registry.AdminResourceQualityRule:
 		mutation.QualityRule = &registry.QualityRuleDraftInput{}
 		target = mutation.QualityRule
+	case registry.AdminResourceRowAccessPolicy:
+		mutation.RowAccessPolicy = &registry.RowAccessPolicyDraftInput{}
+		target = mutation.RowAccessPolicy
 	case registry.AdminResourceMetricDimension:
 		mutation.MetricDimension = &registry.MetricDimensionDraftInput{}
 		target = mutation.MetricDimension

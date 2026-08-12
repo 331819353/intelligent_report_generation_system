@@ -93,6 +93,17 @@ type MaterializationContract struct {
 	RowCount          int64               `json:"rowCount"`
 }
 
+// RowAccessPolicyContract is a release-pinned row access predicate over this
+// model. Predicates are ANDed: a reader must satisfy every certified policy on
+// a model, so adding one can only ever narrow access.
+type RowAccessPolicyContract struct {
+	PolicyVersionID      askdata.ID          `json:"policyVersionId"`
+	Code                 string              `json:"code"`
+	ContentHash          askdata.ContentHash `json:"contentHash"`
+	PredicateAST         json.RawMessage     `json:"predicateAst"`
+	SubjectAttributeKeys []string            `json:"subjectAttributeKeys"`
+}
+
 type ModelContract struct {
 	ModelVersionID     askdata.ID              `json:"modelVersionId"`
 	ContentHash        askdata.ContentHash     `json:"contentHash"`
@@ -101,6 +112,9 @@ type ModelContract struct {
 	PrimaryTimeFieldID *askdata.ID             `json:"primaryTimeFieldId,omitempty"`
 	Fields             []FieldContract         `json:"fields"`
 	Materialization    MaterializationContract `json:"materialization"`
+	// RowAccessPolicies is part of the governed contract: which rows a reader
+	// may see is pinned by the Release, exactly like what the numbers mean.
+	RowAccessPolicies []RowAccessPolicyContract `json:"rowAccessPolicies,omitempty"`
 }
 
 type MeasureContract struct {
@@ -187,6 +201,12 @@ type ContractSnapshot struct {
 	// memberParameterValues is an execution-only bridge to QUERY-003. It is
 	// never serialized, hashed or returned through the public member contract.
 	memberParameterValues map[askdata.ID]string
+	// subjectAttributes carries the READING actor's administered attribute
+	// values. They are runtime identity facts rather than governed contract, so
+	// they are never serialized or hashed into the snapshot - but they do enter
+	// the compiled plan as bound parameters, which is why two readers of the
+	// same question legitimately produce different plan hashes.
+	subjectAttributes map[string][]string
 	// timeRuntime is an execution-only bridge to TIME-001. It carries the
 	// certified time contract and the latest successful materialization
 	// watermark used to resolve relative periods before SQL is compiled.
@@ -220,6 +240,11 @@ type Resolution struct {
 	Relationships          []RelationshipContract `json:"relationships"`
 	ResolutionHash         askdata.ContentHash    `json:"resolutionHash"`
 	memberParameterValues  map[askdata.ID]string
+	// subjectAttributes is execution-only, like memberParameterValues: the
+	// reader's identity is not a governed contract fact and must not enter the
+	// resolution hash, or two readers would appear to resolve different
+	// contracts from the same Release.
+	subjectAttributes map[string][]string
 }
 
 type Resolver struct{ store ContractStore }
@@ -266,6 +291,7 @@ func (resolver *Resolver) Resolve(ctx context.Context, request ResolveRequest) (
 		Metrics: snapshot.Metrics, Dimensions: snapshot.Dimensions,
 		Members: snapshot.Members, GraphPath: cloneJoinPath(path), Relationships: snapshot.Relationships,
 		memberParameterValues: cloneMemberParameterValues(snapshot.memberParameterValues),
+		subjectAttributes:     cloneSubjectAttributes(snapshot.subjectAttributes),
 	}
 	return finalizeResolution(resolution)
 }
@@ -671,6 +697,7 @@ func validateRelationshipPath(path *graph.JoinPath, relationships []Relationship
 func normalizeSnapshot(snapshot ContractSnapshot) (ContractSnapshot, error) {
 	result := snapshot
 	result.memberParameterValues = cloneMemberParameterValues(snapshot.memberParameterValues)
+	result.subjectAttributes = cloneSubjectAttributes(snapshot.subjectAttributes)
 	var err error
 	result.Model.GrainContract, err = canonicalObject(result.Model.GrainContract)
 	if err != nil {
@@ -768,6 +795,10 @@ func resolutionHash(resolution Resolution) (askdata.ContentHash, error) {
 	copy := resolution
 	copy.ResolutionHash = ""
 	copy.memberParameterValues = nil
+	// The reader's identity must never enter the resolution hash: the same
+	// Release resolves to the same contracts for everyone, and only the compiled
+	// plan differs once row access policies bind the reader's own values.
+	copy.subjectAttributes = nil
 	payload, err := registry.CanonicalValue(copy)
 	if err != nil {
 		return "", err
@@ -936,6 +967,17 @@ func cloneID(value *askdata.ID) *askdata.ID {
 	}
 	copy := *value
 	return &copy
+}
+
+func cloneSubjectAttributes(values map[string][]string) map[string][]string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string][]string, len(values))
+	for key, value := range values {
+		result[key] = append([]string(nil), value...)
+	}
+	return result
 }
 
 func cloneMemberParameterValues(values map[askdata.ID]string) map[askdata.ID]string {

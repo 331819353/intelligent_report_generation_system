@@ -91,6 +91,18 @@ export type AdminUser = {
   createdAt: string
 }
 
+// A reader's administered business attributes. Governed row access policies
+// match against these, so they are granted by an administrator and never
+// self-asserted.
+export type SubjectAttribute = {
+  userId: string
+  attributeKey: string
+  attributeValues: string[]
+  grantedBy: string
+  updatedAt: string
+  displayName?: string
+}
+
 export type ShareTarget = {
   id: string
   type: 'USER' | 'ROLE'
@@ -291,6 +303,24 @@ export const administrationAPI = {
       method: 'PATCH',
       body: JSON.stringify({ accessSensitivity }),
     })
+  },
+  async listSubjectAttributes(userID: string) {
+    const result = await administrationRequest<ItemsResponse<SubjectAttribute>>(
+      `/v1/users/${encodeURIComponent(userID)}/subject-attributes`, { cache: 'no-store' },
+    )
+    return safeItems(result)
+  },
+  async setSubjectAttribute(userID: string, attributeKey: string, attributeValues: string[]) {
+    return administrationRequest<SubjectAttribute>(
+      `/v1/users/${encodeURIComponent(userID)}/subject-attributes/${encodeURIComponent(attributeKey)}`,
+      { method: 'PUT', body: JSON.stringify({ attributeValues }) },
+    )
+  },
+  async deleteSubjectAttribute(userID: string, attributeKey: string) {
+    return administrationRequest<void>(
+      `/v1/users/${encodeURIComponent(userID)}/subject-attributes/${encodeURIComponent(attributeKey)}`,
+      { method: 'DELETE' },
+    )
   },
   async listUsers() {
     const result = await administrationRequest<ItemsResponse<AdminUser>>('/v1/users', {

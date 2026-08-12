@@ -26,6 +26,7 @@ const (
 	AdminResourceKPIBundle        AdminResource = "KPI_BUNDLE"
 	AdminResourceRelationship     AdminResource = "RELATIONSHIP"
 	AdminResourceQualityRule      AdminResource = "QUALITY_RULE"
+	AdminResourceRowAccessPolicy  AdminResource = "ROW_ACCESS_POLICY"
 	AdminResourceMember           AdminResource = "MEMBER"
 	AdminResourceHierarchy        AdminResource = "HIERARCHY"
 	AdminResourceCertifiedExample AdminResource = "CERTIFIED_EXAMPLE"
@@ -157,6 +158,7 @@ type MetricVersionDraftInput struct {
 	NullPolicy                     string                      `json:"nullPolicy"`
 	IncompletePeriodPolicyOverride IncompletePeriodPolicy      `json:"incompletePeriodPolicyOverride,omitempty"`
 	MeasureVersionIDs              []string                    `json:"measureVersionIds"`
+	BusinessDefinition             string                      `json:"businessDefinition,omitempty"`
 }
 
 type DimensionDraftInput struct {
@@ -203,6 +205,17 @@ type KPIBundleDraftInput struct {
 	DefaultChartTypes          []string        `json:"defaultChartTypes"`
 	RoleMapping                json.RawMessage `json:"roleMapping"`
 	ApplicableQuestionPatterns []string        `json:"applicableQuestionPatterns"`
+}
+
+// RowAccessPolicyDraftInput authors a row access predicate. SubjectAttributeKeys
+// is intentionally absent: it is derived from the predicate so the two can never
+// disagree, and so a caller cannot understate what a policy depends on.
+type RowAccessPolicyDraftInput struct {
+	VersionedDraftInput
+	ModelVersionID string          `json:"modelVersionId"`
+	Code           string          `json:"code"`
+	Name           string          `json:"name"`
+	PredicateAST   json.RawMessage `json:"predicateAst"`
 }
 
 // QualityRuleDraftInput authors a binding to an executing dataset quality
@@ -270,6 +283,7 @@ type AdminMutation struct {
 	Relationship    *RelationshipDraftInput
 	MetricDimension *MetricDimensionDraftInput
 	QualityRule     *QualityRuleDraftInput
+	RowAccessPolicy *RowAccessPolicyDraftInput
 }
 
 func (mutation AdminMutation) payload(resource AdminResource) (any, error) {
@@ -291,6 +305,8 @@ func (mutation AdminMutation) payload(resource AdminResource) (any, error) {
 		value = mutation.KPIBundle
 	case AdminResourceQualityRule:
 		value = mutation.QualityRule
+	case AdminResourceRowAccessPolicy:
+		value = mutation.RowAccessPolicy
 	case AdminResourceRelationship:
 		value = mutation.Relationship
 	case AdminResourceMetricDimension:
