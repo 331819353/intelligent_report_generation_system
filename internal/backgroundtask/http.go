@@ -18,7 +18,7 @@ func NewHandler(
 	service *Service,
 ) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /api/v1/background-tasks", auth.RequireAccessToken(
+	mux.Handle("GET /api/v1/background-tasks", auth.RequireSessionAccessToken(
 		authService,
 		http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			view := strings.ToUpper(strings.TrimSpace(request.URL.Query().Get("view")))
@@ -58,7 +58,7 @@ func NewHandler(
 			writeJSON(writer, http.StatusOK, page)
 		}),
 	))
-	mux.Handle("POST /api/v1/background-tasks/{kind}/{id}/cancel", auth.RequireAccessToken(
+	mux.Handle("POST /api/v1/background-tasks/{kind}/{id}/cancel", auth.RequireSessionAccessToken(
 		authService,
 		http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			body, bodyErr := io.ReadAll(http.MaxBytesReader(writer, request.Body, 1024))
@@ -110,7 +110,7 @@ func NewHandler(
 			writeJSON(writer, http.StatusOK, task)
 		}),
 	))
-	mux.Handle("POST /api/v1/background-tasks/{kind}/{id}/retry", auth.RequireAccessToken(
+	mux.Handle("POST /api/v1/background-tasks/{kind}/{id}/retry", auth.RequireSessionAccessToken(
 		authService,
 		http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			body, bodyErr := io.ReadAll(http.MaxBytesReader(writer, request.Body, 1024))

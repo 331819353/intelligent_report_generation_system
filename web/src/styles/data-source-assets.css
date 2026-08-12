@@ -78,7 +78,8 @@
 .asset-discover-layout,
 .asset-detail-layout { min-width: 0; min-height: 0; display: grid; gap: 12px; overflow: hidden; }
 .asset-catalog-layout { grid-template-columns: minmax(0, 1fr) 360px; }
-.asset-catalog-side { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 12px; overflow: hidden; }
+.asset-catalog-side { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr); gap: 12px; overflow: hidden; }
+.asset-catalog-side:has(.asset-change-governance) { grid-template-rows: 252px 560px; align-content: start; overflow-y: auto; scrollbar-gutter: stable; }
 .asset-table-catalog,
 .asset-job-panel,
 .asset-discover-catalog,
@@ -435,4 +436,3 @@
 .data-source-assets-shell.qa-viewport-1920 .asset-summary-strip article > span { width: 34px; height: 34px; }
 .data-source-assets-shell.qa-viewport-1920 .asset-summary-strip small { font-size: 13px; }
 .data-source-assets-shell.qa-viewport-1920 .asset-summary-strip strong { font-size: 23px; }
-body:has(.data-source-assets-shell.qa-viewport-1920) { min-width: 1920px; min-height: 1080px; overflow: auto; }

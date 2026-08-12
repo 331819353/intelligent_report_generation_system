@@ -396,6 +396,9 @@ func (r *PostgresRepository) UpdateStatus(ctx context.Context, tenantID, id stri
 				WHERE tenant_id=$1 AND id=$2`, tenantID, id, revokedReference); err != nil {
 				return err
 			}
+			// The database immutability guard permits only this source-specific,
+			// irreversible credential tombstone while the root is retiring. Every
+			// other version field remains append-only.
 			if _, err := tx.Exec(ctx, `UPDATE platform.data_source_versions
 				SET secret_ref=CASE WHEN source_type IN ('MYSQL','ORACLE') THEN $3 ELSE secret_ref END
 				WHERE tenant_id=$1 AND data_source_id=$2`, tenantID, id, revokedReference); err != nil {

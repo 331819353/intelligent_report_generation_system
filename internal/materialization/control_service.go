@@ -38,7 +38,7 @@ func (service *ControlService) Register(
 	if input.MaxAttempts != nil {
 		maxAttempts = *input.MaxAttempts
 	}
-	if mode != RunModeFull ||
+	if (mode != RunModeFull && mode != RunModeIncremental) ||
 		partitionKey != strings.TrimSpace(partitionKey) ||
 		(input.PartitionKey != "") ||
 		maxAttempts < 1 || maxAttempts > 10 {

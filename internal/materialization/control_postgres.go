@@ -25,6 +25,12 @@ type publishedBuildTarget struct {
 	Document   dataset.Document
 }
 
+type incrementalBuildBase struct {
+	MaterializationID    string
+	SnapshotHash         string
+	DataAvailableThrough time.Time
+}
+
 type sourceTableSnapshot struct {
 	DataSourceID        string
 	DataSourceVersionID string
@@ -57,7 +63,7 @@ func (store *PostgresStore) RegisterCurrent(
 	}
 	if store == nil || store.pool == nil ||
 		!validUUID(tenantID) || !validUUID(actorID) || !validUUID(datasetID) ||
-		control.Mode != RunModeFull || !validPartition ||
+		(control.Mode != RunModeFull && control.Mode != RunModeIncremental) || !validPartition ||
 		control.MaxAttempts < 1 || control.MaxAttempts > 10 ||
 		!validUUID(control.ExpectedVersionID) {
 		return Run{}, false, ErrInvalidRequest
@@ -147,7 +153,14 @@ func (store *PostgresStore) registerCurrentTx(
 	if err != nil {
 		return Run{}, false, err
 	}
-	plan, err := deriveBuildPlan(target, control.Mode, ordinals)
+	var base *incrementalBuildBase
+	if control.Mode == RunModeIncremental {
+		base, err = loadIncrementalBuildBaseTx(ctx, tx, target)
+		if err != nil {
+			return Run{}, false, err
+		}
+	}
+	plan, err := deriveBuildPlan(target, control.Mode, ordinals, base)
 	if err != nil {
 		return Run{}, false, err
 	}
@@ -688,10 +701,16 @@ func deriveBuildPlan(
 	target publishedBuildTarget,
 	mode RunMode,
 	inputOrdinals []int,
+	base *incrementalBuildBase,
 ) (BuildPlan, error) {
-	if mode != RunModeFull ||
+	if (mode != RunModeFull && mode != RunModeIncremental) ||
 		len(target.Document.Nodes) == 0 ||
 		len(inputOrdinals) != len(target.Document.Nodes) {
+		return BuildPlan{}, ErrInvalidRequest
+	}
+	if mode == RunModeIncremental && (base == nil || dataset.IsSourceBackedMaterialization(target.Document) ||
+		len(target.Document.OutputGrain.KeyFields) == 0 ||
+		target.Document.OutputGrain.TimeField == "") {
 		return BuildPlan{}, ErrInvalidRequest
 	}
 	plan := BuildPlan{
@@ -701,6 +720,12 @@ func deriveBuildPlan(
 			Storage: "POSTGRES", AtomicPublish: true,
 			RelationKind: "TABLE", RefreshMode: string(mode), StableViewName: true,
 		},
+	}
+	if base != nil {
+		availableThrough := base.DataAvailableThrough.UTC()
+		plan.Target.BaseMaterializationID = base.MaterializationID
+		plan.Target.BaseSnapshotHash = base.SnapshotHash
+		plan.Target.BaseDataAvailableThrough = &availableThrough
 	}
 	if dataset.IsSourceBackedMaterialization(target.Document) {
 		plan.Nodes = []PlanNode{
@@ -757,6 +782,53 @@ func deriveBuildPlan(
 	appendStep("project", NodeProject)
 	appendStep("materialize", NodeMaterialize)
 	return plan, nil
+}
+
+func loadIncrementalBuildBaseTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	target publishedBuildTarget,
+) (*incrementalBuildBase, error) {
+	if dataset.IsSourceBackedMaterialization(target.Document) ||
+		len(target.Document.OutputGrain.KeyFields) == 0 ||
+		target.Document.OutputGrain.TimeField == "" {
+		return nil, ErrInvalidRequest
+	}
+	var base incrementalBuildBase
+	err := tx.QueryRow(ctx, `SELECT materialization.id::text,
+		materialization.snapshot_hash,snapshot.data_available_through
+		FROM platform.dataset_materializations AS materialization
+		JOIN platform.materialization_snapshots AS snapshot
+		  ON snapshot.materialization_id=materialization.id
+		 AND snapshot.build_run_id=materialization.build_run_id
+		 AND snapshot.tenant_id=materialization.tenant_id
+		 AND snapshot.snapshot_hash=materialization.snapshot_hash
+		 AND snapshot.quality_status IN ('OK','WARN')
+		 AND snapshot.snapshot_completed_at IS NOT NULL
+		WHERE materialization.dataset_id=$1
+		  AND materialization.dataset_version_id=$2
+		  AND materialization.layer=$3
+		  AND materialization.schema_hash=$4
+		  AND materialization.status='ACTIVE'
+		  AND snapshot.data_available_through IS NOT NULL
+		FOR SHARE OF materialization,snapshot`,
+		target.DatasetID, target.VersionID, target.Layer, target.SchemaHash,
+	).Scan(
+		&base.MaterializationID, &base.SnapshotHash,
+		&base.DataAvailableThrough,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrConflict
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !validUUID(base.MaterializationID) ||
+		!hashPattern.MatchString(base.SnapshotHash) {
+		return nil, ErrConflict
+	}
+	base.DataAvailableThrough = base.DataAvailableThrough.UTC()
+	return &base, nil
 }
 
 func documentUsesAggregation(document dataset.Document) bool {
@@ -929,7 +1001,7 @@ func loadBuildNodesTx(
 		started_at,completed_at
 		FROM platform.build_node_runs
 		WHERE build_run_id=$1
-		ORDER BY created_at,id`, buildID)
+		ORDER BY started_at NULLS LAST,created_at,id`, buildID)
 	if err != nil {
 		return nil, err
 	}

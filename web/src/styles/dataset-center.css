@@ -1336,5 +1336,7 @@
 .dataset-publication-footer { margin-top: 0; }
 
 /* 视觉回归专用：固定 1920 根画布，不做缩放。 */
+.qa-1920-dataset-workflow { width: 1920px; min-width: 1920px; height: 1080px; min-height: 1080px; }
 .qa-1920-dataset-workflow > .global-header { position: absolute; width: 1920px; }
 .qa-1920-dataset-workflow > .sidebar { position: absolute; top: 72px; height: 1008px; }
+.app-shell-v2.qa-1920-dataset-workflow > .main-stage { height: 1008px; min-height: 1008px; }

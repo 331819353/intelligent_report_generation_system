@@ -139,8 +139,9 @@ func (s *PostgresStore) RegisterUser(ctx context.Context, input RegisterUserReco
 	return err
 }
 
-// ResolveBusinessDomain returns an active member domain, or any active domain
-// for a platform administrator. Empty input selects the default domain first.
+// ResolveBusinessDomain returns one of the user's active member domains.
+// Platform control-plane authority is intentionally independent from business
+// data-plane membership; an administrator without membership stays unbound.
 func (s *PostgresStore) ResolveBusinessDomain(
 	ctx context.Context, tenantID, userID, requestedDomainID string,
 ) (string, error) {
@@ -152,22 +153,12 @@ func (s *PostgresStore) ResolveBusinessDomain(
 			  AND domain.status='ACTIVE'
 			  AND domain.deleted_at IS NULL
 			  AND ($2::text='' OR domain.id::text=$2)
-			  AND (
-			    EXISTS(
-			      SELECT 1 FROM platform.user_roles AS assignment
-			      JOIN platform.roles AS role ON role.id=assignment.role_id
-			      WHERE assignment.tenant_id=domain.tenant_id
-			        AND assignment.user_id=$1::uuid
-			        AND role.code::text='platform_admin'
-			        AND role.status='ACTIVE' AND role.deleted_at IS NULL
-			    )
-			    OR EXISTS(
-			      SELECT 1 FROM platform.domain_memberships AS membership
-			      WHERE membership.tenant_id=domain.tenant_id
-			        AND membership.domain_id=domain.id
-			        AND membership.user_id=$1::uuid
-			        AND membership.status='ACTIVE'
-			    )
+			  AND EXISTS(
+			    SELECT 1 FROM platform.domain_memberships AS membership
+			    WHERE membership.tenant_id=domain.tenant_id
+			      AND membership.domain_id=domain.id
+			      AND membership.user_id=$1::uuid
+			      AND membership.status='ACTIVE'
 			  )
 			ORDER BY
 			  CASE WHEN $2::text<>'' THEN 0

@@ -76,11 +76,12 @@ func scanTable(row interface{ Scan(...any) error }, item *Table) error {
 	return row.Scan(&item.ID, &item.DataSourceID, &item.DataSourceName, &item.DataSourceType, &item.FileVersionID, &item.CatalogName, &item.SchemaName, &item.TableName, &item.TableType, &item.SourceComment, &item.BusinessName, &item.BusinessDescription, &item.Tags, &item.SensitivityLevel, &item.Visibility, &item.ManualLocked, &item.AssetStatus, &item.ManagementStatus, &item.EnrichmentStatus, &item.StructureHash, &item.MetadataVersion, &item.BusinessVersion, &item.ColumnCount, &item.LastSyncAt)
 }
 
-// ListColumns 返回表下按序排列的字段资产。
+// ListColumns 返回表下按序排列的当前活动字段资产。已从源库移除的字段仍保留在
+// 差异与审计账本中，但不能继续出现在业务元数据编辑、样本预览或数据集建模入口。
 func (r *Repository) ListColumns(ctx context.Context, tenantID, tableID string) (items []Column, err error) {
 	items = []Column{}
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id::text,table_id::text,column_name,ordinal_position,source_comment,native_type,canonical_type,nullable,business_name,business_description,tags,sensitivity_level::text,semantic_type,manual_locked,asset_status::text,business_version FROM platform.metadata_columns WHERE table_id=$1 ORDER BY ordinal_position`, tableID)
+		rows, err := tx.Query(ctx, `SELECT id::text,table_id::text,column_name,ordinal_position,source_comment,native_type,canonical_type,nullable,business_name,business_description,tags,sensitivity_level::text,semantic_type,manual_locked,asset_status::text,business_version FROM platform.metadata_columns WHERE table_id=$1 AND asset_status='ACTIVE' ORDER BY ordinal_position`, tableID)
 		if err != nil {
 			return err
 		}

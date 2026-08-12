@@ -43,6 +43,15 @@ type BuildInput struct {
 	Parameters       map[string]any
 	RequireRows      bool
 	BusinessKeyCode  []string
+	Incremental      *IncrementalBuildInput
+}
+
+type IncrementalBuildInput struct {
+	BaseSchema               string
+	BaseTable                string
+	BaseSnapshotHash         string
+	BaseDataAvailableThrough time.Time
+	TimeField                string
 }
 
 type BuildResult struct {
@@ -52,6 +61,7 @@ type BuildResult struct {
 	RowCount             int64
 	SizeBytes            int64
 	DataAvailableThrough *time.Time
+	RefreshStrategy      string
 }
 
 type transaction interface {
@@ -117,6 +127,19 @@ func (executor *Executor) Build(ctx context.Context, input BuildInput) (BuildRes
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("%w: %v", ErrInvalidBuild, err)
 	}
+	if input.Incremental != nil {
+		if targetLayer == materialization.LayerODS ||
+			input.Incremental.TimeField != input.Document.OutputGrain.TimeField ||
+			input.Incremental.TimeField == "" ||
+			len(keys) == 0 ||
+			!outputIdentifier.MatchString(input.Incremental.TimeField) ||
+			!materialization.ValidWarehousePhysicalRelation(
+				input.TenantID, input.Layer,
+				input.Incremental.BaseSchema, input.Incremental.BaseTable,
+			) {
+			return BuildResult{}, fmt.Errorf("%w: incremental base contract is invalid", ErrInvalidBuild)
+		}
+	}
 	qualified := quoteIdentifier(schema) + "." + quoteIdentifier(table)
 	tx, err := executor.transactions.Begin(ctx)
 	if err != nil {
@@ -130,7 +153,58 @@ func (executor *Executor) Build(ctx context.Context, input BuildInput) (BuildRes
 	if _, err := tx.Exec(ctx, "DROP TABLE IF EXISTS "+qualified); err != nil {
 		return BuildResult{}, fmt.Errorf("replace warehouse shadow table: %w", err)
 	}
-	if _, err := tx.Exec(ctx, "CREATE TABLE "+qualified+" AS "+compiled.SQL, compiled.Args...); err != nil {
+	refreshStrategy := "FULL_REBUILD"
+	if input.Incremental != nil {
+		baseQualified := quoteIdentifier(input.Incremental.BaseSchema) + "." +
+			quoteIdentifier(input.Incremental.BaseTable)
+		tempName := table + "_current"
+		if !outputIdentifier.MatchString(tempName) {
+			return BuildResult{}, fmt.Errorf("%w: incremental temporary identity is invalid", ErrInvalidBuild)
+		}
+		tempQualified := "pg_temp." + quoteIdentifier(tempName)
+		if _, err := tx.Exec(ctx, "DROP TABLE IF EXISTS "+tempQualified); err != nil {
+			return BuildResult{}, fmt.Errorf("replace incremental current table: %w", err)
+		}
+		if _, err := tx.Exec(
+			ctx, "CREATE TEMP TABLE "+quoteIdentifier(tempName)+
+				" ON COMMIT DROP AS "+compiled.SQL, compiled.Args...,
+		); err != nil {
+			return BuildResult{}, fmt.Errorf("compute incremental current state: %w", err)
+		}
+		timeField := quoteIdentifier(input.Incremental.TimeField)
+		historicalScope := func(relation string) string {
+			return "SELECT * FROM " + relation + " WHERE " + timeField +
+				" <= $1::timestamptz OR " + timeField + " IS NULL"
+		}
+		comparison := "SELECT EXISTS(SELECT 1 FROM ((" +
+			historicalScope(baseQualified) + " EXCEPT " + historicalScope(tempQualified) +
+			") UNION ALL (" + historicalScope(tempQualified) + " EXCEPT " +
+			historicalScope(baseQualified) + ")) AS historical_change)"
+		var historicalChanged bool
+		if err := tx.QueryRow(
+			ctx, comparison, input.Incremental.BaseDataAvailableThrough.UTC(),
+		).Scan(&historicalChanged); err != nil {
+			return BuildResult{}, fmt.Errorf("compare incremental history: %w", err)
+		}
+		buildSQL := "SELECT * FROM " + tempQualified
+		buildArgs := []any(nil)
+		if !historicalChanged {
+			refreshStrategy = "WATERMARK_APPEND"
+			buildSQL = "SELECT * FROM " + baseQualified +
+				" UNION ALL SELECT * FROM " + tempQualified +
+				" WHERE " + timeField + " > $1::timestamptz"
+			buildArgs = []any{input.Incremental.BaseDataAvailableThrough.UTC()}
+		} else {
+			refreshStrategy = "HISTORY_CHANGED_FULL_FALLBACK"
+		}
+		if _, err := tx.Exec(
+			ctx, "CREATE TABLE "+qualified+" AS "+buildSQL, buildArgs...,
+		); err != nil {
+			return BuildResult{}, fmt.Errorf("create incremental warehouse shadow table: %w", err)
+		}
+	} else if _, err := tx.Exec(
+		ctx, "CREATE TABLE "+qualified+" AS "+compiled.SQL, compiled.Args...,
+	); err != nil {
 		return BuildResult{}, fmt.Errorf("create warehouse shadow table: %w", err)
 	}
 	var rowCount int64
@@ -180,6 +254,7 @@ func (executor *Executor) Build(ctx context.Context, input BuildInput) (BuildRes
 		Schema: schema, Table: table, QualifiedName: schema + "." + table,
 		RowCount: rowCount, SizeBytes: sizeBytes,
 		DataAvailableThrough: dataAvailableThrough,
+		RefreshStrategy:      refreshStrategy,
 	}, nil
 }
 

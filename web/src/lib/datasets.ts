@@ -1079,10 +1079,10 @@ export const datasetAPI = {
     `${datasetPath(id)}/materializations/builds/${encodeURIComponent(runId)}`,
     { cache: 'no-store' },
   ),
-  runDAG: (id: string, publishedVersionId: string, requestId: string) => apiRequest<DatasetDAGRun>(`${datasetPath(id)}/materializations/builds`, {
+  runDAG: (id: string, publishedVersionId: string, requestId: string, mode: 'FULL' | 'INCREMENTAL' = 'FULL') => apiRequest<DatasetDAGRun>(`${datasetPath(id)}/materializations/builds`, {
     method: 'POST',
     cache: 'no-store',
-    body: JSON.stringify({ mode: 'FULL', publishedVersionId, requestId, maxAttempts: 3 }),
+    body: JSON.stringify({ mode, publishedVersionId, requestId, maxAttempts: 3 }),
   }),
   stopDAG: (id: string, runId: string) => apiRequest<DatasetDAGRun>(`${datasetPath(id)}/materializations/builds/${encodeURIComponent(runId)}/cancel`, {
     method: 'POST',

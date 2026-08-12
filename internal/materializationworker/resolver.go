@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -122,10 +123,21 @@ func (resolver *PostgresResolver) Resolve(
 			nil,
 		)
 	}
-	if claim.Mode != materialization.RunModeFull {
+	if claim.Mode != materialization.RunModeFull &&
+		claim.Mode != materialization.RunModeIncremental {
 		return ResolvedBuild{}, executionError(
 			CodeRefreshModeUnsupported,
-			"incremental and backfill materialization are not supported by this worker",
+			"backfill materialization is not supported by this worker",
+			nil,
+		)
+	}
+	if claim.Mode == materialization.RunModeIncremental &&
+		(len(claim.Plan.Target.BaseMaterializationID) == 0 ||
+			len(claim.Plan.Target.BaseSnapshotHash) == 0 ||
+			claim.Plan.Target.BaseDataAvailableThrough == nil) {
+		return ResolvedBuild{}, executionError(
+			CodeTrustedPlanInvalid,
+			"incremental materialization has no frozen active base snapshot",
 			nil,
 		)
 	}
@@ -198,6 +210,55 @@ func (resolver *PostgresResolver) Resolve(
 				"the target published dataset contract does not match its immutable metadata",
 				nil,
 			)
+		}
+		if claim.Mode == materialization.RunModeIncremental {
+			var baseHash string
+			var baseAvailableThrough time.Time
+			var baseSchema, baseTable string
+			if err := tx.QueryRow(ctx, `SELECT materialization.snapshot_hash,
+				snapshot.data_available_through,
+				materialization.physical_schema,materialization.physical_name
+				FROM platform.dataset_materializations AS materialization
+				JOIN platform.materialization_snapshots AS snapshot
+				  ON snapshot.materialization_id=materialization.id
+				 AND snapshot.build_run_id=materialization.build_run_id
+				 AND snapshot.tenant_id=materialization.tenant_id
+				 AND snapshot.snapshot_hash=materialization.snapshot_hash
+				WHERE materialization.id=$1
+				  AND materialization.dataset_id=$2
+				  AND materialization.dataset_version_id=$3
+				  AND materialization.status='ACTIVE'
+				  AND snapshot.quality_status IN ('OK','WARN')
+				  AND snapshot.snapshot_completed_at IS NOT NULL
+				  AND snapshot.data_available_through IS NOT NULL
+				FOR SHARE OF materialization,snapshot`,
+				claim.Plan.Target.BaseMaterializationID,
+				claim.DatasetID, claim.DatasetVersionID,
+			).Scan(
+				&baseHash, &baseAvailableThrough, &baseSchema, &baseTable,
+			); err != nil {
+				return executionError(
+					CodeUpstreamSnapshotChanged,
+					"the frozen incremental base snapshot is no longer active",
+					err,
+				)
+			}
+			if baseHash != claim.Plan.Target.BaseSnapshotHash ||
+				!baseAvailableThrough.UTC().Equal(
+					claim.Plan.Target.BaseDataAvailableThrough.UTC(),
+				) {
+				return executionError(
+					CodeUpstreamSnapshotChanged,
+					"the active materialization changed after incremental registration",
+					nil,
+				)
+			}
+			resolved.Incremental = &warehouse.IncrementalBuildInput{
+				BaseSchema: baseSchema, BaseTable: baseTable,
+				BaseSnapshotHash:         baseHash,
+				BaseDataAvailableThrough: baseAvailableThrough.UTC(),
+				TimeField:                prepared.Document.OutputGrain.TimeField,
+			}
 		}
 		for _, node := range prepared.Document.Nodes {
 			if node.Type != "DATASET" {

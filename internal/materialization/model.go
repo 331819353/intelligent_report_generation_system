@@ -113,11 +113,14 @@ type PlanNode struct {
 }
 
 type TargetPlan struct {
-	Storage        string `json:"storage"`
-	AtomicPublish  bool   `json:"atomicPublish"`
-	RelationKind   string `json:"relationKind"`
-	RefreshMode    string `json:"refreshMode"`
-	StableViewName bool   `json:"stableViewName"`
+	Storage                  string     `json:"storage"`
+	AtomicPublish            bool       `json:"atomicPublish"`
+	RelationKind             string     `json:"relationKind"`
+	RefreshMode              string     `json:"refreshMode"`
+	StableViewName           bool       `json:"stableViewName"`
+	BaseMaterializationID    string     `json:"baseMaterializationId,omitempty"`
+	BaseSnapshotHash         string     `json:"baseSnapshotHash,omitempty"`
+	BaseDataAvailableThrough *time.Time `json:"baseDataAvailableThrough,omitempty"`
 }
 
 // InputSnapshot freezes the exact upstream identity and its schema/content
@@ -185,6 +188,7 @@ type Claim struct {
 	Run
 	Plan           BuildPlan
 	Inputs         []InputSnapshot
+	CompletedNodes map[string]NodeResult
 	WorkerID       string
 	LeaseToken     string
 	LeaseExpiresAt time.Time

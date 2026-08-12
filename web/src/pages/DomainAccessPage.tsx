@@ -37,7 +37,7 @@ const accessLabels: Record<DomainCatalogItem['accessStatus'], string> = {
   CANCELLED: '可申请',
   MEMBER: '已加入',
   DOMAIN_ADMIN: '已加入',
-  PLATFORM_ADMIN: '可进入',
+  PLATFORM_ADMIN: '需申请',
 }
 
 const applicationLabels: Record<DomainApplication['status'], string> = {
@@ -47,8 +47,8 @@ const applicationLabels: Record<DomainApplication['status'], string> = {
   CANCELLED: '已撤回',
 }
 
-const joinedStatuses = new Set<DomainCatalogItem['accessStatus']>(['MEMBER', 'DOMAIN_ADMIN', 'PLATFORM_ADMIN'])
-const applyStatuses = new Set<DomainCatalogItem['accessStatus']>(['AVAILABLE', 'REJECTED', 'CANCELLED'])
+const joinedStatuses = new Set<DomainCatalogItem['accessStatus']>(['MEMBER', 'DOMAIN_ADMIN'])
+const applyStatuses = new Set<DomainCatalogItem['accessStatus']>(['AVAILABLE', 'REJECTED', 'CANCELLED', 'PLATFORM_ADMIN'])
 
 const snapshotAdministrator = {
   id: 'snapshot-admin-wang',
@@ -149,7 +149,7 @@ function formatDate(value: string) {
 function domainRole(domain: DomainCatalogItem, snapshot: boolean) {
   if (snapshot && snapshotRoleLabels[domain.code]) return snapshotRoleLabels[domain.code]
   if (domain.accessStatus === 'DOMAIN_ADMIN') return '领域管理员'
-  if (domain.accessStatus === 'PLATFORM_ADMIN') return '平台管理员'
+  if (domain.accessStatus === 'PLATFORM_ADMIN') return '平台管理员（未入域）'
   if (domain.accessStatus === 'MEMBER') return '领域成员'
   return '—'
 }

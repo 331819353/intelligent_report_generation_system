@@ -883,4 +883,3 @@
 .data-source-shell.qa-viewport-1920 .connection-facts,
 .data-source-shell.qa-viewport-1920 .receipt-facts,
 .data-source-shell.qa-viewport-1920 .sharing-card dl { grid-template-columns: minmax(0, 1fr); }
-body:has(.data-source-shell.qa-viewport-1920) { min-width: 1920px; min-height: 1080px; overflow: auto; }

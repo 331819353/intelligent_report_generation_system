@@ -162,7 +162,34 @@ func (binding *Binding) executeQueryPlan(
 	}
 	output.EvidenceRefs = []askdata.EvidenceRef{evidence}
 	output.MadeProgress = true
+	output.QueryScanBytes = estimatedQueryScanBytes(validation)
 	return output, nil
+}
+
+// estimatedQueryScanBytes derives a stable, strictly positive lower-bound
+// estimate from the trusted EXPLAIN summaries already validated for this run.
+// PostgreSQL does not expose actual heap bytes for a SELECT without adding a
+// second privileged query; eight bytes per estimated row keeps quota accounting
+// useful while remaining conservative and free of client/model input.
+func estimatedQueryScanBytes(validation validator.ValidationArtifact) int64 {
+	var total int64
+	for _, plan := range validation.Plans {
+		rows := plan.Explain.MaxNodeRows
+		if plan.Explain.MaxSequentialRows > rows {
+			rows = plan.Explain.MaxSequentialRows
+		}
+		if rows < 1 {
+			rows = 1
+		}
+		if rows > (1<<50)/8 || total > (1<<50)-(rows*8) {
+			return 1 << 50
+		}
+		total += rows * 8
+	}
+	if total < 1 {
+		return 1
+	}
+	return total
 }
 
 func executionVerdict(rowCount int) string {

@@ -1,19 +1,25 @@
 import { Eye, EyeSlash, LockKey, ShieldCheck, User, UserFocus } from '@phosphor-icons/react'
 import { FormEvent, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation } from 'react-router-dom'
 import { AppButton } from '../components/AppButton'
-import { RequestError } from '../lib/api'
+import { apiRequest, RequestError } from '../lib/api'
 import { login, register } from '../lib/auth'
 import { administrationAPI } from '../lib/administration'
 
 /** 收集平台账号凭据、处理登录状态并进入工作台。 */
 export function LoginPage() {
-  const navigate = useNavigate()
+  const location = useLocation()
   const [mode, setMode] = useState<'login' | 'register'>('login')
   const [error, setError] = useState('')
   const [supportNote, setSupportNote] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [passwordVisible, setPasswordVisible] = useState(false)
+  const today = new Date()
+  const qaViewport1920 = import.meta.env.DEV && new URLSearchParams(location.search).get('qa') === '1920'
+  const dateTime = [today.getFullYear(), String(today.getMonth() + 1).padStart(2, '0'), String(today.getDate()).padStart(2, '0')].join('-')
+  const displayDate = new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long',
+  }).format(today)
 
   function switchMode(nextMode: 'login' | 'register') {
     setMode(nextMode)
@@ -45,11 +51,15 @@ export function LoginPage() {
     try {
       if (mode === 'register') await register(employeeNo, displayName, email, password)
       else await login(account, password)
-      const [domains, platformAdministrator] = await Promise.all([
+      const [domains, access] = await Promise.all([
         administrationAPI.listDomains(),
-        administrationAPI.canManage(),
+        apiRequest<{ platformAdministrator: boolean }>('/v1/platform-management/access', { businessDomain: false, cache: 'no-store' }),
       ])
-      navigate(domains.length > 0 ? '/home' : platformAdministrator ? '/platform-management/domains' : '/domain-access')
+      const destination = domains.length > 0 ? '/home' : access.platformAdministrator ? '/platform-management/domains' : '/domain-access'
+      // Login replaces the public route instead of leaving it in history. A
+      // stale mounted login tree must not race the authenticated destination
+      // while global session/domain listeners initialize.
+      window.location.replace(destination)
     } catch (cause) {
       setError(cause instanceof RequestError
         ? cause.detail.message
@@ -60,7 +70,7 @@ export function LoginPage() {
   }
 
   return (
-    <main className="login-page">
+    <main className={`login-page${qaViewport1920 ? ' qa-preview-1920' : ''}`}>
       <section className="login-story" aria-labelledby="login-story-title">
         <header className="login-brand">
           <img className="brand-logo" src="/haier-logo.svg" alt="Haier 海尔" />
@@ -124,7 +134,7 @@ export function LoginPage() {
 
           <p className="form-hint"><ShieldCheck size={26} weight="regular" aria-hidden="true" />{mode === 'register' ? '注册即代表你同意遵守平台的账号与数据安全策略。' : '登录即代表你同意遵守平台的数据安全策略。'}</p>
         </form>
-        <time dateTime="2026-08-11" className="login-panel-date">2026-08-11&nbsp;&nbsp; 星期二</time>
+        <time dateTime={dateTime} className="login-panel-date">{displayDate}</time>
       </section>
     </main>
   )

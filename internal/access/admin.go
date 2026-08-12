@@ -589,7 +589,10 @@ func (s *AdminStore) UpdateUserStatus(
 	})
 }
 
-// ListDomains 返回当前租户的业务领域目录，所有已登录用户均可用于切换上下文。
+// ListDomains 返回当前用户真正能够进入的业务领域。平台管理员拥有租户控制面
+// 权限，但不因此获得业务数据面身份；完整领域目录由 managed-domains 和
+// domain-catalog 提供。这里若把平台管理员隐式视为所有领域成员，会让页面能
+// 进入，却在决策、审批等严格成员校验处中途失败。
 func (s *AdminStore) ListDomains(
 	ctx context.Context, tenantID, userID string,
 ) ([]BusinessDomain, error) {
@@ -638,16 +641,6 @@ func (s *AdminStore) listDomains(
 			FROM platform.business_domains AS domain
 			WHERE (
 			    $2::boolean
-			    OR EXISTS(
-			      SELECT 1 FROM platform.user_roles AS assignment
-			      JOIN platform.roles AS role
-			        ON role.id=assignment.role_id
-			       AND role.tenant_id=assignment.tenant_id
-			      WHERE assignment.tenant_id=domain.tenant_id
-			        AND assignment.user_id=$1::uuid
-			        AND role.code::text='platform_admin'
-			        AND role.status='ACTIVE' AND role.deleted_at IS NULL
-			    )
 			    OR EXISTS(
 			      SELECT 1 FROM platform.domain_memberships AS membership
 			      WHERE membership.tenant_id=domain.tenant_id
@@ -1157,18 +1150,6 @@ func (s *AdminStore) ListDomainCatalog(
 			domain.id,domain.code,domain.name,domain.description,domain.status,
 			domain.is_default,domain.version,domain.created_at::text,
 			CASE
-			  WHEN EXISTS(
-			    SELECT 1
-			    FROM platform.user_roles AS assignment
-			    JOIN platform.roles AS role
-			      ON role.id=assignment.role_id
-			     AND role.tenant_id=assignment.tenant_id
-			    WHERE assignment.tenant_id=domain.tenant_id
-			      AND assignment.user_id=$1::uuid
-			      AND role.code::text='platform_admin'
-			      AND role.status='ACTIVE'
-			      AND role.deleted_at IS NULL
-			  ) THEN 'PLATFORM_ADMIN'
 			  WHEN membership.user_id IS NOT NULL THEN membership.member_role::text
 			  WHEN application.status IS NOT NULL THEN application.status::text
 			  ELSE 'AVAILABLE'

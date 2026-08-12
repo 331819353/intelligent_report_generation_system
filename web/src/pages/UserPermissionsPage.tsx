@@ -513,7 +513,7 @@ export function UserPermissionsPage() {
     URL.revokeObjectURL(link.href)
   }
 
-  return <AppShell className="user-permissions-shell">
+  return <AppShell className="user-permissions-shell" controlPlane>
     <section className="user-permissions-page">
       <header className="user-permissions-heading">
         <div className="user-permissions-breadcrumb"><span>权限管理</span><CaretRight size={12} /><strong>用户权限</strong></div>

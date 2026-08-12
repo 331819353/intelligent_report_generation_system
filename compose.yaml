@@ -10,6 +10,36 @@ x-backend-build: &backend-build
   dockerfile: deployments/app/Dockerfile
 
 services:
+  # 只在 verification profile 中启动的真实 MySQL 验收源。
+  # 它不进入默认开发栈，也不保存平台控制数据；固定夹具用于验证非 PG 方言、
+  # 元数据发现、结构差异和下架撤权的完整产品链路。
+  mysql-e2e:
+    image: mysql:8.4
+    profiles: ["verification"]
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_E2E_ROOT_PASSWORD:-local_mysql_e2e_root_password}
+      MYSQL_DATABASE: ${MYSQL_E2E_DATABASE:-sales_e2e}
+      MYSQL_USER: ${MYSQL_E2E_USER:-report_reader}
+      MYSQL_PASSWORD: ${MYSQL_E2E_PASSWORD:-local_mysql_e2e_reader_password}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+08:00
+    ports:
+      - "127.0.0.1:${MYSQL_E2E_PORT:-3307}:3306"
+    volumes:
+      - mysql_e2e_data:/var/lib/mysql
+      - ./deployments/mysql-e2e/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    networks: [report_net]
+
   # 平台控制面数据库：只保存账号、权限、数据源/数据集/指标和治理元数据。
   postgres:
     image: pgvector/pgvector:pg17
@@ -566,6 +596,7 @@ services:
     networks: [report_net]
 
 volumes:
+  mysql_e2e_data:
   postgres_control_data:
   postgres_warehouse_data:
   minio_data:

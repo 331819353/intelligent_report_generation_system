@@ -237,18 +237,22 @@ func (store *PostgresStore) Claim(
 		item.Plan = plan
 
 		if priorStatus == string(RunRunning) {
-			// A reclaimed run replays its immutable plan from the beginning.
-			// Reset every prior node outcome, not only the node that happened to
-			// be RUNNING when the lease expired; otherwise the new worker would
-			// hit an invalid transition on already-SUCCEEDED ancestors.
+			// Preserve completed logical checkpoints. The materialization node is
+			// retried because its shadow and activation form one fenced unit.
 			if _, err := tx.Exec(ctx, `UPDATE platform.build_node_runs SET
 				status='PENDING',attempt=0,input_row_count=NULL,output_row_count=NULL,
 				output_size_bytes=NULL,error_code='',error_message='',
 				started_at=NULL,completed_at=NULL,updated_at=now()
-				WHERE build_run_id=$1 AND status<>'PENDING'`, item.ID); err != nil {
+				WHERE build_run_id=$1 AND status<>'PENDING'
+				  AND NOT(status='SUCCEEDED' AND node_kind<>'MATERIALIZE')`, item.ID); err != nil {
 				return err
 			}
 		}
+		completedNodes, err := loadCompletedNodeResultsTx(ctx, tx, item.ID)
+		if err != nil {
+			return err
+		}
+		item.CompletedNodes = completedNodes
 		inputs, err := loadInputsTx(ctx, tx, item.ID)
 		if err != nil {
 			return err
@@ -275,6 +279,42 @@ func (store *PostgresStore) Claim(
 		return nil, mapStoreError(err)
 	}
 	return claim, nil
+}
+
+func loadCompletedNodeResultsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	buildRunID string,
+) (map[string]NodeResult, error) {
+	rows, err := tx.Query(ctx, `SELECT node_id,input_row_count,
+		output_row_count,output_size_bytes
+		FROM platform.build_node_runs
+		WHERE build_run_id=$1 AND status='SUCCEEDED'
+		  AND node_kind<>'MATERIALIZE'`, buildRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	results := map[string]NodeResult{}
+	for rows.Next() {
+		var nodeID string
+		var inputRows, outputRows, outputBytes pgtype.Int8
+		if err := rows.Scan(
+			&nodeID, &inputRows, &outputRows, &outputBytes,
+		); err != nil {
+			return nil, err
+		}
+		results[nodeID] = NodeResult{
+			Status:          NodeSucceeded,
+			InputRowCount:   int64Pointer(inputRows),
+			OutputRowCount:  int64Pointer(outputRows),
+			OutputSizeBytes: int64Pointer(outputBytes),
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 // Heartbeat extends a live lease while preserving the random fencing token.
@@ -534,14 +574,29 @@ func (store *PostgresStore) Activate(
 		)`, "dataset-publication:"+claim.TenantID+":"+claim.DatasetID); err != nil {
 			return err
 		}
-		var previousBuildRunID, previousPhysicalSchema string
-		previousErr := tx.QueryRow(ctx, `SELECT build_run_id::text,physical_schema
+		var previousMaterializationID, previousBuildRunID string
+		var previousPhysicalSchema, previousSnapshotHash string
+		previousErr := tx.QueryRow(ctx, `SELECT id::text,build_run_id::text,
+			physical_schema,snapshot_hash
 			FROM platform.dataset_materializations
 			WHERE dataset_id=$1 AND status='ACTIVE'
 			FOR UPDATE`, claim.DatasetID).
-			Scan(&previousBuildRunID, &previousPhysicalSchema)
+			Scan(
+				&previousMaterializationID, &previousBuildRunID,
+				&previousPhysicalSchema, &previousSnapshotHash,
+			)
 		if previousErr != nil && !errors.Is(previousErr, pgx.ErrNoRows) {
 			return previousErr
+		}
+		// Registration freezes the active base for an incremental build. The
+		// resolver checks it before execution, but another build may activate
+		// between execution and this publication lock. Reject that stale
+		// activation instead of overwriting a newer snapshot with an older base.
+		if claim.Mode == RunModeIncremental &&
+			(errors.Is(previousErr, pgx.ErrNoRows) ||
+				previousMaterializationID != claim.Plan.Target.BaseMaterializationID ||
+				previousSnapshotHash != claim.Plan.Target.BaseSnapshotHash) {
+			return ErrConflict
 		}
 
 		if _, err := tx.Exec(ctx, `UPDATE platform.dataset_materializations SET

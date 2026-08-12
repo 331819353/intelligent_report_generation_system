@@ -191,6 +191,7 @@ export function RuntimeConfigPage() {
     title="运行配置中心"
     eyebrow="平台控制面"
     className="administration-shell runtime-config-shell"
+    controlPlane
     actions={<><AppButton type="button" disabled={loading || Boolean(busy)} onClick={() => void load()}><ArrowClockwise className={loading ? 'spin' : ''} size={17} />刷新</AppButton><AppButton variant="primary" type="button" onClick={() => setDialog('create')}><Plus size={17} />新建配置版本</AppButton></>}
   >
     <section className="runtime-config-page">

@@ -7,6 +7,7 @@ import (
 )
 
 var physicalNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+var warehousePhysicalNamePattern = regexp.MustCompile(`^(ods|dim|dwd|dws|ads)_t[0-9a-f]{12}_d[0-9a-f]{12}_r[0-9a-f]{12}$`)
 
 // GeneratePhysicalIdentifier returns names owned by the platform, not callers.
 // Hash fragments keep identifiers below PostgreSQL's 63-byte limit and avoid
@@ -66,6 +67,30 @@ func ValidatePhysicalIdentifier(identifier PhysicalIdentifier, tenantID, dataset
 		return ErrInvalidRequest
 	}
 	return nil
+}
+
+// ValidWarehousePhysicalRelation verifies a persisted materialization relation
+// without accepting a caller-provided dataset or run identity. The tenant hash,
+// layer prefix and fixed warehouse schema must all match.
+func ValidWarehousePhysicalRelation(
+	tenantID string,
+	layer string,
+	schema string,
+	name string,
+) bool {
+	parsedLayer := Layer(strings.ToUpper(strings.TrimSpace(layer)))
+	if !validUUID(tenantID) || !validLayer(parsedLayer) ||
+		!warehousePhysicalNamePattern.MatchString(name) {
+		return false
+	}
+	expectedSchema := map[Layer]string{
+		LayerODS: "warehouse_ods", LayerDIM: "warehouse_dim",
+		LayerDWD: "warehouse_dwd", LayerDWS: "warehouse_dws",
+		LayerADS: "warehouse_ads",
+	}[parsedLayer]
+	tenantHash := sha256Hex([]byte("tenant\x00" + tenantID))[:12]
+	return schema == expectedSchema &&
+		strings.HasPrefix(name, strings.ToLower(string(parsedLayer))+"_t"+tenantHash+"_")
 }
 
 // publicationSwapNames derives transaction-local and retired view names without

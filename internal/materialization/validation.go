@@ -82,6 +82,17 @@ func (plan BuildPlan) Validate() error {
 		plan.Target.RefreshMode != string(plan.Mode) || !plan.Target.StableViewName {
 		return ErrInvalidRequest
 	}
+	if plan.Mode == RunModeIncremental {
+		if !validUUID(plan.Target.BaseMaterializationID) ||
+			!hashPattern.MatchString(plan.Target.BaseSnapshotHash) ||
+			plan.Target.BaseDataAvailableThrough == nil {
+			return ErrInvalidRequest
+		}
+	} else if plan.Target.BaseMaterializationID != "" ||
+		plan.Target.BaseSnapshotHash != "" ||
+		plan.Target.BaseDataAvailableThrough != nil {
+		return ErrInvalidRequest
+	}
 	sourceBacked := isSourceBackedPlan(plan)
 	if plan.Layer == LayerODS && !sourceBacked {
 		return ErrInvalidRequest

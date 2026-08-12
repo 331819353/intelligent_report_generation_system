@@ -1099,6 +1099,43 @@ textarea:focus-visible {
   .data-source-ai-launcher-tip { display: none; }
 }
 
+/* Visual QA keeps the approved desktop canvas deterministic even when the
+   browser-control surface itself is smaller than the 1920px design target. */
+.login-page.qa-preview-1920 {
+  width: 1920px;
+  min-width: 1920px;
+  height: 1080px;
+  min-height: 1080px;
+  grid-template-columns: minmax(680px, 61.72%) minmax(520px, 38.28%);
+  transform: scale(var(--qa-preview-scale, 1));
+  transform-origin: left top;
+}
+.login-page.qa-preview-1920 .login-story { min-height: 1080px; }
+.login-page.qa-preview-1920 .login-brand { gap: 28px; padding: 62px 64px 0; }
+.login-page.qa-preview-1920 .login-brand .brand-logo { width: 154px; }
+.login-page.qa-preview-1920 .login-brand strong { font-size: 24px; }
+.login-page.qa-preview-1920 .login-brand span { font-size: 12px; }
+.login-page.qa-preview-1920 .login-story-copy { top: 29.5%; left: 99px; max-width: calc(100% - 150px); }
+.login-page.qa-preview-1920 .login-story h1 { font-size: 68px; white-space: nowrap; }
+.login-page.qa-preview-1920 .login-story-copy > p { margin-top: 27px; font-size: 22px; letter-spacing: .08em; }
+.login-page.qa-preview-1920 .login-story-footer { right: 54px; bottom: 57px; left: 64px; gap: 25px; font-size: 16px; }
+.login-page.qa-preview-1920 .login-story-footer span:last-child { display: inline-flex; }
+.login-page.qa-preview-1920 .login-story-footer i:last-of-type { display: block; }
+.login-page.qa-preview-1920 .login-panel { min-height: 1080px; padding: 60px 83px 60px 64px; }
+.login-page.qa-preview-1920 .login-panel form { width: min(560px, 100%); margin-inline: 0; }
+.login-page.qa-preview-1920 .login-mode-switch .login-mode-tab.app-button { min-height: 62px; font-size: 27px; }
+.login-page.qa-preview-1920 .login-field { gap: 13px; margin-bottom: 39px; font-size: 16px; }
+.login-page.qa-preview-1920 .login-input { min-height: 74px; padding-inline: 18px; }
+.login-page.qa-preview-1920 .login-input input { height: 70px; font-size: 17px; }
+.login-page.qa-preview-1920 .login-assistance { margin: -15px 0 53px; }
+.login-page.qa-preview-1920 .login-submit.app-button { min-height: 76px; font-size: 22px; }
+.login-page.qa-preview-1920 .form-hint { margin-top: 28px; font-size: 15px; }
+.login-page.qa-preview-1920 .login-panel-date { bottom: 60px; font-size: 15px; }
+body:has(.login-page.qa-preview-1920) { min-width: 0; min-height: 100vh; overflow: hidden; }
+@media (max-width: 1280px) and (max-height: 720px) {
+  .login-page.qa-preview-1920 { --qa-preview-scale: .6666666667; }
+}
+
 /* Object-level sharing impact preview (UI-FLOW-P01-B03). Narrowing an asset to
    PRIVATE removes the read permission its dependents rely on, so the cost is
    shown before the change is applied. */

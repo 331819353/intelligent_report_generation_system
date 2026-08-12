@@ -9,6 +9,7 @@ artifacts/
 design-qa.md
 design-qa-artifacts/
 design-audit-artifacts/
+.qa/
 coverage.out
 *.test
 *.log

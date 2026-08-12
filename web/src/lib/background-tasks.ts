@@ -73,18 +73,18 @@ export function takeBackgroundTaskFocus(): BackgroundTaskFocus | null {
 export const backgroundTaskAPI = {
   list(view: BackgroundTaskView = 'ACTIVE', limit = 100) {
     const query = new URLSearchParams({ view, limit: String(limit) })
-    return apiRequest<BackgroundTaskPage>(`/v1/background-tasks?${query}`)
+    return apiRequest<BackgroundTaskPage>(`/v1/background-tasks?${query}`, { businessDomain: false })
   },
   cancel(task: Pick<BackgroundTask, 'kind' | 'id'>) {
     return apiRequest<BackgroundTask>(
       `/v1/background-tasks/${encodeURIComponent(task.kind)}/${encodeURIComponent(task.id)}/cancel`,
-      { method: 'POST' },
+      { method: 'POST', businessDomain: false },
     )
   },
   retry(task: Pick<BackgroundTask, 'kind' | 'id'>) {
     return apiRequest<BackgroundTask>(
       `/v1/background-tasks/${encodeURIComponent(task.kind)}/${encodeURIComponent(task.id)}/retry`,
-      { method: 'POST' },
+      { method: 'POST', businessDomain: false },
     )
   },
 }

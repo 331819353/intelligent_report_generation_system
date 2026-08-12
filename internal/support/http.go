@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 
+	accesspkg "intelligent-report-generation-system/internal/access"
 	"intelligent-report-generation-system/internal/auth"
 	"intelligent-report-generation-system/internal/platform/database"
 )
@@ -18,15 +19,18 @@ type Store interface {
 	Transition(context.Context, Identity, string, TransitionInput) (Ticket, error)
 }
 
-type Handler struct{ store Store }
+type Handler struct {
+	permissions *accesspkg.Service
+	store       Store
+}
 
-func NewHandler(authService *auth.Service, store Store) http.Handler {
-	handler := &Handler{store: store}
+func NewHandler(authService *auth.Service, permissions *accesspkg.Service, store Store) http.Handler {
+	handler := &Handler{permissions: permissions, store: store}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/support-tickets", handler.create)
 	mux.HandleFunc("GET /api/v1/support-tickets", handler.list)
 	mux.HandleFunc("POST /api/v1/support-tickets/{id}/transition", handler.transition)
-	return auth.RequireAccessToken(authService, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	return auth.RequireSessionAccessToken(authService, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Cache-Control", "no-store")
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
 		mux.ServeHTTP(writer, request)
@@ -34,7 +38,7 @@ func NewHandler(authService *auth.Service, store Store) http.Handler {
 }
 
 func (handler *Handler) create(writer http.ResponseWriter, request *http.Request) {
-	identity, ok := requestIdentity(writer, request)
+	identity, requestContext, ok := handler.requestIdentity(writer, request, false)
 	if !ok {
 		return
 	}
@@ -43,7 +47,7 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 		writeError(writer, ErrInvalid)
 		return
 	}
-	value, err := handler.store.Create(request.Context(), identity, input)
+	value, err := handler.store.Create(requestContext, identity, input)
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -52,11 +56,11 @@ func (handler *Handler) create(writer http.ResponseWriter, request *http.Request
 }
 
 func (handler *Handler) list(writer http.ResponseWriter, request *http.Request) {
-	identity, ok := requestIdentity(writer, request)
+	queue := request.URL.Query().Get("scope") == "queue"
+	identity, requestContext, ok := handler.requestIdentity(writer, request, queue)
 	if !ok {
 		return
 	}
-	queue := request.URL.Query().Get("scope") == "queue"
 	for key := range request.URL.Query() {
 		if key != "scope" && key != "limit" {
 			writeError(writer, ErrInvalid)
@@ -72,7 +76,7 @@ func (handler *Handler) list(writer http.ResponseWriter, request *http.Request) 
 			return
 		}
 	}
-	items, err := handler.store.List(request.Context(), identity, queue, limit)
+	items, err := handler.store.List(requestContext, identity, queue, limit)
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -81,7 +85,7 @@ func (handler *Handler) list(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (handler *Handler) transition(writer http.ResponseWriter, request *http.Request) {
-	identity, ok := requestIdentity(writer, request)
+	identity, requestContext, ok := handler.requestIdentity(writer, request, true)
 	if !ok {
 		return
 	}
@@ -90,7 +94,7 @@ func (handler *Handler) transition(writer http.ResponseWriter, request *http.Req
 		writeError(writer, ErrInvalid)
 		return
 	}
-	value, err := handler.store.Transition(request.Context(), identity, request.PathValue("id"), input)
+	value, err := handler.store.Transition(requestContext, identity, request.PathValue("id"), input)
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -98,15 +102,37 @@ func (handler *Handler) transition(writer http.ResponseWriter, request *http.Req
 	writeJSON(writer, http.StatusOK, value)
 }
 
-func requestIdentity(writer http.ResponseWriter, request *http.Request) (Identity, bool) {
+func (handler *Handler) requestIdentity(writer http.ResponseWriter, request *http.Request, allowTenantControl bool) (Identity, context.Context, bool) {
 	claims, claimsOK := auth.ClaimsFromContext(request.Context())
 	access, accessOK := database.AccessContextFromContext(request.Context())
 	identity := Identity{TenantID: claims.TenantID, DomainID: access.DomainID, ActorID: claims.Subject}
-	if !claimsOK || !accessOK || !identity.Valid() || access.UserID != claims.Subject {
+	if !claimsOK || !accessOK || access.UserID != claims.Subject || !identity.tenantActorValid() {
 		writeError(writer, ErrForbidden)
-		return Identity{}, false
+		return Identity{}, nil, false
 	}
-	return identity, true
+	if identity.Valid() {
+		return identity, request.Context(), true
+	}
+	if !allowTenantControl || access.DomainID != "" || handler.permissions == nil {
+		writeError(writer, ErrForbidden)
+		return Identity{}, nil, false
+	}
+	allowed, err := handler.permissions.Allowed(request.Context(), accesspkg.Check{
+		TenantID: identity.TenantID, UserID: identity.ActorID,
+		ResourceType: "USER", Action: "MANAGE",
+	})
+	if err != nil {
+		writeError(writer, err)
+		return Identity{}, nil, false
+	}
+	if !allowed {
+		writeError(writer, ErrForbidden)
+		return Identity{}, nil, false
+	}
+	// The fixed platform administrator role has already been checked above.
+	// Execute the tenant-wide queue operation in the repository's SYSTEM RLS
+	// mode so an intentionally unbound control-plane session can span domains.
+	return identity, request.Context(), true
 }
 
 func decodeJSON(writer http.ResponseWriter, request *http.Request, value any) error {

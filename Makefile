@@ -1,4 +1,4 @@
-.PHONY: fmt lint build ci-check run-api run-worker run-connection-test-worker dev-up dev-stop dev-restart dev-status dev-logs seed-dev frontend-lint frontend-build infra-config infra-up connector-up connector-status infra-down infra-reset infra-status infra-logs db-migrate db-seed-report-components db-verify warehouse-verify db-shell warehouse-shell clean
+.PHONY: fmt lint build ci-check run-api run-worker run-connection-test-worker dev-up dev-stop dev-restart dev-status dev-logs seed-dev frontend-lint frontend-build infra-config infra-up connector-up connector-status mysql-e2e-up mysql-e2e-reset mysql-e2e-shell mysql-e2e-verify infra-down infra-reset infra-status infra-logs db-migrate db-seed-report-components db-verify warehouse-verify db-shell warehouse-shell clean
 
 export GOCACHE ?= $(CURDIR)/.cache/go-build
 
@@ -25,7 +25,7 @@ frontend-lint:
 frontend-build:
 	@npm --prefix web run build
 
-# 本地基础设施。外部 MySQL/Oracle 由用户配置，不在项目内启动测试实例。
+# 本地基础设施。常规运行不启动验收源；真实 MySQL 只在 verification profile 中启用。
 infra-config:
 	@docker compose --env-file .env.example config --quiet
 
@@ -38,6 +38,24 @@ connector-up:
 
 connector-status:
 	@docker compose --env-file .env.example ps connector-service
+
+# 真实 MySQL 非 PG 方言验收源；只在显式 verification profile 中运行。
+mysql-e2e-up:
+	@compose_env='--env-file .env.example'; if [ -f .env ]; then compose_env="$$compose_env --env-file .env"; fi; docker compose $$compose_env --profile verification up -d --wait mysql-e2e connector-service
+
+mysql-e2e-reset:
+	@compose_env='--env-file .env.example'; if [ -f .env ]; then compose_env="$$compose_env --env-file .env"; fi; docker compose $$compose_env --profile verification rm -sfv mysql-e2e
+	@docker volume rm intelligent-report-system_mysql_e2e_data 2>/dev/null || true
+	@$(MAKE) mysql-e2e-up
+
+mysql-e2e-shell:
+	@compose_env='--env-file .env.example'; if [ -f .env ]; then compose_env="$$compose_env --env-file .env"; fi; docker compose $$compose_env --profile verification exec mysql-e2e sh -lc 'MYSQL_PWD="$$MYSQL_PASSWORD" exec mysql -u"$$MYSQL_USER" "$$MYSQL_DATABASE"'
+
+mysql-e2e-verify:
+	@compose_env='--env-file .env.example'; if [ -f .env ]; then compose_env="$$compose_env --env-file .env"; fi; \
+	result="$$(docker compose $$compose_env --profile verification exec -T mysql-e2e sh -lc 'MYSQL_PWD="$$MYSQL_PASSWORD" mysql -u"$$MYSQL_USER" "$$MYSQL_DATABASE" --batch --skip-column-names -e "SELECT COUNT(*),COALESCE(SUM(sales_amount),0),COALESCE(SUM(cost_amount),0) FROM sales_order_lines"')"; \
+	test "$$result" = '5	50291.00	38760.00' || { echo "unexpected MySQL verification fixture receipt"; exit 1; }; \
+	echo "MySQL verification fixture is intact (5 rows, trusted aggregates match)."
 
 infra-down:
 	@docker compose --env-file .env.example down

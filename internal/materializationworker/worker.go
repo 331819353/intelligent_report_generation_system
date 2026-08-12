@@ -236,6 +236,12 @@ func (worker *Worker) execute(
 	materializeNodeID := ""
 	nodeOutputs := map[string]*int64{}
 	for _, node := range nodes {
+		if completed, ok := claim.CompletedNodes[node.ID]; ok &&
+			completed.Status == materialization.NodeSucceeded &&
+			node.Kind != materialization.NodeMaterialize {
+			nodeOutputs[node.ID] = cloneCount(completed.OutputRowCount)
+			continue
+		}
 		if err := worker.store.StartNode(ctx, claim, node.ID); err != nil {
 			return materialization.Activation{}, nil, err
 		}
@@ -268,6 +274,7 @@ func (worker *Worker) execute(
 			Layer: string(claim.Layer), Document: resolved.Document,
 			Tables: resolved.Tables, Parameters: nil, RequireRows: false,
 			BusinessKeyCode: append([]string(nil), resolved.Document.OutputGrain.KeyFields...),
+			Incremental:     resolved.Incremental,
 		})
 		cancelBuild()
 		if err != nil {
@@ -351,11 +358,17 @@ func (worker *Worker) execute(
 	snapshotHash := outputSnapshotHash(
 		claim, resolved.SchemaHash, buildResult.RowCount, buildResult.SizeBytes,
 	)
-	watermark, _ := json.Marshal(map[string]string{
+	watermarkDocument := map[string]string{
 		"buildRunId":        claim.ID,
 		"inputSnapshotHash": claim.InputSnapshotHash,
 		"planHash":          claim.PlanHash,
-	})
+		"refreshStrategy":   buildResult.RefreshStrategy,
+	}
+	if claim.Mode == materialization.RunModeIncremental {
+		watermarkDocument["baseMaterializationId"] = claim.Plan.Target.BaseMaterializationID
+		watermarkDocument["baseSnapshotHash"] = claim.Plan.Target.BaseSnapshotHash
+	}
+	watermark, _ := json.Marshal(watermarkDocument)
 	return materialization.Activation{
 		Physical: physical, RelationKind: claim.Plan.Target.RelationKind,
 		SchemaHash: resolved.SchemaHash, SnapshotHash: snapshotHash,

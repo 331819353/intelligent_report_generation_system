@@ -22,9 +22,12 @@ func NewHandler(service *Service) http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/refresh", h.refresh)
 	mux.HandleFunc("POST /api/v1/auth/logout", h.logout)
 	mux.Handle("PUT /api/v1/auth/domain", RequireTenantAccessToken(service, http.HandlerFunc(h.switchDomain)))
-	mux.Handle("GET /api/v1/auth/me", RequireAccessToken(service, http.HandlerFunc(h.me)))
-	mux.Handle("PATCH /api/v1/auth/me", RequireAccessToken(service, http.HandlerFunc(h.updateMe)))
-	mux.Handle("PUT /api/v1/auth/password", RequireAccessToken(service, http.HandlerFunc(h.changePassword)))
+	// Account profile and password are tenant control-plane concerns. Requiring
+	// a business domain here made platform-only administrators lose their valid
+	// session while the global header loaded their display name.
+	mux.Handle("GET /api/v1/auth/me", RequireSessionAccessToken(service, http.HandlerFunc(h.me)))
+	mux.Handle("PATCH /api/v1/auth/me", RequireSessionAccessToken(service, http.HandlerFunc(h.updateMe)))
+	mux.Handle("PUT /api/v1/auth/password", RequireSessionAccessToken(service, http.HandlerFunc(h.changePassword)))
 	return mux
 }
 
@@ -258,7 +261,7 @@ func ClaimsFromContext(ctx context.Context) (AccessClaims, bool) {
 }
 
 func requireAccessToken(
-	service *Service, useRequestedDomain bool, next http.Handler,
+	service *Service, useRequestedDomain, tenantControlPlane bool, next http.Handler,
 ) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		header := r.Header.Get("Authorization")
@@ -298,6 +301,11 @@ func requireAccessToken(
 					return
 				}
 			}
+		} else if tenantControlPlane {
+			// Tenant control-plane endpoints must never inherit a domain that was
+			// bound to an earlier business-data session. Explicitly remove it so
+			// repositories and RLS cannot accidentally narrow a platform view.
+			domainID = ""
 		}
 		if useRequestedDomain && domainID == "" {
 			writeAuthError(
@@ -314,11 +322,17 @@ func requireAccessToken(
 
 // RequireAccessToken 验证 Bearer 令牌、会话和请求指定的业务领域。
 func RequireAccessToken(service *Service, next http.Handler) http.Handler {
-	return requireAccessToken(service, true, next)
+	return requireAccessToken(service, true, false, next)
 }
 
 // RequireTenantAccessToken 用于租户管理控制面：忽略客户端领域请求头。
 // 无领域用户仍可登录并在控制面申请领域，但无法进入任何数据面接口。
 func RequireTenantAccessToken(service *Service, next http.Handler) http.Handler {
-	return requireAccessToken(service, false, next)
+	return requireAccessToken(service, false, true, next)
+}
+
+// RequireSessionAccessToken 用于个人资料等账号接口：不接受客户端领域覆盖，
+// 但保留服务端已经验证的会话领域，便于返回当前领域角色。
+func RequireSessionAccessToken(service *Service, next http.Handler) http.Handler {
+	return requireAccessToken(service, false, false, next)
 }

@@ -46,53 +46,73 @@ func (repository *Repository) Create(ctx context.Context, identity Identity, inp
 }
 
 func (repository *Repository) List(ctx context.Context, identity Identity, queue bool, limit int) ([]Ticket, error) {
-	if repository == nil || repository.pool == nil || !identity.Valid() || limit < 1 || limit > 200 {
+	validIdentity := identity.Valid() || queue && identity.DomainID == "" && identity.tenantActorValid()
+	if repository == nil || repository.pool == nil || !validIdentity || limit < 1 || limit > 200 {
 		return nil, ErrInvalid
 	}
 	items := []Ticket{}
-	err := database.WithTenantTx(ctx, repository.pool, identity.TenantID, func(tx pgx.Tx) error {
+	transactionContext := ctx
+	if queue && identity.DomainID == "" {
+		transactionContext = database.WithoutAccessContext(ctx)
+	}
+	err := database.WithTenantTx(transactionContext, repository.pool, identity.TenantID, func(tx pgx.Tx) error {
+		if queue && identity.DomainID == "" {
+			rows, err := tx.Query(ctx, `SELECT `+ticketColumns+` FROM platform.support_tickets AS ticket
+				JOIN platform.users AS reporter ON reporter.tenant_id=ticket.tenant_id AND reporter.id=ticket.reporter_user_id
+				LEFT JOIN platform.users AS assignee ON assignee.tenant_id=ticket.tenant_id AND assignee.id=ticket.assignee_user_id
+				WHERE ticket.tenant_id=$1
+				ORDER BY CASE ticket.status WHEN 'OPEN' THEN 0 WHEN 'IN_PROGRESS' THEN 1 WHEN 'RESOLVED' THEN 2 ELSE 3 END,
+				CASE ticket.priority WHEN 'URGENT' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END,ticket.updated_at DESC LIMIT $2`,
+				identity.TenantID, limit)
+			return collectTickets(rows, err, &items)
+		}
 		filter := "AND ticket.reporter_user_id=$3"
-		limitPlaceholder := "$4"
-		arguments := []any{identity.TenantID, identity.DomainID, identity.ActorID, limit}
 		if queue {
 			filter = ""
-			limitPlaceholder = "$3"
-			arguments = []any{identity.TenantID, identity.DomainID, limit}
 		}
 		rows, err := tx.Query(ctx, `SELECT `+ticketColumns+` FROM platform.support_tickets AS ticket
 			JOIN platform.users AS reporter ON reporter.tenant_id=ticket.tenant_id AND reporter.id=ticket.reporter_user_id
 			LEFT JOIN platform.users AS assignee ON assignee.tenant_id=ticket.tenant_id AND assignee.id=ticket.assignee_user_id
 			WHERE ticket.tenant_id=$1 AND ticket.domain_id=$2 `+filter+`
 			ORDER BY CASE ticket.status WHEN 'OPEN' THEN 0 WHEN 'IN_PROGRESS' THEN 1 WHEN 'RESOLVED' THEN 2 ELSE 3 END,
-			CASE ticket.priority WHEN 'URGENT' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END,ticket.updated_at DESC LIMIT `+limitPlaceholder,
-			arguments...)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var item Ticket
-			if err := scanTicket(rows, &item); err != nil {
-				return err
-			}
-			items = append(items, item)
-		}
-		return rows.Err()
+			CASE ticket.priority WHEN 'URGENT' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END,ticket.updated_at DESC LIMIT $4`,
+			identity.TenantID, identity.DomainID, identity.ActorID, limit)
+		return collectTickets(rows, err, &items)
 	})
 	return items, mapError(err)
 }
 
+func collectTickets(rows pgx.Rows, err error, items *[]Ticket) error {
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item Ticket
+		if err := scanTicket(rows, &item); err != nil {
+			return err
+		}
+		*items = append(*items, item)
+	}
+	return rows.Err()
+}
+
 func (repository *Repository) Transition(ctx context.Context, identity Identity, id string, input TransitionInput) (Ticket, error) {
-	if repository == nil || repository.pool == nil || !identity.Valid() || input.normalize() != nil {
+	validIdentity := identity.Valid() || identity.DomainID == "" && identity.tenantActorValid()
+	if repository == nil || repository.pool == nil || !validIdentity || input.normalize() != nil {
 		return Ticket{}, ErrInvalid
 	}
 	var result Ticket
-	err := database.WithTenantTx(ctx, repository.pool, identity.TenantID, func(tx pgx.Tx) error {
+	transactionContext := ctx
+	if identity.DomainID == "" {
+		transactionContext = database.WithoutAccessContext(ctx)
+	}
+	err := database.WithTenantTx(transactionContext, repository.pool, identity.TenantID, func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx, `WITH selected AS (
 			UPDATE platform.support_tickets SET status=$1,resolution_note=$2,
 			resolved_at=CASE WHEN $1 IN('RESOLVED','CLOSED') THEN now() ELSE NULL END,
 			record_version=record_version+1,updated_at=now()
-			WHERE tenant_id=$3 AND domain_id=$4 AND id=$5 AND record_version=$6
+			WHERE tenant_id=$3 AND ($4::text='' OR domain_id=$4::uuid) AND id=$5 AND record_version=$6
 			RETURNING *
 		) SELECT `+ticketColumns+` FROM selected AS ticket
 		JOIN platform.users AS reporter ON reporter.tenant_id=ticket.tenant_id AND reporter.id=ticket.reporter_user_id
@@ -106,6 +126,7 @@ func (repository *Repository) Transition(ctx context.Context, identity Identity,
 	})
 	return result, mapError(err)
 }
+
 
 type scanner interface{ Scan(...any) error }
 

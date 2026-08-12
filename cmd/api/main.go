@@ -172,7 +172,7 @@ func main() {
 	runtimeConfigHandler := runtimeconfig.NewHandler(
 		authService, platformidempotency.NewPostgresRepository(pool), runtimeConfigService,
 	)
-	supportHandler := support.NewHandler(authService, support.NewRepository(pool))
+	supportHandler := support.NewHandler(authService, accessService, support.NewRepository(pool))
 	assetScopeHandler := access.NewAssetScopeHandler(authService, access.NewAssetScopeStore(pool))
 
 	dataSourceRepo := datasource.NewPostgresRepository(pool)

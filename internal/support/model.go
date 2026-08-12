@@ -26,6 +26,10 @@ func (identity Identity) Valid() bool {
 	return uuid.Validate(identity.TenantID) == nil && uuid.Validate(identity.DomainID) == nil && uuid.Validate(identity.ActorID) == nil
 }
 
+func (identity Identity) tenantActorValid() bool {
+	return uuid.Validate(identity.TenantID) == nil && uuid.Validate(identity.ActorID) == nil
+}
+
 type CreateInput struct {
 	ClientRequestID string `json:"clientRequestId"`
 	Category        string `json:"category"`

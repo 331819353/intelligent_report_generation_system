@@ -56,6 +56,7 @@ type AppShellProps = {
   actions?: ReactNode
   className?: string
   lockBusinessDomain?: boolean
+  controlPlane?: boolean
 }
 
 type NavItem = {
@@ -96,10 +97,9 @@ function domainVisual(code: string) {
   return { icon: Buildings, tone: 'cyan' }
 }
 
-function domainRoleLabel(domain: BusinessDomain, subject: string, canManage: boolean | null, snapshot: boolean) {
+function domainRoleLabel(domain: BusinessDomain, subject: string, snapshot: boolean) {
   if (snapshot) return domain.code.includes('ENTERPRISE') ? '领域管理员' : '领域成员'
   if (domain.administrators.some(item => item.id === subject)) return '领域管理员'
-  if (canManage) return '平台管理员'
   return '领域成员'
 }
 
@@ -157,13 +157,14 @@ const snapshotNotifications: NotificationItem[] = [
 ]
 
 /** 为业务、协同和治理页面提供统一的全局框架。 */
-export function AppShell({ title = '智能分析决策平台', titleMeta, eyebrow = '工作台', children, actions, className = '' }: AppShellProps) {
+export function AppShell({ title = '智能分析决策平台', titleMeta, eyebrow = '工作台', children, actions, className = '', controlPlane = false }: AppShellProps) {
   const navigate = useNavigate()
   const location = useLocation()
   const domainSwitcherRef = useRef<HTMLDivElement>(null)
   const utilityRef = useRef<HTMLDivElement>(null)
   const searchParams = new URLSearchParams(window.location.search)
   const designSnapshot = import.meta.env.DEV && Boolean(searchParams.get('snapshot'))
+  const platformRoute = controlPlane || location.pathname.startsWith('/platform-management')
   const domainSwitchPreview = designSnapshot && searchParams.get('domainMenu') === 'open'
   const hasRealAccessToken = currentTokens()?.accessToken.split('.').length === 3
   const [domains, setDomains] = useState<BusinessDomain[]>(designSnapshot ? snapshotDomains : [])
@@ -242,6 +243,11 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
 
   useEffect(() => {
     if (designSnapshot) return undefined
+    // The global work inbox is a business-domain projection. A platform-only
+    // administrator has no selected domain, so requesting it would correctly
+    // return BUSINESS_DOMAIN_REQUIRED and the shared API recovery would then
+    // bounce the control plane to /domain-access.
+    if (platformRoute || !selectedDomain?.id) return undefined
     let cancelled = false
     void homeAPI.listWorkItems({ unread: true, limit: 200 })
       .then(result => {
@@ -266,7 +272,13 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
       })
       .finally(() => { if (!cancelled) setNotificationLoading(false) })
     return () => { cancelled = true }
-  }, [designSnapshot])
+  }, [designSnapshot, platformRoute, selectedDomain?.id])
+
+  const businessNotificationsAvailable = designSnapshot || Boolean(selectedDomain?.id) && !platformRoute
+  const visibleNotifications = businessNotificationsAvailable ? notifications : []
+  const visibleNotificationTotal = businessNotificationsAvailable ? notificationTotal : 0
+  const visibleNotificationLoading = businessNotificationsAvailable && notificationLoading
+  const visibleNotificationError = businessNotificationsAvailable ? notificationError : ''
 
   useEffect(() => {
     if (!domainMenuOpen && !openUtility) return undefined
@@ -353,7 +365,7 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
       : '业务分析师'
 
   return (
-    <div className={`app-shell app-shell-v2 ${sidebarCollapsed ? 'is-sidebar-collapsed' : ''} ${className}`.trim()}>
+    <div className={`app-shell app-shell-v2 ${import.meta.env.DEV && new URLSearchParams(location.search).get('qa') === '1920' ? 'qa-viewport-1920' : ''} ${sidebarCollapsed ? 'is-sidebar-collapsed' : ''} ${className}`.trim()}>
       <header className="global-header">
         <NavLink className="global-brand" to="/home" aria-label="返回分析首页">
           <img className="brand-logo" src="/haier-logo.svg" alt="Haier 海尔" />
@@ -362,7 +374,7 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
 
         <div className="global-utilities" ref={utilityRef}>
           <AppButton text circle className="global-utility-button" type="button" aria-label="通知" aria-expanded={openUtility === 'notifications'} onClick={() => setOpenUtility(value => value === 'notifications' ? null : 'notifications')}>
-            <Bell size={20} aria-hidden="true" />{notificationTotal > 0 && <span className="notification-count">{notificationTotal > 99 ? '99+' : notificationTotal}</span>}
+            <Bell size={20} aria-hidden="true" />{visibleNotificationTotal > 0 && <span className="notification-count">{visibleNotificationTotal > 99 ? '99+' : visibleNotificationTotal}</span>}
           </AppButton>
           <AppButton text className="global-help-button" type="button" aria-expanded={openUtility === 'help'} onClick={() => setOpenUtility(value => value === 'help' ? null : 'help')}>
             <Question size={18} aria-hidden="true" /><span>帮助中心</span>
@@ -373,11 +385,11 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
           </AppButton>
 
           {openUtility === 'notifications' && <section className="utility-popover notification-popover" aria-label="通知中心">
-            <header><div><strong>通知</strong><span>{notificationLoading ? '加载中' : notificationError ? '加载失败' : `${notificationTotal} 条未读`}</span></div><AppButton text circle type="button" aria-label="关闭通知" onClick={() => setOpenUtility(null)}><X size={16} /></AppButton></header>
+            <header><div><strong>通知</strong><span>{visibleNotificationLoading ? '加载中' : visibleNotificationError ? '加载失败' : `${visibleNotificationTotal} 条未读`}</span></div><AppButton text circle type="button" aria-label="关闭通知" onClick={() => setOpenUtility(null)}><X size={16} /></AppButton></header>
             <div className="notification-popover-list">
-              {notifications.map(item => <AppButton text type="button" key={item.id} onClick={() => openNotification(item)}><span>{item.kind}</span><strong>{item.title}</strong><small>{item.meta}</small></AppButton>)}
-              {!notificationLoading && notificationError && <p className="notification-empty is-error"><WarningCircle size={18} />{notificationError}</p>}
-              {!notificationLoading && !notificationError && notifications.length === 0 && <p className="notification-empty"><Check size={18} />当前没有未读通知</p>}
+              {visibleNotifications.map(item => <AppButton text type="button" key={item.id} onClick={() => openNotification(item)}><span>{item.kind}</span><strong>{item.title}</strong><small>{item.meta}</small></AppButton>)}
+              {!visibleNotificationLoading && visibleNotificationError && <p className="notification-empty is-error"><WarningCircle size={18} />{visibleNotificationError}</p>}
+              {!visibleNotificationLoading && !visibleNotificationError && visibleNotifications.length === 0 && <p className="notification-empty"><Check size={18} />当前没有未读通知</p>}
             </div>
             <footer><AppButton link type="button" onClick={() => { setOpenUtility(null); navigate('/home') }}>返回首页查看全部待办</AppButton></footer>
           </section>}
@@ -459,7 +471,7 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
                     <span className="domain-option-icon"><DomainIcon size={24} weight="duotone" /></span>
                     <span className="domain-option-copy">
                       <span className="domain-option-title"><strong>{domain.name}</strong>{isCurrent && <em>当前</em>}</span>
-                      <small>角色：{domainRoleLabel(domain, currentSubject(), canManage, designSnapshot)}</small>
+                      <small>角色：{domainRoleLabel(domain, currentSubject(), designSnapshot)}</small>
                       <span className="domain-option-description">{domain.description || domain.code}</span>
                     </span>
                     {switching && <SpinnerGap className="domain-option-spinner" size={17} />}

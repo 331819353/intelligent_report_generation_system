@@ -603,6 +603,10 @@ func (loop *Loop) executeProposedPlan(
 		compiled.PlanHash.Validate() != nil || compiled.MaxRows < 1 || compiled.MaxRows > proposal.SemanticIR.Limit {
 		return ErrInvalidLoop
 	}
+	// Each deterministic tool mutates result.Usage. Keep the same trusted
+	// allowance chain for the next step; using request.Run.Usage here would
+	// re-advertise a stale budget and could hide the formal execute tool.
+	request.Run.Usage = result.Usage
 
 	validateArguments := toolhost.NewArguments(request.Run.Release)
 	validateArguments.PlanHash = &compiled.PlanHash
@@ -625,6 +629,7 @@ func (loop *Loop) executeProposedPlan(
 	if !validation.Allowed {
 		return ErrLoopToolBlocked
 	}
+	request.Run.Usage = result.Usage
 
 	executeArguments := toolhost.NewArguments(request.Run.Release)
 	executeArguments.PlanHash = &compiled.PlanHash

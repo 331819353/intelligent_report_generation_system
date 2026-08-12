@@ -9,6 +9,24 @@ body { min-width: 0; }
   background: #f7f8fa;
 }
 
+/* 开发态统一 1920×1080 视觉回归根画布；业务页面只需追加 ?qa=1920。 */
+.app-shell-v2.qa-viewport-1920 { width: 1920px; min-width: 1920px; height: 1080px; min-height: 1080px; }
+.app-shell-v2.qa-viewport-1920 > .global-header { position: absolute; width: 1920px; }
+.app-shell-v2.qa-viewport-1920 > .sidebar { position: absolute; top: 72px; height: 1008px; }
+.app-shell-v2.qa-viewport-1920 > .main-stage { height: 1008px; min-height: 1008px; }
+body:has(.app-shell-v2.qa-viewport-1920) { min-width: 1920px; min-height: 1080px; overflow: auto; }
+@media (max-width: 1280px) and (max-height: 720px) {
+  .app-shell-v2.qa-viewport-1920 {
+    transform: scale(.6666666667);
+    transform-origin: left top;
+  }
+  body:has(.app-shell-v2.qa-viewport-1920) {
+    min-width: 0;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+}
+
 .global-header {
   position: sticky;
   top: 0;

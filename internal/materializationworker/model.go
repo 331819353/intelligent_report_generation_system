@@ -70,6 +70,7 @@ type ResolvedBuild struct {
 	SchemaHash    string
 	VersionNo     int
 	InputRowCount map[int]int64
+	Incremental   *warehouse.IncrementalBuildInput
 }
 
 type Store interface {

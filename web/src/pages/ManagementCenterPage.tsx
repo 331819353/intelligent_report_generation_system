@@ -55,7 +55,7 @@ type DialogState =
   | null
 
 const fixedCapabilities = {
-  platform: ['管理全平台配置', '进入任意活动领域', '使用全部业务功能'],
+  platform: ['管理全平台配置', '维护领域与用户授权', '审计运行与治理记录'],
   domain: ['管理领域数据配置', '审批数据源与数据集发布', '审批用户加入领域'],
   user: ['配置数据源与数据集', '查看领域内数据资产', '提交配置等待领域发布'],
   account: ['查看注册账号', '停用或恢复账号', '停用时即时撤销会话'],
@@ -470,10 +470,11 @@ export function ManagementCenterPage() {
           <ArrowsClockwise className={loading ? 'spin' : ''} size={17} />刷新运行状态
         </button>}
       className="administration-shell"
+      controlPlane
     >
       <section className="administration-stack platform-page-stack">
         <div className="platform-management-intro">
-          <div><span className="eyebrow">PLATFORM CONTROL PLANE</span><h2>平台治理与运行控制面</h2><p>平台管理员不占用领域身份，但可进入任意领域并使用全部功能。</p></div>
+          <div><span className="eyebrow">PLATFORM CONTROL PLANE</span><h2>平台治理与运行控制面</h2><p>平台管理员负责租户治理与领域授权；业务数据操作需由独立领域成员身份完成。</p></div>
           <div className="administration-metrics platform-management-metrics" aria-label="平台运行概览">
           <article><GlobeHemisphereWest size={20} weight="duotone" /><span>业务领域</span><strong>{domains.filter(item => item.status === 'ACTIVE').length}</strong><small>{domainAdministratorCount} 位领域管理员</small></article>
           <article><UsersThree size={20} weight="duotone" /><span>活跃用户</span><strong>{users.filter(item => item.status === 'ACTIVE').length}</strong><small>{platformAdministrators.length} 位平台管理员</small></article>
@@ -744,7 +745,7 @@ function PermissionGovernance({
     </header>
 
     {permissionView === 'platform' && <section className="permission-management-section permission-switch-panel">
-      <FixedScope level="PLATFORM" title="平台管理员" description="拥有全平台最高权限，不保存领域归属；可在列表中新增或移除平台管理员。" capabilities={fixedCapabilities.platform} />
+      <FixedScope level="PLATFORM" title="平台管理员" description="拥有平台治理控制面权限，不保存领域归属，也不代表业务数据操作权；可在列表中新增或移除平台管理员。" capabilities={fixedCapabilities.platform} />
       <div className="governance-user-list">
         <AddManagementSlot title="新增平台管理员" description="从已注册且未担任其他管理员的用户中选择" onClick={onAddPlatform} />
         {platformAdministrators.map(user => <article key={user.id}>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowDownIcon, ArrowUpIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DotsSixVerticalIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MagnifyingGlassIcon, MathOperationsIcon, PlusIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTSlashIcon, TreeStructureIcon, WarningCircleIcon, XIcon, type Icon } from '@phosphor-icons/react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
@@ -7,7 +7,7 @@ import { DatasetAIDock } from '../components/dataset/DatasetAIDock'
 import { DatasetComponentToolbar } from '../components/dataset/DatasetComponentToolbar'
 import { DatasetDesignWorkspace } from '../components/dataset/DatasetDesignWorkspace'
 import { RequestError } from '../lib/api'
-import { currentDomain } from '../lib/domain-context'
+import { currentDomain, currentDomainID, subscribeDomainChange } from '../lib/domain-context'
 import {
   datasetAIPlanFromEditor,
   datasetAIRequestContext,
@@ -1359,8 +1359,15 @@ export function DatasetCenterPage() {
   const { datasetId } = useParams()
   const navigate = useNavigate()
   const location = useLocation()
-  const designSnapshot = import.meta.env.DEV && new URLSearchParams(location.search).has('snapshot')
+  const pageParams = new URLSearchParams(location.search)
+  const designSnapshot = import.meta.env.DEV && pageParams.has('snapshot')
+  const qaViewport1920 = import.meta.env.DEV && pageParams.get('qa') === '1920'
   const modelingLogIDPrefix = useId()
+  const selectedBusinessDomainID = useSyncExternalStore(
+    subscribeDomainChange,
+    currentDomainID,
+    () => '',
+  )
   const selectedBusinessDomain = currentDomain()
   const selectedBusinessDomainName = selectedBusinessDomain?.name.trim() || (designSnapshot ? '企业经营' : '')
   const [datasets, setDatasets] = useState<DatasetSummary[]>(designSnapshot ? snapshotDatasets : [])
@@ -1502,8 +1509,16 @@ export function DatasetCenterPage() {
     const targets = datasets.filter(dataset => dataset.currentPublishedVersionId)
     const entries = await Promise.all(targets.map(async dataset => {
       try {
-        const page = await datasetAPI.listDAGRuns(dataset.id, 1, 0)
-        return [dataset.id, page.items[0]] as const
+        const page = await datasetAPI.listDAGRuns(dataset.id, 20, 0)
+        const latest = page.items[0]
+        const active = page.items.find(run => activeDAGRunStatuses.has(run.status))
+        // A newly completed run clears an older incident; otherwise catalog
+        // cards would keep showing a historical failure after a successful
+        // retry. Historical receipts remain available from the run history.
+        const actionable = latest && (latest.status === 'FAILED' || latest.slaBreached)
+          ? latest
+          : undefined
+        return [dataset.id, active ?? actionable ?? latest] as const
       } catch {
         return [dataset.id, undefined] as const
       }
@@ -1634,11 +1649,12 @@ export function DatasetCenterPage() {
       return
     }
     let active = true
-    loadAllDatasets().then(items => { if (active) setDatasets(items) }).catch(cause => {
+    setLoading(true)
+    loadDatasets().catch(cause => {
       if (active) setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '加载数据集失败' })
     }).finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [designSnapshot])
+  }, [designSnapshot, loadDatasets, selectedBusinessDomainID])
 
   useEffect(() => {
     if (designSnapshot) return
@@ -3409,9 +3425,21 @@ export function DatasetCenterPage() {
       }
       const published = await datasetAPI.getVersion(dataset.id, record.currentPublishedVersionId)
       if (published.status !== 'PUBLISHED') throw new Error('当前版本尚未发布')
-      const run = await datasetAPI.runDAG(dataset.id, published.id, crypto.randomUUID())
+      const previousRun = dagRuns[dataset.id]
+      const mode: 'FULL' | 'INCREMENTAL' = previousRun?.status === 'SUCCEEDED' &&
+        ['DIM', 'DWD', 'DWS', 'ADS'].includes(dataset.layer) ? 'INCREMENTAL' : 'FULL'
+      let effectiveMode = mode
+      let run: DatasetDAGRun
+      try {
+        run = await datasetAPI.runDAG(dataset.id, published.id, crypto.randomUUID(), mode)
+      } catch (cause) {
+        if (mode !== 'INCREMENTAL' || !(cause instanceof RequestError) ||
+          !['MATERIALIZATION_CONFLICT', 'MATERIALIZATION_INVALID_REQUEST'].includes(cause.detail.code)) throw cause
+        effectiveMode = 'FULL'
+        run = await datasetAPI.runDAG(dataset.id, published.id, crypto.randomUUID(), 'FULL')
+      }
       setDAGRuns(current => ({ ...current, [dataset.id]: run }))
-      setNotice({ tone: 'success', message: `“${dataset.name}”已按发布 V${published.versionNo} 提交完整替换入仓 DAG；目标会先重建为空表再写入，当前${run.status === 'RUNNING' ? '执行中' : '排队中'}` })
+      setNotice({ tone: 'success', message: `“${dataset.name}”已按发布 V${published.versionNo} 提交${effectiveMode === 'INCREMENTAL' ? '水位增量刷新' : mode === 'INCREMENTAL' ? '完整替换（当前快照不满足增量条件，已安全降级）' : '完整替换'} DAG；质量门禁通过后才会原子切换，当前${run.status === 'RUNNING' ? '执行中' : '排队中'}` })
     } catch (cause) {
       setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : 'DAG 运行失败' })
     } finally {
@@ -3985,7 +4013,7 @@ export function DatasetCenterPage() {
   const editingCanvas = Boolean(editingRecord || busyAction.startsWith('edit:') || dialog?.mode === 'create' && dialog.dataset)
   const completeDetailFields = detail ? datasetDetailFields(detail) : []
 
-  return <AppShell className={`dataset-center-shell ${designSnapshot ? 'qa-1920-dataset-workflow' : ''}`} title="数据集资产" eyebrow="数据资产" actions={<button className="primary-button dataset-create-button" type="button" disabled={actionBusy} onClick={() => void openCreate()}><PlusIcon size={18} weight="bold" />新建数据集</button>}>
+  return <AppShell className={`dataset-center-shell ${qaViewport1920 ? 'qa-1920-dataset-workflow' : ''}`} title="数据集资产" eyebrow="数据资产" actions={<button className="primary-button dataset-create-button" type="button" disabled={actionBusy} onClick={() => void openCreate()}><PlusIcon size={18} weight="bold" />新建数据集</button>}>
     {notice && <div className={`dataset-center-toast ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.tone === 'success' ? <CheckCircleIcon size={20} weight="fill" /> : <DropSlashIcon size={20} weight="fill" />}<span>{notice.message}</span><button type="button" aria-label="关闭消息" onClick={() => setNotice(null)}><XIcon size={17} /></button></div>}
     <section className="dataset-center" aria-label="数据集配置中心内容">
       <header className="dataset-center-summary">
@@ -5839,7 +5867,7 @@ function MaterializationRunPanel({ dataset, run, loading, busy, error, onRetry, 
       <div><span className="dataset-materialization-status">{statusLabels[run.status] ?? run.status}</span><h3>{run.partialSuccess ? '部分节点已成功，当前可用快照未切换' : dagRunLabel(run)}</h3><p>{run.errorMessage || (activeDAGRunStatuses.has(run.status) ? '系统正在按冻结的发布版本执行；取消不会影响上一份可用快照。' : '该次运行已形成完整审计证据。')}</p></div>
       <dl>
         <div><dt>运行 ID</dt><dd title={run.id}>{run.id.slice(0, 12)}</dd></div>
-        <div><dt>运行方式</dt><dd>{run.mode === 'FULL' ? '完整替换' : run.mode}</dd></div>
+        <div><dt>运行方式</dt><dd>{run.mode === 'FULL' ? '完整替换' : run.mode === 'INCREMENTAL' ? '水位增量' : '区间回填'}</dd></div>
         <div><dt>尝试次数</dt><dd>{run.attempt} / {run.maxAttempts}</dd></div>
         <div><dt>执行耗时</dt><dd>{durationText(run.durationSeconds)}</dd></div>
         <div><dt>刷新 SLA</dt><dd className={run.slaBreached ? 'is-danger' : run.slaStatus === 'AT_RISK' ? 'is-warning' : ''}>{run.slaBreached ? '已超时' : run.slaStatus === 'AT_RISK' ? '临近截止' : run.status === 'SUCCEEDED' ? '按时完成' : '正常'}</dd></div>
