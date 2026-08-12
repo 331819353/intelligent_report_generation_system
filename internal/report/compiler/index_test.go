@@ -128,7 +128,8 @@ func indexedPropertyDefinition(random *rand.Rand, componentCount int) report.Rep
 		}},
 		Pages: []report.Page{{ID: "page", Sections: []report.Section{{
 			ID: "section", Blocks: []report.Block{{ID: "block", Zones: []report.Zone{{
-				ID: "zone", Slots: slots,
+				Order: 1,
+				ID:    "zone", Slots: slots,
 			}}}},
 		}}}},
 		Components: components,

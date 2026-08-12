@@ -106,11 +106,27 @@ type Handlers struct {
 }
 
 type CandidateSummary struct {
-	ObjectType      ObjectType `json:"objectType"`
-	ObjectVersionID askdata.ID `json:"objectVersionId"`
-	Score           float64    `json:"score"`
-	MatchType       string     `json:"matchType"`
-	Status          string     `json:"status"`
+	ObjectType      ObjectType           `json:"objectType"`
+	ObjectVersionID askdata.ID           `json:"objectVersionId"`
+	Score           float64              `json:"score"`
+	MatchType       string               `json:"matchType"`
+	Status          string               `json:"status"`
+	ReportSource    *ReportSourceSummary `json:"reportSource,omitempty"`
+}
+
+// ReportSourceSummary is the immutable, permission-checked identity of a
+// certified report component. It contains no report prose or historical query;
+// the report is a presentation prior and a verifiable source link only.
+type ReportSourceSummary struct {
+	ReportID          askdata.ID          `json:"reportId"`
+	ReportVersionID   askdata.ID          `json:"reportVersionId"`
+	ComponentID       askdata.ID          `json:"componentId"`
+	ReportTitle       string              `json:"reportTitle"`
+	ComponentTitle    string              `json:"componentTitle,omitempty"`
+	ComponentType     string              `json:"componentType"`
+	ComponentVersion  string              `json:"componentVersion"`
+	SemanticReleaseID askdata.ID          `json:"semanticReleaseId"`
+	ComponentHash     askdata.ContentHash `json:"componentHash"`
 }
 
 type SearchSemanticObjectsResult struct {
@@ -341,6 +357,13 @@ func (result SearchSemanticObjectsResult) ValidateResult(known map[askdata.ID]as
 		if !validObjectType(candidate.ObjectType) || candidate.ObjectVersionID.Validate() != nil ||
 			seen[candidate.ObjectVersionID] || !finiteRange(candidate.Score, 0, 1) ||
 			!boundedText(candidate.MatchType, 64) || !boundedText(candidate.Status, 64) {
+			return ErrInvalidInvocation
+		}
+		if candidate.ObjectType == ObjectTypeReportAsset {
+			if candidate.ReportSource == nil || candidate.ReportSource.Validate() != nil {
+				return ErrInvalidInvocation
+			}
+		} else if candidate.ReportSource != nil {
 			return ErrInvalidInvocation
 		}
 		seen[candidate.ObjectVersionID] = true
@@ -933,7 +956,21 @@ func validateUpperCodes(values []string) error {
 }
 
 func validObjectType(value ObjectType) bool {
-	return value == ObjectTypeMetric || value == ObjectTypeDimension || value == ObjectTypeModel || value == ObjectTypeTerm
+	return value == ObjectTypeMetric || value == ObjectTypeDimension || value == ObjectTypeModel || value == ObjectTypeTerm || value == ObjectTypeReportAsset
+}
+
+func (source ReportSourceSummary) Validate() error {
+	for _, id := range []askdata.ID{source.ReportID, source.ReportVersionID, source.ComponentID, source.SemanticReleaseID} {
+		if id.Validate() != nil {
+			return ErrInvalidInvocation
+		}
+	}
+	if !boundedText(source.ReportTitle, 512) || !optionalBoundedText(source.ComponentTitle, 512) ||
+		!boundedText(source.ComponentType, 128) || !boundedText(source.ComponentVersion, 64) ||
+		source.ComponentHash.Validate() != nil {
+		return ErrInvalidInvocation
+	}
+	return nil
 }
 
 func boundedText(value string, maxRunes int) bool {

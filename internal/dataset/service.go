@@ -414,6 +414,23 @@ func (s *Service) Restore(ctx context.Context, tenantID, actorID, id string, inp
 	return s.store.Restore(ctx, tenantID, actorID, id, input)
 }
 
+type lifecycleImpactStore interface {
+	GetLifecycleImpact(context.Context, string, string) (LifecycleImpact, error)
+}
+
+// GetLifecycleImpact previews every server-side condition used by Delete and
+// the stable state available to Disable/Restore.
+func (s *Service) GetLifecycleImpact(ctx context.Context, tenantID, id string) (LifecycleImpact, error) {
+	if s == nil || tenantID == "" || !canonicalUUID(id) {
+		return LifecycleImpact{}, ErrInvalidDocument
+	}
+	store, ok := s.store.(lifecycleImpactStore)
+	if !ok {
+		return LifecycleImpact{}, errors.New("dataset lifecycle impact store is not configured")
+	}
+	return store.GetLifecycleImpact(ctx, tenantID, id)
+}
+
 // Delete 软删除未被下游或运行中查询占用的数据集，历史审计和版本快照不做物理清除。
 func (s *Service) Delete(ctx context.Context, tenantID, actorID, id string, input LifecycleInput) error {
 	if tenantID == "" || actorID == "" || !canonicalUUID(id) || input.ExpectedVersion < 1 {

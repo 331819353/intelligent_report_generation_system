@@ -51,6 +51,7 @@ type DialogState =
   | { kind: 'domain-administrator'; user?: AdminUser }
   | { kind: 'user-domains'; user: AdminUser }
   | { kind: 'support-transition'; ticket: SupportTicket; status: 'RESOLVED' | 'CLOSED' }
+  | { kind: 'approval-rejection'; approval: PlatformApproval }
   | null
 
 const fixedCapabilities = {
@@ -176,19 +177,21 @@ export function ManagementCenterPage() {
     }
   }
 
-  const reviewApproval = async (approval: PlatformApproval, decision: 'APPROVED' | 'REJECTED') => {
+  const reviewApproval = async (approval: PlatformApproval, decision: 'APPROVED' | 'REJECTED', reason = '') => {
     setBusyKey(`approval:${approval.id}`)
     setError('')
     setNotice('')
     try {
-      await administrationAPI.reviewPublication(approval, decision)
+      await administrationAPI.reviewPublication(approval, decision, reason)
       await load()
+      setDialog(null)
       if (approval.kind === 'DOMAIN_ACCESS') notifyDomainCatalogChanged()
       const target = approval.kind === 'DOMAIN_ACCESS'
         ? `“${approval.requesterDisplayName}”的领域申请`
         : `“${approval.resourceName}”的发布申请`
       setNotice(`${target}已${decision === 'APPROVED' ? '通过' : '拒绝'}`)
     } catch (cause) {
+      await load()
       setError(cause instanceof Error ? cause.message : '审批处理失败')
     } finally {
       setBusyKey('')
@@ -465,7 +468,7 @@ export function ManagementCenterPage() {
                       onStatus={user => void updateUserStatus(user)}
                     />
                     : view === 'approvals'
-                      ? <ApprovalCenter approvals={approvals} busyKey={busyKey} onDecision={(approval, decision) => void reviewApproval(approval, decision)} />
+                      ? <ApprovalCenter approvals={approvals} busyKey={busyKey} onDecision={(approval, decision) => decision === 'REJECTED' ? setDialog({ kind: 'approval-rejection', approval }) : void reviewApproval(approval, decision)} />
                       : view === 'tasks'
                         ? <BackgroundTaskCenter tasks={tasks} busyKey={busyKey} onOperate={(task, operation) => void operateTask(task, operation)} />
                         : view === 'observability'
@@ -523,6 +526,13 @@ export function ManagementCenterPage() {
         error={error}
         onClose={closeDialog}
         onSubmit={event => submitSupportTransition(event, dialog.ticket, dialog.status)}
+      />}
+      {dialog?.kind === 'approval-rejection' && <ApprovalRejectionDialog
+        approval={dialog.approval}
+        busy={Boolean(busyKey)}
+        error={error}
+        onClose={closeDialog}
+        onSubmit={reason => void reviewApproval(dialog.approval, 'REJECTED', reason)}
       />}
     </AppShell>
   )
@@ -1051,6 +1061,28 @@ function DomainDialog({ title, description, busy, error, onClose, onSubmit }: {
       <label>领域编码<input name="code" placeholder="customer_operations" /><small>以小写字母开头，可使用数字、下划线和短横线。</small></label>
       <label>说明<textarea name="description" placeholder="说明该领域承载的数据范围" /></label>
       <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy}>{busy ? <SpinnerGap className="spin" size={16} /> : <CheckCircle size={16} />}{busy ? '正在创建…' : '创建领域'}</button></footer>
+    </form>
+  </DialogFrame>
+}
+
+function ApprovalRejectionDialog({ approval, busy, error, onClose, onSubmit }: {
+  approval: PlatformApproval
+  busy: boolean
+  error: string
+  onClose: () => void
+  onSubmit: (reason: string) => void
+}) {
+  const [reason, setReason] = useState('')
+  return <DialogFrame
+    title="填写驳回原因"
+    description={`申请：${approval.resourceName} · ${approvalKindLabels[approval.kind]}`}
+    busy={busy}
+    error={error}
+    onClose={onClose}
+  >
+    <form onSubmit={event => { event.preventDefault(); if (reason.trim().length >= 4) onSubmit(reason.trim()) }}>
+      <label>审核意见<textarea autoFocus minLength={4} maxLength={1000} required value={reason} onChange={event => setReason(event.target.value)} placeholder="说明需要修改的配置、口径或风险；申请人将据此修改后重新提交。" /><small>{reason.trim().length}/1000 · 至少 4 个字符</small></label>
+      <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button danger" type="submit" disabled={busy || reason.trim().length < 4}>{busy ? <SpinnerGap className="spin" size={16} /> : <X size={16} />}{busy ? '正在驳回…' : '确认驳回'}</button></footer>
     </form>
   </DialogFrame>
 }

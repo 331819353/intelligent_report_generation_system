@@ -81,5 +81,21 @@ func NewPublicationApprovalHandler(
 		writer.Header().Set("Cache-Control", "no-store")
 		writeDatasetJSON(writer, http.StatusOK, record)
 	})))
+	mux.Handle("POST /api/v1/datasets/{id}/publish-requests/{requestId}/withdraw", protect("MANAGE", http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		claims, _ := auth.ClaimsFromContext(request.Context())
+		var input WithdrawPublicationInput
+		if !decodeRequest(writer, request, &input) {
+			return
+		}
+		record, err := service.Withdraw(
+			request.Context(), claims.TenantID, claims.Subject, request.PathValue("id"), request.PathValue("requestId"), input,
+		)
+		if err != nil {
+			writeDatasetError(writer, err)
+			return
+		}
+		writer.Header().Set("Cache-Control", "no-store")
+		writeDatasetJSON(writer, http.StatusOK, record)
+	})))
 	return mux
 }

@@ -602,6 +602,66 @@ func (s *PostgresStore) Restore(ctx context.Context, tenantID, actorID, id strin
 	return s.Get(ctx, tenantID, id)
 }
 
+// GetLifecycleImpact mirrors the aggregate guards used by Delete. The result
+// is intentionally identifier-free because callers may be allowed to manage
+// this dataset without being allowed to inspect every downstream asset.
+func (s *PostgresStore) GetLifecycleImpact(ctx context.Context, tenantID, id string) (impact LifecycleImpact, err error) {
+	if s == nil || s.pool == nil || tenantID == "" || !canonicalUUID(id) {
+		return LifecycleImpact{}, ErrInvalidDocument
+	}
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		impact.DatasetID = id
+		err := tx.QueryRow(ctx, `WITH source_versions AS (
+			SELECT id::text FROM platform.dataset_versions WHERE dataset_id::text=$1
+		), downstream AS (
+			SELECT DISTINCT target.id,target.status
+			FROM platform.dataset_dependencies dependency
+			JOIN source_versions source ON source.id=dependency.source_id
+			JOIN platform.dataset_versions target ON target.id=dependency.dataset_version_id
+			JOIN platform.datasets owner ON owner.id=target.dataset_id AND owner.deleted_at IS NULL
+			WHERE dependency.source_type='DATASET_VERSION' AND target.status<>'DEPRECATED'
+		)
+		SELECT dataset.status,
+			(SELECT count(*)::int FROM downstream WHERE status='DRAFT'),
+			(SELECT count(*)::int FROM downstream WHERE status IN ('PUBLISHED','STALE')),
+			(SELECT count(*)::int FROM platform.query_runs WHERE dataset_id::text=$1 AND status='RUNNING'),
+			(SELECT count(*)::int FROM platform.dataset_build_runs WHERE dataset_id::text=$1 AND status IN ('QUEUED','RUNNING')),
+			(SELECT count(*)::int FROM platform.dataset_materializations WHERE dataset_id::text=$1 AND status<>'RETIRED')
+		FROM platform.datasets dataset
+		WHERE dataset.id::text=$1 AND dataset.deleted_at IS NULL`, id).Scan(
+			&impact.Status, &impact.DownstreamDraftReferences,
+			&impact.DownstreamPublishedReferences, &impact.ActiveQueryRuns,
+			&impact.ActiveBuildRuns, &impact.Materializations,
+		)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		impact.CanDisable = impact.Status == "DRAFT" || impact.Status == "PUBLISHED" || impact.Status == "STALE"
+		impact.CanRestore = impact.Status == "DISABLED"
+		if impact.DownstreamDraftReferences > 0 {
+			impact.Blockers = append(impact.Blockers, "下游草稿仍引用该数据集版本")
+		}
+		if impact.DownstreamPublishedReferences > 0 {
+			impact.Blockers = append(impact.Blockers, "下游发布版本仍依赖该数据集")
+		}
+		if impact.ActiveQueryRuns > 0 {
+			impact.Blockers = append(impact.Blockers, "仍有查询正在运行")
+		}
+		if impact.ActiveBuildRuns > 0 {
+			impact.Blockers = append(impact.Blockers, "仍有物化任务正在排队或执行")
+		}
+		impact.CanDelete = len(impact.Blockers) == 0
+		if impact.Blockers == nil {
+			impact.Blockers = []string{}
+		}
+		return nil
+	})
+	return impact, err
+}
+
 type datasetCommandExecutor interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }

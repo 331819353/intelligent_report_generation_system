@@ -14,9 +14,9 @@ const manifest: ComponentManifest = {
   supportedInteractions: [],
 }
 
-function zone(id: string, type: ZoneType, componentIds: string[]) {
+function zone(id: string, type: ZoneType, componentIds: string[], order = 1) {
   return {
-    id, type,
+    id, order, type,
     layout: { heightMode: 'AUTO' as const, minHeight: 1, columns: 8, rows: 4, overflow: 'EXPAND' as const, emptyPriority: 0 },
     slots: componentIds.map((componentId, index) => ({
       id: `slot-${componentId}`, grid: { x: 0, y: index, w: 8, h: 1 }, componentId,
@@ -54,8 +54,10 @@ test('a component added into a card becomes a new zone of that card', () => {
   const created = operations.find(operation => operation.op === 'ZONE_CREATE')
   // The zone joins the existing card rather than creating a second card.
   assert.equal(created?.targetId, 'block-1')
-  const payload = created?.payload as { zone: { type: string; slots: Array<{ componentId: string }> } }
+  const payload = created?.payload as { zone: { type: string; order: number; slots: Array<{ componentId: string }> } }
   assert.equal(payload.zone.type, 'INSIGHT')
+  // A new region goes beneath what the card already shows.
+  assert.equal(payload.zone.order, 2)
   assert.equal(payload.zone.slots[0].componentId, componentId)
 
   // The card grows to fit the new region; otherwise the zone would be clipped.
@@ -77,8 +79,8 @@ test('a zone spans the full card width so one layout has one representation', ()
 
 test('removing one component of a composite card deletes only its zone', () => {
   const page = pageWith([card('block-1', [
-    zone('zone-content', 'CONTENT', ['chart']),
-    zone('zone-insight', 'INSIGHT', ['conclusion']),
+    zone('zone-content', 'CONTENT', ['chart'], 1),
+    zone('zone-insight', 'INSIGHT', ['conclusion'], 2),
   ])])
   const operations = removeComponentOperations(page, 'conclusion')
   assert.deepEqual(operations.map(operation => operation.op), ['ZONE_DELETE', 'COMPONENT_DELETE'])
@@ -87,8 +89,8 @@ test('removing one component of a composite card deletes only its zone', () => {
 
 test('removing a component from a shared zone deletes only its slot', () => {
   const page = pageWith([card('block-1', [
-    zone('zone-content', 'CONTENT', ['left', 'right']),
-    zone('zone-insight', 'INSIGHT', ['conclusion']),
+    zone('zone-content', 'CONTENT', ['left', 'right'], 1),
+    zone('zone-insight', 'INSIGHT', ['conclusion'], 2),
   ])])
   const operations = removeComponentOperations(page, 'right')
   assert.deepEqual(operations.map(operation => operation.op), ['SLOT_DELETE', 'COMPONENT_DELETE'])

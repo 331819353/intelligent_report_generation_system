@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"intelligent-report-generation-system/internal/platform/database"
@@ -200,7 +201,7 @@ func (s *PostgresStore) SubmitPublicationRequest(
 			tenant_id,dataset_id,draft_version_id,expected_dataset_version,expected_draft_record_version,
 			expected_dsl_hash,expected_plan_hash,validation_parameters,requester_user_id,request_note
 		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-		ON CONFLICT(tenant_id,dataset_id,draft_version_id,expected_draft_record_version) DO NOTHING
+		ON CONFLICT DO NOTHING
 		RETURNING id::text`, tenantID, datasetID, input.DraftVersionID, input.ExpectedVersion,
 			input.ExpectedDraftRecordVersion, input.ExpectedDSLHash, plan.ExpectedPlanHash,
 			plan.ParametersJSON, actorID, input.Note).Scan(&requestID)
@@ -208,7 +209,8 @@ func (s *PostgresStore) SubmitPublicationRequest(
 		if errors.Is(err, pgx.ErrNoRows) {
 			inserted = false
 			err = tx.QueryRow(ctx, `SELECT id::text FROM platform.dataset_publication_requests
-				WHERE dataset_id::text=$1 AND draft_version_id::text=$2 AND expected_draft_record_version=$3`,
+				WHERE dataset_id::text=$1 AND draft_version_id::text=$2 AND expected_draft_record_version=$3
+				  AND status='PENDING'`,
 				datasetID, input.DraftVersionID, input.ExpectedDraftRecordVersion).Scan(&requestID)
 		}
 		if err != nil {
@@ -419,6 +421,61 @@ func (s *PostgresStore) RejectPublicationRequest(
 		if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
 			tenant_id,actor_user_id,action,resource_type,resource_id,detail
 		) VALUES($1,$2,'REJECT','DATASET_PUBLICATION_REQUEST',$3,
+			jsonb_build_object('datasetId',$4::text,'reason',$5::text))`,
+			tenantID, actorID, requestID, datasetID, input.Reason); err != nil {
+			return err
+		}
+		return scanPublicationRequest(tx.QueryRow(ctx, `SELECT `+publicationRequestSelect+`
+			FROM platform.dataset_publication_requests AS request WHERE request.id::text=$1`, requestID), &request)
+	})
+	return request, err
+}
+
+func (s *PostgresStore) WithdrawPublicationRequest(
+	ctx context.Context,
+	tenantID, actorID, datasetID, requestID string,
+	input WithdrawPublicationInput,
+) (request PublicationRequest, err error) {
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		var status, requesterID, priorReason string
+		var version int64
+		err := tx.QueryRow(ctx, `SELECT status,version,requester_user_id::text,review_note
+			FROM platform.dataset_publication_requests
+			WHERE id::text=$1 AND dataset_id::text=$2 FOR UPDATE`, requestID, datasetID).
+			Scan(&status, &version, &requesterID, &priorReason)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrPublicationRequestNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if requesterID != actorID {
+			return ErrForbidden
+		}
+		note := input.Reason
+		if !strings.HasPrefix(note, "申请人撤回") {
+			note = "申请人撤回：" + note
+		}
+		if status == PublicationRequestCancelled && priorReason == note {
+			return scanPublicationRequest(tx.QueryRow(ctx, `SELECT `+publicationRequestSelect+`
+				FROM platform.dataset_publication_requests AS request WHERE request.id::text=$1`, requestID), &request)
+		}
+		if status != PublicationRequestPending {
+			return ErrPublicationRequestNotPending
+		}
+		if version != input.ExpectedVersion {
+			return ErrPublicationRequestConflict
+		}
+		if tag, err := tx.Exec(ctx, `UPDATE platform.dataset_publication_requests SET
+			status='CANCELLED',review_note=$1,reviewed_at=now(),version=version+1,updated_at=now()
+			WHERE id::text=$2 AND status='PENDING' AND version=$3`, note, requestID, input.ExpectedVersion); err != nil {
+			return err
+		} else if tag.RowsAffected() != 1 {
+			return ErrPublicationRequestConflict
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+			tenant_id,actor_user_id,action,resource_type,resource_id,detail
+		) VALUES($1,$2,'WITHDRAW','DATASET_PUBLICATION_REQUEST',$3,
 			jsonb_build_object('datasetId',$4::text,'reason',$5::text))`,
 			tenantID, actorID, requestID, datasetID, input.Reason); err != nil {
 			return err

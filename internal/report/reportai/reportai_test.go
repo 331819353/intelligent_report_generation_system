@@ -343,3 +343,75 @@ func reportAIComponents(t *testing.T) *template.Registry {
 	}
 	return registry
 }
+
+// A planned block that asks for analysis becomes a composite card: the chart in
+// a content zone and its conclusion in an insight zone of the same card.
+func TestAnalysisBlockBecomesACompositeCard(t *testing.T) {
+	base := reportAIBaseDefinition(t)
+	definition, err := Instantiate(validReportPlan(), InstantiateInput{
+		Base: base, DataContextID: base.DataContexts[0].ID,
+		AllowedFields: []string{"month", "sales_amount"},
+	}, reportAIComponents(t), insight.NewRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var card *report.Block
+	for pageIndex := range definition.Pages {
+		for sectionIndex := range definition.Pages[pageIndex].Sections {
+			for blockIndex := range definition.Pages[pageIndex].Sections[sectionIndex].Blocks {
+				block := &definition.Pages[pageIndex].Sections[sectionIndex].Blocks[blockIndex]
+				if len(block.Zones) > 1 {
+					card = block
+				}
+			}
+		}
+	}
+	if card == nil {
+		t.Fatal("an analysed block must produce a card with more than one zone")
+	}
+	if card.Type != report.BlockAnalysisCard {
+		t.Fatalf("a card carrying a conclusion is an analysis card, got %s", card.Type)
+	}
+
+	var content, conclusion *report.Zone
+	for index := range card.Zones {
+		switch card.Zones[index].Type {
+		case report.ZoneContent:
+			content = &card.Zones[index]
+		case report.ZoneInsight:
+			conclusion = &card.Zones[index]
+		}
+	}
+	if content == nil || conclusion == nil {
+		t.Fatalf("expected a content zone and an insight zone, got %#v", card.Zones)
+	}
+	// The content zone absorbs the card's remaining height; the conclusion keeps
+	// only what its text needs.
+	if content.Layout.HeightMode != report.ZoneHeightFR || content.Layout.FR == nil {
+		t.Fatalf("content zone must share remaining height: %#v", content.Layout)
+	}
+	// Normalization reorders zones. Decoding canonical JSON into an already
+	// populated definition used to leave this zone holding the content zone's
+	// fr, which then failed validation. Each zone must keep its own layout.
+	if conclusion.Layout.HeightMode != report.ZoneHeightAuto || conclusion.Layout.FR != nil {
+		t.Fatalf("insight zone must not inherit another zone's height: %#v", conclusion.Layout)
+	}
+
+	// The conclusion is bound to the same query it describes, which is what
+	// evidence derivation needs, and it ships with no prose until one is
+	// generated and verified.
+	componentID := conclusion.Slots[0].ComponentID
+	var conclusionComponent *report.Component
+	for index := range definition.Components {
+		if definition.Components[index].ID == componentID {
+			conclusionComponent = &definition.Components[index]
+		}
+	}
+	if conclusionComponent == nil || conclusionComponent.DataBinding == nil ||
+		len(conclusionComponent.DataBinding.Measures) == 0 {
+		t.Fatalf("the conclusion must bind the measure it talks about: %#v", conclusionComponent)
+	}
+	if conclusionComponent.Options.RichText != "" {
+		t.Fatal("the planner must not author prose that has not been verified")
+	}
+}

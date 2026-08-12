@@ -22,13 +22,14 @@ import {
   type ComponentManifest, type ManifestIndex,
 } from '../report/render/manifests'
 import {
-  canvasOf, findComponentBlock, orderedPages, orderedSections,
+  canvasOf, findBlock, findComponentBlock, orderedPages, orderedSections,
   type BindingRole, type ComponentOptions, type FieldBinding, type Page,
 } from '../report/render/schema'
 import {
   addComponentOperations, addToCardOperations, bundle, createInteractionOperations,
   deleteInteractionOperations, layoutOperations, removeComponentOperations,
-  sectionReorderOperations, updateComponentOperations, zoneKindLabels,
+  sectionReorderOperations, slotLayoutOperations, updateComponentOperations,
+  zoneKindLabels, zoneReorderOperations,
   type InteractionDraft, type ZoneKind,
 } from '../report/designer/operations'
 
@@ -697,6 +698,32 @@ export function ReportEditorPage() {
     await commit(operations, '布局已保存为新修订', setActionError)
   }
 
+  /** 卡片内槽位拖拽：区域行数不够时一并加高区域与卡片。 */
+  const changeSlotLayout = async (
+    blockId: string, zoneId: string, slotId: string,
+    rect: { x: number; y: number; w: number; h: number },
+  ) => {
+    if (!draft || !page || !canEdit) return
+    const located = findBlock(page, blockId)
+    const zone = located?.block.zones.find(item => item.id === zoneId)
+    if (!located || !zone) return
+    const componentId = zone.slots.find(slot => slot.id === slotId)?.componentId
+    const component = draft.definition.components.find(item => item.id === componentId)
+    const minimum = minimumSize(component ? manifests.get(component.templateRef.type, component.templateRef.version) : undefined)
+    const operations = slotLayoutOperations(located.block, zone, slotId, rect, minimum)
+    if (operations.length === 0) return
+    await commit(operations, '卡片内布局已保存为新修订', setActionError)
+  }
+
+  const reorderZone = async (blockId: string, zoneId: string, direction: -1 | 1) => {
+    if (!draft || !page || !canEdit) return
+    const located = findBlock(page, blockId)
+    if (!located) return
+    const operations = zoneReorderOperations(located.block, zoneId, direction)
+    if (operations.length === 0) return
+    await commit(operations, direction < 0 ? '区域已上移' : '区域已下移', setActionError)
+  }
+
   const saveManual = async (result: ManualEditResult) => {
     if (!draft || !selectedComponent) return
     setManualBusy(true); setManualError('')
@@ -895,7 +922,11 @@ export function ReportEditorPage() {
                   if (located) setActiveSectionId(located.section.id)
                   else if (blockId) setActiveSectionId(activeSectionId)
                 }}
-                editing={canEdit ? { onLayoutChange: (sectionId, blockId, rect) => void changeLayout(sectionId, blockId, rect) } : undefined} />
+                editing={canEdit ? {
+                  onLayoutChange: (sectionId, blockId, rect) => void changeLayout(sectionId, blockId, rect),
+                  onSlotLayoutChange: (blockId, zoneId, slotId, rect) => void changeSlotLayout(blockId, zoneId, slotId, rect),
+                  onZoneReorder: (blockId, zoneId, direction) => void reorderZone(blockId, zoneId, direction),
+                } : undefined} />
             </article>
             {aiPreview && <span className="report-editor-preview-label">AI 方案预览，不会自动保存</span>}
           </main>

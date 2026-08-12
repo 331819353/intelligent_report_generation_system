@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"intelligent-report-generation-system/internal/askdata"
@@ -58,15 +59,22 @@ type DictionaryMatcher interface {
 // Nil members disable their tools rather than panicking: a deployment without a
 // graph or without an embedding provider stays usable and degrades visibly.
 type Services struct {
-	Reader     *registry.QueryReader
-	Retriever  *search.Retriever
-	Embedder   Embedder
-	Graph      *graph.Resolver
-	Compiler   *compiler.PinnedIRCompiler
-	Validator  *validator.Validator
-	Coverage   *validator.CoverageControl
-	Executor   *validator.Executor
-	Dictionary DictionaryMatcher
+	Reader        *registry.QueryReader
+	Retriever     *search.Retriever
+	Embedder      Embedder
+	Graph         *graph.Resolver
+	Compiler      *compiler.PinnedIRCompiler
+	Validator     *validator.Validator
+	Coverage      *validator.CoverageControl
+	Executor      *validator.Executor
+	Dictionary    DictionaryMatcher
+	ReportSources ReportSourceReader
+}
+
+// ReportSourceReader re-checks report visibility for the current viewer before
+// a retrieval hit is exposed to the model or retained for the answer card.
+type ReportSourceReader interface {
+	ReportSources(context.Context, askdata.PolicyScope, askdata.ID, []askdata.ID) (map[askdata.ID]toolhost.ReportSourceSummary, error)
 }
 
 // RunContext identifies the question run a handler set belongs to.
@@ -197,10 +205,13 @@ func (cache *resultCache) byResultHash(resultHash askdata.ContentHash) (executio
 
 // Binding is one run's handler set together with the state the chain needs.
 type Binding struct {
-	services Services
-	run      RunContext
-	plans    *planCache
-	results  *resultCache
+	services           Services
+	run                RunContext
+	plans              *planCache
+	results            *resultCache
+	reportSources      map[askdata.ID]toolhost.ReportSourceSummary
+	reportSourceScores map[askdata.ID]float64
+	reportSourcesMutex sync.Mutex
 }
 
 // NewBinding prepares the tool handlers for a single question run.
@@ -210,8 +221,32 @@ func NewBinding(services Services, run RunContext) (*Binding, error) {
 	}
 	return &Binding{
 		services: services, run: run,
-		plans: newPlanCache(), results: newResultCache(),
+		plans: newPlanCache(), results: newResultCache(), reportSources: map[askdata.ID]toolhost.ReportSourceSummary{},
+		reportSourceScores: map[askdata.ID]float64{},
 	}, nil
+}
+
+func (binding *Binding) selectedReportSources() []toolhost.ReportSourceSummary {
+	binding.reportSourcesMutex.Lock()
+	defer binding.reportSourcesMutex.Unlock()
+	ids := make([]askdata.ID, 0, len(binding.reportSources))
+	for id := range binding.reportSources {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		if binding.reportSourceScores[ids[i]] != binding.reportSourceScores[ids[j]] {
+			return binding.reportSourceScores[ids[i]] > binding.reportSourceScores[ids[j]]
+		}
+		return ids[i] < ids[j]
+	})
+	if len(ids) > 3 {
+		ids = ids[:3]
+	}
+	result := make([]toolhost.ReportSourceSummary, 0, len(ids))
+	for _, id := range ids {
+		result = append(result, binding.reportSources[id])
+	}
+	return result
 }
 
 // Handlers exposes this run's tool implementations in the shape the Tool Host

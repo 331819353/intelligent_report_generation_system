@@ -32,6 +32,7 @@
 .semantic-domain-readiness span { grid-column: 1; color: #52647d; font-size: 13px; font-weight: 680; }
 .semantic-domain-readiness strong { grid-column: 2; grid-row: 1 / 3; color: #1e3450; font-size: 32px; line-height: 1; }
 .semantic-domain-readiness small { grid-column: 1; color: #8c99aa; font-size: 14px; }
+.semantic-domain-readiness .app-button { grid-column: 1 / -1; justify-self: end; min-height: 32px; margin-top: 7px; border-color: #f0c98d; background: #fff9ee; color: #9a620f; font-size: 12px; }
 
 .semantic-flow {
   display: grid;
@@ -135,7 +136,7 @@
 .semantic-status.is-blocked { background: #ffeded; color: #c73a3a; }
 
 .semantic-release-list { grid-row: 2 / 4; min-height: 0; overflow: auto; padding: 12px 16px 18px; background: #f9fbfd; }
-.semantic-release-list > article { display: grid; grid-template-columns: minmax(330px, .9fr) minmax(600px, 1.4fr) auto; align-items: center; gap: 20px; min-height: 118px; border: 1px solid #dce5ef; border-radius: 9px; padding: 16px; background: #fff; }
+.semantic-release-list > article { display: grid; grid-template-columns: minmax(260px, .82fr) minmax(460px, 1.35fr) minmax(138px, auto); align-items: center; gap: 14px; min-height: 118px; border: 1px solid #dce5ef; border-radius: 9px; padding: 16px; background: #fff; }
 .semantic-release-list > article + article { margin-top: 10px; }
 .semantic-release-list > article.is-active { border-color: #9ed8c6; box-shadow: inset 3px 0 #12a578; }
 .semantic-release-title { min-width: 0; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 11px; }
@@ -145,13 +146,13 @@
 .semantic-release-title small { overflow: hidden; color: #7f8da0; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .semantic-release-list ol { display: grid; grid-template-columns: repeat(4, minmax(105px, 1fr)); margin: 0; padding: 0; list-style: none; }
 .semantic-release-list li { position: relative; min-width: 0; display: grid; grid-template-columns: 25px minmax(0, 1fr); align-items: center; gap: 7px; }
-.semantic-release-list li:not(:last-child)::after { position: absolute; top: 12px; right: 5px; width: 18px; height: 1px; background: #d6dfeb; content: ""; }
+.semantic-release-list li:not(:last-child)::after { position: absolute; top: 12px; right: 3px; width: 12px; height: 1px; background: #d6dfeb; content: ""; }
 .semantic-release-list li > span { width: 24px; height: 24px; display: grid; place-items: center; border: 1px solid #d3dce7; border-radius: 50%; color: #8290a3; font-size: 13px; }
 .semantic-release-list li.is-done > span { border-color: #9edcc7; background: #e7f7f0; color: #0c9569; }
 .semantic-release-list li > div { min-width: 0; display: grid; gap: 3px; }
 .semantic-release-list li strong { color: #495970; font-size: 13px; }
 .semantic-release-list li small { overflow: hidden; color: #8c99a9; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
-.semantic-release-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.semantic-release-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
 .semantic-release-actions .app-button { min-height: 36px; padding-inline: 12px; font-size: 12px; }
 
 /* 反馈工单 → 语义修复 → Release → 回归验证的持续质量运营闭环。 */
@@ -294,6 +295,12 @@
 .semantic-builder-rule strong { color: #44566e; font-size: 13px; }
 .semantic-builder-rule small { color: #8290a3; font-size: 12px; line-height: 1.45; }
 .semantic-builder-body > main { min-width: 0; min-height: 0; overflow: auto; padding: 24px 28px; }
+.semantic-builder-failure { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; margin-bottom: 16px; border: 1px solid #efb7b5; border-radius: 8px; padding: 12px 14px; background: #fff6f5; color: #c3433f; }
+.semantic-builder-failure > div { min-width: 0; display: grid; gap: 3px; }
+.semantic-builder-failure strong { color: #873b39; font-size: 14px; }
+.semantic-builder-failure small { color: #ba514c; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.semantic-builder-failure p { margin: 1px 0 0; color: #8e5f5d; font-size: 12px; line-height: 1.5; }
+.semantic-builder-failure .app-button { min-height: 35px; border-color: #e2a6a3; background: #fff; color: #a33f3b; }
 .semantic-builder-section { display: grid; align-content: start; gap: 20px; }
 .semantic-builder-section > header { display: grid; gap: 4px; }
 .semantic-builder-section > header h3 { margin: 0; color: #2b3c54; font-size: 21px; }
@@ -405,6 +412,62 @@
 .semantic-builder-dialog > footer .app-button { min-width: 94px; min-height: 38px; }
 
 .semantic-approval-dialog { width: min(820px, calc(100vw - 48px)); display: grid; gap: 0; overflow: hidden; border: 1px solid #ccd8e7; border-radius: 12px; background: #fff; box-shadow: 0 30px 90px #10223f45; }
+.semantic-governance-dialog,
+.semantic-diagnostic-dialog { width: min(980px, calc(100vw - 48px)); max-height: calc(100vh - 48px); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #ccd8e7; border-radius: 12px; background: #fff; box-shadow: 0 30px 90px #10223f45; }
+.semantic-governance-dialog > header,
+.semantic-diagnostic-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 24px; border-bottom: 1px solid #e2e9f1; padding: 18px 22px; }
+.semantic-governance-dialog > header > div,
+.semantic-diagnostic-dialog > header > div { min-width: 0; display: grid; gap: 4px; }
+.semantic-governance-dialog > header span,
+.semantic-diagnostic-dialog > header span { color: #2471df; font-size: 13px; font-weight: 760; }
+.semantic-governance-dialog > header h2,
+.semantic-diagnostic-dialog > header h2 { overflow: hidden; margin: 0; color: #283a52; font-size: 22px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-governance-dialog > header p,
+.semantic-diagnostic-dialog > header p { margin: 0; color: #76869a; font-size: 14px; }
+.semantic-governance-dialog > header > button,
+.semantic-diagnostic-dialog > header > button { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border: 0; border-radius: 7px; background: #f2f5f8; color: #65758a; }
+.semantic-governance-grid { min-height: 0; overflow: auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 22px; background: #f8fafc; }
+.semantic-governance-grid article { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 11px; border: 1px solid #d8e2ed; border-radius: 9px; padding: 16px; background: #fff; color: #2471df; }
+.semantic-governance-grid article > div { display: grid; gap: 5px; }
+.semantic-governance-grid strong { color: #3d4f67; font-size: 14px; }
+.semantic-governance-grid p { margin: 0; color: #738398; font-size: 13px; line-height: 1.55; }
+.semantic-governance-dialog > footer,
+.semantic-diagnostic-dialog > footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid #e2e9f1; padding: 13px 22px; background: #fbfcfe; }
+.semantic-governance-dialog > footer { justify-content: flex-end; }
+.semantic-diagnostic-dialog > footer > span { color: #6f7f93; font-size: 13px; }
+.semantic-diagnostic-dialog > footer > div { display: flex; gap: 8px; }
+.semantic-diagnostic-body { min-height: 0; overflow: auto; display: grid; align-content: start; gap: 12px; padding: 20px 22px; background: #f7f9fc; }
+.semantic-diagnostic-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); overflow: hidden; border: 1px solid #d9e3ee; border-radius: 9px; background: #fff; }
+.semantic-diagnostic-summary article { display: grid; gap: 4px; padding: 14px 17px; }
+.semantic-diagnostic-summary article + article { border-left: 1px solid #e5ebf2; }
+.semantic-diagnostic-summary strong { color: #2d4059; font-size: 22px; }
+.semantic-diagnostic-summary small { color: #7c8b9e; font-size: 12px; }
+.semantic-diagnostic-section { overflow: hidden; border: 1px solid #d8e2ed; border-radius: 9px; background: #fff; }
+.semantic-diagnostic-section > header { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e8edf3; padding: 10px 14px; background: #fbfcfe; }
+.semantic-diagnostic-section > header > div { display: grid; gap: 3px; }
+.semantic-diagnostic-section > header strong { color: #405269; font-size: 14px; }
+.semantic-diagnostic-section > header small { color: #8290a3; font-size: 12px; }
+.semantic-diagnostic-section > header em { border-radius: 4px; padding: 4px 8px; background: #ffeded; color: #bf3939; font-size: 12px; font-style: normal; font-weight: 750; }
+.semantic-diagnostic-section > header em.is-warning { background: #fff4e3; color: #a9650b; }
+.semantic-diagnostic-section > header em.is-ready { background: #e7f7f0; color: #0b8d63; }
+.semantic-diagnostic-section > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.semantic-diagnostic-section article { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 9px; padding: 13px 14px; color: #0c9569; }
+.semantic-diagnostic-section article:nth-child(even) { border-left: 1px solid #e8edf3; }
+.semantic-diagnostic-section article:nth-child(n + 3) { border-top: 1px solid #e8edf3; }
+.semantic-diagnostic-section article.is-error { color: #c34743; }
+.semantic-diagnostic-section article > div { min-width: 0; display: grid; gap: 3px; }
+.semantic-diagnostic-section article strong { color: #43556c; font-size: 13px; }
+.semantic-diagnostic-section article small { overflow: hidden; color: #8190a3; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-diagnostic-section article p { margin: 2px 0 0; color: #6f8095; font-size: 12px; line-height: 1.5; }
+.semantic-diagnostic-section ul { margin: 0; padding: 12px 32px 14px; color: #a13f3c; font-size: 13px; line-height: 1.7; }
+.semantic-diagnostic-empty { grid-column: 1 / -1; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; padding: 18px; color: #6f8caf; }
+.semantic-diagnostic-empty span { display: grid; gap: 3px; }
+.semantic-diagnostic-empty strong { color: #47627e; font-size: 13px; }
+.semantic-diagnostic-empty small { color: #8290a3; font-size: 12px; }
+.semantic-diagnostic-safety { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; border: 1px solid #bdd8f8; border-radius: 8px; padding: 12px 14px; background: #f0f6ff; color: #2471df; }
+.semantic-diagnostic-safety span { display: grid; gap: 3px; }
+.semantic-diagnostic-safety strong { color: #395876; font-size: 13px; }
+.semantic-diagnostic-safety small { color: #6f8298; font-size: 12px; }
 .semantic-evaluation-dialog { width: min(1120px, calc(100vw - 48px)); max-height: calc(100vh - 48px); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #ccd8e7; border-radius: 12px; background: #fff; box-shadow: 0 30px 90px #10223f45; }
 .semantic-evaluation-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 24px; border-bottom: 1px solid #e2e9f1; padding: 18px 22px; }
 .semantic-evaluation-dialog > header > div { min-width: 0; display: grid; gap: 4px; }
@@ -513,6 +576,12 @@
 .semantic-approval-grid strong { color: #405168; font-size: 14px; }
 .semantic-approval-grid small { color: #7d8b9e; font-size: 12px; line-height: 1.4; }
 .semantic-approval-grid .app-button { min-height: 35px; font-size: 12px; }
+.semantic-approval-decisions { display: flex; gap: 6px; }
+.semantic-approval-rejection { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; margin: 14px 22px 0; border: 1px solid #efb7b5; border-radius: 8px; padding: 11px 12px; background: #fff5f4; color: #c34440; }
+.semantic-approval-rejection > span { display: grid; gap: 3px; }
+.semantic-approval-rejection strong { color: #873b39; font-size: 13px; }
+.semantic-approval-rejection small { color: #93615e; font-size: 12px; line-height: 1.45; }
+.semantic-approval-rejection .app-button { min-height: 34px; }
 .semantic-approval-grid article.is-approved { border-color: #a8dfcb; background: #f2faf7; }
 .semantic-approval-grid article.is-approved > span { background: #daf3e9; color: #0c9569; }
 .semantic-gate-receipt { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px; margin: 4px 22px 20px; border: 1px solid #a8dfcb; border-radius: 8px; padding: 12px; background: #eff9f5; color: #0c9569; }
@@ -525,15 +594,77 @@
 .semantic-approval-comment textarea:focus { border-color: #5c97ea; box-shadow: 0 0 0 3px #2d7cec14; }
 .semantic-approval-comment textarea:disabled { background: #f4f6f8; color: #8a97a7; }
 .semantic-approval-handoff { margin: 0 22px 12px; }
+.semantic-approval-handoff { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; border: 1px solid #c7dcf6; border-radius: 8px; padding: 11px 12px; background: #f2f7ff; color: #2471df; }
+.semantic-approval-handoff span { display: grid; gap: 3px; }
+.semantic-approval-handoff strong { color: #3f5876; font-size: 13px; }
+.semantic-approval-handoff small { color: #71849b; font-size: 12px; }
+.semantic-approval-sla { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; margin: 0 22px 12px; border: 1px solid #d7e1ec; border-radius: 8px; padding: 10px 12px; background: #f9fbfd; color: #6f8198; }
+.semantic-approval-sla span { display: grid; gap: 3px; }
+.semantic-approval-sla strong { color: #4d6077; font-size: 13px; }
+.semantic-approval-sla small { color: #8190a3; font-size: 12px; }
+.semantic-approval-sla.is-overdue { border-color: #efc486; background: #fff8eb; color: #c77a12; }
+.semantic-approval-sla.is-overdue strong { color: #8a5a18; }
+.semantic-approval-sla.is-completed { border-color: #a8dfcb; background: #f0faf6; color: #0c9569; }
 .semantic-approval-dialog > footer { display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid #e2e9f1; padding: 13px 22px; background: #fbfcfe; }
 .semantic-approval-dialog > footer .app-button { min-height: 38px; }
+
+.semantic-rollout-dialog { width: min(980px, calc(100vw - 48px)); max-height: calc(100vh - 48px); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #ccd8e7; border-radius: 12px; background: #fff; box-shadow: 0 30px 90px #10223f45; }
+.semantic-rollout-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 24px; border-bottom: 1px solid #e2e9f1; padding: 17px 22px; }
+.semantic-rollout-dialog > header > div { min-width: 0; display: grid; gap: 3px; }
+.semantic-rollout-dialog > header span { color: #2471df; font-size: 12px; font-weight: 760; letter-spacing: .03em; }
+.semantic-rollout-dialog > header h2 { overflow: hidden; margin: 0; color: #283a52; font-size: 22px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-rollout-dialog > header p { margin: 0; color: #76869a; font-size: 14px; }
+.semantic-rollout-dialog > header > button { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border: 0; border-radius: 7px; background: #f2f5f8; color: #65758a; }
+.semantic-rollout-loading { min-height: 280px; display: grid; place-content: center; justify-items: center; gap: 10px; color: #2471df; }
+.semantic-rollout-loading strong { color: #52647b; font-size: 14px; }
+.semantic-rollout-body { min-height: 0; overflow: auto; display: grid; align-content: start; gap: 14px; padding: 18px 22px; background: #f7f9fc; }
+.semantic-rollout-summary { display: grid; grid-template-columns: repeat(3, 1fr); overflow: hidden; border: 1px solid #d9e3ee; border-radius: 9px; background: #fff; }
+.semantic-rollout-summary article { display: grid; gap: 4px; padding: 13px 16px; }
+.semantic-rollout-summary article + article { border-left: 1px solid #e5ebf2; }
+.semantic-rollout-summary span { color: #7d8b9d; font-size: 12px; }
+.semantic-rollout-summary strong { color: #2d4059; font-size: 22px; line-height: 1.1; }
+.semantic-rollout-summary small { color: #8290a3; font-size: 12px; }
+.semantic-rollout-progress { min-height: 180px; flex: none; overflow: hidden; border: 1px solid #d8e2ed; border-radius: 9px; background: #fff; }
+.semantic-rollout-progress > header { min-height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e8edf3; padding: 11px 15px; background: #fbfcfe; }
+.semantic-rollout-progress > header > div { display: grid; gap: 3px; }
+.semantic-rollout-progress > header strong { color: #405269; font-size: 14px; }
+.semantic-rollout-progress > header small { color: #8290a3; font-size: 12px; }
+.semantic-rollout-progress > header em { border-radius: 5px; padding: 5px 8px; background: #edf4ff; color: #2471df; font-size: 11px; font-style: normal; font-weight: 760; }
+.semantic-rollout-progress ol { min-height: 116px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); align-content: start; margin: 0; padding: 18px 14px 14px; list-style: none; }
+.semantic-rollout-progress li { position: relative; min-width: 0; display: grid; justify-items: center; gap: 5px; color: #8b98a9; }
+.semantic-rollout-progress li:not(:last-child)::after { position: absolute; z-index: 0; top: 14px; left: calc(50% + 17px); width: calc(100% - 34px); height: 1px; background: #dbe4ee; content: ''; }
+.semantic-rollout-progress li > span { z-index: 1; width: 29px; height: 29px; display: grid; place-items: center; border: 1px solid #d1dce8; border-radius: 50%; background: #fff; font-size: 12px; font-weight: 760; }
+.semantic-rollout-progress li strong { color: #617188; font-size: 12px; }
+.semantic-rollout-progress li small { color: #8a98aa; font-size: 11px; }
+.semantic-rollout-progress li.is-done > span { border-color: #a8dbc9; background: #e8f7f1; color: #0b9368; }
+.semantic-rollout-progress li.is-current > span { border-color: #2471df; background: #2471df; color: #fff; box-shadow: 0 0 0 4px #2471df14; }
+.semantic-rollout-progress li.is-current strong { color: #1763d2; }
+.semantic-rollout-reason { display: grid; gap: 7px; }
+.semantic-rollout-reason > span { color: #4f6077; font-size: 13px; font-weight: 700; }
+.semantic-rollout-reason textarea { min-height: 76px; width: 100%; resize: vertical; border: 1px solid #cdd8e5; border-radius: 7px; outline: 0; padding: 10px 12px; background: #fff; color: #34455d; font: inherit; font-size: 13px; line-height: 1.5; }
+.semantic-rollout-reason textarea:focus { border-color: #5c97ea; box-shadow: 0 0 0 3px #2d7cec14; }
+.semantic-rollout-references { overflow: hidden; border: 1px solid #ead29c; border-radius: 9px; background: #fffdf7; }
+.semantic-rollout-references > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid #f0e2be; padding: 10px 13px; background: #fff9eb; }
+.semantic-rollout-references > header strong { color: #795719; font-size: 13px; }
+.semantic-rollout-references > header small { color: #9b7a3b; font-size: 12px; }
+.semantic-rollout-references article { min-height: 52px; display: grid; grid-template-columns: 31px minmax(0, 1fr); align-items: center; gap: 10px; padding: 9px 13px; }
+.semantic-rollout-references article + article { border-top: 1px solid #f1e7cf; }
+.semantic-rollout-references article > span { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 6px; background: #fff2cf; color: #a36c11; }
+.semantic-rollout-references article > div { min-width: 0; display: grid; gap: 3px; }
+.semantic-rollout-references article strong { color: #4c5c71; font-size: 13px; }
+.semantic-rollout-references article small { color: #8491a2; font-size: 11px; }
+.semantic-rollout-dialog > footer { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid #e2e9f1; padding: 12px 22px; background: #fbfcfe; }
+.semantic-rollout-dialog > footer > span { color: #718197; font-size: 12px; }
+.semantic-rollout-dialog > footer > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.semantic-rollout-dialog > footer .app-button { min-height: 38px; }
 
 @media (max-width: 1500px) {
   .semantic-center-shell > .main-stage { padding-inline: 16px; }
   .semantic-workbench { grid-template-columns: 204px minmax(0, 1fr); }
   .semantic-object-head,
   .semantic-object-table article { grid-template-columns: minmax(320px, 1.5fr) minmax(160px, .7fr) 120px 130px 160px; }
-  .semantic-release-list > article { grid-template-columns: minmax(290px, .8fr) minmax(520px, 1.3fr) auto; }
+  .semantic-release-list > article { grid-template-columns: minmax(200px, .72fr) minmax(360px, 1.28fr); gap: 12px; }
+  .semantic-release-actions { grid-column: 1 / -1; }
 }
 
 @media (max-height: 900px) {

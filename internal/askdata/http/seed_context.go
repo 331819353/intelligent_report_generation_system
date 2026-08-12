@@ -160,9 +160,16 @@ func (service *PostgresService) resolveExplicitReleaseScope(
 	roleIDs := []askdata.ID{}
 	err := service.scopeRunner(ctx, string(identity.TenantID), func(tx pgx.Tx) error {
 		var runnable bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM askdata.releases
-			WHERE id=$1 AND tenant_id=$2 AND domain_id=$3 AND content_hash=$4
-			  AND status IN ('ACTIVE','SUPERSEDED','RETAINED'))`,
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM askdata.releases AS release
+			WHERE release.id=$1 AND release.tenant_id=$2 AND release.domain_id=$3 AND release.content_hash=$4
+			  AND (release.status IN ('ACTIVE','SUPERSEDED','RETAINED') OR (
+				release.status='READY' AND EXISTS(
+				  SELECT 1 FROM askdata.release_rollouts AS rollout
+				  WHERE rollout.tenant_id=release.tenant_id AND rollout.domain_id=release.domain_id
+				    AND rollout.candidate_release_id=release.id
+				    AND rollout.state IN ('RUNNING','PAUSED','ACCEPTED')
+				)
+			  )))`,
 			release.ReleaseID, identity.TenantID, identity.DomainID, release.ContentHash,
 		).Scan(&runnable); err != nil || !runnable {
 			return errors.Join(err, ErrReportSeedInvalid)

@@ -204,6 +204,63 @@ export type ReleaseLifecycle = {
   approvalCount: number
   approvedRoles: string[]
   actorHasApproved: boolean
+	rejectionCount: number
+	rejectedRoles: string[]
+	actorApprovalRole?: string
+	approvalDueAt?: string
+	approvalSlaStatus: string
+	escalationLevel: number
+	projections: Array<{ target: string; status: string; expectedContentHash: string; appliedContentHash?: string; attempt: number; maxAttempts: number; errorCode?: string; hashMatched: boolean }>
+}
+
+export type ReleaseRollout = {
+  id: string
+  candidateReleaseId: string
+  controlReleaseId?: string
+  stage: 'SHADOW' | 'CANARY_5' | 'CANARY_20' | 'CANARY_50' | 'ACCEPTED_95'
+  state: 'RUNNING' | 'PAUSED' | 'STOPPED' | 'ACCEPTED' | 'COMPLETED' | 'ROLLED_BACK'
+  canaryPercent: number
+  version: number
+  startedAt: string
+  stageStartedAt: string
+  updatedAt: string
+}
+
+export type ReleaseOperationalImpact = {
+  releaseId: string
+  status: string
+  retentionUntil?: string
+  canRetire: boolean
+  blockedCode?: string
+  activeReferenceCount: number
+  references: Array<{
+    id: string
+    releaseId: string
+    referenceType: 'REPORT_VERSION' | 'SAVED_QUESTION'
+    referenceId: string
+    referenceName: string
+    ownerId: string
+    createdAt: string
+  }>
+  rollout?: ReleaseRollout
+  observability?: {
+    stage: string
+    state: string
+    stageElapsedSeconds: number
+    minimumDurationSeconds: number
+    minimumSamples: number
+    gatePassed: boolean
+    controlSamples: number
+    candidateSamples: number
+    controlAnswered: number
+    candidateAnswered: number
+    controlP95LatencyMs: number
+    candidateP95LatencyMs: number
+    stopRequired: boolean
+    stopCodes: string[]
+    advanceAllowed: boolean
+    advanceBlockedCodes: string[]
+  }
 }
 
 export type ReleaseObjectInput = {
@@ -319,8 +376,38 @@ export const semanticAPI = {
     apiRequest<{ releaseId: string; approvalHash: string }>(`${semanticBase}/releases/${encodeURIComponent(releaseId)}/approvals`, {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
     }),
+  withdrawApproval: (releaseId: string, gateReceiptHash: string, reviewRole: string, reasonHash: string) =>
+    apiRequest<{ releaseId: string; withdrawalId: string }>(`${semanticBase}/releases/${encodeURIComponent(releaseId)}/approvals/withdraw`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ gateReceiptHash, reviewRole, reasonHash }),
+    }),
+  resetRejectedApprovals: (releaseId: string, gateReceiptHash: string, reasonHash: string) =>
+    apiRequest<{ releaseId: string; resetCount: number }>(`${semanticBase}/releases/${encodeURIComponent(releaseId)}/approvals/reset-rejection`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ gateReceiptHash, reasonHash }),
+    }),
+  escalateApproval: (releaseId: string, gateReceiptHash: string, reasonHash: string) =>
+    apiRequest<{ releaseId: string; escalationLevel: number }>(`${semanticBase}/releases/${encodeURIComponent(releaseId)}/approvals/escalate`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ gateReceiptHash, reasonHash }),
+    }),
   activate: (releaseId: string, evaluationSetId: string, evaluationBatchId: string, expectedStateVersion: number) =>
     apiRequest<{ activated: boolean; activeReleaseId?: string; releaseStateVersion: number; failures: string[] }>(`${semanticBase}/releases/${encodeURIComponent(releaseId)}/activate`, {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ evaluationSetId, evaluationBatchId, expectedStateVersion }),
+    }),
+  releaseOperations: (releaseId: string) =>
+    apiRequest<ReleaseOperationalImpact>(`${semanticBase}/releases/${encodeURIComponent(releaseId)}/operations`),
+  startRollout: (releaseId: string, reasonHash: string) =>
+    apiRequest<ReleaseRollout>(`${semanticBase}/releases/${encodeURIComponent(releaseId)}/rollouts`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ reasonHash }),
+    }),
+  mutateRollout: (releaseId: string, action: 'advance' | 'pause' | 'resume' | 'stop', expectedVersion: number, reasonHash: string) =>
+    apiRequest<ReleaseRollout>(`${semanticBase}/releases/${encodeURIComponent(releaseId)}/rollouts/${action}`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ expectedVersion, reasonHash }),
+    }),
+  rollback: (releaseId: string, expectedStateVersion: number, reasonHash: string) =>
+    apiRequest<{ rolledBack: boolean; activeReleaseId: string; replacedReleaseId: string; releaseStateVersion: number }>(`${semanticBase}/releases/${encodeURIComponent(releaseId)}/rollback`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ expectedStateVersion, reasonHash }),
+    }),
+  retire: (releaseId: string) =>
+    apiRequest<{ releaseId: string; retired: boolean }>(`${semanticBase}/releases/${encodeURIComponent(releaseId)}/retire`, {
+      method: 'POST', headers: idempotencyHeaders(), body: '{}',
     }),
 }

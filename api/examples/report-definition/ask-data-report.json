@@ -54,12 +54,23 @@
               "id": "block_askdata_trend",
               "type": "ANALYSIS_CARD",
               "layout": {
-                "desktop": { "x": 0, "y": 0, "w": 16, "h": 8 },
-                "mobile": { "order": 1, "visible": true, "heightMode": "AUTO", "slotMode": "STACK" }
+                "desktop": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 16,
+                  "h": 8
+                },
+                "mobile": {
+                  "order": 1,
+                  "visible": true,
+                  "heightMode": "AUTO",
+                  "slotMode": "STACK"
+                }
               },
               "zones": [
                 {
                   "id": "zone_askdata_content",
+                  "order": 1,
                   "type": "CONTENT",
                   "layout": {
                     "heightMode": "FR",
@@ -73,7 +84,12 @@
                   "slots": [
                     {
                       "id": "slot_askdata_chart",
-                      "grid": { "x": 0, "y": 0, "w": 1, "h": 1 },
+                      "grid": {
+                        "x": 0,
+                        "y": 0,
+                        "w": 1,
+                        "h": 1
+                      },
                       "componentId": "component_askdata_chart"
                     }
                   ]
@@ -88,7 +104,10 @@
   "components": [
     {
       "id": "component_askdata_chart",
-      "templateRef": { "type": "line-trend", "version": "1.0.0" },
+      "templateRef": {
+        "type": "line-trend",
+        "version": "1.0.0"
+      },
       "dataBinding": {
         "bindingMode": "SEMANTIC_IR",
         "semanticQueryRef": {
@@ -101,10 +120,16 @@
             "domainId": "domain_enterprise_operations",
             "modelVersionId": "semantic_model_sales_v7",
             "metrics": [
-              { "metricVersionId": "metric_sales_amount_v3", "alias": "sales_amount" }
+              {
+                "metricVersionId": "metric_sales_amount_v3",
+                "alias": "sales_amount"
+              }
             ],
             "groupBy": [
-              { "dimensionVersionId": "dimension_order_date_v2", "grain": "MONTH" }
+              {
+                "dimensionVersionId": "dimension_order_date_v2",
+                "grain": "MONTH"
+              }
             ],
             "filters": [],
             "timeRange": {
@@ -153,12 +178,21 @@
   },
   "provenance": {
     "createdFrom": "ASK_DATA",
-    "sourceQuestionRunIds": ["question_run_sales_trend_001"],
+    "sourceQuestionRunIds": [
+      "question_run_sales_trend_001"
+    ],
     "aiRunIds": [],
     "analysisMethodVersions": [
-      { "analysisMethod": "PERIOD_COMPARISON", "version": "1.2.0" }
+      {
+        "analysisMethod": "PERIOD_COMPARISON",
+        "version": "1.2.0"
+      }
     ],
-    "promptVersions": ["insight-monthly-v2"],
-    "modelPolicies": ["narrative-standard-v1"]
+    "promptVersions": [
+      "insight-monthly-v2"
+    ],
+    "modelPolicies": [
+      "narrative-standard-v1"
+    ]
   }
 }

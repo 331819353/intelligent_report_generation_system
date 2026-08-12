@@ -99,7 +99,14 @@ export type ZoneLayout = {
   emptyPriority: number
 }
 
-export type Zone = { id: string; type: ZoneType; layout: ZoneLayout; slots: Slot[] }
+/**
+ * 卡片内的一个区域。order 决定它在卡片中的上下位置。
+ *
+ * 顺序曾经借用 layout.emptyPriority 表达，而后者同时决定空区域腾出的高度优先
+ * 分配给谁；两个使用方的排序方向相反，于是「先渲染」与「先获得空间」无法同时
+ * 成立。两者现在各自独立。
+ */
+export type Zone = { id: string; order: number; type: ZoneType; layout: ZoneLayout; slots: Slot[] }
 
 export type MobileBlockLayout = {
   order: number

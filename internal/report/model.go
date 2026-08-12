@@ -273,7 +273,16 @@ const (
 )
 
 type Zone struct {
-	ID     askdata.ID `json:"id"`
+	ID askdata.ID `json:"id"`
+	// Order is the zone's position within its card, top to bottom. It is
+	// structural, like Page.Order and Section.Order.
+	//
+	// Zone order used to be inferred from Layout.EmptyPriority, which also
+	// decides which zone absorbs space freed by empty ones. The two consumers
+	// sorted that field in opposite directions, so a zone could not both render
+	// first and absorb freed space first — and ZONE_REORDER, whose payload has
+	// always been an order, wrote into the redistribution weight instead.
+	Order  int        `json:"order"`
 	Type   ZoneType   `json:"type"`
 	Layout ZoneLayout `json:"layout"`
 	Slots  []Slot     `json:"slots"`
@@ -909,6 +918,9 @@ func (layout MobileBlockLayout) validate() error {
 func (zone Zone) validate(componentIDs, slotIDs map[askdata.ID]struct{}) error {
 	if err := zone.ID.Validate(); err != nil {
 		return fmt.Errorf("id: %w", err)
+	}
+	if zone.Order < 1 {
+		return errors.New("order must be positive")
 	}
 	if zone.Type != ZoneHeader && zone.Type != ZoneFilter && zone.Type != ZoneInsight &&
 		zone.Type != ZoneContent && zone.Type != ZoneFooter {

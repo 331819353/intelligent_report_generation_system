@@ -2,8 +2,9 @@ import { type CSSProperties, useRef } from 'react'
 import { ReportBlockBoundary, ReportComponentBoundary, ComponentStateView } from '../runtime/ComponentStateView.tsx'
 import { mobileBlockHeight, toMobileLayout } from '../designer/layout/index.ts'
 import { useMobileViewport } from './use-mobile-viewport.ts'
-import { BlockHandles } from './BlockInteraction.tsx'
+import { BlockHandles, SlotHandles } from './BlockInteraction.tsx'
 import { useBlockInteraction, type DragMode } from './use-block-interaction.ts'
+import { useGridInteraction, zoneGridCellSize } from './use-grid-interaction.ts'
 import { ComponentView, type ComponentResult } from './ComponentView.tsx'
 import { minimumSize, type ManifestIndex } from './manifests.ts'
 import {
@@ -40,6 +41,10 @@ const overflowStyle: Record<Zone['layout']['overflow'], CSSProperties['overflow'
 export type EditingHandlers = {
   /** 一次拖拽或缩放结束后提交；实现方负责碰撞消解与受控 Operation 生成。 */
   onLayoutChange(sectionId: string, blockId: string, rect: GridRect, mode: DragMode): void
+  /** 卡片内槽位在所属区域的子网格中拖拽或缩放。 */
+  onSlotLayoutChange(blockId: string, zoneId: string, slotId: string, rect: GridRect, mode: DragMode): void
+  /** 区域在卡片内上移或下移。 */
+  onZoneReorder(blockId: string, zoneId: string, direction: -1 | 1): void
 }
 
 export type ReportPageViewProps = {
@@ -74,49 +79,101 @@ type BlockContentProps = {
   onSelectComponent?: (componentId: string, blockId: string) => void
   selectedComponentId?: string
   interaction?: ReportPageViewProps['interaction']
+  editing?: EditingHandlers
+}
+
+/**
+ * 一个区域是卡片内的子网格。编辑态下槽位可以在其中拖拽与缩放，用的是与页面
+ * 栅格同一套指针换算——两级网格只有单元格尺寸和行数上界不同。
+ */
+function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
+  zone: Zone; position: number; total: number
+}) {
+  const {
+    block, components, manifests, results, designMode, mobile,
+    onRetryBlock, onSelectComponent, selectedComponentId, interaction, editing,
+  } = props
+  const gridRef = useRef<HTMLDivElement>(null)
+  const columns = Math.max(zone.layout.columns, 1)
+  const rows = Math.max(zone.layout.rows, 1)
+
+  const minSizeFor = (slotId: string) => {
+    const slot = zone.slots.find(item => item.id === slotId)
+    const component = slot?.componentId ? components.get(slot.componentId) : undefined
+    return minimumSize(component && manifests.get(component.templateRef.type, component.templateRef.version))
+  }
+  const slotDrag = useGridInteraction({
+    containerRef: gridRef,
+    bounds: { columns, rows },
+    cellSize: zoneGridCellSize(columns, rows),
+    minSizeFor,
+    onCommit: (slotId, rect, mode) => editing?.onSlotLayoutChange(block.id, zone.id, slotId, rect, mode),
+  })
+  // 只有一个槽位时区域内没有可编排的空间，把手只会干扰点击选中。
+  const slotEditable = Boolean(editing) && zone.slots.length > 1
+
+  return <div className={`report-render-zone is-${zone.type.toLocaleLowerCase()}`} ref={gridRef}
+    style={{
+      gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+      gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
+      overflow: overflowStyle[zone.layout.overflow] ?? 'visible',
+      maxHeight: zone.layout.maxHeight ? `${zone.layout.maxHeight}px` : undefined,
+    }}>
+    {editing && total > 1 && <div className="report-zone-controls" contentEditable={false}>
+      <span>{zone.type}</span>
+      <button type="button" aria-label={`上移区域 ${zone.type}`} disabled={position === 0}
+        onClick={event => { event.stopPropagation(); editing.onZoneReorder(block.id, zone.id, -1) }}>↑</button>
+      <button type="button" aria-label={`下移区域 ${zone.type}`} disabled={position === total - 1}
+        onClick={event => { event.stopPropagation(); editing.onZoneReorder(block.id, zone.id, 1) }}>↓</button>
+    </div>}
+    {zone.slots.map(slot => {
+      const component = slot.componentId ? components.get(slot.componentId) : undefined
+      const selected = Boolean(component && component.id === selectedComponentId)
+      const rect = slotDrag.rectFor(slot.id, slot.grid)
+      const dragging = slotDrag.drag?.id === slot.id
+      return <div className={`report-render-slot ${selected ? 'is-selected' : ''} ${dragging ? 'is-dragging' : ''}`.trim()}
+        key={slot.id}
+        style={{
+          gridColumn: `${rect.x + 1} / span ${Math.max(rect.w, 1)}`,
+          gridRow: `${rect.y + 1} / span ${Math.max(rect.h, 1)}`,
+        }}
+        onClick={component && onSelectComponent
+          ? event => { event.stopPropagation(); onSelectComponent(component.id, block.id) }
+          : undefined}>
+        {component
+          ? <ReportComponentBoundary fallback={<ComponentStateView state="ERROR" onAction={() => onRetryBlock?.(block.id)} />}>
+            <ComponentView component={component} manifests={manifests} mobile={mobile} designMode={designMode}
+              item={results?.get(component.id)} onRetry={() => onRetryBlock?.(block.id)}
+              selected={interaction?.roleFor(component.id).selected}
+              dimmed={interaction?.roleFor(component.id).dimmed}
+              onSelect={interaction && interaction.roleFor(component.id).source
+                ? values => interaction.onSelect(component.id, values)
+                : undefined} />
+          </ReportComponentBoundary>
+          : slot.componentId
+            ? <ComponentStateView state="ERROR" boundTitle="组件在定义中缺失" />
+            : <div className="report-render-empty-slot"><span>空槽位</span></div>}
+        {slotEditable && editing && <SlotHandles
+          slotId={slot.id} rect={slot.grid} columns={columns} rows={rows} minimum={minSizeFor(slot.id)}
+          onStart={(event, mode) => slotDrag.start(event, slot.id, slot.grid, mode)}
+          onNudge={(next, mode) => editing.onSlotLayoutChange(block.id, zone.id, slot.id, next, mode)} />}
+      </div>
+    })}
+  </div>
 }
 
 function BlockZones(props: BlockContentProps) {
-  const { block, components, manifests, results, designMode, mobile, onRetryBlock, onSelectComponent, selectedComponentId, interaction } = props
-  const zones = block.zones.filter(zone => zone.layout.heightMode !== 'HIDDEN')
+  // 区域按声明顺序渲染。服务端规范化会做同样的排序，但渲染器不依赖它已经发生。
+  const zones = props.block.zones
+    .filter(zone => zone.layout.heightMode !== 'HIDDEN')
+    .slice()
+    .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
   if (zones.length === 0) {
     return <div className="report-render-placeholder"><span>该区块尚未配置内容区域</span></div>
   }
   return <div className="report-render-block-zones" style={{ gridTemplateRows: zones.map(zoneTrack).join(' ') }}>
-    {zones.map(zone => <div className={`report-render-zone is-${zone.type.toLocaleLowerCase()}`} key={zone.id}
-      style={{
-        gridTemplateColumns: `repeat(${Math.max(zone.layout.columns, 1)}, minmax(0, 1fr))`,
-        gridTemplateRows: `repeat(${Math.max(zone.layout.rows, 1)}, minmax(0, 1fr))`,
-        overflow: overflowStyle[zone.layout.overflow] ?? 'visible',
-        maxHeight: zone.layout.maxHeight ? `${zone.layout.maxHeight}px` : undefined,
-      }}>
-      {zone.slots.map(slot => {
-        const component = slot.componentId ? components.get(slot.componentId) : undefined
-        const selected = Boolean(component && component.id === selectedComponentId)
-        return <div className={`report-render-slot ${selected ? 'is-selected' : ''}`.trim()} key={slot.id}
-          style={{
-            gridColumn: `${slot.grid.x + 1} / span ${Math.max(slot.grid.w, 1)}`,
-            gridRow: `${slot.grid.y + 1} / span ${Math.max(slot.grid.h, 1)}`,
-          }}
-          onClick={component && onSelectComponent
-            ? event => { event.stopPropagation(); onSelectComponent(component.id, block.id) }
-            : undefined}>
-          {component
-            ? <ReportComponentBoundary fallback={<ComponentStateView state="ERROR" onAction={() => onRetryBlock?.(block.id)} />}>
-              <ComponentView component={component} manifests={manifests} mobile={mobile} designMode={designMode}
-                item={results?.get(component.id)} onRetry={() => onRetryBlock?.(block.id)}
-                selected={interaction?.roleFor(component.id).selected}
-                dimmed={interaction?.roleFor(component.id).dimmed}
-                onSelect={interaction && interaction.roleFor(component.id).source
-                  ? values => interaction.onSelect(component.id, values)
-                  : undefined} />
-            </ReportComponentBoundary>
-            : slot.componentId
-              ? <ComponentStateView state="ERROR" boundTitle="组件在定义中缺失" />
-              : <div className="report-render-empty-slot"><span>空槽位</span></div>}
-        </div>
-      })}
-    </div>)}
+    {zones.map((zone, position) => <ZoneGrid {...props} key={zone.id}
+      zone={zone} position={position} total={zones.length} />)}
   </div>
 }
 

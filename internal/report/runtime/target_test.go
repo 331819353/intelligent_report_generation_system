@@ -28,6 +28,7 @@ func testDefinition(components ...report.Component) report.ReportDefinition {
 			Type:   report.BlockChart,
 			Layout: report.BlockLayout{Desktop: report.DesktopBlockLayout{X: 0, Y: index * 4, W: 8, H: 4}},
 			Zones: []report.Zone{{
+				Order:  1,
 				ID:     askdata.ID(strings.Repeat("0", 8) + "-0000-4000-8000-00000000030" + string(rune('0'+index))),
 				Type:   report.ZoneContent,
 				Layout: report.ZoneLayout{HeightMode: report.ZoneHeightAuto, MinHeight: 1, Columns: 8, Rows: 4, Overflow: report.OverflowExpand},

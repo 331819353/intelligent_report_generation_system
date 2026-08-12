@@ -4,9 +4,9 @@ import { minimumSize, recommendedSize } from '../render/manifests.ts'
 import {
   canvasOf, findBlock, findComponentBlock, orderedSections,
   type BlockType, type ComponentOptions, type FieldBinding,
-  type GridRect, type Page, type ReportComponent, type ReportDefinition, type Section, type Zone,
+  type Block, type GridRect, type Page, type ReportComponent, type ReportDefinition, type Section, type Zone,
 } from '../render/schema.ts'
-import { findFreeRect, resolveLayout } from './placement.ts'
+import { findFreeRect, resolveLayout, resolveSlotPlacement } from './placement.ts'
 
 /**
  * 编辑器把每一次画布操作翻译成 Report Operation v1 受控指令。
@@ -107,7 +107,8 @@ export function addToCardOperations(input: AddToCardInput): { operations: Editor
   const component = buildComponent(componentId, manifest, title, dataContextId, fields)
 
   const zone: Zone = {
-    id: zoneId, type: zoneKind,
+    // New regions go beneath what the card already shows.
+    id: zoneId, order: block.zones.length + 1, type: zoneKind,
     layout: zoneLayoutFor(zoneKind, width, height),
     slots: [{ id: slotId, grid: { x: 0, y: 0, w: width, h: height }, componentId }],
   }
@@ -187,7 +188,7 @@ export function addComponentOperations(input: AddComponentInput): { operations: 
       },
     },
     zones: [{
-      id: zoneId, type: 'CONTENT' as const,
+      id: zoneId, order: 1, type: 'CONTENT' as const,
       layout: {
         heightMode: 'AUTO' as const, minHeight: 1, columns: rect.w, rows: rect.h,
         overflow: 'EXPAND' as const, emptyPriority: 1,
@@ -302,3 +303,60 @@ export function sectionReorderOperations(page: Page, sectionId: string, directio
 }
 
 export type { ManifestIndex }
+
+/**
+ * 槽位拖拽：SLOT_UPDATE 改写槽位在区域子网格中的位置。
+ *
+ * 若求解结果超出区域当前行数，区域必须一并加高——服务端校验
+ * grid.y+h ≤ zone.rows，否则这次拖拽只会换来一次保存失败。
+ */
+export function slotLayoutOperations(
+  block: Block,
+  zone: Zone,
+  slotId: string,
+  rect: GridRect,
+  minimum: { w: number; h: number },
+): EditorOperation[] {
+  const placement = resolveSlotPlacement(
+    zone.slots.map(slot => ({ id: slot.id, grid: slot.grid })),
+    slotId, rect, zone.layout.columns, zone.layout.rows, minimum,
+  )
+  const componentBySlot = new Map(zone.slots.map(slot => [slot.id, slot.componentId]))
+  const operations: EditorOperation[] = []
+  if (placement.requiredRows > zone.layout.rows) {
+    operations.push({
+      op: 'ZONE_UPDATE', targetId: zone.id,
+      payload: { type: zone.type, layout: { ...zone.layout, rows: placement.requiredRows } },
+    })
+    // 卡片也要跟着长高，否则加高的区域会被裁掉。
+    operations.push({
+      op: 'BLOCK_RESIZE', targetId: block.id,
+      payload: {
+        w: block.layout.desktop.w,
+        h: block.layout.desktop.h + (placement.requiredRows - zone.layout.rows),
+      },
+    })
+  }
+  for (const change of placement.changes) {
+    operations.push({
+      op: 'SLOT_UPDATE', targetId: change.slotId,
+      payload: { grid: change.rect, componentId: componentBySlot.get(change.slotId) ?? '' },
+    })
+  }
+  return operations
+}
+
+/**
+ * 区域上下移动：与章节重排同构，交换两个区域的 order。
+ * order 是区域自己的结构字段，不再借用 emptyPriority 表达。
+ */
+export function zoneReorderOperations(block: Block, zoneId: string, direction: -1 | 1): EditorOperation[] {
+  const ordered = block.zones.slice().sort((left, right) => left.order - right.order)
+  const index = ordered.findIndex(zone => zone.id === zoneId)
+  const adjacent = ordered[index + direction]
+  if (index < 0 || !adjacent) return []
+  return [
+    { op: 'ZONE_REORDER', targetId: zoneId, payload: { order: adjacent.order } },
+    { op: 'ZONE_REORDER', targetId: adjacent.id, payload: { order: ordered[index].order } },
+  ]
+}

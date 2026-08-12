@@ -659,6 +659,23 @@ type LifecycleInput struct {
 	ExpectedVersion int64 `json:"expectedVersion"`
 }
 
+// LifecycleImpact is the deletion/disable preflight projection. It exposes
+// only aggregate usage evidence so callers can make a safe lifecycle decision
+// without learning identifiers they cannot otherwise read.
+type LifecycleImpact struct {
+	DatasetID                     string   `json:"datasetId"`
+	Status                        string   `json:"status"`
+	DownstreamDraftReferences     int      `json:"downstreamDraftReferences"`
+	DownstreamPublishedReferences int      `json:"downstreamPublishedReferences"`
+	ActiveQueryRuns               int      `json:"activeQueryRuns"`
+	ActiveBuildRuns               int      `json:"activeBuildRuns"`
+	Materializations              int      `json:"materializations"`
+	CanDisable                    bool     `json:"canDisable"`
+	CanRestore                    bool     `json:"canRestore"`
+	CanDelete                     bool     `json:"canDelete"`
+	Blockers                      []string `json:"blockers"`
+}
+
 // PublishInput 绑定一个确定的草稿修订和发布试跑参数。
 type PublishInput struct {
 	DraftVersionID             string         `json:"draftVersionId"`

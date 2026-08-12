@@ -387,9 +387,11 @@ func sortSemanticCollections(definition *report.ReportDefinition) {
 			})
 			for blockIndex := range section.Blocks {
 				block := &section.Blocks[blockIndex]
+				// Zones render in their declared order; EmptyPriority now means
+				// only what its name says and no longer decides layout order.
 				sort.Slice(block.Zones, func(i, j int) bool {
-					if block.Zones[i].Layout.EmptyPriority != block.Zones[j].Layout.EmptyPriority {
-						return block.Zones[i].Layout.EmptyPriority < block.Zones[j].Layout.EmptyPriority
+					if block.Zones[i].Order != block.Zones[j].Order {
+						return block.Zones[i].Order < block.Zones[j].Order
 					}
 					return block.Zones[i].ID < block.Zones[j].ID
 				})

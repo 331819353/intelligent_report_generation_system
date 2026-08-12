@@ -48,6 +48,22 @@ export type DataSourceRecord = {
   version: number
 }
 
+export type DataSourceRetirementDataset = {
+  id: string
+  name: string
+  status: 'DRAFT' | 'VALIDATING' | 'PUBLISHED' | 'STALE' | 'DEPRECATED'
+  layer?: string
+  dependencyKind: 'ORIGIN_TABLE' | 'VERSION_DEPENDENCY'
+}
+
+export type DataSourceRetirementImpact = {
+  canRetire: boolean
+  blockingDatasetCount: number
+  credentialWillBeRevoked: boolean
+  sourceFileWillBeRetained: boolean
+  datasets: DataSourceRetirementDataset[]
+}
+
 export type DataSourcePublicationRequest = {
   id: string
   dataSourceId: string
@@ -299,6 +315,30 @@ export type MetadataJob = {
   createdAt: string
   startedAt?: string
   completedAt?: string
+}
+
+export type MetadataDiffDependency = {
+  id: string
+  downstreamType: string
+  downstreamId: string
+  downstreamName: string
+  kind: string
+  createdAt: string
+}
+
+export type MetadataDiff = {
+  id: string
+  dataSourceId: string
+  objectType: 'TABLE' | 'COLUMN'
+  objectKey: string
+  changeType: 'ADDED' | 'CHANGED' | 'REMOVED' | 'REACTIVATED'
+  before?: Record<string, unknown>
+  after?: Record<string, unknown>
+  breaking: boolean
+  impactCount: number
+  staleCount: number
+  impact?: MetadataDiffDependency[]
+  createdAt: string
 }
 
 export type DataSourceColumnRecord = {
@@ -565,7 +605,10 @@ export const dataSourceAPI = {
   importTables: (id: string, tables: Array<{ catalogName: string; schemaName: string; tableName: string }>, sampleDataMode: MetadataSampleMode = 'MASK') => apiRequest<MetadataJob>(`/v1/data-sources/${encodeURIComponent(id)}/tables/import`, { method: 'POST', body: JSON.stringify({ tables, sampleDataMode }) }),
   refreshTables: (id: string, mode: MetadataRefreshMode = 'INCREMENTAL', tableIds?: string[], sampleDataMode: MetadataSampleMode = 'MASK') => apiRequest<MetadataJob>(`/v1/data-sources/${encodeURIComponent(id)}/tables/refresh`, { method: 'POST', body: JSON.stringify({ mode, sampleDataMode, ...(tableIds?.length ? { tableIds } : {}) }) }),
   getMetadataJob: (sourceId: string, jobId: string) => apiRequest<MetadataJob>(`/v1/data-sources/${encodeURIComponent(sourceId)}/metadata-jobs/${encodeURIComponent(jobId)}`, { cache: 'no-store' }),
+  latestMetadataJob: (sourceId: string) => apiRequest<{ job: MetadataJob | null }>(`/v1/data-sources/${encodeURIComponent(sourceId)}/metadata-jobs/latest`, { cache: 'no-store' }),
   latestActiveMetadataJob: (sourceId: string) => apiRequest<{ job: MetadataJob | null }>(`/v1/data-sources/${encodeURIComponent(sourceId)}/metadata-jobs/latest-active`, { cache: 'no-store' }),
+  retryFailedMetadataJob: (sourceId: string, jobId: string) => apiRequest<MetadataJob>(`/v1/data-sources/${encodeURIComponent(sourceId)}/metadata-jobs/${encodeURIComponent(jobId)}/retry`, { method: 'POST', body: '{}' }),
+  metadataDiffs: (sourceId: string, limit = 100) => apiRequest<{ items: MetadataDiff[] }>(`/v1/metadata-diffs?dataSourceId=${encodeURIComponent(sourceId)}&limit=${Math.min(500, Math.max(1, limit))}`, { cache: 'no-store' }),
   tables: listAllTables,
   table: (tableId: string) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}`, { cache: 'no-store' }),
   columns: (tableId: string) => apiRequest<{ items: DataSourceColumnRecord[] }>(`/v1/assets/tables/${encodeURIComponent(tableId)}/columns`, { cache: 'no-store' }),
@@ -581,6 +624,7 @@ export const dataSourceAPI = {
   disableTable: (tableId: string) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/disable`, { method: 'POST', body: '{}' }),
   enableTable: (tableId: string) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/enable`, { method: 'POST', body: '{}' }),
   deleteTable: (tableId: string) => apiRequest<void>(`/v1/assets/tables/${encodeURIComponent(tableId)}`, { method: 'DELETE' }),
+  retirementImpact: (id: string) => apiRequest<DataSourceRetirementImpact>(`/v1/data-sources/${encodeURIComponent(id)}/retirement-impact`, { cache: 'no-store' }),
   disable: (id: string) => apiRequest<void>(`/v1/data-sources/${encodeURIComponent(id)}/disable`, { method: 'POST', body: '{}' }),
   enable: (id: string) => apiRequest<void>(`/v1/data-sources/${encodeURIComponent(id)}/enable`, { method: 'POST', body: '{}' }),
   delete: (id: string) => apiRequest<void>(`/v1/data-sources/${encodeURIComponent(id)}`, { method: 'DELETE' }),

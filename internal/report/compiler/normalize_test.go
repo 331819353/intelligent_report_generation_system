@@ -260,7 +260,8 @@ func addRichTextComponent(definition *report.ReportDefinition, ordinal int, rich
 			Mobile:  report.MobileBlockLayout{Order: ordinal, Visible: true, HeightMode: report.MobileHeightAuto, SlotMode: report.MobileSlotStack},
 		},
 		Zones: []report.Zone{{
-			ID: zoneID, Type: report.ZoneContent,
+			Order: 1,
+			ID:    zoneID, Type: report.ZoneContent,
 			Layout: report.ZoneLayout{HeightMode: report.ZoneHeightAuto, MinHeight: 40, Columns: 2, Rows: 1, Overflow: report.OverflowExpand},
 			Slots:  []report.Slot{{ID: slotID, Grid: report.SlotGrid{W: 2, H: 1}, ComponentID: id}},
 		}},

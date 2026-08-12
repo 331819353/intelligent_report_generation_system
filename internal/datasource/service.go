@@ -643,6 +643,18 @@ func (s *Service) Delete(ctx context.Context, tenantID, id string) error {
 	return s.repo.UpdateStatus(ctx, tenantID, id, StatusDeleted, "")
 }
 
+// RetirementImpact performs a read-only preflight. Delete repeats the same
+// dependency fence inside BeginDelete so the preview cannot introduce a race.
+func (s *Service) RetirementImpact(ctx context.Context, tenantID, id string) (RetirementImpact, error) {
+	repository, ok := s.repo.(interface {
+		RetirementImpact(context.Context, string, string) (RetirementImpact, error)
+	})
+	if !ok {
+		return RetirementImpact{}, errors.New("data source retirement impact is unavailable")
+	}
+	return repository.RetirementImpact(ctx, tenantID, id)
+}
+
 func (s *Service) withPublicationReview(ctx context.Context, tenantID string, source Source) (Source, error) {
 	source.ReviewStatus = ReviewNotSubmitted
 	store, ok := s.repo.(interface {

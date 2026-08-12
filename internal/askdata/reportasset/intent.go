@@ -140,7 +140,8 @@ func BuildOperationBundle(request BuildIntentRequest) (operation.Bundle, error) 
 			Mobile:  report.MobileBlockLayout{Order: request.BlockY + 1, Visible: true, HeightMode: report.MobileHeightAuto, SlotMode: report.MobileSlotStack},
 		},
 		Zones: []report.Zone{{
-			ID: zoneID, Type: report.ZoneContent,
+			Order: 1,
+			ID:    zoneID, Type: report.ZoneContent,
 			Layout: report.ZoneLayout{HeightMode: report.ZoneHeightAuto, MinHeight: 240, Columns: 24, Rows: 6, Overflow: report.OverflowExpand},
 			Slots:  []report.Slot{{ID: slotID, Grid: report.SlotGrid{X: 0, Y: 0, W: 24, H: 6}, ComponentID: componentID}},
 		}},

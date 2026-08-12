@@ -236,7 +236,18 @@ func newProtectedAdminHandlerWithImports(
 			mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/review-report/generate", handler.generateReleaseReviewReport)
 		}
 		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/approvals", handler.submitReleaseApproval)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/approvals/withdraw", handler.withdrawReleaseApproval)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/approvals/reset-rejection", handler.resetRejectedReleaseApprovals)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/approvals/escalate", handler.escalateReleaseApproval)
 		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/activate", handler.activateRelease)
+		mux.HandleFunc("GET /api/v1/askdata/semantic/releases/{id}/operations", handler.getReleaseOperations)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/rollouts", handler.startReleaseRollout)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/rollouts/advance", handler.advanceReleaseRollout)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/rollouts/pause", handler.pauseReleaseRollout)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/rollouts/resume", handler.resumeReleaseRollout)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/rollouts/stop", handler.stopReleaseRollout)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/rollback", handler.rollbackRelease)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/retire", handler.retireRelease)
 	}
 	if handler.additivity != nil {
 		mux.HandleFunc(
@@ -313,6 +324,36 @@ func newProtectedAdminHandlerWithImports(
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
 		mux.ServeHTTP(writer, request)
 	})
+}
+
+func (handler *AdminHandler) withdrawReleaseApproval(writer http.ResponseWriter, request *http.Request) {
+	handler.handleReleaseApprovalRecovery(writer, request, handler.lifecycle.WithdrawReleaseApproval)
+}
+
+func (handler *AdminHandler) resetRejectedReleaseApprovals(writer http.ResponseWriter, request *http.Request) {
+	handler.handleReleaseApprovalRecovery(writer, request, handler.lifecycle.ResetRejectedReleaseApprovals)
+}
+
+func (handler *AdminHandler) escalateReleaseApproval(writer http.ResponseWriter, request *http.Request) {
+	handler.handleReleaseApprovalRecovery(writer, request, handler.lifecycle.EscalateReleaseApproval)
+}
+
+func (handler *AdminHandler) handleReleaseApprovalRecovery(writer http.ResponseWriter, request *http.Request, execute func(context.Context, registry.AdminScope, string, registry.ReleaseApprovalRecoveryInput) (registry.ReleaseApprovalRecoveryResult, error)) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok || !requireLifecycleIdempotency(writer, request) {
+		return
+	}
+	var input registry.ReleaseApprovalRecoveryInput
+	if _, err := decodeAdminJSON(writer, request, &input); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := execute(request.Context(), scope, request.PathValue("id"), input)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
 }
 
 func (handler *AdminHandler) listReleaseCatalog(writer http.ResponseWriter, request *http.Request) {
@@ -493,6 +534,14 @@ func (handler *AdminHandler) validateAndProjectRelease(writer http.ResponseWrite
 	}
 	result, err := handler.lifecycle.ValidateAndStartProjection(request.Context(), scope, request.PathValue("id"))
 	if err != nil {
+		var preflightError *registry.ReleasePreflightError
+		if errors.As(err, &preflightError) {
+			writeJSON(writer, http.StatusUnprocessableEntity, map[string]any{
+				"code": "RELEASE_PREFLIGHT_FAILED", "message": "semantic release preflight did not pass",
+				"preflight": preflightError.Result,
+			})
+			return
+		}
 		writeAdminError(writer, err)
 		return
 	}
@@ -668,6 +717,85 @@ func (handler *AdminHandler) activateRelease(writer http.ResponseWriter, request
 		return
 	}
 	writeJSON(writer, http.StatusOK, result)
+}
+
+func (handler *AdminHandler) getReleaseOperations(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	result, err := handler.lifecycle.GetReleaseOperationalImpact(request.Context(), scope, request.PathValue("id"))
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (handler *AdminHandler) handleReleaseRolloutMutation(writer http.ResponseWriter, request *http.Request, execute func(context.Context, registry.AdminScope, string, registry.ReleaseRolloutMutationInput) (registry.ReleaseRolloutSnapshot, error)) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok || !requireLifecycleIdempotency(writer, request) {
+		return
+	}
+	var input registry.ReleaseRolloutMutationInput
+	if _, err := decodeAdminJSON(writer, request, &input); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := execute(request.Context(), scope, request.PathValue("id"), input)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+func (handler *AdminHandler) startReleaseRollout(writer http.ResponseWriter, request *http.Request) {
+	handler.handleReleaseRolloutMutation(writer, request, handler.lifecycle.StartReleaseRollout)
+}
+func (handler *AdminHandler) advanceReleaseRollout(writer http.ResponseWriter, request *http.Request) {
+	handler.handleReleaseRolloutMutation(writer, request, handler.lifecycle.AdvanceReleaseRollout)
+}
+func (handler *AdminHandler) pauseReleaseRollout(writer http.ResponseWriter, request *http.Request) {
+	handler.handleReleaseRolloutMutation(writer, request, handler.lifecycle.PauseReleaseRollout)
+}
+func (handler *AdminHandler) resumeReleaseRollout(writer http.ResponseWriter, request *http.Request) {
+	handler.handleReleaseRolloutMutation(writer, request, handler.lifecycle.ResumeReleaseRollout)
+}
+func (handler *AdminHandler) stopReleaseRollout(writer http.ResponseWriter, request *http.Request) {
+	handler.handleReleaseRolloutMutation(writer, request, handler.lifecycle.StopReleaseRollout)
+}
+
+func (handler *AdminHandler) rollbackRelease(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok || !requireLifecycleIdempotency(writer, request) {
+		return
+	}
+	var input registry.ReleaseRollbackInput
+	if _, err := decodeAdminJSON(writer, request, &input); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.lifecycle.RollbackRelease(request.Context(), scope, request.PathValue("id"), input)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+func (handler *AdminHandler) retireRelease(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok || !requireLifecycleIdempotency(writer, request) {
+		return
+	}
+	if _, err := decodeAdminJSON(writer, request, &struct{}{}); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	if err := handler.lifecycle.RetireRelease(request.Context(), scope, request.PathValue("id")); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"releaseId": request.PathValue("id"), "retired": true})
 }
 
 func requireLifecycleIdempotency(writer http.ResponseWriter, request *http.Request) bool {
@@ -1157,6 +1285,14 @@ func writeAdminError(writer http.ResponseWriter, err error) {
 		writeError(writer, http.StatusUnprocessableEntity, "RELEASE_GATE_FAILED", "semantic release evaluation gate did not pass")
 	case errors.Is(err, registry.ErrReleaseReviewInvalid):
 		writeError(writer, http.StatusUnprocessableEntity, "RELEASE_REVIEW_INVALID", "semantic release review evidence or model output is invalid")
+	case errors.Is(err, registry.ErrReleaseRolloutInvalid):
+		writeError(writer, http.StatusConflict, "RELEASE_ROLLOUT_INVALID", "semantic release rollout cannot transition from its current state")
+	case errors.Is(err, registry.ErrReleaseRollbackInvalid):
+		writeError(writer, http.StatusConflict, "RELEASE_ROLLBACK_INVALID", "semantic release cannot be rolled back or retired from its current state")
+	case errors.Is(err, registry.ErrReleaseRetireBlocked):
+		writeError(writer, http.StatusConflict, "RELEASE_RETIRE_BLOCKED", "semantic release still has active governed references")
+	case errors.Is(err, registry.ErrReleaseRetentionOpen):
+		writeError(writer, http.StatusConflict, "RELEASE_RETENTION_NOT_EXPIRED", "semantic release is still within its mandatory retention window")
 	case errors.Is(err, registry.ErrEvaluationSetCasesMissing):
 		writeError(writer, http.StatusUnprocessableEntity, "EVALUATION_CASES_MISSING", "certified SEALED evaluation cases are required")
 	case errors.Is(err, registry.ErrEvaluationSetHintInvalid):

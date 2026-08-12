@@ -114,7 +114,7 @@ func Invert(operation Operation, beforeDefinition report.ReportDefinition) (Oper
 		if findErr != nil {
 			return Operation{}, findErr
 		}
-		result = Operation{Op: ZoneReorder, TargetID: zone.ID, Payload: &ZoneReorderPayload{Order: zone.Layout.EmptyPriority}}
+		result = Operation{Op: ZoneReorder, TargetID: zone.ID, Payload: &ZoneReorderPayload{Order: zone.Order}}
 	case SlotCreate:
 		result = Operation{Op: SlotDelete, TargetID: operation.Payload.(*SlotCreatePayload).Slot.ID, Payload: &SlotDeletePayload{}}
 	case SlotMerge:

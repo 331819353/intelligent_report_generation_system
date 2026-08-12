@@ -17,6 +17,7 @@ import (
 	"intelligent-report-generation-system/internal/askdata/compiler"
 	"intelligent-report-generation-system/internal/askdata/orchestrator"
 	"intelligent-report-generation-system/internal/askdata/shared"
+	"intelligent-report-generation-system/internal/askdata/toolhost"
 	"intelligent-report-generation-system/internal/askdata/validator"
 )
 
@@ -59,7 +60,7 @@ func (assembler *Assembler) FinalizeAnswer(
 	if err != nil {
 		return orchestrator.Run{}, err
 	}
-	input, narrative, outcome, resultPayload, err := buildVerifiedAnswer(run, executed, metricLabels)
+	input, narrative, outcome, resultPayload, err := buildVerifiedAnswer(run, executed, metricLabels, binding.selectedReportSources())
 	if err != nil {
 		return orchestrator.Run{}, err
 	}
@@ -150,6 +151,7 @@ func buildVerifiedAnswer(
 	run orchestrator.Run,
 	executed executionEntry,
 	metricLabels map[askdata.ID]string,
+	reportSources []toolhost.ReportSourceSummary,
 ) (answer.CompositionInput, answer.NarrativeLayer, validator.Outcome, json.RawMessage, error) {
 	var input answer.CompositionInput
 	currentRows, ok := executed.execution.Rows(compiler.QueryRoleCurrent)
@@ -253,7 +255,7 @@ func buildVerifiedAnswer(
 		Binding:  bindingEvidence,
 		TimeSpec: timeSpec,
 	}
-	resultPayload, err := buildQuestionResultPayload(run, executed, currentRows, currentContract, firstCell, metricValue)
+	resultPayload, err := buildQuestionResultPayload(run, executed, currentRows, currentContract, firstCell, metricValue, reportSources)
 	if err != nil {
 		return input, answer.NarrativeLayer{}, validator.Outcome{}, nil, err
 	}
@@ -603,6 +605,21 @@ type persistedQuestionResult struct {
 	Views             []persistedResultView      `json:"views"`
 	DefaultViewID     askdata.ID                 `json:"defaultViewId"`
 	RecommendedViewID askdata.ID                 `json:"recommendedViewId,omitempty"`
+	ReportSources     []persistedReportSource    `json:"reportSources"`
+}
+
+type persistedReportSource struct {
+	ReportID          askdata.ID          `json:"reportId"`
+	ReportVersionID   askdata.ID          `json:"reportVersionId"`
+	ComponentID       askdata.ID          `json:"componentId"`
+	ReportTitle       string              `json:"reportTitle"`
+	ComponentTitle    string              `json:"componentTitle,omitempty"`
+	ComponentType     string              `json:"componentType"`
+	ComponentVersion  string              `json:"componentVersion"`
+	SemanticReleaseID askdata.ID          `json:"semanticReleaseId"`
+	ComponentHash     askdata.ContentHash `json:"componentHash"`
+	CitationStatus    string              `json:"citationStatus"`
+	AccessStatus      string              `json:"accessStatus"`
 }
 
 type persistedResultSummary struct {
@@ -675,6 +692,7 @@ func buildQuestionResultPayload(
 	contract validator.ResultPlanContract,
 	firstCell answer.ResultCell,
 	metricValue answer.MetricValue,
+	reportSources []toolhost.ReportSourceSummary,
 ) (json.RawMessage, error) {
 	if len(executed.evidenceIDs) == 0 {
 		slog.Warn("question result projection unavailable",
@@ -773,11 +791,18 @@ func buildQuestionResultPayload(
 	}}
 	defaultViewID := askdata.ID("view-table")
 	if len(records) == 1 {
-		views = append([]persistedResultView{{
+		view := persistedResultView{
 			ID: "view-kpi", Type: "KPI", Label: "核心指标", DatasetID: datasetID,
 			DimensionKeys: []askdata.ID{}, MeasureKeys: []askdata.ID{measureKeys[0]},
-		}}, views...)
-		defaultViewID = "view-kpi"
+		}
+		if len(measureKeys) > 1 {
+			view = persistedResultView{
+				ID: "view-kpi-bundle", Type: "KPI_BUNDLE", Label: "指标组", DatasetID: datasetID,
+				DimensionKeys: []askdata.ID{}, MeasureKeys: firstResultKeys(measureKeys, 8),
+			}
+		}
+		views = append([]persistedResultView{view}, views...)
+		defaultViewID = view.ID
 	} else if len(records) >= 2 && len(records) <= 20 && len(dimensionKeys) > 0 {
 		chartType := "BAR"
 		if columns[0].Type == "DATE" || columns[0].Type == "DATETIME" {
@@ -811,6 +836,16 @@ func buildQuestionResultPayload(
 			Page: 1, PageSize: maxIntValue(1, len(records)), TotalRows: len(records),
 		}},
 		Views: views, DefaultViewID: defaultViewID, RecommendedViewID: defaultViewID,
+		ReportSources: make([]persistedReportSource, 0, len(reportSources)),
+	}
+	for _, source := range reportSources {
+		result.ReportSources = append(result.ReportSources, persistedReportSource{
+			ReportID: source.ReportID, ReportVersionID: source.ReportVersionID, ComponentID: source.ComponentID,
+			ReportTitle: source.ReportTitle, ComponentTitle: source.ComponentTitle,
+			ComponentType: source.ComponentType, ComponentVersion: source.ComponentVersion,
+			SemanticReleaseID: source.SemanticReleaseID, ComponentHash: source.ComponentHash,
+			CitationStatus: "CITED", AccessStatus: "AUTHORIZED_AT_RUN",
+		})
 	}
 	return json.Marshal(result)
 }

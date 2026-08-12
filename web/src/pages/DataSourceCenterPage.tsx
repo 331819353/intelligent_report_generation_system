@@ -21,6 +21,7 @@ import { AssetSharingSelect } from '../components/AssetSharingSelect'
 import { DataSourceAIAssistant } from '../components/DataSourceAIAssistant'
 import { RequestError } from '../lib/api'
 import { currentSubject } from '../lib/auth'
+import { backgroundTaskAPI } from '../lib/background-tasks'
 import { currentDomainID, subscribeDomainChange } from '../lib/domain-context'
 import { md5Hex } from '../lib/md5'
 import {
@@ -28,6 +29,7 @@ import {
   type DataSourceConnectionInput,
   type DataSourceColumnRecord,
   type DataSourceRecord,
+  type DataSourceRetirementImpact,
   type DataSourceReviewStatus,
   type DataSourceStatus,
   type DataSourceTableRecord,
@@ -57,7 +59,7 @@ const snapshotSources: DataSourceRecord[] = [
     config: { host: 'sales-db.internal', port: 3306, database: 'sales_prod', username: 'report_reader' },
     configVersionId: 'snapshot-sales-config-v3', publishedVersionId: 'snapshot-sales-published-v3', configVersion: 3,
     publishedConfigVersion: 3, validationStatus: 'PASSED', publicationStatus: 'PUBLISHED', hasUnpublishedChanges: false,
-    reviewStatus: 'APPROVED', lastTestedAt: '2026-08-11T09:18:00+08:00', updatedAt: '2026-08-11T09:18:00+08:00', version: 8,
+    reviewStatus: 'APPROVED', lastTestedAt: '2026-08-11T09:18:00+08:00', testExpiresAt: '2026-08-12T09:18:00+08:00', updatedAt: '2026-08-11T09:18:00+08:00', version: 8,
   },
   {
     id: 'snapshot-finance-oracle', tenantId: 'snapshot-tenant', code: 'finance_erp', name: '财务 ERP',
@@ -168,6 +170,17 @@ type ColumnDraft = {
 }
 
 const semanticTypes = ['DATE', 'TIME', 'DATETIME', 'REGION', 'COMPANY_NAME', 'AMOUNT', 'PERCENTAGE', 'IDENTIFIER', 'CATEGORY', 'QUANTITY', 'BOOLEAN', 'TEXT']
+const retirementDatasetStatusLabels: Record<string, string> = { DRAFT: '草稿', VALIDATING: '校验中', PUBLISHED: '已发布', STALE: '已失效', DEPRECATED: '已停用' }
+const snapshotRetirementImpact: DataSourceRetirementImpact = {
+  canRetire: false,
+  blockingDatasetCount: 2,
+  credentialWillBeRevoked: true,
+  sourceFileWillBeRetained: false,
+  datasets: [
+    { id: 'snapshot-sales-dataset', name: '销售经营明细', status: 'STALE', layer: 'DWD', dependencyKind: 'ORIGIN_TABLE' },
+    { id: 'snapshot-channel-dataset', name: '渠道经营汇总', status: 'PUBLISHED', layer: 'DWS', dependencyKind: 'VERSION_DEPENDENCY' },
+  ],
+}
 const metadataJobActive = (job: MetadataJob | null) => job?.status === 'QUEUED' || job?.status === 'RUNNING'
 const metadataJobTerminal = (job: MetadataJob) => !metadataJobActive(job)
 const metadataStageLabels: Record<string, string> = {
@@ -231,11 +244,16 @@ const publicationStatusOf = (source: DataSourceRecord) => source.publicationStat
 const hasUnpublishedDraft = (source: DataSourceRecord) => source.hasUnpublishedChanges
   ?? publicationStatusOf(source) === 'UNPUBLISHED'
 const reviewStatusOf = (source: DataSourceRecord): DataSourceReviewStatus => source.reviewStatus || 'NOT_SUBMITTED'
+const connectionReceiptExpired = (source: DataSourceRecord, now = Date.now()) => validationStatusOf(source) === 'PASSED'
+  && Boolean(source.testExpiresAt)
+  && (Number.isNaN(new Date(source.testExpiresAt!).getTime()) || new Date(source.testExpiresAt!).getTime() <= now)
+const effectiveValidationStatus = (source: DataSourceRecord) => connectionReceiptExpired(source) ? 'UNTESTED' : validationStatusOf(source)
+const validationLabel = (source: DataSourceRecord) => connectionReceiptExpired(source) ? '测试已过期' : validationLabels[validationStatusOf(source)]
 const lifecycleLabel = (source: DataSourceRecord) => reviewStatusOf(source) === 'PENDING'
   ? '待审批'
   : reviewStatusOf(source) === 'REJECTED'
     ? '审核失败'
-    : source.status === 'DRAFT' && validationStatusOf(source) === 'PASSED'
+    : source.status === 'DRAFT' && effectiveValidationStatus(source) === 'PASSED'
   ? '待上线'
   : statusLabels[source.status]
 const formatDataSourceTime = (value?: string) => {
@@ -246,19 +264,20 @@ const formatDataSourceTime = (value?: string) => {
     : parsed.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 const connectionHealth = (source: DataSourceRecord) => {
+  if (connectionReceiptExpired(source)) return { tone: 'warning', label: '待复验', detail: '测试收据已过期' }
   if (validationStatusOf(source) === 'FAILED' || source.status === 'ERROR') return { tone: 'error', label: '异常', detail: '连接失败' }
   if (validationStatusOf(source) === 'PASSED') return { tone: 'healthy', label: '健康', detail: snapshotSourceMetrics[source.id]?.latency || '验证通过' }
   return { tone: 'warning', label: '待验证', detail: '尚无测试收据' }
 }
 const metadataSummary = (source: DataSourceRecord) => snapshotSourceMetrics[source.id] || {
   readiness: null,
-  tables: '查看资产', fields: '查看资产', business: '待完善', latency: validationStatusOf(source) === 'PASSED' ? '验证通过' : '—',
+  tables: '查看资产', fields: '查看资产', business: '待完善', latency: effectiveValidationStatus(source) === 'PASSED' ? '验证通过' : '—',
 }
 const lifecycleSteps = (source: DataSourceRecord) => {
   const summary = metadataSummary(source)
   return [
     { label: '已连接', complete: Boolean(source.configVersionId || source.fileAssetId) },
-    { label: '已验证', complete: validationStatusOf(source) === 'PASSED' },
+    { label: '已验证', complete: effectiveValidationStatus(source) === 'PASSED' },
     { label: '已发布', complete: publicationStatusOf(source) === 'PUBLISHED' },
     { label: '完善元数据', complete: summary.readiness === 100 },
   ]
@@ -382,6 +401,8 @@ export function DataSourceCenterPage() {
 	const [excelAsset, setExcelAsset] = useState<ExcelFileAsset | null>(null)
   const [fileInspection, setFileInspection] = useState<ExcelWorkbookInspection | null>(null)
   const [busyAction, setBusyAction] = useState('')
+  const [retirementImpact, setRetirementImpact] = useState<DataSourceRetirementImpact | null>(null)
+  const [retirementLoading, setRetirementLoading] = useState(false)
   const [formError, setFormError] = useState('')
   const [keyword, setKeyword] = useState('')
   const [typeFilter, setTypeFilter] = useState<DataSourceType | 'ALL'>('ALL')
@@ -581,13 +602,13 @@ export function DataSourceCenterPage() {
     metadataJobRequests.current.set(sourceId, request)
     setMetadataJobLoading(true)
     try {
-      const result = await dataSourceAPI.latestActiveMetadataJob(sourceId)
+      const result = await dataSourceAPI.latestMetadataJob(sourceId)
       if (request !== metadataJobRequests.current.get(sourceId)) return
       if (result.job) {
         const cached = metadataJobCache.current.get(sourceId)
         const title = cached?.job.id === result.job.id ? cached.title : metadataJobLabel(result.job)
         metadataJobCache.current.set(sourceId, { job: result.job, title })
-        startMetadataJobPolling(sourceId, result.job, title)
+        if (metadataJobActive(result.job)) startMetadataJobPolling(sourceId, result.job, title)
       }
       if (metadataJobSourceIdRef.current === sourceId) {
         const snapshot = metadataJobCache.current.get(sourceId)
@@ -913,6 +934,44 @@ export function DataSourceCenterPage() {
     }
   }
 
+  const cancelMetadataJob = async (source: DataSourceRecord, job: MetadataJob) => {
+    setBusyAction(`cancel-metadata:${job.id}`)
+    try {
+      await backgroundTaskAPI.cancel({ kind: 'DATA_SOURCE_METADATA', id: job.id })
+      const poller = metadataJobPollers.current.get(source.id)
+      if (poller?.jobId === job.id) {
+        poller.stopped = true
+        window.clearTimeout(poller.timeout)
+        metadataJobPollers.current.delete(source.id)
+      }
+      const stopped = await dataSourceAPI.getMetadataJob(source.id, job.id)
+      const title = metadataJobTitle || metadataJobLabel(stopped)
+      metadataJobCache.current.set(source.id, { job: stopped, title })
+      setMetadataJob(stopped)
+      setMetadataJobTitle(title)
+      await loadTableStructures(source.id)
+      setNotice({ tone: 'success', message: '元数据任务已安全中止；已完成的表结果会保留，未完成表可从失败明细重新入队' })
+    } catch (cause) {
+      await loadLatestMetadataJob(source.id)
+      setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '中止元数据任务失败' })
+    } finally {
+      setBusyAction('')
+    }
+  }
+
+  const retryFailedMetadataJob = async (source: DataSourceRecord, job: MetadataJob) => {
+    setBusyAction(`retry-metadata:${job.id}`)
+    try {
+      const retried = await dataSourceAPI.retryFailedMetadataJob(source.id, job.id)
+      await acceptMetadataJob(retried, source.id, '失败表重试', `已将 ${retried.total} 张失败数据表重新入队；原任务记录与成功结果保持不变`)
+    } catch (cause) {
+      await loadLatestMetadataJob(source.id)
+      setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '失败数据表重试失败' })
+    } finally {
+      setBusyAction('')
+    }
+  }
+
   const reuploadSourceFile = async (source: DataSourceRecord, file: File) => {
     if (!source.fileAssetId) {
       setNotice({ tone: 'error', message: '当前文件数据源缺少文件资产，请删除后重新创建数据源' })
@@ -988,6 +1047,14 @@ export function DataSourceCenterPage() {
       : dataSourceAPI.create(input)
   }
 
+  const restoreLatestConnectionDraft = async (sourceID: string) => {
+    const latest = await dataSourceAPI.get(sourceID)
+    setSources(current => current.map(source => source.id === latest.id ? latest : source))
+    setDialog({ mode: 'edit', source: latest })
+    setDraft(draftFromSource(latest))
+    return latest
+  }
+
   const testDraftConnection = async () => {
     const editing = dialog?.mode === 'edit' ? dialog.source : undefined
     setBusyAction(editing ? `form-test:${editing.id}` : 'form-test:create')
@@ -1009,8 +1076,13 @@ export function DataSourceCenterPage() {
       setDraft(draftFromSource(active))
       setNotice({ tone: 'success', message: `“${active.name}”连接成功 · ${result.serverVersion || '版本未知'} · ${result.latencyMs} ms；现在可以提交发布审核` })
     } catch (cause) {
-      setFormError(friendlyConnectionError(cause))
       const sourceID = editing?.id
+      if (sourceID && cause instanceof RequestError && cause.detail.code === 'DATA_SOURCE_VERSION_CONFLICT') {
+        const latest = await restoreLatestConnectionDraft(sourceID)
+        setFormError(`数据源已由其他人更新至 v${latest.version}，已重新加载最新配置。请确认后再次测试。`)
+        return
+      }
+      setFormError(friendlyConnectionError(cause))
       if (sourceID) {
         const latest = await loadSources()
         const updated = latest?.find(source => source.id === sourceID)
@@ -1023,7 +1095,7 @@ export function DataSourceCenterPage() {
 
   const submitDraftForReview = async () => {
     const source = dialog?.mode === 'edit' ? dialog.source : undefined
-    if (!source || !draftMatchesSource(draft, source) || validationStatusOf(source) !== 'PASSED') {
+    if (!source || !draftMatchesSource(draft, source) || effectiveValidationStatus(source) !== 'PASSED') {
       setFormError('发布前必须先用当前表单完成一次成功的连接测试；修改任一字段后需要重新测试')
       return
     }
@@ -1160,10 +1232,16 @@ export function DataSourceCenterPage() {
     setBusyAction(`review-withdraw:${source.id}`)
     try {
       await dataSourceAPI.withdrawPublicationRequest(source.id, source.reviewRequestId, source.reviewRequestVersion)
-      await loadSources()
+      const latest = await loadSources()
+      const updated = latest?.find(item => item.id === source.id)
+      if (updated) setDialog(current => current?.source?.id === updated.id ? { ...current, source: updated } : current)
       setNotice({ tone: 'success', message: `已撤销“${source.name}”的发布审核申请，可以继续修改配置` })
     } catch (cause) {
-      setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '撤销审核申请失败' })
+      const latest = await loadSources()
+      const updated = latest?.find(item => item.id === source.id)
+      if (updated) setDialog(current => current?.source?.id === updated.id ? { ...current, source: updated } : current)
+      const staleReview = cause instanceof RequestError && (cause.detail.code === 'DATA_SOURCE_REVIEW_VERSION_CONFLICT' || cause.detail.code === 'DATA_SOURCE_REVIEW_NOT_PENDING')
+      setNotice({ tone: staleReview ? 'success' : 'error', message: staleReview ? '审核状态已被其他人更新，页面已同步最新结果' : cause instanceof Error ? cause.message : '撤销审核申请失败' })
     } finally {
       setBusyAction('')
     }
@@ -1181,8 +1259,25 @@ export function DataSourceCenterPage() {
       setDialog(null)
     } catch (cause) {
       setFormError(cause instanceof Error ? cause.message : '删除数据源失败')
+      if (cause instanceof RequestError && cause.detail.code === 'DATA_SOURCE_DATASET_REFERENCED') {
+        void dataSourceAPI.retirementImpact(source.id).then(setRetirementImpact).catch(() => undefined)
+      }
     } finally {
       setBusyAction('')
+    }
+  }
+
+  const openRetirement = async (source: DataSourceRecord) => {
+    setFormError('')
+    setRetirementImpact(null)
+    setRetirementLoading(true)
+    setDialog({ mode: 'delete', source })
+    try {
+      setRetirementImpact(designSnapshot ? snapshotRetirementImpact : await dataSourceAPI.retirementImpact(source.id))
+    } catch (cause) {
+      setFormError(cause instanceof Error ? cause.message : '无法读取数据源下架影响')
+    } finally {
+      setRetirementLoading(false)
     }
   }
 
@@ -1190,7 +1285,7 @@ export function DataSourceCenterPage() {
   const editableFormSource = dialog?.mode === 'edit' ? dialog.source : undefined
   const currentDraftTested = draft.type !== 'EXCEL'
     && draftMatchesSource(draft, editableFormSource)
-    && validationStatusOf(editableFormSource!) === 'PASSED'
+    && effectiveValidationStatus(editableFormSource!) === 'PASSED'
     && reviewStatusOf(editableFormSource!) !== 'PENDING'
   const visibleMetadataJob = dialog?.source?.id === metadataJobSourceId ? metadataJob : null
   const metadataTaskActive = metadataJobActive(visibleMetadataJob)
@@ -1234,7 +1329,7 @@ export function DataSourceCenterPage() {
   const selectedUnavailable = selectedSource ? selectedSource.status === 'SYNCING' || selectedSource.status === 'DELETING' : false
   const selectedPendingDraft = selectedSource ? hasUnpublishedDraft(selectedSource) : false
   const selectedCanTest = Boolean(selectedSource && selectedCanManage && !selectedUnavailable && selectedReviewStatus !== 'PENDING')
-  const selectedCanPublish = Boolean(selectedSource && selectedCanManage && !selectedUnavailable && selectedPendingDraft && selectedReviewStatus !== 'PENDING' && validationStatusOf(selectedSource) === 'PASSED')
+  const selectedCanPublish = Boolean(selectedSource && selectedCanManage && !selectedUnavailable && selectedPendingDraft && selectedReviewStatus !== 'PENDING' && effectiveValidationStatus(selectedSource) === 'PASSED')
   const selectedSummary = selectedSource ? metadataSummary(selectedSource) : null
   const selectedHealth = selectedSource ? connectionHealth(selectedSource) : null
   const selectedLifecycle = selectedSource ? lifecycleSteps(selectedSource) : []
@@ -1247,7 +1342,7 @@ export function DataSourceCenterPage() {
       ? '等待发布审批'
       : selectedReviewStatus === 'REJECTED'
         ? '修改配置并重新验证'
-        : validationStatusOf(selectedSource) !== 'PASSED'
+        : effectiveValidationStatus(selectedSource) !== 'PASSED'
           ? '重新测试连接'
           : selectedPendingDraft
             ? '提交发布审批'
@@ -1316,7 +1411,7 @@ export function DataSourceCenterPage() {
                     </span>
                     <span className="data-source-type-cell" role="cell"><strong>{source.type === 'EXCEL' ? '文件数据源' : '数据库'}</strong><small>{typeLabels[source.type]}</small></span>
                     <span className={`data-source-health-cell is-${health.tone}`} role="cell"><strong><i />{health.label}</strong><small>{health.detail}</small></span>
-                    <span className="data-source-test-cell" role="cell"><strong className={`is-${validationStatusOf(source).toLowerCase()}`}>{validationLabels[validationStatusOf(source)]}</strong><small>{formatDataSourceTime(source.lastTestedAt || source.updatedAt)}</small></span>
+                    <span className="data-source-test-cell" role="cell"><strong className={`is-${effectiveValidationStatus(source).toLowerCase()}`}>{validationLabel(source)}</strong><small>{formatDataSourceTime(source.lastTestedAt || source.updatedAt)}</small></span>
                     <span className="data-source-readiness-cell" role="cell"><strong>{summary.readiness === null ? publicationLabels[publicationStatusOf(source)] : `${summary.readiness}%`}</strong>{summary.readiness === null ? <small>进入资产查看进度</small> : <progress aria-label={`${source.name}元数据完善度`} max="100" value={summary.readiness} />}</span>
                   </AppButton>
                   <div className="data-source-actions" role="cell">
@@ -1340,6 +1435,7 @@ export function DataSourceCenterPage() {
           {selectedCanManage && <AppButton variant="primary" className="action-test" type="button" disabled={actionBusy || !selectedCanTest} onClick={() => void testConnection(selectedSource)}>{busyAction === `test:${selectedSource.id}` ? '测试中…' : '测试连接'}</AppButton>}
           {selectedCanManage && <AppButton className="action-edit" type="button" disabled={actionBusy || selectedUnavailable || selectedReviewStatus === 'PENDING' || selectedSource.type === 'EXCEL'} onClick={() => openExisting('edit', selectedSource)}><PencilSimple size={15} />编辑</AppButton>}
           <AppButton className="action-assets" type="button" disabled={selectedReviewStatus === 'PENDING' || selectedReviewStatus === 'REJECTED'} onClick={() => openAssetWorkspace(selectedSource)}>{selectedCanManage ? '管理资产' : '查看资产'}</AppButton>
+          {selectedCanManage && <AppButton className="action-retire" type="button" disabled={actionBusy || selectedUnavailable || selectedReviewStatus === 'PENDING'} onClick={() => void openRetirement(selectedSource)}><WarningCircle size={15} />安全下架</AppButton>}
         </div>
 
         <div className="data-source-inspector-scroll">
@@ -1361,12 +1457,13 @@ export function DataSourceCenterPage() {
           </section>
 
           <section className="data-source-inspector-card">
-            <header><strong>最近测试结果</strong><span className={`receipt-status is-${validationStatusOf(selectedSource).toLowerCase()}`}>{validationLabels[validationStatusOf(selectedSource)]}</span></header>
+            <header><strong>最近测试结果</strong><span className={`receipt-status is-${effectiveValidationStatus(selectedSource).toLowerCase()}`}>{validationLabel(selectedSource)}</span></header>
             <dl className="receipt-facts">
               <div><dt>测试时间</dt><dd>{formatDataSourceTime(selectedSource.lastTestedAt || selectedSource.updatedAt)}</dd></div>
               <div><dt>连接健康</dt><dd>{selectedHealth.label}</dd></div>
               <div><dt>响应延迟</dt><dd>{selectedHealth.detail}</dd></div>
               <div><dt>配置版本</dt><dd>v{selectedSource.configVersion || selectedSource.version}</dd></div>
+              <div><dt>有效期至</dt><dd>{selectedSource.testExpiresAt ? formatDataSourceTime(selectedSource.testExpiresAt) : '需要重新测试'}</dd></div>
             </dl>
           </section>
 
@@ -1383,15 +1480,15 @@ export function DataSourceCenterPage() {
         </div>
 
         <footer className="data-source-next-action">
-          <div><Sparkle size={18} weight="fill" /><span><strong>下一步：{selectedNextAction}</strong><small>{!selectedCanManage ? '以只读方式查看已共享的数据表、字段定义与治理状态。' : selectedReviewStatus === 'PENDING' ? '审核通过后继续元数据发现与资产完善。' : selectedReviewStatus === 'REJECTED' ? (selectedSource.reviewNote || '根据审核意见修改配置后重新提交。') : validationStatusOf(selectedSource) !== 'PASSED' ? '生成新的连接测试收据，确认当前配置可用。' : selectedPendingDraft ? '固定当前已验证版本并进入发布审核。' : '补充业务定义、指标口径与血缘关系。'}</small></span></div>
+          <div><Sparkle size={18} weight="fill" /><span><strong>下一步：{selectedNextAction}</strong><small>{!selectedCanManage ? '以只读方式查看已共享的数据表、字段定义与治理状态。' : selectedReviewStatus === 'PENDING' ? '审核通过后继续元数据发现与资产完善。' : selectedReviewStatus === 'REJECTED' ? (selectedSource.reviewNote || '根据审核意见修改配置后重新提交。') : effectiveValidationStatus(selectedSource) !== 'PASSED' ? '生成新的连接测试收据，确认当前配置可用。' : selectedPendingDraft ? '固定当前已验证版本并进入发布审核。' : '补充业务定义、指标口径与血缘关系。'}</small></span></div>
           <AppButton variant="primary" type="button" disabled={actionBusy || (selectedReviewStatus === 'PENDING' && !selectedIsRequester)} onClick={() => {
             if (!selectedCanManage) openAssetWorkspace(selectedSource)
             else if (selectedReviewStatus === 'PENDING') void withdrawReview(selectedSource)
             else if (selectedReviewStatus === 'REJECTED') openExisting('edit', selectedSource)
-            else if (validationStatusOf(selectedSource) !== 'PASSED') void testConnection(selectedSource)
+            else if (effectiveValidationStatus(selectedSource) !== 'PASSED') void testConnection(selectedSource)
             else if (selectedCanPublish) void publishSource(selectedSource)
             else openAssetWorkspace(selectedSource)
-          }}>{!selectedCanManage ? '查看资产' : selectedReviewStatus === 'PENDING' ? selectedIsRequester ? '撤销申请' : '等待审批' : selectedReviewStatus === 'REJECTED' ? '去修改' : validationStatusOf(selectedSource) !== 'PASSED' ? '重新测试' : selectedCanPublish ? '提交审批' : '去完善'}</AppButton>
+          }}>{!selectedCanManage ? '查看资产' : selectedReviewStatus === 'PENDING' ? selectedIsRequester ? '撤销申请' : '等待审批' : selectedReviewStatus === 'REJECTED' ? '去修改' : effectiveValidationStatus(selectedSource) !== 'PASSED' ? '重新测试' : selectedCanPublish ? '提交审批' : '去完善'}</AppButton>
         </footer>
       </aside>}
 
@@ -1430,7 +1527,7 @@ export function DataSourceCenterPage() {
             {draft.type === 'ORACLE' && <label>Oracle 连接模式<select value={draft.oracleConnectMode} onChange={event => updateDraft('oracleConnectMode', event.target.value as 'SERVICE_NAME' | 'SID')}><option value="SERVICE_NAME">Service Name</option><option value="SID">SID</option></select></label>}
             <label>{draft.type === 'ORACLE' ? (draft.oracleConnectMode === 'SID' ? 'Oracle SID' : 'Oracle Service Name') : 'Database'}<input value={draft.database} onChange={event => updateDraft('database', event.target.value)} placeholder={draft.type === 'ORACLE' ? (draft.oracleConnectMode === 'SID' ? 'ORCL' : 'FREEPDB1') : 'sales'} /></label>
             <label>Username<input autoComplete="username" value={draft.username} onChange={event => updateDraft('username', event.target.value)} placeholder="report_reader" /></label>
-            <label>Password<input aria-label="Password" type="password" autoComplete="new-password" value={draft.password} onChange={event => updateDraft('password', event.target.value)} placeholder={dialog.mode === 'edit' ? '留空表示保留原密码' : '请输入数据库密码'} /><small>{dialog.mode === 'edit' ? '密码不会回显；仅在需要更换时填写。' : '密码由服务端加密保存，不使用 JDBC 连接串。'}</small></label>
+            <label>Password{dialog.mode === 'edit' && <span className={`data-source-credential-state${draft.password ? ' is-rotating' : ''}`}>{draft.password ? '将轮换凭据' : '保留现有凭据'}</span>}<input aria-label="Password" type="password" autoComplete="new-password" value={draft.password} onChange={event => updateDraft('password', event.target.value)} placeholder={dialog.mode === 'edit' ? '留空表示保留原密码' : '请输入数据库密码'} /><small>{dialog.mode === 'edit' ? '密码不会回显；填写新值并测试成功后，草稿切换到新加密凭据，线上版本在审批通过前保持不变。' : '密码由服务端加密保存，不使用 JDBC 连接串。'}</small></label>
 			</>}
           </div>
 			{draft.type === 'EXCEL' && <section className="excel-source-upload" aria-label="Excel 文件上传">
@@ -1486,8 +1583,8 @@ export function DataSourceCenterPage() {
             ? '重新上传会复用当前文件资产并生成不可变新版本；完成后请点击“新增数据表”重新解析并映射 Sheet。已发布数据集继续引用原固定文件版本。'
             : '增量刷新仅调用 LLM 处理新增或结构发生变化的字段，未变化字段保留现有完善结果；源表被删除时停用对应资产。全量刷新会重新处理全部活动表和字段。'}</div>
           {metadataJobLoading && <div className="data-source-job-state" role="status">正在读取后台元数据任务…</div>}
-          {visibleMetadataJob && <section className={`data-source-job-progress ${visibleMetadataJob.status.toLowerCase()}`} aria-label="元数据后台任务">
-            <header><div><strong>{visibleMetadataJobTitle}</strong><span>{metadataStageLabels[visibleMetadataJob.stage] || visibleMetadataJob.stage || '处理中'}</span></div><em>{metadataProgressLabel}</em></header>
+          {visibleMetadataJob && <section className={`data-source-job-progress ${visibleMetadataJob.status.toLowerCase()}${visibleMetadataJob.errorCode === 'USER_CANCELLED' ? ' cancelled' : ''}`} aria-label="元数据后台任务">
+            <header><div><strong>{visibleMetadataJobTitle}</strong><span>{visibleMetadataJob.errorCode === 'USER_CANCELLED' ? '已安全中止' : metadataStageLabels[visibleMetadataJob.stage] || visibleMetadataJob.stage || '处理中'}</span></div><div className="data-source-job-controls"><em>{metadataProgressLabel}</em>{metadataTaskActive && <AppButton variant="danger" plain type="button" disabled={actionBusy} onClick={() => void cancelMetadataJob(dialog.source!, visibleMetadataJob)}>中止任务</AppButton>}{visibleMetadataJobFailures.length > 0 && !metadataTaskActive && <AppButton type="button" disabled={actionBusy} onClick={() => void retryFailedMetadataJob(dialog.source!, visibleMetadataJob)}>{busyAction === `retry-metadata:${visibleMetadataJob.id}` ? '正在重新入队…' : `重试失败表（${visibleMetadataJobFailures.length}）`}</AppButton>}</div></header>
             <progress aria-label="元数据任务进度" aria-valuetext={metadataProgressText} max={metadataProgressMax} value={metadataProgressValue} />
             <div className="data-source-job-counts" role="status" aria-live="polite"><span>已处理 {visibleMetadataJob.completed} / {visibleMetadataJob.total} 张</span><span className="success">成功 {visibleMetadataJob.succeeded}</span><span>跳过 {visibleMetadataJob.skipped}</span><span className={visibleMetadataJob.failed ? 'failed' : ''}>失败 {visibleMetadataJob.failed}</span>{visibleMetadataJob.currentTable && <span className="current">当前：{visibleMetadataJob.currentTable}</span>}</div>
             {(visibleMetadataJob.errorCode || visibleMetadataJob.errorMessage) && <p role="alert">{[visibleMetadataJob.errorCode, visibleMetadataJob.errorMessage].filter(Boolean).join(' · ')}</p>}
@@ -1602,7 +1699,23 @@ export function DataSourceCenterPage() {
       </Dialog>}
 
       {dialog?.mode === 'delete' && dialog.source && <Dialog title="删除数据源" onClose={closeDialog}>
-        <div className="data-source-delete"><p>确认删除“<strong>{dialog.source.name}</strong>”吗？该操作会关闭连接池并从数据源清单移除。</p>{formError && <div className="data-source-feedback error" role="alert">{formError}</div>}<footer><AppButton className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</AppButton><AppButton variant="danger" className="data-source-delete-button" type="button" disabled={actionBusy} onClick={() => void deleteSource()}>{actionBusy ? '正在删除…' : '确认删除'}</AppButton></footer></div>
+        <div className="data-source-delete retirement-dialog">
+          <header><span><WarningCircle size={20} weight="duotone" /></span><div><strong>安全下架“{dialog.source.name}”</strong><small>系统先检查全部下游，再在最终事务中重复验证，避免并发漏检。</small></div></header>
+          {retirementLoading ? <div className="retirement-loading" role="status">正在检查下游数据集与凭据状态…</div> : retirementImpact && <>
+            <section className={`retirement-verdict ${retirementImpact.canRetire ? 'is-safe' : 'is-blocked'}`}>
+              {retirementImpact.canRetire ? <CheckCircle size={22} weight="fill" /> : <WarningCircle size={22} weight="fill" />}
+              <span><strong>{retirementImpact.canRetire ? '可以安全下架' : `仍有 ${retirementImpact.blockingDatasetCount} 个数据集需要处理`}</strong><small>{retirementImpact.canRetire ? '关闭连接后将撤销凭据、停用元数据资产并从清单移除。' : '为防止报表和问数链路断裂，完成迁移或停用下游后才能继续。'}</small></span>
+            </section>
+            {retirementImpact.datasets.length > 0 && <section className="retirement-dependencies"><header><strong>阻断下游</strong><span>{retirementImpact.datasets.length} 个</span></header><div>{retirementImpact.datasets.map(dataset => <article key={dataset.id}><span><strong>{dataset.name}</strong><small>{dataset.layer || 'DATASET'} · {dataset.dependencyKind === 'ORIGIN_TABLE' ? '直接来源' : '版本依赖'}</small></span><em className={`is-${dataset.status.toLowerCase()}`}>{retirementDatasetStatusLabels[dataset.status] || dataset.status}</em><AppButton link onClick={() => navigate(`/datasets/${dataset.id}/edit`)}>去迁移<ArrowClockwise size={13} /></AppButton></article>)}</div></section>}
+            <ul className="retirement-effects">
+              <li><CheckCircle size={16} />{retirementImpact.credentialWillBeRevoked ? '数据库凭据将被不可逆撤销，历史版本不能再建立连接' : '该文件源没有数据库连接凭据'}</li>
+              <li><CheckCircle size={16} />元数据表与字段将停用，但审计记录和结构差异继续保留</li>
+              {retirementImpact.sourceFileWillBeRetained && <li><CheckCircle size={16} />原始上传文件继续保留，便于审计与后续迁移</li>}
+            </ul>
+          </>}
+          {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
+          <footer><AppButton className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</AppButton><AppButton variant="danger" className="data-source-delete-button" type="button" disabled={actionBusy || retirementLoading || !retirementImpact?.canRetire} onClick={() => void deleteSource()}>{actionBusy ? '正在安全下架…' : retirementImpact?.canRetire ? '确认安全下架' : '请先处理下游'}</AppButton></footer>
+        </div>
       </Dialog>}
       <DataSourceAIAssistant
         sources={sources}

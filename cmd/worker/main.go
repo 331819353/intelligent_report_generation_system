@@ -528,15 +528,16 @@ func main() {
 		os.Exit(1)
 	}
 	askDataAssembler, err := askdatatools.NewAssembler(askdatatools.Services{
-		Reader:     askdataregistry.NewQueryReader(pool),
-		Retriever:  askDataRetriever,
-		Embedder:   askdatatools.BatchEmbedder{Provider: embeddingProvider},
-		Graph:      askDataGraphResolver,
-		Compiler:   askDataPinnedCompiler,
-		Validator:  reportPlanValidator,
-		Coverage:   reportCoverage,
-		Executor:   reportPlanExecutor,
-		Dictionary: askDataDictionary,
+		Reader:        askdataregistry.NewQueryReader(pool),
+		Retriever:     askDataRetriever,
+		Embedder:      askdatatools.BatchEmbedder{Provider: embeddingProvider},
+		Graph:         askDataGraphResolver,
+		Compiler:      askDataPinnedCompiler,
+		Validator:     reportPlanValidator,
+		Coverage:      reportCoverage,
+		Executor:      reportPlanExecutor,
+		Dictionary:    askDataDictionary,
+		ReportSources: askdatareportasset.NewPostgresProjectionRuntimeStore(pool),
 	}, askDataCognition, askdataorchestrator.DefaultLoopOptions())
 	if err != nil {
 		logger.Error("initialize AskData question assembler", "error", err)

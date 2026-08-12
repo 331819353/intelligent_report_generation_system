@@ -323,7 +323,37 @@ func (r *Repository) DeleteTableAsset(ctx context.Context, tenantID, actorID, id
 func (r *Repository) ListDiffs(ctx context.Context, tenantID, dataSourceID string, limit int) (items []Diff, err error) {
 	items = []Diff{}
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id::text,data_source_id::text,object_type,object_key,change_type::text,before_json,after_json,created_at::text FROM platform.metadata_diffs WHERE ($1='' OR data_source_id=$1::uuid) ORDER BY created_at DESC LIMIT $2`, dataSourceID, limit)
+		rows, err := tx.Query(ctx, `SELECT diff.id::text,diff.data_source_id::text,diff.object_type,diff.object_key,
+			diff.change_type::text,diff.before_json,diff.after_json,diff.created_at::text,
+			platform.metadata_diff_is_breaking(diff.object_type,diff.change_type,diff.before_json,diff.after_json),
+			COALESCE(impact.total,0),COALESCE(impact.stale,0)
+			FROM platform.metadata_diffs AS diff
+			LEFT JOIN LATERAL (
+			  SELECT count(DISTINCT dependency.downstream_id)::integer AS total,
+			    count(DISTINCT dependency.downstream_id) FILTER(WHERE dataset.status='STALE')::integer AS stale
+			  FROM platform.asset_dependencies AS dependency
+			  JOIN platform.metadata_tables AS table_asset
+			    ON table_asset.tenant_id=dependency.tenant_id
+			   AND dependency.upstream_type='TABLE'
+			   AND dependency.upstream_id=table_asset.id
+			  LEFT JOIN platform.datasets AS dataset
+			    ON dependency.downstream_type='DATASET'
+			   AND dataset.tenant_id=dependency.tenant_id
+			   AND dataset.id=dependency.downstream_id
+			   AND dataset.deleted_at IS NULL
+			  WHERE dependency.tenant_id=diff.tenant_id
+			    AND table_asset.data_source_id=diff.data_source_id
+			    AND (
+			      table_asset.id::text=COALESCE(diff.before_json->>'id','')
+			      OR table_asset.id::text=COALESCE(diff.after_json->>'id','')
+			      OR table_asset.id::text=COALESCE(diff.before_json->>'table_id','')
+			      OR table_asset.id::text=COALESCE(diff.after_json->>'table_id','')
+			      OR diff.object_key LIKE '%.'||table_asset.table_name
+			      OR diff.object_key LIKE '%.'||table_asset.table_name||'.%'
+			    )
+			) AS impact ON true
+			WHERE ($1='' OR diff.data_source_id=$1::uuid)
+			ORDER BY diff.created_at DESC LIMIT $2`, dataSourceID, limit)
 		if err != nil {
 			return err
 		}
@@ -331,7 +361,7 @@ func (r *Repository) ListDiffs(ctx context.Context, tenantID, dataSourceID strin
 		for rows.Next() {
 			var d Diff
 			var before, after []byte
-			if err := rows.Scan(&d.ID, &d.DataSourceID, &d.ObjectType, &d.ObjectKey, &d.ChangeType, &before, &after, &d.CreatedAt); err != nil {
+			if err := rows.Scan(&d.ID, &d.DataSourceID, &d.ObjectType, &d.ObjectKey, &d.ChangeType, &before, &after, &d.CreatedAt, &d.Breaking, &d.ImpactCount, &d.StaleCount); err != nil {
 				return err
 			}
 			if len(before) > 0 {

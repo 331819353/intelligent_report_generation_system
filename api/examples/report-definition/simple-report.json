@@ -67,12 +67,23 @@
               "id": "block_sales_trend",
               "type": "CHART",
               "layout": {
-                "desktop": { "x": 0, "y": 0, "w": 12, "h": 6 },
-                "mobile": { "order": 1, "visible": true, "heightMode": "AUTO", "slotMode": "STACK" }
+                "desktop": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 12,
+                  "h": 6
+                },
+                "mobile": {
+                  "order": 1,
+                  "visible": true,
+                  "heightMode": "AUTO",
+                  "slotMode": "STACK"
+                }
               },
               "zones": [
                 {
                   "id": "zone_sales_content",
+                  "order": 1,
                   "type": "CONTENT",
                   "layout": {
                     "heightMode": "AUTO",
@@ -85,7 +96,12 @@
                   "slots": [
                     {
                       "id": "slot_sales_chart",
-                      "grid": { "x": 0, "y": 0, "w": 1, "h": 1 },
+                      "grid": {
+                        "x": 0,
+                        "y": 0,
+                        "w": 1,
+                        "h": 1
+                      },
                       "componentId": "component_sales_chart"
                     }
                   ]
@@ -100,15 +116,24 @@
   "components": [
     {
       "id": "component_sales_chart",
-      "templateRef": { "type": "line-trend", "version": "1.0.0" },
+      "templateRef": {
+        "type": "line-trend",
+        "version": "1.0.0"
+      },
       "dataBinding": {
         "bindingMode": "DATASET_FIELD",
         "dataContextId": "sales_context",
         "dimensions": [
-          { "role": "X_AXIS", "field": "month" }
+          {
+            "role": "X_AXIS",
+            "field": "month"
+          }
         ],
         "measures": [
-          { "role": "Y_AXIS", "field": "sales_amount" }
+          {
+            "role": "Y_AXIS",
+            "field": "sales_amount"
+          }
         ]
       },
       "options": {

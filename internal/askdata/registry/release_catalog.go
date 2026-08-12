@@ -146,7 +146,10 @@ func (store *PostgresStore) ListReleaseCatalog(
 			   AND projection.expected_content_hash=release.content_hash
 			   AND projection.applied_content_hash=release.content_hash),
 			(SELECT count(*) FROM askdata.release_approvals AS approval
-			 WHERE approval.release_id=release.id),
+			 LEFT JOIN askdata.release_approval_withdrawals AS withdrawal
+			   ON withdrawal.tenant_id=approval.tenant_id AND withdrawal.approval_id=approval.id
+			 WHERE approval.release_id=release.id AND approval.decision='APPROVED'
+			   AND withdrawal.id IS NULL),
 			release.created_at,release.updated_at,release.ready_at,release.activated_at
 		FROM askdata.releases AS release
 		WHERE release.domain_id=$1

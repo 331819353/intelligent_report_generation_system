@@ -195,6 +195,47 @@ func (s *Service) GetMetadataJob(ctx context.Context, tenantID, sourceID, jobID 
 	return s.jobs.GetMetadataJob(ctx, tenantID, sourceID, jobID)
 }
 
+func (s *Service) LatestMetadataJob(ctx context.Context, tenantID, sourceID string) (*MetadataJob, error) {
+	if s.jobs == nil {
+		return nil, errors.New("metadata job repository is not configured")
+	}
+	return s.jobs.LatestMetadataJob(ctx, tenantID, sourceID)
+}
+
+// RetryFailedMetadataJob creates a fresh, auditable batch containing only failed
+// tables. Successful and skipped items remain immutable in the original run.
+func (s *Service) RetryFailedMetadataJob(
+	ctx context.Context,
+	tenantID, actorID, sourceID, jobID string,
+) (MetadataJob, error) {
+	if s.jobs == nil {
+		return MetadataJob{}, errors.New("metadata job repository is not configured")
+	}
+	previous, selections, err := s.jobs.FailedMetadataJobSelections(ctx, tenantID, sourceID, jobID)
+	if err != nil {
+		return MetadataJob{}, err
+	}
+	if len(selections) == 0 {
+		return MetadataJob{}, ErrMetadataJobNotRetryable
+	}
+	if previous.Kind == MetadataJobImport {
+		return s.QueueImportTablesWithSampleMode(ctx, tenantID, actorID, sourceID, previous.SampleDataMode, selections)
+	}
+	if previous.Kind != MetadataJobRefresh {
+		return MetadataJob{}, ErrMetadataJobNotRetryable
+	}
+	tableIDs := make([]string, 0, len(selections))
+	for _, selection := range selections {
+		if selection.TableID == "" {
+			return MetadataJob{}, ErrMetadataJobNotRetryable
+		}
+		tableIDs = append(tableIDs, selection.TableID)
+	}
+	return s.QueueRefreshTablesWithSampleMode(
+		ctx, tenantID, actorID, sourceID, previous.Mode, previous.SampleDataMode, tableIDs...,
+	)
+}
+
 func (s *Service) LatestActiveMetadataJob(ctx context.Context, tenantID, sourceID string) (*MetadataJob, error) {
 	if s.jobs == nil {
 		return nil, errors.New("metadata job repository is not configured")

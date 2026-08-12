@@ -13,6 +13,7 @@ import (
 )
 
 const encryptedSecretPrefix = "encrypted://v1/"
+const revokedSecretPrefix = "revoked://"
 
 var credentialAssociatedData = []byte("intelligent-report:data-source-credential:v1")
 
@@ -60,6 +61,9 @@ func (m *encryptedCredentialManager) Seal(value map[string]string) (string, erro
 
 // Resolve 只在调用 Connector 前解密内部凭据；旧 env:// 引用继续交给兼容解析器。
 func (m *encryptedCredentialManager) Resolve(ctx context.Context, ref string) (map[string]string, error) {
+	if strings.HasPrefix(ref, revokedSecretPrefix) {
+		return nil, errors.New("data source credential has been revoked")
+	}
 	if !strings.HasPrefix(ref, encryptedSecretPrefix) {
 		if m.fallback == nil {
 			return nil, errors.New("unsupported secret reference")

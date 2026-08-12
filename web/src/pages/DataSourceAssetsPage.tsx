@@ -29,6 +29,7 @@ import {
   type DataSourceTableRecord,
   type DiscoveredTableRecord,
   type MetadataAISuggestion,
+  type MetadataDiff,
   type MetadataJob,
   type MetadataSampleMode,
 } from '../lib/data-sources'
@@ -134,6 +135,14 @@ const snapshotJob: MetadataJob = {
   ],
 }
 
+const snapshotDiffs: MetadataDiff[] = [
+  { id: 'snapshot-diff-breaking', dataSourceId: snapshotSource.id, objectType: 'COLUMN', objectKey: 'sales.fact_sales_order.pay_amount', changeType: 'CHANGED', breaking: true, impactCount: 2, staleCount: 2, createdAt: '2026-08-11T10:18:00+08:00', before: { canonical_type: 'DECIMAL', numeric_precision: 18, numeric_scale: 2 }, after: { canonical_type: 'INTEGER', numeric_precision: 12, numeric_scale: 0 }, impact: [
+    { id: 'snapshot-dependency-1', downstreamType: 'DATASET', downstreamId: 'snapshot-sales-dataset', downstreamName: '销售经营明细', kind: 'USES', createdAt: '2026-08-11T10:18:00+08:00' },
+    { id: 'snapshot-dependency-2', downstreamType: 'DATASET', downstreamId: 'snapshot-channel-dataset', downstreamName: '渠道经营汇总', kind: 'USES', createdAt: '2026-08-11T10:18:00+08:00' },
+  ] },
+  { id: 'snapshot-diff-safe', dataSourceId: snapshotSource.id, objectType: 'COLUMN', objectKey: 'sales.dim_customer.customer_level', changeType: 'ADDED', breaking: false, impactCount: 0, staleCount: 0, createdAt: '2026-08-11T10:17:00+08:00', after: { canonical_type: 'STRING', nullable: true } },
+]
+
 const semanticTypes = ['', 'DATE', 'TIME', 'DATETIME', 'REGION', 'COMPANY_NAME', 'AMOUNT', 'PERCENTAGE', 'IDENTIFIER', 'CATEGORY', 'QUANTITY', 'BOOLEAN', 'TEXT']
 const sensitivityLabels: Record<DataSourceTableRecord['sensitivityLevel'], string> = { PUBLIC: '公开', INTERNAL: '内部', CONFIDENTIAL: '机密', RESTRICTED: '受限' }
 const enrichmentLabels: Record<DataSourceTableRecord['enrichmentStatus'], string> = { PENDING: '待完善', RUNNING: '处理中', SUCCEEDED: '已完善', FAILED: '需处理' }
@@ -206,6 +215,7 @@ export function DataSourceAssetsPage() {
   const [discovered, setDiscovered] = useState<DiscoveredTableRecord[]>(designSnapshot ? snapshotDiscovered : [])
   const [suggestions, setSuggestions] = useState<MetadataAISuggestion[]>(designSnapshot && snapshotTableForRoute.id === snapshotTables[0].id ? snapshotSuggestions : [])
   const [job, setJob] = useState<MetadataJob | null>(designSnapshot && params.get('job') === 'importing' ? snapshotJob : null)
+  const [diffs, setDiffs] = useState<MetadataDiff[]>(designSnapshot ? snapshotDiffs : [])
   const [loading, setLoading] = useState(!designSnapshot)
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState<Notice | null>(null)
@@ -216,6 +226,7 @@ export function DataSourceAssetsPage() {
   const [tableForm, setTableForm] = useState({ businessName: snapshotTableForRoute.businessName, businessDescription: snapshotTableForRoute.businessDescription, tags: snapshotTableForRoute.tags.join(', '), sensitivityLevel: snapshotTableForRoute.sensitivityLevel, visibility: snapshotTableForRoute.visibility, manualLocked: snapshotTableForRoute.manualLocked })
   const [preview, setPreview] = useState<DataSourceTablePreview | null>(null)
   const visibleJob = designSnapshot && params.get('job') === 'importing' ? snapshotJob : job
+  const breakingDiffs = diffs.filter(diff => diff.breaking)
 
   useEffect(() => {
     if (!notice) return undefined
@@ -240,12 +251,13 @@ export function DataSourceAssetsPage() {
           return
         }
         if (mode === 'catalog') {
-          const [tablePage, activeJob] = await Promise.all([dataSourceAPI.tables(sourceId), params.get('jobId')
+          const [tablePage, activeJob, metadataDiffs] = await Promise.all([dataSourceAPI.tables(sourceId), params.get('jobId')
             ? dataSourceAPI.getMetadataJob(sourceId, params.get('jobId')!)
-            : dataSourceAPI.latestActiveMetadataJob(sourceId).then(result => result.job)])
+            : dataSourceAPI.latestMetadataJob(sourceId).then(result => result.job), dataSourceAPI.metadataDiffs(sourceId)])
           if (!active) return
           setTables(tablePage.items)
           setJob(activeJob)
+          setDiffs(metadataDiffs.items)
         } else if (mode === 'discover') {
           const result = loadedSource.type === 'EXCEL'
             ? await dataSourceAPI.inspectExcelSource(sourceId).then(inspection => ({ items: inspection.sheets.map(sheet => ({ catalogName: '', schemaName: '', name: sheet.name, type: 'WORKSHEET', sourceComment: '', columns: sheet.columns.map(column => ({ name: column.name, nativeType: column.canonicalType, canonicalType: column.canonicalType, nullable: column.nullable })) })), total: inspection.sheets.length }))
@@ -491,6 +503,26 @@ export function DataSourceAssetsPage() {
             </div>
           </section>
 
+          <div className="asset-catalog-side">
+          {diffs.length > 0 && <section className={`asset-change-governance${breakingDiffs.length > 0 ? ' has-breaking' : ''}`} aria-label="结构变更治理">
+            <header>
+              <span><WarningCircle size={18} weight="duotone" /></span>
+              <div><strong>结构变更治理</strong><small>{breakingDiffs.length > 0 ? `${breakingDiffs.length} 项破坏性变更已触发下游保护` : '最近变更均可向后兼容'}</small></div>
+              <em>{diffs.length} 项</em>
+            </header>
+            <div className="asset-change-list">
+              {diffs.slice(0, 3).map(diff => <article className={diff.breaking ? 'is-breaking' : 'is-safe'} key={diff.id}>
+                <span>{diff.breaking ? <WarningCircle size={17} weight="fill" /> : <CheckCircle size={17} weight="fill" />}</span>
+                <div><strong>{diff.objectKey}</strong><small>{diff.changeType === 'REMOVED' ? '已移除' : diff.changeType === 'ADDED' ? '新增字段' : diff.changeType === 'REACTIVATED' ? '重新启用' : '结构已变化'} · {formatTime(diff.createdAt)}</small></div>
+                <em>{diff.breaking ? `${diff.staleCount || diff.impactCount} 个下游已冻结` : '兼容'}</em>
+                {diff.breaking && diff.impact && diff.impact.length > 0 && <div className="asset-change-impact">
+                  {diff.impact.slice(0, 2).map(item => <AppButton link key={item.id} onClick={() => navigate(`/datasets/${item.downstreamId}/edit`)}>{item.downstreamName}<ArrowRight size={13} /></AppButton>)}
+                  {diff.impact.length > 2 && <small>另有 {diff.impact.length - 2} 个受影响下游</small>}
+                </div>}
+              </article>)}
+            </div>
+          </section>}
+
           <aside className="asset-job-panel" aria-label="元数据处理任务">
             <header><div><span className="is-blue"><Sparkle size={18} weight="duotone" /></span><div><strong>元数据处理任务</strong><small>{visibleJob ? `任务 ${visibleJob.id.slice(-8)}` : '后台任务可断线恢复'}</small></div></div>{visibleJob && <em className={`asset-job-status is-${visibleJob.status.toLowerCase()}`}>{visibleJob.status === 'RUNNING' ? '处理中' : visibleJob.status === 'QUEUED' ? '排队中' : visibleJob.status === 'SUCCEEDED' ? '已完成' : visibleJob.status === 'PARTIAL' ? '部分完成' : '失败'}</em>}</header>
             {!visibleJob ? <div className="asset-job-empty"><CheckCircle size={34} weight="duotone" /><strong>当前没有运行中的任务</strong><p>{canManage ? '发现数据表或增量刷新后，可在这里持续查看处理阶段。' : '这是其他成员共享的数据源，当前以只读方式展示资产状态。'}</p>{canManage && <AppButton onClick={goDiscover}>发现新数据表</AppButton>}</div> : <>
@@ -506,6 +538,7 @@ export function DataSourceAssetsPage() {
             </>}
             <footer><Sparkle size={16} weight="fill" /><span><strong>下一步：完善业务元数据</strong><small>处理完成后逐表确认名称、口径与敏感级。</small></span></footer>
           </aside>
+          </div>
         </div>
       </> : mode === 'discover' ? <div className="asset-discover-layout">
         <section className="asset-discover-catalog">

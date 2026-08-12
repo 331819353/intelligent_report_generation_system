@@ -58,7 +58,7 @@ func (service *ControlService) Register(
 	if err != nil {
 		return BuildDetail{}, false, err
 	}
-	return detail, created, nil
+	return summarizeBuildDetail(detail), created, nil
 }
 
 func (service *ControlService) List(
@@ -90,7 +90,11 @@ func (service *ControlService) Get(
 		!validUUID(tenantID) || !validUUID(datasetID) || !validUUID(buildID) {
 		return BuildDetail{}, ErrInvalidRequest
 	}
-	return service.store.GetBuild(ctx, tenantID, datasetID, buildID)
+	detail, err := service.store.GetBuild(ctx, tenantID, datasetID, buildID)
+	if err != nil {
+		return BuildDetail{}, err
+	}
+	return summarizeBuildDetail(detail), nil
 }
 
 func (service *ControlService) Cancel(
@@ -105,5 +109,9 @@ func (service *ControlService) Cancel(
 	if _, err := service.store.CancelActive(ctx, tenantID, actorID, datasetID, buildID); err != nil {
 		return BuildDetail{}, err
 	}
-	return service.store.GetBuild(ctx, tenantID, datasetID, buildID)
+	detail, err := service.store.GetBuild(ctx, tenantID, datasetID, buildID)
+	if err != nil {
+		return BuildDetail{}, err
+	}
+	return summarizeBuildDetail(detail), nil
 }

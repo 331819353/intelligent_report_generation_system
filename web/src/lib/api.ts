@@ -12,8 +12,10 @@ export type APIError = {
   issues?: Array<{ path: string; code?: string; reason?: string; message?: string }>
   /** 乐观锁冲突返回服务端最新基线，页面仍需显式让用户选择是否加载。 */
   currentRevision?: number
+  currentVersion?: number
   currentHash?: string
   releaseDrift?: unknown
+  preflight?: { passed: boolean; objectCount: number; issues: Array<{ code: string; objectType?: string; objectVersionId?: string }> }
 }
 
 export class RequestError extends Error {

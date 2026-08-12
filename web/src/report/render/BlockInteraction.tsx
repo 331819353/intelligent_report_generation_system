@@ -41,3 +41,48 @@ export function BlockHandles({ blockId, rect, columns, minimum, onStart, onNudge
       onKeyDown={event => keyboard(event, 'resize')} />
   </>
 }
+
+/**
+ * 槽位把手。与区块把手同构，但夹取到区域子网格的行列上界：服务端校验
+ * grid.x+w ≤ zone.columns 且 grid.y+h ≤ zone.rows。
+ */
+export function SlotHandles({ slotId, rect, columns, rows, minimum, onStart, onNudge }: {
+  slotId: string
+  rect: GridRect
+  columns: number
+  rows: number
+  minimum: { w: number; h: number }
+  onStart(event: React.PointerEvent, mode: DragMode): void
+  onNudge(next: GridRect, mode: DragMode): void
+}) {
+  const keyboard = (event: React.KeyboardEvent, mode: DragMode) => {
+    const step = event.shiftKey ? 2 : 1
+    let next: GridRect | null = null
+    if (mode === 'move') {
+      if (event.key === 'ArrowLeft') next = { ...rect, x: Math.max(rect.x - step, 0) }
+      if (event.key === 'ArrowRight') next = { ...rect, x: Math.min(rect.x + step, columns - rect.w) }
+      if (event.key === 'ArrowUp') next = { ...rect, y: Math.max(rect.y - step, 0) }
+      if (event.key === 'ArrowDown') next = { ...rect, y: Math.min(rect.y + step, rows - rect.h) }
+    } else {
+      if (event.key === 'ArrowLeft') next = { ...rect, w: Math.max(rect.w - step, minimum.w) }
+      if (event.key === 'ArrowRight') next = { ...rect, w: Math.min(rect.w + step, columns - rect.x) }
+      if (event.key === 'ArrowUp') next = { ...rect, h: Math.max(rect.h - step, minimum.h) }
+      if (event.key === 'ArrowDown') next = { ...rect, h: Math.min(rect.h + step, rows - rect.y) }
+    }
+    if (!next) return
+    event.preventDefault()
+    onNudge(next, mode)
+  }
+  return <>
+    <button className="report-slot-move-handle" type="button"
+      aria-label={`移动槽位 ${slotId}，可用方向键微调`}
+      onPointerDown={event => onStart(event, 'move')}
+      onKeyDown={event => keyboard(event, 'move')}>
+      <span aria-hidden="true" />
+    </button>
+    <button className="report-slot-resize-handle" type="button"
+      aria-label={`调整槽位 ${slotId} 尺寸，可用方向键微调`}
+      onPointerDown={event => onStart(event, 'resize')}
+      onKeyDown={event => keyboard(event, 'resize')} />
+  </>
+}

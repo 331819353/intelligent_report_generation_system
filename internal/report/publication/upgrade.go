@@ -163,9 +163,13 @@ func (service *UpgradeService) Preview(
 	if err != nil {
 		return UpgradePreview{}, fmt.Errorf("%w: %v", ErrUpgradeUnavailable, err)
 	}
-	if err := json.Unmarshal(canonical, &definition); err != nil {
+	// A fresh value: normalization reorders collections, so decoding into the
+	// populated definition could carry an omitempty field across elements.
+	var canonicalDefinition reportmodel.ReportDefinition
+	if err := json.Unmarshal(canonical, &canonicalDefinition); err != nil {
 		return UpgradePreview{}, err
 	}
+	definition = canonicalDefinition
 	if service.Dependencies != nil {
 		if issues := service.Dependencies.ValidateReportDependencies(ctx, identity, definition); len(issues) != 0 {
 			return UpgradePreview{}, fmt.Errorf("%w: %v", ErrUpgradeUnavailable, issues)

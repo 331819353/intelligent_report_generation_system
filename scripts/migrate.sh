@@ -690,8 +690,14 @@ GRANT INSERT ON TABLE askdata.semantic_export_jobs TO :"app_user";
 GRANT INSERT ON TABLE
   askdata.audit_events,
   askdata.releases,
-  askdata.release_objects
+  askdata.release_objects,
+  askdata.release_rollouts,
+  askdata.release_rollout_events
 TO :"app_user";
+GRANT UPDATE(
+  stage,state,canary_percent,reason_hash,updated_by,version,stage_started_at,
+  paused_at,stopped_at,accepted_at,completed_at,rolled_back_at,updated_at
+) ON askdata.release_rollouts TO :"app_user";
 GRANT INSERT, UPDATE ON TABLE
   askdata.release_references
 TO :"app_user";
@@ -807,6 +813,13 @@ GRANT EXECUTE ON FUNCTION
   askdata.release_manifest_hash(uuid),
   askdata.release_registry_facts_complete(uuid)
 TO :"app_user", :"worker_user";
+
+GRANT EXECUTE ON FUNCTION
+  askdata.resolve_question_release(uuid,uuid,uuid),
+  askdata.release_rollout_observability(uuid),
+  askdata.release_rollout_bucket(text,uuid),
+  askdata.lock_active_question_release(uuid,uuid,uuid,text)
+TO :"app_user";
 SELECT format(
   'GRANT EXECUTE ON FUNCTION askdata.list_add_to_report_tenants() TO %I',
   :'worker_user'
@@ -851,7 +864,11 @@ GRANT EXECUTE ON FUNCTION
   askdata.expose_evaluation_shard(uuid,smallint,uuid),
   askdata.recompute_release_evaluation_gate(uuid,uuid,uuid,uuid),
   askdata.record_release_review_report(uuid,uuid,uuid,text,text,jsonb,uuid),
-  askdata.submit_release_approval(uuid,uuid,uuid,text,text,text,text,uuid),
+  askdata.submit_release_approval_v2(uuid,uuid,uuid,text,text,text,text,uuid,uuid),
+  askdata.withdraw_release_approval(uuid,text,text,text,uuid),
+  askdata.reset_rejected_release_approvals(uuid,text,text,uuid),
+  askdata.escalate_release_approval(uuid,text,text,uuid),
+  askdata.active_release_approval_count(uuid,text),
   askdata.activate_release(uuid,uuid,uuid,uuid,bigint),
   askdata.load_quota_usage_snapshots(uuid,uuid,uuid,timestamptz),
   askdata.record_cost_usage(uuid,uuid,uuid,uuid,text,text,text,bigint,bigint,bigint,bigint),

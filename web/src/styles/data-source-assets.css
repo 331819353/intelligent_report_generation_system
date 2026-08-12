@@ -78,6 +78,7 @@
 .asset-discover-layout,
 .asset-detail-layout { min-width: 0; min-height: 0; display: grid; gap: 12px; overflow: hidden; }
 .asset-catalog-layout { grid-template-columns: minmax(0, 1fr) 360px; }
+.asset-catalog-side { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 12px; overflow: hidden; }
 .asset-table-catalog,
 .asset-job-panel,
 .asset-discover-catalog,
@@ -152,6 +153,29 @@
 .asset-sensitivity.is-confidential { background: #fff7e8; color: #a86a12; }
 .asset-sensitivity.is-restricted { background: #fff0ef; color: #bd403a; }
 .asset-row-action.app-button { grid-column: 6; align-self: center; justify-self: end; gap: 4px; padding: 7px 5px; font-size: 14px; }
+
+.asset-change-governance { min-width: 0; max-height: 252px; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 1px solid #b8d7c9; border-radius: 7px; background: #fff; box-shadow: 0 1px 2px #24426808; }
+.asset-change-governance.has-breaking { border-color: #efc2be; }
+.asset-change-governance > header { min-width: 0; display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid #e7edf4; }
+.asset-change-governance > header > span { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 7px; background: #edf9f4; color: #15966a; }
+.asset-change-governance.has-breaking > header > span { background: #fff0ef; color: #d24d46; }
+.asset-change-governance > header > div { min-width: 0; display: grid; gap: 3px; }
+.asset-change-governance > header strong { color: #33465e; font-size: 13px; }
+.asset-change-governance > header small { overflow: hidden; color: #7d8b9d; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.asset-change-governance > header > em { border-radius: 4px; padding: 4px 7px; background: #eef4fb; color: #526c89; font-size: 12px; font-style: normal; font-weight: 700; }
+.asset-change-list { min-height: 0; overflow-y: auto; }
+.asset-change-list > article { min-width: 0; display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: start; gap: 8px; padding: 10px 14px; border-bottom: 1px solid #edf1f5; }
+.asset-change-list > article:last-child { border-bottom: 0; }
+.asset-change-list > article > span { padding-top: 1px; color: #15966a; }
+.asset-change-list > article.is-breaking > span { color: #d24d46; }
+.asset-change-list article > div:not(.asset-change-impact) { min-width: 0; display: grid; gap: 3px; }
+.asset-change-list article strong { overflow: hidden; color: #40536b; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.asset-change-list article small { color: #8794a6; font-size: 11px; }
+.asset-change-list article > em { border-radius: 4px; padding: 3px 6px; background: #eaf8f1; color: #15966a; font-size: 11px; font-style: normal; font-weight: 700; white-space: nowrap; }
+.asset-change-list article.is-breaking > em { background: #fff0ef; color: #c94640; }
+.asset-change-impact { grid-column: 2 / -1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.asset-change-impact .app-button { min-width: 0; height: 24px; gap: 3px; overflow: hidden; padding: 2px 0; color: #1677ff; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.asset-change-impact > small { font-size: 11px; }
 
 .asset-job-panel { display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto auto; overflow: hidden; }
 .asset-job-panel > header,
@@ -380,6 +404,7 @@
   .asset-catalog-layout,
   .asset-discover-layout,
   .asset-detail-layout { grid-template-columns: minmax(0, 1fr); overflow: visible; }
+  .asset-catalog-side { overflow: visible; }
   .asset-job-panel,
   .asset-import-policy,
   .asset-ai-review { min-height: 420px; }

@@ -120,6 +120,25 @@ function tableCell(value: string | null, column: QuestionResultColumn): string {
   return formatted
 }
 
+function KPIBundle({ dataset, view }: { dataset: QuestionResultDataset; view: QuestionResultView }) {
+  const row = dataset.rows[0]
+  return <section className="ask-result-kpi-bundle" aria-labelledby="ask-kpi-bundle-title">
+    <header>
+      <div><strong id="ask-kpi-bundle-title">指标组结果</strong><small>同一受控查询口径</small></div>
+      <span><ShieldCheck size={13} weight="fill" aria-hidden="true" />{view.measureKeys.length} 项已校验</span>
+    </header>
+    <dl>{view.measureKeys.map(key => {
+      const column = dataset.columns.find(item => item.key === key)
+      if (!column) return null
+      return <div key={key}>
+        <dt>{column.label}</dt>
+        <dd>{tableCell(row[key] ?? null, column)}</dd>
+        <small>当前发布数据快照</small>
+      </div>
+    })}</dl>
+  </section>
+}
+
 function pageItems(totalPages: number, availablePages: number): Array<number | 'ellipsis'> {
   const visible = Math.min(totalPages, Math.max(availablePages, 3))
   if (visible <= 6) return Array.from({ length: visible }, (_, index) => index + 1)
@@ -187,6 +206,7 @@ export function ResultWorkspace({ result, answer, onRetryNarrative }: ResultWork
   const barView = views.find(view => view.type === 'BAR')
   const tableView = views.find(view => view.type === 'TABLE')
   const tableDataset = tableView ? resultDataset(result, tableView.datasetId) : undefined
+	const bundleDataset = activeView?.type === 'KPI_BUNDLE' ? resultDataset(result, activeView.datasetId) : undefined
 
   if (!activeView) return null
   const showLine = activeView.type === 'LINE' && lineView
@@ -236,6 +256,8 @@ export function ResultWorkspace({ result, answer, onRetryNarrative }: ResultWork
         onClick={() => setActiveViewID(view.id)}
       >{view.label}</button>)}
     </div>
+
+	{activeView.type === 'KPI_BUNDLE' && bundleDataset && <KPIBundle dataset={bundleDataset} view={activeView} />}
 
     {(showLine || showBar) && <div className={`ask-result-visual-grid ${showBar ? 'is-channel-focus' : ''}`.trim()}>
       {showLine && <section><header><strong>{resultDataset(result, lineView.datasetId)?.label}</strong><small>（元）</small></header><ResultChart result={result} view={lineView} /></section>}

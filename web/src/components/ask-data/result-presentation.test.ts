@@ -65,3 +65,22 @@ test('formats exact numeric strings without floating point coercion', () => {
   assert.equal(formatExactNumber('12345678901234567890.50'), '12,345,678,901,234,567,890.50')
   assert.equal(formatExactNumber(null), '—')
 })
+
+test('accepts a bounded one-row KPI bundle and rejects incomplete bundles', () => {
+  const bundleResult: QuestionResult = {
+    ...result,
+    datasets: [{
+      id: 'dataset:bundle', label: '经营指标组', page: 1, pageSize: 1, totalRows: 1,
+      columns: [
+        { key: 'sales', label: '销售额', type: 'DECIMAL', role: 'MEASURE' },
+        { key: 'orders', label: '订单数', type: 'INTEGER', role: 'MEASURE' },
+      ],
+      rows: [{ sales: '12846320', orders: '29459' }],
+    }],
+    views: [{ id: 'view:bundle', type: 'KPI_BUNDLE', label: '指标组', datasetId: 'dataset:bundle', dimensionKeys: [], measureKeys: ['sales', 'orders'] }],
+    defaultViewId: 'view:bundle', recommendedViewId: 'view:bundle',
+  }
+  assert.equal(questionResultReady(bundleResult), true)
+  assert.equal(initialResultView(bundleResult)?.type, 'KPI_BUNDLE')
+  assert.equal(resultViewEligible(bundleResult, { ...bundleResult.views[0], measureKeys: ['sales'] }), false)
+})

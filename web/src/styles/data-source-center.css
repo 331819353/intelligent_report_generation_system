@@ -113,6 +113,8 @@
 .data-source-dialog form { display: grid; gap: 14px; padding: 22px 24px 24px; }
 .data-source-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 14px; }
 .data-source-form-grid > label { align-self: start; align-content: start; }
+.data-source-credential-state { justify-self: start; border-radius: 999px; padding: 2px 7px; background: #eef3f8; color: #68788d; font-size: 11px; font-weight: 700; }
+.data-source-credential-state.is-rotating { background: #fff4dc; color: #a96508; }
 .data-source-dialog label { display: grid; gap: 7px; color: #344054; font-size: 13px; font-weight: 750; }
 .data-source-dialog input, .data-source-dialog select, .data-source-dialog textarea { box-sizing: border-box; width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 11px; background: white; font-family: inherit; font-size: 14px; }
 .data-source-dialog input:not([type="checkbox"]):not([type="file"]), .data-source-dialog select { height: 42px; padding-top: 0; padding-bottom: 0; }
@@ -204,10 +206,13 @@
 .data-source-job-progress > header strong { color: var(--ink); font-size: 13px; }
 .data-source-job-progress > header span, .data-source-job-progress > header em { color: #475467; font-size: 14px; font-style: normal; }
 .data-source-job-progress > header em { color: #1d4ed8; font-weight: 900; }
+.data-source-job-progress > header > .data-source-job-controls { align-items: center; gap: 10px; flex: 0 0 auto; }
+.data-source-job-controls .app-button { min-height: 34px; padding: 0 13px; white-space: nowrap; }
 .data-source-job-progress progress { width: 100%; height: 9px; accent-color: #2563eb; }
 .data-source-job-progress.succeeded { border-color: #a7f3d0; background: #f0fdf4; }
 .data-source-job-progress.succeeded progress { accent-color: #059669; }
 .data-source-job-progress.partial, .data-source-job-progress.failed { border-color: #fecaca; background: #fffafa; }
+.data-source-job-progress.cancelled { border-color: #f2c7c4; background: #fffafa; }
 .data-source-job-progress.partial progress, .data-source-job-progress.failed progress { accent-color: #dc2626; }
 .data-source-job-counts { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--muted); font-size: 13px; }
 .data-source-job-counts .success { color: #047857; }
@@ -285,6 +290,35 @@
 .data-source-delete p { margin: 0; color: #475467; line-height: 1.7; }
 .data-source-safe-note { padding: 10px 12px; border-radius: 8px; background: #eff6ff; color: #1d4ed8 !important; font-size: 12px; }
 .data-source-delete-button { border: 1px solid #dc2626; border-radius: 8px; padding: 10px 16px; background: #dc2626; color: white; font-weight: 700; }
+.retirement-dialog { gap: 14px; }
+.retirement-dialog > header { display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: center; gap: 10px; }
+.retirement-dialog > header > span { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 7px; background: #fff0ef; color: #d24d46; }
+.retirement-dialog > header > div { display: grid; gap: 3px; }
+.retirement-dialog > header strong { color: #30435b; font-size: 15px; }
+.retirement-dialog > header small { color: #7d8a9c; font-size: 12px; line-height: 1.5; }
+.retirement-loading { min-height: 116px; display: grid; place-items: center; border: 1px dashed #cbd7e5; border-radius: 7px; background: #f8fbff; color: #718096; font-size: 13px; }
+.retirement-verdict { display: grid; grid-template-columns: 24px minmax(0, 1fr); align-items: start; gap: 10px; border: 1px solid #a7dfca; border-radius: 7px; padding: 12px 14px; background: #f1fbf7; color: #15966a; }
+.retirement-verdict.is-blocked { border-color: #efc2be; background: #fff7f6; color: #d24d46; }
+.retirement-verdict > span { display: grid; gap: 4px; }
+.retirement-verdict strong { color: #33465e; font-size: 13px; }
+.retirement-verdict small { color: #708096; font-size: 12px; line-height: 1.5; }
+.retirement-dependencies { overflow: hidden; border: 1px solid #dce5f1; border-radius: 7px; }
+.retirement-dependencies > header { display: flex; align-items: center; justify-content: space-between; padding: 9px 12px; border-bottom: 1px solid #e5ebf2; background: #f8fbff; color: #40536b; font-size: 12px; }
+.retirement-dependencies > header span { color: #7d8a9c; }
+.retirement-dependencies > div { max-height: 190px; overflow-y: auto; }
+.retirement-dependencies article { display: grid; grid-template-columns: minmax(0, 1fr) auto 68px; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #edf1f5; }
+.retirement-dependencies article:last-child { border-bottom: 0; }
+.retirement-dependencies article > span { min-width: 0; display: grid; gap: 3px; }
+.retirement-dependencies article strong { overflow: hidden; color: #40536b; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.retirement-dependencies article small { color: #8794a6; font-size: 11px; }
+.retirement-dependencies article em { border-radius: 4px; padding: 3px 6px; background: #eef4fb; color: #526c89; font-size: 11px; font-style: normal; font-weight: 700; }
+.retirement-dependencies article em.is-published { background: #eaf8f1; color: #15966a; }
+.retirement-dependencies article em.is-stale { background: #fff0ef; color: #c94640; }
+.retirement-dependencies article .app-button { height: 26px; gap: 3px; padding: 0; color: #1677ff; font-size: 11px; }
+.retirement-effects { display: grid; gap: 7px; margin: 0; padding: 0; color: #66768a; font-size: 12px; list-style: none; }
+.retirement-effects li { display: grid; grid-template-columns: 17px minmax(0, 1fr); align-items: start; gap: 7px; }
+.retirement-effects svg { color: #15966a; }
+.retirement-dialog > footer { display: flex; justify-content: flex-end; gap: 9px; border-top: 1px solid #e5ebf2; padding-top: 14px; }
 .data-source-table-picker { display: grid; gap: 16px; padding: 22px 24px 24px; }
 .data-source-table-picker > header { display: flex; justify-content: space-between; gap: 24px; }
 .data-source-table-picker > header > div { display: grid; gap: 4px; }
@@ -673,7 +707,7 @@
 .data-source-inspector > header .app-button { width: 32px; min-width: 32px; height: 32px; padding: 0; color: #718096; }
 .data-source-inspector-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
   align-items: center;
   padding: 9px 22px 13px;
@@ -682,6 +716,7 @@
 .data-source-inspector-actions .app-button { height: 40px; gap: 7px; border-radius: 5px; box-shadow: none; font-size: 13px; font-weight: 650; }
 .data-source-inspector-actions .action-edit,
 .data-source-inspector-actions .action-assets { border: 1px solid #cbd7e5; background: #fff; color: #526176; }
+.data-source-inspector-actions .action-retire { border: 1px solid #efc2be; background: #fff; color: #bd403a; }
 .data-source-inspector-scroll {
   min-height: 0;
   display: grid;

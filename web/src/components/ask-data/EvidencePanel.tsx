@@ -1,4 +1,4 @@
-import { CalendarBlank, CaretDown, CheckCircle, Pulse, ShareNetwork, ShieldCheck, Sparkle, WarningCircle } from '@phosphor-icons/react'
+import { ArrowSquareOut, CalendarBlank, CaretDown, CheckCircle, FileText, Pulse, ShareNetwork, ShieldCheck, Sparkle, WarningCircle } from '@phosphor-icons/react'
 import { useState, type ReactNode } from 'react'
 import { AnswerLayerStatus } from '../../askdata/AnswerSummary'
 import { renderTimeSpec } from '../../askdata/format/timespec'
@@ -40,6 +40,7 @@ function Section({ id, title, icon, badge, badgeTone = 'success', children }: Se
 }
 
 export function EvidencePanel({ question, run, option, result, graphDegraded = false, answer }: EvidencePanelProps) {
+  const reportSources = result?.reportSources ?? []
   const resolvedOption = option ?? (result?.evidence ? {
     optionId: `result:${result.summary.metricLabel}`,
     label: result.summary.metricLabel,
@@ -103,6 +104,16 @@ export function EvidencePanel({ question, run, option, result, graphDegraded = f
           <div><dt>Run 版本</dt><dd>v{run.recordVersion}</dd></div>
         </dl>
       </Section>
+      {reportSources.length > 0 && <Section id="report-sources" title="认证报告来源" badge={`${reportSources.length} 项引用`} icon={<FileText size={14} weight="fill" />}>
+        <div className="ask-report-source-list">
+          {reportSources.map(source => <article key={source.componentId}>
+            <span className="ask-report-source-icon"><FileText size={17} weight="duotone" /></span>
+            <div><strong>{source.reportTitle}</strong><small>{source.componentTitle || source.componentType} · 组件 v{source.componentVersion}</small><p>基于当前语义 Release 重新执行；未复用历史查询或报告自由文本。</p></div>
+            <span className="ask-report-source-status"><CheckCircle size={12} weight="fill" />已引用</span>
+            <a href={source.openPath} aria-label={`打开报告 ${source.reportTitle}`}><ArrowSquareOut size={15} />打开原报告</a>
+          </article>)}
+        </div>
+      </Section>}
       <Section id="time" title="时间范围" badge={timeSpec ? '与结果一致' : undefined} icon={<CalendarBlank size={14} weight="fill" />}>
         {timeSpec && result ? <dl className="ask-evidence-grid">
           <div><dt>时间口径</dt><dd>{timeSpec.policyLabel}</dd></div>

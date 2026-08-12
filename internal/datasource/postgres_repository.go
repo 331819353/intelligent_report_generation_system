@@ -390,6 +390,17 @@ func (r *PostgresRepository) UpdateStatus(ctx context.Context, tenantID, id stri
 			return pgx.ErrNoRows
 		}
 		if status == StatusDeleted {
+			revokedReference := revokedSecretPrefix + "data-source/" + id
+			if _, err := tx.Exec(ctx, `UPDATE platform.data_sources
+				SET secret_ref=CASE WHEN source_type IN ('MYSQL','ORACLE') THEN $3 ELSE secret_ref END
+				WHERE tenant_id=$1 AND id=$2`, tenantID, id, revokedReference); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE platform.data_source_versions
+				SET secret_ref=CASE WHEN source_type IN ('MYSQL','ORACLE') THEN $3 ELSE secret_ref END
+				WHERE tenant_id=$1 AND data_source_id=$2`, tenantID, id, revokedReference); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx, `UPDATE platform.metadata_columns AS metadata_column
 				SET asset_status='INACTIVE'
 				WHERE metadata_column.tenant_id=$1
@@ -414,6 +425,74 @@ func (r *PostgresRepository) UpdateStatus(ctx context.Context, tenantID, id stri
 		}
 		return nil
 	})
+}
+
+// RetirementImpact lists every non-deleted dataset that still has an origin
+// or version dependency on a table owned by the selected data source.
+func (r *PostgresRepository) RetirementImpact(ctx context.Context, tenantID, id string) (impact RetirementImpact, err error) {
+	impact.Datasets = []RetirementDatasetImpact{}
+	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
+		var sourceType Type
+		if err := tx.QueryRow(ctx, `SELECT source_type FROM platform.data_sources
+			WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL`, tenantID, id).Scan(&sourceType); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `SELECT dataset.id::text,dataset.name,dataset.status,
+			COALESCE(dataset.layer,''),
+			CASE WHEN EXISTS(
+			  SELECT 1 FROM platform.metadata_tables origin_table
+			  WHERE origin_table.id=dataset.origin_table_id
+			    AND origin_table.tenant_id=dataset.tenant_id
+			    AND origin_table.data_source_id=$2
+			) THEN 'ORIGIN_TABLE' ELSE 'VERSION_DEPENDENCY' END
+			FROM platform.datasets AS dataset
+			WHERE dataset.tenant_id=$1 AND dataset.deleted_at IS NULL
+			  AND (
+			    EXISTS(
+			      SELECT 1 FROM platform.metadata_tables origin_table
+			      WHERE origin_table.id=dataset.origin_table_id
+			        AND origin_table.tenant_id=dataset.tenant_id
+			        AND origin_table.data_source_id=$2
+			    )
+			    OR EXISTS(
+			      SELECT 1
+			      FROM platform.dataset_versions AS version
+			      JOIN platform.dataset_dependencies AS dependency
+			        ON dependency.tenant_id=version.tenant_id
+			       AND dependency.dataset_version_id=version.id
+			       AND dependency.source_type='TABLE'
+			      JOIN platform.metadata_tables AS source_table
+			        ON source_table.tenant_id=dependency.tenant_id
+			       AND source_table.id::text=dependency.source_id
+			      WHERE version.tenant_id=dataset.tenant_id
+			        AND version.dataset_id=dataset.id
+			        AND version.status<>'DEPRECATED'
+			        AND source_table.data_source_id=$2
+			    )
+			  )
+			ORDER BY CASE dataset.status WHEN 'PUBLISHED' THEN 0 WHEN 'STALE' THEN 1 ELSE 2 END,
+			  dataset.updated_at DESC,dataset.id`, tenantID, id)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item RetirementDatasetImpact
+			if err := rows.Scan(&item.ID, &item.Name, &item.Status, &item.Layer, &item.DependencyKind); err != nil {
+				return err
+			}
+			impact.Datasets = append(impact.Datasets, item)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		impact.BlockingDatasetCount = len(impact.Datasets)
+		impact.CanRetire = impact.BlockingDatasetCount == 0
+		impact.CredentialWillBeRevoked = sourceType == TypeMySQL || sourceType == TypeOracle
+		impact.SourceFileWillBeRetained = sourceType == TypeExcel
+		return nil
+	})
+	return impact, err
 }
 
 // BeginDelete 在同一事务内锁定数据源、检查活动数据集依赖并切换到删除中，

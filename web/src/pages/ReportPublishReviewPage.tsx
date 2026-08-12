@@ -116,6 +116,13 @@ export function ReportPublishReviewPage() {
   const [selectedGate, setSelectedGate] = useState('FACT')
   const [choice, setChoice] = useState<PublishChoice>('snapshot')
   const [confirmed, setConfirmed] = useState(false)
+  // 每条告警都要发布人逐条确认。之前客户端把 preflight 返回的告警原样回填，
+  // 服务端「所有告警必须被确认」的门禁就被自动满足了——包括结论已过期这种
+  // 需要人来判断的项。
+  const [acknowledged, setAcknowledged] = useState<Set<string>>(() => new Set())
+  // 桌面与移动端都要真正看过。发布接口收的是发布人的声明，不是一个由客户端
+  // 计算、又只需等于草稿哈希的回显值。
+  const [previewed, setPreviewed] = useState<Set<PreviewMode>>(() => new Set<PreviewMode>(['desktop']))
   const [comment, setComment] = useState('')
   const [publishing, setPublishing] = useState(false)
   const [toast, setToast] = useState('')
@@ -154,17 +161,22 @@ export function ReportPublishReviewPage() {
     return () => controller.abort()
   }, [reportId, snapshot])
 
+  const warnings = review?.preflight.warningCodes ?? []
+  const allAcknowledged = warnings.every(code => acknowledged.has(code))
+  const bothPreviewed = previewed.has('desktop') && previewed.has('mobile')
+  const readyToPublish = Boolean(review) && confirmed && allAcknowledged && bothPreviewed &&
+    choice === 'snapshot' && !publishing && (review?.preflight.blockerCodes.length ?? 0) === 0
+
   const publish = async () => {
-    if (!review || !confirmed || choice !== 'snapshot' || review.preflight.blockerCodes.length > 0) return
+    if (!review || !readyToPublish) return
     setPublishing(true); setError('')
     try {
       if (!snapshot) await reportEditorAPI.publish(reportId, {
         sourceRevisionNo: review.preflight.draft.revisionNo,
-        acknowledgeStaleInsights: review.preflight.warningCodes.includes('REPORT_INSIGHT_STALE'),
-        desktopPreviewHash: review.preflight.draft.definitionHash,
-        mobilePreviewHash: review.preflight.draft.definitionHash,
+        acknowledgeStaleInsights: acknowledged.has('REPORT_INSIGHT_STALE'),
+        previewedDesktop: previewed.has('desktop'), previewedMobile: previewed.has('mobile'),
         reviewRunId: review.reviewRunId, humanComment: comment.trim(),
-        acknowledgedIssueCodes: review.preflight.warningCodes,
+        acknowledgedIssueCodes: [...acknowledged],
       })
       setToast(`v${review.impact.targetVersionNo} 已发布，正在生成不可变制品`)
       window.setTimeout(() => navigate(snapshot ? `/reports/${reportId}?snapshot=runtime` : `/reports/${reportId}`), 800)
@@ -189,12 +201,12 @@ export function ReportPublishReviewPage() {
       <div className="publish-body">
         <aside className="publish-gates"><header><div><h2>AI 发布检查</h2><Info size={14} /></div><span>LLM 自动门禁</span></header><div>{review.preflight.checks.map(gate => <GateCard key={gate.id} gate={gate} selected={selectedGate === gate.id} onSelect={() => setSelectedGate(gate.id)} />)}</div><footer><strong>检查结论（LLM）</strong><p>{review.preflight.checks.filter(gate => gate.status === 'PASSED').length} 项通过，{review.preflight.warningCodes.length} 项需人工确认后方可进入最终发布。</p></footer></aside>
 
-        <section className="publish-preview"><nav>{([['desktop', Desktop, '桌面'], ['mobile', DeviceMobile, '移动'], ['print', Printer, '打印'], ['viewer', Users, '查看者权限']] as const).map(([value, Icon, label]) => <button className={mode === value ? 'is-active' : ''} type="button" key={value} onClick={() => setMode(value)}><Icon size={15} />{label}</button>)}</nav><div className="publish-preview-meta"><span>预览身份：业务用户（脱敏）</span><span>数据截至 {snapshot ? '2026-08-09 23:59' : formatCheckedAt(review.checkedAt)}</span></div><div className="publish-preview-canvas"><PublishPreview draft={draft} manifests={manifests} execution={execution} mode={mode} /></div></section>
+        <section className="publish-preview"><nav>{([['desktop', Desktop, '桌面'], ['mobile', DeviceMobile, '移动'], ['print', Printer, '打印'], ['viewer', Users, '查看者权限']] as const).map(([value, Icon, label]) => <button className={mode === value ? 'is-active' : ''} type="button" key={value} onClick={() => { setMode(value); setPreviewed(current => new Set(current).add(value)) }}><Icon size={15} />{label}</button>)}</nav><div className="publish-preview-meta"><span>预览身份：业务用户（脱敏）</span><span>数据截至 {snapshot ? '2026-08-09 23:59' : formatCheckedAt(review.checkedAt)}</span></div><div className="publish-preview-canvas"><PublishPreview draft={draft} manifests={manifests} execution={execution} mode={mode} /></div></section>
 
         <aside className="publish-review-panel"><header><div><h2>AI 发布评审</h2><span>LLM 认知判断与解释</span></div></header><section className={`publish-ai-verdict ${recommendationClass}`}><strong>AI 结论：{review.review.headline}</strong><p>{review.review.summary}</p></section><section className="publish-pins"><div><CheckCircle size={15} /><span>已固定 Definition</span><strong>{shortRef(review.dependencyRefs.find(ref => ref.startsWith('definition:')) || '', 'v2.1.7')}</strong></div><div><CheckCircle size={15} /><span>已绑定语义资产</span><strong>{shortRef(review.dependencyRefs.find(ref => ref.startsWith('semantic:')) || '', `${draft.definition.dataContexts.length} 项`)}</strong></div><div><CheckCircle size={15} /><span>已锁定 Evidence</span><strong>{shortRef(review.dependencyRefs.find(ref => ref.startsWith('evidence:')) || '', '当前版本')}</strong></div><div><CheckCircle size={15} /><span>依赖版本已固化</span><strong>{shortRef(review.dependencyRefs.find(ref => ref.startsWith('dataset:')) || '', `${review.dependencyRefs.length} 项`)}</strong></div></section><section className="publish-impact"><h3>影响范围</h3><div><span><Users size={17} /><strong>{review.impact.visibleCount}</strong><small>位可见用户</small></span><span><ShieldCheck size={17} /><strong>{review.impact.editableCount}</strong><small>位编辑者</small></span><span><Monitor size={17} /><strong>{review.impact.subscriptionCount}</strong><small>个订阅</small></span><span><FilePdf size={17} /><strong>PDF / XLSX</strong><small>制品产出</small></span></div></section>
           {warningGate && <section className="publish-risk"><h3>AI 风险解释（需人工确认）</h3><p>{review.review.risks[0]?.explanation || warningGate.summary}</p><button type="button" onClick={() => setSelectedGate(warningGate.id)}>查看证据详情</button></section>}
           <section className="publish-choices"><button className={choice === 'snapshot' ? 'is-selected' : ''} type="button" onClick={() => setChoice('snapshot')}><span>{choice === 'snapshot' ? <CheckCircle size={16} weight="fill" /> : <i />}</span><strong>按当前快照发布（推荐）</strong><small>保留当前数据快照，发布 v{review.impact.targetVersionNo}</small></button><button className={choice === 'refresh' ? 'is-selected' : ''} type="button" onClick={() => setChoice('refresh')}><span>{choice === 'refresh' ? <CheckCircle size={16} weight="fill" /> : <i />}</span><strong>返回编辑并刷新数据</strong><small>让 AI 刷新后重新进行发布评审</small></button></section>
-          <section className="publish-human-confirm"><label><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />我已审阅风险与受影响范围</label><span>修改意见（选填）</span><textarea value={comment} maxLength={300} onChange={event => setComment(event.target.value)} placeholder="如需修改，请说明理由或建议，AI 将记录并纳入发布日志。" /><small>{comment.length}/300</small><button className="primary-button" type="button" disabled={!confirmed || choice !== 'snapshot' || publishing || review.preflight.blockerCodes.length > 0} onClick={() => void publish()}>{publishing ? <><SpinnerGap className="is-spinning" size={16} />正在发布…</> : `确认发布 v${review.impact.targetVersionNo}`}</button>{choice === 'refresh' && <button className="quiet-button" type="button" onClick={() => navigate(snapshot ? `/reports/${reportId}?mode=edit&snapshot=runtime-draft` : `/reports/${reportId}?mode=edit`)}>返回编辑器并交给 AI</button>}<p>Human 原则：只审核证据、提出意见、最终确认</p></section>
+          <section className="publish-human-confirm">{warnings.length > 0 && <div className="publish-ack-list"><strong>需逐条确认的告警</strong>{warnings.map(code => <label key={code}><input type="checkbox" checked={acknowledged.has(code)} onChange={event => setAcknowledged(current => { const next = new Set(current); if (event.target.checked) next.add(code); else next.delete(code); return next })} /><span>{code}</span></label>)}</div>}{!bothPreviewed && <p className="publish-preview-required"><Info size={14} />请分别查看桌面与移动端预览后再发布。</p>}<label><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />我已审阅风险与受影响范围</label><span>修改意见（选填）</span><textarea value={comment} maxLength={300} onChange={event => setComment(event.target.value)} placeholder="如需修改，请说明理由或建议，AI 将记录并纳入发布日志。" /><small>{comment.length}/300</small><button className="primary-button" type="button" disabled={!readyToPublish} onClick={() => void publish()}>{publishing ? <><SpinnerGap className="is-spinning" size={16} />正在发布…</> : `确认发布 v${review.impact.targetVersionNo}`}</button>{choice === 'refresh' && <button className="quiet-button" type="button" onClick={() => navigate(snapshot ? `/reports/${reportId}?mode=edit&snapshot=runtime-draft` : `/reports/${reportId}?mode=edit`)}>返回编辑器并交给 AI</button>}<p>Human 原则：只审核证据、提出意见、最终确认</p></section>
         </aside>
       </div>
       <footer className="publish-principles"><strong>产品原则（已落地）</strong><span><CheckCircle size={18} weight="fill" />LLM 自动做门禁<small>全量校验与风险识别</small></span><span><CheckCircle size={18} weight="fill" />LLM 自动候选判断<small>发布建议与风险解释</small></span><span><CheckCircle size={18} weight="fill" />LLM 自动异常分析<small>识别异常并定位证据</small></span><span><CheckCircle size={18} weight="fill" />LLM 自动结果核验<small>事实一致性与口径校验</small></span><span><CheckCircle size={18} weight="fill" />LLM 自动发布建议<small>综合门禁与影响输出建议</small></span><span className="is-human"><Users size={18} />Human 最终确认<small>审核证据与风险后确认发布</small></span></footer>

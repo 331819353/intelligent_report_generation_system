@@ -943,13 +943,13 @@ func (handler *Handler) publish(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	var body struct {
-		SourceRevisionNo         *int64              `json:"sourceRevisionNo,omitempty"`
-		AcknowledgeStaleInsights bool                `json:"acknowledgeStaleInsights"`
-		DesktopPreviewHash       askdata.ContentHash `json:"desktopPreviewHash"`
-		MobilePreviewHash        askdata.ContentHash `json:"mobilePreviewHash"`
-		ReviewRunID              askdata.ID          `json:"reviewRunId"`
-		HumanComment             string              `json:"humanComment"`
-		AcknowledgedIssueCodes   []string            `json:"acknowledgedIssueCodes"`
+		SourceRevisionNo         *int64     `json:"sourceRevisionNo,omitempty"`
+		AcknowledgeStaleInsights bool       `json:"acknowledgeStaleInsights"`
+		PreviewedDesktop         bool       `json:"previewedDesktop"`
+		PreviewedMobile          bool       `json:"previewedMobile"`
+		ReviewRunID              askdata.ID `json:"reviewRunId"`
+		HumanComment             string     `json:"humanComment"`
+		AcknowledgedIssueCodes   []string   `json:"acknowledgedIssueCodes"`
 	}
 	if decodeJSON(request, &body) != nil {
 		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "request body is invalid")
@@ -976,8 +976,11 @@ func (handler *Handler) publish(writer http.ResponseWriter, request *http.Reques
 	}
 	version, err := handler.publisher.Publish(request.Context(), identity, publication.PublishRequest{
 		ReportID: id, SourceRevisionNo: body.SourceRevisionNo,
-		AcknowledgeStaleInsights: body.AcknowledgeStaleInsights || containsString(body.AcknowledgedIssueCodes, "REPORT_INSIGHT_STALE"),
-		DesktopPreviewHash:       body.DesktopPreviewHash, MobilePreviewHash: body.MobilePreviewHash,
+		// A specific governance decision comes from its own field. Inferring it
+		// from a blanket list of acknowledged codes let a client satisfy the
+		// stale-insight gate without ever asking the publisher about it.
+		AcknowledgeStaleInsights: body.AcknowledgeStaleInsights,
+		PreviewedDesktop:         body.PreviewedDesktop, PreviewedMobile: body.PreviewedMobile,
 		IdempotencyKey: request.Header.Get("Idempotency-Key"),
 	})
 	if err != nil {

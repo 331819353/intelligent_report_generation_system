@@ -257,8 +257,8 @@ func newPublicationHarness(t *testing.T) publicationHarness {
 	return publicationHarness{
 		publisher: publisher, repository: repository, artifacts: artifacts,
 		identity: store.Identity{TenantID: "tenant_report", ActorID: "publisher", DomainID: "domain_report"},
-		request: PublishRequest{ReportID: definition.Metadata.ID, DesktopPreviewHash: askdata.ContentHash(hash),
-			MobilePreviewHash: askdata.ContentHash(hash), IdempotencyKey: "publish-key-001"},
+		request: PublishRequest{ReportID: definition.Metadata.ID,
+			PreviewedDesktop: true, PreviewedMobile: true, IdempotencyKey: "publish-key-001"},
 	}
 }
 
@@ -369,7 +369,7 @@ func TestPublisherFailureStepsAreLocatedAndSideEffectsBounded(t *testing.T) {
 				return compiler.ValidationIssues{{Code: "REPORT_BINDING_DATASET_NOT_ACTIVE"}}
 			})
 		}},
-		{7, func(h *publicationHarness) { h.request.MobilePreviewHash = "" }},
+		{7, func(h *publicationHarness) { h.request.PreviewedMobile = false }},
 		{8, func(h *publicationHarness) {
 			componentID := h.repository.draft.Definition.Components[0].ID
 			h.repository.draft.Definition.Interactions = []reportmodel.Interaction{{
@@ -592,8 +592,8 @@ func publishChangedHarnessDraft(t *testing.T, harness *publicationHarness, key, 
 	harness.repository.draft.DefinitionHash = hash
 	harness.repository.draft.RevisionNo++
 	harness.request.SourceRevisionNo = nil
-	harness.request.DesktopPreviewHash = askdata.ContentHash(hash)
-	harness.request.MobilePreviewHash = askdata.ContentHash(hash)
+	harness.request.PreviewedDesktop = true
+	harness.request.PreviewedMobile = true
 	harness.request.IdempotencyKey = key
 	version, err := harness.publisher.Publish(context.Background(), harness.identity, harness.request)
 	if err != nil {

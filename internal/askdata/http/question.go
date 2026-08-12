@@ -10,6 +10,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -713,6 +714,22 @@ type QuestionResultView struct {
 	Views             []ResultPresentationView   `json:"views"`
 	DefaultViewID     askdata.ID                 `json:"defaultViewId"`
 	RecommendedViewID askdata.ID                 `json:"recommendedViewId,omitempty"`
+	ReportSources     []ReportSourceView         `json:"reportSources"`
+}
+
+type ReportSourceView struct {
+	ReportID          askdata.ID          `json:"reportId"`
+	ReportVersionID   askdata.ID          `json:"reportVersionId"`
+	ComponentID       askdata.ID          `json:"componentId"`
+	ReportTitle       string              `json:"reportTitle"`
+	ComponentTitle    string              `json:"componentTitle,omitempty"`
+	ComponentType     string              `json:"componentType"`
+	ComponentVersion  string              `json:"componentVersion"`
+	SemanticReleaseID askdata.ID          `json:"semanticReleaseId"`
+	ComponentHash     askdata.ContentHash `json:"componentHash"`
+	CitationStatus    string              `json:"citationStatus"`
+	AccessStatus      string              `json:"accessStatus"`
+	OpenPath          string              `json:"openPath"`
 }
 
 type ResultSummaryView struct {
@@ -1077,6 +1094,7 @@ func parsePublicResult(payload json.RawMessage) *QuestionResultView {
 		Datasets:      make([]ResultDatasetView, 0, len(value.Datasets)),
 		Views:         make([]ResultPresentationView, 0, len(value.Views)),
 		DefaultViewID: value.DefaultViewID, RecommendedViewID: value.RecommendedViewID,
+		ReportSources: make([]ReportSourceView, 0, len(value.ReportSources)),
 	}
 	result.Summary.MetricLabel = metricLabel
 	result.Summary.FormattedValue = formattedValue
@@ -1123,7 +1141,40 @@ func parsePublicResult(payload json.RawMessage) *QuestionResultView {
 	if !views[result.DefaultViewID] || result.RecommendedViewID != "" && !views[result.RecommendedViewID] {
 		return nil
 	}
+	if len(value.ReportSources) > 3 {
+		return nil
+	}
+	seenSources := map[askdata.ID]bool{}
+	for _, source := range value.ReportSources {
+		source.ReportTitle = boundedPublicText(source.ReportTitle, 512)
+		source.ComponentTitle = boundedPublicOptionalText(source.ComponentTitle, 512)
+		source.ComponentType = boundedPublicText(source.ComponentType, 128)
+		source.ComponentVersion = boundedPublicText(source.ComponentVersion, 64)
+		if source.ReportID.Validate() != nil || source.ReportVersionID.Validate() != nil || source.ComponentID.Validate() != nil ||
+			source.SemanticReleaseID != snapshotReleaseID(value) || source.ComponentHash.Validate() != nil ||
+			source.ReportTitle == "" || source.ComponentType == "" || source.ComponentVersion == "" ||
+			source.CitationStatus != "CITED" || source.AccessStatus != "AUTHORIZED_AT_RUN" || seenSources[source.ComponentID] {
+			return nil
+		}
+		seenSources[source.ComponentID] = true
+		source.OpenPath = "/reports/" + url.PathEscape(string(source.ReportID)) + "?versionId=" + url.QueryEscape(string(source.ReportVersionID))
+		result.ReportSources = append(result.ReportSources, source)
+	}
 	return result
+}
+
+func snapshotReleaseID(value QuestionResultView) askdata.ID {
+	if value.Evidence == nil {
+		return ""
+	}
+	return askdata.ID(value.Evidence.SemanticVersion)
+}
+
+func boundedPublicOptionalText(value string, maxRunes int) string {
+	if value == "" {
+		return ""
+	}
+	return boundedPublicText(value, maxRunes)
 }
 
 func sanitizePublicResultDataset(value ResultDatasetView) (ResultDatasetView, bool) {
@@ -1219,7 +1270,7 @@ func sanitizePublicResultView(
 	value.Label = boundedPublicText(value.Label, 128)
 	dataset, exists := datasets[value.DatasetID]
 	if value.ID.Validate() != nil || value.Label == "" || !exists ||
-		len(value.DimensionKeys) > 4 || len(value.MeasureKeys) > 4 {
+		len(value.DimensionKeys) > 4 || len(value.MeasureKeys) > 8 {
 		return ResultPresentationView{}, false
 	}
 	columns := make(map[askdata.ID]ResultColumnView, len(dataset.Columns))
@@ -1256,6 +1307,9 @@ func sanitizePublicResultView(
 		return value, true
 	case "KPI":
 		return value, len(dataset.Rows) == 1 && len(value.DimensionKeys) == 0 && len(value.MeasureKeys) == 1
+	case "KPI_BUNDLE":
+		return value, len(dataset.Rows) == 1 && len(value.DimensionKeys) == 0 &&
+			len(value.MeasureKeys) >= 2 && len(value.MeasureKeys) <= 8
 	default:
 		return ResultPresentationView{}, false
 	}
@@ -1500,10 +1554,17 @@ func (service *PostgresService) CreateQuestion(
 	} else {
 		scope, err = service.resolveActiveScope(ctx, identity)
 		if err == nil {
-			var drift *ReleaseDriftView
-			_, drift, err = service.resolveConversationRelease(ctx, identity, input.ConversationID, scope.Release)
-			if drift != nil {
-				return OperationResult{}, &ReleaseDriftRequiredError{Drift: *drift}
+			var rolloutPinned bool
+			var pinnedScope askdata.PolicyScope
+			pinnedScope, rolloutPinned, err = service.resolveOpenRolloutConversationScope(ctx, identity, input.ConversationID)
+			if err == nil && rolloutPinned {
+				scope = pinnedScope
+			} else if err == nil {
+				var drift *ReleaseDriftView
+				_, drift, err = service.resolveConversationRelease(ctx, identity, input.ConversationID, scope.Release)
+				if drift != nil {
+					return OperationResult{}, &ReleaseDriftRequiredError{Drift: *drift}
+				}
 			}
 		}
 	}
@@ -1639,21 +1700,27 @@ func (service *PostgresService) SubmitClarification(
 	if parent.Run.State == orchestrator.StateClarificationExpired {
 		return OperationResult{}, orchestrator.ErrClarificationExpired
 	}
-	activeScope, err := service.resolveActiveScope(ctx, identity)
+	activeScope, rolloutPinned, err := service.resolveOpenRolloutConversationScope(ctx, identity, parent.Run.ConversationID)
 	if err != nil {
 		return OperationResult{}, err
 	}
-	_, drift, err := service.resolveConversationRelease(ctx, identity, parent.Run.ConversationID, activeScope.Release)
-	if err != nil {
-		return OperationResult{}, err
-	}
-	if drift != nil {
-		if _, err := service.confirmReleaseDrift(ctx, identity, ConfirmReleaseDriftInput{
-			ConversationID:    parent.Run.ConversationID,
-			PreviousReleaseID: drift.Previous.ReleaseID,
-			ActiveReleaseID:   drift.Active.ReleaseID,
-		}); err != nil {
+	if !rolloutPinned {
+		activeScope, err = service.resolveActiveScope(ctx, identity)
+		if err != nil {
 			return OperationResult{}, err
+		}
+		_, drift, err := service.resolveConversationRelease(ctx, identity, parent.Run.ConversationID, activeScope.Release)
+		if err != nil {
+			return OperationResult{}, err
+		}
+		if drift != nil {
+			if _, err := service.confirmReleaseDrift(ctx, identity, ConfirmReleaseDriftInput{
+				ConversationID:    parent.Run.ConversationID,
+				PreviousReleaseID: drift.Previous.ReleaseID,
+				ActiveReleaseID:   drift.Active.ReleaseID,
+			}); err != nil {
+				return OperationResult{}, err
+			}
 		}
 	}
 	now := time.Now().UTC()
@@ -1762,6 +1829,63 @@ func (service *PostgresService) resolveActiveScope(
 	return service.resolveScope(ctx, identity, "", true)
 }
 
+// resolveOpenRolloutConversationScope keeps an existing conversation on the
+// release it first observed while a rollout is running, paused or awaiting
+// activation. New conversations still use the stable actor bucket resolved by
+// resolveActiveScope. This prevents a stage increase or an operational pause
+// from changing semantics half-way through a conversation.
+func (service *PostgresService) resolveOpenRolloutConversationScope(
+	ctx context.Context,
+	identity RequestIdentity,
+	conversationID askdata.ID,
+) (askdata.PolicyScope, bool, error) {
+	if service == nil || service.pool == nil || identity.validate() != nil || !canonicalUUID(conversationID) {
+		return askdata.PolicyScope{}, false, ErrInvalidRequest
+	}
+	var release askdata.ReleaseRef
+	found := false
+	err := service.scopeRunner(ctx, string(identity.TenantID), func(tx pgx.Tx) error {
+		var releaseID, contentHash string
+		err := tx.QueryRow(ctx, `SELECT release.id::text,release.content_hash
+			FROM askdata.conversations AS conversation
+			JOIN askdata.releases AS release
+			  ON release.tenant_id=conversation.tenant_id AND release.domain_id=conversation.domain_id
+			 AND release.id=conversation.pinned_release_id
+			JOIN askdata.release_rollouts AS rollout
+			  ON rollout.tenant_id=conversation.tenant_id AND rollout.domain_id=conversation.domain_id
+			 AND release.id IN (rollout.candidate_release_id,rollout.control_release_id)
+			JOIN askdata.release_state AS state
+			  ON state.tenant_id=rollout.tenant_id AND state.domain_id=rollout.domain_id
+			 AND state.active_release_id=rollout.control_release_id
+			WHERE conversation.tenant_id=$1 AND conversation.domain_id=$2
+			  AND conversation.actor_id=$3 AND conversation.id=$4
+			  AND conversation.pin_source='ASKDATA'
+			  AND rollout.state IN ('RUNNING','PAUSED','ACCEPTED')
+			ORDER BY rollout.updated_at DESC,rollout.id DESC LIMIT 1`, identity.TenantID,
+			identity.DomainID, identity.ActorID, conversationID).Scan(&releaseID, &contentHash)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		found = true
+		release = askdata.ReleaseRef{ReleaseID: askdata.ID(releaseID), ContentHash: askdata.ContentHash(contentHash)}
+		return nil
+	})
+	if err != nil {
+		return askdata.PolicyScope{}, false, fmt.Errorf("%w: resolve rollout conversation scope", ErrQuestionServiceFailure)
+	}
+	if !found {
+		return askdata.PolicyScope{}, false, nil
+	}
+	scope, err := service.resolveExplicitReleaseScope(ctx, identity, release)
+	if err != nil {
+		return askdata.PolicyScope{}, false, err
+	}
+	return scope, true, nil
+}
+
 func (service *PostgresService) resolveRunScope(
 	ctx context.Context,
 	identity RequestIdentity,
@@ -1791,10 +1915,9 @@ func (service *PostgresService) resolveScope(
 		var releaseID, releaseHash string
 		var err error
 		if active {
-			err = tx.QueryRow(ctx, `SELECT id::text,content_hash
-				FROM askdata.releases
-				WHERE tenant_id=$1 AND domain_id=$2 AND status='ACTIVE'`,
-				identity.TenantID, identity.DomainID,
+			err = tx.QueryRow(ctx, `SELECT release_id::text,content_hash
+				FROM askdata.resolve_question_release($1,$2,$3)`,
+				identity.TenantID, identity.DomainID, identity.ActorID,
 			).Scan(&releaseID, &releaseHash)
 		} else {
 			err = tx.QueryRow(ctx, `SELECT release_id::text,release_content_hash

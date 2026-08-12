@@ -211,6 +211,33 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 			writeError(w, 400, "DIFF_QUERY_FAILED", "failed to query metadata diffs")
 			return
 		}
+		for index := range items {
+			if !items[index].Breaking {
+				continue
+			}
+			var tableID string
+			if before, ok := items[index].Before.(map[string]any); ok {
+				tableID, _ = before["table_id"].(string)
+				if tableID == "" {
+					tableID, _ = before["id"].(string)
+				}
+			}
+			if tableID == "" {
+				if after, ok := items[index].After.(map[string]any); ok {
+					tableID, _ = after["table_id"].(string)
+					if tableID == "" {
+						tableID, _ = after["id"].(string)
+					}
+				}
+			}
+			if tableID != "" {
+				impact, impactErr := repo.Impact(r.Context(), c.TenantID, tableID)
+				if impactErr == nil {
+					items[index].Impact = impact
+					items[index].ImpactCount = len(impact)
+				}
+			}
+		}
 		writeJSON(w, 200, map[string]any{"items": items})
 	})))
 	return mux

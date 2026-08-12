@@ -75,6 +75,11 @@ type RejectPublicationInput struct {
 	Reason          string `json:"reason"`
 }
 
+type WithdrawPublicationInput struct {
+	ExpectedVersion int64  `json:"expectedVersion"`
+	Reason          string `json:"reason"`
+}
+
 type PublicationApprovalResult struct {
 	Request          PublicationRequest `json:"request"`
 	PublishedVersion VersionRecord      `json:"publishedVersion"`
@@ -95,6 +100,7 @@ type PublicationApprovalStore interface {
 	GetPublicationRequest(context.Context, string, string, string) (PublicationRequest, error)
 	ApproveAndPublish(context.Context, string, string, string, string, int64, string, PublishPlan) (PublicationRequest, VersionRecord, error)
 	RejectPublicationRequest(context.Context, string, string, string, string, RejectPublicationInput) (PublicationRequest, error)
+	WithdrawPublicationRequest(context.Context, string, string, string, string, WithdrawPublicationInput) (PublicationRequest, error)
 }
 
 // PublicationApprovalService separates drafting from approval while reusing the authoritative
@@ -236,6 +242,22 @@ func (s *PublicationApprovalService) Reject(
 		return PublicationRequest{}, ErrInvalidDocument
 	}
 	return s.store.RejectPublicationRequest(ctx, tenantID, actorID, datasetID, requestID, input)
+}
+
+func (s *PublicationApprovalService) Withdraw(
+	ctx context.Context,
+	tenantID, actorID, datasetID, requestID string,
+	input WithdrawPublicationInput,
+) (PublicationRequest, error) {
+	input.Reason = strings.TrimSpace(input.Reason)
+	if input.Reason == "" {
+		input.Reason = "申请人撤回"
+	}
+	if s == nil || s.store == nil || tenantID == "" || actorID == "" || !canonicalUUID(datasetID) ||
+		!canonicalUUID(requestID) || input.ExpectedVersion < 1 || !validApprovalText(input.Reason, true) {
+		return PublicationRequest{}, ErrInvalidDocument
+	}
+	return s.store.WithdrawPublicationRequest(ctx, tenantID, actorID, datasetID, requestID, input)
 }
 
 func validApprovalText(value string, required bool) bool {

@@ -117,6 +117,12 @@ export type VersionTransitionInput = {
   expectedStatus: PublishedVersionRecord['status']
   targetStatus: 'STALE' | 'DEPRECATED'
 }
+export type DatasetLifecycleImpact = {
+  datasetId: string; status: string
+  downstreamDraftReferences: number; downstreamPublishedReferences: number
+  activeQueryRuns: number; activeBuildRuns: number; materializations: number
+  canDisable: boolean; canRestore: boolean; canDelete: boolean; blockers: string[]
+}
 export type DatasetPermissionAction = 'READ' | 'MANAGE' | 'PUBLISH'
 export type PublishDatasetInput = {
   draftVersionId: string
@@ -156,6 +162,8 @@ export type DatasetDAGRun = {
   mode: 'FULL' | 'INCREMENTAL' | 'BACKFILL'; status: DatasetDAGRunStatus
   attempt: number; maxAttempts: number; createdAt: string; updatedAt: string
   startedAt?: string; completedAt?: string; errorCode?: string; errorMessage?: string
+	readonly slaDueAt?: string; readonly slaStatus?: 'ON_TRACK' | 'AT_RISK' | 'BREACHED' | 'MET'
+	readonly slaBreached?: boolean; readonly durationSeconds?: number
 }
 export type DatasetMaterializationReceipt = {
   id: string
@@ -170,6 +178,9 @@ export type DatasetMaterializationReceipt = {
 }
 export type DatasetDAGRunDetail = DatasetDAGRun & {
   materialization?: DatasetMaterializationReceipt
+	inputs: Array<{ ordinal: number; type: string; layer: string; sourceVersion: string; schemaHash: string; snapshotHash: string; rowCount?: number }>
+	nodes: Array<{ id: string; kind: string; engine: string; status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'SKIPPED'; attempt: number; inputRowCount?: number; outputRowCount?: number; outputSizeBytes?: number; errorCode?: string; errorMessage?: string; startedAt?: string; completedAt?: string }>
+	succeededNodes: number; failedNodes: number; pendingNodes: number; partialSuccess: boolean
 }
 export type DatasetDAGRunPage = {
   items: DatasetDAGRun[]; total: number; limit: number; offset: number
@@ -1015,6 +1026,7 @@ export const datasetAPI = {
   }),
   disable: (id: string, expectedVersion: number) => apiRequest<DatasetRecord>(`${datasetPath(id)}/disable`, { method: 'POST', body: JSON.stringify({ expectedVersion }) }),
   restore: (id: string, expectedVersion: number) => apiRequest<DatasetRecord>(`${datasetPath(id)}/restore`, { method: 'POST', body: JSON.stringify({ expectedVersion }) }),
+  getLifecycleImpact: (id: string) => apiRequest<DatasetLifecycleImpact>(`${datasetPath(id)}/lifecycle-impact`, { cache: 'no-store' }),
   delete: (id: string, expectedVersion: number) => apiRequest<void>(datasetPath(id), { method: 'DELETE', body: JSON.stringify({ expectedVersion }) }),
   requestPublication: (id: string, input: PublishDatasetInput, note = '') => apiRequest<DatasetPublicationRequest>(`${datasetPath(id)}/publish-requests`, {
     method: 'POST', body: JSON.stringify({ ...input, note }),
@@ -1027,6 +1039,9 @@ export const datasetAPI = {
     method: 'POST', body: JSON.stringify({ expectedVersion, note }),
   }),
   rejectPublication: (id: string, requestId: string, expectedVersion: number, reason: string) => apiRequest<DatasetPublicationRequest>(`${datasetPath(id)}/publish-requests/${encodeURIComponent(requestId)}/reject`, {
+    method: 'POST', body: JSON.stringify({ expectedVersion, reason }),
+  }),
+  withdrawPublication: (id: string, requestId: string, expectedVersion: number, reason = '申请人撤回') => apiRequest<DatasetPublicationRequest>(`${datasetPath(id)}/publish-requests/${encodeURIComponent(requestId)}/withdraw`, {
     method: 'POST', body: JSON.stringify({ expectedVersion, reason }),
   }),
   listVersions: (id: string, limit = 50, offset = 0) => {

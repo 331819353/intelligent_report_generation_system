@@ -9,6 +9,10 @@ import (
 const (
 	DefaultBuildPageLimit = 50
 	MaxBuildPageLimit     = 100
+	// DefaultBuildSLA is the platform fallback used until a domain-specific
+	// refresh policy is configured. The due time is derived from the immutable
+	// run creation time, so clients never need to guess their own deadline.
+	DefaultBuildSLA = 30 * time.Minute
 )
 
 // CreateBuildInput is the complete public write contract for registering a
@@ -100,6 +104,10 @@ type Build struct {
 	CompletedAt       *time.Time `json:"completedAt,omitempty"`
 	ErrorCode         string     `json:"errorCode,omitempty"`
 	ErrorMessage      string     `json:"errorMessage,omitempty"`
+	SLADueAt          time.Time  `json:"slaDueAt"`
+	SLAStatus         string     `json:"slaStatus"`
+	SLABreached       bool       `json:"slaBreached"`
+	DurationSeconds   int64      `json:"durationSeconds"`
 }
 
 type BuildDetail struct {
@@ -107,6 +115,10 @@ type BuildDetail struct {
 	Inputs          []BuildInput          `json:"inputs"`
 	Nodes           []BuildNode           `json:"nodes"`
 	Materialization *BuildMaterialization `json:"materialization,omitempty"`
+	SucceededNodes  int                   `json:"succeededNodes"`
+	FailedNodes     int                   `json:"failedNodes"`
+	PendingNodes    int                   `json:"pendingNodes"`
+	PartialSuccess  bool                  `json:"partialSuccess"`
 }
 
 type BuildPage struct {
@@ -134,6 +146,30 @@ func buildFromRun(run Run) Build {
 	if strings.HasPrefix(partitionKey, "run:") {
 		partitionKey = ""
 	}
+	dueAt := run.CreatedAt.Add(DefaultBuildSLA)
+	finishedAt := time.Now().UTC()
+	if run.CompletedAt != nil {
+		finishedAt = *run.CompletedAt
+	}
+	startedAt := run.CreatedAt
+	if run.StartedAt != nil {
+		startedAt = *run.StartedAt
+	}
+	duration := finishedAt.Sub(startedAt)
+	if duration < 0 {
+		duration = 0
+	}
+	breached := finishedAt.After(dueAt)
+	slaStatus := "ON_TRACK"
+	if run.Status == RunSucceeded && !breached {
+		slaStatus = "MET"
+	} else if breached {
+		slaStatus = "BREACHED"
+	} else if run.Status == RunQueued || run.Status == RunRunning {
+		if time.Until(dueAt) <= 5*time.Minute {
+			slaStatus = "AT_RISK"
+		}
+	}
 	return Build{
 		ID: run.ID, DatasetID: run.DatasetID,
 		DatasetVersionID: run.DatasetVersionID,
@@ -144,5 +180,22 @@ func buildFromRun(run Run) Build {
 		CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt,
 		StartedAt: run.StartedAt, CompletedAt: run.CompletedAt,
 		ErrorCode: run.ErrorCode, ErrorMessage: run.ErrorMessage,
+		SLADueAt: dueAt, SLAStatus: slaStatus, SLABreached: breached,
+		DurationSeconds: int64(duration.Seconds()),
 	}
+}
+
+func summarizeBuildDetail(detail BuildDetail) BuildDetail {
+	for _, node := range detail.Nodes {
+		switch node.Status {
+		case NodeSucceeded:
+			detail.SucceededNodes++
+		case NodeFailed:
+			detail.FailedNodes++
+		default:
+			detail.PendingNodes++
+		}
+	}
+	detail.PartialSuccess = detail.SucceededNodes > 0 && detail.FailedNodes > 0
+	return detail
 }

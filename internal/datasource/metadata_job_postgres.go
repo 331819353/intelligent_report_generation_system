@@ -132,6 +132,86 @@ func scanMetadataJobFailure(row rowScanner) (failure MetadataJobFailure, err err
 	return failure, err
 }
 
+func (r *PostgresMetadataJobRepository) LatestMetadataJob(ctx context.Context, tenantID, sourceID string) (job *MetadataJob, err error) {
+	var item MetadataJob
+	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
+		if err := scanMetadataJob(tx.QueryRow(ctx, `SELECT `+metadataJobSelect+` FROM platform.data_source_metadata_jobs j
+			WHERE j.data_source_id=$1 ORDER BY j.created_at DESC LIMIT 1`, sourceID), &item); err != nil {
+			return err
+		}
+		if item.Failed > 0 {
+			rows, queryErr := tx.Query(ctx, `SELECT catalog_name,schema_name,table_name,error_code,error_message
+				FROM platform.data_source_metadata_job_items WHERE job_id=$1 AND status='FAILED'
+				ORDER BY created_at,id`, item.ID)
+			if queryErr != nil {
+				return queryErr
+			}
+			for rows.Next() {
+				failure, scanErr := scanMetadataJobFailure(rows)
+				if scanErr != nil {
+					return scanErr
+				}
+				item.Failures = append(item.Failures, failure)
+			}
+			if rows.Err() != nil {
+				rows.Close()
+				return rows.Err()
+			}
+			rows.Close()
+		}
+		logs, logErr := loadMetadataJobLogs(ctx, tx, item)
+		if logErr != nil {
+			return logErr
+		}
+		item.Logs = logs
+		return nil
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *PostgresMetadataJobRepository) FailedMetadataJobSelections(
+	ctx context.Context,
+	tenantID, sourceID, jobID string,
+) (job MetadataJob, selections []TableSelection, err error) {
+	selections = []TableSelection{}
+	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
+		if err := scanMetadataJob(tx.QueryRow(ctx, `SELECT `+metadataJobSelect+` FROM platform.data_source_metadata_jobs j
+			WHERE j.id=$1 AND j.data_source_id=$2`, jobID, sourceID), &job); err != nil {
+			return err
+		}
+		if (job.Status != "FAILED" && job.Status != "PARTIAL") || job.Failed < 1 {
+			return ErrMetadataJobNotRetryable
+		}
+		rows, queryErr := tx.Query(ctx, `SELECT catalog_name,schema_name,table_name,COALESCE(table_id::text,''),
+			previous_structure_hash,previous_enrichment_status
+			FROM platform.data_source_metadata_job_items
+			WHERE job_id=$1 AND status='FAILED' ORDER BY created_at,id`, jobID)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var selection TableSelection
+			if scanErr := rows.Scan(&selection.CatalogName, &selection.SchemaName, &selection.TableName,
+				&selection.TableID, &selection.StructureHash, &selection.LatestEnrichmentStatus); scanErr != nil {
+				return scanErr
+			}
+			selections = append(selections, selection)
+		}
+		return rows.Err()
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return MetadataJob{}, nil, ErrMetadataJobNotFound
+	}
+	return job, selections, err
+}
+
 func (r *PostgresMetadataJobRepository) LatestActiveMetadataJob(ctx context.Context, tenantID, sourceID string) (job *MetadataJob, err error) {
 	var item MetadataJob
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {

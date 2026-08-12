@@ -21,6 +21,8 @@ type fakeReleaseLifecycleBackend struct {
 	activation  registry.ReleaseActivationResult
 	gate        registry.ReleaseGateResult
 	reviewInput registry.ReleaseReviewReportInput
+	operations  registry.ReleaseOperationalImpact
+	rollout     registry.ReleaseRolloutSnapshot
 	err         error
 }
 
@@ -46,8 +48,41 @@ func (backend *fakeReleaseLifecycleBackend) RecordReleaseReviewReport(_ context.
 func (backend *fakeReleaseLifecycleBackend) SubmitReleaseApproval(context.Context, registry.AdminScope, string, registry.ReleaseApprovalInput) (registry.ReleaseApprovalResult, error) {
 	return registry.ReleaseApprovalResult{}, backend.err
 }
+func (backend *fakeReleaseLifecycleBackend) WithdrawReleaseApproval(context.Context, registry.AdminScope, string, registry.ReleaseApprovalRecoveryInput) (registry.ReleaseApprovalRecoveryResult, error) {
+	return registry.ReleaseApprovalRecoveryResult{}, backend.err
+}
+func (backend *fakeReleaseLifecycleBackend) ResetRejectedReleaseApprovals(context.Context, registry.AdminScope, string, registry.ReleaseApprovalRecoveryInput) (registry.ReleaseApprovalRecoveryResult, error) {
+	return registry.ReleaseApprovalRecoveryResult{}, backend.err
+}
+func (backend *fakeReleaseLifecycleBackend) EscalateReleaseApproval(context.Context, registry.AdminScope, string, registry.ReleaseApprovalRecoveryInput) (registry.ReleaseApprovalRecoveryResult, error) {
+	return registry.ReleaseApprovalRecoveryResult{}, backend.err
+}
 func (backend *fakeReleaseLifecycleBackend) ActivateRelease(context.Context, registry.AdminScope, string, registry.ReleaseActivationInput) (registry.ReleaseActivationResult, error) {
 	return backend.activation, backend.err
+}
+func (backend *fakeReleaseLifecycleBackend) GetReleaseOperationalImpact(context.Context, registry.AdminScope, string) (registry.ReleaseOperationalImpact, error) {
+	return backend.operations, backend.err
+}
+func (backend *fakeReleaseLifecycleBackend) StartReleaseRollout(context.Context, registry.AdminScope, string, registry.ReleaseRolloutMutationInput) (registry.ReleaseRolloutSnapshot, error) {
+	return backend.rollout, backend.err
+}
+func (backend *fakeReleaseLifecycleBackend) AdvanceReleaseRollout(context.Context, registry.AdminScope, string, registry.ReleaseRolloutMutationInput) (registry.ReleaseRolloutSnapshot, error) {
+	return registry.ReleaseRolloutSnapshot{}, backend.err
+}
+func (backend *fakeReleaseLifecycleBackend) PauseReleaseRollout(context.Context, registry.AdminScope, string, registry.ReleaseRolloutMutationInput) (registry.ReleaseRolloutSnapshot, error) {
+	return registry.ReleaseRolloutSnapshot{}, backend.err
+}
+func (backend *fakeReleaseLifecycleBackend) ResumeReleaseRollout(context.Context, registry.AdminScope, string, registry.ReleaseRolloutMutationInput) (registry.ReleaseRolloutSnapshot, error) {
+	return registry.ReleaseRolloutSnapshot{}, backend.err
+}
+func (backend *fakeReleaseLifecycleBackend) StopReleaseRollout(context.Context, registry.AdminScope, string, registry.ReleaseRolloutMutationInput) (registry.ReleaseRolloutSnapshot, error) {
+	return registry.ReleaseRolloutSnapshot{}, backend.err
+}
+func (backend *fakeReleaseLifecycleBackend) RollbackRelease(context.Context, registry.AdminScope, string, registry.ReleaseRollbackInput) (registry.ReleaseRollbackResult, error) {
+	return registry.ReleaseRollbackResult{}, backend.err
+}
+func (backend *fakeReleaseLifecycleBackend) RetireRelease(context.Context, registry.AdminScope, string) error {
+	return backend.err
 }
 func (backend *fakeReleaseLifecycleBackend) GetReleaseLifecycle(context.Context, registry.AdminScope, string) (registry.ReleaseLifecycleSnapshot, error) {
 	return registry.ReleaseLifecycleSnapshot{}, backend.err
@@ -104,6 +139,54 @@ func TestReleaseLifecycleGateFailureUsesStableHTTPCode(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), `"code":"RELEASE_GATE_FAILED"`) {
 		t.Fatalf("gate response = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestReleaseOperationsAndRolloutRoutes(t *testing.T) {
+	scope := testAdminScope()
+	releaseID := uuid.NewString()
+	backend := &fakeReleaseLifecycleBackend{
+		fakeAdminBackend: &fakeAdminBackend{},
+		operations: registry.ReleaseOperationalImpact{
+			ReleaseID: releaseID, Status: "READY", CanRetire: false,
+			References: []registry.ReleaseReference{},
+		},
+		rollout: registry.ReleaseRolloutSnapshot{
+			ID: uuid.NewString(), CandidateReleaseID: releaseID, ControlReleaseID: uuid.NewString(),
+			Stage: "SHADOW", State: "RUNNING", Version: 1,
+		},
+	}
+	handler := newProtectedAdminHandler(backend, func(context.Context) (registry.AdminScope, error) {
+		return scope, nil
+	})
+
+	request := httptest.NewRequest(http.MethodGet,
+		"/api/v1/askdata/semantic/releases/"+releaseID+"/operations", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"READY"`) {
+		t.Fatalf("operations response = %d %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodPost,
+		"/api/v1/askdata/semantic/releases/"+releaseID+"/rollouts",
+		strings.NewReader(`{"reasonHash":"`+strings.Repeat("a", 64)+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "release-rollout-start-1")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"stage":"SHADOW"`) {
+		t.Fatalf("rollout response = %d %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodPost,
+		"/api/v1/askdata/semantic/releases/"+releaseID+"/rollouts",
+		strings.NewReader(`{"reasonHash":"`+strings.Repeat("a", 64)+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("rollout missing idempotency response = %d %s", response.Code, response.Body.String())
 	}
 }
 

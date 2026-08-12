@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"intelligent-report-generation-system/internal/access"
 	"intelligent-report-generation-system/internal/auth"
 )
@@ -109,7 +110,15 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 				return
 			}
 			if errors.Is(err, ErrVersionConflict) {
-				writeDSError(w, http.StatusConflict, "DATA_SOURCE_VERSION_CONFLICT", "data source changed; reload the latest version before saving")
+				current, currentErr := service.Get(r.Context(), c.TenantID, r.PathValue("id"))
+				if currentErr != nil {
+					writeDSError(w, http.StatusConflict, "DATA_SOURCE_VERSION_CONFLICT", "数据源已被其他人更新，请重新加载最新配置后再保存")
+					return
+				}
+				writeDSJSON(w, http.StatusConflict, map[string]any{
+					"code": "DATA_SOURCE_VERSION_CONFLICT", "message": "数据源已被其他人更新，请重新加载最新配置后再保存",
+					"currentVersion": current.Version,
+				})
 				return
 			}
 			if errors.Is(err, ErrReviewPending) {
@@ -134,6 +143,19 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 			return
 		}
 		writeDSJSON(w, 200, publicDataSource(r.Context(), source, credentials))
+	})))
+	mux.Handle("GET /api/v1/data-sources/{id}/retirement-impact", manageObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		impact, err := service.RetirementImpact(r.Context(), c.TenantID, r.PathValue("id"))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeDSError(w, http.StatusNotFound, "DATA_SOURCE_NOT_FOUND", "data source was not found")
+				return
+			}
+			writeDSError(w, http.StatusInternalServerError, "DATA_SOURCE_RETIREMENT_IMPACT_FAILED", "failed to inspect data source retirement impact")
+			return
+		}
+		writeDSJSON(w, http.StatusOK, impact)
 	})))
 	mux.Handle("GET /api/v1/data-sources/{id}/tables/discovery", manageObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
@@ -231,6 +253,38 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 			return
 		}
 		writeDSJSON(w, 200, map[string]any{"job": job})
+	})))
+	mux.Handle("GET /api/v1/data-sources/{id}/metadata-jobs/latest", readObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		job, err := service.LatestMetadataJob(r.Context(), c.TenantID, r.PathValue("id"))
+		if err != nil {
+			writeDSError(w, 500, "DATA_SOURCE_METADATA_JOB_QUERY_FAILED", "读取最近元数据任务失败")
+			return
+		}
+		writeDSJSON(w, 200, map[string]any{"job": job})
+	})))
+	mux.Handle("POST /api/v1/data-sources/{id}/metadata-jobs/{jobId}/retry", manageObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		job, err := service.RetryFailedMetadataJob(r.Context(), c.TenantID, c.Subject, r.PathValue("id"), r.PathValue("jobId"))
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrMetadataJobNotFound):
+				writeDSError(w, http.StatusNotFound, "DATA_SOURCE_METADATA_JOB_NOT_FOUND", "元数据任务不存在")
+			case errors.Is(err, ErrMetadataJobNotRetryable):
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_METADATA_JOB_NOT_RETRYABLE", "任务没有可重试的失败数据表")
+			case errors.Is(err, ErrMetadataJobActive):
+				writeDSError(w, http.StatusConflict, "DATA_SOURCE_METADATA_JOB_ACTIVE", "当前已有元数据任务正在运行")
+			case errors.Is(err, ErrSamplePolicyDenied):
+				writeDSError(w, http.StatusForbidden, "METADATA_SAMPLE_POLICY_DENIED", "当前样本授权策略不允许重试，请调整本次授权后重新发起刷新")
+			default:
+				slog.ErrorContext(r.Context(), "metadata failed-table retry failed", "source_id", r.PathValue("id"), "job_id", r.PathValue("jobId"), "error", err)
+				writeDSError(w, http.StatusBadRequest, "DATA_SOURCE_METADATA_JOB_RETRY_FAILED", "失败数据表重新入队失败")
+			}
+			return
+		}
+		w.Header().Set("Location", "/api/v1/data-sources/"+r.PathValue("id")+"/metadata-jobs/"+job.ID)
+		auditDS(r, service, c.TenantID, c.Subject, "RETRY_FAILED_METADATA_TABLES", r.PathValue("id"), map[string]any{"previousJobId": r.PathValue("jobId"), "jobId": job.ID, "total": job.Total})
+		writeDSJSON(w, http.StatusAccepted, job)
 	})))
 	mux.Handle("GET /api/v1/data-sources/{id}/metadata-jobs/{jobId}", readObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())

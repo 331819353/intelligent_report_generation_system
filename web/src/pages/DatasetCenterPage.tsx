@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
-import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowDownIcon, ArrowUpIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DotsSixVerticalIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MagnifyingGlassIcon, MathOperationsIcon, PlusIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTSlashIcon, TreeStructureIcon, XIcon, type Icon } from '@phosphor-icons/react'
+import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowDownIcon, ArrowUpIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DotsSixVerticalIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MagnifyingGlassIcon, MathOperationsIcon, PlusIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTSlashIcon, TreeStructureIcon, WarningCircleIcon, XIcon, type Icon } from '@phosphor-icons/react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { AssetSharingSelect } from '../components/AssetSharingSelect'
@@ -58,8 +58,10 @@ import {
   type AssetTablePreview,
   type DatasetDraft,
   type DatasetDAGRun,
+  type DatasetDAGRunDetail,
   type DatasetLayer,
   type DatasetLLMTrigger,
+  type DatasetLifecycleImpact,
   type DatasetPreview,
   type DatasetPreviewColumn,
   type DatasetPublicationRequest,
@@ -70,6 +72,7 @@ import {
   type JoinOption,
   type PublishedVersionRecord,
   type PublishedVersionSummary,
+  type VersionUsage,
 } from '../lib/datasets'
 import {
   backgroundTaskAPI,
@@ -95,10 +98,16 @@ type CanvasEdgeTarget =
 type PendingEdgeInsertion = { inserted: RelationInput; source: RelationInput; target: CanvasEdgeTarget }
 type NodePreviewState = { loading: boolean; data?: AssetTablePreview; error?: string; suggestion?: string }
 type VersionPreviewState = { versionID: string; loading: boolean; data?: DatasetPreview; error?: string }
-type DialogState = { mode: 'create' | 'view' | 'metadata' | 'edit-metadata' | 'history' | 'publish' | 'unpublish' | 'delete'; dataset?: DatasetSummary }
+type DatasetVersionDiff = {
+  addedFields: string[]; removedFields: string[]; changedFields: string[]
+  addedNodes: string[]; removedNodes: string[]; changedNodes: string[]
+  metadataChanges: string[]; breakingChanges: number
+}
+type DialogState = { mode: 'create' | 'view' | 'metadata' | 'edit-metadata' | 'history' | 'materialization' | 'publish' | 'lifecycle'; dataset?: DatasetSummary; lifecycleAction?: 'disable' | 'restore' | 'delete' }
 type DatasetBatchAction = 'publish' | 'run' | 'stop' | 'delete'
 type DatasetBatchOutcome = { dataset: DatasetSummary; error?: string }
 type Notice = { tone: 'success' | 'error'; message: string }
+type DraftConflict = { currentVersion?: number; currentHash?: string }
 type ModelingLogEntry = {
   id: string
   timestamp: string
@@ -312,6 +321,17 @@ const modelingSelectionError = (
 }
 const activeBackgroundTaskStatuses = new Set<BackgroundTaskStatus>(['QUEUED', 'RUNNING'])
 const activeDAGRunStatuses = new Set<DatasetDAGRun['status']>(['QUEUED', 'RUNNING'])
+const retryableDAGRunStatuses = new Set<DatasetDAGRun['status']>(['FAILED', 'CANCELLED'])
+const isRetryableDAGRun = (run?: DatasetDAGRun) => Boolean(run && retryableDAGRunStatuses.has(run.status))
+
+function dagRunLabel(run?: DatasetDAGRun) {
+  if (!run) return '尚未运行物化'
+  if (run.status === 'QUEUED') return run.slaStatus === 'AT_RISK' ? '排队中 · SLA 临期' : '物化排队中'
+  if (run.status === 'RUNNING') return run.slaBreached ? '执行中 · SLA 已超时' : run.slaStatus === 'AT_RISK' ? '执行中 · SLA 临期' : '物化执行中'
+  if (run.status === 'SUCCEEDED') return run.slaBreached ? '物化成功 · SLA 超时' : '物化已完成'
+  if (run.status === 'FAILED') return '物化失败 · 可重试'
+  return '物化已取消 · 可重试'
+}
 const backgroundTaskStatusLabels: Record<BackgroundTaskStatus, string> = {
   QUEUED: '排队中',
   RUNNING: '执行中',
@@ -1307,6 +1327,33 @@ function datasetDetailFields(record: DatasetRecord): DatasetDetailField[] {
   })
 }
 
+function publishedVersionDiff(from: PublishedVersionRecord, current: DatasetRecord): DatasetVersionDiff {
+  const keyOf = (value: Record<string, unknown>, index: number) => String(value.id || value.code || `item-${index + 1}`)
+  const labelOf = (value: Record<string, unknown>, fallback: string) => String(value.name || value.code || fallback)
+  const compareCollection = (before: Array<Record<string, unknown>> = [], after: Array<Record<string, unknown>> = []) => {
+    const left = new Map(before.map((value, index) => [keyOf(value, index), value]))
+    const right = new Map(after.map((value, index) => [keyOf(value, index), value]))
+    return {
+      added: [...right].filter(([key]) => !left.has(key)).map(([key, value]) => labelOf(value, key)),
+      removed: [...left].filter(([key]) => !right.has(key)).map(([key, value]) => labelOf(value, key)),
+      changed: [...left].filter(([key, value]) => right.has(key) && JSON.stringify(value) !== JSON.stringify(right.get(key))).map(([key, value]) => labelOf(value, key)),
+    }
+  }
+  const fields = compareCollection(from.dsl.fields, current.dsl.fields)
+  const nodes = compareCollection(from.dsl.nodes, current.dsl.nodes)
+  const metadataChanges: string[] = []
+  if (from.dsl.dataset.name !== current.name) metadataChanges.push('名称')
+  if ((from.dsl.dataset.description || '') !== current.description) metadataChanges.push('说明')
+  if (from.dsl.dataset.type !== current.type) metadataChanges.push('类型')
+  if ((from.dsl.dataset.layer || '') !== current.layer) metadataChanges.push('数仓分层')
+  return {
+    addedFields: fields.added, removedFields: fields.removed, changedFields: fields.changed,
+    addedNodes: nodes.added, removedNodes: nodes.removed, changedNodes: nodes.changed,
+    metadataChanges,
+    breakingChanges: fields.removed.length + fields.changed.length + nodes.removed.length,
+  }
+}
+
 /** 提供数据集资产目录、筛选、新建配置和完整生命周期操作。 */
 export function DatasetCenterPage() {
   const { datasetId } = useParams()
@@ -1328,6 +1375,12 @@ export function DatasetCenterPage() {
   const [selectedDatasetIDs, setSelectedDatasetIDs] = useState<Set<string>>(new Set())
   const [batchAction, setBatchAction] = useState<DatasetBatchAction | null>(null)
   const [dagRuns, setDAGRuns] = useState<Record<string, DatasetDAGRun>>(designSnapshot ? {
+    'snapshot-customer-dim': {
+      id: 'snapshot-run-customer', datasetId: 'snapshot-customer-dim', datasetVersionId: 'snapshot-customer-v6', layer: 'DIM',
+      mode: 'FULL', status: 'FAILED', attempt: 3, maxAttempts: 3, errorCode: 'WAREHOUSE_TIMEOUT', errorMessage: '目标仓库写入超时，已保留成功节点产物并回滚可用快照。',
+      createdAt: '2026-08-11T07:00:00+08:00', updatedAt: '2026-08-11T07:34:00+08:00',
+      startedAt: '2026-08-11T07:00:08+08:00', completedAt: '2026-08-11T07:34:00+08:00', slaDueAt: '2026-08-11T07:30:00+08:00', slaStatus: 'BREACHED', slaBreached: true, durationSeconds: 2032,
+    },
     'snapshot-channel-summary': {
       id: 'snapshot-run-channel', datasetId: 'snapshot-channel-summary', datasetVersionId: 'snapshot-channel-v12', layer: 'DWS',
       mode: 'FULL', status: 'SUCCEEDED', attempt: 1, maxAttempts: 3,
@@ -1335,6 +1388,8 @@ export function DatasetCenterPage() {
       startedAt: '2026-08-11T06:00:08+08:00', completedAt: '2026-08-11T06:04:00+08:00',
     },
   } : {})
+  const [materializationDetail, setMaterializationDetail] = useState<DatasetDAGRunDetail | null>(null)
+  const [lifecycleImpact, setLifecycleImpact] = useState<DatasetLifecycleImpact | null>(null)
   const [datasetManagePermissions, setDatasetManagePermissions] = useState<Record<string, boolean>>(
     designSnapshot ? Object.fromEntries(snapshotDatasets.map(item => [item.id, true])) : {},
   )
@@ -1361,9 +1416,11 @@ export function DatasetCenterPage() {
   const [historyRecord, setHistoryRecord] = useState<DatasetRecord | null>(null)
   const [historyItems, setHistoryItems] = useState<PublishedVersionSummary[]>([])
   const [selectedHistoryVersion, setSelectedHistoryVersion] = useState<PublishedVersionRecord | null>(null)
+  const [historyUsage, setHistoryUsage] = useState<VersionUsage | null>(null)
   const [historyPreview, setHistoryPreview] = useState<VersionPreviewState | null>(null)
   const [historyConfirm, setHistoryConfirm] = useState(false)
   const [editingRecord, setEditingRecord] = useState<DatasetRecord | null>(null)
+  const [draftConflict, setDraftConflict] = useState<DraftConflict | null>(null)
   const [formError, setFormError] = useState('')
   const [busyAction, setBusyAction] = useState('')
   const [modelingMonitors, setModelingMonitors] = useState(() => {
@@ -1836,6 +1893,7 @@ export function DatasetCenterPage() {
   }
 
   const openEdit = useCallback(async (dataset: DatasetSummary | string) => {
+    setDraftConflict(null)
     resetDatasetAI()
     endPreviewRequest.current += 1
     const id = typeof dataset === 'string' ? dataset : dataset.id
@@ -2914,6 +2972,7 @@ export function DatasetCenterPage() {
         saved = await datasetAPI.create(dsl)
       }
       await loadDatasets()
+      setDraftConflict(null)
       setDialog(null)
       setEditingRecord(null)
       if (datasetId) navigate('/datasets', { replace: true })
@@ -2921,7 +2980,12 @@ export function DatasetCenterPage() {
         ? `已保存“${saved.name}”，LLM 已完成表名、字段名和受控标签语义校正`
         : editingRecord ? `已保存“${saved.name}”的最新配置` : `已创建“${saved.name}”，可继续进入修改完善配置` })
     } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : editingRecord ? '保存数据集失败' : '创建数据集失败')
+      if (editingRecord && cause instanceof RequestError && cause.status === 409 && cause.detail.code === 'DATASET_VERSION_CONFLICT') {
+        setDraftConflict({ currentVersion: cause.detail.currentVersion, currentHash: cause.detail.currentHash })
+        setFormError('草稿已被其他协作者更新。你的未保存配置仍保留在当前页面，请加载最新草稿后再合并修改。')
+      } else {
+        setFormError(cause instanceof Error ? cause.message : editingRecord ? '保存数据集失败' : '创建数据集失败')
+      }
     } finally {
       setBusyAction('')
     }
@@ -3102,6 +3166,35 @@ export function DatasetCenterPage() {
     }
   }
 
+  const withdrawPublicationRequest = async () => {
+    if (!publicationRecord || !currentDraftPublicationRequest || currentDraftPublicationRequest.status !== 'PENDING' || !publicationCapabilities.manage || busyAction) return
+    setBusyAction('publication-withdraw')
+    setFormError('')
+    if (designSnapshot) {
+      setPublicationRequests(current => current.map(item => item.id === currentDraftPublicationRequest.id ? {
+        ...item, status: 'CANCELLED', version: item.version + 1, reviewNote: '申请人撤回',
+        reviewedAt: '2026-08-11T10:24:00+08:00', updatedAt: '2026-08-11T10:24:00+08:00',
+      } : item))
+      setBusyAction('')
+      setNotice({ tone: 'success', message: `已撤回“${publicationRecord.name}”的发布申请，可继续修改或重新提交。` })
+      return
+    }
+    try {
+      const withdrawn = await datasetAPI.withdrawPublication(
+        publicationRecord.id, currentDraftPublicationRequest.id, currentDraftPublicationRequest.version,
+      )
+      await refreshPublication(publicationRecord.id)
+      setSelectedPublicationRequestID(withdrawn.id)
+      setNotice({ tone: 'success', message: `已撤回“${publicationRecord.name}”的发布申请，可继续修改或重新提交。` })
+    } catch (cause) {
+      await refreshPublication(publicationRecord.id)
+      const stale = cause instanceof RequestError && ['DATASET_PUBLICATION_REQUEST_CONFLICT', 'DATASET_PUBLICATION_REQUEST_NOT_PENDING'].includes(cause.detail.code)
+      setFormError(stale ? '申请状态已被其他人更新，页面已同步最新结果。' : cause instanceof Error ? cause.message : '撤回发布申请失败')
+    } finally {
+      setBusyAction('')
+    }
+  }
+
   const openView = async (dataset: DatasetSummary) => {
     setDialog({ mode: 'view', dataset })
     setDetail(null)
@@ -3193,10 +3286,36 @@ export function DatasetCenterPage() {
     setHistoryRecord(null)
     setHistoryItems([])
     setSelectedHistoryVersion(null)
+    setHistoryUsage(null)
     setHistoryPreview(null)
     setHistoryConfirm(false)
     setFormError('')
     setBusyAction(`history:${dataset.id}`)
+    if (designSnapshot) {
+      const record = snapshotDatasetRecord(dataset)
+      record.dsl.nodes = [{ id: 'source_current', name: dataset.originTableName || '当前发布输入', type: 'TABLE' }]
+      record.dsl.fields = [
+        { id: 'field_date', code: 'biz_date', name: '业务日期', canonicalType: 'DATE', visible: true },
+        { id: 'field_amount', code: 'sales_amount', name: '销售金额', canonicalType: 'DECIMAL', visible: true },
+        { id: 'field_region', code: 'region_name', name: '所属区域', canonicalType: 'STRING', visible: true },
+      ]
+      const oldVersion: PublishedVersionRecord = {
+        id: dataset.currentPublishedVersionId || `${dataset.id}-published-v${Math.max(1, dataset.version - 1)}`,
+        datasetId: dataset.id, versionNo: Math.max(1, dataset.version - 1), status: 'PUBLISHED', dslVersion: '1.0',
+        dslHash: `previous-${dataset.dslHash}`, planHash: `previous-plan-${dataset.dslHash}`,
+        dsl: { ...record.dsl, dataset: { ...record.dsl.dataset, description: '稳定发布版本，用于展示回滚前的差异与影响。' }, nodes: [{ id: 'source_legacy', name: '历史发布输入', type: 'TABLE' }], fields: record.dsl.fields.slice(0, 2) },
+        logicalPlan: {}, publishedAt: '2026-08-05T16:30:00+08:00', publishedBy: '数据管理员', datasetRecordVersion: dataset.version - 1,
+        draftVersionId: `${dataset.id}-draft-v${dataset.version - 1}`, draftRecordVersion: dataset.version - 1,
+      }
+      const summary: PublishedVersionSummary = oldVersion
+      setHistoryRecord(record)
+      setHistoryItems([summary])
+      setSelectedHistoryVersion(oldVersion)
+      setHistoryUsage({ downstreamDraftReferences: 2, downstreamPublishedReferences: 5, activeQueryRuns: 1 })
+      setHistoryPreview({ versionID: oldVersion.id, loading: false, data: { queryId: 'snapshot-version-preview', columns: ['biz_date', 'sales_amount'], rows: [['2026-08-10', 1286000], ['2026-08-11', 1394000]], rowCount: 2, durationMs: 184 } })
+      setBusyAction('')
+      return
+    }
     try {
       const [record, versions] = await Promise.all([datasetAPI.get(dataset.id), loadAllPublishedVersions(dataset.id)])
       if (request !== historySelectionRequest.current) return
@@ -3205,8 +3324,8 @@ export function DatasetCenterPage() {
       if (versions[0]) {
         setHistoryPreview({ versionID: versions[0].id, loading: true })
         const previewRequest = datasetAPI.previewVersion(dataset.id, versions[0].id, crypto.randomUUID(), {}, 5).then(data => ({ data })).catch(cause => ({ error: cause instanceof Error ? cause.message : '加载发布版本数据预览失败' }))
-        const version = await datasetAPI.getVersion(dataset.id, versions[0].id)
-        if (request === historySelectionRequest.current) { setSelectedHistoryVersion(version); setBusyAction('') }
+        const [version, usage] = await Promise.all([datasetAPI.getVersion(dataset.id, versions[0].id), datasetAPI.getVersionUsage(dataset.id, versions[0].id)])
+        if (request === historySelectionRequest.current) { setSelectedHistoryVersion(version); setHistoryUsage(usage); setBusyAction('') }
         const preview = await previewRequest
         if (request === historySelectionRequest.current) {
           setHistoryPreview({ versionID: versions[0].id, loading: false, ...preview })
@@ -3225,13 +3344,14 @@ export function DatasetCenterPage() {
     const request = ++historySelectionRequest.current
     setHistoryConfirm(false)
     setSelectedHistoryVersion(null)
+    setHistoryUsage(null)
     setHistoryPreview({ versionID, loading: true })
     setFormError('')
     setBusyAction(`version:${versionID}`)
     try {
       const previewRequest = datasetAPI.previewVersion(dataset.id, versionID, crypto.randomUUID(), {}, 5).then(data => ({ data })).catch(cause => ({ error: cause instanceof Error ? cause.message : '加载发布版本数据预览失败' }))
-      const version = await datasetAPI.getVersion(dataset.id, versionID)
-      if (request === historySelectionRequest.current) { setSelectedHistoryVersion(version); setBusyAction('') }
+      const [version, usage] = await Promise.all([datasetAPI.getVersion(dataset.id, versionID), datasetAPI.getVersionUsage(dataset.id, versionID)])
+      if (request === historySelectionRequest.current) { setSelectedHistoryVersion(version); setHistoryUsage(usage); setBusyAction('') }
       const preview = await previewRequest
       if (request === historySelectionRequest.current) {
         setHistoryPreview({ versionID, loading: false, ...preview })
@@ -3279,7 +3399,7 @@ export function DatasetCenterPage() {
       }
       setDAGRuns(current => ({ ...current, [dataset.id]: run }))
       setBusyAction('')
-      setNotice({ tone: 'success', message: `“${dataset.name}”的物化任务已启动，可在任务中心跟踪。` })
+      setNotice({ tone: 'success', message: `“${dataset.name}”的物化任务已启动，可在运行诊断中跟踪。` })
       return
     }
     try {
@@ -3294,6 +3414,37 @@ export function DatasetCenterPage() {
       setNotice({ tone: 'success', message: `“${dataset.name}”已按发布 V${published.versionNo} 提交完整替换入仓 DAG；目标会先重建为空表再写入，当前${run.status === 'RUNNING' ? '执行中' : '排队中'}` })
     } catch (cause) {
       setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : 'DAG 运行失败' })
+    } finally {
+      setBusyAction('')
+    }
+  }
+
+  const openMaterialization = async (dataset: DatasetSummary) => {
+    const run = dagRuns[dataset.id]
+    if (!run) return
+    setDialog({ mode: 'materialization', dataset })
+    setMaterializationDetail(null)
+    setFormError('')
+    setBusyAction(`dag-detail:${dataset.id}`)
+    if (designSnapshot) {
+      setMaterializationDetail({
+        ...run,
+        inputs: [{ ordinal: 1, type: 'DATASET', layer: 'DWD', sourceVersion: 'V6', schemaHash: 'e92c64a8317bb740', snapshotHash: 'bfe8410cc278', rowCount: 286940 }],
+        nodes: [
+          { id: 'extract', kind: 'EXTRACT', engine: 'POSTGRESQL', status: 'SUCCEEDED', attempt: 1, outputRowCount: 286940 },
+          { id: 'transform', kind: 'TRANSFORM', engine: 'POSTGRESQL', status: run.status === 'FAILED' ? 'FAILED' : 'SUCCEEDED', attempt: run.attempt, errorCode: run.errorCode, errorMessage: run.errorMessage },
+          { id: 'quality', kind: 'QUALITY', engine: 'POSTGRESQL', status: run.status === 'FAILED' ? 'SKIPPED' : 'SUCCEEDED', attempt: 1 },
+        ],
+        succeededNodes: run.status === 'FAILED' ? 1 : 3, failedNodes: run.status === 'FAILED' ? 1 : 0, pendingNodes: run.status === 'FAILED' ? 1 : 0,
+        partialSuccess: run.status === 'FAILED',
+      })
+      setBusyAction('')
+      return
+    }
+    try {
+      setMaterializationDetail(await datasetAPI.getDAGRun(dataset.id, run.id))
+    } catch (cause) {
+      setFormError(cause instanceof Error ? cause.message : '加载物化运行诊断失败')
     } finally {
       setBusyAction('')
     }
@@ -3314,38 +3465,56 @@ export function DatasetCenterPage() {
     }
   }
 
-  const unpublishDataset = async () => {
-    const dataset = dialog?.dataset
-    if (!dataset?.currentPublishedVersionId || dataset.status !== 'PUBLISHED') return
-    setBusyAction(`unpublish:${dataset.id}`)
+  const openLifecycle = async (dataset: DatasetSummary, lifecycleAction: 'disable' | 'restore' | 'delete') => {
+    setDialog({ mode: 'lifecycle', dataset, lifecycleAction })
+    setLifecycleImpact(null)
     setFormError('')
-    try {
-      await datasetAPI.transitionVersion(dataset.id, dataset.currentPublishedVersionId, {
-        expectedVersion: dataset.version,
-        expectedStatus: 'PUBLISHED',
-        targetStatus: 'STALE',
+    setBusyAction(`lifecycle-impact:${dataset.id}`)
+    if (designSnapshot) {
+      const blocked = dataset.id === 'snapshot-customer-dim'
+      setLifecycleImpact({
+        datasetId: dataset.id, status: dataset.status,
+        downstreamDraftReferences: blocked ? 2 : 0, downstreamPublishedReferences: blocked ? 5 : 0,
+        activeQueryRuns: blocked ? 1 : 0, activeBuildRuns: 0, materializations: dataset.currentPublishedVersionId ? 1 : 0,
+        canDisable: dataset.status !== 'DISABLED', canRestore: dataset.status === 'DISABLED', canDelete: !blocked,
+        blockers: blocked ? ['下游草稿仍引用该数据集版本', '下游发布版本仍依赖该数据集', '仍有查询正在运行'] : [],
       })
-      await loadDatasets()
-      setDialog(null)
-      setNotice({ tone: 'success', message: `已下架“${dataset.name}”；配置和历史版本仍保留` })
+      setBusyAction('')
+      return
+    }
+    try {
+      setLifecycleImpact(await datasetAPI.getLifecycleImpact(dataset.id))
     } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : '下架数据集失败')
+      setFormError(cause instanceof Error ? cause.message : '加载数据集生命周期影响失败')
     } finally {
       setBusyAction('')
     }
   }
 
-  const deleteDataset = async () => {
+  const executeLifecycle = async () => {
     const dataset = dialog?.dataset
-    if (!dataset) return
-    setBusyAction(`delete:${dataset.id}`)
+    const action = dialog?.lifecycleAction
+    if (!dataset || !action) return
+    setBusyAction(`${action}:${dataset.id}`)
     setFormError('')
     try {
-      await datasetAPI.delete(dataset.id, dataset.version)
-      setDatasets(current => current.filter(item => item.id !== dataset.id))
+      if (designSnapshot) {
+        if (action === 'delete') setDatasets(current => current.filter(item => item.id !== dataset.id))
+        else setDatasets(current => current.map(item => item.id === dataset.id ? { ...item, status: action === 'disable' ? 'DISABLED' : 'PUBLISHED', version: item.version + 1 } : item))
+      } else if (action === 'disable') {
+        const record = await datasetAPI.disable(dataset.id, dataset.version)
+        setDatasets(current => current.map(item => item.id === record.id ? { ...item, status: record.status, version: record.version, currentPublishedVersionId: record.currentPublishedVersionId, updatedAt: record.updatedAt } : item))
+      } else if (action === 'restore') {
+        const record = await datasetAPI.restore(dataset.id, dataset.version)
+        setDatasets(current => current.map(item => item.id === record.id ? { ...item, status: record.status, version: record.version, currentPublishedVersionId: record.currentPublishedVersionId, updatedAt: record.updatedAt } : item))
+      } else {
+        await datasetAPI.delete(dataset.id, dataset.version)
+        setDatasets(current => current.filter(item => item.id !== dataset.id))
+      }
       setDialog(null)
-      setNotice({ tone: 'success', message: `已删除“${dataset.name}”` })
-    } catch (cause) { setFormError(cause instanceof Error ? cause.message : '删除数据集失败') }
+      setLifecycleImpact(null)
+      setNotice({ tone: 'success', message: action === 'delete' ? `已安全删除“${dataset.name}”，历史审计和异步清理记录已保留` : action === 'disable' ? `已停用“${dataset.name}”，随时可恢复到停用前状态` : `已恢复“${dataset.name}”到停用前稳定状态` })
+    } catch (cause) { setFormError(cause instanceof Error ? cause.message : '数据集生命周期操作失败') }
     finally { setBusyAction('') }
   }
 
@@ -3788,13 +3957,16 @@ export function DatasetCenterPage() {
     }
     setCanvasFullscreen(false)
     setDialog(null)
+    setDraftConflict(null)
     setMetadataEdit(null)
     setEditingRecord(null)
     setHistoryRecord(null)
     setHistoryItems([])
     setSelectedHistoryVersion(null)
+    setHistoryUsage(null)
     setHistoryPreview(null)
     setHistoryConfirm(false)
+    setMaterializationDetail(null)
     setPublicationRecord(null)
     setPublicationRequests([])
     setPublicationCapabilities({ manage: false, publish: false })
@@ -3825,7 +3997,7 @@ export function DatasetCenterPage() {
         <article><span><RowsIcon size={21} /></span><div><small>全部数据集</small><strong>{datasets.length}</strong></div><em>当前领域</em></article>
         <article><span className="is-success"><CheckCircleIcon size={21} /></span><div><small>已发布</small><strong>{datasets.filter(item => item.status === 'PUBLISHED').length}</strong></div><em>可被下游使用</em></article>
         <article><span className="is-warning"><CalendarDotsIcon size={21} /></span><div><small>待处理</small><strong>{datasets.filter(item => item.status === 'DRAFT' || item.status === 'VALIDATING').length}</strong></div><em>草稿或校验中</em></article>
-        <article><span className="is-blue"><ArrowClockwiseIcon size={21} /></span><div><small>运行任务</small><strong>{Object.values(dagRuns).filter(run => activeDAGRunStatuses.has(run.status)).length}</strong></div><em>排队或执行中</em></article>
+        <article><span className="is-blue"><ArrowClockwiseIcon size={21} /></span><div><small>物化运行</small><strong>{Object.values(dagRuns).filter(run => activeDAGRunStatuses.has(run.status)).length}</strong></div><em>{Object.values(dagRuns).filter(run => run.status === 'FAILED' || run.slaBreached).length} 个需处理告警</em></article>
       </div>
       <section className="dataset-catalog-panel">
         <header>
@@ -3876,17 +4048,22 @@ export function DatasetCenterPage() {
             <div className="dataset-asset-icon" aria-hidden="true"><RowsIcon size={22} weight="duotone" /></div>
             <div className="dataset-asset-main"><div><h3>{dataset.name}</h3>{(dataset.tags || []).slice(0, 2).map(tag => <span className="dataset-asset-tag" key={tag}>{tag}</span>)}</div><p>{dataset.description || '暂无说明'}</p><small>{dataset.code}{dataset.originDataSourceName ? ` · ${dataset.originDataSourceName}` : ''}</small></div>
             <div className="dataset-catalog-state"><span className={`dataset-asset-layer ${dataset.layer.toLowerCase()}`}>{dataset.layer}</span><span className={`dataset-asset-status ${dataset.status.toLowerCase()}`}>{statusLabels[dataset.status] ?? dataset.status}</span></div>
-            <div className="dataset-catalog-version"><strong>V{dataset.version}</strong><small>{dagRuns[dataset.id] && activeDAGRunStatuses.has(dagRuns[dataset.id].status) ? '物化执行中' : dataset.currentPublishedVersionId ? '已冻结发布版本' : '草稿版本'}</small></div>
+            <div className={`dataset-catalog-version ${dagRuns[dataset.id]?.status.toLowerCase() || ''} ${dagRuns[dataset.id]?.slaBreached ? 'sla-breached' : ''}`}><strong>V{dataset.version}</strong><small>{dagRuns[dataset.id] ? dagRunLabel(dagRuns[dataset.id]) : dataset.currentPublishedVersionId ? '已冻结发布版本' : '草稿版本'}</small>{dagRuns[dataset.id]?.errorCode && <em>{dagRuns[dataset.id].errorCode}</em>}</div>
             <time>{new Date(dataset.updatedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })}</time>
           </div>
           <div className="dataset-asset-actions">
             {datasetManagePermissions[dataset.id] && <button className="action-edit" type="button" disabled={actionBusy} onClick={() => void openEdit(dataset)}><TreeStructureIcon size={15} />建模</button>}
             {datasetManagePermissions[dataset.id] && dagRuns[dataset.id] && activeDAGRunStatuses.has(dagRuns[dataset.id].status)
               ? <button className="action-pause" type="button" disabled={actionBusy} title={`停止本次 DAG${dagRuns[dataset.id]?.status === 'QUEUED' ? '排队' : '执行'}`} onClick={() => void stopDatasetDAG(dataset)}><DropSlashIcon size={15} />停止</button>
-              : datasetManagePermissions[dataset.id] && dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId && <button className="action-resume" type="button" disabled={actionBusy} title="立即执行当前发布版本的物化任务" onClick={() => void runDatasetDAG(dataset)}><ArrowClockwiseIcon size={15} />运行</button>}
+              : datasetManagePermissions[dataset.id] && dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId && <button className={`action-resume ${isRetryableDAGRun(dagRuns[dataset.id]) ? 'is-retry' : ''}`} type="button" disabled={actionBusy} title="锁定当前发布版本并创建一次新的可审计运行" onClick={() => void runDatasetDAG(dataset)}><ArrowClockwiseIcon size={15} />{isRetryableDAGRun(dagRuns[dataset.id]) ? '重试' : '运行'}</button>}
+            {dagRuns[dataset.id] && <button className="action-diagnose" type="button" disabled={actionBusy} onClick={() => void openMaterialization(dataset)}><WarningCircleIcon size={15} />诊断</button>}
             {dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId
               ? <button className="action-history" type="button" disabled={actionBusy} onClick={() => void openHistory(dataset)}><CalendarDotsIcon size={15} />版本</button>
               : <button className="action-publish" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title="提交校验与发布审批" onClick={() => void openPublication(dataset)}><ArrowUpIcon size={15} />发布</button>}
+            {datasetManagePermissions[dataset.id] && dataset.status === 'DISABLED'
+              ? <button className="action-resume" type="button" disabled={actionBusy} onClick={() => void openLifecycle(dataset, 'restore')}><ArrowCounterClockwiseIcon size={15} />恢复</button>
+              : datasetManagePermissions[dataset.id] && ['DRAFT', 'PUBLISHED', 'STALE'].includes(dataset.status) && <button className="action-pause" type="button" disabled={actionBusy} onClick={() => void openLifecycle(dataset, 'disable')}><DropSlashIcon size={15} />停用</button>}
+            {datasetManagePermissions[dataset.id] && <button className="action-delete" type="button" disabled={actionBusy} onClick={() => void openLifecycle(dataset, 'delete')}><XIcon size={15} />删除</button>}
           </div>
         </article>)}</div>}
       </section>
@@ -3973,6 +4150,10 @@ export function DatasetCenterPage() {
         </label>
         <small>{editingRecord ? `数据集编码保持不变：${generatedCode}` : `系统将自动生成唯一编码：${generatedCode}`}</small>
         {formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}
+        {draftConflict && editingRecord && <section className="dataset-draft-conflict" aria-label="草稿版本冲突恢复">
+          <div><WarningCircleIcon size={20} weight="fill" /><span><strong>检测到更新后的协作草稿</strong><small>你打开时为 V{editingRecord.version}，服务端当前为 V{draftConflict.currentVersion ?? '更新版本'}{draftConflict.currentHash ? ` · ${draftConflict.currentHash.slice(0, 10)}…` : ''}。当前表单未被覆盖。</small></span></div>
+          <button type="button" disabled={actionBusy} onClick={() => void openEdit(editingRecord.id)}>加载最新草稿</button>
+        </section>}
         <footer>
           <button className="quiet-button" type="button" disabled={actionBusy} onClick={() => setDialog({ mode: 'create' })}>返回配置</button>
           <button className="primary-button" type="button" disabled={actionBusy} onClick={() => void saveDataset()}>{busyAction === 'update' ? '正在保存…' : busyAction === 'create' ? '正在创建…' : editingRecord ? '保存修改' : '创建数据集'}</button>
@@ -4041,7 +4222,17 @@ export function DatasetCenterPage() {
       </div>
     </Dialog>}
 
-    {dialog?.mode === 'history' && dialog.dataset && <Dialog title={`${dialog.dataset.name} · 历史版本`} eyebrow="发布快照与安全回滚" wide onClose={closeDialog}><PublishedVersionHistoryPanel record={historyRecord} items={historyItems} selected={selectedHistoryVersion} preview={historyPreview} loading={busyAction.startsWith('history:') || busyAction.startsWith('version:')} busy={actionBusy} confirming={historyConfirm} error={formError} onSelect={versionID => void selectHistoryVersion(versionID)} onStartRollback={() => setHistoryConfirm(true)} onCancelRollback={() => { setHistoryConfirm(false); setFormError('') }} onRollback={() => void rollbackHistoryVersion()} onClose={closeDialog} /></Dialog>}
+    {dialog?.mode === 'history' && dialog.dataset && <Dialog title={`${dialog.dataset.name} · 历史版本`} eyebrow="发布快照、差异影响与安全回滚" wide onClose={closeDialog}><PublishedVersionHistoryPanel record={historyRecord} items={historyItems} selected={selectedHistoryVersion} usage={historyUsage} preview={historyPreview} loading={busyAction.startsWith('history:') || busyAction.startsWith('version:')} busy={actionBusy} confirming={historyConfirm} error={formError} onSelect={versionID => void selectHistoryVersion(versionID)} onStartRollback={() => setHistoryConfirm(true)} onCancelRollback={() => { setHistoryConfirm(false); setFormError('') }} onRollback={() => void rollbackHistoryVersion()} onClose={closeDialog} /></Dialog>}
+
+    {dialog?.mode === 'materialization' && dialog.dataset && <Dialog title={`${dialog.dataset.name} · 物化诊断`} eyebrow="运行、质量与刷新 SLA" wide onClose={closeDialog}>
+      <MaterializationRunPanel dataset={dialog.dataset} run={materializationDetail} loading={busyAction.startsWith('dag-detail:')} busy={actionBusy} error={formError} onRetry={() => { const dataset = dialog.dataset!; closeDialog(); void runDatasetDAG(dataset) }} onStop={() => { const dataset = dialog.dataset!; closeDialog(); void stopDatasetDAG(dataset) }} onClose={closeDialog} />
+    </Dialog>}
+
+    {dialog?.mode === 'lifecycle' && dialog.dataset && <Dialog
+      title={`${dialog.lifecycleAction === 'delete' ? '删除' : dialog.lifecycleAction === 'restore' ? '恢复' : '停用'}数据集`}
+      eyebrow="生命周期与下游依赖保护"
+      onClose={closeDialog}
+    ><DatasetLifecyclePanel dataset={dialog.dataset} action={dialog.lifecycleAction || 'disable'} impact={lifecycleImpact} loading={busyAction.startsWith('lifecycle-impact:')} busy={actionBusy} error={formError} onConfirm={() => void executeLifecycle()} onClose={closeDialog} /></Dialog>}
 
     {dialog?.mode === 'publish' && dialog.dataset && <Dialog
       title={`${dialog.dataset.name} · 发布`}
@@ -4065,7 +4256,7 @@ export function DatasetCenterPage() {
               {currentDraftPublicationRequest?.status === 'PENDING' && <div className="dataset-publication-hint">当前精确草稿已经在审批中，无需重复提交。</div>}
               {currentDraftPublicationRequest?.status === 'APPROVED' && <div className="dataset-publication-hint success">当前精确草稿已审批发布。再次修改并保存后可提交新的审批。</div>}
               {publicationRequests[0]?.status === 'CANCELLED' && !currentDraftPublicationRequest && <div className="dataset-publication-hint">上次申请已因草稿变更自动取消；当前草稿可重新提交审批。</div>}
-              <button className="primary-button" type="button" disabled={actionBusy || !publicationCapabilities.manage || currentDraftPublicationRequest?.status === 'APPROVED' || currentDraftPublicationRequest?.status === 'PENDING'} onClick={() => void submitPublicationRequest()}>{busyAction === 'publication-submit' ? '正在提交申请…' : '提交发布申请'}</button>
+              <div className="dataset-publication-submit-actions">{currentDraftPublicationRequest?.status === 'PENDING' && <button className="quiet-button" type="button" disabled={actionBusy || !publicationCapabilities.manage} onClick={() => void withdrawPublicationRequest()}>{busyAction === 'publication-withdraw' ? '正在撤回…' : '撤回申请'}</button>}<button className="primary-button" type="button" disabled={actionBusy || !publicationCapabilities.manage || currentDraftPublicationRequest?.status === 'APPROVED' || currentDraftPublicationRequest?.status === 'PENDING'} onClick={() => void submitPublicationRequest()}>{busyAction === 'publication-submit' ? '正在提交申请…' : '提交发布申请'}</button></div>
             </section>
 
             <section className="dataset-publication-review" aria-label="审批发布申请">
@@ -4112,9 +4303,6 @@ export function DatasetCenterPage() {
       <footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeBatchDialog}>取消</button><button className={batchAction === 'delete' ? 'dataset-delete-button' : 'primary-button'} type="button" disabled={actionBusy || (batchAction === 'run' ? !selectedRunnableCount : batchAction === 'stop' ? !selectedActiveDAGCount : !selectedDatasets.length)} onClick={() => void executeBatchAction()}>{actionBusy ? '正在处理…' : '确认执行'}</button></footer>
     </div></Dialog>}
 
-    {dialog?.mode === 'unpublish' && dialog.dataset && <Dialog title="下架数据集" eyebrow="发布生命周期" onClose={closeDialog}><div className="dataset-delete-confirm"><p>确认下架“<strong>{dialog.dataset.name}</strong>”的当前发布版本吗？</p><small>下架后不再提供当前发布版本；草稿、发布快照和历史审计仍会保留，需要上线时可重新提交发布。</small>{formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="primary-button" type="button" disabled={actionBusy} onClick={() => void unpublishDataset()}>{busyAction ? '正在下架…' : '确认下架'}</button></footer></div></Dialog>}
-
-    {dialog?.mode === 'delete' && dialog.dataset && <Dialog title="删除数据集" eyebrow="危险操作" onClose={closeDialog}><div className="dataset-delete-confirm"><p>确认删除“<strong>{dialog.dataset.name}</strong>”吗？数据集会从资产清单中移除，历史审计仍会保留。</p><small>仍被下游数据集、构建任务或运行中查询占用时，系统会拒绝删除。</small>{formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}<footer><button className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</button><button className="dataset-delete-button" type="button" disabled={actionBusy} onClick={() => void deleteDataset()}>{busyAction ? '正在删除…' : '确认删除'}</button></footer></div></Dialog>}
   </AppShell>
 }
 
@@ -5611,8 +5799,100 @@ function PublishedVersionTopologyPreview({ version }: { version: PublishedVersio
   </div>
 }
 
-function PublishedVersionHistoryPanel({ record, items, selected, preview, loading, busy, confirming, error, onSelect, onStartRollback, onCancelRollback, onRollback, onClose }: {
+function MaterializationRunPanel({ dataset, run, loading, busy, error, onRetry, onStop, onClose }: {
+  dataset: DatasetSummary
+  run: DatasetDAGRunDetail | null
+  loading: boolean
+  busy: boolean
+  error: string
+  onRetry: () => void
+  onStop: () => void
+  onClose: () => void
+}) {
+  const statusLabels: Record<string, string> = {
+    QUEUED: '排队中', RUNNING: '执行中', SUCCEEDED: '成功', FAILED: '失败', CANCELLED: '已取消',
+    PENDING: '待执行', SKIPPED: '已跳过',
+  }
+  const dateText = (value?: string) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
+  const durationText = (seconds = 0) => seconds >= 3600
+    ? `${Math.floor(seconds / 3600)}小时${Math.floor(seconds % 3600 / 60)}分`
+    : seconds >= 60 ? `${Math.floor(seconds / 60)}分${seconds % 60}秒` : `${seconds}秒`
+  if (loading && !run) return <Empty>正在加载运行诊断…</Empty>
+  if (!run) return <div className="dataset-materialization-panel">{error && <div className="dataset-center-feedback error" role="alert">{error}</div>}<Empty>暂时无法读取该次物化运行。</Empty><footer><button className="quiet-button" type="button" onClick={onClose}>关闭</button></footer></div>
+  const succeededNodes = run.succeededNodes ?? run.nodes.filter(node => node.status === 'SUCCEEDED').length
+  const failedNodes = run.failedNodes ?? run.nodes.filter(node => node.status === 'FAILED').length
+  const pendingNodes = run.pendingNodes ?? run.nodes.filter(node => !['SUCCEEDED', 'FAILED'].includes(node.status)).length
+  return <div className="dataset-materialization-panel">
+    <section className={`dataset-materialization-summary ${run.status.toLowerCase()} ${run.slaBreached ? 'sla-breached' : ''}`}>
+      <div><span className="dataset-materialization-status">{statusLabels[run.status] ?? run.status}</span><h3>{run.partialSuccess ? '部分节点已成功，当前可用快照未切换' : dagRunLabel(run)}</h3><p>{run.errorMessage || (activeDAGRunStatuses.has(run.status) ? '系统正在按冻结的发布版本执行；取消不会影响上一份可用快照。' : '该次运行已形成完整审计证据。')}</p></div>
+      <dl>
+        <div><dt>运行 ID</dt><dd title={run.id}>{run.id.slice(0, 12)}</dd></div>
+        <div><dt>运行方式</dt><dd>{run.mode === 'FULL' ? '完整替换' : run.mode}</dd></div>
+        <div><dt>尝试次数</dt><dd>{run.attempt} / {run.maxAttempts}</dd></div>
+        <div><dt>执行耗时</dt><dd>{durationText(run.durationSeconds)}</dd></div>
+        <div><dt>刷新 SLA</dt><dd className={run.slaBreached ? 'is-danger' : run.slaStatus === 'AT_RISK' ? 'is-warning' : ''}>{run.slaBreached ? '已超时' : run.slaStatus === 'AT_RISK' ? '临近截止' : run.status === 'SUCCEEDED' ? '按时完成' : '正常'}</dd></div>
+        <div><dt>SLA 截止</dt><dd>{dateText(run.slaDueAt)}</dd></div>
+      </dl>
+    </section>
+    <section className="dataset-materialization-node-summary" aria-label="物化节点统计">
+      <article><small>成功节点</small><strong>{succeededNodes}</strong><span>产物已留存，失败时不会被误激活</span></article>
+      <article><small>失败节点</small><strong>{failedNodes}</strong><span>{failedNodes ? '查看错误后可创建新运行重试' : '未发现失败节点'}</span></article>
+      <article><small>待处理节点</small><strong>{pendingNodes}</strong><span>取消或上游失败后会安全跳过</span></article>
+      <article><small>冻结输入</small><strong>{run.inputs.length}</strong><span>重试会重新校验当前发布版本</span></article>
+    </section>
+    <section className="dataset-materialization-nodes">
+      <header><div><h3>执行节点</h3><p>逐节点展示状态、行数和可安全披露的失败原因。</p></div><span>{run.partialSuccess ? '部分成功' : `${run.nodes.length} 个节点`}</span></header>
+      <div>{run.nodes.map((node, index) => <article key={node.id} className={node.status.toLowerCase()}>
+        <span>{index + 1}</span><div><strong>{node.kind}</strong><small>{node.engine} · 第 {node.attempt} 次尝试</small></div>
+        <em>{statusLabels[node.status] ?? node.status}</em>
+        <p>{node.errorMessage || (node.outputRowCount !== undefined ? `输出 ${node.outputRowCount.toLocaleString('zh-CN')} 行` : node.status === 'SKIPPED' ? '因前序失败或取消未执行' : '运行证据已记录')}</p>
+      </article>)}</div>
+      {!run.nodes.length && <Empty>任务仍在排队，执行节点将在 Worker 领取后显示。</Empty>}
+    </section>
+    <section className="dataset-materialization-safety">
+      <WarningCircleIcon size={20} weight="fill" />
+      <div><strong>稳定性保护已生效</strong><p>质量失败、部分成功或用户取消都不会切换 ACTIVE 快照；重试会生成新的运行 ID，并保留本次失败证据。</p></div>
+    </section>
+    {error && <div className="dataset-center-feedback error" role="alert">{error}</div>}
+    <footer><span>发布版本 {run.datasetVersionId.slice(0, 12)} · {dataset.layer} 数据层</span><div><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>关闭</button>{activeDAGRunStatuses.has(run.status) ? <button className="dataset-stop-button" type="button" disabled={busy} onClick={onStop}>停止本次运行</button> : retryableDAGRunStatuses.has(run.status) ? <button className="primary-button" type="button" disabled={busy} onClick={onRetry}><ArrowClockwiseIcon size={16} />创建新运行重试</button> : null}</div></footer>
+  </div>
+}
+
+function DatasetLifecyclePanel({ dataset, action, impact, loading, busy, error, onConfirm, onClose }: {
+  dataset: DatasetSummary
+  action: 'disable' | 'restore' | 'delete'
+  impact: DatasetLifecycleImpact | null
+  loading: boolean
+  busy: boolean
+  error: string
+  onConfirm: () => void
+  onClose: () => void
+}) {
+  const label = action === 'delete' ? '删除' : action === 'restore' ? '恢复' : '停用'
+  const permitted = action === 'delete' ? impact?.canDelete : action === 'restore' ? impact?.canRestore : impact?.canDisable
+  return <div className="dataset-lifecycle-panel">
+    {loading ? <Empty>正在检查下游依赖和运行占用…</Empty> : impact ? <>
+      <section className={`dataset-lifecycle-heading ${action} ${permitted ? '' : 'blocked'}`}>
+        <span><WarningCircleIcon size={24} weight="fill" /></span>
+        <div><h3>{permitted ? `可以安全${label}“${dataset.name}”` : `暂时不能${label}“${dataset.name}”`}</h3><p>{action === 'disable' ? '停用会清除目录的活动发布指针，但草稿、不可变发布快照、物化历史和审计全部保留。' : action === 'restore' ? '系统将恢复到停用前记录的稳定状态和精确发布版本，不会猜测或重写历史。' : '删除会隐藏目录项、废弃发布版本并排队清理物化；源库物理表不会被修改。'}</p></div>
+      </section>
+      <section className="dataset-lifecycle-impact" aria-label="数据集生命周期影响预览">
+        <article><small>下游草稿</small><strong>{impact.downstreamDraftReferences}</strong><span>引用当前任一发布版本</span></article>
+        <article><small>已发布下游</small><strong>{impact.downstreamPublishedReferences}</strong><span>需要先迁移或废弃</span></article>
+        <article><small>运行中查询</small><strong>{impact.activeQueryRuns}</strong><span>结束后才能删除</span></article>
+        <article><small>活动物化</small><strong>{impact.activeBuildRuns}</strong><span>{impact.materializations} 份物化待保留或清理</span></article>
+      </section>
+      {impact.blockers.length > 0 && <section className="dataset-lifecycle-blockers"><strong>先完成以下处理</strong><ul>{impact.blockers.map(blocker => <li key={blocker}>{blocker}</li>)}</ul><p>停用可作为可恢复的临时措施；彻底删除前需让这些计数归零。</p></section>}
+      <section className="dataset-lifecycle-retention"><CheckCircleIcon size={19} weight="fill" /><div><strong>保留与恢复策略</strong><p>{action === 'delete' ? '软删除保留版本与审计；数仓物化通过后台清理队列安全释放，业务源表永不删除。' : '停用和恢复都是带乐观锁的原子操作；并发保存或发布发生时会拒绝覆盖并要求刷新。'}</p></div></section>
+    </> : error ? null : <Empty>暂无生命周期影响信息。</Empty>}
+    {error && <div className="dataset-center-feedback error" role="alert">{error}</div>}
+    <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className={action === 'delete' ? 'dataset-delete-button' : 'primary-button'} type="button" disabled={busy || loading || !permitted} onClick={onConfirm}>{busy && !loading ? `正在${label}…` : `确认${label}`}</button></footer>
+  </div>
+}
+
+function PublishedVersionHistoryPanel({ record, items, selected, usage, preview, loading, busy, confirming, error, onSelect, onStartRollback, onCancelRollback, onRollback, onClose }: {
   record: DatasetRecord | null; items: PublishedVersionSummary[]; selected: PublishedVersionRecord | null
+  usage: VersionUsage | null
   preview: VersionPreviewState | null
   loading: boolean; busy: boolean; confirming: boolean; error: string
   onSelect: (versionID: string) => void; onStartRollback: () => void; onCancelRollback: () => void; onRollback: () => void; onClose: () => void
@@ -5623,6 +5903,8 @@ function PublishedVersionHistoryPanel({ record, items, selected, preview, loadin
   }
   const isCurrent = Boolean(record && selected && selected.dslHash === record.dslHash && selected.planHash === record.planHash)
   const isCurrentPublishedVersion = Boolean(record && selected && record.currentPublishedVersionId === selected.id)
+  const difference = record && selected ? publishedVersionDiff(selected, record) : null
+  const downstreamImpact = (usage?.downstreamDraftReferences ?? 0) + (usage?.downstreamPublishedReferences ?? 0) + (usage?.activeQueryRuns ?? 0)
   return <div className="dataset-version-history">
     <aside className="dataset-revision-list" aria-label="数据集发布版本列表">
       <header><strong>发布历史</strong><small>{items.length} 个已发布快照</small></header>
@@ -5641,6 +5923,17 @@ function PublishedVersionHistoryPanel({ record, items, selected, preview, loadin
           <span><small>输出字段</small><strong>{Array.isArray(selected.dsl.fields) ? selected.dsl.fields.length : 0}</strong></span>
           <span><small>数据集类型</small><strong>{typeLabels[selected.dsl.dataset.type] ?? selected.dsl.dataset.type}</strong></span>
         </section>
+        {difference && <section className="dataset-version-diff" aria-label="发布版本差异和影响">
+          <header><div><h3>与当前草稿的差异</h3><p>回滚会复制该快照生成新草稿，不会覆盖现有发布版本。</p></div><span className={difference.breakingChanges ? 'has-breaking' : ''}>{difference.breakingChanges ? `${difference.breakingChanges} 项破坏性变化` : '无破坏性变化'}</span></header>
+          <div className="dataset-version-diff-grid">
+            <article><small>字段变化</small><strong>+{difference.addedFields.length} / −{difference.removedFields.length} / ~{difference.changedFields.length}</strong><p>{[...difference.addedFields.map(name => `新增 ${name}`), ...difference.removedFields.map(name => `移除 ${name}`), ...difference.changedFields.map(name => `调整 ${name}`)].slice(0, 4).join('；') || '字段定义一致'}</p></article>
+            <article><small>DAG 变化</small><strong>+{difference.addedNodes.length} / −{difference.removedNodes.length} / ~{difference.changedNodes.length}</strong><p>{[...difference.addedNodes.map(name => `新增 ${name}`), ...difference.removedNodes.map(name => `移除 ${name}`), ...difference.changedNodes.map(name => `调整 ${name}`)].slice(0, 4).join('；') || '节点定义一致'}</p></article>
+            <article><small>业务元信息</small><strong>{difference.metadataChanges.length}</strong><p>{difference.metadataChanges.join('、') || '名称、说明、类型与分层一致'}</p></article>
+          </div>
+          <div className={`dataset-version-impact ${downstreamImpact ? 'has-impact' : ''}`}>
+            <WarningCircleIcon size={19} weight="fill" /><div><strong>{downstreamImpact ? `该快照当前关联 ${downstreamImpact} 项下游使用` : '未发现当前下游占用'}</strong><p>草稿引用 {usage?.downstreamDraftReferences ?? 0} · 已发布引用 {usage?.downstreamPublishedReferences ?? 0} · 运行中查询 {usage?.activeQueryRuns ?? 0}</p></div>
+          </div>
+        </section>}
         <dl className="dataset-revision-metadata">
           <div><dt>数据集名称</dt><dd>{selected.dsl.dataset.name}</dd></div>
           <div><dt>发布状态</dt><dd>{statusLabels[selected.status] ?? selected.status}</dd></div>

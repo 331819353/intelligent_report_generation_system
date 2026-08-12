@@ -1750,3 +1750,47 @@
 .report-render-zone.is-filter { border-bottom: 1px solid var(--line); padding-bottom: 6px; }
 .report-render-zone.is-header { border-bottom: 1px solid var(--line); padding-bottom: 6px; }
 .report-render-zone.is-footer { border-top: 1px solid var(--line); padding-top: 6px; }
+
+/* 卡片内区域的编排把手 */
+.report-render-slot { position: relative; }
+.report-render-slot.is-dragging { opacity: .82; z-index: 3; }
+.report-slot-move-handle, .report-slot-resize-handle {
+  position: absolute; opacity: 0; border: 0; padding: 0; cursor: grab;
+  background: var(--blue); border-radius: 4px; transition: opacity .12s ease;
+}
+.report-slot-move-handle { top: 4px; left: 4px; width: 20px; height: 14px; display: grid; place-items: center; }
+.report-slot-move-handle span { width: 10px; height: 2px; background: #fff; box-shadow: 0 3px 0 #fff, 0 -3px 0 #fff; }
+.report-slot-resize-handle { right: 3px; bottom: 3px; width: 12px; height: 12px; cursor: nwse-resize; }
+.report-render-slot:hover .report-slot-move-handle,
+.report-render-slot:hover .report-slot-resize-handle,
+.report-slot-move-handle:focus-visible, .report-slot-resize-handle:focus-visible { opacity: .92; }
+.report-slot-move-handle:focus-visible, .report-slot-resize-handle:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+/* 区域上下移动 */
+.report-render-zone { position: relative; }
+.report-zone-controls {
+  position: absolute; top: 2px; right: 4px; z-index: 4; display: flex; align-items: center; gap: 3px;
+  opacity: 0; transition: opacity .12s ease;
+}
+.report-render-zone:hover .report-zone-controls,
+.report-zone-controls:focus-within { opacity: 1; }
+.report-zone-controls span {
+  font-size: 9px; letter-spacing: .04em; color: var(--muted);
+  background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px;
+}
+.report-zone-controls button {
+  width: 18px; height: 18px; display: grid; place-items: center; font-size: 11px; line-height: 1;
+  border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--ink); cursor: pointer;
+}
+.report-zone-controls button:disabled { opacity: .35; cursor: default; }
+.report-zone-controls button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+/* 发布前逐条确认告警 */
+.publish-ack-list { display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; }
+.publish-ack-list strong { font-size: 11px; color: var(--muted); font-weight: 500; }
+.publish-ack-list label { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.publish-ack-list span { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; color: #a4620a; }
+.publish-preview-required {
+  display: flex; align-items: center; gap: 5px; margin: 0 0 8px;
+  font-size: 11px; color: #a4620a;
+}

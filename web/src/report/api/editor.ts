@@ -254,8 +254,9 @@ export const reportEditorAPI = {
   publish(reportId: string, input: {
     sourceRevisionNo: number
     acknowledgeStaleInsights: boolean
-    desktopPreviewHash: string
-    mobilePreviewHash: string
+    /** 发布人对两种布局的确认声明，不是客户端算出的回显哈希。 */
+    previewedDesktop: boolean
+    previewedMobile: boolean
     reviewRunId: string
     humanComment: string
     acknowledgedIssueCodes: string[]

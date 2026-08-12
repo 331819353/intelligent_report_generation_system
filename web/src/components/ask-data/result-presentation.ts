@@ -50,6 +50,9 @@ export function resultViewEligible(result: QuestionResult, view: QuestionResultV
   if (view.type === 'KPI') {
 		return dataset.rows.length === 1 && dimensionKeys.length === 0 && measureKeys.length === 1
   }
+	if (view.type === 'KPI_BUNDLE') {
+		return dataset.rows.length === 1 && dimensionKeys.length === 0 && measureKeys.length >= 2 && measureKeys.length <= 8
+	}
   return view.type === 'TABLE'
 }
 
@@ -63,7 +66,7 @@ export function initialResultView(result: QuestionResult): QuestionResultView | 
   if (recommended) return recommended
   const fallback = eligible.find(view => view.id === result.defaultViewId)
   if (fallback) return fallback
-  return ['LINE', 'BAR', 'TABLE', 'KPI']
+  return ['KPI_BUNDLE', 'LINE', 'BAR', 'TABLE', 'KPI']
     .map(type => eligible.find(view => view.type === type))
     .find((view): view is QuestionResultView => Boolean(view))
 }

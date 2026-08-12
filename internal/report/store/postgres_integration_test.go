@@ -897,7 +897,8 @@ func nearLimitDefinition(t *testing.T, base reportmodel.ReportDefinition) (repor
 						HeightMode: reportmodel.MobileHeightAuto, SlotMode: reportmodel.MobileSlotStack},
 				},
 				Zones: []reportmodel.Zone{{
-					ID: askdata.ID(fmt.Sprintf("zone_large_%03d", blockIndex)), Type: reportmodel.ZoneContent,
+					Order: 1,
+					ID:    askdata.ID(fmt.Sprintf("zone_large_%03d", blockIndex)), Type: reportmodel.ZoneContent,
 					Layout: reportmodel.ZoneLayout{HeightMode: reportmodel.ZoneHeightAuto, MinHeight: 180,
 						Columns: 24, Rows: 9, Overflow: reportmodel.OverflowExpand, EmptyPriority: 1},
 					Slots: slots,

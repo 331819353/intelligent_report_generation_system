@@ -928,19 +928,25 @@ func scanVersion(row scanner, destination *Version) error {
 func hydrateStoredDefinition(
 	raw []byte, expectedHash string, definition *reportmodel.ReportDefinition, canonicalRaw *json.RawMessage,
 ) error {
-	if err := json.Unmarshal(raw, definition); err != nil {
+	// Both decodes target a fresh value. Unmarshalling into the caller's
+	// definition would reuse its slice elements, and an omitempty field absent
+	// from the incoming JSON would silently keep the previous element's value.
+	var decoded reportmodel.ReportDefinition
+	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return fmt.Errorf("decode stored report definition: %w", err)
 	}
-	canonical, hash, err := compiler.Normalize(*definition)
+	canonical, hash, err := compiler.Normalize(decoded)
 	if err != nil {
 		return fmt.Errorf("normalize stored report definition: %w", err)
 	}
 	if hash != expectedHash {
 		return errors.New("stored report definition hash mismatch")
 	}
-	if err := json.Unmarshal(canonical, definition); err != nil {
+	var canonicalDefinition reportmodel.ReportDefinition
+	if err := json.Unmarshal(canonical, &canonicalDefinition); err != nil {
 		return fmt.Errorf("decode canonical report definition: %w", err)
 	}
+	*definition = canonicalDefinition
 	*canonicalRaw = append((*canonicalRaw)[:0], canonical...)
 	return nil
 }

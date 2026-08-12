@@ -216,6 +216,11 @@ export const administrationAPI = {
     })
     return safeItems(result)
   },
+  async withdrawDomainApplication(id: string) {
+    return administrationRequest<void>(`/v1/domain-applications/${encodeURIComponent(id)}/withdraw`, {
+      method: 'POST',
+    })
+  },
   async listPendingDomainApplications(domainID: string) {
     const result = await administrationRequest<ItemsResponse<DomainApplication>>(`/v1/domains/${domainID}/applications`, {
       cache: 'no-store',
@@ -247,23 +252,27 @@ export const administrationAPI = {
   async reviewPublication(
     approval: Pick<PlatformApproval, 'domainId' | 'id' | 'kind' | 'resourceId' | 'version'>,
     decision: 'APPROVED' | 'REJECTED',
+    reason = '',
   ) {
+    const reviewReason = decision === 'APPROVED'
+      ? '平台管理中心审核通过'
+      : reason.trim() || '申请不符合当前发布要求'
     if (approval.kind === 'DOMAIN_ACCESS') {
       return administrationRequest<void>(`/v1/domain-applications/${approval.id}/decision`, {
         method: 'POST',
         body: JSON.stringify({
           decision,
-          comment: decision === 'APPROVED' ? '平台管理中心审核通过' : '平台管理中心审核拒绝',
+          comment: reviewReason,
         }),
       })
     }
     const collection = approval.kind === 'DATA_SOURCE' ? 'data-sources' : 'datasets'
     const operation = decision === 'APPROVED' ? 'approve' : 'reject'
     const body = approval.kind === 'DATA_SOURCE'
-      ? { expectedVersion: approval.version, reason: decision === 'APPROVED' ? '平台管理中心审核通过' : '平台管理中心审核拒绝' }
+      ? { expectedVersion: approval.version, reason: reviewReason }
       : decision === 'APPROVED'
         ? { expectedVersion: approval.version, note: '平台管理中心审核通过' }
-        : { expectedVersion: approval.version, reason: '平台管理中心审核拒绝' }
+        : { expectedVersion: approval.version, reason: reviewReason }
     return domainAssetRequest(
       approval.domainId,
       `/v1/${collection}/${encodeURIComponent(approval.resourceId)}/publish-requests/${encodeURIComponent(approval.id)}/${operation}`,

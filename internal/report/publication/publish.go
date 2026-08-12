@@ -61,11 +61,20 @@ type PublishRequest struct {
 	ReportID                 askdata.ID
 	SourceRevisionNo         *int64
 	AcknowledgeStaleInsights bool
-	DesktopPreviewHash       askdata.ContentHash
-	MobilePreviewHash        askdata.ContentHash
-	RollbackOfVersionNo      *int
-	RollbackReason           string
-	IdempotencyKey           string
+	// PreviewedDesktop and PreviewedMobile are the publisher's attestation that
+	// they looked at both layouts before publishing.
+	//
+	// These were previously two content hashes the caller had to echo back, and
+	// the check was that they equalled the draft hash the caller already held —
+	// so the gate could not express what its name claimed. A client-side render
+	// hash cannot be a trustworthy gate either, since the client produces it. An
+	// honest human attestation is recorded as one, and the responsive layout
+	// itself is validated server-side by stage 7.
+	PreviewedDesktop    bool
+	PreviewedMobile     bool
+	RollbackOfVersionNo *int
+	RollbackReason      string
+	IdempotencyKey      string
 }
 
 type StepError struct {
@@ -119,9 +128,8 @@ func (publisher *Publisher) publishDefinition(ctx context.Context, identity stor
 	if issues := staticIssues[7]; len(issues) != 0 {
 		return store.Version{}, &StepError{Step: 7, Code: publicationStepCode(7), Err: issues}
 	}
-	if request.DesktopPreviewHash.Validate() != nil || request.MobilePreviewHash.Validate() != nil ||
-		string(request.DesktopPreviewHash) != sourceHash || string(request.MobilePreviewHash) != sourceHash {
-		return store.Version{}, &StepError{Step: 7, Code: "REPORT_PREVIEW_REQUIRED", Err: errors.New("desktop and mobile previews must match the selected draft revision")}
+	if !request.PreviewedDesktop || !request.PreviewedMobile {
+		return store.Version{}, &StepError{Step: 7, Code: "REPORT_PREVIEW_REQUIRED", Err: errors.New("the publisher must confirm both the desktop and mobile preview")}
 	}
 	if issues := staticIssues[8]; len(issues) != 0 {
 		return store.Version{}, &StepError{Step: 8, Code: publicationStepCode(8), Err: issues}
@@ -156,15 +164,15 @@ func (publisher *Publisher) publishDefinition(ctx context.Context, identity stor
 		operation = "ROLLBACK"
 	}
 	requestBytes, _ := json.Marshal(struct {
-		ReportID           askdata.ID          `json:"reportId"`
-		SourceRevision     int64               `json:"sourceRevision"`
-		DefinitionHash     string              `json:"definitionHash"`
-		DesktopPreviewHash askdata.ContentHash `json:"desktopPreviewHash"`
-		MobilePreviewHash  askdata.ContentHash `json:"mobilePreviewHash"`
-		Acknowledge        bool                `json:"acknowledgeStaleInsights"`
-		RollbackVersion    *int                `json:"rollbackOfVersionNo,omitempty"`
-		RollbackReason     string              `json:"rollbackReason,omitempty"`
-	}{request.ReportID, sourceRevision, definitionHash, request.DesktopPreviewHash, request.MobilePreviewHash, request.AcknowledgeStaleInsights,
+		ReportID         askdata.ID `json:"reportId"`
+		SourceRevision   int64      `json:"sourceRevision"`
+		DefinitionHash   string     `json:"definitionHash"`
+		PreviewedDesktop bool       `json:"previewedDesktop"`
+		PreviewedMobile  bool       `json:"previewedMobile"`
+		Acknowledge      bool       `json:"acknowledgeStaleInsights"`
+		RollbackVersion  *int       `json:"rollbackOfVersionNo,omitempty"`
+		RollbackReason   string     `json:"rollbackReason,omitempty"`
+	}{request.ReportID, sourceRevision, definitionHash, request.PreviewedDesktop, request.PreviewedMobile, request.AcknowledgeStaleInsights,
 		request.RollbackOfVersionNo, request.RollbackReason})
 	requestHash := askdata.HashBytes(requestBytes)
 	versionID := askdata.ID(uuid.NewSHA1(uuid.NameSpaceOID, []byte("report-publication-v1\x00"+
@@ -322,8 +330,9 @@ func (publisher *Publisher) Rollback(ctx context.Context, identity store.Identit
 	}
 	return publisher.publishDefinition(ctx, identity, PublishRequest{
 		ReportID: reportID, AcknowledgeStaleInsights: acknowledgeStale,
-		DesktopPreviewHash:  askdata.ContentHash(target.DefinitionHash),
-		MobilePreviewHash:   askdata.ContentHash(target.DefinitionHash),
+		// A rollback republishes a version that was already previewed and
+		// attested when it was first published.
+		PreviewedDesktop: true, PreviewedMobile: true,
 		RollbackOfVersionNo: &targetVersionNo, RollbackReason: trimmedReason,
 		IdempotencyKey: idempotencyKey,
 	}, target.Definition, target.DefinitionHash, target.SourceRevisionNo)

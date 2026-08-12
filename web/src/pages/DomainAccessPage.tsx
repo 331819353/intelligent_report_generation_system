@@ -96,19 +96,19 @@ const snapshotItems: DomainCatalogItem[] = [
   },
 ]
 
-const snapshotApplications: DomainApplication[] = [{
-  id: 'snapshot-application-retail',
-  domainId: 'snapshot-retail',
-  domainCode: 'RETAIL_OPERATION',
-  domainName: '零售运营',
-  applicantUserId: 'snapshot-user',
-  applicantEmail: 'zhang.wei@example.com',
-  applicantDisplayName: '张伟',
-  status: 'PENDING',
-  reason: '用于月度零售经营复盘与门店效率分析',
-  reviewComment: '',
-  createdAt: '2026-08-11T10:15:00+08:00',
-}]
+const snapshotApplications: DomainApplication[] = [
+  {
+    id: 'snapshot-application-retail', domainId: 'snapshot-retail', domainCode: 'RETAIL_OPERATION', domainName: '零售运营',
+    applicantUserId: 'snapshot-user', applicantEmail: 'zhang.wei@example.com', applicantDisplayName: '张伟', status: 'PENDING',
+    reason: '用于月度零售经营复盘与门店效率分析', reviewComment: '', createdAt: '2026-08-11T10:15:00+08:00',
+  },
+  {
+    id: 'snapshot-application-quality', domainId: 'snapshot-quality', domainCode: 'MANUFACTURING_QUALITY', domainName: '制造质量',
+    applicantUserId: 'snapshot-user', applicantEmail: 'zhang.wei@example.com', applicantDisplayName: '张伟', status: 'REJECTED',
+    reason: '查看生产质量异常与改善趋势', reviewComment: '请补充负责的工厂范围与项目编号后重新提交。',
+    reviewedBy: 'snapshot-admin-zhao', reviewedAt: '2026-08-10T16:45:00+08:00', createdAt: '2026-08-10T09:20:00+08:00',
+  },
+]
 
 const snapshotRoleLabels: Record<string, string> = {
   BIZ_MANAGEMENT: '业务分析师',
@@ -283,6 +283,33 @@ export function DomainAccessPage() {
     }
   }
 
+  const withdraw = async (application: DomainApplication) => {
+    setBusy(true)
+    setError('')
+    try {
+      if (designSnapshot) {
+        setApplications(current => current.map(item => item.id === application.id ? { ...item, status: 'CANCELLED' } : item))
+        setItems(current => current.map(item => item.id === application.domainId ? { ...item, accessStatus: 'CANCELLED' } : item))
+      } else {
+        await administrationAPI.withdrawDomainApplication(application.id)
+        await load()
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '领域申请撤回失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const reapply = (application: DomainApplication) => {
+    const domain = items.find(item => item.id === application.domainId)
+    if (!domain) {
+      setError('该领域当前不可申请，请刷新目录后重试。')
+      return
+    }
+    openApplication(domain)
+  }
+
   const detailApplication = selected ? applicationByDomain.get(selected.id) : undefined
   const detailScopes = selected
     ? designSnapshot && snapshotScopes[selected.code] ? snapshotScopes[selected.code] : ['领域数据', '指标与报告']
@@ -340,7 +367,7 @@ export function DomainAccessPage() {
           {view === 'APPLICATIONS'
             ? <>
               <div className="domain-application-header" role="row">
-                <span>领域</span><span>申请用途</span><span>访问状态</span><span>提交时间</span><span>审批说明</span>
+                <span>领域</span><span>申请用途</span><span>访问状态</span><span>提交时间</span><span>审批说明</span><span>操作</span>
               </div>
               <div className="domain-application-body">
                 {visibleApplications.map(application => <article className="domain-application-row" key={application.id}>
@@ -349,6 +376,11 @@ export function DomainAccessPage() {
                   <span className={`domain-status-badge is-${application.status.toLocaleLowerCase()}`}>{applicationLabels[application.status]}</span>
                   <time dateTime={application.createdAt}>{formatDate(application.createdAt)}</time>
                   <span>{application.reviewComment || (application.status === 'PENDING' ? '等待领域管理员审批' : '—')}</span>
+                  <div className="domain-application-actions">
+                    {application.status === 'PENDING' && <AppButton plain size="small" type="button" disabled={busy} onClick={() => void withdraw(application)}>撤回申请</AppButton>}
+                    {(application.status === 'REJECTED' || application.status === 'CANCELLED') && <AppButton variant="primary" size="small" type="button" disabled={busy} onClick={() => reapply(application)}>重新申请</AppButton>}
+                    {application.status === 'APPROVED' && <span>权限已生效</span>}
+                  </div>
                 </article>)}
                 {!loading && visibleApplications.length === 0 && <div className="domain-access-empty"><GlobeHemisphereWest size={30} weight="duotone" /><strong>{query ? '没有匹配的申请记录' : '还没有领域申请'}</strong><span>{query ? '请调整搜索关键词' : '可从领域目录选择领域并提交申请'}</span><AppButton link type="button" onClick={() => { setQuery(''); chooseView('ALL') }}>返回领域目录</AppButton></div>}
               </div>

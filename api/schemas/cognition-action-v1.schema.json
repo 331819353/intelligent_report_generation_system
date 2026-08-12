@@ -586,14 +586,15 @@
         },
         "objectTypes": {
           "type": "array",
-          "maxItems": 4,
+          "maxItems": 5,
           "uniqueItems": true,
           "items": {
             "enum": [
               "METRIC",
               "DIMENSION",
               "MODEL",
-              "TERM"
+              "TERM",
+              "REPORT_ASSET"
             ]
           }
         },

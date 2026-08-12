@@ -78,14 +78,18 @@ func (e *ManualCompletionIncompleteError) Error() string {
 }
 
 type Diff struct {
-	ID           string `json:"id"`
-	DataSourceID string `json:"dataSourceId"`
-	ObjectType   string `json:"objectType"`
-	ObjectKey    string `json:"objectKey"`
-	ChangeType   string `json:"changeType"`
-	Before       any    `json:"before"`
-	After        any    `json:"after"`
-	CreatedAt    string `json:"createdAt"`
+	ID           string       `json:"id"`
+	DataSourceID string       `json:"dataSourceId"`
+	ObjectType   string       `json:"objectType"`
+	ObjectKey    string       `json:"objectKey"`
+	ChangeType   string       `json:"changeType"`
+	Before       any          `json:"before"`
+	After        any          `json:"after"`
+	CreatedAt    string       `json:"createdAt"`
+	Breaking     bool         `json:"breaking"`
+	ImpactCount  int          `json:"impactCount"`
+	StaleCount   int          `json:"staleCount"`
+	Impact       []Dependency `json:"impact,omitempty"`
 }
 type Dependency struct {
 	ID             string `json:"id"`

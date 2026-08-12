@@ -319,14 +319,34 @@ const DEMO_RESULT: QuestionResult = {
       ],
       rows: DEMO_RESULT_DETAIL_ROWS,
     },
+    {
+      id: 'dataset:operations-bundle', label: '核心经营指标组', page: 1, pageSize: 1, totalRows: 1,
+      columns: [
+        { key: 'sales', label: '销售额（元）', type: 'DECIMAL', role: 'MEASURE' },
+        { key: 'orders', label: '已支付订单数', type: 'INTEGER', role: 'MEASURE' },
+        { key: 'average_order_value', label: '客单价（元）', type: 'DECIMAL', role: 'MEASURE' },
+        { key: 'active_customers', label: '活跃客户数', type: 'INTEGER', role: 'MEASURE' },
+      ],
+      rows: [{ sales: '12846320', orders: '29459', average_order_value: '436.07', active_customers: '18632' }],
+    },
   ],
   views: [
     { id: 'view:trend', type: 'LINE', label: '趋势', datasetId: 'dataset:sales-trend', dimensionKeys: ['day'], measureKeys: ['sales'] },
     { id: 'view:channel', type: 'BAR', label: '渠道', datasetId: 'dataset:channel-contribution', dimensionKeys: ['channel'], measureKeys: ['sales'] },
+    { id: 'view:bundle', type: 'KPI_BUNDLE', label: '指标组', datasetId: 'dataset:operations-bundle', dimensionKeys: [], measureKeys: ['sales', 'orders', 'average_order_value', 'active_customers'] },
     { id: 'view:detail', type: 'TABLE', label: '明细', datasetId: 'dataset:channel-detail', dimensionKeys: ['rank', 'channel'], measureKeys: ['sales', 'share', 'orders', 'average_order_value'] },
   ],
   defaultViewId: 'view:trend',
   recommendedViewId: 'view:trend',
+  reportSources: [{
+    reportId: '00000000-0000-4000-8000-000000000211',
+    reportVersionId: '00000000-0000-4000-8000-000000000212',
+    componentId: '00000000-0000-4000-8000-000000000213',
+    reportTitle: '月度经营分析报告', componentTitle: '核心经营指标概览', componentType: 'METRIC_CARD_GROUP',
+    componentVersion: '3', semanticReleaseId: '00000000-0000-4000-8000-000000000101',
+    componentHash: 'f'.repeat(64), citationStatus: 'CITED', accessStatus: 'AUTHORIZED_AT_RUN',
+    openPath: '/reports/00000000-0000-4000-8000-000000000211?versionId=00000000-0000-4000-8000-000000000212',
+  }],
 }
 
 const DEMO_RESULT_RUN: QuestionRun = {

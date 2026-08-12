@@ -61,10 +61,11 @@ func IsKnownTool(tool ToolName) bool {
 type ObjectType string
 
 const (
-	ObjectTypeMetric    ObjectType = "METRIC"
-	ObjectTypeDimension ObjectType = "DIMENSION"
-	ObjectTypeModel     ObjectType = "MODEL"
-	ObjectTypeTerm      ObjectType = "TERM"
+	ObjectTypeMetric      ObjectType = "METRIC"
+	ObjectTypeDimension   ObjectType = "DIMENSION"
+	ObjectTypeModel       ObjectType = "MODEL"
+	ObjectTypeTerm        ObjectType = "TERM"
+	ObjectTypeReportAsset ObjectType = "REPORT_ASSET"
 )
 
 type ValidationType string
@@ -534,7 +535,7 @@ func validateOptionalText(name string, value *string, max int) error {
 func validateObjectTypes(values []ObjectType) error {
 	seen := map[ObjectType]struct{}{}
 	for index, value := range values {
-		if value != ObjectTypeMetric && value != ObjectTypeDimension && value != ObjectTypeModel && value != ObjectTypeTerm {
+		if value != ObjectTypeMetric && value != ObjectTypeDimension && value != ObjectTypeModel && value != ObjectTypeTerm && value != ObjectTypeReportAsset {
 			return fmt.Errorf("objectTypes[%d] is invalid", index)
 		}
 		if _, exists := seen[value]; exists {

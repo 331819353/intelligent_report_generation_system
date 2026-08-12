@@ -20,39 +20,63 @@
     "provenance"
   ],
   "properties": {
-    "schemaVersion": { "const": "1.0" },
-    "metadata": { "$ref": "#/$defs/metadata" },
-    "templateRef": { "$ref": "#/$defs/templateRef" },
-    "themeRef": { "$ref": "#/$defs/themeRef" },
-    "canvas": { "$ref": "#/$defs/canvas" },
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "templateRef": {
+      "$ref": "#/$defs/templateRef"
+    },
+    "themeRef": {
+      "$ref": "#/$defs/themeRef"
+    },
+    "canvas": {
+      "$ref": "#/$defs/canvas"
+    },
     "dataContexts": {
       "type": "array",
       "maxItems": 128,
-      "items": { "$ref": "#/$defs/dataContext" }
+      "items": {
+        "$ref": "#/$defs/dataContext"
+      }
     },
     "globalFilters": {
       "type": "array",
       "maxItems": 128,
-      "items": { "$ref": "#/$defs/globalFilter" }
+      "items": {
+        "$ref": "#/$defs/globalFilter"
+      }
     },
     "pages": {
       "type": "array",
       "minItems": 1,
       "maxItems": 20,
-      "items": { "$ref": "#/$defs/page" }
+      "items": {
+        "$ref": "#/$defs/page"
+      }
     },
     "components": {
       "type": "array",
       "maxItems": 500,
-      "items": { "$ref": "#/$defs/component" }
+      "items": {
+        "$ref": "#/$defs/component"
+      }
     },
     "interactions": {
       "type": "array",
       "maxItems": 500,
-      "items": { "$ref": "#/$defs/interaction" }
+      "items": {
+        "$ref": "#/$defs/interaction"
+      }
     },
-    "runtimePolicy": { "$ref": "#/$defs/runtimePolicy" },
-    "provenance": { "$ref": "#/$defs/provenance" }
+    "runtimePolicy": {
+      "$ref": "#/$defs/runtimePolicy"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    }
   },
   "$defs": {
     "stableId": {
@@ -78,14 +102,43 @@
     "metadata": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "code", "name", "description", "reportType", "locale"],
+      "required": [
+        "id",
+        "code",
+        "name",
+        "description",
+        "reportType",
+        "locale"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/stableId" },
-        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,127}$", "maxLength": 128 },
-        "name": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "description": { "type": "string", "maxLength": 4096 },
-        "reportType": { "enum": ["REPORT", "DASHBOARD"] },
-        "locale": { "type": "string", "pattern": "^[a-z]{2,3}(-[A-Z]{2})?$", "maxLength": 16 }
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,127}$",
+          "maxLength": 128
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "reportType": {
+          "enum": [
+            "REPORT",
+            "DASHBOARD"
+          ]
+        },
+        "locale": {
+          "type": "string",
+          "pattern": "^[a-z]{2,3}(-[A-Z]{2})?$",
+          "maxLength": 16
+        }
       }
     },
     "templateRef": {
@@ -99,138 +152,325 @@
         "narrativeTemplateVersion"
       ],
       "properties": {
-        "reportTemplateId": { "$ref": "#/$defs/stableId" },
-        "reportTemplateVersion": { "$ref": "#/$defs/semver" },
-        "structureTemplateVersion": { "$ref": "#/$defs/semver" },
-        "layoutTemplateVersion": { "$ref": "#/$defs/semver" },
-        "narrativeTemplateVersion": { "$ref": "#/$defs/semver" }
+        "reportTemplateId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "reportTemplateVersion": {
+          "$ref": "#/$defs/semver"
+        },
+        "structureTemplateVersion": {
+          "$ref": "#/$defs/semver"
+        },
+        "layoutTemplateVersion": {
+          "$ref": "#/$defs/semver"
+        },
+        "narrativeTemplateVersion": {
+          "$ref": "#/$defs/semver"
+        }
       }
     },
     "themeRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["themeId", "version"],
+      "required": [
+        "themeId",
+        "version"
+      ],
       "properties": {
-        "themeId": { "$ref": "#/$defs/stableId" },
-        "version": { "$ref": "#/$defs/semver" }
+        "themeId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "version": {
+          "$ref": "#/$defs/semver"
+        }
       }
     },
     "canvas": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["desktop", "mobile"],
+      "required": [
+        "desktop",
+        "mobile"
+      ],
       "properties": {
-        "desktop": { "$ref": "#/$defs/desktopCanvas" },
-        "mobile": { "$ref": "#/$defs/mobileCanvas" }
+        "desktop": {
+          "$ref": "#/$defs/desktopCanvas"
+        },
+        "mobile": {
+          "$ref": "#/$defs/mobileCanvas"
+        }
       }
     },
     "desktopCanvas": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["designWidth", "columns", "baseCellWidth", "baseRowHeight", "gapX", "gapY", "paddingX", "paddingY"],
+      "required": [
+        "designWidth",
+        "columns",
+        "baseCellWidth",
+        "baseRowHeight",
+        "gapX",
+        "gapY",
+        "paddingX",
+        "paddingY"
+      ],
       "properties": {
-        "designWidth": { "const": 1920 },
-        "columns": { "const": 24 },
-        "baseCellWidth": { "const": 80 },
-        "baseRowHeight": { "const": 54 },
-        "gapX": { "const": 12 },
-        "gapY": { "const": 12 },
-        "paddingX": { "const": 24 },
-        "paddingY": { "const": 24 }
+        "designWidth": {
+          "const": 1920
+        },
+        "columns": {
+          "const": 24
+        },
+        "baseCellWidth": {
+          "const": 80
+        },
+        "baseRowHeight": {
+          "const": 54
+        },
+        "gapX": {
+          "const": 12
+        },
+        "gapY": {
+          "const": 12
+        },
+        "paddingX": {
+          "const": 24
+        },
+        "paddingY": {
+          "const": 24
+        }
       }
     },
     "mobileCanvas": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["columns", "gapY", "paddingX", "paddingY"],
+      "required": [
+        "columns",
+        "gapY",
+        "paddingX",
+        "paddingY"
+      ],
       "properties": {
-        "columns": { "const": 1 },
-        "gapY": { "const": 12 },
-        "paddingX": { "const": 12 },
-        "paddingY": { "const": 12 }
+        "columns": {
+          "const": 1
+        },
+        "gapY": {
+          "const": 12
+        },
+        "paddingX": {
+          "const": 12
+        },
+        "paddingY": {
+          "const": 12
+        }
       }
     },
     "dataContext": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "datasetId", "datasetVersionId", "alias", "defaultParameters", "queryPolicy"],
+      "required": [
+        "id",
+        "datasetId",
+        "datasetVersionId",
+        "alias",
+        "defaultParameters",
+        "queryPolicy"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/stableId" },
-        "datasetId": { "$ref": "#/$defs/stableId" },
-        "datasetVersionId": { "$ref": "#/$defs/stableId" },
-        "alias": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "datasetId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "datasetVersionId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "alias": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
         "defaultParameters": {
           "type": "array",
           "maxItems": 64,
-          "items": { "$ref": "#/$defs/defaultParameter" }
+          "items": {
+            "$ref": "#/$defs/defaultParameter"
+          }
         },
-        "queryPolicy": { "$ref": "#/$defs/queryPolicy" }
+        "queryPolicy": {
+          "$ref": "#/$defs/queryPolicy"
+        }
       }
     },
     "defaultParameter": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "type"],
+      "required": [
+        "name",
+        "type"
+      ],
       "properties": {
-        "name": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$", "maxLength": 128 },
-        "type": { "enum": ["STRING", "NUMBER", "BOOLEAN"] },
-        "stringValue": { "type": "string", "maxLength": 4096 },
-        "numberValue": { "type": "number" },
-        "booleanValue": { "type": "boolean" }
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$",
+          "maxLength": 128
+        },
+        "type": {
+          "enum": [
+            "STRING",
+            "NUMBER",
+            "BOOLEAN"
+          ]
+        },
+        "stringValue": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "numberValue": {
+          "type": "number"
+        },
+        "booleanValue": {
+          "type": "boolean"
+        }
       },
       "oneOf": [
-        { "required": ["stringValue"], "properties": { "type": { "const": "STRING" } } },
-        { "required": ["numberValue"], "properties": { "type": { "const": "NUMBER" } } },
-        { "required": ["booleanValue"], "properties": { "type": { "const": "BOOLEAN" } } }
+        {
+          "required": [
+            "stringValue"
+          ],
+          "properties": {
+            "type": {
+              "const": "STRING"
+            }
+          }
+        },
+        {
+          "required": [
+            "numberValue"
+          ],
+          "properties": {
+            "type": {
+              "const": "NUMBER"
+            }
+          }
+        },
+        {
+          "required": [
+            "booleanValue"
+          ],
+          "properties": {
+            "type": {
+              "const": "BOOLEAN"
+            }
+          }
+        }
       ]
     },
     "queryPolicy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["timeoutMs", "maxRows", "cacheTtlSeconds"],
+      "required": [
+        "timeoutMs",
+        "maxRows",
+        "cacheTtlSeconds"
+      ],
       "properties": {
-        "timeoutMs": { "type": "integer", "minimum": 100, "maximum": 120000 },
-        "maxRows": { "type": "integer", "minimum": 1, "maximum": 10000 },
-        "cacheTtlSeconds": { "type": "integer", "minimum": 0, "maximum": 86400 }
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 120000
+        },
+        "maxRows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "cacheTtlSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400
+        }
       }
     },
     "globalFilter": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "type", "fieldRef", "scope"],
+      "required": [
+        "id",
+        "type",
+        "fieldRef",
+        "scope"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/stableId" },
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
         "type": {
           "enum": [
-            "SINGLE_SELECT", "MULTI_SELECT", "DATE", "DATE_RANGE", "RELATIVE_TIME",
-            "NUMBER_RANGE", "SEARCH_SELECT", "PARAMETER_INPUT", "SELECT", "BOOLEAN"
+            "SINGLE_SELECT",
+            "MULTI_SELECT",
+            "DATE",
+            "DATE_RANGE",
+            "RELATIVE_TIME",
+            "NUMBER_RANGE",
+            "SEARCH_SELECT",
+            "PARAMETER_INPUT",
+            "SELECT",
+            "BOOLEAN"
           ]
         },
-        "fieldRef": { "$ref": "#/$defs/fieldRef" },
-        "scope": { "$ref": "#/$defs/filterScope" },
-        "defaultValue": { "$ref": "#/$defs/filterDefaultValue" }
+        "fieldRef": {
+          "$ref": "#/$defs/fieldRef"
+        },
+        "scope": {
+          "$ref": "#/$defs/filterScope"
+        },
+        "defaultValue": {
+          "$ref": "#/$defs/filterDefaultValue"
+        }
       }
     },
     "fieldRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["dataContextId", "field"],
+      "required": [
+        "dataContextId",
+        "field"
+      ],
       "properties": {
-        "dataContextId": { "$ref": "#/$defs/stableId" },
-        "field": { "$ref": "#/$defs/logicalField" }
+        "dataContextId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "field": {
+          "$ref": "#/$defs/logicalField"
+        }
       }
     },
     "filterScope": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "targetIds"],
+      "required": [
+        "type",
+        "targetIds"
+      ],
       "properties": {
-        "type": { "enum": ["REPORT", "PAGE", "SECTION", "BLOCK", "COMPONENT"] },
+        "type": {
+          "enum": [
+            "REPORT",
+            "PAGE",
+            "SECTION",
+            "BLOCK",
+            "COMPONENT"
+          ]
+        },
         "targetIds": {
           "type": "array",
           "maxItems": 500,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/stableId" }
+          "items": {
+            "$ref": "#/$defs/stableId"
+          }
         }
       }
     },
@@ -238,420 +478,1166 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mode": { "type": "string", "maxLength": 4096 },
-        "unit": { "type": "string", "maxLength": 4096 },
-        "offset": { "type": "integer" },
-        "values": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 4096 } },
-        "minimum": { "type": "number" },
-        "maximum": { "type": "number" },
-        "boolean": { "type": "boolean" }
+        "mode": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "unit": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "values": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "minimum": {
+          "type": "number"
+        },
+        "maximum": {
+          "type": "number"
+        },
+        "boolean": {
+          "type": "boolean"
+        }
       }
     },
     "page": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "order", "sections"],
+      "required": [
+        "id",
+        "name",
+        "order",
+        "sections"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/stableId" },
-        "name": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "order": { "type": "integer", "minimum": 1 },
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 1
+        },
         "sections": {
           "type": "array",
           "maxItems": 30,
-          "items": { "$ref": "#/$defs/section" }
+          "items": {
+            "$ref": "#/$defs/section"
+          }
         }
       }
     },
     "section": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "order", "blocks"],
+      "required": [
+        "id",
+        "name",
+        "order",
+        "blocks"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/stableId" },
-        "name": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "order": { "type": "integer", "minimum": 1 },
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 1
+        },
         "blocks": {
           "type": "array",
           "maxItems": 300,
-          "items": { "$ref": "#/$defs/block" }
+          "items": {
+            "$ref": "#/$defs/block"
+          }
         }
       }
     },
     "block": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "type", "layout", "zones"],
+      "required": [
+        "id",
+        "type",
+        "layout",
+        "zones"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/stableId" },
-        "type": { "enum": ["ANALYSIS_CARD", "KPI_GROUP", "CHART", "TABLE", "CONTENT", "FILTER"] },
-        "layout": { "$ref": "#/$defs/blockLayout" },
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "type": {
+          "enum": [
+            "ANALYSIS_CARD",
+            "KPI_GROUP",
+            "CHART",
+            "TABLE",
+            "CONTENT",
+            "FILTER"
+          ]
+        },
+        "layout": {
+          "$ref": "#/$defs/blockLayout"
+        },
         "zones": {
           "type": "array",
           "maxItems": 16,
-          "items": { "$ref": "#/$defs/zone" }
+          "items": {
+            "$ref": "#/$defs/zone"
+          }
         }
       }
     },
     "blockLayout": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["desktop", "mobile"],
+      "required": [
+        "desktop",
+        "mobile"
+      ],
       "properties": {
-        "desktop": { "$ref": "#/$defs/desktopBlockLayout" },
-        "mobile": { "$ref": "#/$defs/mobileBlockLayout" }
+        "desktop": {
+          "$ref": "#/$defs/desktopBlockLayout"
+        },
+        "mobile": {
+          "$ref": "#/$defs/mobileBlockLayout"
+        }
       }
     },
     "desktopBlockLayout": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["x", "y", "w", "h"],
+      "required": [
+        "x",
+        "y",
+        "w",
+        "h"
+      ],
       "properties": {
-        "x": { "type": "integer", "minimum": 0, "maximum": 23 },
-        "y": { "type": "integer", "minimum": 0 },
-        "w": { "type": "integer", "minimum": 1, "maximum": 24 },
-        "h": { "type": "integer", "minimum": 1 }
+        "x": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "w": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 24
+        },
+        "h": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "mobileBlockLayout": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["order", "visible", "heightMode", "slotMode"],
+      "required": [
+        "order",
+        "visible",
+        "heightMode",
+        "slotMode"
+      ],
       "properties": {
-        "order": { "type": "integer", "minimum": 1 },
-        "visible": { "type": "boolean" },
-        "heightMode": { "enum": ["AUTO", "FIXED", "ASPECT_RATIO"] },
-        "slotMode": { "enum": ["STACK", "CAROUSEL", "PRIMARY_ONLY", "COLLAPSE"] },
-        "fixedHeight": { "type": "integer", "minimum": 40 },
-        "aspectRatio": { "type": "number", "exclusiveMinimum": 0 },
-        "primarySlotId": { "$ref": "#/$defs/stableId" }
+        "order": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "visible": {
+          "type": "boolean"
+        },
+        "heightMode": {
+          "enum": [
+            "AUTO",
+            "FIXED",
+            "ASPECT_RATIO"
+          ]
+        },
+        "slotMode": {
+          "enum": [
+            "STACK",
+            "CAROUSEL",
+            "PRIMARY_ONLY",
+            "COLLAPSE"
+          ]
+        },
+        "fixedHeight": {
+          "type": "integer",
+          "minimum": 40
+        },
+        "aspectRatio": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "primarySlotId": {
+          "$ref": "#/$defs/stableId"
+        }
       },
       "allOf": [
         {
-          "if": { "properties": { "heightMode": { "const": "AUTO" } }, "required": ["heightMode"] },
-          "then": { "not": { "anyOf": [{ "required": ["fixedHeight"] }, { "required": ["aspectRatio"] }] } }
+          "if": {
+            "properties": {
+              "heightMode": {
+                "const": "AUTO"
+              }
+            },
+            "required": [
+              "heightMode"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "fixedHeight"
+                  ]
+                },
+                {
+                  "required": [
+                    "aspectRatio"
+                  ]
+                }
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "heightMode": { "const": "FIXED" } }, "required": ["heightMode"] },
-          "then": { "required": ["fixedHeight"], "not": { "required": ["aspectRatio"] } }
+          "if": {
+            "properties": {
+              "heightMode": {
+                "const": "FIXED"
+              }
+            },
+            "required": [
+              "heightMode"
+            ]
+          },
+          "then": {
+            "required": [
+              "fixedHeight"
+            ],
+            "not": {
+              "required": [
+                "aspectRatio"
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "heightMode": { "const": "ASPECT_RATIO" } }, "required": ["heightMode"] },
-          "then": { "required": ["aspectRatio"], "not": { "required": ["fixedHeight"] } }
+          "if": {
+            "properties": {
+              "heightMode": {
+                "const": "ASPECT_RATIO"
+              }
+            },
+            "required": [
+              "heightMode"
+            ]
+          },
+          "then": {
+            "required": [
+              "aspectRatio"
+            ],
+            "not": {
+              "required": [
+                "fixedHeight"
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "slotMode": { "const": "PRIMARY_ONLY" } }, "required": ["slotMode"] },
-          "then": { "required": ["primarySlotId"] },
-          "else": { "not": { "required": ["primarySlotId"] } }
+          "if": {
+            "properties": {
+              "slotMode": {
+                "const": "PRIMARY_ONLY"
+              }
+            },
+            "required": [
+              "slotMode"
+            ]
+          },
+          "then": {
+            "required": [
+              "primarySlotId"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "primarySlotId"
+              ]
+            }
+          }
         }
       ]
     },
     "zone": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "type", "layout", "slots"],
+      "required": [
+        "id",
+        "order",
+        "type",
+        "layout",
+        "slots"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/stableId" },
-        "type": { "enum": ["HEADER", "FILTER", "INSIGHT", "CONTENT", "FOOTER"] },
-        "layout": { "$ref": "#/$defs/zoneLayout" },
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Zone position within its card, top to bottom."
+        },
+        "type": {
+          "enum": [
+            "HEADER",
+            "FILTER",
+            "INSIGHT",
+            "CONTENT",
+            "FOOTER"
+          ]
+        },
+        "layout": {
+          "$ref": "#/$defs/zoneLayout"
+        },
         "slots": {
           "type": "array",
           "maxItems": 16,
-          "items": { "$ref": "#/$defs/slot" }
+          "items": {
+            "$ref": "#/$defs/slot"
+          }
         }
       }
     },
     "zoneLayout": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["heightMode", "minHeight", "columns", "rows", "overflow", "emptyPriority"],
+      "required": [
+        "heightMode",
+        "minHeight",
+        "columns",
+        "rows",
+        "overflow",
+        "emptyPriority"
+      ],
       "properties": {
-        "heightMode": { "enum": ["AUTO", "FIXED", "FR", "HIDDEN"] },
-        "minHeight": { "type": "integer", "minimum": 0 },
-        "maxHeight": { "type": "integer", "minimum": 0 },
-        "fixedHeight": { "type": "integer", "minimum": 0 },
-        "fr": { "type": "number", "exclusiveMinimum": 0 },
-        "columns": { "type": "integer", "minimum": 1, "maximum": 24 },
-        "rows": { "type": "integer", "minimum": 1, "maximum": 100 },
-        "overflow": { "enum": ["CLIP", "SCROLL", "EXPAND"] },
-        "emptyPriority": { "type": "integer", "minimum": 0, "maximum": 100 }
+        "heightMode": {
+          "enum": [
+            "AUTO",
+            "FIXED",
+            "FR",
+            "HIDDEN"
+          ]
+        },
+        "minHeight": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxHeight": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fixedHeight": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fr": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "columns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 24
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "overflow": {
+          "enum": [
+            "CLIP",
+            "SCROLL",
+            "EXPAND"
+          ]
+        },
+        "emptyPriority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
       },
       "allOf": [
         {
-          "if": { "properties": { "heightMode": { "enum": ["AUTO", "HIDDEN"] } }, "required": ["heightMode"] },
-          "then": { "not": { "anyOf": [{ "required": ["fixedHeight"] }, { "required": ["fr"] }] } }
+          "if": {
+            "properties": {
+              "heightMode": {
+                "enum": [
+                  "AUTO",
+                  "HIDDEN"
+                ]
+              }
+            },
+            "required": [
+              "heightMode"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "fixedHeight"
+                  ]
+                },
+                {
+                  "required": [
+                    "fr"
+                  ]
+                }
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "heightMode": { "const": "FIXED" } }, "required": ["heightMode"] },
-          "then": { "required": ["fixedHeight"], "not": { "required": ["fr"] } }
+          "if": {
+            "properties": {
+              "heightMode": {
+                "const": "FIXED"
+              }
+            },
+            "required": [
+              "heightMode"
+            ]
+          },
+          "then": {
+            "required": [
+              "fixedHeight"
+            ],
+            "not": {
+              "required": [
+                "fr"
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "heightMode": { "const": "FR" } }, "required": ["heightMode"] },
-          "then": { "required": ["fr"], "not": { "required": ["fixedHeight"] } }
+          "if": {
+            "properties": {
+              "heightMode": {
+                "const": "FR"
+              }
+            },
+            "required": [
+              "heightMode"
+            ]
+          },
+          "then": {
+            "required": [
+              "fr"
+            ],
+            "not": {
+              "required": [
+                "fixedHeight"
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "heightMode": { "const": "HIDDEN" } }, "required": ["heightMode"] },
-          "else": { "properties": { "minHeight": { "minimum": 1 } } }
+          "if": {
+            "properties": {
+              "heightMode": {
+                "const": "HIDDEN"
+              }
+            },
+            "required": [
+              "heightMode"
+            ]
+          },
+          "else": {
+            "properties": {
+              "minHeight": {
+                "minimum": 1
+              }
+            }
+          }
         }
       ]
     },
     "slot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "grid"],
+      "required": [
+        "id",
+        "grid"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/stableId" },
-        "grid": { "$ref": "#/$defs/slotGrid" },
-        "componentId": { "$ref": "#/$defs/stableId" },
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "grid": {
+          "$ref": "#/$defs/slotGrid"
+        },
+        "componentId": {
+          "$ref": "#/$defs/stableId"
+        },
         "mergedFrom": {
           "type": "array",
           "minItems": 2,
           "maxItems": 16,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/stableId" }
+          "items": {
+            "$ref": "#/$defs/stableId"
+          }
         }
       }
     },
     "slotGrid": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["x", "y", "w", "h"],
+      "required": [
+        "x",
+        "y",
+        "w",
+        "h"
+      ],
       "properties": {
-        "x": { "type": "integer", "minimum": 0 },
-        "y": { "type": "integer", "minimum": 0 },
-        "w": { "type": "integer", "minimum": 1 },
-        "h": { "type": "integer", "minimum": 1 }
+        "x": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "w": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "h": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "component": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "templateRef", "options"],
+      "required": [
+        "id",
+        "templateRef",
+        "options"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/stableId" },
-        "templateRef": { "$ref": "#/$defs/componentTemplateRef" },
-        "dataBinding": { "$ref": "#/$defs/dataBinding" },
-        "options": { "$ref": "#/$defs/componentOptions" }
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "templateRef": {
+          "$ref": "#/$defs/componentTemplateRef"
+        },
+        "dataBinding": {
+          "$ref": "#/$defs/dataBinding"
+        },
+        "options": {
+          "$ref": "#/$defs/componentOptions"
+        }
       }
     },
     "componentTemplateRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "version"],
+      "required": [
+        "type",
+        "version"
+      ],
       "properties": {
-        "type": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$", "maxLength": 64 },
-        "version": { "$ref": "#/$defs/semver" }
+        "type": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
+          "maxLength": 64
+        },
+        "version": {
+          "$ref": "#/$defs/semver"
+        }
       }
     },
     "dataBinding": {
       "oneOf": [
-        { "$ref": "#/$defs/semanticDataBinding" },
-        { "$ref": "#/$defs/datasetFieldDataBinding" }
+        {
+          "$ref": "#/$defs/semanticDataBinding"
+        },
+        {
+          "$ref": "#/$defs/datasetFieldDataBinding"
+        }
       ]
     },
     "semanticDataBinding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["bindingMode", "semanticQueryRef"],
+      "required": [
+        "bindingMode",
+        "semanticQueryRef"
+      ],
       "properties": {
-        "bindingMode": { "const": "SEMANTIC_IR" },
-        "semanticQueryRef": { "$ref": "#/$defs/semanticQueryRef" }
+        "bindingMode": {
+          "const": "SEMANTIC_IR"
+        },
+        "semanticQueryRef": {
+          "$ref": "#/$defs/semanticQueryRef"
+        }
       }
     },
     "datasetFieldDataBinding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["bindingMode", "dataContextId", "dimensions", "measures"],
+      "required": [
+        "bindingMode",
+        "dataContextId",
+        "dimensions",
+        "measures"
+      ],
       "properties": {
-        "bindingMode": { "const": "DATASET_FIELD" },
-        "dataContextId": { "$ref": "#/$defs/stableId" },
+        "bindingMode": {
+          "const": "DATASET_FIELD"
+        },
+        "dataContextId": {
+          "$ref": "#/$defs/stableId"
+        },
         "dimensions": {
           "type": "array",
           "maxItems": 32,
-          "items": { "$ref": "#/$defs/fieldBinding" }
+          "items": {
+            "$ref": "#/$defs/fieldBinding"
+          }
         },
         "measures": {
           "type": "array",
           "minItems": 1,
           "maxItems": 32,
-          "items": { "$ref": "#/$defs/fieldBinding" }
+          "items": {
+            "$ref": "#/$defs/fieldBinding"
+          }
         }
       }
     },
     "semanticQueryRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["semanticReleaseId", "semanticContentHash", "semanticIr", "queryPlanHash"],
+      "required": [
+        "semanticReleaseId",
+        "semanticContentHash",
+        "semanticIr",
+        "queryPlanHash"
+      ],
       "allOf": [
-        { "not": { "required": ["sourceQuestionRunId", "compilationArtifactId"] } }
+        {
+          "not": {
+            "required": [
+              "sourceQuestionRunId",
+              "compilationArtifactId"
+            ]
+          }
+        }
       ],
       "properties": {
-        "semanticReleaseId": { "$ref": "#/$defs/stableId" },
-        "semanticContentHash": { "$ref": "#/$defs/contentHash" },
-        "semanticIr": { "$ref": "semantic-ir-v1.schema.json" },
-        "queryPlanHash": { "$ref": "#/$defs/contentHash" },
-        "sourceQuestionRunId": { "$ref": "#/$defs/stableId" },
-        "compilationArtifactId": { "$ref": "#/$defs/stableId" },
-        "datasetVersionId": { "$ref": "#/$defs/stableId" },
-        "resolvedTimeSpec": { "$ref": "#/$defs/resolvedTimeSpec" },
-        "evidenceRefs": {
-          "type": "array", "maxItems": 64, "uniqueItems": true,
-          "items": { "$ref": "#/$defs/evidenceRef" }
+        "semanticReleaseId": {
+          "$ref": "#/$defs/stableId"
         },
-        "chartRuleVersion": { "$ref": "#/$defs/semver" }
+        "semanticContentHash": {
+          "$ref": "#/$defs/contentHash"
+        },
+        "semanticIr": {
+          "$ref": "semantic-ir-v1.schema.json"
+        },
+        "queryPlanHash": {
+          "$ref": "#/$defs/contentHash"
+        },
+        "sourceQuestionRunId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "compilationArtifactId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "datasetVersionId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "resolvedTimeSpec": {
+          "$ref": "#/$defs/resolvedTimeSpec"
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/evidenceRef"
+          }
+        },
+        "chartRuleVersion": {
+          "$ref": "#/$defs/semver"
+        }
       }
     },
     "resolvedTimeSpec": {
-      "type": "object", "additionalProperties": false,
-      "required": ["requestedPeriod","grain","policyApplied","policySource","resolvedStart","resolvedEndExclusive","dataAvailableThrough","truncatedByDataAvailability","periodFallbackApplied","timezone"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestedPeriod",
+        "grain",
+        "policyApplied",
+        "policySource",
+        "resolvedStart",
+        "resolvedEndExclusive",
+        "dataAvailableThrough",
+        "truncatedByDataAvailability",
+        "periodFallbackApplied",
+        "timezone"
+      ],
       "properties": {
-        "requestedPeriod": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "grain": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "policyApplied": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "policySource": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "resolvedStart": { "type": "string", "format": "date-time" },
-        "resolvedEndExclusive": { "type": "string", "format": "date-time" },
-        "dataAvailableThrough": { "type": "string", "format": "date-time" },
-        "truncatedByDataAvailability": { "type": "boolean" },
-        "periodFallbackApplied": { "type": "boolean" },
-        "timezone": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "calendarVersionId": { "type": "string", "maxLength": 128 },
-        "comparison": { "$ref": "#/$defs/resolvedComparison" }
+        "requestedPeriod": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "grain": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "policyApplied": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "policySource": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "resolvedStart": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "resolvedEndExclusive": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "dataAvailableThrough": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "truncatedByDataAvailability": {
+          "type": "boolean"
+        },
+        "periodFallbackApplied": {
+          "type": "boolean"
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "calendarVersionId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "comparison": {
+          "$ref": "#/$defs/resolvedComparison"
+        }
       }
     },
     "resolvedComparison": {
-      "type": "object", "additionalProperties": false,
-      "required": ["type","periods","alignment","resolvedStart","resolvedEndExclusive","overflowApplied"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "periods",
+        "alignment",
+        "resolvedStart",
+        "resolvedEndExclusive",
+        "overflowApplied"
+      ],
       "properties": {
-        "type": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "periods": { "type": "integer", "minimum": 1 },
-        "alignment": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "resolvedStart": { "type": "string", "format": "date-time" },
-        "resolvedEndExclusive": { "type": "string", "format": "date-time" },
-        "overflowApplied": { "type": "boolean" }
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "periods": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "alignment": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "resolvedStart": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "resolvedEndExclusive": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "overflowApplied": {
+          "type": "boolean"
+        }
       }
     },
     "evidenceRef": {
-      "type": "object", "additionalProperties": false,
-      "required": ["evidenceId","kind","sourceId","contentHash"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidenceId",
+        "kind",
+        "sourceId",
+        "contentHash"
+      ],
       "properties": {
-        "evidenceId": { "$ref": "#/$defs/stableId" },
-        "kind": { "enum": ["EXACT_ALIAS","LEXICAL_MATCH","VECTOR_MATCH","GRAPH_PATH","SEMANTIC_CONTRACT","CERTIFIED_EXAMPLE","DIMENSION_PROFILE","CANDIDATE_SET","DATA_QUALITY","QUERY_PLAN","QUERY_RESULT","POLICY","RULE","CONVERSATION"] },
-        "sourceId": { "$ref": "#/$defs/stableId" },
-        "contentHash": { "$ref": "#/$defs/contentHash" }
+        "evidenceId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "kind": {
+          "enum": [
+            "EXACT_ALIAS",
+            "LEXICAL_MATCH",
+            "VECTOR_MATCH",
+            "GRAPH_PATH",
+            "SEMANTIC_CONTRACT",
+            "CERTIFIED_EXAMPLE",
+            "DIMENSION_PROFILE",
+            "CANDIDATE_SET",
+            "DATA_QUALITY",
+            "QUERY_PLAN",
+            "QUERY_RESULT",
+            "POLICY",
+            "RULE",
+            "CONVERSATION"
+          ]
+        },
+        "sourceId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "contentHash": {
+          "$ref": "#/$defs/contentHash"
+        }
       }
     },
     "fieldBinding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["role", "field"],
+      "required": [
+        "role",
+        "field"
+      ],
       "properties": {
-        "role": { "enum": ["DIMENSION", "SERIES", "X_AXIS", "Y_AXIS", "VALUE", "CATEGORY", "TIME", "COLOR", "SIZE", "LABEL", "DETAIL", "TOOLTIP"] },
-        "field": { "$ref": "#/$defs/logicalField" }
+        "role": {
+          "enum": [
+            "DIMENSION",
+            "SERIES",
+            "X_AXIS",
+            "Y_AXIS",
+            "VALUE",
+            "CATEGORY",
+            "TIME",
+            "COLOR",
+            "SIZE",
+            "LABEL",
+            "DETAIL",
+            "TOOLTIP"
+          ]
+        },
+        "field": {
+          "$ref": "#/$defs/logicalField"
+        }
       }
     },
     "componentOptions": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "title": { "type": "string", "maxLength": 4096 },
-        "subtitle": { "type": "string", "maxLength": 4096 },
-        "showLegend": { "type": "boolean" },
-        "showLabel": { "type": "boolean" },
-        "smooth": { "type": "boolean" },
-        "orientation": { "enum": ["HORIZONTAL", "VERTICAL"] },
-        "topN": { "type": "integer", "minimum": 1, "maximum": 1000 },
-        "colorPaletteRef": { "type": "string", "maxLength": 4096 },
-        "numberFormat": { "type": "string", "maxLength": 4096 },
-        "nullPolicy": { "enum": ["GAP", "ZERO", "HIDE"] },
-        "animation": { "type": "boolean" },
-        "mobileLegendMode": { "enum": ["VISIBLE", "HIDDEN", "SCROLL"] },
-        "richText": { "type": "string", "maxLength": 65536 },
-        "imageAssetId": { "$ref": "#/$defs/stableId" },
-        "insightRole": { "type": "string", "maxLength": 4096 },
-        "tablePageSize": { "type": "integer", "minimum": 1, "maximum": 1000 }
+        "title": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "subtitle": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "showLegend": {
+          "type": "boolean"
+        },
+        "showLabel": {
+          "type": "boolean"
+        },
+        "smooth": {
+          "type": "boolean"
+        },
+        "orientation": {
+          "enum": [
+            "HORIZONTAL",
+            "VERTICAL"
+          ]
+        },
+        "topN": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "colorPaletteRef": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "numberFormat": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "nullPolicy": {
+          "enum": [
+            "GAP",
+            "ZERO",
+            "HIDE"
+          ]
+        },
+        "animation": {
+          "type": "boolean"
+        },
+        "mobileLegendMode": {
+          "enum": [
+            "VISIBLE",
+            "HIDDEN",
+            "SCROLL"
+          ]
+        },
+        "richText": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "imageAssetId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "insightRole": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "tablePageSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
       }
     },
     "interaction": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "sourceComponentId", "event", "action", "targetComponentIds", "fieldMappings"],
+      "required": [
+        "id",
+        "sourceComponentId",
+        "event",
+        "action",
+        "targetComponentIds",
+        "fieldMappings"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/stableId" },
-        "sourceComponentId": { "$ref": "#/$defs/stableId" },
-        "event": { "enum": ["CLICK", "SELECT", "BRUSH", "ZOOM"] },
-        "action": { "enum": ["FILTER", "DRILL_DOWN", "HIGHLIGHT", "NAVIGATE_PAGE"] },
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "sourceComponentId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "event": {
+          "enum": [
+            "CLICK",
+            "SELECT",
+            "BRUSH",
+            "ZOOM"
+          ]
+        },
+        "action": {
+          "enum": [
+            "FILTER",
+            "DRILL_DOWN",
+            "HIGHLIGHT",
+            "NAVIGATE_PAGE"
+          ]
+        },
         "targetComponentIds": {
           "type": "array",
           "maxItems": 64,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/stableId" }
+          "items": {
+            "$ref": "#/$defs/stableId"
+          }
         },
-        "targetPageId": { "$ref": "#/$defs/stableId" },
+        "targetPageId": {
+          "$ref": "#/$defs/stableId"
+        },
         "fieldMappings": {
           "type": "array",
           "maxItems": 64,
-          "items": { "$ref": "#/$defs/fieldMapping" }
+          "items": {
+            "$ref": "#/$defs/fieldMapping"
+          }
         }
       }
     },
     "fieldMapping": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sourceField", "targetField"],
+      "required": [
+        "sourceField",
+        "targetField"
+      ],
       "properties": {
-        "sourceField": { "$ref": "#/$defs/logicalField" },
-        "targetField": { "$ref": "#/$defs/logicalField" }
+        "sourceField": {
+          "$ref": "#/$defs/logicalField"
+        },
+        "targetField": {
+          "$ref": "#/$defs/logicalField"
+        }
       }
     },
     "runtimePolicy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["refreshMode", "refreshIntervalSeconds", "maxConcurrentQueries", "componentTimeoutMs", "exportEnabled", "failureMode"],
+      "required": [
+        "refreshMode",
+        "refreshIntervalSeconds",
+        "maxConcurrentQueries",
+        "componentTimeoutMs",
+        "exportEnabled",
+        "failureMode"
+      ],
       "properties": {
-        "refreshMode": { "enum": ["MANUAL", "ON_OPEN", "INTERVAL"] },
-        "refreshIntervalSeconds": { "type": "integer", "minimum": 0, "maximum": 86400 },
-        "maxConcurrentQueries": { "type": "integer", "minimum": 1, "maximum": 32 },
-        "componentTimeoutMs": { "type": "integer", "minimum": 100, "maximum": 120000 },
-        "exportEnabled": { "type": "boolean" },
-        "failureMode": { "enum": ["PARTIAL", "STRICT"] }
+        "refreshMode": {
+          "enum": [
+            "MANUAL",
+            "ON_OPEN",
+            "INTERVAL"
+          ]
+        },
+        "refreshIntervalSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400
+        },
+        "maxConcurrentQueries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "componentTimeoutMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 120000
+        },
+        "exportEnabled": {
+          "type": "boolean"
+        },
+        "failureMode": {
+          "enum": [
+            "PARTIAL",
+            "STRICT"
+          ]
+        }
       }
     },
     "provenance": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["createdFrom", "sourceQuestionRunIds", "aiRunIds"],
+      "required": [
+        "createdFrom",
+        "sourceQuestionRunIds",
+        "aiRunIds"
+      ],
       "properties": {
-        "createdFrom": { "enum": ["MANUAL", "TEMPLATE", "AI", "ASK_DATA", "IMPORT"] },
+        "createdFrom": {
+          "enum": [
+            "MANUAL",
+            "TEMPLATE",
+            "AI",
+            "ASK_DATA",
+            "IMPORT"
+          ]
+        },
         "sourceQuestionRunIds": {
           "type": "array",
           "maxItems": 128,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/stableId" }
+          "items": {
+            "$ref": "#/$defs/stableId"
+          }
         },
         "aiRunIds": {
           "type": "array",
           "maxItems": 128,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/stableId" }
+          "items": {
+            "$ref": "#/$defs/stableId"
+          }
         },
         "analysisMethodVersions": {
-          "type": "array", "maxItems": 128, "uniqueItems": true,
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
           "items": {
-            "type": "object", "additionalProperties": false,
-            "required": ["analysisMethod", "version"],
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "analysisMethod",
+              "version"
+            ],
             "properties": {
-              "analysisMethod": { "$ref": "#/$defs/stableId" },
-              "version": { "$ref": "#/$defs/semver" }
+              "analysisMethod": {
+                "$ref": "#/$defs/stableId"
+              },
+              "version": {
+                "$ref": "#/$defs/semver"
+              }
             }
           }
         },
         "promptVersions": {
-          "type": "array", "maxItems": 128, "uniqueItems": true,
-          "items": { "$ref": "#/$defs/stableId" }
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/stableId"
+          }
         },
         "modelPolicies": {
-          "type": "array", "maxItems": 128, "uniqueItems": true,
-          "items": { "$ref": "#/$defs/stableId" }
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/stableId"
+          }
         }
       }
     }

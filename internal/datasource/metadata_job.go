@@ -7,10 +7,11 @@ import (
 )
 
 var (
-	ErrMetadataJobNotFound = errors.New("metadata job not found")
-	ErrMetadataJobActive   = errors.New("a metadata job is already active for this data source")
-	ErrSamplePolicyDenied  = errors.New("metadata sample mode is not allowed by the tenant policy")
-	ErrSamplePolicyChanged = errors.New("metadata sample policy changed after the job was queued")
+	ErrMetadataJobNotFound     = errors.New("metadata job not found")
+	ErrMetadataJobActive       = errors.New("a metadata job is already active for this data source")
+	ErrMetadataJobNotRetryable = errors.New("metadata job is not retryable")
+	ErrSamplePolicyDenied      = errors.New("metadata sample mode is not allowed by the tenant policy")
+	ErrSamplePolicyChanged     = errors.New("metadata sample policy changed after the job was queued")
 )
 
 type MetadataJobKind string
@@ -116,7 +117,9 @@ type metadataJobItemUpdate struct {
 type MetadataJobRepository interface {
 	EnqueueMetadataJob(context.Context, metadataJobRequest) (MetadataJob, error)
 	GetMetadataJob(context.Context, string, string, string) (MetadataJob, error)
+	LatestMetadataJob(context.Context, string, string) (*MetadataJob, error)
 	LatestActiveMetadataJob(context.Context, string, string) (*MetadataJob, error)
+	FailedMetadataJobSelections(context.Context, string, string, string) (MetadataJob, []TableSelection, error)
 	ListMetadataJobTenantIDs(context.Context) ([]string, error)
 	ClaimMetadataJob(context.Context, string, string, time.Duration) (*metadataJobClaim, error)
 	ListMetadataJobItems(context.Context, string, string) ([]metadataJobItem, error)

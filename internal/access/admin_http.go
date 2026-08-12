@@ -178,6 +178,16 @@ func NewAdminHandler(authService *auth.Service, store *AdminStore) http.Handler 
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 	})))
+	mux.Handle("POST /api/v1/domain-applications/{id}/withdraw", authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		if err := store.WithdrawDomainApplication(
+			r.Context(), c.TenantID, c.Subject, r.PathValue("id"),
+		); err != nil {
+			writeError(w, http.StatusConflict, "DOMAIN_APPLICATION_WITHDRAW_FAILED", err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})))
 	mux.Handle("GET /api/v1/domains/{id}/applications", authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		items, err := store.ListPendingDomainApplications(

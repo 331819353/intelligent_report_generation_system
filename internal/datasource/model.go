@@ -120,6 +120,26 @@ type Source struct {
 	Version                int64             `json:"version"`
 	RuntimeQuota           Quota             `json:"-"`
 }
+
+// RetirementDatasetImpact describes one governed downstream that must be
+// migrated or retired before its source connection can be safely removed.
+type RetirementDatasetImpact struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Status         string `json:"status"`
+	Layer          string `json:"layer,omitempty"`
+	DependencyKind string `json:"dependencyKind"`
+}
+
+// RetirementImpact is the preflight contract consumed by the management UI.
+// The final delete repeats the dependency check under a database lock.
+type RetirementImpact struct {
+	CanRetire                bool                      `json:"canRetire"`
+	BlockingDatasetCount     int                       `json:"blockingDatasetCount"`
+	CredentialWillBeRevoked  bool                      `json:"credentialWillBeRevoked"`
+	SourceFileWillBeRetained bool                      `json:"sourceFileWillBeRetained"`
+	Datasets                 []RetirementDatasetImpact `json:"datasets"`
+}
 type Quota struct {
 	MaxDataSources, MaxConnectionsPerSource, MaxConcurrentQueries int
 	MaxExcelFileBytes                                             int64

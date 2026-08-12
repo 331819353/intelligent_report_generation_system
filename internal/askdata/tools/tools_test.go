@@ -144,6 +144,7 @@ func TestMetricRetrievalIncludesExecutableSemanticContext(t *testing.T) {
 		toolhost.ObjectTypeMetric,
 		toolhost.ObjectTypeDimension,
 		toolhost.ObjectTypeModel,
+		toolhost.ObjectTypeReportAsset,
 	}
 	if len(completed) != len(want) {
 		t.Fatalf("completed object types = %v, want %v", completed, want)
@@ -156,6 +157,10 @@ func TestMetricRetrievalIncludesExecutableSemanticContext(t *testing.T) {
 	termOnly := completeAnalyticObjectTypes([]toolhost.ObjectType{toolhost.ObjectTypeTerm})
 	if len(termOnly) != 1 || termOnly[0] != toolhost.ObjectTypeTerm {
 		t.Fatalf("term-only retrieval widened to %v", termOnly)
+	}
+	reportLookup := completeAnalyticObjectTypes([]toolhost.ObjectType{toolhost.ObjectTypeReportAsset})
+	if len(reportLookup) != len(want) {
+		t.Fatalf("report lookup omitted executable context: %v", reportLookup)
 	}
 }
 

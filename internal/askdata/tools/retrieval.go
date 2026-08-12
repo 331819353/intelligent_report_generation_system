@@ -65,6 +65,22 @@ func (binding *Binding) searchSemanticObjects(
 		}
 	}
 	canonicalMetrics := map[string]string{}
+	reportAssetIDs := make([]askdata.ID, 0)
+	for _, candidate := range result.Candidates {
+		if candidate.ObjectType == search.ObjectReportAsset {
+			reportAssetIDs = append(reportAssetIDs, candidate.ObjectVersionID)
+		}
+	}
+	reportSources := map[askdata.ID]toolhost.ReportSourceSummary{}
+	if len(reportAssetIDs) > 0 {
+		if binding.services.ReportSources == nil {
+			return output, ErrToolUnavailable
+		}
+		reportSources, err = binding.services.ReportSources.ReportSources(ctx, binding.run.Scope, binding.run.DomainID, reportAssetIDs)
+		if err != nil {
+			return output, err
+		}
+	}
 	if len(legacyMetricIDs) > 0 {
 		if binding.services.Reader == nil {
 			return output, ErrToolUnavailable
@@ -94,6 +110,22 @@ func (binding *Binding) searchSemanticObjects(
 		}
 		key := string(objectType) + "\x00" + string(versionID)
 		if !seenCandidates[key] {
+			var reportSource *toolhost.ReportSourceSummary
+			if objectType == toolhost.ObjectTypeReportAsset {
+				if strongestEvidenceScore(candidate.Evidence) < 0.25 {
+					continue
+				}
+				source, visible := reportSources[versionID]
+				if !visible {
+					continue
+				}
+				sourceCopy := source
+				reportSource = &sourceCopy
+				binding.reportSourcesMutex.Lock()
+				binding.reportSources[versionID] = source
+				binding.reportSourceScores[versionID] = candidate.Score
+				binding.reportSourcesMutex.Unlock()
+			}
 			seenCandidates[key] = true
 			candidates = append(candidates, toolhost.CandidateSummary{
 				ObjectType:      objectType,
@@ -104,7 +136,8 @@ func (binding *Binding) searchSemanticObjects(
 				MatchType: strongestSource(candidate.Evidence),
 				// Only CERTIFIED objects are indexed for a release, so a returned
 				// candidate is certified by construction.
-				Status: "CERTIFIED",
+				Status:       "CERTIFIED",
+				ReportSource: reportSource,
 			})
 		}
 		for _, item := range candidate.Evidence {
@@ -141,14 +174,20 @@ func completeAnalyticObjectTypes(values []toolhost.ObjectType) []toolhost.Object
 			analytic = true
 		case toolhost.ObjectTypeTerm:
 			terms = true
+		case toolhost.ObjectTypeReportAsset:
+			// A direct report-asset lookup is also analytical: the published
+			// component is only a source prior, so executable semantic context
+			// must be retrieved alongside it.
+			analytic = true
 		}
 	}
-	result := make([]toolhost.ObjectType, 0, 4)
+	result := make([]toolhost.ObjectType, 0, 5)
 	if analytic {
 		result = append(result,
 			toolhost.ObjectTypeMetric,
 			toolhost.ObjectTypeDimension,
 			toolhost.ObjectTypeModel,
+			toolhost.ObjectTypeReportAsset,
 		)
 	}
 	if terms {
@@ -389,6 +428,8 @@ func retrievalObjectTypes(values []toolhost.ObjectType) ([]search.ObjectType, bo
 			result = append(result, search.ObjectSemanticModel)
 		case toolhost.ObjectTypeTerm:
 			result = append(result, search.ObjectBusinessTerm)
+		case toolhost.ObjectTypeReportAsset:
+			result = append(result, search.ObjectReportAsset)
 		default:
 			continue
 		}
@@ -406,6 +447,8 @@ func toolObjectType(value search.ObjectType) (toolhost.ObjectType, bool) {
 		return toolhost.ObjectTypeModel, true
 	case search.ObjectBusinessTerm:
 		return toolhost.ObjectTypeTerm, true
+	case search.ObjectReportAsset:
+		return toolhost.ObjectTypeReportAsset, true
 	default:
 		return "", false
 	}
@@ -474,6 +517,16 @@ func strongestSource(evidence []search.SourceEvidence) string {
 	}
 	if best == "" {
 		return "LEXICAL"
+	}
+	return best
+}
+
+func strongestEvidenceScore(evidence []search.SourceEvidence) float64 {
+	best := 0.0
+	for _, item := range evidence {
+		if item.SourceScore > best {
+			best = item.SourceScore
+		}
 	}
 	return best
 }

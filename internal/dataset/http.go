@@ -190,6 +190,16 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		}
 		record, err := service.Update(r.Context(), claims.TenantID, claims.Subject, r.PathValue("id"), input)
 		if err != nil {
+			if errors.Is(err, ErrConflict) {
+				current, currentErr := service.Get(r.Context(), claims.TenantID, r.PathValue("id"))
+				if currentErr == nil {
+					writeDatasetJSON(w, http.StatusConflict, map[string]any{
+						"code": "DATASET_VERSION_CONFLICT", "message": "数据集草稿已被其他协作者更新，请加载最新版本后继续",
+						"currentVersion": current.Version, "currentHash": current.DSLHash,
+					})
+					return
+				}
+			}
 			writeDatasetError(w, err)
 			return
 		}
@@ -206,6 +216,16 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 			r.PathValue("id"), input,
 		)
 		if err != nil {
+			if errors.Is(err, ErrConflict) {
+				current, currentErr := service.Get(r.Context(), claims.TenantID, r.PathValue("id"))
+				if currentErr == nil {
+					writeDatasetJSON(w, http.StatusConflict, map[string]any{
+						"code": "DATASET_VERSION_CONFLICT", "message": "数据集草稿已被其他协作者更新，请加载最新版本后继续",
+						"currentVersion": current.Version, "currentHash": current.DSLHash,
+					})
+					return
+				}
+			}
 			writeDatasetError(w, err)
 			return
 		}
@@ -236,6 +256,16 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 			return
 		}
 		writeDatasetJSON(w, http.StatusOK, record)
+	})))
+	mux.Handle("GET /api/v1/datasets/{id}/lifecycle-impact", protect("READ", objectID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		impact, err := service.GetLifecycleImpact(r.Context(), claims.TenantID, r.PathValue("id"))
+		if err != nil {
+			writeDatasetError(w, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeDatasetJSON(w, http.StatusOK, impact)
 	})))
 	mux.Handle("DELETE /api/v1/datasets/{id}", protect("MANAGE", objectID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, _ := auth.ClaimsFromContext(r.Context())

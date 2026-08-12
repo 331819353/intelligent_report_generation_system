@@ -121,7 +121,7 @@ export type ClarificationOption = {
 }
 export type ResultColumnType = 'STRING' | 'INTEGER' | 'DECIMAL' | 'DATE' | 'DATETIME'
 export type ResultColumnRole = 'DIMENSION' | 'MEASURE'
-export type ResultViewType = 'KPI' | 'LINE' | 'BAR' | 'TABLE'
+export type ResultViewType = 'KPI' | 'KPI_BUNDLE' | 'LINE' | 'BAR' | 'TABLE'
 export type ResolvedComparison = {
   type: 'YEAR_OVER_YEAR' | 'MONTH_OVER_MONTH' | 'QUARTER_OVER_QUARTER' | 'WEEK_OVER_WEEK' | 'PERIOD_OVER_PERIOD'
   periods: number
@@ -174,6 +174,20 @@ export type QuestionResultView = {
   dimensionKeys: string[]
   measureKeys: string[]
 }
+export type QuestionReportSource = {
+  reportId: string
+  reportVersionId: string
+  componentId: string
+  reportTitle: string
+  componentTitle?: string
+  componentType: string
+  componentVersion: string
+  semanticReleaseId: string
+  componentHash: string
+  citationStatus: 'CITED'
+  accessStatus: 'AUTHORIZED_AT_RUN'
+  openPath: string
+}
 export type QuestionResult = {
   schemaVersion: 'question-result-v1'
   title: string
@@ -200,6 +214,7 @@ export type QuestionResult = {
   views: QuestionResultView[]
   defaultViewId: string
   recommendedViewId?: string
+  reportSources?: QuestionReportSource[]
 }
 export type QuestionScopeVerdict = {
   schemaVersion: 'question-scope-verdict-v1'

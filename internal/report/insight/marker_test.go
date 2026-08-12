@@ -131,7 +131,7 @@ func TestRenderedNarrativeVerifiesEndToEnd(t *testing.T) {
 		EvidenceHash:  hash,
 		PromptVersion: "report-insight-v1", ModelPolicy: "governed-default",
 		VerifierVersion: answer.VerifierVersion, PolicyWordlistVersion: policyWordlistVersion,
-		Content:         content, Citations: citations, Status: InsightCurrent,
+		Content: content, Citations: citations, Status: InsightCurrent,
 	}.Normalize()
 	if err := artifact.ValidateAgainst(bundle); err != nil {
 		t.Fatalf("rendered artifact must be valid: %v", err)

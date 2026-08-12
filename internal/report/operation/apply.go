@@ -199,7 +199,7 @@ func applyOne(definition *report.ReportDefinition, operation Operation) error {
 		if err != nil {
 			return err
 		}
-		zone.Layout.EmptyPriority = operation.Payload.(*ZoneReorderPayload).Order
+		zone.Order = operation.Payload.(*ZoneReorderPayload).Order
 	case SlotCreate:
 		_, _, _, zone, err := zoneByID(definition, operation.TargetID)
 		if err != nil {

@@ -1088,6 +1088,9 @@ func (s *AdminStore) ApplyDomainAccess(
 			      AND membership.user_id=applicant.id
 			      AND membership.status='ACTIVE'
 			  )
+			ON CONFLICT(tenant_id,domain_id,applicant_user_id)
+			  WHERE status='PENDING'
+			DO UPDATE SET reason=EXCLUDED.reason
 			RETURNING id::text`, tenantID, applicantID, reason, domainID).Scan(&id)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errors.New("active domain was not found or user is already a member")
@@ -1116,6 +1119,36 @@ func (s *AdminStore) ApplyDomainAccess(
 		}
 	}
 	return application, errors.New("created domain application was not found")
+}
+
+// WithdrawDomainApplication lets only the applicant cancel a pending request.
+// Rejected and cancelled requests remain immutable audit history; a later
+// application creates a new row, while concurrent duplicate pending submits
+// are merged by ApplyDomainAccess.
+func (s *AdminStore) WithdrawDomainApplication(
+	ctx context.Context, tenantID, applicantID, applicationID string,
+) error {
+	return database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		var domainID string
+		err := tx.QueryRow(ctx, `UPDATE platform.domain_access_applications
+			SET status='CANCELLED'
+			WHERE tenant_id=$1::uuid AND id=$2::uuid
+			  AND applicant_user_id=$3::uuid AND status='PENDING'
+			RETURNING domain_id::text`, tenantID, applicationID, applicantID).Scan(&domainID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errors.New("pending domain application was not found")
+		}
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+				tenant_id,actor_user_id,action,resource_type,resource_id,detail
+			) VALUES($1,$2,'WITHDRAW_DOMAIN_APPLICATION','DOMAIN_APPLICATION',$3,
+				jsonb_build_object('domainId',$4::text))`,
+			tenantID, applicantID, applicationID, domainID,
+		)
+		return err
+	})
 }
 
 // ListMyDomainApplications returns the caller's request history.

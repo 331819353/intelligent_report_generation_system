@@ -44,8 +44,16 @@
       "datasetVersionId": "dataset_operations_v8",
       "alias": "经营分析数据",
       "defaultParameters": [
-        { "name": "currency", "type": "STRING", "stringValue": "CNY" },
-        { "name": "includeForecast", "type": "BOOLEAN", "booleanValue": false }
+        {
+          "name": "currency",
+          "type": "STRING",
+          "stringValue": "CNY"
+        },
+        {
+          "name": "includeForecast",
+          "type": "BOOLEAN",
+          "booleanValue": false
+        }
       ],
       "queryPolicy": {
         "timeoutMs": 8000,
@@ -58,9 +66,19 @@
     {
       "id": "filter_month",
       "type": "DATE_RANGE",
-      "fieldRef": { "dataContextId": "operations_context", "field": "order_date" },
-      "scope": { "type": "REPORT", "targetIds": [] },
-      "defaultValue": { "mode": "RELATIVE", "unit": "MONTH", "offset": 0 }
+      "fieldRef": {
+        "dataContextId": "operations_context",
+        "field": "order_date"
+      },
+      "scope": {
+        "type": "REPORT",
+        "targetIds": []
+      },
+      "defaultValue": {
+        "mode": "RELATIVE",
+        "unit": "MONTH",
+        "offset": 0
+      }
     }
   ],
   "pages": [
@@ -78,12 +96,24 @@
               "id": "block_revenue_kpi",
               "type": "KPI_GROUP",
               "layout": {
-                "desktop": { "x": 0, "y": 0, "w": 8, "h": 4 },
-                "mobile": { "order": 1, "visible": true, "heightMode": "FIXED", "slotMode": "STACK", "fixedHeight": 240 }
+                "desktop": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 8,
+                  "h": 4
+                },
+                "mobile": {
+                  "order": 1,
+                  "visible": true,
+                  "heightMode": "FIXED",
+                  "slotMode": "STACK",
+                  "fixedHeight": 240
+                }
               },
               "zones": [
                 {
                   "id": "zone_revenue_kpi",
+                  "order": 1,
                   "type": "CONTENT",
                   "layout": {
                     "heightMode": "FIXED",
@@ -97,7 +127,12 @@
                   "slots": [
                     {
                       "id": "slot_revenue_kpi",
-                      "grid": { "x": 0, "y": 0, "w": 1, "h": 1 },
+                      "grid": {
+                        "x": 0,
+                        "y": 0,
+                        "w": 1,
+                        "h": 1
+                      },
                       "componentId": "component_revenue_kpi"
                     }
                   ]
@@ -108,12 +143,25 @@
               "id": "block_region_chart",
               "type": "CHART",
               "layout": {
-                "desktop": { "x": 8, "y": 0, "w": 16, "h": 7 },
-                "mobile": { "order": 2, "visible": true, "heightMode": "ASPECT_RATIO", "slotMode": "PRIMARY_ONLY", "aspectRatio": 1.6, "primarySlotId": "slot_region_chart" }
+                "desktop": {
+                  "x": 8,
+                  "y": 0,
+                  "w": 16,
+                  "h": 7
+                },
+                "mobile": {
+                  "order": 2,
+                  "visible": true,
+                  "heightMode": "ASPECT_RATIO",
+                  "slotMode": "PRIMARY_ONLY",
+                  "aspectRatio": 1.6,
+                  "primarySlotId": "slot_region_chart"
+                }
               },
               "zones": [
                 {
                   "id": "zone_region_chart",
+                  "order": 1,
                   "type": "CONTENT",
                   "layout": {
                     "heightMode": "FR",
@@ -127,7 +175,12 @@
                   "slots": [
                     {
                       "id": "slot_region_chart",
-                      "grid": { "x": 0, "y": 0, "w": 1, "h": 1 },
+                      "grid": {
+                        "x": 0,
+                        "y": 0,
+                        "w": 1,
+                        "h": 1
+                      },
                       "componentId": "component_region_chart"
                     }
                   ]
@@ -152,12 +205,23 @@
               "id": "block_region_table",
               "type": "TABLE",
               "layout": {
-                "desktop": { "x": 0, "y": 0, "w": 24, "h": 10 },
-                "mobile": { "order": 1, "visible": true, "heightMode": "AUTO", "slotMode": "COLLAPSE" }
+                "desktop": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 24,
+                  "h": 10
+                },
+                "mobile": {
+                  "order": 1,
+                  "visible": true,
+                  "heightMode": "AUTO",
+                  "slotMode": "COLLAPSE"
+                }
               },
               "zones": [
                 {
                   "id": "zone_region_table",
+                  "order": 1,
                   "type": "CONTENT",
                   "layout": {
                     "heightMode": "AUTO",
@@ -170,7 +234,12 @@
                   "slots": [
                     {
                       "id": "slot_region_table",
-                      "grid": { "x": 0, "y": 0, "w": 1, "h": 1 },
+                      "grid": {
+                        "x": 0,
+                        "y": 0,
+                        "w": 1,
+                        "h": 1
+                      },
                       "componentId": "component_region_table"
                     }
                   ]
@@ -181,12 +250,23 @@
               "id": "block_method_note",
               "type": "CONTENT",
               "layout": {
-                "desktop": { "x": 0, "y": 10, "w": 24, "h": 3 },
-                "mobile": { "order": 2, "visible": true, "heightMode": "AUTO", "slotMode": "STACK" }
+                "desktop": {
+                  "x": 0,
+                  "y": 10,
+                  "w": 24,
+                  "h": 3
+                },
+                "mobile": {
+                  "order": 2,
+                  "visible": true,
+                  "heightMode": "AUTO",
+                  "slotMode": "STACK"
+                }
               },
               "zones": [
                 {
                   "id": "zone_method_note",
+                  "order": 1,
                   "type": "FOOTER",
                   "layout": {
                     "heightMode": "AUTO",
@@ -199,7 +279,12 @@
                   "slots": [
                     {
                       "id": "slot_method_note",
-                      "grid": { "x": 0, "y": 0, "w": 1, "h": 1 },
+                      "grid": {
+                        "x": 0,
+                        "y": 0,
+                        "w": 1,
+                        "h": 1
+                      },
                       "componentId": "component_method_note"
                     }
                   ]
@@ -214,53 +299,99 @@
   "components": [
     {
       "id": "component_revenue_kpi",
-      "templateRef": { "type": "metric-card", "version": "1.0.0" },
+      "templateRef": {
+        "type": "metric-card",
+        "version": "1.0.0"
+      },
       "dataBinding": {
         "bindingMode": "DATASET_FIELD",
         "dataContextId": "operations_context",
         "dimensions": [],
         "measures": [
-          { "role": "VALUE", "field": "revenue" }
+          {
+            "role": "VALUE",
+            "field": "revenue"
+          }
         ]
       },
-      "options": { "title": "营业收入", "numberFormat": "CURRENCY_CNY" }
+      "options": {
+        "title": "营业收入",
+        "numberFormat": "CURRENCY_CNY"
+      }
     },
     {
       "id": "component_region_chart",
-      "templateRef": { "type": "bar-horizontal", "version": "1.0.0" },
+      "templateRef": {
+        "type": "bar-horizontal",
+        "version": "1.0.0"
+      },
       "dataBinding": {
         "bindingMode": "DATASET_FIELD",
         "dataContextId": "operations_context",
         "dimensions": [
-          { "role": "Y_AXIS", "field": "region_name" }
+          {
+            "role": "Y_AXIS",
+            "field": "region_name"
+          }
         ],
         "measures": [
-          { "role": "X_AXIS", "field": "revenue" }
+          {
+            "role": "X_AXIS",
+            "field": "revenue"
+          }
         ]
       },
-      "options": { "title": "区域收入对比", "orientation": "HORIZONTAL", "topN": 10, "showLabel": true }
+      "options": {
+        "title": "区域收入对比",
+        "orientation": "HORIZONTAL",
+        "topN": 10,
+        "showLabel": true
+      }
     },
     {
       "id": "component_region_table",
-      "templateRef": { "type": "data-table", "version": "1.0.0" },
+      "templateRef": {
+        "type": "data-table",
+        "version": "1.0.0"
+      },
       "dataBinding": {
         "bindingMode": "DATASET_FIELD",
         "dataContextId": "operations_context",
         "dimensions": [
-          { "role": "DIMENSION", "field": "region_name" },
-          { "role": "DIMENSION", "field": "product_category" }
+          {
+            "role": "DIMENSION",
+            "field": "region_name"
+          },
+          {
+            "role": "DIMENSION",
+            "field": "product_category"
+          }
         ],
         "measures": [
-          { "role": "VALUE", "field": "revenue" },
-          { "role": "VALUE", "field": "gross_margin" }
+          {
+            "role": "VALUE",
+            "field": "revenue"
+          },
+          {
+            "role": "VALUE",
+            "field": "gross_margin"
+          }
         ]
       },
-      "options": { "title": "区域经营明细", "tablePageSize": 50 }
+      "options": {
+        "title": "区域经营明细",
+        "tablePageSize": 50
+      }
     },
     {
       "id": "component_method_note",
-      "templateRef": { "type": "rich-text", "version": "1.0.0" },
-      "options": { "richText": "数据口径：营业收入按已发布经营数据集版本计算。" }
+      "templateRef": {
+        "type": "rich-text",
+        "version": "1.0.0"
+      },
+      "options": {
+        "richText": "数据口径：营业收入按已发布经营数据集版本计算。"
+      }
     }
   ],
   "interactions": [
@@ -269,9 +400,14 @@
       "sourceComponentId": "component_region_chart",
       "event": "CLICK",
       "action": "FILTER",
-      "targetComponentIds": ["component_region_table"],
+      "targetComponentIds": [
+        "component_region_table"
+      ],
       "fieldMappings": [
-        { "sourceField": "region_name", "targetField": "region_name" }
+        {
+          "sourceField": "region_name",
+          "targetField": "region_name"
+        }
       ]
     }
   ],
@@ -286,8 +422,14 @@
   "provenance": {
     "createdFrom": "AI",
     "sourceQuestionRunIds": [],
-    "aiRunIds": ["ai_run_monthly_operations_001"],
-    "promptVersions": ["report-ai-v1"],
-    "modelPolicies": ["governed-default-v1"]
+    "aiRunIds": [
+      "ai_run_monthly_operations_001"
+    ],
+    "promptVersions": [
+      "report-ai-v1"
+    ],
+    "modelPolicies": [
+      "governed-default-v1"
+    ]
   }
 }

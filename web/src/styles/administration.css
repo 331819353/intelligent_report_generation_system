@@ -572,12 +572,14 @@
 .domain-access-detail > footer small { color: #75849a; font-size: 14px; }
 
 .domain-application-header,
-.domain-application-row { display: grid; grid-template-columns: minmax(180px, 1.05fr) minmax(260px, 1.7fr) 110px 155px minmax(180px, 1fr); align-items: center; gap: 18px; }
+.domain-application-row { display: grid; grid-template-columns: minmax(165px, 1fr) minmax(220px, 1.45fr) 100px 140px minmax(150px, 1fr) 104px; align-items: center; gap: 14px; }
 .domain-application-header { min-height: 54px; border-bottom: 1px solid #e1e7ef; padding: 0 18px; color: #65758c; font-size: 12px; font-weight: 620; }
 .domain-application-row { min-height: 82px; border-bottom: 1px solid #e8edf3; padding: 10px 18px; color: #5e6d82; font-size: 12px; }
 .domain-application-row > div { min-width: 0; display: flex; align-items: center; gap: 12px; }
 .domain-application-row p { overflow: hidden; margin: 0; text-overflow: ellipsis; white-space: nowrap; }
 .domain-application-row time { white-space: nowrap; }
+.domain-application-row .domain-application-actions { justify-content: flex-end; }
+.domain-application-actions > span { color: #1a8b61; font-size: 12px; font-weight: 700; white-space: nowrap; }
 
 .domain-application-backdrop {
   position: fixed;
