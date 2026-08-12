@@ -892,6 +892,11 @@ func (store *PostgresStore) GetBuild(
 			return err
 		}
 		detail.Nodes = nodes
+		quality, err := loadBuildQualityTx(ctx, tx, buildID)
+		if err != nil {
+			return err
+		}
+		detail.Quality = quality
 		materialized, err := loadBuildMaterializationTx(ctx, tx, buildID)
 		if err != nil {
 			return err
@@ -907,6 +912,9 @@ func (store *PostgresStore) GetBuild(
 	}
 	if detail.Nodes == nil {
 		detail.Nodes = []BuildNode{}
+	}
+	if detail.Quality == nil {
+		detail.Quality = []BuildQuality{}
 	}
 	return detail, nil
 }
@@ -943,6 +951,41 @@ func loadBuildNodesTx(
 		item.OutputSizeBytes = int64Pointer(outputBytes)
 		item.StartedAt = timePointer(startedAt)
 		item.CompletedAt = timePointer(completedAt)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func loadBuildQualityTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	buildID string,
+) ([]BuildQuality, error) {
+	rows, err := tx.Query(ctx, `SELECT COALESCE(node.node_id,''),quality.rule_code,
+		quality.rule_version,quality.scope,quality.field_id,quality.severity,
+		quality.status,quality.expectation_json,quality.observed_json,
+		quality.message,quality.measured_at
+		FROM platform.data_quality_results AS quality
+		LEFT JOIN platform.build_node_runs AS node
+		  ON node.id=quality.build_node_run_id
+		 AND node.build_run_id=quality.build_run_id
+		 AND node.tenant_id=quality.tenant_id
+		WHERE quality.build_run_id=$1
+		ORDER BY quality.measured_at,quality.created_at,quality.id`, buildID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []BuildQuality{}
+	for rows.Next() {
+		var item BuildQuality
+		if err := rows.Scan(
+			&item.NodeID, &item.RuleCode, &item.RuleVersion,
+			&item.Scope, &item.FieldID, &item.Severity, &item.Status,
+			&item.Expectation, &item.Observed, &item.Message, &item.MeasuredAt,
+		); err != nil {
+			return nil, err
+		}
 		items = append(items, item)
 	}
 	return items, rows.Err()

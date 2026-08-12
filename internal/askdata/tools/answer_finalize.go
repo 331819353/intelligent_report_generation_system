@@ -50,7 +50,9 @@ func (assembler *Assembler) FinalizeAnswer(
 	if !ok {
 		return orchestrator.Run{}, errAnswerEvidenceUnavailable
 	}
-	if recorder, ok := store.(reportExportArtifactRecorder); ok {
+	// A Shadow answer is retained only as hidden run evidence. It must never
+	// manufacture a report-export source that a user can later attach.
+	if recorder, ok := store.(reportExportArtifactRecorder); ok && run.ExecutionMode != "SHADOW" {
 		if err := recordReportExportArtifacts(ctx, recorder, scope, domainID, run, executed); err != nil {
 			return orchestrator.Run{}, err
 		}

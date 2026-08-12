@@ -181,7 +181,7 @@ export async function hydrateDatasetDraft(record: DatasetRecord, tables: AssetTa
       fields.push({ key: `${text(expression.nodeId)}.${text(expression.field)}`, role: text(raw.role), aggregation: '', code: text(raw.code), name: text(raw.name), groupBy: groupByIDs.has(text(raw.id)), output: true, finalOutput: true })
     } else if (text(expression.type) === 'DATE_TRUNC') {
       const source = object(expression.argument)
-      fields.push({ key: `${text(source.nodeId)}.${text(source.field)}`, role: 'DIMENSION', aggregation: '', code: text(raw.code), name: text(raw.name), groupBy: true, grouping: text(expression.unit), output: true, finalOutput: true })
+      fields.push({ key: `${text(source.nodeId)}.${text(source.field)}`, role: text(raw.role) || 'TIME', aggregation: '', code: text(raw.code), name: text(raw.name), groupBy: true, grouping: text(expression.unit), output: true, finalOutput: true })
     } else if (['TRIM', 'COALESCE', 'CAST'].includes(text(expression.type))) {
       const source = expressionFieldReference(expression)
       if (source) {
@@ -282,7 +282,7 @@ export async function hydrateDatasetDraft(record: DatasetRecord, tables: AssetTa
       ...field,
       code: `${node.alias}_${column.columnName}`,
       name: column.businessName || column.columnName,
-      role: column.semanticType === 'IDENTIFIER' ? 'IDENTIFIER' : column.semanticType === 'DATE' ? 'TIME' : 'ATTRIBUTE',
+      role: field.role === 'TIME' || column.semanticType === 'DATE' ? 'TIME' : column.semanticType === 'IDENTIFIER' ? 'IDENTIFIER' : 'ATTRIBUTE',
     }
   }) : configuredFields
   const hydratedDesigner = hydrateDesignerGraph(dsl, nodes, joins, graphFields)

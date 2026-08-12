@@ -106,6 +106,7 @@ func (service *PostgresService) ListConversations(ctx context.Context, identity 
 		  SELECT run.*,row_number() OVER(PARTITION BY run.conversation_id ORDER BY run.created_at DESC,run.id DESC) AS position,
 		    count(*) OVER(PARTITION BY run.conversation_id) AS run_count
 		  FROM askdata.question_runs run WHERE run.tenant_id=$1 AND run.domain_id=$2 AND run.actor_id=$3
+		    AND run.execution_mode='USER'
 		), latest_label AS (
 		  SELECT DISTINCT ON (run.conversation_id) run.conversation_id,
 		    COALESCE(NULLIF(artifact.payload_json#>>'{artifact,layers,structured,headline,label}',''),
@@ -117,6 +118,7 @@ func (service *PostgresService) ListConversations(ctx context.Context, identity 
 		  FROM askdata.question_artifacts artifact JOIN askdata.question_runs run
 		    ON run.tenant_id=artifact.tenant_id AND run.id=artifact.question_run_id
 		  WHERE artifact.tenant_id=$1 AND artifact.domain_id=$2 AND artifact.actor_id=$3
+		    AND run.execution_mode='USER'
 		    AND artifact.artifact_type='ANSWER'
 		  ORDER BY run.conversation_id,artifact.created_at DESC,artifact.artifact_index DESC
 		)
@@ -186,6 +188,7 @@ func (service *PostgresService) GetConversation(ctx context.Context, identity Re
 	err = service.scopeRunner(ctx, string(identity.TenantID), func(tx pgx.Tx) error {
 		rows, e := tx.Query(ctx, `SELECT id::text,created_at FROM askdata.question_runs
 			WHERE tenant_id=$1 AND domain_id=$2 AND actor_id=$3 AND conversation_id=$4
+			  AND execution_mode='USER'
 			  AND ($5::timestamptz IS NULL OR (created_at,id)<($5,$6::uuid))
 			ORDER BY created_at DESC,id DESC LIMIT $7`, identity.TenantID, identity.DomainID, identity.ActorID, id, cursorTime, cursorID, limit+1)
 		if e != nil {
@@ -299,6 +302,7 @@ func (service *PostgresService) conversationByID(ctx context.Context, identity R
 		),latest AS(
 			SELECT * FROM askdata.question_runs
 			WHERE tenant_id=$1 AND domain_id=$2 AND actor_id=$3 AND conversation_id=$4
+			  AND execution_mode='USER'
 			ORDER BY created_at DESC,id DESC LIMIT 1
 		),label AS(
 			SELECT COALESCE(NULLIF(artifact.payload_json#>>'{artifact,layers,structured,headline,label}',''),
@@ -310,6 +314,7 @@ func (service *PostgresService) conversationByID(ctx context.Context, identity R
 			FROM askdata.question_artifacts artifact JOIN askdata.question_runs run
 			  ON run.tenant_id=artifact.tenant_id AND run.id=artifact.question_run_id
 			WHERE artifact.tenant_id=$1 AND artifact.domain_id=$2 AND artifact.actor_id=$3
+			  AND run.execution_mode='USER'
 			  AND run.conversation_id=$4 AND artifact.artifact_type='ANSWER'
 			ORDER BY artifact.created_at DESC,artifact.artifact_index DESC LIMIT 1
 		)
@@ -318,7 +323,8 @@ func (service *PostgresService) conversationByID(ctx context.Context, identity R
 		  COALESCE(active.id<>latest.release_id OR active.content_hash<>latest.release_content_hash,false),
 		  latest.current_state='CLARIFICATION_REQUIRED',COALESCE(label.degraded,false),
 		  (SELECT count(*) FROM askdata.question_runs run_count WHERE run_count.tenant_id=$1
-		    AND run_count.domain_id=$2 AND run_count.actor_id=$3 AND run_count.conversation_id=conversation.id),
+		    AND run_count.domain_id=$2 AND run_count.actor_id=$3 AND run_count.conversation_id=conversation.id
+		    AND run_count.execution_mode='USER'),
 		  conversation.record_version,conversation.updated_at
 		FROM askdata.conversations conversation JOIN latest ON true LEFT JOIN label ON true LEFT JOIN active ON true
 		WHERE conversation.tenant_id=$1 AND conversation.domain_id=$2 AND conversation.actor_id=$3 AND conversation.id=$4`,

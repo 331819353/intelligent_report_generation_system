@@ -426,7 +426,7 @@ export function ReportAssetsPage() {
 
   const publish = (asset: ReportAsset) => {
     if (!snapshot) {
-      navigate(`/reports/${asset.id}?mode=publish`)
+      navigate(`/reports/${asset.id}/publish-review`)
       return
     }
     updateAsset(asset.id, item => ({ ...item, lifecycle: 'PUBLISHED', currentVersionNo: (item.currentVersionNo ?? 0) + 1, unpublishedChanges: 0 }))

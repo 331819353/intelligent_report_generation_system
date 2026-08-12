@@ -42,7 +42,8 @@ func (repository *PostgresIntentRepository) CreatePreview(
 		var state string
 		var version int64
 		if err := tx.QueryRow(ctx, `SELECT current_state,record_version FROM askdata.question_runs
-			WHERE id=$1 AND tenant_id=$2 AND domain_id=$3 AND actor_id=$4`,
+			WHERE id=$1 AND tenant_id=$2 AND domain_id=$3 AND actor_id=$4
+			  AND execution_mode='USER'`,
 			request.QuestionRunID, identity.TenantID, identity.DomainID, identity.ActorID,
 		).Scan(&state, &version); err != nil {
 			return err

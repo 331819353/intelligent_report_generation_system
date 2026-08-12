@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"intelligent-report-generation-system/internal/askdata"
+	"intelligent-report-generation-system/internal/materialization"
 	"intelligent-report-generation-system/internal/platform/database"
 )
 
@@ -96,6 +97,9 @@ type QualityRuleRow struct {
 	Code     string
 	Severity string
 	Passed   bool
+	// Measurement distinguishes "checked and failed" from "never measured for
+	// this snapshot", which Passed alone cannot express.
+	Measurement string
 }
 
 // QualityStatus aggregates data-quality state for the models a query touches.
@@ -492,13 +496,14 @@ func (reader *QueryReader) CertifiedExamples(
 }
 
 // DataQuality reports the governed quality rules attached to the models a query
-// touches.
+// touches, resolved against the measurement the materialization pipeline
+// actually produced for the snapshot those models are pinned to.
 //
-// NOTE: askdata.quality_rules currently has no authoring path — the semantic
-// importer does not accept QUALITY_RULE and nothing else writes the table — so
-// in practice this returns UNKNOWN with no rules until that gap is closed. The
-// read is implemented against the real schema so that closing the authoring gap
-// needs no change here.
+// A rule is a binding to an executing check (see quality_rule.go), so the
+// outcome here is a real PASSED/FAILED/SKIPPED from platform.data_quality_results
+// rather than an assumption. A rule whose bound check produced no measurement
+// for the pinned materialization reports as unproven, and unproven is never
+// reported as passed.
 func (reader *QueryReader) DataQuality(
 	ctx context.Context,
 	scope askdata.PolicyScope,
@@ -517,11 +522,33 @@ func (reader *QueryReader) DataQuality(
 		return status, nil
 	}
 	err = reader.read(ctx, scope, domainID, func(tx pgx.Tx) error {
-		result, queryErr := tx.Query(ctx, `SELECT rule.code,rule.severity
+		// The measurement is looked up through the materialization the semantic
+		// model itself pins, so the reported quality belongs to exactly the
+		// snapshot the query will read - not to some later rebuild.
+		result, queryErr := tx.Query(ctx, `SELECT rule.code,rule.severity,
+			COALESCE((
+			  SELECT quality.status
+			  FROM platform.data_quality_results AS quality
+			  WHERE quality.tenant_id=model.tenant_id
+			    AND quality.materialization_id=model.materialization_id
+			    AND quality.rule_code=rule.rule_ast->>'datasetRuleCode'
+			    AND quality.scope=rule.rule_ast->>'scope'
+			    AND quality.field_id=COALESCE(rule.rule_ast->>'fieldId','')
+			    AND (
+			      COALESCE((rule.rule_ast->>'maxAgeHours')::int,0)=0
+			      OR quality.measured_at>=now()-make_interval(
+			        hours=>COALESCE((rule.rule_ast->>'maxAgeHours')::int,0)
+			      )
+			    )
+			  ORDER BY quality.measured_at DESC,quality.id DESC
+			  LIMIT 1
+			),'UNMEASURED')
 			FROM askdata.quality_rules AS rule
 			JOIN askdata.release_objects AS object
 			  ON object.object_version_id=rule.id AND object.tenant_id=rule.tenant_id
 			 AND object.release_id=$1 AND object.object_type='QUALITY_RULE'
+			JOIN askdata.semantic_models AS model
+			  ON model.id=rule.target_version_id AND model.tenant_id=rule.tenant_id
 			WHERE rule.domain_id=$2 AND rule.target_type='SEMANTIC_MODEL' AND rule.target_version_id::text=ANY($3)
 			  AND rule.status='CERTIFIED'
 			ORDER BY rule.code`,
@@ -532,12 +559,14 @@ func (reader *QueryReader) DataQuality(
 		defer result.Close()
 		for result.Next() {
 			var row QualityRuleRow
-			if scanErr := result.Scan(&row.Code, &row.Severity); scanErr != nil {
+			var measurement string
+			if scanErr := result.Scan(&row.Code, &row.Severity, &measurement); scanErr != nil {
 				return scanErr
 			}
-			// Rule outcomes are produced by materialisation quality runs; until
-			// those are linked here a rule is reported as present but unproven.
-			row.Passed = false
+			// Only an actual PASSED measurement counts as passed. SKIPPED and
+			// UNMEASURED are unproven, and unproven must never read as clean.
+			row.Passed = measurement == string(materialization.QualityPassed)
+			row.Measurement = measurement
 			status.Rules = append(status.Rules, row)
 		}
 		return result.Err()
@@ -550,19 +579,43 @@ func (reader *QueryReader) DataQuality(
 }
 
 // qualityStatusFor derives the reported status from the rules that were found.
-// The absence of rules is UNKNOWN and never PASSED: no governed quality rule
+//
+// The absence of rules is UNKNOWN and never PASS: no governed quality rule
 // having run is not evidence that the data is good, and the answer layer must
-// be able to tell "verified clean" apart from "never checked".
+// be able to tell "verified clean" apart from "never checked". A rule that was
+// never measured for the pinned snapshot is unproven for the same reason.
+//
+// The vocabulary is the frozen get_data_quality_status contract
+// (PASS/WARNING/FAIL/UNKNOWN); precedence is FAIL > WARNING > UNKNOWN > PASS so
+// the worst real finding is never hidden behind a milder one.
 func qualityStatusFor(rules []QualityRuleRow) string {
 	if len(rules) == 0 {
 		return "UNKNOWN"
 	}
+	failed, warned, unproven := false, false, false
 	for _, rule := range rules {
-		if !rule.Passed {
-			return "PARTIAL"
+		switch {
+		case rule.Passed:
+		case rule.Measurement == string(materialization.QualityFailed):
+			if rule.Severity == "BLOCKING" {
+				failed = true
+			} else {
+				warned = true
+			}
+		default:
+			unproven = true
 		}
 	}
-	return "PASSED"
+	switch {
+	case failed:
+		return "FAIL"
+	case warned:
+		return "WARNING"
+	case unproven:
+		return "UNKNOWN"
+	default:
+		return "PASS"
+	}
 }
 
 func (reader *QueryReader) validate(scope askdata.PolicyScope, domainID askdata.ID) error {

@@ -161,6 +161,29 @@ export function ManagementCenterPage() {
     }
   }
 
+  // Raising or lowering sensitivity only affects requests submitted afterwards:
+  // applications already in flight pinned their approval requirement, so a
+  // downgrade cannot drop the security seat from a request waiting on it.
+  const updateDomainSensitivity = async (
+    domain: BusinessDomain,
+    sensitivity: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED',
+  ) => {
+    setBusyKey(`domain-sensitivity:${domain.id}`)
+    setError('')
+    setNotice('')
+    try {
+      const updated = await administrationAPI.updateDomainAccessSensitivity(domain.id, sensitivity)
+      setDomains(current => current.map(item => item.id === domain.id
+        ? { ...item, ...updated, administrators: item.administrators }
+        : item))
+      setNotice(`领域“${domain.name}”准入敏感度已设为${domainSensitivityLabels[sensitivity]}；已提交的申请沿用其提交时的审批要求`)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '领域准入敏感度更新失败')
+    } finally {
+      setBusyKey('')
+    }
+  }
+
   const updateUserStatus = async (user: AdminUser) => {
     const status = user.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'
     setBusyKey(`user-status:${user.id}`)
@@ -177,18 +200,50 @@ export function ManagementCenterPage() {
     }
   }
 
-  const reviewApproval = async (approval: PlatformApproval, decision: 'APPROVED' | 'REJECTED', reason = '') => {
+  // Escalation raises visibility on an overdue request; it never decides it,
+  // because a review that grants itself by timing out is not a review.
+  const escalateApproval = async (approval: PlatformApproval) => {
     setBusyKey(`approval:${approval.id}`)
     setError('')
     setNotice('')
     try {
-      await administrationAPI.reviewPublication(approval, decision, reason)
+      const result = await administrationAPI.escalateDomainApplication(approval.id)
+      await load()
+      setNotice(`“${approval.requesterDisplayName}”的领域申请已升级至 L${result.escalationLevel}，仍需完成全部签署`)
+    } catch (cause) {
+      await load()
+      setError(cause instanceof Error ? cause.message : '审批升级失败')
+    } finally {
+      setBusyKey('')
+    }
+  }
+
+  const reviewApproval = async (
+    approval: PlatformApproval,
+    decision: 'APPROVED' | 'REJECTED',
+    reason = '',
+    reviewRole: 'DOMAIN_OWNER' | 'SECURITY' = 'DOMAIN_OWNER',
+  ) => {
+    setBusyKey(`approval:${approval.id}`)
+    setError('')
+    setNotice('')
+    try {
+      await administrationAPI.reviewPublication(approval, decision, reason, reviewRole)
       await load()
       setDialog(null)
       if (approval.kind === 'DOMAIN_ACCESS') notifyDomainCatalogChanged()
       const target = approval.kind === 'DOMAIN_ACCESS'
         ? `“${approval.requesterDisplayName}”的领域申请`
         : `“${approval.resourceName}”的发布申请`
+      // A first signature on a sensitive domain records a receipt but decides
+      // nothing, so the message must not claim the request was granted.
+      const pendingSecondSeat = approval.kind === 'DOMAIN_ACCESS'
+        && approval.requiresDualApproval && decision === 'APPROVED'
+        && approval.openSeats.filter(seat => seat !== reviewRole).length > 0
+      if (pendingSecondSeat) {
+        setNotice(`${target}已完成${reviewRole === 'SECURITY' ? '安全复核' : '业务 Owner'}签署，仍需另一席位签署后才会授予访问权限`)
+        return
+      }
       setNotice(`${target}已${decision === 'APPROVED' ? '通过' : '拒绝'}`)
     } catch (cause) {
       await load()
@@ -450,7 +505,7 @@ export function ManagementCenterPage() {
               : error && users.length === 0
                 ? <div className="administration-empty"><LockKey size={34} /><strong>无法进入平台管理中心</strong><p>该页面仅对平台管理员开放。</p><button className="quiet-button" type="button" onClick={() => void load()}>重新加载</button></div>
                 : view === 'domains'
-                  ? <DomainGovernance domains={domains} busyKey={busyKey} onCreate={() => setDialog({ kind: 'create-domain' })} onStatus={domain => void updateDomainStatus(domain)} />
+                  ? <DomainGovernance domains={domains} busyKey={busyKey} onCreate={() => setDialog({ kind: 'create-domain' })} onStatus={domain => void updateDomainStatus(domain)} onSensitivity={(domain, sensitivity) => void updateDomainSensitivity(domain, sensitivity)} />
                   : view === 'permissions'
                     ? <PermissionGovernance
                       domains={domains}
@@ -468,7 +523,7 @@ export function ManagementCenterPage() {
                       onStatus={user => void updateUserStatus(user)}
                     />
                     : view === 'approvals'
-                      ? <ApprovalCenter approvals={approvals} busyKey={busyKey} onDecision={(approval, decision) => decision === 'REJECTED' ? setDialog({ kind: 'approval-rejection', approval }) : void reviewApproval(approval, decision)} />
+                      ? <ApprovalCenter approvals={approvals} busyKey={busyKey} onDecision={(approval, decision, reviewRole) => decision === 'REJECTED' ? setDialog({ kind: 'approval-rejection', approval }) : void reviewApproval(approval, decision, '', reviewRole)} onEscalate={approval => void escalateApproval(approval)} />
                       : view === 'tasks'
                         ? <BackgroundTaskCenter tasks={tasks} busyKey={busyKey} onOperate={(task, operation) => void operateTask(task, operation)} />
                         : view === 'observability'
@@ -737,11 +792,16 @@ function PermissionGovernance({
   </div>
 }
 
-function DomainGovernance({ domains, busyKey, onCreate, onStatus }: {
+const domainSensitivityLabels: Record<string, string> = {
+  PUBLIC: '公开', INTERNAL: '内部', CONFIDENTIAL: '机密', RESTRICTED: '受限',
+}
+
+function DomainGovernance({ domains, busyKey, onCreate, onStatus, onSensitivity }: {
   domains: BusinessDomain[]
   busyKey: string
   onCreate: () => void
   onStatus: (domain: BusinessDomain) => void
+  onSensitivity: (domain: BusinessDomain, sensitivity: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED') => void
 }) {
   return <div className="administration-view">
     <header className="administration-view-heading"><div><span className="eyebrow">DOMAIN LIFECYCLE</span><h2>领域管理</h2><p>这里只负责领域的新建、启用和停用；管理员请前往权限管理配置。</p></div><small>{domains.length} 个领域</small></header>
@@ -751,6 +811,20 @@ function DomainGovernance({ domains, busyKey, onCreate, onStatus }: {
           <div className="domain-management-avatar">{domain.name.slice(0, 1)}</div>
           <div className="domain-governance-name"><strong>{domain.name}</strong><small>{domain.code}{domain.default ? ' · 默认领域' : ''}</small></div>
           <div className="domain-governance-description"><small>领域说明</small><strong>{domain.description || '暂无说明'}</strong></div>
+          <label className="domain-sensitivity-select">
+            <small>准入敏感度</small>
+            <select
+              aria-label={`${domain.name} 准入敏感度`}
+              value={domain.accessSensitivity}
+              disabled={Boolean(busyKey)}
+              onChange={event => onSensitivity(domain, event.target.value as 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED')}
+            >
+              {(['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED'] as const).map(level =>
+                <option value={level} key={level}>{domainSensitivityLabels[level]}</option>)}
+            </select>
+            {(domain.accessSensitivity === 'CONFIDENTIAL' || domain.accessSensitivity === 'RESTRICTED')
+              && <em>加入需业务 Owner + 安全复核双人签署</em>}
+          </label>
           <span className={`domain-status ${domain.status.toLowerCase()}`}>{domain.status === 'ACTIVE' ? '已启用' : '已停用'}</span>
           <div className="domain-governance-actions">
             <button className="quiet-button" type="button" disabled={Boolean(busyKey) || domain.default} onClick={() => onStatus(domain)}>
@@ -786,10 +860,23 @@ const formatPlatformTime = (value?: string) => {
   }).format(date)
 }
 
-function ApprovalCenter({ approvals, busyKey, onDecision }: {
+const domainSeatLabels: Record<string, string> = {
+  DOMAIN_OWNER: '业务 Owner',
+  SECURITY: '安全复核',
+}
+
+const domainSLALabels: Record<string, string> = {
+  ON_TRACK: 'SLA 正常',
+  DUE_SOON: 'SLA 临期',
+  OVERDUE: 'SLA 已超期',
+  NOT_APPLICABLE: '',
+}
+
+function ApprovalCenter({ approvals, busyKey, onDecision, onEscalate }: {
   approvals: PlatformApproval[]
   busyKey: string
-  onDecision: (approval: PlatformApproval, decision: 'APPROVED' | 'REJECTED') => void
+  onDecision: (approval: PlatformApproval, decision: 'APPROVED' | 'REJECTED', reviewRole: 'DOMAIN_OWNER' | 'SECURITY') => void
+  onEscalate: (approval: PlatformApproval) => void
 }) {
   const [filter, setFilter] = useState<'PENDING' | 'ALL'>('PENDING')
   const visible = approvals.filter(item => filter === 'ALL' || item.status === 'PENDING')
@@ -818,14 +905,43 @@ function ApprovalCenter({ approvals, busyKey, onDecision }: {
           <span className={`approval-kind ${item.kind.toLowerCase()}`}>{approvalKindLabels[item.kind]}</span>
           <div className="approval-resource"><strong>{item.resourceName}</strong><small>{item.domainName} · {item.domainCode}</small></div>
           <div className="approval-requester"><strong>{item.requesterDisplayName}</strong><small>{item.requesterEmail}</small></div>
-          <div className="approval-note"><span>{item.note || '未填写申请说明'}</span><small>{formatPlatformTime(item.submittedAt)}</small></div>
+          <div className="approval-note">
+            <span>{item.note || '未填写申请说明'}</span>
+            <small>{formatPlatformTime(item.submittedAt)}</small>
+            {item.requiresDualApproval && <em className="approval-dual-seats">
+              <ShieldCheck size={13} />
+              敏感领域双人审批
+              {item.approvedRoles.map(role => <b key={role}>{domainSeatLabels[role] ?? role} 已签署</b>)}
+              {item.openSeats.map(role => <i key={role}>待 {domainSeatLabels[role] ?? role} 签署</i>)}
+            </em>}
+            {item.status === 'PENDING' && item.slaStatus !== 'NOT_APPLICABLE' && <em className={`approval-sla is-${item.slaStatus.toLowerCase()}`}>
+              {domainSLALabels[item.slaStatus]}
+              {item.slaDueAt ? ` · 截止 ${formatPlatformTime(item.slaDueAt)}` : ''}
+              {item.escalationLevel > 0 ? ` · 已升级至 L${item.escalationLevel}` : ''}
+            </em>}
+          </div>
           <span className={`platform-status-badge ${item.status.toLowerCase()}`}>{approvalStatusLabels[item.status]}</span>
           <div className="approval-actions">
             {item.status === 'PENDING' ? <>
-              <button className="quiet-button danger-text" type="button" disabled={Boolean(busyKey)} onClick={() => onDecision(item, 'REJECTED')}>拒绝</button>
-              <button className="primary-button compact" type="button" disabled={Boolean(busyKey)} onClick={() => onDecision(item, 'APPROVED')}>
-                {busyKey === `approval:${item.id}` && <SpinnerGap className="spin" size={13} />}通过
-              </button>
+              {item.slaStatus === 'OVERDUE' && item.escalationLevel < 3 && <button
+                className="quiet-button"
+                type="button"
+                disabled={Boolean(busyKey)}
+                onClick={() => onEscalate(item)}
+              >升级</button>}
+              <button className="quiet-button danger-text" type="button" disabled={Boolean(busyKey)} onClick={() => onDecision(item, 'REJECTED', item.openSeats[0] ?? 'DOMAIN_OWNER')}>拒绝</button>
+              {/* One button per seat still open, so a reviewer signs a specific
+                  duty rather than an anonymous approval. */}
+              {(item.requiresDualApproval ? item.openSeats : ['DOMAIN_OWNER' as const]).map(role => <button
+                className="primary-button compact"
+                type="button"
+                key={role}
+                disabled={Boolean(busyKey)}
+                onClick={() => onDecision(item, 'APPROVED', role as 'DOMAIN_OWNER' | 'SECURITY')}
+              >
+                {busyKey === `approval:${item.id}` && <SpinnerGap className="spin" size={13} />}
+                {item.requiresDualApproval ? `以${domainSeatLabels[role] ?? role}通过` : '通过'}
+              </button>)}
             </> : <small>{item.reviewerDisplayName || '系统处理'}</small>}
           </div>
         </article>)}

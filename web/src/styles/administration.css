@@ -204,6 +204,17 @@
 .approval-resource strong, .approval-requester strong { overflow: hidden; color: #344054; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .approval-resource small, .approval-requester small, .approval-note small { overflow: hidden; color: #98a2b3; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .approval-note span { overflow: hidden; color: #667085; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.approval-dual-seats { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; color: #9b6710; font-size: 11px; font-style: normal; font-weight: 700; }
+.approval-dual-seats > svg { flex: none; }
+.approval-dual-seats b { border-radius: 4px; padding: 2px 6px; background: #e3f5ec; color: #0b7a56; font-weight: 700; }
+.approval-dual-seats i { border-radius: 4px; padding: 2px 6px; background: #fdf0d8; color: #96631a; font-style: normal; font-weight: 700; }
+.approval-sla { color: #667085; font-size: 11px; font-style: normal; font-weight: 640; }
+.approval-sla.is-due_soon { color: #96631a; }
+.approval-sla.is-overdue { color: #b42318; }
+.domain-sensitivity-select { min-width: 0; display: grid; gap: 3px; }
+.domain-sensitivity-select small { color: #98a2b3; font-size: 11px; }
+.domain-sensitivity-select select { min-height: 32px; border: 1px solid #d0d5dd; border-radius: 7px; padding: 0 8px; background: #fff; color: #344054; font: inherit; font-size: 12px; }
+.domain-sensitivity-select em { color: #96631a; font-size: 11px; font-style: normal; }
 .approval-actions { display: flex; align-items: center; justify-content: flex-end; gap: 5px; }
 .approval-actions button { min-height: 29px; font-size: 12px; }
 .approval-actions .primary-button.compact { padding: 5px 9px; }

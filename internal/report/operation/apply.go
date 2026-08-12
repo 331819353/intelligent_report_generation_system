@@ -432,11 +432,35 @@ func sortDefinition(definition *report.ReportDefinition) {
 				return section.Blocks[i].Layout.Mobile.Order < section.Blocks[j].Layout.Mobile.Order
 			})
 			for blockIndex := range section.Blocks {
+				upgradeLegacyZoneOrders(&section.Blocks[blockIndex])
 				sort.SliceStable(section.Blocks[blockIndex].Zones, func(i, j int) bool {
-					return section.Blocks[blockIndex].Zones[i].Layout.EmptyPriority < section.Blocks[blockIndex].Zones[j].Layout.EmptyPriority
+					return section.Blocks[blockIndex].Zones[i].Order < section.Blocks[blockIndex].Zones[j].Order
 				})
 			}
 		}
+	}
+}
+
+func upgradeLegacyZoneOrders(block *report.Block) {
+	if block == nil || len(block.Zones) == 0 {
+		return
+	}
+	for _, zone := range block.Zones {
+		if zone.Order != 0 {
+			return
+		}
+	}
+	// Preserve the exact order legacy normalization used before assigning the
+	// new structural position. This happens only while creating a new mutable
+	// revision; immutable published bytes remain untouched.
+	sort.SliceStable(block.Zones, func(i, j int) bool {
+		if block.Zones[i].Layout.EmptyPriority != block.Zones[j].Layout.EmptyPriority {
+			return block.Zones[i].Layout.EmptyPriority < block.Zones[j].Layout.EmptyPriority
+		}
+		return block.Zones[i].ID < block.Zones[j].ID
+	})
+	for index := range block.Zones {
+		block.Zones[index].Order = index + 1
 	}
 }
 

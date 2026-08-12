@@ -443,8 +443,8 @@ func successfulQuality(
 	rowObserved, _ := json.Marshal(map[string]int64{"rowCount": rowCount})
 	results := []materialization.QualityResult{{
 		NodeID:   nodeID,
-		RuleCode: "ROW_COUNT_NONNEGATIVE", RuleVersion: "1",
-		RuleDefinitionHash: ruleHash("ROW_COUNT_NONNEGATIVE", "row_count >= 0"),
+		RuleCode: materialization.QualityRuleRowCountNonNegative, RuleVersion: "1",
+		RuleDefinitionHash: ruleHash(materialization.QualityRuleRowCountNonNegative, "row_count >= 0"),
 		Scope:              "DATASET", Severity: materialization.QualityError,
 		Status:      materialization.QualityPassed,
 		Expectation: json.RawMessage(`{"minimum":0}`),
@@ -457,9 +457,9 @@ func successfulQuality(
 	keyExpectation, _ := json.Marshal(map[string]int{"keyFieldCount": len(keys)})
 	results = append(results, materialization.QualityResult{
 		NodeID:   nodeID,
-		RuleCode: "OUTPUT_GRAIN_UNIQUE_NOT_NULL", RuleVersion: "1",
+		RuleCode: materialization.QualityRuleOutputGrainUnique, RuleVersion: "1",
 		RuleDefinitionHash: ruleHash(
-			"OUTPUT_GRAIN_UNIQUE_NOT_NULL",
+			materialization.QualityRuleOutputGrainUnique,
 			"declared output grain keys are non-null and unique",
 		),
 		Scope: "DATASET", Severity: materialization.QualityError,
@@ -474,9 +474,9 @@ func successfulQuality(
 func failedGrainQuality(nodeID string) []materialization.QualityResult {
 	return []materialization.QualityResult{{
 		NodeID:   nodeID,
-		RuleCode: "OUTPUT_GRAIN_UNIQUE_NOT_NULL", RuleVersion: "1",
+		RuleCode: materialization.QualityRuleOutputGrainUnique, RuleVersion: "1",
 		RuleDefinitionHash: ruleHash(
-			"OUTPUT_GRAIN_UNIQUE_NOT_NULL",
+			materialization.QualityRuleOutputGrainUnique,
 			"declared output grain keys are non-null and unique",
 		),
 		Scope: "DATASET", Severity: materialization.QualityError,

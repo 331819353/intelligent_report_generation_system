@@ -18,6 +18,7 @@ import (
 	askdatadimension "intelligent-report-generation-system/internal/askdata/dimension"
 	askdatafeedback "intelligent-report-generation-system/internal/askdata/feedback"
 	askdatagraph "intelligent-report-generation-system/internal/askdata/graph"
+	askdataobservability "intelligent-report-generation-system/internal/askdata/observability"
 	askdataorchestrator "intelligent-report-generation-system/internal/askdata/orchestrator"
 	askdataprojection "intelligent-report-generation-system/internal/askdata/projection"
 	askdataregistry "intelligent-report-generation-system/internal/askdata/registry"
@@ -527,6 +528,13 @@ func main() {
 		logger.Error("initialize AskData cognition runner", "error", err)
 		os.Exit(1)
 	}
+	askDataLoopOptions := askdataorchestrator.DefaultLoopOptions()
+	askDataCostGovernor, costGovernorErr := askdataobservability.NewQuotaPostgresStore(pool)
+	if costGovernorErr != nil {
+		logger.Error("initialize AskData cost governor", "error", costGovernorErr)
+		os.Exit(1)
+	}
+	askDataLoopOptions.CostGovernor = askDataCostGovernor
 	askDataAssembler, err := askdatatools.NewAssembler(askdatatools.Services{
 		Reader:        askdataregistry.NewQueryReader(pool),
 		Retriever:     askDataRetriever,
@@ -538,7 +546,7 @@ func main() {
 		Executor:      reportPlanExecutor,
 		Dictionary:    askDataDictionary,
 		ReportSources: askdatareportasset.NewPostgresProjectionRuntimeStore(pool),
-	}, askDataCognition, askdataorchestrator.DefaultLoopOptions())
+	}, askDataCognition, askDataLoopOptions)
 	if err != nil {
 		logger.Error("initialize AskData question assembler", "error", err)
 		os.Exit(1)
@@ -569,6 +577,15 @@ func main() {
 		os.Exit(1)
 	}
 	questionRunWorker.SetQuestionFactSource(questionEnvelopes)
+	shadowDispatcher, err := askdataorchestrator.NewShadowDispatcher(
+		askdataorchestrator.NewShadowJobStore(pool), askDataLeases,
+		askdataorchestrator.NewPostgresStore(pool), questionEnvelopes, workerID,
+	)
+	if err != nil {
+		logger.Error("initialize AskData release shadow dispatcher", "error", err)
+		os.Exit(1)
+	}
+	go runAskDataReleaseShadowWorker(ctx, logger, shadowDispatcher, cfg.WorkerPollInterval)
 	go runAskDataQuestionRunWorker(ctx, logger, questionRunWorker, askDataLeases, cfg.WorkerPollInterval)
 	go runAskDataSemanticImportWorker(
 		ctx,
@@ -1355,4 +1372,27 @@ func runAskDataQuestionRunWorker(
 		}
 		return processed, nil
 	}, func(err error) { logger.Error("list AskData question run tenants", "error", err) })
+}
+
+func runAskDataReleaseShadowWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	dispatcher *askdataorchestrator.ShadowDispatcher,
+	pollInterval time.Duration,
+) {
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
+		processed := false
+		tenantIDs, err := dispatcher.ListTenantIDs(ctx)
+		if err != nil {
+			return false, err
+		}
+		for _, tenantID := range tenantIDs {
+			didProcess, dispatchErr := dispatcher.ProcessNext(ctx, tenantID)
+			if dispatchErr != nil {
+				logger.Error("dispatch AskData release shadow", "tenant_id", tenantID, "error", dispatchErr)
+			}
+			processed = processed || didProcess
+		}
+		return processed, nil
+	}, func(err error) { logger.Error("list AskData release shadow tenants", "error", err) })
 }

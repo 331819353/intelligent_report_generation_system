@@ -122,13 +122,27 @@ func NewAdminHandler(authService *auth.Service, store *AdminStore) http.Handler 
 	mux.Handle("PATCH /api/v1/domains/{id}", platformManaged(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		var in struct {
-			Status string `json:"status"`
+			Status            string `json:"status"`
+			AccessSensitivity string `json:"accessSensitivity"`
 		}
 		if !decodeAdmin(w, r, &in) {
 			return
 		}
-		domain, err := store.UpdateDomainStatus(
-			r.Context(), c.TenantID, c.Subject, r.PathValue("id"), in.Status,
+		// Status and access sensitivity are separate governance decisions, so a
+		// single request may only carry one of them.
+		if (in.Status == "") == (in.AccessSensitivity == "") {
+			writeError(w, 400, "DOMAIN_UPDATE_FAILED",
+				"exactly one of status or accessSensitivity must be provided")
+			return
+		}
+		update := store.UpdateDomainStatus
+		value := in.Status
+		if in.AccessSensitivity != "" {
+			update = store.UpdateDomainAccessSensitivity
+			value = in.AccessSensitivity
+		}
+		domain, err := update(
+			r.Context(), c.TenantID, c.Subject, r.PathValue("id"), value,
 		)
 		if err != nil {
 			writeError(w, 400, "DOMAIN_UPDATE_FAILED", err.Error())
@@ -202,24 +216,58 @@ func NewAdminHandler(authService *auth.Service, store *AdminStore) http.Handler 
 	mux.Handle("POST /api/v1/domain-applications/{id}/decision", authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		var in struct {
-			Decision string `json:"decision"`
-			Comment  string `json:"comment"`
+			Decision   string `json:"decision"`
+			Comment    string `json:"comment"`
+			ReviewRole string `json:"reviewRole"`
 		}
 		if !decodeAdmin(w, r, &in) {
 			return
 		}
 		if err := store.ReviewDomainApplication(
 			r.Context(), c.TenantID, c.Subject, r.PathValue("id"),
-			in.Decision, in.Comment,
+			in.Decision, in.Comment, in.ReviewRole,
 		); err != nil {
-			if errors.Is(err, ErrDomainApplicationForbidden) || errors.Is(err, ErrDomainApplicationPlatformReviewRequired) {
+			switch {
+			case errors.Is(err, ErrDomainApplicationForbidden),
+				errors.Is(err, ErrDomainApplicationPlatformReviewRequired),
+				errors.Is(err, ErrDomainApplicationSecurityReviewRequired):
 				writeError(w, http.StatusForbidden, "DOMAIN_APPLICATION_REVIEW_FORBIDDEN", err.Error())
-				return
+			case errors.Is(err, ErrDomainApplicationSelfCosign):
+				writeError(w, http.StatusConflict, "DOMAIN_APPLICATION_SELF_COSIGN", err.Error())
+			case errors.Is(err, ErrDomainApplicationSeatTaken):
+				writeError(w, http.StatusConflict, "DOMAIN_APPLICATION_SEAT_TAKEN", err.Error())
+			case errors.Is(err, ErrDomainApplicationSeatInvalid):
+				writeError(w, http.StatusBadRequest, "DOMAIN_APPLICATION_SEAT_INVALID", err.Error())
+			default:
+				writeError(w, http.StatusBadRequest, "DOMAIN_APPLICATION_REVIEW_FAILED", err.Error())
 			}
-			writeError(w, http.StatusBadRequest, "DOMAIN_APPLICATION_REVIEW_FAILED", err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	})))
+	mux.Handle("POST /api/v1/domain-applications/{id}/escalate", authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := auth.ClaimsFromContext(r.Context())
+		var in struct {
+			Note string `json:"note"`
+		}
+		if !decodeAdmin(w, r, &in) {
+			return
+		}
+		level, err := store.EscalateDomainApplication(
+			r.Context(), c.TenantID, c.Subject, r.PathValue("id"), in.Note,
+		)
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrDomainApplicationForbidden):
+				writeError(w, http.StatusForbidden, "DOMAIN_APPLICATION_REVIEW_FORBIDDEN", err.Error())
+			case errors.Is(err, ErrDomainApplicationEscalationInvalid):
+				writeError(w, http.StatusConflict, "DOMAIN_APPLICATION_ESCALATION_INVALID", err.Error())
+			default:
+				writeError(w, http.StatusBadRequest, "DOMAIN_APPLICATION_ESCALATION_FAILED", err.Error())
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"escalationLevel": level})
 	})))
 	mux.Handle("GET /api/v1/users", platformManaged(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())

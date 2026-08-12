@@ -3435,6 +3435,11 @@ export function DatasetCenterPage() {
           { id: 'transform', kind: 'TRANSFORM', engine: 'POSTGRESQL', status: run.status === 'FAILED' ? 'FAILED' : 'SUCCEEDED', attempt: run.attempt, errorCode: run.errorCode, errorMessage: run.errorMessage },
           { id: 'quality', kind: 'QUALITY', engine: 'POSTGRESQL', status: run.status === 'FAILED' ? 'SKIPPED' : 'SUCCEEDED', attempt: 1 },
         ],
+        quality: run.status === 'FAILED' ? [] : [{
+          nodeId: 'quality', ruleCode: 'ROW_COUNT_NONNEGATIVE', ruleVersion: '1', scope: 'DATASET',
+          severity: 'ERROR', status: 'PASSED', expectation: { minimum: 0 }, observed: { rowCount: 286940 },
+          message: 'warehouse output row count is valid', measuredAt: '2026-08-11T10:26:00+08:00',
+        }],
         succeededNodes: run.status === 'FAILED' ? 1 : 3, failedNodes: run.status === 'FAILED' ? 1 : 0, pendingNodes: run.status === 'FAILED' ? 1 : 0,
         partialSuccess: run.status === 'FAILED',
       })
@@ -4156,7 +4161,7 @@ export function DatasetCenterPage() {
         </section>}
         <footer>
           <button className="quiet-button" type="button" disabled={actionBusy} onClick={() => setDialog({ mode: 'create' })}>返回配置</button>
-          <button className="primary-button" type="button" disabled={actionBusy} onClick={() => void saveDataset()}>{busyAction === 'update' ? '正在保存…' : busyAction === 'create' ? '正在创建…' : editingRecord ? '保存修改' : '创建数据集'}</button>
+          <button className="primary-button" type="button" disabled={actionBusy} onClick={() => void saveDataset()}>{busyAction === 'update' ? '正在校正语义并保存…' : busyAction === 'create' ? '正在校正语义并创建…' : editingRecord ? '保存修改' : '创建数据集'}</button>
         </footer>
       </div>
     </Dialog>}
@@ -5822,6 +5827,13 @@ function MaterializationRunPanel({ dataset, run, loading, busy, error, onRetry, 
   const succeededNodes = run.succeededNodes ?? run.nodes.filter(node => node.status === 'SUCCEEDED').length
   const failedNodes = run.failedNodes ?? run.nodes.filter(node => node.status === 'FAILED').length
   const pendingNodes = run.pendingNodes ?? run.nodes.filter(node => !['SUCCEEDED', 'FAILED'].includes(node.status)).length
+  const quality = run.quality ?? []
+  const qualityFailed = quality.filter(item => item.status === 'FAILED').length
+  const qualityPassed = quality.filter(item => item.status === 'PASSED').length
+  const qualityLabels: Record<string, string> = {
+    ROW_COUNT_NONNEGATIVE: '输出行数有效',
+    OUTPUT_GRAIN_UNIQUE_NOT_NULL: '声明粒度唯一且非空',
+  }
   return <div className="dataset-materialization-panel">
     <section className={`dataset-materialization-summary ${run.status.toLowerCase()} ${run.slaBreached ? 'sla-breached' : ''}`}>
       <div><span className="dataset-materialization-status">{statusLabels[run.status] ?? run.status}</span><h3>{run.partialSuccess ? '部分节点已成功，当前可用快照未切换' : dagRunLabel(run)}</h3><p>{run.errorMessage || (activeDAGRunStatuses.has(run.status) ? '系统正在按冻结的发布版本执行；取消不会影响上一份可用快照。' : '该次运行已形成完整审计证据。')}</p></div>
@@ -5848,6 +5860,15 @@ function MaterializationRunPanel({ dataset, run, loading, busy, error, onRetry, 
         <p>{node.errorMessage || (node.outputRowCount !== undefined ? `输出 ${node.outputRowCount.toLocaleString('zh-CN')} 行` : node.status === 'SKIPPED' ? '因前序失败或取消未执行' : '运行证据已记录')}</p>
       </article>)}</div>
       {!run.nodes.length && <Empty>任务仍在排队，执行节点将在 Worker 领取后显示。</Empty>}
+    </section>
+    <section className="dataset-materialization-quality">
+      <header><div><h3>质量证据</h3><p>展示本次运行真实执行并写入审计库的规则结果，不使用前端模拟状态。</p></div><span className={qualityFailed ? 'failed' : quality.length ? 'passed' : ''}>{qualityFailed ? `${qualityFailed} 项未通过` : quality.length ? `${qualityPassed} / ${quality.length} 通过` : '等待校验'}</span></header>
+      {quality.length ? <div>{quality.map((item, index) => <article key={`${item.ruleCode}:${item.nodeId || index}`} className={item.status.toLowerCase()}>
+        <span><CheckCircleIcon size={18} weight="fill" /></span>
+        <div><strong>{qualityLabels[item.ruleCode] ?? item.ruleCode}</strong><small>{item.scope === 'FIELD' ? `字段 ${item.fieldId}` : '数据集级'} · 规则 V{item.ruleVersion} · {dateText(item.measuredAt)}</small></div>
+        <em>{item.status === 'PASSED' ? '已通过' : item.status === 'FAILED' ? '未通过' : '已跳过'}</em>
+        <p>{item.message || '规则已完成校验并保存证据。'}</p>
+      </article>)}</div> : <Empty>{activeDAGRunStatuses.has(run.status) ? '质量节点完成后将在此展示校验证据。' : '该历史运行没有质量结果；新运行会记录可追溯证据。'}</Empty>}
     </section>
     <section className="dataset-materialization-safety">
       <WarningCircleIcon size={20} weight="fill" />

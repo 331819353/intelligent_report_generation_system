@@ -10,6 +10,7 @@ export type BusinessDomain = {
   default: boolean
   version: number
   createdAt: string
+  accessSensitivity: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED'
   administrators: DomainAdministrator[]
 }
 
@@ -37,6 +38,36 @@ export type DomainApplication = {
   reviewComment: string
   reviewedBy?: string
   reviewedAt?: string
+  createdAt: string
+  // Two-seat approval governance. Every field below is derived server-side; the
+  // browser never decides whether a security co-signature is required.
+  domainSensitivity: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED'
+  requiresDualApproval: boolean
+  slaDueAt?: string
+  slaStatus: 'ON_TRACK' | 'DUE_SOON' | 'OVERDUE' | 'NOT_APPLICABLE'
+  escalationLevel: number
+  approvals: DomainAccessApproval[]
+  approvedRoles: DomainReviewRole[]
+  actorApproval?: 'APPROVED' | 'REJECTED'
+  openSeats: DomainReviewRole[]
+  escalations: DomainAccessEscalation[]
+}
+
+export type DomainReviewRole = 'DOMAIN_OWNER' | 'SECURITY'
+
+export type DomainAccessApproval = {
+  reviewerId: string
+  reviewerDisplayName: string
+  reviewRole: DomainReviewRole
+  decision: 'APPROVED' | 'REJECTED'
+  comment: string
+  createdAt: string
+}
+
+export type DomainAccessEscalation = {
+  level: number
+  escalatedBy: string
+  note: string
   createdAt: string
 }
 
@@ -84,6 +115,14 @@ export type PlatformApproval = {
   reviewerDisplayName?: string
   submittedAt: string
   reviewedAt?: string
+  // Two-seat governance, populated for DOMAIN_ACCESS requests only. Other
+  // approval kinds report no open seats and no SLA.
+  requiresDualApproval: boolean
+  approvedRoles: DomainReviewRole[]
+  openSeats: DomainReviewRole[]
+  slaDueAt?: string
+  slaStatus: 'ON_TRACK' | 'DUE_SOON' | 'OVERDUE' | 'NOT_APPLICABLE'
+  escalationLevel: number
 }
 
 export type PlatformAuditLog = {
@@ -227,10 +266,30 @@ export const administrationAPI = {
     })
     return safeItems(result)
   },
-  async reviewDomainApplication(id: string, decision: 'APPROVED' | 'REJECTED', comment = '') {
+  async reviewDomainApplication(
+    id: string,
+    decision: 'APPROVED' | 'REJECTED',
+    comment = '',
+    reviewRole: 'DOMAIN_OWNER' | 'SECURITY' = 'DOMAIN_OWNER',
+  ) {
     return administrationRequest<void>(`/v1/domain-applications/${id}/decision`, {
       method: 'POST',
-      body: JSON.stringify({ decision, comment }),
+      body: JSON.stringify({ decision, comment, reviewRole }),
+    })
+  },
+  async escalateDomainApplication(id: string, note = '') {
+    return administrationRequest<{ escalationLevel: number }>(`/v1/domain-applications/${encodeURIComponent(id)}/escalate`, {
+      method: 'POST',
+      body: JSON.stringify({ note }),
+    })
+  },
+  async updateDomainAccessSensitivity(
+    id: string,
+    accessSensitivity: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED',
+  ) {
+    return administrationRequest<BusinessDomain>(`/v1/domains/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ accessSensitivity }),
     })
   },
   async listUsers() {
@@ -253,6 +312,7 @@ export const administrationAPI = {
     approval: Pick<PlatformApproval, 'domainId' | 'id' | 'kind' | 'resourceId' | 'version'>,
     decision: 'APPROVED' | 'REJECTED',
     reason = '',
+    reviewRole: DomainReviewRole = 'DOMAIN_OWNER',
   ) {
     const reviewReason = decision === 'APPROVED'
       ? '平台管理中心审核通过'
@@ -263,6 +323,7 @@ export const administrationAPI = {
         body: JSON.stringify({
           decision,
           comment: reviewReason,
+          reviewRole,
         }),
       })
     }

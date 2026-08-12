@@ -80,6 +80,7 @@ const snapshotDomain: BusinessDomain = {
   default: true,
   version: 1,
   createdAt: '2026-08-10T00:00:00+08:00',
+  accessSensitivity: 'INTERNAL',
   administrators: [],
 }
 

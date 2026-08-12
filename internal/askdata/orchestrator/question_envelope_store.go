@@ -133,6 +133,45 @@ func (store *PostgresQuestionEnvelopeStore) SaveClarificationQuestion(
 	return store.SaveQuestion(ctx, childBinding, continuedQuestion, now)
 }
 
+// SaveShadowQuestion opens the control run's short-lived envelope and seals a
+// fresh candidate-bound envelope. Ciphertext is never copied: release and
+// policy are authenticated associated data, so a byte-for-byte copy would be
+// invalid and would weaken the isolation this store provides.
+func (store *PostgresQuestionEnvelopeStore) SaveShadowQuestion(
+	ctx context.Context,
+	sourceBinding QuestionRetentionBinding,
+	shadowBinding QuestionRetentionBinding,
+	now time.Time,
+) error {
+	if store == nil || store.pool == nil || store.policy == nil || ctx == nil ||
+		sourceBinding.validate() != nil || shadowBinding.validate() != nil ||
+		sourceBinding.Scope.TenantID != shadowBinding.Scope.TenantID ||
+		sourceBinding.Scope.ActorID != shadowBinding.Scope.ActorID ||
+		sourceBinding.DomainID != shadowBinding.DomainID ||
+		sourceBinding.ConversationID != shadowBinding.ConversationID ||
+		sourceBinding.QuestionHash != shadowBinding.QuestionHash ||
+		sourceBinding.RunID == shadowBinding.RunID || now.IsZero() {
+		return ErrQuestionContextUnavailable
+	}
+
+	var sourceEnvelope QuestionEnvelope
+	ctx = database.WithAccessContext(ctx, string(sourceBinding.Scope.ActorID), string(sourceBinding.DomainID))
+	err := database.WithTenantTx(ctx, store.pool, string(sourceBinding.Scope.TenantID), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT envelope_json
+			FROM askdata.question_envelopes
+			WHERE run_id=$1 AND tenant_id=$2 AND expires_at>clock_timestamp()`,
+			sourceBinding.RunID, sourceBinding.Scope.TenantID).Scan(&sourceEnvelope)
+	})
+	if err != nil {
+		return fmt.Errorf("%w: load source shadow envelope", ErrQuestionContextUnavailable)
+	}
+	rawQuestion, err := store.policy.OpenQuestion(sourceBinding, sourceEnvelope, now)
+	if err != nil {
+		return fmt.Errorf("%w: open source shadow envelope", ErrQuestionContextUnavailable)
+	}
+	return store.SaveQuestion(ctx, shadowBinding, rawQuestion, now)
+}
+
 func (store *PostgresQuestionEnvelopeStore) LoadQuestionFact(
 	ctx context.Context,
 	scope askdata.PolicyScope,

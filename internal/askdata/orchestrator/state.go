@@ -236,6 +236,8 @@ type Run struct {
 	ActorID               askdata.ID
 	ConversationID        askdata.ID
 	ParentRunID           askdata.ID
+	ExecutionMode         string
+	SourceRunID           askdata.ID
 	TraceID               askdata.ID
 	IdempotencyKeyHash    askdata.ContentHash
 	QuestionHash          askdata.ContentHash
@@ -275,6 +277,7 @@ func (run Run) Validate() error {
 	}
 	for name, id := range map[string]askdata.ID{
 		"conversationId": run.ConversationID, "parentRunId": run.ParentRunID,
+		"sourceRunId": run.SourceRunID,
 	} {
 		if id != "" && uuid.Validate(string(id)) != nil {
 			return fmt.Errorf("%w: %s must be a UUID", ErrInvalidRun, name)
@@ -282,6 +285,18 @@ func (run Run) Validate() error {
 	}
 	if run.ParentRunID != "" && run.ParentRunID == run.ID {
 		return fmt.Errorf("%w: parent run cannot reference itself", ErrInvalidRun)
+	}
+	mode := run.ExecutionMode
+	if mode == "" {
+		// Keep historical in-memory fixtures source compatible. Persisted rows
+		// always carry the non-empty database default.
+		mode = "USER"
+	}
+	if (mode != "USER" && mode != "SHADOW") ||
+		(mode == "USER" && run.SourceRunID != "") ||
+		(mode == "SHADOW" && (run.SourceRunID == "" || run.ConversationID == "" ||
+			run.ParentRunID != "" || run.SourceRunID == run.ID)) {
+		return fmt.Errorf("%w: execution mode binding is invalid", ErrInvalidRun)
 	}
 	for name, hash := range map[string]askdata.ContentHash{
 		"idempotency key": run.IdempotencyKeyHash, "question": run.QuestionHash,

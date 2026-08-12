@@ -222,6 +222,32 @@ func MetricDimensionReleaseObject(compatibility MetricDimension) (ReleaseObject,
 // BusinessTermReleaseObject publishes only the certified, canonical business
 // vocabulary contract. Review metadata remains audit evidence and is not part
 // of the executable release content hash.
+// QualityRuleReleaseObject freezes a governed quality rule into a Release. The
+// contract carries the binding itself, so what a release promises to check is
+// content-addressed alongside everything else it promises.
+func QualityRuleReleaseObject(rule QualityRule) (ReleaseObject, error) {
+	if rule.Status != VersionStatusCertified {
+		return ReleaseObject{}, errors.New("quality rule must be CERTIFIED before release")
+	}
+	if err := rule.Validate(); err != nil {
+		return ReleaseObject{}, err
+	}
+	return NewReleaseObject(
+		ReleaseObjectQualityRule,
+		rule.ObjectID,
+		rule.ID,
+		SensitivityInternal,
+		map[string]any{
+			"type": "QUALITY_RULE", "qualityRuleId": rule.ObjectID,
+			"versionNo": rule.VersionNo, "targetType": rule.TargetType,
+			"targetVersionId": rule.TargetVersionID, "code": rule.Code,
+			"name": rule.Name, "ruleAst": json.RawMessage(rule.RuleAST),
+			"severity": rule.Severity,
+		},
+		rule.ContentHash,
+	)
+}
+
 func BusinessTermReleaseObject(term BusinessTerm) (ReleaseObject, error) {
 	if term.Status != VersionStatusCertified {
 		return ReleaseObject{}, errors.New("business term must be CERTIFIED before release")

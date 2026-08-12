@@ -6,8 +6,10 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"intelligent-report-generation-system/internal/platform/database"
 )
@@ -31,15 +33,19 @@ type UserSummary struct {
 	CreatedAt             string       `json:"createdAt"`
 }
 type BusinessDomain struct {
-	ID             string                `json:"id"`
-	Code           string                `json:"code"`
-	Name           string                `json:"name"`
-	Description    string                `json:"description"`
-	Status         string                `json:"status"`
-	Default        bool                  `json:"default"`
-	Version        int64                 `json:"version"`
-	CreatedAt      string                `json:"createdAt"`
-	Administrators []DomainAdministrator `json:"administrators"`
+	ID          string `json:"id"`
+	Code        string `json:"code"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	Default     bool   `json:"default"`
+	Version     int64  `json:"version"`
+	CreatedAt   string `json:"createdAt"`
+	// AccessSensitivity drives whether joining this domain needs an independent
+	// security co-signature, using the same vocabulary as data request
+	// sensitivity so the platform has one definition of "sensitive".
+	AccessSensitivity string                `json:"accessSensitivity"`
+	Administrators    []DomainAdministrator `json:"administrators"`
 }
 type DomainAdministrator struct {
 	ID          string `json:"id"`
@@ -71,6 +77,38 @@ type DomainApplication struct {
 	ReviewedBy           string `json:"reviewedBy,omitempty"`
 	ReviewedAt           string `json:"reviewedAt,omitempty"`
 	CreatedAt            string `json:"createdAt"`
+	// Dual-approval governance for sensitive domains. All of these are derived
+	// server-side; the browser never decides whether a second seat is needed.
+	DomainSensitivity    string                   `json:"domainSensitivity"`
+	RequiresDualApproval bool                     `json:"requiresDualApproval"`
+	SLADueAt             string                   `json:"slaDueAt,omitempty"`
+	SLAStatus            string                   `json:"slaStatus"`
+	EscalationLevel      int                      `json:"escalationLevel"`
+	Approvals            []DomainAccessApproval   `json:"approvals"`
+	ApprovedRoles        []string                 `json:"approvedRoles"`
+	ActorApproval        string                   `json:"actorApproval,omitempty"`
+	OpenSeats            []string                 `json:"openSeats"`
+	Escalations          []DomainAccessEscalation `json:"escalations"`
+}
+
+// DomainAccessApproval is one immutable approval receipt. Comments are stored
+// in the clear because a domain access decision has to stay readable to the
+// applicant and to auditors, unlike the release approval reasons which are
+// hashed.
+type DomainAccessApproval struct {
+	ReviewerID          string `json:"reviewerId"`
+	ReviewerDisplayName string `json:"reviewerDisplayName"`
+	ReviewRole          string `json:"reviewRole"`
+	Decision            string `json:"decision"`
+	Comment             string `json:"comment"`
+	CreatedAt           string `json:"createdAt"`
+}
+
+type DomainAccessEscalation struct {
+	Level       int    `json:"level"`
+	EscalatedBy string `json:"escalatedBy"`
+	Note        string `json:"note"`
+	CreatedAt   string `json:"createdAt"`
 }
 type PlatformApproval struct {
 	ID                   string  `json:"id"`
@@ -89,6 +127,14 @@ type PlatformApproval struct {
 	ReviewerDisplayName  string  `json:"reviewerDisplayName,omitempty"`
 	SubmittedAt          string  `json:"submittedAt"`
 	ReviewedAt           *string `json:"reviewedAt,omitempty"`
+	// Two-seat governance, populated for DOMAIN_ACCESS requests only. Other
+	// approval kinds report a single empty seat set.
+	RequiresDualApproval bool     `json:"requiresDualApproval"`
+	ApprovedRoles        []string `json:"approvedRoles"`
+	OpenSeats            []string `json:"openSeats"`
+	SLADueAt             string   `json:"slaDueAt,omitempty"`
+	SLAStatus            string   `json:"slaStatus"`
+	EscalationLevel      int      `json:"escalationLevel"`
 }
 type PlatformAuditLog struct {
 	ID               string `json:"id"`
@@ -108,7 +154,52 @@ var businessDomainCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,31}$`)
 var (
 	ErrDomainApplicationForbidden              = errors.New("仅目标领域管理员或平台管理员可以审批领域申请")
 	ErrDomainApplicationPlatformReviewRequired = errors.New("超出领域管理员权限范围，需要平台管理员审批")
+	ErrDomainApplicationSeatInvalid            = errors.New("审批席位无效：敏感领域需要业务 Owner 与安全复核两个不同席位")
+	ErrDomainApplicationSeatTaken              = errors.New("该审批席位已由他人签署")
+	ErrDomainApplicationSelfCosign             = errors.New("同一账号不得同时占据业务 Owner 与安全复核席位")
+	ErrDomainApplicationSecurityReviewRequired = errors.New("安全复核席位需要平台管理员签署")
+	ErrDomainApplicationEscalationInvalid      = errors.New("升级无效：申请未超期或升级级别已用尽")
 )
+
+// Domain access review seats. DOMAIN_OWNER carries the business decision and
+// SECURITY the independent check; a sensitive domain needs both, filled by two
+// different accounts.
+const (
+	domainReviewRoleOwner    = "DOMAIN_OWNER"
+	domainReviewRoleSecurity = "SECURITY"
+)
+
+// domainAccessReviewSLA is the review window before escalation becomes
+// available, matching the 24 hour SLA used by the semantic release approvals.
+const domainAccessReviewSLA = 24 * time.Hour
+
+// requiresDualDomainApproval mirrors datarequest.RequiresSecurityCosign so the
+// platform has one definition of "sensitive enough to need a second pair of
+// eyes" rather than two that can drift apart.
+func requiresDualDomainApproval(sensitivity string) bool {
+	return sensitivity == "CONFIDENTIAL" || sensitivity == "RESTRICTED"
+}
+
+func validDomainReviewRole(role string) bool {
+	return role == domainReviewRoleOwner || role == domainReviewRoleSecurity
+}
+
+// domainApplicationSLAStatus reports the review window without the browser
+// having to compute it from timestamps.
+func domainApplicationSLAStatus(status string, dueAt *time.Time) string {
+	if status != "PENDING" || dueAt == nil {
+		return "NOT_APPLICABLE"
+	}
+	remaining := time.Until(*dueAt)
+	switch {
+	case remaining <= 0:
+		return "OVERDUE"
+	case remaining <= 4*time.Hour:
+		return "DUE_SOON"
+	default:
+		return "ON_TRACK"
+	}
+}
 
 func validateDomainApplicationReviewer(
 	platformAdministrator, domainAdministrator bool,
@@ -272,7 +363,8 @@ func (s *AdminStore) ListPlatformApprovals(
 		rows, queryErr := tx.Query(ctx, `SELECT
 			approval_id,kind,approval_version,resource_id,resource_name,domain_id,domain_code,
 			domain_name,requester_user_id,requester_email,requester_display_name,
-			status,note,reviewer_display_name,submitted_at::text,reviewed_at::text
+			status,note,reviewer_display_name,submitted_at::text,reviewed_at::text,
+			requires_dual_approval,approved_roles,sla_due_at,escalation_level
 		FROM (
 			SELECT application.id AS approval_id,'DOMAIN_ACCESS'::text AS kind,0::bigint AS approval_version,
 				domain.id AS resource_id,domain.name AS resource_name,
@@ -280,7 +372,14 @@ func (s *AdminStore) ListPlatformApprovals(
 				applicant.id AS requester_user_id,applicant.email::text AS requester_email,
 				applicant.display_name AS requester_display_name,application.status::text AS status,
 				application.reason AS note,COALESCE(reviewer.display_name,'') AS reviewer_display_name,
-				application.created_at AS submitted_at,application.reviewed_at
+				application.created_at AS submitted_at,application.reviewed_at,
+				application.requires_dual_approval,
+				COALESCE((
+				  SELECT array_agg(approval.review_role ORDER BY approval.review_role)
+				  FROM platform.domain_access_approvals AS approval
+				  WHERE approval.application_id=application.id AND approval.decision='APPROVED'
+				),ARRAY[]::text[]) AS approved_roles,
+				application.sla_due_at,application.escalation_level
 			FROM platform.domain_access_applications AS application
 			JOIN platform.business_domains AS domain
 			  ON domain.id=application.domain_id AND domain.tenant_id=application.tenant_id
@@ -292,7 +391,8 @@ func (s *AdminStore) ListPlatformApprovals(
 			SELECT request.id,'DATA_SOURCE',request.version,source.id,source.name,
 				domain.id,domain.code::text,domain.name,requester.id,requester.email::text,
 				requester.display_name,request.status,request.request_note,
-				COALESCE(reviewer.display_name,''),request.submitted_at,request.reviewed_at
+				COALESCE(reviewer.display_name,''),request.submitted_at,request.reviewed_at,
+				false,ARRAY[]::text[],NULL::timestamptz,0
 			FROM platform.data_source_publication_requests AS request
 			JOIN platform.data_sources AS source
 			  ON source.id=request.data_source_id AND source.tenant_id=request.tenant_id
@@ -306,7 +406,8 @@ func (s *AdminStore) ListPlatformApprovals(
 			SELECT request.id,'DATASET',request.version,dataset.id,dataset.name,
 				domain.id,domain.code::text,domain.name,requester.id,requester.email::text,
 				requester.display_name,request.status,request.request_note,
-				COALESCE(reviewer.display_name,''),request.submitted_at,request.reviewed_at
+				COALESCE(reviewer.display_name,''),request.submitted_at,request.reviewed_at,
+				false,ARRAY[]::text[],NULL::timestamptz,0
 			FROM platform.dataset_publication_requests AS request
 			JOIN platform.datasets AS dataset
 			  ON dataset.id=request.dataset_id AND dataset.tenant_id=request.tenant_id
@@ -325,14 +426,38 @@ func (s *AdminStore) ListPlatformApprovals(
 		defer rows.Close()
 		for rows.Next() {
 			var item PlatformApproval
+			var slaDueAt *time.Time
 			if scanErr := rows.Scan(
 				&item.ID, &item.Kind, &item.Version, &item.ResourceID, &item.ResourceName,
 				&item.DomainID, &item.DomainCode, &item.DomainName,
 				&item.RequesterUserID, &item.RequesterEmail,
 				&item.RequesterDisplayName, &item.Status, &item.Note,
 				&item.ReviewerDisplayName, &item.SubmittedAt, &item.ReviewedAt,
+				&item.RequiresDualApproval, &item.ApprovedRoles, &slaDueAt,
+				&item.EscalationLevel,
 			); scanErr != nil {
 				return scanErr
+			}
+			if item.ApprovedRoles == nil {
+				item.ApprovedRoles = []string{}
+			}
+			if slaDueAt != nil {
+				item.SLADueAt = slaDueAt.UTC().Format(time.RFC3339Nano)
+			}
+			item.SLAStatus = domainApplicationSLAStatus(item.Status, slaDueAt)
+			// The seats still open are derived here so the cross-domain queue can
+			// show a platform administrator what a request is actually waiting on.
+			item.OpenSeats = []string{}
+			if item.Kind == "DOMAIN_ACCESS" && item.Status == "PENDING" {
+				required := []string{domainReviewRoleOwner}
+				if item.RequiresDualApproval {
+					required = append(required, domainReviewRoleSecurity)
+				}
+				for _, seat := range required {
+					if !containsString(item.ApprovedRoles, seat) {
+						item.OpenSeats = append(item.OpenSeats, seat)
+					}
+				}
 			}
 			items = append(items, item)
 		}
@@ -493,6 +618,7 @@ func (s *AdminStore) listDomains(
 		rows, err := tx.Query(ctx, `SELECT
 			  domain.id,domain.code,domain.name,domain.description,domain.status,
 			  domain.is_default,domain.version,domain.created_at::text,
+			  domain.access_sensitivity,
 			  COALESCE((
 			    SELECT jsonb_agg(jsonb_build_object(
 			      'id',administrator.id,'employeeNo',administrator.employee_no,
@@ -542,7 +668,7 @@ func (s *AdminStore) listDomains(
 			if err := rows.Scan(
 				&domain.ID, &domain.Code, &domain.Name, &domain.Description,
 				&domain.Status, &domain.Default, &domain.Version, &domain.CreatedAt,
-				&administratorsJSON,
+				&domain.AccessSensitivity, &administratorsJSON,
 			); err != nil {
 				return err
 			}
@@ -609,11 +735,13 @@ func (s *AdminStore) CreateDomain(
 		if err := tx.QueryRow(ctx, `INSERT INTO platform.business_domains(
 				tenant_id,code,name,description,created_by
 			) VALUES($1,$2,$3,$4,$5)
-			RETURNING id,code,name,description,status,is_default,version,created_at::text`,
+			RETURNING id,code,name,description,status,is_default,version,created_at::text,
+			  access_sensitivity`,
 			tenantID, code, name, description, actorID,
 		).Scan(
 			&domain.ID, &domain.Code, &domain.Name, &domain.Description,
 			&domain.Status, &domain.Default, &domain.Version, &domain.CreatedAt,
+			&domain.AccessSensitivity,
 		); err != nil {
 			return err
 		}
@@ -757,6 +885,54 @@ func (s *AdminStore) RevokeUserDomain(
 }
 
 // UpdateDomainStatus 启用或停用非默认领域。
+// UpdateDomainAccessSensitivity changes how strictly access to a domain is
+// reviewed. Only a platform administrator may change it, and the change never
+// touches applications already in flight: those pinned their requirement when
+// they were submitted, so a downgrade cannot retroactively drop the security
+// seat from a request that is waiting on it.
+func (s *AdminStore) UpdateDomainAccessSensitivity(
+	ctx context.Context, tenantID, actorID, id, sensitivity string,
+) (BusinessDomain, error) {
+	var domain BusinessDomain
+	sensitivity = strings.ToUpper(strings.TrimSpace(sensitivity))
+	switch sensitivity {
+	case "PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED":
+	default:
+		return domain, errors.New("domain access sensitivity must be PUBLIC, INTERNAL, CONFIDENTIAL or RESTRICTED")
+	}
+	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		platformAdministrator, err := isPlatformAdministratorTx(ctx, tx, actorID)
+		if err != nil {
+			return err
+		}
+		if !platformAdministrator {
+			return errors.New("only a platform administrator can update domain access sensitivity")
+		}
+		if err := tx.QueryRow(ctx, `UPDATE platform.business_domains
+			SET access_sensitivity=$2,version=version+1
+			WHERE id=$1 AND tenant_id=$3 AND deleted_at IS NULL
+			RETURNING id,code,name,description,status,is_default,version,created_at::text,
+			  access_sensitivity`,
+			id, sensitivity, tenantID,
+		).Scan(
+			&domain.ID, &domain.Code, &domain.Name, &domain.Description,
+			&domain.Status, &domain.Default, &domain.Version, &domain.CreatedAt,
+			&domain.AccessSensitivity,
+		); err != nil {
+			return err
+		}
+		domain.Administrators = []DomainAdministrator{}
+		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+				tenant_id,actor_user_id,action,resource_type,resource_id,detail
+			) VALUES($1,$2,'UPDATE_DOMAIN_ACCESS_SENSITIVITY','BUSINESS_DOMAIN',$3,
+				jsonb_build_object('accessSensitivity',$4::text))`,
+			tenantID, actorID, id, sensitivity,
+		)
+		return err
+	})
+	return domain, err
+}
+
 func (s *AdminStore) UpdateDomainStatus(
 	ctx context.Context, tenantID, actorID, id, status string,
 ) (BusinessDomain, error) {
@@ -784,11 +960,13 @@ func (s *AdminStore) UpdateDomainStatus(
 		if err := tx.QueryRow(ctx, `UPDATE platform.business_domains
 			SET status=$2,version=version+1
 			WHERE id=$1 AND tenant_id=$3
-			RETURNING id,code,name,description,status,is_default,version,created_at::text`,
+			RETURNING id,code,name,description,status,is_default,version,created_at::text,
+			  access_sensitivity`,
 			id, status, tenantID,
 		).Scan(
 			&domain.ID, &domain.Code, &domain.Name, &domain.Description,
 			&domain.Status, &domain.Default, &domain.Version, &domain.CreatedAt,
+			&domain.AccessSensitivity,
 		); err != nil {
 			return err
 		}
@@ -1064,10 +1242,16 @@ func (s *AdminStore) ApplyDomainAccess(
 	var application DomainApplication
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		var id string
+		// requires_dual_approval and the review SLA are pinned from the domain at
+		// submission time: reading them at decision time would let a sensitivity
+		// downgrade retroactively weaken a request that is already in flight.
 		err := tx.QueryRow(ctx, `INSERT INTO platform.domain_access_applications(
-				tenant_id,domain_id,applicant_user_id,reason
+				tenant_id,domain_id,applicant_user_id,reason,
+				requires_dual_approval,sla_due_at
 			)
-			SELECT $1,domain.id,$2,$3
+			SELECT $1,domain.id,$2,$3,
+			  domain.access_sensitivity IN ('CONFIDENTIAL','RESTRICTED'),
+			  now()+interval '24 hours'
 			FROM platform.business_domains AS domain
 			JOIN platform.users AS applicant
 			  ON applicant.tenant_id=domain.tenant_id AND applicant.id=$2::uuid
@@ -1092,6 +1276,8 @@ func (s *AdminStore) ApplyDomainAccess(
 			  WHERE status='PENDING'
 			DO UPDATE SET reason=EXCLUDED.reason
 			RETURNING id::text`, tenantID, applicantID, reason, domainID).Scan(&id)
+		// A merged duplicate keeps its original seats and SLA; only the stated
+		// purpose is refreshed.
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errors.New("active domain was not found or user is already a member")
 		}
@@ -1181,7 +1367,29 @@ func (s *AdminStore) listDomainApplications(
 			applicant.id::text,applicant.email::text,applicant.display_name,
 			application.status::text,application.reason,application.review_comment,
 			COALESCE(application.reviewed_by::text,''),
-			COALESCE(application.reviewed_at::text,''),application.created_at::text
+			COALESCE(application.reviewed_at::text,''),application.created_at::text,
+			domain.access_sensitivity,application.requires_dual_approval,
+			application.sla_due_at,application.escalation_level,
+			COALESCE((
+			  SELECT jsonb_agg(jsonb_build_object(
+			      'reviewerId',approval.reviewer_id::text,
+			      'reviewerDisplayName',reviewer.display_name,
+			      'reviewRole',approval.review_role,'decision',approval.decision,
+			      'comment',approval.comment,'createdAt',approval.created_at::text
+			    ) ORDER BY approval.created_at)
+			  FROM platform.domain_access_approvals AS approval
+			  JOIN platform.users AS reviewer
+			    ON reviewer.id=approval.reviewer_id AND reviewer.tenant_id=approval.tenant_id
+			  WHERE approval.application_id=application.id
+			),'[]'::jsonb),
+			COALESCE((
+			  SELECT jsonb_agg(jsonb_build_object(
+			      'level',escalation.level,'escalatedBy',escalation.escalated_by::text,
+			      'note',escalation.note,'createdAt',escalation.created_at::text
+			    ) ORDER BY escalation.level)
+			  FROM platform.domain_access_escalations AS escalation
+			  WHERE escalation.application_id=application.id
+			),'[]'::jsonb)
 		FROM platform.domain_access_applications AS application
 		JOIN platform.business_domains AS domain
 		  ON domain.id=application.domain_id AND domain.tenant_id=application.tenant_id
@@ -1198,14 +1406,52 @@ func (s *AdminStore) listDomainApplications(
 		defer rows.Close()
 		for rows.Next() {
 			var item DomainApplication
+			var slaDueAt *time.Time
+			var approvalsJSON, escalationsJSON []byte
 			if scanErr := rows.Scan(
 				&item.ID, &item.DomainID, &item.DomainCode, &item.DomainName,
 				&item.ApplicantUserID, &item.ApplicantEmail,
 				&item.ApplicantDisplayName, &item.Status, &item.Reason,
 				&item.ReviewComment, &item.ReviewedBy, &item.ReviewedAt,
-				&item.CreatedAt,
+				&item.CreatedAt, &item.DomainSensitivity, &item.RequiresDualApproval,
+				&slaDueAt, &item.EscalationLevel, &approvalsJSON, &escalationsJSON,
 			); scanErr != nil {
 				return scanErr
+			}
+			item.Approvals = []DomainAccessApproval{}
+			item.Escalations = []DomainAccessEscalation{}
+			if err := json.Unmarshal(approvalsJSON, &item.Approvals); err != nil {
+				return err
+			}
+			if err := json.Unmarshal(escalationsJSON, &item.Escalations); err != nil {
+				return err
+			}
+			if slaDueAt != nil {
+				item.SLADueAt = slaDueAt.UTC().Format(time.RFC3339Nano)
+			}
+			item.SLAStatus = domainApplicationSLAStatus(item.Status, slaDueAt)
+			item.ApprovedRoles = []string{}
+			item.OpenSeats = []string{}
+			for _, approval := range item.Approvals {
+				if approval.Decision == "APPROVED" {
+					item.ApprovedRoles = append(item.ApprovedRoles, approval.ReviewRole)
+				}
+				if approval.ReviewerID == userID {
+					item.ActorApproval = approval.Decision
+				}
+			}
+			// The seats still to be filled are derived here so the queue can show
+			// a reviewer what is actually being waited on.
+			if item.Status == "PENDING" {
+				required := []string{domainReviewRoleOwner}
+				if item.RequiresDualApproval {
+					required = append(required, domainReviewRoleSecurity)
+				}
+				for _, seat := range required {
+					if !containsString(item.ApprovedRoles, seat) {
+						item.OpenSeats = append(item.OpenSeats, seat)
+					}
+				}
 			}
 			items = append(items, item)
 		}
@@ -1217,26 +1463,44 @@ func (s *AdminStore) listDomainApplications(
 // ReviewDomainApplication atomically decides a pending request and creates an
 // ordinary active membership only on approval.
 func (s *AdminStore) ReviewDomainApplication(
-	ctx context.Context, tenantID, reviewerID, applicationID, decision, comment string,
+	ctx context.Context, tenantID, reviewerID, applicationID, decision, comment, reviewRole string,
 ) error {
 	decision = strings.ToUpper(strings.TrimSpace(decision))
 	comment = strings.TrimSpace(comment)
+	reviewRole = strings.ToUpper(strings.TrimSpace(reviewRole))
 	if decision != "APPROVED" && decision != "REJECTED" {
 		return errors.New("decision must be APPROVED or REJECTED")
 	}
 	if len([]byte(comment)) > 1000 {
 		return errors.New("review comment is too long")
 	}
+	if reviewRole == "" {
+		reviewRole = domainReviewRoleOwner
+	}
+	if !validDomainReviewRole(reviewRole) {
+		return ErrDomainApplicationSeatInvalid
+	}
 	return database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		var domainID, applicantID, status string
-		if err := tx.QueryRow(ctx, `SELECT domain_id::text,applicant_user_id::text,status::text
+		var requiresDualApproval bool
+		if err := tx.QueryRow(ctx, `SELECT domain_id::text,applicant_user_id::text,status::text,
+			requires_dual_approval
 			FROM platform.domain_access_applications
 			WHERE id=$1::uuid FOR UPDATE`, applicationID,
-		).Scan(&domainID, &applicantID, &status); err != nil {
+		).Scan(&domainID, &applicantID, &status, &requiresDualApproval); err != nil {
 			return err
 		}
 		if status != "PENDING" {
 			return errors.New("domain application has already been decided")
+		}
+		if !requiresDualApproval && reviewRole != domainReviewRoleOwner {
+			// A standard domain has exactly one seat. Accepting a SECURITY
+			// signature here would leave the request pending forever, because the
+			// owner seat it is waiting for would still be empty.
+			return ErrDomainApplicationSeatInvalid
+		}
+		if reviewerID == applicantID {
+			return ErrDomainApplicationSelfCosign
 		}
 		platformAdministrator, err := isPlatformAdministratorTx(ctx, tx, reviewerID)
 		if err != nil {
@@ -1252,6 +1516,46 @@ func (s *AdminStore) ReviewDomainApplication(
 			platformAdministrator, domainAdministrator,
 		); err != nil {
 			return err
+		}
+		// The security seat is the independent check, so it cannot be filled by
+		// the same administrators who run the domain day to day.
+		if reviewRole == domainReviewRoleSecurity && !platformAdministrator {
+			return ErrDomainApplicationSecurityReviewRequired
+		}
+		// Append the receipt first. The unique constraints on (application,
+		// reviewer) and (application, role) are what actually enforce separation
+		// of duties, so a concurrent second signature loses the race here rather
+		// than silently completing the approval.
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.domain_access_approvals(
+				tenant_id,application_id,reviewer_id,review_role,decision,comment
+			) VALUES($1,$2::uuid,$3::uuid,$4,$5,$6)`,
+			tenantID, applicationID, reviewerID, reviewRole, decision, comment,
+		); err != nil {
+			var postgresError *pgconn.PgError
+			if errors.As(err, &postgresError) && postgresError.Code == "23505" {
+				if strings.Contains(postgresError.ConstraintName, "one_seat_per_reviewer") {
+					return ErrDomainApplicationSelfCosign
+				}
+				return ErrDomainApplicationSeatTaken
+			}
+			return err
+		}
+		// One rejection in either seat is decisive; approval needs every required
+		// seat filled.
+		decided := decision == "REJECTED"
+		if decision == "APPROVED" {
+			if !requiresDualApproval {
+				decided = true
+			} else {
+				var approvedSeats int
+				if err := tx.QueryRow(ctx, `SELECT count(DISTINCT review_role)
+					FROM platform.domain_access_approvals
+					WHERE tenant_id=$1::uuid AND application_id=$2::uuid AND decision='APPROVED'`,
+					tenantID, applicationID).Scan(&approvedSeats); err != nil {
+					return err
+				}
+				decided = approvedSeats == 2
+			}
 		}
 		var applicantPlatformAdministrator, applicantDomainAdministrator, applicantTargetDomainAdministrator bool
 		if decision == "APPROVED" {
@@ -1283,6 +1587,19 @@ func (s *AdminStore) ReviewDomainApplication(
 				return ErrDomainApplicationPlatformReviewRequired
 			}
 		}
+		if !decided {
+			// The first seat of a sensitive-domain approval only records its
+			// receipt. The request stays PENDING and grants nothing until the
+			// second seat signs.
+			_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+					tenant_id,actor_user_id,action,resource_type,resource_id,detail
+				) VALUES($1,$2,'COSIGN_DOMAIN_APPLICATION','DOMAIN_APPLICATION',$3,
+					jsonb_build_object('domainId',$4::text,'applicantUserId',$5::text,
+					'decision',$6::text,'reviewRole',$7::text))`,
+				tenantID, reviewerID, applicationID, domainID, applicantID, decision, reviewRole,
+			)
+			return err
+		}
 		if _, err := tx.Exec(ctx, `UPDATE platform.domain_access_applications
 			SET status=$2::platform.domain_application_status,review_comment=$3,
 			    reviewed_by=$4::uuid,reviewed_at=now()
@@ -1308,11 +1625,82 @@ func (s *AdminStore) ReviewDomainApplication(
 				tenant_id,actor_user_id,action,resource_type,resource_id,detail
 			) VALUES($1,$2,'REVIEW_DOMAIN_APPLICATION','DOMAIN_APPLICATION',$3,
 				jsonb_build_object('domainId',$4::text,'applicantUserId',$5::text,
-				'decision',$6::text))`,
+				'decision',$6::text,'reviewRole',$7::text,
+				'requiresDualApproval',$8::boolean))`,
 			tenantID, reviewerID, applicationID, domainID, applicantID, decision,
+			reviewRole, requiresDualApproval,
 		)
 		return err
 	})
+}
+
+// EscalateDomainApplication records that a pending request has passed its review
+// SLA and raises it one level, up to three.
+//
+// Escalation deliberately does not decide anything: an overdue sensitive-domain
+// request must still collect both signatures, because a review that grants
+// itself by timing out is not a review. The ledger exists so an unattended
+// request becomes visible instead of sitting silently in a queue.
+func (s *AdminStore) EscalateDomainApplication(
+	ctx context.Context, tenantID, actorID, applicationID, note string,
+) (int, error) {
+	note = strings.TrimSpace(note)
+	if len([]byte(note)) > 1000 {
+		return 0, errors.New("escalation note is too long")
+	}
+	level := 0
+	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		var domainID, status string
+		var slaDueAt *time.Time
+		var currentLevel int
+		if err := tx.QueryRow(ctx, `SELECT domain_id::text,status::text,sla_due_at,escalation_level
+			FROM platform.domain_access_applications
+			WHERE tenant_id=$1::uuid AND id=$2::uuid FOR UPDATE`, tenantID, applicationID).
+			Scan(&domainID, &status, &slaDueAt, &currentLevel); err != nil {
+			return err
+		}
+		if status != "PENDING" || slaDueAt == nil || currentLevel >= 3 || time.Now().Before(*slaDueAt) {
+			return ErrDomainApplicationEscalationInvalid
+		}
+		platformAdministrator, err := isPlatformAdministratorTx(ctx, tx, actorID)
+		if err != nil {
+			return err
+		}
+		var domainAdministrator bool
+		if err := tx.QueryRow(ctx, `SELECT platform.user_is_domain_administrator($1::uuid)`,
+			domainID).Scan(&domainAdministrator); err != nil {
+			return err
+		}
+		if err := validateDomainApplicationReviewer(
+			platformAdministrator, domainAdministrator,
+		); err != nil {
+			return err
+		}
+		level = currentLevel + 1
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.domain_access_escalations(
+				tenant_id,application_id,level,escalated_by,note
+			) VALUES($1,$2::uuid,$3,$4::uuid,$5)`,
+			tenantID, applicationID, level, actorID, note); err != nil {
+			var postgresError *pgconn.PgError
+			if errors.As(err, &postgresError) && postgresError.Code == "23505" {
+				return ErrDomainApplicationEscalationInvalid
+			}
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE platform.domain_access_applications
+			SET escalation_level=$2 WHERE tenant_id=$1::uuid AND id=$3::uuid`,
+			tenantID, level, applicationID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(
+				tenant_id,actor_user_id,action,resource_type,resource_id,detail
+			) VALUES($1,$2,'ESCALATE_DOMAIN_APPLICATION','DOMAIN_APPLICATION',$3,
+				jsonb_build_object('domainId',$4::text,'level',$5::int))`,
+			tenantID, actorID, applicationID, domainID, level,
+		)
+		return err
+	})
+	return level, err
 }
 
 // ReplaceDomainAdministrators replaces the explicit administrator set. Removed
@@ -1418,6 +1806,15 @@ func (s *AdminStore) ReplaceDomainAdministrators(
 		)
 		return err
 	})
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func uniqueStrings(values []string) []string {

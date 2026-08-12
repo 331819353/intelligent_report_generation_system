@@ -172,7 +172,7 @@ func lockCertificationCandidate(ctx context.Context, tx pgx.Tx, candidate certif
 	allowed := map[string]struct{}{
 		"semantic_models": {}, "measures": {}, "metric_versions": {},
 		"metric_dimension_versions": {}, "dimensions": {}, "dimension_members": {},
-		"hierarchies": {}, "relationships": {}, "business_term_versions": {},
+		"hierarchies": {}, "relationships": {}, "quality_rules": {}, "business_term_versions": {},
 		"certified_example_versions": {}, "kpi_bundle_versions": {}, "evaluation_case_versions": {},
 		"time_contract_versions": {},
 	}
@@ -219,6 +219,7 @@ func orderCertificationCandidates(
 		UNION ALL SELECT id::text,left_model_version_id::text FROM askdata.relationships WHERE id::text=ANY($1)
 		UNION ALL SELECT id::text,right_model_version_id::text FROM askdata.relationships WHERE id::text=ANY($1)
 		UNION ALL SELECT id::text,bridge_model_version_id::text FROM askdata.relationships WHERE id::text=ANY($1) AND bridge_model_version_id IS NOT NULL
+		UNION ALL SELECT id::text,target_version_id::text FROM askdata.quality_rules WHERE id::text=ANY($1)
 		UNION ALL SELECT id::text,target_version_id::text FROM askdata.business_term_versions WHERE id::text=ANY($1)
 		UNION ALL SELECT example.id::text,dependency::text FROM askdata.certified_example_versions AS example,LATERAL unnest(example.expected_metric_version_ids||example.expected_dimension_version_ids) AS dependency WHERE example.id::text=ANY($1)
 		UNION ALL SELECT bundle.id::text,item->>'metricVersionId' FROM askdata.kpi_bundle_versions AS bundle,LATERAL jsonb_array_elements(bundle.items) AS item WHERE bundle.id::text=ANY($1)
@@ -295,6 +296,7 @@ func resolveCertificationCandidate(
 		UNION ALL SELECT id::text,member_id::text,'MEMBER','dimension_members' FROM askdata.dimension_members WHERE id=$1 AND domain_id=$2 AND status='DRAFT'
 		UNION ALL SELECT id::text,hierarchy_id::text,'HIERARCHY','hierarchies' FROM askdata.hierarchies WHERE id=$1 AND domain_id=$2 AND status='DRAFT'
 		UNION ALL SELECT id::text,relationship_id::text,'RELATIONSHIP','relationships' FROM askdata.relationships WHERE id=$1 AND domain_id=$2 AND status='DRAFT'
+		UNION ALL SELECT id::text,quality_rule_id::text,'QUALITY_RULE','quality_rules' FROM askdata.quality_rules WHERE id=$1 AND domain_id=$2 AND status='DRAFT'
 		UNION ALL SELECT id::text,time_contract_id::text,'TIME_CONTRACT','time_contract_versions' FROM askdata.time_contract_versions WHERE id=$1 AND domain_id=$2 AND status='DRAFT'
 		UNION ALL SELECT id::text,business_term_id::text,'BUSINESS_TERM','business_term_versions' FROM askdata.business_term_versions WHERE id=$1 AND domain_id=$2 AND status='DRAFT'
 		UNION ALL SELECT id::text,certified_example_id::text,'CERTIFIED_EXAMPLE','certified_example_versions' FROM askdata.certified_example_versions WHERE id=$1 AND domain_id=$2 AND status='DRAFT'
@@ -326,7 +328,7 @@ func updateCertificationStatus(ctx context.Context, tx pgx.Tx, candidate certifi
 	allowed := map[string]struct{}{
 		"semantic_models": {}, "measures": {}, "metric_versions": {},
 		"metric_dimension_versions": {}, "dimensions": {}, "dimension_members": {},
-		"hierarchies": {}, "relationships": {}, "business_term_versions": {},
+		"hierarchies": {}, "relationships": {}, "quality_rules": {}, "business_term_versions": {},
 		"certified_example_versions": {}, "kpi_bundle_versions": {}, "evaluation_case_versions": {},
 		"time_contract_versions": {},
 	}
@@ -386,6 +388,17 @@ func validateCertificationCandidate(ctx context.Context, tx pgx.Tx, candidate ce
 			FROM askdata.hierarchy_levels WHERE hierarchy_version_id=$1`,
 			candidate.VersionID).Scan(&valid); err != nil || !valid {
 			return errors.New("HIERARCHY_LEVELS_INVALID: hierarchy requires two to thirty-two contiguous levels")
+		}
+	case "quality_rules":
+		// Certifying a rule bound to a check nothing executes would create an
+		// object that can only ever report "unproven".
+		var ruleAST []byte
+		if err := tx.QueryRow(ctx, `SELECT rule_ast FROM askdata.quality_rules
+			WHERE id=$1`, candidate.VersionID).Scan(&ruleAST); err != nil {
+			return errors.New("QUALITY_RULE_BINDING_INVALID: quality rule was not found")
+		}
+		if _, err := DecodeQualityRuleBinding(ruleAST); err != nil {
+			return errors.New("QUALITY_RULE_BINDING_INVALID: rule must bind to an executing dataset quality check")
 		}
 	case "relationships":
 		var cardinality, fanoutPolicy, bridgeModelVersionID string

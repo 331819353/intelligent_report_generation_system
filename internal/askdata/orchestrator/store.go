@@ -43,6 +43,8 @@ type CreateRunRequest struct {
 	DomainID           askdata.ID
 	ConversationID     askdata.ID
 	ParentRunID        askdata.ID
+	ExecutionMode      string
+	SourceRunID        askdata.ID
 	IdempotencyKeyHash askdata.ContentHash
 	QuestionHash       askdata.ContentHash
 	Limits             BudgetLimits
@@ -431,7 +433,7 @@ func (store *PostgresStore) Transition(ctx context.Context, request TransitionRe
 		if err != nil {
 			return err
 		}
-		if current.State == StateBinding && persisted.State == StateGraphValidating {
+		if current.ExecutionMode == "USER" && current.State == StateBinding && persisted.State == StateGraphValidating {
 			if err := pinConversationAfterBindingTx(ctx, tx, persisted); err != nil {
 				return err
 			}
@@ -710,6 +712,7 @@ func prepareCreateRequest(ctx context.Context, request CreateRunRequest) (string
 	}
 	for name, id := range map[string]askdata.ID{
 		"conversation ID": request.ConversationID, "parent run ID": request.ParentRunID,
+		"source run ID": request.SourceRunID,
 	} {
 		if id != "" && !canonicalUUID(id) {
 			return "", preparedCreate{}, fmt.Errorf("%w: %s must be a UUID", ErrInvalidRun, name)
@@ -717,6 +720,14 @@ func prepareCreateRequest(ctx context.Context, request CreateRunRequest) (string
 	}
 	if request.ParentRunID != "" && request.ConversationID == "" {
 		return "", preparedCreate{}, fmt.Errorf("%w: parent run requires a conversation ID", ErrInvalidRun)
+	}
+	if request.ExecutionMode == "" {
+		request.ExecutionMode = "USER"
+	}
+	if (request.ExecutionMode != "USER" && request.ExecutionMode != "SHADOW") ||
+		(request.ExecutionMode == "USER" && request.SourceRunID != "") ||
+		(request.ExecutionMode == "SHADOW" && (request.SourceRunID == "" || request.ParentRunID != "" || request.SeedContext != nil || request.ConversationID == "")) {
+		return "", preparedCreate{}, fmt.Errorf("%w: execution mode binding is invalid", ErrInvalidRun)
 	}
 	if request.SeedContext != nil {
 		seed := request.SeedContext
@@ -761,6 +772,7 @@ func prepareCreateRequest(ctx context.Context, request CreateRunRequest) (string
 		ID: askdata.ID(uuid.NewString()), TenantID: request.Scope.TenantID,
 		DomainID: request.DomainID, ActorID: request.Scope.ActorID,
 		ConversationID: request.ConversationID, ParentRunID: request.ParentRunID,
+		ExecutionMode: request.ExecutionMode, SourceRunID: request.SourceRunID,
 		TraceID: askdata.ID(uuid.NewString()), IdempotencyKeyHash: request.IdempotencyKeyHash,
 		QuestionHash: request.QuestionHash, PolicyScopeHash: request.Scope.PolicyHash,
 		Release: request.Scope.Release, State: StateReceived, Disposition: DispositionPending,
@@ -817,7 +829,7 @@ func createRunTx(ctx context.Context, tx pgx.Tx, prepared preparedCreate) (Run, 
 		}
 		return existing, true, nil
 	}
-	if prepared.run.ConversationID != "" {
+	if prepared.run.ConversationID != "" && prepared.run.ExecutionMode == "USER" {
 		if err := lockConversationTx(ctx, tx, prepared.run); err != nil {
 			return Run{}, false, err
 		}
@@ -841,6 +853,15 @@ func createRunTx(ctx context.Context, tx pgx.Tx, prepared preparedCreate) (Run, 
 			parent.ActorID != prepared.run.ActorID || parent.State != StateClarificationRequired ||
 			parent.BudgetConsumed == nil || prepared.run.Usage != (BudgetUsage{}) {
 			return Run{}, false, ErrPinnedScopeMismatch
+		}
+	}
+	if prepared.run.ExecutionMode == "SHADOW" {
+		// The lifecycle trigger accepts a READY release only for the exact
+		// dispatcher-claimed source run. The marker is transaction-local and is
+		// therefore unavailable to ordinary API-created USER runs.
+		if _, err := tx.Exec(ctx, `SELECT set_config('askdata.shadow_source_run_id',$1,true)`,
+			prepared.run.SourceRunID); err != nil {
+			return Run{}, false, err
 		}
 	}
 	run, inserted, err := insertRunTx(ctx, tx, prepared.run)
@@ -886,11 +907,13 @@ func createRunTx(ctx context.Context, tx pgx.Tx, prepared preparedCreate) (Run, 
 	if err := insertEventTx(ctx, tx, event); err != nil {
 		return Run{}, false, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE askdata.conversations
+	if run.ExecutionMode == "USER" {
+		if _, err := tx.Exec(ctx, `UPDATE askdata.conversations
 		SET record_version=record_version+1,updated_at=clock_timestamp()
 		WHERE tenant_id=$1 AND domain_id=$2 AND actor_id=$3 AND id=$4`,
-		run.TenantID, run.DomainID, run.ActorID, run.ConversationID); err != nil {
-		return Run{}, false, err
+			run.TenantID, run.DomainID, run.ActorID, run.ConversationID); err != nil {
+			return Run{}, false, err
+		}
 	}
 	return run, false, nil
 }
@@ -1147,7 +1170,8 @@ func runMatchesCreate(run Run, prepared preparedCreate) bool {
 	want := prepared.run
 	return run.TenantID == want.TenantID && run.DomainID == want.DomainID &&
 		run.ActorID == want.ActorID && run.ConversationID == want.ConversationID &&
-		run.ParentRunID == want.ParentRunID && run.IdempotencyKeyHash == want.IdempotencyKeyHash &&
+		run.ParentRunID == want.ParentRunID && run.ExecutionMode == want.ExecutionMode &&
+		run.SourceRunID == want.SourceRunID && run.IdempotencyKeyHash == want.IdempotencyKeyHash &&
 		run.QuestionHash == want.QuestionHash && run.PolicyScopeHash == want.PolicyScopeHash &&
 		run.Release == want.Release && run.Limits == want.Limits
 }
@@ -1160,19 +1184,19 @@ func runMatchesScope(run Run, scope askdata.PolicyScope, domainID askdata.ID) bo
 
 func insertRunTx(ctx context.Context, tx pgx.Tx, run Run) (Run, bool, error) {
 	row := tx.QueryRow(ctx, `INSERT INTO askdata.question_runs(
-		id,tenant_id,domain_id,actor_id,conversation_id,parent_run_id,trace_id,
+		id,tenant_id,domain_id,actor_id,conversation_id,parent_run_id,execution_mode,source_run_id,trace_id,
 		idempotency_key_hash,question_hash,policy_scope_hash,release_id,
 		release_content_hash,max_steps,max_llm_calls,max_tool_calls,
 		max_formal_queries,max_validation_queries,max_duration_ms,
 		step_count,llm_calls_used,tool_calls_used,formal_queries_used,
 		validation_queries_used,elapsed_ms,budget_exhausted
 	) VALUES(
-		$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-		$19,$20,$21,$22,$23,$24,$25
+		$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+		$21,$22,$23,$24,$25,$26,$27
 	) ON CONFLICT ON CONSTRAINT askdata_question_runs_idempotency_key DO NOTHING
 	RETURNING `+runColumns,
 		run.ID, run.TenantID, run.DomainID, run.ActorID, nullableID(run.ConversationID),
-		nullableID(run.ParentRunID), run.TraceID, run.IdempotencyKeyHash, run.QuestionHash,
+		nullableID(run.ParentRunID), run.ExecutionMode, nullableID(run.SourceRunID), run.TraceID, run.IdempotencyKeyHash, run.QuestionHash,
 		run.PolicyScopeHash, run.Release.ReleaseID, run.Release.ContentHash,
 		run.Limits.MaxSteps, run.Limits.MaxLLMCalls, run.Limits.MaxToolCalls,
 		run.Limits.MaxFormalQueries, run.Limits.MaxValidationQueries, run.Limits.MaxDurationMS,
@@ -1231,7 +1255,8 @@ func updateRunTx(ctx context.Context, tx pgx.Tx, current, next Run) (Run, error)
 
 const runColumns = `
 	id::text,tenant_id::text,domain_id::text,actor_id::text,
-	COALESCE(conversation_id::text,''),COALESCE(parent_run_id::text,''),trace_id::text,
+	COALESCE(conversation_id::text,''),COALESCE(parent_run_id::text,''),execution_mode,
+	COALESCE(source_run_id::text,''),trace_id::text,
 	idempotency_key_hash,question_hash,policy_scope_hash,release_id::text,
 	release_content_hash,current_state,disposition,completion_code,
 	COALESCE(completion_artifact_hash,''),COALESCE(understanding_hash,''),
@@ -1249,14 +1274,14 @@ type rowScanner interface{ Scan(...any) error }
 
 func scanRun(row rowScanner) (Run, error) {
 	var run Run
-	var id, tenantID, domainID, actorID, conversationID, parentID, traceID string
+	var id, tenantID, domainID, actorID, conversationID, parentID, executionMode, sourceRunID, traceID string
 	var releaseID, state, disposition string
 	var idempotencyHash, questionHash, policyHash, releaseHash string
 	var completionHash, understandingHash, bindingHash, graphHash, irHash, planHash, resultHash string
 	var clarificationDeadline, budgetFrozenAt, completed sql.NullTime
 	var budgetConsumed []byte
 	err := row.Scan(
-		&id, &tenantID, &domainID, &actorID, &conversationID, &parentID, &traceID,
+		&id, &tenantID, &domainID, &actorID, &conversationID, &parentID, &executionMode, &sourceRunID, &traceID,
 		&idempotencyHash, &questionHash, &policyHash, &releaseID, &releaseHash,
 		&state, &disposition, &run.CompletionCode, &completionHash,
 		&understandingHash, &bindingHash, &graphHash, &irHash, &planHash, &resultHash,
@@ -1272,6 +1297,7 @@ func scanRun(row rowScanner) (Run, error) {
 	}
 	run.ID, run.TenantID, run.DomainID, run.ActorID = askdata.ID(id), askdata.ID(tenantID), askdata.ID(domainID), askdata.ID(actorID)
 	run.ConversationID, run.ParentRunID, run.TraceID = askdata.ID(conversationID), askdata.ID(parentID), askdata.ID(traceID)
+	run.ExecutionMode, run.SourceRunID = executionMode, askdata.ID(sourceRunID)
 	run.IdempotencyKeyHash, run.QuestionHash = askdata.ContentHash(idempotencyHash), askdata.ContentHash(questionHash)
 	run.PolicyScopeHash = askdata.ContentHash(policyHash)
 	run.Release = askdata.ReleaseRef{ReleaseID: askdata.ID(releaseID), ContentHash: askdata.ContentHash(releaseHash)}

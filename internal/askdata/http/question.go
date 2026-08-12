@@ -1922,7 +1922,8 @@ func (service *PostgresService) resolveScope(
 		} else {
 			err = tx.QueryRow(ctx, `SELECT release_id::text,release_content_hash
 				FROM askdata.question_runs
-				WHERE tenant_id=$1 AND domain_id=$2 AND actor_id=$3 AND id=$4`,
+				WHERE tenant_id=$1 AND domain_id=$2 AND actor_id=$3 AND id=$4
+				  AND execution_mode='USER'`,
 				identity.TenantID, identity.DomainID, identity.ActorID, runID,
 			).Scan(&releaseID, &releaseHash)
 		}

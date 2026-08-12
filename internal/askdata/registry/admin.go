@@ -25,6 +25,7 @@ const (
 	AdminResourceBusinessTerm     AdminResource = "BUSINESS_TERM"
 	AdminResourceKPIBundle        AdminResource = "KPI_BUNDLE"
 	AdminResourceRelationship     AdminResource = "RELATIONSHIP"
+	AdminResourceQualityRule      AdminResource = "QUALITY_RULE"
 	AdminResourceMember           AdminResource = "MEMBER"
 	AdminResourceHierarchy        AdminResource = "HIERARCHY"
 	AdminResourceCertifiedExample AdminResource = "CERTIFIED_EXAMPLE"
@@ -204,6 +205,19 @@ type KPIBundleDraftInput struct {
 	ApplicableQuestionPatterns []string        `json:"applicableQuestionPatterns"`
 }
 
+// QualityRuleDraftInput authors a binding to an executing dataset quality
+// check. RuleAST is validated as a DATASET_QUALITY_BINDING, so a rule that no
+// component would ever evaluate cannot be created (see quality_rule.go).
+type QualityRuleDraftInput struct {
+	VersionedDraftInput
+	TargetType      string          `json:"targetType"`
+	TargetVersionID string          `json:"targetVersionId"`
+	Code            string          `json:"code"`
+	Name            string          `json:"name"`
+	RuleAST         json.RawMessage `json:"ruleAst"`
+	Severity        string          `json:"severity"`
+}
+
 type RelationshipDraftInput struct {
 	VersionedDraftInput
 	LeftModelVersionID   string           `json:"leftModelVersionId"`
@@ -255,6 +269,7 @@ type AdminMutation struct {
 	KPIBundle       *KPIBundleDraftInput
 	Relationship    *RelationshipDraftInput
 	MetricDimension *MetricDimensionDraftInput
+	QualityRule     *QualityRuleDraftInput
 }
 
 func (mutation AdminMutation) payload(resource AdminResource) (any, error) {
@@ -274,6 +289,8 @@ func (mutation AdminMutation) payload(resource AdminResource) (any, error) {
 		value = mutation.BusinessTerm
 	case AdminResourceKPIBundle:
 		value = mutation.KPIBundle
+	case AdminResourceQualityRule:
+		value = mutation.QualityRule
 	case AdminResourceRelationship:
 		value = mutation.Relationship
 	case AdminResourceMetricDimension:

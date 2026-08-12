@@ -171,15 +171,21 @@ type ReleaseRolloutMutationInput struct {
 }
 
 type ReleaseOperationalImpact struct {
-	ReleaseID            string                  `json:"releaseId"`
-	Status               string                  `json:"status"`
-	RetentionUntil       string                  `json:"retentionUntil,omitempty"`
-	CanRetire            bool                    `json:"canRetire"`
-	BlockedCode          string                  `json:"blockedCode,omitempty"`
-	ActiveReferenceCount int                     `json:"activeReferenceCount"`
-	References           []ReleaseReference      `json:"references"`
-	Rollout              *ReleaseRolloutSnapshot `json:"rollout,omitempty"`
-	Observability        json.RawMessage         `json:"observability,omitempty"`
+	ReleaseID            string             `json:"releaseId"`
+	Status               string             `json:"status"`
+	RetentionUntil       string             `json:"retentionUntil,omitempty"`
+	CanRetire            bool               `json:"canRetire"`
+	BlockedCode          string             `json:"blockedCode,omitempty"`
+	ActiveReferenceCount int                `json:"activeReferenceCount"`
+	References           []ReleaseReference `json:"references"`
+	// ActiveReleaseID is the control this domain currently serves, if any, and
+	// RolloutRequired states whether activating this candidate must first carry
+	// traffic against it. Both are derived server-side from release_state so the
+	// browser never has to infer an activation condition for itself.
+	ActiveReleaseID string                  `json:"activeReleaseId,omitempty"`
+	RolloutRequired bool                    `json:"rolloutRequired"`
+	Rollout         *ReleaseRolloutSnapshot `json:"rollout,omitempty"`
+	Observability   json.RawMessage         `json:"observability,omitempty"`
 }
 
 type ReleaseRollbackInput struct {
@@ -375,11 +381,19 @@ func EvaluateReleasePreflight(
 			}
 		case ReleaseObjectQualityRule:
 			var quality struct {
-				Severity string `json:"severity"`
-				RuleAST  any    `json:"ruleAst"`
+				Severity string          `json:"severity"`
+				RuleAST  json.RawMessage `json:"ruleAst"`
 			}
-			if json.Unmarshal(object.Contract, &quality) != nil || strings.TrimSpace(quality.Severity) == "" || quality.RuleAST == nil {
+			if json.Unmarshal(object.Contract, &quality) != nil || strings.TrimSpace(quality.Severity) == "" || len(quality.RuleAST) == 0 {
 				result.Issues = append(result.Issues, lifecycleIssue("RELEASE_QUALITY_RULE_INVALID", object))
+				continue
+			}
+			// The gate must also refuse a rule bound to a check nothing runs.
+			// Releasing one would put an object into ACTIVE that can only ever
+			// report "unproven", which reads to a user as a data quality problem
+			// that was in fact never looked for.
+			if _, err := DecodeQualityRuleBinding(quality.RuleAST); err != nil {
+				result.Issues = append(result.Issues, lifecycleIssue("RELEASE_QUALITY_RULE_NOT_EXECUTABLE", object))
 			}
 		}
 	}
@@ -553,33 +567,15 @@ func (store *PostgresStore) ActivateRelease(
 		} else if approvalCount != 2 {
 			return ErrReleaseApprovalFailed
 		}
-		var rolloutID, rolloutReasonHash string
-		if err := tx.QueryRow(ctx, `SELECT id::text,reason_hash FROM askdata.release_rollouts
-			WHERE tenant_id=$1 AND domain_id=$2 AND candidate_release_id=$3
-			  AND stage='ACCEPTED_95' AND state='ACCEPTED'
-			ORDER BY accepted_at DESC,id DESC LIMIT 1 FOR UPDATE`, scope.TenantID, scope.DomainID, releaseID).
-			Scan(&rolloutID, &rolloutReasonHash); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrReleaseRolloutInvalid
-			}
-			return err
-		}
-		if err := tx.QueryRow(ctx, `SELECT * FROM askdata.activate_release($1,$2,$3,$4,$5)`,
+		// askdata.activate_release is the sole arbiter of the activation
+		// conditions, including the Shadow/Canary requirement and the closing of
+		// the rollout. Requiring an ACCEPTED rollout here as well used to make a
+		// domain's first release unactivatable: no ACTIVE control exists to
+		// canary against, so the rollout it demanded could never be started.
+		err := tx.QueryRow(ctx, `SELECT * FROM askdata.activate_release($1,$2,$3,$4,$5)`,
 			releaseID, input.EvaluationSetID, input.EvaluationBatchID, scope.ActorID,
 			input.ExpectedStateVersion).Scan(&result.Activated, &activeID, &supersededID,
-			&result.ReleaseStateVersion, &gateReceiptHash, &result.Failures); err != nil || !result.Activated {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE askdata.release_rollouts SET state='COMPLETED',completed_at=clock_timestamp(),
-			updated_at=clock_timestamp(),updated_by=$1,version=version+1 WHERE id=$2 AND state='ACCEPTED'`,
-			scope.ActorID, rolloutID); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, `INSERT INTO askdata.release_rollout_events(
-			tenant_id,domain_id,rollout_id,candidate_release_id,event_type,from_stage,to_stage,actor_id,reason_hash,detail
-		) VALUES($1,$2,$3,$4,'ACTIVATED','ACCEPTED_95','ACCEPTED_95',$5,$6,
-			jsonb_build_object('releaseStateVersion',$7))`, scope.TenantID, scope.DomainID,
-			rolloutID, releaseID, scope.ActorID, rolloutReasonHash, result.ReleaseStateVersion)
+			&result.ReleaseStateVersion, &gateReceiptHash, &result.Failures)
 		return err
 	})
 	if activeID != nil {
@@ -598,6 +594,9 @@ func (store *PostgresStore) ActivateRelease(
 		if containsLifecycleFailure(result.Failures, "RELEASE_APPROVALS_REQUIRED") {
 			return result, ErrReleaseApprovalFailed
 		}
+		if containsLifecycleFailure(result.Failures, "RELEASE_ROLLOUT_REQUIRED") {
+			return result, ErrReleaseRolloutInvalid
+		}
 		return result, ErrReleaseGateFailed
 	}
 	return result, normalizeLifecycleError(err)
@@ -615,13 +614,26 @@ func (store *PostgresStore) GetReleaseOperationalImpact(
 			return err
 		}
 		var retentionUntil *time.Time
-		if err := tx.QueryRow(ctx, `SELECT status,retention_until FROM askdata.releases
-			WHERE id=$1 AND domain_id=$2`, releaseID, scope.DomainID).Scan(&result.Status, &retentionUntil); err != nil {
+		var activeReleaseID *string
+		if err := tx.QueryRow(ctx, `SELECT release.status,release.retention_until,
+			state.active_release_id::text
+		FROM askdata.releases AS release
+		JOIN askdata.release_state AS state
+		  ON state.tenant_id=release.tenant_id AND state.domain_id=release.domain_id
+		WHERE release.id=$1 AND release.domain_id=$2`, releaseID, scope.DomainID).
+			Scan(&result.Status, &retentionUntil, &activeReleaseID); err != nil {
 			return err
 		}
 		if retentionUntil != nil {
 			result.RetentionUntil = retentionUntil.UTC().Format(time.RFC3339Nano)
 		}
+		if activeReleaseID != nil {
+			result.ActiveReleaseID = *activeReleaseID
+		}
+		// The first release of a domain has no control, so Shadow/Canary cannot
+		// and need not run; the evaluation gate and two-person approval are its
+		// complete set of controls.
+		result.RolloutRequired = result.ActiveReleaseID != "" && result.ActiveReleaseID != releaseID
 		rows, err := tx.Query(ctx, `SELECT reference.id::text,reference.tenant_id::text,
 			release.domain_id::text,reference.release_id::text,reference.reference_type,
 			reference.reference_id::text,reference.reference_name,reference.owner_id::text,
@@ -683,13 +695,22 @@ func (store *PostgresStore) StartReleaseRollout(ctx context.Context, scope Admin
 	}
 	var result ReleaseRolloutSnapshot
 	err := store.withReleasePermission(ctx, scope, releaseID, func(tx pgx.Tx) error {
-		var status, contentHash, controlID string
+		var status, contentHash string
+		// active_release_id is nullable: a business domain that has never
+		// activated a release has no control to compare against. Scanning that
+		// NULL into a string used to surface as an opaque driver error rather
+		// than the domain error the caller can act on.
+		var activeReleaseID *string
 		if err := tx.QueryRow(ctx, `SELECT release.status,release.content_hash,state.active_release_id::text
 			FROM askdata.releases AS release JOIN askdata.release_state AS state
 			ON state.tenant_id=release.tenant_id AND state.domain_id=release.domain_id
 			WHERE release.id=$1 AND release.domain_id=$2 FOR UPDATE OF release,state`, releaseID, scope.DomainID).
-			Scan(&status, &contentHash, &controlID); err != nil {
+			Scan(&status, &contentHash, &activeReleaseID); err != nil {
 			return err
+		}
+		controlID := ""
+		if activeReleaseID != nil {
+			controlID = *activeReleaseID
 		}
 		if status != "READY" || controlID == "" || controlID == releaseID {
 			return ErrReleaseRolloutInvalid
@@ -1150,6 +1171,8 @@ func normalizeLifecycleError(err error) error {
 			return fmt.Errorf("%w: %s", ErrReleaseGateFailed, postgresError.Message)
 		case postgresError.Code == "40001":
 			return ErrReleaseStateConflict
+		case postgresError.Code == "23505" && strings.Contains(postgresError.ConstraintName, "release_rollouts"):
+			return fmt.Errorf("%w: an open rollout already exists or this operation was already submitted", ErrReleaseRolloutInvalid)
 		case postgresError.Code == "22023" || postgresError.Code == "23514" || postgresError.Code == "55000":
 			return fmt.Errorf("%w: %s", ErrRegistryInvalidRequest, postgresError.Message)
 		}

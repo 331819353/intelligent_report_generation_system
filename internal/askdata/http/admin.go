@@ -177,6 +177,9 @@ func newProtectedAdminHandlerWithImports(
 	for _, path := range []string{
 		"models", "measures", "metrics", "metric-versions",
 		"dimensions", "terms", "kpi-bundles", "relationships", "metric-dimensions",
+		// Governed data quality rules bind a semantic object to a check the
+		// materialization pipeline already runs; see registry/quality_rule.go.
+		"quality-rules",
 	} {
 		collection := "/api/v1/askdata/semantic/" + path
 		item := collection + "/{id}"
@@ -213,6 +216,8 @@ func newProtectedAdminHandlerWithImports(
 		mux.HandleFunc("GET /api/v1/askdata/semantic/evaluation-sets/{id}/cases", handler.listEvaluationCasesForReview)
 		mux.HandleFunc("POST /api/v1/askdata/semantic/evaluation-sets/{id}/reviews", handler.reviewEvaluationSet)
 		mux.HandleFunc("POST /api/v1/askdata/semantic/evaluation-sets/{id}/seal", handler.sealEvaluationSet)
+		mux.HandleFunc("GET /api/v1/askdata/semantic/evaluation-sets/{id}/shards", handler.getEvaluationShardHealth)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/evaluation-sets/{id}/shards/expose", handler.exposeEvaluationShard)
 	}
 	if handler.timeContracts != nil {
 		mux.HandleFunc("GET /api/v1/askdata/semantic/time-contracts", handler.listTimeContractCatalog)
@@ -253,6 +258,10 @@ func newProtectedAdminHandlerWithImports(
 		mux.HandleFunc(
 			"POST /api/v1/askdata/semantic/metrics/additivity/confirm",
 			handler.bulkConfirmAdditivity,
+		)
+		mux.HandleFunc(
+			"POST /api/v1/askdata/semantic/metrics/additivity/suggestions",
+			handler.refreshAdditivitySuggestions,
 		)
 		mux.HandleFunc(
 			"GET /api/v1/askdata/semantic/domains/{id}/readiness",
@@ -902,6 +911,32 @@ func (handler *AdminHandler) getDomainReadiness(writer http.ResponseWriter, requ
 	writeJSON(writer, http.StatusOK, result)
 }
 
+// refreshAdditivitySuggestions recomputes the advisory heuristic for the whole
+// domain. The request body is empty on purpose: candidates and their suggested
+// values are derived server-side, so the browser cannot propose an additivity
+// value for a metric. Confirmation remains a separate, explicit human act.
+func (handler *AdminHandler) refreshAdditivitySuggestions(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	if request.URL.RawQuery != "" || handler.additivity == nil {
+		writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+		return
+	}
+	var input struct{}
+	if _, err := decodeAdminJSON(writer, request, &input); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.additivity.RefreshAdditivitySuggestions(request.Context(), scope)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
 func (handler *AdminHandler) bulkConfirmAdditivity(writer http.ResponseWriter, request *http.Request) {
 	scope, ok := handler.resolveScope(writer, request)
 	if !ok {
@@ -1147,6 +1182,8 @@ func adminResourceFromPath(path string) (registry.AdminResource, error) {
 		return registry.AdminResourceKPIBundle, nil
 	case "relationships":
 		return registry.AdminResourceRelationship, nil
+	case "quality-rules":
+		return registry.AdminResourceQualityRule, nil
 	case "members":
 		return registry.AdminResourceMember, nil
 	case "hierarchies":
@@ -1200,6 +1237,9 @@ func decodeAdminMutation(
 	case registry.AdminResourceRelationship:
 		mutation.Relationship = &registry.RelationshipDraftInput{}
 		target = mutation.Relationship
+	case registry.AdminResourceQualityRule:
+		mutation.QualityRule = &registry.QualityRuleDraftInput{}
+		target = mutation.QualityRule
 	case registry.AdminResourceMetricDimension:
 		mutation.MetricDimension = &registry.MetricDimensionDraftInput{}
 		target = mutation.MetricDimension

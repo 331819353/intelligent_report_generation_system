@@ -572,6 +572,26 @@ func createDraftTx(
 			return AdminWriteResult{}, err
 		}
 		return versionWriteResult(resource, bundle.VersionIdentity), nil
+	case AdminResourceQualityRule:
+		input := payload.(*QualityRuleDraftInput)
+		identity, err := newVersionIdentity(scope, input.VersionedDraftInput, requestID, resource)
+		if err != nil {
+			return AdminWriteResult{}, err
+		}
+		identity.ID = recordID
+		rule := QualityRule{VersionIdentity: identity,
+			TargetType: input.TargetType, TargetVersionID: input.TargetVersionID,
+			Code: input.Code, Name: input.Name, RuleAST: input.RuleAST,
+			Severity: input.Severity,
+		}
+		rule.ContentHash = qualityRuleContentHash(rule)
+		if err := rule.Validate(); err != nil {
+			return AdminWriteResult{}, err
+		}
+		if err := insertQualityRuleAdminTx(ctx, tx, &rule); err != nil {
+			return AdminWriteResult{}, err
+		}
+		return versionWriteResult(resource, rule.VersionIdentity), nil
 	case AdminResourceRelationship:
 		input := payload.(*RelationshipDraftInput)
 		identity, err := newVersionIdentity(scope, input.VersionedDraftInput, requestID, resource)
@@ -942,6 +962,31 @@ func updateDraftTx(
 			return AdminWriteResult{}, ErrRegistryVersionConflict
 		}
 		return versionWriteResult(resource, current.VersionIdentity), err
+	case AdminResourceQualityRule:
+		current, input := existing.(QualityRule), payload.(*QualityRuleDraftInput)
+		if err := validateVersionedUpdate(input.VersionedDraftInput, current.VersionIdentity); err != nil {
+			return AdminWriteResult{}, err
+		}
+		current.TargetType, current.TargetVersionID = input.TargetType, input.TargetVersionID
+		current.Code, current.Name = input.Code, input.Name
+		current.RuleAST, current.Severity = input.RuleAST, input.Severity
+		current.OwnerID = updatedAdminOwner(input.OwnerID, current.OwnerID)
+		current.ContentHash = qualityRuleContentHash(current)
+		if err := current.Validate(); err != nil {
+			return AdminWriteResult{}, err
+		}
+		err = tx.QueryRow(ctx, `UPDATE askdata.quality_rules SET
+			target_type=$1,target_version_id=$2,code=$3,name=$4,rule_ast=$5,
+			severity=$6,content_hash=$7,owner_id=$8,updated_at=now()
+			WHERE id=$9 AND domain_id=$10 AND status='DRAFT' AND updated_at=$11
+			RETURNING updated_at`,
+			current.TargetType, current.TargetVersionID, current.Code, current.Name,
+			current.RuleAST, current.Severity, current.ContentHash, current.OwnerID,
+			current.ID, current.DomainID, input.ExpectedUpdatedAt).Scan(&current.UpdatedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return AdminWriteResult{}, ErrRegistryVersionConflict
+		}
+		return versionWriteResult(resource, current.VersionIdentity), err
 	case AdminResourceRelationship:
 		current, input := existing.(Relationship), payload.(*RelationshipDraftInput)
 		if err := validateVersionedUpdate(input.VersionedDraftInput, current.VersionIdentity); err != nil {
@@ -1099,6 +1144,10 @@ func getObjectTx(
 		var value KPIBundle
 		err = scanKPIBundle(tx.QueryRow(ctx, kpiBundleAdminSelect+` WHERE version.id=$1 AND version.domain_id=$2 AND ($3::text IS NULL OR version.status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
 		return value, adminNoRows(err)
+	case AdminResourceQualityRule:
+		var value QualityRule
+		err = scanQualityRule(tx.QueryRow(ctx, qualityRuleAdminSelect+` WHERE id=$1 AND domain_id=$2 AND ($3::text IS NULL OR status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
+		return value, adminNoRows(err)
 	case AdminResourceRelationship:
 		var value Relationship
 		err = scanRelationship(tx.QueryRow(ctx, relationshipAdminSelect+` WHERE id=$1 AND domain_id=$2 AND ($3::text IS NULL OR status=$3)`+lock, resourceID, domainID, statusArg(status)), &value)
@@ -1253,6 +1302,21 @@ func listObjectsTx(
 			items = append(items, item)
 		}
 		return finishAdminPage(items, limit, func(value KPIBundle) (time.Time, string) { return value.UpdatedAt, value.ID }, rows.Err())
+	case AdminResourceQualityRule:
+		rows, err := tx.Query(ctx, qualityRuleAdminSelect+suffix, args...)
+		if err != nil {
+			return AdminPage{}, err
+		}
+		defer rows.Close()
+		items := []QualityRule{}
+		for rows.Next() {
+			var item QualityRule
+			if err := scanQualityRule(rows, &item); err != nil {
+				return AdminPage{}, err
+			}
+			items = append(items, item)
+		}
+		return finishAdminPage(items, limit, func(value QualityRule) (time.Time, string) { return value.UpdatedAt, value.ID }, rows.Err())
 	case AdminResourceRelationship:
 		rows, err := tx.Query(ctx, relationshipAdminSelect+suffix, args...)
 		if err != nil {
@@ -1596,6 +1660,42 @@ func scanMetricDimension(row rowScanner, value *MetricDimension) error {
 		&value.VersionNo, &value.Status, &value.ContentHash, &value.OwnerID,
 		&value.CreatedAt, &value.UpdatedAt, &value.MetricVersionID,
 		&value.DimensionVersionID, &value.Compatible, &value.Role)
+}
+
+const qualityRuleAdminSelect = `SELECT
+	id::text,tenant_id::text,domain_id::text,quality_rule_id::text,version_no,status,
+	content_hash,owner_id::text,created_at,updated_at,target_type,
+	target_version_id::text,code::text,name,rule_ast,severity
+	FROM askdata.quality_rules`
+
+func scanQualityRule(row rowScanner, value *QualityRule) error {
+	return row.Scan(&value.ID, &value.TenantID, &value.DomainID, &value.ObjectID,
+		&value.VersionNo, &value.Status, &value.ContentHash, &value.OwnerID,
+		&value.CreatedAt, &value.UpdatedAt, &value.TargetType,
+		&value.TargetVersionID, &value.Code, &value.Name, &value.RuleAST,
+		&value.Severity)
+}
+
+func insertQualityRuleAdminTx(ctx context.Context, tx pgx.Tx, value *QualityRule) error {
+	return tx.QueryRow(ctx, `INSERT INTO askdata.quality_rules(
+		id,tenant_id,domain_id,quality_rule_id,version_no,target_type,
+		target_version_id,code,name,rule_ast,severity,status,content_hash,owner_id
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'DRAFT',$12,$13)
+	RETURNING created_at,updated_at`, value.ID, value.TenantID, value.DomainID,
+		value.ObjectID, value.VersionNo, value.TargetType, value.TargetVersionID,
+		value.Code, value.Name, value.RuleAST, value.Severity,
+		value.ContentHash, value.OwnerID).
+		Scan(&value.CreatedAt, &value.UpdatedAt)
+}
+
+func qualityRuleContentHash(value QualityRule) askdata.ContentHash {
+	return contentHashForContract(map[string]any{
+		"type": "QUALITY_RULE", "qualityRuleId": value.ObjectID,
+		"versionNo": value.VersionNo, "targetType": value.TargetType,
+		"targetVersionId": value.TargetVersionID, "code": value.Code,
+		"name": value.Name, "ruleAst": json.RawMessage(value.RuleAST),
+		"severity": value.Severity,
+	})
 }
 
 func scanRelationship(row rowScanner, value *Relationship) error {
@@ -1946,6 +2046,8 @@ func versionIdentityOf(value any) VersionIdentity {
 		return typed.VersionIdentity
 	case Relationship:
 		return typed.VersionIdentity
+	case QualityRule:
+		return typed.VersionIdentity
 	case MetricDimension:
 		return typed.VersionIdentity
 	default:
@@ -1967,6 +2069,8 @@ func adminTable(resource AdminResource) (string, error) {
 		return "business_term_versions", nil
 	case AdminResourceKPIBundle:
 		return "kpi_bundle_versions", nil
+	case AdminResourceQualityRule:
+		return "quality_rules", nil
 	case AdminResourceRelationship:
 		return "relationships", nil
 	case AdminResourceMetricDimension:

@@ -189,6 +189,31 @@ func loadCertifiedCoreReleaseObjectsTx(ctx context.Context, tx pgx.Tx, domainID 
 	}
 	bundleRows.Close()
 
+	// Certified quality rules travel with the release so a run can resolve what
+	// the release promised to check, not what happens to be certified now.
+	qualityRows, err := tx.Query(ctx, qualityRuleAdminSelect+` WHERE domain_id=$1 AND status='CERTIFIED' ORDER BY id`, domainID)
+	if err != nil {
+		return nil, err
+	}
+	for qualityRows.Next() {
+		var value QualityRule
+		if err := scanQualityRule(qualityRows, &value); err != nil {
+			qualityRows.Close()
+			return nil, err
+		}
+		object, err := QualityRuleReleaseObject(value)
+		if err != nil {
+			qualityRows.Close()
+			return nil, err
+		}
+		objects = append(objects, object)
+	}
+	if err := qualityRows.Err(); err != nil {
+		qualityRows.Close()
+		return nil, err
+	}
+	qualityRows.Close()
+
 	timeRows, err := tx.Query(ctx, `SELECT id::text,tenant_id::text,domain_id::text,
 		time_contract_id::text,version_no,status,timezone,week_start,week_numbering,
 		fiscal_year_start_month,fiscal_month_rule,COALESCE(incomplete_period_policy,''),

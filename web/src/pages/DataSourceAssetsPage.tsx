@@ -267,9 +267,15 @@ export function DataSourceAssetsPage() {
           setDiscovered(result.items)
           setTables(imported.items)
         } else if (tableId) {
-          const [loadedTable, loadedColumns, pendingSuggestions] = await Promise.all([
-            dataSourceAPI.table(tableId), dataSourceAPI.columns(tableId), manageAllowed ? dataSourceAPI.metadataSuggestions('PENDING') : Promise.resolve({ items: [], total: 0 }),
+          // Table and column metadata are the primary editing path. AI review is
+          // optional assistance and must never blank the editor if temporarily
+          // unavailable or disabled for the tenant.
+          const [loadedTable, loadedColumns] = await Promise.all([
+            dataSourceAPI.table(tableId), dataSourceAPI.columns(tableId),
           ])
+          const pendingSuggestions = manageAllowed
+            ? await dataSourceAPI.metadataSuggestions('PENDING').catch(() => ({ items: [], total: 0 }))
+            : { items: [], total: 0 }
           if (!active) return
           const ids = new Set([loadedTable.id, ...loadedColumns.items.map(column => column.id)])
           setTableRecord(loadedTable)

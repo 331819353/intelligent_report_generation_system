@@ -1376,7 +1376,9 @@ SELECT (
   AND NOT has_table_privilege(:'worker_user','askdata.entities','INSERT')
   AND NOT has_table_privilege(:'worker_user','askdata.release_objects','INSERT')
   AND NOT has_table_privilege(:'worker_user','askdata.release_projections','UPDATE')
-  AND NOT has_table_privilege(:'worker_user','askdata.question_runs','INSERT')
+  -- The shadow-release worker creates isolated SHADOW runs; RLS and the
+  -- execution-mode trigger still prevent it from creating production runs.
+  AND has_table_privilege(:'worker_user','askdata.question_runs','INSERT')
   AND NOT has_table_privilege(:'worker_user','askdata.question_runs','UPDATE')
   AND NOT has_table_privilege(:'worker_user','askdata.question_run_events','INSERT')
   AND has_column_privilege(:'worker_user','askdata.question_runs','current_state','UPDATE')
@@ -1563,7 +1565,7 @@ SELECT (
     :'app_user','askdata.record_release_review_report(uuid,uuid,uuid,text,text,jsonb,uuid)','EXECUTE'
   )
   AND has_function_privilege(
-    :'app_user','askdata.submit_release_approval(uuid,uuid,uuid,text,text,text,text,uuid)','EXECUTE'
+    :'app_user','askdata.submit_release_approval_v2(uuid,uuid,uuid,text,text,text,text,uuid,uuid)','EXECUTE'
   )
   AND has_function_privilege(
     :'app_user','askdata.activate_release(uuid,uuid,uuid,uuid,bigint)','EXECUTE'
@@ -1589,7 +1591,7 @@ SELECT (
   AND NOT has_function_privilege(
     'public','askdata.active_learning_data_request_signals(uuid)','EXECUTE'
   )
-  AND NOT has_function_privilege(
+  AND has_function_privilege(
     :'worker_user','askdata.load_quota_usage_snapshots(uuid,uuid,uuid,timestamptz)','EXECUTE'
   )
   AND NOT has_function_privilege(

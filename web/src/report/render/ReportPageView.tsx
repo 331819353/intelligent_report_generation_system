@@ -167,7 +167,8 @@ function BlockZones(props: BlockContentProps) {
   const zones = props.block.zones
     .filter(zone => zone.layout.heightMode !== 'HIDDEN')
     .slice()
-    .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+    .sort((left, right) =>
+      (left.order ?? left.layout.emptyPriority) - (right.order ?? right.layout.emptyPriority) || left.id.localeCompare(right.id))
   if (zones.length === 0) {
     return <div className="report-render-placeholder"><span>该区块尚未配置内容区域</span></div>
   }

@@ -359,9 +359,9 @@ func (binding *Binding) getCertifiedExamples(
 
 // getDataQualityStatus reports governed quality rules for the touched models.
 //
-// askdata.quality_rules currently has no authoring path, so this reports
-// UNKNOWN in practice. UNKNOWN is deliberately not PASSED: the answer layer has
-// to be able to tell "verified clean" from "never checked".
+// Rules bind to materialization checks, so this reads the measurement produced
+// for the model's pinned snapshot. UNKNOWN is deliberately not PASS: the answer
+// layer has to distinguish "verified clean" from "never checked".
 func (binding *Binding) getDataQualityStatus(
 	ctx context.Context,
 	authorization toolhost.AuthorizationContext,

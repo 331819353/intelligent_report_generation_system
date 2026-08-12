@@ -709,6 +709,12 @@ GRANT INSERT, UPDATE ON TABLE
   askdata.feedback_tickets,
   askdata.add_to_report_intents
 TO :"app_user";
+
+-- Shadow dispatch is worker-only. The browser can read aggregate rollout
+-- evidence through release_rollout_observability but cannot mutate queue or
+-- paired observations.
+GRANT INSERT ON TABLE askdata.question_runs TO :"worker_user";
+GRANT INSERT ON TABLE askdata.question_envelopes TO :"worker_user";
 GRANT INSERT ON TABLE askdata.question_envelopes TO :"app_user";
 GRANT UPDATE ON TABLE
   askdata.active_learning_candidates,
@@ -817,8 +823,7 @@ TO :"app_user", :"worker_user";
 GRANT EXECUTE ON FUNCTION
   askdata.resolve_question_release(uuid,uuid,uuid),
   askdata.release_rollout_observability(uuid),
-  askdata.release_rollout_bucket(text,uuid),
-  askdata.lock_active_question_release(uuid,uuid,uuid,text)
+  askdata.release_rollout_bucket(text,uuid)
 TO :"app_user";
 SELECT format(
   'GRANT EXECUTE ON FUNCTION askdata.list_add_to_report_tenants() TO %I',
@@ -855,6 +860,14 @@ WHERE to_regprocedure(
   'askdata.list_question_run_actor_roles(uuid,uuid,uuid)'
 ) IS NOT NULL
 \gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION askdata.list_release_shadow_job_tenants(), askdata.claim_release_shadow_job(uuid,text,integer), askdata.complete_release_shadow_job(uuid,uuid,uuid,text) TO %I',
+  :'worker_user'
+)
+WHERE to_regprocedure('askdata.list_release_shadow_job_tenants()') IS NOT NULL
+  AND to_regprocedure('askdata.claim_release_shadow_job(uuid,text,integer)') IS NOT NULL
+  AND to_regprocedure('askdata.complete_release_shadow_job(uuid,uuid,uuid,text)') IS NOT NULL
+\gexec
 GRANT EXECUTE ON FUNCTION
   askdata.start_release_projection(uuid,uuid,jsonb),
   askdata.retry_failed_release_projections(uuid,uuid),
@@ -876,7 +889,8 @@ GRANT EXECUTE ON FUNCTION
   askdata.retire_release(uuid)
 TO :"app_user";
 GRANT EXECUTE ON FUNCTION
-  askdata.record_cost_usage(uuid,uuid,uuid,uuid,text,text,text,bigint,bigint,bigint,bigint)
+  askdata.record_cost_usage(uuid,uuid,uuid,uuid,text,text,text,bigint,bigint,bigint,bigint),
+  askdata.load_quota_usage_snapshots(uuid,uuid,uuid,timestamptz)
 TO :"worker_user";
 GRANT EXECUTE ON FUNCTION
   askdata.record_search_query_sample(uuid,uuid,text,text,text,text,integer,text)

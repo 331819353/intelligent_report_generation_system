@@ -286,6 +286,13 @@ func (rule QualityRule) Validate() error {
 		validation.add(validationCodeInvalidEnum, "severity", "unsupported quality severity")
 	}
 	validateJSONObject(&validation, "ruleAst", rule.RuleAST, 65536)
+	// A quality rule is a binding to an executing check, not a free-form
+	// document: anything else could be certified and released without ever
+	// being evaluated by anything.
+	if _, err := DecodeQualityRuleBinding(rule.RuleAST); err != nil {
+		validation.add(validationCodeInvalidEnum, "ruleAst",
+			"must be a DATASET_QUALITY_BINDING naming an executing dataset quality rule and scope")
+	}
 	return validation.result()
 }
 

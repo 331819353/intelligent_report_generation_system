@@ -82,24 +82,28 @@ const snapshotDomains: BusinessDomain[] = [
     id: 'snapshot-enterprise', code: 'BIZ_MANAGEMENT', name: '企业经营',
     description: '经营分析与管理决策支持，涵盖财务、预算、人力等核心经营主题。',
     status: 'ACTIVE', default: true, version: 4, createdAt: '2026-08-08T09:32:00+08:00',
+    accessSensitivity: 'INTERNAL',
     administrators: [{ id: 'snapshot-zhang', employeeNo: 'ZW00123', email: 'zhangwei@haier.com', displayName: '张伟' }],
   },
   {
     id: 'snapshot-supply', code: 'SUPPLY_CHAIN', name: '供应链管理',
     description: '供应链计划、采购、库存、物流等端到端供应链运营分析。',
     status: 'ACTIVE', default: false, version: 3, createdAt: '2026-08-07T16:45:00+08:00',
+    accessSensitivity: 'CONFIDENTIAL',
     administrators: [{ id: 'snapshot-zhou', employeeNo: 'ZT00314', email: 'zhoutao@haier.com', displayName: '周涛' }],
   },
   {
     id: 'snapshot-channel', code: 'SALES_CHANNEL', name: '渠道销售',
     description: '渠道销售目标、渠道库存与经销商表现分析，支持渠道策略优化。',
     status: 'ACTIVE', default: false, version: 2, createdAt: '2026-08-06T10:15:00+08:00',
+    accessSensitivity: 'INTERNAL',
     administrators: [{ id: 'snapshot-zhao', employeeNo: 'ZM00632', email: 'zhaomin@haier.com', displayName: '赵敏' }],
   },
   {
     id: 'snapshot-quality', code: 'MANUFACTURING_QUALITY', name: '制造质量',
     description: '制造过程质量监控、质量追溯与改进分析。',
     status: 'ACTIVE', default: false, version: 2, createdAt: '2026-08-05T14:18:00+08:00',
+    accessSensitivity: 'RESTRICTED',
     administrators: [{ id: 'snapshot-zhao', employeeNo: 'ZM00632', email: 'zhaomin@haier.com', displayName: '赵敏' }],
   },
 ]

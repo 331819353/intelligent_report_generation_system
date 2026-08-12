@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -84,11 +85,41 @@ type EvaluationSetSealResult struct {
 	ContentHash     string `json:"contentHash,omitempty"`
 }
 
+// EvaluationShardState reports the rotation health of one sealed shard. It
+// deliberately carries counts and timestamps only: the sealed question bodies
+// are never part of this contract, because anything that can display them
+// defeats the gate they exist to protect (02 §10.1, 06 §4.10).
+type EvaluationShardState struct {
+	ShardID      int16  `json:"shardId"`
+	CaseCount    int    `json:"caseCount"`
+	UsageCount   int    `json:"usageCount"`
+	ExposedAt    string `json:"exposedAt,omitempty"`
+	RetiredAt    string `json:"retiredAt,omitempty"`
+	RetireReason string `json:"retireReason,omitempty"`
+}
+
+type EvaluationShardHealth struct {
+	EvaluationSetID   string                 `json:"evaluationSetId"`
+	Status            string                 `json:"status"`
+	Shards            []EvaluationShardState `json:"shards"`
+	AvailableShardIDs []int16                `json:"availableShardIds"`
+	// CanIssue95Percent mirrors the batch planner: only a complete set of four
+	// live shards can support a 95 percent conclusion.
+	CanIssue95Percent bool `json:"canIssue95Percent"`
+}
+
+type EvaluationShardExposureResult struct {
+	EvaluationShardHealth
+	Retired bool `json:"retired"`
+}
+
 type EvaluationSetAdminBackend interface {
 	CreateEvaluationSetFromCertified(context.Context, AdminScope, string, EvaluationSetCreateInput) (EvaluationSetCreateResult, error)
 	ListEvaluationCasesForReview(context.Context, AdminScope, string, int, int) (EvaluationCaseReviewPage, error)
 	ReviewEvaluationSet(context.Context, AdminScope, string, EvaluationSetReviewInput) (EvaluationSetReviewResult, error)
 	SealEvaluationSet(context.Context, AdminScope, string) (EvaluationSetSealResult, error)
+	GetEvaluationShardHealth(context.Context, AdminScope, string) (EvaluationShardHealth, error)
+	ExposeEvaluationShard(context.Context, AdminScope, string, int16) (EvaluationShardExposureResult, error)
 }
 
 type evaluationExpectedContract struct {
@@ -426,6 +457,128 @@ func (store *PostgresStore) SealEvaluationSet(
 		return nil
 	})
 	return result, normalizeEvaluationSetError(err)
+}
+
+// GetEvaluationShardHealth reports sealed shard rotation state without ever
+// reading a sealed question. It is the read half of the exposure contract:
+// operators can see how much sealed material remains, and therefore whether a
+// 95 percent claim is still supportable, without being shown any of it.
+func (store *PostgresStore) GetEvaluationShardHealth(
+	ctx context.Context, scope AdminScope, evaluationSetID string,
+) (EvaluationShardHealth, error) {
+	if store == nil || store.pool == nil || scope.Validate(ctx) != nil || !canonicalAdminUUID(evaluationSetID) {
+		return EvaluationShardHealth{}, ErrEvaluationSetInvalid
+	}
+	var result EvaluationShardHealth
+	err := database.WithTenantTx(ctx, store.pool, scope.TenantID, func(tx pgx.Tx) error {
+		if err := requireSemanticPermissionTx(ctx, tx, scope, AdminActionView, evaluationSetID); err != nil {
+			return err
+		}
+		return loadEvaluationShardHealthTx(ctx, tx, scope, evaluationSetID, &result)
+	})
+	return result, normalizeEvaluationSetError(err)
+}
+
+// ExposeEvaluationShard records that sealed material in one shard has been seen
+// by a human and retires that shard.
+//
+// This is deliberately the ONLY governed path that reacts to sealed exposure,
+// and it is a declaration rather than a read. A "show me the sealed case, and
+// retire it" interface was considered and rejected: it would let any holder of
+// the semantic view permission drain the sealed set one sample at a time, which
+// makes the exposure auditable but does not make it safe, and the 95 percent
+// gate depends on the sealed material staying unseen. Retirement is therefore
+// applied at shard granularity, matching evaluation.RecordSealedRead and the
+// shard rotation the gate already plans over.
+func (store *PostgresStore) ExposeEvaluationShard(
+	ctx context.Context, scope AdminScope, evaluationSetID string, shardID int16,
+) (EvaluationShardExposureResult, error) {
+	if store == nil || store.pool == nil || scope.Validate(ctx) != nil ||
+		!canonicalAdminUUID(evaluationSetID) || shardID < 1 || shardID > 4 {
+		return EvaluationShardExposureResult{}, ErrEvaluationSetInvalid
+	}
+	var result EvaluationShardExposureResult
+	err := database.WithTenantTx(ctx, store.pool, scope.TenantID, func(tx pgx.Tx) error {
+		if err := requireSemanticPermissionTx(ctx, tx, scope, AdminActionRelease, evaluationSetID); err != nil {
+			return err
+		}
+		var status string
+		if err := tx.QueryRow(ctx, `SELECT status FROM askdata.evaluation_sets
+			WHERE id=$1 AND domain_id=$2`, evaluationSetID, scope.DomainID).Scan(&status); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrEvaluationSetNotFound
+			}
+			return err
+		}
+		if status != "SEALED" {
+			return ErrEvaluationSetInvalid
+		}
+		// The retirement itself is irreversible and lives in the database, so a
+		// repeated declaration reports false rather than retiring twice.
+		if err := tx.QueryRow(ctx, `SELECT askdata.expose_evaluation_shard($1,$2,$3)`,
+			evaluationSetID, shardID, scope.ActorID).Scan(&result.Retired); err != nil {
+			return err
+		}
+		return loadEvaluationShardHealthTx(ctx, tx, scope, evaluationSetID, &result.EvaluationShardHealth)
+	})
+	return result, normalizeEvaluationSetError(err)
+}
+
+func loadEvaluationShardHealthTx(
+	ctx context.Context, tx pgx.Tx, scope AdminScope, evaluationSetID string,
+	health *EvaluationShardHealth,
+) error {
+	health.EvaluationSetID = evaluationSetID
+	health.Shards = []EvaluationShardState{}
+	health.AvailableShardIDs = []int16{}
+	if err := tx.QueryRow(ctx, `SELECT status FROM askdata.evaluation_sets
+		WHERE id=$1 AND domain_id=$2`, evaluationSetID, scope.DomainID).Scan(&health.Status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrEvaluationSetNotFound
+		}
+		return err
+	}
+	// Shard rows are created lazily by the batch planner, so the case counts are
+	// the authority on which shards exist at all; a shard with no cases can
+	// never carry a gate run and is not reported as available.
+	rows, err := tx.Query(ctx, `SELECT shard.shard_id,
+		(SELECT count(*) FROM askdata.evaluation_cases AS evaluation_case
+		 WHERE evaluation_case.tenant_id=$1 AND evaluation_case.evaluation_set_id=$2
+		   AND evaluation_case.shard_id=shard.shard_id),
+		COALESCE(state.usage_count,0),state.exposed_at,state.retired_at,
+		COALESCE(state.retire_reason,'')
+	FROM generate_series(1,4) AS shard(shard_id)
+	LEFT JOIN askdata.evaluation_shard_states AS state
+	  ON state.tenant_id=$1 AND state.evaluation_set_id=$2
+	 AND state.shard_id=shard.shard_id
+	ORDER BY shard.shard_id`, scope.TenantID, evaluationSetID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item EvaluationShardState
+		var exposedAt, retiredAt *time.Time
+		if err := rows.Scan(&item.ShardID, &item.CaseCount, &item.UsageCount,
+			&exposedAt, &retiredAt, &item.RetireReason); err != nil {
+			return err
+		}
+		if exposedAt != nil {
+			item.ExposedAt = exposedAt.UTC().Format(time.RFC3339Nano)
+		}
+		if retiredAt != nil {
+			item.RetiredAt = retiredAt.UTC().Format(time.RFC3339Nano)
+		}
+		health.Shards = append(health.Shards, item)
+		if retiredAt == nil && item.CaseCount > 0 {
+			health.AvailableShardIDs = append(health.AvailableShardIDs, item.ShardID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	health.CanIssue95Percent = len(health.AvailableShardIDs) == 4
+	return nil
 }
 
 func stableAdminCode(value string) bool {

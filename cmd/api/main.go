@@ -665,6 +665,8 @@ func main() {
 	api.Handle("/api/v1/metadata-diffs", asset.NewHandler(
 		authService, accessService, assetRepository, dataSourceService,
 	))
+	metadataAIHandler := metadataai.NewHandler(authService, accessService, metadataAIService)
+	api.Handle("/api/v1/metadata-ai/", metadataAIHandler)
 
 	api.Handle("POST /api/v1/datasets/ai/proposals", datasetai.NewHandler(authService, accessService, datasetAIService))
 	api.Handle("POST /api/v1/datasets/{id}/ai/proposals", datasetai.NewHandler(authService, accessService, datasetAIService))

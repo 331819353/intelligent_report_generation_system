@@ -2,6 +2,7 @@ package materialization
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -85,6 +86,23 @@ type BuildMaterialization struct {
 	ActivatedAt      *time.Time `json:"activatedAt,omitempty"`
 }
 
+// BuildQuality is the immutable, user-safe receipt for one quality rule
+// evaluated during a build. It deliberately exposes rule evidence without
+// leaking SQL, physical warehouse identifiers or worker implementation data.
+type BuildQuality struct {
+	NodeID      string          `json:"nodeId,omitempty"`
+	RuleCode    string          `json:"ruleCode"`
+	RuleVersion string          `json:"ruleVersion"`
+	Scope       string          `json:"scope"`
+	FieldID     string          `json:"fieldId,omitempty"`
+	Severity    QualitySeverity `json:"severity"`
+	Status      QualityStatus   `json:"status"`
+	Expectation json.RawMessage `json:"expectation"`
+	Observed    json.RawMessage `json:"observed"`
+	Message     string          `json:"message"`
+	MeasuredAt  time.Time       `json:"measuredAt"`
+}
+
 type Build struct {
 	ID                string     `json:"id"`
 	DatasetID         string     `json:"datasetId"`
@@ -114,6 +132,7 @@ type BuildDetail struct {
 	Build
 	Inputs          []BuildInput          `json:"inputs"`
 	Nodes           []BuildNode           `json:"nodes"`
+	Quality         []BuildQuality        `json:"quality"`
 	Materialization *BuildMaterialization `json:"materialization,omitempty"`
 	SucceededNodes  int                   `json:"succeededNodes"`
 	FailedNodes     int                   `json:"failedNodes"`

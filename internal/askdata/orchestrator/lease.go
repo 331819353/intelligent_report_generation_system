@@ -33,6 +33,8 @@ type LeasedRun struct {
 	RunID              askdata.ID
 	DomainID           askdata.ID
 	ActorID            askdata.ID
+	ExecutionMode      string
+	SourceRunID        askdata.ID
 	ReleaseID          askdata.ID
 	ReleaseContentHash askdata.ContentHash
 	CurrentState       State
@@ -88,12 +90,14 @@ func (store *LeaseStore) Claim(
 	var mode string
 	err := store.pool.QueryRow(ctx,
 		`SELECT claimed_run_id::text,claimed_domain_id::text,claimed_actor_id::text,
+			claimed_execution_mode,COALESCE(claimed_source_run_id::text,''),
 			claimed_release_id::text,claimed_release_content_hash,claimed_current_state,
 			claimed_record_version,claimed_lease_token::text,claimed_attempt,claimed_resume_mode
 		 FROM askdata.claim_question_run($1::uuid,$2,$3)`,
 		tenantID, workerID, seconds,
 	).Scan(
-		&claimed.RunID, &claimed.DomainID, &claimed.ActorID, &claimed.ReleaseID,
+		&claimed.RunID, &claimed.DomainID, &claimed.ActorID, &claimed.ExecutionMode,
+		&claimed.SourceRunID, &claimed.ReleaseID,
 		&claimed.ReleaseContentHash, &claimed.CurrentState, &claimed.RecordVersion,
 		&claimed.LeaseToken, &claimed.Attempt, &mode,
 	)

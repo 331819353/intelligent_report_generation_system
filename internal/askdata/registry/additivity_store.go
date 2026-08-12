@@ -54,9 +54,20 @@ type BulkAdditivityConfirmationResult struct {
 	Replayed         bool     `json:"replayed"`
 }
 
+// AdditivitySuggestionRefreshResult summarises one advisory backfill pass. The
+// counts are the worklist the Owner then has to work through; nothing here
+// changes an authoritative additivity fact.
+type AdditivitySuggestionRefreshResult struct {
+	EvaluatedCount  int            `json:"evaluatedCount"`
+	PersistedCount  int            `json:"persistedCount"`
+	NeedsHumanCount int            `json:"needsHumanCount"`
+	GroupCounts     map[string]int `json:"groupCounts"`
+}
+
 type AdditivityAdminBackend interface {
 	ListUnconfirmedAdditivity(context.Context, AdminScope, Additivity, string, int) (AdditivityCandidatePage, error)
 	GetAdditivityReadiness(context.Context, AdminScope) (AdditivityReadiness, error)
+	RefreshAdditivitySuggestions(context.Context, AdminScope) (AdditivitySuggestionRefreshResult, error)
 	BulkConfirmAdditivity(context.Context, AdminScope, BulkAdditivityConfirmation, AdminCommand) (BulkAdditivityConfirmationResult, error)
 }
 
@@ -367,6 +378,58 @@ func (store *PostgresStore) PersistAdditivitySuggestions(
 		return nil
 	})
 	return updated, normalizeAdminStoreError(err)
+}
+
+// RefreshAdditivitySuggestions recomputes the heuristic for every unconfirmed
+// draft metric in the domain and stores the advisory result.
+//
+// This exists because the confirmation path matches the value the Owner is
+// confirming against the PERSISTED suggestion, while the heuristic itself was
+// only ever evaluated at read time and written by the askdata-inventory CLI. A
+// metric whose suggestion had never been persisted was therefore invisible to
+// the batch confirmation flow, and the backfill worklist silently skipped it
+// until somebody remembered to run an offline command.
+//
+// The caller supplies nothing but the intent: candidates and their suggestions
+// are derived server-side, so a browser can never propose an additivity value.
+// The result stays advisory - confirming it remains an explicit human act
+// (HUMAN-008), and this call never sets MetricVersion.Additivity.
+func (store *PostgresStore) RefreshAdditivitySuggestions(
+	ctx context.Context, scope AdminScope,
+) (AdditivitySuggestionRefreshResult, error) {
+	if store == nil || store.pool == nil {
+		return AdditivitySuggestionRefreshResult{}, errors.New("semantic registry PostgreSQL store is not configured")
+	}
+	if err := scope.Validate(ctx); err != nil {
+		return AdditivitySuggestionRefreshResult{}, err
+	}
+	result := AdditivitySuggestionRefreshResult{GroupCounts: map[string]int{}}
+	candidates := []AdditivityCandidate{}
+	for cursor := ""; ; {
+		page, err := store.ListUnconfirmedAdditivity(ctx, scope, "", cursor, 200)
+		if err != nil {
+			return AdditivitySuggestionRefreshResult{}, err
+		}
+		candidates = append(candidates, page.Items...)
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	for _, candidate := range candidates {
+		result.EvaluatedCount++
+		if candidate.Suggestion.NeedsHuman || candidate.Suggestion.Value == "" {
+			result.NeedsHumanCount++
+			continue
+		}
+		result.GroupCounts[string(candidate.Suggestion.Value)]++
+	}
+	persisted, err := store.PersistAdditivitySuggestions(ctx, scope, candidates)
+	if err != nil {
+		return AdditivitySuggestionRefreshResult{}, err
+	}
+	result.PersistedCount = persisted
+	return result, nil
 }
 
 var _ AdditivityAdminBackend = (*PostgresStore)(nil)

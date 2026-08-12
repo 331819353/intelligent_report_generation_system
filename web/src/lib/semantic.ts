@@ -10,6 +10,7 @@ export type SemanticResource =
   | 'terms'
   | 'kpi-bundles'
   | 'relationships'
+  | 'quality-rules'
   | 'members'
   | 'hierarchies'
   | 'certified-examples'
@@ -49,6 +50,10 @@ export type SemanticObject = {
   sensitivity?: string
   memberIndexPolicy?: string
   logicalFieldId?: string
+  targetType?: 'SEMANTIC_MODEL' | 'METRIC' | 'DIMENSION'
+  targetVersionId?: string
+  ruleAst?: Record<string, unknown>
+  severity?: 'INFO' | 'WARNING' | 'BLOCKING'
   term?: string
   aliases?: string[]
   definition?: string
@@ -63,6 +68,39 @@ export type AdditivityReadiness = {
   confirmedCount: number
   unconfirmedCount: number
   confirmationRate: number
+}
+
+// One advisory heuristic pass over the domain's unconfirmed draft metrics.
+// Suggestions never become authoritative additivity without a human confirming
+// them, so these counts are a worklist and not a result.
+export type AdditivitySuggestionRefreshResult = {
+  evaluatedCount: number
+  persistedCount: number
+  needsHumanCount: number
+  groupCounts: Record<string, number>
+}
+
+export type AdditivityCandidate = {
+  metricVersionId: string
+  metricId: string
+  metricCode: string
+  metricName: string
+  modelVersionId: string
+  suggestion: {
+    value?: string
+    semiAdditiveTimeAggregation?: string
+    aggregationRestriction?: string
+    ruleId: string
+    needsHuman: boolean
+  }
+  persistedSuggestion?: string
+  persistedRuleId?: string
+  updatedAt: string
+}
+
+export type AdditivityCandidatePage = {
+  items: AdditivityCandidate[]
+  nextCursor?: string
 }
 
 export type SemanticWriteResult = {
@@ -124,6 +162,29 @@ export type EvaluationReviewCase = {
   independentReviewCount: number
   actorReviewed: boolean
   actorEligible: boolean
+}
+
+// Sealed shard rotation health. Counts and timestamps only - there is no
+// contract anywhere in this client that carries a sealed question body.
+export type EvaluationShardState = {
+  shardId: number
+  caseCount: number
+  usageCount: number
+  exposedAt?: string
+  retiredAt?: string
+  retireReason?: string
+}
+
+export type EvaluationShardHealth = {
+  evaluationSetId: string
+  status: string
+  shards: EvaluationShardState[]
+  availableShardIds: number[]
+  canIssue95Percent: boolean
+}
+
+export type EvaluationShardExposureResult = EvaluationShardHealth & {
+  retired: boolean
 }
 
 export type EvaluationReviewPage = {
@@ -242,6 +303,10 @@ export type ReleaseOperationalImpact = {
     ownerId: string
     createdAt: string
   }>
+  activeReleaseId?: string
+  // Server-derived: false only for a domain's first release, which has no
+  // ACTIVE control to canary against. The browser never infers this itself.
+  rolloutRequired: boolean
   rollout?: ReleaseRollout
   observability?: {
     stage: string
@@ -254,8 +319,17 @@ export type ReleaseOperationalImpact = {
     candidateSamples: number
     controlAnswered: number
     candidateAnswered: number
+    controlClarifications: number
+    candidateClarifications: number
+    controlBlocked: number
+    candidateBlocked: number
     controlP95LatencyMs: number
     candidateP95LatencyMs: number
+    controlAverageCostCents: number
+    candidateAverageCostCents: number
+    shadowAlignedSamples: number
+    shadowPendingSamples: number
+    shadowSecurityFailures: number
     stopRequired: boolean
     stopCodes: string[]
     advanceAllowed: boolean
@@ -291,12 +365,25 @@ export const semanticAPI = {
     apiRequest<SemanticWriteResult>(`${semanticBase}/${resource}/${encodeURIComponent(id)}`, {
       method: 'PUT', headers: idempotencyHeaders(), body: JSON.stringify(payload),
     }),
+  remove: (resource: Exclude<SemanticResource, 'members' | 'hierarchies' | 'certified-examples'>, id: string, expectedUpdatedAt: string) =>
+    apiRequest<SemanticWriteResult>(`${semanticBase}/${resource}/${encodeURIComponent(id)}`, {
+      method: 'DELETE', headers: idempotencyHeaders(), body: JSON.stringify({ expectedUpdatedAt }),
+    }),
   certify: (domainId: string, objectVersionIds: string[], note: string) =>
     apiRequest<{ certifiedObjectVersionIds: string[] }>(`${semanticBase}/bulk-certify`, {
       method: 'POST', body: JSON.stringify({ domainId, objectVersionIds, note }),
     }),
   readiness: (domainId: string) =>
     apiRequest<AdditivityReadiness>(`${semanticBase}/domains/${encodeURIComponent(domainId)}/readiness`),
+  additivityCandidates: (suggestion = '', limit = 200) => {
+    const query = new URLSearchParams({ additivityStatus: 'UNCONFIRMED', limit: String(limit) })
+    if (suggestion) query.set('suggestion', suggestion)
+    return apiRequest<AdditivityCandidatePage>(`${semanticBase}/metrics?${query}`)
+  },
+  refreshAdditivitySuggestions: () =>
+    apiRequest<AdditivitySuggestionRefreshResult>(`${semanticBase}/metrics/additivity/suggestions`, {
+      method: 'POST', body: JSON.stringify({}),
+    }),
   confirmAdditivity: (metricVersionIds: string[], suggestion: string) =>
     apiRequest<{ metricVersionIds: string[]; confirmedCount: number; replayed: boolean }>(`${semanticBase}/metrics/additivity/confirm`, {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ metricVersionIds, suggestion }),
@@ -312,6 +399,12 @@ export const semanticAPI = {
   reviewEvaluationSet: (evaluationSetId: string, caseIds: string[], decision: 'APPROVED' | 'REJECTED', comment: string) =>
     apiRequest<{ evaluationSetId: string; decision: string; reviewedCount: number; totalCount: number }>(`${semanticBase}/evaluation-sets/${encodeURIComponent(evaluationSetId)}/reviews`, {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ caseIds, decision, comment }),
+    }),
+  evaluationShards: (evaluationSetId: string) =>
+    apiRequest<EvaluationShardHealth>(`${semanticBase}/evaluation-sets/${encodeURIComponent(evaluationSetId)}/shards`),
+  exposeEvaluationShard: (evaluationSetId: string, shardId: number) =>
+    apiRequest<EvaluationShardExposureResult>(`${semanticBase}/evaluation-sets/${encodeURIComponent(evaluationSetId)}/shards/expose`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ shardId }),
     }),
   sealEvaluationSet: (evaluationSetId: string) =>
     apiRequest<{ evaluationSetId: string; sealed: boolean; status: string; caseCount: number; reviewCount: number; contentHash?: string }>(`${semanticBase}/evaluation-sets/${encodeURIComponent(evaluationSetId)}/seal`, {

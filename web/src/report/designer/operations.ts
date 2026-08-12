@@ -351,12 +351,13 @@ export function slotLayoutOperations(
  * order 是区域自己的结构字段，不再借用 emptyPriority 表达。
  */
 export function zoneReorderOperations(block: Block, zoneId: string, direction: -1 | 1): EditorOperation[] {
-  const ordered = block.zones.slice().sort((left, right) => left.order - right.order)
+  const ordered = block.zones.slice().sort((left, right) =>
+    (left.order ?? left.layout.emptyPriority) - (right.order ?? right.layout.emptyPriority) || left.id.localeCompare(right.id))
   const index = ordered.findIndex(zone => zone.id === zoneId)
   const adjacent = ordered[index + direction]
   if (index < 0 || !adjacent) return []
   return [
-    { op: 'ZONE_REORDER', targetId: zoneId, payload: { order: adjacent.order } },
-    { op: 'ZONE_REORDER', targetId: adjacent.id, payload: { order: ordered[index].order } },
+    { op: 'ZONE_REORDER', targetId: zoneId, payload: { order: index + direction + 1 } },
+    { op: 'ZONE_REORDER', targetId: adjacent.id, payload: { order: index + 1 } },
   ]
 }

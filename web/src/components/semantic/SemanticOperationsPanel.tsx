@@ -11,6 +11,7 @@ import {
 } from '@phosphor-icons/react'
 import { useCallback, useEffect, useState } from 'react'
 import { AppButton } from '../AppButton'
+import { SealedSetIntegrityPanel } from './SealedSetIntegrityPanel'
 import { currentSubject } from '../../lib/auth'
 import { semanticAPI, type EvaluationSetCatalogItem, type ReleaseCatalogItem } from '../../lib/semantic'
 import {
@@ -239,6 +240,8 @@ export function SemanticOperationsPanel({ releases, evaluationSets, initialTicke
         </>}
       </section>
     </div>
+
+    <SealedSetIntegrityPanel evaluationSets={evaluationSets} onNotice={onNotice} />
 
     <section className="semantic-candidate-center">
       <header><div><span>主动学习</span><h3>语义改进候选</h3><p>系统仅挖掘哈希、稳定 ID 与聚合计数；人工批准只产生草稿候选，不会绕过认证或 Release 门禁。</p></div><strong>{pendingCandidates.length} 项待审核</strong></header>

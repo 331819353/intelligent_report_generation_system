@@ -862,7 +862,7 @@ func (c *ExcelConnector) Sample(ctx context.Context, source Source, table Metada
 				break
 			}
 		}
-		return SampleResult{Columns: headers, Rows: rows}, nil
+		return SampleResult{Columns: headers, Rows: rows, RowCount: len(rows)}, nil
 	}
 	return SampleResult{}, fmt.Errorf("worksheet %s is not available", table.Name)
 }

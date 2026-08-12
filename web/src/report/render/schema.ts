@@ -106,7 +106,7 @@ export type ZoneLayout = {
  * 分配给谁；两个使用方的排序方向相反，于是「先渲染」与「先获得空间」无法同时
  * 成立。两者现在各自独立。
  */
-export type Zone = { id: string; order: number; type: ZoneType; layout: ZoneLayout; slots: Slot[] }
+export type Zone = { id: string; order?: number; type: ZoneType; layout: ZoneLayout; slots: Slot[] }
 
 export type MobileBlockLayout = {
   order: number

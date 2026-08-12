@@ -62,36 +62,42 @@ const snapshotItems: DomainCatalogItem[] = [
     id: 'snapshot-enterprise', code: 'BIZ_MANAGEMENT', name: '企业经营',
     description: '经营分析与管理决策支持，涵盖财务、预算、人力等核心经营主题。',
     status: 'ACTIVE', default: true, version: 4, createdAt: '2026-08-10T09:32:00+08:00',
+    accessSensitivity: 'INTERNAL',
     administrators: [snapshotAdministrator], accessStatus: 'MEMBER',
   },
   {
     id: 'snapshot-supply', code: 'SUPPLY_CHAIN', name: '供应链管理',
     description: '供应链计划、采购、库存、物流等端到端供应链运营分析。',
     status: 'ACTIVE', default: false, version: 3, createdAt: '2026-08-09T16:45:00+08:00',
+    accessSensitivity: 'CONFIDENTIAL',
     administrators: [snapshotAdministrator], accessStatus: 'MEMBER',
   },
   {
     id: 'snapshot-channel', code: 'SALES_CHANNEL', name: '渠道销售',
     description: '渠道销售目标、渠道库存与经销商表现分析，支持渠道策略优化。',
     status: 'ACTIVE', default: false, version: 2, createdAt: '2026-08-11T10:15:00+08:00',
+    accessSensitivity: 'INTERNAL',
     administrators: [snapshotAdministrator], accessStatus: 'AVAILABLE',
   },
   {
     id: 'snapshot-retail', code: 'RETAIL_OPERATION', name: '零售运营',
     description: '零售门店运营、商品、会员与促销效果分析，提升零售运营效率。',
     status: 'ACTIVE', default: false, version: 2, createdAt: '2026-08-08T11:20:00+08:00',
+    accessSensitivity: 'CONFIDENTIAL',
     administrators: [{ ...snapshotAdministrator, id: 'snapshot-admin-li', displayName: '李明' }], accessStatus: 'PENDING',
   },
   {
     id: 'snapshot-quality', code: 'MANUFACTURING_QUALITY', name: '制造质量',
     description: '制造过程质量监控、质量追溯与改进分析，保障产品质量。',
     status: 'ACTIVE', default: false, version: 2, createdAt: '2026-08-07T14:18:00+08:00',
+    accessSensitivity: 'RESTRICTED',
     administrators: [{ ...snapshotAdministrator, id: 'snapshot-admin-zhao', displayName: '赵强' }], accessStatus: 'AVAILABLE',
   },
   {
     id: 'snapshot-overseas', code: 'OVERSEAS_BUSINESS', name: '海外业务',
     description: '海外市场销售、渠道与运营分析，支持全球化业务决策。',
     status: 'ACTIVE', default: false, version: 1, createdAt: '2026-08-06T09:05:00+08:00',
+    accessSensitivity: 'CONFIDENTIAL',
     administrators: [{ ...snapshotAdministrator, id: 'snapshot-admin-chen', displayName: '陈晨' }], accessStatus: 'AVAILABLE',
   },
 ]
@@ -101,12 +107,16 @@ const snapshotApplications: DomainApplication[] = [
     id: 'snapshot-application-retail', domainId: 'snapshot-retail', domainCode: 'RETAIL_OPERATION', domainName: '零售运营',
     applicantUserId: 'snapshot-user', applicantEmail: 'zhang.wei@example.com', applicantDisplayName: '张伟', status: 'PENDING',
     reason: '用于月度零售经营复盘与门店效率分析', reviewComment: '', createdAt: '2026-08-11T10:15:00+08:00',
+    domainSensitivity: 'CONFIDENTIAL', requiresDualApproval: true, slaDueAt: '2026-08-12T10:15:00+08:00',
+    slaStatus: 'DUE_SOON', escalationLevel: 0, approvals: [], approvedRoles: [], openSeats: ['DOMAIN_OWNER', 'SECURITY'], escalations: [],
   },
   {
     id: 'snapshot-application-quality', domainId: 'snapshot-quality', domainCode: 'MANUFACTURING_QUALITY', domainName: '制造质量',
     applicantUserId: 'snapshot-user', applicantEmail: 'zhang.wei@example.com', applicantDisplayName: '张伟', status: 'REJECTED',
     reason: '查看生产质量异常与改善趋势', reviewComment: '请补充负责的工厂范围与项目编号后重新提交。',
     reviewedBy: 'snapshot-admin-zhao', reviewedAt: '2026-08-10T16:45:00+08:00', createdAt: '2026-08-10T09:20:00+08:00',
+    domainSensitivity: 'RESTRICTED', requiresDualApproval: true, slaStatus: 'NOT_APPLICABLE', escalationLevel: 0,
+    approvals: [], approvedRoles: [], openSeats: [], escalations: [],
   },
 ]
 
@@ -266,6 +276,17 @@ export function DomainAccessPage() {
           reason: reason.trim(),
           reviewComment: '',
           createdAt: new Date('2026-08-11T11:20:00+08:00').toISOString(),
+          domainSensitivity: applicationTarget.accessSensitivity,
+          requiresDualApproval: ['CONFIDENTIAL', 'RESTRICTED'].includes(applicationTarget.accessSensitivity),
+          slaDueAt: new Date('2026-08-12T11:20:00+08:00').toISOString(),
+          slaStatus: 'ON_TRACK',
+          escalationLevel: 0,
+          approvals: [],
+          approvedRoles: [],
+          openSeats: ['CONFIDENTIAL', 'RESTRICTED'].includes(applicationTarget.accessSensitivity)
+            ? ['DOMAIN_OWNER', 'SECURITY']
+            : ['DOMAIN_OWNER'],
+          escalations: [],
         }, ...current])
         setItems(current => current.map(item => item.id === applicationTarget.id ? { ...item, accessStatus: 'PENDING' } : item))
       } else {

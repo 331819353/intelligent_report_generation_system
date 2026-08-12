@@ -1,5 +1,6 @@
 import { apiRequest } from './api'
 import { graphContains, graphGroupOutputKey, graphLeaves, graphProducedFields, normalizeGraphTransformComponentType, serializeDesignerGraph, type DesignerGraphV1, type GraphInput, type GraphTransform, type GraphTransformComponentType } from './dataset-graph'
+import { designerOutputRole } from './dataset-field-role'
 export type { CanvasPoint as GraphPosition, DesignerGraphV1, GraphDimension, GraphEnd, GraphEndOutput, GraphGroup, GraphGroupByMode, GraphInput, GraphJoin, GraphMetric } from './dataset-graph'
 export type DatasetLayer = 'ODS' | 'DIM' | 'DWD' | 'DWS' | 'ADS'
 
@@ -176,10 +177,24 @@ export type DatasetMaterializationReceipt = {
   sizeBytes?: number
   activatedAt?: string
 }
+export type DatasetQualityReceipt = {
+	nodeId?: string
+	ruleCode: string
+	ruleVersion: string
+	scope: 'DATASET' | 'FIELD' | 'RELATIONSHIP'
+	fieldId?: string
+	severity: 'INFO' | 'WARNING' | 'ERROR'
+	status: 'PASSED' | 'FAILED' | 'SKIPPED'
+	expectation: Record<string, unknown>
+	observed: Record<string, unknown>
+	message: string
+	measuredAt: string
+}
 export type DatasetDAGRunDetail = DatasetDAGRun & {
   materialization?: DatasetMaterializationReceipt
 	inputs: Array<{ ordinal: number; type: string; layer: string; sourceVersion: string; schemaHash: string; snapshotHash: string; rowCount?: number }>
 	nodes: Array<{ id: string; kind: string; engine: string; status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'SKIPPED'; attempt: number; inputRowCount?: number; outputRowCount?: number; outputSizeBytes?: number; errorCode?: string; errorMessage?: string; startedAt?: string; completedAt?: string }>
+	quality: DatasetQualityReceipt[]
 	succeededNodes: number; failedNodes: number; pendingNodes: number; partialSuccess: boolean
 }
 export type DatasetDAGRunPage = {
@@ -637,7 +652,11 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
       code: identifier(configuredCode),
       name: configuredName,
       ...(option?.description ? { description: option.description } : {}),
-      role: produced.kind === 'METRIC' ? 'MEASURE' : graphItemText(value, 'role') || (dimension || produced.kind === 'DIMENSION' ? 'DIMENSION' : option?.role || 'ATTRIBUTE'),
+      // A time dimension remains a TIME field after a designer round-trip.
+      // Treating every group dimension as DIMENSION breaks persisted DWS
+      // analysisContract.timeField even when its DATE_TRUNC expression and
+      // canonical DATE type are unchanged.
+      role: designerOutputRole(produced.kind, option?.role, graphItemText(value, 'role'), Boolean(dimension)),
       expression,
       canonicalType: option?.canonicalType || (produced.aggregation === 'COUNT' || produced.aggregation === 'COUNT_DISTINCT' ? 'INTEGER' : canonicalType(produced.canonicalType || column.canonicalType)),
       ...(option?.semanticType ? { semanticType: option.semanticType } : {}),

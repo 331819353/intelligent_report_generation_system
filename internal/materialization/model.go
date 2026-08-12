@@ -229,6 +229,37 @@ type QualityResult struct {
 	Message            string
 }
 
+// Executing quality rule catalog.
+//
+// These are the checks the materialization worker actually runs against a
+// warehouse output, and therefore the only checks that can produce a real
+// PASSED/FAILED outcome. The semantic layer binds to these codes rather than
+// defining a second rule language: a governed rule nobody can execute is worse
+// than no rule at all, because it reports as unproven and reads as a failure.
+const (
+	QualityRuleRowCountNonNegative = "ROW_COUNT_NONNEGATIVE"
+	QualityRuleOutputGrainUnique   = "OUTPUT_GRAIN_UNIQUE_NOT_NULL"
+)
+
+// ExecutingQualityRules lists each executing rule against the scopes it can be
+// measured at. Callers use it to reject a binding to a rule that would never be
+// evaluated.
+var ExecutingQualityRules = map[string][]string{
+	QualityRuleRowCountNonNegative: {"DATASET"},
+	QualityRuleOutputGrainUnique:   {"DATASET"},
+}
+
+// QualityRuleExecutable reports whether the given rule code is actually run at
+// the given scope by the materialization pipeline.
+func QualityRuleExecutable(ruleCode, scope string) bool {
+	for _, supported := range ExecutingQualityRules[ruleCode] {
+		if supported == scope {
+			return true
+		}
+	}
+	return false
+}
+
 type PhysicalIdentifier struct {
 	Schema          string
 	Name            string

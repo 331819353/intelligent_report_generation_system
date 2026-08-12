@@ -282,7 +282,11 @@ type Zone struct {
 	// sorted that field in opposite directions, so a zone could not both render
 	// first and absorb freed space first — and ZONE_REORDER, whose payload has
 	// always been an order, wrote into the redistribution weight instead.
-	Order  int        `json:"order"`
+	// omitempty is intentional compatibility: reports published before zone
+	// ordering was separated from EmptyPriority do not contain this field. A
+	// missing order remains a valid immutable V1 artifact and keeps its original
+	// content hash; every newly created or edited zone uses a positive order.
+	Order  int        `json:"order,omitempty"`
 	Type   ZoneType   `json:"type"`
 	Layout ZoneLayout `json:"layout"`
 	Slots  []Slot     `json:"slots"`
@@ -865,6 +869,7 @@ func (block Block) validate(columns int, componentIDs, zoneIDs, slotIDs map[askd
 		return errors.New("zones must be a JSON array, not null")
 	}
 	totalSlots := 0
+	orderedZones := 0
 	for zoneIndex, zone := range block.Zones {
 		path := fmt.Sprintf("zones[%d]", zoneIndex)
 		if err := addUniqueID(zoneIDs, zone.ID, path+".id"); err != nil {
@@ -873,10 +878,19 @@ func (block Block) validate(columns int, componentIDs, zoneIDs, slotIDs map[askd
 		if err := zone.validate(componentIDs, slotIDs); err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}
+		if zone.Order > 0 {
+			orderedZones++
+		}
 		totalSlots += len(zone.Slots)
 		if totalSlots > MaxSlotsPerBlock {
 			return fmt.Errorf("slots across block exceeds %d items", MaxSlotsPerBlock)
 		}
+	}
+	// A whole block without explicit zone orders is a legacy immutable V1
+	// artifact. Mixing legacy and explicit ordering is ambiguous and therefore
+	// rejected; normal edit operations upgrade all zones together.
+	if orderedZones != 0 && orderedZones != len(block.Zones) {
+		return errors.New("zones must either all declare order or all use legacy ordering")
 	}
 	return nil
 }
@@ -919,8 +933,8 @@ func (zone Zone) validate(componentIDs, slotIDs map[askdata.ID]struct{}) error {
 	if err := zone.ID.Validate(); err != nil {
 		return fmt.Errorf("id: %w", err)
 	}
-	if zone.Order < 1 {
-		return errors.New("order must be positive")
+	if zone.Order < 0 {
+		return errors.New("order cannot be negative")
 	}
 	if zone.Type != ZoneHeader && zone.Type != ZoneFilter && zone.Type != ZoneInsight &&
 		zone.Type != ZoneContent && zone.Type != ZoneFooter {

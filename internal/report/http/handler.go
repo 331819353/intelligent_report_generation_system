@@ -570,7 +570,7 @@ func instantiateStarterDefinition(reportID askdata.ID, name, description, templa
 		page.Sections = append(page.Sections, reportmodel.Section{ID: sectionID, Name: sectionName, Order: order, Blocks: []reportmodel.Block{{
 			ID: blockID, Type: starterBlockType(componentType),
 			Layout: reportmodel.BlockLayout{Desktop: reportmodel.DesktopBlockLayout{X: 0, Y: (order - 1) * height, W: width, H: height}, Mobile: reportmodel.MobileBlockLayout{Order: order, Visible: true, HeightMode: reportmodel.MobileHeightAuto, SlotMode: reportmodel.MobileSlotStack}},
-			Zones:  []reportmodel.Zone{{ID: zoneID, Type: reportmodel.ZoneContent, Layout: reportmodel.ZoneLayout{HeightMode: reportmodel.ZoneHeightAuto, MinHeight: 1, Columns: width, Rows: height, Overflow: reportmodel.OverflowExpand, EmptyPriority: 1}, Slots: []reportmodel.Slot{{ID: slotID, Grid: reportmodel.SlotGrid{X: 0, Y: 0, W: width, H: height}, ComponentID: componentID}}}},
+			Zones:  []reportmodel.Zone{{ID: zoneID, Order: 1, Type: reportmodel.ZoneContent, Layout: reportmodel.ZoneLayout{HeightMode: reportmodel.ZoneHeightAuto, MinHeight: 1, Columns: width, Rows: height, Overflow: reportmodel.OverflowExpand, EmptyPriority: 1}, Slots: []reportmodel.Slot{{ID: slotID, Grid: reportmodel.SlotGrid{X: 0, Y: 0, W: width, H: height}, ComponentID: componentID}}}},
 		}}})
 	}
 	value := func(field reportai.FieldDefinition, role reportmodel.BindingRole) reportmodel.FieldBinding {
