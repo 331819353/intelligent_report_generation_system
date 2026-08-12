@@ -22,3 +22,9 @@ web/vite.config.d.ts
 .venv-connector/
 __pycache__/
 .pytest_cache/
+
+# Go 测试文件不纳入版本库。
+# 注意范围：只匹配 *_test.go。字面意义上「文件名包含 _test」还会命中
+# internal/datasource/connection_test_*.go 等连接测试功能的生产代码，
+# 以及 migrations/*connection_test*.sql 等数据库迁移——它们必须保持受控。
+*_test.go
