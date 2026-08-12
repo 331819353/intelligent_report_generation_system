@@ -7,7 +7,8 @@ import (
 )
 
 // 协议表必须是既有约束的交集，不能自造权限：每个由模型驱动的状态，
-// 其阶段必须允许该状态要求的推进动作，且必须有可用工具。
+// 其阶段必须允许该状态要求的推进动作。除纯意图理解阶段外，后续阶段
+// 还必须至少有一个受控工具用于获取或验证治理事实。
 func TestProtocolIsTheIntersectionOfExistingConstraints(t *testing.T) {
 	for state, advance := range advanceByState {
 		stage, ok := StageForState(state)
@@ -19,8 +20,9 @@ func TestProtocolIsTheIntersectionOfExistingConstraints(t *testing.T) {
 			t.Fatalf("stage %s does not permit %s, so state %s can never complete",
 				stage, advance.action, state)
 		}
-		if len(allowedToolsForCognitionStage(stage)) == 0 {
-			t.Fatalf("stage %s for state %s has no permitted tools", stage, state)
+		if cognition.StageAllowsActionForTest(stage, cognition.ActionCallTool) &&
+			len(allowedToolsForCognitionStage(stage)) == 0 {
+			t.Fatalf("stage %s exposes CALL_TOOL without a governed allowlist", stage)
 		}
 	}
 }

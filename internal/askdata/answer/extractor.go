@@ -55,12 +55,40 @@ type ObjectEvidence struct {
 	Names    []string   `json:"names"`
 }
 
-const BindingEvidenceVersion = "answer-binding-evidence-v1"
+const BindingEvidenceVersion = "answer-binding-evidence-v2"
+
+// BindingSource names where a narrative's governed object identities come from.
+//
+// The verifier checks that every business object named in prose is a bound
+// object from a known catalog, which is what makes hallucinated metric names
+// detectable. A semantic release is one such catalog; a published dataset
+// version is another. The source is explicit so the two are never confused, and
+// so a reader can tell which grade of guarantee a verified narrative carries:
+// a certified semantic metric brings confirmed additivity, unit, currency and
+// ownership, while a dataset field brings identity and unit only.
+type BindingSource string
+
+const (
+	BindingSourceSemanticRelease BindingSource = "SEMANTIC_RELEASE"
+	BindingSourceDatasetVersion  BindingSource = "DATASET_VERSION"
+)
 
 type BindingEvidence struct {
-	Version           string           `json:"version"`
-	SemanticReleaseID askdata.ID       `json:"semanticReleaseId"`
+	Version string        `json:"version"`
+	Source  BindingSource `json:"source"`
+	// Exactly one identity field is set, selected by Source.
+	SemanticReleaseID askdata.ID       `json:"semanticReleaseId,omitempty"`
+	DatasetVersionID  askdata.ID       `json:"datasetVersionId,omitempty"`
 	Objects           []ObjectEvidence `json:"objects"`
+}
+
+// CatalogID is the identity of the catalog this evidence was built from,
+// whichever source it came from.
+func (binding BindingEvidence) CatalogID() askdata.ID {
+	if binding.Source == BindingSourceDatasetVersion {
+		return binding.DatasetVersionID
+	}
+	return binding.SemanticReleaseID
 }
 
 func (binding BindingEvidence) Normalize() BindingEvidence {

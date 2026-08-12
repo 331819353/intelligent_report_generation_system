@@ -47,6 +47,12 @@ type DomainAdministrator struct {
 	Email       string `json:"email"`
 	DisplayName string `json:"displayName"`
 }
+type ShareTarget struct {
+	ID     string `json:"id"`
+	Type   string `json:"type"`
+	Name   string `json:"name"`
+	Detail string `json:"detail"`
+}
 type DomainCatalogItem struct {
 	BusinessDomain
 	AccessStatus string `json:"accessStatus"`
@@ -175,6 +181,70 @@ func (s *AdminStore) ListUsers(ctx context.Context, tenantID string) ([]UserSumm
 		return rows.Err()
 	})
 	return users, err
+}
+
+// ListShareTargets returns the active users and roles that can actually receive
+// an internal share in the caller's selected domain. It exposes directory
+// labels only; role permissions and users from other domains remain hidden.
+func (s *AdminStore) ListShareTargets(
+	ctx context.Context, tenantID, actorID, domainID string,
+) (targets []ShareTarget, err error) {
+	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(actorID) == "" || strings.TrimSpace(domainID) == "" {
+		return nil, errors.New("share target scope is required")
+	}
+	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		var allowed bool
+		if err := tx.QueryRow(ctx, `SELECT platform.user_is_platform_administrator() OR EXISTS(
+			SELECT 1 FROM platform.domain_memberships AS membership
+			JOIN platform.business_domains AS domain
+			  ON domain.id=membership.domain_id AND domain.tenant_id=membership.tenant_id
+			WHERE membership.tenant_id=$1::uuid AND membership.domain_id=$2::uuid
+			  AND membership.user_id=$3::uuid AND membership.status='ACTIVE'
+			  AND domain.status='ACTIVE' AND domain.deleted_at IS NULL
+		)`, tenantID, domainID, actorID).Scan(&allowed); err != nil {
+			return err
+		}
+		if !allowed {
+			return errors.New("active domain membership is required")
+		}
+		rows, queryErr := tx.Query(ctx, `
+			SELECT id::text,target_type,target_name,target_detail FROM (
+			  SELECT user_account.id,'USER'::text AS target_type,user_account.display_name AS target_name,
+			    user_account.email::text AS target_detail,0 AS target_order
+			  FROM platform.users AS user_account
+			  JOIN platform.domain_memberships AS membership
+			    ON membership.user_id=user_account.id AND membership.tenant_id=user_account.tenant_id
+			  WHERE user_account.tenant_id=$1::uuid AND membership.domain_id=$2::uuid
+			    AND membership.status='ACTIVE' AND user_account.status='ACTIVE'
+			    AND user_account.deleted_at IS NULL
+			  UNION ALL
+			  SELECT role.id,'ROLE',role.name,COALESCE(NULLIF(role.description,''),role.code::text),1
+			  FROM platform.roles AS role
+			  WHERE role.tenant_id=$1::uuid AND role.status='ACTIVE' AND role.deleted_at IS NULL
+			    AND EXISTS(
+			      SELECT 1 FROM platform.user_roles AS assignment
+			      JOIN platform.domain_memberships AS membership
+			        ON membership.user_id=assignment.user_id AND membership.tenant_id=assignment.tenant_id
+			      JOIN platform.users AS member
+			        ON member.id=assignment.user_id AND member.tenant_id=assignment.tenant_id
+			      WHERE assignment.role_id=role.id AND membership.domain_id=$2::uuid
+			        AND membership.status='ACTIVE' AND member.status='ACTIVE' AND member.deleted_at IS NULL
+			    )
+			) AS directory ORDER BY target_order,target_name,id`, tenantID, domainID)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item ShareTarget
+			if err := rows.Scan(&item.ID, &item.Type, &item.Name, &item.Detail); err != nil {
+				return err
+			}
+			targets = append(targets, item)
+		}
+		return rows.Err()
+	})
+	return targets, err
 }
 
 // ListPlatformApprovals provides one metadata-only queue for platform
@@ -909,10 +979,38 @@ func (s *AdminStore) ListDomainCatalog(
 			domain.id,domain.code,domain.name,domain.description,domain.status,
 			domain.is_default,domain.version,domain.created_at::text,
 			CASE
+			  WHEN EXISTS(
+			    SELECT 1
+			    FROM platform.user_roles AS assignment
+			    JOIN platform.roles AS role
+			      ON role.id=assignment.role_id
+			     AND role.tenant_id=assignment.tenant_id
+			    WHERE assignment.tenant_id=domain.tenant_id
+			      AND assignment.user_id=$1::uuid
+			      AND role.code::text='platform_admin'
+			      AND role.status='ACTIVE'
+			      AND role.deleted_at IS NULL
+			  ) THEN 'PLATFORM_ADMIN'
 			  WHEN membership.user_id IS NOT NULL THEN membership.member_role::text
 			  WHEN application.status IS NOT NULL THEN application.status::text
 			  ELSE 'AVAILABLE'
-			END
+			END,
+			COALESCE((
+			  SELECT jsonb_agg(jsonb_build_object(
+			    'id',administrator.id,'employeeNo',administrator.employee_no,
+			    'email',administrator.email,
+			    'displayName',administrator.display_name
+			  ) ORDER BY administrator.display_name,administrator.email)
+			  FROM platform.domain_memberships AS administrator_membership
+			  JOIN platform.users AS administrator
+			    ON administrator.id=administrator_membership.user_id
+			   AND administrator.tenant_id=administrator_membership.tenant_id
+			  WHERE administrator_membership.tenant_id=domain.tenant_id
+			    AND administrator_membership.domain_id=domain.id
+			    AND administrator_membership.status='ACTIVE'
+			    AND administrator_membership.member_role='DOMAIN_ADMIN'
+			    AND administrator.deleted_at IS NULL
+			),'[]'::jsonb)
 		FROM platform.business_domains AS domain
 		LEFT JOIN platform.domain_memberships AS membership
 		  ON membership.tenant_id=domain.tenant_id
@@ -936,12 +1034,17 @@ func (s *AdminStore) ListDomainCatalog(
 		defer rows.Close()
 		for rows.Next() {
 			var item DomainCatalogItem
+			var administratorsJSON []byte
 			item.Administrators = []DomainAdministrator{}
 			if scanErr := rows.Scan(
 				&item.ID, &item.Code, &item.Name, &item.Description, &item.Status,
 				&item.Default, &item.Version, &item.CreatedAt, &item.AccessStatus,
+				&administratorsJSON,
 			); scanErr != nil {
 				return scanErr
+			}
+			if unmarshalErr := json.Unmarshal(administratorsJSON, &item.Administrators); unmarshalErr != nil {
+				return unmarshalErr
 			}
 			items = append(items, item)
 		}
@@ -1215,13 +1318,14 @@ func (s *AdminStore) ReplaceDomainAdministrators(
 			      AND membership.user_id=user_account.id
 			      AND membership.status='ACTIVE'
 			      AND membership.member_role='MEMBER'
+			      AND membership.domain_id<>$2::uuid
 			  )`,
-			userIDs,
+			userIDs, domainID,
 		).Scan(&validCount); err != nil {
 			return err
 		}
 		if validCount != len(userIDs) {
-			return errors.New("domain administrators must be active users without platform or ordinary-user identity")
+			return errors.New("domain administrators must be active users without platform identity or ordinary membership in another domain")
 		}
 		var domainExists bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(

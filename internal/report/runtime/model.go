@@ -86,6 +86,11 @@ type QueryRequest struct {
 	Timeout               time.Duration             `json:"-"`
 	PolicyScopeHash       string                    `json:"policyScopeHash"`
 	UncertifiedDefinition bool                      `json:"uncertifiedDefinition"`
+	// Draft marks a query planned against the editable draft rather than an
+	// immutable published version. Such a query carries no ReportVersionID, and
+	// the executor only accepts that for bindings that are self-contained in the
+	// definition.
+	Draft bool `json:"draft,omitempty"`
 }
 
 type ComponentPlan struct {
@@ -94,26 +99,12 @@ type ComponentPlan struct {
 	BlockID     askdata.ID    `json:"blockId"`
 	SlotID      askdata.ID    `json:"slotId"`
 	Query       *QueryRequest `json:"query,omitempty"`
+	// Blocked names the reason a bound component cannot execute against the
+	// current target. It is distinct from a nil Query with no reason, which
+	// means the component legitimately needs no data.
+	Blocked string `json:"blocked,omitempty"`
 }
 
 type ExecutionPlan struct {
 	Components []ComponentPlan `json:"components"`
-}
-
-// PinExecutionVersion binds every query to the immutable report artifact that
-// produced it. Plan construction deliberately cannot infer these IDs from the
-// definition JSON, so the loader must apply them before a plan is returned or
-// executed.
-func PinExecutionVersion(plan *ExecutionPlan, loaded LoadedReport) error {
-	if plan == nil || loaded.ReportID.Validate() != nil || loaded.VersionID.Validate() != nil {
-		return fmt.Errorf("report execution version is invalid")
-	}
-	for index := range plan.Components {
-		if plan.Components[index].Query == nil {
-			continue
-		}
-		plan.Components[index].Query.ReportID = loaded.ReportID
-		plan.Components[index].Query.ReportVersionID = loaded.VersionID
-	}
-	return nil
 }

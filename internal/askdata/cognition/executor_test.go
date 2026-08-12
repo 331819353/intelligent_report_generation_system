@@ -19,6 +19,26 @@ type recordingInvoker struct {
 	err        error
 }
 
+type scriptedInvoker struct {
+	invocations []ai.Invocation
+	results     []ai.InvocationResult
+	errors      []error
+	models      []string
+}
+
+func (invoker *scriptedInvoker) ConfiguredModels() []string {
+	return append([]string(nil), invoker.models...)
+}
+
+func (invoker *scriptedInvoker) Invoke(_ context.Context, input ai.Invocation) (ai.InvocationResult, error) {
+	invoker.invocations = append(invoker.invocations, input)
+	index := len(invoker.invocations) - 1
+	if index >= len(invoker.results) || index >= len(invoker.errors) {
+		return ai.InvocationResult{}, errors.New("unexpected invocation")
+	}
+	return invoker.results[index], invoker.errors[index]
+}
+
 func (invoker *recordingInvoker) Invoke(_ context.Context, input ai.Invocation) (ai.InvocationResult, error) {
 	invoker.invocation = input
 	return invoker.result, invoker.err
@@ -49,9 +69,15 @@ func TestExecutorUsesSemanticQuestionPurposeAndReturnsOnlyStructuredAction(t *te
 	if err := json.Unmarshal(invoker.invocation.Request.ResponseSchema.Schema, &schemaRoot); err != nil {
 		t.Fatal(err)
 	}
-	properties := schemaRoot["properties"].(map[string]any)
-	if got := properties["stage"].(map[string]any)["const"]; got != string(StageUnderstanding) {
-		t.Fatalf("provider stage schema const = %#v", got)
+	branches := schemaRoot["oneOf"].([]any)
+	if len(branches) == 0 {
+		t.Fatal("provider stage schema has no action branches")
+	}
+	for _, value := range branches {
+		properties := value.(map[string]any)["properties"].(map[string]any)
+		if got := properties["stage"].(map[string]any)["const"]; got != string(StageUnderstanding) {
+			t.Fatalf("provider stage schema const = %#v", got)
+		}
 	}
 	if result.Action.Action != ActionBlock || result.ProviderModel != "deepseek-v4-flash" {
 		t.Fatalf("result = %#v", result)
@@ -61,6 +87,153 @@ func TestExecutorUsesSemanticQuestionPurposeAndReturnsOnlyStructuredAction(t *te
 	}
 	if strings.Contains(string(raw), "reasoning_content") {
 		t.Fatal("test fixture unexpectedly contains reasoning content")
+	}
+}
+
+func TestExecutorRepairsOneInvalidStructuredCandidateWithAFreshAuditedInvocation(t *testing.T) {
+	action := validBlockAction(StageUnderstanding)
+	valid, err := json.Marshal(action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageSchema, err := SchemaForStage(readActionSchema(t), StageUnderstanding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, invalid := ai.ValidateStructuredOutput(stageSchema, []byte(`{"schemaVersion":"1.0"}`))
+	if invalid == nil {
+		t.Fatal("invalid fixture unexpectedly passed the stage schema")
+	}
+	invoker := &scriptedInvoker{
+		results: []ai.InvocationResult{{}, {
+			RequestID: "ai-request-repair", Attempts: 1,
+			ProviderResult: ai.ProviderResult{
+				Content: valid, Model: "deepseek-v4-flash", FinishReason: "stop",
+				Usage: ai.Usage{PromptTokens: 120, CompletionTokens: 30, TotalTokens: 150},
+			},
+		}},
+		errors: []error{invalid, nil},
+	}
+	result, err := newTestExecutor(t, invoker).Execute(context.Background(), validRoundRequest(StageUnderstanding))
+	if err != nil || result.AIRequestID != "ai-request-repair" || len(invoker.invocations) != 2 {
+		t.Fatalf("repair result = %#v, calls=%d, err=%v", result, len(invoker.invocations), err)
+	}
+	second := invoker.invocations[1]
+	if second.PreferredModel != "" || len(second.Request.Messages) != 3 ||
+		second.Request.Messages[1].Role != ai.MessageRoleAssistant ||
+		!strings.Contains(second.Request.Messages[2].Parts[0].Text, "只修正 JSON 结构") {
+		t.Fatalf("repair invocation = %#v", second)
+	}
+}
+
+func TestExecutorRetriesMalformedProviderEnvelopeThroughTheModelPool(t *testing.T) {
+	action := validBlockAction(StageUnderstanding)
+	valid, err := json.Marshal(action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	malformedEnvelope := &ai.ProviderError{
+		Code: ai.ErrorCodeInvalidResponse, Message: "AI provider returned an invalid response",
+	}
+	invoker := &scriptedInvoker{
+		models: []string{"deepseek-v4-flash", "glm-5.2"},
+		results: []ai.InvocationResult{{
+			ProviderResult: ai.ProviderResult{Model: "glm-5.2"},
+		}, {
+			RequestID: "ai-request-fallback", Attempts: 1,
+			ProviderResult: ai.ProviderResult{
+				Content: valid, Model: "deepseek-v4-flash", FinishReason: "stop",
+				Usage: ai.Usage{PromptTokens: 120, CompletionTokens: 30, TotalTokens: 150},
+			},
+		}},
+		errors: []error{malformedEnvelope, nil},
+	}
+	result, err := newTestExecutor(t, invoker).Execute(context.Background(), validRoundRequest(StageUnderstanding))
+	if err != nil || result.ProviderModel != "deepseek-v4-flash" || len(invoker.invocations) != 2 {
+		t.Fatalf("fallback result = %#v, calls=%d, err=%v", result, len(invoker.invocations), err)
+	}
+	if invoker.invocations[1].PreferredModel != "deepseek-v4-flash" || len(invoker.invocations[1].Request.Messages) != 1 {
+		t.Fatalf("fallback invocation = %#v", invoker.invocations[1])
+	}
+}
+
+func TestExecutorRestartsOnAlternateModelWhenStructuredRepairFails(t *testing.T) {
+	action := validBlockAction(StageUnderstanding)
+	valid, err := json.Marshal(action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageSchema, err := SchemaForStage(readActionSchema(t), StageUnderstanding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, invalid := ai.ValidateStructuredOutput(stageSchema, []byte(`{"schemaVersion":"1.0"}`))
+	if invalid == nil {
+		t.Fatal("invalid fixture unexpectedly passed the stage schema")
+	}
+	invoker := &scriptedInvoker{
+		models: []string{"deepseek-v4-flash", "glm-5.2"},
+		results: []ai.InvocationResult{
+			{ProviderResult: ai.ProviderResult{Model: "deepseek-v4-flash"}},
+			{ProviderResult: ai.ProviderResult{Model: "deepseek-v4-flash"}},
+			{RequestID: "ai-request-alternate", ProviderResult: ai.ProviderResult{Content: valid, Model: "glm-5.2", FinishReason: "stop"}},
+		},
+		errors: []error{invalid, invalid, nil},
+	}
+	result, err := newTestExecutor(t, invoker).Execute(context.Background(), validRoundRequest(StageUnderstanding))
+	if err != nil || result.AIRequestID != "ai-request-alternate" || len(invoker.invocations) != 3 {
+		t.Fatalf("alternate result = %#v, calls=%d, err=%v", result, len(invoker.invocations), err)
+	}
+	if invoker.invocations[1].PreferredModel != "deepseek-v4-flash" ||
+		invoker.invocations[2].PreferredModel != "glm-5.2" ||
+		len(invoker.invocations[2].Request.Messages) != 1 {
+		t.Fatalf("alternate invocations = %#v", invoker.invocations)
+	}
+}
+
+func TestExecutorRepairsCandidateThatFailsTypedToolContract(t *testing.T) {
+	evidence := validBlockAction(StageCandidateJudgment).EvidenceRefs[0]
+	release := askdata.ReleaseRef{ReleaseID: "release-1", ContentHash: askdata.HashBytes([]byte("release-1"))}
+	arguments := toolhost.NewArguments(release)
+	arguments.ObjectTypes = []toolhost.ObjectType{toolhost.ObjectTypeMetric}
+	arguments.DomainIDs = []askdata.ID{"domain-1"}
+	limit := 10
+	arguments.Limit = &limit
+	invalid := Action{
+		SchemaVersion: SchemaVersion, Stage: StageCandidateJudgment, Action: ActionCallTool,
+		DecisionSummary: "检索候选。", EvidenceRefs: []askdata.EvidenceRef{evidence},
+		ToolCall: &toolhost.CallRequest{
+			SchemaVersion: toolhost.SchemaVersion, CallID: "call-search-1",
+			Tool: toolhost.ToolSearchSemanticObjects, Arguments: arguments,
+		},
+	}
+	invalidRaw, err := json.Marshal(invalid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(invalidRaw); err == nil || !strings.Contains(err.Error(), "required argument fields") {
+		t.Fatalf("invalid fixture error = %v", err)
+	}
+	repaired := validBlockAction(StageCandidateJudgment)
+	repairedRaw, err := json.Marshal(repaired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoker := &scriptedInvoker{
+		results: []ai.InvocationResult{
+			{RequestID: "ai-request-original", ProviderResult: ai.ProviderResult{Content: invalidRaw, Model: "deepseek-v4-flash", FinishReason: "stop"}},
+			{RequestID: "ai-request-repair", ProviderResult: ai.ProviderResult{Content: repairedRaw, Model: "deepseek-v4-flash", FinishReason: "stop"}},
+		},
+		errors: []error{nil, nil},
+	}
+	result, err := newTestExecutor(t, invoker).Execute(context.Background(), validRoundRequest(StageCandidateJudgment))
+	if err != nil || result.AIRequestID != "ai-request-repair" || result.Action.Action != ActionBlock {
+		t.Fatalf("typed repair result = %#v, err=%v", result, err)
+	}
+	if len(invoker.invocations) != 2 || invoker.invocations[1].PreferredModel != "deepseek-v4-flash" ||
+		len(invoker.invocations[1].Request.Messages) != 3 ||
+		!strings.Contains(invoker.invocations[1].Request.Messages[2].Parts[0].Text, "工具参数") {
+		t.Fatalf("typed repair invocation = %#v", invoker.invocations)
 	}
 }
 
@@ -133,8 +306,9 @@ func TestAssistantAndToolMessagesRoundTripThroughAIValidation(t *testing.T) {
 	if err := ai.ValidateProviderRequest(request); err != nil {
 		t.Fatalf("ValidateProviderRequest() error = %v", err)
 	}
-	if toolMessage.ToolCallID != "call-search-1" || toolMessage.ToolName != string(toolhost.ToolSearchSemanticObjects) {
-		t.Fatalf("tool message identity = %#v", toolMessage)
+	if toolMessage.Role != ai.MessageRoleUser || toolMessage.ToolCallID != "" || toolMessage.ToolName != "" ||
+		!strings.HasPrefix(toolMessage.Parts[0].Text, "GOVERNED_TOOL_RESULT\n") {
+		t.Fatalf("governed tool result message = %#v", toolMessage)
 	}
 }
 

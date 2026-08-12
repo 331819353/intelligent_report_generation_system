@@ -103,6 +103,9 @@ func TestPostgresScheduleDeliveryLifecyclePermissionAndFailurePolicy(t *testing.
 	if err != nil || len(deliveries) != 1 || deliveries[0].State != "READY" || deliveries[0].ReportLink == "" || deliveries[0].AccessCheckedAt == nil {
 		t.Fatalf("ready deliveries = %#v, %v", deliveries, err)
 	}
+	if want := fmt.Sprintf("/reports/%s?version=1", fixture.reportID); deliveries[0].ReportLink != want {
+		t.Fatalf("ready report link = %q, want %q", deliveries[0].ReportLink, want)
+	}
 	read, err := service.MarkDeliveryRead(requestContext, identity, deliveries[0].ID)
 	if err != nil || read.ReadAt == nil {
 		t.Fatalf("MarkDeliveryRead() = %#v, %v", read, err)

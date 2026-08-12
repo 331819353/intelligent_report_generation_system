@@ -1,4 +1,7 @@
 import { apiRequest } from '../../lib/api'
+import type { Block, Page, ReportComponent, ReportDefinition, Section } from '../render/schema'
+import type { ComponentManifest } from '../render/manifests'
+import type { RuntimeComponentResult } from './runtime'
 
 export type EditorScope = {
   pageId: string
@@ -22,60 +25,16 @@ export type EditorOperationBundle = {
   operations: EditorOperation[]
 }
 
-export type EditorComponent = {
-  id: string
-  templateRef: { type: string; version: string }
-  dataBinding?: {
-    bindingMode: 'SEMANTIC_IR' | 'DATASET_FIELD'
-    dataContextId?: string
-    dimensions?: Array<{ role: string; field: string }>
-    measures?: Array<{ role: string; field: string }>
-    semanticQueryRef?: Record<string, unknown>
-  }
-  options: {
-    title?: string
-    subtitle?: string
-    showLegend?: boolean
-    showLabel?: boolean
-    smooth?: boolean
-    orientation?: string
-    topN?: number
-    colorPaletteRef?: string
-    numberFormat?: string
-    nullPolicy?: string
-    animation?: boolean
-    mobileLegendMode?: string
-    richText?: string
-    imageAssetId?: string
-    insightRole?: string
-    tablePageSize?: number
-  }
-}
-
-export type EditorSlot = { id: string; componentId?: string }
-export type EditorBlock = {
-  id: string
-  type: string
-  layout?: { desktop?: { x: number; y: number; w: number; h: number }; mobile?: Record<string, unknown> }
-  zones: Array<{ id: string; type: string; slots: EditorSlot[] }>
-}
-export type EditorSection = { id: string; name: string; order: number; blocks: EditorBlock[] }
-export type EditorPage = { id: string; name: string; order: number; sections: EditorSection[] }
-
-export type EditorDefinition = {
-  schemaVersion: string
-  metadata: { id: string; code: string; name: string; description?: string; reportType: 'REPORT' | 'DASHBOARD'; locale?: string }
-  dataContexts: Array<{ id: string; datasetId?: string; datasetVersionId?: string; alias?: string }>
-  pages: EditorPage[]
-  components: EditorComponent[]
-  globalFilters?: unknown[]
-  interactions?: unknown[]
-  runtimePolicy?: Record<string, unknown>
-  templateRef?: Record<string, unknown>
-  themeRef?: Record<string, unknown>
-  canvas?: Record<string, unknown>
-  provenance?: Record<string, unknown>
-}
+/**
+ * 编辑器不再声明自己的报告结构类型。草稿、发布制品、AI 生成结果都是同一份
+ * Report Definition 1.0，前端只有 render/schema 一套镜像类型；曾经的
+ * EditorDefinition 子集会在编辑器一侧静默丢掉 canvas、区块布局与槽位网格。
+ */
+export type EditorComponent = ReportComponent
+export type EditorBlock = Block
+export type EditorSection = Section
+export type EditorPage = Page
+export type EditorDefinition = ReportDefinition
 
 export type ReportDraft = {
   reportId: string
@@ -169,26 +128,56 @@ export type DataContextCandidate = {
   name: string
   description: string
   fields: string[]
+  fieldDefinitions?: DataContextField[]
 }
 
-/** 组件模板合同：数据绑定面板只允许提交合同内的角色与维度/度量数量。 */
-export type ComponentManifest = {
-  type: string
-  version: string
-  displayName: string
-  category: 'CHART' | 'TABLE' | 'TEXT' | 'METRIC' | 'CONTROL' | 'MEDIA' | string
-  recommendedSize: { w: number; h: number }
-  dataContract: {
-    dimensions: { min: number; max: number }
-    measures: { min: number; max: number }
-    timeField?: { required: boolean }
-    roles: string[]
-  }
+export type DataContextField = {
+  code: string
+  name: string
+  canonicalType: string
+  semanticType: string
+  role: 'DIMENSION' | 'MEASURE' | 'TIME' | 'IDENTIFIER' | string
+  aggregation: string
 }
+
+/**
+ * 组件清单由 render/manifests 统一定义（含 renderer 与 optionSchema），
+ * 编辑器与渲染器读取的是同一个注册表，不再各自维护一份裁剪过的合同类型。
+ */
+export type { ComponentManifest }
 
 export type BlankCreateReportResponse = {
   report: { id: string; name: string; code: string; reportType: 'REPORT' | 'DASHBOARD' }
   draft: ReportDraft
+}
+
+export type ReportStarterTemplate = {
+  id: 'executive-overview' | 'trend-analysis' | 'data-detail'
+  name: string
+  description: string
+  category: string
+  componentCount: number
+  requiresDimension: boolean
+}
+
+export type DraftExecutionInput = {
+  pageId: string
+  visibleBlockIds?: string[]
+  filterValues?: Record<string, unknown>
+}
+
+/**
+ * 草稿执行结果与已发布运行结果结构相同，但携带的是修订号与定义哈希而不是版本号，
+ * 因此二者在界面上永远不会被混为一谈。
+ */
+export type DraftExecution = {
+  reportId: string
+  draft: true
+  revisionNo: number
+  definitionHash: string
+  asOf: string
+  timezone: string
+  components: RuntimeComponentResult[]
 }
 
 function idempotencyHeaders() {
@@ -207,6 +196,14 @@ export const reportEditorAPI = {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
     })
   },
+  listStarterTemplates() {
+    return apiRequest<{ items: ReportStarterTemplate[] }>('/v1/report-templates')
+  },
+  instantiateStarterTemplate(templateId: string, input: { name: string; description?: string; dataContextId: string }) {
+    return apiRequest<BlankCreateReportResponse>(`/v1/report-templates/${encodeURIComponent(templateId)}/instantiate`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
+    })
+  },
   listDataContexts() {
     return apiRequest<{ items: DataContextCandidate[] }>('/v1/report-data-contexts')
   },
@@ -216,17 +213,27 @@ export const reportEditorAPI = {
   getDraft(reportId: string) {
     return apiRequest<ReportDraft>(`/v1/reports/${encodeURIComponent(reportId)}/draft`)
   },
+  /**
+   * 按当前草稿执行组件查询，让作者在绑定字段时就能看到真实数据，而不是先发布
+   * 一个版本才知道绑定是否成立。执行仍按调用者自己的行/列权限进行，也不会写入
+   * 任何版本或制品；返回体里的 draft/revisionNo 用于与已发布运行结果区分。
+   */
+  executeDraft(reportId: string, input: DraftExecutionInput, options: { signal?: AbortSignal } = {}) {
+    return apiRequest<DraftExecution>(`/v1/reports/${encodeURIComponent(reportId)}/draft/execute`, {
+      method: 'POST', signal: options.signal, body: JSON.stringify(input),
+    })
+  },
   listRevisions(reportId: string) {
     return apiRequest<{ items: ReportRevision[] }>(`/v1/reports/${encodeURIComponent(reportId)}/revisions`)
   },
   previewAI(reportId: string, input: { intent: string; dataContextId: string; scope: EditorScope }) {
     return apiRequest<AIPreviewResponse>(`/v1/reports/${encodeURIComponent(reportId)}/ai/preview`, {
-      method: 'POST', body: JSON.stringify(input),
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
     })
   },
   applyOperations(reportId: string, bundle: EditorOperationBundle) {
     return apiRequest<DraftMutationResponse>(`/v1/reports/${encodeURIComponent(reportId)}/operations`, {
-      method: 'POST', body: JSON.stringify(bundle),
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(bundle),
     })
   },
   undo(reportId: string) {

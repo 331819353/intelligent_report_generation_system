@@ -70,7 +70,7 @@ func (retriever *Retriever) Retrieve(ctx context.Context, request RetrievalReque
 	}
 	sort.Slice(objectTypes, func(i, j int) bool { return objectTypes[i] < objectTypes[j] })
 	for index, objectType := range objectTypes {
-		if !validRetrievalObjectType(objectType) || index > 0 && objectTypes[index-1] == objectType {
+		if !ValidRetrievalObjectType(objectType) || index > 0 && objectTypes[index-1] == objectType {
 			return RetrievalResult{}, ErrInvalidRetrieval
 		}
 	}
@@ -141,7 +141,7 @@ func validateDeterministicExactHits(
 	result := []RawHit{}
 	seen := map[string]struct{}{}
 	for _, hit := range hits {
-		if !validRetrievalObjectType(hit.ObjectType) || hit.ObjectVersionID.Validate() != nil ||
+		if !ValidRetrievalObjectType(hit.ObjectType) || hit.ObjectVersionID.Validate() != nil ||
 			hit.InputHash.Validate() != nil || hit.Score != 1 {
 			return nil, ErrInvalidRetrieval
 		}

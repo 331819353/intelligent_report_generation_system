@@ -25,6 +25,17 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 }
 
 func (repository *PostgresRepository) Create(ctx context.Context, identity Identity, input CreateInput) (SavedQuestion, error) {
+	return repository.create(ctx, identity, input, nil)
+}
+
+func (repository *PostgresRepository) CreateWithShare(ctx context.Context, identity Identity, input CreateInput, share ShareInput) (SavedQuestion, error) {
+	if share.Validate() != nil || input.Visibility != Team {
+		return SavedQuestion{}, ErrInvalid
+	}
+	return repository.create(ctx, identity, input, &share)
+}
+
+func (repository *PostgresRepository) create(ctx context.Context, identity Identity, input CreateInput, share *ShareInput) (SavedQuestion, error) {
 	if repository == nil || repository.pool == nil || identity.Validate() != nil || input.Validate() != nil ||
 		input.SemanticIR.DomainID != identity.DomainID {
 		return SavedQuestion{}, ErrInvalid
@@ -53,6 +64,14 @@ func (repository *PostgresRepository) Create(ctx context.Context, identity Ident
 			if _, insertErr := tx.Exec(ctx, `INSERT INTO askdata.saved_question_dependencies(
 				tenant_id,saved_question_id,dependency_type,dependency_id
 			) VALUES($1,$2,$3,$4)`, identity.TenantID, id, dependency.Type, dependency.ID); insertErr != nil {
+				return insertErr
+			}
+		}
+		if share != nil {
+			if _, insertErr := tx.Exec(ctx, `INSERT INTO askdata.saved_question_shares(
+				saved_question_id,tenant_id,principal_type,principal_id,granted_by
+			) VALUES($1,$2,$3,$4,$5)`, id, identity.TenantID, share.PrincipalType,
+				share.PrincipalID, identity.ActorID); insertErr != nil {
 				return insertErr
 			}
 		}

@@ -25,6 +25,7 @@ import (
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/compiler"
 	"intelligent-report-generation-system/internal/askdata/graph"
+	"intelligent-report-generation-system/internal/askdata/ircontract"
 	"intelligent-report-generation-system/internal/askdata/registry"
 	"intelligent-report-generation-system/internal/askdata/search"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
@@ -63,6 +64,7 @@ type Services struct {
 	Graph      *graph.Resolver
 	Compiler   *compiler.PinnedIRCompiler
 	Validator  *validator.Validator
+	Coverage   *validator.CoverageControl
 	Executor   *validator.Executor
 	Dictionary DictionaryMatcher
 }
@@ -85,6 +87,7 @@ func (run RunContext) validate() error {
 // planEntry is one plan's progress through compile → validate → execute.
 type planEntry struct {
 	artifact   compiler.QueryArtifact
+	semanticIR ircontract.SemanticIR
 	validation validator.ValidationArtifact
 	validated  bool
 }
@@ -100,10 +103,14 @@ func newPlanCache() *planCache {
 	return &planCache{plans: map[askdata.ContentHash]planEntry{}}
 }
 
-func (cache *planCache) put(hash askdata.ContentHash, artifact compiler.QueryArtifact) {
+func (cache *planCache) put(
+	hash askdata.ContentHash,
+	artifact compiler.QueryArtifact,
+	semanticIR ircontract.SemanticIR,
+) {
 	cache.mutex.Lock()
 	defer cache.mutex.Unlock()
-	cache.plans[hash] = planEntry{artifact: artifact}
+	cache.plans[hash] = planEntry{artifact: artifact, semanticIR: semanticIR}
 }
 
 func (cache *planCache) get(hash askdata.ContentHash) (compiler.QueryArtifact, bool) {
@@ -129,38 +136,63 @@ func (cache *planCache) markValidated(hash askdata.ContentHash, validation valid
 
 func (cache *planCache) getValidated(
 	hash askdata.ContentHash,
-) (compiler.QueryArtifact, validator.ValidationArtifact, bool) {
+) (compiler.QueryArtifact, ircontract.SemanticIR, validator.ValidationArtifact, bool) {
 	cache.mutex.Lock()
 	defer cache.mutex.Unlock()
 	entry, ok := cache.plans[hash]
 	if !ok || !entry.validated {
-		return compiler.QueryArtifact{}, validator.ValidationArtifact{}, false
+		return compiler.QueryArtifact{}, ircontract.SemanticIR{}, validator.ValidationArtifact{}, false
 	}
-	return entry.artifact, entry.validation, true
+	return entry.artifact, entry.semanticIR, entry.validation, true
 }
 
-// resultCache holds the result hash each executed plan produced, so candidate
-// comparison can work from hashes without holding result rows across calls.
+// executionEntry retains the private, in-process execution rows until the
+// answer boundary has built exact result-cell evidence. It never crosses the
+// audit artifact boundary and is deleted when the run completes.
+type executionEntry struct {
+	planHash    askdata.ContentHash
+	artifact    compiler.QueryArtifact
+	semanticIR  ircontract.SemanticIR
+	validation  validator.ValidationArtifact
+	execution   validator.ExecutionResult
+	contract    validator.ResultContract
+	resultHash  askdata.ContentHash
+	evidenceIDs []askdata.ID
+}
+
+// resultCache holds executed plans for candidate comparison and final answer
+// construction. It is run-scoped and in-memory only.
 type resultCache struct {
 	mutex   sync.Mutex
-	results map[askdata.ContentHash]askdata.ContentHash
+	results map[askdata.ContentHash]executionEntry
 }
 
 func newResultCache() *resultCache {
-	return &resultCache{results: map[askdata.ContentHash]askdata.ContentHash{}}
+	return &resultCache{results: map[askdata.ContentHash]executionEntry{}}
 }
 
-func (cache *resultCache) put(planHash, resultHash askdata.ContentHash) {
+func (cache *resultCache) put(entry executionEntry) {
 	cache.mutex.Lock()
 	defer cache.mutex.Unlock()
-	cache.results[planHash] = resultHash
+	cache.results[entry.planHash] = entry
 }
 
-func (cache *resultCache) get(planHash askdata.ContentHash) (askdata.ContentHash, bool) {
+func (cache *resultCache) get(planHash askdata.ContentHash) (executionEntry, bool) {
 	cache.mutex.Lock()
 	defer cache.mutex.Unlock()
-	resultHash, ok := cache.results[planHash]
-	return resultHash, ok
+	entry, ok := cache.results[planHash]
+	return entry, ok
+}
+
+func (cache *resultCache) byResultHash(resultHash askdata.ContentHash) (executionEntry, bool) {
+	cache.mutex.Lock()
+	defer cache.mutex.Unlock()
+	for _, entry := range cache.results {
+		if entry.resultHash == resultHash {
+			return entry, true
+		}
+	}
+	return executionEntry{}, false
 }
 
 // Binding is one run's handler set together with the state the chain needs.

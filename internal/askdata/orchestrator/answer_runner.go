@@ -24,6 +24,7 @@ type AnswerRunRequest struct {
 	Run         Run
 	Input       answer.CompositionInput
 	Outcome     validator.Outcome
+	Result      json.RawMessage
 	EvidenceIDs []askdata.ID
 }
 
@@ -170,9 +171,10 @@ func (runner *AnswerVerificationRunner) Run(
 		outcome = validator.DetermineOutcome(validator.OutcomeContext{})
 	}
 	payload, err := json.Marshal(struct {
-		Answer  json.RawMessage   `json:"answer"`
-		Outcome validator.Outcome `json:"outcome"`
-	}{Answer: answerPayload, Outcome: outcome})
+		Artifact json.RawMessage   `json:"artifact"`
+		Outcome  validator.Outcome `json:"outcome"`
+		Result   json.RawMessage   `json:"result,omitempty"`
+	}{Artifact: answerPayload, Outcome: outcome, Result: request.Result})
 	if err != nil {
 		return result, fmt.Errorf("%w: terminal envelope: %v", ErrAnswerVerification, err)
 	}

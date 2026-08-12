@@ -24,11 +24,52 @@ const presentations: Record<ReportComponentState, Omit<ComponentPresentation, 's
   TIMEOUT: { label: '响应超时', title: '组件响应超时', message: '查询超过时间预算，请重试。', action: '重试', tone: 'neutral', exposeBoundTitle: true },
 }
 
-export function componentPresentation(state: string, boundTitle?: string): ComponentPresentation {
+/**
+ * 组件失败原因的可读说明。
+ *
+ * 状态只说明「成功与否」，原因码说明「为什么」。没有这层映射时，草稿预览里
+ * 一个固定了语义发布版本的组件只会显示「组件加载失败」，作者无从判断那其实
+ * 是预期行为而不是配置错误。
+ */
+const errorCodeMessages: Record<string, { title: string; message: string; tone: ComponentPresentation['tone'] }> = {
+  REPORT_DRAFT_PREVIEW_REQUIRES_PUBLISH: {
+    title: '草稿预览不可执行',
+    message: '该组件固定了语义发布版本，其受治理查询制品只对已发布版本开放；发布后即可查看数据。',
+    tone: 'neutral',
+  },
+  REPORT_ROLLUP_MEASURE_NON_ADDITIVE: {
+    title: '该度量不能按当前维度汇总',
+    message: '平均值、去重计数与非可加度量无法跨被省略的维度重新汇总；请补齐维度或改用可加度量。',
+    tone: 'warning',
+  },
+  REPORT_ROLLUP_MEASURE_UNDECLARED: {
+    title: '度量缺少聚合口径',
+    message: '数据集版本未声明该度量的聚合方式，无法安全汇总；请在数据集契约中补充。',
+    tone: 'warning',
+  },
+  REPORT_ROLLUP_SOURCE_TRUNCATED: {
+    title: '数据超出查询上限',
+    message: '源数据在汇总前已被行数上限截断，合计值会失真；请增加筛选条件缩小范围。',
+    tone: 'warning',
+  },
+}
+
+export function componentPresentation(state: string, boundTitle?: string, errorCode?: string): ComponentPresentation {
   const safeState = componentStates.includes(state as ReportComponentState)
     ? state as ReportComponentState
     : 'ERROR'
   const presentation = presentations[safeState]
+  const explained = errorCode ? errorCodeMessages[errorCode] : undefined
+  if (explained) {
+    return {
+      state: safeState,
+      ...presentation,
+      title: explained.title,
+      message: explained.message,
+      tone: explained.tone,
+      action: undefined,
+    }
+  }
   return {
     state: safeState,
     ...presentation,

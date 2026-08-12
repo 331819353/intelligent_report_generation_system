@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"strings"
@@ -121,7 +122,15 @@ func (service *Service) PrefillEvidence(ctx context.Context, identity Identity, 
 	if !ok {
 		return EvidenceInput{}, ErrEvidenceInvalid
 	}
-	return resolver.Resolve(ctx, identity, sourceType, sourceID)
+	input, err := resolver.Resolve(ctx, identity, sourceType, sourceID)
+	if err != nil {
+		return EvidenceInput{}, fmt.Errorf("%w: resolve source: %v", ErrEvidenceInvalid, err)
+	}
+	verified, err := service.evidence.Verify(ctx, identity, input)
+	if err != nil || !verified.Verified {
+		return EvidenceInput{}, fmt.Errorf("%w: verify source: %v", ErrEvidenceInvalid, err)
+	}
+	return input, nil
 }
 
 func (service *Service) Update(ctx context.Context, identity Identity, id askdata.ID, input UpdateInput) (Decision, error) {
@@ -246,7 +255,39 @@ func (service *Service) ConfirmOutcome(ctx context.Context, identity Identity, d
 	if input.Conclusion != ConclusionAchieved && input.Conclusion != ConclusionPartial && input.Conclusion != ConclusionNotAchieved && input.Conclusion != ConclusionInconclusive {
 		return OutcomeReview{}, ErrInvalid
 	}
+	if input.Conclusion == ConclusionInconclusive && !validText(input.Notes, 1, 4096) {
+		return OutcomeReview{}, ErrInvalid
+	}
 	return service.repository.ConfirmOutcome(ctx, identity, decisionID, input, service.clock())
+}
+
+// StartReview lets an owner enter the review stage as soon as every action has
+// reached a terminal state. The due-date worker remains the safety net for
+// unattended decisions, but completed work must not be artificially blocked
+// until a future calendar date before it can be reviewed and closed.
+func (service *Service) StartReview(ctx context.Context, identity Identity, decisionID askdata.ID, expectedVersion int64) (Aggregate, error) {
+	if identity.Validate() != nil || !validUUID(decisionID) || expectedVersion < 1 {
+		return Aggregate{}, ErrInvalid
+	}
+	current, err := service.repository.Get(ctx, identity, decisionID, false)
+	if err != nil {
+		return Aggregate{}, err
+	}
+	if current.Decision.Status != StatusInExecution && current.Decision.Status != StatusReopened {
+		return Aggregate{}, ErrIllegalTransition
+	}
+	if len(current.Actions) == 0 {
+		return Aggregate{}, ErrOutcomeBlocked
+	}
+	for _, action := range current.Actions {
+		if action.Status != ActionDone && action.Status != ActionCanceled {
+			return Aggregate{}, ErrOutcomeBlocked
+		}
+	}
+	return service.repository.TransitionDecision(
+		ctx, identity, decisionID, expectedVersion, StatusReviewDue,
+		"全部行动项已完成，发起人提前进入结果复盘", service.clock(),
+	)
 }
 
 func (service *Service) Close(ctx context.Context, identity Identity, decisionID askdata.ID, expectedVersion int64, reason string) (Aggregate, error) {

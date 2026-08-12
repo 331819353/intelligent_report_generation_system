@@ -24,8 +24,14 @@ type ViewType string
 type IndexPolicy string
 
 const (
-	ObjectMetric           ObjectType = "METRIC"
+	ObjectMetric ObjectType = "METRIC"
+	// ObjectMeasureLegacy is retained at the retrieval boundary because older
+	// release projections wrote physical MEASURE contracts into the search
+	// index. New projections canonicalize them to METRIC, but a rolling upgrade
+	// must not turn every previously active release into an empty catalog.
+	ObjectMeasureLegacy    ObjectType = "MEASURE"
 	ObjectDimension        ObjectType = "DIMENSION"
+	ObjectSemanticModel    ObjectType = "SEMANTIC_MODEL"
 	ObjectMember           ObjectType = "MEMBER"
 	ObjectBusinessTerm     ObjectType = "BUSINESS_TERM"
 	ObjectCertifiedExample ObjectType = "CERTIFIED_EXAMPLE"

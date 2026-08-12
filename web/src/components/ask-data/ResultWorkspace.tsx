@@ -57,8 +57,8 @@ function ResultChart({ result, view, compact = false }: ResultChartProps) {
   useEffect(() => {
     if (!chartRef.current || !dataset) return undefined
     const chart = init(chartRef.current)
-    const dimensionKey = view.dimensionKeys[0]
-    const measureKey = view.measureKeys[0]
+		const dimensionKey = (view.dimensionKeys ?? [])[0]
+		const measureKey = (view.measureKeys ?? [])[0]
     const labels = dataset.rows.map(row => row[dimensionKey] ?? '—')
     const values = dataset.rows.map(row => numericResultValue(row[measureKey]) ?? 0)
     const dimension = dataset.columns.find(column => column.key === dimensionKey)
@@ -137,7 +137,7 @@ function ResultTable({ dataset, result }: { dataset: QuestionResultDataset; resu
   const exportPage = () => {
     const header = dataset.columns.map(column => column.label)
     const body = rows.map(row => dataset.columns.map(column => row[column.key] ?? ''))
-    const footer = exportTimeSpecFooter(result.resolvedTimeSpec)
+    const footer = result.resolvedTimeSpec ? exportTimeSpecFooter(result.resolvedTimeSpec) : [['数据口径', '当前已发布数据快照']]
     const csv = [header, ...body, [], ...footer].map(values => values.map(value => `"${String(value).replaceAll('"', '""')}"`).join(',')).join('\n')
     const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' }))
     const link = document.createElement('a')
@@ -192,7 +192,7 @@ export function ResultWorkspace({ result, answer, onRetryNarrative }: ResultWork
   const showLine = activeView.type === 'LINE' && lineView
   const showBar = activeView.type === 'BAR' && barView
   const comparison = result.summary.comparison
-  const timeSpec = renderTimeSpec(result.resolvedTimeSpec)
+  const timeSpec = result.resolvedTimeSpec ? renderTimeSpec(result.resolvedTimeSpec) : undefined
   const timeSpecID = 'ask-result-time-spec'
 
   return <section className="ask-result-workspace" aria-labelledby="ask-result-title">
@@ -207,18 +207,18 @@ export function ResultWorkspace({ result, answer, onRetryNarrative }: ResultWork
     <div className="ask-result-kpi-row">
       <div>
         <strong>{result.summary.formattedValue}</strong>
-        <small>{timeSpecSummaryLabel(timeSpec)}</small>
+        <small>{timeSpec ? timeSpecSummaryLabel(timeSpec) : '当前已发布数据快照'}</small>
         <div className="ask-result-time-actions">
-          {timeSpec.truncatedHint && <span>{timeSpec.truncatedHint}</span>}
-          <button type="button" aria-expanded={timeSpecOpen} aria-controls={timeSpecID} onClick={() => setTimeSpecOpen(value => !value)}>
+          {timeSpec?.truncatedHint && <span>{timeSpec.truncatedHint}</span>}
+          {timeSpec && <button type="button" aria-expanded={timeSpecOpen} aria-controls={timeSpecID} onClick={() => setTimeSpecOpen(value => !value)}>
             {timeSpecOpen ? '收起时间口径' : '查看时间口径'}<CaretDown className={timeSpecOpen ? 'is-open' : ''} size={10} aria-hidden="true" />
-          </button>
+          </button>}
         </div>
       </div>
-      {comparison && <div><span>{comparison.label}</span><strong className={`is-${comparison.direction.toLowerCase()}`}>{comparison.formattedChange}<TrendUp size={15} weight="bold" aria-hidden="true" /></strong><small>{timeSpec.comparisonLabel}</small></div>}
+      {comparison && <div><span>{comparison.label}</span><strong className={`is-${comparison.direction.toLowerCase()}`}>{comparison.formattedChange}<TrendUp size={15} weight="bold" aria-hidden="true" /></strong>{timeSpec?.comparisonLabel && <small>{timeSpec.comparisonLabel}</small>}</div>}
     </div>
 
-    {timeSpecOpen && <div id={timeSpecID} className="ask-result-time-spec">
+    {timeSpecOpen && timeSpec && result.resolvedTimeSpec && <div id={timeSpecID} className="ask-result-time-spec">
       <dl>
         <div><dt>实际区间</dt><dd>{timeSpec.rangeLabel}</dd></div>
         <div><dt>数据截止</dt><dd>{timeSpec.asOfLabel}</dd></div>
@@ -244,6 +244,6 @@ export function ResultWorkspace({ result, answer, onRetryNarrative }: ResultWork
     </div>}
 
     {tableDataset && <ResultTable key={tableDataset.id} dataset={tableDataset} result={result} />}
-    <p className="ask-result-freshness"><ShieldCheck size={12} aria-hidden="true" />{timeSpec.asOfLabel}（{result.resolvedTimeSpec.timezone}）</p>
+    <p className="ask-result-freshness"><ShieldCheck size={12} aria-hidden="true" />{timeSpec ? `${timeSpec.asOfLabel}（${result.resolvedTimeSpec?.timezone}）` : '当前已发布数据快照 · 已通过受控校验'}</p>
   </section>
 }

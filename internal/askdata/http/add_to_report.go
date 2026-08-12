@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -31,12 +32,14 @@ type AddToReportInput struct {
 }
 
 type AddToReportResult struct {
-	IntentID    askdata.ID          `json:"intentId"`
-	ReportID    askdata.ID          `json:"reportId"`
-	RunID       askdata.ID          `json:"runId"`
-	Status      string              `json:"status"`
-	PreviewHash askdata.ContentHash `json:"previewHash,omitempty"`
-	Replayed    bool                `json:"replayed"`
+	IntentID        askdata.ID          `json:"intentId"`
+	ReportID        askdata.ID          `json:"reportId"`
+	RunID           askdata.ID          `json:"runId"`
+	Status          string              `json:"status"`
+	PreviewHash     askdata.ContentHash `json:"previewHash,omitempty"`
+	RejectionCode   string              `json:"rejectionCode,omitempty"`
+	RejectionDetail string              `json:"rejectionDetail,omitempty"`
+	Replayed        bool                `json:"replayed"`
 }
 
 // AddToReportBackend is intentionally separate from the Question Backend.
@@ -126,6 +129,7 @@ func (handler *Handler) addToReport(writer http.ResponseWriter, request *http.Re
 		)),
 	})
 	if err != nil {
+		slog.ErrorContext(request.Context(), "create add-to-report preview", "run_id", runID, "report_id", reportID, "error", err)
 		writeServiceError(writer, err)
 		return
 	}
@@ -160,6 +164,7 @@ func (handler *Handler) confirmAddToReport(writer http.ResponseWriter, request *
 	}
 	result, err := backend.ConfirmAddToReport(request.Context(), identity, intentID, body.PreviewHash)
 	if err != nil {
+		slog.ErrorContext(request.Context(), "confirm add-to-report preview", "intent_id", intentID, "error", err)
 		writeServiceError(writer, err)
 		return
 	}
@@ -240,5 +245,6 @@ func parsePublicOutcome(payload json.RawMessage) *validator.Outcome {
 
 func validAddToReportResult(result AddToReportResult, runID, reportID askdata.ID) bool {
 	return canonicalUUID(result.IntentID) && result.RunID == runID && result.ReportID == reportID &&
-		(result.Status == "PENDING_CONFIRMATION" || result.Status == "PENDING" || result.Status == "APPLIED")
+		(result.Status == "PENDING_CONFIRMATION" || result.Status == "PENDING" || result.Status == "APPLIED" ||
+			result.Status == "REJECTED" || result.Status == "EXPIRED")
 }

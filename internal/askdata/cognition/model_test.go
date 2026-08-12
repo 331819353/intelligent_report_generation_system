@@ -51,7 +51,14 @@ func TestCognitionCallToolRoundTripAndSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.ReadFile(schema) error = %v", err)
 	}
-	if _, err := ai.ValidateStructuredOutput(ai.JSONSchema{Name: "cognition_action_v1", Schema: schemaRaw}, raw); err != nil {
+	stageSchema, err := cognition.SchemaForStage(
+		ai.JSONSchema{Name: "cognition_action_v1", Schema: schemaRaw},
+		cognition.StageCandidateJudgment,
+	)
+	if err != nil {
+		t.Fatalf("build stage schema: %v", err)
+	}
+	if _, err := ai.ValidateStructuredOutput(stageSchema, raw); err != nil {
 		t.Fatalf("schema validation error = %v", err)
 	}
 }
@@ -76,6 +83,48 @@ func TestCognitionActionRejectsStageMismatchAndMultiplePayloads(t *testing.T) {
 	action.Block = &cognition.BlockDecision{Code: "DATA_UNAVAILABLE", PublicMessage: "数据暂不可用。", EvidenceRefs: []askdata.EvidenceRef{evidence}}
 	if err := action.Validate(); err == nil || !strings.Contains(err.Error(), "exactly one") {
 		t.Fatalf("Validate() error = %v, want multiple payload rejection", err)
+	}
+}
+
+func TestCognitionUnderstandingProposalMatchesSchemaAndGoContract(t *testing.T) {
+	evidence := testEvidence()
+	action := cognition.Action{
+		SchemaVersion: cognition.SchemaVersion, Stage: cognition.StageUnderstanding,
+		Action:          cognition.ActionProposeUnderstanding,
+		DecisionSummary: "问题要求查询已治理的销售额指标。",
+		EvidenceRefs:    []askdata.EvidenceRef{evidence},
+		Understanding: &cognition.UnderstandingProposal{
+			IntentSummary: "查询销售额汇总值", UnresolvedSpans: []string{},
+		},
+	}
+	raw, err := json.Marshal(action)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if _, err := cognition.Decode(raw); err != nil {
+		t.Fatalf("cognition.Decode() error = %v", err)
+	}
+	stageSchema, err := cognition.SchemaForStage(cognition.ActionSchema(), cognition.StageUnderstanding)
+	if err != nil {
+		t.Fatalf("SchemaForStage() error = %v", err)
+	}
+	if _, err := ai.ValidateStructuredOutput(stageSchema, raw); err != nil {
+		t.Fatalf("stage schema validation error = %v", err)
+	}
+	var invalid map[string]any
+	if err := json.Unmarshal(raw, &invalid); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	invalid["block"] = map[string]any{
+		"code": "UNEXPECTED_SECOND_PAYLOAD", "publicMessage": "不应同时返回两个动作。",
+		"evidenceRefs": []askdata.EvidenceRef{evidence},
+	}
+	multiple, err := json.Marshal(invalid)
+	if err != nil {
+		t.Fatalf("json.Marshal(multiple) error = %v", err)
+	}
+	if _, err := ai.ValidateStructuredOutput(stageSchema, multiple); err == nil {
+		t.Fatal("stage schema accepted multiple action payloads")
 	}
 }
 

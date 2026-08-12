@@ -51,6 +51,16 @@ func ValidateInteractions(definition report.ReportDefinition, registry *template
 			if !bindingsCompatible(source.DataBinding, target.DataBinding) && len(interaction.FieldMappings) != 0 {
 				issues = append(issues, ValidationIssue{Code: "REPORT_INTERACTION_FIELD_INCOMPATIBLE", Path: path + ".fieldMappings", Message: "cross-context field mappings require compatible bindings"})
 			}
+			// A pinned semantic query executes against a fixed plan hash and cannot
+			// be narrowed at runtime. An interaction that would have to narrow one is
+			// rejected here rather than silently doing nothing when a viewer clicks.
+			if narrowsTarget(interaction.Action) && target.DataBinding != nil &&
+				target.DataBinding.BindingMode == report.BindingSemanticIR {
+				issues = append(issues, ValidationIssue{
+					Code: "REPORT_INTERACTION_TARGET_PINNED", Path: path + ".targetComponentIds",
+					Message: fmt.Sprintf("component %q is bound to a pinned semantic query and cannot be filtered by an interaction", target.ID),
+				})
+			}
 		}
 	}
 	if hasInteractionCycle(graph) {
@@ -85,6 +95,12 @@ func requiredActionKind(action report.InteractionAction) template.InteractionKin
 	default:
 		return ""
 	}
+}
+
+// narrowsTarget reports whether an action changes the target's query rather
+// than only its presentation.
+func narrowsTarget(action report.InteractionAction) bool {
+	return action == report.InteractionFilter || action == report.InteractionDrillDown
 }
 
 func supportsInteraction(manifest template.Manifest, required template.InteractionKind) bool {

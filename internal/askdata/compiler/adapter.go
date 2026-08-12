@@ -58,9 +58,13 @@ type PhysicalSource struct {
 }
 
 type QueryPlan struct {
-	Role             QueryRole           `json:"role"`
-	Document         dataset.Document    `json:"document"`
-	Source           PhysicalSource      `json:"source"`
+	Role     QueryRole        `json:"role"`
+	Document dataset.Document `json:"document"`
+	Source   PhysicalSource   `json:"source"`
+	// JoinedSources lists the physical tables reached through the resolved join
+	// path. Omitted for single-model plans, which keeps their canonical form —
+	// and every plan hash compiled before joins existed — byte-identical.
+	JoinedSources    []PhysicalSource    `json:"joinedSources,omitempty"`
 	ParameterShapes  []ParameterShape    `json:"parameterShapes"`
 	DSLHash          askdata.ContentHash `json:"dslHash"`
 	LogicalPlanHash  askdata.ContentHash `json:"logicalPlanHash"`
@@ -139,15 +143,25 @@ func compileResolvedArtifact(
 	if err != nil {
 		return QueryArtifact{}, err
 	}
-	if len(resolution.Relationships) != 0 ||
-		(resolution.GraphPath != nil && len(resolution.GraphPath.Steps) != 0) {
-		return QueryArtifact{}, fmt.Errorf("%w: Semantic IR v1 has one model and cannot adapt a join path", ErrUnsupportedQuery)
+	// A resolved join path is compiled through the Query DSL's own join support
+	// (buildDatasetJoins). Relationships without loaded contracts for the models
+	// they reach are still refused there, and fanout-bearing edges are refused
+	// by assertNonFanoutJoin rather than compiled into an inflated aggregate.
+	if len(resolution.Relationships) != 0 && len(resolution.JoinedModels) == 0 {
+		return QueryArtifact{}, fmt.Errorf(
+			"%w: join path resolved without the joined model contracts", ErrUnsupportedQuery,
+		)
 	}
 
 	document, source, parameterValues, shapes, err := buildQueryDocument(queryIR, resolution)
 	if err != nil {
 		return QueryArtifact{}, err
 	}
+	placement, err := placeJoinedModels(resolution)
+	if err != nil {
+		return QueryArtifact{}, err
+	}
+	joinedSources := placement.sources
 	metricPlans, err := planMetrics(resolution.Metrics, queryIR)
 	if err != nil {
 		return QueryArtifact{}, err
@@ -176,7 +190,7 @@ func compileResolvedArtifact(
 		}
 	}
 
-	current, err := compileQueryPlan(QueryRoleCurrent, document, source, shapes, parameterValues, ir.MaxResultRows)
+	current, err := compileQueryPlan(QueryRoleCurrent, document, source, joinedSources, shapes, parameterValues, ir.MaxResultRows)
 	if err != nil {
 		return QueryArtifact{}, err
 	}
@@ -186,7 +200,7 @@ func compileResolvedArtifact(
 		if err != nil {
 			return QueryArtifact{}, err
 		}
-		baseline, err := compileQueryPlan(QueryRoleBaseline, document, source, shapes, baselineValues, ir.MaxResultRows)
+		baseline, err := compileQueryPlan(QueryRoleBaseline, document, source, joinedSources, shapes, baselineValues, ir.MaxResultRows)
 		if err != nil {
 			return QueryArtifact{}, err
 		}
@@ -306,10 +320,27 @@ func buildQueryDocument(
 	sort.Slice(columns, func(i, j int) bool { return columns[i].Code < columns[j].Code })
 	sort.Strings(projection)
 	source := PhysicalSource{
-		NodeID: "semantic_model", DatasetVersionID: resolution.Model.Materialization.DatasetVersionID,
+		NodeID: anchorNodeID, DatasetVersionID: resolution.Model.Materialization.DatasetVersionID,
 		MaterializationID: resolution.Model.Materialization.MaterializationID,
 		PublishedSchema:   resolution.Model.Materialization.PublishedSchema,
 		PublishedName:     resolution.Model.Materialization.PublishedName, Columns: columns,
+	}
+	// Measure fields stay anchor-only. A metric is defined on the model the IR
+	// names, so letting metric compilation see a joined model's fields would let
+	// an aggregate silently move across a join and change its grain. The copy is
+	// taken before placement, which adds the joined models' fields to fieldsByID
+	// for dimension resolution.
+	anchorFieldsByID := make(map[askdata.ID]FieldContract, len(fieldsByID))
+	for id, field := range fieldsByID {
+		anchorFieldsByID[id] = field
+	}
+	placement, err := placeJoinedModels(resolution)
+	if err != nil {
+		return dataset.Document{}, PhysicalSource{}, nil, nil, err
+	}
+	joinedSources, nodeByFieldID, joinedProjection := placement.sources, placement.nodeByFieldID, placement.projections
+	for id, field := range placement.fields {
+		fieldsByID[id] = field
 	}
 
 	dimensionsByID := make(map[askdata.ID]DimensionContract, len(resolution.Dimensions))
@@ -362,7 +393,7 @@ func buildQueryDocument(
 		if !exists {
 			return dataset.Document{}, PhysicalSource{}, nil, nil, fmt.Errorf("%w: group field contract is missing", ErrInvalidAdaptRequest)
 		}
-		expression := fieldReference(field)
+		expression := fieldReferenceOn(field, nodeByFieldID[field.FieldID])
 		if group.Grain != nil {
 			truncationArgument := expression
 			truncated := dataset.Expression{Type: "DATE_TRUNC", Unit: string(*group.Grain), Argument: &truncationArgument}
@@ -401,10 +432,10 @@ func buildQueryDocument(
 		var expression dataset.Expression
 		var canonicalType string
 		if timeReduction == nil {
-			expression, canonicalType, err = compileMetricExpression(metric, fieldsByID)
+			expression, canonicalType, err = compileMetricExpression(metric, anchorFieldsByID)
 		} else {
 			var inner []dataset.PreAggregationMetric
-			expression, canonicalType, inner, err = compileMetricExpressionPreAggregated(metric, fieldsByID, timeReductionField)
+			expression, canonicalType, inner, err = compileMetricExpressionPreAggregated(metric, anchorFieldsByID, timeReductionField)
 			timeReduction.Metrics = append(timeReduction.Metrics, inner...)
 		}
 		if err != nil {
@@ -417,6 +448,20 @@ func buildQueryDocument(
 			Nullable: metric.NullPolicy != "ZERO", Visible: &visible,
 		})
 		fieldIDByMetric[selected.MetricVersionID] = fieldID
+	}
+	// The result projection is flat, so two selected columns sharing a code are
+	// ambiguous no matter which models they came from. Join keys legitimately
+	// repeat a code across models, which is why this is checked on the selected
+	// output rather than on every field the joined models expose.
+	outputCodes := make(map[string]struct{}, len(outputFields))
+	for _, field := range outputFields {
+		if _, duplicate := outputCodes[field.Code]; duplicate {
+			return dataset.Document{}, PhysicalSource{}, nil, nil, fmt.Errorf(
+				"%w: result column %q is ambiguous across joined models",
+				ErrInvalidQueryPlan, field.Code,
+			)
+		}
+		outputCodes[field.Code] = struct{}{}
 	}
 
 	filters := make([]dataset.Filter, 0, len(semanticIR.Filters)+2)
@@ -432,7 +477,7 @@ func buildQueryDocument(
 		if !exists {
 			return dataset.Document{}, PhysicalSource{}, nil, nil, fmt.Errorf("%w: filter field contract is missing", ErrInvalidAdaptRequest)
 		}
-		left := fieldReference(field)
+		left := fieldReferenceOn(field, nodeByFieldID[field.FieldID])
 		filterID := stableDatasetIdentifier("member_filter", askdata.ID(fmt.Sprintf("%s:%s:%d", filter.DimensionVersionID, filter.Operator, index)))
 		if filter.Operator == ir.FilterIsNull || filter.Operator == ir.FilterIsNotNull {
 			argument := left
@@ -496,7 +541,7 @@ func buildQueryDocument(
 			parameters = append(parameters, parameter)
 			shapes = append(shapes, parameterShape(parameter, 1))
 			parameterValues[boundary.code] = boundary.value
-			left := fieldReference(field)
+			left := fieldReferenceOn(field, nodeByFieldID[field.FieldID])
 			right := dataset.Expression{Type: "PARAM_REF", Code: boundary.code}
 			filters = append(filters, dataset.Filter{
 				ID: stableDatasetIdentifier("time_filter", askdata.ID(boundary.code)), Stage: "PRE_AGGREGATION",
@@ -546,6 +591,10 @@ func buildQueryDocument(
 		ID: source.NodeID, Type: "DATASET", DatasetVersionID: string(source.DatasetVersionID),
 		Alias: source.NodeID, Projection: projection, SourceFilters: []dataset.SourceFilter{},
 	}
+	joins, err := buildDatasetJoins(resolution)
+	if err != nil {
+		return dataset.Document{}, PhysicalSource{}, nil, nil, err
+	}
 	preAggregations := []dataset.PreAggregation{}
 	if timeReduction != nil {
 		for _, filter := range filters {
@@ -555,14 +604,24 @@ func buildQueryDocument(
 		filters = []dataset.Filter{}
 		preAggregations = append(preAggregations, *timeReduction)
 	}
+	// Built after the time-reduction block, which appends source filters to the
+	// anchor node. Copying the node before that would silently drop them.
+	nodes := []dataset.Node{node}
+	for _, joined := range joinedSources {
+		nodes = append(nodes, dataset.Node{
+			ID: joined.NodeID, Type: "DATASET", DatasetVersionID: string(joined.DatasetVersionID),
+			Alias: joined.NodeID, Projection: joinedProjection[joined.NodeID],
+			SourceFilters: []dataset.SourceFilter{},
+		})
+	}
 	document := dataset.Document{
 		DSLVersion: dataset.DSLVersion,
 		Dataset: dataset.Descriptor{
 			Code: "askdata_query_" + string(semanticIRHash[:16]),
 			Name: "AskData governed query", Type: "SINGLE_SOURCE",
 		},
-		Nodes: []dataset.Node{node},
-		Joins: []dataset.Join{}, Transforms: []dataset.Transform{}, PreAggregations: preAggregations,
+		Nodes: nodes,
+		Joins: joins, Transforms: []dataset.Transform{}, PreAggregations: preAggregations,
 		Fields: outputFields, Filters: filters, GroupBy: groupBy, Having: []dataset.Filter{}, Sorts: sorts,
 		Parameters: parameters,
 		OutputGrain: dataset.OutputGrain{
@@ -575,7 +634,7 @@ func buildQueryDocument(
 		},
 	}
 	if err := dataset.Validate(document); err != nil {
-		return dataset.Document{}, PhysicalSource{}, nil, nil, fmt.Errorf("%w: generated Dataset DSL: %v", ErrInvalidQueryPlan, err)
+		return dataset.Document{}, PhysicalSource{}, nil, nil, fmt.Errorf("%w: generated Dataset DSL: %w", ErrInvalidQueryPlan, err)
 	}
 	return document, source, parameterValues, shapes, nil
 }
@@ -584,6 +643,7 @@ func compileQueryPlan(
 	role QueryRole,
 	document dataset.Document,
 	source PhysicalSource,
+	joinedSources []PhysicalSource,
 	shapes []ParameterShape,
 	parameterValues map[string]any,
 	maxRows int,
@@ -598,7 +658,7 @@ func compileQueryPlan(
 	}
 	compiled, err := querycompiler.Compile(querycompiler.Input{
 		Document: prepared.Document, Dialect: querycompiler.PostgreSQL,
-		Tables:     map[string]querycompiler.TableRef{source.NodeID: source.tableRef()},
+		Tables:     tableRefsFor(source, joinedSources),
 		Parameters: cloneParameterValues(parameterValues),
 		Scope:      policy.UserScope{}, MaxRows: maxRows, LimitKind: querycompiler.LimitResult,
 	})
@@ -607,6 +667,7 @@ func compileQueryPlan(
 	}
 	plan := QueryPlan{
 		Role: role, Document: prepared.Document, Source: source,
+		JoinedSources:   append([]PhysicalSource(nil), joinedSources...),
 		ParameterShapes: append([]ParameterShape(nil), shapes...),
 		DSLHash:         askdata.ContentHash(prepared.DSLHash), LogicalPlanHash: askdata.ContentHash(prepared.PlanHash),
 		CompiledPlanHash: askdata.ContentHash(compiled.PlanHash), compiled: &compiled,
@@ -719,7 +780,7 @@ func (plan QueryPlan) validate() error {
 	}
 	compiled, err := querycompiler.Compile(querycompiler.Input{
 		Document: prepared.Document, Dialect: querycompiler.PostgreSQL,
-		Tables:     map[string]querycompiler.TableRef{plan.Source.NodeID: plan.Source.tableRef()},
+		Tables:     tableRefsFor(plan.Source, plan.JoinedSources),
 		Parameters: dummy, Scope: policy.UserScope{},
 		MaxRows: prepared.Document.ExecutionPolicy.ResultLimit, LimitKind: querycompiler.LimitResult,
 	})
@@ -939,8 +1000,207 @@ func timeBoundaryValues(value ir.TimeRange, canonicalType string) (string, strin
 	}
 }
 
+// anchorNodeID is the Query DSL node for the model the Semantic IR names. It is
+// a literal rather than a derived identifier because every plan hash compiled
+// before joins existed used this exact string.
+const anchorNodeID = "semantic_model"
+
 func fieldReference(field FieldContract) dataset.Expression {
-	return dataset.Expression{Type: "FIELD_REF", NodeID: "semantic_model", Field: field.Code}
+	return fieldReferenceOn(field, anchorNodeID)
+}
+
+func fieldReferenceOn(field FieldContract, nodeID string) dataset.Expression {
+	if nodeID == "" {
+		nodeID = anchorNodeID
+	}
+	return dataset.Expression{Type: "FIELD_REF", NodeID: nodeID, Field: field.Code}
+}
+
+// placeJoinedModels registers every joined model's fields alongside the
+// anchor's and records which DSL node each one belongs to.
+//
+// Field codes must stay globally unique across the joined set: the Query DSL
+// addresses columns by code within a node, but the output projection is flat, so
+// two models exposing the same code would produce an ambiguous result column.
+// Rejecting that is a fail-closed choice — silently preferring one side would
+// mean a question answered from a column the asker did not name.
+type joinPlacement struct {
+	sources       []PhysicalSource
+	fields        map[askdata.ID]FieldContract
+	nodeByFieldID map[askdata.ID]string
+	projections   map[string][]string
+}
+
+func placeJoinedModels(resolution Resolution) (joinPlacement, error) {
+	placement := joinPlacement{
+		fields:        map[askdata.ID]FieldContract{},
+		nodeByFieldID: map[askdata.ID]string{},
+		projections:   map[string][]string{},
+	}
+	if len(resolution.JoinedModels) == 0 {
+		return placement, nil
+	}
+	for _, model := range resolution.JoinedModels {
+		nodeID := joinedNodeID(model.ModelVersionID)
+		columns := make([]PhysicalColumn, 0, len(model.Fields))
+		projection := make([]string, 0, len(model.Fields))
+		modelCodes := make(map[string]struct{}, len(model.Fields))
+		for _, field := range model.Fields {
+			if _, duplicate := modelCodes[field.Code]; duplicate {
+				return joinPlacement{}, fmt.Errorf(
+					"%w: duplicate model field code", ErrInvalidQueryPlan,
+				)
+			}
+			modelCodes[field.Code] = struct{}{}
+			placement.fields[field.FieldID] = field
+			placement.nodeByFieldID[field.FieldID] = nodeID
+			columns = append(columns, PhysicalColumn{Code: field.Code, CanonicalType: field.CanonicalType})
+			projection = append(projection, field.Code)
+		}
+		sort.Slice(columns, func(i, j int) bool { return columns[i].Code < columns[j].Code })
+		sort.Strings(projection)
+		placement.projections[nodeID] = projection
+		placement.sources = append(placement.sources, PhysicalSource{
+			NodeID: nodeID, DatasetVersionID: model.Materialization.DatasetVersionID,
+			MaterializationID: model.Materialization.MaterializationID,
+			PublishedSchema:   model.Materialization.PublishedSchema,
+			PublishedName:     model.Materialization.PublishedName, Columns: columns,
+		})
+	}
+	sort.Slice(placement.sources, func(i, j int) bool {
+		return placement.sources[i].NodeID < placement.sources[j].NodeID
+	})
+	return placement, nil
+}
+
+// tableRefsFor builds the node -> physical table map the query compiler needs.
+func tableRefsFor(source PhysicalSource, joined []PhysicalSource) map[string]querycompiler.TableRef {
+	tables := map[string]querycompiler.TableRef{source.NodeID: source.tableRef()}
+	for _, value := range joined {
+		tables[value.NodeID] = value.tableRef()
+	}
+	return tables
+}
+
+func joinedNodeID(modelVersionID askdata.ID) string {
+	return stableDatasetIdentifier("semantic_join", modelVersionID)
+}
+
+// buildDatasetJoins turns the resolved relationship path into Query DSL joins.
+//
+// The Query DSL already compiles joins, including fanout policy and bridge
+// contracts, so this maps governed contracts onto that vocabulary rather than
+// generating SQL. compiler.CompileJoin generates join SQL at the string layer
+// and is deliberately not used here: emitting the typed document keeps one
+// compilation path, so row policies, parameter binding and plan hashing all
+// continue to apply to a joined query exactly as they do to a single-model one.
+func buildDatasetJoins(resolution Resolution) ([]dataset.Join, error) {
+	steps := 0
+	if resolution.GraphPath != nil {
+		steps = len(resolution.GraphPath.Steps)
+	}
+	if len(resolution.Relationships) == 0 && steps == 0 {
+		return []dataset.Join{}, nil
+	}
+	// The two must agree. A path with no relationship contracts would otherwise
+	// compile to a join-free query that silently answers a cross-model question
+	// from the anchor table alone — a plausible-looking wrong number.
+	if len(resolution.Relationships) == 0 || steps == 0 {
+		return nil, fmt.Errorf(
+			"%w: join path and relationship contracts disagree", ErrUnsupportedQuery,
+		)
+	}
+	relationshipsByID := make(map[askdata.ID]RelationshipContract, len(resolution.Relationships))
+	for _, relationship := range resolution.Relationships {
+		relationshipsByID[relationship.RelationshipVersionID] = relationship
+	}
+	joins := make([]dataset.Join, 0, len(resolution.GraphPath.Steps))
+	for index, step := range resolution.GraphPath.Steps {
+		relationship, exists := relationshipsByID[step.RelationshipVersionID]
+		if !exists {
+			return nil, fmt.Errorf("%w: join step has no relationship contract", ErrInvalidQueryPlan)
+		}
+		var joinAST relationshipJoinAST
+		if err := json.Unmarshal(relationship.JoinAST, &joinAST); err != nil {
+			return nil, fmt.Errorf("%w: relationship join AST is unreadable", ErrInvalidQueryPlan)
+		}
+		leftField, leftOK := fieldByID(resolution.Model.Fields, askdata.ID(joinAST.LeftFieldID))
+		rightModel, rightOK := joinedModelByVersion(resolution, step.ToModelVersionID)
+		if !leftOK || !rightOK {
+			return nil, fmt.Errorf("%w: join step references an unresolved model field", ErrInvalidQueryPlan)
+		}
+		rightField, fieldOK := fieldByID(rightModel.Fields, askdata.ID(joinAST.RightFieldID))
+		if !fieldOK {
+			return nil, fmt.Errorf("%w: join step references an unresolved model field", ErrInvalidQueryPlan)
+		}
+		if err := assertNonFanoutJoin(relationship); err != nil {
+			return nil, err
+		}
+		rightNodeID := joinedNodeID(rightModel.ModelVersionID)
+		joins = append(joins, dataset.Join{
+			ID:          stableDatasetIdentifier("semantic_edge", step.RelationshipVersionID),
+			LeftNodeID:  anchorNodeID,
+			RightNodeID: rightNodeID,
+			// LEFT preserves anchor rows: a fact without a matching dimension row
+			// must still be counted, or the join would silently filter the result.
+			// The DSL derives cardinality from join type and validates the pair,
+			// so MANY_TO_ONE here is the shape assertNonFanoutJoin just proved.
+			JoinType:    "LEFT",
+			Cardinality: joinCardinalityForLeftJoin,
+			// FanoutPolicy is deliberately left unset: the DSL derives fanout from
+			// the join type and rejects a document that also declares it. The
+			// governed policy is not discarded — assertNonFanoutJoin has already
+			// refused every value that would need one.
+			Conditions: []dataset.JoinCondition{{
+				LeftExpression:  fieldReferenceOn(leftField, anchorNodeID),
+				RightExpression: fieldReferenceOn(rightField, rightNodeID),
+				Operator:        "EQUALS",
+			}},
+			ManualConfirmed: true,
+		})
+		_ = index
+	}
+	return joins, nil
+}
+
+// joinCardinalityForLeftJoin mirrors dataset.joinCardinalityForType("LEFT").
+// The DSL validates that the declared cardinality matches the join type, so
+// this is a constraint to satisfy rather than a value to choose.
+const joinCardinalityForLeftJoin = "MANY_TO_ONE"
+
+// assertNonFanoutJoin refuses any relationship whose governed contract says the
+// join can multiply anchor rows.
+//
+// A fanout-bearing edge needs pre-aggregation of the right side or a bridge
+// dedup before it is safe to aggregate across, and compiling it as a plain LEFT
+// join would inflate every measure without any visible error. Refusing is the
+// only honest option until the pre-aggregation path is built: a wrong number
+// presented confidently is the worst outcome this compiler can produce.
+func assertNonFanoutJoin(relationship RelationshipContract) error {
+	switch relationship.Cardinality {
+	case registry.CardinalityOneToOne, registry.CardinalityManyToOne:
+	default:
+		return fmt.Errorf(
+			"%w: %s join needs pre-aggregation before it can be compiled",
+			ErrUnsupportedQuery, relationship.Cardinality,
+		)
+	}
+	if relationship.FanoutPolicy != registry.FanoutSafe {
+		return fmt.Errorf(
+			"%w: fanout policy %s is not compilable as a direct join",
+			ErrUnsupportedQuery, relationship.FanoutPolicy,
+		)
+	}
+	return nil
+}
+
+func joinedModelByVersion(resolution Resolution, modelVersionID askdata.ID) (ModelContract, bool) {
+	for _, model := range resolution.JoinedModels {
+		if model.ModelVersionID == modelVersionID {
+			return model, true
+		}
+	}
+	return ModelContract{}, false
 }
 
 func stableDatasetIdentifier(prefix string, value askdata.ID) string {

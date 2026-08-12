@@ -7,10 +7,61 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { AppButton } from '../components/AppButton'
+import { administrationAPI, type ShareTarget } from '../lib/administration'
 import { reportAssetsAPI, type AssetEvent, type PermissionGrant } from '../report/api/assets'
+import { reportRuntimeAPI, type LoadedReport } from '../report/api/runtime'
 import { reportAssetFixtures } from '../report/assets/fixtures'
 import { canRun, filterAssets, lifecycleLabels, type ReportAction, type ReportAsset, type ReportLifecycle, type ReportScope } from '../report/assets/model'
-import { MiniReportPreview, ReportWorkspacePreview } from '../report/runtime/ReportCharts'
+import { ReportPageView } from '../report/render/ReportPageView'
+import { emptyManifestIndex, indexManifests, listComponentManifests, type ManifestIndex } from '../report/render/manifests'
+import { orderedPages } from '../report/render/schema'
+
+/**
+ * 资产缩略图只呈现资产自身的属性（类型与状态）。这里曾经按报告 ID 哈希出一套
+ * 虚构的收入/毛利曲线当作「预览」，那是把编造的数字冒充成报告内容；受治理
+ * 报告的任何数值都只能来自按查看者权限执行的真实查询。
+ */
+function AssetThumb({ asset }: { asset: ReportAsset }) {
+  return <span className={`report-library-thumb-tile is-${asset.reportType.toLocaleLowerCase()}`} aria-hidden="true">
+    {asset.reportType === 'DASHBOARD' ? <SquaresFour size={20} /> : <ListBullets size={20} />}
+  </span>
+}
+
+/**
+ * 详情抽屉里的预览渲染的是该报告已发布版本的真实结构：同一个 ReportPageView，
+ * 只是不执行查询（designMode），因此展示的是真实的章节、排版与组件配置。
+ */
+function AssetStructurePreview({ asset }: { asset: ReportAsset }) {
+  const [loaded, setLoaded] = useState<LoadedReport | null>(null)
+  const [manifests, setManifests] = useState<ManifestIndex>(emptyManifestIndex)
+  const [state, setState] = useState<'loading' | 'ready' | 'unavailable'>('loading')
+
+  useEffect(() => {
+    let cancelled = false
+    void Promise.all([
+      reportRuntimeAPI.load(asset.id),
+      listComponentManifests().catch(() => ({ items: [] })),
+    ])
+      .then(([runtime, manifestPage]) => {
+        if (cancelled) return
+        setLoaded(runtime); setManifests(indexManifests(manifestPage.items)); setState('ready')
+      })
+      .catch(() => { if (!cancelled) setState('unavailable') })
+    return () => { cancelled = true }
+  }, [asset.id])
+
+  if (state === 'loading') return <p className="report-drawer-feedback">正在读取已发布版本的报告结构…</p>
+  if (state === 'unavailable' || !loaded) {
+    return <p className="report-drawer-feedback">
+      {asset.currentVersionNo ? '发布制品暂不可读，请稍后重试。' : '该报告尚未发布，发布后可在此预览结构。'}
+    </p>
+  }
+  const page = orderedPages(loaded.definition)[0]
+  return <div className="report-drawer-structure-preview">
+    <p className="report-drawer-preview-note">已发布 v{loaded.versionNo} 的真实结构，数值需打开报告后按你的权限执行。</p>
+    {page && <ReportPageView definition={loaded.definition} page={page} manifests={manifests} designMode />}
+  </div>
+}
 
 const avatarFallbacks = ['/report-assets/avatars/wang-min.png', '/report-assets/avatars/liu-yang.png', '/report-assets/avatars/chen-chen.png']
 
@@ -30,7 +81,7 @@ function AssetListRow({ asset, selected, onSelect }: { asset: ReportAsset; selec
   return <article className={`report-library-row ${selected ? 'is-selected' : ''}`.trim()}>
     <AppButton text className="report-library-row-main" type="button" aria-pressed={selected} onClick={onSelect}>
       <span className="report-library-row-identity">
-        <span className="report-library-thumb"><MiniReportPreview kind={asset.previewKind} label={asset.name} /></span>
+        <AssetThumb asset={asset} />
         <span><strong>{asset.name}</strong><small>{asset.code}</small></span>
       </span>
       <span className="report-library-owner"><img src={avatarFor(asset)} alt="" />{asset.ownerName}</span>
@@ -45,7 +96,7 @@ function AssetListRow({ asset, selected, onSelect }: { asset: ReportAsset; selec
 
 function AssetGridCard({ asset, selected, onSelect }: { asset: ReportAsset; selected: boolean; onSelect: () => void }) {
   return <AppButton text className={`report-library-grid-card ${selected ? 'is-selected' : ''}`.trim()} type="button" aria-pressed={selected} onClick={onSelect}>
-    <MiniReportPreview kind={asset.previewKind} label={asset.name} />
+    <AssetThumb asset={asset} />
     <span className="report-library-grid-heading"><strong>{asset.name}</strong><span className={`report-lifecycle is-${asset.lifecycle.toLocaleLowerCase()}`}>{lifecycleLabels[asset.lifecycle]}</span></span>
     <small>{asset.code}</small>
     <span><img src={avatarFor(asset)} alt="" />{asset.ownerName}<time>{formatUpdatedAt(asset.updatedAt)}</time></span>
@@ -73,11 +124,13 @@ function PermissionDialog({ asset, snapshot, onClose, onChanged }: { asset: Repo
   const [subjectType, setSubjectType] = useState<'USER' | 'ROLE'>('USER')
   const [subjectId, setSubjectId] = useState('')
   const [subjectAction, setSubjectAction] = useState<PermissionGrant['action']>('VIEW')
+  const [targets, setTargets] = useState<ShareTarget[]>([])
 
   useEffect(() => {
     if (snapshot) return undefined
     let cancelled = false
-    void reportAssetsAPI.listPermissions(asset.id).then(result => { if (!cancelled) setGrants(result.items) })
+    void Promise.all([reportAssetsAPI.listPermissions(asset.id), administrationAPI.listShareTargets()])
+      .then(([result, directory]) => { if (!cancelled) { setGrants(result.items); setTargets(directory) } })
       .catch(cause => { if (!cancelled) setError(cause instanceof Error ? cause.message : '权限加载失败') })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
@@ -129,7 +182,7 @@ function PermissionDialog({ asset, snapshot, onClose, onChanged }: { asset: Repo
       }
       setSubjectId('')
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '新增授权失败，请确认用户或角色 ID')
+      setError(cause instanceof Error ? cause.message : '新增授权失败，请重新选择授权对象')
     } finally {
       setBusyKey('')
     }
@@ -140,8 +193,8 @@ function PermissionDialog({ asset, snapshot, onClose, onChanged }: { asset: Repo
       <header><div><span className="eyebrow">报告权限</span><h2 id="report-permission-title">{asset.name}</h2></div><AppButton text circle type="button" aria-label="关闭" onClick={onClose}><X size={18} /></AppButton></header>
       <p className="report-permission-note"><ShieldCheck size={16} weight="fill" />报告权限只控制对象操作，不能扩大任何人的数据权限。</p>
       {!snapshot && <div className="report-permission-add">
-        <select aria-label="授权主体类型" value={subjectType} onChange={event => setSubjectType(event.target.value as 'USER' | 'ROLE')}><option value="USER">用户</option><option value="ROLE">角色</option></select>
-        <input aria-label="用户或角色 ID" value={subjectId} onChange={event => setSubjectId(event.target.value)} placeholder="输入用户或角色 UUID" />
+        <select aria-label="授权主体类型" value={subjectType} onChange={event => { setSubjectType(event.target.value as 'USER' | 'ROLE'); setSubjectId('') }}><option value="USER">用户</option><option value="ROLE">角色</option></select>
+        <select aria-label="选择授权对象" value={subjectId} onChange={event => setSubjectId(event.target.value)}><option value="">请选择{subjectType === 'USER' ? '当前领域用户' : '角色'}</option>{targets.filter(item => item.type === subjectType).map(item => <option value={item.id} key={item.id}>{item.name} · {item.detail}</option>)}</select>
         <select aria-label="授权操作" value={subjectAction} onChange={event => setSubjectAction(event.target.value as PermissionGrant['action'])}>{permissionActions.map(([action, label]) => <option key={action} value={action}>{label}</option>)}</select>
         <AppButton plain size="small" type="button" disabled={!subjectId.trim() || busyKey === 'new'} onClick={() => void addGrant()}>添加授权</AppButton>
       </div>}
@@ -167,6 +220,15 @@ function ShareDialog({ asset, snapshot, onClose }: { asset: ReportAsset; snapsho
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [shareURL, setShareURL] = useState('')
+  const [targets, setTargets] = useState<ShareTarget[]>([])
+
+  useEffect(() => {
+    if (snapshot) return undefined
+    let cancelled = false
+    void administrationAPI.listShareTargets().then(items => { if (!cancelled) setTargets(items) })
+      .catch(cause => { if (!cancelled) setError(cause instanceof Error ? cause.message : '分享对象加载失败') })
+    return () => { cancelled = true }
+  }, [snapshot])
 
   const create = async () => {
     if (!principalId.trim()) return
@@ -175,7 +237,7 @@ function ShareDialog({ asset, snapshot, onClose }: { asset: ReportAsset; snapsho
       const token = snapshot
         ? 'snapshot-secure-share-token'
         : (await reportAssetsAPI.createShare(asset.id, { shareType, principalId: principalId.trim(), expiresAt: new Date(`${expiresOn}T23:59:59`).toISOString() })).token
-      setShareURL(`${window.location.origin}/api/v1/report-shares/${encodeURIComponent(token)}`)
+      setShareURL(`${window.location.origin}/report-shares/${encodeURIComponent(token)}`)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '分享创建失败')
     } finally {
@@ -188,8 +250,8 @@ function ShareDialog({ asset, snapshot, onClose }: { asset: ReportAsset; snapsho
       <header><div><span className="eyebrow">安全分享</span><h2 id="report-share-title">分享“{asset.name}”</h2></div><AppButton text circle type="button" aria-label="关闭" onClick={onClose}><X size={18} /></AppButton></header>
       <p className="report-permission-note"><ShieldCheck size={16} weight="fill" />链接仅定位报告，访问时仍会校验接收人的报告权限与数据权限。</p>
       {!shareURL && <div className="report-share-form">
-        <label>接收对象<select value={shareType} onChange={event => setShareType(event.target.value as typeof shareType)}><option value="INTERNAL_USER">内部用户</option><option value="INTERNAL_GROUP">内部用户组</option></select></label>
-        <label>用户或用户组 ID<input value={principalId} onChange={event => setPrincipalId(event.target.value)} placeholder="输入 UUID" /></label>
+        <label>接收对象<select value={shareType} onChange={event => { setShareType(event.target.value as typeof shareType); setPrincipalId('') }}><option value="INTERNAL_USER">内部用户</option><option value="INTERNAL_GROUP">内部用户组</option></select></label>
+        <label>选择接收人<select aria-label="选择接收人" value={principalId} onChange={event => setPrincipalId(event.target.value)}><option value="">请选择{shareType === 'INTERNAL_USER' ? '当前领域用户' : '内部用户组'}</option>{targets.filter(item => item.type === (shareType === 'INTERNAL_USER' ? 'USER' : 'ROLE')).map(item => <option value={item.id} key={item.id}>{item.name} · {item.detail}</option>)}</select></label>
         <label>有效期至<input type="date" value={expiresOn} onChange={event => setExpiresOn(event.target.value)} /></label>
       </div>}
       {error && <p className="report-permission-error"><WarningCircle size={15} />{error}</p>}
@@ -248,7 +310,6 @@ function ReportAssetDrawer({ asset, events, eventsLoading, onClose, onView, onEd
         {canRun(asset, 'VIEW') && <AppButton plain size="small" type="button" onClick={onView}><Eye size={16} />查看报告</AppButton>}
         {canRun(asset, 'PUBLISH') && <AppButton plain size="small" type="button" onClick={onPublish}><UploadSimple size={16} />{asset.currentVersionNo ? '发布新版本' : '发布报告'}</AppButton>}
         {canRun(asset, 'RESTORE') && <AppButton variant="primary" size="small" type="button" onClick={onRestore}><UploadSimple size={16} />重新上架</AppButton>}
-        <AppButton plain circle size="small" className="report-drawer-more" type="button" aria-label="更多操作"><DotsThreeVertical size={18} weight="bold" /></AppButton>
       </div>
     </header>
 
@@ -266,7 +327,7 @@ function ReportAssetDrawer({ asset, events, eventsLoading, onClose, onView, onEd
 
       <section className="report-drawer-section report-drawer-preview">
         <h3>预览</h3>
-        <ReportWorkspacePreview asset={asset} />
+        <AssetStructurePreview key={asset.id} asset={asset} />
       </section>
 
       <div className="report-drawer-lower-grid">

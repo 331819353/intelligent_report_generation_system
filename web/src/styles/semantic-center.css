@@ -1,0 +1,543 @@
+.semantic-center-shell > .main-stage {
+  height: calc(100vh - 72px);
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 20px 18px;
+  background: #f5f8fc;
+}
+
+.semantic-center-shell .topbar { height: 82px; flex: none; padding-inline: 0; }
+.semantic-center-shell .topbar .eyebrow { display: none; }
+.semantic-center-shell .topbar h1 { color: #1f2f46; font-size: 28px; font-weight: 760; }
+.semantic-center-shell .topbar-actions .app-button { min-height: 43px; padding-inline: 20px; border-radius: 8px; font-size: 14px; }
+
+.semantic-stage {
+  height: calc(100% - 82px);
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 82px 72px 82px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.semantic-intro { display: flex; align-items: center; justify-content: space-between; gap: 28px; }
+.semantic-intro > div:first-child { min-width: 0; }
+.semantic-intro > div:first-child > span,
+.semantic-content > header > div > span,
+.semantic-builder-section > header > span,
+.semantic-builder-dialog > header span,
+.semantic-approval-dialog > header span { color: #2471df; font-size: 12px; font-weight: 760; letter-spacing: .03em; }
+.semantic-intro h2 { margin: 5px 0 4px; color: #24344c; font-size: 24px; line-height: 1.18; }
+.semantic-intro p { margin: 0; color: #6f7f95; font-size: 13px; }
+.semantic-domain-readiness { min-width: 190px; display: grid; grid-template-columns: 1fr auto; align-items: end; column-gap: 12px; text-align: right; }
+.semantic-domain-readiness span { grid-column: 1; color: #52647d; font-size: 13px; font-weight: 680; }
+.semantic-domain-readiness strong { grid-column: 2; grid-row: 1 / 3; color: #1e3450; font-size: 32px; line-height: 1; }
+.semantic-domain-readiness small { grid-column: 1; color: #8c99aa; font-size: 14px; }
+
+.semantic-flow {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  margin: 0;
+  border: 1px solid #d8e2ee;
+  border-radius: 9px;
+  padding: 0;
+  overflow: hidden;
+  background: #fff;
+  list-style: none;
+}
+.semantic-flow li { position: relative; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 12px 24px; }
+.semantic-flow li + li { border-left: 1px solid #e7edf4; }
+.semantic-flow li > span { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border: 1px solid #d6dfeb; border-radius: 50%; color: #8b99aa; background: #fff; }
+.semantic-flow li > div { display: grid; gap: 3px; }
+.semantic-flow strong { color: #4a586d; font-size: 14px; }
+.semantic-flow small { color: #95a1b0; font-size: 14px; }
+.semantic-flow li.is-complete > span { border-color: #b7ead9; background: #e9f8f2; color: #0c9c6e; }
+.semantic-flow li.is-active { background: #f2f7ff; }
+.semantic-flow li.is-active::before { position: absolute; inset: 0 auto 0 0; width: 3px; background: #2a78ec; content: ""; }
+.semantic-flow li.is-active > span { border-color: #2a78ec; background: #2a78ec; color: #fff; }
+.semantic-flow li.is-active strong { color: #1763d2; }
+
+.semantic-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border: 1px solid #d8e2ee;
+  border-radius: 9px;
+  overflow: hidden;
+  background: #fff;
+}
+.semantic-summary article { min-width: 0; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 14px 20px; }
+.semantic-summary article + article { border-left: 1px solid #e7edf4; }
+.semantic-summary article > span { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 9px; }
+.semantic-summary .is-blue { background: #edf4ff; color: #2471df; }
+.semantic-summary .is-green { background: #eaf8f3; color: #119a70; }
+.semantic-summary .is-orange { background: #fff6e7; color: #dc8a15; }
+.semantic-summary .is-cyan { background: #eaf8fa; color: #1499a8; }
+.semantic-summary article > div { display: grid; gap: 2px; }
+.semantic-summary small { color: #718096; font-size: 12px; }
+.semantic-summary strong { color: #24344c; font-size: 24px; line-height: 1; }
+.semantic-summary em { overflow: hidden; color: #8b99ab; font-size: 14px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+
+.semantic-workbench { min-height: 0; display: grid; grid-template-columns: 224px minmax(0, 1fr); border: 1px solid #d8e2ee; border-radius: 9px; overflow: hidden; background: #fff; }
+.semantic-tabs { min-height: 0; display: grid; align-content: start; gap: 5px; padding: 15px 12px; border-right: 1px solid #e1e8f0; background: #f9fbfd; }
+.semantic-tabs button { min-height: 64px; display: grid; grid-template-columns: 27px minmax(0, 1fr) auto; align-items: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; padding: 9px 11px; background: transparent; color: #75849a; text-align: left; }
+.semantic-tabs button:hover { border-color: #dbe5f2; background: #fff; }
+.semantic-tabs button.is-active { border-color: #cbdcf5; background: #edf4ff; color: #246fdb; box-shadow: 0 4px 12px #2c68b80c; }
+.semantic-tabs button > span { min-width: 0; display: grid; gap: 3px; }
+.semantic-tabs strong { color: #38485f; font-size: 14px; }
+.semantic-tabs small { overflow: hidden; color: #8c9aab; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-tabs em { min-width: 24px; border-radius: 999px; padding: 3px 6px; background: #eef2f6; color: #7c899b; font-size: 12px; font-style: normal; font-weight: 760; text-align: center; }
+.semantic-tabs button.is-active strong { color: #1c63c8; }
+.semantic-tabs button.is-active em { background: #dbe9ff; color: #1763d2; }
+
+.semantic-content { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
+.semantic-content > header { min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid #e8edf3; padding: 12px 18px; }
+.semantic-content > header > div { min-width: 0; display: grid; gap: 2px; }
+.semantic-content > header h3 { margin: 0; color: #26364d; font-size: 18px; }
+.semantic-content > header p { margin: 0; color: #7b8a9d; font-size: 13px; }
+.semantic-content > header .app-button { min-height: 36px; }
+.semantic-toolbar { min-height: 58px; display: grid; grid-template-columns: minmax(300px, 1fr) 180px auto; align-items: center; gap: 12px; border-bottom: 1px solid #e8edf3; padding: 9px 18px; background: #fbfcfe; }
+.semantic-toolbar label { min-width: 0; height: 38px; display: flex; align-items: center; gap: 8px; border: 1px solid #cfd9e6; border-radius: 7px; padding: 0 11px; background: #fff; color: #8190a3; }
+.semantic-toolbar input { min-width: 0; flex: 1; border: 0; outline: 0; color: #34445b; font-size: 13px; }
+.semantic-toolbar > div { height: 38px; display: flex; align-items: center; gap: 6px; border: 1px solid #cfd9e6; border-radius: 7px; padding: 0 10px; background: #fff; color: #7a899c; }
+.semantic-toolbar select { flex: 1; border: 0; outline: 0; background: transparent; color: #3d4d63; font-size: 12px; }
+.semantic-toolbar > span { color: #8290a3; font-size: 12px; }
+
+.semantic-object-table { min-height: 0; overflow: auto; }
+.semantic-object-head { min-height: 42px; display: grid; grid-template-columns: minmax(360px, 1.5fr) minmax(190px, .75fr) 140px 150px 180px; align-items: center; gap: 16px; border-bottom: 1px solid #e6ecf3; padding: 0 18px; background: #f8fafc; color: #718096; font-size: 12px; font-weight: 720; }
+.semantic-object-table article { min-height: 88px; display: grid; grid-template-columns: minmax(360px, 1.5fr) minmax(190px, .75fr) 140px 150px 180px; align-items: center; gap: 16px; border-bottom: 1px solid #e8edf3; padding: 10px 18px; }
+.semantic-object-table article:hover { background: #fbfdff; }
+.semantic-object-name { min-width: 0; display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: start; gap: 11px; }
+.semantic-object-name > i { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid #cfe0f7; border-radius: 8px; background: #f0f6ff; color: #2471df; font-style: normal; }
+.semantic-object-name > span { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; }
+.semantic-object-name strong { overflow: hidden; color: #304159; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-object-name small { overflow: hidden; align-self: center; color: #8a98aa; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-object-name p { grid-column: 1 / -1; overflow: hidden; margin: 0; color: #718096; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-contract { display: grid; gap: 5px; }
+.semantic-contract em { justify-self: start; border-radius: 4px; padding: 3px 7px; background: #eff4fa; color: #55667d; font-size: 12px; font-style: normal; font-weight: 760; }
+.semantic-contract small,
+.semantic-object-table article > span:nth-child(3) small,
+  .semantic-object-table article > span:nth-child(4) small { color: #8492a5; font-size: 12px; }
+.semantic-object-table article > span:nth-child(3),
+.semantic-object-table article > span:nth-child(4) { display: grid; justify-items: start; gap: 6px; }
+.semantic-object-table article > span:nth-child(4) strong { color: #4a5a70; font-size: 12px; }
+.semantic-object-table article > span:last-child { display: flex; justify-content: flex-end; gap: 7px; }
+.semantic-row-button.app-button { min-height: 36px; border-color: #cfd9e6; padding-inline: 11px; background: #fff; color: #4f6076; font-size: 12px; }
+.semantic-row-button.is-primary.app-button { border-color: #a9c8f8; color: #1763d2; background: #f4f8ff; }
+
+.semantic-status { display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; padding: 4px 8px; font-size: 12px; font-weight: 760; }
+.semantic-status.is-certified,
+.semantic-status.is-active { background: #e7f7f0; color: #0b8d63; }
+.semantic-status.is-draft { background: #edf3ff; color: #2569d3; }
+.semantic-status.is-ready { background: #e9f5ff; color: #087fb3; }
+.semantic-status.is-validating,
+.semantic-status.is-projecting { background: #fff4e3; color: #c4760f; }
+.semantic-status.is-deprecated,
+.semantic-status.is-superseded { background: #eef1f4; color: #6e7b8b; }
+.semantic-status.is-blocked { background: #ffeded; color: #c73a3a; }
+
+.semantic-release-list { grid-row: 2 / 4; min-height: 0; overflow: auto; padding: 12px 16px 18px; background: #f9fbfd; }
+.semantic-release-list > article { display: grid; grid-template-columns: minmax(330px, .9fr) minmax(600px, 1.4fr) auto; align-items: center; gap: 20px; min-height: 118px; border: 1px solid #dce5ef; border-radius: 9px; padding: 16px; background: #fff; }
+.semantic-release-list > article + article { margin-top: 10px; }
+.semantic-release-list > article.is-active { border-color: #9ed8c6; box-shadow: inset 3px 0 #12a578; }
+.semantic-release-title { min-width: 0; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 11px; }
+.semantic-release-title > span { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 9px; background: #edf4ff; color: #2471df; }
+.semantic-release-title > div { min-width: 0; display: grid; gap: 5px; }
+.semantic-release-title strong { overflow: hidden; color: #2c3e56; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-release-title small { overflow: hidden; color: #7f8da0; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-release-list ol { display: grid; grid-template-columns: repeat(4, minmax(105px, 1fr)); margin: 0; padding: 0; list-style: none; }
+.semantic-release-list li { position: relative; min-width: 0; display: grid; grid-template-columns: 25px minmax(0, 1fr); align-items: center; gap: 7px; }
+.semantic-release-list li:not(:last-child)::after { position: absolute; top: 12px; right: 5px; width: 18px; height: 1px; background: #d6dfeb; content: ""; }
+.semantic-release-list li > span { width: 24px; height: 24px; display: grid; place-items: center; border: 1px solid #d3dce7; border-radius: 50%; color: #8290a3; font-size: 13px; }
+.semantic-release-list li.is-done > span { border-color: #9edcc7; background: #e7f7f0; color: #0c9569; }
+.semantic-release-list li > div { min-width: 0; display: grid; gap: 3px; }
+.semantic-release-list li strong { color: #495970; font-size: 13px; }
+.semantic-release-list li small { overflow: hidden; color: #8c99a9; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-release-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.semantic-release-actions .app-button { min-height: 36px; padding-inline: 12px; font-size: 12px; }
+
+/* 反馈工单 → 语义修复 → Release → 回归验证的持续质量运营闭环。 */
+.semantic-operations { grid-row: 2 / 4; min-width: 0; min-height: 0; overflow: auto; padding: 14px 16px 22px; background: #f7f9fc; }
+.semantic-ops-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+.semantic-ops-metrics article { min-width: 0; display: flex; align-items: center; gap: 11px; border: 1px solid #dce5ef; border-radius: 9px; padding: 11px 14px; background: #fff; color: #2471df; }
+.semantic-ops-metrics article > span { display: grid; gap: 2px; }
+.semantic-ops-metrics small { color: #7c8a9d; font-size: 12px; }
+.semantic-ops-metrics strong { color: #2d3f58; font-size: 20px; line-height: 1; }
+.semantic-ops-grid { min-height: 520px; display: grid; grid-template-columns: minmax(330px, .72fr) minmax(620px, 1.28fr); border: 1px solid #d8e2ed; border-radius: 10px; overflow: hidden; background: #fff; }
+.semantic-ticket-queue { min-width: 0; border-right: 1px solid #e0e7ef; background: #fbfcfe; }
+.semantic-ticket-queue > header,
+.semantic-candidate-center > header { min-height: 68px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border-bottom: 1px solid #e6ecf3; padding: 11px 14px; }
+.semantic-ticket-queue > header > div:first-child,
+.semantic-candidate-center > header > div { display: grid; gap: 2px; }
+.semantic-ticket-queue > header > div:first-child > span,
+.semantic-candidate-center > header > div > span { color: #2471df; font-size: 11px; font-weight: 760; }
+.semantic-ticket-queue h3,
+.semantic-candidate-center h3 { margin: 0; color: #304159; font-size: 16px; }
+.semantic-ticket-queue > header > div:last-child { display: flex; align-items: center; gap: 5px; border: 1px solid #d4dee9; border-radius: 7px; padding-left: 8px; background: #fff; color: #8391a3; }
+.semantic-ticket-queue select { height: 34px; border: 0; outline: 0; background: transparent; color: #46576e; font-size: 12px; }
+.semantic-ticket-queue .app-button.is-circle { width: 34px; height: 34px; min-height: 34px; }
+.semantic-ticket-list { max-height: 580px; overflow: auto; }
+.semantic-ticket-list > button { width: 100%; min-height: 70px; display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 10px; border: 0; border-bottom: 1px solid #e8edf3; padding: 10px 13px; background: transparent; text-align: left; }
+.semantic-ticket-list > button:hover { background: #f5f8fc; }
+.semantic-ticket-list > button.is-selected { background: #edf4ff; box-shadow: inset 3px 0 #2471df; }
+.semantic-ticket-list > button > span { width: 34px; height: 30px; display: grid; place-items: center; border-radius: 6px; background: #edf3f9; color: #52657d; font-size: 11px; font-weight: 780; }
+.semantic-ticket-list > button > span.is-p0 { background: #ffeded; color: #bf3d3d; }
+.semantic-ticket-list > button > span.is-p1 { background: #fff4df; color: #bd7315; }
+.semantic-ticket-list > button > div { min-width: 0; display: grid; gap: 4px; }
+.semantic-ticket-list strong { overflow: hidden; color: #3b4d65; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-ticket-list small { overflow: hidden; color: #8190a3; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-ticket-list em,
+.semantic-ticket-detail > header > em,
+.semantic-candidate-list em { border-radius: 4px; padding: 4px 7px; background: #edf3fb; color: #4770a5; font-size: 11px; font-style: normal; font-weight: 730; white-space: nowrap; }
+.semantic-ticket-list em.is-closed,
+.semantic-ticket-list em.is-rejected,
+.semantic-ticket-detail > header > em.is-closed,
+.semantic-ticket-detail > header > em.is-rejected { background: #eef1f4; color: #758294; }
+.semantic-ticket-detail { min-width: 0; padding: 16px 18px 20px; }
+.semantic-ticket-detail > header { display: flex; align-items: start; justify-content: space-between; gap: 16px; padding-bottom: 12px; }
+.semantic-ticket-detail > header > div { min-width: 0; display: grid; gap: 3px; }
+.semantic-ticket-detail > header span { color: #2471df; font-size: 11px; font-weight: 760; }
+.semantic-ticket-detail > header h3 { margin: 0; color: #2d3f58; font-size: 18px; }
+.semantic-ticket-detail > header p { margin: 0; color: #7c8a9d; font-size: 12px; }
+.semantic-ticket-lifecycle { display: grid; grid-template-columns: repeat(8, minmax(68px, 1fr)); margin: 0 0 12px; padding: 0; list-style: none; }
+.semantic-ticket-lifecycle li { position: relative; min-width: 0; display: grid; justify-items: center; gap: 5px; color: #8c99aa; }
+.semantic-ticket-lifecycle li:not(:last-child)::after { position: absolute; top: 13px; right: -50%; width: 100%; height: 1px; background: #dce4ed; content: ''; }
+.semantic-ticket-lifecycle li > span { z-index: 1; width: 27px; height: 27px; display: grid; place-items: center; border: 1px solid #d2dce7; border-radius: 50%; background: #fff; font-size: 11px; }
+.semantic-ticket-lifecycle small { overflow: hidden; width: 100%; font-size: 10px; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-ticket-lifecycle li.is-done > span { border-color: #a9dccb; background: #e8f7f1; color: #0b9368; }
+.semantic-ticket-lifecycle li.is-current > span { border-color: #2471df; background: #2471df; color: #fff; }
+.semantic-ticket-lifecycle li.is-current small { color: #1763d2; font-weight: 740; }
+.semantic-ticket-facts { display: grid; gap: 9px; border: 1px solid #dfe7ef; border-radius: 8px; padding: 11px 13px; background: #f9fbfd; }
+.semantic-ticket-facts dl { display: grid; grid-template-columns: repeat(4, 1fr); margin: 0; }
+.semantic-ticket-facts dl div { min-width: 0; display: grid; gap: 3px; border-right: 1px solid #e2e8ef; padding: 0 10px; }
+.semantic-ticket-facts dl div:first-child { padding-left: 0; }
+.semantic-ticket-facts dl div:last-child { border-right: 0; }
+.semantic-ticket-facts dt { color: #8a97a8; font-size: 11px; }
+.semantic-ticket-facts dd { overflow: hidden; margin: 0; color: #405169; font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-ticket-facts > p { display: flex; align-items: center; gap: 6px; margin: 0; color: #39715f; font-size: 11px; }
+.semantic-ticket-action { display: grid; gap: 10px; margin-top: 12px; border: 1px solid #cbdcf2; border-radius: 9px; padding: 13px; background: #f4f8ff; }
+.semantic-ticket-action > strong { color: #304969; font-size: 13px; }
+.semantic-ticket-action label { display: grid; gap: 6px; color: #53657c; font-size: 12px; font-weight: 670; }
+.semantic-ticket-action select,
+.semantic-ticket-action textarea { width: 100%; border: 1px solid #ccd8e5; border-radius: 7px; outline: 0; background: #fff; color: #35475f; font: inherit; font-size: 12px; }
+.semantic-ticket-action select { height: 37px; padding: 0 9px; }
+.semantic-ticket-action textarea { min-height: 66px; resize: vertical; padding: 9px; line-height: 1.5; }
+.semantic-ticket-action small { color: #7d8b9d; font-size: 11px; font-weight: 400; line-height: 1.45; }
+.semantic-ticket-fields { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.semantic-ticket-action footer { display: flex; justify-content: flex-end; gap: 8px; }
+.semantic-ticket-action footer .app-button { min-height: 36px; font-size: 12px; }
+.semantic-ticket-resolution { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; margin-top: 12px; border: 1px solid #b8dfd2; border-radius: 8px; padding: 10px; background: #eef9f5; color: #0b9368; }
+.semantic-ticket-resolution span { display: grid; gap: 2px; }
+.semantic-ticket-resolution strong { color: #365e51; font-size: 12px; }
+.semantic-ticket-resolution small { color: #6d897f; font-size: 11px; }
+.semantic-ticket-events { max-height: 180px; overflow: auto; display: grid; gap: 0; margin-top: 13px; }
+.semantic-ticket-events > strong { margin-bottom: 6px; color: #4c5e75; font-size: 12px; }
+.semantic-ticket-events > div { min-height: 42px; display: grid; grid-template-columns: 25px minmax(0, 1fr); align-items: center; gap: 8px; border-top: 1px solid #e8edf3; }
+.semantic-ticket-events > div > span { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; background: #edf4ff; color: #2471df; font-size: 10px; font-weight: 760; }
+.semantic-ticket-events p { display: grid; gap: 2px; margin: 0; }
+.semantic-ticket-events b { color: #4b5b71; font-size: 11px; }
+.semantic-ticket-events small { color: #8a97a8; font-size: 10px; }
+.semantic-ops-state { min-height: 180px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; padding: 18px; color: #7e8da0; text-align: center; }
+.semantic-ops-state strong { color: #53647b; font-size: 13px; }
+.semantic-ops-state small { max-width: 360px; font-size: 11px; line-height: 1.5; }
+.semantic-ops-state.is-error { color: #c74444; }
+.semantic-candidate-center { margin-top: 12px; border: 1px solid #d8e2ed; border-radius: 10px; overflow: hidden; background: #fff; }
+.semantic-candidate-center > header p { margin: 0; color: #7c8a9d; font-size: 11px; }
+.semantic-candidate-center > header > strong { color: #52657d; font-size: 12px; }
+.semantic-candidate-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.semantic-candidate-list article { min-width: 0; display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: 9px; border-right: 1px solid #e8edf3; border-bottom: 1px solid #e8edf3; padding: 12px 14px; }
+.semantic-candidate-list article > span { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 7px; background: #fff5e6; color: #d38312; }
+.semantic-candidate-list article > div { min-width: 0; display: grid; gap: 3px; }
+.semantic-candidate-list article strong { overflow: hidden; color: #405169; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-candidate-list article small,
+.semantic-candidate-list article p { overflow: hidden; margin: 0; color: #8391a3; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-candidate-list em.is-approved { background: #e8f7f1; color: #0b8f66; }
+.semantic-candidate-list em.is-rejected { background: #eef1f4; color: #798596; }
+.semantic-candidate-list footer { grid-column: 2 / 4; display: flex; justify-content: flex-end; gap: 7px; padding-top: 4px; }
+.semantic-candidate-list footer .app-button { min-height: 32px; padding-inline: 10px; font-size: 10px; }
+
+.semantic-state { min-height: 180px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; color: #8290a3; }
+.semantic-state strong { color: #526178; font-size: 14px; }
+.semantic-state small { font-size: 14px; }
+.semantic-state.is-error svg { color: #c63f3f; }
+
+.semantic-notice { position: fixed; top: 82px; right: 24px; z-index: 140; min-width: 360px; max-width: 560px; min-height: 46px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; border: 1px solid; border-radius: 8px; padding: 10px 12px; box-shadow: 0 16px 38px #17304d24; font-size: 12px; }
+.semantic-notice.is-success { border-color: #a8dfcb; background: #f0faf6; color: #167e5e; }
+.semantic-notice.is-error { border-color: #f1b7b7; background: #fff5f5; color: #b73e3e; }
+.semantic-notice button { width: 26px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 5px; background: transparent; color: currentColor; }
+
+.semantic-dialog-backdrop { position: fixed; inset: 0; z-index: 180; display: grid; place-items: center; padding: 24px; background: #14243e70; backdrop-filter: blur(2px); }
+.semantic-builder-dialog { width: min(1680px, calc(100vw - 48px)); height: min(920px, calc(100vh - 48px)); min-height: 0; display: grid; grid-template-rows: 90px minmax(0, 1fr) 70px; overflow: hidden; border: 1px solid #ccd8e7; border-radius: 12px; background: #fff; box-shadow: 0 30px 90px #10223f45; }
+.semantic-builder-dialog > header,
+.semantic-approval-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 24px; border-bottom: 1px solid #e2e9f1; padding: 15px 22px; }
+.semantic-builder-dialog > header > div,
+.semantic-approval-dialog > header > div { min-width: 0; display: grid; gap: 3px; }
+.semantic-builder-dialog > header h2,
+.semantic-approval-dialog > header h2 { overflow: hidden; margin: 0; color: #283a52; font-size: 22px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-builder-dialog > header p,
+.semantic-approval-dialog > header p { margin: 0; color: #76869a; font-size: 14px; }
+.semantic-builder-dialog > header > button,
+.semantic-approval-dialog > header > button { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border: 0; border-radius: 7px; background: #f2f5f8; color: #65758a; }
+.semantic-builder-body { min-height: 0; display: grid; grid-template-columns: 250px minmax(0, 1fr) 300px; }
+.semantic-builder-body > aside:first-child { min-height: 0; display: flex; flex-direction: column; border-right: 1px solid #e2e9f1; padding: 20px 16px; background: #f8fafc; }
+.semantic-builder-body > aside:first-child > strong { color: #405168; font-size: 14px; }
+.semantic-builder-body > aside:first-child ol { display: grid; gap: 7px; margin: 14px 0 0; padding: 0; list-style: none; }
+.semantic-builder-body > aside:first-child li { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; padding: 10px; }
+.semantic-builder-body > aside:first-child li > span { width: 27px; height: 27px; display: grid; place-items: center; border: 1px solid #ccd6e2; border-radius: 50%; color: #7c8b9f; font-size: 12px; }
+.semantic-builder-body > aside:first-child li > div { display: grid; gap: 3px; }
+.semantic-builder-body > aside:first-child li strong { color: #53637a; font-size: 14px; }
+.semantic-builder-body > aside:first-child li small { color: #8d9aac; font-size: 12px; }
+.semantic-builder-body > aside:first-child li.is-active { border-color: #cbdcf5; background: #edf4ff; }
+.semantic-builder-body > aside:first-child li.is-active > span { border-color: #2471df; background: #2471df; color: #fff; }
+.semantic-builder-body > aside:first-child li.is-active strong { color: #1763d2; }
+.semantic-builder-body > aside:first-child li.is-done > span { border-color: #a8dfcb; background: #e7f7f0; color: #0c9569; }
+.semantic-builder-rule { margin-top: auto; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; border: 1px solid #d8e4f2; border-radius: 8px; padding: 11px; background: #fff; color: #2a70d8; }
+.semantic-builder-rule span { display: grid; gap: 3px; }
+.semantic-builder-rule strong { color: #44566e; font-size: 13px; }
+.semantic-builder-rule small { color: #8290a3; font-size: 12px; line-height: 1.45; }
+.semantic-builder-body > main { min-width: 0; min-height: 0; overflow: auto; padding: 24px 28px; }
+.semantic-builder-section { display: grid; align-content: start; gap: 20px; }
+.semantic-builder-section > header { display: grid; gap: 4px; }
+.semantic-builder-section > header h3 { margin: 0; color: #2b3c54; font-size: 21px; }
+.semantic-builder-section > header p { margin: 0; color: #76869a; font-size: 14px; }
+.semantic-dataset-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.semantic-dataset-options button { position: relative; min-height: 124px; display: grid; grid-template-columns: 40px minmax(0, 1fr); align-items: start; gap: 10px; border: 1px solid #d6e0eb; border-radius: 9px; padding: 14px; background: #fff; text-align: left; }
+.semantic-dataset-options button:hover { border-color: #a9c7ef; background: #fbfdff; }
+.semantic-dataset-options button.is-selected { border-color: #5c97ea; background: #f1f6ff; box-shadow: inset 0 0 0 1px #5c97ea; }
+.semantic-dataset-options button > span { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 8px; background: #edf4ff; color: #2471df; }
+.semantic-dataset-options button > div { min-width: 0; display: grid; gap: 4px; }
+.semantic-dataset-options strong { overflow: hidden; color: #34465e; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-dataset-options small { color: #7f8da0; font-size: 12px; }
+.semantic-dataset-options p { display: -webkit-box; overflow: hidden; margin: 0; color: #748398; font-size: 13px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.semantic-dataset-options button > svg { position: absolute; top: 9px; right: 9px; color: #2471df; }
+.semantic-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
+.semantic-form-grid label { display: grid; gap: 7px; }
+.semantic-form-grid label.is-wide { grid-column: 1 / -1; }
+.semantic-form-grid label > span { color: #4f6077; font-size: 14px; font-weight: 700; }
+.semantic-form-grid input,
+.semantic-form-grid select,
+  .semantic-form-grid textarea { width: 100%; border: 1px solid #cdd8e5; border-radius: 7px; outline: 0; background: #fff; color: #34455d; font: inherit; font-size: 14px; }
+.semantic-form-grid input,
+.semantic-form-grid select { height: 39px; padding: 0 10px; }
+.semantic-form-grid textarea { height: 76px; resize: none; padding: 10px; line-height: 1.5; }
+.semantic-form-grid input:focus,
+.semantic-form-grid select:focus,
+.semantic-form-grid textarea:focus { border-color: #5c97ea; box-shadow: 0 0 0 3px #2d7cec14; }
+.semantic-builder-empty { min-height: 170px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; border: 1px dashed #bfd0e4; border-radius: 10px; padding: 22px; background: #f8fbff; color: #5880b3; text-align: center; }
+.semantic-builder-empty.is-compact { min-height: 0; align-items: flex-start; padding: 16px 18px; text-align: left; }
+.semantic-builder-empty strong { color: #344c69; font-size: 15px; }
+.semantic-builder-empty p { max-width: 680px; margin: 0; color: #71849a; font-size: 13px; line-height: 1.55; }
+.semantic-builder-empty .app-button { margin-top: 4px; }
+.semantic-builder-source-state { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; border: 1px solid #a9decf; border-radius: 8px; padding: 12px 14px; background: #eff9f5; color: #11966c; }
+.semantic-builder-source-state.is-error { border-color: #efb6b6; background: #fff5f5; color: #c14444; }
+.semantic-builder-source-state span { display: grid; gap: 3px; }
+.semantic-builder-source-state strong { color: #345d51; font-size: 13px; }
+.semantic-builder-source-state.is-error strong { color: #8c3c3c; }
+.semantic-builder-source-state small { color: #6d8a81; font-size: 12px; }
+.semantic-builder-source-state.is-error small { color: #9c6666; }
+.semantic-grain-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; border: 0; padding: 0; }
+.semantic-grain-fields legend { grid-column: 1 / -1; margin-bottom: 7px; color: #4f6077; font-size: 14px; font-weight: 700; }
+.semantic-grain-fields label { display: flex; align-items: center; gap: 9px; border: 1px solid #d7e1ec; border-radius: 8px; padding: 10px 12px; background: #fff; color: #52657d; }
+.semantic-grain-fields input { width: 17px; height: 17px; accent-color: #2471df; }
+.semantic-grain-fields span { min-width: 0; display: grid; gap: 2px; }
+.semantic-grain-fields strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-grain-fields small { overflow: hidden; color: #8391a3; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-relation-map { display: grid; grid-template-columns: repeat(auto-fit, minmax(44px, auto)); align-items: center; gap: 13px; border: 1px solid #dce5ef; border-radius: 9px; padding: 20px; background: #f9fbfd; }
+.semantic-relation-map.is-single { grid-template-columns: minmax(260px, 1fr); }
+.semantic-relation-map > svg { color: #6290cf; }
+.semantic-relation-map article { display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: center; gap: 9px; border: 1px solid #d5e0ec; border-radius: 8px; padding: 12px; background: #fff; }
+.semantic-relation-map article > span { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 7px; background: #edf4ff; color: #2471df; }
+.semantic-relation-map article > div { min-width: 0; display: grid; gap: 3px; }
+.semantic-relation-map strong { overflow: hidden; color: #3c4d64; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-relation-map small { color: #7e8da0; font-size: 12px; }
+.semantic-inline-check { display: flex; align-items: center; gap: 7px; margin: 0; color: #16815f; font-size: 13px; }
+.semantic-contract-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.semantic-contract-cards article { display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 10px; border: 1px solid #d9e3ee; border-radius: 9px; padding: 16px; }
+.semantic-contract-cards article > span { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 8px; background: #edf4ff; color: #2471df; }
+.semantic-contract-cards article > div { display: grid; gap: 4px; }
+.semantic-contract-cards article strong { color: #35465e; font-size: 13px; }
+.semantic-contract-cards article small { color: #7f8da0; font-size: 13px; }
+.semantic-contract-cards fieldset { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin: 4px 0 0; border: 0; padding: 0; }
+.semantic-contract-cards legend { margin-bottom: 7px; color: #65758a; font-size: 13px; }
+.semantic-contract-cards fieldset label { display: flex; align-items: center; gap: 5px; border: 1px solid #d8e2ed; border-radius: 6px; padding: 8px; color: #53637a; font-size: 13px; }
+.semantic-contract-cards input { accent-color: #2471df; }
+.semantic-field-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.semantic-field-groups > section { min-width: 0; overflow: hidden; border: 1px solid #d9e3ee; border-radius: 9px; background: #fff; }
+.semantic-field-groups > section > header { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #e2e9f1; padding: 14px 16px; background: #f8fbff; color: #2471df; }
+.semantic-field-groups > section > header span { display: grid; gap: 2px; }
+.semantic-field-groups > section > header strong { color: #344b68; font-size: 15px; }
+.semantic-field-groups > section > header small { color: #7e8ea1; font-size: 12px; }
+.semantic-field-groups > section > div { max-height: 300px; overflow: auto; }
+.semantic-field-groups article { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #edf1f5; padding: 10px 16px; }
+.semantic-field-groups article > span { min-width: 0; display: grid; gap: 3px; }
+.semantic-field-groups article strong { overflow: hidden; color: #3e5068; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-field-groups article small { overflow: hidden; color: #8492a4; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-field-groups article em { flex: none; color: #63748a; font-size: 12px; font-style: normal; }
+.semantic-field-groups > section > div > p { margin: 0; padding: 24px 16px; color: #8190a3; font-size: 13px; text-align: center; }
+.semantic-suggestion { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px; border: 1px solid #cfe0f7; border-radius: 8px; padding: 12px; background: #f2f7ff; color: #2471df; }
+.semantic-suggestion span { display: grid; gap: 3px; }
+.semantic-suggestion strong { color: #38506f; font-size: 14px; }
+.semantic-suggestion small { color: #71839b; font-size: 13px; }
+.semantic-check-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; }
+.semantic-check-list article { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; border: 1px solid #dce6ef; border-radius: 8px; padding: 12px; color: #0c9569; }
+.semantic-check-list article span { display: grid; gap: 3px; }
+.semantic-check-list strong { color: #44556c; font-size: 14px; }
+.semantic-check-list small { overflow: hidden; color: #7b8a9e; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-release-preview { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 20px; border: 1px solid #c9dcf5; border-radius: 9px; padding: 18px; background: #f1f6ff; color: #2471df; }
+.semantic-release-preview > div { display: grid; gap: 4px; }
+.semantic-release-preview span { color: #6b7f9b; font-size: 12px; }
+.semantic-release-preview strong { color: #2f4869; font-size: 15px; }
+.semantic-release-preview small { color: #7d8fa6; font-size: 12px; }
+.semantic-builder-summary { min-height: 0; overflow: auto; border-left: 1px solid #e2e9f1; padding: 20px; background: #fafbfd; }
+.semantic-builder-summary > span { color: #2471df; font-size: 14px; font-weight: 760; }
+.semantic-builder-summary dl { display: grid; gap: 0; margin: 13px 0; }
+.semantic-builder-summary dl div { display: grid; gap: 4px; border-bottom: 1px solid #e5eaf0; padding: 11px 0; }
+.semantic-builder-summary dt { color: #8a97a8; font-size: 12px; }
+.semantic-builder-summary dd { margin: 0; color: #42536b; font-size: 14px; font-weight: 650; }
+.semantic-builder-summary > div { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; border: 1px solid #b8e4d6; border-radius: 8px; padding: 11px; background: #eff9f5; color: #11966c; }
+.semantic-builder-summary > div span { display: grid; gap: 3px; }
+.semantic-builder-summary > div strong { color: #2e6856; font-size: 13px; }
+.semantic-builder-summary > div small { color: #668d80; font-size: 12px; }
+.semantic-builder-summary > div.is-pending { border-color: #f0d19c; background: #fff8ec; color: #cc7b10; }
+.semantic-builder-summary > div.is-pending strong { color: #875a19; }
+.semantic-builder-summary > div.is-pending small { color: #92754b; }
+.semantic-builder-dialog > footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; border-top: 1px solid #e2e9f1; padding: 12px 22px; background: #fbfcfe; }
+.semantic-builder-dialog > footer > span { color: #7c8a9e; font-size: 13px; }
+.semantic-builder-dialog > footer > div { display: flex; gap: 8px; }
+.semantic-builder-dialog > footer .app-button { min-width: 94px; min-height: 38px; }
+
+.semantic-approval-dialog { width: min(820px, calc(100vw - 48px)); display: grid; gap: 0; overflow: hidden; border: 1px solid #ccd8e7; border-radius: 12px; background: #fff; box-shadow: 0 30px 90px #10223f45; }
+.semantic-evaluation-dialog { width: min(1120px, calc(100vw - 48px)); max-height: calc(100vh - 48px); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #ccd8e7; border-radius: 12px; background: #fff; box-shadow: 0 30px 90px #10223f45; }
+.semantic-evaluation-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 24px; border-bottom: 1px solid #e2e9f1; padding: 18px 22px; }
+.semantic-evaluation-dialog > header > div { min-width: 0; display: grid; gap: 4px; }
+.semantic-evaluation-dialog > header span { color: #2471df; font-size: 13px; font-weight: 760; }
+.semantic-evaluation-dialog > header h2 { overflow: hidden; margin: 0; color: #283a52; font-size: 22px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-evaluation-dialog > header p { margin: 0; color: #76869a; font-size: 14px; }
+.semantic-evaluation-dialog > header button { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border: 0; border-radius: 7px; background: #f2f5f8; color: #65758a; }
+.semantic-evaluation-body { min-height: 0; overflow: auto; padding: 20px 22px; background: #f8fafc; }
+.semantic-evaluation-steps { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.semantic-evaluation-steps li { min-height: 76px; display: grid; grid-template-columns: 34px minmax(0, 1fr) auto auto; align-items: center; gap: 12px; border: 1px solid #d8e2ed; border-radius: 9px; padding: 12px 14px; background: #fff; }
+.semantic-evaluation-steps li > span { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid #ccd8e5; border-radius: 50%; color: #718197; font-size: 13px; font-weight: 760; }
+.semantic-evaluation-steps li > div { min-width: 0; display: grid; gap: 4px; }
+.semantic-evaluation-steps strong { color: #3c4e66; font-size: 14px; }
+.semantic-evaluation-steps small { color: #7c8a9d; font-size: 13px; }
+.semantic-evaluation-steps li.is-active { border-color: #bfd3f0; background: #f5f9ff; }
+.semantic-evaluation-steps li.is-active > span { border-color: #2471df; background: #2471df; color: #fff; }
+.semantic-evaluation-steps li.is-complete { border-color: #b6e0d3; }
+.semantic-evaluation-steps li.is-complete > span { border-color: #9ed8c6; background: #e8f7f2; color: #0c9569; }
+.semantic-evaluation-steps li.is-error { border-color: #efb6b6; background: #fff8f8; }
+.semantic-file-picker { min-height: 36px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid #cfd9e6; border-radius: 7px; padding: 0 12px; background: #fff; color: #52647b; font-size: 12px; font-weight: 680; cursor: pointer; }
+.semantic-file-picker input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; }
+.semantic-evaluation-alert,
+.semantic-approval-handoff { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; margin-top: 12px; border: 1px solid #b8dfd3; border-radius: 8px; padding: 12px 14px; background: #eff9f5; color: #0c9569; }
+.semantic-evaluation-alert.is-error { border-color: #efb6b6; background: #fff5f5; color: #c14444; }
+.semantic-evaluation-alert.is-warning { border-color: #ead29c; background: #fffaf0; color: #98691d; }
+.semantic-evaluation-alert span,
+.semantic-approval-handoff span { display: grid; gap: 3px; }
+.semantic-evaluation-alert strong,
+.semantic-approval-handoff strong { color: #385b51; font-size: 13px; }
+.semantic-evaluation-alert small,
+.semantic-approval-handoff small { color: #6f887f; font-size: 12px; line-height: 1.45; }
+.semantic-evaluation-dialog > footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; border-top: 1px solid #e2e9f1; padding: 13px 22px; background: #fff; }
+.semantic-evaluation-dialog > footer > span { color: #7d8a9d; font-size: 13px; }
+.semantic-evaluation-governance { display: grid; gap: 14px; margin-top: 18px; border-top: 1px solid #dce5ef; padding-top: 18px; }
+.semantic-evaluation-governance > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.semantic-evaluation-governance > header > div:first-child { display: grid; gap: 4px; }
+.semantic-evaluation-governance > header span { color: #2471df; font-size: 12px; font-weight: 760; }
+.semantic-evaluation-governance > header h3 { margin: 0; color: #2e4058; font-size: 19px; }
+.semantic-evaluation-governance > header p { max-width: 720px; margin: 0; color: #728197; font-size: 13px; line-height: 1.55; }
+.semantic-evaluation-progress { min-width: 150px; display: grid; gap: 2px; border-left: 2px solid #2471df; padding: 3px 0 3px 12px; }
+.semantic-evaluation-progress strong { color: #2e4058; font-size: 18px; }
+.semantic-evaluation-progress small { color: #7b899b; font-size: 12px; }
+.semantic-evaluation-empty { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; border: 1px dashed #b9cce4; border-radius: 9px; padding: 16px; background: #f5f9ff; color: #2471df; }
+.semantic-evaluation-empty > div { display: grid; gap: 4px; }
+.semantic-evaluation-empty strong { color: #3b4e67; font-size: 14px; }
+.semantic-evaluation-empty p { margin: 0; color: #708097; font-size: 13px; line-height: 1.5; }
+.semantic-evaluation-review-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.semantic-evaluation-review-summary > span { display: grid; gap: 3px; border: 1px solid #dae4ef; border-radius: 8px; padding: 11px 13px; background: #fff; }
+.semantic-evaluation-review-summary strong { color: #33465e; font-size: 16px; }
+.semantic-evaluation-review-summary small { color: #7b899b; font-size: 12px; }
+.semantic-evaluation-pagebar { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.semantic-evaluation-pagebar > span { color: #64758c; font-size: 13px; font-weight: 680; }
+.semantic-evaluation-pagebar > div { display: flex; gap: 8px; }
+.semantic-evaluation-case-list { max-height: 330px; overflow: auto; border: 1px solid #d8e2ed; border-radius: 9px; background: #fff; }
+.semantic-evaluation-case-list article { min-height: 58px; display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 12px; border-bottom: 1px solid #e8edf3; padding: 9px 13px; }
+.semantic-evaluation-case-list article:last-child { border-bottom: 0; }
+.semantic-evaluation-case-list article.is-reviewed { background: #f6fbf9; }
+.semantic-evaluation-case-index { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 6px; background: #eef5ff; color: #2471df; font-size: 12px; font-weight: 760; }
+.semantic-evaluation-case-list article > div { min-width: 0; display: grid; gap: 4px; }
+.semantic-evaluation-case-list article strong { overflow: hidden; color: #405169; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-evaluation-case-list article small { overflow: hidden; color: #7a899c; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-evaluation-case-list article em { color: #697a91; font-size: 12px; font-style: normal; white-space: nowrap; }
+.semantic-evaluation-review-form { display: grid; gap: 10px; border: 1px solid #d5e1ee; border-radius: 9px; padding: 14px; background: #fff; }
+.semantic-evaluation-review-form > label { display: flex; align-items: center; gap: 8px; color: #53657c; font-size: 13px; }
+.semantic-evaluation-review-form input { width: 16px; height: 16px; accent-color: #2471df; }
+.semantic-evaluation-review-form textarea { min-height: 78px; resize: vertical; border: 1px solid #ccd8e5; border-radius: 7px; padding: 10px 12px; color: #33465d; font: inherit; font-size: 13px; line-height: 1.5; outline: 0; }
+.semantic-evaluation-review-form textarea:focus { border-color: #5d94e5; box-shadow: 0 0 0 3px #2471df18; }
+.semantic-evaluation-review-form > div { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.semantic-evaluation-review-form > div > span { margin-right: auto; color: #7a899c; font-size: 12px; }
+.semantic-evaluation-seal { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; border: 1px solid #b7dfd2; border-radius: 9px; padding: 13px 14px; background: #eef9f5; color: #0c9569; }
+.semantic-evaluation-seal > div { display: grid; gap: 3px; }
+.semantic-evaluation-seal strong { color: #355c50; font-size: 13px; }
+.semantic-evaluation-seal small { color: #6d887f; font-size: 12px; }
+.semantic-evaluation-seal.is-complete { grid-template-columns: auto minmax(0, 1fr); }
+.semantic-detail-dialog { width: min(680px, calc(100vw - 48px)); display: grid; overflow: hidden; border: 1px solid #ccd8e7; border-radius: 12px; background: #fff; box-shadow: 0 30px 90px #10223f45; }
+.semantic-detail-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid #e2e9f1; padding: 17px 20px; }
+.semantic-detail-dialog > header > div { min-width: 0; display: grid; gap: 3px; }
+.semantic-detail-dialog > header span { color: #2471df; font-size: 14px; font-weight: 760; }
+.semantic-detail-dialog > header h2 { overflow: hidden; margin: 0; color: #2d3e56; font-size: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-detail-dialog > header p { margin: 0; color: #7b8a9e; font-size: 13px; }
+.semantic-detail-dialog > header button { width: 34px; height: 34px; display: grid; place-items: center; border: 0; border-radius: 7px; background: #f1f4f7; color: #65758a; }
+.semantic-detail-content { display: grid; gap: 16px; padding: 20px; }
+.semantic-detail-definition { display: grid; gap: 7px; border: 1px solid #dce5ef; border-radius: 8px; padding: 13px; background: #f9fbfd; }
+.semantic-detail-definition strong { color: #45566e; font-size: 14px; }
+.semantic-detail-definition p { margin: 0; color: #68798f; font-size: 14px; line-height: 1.55; }
+.semantic-detail-content dl,
+.semantic-receipt-content dl { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 20px; margin: 0; }
+.semantic-detail-content dl div,
+.semantic-receipt-content dl div { display: grid; grid-template-columns: 86px minmax(0, 1fr); align-items: center; gap: 8px; border-bottom: 1px solid #e8edf3; padding: 11px 0; }
+.semantic-detail-content dt,
+.semantic-receipt-content dt { color: #8a97a8; font-size: 13px; }
+.semantic-detail-content dd,
+.semantic-receipt-content dd { overflow: hidden; margin: 0; color: #46576e; font-size: 14px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-detail-dialog > footer { display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid #e2e9f1; padding: 13px 20px; background: #fbfcfe; }
+.semantic-detail-dialog > footer .app-button { min-height: 37px; }
+.semantic-receipt-content { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 10px; padding: 20px; color: #0c9569; }
+.semantic-receipt-content > div { display: grid; gap: 3px; }
+.semantic-receipt-content > div strong { color: #356c5a; font-size: 13px; }
+.semantic-receipt-content > div small { color: #718d84; font-size: 13px; }
+.semantic-receipt-content code { grid-column: 1 / -1; overflow: hidden; border: 1px solid #dce5ef; border-radius: 7px; padding: 10px; background: #f7f9fb; color: #53657d; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.semantic-receipt-content dl { grid-column: 1 / -1; }
+.semantic-approval-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 20px 22px 12px; }
+.semantic-approval-grid article { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 10px; border: 1px solid #d8e2ed; border-radius: 9px; padding: 14px; }
+.semantic-approval-grid article > span { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 50%; background: #edf4ff; color: #2471df; }
+.semantic-approval-grid article > div { display: grid; gap: 4px; }
+.semantic-approval-grid strong { color: #405168; font-size: 14px; }
+.semantic-approval-grid small { color: #7d8b9e; font-size: 12px; line-height: 1.4; }
+.semantic-approval-grid .app-button { min-height: 35px; font-size: 12px; }
+.semantic-approval-grid article.is-approved { border-color: #a8dfcb; background: #f2faf7; }
+.semantic-approval-grid article.is-approved > span { background: #daf3e9; color: #0c9569; }
+.semantic-gate-receipt { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px; margin: 4px 22px 20px; border: 1px solid #a8dfcb; border-radius: 8px; padding: 12px; background: #eff9f5; color: #0c9569; }
+.semantic-gate-receipt span { display: grid; gap: 3px; }
+.semantic-gate-receipt strong { color: #346b5a; font-size: 13px; }
+.semantic-gate-receipt small { color: #6e8f83; font-size: 12px; }
+.semantic-approval-comment { display: grid; gap: 7px; margin: 4px 22px 12px; }
+.semantic-approval-comment > span { color: #4f6077; font-size: 13px; font-weight: 700; }
+.semantic-approval-comment textarea { min-height: 82px; width: 100%; resize: vertical; border: 1px solid #cdd8e5; border-radius: 7px; outline: 0; padding: 10px 12px; color: #34455d; font: inherit; font-size: 13px; line-height: 1.5; }
+.semantic-approval-comment textarea:focus { border-color: #5c97ea; box-shadow: 0 0 0 3px #2d7cec14; }
+.semantic-approval-comment textarea:disabled { background: #f4f6f8; color: #8a97a7; }
+.semantic-approval-handoff { margin: 0 22px 12px; }
+.semantic-approval-dialog > footer { display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid #e2e9f1; padding: 13px 22px; background: #fbfcfe; }
+.semantic-approval-dialog > footer .app-button { min-height: 38px; }
+
+@media (max-width: 1500px) {
+  .semantic-center-shell > .main-stage { padding-inline: 16px; }
+  .semantic-workbench { grid-template-columns: 204px minmax(0, 1fr); }
+  .semantic-object-head,
+  .semantic-object-table article { grid-template-columns: minmax(320px, 1.5fr) minmax(160px, .7fr) 120px 130px 160px; }
+  .semantic-release-list > article { grid-template-columns: minmax(290px, .8fr) minmax(520px, 1.3fr) auto; }
+}
+
+@media (max-height: 900px) {
+  .semantic-stage { grid-template-rows: 72px 64px 74px minmax(0, 1fr); gap: 9px; }
+  .semantic-flow li { padding-block: 8px; }
+  .semantic-summary article { padding-block: 10px; }
+}

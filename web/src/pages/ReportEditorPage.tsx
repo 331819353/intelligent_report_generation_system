@@ -1,66 +1,43 @@
 import {
-  ArrowLeft, ArrowUDownLeft, ArrowUDownRight, CaretDown, CaretRight, Check,
-  CheckCircle, CirclesFour, DotsThree, Info, MagicWand,
-  NotePencil, Paperclip, ShieldCheck, Sparkle, SpinnerGap, WarningCircle, X,
+  ArrowDown, ArrowLeft, ArrowUp, ArrowUDownLeft, ArrowUDownRight, CaretDown, CaretRight, Check,
+  CheckCircle, CirclesFour, Info, MagicWand,
+  NotePencil, Plus, ShieldCheck, Sparkle, SpinnerGap, Trash, WarningCircle, X,
 } from '@phosphor-icons/react'
 import { useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { RequestError } from '../lib/api'
 import {
-  reportEditorAPI, type AIPreviewResponse, type ComponentManifest, type DataContextCandidate,
-  type EditorComponent, type EditorOperation, type EditorOperationBundle, type EditorPage,
-  type EditorScope, type ReportDraft,
+  reportEditorAPI, type AIPreviewResponse, type DataContextCandidate, type DataContextField,
+  type EditorComponent, type EditorOperation, type EditorOperationBundle,
+  type DraftExecution, type EditorScope, type ReportDraft, type ReportStarterTemplate,
 } from '../report/api/editor'
 import { reportAssetsAPI } from '../report/api/assets'
-import { reportRuntimeAPI, type LoadedReport, type RuntimeExecution, type RuntimeQueryResult } from '../report/api/runtime'
 import type { ReportAsset } from '../report/assets/model'
-import { ChannelContributionChart, RuntimeResultChart, RuntimeRevenueTrendChart } from '../report/runtime/ReportCharts'
+import { ReportPageView } from '../report/render/ReportPageView'
+import { InteractionPanel } from '../report/designer/InteractionPanel'
+import { EvidencePanel } from '../report/designer/EvidencePanel'
+import {
+  emptyManifestIndex, indexManifests, listComponentManifests, minimumSize,
+  type ComponentManifest, type ManifestIndex,
+} from '../report/render/manifests'
+import {
+  canvasOf, findComponentBlock, orderedPages, orderedSections,
+  type BindingRole, type ComponentOptions, type FieldBinding, type Page,
+} from '../report/render/schema'
+import {
+  addComponentOperations, addToCardOperations, bundle, createInteractionOperations,
+  deleteInteractionOperations, layoutOperations, removeComponentOperations,
+  sectionReorderOperations, updateComponentOperations, zoneKindLabels,
+  type InteractionDraft, type ZoneKind,
+} from '../report/designer/operations'
 
-type PublishedPreview = { loaded: LoadedReport; execution: RuntimeExecution }
+/** 组件加入报告的两种方式：新建一张卡片，或加入当前卡片的一个区域。 */
+type Placement =
+  | { mode: 'NEW_CARD' }
+  | { mode: 'INTO_CARD'; zoneKind: ZoneKind }
+
 type PartialDecision = 'retain' | 'exclude'
-
-const snapshotReportId = '00000000-0000-4000-8000-000000000701'
-const snapshotPageId = 'page_monthly_operations'
-const snapshotSections = [
-  { id: 'section_summary', name: '经营摘要', order: 0, blocks: [] },
-  { id: 'section_revenue', name: '营业收入趋势', order: 1, blocks: [{ id: 'block_revenue', type: 'CHART', zones: [{ id: 'zone_revenue', type: 'CONTENT', slots: [{ id: 'slot_revenue', componentId: 'component_revenue' }] }] }] },
-  { id: 'section_channel', name: '渠道贡献分析', order: 2, blocks: [{ id: 'block_channel', type: 'CHART', zones: [{ id: 'zone_channel', type: 'CONTENT', slots: [{ id: 'slot_channel', componentId: 'component_channel' }] }] }] },
-  { id: 'section_conclusion', name: '经营结论', order: 3, blocks: [{ id: 'block_conclusion', type: 'CONTENT', zones: [{ id: 'zone_conclusion', type: 'INSIGHT', slots: [{ id: 'slot_conclusion', componentId: 'component_conclusion' }] }] }] },
-] satisfies EditorPage['sections']
-
-const snapshotDraft: ReportDraft = {
-  reportId: snapshotReportId, tenantId: 'snapshot-tenant', schemaVersion: '1.0', revisionNo: 24,
-  definitionHash: '7c9b6cc154ced4ee91e5b77abcc6a8d86e790132d3bcc65cac88c70f7c71e5f6',
-  updatedBy: '王敏', updatedAt: '2026-08-10T10:42:00+08:00',
-  definition: {
-    schemaVersion: '1.0', metadata: { id: snapshotReportId, code: 'RP-OPS-MON-001', name: '2026年7月经营月报', reportType: 'REPORT', locale: 'zh-CN' },
-    dataContexts: [{ id: 'context_enterprise_operations', alias: '企业经营主题集' }],
-    pages: [{ id: snapshotPageId, name: '月度经营总览', order: 0, sections: snapshotSections }],
-    components: [
-      { id: 'component_revenue', templateRef: { type: 'bar-comparison', version: '1.0.0' }, dataBinding: { bindingMode: 'DATASET_FIELD', dataContextId: 'context_enterprise_operations', dimensions: [{ role: 'TIME', field: 'month' }], measures: [{ role: 'VALUE', field: 'revenue' }] }, options: { title: '营业收入趋势', subtitle: '万元', showLegend: true, mobileLegendMode: 'SCROLL' } },
-      { id: 'component_channel', templateRef: { type: 'pie-donut', version: '1.0.0' }, dataBinding: { bindingMode: 'DATASET_FIELD', dataContextId: 'context_enterprise_operations', dimensions: [{ role: 'CATEGORY', field: 'channel' }], measures: [{ role: 'VALUE', field: 'revenue' }] }, options: { title: '渠道贡献分析', showLegend: true } },
-      { id: 'component_conclusion', templateRef: { type: 'insight-text', version: '1.0.0' }, options: { title: '经营结论', richText: '收入实现稳健增长，线上渠道贡献提升，盈利能力持续优化。', insightRole: 'CONCLUSION' } },
-    ],
-  },
-}
-
-const snapshotPreview: AIPreviewResponse = {
-  aiRunId: 'AI-20260810-042',
-  preview: {
-    beforeHash: snapshotDraft.definitionHash,
-    afterHash: '8b8b9fd0fbfe7c663c755ca297339d4da52d8fe1e637bd1968ea271202e8bc44',
-    affectedComponents: ['component_revenue', 'component_conclusion'],
-    bundle: {
-      schemaVersion: '1.0', reportId: snapshotReportId, baseRevision: 24, source: 'AI', aiRunId: 'AI-20260810-042', scope: { pageId: snapshotPageId },
-      operations: [
-        { op: 'SECTION_REORDER', targetId: 'section_summary', payload: { order: 0 } },
-        { op: 'DATA_BINDING_UPDATE', targetId: 'component_revenue', payload: { mode: 'SET', dataBinding: snapshotDraft.definition.components[0].dataBinding } },
-        { op: 'INSIGHT_UPDATE', targetId: 'component_conclusion', payload: { richText: '毛利率同比下降 1.4pct，主要由促销折扣与原材料价格变化驱动。', evidenceId: 'evidence_margin_202607' } },
-      ],
-    },
-  },
-}
 
 function dateTime(value: string) {
   const date = new Date(value)
@@ -68,8 +45,17 @@ function dateTime(value: string) {
   return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date).replaceAll('/', '-')
 }
 
-function componentIDs(section?: EditorPage['sections'][number]) {
-  return section?.blocks.flatMap(block => block.zones.flatMap(zone => zone.slots.map(slot => slot.componentId).filter((id): id is string => Boolean(id)))) ?? []
+/**
+ * 服务端返回的受治理字段带有权威的角色。旧版本 API 只返回字段名时按命名回退，
+ * 使编辑器在滚动升级期间仍可用；正常情况下不会走到这条分支。
+ */
+function governedFieldDefinitions(candidate?: DataContextCandidate): DataContextField[] {
+  if (!candidate) return []
+  if (candidate.fieldDefinitions?.length) return candidate.fieldDefinitions
+  return candidate.fields.map(code => ({
+    code, name: code, canonicalType: '', semanticType: '', aggregation: '',
+    role: /(^|_)(amount|quantity|count|revenue|cost|profit|sales|value)($|_)/i.test(code) ? 'MEASURE' : 'DIMENSION',
+  }))
 }
 
 function objectName(draft: ReportDraft, id: string) {
@@ -110,55 +96,6 @@ function operationDetail(operation: EditorOperation, draft: ReportDraft) {
   }
 }
 
-function numericMetrics(preview?: PublishedPreview) {
-  const metrics: Array<{ label: string; value: string }> = []
-  for (const item of preview?.execution.components ?? []) {
-    const result = item.result
-    if (!result?.rows[0]) continue
-    result.columns.forEach((column, index) => {
-      const raw = result.rows[0]?.[index]
-      if (metrics.length < 3 && Number.isFinite(Number(raw))) metrics.push({ label: column, value: String(raw) })
-    })
-    if (metrics.length >= 3) break
-  }
-  return metrics
-}
-
-function findChart(preview: PublishedPreview | undefined, components: EditorComponent[], pattern: RegExp): { result: RuntimeQueryResult; type: string; label: string } | undefined {
-  if (!preview) return undefined
-  const resultMap = new Map(preview.execution.components.map(item => [item.componentId, item]))
-  for (const component of components) {
-    if (!pattern.test(component.templateRef.type)) continue
-    const item = resultMap.get(component.id)
-    if (item?.result) return { result: item.result, type: component.templateRef.type, label: component.options.title || component.templateRef.type }
-  }
-  return undefined
-}
-
-function DraftCanvas({ draft, page, activeSectionId, preview, published, snapshot, onSelectSection, onManualEdit }: {
-  draft: ReportDraft; page: EditorPage; activeSectionId: string; preview?: AIPreviewResponse; published?: PublishedPreview; snapshot: boolean; onSelectSection: (id: string) => void; onManualEdit: () => void
-}) {
-  const metrics = numericMetrics(published)
-  const trend = findChart(published, draft.definition.components, /(line|bar|trend|area)/i)
-  const channel = findChart(published, draft.definition.components, /(pie|donut)/i)
-  const hasProposal = Boolean(preview)
-  return <div className="report-editor-main">
-    <nav className="report-editor-outline" aria-label="报告大纲"><header><strong>报告大纲</strong><button type="button" aria-label="收起大纲"><CaretDown size={14} /></button></header>{page.sections.slice().sort((a, b) => a.order - b.order).map(section => <button className={section.id === activeSectionId ? 'is-active' : ''} type="button" key={section.id} onClick={() => onSelectSection(section.id)}><span />{section.name}</button>)}</nav>
-    <main className={`report-editor-canvas ${hasProposal ? 'has-ai-proposal' : ''}`}>
-      <article className="report-editor-paper">
-        <header><div><h2>{page.sections[0]?.name || page.name}</h2><ShieldCheck size={17} weight="fill" /></div><button type="button" onClick={onManualEdit}><NotePencil size={15} />手动精修</button></header>
-        <p>{draft.definition.metadata.description || (snapshot ? '2026年7月企业经营整体稳中有进，收入端保持增长，渠道表现分化，盈利能力持续优化。' : '当前草稿按报告结构与受治理数据绑定生成设计预览。')}</p>
-        <dl className="report-editor-kpis">{snapshot ? <><div><dt>营业收入</dt><dd>1,256,320<small>万元</small></dd><span>同比 <b>+8.7% ↑</b></span></div><div><dt>毛利率</dt><dd>23.6%</dd><span>同比 <b>+1.2pct ↑</b></span></div><div><dt>经营利润</dt><dd>152,680<small>万元</small></dd><span>同比 <b>+12.3% ↑</b></span></div></> : metrics.length ? metrics.map(metric => <div key={metric.label}><dt>{metric.label}</dt><dd>{metric.value}</dd><span><b>当前已发布数据</b></span></div>) : <><div><dt>组件配置</dt><dd>{draft.definition.components.length}</dd><span>草稿定义</span></div><div><dt>数据绑定</dt><dd>{draft.definition.components.filter(item => item.dataBinding).length}</dd><span>受治理绑定</span></div><div><dt>全局筛选</dt><dd>{draft.definition.globalFilters?.length ?? 0}</dd><span>设计预览</span></div></>}</dl>
-        {hasProposal && <div className="report-editor-ai-insert">AI 方案将修改 {preview?.preview.affectedComponents.length ?? 0} 个组件，应用后写入新修订</div>}
-        <section className={`report-editor-trend ${activeSectionId === page.sections[1]?.id ? 'is-selected' : ''}`} id={`editor-section-${page.sections[1]?.id}`}><header><strong>{page.sections[1]?.name || trend?.label || '趋势分析'}</strong><small>（设计预览）</small></header>{snapshot ? <RuntimeRevenueTrendChart /> : trend ? <RuntimeResultChart result={trend.result} templateType={trend.type} label={trend.label} /> : <div className="report-editor-data-placeholder"><CirclesFour size={22} /><strong>当前草稿组件已配置</strong><span>没有可复用的已发布运行结果；发布前预览将按当前权限执行。</span></div>}</section>
-        <section className="report-editor-channel" id={`editor-section-${page.sections[2]?.id}`}>{snapshot ? <ChannelContributionChart /> : channel ? <RuntimeResultChart result={channel.result} templateType={channel.type} label={channel.label} /> : <div className="report-editor-data-placeholder is-compact"><CirclesFour size={20} /><strong>{page.sections[2]?.name || '渠道分析'}</strong><span>等待受治理运行结果</span></div>}</section>
-        <section className="report-editor-conclusion" id={`editor-section-${page.sections[3]?.id}`}><CheckCircle size={17} weight="fill" /><div><strong>{page.sections[3]?.name || '经营结论'}</strong><p>{snapshot ? '收入实现稳健增长，线上渠道贡献提升，盈利能力持续优化；工程渠道短期承压，需关注项目节奏与回款。' : draft.definition.components.find(component => component.options.richText)?.options.richText || '当前草稿未配置经营结论。'}</p></div></section>
-      </article>
-      {hasProposal && <span className="report-editor-preview-label">AI 方案预览，不会自动保存</span>}
-    </main>
-  </div>
-}
-
 function NewReportCanvas() {
   return <div className="report-editor-main report-editor-new-main">
     <nav className="report-editor-outline report-editor-new-outline" aria-label="报告大纲">
@@ -175,14 +112,14 @@ function NewReportCanvas() {
 }
 
 /**
- * 新建面板提供两条并列入口：
- *  - 空白新建：只依赖已发布的数据集版本，未配置模型提供方时依然可用；
+ * 新建面板提供三条并列入口：
+ *  - 空白新建与模板新建：只依赖已发布的数据集版本，未配置模型提供方时依然可用；
  *  - AI 生成：额外需要可用的模型提供方，失败时回退到空白新建。
- * 面板只展示服务端返回的真实候选与真实错误，不展示虚构的执行阶段或消歧问题。
+ * 三条入口产出的都是同一种 Report Definition，进入同一个编辑器与同一条发布链。
  */
 function NewReportTaskPanel({
-  name, intent, contexts, contextId, contextsLoading, contextsError, creating, error,
-  onName, onIntent, onContext, onCreateBlank, onGenerate,
+  name, intent, contexts, contextId, contextsLoading, contextsError, templates, templatesLoading, selectedTemplateId, creating, error,
+  onName, onIntent, onContext, onTemplate, onCreateBlank, onCreateTemplate, onGenerate,
 }: {
   name: string
   intent: string
@@ -190,12 +127,17 @@ function NewReportTaskPanel({
   contextId: string
   contextsLoading: boolean
   contextsError: string
-  creating: '' | 'blank' | 'ai'
+  templates: ReportStarterTemplate[]
+  templatesLoading: boolean
+  selectedTemplateId: string
+  creating: '' | 'blank' | 'template' | 'ai'
   error: string
   onName: (value: string) => void
   onIntent: (value: string) => void
   onContext: (value: string) => void
+  onTemplate: (value: string) => void
   onCreateBlank: () => void
+  onCreateTemplate: () => void
   onGenerate: () => void
 }) {
   const selected = contexts.find(item => item.dataContext.id === contextId)
@@ -223,6 +165,13 @@ function NewReportTaskPanel({
       </p>}
     </section>
 
+    <section className="report-editor-template-center" aria-label="报告模板中心">
+      <header><div><strong>从模板开始</strong><small>直接生成可编辑的真实草稿和受治理数据绑定</small></div><span>{templates.length} 个模板</span></header>
+      {templatesLoading && <p className="report-editor-new-hint"><SpinnerGap className="is-spinning" size={14} />正在读取模板…</p>}
+      <div>{templates.map(template => <button className={selectedTemplateId === template.id ? 'is-selected' : ''} type="button" key={template.id} onClick={() => onTemplate(template.id)}><span>{template.category}</span><strong>{template.name}</strong><small>{template.description}</small><em>{template.componentCount} 个组件</em></button>)}</div>
+      <button className="primary-button" type="button" disabled={Boolean(creating) || !ready || !selectedTemplateId || !name.trim()} onClick={onCreateTemplate}>{creating === 'template' ? <SpinnerGap className="is-spinning" size={16} /> : <CirclesFour size={16} />}{creating === 'template' ? '正在创建…' : '使用所选模板'}</button>
+    </section>
+
     {error && <div className="report-editor-new-error" role="alert"><WarningCircle size={15} /><span>{error}</span></div>}
 
     <section className="report-editor-new-actions">
@@ -246,64 +195,72 @@ function NewReportTaskPanel({
 }
 
 export type ManualEditResult = {
-  title: string
-  subtitle: string
-  binding?: { dimensions: Array<{ role: string; field: string }>; measures: Array<{ role: string; field: string }> }
+  options: ComponentOptions
+  binding?: { dimensions: FieldBinding[]; measures: FieldBinding[] }
 }
 
 /**
- * WEB-RPT-003 属性与数据绑定面板。
- * 绑定只能使用服务端返回的受治理字段与组件合同声明的角色；提交仍走
- * COMPONENT_UPDATE / DATA_BINDING_UPDATE 受控 Operation，不直接覆盖草稿 JSON。
+ * 属性与数据绑定面板。
+ *
+ * 可编辑的表现属性由组件清单的 optionSchema 生成，因此面板暴露的每一项都是
+ * 渲染器真正会读取的配置；绑定只能使用服务端返回的受治理字段与合同声明的角色。
+ * 提交仍走 COMPONENT_UPDATE / DATA_BINDING_UPDATE 受控 Operation。
  */
 function ManualEditDialog({ component, manifest, fields, busy, error, onClose, onSave }: {
   component?: EditorComponent
   manifest?: ComponentManifest
-  fields: string[]
+  fields: DataContextField[]
   busy: boolean
   error: string
   onClose: () => void
   onSave: (result: ManualEditResult) => void
 }) {
-  const [title, setTitle] = useState(component?.options.title || '')
-  const [subtitle, setSubtitle] = useState(component?.options.subtitle || '')
-  const [dimensions, setDimensions] = useState<Array<{ role: string; field: string }>>(
-    component?.dataBinding?.dimensions ?? [],
-  )
-  const [measures, setMeasures] = useState<Array<{ role: string; field: string }>>(
-    component?.dataBinding?.measures ?? [],
-  )
+  const [options, setOptions] = useState<ComponentOptions>(() => ({ ...component?.options }))
+  const [dimensions, setDimensions] = useState<FieldBinding[]>(component?.dataBinding?.dimensions ?? [])
+  const [measures, setMeasures] = useState<FieldBinding[]>(component?.dataBinding?.measures ?? [])
 
   const contract = manifest?.dataContract
   // SEMANTIC_IR 绑定固定语义发布版本，只能由问数或 AI 编排产生，面板不得改写。
   const semanticBound = component?.dataBinding?.bindingMode === 'SEMANTIC_IR'
+  const dimensionFields = fields.filter(field => field.role !== 'MEASURE')
+  const measureFields = fields.filter(field => field.role === 'MEASURE')
   const bindable = Boolean(contract) && fields.length > 0 && !semanticBound
   const roles = contract?.roles ?? []
   const dimensionRoles = roles.filter(role => role !== 'VALUE' && role !== 'Y_AXIS')
   const measureRoles = roles.filter(role => role === 'VALUE' || role === 'Y_AXIS' || role === 'SIZE')
   const dimensionsValid = !contract || (dimensions.length >= contract.dimensions.min && dimensions.length <= contract.dimensions.max)
   const measuresValid = !contract || (measures.length >= contract.measures.min && measures.length <= contract.measures.max)
-  const complete = dimensions.every(item => item.field && item.role) && measures.every(item => item.field && item.role)
+  const complete = dimensions.every(item => item.field && item.role && dimensionFields.some(field => field.code === item.field)) &&
+    measures.every(item => item.field && item.role && measureFields.some(field => field.code === item.field))
   const bindingValid = !bindable || (dimensionsValid && measuresValid && complete)
 
+  // 表现属性直接由清单的 optionSchema 生成，避免面板与渲染器各自维护一份白名单。
+  const styleProperties = Object.entries(manifest?.optionSchema.properties ?? {})
+    .filter(([name]) => name !== 'title' && name !== 'subtitle' && name !== 'richText')
+    .sort(([left], [right]) => left.localeCompare(right))
+
+  const setOption = (name: string, value: unknown) =>
+    setOptions(current => ({ ...current, [name]: value }))
+
   const rows = (
-    label: string, items: Array<{ role: string; field: string }>, allowedRoles: string[], max: number,
-    onChange: (next: Array<{ role: string; field: string }>) => void,
+    label: string, items: FieldBinding[], allowedRoles: BindingRole[], max: number,
+    availableFields: DataContextField[],
+    onChange: (next: FieldBinding[]) => void,
   ) => <div className="report-editor-binding-group">
     <div className="report-editor-binding-head">
       <strong>{label}</strong>
       <button type="button" disabled={items.length >= max || allowedRoles.length === 0}
-        onClick={() => onChange([...items, { role: allowedRoles[0] ?? '', field: fields[0] ?? '' }])}>添加</button>
+        onClick={() => onChange([...items, { role: allowedRoles[0], field: availableFields[0]?.code ?? '' }])}>添加</button>
     </div>
     {items.length === 0 && <p className="report-editor-binding-empty">尚未选择{label}</p>}
     {items.map((item, index) => <div className="report-editor-binding-row" key={`${label}-${index}`}>
       <select aria-label={`${label}角色`} value={item.role}
-        onChange={event => onChange(items.map((row, position) => position === index ? { ...row, role: event.target.value } : row))}>
+        onChange={event => onChange(items.map((row, position) => position === index ? { ...row, role: event.target.value as BindingRole } : row))}>
         {allowedRoles.map(role => <option key={role} value={role}>{role}</option>)}
       </select>
       <select aria-label={`${label}字段`} value={item.field}
         onChange={event => onChange(items.map((row, position) => position === index ? { ...row, field: event.target.value } : row))}>
-        {fields.map(field => <option key={field} value={field}>{field}</option>)}
+        {availableFields.map(field => <option key={field.code} value={field.code}>{field.name || field.code} · {field.code}</option>)}
       </select>
       <button type="button" aria-label={`移除${label}`}
         onClick={() => onChange(items.filter((_, position) => position !== index))}><X size={14} /></button>
@@ -318,8 +275,41 @@ function ManualEditDialog({ component, manifest, fields, busy, error, onClose, o
       </header>
       <div className="report-editor-manual-form">
         <p><Info size={15} />属性与绑定都通过受控 Operation 写入新修订，不会直接覆盖历史。</p>
-        <label>组件标题<input value={title} onChange={event => setTitle(event.target.value)} /></label>
-        <label>组件副标题<input value={subtitle} onChange={event => setSubtitle(event.target.value)} /></label>
+        <label>组件标题<input value={options.title ?? ''} onChange={event => setOption('title', event.target.value)} /></label>
+        <label>组件副标题<input value={options.subtitle ?? ''} onChange={event => setOption('subtitle', event.target.value)} /></label>
+        {manifest?.renderer === 'TEXT' && <label>文字内容
+          <textarea rows={4} value={options.richText ?? ''} onChange={event => setOption('richText', event.target.value)} />
+        </label>}
+
+        {styleProperties.length > 0 && <div className="report-editor-style-group">
+          <strong>表现设置</strong>
+          {styleProperties.map(([name, schema]) => {
+            const value = (options as Record<string, unknown>)[name]
+            if (schema.type === 'boolean') {
+              return <label className="report-editor-style-toggle" key={name}>
+                <input type="checkbox" checked={value === true} onChange={event => setOption(name, event.target.checked)} />
+                <span>{schema.description || name}</span>
+              </label>
+            }
+            if (schema.enum?.length) {
+              return <label key={name}>{schema.description || name}
+                <select value={String(value ?? '')} onChange={event => setOption(name, event.target.value || undefined)}>
+                  <option value="">默认</option>
+                  {schema.enum.map(item => <option key={item} value={item}>{item}</option>)}
+                </select>
+              </label>
+            }
+            if (schema.type === 'integer' || schema.type === 'number') {
+              return <label key={name}>{schema.description || name}
+                <input type="number" min={schema.minimum} max={schema.maximum} value={value === undefined ? '' : String(value)}
+                  onChange={event => setOption(name, event.target.value === '' ? undefined : Number(event.target.value))} />
+              </label>
+            }
+            return <label key={name}>{schema.description || name}
+              <input value={String(value ?? '')} onChange={event => setOption(name, event.target.value || undefined)} />
+            </label>
+          })}
+        </div>}
 
         {semanticBound && <p className="report-editor-binding-note">
           <ShieldCheck size={15} />该组件使用 SEMANTIC_IR 绑定并固定了语义发布版本，只能通过语义升级流程调整。
@@ -335,8 +325,8 @@ function ManualEditDialog({ component, manifest, fields, busy, error, onClose, o
           <p className="report-editor-binding-contract">
             组件合同：维度 {contract.dimensions.min}～{contract.dimensions.max} 个，度量 {contract.measures.min}～{contract.measures.max} 个
           </p>
-          {rows('维度', dimensions, dimensionRoles, contract.dimensions.max, setDimensions)}
-          {rows('度量', measures, measureRoles, contract.measures.max, setMeasures)}
+          {rows('维度', dimensions, dimensionRoles, contract.dimensions.max, dimensionFields, setDimensions)}
+          {rows('度量', measures, measureRoles, contract.measures.max, measureFields, setMeasures)}
           {!dimensionsValid && <p className="report-editor-inline-error"><WarningCircle size={15} />维度数量不满足组件合同</p>}
           {!measuresValid && <p className="report-editor-inline-error"><WarningCircle size={15} />度量数量不满足组件合同</p>}
         </div>}
@@ -345,9 +335,9 @@ function ManualEditDialog({ component, manifest, fields, busy, error, onClose, o
       </div>
       <footer>
         <button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button>
-        <button className="primary-button" type="button" disabled={busy || !title.trim() || !bindingValid}
+        <button className="primary-button" type="button" disabled={busy || !options.title?.trim() || !bindingValid}
           onClick={() => onSave({
-            title: title.trim(), subtitle: subtitle.trim(),
+            options: { ...options, title: options.title?.trim(), subtitle: options.subtitle?.trim() },
             binding: bindable ? { dimensions, measures } : undefined,
           })}>{busy ? '正在保存…' : '保存为新修订'}</button>
       </footer>
@@ -355,20 +345,102 @@ function ManualEditDialog({ component, manifest, fields, busy, error, onClose, o
   </div>
 }
 
+function ComponentLibraryDialog({ manifests, fields, contextId, sectionName, cardName, busy, error, onClose, onAdd }: {
+  manifests: ComponentManifest[]
+  fields: DataContextField[]
+  contextId: string
+  sectionName: string
+  /** 当前选中组件所在的卡片；为空时只能新建卡片。 */
+  cardName: string
+  busy: boolean
+  error: string
+  onClose: () => void
+  onAdd: (manifest: ComponentManifest, title: string, placement: Placement) => void
+}) {
+  const [placement, setPlacement] = useState<Placement>({ mode: 'NEW_CARD' })
+  const [selectedRef, setSelectedRef] = useState(() => manifests[0] ? `${manifests[0].type}@${manifests[0].version}` : '')
+  const selected = manifests.find(item => `${item.type}@${item.version}` === selectedRef)
+  const [title, setTitle] = useState(selected?.displayName || '')
+  const needsData = Boolean(selected && (selected.dataContract.dimensions.min > 0 || selected.dataContract.measures.min > 0))
+  const enoughFields = Boolean(selected &&
+    fields.filter(field => field.role !== 'MEASURE').length >= selected.dataContract.dimensions.min &&
+    fields.filter(field => field.role === 'MEASURE').length >= selected.dataContract.measures.min)
+
+  return <div className="report-modal-backdrop" role="presentation" onMouseDown={onClose}>
+    <section className="report-modal report-component-library" role="dialog" aria-modal="true" aria-labelledby="component-library-title" onMouseDown={event => event.stopPropagation()}>
+      <header><div><span className="eyebrow">组件库</span><h2 id="component-library-title">添加报告组件</h2></div><button type="button" aria-label="关闭" onClick={onClose}><X size={18} /></button></header>
+      <div className="report-component-library-body">
+        <div className="report-component-grid">
+          {manifests.map(manifest => {
+            const ref = `${manifest.type}@${manifest.version}`
+            return <button className={ref === selectedRef ? 'is-selected' : ''} type="button" key={ref} onClick={() => { setSelectedRef(ref); setTitle(manifest.displayName) }}>
+              <span><CirclesFour size={18} /></span><strong>{manifest.displayName}</strong><small>{manifest.category} · {manifest.recommendedSize.w}×{manifest.recommendedSize.h}</small>
+            </button>
+          })}
+        </div>
+        <aside className="report-component-config">
+          <h3>组件配置</h3>
+          <label>组件标题<input value={title} maxLength={80} onChange={event => setTitle(event.target.value)} /></label>
+          {selected && <dl>
+            <div><dt>模板</dt><dd>{selected.displayName}</dd></div>
+            <div><dt>渲染方式</dt><dd>{selected.renderer}</dd></div>
+            <div><dt>尺寸</dt><dd>{selected.recommendedSize.w} × {selected.recommendedSize.h}</dd></div>
+            <div><dt>数据要求</dt><dd>维度 {selected.dataContract.dimensions.min}～{selected.dataContract.dimensions.max}，度量 {selected.dataContract.measures.min}～{selected.dataContract.measures.max}</dd></div>
+            <div><dt>所在章节</dt><dd>{sectionName || '新建章节'}</dd></div>
+          </dl>}
+          <div className="report-component-placement">
+            <strong>放置方式</strong>
+            <label>
+              <input type="radio" name="placement" checked={placement.mode === 'NEW_CARD'}
+                onChange={() => setPlacement({ mode: 'NEW_CARD' })} />
+              <span>新建卡片<small>成为一张可独立拖拽的卡片</small></span>
+            </label>
+            <label className={cardName ? '' : 'is-disabled'}>
+              <input type="radio" name="placement" disabled={!cardName}
+                checked={placement.mode === 'INTO_CARD'}
+                onChange={() => setPlacement({ mode: 'INTO_CARD', zoneKind: 'INSIGHT' })} />
+              <span>加入「{cardName || '当前卡片'}」<small>与卡片内已有内容一起移动和缩放</small></span>
+            </label>
+            {placement.mode === 'INTO_CARD' && <select aria-label="卡片内区域" value={placement.zoneKind}
+              onChange={event => setPlacement({ mode: 'INTO_CARD', zoneKind: event.target.value as ZoneKind })}>
+              {(Object.keys(zoneKindLabels) as ZoneKind[]).map(kind =>
+                <option key={kind} value={kind}>{zoneKindLabels[kind]}</option>)}
+            </select>}
+          </div>
+          {needsData && <p className={enoughFields && contextId ? '' : 'is-error'}><Info size={15} />{enoughFields && contextId ? `将从当前受治理数据上下文中配置 ${selected?.dataContract.dimensions.min ?? 0} 个维度、${selected?.dataContract.measures.min ?? 0} 个度量；加入后可在画布上拖拽调整位置与大小。` : '当前数据上下文的可用字段不足，无法满足此组件合同。'}</p>}
+          {!needsData && <p><Info size={15} />该组件无需数据绑定，可直接加入报告结构。</p>}
+          {error && <p className="is-error"><WarningCircle size={15} />{error}</p>}
+        </aside>
+      </div>
+      <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="button" disabled={busy || !selected || !title.trim() || (needsData && (!enoughFields || !contextId))} onClick={() => selected && onAdd(selected, title.trim(), placement)}>{busy ? '正在添加…' : '添加到报告'}</button></footer>
+    </section>
+  </div>
+}
+
+/**
+ * 报告编辑器。
+ *
+ * 画布用的是与运行页完全相同的 ReportPageView：编辑器只是多传了一个 editing
+ * 回调，把拖拽与缩放翻译成 BLOCK_MOVE / BLOCK_RESIZE 受控 Operation。因此
+ * 「编辑时看到的排版」与「发布后看到的排版」来自同一份 JSON 和同一套渲染实现。
+ */
 export function ReportEditorPage() {
   const { reportId: routeReportId } = useParams()
   const location = useLocation()
   const navigate = useNavigate()
   const newMode = location.pathname === '/reports/new'
-  const reportId = routeReportId ?? snapshotReportId
-  const snapshot = import.meta.env.DEV && new URLSearchParams(location.search).get('snapshot') === 'runtime-draft'
-  const [draft, setDraft] = useState<ReportDraft | null>(snapshot && !newMode ? snapshotDraft : null)
+  const reportId = routeReportId ?? ''
+  const [draft, setDraft] = useState<ReportDraft | null>(null)
   const [asset, setAsset] = useState<ReportAsset | null>(null)
-  const [published, setPublished] = useState<PublishedPreview | undefined>()
+  const [execution, setExecution] = useState<DraftExecution | null>(null)
+  // 与草稿加载一致：执行中的状态由「已结算的数据签名」推导，避免在 effect 内
+  // 同步 setState 触发级联渲染。
+  const [settledSignature, setSettledSignature] = useState('')
+  const [executionError, setExecutionError] = useState('')
   // 加载状态由已结算的报告 ID 推导，避免在 effect 内同步 setState。
   const [settledReportId, setSettledReportId] = useState('')
   const [loadFailure, setLoadFailure] = useState<{ reportId: string; message: string } | null>(null)
-  const loading = !snapshot && !newMode && settledReportId !== reportId
+  const loading = !newMode && settledReportId !== reportId
   const loadError = loadFailure?.reportId === reportId ? loadFailure.message : ''
   const [intent, setIntent] = useState('')
   const [newName, setNewName] = useState('')
@@ -376,41 +448,45 @@ export function ReportEditorPage() {
   const [contextId, setContextId] = useState('')
   const [contextsLoading, setContextsLoading] = useState(newMode)
   const [contextsError, setContextsError] = useState('')
-  const [newCreating, setNewCreating] = useState<'' | 'blank' | 'ai'>('')
+  const [starterTemplates, setStarterTemplates] = useState<ReportStarterTemplate[]>([])
+  const [starterTemplatesLoading, setStarterTemplatesLoading] = useState(newMode)
+  const [selectedTemplateId, setSelectedTemplateId] = useState('')
+  const [newCreating, setNewCreating] = useState<'' | 'blank' | 'template' | 'ai'>('')
   const [scopeMode, setScopeMode] = useState<'page' | 'section'>('page')
-  const [activeSectionId, setActiveSectionId] = useState(snapshotSections[0].id)
-  const [aiPreview, setAIPreview] = useState<AIPreviewResponse | undefined>(snapshot ? snapshotPreview : undefined)
+  const [activeSectionId, setActiveSectionId] = useState('')
+  const [selectedComponentId, setSelectedComponentId] = useState('')
+  const [aiPreview, setAIPreview] = useState<AIPreviewResponse | undefined>()
   const [previewing, setPreviewing] = useState(false)
   const [applying, setApplying] = useState(false)
-  const [operationSelection, setOperationSelection] = useState<Set<number>>(() => new Set(snapshotPreview.preview.bundle.operations.map((_, index) => index)))
-  const [expandedOperations, setExpandedOperations] = useState<Set<number>>(() => new Set([0, 1, 2]))
+  const [operationSelection, setOperationSelection] = useState<Set<number>>(() => new Set())
+  const [expandedOperations, setExpandedOperations] = useState<Set<number>>(() => new Set())
   const [partialDecision, setPartialDecision] = useState<PartialDecision>('retain')
   const [actionError, setActionError] = useState('')
   const [toast, setToast] = useState('')
-  const [manifests, setManifests] = useState<ComponentManifest[]>([])
+  const [manifests, setManifests] = useState<ManifestIndex>(emptyManifestIndex)
   const [manualOpen, setManualOpen] = useState(false)
   const [manualBusy, setManualBusy] = useState(false)
   const [manualError, setManualError] = useState('')
+  const [componentLibraryOpen, setComponentLibraryOpen] = useState(false)
+  const [componentBusy, setComponentBusy] = useState(false)
+  const [componentError, setComponentError] = useState('')
+  const [deleteSectionOpen, setDeleteSectionOpen] = useState(false)
+  const [interactionBusy, setInteractionBusy] = useState(false)
+  const [interactionError, setInteractionError] = useState('')
   const [lastReceipt, setLastReceipt] = useState<{ from: number; to: number; count: number; source: string } | null>(null)
 
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2600) }
 
   useEffect(() => {
-    if (snapshot || newMode) return undefined
+    if (newMode) return undefined
     let cancelled = false
     void Promise.all([reportEditorAPI.getDraft(reportId), reportAssetsAPI.list({ limit: 100 })])
       .then(async ([nextDraft, assets]) => {
         if (cancelled) return
         setDraft(nextDraft)
         setAsset(assets.items.find(item => item.id === reportId) ?? null)
-        const page = nextDraft.definition.pages.slice().sort((a, b) => a.order - b.order)[0]
-        setActiveSectionId(page?.sections.slice().sort((a, b) => a.order - b.order)[0]?.id || '')
-        if (!page) return
-        try {
-          const loaded = await reportRuntimeAPI.load(reportId)
-          const execution = await reportRuntimeAPI.execute(reportId, { pageId: loaded.definition.pages[0]?.id || page.id })
-          if (!cancelled) setPublished({ loaded, execution })
-        } catch { /* Draft-only reports intentionally have no published runtime preview. */ }
+        const page = orderedPages(nextDraft.definition)[0]
+        setActiveSectionId(page ? orderedSections(page)[0]?.id ?? '' : '')
       })
       .catch(cause => {
         if (!cancelled) {
@@ -419,17 +495,52 @@ export function ReportEditorPage() {
       })
       .finally(() => { if (!cancelled) setSettledReportId(reportId) })
     return () => { cancelled = true }
-  }, [newMode, reportId, snapshot])
+  }, [newMode, reportId])
 
-  // 编辑页读取组件模板合同，数据绑定面板据此限制可选角色与维度/度量数量。
+  // 组件清单同时驱动渲染器、组件库与属性面板，编辑页与运行页读的是同一个注册表。
   useEffect(() => {
     if (newMode) return undefined
     let cancelled = false
-    void reportEditorAPI.listComponentManifests()
-      .then(result => { if (!cancelled) setManifests(result.items) })
-      .catch(() => { /* 合同不可用时绑定面板降级为只读，不阻塞编辑器加载。 */ })
+    void listComponentManifests()
+      .then(result => { if (!cancelled) setManifests(indexManifests(result.items)) })
+      .catch(() => { /* 清单不可用时绑定面板降级为只读，不阻塞编辑器加载。 */ })
     return () => { cancelled = true }
   }, [newMode])
+
+  /**
+   * 草稿的数据签名：组件绑定与报告级筛选。
+   *
+   * 拖拽和改标题会改变定义哈希但不会改变查询，因此用签名而不是哈希来决定是否
+   * 重新执行——排版调整保持零查询，改绑定则立刻看到真实数据。
+   */
+  const dataSignature = useMemo(() => JSON.stringify({
+    page: draft ? orderedPages(draft.definition)[0]?.id ?? '' : '',
+    bindings: draft?.definition.components.map(component => [component.id, component.dataBinding]) ?? [],
+    filters: draft?.definition.globalFilters ?? [],
+  }), [draft])
+
+  const executing = Boolean(draft) && settledSignature !== dataSignature
+
+  // 按当前草稿执行组件查询。执行按当前用户权限进行，不产生任何版本或制品。
+  useEffect(() => {
+    if (newMode || !reportId) return undefined
+    const page = draft ? orderedPages(draft.definition)[0] : undefined
+    if (!page) return undefined
+    const controller = new AbortController()
+    void reportEditorAPI.executeDraft(reportId, { pageId: page.id }, { signal: controller.signal })
+      .then(result => {
+        if (controller.signal.aborted) return
+        setExecution(result); setExecutionError('')
+      })
+      .catch(cause => {
+        if (controller.signal.aborted) return
+        setExecutionError(cause instanceof Error ? cause.message : '草稿预览执行失败')
+      })
+      .finally(() => { if (!controller.signal.aborted) setSettledSignature(dataSignature) })
+    return () => controller.abort()
+    // dataSignature 已经涵盖了 draft 中影响查询的全部内容。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataSignature, newMode, reportId])
 
   // 受治理数据上下文在两种模式下都需要：新建页用于选择数据来源，
   // 编辑页用于给数据绑定面板提供当前用户有权使用的字段列表。
@@ -449,33 +560,81 @@ export function ReportEditorPage() {
     return () => { cancelled = true }
   }, [])
 
-  const page = useMemo(() => draft?.definition.pages.slice().sort((a, b) => a.order - b.order)[0], [draft])
-  const activeSection = page?.sections.find(section => section.id === activeSectionId) || page?.sections[0]
-  const selectedComponent = useMemo(() => {
-    if (!draft) return undefined
-    const ids = componentIDs(activeSection)
-    return draft.definition.components.find(component => ids.includes(component.id)) || draft.definition.components[0]
-  }, [activeSection, draft])
+  useEffect(() => {
+    if (!newMode) return undefined
+    let cancelled = false
+    void reportEditorAPI.listStarterTemplates()
+      .then(result => {
+        if (cancelled) return
+        setStarterTemplates(result.items)
+        setSelectedTemplateId(result.items[0]?.id ?? '')
+      })
+      .catch(cause => { if (!cancelled) setActionError(cause instanceof Error ? cause.message : '报告模板读取失败') })
+      .finally(() => { if (!cancelled) setStarterTemplatesLoading(false) })
+    return () => { cancelled = true }
+  }, [newMode])
+
+  const page = useMemo<Page | undefined>(() => draft ? orderedPages(draft.definition)[0] : undefined, [draft])
+  const sections = useMemo(() => page ? orderedSections(page) : [], [page])
+  const activeSection = sections.find(section => section.id === activeSectionId) ?? sections[0]
+  const selectedComponent = useMemo(
+    () => draft?.definition.components.find(component => component.id === selectedComponentId),
+    [draft, selectedComponentId],
+  )
+  const selectedCard = useMemo(
+    () => page && selectedComponentId ? findComponentBlock(page, selectedComponentId) : undefined,
+    [page, selectedComponentId],
+  )
+  const selectedCardId = selectedCard?.block.id ?? ''
+  const currentDataContextId = draft?.definition.dataContexts[0]?.id ?? ''
+  const fieldsForDraft = useMemo(
+    () => governedFieldDefinitions(contexts.find(item => item.dataContext.id === currentDataContextId)),
+    [contexts, currentDataContextId],
+  )
   // 绑定面板只能使用当前报告数据上下文对应的、服务端已按列权限裁剪的字段。
   const bindableFields = useMemo(() => {
-    const contextID = selectedComponent?.dataBinding?.dataContextId ?? draft?.definition.dataContexts[0]?.id
-    return contexts.find(item => item.dataContext.id === contextID)?.fields ?? []
-  }, [contexts, draft, selectedComponent])
-  const selectedManifest = useMemo(
-    () => manifests.find(item =>
-      item.type === selectedComponent?.templateRef.type && item.version === selectedComponent?.templateRef.version),
-    [manifests, selectedComponent],
-  )
-  const canAIEdit = snapshot || Boolean(asset?.allowedActions.includes('AI_EDIT'))
-  const canEdit = snapshot || Boolean(asset?.allowedActions.includes('EDIT'))
-  const canPublish = snapshot || Boolean(asset?.allowedActions.includes('PUBLISH'))
+    const contextID = selectedComponent?.dataBinding?.dataContextId ?? currentDataContextId
+    return governedFieldDefinitions(contexts.find(item => item.dataContext.id === contextID))
+  }, [contexts, currentDataContextId, selectedComponent])
+  const selectedManifest = selectedComponent
+    ? manifests.get(selectedComponent.templateRef.type, selectedComponent.templateRef.version)
+    : undefined
+  const canAIEdit = Boolean(asset?.allowedActions.includes('AI_EDIT'))
+  const canEdit = Boolean(asset?.allowedActions.includes('EDIT'))
+  const canPublish = Boolean(asset?.allowedActions.includes('PUBLISH'))
   const selectedOperationCount = aiPreview?.preview.bundle.operations.filter((_, index) => operationSelection.has(index)).length ?? 0
+  const results = useMemo(
+    () => new Map((execution?.components ?? []).map(item => [item.componentId, item])),
+    [execution],
+  )
+
+  /** 所有画布写操作的唯一出口：提交受控 Operation 并换回服务端归一化后的草稿。 */
+  const commit = async (operations: EditorOperation[], message: string, onError: (text: string) => void) => {
+    if (!draft || operations.length === 0) return null
+    try {
+      const saved = await reportEditorAPI.applyOperations(reportId, bundle(reportId, draft.revisionNo, operations))
+      setDraft(saved.draft)
+      if (message) notify(message)
+      return saved.draft
+    } catch (cause) {
+      if (cause instanceof RequestError && cause.detail.code === 'REPORT_REVISION_CONFLICT') {
+        onError('草稿已被其他协作者更新，请先打开服务端最新修订。')
+      } else if (cause instanceof RequestError && cause.detail.code === 'REPORT_LAYOUT_COLLISION') {
+        onError('该位置与其他区块重叠，请调整落点。')
+      } else {
+        onError(cause instanceof Error ? cause.message : '操作失败')
+      }
+      return null
+    }
+  }
 
   const reloadDraft = async () => {
-    if (snapshot) return
     setActionError('')
-    try { const next = await reportEditorAPI.getDraft(reportId); setDraft(next); setAIPreview(undefined); notify(`已打开服务端最新修订 r${next.revisionNo}`) }
-    catch (cause) { setActionError(cause instanceof Error ? cause.message : '最新修订加载失败') }
+    try {
+      const next = await reportEditorAPI.getDraft(reportId)
+      setDraft(next); setAIPreview(undefined)
+      notify(`已打开服务端最新修订 r${next.revisionNo}`)
+    } catch (cause) { setActionError(cause instanceof Error ? cause.message : '最新修订加载失败') }
   }
 
   const generatePreview = async () => {
@@ -485,7 +644,7 @@ export function ReportEditorPage() {
     const scope: EditorScope = { pageId: page.id, ...(scopeMode === 'section' && activeSection ? { sectionId: activeSection.id } : {}) }
     setPreviewing(true); setActionError('')
     try {
-      const result = snapshot ? await new Promise<AIPreviewResponse>(resolve => window.setTimeout(() => resolve(snapshotPreview), 420)) : await reportEditorAPI.previewAI(reportId, { intent: intent.trim(), dataContextId, scope })
+      const result = await reportEditorAPI.previewAI(reportId, { intent: intent.trim(), dataContextId, scope })
       setAIPreview(result)
       setOperationSelection(new Set(result.preview.bundle.operations.map((_, index) => index)))
       setExpandedOperations(new Set(result.preview.bundle.operations.slice(0, 4).map((_, index) => index)))
@@ -499,18 +658,14 @@ export function ReportEditorPage() {
     if (!draft || !aiPreview || selectedOperationCount === 0) return
     setApplying(true); setActionError('')
     const from = draft.revisionNo
-    const operations = aiPreview.preview.bundle.operations.filter((operation, index) => operationSelection.has(index) && !(partialDecision === 'exclude' && operation.op.startsWith('INSIGHT_')))
-    const bundle: EditorOperationBundle = { ...aiPreview.preview.bundle, operations }
+    const operations = aiPreview.preview.bundle.operations.filter((operation, index) =>
+      operationSelection.has(index) && !(partialDecision === 'exclude' && operation.op.startsWith('INSIGHT_')))
+    // AI 方案沿用服务端返回的 bundle（保留 aiRunId 与 scope），只裁剪用户未勾选的操作。
+    const nextBundle: EditorOperationBundle = { ...aiPreview.preview.bundle, operations }
     try {
-      if (snapshot) {
-        const next = { ...draft, revisionNo: draft.revisionNo + 1, updatedAt: new Date().toISOString() }
-        setDraft(next)
-        setLastReceipt({ from, to: next.revisionNo, count: operations.length, source: 'AI' })
-      } else {
-        const result = await reportEditorAPI.applyOperations(reportId, bundle)
-        setDraft(result.draft)
-        setLastReceipt({ from, to: result.draft.revisionNo, count: operations.length, source: 'AI' })
-      }
+      const result = await reportEditorAPI.applyOperations(reportId, nextBundle)
+      setDraft(result.draft)
+      setLastReceipt({ from, to: result.draft.revisionNo, count: operations.length, source: 'AI' })
       setAIPreview(undefined)
       notify(`已应用 ${operations.length} 项修改并生成新修订`)
     } catch (cause) {
@@ -523,54 +678,101 @@ export function ReportEditorPage() {
     if (!draft || !canEdit) return
     setActionError('')
     try {
-      if (snapshot) {
-        setDraft(current => current ? { ...current, revisionNo: Math.max(1, current.revisionNo + (redo ? 1 : -1)), updatedAt: new Date().toISOString() } : current)
-      } else {
-        const result = redo ? await reportEditorAPI.redo(reportId) : await reportEditorAPI.undo(reportId)
-        setDraft(result.draft)
-      }
+      const result = redo ? await reportEditorAPI.redo(reportId) : await reportEditorAPI.undo(reportId)
+      setDraft(result.draft)
       setAIPreview(undefined); notify(redo ? '已重做并生成新修订' : '已撤销并生成新修订')
     } catch (cause) { setActionError(cause instanceof Error ? cause.message : redo ? '当前没有可重做的修订' : '当前没有可撤销的修订') }
+  }
+
+  /** 拖拽与缩放：碰撞消解后可能连带移动其他区块，一次提交为同一条修订。 */
+  const changeLayout = async (sectionId: string, blockId: string, rect: { x: number; y: number; w: number; h: number }) => {
+    if (!draft || !page || !canEdit) return
+    const section = page.sections.find(item => item.id === sectionId)
+    if (!section) return
+    const block = section.blocks.find(item => item.id === blockId)
+    const componentId = block?.zones.flatMap(zone => zone.slots.map(slot => slot.componentId)).find(Boolean)
+    const component = draft.definition.components.find(item => item.id === componentId)
+    const minimum = minimumSize(component ? manifests.get(component.templateRef.type, component.templateRef.version) : undefined)
+    const operations = layoutOperations(section, blockId, rect, canvasOf(draft.definition).desktop.columns, minimum)
+    await commit(operations, '布局已保存为新修订', setActionError)
   }
 
   const saveManual = async (result: ManualEditResult) => {
     if (!draft || !selectedComponent) return
     setManualBusy(true); setManualError('')
-    const { title, subtitle, binding } = result
-    const operations: EditorOperation[] = [
-      { op: 'COMPONENT_UPDATE', targetId: selectedComponent.id, payload: { options: { ...selectedComponent.options, title, subtitle } } },
-    ]
-    // 数据绑定走独立的 DATA_BINDING_UPDATE：清空绑定与设置绑定是不同的受控语义。
-    if (binding) {
-      const empty = binding.dimensions.length === 0 && binding.measures.length === 0
-      const dataContextId = selectedComponent.dataBinding?.dataContextId ?? draft.definition.dataContexts[0]?.id
-      operations.push(empty || !dataContextId
-        ? { op: 'DATA_BINDING_UPDATE', targetId: selectedComponent.id, payload: { mode: 'CLEAR', dataBinding: null } }
-        : {
-          op: 'DATA_BINDING_UPDATE', targetId: selectedComponent.id,
-          payload: {
-            mode: 'SET',
-            dataBinding: {
-              bindingMode: 'DATASET_FIELD', dataContextId,
-              dimensions: binding.dimensions, measures: binding.measures,
-            },
-          },
-        })
-    }
-    try {
-      const saved = await reportEditorAPI.applyOperations(reportId, {
-        schemaVersion: '1.0', reportId, baseRevision: draft.revisionNo,
-        source: 'USER', aiRunId: null, scope: null, operations,
+    const operations = updateComponentOperations(selectedComponent, result.options, result.binding, currentDataContextId)
+    const saved = await commit(operations, result.binding ? '属性与数据绑定已保存为新修订' : '组件属性已保存为新修订', setManualError)
+    if (saved) setManualOpen(false)
+    setManualBusy(false)
+  }
+
+  const addComponent = async (manifest: ComponentManifest, title: string, placement: Placement) => {
+    if (!draft || !page || !canEdit) return
+    setComponentBusy(true); setComponentError('')
+    if (placement.mode === 'INTO_CARD' && selectedCardId) {
+      const { operations, componentId } = addToCardOperations({
+        page, blockId: selectedCardId, zoneKind: placement.zoneKind,
+        manifest, title, dataContextId: currentDataContextId, fields: fieldsForDraft,
+        newId: () => crypto.randomUUID(),
       })
-      setDraft(saved.draft)
-      setManualOpen(false); notify(binding ? '属性与数据绑定已保存为新修订' : '组件属性已保存为新修订')
-    } catch (cause) {
-      if (cause instanceof RequestError && cause.detail.code === 'REPORT_REVISION_CONFLICT') {
-        setManualError('草稿已被其他协作者更新，请先打开服务端最新修订。')
-      } else {
-        setManualError(cause instanceof Error ? cause.message : '保存失败')
-      }
-    } finally { setManualBusy(false) }
+      const saved = await commit(operations, `${manifest.displayName}已加入当前卡片并生成新修订`, setComponentError)
+      if (saved) { setSelectedComponentId(componentId); setComponentLibraryOpen(false) }
+      setComponentBusy(false)
+      return
+    }
+    const { operations, sectionId, componentId } = addComponentOperations({
+      definition: draft.definition, page, sectionId: activeSection?.id, manifest, title,
+      dataContextId: currentDataContextId, fields: fieldsForDraft, newId: () => crypto.randomUUID(),
+    })
+    const saved = await commit(operations, `${manifest.displayName}已加入报告并生成新修订`, setComponentError)
+    if (saved) {
+      setActiveSectionId(sectionId); setSelectedComponentId(componentId); setComponentLibraryOpen(false)
+    }
+    setComponentBusy(false)
+  }
+
+  const deleteSelectedComponent = async () => {
+    if (!draft || !page || !selectedComponent || !canEdit) return
+    const operations = removeComponentOperations(page, selectedComponent.id)
+    const saved = await commit(operations, '组件已移除并生成新修订', setActionError)
+    if (saved) setSelectedComponentId('')
+  }
+
+  const addInteraction = async (draft: InteractionDraft) => {
+    if (!canEdit) return
+    setInteractionBusy(true); setInteractionError('')
+    await commit(createInteractionOperations(draft, () => crypto.randomUUID()), '联动已保存为新修订', setInteractionError)
+    setInteractionBusy(false)
+  }
+
+  const removeInteraction = async (interactionId: string) => {
+    if (!canEdit) return
+    setInteractionBusy(true); setInteractionError('')
+    await commit(deleteInteractionOperations(interactionId), '联动已移除并生成新修订', setInteractionError)
+    setInteractionBusy(false)
+  }
+
+  const moveSection = async (direction: -1 | 1) => {
+    if (!draft || !page || !activeSection || !canEdit) return
+    const operations = sectionReorderOperations(page, activeSection.id, direction)
+    await commit(operations, direction < 0 ? '章节已上移' : '章节已下移', setActionError)
+  }
+
+  const deleteActiveSection = async () => {
+    if (!draft || !page || !activeSection || !canEdit) return
+    const ids = activeSection.blocks.flatMap(block =>
+      block.zones.flatMap(zone => zone.slots.map(slot => slot.componentId).filter((id): id is string => Boolean(id))))
+    const operations: EditorOperation[] = [
+      { op: 'SECTION_DELETE', targetId: activeSection.id, payload: {} },
+      ...ids.map(id => ({ op: 'COMPONENT_DELETE', targetId: id, payload: {} })),
+    ]
+    setComponentBusy(true); setComponentError('')
+    const saved = await commit(operations, '章节及其组件已移除并生成新修订', setComponentError)
+    if (saved) {
+      setActiveSectionId(orderedPages(saved.definition)[0]?.sections[0]?.id ?? '')
+      setSelectedComponentId(''); setDeleteSectionOpen(false)
+    }
+    setComponentBusy(false)
   }
 
   const createBlankReport = async () => {
@@ -599,15 +801,29 @@ export function ReportEditorPage() {
     } finally { setNewCreating('') }
   }
 
+  const createFromTemplate = async () => {
+    if (!newName.trim() || !contextId || !selectedTemplateId || newCreating) return
+    setNewCreating('template'); setActionError('')
+    try {
+      const result = await reportEditorAPI.instantiateStarterTemplate(selectedTemplateId, {
+        name: newName.trim(), description: intent.trim(), dataContextId: contextId,
+      })
+      navigate(`/reports/${result.report.id}?mode=edit`, { replace: true })
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : '模板报告创建失败，请检查所选数据集字段')
+    } finally { setNewCreating('') }
+  }
+
   if (newMode) return <AppShell className="report-editor-shell" lockBusinessDomain>
     <div className="report-editor-workspace report-editor-new-workspace">
       <header className="report-editor-header"><div><button type="button" onClick={() => navigate('/reports')}><ArrowLeft size={15} />返回报告工作台</button><div className="report-editor-title"><h1>新建报告</h1><span>草稿 r0</span><small>创建后进入编辑器</small></div></div></header>
       <div className="report-editor-body"><NewReportCanvas /><NewReportTaskPanel
         name={newName} intent={intent} contexts={contexts} contextId={contextId}
         contextsLoading={contextsLoading} contextsError={contextsError}
+        templates={starterTemplates} templatesLoading={starterTemplatesLoading} selectedTemplateId={selectedTemplateId}
         creating={newCreating} error={actionError}
-        onName={setNewName} onIntent={setIntent} onContext={setContextId}
-        onCreateBlank={() => void createBlankReport()} onGenerate={() => void createNewReport()}
+        onName={setNewName} onIntent={setIntent} onContext={setContextId} onTemplate={setSelectedTemplateId}
+        onCreateBlank={() => void createBlankReport()} onCreateTemplate={() => void createFromTemplate()} onGenerate={() => void createNewReport()}
       /></div>
     </div>
   </AppShell>
@@ -617,33 +833,151 @@ export function ReportEditorPage() {
 
   return <AppShell className="report-editor-shell" lockBusinessDomain>
     <div className="report-editor-workspace">
-      <header className="report-editor-header"><div><button type="button" onClick={() => navigate(snapshot ? '/reports?snapshot=assets' : '/reports')}><ArrowLeft size={15} />返回报告工作台</button><div className="report-editor-title"><h1>{draft.definition.metadata.name}</h1><span>草稿 r{draft.revisionNo}</span><small>已自动保存 {dateTime(draft.updatedAt).split(' ').at(-1)}</small></div></div><div className="report-editor-header-actions"><button type="button" aria-label="撤销" disabled={!canEdit || applying} onClick={() => void undoRedo(false)}><ArrowUDownLeft size={20} /></button><button type="button" aria-label="重做" disabled={!canEdit || applying} onClick={() => void undoRedo(true)}><ArrowUDownRight size={20} /></button><button className="quiet-button" type="button" disabled={!canEdit} onClick={() => setManualOpen(true)}><NotePencil size={16} />手动精修</button><button className="quiet-button" type="button" disabled={!canPublish || Boolean(aiPreview)} title={aiPreview ? '请先应用或退回当前 AI 方案' : ''} onClick={() => navigate(`/reports/${reportId}/publish-review${snapshot ? '?snapshot=publish-review' : ''}`)}><ShieldCheck size={16} />预览与发布</button><button type="button" aria-label="更多操作"><DotsThree size={19} /></button></div></header>
+      <header className="report-editor-header">
+        <div>
+          <button type="button" onClick={() => navigate('/reports')}><ArrowLeft size={15} />返回报告工作台</button>
+          <div className="report-editor-title"><h1>{draft.definition.metadata.name}</h1><span>草稿 r{draft.revisionNo}</span><small>已自动保存 {dateTime(draft.updatedAt).split(' ').at(-1)}</small></div>
+        </div>
+        <div className="report-editor-header-actions">
+          <button type="button" aria-label="撤销" disabled={!canEdit || applying} onClick={() => void undoRedo(false)}><ArrowUDownLeft size={20} /></button>
+          <button type="button" aria-label="重做" disabled={!canEdit || applying} onClick={() => void undoRedo(true)}><ArrowUDownRight size={20} /></button>
+          <button className="quiet-button" type="button" disabled={!canEdit || manifests.list().length === 0} onClick={() => { setComponentError(''); setComponentLibraryOpen(true) }}><Plus size={16} />添加组件</button>
+          <button className="quiet-button" type="button" disabled={!canEdit || !selectedComponent} onClick={() => setManualOpen(true)}><NotePencil size={16} />属性与绑定</button>
+          <button className="quiet-button is-danger" type="button" disabled={!canEdit || !selectedComponent} onClick={() => void deleteSelectedComponent()}><Trash size={16} />删除组件</button>
+          <button className="quiet-button" type="button" disabled={!canPublish || Boolean(aiPreview)} title={aiPreview ? '请先应用或退回当前 AI 方案' : ''} onClick={() => navigate(`/reports/${reportId}/publish-review`)}><ShieldCheck size={16} />预览与发布</button>
+        </div>
+      </header>
 
-      <section className="report-editor-progress" aria-label="AI 改稿进度"><div className={aiPreview || previewing ? 'is-done' : ''}><CheckCircle size={18} weight="fill" />读取当前修订</div><i /><div className={aiPreview || previewing ? 'is-done' : ''}><CheckCircle size={18} weight="fill" />规划修改</div><i /><div className={aiPreview ? 'is-done' : previewing ? 'is-active' : ''}>{previewing ? <SpinnerGap className="is-spinning" size={18} /> : <CheckCircle size={18} weight="fill" />}验证数据与证据</div><i /><div className={aiPreview ? 'is-active' : ''}><span>4</span>等待确认</div><small>AI 方案预览，不会自动保存 <Info size={14} /></small></section>
+      <div className="report-editor-structure-actions" aria-label="章节布局操作">
+        <span>当前章节：<strong>{activeSection?.name || '尚未添加章节'}</strong></span>
+        <span className="report-editor-selection-hint">{selectedComponent ? `已选中：${selectedComponent.options.title || selectedComponent.templateRef.type}` : '点击画布上的组件即可选中并编辑'}</span>
+        <button type="button" disabled={!activeSection || sections[0]?.id === activeSection?.id} onClick={() => void moveSection(-1)}><ArrowUp size={15} />上移</button>
+        <button type="button" disabled={!activeSection || sections.at(-1)?.id === activeSection?.id} onClick={() => void moveSection(1)}><ArrowDown size={15} />下移</button>
+        <button className="is-danger" type="button" disabled={!activeSection} onClick={() => { setComponentError(''); setDeleteSectionOpen(true) }}><Trash size={15} />删除章节</button>
+      </div>
 
       {actionError && <div className="report-editor-action-error" role="alert"><WarningCircle size={16} /><span>{actionError}</span>{actionError.includes('最新修订') && <button type="button" onClick={() => void reloadDraft()}>打开最新修订</button>}<button type="button" aria-label="关闭错误" onClick={() => setActionError('')}><X size={14} /></button></div>}
 
-      <div className="report-editor-body"><DraftCanvas draft={draft} page={page} activeSectionId={activeSection?.id || ''} preview={aiPreview} published={published} snapshot={snapshot} onSelectSection={id => { setActiveSectionId(id); document.getElementById(`editor-section-${id}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }) }} onManualEdit={() => setManualOpen(true)} />
-        <aside className="report-editor-task-panel"><header><div><h2>AI 改稿会话</h2><span>{aiPreview?.aiRunId || '等待开始'}</span></div><em className={aiPreview ? 'is-pending' : ''}>{previewing ? '思考中' : aiPreview ? '待确认' : '可输入'}</em></header>
-          <section className={`report-editor-ai-message ${previewing ? 'is-thinking' : ''}`}><span><Sparkle size={15} weight="fill" /></span><p>{previewing ? '正在读取当前修订并校验可用数据与证据…' : aiPreview ? `我已生成 ${aiPreview.preview.bundle.operations.length} 项受控修改。你可以在执行计划中选择操作，确认后再应用到新修订。` : '告诉我想怎样修改这份报告。我会先生成可审查的执行计划，不会直接覆盖草稿。'}</p></section>
-          <dl><div><dt>范围</dt><dd>{scopeMode === 'page' ? '当前页面' : activeSection?.name || '当前章节'}</dd></div><div><dt>基准修订</dt><dd>r{aiPreview?.preview.bundle.baseRevision ?? draft.revisionNo}</dd></div><div><dt>发起人</dt><dd>{snapshot ? '王敏 · 10:41' : `当前用户 · ${dateTime(new Date().toISOString()).split(' ').at(-1)}`}</dd></div><div><dt>影响对象</dt><dd>{aiPreview?.preview.affectedComponents.length ?? 0} 个组件</dd></div></dl>
-          <section className="report-editor-plan"><h3>执行计划 <span>（共 {aiPreview?.preview.bundle.operations.length ?? 0} 项）</span></h3>{aiPreview ? aiPreview.preview.bundle.operations.map((operation, index) => { const detail = operationDetail(operation, draft); const expanded = expandedOperations.has(index); return <article className={operationSelection.has(index) ? 'is-selected' : ''} key={`${operation.op}:${operation.targetId}:${index}`}><button type="button" className="report-editor-plan-title" onClick={() => setOperationSelection(current => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next })}><CheckCircle size={17} weight={operationSelection.has(index) ? 'fill' : 'regular'} /><strong>{operationTitle(operation, draft)}</strong><span>{expanded ? <CaretDown size={14} /> : <CaretRight size={14} />}</span></button>{expanded && <div><p><span>操作</span><code>{detail.op}</code></p><p><span>目标</span>{detail.target}</p><p><span>载荷字段</span>{detail.payload}</p><button type="button" onClick={() => setExpandedOperations(current => { const next = new Set(current); next.delete(index); return next })}>收起详情</button></div>}{!expanded && <button className="report-editor-expand" type="button" onClick={() => setExpandedOperations(current => new Set(current).add(index))}>展开详情</button>}</article> }) : <div className="report-editor-plan-empty"><Sparkle size={22} /><strong>等待 AI 改稿要求</strong><p>AI 只会在所选作用域内生成受控修改方案。</p></div>}
+      <div className="report-editor-body">
+        <div className="report-editor-main">
+          <nav className="report-editor-outline" aria-label="报告大纲">
+            <header><strong>报告大纲</strong></header>
+            {sections.map(section => <button className={section.id === activeSectionId ? 'is-active' : ''} type="button" key={section.id}
+              onClick={() => {
+                setActiveSectionId(section.id)
+                document.getElementById(`report-section-${section.id}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+              }}><span />{section.name}</button>)}
+            {sections.length === 0 && <p>尚未添加章节</p>}
+          </nav>
+          <main className={`report-editor-canvas ${aiPreview ? 'has-ai-proposal' : ''}`.trim()}>
+            <article className="report-editor-paper report-editor-live-paper">
+              <header>
+                <div><h2>{draft.definition.metadata.name}</h2><ShieldCheck size={17} weight="fill" /></div>
+                <small>拖动区块顶部的把手移动位置，拖动右下角调整大小；每次改动都会保存为新修订。</small>
+              </header>
+              {draft.definition.metadata.description && <p className="report-editor-description">{draft.definition.metadata.description}</p>}
+              <p className="report-editor-preview-status" aria-live="polite">
+                {executing
+                  ? <><SpinnerGap className="is-spinning" size={14} />正在按你的权限执行当前草稿…</>
+                  : executionError
+                    ? <><WarningCircle size={14} />{executionError}</>
+                    : execution
+                      ? <><CheckCircle size={14} weight="fill" />草稿预览 r{execution.revisionNo} · 数据截至 {dateTime(execution.asOf)}</>
+                      : <><Info size={14} />尚未执行草稿预览</>}
+              </p>
+              {/* 首次执行返回前按设计态呈现；之后组件状态一律来自真实执行结果。 */}
+              <ReportPageView definition={draft.definition} page={page} manifests={manifests} results={results}
+                designMode={!execution}
+                selectedComponentId={selectedComponentId}
+                onSelectComponent={(componentId, blockId) => {
+                  setSelectedComponentId(componentId)
+                  const located = findComponentBlock(page, componentId)
+                  if (located) setActiveSectionId(located.section.id)
+                  else if (blockId) setActiveSectionId(activeSectionId)
+                }}
+                editing={canEdit ? { onLayoutChange: (sectionId, blockId, rect) => void changeLayout(sectionId, blockId, rect) } : undefined} />
+            </article>
+            {aiPreview && <span className="report-editor-preview-label">AI 方案预览，不会自动保存</span>}
+          </main>
+        </div>
+
+        <aside className="report-editor-task-panel">
+          <header><div><h2>AI 改稿会话</h2><span>{aiPreview?.aiRunId || '等待开始'}</span></div><em className={aiPreview ? 'is-pending' : ''}>{previewing ? '思考中' : aiPreview ? '待确认' : '可输入'}</em></header>
+          <section className={`report-editor-ai-message ${previewing ? 'is-thinking' : ''}`.trim()}><span><Sparkle size={15} weight="fill" /></span><p>{previewing ? '正在读取当前修订并校验可用数据与证据…' : aiPreview ? `我已生成 ${aiPreview.preview.bundle.operations.length} 项受控修改。你可以在执行计划中选择操作，确认后再应用到新修订。` : '告诉我想怎样修改这份报告。我会先生成可审查的执行计划，不会直接覆盖草稿。'}</p></section>
+          <dl>
+            <div><dt>范围</dt><dd>{scopeMode === 'page' ? '当前页面' : activeSection?.name || '当前章节'}</dd></div>
+            <div><dt>基准修订</dt><dd>r{aiPreview?.preview.bundle.baseRevision ?? draft.revisionNo}</dd></div>
+            <div><dt>影响对象</dt><dd>{aiPreview?.preview.affectedComponents.length ?? 0} 个组件</dd></div>
+          </dl>
+          <section className="report-editor-plan">
+            <h3>执行计划 <span>（共 {aiPreview?.preview.bundle.operations.length ?? 0} 项）</span></h3>
+            {aiPreview ? aiPreview.preview.bundle.operations.map((operation, index) => {
+              const detail = operationDetail(operation, draft)
+              const expanded = expandedOperations.has(index)
+              return <article className={operationSelection.has(index) ? 'is-selected' : ''} key={`${operation.op}:${operation.targetId}:${index}`}>
+                <button type="button" className="report-editor-plan-title" onClick={() => setOperationSelection(current => {
+                  const next = new Set(current)
+                  if (next.has(index)) next.delete(index); else next.add(index)
+                  return next
+                })}><CheckCircle size={17} weight={operationSelection.has(index) ? 'fill' : 'regular'} /><strong>{operationTitle(operation, draft)}</strong><span>{expanded ? <CaretDown size={14} /> : <CaretRight size={14} />}</span></button>
+                {expanded && <div><p><span>操作</span><code>{detail.op}</code></p><p><span>目标</span>{detail.target}</p><p><span>载荷字段</span>{detail.payload}</p><button type="button" onClick={() => setExpandedOperations(current => { const next = new Set(current); next.delete(index); return next })}>收起详情</button></div>}
+                {!expanded && <button className="report-editor-expand" type="button" onClick={() => setExpandedOperations(current => new Set(current).add(index))}>展开详情</button>}
+              </article>
+            }) : <div className="report-editor-plan-empty"><Sparkle size={22} /><strong>等待 AI 改稿要求</strong><p>AI 只会在所选作用域内生成受控修改方案。</p></div>}
           </section>
-          {aiPreview && aiPreview.preview.bundle.operations.some(operation => operation.op.startsWith('INSIGHT_')) && <section className="report-editor-decision"><h3>待人工确认项 <span>1 项</span></h3><p><WarningCircle size={15} />是否应用 AI 生成的智能结论？<small>结论文本需通过事实校验后才会随报告发布。</small></p><div><button className={partialDecision === 'retain' ? 'is-selected' : ''} type="button" onClick={() => setPartialDecision('retain')}>保留结论</button><button className={partialDecision === 'exclude' ? 'is-selected is-danger' : ''} type="button" onClick={() => setPartialDecision('exclude')}>排除结论</button></div></section>}
-          <section className="report-editor-review-actions"><button className="primary-button" type="button" disabled={!aiPreview || applying || selectedOperationCount === 0} onClick={() => void applyPreview()}>{applying ? <><SpinnerGap className="is-spinning" size={16} />正在生成修订…</> : <>审查并应用 {selectedOperationCount} 项</>}</button><button className="quiet-button" type="button" disabled={!aiPreview || applying} onClick={() => { setAIPreview(undefined); setActionError(''); notify('AI 方案已退回，草稿未发生变化') }}>退回 AI 调整</button></section>
-          <section className="report-editor-composer"><textarea aria-label="AI 改稿要求" value={intent} onChange={event => setIntent(event.target.value)} placeholder="描述你希望 AI 如何修改报告…" /><div><select aria-label="AI 修改作用域" value={scopeMode} onChange={event => setScopeMode(event.target.value as typeof scopeMode)}><option value="page">当前页面</option><option value="section">当前章节</option></select><button className="report-editor-attach" type="button" aria-label="附加证据"><Paperclip size={17} /></button><button className="primary-button" type="button" disabled={previewing || !intent.trim() || !canAIEdit} onClick={() => void generatePreview()}>{previewing ? <SpinnerGap className="is-spinning" size={16} /> : <MagicWand size={16} />}<span>{aiPreview ? '重新生成' : '发送'}</span></button></div></section>
+          {aiPreview && aiPreview.preview.bundle.operations.some(operation => operation.op.startsWith('INSIGHT_')) && <section className="report-editor-decision"><h3>待人工确认项</h3><p><WarningCircle size={15} />是否应用 AI 生成的智能结论？<small>结论文本需通过事实校验后才会随报告发布。</small></p><div><button className={partialDecision === 'retain' ? 'is-selected' : ''} type="button" onClick={() => setPartialDecision('retain')}>保留结论</button><button className={partialDecision === 'exclude' ? 'is-selected is-danger' : ''} type="button" onClick={() => setPartialDecision('exclude')}>排除结论</button></div></section>}
+          <section className="report-editor-review-actions">
+            <button className="primary-button" type="button" disabled={!aiPreview || applying || selectedOperationCount === 0} onClick={() => void applyPreview()}>{applying ? <><SpinnerGap className="is-spinning" size={16} />正在生成修订…</> : <>审查并应用 {selectedOperationCount} 项</>}</button>
+            <button className="quiet-button" type="button" disabled={!aiPreview || applying} onClick={() => { setAIPreview(undefined); setActionError(''); notify('AI 方案已退回，草稿未发生变化') }}>退回 AI 调整</button>
+          </section>
+          {selectedComponent && selectedComponent.dataBinding && <EvidencePanel
+            key={selectedComponent.id} reportId={reportId} component={selectedComponent} canEdit={canEdit} />}
+
+          {selectedComponent && <InteractionPanel definition={draft.definition} manifests={manifests}
+            sourceComponentId={selectedComponent.id} busy={interactionBusy} error={interactionError}
+            onCreate={interactionDraft => void addInteraction(interactionDraft)}
+            onDelete={interactionId => void removeInteraction(interactionId)} />}
+
+          <section className="report-editor-composer">
+            <textarea aria-label="AI 改稿要求" value={intent} onChange={event => setIntent(event.target.value)} placeholder="描述你希望 AI 如何修改报告…" />
+            <div>
+              <select aria-label="AI 修改作用域" value={scopeMode} onChange={event => setScopeMode(event.target.value as typeof scopeMode)}><option value="page">当前页面</option><option value="section">当前章节</option></select>
+              <button className="primary-button" type="button" disabled={previewing || !intent.trim() || !canAIEdit} onClick={() => void generatePreview()}>{previewing ? <SpinnerGap className="is-spinning" size={16} /> : <MagicWand size={16} />}<span>{aiPreview ? '重新生成' : '发送'}</span></button>
+            </div>
+          </section>
         </aside>
       </div>
 
       {/* 收据只陈述本地可确证的事实：修订号、操作数与绑定统计。
           阻断问题与证据校验结论由发布评审的确定性门禁给出，这里不预判。 */}
-      <footer className="report-editor-receipt"><span className="report-editor-receipt-label"><CaretDown size={15} />修改收据</span><div><strong>r{lastReceipt?.from ?? draft.revisionNo}</strong><span>→</span><strong>r{lastReceipt?.to ?? draft.revisionNo + (aiPreview ? 1 : 0)}</strong><small>目标修订</small></div><div><strong>{lastReceipt?.count ?? selectedOperationCount}</strong><small>{lastReceipt ? '已执行操作' : '拟执行操作'}</small></div><div><strong>{draft.definition.components.length}</strong><small>组件</small></div><div><strong>{draft.definition.components.filter(component => component.dataBinding).length}</strong><small>已绑定数据</small></div><span>发布前检查将在「预览与发布」中给出阻断与告警项</span></footer>
+      <footer className="report-editor-receipt">
+        <span className="report-editor-receipt-label"><CaretDown size={15} />修改收据</span>
+        <div><strong>r{lastReceipt?.from ?? draft.revisionNo}</strong><span>→</span><strong>r{lastReceipt?.to ?? draft.revisionNo + (aiPreview ? 1 : 0)}</strong><small>目标修订</small></div>
+        <div><strong>{lastReceipt?.count ?? selectedOperationCount}</strong><small>{lastReceipt ? '已执行操作' : '拟执行操作'}</small></div>
+        <div><strong>{draft.definition.components.length}</strong><small>组件</small></div>
+        <div><strong>{draft.definition.components.filter(component => component.dataBinding).length}</strong><small>已绑定数据</small></div>
+        <span>发布前检查将在「预览与发布」中给出阻断与告警项</span>
+      </footer>
     </div>
     {manualOpen && <ManualEditDialog
+      key={selectedComponent?.id}
       component={selectedComponent} manifest={selectedManifest} fields={bindableFields}
       busy={manualBusy} error={manualError}
       onClose={() => setManualOpen(false)} onSave={result => void saveManual(result)}
     />}
+    {componentLibraryOpen && <ComponentLibraryDialog manifests={manifests.list()} fields={fieldsForDraft} contextId={currentDataContextId}
+      sectionName={activeSection?.name ?? ''}
+      cardName={selectedCard ? selectedComponent?.options.title || '当前卡片' : ''}
+      busy={componentBusy} error={componentError}
+      onClose={() => setComponentLibraryOpen(false)}
+      onAdd={(manifest, title, placement) => void addComponent(manifest, title, placement)} />}
+    {deleteSectionOpen && activeSection && <div className="report-modal-backdrop" role="presentation" onMouseDown={() => setDeleteSectionOpen(false)}>
+      <section className="report-modal report-delete-section-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-section-title" onMouseDown={event => event.stopPropagation()}>
+        <header><div><span className="eyebrow">结构变更</span><h2 id="delete-section-title">删除“{activeSection.name}”</h2></div><button type="button" aria-label="关闭" onClick={() => setDeleteSectionOpen(false)}><X size={18} /></button></header>
+        <div><WarningCircle size={20} /><p>该章节内的 {activeSection.blocks.flatMap(block => block.zones.flatMap(zone => zone.slots.filter(slot => slot.componentId))).length} 个组件将一并移除。系统会生成新修订，仍可通过撤销恢复。</p>{componentError && <span>{componentError}</span>}</div>
+        <footer><button className="quiet-button" type="button" disabled={componentBusy} onClick={() => setDeleteSectionOpen(false)}>取消</button><button className="primary-button is-danger" type="button" disabled={componentBusy} onClick={() => void deleteActiveSection()}>{componentBusy ? '正在删除…' : '确认删除'}</button></footer>
+      </section>
+    </div>}
     {toast && <div className="report-toast" role="status"><Check size={16} weight="bold" />{toast}</div>}
   </AppShell>
 }

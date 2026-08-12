@@ -76,7 +76,7 @@ export function ConversationOutcome({ state, onRetry, onDataRequest }: Conversat
         <div>
           <h2 id="ask-outcome-blocked-title">分析已被受控门禁阻断</h2>
           <p>当前证据不足以安全生成答案；系统已停止执行并保留可审计记录。</p>
-          <small>阻断记录 {shortHash(run.completion?.artifactHash)} · 证据 {run.completion?.evidenceIds.length ?? 0} 项</small>
+          <small>阻断记录 {shortHash(run.completion?.artifactHash)} · 证据 {run.completion?.evidenceIds?.length ?? 0} 项</small>
         </div>
       </section>
     )
@@ -89,7 +89,7 @@ export function ConversationOutcome({ state, onRetry, onDataRequest }: Conversat
         <div>
           <h2 id="ask-outcome-clarification-title">需要确认一个业务口径</h2>
           <p>{run.completion?.clarification?.message || '系统发现多个可用口径，需要定向确认后继续。'}</p>
-          <small>可选口径 {run.completion?.clarification?.options.length ?? 0} 个 · 选择交互将在定向澄清卡片中提供</small>
+          <small>可选口径 {run.completion?.clarification?.options?.length ?? 0} 个 · 选择交互将在定向澄清卡片中提供</small>
         </div>
       </section>
     )
@@ -114,7 +114,7 @@ export function ConversationOutcome({ state, onRetry, onDataRequest }: Conversat
       <div>
         <h2 id="ask-outcome-answered-title">最终回答已生成</h2>
         <p>分析结果已通过受控核验；结果内容将由已验证的表格与图表组件呈现。</p>
-        <small><SealCheck size={13} weight="fill" aria-hidden="true" />回答记录 {shortHash(run.completion?.artifactHash)} · 证据 {run.completion?.evidenceIds.length ?? 0} 项</small>
+        <small><SealCheck size={13} weight="fill" aria-hidden="true" />回答记录 {shortHash(run.completion?.artifactHash)} · 证据 {run.completion?.evidenceIds?.length ?? 0} 项</small>
       </div>
     </section>
   )

@@ -19,6 +19,7 @@ import (
 	askdatafeedback "intelligent-report-generation-system/internal/askdata/feedback"
 	askdatagraph "intelligent-report-generation-system/internal/askdata/graph"
 	askdataorchestrator "intelligent-report-generation-system/internal/askdata/orchestrator"
+	askdataprojection "intelligent-report-generation-system/internal/askdata/projection"
 	askdataregistry "intelligent-report-generation-system/internal/askdata/registry"
 	registryimport "intelligent-report-generation-system/internal/askdata/registry/import"
 	askdatareportasset "intelligent-report-generation-system/internal/askdata/reportasset"
@@ -98,6 +99,15 @@ func main() {
 	}
 	defer warehousePool.Close()
 
+	warehouseQueryStartupCtx, warehouseQueryStartupCancel := context.WithTimeout(ctx, 10*time.Second)
+	warehouseQueryPool, err := database.Open(warehouseQueryStartupCtx, cfg.WarehouseQueryDatabaseURL)
+	warehouseQueryStartupCancel()
+	if err != nil {
+		logger.Error("connect warehouse query database", "error", err)
+		os.Exit(1)
+	}
+	defer warehouseQueryPool.Close()
+
 	graphTLSEnabled, err := strconv.ParseBool(envOrDefault("ASKDATA_NEBULA_TLS_ENABLED", "false"))
 	if err != nil {
 		logger.Error("parse AskData NebulaGraph TLS configuration", "error", err)
@@ -125,6 +135,11 @@ func main() {
 	)
 	if err != nil {
 		logger.Error("initialize AskData release projector", "error", err)
+		os.Exit(1)
+	}
+	runtimeProjectionWorker, err := askdataprojection.NewWorker(askdataprojection.NewPostgresStore(pool))
+	if err != nil {
+		logger.Error("initialize AskData runtime projection worker", "error", err)
 		os.Exit(1)
 	}
 	reportGraphWriter, err := askdatareportasset.NewNebulaReportGraphWriter(graphPool)
@@ -160,14 +175,6 @@ func main() {
 	)
 	if err != nil {
 		logger.Error("initialize report publication recovery worker", "error", err)
-		os.Exit(1)
-	}
-	reportExportRenderer, err := reportpublication.NewHTTPDocumentExportGenerator(
-		cfg.ReportExportRendererURL, cfg.ReportExportRendererToken,
-		&http.Client{Timeout: 2 * time.Minute},
-	)
-	if err != nil {
-		logger.Error("initialize report export renderer", "error", err)
 		os.Exit(1)
 	}
 	excelManager := datasource.NewExcelManager(dataSourceRepo, objectStorage, cfg.MinIOUploadsBucket)
@@ -248,7 +255,7 @@ func main() {
 	)
 	queryService.SetFederatedExecutor(federation.NewExecutor(queryConnectors, excelManager))
 	queryService.SetWarehouseExecutor(
-		queryruntime.NewSeparatedPostgresWarehouseExecutor(pool, warehousePool),
+		queryruntime.NewSeparatedPostgresWarehouseExecutor(pool, warehouseQueryPool),
 	)
 	reportDatasetRunner, err := reportruntime.NewDatasetVersionRunner(queryService)
 	if err != nil {
@@ -268,14 +275,14 @@ func main() {
 		os.Exit(1)
 	}
 	reportPlanValidator, err := askdatavalidator.NewValidator(
-		askdatavalidator.NewPostgresExplainer(warehousePool), askdatavalidator.DefaultLimits(),
+		askdatavalidator.NewPostgresExplainer(warehouseQueryPool), askdatavalidator.DefaultLimits(),
 	)
 	if err != nil {
 		logger.Error("initialize report export semantic validator", "error", err)
 		os.Exit(1)
 	}
 	reportPlanExecutor, err := askdatavalidator.NewExecutor(
-		warehousePool,
+		warehouseQueryPool,
 		queryruntime.NewPostgresSemanticMaterializationRevalidator(pool),
 		queryruntime.NewPostgresSemanticQuestionAuditStore(pool),
 	)
@@ -312,10 +319,34 @@ func main() {
 		logger.Error("initialize report tabular export source", "error", err)
 		os.Exit(1)
 	}
+	reportDocumentFonts, err := reportpublication.LoadDocumentFontSet(os.Getenv("REPORT_EXPORT_FONT_PATH"))
+	if err != nil {
+		logger.Error("initialize report export fonts", "error", err)
+		os.Exit(1)
+	}
+	reportDocumentFallback, err := reportpublication.NewRuntimeDocumentExportGenerator(reportExportSource, reportDocumentFonts)
+	if err != nil {
+		logger.Error("initialize built-in report document renderer", "error", err)
+		os.Exit(1)
+	}
+	var reportDocumentGenerator reportpublication.ExportGenerator = reportDocumentFallback
+	if cfg.ReportExportRendererURL != "" {
+		reportExportRenderer, rendererErr := reportpublication.NewHTTPDocumentExportGenerator(
+			cfg.ReportExportRendererURL, cfg.ReportExportRendererToken,
+			&http.Client{Timeout: 15 * time.Second},
+		)
+		if rendererErr != nil {
+			logger.Error("initialize optional report export renderer", "error", rendererErr)
+			os.Exit(1)
+		}
+		reportDocumentGenerator = reportpublication.FallbackExportGenerator{
+			Primary: reportExportRenderer, Fallback: reportDocumentFallback,
+		}
+	}
 	reportExportWorker, err := reportpublication.NewExportWorker(
 		reportpublication.NewExportJobStore(pool), reportstore.NewPostgresStore(pool),
 		reportpublication.CompositeExportGenerator{
-			Document: reportExportRenderer,
+			Document: reportDocumentGenerator,
 			Tabular:  reportpublication.TabularExportGenerator{Source: reportExportSource},
 		},
 		objectStorage, cfg.MinIOUploadsBucket,
@@ -410,7 +441,7 @@ func main() {
 	dimensionProfileOptions.Budget.MaxRows = int64(cfg.AskDataProfileScanLimit)
 	dimensionProfileWorker, err := askdatadimension.NewWorker(
 		askdatadimension.NewPostgresProfileStore(pool),
-		askdatadimension.NewPostgresWarehouseScanner(warehousePool),
+		askdatadimension.NewPostgresWarehouseScanner(warehouseQueryPool),
 		dimensionProfileOptions,
 	)
 	if err != nil {
@@ -422,6 +453,9 @@ func main() {
 	)
 	go runAskDataGraphProjectionWorker(
 		ctx, logger, graphProjector, workerID, cfg.WorkerPollInterval, cfg.AskDataProjectionLease,
+	)
+	go runAskDataRuntimeProjectionWorker(
+		ctx, logger, runtimeProjectionWorker, workerID, cfg.WorkerPollInterval, cfg.AskDataProjectionLease,
 	)
 	go runReportAssetProjectionWorker(
 		ctx, logger, reportAssetProjectionWorker, cfg.WorkerPollInterval,
@@ -500,6 +534,7 @@ func main() {
 		Graph:      askDataGraphResolver,
 		Compiler:   askDataPinnedCompiler,
 		Validator:  reportPlanValidator,
+		Coverage:   reportCoverage,
 		Executor:   reportPlanExecutor,
 		Dictionary: askDataDictionary,
 	}, askDataCognition, askdataorchestrator.DefaultLoopOptions())
@@ -518,6 +553,21 @@ func main() {
 		logger.Error("initialize AskData question run worker", "error", err)
 		os.Exit(1)
 	}
+	questionRetention, err := askdataorchestrator.NewRetentionPolicy(askdataorchestrator.RetentionConfig{
+		QuestionMode: askdataorchestrator.OriginalQuestionMode(cfg.AskDataQuestionRetentionMode),
+		QuestionTTL:  cfg.AskDataQuestionRetentionTTL, RunArtifactTTL: cfg.AskDataRunArtifactTTL,
+		QuestionEncryptionKey: cfg.AskDataQuestionEncryptionKey,
+	})
+	if err != nil {
+		logger.Error("initialize AskData question retention", "error", err)
+		os.Exit(1)
+	}
+	questionEnvelopes, err := askdataorchestrator.NewPostgresQuestionEnvelopeStore(pool, questionRetention)
+	if err != nil {
+		logger.Error("initialize AskData question envelopes", "error", err)
+		os.Exit(1)
+	}
+	questionRunWorker.SetQuestionFactSource(questionEnvelopes)
 	go runAskDataQuestionRunWorker(ctx, logger, questionRunWorker, askDataLeases, cfg.WorkerPollInterval)
 	go runAskDataSemanticImportWorker(
 		ctx,
@@ -893,6 +943,33 @@ func runAskDataGraphProjectionWorker(
 		}
 		return processed, nil
 	}, func(err error) { logger.Error("list AskData graph projection tenants", "error", err) })
+}
+
+func runAskDataRuntimeProjectionWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	worker *askdataprojection.Worker,
+	workerID string,
+	pollInterval time.Duration,
+	lease time.Duration,
+) {
+	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
+		processed := false
+		for _, target := range askdataprojection.RuntimeTargets {
+			tenantIDs, err := worker.TenantIDs(ctx, target)
+			if err != nil {
+				return processed, err
+			}
+			for _, tenantID := range tenantIDs {
+				didProcess, runErr := worker.ProcessNext(ctx, tenantID, target, workerID, lease)
+				if runErr != nil {
+					logger.Error("process AskData runtime projection", "tenant_id", tenantID, "target", target, "error", runErr)
+				}
+				processed = processed || didProcess
+			}
+		}
+		return processed, nil
+	}, func(err error) { logger.Error("list AskData runtime projection tenants", "error", err) })
 }
 
 func runReportAssetProjectionWorker(

@@ -51,9 +51,9 @@ func (service *PostgresService) AddToReport(
 		return AddToReportResult{}, err
 	}
 	chart := answer.RecommendChart(chartRuleInput(semanticIR, queryPlan, answerArtifact), registryValue)
-	datasetVersionID := queryPlan.Plans[0].Source.DatasetVersionID
-	for _, plan := range queryPlan.Plans {
-		if plan.Source.DatasetVersionID != datasetVersionID {
+	datasetVersionID := queryPlan.Sources[0].DatasetVersionID
+	for _, source := range queryPlan.Sources {
+		if source.DatasetVersionID != datasetVersionID {
 			return AddToReportResult{}, ErrAddToReportNotAccepted
 		}
 	}
@@ -116,12 +116,13 @@ func (service *PostgresService) GetAddToReportIntent(
 
 func addToReportIntentResult(intent reportasset.Intent) AddToReportResult {
 	return AddToReportResult{IntentID: intent.ID, ReportID: intent.ReportID, RunID: intent.QuestionRunID,
-		Status: string(intent.State), PreviewHash: intent.PreviewHash, Replayed: intent.Replayed}
+		Status: string(intent.State), PreviewHash: intent.PreviewHash, RejectionCode: intent.RejectionCode,
+		RejectionDetail: intent.RejectionDetail, Replayed: intent.Replayed}
 }
 
-func reportExportArtifacts(snapshot orchestrator.ReplaySnapshot) (ircontract.SemanticIR, askcompiler.QueryArtifact, answer.AnswerArtifact, error) {
+func reportExportArtifacts(snapshot orchestrator.ReplaySnapshot) (ircontract.SemanticIR, askcompiler.ReportQuerySnapshot, answer.AnswerArtifact, error) {
 	var semanticIR ircontract.SemanticIR
-	var query askcompiler.QueryArtifact
+	var query askcompiler.ReportQuerySnapshot
 	var answerArtifact answer.AnswerArtifact
 	irCount, planCount, answerCount := 0, 0, 0
 	for _, artifact := range snapshot.Artifacts {
@@ -133,8 +134,20 @@ func reportExportArtifacts(snapshot orchestrator.ReplaySnapshot) (ircontract.Sem
 			}
 			semanticIR, irCount = value, irCount+1
 		case orchestrator.ArtifactQueryPlan:
-			if askdata.DecodeStrictJSON(artifact.Payload, &query) != nil || query.Validate() != nil {
-				return semanticIR, query, answerArtifact, ErrAddToReportNotAccepted
+			if artifact.SchemaVersion == askcompiler.ReportQuerySnapshotVersion {
+				if askdata.DecodeStrictJSON(artifact.Payload, &query) != nil || query.Validate() != nil {
+					return semanticIR, query, answerArtifact, ErrAddToReportNotAccepted
+				}
+			} else {
+				var legacy askcompiler.QueryArtifact
+				if askdata.DecodeStrictJSON(artifact.Payload, &legacy) != nil || legacy.Validate() != nil {
+					return semanticIR, query, answerArtifact, ErrAddToReportNotAccepted
+				}
+				value, snapshotErr := askcompiler.NewReportQuerySnapshot(legacy)
+				if snapshotErr != nil {
+					return semanticIR, query, answerArtifact, ErrAddToReportNotAccepted
+				}
+				query = value
 			}
 			planCount++
 		case orchestrator.ArtifactAnswer:
@@ -148,9 +161,9 @@ func reportExportArtifacts(snapshot orchestrator.ReplaySnapshot) (ircontract.Sem
 			answerArtifact, answerCount = value, answerCount+1
 		}
 	}
-	if irCount != 1 || planCount != 1 || answerCount != 1 || query.IRHash != snapshot.Run.Hashes.SemanticIR ||
+	if irCount != 1 || planCount != 1 || answerCount != 1 || query.SemanticIRHash != snapshot.Run.Hashes.SemanticIR ||
 		query.PlanHash != snapshot.Run.Hashes.QueryPlan || semanticIR.SemanticReleaseID != snapshot.Run.Release.ReleaseID ||
-		semanticIR.SemanticContentHash != snapshot.Run.Release.ContentHash || len(query.Plans) == 0 {
+		semanticIR.SemanticContentHash != snapshot.Run.Release.ContentHash || len(query.Sources) == 0 {
 		return semanticIR, query, answerArtifact, ErrAddToReportNotAccepted
 	}
 	return semanticIR, query, answerArtifact, nil
@@ -169,17 +182,53 @@ func decodeSemanticIRArtifact(raw json.RawMessage) (ircontract.SemanticIR, error
 	return ircontract.Decode(envelope.SemanticIR)
 }
 
+// SavedQuestionSemanticIR returns the exact governed Semantic IR that produced
+// an answered run.  Saved-question clients deliberately do not receive raw IR;
+// the server resolves and validates the artifact at this trust boundary.
+func SavedQuestionSemanticIR(snapshot orchestrator.ReplaySnapshot) (ircontract.SemanticIR, error) {
+	if snapshot.Run.State != orchestrator.StateAnswered || snapshot.Run.Hashes.SemanticIR.Validate() != nil {
+		return ircontract.SemanticIR{}, ErrAddToReportNotAccepted
+	}
+	var selected ircontract.SemanticIR
+	count := 0
+	for _, artifact := range snapshot.Artifacts {
+		if artifact.Type != orchestrator.ArtifactSemanticIR {
+			continue
+		}
+		value, err := decodeSemanticIRArtifact(artifact.Payload)
+		if err != nil {
+			return ircontract.SemanticIR{}, ErrAddToReportNotAccepted
+		}
+		selected, count = value, count+1
+	}
+	_, _, semanticHash, canonicalErr := ircontract.Canonicalize(selected)
+	if count != 1 || canonicalErr != nil || semanticHash != snapshot.Run.Hashes.SemanticIR ||
+		selected.SemanticReleaseID != snapshot.Run.Release.ReleaseID ||
+		selected.SemanticContentHash != snapshot.Run.Release.ContentHash {
+		return ircontract.SemanticIR{}, ErrAddToReportNotAccepted
+	}
+	return selected, nil
+}
+
 func decodeAnswerEnvelope(raw json.RawMessage) (answer.AnswerArtifact, error) {
 	if value, err := answer.Decode(raw); err == nil {
 		return value, nil
 	}
 	var envelope struct {
-		Answer json.RawMessage `json:"answer"`
+		Artifact json.RawMessage `json:"artifact"`
+		Answer   json.RawMessage `json:"answer"`
 	}
 	if json.Unmarshal(raw, &envelope) != nil {
 		return answer.AnswerArtifact{}, ErrAddToReportNotAccepted
 	}
-	return answer.Decode(envelope.Answer)
+	artifact := envelope.Artifact
+	if len(artifact) == 0 {
+		artifact = envelope.Answer
+	}
+	if len(artifact) == 0 {
+		return answer.AnswerArtifact{}, ErrAddToReportNotAccepted
+	}
+	return answer.Decode(artifact)
 }
 
 func (service *PostgresService) resolveReportTarget(ctx context.Context, identity RequestIdentity, input AddToReportInput) (
@@ -238,7 +287,7 @@ func (service *PostgresService) resolveReportTarget(ctx context.Context, identit
 	return pageID, sectionID, revision, maxY, nil
 }
 
-func chartRuleInput(ir ircontract.SemanticIR, query askcompiler.QueryArtifact, artifact answer.AnswerArtifact) answer.ChartRuleInput {
+func chartRuleInput(ir ircontract.SemanticIR, query askcompiler.ReportQuerySnapshot, artifact answer.AnswerArtifact) answer.ChartRuleInput {
 	nonTime := len(ir.GroupBy)
 	timeGrain := ""
 	for _, group := range ir.GroupBy {

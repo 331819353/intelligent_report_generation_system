@@ -28,8 +28,8 @@ func (securityContext ToolSecurityContext) Validate() error {
 	if authorization.Scope.Validate() != nil || authorization.DomainID.Validate() != nil ||
 		!containsToolSecurityID(authorization.Scope.DomainIDs, authorization.DomainID) ||
 		len(authorization.Permissions) == 0 || len(authorization.Permissions) > 10 ||
-		securityContext.Budget.ToolCallsRemaining < 0 || securityContext.Budget.ToolCallsRemaining > 8 ||
-		securityContext.Budget.FormalQueriesRemaining < 0 || securityContext.Budget.FormalQueriesRemaining > 2 ||
+		securityContext.Budget.ToolCallsRemaining < 0 || securityContext.Budget.ToolCallsRemaining > 16 ||
+		securityContext.Budget.FormalQueriesRemaining < 0 || securityContext.Budget.FormalQueriesRemaining > 6 ||
 		securityContext.Budget.ValidationQueriesRemaining < 0 || securityContext.Budget.ValidationQueriesRemaining > 3 {
 		return ErrInvalidToolSecurityContext
 	}

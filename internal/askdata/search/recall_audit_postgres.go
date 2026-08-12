@@ -320,10 +320,26 @@ func (store *PostgresRetrievalStore) recordQuerySamples(
 	}
 	vectorText := formatEmbeddingVector(vector)
 	return database.WithTenantTx(ctx, store.pool, string(scope.TenantID), func(tx pgx.Tx) error {
+		sampleTypes := make([]ObjectType, 0, len(objectTypes))
+		seenTypes := map[ObjectType]bool{}
 		for _, objectType := range objectTypes {
-			if !validRetrievalObjectType(objectType) {
+			if !ValidRetrievalObjectType(objectType) {
 				return ErrInvalidRetrieval
 			}
+			// MEASURE is the historical projection name for a metric. Recall
+			// sampling uses the canonical analytical class so one query cannot
+			// create two statistically identical groups during mixed-version
+			// rollouts.
+			if objectType == ObjectMeasureLegacy {
+				objectType = ObjectMetric
+			}
+			if seenTypes[objectType] {
+				continue
+			}
+			seenTypes[objectType] = true
+			sampleTypes = append(sampleTypes, objectType)
+		}
+		for _, objectType := range sampleTypes {
 			sampleHash := askdata.HashBytes([]byte(strings.Join([]string{
 				string(scope.TenantID), access.DomainID, string(scope.Release.ReleaseID),
 				string(scope.Release.ContentHash), string(objectType), strings.TrimSpace(model), vectorText,

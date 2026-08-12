@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,6 +23,10 @@ type Repository interface {
 	Share(context.Context, Identity, askdata.ID, ShareInput) error
 	Promote(context.Context, Identity, askdata.ID) error
 	Archive(context.Context, Identity, askdata.ID) error
+}
+
+type AtomicCreator interface {
+	CreateWithShare(context.Context, Identity, CreateInput, ShareInput) (SavedQuestion, error)
 }
 
 type Page struct {
@@ -48,16 +53,28 @@ type Launcher interface {
 	LaunchSavedQuestion(context.Context, LaunchInput) (LaunchResult, error)
 }
 
+// RunResolver resolves the governed Semantic IR on the server. Browser clients
+// only submit the source run and display metadata, so they cannot forge a saved
+// question by supplying a different IR.
+type RunResolver interface {
+	ResolveSavedQuestionIR(context.Context, Identity, askdata.ID) (ircontract.SemanticIR, error)
+}
+
 type HTTPHandler struct {
 	repository Repository
 	launcher   Launcher
+	runs       RunResolver
 }
 
-func NewHandler(authService *auth.Service, repository Repository, launcher Launcher) http.Handler {
+func NewHandler(authService *auth.Service, repository Repository, launcher Launcher, runResolver ...RunResolver) http.Handler {
 	handler := &HTTPHandler{repository: repository, launcher: launcher}
+	if len(runResolver) > 0 {
+		handler.runs = runResolver[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/askdata/saved-questions", handler.list)
 	mux.HandleFunc("POST /api/v1/askdata/saved-questions", handler.create)
+	mux.HandleFunc("POST /api/v1/askdata/saved-questions/from-run", handler.createFromRun)
 	mux.HandleFunc("GET /api/v1/askdata/saved-questions/{id}", handler.get)
 	mux.HandleFunc("POST /api/v1/askdata/saved-questions/{id}/open", handler.open)
 	mux.HandleFunc("POST /api/v1/askdata/saved-questions/{id}/share", handler.share)
@@ -69,6 +86,56 @@ func NewHandler(authService *auth.Service, repository Repository, launcher Launc
 		mux.ServeHTTP(writer, request)
 	})
 	return auth.RequireAccessToken(authService, protected)
+}
+
+func (handler *HTTPHandler) createFromRun(writer http.ResponseWriter, request *http.Request) {
+	identity, ok := httpIdentity(writer, request)
+	if !ok {
+		return
+	}
+	if handler.runs == nil {
+		writeSavedError(writer, errors.New("saved question run resolver unavailable"))
+		return
+	}
+	var body struct {
+		Name                string        `json:"name"`
+		QuestionText        string        `json:"questionText"`
+		Visibility          Visibility    `json:"visibility"`
+		SourceQuestionRunID askdata.ID    `json:"sourceQuestionRunId"`
+		PrincipalType       PrincipalType `json:"principalType,omitempty"`
+		PrincipalID         askdata.ID    `json:"principalId,omitempty"`
+	}
+	if decodeSavedJSON(request, &body) != nil || body.SourceQuestionRunID.Validate() != nil ||
+		(body.PrincipalID == "") != (body.PrincipalType == "") {
+		writeSavedError(writer, ErrInvalid)
+		return
+	}
+	semanticIR, err := handler.runs.ResolveSavedQuestionIR(request.Context(), identity, body.SourceQuestionRunID)
+	if err != nil {
+		writeSavedError(writer, err)
+		return
+	}
+	createInput := CreateInput{
+		Name: body.Name, QuestionText: body.QuestionText, Visibility: body.Visibility,
+		SemanticIR: semanticIR, SourceQuestionRunID: body.SourceQuestionRunID,
+	}
+	var item SavedQuestion
+	if body.PrincipalID != "" {
+		creator, supported := handler.repository.(AtomicCreator)
+		share := ShareInput{PrincipalType: body.PrincipalType, PrincipalID: body.PrincipalID}
+		if !supported || share.Validate() != nil || body.Visibility != Team {
+			writeSavedError(writer, ErrInvalid)
+			return
+		}
+		item, err = creator.CreateWithShare(request.Context(), identity, createInput, share)
+	} else {
+		item, err = handler.repository.Create(request.Context(), identity, createInput)
+	}
+	if err != nil {
+		writeSavedError(writer, err)
+		return
+	}
+	writeSavedJSON(writer, http.StatusCreated, item)
 }
 
 func (handler *HTTPHandler) list(writer http.ResponseWriter, request *http.Request) {
@@ -176,6 +243,7 @@ func (handler *HTTPHandler) open(writer http.ResponseWriter, request *http.Reque
 		Identity: identity, Question: item, IdempotencyKey: key,
 	})
 	if err != nil {
+		slog.ErrorContext(request.Context(), "launch saved question", "saved_question_id", id, "error", err)
 		writeSavedError(writer, err)
 		return
 	}
@@ -295,16 +363,16 @@ func requireEmptyBody(request *http.Request) error {
 }
 
 func writeSavedError(writer http.ResponseWriter, err error) {
-	status, code := http.StatusInternalServerError, "SAVED_QUESTION_FAILED"
+	status, code, message := http.StatusInternalServerError, "SAVED_QUESTION_FAILED", "收藏服务暂时不可用，请稍后重试。"
 	switch {
 	case errors.Is(err, ErrInvalid):
-		status, code = http.StatusBadRequest, "SAVED_QUESTION_INVALID"
+		status, code, message = http.StatusBadRequest, "SAVED_QUESTION_INVALID", "收藏内容或来源运行无效，请刷新结果后重试。"
 	case errors.Is(err, ErrNotFound):
-		status, code = http.StatusNotFound, "SAVED_QUESTION_NOT_FOUND"
+		status, code, message = http.StatusNotFound, "SAVED_QUESTION_NOT_FOUND", "该收藏不存在或已归档。"
 	case errors.Is(err, ErrPermissionDenied):
-		status, code = http.StatusForbidden, "SAVED_QUESTION_FORBIDDEN"
+		status, code, message = http.StatusForbidden, "SAVED_QUESTION_FORBIDDEN", "当前账号无权访问或共享该收藏。"
 	}
-	writeSavedJSON(writer, status, map[string]string{"code": code})
+	writeSavedJSON(writer, status, map[string]string{"code": code, "message": message})
 }
 
 func writeSavedJSON(writer http.ResponseWriter, status int, value any) {

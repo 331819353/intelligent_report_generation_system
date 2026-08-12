@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasource"
+	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/policy"
 	"intelligent-report-generation-system/internal/querycompiler"
 )
@@ -258,18 +259,30 @@ type runtimeSnapshot struct {
 func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string, snapshot runtimeSnapshot, input dataset.PreviewInput, runType string) (dataset.PreviewResult, error) {
 	document, err := dataset.DecodeAndNormalize(snapshot.DSL)
 	if err != nil {
-		return dataset.PreviewResult{}, dataset.ErrInvalidDocument
+		return dataset.PreviewResult{}, fmt.Errorf("decode runtime snapshot: %w", dataset.ErrInvalidDocument)
+	}
+	// GetVersion above is the asset-access boundary: it proves that the current
+	// viewer may read the published root dataset. Resolving and revalidating that
+	// immutable version can legitimately touch private upstream datasets and
+	// materializations that are implementation details of the shared root asset.
+	// Run that trusted metadata/data-plane work in tenant SYSTEM mode while still
+	// loading and compiling the viewer's row/column policies from the original
+	// authenticated context below. Otherwise PostgreSQL FOR SHARE turns a valid
+	// read of a DOMAIN-shared dataset into an empty result for non-owners.
+	executionContext := ctx
+	if snapshot.ExactVersion {
+		executionContext = database.WithoutAccessContext(ctx)
 	}
 	// DSL 中只有资产 ID；每次执行都从控制库重新解析物理白名单并加载当前策略，
 	// 因而草稿不能缓存旧表名或旧权限来绕过撤权。
 	var resolved ResolvedPlan
 	if snapshot.ExactVersion {
-		resolved, err = s.store.ResolveVersion(ctx, tenantID, snapshot.DatasetID, snapshot.VersionID, document)
+		resolved, err = s.store.ResolveVersion(executionContext, tenantID, snapshot.DatasetID, snapshot.VersionID, document)
 	} else {
 		resolved, err = s.store.Resolve(ctx, tenantID, document)
 	}
 	if err != nil {
-		return dataset.PreviewResult{}, err
+		return dataset.PreviewResult{}, fmt.Errorf("resolve runtime snapshot: %w", err)
 	}
 	if resolved.Engine == "" {
 		// Compatibility for in-process resolvers compiled before the warehouse
@@ -287,18 +300,18 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	}
 	scope, rowPolicies, columnPolicies, err := s.policies.Load(ctx, tenantID, actorID, "DATASET", policyObjectID)
 	if err != nil {
-		return dataset.PreviewResult{}, err
+		return dataset.PreviewResult{}, fmt.Errorf("load runtime policy: %w", err)
 	}
 	maxRows := input.MaxRows
 	if maxRows == 0 {
 		maxRows = min(document.ExecutionPolicy.PreviewLimit, 100)
 	}
 	if maxRows < 1 || maxRows > document.ExecutionPolicy.PreviewLimit {
-		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+		return dataset.PreviewResult{}, fmt.Errorf("runtime row limit %d exceeds preview limit %d: %w", maxRows, document.ExecutionPolicy.PreviewLimit, dataset.ErrPreviewInvalid)
 	}
 	queryID, err := queryIdentifier(input.QueryID)
 	if err != nil {
-		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+		return dataset.PreviewResult{}, fmt.Errorf("runtime query identifier: %w", dataset.ErrPreviewInvalid)
 	}
 
 	// 数据库和文件路径共用同一审计记录与生命周期；分支只负责生成各自的执行计划。
@@ -310,15 +323,15 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	}
 	if resolved.Engine == ExecutionPostgreSQL {
 		return s.previewWarehouse(
-			ctx, tenantID, executionDocument, resolved, input.Parameters, scope,
+			executionContext, tenantID, executionDocument, resolved, input.Parameters, scope,
 			rowPolicies, columnPolicies, maxRows, baseRun,
 		)
 	}
-	quota, err := s.sources.Quota(ctx, tenantID)
+	quota, err := s.sources.Quota(executionContext, tenantID)
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
-	sources, err := s.loadSources(ctx, tenantID, resolved, quota)
+	sources, err := s.loadSources(executionContext, tenantID, resolved, quota)
 	if err != nil {
 		return dataset.PreviewResult{}, err
 	}
@@ -331,16 +344,16 @@ func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string,
 	baseRun.Sources = resolvedRunSources(queryID, sourceAuditType, resolved)
 	if executionDocument.Dataset.Type == "CROSS_SOURCE" ||
 		resolved.SourceSampleLimit > 0 {
-		return s.previewFederated(ctx, sources, snapshot.PlanHash, executionDocument, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
+		return s.previewFederated(executionContext, sources, snapshot.PlanHash, executionDocument, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
 	}
 	source, ok := sources[resolved.SourceID]
 	if !ok {
 		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
 	}
 	if resolved.SourceType == datasource.TypeExcel {
-		return s.previewFile(ctx, source, snapshot.PlanHash, executionDocument, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
+		return s.previewFile(executionContext, source, snapshot.PlanHash, executionDocument, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
 	}
-	return s.previewDatabase(ctx, source, executionDocument, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
+	return s.previewDatabase(executionContext, source, executionDocument, resolved, input.Parameters, scope, rowPolicies, columnPolicies, maxRows, baseRun)
 }
 
 func editablePreviewRowLimit(document dataset.Document) int {
@@ -469,11 +482,11 @@ func (s *Service) previewWarehouse(
 ) (dataset.PreviewResult, error) {
 	if s.warehouse == nil || resolved.Engine != ExecutionPostgreSQL ||
 		len(resolved.Materializations) == 0 || len(resolved.Tables) == 0 {
-		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
+		return dataset.PreviewResult{}, fmt.Errorf("warehouse runtime unavailable: %w", dataset.ErrPreviewUnsupported)
 	}
 	normalized, err := querycompiler.NormalizeParameters(document.Parameters, parameters)
 	if err != nil {
-		return dataset.PreviewResult{}, fmt.Errorf("%w: %v", dataset.ErrPreviewInvalid, err)
+		return dataset.PreviewResult{}, fmt.Errorf("normalize warehouse runtime parameters: %w", dataset.ErrPreviewInvalid)
 	}
 	// Audit the structured plan and immutable materialization identities rather
 	// than retaining generated SQL or parameter values.
@@ -489,14 +502,14 @@ func (s *Service) previewWarehouse(
 		Rows:             rowPolicies, Columns: columnPolicies,
 	})
 	if err != nil {
-		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+		return dataset.PreviewResult{}, fmt.Errorf("encode warehouse runtime plan: %w", dataset.ErrPreviewInvalid)
 	}
 	bindingJSON, err := json.Marshal(struct {
 		Parameters map[string]any
 		Scope      policy.UserScope
 	}{Parameters: normalized, Scope: scope})
 	if err != nil {
-		return dataset.PreviewResult{}, dataset.ErrPreviewInvalid
+		return dataset.PreviewResult{}, fmt.Errorf("encode warehouse runtime binding: %w", dataset.ErrPreviewInvalid)
 	}
 	run.PlanHash, run.ParameterHash = hash(planJSON), hash(bindingJSON)
 	return s.execute(

@@ -1,13 +1,14 @@
 import {
+  BookmarkSimple,
   CaretDown,
   ChartBarHorizontal,
   CheckCircle,
   Database,
   DownloadSimple,
-  DotsThree,
   FileText,
   LinkSimple,
   PaperPlaneRight,
+  Path,
   Plus,
   Pulse,
   ShareNetwork,
@@ -25,6 +26,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'rea
 import { useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { AddToReportDialog } from '../components/ask-data/AddToReportDialog'
+import { CreateDecisionDialog } from '../components/decision/CreateDecisionDialog'
 import { ClarificationCard } from '../components/ask-data/ClarificationCard'
 import { ConversationRail } from '../components/ask-data/ConversationRail'
 import { ConversationOutcome } from '../components/ask-data/ConversationOutcome'
@@ -32,10 +34,12 @@ import { ConversationProgress } from '../components/ask-data/ConversationProgres
 import { EvidencePanel } from '../components/ask-data/EvidencePanel'
 import { FeedbackDialog } from '../components/ask-data/FeedbackDialog'
 import { ResultWorkspace } from '../components/ask-data/ResultWorkspace'
+import { SaveQuestionDialog } from '../components/ask-data/SaveQuestionDialog'
 import { ReleaseDriftCard } from '../components/ask-data/ReleaseDriftCard'
 import { ReleaseDriftEvidencePanel } from '../components/ask-data/ReleaseDriftEvidencePanel'
 import { latestQuestionState } from '../components/ask-data/conversation-progress'
 import { questionResultReady } from '../components/ask-data/result-presentation'
+import { renderTimeSpec } from '../askdata/format/timespec'
 import { useAskDataQuestion } from '../hooks/use-ask-data-question'
 import { MyDataRequests } from '../askdata/datarequest/MyDataRequests'
 import type { DataRequestPrefill } from '../askdata/datarequest/DataRequestDialog'
@@ -147,6 +151,7 @@ const DEMO_CLARIFICATION_RUN: QuestionRun = {
   disposition: 'CLARIFY',
   completion: {
     code: 'METRIC_DEFINITION_AMBIGUOUS',
+    artifactId: '00000000-0000-4000-8000-000000000122',
     artifactType: 'CLARIFICATION',
     artifactHash: 'a'.repeat(64),
     evidenceIds: ['evidence:paid-sales', 'evidence:net-sales'],
@@ -197,6 +202,7 @@ const DEMO_CLARIFICATION_RUN: QuestionRun = {
   createdAt: '2026-08-06T10:38:00+08:00',
   updatedAt: '2026-08-06T10:38:06+08:00',
   completedAt: '2026-08-06T10:38:06+08:00',
+  allowedActions: [],
 }
 
 const DEMO_SCOPE_DETAIL_RUN: QuestionRun = {
@@ -205,7 +211,7 @@ const DEMO_SCOPE_DETAIL_RUN: QuestionRun = {
   state: 'BLOCKED',
   disposition: 'REFUSE',
   completion: {
-    code: 'SCOPE_DETAIL_LIST', artifactType: 'BLOCK', artifactHash: 'd'.repeat(64), evidenceIds: [],
+    code: 'SCOPE_DETAIL_LIST', artifactId: '00000000-0000-4000-8000-000000000134', artifactType: 'BLOCK', artifactHash: 'd'.repeat(64), evidenceIds: [],
     scopeVerdict: {
       schemaVersion: 'question-scope-verdict-v1', type: 'DETAIL_LIST', outcome: 'OUT_OF_SCOPE',
       reason: 'SCOPE_DETAIL_LIST',
@@ -330,13 +336,14 @@ const DEMO_RESULT_RUN: QuestionRun = {
   state: 'ANSWERED',
   disposition: 'DIRECT',
   completion: {
-    code: 'ANSWER_READY', artifactType: 'ANSWER', artifactHash: 'c'.repeat(64),
+    code: 'ANSWER_READY', artifactId: '00000000-0000-4000-8000-000000000135', artifactType: 'ANSWER', artifactHash: 'c'.repeat(64),
     evidenceIds: DEMO_RESULT.evidenceIds, result: DEMO_RESULT,
   },
   recordVersion: 18,
   lastEventId: 18,
   updatedAt: '2026-08-07T10:38:31+08:00',
   completedAt: '2026-08-07T10:38:31+08:00',
+  allowedActions: ['SAVE', 'SHARE', 'EXPORT', 'CREATE_DECISION', 'ADD_TO_REPORT'],
 }
 
 const DEMO_DEGRADED_RUN: QuestionRun = {
@@ -442,6 +449,8 @@ export function AskDataPage() {
   const [activeConversationLabel, setActiveConversationLabel] = useState(resultSnapshot ? MARGIN_QUESTION : '')
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0)
   const [addToReportOpen, setAddToReportOpen] = useState(false)
+  const [createDecisionOpen, setCreateDecisionOpen] = useState(false)
+  const [saveQuestionOpen, setSaveQuestionOpen] = useState(false)
   const [toast, setToast] = useState('')
   const [selectedClarificationOption, setSelectedClarificationOption] = useState<ClarificationOption | undefined>(
     DEMO_CLARIFICATION_RUN.completion?.clarification?.options[0],
@@ -473,9 +482,15 @@ export function AskDataPage() {
     let cancelled = false
     void questionAPI.getConversation(routeConversationId, { runLimit: 1 }).then(detail => {
       if (cancelled) return undefined
+		setToast('')
       setActiveConversationID(detail.conversation.conversationId)
-      setActiveConversationLabel(detail.conversation.label)
-      setQuestion(detail.conversation.label)
+      setActiveConversationLabel(current => detail.conversation.label === '分析会话' && current
+        ? current
+        : detail.conversation.label)
+      // A conversation title is navigation metadata, not the next question.
+      // Using the fallback title ("分析会话") as composer content caused an
+      // accidental follow-up whenever users reopened a blocked conversation.
+      setQuestion('')
       setMode('live')
       return resumeQuestion(detail.conversation.latestRunId)
     }).catch(cause => {
@@ -526,16 +541,19 @@ export function AskDataPage() {
     const submittedQuestion = verifiedAnswerVisible ? followUp.trim() : question.trim()
     if (!submittedQuestion || liveActive) return
     setMode('live')
+		setToast('')
     setFeedback(null)
     setFeedbackDialogOpen(false)
     setFeedbackError('')
     setExpandedResult(false)
+    if (!activeConversationID || !activeConversationLabel || activeConversationLabel === '分析会话') {
+      setActiveConversationLabel(submittedQuestion)
+    }
+    if (verifiedAnswerVisible) setFollowUp('')
+    else setQuestion('')
     void createQuestion(submittedQuestion, activeConversationID || undefined).then(run => {
       if (!run) return
       setActiveConversationID(run.conversationId)
-      if (!activeConversationLabel) setActiveConversationLabel(submittedQuestion)
-      setQuestion(submittedQuestion)
-      setFollowUp('')
       setHistoryRefreshKey(value => value + 1)
       if (!designSnapshot) navigate(`/ask-data/conversations/${run.conversationId}`)
     })
@@ -543,6 +561,7 @@ export function AskDataPage() {
 
   const startNewQuestion = () => {
     setWorkspaceView('ask')
+		setToast('')
     resetQuestion()
     setQuestion('')
     setFollowUp('')
@@ -568,9 +587,10 @@ export function AskDataPage() {
 
   const chooseConversation = (conversation: ConversationSummary) => {
     resetQuestion()
+		setToast('')
     setActiveConversationID(conversation.conversationId)
     setActiveConversationLabel(conversation.label)
-    setQuestion(conversation.label)
+    setQuestion('')
     setFeedback(null)
     setFeedbackDialogOpen(false)
     setFeedbackError('')
@@ -586,6 +606,7 @@ export function AskDataPage() {
   const retryQuestion = () => {
     if (!question.trim()) return
     setMode('live')
+		setToast('')
     setFeedback(null)
     setFeedbackDialogOpen(false)
     setFeedbackError('')
@@ -695,8 +716,17 @@ export function AskDataPage() {
     setDataRequestDialogOpen(true)
   }
 
-  const presentedRun = mode === 'snapshot-complete' ? DEMO_RESULT_RUN : activeResultRun ?? questionState.run
-  const verifiedAnswerVisible = mode === 'snapshot-complete' || Boolean(activeResultRun)
+	const presentedRun = mode === 'snapshot-complete' ? DEMO_RESULT_RUN : activeResultRun ?? questionState.run
+	const verifiedAnswerVisible = mode === 'snapshot-complete' || Boolean(activeResultRun)
+	const activeResultTime = activeResultRun?.completion?.result?.resolvedTimeSpec
+		? renderTimeSpec(activeResultRun.completion.result.resolvedTimeSpec)
+		: undefined
+	const conversationContextLabel = verifiedAnswerVisible
+		? activeResultTime
+			? `${activeResultTime.asOfLabel} · ${activeResultTime.rangeLabel}`
+			: '已通过受控结果校验'
+		: '当前领域：企业经营 · 仅使用已发布语义口径'
+  const evidenceQuestion = activeConversationLabel || question
   const notify = (message: string) => {
     setToast(message)
     window.setTimeout(() => setToast(''), 2600)
@@ -742,16 +772,17 @@ export function AskDataPage() {
         dialogPrefill={dataRequestPrefill}
         onDialogOpenChange={setDataRequestDialogOpen}
       /> : <div className="ask-workbench">
-        <ConversationRail snapshot={designSnapshot} activeConversationId={activeConversationID} refreshKey={historyRefreshKey} onNew={startNewQuestion} onSelect={chooseConversation} />
+        <ConversationRail snapshot={designSnapshot} activeConversationId={activeConversationID} refreshKey={historyRefreshKey} onNew={startNewQuestion} onSelect={chooseConversation} onActiveChange={conversation => setActiveConversationLabel(conversation.label)} />
 
         <section className="ask-conversation" aria-label="问数对话与结果">
           <header className="ask-conversation-heading">
-            <div><div className="ask-conversation-title-row"><h2>{activeConversationLabel || question || '开始一个新问题'}</h2>{verifiedAnswerVisible && <span><CheckCircle size={13} weight="fill" />已验证</span>}</div><p>{verifiedAnswerVisible ? '数据截至：2026-08-09 23:59 · 2026-08-10 10:12 更新' : '当前领域：企业经营 · 仅使用已发布语义口径'}</p></div>
+            <div><div className="ask-conversation-title-row"><h2>{activeConversationLabel || question || '开始一个新问题'}</h2>{verifiedAnswerVisible && <span><CheckCircle size={13} weight="fill" />已验证</span>}</div><p>{conversationContextLabel}</p></div>
             <div className="ask-answer-actions">
-              <button type="button" disabled={!verifiedAnswerVisible || !presentedRun} onClick={() => setAddToReportOpen(true)}><FileText size={16} />加入报告</button>
+              <button type="button" title={presentedRun && !presentedRun.allowedActions.includes('SAVE') ? '当前结果尚未形成可收藏的语义快照' : undefined} disabled={!verifiedAnswerVisible || !presentedRun?.allowedActions.includes('SAVE')} onClick={() => setSaveQuestionOpen(true)}><BookmarkSimple size={16} />收藏</button>
+              <button type="button" title={presentedRun && !presentedRun.allowedActions.includes('ADD_TO_REPORT') ? '该历史结果未保留完整报告快照，可重新提问后加入报告' : undefined} disabled={!verifiedAnswerVisible || !presentedRun?.allowedActions.includes('ADD_TO_REPORT')} onClick={() => setAddToReportOpen(true)}><FileText size={16} />加入报告</button>
+              <button type="button" title={presentedRun && !presentedRun.allowedActions.includes('CREATE_DECISION') ? '当前结果尚未形成可固定的验证证据' : undefined} disabled={!verifiedAnswerVisible || !presentedRun?.allowedActions.includes('CREATE_DECISION')} onClick={() => designSnapshot ? notify('设计快照不写入业务数据；真实答案会固定证据并创建决策') : setCreateDecisionOpen(true)}><Path size={16} />形成决策</button>
               <button type="button" disabled={!verifiedAnswerVisible} onClick={exportVisibleResult}><DownloadSimple size={16} />导出<CaretDown size={12} /></button>
               <button type="button" disabled={!activeConversationID} onClick={() => void shareConversation()}><ShareNetwork size={16} />分享</button>
-              <button type="button" aria-label="更多操作" onClick={() => notify('可从左侧会话菜单完成置顶、重命名和归档')}><DotsThree size={18} /></button>
             </div>
           </header>
 
@@ -847,12 +878,12 @@ export function AskDataPage() {
         </section>
 
         <aside className="ask-evidence-panel" aria-label="证据与可信度">
-          {activeReleaseDrift ? <ReleaseDriftEvidencePanel question={question} drift={activeReleaseDrift} /> : activeClarificationRun ? <EvidencePanel
-            question={question}
+          {activeReleaseDrift ? <ReleaseDriftEvidencePanel question={evidenceQuestion} drift={activeReleaseDrift} /> : activeClarificationRun ? <EvidencePanel
+            question={evidenceQuestion}
             run={activeClarificationRun}
             option={selectedClarificationOption}
           /> : activeResultRun?.completion?.result ? <EvidencePanel
-            question={question}
+            question={evidenceQuestion}
             run={activeResultRun}
             result={activeResultRun.completion.result}
             graphDegraded={graphDegraded}
@@ -928,6 +959,26 @@ export function AskDataPage() {
         run={presentedRun}
         onClose={() => setAddToReportOpen(false)}
         onApplied={() => notify('已加入报告草稿，证据与当前问数运行已固定')}
+      />}
+      {workspaceView === 'ask' && saveQuestionOpen && presentedRun && <SaveQuestionDialog
+        open={saveQuestionOpen}
+        run={presentedRun}
+        question={activeConversationLabel || question || presentedRun.completion?.result?.title || '经营分析'}
+        snapshot={designSnapshot}
+        onClose={() => setSaveQuestionOpen(false)}
+        onSaved={() => notify('已收藏，可从首页或常用问题再次运行')}
+      />}
+      {workspaceView === 'ask' && createDecisionOpen && presentedRun?.completion?.artifactId && <CreateDecisionDialog
+        open={createDecisionOpen}
+        source={{
+          type: 'ANSWER_ARTIFACT', id: presentedRun.completion.artifactId, label: '智能问数已验证答案',
+          title: `${presentedRun.completion.result?.summary.metricLabel || activeConversationLabel || '经营分析'}决策`,
+          question: activeConversationLabel || question || presentedRun.completion.result?.title || '',
+          decision: presentedRun.completion.answer?.narrative?.summary || '',
+          expectedEffect: `围绕“${presentedRun.completion.result?.summary.metricLabel || '关键经营指标'}”形成可执行方案，并在复盘日验证实际结果。`,
+        }}
+        onClose={() => setCreateDecisionOpen(false)}
+        onCreated={decisionId => { setCreateDecisionOpen(false); navigate(`/decisions?decisionId=${encodeURIComponent(decisionId)}`) }}
       />}
       {toast && <div className="ask-toast" role="status"><CheckCircle size={16} weight="fill" />{toast}</div>}
     </AppShell>

@@ -2,6 +2,7 @@ package cognition
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"testing"
 
@@ -17,6 +18,32 @@ func TestEmbeddedActionSchemaMatchesTheCanonicalContract(t *testing.T) {
 	}
 	if !bytes.Equal(bytes.TrimSpace(canonical), bytes.TrimSpace(actionSchemaJSON)) {
 		t.Fatal("embedded cognition action schema has drifted from api/schemas/cognition-action-v1.schema.json")
+	}
+}
+
+// SemanticIR 的 Provider 契约必须覆盖 Go 侧所有无默认值的必填字段。
+// 若这里遗漏，模型会按 schema 合法地省略字段，却在本地 Decode 时失败。
+func TestSemanticIRSchemaCarriesPinnedScopeAndResultPolicies(t *testing.T) {
+	var schema map[string]any
+	if err := json.Unmarshal(actionSchemaJSON, &schema); err != nil {
+		t.Fatal(err)
+	}
+	definitions := schema["$defs"].(map[string]any)
+	semanticIR := definitions["semanticIr"].(map[string]any)
+	requiredValues := semanticIR["required"].([]any)
+	required := make(map[string]bool, len(requiredValues))
+	for _, value := range requiredValues {
+		required[value.(string)] = true
+	}
+	properties := semanticIR["properties"].(map[string]any)
+	for _, name := range []string{"domainId", "otherPolicy", "tieBreaking"} {
+		if !required[name] || properties[name] == nil {
+			t.Fatalf("semanticIr schema does not require %s", name)
+		}
+	}
+	limit := properties["limit"].(map[string]any)
+	if maximum, ok := limit["maximum"].(float64); !ok || maximum != 1000 {
+		t.Fatalf("semanticIr limit maximum = %v, want 1000", limit["maximum"])
 	}
 }
 

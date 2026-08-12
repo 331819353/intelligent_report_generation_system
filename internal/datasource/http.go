@@ -20,10 +20,18 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 	if len(managers) > 0 {
 		credentials = managers[0]
 	}
-	managed := func(next http.Handler) http.Handler {
-		return auth.RequireAccessToken(authService, access.Require(permissions, "DATA_SOURCE", "MANAGE", nil, next))
+	permit := func(action string, objectScoped bool, next http.Handler) http.Handler {
+		var objectID func(*http.Request) string
+		if objectScoped {
+			objectID = func(request *http.Request) string { return request.PathValue("id") }
+		}
+		return auth.RequireAccessToken(authService, access.Require(permissions, "DATA_SOURCE", action, objectID, next))
 	}
-	mux.Handle("GET /api/v1/data-sources", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	readCatalog := func(next http.Handler) http.Handler { return permit("READ", false, next) }
+	readObject := func(next http.Handler) http.Handler { return permit("READ", true, next) }
+	createObject := func(next http.Handler) http.Handler { return permit("MANAGE", false, next) }
+	manageObject := func(next http.Handler) http.Handler { return permit("MANAGE", true, next) }
+	mux.Handle("GET /api/v1/data-sources", readCatalog(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		items, err := service.List(r.Context(), c.TenantID)
 		if err != nil {
@@ -35,7 +43,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		}
 		writeDSJSON(w, 200, map[string]any{"items": items})
 	})))
-	mux.Handle("POST /api/v1/data-sources", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/data-sources", createObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		var in dataSourceInput
 		if !decodeDS(w, r, &in) {
@@ -74,7 +82,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		auditDS(r, service, c.TenantID, c.Subject, "CREATE", created.ID, map[string]any{"type": created.Type, "status": created.Status})
 		writeDSJSON(w, 201, publicDataSource(r.Context(), created, credentials))
 	})))
-	mux.Handle("PUT /api/v1/data-sources/{id}", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("PUT /api/v1/data-sources/{id}", manageObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		var in dataSourceInput
 		if !decodeDS(w, r, &in) {
@@ -118,7 +126,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		auditDS(r, service, c.TenantID, c.Subject, "UPDATE", updated.ID, map[string]any{"type": updated.Type, "status": updated.Status})
 		writeDSJSON(w, 200, publicDataSource(r.Context(), updated, credentials))
 	})))
-	mux.Handle("GET /api/v1/data-sources/{id}", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/v1/data-sources/{id}", readObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		source, err := service.Get(r.Context(), c.TenantID, r.PathValue("id"))
 		if err != nil {
@@ -127,7 +135,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		}
 		writeDSJSON(w, 200, publicDataSource(r.Context(), source, credentials))
 	})))
-	mux.Handle("GET /api/v1/data-sources/{id}/tables/discovery", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/v1/data-sources/{id}/tables/discovery", manageObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		result, err := service.DiscoverTables(r.Context(), c.TenantID, r.PathValue("id"))
 		if err != nil {
@@ -136,7 +144,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		}
 		writeDSJSON(w, 200, map[string]any{"items": result.Tables, "total": len(result.Tables)})
 	})))
-	mux.Handle("POST /api/v1/data-sources/{id}/file-inspection", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/data-sources/{id}/file-inspection", manageObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		inspection, err := service.InspectFileSource(r.Context(), c.TenantID, r.PathValue("id"))
 		if err != nil {
@@ -147,7 +155,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		auditDS(r, service, c.TenantID, c.Subject, "INSPECT_FILE_STRUCTURE", r.PathValue("id"), map[string]any{"sheets": len(inspection.Sheets), "sampleLimit": inspection.SampleLimit})
 		writeDSJSON(w, http.StatusOK, inspection)
 	})))
-	mux.Handle("POST /api/v1/data-sources/{id}/tables/import", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/data-sources/{id}/tables/import", manageObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		var input struct {
 			Tables         []TableSelection   `json:"tables"`
@@ -180,7 +188,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		})
 		writeDSJSON(w, http.StatusAccepted, job)
 	})))
-	mux.Handle("POST /api/v1/data-sources/{id}/tables/refresh", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/data-sources/{id}/tables/refresh", manageObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		var input struct {
 			Mode           MetadataRefreshMode `json:"mode"`
@@ -215,7 +223,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		})
 		writeDSJSON(w, http.StatusAccepted, job)
 	})))
-	mux.Handle("GET /api/v1/data-sources/{id}/metadata-jobs/latest-active", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/v1/data-sources/{id}/metadata-jobs/latest-active", readObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		job, err := service.LatestActiveMetadataJob(r.Context(), c.TenantID, r.PathValue("id"))
 		if err != nil {
@@ -224,7 +232,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		}
 		writeDSJSON(w, 200, map[string]any{"job": job})
 	})))
-	mux.Handle("GET /api/v1/data-sources/{id}/metadata-jobs/{jobId}", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/v1/data-sources/{id}/metadata-jobs/{jobId}", readObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		job, err := service.GetMetadataJob(r.Context(), c.TenantID, r.PathValue("id"), r.PathValue("jobId"))
 		if errors.Is(err, ErrMetadataJobNotFound) {
@@ -238,7 +246,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		writeDSJSON(w, 200, job)
 	})))
 	action := func(run func(contextClaims, *http.Request, string) error) http.Handler {
-		return managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		return manageObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims, _ := auth.ClaimsFromContext(r.Context())
 			if err := run(contextClaims{claims.TenantID}, r, r.PathValue("id")); err != nil {
 				if errors.Is(err, ErrDatasetReferenced) {
@@ -275,7 +283,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		}
 		return err
 	}))
-	mux.Handle("POST /api/v1/data-sources/{id}/test", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/data-sources/{id}/test", manageObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		job, err := service.QueueConnectionTest(
 			r.Context(), c.TenantID, c.Subject, r.PathValue("id"),
@@ -300,7 +308,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		})
 		writeDSJSON(w, http.StatusAccepted, job)
 	})))
-	mux.Handle("GET /api/v1/data-sources/{id}/connection-tests/{jobId}", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/v1/data-sources/{id}/connection-tests/{jobId}", manageObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		job, err := service.GetConnectionTest(
 			r.Context(), c.TenantID, r.PathValue("id"), r.PathValue("jobId"),
@@ -316,7 +324,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		}
 		writeDSJSON(w, http.StatusOK, job)
 	})))
-	mux.Handle("POST /api/v1/data-sources/{id}/publish", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/data-sources/{id}/publish", manageObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		published, err := service.Publish(r.Context(), c.TenantID, c.Subject, r.PathValue("id"))
 		if err != nil {
@@ -342,7 +350,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		})
 		writeDSJSON(w, http.StatusOK, publicDataSource(r.Context(), published, credentials))
 	})))
-	mux.Handle("POST /api/v1/data-sources/{id}/sync", managed(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/data-sources/{id}/sync", manageObject(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		result, err := service.Sync(r.Context(), c.TenantID, r.PathValue("id"))
 		if err != nil {

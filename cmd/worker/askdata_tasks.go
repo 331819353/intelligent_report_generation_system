@@ -15,6 +15,7 @@ import (
 
 	askdatadimension "intelligent-report-generation-system/internal/askdata/dimension"
 	askdatagraph "intelligent-report-generation-system/internal/askdata/graph"
+	askdataprojection "intelligent-report-generation-system/internal/askdata/projection"
 	askdatareportasset "intelligent-report-generation-system/internal/askdata/reportasset"
 	askdatasearch "intelligent-report-generation-system/internal/askdata/search"
 	"intelligent-report-generation-system/internal/config"
@@ -134,7 +135,7 @@ func runSelectedAskDataTasks(
 
 	if selection.has(workerTaskProfile) {
 		warehouseCtx, warehouseCancel := context.WithTimeout(ctx, 10*time.Second)
-		warehousePool, openErr := database.Open(warehouseCtx, cfg.WarehouseDatabaseURL)
+		warehousePool, openErr := database.Open(warehouseCtx, cfg.WarehouseQueryDatabaseURL)
 		warehouseCancel()
 		if openErr != nil {
 			return fmt.Errorf("connect selected profile warehouse: %w", openErr)
@@ -173,6 +174,10 @@ func runSelectedAskDataTasks(
 		if createErr != nil {
 			return fmt.Errorf("initialize selected semantic projector: %w", createErr)
 		}
+		runtimeProjectionWorker, createErr := askdataprojection.NewWorker(askdataprojection.NewPostgresStore(pool))
+		if createErr != nil {
+			return fmt.Errorf("initialize selected runtime projector: %w", createErr)
+		}
 		reportWriter, createErr := askdatareportasset.NewNebulaReportGraphWriter(graphPool)
 		if createErr != nil {
 			return fmt.Errorf("initialize selected report projector writer: %w", createErr)
@@ -186,6 +191,11 @@ func runSelectedAskDataTasks(
 		start(func() {
 			runAskDataGraphProjectionWorker(
 				ctx, logger, projector, workerID, cfg.WorkerPollInterval, cfg.AskDataProjectionLease,
+			)
+		})
+		start(func() {
+			runAskDataRuntimeProjectionWorker(
+				ctx, logger, runtimeProjectionWorker, workerID, cfg.WorkerPollInterval, cfg.AskDataProjectionLease,
 			)
 		})
 		start(func() {

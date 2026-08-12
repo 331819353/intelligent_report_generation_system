@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"intelligent-report-generation-system/internal/askdata"
+	"intelligent-report-generation-system/internal/askdata/ircontract"
 	"intelligent-report-generation-system/internal/askdata/registry"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
 	"intelligent-report-generation-system/internal/platform/database"
@@ -734,13 +735,16 @@ func prepareCreateRequest(ctx context.Context, request CreateRunRequest) (string
 				return "", preparedCreate{}, fmt.Errorf("%w: saved question seed source is invalid", ErrInvalidRun)
 			}
 		}
-		var object map[string]json.RawMessage
-		if unmarshalErr := json.Unmarshal(seed.SemanticIR, &object); unmarshalErr != nil || object == nil {
+		canonical, canonicalErr := canonicalSeedPayload(seed.SemanticIR)
+		if canonicalErr != nil {
 			return "", preparedCreate{}, fmt.Errorf("%w: seed semantic IR is invalid", ErrInvalidRun)
-		} else if canonical, marshalErr := json.Marshal(object); marshalErr != nil ||
-			!bytes.Equal(canonical, seed.SemanticIR) || askdata.HashBytes(canonical) != seed.SemanticIRHash {
+		}
+		semanticIR, decodeErr := ircontract.Decode(canonical)
+		_, canonical, semanticHash, canonicalErr := ircontract.Canonicalize(semanticIR)
+		if decodeErr != nil || canonicalErr != nil || semanticHash != seed.SemanticIRHash {
 			return "", preparedCreate{}, fmt.Errorf("%w: seed semantic IR is not canonical", ErrInvalidRun)
 		}
+		seed.SemanticIR = canonical
 	}
 	limits := request.Limits
 	if limits.IsZero() {
@@ -835,7 +839,7 @@ func createRunTx(ctx context.Context, tx pgx.Tx, prepared preparedCreate) (Run, 
 		if parent.ConversationID != prepared.run.ConversationID ||
 			parent.TenantID != prepared.run.TenantID || parent.DomainID != prepared.run.DomainID ||
 			parent.ActorID != prepared.run.ActorID || parent.State != StateClarificationRequired ||
-			parent.BudgetConsumed == nil || prepared.run.Usage != *parent.BudgetConsumed {
+			parent.BudgetConsumed == nil || prepared.run.Usage != (BudgetUsage{}) {
 			return Run{}, false, ErrPinnedScopeMismatch
 		}
 	}
@@ -973,9 +977,11 @@ func seedMatchesRunTx(ctx context.Context, tx pgx.Tx, run Run, expected *SeedCon
 			WHERE tenant_id=$1 AND question_run_id=$2`, run.TenantID, run.ID,
 		).Scan(&savedQuestionID, &semanticIR, &semanticIRHash, &pinnedReleaseID)
 		canonical, canonicalErr := canonicalSeedPayload(semanticIR)
+		expectedCanonical, expectedErr := canonicalSeedPayload(expected.SemanticIR)
 		return err == nil && canonicalErr == nil && savedQuestionID == string(expected.SavedQuestionID) &&
+			expectedErr == nil &&
 			semanticIRHash == expected.SemanticIRHash && pinnedReleaseID == string(expected.PinnedReleaseID) &&
-			bytes.Equal(canonical, expected.SemanticIR)
+			bytes.Equal(canonical, expectedCanonical)
 	}
 	var reportVersionID, componentID, pinnedReleaseID string
 	var semanticIR []byte
@@ -991,9 +997,11 @@ func seedMatchesRunTx(ctx context.Context, tx pgx.Tx, run Run, expected *SeedCon
 		return false
 	}
 	canonical, canonicalErr := canonicalSeedPayload(semanticIR)
+	expectedCanonical, expectedErr := canonicalSeedPayload(expected.SemanticIR)
 	return canonicalErr == nil && reportVersionID == string(expected.ReportVersionID) && componentID == string(expected.ComponentID) &&
+		expectedErr == nil &&
 		semanticIRHash == expected.SemanticIRHash && pinnedReleaseID == string(expected.PinnedReleaseID) &&
-		bytes.Equal(canonical, expected.SemanticIR)
+		bytes.Equal(canonical, expectedCanonical)
 }
 
 func seedSource(seed *SeedContext) SeedSource {
@@ -1047,7 +1055,12 @@ func loadSeedContextTx(ctx context.Context, tx pgx.Tx, run Run) (*SeedContext, e
 		return nil, err
 	}
 	semanticIR, err = canonicalSeedPayload(semanticIR)
-	if err != nil || askdata.HashBytes(semanticIR) != semanticIRHash {
+	if err != nil {
+		return nil, ErrReplayCorrupt
+	}
+	decoded, decodeErr := ircontract.Decode(semanticIR)
+	_, semanticIR, decodedHash, canonicalErr := ircontract.Canonicalize(decoded)
+	if decodeErr != nil || canonicalErr != nil || decodedHash != semanticIRHash {
 		return nil, ErrReplayCorrupt
 	}
 	seed := &SeedContext{
@@ -1062,13 +1075,13 @@ func loadSeedContextTx(ctx context.Context, tx pgx.Tx, run Run) (*SeedContext, e
 }
 
 func canonicalSeedPayload(raw []byte) (json.RawMessage, error) {
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+	canonical, err := registry.CanonicalJSON(raw)
+	if err != nil {
 		return nil, ErrReplayCorrupt
 	}
-	canonical, err := json.Marshal(object)
-	if err != nil {
-		return nil, err
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(canonical, &object); err != nil || object == nil {
+		return nil, ErrReplayCorrupt
 	}
 	return canonical, nil
 }
@@ -1751,9 +1764,12 @@ func (snapshot ReplaySnapshot) Validate() error {
 	}
 	if snapshot.Seed != nil {
 		seed := snapshot.Seed
+		semanticIR, decodeErr := ircontract.Decode(seed.SemanticIR)
+		_, _, semanticHash, canonicalErr := ircontract.Canonicalize(semanticIR)
 		if snapshot.Run.ConversationID == "" || seedSource(seed) == "" ||
 			seed.PinnedReleaseID != snapshot.Run.Release.ReleaseID || seed.SemanticIRHash.Validate() != nil ||
-			len(seed.SemanticIR) == 0 || !json.Valid(seed.SemanticIR) || askdata.HashBytes(seed.SemanticIR) != seed.SemanticIRHash {
+			len(seed.SemanticIR) == 0 || !json.Valid(seed.SemanticIR) || decodeErr != nil || canonicalErr != nil ||
+			semanticHash != seed.SemanticIRHash {
 			return fmt.Errorf("%w: persisted semantic seed is invalid", ErrReplayCorrupt)
 		}
 	}
@@ -1955,6 +1971,10 @@ func replayEventStates(run Run, events []Event) (map[int64]State, error) {
 }
 
 func validateRunReplayTx(ctx context.Context, tx pgx.Tx, run Run) error {
+	seed, err := loadSeedContextTx(ctx, tx, run)
+	if err != nil {
+		return err
+	}
 	events, err := loadEventsTx(ctx, tx, run)
 	if err != nil {
 		return err
@@ -1967,7 +1987,7 @@ func validateRunReplayTx(ctx context.Context, tx pgx.Tx, run Run) error {
 	if err != nil {
 		return err
 	}
-	return (ReplaySnapshot{Run: run, Events: events, Artifacts: artifacts, ToolCalls: tools}).Validate()
+	return (ReplaySnapshot{Run: run, Seed: seed, Events: events, Artifacts: artifacts, ToolCalls: tools}).Validate()
 }
 
 func (snapshot ReplaySnapshot) SeenActionHashes() []askdata.ContentHash {
@@ -2242,8 +2262,8 @@ func canonicalAuditObject(raw []byte, maximum int) (json.RawMessage, error) {
 	if err := askdata.DecodeStrictJSON(canonical, &object); err != nil || object == nil {
 		return nil, fmt.Errorf("%w: audit JSON must be an object", ErrInvalidRun)
 	}
-	if !auditJSONSafe(object) {
-		return nil, fmt.Errorf("%w: audit JSON contains a forbidden field", ErrInvalidRun)
+	if forbidden := forbiddenAuditField(object); forbidden != "" {
+		return nil, fmt.Errorf("%w: audit JSON contains forbidden field %s", ErrInvalidRun, forbidden)
 	}
 	return json.RawMessage(canonical), nil
 }
@@ -2266,22 +2286,38 @@ var forbiddenAuditKeys = map[string]struct{}{
 }
 
 func auditJSONSafe(value any) bool {
+	return forbiddenAuditField(value) == ""
+}
+
+// forbiddenAuditField returns only a member of the fixed policy vocabulary,
+// never an untrusted key or value. It makes contract mismatches actionable in
+// logs without leaking the audit payload that was rejected.
+func forbiddenAuditField(value any) string {
 	switch typed := value.(type) {
 	case map[string]any:
-		for key, child := range typed {
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			child := typed[key]
 			normalized := auditKeyNormalizer.ReplaceAllString(strings.ToLower(key), "")
-			if _, forbidden := forbiddenAuditKeys[normalized]; forbidden || !auditJSONSafe(child) {
-				return false
+			if _, forbidden := forbiddenAuditKeys[normalized]; forbidden {
+				return normalized
+			}
+			if nested := forbiddenAuditField(child); nested != "" {
+				return nested
 			}
 		}
 	case []any:
 		for _, child := range typed {
-			if !auditJSONSafe(child) {
-				return false
+			if nested := forbiddenAuditField(child); nested != "" {
+				return nested
 			}
 		}
 	}
-	return true
+	return ""
 }
 
 func normalizedEvidenceIDs(values []askdata.ID) ([]askdata.ID, error) {

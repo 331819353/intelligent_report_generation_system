@@ -10,10 +10,52 @@ import (
 	"time"
 
 	"intelligent-report-generation-system/internal/askdata"
+	"intelligent-report-generation-system/internal/askdata/graph"
 	"intelligent-report-generation-system/internal/askdata/ir"
 	"intelligent-report-generation-system/internal/askdata/registry"
 	"intelligent-report-generation-system/internal/platform/database"
 )
+
+// 连接路径与关系契约必须成对出现。
+//
+// 适配器现在会把解析出的连接路径编译成 Query DSL 的 join，但两者只要有一边
+// 缺失，就绝不能「丢掉连接照常编译」——那会产出一份缺了 join、看上去正常
+// 却只从锚点表取数的查询，也就是一个貌似合理的错误数字。
+func TestJoinPathIsRefusedInsteadOfSilentlyDroppingRelationships(t *testing.T) {
+	request, buildArtifact, scope := resolverBuildFixture(t)
+	resolver, err := NewResolver(&memoryContractStore{snapshot: metricOnlySnapshot(t, scope.Release)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := database.WithAccessContext(context.Background(), string(scope.ActorID), "sales")
+	resolution, err := resolver.Resolve(ctx, ResolveRequest{
+		BuildRequest: request, BuildArtifact: buildArtifact,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 基线：同一份解析结果在没有连接路径时可以正常编译，确保下面两个断言
+	// 失败的原因只可能是连接路径本身。
+	if _, err := compileResolvedArtifact(buildArtifact.IR, resolution, nil); err != nil {
+		t.Fatalf("single-model baseline must compile, got %v", err)
+	}
+
+	withRelationship := resolution
+	withRelationship.Relationships = []RelationshipContract{{}}
+	if _, err := compileResolvedArtifact(
+		buildArtifact.IR, withRelationship, nil,
+	); !errors.Is(err, ErrUnsupportedQuery) {
+		t.Fatalf("resolution carrying a relationship compiled with %v", err)
+	}
+
+	withPath := resolution
+	withPath.GraphPath = &graph.JoinPath{Steps: []graph.JoinStep{{Hop: 1}}}
+	if _, err := compileResolvedArtifact(
+		buildArtifact.IR, withPath, nil,
+	); !errors.Is(err, ErrUnsupportedQuery) {
+		t.Fatalf("resolution carrying a join path compiled with %v", err)
+	}
+}
 
 func TestAdaptProducesReplaySafeGoldenCompiledQuery(t *testing.T) {
 	request, buildArtifact, scope := resolverBuildFixture(t)
@@ -202,7 +244,7 @@ func TestComparisonBuildsCurrentAndBaselineWithoutPersistingValues(t *testing.T)
 		len(document.Parameters) != 3 || document.ExecutionPolicy.ResultLimit != 10000 {
 		t.Fatalf("generated document did not preserve stable fields/parameters: %#v", document)
 	}
-	current, err := compileQueryPlan(QueryRoleCurrent, document, source, shapes, currentValues, ir.MaxResultRows)
+	current, err := compileQueryPlan(QueryRoleCurrent, document, source, nil, shapes, currentValues, ir.MaxResultRows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +252,7 @@ func TestComparisonBuildsCurrentAndBaselineWithoutPersistingValues(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseline, err := compileQueryPlan(QueryRoleBaseline, document, source, shapes, baselineValues, ir.MaxResultRows)
+	baseline, err := compileQueryPlan(QueryRoleBaseline, document, source, nil, shapes, baselineValues, ir.MaxResultRows)
 	if err != nil {
 		t.Fatal(err)
 	}

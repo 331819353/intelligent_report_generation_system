@@ -57,7 +57,7 @@ type CandidateRef struct {
 }
 
 func (ref CandidateRef) Validate() error {
-	if !validRetrievalObjectType(ref.ObjectType) {
+	if !ValidRetrievalObjectType(ref.ObjectType) {
 		return errors.New("objectType is invalid")
 	}
 	if err := ref.ObjectVersionID.Validate(); err != nil {

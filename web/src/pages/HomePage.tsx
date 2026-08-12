@@ -25,7 +25,7 @@ import {
   type HomeWorkItem,
   type HomeWorkKind,
 } from '../lib/home-data'
-import { homeAPI, type WorkInboxItem } from '../lib/home-api'
+import { homeAPI, type SavedQuestionSummary, type WorkInboxItem } from '../lib/home-api'
 import { reportAssetsAPI } from '../report/api/assets'
 
 type LoadState<T> = {
@@ -36,10 +36,10 @@ type LoadState<T> = {
 
 type HomeWorkFilter = 'all' | HomeWorkKind
 
-const snapshotSuggestions = [
-  '各渠道毛利率变化趋势如何？',
-  '新品上市效果如何？',
-  '库存健康度异常的产品有哪些？',
+const snapshotSuggestions: SavedQuestionSummary[] = [
+  { id: 'saved-1', name: '渠道毛利率趋势', questionText: '各渠道毛利率变化趋势如何？', visibility: 'PRIVATE', status: 'ACTIVE', updatedAt: '2026-08-10T10:00:00+08:00' },
+  { id: 'saved-2', name: '新品效果', questionText: '新品上市效果如何？', visibility: 'TEAM', status: 'ACTIVE', updatedAt: '2026-08-09T10:00:00+08:00' },
+  { id: 'saved-3', name: '库存健康度', questionText: '库存健康度异常的产品有哪些？', visibility: 'PRIVATE', status: 'ACTIVE', updatedAt: '2026-08-08T10:00:00+08:00' },
 ]
 
 const snapshotWorkItems: Record<HomeWorkKind, HomeWorkItem[]> = {
@@ -125,7 +125,7 @@ export function HomePage() {
   const [notice, setNotice] = useState('')
   const [reloadRevision, setReloadRevision] = useState(0)
   const [pageDomainName, setPageDomainName] = useState(() => snapshot ? '企业经营' : currentDomain()?.name ?? '当前领域')
-  const [suggestions, setSuggestions] = useState(snapshot ? snapshotSuggestions : [])
+  const [suggestions, setSuggestions] = useState<SavedQuestionSummary[]>(snapshot ? snapshotSuggestions : [])
   const [work, setWork] = useState<Record<HomeWorkKind, LoadState<HomeWorkItem>>>(() => ({
     question: initialWorkState('question'),
     report: initialWorkState('report'),
@@ -166,7 +166,7 @@ export function HomePage() {
 
     void homeAPI.listSavedQuestions()
       .then(result => {
-        if (!cancelled) setSuggestions(result.items.filter(item => item.status === 'ACTIVE').slice(0, 3).map(item => item.questionText))
+        if (!cancelled) setSuggestions(result.items.filter(item => item.status === 'ACTIVE').slice(0, 3))
       })
       .catch(() => { if (!cancelled) setSuggestions([]) })
 
@@ -208,9 +208,19 @@ export function HomePage() {
     navigate(`/ask-data?q=${encodeURIComponent(value)}${snapshot ? '&snapshot=home-question' : ''}`)
   }
 
-  const chooseSuggestion = (value: string) => {
-    setQuestion(value)
-    setQuestionError('')
+  const chooseSuggestion = async (item: SavedQuestionSummary) => {
+    if (snapshot) {
+      setQuestion(item.questionText)
+      setQuestionError('')
+      return
+    }
+    setNotice(`正在运行“${item.name}”…`)
+    try {
+      const result = await homeAPI.openSavedQuestion(item.id)
+      navigate(`/ask-data?runId=${encodeURIComponent(result.runId)}`)
+    } catch (cause) {
+      setNotice(resourceError(cause, '常用问题运行失败，请稍后重试'))
+    }
   }
 
   const openWork = (item: HomeWorkItem) => {
@@ -222,11 +232,11 @@ export function HomePage() {
       navigate(`/ask-data?q=${encodeURIComponent(item.title)}${snapshot ? '&snapshot=home-question' : ''}`)
       return
     }
-    if (item.kind === 'report') {
-      navigate(snapshot ? '/reports?snapshot=assets' : '/reports')
-      return
-    }
-    setNotice('决策数据已从后端加载；决策详情页需在下一页面组确认后接入。')
+		if (item.kind === 'report') {
+			navigate(snapshot ? '/reports?snapshot=assets' : '/reports')
+			return
+		}
+		navigate(snapshot ? '/decisions?snapshot=decisions' : `/decisions?decisionId=${encodeURIComponent(item.id)}`)
   }
 
   const openTask = (task: HomeTaskItem) => {
@@ -239,16 +249,17 @@ export function HomePage() {
       navigate(task.href)
       return
     }
-    setNotice('该待办来自真实工作箱，但对应的源对象处理页尚未实现；已记录在后端 TODO。')
+    const center = task.source.allowedActions.some(action => action === 'APPROVE' || action === 'REJECT') ? '/approvals' : '/tasks'
+    navigate(`${center}?itemType=${encodeURIComponent(task.source.type)}&itemId=${encodeURIComponent(task.source.objectId)}`)
   }
 
   const viewAllWork = () => {
-    if (activeFilter === 'report') {
+		if (activeFilter === 'report') {
       navigate(snapshot ? '/reports?snapshot=assets' : '/reports')
-      return
-    }
-    setNotice(activeFilter === 'decision' ? '决策中心页面尚待确认设计。' : '完整会话历史页正在接入现有会话 API。')
-  }
+			return
+		}
+		navigate(activeFilter === 'decision' ? '/decisions' : '/ask-data')
+	}
 
   return <AppShell
     className="home-shell"
@@ -287,7 +298,7 @@ export function HomePage() {
           {questionError && <p className="home-question-error" id="home-question-error" role="alert"><WarningCircle size={14} />{questionError}</p>}
           <div className="home-suggestions">
             <span>{suggestions.length > 0 ? '常用问题：' : '暂无保存问题，可直接输入新问题'}</span>
-            {suggestions.map(item => <AppButton plain size="small" type="button" key={item} onClick={() => chooseSuggestion(item)}>{item}</AppButton>)}
+            {suggestions.map(item => <AppButton plain size="small" type="button" key={item.id} title={item.questionText} onClick={() => void chooseSuggestion(item)}>{item.name}</AppButton>)}
           </div>
         </form>
       </section>
@@ -312,7 +323,7 @@ export function HomePage() {
             })}
             {recentState.status === 'loading' && <div className="home-data-state"><span className="home-loading-dot" />正在加载当前领域数据…</div>}
             {recentState.status === 'error' && <div className="home-data-state is-error"><WarningCircle size={20} /><strong>最近工作暂时无法加载</strong><span>{recentState.error}</span><AppButton plain size="small" type="button" onClick={reloadHome}><ArrowClockwise size={13} />重新加载</AppButton></div>}
-            {recentState.status === 'ready' && visibleWork.length === 0 && <div className="home-data-state"><CheckCircle size={20} /><strong>暂无{workFilterLabels[activeFilter]}记录</strong><span>这里不会使用演示数据填充空态</span></div>}
+            {recentState.status === 'ready' && visibleWork.length === 0 && <div className="home-data-state"><CheckCircle size={20} /><strong>暂无{workFilterLabels[activeFilter]}记录</strong><span>完成相关工作后，最近更新会自动汇总在这里</span></div>}
           </div>
           <AppButton link className="home-view-all" type="button" onClick={viewAllWork}>查看全部<ArrowRight size={14} /></AppButton>
         </section>

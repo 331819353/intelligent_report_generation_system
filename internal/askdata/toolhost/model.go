@@ -83,34 +83,34 @@ type ClarificationOption struct {
 	EvidenceRefs []askdata.EvidenceRef `json:"evidenceRefs"`
 }
 
-// ToolArguments is a closed parameter vocabulary shared by all tools. Every
-// JSON field is present; tool-specific validation requires and permits only the
-// subset assigned to the selected tool. This avoids an arbitrary map crossing
-// the LLM/tool trust boundary.
+// ToolArguments is a closed parameter vocabulary shared by all tools.
+// Tool-specific validation requires and permits only the subset assigned to
+// the selected tool; unused fields are omitted from provider JSON to keep the
+// structured-output contract small and unambiguous.
 type ToolArguments struct {
 	Release               askdata.ReleaseRef     `json:"release"`
-	Mention               *string                `json:"mention"`
-	ObjectTypes           []ObjectType           `json:"objectTypes"`
-	DomainIDs             []askdata.ID           `json:"domainIds"`
-	ObjectVersionIDs      []askdata.ID           `json:"objectVersionIds"`
-	DimensionVersionID    *askdata.ID            `json:"dimensionVersionId"`
-	QuestionSummary       *string                `json:"questionSummary"`
-	ModelVersionIDs       []askdata.ID           `json:"modelVersionIds"`
-	MetricVersionIDs      []askdata.ID           `json:"metricVersionIds"`
-	DimensionVersionIDs   []askdata.ID           `json:"dimensionVersionIds"`
-	MemberVersionIDs      []askdata.ID           `json:"memberVersionIds"`
-	TimeRange             *ircontract.TimeRange  `json:"timeRange"`
-	SemanticIR            *ircontract.SemanticIR `json:"semanticIr"`
-	PlanHash              *askdata.ContentHash   `json:"planHash"`
-	GraphPlanHash         *askdata.ContentHash   `json:"graphPlanHash"`
-	LeftPlanHash          *askdata.ContentHash   `json:"leftPlanHash"`
-	RightPlanHash         *askdata.ContentHash   `json:"rightPlanHash"`
-	Limit                 *int                   `json:"limit"`
-	MaxRows               *int                   `json:"maxRows"`
-	ValidationType        *ValidationType        `json:"validationType"`
-	ConflictCode          *string                `json:"conflictCode"`
-	ClarificationQuestion *string                `json:"clarificationQuestion"`
-	ClarificationOptions  []ClarificationOption  `json:"clarificationOptions"`
+	Mention               *string                `json:"mention,omitempty"`
+	ObjectTypes           []ObjectType           `json:"objectTypes,omitempty"`
+	DomainIDs             []askdata.ID           `json:"domainIds,omitempty"`
+	ObjectVersionIDs      []askdata.ID           `json:"objectVersionIds,omitempty"`
+	DimensionVersionID    *askdata.ID            `json:"dimensionVersionId,omitempty"`
+	QuestionSummary       *string                `json:"questionSummary,omitempty"`
+	ModelVersionIDs       []askdata.ID           `json:"modelVersionIds,omitempty"`
+	MetricVersionIDs      []askdata.ID           `json:"metricVersionIds,omitempty"`
+	DimensionVersionIDs   []askdata.ID           `json:"dimensionVersionIds,omitempty"`
+	MemberVersionIDs      []askdata.ID           `json:"memberVersionIds,omitempty"`
+	TimeRange             *ircontract.TimeRange  `json:"timeRange,omitempty"`
+	SemanticIR            *ircontract.SemanticIR `json:"semanticIr,omitempty"`
+	PlanHash              *askdata.ContentHash   `json:"planHash,omitempty"`
+	GraphPlanHash         *askdata.ContentHash   `json:"graphPlanHash,omitempty"`
+	LeftPlanHash          *askdata.ContentHash   `json:"leftPlanHash,omitempty"`
+	RightPlanHash         *askdata.ContentHash   `json:"rightPlanHash,omitempty"`
+	Limit                 *int                   `json:"limit,omitempty"`
+	MaxRows               *int                   `json:"maxRows,omitempty"`
+	ValidationType        *ValidationType        `json:"validationType,omitempty"`
+	ConflictCode          *string                `json:"conflictCode,omitempty"`
+	ClarificationQuestion *string                `json:"clarificationQuestion,omitempty"`
+	ClarificationOptions  []ClarificationOption  `json:"clarificationOptions,omitempty"`
 }
 
 // NewArguments returns the schema-valid empty parameter vocabulary pinned to

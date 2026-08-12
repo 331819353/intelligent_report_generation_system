@@ -15,10 +15,23 @@ import (
 // DataContextCandidate is a governed, actor-visible semantic asset that the
 // report model may consider. Raw rows and SQL never cross this boundary.
 type DataContextCandidate struct {
-	DataContext report.DataContext `json:"dataContext"`
-	Name        string             `json:"name"`
-	Description string             `json:"description"`
-	Fields      []string           `json:"fields"`
+	DataContext      report.DataContext `json:"dataContext"`
+	Name             string             `json:"name"`
+	Description      string             `json:"description"`
+	Fields           []string           `json:"fields"`
+	FieldDefinitions []FieldDefinition  `json:"fieldDefinitions"`
+}
+
+// FieldDefinition is the policy-trimmed field metadata the manual report
+// editor needs to distinguish dimensions from measures. It contains schema
+// metadata only; expressions, SQL and data values never cross this boundary.
+type FieldDefinition struct {
+	Code          string `json:"code"`
+	Name          string `json:"name"`
+	CanonicalType string `json:"canonicalType"`
+	SemanticType  string `json:"semanticType"`
+	Role          string `json:"role"`
+	Aggregation   string `json:"aggregation"`
 }
 
 // DataContextCatalog discovers only semantic assets the current actor can

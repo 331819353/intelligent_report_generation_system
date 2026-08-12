@@ -3,6 +3,7 @@ package toolhost
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/big"
 	"sort"
@@ -157,8 +158,9 @@ type LookupDimensionValuesResult struct {
 	EvidenceIDs        []askdata.ID            `json:"evidenceIds"`
 }
 
-// CertifiedExampleSummary is a certified question together with the governed
-// semantic objects it is expected to bind to.
+// CertifiedExampleSummary is the governed binding signature of a certified
+// question. The source question text is deliberately omitted: replay/audit
+// artifacts must never persist another user's raw or summarized question.
 //
 // It deliberately carries expected *components* rather than a serialised
 // Semantic IR. askdata.certified_example_versions stores exactly these columns
@@ -169,7 +171,6 @@ type LookupDimensionValuesResult struct {
 // plan that may reference superseded object versions.
 type CertifiedExampleSummary struct {
 	ExampleID                askdata.ID          `json:"exampleId"`
-	QuestionSummary          string              `json:"questionSummary"`
 	ExpectedMetricVersionIDs []askdata.ID        `json:"expectedMetricVersionIds"`
 	ExpectedDimensionIDs     []askdata.ID        `json:"expectedDimensionVersionIds"`
 	ExpectedTimeExpression   string              `json:"expectedTimeExpression,omitempty"`
@@ -234,7 +235,13 @@ type ParameterShapeSummary struct {
 }
 
 type CompileSemanticQueryResult struct {
-	PlanHash        askdata.ContentHash     `json:"planHash"`
+	PlanHash askdata.ContentHash `json:"planHash"`
+	// SemanticIRHash is the compiler's canonical hash of the IR it accepted,
+	// not of the IR the model submitted. The orchestrator records it as the
+	// run's governed SemanticIR link, so it has to come from the component that
+	// normalized and validated the IR — recomputing it anywhere else would let
+	// a run be certified against an IR the compiler never saw.
+	SemanticIRHash  askdata.ContentHash     `json:"semanticIrHash"`
 	PlanCount       int                     `json:"planCount"`
 	ParameterShapes []ParameterShapeSummary `json:"parameterShapes"`
 	MaxRows         int                     `json:"maxRows"`
@@ -317,10 +324,12 @@ type CompareCandidateResultsResult struct {
 }
 
 type RequestClarificationResult struct {
-	ConflictCode string                `json:"conflictCode"`
-	Question     string                `json:"question"`
-	Options      []ClarificationOption `json:"options"`
-	EvidenceIDs  []askdata.ID          `json:"evidenceIds"`
+	ConflictCode string `json:"conflictCode"`
+	// ClarificationCopy is assistant-authored display text. The JSON key avoids
+	// the reserved audit vocabulary used for retained raw user questions.
+	Question    string                `json:"clarificationCopy"`
+	Options     []ClarificationOption `json:"options"`
+	EvidenceIDs []askdata.ID          `json:"evidenceIds"`
 }
 
 func (result SearchSemanticObjectsResult) ValidateResult(known map[askdata.ID]askdata.EvidenceRef) error {
@@ -341,17 +350,17 @@ func (result SearchSemanticObjectsResult) ValidateResult(known map[askdata.ID]as
 
 func (result GetSemanticContractsResult) ValidateResult(known map[askdata.ID]askdata.EvidenceRef) error {
 	if len(result.Contracts) > MaxArgumentIDs || validateEvidenceIDs(result.EvidenceIDs, known) != nil {
-		return ErrInvalidInvocation
+		return fmt.Errorf("%w: semantic contract evidence closure is invalid", ErrInvalidInvocation)
 	}
 	seen := map[askdata.ID]bool{}
-	for _, contract := range result.Contracts {
+	for index, contract := range result.Contracts {
 		if !validObjectType(contract.ObjectType) || contract.ObjectVersionID.Validate() != nil ||
 			seen[contract.ObjectVersionID] || !boundedText(contract.Name, 512) ||
 			!boundedText(contract.Definition, 4096) || !optionalBoundedText(contract.Unit, 128) ||
 			contract.OwnerID.Validate() != nil || !boundedText(contract.Status, 64) ||
 			!optionalBoundedText(contract.Grain, 256) || contract.ContentHash.Validate() != nil ||
 			validateFormulaSummary(contract.Formula) != nil {
-			return ErrInvalidInvocation
+			return fmt.Errorf("%w: semantic contract %d is invalid", ErrInvalidInvocation, index)
 		}
 		seen[contract.ObjectVersionID] = true
 	}
@@ -386,7 +395,6 @@ func (result GetCertifiedExamplesResult) ValidateResult(known map[askdata.ID]ask
 		// example may not smuggle an unbounded or malformed object set into the
 		// binder, and it may not carry any executable plan of its own.
 		if example.ExampleID.Validate() != nil || seen[example.ExampleID] ||
-			!boundedText(example.QuestionSummary, 2048) ||
 			validateStableIDs(example.ExpectedMetricVersionIDs, MaxArgumentIDs) != nil ||
 			validateStableIDs(example.ExpectedDimensionIDs, MaxArgumentIDs) != nil ||
 			!optionalBoundedText(example.ExpectedTimeExpression, 512) ||
@@ -447,7 +455,8 @@ func (result GetDataQualityStatusResult) ValidateResult(known map[askdata.ID]ask
 }
 
 func (result CompileSemanticQueryResult) ValidateResult(known map[askdata.ID]askdata.EvidenceRef) error {
-	if result.PlanHash.Validate() != nil || result.PlanCount < 1 || result.PlanCount > 2 ||
+	if result.PlanHash.Validate() != nil || result.SemanticIRHash.Validate() != nil ||
+		result.PlanCount < 1 || result.PlanCount > 2 ||
 		result.MaxRows < 1 || result.MaxRows > ircontract.MaxLimit || len(result.ParameterShapes) > 128 ||
 		validateEvidenceIDs(result.EvidenceIDs, known) != nil {
 		return ErrInvalidInvocation

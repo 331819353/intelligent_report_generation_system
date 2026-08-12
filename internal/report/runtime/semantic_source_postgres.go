@@ -17,7 +17,7 @@ import (
 type SemanticArtifactSource interface {
 	LoadQueryArtifact(
 		context.Context, store.Identity, askdata.ID, askdata.ID, askdata.ContentHash,
-	) (askcompiler.QueryArtifact, error)
+	) (askcompiler.ReportQuerySnapshot, error)
 }
 
 type SemanticCompilationSource interface {
@@ -42,13 +42,13 @@ func (source *PostgresSemanticArtifactSource) LoadQueryArtifact(
 	reportVersionID askdata.ID,
 	sourceRunID askdata.ID,
 	expectedPlanHash askdata.ContentHash,
-) (artifact askcompiler.QueryArtifact, err error) {
+) (artifact askcompiler.ReportQuerySnapshot, err error) {
 	access, ok := database.AccessContextFromContext(ctx)
 	if source == nil || source.pool == nil || identity.Validate() != nil ||
 		reportVersionID.Validate() != nil || sourceRunID.Validate() != nil ||
 		expectedPlanHash.Validate() != nil || !ok || access.UserID != string(identity.ActorID) ||
 		access.DomainID != string(identity.DomainID) {
-		return askcompiler.QueryArtifact{}, NewError(
+		return askcompiler.ReportQuerySnapshot{}, NewError(
 			"NO_PERMISSION", "semantic report artifact is unavailable", nil,
 		)
 	}
@@ -60,13 +60,13 @@ func (source *PostgresSemanticArtifactSource) LoadQueryArtifact(
 		).Scan(&raw)
 	})
 	if err != nil {
-		return askcompiler.QueryArtifact{}, NewError(
+		return askcompiler.ReportQuerySnapshot{}, NewError(
 			"NO_PERMISSION", "semantic report artifact is unavailable", err,
 		)
 	}
 	if err := askdata.DecodeStrictJSON(raw, &artifact); err != nil ||
 		artifact.Validate() != nil || artifact.PlanHash != expectedPlanHash {
-		return askcompiler.QueryArtifact{}, NewError(
+		return askcompiler.ReportQuerySnapshot{}, NewError(
 			"REPORT_SEMANTIC_ARTIFACT_INVALID", "semantic report artifact is invalid", errors.Join(err, artifact.Validate()),
 		)
 	}

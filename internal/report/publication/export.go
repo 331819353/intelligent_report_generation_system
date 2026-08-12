@@ -24,6 +24,7 @@ import (
 
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/platform/database"
+	reportmodel "intelligent-report-generation-system/internal/report"
 	"intelligent-report-generation-system/internal/report/store"
 )
 
@@ -88,7 +89,13 @@ type CreateExportInput struct {
 	ExpiresAt                     time.Time
 }
 
-type ExportClaim struct{ ExportJob }
+type ExportClaim struct {
+	ExportJob
+	// Definition is populated by the worker from the immutable published
+	// version after the claim has been authorized. It is never persisted in the
+	// job row and gives document renderers the exact report structure.
+	Definition reportmodel.ReportDefinition
+}
 
 type ExportJobStore struct{ pool *pgxpool.Pool }
 
@@ -257,7 +264,7 @@ func (s *ExportJobStore) Claim(ctx context.Context, tenantID, workerID string, l
 	if err != nil || !found {
 		return nil, err
 	}
-	return &ExportClaim{result}, nil
+	return &ExportClaim{ExportJob: result}, nil
 }
 
 func (s *ExportJobStore) Complete(ctx context.Context, claim ExportClaim, workerID string, artifact ExportArtifact, objectURI string) error {
@@ -308,16 +315,17 @@ const exportJobColumns = `id::text,tenant_id::text,domain_id::text,report_id::te
 	completed_at,updated_at`
 
 func prefixedExportJobColumns(alias string) string {
-	parts := strings.Split(exportJobColumns, ",")
-	for index, part := range parts {
-		part = strings.TrimSpace(part)
-		if strings.Contains(part, "(") {
-			parts[index] = strings.ReplaceAll(part, "lease_token", alias+".lease_token")
-		} else {
-			parts[index] = alias + "." + part
-		}
-	}
-	return strings.Join(parts, ",")
+	// Do not split the SQL expression list on commas: COALESCE itself contains
+	// a comma, which previously produced invalid SQL such as job.'' while a
+	// worker claimed an export job. Alias is internal and always fixed by the
+	// caller; keeping the explicit projection also makes scan order reviewable.
+	return alias + `.id::text,` + alias + `.tenant_id::text,` + alias + `.domain_id::text,` +
+		alias + `.report_id::text,` + alias + `.report_version_id::text,` + alias + `.requested_by::text,` +
+		alias + `.format,` + alias + `.page_ids,` + alias + `.filter_summary_json,` + alias + `.as_of,` +
+		alias + `.timezone,` + alias + `.state,` + alias + `.attempt,` + alias + `.next_attempt_at,` +
+		alias + `.lease_owner,COALESCE(` + alias + `.lease_token::text,''),` + alias + `.lease_expires_at,` +
+		alias + `.object_uri,` + alias + `.content_hash,` + alias + `.artifact_bytes,` + alias + `.failure_code,` +
+		alias + `.expires_at,` + alias + `.created_at,` + alias + `.started_at,` + alias + `.completed_at,` + alias + `.updated_at`
 }
 
 type exportScanner interface{ Scan(...any) error }
@@ -433,6 +441,7 @@ func (w *ExportWorker) ProcessNext(ctx context.Context, tenantID, workerID strin
 	if err != nil || version.ID != claim.ReportVersionID || version.ArtifactState != "READY" {
 		return true, w.store.Fail(ctx, *claim, workerID, "EXPORT_VERSION_UNAVAILABLE", false)
 	}
+	claim.Definition = version.Definition
 	location, locationErr := time.LoadLocation(claim.Timezone)
 	if locationErr != nil {
 		return true, w.store.Fail(ctx, *claim, workerID, "EXPORT_TIMEZONE_INVALID", false)
@@ -553,7 +562,7 @@ func (g *HTTPDocumentExportGenerator) Generate(ctx context.Context, claim Export
 		"tenantId": claim.TenantID, "domainId": claim.DomainID,
 		"requestedBy": claim.RequestedBy, "format": claim.Format, "pageIds": claim.PageIDs,
 		"filters": claim.FilterSummary, "asOf": claim.AsOf.Format(time.RFC3339Nano), "timezone": claim.Timezone,
-		"disableLazyLoading": true, "footer": footer})
+		"disableLazyLoading": true, "footer": footer, "definition": claim.Definition})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, g.Endpoint.String(), bytes.NewReader(payload))
 	if err != nil {
 		return ExportArtifact{}, err
@@ -594,4 +603,21 @@ func (g CompositeExportGenerator) Generate(ctx context.Context, claim ExportClai
 		return ExportArtifact{}, errors.New("tabular export generator is unavailable")
 	}
 	return g.Tabular.Generate(ctx, claim, footer)
+}
+
+// FallbackExportGenerator keeps document delivery available when the optional
+// high-fidelity renderer is down. Both implementations receive the same
+// immutable version and viewer-scoped runtime results.
+type FallbackExportGenerator struct{ Primary, Fallback ExportGenerator }
+
+func (g FallbackExportGenerator) Generate(ctx context.Context, claim ExportClaim, footer ExportFooter) (ExportArtifact, error) {
+	if g.Primary != nil {
+		if artifact, err := g.Primary.Generate(ctx, claim, footer); err == nil {
+			return artifact, nil
+		}
+	}
+	if g.Fallback == nil {
+		return ExportArtifact{}, errors.New("report export fallback is unavailable")
+	}
+	return g.Fallback.Generate(ctx, claim, footer)
 }

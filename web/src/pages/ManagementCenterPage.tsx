@@ -1,5 +1,6 @@
 import {
   ArrowsClockwise,
+  ChartLineUp,
   Check,
   CheckCircle,
   ClipboardText,
@@ -7,12 +8,15 @@ import {
   GlobeHemisphereWest,
   ListChecks,
   LockKey,
+  Lifebuoy,
   Plus,
   Pulse,
   Scroll,
   ShieldCheck,
   SpinnerGap,
   Timer,
+  GearSix,
+  Gauge,
   UsersThree,
   X,
 } from '@phosphor-icons/react'
@@ -32,14 +36,21 @@ import {
   type BackgroundTask,
 } from '../lib/background-tasks'
 import { notifyDomainCatalogChanged } from '../lib/domain-context'
+import { supportAPI, type SupportTicket } from '../lib/support'
+import {
+  operationalObservabilityAPI,
+  type OperationalSnapshot,
+  type OperationalWindow,
+} from '../lib/operational-observability'
 
-type ConfigurationView = 'domains' | 'permissions' | 'approvals' | 'tasks' | 'logs'
+type ConfigurationView = 'domains' | 'permissions' | 'approvals' | 'tasks' | 'logs' | 'support' | 'observability'
 type PermissionView = 'platform' | 'domains' | 'users'
 type DialogState =
   | { kind: 'platform-administrators' }
   | { kind: 'create-domain' }
   | { kind: 'domain-administrator'; user?: AdminUser }
   | { kind: 'user-domains'; user: AdminUser }
+  | { kind: 'support-transition'; ticket: SupportTicket; status: 'RESOLVED' | 'CLOSED' }
   | null
 
 const fixedCapabilities = {
@@ -52,7 +63,7 @@ const fixedCapabilities = {
 /** 按平台、领域、用户三级固定边界管理身份与归属。 */
 export function ManagementCenterPage() {
   const { section } = useParams<{ section: string }>()
-  const view: ConfigurationView = section === 'permissions' || section === 'approvals' || section === 'tasks' || section === 'logs'
+  const view: ConfigurationView = section === 'permissions' || section === 'approvals' || section === 'tasks' || section === 'logs' || section === 'support' || section === 'observability'
     ? section
     : 'domains'
   const [domains, setDomains] = useState<BusinessDomain[]>([])
@@ -60,6 +71,9 @@ export function ManagementCenterPage() {
   const [approvals, setApprovals] = useState<PlatformApproval[]>([])
   const [tasks, setTasks] = useState<BackgroundTask[]>([])
   const [auditLogs, setAuditLogs] = useState<PlatformAuditLog[]>([])
+  const [supportTickets, setSupportTickets] = useState<SupportTicket[]>([])
+  const [observability, setObservability] = useState<OperationalSnapshot | null>(null)
+  const [operationalWindow, setOperationalWindow] = useState<OperationalWindow>('24h')
   const [permissionView, setPermissionView] = useState<PermissionView>('platform')
   const [dialog, setDialog] = useState<DialogState>(null)
   const [loading, setLoading] = useState(true)
@@ -72,24 +86,28 @@ export function ManagementCenterPage() {
     setLoading(true)
     setError('')
     try {
-      const [nextDomains, nextUsers, nextApprovals, nextTasks, nextAuditLogs] = await Promise.all([
+      const [nextDomains, nextUsers, nextApprovals, nextTasks, nextAuditLogs, nextSupportTickets, nextObservability] = await Promise.all([
         administrationAPI.listManagedDomains(),
         administrationAPI.listUsers(),
         administrationAPI.listPlatformApprovals(),
         backgroundTaskAPI.list('ALL', 100),
         administrationAPI.listPlatformAuditLogs(),
+        supportAPI.list('queue'),
+        operationalObservabilityAPI.snapshot(operationalWindow),
       ])
       setDomains(nextDomains)
       setUsers(nextUsers)
       setApprovals(nextApprovals)
       setTasks(nextTasks.items)
       setAuditLogs(nextAuditLogs)
+      setSupportTickets(nextSupportTickets)
+      setObservability(nextObservability)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '平台管理数据加载失败')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [operationalWindow])
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void load() }, 0)
@@ -191,6 +209,32 @@ export function ManagementCenterPage() {
     } finally {
       setBusyKey('')
     }
+  }
+
+  const transitionSupportTicket = async (ticket: SupportTicket, status: 'IN_PROGRESS' | 'RESOLVED' | 'CLOSED', resolutionNote = '') => {
+    setBusyKey(`support:${ticket.id}:${status}`)
+    setError('')
+    setNotice('')
+    try {
+      const updated = await supportAPI.transition(ticket.id, status, resolutionNote, ticket.recordVersion)
+      setSupportTickets(current => current.map(item => item.id === updated.id ? updated : item))
+      setDialog(null)
+      setNotice(`支持工单“${ticket.subject}”已更新为${status === 'IN_PROGRESS' ? '处理中' : status === 'RESOLVED' ? '已解决' : '已关闭'}`)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '支持工单状态更新失败')
+    } finally {
+      setBusyKey('')
+    }
+  }
+
+  const submitSupportTransition = (event: FormEvent<HTMLFormElement>, ticket: SupportTicket, status: 'RESOLVED' | 'CLOSED') => {
+    event.preventDefault()
+    const note = String(new FormData(event.currentTarget).get('resolutionNote') ?? '').trim()
+    if (note.length < 4) {
+      setError('请填写至少 4 个字的处理结果')
+      return
+    }
+    void transitionSupportTicket(ticket, status, note)
   }
 
   const createDomain = async (event: FormEvent<HTMLFormElement>) => {
@@ -385,7 +429,10 @@ export function ManagementCenterPage() {
           <NavLink to="/platform-management/permissions"><ShieldCheck size={18} /><span><strong>权限管理</strong><small>管理员与用户</small></span></NavLink>
           <NavLink to="/platform-management/approvals"><ListChecks size={18} /><span><strong>审批中心</strong><small>{pendingApprovalCount} 项待处理</small></span></NavLink>
           <NavLink to="/platform-management/tasks"><Pulse size={18} /><span><strong>后台任务</strong><small>{activeTaskCount} 项运行中</small></span></NavLink>
+          <NavLink to="/platform-management/observability"><ChartLineUp size={18} /><span><strong>运行观测</strong><small>{observability?.health === 'CRITICAL' ? '存在异常' : observability?.health === 'ATTENTION' ? '需要关注' : '运行健康'}</small></span></NavLink>
+          <NavLink to="/platform-management/support"><Lifebuoy size={18} /><span><strong>支持工单</strong><small>{supportTickets.filter(item => item.status === 'OPEN' || item.status === 'IN_PROGRESS').length} 项待跟进</small></span></NavLink>
           <NavLink to="/platform-management/logs"><Scroll size={18} /><span><strong>平台日志</strong><small>不可变轨迹</small></span></NavLink>
+          <NavLink to="/platform-management/runtime-config"><GearSix size={18} /><span><strong>运行配置</strong><small>版本与回滚</small></span></NavLink>
         </nav>
 
         {(error || notice) && <div className={`administration-feedback ${error ? 'error' : 'success'}`} role={error ? 'alert' : 'status'}>
@@ -421,7 +468,18 @@ export function ManagementCenterPage() {
                       ? <ApprovalCenter approvals={approvals} busyKey={busyKey} onDecision={(approval, decision) => void reviewApproval(approval, decision)} />
                       : view === 'tasks'
                         ? <BackgroundTaskCenter tasks={tasks} busyKey={busyKey} onOperate={(task, operation) => void operateTask(task, operation)} />
-                        : <PlatformLogCenter logs={auditLogs} />}
+                        : view === 'observability'
+                          ? observability && <OperationalObservabilityCenter snapshot={observability} window={operationalWindow} onWindowChange={setOperationalWindow} />
+                        : view === 'support'
+                          ? <SupportTicketCenter
+                            tickets={supportTickets}
+                            busyKey={busyKey}
+                            onStart={ticket => void transitionSupportTicket(ticket, 'IN_PROGRESS')}
+                            onReopen={ticket => void transitionSupportTicket(ticket, 'IN_PROGRESS')}
+                            onResolve={ticket => setDialog({ kind: 'support-transition', ticket, status: 'RESOLVED' })}
+                            onClose={ticket => setDialog({ kind: 'support-transition', ticket, status: 'CLOSED' })}
+                          />
+                          : <PlatformLogCenter logs={auditLogs} />}
           </section>
         </div>
       </section>
@@ -458,8 +516,100 @@ export function ManagementCenterPage() {
         onClose={closeDialog}
         onSubmit={event => void saveUserDomains(event, dialog.user)}
       />}
+      {dialog?.kind === 'support-transition' && <SupportTransitionDialog
+        ticket={dialog.ticket}
+        status={dialog.status}
+        busy={Boolean(busyKey)}
+        error={error}
+        onClose={closeDialog}
+        onSubmit={event => submitSupportTransition(event, dialog.ticket, dialog.status)}
+      />}
     </AppShell>
   )
+}
+
+const operationalHealthLabel = { HEALTHY: '运行健康', ATTENTION: '需要关注', CRITICAL: '存在异常' } as const
+const queueHealthLabel = { HEALTHY: '正常', ATTENTION: '有积压', CRITICAL: '需处理' } as const
+const purposeLabel: Record<string, string> = {
+  METADATA_COMPLETION: '元数据补全', REPORT_GENERATION: '报告生成', BLOCK_EDIT: '内容块编辑',
+  CONCLUSION_GENERATION: '结论生成', DATA_SOURCE_CONFIG: '数据源配置', ASKDATA_NARRATIVE: '问数解读',
+}
+
+function compactNumber(value: number) {
+  return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(value)
+}
+
+function formatDuration(value: number) {
+  if (value < 1000) return `${value} ms`
+  return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)} 秒`
+}
+
+function formatAge(value: number) {
+  if (value <= 0) return '无等待'
+  if (value < 60) return `${value} 秒`
+  if (value < 3600) return `${Math.ceil(value / 60)} 分钟`
+  return `${(value / 3600).toFixed(1)} 小时`
+}
+
+function QuotaMeter({ label, used, limit, utilization, unit = '' }: { label: string; used: number; limit: number; utilization: number; unit?: string }) {
+  const level = utilization >= 90 ? 'critical' : utilization >= 75 ? 'attention' : 'healthy'
+  return <article className={`operational-quota is-${level}`}>
+    <header><span>{label}</span><strong>{utilization.toFixed(1)}%</strong></header>
+    <div aria-label={`${label}已使用 ${utilization.toFixed(1)}%`}><i style={{ width: `${Math.min(utilization, 100)}%` }} /></div>
+    <footer><span>{compactNumber(used)}{unit}</span><small>额度 {compactNumber(limit)}{unit}</small></footer>
+  </article>
+}
+
+function OperationalObservabilityCenter({ snapshot, window, onWindowChange }: {
+  snapshot: OperationalSnapshot
+  window: OperationalWindow
+  onWindowChange: (value: OperationalWindow) => void
+}) {
+  const ai = snapshot.ai
+  const askData = snapshot.askData
+  return <div className="operational-center">
+    <header className="platform-section-heading operational-heading">
+      <div><span className="eyebrow">OPERATIONS & QUOTA</span><h3>运行健康与资源用量</h3><p>聚合展示问数链路、AI 配额和异步队列；仅保留计数与稳定错误码，不展示业务数据。</p></div>
+      <div className="operational-heading-actions">
+        <span className={`operational-health is-${snapshot.health.toLowerCase()}`}><Pulse size={16} weight="fill" />{operationalHealthLabel[snapshot.health]}</span>
+        <label><span>观察窗口</span><select value={window} onChange={event => onWindowChange(event.target.value as OperationalWindow)}><option value="1h">最近 1 小时</option><option value="6h">最近 6 小时</option><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option></select></label>
+      </div>
+    </header>
+
+    <section className="operational-summary" aria-label="运行概览">
+      <article><Gauge size={22} weight="duotone" /><span>AI 请求成功率</span><strong>{ai.successRate.toFixed(1)}%</strong><small>{ai.succeededInWindow} 成功 · {ai.failedInWindow} 失败</small></article>
+      <article className={askData.blockedInWindow > 0 ? 'attention' : ''}><ChartLineUp size={22} weight="duotone" /><span>问数回答率</span><strong>{askData.answerRate.toFixed(1)}%</strong><small>{askData.answeredInWindow} 已回答 · {askData.blockedInWindow} 阻断</small></article>
+      <article><Timer size={22} weight="duotone" /><span>问数 P95 耗时</span><strong>{formatDuration(askData.p95DurationMs)}</strong><small>平均 {formatDuration(askData.averageDurationMs)}</small></article>
+      <article className={snapshot.queues.some(item => item.status !== 'HEALTHY') ? 'attention' : ''}><Pulse size={22} weight="duotone" /><span>异步队列</span><strong>{snapshot.queues.filter(item => item.status === 'HEALTHY').length}/{snapshot.queues.length}</strong><small>{snapshot.queues.reduce((sum, item) => sum + item.pending + item.running, 0)} 项处理中</small></article>
+    </section>
+
+    <div className="operational-grid">
+      <section className="operational-card operational-quota-card"><header><div><strong>AI 配额水位</strong><span>{ai.enabled ? '租户 AI 能力已启用' : '租户 AI 能力当前停用'}</span></div><small>月度口径按保守计费量统计</small></header><div>
+        <QuotaMeter label="今日请求" used={ai.requestsToday} limit={ai.requestsDailyLimit} utilization={ai.requestUtilization} unit=" 次" />
+        <QuotaMeter label="本月 Token" used={ai.tokensThisMonth} limit={ai.tokensMonthlyLimit} utilization={ai.tokenUtilization} />
+        <QuotaMeter label="本月成本" used={ai.costMicrosThisMonth / 1_000_000} limit={ai.costMicrosMonthlyLimit / 1_000_000} utilization={ai.costUtilization} unit=" 元" />
+      </div></section>
+
+      <section className="operational-card operational-latency-card"><header><div><strong>链路响应</strong><span>判断体验退化与超时风险</span></div><small>最近 {window}</small></header><div>
+        <article><span>AI 平均延迟</span><strong>{formatDuration(ai.averageLatencyMs)}</strong><small>P95 {formatDuration(ai.p95LatencyMs)}</small></article>
+        <article><span>问数平均耗时</span><strong>{formatDuration(askData.averageDurationMs)}</strong><small>P95 {formatDuration(askData.p95DurationMs)}</small></article>
+        <article><span>问数运行中</span><strong>{askData.activeInWindow}</strong><small>{askData.clarificationInWindow} 项等待补充</small></article>
+      </div></section>
+    </div>
+
+    <section className="operational-card operational-queue-card"><header><div><strong>异步处理队列</strong><span>发现积压、失败和卡死任务</span></div><small>超过 15 分钟自动标记异常</small></header><div className="operational-queue-list">
+      {snapshot.queues.map(queue => <article key={queue.code}><span className={`queue-signal is-${queue.status.toLowerCase()}`}><i />{queueHealthLabel[queue.status]}</span><div><strong>{queue.name}</strong><small>{queue.code}</small></div><dl><div><dt>待处理</dt><dd>{queue.pending}</dd></div><div><dt>运行中</dt><dd>{queue.running}</dd></div><div><dt>失败</dt><dd>{queue.failed}</dd></div><div><dt>最长等待</dt><dd>{formatAge(queue.oldestPendingSeconds)}</dd></div></dl></article>)}
+    </div></section>
+
+    <div className="operational-grid operational-bottom-grid">
+      <section className="operational-card"><header><div><strong>AI 用途分布</strong><span>按业务用途核对资源消耗</span></div></header><div className="operational-purpose-list">
+        {snapshot.purposes.length ? snapshot.purposes.map(item => <article key={item.purpose}><div><strong>{purposeLabel[item.purpose] ?? item.purpose}</strong><small>{item.count} 次请求</small></div><span>{compactNumber(item.tokens)} Token</span></article>) : <p className="operational-empty">当前窗口内没有 AI 请求</p>}
+      </div></section>
+      <section className="operational-card"><header><div><strong>失败原因</strong><span>稳定错误码可直接用于定位与告警</span></div></header><div className="operational-failure-list">
+        {snapshot.failureCodes.length ? snapshot.failureCodes.map(item => <article key={`${item.source}:${item.code}`}><span>{item.source === 'ASK_DATA' ? '问数' : 'AI'}</span><code>{item.code}</code><strong>{item.count}</strong></article>) : <p className="operational-empty is-healthy"><CheckCircle size={20} />当前窗口内没有记录到失败</p>}
+      </div></section>
+    </div>
+  </div>
 }
 
 function FixedScope({ level, title, description, capabilities }: {
@@ -720,6 +870,52 @@ function BackgroundTaskCenter({ tasks, busyKey, onOperate }: {
   </div>
 }
 
+const supportStatusLabels: Record<SupportTicket['status'], string> = {
+  OPEN: '待受理', IN_PROGRESS: '处理中', RESOLVED: '已解决', CLOSED: '已关闭',
+}
+const supportCategoryLabels: Record<SupportTicket['category'], string> = {
+  QUESTION: '问数分析', DATA: '数据资产', REPORT: '报告中心', ACCESS: '账号权限', SYSTEM: '平台运行', OTHER: '其他问题',
+}
+
+function SupportTicketCenter({ tickets, busyKey, onStart, onReopen, onResolve, onClose }: {
+  tickets: SupportTicket[]
+  busyKey: string
+  onStart: (ticket: SupportTicket) => void
+  onReopen: (ticket: SupportTicket) => void
+  onResolve: (ticket: SupportTicket) => void
+  onClose: (ticket: SupportTicket) => void
+}) {
+  const [filter, setFilter] = useState<'ACTIVE' | 'RESOLVED' | 'ALL'>('ACTIVE')
+  const visible = tickets.filter(ticket => filter === 'ALL' || (filter === 'ACTIVE'
+    ? ticket.status === 'OPEN' || ticket.status === 'IN_PROGRESS'
+    : ticket.status === 'RESOLVED' || ticket.status === 'CLOSED'))
+  return <div className="administration-view platform-support-view">
+    <header className="administration-view-heading platform-section-heading">
+      <div><span className="eyebrow">SERVICE DESK</span><h2>支持工单</h2><p>处理当前领域的产品使用与运行问题；处理结论会同步给提交人。</p></div>
+      <div className="platform-view-switch" aria-label="工单筛选">
+        <button className={filter === 'ACTIVE' ? 'active' : ''} type="button" onClick={() => setFilter('ACTIVE')}>待跟进</button>
+        <button className={filter === 'RESOLVED' ? 'active' : ''} type="button" onClick={() => setFilter('RESOLVED')}>已处理</button>
+        <button className={filter === 'ALL' ? 'active' : ''} type="button" onClick={() => setFilter('ALL')}>全部</button>
+      </div>
+    </header>
+    {visible.length === 0
+      ? <div className="platform-module-empty"><Lifebuoy size={30} weight="duotone" /><strong>当前没有支持工单</strong><span>用户从帮助中心提交的问题会自动进入这里。</span></div>
+      : <div className="platform-support-list">{visible.map(ticket => <article key={ticket.id}>
+        <span className={`support-priority is-${ticket.priority.toLowerCase()}`}>{ticket.priority === 'URGENT' ? '紧急' : ticket.priority === 'HIGH' ? '较高' : '普通'}</span>
+        <div className="support-ticket-main"><strong>{ticket.subject}</strong><small>{supportCategoryLabels[ticket.category]} · {ticket.reporterName} · {ticket.id.slice(0, 8).toUpperCase()}</small><p>{ticket.description}</p>{ticket.errorCode && <code>{ticket.errorCode}</code>}</div>
+        <div className="support-ticket-source"><small>发生页面</small><strong>{ticket.pageUrl || '未记录'}</strong><time>{formatPlatformTime(ticket.createdAt)}</time></div>
+        <span className={`platform-status-badge ${ticket.status.toLowerCase()}`}>{supportStatusLabels[ticket.status]}</span>
+        <div className="support-ticket-actions">
+          {ticket.status === 'OPEN' && <button className="primary-button compact" type="button" disabled={Boolean(busyKey)} onClick={() => onStart(ticket)}>开始处理</button>}
+          {ticket.status === 'IN_PROGRESS' && <><button className="quiet-button" type="button" disabled={Boolean(busyKey)} onClick={() => onClose(ticket)}>关闭</button><button className="primary-button compact" type="button" disabled={Boolean(busyKey)} onClick={() => onResolve(ticket)}>标记解决</button></>}
+          {ticket.status === 'RESOLVED' && <><button className="quiet-button" type="button" disabled={Boolean(busyKey)} onClick={() => onReopen(ticket)}>重新处理</button><button className="quiet-button" type="button" disabled={Boolean(busyKey)} onClick={() => onClose(ticket)}>关闭</button></>}
+          {ticket.status === 'CLOSED' && <small>{ticket.resolutionNote || '工单已关闭'}</small>}
+        </div>
+        {ticket.resolutionNote && <p className="support-resolution"><CheckCircle size={14} />{ticket.resolutionNote}</p>}
+      </article>)}</div>}
+  </div>
+}
+
 const auditActionLabels: Record<string, string> = {
   REGISTER: '用户注册', LOGIN: '用户登录', LOGOUT: '退出登录',
   CREATE: '创建资源', UPDATE_STATUS: '更新状态', UPDATE_USER_STATUS: '更新账号状态',
@@ -859,6 +1055,28 @@ function DomainDialog({ title, description, busy, error, onClose, onSubmit }: {
   </DialogFrame>
 }
 
+function SupportTransitionDialog({ ticket, status, busy, error, onClose, onSubmit }: {
+  ticket: SupportTicket
+  status: 'RESOLVED' | 'CLOSED'
+  busy: boolean
+  error: string
+  onClose: () => void
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void
+}) {
+  return <DialogFrame
+    title={status === 'RESOLVED' ? '确认问题已解决' : '关闭支持工单'}
+    description={`工单：${ticket.subject}`}
+    busy={busy}
+    error={error}
+    onClose={onClose}
+  >
+    <form onSubmit={onSubmit}>
+      <label>处理结果<textarea name="resolutionNote" autoFocus minLength={4} maxLength={2000} required placeholder="说明定位结果、处理措施或后续建议，提交人会看到这段内容。" /></label>
+      <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy}>{busy ? <SpinnerGap className="spin" size={16} /> : <CheckCircle size={16} />}{busy ? '保存中…' : status === 'RESOLVED' ? '确认解决' : '确认关闭'}</button></footer>
+    </form>
+  </DialogFrame>
+}
+
 function PlatformAdministratorDialog({ users, busy, error, onClose, onSubmit }: {
   users: AdminUser[]
   busy: boolean
@@ -890,7 +1108,11 @@ function DomainAdministratorDialog({ user, domains, users, busy, error, onClose,
   onClose: () => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
 }) {
-  const candidates = users.filter(item => item.status === 'ACTIVE' && !item.platformAdministrator && item.domains.length === 0)
+  // An existing ordinary domain member is the most common person to promote.
+  // Exclude only identities that already hold an administrator class; the API
+  // atomically upgrades MEMBER to DOMAIN_ADMIN for the selected domains.
+  const candidates = users.filter(item => item.status === 'ACTIVE' && !item.platformAdministrator &&
+    !item.domains.some(domain => domain.memberRole === 'DOMAIN_ADMIN'))
   const selectedDomainIDs = new Set(user?.domains.filter(domain => domain.memberRole === 'DOMAIN_ADMIN').map(domain => domain.id) ?? [])
   const visibleDomains = domains.filter(domain => domain.status === 'ACTIVE' || selectedDomainIDs.has(domain.id))
   return <DialogFrame

@@ -682,7 +682,8 @@ func TestClarificationConsumptionUsesArtifactIdentityAndRunVersion(t *testing.T)
 		clarificationConsumeDomain + string(parent.Run.ID) + "\x00" + string(clarificationID),
 	))
 	if store.createRequests[0].IdempotencyKeyHash != wantConsumptionHash ||
-		store.createRequests[0].ParentRunID != parent.Run.ID {
+		store.createRequests[0].ParentRunID != parent.Run.ID ||
+		store.createRequests[0].InitialUsage != (orchestrator.BudgetUsage{}) {
 		t.Fatalf("clarification create request = %#v", store.createRequests[0])
 	}
 

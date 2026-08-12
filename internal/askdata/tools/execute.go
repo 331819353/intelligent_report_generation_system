@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"math/big"
+	"strconv"
 
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/compiler"
@@ -94,7 +97,7 @@ func (binding *Binding) executeQueryPlan(
 	if binding.services.Executor == nil {
 		return output, ErrToolUnavailable
 	}
-	artifact, validation, ok := binding.plans.getValidated(input.PlanHash)
+	artifact, semanticIR, validation, ok := binding.plans.getValidated(input.PlanHash)
 	if !ok {
 		// Either the plan is unknown to this run or it has not been validated.
 		// Both are invalid invocations: execution never validates implicitly.
@@ -104,36 +107,51 @@ func (binding *Binding) executeQueryPlan(
 		RunID: string(binding.run.RunID), Query: artifact, Validation: validation,
 	})
 	if err != nil {
+		// The Tool Host deliberately returns a bounded public error, but the
+		// worker still needs the internal failure class to diagnose broken
+		// warehouse/materialization paths. Do not log SQL, arguments or rows.
+		slog.ErrorContext(ctx, "execute AskData query plan",
+			"run_id", binding.run.RunID,
+			"plan_hash", input.PlanHash,
+			"error", err,
+		)
 		return output, err
 	}
 
 	contract, contractErr := validator.NormalizeResultColumns(artifact, execution, nil)
 	columns := make([]toolhost.ResultColumnSummary, 0)
 	metrics := make([]toolhost.ResultMetricSummary, 0)
+	rowCount := 0
 	if contractErr == nil {
 		for _, plan := range contract.Plans {
 			if plan.Role != compiler.QueryRoleCurrent {
 				continue
 			}
-			for _, column := range plan.Columns {
-				if column.Role == "METRIC" {
-					metrics = append(metrics, toolhost.ResultMetricSummary{Code: column.Name})
-					continue
-				}
-				columns = append(columns, toolhost.ResultColumnSummary{
-					Code: column.Name, CanonicalType: column.Role,
-				})
+			rows, exists := execution.Rows(compiler.QueryRoleCurrent)
+			if !exists {
+				contractErr = fmt.Errorf("current query result is missing")
+				break
 			}
+			rowCount = len(rows)
+			columns, metrics, contractErr = summarizeCurrentResult(plan, rows)
+			break
 		}
 	}
 
-	rowCount := execution.Artifact.TotalRows
 	payload, err := json.Marshal(execution.Artifact)
 	if err != nil {
 		return output, err
 	}
-	binding.results.put(artifact.PlanHash, execution.Artifact.ResultHash)
 	evidence := binding.evidence(askdata.EvidenceKindQueryResult, binding.run.DomainID, payload)
+	if contractErr != nil {
+		return output, contractErr
+	}
+	binding.results.put(executionEntry{
+		planHash: artifact.PlanHash, artifact: artifact, semanticIR: semanticIR,
+		validation: validation, execution: execution, contract: contract,
+		resultHash:  execution.Artifact.ResultHash,
+		evidenceIDs: []askdata.ID{evidence.EvidenceID},
+	})
 	// An empty result is a confirmed fact about the governed data, not a
 	// failure: the answer layer must be able to say "no rows" with evidence.
 	output.Result = toolhost.ExecuteQueryPlanResult{
@@ -148,10 +166,118 @@ func (binding *Binding) executeQueryPlan(
 }
 
 func executionVerdict(rowCount int) string {
-	if rowCount == 0 {
-		return "NO_DATA"
+	// Empty data is represented independently by NoDataConfirmed. PASS means
+	// the governed execution itself completed and crossed its deterministic
+	// validation boundary; it does not claim that the result contains rows.
+	return "PASS"
+}
+
+// summarizeCurrentResult produces the bounded, row-free result evidence that
+// the cognition loop may inspect. Every visible column is included (metrics
+// included), while metric aggregates are computed with exact rationals so a
+// DECIMAL never crosses float64 merely to build a summary.
+func summarizeCurrentResult(
+	plan validator.ResultPlanContract,
+	rows [][]any,
+) ([]toolhost.ResultColumnSummary, []toolhost.ResultMetricSummary, error) {
+	columns := make([]toolhost.ResultColumnSummary, len(plan.Columns))
+	metrics := make([]toolhost.ResultMetricSummary, 0)
+	if len(plan.Columns) == 0 {
+		return nil, nil, fmt.Errorf("current query columns are missing")
 	}
-	return "OK"
+	for rowIndex, row := range rows {
+		if len(row) != len(plan.Columns) {
+			return nil, nil, fmt.Errorf("current query row %d has an invalid shape", rowIndex)
+		}
+	}
+	for columnIndex, column := range plan.Columns {
+		distinct := make(map[string]struct{}, len(rows))
+		nullCount := 0
+		metric := toolhost.ResultMetricSummary{Code: column.Name}
+		var minimum, maximum, sum *big.Rat
+		for _, row := range rows {
+			value := row[columnIndex]
+			if value == nil {
+				nullCount++
+				continue
+			}
+			canonical, err := json.Marshal(value)
+			if err != nil {
+				return nil, nil, err
+			}
+			distinct[string(canonical)] = struct{}{}
+			if column.Role != "METRIC" {
+				continue
+			}
+			numeric, ok := exactResultNumber(value)
+			if !ok {
+				return nil, nil, fmt.Errorf("metric %s contains a non-numeric value", column.Name)
+			}
+			if minimum == nil || numeric.Cmp(minimum) < 0 {
+				minimum = new(big.Rat).Set(numeric)
+			}
+			if maximum == nil || numeric.Cmp(maximum) > 0 {
+				maximum = new(big.Rat).Set(numeric)
+			}
+			if sum == nil {
+				sum = new(big.Rat)
+			}
+			sum.Add(sum, numeric)
+		}
+		columns[columnIndex] = toolhost.ResultColumnSummary{
+			Code: column.Name, CanonicalType: column.Role,
+			NullCount: nullCount, DistinctCount: len(distinct),
+		}
+		if column.Role == "METRIC" {
+			metric.NullCount = nullCount
+			metric.NonNullCount = len(rows) - nullCount
+			if minimum != nil {
+				metric.Minimum = minimum.RatString()
+				metric.Maximum = maximum.RatString()
+				metric.Sum = sum.RatString()
+			}
+			metrics = append(metrics, metric)
+		}
+	}
+	return columns, metrics, nil
+}
+
+func exactResultNumber(value any) (*big.Rat, bool) {
+	var text string
+	switch typed := value.(type) {
+	case string:
+		text = typed
+	case json.Number:
+		text = typed.String()
+	case int:
+		text = strconv.FormatInt(int64(typed), 10)
+	case int8:
+		text = strconv.FormatInt(int64(typed), 10)
+	case int16:
+		text = strconv.FormatInt(int64(typed), 10)
+	case int32:
+		text = strconv.FormatInt(int64(typed), 10)
+	case int64:
+		text = strconv.FormatInt(typed, 10)
+	case uint:
+		text = strconv.FormatUint(uint64(typed), 10)
+	case uint8:
+		text = strconv.FormatUint(uint64(typed), 10)
+	case uint16:
+		text = strconv.FormatUint(uint64(typed), 10)
+	case uint32:
+		text = strconv.FormatUint(uint64(typed), 10)
+	case uint64:
+		text = strconv.FormatUint(typed, 10)
+	case float32:
+		text = strconv.FormatFloat(float64(typed), 'f', -1, 32)
+	case float64:
+		text = strconv.FormatFloat(typed, 'f', -1, 64)
+	default:
+		return nil, false
+	}
+	number, ok := new(big.Rat).SetString(text)
+	return number, ok
 }
 
 // executeValidationQuery is not yet backed by a governed validation-query
@@ -216,18 +342,18 @@ func (binding *Binding) compareCandidateResults(
 	payload, err := json.Marshal(struct {
 		Left  askdata.ContentHash `json:"left"`
 		Right askdata.ContentHash `json:"right"`
-	}{left, right})
+	}{left.resultHash, right.resultHash})
 	if err != nil {
 		return output, err
 	}
 	evidence := binding.evidence(askdata.EvidenceKindQueryResult, binding.run.DomainID, payload)
-	equivalent := left == right
+	equivalent := left.resultHash == right.resultHash
 	differenceCount := 0
 	if !equivalent {
 		differenceCount = 1
 	}
 	output.Result = toolhost.CompareCandidateResultsResult{
-		LeftResultHash: left, RightResultHash: right, Equivalent: equivalent,
+		LeftResultHash: left.resultHash, RightResultHash: right.resultHash, Equivalent: equivalent,
 		DifferenceCount: differenceCount,
 		Differences:     []toolhost.MetricDifferenceSummary{},
 		EvidenceIDs:     []askdata.ID{evidence.EvidenceID},

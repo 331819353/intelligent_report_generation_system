@@ -171,6 +171,12 @@ func (generator *OrchestratedGenerator) ReviewPublication(ctx context.Context, r
 	return review, nil
 }
 
+// InvocationIdentityFrom exposes the identity carried on ctx so callers
+// assembling their own generators can pass it to the AI boundary.
+func InvocationIdentityFrom(ctx context.Context) (InvocationIdentity, error) {
+	return invocationIdentity(ctx)
+}
+
 func invocationIdentity(ctx context.Context) (InvocationIdentity, error) {
 	identity, ok := ctx.Value(invocationIdentityKey{}).(InvocationIdentity)
 	if !ok || identity.TenantID.Validate() != nil || identity.ActorID.Validate() != nil || identity.ReportID.Validate() != nil {

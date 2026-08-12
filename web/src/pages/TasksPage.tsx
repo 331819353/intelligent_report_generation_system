@@ -56,8 +56,13 @@ const typeMeta: Record<string, { category: Exclude<Category, 'all'>; source: str
   FEEDBACK_TICKET: { category: 'request', source: '取数与反馈 · 反馈工单', icon: ChatCircleDots, tone: 'cyan' },
   DECISION_APPROVAL: { category: 'decision', source: '决策与行动 · 决策审批', icon: ShieldCheck, tone: 'amber' },
   ACTION_ASSIGNED: { category: 'decision', source: '决策与行动 · 行动执行', icon: Path, tone: 'cyan' },
+  ACTION_BLOCKED: { category: 'decision', source: '决策与行动 · 行动阻塞', icon: Path, tone: 'orange' },
+  ACTION_OVERDUE: { category: 'decision', source: '决策与行动 · 行动逾期', icon: Clock, tone: 'orange' },
   DECISION_REVIEW_DUE: { category: 'decision', source: '决策与行动 · 决策复盘', icon: Path, tone: 'amber' },
+  OUTCOME_REVIEW_DUE: { category: 'decision', source: '决策与行动 · 结果复盘', icon: Path, tone: 'amber' },
   REPORT_EXPORT_FAILED: { category: 'report', source: '报告任务 · 报告导出', icon: FileText, tone: 'orange' },
+  REPORT_DELIVERY_READY: { category: 'report', source: '报告任务 · 报告送达', icon: FileText, tone: 'green' },
+  REPORT_DELIVERY_FAILED: { category: 'report', source: '报告任务 · 报告分发', icon: FileText, tone: 'orange' },
   RUNTIME_CONFIG_APPROVAL: { category: 'access', source: '访问与发布 · 运行配置', icon: ShieldCheck, tone: 'amber' },
 }
 
@@ -69,6 +74,10 @@ const statusLabels: Record<string, string> = {
   IN_PROGRESS: '处理中',
   UNRESOLVED: '待处理',
   FAILED: '失败',
+  READY: '已送达',
+  PAUSED: '已暂停',
+  NEW: '待分诊',
+  TRIAGED: '已分诊',
 }
 
 function snapshotItem(input: Partial<WorkInboxItem> & Pick<WorkInboxItem, 'type' | 'objectId' | 'summary'>): WorkInboxItem {
@@ -147,7 +156,9 @@ export function ApprovalsPage() {
 
 function WorkCenterPage({ mode }: { mode: WorkCenterMode }) {
   const navigate = useNavigate()
-  const snapshot = import.meta.env.DEV && new URLSearchParams(window.location.search).get('snapshot') === mode
+  const pageParams = new URLSearchParams(window.location.search)
+  const snapshot = import.meta.env.DEV && pageParams.get('snapshot') === mode
+  const incomingItemID = /^[0-9a-f-]{36}$/i.test(pageParams.get('itemId') ?? '') ? pageParams.get('itemId') ?? '' : ''
   const now = useMemo(() => snapshot ? new Date('2026-08-10T12:00:00+08:00') : new Date(), [snapshot])
   const domainName = snapshot ? '企业经营' : currentDomain()?.name ?? '当前领域'
   const [items, setItems] = useState<WorkInboxItem[]>(snapshot ? snapshotItems : [])
@@ -155,8 +166,8 @@ function WorkCenterPage({ mode }: { mode: WorkCenterMode }) {
   const [error, setError] = useState('')
   const [category, setCategory] = useState<Category>('all')
   const [query, setQuery] = useState('')
-  const [onlyUnread, setOnlyUnread] = useState(true)
-  const [selectedID, setSelectedID] = useState(mode === 'tasks' ? snapshotItems[10].objectId : snapshotItems[0].objectId)
+  const [onlyUnread, setOnlyUnread] = useState(!incomingItemID)
+  const [selectedID, setSelectedID] = useState(incomingItemID || (mode === 'tasks' ? snapshotItems[10].objectId : snapshotItems[0].objectId))
   const [reloadRevision, setReloadRevision] = useState(0)
   const [notice, setNotice] = useState('')
   const [nextPath, setNextPath] = useState('')
@@ -234,15 +245,15 @@ function WorkCenterPage({ mode }: { mode: WorkCenterMode }) {
       navigate(destination)
       return
     }
-    setNotice(snapshot ? '视觉快照不跳转真实业务页面。' : '来源任务真实存在，但对应处理页尚未完成；接口与页面缺口已登记到 TODO。')
+    setNotice(snapshot ? '视觉快照保持在当前任务中心。' : '该事项没有独立来源页面，可直接使用当前任务中心提供的操作处理。')
   }
 
   const executeAction = async (item: WorkInboxItem, action: InlineTaskAction) => {
-    if (action === 'REJECT' && !actionNote.trim()) return
+		if (['REJECT', 'BLOCK', 'COMPLETE'].includes(action) && !actionNote.trim()) return
     setBusyAction(true)
     try {
       if (snapshot) {
-        const status = action === 'APPROVE' ? 'APPROVED' : action === 'REJECT' ? 'REJECTED' : 'IN_PROGRESS'
+				const status = action === 'APPROVE' ? 'APPROVED' : action === 'REJECT' ? 'REJECTED' : action === 'COMPLETE' ? 'DONE' : action === 'BLOCK' ? 'BLOCKED' : 'IN_PROGRESS'
         setItems(current => current.map(value => value.objectId === item.objectId
           ? { ...value, status, unread: false, allowedActions: [] }
           : value))
@@ -257,7 +268,11 @@ function WorkCenterPage({ mode }: { mode: WorkCenterMode }) {
         : '')
       setNotice(accessApproved
         ? '领域申请已批准，可继续确认成员角色与生效权限'
-        : action === 'APPROVE' ? '事项已批准，来源状态已同步更新' : action === 'REJECT' ? '事项已驳回，意见已提交给申请人' : '事项已开始处理')
+				: action === 'APPROVE' ? '事项已批准，来源状态已同步更新'
+					: action === 'REJECT' ? '事项已驳回，意见已提交给申请人'
+						: action === 'BLOCK' ? '行动已标记为阻塞，原因已同步给决策负责人'
+							: action === 'COMPLETE' ? '行动已完成，交付凭证已写入决策记录'
+								: '事项已开始处理')
       setActionMode(null)
       setActionNote('')
     } catch (cause) {
@@ -293,7 +308,7 @@ function WorkCenterPage({ mode }: { mode: WorkCenterMode }) {
         <header className="tasks-queue-toolbar">
           <label className="tasks-search"><MagnifyingGlass size={17} /><span className="sr-only">搜索任务</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索任务标题、来源或申请人" /></label>
           <label className="tasks-unread-toggle"><span>仅看未读</span><button type="button" role="switch" aria-checked={onlyUnread} onClick={() => { setOnlyUnread(value => !value); if (!snapshot) setState('loading') }}><span /></button></label>
-          <button className="tasks-sort" type="button">按 SLA<CaretDown size={13} /></button>
+          <span className="tasks-sort" title="任务已按 SLA 紧急程度自动分组">按 SLA 排序</span>
           <button className="tasks-refresh" type="button" aria-label="刷新任务列表" onClick={reload}><ArrowClockwise size={17} /></button>
         </header>
 
@@ -315,7 +330,7 @@ function WorkCenterPage({ mode }: { mode: WorkCenterMode }) {
               </button>
             })}
           </section>)}
-          {state === 'ready' && visibleItems.length === 0 && <div className="tasks-state"><Check size={28} /><strong>{query ? `没有匹配的${mode === 'approvals' ? '审批' : '任务'}` : `当前分类没有${mode === 'approvals' ? '待审批事项' : '任务'}`}</strong><small>这里不会使用演示数据补齐空态</small></div>}
+          {state === 'ready' && visibleItems.length === 0 && <div className="tasks-state"><Check size={28} /><strong>{query ? `没有匹配的${mode === 'approvals' ? '审批' : '任务'}` : `当前分类没有${mode === 'approvals' ? '待审批事项' : '任务'}`}</strong><small>{query ? '可调整关键词或切换分类继续查找' : '新的事项进入当前领域后会自动显示在这里'}</small></div>}
         </div>
       </div>
 
@@ -332,14 +347,16 @@ function WorkCenterPage({ mode }: { mode: WorkCenterMode }) {
           </dl>
           <div className="tasks-detail-description"><strong>说明</strong><p>{selected.summary}。该工作箱只展示受权摘要，具体业务信息与处理状态以来源模块为准。</p></div>
           {actionMode && <form className={`tasks-action-confirm is-${actionMode.toLocaleLowerCase()}`} onSubmit={event => { event.preventDefault(); void executeAction(selected, actionMode) }}>
-            <strong>{actionMode === 'APPROVE' ? '确认批准此事项？' : actionMode === 'REJECT' ? '填写驳回原因' : '确认开始处理？'}</strong>
-            <p>{actionMode === 'REJECT' ? '驳回原因将记录在来源业务的审计事件中。' : '提交后由来源模块重新校验权限、版本和业务门禁。'}</p>
-            {actionMode === 'REJECT' && <textarea autoFocus value={actionNote} onChange={event => setActionNote(event.target.value)} placeholder="请说明需要补充或调整的内容" />}
-            <div><button type="button" disabled={busyAction} onClick={() => { setActionMode(null); setActionNote('') }}>取消</button><button className="primary-button" type="submit" disabled={busyAction || (actionMode === 'REJECT' && !actionNote.trim())}>{busyAction ? '正在提交…' : actionMode === 'APPROVE' ? '确认批准' : actionMode === 'REJECT' ? '确认驳回' : '确认开始'}</button></div>
+			<strong>{actionMode === 'APPROVE' ? '确认批准此事项？' : actionMode === 'REJECT' ? '填写驳回原因' : actionMode === 'BLOCK' ? '说明阻塞原因' : actionMode === 'COMPLETE' ? '填写完成凭证' : '确认开始处理？'}</strong>
+			<p>{actionMode === 'REJECT' ? '驳回原因将记录在来源业务的审计事件中。' : actionMode === 'BLOCK' ? '阻塞原因会同步给决策负责人。' : actionMode === 'COMPLETE' ? '请填写交付结果、文档地址或其他可核验凭证。' : '提交后由来源模块重新校验权限、版本和业务门禁。'}</p>
+			{['REJECT', 'BLOCK', 'COMPLETE'].includes(actionMode) && <textarea autoFocus value={actionNote} onChange={event => setActionNote(event.target.value)} placeholder={actionMode === 'COMPLETE' ? '例如：预算方案已更新并完成投放配置，凭证编号 OP-2026-0812' : actionMode === 'BLOCK' ? '请说明阻塞原因和需要的协助' : '请说明需要补充或调整的内容'} />}
+			<div><button type="button" disabled={busyAction} onClick={() => { setActionMode(null); setActionNote('') }}>取消</button><button className="primary-button" type="submit" disabled={busyAction || (['REJECT', 'BLOCK', 'COMPLETE'].includes(actionMode) && !actionNote.trim())}>{busyAction ? '正在提交…' : actionMode === 'APPROVE' ? '确认批准' : actionMode === 'REJECT' ? '确认驳回' : actionMode === 'BLOCK' ? '确认阻塞' : actionMode === 'COMPLETE' ? '确认完成' : '确认开始'}</button></div>
           </form>}
           <div className="tasks-detail-actions">
             {inlineActions.includes('REJECT') && <button className="danger-button" type="button" disabled={busyAction} onClick={() => setActionMode('REJECT')}>驳回</button>}
+			{inlineActions.includes('BLOCK') && <button className="danger-button" type="button" disabled={busyAction} onClick={() => setActionMode('BLOCK')}>标记阻塞</button>}
             {inlineActions.includes('START') && <button className="primary-button" type="button" disabled={busyAction} onClick={() => setActionMode('START')}>开始处理</button>}
+			{inlineActions.includes('COMPLETE') && <button className="primary-button" type="button" disabled={busyAction} onClick={() => setActionMode('COMPLETE')}>完成行动</button>}
             {inlineActions.includes('APPROVE') && <button className="primary-button" type="button" disabled={busyAction} onClick={() => setActionMode('APPROVE')}>批准</button>}
             <button type="button" disabled={busyAction} onClick={() => void openSource(selected)}>{inlineActions.length ? '查看完整详情' : '打开源页面处理'}<ArrowSquareOut size={17} /></button>
             <button type="button" disabled={busyAction || !selected.unread} onClick={() => void markRead(selected)}>{selected.unread ? '标记已读' : '已标记为已读'}</button>

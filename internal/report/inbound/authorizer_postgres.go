@@ -27,31 +27,14 @@ func (authorizer *PostgresAuthorizer) AuthorizeReportEdit(
 	ctx = database.WithAccessContext(ctx, string(identity.ActorID), string(identity.DomainID))
 	allowed := false
 	err := database.WithTenantTx(ctx, authorizer.pool, string(identity.TenantID), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT EXISTS(
-			SELECT 1 FROM platform.reports AS report
-			JOIN platform.users AS actor ON actor.id=$2 AND actor.tenant_id=report.tenant_id
-			JOIN platform.domain_memberships AS membership
-			  ON membership.tenant_id=report.tenant_id AND membership.domain_id=report.domain_id
-			 AND membership.user_id=actor.id AND membership.status='ACTIVE'
-			WHERE report.id=$1 AND report.tenant_id=$3 AND report.domain_id=$4 AND report.status='ACTIVE'
-			  AND actor.status='ACTIVE' AND actor.deleted_at IS NULL
-			  AND (
-			    report.owner_user_id=actor.id OR membership.member_role='DOMAIN_ADMIN'
-			    OR platform.user_is_asset_administrator()
-			    OR EXISTS(
-			      SELECT 1 FROM platform.object_permissions AS grant
-			      WHERE grant.tenant_id=report.tenant_id AND grant.object_type='REPORT'
-			        AND grant.object_id=report.id AND grant.action='EDIT'
-			        AND ((grant.subject_type='USER' AND grant.subject_id=actor.id)
-			          OR (grant.subject_type='ROLE' AND EXISTS(
-			            SELECT 1 FROM platform.user_roles AS assignment
-			            JOIN platform.roles AS role ON role.id=assignment.role_id AND role.tenant_id=assignment.tenant_id
-			            WHERE assignment.tenant_id=report.tenant_id AND assignment.user_id=actor.id
-			              AND assignment.role_id=grant.subject_id AND role.status='ACTIVE' AND role.deleted_at IS NULL
-			          )))
-			    )
-			  )
-		)`, reportID, identity.ActorID, identity.TenantID, identity.DomainID).Scan(&allowed)
+		// Keep worker delivery authorization identical to the interactive report
+		// editor. A second hand-written permission query had drifted from this
+		// policy and also used the reserved SQL word "grant" as an alias, causing
+		// every otherwise-valid add-to-report job to be rejected.
+		return tx.QueryRow(ctx,
+			`SELECT platform.report_v2_can_access($1,ARRAY['EDIT']::text[])`,
+			reportID,
+		).Scan(&allowed)
 	})
 	if err != nil {
 		return err
@@ -66,9 +49,13 @@ func (authorizer *PostgresAuthorizer) AuthorizeSemanticBinding(
 	ctx context.Context, identity store.Identity, reference report.SemanticQueryRef,
 ) error {
 	if authorizer == nil || authorizer.pool == nil || identity.Validate() != nil ||
-		reference.DatasetVersionID == nil || reference.ResolvedTimeSpec == nil || len(reference.EvidenceRefs) == 0 {
+		!semanticBindingShapeAllowed(reference) {
 		return ErrUnauthorized
 	}
+	// A timeless governed aggregation is a valid semantic binding. When an
+	// explicit time range exists it must carry the compiler-produced resolved
+	// contract; requiring one for every query made otherwise valid KPI answers
+	// impossible to write back to a report.
 	versionIDs := semanticVersionIDs(reference)
 	if len(versionIDs) == 0 {
 		return ErrUnauthorized
@@ -101,6 +88,11 @@ func (authorizer *PostgresAuthorizer) AuthorizeSemanticBinding(
 		return ErrUnauthorized
 	}
 	return nil
+}
+
+func semanticBindingShapeAllowed(reference report.SemanticQueryRef) bool {
+	return reference.DatasetVersionID != nil && len(reference.EvidenceRefs) > 0 &&
+		(reference.SemanticIR.TimeRange == nil || reference.ResolvedTimeSpec != nil)
 }
 
 func semanticVersionIDs(reference report.SemanticQueryRef) []string {

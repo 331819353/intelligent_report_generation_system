@@ -24,10 +24,18 @@ test('work item urgency is derived from authoritative SLA without fixture priori
   assert.equal(result.href, '/ask-data?workspace=data-requests')
 })
 
-test('unsupported source pages stay unavailable instead of falling through to the home route', () => {
+test('decision work items deep-link to the authoritative decision drawer', () => {
+	assert.equal(workItemDestination({
+		type: 'DECISION_APPROVAL', objectId: 'notification-id', status: 'UNRESOLVED', overdue: false,
+		domainId: 'domain-id', summary: '决策待审批', sourceHref: '/decisions/10000000-0000-4000-8000-000000000006', allowedActions: ['APPROVE'],
+		unread: true, updatedAt: '2026-08-10T01:00:00Z', version: '1',
+	}), '/decisions?decisionId=10000000-0000-4000-8000-000000000006')
+})
+
+test('feedback work items deep-link to semantic quality operations', () => {
   assert.equal(workItemDestination({
-    type: 'DECISION_APPROVAL', objectId: 'decision-id', status: 'UNRESOLVED', overdue: false,
-    domainId: 'domain-id', summary: '决策待审批', sourceHref: '/decisions/decision-id', allowedActions: ['APPROVE'],
-    unread: true, updatedAt: '2026-08-10T01:00:00Z', version: '1',
-  }), undefined)
+    type: 'FEEDBACK_TICKET', objectId: '10000000-0000-4000-8000-000000000010', status: 'NEW', overdue: false,
+    domainId: 'domain-id', summary: '反馈工单', sourceHref: '/operations/feedback/10000000-0000-4000-8000-000000000010',
+    allowedActions: ['OPEN'], unread: true, updatedAt: '2026-08-12T01:00:00Z', version: '1',
+  }), '/semantic?workspace=feedback&ticketId=10000000-0000-4000-8000-000000000010')
 })

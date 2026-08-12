@@ -76,6 +76,16 @@ func TestPublicGraphToolEventExposesOnlyDegradationFlag(t *testing.T) {
 	}
 }
 
+func TestPublicEventAlwaysEmitsEvidenceIDsAsAnArray(t *testing.T) {
+	raw, err := json.Marshal(newPublicEvent(orchestrator.Event{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"evidenceIds":[]`) {
+		t.Fatalf("empty evidence IDs must remain a JSON array: %s", raw)
+	}
+}
+
 func TestEventStreamPollsUntilTerminalAndDeduplicatesSnapshots(t *testing.T) {
 	identity := testIdentity()
 	initial := testSnapshot(orchestrator.StateUnderstanding, 1)

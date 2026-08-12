@@ -108,9 +108,12 @@ func (service *PostgresService) ListConversations(ctx context.Context, identity 
 		  FROM askdata.question_runs run WHERE run.tenant_id=$1 AND run.domain_id=$2 AND run.actor_id=$3
 		), latest_label AS (
 		  SELECT DISTINCT ON (run.conversation_id) run.conversation_id,
-		    COALESCE(NULLIF(artifact.payload_json#>>'{answer,layers,structured,headline,label}',''),
+		    COALESCE(NULLIF(artifact.payload_json#>>'{artifact,layers,structured,headline,label}',''),
+		      NULLIF(artifact.payload_json#>>'{artifact,layers,narrative,summary}',''),
+		      NULLIF(artifact.payload_json#>>'{answer,layers,structured,headline,label}',''),
 		      NULLIF(artifact.payload_json#>>'{answer,layers,narrative,summary}',''),'分析会话') AS label,
-		    COALESCE((artifact.payload_json#>>'{answer,verification,degraded}')::boolean,false) AS degraded
+		    COALESCE((artifact.payload_json#>>'{artifact,verification,degraded}')::boolean,
+		      (artifact.payload_json#>>'{answer,verification,degraded}')::boolean,false) AS degraded
 		  FROM askdata.question_artifacts artifact JOIN askdata.question_runs run
 		    ON run.tenant_id=artifact.tenant_id AND run.id=artifact.question_run_id
 		  WHERE artifact.tenant_id=$1 AND artifact.domain_id=$2 AND artifact.actor_id=$3
@@ -298,9 +301,12 @@ func (service *PostgresService) conversationByID(ctx context.Context, identity R
 			WHERE tenant_id=$1 AND domain_id=$2 AND actor_id=$3 AND conversation_id=$4
 			ORDER BY created_at DESC,id DESC LIMIT 1
 		),label AS(
-			SELECT COALESCE(NULLIF(artifact.payload_json#>>'{answer,layers,structured,headline,label}',''),
+			SELECT COALESCE(NULLIF(artifact.payload_json#>>'{artifact,layers,structured,headline,label}',''),
+			  NULLIF(artifact.payload_json#>>'{artifact,layers,narrative,summary}',''),
+			  NULLIF(artifact.payload_json#>>'{answer,layers,structured,headline,label}',''),
 			  NULLIF(artifact.payload_json#>>'{answer,layers,narrative,summary}',''),'分析会话') AS value,
-			  COALESCE((artifact.payload_json#>>'{answer,verification,degraded}')::boolean,false) AS degraded
+			  COALESCE((artifact.payload_json#>>'{artifact,verification,degraded}')::boolean,
+			    (artifact.payload_json#>>'{answer,verification,degraded}')::boolean,false) AS degraded
 			FROM askdata.question_artifacts artifact JOIN askdata.question_runs run
 			  ON run.tenant_id=artifact.tenant_id AND run.id=artifact.question_run_id
 			WHERE artifact.tenant_id=$1 AND artifact.domain_id=$2 AND artifact.actor_id=$3

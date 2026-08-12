@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -151,6 +152,35 @@ func TestReleaseReviewServiceCanClusterFailedGateButCannotApproveIt(t *testing.T
 	})
 	if err != nil || result.PersistedReportHash != recorder.hash || recorder.input.Recommendation != "REJECT" {
 		t.Fatalf("failed-gate review result=%+v input=%+v err=%v", result, recorder.input, err)
+	}
+}
+
+func TestReleaseReviewServiceFallsBackToDeterministicGateReview(t *testing.T) {
+	request, _ := validReleaseReviewRequest(t)
+	reviewer, err := NewReleaseReviewer(&assetReviewInvoker{err: errors.New("provider unavailable")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &releaseReviewRecorderFixture{hash: strings.Repeat("d", 64)}
+	service, err := NewReleaseReviewService(reviewer, recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := AdminScope{TenantID: request.TenantID, DomainID: request.DomainID, ActorID: request.ActorID}
+	ctx := database.WithAccessContext(context.Background(), scope.ActorID, scope.DomainID)
+	result, err := service.GenerateAndRecord(ctx, GenerateReleaseReviewRequest{
+		Scope: scope, ReleaseID: request.ReleaseID,
+		EvaluationSetID: uuid.NewString(), EvaluationBatchID: uuid.NewString(),
+		Gate: ReleaseGateResult{Passed: true, ReceiptHash: strings.Repeat("c", 64),
+			Facts: json.RawMessage(`{"databaseRecomputed":true}`)},
+		PromptVersion: request.PromptVersion, Evidence: request.Evidence,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Review.ProviderModel != "deterministic-gate-review-v1" ||
+		result.Review.Report.Recommendation != "APPROVE" || recorder.input.Recommendation != "APPROVE" {
+		t.Fatalf("fallback result=%+v input=%+v", result, recorder.input)
 	}
 }
 

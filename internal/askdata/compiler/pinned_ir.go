@@ -60,6 +60,19 @@ func (compiler *PinnedIRCompiler) CompilePinnedIR(
 	if err := validateSnapshot(lookup, nil, snapshot); err != nil {
 		return QueryArtifact{}, err
 	}
+	resolvedTimeSpec := request.ResolvedTimeSpec
+	if normalized.TimeRange != nil && resolvedTimeSpec == nil {
+		if snapshot.timeRuntime == nil {
+			return QueryArtifact{}, fmt.Errorf("%w: certified time runtime", ErrContractUnavailable)
+		}
+		resolved, resolveErr := Resolve(
+			ctx, normalized, snapshot.timeRuntime.contract, snapshot.timeRuntime.meta,
+		)
+		if resolveErr != nil {
+			return QueryArtifact{}, resolveErr
+		}
+		resolvedTimeSpec = &resolved
+	}
 	provenance, _ := json.Marshal(struct {
 		Version         string              `json:"version"`
 		PolicyScopeHash askdata.ContentHash `json:"policyScopeHash"`
@@ -85,5 +98,5 @@ func (compiler *PinnedIRCompiler) CompilePinnedIR(
 	if err != nil {
 		return QueryArtifact{}, err
 	}
-	return compileResolvedArtifact(normalized, resolution, request.ResolvedTimeSpec)
+	return compileResolvedArtifact(normalized, resolution, resolvedTimeSpec)
 }

@@ -25,6 +25,7 @@ var (
 	ErrIllegalTransition = errors.New("decision state transition is not allowed")
 	ErrEvidenceInvalid   = errors.New("decision evidence is not a verified immutable artifact")
 	ErrPolicyUnavailable = errors.New("decision approval policy is not configured")
+	ErrSelfApproval      = errors.New("decision submitter cannot approve their own decision")
 	ErrOutcomeBlocked    = errors.New("decision outcome review cannot proceed")
 )
 

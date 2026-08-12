@@ -1,4 +1,4 @@
-import { ArrowRight, Info, LockKey, WarningCircle } from '@phosphor-icons/react'
+import { ArrowRight, CheckCircle, Info, LockKey, WarningCircle } from '@phosphor-icons/react'
 import { useEffect, useMemo, useState } from 'react'
 import type { AskDataClientError, ClarificationOption, QuestionRun } from '../../lib/ask-data-api'
 import {
@@ -41,11 +41,17 @@ export function ClarificationCard({
     onSelectionChange?.(option)
   }
 
+  const conflictLabel = clarification?.conflictCode === 'TIME_RANGE_MISSING'
+    ? '时间范围'
+    : clarification?.conflictCode === 'DIMENSION_ROLE_AMBIGUOUS'
+      ? '维度'
+      : '指标口径'
+
   return (
     <section className="ask-clarification-card" aria-labelledby="ask-clarification-title">
       <header>
         <span>
-          <strong id="ask-clarification-title">需要确认{clarification?.conflictCode === 'DIMENSION_ROLE_AMBIGUOUS' ? '维度' : '指标'}口径</strong>
+          <strong id="ask-clarification-title">需要确认{conflictLabel}</strong>
           <Info size={13} weight="duotone" aria-hidden="true" />
         </span>
         <small>{clarification?.message || '检测到多个可用口径，请选择本次要使用的口径。'}</small>
@@ -68,7 +74,7 @@ export function ClarificationCard({
               <span className="ask-clarification-option-content">
                 <span className="ask-clarification-option-title">
                   <strong>{option.label}</strong>
-                  <small className={optionReady ? '' : 'is-warning'}>{optionReady ? semanticStatusLabel(evidence?.semanticStatus) : '证据不完整'}</small>
+                  <small className={optionReady ? '' : 'is-warning'}>{optionReady ? evidence ? semanticStatusLabel(evidence.semanticStatus) : '可选择' : '证据不完整'}</small>
                 </span>
                 {evidence ? <dl className="ask-clarification-option-grid">
                   <div className="is-wide"><dt>定义</dt><dd>{evidence.definition}</dd></div>
@@ -77,7 +83,7 @@ export function ClarificationCard({
                   <div className="is-wide"><dt>时间范围</dt><dd>{timeRangeLabel(option)}</dd></div>
                   <div><dt>质量评分</dt><dd>{qualityScoreLabel(option)}</dd></div>
                   <div><dt>数据新鲜度</dt><dd>{freshnessLabel(option)}</dd></div>
-                </dl> : <p className="ask-clarification-missing"><WarningCircle size={13} aria-hidden="true" />该候选没有可公开的治理证据，不能提交。</p>}
+                </dl> : <p className="ask-clarification-missing"><CheckCircle size={13} weight="fill" aria-hidden="true" />已关联 {option.evidenceIds.length} 项治理证据，提交后将继续校验完整口径。</p>}
               </span>
             </label>
             {index === 0 && option.difference && <p className="ask-clarification-difference"><Info size={12} weight="fill" aria-hidden="true" /><strong>差异：</strong>{option.difference}</p>}

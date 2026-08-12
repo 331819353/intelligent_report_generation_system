@@ -31,15 +31,7 @@ export type CreatedReportShare = {
   token: string
 }
 
-type AssetPage = { items: Array<Omit<ReportAsset, 'previewKind' | 'ownerAvatar'>>; nextCursor?: string }
-
-const previewKinds: ReportAsset['previewKind'][] = ['operations', 'sales', 'quality', 'inventory', 'channel', 'cashflow']
-
-function previewKindFor(id: string, reportType: ReportAsset['reportType']) {
-  if (reportType === 'DASHBOARD') return 'inventory' as const
-  const score = [...id].reduce((total, value) => total + value.charCodeAt(0), 0)
-  return previewKinds[score % previewKinds.length]
-}
+type AssetPage = { items: Array<Omit<ReportAsset, 'ownerAvatar'>>; nextCursor?: string }
 
 function idempotencyHeaders() {
   return { 'Idempotency-Key': crypto.randomUUID() }
@@ -53,11 +45,7 @@ export const reportAssetsAPI = {
     if (input.lifecycle && input.lifecycle !== 'ALL') query.set('lifecycle', input.lifecycle)
     if (input.search?.trim()) query.set('search', input.search.trim())
     if (input.cursor) query.set('cursor', input.cursor)
-    const result = await apiRequest<AssetPage>(`/v1/reports?${query}`)
-    return {
-      ...result,
-      items: result.items.map(item => ({ ...item, previewKind: previewKindFor(item.id, item.reportType) } satisfies ReportAsset)),
-    }
+    return apiRequest<AssetPage>(`/v1/reports?${query}`)
   },
   listPermissions(reportId: string) {
     return apiRequest<{ items: PermissionGrant[] }>(`/v1/reports/${encodeURIComponent(reportId)}/permissions`)

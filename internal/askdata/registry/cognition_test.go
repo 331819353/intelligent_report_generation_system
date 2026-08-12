@@ -15,6 +15,7 @@ import (
 type assetReviewInvoker struct {
 	invocation ai.Invocation
 	result     ai.InvocationResult
+	err        error
 }
 
 func (invoker *assetReviewInvoker) Invoke(
@@ -22,7 +23,7 @@ func (invoker *assetReviewInvoker) Invoke(
 	invocation ai.Invocation,
 ) (ai.InvocationResult, error) {
 	invoker.invocation = invocation
-	return invoker.result, nil
+	return invoker.result, invoker.err
 }
 
 func TestAssetSuggestionReviewerValidatesAllKindsAndCannotPublish(t *testing.T) {

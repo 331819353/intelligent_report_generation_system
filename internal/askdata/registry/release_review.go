@@ -286,7 +286,15 @@ func (service *ReleaseReviewService) GenerateAndRecord(
 		GatePassed: request.Gate.Passed, Evidence: request.Evidence,
 	})
 	if err != nil {
-		return GenerateReleaseReviewResult{}, err
+		review, err = deterministicReleaseReview(ReleaseReviewLLMRequest{
+			TenantID: request.Scope.TenantID, DomainID: request.Scope.DomainID,
+			ActorID: request.Scope.ActorID, ReleaseID: request.ReleaseID,
+			PromptVersion: request.PromptVersion, PreferredModel: request.PreferredModel,
+			GatePassed: request.Gate.Passed, Evidence: request.Evidence,
+		}, request.Gate.Failures)
+		if err != nil {
+			return GenerateReleaseReviewResult{}, err
+		}
 	}
 	evidence := make([]map[string]any, len(request.Evidence))
 	for index, item := range request.Evidence {
@@ -313,4 +321,59 @@ func (service *ReleaseReviewService) GenerateAndRecord(
 		return GenerateReleaseReviewResult{}, err
 	}
 	return GenerateReleaseReviewResult{Review: review, PersistedReportHash: persistedHash}, nil
+}
+
+func deterministicReleaseReview(
+	request ReleaseReviewLLMRequest,
+	gateFailures []string,
+) (ReleaseReviewLLMResult, error) {
+	_, known, err := releaseReviewMessages(request)
+	if err != nil {
+		return ReleaseReviewLLMResult{}, err
+	}
+	evidenceIDs := make([]askdata.ID, 0, len(known))
+	for evidenceID := range known {
+		evidenceIDs = append(evidenceIDs, evidenceID)
+	}
+	sort.Slice(evidenceIDs, func(i, j int) bool { return evidenceIDs[i] < evidenceIDs[j] })
+	envelope := ReleaseReviewEnvelope{
+		SchemaVersion:       ReleaseReviewSchemaVersion,
+		Recommendation:      "APPROVE",
+		ImpactCodes:         []string{"GATE_FACTS_VERIFIED"},
+		FailureClusterCodes: []string{},
+		Risks:               []ReleaseReviewRisk{},
+		EvidenceIDs:         evidenceIDs,
+	}
+	if !request.GatePassed {
+		failures := make([]string, 0, len(gateFailures))
+		seen := map[string]bool{}
+		for _, failure := range gateFailures {
+			failure = strings.TrimSpace(failure)
+			if stableUpperCode(failure) && !seen[failure] {
+				seen[failure] = true
+				failures = append(failures, failure)
+			}
+		}
+		sort.Strings(failures)
+		if len(failures) == 0 {
+			failures = []string{"RELEASE_GATE_FAILED"}
+		}
+		envelope.Recommendation = "REJECT"
+		envelope.ImpactCodes = []string{}
+		envelope.FailureClusterCodes = failures
+		envelope.Risks = []ReleaseReviewRisk{{
+			Code: "RELEASE_GATE_FAILED", Severity: "CRITICAL", EvidenceIDs: evidenceIDs,
+		}}
+	}
+	if err := validateReleaseReviewEnvelope(envelope, request.GatePassed, known); err != nil {
+		return ReleaseReviewLLMResult{}, err
+	}
+	canonical, err := json.Marshal(envelope)
+	if err != nil {
+		return ReleaseReviewLLMResult{}, err
+	}
+	return ReleaseReviewLLMResult{
+		Report: envelope, ReportHash: askdata.HashBytes(canonical),
+		ProviderModel: "deterministic-gate-review-v1",
+	}, nil
 }

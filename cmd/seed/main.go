@@ -63,12 +63,45 @@ func main() {
 		if err := seedAccess(ctx, tx, tenantID, adminID); err != nil {
 			return err
 		}
+		if err := seedSemanticTaxonomy(ctx, tx, tenantID, adminID); err != nil {
+			return err
+		}
 		return seedDevelopmentAI(ctx, tx, tenantID)
 	})
 	if err != nil {
 		fatal("upsert seed admin", err)
 	}
 	fmt.Printf("seeded tenant=%s admin=%s\n", tenantCode, email)
+}
+
+// seedSemanticTaxonomy guarantees that intelligent DIM/DWD modeling can bind
+// its controlled classification result even when the tenant was created after
+// the schema migration that introduced these tags.
+func seedSemanticTaxonomy(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error {
+	_, err := tx.Exec(ctx, `WITH taxonomy(code,name,description) AS (
+		VALUES
+		  ('system.function.ods_fact','作用:ODS事实表','当前精确 ODS 版本的主要行粒度是原子事实、事件或周期快照'),
+		  ('system.function.ods_dimension','作用:ODS维度表','当前精确 ODS 版本可形成一个或多个稳定实体维度'),
+		  ('system.function.ods_fact_dimension','作用:ODS事实兼维度表','当前精确 ODS 版本既保留事实粒度，也可抽取稳定实体维度'),
+		  ('system.function.ods_other','作用:ODS其他表','当前精确 ODS 版本未识别为事实表或维度表')
+	), default_domain AS (
+		SELECT id FROM platform.business_domains
+		WHERE tenant_id=$1 AND is_default AND status='ACTIVE' AND deleted_at IS NULL
+		ORDER BY created_at,id LIMIT 1
+	)
+	INSERT INTO platform.semantic_tags(
+		tenant_id,domain_id,sharing_scope,code,name,description,
+		category,governance,status,created_by,updated_by
+	)
+	SELECT $1,default_domain.id,'PLATFORM',taxonomy.code,taxonomy.name,
+		taxonomy.description,'TABLE_FUNCTION','CONTROLLED','ACTIVE',$2,$2
+	FROM default_domain CROSS JOIN taxonomy
+	ON CONFLICT(tenant_id,code) DO UPDATE SET
+		name=EXCLUDED.name,description=EXCLUDED.description,
+		category='TABLE_FUNCTION',governance='CONTROLLED',
+		sharing_scope='PLATFORM',status='ACTIVE',updated_by=EXCLUDED.updated_by,
+		updated_at=now()`, tenantID, adminID)
+	return err
 }
 
 // seedDomains 创建本地演示工作空间的默认业务领域，重复执行保持幂等。
@@ -152,17 +185,24 @@ func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error 
 	return err
 }
 
-// seedDevelopmentAI 只为本地演示租户启用数据源元数据与数据集设计所需的 AI 用途。
+// seedDevelopmentAI enables every governed AI workflow in the local demo
+// tenant. Production tenants still opt in through the trusted administration
+// path; this seed exists so the checked-in development product is end-to-end.
 func seedDevelopmentAI(ctx context.Context, tx pgx.Tx, tenantID string) error {
+	const governedPurposes = `ARRAY[
+		'METADATA_COMPLETION','DATASET_DAG_GENERATION','DATASET_TAG_SUGGESTION',
+		'DATASET_SEMANTIC_NAMING','DATA_SOURCE_CONFIGURATION','SEMANTIC_QUESTION',
+		'REPORT_GENERATION','BLOCK_EDIT','CONCLUSION_GENERATION'
+	]::text[]`
 	_, err := tx.Exec(ctx, `UPDATE platform.ai_tenant_policies
 		SET enabled=true,
 			allowed_purposes=ARRAY(
 				SELECT DISTINCT requested.purpose
-				FROM unnest(allowed_purposes || ARRAY['METADATA_COMPLETION','DATASET_DAG_GENERATION','DATA_SOURCE_CONFIGURATION']::text[]) AS requested(purpose)
+				FROM unnest(allowed_purposes || `+governedPurposes+`) AS requested(purpose)
 				ORDER BY requested.purpose
 			)
 		WHERE tenant_id=$1
-			AND (NOT enabled OR NOT (allowed_purposes @> ARRAY['METADATA_COMPLETION','DATASET_DAG_GENERATION','DATA_SOURCE_CONFIGURATION']::text[]))`, tenantID)
+			AND (NOT enabled OR NOT (allowed_purposes @> `+governedPurposes+`))`, tenantID)
 	return err
 }
 

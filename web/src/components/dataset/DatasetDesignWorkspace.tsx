@@ -1,4 +1,5 @@
 import { forwardRef, useMemo, useState, type DragEvent, type ReactNode } from 'react'
+import { RowsIcon } from '@phosphor-icons/react'
 import type { AssetTable, DesignerNode } from '../../lib/datasets'
 
 export type DatasetAssetSourceGroup = {
@@ -52,7 +53,7 @@ function DatasetAssetSidebar({ loading, groups, nodes, onSelectTable }: DatasetA
       }}
       onClick={() => onSelectTable(table)}
     >
-      <span aria-hidden="true">▦</span>
+      <span aria-hidden="true"><RowsIcon size={15} weight="duotone" /></span>
       <span>
         <strong>{table.businessName || table.tableName}</strong>
         <small>{detail}</small>

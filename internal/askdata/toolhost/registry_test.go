@@ -408,7 +408,7 @@ func TestEveryTypedResultContractSanitizesToEvidenceBoundObject(t *testing.T) {
 		}},
 		{ToolGetCertifiedExamples, GetCertifiedExamplesResult{
 			Examples: []CertifiedExampleSummary{{
-				ExampleID: "example-sales-v1", QuestionSummary: "销售额",
+				ExampleID:                "example-sales-v1",
 				ExpectedMetricVersionIDs: []askdata.ID{"metric-sales-v1"},
 				ExpectedDimensionIDs:     []askdata.ID{"dimension-region-v1"},
 				ExpectedTimeExpression:   "LAST_MONTH",
@@ -428,7 +428,8 @@ func TestEveryTypedResultContractSanitizesToEvidenceBoundObject(t *testing.T) {
 			CoverageEnd: "2027-01-01", Rules: []QualityRuleSummary{}, EvidenceIDs: evidenceIDs,
 		}},
 		{ToolCompileSemanticQuery, CompileSemanticQueryResult{
-			PlanHash: hash, PlanCount: 1, ParameterShapes: []ParameterShapeSummary{}, MaxRows: 100, EvidenceIDs: evidenceIDs,
+			PlanHash: hash, SemanticIRHash: hash, PlanCount: 1,
+			ParameterShapes: []ParameterShapeSummary{}, MaxRows: 100, EvidenceIDs: evidenceIDs,
 		}},
 		{ToolValidateQueryPlan, ValidateQueryPlanResult{
 			Allowed: true, ValidationHash: hash, MaxCost: 10, MaxPlanRows: 1,
@@ -556,7 +557,7 @@ func TestCertifiedExampleContractCarriesComponentsNotAnExecutablePlan(t *testing
 	known := map[askdata.ID]askdata.EvidenceRef{evidence.EvidenceID: evidence}
 	hash := askdata.HashBytes([]byte("example"))
 	valid := CertifiedExampleSummary{
-		ExampleID: "example-sales-v1", QuestionSummary: "上月各区域销售额",
+		ExampleID:                "example-sales-v1",
 		ExpectedMetricVersionIDs: []askdata.ID{"metric-sales-v1"},
 		ExpectedDimensionIDs:     []askdata.ID{"dimension-region-v1"},
 		ExpectedTimeExpression:   "LAST_MONTH",

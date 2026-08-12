@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -54,8 +55,18 @@ func (store *PostgresContractStore) LoadContractSnapshot(
 	if err := loadReleaseProof(ctx, tx, lookup, &snapshot); err != nil {
 		return ContractSnapshot{}, err
 	}
-	if err := loadModelContract(ctx, tx, lookup, &snapshot.Model); err != nil {
+	if err := loadModelContract(ctx, tx, lookup, lookup.ModelVersionID, &snapshot.Model); err != nil {
 		return ContractSnapshot{}, err
+	}
+	// Each joined model goes through exactly the same certification, publication
+	// and materialization-freshness checks as the anchor. A join must not be a
+	// way to reach a model that would have been refused on its own.
+	for _, joinedModelVersionID := range lookup.JoinedModelVersionIDs {
+		var joined ModelContract
+		if err := loadModelContract(ctx, tx, lookup, joinedModelVersionID, &joined); err != nil {
+			return ContractSnapshot{}, err
+		}
+		snapshot.JoinedModels = append(snapshot.JoinedModels, joined)
 	}
 	for _, metricVersionID := range lookup.MetricVersionIDs {
 		metric, err := loadMetricContract(ctx, tx, lookup, metricVersionID)
@@ -63,6 +74,11 @@ func (store *PostgresContractStore) LoadContractSnapshot(
 			return ContractSnapshot{}, err
 		}
 		snapshot.Metrics = append(snapshot.Metrics, metric)
+	}
+	if lookup.TimeDimensionVersionID != nil {
+		if err := loadTimeRuntimeContract(ctx, tx, lookup, &snapshot); err != nil {
+			return ContractSnapshot{}, err
+		}
 	}
 	for _, dimensionVersionID := range lookup.DimensionVersionIDs {
 		dimension, err := loadDimensionContract(ctx, tx, lookup, dimensionVersionID)
@@ -93,6 +109,114 @@ func (store *PostgresContractStore) LoadContractSnapshot(
 		return ContractSnapshot{}, fmt.Errorf("commit semantic contract transaction: %w", err)
 	}
 	return snapshot, nil
+}
+
+func loadTimeRuntimeContract(
+	ctx context.Context,
+	tx pgx.Tx,
+	lookup ContractLookup,
+	snapshot *ContractSnapshot,
+) error {
+	metricIDs := make([]string, len(lookup.MetricVersionIDs))
+	for index, value := range lookup.MetricVersionIDs {
+		metricIDs[index] = string(value)
+	}
+	var metricPolicies []string
+	if err := tx.QueryRow(ctx, `SELECT array_agg(DISTINCT COALESCE(metric.incomplete_period_policy_override,'') ORDER BY COALESCE(metric.incomplete_period_policy_override,''))
+		FROM askdata.metric_versions AS metric
+		WHERE metric.tenant_id=$1 AND metric.domain_id=$2 AND metric.id=ANY($3::uuid[])`,
+		lookup.Scope.TenantID, lookup.DomainID, metricIDs,
+	).Scan(&metricPolicies); err != nil {
+		return fmt.Errorf("load metric time policy: %w", err)
+	}
+	if len(metricPolicies) != 1 {
+		return fmt.Errorf("%w: selected metrics have incompatible time policies", ErrContractUnavailable)
+	}
+
+	var (
+		contract                                registry.TimeContractVersion
+		supportedGrains                         []string
+		defaultPolicy, calendarDatasetVersionID string
+		dataAvailableThrough                    time.Time
+	)
+	err := tx.QueryRow(ctx, `SELECT
+		contract.id::text,contract.tenant_id::text,contract.domain_id::text,
+		contract.time_contract_id::text,contract.version_no,contract.status,
+		contract.timezone,contract.week_start,contract.week_numbering,
+		contract.fiscal_year_start_month,contract.fiscal_month_rule,
+		COALESCE(contract.incomplete_period_policy,''),contract.comparison_alignment,
+		contract.month_end_overflow_rule,contract.supported_grains,
+		contract.data_available_through_expr,contract.expected_lag_hours,
+		COALESCE(contract.calendar_dataset_version_id::text,''),contract.content_hash,
+		COALESCE(domain.default_incomplete_period_policy,''),watermark.data_available_through
+	FROM askdata.semantic_models AS model
+	JOIN askdata.release_objects AS model_object
+	  ON model_object.tenant_id=model.tenant_id AND model_object.domain_id=model.domain_id
+	 AND model_object.release_id=$3 AND model_object.object_type='SEMANTIC_MODEL'
+	 AND model_object.object_version_id=model.id
+	JOIN askdata.time_contract_versions AS contract
+	  ON contract.tenant_id=model.tenant_id AND contract.domain_id=model.domain_id
+	 AND contract.id=model.time_contract_version_id
+	JOIN askdata.release_objects AS time_object
+	  ON time_object.tenant_id=contract.tenant_id AND time_object.domain_id=contract.domain_id
+	 AND time_object.release_id=$3 AND time_object.object_type='TIME_CONTRACT'
+	 AND time_object.object_version_id=contract.id AND time_object.content_hash=contract.content_hash
+	JOIN askdata.domains AS domain
+	  ON domain.tenant_id=model.tenant_id AND domain.id=model.domain_id
+	JOIN LATERAL (
+		SELECT materialization.data_available_through
+		FROM platform.materialization_snapshots AS materialization
+		WHERE materialization.tenant_id=model.tenant_id
+		  AND materialization.materialization_id=model.materialization_id
+		  AND materialization.snapshot_completed_at IS NOT NULL
+		  AND materialization.data_available_through IS NOT NULL
+		  AND materialization.quality_status IN ('OK','WARN')
+		ORDER BY materialization.snapshot_completed_at DESC,materialization.id DESC
+		LIMIT 1
+	) AS watermark ON true
+	WHERE model.tenant_id=$1 AND model.domain_id=$2 AND model.id=$4
+	  AND contract.status='CERTIFIED'`,
+		lookup.Scope.TenantID, lookup.DomainID, lookup.Scope.Release.ReleaseID,
+		lookup.ModelVersionID,
+	).Scan(
+		&contract.ID, &contract.TenantID, &contract.DomainID,
+		&contract.TimeContractID, &contract.VersionNo, &contract.Status,
+		&contract.Timezone, &contract.WeekStart, &contract.WeekNumbering,
+		&contract.FiscalYearStartMonth, &contract.FiscalMonthRule,
+		&contract.IncompletePeriodPolicy, &contract.ComparisonAlignment,
+		&contract.MonthEndOverflowRule, &supportedGrains,
+		&contract.DataAvailableThroughExpr, &contract.ExpectedLagHours,
+		&calendarDatasetVersionID, &contract.ContentHash,
+		&defaultPolicy, &dataAvailableThrough,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: certified time runtime", ErrContractUnavailable)
+	}
+	if err != nil {
+		return fmt.Errorf("load certified time runtime: %w", err)
+	}
+	contract.CalendarDatasetVersionID = calendarDatasetVersionID
+	contract.SupportedGrains = make([]registry.TimeGrain, len(supportedGrains))
+	for index, value := range supportedGrains {
+		contract.SupportedGrains[index] = registry.TimeGrain(value)
+	}
+	if contract.Validate() != nil {
+		return fmt.Errorf("%w: invalid certified time contract", ErrContractUnavailable)
+	}
+	policy, source := registry.ResolveIncompletePeriodPolicy(
+		registry.MetricVersion{IncompletePeriodPolicyOverride: registry.IncompletePeriodPolicy(metricPolicies[0])},
+		registry.Domain{DefaultIncompletePeriodPolicy: registry.IncompletePeriodPolicy(defaultPolicy)},
+		contract,
+	)
+	snapshot.timeRuntime = &timeRuntimeContract{
+		contract: contract,
+		meta: MaterializationMeta{
+			DataAvailableThrough: dataAvailableThrough,
+			PolicyApplied:        policy,
+			PolicySource:         source,
+		},
+	}
+	return nil
 }
 
 func validateDatabaseLookupIDs(lookup ContractLookup) error {
@@ -151,7 +275,13 @@ func loadReleaseProof(ctx context.Context, tx pgx.Tx, lookup ContractLookup, sna
 	return nil
 }
 
-func loadModelContract(ctx context.Context, tx pgx.Tx, lookup ContractLookup, target *ModelContract) error {
+func loadModelContract(
+	ctx context.Context,
+	tx pgx.Tx,
+	lookup ContractLookup,
+	modelVersionID askdata.ID,
+	target *ModelContract,
+) error {
 	var (
 		manifestHash, modelStatus, datasetStatus, currentPublishedVersionID string
 		datasetLive, versionStatus, modelLayer, versionLayer                string
@@ -186,7 +316,7 @@ func loadModelContract(ctx context.Context, tx pgx.Tx, lookup ContractLookup, ta
 	WHERE object.tenant_id=$1 AND object.domain_id=$2 AND object.release_id=$3
 	  AND object.object_type='SEMANTIC_MODEL' AND object.object_version_id=$4`,
 		lookup.Scope.TenantID, lookup.DomainID, lookup.Scope.Release.ReleaseID,
-		lookup.ModelVersionID).Scan(
+		modelVersionID).Scan(
 		&target.ContentHash, &manifestHash, &modelStatus,
 		&target.Materialization.DatasetID, &target.Materialization.DatasetVersionID,
 		&target.Materialization.MaterializationID, &target.DatasetSchemaHash,
@@ -203,7 +333,7 @@ func loadModelContract(ctx context.Context, tx pgx.Tx, lookup ContractLookup, ta
 	if err != nil {
 		return fmt.Errorf("load semantic model contract: %w", err)
 	}
-	target.ModelVersionID = lookup.ModelVersionID
+	target.ModelVersionID = modelVersionID
 	if rowCount != nil {
 		target.Materialization.RowCount = *rowCount
 	} else {
@@ -228,23 +358,40 @@ func loadModelContract(ctx context.Context, tx pgx.Tx, lookup ContractLookup, ta
 		value := askdata.ID(primaryTimeFieldID)
 		target.PrimaryTimeFieldID = &value
 	}
+	target.GrainContract, err = canonicalObject(target.GrainContract)
+	if err != nil {
+		return fmt.Errorf("%w: semantic model grain contract", ErrContractUnavailable)
+	}
 	for _, field := range prepared.Document.Fields {
-		visible := true
-		if field.Visible != nil {
-			visible = *field.Visible
-		}
-		contract := FieldContract{
-			FieldID: askdata.ID(field.ID), Code: field.Code, Role: field.Role,
-			CanonicalType: field.CanonicalType, SemanticType: field.SemanticType,
-			Nullable: field.Nullable, Visible: visible,
-		}
-		contract.ContractHash, err = fieldContractHash(contract)
-		if err != nil {
-			return fmt.Errorf("hash model field contract: %w", err)
+		contract, contractErr := semanticFieldContract(field)
+		if contractErr != nil {
+			return fmt.Errorf("hash model field contract: %w", contractErr)
 		}
 		target.Fields = append(target.Fields, contract)
 	}
 	return nil
+}
+
+func semanticFieldContract(field dataset.Field) (FieldContract, error) {
+	visible := true
+	if field.Visible != nil {
+		visible = *field.Visible
+	}
+	contract := FieldContract{
+		// The semantic registry stores primary_time_field_id and
+		// dimensions.logical_field_id as the published field code. Dataset DSL
+		// node IDs are editor-local implementation identifiers (and may
+		// legitimately be values such as "field_stat_date").
+		FieldID: askdata.ID(field.Code), Code: field.Code, Role: field.Role,
+		CanonicalType: field.CanonicalType, SemanticType: field.SemanticType,
+		Nullable: field.Nullable, Visible: visible,
+	}
+	var err error
+	contract.ContractHash, err = fieldContractHash(contract)
+	if err != nil {
+		return FieldContract{}, err
+	}
+	return contract, nil
 }
 
 func loadMetricContract(
@@ -278,6 +425,14 @@ func loadMetricContract(
 	}
 	if manifestHash != string(metric.ContentHash) || status != "CERTIFIED" {
 		return MetricContract{}, fmt.Errorf("%w: metric manifest", ErrContractUnavailable)
+	}
+	metric.FormulaAST, err = canonicalObject(metric.FormulaAST)
+	if err != nil {
+		return MetricContract{}, fmt.Errorf("%w: metric formula contract", ErrContractUnavailable)
+	}
+	metric.DefaultFilterAST, err = canonicalObject(metric.DefaultFilterAST)
+	if err != nil {
+		return MetricContract{}, fmt.Errorf("%w: metric default filter contract", ErrContractUnavailable)
 	}
 	rows, err := tx.Query(ctx, `SELECT measure.measure_id::text,measure.id::text,measure.semantic_model_version_id::text,
 		measure.content_hash,object.content_hash,measure.status,measure.formula_ast,
@@ -313,6 +468,10 @@ func loadMetricContract(
 		}
 		if measureManifestHash != string(measure.ContentHash) || measureStatus != "CERTIFIED" {
 			return MetricContract{}, fmt.Errorf("%w: measure manifest", ErrContractUnavailable)
+		}
+		measure.FormulaAST, err = canonicalObject(measure.FormulaAST)
+		if err != nil {
+			return MetricContract{}, fmt.Errorf("%w: measure formula contract", ErrContractUnavailable)
 		}
 		metric.Measures = append(metric.Measures, measure)
 	}
@@ -450,6 +609,10 @@ func loadRelationshipContract(
 	if manifestHash != string(result.ContentHash) || status != "CERTIFIED" ||
 		registry.RelationshipType(relationshipType) != registry.RelationshipModelJoin {
 		return RelationshipContract{}, fmt.Errorf("%w: relationship manifest", ErrContractUnavailable)
+	}
+	result.JoinAST, err = canonicalObject(result.JoinAST)
+	if err != nil {
+		return RelationshipContract{}, fmt.Errorf("%w: relationship join contract", ErrContractUnavailable)
 	}
 	return result, nil
 }

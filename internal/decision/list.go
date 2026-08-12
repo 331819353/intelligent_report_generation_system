@@ -303,6 +303,12 @@ func (store *PostgresStore) ListApprovalPolicies(ctx context.Context, identity I
 			count(approver.approver_user_id) FROM decision.approval_policies policy
 			JOIN decision.approval_policy_approvers approver ON approver.tenant_id=policy.tenant_id
 			  AND approver.domain_id=policy.domain_id AND approver.policy_id=policy.id
+			JOIN platform.users user_account ON user_account.tenant_id=approver.tenant_id
+			  AND user_account.id=approver.approver_user_id AND user_account.status='ACTIVE'
+			  AND user_account.deleted_at IS NULL
+			JOIN platform.domain_memberships membership ON membership.tenant_id=approver.tenant_id
+			  AND membership.domain_id=approver.domain_id AND membership.user_id=approver.approver_user_id
+			  AND membership.status='ACTIVE'
 			WHERE policy.tenant_id=$1 AND policy.domain_id=$2 AND policy.status='ACTIVE'
 			GROUP BY policy.id,policy.domain_id,policy.tenant_id,policy.name,policy.required_approvals
 			HAVING count(approver.approver_user_id)>=policy.required_approvals ORDER BY policy.name,policy.id`, identity.TenantID, identity.DomainID)

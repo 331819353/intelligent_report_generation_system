@@ -45,6 +45,7 @@ func TestAskDataAndReportUseIdenticalVerifyReport(t *testing.T) {
 		}},
 	}.Normalize()
 	binding := answer.BindingEvidence{
+		Source:  answer.BindingSourceSemanticRelease,
 		Version: answer.BindingEvidenceVersion, SemanticReleaseID: *bundle.SemanticReleaseID,
 		Objects: []answer.ObjectEvidence{{
 			ObjectID: bundle.Facts[0].MetricVersionID, Kind: answer.ObjectMetric,

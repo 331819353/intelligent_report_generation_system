@@ -83,6 +83,7 @@ func (identity RequestIdentity) validate() error {
 }
 
 type CreateQuestionInput struct {
+	Question           string
 	QuestionHash       askdata.ContentHash
 	IdempotencyKeyHash askdata.ContentHash
 	ConversationID     askdata.ID
@@ -360,6 +361,7 @@ func (handler *Handler) createQuestion(writer http.ResponseWriter, request *http
 		return
 	}
 	result, err := handler.backend.CreateQuestion(request.Context(), identity, CreateQuestionInput{
+		Question:           question,
 		QuestionHash:       askdata.HashBytes([]byte(questionHashDomain + question)),
 		IdempotencyKeyHash: idempotencyHash,
 		ConversationID:     conversationID,
@@ -620,6 +622,7 @@ type RunBudgetView struct {
 
 type CompletionView struct {
 	Code          string                      `json:"code"`
+	ArtifactID    askdata.ID                  `json:"artifactId"`
 	ArtifactType  orchestrator.ArtifactType   `json:"artifactType"`
 	ArtifactHash  askdata.ContentHash         `json:"artifactHash"`
 	EvidenceIDs   []askdata.ID                `json:"evidenceIds"`
@@ -701,8 +704,8 @@ type ClarificationQualityView struct {
 type QuestionResultView struct {
 	SchemaVersion     string                     `json:"schemaVersion"`
 	Title             string                     `json:"title"`
-	ResolvedTimeSpec  compiler.ResolvedTimeSpec  `json:"resolvedTimeSpec"`
-	TimeSpec          answer.TimeSpecView        `json:"timeSpec"`
+	ResolvedTimeSpec  *compiler.ResolvedTimeSpec `json:"resolvedTimeSpec,omitempty"`
+	TimeSpec          *answer.TimeSpecView       `json:"timeSpec,omitempty"`
 	Summary           ResultSummaryView          `json:"summary"`
 	EvidenceIDs       []askdata.ID               `json:"evidenceIds"`
 	Evidence          *ClarificationEvidenceView `json:"evidence,omitempty"`
@@ -768,14 +771,14 @@ func newRunView(snapshot orchestrator.ReplaySnapshot) RunView {
 	if run.Terminal() {
 		view.Completion = publicCompletion(snapshot)
 	}
-	view.AllowedActions = allowedRunActions(view)
+	view.AllowedActions = allowedRunActions(view, snapshot)
 	return view
 }
 
 // allowedRunActions is derived only from the server-validated completion
 // projection. Clients must not infer export, report or decision eligibility
 // from a visual state or from payload fields that failed sanitization.
-func allowedRunActions(view RunView) []string {
+func allowedRunActions(view RunView, snapshot orchestrator.ReplaySnapshot) []string {
 	result := []string{}
 	completion := view.Completion
 	if completion == nil || completion.ArtifactType != orchestrator.ArtifactAnswer ||
@@ -783,8 +786,9 @@ func allowedRunActions(view RunView) []string {
 		return result
 	}
 	result = append(result, "SAVE", "SHARE", "EXPORT", "CREATE_DECISION")
+	_, _, _, exportErr := reportExportArtifacts(snapshot)
 	if completion.Result != nil && completion.Outcome != nil &&
-		completion.Outcome.Status == validator.OutcomeAnswered {
+		completion.Outcome.Status == validator.OutcomeAnswered && exportErr == nil {
 		result = append(result, "ADD_TO_REPORT")
 	}
 	return result
@@ -797,9 +801,9 @@ func publicCompletion(snapshot orchestrator.ReplaySnapshot) *CompletionView {
 			continue
 		}
 		view := &CompletionView{
-			Code: run.CompletionCode, ArtifactType: artifact.Type,
+			Code: run.CompletionCode, ArtifactID: artifact.ID, ArtifactType: artifact.Type,
 			ArtifactHash: artifact.Hash,
-			EvidenceIDs:  append([]askdata.ID(nil), artifact.EvidenceIDs...),
+			EvidenceIDs:  copyEvidenceIDs(artifact.EvidenceIDs),
 		}
 		if artifact.Type == orchestrator.ArtifactClarification {
 			view.Clarification = parsePublicClarification(artifact.ID, artifact.Payload)
@@ -817,18 +821,31 @@ func publicCompletion(snapshot orchestrator.ReplaySnapshot) *CompletionView {
 	return nil
 }
 
+func copyEvidenceIDs(values []askdata.ID) []askdata.ID {
+	result := make([]askdata.ID, len(values))
+	copy(result, values)
+	return result
+}
+
 func parsePublicAnswer(payload json.RawMessage) *AnswerPresentationView {
 	raw := payload
 	artifact, err := answer.Decode(raw)
 	if err != nil {
 		var envelope struct {
-			Answer json.RawMessage `json:"answer"`
+			Artifact json.RawMessage `json:"artifact"`
+			Answer   json.RawMessage `json:"answer"`
 		}
-		if json.Unmarshal(payload, &envelope) != nil || len(envelope.Answer) == 0 ||
-			string(envelope.Answer) == "null" {
+		if json.Unmarshal(payload, &envelope) != nil {
 			return nil
 		}
-		artifact, err = answer.Decode(envelope.Answer)
+		rawArtifact := envelope.Artifact
+		if len(rawArtifact) == 0 {
+			rawArtifact = envelope.Answer
+		}
+		if len(rawArtifact) == 0 || string(rawArtifact) == "null" {
+			return nil
+		}
+		artifact, err = answer.Decode(rawArtifact)
 		if err != nil {
 			return nil
 		}
@@ -845,7 +862,7 @@ func parsePublicAnswer(payload json.RawMessage) *AnswerPresentationView {
 	}
 	view.Narrative = &AnswerNarrativePresentation{
 		Summary:  artifact.Layers.Narrative.Summary,
-		Findings: append([]string(nil), artifact.Layers.Narrative.Findings...),
+		Findings: append([]string{}, artifact.Layers.Narrative.Findings...),
 	}
 	return view
 }
@@ -990,15 +1007,33 @@ func sanitizeClarificationEvidence(value *ClarificationEvidenceView) *Clarificat
 }
 
 type questionResultPayload struct {
-	Result *QuestionResultView `json:"result"`
+	Result json.RawMessage `json:"result"`
 }
 
 func parsePublicResult(payload json.RawMessage) *QuestionResultView {
 	var envelope questionResultPayload
-	if json.Unmarshal(payload, &envelope) != nil || envelope.Result == nil {
+	if json.Unmarshal(payload, &envelope) != nil || len(envelope.Result) == 0 || string(envelope.Result) == "null" {
 		return nil
 	}
-	value := envelope.Result
+	var value QuestionResultView
+	if json.Unmarshal(envelope.Result, &value) != nil {
+		return nil
+	}
+	// Durable answer artifacts use "records" rather than the forbidden audit
+	// key "rows". The HTTP projection restores the browser contract only after
+	// every cell has crossed the bounded result validator below.
+	var persisted struct {
+		Datasets []struct {
+			Records []map[string]*string `json:"records"`
+		} `json:"datasets"`
+	}
+	if json.Unmarshal(envelope.Result, &persisted) == nil && len(persisted.Datasets) == len(value.Datasets) {
+		for index := range value.Datasets {
+			if value.Datasets[index].Rows == nil {
+				value.Datasets[index].Rows = persisted.Datasets[index].Records
+			}
+		}
+	}
 	if value.SchemaVersion != "question-result-v1" ||
 		len(value.Datasets) == 0 || len(value.Datasets) > maxPublicResultDatasets ||
 		len(value.Views) == 0 || len(value.Views) > maxPublicResultViews {
@@ -1023,12 +1058,16 @@ func parsePublicResult(payload json.RawMessage) *QuestionResultView {
 	if evidence == nil {
 		return nil
 	}
-	if compiler.ValidateResolvedTimeSpec(value.ResolvedTimeSpec) != nil {
-		return nil
-	}
-	timeSpec := answer.RenderTimeSpec(value.ResolvedTimeSpec, answer.RenderOptions{})
-	if timeSpec.RangeLabel == "" || timeSpec.AsOfLabel == "" || timeSpec.PolicyLabel == "" {
-		return nil
+	var timeSpec *answer.TimeSpecView
+	if value.ResolvedTimeSpec != nil {
+		if compiler.ValidateResolvedTimeSpec(*value.ResolvedTimeSpec) != nil {
+			return nil
+		}
+		rendered := answer.RenderTimeSpec(*value.ResolvedTimeSpec, answer.RenderOptions{})
+		if rendered.RangeLabel == "" || rendered.AsOfLabel == "" || rendered.PolicyLabel == "" {
+			return nil
+		}
+		timeSpec = &rendered
 	}
 
 	result := &QuestionResultView{
@@ -1172,6 +1211,11 @@ func sanitizePublicResultView(
 	value ResultPresentationView,
 	datasets map[askdata.ID]ResultDatasetView,
 ) (ResultPresentationView, bool) {
+	// Normalize empty slices for the JSON boundary. Historical artifacts may
+	// contain null for a view with no dimensions; browser code must always
+	// receive arrays so one malformed old result cannot crash the workspace.
+	value.DimensionKeys = append([]askdata.ID{}, value.DimensionKeys...)
+	value.MeasureKeys = append([]askdata.ID{}, value.MeasureKeys...)
 	value.Label = boundedPublicText(value.Label, 128)
 	dataset, exists := datasets[value.DatasetID]
 	if value.ID.Validate() != nil || value.Label == "" || !exists ||
@@ -1379,6 +1423,7 @@ type PostgresService struct {
 	pool        *pgxpool.Pool
 	runs        questionRunStore
 	quotas      quotaChecker
+	questions   *orchestrator.PostgresQuestionEnvelopeStore
 	scopeRunner scopeTransactionRunner
 }
 
@@ -1412,6 +1457,14 @@ func NewPostgresServiceWithClarificationTimeout(pool *pgxpool.Pool, timeout time
 	}
 }
 
+func (service *PostgresService) SetQuestionEnvelopeStore(
+	store *orchestrator.PostgresQuestionEnvelopeStore,
+) {
+	if service != nil {
+		service.questions = store
+	}
+}
+
 func (service *PostgresService) CreateQuestion(
 	ctx context.Context,
 	identity RequestIdentity,
@@ -1420,6 +1473,11 @@ func (service *PostgresService) CreateQuestion(
 	if service == nil || service.pool == nil || service.runs == nil || identity.validate() != nil ||
 		input.QuestionHash.Validate() != nil || input.IdempotencyKeyHash.Validate() != nil ||
 		!canonicalUUID(input.ConversationID) || (input.SeedContext != nil && input.SavedQuestionID != "") {
+		return OperationResult{}, ErrInvalidRequest
+	}
+	question := strings.TrimSpace(input.Question)
+	if service.questions != nil && (question == "" ||
+		(input.SavedQuestionID == "" && askdata.HashBytes([]byte(questionHashDomain+question)) != input.QuestionHash)) {
 		return OperationResult{}, ErrInvalidRequest
 	}
 	var scope askdata.PolicyScope
@@ -1476,6 +1534,14 @@ func (service *PostgresService) CreateQuestion(
 	})
 	if err != nil {
 		return OperationResult{}, err
+	}
+	if service.questions != nil {
+		if err := service.questions.SaveQuestion(ctx, orchestrator.QuestionRetentionBinding{
+			Scope: scope, DomainID: identity.DomainID, ConversationID: input.ConversationID,
+			RunID: created.Run.ID, QuestionHash: input.QuestionHash,
+		}, question, time.Now().UTC()); err != nil {
+			return OperationResult{}, err
+		}
 	}
 	snapshot, err := service.runs.Resume(ctx, orchestrator.ResumeRequest{
 		Scope: scope, DomainID: identity.DomainID, RunID: created.Run.ID,
@@ -1590,7 +1656,31 @@ func (service *PostgresService) SubmitClarification(
 			return OperationResult{}, err
 		}
 	}
-	return createClarificationChild(ctx, service.runs, activeScope, identity.DomainID, parent, input, time.Now().UTC())
+	now := time.Now().UTC()
+	result, err := createClarificationChild(ctx, service.runs, activeScope, identity.DomainID, parent, input, now)
+	if err != nil {
+		return OperationResult{}, err
+	}
+	if service.questions != nil {
+		label, ok := clarificationOptionLabel(parent, input.OptionID)
+		if !ok {
+			return OperationResult{}, ErrClarificationOption
+		}
+		if err := service.questions.SaveClarificationQuestion(ctx,
+			orchestrator.QuestionRetentionBinding{
+				Scope: scope, DomainID: identity.DomainID,
+				ConversationID: parent.Run.ConversationID, RunID: parent.Run.ID,
+				QuestionHash: parent.Run.QuestionHash,
+			},
+			orchestrator.QuestionRetentionBinding{
+				Scope: activeScope, DomainID: identity.DomainID,
+				ConversationID: result.Snapshot.Run.ConversationID, RunID: result.Snapshot.Run.ID,
+				QuestionHash: result.Snapshot.Run.QuestionHash,
+			}, label, now); err != nil {
+			return OperationResult{}, err
+		}
+	}
+	return result, nil
 }
 
 func createClarificationChild(
@@ -1648,16 +1738,21 @@ func createClarificationChild(
 }
 
 func clarificationOptionAllowed(snapshot orchestrator.ReplaySnapshot, optionID askdata.ID) bool {
+	_, allowed := clarificationOptionLabel(snapshot, optionID)
+	return allowed
+}
+
+func clarificationOptionLabel(snapshot orchestrator.ReplaySnapshot, optionID askdata.ID) (string, bool) {
 	completion := publicCompletion(snapshot)
 	if completion == nil || completion.Clarification == nil {
-		return false
+		return "", false
 	}
 	for _, option := range completion.Clarification.Options {
 		if option.OptionID == optionID {
-			return true
+			return option.Label, strings.TrimSpace(option.Label) != ""
 		}
 	}
-	return false
+	return "", false
 }
 
 func (service *PostgresService) resolveActiveScope(

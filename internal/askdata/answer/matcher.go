@@ -124,8 +124,23 @@ func (evidence ResultEvidence) Validate() error {
 }
 
 func (binding BindingEvidence) Validate() error {
-	if binding.Version != BindingEvidenceVersion || binding.SemanticReleaseID.Validate() != nil || len(binding.Objects) > 512 {
+	if binding.Version != BindingEvidenceVersion || len(binding.Objects) > 512 {
 		return errors.New("invalid binding evidence header")
+	}
+	// Exactly one catalog identity, matching the declared source. An unset or
+	// mismatched identity would leave object names unanchored, which is the
+	// hallucination check this evidence exists to support.
+	switch binding.Source {
+	case BindingSourceSemanticRelease:
+		if binding.SemanticReleaseID.Validate() != nil || binding.DatasetVersionID != "" {
+			return errors.New("SEMANTIC_RELEASE binding requires only a valid semanticReleaseId")
+		}
+	case BindingSourceDatasetVersion:
+		if binding.DatasetVersionID.Validate() != nil || binding.SemanticReleaseID != "" {
+			return errors.New("DATASET_VERSION binding requires only a valid datasetVersionId")
+		}
+	default:
+		return errors.New("binding evidence source is invalid")
 	}
 	seenNames := map[string]bool{}
 	seenObjects := map[askdata.ID]bool{}

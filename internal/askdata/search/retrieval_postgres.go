@@ -209,7 +209,7 @@ func scanRetrievalRows(rows pgx.Rows) ([]RawHit, error) {
 		if err := rows.Scan(&hit.ObjectType, &hit.ObjectVersionID, &hit.InputHash, &hit.Score); err != nil {
 			return nil, err
 		}
-		if !validRetrievalObjectType(hit.ObjectType) || math.IsNaN(hit.Score) ||
+		if !ValidRetrievalObjectType(hit.ObjectType) || math.IsNaN(hit.Score) ||
 			math.IsInf(hit.Score, 0) || hit.Score < 0 {
 			return nil, errors.New("database returned an invalid semantic retrieval score")
 		}
@@ -251,7 +251,7 @@ func validateRetrievalStoreRequest(
 	}
 	types := make([]string, len(objectTypes))
 	for index, objectType := range objectTypes {
-		if !validRetrievalObjectType(objectType) {
+		if !ValidRetrievalObjectType(objectType) {
 			return "", nil, uuid.Nil, nil, ErrInvalidRetrieval
 		}
 		types[index] = string(objectType)

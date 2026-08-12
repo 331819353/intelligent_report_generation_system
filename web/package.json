@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit -p tsconfig.app.json && vite build",
     "lint": "eslint .",
-    "test": "node --test --experimental-transform-types src/lib/*.test.ts src/components/ask-data/*.test.ts src/askdata/format/*.test.ts src/askdata/datarequest/*.test.ts src/report/assets/*.test.ts src/report/designer/layout/*.test.ts src/report/runtime/*.test.ts src/shared/*.test.ts"
+    "test": "node --test --experimental-transform-types src/lib/*.test.ts src/components/ask-data/*.test.ts src/askdata/format/*.test.ts src/askdata/datarequest/*.test.ts src/report/assets/*.test.ts src/report/designer/*.test.ts src/report/designer/layout/*.test.ts src/report/render/*.test.ts src/report/runtime/*.test.ts src/shared/*.test.ts"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",

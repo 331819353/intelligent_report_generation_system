@@ -227,7 +227,8 @@ func TestPostgresCheckpointLoopPersistsCognitionToolAndReplayGuards(t *testing.T
 		Authorization: toolhost.AuthorizationContext{
 			Scope: scope, DomainID: run.DomainID,
 			Permissions: []toolhost.Permission{
-				toolhost.PermissionSemanticRead, toolhost.PermissionClarificationRequest,
+				toolhost.PermissionSemanticRead, toolhost.PermissionGraphResolve,
+				toolhost.PermissionClarificationRequest,
 			},
 		},
 	}
@@ -237,8 +238,10 @@ func TestPostgresCheckpointLoopPersistsCognitionToolAndReplayGuards(t *testing.T
 		bindingAction(cognition.StageCandidateJudgment, toolEvidence),
 	}}
 	loopTools := &fakeLoopTools{
-		available: []toolhost.ToolName{toolhost.ToolSearchSemanticObjects},
-		evidence:  toolEvidence, progress: true,
+		available: []toolhost.ToolName{
+			toolhost.ToolSearchSemanticObjects, toolhost.ToolResolveGraphPlan, toolhost.ToolValidateSemanticBundle,
+		},
+		evidence: toolEvidence, progress: true,
 	}
 	loop, _ := NewLoop(loopRunner, loopTools)
 	loopResult, err := loop.Run(actorContext, loopRequest)
@@ -258,11 +261,11 @@ func TestPostgresCheckpointLoopPersistsCognitionToolAndReplayGuards(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if checkpoint.Run.State != StateBinding || len(checkpoint.Snapshot.ToolCalls) != 1 ||
-		len(checkpoint.Snapshot.Artifacts) != 1 ||
+	if checkpoint.Run.State != StateBinding || len(checkpoint.Snapshot.ToolCalls) != 3 ||
+		len(checkpoint.Snapshot.Artifacts) != 3 ||
 		checkpoint.Snapshot.ToolCalls[0].CallID != "call-search-loop" ||
 		len(checkpoint.Snapshot.SeenActionHashes()) != 2 ||
-		len(checkpoint.Snapshot.SeenToolCallIDs()) != 1 {
+		len(checkpoint.Snapshot.SeenToolCallIDs()) != 3 {
 		t.Fatalf("audited loop replay = %#v", checkpoint.Snapshot)
 	}
 	if checkpointSummaryContainsUnsafeText(checkpoint.Snapshot.Artifacts[0].Payload) {
@@ -275,7 +278,7 @@ func TestPostgresCheckpointLoopPersistsCognitionToolAndReplayGuards(t *testing.T
 		t.Fatalf("replayed tool execution = %#v, %v/%v", replayedExecution, found, err)
 	}
 	replayed, err := store.CheckpointLoop(actorContext, checkpointRequest)
-	if err != nil || !replayed.Replayed || len(replayed.Snapshot.ToolCalls) != 1 {
+	if err != nil || !replayed.Replayed || len(replayed.Snapshot.ToolCalls) != 3 {
 		t.Fatalf("tool checkpoint replay = %#v, %v", replayed, err)
 	}
 

@@ -53,11 +53,13 @@ type PublicEvent struct {
 }
 
 func newPublicEvent(event orchestrator.Event) PublicEvent {
+	evidenceIDs := make([]askdata.ID, len(event.EvidenceIDs))
+	copy(evidenceIDs, event.EvidenceIDs)
 	return PublicEvent{
 		EventID: event.ID, EventIndex: event.Index, RunVersion: event.RunVersion,
 		State: event.State, Type: event.Type, Stage: event.Stage, Status: event.Status,
 		Code: event.Code, ActionHash: event.ActionHash, ArtifactHash: event.ArtifactHash,
-		EvidenceIDs:   append([]askdata.ID(nil), event.EvidenceIDs...),
+		EvidenceIDs:   evidenceIDs,
 		GraphDegraded: publicGraphDegraded(event),
 		DurationMS:    event.DurationMS, CreatedAt: event.CreatedAt,
 	}

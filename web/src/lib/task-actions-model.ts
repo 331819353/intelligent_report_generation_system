@@ -1,13 +1,15 @@
 import type { WorkInboxItem } from './home-api.ts'
 
-export type InlineTaskAction = 'APPROVE' | 'REJECT' | 'START'
+export type InlineTaskAction = 'APPROVE' | 'REJECT' | 'START' | 'BLOCK' | 'COMPLETE'
 
 const supportedActions: Partial<Record<string, readonly InlineTaskAction[]>> = {
   DOMAIN_ACCESS_APPROVAL: ['APPROVE', 'REJECT'],
   DATA_SOURCE_PUBLICATION: ['APPROVE', 'REJECT'],
   DATASET_PUBLICATION: ['APPROVE', 'REJECT'],
   DATA_REQUEST: ['APPROVE', 'REJECT', 'START'],
-  RUNTIME_CONFIG_APPROVAL: ['APPROVE'],
+	DECISION_APPROVAL: ['APPROVE', 'REJECT'],
+	ACTION_ASSIGNED: ['START', 'BLOCK', 'COMPLETE'],
+  RUNTIME_CONFIG_APPROVAL: ['APPROVE', 'REJECT'],
 }
 
 /** 只有现有来源合同具备完整对象标识和乐观锁版本时，才允许在统一工作箱内直接执行。 */

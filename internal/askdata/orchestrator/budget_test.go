@@ -22,10 +22,10 @@ func TestDefaultRunBudgets(t *testing.T) {
 		hard, p95          time.Duration
 		concurrency        int
 	}{
-		{BudgetClassSingleQueryFast, RunTypeSingleQuery, 1, 4, 1, 1, 25 * time.Second, 8 * time.Second, 0},
-		{BudgetClassSingleQueryComplex, RunTypeSingleQuery, 4, 8, 2, 3, 25 * time.Second, 18 * time.Second, 0},
-		{BudgetClassBundle, RunTypeBundle, 2, 10, 6, 2, 30 * time.Second, 25 * time.Second, 4},
-		{BudgetClassDefinition, RunTypeDefinition, 1, 2, 0, 0, 10 * time.Second, 3 * time.Second, 0},
+		{BudgetClassSingleQueryFast, RunTypeSingleQuery, 4, 6, 1, 1, 60 * time.Second, 30 * time.Second, 0},
+		{BudgetClassSingleQueryComplex, RunTypeSingleQuery, 16, 16, 2, 3, 10 * time.Minute, 5 * time.Minute, 0},
+		{BudgetClassBundle, RunTypeBundle, 8, 16, 6, 2, 5 * time.Minute, 3 * time.Minute, 4},
+		{BudgetClassDefinition, RunTypeDefinition, 2, 4, 0, 0, 30 * time.Second, 15 * time.Second, 0},
 	}
 	for _, test := range tests {
 		t.Run(string(test.class), func(t *testing.T) {
@@ -73,7 +73,7 @@ func TestBudgetCatalogAppliesDomainOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve(default) error = %v", err)
 	}
-	if other.MaxToolCalls != 4 || other.HardTimeout != 25*time.Second {
+	if other.MaxToolCalls != 6 || other.HardTimeout != 60*time.Second {
 		t.Fatalf("default budget = %+v", other)
 	}
 }
@@ -153,7 +153,7 @@ func TestBudgetMonitorP95DoesNotInterrupt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBudgetMonitor() error = %v", err)
 	}
-	observation, err := monitor.Observe(context.Background(), RunBudgetUsage{ElapsedMS: 3_001})
+	observation, err := monitor.Observe(context.Background(), RunBudgetUsage{ElapsedMS: 15_001})
 	if err != nil {
 		t.Fatalf("Observe() error = %v", err)
 	}
@@ -161,13 +161,13 @@ func TestBudgetMonitorP95DoesNotInterrupt(t *testing.T) {
 		len(recorder.values) != 1 || recorder.values[0].Name != MetricBudgetTargetExceeded {
 		t.Fatalf("observation = %+v, metrics = %+v", observation, recorder.values)
 	}
-	if _, err := monitor.Observe(context.Background(), RunBudgetUsage{ElapsedMS: 4_000}); err != nil {
+	if _, err := monitor.Observe(context.Background(), RunBudgetUsage{ElapsedMS: 16_000}); err != nil {
 		t.Fatalf("second Observe() error = %v", err)
 	}
 	if len(recorder.values) != 1 {
 		t.Fatalf("metric count = %d, want 1", len(recorder.values))
 	}
-	hard, err := monitor.Observe(context.Background(), RunBudgetUsage{ElapsedMS: 10_000})
+	hard, err := monitor.Observe(context.Background(), RunBudgetUsage{ElapsedMS: 30_000})
 	if err != nil || !hard.HardTimeoutReached || !hard.Interrupt {
 		t.Fatalf("hard observation = %+v, error = %v", hard, err)
 	}
@@ -198,7 +198,7 @@ func TestBudgetConsumptionRecordsEveryDimension(t *testing.T) {
 	usage := RunBudgetUsage{
 		LLMCallsUsed: 4, ToolCallsUsed: 8, PrimaryQueriesUsed: 2,
 		ValidationQueriesUsed: 3, CandidateComparesUsed: 2,
-		MaxJoinHopsUsed: 4, ElapsedMS: 19_000,
+		MaxJoinHopsUsed: 4, ElapsedMS: 301_000,
 	}
 	consumption, err := SnapshotBudgetConsumption(budget, usage)
 	if err != nil {
@@ -218,7 +218,7 @@ func TestBudgetConsumptionRecordsEveryDimension(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	if decoded.SchemaVersion != BudgetConsumptionSchemaVersion || decoded.Usage != usage ||
-		decoded.Limits.HardTimeoutMS != 25_000 || decoded.Limits.P95TargetMS != 18_000 ||
+		decoded.Limits.HardTimeoutMS != 600_000 || decoded.Limits.P95TargetMS != 300_000 ||
 		decoded.Limits.MaxCandidateCompares != 2 || decoded.Limits.MaxJoinHops != 4 ||
 		!decoded.P95TargetExceeded {
 		t.Fatalf("consumption = %+v", decoded)

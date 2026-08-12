@@ -22,8 +22,10 @@ func TestPrepareLoopCheckpointBindsEveryDecisionToolAndBudget(t *testing.T) {
 		bindingAction(cognition.StageCandidateJudgment, toolEvidence),
 	}}
 	tools := &fakeLoopTools{
-		available: []toolhost.ToolName{toolhost.ToolSearchSemanticObjects},
-		evidence:  toolEvidence, progress: true,
+		available: []toolhost.ToolName{
+			toolhost.ToolSearchSemanticObjects, toolhost.ToolResolveGraphPlan, toolhost.ToolValidateSemanticBundle,
+		},
+		evidence: toolEvidence, progress: true,
 	}
 	loop, _ := NewLoop(runner, tools)
 	loopResult, err := loop.Run(context.Background(), loopRequest)
@@ -31,6 +33,7 @@ func TestPrepareLoopCheckpointBindsEveryDecisionToolAndBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := LoopCheckpointRequest{
+		Scope: loopRequest.Authorization.Scope,
 		RunID: loopRequest.Run.ID, ExpectedVersion: loopRequest.Run.RecordVersion,
 		CheckpointID: "checkpoint-binding-1", Stage: cognition.StageCandidateJudgment,
 		TargetState: StateBinding, Result: loopResult,
@@ -44,7 +47,7 @@ func TestPrepareLoopCheckpointBindsEveryDecisionToolAndBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	if prepared.next.State != StateBinding || prepared.next.Usage != loopResult.Usage ||
-		len(prepared.rounds) != 2 || len(prepared.tools) != 1 || prepared.completion != nil {
+		len(prepared.rounds) != 2 || len(prepared.tools) != 3 || prepared.completion != nil {
 		t.Fatalf("prepared checkpoint = %#v", prepared)
 	}
 	tool := prepared.tools[0]
@@ -97,7 +100,7 @@ func TestPrepareGraphToolAuditPersistsDegradedEvidence(t *testing.T) {
 			EvidenceRefs: []askdata.EvidenceRef{conversation},
 		},
 	}
-	prepared, err := prepareToolAudit(loopRequest.Run, action, execution)
+	prepared, err := prepareToolAudit(loopRequest.Run, *action.ToolCall, execution)
 	if err != nil {
 		t.Fatal(err)
 	}

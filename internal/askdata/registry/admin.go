@@ -29,6 +29,7 @@ const (
 	AdminResourceHierarchy        AdminResource = "HIERARCHY"
 	AdminResourceCertifiedExample AdminResource = "CERTIFIED_EXAMPLE"
 	AdminResourceMetricDimension  AdminResource = "METRIC_DIMENSION"
+	AdminResourceTimeContract     AdminResource = "TIME_CONTRACT"
 	AdminResourceRelease          AdminResource = "SEMANTIC_RELEASE"
 )
 
@@ -215,6 +216,14 @@ type RelationshipDraftInput struct {
 	BridgeModelVersionID string           `json:"bridgeModelVersionId,omitempty"`
 }
 
+type MetricDimensionDraftInput struct {
+	VersionedDraftInput
+	MetricVersionID    string `json:"metricVersionId"`
+	DimensionVersionID string `json:"dimensionVersionId"`
+	Compatible         bool   `json:"compatible"`
+	Role               string `json:"role"`
+}
+
 type DeleteDraftInput struct {
 	ExpectedUpdatedAt *time.Time `json:"expectedUpdatedAt,omitempty"`
 	ExpectedVersion   int64      `json:"expectedVersion,omitempty"`
@@ -225,15 +234,27 @@ type ReleaseDraftInput struct {
 	Objects         []ReleaseObject `json:"objects"`
 }
 
+// ReleaseComposeInput asks the server to resolve the exact immutable contract
+// of every currently certified core semantic object. Clients do not recreate
+// canonical contracts or hashes in JavaScript.
+type ReleaseComposeInput struct {
+	SemanticVersion string `json:"semanticVersion"`
+}
+
+type ReleaseComposer interface {
+	CreateReleaseFromCertified(context.Context, AdminScope, ReleaseComposeInput, AdminCommand) (AdminWriteResult, error)
+}
+
 type AdminMutation struct {
-	SemanticModel *SemanticModelDraftInput
-	Measure       *MeasureDraftInput
-	Metric        *MetricDraftInput
-	MetricVersion *MetricVersionDraftInput
-	Dimension     *DimensionDraftInput
-	BusinessTerm  *BusinessTermDraftInput
-	KPIBundle     *KPIBundleDraftInput
-	Relationship  *RelationshipDraftInput
+	SemanticModel   *SemanticModelDraftInput
+	Measure         *MeasureDraftInput
+	Metric          *MetricDraftInput
+	MetricVersion   *MetricVersionDraftInput
+	Dimension       *DimensionDraftInput
+	BusinessTerm    *BusinessTermDraftInput
+	KPIBundle       *KPIBundleDraftInput
+	Relationship    *RelationshipDraftInput
+	MetricDimension *MetricDimensionDraftInput
 }
 
 func (mutation AdminMutation) payload(resource AdminResource) (any, error) {
@@ -255,6 +276,8 @@ func (mutation AdminMutation) payload(resource AdminResource) (any, error) {
 		value = mutation.KPIBundle
 	case AdminResourceRelationship:
 		value = mutation.Relationship
+	case AdminResourceMetricDimension:
+		value = mutation.MetricDimension
 	default:
 		return nil, fmt.Errorf("%w: unsupported semantic resource %q", ErrRegistryInvalidRequest, resource)
 	}

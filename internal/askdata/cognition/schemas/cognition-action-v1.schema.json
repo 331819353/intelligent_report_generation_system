@@ -399,6 +399,7 @@
         "irVersion",
         "semanticReleaseId",
         "semanticContentHash",
+        "domainId",
         "modelVersionId",
         "metrics",
         "groupBy",
@@ -406,7 +407,9 @@
         "timeRange",
         "comparison",
         "sort",
-        "limit"
+        "limit",
+        "otherPolicy",
+        "tieBreaking"
       ],
       "properties": {
         "irVersion": {
@@ -417,6 +420,9 @@
         },
         "semanticContentHash": {
           "$ref": "#/$defs/contentHash"
+        },
+        "domainId": {
+          "$ref": "#/$defs/stableId"
         },
         "modelVersionId": {
           "$ref": "#/$defs/stableId"
@@ -473,7 +479,19 @@
         "limit": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 10000
+          "maximum": 1000
+        },
+        "otherPolicy": {
+          "enum": [
+            "NONE",
+            "AGGREGATE_REMAINDER"
+          ]
+        },
+        "tieBreaking": {
+          "enum": [
+            "INCLUDE_ALL",
+            "DETERMINISTIC_CUT"
+          ]
         }
       }
     },

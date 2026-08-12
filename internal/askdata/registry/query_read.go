@@ -46,6 +46,15 @@ type ContractRow struct {
 	Contract        json.RawMessage
 }
 
+// ReleasedVersionRef is the complete immutable identity required by graph
+// vertex contracts. Query-time callers provide version IDs only; object IDs and
+// version numbers must be resolved from the pinned release, never guessed.
+type ReleasedVersionRef struct {
+	ObjectID        string
+	ObjectVersionID string
+	Version         int
+}
+
 // MemberRow is one governed dimension member value.
 type MemberRow struct {
 	MemberVersionID string
@@ -118,7 +127,7 @@ func (reader *QueryReader) Contracts(
 		return []ContractRow{}, nil
 	}
 	rows := []ContractRow{}
-	err = reader.read(ctx, scope, func(tx pgx.Tx) error {
+	err = reader.read(ctx, scope, domainID, func(tx pgx.Tx) error {
 		// release_objects carries the contract, hash and sensitivity that the
 		// release gate approved. Owner and status come from the source version
 		// tables purely for display; they can never widen what is returned.
@@ -126,13 +135,21 @@ func (reader *QueryReader) Contracts(
 			object.object_type,object.object_id::text,object.object_version_id::text,
 			object.content_hash,object.sensitivity,
 			COALESCE(owner.owner_id::text,''),COALESCE(owner.status,''),
-			object.contract_json
+			CASE WHEN metric_measure.contract_json IS NOT NULL THEN
+			  object.contract_json || jsonb_build_object(
+			    'name',COALESCE(metric_measure.contract_json->>'name',''),
+			    'definition',COALESCE(metric_measure.contract_json->>'definition',metric_measure.contract_json->>'name','')
+			  )
+			ELSE object.contract_json END
 			FROM askdata.release_objects AS object
 			LEFT JOIN LATERAL (
 			  SELECT owner_id,status FROM askdata.semantic_models
 			   WHERE id=object.object_version_id AND tenant_id=object.tenant_id
 			  UNION ALL
 			  SELECT owner_id,status FROM askdata.metric_versions
+			   WHERE id=object.object_version_id AND tenant_id=object.tenant_id
+			  UNION ALL
+			  SELECT owner_id,status FROM askdata.measures
 			   WHERE id=object.object_version_id AND tenant_id=object.tenant_id
 			  UNION ALL
 			  SELECT owner_id,status FROM askdata.dimensions
@@ -142,6 +159,20 @@ func (reader *QueryReader) Contracts(
 			   WHERE id=object.object_version_id AND tenant_id=object.tenant_id
 			  LIMIT 1
 			) AS owner ON true
+			LEFT JOIN LATERAL (
+			  SELECT measure_object.contract_json
+			  FROM askdata.metric_versions AS metric
+			  JOIN askdata.release_objects AS measure_object
+			    ON measure_object.tenant_id=object.tenant_id
+			   AND measure_object.release_id=object.release_id
+			   AND measure_object.object_type='MEASURE'
+			   AND measure_object.object_version_id::text=metric.formula_ast->>'measureVersionId'
+			  WHERE object.object_type='METRIC'
+			    AND metric.tenant_id=object.tenant_id
+			    AND metric.id=object.object_version_id
+			    AND metric.formula_ast->>'type'='MEASURE_REF'
+			  LIMIT 1
+			) AS metric_measure ON true
 			WHERE object.release_id=$1 AND object.domain_id=$2
 			  AND object.object_version_id::text=ANY($3)
 			  AND object.sensitivity<>'RESTRICTED'
@@ -169,6 +200,137 @@ func (reader *QueryReader) Contracts(
 	return rows, nil
 }
 
+// CanonicalMetricVersions translates historical MEASURE search hits to the
+// certified METRIC wrapper in the same pinned release. The search index keeps
+// the richer physical-measure label for recall, while every downstream graph
+// and compiler contract receives the executable metric version identity.
+func (reader *QueryReader) CanonicalMetricVersions(
+	ctx context.Context,
+	scope askdata.PolicyScope,
+	domainID askdata.ID,
+	objectVersionIDs []string,
+) (map[string]string, error) {
+	if err := reader.validate(scope, domainID); err != nil {
+		return nil, err
+	}
+	ids, err := canonicalIDSet(objectVersionIDs)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+	err = reader.read(ctx, scope, domainID, func(tx pgx.Tx) error {
+		rows, queryErr := tx.Query(ctx, `SELECT requested.id::text,
+			CASE WHEN original.object_type='MEASURE' THEN metric.id::text ELSE original.object_version_id::text END
+			FROM unnest($3::uuid[]) AS requested(id)
+			JOIN askdata.release_objects AS original
+			  ON original.tenant_id=askdata.current_tenant_id()
+			 AND original.release_id=$1 AND original.domain_id=$2
+			 AND original.object_version_id=requested.id
+			 AND original.object_type IN ('METRIC','MEASURE')
+			LEFT JOIN LATERAL (
+			  SELECT metric.id
+			  FROM askdata.metric_versions AS metric
+			  JOIN askdata.release_objects AS metric_object
+			    ON metric_object.tenant_id=metric.tenant_id
+			   AND metric_object.release_id=original.release_id
+			   AND metric_object.domain_id=original.domain_id
+			   AND metric_object.object_type='METRIC'
+			   AND metric_object.object_version_id=metric.id
+			  WHERE original.object_type='MEASURE'
+			    AND metric.formula_ast->>'type'='MEASURE_REF'
+			    AND metric.formula_ast->>'measureVersionId'=original.object_version_id::text
+			  ORDER BY metric.id
+			  LIMIT 1
+			) AS metric ON true
+			WHERE original.object_type='METRIC' OR metric.id IS NOT NULL
+			ORDER BY requested.id`, scope.Release.ReleaseID, domainID, ids)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var requested, canonical string
+			if scanErr := rows.Scan(&requested, &canonical); scanErr != nil {
+				return scanErr
+			}
+			result[requested] = canonical
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// ReleasedVersionRefs resolves complete graph identities from the immutable
+// release manifest and the corresponding certified source table.
+func (reader *QueryReader) ReleasedVersionRefs(
+	ctx context.Context,
+	scope askdata.PolicyScope,
+	domainID askdata.ID,
+	objectType string,
+	objectVersionIDs []string,
+) ([]ReleasedVersionRef, error) {
+	if err := reader.validate(scope, domainID); err != nil {
+		return nil, err
+	}
+	ids, err := canonicalIDSet(objectVersionIDs)
+	if err != nil {
+		return nil, err
+	}
+	table, releaseType, objectColumn := "", "", ""
+	switch objectType {
+	case "MODEL":
+		table, releaseType, objectColumn = "semantic_models", "SEMANTIC_MODEL", "model_id"
+	case "METRIC":
+		table, releaseType, objectColumn = "metric_versions", "METRIC", "metric_id"
+	case "DIMENSION":
+		table, releaseType, objectColumn = "dimensions", "DIMENSION", "dimension_id"
+	case "MEMBER":
+		table, releaseType, objectColumn = "dimension_members", "MEMBER", "member_id"
+	default:
+		return nil, fmt.Errorf("%w: unsupported graph object type", ErrQueryReadInvalid)
+	}
+	if len(ids) == 0 {
+		return []ReleasedVersionRef{}, nil
+	}
+	refs := []ReleasedVersionRef{}
+	err = reader.read(ctx, scope, domainID, func(tx pgx.Tx) error {
+		query := fmt.Sprintf(`SELECT source.%s::text,source.id::text,source.version_no
+			FROM askdata.release_objects AS object
+			JOIN askdata.%s AS source
+			  ON source.tenant_id=object.tenant_id AND source.domain_id=object.domain_id
+			 AND source.id=object.object_version_id AND source.%s=object.object_id
+			WHERE object.release_id=$1 AND object.domain_id=$2
+			  AND object.object_type=$3 AND object.object_version_id::text=ANY($4)
+			ORDER BY source.id`, objectColumn, table, objectColumn)
+		rows, queryErr := tx.Query(ctx, query, scope.Release.ReleaseID, domainID, releaseType, ids)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var ref ReleasedVersionRef
+			if scanErr := rows.Scan(&ref.ObjectID, &ref.ObjectVersionID, &ref.Version); scanErr != nil {
+				return scanErr
+			}
+			refs = append(refs, ref)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(refs) != len(ids) {
+		return nil, fmt.Errorf("%w: graph identities are outside the pinned release", ErrQueryReadInvalid)
+	}
+	return refs, nil
+}
+
 // DimensionMembers resolves a business mention against the governed members of
 // one dimension. It refuses dimensions whose member policy forbids
 // label-bearing recall and never returns members above INTERNAL sensitivity, so
@@ -192,7 +354,7 @@ func (reader *QueryReader) DimensionMembers(
 		return MemberLookup{}, fmt.Errorf("%w: mention exceeds the safe bound", ErrQueryReadInvalid)
 	}
 	lookup := MemberLookup{DimensionVersionID: dimensionVersionID, Members: []MemberRow{}}
-	err := reader.read(ctx, scope, func(tx pgx.Tx) error {
+	err := reader.read(ctx, scope, domainID, func(tx pgx.Tx) error {
 		// The dimension itself must be inside the pinned release and must allow
 		// label-bearing member recall; EXACT_ONLY/NONE and high-cardinality
 		// dimensions never expose browsable labels.
@@ -282,7 +444,7 @@ func (reader *QueryReader) CertifiedExamples(
 		return nil, fmt.Errorf("%w: question summary exceeds the safe bound", ErrQueryReadInvalid)
 	}
 	rows := []ExampleRow{}
-	err := reader.read(ctx, scope, func(tx pgx.Tx) error {
+	err := reader.read(ctx, scope, domainID, func(tx pgx.Tx) error {
 		// Trigram similarity ranks examples against the question; role scoping
 		// keeps examples an actor may not use out of the candidate set.
 		result, queryErr := tx.Query(ctx, `SELECT
@@ -354,7 +516,7 @@ func (reader *QueryReader) DataQuality(
 	if len(ids) == 0 {
 		return status, nil
 	}
-	err = reader.read(ctx, scope, func(tx pgx.Tx) error {
+	err = reader.read(ctx, scope, domainID, func(tx pgx.Tx) error {
 		result, queryErr := tx.Query(ctx, `SELECT rule.code,rule.severity
 			FROM askdata.quality_rules AS rule
 			JOIN askdata.release_objects AS object
@@ -421,9 +583,14 @@ func (reader *QueryReader) validate(scope askdata.PolicyScope, domainID askdata.
 func (reader *QueryReader) read(
 	ctx context.Context,
 	scope askdata.PolicyScope,
+	domainID askdata.ID,
 	run func(pgx.Tx) error,
 ) error {
-	ctx = database.WithAccessContext(ctx, string(scope.ActorID), "")
+	// Preserve the exact domain already validated by each public read. Clearing
+	// app.domain_id put the transaction into USER mode without a selected domain,
+	// so RLS correctly returned zero contracts; the Tool Host then rejected the
+	// empty result as if the release had no governed evidence.
+	ctx = database.WithAccessContext(ctx, string(scope.ActorID), string(domainID))
 	return database.WithTenantTx(ctx, reader.pool, string(scope.TenantID), run)
 }
 

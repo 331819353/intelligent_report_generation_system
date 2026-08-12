@@ -51,6 +51,13 @@ func TestAdminCommandAndStableIDsAreDeterministic(t *testing.T) {
 	}
 }
 
+func TestSortedAdminIDsPreservesEmptyArrayContract(t *testing.T) {
+	values := sortedAdminIDs(nil)
+	if values == nil || len(values) != 0 {
+		t.Fatalf("sortedAdminIDs(nil) = %#v, want non-nil empty slice", values)
+	}
+}
+
 func TestDraftContractsNormalizeSetValuedInputsAndMatchReleaseHash(t *testing.T) {
 	term := BusinessTerm{
 		VersionIdentity: VersionIdentity{ID: uuid.NewString(), TenantID: uuid.NewString(),

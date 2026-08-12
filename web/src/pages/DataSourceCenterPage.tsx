@@ -371,6 +371,9 @@ export function DataSourceCenterPage() {
   const designSnapshot = import.meta.env.DEV && Boolean(searchParams.get('snapshot'))
   const qaViewport1920 = designSnapshot && searchParams.get('qa') === '1920'
   const [sources, setSources] = useState<DataSourceRecord[]>(designSnapshot ? snapshotSources : [])
+  const [sourceManagePermissions, setSourceManagePermissions] = useState<Record<string, boolean>>(
+    designSnapshot ? Object.fromEntries(snapshotSources.map(source => [source.id, true])) : {},
+  )
   const [loading, setLoading] = useState(!designSnapshot)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [dialog, setDialog] = useState<DialogState | null>(null)
@@ -448,11 +451,27 @@ export function DataSourceCenterPage() {
     () => sources.find(source => source.id === selectedSourceId) || (!detailDismissed ? sources[0] || null : null),
     [detailDismissed, selectedSourceId, sources],
   )
+  const selectedCanManage = Boolean(selectedSource && sourceManagePermissions[selectedSource.id])
   const replacingFileSource = useMemo(() => {
     if (draft.type !== 'EXCEL' || !draft.code.trim()) return null
     const code = draft.code.trim().toLocaleLowerCase()
     return sources.find(source => source.type === 'EXCEL' && source.code.toLocaleLowerCase() === code && source.fileAssetId) || null
   }, [draft.code, draft.type, sources])
+
+  const loadManagePermissions = useCallback(async (items: DataSourceRecord[]) => {
+    if (designSnapshot) {
+      setSourceManagePermissions(Object.fromEntries(items.map(source => [source.id, true])))
+      return
+    }
+    const entries = await Promise.all(items.map(async source => {
+      try {
+        return [source.id, (await dataSourceAPI.evaluatePermission(source.id, 'MANAGE')).allowed] as const
+      } catch {
+        return [source.id, false] as const
+      }
+    }))
+    setSourceManagePermissions(Object.fromEntries(entries))
+  }, [designSnapshot])
 
   const loadSources = useCallback(async () => {
     if (designSnapshot) {
@@ -464,6 +483,7 @@ export function DataSourceCenterPage() {
       const page = await dataSourceAPI.list()
       const items = Array.isArray(page.items) ? page.items : []
       setSources(items)
+      await loadManagePermissions(items)
       return items
     } catch (cause) {
       setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '加载数据源失败' })
@@ -471,7 +491,7 @@ export function DataSourceCenterPage() {
     } finally {
       setLoading(false)
     }
-  }, [designSnapshot])
+  }, [designSnapshot, loadManagePermissions])
 
   const runConnectionTest = useCallback((sourceId: string) => {
     const existing = connectionTestPollers.current.get(sourceId)
@@ -612,10 +632,12 @@ export function DataSourceCenterPage() {
   useEffect(() => {
     if (designSnapshot) return undefined
     let active = true
-    dataSourceAPI.list().then(page => {
+    dataSourceAPI.list().then(async page => {
       if (!active) return
       const items = Array.isArray(page.items) ? page.items : []
       setSources(items)
+      await loadManagePermissions(items)
+      if (!active) return
       const resumable = new Set(
         dataSourceAPI.pendingConnectionTestSourceIds(),
       )
@@ -641,7 +663,7 @@ export function DataSourceCenterPage() {
       if (active) setLoading(false)
     })
     return () => { active = false }
-  }, [designSnapshot, runConnectionTest, selectedDomainID])
+  }, [designSnapshot, loadManagePermissions, runConnectionTest, selectedDomainID])
 
   const openCreate = () => {
     setFormError('')
@@ -1211,15 +1233,17 @@ export function DataSourceCenterPage() {
   const selectedReviewStatus = selectedSource ? reviewStatusOf(selectedSource) : 'NOT_SUBMITTED'
   const selectedUnavailable = selectedSource ? selectedSource.status === 'SYNCING' || selectedSource.status === 'DELETING' : false
   const selectedPendingDraft = selectedSource ? hasUnpublishedDraft(selectedSource) : false
-  const selectedCanTest = Boolean(selectedSource && !selectedUnavailable && selectedReviewStatus !== 'PENDING')
-  const selectedCanPublish = Boolean(selectedSource && !selectedUnavailable && selectedPendingDraft && selectedReviewStatus !== 'PENDING' && validationStatusOf(selectedSource) === 'PASSED')
+  const selectedCanTest = Boolean(selectedSource && selectedCanManage && !selectedUnavailable && selectedReviewStatus !== 'PENDING')
+  const selectedCanPublish = Boolean(selectedSource && selectedCanManage && !selectedUnavailable && selectedPendingDraft && selectedReviewStatus !== 'PENDING' && validationStatusOf(selectedSource) === 'PASSED')
   const selectedSummary = selectedSource ? metadataSummary(selectedSource) : null
   const selectedHealth = selectedSource ? connectionHealth(selectedSource) : null
   const selectedLifecycle = selectedSource ? lifecycleSteps(selectedSource) : []
   const selectedIsRequester = Boolean(selectedSource && (!signedInSubject || selectedSource.reviewRequesterId === signedInSubject))
   const selectedNextAction = !selectedSource
     ? ''
-    : selectedReviewStatus === 'PENDING'
+    : !selectedCanManage
+      ? '浏览数据资产'
+      : selectedReviewStatus === 'PENDING'
       ? '等待发布审批'
       : selectedReviewStatus === 'REJECTED'
         ? '修改配置并重新验证'
@@ -1277,7 +1301,8 @@ export function DataSourceCenterPage() {
                 const reviewStatus = reviewStatusOf(source)
                 const reviewLocked = reviewStatus === 'PENDING' || reviewStatus === 'REJECTED'
                 const unavailable = source.status === 'SYNCING' || source.status === 'DELETING'
-                const canTest = !unavailable && reviewStatus !== 'PENDING'
+                const canManage = Boolean(sourceManagePermissions[source.id])
+                const canTest = canManage && !unavailable && reviewStatus !== 'PENDING'
                 const subtitle = `${typeLabels[source.type]} · ${source.code}${source.description ? ` · ${source.description}` : ''}`
                 const health = connectionHealth(source)
                 const summary = metadataSummary(source)
@@ -1295,9 +1320,9 @@ export function DataSourceCenterPage() {
                     <span className="data-source-readiness-cell" role="cell"><strong>{summary.readiness === null ? publicationLabels[publicationStatusOf(source)] : `${summary.readiness}%`}</strong>{summary.readiness === null ? <small>进入资产查看进度</small> : <progress aria-label={`${source.name}元数据完善度`} max="100" value={summary.readiness} />}</span>
                   </AppButton>
                   <div className="data-source-actions" role="cell">
-                    <AppButton className="action-test" type="button" disabled={actionBusy || !canTest} onClick={() => void testConnection(source)}>{busyAction === `test:${source.id}` ? '测试中…' : '测试连接'}</AppButton>
-                    <AppButton className="action-edit" type="button" disabled={actionBusy || unavailable || reviewStatus === 'PENDING' || source.type === 'EXCEL'} aria-label={`编辑${source.name}`} onClick={() => openExisting('edit', source)}><PencilSimple size={15} /><span>编辑</span></AppButton>
-                    <AppButton text circle className="action-more" type="button" disabled={reviewLocked} aria-label={`管理${source.name}的数据表资产`} title={reviewLocked ? '审核完成后可管理数据表资产' : '管理数据表资产'} onClick={() => openAssetWorkspace(source)}><DotsThree size={19} weight="bold" /></AppButton>
+                    {canManage && <AppButton className="action-test" type="button" disabled={actionBusy || !canTest} onClick={() => void testConnection(source)}>{busyAction === `test:${source.id}` ? '测试中…' : '测试连接'}</AppButton>}
+                    {canManage && <AppButton className="action-edit" type="button" disabled={actionBusy || unavailable || reviewStatus === 'PENDING' || source.type === 'EXCEL'} aria-label={`编辑${source.name}`} onClick={() => openExisting('edit', source)}><PencilSimple size={15} /><span>编辑</span></AppButton>}
+                    <AppButton text circle className="action-more" type="button" disabled={reviewLocked} aria-label={`${canManage ? '管理' : '查看'}${source.name}的数据表资产`} title={reviewLocked ? '审核完成后可查看数据表资产' : canManage ? '管理数据表资产' : '查看数据表资产'} onClick={() => openAssetWorkspace(source)}><DotsThree size={19} weight="bold" /></AppButton>
                   </div>
                 </article>
               })}</div>}
@@ -1312,9 +1337,9 @@ export function DataSourceCenterPage() {
           <AppButton text circle type="button" aria-label="关闭数据源详情" onClick={() => { setDetailDismissed(true); setSelectedSourceId('') }}><X size={19} /></AppButton>
         </header>
         <div className="data-source-inspector-actions">
-          <AppButton variant="primary" className="action-test" type="button" disabled={actionBusy || !selectedCanTest} onClick={() => void testConnection(selectedSource)}>{busyAction === `test:${selectedSource.id}` ? '测试中…' : '测试连接'}</AppButton>
-          <AppButton className="action-edit" type="button" disabled={actionBusy || selectedUnavailable || selectedReviewStatus === 'PENDING' || selectedSource.type === 'EXCEL'} onClick={() => openExisting('edit', selectedSource)}><PencilSimple size={15} />编辑</AppButton>
-          <AppButton className="action-assets" type="button" disabled={selectedReviewStatus === 'PENDING' || selectedReviewStatus === 'REJECTED'} onClick={() => openAssetWorkspace(selectedSource)}>管理资产</AppButton>
+          {selectedCanManage && <AppButton variant="primary" className="action-test" type="button" disabled={actionBusy || !selectedCanTest} onClick={() => void testConnection(selectedSource)}>{busyAction === `test:${selectedSource.id}` ? '测试中…' : '测试连接'}</AppButton>}
+          {selectedCanManage && <AppButton className="action-edit" type="button" disabled={actionBusy || selectedUnavailable || selectedReviewStatus === 'PENDING' || selectedSource.type === 'EXCEL'} onClick={() => openExisting('edit', selectedSource)}><PencilSimple size={15} />编辑</AppButton>}
+          <AppButton className="action-assets" type="button" disabled={selectedReviewStatus === 'PENDING' || selectedReviewStatus === 'REJECTED'} onClick={() => openAssetWorkspace(selectedSource)}>{selectedCanManage ? '管理资产' : '查看资产'}</AppButton>
         </div>
 
         <div className="data-source-inspector-scroll">
@@ -1353,19 +1378,20 @@ export function DataSourceCenterPage() {
 
           <section className="data-source-inspector-card sharing-card">
             <header><strong>共享范围</strong></header>
-            <dl><div><dt>所属领域</dt><dd>企业经营</dd></div><div><dt>当前范围</dt><dd><AssetSharingSelect resourceType="DATA_SOURCE" resourceID={selectedSource.id} value={selectedSource.sharingScope || (selectedSource.visibility === 'TENANT_PUBLIC' ? 'DOMAIN' : 'PRIVATE')} ownerUserID={selectedSource.ownerId} assetDomainID={selectedSource.domainId} disabled={actionBusy || selectedUnavailable} onChange={sharingScope => setSources(current => current.map(item => item.id === selectedSource.id ? { ...item, sharingScope } : item))} /></dd></div></dl>
+            <dl><div><dt>所属领域</dt><dd>企业经营</dd></div><div><dt>当前范围</dt><dd><AssetSharingSelect resourceType="DATA_SOURCE" resourceID={selectedSource.id} value={selectedSource.sharingScope || (selectedSource.visibility === 'TENANT_PUBLIC' ? 'DOMAIN' : 'PRIVATE')} ownerUserID={selectedSource.ownerId} assetDomainID={selectedSource.domainId} disabled={!selectedCanManage || actionBusy || selectedUnavailable} onChange={sharingScope => setSources(current => current.map(item => item.id === selectedSource.id ? { ...item, sharingScope } : item))} /></dd></div></dl>
           </section>
         </div>
 
         <footer className="data-source-next-action">
-          <div><Sparkle size={18} weight="fill" /><span><strong>下一步：{selectedNextAction}</strong><small>{selectedReviewStatus === 'PENDING' ? '审核通过后继续元数据发现与资产完善。' : selectedReviewStatus === 'REJECTED' ? (selectedSource.reviewNote || '根据审核意见修改配置后重新提交。') : validationStatusOf(selectedSource) !== 'PASSED' ? '生成新的连接测试收据，确认当前配置可用。' : selectedPendingDraft ? '固定当前已验证版本并进入发布审核。' : '补充业务定义、指标口径与血缘关系。'}</small></span></div>
+          <div><Sparkle size={18} weight="fill" /><span><strong>下一步：{selectedNextAction}</strong><small>{!selectedCanManage ? '以只读方式查看已共享的数据表、字段定义与治理状态。' : selectedReviewStatus === 'PENDING' ? '审核通过后继续元数据发现与资产完善。' : selectedReviewStatus === 'REJECTED' ? (selectedSource.reviewNote || '根据审核意见修改配置后重新提交。') : validationStatusOf(selectedSource) !== 'PASSED' ? '生成新的连接测试收据，确认当前配置可用。' : selectedPendingDraft ? '固定当前已验证版本并进入发布审核。' : '补充业务定义、指标口径与血缘关系。'}</small></span></div>
           <AppButton variant="primary" type="button" disabled={actionBusy || (selectedReviewStatus === 'PENDING' && !selectedIsRequester)} onClick={() => {
-            if (selectedReviewStatus === 'PENDING') void withdrawReview(selectedSource)
+            if (!selectedCanManage) openAssetWorkspace(selectedSource)
+            else if (selectedReviewStatus === 'PENDING') void withdrawReview(selectedSource)
             else if (selectedReviewStatus === 'REJECTED') openExisting('edit', selectedSource)
             else if (validationStatusOf(selectedSource) !== 'PASSED') void testConnection(selectedSource)
             else if (selectedCanPublish) void publishSource(selectedSource)
             else openAssetWorkspace(selectedSource)
-          }}>{selectedReviewStatus === 'PENDING' ? selectedIsRequester ? '撤销申请' : '等待审批' : selectedReviewStatus === 'REJECTED' ? '去修改' : validationStatusOf(selectedSource) !== 'PASSED' ? '重新测试' : selectedCanPublish ? '提交审批' : '去完善'}</AppButton>
+          }}>{!selectedCanManage ? '查看资产' : selectedReviewStatus === 'PENDING' ? selectedIsRequester ? '撤销申请' : '等待审批' : selectedReviewStatus === 'REJECTED' ? '去修改' : validationStatusOf(selectedSource) !== 'PASSED' ? '重新测试' : selectedCanPublish ? '提交审批' : '去完善'}</AppButton>
         </footer>
       </aside>}
 

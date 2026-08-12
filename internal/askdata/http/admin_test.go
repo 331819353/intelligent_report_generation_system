@@ -22,28 +22,41 @@ type fakeAdminBackend struct {
 	result   registry.AdminWriteResult
 	err      error
 
-	lastScope       registry.AdminScope
-	lastResource    registry.AdminResource
-	lastResourceID  string
-	lastListFilter  registry.AdminListFilter
-	lastMutation    registry.AdminMutation
-	lastDelete      registry.DeleteDraftInput
-	lastRelease     registry.ReleaseDraftInput
-	lastCommand     registry.AdminCommand
-	listCalls       int
-	getCalls        int
-	createCalls     int
-	updateCalls     int
-	deleteCalls     int
-	releaseCalls    int
-	additivityPage  registry.AdditivityCandidatePage
-	readiness       registry.AdditivityReadiness
-	confirmation    registry.BulkAdditivityConfirmationResult
-	lastGroup       registry.Additivity
-	lastConfirm     registry.BulkAdditivityConfirmation
-	additivityCalls int
-	readinessCalls  int
-	confirmCalls    int
+	lastScope         registry.AdminScope
+	lastResource      registry.AdminResource
+	lastResourceID    string
+	lastListFilter    registry.AdminListFilter
+	lastMutation      registry.AdminMutation
+	lastDelete        registry.DeleteDraftInput
+	lastRelease       registry.ReleaseDraftInput
+	lastCommand       registry.AdminCommand
+	listCalls         int
+	getCalls          int
+	createCalls       int
+	updateCalls       int
+	deleteCalls       int
+	releaseCalls      int
+	additivityPage    registry.AdditivityCandidatePage
+	readiness         registry.AdditivityReadiness
+	confirmation      registry.BulkAdditivityConfirmationResult
+	lastGroup         registry.Additivity
+	lastConfirm       registry.BulkAdditivityConfirmation
+	additivityCalls   int
+	readinessCalls    int
+	confirmCalls      int
+	timeContractCalls int
+	lastTimeContract  registry.TimeContractCreateInput
+}
+
+func (backend *fakeAdminBackend) CreateCertifiedTimeContract(
+	_ context.Context,
+	scope registry.AdminScope,
+	input registry.TimeContractCreateInput,
+	command registry.AdminCommand,
+) (registry.AdminWriteResult, error) {
+	backend.timeContractCalls++
+	backend.lastScope, backend.lastTimeContract, backend.lastCommand = scope, input, command
+	return backend.result, backend.err
 }
 
 func (backend *fakeAdminBackend) ListDrafts(
@@ -295,6 +308,47 @@ func TestSemanticAdminCreateDraftUsesAuthenticatedScopeAndDurableCommand(t *test
 	if strings.Contains(response.Body.String(), scope.TenantID) ||
 		strings.Contains(response.Body.String(), scope.ActorID) {
 		t.Fatalf("write result leaks request scope: %s", response.Body.String())
+	}
+}
+
+func TestSemanticAdminCreatesCertifiedTimeContractAtomically(t *testing.T) {
+	scope := testAdminScope()
+	backend := &fakeAdminBackend{result: registry.AdminWriteResult{
+		ResourceType: registry.AdminResourceTimeContract,
+		ResourceID:   uuid.NewString(), ObjectID: uuid.NewString(),
+		ContentHash: askdata.HashBytes([]byte("time-contract")), Status: "CERTIFIED",
+	}}
+	handler := testAdminHandler(backend, scope)
+	request := httptest.NewRequest(http.MethodPost,
+		"/api/v1/askdata/semantic/time-contracts", strings.NewReader(`{
+			"code":"enterprise_calendar",
+			"name":"企业经营自然日历",
+			"timezone":"Asia/Shanghai",
+			"weekStart":"MONDAY",
+			"weekNumbering":"ISO",
+			"fiscalYearStartMonth":1,
+			"fiscalMonthRule":"CALENDAR",
+			"incompletePeriodPolicy":"LAST_COMPLETE",
+			"comparisonAlignment":"SAME_DAY_COUNT",
+			"monthEndOverflowRule":"CLAMP_TO_LAST_DAY",
+			"supportedGrains":["DAY","WEEK","MONTH","QUARTER","YEAR"],
+			"dataAvailableThroughExpr":"MATERIALIZATION_MAX_PRIMARY_TIME",
+			"expectedLagHours":8
+		}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "time-contract-create-0001")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated || backend.timeContractCalls != 1 ||
+		backend.lastScope != scope || backend.lastTimeContract.Timezone != "Asia/Shanghai" ||
+		len(backend.lastTimeContract.SupportedGrains) != 5 ||
+		backend.lastTimeContract.SupportedGrains[0] != registry.TimeGrainDay {
+		t.Fatalf("time contract dispatch = status:%d body:%s calls:%d input:%+v",
+			response.Code, response.Body.String(), backend.timeContractCalls, backend.lastTimeContract)
+	}
+	if err := backend.lastCommand.Validate(); err != nil {
+		t.Fatalf("time contract command = %v", err)
 	}
 }
 
@@ -556,7 +610,7 @@ func decodeAdminResult(t *testing.T, response *httptest.ResponseRecorder) regist
 	return result
 }
 
-// 新增的四类只读对象必须能被读取，且不能暴露写入路由——
+// 只读对象必须能被读取，且不能暴露写入路由——
 // 它们目前只能经导入通道写入，注册未实现的写入路由会把「不支持」变成运行期错误。
 func TestReadOnlySemanticResourcesExposeOnlyReads(t *testing.T) {
 	scope := testAdminScope()
@@ -567,7 +621,6 @@ func TestReadOnlySemanticResourcesExposeOnlyReads(t *testing.T) {
 		"members":            registry.AdminResourceMember,
 		"hierarchies":        registry.AdminResourceHierarchy,
 		"certified-examples": registry.AdminResourceCertifiedExample,
-		"metric-dimensions":  registry.AdminResourceMetricDimension,
 	}
 	for path, resource := range readable {
 		list := httptest.NewRequest(http.MethodGet, "/api/v1/askdata/semantic/"+path+"?limit=10", nil)
@@ -590,6 +643,32 @@ func TestReadOnlySemanticResourcesExposeOnlyReads(t *testing.T) {
 				t.Fatalf("%s %s must not be routed, got %d", method, target, writeResponse.Code)
 			}
 		}
+	}
+}
+
+// 指标维度兼容关系是 KPI Bundle 的认证前置条件，管理端必须能够创建、更新和删除草稿。
+func TestMetricDimensionResourceExposesDraftMutations(t *testing.T) {
+	scope := testAdminScope()
+	backend := &fakeAdminBackend{result: registry.AdminWriteResult{ResourceType: registry.AdminResourceMetricDimension, ResourceID: uuid.NewString()}}
+	handler := testAdminHandler(backend, scope)
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/askdata/semantic/metric-dimensions", strings.NewReader(`{
+		"versionNo":1,
+		"metricVersionId":"11111111-1111-4111-8111-111111111111",
+		"dimensionVersionId":"22222222-2222-4222-8222-222222222222",
+		"compatible":true,
+		"role":"GROUP_BY"
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "metric-dimension-create-0001")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("POST metric-dimensions = %d body=%s", response.Code, response.Body.String())
+	}
+	if backend.lastResource != registry.AdminResourceMetricDimension {
+		t.Fatalf("resource = %s", backend.lastResource)
 	}
 }
 

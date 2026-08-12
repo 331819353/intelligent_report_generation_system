@@ -32,6 +32,13 @@ type ModelProviderChainSelector interface {
 	FallbackModels() []string
 }
 
+// ModelProviderCatalog exposes the complete configured model order. Domain
+// workflows use it only to choose a different, already allowlisted model after
+// a structured-output failure; it never expands the provider allowlist.
+type ModelProviderCatalog interface {
+	Models() []string
+}
+
 // PrimaryFallbackProvider owns an ordered provider pool. Its selection mode is
 // either fixed-primary or round-robin; explicit model routing never advances
 // the round-robin cursor.
@@ -201,6 +208,19 @@ func (p *PrimaryFallbackProvider) FallbackModels() []string {
 	result := make([]string, 0, len(p.providers)-1)
 	for _, provider := range p.providers[1:] {
 		result = append(result, provider.Model())
+	}
+	return result
+}
+
+func (p *PrimaryFallbackProvider) Models() []string {
+	if p == nil {
+		return []string{}
+	}
+	result := make([]string, 0, len(p.providers))
+	for _, provider := range p.providers {
+		if model := strings.TrimSpace(provider.Model()); model != "" {
+			result = append(result, model)
+		}
 	}
 	return result
 }

@@ -136,12 +136,15 @@ export function buildConversationProgress(
   currentState: QuestionRunState,
   events: QuestionRunEvent[],
 ): ConversationProgressItem[] {
-  const currentRank = stateRank[currentState]
   const terminalBlocked = currentState === 'BLOCKED' || currentState === 'CLARIFICATION_REQUIRED' || currentState === 'CLARIFICATION_EXPIRED'
+  const effectiveState = terminalBlocked
+    ? [...events].reverse().find(event => !['BLOCKED', 'CLARIFICATION_REQUIRED', 'CLARIFICATION_EXPIRED'].includes(event.state))?.state ?? 'RECEIVED'
+    : currentState
+  const currentRank = stateRank[effectiveState]
 
   return progressDefinitions.map(definition => {
     const event = eventForDefinition(definition, events)
-    const active = definition.activatesAt.includes(currentState)
+    const active = definition.activatesAt.includes(effectiveState)
     const completed = currentRank >= definition.completesBefore
     const status: ConversationProgressStatus = active && terminalBlocked
       ? 'blocked'

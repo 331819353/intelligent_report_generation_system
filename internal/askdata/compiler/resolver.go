@@ -44,16 +44,21 @@ type ResolveRequest struct {
 }
 
 type ContractLookup struct {
-	Scope                  askdata.PolicyScope `json:"scope"`
-	DomainID               askdata.ID          `json:"domainId"`
-	IRHash                 askdata.ContentHash `json:"irHash"`
-	ModelVersionID         askdata.ID          `json:"modelVersionId"`
-	TimeDimensionVersionID *askdata.ID         `json:"timeDimensionVersionId,omitempty"`
-	MetricVersionIDs       []askdata.ID        `json:"metricVersionIds"`
-	DimensionVersionIDs    []askdata.ID        `json:"dimensionVersionIds"`
-	MemberVersionIDs       []askdata.ID        `json:"memberVersionIds"`
-	MemberBindings         []MemberBinding     `json:"memberBindings"`
-	RelationshipVersionIDs []askdata.ID        `json:"relationshipVersionIds"`
+	Scope          askdata.PolicyScope `json:"scope"`
+	DomainID       askdata.ID          `json:"domainId"`
+	IRHash         askdata.ContentHash `json:"irHash"`
+	ModelVersionID askdata.ID          `json:"modelVersionId"`
+	// JoinedModelVersionIDs names every other model the resolved join path
+	// traverses, in sorted order. It is omitted entirely for a single-model
+	// query, which keeps the canonical form — and therefore every existing plan
+	// hash — byte-identical to before joins were supported.
+	JoinedModelVersionIDs  []askdata.ID    `json:"joinedModelVersionIds,omitempty"`
+	TimeDimensionVersionID *askdata.ID     `json:"timeDimensionVersionId,omitempty"`
+	MetricVersionIDs       []askdata.ID    `json:"metricVersionIds"`
+	DimensionVersionIDs    []askdata.ID    `json:"dimensionVersionIds"`
+	MemberVersionIDs       []askdata.ID    `json:"memberVersionIds"`
+	MemberBindings         []MemberBinding `json:"memberBindings"`
+	RelationshipVersionIDs []askdata.ID    `json:"relationshipVersionIds"`
 }
 
 // MemberBinding preserves the exact FILTER edge from the IR. Checking only
@@ -167,17 +172,30 @@ type RelationshipContract struct {
 }
 
 type ContractSnapshot struct {
-	Release            askdata.ReleaseRef     `json:"release"`
-	ReleaseStatus      string                 `json:"releaseStatus"`
-	ReleaseObjectCount int                    `json:"releaseObjectCount"`
-	Model              ModelContract          `json:"model"`
-	Metrics            []MetricContract       `json:"metrics"`
-	Dimensions         []DimensionContract    `json:"dimensions"`
-	Members            []MemberContract       `json:"members"`
-	Relationships      []RelationshipContract `json:"relationships"`
+	Release            askdata.ReleaseRef `json:"release"`
+	ReleaseStatus      string             `json:"releaseStatus"`
+	ReleaseObjectCount int                `json:"releaseObjectCount"`
+	Model              ModelContract      `json:"model"`
+	// JoinedModels holds the contracts for the other models on the join path,
+	// sorted by version ID. Omitted for single-model queries so the canonical
+	// snapshot is unchanged for every query that worked before.
+	JoinedModels  []ModelContract        `json:"joinedModels,omitempty"`
+	Metrics       []MetricContract       `json:"metrics"`
+	Dimensions    []DimensionContract    `json:"dimensions"`
+	Members       []MemberContract       `json:"members"`
+	Relationships []RelationshipContract `json:"relationships"`
 	// memberParameterValues is an execution-only bridge to QUERY-003. It is
 	// never serialized, hashed or returned through the public member contract.
 	memberParameterValues map[askdata.ID]string
+	// timeRuntime is an execution-only bridge to TIME-001. It carries the
+	// certified time contract and the latest successful materialization
+	// watermark used to resolve relative periods before SQL is compiled.
+	timeRuntime *timeRuntimeContract
+}
+
+type timeRuntimeContract struct {
+	contract registry.TimeContractVersion
+	meta     MaterializationMeta
 }
 
 type ContractStore interface {
@@ -194,6 +212,7 @@ type Resolution struct {
 	TimeDimensionVersionID *askdata.ID            `json:"timeDimensionVersionId,omitempty"`
 	MemberBindings         []MemberBinding        `json:"memberBindings"`
 	Model                  ModelContract          `json:"model"`
+	JoinedModels           []ModelContract        `json:"joinedModels,omitempty"`
 	Metrics                []MetricContract       `json:"metrics"`
 	Dimensions             []DimensionContract    `json:"dimensions"`
 	Members                []MemberContract       `json:"members"`
@@ -243,7 +262,8 @@ func (resolver *Resolver) Resolve(ctx context.Context, request ResolveRequest) (
 		GraphPlanHash:          request.BuildRequest.BindingResult.GraphPlanHash,
 		TimeDimensionVersionID: cloneID(lookup.TimeDimensionVersionID),
 		MemberBindings:         append([]MemberBinding(nil), lookup.MemberBindings...),
-		Model:                  snapshot.Model, Metrics: snapshot.Metrics, Dimensions: snapshot.Dimensions,
+		Model:                  snapshot.Model, JoinedModels: snapshot.JoinedModels,
+		Metrics: snapshot.Metrics, Dimensions: snapshot.Dimensions,
 		Members: snapshot.Members, GraphPath: cloneJoinPath(path), Relationships: snapshot.Relationships,
 		memberParameterValues: cloneMemberParameterValues(snapshot.memberParameterValues),
 	}
@@ -330,10 +350,19 @@ func buildContractLookup(request ResolveRequest) (ContractLookup, *graph.JoinPat
 	}
 	path := cloneJoinPath(bundle.GraphPath)
 	if path != nil {
+		joined := []askdata.ID{}
 		for _, step := range path.Steps {
 			lookup.RelationshipVersionIDs = append(lookup.RelationshipVersionIDs, step.RelationshipVersionID)
+			// Every model the path touches other than the anchor has to be
+			// loaded, or the join has no right-hand contract to compile against.
+			for _, model := range []askdata.ID{step.FromModelVersionID, step.ToModelVersionID} {
+				if model != "" && model != lookup.ModelVersionID {
+					joined = append(joined, model)
+				}
+			}
 		}
 		lookup.RelationshipVersionIDs = normalizeIDs(lookup.RelationshipVersionIDs)
+		lookup.JoinedModelVersionIDs = normalizeIDs(joined)
 	}
 	if err := lookup.Validate(); err != nil {
 		return ContractLookup{}, nil, err
@@ -442,6 +471,24 @@ func validateResolvedContracts(lookup ContractLookup, path *graph.JoinPath, snap
 			return fmt.Errorf("%w: primary time field", ErrContractUnavailable)
 		}
 	}
+	// The joined models must be exactly the set the lookup asked for. Without
+	// this the store could satisfy a join from a model the graph never resolved,
+	// which is a way to reach data outside the resolved path.
+	joinedIDs := make([]askdata.ID, 0, len(snapshot.JoinedModels))
+	for index, joined := range snapshot.JoinedModels {
+		if joined.ModelVersionID.Validate() != nil || joined.ContentHash.Validate() != nil ||
+			joined.DatasetSchemaHash.Validate() != nil ||
+			len(joined.Fields) == 0 || len(joined.Fields) > MaxResolvedFields {
+			return fmt.Errorf("%w: joinedModels[%d] contract", ErrContractUnavailable, index)
+		}
+		if joined.Materialization.Status != "ACTIVE" {
+			return ErrMaterializationStale
+		}
+		joinedIDs = append(joinedIDs, joined.ModelVersionID)
+	}
+	if !reflect.DeepEqual(normalizeIDs(joinedIDs), normalizeIDs(lookup.JoinedModelVersionIDs)) {
+		return fmt.Errorf("%w: joined model set mismatch", ErrContractUnavailable)
+	}
 	if !reflect.DeepEqual(metricIDs(snapshot.Metrics), lookup.MetricVersionIDs) ||
 		!reflect.DeepEqual(dimensionIDs(snapshot.Dimensions), lookup.DimensionVersionIDs) ||
 		!reflect.DeepEqual(memberIDs(snapshot.Members), lookup.MemberVersionIDs) ||
@@ -489,15 +536,31 @@ func validateResolvedContracts(lookup ContractLookup, path *graph.JoinPath, snap
 			seenMeasureObjects[measure.MeasureID] = struct{}{}
 		}
 	}
+	// A dimension may live on the anchor model or on any model the resolved join
+	// path reaches, and its logical field must exist on that same model. Checking
+	// only the anchor would refuse every cross-model question; checking any model
+	// without pairing dimension and field would let a dimension borrow a
+	// same-named field from the wrong table.
+	fieldsByModel := map[askdata.ID]map[askdata.ID]FieldContract{
+		model.ModelVersionID: fieldsByID,
+	}
+	for _, joined := range snapshot.JoinedModels {
+		joinedFields := make(map[askdata.ID]FieldContract, len(joined.Fields))
+		for _, field := range joined.Fields {
+			joinedFields[field.FieldID] = field
+		}
+		fieldsByModel[joined.ModelVersionID] = joinedFields
+	}
 	dimensionSet := map[askdata.ID]struct{}{}
 	for index, dimension := range snapshot.Dimensions {
-		if dimension.DimensionVersionID.Validate() != nil || dimension.ModelVersionID != model.ModelVersionID ||
+		ownerFields, owned := fieldsByModel[dimension.ModelVersionID]
+		if dimension.DimensionVersionID.Validate() != nil || !owned ||
 			dimension.LogicalFieldID.Validate() != nil || dimension.ContentHash.Validate() != nil ||
 			!validDimensionKind(dimension.Kind) || !validSensitivity(dimension.Sensitivity) ||
 			!validMemberIndexPolicy(dimension.MemberIndexPolicy) {
 			return fmt.Errorf("%w: dimensions[%d] model", ErrContractUnavailable, index)
 		}
-		field, exists := fieldsByID[dimension.LogicalFieldID]
+		field, exists := ownerFields[dimension.LogicalFieldID]
 		if !exists || !dimensionFieldCompatible(dimension.Kind, field) {
 			return fmt.Errorf("%w: dimensions[%d] field", ErrContractUnavailable, index)
 		}
@@ -615,6 +678,21 @@ func normalizeSnapshot(snapshot ContractSnapshot) (ContractSnapshot, error) {
 	}
 	result.Model.Fields = append([]FieldContract(nil), snapshot.Model.Fields...)
 	sort.Slice(result.Model.Fields, func(i, j int) bool { return result.Model.Fields[i].FieldID < result.Model.Fields[j].FieldID })
+	if len(snapshot.JoinedModels) > 0 {
+		result.JoinedModels = append([]ModelContract(nil), snapshot.JoinedModels...)
+		for index := range result.JoinedModels {
+			result.JoinedModels[index].GrainContract, err = canonicalObject(result.JoinedModels[index].GrainContract)
+			if err != nil {
+				return ContractSnapshot{}, err
+			}
+			fields := append([]FieldContract(nil), snapshot.JoinedModels[index].Fields...)
+			sort.Slice(fields, func(i, j int) bool { return fields[i].FieldID < fields[j].FieldID })
+			result.JoinedModels[index].Fields = fields
+		}
+		sort.Slice(result.JoinedModels, func(i, j int) bool {
+			return result.JoinedModels[i].ModelVersionID < result.JoinedModels[j].ModelVersionID
+		})
+	}
 	result.Metrics = append([]MetricContract(nil), snapshot.Metrics...)
 	for index := range result.Metrics {
 		if result.Metrics[index].ZeroDenominatorPolicy == "" {

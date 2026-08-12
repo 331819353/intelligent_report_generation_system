@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 
@@ -50,13 +51,15 @@ func (runner *DatasetVersionRunner) ExecuteDatasetFields(ctx context.Context, re
 	if err != nil {
 		return QueryResult{}, err
 	}
-	preview, err := runner.service.PreviewVersionQuery(
+	effectiveLimit := min(request.Limit, queryruntime.MaxVersionQueryRows)
+	preview, contract, err := runner.service.PreviewVersionQueryWithRollup(
 		ctx, string(identity.TenantID), string(identity.ActorID), string(request.DatasetID),
 		string(request.DatasetVersionID), queryruntime.VersionQueryInput{
-			Fields: fields, Predicates: predicates, Parameters: parameters, MaxRows: request.Limit,
+			Fields: fields, Predicates: predicates, Parameters: parameters, MaxRows: effectiveLimit,
 		},
 	)
 	if err != nil {
+		slog.Warn("report dataset query failed", "dataset_id", request.DatasetID, "dataset_version_id", request.DatasetVersionID, "error", err)
 		return QueryResult{}, err
 	}
 	indexes := make(map[string]int, len(preview.Columns))
@@ -75,17 +78,30 @@ func (runner *DatasetVersionRunner) ExecuteDatasetFields(ctx context.Context, re
 		}
 		rows[rowIndex] = row
 	}
-	hashPayload, err := json.Marshal(struct {
-		Columns []string `json:"columns"`
-		Rows    [][]any  `json:"rows"`
-	}{fields, rows})
+	hash, err := hashResult(fields, rows)
 	if err != nil {
 		return QueryResult{}, err
 	}
-	return QueryResult{
-		Columns: fields, Rows: rows, Hash: askdata.HashBytes(hashPayload),
-		Partial: len(rows) == request.Limit,
-	}, nil
+	projected := QueryResult{
+		Columns: fields, Rows: rows, Hash: hash,
+		Partial: len(rows) == effectiveLimit,
+	}
+
+	// The projection above drops any dataset field the component did not bind.
+	// If those dropped fields were part of the version's output grain, the rows
+	// are finer-grained than the component asks for and must be rolled up —
+	// otherwise a chart bound to (channel, revenue) plots one mark per source
+	// row instead of one per channel.
+	if !NeedsRollup(request.Dimensions, contract.GrainKeyFields) {
+		return projected, nil
+	}
+	rolled, err := RollUp(projected, request.Dimensions, request.Measures, contract)
+	if err != nil {
+		slog.Warn("report dataset roll-up refused",
+			"dataset_version_id", request.DatasetVersionID, "error", err)
+		return QueryResult{}, err
+	}
+	return rolled, nil
 }
 
 func requestedDatasetFields(dimensions, measures []report.FieldBinding) ([]string, error) {

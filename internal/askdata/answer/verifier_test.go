@@ -252,6 +252,7 @@ func baseVerifierFixture(t *testing.T) verifierFixture {
 		}},
 	}.Normalize()
 	binding := BindingEvidence{
+		Source:  BindingSourceSemanticRelease,
 		Version: BindingEvidenceVersion, SemanticReleaseID: "release:v1",
 		Objects: []ObjectEvidence{{ObjectID: "metric:sales@v5", Kind: ObjectMetric, Bound: true, Names: []string{"销售额"}}},
 	}.Normalize()

@@ -108,13 +108,13 @@ func validateAskDataBudgetOverride(value AskDataBudgetOverride) error {
 	default:
 		return errors.New("budgetClass is invalid")
 	}
-	if value.MaxLLMCalls < 1 || value.MaxLLMCalls > 4 ||
-		value.MaxToolCalls < 0 || value.MaxToolCalls > 10 ||
+	if value.MaxLLMCalls < 1 || value.MaxLLMCalls > 16 ||
+		value.MaxToolCalls < 0 || value.MaxToolCalls > 16 ||
 		value.MaxPrimaryQueries < 0 || value.MaxPrimaryQueries > 6 ||
 		value.MaxValidationQueries < 0 || value.MaxValidationQueries > 3 ||
 		value.MaxCandidateCompares < 0 || value.MaxCandidateCompares > 2 ||
 		value.MaxJoinHops < 0 || value.MaxJoinHops > 4 ||
-		value.HardTimeout < 100*time.Millisecond || value.HardTimeout > 30*time.Second ||
+		value.HardTimeout < 100*time.Millisecond || value.HardTimeout > 120*time.Second ||
 		value.P95Target <= 0 || value.P95Target > value.HardTimeout {
 		return errors.New("budget limits exceed the governed bounds")
 	}

@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"intelligent-report-generation-system/internal/auth"
+	"intelligent-report-generation-system/internal/platform/database"
 )
 
 // NewAdminHandler 注册平台、领域与用户归属的固定层级管理接口。
@@ -31,6 +32,9 @@ func NewAdminHandler(authService *auth.Service, store *AdminStore) http.Handler 
 			}
 			next.ServeHTTP(w, r)
 		}))
+	}
+	businessAuthenticated := func(next http.Handler) http.Handler {
+		return auth.RequireAccessToken(authService, next)
 	}
 	mux.Handle("GET /api/v1/platform-management/access", authenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, _ := auth.ClaimsFromContext(r.Context())
@@ -215,6 +219,20 @@ func NewAdminHandler(authService *auth.Service, store *AdminStore) http.Handler 
 			return
 		}
 		writeJSON(w, 200, map[string]any{"items": users})
+	})))
+	mux.Handle("GET /api/v1/share-targets", businessAuthenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		accessContext, ok := database.AccessContextFromContext(r.Context())
+		if !ok || accessContext.DomainID == "" {
+			writeError(w, http.StatusForbidden, "BUSINESS_DOMAIN_REQUIRED", "an active business domain is required")
+			return
+		}
+		items, err := store.ListShareTargets(r.Context(), claims.TenantID, claims.Subject, accessContext.DomainID)
+		if err != nil {
+			writeError(w, http.StatusForbidden, "SHARE_TARGET_LIST_FAILED", "failed to list available share targets")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 	})))
 	mux.Handle("PATCH /api/v1/users/{id}", platformManaged(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())

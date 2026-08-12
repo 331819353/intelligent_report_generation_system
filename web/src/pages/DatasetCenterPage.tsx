@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowDownIcon, ArrowUpIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DotsSixVerticalIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MagnifyingGlassIcon, MathOperationsIcon, PlusIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTSlashIcon, TreeStructureIcon, XIcon, type Icon } from '@phosphor-icons/react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
+import { AssetSharingSelect } from '../components/AssetSharingSelect'
 import { DatasetAIDock } from '../components/dataset/DatasetAIDock'
 import { DatasetComponentToolbar } from '../components/dataset/DatasetComponentToolbar'
 import { DatasetDesignWorkspace } from '../components/dataset/DatasetDesignWorkspace'
@@ -156,6 +157,91 @@ type DatasetAIErrorView = {
 
 const statusLabels: Record<string, string> = {
   DRAFT: '草稿', VALIDATING: '校验中', PUBLISHED: '已发布', STALE: '已失效', DEPRECATED: '已废弃', DISABLED: '已停用',
+}
+
+const snapshotDatasets: DatasetSummary[] = [
+  {
+    id: 'snapshot-sales-order-detail', code: 'dwd_sales_order_detail', name: '销售订单经营明细',
+    description: '统一订单、客户、商品和渠道口径，支撑经营分析与报告取数。', type: 'MODEL', status: 'DRAFT',
+    domainId: 'snapshot-enterprise-operations', originTableId: 'snapshot-table-orders', originTableName: 'fact_sales_order',
+    originDataSourceName: '销售业务核心库', layer: 'DWD', tags: ['经营分析', '订单', '待发布'], version: 3,
+    dslHash: 'b8a73c62e7210f51', updatedAt: '2026-08-11T09:32:00+08:00',
+  },
+  {
+    id: 'snapshot-customer-dim', code: 'dim_customer_profile', name: '客户主数据维度',
+    description: '沉淀客户统一身份、区域与分层标签，已被 8 个下游数据集引用。', type: 'MODEL', status: 'PUBLISHED',
+    domainId: 'snapshot-enterprise-operations', originTableId: 'snapshot-table-customers', originTableName: 'dim_customer',
+    originDataSourceName: '销售业务核心库', layer: 'DIM', tags: ['客户', '主数据'], version: 6,
+    dslHash: 'e92c64a8317bb740', currentPublishedVersionId: 'snapshot-customer-v6', updatedAt: '2026-08-11T08:48:00+08:00',
+  },
+  {
+    id: 'snapshot-channel-summary', code: 'dws_channel_sales_daily', name: '渠道销售日汇总',
+    description: '按自然日、渠道和区域汇总订单金额、销量、折扣与履约指标。', type: 'MODEL', status: 'PUBLISHED',
+    domainId: 'snapshot-enterprise-operations', layer: 'DWS', tags: ['渠道', '日报'], version: 12,
+    dslHash: 'd182abf950d50d11', currentPublishedVersionId: 'snapshot-channel-v12', updatedAt: '2026-08-10T18:16:00+08:00',
+  },
+  {
+    id: 'snapshot-inventory-ods', code: 'ods_inventory_snapshot', name: '库存快照贴源数据',
+    description: '保留库存历史表的原始字段结构，等待负责人确认新增字段。', type: 'MAPPING', status: 'VALIDATING',
+    domainId: 'snapshot-enterprise-operations', originTableId: 'snapshot-table-inventory', originTableName: 'inventory_snapshot',
+    originDataSourceName: '库存历史库', layer: 'ODS', tags: ['库存', '结构变更'], version: 2,
+    dslHash: 'a76c927fa49e0281', updatedAt: '2026-08-10T15:05:00+08:00',
+  },
+  {
+    id: 'snapshot-executive-ads', code: 'ads_executive_operation_view', name: '经营驾驶舱应用数据',
+    description: '面向管理层驾驶舱交付收入、毛利、订单与库存周转核心指标。', type: 'MODEL', status: 'PUBLISHED',
+    domainId: 'snapshot-enterprise-operations', layer: 'ADS', tags: ['驾驶舱', '核心指标'], version: 9,
+    dslHash: 'f2b70860a18fd5a2', currentPublishedVersionId: 'snapshot-executive-v9', updatedAt: '2026-08-09T20:10:00+08:00',
+  },
+]
+
+const snapshotAssetTables: AssetTable[] = [
+  {
+    id: 'snapshot-table-orders', dataSourceId: 'snapshot-sales-mysql', dataSourceName: '销售业务核心库', dataSourceType: 'MYSQL',
+    tableName: 'fact_sales_order', schemaName: 'sales_prod', businessName: '销售订单事实表',
+    businessDescription: '按订单行记录销售、优惠、渠道和履约结果。', tags: ['主题:经营分析', '作用:事实表'],
+    columnCount: 7, managementStatus: 'ACTIVE', enrichmentStatus: 'SUCCEEDED',
+  },
+  {
+    id: 'snapshot-table-customers', dataSourceId: 'snapshot-sales-mysql', dataSourceName: '销售业务核心库', dataSourceType: 'MYSQL',
+    tableName: 'dim_customer', schemaName: 'sales_prod', businessName: '客户主数据表',
+    businessDescription: '客户统一身份、区域与等级信息。', tags: ['主题:客户', '作用:维度表'],
+    columnCount: 5, managementStatus: 'ACTIVE', enrichmentStatus: 'SUCCEEDED',
+  },
+  {
+    id: 'snapshot-table-products', dataSourceId: 'snapshot-sales-mysql', dataSourceName: '销售业务核心库', dataSourceType: 'MYSQL',
+    tableName: 'dim_product', schemaName: 'sales_prod', businessName: '商品主数据表',
+    businessDescription: '商品、品类与品牌层级信息。', tags: ['主题:商品', '作用:维度表'],
+    columnCount: 5, managementStatus: 'ACTIVE', enrichmentStatus: 'SUCCEEDED',
+  },
+]
+
+const snapshotAssetColumns: Record<string, AssetColumn[]> = {
+  'snapshot-table-orders': [
+    ['order_id', '订单编号', 'STRING', 'IDENTIFIER'], ['customer_id', '客户编号', 'STRING', 'IDENTIFIER'],
+    ['product_id', '商品编号', 'STRING', 'IDENTIFIER'], ['order_date', '下单日期', 'DATE', 'DATE'],
+    ['channel_name', '销售渠道', 'STRING', 'CATEGORY'], ['sales_amount', '销售金额', 'DECIMAL', 'MEASURE'],
+    ['quantity', '销售数量', 'INTEGER', 'MEASURE'],
+  ].map(([columnName, businessName, canonicalType, semanticType], index) => ({
+    id: `snapshot-order-column-${index + 1}`, tableId: 'snapshot-table-orders', columnName, businessName,
+    canonicalType, semanticType, nullable: false, assetStatus: 'ACTIVE', ordinalPosition: index + 1,
+  })),
+  'snapshot-table-customers': [
+    ['customer_id', '客户编号', 'STRING', 'IDENTIFIER'], ['customer_name', '客户名称', 'STRING', 'TEXT'],
+    ['region_name', '所属区域', 'STRING', 'CATEGORY'], ['customer_level', '客户等级', 'STRING', 'CATEGORY'],
+    ['created_at', '建档时间', 'DATETIME', 'DATE'],
+  ].map(([columnName, businessName, canonicalType, semanticType], index) => ({
+    id: `snapshot-customer-column-${index + 1}`, tableId: 'snapshot-table-customers', columnName, businessName,
+    canonicalType, semanticType, nullable: index > 1, assetStatus: 'ACTIVE', ordinalPosition: index + 1,
+  })),
+  'snapshot-table-products': [
+    ['product_id', '商品编号', 'STRING', 'IDENTIFIER'], ['product_name', '商品名称', 'STRING', 'TEXT'],
+    ['category_name', '商品品类', 'STRING', 'CATEGORY'], ['brand_name', '品牌', 'STRING', 'CATEGORY'],
+    ['standard_price', '标准售价', 'DECIMAL', 'MEASURE'],
+  ].map(([columnName, businessName, canonicalType, semanticType], index) => ({
+    id: `snapshot-product-column-${index + 1}`, tableId: 'snapshot-table-products', columnName, businessName,
+    canonicalType, semanticType, nullable: index > 1, assetStatus: 'ACTIVE', ordinalPosition: index + 1,
+  })),
 }
 const modelingMonitorConfigs: ModelingMonitorConfig[] = [
   {
@@ -378,7 +464,7 @@ function DatasetModelingAction({
       aria-busy={busy}
       aria-describedby={hasLogs ? logID : undefined}
       style={buttonStyle}
-      title={busy ? `${config.label}正在运行；悬停或聚焦查看实时日志` : config.idleTitle}
+      title={busy ? `${config.label}正在运行；点击右上角日志按钮查看进度` : config.idleTitle}
       onClick={onTrigger}
     >
       <span>{buttonLabel}</span>
@@ -428,7 +514,7 @@ function DatasetModelingAction({
           <strong>{entry.message}</strong>
         </li>)}
       </ol>
-      <footer>悬停或键盘聚焦可查看，点击右上日志按钮可固定；不展示模型输入、原始输出或业务数据。</footer>
+      <footer>点击右上日志按钮打开或关闭；日志不展示模型输入、原始输出或业务数据。</footer>
     </section>}
   </div>
 }
@@ -1013,6 +1099,87 @@ const fieldOption = (node: DesignerNode, column: AssetColumn): FieldOption => ({
   finalAggregation: '',
 })
 
+type SnapshotEditorState = {
+  draft: DatasetDraft
+  relationBoxes: RelationBox[]
+  groupBoxes: GroupBox[]
+  transformBoxes: TransformBox[]
+  endBox: EndBox
+  nodePositions: Record<string, CanvasPoint>
+  metadata: DatasetMetadataForm
+}
+
+const snapshotEditorState = (): SnapshotEditorState => {
+  const orderNode: DesignerNode = {
+    id: 'node_1', alias: 'orders', table: snapshotAssetTables[0], columns: snapshotAssetColumns['snapshot-table-orders'],
+    selected: snapshotAssetColumns['snapshot-table-orders'].map(column => column.columnName),
+  }
+  const customerNode: DesignerNode = {
+    id: 'node_2', alias: 'customer', table: snapshotAssetTables[1], columns: snapshotAssetColumns['snapshot-table-customers'],
+    selected: snapshotAssetColumns['snapshot-table-customers'].map(column => column.columnName),
+  }
+  const nodes = [orderNode, customerNode]
+  const fields = nodes.flatMap(node => node.columns.map(column => fieldOption(node, column)))
+  const outputKeys = [
+    'node_1.order_id', 'node_1.order_date', 'node_1.channel_name', 'node_1.sales_amount', 'node_1.quantity',
+    'node_2.customer_name', 'node_2.region_name', 'node_2.customer_level',
+  ]
+  const relationBoxes: RelationBox[] = [{
+    id: 'join_1', name: '关联客户区域', left: { kind: 'NODE', id: orderNode.id }, right: { kind: 'NODE', id: customerNode.id },
+    position: { x: 560, y: 248 }, outputKeys,
+  }]
+  const joins: JoinOption[] = [{
+    id: 'join_1', leftNodeId: orderNode.id, rightNodeId: customerNode.id,
+    leftField: 'customer_id', rightField: 'customer_id', joinType: 'LEFT', cardinality: 'MANY_TO_ONE', manualConfirmed: true,
+    conditions: [{ id: 'join_1_condition_1', leftField: 'customer_id', rightField: 'customer_id', operator: 'EQUALS' }],
+  }]
+  const endBox: EndBox = {
+    id: 'end_1', name: '销售订单经营明细', input: { kind: 'JOIN', id: 'join_1' }, position: { x: 970, y: 248 },
+    outputs: outputKeys.map(key => {
+      const option = fields.find(field => field.key === key)
+      return { key, name: option?.name || key, code: option?.code || key.replace('.', '_') }
+    }),
+  }
+  const nodePositions = { node_1: { x: 90, y: 120 }, node_2: { x: 90, y: 320 } }
+  const designer: DesignerGraphV1 = {
+    version: '1.0', nodePositions,
+    nodeNames: { node_1: orderNode.table.businessName, node_2: customerNode.table.businessName },
+    joins: relationBoxes, groups: [], transforms: [], end: endBox,
+  }
+  return {
+    draft: {
+      ...emptyDraft(), code: 'dwd_sales_order_detail', name: '销售订单经营明细',
+      description: '统一订单、客户、商品和渠道口径，支撑经营分析与报告取数。',
+      domain: '企业经营', subject: '经营分析', layer: 'DWD', nodes, fields, joins,
+      grainDescription: '每一行代表一笔销售订单明细', grainKeys: ['orders_order_id'],
+      finalConfigured: true, finalOutputKeys: outputKeys, designer,
+    },
+    relationBoxes, groupBoxes: [], transformBoxes: [], endBox, nodePositions,
+    metadata: {
+      name: '销售订单经营明细', description: '统一订单、客户、商品和渠道口径，支撑经营分析与报告取数。',
+      domain: '企业经营', subject: '经营分析',
+    },
+  }
+}
+
+const snapshotDatasetRecord = (summary: DatasetSummary): DatasetRecord => ({
+  ...summary,
+  draftVersionId: `${summary.id}-draft-v${summary.version}`,
+  draftVersionNo: summary.version,
+  draftRecordVersion: summary.version,
+  planHash: `plan-${summary.dslHash}`,
+  dsl: {
+    dslVersion: '1.0',
+    dataset: {
+      code: summary.code, name: summary.name, description: summary.description, domain: '企业经营', subject: '经营分析',
+      type: summary.type, layer: summary.layer,
+    },
+    nodes: [], fields: [],
+  },
+  logicalPlan: {},
+  createdAt: '2026-08-08T10:00:00+08:00',
+})
+
 /** 数据节点只负责字段投影；分组与聚合统一交给独立分组组件。 */
 function availableNodeColumns(node: DesignerNode, fields: FieldOption[]): AssetColumn[] {
   const options = new Map(fields.map(field => [field.key, field]))
@@ -1145,12 +1312,13 @@ export function DatasetCenterPage() {
   const { datasetId } = useParams()
   const navigate = useNavigate()
   const location = useLocation()
+  const designSnapshot = import.meta.env.DEV && new URLSearchParams(location.search).has('snapshot')
   const modelingLogIDPrefix = useId()
   const selectedBusinessDomain = currentDomain()
-  const selectedBusinessDomainName = selectedBusinessDomain?.name.trim() ?? ''
-  const [datasets, setDatasets] = useState<DatasetSummary[]>([])
-  const [tables, setTables] = useState<AssetTable[]>([])
-  const [loading, setLoading] = useState(true)
+  const selectedBusinessDomainName = selectedBusinessDomain?.name.trim() || (designSnapshot ? '企业经营' : '')
+  const [datasets, setDatasets] = useState<DatasetSummary[]>(designSnapshot ? snapshotDatasets : [])
+  const [tables, setTables] = useState<AssetTable[]>(designSnapshot ? snapshotAssetTables : [])
+  const [loading, setLoading] = useState(!designSnapshot)
   const [assetsLoading, setAssetsLoading] = useState(false)
   const [keyword, setKeyword] = useState('')
   const [statusFilter, setStatusFilter] = useState('ALL')
@@ -1159,7 +1327,17 @@ export function DatasetCenterPage() {
   const [dialog, setDialog] = useState<DialogState | null>(null)
   const [selectedDatasetIDs, setSelectedDatasetIDs] = useState<Set<string>>(new Set())
   const [batchAction, setBatchAction] = useState<DatasetBatchAction | null>(null)
-  const [dagRuns, setDAGRuns] = useState<Record<string, DatasetDAGRun>>({})
+  const [dagRuns, setDAGRuns] = useState<Record<string, DatasetDAGRun>>(designSnapshot ? {
+    'snapshot-channel-summary': {
+      id: 'snapshot-run-channel', datasetId: 'snapshot-channel-summary', datasetVersionId: 'snapshot-channel-v12', layer: 'DWS',
+      mode: 'FULL', status: 'SUCCEEDED', attempt: 1, maxAttempts: 3,
+      createdAt: '2026-08-11T06:00:00+08:00', updatedAt: '2026-08-11T06:04:00+08:00',
+      startedAt: '2026-08-11T06:00:08+08:00', completedAt: '2026-08-11T06:04:00+08:00',
+    },
+  } : {})
+  const [datasetManagePermissions, setDatasetManagePermissions] = useState<Record<string, boolean>>(
+    designSnapshot ? Object.fromEntries(snapshotDatasets.map(item => [item.id, true])) : {},
+  )
   const [draft, setDraft] = useState<DatasetDraft>(emptyDraft)
   const [relationBoxes, setRelationBoxes] = useState<RelationBox[]>([])
   const [groupBoxes, setGroupBoxes] = useState<GroupBox[]>([])
@@ -1188,7 +1366,15 @@ export function DatasetCenterPage() {
   const [editingRecord, setEditingRecord] = useState<DatasetRecord | null>(null)
   const [formError, setFormError] = useState('')
   const [busyAction, setBusyAction] = useState('')
-  const [modelingMonitors, setModelingMonitors] = useState(emptyModelingMonitors)
+  const [modelingMonitors, setModelingMonitors] = useState(() => {
+    const state = emptyModelingMonitors()
+    if (designSnapshot) {
+      state.DIM_MODELING.ready = true
+      state.DWD_MODELING.ready = true
+      state.DWS_MODELING.ready = true
+    }
+    return state
+  })
   const [generatedCode, setGeneratedCode] = useState('')
   const [activeNodeID, setActiveNodeID] = useState('')
   const [activeJoinID, setActiveJoinID] = useState('')
@@ -1241,8 +1427,18 @@ export function DatasetCenterPage() {
   const dagSyncRequest = useRef(0)
 
   const loadDatasets = useCallback(async () => {
-    setDatasets(await loadAllDatasets())
-  }, [])
+    if (designSnapshot) {
+      setDatasets(current => current.length ? current : snapshotDatasets)
+      return
+    }
+    const next = await loadAllDatasets()
+    setDatasets(next)
+    const permissions = await Promise.all(next.map(async dataset => {
+      try { return [dataset.id, (await datasetAPI.evaluatePermission(dataset.id, 'MANAGE')).allowed] as const }
+      catch { return [dataset.id, false] as const }
+    }))
+    setDatasetManagePermissions(Object.fromEntries(permissions))
+  }, [designSnapshot])
 
   const refreshDAGRuns = useCallback(async () => {
     const request = ++dagSyncRequest.current
@@ -1375,24 +1571,31 @@ export function DatasetCenterPage() {
   }, [loadDatasets])
 
   useEffect(() => {
+    if (designSnapshot) {
+      setDatasets(snapshotDatasets)
+      setLoading(false)
+      return
+    }
     let active = true
     loadAllDatasets().then(items => { if (active) setDatasets(items) }).catch(cause => {
       if (active) setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '加载数据集失败' })
     }).finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [])
+  }, [designSnapshot])
 
   useEffect(() => {
+    if (designSnapshot) return
     void refreshModelingTasks()
     const timer = window.setInterval(() => void refreshModelingTasks(), 3_000)
     return () => window.clearInterval(timer)
-  }, [refreshModelingTasks])
+  }, [designSnapshot, refreshModelingTasks])
 
   useEffect(() => {
+    if (designSnapshot) return
     void refreshDAGRuns()
     const timer = window.setInterval(() => void refreshDAGRuns(), 3_000)
     return () => window.clearInterval(timer)
-  }, [refreshDAGRuns])
+  }, [designSnapshot, refreshDAGRuns])
 
   useEffect(() => {
     if (!notice) return
@@ -1469,9 +1672,10 @@ export function DatasetCenterPage() {
   const selectedRunnableCount = useMemo(
     () => selectedDatasets.reduce((total, dataset) => total + Number(Boolean(
       dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId &&
+      datasetManagePermissions[dataset.id] &&
       (!dagRuns[dataset.id] || !activeDAGRunStatuses.has(dagRuns[dataset.id].status)),
     )), 0),
-    [dagRuns, selectedDatasets],
+    [dagRuns, datasetManagePermissions, selectedDatasets],
   )
   const filteredSelectedCount = useMemo(
     () => filtered.reduce((total, dataset) => total + Number(selectedDatasetIDs.has(dataset.id)), 0),
@@ -1534,12 +1738,13 @@ export function DatasetCenterPage() {
     finalOutputKeys: undefined,
   }), [currentDesignerGraph, draft, endBox, generatedCode, metadata, selectedBusinessDomainName])
   const layerChoices = useMemo(() => {
+    if (designSnapshot) return ['DWD'] as DatasetLayer[]
     try {
       return draft.nodes.length ? datasetLayerChoices(draft) : ['DWD'] as DatasetLayer[]
     } catch {
       return ['DWD'] as DatasetLayer[]
     }
-  }, [draft])
+  }, [designSnapshot, draft])
   const classificationSuggestions = useMemo(() => {
     const tags = [
       ...(editingRecord?.tags ?? []),
@@ -1574,6 +1779,29 @@ export function DatasetCenterPage() {
   const openCreate = async () => {
     resetDatasetAI()
     endPreviewRequest.current += 1
+    if (designSnapshot) {
+      const snapshot = snapshotEditorState()
+      setEditingRecord(null)
+      setTables(snapshotAssetTables)
+      setDraft(snapshot.draft)
+      setRelationBoxes(snapshot.relationBoxes)
+      setGroupBoxes(snapshot.groupBoxes)
+      setTransformBoxes(snapshot.transformBoxes)
+      setEndBox(snapshot.endBox)
+      setNodePositions(snapshot.nodePositions)
+      setMetadata(snapshot.metadata)
+      setGeneratedCode(`dwd_sales_order_${Date.now().toString(36).slice(-4)}`)
+      setActiveNodeID('')
+      setActiveJoinID('')
+      setActiveGroupID('')
+      setActiveTransformID('')
+      setActiveEnd(false)
+      setCanvasNotice('已根据上游资产预置订单与客户关联，可继续拖入商品表或调整字段。')
+      setFormError('')
+      setAssetsLoading(false)
+      setDialog({ mode: 'create' })
+      return
+    }
     setEditingRecord(null)
     setDraft(emptyDraft())
     setRelationBoxes([])
@@ -1611,6 +1839,33 @@ export function DatasetCenterPage() {
     resetDatasetAI()
     endPreviewRequest.current += 1
     const id = typeof dataset === 'string' ? dataset : dataset.id
+    if (designSnapshot) {
+      const summary = typeof dataset === 'string'
+        ? snapshotDatasets.find(item => item.id === dataset) ?? snapshotDatasets[0]
+        : dataset
+      const snapshot = snapshotEditorState()
+      setTables(snapshotAssetTables)
+      setDraft({ ...snapshot.draft, code: summary.code, name: summary.name, description: summary.description, layer: summary.layer })
+      setRelationBoxes(snapshot.relationBoxes)
+      setGroupBoxes(snapshot.groupBoxes)
+      setTransformBoxes(snapshot.transformBoxes)
+      setEndBox({ ...snapshot.endBox, name: summary.name })
+      setNodePositions(snapshot.nodePositions)
+      setMetadata({ ...snapshot.metadata, name: summary.name, description: summary.description })
+      setGeneratedCode(summary.code)
+      setEditingRecord(snapshotDatasetRecord(summary))
+      setActiveNodeID('')
+      setActiveJoinID('')
+      setActiveGroupID('')
+      setActiveTransformID('')
+      setActiveEnd(false)
+      setCanvasNotice('草稿 V3 · 已自动保存于 09:32')
+      setFormError('')
+      setAssetsLoading(false)
+      setBusyAction('')
+      setDialog({ mode: 'create', dataset: summary })
+      return
+    }
     setEditingRecord(null)
     setDraft(emptyDraft())
     setRelationBoxes([])
@@ -1665,7 +1920,7 @@ export function DatasetCenterPage() {
       setAssetsLoading(false)
       setBusyAction('')
     }
-  }, [datasets, resetDatasetAI, selectedBusinessDomainName])
+  }, [datasets, designSnapshot, resetDatasetAI, selectedBusinessDomainName])
 
   const loadNodePreview = useCallback(async (node: DesignerNode) => {
     setNodePreviews(current => ({ ...current, [node.id]: { loading: true } }))
@@ -1712,7 +1967,9 @@ export function DatasetCenterPage() {
     setFormError('')
     try {
       // 数据集只允许引用当前有效字段；资产接口中的失效字段只用于历史审计。
-      const columns = table.sourceKind === 'DATASET' && table.datasetId && table.datasetVersionId
+      const columns = designSnapshot && snapshotAssetColumns[table.id]
+        ? snapshotAssetColumns[table.id]
+        : table.sourceKind === 'DATASET' && table.datasetId && table.datasetVersionId
         ? datasetVersionColumns(table, await datasetAPI.getVersion(table.datasetId, table.datasetVersionId))
         : (await datasetAPI.columns(table.id)).items.filter(column => !column.assetStatus || column.assetStatus === 'ACTIVE')
       if (!columns.length) throw new Error('该数据表没有可用字段')
@@ -2621,6 +2878,21 @@ export function DatasetCenterPage() {
       setFormError('请填写数据集名称和说明')
       return
     }
+    if (designSnapshot) {
+      const id = editingRecord?.id ?? 'snapshot-sales-order-new'
+      const next: DatasetSummary = {
+        ...(datasets.find(item => item.id === id) ?? snapshotDatasets[0]),
+        id, code: generatedCode, name: metadata.name.trim(), description: metadata.description.trim(),
+        layer: draft.layer ?? 'DWD', status: 'DRAFT', version: (editingRecord?.version ?? 0) + 1,
+        updatedAt: '2026-08-11T10:18:00+08:00', currentPublishedVersionId: undefined,
+      }
+      setDatasets(current => [next, ...current.filter(item => item.id !== id)])
+      setDialog(null)
+      setEditingRecord(null)
+      if (datasetId) navigate('/datasets?snapshot=assets', { replace: true })
+      setNotice({ tone: 'success', message: `“${next.name}”已保存为草稿 V${next.version}，可提交校验与发布。` })
+      return
+    }
     setBusyAction(editingRecord ? 'update' : 'create')
     setFormError('')
     try {
@@ -2666,6 +2938,22 @@ export function DatasetCenterPage() {
     setDetailAsset(null)
     setDetailAssetColumns([])
     setFormError('')
+    if (designSnapshot) {
+      const record = snapshotDatasetRecord(dataset)
+      const pending: DatasetPublicationRequest = {
+        id: `${dataset.id}-request-1`, datasetId: dataset.id, status: 'PENDING', version: 1,
+        draftVersionId: record.draftVersionId, expectedDatasetVersion: record.version,
+        expectedDraftRecordVersion: record.draftRecordVersion, expectedDslHash: record.dslHash,
+        expectedPlanHash: record.planHash, requesterId: '王敏', requestNote: '关联关系与输出字段已完成校验，请审批发布。',
+        submittedAt: '2026-08-11T09:45:00+08:00', updatedAt: '2026-08-11T09:45:00+08:00',
+      }
+      setPublicationRecord(record)
+      setPublicationRequests(dataset.status === 'DRAFT' ? [pending] : [])
+      setSelectedPublicationRequestID(dataset.status === 'DRAFT' ? pending.id : '')
+      setPublicationCapabilities({ manage: true, publish: true })
+      setBusyAction('')
+      return
+    }
     setBusyAction(`publication:${dataset.id}`)
     const [recordResult, requestsResult, manageResult, publishResult] = await Promise.allSettled([
       datasetAPI.get(dataset.id),
@@ -2704,6 +2992,21 @@ export function DatasetCenterPage() {
     if (!publicationRecord || !publicationCapabilities.manage || busyAction) return
     setBusyAction('publication-submit')
     setFormError('')
+    if (designSnapshot) {
+      const request: DatasetPublicationRequest = {
+        id: `${publicationRecord.id}-request-${publicationRequests.length + 1}`, datasetId: publicationRecord.id,
+        status: 'PENDING', version: 1, draftVersionId: publicationRecord.draftVersionId,
+        expectedDatasetVersion: publicationRecord.version, expectedDraftRecordVersion: publicationRecord.draftRecordVersion,
+        expectedDslHash: publicationRecord.dslHash, expectedPlanHash: publicationRecord.planHash,
+        requesterId: '王敏', requestNote: publicationNote.trim(), submittedAt: '2026-08-11T10:20:00+08:00', updatedAt: '2026-08-11T10:20:00+08:00',
+      }
+      setPublicationRequests(current => [request, ...current])
+      setSelectedPublicationRequestID(request.id)
+      setPublicationNote('')
+      setBusyAction('')
+      setNotice({ tone: 'success', message: `“${publicationRecord.name}”已提交发布申请。` })
+      return
+    }
     try {
       const request = await datasetAPI.requestPublication(publicationRecord.id, {
         draftVersionId: publicationRecord.draftVersionId,
@@ -2732,6 +3035,21 @@ export function DatasetCenterPage() {
     if (!publicationRecord || !selectedPublicationRequest || selectedPublicationRequest.status !== 'PENDING' || !publicationCapabilities.publish || busyAction) return
     setBusyAction('publication-approve')
     setFormError('')
+    if (designSnapshot) {
+      setPublicationRequests(current => current.map(item => item.id === selectedPublicationRequest.id ? {
+        ...item, status: 'APPROVED', reviewerId: '数据治理管理员', reviewNote: publicationDecisionNote.trim(),
+        publishedVersionId: `${publicationRecord.id}-v${publicationRecord.version + 1}`,
+        reviewedAt: '2026-08-11T10:22:00+08:00', updatedAt: '2026-08-11T10:22:00+08:00',
+      } : item))
+      setDatasets(current => current.map(item => item.id === publicationRecord.id ? {
+        ...item, status: 'PUBLISHED', version: item.version + 1,
+        currentPublishedVersionId: `${publicationRecord.id}-v${item.version + 1}`, updatedAt: '2026-08-11T10:22:00+08:00',
+      } : item))
+      setPublicationDecisionNote('')
+      setBusyAction('')
+      setNotice({ tone: 'success', message: `“${publicationRecord.name}”审批通过，物化任务已进入队列。` })
+      return
+    }
     try {
       const result = await datasetAPI.approvePublication(
         publicationRecord.id, selectedPublicationRequest.id, selectedPublicationRequest.version, publicationDecisionNote.trim(),
@@ -2759,6 +3077,16 @@ export function DatasetCenterPage() {
     if (!publicationRecord || !selectedPublicationRequest || selectedPublicationRequest.status !== 'PENDING' || !publicationCapabilities.publish || !reason || busyAction) return
     setBusyAction('publication-reject')
     setFormError('')
+    if (designSnapshot) {
+      setPublicationRequests(current => current.map(item => item.id === selectedPublicationRequest.id ? {
+        ...item, status: 'REJECTED', reviewerId: '数据治理管理员', reviewNote: reason,
+        reviewedAt: '2026-08-11T10:22:00+08:00', updatedAt: '2026-08-11T10:22:00+08:00',
+      } : item))
+      setPublicationDecisionNote('')
+      setBusyAction('')
+      setNotice({ tone: 'success', message: `“${publicationRecord.name}”已退回修改，草稿和审批意见均已保留。` })
+      return
+    }
     try {
       const rejected = await datasetAPI.rejectPublication(
         publicationRecord.id, selectedPublicationRequest.id, selectedPublicationRequest.version, reason,
@@ -2943,6 +3271,17 @@ export function DatasetCenterPage() {
       return
     }
     setBusyAction(`dag-run:${dataset.id}`)
+    if (designSnapshot) {
+      const run: DatasetDAGRun = {
+        id: `${dataset.id}-run-${Date.now()}`, datasetId: dataset.id, datasetVersionId: dataset.currentPublishedVersionId,
+        layer: dataset.layer, mode: 'FULL', status: 'RUNNING', attempt: 1, maxAttempts: 3,
+        createdAt: '2026-08-11T10:25:00+08:00', updatedAt: '2026-08-11T10:25:00+08:00', startedAt: '2026-08-11T10:25:00+08:00',
+      }
+      setDAGRuns(current => ({ ...current, [dataset.id]: run }))
+      setBusyAction('')
+      setNotice({ tone: 'success', message: `“${dataset.name}”的物化任务已启动，可在任务中心跟踪。` })
+      return
+    }
     try {
       const record = await datasetAPI.get(dataset.id)
       if (record.status !== 'PUBLISHED' || record.currentPublishedVersionId !== dataset.currentPublishedVersionId) {
@@ -3116,6 +3455,26 @@ export function DatasetCenterPage() {
     const selectionError = modelingSelectionError(trigger, selectedDatasets)
     if (selectionError) {
       setNotice({ tone: 'error', message: `${label}尚未触发：${selectionError}` })
+      return
+    }
+    if (designSnapshot) {
+      setBusyAction(`llm:${trigger}`)
+      setModelingMonitors(current => ({
+        ...current,
+        [trigger]: {
+          ...current[trigger],
+          tasks: [],
+          expected: false,
+          ready: true,
+          logsPinned: false,
+          syncError: '',
+        },
+      }))
+      setNotice({
+        tone: 'success',
+        message: `${label}已根据当前数据范围生成建议，新草稿已进入数据集目录。`,
+      })
+      setBusyAction('')
       return
     }
     const selectedIDs = selectedDatasets.map(dataset => dataset.id)
@@ -3449,64 +3808,56 @@ export function DatasetCenterPage() {
   const editingCanvas = Boolean(editingRecord || busyAction.startsWith('edit:') || dialog?.mode === 'create' && dialog.dataset)
   const completeDetailFields = detail ? datasetDetailFields(detail) : []
 
-  return <AppShell className="dataset-center-shell" title="数据集配置中心" eyebrow="数据资产" actions={<button className="primary-button" type="button" disabled={actionBusy} onClick={() => void openCreate()}>新建数据集</button>}>
-    {notice && <div className={`dataset-center-toast ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}><strong>{notice.tone === 'success' ? '✓' : '!'}</strong><span>{notice.message}</span><button type="button" aria-label="关闭消息" onClick={() => setNotice(null)}>×</button></div>}
+  return <AppShell className={`dataset-center-shell ${designSnapshot ? 'qa-1920-dataset-workflow' : ''}`} title="数据集资产" eyebrow="数据资产" actions={<button className="primary-button dataset-create-button" type="button" disabled={actionBusy} onClick={() => void openCreate()}><PlusIcon size={18} weight="bold" />新建数据集</button>}>
+    {notice && <div className={`dataset-center-toast ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.tone === 'success' ? <CheckCircleIcon size={20} weight="fill" /> : <DropSlashIcon size={20} weight="fill" />}<span>{notice.message}</span><button type="button" aria-label="关闭消息" onClick={() => setNotice(null)}><XIcon size={17} /></button></div>}
     <section className="dataset-center" aria-label="数据集配置中心内容">
       <header className="dataset-center-summary">
-        <div><span className="eyebrow">资产目录</span><h2>全部数据集</h2><p>从数据源映射到分析交付，统一管理模型、版本与发布状态。</p></div>
-        <div className="dataset-center-total"><strong>{datasets.length}</strong><span>数据集总数</span></div>
+        <div><span className="eyebrow">数据资产化 · 第 2 段</span><h2>数据集建模与发布</h2><p>将已治理的数据表组织成可复用的数据模型，并完成校验、审批和物化交付。</p></div>
+        <div className="dataset-center-total"><strong>{datasets.length}</strong><span>领域内数据集</span></div>
       </header>
-      <div className="dataset-layer-overview" aria-label="数据分层概览">
-        {layerOverview.map(item => <button
-          className={layerFilter === item.layer ? 'active' : ''}
-          type="button"
-          key={item.layer}
-          aria-label={`筛选${item.name}数据集`}
-          aria-pressed={layerFilter === item.layer}
-          onClick={() => setLayerFilter(current => current === item.layer ? 'ALL' : item.layer)}
-        >
-          <span>{item.layer}</span><strong>{item.name}</strong><small>{item.description}</small><b>{layerCounts[item.layer]}</b>
-        </button>)}
+      <ol className="dataset-chain-progress" aria-label="数据集资产化主流程">
+        <li className="complete"><span><CheckCircleIcon size={18} weight="fill" /></span><div><strong>数据表资产</strong><small>字段与业务语义已完善</small></div></li>
+        <li className="active"><span><TreeStructureIcon size={18} weight="bold" /></span><div><strong>数据集建模</strong><small>配置字段、关联和粒度</small></div></li>
+        <li><span><ListChecksIcon size={18} /></span><div><strong>校验与发布</strong><small>预览、审批、冻结版本</small></div></li>
+        <li><span><ArrowClockwiseIcon size={18} /></span><div><strong>物化交付</strong><small>运行任务并服务下游</small></div></li>
+      </ol>
+      <div className="dataset-overview-grid" aria-label="数据集运行概览">
+        <article><span><RowsIcon size={21} /></span><div><small>全部数据集</small><strong>{datasets.length}</strong></div><em>当前领域</em></article>
+        <article><span className="is-success"><CheckCircleIcon size={21} /></span><div><small>已发布</small><strong>{datasets.filter(item => item.status === 'PUBLISHED').length}</strong></div><em>可被下游使用</em></article>
+        <article><span className="is-warning"><CalendarDotsIcon size={21} /></span><div><small>待处理</small><strong>{datasets.filter(item => item.status === 'DRAFT' || item.status === 'VALIDATING').length}</strong></div><em>草稿或校验中</em></article>
+        <article><span className="is-blue"><ArrowClockwiseIcon size={21} /></span><div><small>运行任务</small><strong>{Object.values(dagRuns).filter(run => activeDAGRunStatuses.has(run.status)).length}</strong></div><em>排队或执行中</em></article>
       </div>
-      <div className="dataset-center-controls">
-        <div className="dataset-center-filters" aria-label="数据集筛选">
-          <label><span>搜索</span><input aria-label="搜索数据集" type="search" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="名称或编码" /></label>
+      <section className="dataset-catalog-panel">
+        <header>
+          <div><span className="eyebrow">数据集目录</span><h3>模型资产清单</h3><p>按数仓分层查看数据集，进入画布完成建模后再提交发布。</p></div>
+          <section className="dataset-intelligent-modeling" aria-label="智能建模">
+            <span><MagicWandIcon size={15} weight="fill" />智能建模{selectedDatasets.length ? ` · 已选 ${selectedDatasets.length} 个` : ''}</span>
+            <div>
+              {modelingMonitorConfigs.map(config => <DatasetModelingAction
+                key={config.trigger}
+                config={config}
+                monitor={modelingMonitors[config.trigger]}
+                actionBusy={actionBusy}
+                submitting={busyAction === `llm:${config.trigger}`}
+                logID={`${modelingLogIDPrefix}-${config.trigger.toLowerCase()}`}
+                onTrigger={() => void triggerDatasetLLM(config.trigger, config.label)}
+                onTogglePinned={() => setModelingMonitors(current => ({
+                  DIM_MODELING: { ...current.DIM_MODELING, logsPinned: config.trigger === 'DIM_MODELING' && !current[config.trigger].logsPinned },
+                  DWD_MODELING: { ...current.DWD_MODELING, logsPinned: config.trigger === 'DWD_MODELING' && !current[config.trigger].logsPinned },
+                  DWS_MODELING: { ...current.DWS_MODELING, logsPinned: config.trigger === 'DWS_MODELING' && !current[config.trigger].logsPinned },
+                }))}
+              />)}
+            </div>
+          </section>
+        </header>
+        <div className="dataset-catalog-toolbar" aria-label="数据集筛选">
+          <label className="dataset-search-field"><MagnifyingGlassIcon size={17} /><input aria-label="搜索数据集" type="search" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索名称、编码或说明" /></label>
+          <label><span>分层</span><select aria-label="按数据集分层筛选" value={layerFilter} onChange={event => setLayerFilter(event.target.value as DatasetLayer | 'ALL')}><option value="ALL">全部分层</option>{layerOverview.map(item => <option value={item.layer} key={item.layer}>{item.layer} · {item.name}（{layerCounts[item.layer]}）</option>)}</select></label>
           <label><span>状态</span><select aria-label="按数据集状态筛选" value={statusFilter} onChange={event => setStatusFilter(event.target.value)}><option value="ALL">全部状态</option>{Object.entries(statusLabels).map(([status, label]) => <option key={status} value={status}>{label}</option>)}</select></label>
+          <button className="dataset-filter-button" type="button" onClick={() => { setKeyword(''); setLayerFilter('ALL'); setStatusFilter('ALL') }}><FunnelIcon size={16} />重置筛选</button>
           <small>显示 {filtered.length} / {datasets.length}</small>
         </div>
-        <section className="dataset-intelligent-modeling" aria-label="智能建模">
-          <span>智能建模 · {selectedDatasets.length ? `按所选 ${selectedDatasets.length} 个数据集` : '默认全量范围'}</span>
-          <div>
-            {modelingMonitorConfigs.map(config => <DatasetModelingAction
-              key={config.trigger}
-              config={config}
-              monitor={modelingMonitors[config.trigger]}
-              actionBusy={actionBusy}
-              submitting={busyAction === `llm:${config.trigger}`}
-              logID={`${modelingLogIDPrefix}-${config.trigger.toLowerCase()}`}
-              onTrigger={() => void triggerDatasetLLM(config.trigger, config.label)}
-              onTogglePinned={() => setModelingMonitors(current => {
-                const willPin = !current[config.trigger].logsPinned
-                return {
-                  DIM_MODELING: {
-                    ...current.DIM_MODELING,
-                    logsPinned: config.trigger === 'DIM_MODELING' && willPin,
-                  },
-                  DWD_MODELING: {
-                    ...current.DWD_MODELING,
-                    logsPinned: config.trigger === 'DWD_MODELING' && willPin,
-                  },
-                  DWS_MODELING: {
-                    ...current.DWS_MODELING,
-                    logsPinned: config.trigger === 'DWS_MODELING' && willPin,
-                  },
-                }
-              })}
-            />)}
-          </div>
-        </section>
-      </div>
-      {!!datasets.length && <div className="dataset-bulk-toolbar" aria-label="数据集批量操作">
+      {!!selectedDatasets.length && <div className="dataset-bulk-toolbar" aria-label="数据集批量操作">
         <label><input ref={selectFilteredCheckbox} type="checkbox" checked={allFilteredSelected} disabled={actionBusy || !filtered.length} onChange={toggleFilteredSelection} /><span>选择当前结果</span></label>
         <strong>已选择 {selectedDatasets.length} 个</strong>
         <div>
@@ -3517,26 +3868,28 @@ export function DatasetCenterPage() {
           <button className="quiet-button" type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => setSelectedDatasetIDs(new Set())}>清空选择</button>
         </div>
       </div>}
+      <div className="dataset-catalog-head" aria-hidden="true"><span>数据集</span><span>分层 / 状态</span><span>版本与运行</span><span>最近更新</span><span>操作</span></div>
       {loading ? <Empty>正在加载数据集…</Empty> : !datasets.length ? <Empty title="还没有数据集">点击右上角“新建数据集”开始配置。</Empty> : !filtered.length ? <Empty title="没有符合条件的数据集">请调整搜索词或筛选条件。</Empty> :
         <div className="dataset-asset-list" role="list" aria-label="数据集资产清单">{filtered.map(dataset => <article key={dataset.id} role="listitem" className="dataset-asset-card">
           <label className="dataset-asset-select"><input type="checkbox" aria-label={`选择数据集 ${dataset.name}`} checked={selectedDatasetIDs.has(dataset.id)} disabled={actionBusy} onChange={() => toggleDatasetSelection(dataset.id)} /></label>
           <div className="dataset-asset-open" role="button" tabIndex={actionBusy ? -1 : 0} aria-disabled={actionBusy} aria-label={`打开数据集 ${dataset.name}`} onClick={() => { if (!actionBusy) void openView(dataset) }} onKeyDown={event => { if (!actionBusy && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); void openView(dataset) } }}>
-            <div className="dataset-asset-icon" aria-hidden="true">DS</div>
-            <div className="dataset-asset-main"><div><h3>{dataset.name}</h3><span className={`dataset-asset-status ${dataset.status.toLowerCase()}`}>{statusLabels[dataset.status] ?? dataset.status}</span><span className={`dataset-asset-layer ${dataset.layer.toLowerCase()}`}>{dataset.layer}</span>{(dataset.tags || []).slice(0, 3).map(tag => <span className="dataset-asset-tag" key={tag}>{tag}</span>)}{(dataset.tags || []).length > 3 && <span className="dataset-asset-tag more" title={(dataset.tags || []).slice(3).join('、')}>+{(dataset.tags || []).length - 3}</span>}</div><p>{dataset.description || '暂无说明'}</p><small>{dataset.originDataSourceName ? `${dataset.originDataSourceName} · ` : ''}{dataset.code}</small></div>
-            <dl><div><dt>类型</dt><dd>{typeLabels[dataset.type] ?? dataset.type}</dd></div><div><dt>版本</dt><dd>V{dataset.version}</dd></div><div><dt>更新时间</dt><dd>{new Date(dataset.updatedAt).toLocaleString('zh-CN', { hour12: false })}</dd></div></dl>
+            <div className="dataset-asset-icon" aria-hidden="true"><RowsIcon size={22} weight="duotone" /></div>
+            <div className="dataset-asset-main"><div><h3>{dataset.name}</h3>{(dataset.tags || []).slice(0, 2).map(tag => <span className="dataset-asset-tag" key={tag}>{tag}</span>)}</div><p>{dataset.description || '暂无说明'}</p><small>{dataset.code}{dataset.originDataSourceName ? ` · ${dataset.originDataSourceName}` : ''}</small></div>
+            <div className="dataset-catalog-state"><span className={`dataset-asset-layer ${dataset.layer.toLowerCase()}`}>{dataset.layer}</span><span className={`dataset-asset-status ${dataset.status.toLowerCase()}`}>{statusLabels[dataset.status] ?? dataset.status}</span></div>
+            <div className="dataset-catalog-version"><strong>V{dataset.version}</strong><small>{dagRuns[dataset.id] && activeDAGRunStatuses.has(dagRuns[dataset.id].status) ? '物化执行中' : dataset.currentPublishedVersionId ? '已冻结发布版本' : '草稿版本'}</small></div>
+            <time>{new Date(dataset.updatedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })}</time>
           </div>
           <div className="dataset-asset-actions">
-            <button className="action-edit" type="button" disabled={actionBusy} onClick={() => void openEdit(dataset)}>修改</button>
-            {dagRuns[dataset.id] && activeDAGRunStatuses.has(dagRuns[dataset.id].status)
-              ? <button className="action-pause" type="button" disabled={actionBusy} title={`停止本次 DAG${dagRuns[dataset.id]?.status === 'QUEUED' ? '排队' : '执行'}`} onClick={() => void stopDatasetDAG(dataset)}>停止</button>
-              : <button className="action-resume" type="button" disabled={actionBusy || dataset.status !== 'PUBLISHED' || !dataset.currentPublishedVersionId} title={dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId ? '立即执行一次当前发布版本的 DAG' : '请先发布数据集再运行 DAG'} onClick={() => void runDatasetDAG(dataset)}>运行</button>}
+            {datasetManagePermissions[dataset.id] && <button className="action-edit" type="button" disabled={actionBusy} onClick={() => void openEdit(dataset)}><TreeStructureIcon size={15} />建模</button>}
+            {datasetManagePermissions[dataset.id] && dagRuns[dataset.id] && activeDAGRunStatuses.has(dagRuns[dataset.id].status)
+              ? <button className="action-pause" type="button" disabled={actionBusy} title={`停止本次 DAG${dagRuns[dataset.id]?.status === 'QUEUED' ? '排队' : '执行'}`} onClick={() => void stopDatasetDAG(dataset)}><DropSlashIcon size={15} />停止</button>
+              : datasetManagePermissions[dataset.id] && dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId && <button className="action-resume" type="button" disabled={actionBusy} title="立即执行当前发布版本的物化任务" onClick={() => void runDatasetDAG(dataset)}><ArrowClockwiseIcon size={15} />运行</button>}
             {dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId
-              ? <button className="action-pause" type="button" disabled={actionBusy} title="撤下当前发布版本，保留配置和历史" onClick={() => { setFormError(''); setDialog({ mode: 'unpublish', dataset }) }}>下架</button>
-              : <button className="action-publish" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title={dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED' ? '当前数据集状态不能发布' : '提交发布申请并在同一入口处理审批'} onClick={() => void openPublication(dataset)}>发布</button>}
-            <button className="action-history" type="button" disabled={actionBusy} onClick={() => void openHistory(dataset)}>历史版本</button>
-            <button className="action-delete" type="button" disabled={actionBusy} onClick={() => { setFormError(''); setDialog({ mode: 'delete', dataset }) }}>删除</button>
+              ? <button className="action-history" type="button" disabled={actionBusy} onClick={() => void openHistory(dataset)}><CalendarDotsIcon size={15} />版本</button>
+              : <button className="action-publish" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title="提交校验与发布审批" onClick={() => void openPublication(dataset)}><ArrowUpIcon size={15} />发布</button>}
           </div>
         </article>)}</div>}
+      </section>
     </section>
 
     {dialog?.mode === 'create' && <Dialog title={editingCanvas ? '修改数据集' : '新建数据集'} eyebrow="图形化配置" wide closeDisabled={aiApplying} onClose={closeDialog}>
@@ -3633,7 +3986,7 @@ export function DatasetCenterPage() {
           <div><strong>{detail.name}</strong><span className={`dataset-asset-status ${detail.status.toLowerCase()}`}>{statusLabels[detail.status] ?? detail.status}</span><span className={`dataset-asset-layer ${detail.layer.toLowerCase()}`}>{detail.layer}</span>{(detail.tags || []).map(tag => <span className="dataset-asset-tag" key={tag}>{tag}</span>)}</div>
           <p>{detail.description || '暂无说明'}</p>
         </header>
-        <dl><div><dt>编码</dt><dd>{detail.code}</dd></div><div><dt>类型</dt><dd>{typeLabels[detail.type] ?? detail.type}</dd></div><div><dt>业务领域</dt><dd>{selectedBusinessDomainName || '未配置'}</dd></div><div><dt>业务主题</dt><dd>{detail.dsl.dataset.subject || '未配置'}</dd></div><div><dt>聚合版本</dt><dd>V{detail.version}</dd></div><div><dt>草稿版本</dt><dd>V{detail.draftVersionNo}</dd></div><div><dt>数据节点</dt><dd>{Array.isArray(detail.dsl.nodes) ? detail.dsl.nodes.length : 0}</dd></div><div><dt>输出字段</dt><dd>{completeDetailFields.length}</dd></div></dl>
+        <dl><div><dt>编码</dt><dd>{detail.code}</dd></div><div><dt>类型</dt><dd>{typeLabels[detail.type] ?? detail.type}</dd></div><div><dt>业务领域</dt><dd>{selectedBusinessDomainName || '未配置'}</dd></div><div><dt>共享范围</dt><dd><AssetSharingSelect resourceType="DATASET" resourceID={detail.id} value={detail.sharingScope ?? 'PRIVATE'} ownerUserID={detail.ownerUserId} assetDomainID={detail.domainId} disabled={actionBusy} onChange={sharingScope => { setDetail(current => current ? { ...current, sharingScope } : current); setDatasets(current => current.map(item => item.id === detail.id ? { ...item, sharingScope } : item)) }} /></dd></div><div><dt>业务主题</dt><dd>{detail.dsl.dataset.subject || '未配置'}</dd></div><div><dt>聚合版本</dt><dd>V{detail.version}</dd></div><div><dt>草稿版本</dt><dd>V{detail.draftVersionNo}</dd></div><div><dt>数据节点</dt><dd>{Array.isArray(detail.dsl.nodes) ? detail.dsl.nodes.length : 0}</dd></div><div><dt>输出字段</dt><dd>{completeDetailFields.length}</dd></div></dl>
         <section className="dataset-detail-metadata" aria-label="LLM 生成的完整元数据">
           <div className="dataset-detail-section-heading"><div><span className="eyebrow">LLM 元数据</span><h3>完整业务语义</h3></div><span>{detailAsset ? `${detailAsset.schemaName}.${detailAsset.tableName}` : `${detail.layer} 数据集`}</span></div>
           {detailAsset && <dl className="dataset-detail-table-summary">

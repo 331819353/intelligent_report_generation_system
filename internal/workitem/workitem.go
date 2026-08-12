@@ -114,7 +114,8 @@ const unifiedItemsSQL = `WITH permitted(code) AS (
     ARRAY['APPROVE','REJECT']::text[] AS actions
   FROM platform.domain_access_applications application
   WHERE application.tenant_id=$1 AND application.domain_id=$2 AND application.status='PENDING'
-    AND platform.user_is_domain_administrator(application.domain_id)
+    AND (platform.user_is_domain_administrator(application.domain_id)
+      OR platform.user_is_platform_administrator())
   UNION ALL
   SELECT 'DATA_SOURCE_PUBLICATION',request.id,source.domain_id,request.status,request.requester_user_id,NULL,
     request.updated_at,request.version::text,'数据源发布申请待审批','/governance/data-sources/'||request.data_source_id::text,
@@ -342,6 +343,22 @@ func enrichActionContextTx(ctx context.Context, tx pgx.Tx, identity Identity, it
 		target.References[name] = id
 	}
 	switch item.Type {
+	case "DOMAIN_ACCESS_APPROVAL":
+		var reason, domainName string
+		if err := tx.QueryRow(ctx, `SELECT application.reason,domain.name
+			FROM platform.domain_access_applications application
+			JOIN platform.business_domains domain ON domain.tenant_id=application.tenant_id AND domain.id=application.domain_id
+			WHERE application.tenant_id=$1 AND application.domain_id=$2 AND application.id=$3
+			  AND application.status='PENDING'
+			  AND (platform.user_is_domain_administrator(application.domain_id)
+			    OR platform.user_is_platform_administrator())`, identity.TenantID, identity.DomainID, item.ObjectID).
+			Scan(&reason, &domainName); err != nil {
+			return err
+		}
+		target.ApprovalPurpose = "申请加入“" + domainName + "”"
+		target.DifferenceSummary = "批准后将创建当前领域的普通成员身份"
+		target.EvidenceSummary = "申请用途：" + reason
+		target.RiskSummary = "领域授权仅在当前领域生效，可在用户权限中继续收敛角色"
 	case "DATA_SOURCE_PUBLICATION":
 		var sourceID, versionID askdata.ID
 		if err := tx.QueryRow(ctx, `SELECT data_source_id::text,data_source_version_id::text,config_hash,version::text

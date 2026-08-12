@@ -43,6 +43,18 @@ export type DecisionEvidence = {
   asOf: string
 }
 
+export type DecisionEvidenceInput = {
+  sourceType: DecisionEvidence['sourceType']
+  sourceId: string
+  sourceHash: string
+  semanticReleaseId: string
+  semanticReleaseHash: string
+  dataSnapshotId?: string
+  asOf: string
+  policyScopeHash: string
+  summary: string
+}
+
 export type DecisionApproval = {
   id: string
   approverUserId: string
@@ -96,6 +108,13 @@ export type DecisionOutcomeReview = {
   recordVersion: number
 }
 
+export type DecisionApprovalPolicy = {
+  id: string
+  name: string
+  requiredApprovals: number
+  approverSummary: string
+}
+
 export type DecisionAggregate = {
   decision: DecisionRecord
   options: DecisionOption[]
@@ -117,12 +136,21 @@ export type DecisionCreateInput = {
   approvalPolicyId: string
   reviewAt: string
   options: Array<{ title: string; description: string; selected: boolean }>
-  evidence: []
+  evidence: DecisionEvidenceInput[]
 }
 
 const governedWriteHeaders = () => ({ 'Idempotency-Key': crypto.randomUUID() })
 
 export const decisionAPI = {
+  listApprovalPolicies() {
+    return apiRequest<{ items: DecisionApprovalPolicy[] }>('/v1/decisions/approval-policies')
+      .then(result => result.items)
+  },
+  prefillEvidence(sourceType: DecisionEvidence['sourceType'], sourceId: string) {
+    const query = new URLSearchParams({ sourceType, sourceId })
+    return apiRequest<{ evidence: DecisionEvidenceInput }>(`/v1/decisions/evidence-prefill?${query.toString()}`)
+      .then(result => result.evidence)
+  },
   list(scope: DecisionScope, limit = 200, cursor = '') {
     const query = new URLSearchParams({ scope, limit: String(limit) })
     if (cursor) query.set('cursor', cursor)
@@ -145,4 +173,45 @@ export const decisionAPI = {
       body: JSON.stringify({ expectedVersion }),
     })
   },
+	decideApproval(id: string, expectedVersion: number, decision: 'APPROVE' | 'REJECT', comment: string) {
+		return apiRequest<DecisionAggregate>(`/v1/decisions/${encodeURIComponent(id)}/approvals`, {
+			method: 'POST',
+			headers: governedWriteHeaders(),
+			body: JSON.stringify({ expectedVersion, decision, comment }),
+		})
+	},
+	createAction(id: string, input: { title: string; description: string; assigneeUserId: string; dueAt: string; deliverableRefs: string[] }) {
+		return apiRequest<DecisionAction>(`/v1/decisions/${encodeURIComponent(id)}/actions`, {
+			method: 'POST',
+			headers: governedWriteHeaders(),
+			body: JSON.stringify(input),
+		})
+	},
+	transitionAction(decisionId: string, actionId: string, input: { expectedVersion: number; target: DecisionActionStatus; reason: string; completionEvidence: string }) {
+		return apiRequest<DecisionAction>(`/v1/decisions/${encodeURIComponent(decisionId)}/actions/${encodeURIComponent(actionId)}/transition`, {
+			method: 'POST',
+			headers: governedWriteHeaders(),
+			body: JSON.stringify(input),
+		})
+	},
+	startReview(id: string, expectedVersion: number) {
+		return apiRequest<DecisionAggregate>(`/v1/decisions/${encodeURIComponent(id)}/outcome/start`, {
+			method: 'POST', headers: governedWriteHeaders(), body: JSON.stringify({ expectedVersion }),
+		})
+	},
+	refreshOutcome(id: string) {
+		return apiRequest<{ items: DecisionOutcomeMetric[] }>(`/v1/decisions/${encodeURIComponent(id)}/outcome/refresh`, {
+			method: 'POST', headers: governedWriteHeaders(), body: JSON.stringify({}),
+		})
+	},
+	confirmOutcome(id: string, input: { expectedVersion: number; conclusion: DecisionOutcomeReview['conclusion']; notes: string }) {
+		return apiRequest<DecisionOutcomeReview>(`/v1/decisions/${encodeURIComponent(id)}/outcome/confirm`, {
+			method: 'POST', headers: governedWriteHeaders(), body: JSON.stringify(input),
+		})
+	},
+	transitionDecision(id: string, target: 'close' | 'reopen' | 'cancel', expectedVersion: number, reason: string) {
+		return apiRequest<DecisionAggregate>(`/v1/decisions/${encodeURIComponent(id)}/${target}`, {
+			method: 'POST', headers: governedWriteHeaders(), body: JSON.stringify({ expectedVersion, reason }),
+		})
+	},
 }

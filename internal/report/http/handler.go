@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -24,6 +25,7 @@ import (
 	"intelligent-report-generation-system/internal/report/operation"
 	"intelligent-report-generation-system/internal/report/publication"
 	"intelligent-report-generation-system/internal/report/reportai"
+	"intelligent-report-generation-system/internal/report/reportinsight"
 	"intelligent-report-generation-system/internal/report/runtime"
 	"intelligent-report-generation-system/internal/report/sharing"
 	"intelligent-report-generation-system/internal/report/store"
@@ -40,20 +42,29 @@ type AIOptions struct {
 	Components    *template.Registry
 	Methods       *insight.Registry
 	Runtime       runtime.QueryExecutor
-	Upgrade       *publication.UpgradeService
+	// Measures supplies governed dataset metadata (declared units) that a
+	// derived Evidence Bundle must carry.
+	Measures reportinsight.MeasureContract
+	// Narrative writes and verifies report conclusions.
+	Narrative *reportinsight.NarrativeService
+	Upgrade   *publication.UpgradeService
 }
 
 type Handler struct {
-	repository *store.PostgresStore
-	publisher  *publication.Publisher
-	loader     runtime.Loader
-	shares     sharing.Service
-	exports    *publication.ExportJobStore
-	insights   *insight.PostgresStore
-	aiAudit    *reportai.PostgresStore
-	assets     reportasset.Service
-	assetRepo  *reportasset.PostgresRepository
-	ai         AIOptions
+	repository  *store.PostgresStore
+	publisher   *publication.Publisher
+	loader      runtime.Loader
+	shares      sharing.Service
+	exports     *publication.ExportJobStore
+	exportFiles interface {
+		Get(context.Context, string, string) (io.ReadCloser, error)
+	}
+	exportBucket string
+	insights     *insight.PostgresStore
+	aiAudit      *reportai.PostgresStore
+	assets       reportasset.Service
+	assetRepo    *reportasset.PostgresRepository
+	ai           AIOptions
 }
 
 func NewHandler(
@@ -64,6 +75,10 @@ func NewHandler(
 	loader runtime.Loader,
 	shares sharing.Service,
 	exports *publication.ExportJobStore,
+	exportFiles interface {
+		Get(context.Context, string, string) (io.ReadCloser, error)
+	},
+	exportBucket string,
 	insights *insight.PostgresStore,
 	aiAudit *reportai.PostgresStore,
 	assets reportasset.Service,
@@ -73,11 +88,15 @@ func NewHandler(
 	if len(aiOptions) == 1 {
 		configuredAI = aiOptions[0]
 	}
-	handler := &Handler{repository: repository, publisher: publisher, loader: loader, shares: shares, exports: exports, insights: insights, aiAudit: aiAudit, assets: assets, assetRepo: assets.Repository, ai: configuredAI}
+	handler := &Handler{repository: repository, publisher: publisher, loader: loader, shares: shares, exports: exports,
+		exportFiles: exportFiles, exportBucket: strings.TrimSpace(exportBucket), insights: insights,
+		aiAudit: aiAudit, assets: assets, assetRepo: assets.Repository, ai: configuredAI}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/reports", handler.list)
 	mux.HandleFunc("POST /api/v1/reports", handler.create)
 	mux.HandleFunc("POST /api/v1/reports/blank", handler.createBlank)
+	mux.HandleFunc("GET /api/v1/report-templates", handler.reportTemplates)
+	mux.HandleFunc("POST /api/v1/report-templates/{templateId}/instantiate", handler.instantiateTemplate)
 	mux.HandleFunc("GET /api/v1/report-data-contexts", handler.dataContexts)
 	mux.HandleFunc("GET /api/v1/report-component-manifests", handler.componentManifests)
 	mux.HandleFunc("POST /api/v1/reports/ai/create", handler.createAI)
@@ -97,6 +116,7 @@ func NewHandler(
 	mux.HandleFunc("GET /api/v1/reports/{id}/runtime", handler.loadRuntime)
 	mux.HandleFunc("POST /api/v1/reports/{id}/runtime/plan", handler.runtimePlan)
 	mux.HandleFunc("POST /api/v1/reports/{id}/runtime/execute", handler.runtimeExecute)
+	mux.HandleFunc("POST /api/v1/reports/{id}/draft/execute", handler.draftExecute)
 	mux.HandleFunc("POST /api/v1/reports/{id}/upgrade/preview", handler.upgradePreview)
 	mux.HandleFunc("POST /api/v1/reports/{id}/upgrade/confirm", handler.upgradeConfirm)
 	mux.HandleFunc("GET /api/v1/reports/{id}/permissions", handler.listPermissions)
@@ -106,12 +126,15 @@ func NewHandler(
 	mux.HandleFunc("POST /api/v1/reports/{id}/restore", handler.restoreReport)
 	mux.HandleFunc("GET /api/v1/reports/{id}/asset-events", handler.listAssetEvents)
 	mux.HandleFunc("POST /api/v1/reports/{id}/shares", handler.createShare)
+	mux.HandleFunc("GET /api/v1/reports/{id}/shares", handler.listShares)
 	mux.HandleFunc("POST /api/v1/reports/{id}/shares/{shareId}/revoke", handler.revokeShare)
 	mux.HandleFunc("GET /api/v1/report-shares/{token}", handler.accessShare)
 	mux.HandleFunc("POST /api/v1/reports/{id}/exports", handler.createExport)
 	mux.HandleFunc("GET /api/v1/reports/{id}/exports/{exportId}", handler.getExport)
+	mux.HandleFunc("GET /api/v1/reports/{id}/exports/{exportId}/download", handler.downloadExport)
 	mux.HandleFunc("POST /api/v1/reports/{id}/exports/{exportId}/retry", handler.retryExport)
-	mux.HandleFunc("POST /api/v1/reports/{id}/insights/evidence", handler.saveEvidence)
+	mux.HandleFunc("POST /api/v1/reports/{id}/insights/{componentId}/derive", handler.deriveEvidence)
+	mux.HandleFunc("POST /api/v1/reports/{id}/insights/{componentId}/generate", handler.generateInsight)
 	mux.HandleFunc("GET /api/v1/reports/{id}/insights/{componentId}", handler.getInsight)
 	mux.HandleFunc("POST /api/v1/reports/{id}/insights/{componentId}/edit", handler.editInsight)
 	governed := WithIdempotency(idempotencyRepository, func(ctx context.Context) (platformidempotency.Identity, error) {
@@ -416,6 +439,176 @@ func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	writeJSON(writer, http.StatusCreated, map[string]any{"report": reportRecord, "draft": draft})
+}
+
+type reportStarterTemplate struct {
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	Description       string `json:"description"`
+	Category          string `json:"category"`
+	ComponentCount    int    `json:"componentCount"`
+	RequiresDimension bool   `json:"requiresDimension"`
+}
+
+var reportStarterTemplates = []reportStarterTemplate{
+	{ID: "executive-overview", Name: "经营概览", Description: "核心指标、分类对比与明细表，适合经营例会和管理层快速阅览。", Category: "经营分析", ComponentCount: 3, RequiresDimension: true},
+	{ID: "trend-analysis", Name: "趋势分析", Description: "按时间或业务维度观察指标变化，并保留明细数据用于追溯。", Category: "趋势洞察", ComponentCount: 2, RequiresDimension: true},
+	{ID: "data-detail", Name: "数据明细", Description: "以可审计明细表为主体，适合核对、下钻和导出。", Category: "数据核对", ComponentCount: 1, RequiresDimension: false},
+}
+
+func (handler *Handler) reportTemplates(writer http.ResponseWriter, request *http.Request) {
+	if _, ok := handler.identity(writer, request); !ok {
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": reportStarterTemplates})
+}
+
+func (handler *Handler) instantiateTemplate(writer http.ResponseWriter, request *http.Request) {
+	identity, ok := handler.identity(writer, request)
+	if !ok {
+		return
+	}
+	if handler.repository == nil || handler.ai.Contexts == nil {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_DATA_CONTEXT_UNAVAILABLE", "governed data context catalog is unavailable")
+		return
+	}
+	templateID := strings.TrimSpace(request.PathValue("templateId"))
+	known := false
+	for _, item := range reportStarterTemplates {
+		if item.ID == templateID {
+			known = true
+			break
+		}
+	}
+	if !known {
+		writeError(writer, http.StatusNotFound, "REPORT_TEMPLATE_NOT_FOUND", "report starter template was not found")
+		return
+	}
+	var body struct {
+		Name          string     `json:"name"`
+		Description   string     `json:"description"`
+		DataContextID askdata.ID `json:"dataContextId"`
+	}
+	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.Name) == "" {
+		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "report name is required")
+		return
+	}
+	candidates, err := handler.ai.Contexts.Candidates(request.Context(), identity, 30)
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	selected, found := selectReportDataContext(candidates, body.DataContextID)
+	if !found {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_DATA_CONTEXT_REJECTED", "the requested data context is not available to this actor")
+		return
+	}
+	reportID := askdata.ID(uuid.NewString())
+	definition, err := instantiateStarterDefinition(reportID, strings.TrimSpace(body.Name), strings.TrimSpace(body.Description), templateID, selected)
+	if err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_TEMPLATE_NOT_APPLICABLE", err.Error())
+		return
+	}
+	reportRecord, draft, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
+		ID: reportID, Code: definition.Metadata.Code, Name: definition.Metadata.Name,
+		ReportType: definition.Metadata.ReportType, Definition: definition,
+	})
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{"report": reportRecord, "draft": draft, "templateId": templateID})
+}
+
+func selectReportDataContext(candidates []reportai.DataContextCandidate, requested askdata.ID) (reportai.DataContextCandidate, bool) {
+	if len(candidates) == 0 {
+		return reportai.DataContextCandidate{}, false
+	}
+	if requested == "" {
+		return candidates[0], true
+	}
+	for _, candidate := range candidates {
+		if candidate.DataContext.ID == requested {
+			return candidate, true
+		}
+	}
+	return reportai.DataContextCandidate{}, false
+}
+
+func instantiateStarterDefinition(reportID askdata.ID, name, description, templateID string, candidate reportai.DataContextCandidate) (reportmodel.ReportDefinition, error) {
+	definition := newReportDefinition(reportID, name, description, candidate.DataContext, reportmodel.CreatedTemplate)
+	dimensions := []reportai.FieldDefinition{}
+	measures := []reportai.FieldDefinition{}
+	for _, field := range candidate.FieldDefinitions {
+		if strings.EqualFold(field.Role, "MEASURE") {
+			measures = append(measures, field)
+		} else {
+			dimensions = append(dimensions, field)
+		}
+	}
+	if len(measures) == 0 {
+		return reportmodel.ReportDefinition{}, errors.New("所选数据集没有可用度量字段，无法套用报告模板")
+	}
+	if (templateID == "executive-overview" || templateID == "trend-analysis") && len(dimensions) == 0 {
+		return reportmodel.ReportDefinition{}, errors.New("所选数据集没有可用维度字段，无法套用该报告模板")
+	}
+	page := &definition.Pages[0]
+	add := func(sectionName, componentType string, width, height int, dimensionBindings, measureBindings []reportmodel.FieldBinding, options reportmodel.ComponentOptions) {
+		order := len(page.Sections) + 1
+		componentID := askdata.ID(uuid.NewString())
+		sectionID := askdata.ID(uuid.NewString())
+		blockID := askdata.ID(uuid.NewString())
+		zoneID := askdata.ID(uuid.NewString())
+		slotID := askdata.ID(uuid.NewString())
+		contextID := candidate.DataContext.ID
+		definition.Components = append(definition.Components, reportmodel.Component{
+			ID:          componentID,
+			TemplateRef: reportmodel.ComponentTemplateReference{Type: componentType, Version: "1.0.0"},
+			DataBinding: &reportmodel.DataBinding{BindingMode: reportmodel.BindingDatasetField, DataContextID: &contextID, Dimensions: dimensionBindings, Measures: measureBindings},
+			Options:     options,
+		})
+		page.Sections = append(page.Sections, reportmodel.Section{ID: sectionID, Name: sectionName, Order: order, Blocks: []reportmodel.Block{{
+			ID: blockID, Type: starterBlockType(componentType),
+			Layout: reportmodel.BlockLayout{Desktop: reportmodel.DesktopBlockLayout{X: 0, Y: (order - 1) * height, W: width, H: height}, Mobile: reportmodel.MobileBlockLayout{Order: order, Visible: true, HeightMode: reportmodel.MobileHeightAuto, SlotMode: reportmodel.MobileSlotStack}},
+			Zones:  []reportmodel.Zone{{ID: zoneID, Type: reportmodel.ZoneContent, Layout: reportmodel.ZoneLayout{HeightMode: reportmodel.ZoneHeightAuto, MinHeight: 1, Columns: width, Rows: height, Overflow: reportmodel.OverflowExpand, EmptyPriority: 1}, Slots: []reportmodel.Slot{{ID: slotID, Grid: reportmodel.SlotGrid{X: 0, Y: 0, W: width, H: height}, ComponentID: componentID}}}},
+		}}})
+	}
+	value := func(field reportai.FieldDefinition, role reportmodel.BindingRole) reportmodel.FieldBinding {
+		return reportmodel.FieldBinding{Role: role, Field: field.Code}
+	}
+	showLegend, showLabel := true, true
+	switch templateID {
+	case "executive-overview":
+		add("核心指标", "metric-card", 8, 3, []reportmodel.FieldBinding{}, []reportmodel.FieldBinding{value(measures[0], reportmodel.RoleValue)}, reportmodel.ComponentOptions{Title: measures[0].Name, ShowLabel: &showLabel})
+		add("分类对比", "bar-comparison", 12, 5, []reportmodel.FieldBinding{value(dimensions[0], reportmodel.RoleXAxis)}, []reportmodel.FieldBinding{value(measures[0], reportmodel.RoleYAxis)}, reportmodel.ComponentOptions{Title: dimensions[0].Name + "对比", ShowLegend: &showLegend, Orientation: reportmodel.OrientationVertical})
+		add("经营明细", "data-table", 24, 7, []reportmodel.FieldBinding{value(dimensions[0], reportmodel.RoleDimension)}, []reportmodel.FieldBinding{value(measures[0], reportmodel.RoleValue)}, reportmodel.ComponentOptions{Title: "经营明细"})
+	case "trend-analysis":
+		add("指标趋势", "line-trend", 16, 5, []reportmodel.FieldBinding{value(dimensions[0], reportmodel.RoleXAxis)}, []reportmodel.FieldBinding{value(measures[0], reportmodel.RoleYAxis)}, reportmodel.ComponentOptions{Title: measures[0].Name + "趋势", ShowLegend: &showLegend})
+		add("趋势明细", "data-table", 24, 7, []reportmodel.FieldBinding{value(dimensions[0], reportmodel.RoleDimension)}, []reportmodel.FieldBinding{value(measures[0], reportmodel.RoleValue)}, reportmodel.ComponentOptions{Title: "趋势明细"})
+	case "data-detail":
+		detailDimensions := make([]reportmodel.FieldBinding, 0, min(4, len(dimensions)))
+		for _, field := range dimensions[:min(4, len(dimensions))] {
+			detailDimensions = append(detailDimensions, value(field, reportmodel.RoleDimension))
+		}
+		detailMeasures := make([]reportmodel.FieldBinding, 0, min(3, len(measures)))
+		for _, field := range measures[:min(3, len(measures))] {
+			detailMeasures = append(detailMeasures, value(field, reportmodel.RoleValue))
+		}
+		add("数据明细", "data-table", 24, 9, detailDimensions, detailMeasures, reportmodel.ComponentOptions{Title: "数据明细"})
+	default:
+		return reportmodel.ReportDefinition{}, errors.New("报告模板不存在")
+	}
+	if err := definition.Validate(); err != nil {
+		return reportmodel.ReportDefinition{}, fmt.Errorf("报告模板生成失败：%w", err)
+	}
+	return definition, nil
+}
+
+func starterBlockType(componentType string) reportmodel.BlockType {
+	if componentType == "data-table" {
+		return reportmodel.BlockTable
+	}
+	return reportmodel.BlockChart
 }
 
 func (handler *Handler) get(writer http.ResponseWriter, request *http.Request) {
@@ -986,57 +1179,104 @@ func (handler *Handler) loadRuntime(writer http.ResponseWriter, request *http.Re
 	writeJSON(writer, http.StatusOK, loaded)
 }
 
+// runtimeSession resolves the requested execution target and opens the shared
+// pipeline for it. Published and draft targets differ only here; everything
+// after this point is identical, which is what makes a preview trustworthy.
+func (handler *Handler) runtimeSession(
+	writer http.ResponseWriter, request *http.Request, identity store.Identity, reportID askdata.ID, draft bool,
+) (runtime.Session, runtime.HTTPPlanInput, bool) {
+	var target runtime.ExecutionTarget
+	if draft {
+		if handler.repository == nil {
+			writeError(writer, http.StatusServiceUnavailable, "REPORT_RUNTIME_UNAVAILABLE", "report draft store is unavailable")
+			return runtime.Session{}, runtime.HTTPPlanInput{}, false
+		}
+		current, err := handler.repository.GetDraft(request.Context(), identity, reportID)
+		if err != nil {
+			writeReportError(writer, err)
+			return runtime.Session{}, runtime.HTTPPlanInput{}, false
+		}
+		target = runtime.DraftTarget(reportID, current.Definition, current.DefinitionHash, current.RevisionNo)
+	} else {
+		versionNo, valid := optionalVersionNo(writer, request)
+		if !valid {
+			return runtime.Session{}, runtime.HTTPPlanInput{}, false
+		}
+		loaded, err := handler.loader.Load(request.Context(), identity, reportID, versionNo)
+		if err != nil {
+			writeReportError(writer, err)
+			return runtime.Session{}, runtime.HTTPPlanInput{}, false
+		}
+		target = runtime.PublishedTarget(loaded)
+	}
+	var body runtime.HTTPPlanInput
+	if decodeJSON(request, &body) != nil {
+		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "request body is invalid")
+		return runtime.Session{}, runtime.HTTPPlanInput{}, false
+	}
+	session, err := runtime.NewSession(identity, target, time.Now().UTC())
+	if err != nil {
+		writeReportError(writer, err)
+		return runtime.Session{}, runtime.HTTPPlanInput{}, false
+	}
+	return session, body, true
+}
+
+// runtimeEnvelope reports which definition produced a result so a client can
+// never mistake a draft preview for a published run.
+func runtimeEnvelope(session runtime.Session) map[string]any {
+	envelope := map[string]any{
+		"reportId": session.Target.ReportID,
+		"asOf":     session.AsOf,
+		"timezone": session.Location.String(),
+		"draft":    session.Target.Draft,
+	}
+	if session.Target.Draft {
+		envelope["revisionNo"] = session.Target.RevisionNo
+		envelope["definitionHash"] = session.Target.DefinitionHash
+		return envelope
+	}
+	envelope["versionId"] = session.Target.VersionID
+	envelope["versionNo"] = session.Target.VersionNo
+	return envelope
+}
+
 func (handler *Handler) runtimePlan(writer http.ResponseWriter, request *http.Request) {
 	identity, id, ok := handler.subject(writer, request)
 	if !ok {
 		return
 	}
-	versionNo, valid := optionalVersionNo(writer, request)
-	if !valid {
+	session, body, ok := handler.runtimeSession(writer, request, identity, id, false)
+	if !ok {
 		return
 	}
-	loaded, err := handler.loader.Load(request.Context(), identity, id, versionNo)
+	plan, err := session.Plan(body)
 	if err != nil {
 		writeReportError(writer, err)
 		return
 	}
-	var body runtime.HTTPPlanInput
-	if decodeJSON(request, &body) != nil {
-		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "request body is invalid")
-		return
-	}
-	location, err := runtime.RuntimeTimezone(loaded.Definition)
-	if err != nil {
-		writeReportError(writer, runtime.NewError("REPORT_RUNTIME_TIMEZONE_INVALID", "report runtime timezone is invalid", err))
-		return
-	}
-	asOf := time.Now().UTC()
-	policyHash, err := runtime.ViewerPolicyHash(identity, loaded)
-	if err != nil {
-		writeReportError(writer, err)
-		return
-	}
-	resolved, err := body.Resolve(loaded.Definition, asOf, location, policyHash)
-	if err != nil {
-		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "report runtime request is invalid")
-		return
-	}
-	plan, err := runtime.BuildExecutionPlan(loaded.Definition, resolved)
-	if err != nil {
-		writeReportError(writer, err)
-		return
-	}
-	if err := runtime.PinExecutionVersion(&plan, loaded); err != nil {
-		writeReportError(writer, err)
-		return
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{
-		"reportId": loaded.ReportID, "versionId": loaded.VersionID, "versionNo": loaded.VersionNo,
-		"asOf": asOf, "timezone": location.String(), "plan": plan,
-	})
+	response := runtimeEnvelope(session)
+	response["plan"] = plan
+	writeJSON(writer, http.StatusOK, response)
 }
 
+// runtimeExecute runs an immutable published version for a viewer.
 func (handler *Handler) runtimeExecute(writer http.ResponseWriter, request *http.Request) {
+	handler.executeReport(writer, request, false)
+}
+
+// draftExecute runs the current editable draft for someone who can read it.
+//
+// Without it an author binds fields blind and only discovers whether the
+// binding works after publishing a version. Execution still applies the calling
+// viewer's row and column policy, so previewing grants no data the actor could
+// not already query; what it deliberately does not do is create a version,
+// write an artifact, or let its result be replayed as a published run.
+func (handler *Handler) draftExecute(writer http.ResponseWriter, request *http.Request) {
+	handler.executeReport(writer, request, true)
+}
+
+func (handler *Handler) executeReport(writer http.ResponseWriter, request *http.Request, draft bool) {
 	identity, id, ok := handler.subject(writer, request)
 	if !ok {
 		return
@@ -1045,55 +1285,19 @@ func (handler *Handler) runtimeExecute(writer http.ResponseWriter, request *http
 		writeError(writer, http.StatusServiceUnavailable, "REPORT_RUNTIME_UNAVAILABLE", "report runtime is unavailable")
 		return
 	}
-	versionNo, valid := optionalVersionNo(writer, request)
-	if !valid {
-		return
-	}
-	loaded, err := handler.loader.Load(request.Context(), identity, id, versionNo)
-	if err != nil {
-		writeReportError(writer, err)
-		return
-	}
-	var body runtime.HTTPPlanInput
-	if decodeJSON(request, &body) != nil {
-		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "request body is invalid")
-		return
-	}
-	location, err := runtime.RuntimeTimezone(loaded.Definition)
-	if err != nil {
-		writeReportError(writer, runtime.NewError("REPORT_RUNTIME_TIMEZONE_INVALID", "report runtime timezone is invalid", err))
-		return
-	}
-	asOf := time.Now().UTC()
-	policyHash, err := runtime.ViewerPolicyHash(identity, loaded)
-	if err != nil {
-		writeReportError(writer, err)
-		return
-	}
-	resolved, err := body.Resolve(loaded.Definition, asOf, location, policyHash)
-	if err != nil {
-		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "report runtime request is invalid")
-		return
-	}
-	plan, err := runtime.BuildExecutionPlan(loaded.Definition, resolved)
-	if err != nil {
-		writeReportError(writer, err)
-		return
-	}
-	if err := runtime.PinExecutionVersion(&plan, loaded); err != nil {
-		writeReportError(writer, err)
+	session, body, ok := handler.runtimeSession(writer, request, identity, id, draft)
+	if !ok {
 		return
 	}
 	executionContext := database.WithAccessContext(request.Context(), string(identity.ActorID), string(identity.DomainID))
-	executionContext = runtime.WithViewerIdentity(executionContext, identity)
-	results := runtime.ExecuteBatch(
-		executionContext, plan, handler.ai.Runtime,
-		loaded.Definition.RuntimePolicy.MaxConcurrentQueries,
-	)
-	writeJSON(writer, http.StatusOK, map[string]any{
-		"reportId": loaded.ReportID, "versionId": loaded.VersionID, "versionNo": loaded.VersionNo,
-		"asOf": asOf, "timezone": location.String(), "components": results,
-	})
+	results, err := session.Run(executionContext, body, handler.ai.Runtime)
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	response := runtimeEnvelope(session)
+	response["components"] = results
+	writeJSON(writer, http.StatusOK, response)
 }
 
 func (handler *Handler) upgradePreview(writer http.ResponseWriter, request *http.Request) {
@@ -1294,6 +1498,19 @@ func (handler *Handler) createShare(writer http.ResponseWriter, request *http.Re
 	writeJSON(writer, http.StatusCreated, created)
 }
 
+func (handler *Handler) listShares(writer http.ResponseWriter, request *http.Request) {
+	identity, reportID, ok := handler.subject(writer, request)
+	if !ok {
+		return
+	}
+	items, err := handler.shares.List(request.Context(), identity, reportID, 200)
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
+}
+
 func (handler *Handler) revokeShare(writer http.ResponseWriter, request *http.Request) {
 	identity, _, ok := handler.subject(writer, request)
 	if !ok {
@@ -1379,18 +1596,20 @@ func (handler *Handler) createExport(writer http.ResponseWriter, request *http.R
 		writeError(writer, http.StatusBadRequest, "REPORT_EXPORT_AS_OF_INVALID", "report export asOf cannot be in the future")
 		return
 	}
-	loaded := runtime.LoadedReport{
+	// Validate the requested filters against the same session the export worker
+	// will later run, so an export job is never queued with filters that only
+	// fail once the worker picks it up.
+	exportSession, err := runtime.NewSession(identity, runtime.PublishedTarget(runtime.LoadedReport{
 		ReportID: reportID, VersionID: version.ID, VersionNo: version.VersionNo,
 		DefinitionHash: version.DefinitionHash, Definition: version.Definition,
-	}
-	policyHash, err := runtime.ViewerPolicyHash(identity, loaded)
+	}), asOf)
 	if err != nil {
 		writeReportError(writer, err)
 		return
 	}
 	if _, err := (runtime.HTTPPlanInput{
 		PageID: version.Definition.Pages[0].ID, FilterValues: body.Filters,
-	}).Resolve(version.Definition, asOf, location, policyHash); err != nil {
+	}).Resolve(version.Definition, exportSession.AsOf, exportSession.Location, exportSession.PolicyScopeHash); err != nil {
 		writeError(writer, http.StatusBadRequest, "REPORT_EXPORT_FILTER_INVALID", "report export filters are invalid")
 		return
 	}
@@ -1423,6 +1642,55 @@ func (handler *Handler) createExport(writer http.ResponseWriter, request *http.R
 
 func (handler *Handler) getExport(writer http.ResponseWriter, request *http.Request) {
 	handler.exportAction(writer, request, false)
+}
+
+func (handler *Handler) downloadExport(writer http.ResponseWriter, request *http.Request) {
+	identity, reportID, ok := handler.subject(writer, request)
+	if !ok {
+		return
+	}
+	if handler.exports == nil || handler.exportFiles == nil || handler.exportBucket == "" {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_EXPORT_UNAVAILABLE", "report export download is unavailable")
+		return
+	}
+	exportID := askdata.ID(request.PathValue("exportId"))
+	if exportID.Validate() != nil {
+		writeError(writer, http.StatusBadRequest, "REPORT_EXPORT_INVALID", "report export ID is invalid")
+		return
+	}
+	item, err := handler.exports.Get(request.Context(), identity, exportID)
+	if err == nil && item.ReportID != reportID {
+		err = store.ErrNotFound
+	}
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	if item.State != publication.ExportReady || item.ObjectURI == "" || item.ExpiresAt.Before(time.Now().UTC()) {
+		writeError(writer, http.StatusConflict, "REPORT_EXPORT_NOT_READY", "report export is not ready for download")
+		return
+	}
+	prefix := "s3://" + handler.exportBucket + "/"
+	if !strings.HasPrefix(item.ObjectURI, prefix) {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_EXPORT_UNAVAILABLE", "report export artifact is unavailable")
+		return
+	}
+	object, err := handler.exportFiles.Get(request.Context(), handler.exportBucket, strings.TrimPrefix(item.ObjectURI, prefix))
+	if err != nil {
+		writeError(writer, http.StatusNotFound, "REPORT_EXPORT_NOT_FOUND", "report export artifact was not found")
+		return
+	}
+	defer object.Close()
+	contentType := map[publication.ExportFormat]string{
+		publication.ExportPDF: "application/pdf", publication.ExportPNG: "image/png",
+		publication.ExportCSV:  "text/csv; charset=utf-8",
+		publication.ExportXLSX: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	}[item.Format]
+	writer.Header().Set("Content-Type", contentType)
+	writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="report-%s.%s"`, item.ID, strings.ToLower(string(item.Format))))
+	writer.Header().Set("Content-Length", strconv.FormatInt(item.ArtifactBytes, 10))
+	writer.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(writer, object)
 }
 
 func (handler *Handler) retryExport(writer http.ResponseWriter, request *http.Request) {
@@ -1461,29 +1729,100 @@ func (handler *Handler) exportAction(writer http.ResponseWriter, request *http.R
 	writeJSON(writer, http.StatusOK, item)
 }
 
-func (handler *Handler) saveEvidence(writer http.ResponseWriter, request *http.Request) {
+// deriveEvidence computes a component's Evidence Bundle from a live execution
+// of that component.
+//
+// The previous endpoint accepted an Evidence Bundle from the caller. Because
+// the bundle is exactly what the publication fact gate and the narrative
+// verifier check a conclusion against, accepting one from a client meant anyone
+// with edit rights could assert arbitrary "verified" numbers. The caller now
+// chooses only which component to analyse and by which registered method;
+// every fact comes from the result the server executed under that caller's own
+// data permissions.
+func (handler *Handler) deriveEvidence(writer http.ResponseWriter, request *http.Request) {
 	identity, reportID, ok := handler.subject(writer, request)
 	if !ok {
 		return
 	}
-	if handler.insights == nil {
-		writeError(writer, http.StatusServiceUnavailable, "REPORT_INSIGHT_UNAVAILABLE", "report insight storage is unavailable")
+	componentID := askdata.ID(request.PathValue("componentId"))
+	if handler.insights == nil || handler.repository == nil || handler.ai.Runtime == nil ||
+		handler.ai.Methods == nil || handler.ai.Measures == nil || componentID.Validate() != nil {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_INSIGHT_UNAVAILABLE", "report evidence derivation is unavailable")
 		return
 	}
 	var body struct {
-		ComponentID askdata.ID             `json:"componentId"`
-		Evidence    insight.EvidenceBundle `json:"evidence"`
+		AnalysisMethod string `json:"analysisMethod"`
+		TopN           int    `json:"topN"`
 	}
-	if decodeJSON(request, &body) != nil {
-		writeError(writer, http.StatusBadRequest, "REPORT_EVIDENCE_INVALID", "report evidence is invalid")
+	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.AnalysisMethod) == "" {
+		writeError(writer, http.StatusBadRequest, "REPORT_EVIDENCE_INVALID", "analysisMethod is required")
 		return
 	}
-	item, err := handler.insights.SaveEvidence(request.Context(), identity, reportID, body.ComponentID, body.Evidence)
+	record, _, err := reportinsight.Deriver{
+		Drafts: handler.repository, Executor: handler.ai.Runtime,
+		Methods: handler.ai.Methods, Evidence: handler.insights, Measures: handler.ai.Measures,
+	}.Derive(request.Context(), identity, reportinsight.DeriveRequest{
+		ReportID: reportID, ComponentID: componentID,
+		Method: insight.AnalysisMethod(strings.ToUpper(strings.TrimSpace(body.AnalysisMethod))), TopN: body.TopN,
+	})
 	if err != nil {
 		writeReportError(writer, err)
 		return
 	}
-	writeJSON(writer, http.StatusCreated, item)
+	writeJSON(writer, http.StatusCreated, record)
+}
+
+// generateInsight derives fresh evidence for a component and writes a
+// conclusion from it. Nothing is stored unless the prose passes the shared fact
+// verifier, and the model never writes a figure: it emits markers that the
+// server substitutes with values taken from the evidence itself.
+func (handler *Handler) generateInsight(writer http.ResponseWriter, request *http.Request) {
+	identity, reportID, ok := handler.subject(writer, request)
+	if !ok {
+		return
+	}
+	componentID := askdata.ID(request.PathValue("componentId"))
+	if handler.insights == nil || handler.repository == nil || handler.ai.Runtime == nil ||
+		handler.ai.Methods == nil || handler.ai.Measures == nil || handler.ai.Narrative == nil ||
+		componentID.Validate() != nil {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_INSIGHT_UNAVAILABLE", "report conclusion generation is unavailable")
+		return
+	}
+	var body struct {
+		AnalysisMethod string `json:"analysisMethod"`
+		TopN           int    `json:"topN"`
+	}
+	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.AnalysisMethod) == "" {
+		writeError(writer, http.StatusBadRequest, "REPORT_EVIDENCE_INVALID", "analysisMethod is required")
+		return
+	}
+	evidence, objects, err := reportinsight.Deriver{
+		Drafts: handler.repository, Executor: handler.ai.Runtime,
+		Methods: handler.ai.Methods, Evidence: handler.insights, Measures: handler.ai.Measures,
+	}.Derive(request.Context(), identity, reportinsight.DeriveRequest{
+		ReportID: reportID, ComponentID: componentID,
+		Method: insight.AnalysisMethod(strings.ToUpper(strings.TrimSpace(body.AnalysisMethod))), TopN: body.TopN,
+	})
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	ctx := reportai.WithInvocationIdentity(request.Context(), reportai.InvocationIdentity{
+		TenantID: identity.TenantID, ActorID: identity.ActorID, ReportID: reportID,
+	})
+	record, report, err := handler.ai.Narrative.Generate(ctx, identity, reportID, componentID, evidence, objects)
+	if err != nil {
+		// A rejected conclusion is a normal outcome, not a server fault: report
+		// the verifier's own findings so the author can see what was unsupported.
+		writeJSON(writer, http.StatusUnprocessableEntity, map[string]any{
+			"code": "REPORT_INSIGHT_UNVERIFIED", "message": "生成的结论未通过事实校验，未予保存",
+			"evidence": evidence, "verification": report,
+		})
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{
+		"artifact": record, "evidence": evidence, "verification": report,
+	})
 }
 
 func (handler *Handler) getInsight(writer http.ResponseWriter, request *http.Request) {

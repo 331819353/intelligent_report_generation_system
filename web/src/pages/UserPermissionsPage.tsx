@@ -1,5 +1,6 @@
 import {
   Buildings,
+  ArrowsClockwise,
   CaretLeft,
   CaretRight,
   Check,
@@ -28,6 +29,9 @@ import {
   type AdminUser,
   type AdminUserDomain,
   type BusinessDomain,
+  type UserDeactivationPreview,
+  type UserLifecycleBatch,
+  type UserLifecycleMapping,
 } from '../lib/administration'
 import { currentSubject } from '../lib/auth'
 import { notifyDomainCatalogChanged } from '../lib/domain-context'
@@ -36,6 +40,23 @@ type AccessRole = AdminUserDomain['memberRole']
 type AccessDraft = { domainId: string; role: AccessRole }
 type StatusFilter = 'ALL' | AdminUser['status']
 type RoleFilter = 'ALL' | 'PLATFORM_ADMIN' | AccessRole
+type TransferSelection = Record<string, string>
+
+const lifecycleCategoryLabels: Record<string, string> = {
+  DATA_SOURCE: '数据源', DATASET: '数据集', SEMANTIC_DOMAIN: '语义领域', SAVED_QUESTION: '保存的问题',
+  REPORT: '报告', REPORT_SCHEDULE: '报告订阅计划', FEEDBACK_TICKET: '语义反馈工单',
+  DATA_REQUEST_ASSIGNMENT: '数据申请', DECISION: '决策', DECISION_ACTION: '决策行动',
+  KPI_BUNDLE: 'KPI 组合', TIME_CONTRACT: '时间合同', SEMANTIC_METRIC: '指标',
+  SEMANTIC_DIMENSION: '维度', SEMANTIC_RELATIONSHIP: '语义关系', BUSINESS_TERM_VERSION: '业务词条',
+  CERTIFIED_EXAMPLE_VERSION: '认证问法', RELEASE_REFERENCE: '语义发布引用',
+  REPORT_SUBSCRIPTION: '报告订阅', REPORT_DELIVERY: '待发送报告', CONVERSATION_HISTORY: '问数历史',
+  DATA_REQUEST_APPROVAL: '待审批数据申请', DECISION_APPROVAL: '待审批决策',
+  RUNTIME_CONFIG_DRAFT: '运行配置草稿', DOMAIN_ADMIN: '最后一位领域管理员', PLATFORM_ADMIN: '最后一位平台管理员',
+}
+
+function transferKey(category: string, domainID: string) {
+  return `${category}|${domainID}`
+}
 
 const statusLabels: Record<AdminUser['status'], string> = {
   ACTIVE: '启用',
@@ -204,6 +225,10 @@ export function UserPermissionsPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState(params.get('from') === 'approval' ? '领域申请已通过，请继续确认成员角色与生效权限。' : '')
+  const [deactivationPreview, setDeactivationPreview] = useState<UserDeactivationPreview | null>(null)
+  const [deactivationBatch, setDeactivationBatch] = useState<UserLifecycleBatch | null>(null)
+  const [transferSelection, setTransferSelection] = useState<TransferSelection>({})
+  const [lifecycleBusy, setLifecycleBusy] = useState(false)
   const signedInUserID = currentSubject()
 
   const refresh = async () => {
@@ -359,7 +384,41 @@ export function UserPermissionsPage() {
 
   const updateStatus = async () => {
     if (!selected || selected.id === signedInUserID) return
-    const nextStatus = selected.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'
+    if (selected.status === 'ACTIVE') {
+      setLifecycleBusy(true)
+      setError('')
+      setNotice('')
+      try {
+        const preview = designSnapshot ? {
+          targetUserId: selected.id,
+          canDisable: true,
+          counts: { REPORT: 2, DATASET: 1, REPORT_SUBSCRIPTION: 1 },
+          items: [
+            { category: 'REPORT', domainId: selected.domains[0]?.id ?? '', objectId: 'snapshot-report-1', disposition: 'TRANSFER' as const, sourceVersion: '1' },
+            { category: 'REPORT', domainId: selected.domains[0]?.id ?? '', objectId: 'snapshot-report-2', disposition: 'TRANSFER' as const, sourceVersion: '1' },
+            { category: 'DATASET', domainId: selected.domains[0]?.id ?? '', objectId: 'snapshot-dataset-1', disposition: 'TRANSFER' as const, sourceVersion: '2' },
+            { category: 'REPORT_SUBSCRIPTION', domainId: selected.domains[0]?.id ?? '', objectId: 'snapshot-subscription-1', disposition: 'AUTO_CLOSE' as const, sourceVersion: '1' },
+          ],
+        } satisfies UserDeactivationPreview : await administrationAPI.previewUserDeactivation(selected.id)
+        const defaults: TransferSelection = {}
+        for (const item of preview.items.filter(value => value.disposition === 'TRANSFER')) {
+          const key = transferKey(item.category, item.domainId)
+          if (defaults[key]) continue
+          const candidate = users.find(user => user.id !== selected.id && user.status === 'ACTIVE' &&
+            (!item.domainId || user.platformAdministrator || user.domains.some(domain => domain.id === item.domainId)))
+          if (candidate) defaults[key] = candidate.id
+        }
+        setTransferSelection(defaults)
+        setDeactivationBatch(null)
+        setDeactivationPreview(preview)
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : '停用影响分析加载失败')
+      } finally {
+        setLifecycleBusy(false)
+      }
+      return
+    }
+    const nextStatus = 'ACTIVE'
     setBusy(true)
     setError('')
     try {
@@ -374,6 +433,65 @@ export function UserPermissionsPage() {
       setError(cause instanceof Error ? cause.message : '账号状态更新失败')
     } finally {
       setBusy(false)
+    }
+  }
+
+  const executeDeactivation = async () => {
+    if (!selected || !deactivationPreview?.canDisable) return
+    const transferGroups = new Map<string, UserLifecycleMapping>()
+    for (const item of deactivationPreview.items.filter(value => value.disposition === 'TRANSFER')) {
+      const key = transferKey(item.category, item.domainId)
+      const receiverUserId = transferSelection[key]
+      if (!receiverUserId) {
+        setError(`请为${lifecycleCategoryLabels[item.category] ?? item.category}选择接收人`)
+        return
+      }
+      transferGroups.set(key, { category: item.category, domainId: item.domainId, receiverUserId })
+    }
+    setLifecycleBusy(true)
+    setError('')
+    try {
+      if (designSnapshot) {
+        setUsers(current => current.map(user => user.id === selected.id ? { ...user, status: 'DISABLED' } : user))
+        setDeactivationPreview(null)
+        setNotice(`${selected.displayName}的资产已完成转交，账号与当前会话已停用`)
+      } else {
+        const batch = await administrationAPI.executeUserDeactivation(selected.id, [...transferGroups.values()])
+        setDeactivationBatch(batch)
+        if (batch.status === 'TRANSFER_FAILED') {
+          setError('部分资产转交失败，系统未完成停用。请重试本次安全停用。')
+          return
+        }
+        await refresh()
+        setDeactivationPreview(null)
+        setNotice(`${selected.displayName}的资产已完成转交，账号与当前会话已停用`)
+      }
+      notifyDomainCatalogChanged()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '安全停用执行失败')
+    } finally {
+      setLifecycleBusy(false)
+    }
+  }
+
+  const retryDeactivation = async () => {
+    if (!deactivationBatch) return
+    setLifecycleBusy(true)
+    setError('')
+    try {
+      const batch = await administrationAPI.retryUserDeactivation(deactivationBatch.id, deactivationBatch.recordVersion)
+      setDeactivationBatch(batch)
+      if (batch.status === 'COMPLETED') {
+        await refresh()
+        setDeactivationPreview(null)
+        setNotice('资产转交已恢复完成，账号与当前会话已安全停用')
+      } else {
+        setError('转交仍未完成，请根据失败项目调整接收人后重试')
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '重试安全停用失败')
+    } finally {
+      setLifecycleBusy(false)
     }
   }
 
@@ -492,11 +610,52 @@ export function UserPermissionsPage() {
 
             <footer>
               <AppButton type="button" variant="primary" disabled={busy || selected.platformAdministrator} onClick={() => void save()}>{busy ? <SpinnerGap className="spin" size={16} /> : <Check size={16} weight="bold" />}{busy ? '保存中…' : '保存配置'}</AppButton>
-              <AppButton link type="button" disabled={busy || selected.id === signedInUserID} onClick={() => void updateStatus()}>{selected.status === 'ACTIVE' ? '停用此账号' : '恢复此账号'}</AppButton>
+              <AppButton link type="button" disabled={busy || lifecycleBusy || selected.id === signedInUserID} onClick={() => void updateStatus()}>{lifecycleBusy ? '正在分析影响…' : selected.status === 'ACTIVE' ? '安全停用此账号' : '恢复此账号'}</AppButton>
             </footer>
           </> : <div className="user-permissions-state"><PencilSimple size={30} weight="duotone" /><strong>选择一位用户</strong><small>查看并编辑其领域与角色配置</small></div>}
         </aside>
       </div>
+
+      {deactivationPreview && selected && <div className="user-lifecycle-backdrop" role="presentation" onMouseDown={event => { if (event.currentTarget === event.target && !lifecycleBusy) setDeactivationPreview(null) }}>
+        <section className="user-lifecycle-dialog" role="dialog" aria-modal="true" aria-labelledby="user-lifecycle-title">
+          <header>
+            <span><ShieldCheck size={22} weight="duotone" /></span>
+            <div><h2 id="user-lifecycle-title">安全停用 {selected.displayName}</h2><p>系统将先处理资产归属与未完成工作，再撤销会话并停用账号。</p></div>
+            <AppButton text circle type="button" aria-label="关闭" disabled={lifecycleBusy} onClick={() => setDeactivationPreview(null)}><X size={18} /></AppButton>
+          </header>
+
+          {!deactivationPreview.canDisable && <div className="user-lifecycle-blocked" role="alert">
+            <WarningCircle size={22} weight="fill" />
+            <div><strong>当前不能直接停用</strong><p>该用户仍是唯一管理员或持有待审批职责。请先在对应模块新增管理员或完成审批，再重新分析。</p></div>
+          </div>}
+
+          <div className="user-lifecycle-summary">
+            <div><strong>{deactivationPreview.items.filter(item => item.disposition === 'TRANSFER').length}</strong><span>需转交资产</span></div>
+            <div><strong>{deactivationPreview.items.filter(item => item.disposition === 'AUTO_CLOSE').length}</strong><span>自动关闭事项</span></div>
+            <div><strong>{deactivationPreview.items.filter(item => item.disposition === 'READ_ONLY').length}</strong><span>保留只读历史</span></div>
+            <div className={deactivationPreview.canDisable ? 'is-safe' : 'is-blocked'}><strong>{deactivationPreview.items.filter(item => item.disposition === 'BLOCK').length}</strong><span>阻断事项</span></div>
+          </div>
+
+          <div className="user-lifecycle-items">
+            {Array.from(new Map(deactivationPreview.items.map(item => [transferKey(item.category, item.domainId), item])).values()).map(item => {
+              const count = deactivationPreview.items.filter(candidate => candidate.category === item.category && candidate.domainId === item.domainId).length
+              const domain = domains.find(value => value.id === item.domainId)
+              const candidates = users.filter(user => user.id !== selected.id && user.status === 'ACTIVE' &&
+                (!item.domainId || user.platformAdministrator || user.domains.some(userDomain => userDomain.id === item.domainId)))
+              return <article className={`is-${item.disposition.toLocaleLowerCase()}`} key={transferKey(item.category, item.domainId)}>
+                <span className="user-lifecycle-item-icon">{item.disposition === 'BLOCK' ? <WarningCircle size={18} /> : item.disposition === 'TRANSFER' ? <GlobeHemisphereWest size={18} /> : <CheckCircle size={18} />}</span>
+                <div><strong>{lifecycleCategoryLabels[item.category] ?? item.category}</strong><small>{domain?.name ?? '平台范围'} · {count} 项</small></div>
+                {item.disposition === 'TRANSFER' ? <label><span className="sr-only">选择接收人</span><select value={transferSelection[transferKey(item.category, item.domainId)] ?? ''} onChange={event => setTransferSelection(current => ({ ...current, [transferKey(item.category, item.domainId)]: event.target.value }))}><option value="">选择接收人</option>{candidates.map(user => <option value={user.id} key={user.id}>{user.displayName} · {primaryRole(user)}</option>)}</select></label> : <span className="user-lifecycle-disposition">{item.disposition === 'AUTO_CLOSE' ? '停用时自动关闭' : item.disposition === 'READ_ONLY' ? '历史记录保留' : '需先人工解除'}</span>}
+              </article>
+            })}
+          </div>
+
+          <footer>
+            <p><LockKey size={15} />执行成功后将立即撤销该用户所有登录会话，过程保留完整审计记录。</p>
+            <span><AppButton type="button" disabled={lifecycleBusy} onClick={() => setDeactivationPreview(null)}>取消</AppButton>{deactivationBatch?.status === 'TRANSFER_FAILED' ? <AppButton variant="primary" type="button" disabled={lifecycleBusy} onClick={() => void retryDeactivation()}>{lifecycleBusy ? <SpinnerGap className="spin" size={16} /> : <ArrowsClockwise size={16} />}重试转交</AppButton> : <AppButton variant="primary" type="button" disabled={lifecycleBusy || !deactivationPreview.canDisable} onClick={() => void executeDeactivation()}>{lifecycleBusy ? <SpinnerGap className="spin" size={16} /> : <ShieldCheck size={16} />}{lifecycleBusy ? '正在安全停用…' : '确认转交并停用'}</AppButton>}</span>
+          </footer>
+        </section>
+      </div>}
     </section>
   </AppShell>
 }

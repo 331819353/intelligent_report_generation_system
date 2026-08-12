@@ -50,6 +50,15 @@ func ExecuteBatch(ctx context.Context, plan ExecutionPlan, executor QueryExecuto
 	groups := map[string]*group{}
 	results := make([]ComponentResult, 0, len(plan.Components))
 	for _, component := range plan.Components {
+		// A blocked component is bound but unexecutable against this target;
+		// reporting its specific reason is what makes a draft preview honest
+		// instead of showing an empty chart.
+		if component.Blocked != "" {
+			results = append(results, ComponentResult{
+				ComponentID: component.ComponentID, State: StateError, ErrorCode: component.Blocked,
+			})
+			continue
+		}
 		if component.Query == nil {
 			results = append(results, ComponentResult{ComponentID: component.ComponentID, State: StateReady})
 			continue

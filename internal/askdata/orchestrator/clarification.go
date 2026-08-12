@@ -27,8 +27,12 @@ func FreezeBudget(usage BudgetUsage, limits BudgetLimits, now time.Time, timeout
 	return FrozenBudget{FrozenAt: frozenAt, Deadline: frozenAt.Add(timeout), Consumed: usage}, nil
 }
 
-// ResumeBudget returns the exact consumed snapshot. Wall-clock time spent
-// waiting for the user is deliberately not added to elapsedMs.
+// ResumeBudget starts the clarification child with a fresh per-run execution
+// envelope. The parent remains immutable and retains its exact consumed
+// snapshot, while tenant/actor cost governors continue to enforce aggregate
+// usage across both runs. Carrying the parent's depleted LLM/tool counters into
+// a child that must replay the governed state graph makes a valid clarification
+// impossible to finish.
 func ResumeBudget(run Run, now time.Time) (BudgetUsage, error) {
 	if run.Validate() != nil || run.State != StateClarificationRequired || now.IsZero() ||
 		run.ClarificationDeadline == nil || run.BudgetConsumed == nil {
@@ -37,9 +41,7 @@ func ResumeBudget(run Run, now time.Time) (BudgetUsage, error) {
 	if now.UTC().After(*run.ClarificationDeadline) {
 		return BudgetUsage{}, ErrClarificationExpired
 	}
-	usage := *run.BudgetConsumed
-	usage.Exhausted = false
-	return usage, nil
+	return BudgetUsage{}, nil
 }
 
 func ClarificationExpired(run Run, now time.Time) bool {

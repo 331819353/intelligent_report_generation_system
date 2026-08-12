@@ -157,6 +157,20 @@ export type DatasetDAGRun = {
   attempt: number; maxAttempts: number; createdAt: string; updatedAt: string
   startedAt?: string; completedAt?: string; errorCode?: string; errorMessage?: string
 }
+export type DatasetMaterializationReceipt = {
+  id: string
+  datasetVersionId: string
+  layer: DatasetLayer
+  status: string
+  schemaHash: string
+  snapshotHash: string
+  rowCount?: number
+  sizeBytes?: number
+  activatedAt?: string
+}
+export type DatasetDAGRunDetail = DatasetDAGRun & {
+  materialization?: DatasetMaterializationReceipt
+}
 export type DatasetDAGRunPage = {
   items: DatasetDAGRun[]; total: number; limit: number; offset: number
 }
@@ -1027,6 +1041,10 @@ export const datasetAPI = {
     const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
     return apiRequest<DatasetDAGRunPage>(`${datasetPath(id)}/materializations/builds?${query}`, { cache: 'no-store' })
   },
+  getDAGRun: (id: string, runId: string) => apiRequest<DatasetDAGRunDetail>(
+    `${datasetPath(id)}/materializations/builds/${encodeURIComponent(runId)}`,
+    { cache: 'no-store' },
+  ),
   runDAG: (id: string, publishedVersionId: string, requestId: string) => apiRequest<DatasetDAGRun>(`${datasetPath(id)}/materializations/builds`, {
     method: 'POST',
     cache: 'no-store',

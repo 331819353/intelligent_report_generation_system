@@ -60,8 +60,10 @@ export type AddToReportResult = {
   intentId: string
   reportId: string
   runId: string
-  status: 'PENDING_CONFIRMATION' | 'PENDING' | 'APPLIED'
+  status: 'PENDING_CONFIRMATION' | 'PENDING' | 'APPLIED' | 'REJECTED' | 'EXPIRED'
   previewHash?: string
+  rejectionCode?: string
+  rejectionDetail?: string
   replayed: boolean
 }
 export type RunHashes = {
@@ -175,8 +177,8 @@ export type QuestionResultView = {
 export type QuestionResult = {
   schemaVersion: 'question-result-v1'
   title: string
-  resolvedTimeSpec: ResolvedTimeSpec
-  timeSpec: TimeSpecView
+  resolvedTimeSpec?: ResolvedTimeSpec
+  timeSpec?: TimeSpecView
   summary: {
     metricLabel: string
     value: string
@@ -228,6 +230,7 @@ export type QuestionScopeVerdict = {
 }
 export type QuestionCompletion = {
   code: string
+  artifactId: string
   artifactType: QuestionArtifactType
   artifactHash: string
   evidenceIds: string[]
@@ -266,7 +269,29 @@ export type QuestionRun = {
   createdAt: string
   updatedAt: string
   completedAt?: string
+  allowedActions: Array<'SAVE' | 'SHARE' | 'EXPORT' | 'CREATE_DECISION' | 'ADD_TO_REPORT'>
 }
+
+export type SavedQuestionVisibility = 'PRIVATE' | 'TEAM' | 'CERTIFIED_CANDIDATE'
+export type SavedQuestion = {
+  id: string
+  tenantId: string
+  domainId: string
+  ownerUserId: string
+  visibility: SavedQuestionVisibility
+  name: string
+  questionText: string
+  semanticIrHash: string
+  semanticReleaseId: string
+  semanticReleaseContentHash: string
+  sourceQuestionRunId?: string
+  status: 'ACTIVE' | 'NEEDS_MIGRATION' | 'ARCHIVED'
+  migrationReason?: string
+  createdAt: string
+  updatedAt: string
+}
+export type SavedQuestionPage = { items: SavedQuestion[]; nextCursor?: string }
+export type SavedQuestionLaunch = { runId: string; conversationId: string; replayed: boolean }
 export type QuestionRunEvent = {
   eventId: string
   eventIndex: number
@@ -333,6 +358,10 @@ const errorMessages: Record<string, { kind: AskDataErrorKind; message: string; r
   QUESTION_STREAM_EVENT_GAP: { kind: 'STREAM', message: '事件序列不连续，请重新加载运行。', retryable: false },
   QUESTION_EVENT_PAYLOAD_REJECTED: { kind: 'STREAM', message: '事件内容未通过安全校验。', retryable: false },
   QUESTION_SERVICE_FAILED: { kind: 'SERVICE', message: '问数服务暂时不可用，请稍后重试。', retryable: true },
+  SAVED_QUESTION_INVALID: { kind: 'INVALID_REQUEST', message: '收藏内容或来源运行无效，请刷新结果后重试。', retryable: false },
+  SAVED_QUESTION_NOT_FOUND: { kind: 'RUN_NOT_FOUND', message: '该收藏不存在或已归档。', retryable: false },
+  SAVED_QUESTION_FORBIDDEN: { kind: 'INVALID_REQUEST', message: '当前账号无权访问或共享该收藏。', retryable: false },
+  SAVED_QUESTION_FAILED: { kind: 'SERVICE', message: '收藏服务暂时不可用，请稍后重试。', retryable: true },
 }
 
 export class AskDataClientError extends Error {
@@ -515,6 +544,7 @@ export const questionAPI = {
     const submission = buildFeedbackSubmission(input)
     return apiRequest<QuestionFeedbackReceipt>(`/v1/questions/${encodeURIComponent(submission.runId)}/feedback`, {
       method: 'POST', signal: input.signal,
+      headers: { 'Idempotency-Key': createIdempotencyKey() },
       body: JSON.stringify({
         rating: submission.rating,
         issueType: submission.issueType,
@@ -522,6 +552,55 @@ export const questionAPI = {
         runVersion: submission.runVersion,
       }),
     })
+  },
+
+  saveQuestionFromRun(input: {
+    runId: string
+    name: string
+    questionText: string
+    visibility: SavedQuestionVisibility
+    shareTarget?: { type: 'USER' | 'ROLE'; id: string }
+  }) {
+    const name = input.name.trim()
+    if (!name || [...name].length > 200) {
+      throw new AskDataClientError({ kind: 'INVALID_REQUEST', code: 'SAVED_QUESTION_NAME_INVALID', message: '收藏名称需为 1～200 个字符。' })
+    }
+    return apiRequest<SavedQuestion>('/v1/askdata/saved-questions/from-run', {
+      method: 'POST',
+      body: JSON.stringify({
+        name,
+        questionText: requireQuestion(input.questionText),
+        visibility: input.visibility,
+        sourceQuestionRunId: requireRunID(input.runId),
+        ...(input.shareTarget ? { principalType: input.shareTarget.type, principalId: requireRunID(input.shareTarget.id) } : {}),
+      }),
+    })
+  },
+
+  listSavedQuestions(input: { limit?: number; cursor?: string; order?: 'UPDATED_DESC' | 'CREATED_DESC' | 'NAME_ASC'; signal?: AbortSignal } = {}) {
+    const query = new URLSearchParams({ limit: String(input.limit ?? 50), order: input.order ?? 'UPDATED_DESC' })
+    if (input.cursor) query.set('cursor', input.cursor)
+    return apiRequest<SavedQuestionPage>(`/v1/askdata/saved-questions?${query}`, { signal: input.signal })
+  },
+
+  openSavedQuestion(id: string) {
+    return apiRequest<SavedQuestionLaunch>(`/v1/askdata/saved-questions/${encodeURIComponent(requireRunID(id))}/open`, {
+      method: 'POST', headers: { 'Idempotency-Key': createIdempotencyKey() },
+    })
+  },
+
+  shareSavedQuestion(id: string, principalType: 'USER' | 'ROLE' | 'DOMAIN', principalId: string) {
+    return apiRequest<void>(`/v1/askdata/saved-questions/${encodeURIComponent(requireRunID(id))}/share`, {
+      method: 'POST', body: JSON.stringify({ principalType, principalId: requireRunID(principalId) }),
+    })
+  },
+
+  promoteSavedQuestion(id: string) {
+    return apiRequest<void>(`/v1/askdata/saved-questions/${encodeURIComponent(requireRunID(id))}/promote`, { method: 'POST' })
+  },
+
+  archiveSavedQuestion(id: string) {
+    return apiRequest<void>(`/v1/askdata/saved-questions/${encodeURIComponent(requireRunID(id))}`, { method: 'DELETE' })
   },
 
   listConversations(input: { search?: string; archived?: boolean; limit?: number; cursor?: string; signal?: AbortSignal } = {}) {

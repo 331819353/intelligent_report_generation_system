@@ -80,7 +80,7 @@ func MergeRRF(exact, lexical, vector []RawHit, config RankConfig) ([]Candidate, 
 		perTypeRank := map[ObjectType]int{}
 		seen := map[candidateKey]struct{}{}
 		for _, hit := range source.hits {
-			if !validRetrievalObjectType(hit.ObjectType) || hit.Score < 0 {
+			if !ValidRetrievalObjectType(hit.ObjectType) || hit.Score < 0 {
 				return nil, fmt.Errorf("%s hit is invalid", source.name)
 			}
 			if err := hit.ObjectVersionID.Validate(); err != nil {
@@ -149,7 +149,12 @@ func sourceEvidenceKind(source RetrievalSource) askdata.EvidenceKind {
 	}
 }
 
-func validRetrievalObjectType(value ObjectType) bool {
-	return value == ObjectMetric || value == ObjectDimension || value == ObjectMember ||
+// ValidRetrievalObjectType reports whether the retriever will accept this
+// object type. It is exported so callers that translate their own object-type
+// enum into this one can assert the mapping lands inside the accepted set,
+// instead of discovering a mismatch as a whole-request ErrInvalidRetrieval.
+func ValidRetrievalObjectType(value ObjectType) bool {
+	return value == ObjectMetric || value == ObjectMeasureLegacy || value == ObjectSemanticModel ||
+		value == ObjectDimension || value == ObjectMember ||
 		value == ObjectBusinessTerm || value == ObjectCertifiedExample || value == ObjectReportAsset
 }

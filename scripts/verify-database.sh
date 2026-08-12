@@ -53,7 +53,7 @@ WHERE rolname IN (:'app_user',:'worker_user',:'connection_test_user')
 \if :dedicated_roles_secure
 \else
   \echo 'dedicated database role attributes are unsafe'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 DO $$
@@ -161,7 +161,7 @@ SELECT (
 \if :data_request_privileges_secure
 \else
   \echo 'detail data request least-privilege boundary is incomplete'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 DO $$
@@ -481,6 +481,7 @@ BEGIN
   END IF;
 
   IF to_regprocedure('askdata.start_release_projection(uuid,uuid,jsonb)') IS NULL
+    OR to_regprocedure('askdata.retry_failed_release_projections(uuid,uuid)') IS NULL
     OR to_regprocedure('askdata.claim_release_projection(uuid,text,integer)') IS NULL
     OR to_regprocedure('askdata.list_release_projection_tenants(text)') IS NULL
     OR to_regprocedure('askdata.claim_release_projection(uuid,text,text,integer)') IS NULL
@@ -493,6 +494,15 @@ BEGIN
     OR to_regprocedure('askdata.validate_release_time_contract_closure()') IS NULL
     OR to_regprocedure('askdata.activate_release(uuid,uuid)') IS NOT NULL THEN
     RAISE EXCEPTION 'askdata projection boundary is incomplete or unsafe activation exists before evaluation gates';
+  END IF;
+
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='askdata.release_events'::regclass
+      AND conname='askdata_release_events_event_type_check'
+      AND position('PROJECTION_RETRIED' IN pg_get_constraintdef(oid))>0
+  ) THEN
+    RAISE EXCEPTION 'release projection retry audit event is missing';
   END IF;
 
   IF to_regprocedure('askdata.semantic_import_errors_valid(jsonb)') IS NULL
@@ -1192,6 +1202,14 @@ BEGIN
     RAISE EXCEPTION 'sensitive member functions must be SECURITY DEFINER with fixed search paths and a stable set-returning lookup';
   END IF;
 
+  IF position(
+       'askdata.business_term_versions' IN pg_get_functiondef(
+         'askdata.validate_search_document_subject()'::regprocedure
+       )
+     )=0 THEN
+    RAISE EXCEPTION 'business-term search subjects must be validated against immutable certified versions';
+  END IF;
+
   IF NOT EXISTS(
     SELECT 1
     FROM pg_constraint
@@ -1301,7 +1319,7 @@ SELECT (
     'askdata.record_search_query_sample(uuid,uuid,text,text,text,text,integer,text)',
     'EXECUTE'
   )
-  AND NOT has_function_privilege(
+  AND has_function_privilege(
     :'worker_user',
     'askdata.record_search_query_sample(uuid,uuid,text,text,text,text,integer,text)',
     'EXECUTE'
@@ -1364,8 +1382,8 @@ SELECT (
   AND has_column_privilege(:'worker_user','askdata.question_runs','current_state','UPDATE')
   AND has_column_privilege(:'worker_user','askdata.question_runs','record_version','UPDATE')
   AND has_column_privilege(:'worker_user','askdata.question_run_events','event_hash','INSERT')
-  AND NOT has_table_privilege(:'worker_user','askdata.question_artifacts','INSERT')
-  AND NOT has_table_privilege(:'worker_user','askdata.tool_calls','INSERT')
+  AND has_table_privilege(:'worker_user','askdata.question_artifacts','INSERT')
+  AND has_table_privilege(:'worker_user','askdata.tool_calls','INSERT')
   AND has_table_privilege(:'worker_user','askdata.idempotency_records','SELECT')
   AND NOT has_table_privilege(:'worker_user','askdata.idempotency_records','INSERT')
   AND NOT has_table_privilege(:'worker_user','askdata.idempotency_records','UPDATE')
@@ -1395,6 +1413,9 @@ SELECT (
   AND NOT has_table_privilege(:'connection_test_user','askdata.domains','SELECT')
   AND has_function_privilege(
     :'app_user','askdata.start_release_projection(uuid,uuid,jsonb)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user','askdata.retry_failed_release_projections(uuid,uuid)','EXECUTE'
   )
   AND NOT has_function_privilege(
     :'worker_user','askdata.start_release_projection(uuid,uuid,jsonb)','EXECUTE'
@@ -1556,6 +1577,18 @@ SELECT (
   AND has_function_privilege(
     :'worker_user','askdata.record_cost_usage(uuid,uuid,uuid,uuid,text,text,text,bigint,bigint,bigint,bigint)','EXECUTE'
   )
+  AND has_function_privilege(
+    :'worker_user','askdata.active_learning_member_signals(uuid)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user','askdata.active_learning_data_request_signals(uuid)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    'public','askdata.active_learning_member_signals(uuid)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    'public','askdata.active_learning_data_request_signals(uuid)','EXECUTE'
+  )
   AND NOT has_function_privilege(
     :'worker_user','askdata.load_quota_usage_snapshots(uuid,uuid,uuid,timestamptz)','EXECUTE'
   )
@@ -1621,7 +1654,7 @@ SELECT (
 \if :askdata_runtime_privileges_secure
 \else
   \echo 'askdata runtime privileges are unsafe'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT (
@@ -1636,7 +1669,10 @@ SELECT (
   AND NOT has_table_privilege(:'app_user','askdata.report_semantic_assets','INSERT')
   AND has_table_privilege(:'app_user','askdata.report_asset_certifications','INSERT')
   AND has_table_privilege(:'app_user','askdata.add_to_report_intents','INSERT,UPDATE')
-  AND has_table_privilege(:'app_user','askdata.add_to_report_outbox','INSERT')
+  AND NOT has_table_privilege(:'app_user','askdata.add_to_report_outbox','INSERT')
+  AND has_function_privilege(
+    :'app_user','askdata.enqueue_add_to_report_intent(uuid)','EXECUTE'
+  )
   AND NOT has_table_privilege(:'app_user','askdata.add_to_report_outbox','UPDATE')
   AND has_table_privilege(:'app_user','askdata.narrative_verification_failures','INSERT')
   AND NOT has_table_privilege(:'app_user','askdata.quotas','INSERT,UPDATE,DELETE')
@@ -1658,7 +1694,7 @@ SELECT (
 \if :askdata_late_module_dml_secure
 \else
   \echo 'AskData late-module runtime DML privileges are unsafe'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT (
@@ -1833,7 +1869,7 @@ SELECT (
 \if :askdata_sensitive_member_privileges_secure
 \else
   \echo 'askdata sensitive member privileges are unsafe'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 -- Exercise the SEC-003 exact-only boundary with real report_app calls. The
@@ -2226,7 +2262,7 @@ WHERE release_id=:'askdata_sensitive_draft_release_id'
 \if :askdata_sensitive_sensitivity_only_update_rejected
 \else
   \echo 'MEMBER release sensitivity-only update bypassed its source pin'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SET LOCAL ROLE :"app_user";
@@ -2249,7 +2285,7 @@ SELECT
 \if :askdata_sensitive_missing_and_unauthorized_are_indistinguishable
 \else
   \echo 'missing and unauthorized sensitive member lookups diverged'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT (
@@ -2277,7 +2313,7 @@ SELECT (
 \if :askdata_sensitive_unpinned_ambiguous_and_expired_fail_closed
 \else
   \echo 'an unpinned, ambiguous or expired member lookup did not fail closed'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT set_config(
@@ -2333,7 +2369,7 @@ SELECT (
 \if :askdata_sensitive_confidential_alias_action_ok
 \else
   \echo 'confidential canonical/alias or restricted action enforcement failed'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 RESET ROLE;
@@ -2369,7 +2405,7 @@ SELECT (
 \if :askdata_sensitive_active_role_can_use_restricted_action
 \else
   \echo 'active ROLE restricted-member action was not honored'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 RESET ROLE;
@@ -2396,7 +2432,7 @@ SELECT (
 \if :askdata_sensitive_graph_projection_target_listing_isolated
 \else
   \echo 'target-scoped graph projection tenant listing leaked another target'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT * FROM askdata.claim_release_projection(
@@ -2413,7 +2449,7 @@ SELECT (
 \if :askdata_sensitive_graph_projection_target_claim_isolated
 \else
   \echo 'target-scoped graph projection claim returned the wrong release or target'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT (
@@ -2430,7 +2466,7 @@ SELECT (
 \if :askdata_sensitive_graph_projection_heartbeat_is_lease_bound
 \else
   \echo 'graph projection heartbeat accepted a stale lease or rejected the live lease'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT (
@@ -2448,7 +2484,7 @@ FROM askdata.load_release_graph_projection(
 \if :askdata_sensitive_graph_projection_snapshot_is_complete_and_label_free
 \else
   \echo 'lease-bound graph projection snapshot was incomplete or exposed the wrong shape'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT set_config(
@@ -2478,7 +2514,7 @@ SELECT askdata.complete_release_projection(
 \if :askdata_sensitive_graph_projection_completed
 \else
   \echo 'graph projection completion rejected the current target lease'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 RESET ROLE;
@@ -2499,7 +2535,7 @@ SELECT (
 \if :askdata_sensitive_superseded_release_remains_replayable
 \else
   \echo 'a pinned SUPERSEDED release is not replayable'
-  \quit 1
+  SELECT 1/0;
 \endif
 RESET ROLE;
 ROLLBACK;
@@ -2511,7 +2547,7 @@ SELECT NOT EXISTS(
 \if :askdata_sensitive_fixture_rolled_back
 \else
   \echo 'sensitive member verification fixture left persistent data'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 BEGIN;
@@ -2573,7 +2609,7 @@ WHERE id IN (:'askdata_ctx_domain_id',:'askdata_other_id')
 \if :askdata_domain_rls_isolated
 \else
   \echo 'askdata domain RLS isolation failed'
-  \quit 1
+  SELECT 1/0;
 \endif
 ROLLBACK;
 
@@ -2838,7 +2874,7 @@ WHERE question_run_id=:'askdata_runtime_run_id'
 \if :askdata_tool_call_retry_idempotent
 \else
   \echo 'askdata tool_call_id retry is not idempotent'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 INSERT INTO askdata.question_run_events(
@@ -2969,7 +3005,7 @@ FROM askdata.question_runs WHERE id=:'askdata_runtime_run_id'
 \if :askdata_question_terminal_shape_valid
 \else
   \echo 'askdata terminal question shape is invalid'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 INSERT INTO askdata.query_feedback(
@@ -3000,7 +3036,7 @@ FROM askdata.query_feedback WHERE id=:'askdata_feedback_feedback_id'
 \if :askdata_feedback_update_valid
 \else
   \echo 'askdata feedback optimistic update or hash stamping failed'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 DO $$
@@ -3070,7 +3106,7 @@ SELECT (
 \if :askdata_case_content_author_stamped
 \else
   \echo 'evaluation case current-content author was not database-stamped'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 DO $$
@@ -3117,7 +3153,7 @@ RETURNING (content_updated_by=:'askdata_runtime_reviewer_one_id')
 \if :askdata_eval_content_author_rotated
 \else
   \echo 'evaluation case content edit did not rotate the current-content author'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 DO $$
@@ -3169,7 +3205,7 @@ RETURNING content_hash AS case_content_hash,
 \if :askdata_eval_stale_review_invalidated
 \else
   \echo 'evaluation case edit did not invalidate the stale review hash'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT set_config('app.user_id',:'askdata_runtime_reviewer_one_id',true);
@@ -3184,7 +3220,7 @@ FROM askdata.evaluation_cases WHERE id=:'askdata_eval_case_id'
 \if :askdata_current_review_restored
 \else
   \echo 'evaluation review refresh did not bind the current case hash'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 DO $$
@@ -3223,7 +3259,7 @@ FROM askdata.evaluation_cases WHERE id=:'askdata_eval_case_id'
 \if :askdata_two_current_reviews_recorded
 \else
   \echo 'evaluation case did not record exactly two current approvals'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 RESET ROLE;
@@ -3282,7 +3318,7 @@ SELECT askdata.seal_evaluation_set(
 \if :askdata_eval_seal_succeeded
 \else
   \echo 'evaluation set sealing did not report success'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT sealed_content_hash AS set_content_hash,
@@ -3295,7 +3331,7 @@ FROM askdata.evaluation_sets WHERE id=:'askdata_eval_set_id'
 \if :askdata_eval_shape_valid
 \else
   \echo 'sealed evaluation set hash or counts are invalid'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT (
@@ -3308,7 +3344,7 @@ SELECT (
 \if :askdata_sealed_gold_hidden_from_user_mode
 \else
   \echo 'sealed evaluation gold content is visible in USER mode'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 RESET ROLE;
@@ -3346,7 +3382,7 @@ SELECT (
 \if :askdata_worker_can_read_sealed_gold
 \else
   \echo 'evaluation worker cannot read sealed gold content in SYSTEM mode'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 INSERT INTO askdata.evaluation_runs(
@@ -3589,7 +3625,7 @@ SELECT (
 \if :askdata_question_actor_rls_isolated
 \else
   \echo 'askdata question actor RLS isolation failed'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 RESET ROLE;
@@ -3880,7 +3916,7 @@ SELECT (
 \if :report_v2_template_guard_privileges_ok
 \else
   \echo 'Report V2 template guard privileges failed'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 DO $$
@@ -4022,7 +4058,7 @@ SELECT (
 \if :report_version_release_reference_privileges_ok
 \else
   \echo 'Report version release-reference privilege boundary failed'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 DO $$
@@ -4164,7 +4200,7 @@ SELECT (
 \if :report_ai_trigger_privileges_ok
 \else
   \echo 'Report AI trigger privilege boundary failed'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 DO $$
@@ -4278,7 +4314,7 @@ SELECT (
 \if :report_share_trigger_privileges_ok
 \else
   \echo 'Report share trigger privilege boundary failed'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT (
@@ -4293,7 +4329,7 @@ SELECT (
 \if :report_v2_helper_privileges_ok
 \else
   \echo 'Report V2 helper privileges failed'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 DO $$
@@ -4410,7 +4446,7 @@ SELECT (
 \if :dataset_tag_policy_helpers_executable
 \else
   \echo 'dataset tag policy helper runtime privileges are missing'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 DO $$
@@ -4517,7 +4553,7 @@ SELECT (
 \if :report_runtime_worker_privileges_secure
 \else
   \echo 'report runtime or report-asset worker privileges are unsafe'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 DO $$
@@ -4567,7 +4603,7 @@ SELECT (
 \if :semantic_seed_privileges_secure
 \else
   \echo 'semantic seed table privileges are unsafe'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 -- Verify the post-280 cross-context backend: decision facts, unified inbox,
@@ -4755,7 +4791,7 @@ SELECT (
 \if :backend_platform_privileges_secure
 \else
   \echo 'post-280 platform backend privileges are unsafe'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT (
@@ -4782,7 +4818,7 @@ SELECT (
 \if :decision_privileges_secure
 \else
   \echo 'decision least-privilege boundary is unsafe'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT 'retained platform and askdata permission/schema checks passed' AS result;

@@ -242,6 +242,8 @@ func templateColumnDescription(name string, enum bool) string {
 		return "本租户 ACTIVE 用户邮箱"
 	case "targetCode":
 		return "通常填写 References 中的稳定 code；termType=MEMBER 时填写 dimensionCode::canonicalValue"
+	case "expectedResultHint":
+		return `JSON 合同；DIRECT 必填 expectedIrHash/expectedResultHash，可含 expectedPathHash、priority、securityExpectation、complexity、ambiguity`
 	}
 	if strings.HasSuffix(name, "Code") || strings.HasSuffix(name, "Codes") {
 		return "使用本模板 References Sheet 中的稳定 code，不填写 UUID"

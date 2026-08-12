@@ -174,6 +174,7 @@ func lockCertificationCandidate(ctx context.Context, tx pgx.Tx, candidate certif
 		"metric_dimension_versions": {}, "dimensions": {}, "dimension_members": {},
 		"hierarchies": {}, "relationships": {}, "business_term_versions": {},
 		"certified_example_versions": {}, "kpi_bundle_versions": {}, "evaluation_case_versions": {},
+		"time_contract_versions": {},
 	}
 	if _, exists := allowed[candidate.Table]; !exists {
 		return ErrBulkCertificationInvalid
@@ -204,6 +205,8 @@ func orderCertificationCandidates(
 		byID[candidate.VersionID] = candidate
 	}
 	edges, err := tx.Query(ctx, `WITH edges(dependent,dependency) AS (
+		SELECT id::text,time_contract_version_id::text FROM askdata.semantic_models WHERE id::text=ANY($1) AND time_contract_version_id IS NOT NULL
+		UNION ALL
 		SELECT id::text,semantic_model_version_id::text FROM askdata.measures WHERE id::text=ANY($1)
 		UNION ALL SELECT id::text,semantic_model_version_id::text FROM askdata.metric_versions WHERE id::text=ANY($1)
 		UNION ALL SELECT metric_version_id::text,measure_version_id::text FROM askdata.metric_version_measures WHERE metric_version_id::text=ANY($1)
@@ -292,6 +295,7 @@ func resolveCertificationCandidate(
 		UNION ALL SELECT id::text,member_id::text,'MEMBER','dimension_members' FROM askdata.dimension_members WHERE id=$1 AND domain_id=$2 AND status='DRAFT'
 		UNION ALL SELECT id::text,hierarchy_id::text,'HIERARCHY','hierarchies' FROM askdata.hierarchies WHERE id=$1 AND domain_id=$2 AND status='DRAFT'
 		UNION ALL SELECT id::text,relationship_id::text,'RELATIONSHIP','relationships' FROM askdata.relationships WHERE id=$1 AND domain_id=$2 AND status='DRAFT'
+		UNION ALL SELECT id::text,time_contract_id::text,'TIME_CONTRACT','time_contract_versions' FROM askdata.time_contract_versions WHERE id=$1 AND domain_id=$2 AND status='DRAFT'
 		UNION ALL SELECT id::text,business_term_id::text,'BUSINESS_TERM','business_term_versions' FROM askdata.business_term_versions WHERE id=$1 AND domain_id=$2 AND status='DRAFT'
 		UNION ALL SELECT id::text,certified_example_id::text,'CERTIFIED_EXAMPLE','certified_example_versions' FROM askdata.certified_example_versions WHERE id=$1 AND domain_id=$2 AND status='DRAFT'
 		UNION ALL SELECT id::text,kpi_bundle_id::text,'KPI_BUNDLE','kpi_bundle_versions' FROM askdata.kpi_bundle_versions WHERE id=$1 AND domain_id=$2 AND status='DRAFT'
@@ -324,6 +328,7 @@ func updateCertificationStatus(ctx context.Context, tx pgx.Tx, candidate certifi
 		"metric_dimension_versions": {}, "dimensions": {}, "dimension_members": {},
 		"hierarchies": {}, "relationships": {}, "business_term_versions": {},
 		"certified_example_versions": {}, "kpi_bundle_versions": {}, "evaluation_case_versions": {},
+		"time_contract_versions": {},
 	}
 	if _, ok := allowed[candidate.Table]; !ok {
 		return ErrBulkCertificationInvalid

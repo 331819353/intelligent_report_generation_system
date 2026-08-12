@@ -209,6 +209,17 @@ func (dimension Dimension) Validate() error {
 	return validation.result()
 }
 
+func (compatibility MetricDimension) Validate() error {
+	validation := validator{}
+	validateVersionIdentity(&validation, compatibility.VersionIdentity, "")
+	validateUUID(&validation, "metricVersionId", compatibility.MetricVersionID, true)
+	validateUUID(&validation, "dimensionVersionId", compatibility.DimensionVersionID, true)
+	if !oneOf(compatibility.Role, "FILTER", "GROUP_BY", "ORDER_BY", "BREAKDOWN") {
+		validation.add(validationCodeInvalidEnum, "role", "unsupported metric-dimension role")
+	}
+	return validation.result()
+}
+
 func (relationship Relationship) Validate() error {
 	validation := validator{}
 	validateVersionIdentity(&validation, relationship.VersionIdentity, "")

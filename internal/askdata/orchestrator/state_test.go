@@ -25,11 +25,11 @@ func TestCanTransitionMatchesGovernedLifecycle(t *testing.T) {
 		StateRetrieving:            {StateRetrieving: true, StateBinding: true, StateClarificationRequired: true, StateBlocked: true},
 		StateBinding:               {StateBinding: true, StateGraphValidating: true, StateClarificationRequired: true, StateOutOfScope: true, StateBlocked: true},
 		StateGraphValidating:       {StateGraphValidating: true, StateIRReady: true, StateClarificationRequired: true, StateBlocked: true},
-		StateIRReady:               {StateIRReady: true, StatePlanValidating: true, StateBlocked: true},
+		StateIRReady:               {StateIRReady: true, StatePlanValidating: true, StateClarificationRequired: true, StateBlocked: true},
 		StatePlanValidating:        {StatePlanValidating: true, StateExecuting: true, StateBinding: true, StateClarificationRequired: true, StateBlocked: true},
 		StateExecuting:             {StateExecuting: true, StateResultVerifying: true, StateBlocked: true},
 		StateResultVerifying:       {StateResultVerifying: true, StateAnswerVerifying: true, StateBinding: true, StateClarificationRequired: true, StateBlocked: true},
-		StateAnswerVerifying:       {StateAnswerVerifying: true, StateAnswered: true, StateBlocked: true},
+		StateAnswerVerifying:       {StateAnswerVerifying: true, StateAnswered: true, StateClarificationRequired: true, StateBlocked: true},
 		StateClarificationRequired: {StateClarificationExpired: true},
 		StateClarificationExpired:  {}, StateOutOfScope: {}, StateAnswered: {}, StateBlocked: {},
 	}

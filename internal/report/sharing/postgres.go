@@ -81,6 +81,42 @@ func (repository *PostgresRepository) FindByTokenHash(ctx context.Context, ident
 	return result, err
 }
 
+func (repository *PostgresRepository) ListCreated(ctx context.Context, identity store.Identity, reportID askdata.ID, limit int) ([]Record, error) {
+	ctx, err := repository.requestContext(ctx, identity, reportID)
+	if err != nil || limit < 1 || limit > 200 {
+		return nil, errors.Join(err, errors.New("invalid share list request"))
+	}
+	items := []Record{}
+	err = database.WithTenantTx(ctx, repository.pool, string(identity.TenantID), func(tx pgx.Tx) error {
+		rows, queryErr := tx.Query(ctx, `SELECT id::text,tenant_id::text,report_id::text,
+			COALESCE(report_version_id::text,''),share_type,principal_id::text,
+			COALESCE(filter_snapshot_json,'null'::jsonb),created_by::text,created_at,expires_at,expired_at,revoked_at
+			FROM platform.report_shares WHERE tenant_id=$1 AND report_id=$2 AND created_by=$3
+			ORDER BY created_at DESC,id DESC LIMIT $4`, identity.TenantID, reportID, identity.ActorID, limit)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item Record
+			var snapshot []byte
+			if scanErr := rows.Scan(&item.ID, &item.TenantID, &item.ReportID, &item.ReportVersionID,
+				&item.Type, &item.PrincipalID, &snapshot, &item.CreatedBy, &item.CreatedAt,
+				&item.ExpiresAt, &item.ExpiredAt, &item.RevokedAt); scanErr != nil {
+				return scanErr
+			}
+			if string(snapshot) != "null" {
+				if decodeErr := json.Unmarshal(snapshot, &item.FilterSnapshot); decodeErr != nil {
+					return decodeErr
+				}
+			}
+			items = append(items, item)
+		}
+		return rows.Err()
+	})
+	return items, err
+}
+
 func (repository *PostgresRepository) Revoke(ctx context.Context, identity store.Identity, id askdata.ID, now time.Time) error {
 	var err error
 	ctx, err = repository.requestContext(ctx, identity, id)

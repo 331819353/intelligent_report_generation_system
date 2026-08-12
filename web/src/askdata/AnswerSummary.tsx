@@ -31,10 +31,11 @@ export function AnswerSummary({ answer, onRetryNarrative }: AnswerSummaryProps) 
   const snapshot = answerSummarySnapshot(answer)
 
   if (!answer.narrativeDegraded && answer.narrative) {
+	const findings = answer.narrative.findings ?? []
     return <section className="ask-answer-summary is-verified" aria-labelledby="ask-answer-summary-title">
       <header><ShieldCheck size={14} weight="fill" aria-hidden="true" /><strong id="ask-answer-summary-title">{snapshot.headline}</strong></header>
       <p>{answer.narrative.summary}</p>
-      {answer.narrative.findings.length > 0 && <ul>{answer.narrative.findings.map(finding => <li key={finding}>{finding}</li>)}</ul>}
+		{findings.length > 0 && <ul>{findings.map(finding => <li key={finding}>{finding}</li>)}</ul>}
     </section>
   }
 

@@ -24,6 +24,84 @@ func NewPinnedArtifactRehydrator(store ContractStore) (*PinnedArtifactRehydrator
 	return &PinnedArtifactRehydrator{store: store}, nil
 }
 
+// RehydrateSnapshot rebuilds the executable query artifact from the compact,
+// audit-safe snapshot persisted for AskData -> Report writeback. The snapshot
+// intentionally omits physical DSL documents and the original actor scope;
+// those values are resolved again from the pinned semantic release and the
+// current viewer's scope. The fixed hashes and source contracts remain the
+// immutable proof that the rebuilt plan has not drifted.
+func (rehydrator *PinnedArtifactRehydrator) RehydrateSnapshot(
+	ctx context.Context,
+	scope askdata.PolicyScope,
+	semanticIR ir.SemanticIR,
+	fixedPlanHash askdata.ContentHash,
+	snapshot ReportQuerySnapshot,
+) (QueryArtifact, error) {
+	if rehydrator == nil || rehydrator.store == nil || scope.Validate() != nil ||
+		semanticIR.Validate() != nil || fixedPlanHash.Validate() != nil ||
+		snapshot.Validate() != nil || snapshot.PlanHash != fixedPlanHash {
+		return QueryArtifact{}, fmt.Errorf("%w: persisted report snapshot contract", ErrInvalidQueryPlan)
+	}
+	normalizedIR, _, irHash, err := ir.Canonicalize(semanticIR)
+	if err != nil || normalizedIR.SemanticReleaseID != scope.Release.ReleaseID ||
+		normalizedIR.SemanticContentHash != scope.Release.ContentHash ||
+		snapshot.SemanticIRHash != irHash ||
+		(normalizedIR.TimeRange == nil) != (snapshot.ResolvedTimeSpec == nil) {
+		return QueryArtifact{}, fmt.Errorf("%w: pinned report snapshot identity", ErrInvalidQueryPlan)
+	}
+	if err := validateResolveAccessContext(ctx, scope, normalizedIR.DomainID); err != nil {
+		return QueryArtifact{}, err
+	}
+	lookup, err := pinnedContractLookup(scope, normalizedIR, irHash)
+	if err != nil {
+		return QueryArtifact{}, err
+	}
+	contractSnapshot, err := rehydrator.store.LoadContractSnapshot(ctx, lookup)
+	if err != nil {
+		return QueryArtifact{}, err
+	}
+	contractSnapshot, err = normalizeSnapshot(contractSnapshot)
+	if err != nil {
+		return QueryArtifact{}, fmt.Errorf("%w: normalize pinned snapshot", ErrContractUnavailable)
+	}
+	if err := validateSnapshot(lookup, nil, contractSnapshot); err != nil {
+		return QueryArtifact{}, err
+	}
+	buildHash := askdata.HashBytes([]byte("report-query-snapshot-build-v1\x00" + string(irHash)))
+	resolution, err := finalizeResolution(Resolution{
+		Version: ResolutionVersion, Scope: scope, DomainID: normalizedIR.DomainID,
+		IRHash: irHash, BuildArtifactHash: buildHash,
+		GraphPlanHash:          snapshot.GraphPlanHash,
+		TimeDimensionVersionID: cloneID(lookup.TimeDimensionVersionID),
+		MemberBindings:         append([]MemberBinding(nil), lookup.MemberBindings...),
+		Model:                  contractSnapshot.Model,
+		Metrics:                contractSnapshot.Metrics,
+		Dimensions:             contractSnapshot.Dimensions,
+		Members:                contractSnapshot.Members,
+		Relationships:          []RelationshipContract{},
+		memberParameterValues:  cloneMemberParameterValues(contractSnapshot.memberParameterValues),
+	})
+	if err != nil {
+		return QueryArtifact{}, err
+	}
+	live, err := compileResolvedArtifact(normalizedIR, resolution, snapshot.ResolvedTimeSpec)
+	if err != nil {
+		return QueryArtifact{}, err
+	}
+	if live.GraphPlanHash != snapshot.GraphPlanHash ||
+		!reflect.DeepEqual(live.MetricAggregations, snapshot.MetricAggregations) ||
+		!reflect.DeepEqual(live.ResolvedTimeSpec, snapshot.ResolvedTimeSpec) ||
+		len(live.Plans) != len(snapshot.Sources) {
+		return QueryArtifact{}, fmt.Errorf("%w: persisted report snapshot shape drift", ErrInvalidQueryPlan)
+	}
+	for index, source := range snapshot.Sources {
+		if live.Plans[index].Role != source.Role || live.Plans[index].Source.DatasetVersionID != source.DatasetVersionID {
+			return QueryArtifact{}, fmt.Errorf("%w: persisted report snapshot source drift", ErrInvalidQueryPlan)
+		}
+	}
+	return live, nil
+}
+
 func (rehydrator *PinnedArtifactRehydrator) Rehydrate(
 	ctx context.Context,
 	scope askdata.PolicyScope,

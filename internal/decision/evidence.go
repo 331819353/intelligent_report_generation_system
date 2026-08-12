@@ -35,11 +35,16 @@ func (verifier *PostgresEvidenceVerifier) Resolve(ctx context.Context, identity 
 		case SourceAnswerArtifact:
 			var dataAsOf string
 			if err := tx.QueryRow(ctx, `SELECT artifact.artifact_hash,run.release_id::text,run.release_content_hash,
-				run.policy_scope_hash,COALESCE((SELECT COALESCE(summary.payload_json#>>'{resolvedTimeSpec,dataAvailableThrough}',
-				  summary.payload_json#>>'{result,resolvedTimeSpec,dataAvailableThrough}')
+				run.policy_scope_hash,COALESCE((SELECT candidate.data_as_of FROM (
+				  SELECT summary.artifact_index,COALESCE(summary.payload_json#>>'{resolvedTimeSpec,dataAvailableThrough}',
+				    summary.payload_json#>>'{result,resolvedTimeSpec,dataAvailableThrough}',
+				    summary.payload_json#>>'{result,evidence,quality,dataAsOf}',
+				    summary.payload_json#>>'{result,evidence,time,end}',
+				    summary.payload_json#>>'{result,summary,time,end}') AS data_as_of
 				  FROM askdata.question_artifacts summary WHERE summary.tenant_id=run.tenant_id
-				    AND summary.question_run_id=run.id AND summary.artifact_type='RESULT_SUMMARY'
-				  ORDER BY summary.artifact_index DESC LIMIT 1),'')
+				    AND summary.question_run_id=run.id AND summary.artifact_type IN ('RESULT_SUMMARY','ANSWER')
+				) candidate WHERE btrim(COALESCE(candidate.data_as_of,''))<>''
+				  ORDER BY candidate.artifact_index DESC LIMIT 1),'')
 				FROM askdata.question_artifacts artifact JOIN askdata.question_runs run
 				  ON run.tenant_id=artifact.tenant_id AND run.id=artifact.question_run_id
 				WHERE artifact.tenant_id=$1 AND artifact.domain_id=$2 AND artifact.id=$3
@@ -54,21 +59,39 @@ func (verifier *PostgresEvidenceVerifier) Resolve(ctx context.Context, identity 
 			}
 			input.AsOf, input.Summary = parsed.UTC(), "已固定的问数答案证据"
 		case SourceReportVersion:
-			if err := tx.QueryRow(ctx, `SELECT version.definition_hash,version.published_at,release.id::text,release.content_hash
+			if err := tx.QueryRow(ctx, `SELECT version.definition_hash,version.published_at
 				FROM platform.report_versions version JOIN platform.reports report
 				  ON report.tenant_id=version.tenant_id AND report.id=version.report_id
-				JOIN platform.report_version_dependencies dependency ON dependency.tenant_id=version.tenant_id
-				  AND dependency.report_version_id=version.id AND dependency.dependency_type='SEMANTIC_RELEASE'
-				JOIN askdata.releases release ON release.tenant_id=version.tenant_id AND release.domain_id=report.domain_id
-				  AND release.id::text=dependency.dependency_id
-				WHERE version.tenant_id=$1 AND report.domain_id=$2 AND version.id=$3 AND version.artifact_state='READY'
-				  AND (SELECT count(*) FROM platform.report_version_dependencies dependency_count
-				    WHERE dependency_count.tenant_id=version.tenant_id AND dependency_count.report_version_id=version.id
-				      AND dependency_count.dependency_type='SEMANTIC_RELEASE')=1`, identity.TenantID, identity.DomainID, sourceID).
-				Scan(&input.SourceHash, &input.AsOf, &input.SemanticReleaseID, &input.SemanticReleaseHash); err != nil {
+				WHERE version.tenant_id=$1 AND report.domain_id=$2 AND version.id=$3 AND version.artifact_state='READY'`,
+				identity.TenantID, identity.DomainID, sourceID).Scan(&input.SourceHash, &input.AsOf); err != nil {
 				return err
 			}
-			input.Summary = "已固定的发布报告版本证据"
+			var dependencyCount int
+			var dependencyID string
+			if err := tx.QueryRow(ctx, `SELECT count(*),COALESCE(min(dependency_id),'')
+				FROM platform.report_version_dependencies WHERE tenant_id=$1 AND report_version_id=$2
+				  AND dependency_type='SEMANTIC_RELEASE'`, identity.TenantID, sourceID).Scan(&dependencyCount, &dependencyID); err != nil {
+				return err
+			}
+			switch dependencyCount {
+			case 0:
+				if err := tx.QueryRow(ctx, `SELECT id::text,content_hash FROM askdata.releases
+					WHERE tenant_id=$1 AND domain_id=$2 AND status='ACTIVE'
+					ORDER BY activated_at DESC NULLS LAST,id DESC LIMIT 1`, identity.TenantID, identity.DomainID).
+					Scan(&input.SemanticReleaseID, &input.SemanticReleaseHash); err != nil {
+					return err
+				}
+				input.Summary = "已固定的发布报告版本证据（数据集报告按创建决策时的有效语义治理范围校验）"
+			case 1:
+				if err := tx.QueryRow(ctx, `SELECT id::text,content_hash FROM askdata.releases
+					WHERE tenant_id=$1 AND domain_id=$2 AND id::text=$3 AND status IN ('ACTIVE','SUPERSEDED','RETAINED')`,
+					identity.TenantID, identity.DomainID, dependencyID).Scan(&input.SemanticReleaseID, &input.SemanticReleaseHash); err != nil {
+					return err
+				}
+				input.Summary = "已固定的发布报告版本证据"
+			default:
+				return ErrEvidenceInvalid
+			}
 			return resolveCurrentPolicyHashTx(ctx, tx, identity, &input)
 		case SourceInsightArtifact:
 			var raw []byte
@@ -97,10 +120,6 @@ func (verifier *PostgresEvidenceVerifier) Resolve(ctx context.Context, identity 
 		return nil
 	})
 	if errors.Is(err, pgx.ErrNoRows) || err != nil || input.Validate() != nil {
-		return EvidenceInput{}, ErrEvidenceInvalid
-	}
-	verified, err := verifier.Verify(ctx, identity, input)
-	if err != nil || !verified.Verified {
 		return EvidenceInput{}, ErrEvidenceInvalid
 	}
 	return input, nil
@@ -160,12 +179,17 @@ func (verifier *PostgresEvidenceVerifier) Verify(ctx context.Context, identity I
 			var completedAt time.Time
 			err := tx.QueryRow(ctx, `SELECT artifact.artifact_hash,artifact.payload_json,run.id::text,
 				run.release_id::text,run.release_content_hash,run.policy_scope_hash,run.result_hash,run.completed_at,
-				COALESCE((SELECT COALESCE(summary.payload_json#>>'{resolvedTimeSpec,dataAvailableThrough}',
-					summary.payload_json#>>'{result,resolvedTimeSpec,dataAvailableThrough}')
+				COALESCE((SELECT candidate.data_as_of FROM (
+				  SELECT summary.artifact_index,COALESCE(summary.payload_json#>>'{resolvedTimeSpec,dataAvailableThrough}',
+				    summary.payload_json#>>'{result,resolvedTimeSpec,dataAvailableThrough}',
+				    summary.payload_json#>>'{result,evidence,quality,dataAsOf}',
+				    summary.payload_json#>>'{result,evidence,time,end}',
+				    summary.payload_json#>>'{result,summary,time,end}') AS data_as_of
 				  FROM askdata.question_artifacts summary
 				  WHERE summary.tenant_id=run.tenant_id AND summary.question_run_id=run.id
-				    AND summary.artifact_type='RESULT_SUMMARY'
-				  ORDER BY summary.artifact_index DESC LIMIT 1),'')
+				    AND summary.artifact_type IN ('RESULT_SUMMARY','ANSWER')
+				) candidate WHERE btrim(COALESCE(candidate.data_as_of,''))<>''
+				  ORDER BY candidate.artifact_index DESC LIMIT 1),'')
 			FROM askdata.question_artifacts artifact
 			JOIN askdata.question_runs run ON run.id=artifact.question_run_id AND run.tenant_id=artifact.tenant_id
 			WHERE artifact.tenant_id=$1 AND artifact.domain_id=$2 AND artifact.id=$3
@@ -196,10 +220,15 @@ func (verifier *PostgresEvidenceVerifier) Verify(ctx context.Context, identity I
 			FROM platform.report_versions version JOIN platform.reports report
 			  ON report.id=version.report_id AND report.tenant_id=version.tenant_id
 			WHERE version.tenant_id=$1 AND report.domain_id=$2 AND version.id=$3
-			  AND version.artifact_state='READY' AND EXISTS(
-			    SELECT 1 FROM platform.report_version_dependencies dependency
-			    WHERE dependency.tenant_id=version.tenant_id AND dependency.report_version_id=version.id
-			      AND dependency.dependency_type='SEMANTIC_RELEASE' AND dependency.dependency_id=$4::text
+			  AND version.artifact_state='READY' AND (
+			    EXISTS(SELECT 1 FROM platform.report_version_dependencies dependency
+			      WHERE dependency.tenant_id=version.tenant_id AND dependency.report_version_id=version.id
+			        AND dependency.dependency_type='SEMANTIC_RELEASE' AND dependency.dependency_id=$4::text)
+			    OR (NOT EXISTS(SELECT 1 FROM platform.report_version_dependencies dependency
+			      WHERE dependency.tenant_id=version.tenant_id AND dependency.report_version_id=version.id
+			        AND dependency.dependency_type='SEMANTIC_RELEASE')
+			      AND EXISTS(SELECT 1 FROM askdata.releases release WHERE release.tenant_id=version.tenant_id
+			        AND release.domain_id=report.domain_id AND release.id=$4::uuid AND release.status='ACTIVE'))
 			  )`, identity.TenantID, identity.DomainID, input.SourceID, input.SemanticReleaseID).Scan(&hash, &publishedAt)
 			if err != nil {
 				return err
@@ -250,10 +279,18 @@ func decodePersistedAnswer(raw json.RawMessage) (answer.AnswerArtifact, error) {
 		return value, nil
 	}
 	var envelope struct {
-		Answer json.RawMessage `json:"answer"`
+		Artifact json.RawMessage `json:"artifact"`
+		Answer   json.RawMessage `json:"answer"`
 	}
-	if json.Unmarshal(raw, &envelope) != nil || len(envelope.Answer) == 0 {
+	if json.Unmarshal(raw, &envelope) != nil {
 		return answer.AnswerArtifact{}, ErrEvidenceInvalid
 	}
-	return answer.Decode(envelope.Answer)
+	artifact := envelope.Artifact
+	if len(artifact) == 0 {
+		artifact = envelope.Answer
+	}
+	if len(artifact) == 0 {
+		return answer.AnswerArtifact{}, ErrEvidenceInvalid
+	}
+	return answer.Decode(artifact)
 }

@@ -37,6 +37,7 @@ const accessLabels: Record<DomainCatalogItem['accessStatus'], string> = {
   CANCELLED: '可申请',
   MEMBER: '已加入',
   DOMAIN_ADMIN: '已加入',
+  PLATFORM_ADMIN: '可进入',
 }
 
 const applicationLabels: Record<DomainApplication['status'], string> = {
@@ -46,7 +47,7 @@ const applicationLabels: Record<DomainApplication['status'], string> = {
   CANCELLED: '已撤回',
 }
 
-const joinedStatuses = new Set<DomainCatalogItem['accessStatus']>(['MEMBER', 'DOMAIN_ADMIN'])
+const joinedStatuses = new Set<DomainCatalogItem['accessStatus']>(['MEMBER', 'DOMAIN_ADMIN', 'PLATFORM_ADMIN'])
 const applyStatuses = new Set<DomainCatalogItem['accessStatus']>(['AVAILABLE', 'REJECTED', 'CANCELLED'])
 
 const snapshotAdministrator = {
@@ -138,6 +139,7 @@ function formatDate(value: string) {
 function domainRole(domain: DomainCatalogItem, snapshot: boolean) {
   if (snapshot && snapshotRoleLabels[domain.code]) return snapshotRoleLabels[domain.code]
   if (domain.accessStatus === 'DOMAIN_ADMIN') return '领域管理员'
+  if (domain.accessStatus === 'PLATFORM_ADMIN') return '平台管理员'
   if (domain.accessStatus === 'MEMBER') return '领域成员'
   return '—'
 }
@@ -380,7 +382,7 @@ export function DomainAccessPage() {
                         ? <AppButton variant="primary" size="small" type="button" disabled={busy} onClick={event => { event.stopPropagation(); void enter(domain) }}>进入领域</AppButton>
                         : pending
                           ? <AppButton plain size="small" type="button" onClick={event => { event.stopPropagation(); chooseView('APPLICATIONS') }}>查看进度</AppButton>
-                          : <AppButton plain size="small" type="button" onClick={event => { event.stopPropagation(); setSelected(domain) }}>申请加入</AppButton>}
+                          : <AppButton plain size="small" type="button" onClick={event => { event.stopPropagation(); openApplication(domain) }}>申请加入</AppButton>}
                     </div>
                   </article>
                 })}

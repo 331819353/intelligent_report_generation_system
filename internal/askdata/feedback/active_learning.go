@@ -275,7 +275,7 @@ func (repository *PostgresRepository) ReviewCandidate(ctx context.Context, ident
 	var result Candidate
 	err := database.WithTenantTx(ctx, repository.pool, string(identity.TenantID), func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx, `UPDATE askdata.active_learning_candidates SET review_status=$1,
-			rejected_at=CASE WHEN $1='REJECTED' THEN $2 ELSE NULL END,reviewed_by=$3,reviewed_at=$2,updated_at=$2
+			rejected_at=CASE WHEN $1::text='REJECTED' THEN $2::timestamptz ELSE NULL::timestamptz END,reviewed_by=$3,reviewed_at=$2,updated_at=$2
 			WHERE id=$4 AND tenant_id=$5 AND domain_id=$6 AND review_status='PENDING'
 			  AND (platform.user_is_domain_administrator(domain_id) OR platform.user_is_platform_administrator())
 			RETURNING id::text,tenant_id::text,domain_id::text,task_type,candidate_type,candidate_state,
@@ -299,10 +299,13 @@ func scanCandidate(row candidateScanner) (Candidate, error) {
 	err := row.Scan(&result.ID, &result.TenantID, &result.DomainID, &result.Task, &result.Type,
 		&result.State, &result.ReviewStatus, &result.KeyHash, &result.Summary, &result.Evidence,
 		&result.OccurrenceCount, &ids, &result.FirstSeenAt, &result.LastSeenAt)
+	if err != nil {
+		return Candidate{}, err
+	}
 	for _, id := range ids {
 		result.RepresentativeRunIDs = append(result.RepresentativeRunIDs, askdata.ID(id))
 	}
-	return result, err
+	return result, nil
 }
 
 type PostgresSignalSource struct{ pool *pgxpool.Pool }
@@ -311,20 +314,51 @@ func NewPostgresSignalSource(pool *pgxpool.Pool) *PostgresSignalSource {
 	return &PostgresSignalSource{pool: pool}
 }
 func (source *PostgresSignalSource) TenantDomains(ctx context.Context) ([][2]string, error) {
-	rows, err := source.pool.Query(ctx, `SELECT tenant_id::text,id::text FROM askdata.domains WHERE status='ACTIVE' ORDER BY tenant_id,id`)
+	if source == nil || source.pool == nil {
+		return nil, ErrInvalid
+	}
+	tenantRows, err := source.pool.Query(ctx, `SELECT id::text FROM platform.tenants
+		WHERE status='ACTIVE' AND deleted_at IS NULL ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	result := [][2]string{}
-	for rows.Next() {
-		var pair [2]string
-		if err := rows.Scan(&pair[0], &pair[1]); err != nil {
+	tenantIDs := []string{}
+	for tenantRows.Next() {
+		var tenantID string
+		if err := tenantRows.Scan(&tenantID); err != nil {
+			tenantRows.Close()
 			return nil, err
 		}
-		result = append(result, pair)
+		tenantIDs = append(tenantIDs, tenantID)
 	}
-	return result, rows.Err()
+	if err := tenantRows.Err(); err != nil {
+		tenantRows.Close()
+		return nil, err
+	}
+	tenantRows.Close()
+
+	result := [][2]string{}
+	for _, tenantID := range tenantIDs {
+		if err := database.WithTenantTx(ctx, source.pool, tenantID, func(tx pgx.Tx) error {
+			rows, err := tx.Query(ctx, `SELECT id::text FROM askdata.domains
+				WHERE tenant_id=$1 AND status='ACTIVE' ORDER BY id`, tenantID)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var domainID string
+				if err := rows.Scan(&domainID); err != nil {
+					return err
+				}
+				result = append(result, [2]string{tenantID, domainID})
+			}
+			return rows.Err()
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
 
 // Mine uses only hashes, stable IDs and governed counters. Even member-pair
@@ -373,7 +407,7 @@ func learningQuery(task LearningTask) string {
 	case TaskConfusableMetric:
 		return `SELECT encode(digest('metric-pair:'||artifact.artifact_hash,'sha256'),'hex'),jsonb_build_object('candidateSetHash',artifact.artifact_hash),jsonb_build_object('source','CANDIDATE_SET'),1,artifact.question_run_id::text,artifact.created_at,artifact.created_at FROM askdata.question_artifacts artifact WHERE artifact.domain_id=$1 AND artifact.artifact_type='CANDIDATE_SET' ORDER BY artifact.created_at DESC LIMIT $2`
 	case TaskConfusableMember:
-		return `SELECT encode(digest('member-pair:'||left_member.member_key_hash||':'||right_member.member_key_hash,'sha256'),'hex'),jsonb_build_object('leftMemberVersionId',left_member.id,'rightMemberVersionId',right_member.id,'memberKeyHash',left_member.member_key_hash),jsonb_build_object('dimensions',jsonb_build_array(left_member.dimension_version_id,right_member.dimension_version_id)),1,''::text,GREATEST(left_member.created_at,right_member.created_at),GREATEST(left_member.updated_at,right_member.updated_at) FROM askdata.dimension_members left_member JOIN askdata.dimension_members right_member ON right_member.tenant_id=left_member.tenant_id AND right_member.domain_id=left_member.domain_id AND right_member.member_key_hash=left_member.member_key_hash AND right_member.dimension_version_id<>left_member.dimension_version_id AND right_member.id>left_member.id WHERE left_member.domain_id=$1 AND left_member.status='CERTIFIED' AND right_member.status='CERTIFIED' ORDER BY left_member.member_key_hash LIMIT $2`
+		return `SELECT encode(digest('member-pair:'||left_member.member_key_hash||':'||right_member.member_key_hash,'sha256'),'hex'),jsonb_build_object('leftMemberVersionId',left_member.id,'rightMemberVersionId',right_member.id,'memberKeyHash',left_member.member_key_hash),jsonb_build_object('dimensions',jsonb_build_array(left_member.dimension_version_id,right_member.dimension_version_id)),1,''::text,GREATEST(left_member.created_at,right_member.created_at),GREATEST(left_member.updated_at,right_member.updated_at) FROM askdata.active_learning_member_signals($1) left_member JOIN askdata.active_learning_member_signals($1) right_member ON right_member.member_key_hash=left_member.member_key_hash AND right_member.dimension_version_id<>left_member.dimension_version_id AND right_member.id>left_member.id ORDER BY left_member.member_key_hash LIMIT $2`
 	case TaskRetrievalMiss:
 		return `SELECT encode(digest('retrieval-miss:'||ticket.id::text,'sha256'),'hex'),jsonb_build_object('ticketId',ticket.id,'issueType',ticket.issue_type),jsonb_build_object('suggestedStage',ticket.suggested_stage),1,ticket.question_run_id::text,ticket.created_at,ticket.updated_at FROM askdata.feedback_tickets ticket WHERE ticket.domain_id=$1 AND ticket.issue_type IN('METRIC','DIMENSION','MEMBER') AND ticket.suggested_stage IN('RETRIEVAL','BINDING') ORDER BY ticket.updated_at DESC LIMIT $2`
 	case TaskReportMetricCombination:
@@ -386,8 +420,8 @@ func learningQuery(task LearningTask) string {
 			  ARRAY(SELECT value FROM jsonb_array_elements_text(COALESCE(request.parsed_context_json->'metricIds','[]'::jsonb)) value ORDER BY value) AS metric_ids,
 			  ARRAY(SELECT value FROM jsonb_array_elements_text(COALESCE(request.parsed_context_json->'dimensionIds','[]'::jsonb)) value ORDER BY value) AS dimension_ids,
 			  upper(COALESCE(request.parsed_context_json#>>'{timeRange,grain}','')) AS grain
-			FROM platform.data_requests AS request
-			WHERE request.domain_id=$1 AND request.created_at>=now()-interval '30 days'
+			FROM askdata.active_learning_data_request_signals($1) AS request
+			WHERE request.created_at>=now()-interval '30 days'
 		),purpose_counts AS (
 			SELECT metric_ids,dimension_ids,grain,business_purpose,count(*) AS purpose_count
 			FROM recent GROUP BY metric_ids,dimension_ids,grain,business_purpose

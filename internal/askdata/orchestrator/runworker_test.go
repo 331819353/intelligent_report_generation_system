@@ -93,7 +93,7 @@ func TestWorkerNeverWritesToATerminalRun(t *testing.T) {
 		StateAnswered, StateBlocked, StateOutOfScope,
 		StateClarificationRequired, StateClarificationExpired,
 	} {
-		if err := worker.failClosedFrom(context.Background(), scope, claimed, 1, state,
+		if err := worker.failClosedFrom(context.Background(), scope, claimed, 1, state, BudgetUsage{},
 			"CODE", "reason"); err != nil {
 			t.Fatalf("fail-closed on terminal %s returned %v", state, err)
 		}
@@ -111,7 +111,7 @@ func TestAbnormalExitsAlwaysBlockWithAnAuditableReason(t *testing.T) {
 	claimed := testClaim()
 	scope := testScope(t)
 
-	if err := worker.failClosedFrom(context.Background(), scope, claimed, 4, StateBinding,
+	if err := worker.failClosedFrom(context.Background(), scope, claimed, 4, StateBinding, BudgetUsage{},
 		"QUESTION_PROTOCOL_VIOLATION", "unexpected action"); err != nil {
 		t.Fatalf("failClosedFrom() error = %v", err)
 	}
@@ -122,7 +122,8 @@ func TestAbnormalExitsAlwaysBlockWithAnAuditableReason(t *testing.T) {
 	if request.TargetState != StateBlocked {
 		t.Fatalf("abnormal exit targeted %s, want BLOCKED", request.TargetState)
 	}
-	if request.Event.Status != EventFailed || request.Event.Code != "QUESTION_PROTOCOL_VIOLATION" {
+	if request.Event.Stage != string(StateBlocked) || request.Event.Status != EventBlocked ||
+		request.Event.Code != "QUESTION_PROTOCOL_VIOLATION" {
 		t.Fatalf("abnormal exit lost its reason: %#v", request.Event)
 	}
 	if request.ExpectedVersion != 4 {
@@ -165,6 +166,88 @@ func TestTerminalStateCoversEveryTerminal(t *testing.T) {
 		if terminalState(state) {
 			t.Fatalf("%s must not be treated as terminal", state)
 		}
+	}
+}
+
+// applyingTransitioner is recordingTransitioner's honest counterpart: it runs
+// the real state machine instead of accepting whatever it is handed. Any
+// TransitionRequest the worker emits has to survive Apply, because that is
+// exactly what PostgresStore.Transition does with it.
+type applyingTransitioner struct {
+	run   Run
+	calls int
+}
+
+func (store *applyingTransitioner) Transition(
+	_ context.Context, request TransitionRequest,
+) (TransitionResult, error) {
+	store.calls++
+	var completion *CompletionRef
+	if request.Completion != nil {
+		// Mirror PostgresStore.Transition: it prepares the artifact, which is
+		// what derives the hash, and only then hands Apply a CompletionRef.
+		prepared, err := prepareCompletionArtifact(request, *request.Completion)
+		if err != nil {
+			return TransitionResult{}, err
+		}
+		completion = &CompletionRef{
+			Code:         request.Completion.Code,
+			ArtifactType: prepared.Type,
+			ArtifactHash: prepared.Hash,
+		}
+	}
+	next, err := Apply(store.run, Transition{
+		ExpectedVersion: request.ExpectedVersion, TargetState: request.TargetState,
+		Usage: request.Usage, Hashes: request.Hashes, Completion: completion,
+	})
+	if err != nil {
+		return TransitionResult{}, err
+	}
+	store.run = next
+	return TransitionResult{Run: next}, nil
+}
+
+func (store *applyingTransitioner) Resume(
+	_ context.Context, _ ResumeRequest,
+) (ReplaySnapshot, error) {
+	return ReplaySnapshot{Run: store.run}, nil
+}
+
+// Worker 的失败关闭路径必须能真正落库。
+//
+// failClosedFrom 把运行推向 BLOCKED，而 BLOCKED 是终态；Apply 要求任何终态
+// 迁移都带 Completion 工件。recordingTransitioner 不校验，所以既有用例看不到
+// 这一点——真实的 PostgresStore 会直接拒绝，运行卡在原状态。
+func TestFailClosedProducesATransitionTheStateMachineAccepts(t *testing.T) {
+	claimed := testClaim()
+	run := workerRun(t, claimed, StateUnderstanding)
+	runs := &applyingTransitioner{run: run}
+	worker := testWorker(t, runs)
+
+	err := worker.failClosedFrom(
+		context.Background(), testScope(t), claimed, run.RecordVersion,
+		StateUnderstanding, run.Usage, "QUESTION_LOOP_FAILED", "loop failed",
+	)
+	if err != nil {
+		t.Fatalf("fail-closed transition rejected by the state machine: %v", err)
+	}
+	if runs.run.State != StateBlocked {
+		t.Fatalf("run state = %s, want BLOCKED", runs.run.State)
+	}
+}
+
+func workerRun(t *testing.T, claimed LeasedRun, state State) Run {
+	t.Helper()
+	scope := testScope(t)
+	return Run{
+		ID: claimed.RunID, TenantID: claimed.TenantID, DomainID: claimed.DomainID,
+		ActorID: claimed.ActorID, TraceID: "77777777-7777-4777-8777-777777777777",
+		IdempotencyKeyHash: askdata.HashBytes([]byte("idempotency")),
+		QuestionHash:       askdata.HashBytes([]byte("question")),
+		PolicyScopeHash:    scope.PolicyHash,
+		Release:            scope.Release,
+		State:              state, Disposition: DispositionPending,
+		Limits: DefaultBudgetLimits(), RecordVersion: 1,
 	}
 }
 

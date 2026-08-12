@@ -10,7 +10,6 @@ import (
 
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/report"
-	"intelligent-report-generation-system/internal/report/store"
 )
 
 // HTTPPlanInput is the closed public request contract for report runtime
@@ -22,6 +21,10 @@ type HTTPPlanInput struct {
 	ExpandedSlotIDs []askdata.ID                   `json:"expandedSlotIds,omitempty"`
 	Mobile          bool                           `json:"mobile,omitempty"`
 	FilterValues    map[askdata.ID]json.RawMessage `json:"filterValues,omitempty"`
+	// Selections are the viewer's active interactions. They name a source
+	// component and the values under it; the server derives every resulting
+	// filter from the definition's declared Interactions.
+	Selections []ReportSelection `json:"selections,omitempty"`
 }
 
 func (input HTTPPlanInput) Resolve(
@@ -44,10 +47,14 @@ func (input HTTPPlanInput) Resolve(
 	if err != nil {
 		return PlanRequest{}, err
 	}
+	selectionFilters, err := ResolveSelections(definition, input.Selections)
+	if err != nil {
+		return PlanRequest{}, err
+	}
 	return PlanRequest{
 		PageID: input.PageID, VisibleBlockIDs: append([]askdata.ID(nil), input.VisibleBlockIDs...),
 		ExpandedSlotIDs: append([]askdata.ID(nil), input.ExpandedSlotIDs...), Mobile: input.Mobile,
-		PolicyScopeHash: policyScopeHash, FilterValues: values,
+		PolicyScopeHash: policyScopeHash, FilterValues: values, SelectionFilters: selectionFilters,
 	}, nil
 }
 
@@ -85,19 +92,6 @@ func RuntimeTimezone(definition report.ReportDefinition) (*time.Location, error)
 		return nil, errors.New("report runtime timezone is invalid")
 	}
 	return location, nil
-}
-
-// ViewerPolicyHash scopes report batch deduplication to the authenticated
-// viewer and immutable report version. It is not accepted from public input.
-func ViewerPolicyHash(identity store.Identity, loaded LoadedReport) (string, error) {
-	if identity.Validate() != nil || loaded.ReportID.Validate() != nil || loaded.VersionID.Validate() != nil {
-		return "", errors.New("report runtime viewer identity is invalid")
-	}
-	return string(askdata.HashBytes([]byte(
-		"report-runtime-policy-v1\x00" + string(identity.TenantID) + "\x00" +
-			string(identity.DomainID) + "\x00" + string(identity.ActorID) + "\x00" +
-			string(loaded.ReportID) + "\x00" + string(loaded.VersionID),
-	))), nil
 }
 
 func resolveRuntimeFilterValues(

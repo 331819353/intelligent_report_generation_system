@@ -27,6 +27,9 @@ type fakeReleaseLifecycleBackend struct {
 func (backend *fakeReleaseLifecycleBackend) ValidateAndStartProjection(context.Context, registry.AdminScope, string) (registry.ReleaseProjectionStartResult, error) {
 	return registry.ReleaseProjectionStartResult{}, backend.err
 }
+func (backend *fakeReleaseLifecycleBackend) RetryFailedProjections(context.Context, registry.AdminScope, string) (registry.ReleaseProjectionRetryResult, error) {
+	return registry.ReleaseProjectionRetryResult{Status: "PROJECTING", RetriedCount: 1}, backend.err
+}
 func (backend *fakeReleaseLifecycleBackend) PlanEvaluationBatch(context.Context, registry.AdminScope, string, registry.EvaluationBatchPlanInput) (registry.EvaluationBatchPlanResult, error) {
 	return registry.EvaluationBatchPlanResult{}, backend.err
 }

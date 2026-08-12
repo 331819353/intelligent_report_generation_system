@@ -23,6 +23,8 @@ func NewHandler(service *Service) http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/logout", h.logout)
 	mux.Handle("PUT /api/v1/auth/domain", RequireTenantAccessToken(service, http.HandlerFunc(h.switchDomain)))
 	mux.Handle("GET /api/v1/auth/me", RequireAccessToken(service, http.HandlerFunc(h.me)))
+	mux.Handle("PATCH /api/v1/auth/me", RequireAccessToken(service, http.HandlerFunc(h.updateMe)))
+	mux.Handle("PUT /api/v1/auth/password", RequireAccessToken(service, http.HandlerFunc(h.changePassword)))
 	return mux
 }
 
@@ -76,10 +78,52 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAuthJSON(w, http.StatusOK, map[string]any{
-		"userId": profile.UserID, "displayName": profile.DisplayName, "avatarUrl": profile.AvatarURL,
+		"userId": profile.UserID, "employeeNo": profile.EmployeeNo, "email": profile.Email,
+		"displayName": profile.DisplayName, "avatarUrl": profile.AvatarURL,
 		"status": profile.Status, "domainId": profile.DomainID, "roles": profile.Roles,
 		"tokenVersion": claims.TokenVersion,
 	})
+}
+
+func (h *Handler) updateMe(w http.ResponseWriter, r *http.Request) {
+	claims, _ := ClaimsFromContext(r.Context())
+	var request struct {
+		DisplayName string `json:"displayName"`
+	}
+	if decodeJSON(w, r, &request) != nil {
+		writeAuthError(w, http.StatusBadRequest, "INVALID_REQUEST", "请输入有效的姓名")
+		return
+	}
+	if err := h.service.UpdateCurrentProfile(r.Context(), claims.TenantID, claims.Subject, request.DisplayName); err != nil {
+		writeAuthError(w, http.StatusBadRequest, "PROFILE_INVALID", "姓名不能为空且最多 100 个字符")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
+	claims, _ := ClaimsFromContext(r.Context())
+	var request struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if decodeJSON(w, r, &request) != nil {
+		writeAuthError(w, http.StatusBadRequest, "INVALID_REQUEST", "请输入当前密码和新密码")
+		return
+	}
+	if err := h.service.ChangePassword(r.Context(), claims.TenantID, claims.Subject, request.CurrentPassword, request.NewPassword); err != nil {
+		if errors.Is(err, ErrInvalidCredentials) {
+			writeAuthError(w, http.StatusUnauthorized, "CURRENT_PASSWORD_INVALID", "当前密码不正确")
+			return
+		}
+		if errors.Is(err, ErrWeakPassword) {
+			writeAuthError(w, http.StatusBadRequest, "WEAK_PASSWORD", "新密码需为 10–128 位，包含大小写字母和数字，且不能与当前密码相同")
+			return
+		}
+		writeAuthError(w, http.StatusInternalServerError, "PASSWORD_CHANGE_FAILED", "密码修改失败，请稍后重试")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // login 解析登录请求并把客户端环境信息交给认证服务审计。

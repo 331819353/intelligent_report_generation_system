@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -69,8 +70,8 @@ type BudgetAllowance struct {
 }
 
 func (allowance BudgetAllowance) Validate() error {
-	if allowance.ToolCallsRemaining < 0 || allowance.ToolCallsRemaining > 8 ||
-		allowance.FormalQueriesRemaining < 0 || allowance.FormalQueriesRemaining > 2 ||
+	if allowance.ToolCallsRemaining < 0 || allowance.ToolCallsRemaining > 16 ||
+		allowance.FormalQueriesRemaining < 0 || allowance.FormalQueriesRemaining > 6 ||
 		allowance.ValidationQueriesRemaining < 0 || allowance.ValidationQueriesRemaining > 3 {
 		return ErrInvalidInvocation
 	}
@@ -382,6 +383,9 @@ func (registry *Registry) Execute(ctx context.Context, invocation Invocation) (E
 	}
 	result, evidence, err := sanitizeToolResult(output, definition.MaxResultBytes)
 	if err != nil {
+		// Result values stay private; the typed validator error contains only a
+		// stable contract rule/path and is safe for operator diagnostics.
+		slog.Warn("reject governed tool result", "tool", invocation.Call.Tool, "error", err)
 		response := failedToolResponse(
 			invocation.Call, ResponseFailed, "TOOL_RESULT_REJECTED", "工具结果未通过脱敏合同校验。", false,
 		)

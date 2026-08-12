@@ -270,6 +270,31 @@ type bulkCertifyRequest struct {
 	Note             string   `json:"note"`
 }
 
+func (handler *AdminHandler) getImport(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	if request.URL.RawQuery != "" || handler.importReads == nil {
+		writeImportError(writer, registryimport.ErrInvalidImport)
+		return
+	}
+	importID := request.PathValue("id")
+	parsedID, err := uuid.Parse(importID)
+	if err != nil || parsedID.String() != importID {
+		writeImportError(writer, registryimport.ErrInvalidImport)
+		return
+	}
+	result, err := handler.importReads.Get(
+		request.Context(), scope.TenantID, scope.DomainID, importID,
+	)
+	if err != nil {
+		writeImportError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
 func (handler *AdminHandler) commitImport(writer http.ResponseWriter, request *http.Request) {
 	scope, ok := handler.resolveScope(writer, request)
 	if !ok {

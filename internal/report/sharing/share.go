@@ -46,6 +46,7 @@ type Record struct {
 type Repository interface {
 	Create(context.Context, store.Identity, Record) error
 	FindByTokenHash(context.Context, store.Identity, string) (Record, error)
+	ListCreated(context.Context, store.Identity, askdata.ID, int) ([]Record, error)
 	Revoke(context.Context, store.Identity, askdata.ID, time.Time) error
 	RecordAccess(context.Context, store.Identity, askdata.ID, time.Time) error
 }
@@ -192,6 +193,16 @@ func (service Service) Revoke(ctx context.Context, identity store.Identity, shar
 		return service.Cache.InvalidateShare(ctx, identity, shareID)
 	}
 	return nil
+}
+
+func (service Service) List(ctx context.Context, identity store.Identity, reportID askdata.ID, limit int) ([]Record, error) {
+	if identity.ActorID == "" {
+		return nil, &Error{Code: "SHARE_LOGIN_REQUIRED"}
+	}
+	if service.Repository == nil || identity.Validate() != nil || !validUUID(reportID) || limit < 1 || limit > 200 {
+		return nil, &Error{Code: "SHARE_REQUEST_INVALID"}
+	}
+	return service.Repository.ListCreated(ctx, identity, reportID, limit)
 }
 
 func (service Service) now() time.Time {

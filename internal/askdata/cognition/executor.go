@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"intelligent-report-generation-system/internal/ai"
@@ -17,12 +18,17 @@ const (
 	defaultMaxOutputTokens = 8_192
 	defaultMaxSeenActions  = 16
 	maximumSeenActions     = 64
+	maximumRepairCandidate = 64 << 10
 )
 
 // Invoker is the audited, quota-aware AI boundary used by the cognition
 // executor. *ai.Service satisfies this interface.
 type Invoker interface {
 	Invoke(context.Context, ai.Invocation) (ai.InvocationResult, error)
+}
+
+type modelCatalogInvoker interface {
+	ConfiguredModels() []string
 }
 
 type ExecutorOptions struct {
@@ -123,14 +129,70 @@ func (executor *Executor) Execute(ctx context.Context, input RoundRequest) (Roun
 		return RoundResult{}, err
 	}
 
-	invocation, err := executor.invoker.Invoke(ctx, ai.Invocation{
+	invocationInput := ai.Invocation{
 		TenantID: input.TenantID, ActorID: input.ActorID,
 		Purpose: ai.PurposeSemanticQuestion, PromptVersion: strings.TrimSpace(input.PromptVersion),
 		ResourceType: strings.TrimSpace(input.ResourceType), ResourceID: strings.TrimSpace(input.ResourceID),
 		PreferredModel: strings.TrimSpace(input.PreferredModel), Request: request,
-	})
+	}
+	invocation, err := executor.invoker.Invoke(ctx, invocationInput)
 	if err != nil {
-		return RoundResult{}, err
+		// Structured-output candidates never cross the provider boundary into
+		// logs, but the validator's field-path-only diagnostic is safe and makes
+		// production incompatibilities actionable instead of looking like a
+		// generic model outage.
+		if diagnostic := cognitionOutputDiagnostic(stageSchema, err); diagnostic != "" {
+			slog.Warn("reject provider structured output", "stage", input.Stage, "diagnostic", diagnostic)
+		}
+		// Compatible providers differ in how reliably they honour a deeply typed
+		// JSON contract. A schema-invalid candidate is safe to hand back to the
+		// provider that produced it, and an invalid response envelope is safe to
+		// retry as a fresh audited invocation. The model pool is round-robin in
+		// production, so this single logical repair also gives the other provider
+		// a chance without creating an unbounded retry loop.
+		if repairRequest, ok := cognitionRepairRequest(request, stageSchema, err); ok {
+			invocationInput.Request = repairRequest
+			// Repair an available candidate with the model that produced it. A
+			// malformed success envelope has no candidate to repair; let the provider
+			// pool choose the next model instead of pinning the retry to the model that
+			// just failed the transport-level response contract.
+			var providerError *ai.ProviderError
+			if !errors.As(err, &providerError) || providerError.Code != ai.ErrorCodeInvalidResponse {
+				invocationInput.PreferredModel = strings.TrimSpace(invocation.ProviderResult.Model)
+			} else {
+				invocationInput.PreferredModel = executor.alternateModel(invocation.ProviderResult.Model)
+			}
+			invocation, err = executor.invoker.Invoke(ctx, invocationInput)
+			if err != nil {
+				if diagnostic := cognitionOutputDiagnostic(stageSchema, err); diagnostic != "" {
+					slog.Warn("reject repaired provider structured output", "stage", input.Stage, "diagnostic", diagnostic)
+				}
+				// A provider that cannot honour the closed action contract after one
+				// repair must not block the whole governed question. Restart this one
+				// cognition round from its original facts on a different configured
+				// model. This is explicit and bounded, so it remains fully audited and
+				// cannot become an unbounded cross-provider retry loop.
+				failedModel := invocation.ProviderResult.Model
+				if failedModel == "" {
+					failedModel = invocationInput.PreferredModel
+				}
+				alternate := executor.alternateModel(failedModel)
+				if alternate == "" || strings.EqualFold(alternate, strings.TrimSpace(invocationInput.PreferredModel)) {
+					return RoundResult{}, err
+				}
+				invocationInput.Request = request
+				invocationInput.PreferredModel = alternate
+				invocation, err = executor.invoker.Invoke(ctx, invocationInput)
+				if err != nil {
+					if diagnostic := cognitionOutputDiagnostic(stageSchema, err); diagnostic != "" {
+						slog.Warn("reject alternate provider structured output", "stage", input.Stage, "diagnostic", diagnostic)
+					}
+					return RoundResult{}, err
+				}
+			}
+		} else {
+			return RoundResult{}, err
+		}
 	}
 	if len(bytes.TrimSpace(invocation.ProviderResult.Content)) == 0 {
 		return RoundResult{}, invalidCognitionAction("provider returned an empty cognition action")
@@ -146,7 +208,48 @@ func (executor *Executor) Execute(ctx context.Context, input RoundRequest) (Roun
 	}
 	action, err := Decode(invocation.ProviderResult.Content)
 	if err != nil {
-		return RoundResult{}, invalidCognitionAction("provider returned an invalid cognition action")
+		// The raw provider body is intentionally never logged. The local typed
+		// validator only reports contract field names and stable validation rules,
+		// which gives operators enough signal to repair the schema without leaking
+		// question text or model output.
+		slog.Warn("reject cognition action", "stage", input.Stage, "error", err)
+		// JSON Schema and the executable Go contract deliberately form two
+		// independent gates. A provider can satisfy the generic JSON shape while
+		// still missing a tool-specific argument or violating a cross-field rule.
+		// Give that exact, bounded candidate one audited structural-repair turn,
+		// just as we already do for provider-side schema validation failures.
+		repairRequest, ok := cognitionTypedRepairRequest(request, invocation.ProviderResult.Content, err)
+		if !ok {
+			return RoundResult{}, invalidCognitionAction("provider returned an invalid cognition action")
+		}
+		invocationInput.Request = repairRequest
+		invocationInput.PreferredModel = strings.TrimSpace(invocation.ProviderResult.Model)
+		invocation, err = executor.invoker.Invoke(ctx, invocationInput)
+		if err != nil {
+			if diagnostic := cognitionOutputDiagnostic(stageSchema, err); diagnostic != "" {
+				slog.Warn("reject typed cognition repair", "stage", input.Stage, "diagnostic", diagnostic)
+			}
+			return RoundResult{}, err
+		}
+		action, err = Decode(invocation.ProviderResult.Content)
+		if err != nil {
+			slog.Warn("reject repaired cognition action", "stage", input.Stage, "error", err)
+			alternate := executor.alternateModel(invocation.ProviderResult.Model)
+			if alternate == "" || strings.EqualFold(alternate, strings.TrimSpace(invocationInput.PreferredModel)) {
+				return RoundResult{}, invalidCognitionAction("provider returned an invalid cognition action after repair")
+			}
+			invocationInput.Request = request
+			invocationInput.PreferredModel = alternate
+			invocation, err = executor.invoker.Invoke(ctx, invocationInput)
+			if err != nil {
+				return RoundResult{}, err
+			}
+			action, err = Decode(invocation.ProviderResult.Content)
+			if err != nil {
+				slog.Warn("reject alternate cognition action", "stage", input.Stage, "error", err)
+				return RoundResult{}, invalidCognitionAction("configured models returned invalid cognition actions")
+			}
+		}
 	}
 	if action.Stage != input.Stage {
 		return RoundResult{}, invalidCognitionAction("provider returned an action for a different stage")
@@ -186,6 +289,140 @@ func (executor *Executor) Execute(ctx context.Context, input RoundRequest) (Roun
 	}, nil
 }
 
+func (executor *Executor) alternateModel(failed string) string {
+	catalog, ok := executor.invoker.(modelCatalogInvoker)
+	if !ok {
+		return ""
+	}
+	failed = strings.TrimSpace(failed)
+	for _, model := range catalog.ConfiguredModels() {
+		model = strings.TrimSpace(model)
+		if model != "" && !strings.EqualFold(model, failed) {
+			return model
+		}
+	}
+	return ""
+}
+
+func cognitionTypedRepairRequest(request ai.ProviderRequest, candidate json.RawMessage, failure error) (ai.ProviderRequest, bool) {
+	if len(candidate) == 0 || len(candidate) > maximumRepairCandidate || failure == nil {
+		return ai.ProviderRequest{}, false
+	}
+	repair := request
+	repair.Messages = append(append([]ai.Message(nil), request.Messages...),
+		ai.Message{
+			Role:  ai.MessageRoleAssistant,
+			Parts: []ai.ContentPart{{Type: ai.ContentTypeText, Text: string(candidate)}},
+		},
+		ai.Message{
+			Role: ai.MessageRoleUser,
+			Parts: []ai.ContentPart{{
+				Type: ai.ContentTypeText,
+				Text: "上一份候选通过了 JSON 外形校验，但未通过工具参数或跨字段业务合同。只修正 JSON 结构与必填字段，不改变业务判断，不输出解释。严格依据响应 Schema 补齐所选工具的全部必填 arguments，并确保字段值来自已有事实。",
+			}},
+		},
+	)
+	return repair, true
+}
+
+func cognitionRepairRequest(request ai.ProviderRequest, schema ai.JSONSchema, failure error) (ai.ProviderRequest, bool) {
+	candidate, diagnostic, invalidOutput := ai.InvalidOutputDetails(failure)
+	if invalidOutput {
+		if precise := cognitionCandidateDiagnostic(schema, candidate); precise != "" {
+			diagnostic = precise
+		}
+		if len(candidate) == 0 || len(candidate) > maximumRepairCandidate || strings.TrimSpace(diagnostic) == "" {
+			return ai.ProviderRequest{}, false
+		}
+		repair := request
+		repair.Messages = append(append([]ai.Message(nil), request.Messages...),
+			ai.Message{
+				Role:  ai.MessageRoleAssistant,
+				Parts: []ai.ContentPart{{Type: ai.ContentTypeText, Text: string(candidate)}},
+			},
+			ai.Message{
+				Role: ai.MessageRoleUser,
+				Parts: []ai.ContentPart{{
+					Type: ai.ContentTypeText,
+					Text: "上一份候选未通过响应合同。只修正 JSON 结构，不改变业务判断，也不要输出解释。校验规则：" + diagnostic,
+				}},
+			},
+		)
+		return repair, true
+	}
+	var providerError *ai.ProviderError
+	if !errors.As(failure, &providerError) {
+		return ai.ProviderRequest{}, false
+	}
+	switch providerError.Code {
+	case ai.ErrorCodeInvalidResponse:
+		// No candidate is available to repair, so reissue the original bounded
+		// request once. Provider/network retryability is already handled inside
+		// ai.Service; this branch is specifically for a malformed success envelope.
+		return request, true
+	default:
+		return ai.ProviderRequest{}, false
+	}
+}
+
+// cognitionCandidateDiagnostic selects the action's discriminated branch and
+// re-validates against that single closed object. A root oneOf error is too
+// vague for a model to repair; the branch diagnostic exposes only schema paths
+// and rules, never candidate values or question text.
+func cognitionCandidateDiagnostic(schema ai.JSONSchema, candidate json.RawMessage) string {
+	var value map[string]any
+	if json.Unmarshal(candidate, &value) != nil {
+		return ""
+	}
+	action, ok := value["action"].(string)
+	if !ok || action == "" {
+		return ""
+	}
+	var root map[string]any
+	if json.Unmarshal(schema.Schema, &root) != nil {
+		return ""
+	}
+	branches, ok := root["oneOf"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, rawBranch := range branches {
+		branch, ok := rawBranch.(map[string]any)
+		if !ok {
+			continue
+		}
+		properties, _ := branch["properties"].(map[string]any)
+		actionSchema, _ := properties["action"].(map[string]any)
+		if actionSchema["const"] != action {
+			continue
+		}
+		branchRoot := make(map[string]any, len(branch)+1)
+		for key, child := range branch {
+			branchRoot[key] = child
+		}
+		branchRoot["$defs"] = root["$defs"]
+		encoded, err := json.Marshal(branchRoot)
+		if err != nil {
+			return ""
+		}
+		_, validationErr := ai.ValidateStructuredOutput(ai.JSONSchema{
+			Name: schema.Name, Description: schema.Description, Schema: encoded,
+		}, candidate)
+		return ai.InvalidOutputDiagnostic(validationErr)
+	}
+	return ""
+}
+
+func cognitionOutputDiagnostic(schema ai.JSONSchema, failure error) string {
+	candidate, _, invalid := ai.InvalidOutputDetails(failure)
+	if invalid {
+		if diagnostic := cognitionCandidateDiagnostic(schema, candidate); diagnostic != "" {
+			return diagnostic
+		}
+	}
+	return ai.InvalidOutputDiagnostic(failure)
+}
+
 // AssistantMessage converts a validated action into the next transcript turn.
 // It serializes only the structured decision, never provider reasoning.
 func AssistantMessage(result RoundResult) (ai.Message, error) {
@@ -203,8 +440,10 @@ func AssistantMessage(result RoundResult) (ai.Message, error) {
 }
 
 // ToolMessage validates the typed, sanitized Tool Host response before it can
-// be returned to a model. Arbitrary tool names and unbounded result bodies are
-// rejected by toolhost.Response.Validate.
+// be returned to a model. The cognition protocol uses structured JSON actions,
+// not provider-native function calling, so the result is a new governed user
+// turn rather than an OpenAI `tool` role. Sending a tool role without a matching
+// provider tool_calls envelope is rejected by compliant providers.
 func ToolMessage(response toolhost.Response) (ai.Message, error) {
 	if err := response.Validate(); err != nil {
 		return ai.Message{}, fmt.Errorf("tool response: %w", err)
@@ -214,9 +453,8 @@ func ToolMessage(response toolhost.Response) (ai.Message, error) {
 		return ai.Message{}, err
 	}
 	return ai.Message{
-		Role:       ai.MessageRoleTool,
-		Parts:      []ai.ContentPart{{Type: ai.ContentTypeText, Text: string(payload)}},
-		ToolCallID: string(response.CallID), ToolName: string(response.Tool),
+		Role:  ai.MessageRoleUser,
+		Parts: []ai.ContentPart{{Type: ai.ContentTypeText, Text: "GOVERNED_TOOL_RESULT\n" + string(payload)}},
 	}, nil
 }
 

@@ -6,12 +6,11 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import {
-  reportEditorAPI, type PublicationGate, type PublicationReviewResponse, type ReportDraft,
+  reportEditorAPI, type DraftExecution, type PublicationGate, type PublicationReviewResponse, type ReportDraft,
 } from '../report/api/editor'
-import {
-  reportRuntimeAPI, type LoadedReport, type RuntimeExecution, type RuntimeQueryResult,
-} from '../report/api/runtime'
-import { ChannelContributionChart, RuntimeResultChart, WorkspaceRevenueTrendChart } from '../report/runtime/ReportCharts'
+import { ReportPageView } from '../report/render/ReportPageView'
+import { emptyManifestIndex, indexManifests, listComponentManifests, type ManifestIndex } from '../report/render/manifests'
+import { orderedPages } from '../report/render/schema'
 
 type PreviewMode = 'desktop' | 'mobile' | 'print' | 'viewer'
 type PublishChoice = 'snapshot' | 'refresh'
@@ -71,26 +70,30 @@ function GateCard({ gate, selected, onSelect }: { gate: PublicationGate; selecte
   </article>
 }
 
-function SnapshotPreview({ mode }: { mode: PreviewMode }) {
-  return <div className={`publish-preview-document is-${mode}`}>
-    <header><div><h2>2026年7月经营月报</h2><span>单位：万元</span></div></header>
-    <dl className="publish-preview-kpis"><div><dt>营业收入</dt><dd>1,256,320 <small>万元</small></dd><span>环比 <b>+8.7% ↑</b> 同比 <b>+15.2% ↑</b></span></div><div><dt>毛利率</dt><dd>23.6%</dd><span>环比 <b>+1.3pct ↑</b> 同比 <b>+2.6ppt ↑</b></span></div><div><dt>经营利润</dt><dd>152,680 <small>万元</small></dd><span>环比 <b>+12.4% ↑</b> 同比 <b>+18.7% ↑</b></span></div></dl>
-    <div className="publish-preview-chart-grid"><section><h3>营业收入趋势</h3><WorkspaceRevenueTrendChart /></section><section><h3>渠道结构（按收入）</h3><ChannelContributionChart compact /></section></div>
-    <section className="publish-preview-conclusion"><strong>AI 经营结论</strong><ul><li>收入同比增长 15.2%，主要受线上电商与海外渠道拉动。</li><li>毛利率同比提升 2.6 个百分点，成本效率改善显著。</li><li>经营利润同比增长 18.7%，盈利能力增强。</li></ul></section>
-    {mode === 'viewer' && <div className="publish-preview-mask"><ShieldCheck size={18} weight="fill" />当前按业务用户权限脱敏预览</div>}
-  </div>
-}
-
-function LivePreview({ draft, loaded, execution, mode }: { draft: ReportDraft; loaded: LoadedReport | null; execution: RuntimeExecution | null; mode: PreviewMode }) {
-  const componentMap = useMemo(() => new Map(loaded?.definition.components.map(component => [component.id, component]) ?? []), [loaded])
-  const ready = execution?.components.filter(item => item.result) ?? []
-  const kpi = ready.find(item => item.result?.rows.length === 1 && (item.result.columns.length ?? 0) <= 4)?.result
-  const charts = ready.filter(item => item.result && item.result.rows.length > 1 && item.result.columns.length > 1).slice(0, 2)
+/**
+ * 发布预览渲染的就是待发布草稿本身，用的是运行页同一个 ReportPageView。
+ *
+ * 这里曾经是第三套渲染实现：靠「行数少的当 KPI、列数多的当图表」猜测组件用途，
+ * 于是预览到的排版和发布后看到的排版必然不同。现在预览、编辑器画布与运行页
+ * 共用同一份 Definition 与同一套渲染，多端模式只改变预览容器的宽度。
+ */
+function PublishPreview({ draft, manifests, execution, mode }: {
+  draft: ReportDraft; manifests: ManifestIndex; execution: DraftExecution | null; mode: PreviewMode
+}) {
+  const page = orderedPages(draft.definition)[0]
+  const results = useMemo(
+    () => new Map((execution?.components ?? []).map(item => [item.componentId, item])),
+    [execution],
+  )
   return <div className={`publish-preview-document is-${mode}`}>
     <header><div><h2>{draft.definition.metadata.name}</h2><span>草稿 r{draft.revisionNo} · 发布预览</span></div></header>
-    {kpi ? <dl className="publish-preview-kpis">{kpi.columns.slice(0, 3).map((column, index) => <div key={column}><dt>{column}</dt><dd>{String(kpi.rows[0]?.[index] ?? '—')}</dd><span>按最近发布运行结果预览</span></div>)}</dl> : <div className="publish-preview-empty"><Monitor size={24} /><strong>当前草稿暂无可复用运行结果</strong><span>结构与绑定已完成门禁；首次发布后按查看者权限执行组件。</span></div>}
-    {charts.length > 0 && <div className="publish-preview-chart-grid">{charts.map(item => <section key={item.componentId}><h3>{componentMap.get(item.componentId)?.options.title || '数据组件'}</h3><RuntimeResultChart result={item.result as RuntimeQueryResult} templateType={componentMap.get(item.componentId)?.templateRef.type || 'line'} label={componentMap.get(item.componentId)?.options.title || '报告组件'} /></section>)}</div>}
-    <section className="publish-preview-component-list"><strong>当前草稿包含 {draft.definition.components.length} 个组件</strong><p>{draft.definition.components.slice(0, 5).map(component => component.options.title || component.templateRef.type).join(' · ') || 'AI 将在发布制品中固定当前结构。'}</p></section>
+    {page
+      ? <ReportPageView definition={draft.definition} page={page} manifests={manifests} results={results} designMode={!execution} />
+      : <div className="publish-preview-empty"><Monitor size={24} /><strong>当前草稿没有可预览页面</strong><span>请返回编辑器添加章节与组件。</span></div>}
+    {execution === null
+      ? <p className="publish-preview-note">草稿预览执行未返回结果；发布后将按每位查看者的权限执行组件查询。</p>
+      : <p className="publish-preview-note">按你的权限执行草稿 r{execution.revisionNo}；发布后每位查看者将按各自权限重新执行。</p>}
+    {mode === 'viewer' && <div className="publish-preview-mask"><ShieldCheck size={18} weight="fill" />当前按业务用户权限脱敏预览</div>}
   </div>
 }
 
@@ -100,8 +103,8 @@ export function ReportPublishReviewPage() {
   // 设计走查快照只在开发构建中可用，生产构建绝不返回虚构发布评审结论。
   const snapshot = import.meta.env.DEV && new URLSearchParams(window.location.search).get('snapshot') === 'publish-review'
   const [review, setReview] = useState<PublicationReviewResponse | null>(snapshot ? snapshotReview : null)
-  const [loaded, setLoaded] = useState<LoadedReport | null>(null)
-  const [execution, setExecution] = useState<RuntimeExecution | null>(null)
+  const [manifests, setManifests] = useState<ManifestIndex>(emptyManifestIndex)
+  const [execution, setExecution] = useState<DraftExecution | null>(null)
   // 与运行页一致：加载态由已结算的请求令牌推导，避免 effect 内同步 setState。
   const [settledReportId, setSettledReportId] = useState('')
   const [failure, setFailure] = useState<{ reportId: string; message: string } | null>(null)
@@ -117,6 +120,15 @@ export function ReportPublishReviewPage() {
   const [publishing, setPublishing] = useState(false)
   const [toast, setToast] = useState('')
 
+  // 组件清单驱动预览渲染，与编辑器和运行页读取同一个注册表。
+  useEffect(() => {
+    let cancelled = false
+    void listComponentManifests()
+      .then(result => { if (!cancelled) setManifests(indexManifests(result.items)) })
+      .catch(() => { /* 清单不可用时组件按「未注册模板」显式失败，不做类型猜测。 */ })
+    return () => { cancelled = true }
+  }, [])
+
   useEffect(() => {
     if (snapshot) return undefined
     const controller = new AbortController()
@@ -125,13 +137,13 @@ export function ReportPublishReviewPage() {
         const next = await reportEditorAPI.reviewPublication(reportId, { sourceRevisionNo: draft.revisionNo })
         if (controller.signal.aborted) return
         setReview(next)
+        // 预览执行的是「即将发布的这份草稿」本身，而不是上一个已发布版本，
+        // 否则发布前看到的数值可能来自和待发布定义完全不同的绑定。
+        const page = orderedPages(next.preflight.draft.definition)[0]
+        if (!page || controller.signal.aborted) return
         try {
-          const runtime = await reportRuntimeAPI.load(reportId)
-          const page = runtime.definition.pages.slice().sort((a, b) => a.order - b.order)[0]
-          if (controller.signal.aborted) return
-          setLoaded(runtime)
-          if (page) setExecution(await reportRuntimeAPI.execute(reportId, { pageId: page.id }, { signal: controller.signal }))
-        } catch { /* Draft-only reports intentionally have no reusable published runtime. */ }
+          setExecution(await reportEditorAPI.executeDraft(reportId, { pageId: page.id }, { signal: controller.signal }))
+        } catch { /* 门禁结论独立于预览执行；执行失败不应阻断发布评审展示。 */ }
       })
       .catch(cause => {
         if (!controller.signal.aborted) {
@@ -177,7 +189,7 @@ export function ReportPublishReviewPage() {
       <div className="publish-body">
         <aside className="publish-gates"><header><div><h2>AI 发布检查</h2><Info size={14} /></div><span>LLM 自动门禁</span></header><div>{review.preflight.checks.map(gate => <GateCard key={gate.id} gate={gate} selected={selectedGate === gate.id} onSelect={() => setSelectedGate(gate.id)} />)}</div><footer><strong>检查结论（LLM）</strong><p>{review.preflight.checks.filter(gate => gate.status === 'PASSED').length} 项通过，{review.preflight.warningCodes.length} 项需人工确认后方可进入最终发布。</p></footer></aside>
 
-        <section className="publish-preview"><nav>{([['desktop', Desktop, '桌面'], ['mobile', DeviceMobile, '移动'], ['print', Printer, '打印'], ['viewer', Users, '查看者权限']] as const).map(([value, Icon, label]) => <button className={mode === value ? 'is-active' : ''} type="button" key={value} onClick={() => setMode(value)}><Icon size={15} />{label}</button>)}</nav><div className="publish-preview-meta"><span>预览身份：业务用户（脱敏）</span><span>数据截至 {snapshot ? '2026-08-09 23:59' : formatCheckedAt(review.checkedAt)}</span></div><div className="publish-preview-canvas">{snapshot ? <SnapshotPreview mode={mode} /> : <LivePreview draft={draft} loaded={loaded} execution={execution} mode={mode} />}</div></section>
+        <section className="publish-preview"><nav>{([['desktop', Desktop, '桌面'], ['mobile', DeviceMobile, '移动'], ['print', Printer, '打印'], ['viewer', Users, '查看者权限']] as const).map(([value, Icon, label]) => <button className={mode === value ? 'is-active' : ''} type="button" key={value} onClick={() => setMode(value)}><Icon size={15} />{label}</button>)}</nav><div className="publish-preview-meta"><span>预览身份：业务用户（脱敏）</span><span>数据截至 {snapshot ? '2026-08-09 23:59' : formatCheckedAt(review.checkedAt)}</span></div><div className="publish-preview-canvas"><PublishPreview draft={draft} manifests={manifests} execution={execution} mode={mode} /></div></section>
 
         <aside className="publish-review-panel"><header><div><h2>AI 发布评审</h2><span>LLM 认知判断与解释</span></div></header><section className={`publish-ai-verdict ${recommendationClass}`}><strong>AI 结论：{review.review.headline}</strong><p>{review.review.summary}</p></section><section className="publish-pins"><div><CheckCircle size={15} /><span>已固定 Definition</span><strong>{shortRef(review.dependencyRefs.find(ref => ref.startsWith('definition:')) || '', 'v2.1.7')}</strong></div><div><CheckCircle size={15} /><span>已绑定语义资产</span><strong>{shortRef(review.dependencyRefs.find(ref => ref.startsWith('semantic:')) || '', `${draft.definition.dataContexts.length} 项`)}</strong></div><div><CheckCircle size={15} /><span>已锁定 Evidence</span><strong>{shortRef(review.dependencyRefs.find(ref => ref.startsWith('evidence:')) || '', '当前版本')}</strong></div><div><CheckCircle size={15} /><span>依赖版本已固化</span><strong>{shortRef(review.dependencyRefs.find(ref => ref.startsWith('dataset:')) || '', `${review.dependencyRefs.length} 项`)}</strong></div></section><section className="publish-impact"><h3>影响范围</h3><div><span><Users size={17} /><strong>{review.impact.visibleCount}</strong><small>位可见用户</small></span><span><ShieldCheck size={17} /><strong>{review.impact.editableCount}</strong><small>位编辑者</small></span><span><Monitor size={17} /><strong>{review.impact.subscriptionCount}</strong><small>个订阅</small></span><span><FilePdf size={17} /><strong>PDF / XLSX</strong><small>制品产出</small></span></div></section>
           {warningGate && <section className="publish-risk"><h3>AI 风险解释（需人工确认）</h3><p>{review.review.risks[0]?.explanation || warningGate.summary}</p><button type="button" onClick={() => setSelectedGate(warningGate.id)}>查看证据详情</button></section>}

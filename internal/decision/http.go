@@ -36,6 +36,7 @@ func NewHandler(authService *auth.Service, idempotencyRepository platformidempot
 	mux.HandleFunc("POST /api/v1/decisions/{id}/actions", handler.createAction)
 	mux.HandleFunc("POST /api/v1/decisions/{id}/actions/{actionId}/transition", handler.transitionAction)
 	mux.HandleFunc("POST /api/v1/decisions/{id}/outcome/metrics", handler.addMetric)
+	mux.HandleFunc("POST /api/v1/decisions/{id}/outcome/start", handler.startReview)
 	mux.HandleFunc("POST /api/v1/decisions/{id}/outcome/refresh", handler.refreshOutcome)
 	mux.HandleFunc("POST /api/v1/decisions/{id}/outcome/confirm", handler.confirmOutcome)
 	mux.HandleFunc("POST /api/v1/decisions/{id}/close", handler.closeDecision)
@@ -286,6 +287,26 @@ func (handler *Handler) addMetric(writer http.ResponseWriter, request *http.Requ
 	writeDecisionJSON(writer, http.StatusCreated, value)
 }
 
+func (handler *Handler) startReview(writer http.ResponseWriter, request *http.Request) {
+	identity, id, ok := handler.subject(writer, request)
+	if !ok {
+		return
+	}
+	var input struct {
+		ExpectedVersion int64 `json:"expectedVersion"`
+	}
+	if decodeDecisionJSON(request, &input) != nil {
+		writeDecisionError(writer, http.StatusBadRequest, "DECISION_REQUEST_INVALID", "request body is invalid")
+		return
+	}
+	value, err := handler.service.StartReview(request.Context(), identity, id, input.ExpectedVersion)
+	if err != nil {
+		writeServiceError(writer, err)
+		return
+	}
+	writeDecisionJSON(writer, http.StatusOK, value)
+}
+
 func (handler *Handler) refreshOutcome(writer http.ResponseWriter, request *http.Request) {
 	identity, id, ok := handler.subject(writer, request)
 	if !ok {
@@ -458,6 +479,8 @@ func writeServiceError(writer http.ResponseWriter, err error) {
 		status, code, message = http.StatusNotFound, "DECISION_NOT_FOUND", err.Error()
 	case errors.Is(err, ErrForbidden), errors.Is(err, ErrPolicyUnavailable):
 		status, code, message = http.StatusForbidden, "DECISION_FORBIDDEN", err.Error()
+	case errors.Is(err, ErrSelfApproval):
+		status, code, message = http.StatusConflict, "DECISION_SELF_APPROVAL_FORBIDDEN", err.Error()
 	case errors.Is(err, ErrConflict), errors.Is(err, ErrIllegalTransition), errors.Is(err, ErrOutcomeBlocked):
 		status, code, message = http.StatusConflict, "DECISION_CONFLICT", err.Error()
 	}

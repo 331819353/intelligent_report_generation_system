@@ -176,7 +176,11 @@ func (w *Worker) finishDelivery(ctx context.Context, tenantID string, delivery D
 		}
 		link := ""
 		if state == "READY" {
-			link = fmt.Sprintf("/reports/%s?versionId=%s", delivery.ReportID, delivery.ReportVersionID)
+			var versionNo int
+			if e := tx.QueryRow(ctx, `SELECT version_no FROM platform.report_versions WHERE tenant_id=$1 AND report_id=$2 AND id=$3`, tenantID, delivery.ReportID, delivery.ReportVersionID).Scan(&versionNo); e != nil {
+				return e
+			}
+			link = fmt.Sprintf("/reports/%s?version=%d", delivery.ReportID, versionNo)
 		}
 		tag, e := tx.Exec(ctx, `UPDATE platform.report_deliveries SET state=$1,report_link=$2,failure_code=$3,access_checked_at=$4,next_attempt_at=$5,lease_token=NULL,lease_expires_at=NULL,updated_at=$4 WHERE tenant_id=$6 AND id=$7 AND state='RUNNING' AND lease_token=$8`, finalState, link, code, now, next, tenantID, delivery.ID, token)
 		if e != nil {

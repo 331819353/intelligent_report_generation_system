@@ -17,6 +17,7 @@ import (
 const (
 	defaultDataSourceCredentialKey = "bG9jYWxfZGF0YV9zb3VyY2VfY3JlZGVudGlhbF9rZXk="
 	defaultConnectorToken          = "local_connector_token_change_me"
+	defaultAskDataQuestionKey      = "bG9jYWxfYXNrZGF0YV9xdWVzdGlvbl9rZXlfMzJiISE="
 )
 
 type Config struct {
@@ -53,6 +54,7 @@ type Config struct {
 	DatasetAIRetrievalMode          string
 	DatabaseURL                     string
 	WarehouseDatabaseURL            string
+	WarehouseQueryDatabaseURL       string
 	MinIOEndpoint                   string
 	MinIOAccessKey                  string
 	MinIOSecretKey                  string
@@ -136,6 +138,7 @@ var (
 		developmentWarehouseRole: "report_warehouse_reader",
 		forbiddenKeys: []string{
 			"WORKER_DATABASE_URL", "CONNECTION_TEST_DATABASE_URL", "WAREHOUSE_WORKER_DATABASE_URL",
+			"WAREHOUSE_QUERY_DATABASE_URL",
 			"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_APP_PASSWORD",
 			"POSTGRES_WORKER_USER", "POSTGRES_WORKER_PASSWORD",
 			"POSTGRES_CONNECTION_TEST_USER", "POSTGRES_CONNECTION_TEST_PASSWORD",
@@ -201,6 +204,18 @@ func loadApplication(process databaseProcess) (Config, error) {
 	})
 	if err != nil {
 		return Config{}, err
+	}
+	warehouseQueryDatabaseURL := warehouseDatabaseURL
+	if process.urlKey == workerDatabaseProcess.urlKey {
+		warehouseQueryDatabaseURL, err = loadProcessDatabaseURL(environment, databaseProcess{
+			urlKey:          "WAREHOUSE_QUERY_DATABASE_URL",
+			developmentURL:  "postgres://report_warehouse_reader:local_warehouse_reader_password@127.0.0.1:5433/intelligent_report_warehouse?sslmode=disable",
+			roleKey:         "WAREHOUSE_READER_USER",
+			developmentRole: "report_warehouse_reader",
+		})
+		if err != nil {
+			return Config{}, err
+		}
 	}
 	askDataBudgetOverrides, err := ParseAskDataBudgetOverrides(os.Getenv("ASKDATA_RUN_BUDGET_OVERRIDES"))
 	if err != nil {
@@ -334,23 +349,24 @@ func loadApplication(process databaseProcess) (Config, error) {
 		DatasetAIRetrievalMode:          strings.ToUpper(envOrDefault("DATASET_AI_RETRIEVAL_MODE", "HYBRID")),
 		DatabaseURL:                     databaseURL,
 		WarehouseDatabaseURL:            warehouseDatabaseURL,
+		WarehouseQueryDatabaseURL:       warehouseQueryDatabaseURL,
 		MinIOEndpoint:                   envOrDefault("MINIO_ENDPOINT", "127.0.0.1:9000"),
 		MinIOAccessKey:                  envOrDefault("MINIO_ACCESS_KEY", "report_minio"),
 		MinIOSecretKey:                  envOrDefault("MINIO_SECRET_KEY", "local_minio_password"),
 		MinIOUseSSL:                     strings.EqualFold(os.Getenv("MINIO_USE_SSL"), "true"),
 		MinIOUploadsBucket:              envOrDefault("MINIO_BUCKET_UPLOADS", "uploads"),
-		ReportExportRendererURL:         envOrDefault("REPORT_EXPORT_RENDERER_URL", "http://127.0.0.1:8091"),
+		ReportExportRendererURL:         envOrDefault("REPORT_EXPORT_RENDERER_URL", ""),
 		ReportExportRendererToken:       envOrDefault("REPORT_EXPORT_RENDERER_TOKEN", "local_report_export_renderer_token"),
 		AuthTokenIssuer:                 envOrDefault("AUTH_TOKEN_ISSUER", "intelligent-report-system"),
 		AuthAccessSecret:                envOrDefault("AUTH_ACCESS_TOKEN_SECRET", "local_access_token_secret_change_me"),
 		AuthAccessTTL:                   15 * time.Minute,
 		AuthRefreshTTL:                  7 * 24 * time.Hour,
 		AuthBcryptCost:                  12,
-		AskDataQuestionRetentionMode:    strings.ToUpper(envOrDefault("ASKDATA_QUESTION_RETENTION_MODE", "HASH_ONLY")),
+		AskDataQuestionRetentionMode:    questionRetentionMode(),
 		AskDataQuestionRetentionTTL:     24 * time.Hour,
 		AskDataRunArtifactTTL:           30 * 24 * time.Hour,
 		AskDataClarificationTimeout:     30 * time.Minute,
-		AskDataQuestionEncryptionKey:    os.Getenv("ASKDATA_QUESTION_ENCRYPTION_KEY"),
+		AskDataQuestionEncryptionKey:    questionEncryptionKey(environment),
 		AskDataBudgetOverrides:          askDataBudgetOverrides,
 		AskDataNebulaAddresses:          parseUniqueCSV(envOrDefault("ASKDATA_NEBULA_ADDRESSES", "127.0.0.1:9669")),
 		AskDataNebulaSpace:              envOrDefault("ASKDATA_NEBULA_SPACE", "askdata_semantic"),
@@ -515,6 +531,23 @@ func loadApplication(process databaseProcess) (Config, error) {
 	return cfg, nil
 }
 
+func questionRetentionMode() string {
+	return strings.ToUpper(envOrDefault("ASKDATA_QUESTION_RETENTION_MODE", "ENCRYPTED_SHORT_TERM"))
+}
+
+func questionEncryptionKey(environment string) string {
+	if value := strings.TrimSpace(os.Getenv("ASKDATA_QUESTION_ENCRYPTION_KEY")); value != "" {
+		return value
+	}
+	if questionRetentionMode() != "ENCRYPTED_SHORT_TERM" {
+		return ""
+	}
+	if strings.EqualFold(environment, "development") || strings.EqualFold(environment, "test") {
+		return defaultAskDataQuestionKey
+	}
+	return ""
+}
+
 // Validate 检查服务启动所需的地址、密钥、超时和配额边界。
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.HTTPAddr) == "" {
@@ -620,8 +653,14 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.WarehouseDatabaseURL) == "" {
 		return errors.New("warehouse database URL must not be empty")
 	}
+	if strings.TrimSpace(c.WarehouseQueryDatabaseURL) == "" {
+		return errors.New("warehouse query database URL must not be empty")
+	}
 	if samePostgresDatabase(c.DatabaseURL, c.WarehouseDatabaseURL) {
 		return errors.New("control and warehouse PostgreSQL must use different physical endpoints")
+	}
+	if samePostgresDatabase(c.DatabaseURL, c.WarehouseQueryDatabaseURL) {
+		return errors.New("control and warehouse query PostgreSQL must use different physical endpoints")
 	}
 	if len(c.AuthAccessSecret) < 32 {
 		return errors.New("AUTH_ACCESS_TOKEN_SECRET must be at least 32 characters")
@@ -665,10 +704,9 @@ func (c Config) Validate() error {
 	if c.ReportExportRendererURL != "" && !validAIBaseURL(c.ReportExportRendererURL) {
 		return errors.New("REPORT_EXPORT_RENDERER_URL must use HTTPS or loopback HTTP")
 	}
-	if strings.EqualFold(c.Environment, "production") &&
-		(strings.TrimSpace(os.Getenv("REPORT_EXPORT_RENDERER_URL")) == "" ||
-			len(strings.TrimSpace(os.Getenv("REPORT_EXPORT_RENDERER_TOKEN"))) < 24) {
-		return errors.New("production report export renderer URL and token are required")
+	if strings.EqualFold(c.Environment, "production") && c.ReportExportRendererURL != "" &&
+		len(strings.TrimSpace(c.ReportExportRendererToken)) < 24 {
+		return errors.New("production report export renderer token must contain at least 24 characters")
 	}
 	credentialKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(c.DataSourceCredentialKey))
 	if err != nil || len(credentialKey) != 32 {

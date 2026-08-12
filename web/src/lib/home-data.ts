@@ -53,7 +53,13 @@ const workTypeLabels: Record<string, string> = {
   DECISION_APPROVAL: '决策审批',
   ACTION_ASSIGNED: '决策行动',
   DECISION_REVIEW_DUE: '决策复盘',
+  OUTCOME_REVIEW_DUE: '结果复盘',
+  ACTION_BLOCKED: '行动阻塞',
+  ACTION_OVERDUE: '行动逾期',
   REPORT_EXPORT_FAILED: '报告导出失败',
+  REPORT_DELIVERY_READY: '报告已送达',
+  REPORT_DELIVERY_FAILED: '报告分发失败',
+  RUNTIME_CONFIG_APPROVAL: '运行配置审批',
 }
 
 export function formatHomeTime(value: string, now = new Date()) {
@@ -109,14 +115,29 @@ export function decisionToHomeWork(item: DecisionSummary): HomeWorkItem {
 }
 
 export function workItemDestination(item: WorkInboxItem): string | undefined {
-  switch (item.type) {
+	const decisionMatch = item.sourceHref.match(/^\/decisions\/([0-9a-f-]{36})$/i)
+	const reportMatch = item.sourceHref.match(/^\/reports\/([0-9a-f-]{36})$/i)
+	switch (item.type) {
     case 'DOMAIN_ACCESS_APPROVAL': return '/domain-access'
     case 'DATA_SOURCE_PUBLICATION': return '/data-sources'
     case 'DATASET_PUBLICATION': return '/datasets'
     case 'DATA_REQUEST': return '/ask-data?workspace=data-requests'
-    case 'REPORT_EXPORT_FAILED': return /^\/reports\/[0-9a-f-]+$/i.test(item.sourceHref) ? item.sourceHref : '/reports'
-    default: return undefined
-  }
+		case 'FEEDBACK_TICKET': return `/semantic?workspace=feedback&ticketId=${encodeURIComponent(item.objectId)}`
+		case 'DECISION_APPROVAL':
+		case 'ACTION_ASSIGNED':
+		case 'ACTION_BLOCKED':
+		case 'ACTION_OVERDUE':
+		case 'DECISION_REVIEW_DUE':
+		case 'OUTCOME_REVIEW_DUE':
+			return decisionMatch ? `/decisions?decisionId=${encodeURIComponent(decisionMatch[1])}` : '/decisions'
+		case 'REPORT_EXPORT_FAILED':
+		case 'REPORT_DELIVERY_READY':
+		case 'REPORT_DELIVERY_FAILED':
+			return reportMatch ? item.sourceHref : '/reports'
+		case 'RUNTIME_CONFIG_APPROVAL':
+			return `/platform-management/runtime-config?versionId=${encodeURIComponent(item.objectId)}`
+		default: return undefined
+	}
 }
 
 export function workItemToHomeTask(item: WorkInboxItem, now = new Date()): HomeTaskItem {

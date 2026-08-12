@@ -49,17 +49,21 @@ export function EvidencePanel({ question, run, option, result, graphDegraded = f
   const ready = clarificationOptionReady(resolvedOption)
   const evidence = resolvedOption?.evidence
   const trust = evidence?.quality.scorePermillion === undefined ? '—' : (evidence.quality.scorePermillion / 10_000).toFixed(1)
-  const timeSpec = result ? renderTimeSpec(result.resolvedTimeSpec) : undefined
+  const timeSpec = result?.resolvedTimeSpec ? renderTimeSpec(result.resolvedTimeSpec) : undefined
 
   return <>
     <header className="ask-evidence-heading">
 			<div><span className={`ask-live-dot ${ready ? '' : 'is-pending'}`.trim()} /><span className="ask-evidence-heading-copy"><strong>证据与可信度</strong><small>{ready ? result ? '答案口径与证据同步' : '所选口径与证据同步' : '等待完整受控证据'}</small></span>{graphDegraded && <span className="ask-graph-degraded-badge"><ShareNetwork size={10} weight="bold" aria-hidden="true" />关系校验已降级</span>}</div>
       <span className={`ask-trust-score ${ready ? '' : 'is-pending'}`.trim()}>{trust}</span>
     </header>
-    {!ready || !resolvedOption || !evidence ? <div className="ask-live-evidence-state" role="status">
+    {!ready || !resolvedOption ? <div className="ask-live-evidence-state" role="status">
       <span><ShieldCheck size={22} weight="duotone" aria-hidden="true" /></span>
       <strong>该候选证据不完整</strong>
       <p>Owner、版本、实际时间与质量信息全部通过公共合同后才能继续。</p>
+    </div> : !evidence ? <div className="ask-live-evidence-state" role="status">
+      <span><CheckCircle size={22} weight="duotone" aria-hidden="true" /></span>
+      <strong>选择已受治理证据约束</strong>
+      <p>已关联 {resolvedOption.evidenceIds.length} 项不可变证据；提交后将展示最终指标、时间与质量口径。</p>
     </div> : <div className="ask-evidence-sections ask-clarification-evidence-sections">
       <Section id="intent" title="问题理解" icon={<Sparkle size={14} weight="fill" />}>
         <dl className="ask-evidence-grid ask-evidence-grid-single">
@@ -102,7 +106,7 @@ export function EvidencePanel({ question, run, option, result, graphDegraded = f
       <Section id="time" title="时间范围" badge={timeSpec ? '与结果一致' : undefined} icon={<CalendarBlank size={14} weight="fill" />}>
         {timeSpec && result ? <dl className="ask-evidence-grid">
           <div><dt>时间口径</dt><dd>{timeSpec.policyLabel}</dd></div>
-          <div><dt>业务时区</dt><dd>{result.resolvedTimeSpec.timezone}</dd></div>
+          <div><dt>业务时区</dt><dd>{result.resolvedTimeSpec?.timezone}</dd></div>
           <div className="is-wide"><dt>实际区间</dt><dd>{timeSpec.rangeLabel}</dd></div>
           <div className="is-wide"><dt>数据截止</dt><dd>{timeSpec.asOfLabel}</dd></div>
         </dl> : <dl className="ask-evidence-grid">

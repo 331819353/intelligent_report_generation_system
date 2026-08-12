@@ -65,6 +65,14 @@ func (executor GovernedQueryExecutor) ExecuteReportQuery(ctx context.Context, re
 	}
 	switch request.BindingMode {
 	case report.BindingSemanticIR:
+		// A pinned semantic query is released by the database only for an
+		// immutable report version, so it can never be executed as a draft. The
+		// planner already blocks it; refusing here too keeps the invariant local
+		// to the executor rather than depending on the caller having planned
+		// correctly.
+		if request.Draft {
+			return QueryResult{}, errors.New("semantic report bindings require a published version")
+		}
 		if executor.Semantic == nil || request.ReportID.Validate() != nil || request.ReportVersionID.Validate() != nil ||
 			(request.SourceQuestionRunID == "") == (request.CompilationArtifactID == "") ||
 			(request.SourceQuestionRunID != "" && request.SourceQuestionRunID.Validate() != nil) ||
@@ -98,7 +106,15 @@ func (executor GovernedQueryExecutor) ExecuteReportQuery(ctx context.Context, re
 		})
 		return enforceResultLimit(result, request.Limit, err)
 	case report.BindingDatasetField:
-		if executor.Dataset == nil || request.ReportID.Validate() != nil || request.ReportVersionID.Validate() != nil ||
+		// A dataset binding is fully described by the definition itself, so it is
+		// executable against a draft. A published run still requires its version
+		// pin; a draft run requires the absence of one, so a preview cannot be
+		// replayed as if it came from a version.
+		versionPinned := request.ReportVersionID.Validate() == nil
+		if request.Draft == versionPinned {
+			return QueryResult{}, errors.New("dataset report request has an inconsistent version pin")
+		}
+		if executor.Dataset == nil || request.ReportID.Validate() != nil ||
 			request.DatasetID.Validate() != nil || request.DatasetVersionID.Validate() != nil || request.DataContextID.Validate() != nil ||
 			len(request.Measures) == 0 {
 			return QueryResult{}, errors.New("dataset report runner is unavailable or the logical request is invalid")

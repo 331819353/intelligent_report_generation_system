@@ -198,6 +198,7 @@ export function DataSourceAssetsPage() {
   const snapshotTableForRoute = snapshotTables.find(item => item.id === tableId) || snapshotTables[0]
   const snapshotColumnsForRoute = snapshotTableForRoute.id === snapshotTables[0].id ? snapshotColumns : snapshotColumns.slice(0, 6).map((column, index) => ({ ...column, id: `${snapshotTableForRoute.id}-column-${index}`, tableId: snapshotTableForRoute.id }))
   const [source, setSource] = useState<DataSourceRecord | null>(designSnapshot ? snapshotSource : null)
+  const [canManage, setCanManage] = useState(designSnapshot)
   const [tables, setTables] = useState<DataSourceTableRecord[]>(designSnapshot ? snapshotTables : [])
   const [tableRecord, setTableRecord] = useState<DataSourceTableRecord | null>(designSnapshot ? snapshotTableForRoute : null)
   const [columns, setColumns] = useState<DataSourceColumnRecord[]>(designSnapshot ? snapshotColumnsForRoute : [])
@@ -230,6 +231,14 @@ export function DataSourceAssetsPage() {
         const loadedSource = await dataSourceAPI.get(sourceId)
         if (!active) return
         setSource(loadedSource)
+        const manageAllowed = designSnapshot || (await dataSourceAPI.evaluatePermission(sourceId, 'MANAGE')).allowed
+        if (!active) return
+        setCanManage(manageAllowed)
+        if (!manageAllowed && mode === 'discover') {
+          setNotice({ tone: 'error', message: '当前数据源由其他成员共享，你可以查看资产，但不能发现或导入数据表' })
+          navigate(`/data-sources/${sourceId}/assets${suffix}`, { replace: true })
+          return
+        }
         if (mode === 'catalog') {
           const [tablePage, activeJob] = await Promise.all([dataSourceAPI.tables(sourceId), params.get('jobId')
             ? dataSourceAPI.getMetadataJob(sourceId, params.get('jobId')!)
@@ -247,7 +256,7 @@ export function DataSourceAssetsPage() {
           setTables(imported.items)
         } else if (tableId) {
           const [loadedTable, loadedColumns, pendingSuggestions] = await Promise.all([
-            dataSourceAPI.table(tableId), dataSourceAPI.columns(tableId), dataSourceAPI.metadataSuggestions('PENDING'),
+            dataSourceAPI.table(tableId), dataSourceAPI.columns(tableId), manageAllowed ? dataSourceAPI.metadataSuggestions('PENDING') : Promise.resolve({ items: [], total: 0 }),
           ])
           if (!active) return
           const ids = new Set([loadedTable.id, ...loadedColumns.items.map(column => column.id)])
@@ -265,7 +274,7 @@ export function DataSourceAssetsPage() {
     }
     void load()
     return () => { active = false }
-  }, [designSnapshot, mode, params, sourceId, tableId])
+  }, [designSnapshot, mode, navigate, params, sourceId, suffix, tableId])
 
   useEffect(() => {
     if (designSnapshot || !job || !isJobActive(job)) return undefined
@@ -440,9 +449,9 @@ export function DataSourceAssetsPage() {
     titleMeta={<span className="asset-page-title-meta">{titleMeta}</span>}
     actions={<>
       <AppButton className="asset-back-button" onClick={mode === 'catalog' ? () => navigate(`/data-sources${suffix}`) : goCatalog}><ArrowLeft size={16} />{mode === 'catalog' ? '返回数据源' : '返回资产目录'}</AppButton>
-      {mode === 'catalog' && <><AppButton onClick={() => void refreshAssets()} disabled={busy === 'refresh' || isJobActive(visibleJob)}><ArrowClockwise size={16} />{busy === 'refresh' ? '提交中…' : '增量刷新'}</AppButton><AppButton variant="primary" onClick={goDiscover}><Plus size={16} weight="bold" />发现数据表</AppButton></>}
-      {mode === 'discover' && <AppButton variant="primary" disabled={busy === 'import' || selectedKeys.length === 0} onClick={() => void importSelected()}><ArrowRight size={16} />{busy === 'import' ? '正在提交…' : `导入 ${selectedKeys.length} 张表`}</AppButton>}
-      {mode === 'detail' && <><AppButton onClick={() => void openPreview()} disabled={busy === 'preview'}><Eye size={16} />预览样本</AppButton><AppButton onClick={() => void saveMetadata()} disabled={busy === 'save'}><FloppyDisk size={16} />{busy === 'save' ? '保存中…' : '保存'}</AppButton><AppButton variant="primary" onClick={() => void completeMetadata()} disabled={busy === 'complete' || tableReadiness < 100}><CheckCircle size={16} />完成资产化</AppButton></>}
+      {mode === 'catalog' && canManage && <><AppButton onClick={() => void refreshAssets()} disabled={busy === 'refresh' || isJobActive(visibleJob)}><ArrowClockwise size={16} />{busy === 'refresh' ? '提交中…' : '增量刷新'}</AppButton><AppButton variant="primary" onClick={goDiscover}><Plus size={16} weight="bold" />发现数据表</AppButton></>}
+      {mode === 'discover' && canManage && <AppButton variant="primary" disabled={busy === 'import' || selectedKeys.length === 0} onClick={() => void importSelected()}><ArrowRight size={16} />{busy === 'import' ? '正在提交…' : `导入 ${selectedKeys.length} 张表`}</AppButton>}
+      {mode === 'detail' && <><AppButton onClick={() => void openPreview()} disabled={busy === 'preview'}><Eye size={16} />预览样本</AppButton>{canManage && <><AppButton onClick={() => void saveMetadata()} disabled={busy === 'save'}><FloppyDisk size={16} />{busy === 'save' ? '保存中…' : '保存'}</AppButton><AppButton variant="primary" onClick={() => void completeMetadata()} disabled={busy === 'complete' || tableReadiness < 100}><CheckCircle size={16} />完成资产化</AppButton></>}</>}
     </>}
   >
     <PageNotice notice={notice} onClose={() => setNotice(null)} />
@@ -468,14 +477,14 @@ export function DataSourceAssetsPage() {
               <div className="asset-table-grid-head" role="row"><span role="columnheader">资产名称</span><span role="columnheader">物理表</span><span role="columnheader">字段</span><span role="columnheader">完善状态</span><span role="columnheader">敏感级</span><span role="columnheader">操作</span></div>
               <div className="asset-table-grid-body" role="rowgroup">
                 {filteredTables.map(item => <article className="asset-table-row" role="row" key={item.id}>
-                  <AppButton className="asset-table-row-open" aria-label={`完善${item.businessName || item.tableName}`} onClick={() => goDetail(item.id)}>
+                  <AppButton className="asset-table-row-open" aria-label={`${canManage ? '完善' : '查看'}${item.businessName || item.tableName}`} onClick={() => goDetail(item.id)}>
                     <span className="asset-table-name" role="cell"><span><Table size={20} weight="duotone" /></span><span><strong>{item.businessName || '待补充业务名称'}</strong><small>{item.businessDescription || '尚未填写业务说明'}</small></span></span>
                     <span role="cell"><strong>{item.schemaName}.{item.tableName}</strong><small>{item.tableType}</small></span>
                     <span role="cell"><strong>{item.columnCount}</strong><small>个字段</small></span>
                     <span role="cell"><em className={`asset-status is-${item.enrichmentStatus.toLowerCase()}`}>{enrichmentLabels[item.enrichmentStatus]}</em><small>{formatTime(item.lastSyncAt)}</small></span>
                     <span role="cell"><em className={`asset-sensitivity is-${item.sensitivityLevel.toLowerCase()}`}>{sensitivityLabels[item.sensitivityLevel]}</em><small>{item.visibility === 'TENANT_PUBLIC' ? '领域内共享' : '仅自己'}</small></span>
                   </AppButton>
-                  <AppButton link className="asset-row-action" aria-label={`进入${item.businessName || item.tableName}完善页`} onClick={() => goDetail(item.id)}>去完善<ArrowRight size={14} /></AppButton>
+                  <AppButton link className="asset-row-action" aria-label={`进入${item.businessName || item.tableName}${canManage ? '完善' : '查看'}页`} onClick={() => goDetail(item.id)}>{canManage ? '去完善' : '查看'}<ArrowRight size={14} /></AppButton>
                 </article>)}
                 {filteredTables.length === 0 && <div className="asset-page-state"><strong>没有符合条件的数据表</strong><span>调整筛选条件或从源库发现新表。</span></div>}
               </div>
@@ -484,7 +493,7 @@ export function DataSourceAssetsPage() {
 
           <aside className="asset-job-panel" aria-label="元数据处理任务">
             <header><div><span className="is-blue"><Sparkle size={18} weight="duotone" /></span><div><strong>元数据处理任务</strong><small>{visibleJob ? `任务 ${visibleJob.id.slice(-8)}` : '后台任务可断线恢复'}</small></div></div>{visibleJob && <em className={`asset-job-status is-${visibleJob.status.toLowerCase()}`}>{visibleJob.status === 'RUNNING' ? '处理中' : visibleJob.status === 'QUEUED' ? '排队中' : visibleJob.status === 'SUCCEEDED' ? '已完成' : visibleJob.status === 'PARTIAL' ? '部分完成' : '失败'}</em>}</header>
-            {!visibleJob ? <div className="asset-job-empty"><CheckCircle size={34} weight="duotone" /><strong>当前没有运行中的任务</strong><p>发现数据表或增量刷新后，可在这里持续查看处理阶段。</p><AppButton onClick={goDiscover}>发现新数据表</AppButton></div> : <>
+            {!visibleJob ? <div className="asset-job-empty"><CheckCircle size={34} weight="duotone" /><strong>当前没有运行中的任务</strong><p>{canManage ? '发现数据表或增量刷新后，可在这里持续查看处理阶段。' : '这是其他成员共享的数据源，当前以只读方式展示资产状态。'}</p>{canManage && <AppButton onClick={goDiscover}>发现新数据表</AppButton>}</div> : <>
               <section className="asset-job-progress"><div><strong>{visibleJob.kind === 'IMPORT' ? '导入并完善元数据' : '增量刷新元数据'}</strong><span>{visibleJob.total ? Math.round(visibleJob.completed / visibleJob.total * 100) : 0}%</span></div><progress max={Math.max(1, visibleJob.total)} value={visibleJob.completed} /><p>已处理 {visibleJob.completed} / {visibleJob.total} 张 · 成功 {visibleJob.succeeded} · 失败 {visibleJob.failed}</p>{visibleJob.currentTable && <small>当前：{visibleJob.currentTable}</small>}</section>
               <ol className="asset-job-stages">{['DISCOVERY', 'PERSISTENCE', 'LLM', 'COMPLETE'].map((stage, index) => {
                 const activeIndex = ['QUEUED', 'DISCOVERY', 'DIFF', 'SAMPLE', 'PERSISTENCE', 'LLM', 'COMPLETE'].indexOf(visibleJob.stage)
@@ -532,11 +541,11 @@ export function DataSourceAssetsPage() {
       </div> : tableRecord && <div className="asset-detail-layout">
         <aside className="asset-table-form">
           <header><span><Table size={20} weight="duotone" /></span><div><strong>表级业务元数据</strong><small>业务版本 v{tableRecord.businessVersion}</small></div></header>
-          <label>业务名称<input value={tableForm.businessName} onChange={event => setTableForm(current => ({ ...current, businessName: event.target.value }))} /></label>
-          <label>业务说明<textarea rows={4} value={tableForm.businessDescription} onChange={event => setTableForm(current => ({ ...current, businessDescription: event.target.value }))} placeholder="说明业务范围、粒度和使用边界" /></label>
-          <label>标签<input value={tableForm.tags} onChange={event => setTableForm(current => ({ ...current, tags: event.target.value }))} placeholder="使用英文逗号分隔" /></label>
-          <div className="asset-form-grid"><label>敏感级<select value={tableForm.sensitivityLevel} onChange={event => setTableForm(current => ({ ...current, sensitivityLevel: event.target.value as DataSourceTableRecord['sensitivityLevel'] }))}>{Object.entries(sensitivityLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>可见范围<select value={tableForm.visibility} onChange={event => setTableForm(current => ({ ...current, visibility: event.target.value as DataSourceTableRecord['visibility'] }))}><option value="PRIVATE">仅自己</option><option value="TENANT_PUBLIC">领域内共享</option></select></label></div>
-          <label className="asset-lock-control"><input type="checkbox" checked={tableForm.manualLocked} onChange={event => setTableForm(current => ({ ...current, manualLocked: event.target.checked }))} /><span><strong>锁定人工定义</strong><small>后续 AI 刷新不覆盖当前表级业务元数据</small></span></label>
+          <label>业务名称<input disabled={!canManage} value={tableForm.businessName} onChange={event => setTableForm(current => ({ ...current, businessName: event.target.value }))} /></label>
+          <label>业务说明<textarea disabled={!canManage} rows={4} value={tableForm.businessDescription} onChange={event => setTableForm(current => ({ ...current, businessDescription: event.target.value }))} placeholder="说明业务范围、粒度和使用边界" /></label>
+          <label>标签<input disabled={!canManage} value={tableForm.tags} onChange={event => setTableForm(current => ({ ...current, tags: event.target.value }))} placeholder="使用英文逗号分隔" /></label>
+          <div className="asset-form-grid"><label>敏感级<select disabled={!canManage} value={tableForm.sensitivityLevel} onChange={event => setTableForm(current => ({ ...current, sensitivityLevel: event.target.value as DataSourceTableRecord['sensitivityLevel'] }))}>{Object.entries(sensitivityLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>可见范围<select disabled={!canManage} value={tableForm.visibility} onChange={event => setTableForm(current => ({ ...current, visibility: event.target.value as DataSourceTableRecord['visibility'] }))}><option value="PRIVATE">仅自己</option><option value="TENANT_PUBLIC">领域内共享</option></select></label></div>
+          <label className="asset-lock-control"><input type="checkbox" disabled={!canManage} checked={tableForm.manualLocked} onChange={event => setTableForm(current => ({ ...current, manualLocked: event.target.checked }))} /><span><strong>锁定人工定义</strong><small>{canManage ? '后续 AI 刷新不覆盖当前表级业务元数据' : '当前为共享资产只读视图'}</small></span></label>
           <section className="asset-technical-facts"><strong>技术身份</strong><dl><div><dt>物理表</dt><dd>{tableRecord.schemaName}.{tableRecord.tableName}</dd></div><div><dt>类型</dt><dd>{tableRecord.tableType}</dd></div><div><dt>字段</dt><dd>{tableRecord.columnCount}</dd></div><div><dt>结构版本</dt><dd>v{tableRecord.metadataVersion}</dd></div></dl></section>
         </aside>
 
@@ -547,23 +556,23 @@ export function DataSourceAssetsPage() {
             <div className="asset-column-head" role="row"><span role="columnheader">技术字段</span><span role="columnheader">业务名称</span><span role="columnheader">业务说明</span><span role="columnheader">语义类型</span><span role="columnheader">敏感级</span></div>
             <div className="asset-column-body" role="rowgroup">{columns.filter(column => !keyword.trim() || `${column.columnName} ${column.businessName}`.toLocaleLowerCase().includes(keyword.trim().toLocaleLowerCase())).map(column => <div className="asset-column-row" role="row" key={column.id}>
               <span role="cell"><strong>{column.columnName}</strong><small>{column.nativeType}{column.nullable ? ' · 可空' : ' · 必填'}</small></span>
-              <span role="cell"><input aria-label={`${column.columnName}业务名称`} value={column.businessName} onChange={event => updateColumn(column.id, { businessName: event.target.value })} /></span>
-              <span role="cell"><input aria-label={`${column.columnName}业务说明`} value={column.businessDescription} onChange={event => updateColumn(column.id, { businessDescription: event.target.value })} /></span>
-              <span role="cell"><select aria-label={`${column.columnName}语义类型`} value={column.semanticType} onChange={event => updateColumn(column.id, { semanticType: event.target.value })}>{semanticTypes.map(value => <option key={value || 'none'} value={value}>{value || '未设置'}</option>)}</select></span>
-              <span role="cell"><select aria-label={`${column.columnName}敏感级`} value={column.sensitivityLevel} onChange={event => updateColumn(column.id, { sensitivityLevel: event.target.value as DataSourceColumnRecord['sensitivityLevel'] })}>{Object.entries(sensitivityLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></span>
+              <span role="cell"><input disabled={!canManage} aria-label={`${column.columnName}业务名称`} value={column.businessName} onChange={event => updateColumn(column.id, { businessName: event.target.value })} /></span>
+              <span role="cell"><input disabled={!canManage} aria-label={`${column.columnName}业务说明`} value={column.businessDescription} onChange={event => updateColumn(column.id, { businessDescription: event.target.value })} /></span>
+              <span role="cell"><select disabled={!canManage} aria-label={`${column.columnName}语义类型`} value={column.semanticType} onChange={event => updateColumn(column.id, { semanticType: event.target.value })}>{semanticTypes.map(value => <option key={value || 'none'} value={value}>{value || '未设置'}</option>)}</select></span>
+              <span role="cell"><select disabled={!canManage} aria-label={`${column.columnName}敏感级`} value={column.sensitivityLevel} onChange={event => updateColumn(column.id, { sensitivityLevel: event.target.value as DataSourceColumnRecord['sensitivityLevel'] })}>{Object.entries(sensitivityLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></span>
             </div>)}</div>
           </div>
-          <footer><span><CheckCircle size={16} />保存使用业务版本号进行并发冲突保护</span><AppButton variant="primary" disabled={busy === 'save'} onClick={() => void saveMetadata()}><FloppyDisk size={16} />保存全部变更</AppButton></footer>
+          <footer><span><CheckCircle size={16} />{canManage ? '保存使用业务版本号进行并发冲突保护' : '共享数据源只读展示，不会修改所有者资产'}</span>{canManage && <AppButton variant="primary" disabled={busy === 'save'} onClick={() => void saveMetadata()}><FloppyDisk size={16} />保存全部变更</AppButton>}</footer>
         </section>
 
-        <aside className="asset-ai-review">
+        {canManage && <aside className="asset-ai-review">
           <header><span><Sparkle size={19} weight="duotone" /></span><div><strong>AI 建议复核</strong><small>{suggestions.length} 项需要人工确认</small></div></header>
           <div className="asset-ai-suggestion-list">{suggestions.map(suggestion => {
             const target = suggestion.targetType === 'TABLE' ? tableRecord.tableName : columns.find(column => column.id === suggestion.targetId)?.columnName || '字段'
             return <article key={suggestion.id}><header><span>{suggestion.targetType === 'TABLE' ? '表' : '字段'} · {target}</span><em>{Math.round(suggestion.confidence * 100)}%</em></header><strong>{suggestion.value.businessName}</strong><p>{suggestion.value.businessDescription}</p><div>{suggestion.value.tags.map(tag => <span key={tag}>{tag}</span>)}</div><footer><AppButton disabled={busy === `suggestion:${suggestion.id}`} onClick={() => void decideSuggestion(suggestion, 'REJECT')}>拒绝</AppButton><AppButton variant="primary" disabled={busy === `suggestion:${suggestion.id}`} onClick={() => void decideSuggestion(suggestion, 'ACCEPT')}>接受建议</AppButton></footer></article>
           })}{suggestions.length === 0 && <div className="asset-ai-empty"><CheckCircle size={30} weight="duotone" /><strong>暂无待确认建议</strong><p>高置信度建议已自动应用，人工定义始终拥有更高优先级。</p></div>}</div>
           <section className="asset-detail-next"><Sparkle size={17} weight="fill" /><span><strong>下一步：进入数据集建模</strong><small>表和字段完善度达到 100% 后，可作为稳定输入创建数据集。</small></span><AppButton variant="primary" disabled={tableReadiness < 100} onClick={() => navigate(`/datasets${designSnapshot ? '?snapshot=assets' : `?sourceTableId=${encodeURIComponent(tableRecord.id)}`}`)}>去建模<ArrowRight size={14} /></AppButton></section>
-        </aside>
+        </aside>}
       </div>}
     </main>
 

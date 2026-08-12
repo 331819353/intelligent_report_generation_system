@@ -70,13 +70,53 @@ type profileStore interface {
 	LoadCurrentProfile(context.Context, string, string, string) (CurrentProfile, error)
 }
 
+type profileUpdateStore interface {
+	UpdateCurrentProfile(context.Context, string, string, string) error
+}
+
+type passwordChangeStore interface {
+	ChangePassword(context.Context, string, string, string) error
+}
+
 type CurrentProfile struct {
 	UserID      string   `json:"userId"`
+	EmployeeNo  string   `json:"employeeNo"`
+	Email       string   `json:"email"`
 	DisplayName string   `json:"displayName"`
 	AvatarURL   string   `json:"avatarUrl"`
 	Status      string   `json:"status"`
 	DomainID    string   `json:"domainId,omitempty"`
 	Roles       []string `json:"roles"`
+}
+
+// UpdateCurrentProfile 修改当前用户可自助维护的基础资料。
+func (s *Service) UpdateCurrentProfile(ctx context.Context, tenantID, userID, displayName string) error {
+	store, ok := s.store.(profileUpdateStore)
+	displayName = strings.TrimSpace(displayName)
+	if !ok || displayName == "" || utf8.RuneCountInString(displayName) > 100 {
+		return ErrInvalidRegistration
+	}
+	return store.UpdateCurrentProfile(ctx, tenantID, userID, displayName)
+}
+
+// ChangePassword 校验旧密码后轮换密码并撤销该用户全部活动会话。
+func (s *Service) ChangePassword(ctx context.Context, tenantID, userID, currentPassword, newPassword string) error {
+	store, ok := s.store.(passwordChangeStore)
+	if !ok || currentPassword == "" || !strongPassword(newPassword) {
+		return ErrWeakPassword
+	}
+	user, err := s.store.FindUserByID(ctx, tenantID, userID)
+	if err != nil || !s.passwords.Verify(user.PasswordHash, currentPassword) {
+		return ErrInvalidCredentials
+	}
+	if s.passwords.Verify(user.PasswordHash, newPassword) {
+		return ErrWeakPassword
+	}
+	hash, err := s.passwords.Hash(newPassword)
+	if err != nil {
+		return err
+	}
+	return store.ChangePassword(ctx, tenantID, userID, hash)
 }
 
 const compatibilityDomainID = "00000000-0000-0000-0000-000000000000"

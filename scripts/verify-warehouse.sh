@@ -49,7 +49,7 @@ SELECT has_schema_privilege(:'worker_user','warehouse_dwd','CREATE')
 \if :worker_can_build
 \else
   \echo 'warehouse worker cannot create DIM/DWD/DWS/ADS relations'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SELECT has_schema_privilege(:'reader_user','warehouse_published','USAGE')
@@ -59,7 +59,7 @@ SELECT has_schema_privilege(:'reader_user','warehouse_published','USAGE')
 \if :reader_is_read_only
 \else
   \echo 'warehouse reader privileges are unsafe'
-  \quit 1
+  SELECT 1/0;
 \endif
 
 SQL

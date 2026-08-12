@@ -57,6 +57,24 @@ export type WorkInboxItem = {
   version: string
 }
 
+export type WorkItemCommand = {
+  action: string
+  method: string
+  href: string
+  idempotencyRequired: boolean
+  fixedValues?: Record<string, string>
+  fields?: Array<{ name: string; type: string; required: boolean }>
+}
+
+export type WorkItemDetail = {
+  item: WorkInboxItem
+  actionContext: {
+    expectedVersion: string
+    references?: Record<string, string>
+    commands: WorkItemCommand[]
+  }
+}
+
 function idempotencyHeaders() {
   return { 'Idempotency-Key': crypto.randomUUID() }
 }
@@ -68,6 +86,12 @@ export const homeAPI = {
 
   listSavedQuestions() {
     return apiRequest<{ items: SavedQuestionSummary[] }>('/v1/askdata/saved-questions')
+  },
+
+  openSavedQuestion(id: string) {
+    return apiRequest<{ runId: string; conversationId: string; replayed: boolean }>(`/v1/askdata/saved-questions/${encodeURIComponent(id)}/open`, {
+      method: 'POST', headers: idempotencyHeaders(),
+    })
   },
 
   listDecisions(limit = 5) {
@@ -86,5 +110,9 @@ export const homeAPI = {
       method: 'POST',
       headers: idempotencyHeaders(),
     })
+  },
+
+  getWorkItemDetail(item: Pick<WorkInboxItem, 'type' | 'objectId'>) {
+    return apiRequest<WorkItemDetail>(`/v1/work-items/${encodeURIComponent(item.type)}/${encodeURIComponent(item.objectId)}`)
   },
 }

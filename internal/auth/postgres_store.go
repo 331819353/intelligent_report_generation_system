@@ -43,7 +43,7 @@ func (s *PostgresStore) FindUserByID(ctx context.Context, tenantID, userID strin
 func (s *PostgresStore) LoadCurrentProfile(ctx context.Context, tenantID, userID, domainID string) (CurrentProfile, error) {
 	result := CurrentProfile{Roles: []string{}, DomainID: domainID}
 	err := database.WithTenantTx(database.WithoutAccessContext(ctx), s.pool, tenantID, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `SELECT id::text,display_name,status::text FROM platform.users WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL`, tenantID, userID).Scan(&result.UserID, &result.DisplayName, &result.Status); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT id::text,employee_no::text,email::text,display_name,COALESCE(attributes->>'avatarUrl',''),status::text FROM platform.users WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL`, tenantID, userID).Scan(&result.UserID, &result.EmployeeNo, &result.Email, &result.DisplayName, &result.AvatarURL, &result.Status); err != nil {
 			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT role_code FROM (
@@ -65,6 +65,31 @@ func (s *PostgresStore) LoadCurrentProfile(ctx context.Context, tenantID, userID
 		return rows.Err()
 	})
 	return result, err
+}
+
+func (s *PostgresStore) UpdateCurrentProfile(ctx context.Context, tenantID, userID, displayName string) error {
+	return database.WithTenantTx(database.WithoutAccessContext(ctx), s.pool, tenantID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE platform.users SET display_name=$1,updated_at=now() WHERE tenant_id=$2 AND id=$3 AND status='ACTIVE' AND deleted_at IS NULL`, displayName, tenantID, userID)
+		if err != nil || tag.RowsAffected() != 1 {
+			return errors.Join(err, errors.New("active user not found"))
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id,detail) VALUES($1,$2,'UPDATE_PROFILE','USER',$2::text,jsonb_build_object('displayName',$3::text))`, tenantID, userID, displayName)
+		return err
+	})
+}
+
+func (s *PostgresStore) ChangePassword(ctx context.Context, tenantID, userID, passwordHash string) error {
+	return database.WithTenantTx(database.WithoutAccessContext(ctx), s.pool, tenantID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE platform.users SET password_hash=$1,token_version=token_version+1,updated_at=now() WHERE tenant_id=$2 AND id=$3 AND status='ACTIVE' AND deleted_at IS NULL`, passwordHash, tenantID, userID)
+		if err != nil || tag.RowsAffected() != 1 {
+			return errors.Join(err, errors.New("active user not found"))
+		}
+		if _, err = tx.Exec(ctx, `UPDATE platform.auth_sessions SET revoked_at=COALESCE(revoked_at,now()),revoke_reason=CASE WHEN revoked_at IS NULL THEN 'PASSWORD_CHANGED' ELSE revoke_reason END WHERE tenant_id=$1 AND user_id=$2`, tenantID, userID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO platform.audit_logs(tenant_id,actor_user_id,action,resource_type,resource_id) VALUES($1,$2,'CHANGE_PASSWORD','USER',$2::text)`, tenantID, userID)
+		return err
+	})
 }
 
 // RegisterUser 原子创建账号及受限基础身份；领域归属必须另行申请或分配。

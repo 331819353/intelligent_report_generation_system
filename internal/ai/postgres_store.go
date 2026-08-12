@@ -68,7 +68,8 @@ func (s *PostgresStore) Start(ctx context.Context, input StartRequest) (record R
 			return err
 		}
 
-		// 仅成功请求采用可信实耗；失败或取消也可能产生供应商费用，因此按预留量失败关闭。
+		// 成功请求采用可信 Provider 实耗；运行中、失败或取消请求可能仍产生供应商费用，
+		// 因此继续按预留量进行准入和失败关闭计量。
 		var requestsToday, tokensThisMonth, costThisMonth int64
 		if err := tx.QueryRow(ctx, `WITH boundaries AS (
 			SELECT

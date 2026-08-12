@@ -9,9 +9,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"intelligent-report-generation-system/internal/access"
 	"intelligent-report-generation-system/internal/auth"
 	"intelligent-report-generation-system/internal/datasource"
+	"intelligent-report-generation-system/internal/platform/database"
 )
 
 type tableSampler interface {
@@ -25,11 +27,23 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 	if len(samplers) > 0 {
 		sampler = samplers[0]
 	}
-	protect := func(action string, next http.Handler) http.Handler {
-		return auth.RequireAccessToken(authService, access.Require(permissions, "DATA_ASSET", action, nil, next))
+	protect := func(action string, objectID func(*http.Request) string, next http.Handler) http.Handler {
+		return auth.RequireAccessToken(authService, access.Require(permissions, "DATA_ASSET", action, objectID, next))
+	}
+	tableID := func(request *http.Request) string { return request.PathValue("id") }
+	columnTableID := func(request *http.Request) string {
+		claims, ok := auth.ClaimsFromContext(request.Context())
+		if !ok {
+			return ""
+		}
+		id := "00000000-0000-0000-0000-000000000000"
+		_ = database.WithTenantTx(request.Context(), repo.pool, claims.TenantID, func(tx pgx.Tx) error {
+			return tx.QueryRow(request.Context(), `SELECT table_id::text FROM platform.metadata_columns WHERE id=$1`, request.PathValue("id")).Scan(&id)
+		})
+		return id
 	}
 	list := func(publicOnly bool) http.Handler {
-		return protect("READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		return protect("READ", nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims, _ := auth.ClaimsFromContext(r.Context())
 			q := r.URL.Query()
 			limit := intParam(q.Get("limit"), 50)
@@ -51,7 +65,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 	}
 	mux.Handle("GET /api/v1/assets/tables", list(false))
 	mux.Handle("GET /api/v1/assets/catalog", list(true))
-	mux.Handle("GET /api/v1/assets/tables/{id}", protect("READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/v1/assets/tables/{id}", protect("READ", tableID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		item, err := repo.GetTable(r.Context(), c.TenantID, r.PathValue("id"))
 		if err != nil {
@@ -60,7 +74,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 		}
 		writeJSON(w, 200, item)
 	})))
-	mux.Handle("GET /api/v1/assets/tables/{id}/columns", protect("READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/v1/assets/tables/{id}/columns", protect("READ", tableID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		if _, err := repo.GetTable(r.Context(), c.TenantID, r.PathValue("id")); err != nil {
 			writeError(w, 404, "ASSET_NOT_FOUND", "table asset not found")
@@ -73,7 +87,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 		}
 		writeJSON(w, 200, map[string]any{"items": items})
 	})))
-	mux.Handle("GET /api/v1/assets/tables/{id}/preview", protect("READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/v1/assets/tables/{id}/preview", protect("READ", tableID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if sampler == nil {
 			writeError(w, 503, "ASSET_PREVIEW_UNAVAILABLE", "table preview is not available")
 			return
@@ -105,7 +119,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 		}
 		writeJSON(w, 200, result)
 	})))
-	mux.Handle("PUT /api/v1/assets/tables/{id}/business-metadata", protect("MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("PUT /api/v1/assets/tables/{id}/business-metadata", protect("MANAGE", tableID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		var input BusinessMetadata
 		if !decode(w, r, &input) {
@@ -118,7 +132,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 		}
 		writeJSON(w, 200, item)
 	})))
-	mux.Handle("PUT /api/v1/assets/columns/{id}/business-metadata", protect("MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("PUT /api/v1/assets/columns/{id}/business-metadata", protect("MANAGE", columnTableID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		var input BusinessMetadata
 		if !decode(w, r, &input) {
@@ -131,7 +145,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 		}
 		writeJSON(w, 200, item)
 	})))
-	mux.Handle("POST /api/v1/assets/tables/{id}/manual-completion", protect("MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/assets/tables/{id}/manual-completion", protect("MANAGE", tableID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		var input ManualCompletionInput
 		if !decode(w, r, &input) {
@@ -150,7 +164,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 		}
 		writeJSON(w, http.StatusOK, item)
 	})))
-	mux.Handle("POST /api/v1/assets/tables/{id}/disable", protect("MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/assets/tables/{id}/disable", protect("MANAGE", tableID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		item, err := repo.SetTableManagementStatus(r.Context(), c.TenantID, c.Subject, r.PathValue("id"), "DISABLED")
 		if err != nil {
@@ -159,7 +173,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 		}
 		writeJSON(w, 200, item)
 	})))
-	mux.Handle("POST /api/v1/assets/tables/{id}/enable", protect("MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/assets/tables/{id}/enable", protect("MANAGE", tableID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		item, err := repo.SetTableManagementStatus(r.Context(), c.TenantID, c.Subject, r.PathValue("id"), "ENABLED")
 		if err != nil {
@@ -168,7 +182,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 		}
 		writeJSON(w, 200, item)
 	})))
-	mux.Handle("DELETE /api/v1/assets/tables/{id}", protect("MANAGE", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("DELETE /api/v1/assets/tables/{id}", protect("MANAGE", tableID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		if err := repo.DeleteTableAsset(r.Context(), c.TenantID, c.Subject, r.PathValue("id")); err != nil {
 			writeError(w, 409, "ASSET_DELETE_FAILED", "failed to delete table asset")
@@ -176,7 +190,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})))
-	mux.Handle("GET /api/v1/assets/tables/{id}/impact", protect("READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/v1/assets/tables/{id}/impact", protect("READ", tableID, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		items, err := repo.Impact(r.Context(), c.TenantID, r.PathValue("id"))
 		if err != nil {
@@ -185,7 +199,7 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 		}
 		writeJSON(w, 200, map[string]any{"items": items, "total": len(items)})
 	})))
-	mux.Handle("GET /api/v1/metadata-diffs", protect("READ", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/v1/metadata-diffs", protect("READ", nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, _ := auth.ClaimsFromContext(r.Context())
 		limit := intParam(r.URL.Query().Get("limit"), 100)
 		if limit < 1 || limit > 500 {

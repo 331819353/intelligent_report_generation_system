@@ -2,8 +2,13 @@ import type { ClarificationEvidence, ClarificationOption } from '../../lib/ask-d
 
 export function clarificationOptionReady(option: ClarificationOption | undefined): boolean {
   const evidence = option?.evidence
-  if (!option || !evidence || option.evidenceIds.length === 0) return false
-  if (!option.optionId.trim() || !option.label.trim() || !evidence.definition.trim()) return false
+  if (!option || option.evidenceIds.length === 0 || !option.optionId.trim() || !option.label.trim()) return false
+  // Every submitted option is re-checked by the API against the immutable
+  // completion artifact and its governed evidence references. Detailed public
+  // evidence is optional enrichment: time-range and retry choices often have
+  // policy evidence without a metric-owner card, and must not dead-end here.
+  if (!evidence) return true
+  if (!evidence.definition.trim()) return false
   if (!evidence.owner.id.trim() || !evidence.owner.displayName.trim()) return false
   if (!evidence.semanticVersion.trim() || !evidence.semanticStatus.trim()) return false
   if (!evidence.time.label.trim() || !evidence.time.start.trim() || !evidence.time.end.trim() || !evidence.time.timezone.trim()) return false

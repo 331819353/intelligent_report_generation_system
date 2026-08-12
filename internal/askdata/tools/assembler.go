@@ -3,7 +3,9 @@ package tools
 import (
 	"context"
 	"fmt"
+	"sync"
 
+	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/orchestrator"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
 )
@@ -19,6 +21,7 @@ type Assembler struct {
 	services  Services
 	cognition *CognitionRunner
 	options   orchestrator.LoopOptions
+	bindings  sync.Map
 }
 
 func NewAssembler(
@@ -64,10 +67,19 @@ func (assembler *Assembler) Assemble(
 	if err != nil {
 		return nil, toolhost.AuthorizationContext{}, err
 	}
+	assembler.bindings.Store(request.RunID, binding)
 	return loop, toolhost.AuthorizationContext{
 		Scope: request.Scope, DomainID: request.DomainID,
 		Permissions: questionRunPermissions(),
 	}, nil
+}
+
+// ReleaseRun removes the only in-memory copy of result rows once a run has
+// reached a terminal state or failed closed.
+func (assembler *Assembler) ReleaseRun(runID askdata.ID) {
+	if assembler != nil {
+		assembler.bindings.Delete(runID)
+	}
 }
 
 // questionRunPermissions is the tool permission set a question run may use.
@@ -95,3 +107,4 @@ func questionRunPermissions() []toolhost.Permission {
 
 // Compile-time proof that the assembler satisfies what the worker requires.
 var _ orchestrator.LoopAssembler = (*Assembler)(nil)
+var _ orchestrator.RunAnswerFinalizer = (*Assembler)(nil)

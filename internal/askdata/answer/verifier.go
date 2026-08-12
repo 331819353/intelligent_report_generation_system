@@ -29,10 +29,13 @@ type VerifyFailure struct {
 }
 
 type VerifyReport struct {
-	Passed                bool            `json:"passed"`
-	VerifierVersion       string          `json:"verifierVersion"`
-	PolicyWordlistVersion string          `json:"policyWordlistVersion"`
-	Failures              []VerifyFailure `json:"failures"`
+	Passed                bool   `json:"passed"`
+	VerifierVersion       string `json:"verifierVersion"`
+	PolicyWordlistVersion string `json:"policyWordlistVersion"`
+	// Source records which catalog grade backed this verification, so a
+	// dataset-verified narrative is never presented as a certified-metric one.
+	Source   BindingSource   `json:"source,omitempty"`
+	Failures []VerifyFailure `json:"failures"`
 }
 
 type ReleaseVerifierPolicy struct {
@@ -50,7 +53,11 @@ type VerificationNarrative struct {
 	VerifierVersion       string
 	PolicyWordlistVersion string
 	ReferenceHash         askdata.ContentHash
-	SemanticReleaseID     askdata.ID
+	// Source and CatalogID pin the object catalog the prose was written
+	// against. They must match the BindingEvidence supplied at verification,
+	// so a narrative cannot be checked against a catalog it never saw.
+	Source    BindingSource
+	CatalogID askdata.ID
 }
 
 type Verifier struct {
@@ -98,7 +105,9 @@ func (verifier *Verifier) Verify(
 		VerifierVersion:       artifact.Verification.VerifierVersion,
 		PolicyWordlistVersion: artifact.Verification.PolicyWordlistVersion,
 		ReferenceHash:         artifact.Provenance.ResultHash,
-		SemanticReleaseID:     artifact.Provenance.SemanticReleaseID,
+		// An Ask Data answer is always written against its semantic release.
+		Source:    BindingSourceSemanticRelease,
+		CatalogID: artifact.Provenance.SemanticReleaseID,
 	}, result, binding, timeSpec)
 }
 
@@ -117,6 +126,7 @@ func (verifier *Verifier) VerifyNarrative(
 	}
 	report.VerifierVersion = VerifierVersion
 	report.PolicyWordlistVersion = verifier.policy.Version
+	report.Source = binding.Source
 	text := narrative.Text
 	if narrative.VerifierVersion != VerifierVersion ||
 		narrative.PolicyWordlistVersion != verifier.policy.Version {
@@ -125,10 +135,11 @@ func (verifier *Verifier) VerifyNarrative(
 			Expected: []string{VerifierVersion, verifier.policy.Version},
 		})
 	}
-	if narrative.ReferenceHash != result.ReferenceHash || narrative.SemanticReleaseID != binding.SemanticReleaseID {
+	if narrative.ReferenceHash != result.ReferenceHash ||
+		narrative.Source != binding.Source || narrative.CatalogID != binding.CatalogID() {
 		report.Failures = append(report.Failures, VerifyFailure{
 			Element: ElementAssertion, Span: shared.TextSpan{}, Reason: AnswerExternalFact,
-			Expected: []string{"result reference hash and semantic release pinned by the narrative artifact"},
+			Expected: []string{"result reference hash and object catalog pinned by the narrative artifact"},
 		})
 	}
 	if err := shared.ValidateCitations(text, narrative.Citations); err != nil {

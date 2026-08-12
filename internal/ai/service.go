@@ -179,6 +179,21 @@ func (s *Service) FallbackModels() []string {
 	return []string{}
 }
 
+// ConfiguredModels returns the provider pool's stable, allowlisted model
+// order. It deliberately exposes names only, never credentials or endpoints.
+func (s *Service) ConfiguredModels() []string {
+	if s == nil || s.provider == nil {
+		return []string{}
+	}
+	if catalog, ok := s.provider.(ModelProviderCatalog); ok {
+		return append([]string(nil), catalog.Models()...)
+	}
+	if model := strings.TrimSpace(s.provider.Model()); model != "" {
+		return []string{model}
+	}
+	return []string{}
+}
+
 // Invoke 在发送前最小化并脱敏输入，然后执行租户配额预留、有限重试和审计收口。
 func (s *Service) Invoke(ctx context.Context, input Invocation) (InvocationResult, error) {
 	if !s.Configured() {

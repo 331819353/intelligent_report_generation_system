@@ -207,8 +207,11 @@ func (repository *PostgresRepository) Transition(ctx context.Context, identity I
 }
 
 type Metrics struct {
-	Total, Rejected, Closed, Overdue int64
-	ClosureRate                      float64
+	Total       int64   `json:"total"`
+	Rejected    int64   `json:"rejected"`
+	Closed      int64   `json:"closed"`
+	Overdue     int64   `json:"overdue"`
+	ClosureRate float64 `json:"closureRate"`
 }
 
 func (repository *PostgresRepository) Metrics(ctx context.Context, identity Identity, now time.Time) (Metrics, error) {

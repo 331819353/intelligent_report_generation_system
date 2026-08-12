@@ -46,8 +46,18 @@ test('keeps answer verification visible before the terminal result', () => {
 test('marks terminal blocked state without leaking its raw code', () => {
   const events = [event(1, 'RECEIVED'), event(2, 'BINDING'), event(3, 'BLOCKED')]
   const items = buildConversationProgress('BLOCKED', events)
-  assert.equal(items.at(-1)?.status, 'blocked')
-  assert.equal(items.at(-1)?.label, '完成')
+  assert.equal(items.find(item => item.key === 'binding')?.status, 'blocked')
+  assert.equal(items.find(item => item.key === 'graph')?.status, 'pending')
+  assert.equal(items.at(-1)?.status, 'pending')
+})
+
+test('does not mark future steps complete when retrieval is blocked', () => {
+  const events = [event(1, 'RECEIVED'), event(2, 'AUTHORIZED'), event(3, 'UNDERSTANDING'), event(4, 'RETRIEVING'), event(5, 'BLOCKED')]
+  const items = buildConversationProgress('BLOCKED', events)
+  assert.deepEqual(items.map(item => item.status), [
+    'complete', 'complete', 'complete', 'blocked', 'pending',
+    'pending', 'pending', 'pending', 'pending', 'pending',
+  ])
 })
 
 test('uses the latest event after a bounded correction', () => {

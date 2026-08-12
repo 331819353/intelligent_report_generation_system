@@ -1,6 +1,8 @@
 import { PropsWithChildren, useEffect, useState } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
 import { administrationAPI } from '../lib/administration'
+import { bindBusinessDomain, switchBusinessDomain } from '../lib/auth'
+import { clearDomain, currentDomain } from '../lib/domain-context'
 
 /**
  * 数据配置页要求明确选择活动领域。平台管理员无需领域成员关系即可进入任意
@@ -17,11 +19,24 @@ export function RequireBusinessDomain({ children }: PropsWithChildren) {
     void Promise.all([
       administrationAPI.canManage(),
       administrationAPI.listDomains(),
-    ]).then(([platformAdministrator, domains]) => {
-      if (!cancelled) {
-        const hasActiveDomain = domains.some(domain => domain.status === 'ACTIVE')
-        setDestination(hasActiveDomain ? 'allowed' : platformAdministrator ? 'platform' : 'access')
+    ]).then(async ([platformAdministrator, domains]) => {
+      const activeDomains = domains.filter(domain => domain.status === 'ACTIVE')
+      if (activeDomains.length === 0) {
+        if (!cancelled) setDestination(platformAdministrator ? 'platform' : 'access')
+        return
       }
+
+      const stored = currentDomain()
+      const selected = activeDomains.find(domain => domain.id === stored?.id)
+        ?? activeDomains.find(domain => domain.default)
+        ?? activeDomains[0]
+      if (stored && stored.id !== selected.id) clearDomain()
+
+      // 在业务页面挂载前完成服务端会话绑定和本地请求头上下文写入，避免页面
+      // 首批接口与侧栏初始化竞速而随机返回 BUSINESS_DOMAIN_REQUIRED。
+      if (stored?.id === selected.id) await bindBusinessDomain(selected.id)
+      else await switchBusinessDomain(selected)
+      if (!cancelled) setDestination('allowed')
     }).catch(() => {
       if (!cancelled) setDestination('access')
     })

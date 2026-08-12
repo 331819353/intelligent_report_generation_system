@@ -51,30 +51,30 @@ func DefaultRunBudget(class RunBudgetClass) (RunBudget, error) {
 	case BudgetClassSingleQueryFast:
 		budget = RunBudget{
 			RunType: RunTypeSingleQuery, BudgetClass: class,
-			MaxLLMCalls: 1, MaxToolCalls: 4, MaxPrimaryQueries: 1,
+			MaxLLMCalls: 4, MaxToolCalls: 6, MaxPrimaryQueries: 1,
 			MaxValidationQueries: 1, MaxCandidateCompares: 2, MaxJoinHops: 4,
-			HardTimeout: 25 * time.Second, P95Target: 8 * time.Second,
+			HardTimeout: 60 * time.Second, P95Target: 30 * time.Second,
 		}
 	case BudgetClassSingleQueryComplex:
 		budget = RunBudget{
 			RunType: RunTypeSingleQuery, BudgetClass: class,
-			MaxLLMCalls: 4, MaxToolCalls: 8, MaxPrimaryQueries: 2,
+			MaxLLMCalls: 16, MaxToolCalls: 16, MaxPrimaryQueries: 2,
 			MaxValidationQueries: 3, MaxCandidateCompares: 2, MaxJoinHops: 4,
-			HardTimeout: 25 * time.Second, P95Target: 18 * time.Second,
+			HardTimeout: 10 * time.Minute, P95Target: 5 * time.Minute,
 		}
 	case BudgetClassBundle:
 		budget = RunBudget{
 			RunType: RunTypeBundle, BudgetClass: class,
-			MaxLLMCalls: 2, MaxToolCalls: 10, MaxPrimaryQueries: 6,
+			MaxLLMCalls: 8, MaxToolCalls: 16, MaxPrimaryQueries: 6,
 			MaxValidationQueries: 2, MaxCandidateCompares: 2, MaxJoinHops: 4,
-			HardTimeout: 30 * time.Second, P95Target: 25 * time.Second,
+			HardTimeout: 5 * time.Minute, P95Target: 3 * time.Minute,
 			MaxConcurrentPlans: 4,
 		}
 	case BudgetClassDefinition:
 		budget = RunBudget{
 			RunType: RunTypeDefinition, BudgetClass: class,
-			MaxLLMCalls: 1, MaxToolCalls: 2,
-			HardTimeout: 10 * time.Second, P95Target: 3 * time.Second,
+			MaxLLMCalls: 2, MaxToolCalls: 4,
+			HardTimeout: 30 * time.Second, P95Target: 15 * time.Second,
 		}
 	default:
 		return RunBudget{}, fmt.Errorf("%w: unknown run budget class", ErrInvalidRun)
@@ -84,13 +84,13 @@ func DefaultRunBudget(class RunBudgetClass) (RunBudget, error) {
 
 func (budget RunBudget) Validate() error {
 	expectedType, validClass := runTypeForBudgetClass(budget.BudgetClass)
-	if !validClass || budget.RunType != expectedType || budget.MaxLLMCalls < 1 || budget.MaxLLMCalls > 4 ||
-		budget.MaxToolCalls < 0 || budget.MaxToolCalls > 10 ||
+	if !validClass || budget.RunType != expectedType || budget.MaxLLMCalls < 1 || budget.MaxLLMCalls > 16 ||
+		budget.MaxToolCalls < 0 || budget.MaxToolCalls > 16 ||
 		budget.MaxPrimaryQueries < 0 || budget.MaxPrimaryQueries > 6 ||
 		budget.MaxValidationQueries < 0 || budget.MaxValidationQueries > 3 ||
 		budget.MaxCandidateCompares < 0 || budget.MaxCandidateCompares > 2 ||
 		budget.MaxJoinHops < 0 || budget.MaxJoinHops > 4 ||
-		budget.HardTimeout < 100*time.Millisecond || budget.HardTimeout > 30*time.Second ||
+		budget.HardTimeout < 100*time.Millisecond || budget.HardTimeout > 10*time.Minute ||
 		budget.P95Target <= 0 || budget.P95Target > budget.HardTimeout {
 		return fmt.Errorf("%w: run budget exceeds the governed bounds", ErrInvalidRun)
 	}
@@ -112,12 +112,12 @@ func (budget RunBudget) Limits() (BudgetLimits, error) {
 	if err := budget.Validate(); err != nil {
 		return BudgetLimits{}, err
 	}
-	maxSteps := 16
+	maxSteps := 48
 	switch budget.BudgetClass {
 	case BudgetClassSingleQueryFast:
-		maxSteps = 8
+		maxSteps = 12
 	case BudgetClassDefinition:
-		maxSteps = 4
+		maxSteps = 6
 	}
 	limits := BudgetLimits{
 		MaxSteps: maxSteps, MaxLLMCalls: budget.MaxLLMCalls,

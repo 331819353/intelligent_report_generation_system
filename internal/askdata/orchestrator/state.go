@@ -132,18 +132,18 @@ type BudgetLimits struct {
 
 func DefaultBudgetLimits() BudgetLimits {
 	return BudgetLimits{
-		MaxSteps: 16, MaxLLMCalls: 4, MaxToolCalls: 8,
-		MaxFormalQueries: 2, MaxValidationQueries: 3, MaxDurationMS: 25_000,
+		MaxSteps: 48, MaxLLMCalls: 16, MaxToolCalls: 16,
+		MaxFormalQueries: 2, MaxValidationQueries: 3, MaxDurationMS: 600_000,
 	}
 }
 
 func (limits BudgetLimits) Validate() error {
-	if limits.MaxSteps < 1 || limits.MaxSteps > 32 ||
-		limits.MaxLLMCalls < 1 || limits.MaxLLMCalls > 4 ||
-		limits.MaxToolCalls < 0 || limits.MaxToolCalls > 10 ||
+	if limits.MaxSteps < 1 || limits.MaxSteps > 48 ||
+		limits.MaxLLMCalls < 1 || limits.MaxLLMCalls > 16 ||
+		limits.MaxToolCalls < 0 || limits.MaxToolCalls > 16 ||
 		limits.MaxFormalQueries < 0 || limits.MaxFormalQueries > 6 ||
 		limits.MaxValidationQueries < 0 || limits.MaxValidationQueries > 3 ||
-		limits.MaxDurationMS < 100 || limits.MaxDurationMS > 30_000 {
+		limits.MaxDurationMS < 100 || limits.MaxDurationMS > 600_000 {
 		return fmt.Errorf("%w: budget limits exceed the governed bounds", ErrInvalidRun)
 	}
 	return nil
@@ -392,7 +392,7 @@ func CanTransition(from, to State) bool {
 	case StateGraphValidating:
 		return to == StateIRReady || to == StateClarificationRequired || to == StateBlocked
 	case StateIRReady:
-		return to == StatePlanValidating || to == StateBlocked
+		return to == StatePlanValidating || to == StateClarificationRequired || to == StateBlocked
 	case StatePlanValidating:
 		return to == StateExecuting || to == StateBinding ||
 			to == StateClarificationRequired || to == StateBlocked
@@ -402,7 +402,7 @@ func CanTransition(from, to State) bool {
 		return to == StateAnswerVerifying || to == StateBinding ||
 			to == StateClarificationRequired || to == StateBlocked
 	case StateAnswerVerifying:
-		return to == StateAnswered || to == StateBlocked
+		return to == StateAnswered || to == StateClarificationRequired || to == StateBlocked
 	default:
 		return false
 	}

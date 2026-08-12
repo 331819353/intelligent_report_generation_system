@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,9 +33,13 @@ func (binding *Binding) searchSemanticObjects(
 	if binding.services.Retriever == nil {
 		return output, ErrToolUnavailable
 	}
+	objectTypes, ok := retrievalObjectTypes(completeAnalyticObjectTypes(input.ObjectTypes))
+	if !ok {
+		return output, toolhost.ErrInvalidInvocation
+	}
 	request := search.RetrievalRequest{
 		Scope: binding.run.Scope, Mention: input.Mention,
-		ObjectTypes: retrievalObjectTypes(input.ObjectTypes), TopKPerType: input.Limit,
+		ObjectTypes: objectTypes, TopKPerType: input.Limit,
 	}
 	// Certified business vocabulary enters retrieval as deterministic exact
 	// hits. A term that an Owner certified to mean a specific metric must beat
@@ -53,20 +58,55 @@ func (binding *Binding) searchSemanticObjects(
 	if err != nil {
 		return output, err
 	}
+	legacyMetricIDs := make([]string, 0)
+	for _, candidate := range result.Candidates {
+		if candidate.ObjectType == search.ObjectMeasureLegacy {
+			legacyMetricIDs = append(legacyMetricIDs, string(candidate.ObjectVersionID))
+		}
+	}
+	canonicalMetrics := map[string]string{}
+	if len(legacyMetricIDs) > 0 {
+		if binding.services.Reader == nil {
+			return output, ErrToolUnavailable
+		}
+		canonicalMetrics, err = binding.services.Reader.CanonicalMetricVersions(
+			ctx, binding.run.Scope, binding.run.DomainID, legacyMetricIDs,
+		)
+		if err != nil {
+			return output, err
+		}
+	}
 	candidates := make([]toolhost.CandidateSummary, 0, len(result.Candidates))
 	refs := make([]askdata.EvidenceRef, 0, len(result.Candidates))
+	seenCandidates := map[string]bool{}
 	for _, candidate := range result.Candidates {
-		candidates = append(candidates, toolhost.CandidateSummary{
-			ObjectType:      toolhost.ObjectType(candidate.ObjectType),
-			ObjectVersionID: candidate.ObjectVersionID,
-			Score:           candidate.Score,
-			// The strongest contributing source is the match type the model
-			// sees; the per-source evidence stays on the retrieval artifact.
-			MatchType: strongestSource(candidate.Evidence),
-			// Only CERTIFIED objects are indexed for a release, so a returned
-			// candidate is certified by construction.
-			Status: "CERTIFIED",
-		})
+		objectType, ok := toolObjectType(candidate.ObjectType)
+		if !ok {
+			return output, toolhost.ErrInvalidInvocation
+		}
+		versionID := candidate.ObjectVersionID
+		if candidate.ObjectType == search.ObjectMeasureLegacy {
+			mapped := canonicalMetrics[string(candidate.ObjectVersionID)]
+			if mapped == "" {
+				continue
+			}
+			versionID = askdata.ID(mapped)
+		}
+		key := string(objectType) + "\x00" + string(versionID)
+		if !seenCandidates[key] {
+			seenCandidates[key] = true
+			candidates = append(candidates, toolhost.CandidateSummary{
+				ObjectType:      objectType,
+				ObjectVersionID: versionID,
+				Score:           candidate.Score,
+				// The strongest contributing source is the match type the model
+				// sees; the per-source evidence stays on the retrieval artifact.
+				MatchType: strongestSource(candidate.Evidence),
+				// Only CERTIFIED objects are indexed for a release, so a returned
+				// candidate is certified by construction.
+				Status: "CERTIFIED",
+			})
+		}
 		for _, item := range candidate.Evidence {
 			refs = append(refs, item.Evidence)
 		}
@@ -80,11 +120,54 @@ func (binding *Binding) searchSemanticObjects(
 	)
 	output.Result = toolhost.SearchSemanticObjectsResult{
 		Candidates: candidates, Truncated: result.Degraded,
-		EvidenceIDs: []askdata.ID{evidence.EvidenceID},
 	}
 	output.EvidenceRefs = append(append([]askdata.EvidenceRef{evidence}, refs...), dictionaryRefs...)
+	output.Result.EvidenceIDs = sortedEvidenceIDs(output.EvidenceRefs)
 	output.MadeProgress = len(candidates) > 0
 	return output, nil
+}
+
+// completeAnalyticObjectTypes guarantees that metric discovery also returns
+// the executable semantic context required by the next stage. A metric alone
+// cannot be compiled: graph validation requires a certified model and relative
+// time questions require the model's certified time dimension. The caller may
+// still request TERM-only lookup without widening that vocabulary search.
+func completeAnalyticObjectTypes(values []toolhost.ObjectType) []toolhost.ObjectType {
+	analytic := false
+	terms := false
+	for _, value := range values {
+		switch value {
+		case toolhost.ObjectTypeMetric, toolhost.ObjectTypeDimension, toolhost.ObjectTypeModel:
+			analytic = true
+		case toolhost.ObjectTypeTerm:
+			terms = true
+		}
+	}
+	result := make([]toolhost.ObjectType, 0, 4)
+	if analytic {
+		result = append(result,
+			toolhost.ObjectTypeMetric,
+			toolhost.ObjectTypeDimension,
+			toolhost.ObjectTypeModel,
+		)
+	}
+	if terms {
+		result = append(result, toolhost.ObjectTypeTerm)
+	}
+	return result
+}
+
+func sortedEvidenceIDs(values []askdata.EvidenceRef) []askdata.ID {
+	seen := make(map[askdata.ID]bool, len(values))
+	result := make([]askdata.ID, 0, len(values))
+	for _, value := range values {
+		if !seen[value.EvidenceID] {
+			seen[value.EvidenceID] = true
+			result = append(result, value.EvidenceID)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
 }
 
 // getSemanticContracts returns release-pinned contracts for candidate objects.
@@ -108,13 +191,11 @@ func (binding *Binding) getSemanticContracts(
 	}
 	contracts := make([]toolhost.SemanticContractSummary, 0, len(rows))
 	refs := make([]askdata.EvidenceRef, 0, len(rows))
-	ids := make([]askdata.ID, 0, len(rows))
 	for _, row := range rows {
 		summary, ok := contractSummary(row)
 		if !ok {
-			// Object types outside the tool contract's enum (measures,
-			// relationships, members) are not surfaced as contracts; the binder
-			// reaches them through the graph plan instead.
+			// Object types outside the question contract's enum (relationships
+			// and members) are reached through the graph plan instead.
 			continue
 		}
 		evidence := binding.evidence(
@@ -123,9 +204,14 @@ func (binding *Binding) getSemanticContracts(
 		summary.ContentHash = row.ContentHash
 		contracts = append(contracts, summary)
 		refs = append(refs, evidence)
-		ids = append(ids, evidence.EvidenceID)
 	}
-	output.Result = toolhost.GetSemanticContractsResult{Contracts: contracts, EvidenceIDs: ids}
+	// Result contracts require exact, strictly sorted evidence closure. Query
+	// order is by semantic object identity, while evidence IDs are content based;
+	// reusing query order therefore rejected otherwise valid multi-contract
+	// results at the Tool Host boundary.
+	output.Result = toolhost.GetSemanticContractsResult{
+		Contracts: contracts, EvidenceIDs: sortedEvidenceIDs(refs),
+	}
 	output.EvidenceRefs = refs
 	output.MadeProgress = len(contracts) > 0
 	return output, nil
@@ -197,15 +283,14 @@ func (binding *Binding) getCertifiedExamples(
 		return output, err
 	}
 	examples := make([]toolhost.CertifiedExampleSummary, 0, len(rows))
-	refs := make([]askdata.EvidenceRef, 0, len(rows))
-	ids := make([]askdata.ID, 0, len(rows))
+	refs := make([]askdata.EvidenceRef, 0, len(rows)+1)
 	for _, row := range rows {
 		evidence := binding.evidence(
 			askdata.EvidenceKindCertifiedExample, askdata.ID(row.ExampleVersionID),
 			[]byte(row.ContentHash),
 		)
 		examples = append(examples, toolhost.CertifiedExampleSummary{
-			ExampleID: askdata.ID(row.ExampleVersionID), QuestionSummary: row.Question,
+			ExampleID:                askdata.ID(row.ExampleVersionID),
 			ExpectedMetricVersionIDs: stableIDs(row.ExpectedMetricIDs),
 			ExpectedDimensionIDs:     stableIDs(row.ExpectedDimensionIDs),
 			ExpectedTimeExpression:   row.ExpectedTimeExpression,
@@ -213,11 +298,23 @@ func (binding *Binding) getCertifiedExamples(
 			SimilarityPermillion:     row.SimilarityPermillion,
 		})
 		refs = append(refs, evidence)
-		ids = append(ids, evidence.EvidenceID)
 	}
-	output.Result = toolhost.GetCertifiedExamplesResult{Examples: examples, EvidenceIDs: ids}
+	// "No certified examples for this release and role" is itself a governed
+	// retrieval fact. Persist one lookup-level evidence reference even when the
+	// row set is empty, otherwise the optional prior lookup is rejected as an
+	// invalid tool response and blocks an otherwise answerable question.
+	lookupPayload, err := json.Marshal(examples)
+	if err != nil {
+		return output, err
+	}
+	refs = append(refs, binding.evidence(
+		askdata.EvidenceKindCertifiedExample, binding.run.Scope.Release.ReleaseID, lookupPayload,
+	))
+	output.Result = toolhost.GetCertifiedExamplesResult{
+		Examples: examples, EvidenceIDs: sortedEvidenceIDs(refs),
+	}
 	output.EvidenceRefs = refs
-	output.MadeProgress = len(examples) > 0
+	output.MadeProgress = true
 	return output, nil
 }
 
@@ -270,12 +367,48 @@ func (binding *Binding) getDataQualityStatus(
 	return output, nil
 }
 
-func retrievalObjectTypes(values []toolhost.ObjectType) []search.ObjectType {
+// retrievalObjectTypes translates the tool's object-type enum into the
+// retrieval index's own enum. The two are declared independently and do not
+// agree on spelling (TERM vs BUSINESS_TERM) or membership (the index holds no
+// semantic-model document at all), so the conversion is written out rather
+// than cast: a string cast sends an unknown type into the retriever, which
+// rejects the whole request and turns a legal argument into a tool failure.
+//
+// ok is false when the caller asked only for types this index cannot serve.
+// That is an invalid invocation, not an empty result — reporting it as "no
+// candidates" would tell the model the release is empty when it is not.
+func retrievalObjectTypes(values []toolhost.ObjectType) ([]search.ObjectType, bool) {
 	result := make([]search.ObjectType, 0, len(values))
 	for _, value := range values {
-		result = append(result, search.ObjectType(value))
+		switch value {
+		case toolhost.ObjectTypeMetric:
+			result = append(result, search.ObjectMetric, search.ObjectMeasureLegacy)
+		case toolhost.ObjectTypeDimension:
+			result = append(result, search.ObjectDimension)
+		case toolhost.ObjectTypeModel:
+			result = append(result, search.ObjectSemanticModel)
+		case toolhost.ObjectTypeTerm:
+			result = append(result, search.ObjectBusinessTerm)
+		default:
+			continue
+		}
 	}
-	return result
+	return result, len(result) > 0
+}
+
+func toolObjectType(value search.ObjectType) (toolhost.ObjectType, bool) {
+	switch value {
+	case search.ObjectMetric, search.ObjectMeasureLegacy:
+		return toolhost.ObjectTypeMetric, true
+	case search.ObjectDimension:
+		return toolhost.ObjectTypeDimension, true
+	case search.ObjectSemanticModel:
+		return toolhost.ObjectTypeModel, true
+	case search.ObjectBusinessTerm:
+		return toolhost.ObjectTypeTerm, true
+	default:
+		return "", false
+	}
 }
 
 // contractSummary maps a release-pinned contract document onto the tool
@@ -299,16 +432,24 @@ func contractSummary(row registry.ContractRow) (toolhost.SemanticContractSummary
 	if name == "" {
 		name = document.Code
 	}
+	definition := document.Definition
+	if definition == "" {
+		// Physical measures are release-governed metric candidates but their
+		// executable contract may only carry name, unit and aggregation. Reusing
+		// the governed name is preferable to inventing prose or rejecting an
+		// otherwise complete certified contract.
+		definition = name
+	}
 	return toolhost.SemanticContractSummary{
 		ObjectType: objectType, ObjectVersionID: askdata.ID(row.ObjectVersionID),
-		Name: name, Definition: document.Definition, Unit: document.Unit,
+		Name: name, Definition: definition, Unit: document.Unit,
 		OwnerID: askdata.ID(row.OwnerID), Status: row.Status, Grain: document.GrainContract,
 	}, true
 }
 
 func contractObjectType(value string) (toolhost.ObjectType, bool) {
 	switch value {
-	case "METRIC":
+	case "METRIC", "MEASURE":
 		return toolhost.ObjectTypeMetric, true
 	case "DIMENSION":
 		return toolhost.ObjectTypeDimension, true

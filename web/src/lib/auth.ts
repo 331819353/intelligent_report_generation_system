@@ -10,6 +10,26 @@ export type TokenPair = {
   tokenType: 'Bearer'
 }
 
+export type CurrentProfile = {
+  userId: string
+  employeeNo: string
+  email: string
+  displayName: string
+  avatarUrl: string
+  status: string
+  domainId?: string
+  roles: string[]
+  tokenVersion: number
+}
+
+export async function updateCurrentProfile(displayName: string) {
+  await apiRequest<void>('/v1/auth/me', { method: 'PATCH', businessDomain: false, body: JSON.stringify({ displayName }) })
+}
+
+export async function changeCurrentPassword(currentPassword: string, newPassword: string) {
+  await apiRequest<void>('/v1/auth/password', { method: 'PUT', businessDomain: false, body: JSON.stringify({ currentPassword, newPassword }) })
+}
+
 const sessionKey = 'intelligent-report-auth'
 
 /** 登录成功后将令牌对保存到当前标签页会话。 */
@@ -19,6 +39,7 @@ export async function login(account: string, password: string) {
     businessDomain: false,
     body: JSON.stringify({ account, password }),
   })
+  clearDomain()
   sessionStorage.setItem(sessionKey, JSON.stringify(tokens))
   return tokens
 }
@@ -30,6 +51,7 @@ export async function register(employeeNo: string, displayName: string, email: s
     businessDomain: false,
     body: JSON.stringify({ employeeNo, displayName, email, password }),
   })
+  clearDomain()
   sessionStorage.setItem(sessionKey, JSON.stringify(tokens))
   return tokens
 }
@@ -53,6 +75,28 @@ export function currentSubject() {
   } catch {
     return ''
   }
+}
+
+/** 读取当前租户标识，用于平台级配置的作用域展示与提交。 */
+export function currentTenantID() {
+  const token = currentTokens()?.accessToken
+  const payload = token?.split('.')[1]
+  if (!payload) return ''
+  try {
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const claims = JSON.parse(atob(normalized)) as { tenantId?: string }
+    return typeof claims.tenantId === 'string' ? claims.tenantId : ''
+  } catch {
+    return ''
+  }
+}
+
+/** 从服务端读取实时用户资料，避免导航栏长期显示匿名占位名称。 */
+export async function currentProfile() {
+  return apiRequest<CurrentProfile>('/v1/auth/me', {
+    businessDomain: false,
+    cache: 'no-store',
+  })
 }
 
 /** 清除当前标签页保存的认证信息。 */

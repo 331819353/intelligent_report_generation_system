@@ -21,7 +21,7 @@ export type DomainAdministrator = {
 }
 
 export type DomainCatalogItem = BusinessDomain & {
-  accessStatus: 'AVAILABLE' | 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'MEMBER' | 'DOMAIN_ADMIN'
+  accessStatus: 'AVAILABLE' | 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'MEMBER' | 'DOMAIN_ADMIN' | 'PLATFORM_ADMIN'
 }
 
 export type DomainApplication = {
@@ -60,6 +60,13 @@ export type AdminUser = {
   createdAt: string
 }
 
+export type ShareTarget = {
+  id: string
+  type: 'USER' | 'ROLE'
+  name: string
+  detail: string
+}
+
 export type PlatformApproval = {
   id: string
   kind: 'DOMAIN_ACCESS' | 'DATA_SOURCE' | 'DATASET'
@@ -89,6 +96,44 @@ export type PlatformAuditLog = {
   actorEmail: string
   requestId?: string
   occurredAt: string
+}
+
+export type UserLifecycleDisposition = 'TRANSFER' | 'AUTO_CLOSE' | 'READ_ONLY' | 'BLOCK'
+
+export type UserLifecycleItem = {
+  category: string
+  domainId: string
+  objectId: string
+  disposition: UserLifecycleDisposition
+  receiverUserId?: string
+  sourceVersion: string
+  executedAt?: string
+}
+
+export type UserDeactivationPreview = {
+  targetUserId: string
+  items: UserLifecycleItem[]
+  counts: Record<string, number>
+  canDisable: boolean
+}
+
+export type UserLifecycleMapping = {
+  category: string
+  domainId: string
+  receiverUserId: string
+}
+
+export type UserLifecycleBatch = {
+  id: string
+  targetUserId: string
+  status: 'PLANNED' | 'EXECUTING' | 'COMPLETED' | 'TRANSFER_FAILED'
+  planHash: string
+  failureCode?: string
+  recordVersion: number
+  items: UserLifecycleItem[]
+  createdAt: string
+  updatedAt: string
+  completedAt?: string
 }
 
 type ItemsResponse<T> = { items?: T[] }
@@ -189,6 +234,10 @@ export const administrationAPI = {
     })
     return safeItems(result)
   },
+  async listShareTargets() {
+    const result = await apiRequest<ItemsResponse<ShareTarget>>('/v1/share-targets', { cache: 'no-store' })
+    return safeItems(result)
+  },
   async listPlatformApprovals(limit = 100) {
     const result = await administrationRequest<ItemsResponse<PlatformApproval>>(`/v1/platform-management/approvals?limit=${limit}`, {
       cache: 'no-store',
@@ -231,6 +280,25 @@ export const administrationAPI = {
     return administrationRequest<void>(`/v1/users/${userID}`, {
       method: 'PATCH',
       body: JSON.stringify({ status }),
+    })
+  },
+  async previewUserDeactivation(userID: string) {
+    return administrationRequest<UserDeactivationPreview>(`/v1/users/${userID}/deactivation-preview`, {
+      cache: 'no-store',
+    })
+  },
+  async executeUserDeactivation(userID: string, mappings: UserLifecycleMapping[]) {
+    return administrationRequest<UserLifecycleBatch>(`/v1/users/${userID}/deactivation-batches`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+      body: JSON.stringify({ mappings }),
+    })
+  },
+  async retryUserDeactivation(batchID: string, expectedVersion: number) {
+    return administrationRequest<UserLifecycleBatch>(`/v1/user-lifecycle-batches/${batchID}/retry`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+      body: JSON.stringify({ expectedVersion }),
     })
   },
   async setPlatformAdministrator(userID: string, enabled: boolean) {

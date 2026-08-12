@@ -31,6 +31,7 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { administrationAPI, type BusinessDomain } from '../lib/administration'
 import {
   bindBusinessDomain,
+  currentProfile,
   currentSubject,
   currentTokens,
   forceLogout,
@@ -124,6 +125,7 @@ const navigation: NavGroup[] = [
       // 数据集是报告数据绑定的前置资产，必须可以从导航直达。
       { label: '数据资产', to: '/data-sources', icon: Database },
       { label: '数据集', to: '/datasets', icon: Stack },
+      { label: '语义资产', to: '/semantic', icon: Cube },
       {
         label: '权限管理',
         icon: ShieldCheck,
@@ -176,6 +178,9 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
   const [notificationTotal, setNotificationTotal] = useState(designSnapshot ? 8 : 0)
   const [notificationLoading, setNotificationLoading] = useState(!designSnapshot)
   const [notificationError, setNotificationError] = useState('')
+  const [profile, setProfile] = useState(() => designSnapshot
+    ? { displayName: '王敏', avatarUrl: '/report-assets/avatars/wang-min.png', roles: ['DOMAIN_ADMIN'] }
+    : { displayName: '', avatarUrl: '', roles: [] as string[] })
 
   useEffect(() => {
     if (designSnapshot) return undefined
@@ -216,6 +221,17 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
       })
       .catch(() => {
         if (!cancelled) setCanManage(false)
+      })
+    void currentProfile()
+      .then(result => {
+        if (!cancelled) setProfile({
+          displayName: result.displayName.trim(),
+          avatarUrl: result.avatarUrl?.trim() ?? '',
+          roles: Array.isArray(result.roles) ? result.roles : [],
+        })
+      })
+      .catch(() => {
+        if (!cancelled) setProfile(current => ({ ...current, displayName: '' }))
       })
     return () => {
       cancelled = true
@@ -328,7 +344,12 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
     if (item.href) navigate(item.href)
   }
 
-  const userName = designSnapshot ? '王敏' : '当前用户'
+  const userName = profile.displayName || '当前用户'
+  const userRole = canManage || profile.roles.includes('platform_admin')
+    ? '平台管理员'
+    : profile.roles.includes('DOMAIN_ADMIN')
+      ? '领域管理员'
+      : '业务分析师'
 
   return (
     <div className={`app-shell app-shell-v2 ${sidebarCollapsed ? 'is-sidebar-collapsed' : ''} ${className}`.trim()}>
@@ -346,7 +367,7 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
             <Question size={18} aria-hidden="true" /><span>帮助中心</span>
           </AppButton>
           <AppButton text className="global-user-button" type="button" aria-expanded={openUtility === 'user'} onClick={() => setOpenUtility(value => value === 'user' ? null : 'user')}>
-            {designSnapshot ? <img src="/report-assets/avatars/wang-min.png" alt="" /> : <UserCircle size={30} weight="duotone" aria-hidden="true" />}
+            {profile.avatarUrl ? <img src={profile.avatarUrl} alt="" /> : <UserCircle size={30} weight="duotone" aria-hidden="true" />}
             <span>{userName}</span><CaretDown size={14} aria-hidden="true" />
           </AppButton>
 
@@ -362,13 +383,13 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
 
           {openUtility === 'help' && <section className="utility-popover help-popover" aria-label="帮助中心">
             <header><div><strong>帮助中心</strong><span>快速找到使用说明</span></div><AppButton text circle type="button" aria-label="关闭帮助" onClick={() => setOpenUtility(null)}><X size={16} /></AppButton></header>
-            <AppButton text type="button" onClick={() => setOpenUtility(null)}><BookOpenText size={18} /><span><strong>平台使用指南</strong><small>了解问数、报告与决策流程</small></span></AppButton>
-            <AppButton text type="button" onClick={() => setOpenUtility(null)}><ChatCircleDots size={18} /><span><strong>联系平台支持</strong><small>反馈问题并附带当前页面</small></span></AppButton>
+            <AppButton text type="button" onClick={() => { setOpenUtility(null); navigate('/help') }}><BookOpenText size={18} /><span><strong>平台使用指南</strong><small>了解问数、报告与决策流程</small></span></AppButton>
+            <AppButton text type="button" onClick={() => { setOpenUtility(null); navigate('/help?support=1') }}><ChatCircleDots size={18} /><span><strong>联系平台支持</strong><small>反馈问题并附带当前页面</small></span></AppButton>
           </section>}
 
           {openUtility === 'user' && <section className="utility-popover user-popover" aria-label="用户菜单">
-            <header><div><strong>{userName}</strong><span>企业经营 · 业务分析师</span></div></header>
-            <AppButton text type="button" onClick={() => setOpenUtility(null)}><UserCircle size={18} />个人设置</AppButton>
+            <header><div><strong>{userName}</strong><span>{selectedDomain?.name || '未选择领域'} · {userRole}</span></div></header>
+            <AppButton text type="button" onClick={() => { setOpenUtility(null); navigate('/profile') }}><UserCircle size={18} />个人设置</AppButton>
             <AppButton text type="button" onClick={() => void signOut()}><SignOut size={18} />退出登录</AppButton>
           </section>}
         </div>
@@ -405,10 +426,8 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
                   </div>}
                 </div>
               }
-              const available = !item.adminOnly || canManage !== false
-              return available
-                ? <NavLink key={item.label} to={item.to!} title={sidebarCollapsed ? item.label : undefined}><Icon aria-hidden="true" size={19} /><span>{item.label}</span></NavLink>
-                : <AppButton text className="sidebar-planned-link" type="button" disabled aria-disabled="true" key={item.label} title={`${item.label}将在后续页面确认后开放`}><Icon aria-hidden="true" size={19} /><span>{item.label}</span></AppButton>
+              if (item.adminOnly && canManage === false) return null
+              return <NavLink key={item.label} to={item.to!} title={sidebarCollapsed ? item.label : undefined}><Icon aria-hidden="true" size={19} /><span>{item.label}</span></NavLink>
             })}
           </section>)}
         </nav>

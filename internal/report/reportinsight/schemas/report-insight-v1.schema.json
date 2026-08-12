@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "findings", "risks", "actions"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "maxLength": 600,
+      "description": "One sentence describing what the evidence shows. Every figure must be written as a {{fact:<id>}} marker and every business object as a {{field:<objectId>}} marker."
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 5,
+      "items": { "type": "string", "maxLength": 400 },
+      "description": "What the evidence shows, one point per item, using markers for all figures and object names."
+    },
+    "risks": {
+      "type": "array",
+      "maxItems": 5,
+      "items": { "type": "string", "maxLength": 400 },
+      "description": "Caveats supported by the evidence's own quality warnings. Leave empty when there are none."
+    },
+    "actions": {
+      "type": "array",
+      "maxItems": 5,
+      "items": { "type": "string", "maxLength": 400 },
+      "description": "Suggested next steps phrased as observations to check, never as claims about causes."
+    }
+  }
+}

@@ -210,15 +210,15 @@ type Action struct {
 	Action          ActionType             `json:"action"`
 	DecisionSummary string                 `json:"decisionSummary"`
 	EvidenceRefs    []askdata.EvidenceRef  `json:"evidenceRefs"`
-	ToolCall        *toolhost.CallRequest  `json:"toolCall"`
-	Understanding   *UnderstandingProposal `json:"understanding"`
-	BindingProposal *BindingProposal       `json:"bindingProposal"`
-	PlanProposal    *PlanProposal          `json:"planProposal"`
-	AnomalyAnalysis *AnomalyAnalysis       `json:"anomalyAnalysis"`
-	Verification    *Verification          `json:"verification"`
-	FinalDecision   *FinalDecision         `json:"finalDecision"`
-	Clarification   *Clarification         `json:"clarification"`
-	Block           *BlockDecision         `json:"block"`
+	ToolCall        *toolhost.CallRequest  `json:"toolCall,omitempty"`
+	Understanding   *UnderstandingProposal `json:"understanding,omitempty"`
+	BindingProposal *BindingProposal       `json:"bindingProposal,omitempty"`
+	PlanProposal    *PlanProposal          `json:"planProposal,omitempty"`
+	AnomalyAnalysis *AnomalyAnalysis       `json:"anomalyAnalysis,omitempty"`
+	Verification    *Verification          `json:"verification,omitempty"`
+	FinalDecision   *FinalDecision         `json:"finalDecision,omitempty"`
+	Clarification   *Clarification         `json:"clarification,omitempty"`
+	Block           *BlockDecision         `json:"block,omitempty"`
 }
 
 func Decode(raw []byte) (Action, error) {
@@ -505,7 +505,8 @@ func validStage(value Stage) bool {
 
 func validAction(value ActionType) bool {
 	switch value {
-	case ActionCallTool, ActionProposeBinding, ActionProposePlan, ActionAnalyzeAnomaly, ActionVerifyResult, ActionFinalize, ActionClarify, ActionBlock:
+	case ActionCallTool, ActionProposeUnderstanding, ActionProposeBinding, ActionProposePlan,
+		ActionAnalyzeAnomaly, ActionVerifyResult, ActionFinalize, ActionClarify, ActionBlock:
 		return true
 	default:
 		return false
@@ -513,7 +514,16 @@ func validAction(value ActionType) bool {
 }
 
 func stageAllowsAction(stage Stage, action ActionType) bool {
-	if action == ActionCallTool || action == ActionBlock {
+	if action == ActionCallTool {
+		// Understanding is a pure intent-reading stage. Retrieval starts in
+		// CandidateJudgment, where the run has a dedicated semantic-search step.
+		// PLAN_SELECTION consumes the binding, graph and contract facts already
+		// accepted upstream; compilation, validation and execution are performed
+		// deterministically after PROPOSE_PLAN. Exposing those tools to the model
+		// only encouraged it to repeat checks until the run budget was exhausted.
+		return stage != StageUnderstanding && stage != StagePlanSelection
+	}
+	if action == ActionBlock {
 		return true
 	}
 	switch stage {

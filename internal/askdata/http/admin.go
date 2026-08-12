@@ -34,6 +34,10 @@ type importWithdrawer interface {
 	Withdraw(context.Context, registryimport.WithdrawInput) (registryimport.WithdrawResult, error)
 }
 
+type semanticImportReader interface {
+	Get(context.Context, string, string, string) (registryimport.SemanticImport, error)
+}
+
 type semanticBulkCertifier interface {
 	BulkCertify(
 		context.Context, registry.AdminScope, string, []string, string,
@@ -50,6 +54,7 @@ type adminIdempotencyProvider interface {
 }
 
 type ImportMutationServices struct {
+	Reads           semanticImportReader
 	Commit          importCommitter
 	Withdraw        importWithdrawer
 	Certify         semanticBulkCertifier
@@ -60,20 +65,27 @@ type ImportMutationServices struct {
 }
 
 type AdminHandler struct {
-	backend         registry.AdminBackend
-	lifecycle       registry.ReleaseLifecycleBackend
-	additivity      registry.AdditivityAdminBackend
-	identity        adminIdentityResolver
-	template        *registryimport.TemplateService
-	upload          *registryimport.UploadService
-	report          *registryimport.ReportService
-	commit          importCommitter
-	withdraw        importWithdrawer
-	certify         semanticBulkCertifier
-	export          semanticExporter
-	exportJobs      registryimport.ExportJobReader
-	exportArtifacts registryimport.ImportObjectStorage
-	releaseReview   *registry.ReleaseReviewService
+	backend            registry.AdminBackend
+	lifecycle          registry.ReleaseLifecycleBackend
+	additivity         registry.AdditivityAdminBackend
+	identity           adminIdentityResolver
+	template           *registryimport.TemplateService
+	upload             *registryimport.UploadService
+	report             *registryimport.ReportService
+	importReads        semanticImportReader
+	commit             importCommitter
+	withdraw           importWithdrawer
+	certify            semanticBulkCertifier
+	export             semanticExporter
+	exportJobs         registryimport.ExportJobReader
+	exportArtifacts    registryimport.ImportObjectStorage
+	releaseReview      *registry.ReleaseReviewService
+	releaseCatalog     registry.ReleaseCatalogBackend
+	evaluationSets     registry.EvaluationSetCatalogBackend
+	evaluationSetAdmin registry.EvaluationSetAdminBackend
+	timeContracts      registry.TimeContractCatalogBackend
+	timeContractAdmin  registry.TimeContractAdminBackend
+	releaseComposer    registry.ReleaseComposer
 }
 
 func NewAdminHandler(
@@ -132,7 +144,8 @@ func newProtectedAdminHandlerWithImports(
 	handler := &AdminHandler{
 		backend: backend, identity: identity, template: template, upload: upload,
 		report: report, commit: mutationServices.Commit,
-		withdraw: mutationServices.Withdraw, certify: mutationServices.Certify,
+		importReads: mutationServices.Reads,
+		withdraw:    mutationServices.Withdraw, certify: mutationServices.Certify,
 		export: mutationServices.Export, exportJobs: mutationServices.ExportJobs,
 		exportArtifacts: mutationServices.ExportArtifacts, releaseReview: mutationServices.ReleaseReview,
 	}
@@ -142,10 +155,28 @@ func newProtectedAdminHandlerWithImports(
 	if lifecycle, ok := backend.(registry.ReleaseLifecycleBackend); ok {
 		handler.lifecycle = lifecycle
 	}
+	if catalog, ok := backend.(registry.ReleaseCatalogBackend); ok {
+		handler.releaseCatalog = catalog
+	}
+	if catalog, ok := backend.(registry.EvaluationSetCatalogBackend); ok {
+		handler.evaluationSets = catalog
+	}
+	if admin, ok := backend.(registry.EvaluationSetAdminBackend); ok {
+		handler.evaluationSetAdmin = admin
+	}
+	if catalog, ok := backend.(registry.TimeContractCatalogBackend); ok {
+		handler.timeContracts = catalog
+	}
+	if admin, ok := backend.(registry.TimeContractAdminBackend); ok {
+		handler.timeContractAdmin = admin
+	}
+	if composer, ok := backend.(registry.ReleaseComposer); ok {
+		handler.releaseComposer = composer
+	}
 	mux := http.NewServeMux()
 	for _, path := range []string{
 		"models", "measures", "metrics", "metric-versions",
-		"dimensions", "terms", "kpi-bundles", "relationships",
+		"dimensions", "terms", "kpi-bundles", "relationships", "metric-dimensions",
 	} {
 		collection := "/api/v1/askdata/semantic/" + path
 		item := collection + "/{id}"
@@ -155,7 +186,7 @@ func newProtectedAdminHandlerWithImports(
 		mux.HandleFunc("PUT "+item, handler.updateDraft)
 		mux.HandleFunc("DELETE "+item, handler.deleteDraft)
 	}
-	// 只读对象类型：成员、层级、认证问法与指标维度绑定目前只能经导入通道写入，
+	// 只读对象类型：成员、层级与认证问法目前只能经导入通道写入，
 	// 因此只注册 GET，不注册 POST/PUT/DELETE——注册一个没有实现的写入路由，
 	// 会把「不支持」变成运行期错误。
 	//
@@ -165,16 +196,38 @@ func newProtectedAdminHandlerWithImports(
 	// SEMANTIC_VIEW 的人直接读到密封题面，使 95% 门禁失效。
 	// 若确需查看，应走单独的、带退役副作用的受控接口，见 05_TODO SEM-READ-002。
 	for _, path := range []string{
-		"members", "hierarchies", "certified-examples", "metric-dimensions",
+		"members", "hierarchies", "certified-examples",
 	} {
 		collection := "/api/v1/askdata/semantic/" + path
 		mux.HandleFunc("GET "+collection, handler.listDrafts)
 		mux.HandleFunc("GET "+collection+"/{id}", handler.getDraft)
 	}
+	if handler.releaseCatalog != nil {
+		mux.HandleFunc("GET /api/v1/askdata/semantic/releases", handler.listReleaseCatalog)
+	}
+	if handler.evaluationSets != nil {
+		mux.HandleFunc("GET /api/v1/askdata/semantic/evaluation-sets", handler.listEvaluationSetCatalog)
+	}
+	if handler.evaluationSetAdmin != nil {
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/evaluation-sets", handler.createReleaseEvaluationSet)
+		mux.HandleFunc("GET /api/v1/askdata/semantic/evaluation-sets/{id}/cases", handler.listEvaluationCasesForReview)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/evaluation-sets/{id}/reviews", handler.reviewEvaluationSet)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/evaluation-sets/{id}/seal", handler.sealEvaluationSet)
+	}
+	if handler.timeContracts != nil {
+		mux.HandleFunc("GET /api/v1/askdata/semantic/time-contracts", handler.listTimeContractCatalog)
+	}
+	if handler.timeContractAdmin != nil {
+		mux.HandleFunc("POST /api/v1/askdata/semantic/time-contracts", handler.createCertifiedTimeContract)
+	}
 	mux.HandleFunc("POST /api/v1/askdata/semantic/releases", handler.createReleaseDraft)
+	if handler.releaseComposer != nil {
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/compose", handler.composeReleaseDraft)
+	}
 	if handler.lifecycle != nil {
 		mux.HandleFunc("GET /api/v1/askdata/semantic/releases/{id}/lifecycle", handler.getReleaseLifecycle)
 		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/validate-project", handler.validateAndProjectRelease)
+		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/retry-projections", handler.retryReleaseProjections)
 		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/evaluation-batches", handler.planReleaseEvaluationBatch)
 		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/error-budget", handler.recordReleaseErrorBudget)
 		mux.HandleFunc("POST /api/v1/askdata/semantic/releases/{id}/gate", handler.recomputeReleaseGate)
@@ -205,6 +258,12 @@ func newProtectedAdminHandlerWithImports(
 		mux.HandleFunc(
 			"POST /api/v1/askdata/semantic/imports",
 			handler.uploadImport,
+		)
+	}
+	if handler.importReads != nil {
+		mux.HandleFunc(
+			"GET /api/v1/askdata/semantic/imports/{id}",
+			handler.getImport,
 		)
 	}
 	if handler.report != nil {
@@ -256,6 +315,159 @@ func newProtectedAdminHandlerWithImports(
 	})
 }
 
+func (handler *AdminHandler) listReleaseCatalog(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	query := request.URL.Query()
+	for key := range query {
+		if key != "cursor" && key != "limit" {
+			writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+			return
+		}
+	}
+	limit := 50
+	var err error
+	if raw := query.Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil {
+			writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+			return
+		}
+	}
+	result, err := handler.releaseCatalog.ListReleaseCatalog(request.Context(), scope, query.Get("cursor"), limit)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (handler *AdminHandler) listEvaluationSetCatalog(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	query := request.URL.Query()
+	for key := range query {
+		if key != "limit" {
+			writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+			return
+		}
+	}
+	limit := 50
+	var err error
+	if raw := query.Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil {
+			writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+			return
+		}
+	}
+	result, err := handler.evaluationSets.ListEvaluationSetCatalog(request.Context(), scope, limit)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (handler *AdminHandler) listTimeContractCatalog(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	query := request.URL.Query()
+	for key := range query {
+		if key != "limit" {
+			writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+			return
+		}
+	}
+	limit := 50
+	var err error
+	if raw := query.Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil {
+			writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+			return
+		}
+	}
+	result, err := handler.timeContracts.ListTimeContractCatalog(request.Context(), scope, limit)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": result})
+}
+
+func (handler *AdminHandler) createCertifiedTimeContract(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	if request.URL.RawQuery != "" || handler.timeContractAdmin == nil {
+		writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+		return
+	}
+	var input registry.TimeContractCreateInput
+	canonical, err := decodeAdminJSON(writer, request, &input)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	command, err := newAdminCommand(request, scope, canonical)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.timeContractAdmin.CreateCertifiedTimeContract(
+		request.Context(), scope, input, command,
+	)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if result.Replayed {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, result)
+}
+
+func (handler *AdminHandler) composeReleaseDraft(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	if request.URL.RawQuery != "" {
+		writeAdminError(writer, registry.ErrRegistryInvalidRequest)
+		return
+	}
+	var input registry.ReleaseComposeInput
+	canonical, err := decodeAdminJSON(writer, request, &input)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	command, err := newAdminCommand(request, scope, canonical)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.releaseComposer.CreateReleaseFromCertified(request.Context(), scope, input, command)
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	status := http.StatusCreated
+	if result.Replayed {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, result)
+}
+
 func (handler *AdminHandler) getReleaseLifecycle(writer http.ResponseWriter, request *http.Request) {
 	scope, ok := handler.resolveScope(writer, request)
 	if !ok {
@@ -280,6 +492,24 @@ func (handler *AdminHandler) validateAndProjectRelease(writer http.ResponseWrite
 		return
 	}
 	result, err := handler.lifecycle.ValidateAndStartProjection(request.Context(), scope, request.PathValue("id"))
+	if err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, result)
+}
+
+func (handler *AdminHandler) retryReleaseProjections(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok || !requireLifecycleIdempotency(writer, request) {
+		return
+	}
+	var input struct{}
+	if _, err := decodeAdminJSON(writer, request, &input); err != nil {
+		writeAdminError(writer, err)
+		return
+	}
+	result, err := handler.lifecycle.RetryFailedProjections(request.Context(), scope, request.PathValue("id"))
 	if err != nil {
 		writeAdminError(writer, err)
 		return
@@ -842,6 +1072,9 @@ func decodeAdminMutation(
 	case registry.AdminResourceRelationship:
 		mutation.Relationship = &registry.RelationshipDraftInput{}
 		target = mutation.Relationship
+	case registry.AdminResourceMetricDimension:
+		mutation.MetricDimension = &registry.MetricDimensionDraftInput{}
+		target = mutation.MetricDimension
 	default:
 		return registry.AdminMutation{}, nil, registry.ErrRegistryInvalidRequest
 	}
@@ -924,6 +1157,16 @@ func writeAdminError(writer http.ResponseWriter, err error) {
 		writeError(writer, http.StatusUnprocessableEntity, "RELEASE_GATE_FAILED", "semantic release evaluation gate did not pass")
 	case errors.Is(err, registry.ErrReleaseReviewInvalid):
 		writeError(writer, http.StatusUnprocessableEntity, "RELEASE_REVIEW_INVALID", "semantic release review evidence or model output is invalid")
+	case errors.Is(err, registry.ErrEvaluationSetCasesMissing):
+		writeError(writer, http.StatusUnprocessableEntity, "EVALUATION_CASES_MISSING", "certified SEALED evaluation cases are required")
+	case errors.Is(err, registry.ErrEvaluationSetHintInvalid):
+		writeError(writer, http.StatusUnprocessableEntity, "EVALUATION_EXPECTED_CONTRACT_INVALID", "evaluation expected-result contract is incomplete or invalid")
+	case errors.Is(err, registry.ErrEvaluationSetReviewConflict):
+		writeError(writer, http.StatusConflict, "EVALUATION_REVIEW_CONFLICT", "the current actor cannot add another independent review")
+	case errors.Is(err, registry.ErrEvaluationSetNotFound):
+		writeError(writer, http.StatusNotFound, "EVALUATION_SET_NOT_FOUND", "evaluation set was not found")
+	case errors.Is(err, registry.ErrEvaluationSetInvalid):
+		writeError(writer, http.StatusBadRequest, "EVALUATION_SET_INVALID", "evaluation set request is invalid")
 	default:
 		writeError(writer, http.StatusInternalServerError, "REG_SERVICE_FAILED", "semantic administration service failed")
 	}

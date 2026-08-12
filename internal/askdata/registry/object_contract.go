@@ -198,3 +198,51 @@ func MetricVersionReleaseObject(metric MetricVersion) (ReleaseObject, error) {
 	return NewReleaseObject(ReleaseObjectMetric, metric.MetricID, metric.ID,
 		SensitivityInternal, contract, metric.ContentHash)
 }
+
+// MetricDimensionReleaseObject keeps governed metric/dimension compatibility
+// in the immutable release manifest so KPI and ad-hoc group-by planning use
+// the exact certified compatibility fact.
+func MetricDimensionReleaseObject(compatibility MetricDimension) (ReleaseObject, error) {
+	if compatibility.Status != VersionStatusCertified {
+		return ReleaseObject{}, errors.New("metric dimension must be CERTIFIED before release")
+	}
+	if err := compatibility.Validate(); err != nil {
+		return ReleaseObject{}, err
+	}
+	return NewReleaseObject(
+		ReleaseObjectMetricDimension,
+		compatibility.ObjectID,
+		compatibility.ID,
+		SensitivityInternal,
+		metricDimensionContract(compatibility),
+		compatibility.ContentHash,
+	)
+}
+
+// BusinessTermReleaseObject publishes only the certified, canonical business
+// vocabulary contract. Review metadata remains audit evidence and is not part
+// of the executable release content hash.
+func BusinessTermReleaseObject(term BusinessTerm) (ReleaseObject, error) {
+	if term.Status != VersionStatusCertified {
+		return ReleaseObject{}, errors.New("business term must be CERTIFIED before release")
+	}
+	// BusinessTerm.Validate checks the editable draft shape and therefore expects
+	// PENDING review metadata. Certification stores APPROVED audit evidence, which
+	// is intentionally outside the executable contract; validate an equivalent
+	// draft-shaped copy while preserving the certified source value and hash.
+	validated := term
+	validated.ReviewStatus = TermReviewPending
+	validated.ReviewedBy = ""
+	validated.ReviewedAt = nil
+	if err := validated.Validate(); err != nil {
+		return ReleaseObject{}, err
+	}
+	return NewReleaseObject(
+		ReleaseObjectBusinessTerm,
+		term.ObjectID,
+		term.ID,
+		SensitivityInternal,
+		businessTermContract(term),
+		term.ContentHash,
+	)
+}

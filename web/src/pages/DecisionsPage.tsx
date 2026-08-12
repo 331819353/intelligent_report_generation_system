@@ -3,7 +3,6 @@ import {
   BookmarkSimple,
   CalendarBlank,
   CaretDown,
-  CaretLeft,
   CaretRight,
   CheckCircle,
   ClipboardText,
@@ -18,14 +17,17 @@ import {
   WarningCircle,
   X,
 } from '@phosphor-icons/react'
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { RequestError } from '../lib/api'
 import { currentSubject } from '../lib/auth'
 import {
   decisionAPI,
-  type DecisionAggregate,
+	type DecisionAggregate,
+	type DecisionAction,
+	type DecisionActionStatus,
+	type DecisionApprovalPolicy,
   type DecisionRecord,
   type DecisionScope,
   type DecisionStatus,
@@ -59,7 +61,31 @@ const scopeTabs: Array<{ key: DecisionScope; label: string }> = [
   { key: 'REVIEWS', label: '待我复盘' },
 ]
 
+const actionStatusLabels: Record<string, string> = {
+	TODO: '待开始', DOING: '进行中', BLOCKED: '已阻塞', DONE: '已完成', CANCELED: '已取消',
+}
+
+const outcomeConclusionLabels: Record<string, string> = {
+	ACHIEVED: '目标达成', PARTIALLY_ACHIEVED: '部分达成', NOT_ACHIEVED: '未达成', INCONCLUSIVE: '证据不足',
+}
+
+function availableActionTransitions(status: DecisionActionStatus): Array<{ target: DecisionActionStatus; label: string }> {
+	switch (status) {
+		case 'TODO': return [{ target: 'DOING', label: '开始执行' }, { target: 'CANCELED', label: '取消行动' }]
+		case 'DOING': return [{ target: 'DONE', label: '完成行动' }, { target: 'BLOCKED', label: '标记阻塞' }, { target: 'CANCELED', label: '取消行动' }]
+		case 'BLOCKED': return [{ target: 'DOING', label: '解除阻塞' }, { target: 'CANCELED', label: '取消行动' }]
+		case 'DONE': case 'CANCELED': return [{ target: 'DOING', label: '重新打开' }]
+	}
+	return []
+}
+
 const snapshotOwner = '00000000-0000-4000-8000-000000000001'
+const snapshotApprovalPolicies: DecisionApprovalPolicy[] = [{
+  id: 'enterprise-operation-standard',
+  name: '企业经营标准审批',
+  requiredApprovals: 1,
+  approverSummary: '1 位审批人，需 1 人批准',
+}]
 
 function snapshotDecision(index: number, patch: Partial<DecisionVisual>): DecisionVisual {
   return {
@@ -135,19 +161,33 @@ const initialCreate = () => ({
   title: '', question: '', decision: '', expectedEffect: '', risks: '', approvalPolicyId: '', optionTitle: '', reviewDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
 })
 
+const initialAction = () => ({
+	title: '',
+	description: '',
+	dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+})
+
 function loadError(cause: unknown) {
-  if (cause instanceof RequestError) return cause.message
+  if (cause instanceof RequestError) {
+    if (cause.detail.code === 'DECISION_SELF_APPROVAL_FORBIDDEN') return '当前审批流程只有你本人，无法提交给自己审批。请先在权限管理中增加另一位领域管理员，或由其他领域成员发起。'
+    if (cause.detail.code === 'DECISION_FORBIDDEN' && cause.message.includes('approval policy')) return '当前领域缺少可用审批人，请先在权限管理中配置领域管理员。'
+    return cause.message
+  }
   return cause instanceof Error ? cause.message : '请求失败，请稍后重试'
 }
 
 /** 决策组合页使用受权决策读模型；设计快照仅在显式开发参数下启用。 */
 export function DecisionsPage() {
   const navigate = useNavigate()
-  const snapshot = import.meta.env.DEV && new URLSearchParams(window.location.search).get('snapshot') === 'decisions'
+  const pageSearch = new URLSearchParams(window.location.search)
+  const snapshot = import.meta.env.DEV && pageSearch.get('snapshot') === 'decisions'
+  const incomingDecisionID = /^[0-9a-f-]{36}$/i.test(pageSearch.get('decisionId') ?? '') ? pageSearch.get('decisionId') ?? '' : ''
   const actorID = snapshot ? snapshotOwner : currentSubject()
   const [activeScope, setActiveScope] = useState<DecisionScope>('MINE')
   const [scopes, setScopes] = useState<ScopeState>(snapshot ? snapshotScopes : emptyScopes)
   const [hasMore, setHasMore] = useState<Record<DecisionScope, boolean>>({ MINE: false, APPROVALS: false, ACTIONS: false, REVIEWS: false })
+  const [nextCursors, setNextCursors] = useState<Record<DecisionScope, string>>({ MINE: '', APPROVALS: '', ACTIONS: '', REVIEWS: '' })
+  const [loadingMore, setLoadingMore] = useState(false)
   const [loading, setLoading] = useState(!snapshot)
   const [error, setError] = useState('')
   const [reloadRevision, setReloadRevision] = useState(0)
@@ -163,30 +203,101 @@ export function DecisionsPage() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
-  const [createForm, setCreateForm] = useState(initialCreate)
+  const [createForm, setCreateForm] = useState(() => ({
+		...initialCreate(),
+		approvalPolicyId: snapshot ? snapshotApprovalPolicies[0].id : '',
+	}))
   const [createBusy, setCreateBusy] = useState(false)
   const [createError, setCreateError] = useState('')
-  const [notice, setNotice] = useState('')
+	const [notice, setNotice] = useState('')
+  const deepLinkOpened = useRef(false)
+  const [approvalPolicies, setApprovalPolicies] = useState<DecisionApprovalPolicy[]>(snapshot ? snapshotApprovalPolicies : [])
+  const [approvalPolicyError, setApprovalPolicyError] = useState('')
+	const [approvalMode, setApprovalMode] = useState<'APPROVE' | 'REJECT' | null>(null)
+	const [approvalComment, setApprovalComment] = useState('')
+	const [approvalBusy, setApprovalBusy] = useState(false)
+	const [actionOpen, setActionOpen] = useState(false)
+	const [actionForm, setActionForm] = useState(initialAction)
+	const [actionBusy, setActionBusy] = useState(false)
+	const [actionError, setActionError] = useState('')
+	const [transitioningAction, setTransitioningAction] = useState<DecisionAction | null>(null)
+	const [transitionTarget, setTransitionTarget] = useState<DecisionActionStatus>('DOING')
+	const [transitionNote, setTransitionNote] = useState('')
+	const [transitionBusy, setTransitionBusy] = useState(false)
+	const [terminalMode, setTerminalMode] = useState<'close' | 'reopen' | 'cancel' | null>(null)
+	const [terminalReason, setTerminalReason] = useState('')
+	const [terminalBusy, setTerminalBusy] = useState(false)
+	const [outcomeOpen, setOutcomeOpen] = useState(false)
+	const [outcomeConclusion, setOutcomeConclusion] = useState<NonNullable<DecisionAggregate['outcomeReview']>['conclusion']>('ACHIEVED')
+	const [outcomeNotes, setOutcomeNotes] = useState('')
+	const [outcomeBusy, setOutcomeBusy] = useState(false)
+	const [reviewStartBusy, setReviewStartBusy] = useState(false)
 
   useEffect(() => {
     if (snapshot) return undefined
     let cancelled = false
-    Promise.all(scopeTabs.map(async tab => ({ tab: tab.key, result: await decisionAPI.list(tab.key, 200) })))
+    Promise.all(scopeTabs.map(async tab => ({ tab: tab.key, result: await decisionAPI.list(tab.key, 20) })))
       .then(results => {
         if (cancelled) return
         const next = emptyScopes()
         const more = { MINE: false, APPROVALS: false, ACTIONS: false, REVIEWS: false }
+        const cursors = { MINE: '', APPROVALS: '', ACTIONS: '', REVIEWS: '' }
         results.forEach(({ tab, result }) => {
           next[tab] = result.items
           more[tab] = Boolean(result.nextCursor)
+          cursors[tab] = result.nextCursor ?? ''
         })
         setScopes(next)
         setHasMore(more)
+        setNextCursors(cursors)
       })
       .catch(cause => { if (!cancelled) setError(loadError(cause)) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
+	}, [reloadRevision, snapshot])
+
+  useEffect(() => {
+		if (snapshot) return undefined
+    let cancelled = false
+    void decisionAPI.listApprovalPolicies()
+      .then(items => {
+        if (cancelled) return
+        setApprovalPolicies(items)
+        setApprovalPolicyError(items.length ? '' : '当前领域还没有可用的审批策略')
+        if (items.length) {
+          setCreateForm(current => ({
+            ...current,
+            approvalPolicyId: items.some(item => item.id === current.approvalPolicyId)
+              ? current.approvalPolicyId
+              : items[0].id,
+          }))
+        }
+      })
+      .catch(cause => { if (!cancelled) setApprovalPolicyError(loadError(cause)) })
+    return () => { cancelled = true }
   }, [reloadRevision, snapshot])
+
+	useEffect(() => {
+		if (snapshot || loading || !incomingDecisionID || deepLinkOpened.current) return undefined
+		deepLinkOpened.current = true
+		let cancelled = false
+		const matchingScope = scopeTabs.find(tab => scopes[tab.key].some(item => item.id === incomingDecisionID))?.key
+		void Promise.resolve().then(async () => {
+			if (cancelled) return
+			if (matchingScope) setActiveScope(matchingScope)
+			setDetailError('')
+			setDetailLoading(true)
+			try {
+				const aggregate = await decisionAPI.get(incomingDecisionID)
+				if (!cancelled) setDetail(aggregate)
+			} catch (cause) {
+				if (!cancelled) setDetailError(loadError(cause))
+			} finally {
+				if (!cancelled) setDetailLoading(false)
+			}
+		})
+		return () => { cancelled = true }
+	}, [incomingDecisionID, loading, scopes, snapshot])
 
   const visible = useMemo(() => filterDecisions(scopes[activeScope], { query, status, evidenceMode, startDate, endDate }), [activeScope, endDate, evidenceMode, query, scopes, startDate, status])
   const urgent = useMemo(() => {
@@ -194,6 +305,26 @@ export function DecisionsPage() {
     Object.values(scopes).flat().forEach(item => unique.set(item.id, item))
     return urgentDecisions([...unique.values()], new Date('2026-08-10T12:00:00+08:00')).slice(0, 4) as DecisionVisual[]
   }, [scopes])
+
+  const loadMore = async () => {
+    const cursor = nextCursors[activeScope]
+    if (snapshot || !cursor || loadingMore) return
+    setLoadingMore(true)
+    setError('')
+    try {
+      const result = await decisionAPI.list(activeScope, 20, cursor)
+      setScopes(current => ({
+        ...current,
+        [activeScope]: [...current[activeScope], ...result.items.filter(item => !current[activeScope].some(existing => existing.id === item.id))],
+      }))
+      setNextCursors(current => ({ ...current, [activeScope]: result.nextCursor ?? '' }))
+      setHasMore(current => ({ ...current, [activeScope]: Boolean(result.nextCursor) }))
+    } catch (cause) {
+      setError(loadError(cause))
+    } finally {
+      setLoadingMore(false)
+    }
+  }
 
   const openDetail = async (item: DecisionVisual) => {
     setDetailError('')
@@ -223,6 +354,125 @@ export function DecisionsPage() {
       setNotice('决策已提交审批，审批人会在审批中心处理')
     } catch (cause) { setDetailError(loadError(cause)) } finally { setDetailLoading(false) }
   }
+
+	const decideApproval = async (event: FormEvent) => {
+		event.preventDefault()
+		if (!detail || !approvalMode || approvalMode === 'REJECT' && !approvalComment.trim()) return
+		setApprovalBusy(true)
+		setDetailError('')
+		try {
+			if (snapshot) {
+				const nextStatus: DecisionStatus = approvalMode === 'APPROVE' ? 'APPROVED' : 'REJECTED'
+				setDetail({ ...detail, decision: { ...detail.decision, status: nextStatus, recordVersion: detail.decision.recordVersion + 1 } })
+			} else {
+				setDetail(await decisionAPI.decideApproval(detail.decision.id, detail.decision.recordVersion, approvalMode, approvalComment.trim()))
+				setReloadRevision(value => value + 1)
+			}
+			setNotice(approvalMode === 'APPROVE' ? '决策已批准，发起人现在可以创建行动项' : '决策已驳回，意见已同步给发起人')
+			setApprovalMode(null)
+			setApprovalComment('')
+		} catch (cause) {
+			setDetailError(loadError(cause))
+		} finally {
+			setApprovalBusy(false)
+		}
+	}
+
+	const createAction = async (event: FormEvent) => {
+		event.preventDefault()
+		if (!detail || !actorID || !actionForm.title.trim() || !actionForm.dueDate) {
+			setActionError('请填写行动标题和截止日期')
+			return
+		}
+		setActionBusy(true)
+		setActionError('')
+		try {
+			if (snapshot) {
+				const action = {
+					schemaVersion: '1.0', id: `${detail.decision.id}-new-action`, decisionId: detail.decision.id,
+					title: actionForm.title.trim(), description: actionForm.description.trim(), assigneeUserId: actorID,
+					dueAt: `${actionForm.dueDate}T18:00:00+08:00`, status: 'TODO' as const, deliverableRefs: [],
+					recordVersion: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+				}
+				setDetail({ ...detail, actions: [...detail.actions, action], decision: { ...detail.decision, status: 'IN_EXECUTION', recordVersion: detail.decision.recordVersion + 1 } })
+			} else {
+				await decisionAPI.createAction(detail.decision.id, {
+					title: actionForm.title.trim(), description: actionForm.description.trim(), assigneeUserId: actorID,
+					dueAt: `${actionForm.dueDate}T18:00:00+08:00`, deliverableRefs: [],
+				})
+				setDetail(await decisionAPI.get(detail.decision.id))
+				setReloadRevision(value => value + 1)
+			}
+			setActionOpen(false)
+			setActionForm(initialAction())
+			setNotice('行动项已创建并进入任务中心，可立即开始执行')
+		} catch (cause) {
+			setActionError(loadError(cause))
+		} finally {
+			setActionBusy(false)
+		}
+	}
+
+	const beginActionTransition = (action: DecisionAction, target: DecisionActionStatus) => {
+		setTransitioningAction(action); setTransitionTarget(target); setTransitionNote(''); setActionError('')
+	}
+
+	const transitionAction = async (event: FormEvent) => {
+		event.preventDefault()
+		if (!detail || !transitioningAction) return
+		if ((transitionTarget === 'BLOCKED' || transitionTarget === 'DONE' || ['DONE', 'CANCELED'].includes(transitioningAction.status)) && !transitionNote.trim()) {
+			setActionError(transitionTarget === 'DONE' ? '请填写完成凭证' : '请填写原因或处理说明'); return
+		}
+		setTransitionBusy(true); setActionError('')
+		try {
+			if (!snapshot) {
+				await decisionAPI.transitionAction(detail.decision.id, transitioningAction.id, {
+					expectedVersion: transitioningAction.recordVersion, target: transitionTarget,
+					reason: transitionTarget === 'DONE' ? '' : transitionNote.trim(),
+					completionEvidence: transitionTarget === 'DONE' ? transitionNote.trim() : '',
+				})
+				setDetail(await decisionAPI.get(detail.decision.id)); setReloadRevision(value => value + 1)
+			} else {
+				setDetail({ ...detail, actions: detail.actions.map(item => item.id === transitioningAction.id ? { ...item, status: transitionTarget, recordVersion: item.recordVersion + 1 } : item) })
+			}
+			setNotice(`行动项已更新为“${actionStatusLabels[transitionTarget]}”`); setTransitioningAction(null); setTransitionNote('')
+		} catch (cause) { setActionError(loadError(cause)) } finally { setTransitionBusy(false) }
+	}
+
+	const transitionDecision = async (event: FormEvent) => {
+		event.preventDefault()
+		if (!detail || !terminalMode || !terminalReason.trim() && terminalMode !== 'close') return
+		setTerminalBusy(true); setDetailError('')
+		try {
+			if (!snapshot) setDetail(await decisionAPI.transitionDecision(detail.decision.id, terminalMode, detail.decision.recordVersion, terminalReason.trim()))
+			setNotice(terminalMode === 'close' ? '决策已关闭并保留完整审计记录' : terminalMode === 'reopen' ? '决策已重新打开' : '决策已取消')
+			setTerminalMode(null); setTerminalReason(''); setReloadRevision(value => value + 1)
+		} catch (cause) { setDetailError(loadError(cause)) } finally { setTerminalBusy(false) }
+	}
+
+	const confirmOutcome = async (event: FormEvent) => {
+		event.preventDefault()
+		if (!detail || !outcomeConclusion) return
+		setOutcomeBusy(true); setDetailError('')
+		try {
+			if (!snapshot) {
+				if (detail.outcomeMetrics.length > 0) await decisionAPI.refreshOutcome(detail.decision.id)
+				await decisionAPI.confirmOutcome(detail.decision.id, { expectedVersion: detail.outcomeReview?.recordVersion ?? 1, conclusion: outcomeConclusion, notes: outcomeNotes.trim() })
+				setDetail(await decisionAPI.get(detail.decision.id))
+			}
+			setOutcomeOpen(false); setOutcomeNotes(''); setNotice('复盘结论已确认，可关闭或继续调整决策')
+		} catch (cause) { setDetailError(loadError(cause)) } finally { setOutcomeBusy(false) }
+	}
+
+	const startReview = async () => {
+		if (!detail) return
+		setReviewStartBusy(true); setDetailError('')
+		try {
+			if (!snapshot) setDetail(await decisionAPI.startReview(detail.decision.id, detail.decision.recordVersion))
+			else setDetail({ ...detail, decision: { ...detail.decision, status: 'REVIEW_DUE', recordVersion: detail.decision.recordVersion + 1 } })
+			setNotice('全部行动已完成，决策已进入结果复盘'); setReloadRevision(value => value + 1)
+		} catch (cause) { setDetailError(loadError(cause)) } finally { setReviewStartBusy(false) }
+	}
 
   const createDecision = async (event: FormEvent) => {
     event.preventDefault()
@@ -296,7 +546,7 @@ export function DecisionsPage() {
             <label><span className="sr-only">证据模式</span><select value={evidenceMode} onChange={event => setEvidenceMode(event.target.value)}><option value="">全部证据模式</option>{Object.entries(decisionEvidenceMeta).map(([value, meta]) => <option value={value} key={value}>{meta.shortLabel}</option>)}</select><CaretDown size={13} /></label>
             <div className="decisions-date-range"><CalendarBlank size={16} /><input aria-label="复盘开始日期" type="date" value={startDate} onChange={event => setStartDate(event.target.value)} /><span>~</span><input aria-label="复盘结束日期" type="date" value={endDate} onChange={event => setEndDate(event.target.value)} /></div>
             <button className="decisions-refresh" type="button" aria-label="刷新决策列表" onClick={reload}><ArrowClockwise size={18} /></button>
-            <button className="decisions-create" type="button" onClick={() => { setCreateError(''); setCreateOpen(true) }}><Plus size={17} weight="bold" />新建决策<CaretDown size={13} /></button>
+            <button className="decisions-create" type="button" disabled={!approvalPolicies.length} title={approvalPolicyError || undefined} onClick={() => { setCreateError(''); setCreateOpen(true) }}><Plus size={17} weight="bold" />新建决策<CaretDown size={13} /></button>
           </header>
 
           <div className="decisions-table-wrap" aria-live="polite" aria-busy={loading}>
@@ -315,7 +565,7 @@ export function DecisionsPage() {
                 <span className="decision-title-cell"><button type="button" aria-label={bookmarked ? `取消关注${item.title}` : `关注${item.title}`} onClick={() => toggleBookmark(item.id)}><BookmarkSimple size={17} weight={bookmarked ? 'fill' : 'regular'} /></button><span><strong>{item.title}</strong><small>{item.question}</small></span></span>
                 <span><em className={`decision-status is-${statusMeta.tone}`}>{statusMeta.label}</em></span>
                 <span className={`decision-evidence-mode ${evidenceMeta.verified ? 'is-verified' : ''}`}><ShieldCheck size={15} />{evidenceMeta.shortLabel}</span>
-                <span className="decision-owner-cell">{item.ownerAvatar ? <img src={item.ownerAvatar} alt="" /> : <User size={19} weight="duotone" />}<span><strong>{item.ownerDisplayName ?? decisionOwnerLabel(item.ownerUserId, actorID)}</strong><small>{item.ownerDepartment ?? '展示资料待后端补全'}</small></span></span>
+                <span className="decision-owner-cell">{item.ownerAvatar ? <img src={item.ownerAvatar} alt="" /> : <User size={19} weight="duotone" />}<span><strong>{item.ownerDisplayName ?? decisionOwnerLabel(item.ownerUserId, actorID)}</strong><small>{item.ownerDepartment || `${currentDomain()?.name || '当前'}领域成员`}</small></span></span>
                 <span className={`decision-evidence-cell ${evidenceMeta.verified ? 'is-verified' : ''}`}><strong>{evidenceMeta.shortLabel}</strong><small>{typeof item.evidenceCount === 'number' ? `${item.evidenceCount} 项依据` : '打开详情查看'}</small></span>
                 <span className="decision-progress-cell"><small>{item.actionLabel ?? '打开详情查看'}</small>{typeof item.actionPercent === 'number' ? <><span><i style={{ width: `${item.actionPercent}%` }} /></span><strong>{item.actionPercent}%</strong></> : <strong>—</strong>}</span>
                 <span>{item.reviewAt ? formatDecisionDate(item.reviewAt) : '—'}</span>
@@ -326,9 +576,9 @@ export function DecisionsPage() {
                 </span>}</span>
               </div>
             })}
-            {!loading && !error && visible.length === 0 && <div className="decisions-state"><CheckCircle size={28} /><strong>{query || status || evidenceMode || startDate || endDate ? '没有匹配当前条件的决策' : '当前范围没有决策'}</strong><small>生产页面不会用演示数据补齐空态</small></div>}
+            {!loading && !error && visible.length === 0 && <div className="decisions-state"><CheckCircle size={28} /><strong>{query || status || evidenceMode || startDate || endDate ? '没有匹配当前条件的决策' : '当前范围没有决策'}</strong><small>{query || status || evidenceMode || startDate || endDate ? '可清空筛选条件查看全部决策' : '从已验证的问数结果或报告证据可发起新决策'}</small></div>}
           </div>
-          <footer className="decisions-pagination"><span>共 {visible.length} 条{hasMore[activeScope] ? '，更多结果可继续分页' : ''}</span><div><button type="button" disabled aria-label="上一页"><CaretLeft size={14} /></button><button className="is-current" type="button">1</button><button type="button" disabled={!hasMore[activeScope]} aria-label="下一页"><CaretRight size={14} /></button><button type="button">20 条/页<CaretDown size={13} /></button></div></footer>
+          <footer className="decisions-pagination"><span>已加载 {visible.length} 条{hasMore[activeScope] ? '，仍有更多结果' : '，已显示全部'}</span>{hasMore[activeScope] && <button type="button" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? '加载中…' : '加载更多'}<CaretRight size={14} /></button>}</footer>
         </div>
 
         <aside className="decisions-urgent" aria-label="紧急关注">
@@ -349,12 +599,45 @@ export function DecisionsPage() {
           <section><h3><Path size={17} />决策结论</h3><p>{detail.decision.decision || '尚未填写决策结论'}</p><small>预期效果：{detail.decision.expectedEffect || '尚未填写'}</small></section>
           <section><h3><FileText size={17} />备选方案 <span>{detail.options.length}</span></h3>{detail.options.length ? detail.options.map(option => <div className={`decision-detail-item ${option.selected ? 'is-selected' : ''}`} key={option.id}><strong>{option.title}{option.selected && <em>已选择</em>}</strong><p>{option.description || '无补充说明'}</p></div>) : <p>当前草稿没有备选方案。</p>}</section>
           <section><h3><ShieldCheck size={17} />证据与审批</h3><dl><div><dt>已验证证据</dt><dd>{detail.evidence.length} 项</dd></div><div><dt>审批进度</dt><dd>{detail.approvals.filter(item => item.status === 'APPROVED').length}/{detail.decision.requiredApprovals}</dd></div><div><dt>审批策略</dt><dd>{detail.decision.approvalPolicyId}</dd></div></dl></section>
-          <section><h3><ClipboardText size={17} />行动进度</h3>{(() => { const progress = actionProgress(detail.actions); return <div className="decision-detail-progress"><span><i style={{ width: `${progress.percent}%` }} /></span><strong>{progress.completed}/{progress.total} 已完成</strong></div> })()}{detail.actions.slice(0, 4).map(action => <div className="decision-detail-item" key={action.id}><strong>{action.title}<em>{action.status}</em></strong><p>截止 {formatDecisionDate(action.dueAt, true)}</p></div>)}</section>
-          <section><h3><Clock size={17} />复盘与风险</h3><dl><div><dt>计划复盘</dt><dd>{formatDecisionDate(detail.decision.reviewAt, true)}</dd></div><div><dt>风险项</dt><dd>{detail.decision.risks.length || 0} 项</dd></div></dl>{detail.decision.risks.map(risk => <p className="decision-risk" key={risk}><Flag size={14} />{risk}</p>)}</section>
+			<section><h3><ClipboardText size={17} />行动进度</h3>{(() => { const progress = actionProgress(detail.actions); return <div className="decision-detail-progress"><span><i style={{ width: `${progress.percent}%` }} /></span><strong>{progress.completed}/{progress.total} 已完成</strong></div> })()}{detail.actions.map(action => <div className="decision-detail-item decision-action-item" key={action.id}><strong>{action.title}<em>{actionStatusLabels[action.status] ?? action.status}</em></strong><p>截止 {formatDecisionDate(action.dueAt, true)}</p>{action.blockReason && <small>阻塞原因：{action.blockReason}</small>}{action.completionEvidence && <small>完成凭证：{action.completionEvidence}</small>}{(action.assigneeUserId === actorID || detail.decision.ownerUserId === actorID) && availableActionTransitions(action.status).length > 0 && <div>{availableActionTransitions(action.status).map(item => <button type="button" className={item.target === 'CANCELED' || item.target === 'BLOCKED' ? 'is-danger' : ''} key={item.target} onClick={() => beginActionTransition(action, item.target)}>{item.label}</button>)}</div>}</div>)}</section>
+			<section><h3><Clock size={17} />复盘与风险</h3><dl><div><dt>计划复盘</dt><dd>{formatDecisionDate(detail.decision.reviewAt, true)}</dd></div><div><dt>风险项</dt><dd>{detail.decision.risks.length || 0} 项</dd></div><div><dt>复盘结论</dt><dd>{detail.outcomeReview?.conclusion ? outcomeConclusionLabels[detail.outcomeReview.conclusion] : '待确认'}</dd></div></dl>{detail.outcomeMetrics.length > 0 ? detail.outcomeMetrics.map(metric => <p className="decision-risk" key={metric.id}><ArrowClockwise size={14} />基线 {metric.baselineValue} · 当前 {metric.currentValue ?? '待刷新'} · {metric.refreshStatus}</p>) : <p className="decision-risk"><WarningCircle size={14} />未配置量化跟踪指标，仍可按“证据不足”完成定性复盘并记录后续补数计划。</p>}{detail.decision.risks.map(risk => <p className="decision-risk" key={risk}><Flag size={14} />{risk}</p>)}</section>
         </div>}
-        {detail && <footer>{detail.decision.status === 'DRAFT' && detail.decision.ownerUserId === actorID && <button className="primary" type="button" disabled={detailLoading} onClick={() => void submitDecision()}>{detailLoading ? '正在提交…' : '提交审批'}</button>}{detail.decision.status === 'IN_REVIEW' && <button className="primary" type="button" onClick={() => navigate('/approvals')}>前往审批中心</button>}<button type="button" onClick={() => setDetail(null)}>关闭</button></footer>}
+		{detail && <footer>
+			{detail.decision.status === 'DRAFT' && detail.decision.ownerUserId === actorID && <button className="primary" type="button" disabled={detailLoading} onClick={() => void submitDecision()}>{detailLoading ? '正在提交…' : '提交审批'}</button>}
+			{detail.decision.status === 'IN_REVIEW' && detail.approvals.some(item => item.approverUserId === actorID && item.status === 'PENDING') && <><button className="decision-reject" type="button" onClick={() => { setApprovalComment(''); setApprovalMode('REJECT') }}>驳回</button><button className="primary" type="button" onClick={() => { setApprovalComment(''); setApprovalMode('APPROVE') }}>批准决策</button></>}
+			{detail.decision.status === 'IN_REVIEW' && !detail.approvals.some(item => item.approverUserId === actorID && item.status === 'PENDING') && <button className="primary" type="button" onClick={() => navigate('/approvals')}>查看审批进度</button>}
+			{['APPROVED', 'IN_EXECUTION', 'REOPENED'].includes(detail.decision.status) && detail.decision.ownerUserId === actorID && <button className="primary" type="button" onClick={() => { setActionError(''); setActionForm(initialAction()); setActionOpen(true) }}><Plus size={16} />创建行动</button>}
+			{['IN_EXECUTION', 'REOPENED'].includes(detail.decision.status) && detail.decision.ownerUserId === actorID && detail.actions.length > 0 && detail.actions.every(action => action.status === 'DONE' || action.status === 'CANCELED') && <button className="primary" type="button" disabled={reviewStartBusy} onClick={() => void startReview()}>{reviewStartBusy ? '正在进入复盘…' : '进入复盘'}</button>}
+			{detail.decision.status === 'REVIEW_DUE' && detail.decision.ownerUserId === actorID && !detail.outcomeReview && <button className="primary" type="button" onClick={() => { setOutcomeConclusion(detail.outcomeMetrics.length > 0 ? 'ACHIEVED' : 'INCONCLUSIVE'); setOutcomeNotes(''); setOutcomeOpen(true) }}>确认复盘</button>}
+			{detail.decision.status === 'REVIEW_DUE' && detail.decision.ownerUserId === actorID && detail.outcomeReview && <button type="button" onClick={() => { setTerminalReason(''); setTerminalMode('close') }}>关闭决策</button>}
+			{['REJECTED', 'CLOSED'].includes(detail.decision.status) && detail.decision.ownerUserId === actorID && <button type="button" onClick={() => { setTerminalReason(''); setTerminalMode('reopen') }}>重新打开</button>}
+			{['DRAFT', 'IN_REVIEW', 'APPROVED', 'IN_EXECUTION', 'REOPENED', 'REVIEW_DUE'].includes(detail.decision.status) && detail.decision.ownerUserId === actorID && <button className="decision-reject" type="button" onClick={() => { setTerminalReason(''); setTerminalMode('cancel') }}>取消决策</button>}
+			<button type="button" onClick={() => setDetail(null)}>关闭</button>
+		</footer>}
       </aside>
     </div>}
+
+	{approvalMode && detail && <div className="decision-create-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !approvalBusy) setApprovalMode(null) }}>
+		<form className="decision-create-dialog decision-operation-dialog" role="dialog" aria-modal="true" aria-labelledby="decision-approval-title" onSubmit={decideApproval}>
+			<header><div><span>决策审批</span><h2 id="decision-approval-title">{approvalMode === 'APPROVE' ? '确认批准此决策' : '驳回并要求补充'}</h2></div><button type="button" disabled={approvalBusy} aria-label="关闭审批" onClick={() => setApprovalMode(null)}><X size={18} /></button></header>
+			<div className="decision-create-body"><p className="decision-create-note"><ShieldCheck size={18} />{detail.decision.title} · 当前版本 v{detail.decision.recordVersion}</p><label><span>{approvalMode === 'REJECT' ? '驳回意见 *' : '审批意见（可选）'}</span><textarea autoFocus value={approvalComment} onChange={event => setApprovalComment(event.target.value)} placeholder={approvalMode === 'REJECT' ? '请说明需要补充的依据或调整内容' : '例如：同意按分阶段方案执行'} maxLength={4096} /></label>{detailError && <p className="decision-create-error" role="alert"><WarningCircle size={16} />{detailError}</p>}</div>
+			<footer><button type="button" disabled={approvalBusy} onClick={() => setApprovalMode(null)}>取消</button><button className="primary" type="submit" disabled={approvalBusy || approvalMode === 'REJECT' && !approvalComment.trim()}>{approvalBusy ? '正在提交…' : approvalMode === 'APPROVE' ? '确认批准' : '确认驳回'}</button></footer>
+		</form>
+	</div>}
+
+	{actionOpen && detail && <div className="decision-create-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !actionBusy) setActionOpen(false) }}>
+		<form className="decision-create-dialog decision-operation-dialog" role="dialog" aria-modal="true" aria-labelledby="decision-action-title" onSubmit={createAction}>
+			<header><div><span>落地执行</span><h2 id="decision-action-title">创建行动项</h2></div><button type="button" disabled={actionBusy} aria-label="关闭行动创建" onClick={() => setActionOpen(false)}><X size={18} /></button></header>
+			<div className="decision-create-body"><p className="decision-create-note"><ClipboardText size={18} />行动创建后将自动进入“任务中心”，并由当前决策发起人负责执行。</p><label><span>行动标题 *</span><input autoFocus value={actionForm.title} onChange={event => setActionForm(current => ({ ...current, title: event.target.value }))} placeholder="例如：完成华东渠道预算调整与投放配置" maxLength={256} /></label><label><span>执行说明</span><textarea value={actionForm.description} onChange={event => setActionForm(current => ({ ...current, description: event.target.value }))} placeholder="说明交付范围、检查标准和协同事项" maxLength={4096} /></label><div className="decision-create-grid"><label><span>负责人</span><input value="由我负责" disabled /></label><label><span>截止日期 *</span><input type="date" value={actionForm.dueDate} onChange={event => setActionForm(current => ({ ...current, dueDate: event.target.value }))} /></label></div>{actionError && <p className="decision-create-error" role="alert"><WarningCircle size={16} />{actionError}</p>}</div>
+			<footer><button type="button" disabled={actionBusy} onClick={() => setActionOpen(false)}>取消</button><button className="primary" type="submit" disabled={actionBusy}>{actionBusy ? '正在创建…' : '创建并进入执行'}</button></footer>
+		</form>
+	</div>}
+
+	{transitioningAction && <div className="decision-create-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !transitionBusy) setTransitioningAction(null) }}><form className="decision-create-dialog decision-operation-dialog" role="dialog" aria-modal="true" aria-labelledby="decision-action-transition-title" onSubmit={transitionAction}><header><div><span>行动状态</span><h2 id="decision-action-transition-title">{actionStatusLabels[transitionTarget]}</h2></div><button type="button" disabled={transitionBusy} aria-label="关闭行动状态更新" onClick={() => setTransitioningAction(null)}><X size={18} /></button></header><div className="decision-create-body"><p className="decision-create-note"><ClipboardText size={18} />{transitioningAction.title} · 当前状态 {actionStatusLabels[transitioningAction.status]}</p><label><span>{transitionTarget === 'DONE' ? '完成凭证 *' : transitionTarget === 'BLOCKED' ? '阻塞原因 *' : ['DONE', 'CANCELED'].includes(transitioningAction.status) ? '重新打开原因 *' : '处理说明（选填）'}</span><textarea autoFocus value={transitionNote} onChange={event => setTransitionNote(event.target.value)} placeholder={transitionTarget === 'DONE' ? '填写交付物、验收结果或可追溯链接' : '说明本次状态变更'} maxLength={2048} /></label>{actionError && <p className="decision-create-error" role="alert"><WarningCircle size={16} />{actionError}</p>}</div><footer><button type="button" disabled={transitionBusy} onClick={() => setTransitioningAction(null)}>取消</button><button className="primary" type="submit" disabled={transitionBusy}>{transitionBusy ? '正在更新…' : '确认更新'}</button></footer></form></div>}
+
+	{terminalMode && detail && <div className="decision-create-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !terminalBusy) setTerminalMode(null) }}><form className="decision-create-dialog decision-operation-dialog" role="dialog" aria-modal="true" aria-labelledby="decision-terminal-title" onSubmit={transitionDecision}><header><div><span>决策生命周期</span><h2 id="decision-terminal-title">{terminalMode === 'close' ? '关闭决策' : terminalMode === 'reopen' ? '重新打开决策' : '取消决策'}</h2></div><button type="button" disabled={terminalBusy} aria-label="关闭决策状态更新" onClick={() => setTerminalMode(null)}><X size={18} /></button></header><div className="decision-create-body"><p className="decision-create-note"><ShieldCheck size={18} />状态变更将保留完整审批、行动和复盘审计记录。</p><label><span>{terminalMode === 'close' ? '关闭说明（完成行动和复盘后可留空）' : '原因 *'}</span><textarea autoFocus value={terminalReason} onChange={event => setTerminalReason(event.target.value)} placeholder="说明本次状态变更的业务原因" maxLength={4096} /></label>{detailError && <p className="decision-create-error" role="alert"><WarningCircle size={16} />{detailError}</p>}</div><footer><button type="button" disabled={terminalBusy} onClick={() => setTerminalMode(null)}>取消</button><button className={terminalMode === 'cancel' ? 'decision-reject' : 'primary'} type="submit" disabled={terminalBusy || terminalMode !== 'close' && !terminalReason.trim()}>{terminalBusy ? '正在处理…' : '确认'}</button></footer></form></div>}
+
+	{outcomeOpen && detail && <div className="decision-create-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !outcomeBusy) setOutcomeOpen(false) }}><form className="decision-create-dialog decision-operation-dialog" role="dialog" aria-modal="true" aria-labelledby="decision-outcome-title" onSubmit={confirmOutcome}><header><div><span>决策复盘</span><h2 id="decision-outcome-title">{detail.outcomeMetrics.length > 0 ? '刷新指标并确认结果' : '记录定性复盘结论'}</h2></div><button type="button" disabled={outcomeBusy} aria-label="关闭决策复盘" onClick={() => setOutcomeOpen(false)}><X size={18} /></button></header><div className="decision-create-body"><p className="decision-create-note">{detail.outcomeMetrics.length > 0 ? <><ArrowClockwise size={18} />提交时会先按当前权限刷新 {detail.outcomeMetrics.length} 项跟踪指标，再固定复盘结论。</> : <><WarningCircle size={18} />当前决策没有量化跟踪指标。平台不会推断达成度；本次将如实记录为“证据不足”，并保留补数与后续跟踪说明。</>}</p><label><span>复盘结论 *</span><select value={outcomeConclusion} disabled={detail.outcomeMetrics.length === 0} onChange={event => setOutcomeConclusion(event.target.value as typeof outcomeConclusion)}>{detail.outcomeMetrics.length > 0 && <><option value="ACHIEVED">目标达成</option><option value="PARTIALLY_ACHIEVED">部分达成</option><option value="NOT_ACHIEVED">未达成</option></>}<option value="INCONCLUSIVE">证据不足</option></select></label><label><span>{detail.outcomeMetrics.length > 0 ? '复盘说明' : '复盘依据与后续计划 *'}</span><textarea value={outcomeNotes} onChange={event => setOutcomeNotes(event.target.value)} placeholder="说明结果、归因、证据缺口与后续建议" maxLength={4096} /></label>{detailError && <p className="decision-create-error" role="alert"><WarningCircle size={16} />{detailError}</p>}</div><footer><button type="button" disabled={outcomeBusy} onClick={() => setOutcomeOpen(false)}>取消</button><button className="primary" type="submit" disabled={outcomeBusy || detail.outcomeMetrics.length === 0 && !outcomeNotes.trim()}>{outcomeBusy ? '正在确认…' : '确认复盘'}</button></footer></form></div>}
 
     {createOpen && <div className="decision-create-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !createBusy) setCreateOpen(false) }}>
       <form className="decision-create-dialog" role="dialog" aria-modal="true" aria-labelledby="decision-create-title" onSubmit={createDecision}>
@@ -363,7 +646,7 @@ export function DecisionsPage() {
           <p className="decision-create-note"><WarningCircle size={18} />从本页新建的草稿会明确标记为“无平台证据”。从问数答案或报告创建时，后续将由来源页面固定已验证证据。</p>
           <label><span>决策标题 *</span><input autoFocus value={createForm.title} onChange={event => setCreateForm(current => ({ ...current, title: event.target.value }))} placeholder="例如：渠道政策调整专项方案" maxLength={256} /></label>
           <label><span>需要决策的问题 *</span><textarea value={createForm.question} onChange={event => setCreateForm(current => ({ ...current, question: event.target.value }))} placeholder="描述需要做出决定的业务问题" maxLength={4096} /></label>
-          <div className="decision-create-grid"><label><span>审批策略编码 *</span><input value={createForm.approvalPolicyId} onChange={event => setCreateForm(current => ({ ...current, approvalPolicyId: event.target.value }))} placeholder="由当前业务领域管理员提供" maxLength={128} /></label><label><span>计划复盘日期 *</span><input type="date" value={createForm.reviewDate} onChange={event => setCreateForm(current => ({ ...current, reviewDate: event.target.value }))} /></label></div>
+          <div className="decision-create-grid"><label><span>审批流程 *</span><select value={createForm.approvalPolicyId} onChange={event => setCreateForm(current => ({ ...current, approvalPolicyId: event.target.value }))}>{approvalPolicies.map(policy => <option key={policy.id} value={policy.id}>{policy.name} · {policy.approverSummary}</option>)}</select></label><label><span>计划复盘日期 *</span><input type="date" value={createForm.reviewDate} onChange={event => setCreateForm(current => ({ ...current, reviewDate: event.target.value }))} /></label></div>
           <label><span>备选/推荐方案</span><input value={createForm.optionTitle} onChange={event => setCreateForm(current => ({ ...current, optionTitle: event.target.value }))} placeholder="例如：分区域分阶段调整" maxLength={256} /></label>
           <label><span>决策结论</span><textarea value={createForm.decision} onChange={event => setCreateForm(current => ({ ...current, decision: event.target.value }))} placeholder="草稿可先留空，提交审批前再完善" maxLength={8192} /></label>
           <label><span>预期效果</span><textarea value={createForm.expectedEffect} onChange={event => setCreateForm(current => ({ ...current, expectedEffect: event.target.value }))} placeholder="描述希望改善的经营结果" maxLength={4096} /></label>

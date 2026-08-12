@@ -63,6 +63,7 @@ func BuildRecomputedTotalPlan(plan QueryPlan, metricColumns []string) (QueryPlan
 		plan.Role,
 		document,
 		plan.Source,
+		plan.JoinedSources,
 		plan.ParameterShapes,
 		plan.parameterValues,
 		1,

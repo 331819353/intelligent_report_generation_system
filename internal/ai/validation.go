@@ -260,6 +260,14 @@ func validateStrictSchemaNodeAtDepth(node, root map[string]any, path string, dep
 	if schemaIncludesType(node["type"], "object") {
 		properties, ok := node["properties"].(map[string]any)
 		if !ok {
+			// A root discriminated union may delegate the complete closed object
+			// shape to strict oneOf branches. This keeps every branch fully strict
+			// while avoiding a contradictory parent object that would require the
+			// fields of every mutually exclusive variant.
+			_, unionRoot := node["oneOf"].([]any)
+			if path == "$schema" && unionRoot && !objectKeywords {
+				goto validateChildren
+			}
 			return fmt.Errorf("%s object properties must be an object", path)
 		}
 		additional, exists := node["additionalProperties"]
@@ -295,6 +303,7 @@ func validateStrictSchemaNodeAtDepth(node, root map[string]any, path string, dep
 		}
 	}
 
+validateChildren:
 	arrayKeywords := hasAnySchemaKeyword(node, "items", "minItems", "maxItems", "uniqueItems")
 	if arrayKeywords && !schemaIncludesType(node["type"], "array") {
 		return fmt.Errorf("%s array keywords require array type", path)

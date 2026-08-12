@@ -156,7 +156,14 @@ func TestPostgresAnswerDecisionActionOutcomeCloseE2E(t *testing.T) {
 		t.Fatalf("second paginated decision list = %#v, %v", secondListPage, err)
 	}
 	policies, err := service.ListApprovalPolicies(ownerContext, owner)
-	if err != nil || len(policies) != 1 || policies[0].ID != "decision-e2e-single" || policies[0].ApproverSummary == "" {
+	foundIntegrationPolicy := false
+	for _, policy := range policies {
+		if policy.ID == "decision-e2e-single" && policy.ApproverSummary != "" {
+			foundIntegrationPolicy = true
+			break
+		}
+	}
+	if err != nil || !foundIntegrationPolicy {
 		t.Fatalf("approval policy directory = %#v, %v", policies, err)
 	}
 	if _, err = service.ListDetailed(ownerContext, owner, ListQuery{DecisionType: "UNCONFIRMED", Sort: "UPDATED_DESC", Limit: 20}); !errors.Is(err, ErrInvalid) {

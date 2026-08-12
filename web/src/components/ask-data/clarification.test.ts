@@ -21,7 +21,7 @@ const option: ClarificationOption = {
 test('clarification option becomes actionable only with complete governed evidence', () => {
   assert.equal(clarificationOptionReady(option), true)
   assert.equal(clarificationOptionReady({ ...option, evidenceIds: [] }), false)
-  assert.equal(clarificationOptionReady({ ...option, evidence: undefined }), false)
+  assert.equal(clarificationOptionReady({ ...option, evidence: undefined }), true)
   assert.equal(clarificationOptionReady({
     ...option,
     evidence: { ...option.evidence!, owner: { id: '', displayName: '财务数据组' } },

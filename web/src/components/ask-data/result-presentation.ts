@@ -24,27 +24,31 @@ export function numericResultValue(value: string | null | undefined): number | u
 
 function validViewCellShape(view: QuestionResultView, dataset: QuestionResultDataset, requireSafeNumbers: boolean): boolean {
   const columns = columnMap(dataset)
-  const dimensions = view.dimensionKeys.map(key => columns.get(key))
-  const measures = view.measureKeys.map(key => columns.get(key))
+	const dimensionKeys = view.dimensionKeys ?? []
+	const measureKeys = view.measureKeys ?? []
+	const dimensions = dimensionKeys.map(key => columns.get(key))
+	const measures = measureKeys.map(key => columns.get(key))
   if (dimensions.some(column => !column || column.role !== 'DIMENSION')) return false
   if (measures.some(column => !column || column.role !== 'MEASURE' || !['INTEGER', 'DECIMAL'].includes(column.type))) return false
-  return !requireSafeNumbers || dataset.rows.every(row => view.measureKeys.every(key => row[key] === null || numericResultValue(row[key]) !== undefined))
+	return !requireSafeNumbers || dataset.rows.every(row => measureKeys.every(key => row[key] === null || numericResultValue(row[key]) !== undefined))
 }
 
 export function resultViewEligible(result: QuestionResult, view: QuestionResultView): boolean {
   const dataset = resultDataset(result, view.datasetId)
   if (!dataset || dataset.totalRows < dataset.rows.length) return false
   if (!validViewCellShape(view, dataset, view.type !== 'TABLE')) return false
+	const dimensionKeys = view.dimensionKeys ?? []
+	const measureKeys = view.measureKeys ?? []
   if (view.type === 'LINE') {
-    const dimension = dataset.columns.find(column => column.key === view.dimensionKeys[0])
-    return dataset.rows.length >= 2 && view.dimensionKeys.length === 1 && view.measureKeys.length === 1 &&
+		const dimension = dataset.columns.find(column => column.key === dimensionKeys[0])
+		return dataset.rows.length >= 2 && dimensionKeys.length === 1 && measureKeys.length === 1 &&
       (dimension?.type === 'DATE' || dimension?.type === 'DATETIME')
   }
   if (view.type === 'BAR') {
-    return dataset.rows.length >= 2 && dataset.rows.length <= 20 && view.dimensionKeys.length === 1 && view.measureKeys.length === 1
+		return dataset.rows.length >= 2 && dataset.rows.length <= 20 && dimensionKeys.length === 1 && measureKeys.length === 1
   }
   if (view.type === 'KPI') {
-    return dataset.rows.length === 1 && view.dimensionKeys.length === 0 && view.measureKeys.length === 1
+		return dataset.rows.length === 1 && dimensionKeys.length === 0 && measureKeys.length === 1
   }
   return view.type === 'TABLE'
 }

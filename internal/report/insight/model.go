@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"intelligent-report-generation-system/internal/askdata"
+	"intelligent-report-generation-system/internal/askdata/answer"
 	"intelligent-report-generation-system/internal/askdata/shared"
 )
 
@@ -271,6 +272,17 @@ func (warning QualityWarning) Validate() error {
 		return fmt.Errorf("unsupported severity %q", warning.Severity)
 	}
 	return validateText(warning.Message, 1024, false)
+}
+
+// BindingCatalog names the object catalog a narrative over this evidence must
+// be verified against. A semantic-sourced bundle answers with its release; a
+// dataset-sourced one answers with its dataset version. Both are governed
+// catalogs of object identity, which is what the verifier needs.
+func (bundle EvidenceBundle) BindingCatalog() (answer.BindingSource, askdata.ID) {
+	if bundle.SourceType == SourceSemanticIR && bundle.SemanticReleaseID != nil {
+		return answer.BindingSourceSemanticRelease, *bundle.SemanticReleaseID
+	}
+	return answer.BindingSourceDatasetVersion, bundle.DatasetVersionID
 }
 
 func (bundle EvidenceBundle) StaleProvenance() shared.Provenance {

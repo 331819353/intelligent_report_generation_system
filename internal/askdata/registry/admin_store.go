@@ -199,55 +199,7 @@ func (store *PostgresStore) CreateAdminReleaseDraft(
 ) (AdminWriteResult, error) {
 	return store.runAdminWrite(ctx, scope, AdminResourceRelease, AdminActionRelease, "",
 		"RELEASE_DRAFT_CREATED", command, func(ctx context.Context, tx pgx.Tx) (AdminWriteResult, error) {
-			manifest, err := BuildReleaseManifest(input.Objects)
-			if err != nil {
-				return AdminWriteResult{}, fmt.Errorf("%w: %v", ErrRegistryInvalidRequest, err)
-			}
-			semanticVersion := strings.TrimSpace(input.SemanticVersion)
-			if semanticVersion != input.SemanticVersion {
-				return AdminWriteResult{}, fmt.Errorf("%w: semanticVersion must be trimmed", ErrRegistryInvalidRequest)
-			}
-			releaseID := stableAdminID(command.RequestID, string(AdminResourceRelease), "record")
-			tag, err := tx.Exec(ctx, `INSERT INTO askdata.releases(
-				id,tenant_id,domain_id,semantic_version,content_hash,status,
-				object_count,created_by,updated_by
-			) VALUES($1,$2,$3,$4,$5,'DRAFT',$6,$7,$7)
-			ON CONFLICT(tenant_id,domain_id,semantic_version) DO NOTHING`,
-				releaseID, scope.TenantID, scope.DomainID, semanticVersion,
-				manifest.ContentHash, len(manifest.Objects), scope.ActorID)
-			if err != nil {
-				return AdminWriteResult{}, err
-			}
-			if tag.RowsAffected() != 1 {
-				var existingID, existingHash, status string
-				if err := tx.QueryRow(ctx, `SELECT id::text,content_hash,status
-					FROM askdata.releases WHERE domain_id=$1 AND semantic_version=$2`,
-					scope.DomainID, semanticVersion).Scan(&existingID, &existingHash, &status); err != nil {
-					return AdminWriteResult{}, err
-				}
-				if existingHash != string(manifest.ContentHash) || status != "DRAFT" {
-					return AdminWriteResult{}, ErrRegistryConflict
-				}
-				releaseID = existingID
-			}
-			if tag.RowsAffected() == 1 {
-				for _, object := range manifest.Objects {
-					if _, err := tx.Exec(ctx, `INSERT INTO askdata.release_objects(
-						tenant_id,domain_id,release_id,object_type,object_id,
-						object_version_id,content_hash,sensitivity,contract_json
-					) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-						scope.TenantID, scope.DomainID, releaseID, object.Type,
-						object.ObjectID, object.ObjectVersionID, object.ContentHash,
-						object.Sensitivity, object.Contract); err != nil {
-						return AdminWriteResult{}, err
-					}
-				}
-			}
-			return AdminWriteResult{
-				ResourceType: AdminResourceRelease, ResourceID: releaseID,
-				ContentHash: manifest.ContentHash, Status: "DRAFT",
-				SemanticVersion: semanticVersion,
-			}, nil
+			return createAdminReleaseDraftTx(ctx, tx, scope, input.SemanticVersion, input.Objects, command.RequestID)
 		})
 }
 
@@ -275,6 +227,9 @@ func (store *PostgresStore) runAdminWrite(
 	var result AdminWriteResult
 	err := database.WithTenantTx(ctx, store.pool, scope.TenantID, func(tx pgx.Tx) error {
 		if err := requireSemanticPermissionTx(ctx, tx, scope, action, permissionObjectID); err != nil {
+			return err
+		}
+		if err := ensureSemanticDomainTx(ctx, tx, scope); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`,
@@ -326,6 +281,33 @@ func (store *PostgresStore) runAdminWrite(
 		return err
 	})
 	return result, normalizeAdminStoreError(err)
+}
+
+// Business domains are created in the platform control plane before a tenant
+// ever opens the semantic workbench. Provision the registry projection on the
+// first authorized semantic write so a valid domain cannot dead-end on a
+// missing internal mirror row.
+func ensureSemanticDomainTx(ctx context.Context, tx pgx.Tx, scope AdminScope) error {
+	tag, err := tx.Exec(ctx, `INSERT INTO askdata.domains(id,tenant_id,code,name,owner_id)
+		SELECT domain.id,domain.tenant_id,domain.code,domain.name,$3
+		FROM platform.business_domains AS domain
+		WHERE domain.id=$1 AND domain.tenant_id=$2
+		  AND domain.status='ACTIVE' AND domain.deleted_at IS NULL
+		ON CONFLICT (id) DO NOTHING`, scope.DomainID, scope.TenantID, scope.ActorID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM askdata.domains
+			WHERE id=$1 AND tenant_id=$2)`, scope.DomainID, scope.TenantID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return ErrRegistryPermissionDenied
+		}
+	}
+	return nil
 }
 
 func requireSemanticPermissionTx(
@@ -612,6 +594,45 @@ func createDraftTx(
 			return AdminWriteResult{}, err
 		}
 		return versionWriteResult(resource, relationship.VersionIdentity), nil
+	case AdminResourceMetricDimension:
+		input := payload.(*MetricDimensionDraftInput)
+		identity, err := newVersionIdentity(scope, input.VersionedDraftInput, requestID, resource)
+		if err != nil {
+			return AdminWriteResult{}, err
+		}
+		identity.ID = recordID
+		var metricID, dimensionID string
+		if err := tx.QueryRow(ctx, `SELECT metric_id::text FROM askdata.metric_versions
+			WHERE id=$1 AND domain_id=$2`, input.MetricVersionID, scope.DomainID).Scan(&metricID); err != nil {
+			return AdminWriteResult{}, adminNoRows(err)
+		}
+		if err := tx.QueryRow(ctx, `SELECT dimension_id::text FROM askdata.dimensions
+			WHERE id=$1 AND domain_id=$2`, input.DimensionVersionID, scope.DomainID).Scan(&dimensionID); err != nil {
+			return AdminWriteResult{}, adminNoRows(err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO askdata.metric_dimensions(
+			id,tenant_id,domain_id,metric_id,dimension_id,created_by
+		) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(tenant_id,domain_id,metric_id,dimension_id) DO NOTHING`,
+			identity.ObjectID, scope.TenantID, scope.DomainID, metricID, dimensionID, scope.ActorID); err != nil {
+			return AdminWriteResult{}, err
+		}
+		if err := tx.QueryRow(ctx, `SELECT id::text FROM askdata.metric_dimensions
+			WHERE tenant_id=$1 AND domain_id=$2 AND metric_id=$3 AND dimension_id=$4`,
+			scope.TenantID, scope.DomainID, metricID, dimensionID).Scan(&identity.ObjectID); err != nil {
+			return AdminWriteResult{}, err
+		}
+		compatibility := MetricDimension{VersionIdentity: identity,
+			MetricVersionID: input.MetricVersionID, DimensionVersionID: input.DimensionVersionID,
+			Compatible: input.Compatible, Role: input.Role,
+		}
+		compatibility.ContentHash = metricDimensionContentHash(compatibility)
+		if err := compatibility.Validate(); err != nil {
+			return AdminWriteResult{}, err
+		}
+		if err := insertMetricDimensionAdminTx(ctx, tx, &compatibility); err != nil {
+			return AdminWriteResult{}, err
+		}
+		return versionWriteResult(resource, compatibility.VersionIdentity), nil
 	default:
 		return AdminWriteResult{}, fmt.Errorf("%w: unsupported semantic resource", ErrRegistryInvalidRequest)
 	}
@@ -944,6 +965,29 @@ func updateDraftTx(
 			current.Type, current.JoinType, current.Cardinality, current.JoinAST,
 			current.FanoutPolicy, current.BridgeModelVersionID, current.ContentHash, current.OwnerID, current.ID,
 			current.DomainID, input.ExpectedUpdatedAt).Scan(&current.UpdatedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return AdminWriteResult{}, ErrRegistryVersionConflict
+		}
+		return versionWriteResult(resource, current.VersionIdentity), err
+	case AdminResourceMetricDimension:
+		current, input := existing.(MetricDimension), payload.(*MetricDimensionDraftInput)
+		if err := validateVersionedUpdate(input.VersionedDraftInput, current.VersionIdentity); err != nil {
+			return AdminWriteResult{}, err
+		}
+		if input.MetricVersionID != current.MetricVersionID || input.DimensionVersionID != current.DimensionVersionID {
+			return AdminWriteResult{}, fmt.Errorf("%w: metric and dimension identities cannot change", ErrRegistryInvalidRequest)
+		}
+		current.Compatible, current.Role = input.Compatible, input.Role
+		current.OwnerID = updatedAdminOwner(input.OwnerID, current.OwnerID)
+		current.ContentHash = metricDimensionContentHash(current)
+		if err := current.Validate(); err != nil {
+			return AdminWriteResult{}, err
+		}
+		err = tx.QueryRow(ctx, `UPDATE askdata.metric_dimension_versions SET
+			compatible=$1,role=$2,content_hash=$3,owner_id=$4
+			WHERE id=$5 AND domain_id=$6 AND status='DRAFT' AND updated_at=$7
+			RETURNING updated_at`, current.Compatible, current.Role, current.ContentHash,
+			current.OwnerID, current.ID, current.DomainID, input.ExpectedUpdatedAt).Scan(&current.UpdatedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return AdminWriteResult{}, ErrRegistryVersionConflict
 		}
@@ -1707,6 +1751,30 @@ func insertRelationshipAdminTx(ctx context.Context, tx pgx.Tx, value *Relationsh
 		Scan(&value.CreatedAt, &value.UpdatedAt)
 }
 
+func metricDimensionContentHash(value MetricDimension) askdata.ContentHash {
+	return contentHashForContract(metricDimensionContract(value))
+}
+
+func metricDimensionContract(value MetricDimension) map[string]any {
+	return map[string]any{
+		"type": "METRIC_DIMENSION", "metricDimensionId": value.ObjectID,
+		"versionNo": value.VersionNo, "metricVersionId": value.MetricVersionID,
+		"dimensionVersionId": value.DimensionVersionID, "compatible": value.Compatible,
+		"role": value.Role,
+	}
+}
+
+func insertMetricDimensionAdminTx(ctx context.Context, tx pgx.Tx, value *MetricDimension) error {
+	return tx.QueryRow(ctx, `INSERT INTO askdata.metric_dimension_versions(
+		id,tenant_id,domain_id,metric_dimension_id,version_no,metric_version_id,
+		dimension_version_id,compatible,role,status,content_hash,owner_id
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'DRAFT',$10,$11)
+	RETURNING created_at,updated_at`, value.ID, value.TenantID, value.DomainID,
+		value.ObjectID, value.VersionNo, value.MetricVersionID, value.DimensionVersionID,
+		value.Compatible, value.Role, value.ContentHash, value.OwnerID).
+		Scan(&value.CreatedAt, &value.UpdatedAt)
+}
+
 func newVersionIdentity(
 	scope AdminScope,
 	input VersionedDraftInput,
@@ -1786,36 +1854,41 @@ func metricVersionContentHash(metric MetricVersion) askdata.ContentHash {
 	return contentHashForContract(contract)
 }
 
-func businessTermContentHash(term BusinessTerm) askdata.ContentHash {
-	contract := struct {
-		Type              string     `json:"type"`
-		TermID            string     `json:"termId"`
-		VersionNo         int        `json:"versionNo"`
-		Term              string     `json:"term"`
-		TermType          string     `json:"termType"`
-		TargetObjectType  string     `json:"targetObjectType"`
-		TargetVersionID   string     `json:"targetVersionId"`
-		TargetCode        string     `json:"targetCode"`
-		MatchMode         string     `json:"matchMode"`
-		MatchPattern      string     `json:"matchPattern,omitempty"`
-		Priority          int        `json:"priority"`
-		NegativeContexts  []string   `json:"negativeContexts"`
-		ApplicableRoleIDs []string   `json:"applicableRoleIds"`
-		ValidFrom         *time.Time `json:"validFrom,omitempty"`
-		ValidTo           *time.Time `json:"validTo,omitempty"`
-		Source            string     `json:"source"`
-		Code              string     `json:"code"`
-		Name              string     `json:"name"`
-		Definition        string     `json:"definition"`
-		Aliases           []string   `json:"aliases"`
-	}{
+type businessTermContractDocument struct {
+	Type              string     `json:"type"`
+	TermID            string     `json:"termId"`
+	VersionNo         int        `json:"versionNo"`
+	Term              string     `json:"term"`
+	TermType          string     `json:"termType"`
+	TargetObjectType  string     `json:"targetObjectType"`
+	TargetVersionID   string     `json:"targetVersionId"`
+	TargetCode        string     `json:"targetCode"`
+	MatchMode         string     `json:"matchMode"`
+	MatchPattern      string     `json:"matchPattern,omitempty"`
+	Priority          int        `json:"priority"`
+	NegativeContexts  []string   `json:"negativeContexts"`
+	ApplicableRoleIDs []string   `json:"applicableRoleIds"`
+	ValidFrom         *time.Time `json:"validFrom,omitempty"`
+	ValidTo           *time.Time `json:"validTo,omitempty"`
+	Source            string     `json:"source"`
+	Code              string     `json:"code"`
+	Name              string     `json:"name"`
+	Definition        string     `json:"definition"`
+	Aliases           []string   `json:"aliases"`
+}
+
+func businessTermContract(term BusinessTerm) businessTermContractDocument {
+	return businessTermContractDocument{
 		"BUSINESS_TERM", term.ObjectID, term.VersionNo, term.Term, term.TermType,
 		term.TargetObjectType, term.TargetVersionID, term.TargetCode, term.MatchMode,
 		term.MatchPattern, term.Priority, sortedAdminAliases(term.NegativeContexts),
 		sortedAdminIDs(term.ApplicableRoleIDs), term.ValidFrom, term.ValidTo, term.Source,
 		term.Code, term.Name, term.Definition, sortedAdminAliases(term.Aliases),
 	}
-	return contentHashForContract(contract)
+}
+
+func businessTermContentHash(term BusinessTerm) askdata.ContentHash {
+	return contentHashForContract(businessTermContract(term))
 }
 
 func relationshipContentHash(relationship Relationship) askdata.ContentHash {
@@ -1873,6 +1946,8 @@ func versionIdentityOf(value any) VersionIdentity {
 		return typed.VersionIdentity
 	case Relationship:
 		return typed.VersionIdentity
+	case MetricDimension:
+		return typed.VersionIdentity
 	default:
 		panic("unsupported versioned semantic draft")
 	}
@@ -1894,6 +1969,8 @@ func adminTable(resource AdminResource) (string, error) {
 		return "kpi_bundle_versions", nil
 	case AdminResourceRelationship:
 		return "relationships", nil
+	case AdminResourceMetricDimension:
+		return "metric_dimension_versions", nil
 	default:
 		return "", fmt.Errorf("%w: unsupported semantic resource", ErrRegistryInvalidRequest)
 	}
@@ -1918,7 +1995,11 @@ func updatedAdminOwner(ownerID, current string) string {
 }
 
 func sortedAdminIDs(values []string) []string {
-	result := append([]string(nil), values...)
+	// PostgreSQL uuid[] columns are NOT NULL. Preserve an explicitly empty
+	// contract as an empty array instead of letting the driver encode a nil
+	// slice as SQL NULL.
+	result := make([]string, len(values))
+	copy(result, values)
 	sort.Strings(result)
 	return result
 }

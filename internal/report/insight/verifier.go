@@ -3,7 +3,6 @@ package insight
 import (
 	"errors"
 
-	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/answer"
 	"intelligent-report-generation-system/internal/askdata/compiler"
 	"intelligent-report-generation-system/internal/askdata/shared"
@@ -26,17 +25,15 @@ func (value VerifiableInsight) VerificationNarrative() (answer.VerificationNarra
 	if err != nil || hash != value.Artifact.EvidenceHash {
 		return answer.VerificationNarrative{}, errors.New("insight evidence hash is invalid")
 	}
-	releaseID := askdata.ID("")
-	if value.Evidence.SemanticReleaseID != nil {
-		releaseID = *value.Evidence.SemanticReleaseID
-	}
+	source, catalogID := value.Evidence.BindingCatalog()
 	return answer.VerificationNarrative{
 		Text:                  value.Artifact.Content.CanonicalText(),
 		Citations:             shared.NormalizeCitations(value.Artifact.Citations),
 		VerifierVersion:       value.Artifact.VerifierVersion,
 		PolicyWordlistVersion: value.Artifact.PolicyWordlistVersion,
 		ReferenceHash:         hash,
-		SemanticReleaseID:     releaseID,
+		Source:                source,
+		CatalogID:             catalogID,
 	}, nil
 }
 

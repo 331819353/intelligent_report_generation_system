@@ -44,7 +44,7 @@ type QueryVectorSample struct {
 func (sample QueryVectorSample) Validate() error {
 	if uuid.Validate(sample.ID) != nil || uuid.Validate(sample.TenantID) != nil ||
 		uuid.Validate(sample.DomainID) != nil || sample.Release.Validate() != nil ||
-		!validRetrievalObjectType(sample.DocumentType) ||
+		!ValidRetrievalObjectType(sample.DocumentType) ||
 		strings.TrimSpace(sample.EmbeddingModel) == "" || len(sample.EmbeddingModel) > 128 ||
 		sample.EmbeddingDimension != SearchEmbeddingDimension ||
 		len(sample.Embedding) != sample.EmbeddingDimension || sample.CapturedAt.IsZero() {
@@ -72,7 +72,7 @@ type RecallAuditResult struct {
 
 func (result RecallAuditResult) Validate() error {
 	if uuid.Validate(result.TenantID) != nil || uuid.Validate(result.DomainID) != nil ||
-		result.RunAt.IsZero() || !validRetrievalObjectType(result.DocumentType) ||
+		result.RunAt.IsZero() || !ValidRetrievalObjectType(result.DocumentType) ||
 		!validRecallK(result.K) || result.SampleSize < 1 ||
 		math.IsNaN(result.Recall) || math.IsInf(result.Recall, 0) ||
 		result.Recall < 0 || result.Recall > 1 || result.P95LatencyANN < 0 ||

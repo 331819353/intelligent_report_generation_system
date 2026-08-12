@@ -47,9 +47,7 @@ func TestBuildExecutionPlanProducesStructuredRequestsWithoutSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := PinExecutionVersion(&semanticPlan, testLoadedReport()); err != nil {
-		t.Fatal(err)
-	}
+	pinPublished(t, &semanticPlan)
 	request := semanticPlan.Components[0].Query
 	if request.SemanticContentHash == "" || request.FixedQueryPlanHash == "" || request.Timeout != 5*time.Second {
 		t.Fatalf("semantic execution plan lost pinned identity: %#v", request)
@@ -158,9 +156,7 @@ func TestGovernedQueryExecutorDispatchesClosedBindingUnion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := PinExecutionVersion(&semanticPlan, testLoadedReport()); err != nil {
-		t.Fatal(err)
-	}
+	pinPublished(t, &semanticPlan)
 	semanticCalled := false
 	datasetCalled := false
 	executor := GovernedQueryExecutor{
@@ -183,9 +179,7 @@ func TestGovernedQueryExecutorDispatchesClosedBindingUnion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := PinExecutionVersion(&datasetPlan, testLoadedReport()); err != nil {
-		t.Fatal(err)
-	}
+	pinPublished(t, &datasetPlan)
 	if _, err := executor.ExecuteReportQuery(context.Background(), *datasetPlan.Components[0].Query); err != nil {
 		t.Fatal(err)
 	}
@@ -219,18 +213,14 @@ func TestViewerPolicyScopeIsReappliedAndCannotReusePublisherResult(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := PinExecutionVersion(&publisherPlan, testLoadedReport()); err != nil {
-		t.Fatal(err)
-	}
+	pinPublished(t, &publisherPlan)
 	viewerPlan, err := BuildExecutionPlan(definition, PlanRequest{
 		PageID: definition.Pages[0].ID, PolicyScopeHash: strings.Repeat("b", 64),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := PinExecutionVersion(&viewerPlan, testLoadedReport()); err != nil {
-		t.Fatal(err)
-	}
+	pinPublished(t, &viewerPlan)
 	executor := GovernedQueryExecutor{Dataset: datasetRunnerFunc(func(ctx context.Context, request DatasetExecutionRequest) (QueryResult, error) {
 		role, _ := ctx.Value(reportViewerContextKey{}).(string)
 		if role == "publisher" && request.PolicyScopeHash == strings.Repeat("a", 64) {
@@ -263,7 +253,18 @@ func datasetQueryRequest(datasetVersionID askdata.ID, policyHash string) QueryRe
 
 func testLoadedReport() LoadedReport {
 	return LoadedReport{
-		ReportID:  "00000000-0000-4000-8000-000000000101",
-		VersionID: "00000000-0000-4000-8000-000000000102",
+		ReportID:       "00000000-0000-4000-8000-000000000101",
+		VersionID:      "00000000-0000-4000-8000-000000000102",
+		VersionNo:      3,
+		DefinitionHash: strings.Repeat("b", 64),
+	}
+}
+
+// pinPublished applies the published version pin the session would apply, so
+// these tests exercise the same pinning path the HTTP and export callers use.
+func pinPublished(t *testing.T, plan *ExecutionPlan) {
+	t.Helper()
+	if err := PublishedTarget(testLoadedReport()).pin(plan); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -456,7 +456,8 @@ func (s *PostgresStore) Start(ctx context.Context, run RunRecord) error {
 	if run.RunType == "" {
 		run.RunType = "PREVIEW"
 	}
-	if run.RunType != "PREVIEW" && run.RunType != "VALIDATION" && run.RunType != "COMPONENT_PREVIEW" {
+	if run.RunType != "PREVIEW" && run.RunType != "VALIDATION" && run.RunType != "COMPONENT_PREVIEW" &&
+		run.RunType != "ONLINE" && run.RunType != "EXPORT" && run.RunType != "SCHEDULED" {
 		return dataset.ErrPreviewInvalid
 	}
 	if run.ExecutionEngine == "" {

@@ -46,3 +46,9 @@ func TestExpressionContainsAggregateRecursesThroughClosedAST(t *testing.T) {
 		t.Fatal("plain field was classified as aggregate")
 	}
 }
+
+func TestReportVersionQueryRowCapMatchesTheDatasetDSLPreviewContract(t *testing.T) {
+	if MaxVersionQueryRows != 5_000 {
+		t.Fatalf("MaxVersionQueryRows = %d, want 5000", MaxVersionQueryRows)
+	}
+}

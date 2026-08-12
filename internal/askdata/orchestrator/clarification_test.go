@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func TestFreezeAndResumeBudgetDoesNotChargeWaitingTime(t *testing.T) {
+func TestFreezeAndResumeBudgetStartsASeparateChildEnvelope(t *testing.T) {
 	now := time.Date(2026, 8, 8, 10, 0, 0, 0, time.FixedZone("CST", 8*60*60))
 	limits := DefaultBudgetLimits()
 	usage := BudgetUsage{StepCount: 7, LLMCallsUsed: 2, ToolCallsUsed: 4, ElapsedMS: 1_860}
@@ -22,7 +22,7 @@ func TestFreezeAndResumeBudgetDoesNotChargeWaitingTime(t *testing.T) {
 	run.CompletedAt = &completed
 	run.ClarificationDeadline, run.BudgetFrozenAt, run.BudgetConsumed = &frozen.Deadline, &frozen.FrozenAt, &frozen.Consumed
 	resumed, err := ResumeBudget(run, now.Add(20*time.Minute))
-	if err != nil || resumed.ElapsedMS != usage.ElapsedMS || resumed != usage {
+	if err != nil || resumed != (BudgetUsage{}) {
 		t.Fatalf("ResumeBudget() = %#v, %v", resumed, err)
 	}
 	if _, err := ResumeBudget(run, now.Add(31*time.Minute)); !errors.Is(err, ErrClarificationExpired) {

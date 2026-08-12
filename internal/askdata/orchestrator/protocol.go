@@ -18,8 +18,21 @@ import (
 
 // StageForState returns the cognition stage that drives a run state, and false
 // for states the deterministic layer owns. Deterministic states never invoke a
-// model: authorization, graph validation, compilation, plan validation and
-// execution are all decided by code, and a model has no say in them.
+// model.
+//
+// What "deterministic" means here is worth stating precisely, because the state
+// names invite a stronger reading than the code delivers. GRAPH_VALIDATING,
+// PLAN_VALIDATING and EXECUTING do not themselves resolve a graph, validate a
+// plan or run a query: that work is done by the Tool Host, during the
+// model-driven stages that precede them, by code the model can invoke but not
+// substitute for. These states are where the platform *commits* to what those
+// tools produced — each one owns a link of the governed hash chain
+// (governed_chain.go), and Apply refuses a link that first appears anywhere
+// else. A model that skipped the work reaches ANSWERED with an incomplete
+// chain, and the transition fails closed.
+//
+// So the guarantee is not "the platform re-does the work here"; it is "the
+// platform will not certify work that no tool actually performed."
 func StageForState(state State) (cognition.Stage, bool) {
 	stage, ok := stageByState[state]
 	return stage, ok

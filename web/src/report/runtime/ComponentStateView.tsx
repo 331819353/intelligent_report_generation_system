@@ -48,13 +48,15 @@ const stateIcons = {
   TIMEOUT: Clock,
 } as const
 
-export function ComponentStateView({ state, boundTitle, onAction, compact = false }: {
+export function ComponentStateView({ state, boundTitle, errorCode, onAction, compact = false }: {
   state: ReportComponentState | string
   boundTitle?: string
+  /** 失败原因码，用于把「加载失败」替换为可执行的具体说明。 */
+  errorCode?: string
   onAction?: () => void
   compact?: boolean
 }) {
-  const view = componentPresentation(state, boundTitle)
+  const view = componentPresentation(state, boundTitle, errorCode)
   const Icon = stateIcons[view.state]
   return <section className={`report-component-state is-${view.tone} ${compact ? 'is-compact' : ''}`.trim()} aria-label={`${view.label}：${view.message}`}>
     <span className="report-state-badge">{view.label}</span>

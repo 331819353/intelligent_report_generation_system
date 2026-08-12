@@ -75,27 +75,26 @@ func (source *RuntimeExportResultSource) Rows(
 	if err != nil {
 		return ExportRows{}, err
 	}
-	policyHash, err := reportruntime.ViewerPolicyHash(identity, loaded)
+	// An export runs the same session as the interactive runtime, so a PDF or
+	// XLSX can never be produced by a pipeline that skipped a step the viewer
+	// path applies.
+	session, err := reportruntime.NewSession(identity, reportruntime.PublishedTarget(loaded), claim.AsOf)
 	if err != nil {
 		return ExportRows{}, err
 	}
 	resolved, err := (reportruntime.HTTPPlanInput{
 		PageID: loaded.Definition.Pages[0].ID, FilterValues: rawFilters,
-	}).Resolve(loaded.Definition, claim.AsOf, location, policyHash)
+	}).Resolve(loaded.Definition, session.AsOf, session.Location, session.PolicyScopeHash)
 	if err != nil {
 		return ExportRows{}, err
 	}
 	resolved.Export = true
 	resolved.PageIDs = append([]askdata.ID(nil), claim.PageIDs...)
-	plan, err := reportruntime.BuildExecutionPlan(loaded.Definition, resolved)
+	plan, err := session.PlanResolved(resolved)
 	if err != nil {
 		return ExportRows{}, err
 	}
-	if err := reportruntime.PinExecutionVersion(&plan, loaded); err != nil {
-		return ExportRows{}, err
-	}
-	executionContext = reportruntime.WithViewerIdentity(executionContext, identity)
-	results := reportruntime.ExecuteBatch(
+	results := session.Execute(
 		executionContext, plan, source.executor,
 		loaded.Definition.RuntimePolicy.MaxConcurrentQueries,
 	)

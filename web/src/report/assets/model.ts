@@ -19,7 +19,6 @@ export type ReportAsset = {
   editableCount: number
   shared: boolean
   allowedActions: ReportAction[]
-  previewKind: 'operations' | 'sales' | 'quality' | 'inventory' | 'channel' | 'cashflow'
 }
 
 export const lifecycleLabels: Record<ReportLifecycle, string> = {

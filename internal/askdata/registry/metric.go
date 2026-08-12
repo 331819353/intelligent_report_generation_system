@@ -135,6 +135,10 @@ func confirmMetricAdditivity(current *MetricVersion, actorID string, previous *M
 		current.AdditivityConfirmedBy, current.AdditivityConfirmedAt = "", nil
 		return
 	}
+	// Once an owner submits the authoritative additivity fact, the advisory
+	// suggestion is no longer part of the draft contract. Keeping both would
+	// also violate the audited suggestion/rule pairing enforced by PostgreSQL.
+	current.AdditivitySuggestion = ""
 	changed := previous == nil || current.Additivity != previous.Additivity ||
 		current.SemiAdditiveTimeAggregation != previous.SemiAdditiveTimeAggregation ||
 		current.AggregationRestriction != previous.AggregationRestriction ||
@@ -156,6 +160,7 @@ func confirmMeasureAdditivity(current *Measure, actorID string, previous *Measur
 		current.AdditivityConfirmedBy, current.AdditivityConfirmedAt = "", nil
 		return
 	}
+	current.AdditivitySuggestion = ""
 	changed := previous == nil || current.Additivity != previous.Additivity ||
 		current.SemiAdditiveTimeAggregation != previous.SemiAdditiveTimeAggregation ||
 		current.AggregationRestriction != previous.AggregationRestriction ||

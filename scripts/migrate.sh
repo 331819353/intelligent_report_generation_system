@@ -76,10 +76,62 @@ for migration in "$ROOT_DIR"/migrations/*.up.sql; do
     fi
   fi
 
+  # 000300 was first shipped while the runner wrapped files that already owned
+  # BEGIN/COMMIT. PostgreSQL therefore committed the migration before the
+  # registry insert, and an interrupted restart could leave a fully installed
+  # lease contract without its version row. Recognize only the complete shape;
+  # a genuinely partial contract must still fail instead of being blessed.
+  if [ "$version" = "000300_askdata_question_run_lease" ]; then
+    already_installed=$(compose exec -T postgres \
+      psql -At -U "${POSTGRES_USER:-report_admin}" -d "${POSTGRES_DB:-intelligent_report_control}" \
+      -c "SELECT
+        to_regclass('askdata.question_run_leases') IS NOT NULL
+        AND to_regprocedure('askdata.claim_question_run(uuid,text,integer)') IS NOT NULL
+        AND to_regprocedure('askdata.heartbeat_question_run(uuid,uuid,integer)') IS NOT NULL
+        AND to_regprocedure('askdata.release_question_run(uuid,uuid)') IS NOT NULL
+        AND EXISTS(
+          SELECT 1 FROM pg_indexes
+          WHERE schemaname='askdata'
+            AND tablename='question_run_leases'
+            AND indexname='askdata_question_run_leases_claimable_idx'
+        )
+        AND EXISTS(
+          SELECT 1 FROM pg_policies
+          WHERE schemaname='askdata'
+            AND tablename='question_run_leases'
+            AND policyname='askdata_question_run_leases_domain_isolation'
+        )
+        AND EXISTS(
+          SELECT 1 FROM pg_trigger
+          WHERE tgrelid='askdata.question_run_leases'::regclass
+            AND tgname='askdata_question_run_leases_set_updated_at'
+            AND NOT tgisinternal
+        )")
+    if [ "$already_installed" = "t" ]; then
+      compose exec -T postgres \
+        psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-report_admin}" -d "${POSTGRES_DB:-intelligent_report_control}" \
+        -c "INSERT INTO platform_schema_migrations(version) VALUES ('$version') ON CONFLICT DO NOTHING" >/dev/null
+      echo "record $version (complete contract already installed)"
+      continue
+    fi
+  fi
+
   echo "apply $version"
+  begin_count=$(grep -Ec '^[[:space:]]*BEGIN;[[:space:]]*$' "$migration" || true)
+  commit_count=$(grep -Ec '^[[:space:]]*COMMIT;[[:space:]]*$' "$migration" || true)
+  if [ "$begin_count" != "1" ] || [ "$commit_count" != "1" ]; then
+    echo "$version must contain exactly one top-level BEGIN and COMMIT" >&2
+    exit 1
+  fi
   {
     echo 'BEGIN;'
-    cat "$migration"
+    # Migration files own a top-level transaction for direct execution. Strip
+    # only that pair here so the schema change and version registry row commit
+    # atomically under the runner's transaction.
+    sed \
+      -e '/^[[:space:]]*BEGIN;[[:space:]]*$/d' \
+      -e '/^[[:space:]]*COMMIT;[[:space:]]*$/d' \
+      "$migration"
     printf "\nINSERT INTO platform_schema_migrations(version) VALUES ('%s');\n" "$version"
     echo 'COMMIT;'
   } | compose exec -T postgres \
@@ -133,7 +185,7 @@ WHERE rolname IN (:'app_user',:'worker_user',:'connection_test_user')
 \if :dedicated_roles_secure
 \else
   \echo 'dedicated database role attributes or memberships are unsafe'
-  \quit 1
+  SELECT 1/0;
 \endif
 COMMIT;
 SQL
@@ -545,6 +597,13 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA askdata
 GRANT SELECT ON ALL TABLES IN SCHEMA askdata TO :"app_user", :"worker_user";
 REVOKE SELECT ON TABLE askdata.semantic_export_jobs FROM :"worker_user";
 REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLE askdata.search_query_samples FROM :"app_user";
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION askdata.active_learning_member_signals(uuid), askdata.active_learning_data_request_signals(uuid) TO %I',
+  :'worker_user'
+)
+WHERE to_regprocedure('askdata.active_learning_member_signals(uuid)') IS NOT NULL
+  AND to_regprocedure('askdata.active_learning_data_request_signals(uuid)') IS NOT NULL
+\gexec
 -- Raw dimension-member material is never a general registry read surface.
 -- The API may perform governed authoring DML, while runtime lookup goes only
 -- through the hash-only SECURITY DEFINER function below. The profile worker
@@ -644,6 +703,7 @@ GRANT INSERT, UPDATE ON TABLE
   askdata.feedback_tickets,
   askdata.add_to_report_intents
 TO :"app_user";
+GRANT INSERT ON TABLE askdata.question_envelopes TO :"app_user";
 GRANT UPDATE ON TABLE
   askdata.active_learning_candidates,
   askdata.report_semantic_assets
@@ -653,7 +713,6 @@ GRANT INSERT ON TABLE
   askdata.saved_question_shares,
   askdata.feedback_ticket_events,
   askdata.report_asset_certifications,
-  askdata.add_to_report_outbox,
   askdata.narrative_verification_failures
 TO :"app_user";
 GRANT DELETE ON TABLE askdata.idempotency_records TO :"app_user", :"worker_user";
@@ -682,12 +741,20 @@ GRANT UPDATE(
   formal_queries_used,validation_queries_used,elapsed_ms,budget_exhausted,
   clarification_deadline,budget_frozen_at,budget_consumed_json,record_version
 ) ON TABLE askdata.question_runs TO :"worker_user";
+GRANT UPDATE(
+  pinned_release_id,pinned_at,pin_drift_acknowledged,updated_at
+) ON TABLE askdata.conversations TO :"worker_user";
 GRANT INSERT(
   id,tenant_id,domain_id,actor_id,question_run_id,release_id,
   release_content_hash,policy_scope_hash,event_index,run_version,state,
   event_type,stage,status,code,tool_call_id,ai_request_id,action_hash,
   artifact_hash,evidence_ids,summary_json,event_hash,duration_ms
 ) ON TABLE askdata.question_run_events TO :"worker_user";
+GRANT INSERT ON TABLE
+  askdata.question_artifacts,
+  askdata.tool_calls
+TO :"worker_user";
+GRANT DELETE ON TABLE askdata.question_envelopes TO :"worker_user";
 
 GRANT INSERT ON TABLE askdata.audit_events TO :"worker_user";
 GRANT INSERT, UPDATE, DELETE ON TABLE
@@ -730,6 +797,7 @@ GRANT EXECUTE ON FUNCTION
   askdata.tenant_matches(uuid),
   askdata.domain_can_access(uuid),
   askdata.json_is_safe(jsonb),
+  askdata.report_operation_json_is_safe(jsonb),
   askdata.question_audit_json_is_safe(jsonb),
   askdata.question_runtime_can_access(uuid,uuid,uuid),
   askdata.evaluation_control_can_access(uuid,uuid),
@@ -746,13 +814,37 @@ SELECT format(
 WHERE to_regprocedure('askdata.list_add_to_report_tenants()') IS NOT NULL
 \gexec
 SELECT format(
+  'GRANT EXECUTE ON FUNCTION askdata.enqueue_add_to_report_intent(uuid) TO %I',
+  :'app_user'
+)
+WHERE to_regprocedure('askdata.enqueue_add_to_report_intent(uuid)') IS NOT NULL
+\gexec
+SELECT format(
   'GRANT EXECUTE ON FUNCTION askdata.list_report_asset_projection_tenants() TO %I',
   :'worker_user'
 )
 WHERE to_regprocedure('askdata.list_report_asset_projection_tenants()') IS NOT NULL
 \gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION askdata.list_question_run_tenants(), askdata.claim_question_run(uuid,text,integer), askdata.heartbeat_question_run(uuid,uuid,integer), askdata.release_question_run(uuid,uuid) TO %I',
+  :'worker_user'
+)
+WHERE to_regprocedure('askdata.list_question_run_tenants()') IS NOT NULL
+  AND to_regprocedure('askdata.claim_question_run(uuid,text,integer)') IS NOT NULL
+  AND to_regprocedure('askdata.heartbeat_question_run(uuid,uuid,integer)') IS NOT NULL
+  AND to_regprocedure('askdata.release_question_run(uuid,uuid)') IS NOT NULL
+\gexec
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION askdata.list_question_run_actor_roles(uuid,uuid,uuid) TO %I',
+  :'worker_user'
+)
+WHERE to_regprocedure(
+  'askdata.list_question_run_actor_roles(uuid,uuid,uuid)'
+) IS NOT NULL
+\gexec
 GRANT EXECUTE ON FUNCTION
   askdata.start_release_projection(uuid,uuid,jsonb),
+  askdata.retry_failed_release_projections(uuid,uuid),
   askdata.seal_evaluation_set(uuid,uuid),
   askdata.record_release_error_budget(uuid,uuid,uuid,jsonb,uuid),
   askdata.plan_evaluation_batch(uuid,uuid,text,uuid),
@@ -771,7 +863,7 @@ GRANT EXECUTE ON FUNCTION
 TO :"worker_user";
 GRANT EXECUTE ON FUNCTION
   askdata.record_search_query_sample(uuid,uuid,text,text,text,text,integer,text)
-TO :"app_user";
+TO :"app_user", :"worker_user";
 GRANT EXECUTE ON FUNCTION
   askdata.list_release_projection_tenants(),
   askdata.list_release_projection_tenants(text),

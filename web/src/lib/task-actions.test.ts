@@ -10,10 +10,12 @@ const item = (input: Partial<WorkInboxItem>): WorkInboxItem => ({
   ...input,
 })
 
-test('inline task actions are restricted to source contracts with sufficient identifiers', () => {
+test('inline task actions cover every source that publishes a governed work-item command', () => {
   assert.equal(canRunInlineTaskAction(item({}), 'APPROVE'), true)
-  assert.equal(canRunInlineTaskAction(item({ type: 'DECISION_APPROVAL' }), 'APPROVE'), false)
-  assert.equal(canRunInlineTaskAction(item({ type: 'RUNTIME_CONFIG_APPROVAL' }), 'REJECT'), false)
+	assert.equal(canRunInlineTaskAction(item({ type: 'DECISION_APPROVAL' }), 'APPROVE'), true)
+	assert.equal(canRunInlineTaskAction(item({ type: 'ACTION_ASSIGNED' }), 'COMPLETE'), true)
+	assert.equal(canRunInlineTaskAction(item({ type: 'RUNTIME_CONFIG_APPROVAL' }), 'REJECT'), true)
+	assert.equal(canRunInlineTaskAction(item({ type: 'FEEDBACK_TICKET' }), 'APPROVE'), false)
 })
 
 test('resource ids are parsed only from canonical governed source links', () => {

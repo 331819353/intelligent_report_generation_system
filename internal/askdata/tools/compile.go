@@ -4,13 +4,82 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/compiler"
 	"intelligent-report-generation-system/internal/askdata/graph"
+	"intelligent-report-generation-system/internal/askdata/registry"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
 	"intelligent-report-generation-system/internal/askdata/validator"
 )
+
+// JoinFanoutRiskCode marks a resolved path whose relationships can multiply
+// anchor rows.
+//
+// The compiler now adapts join paths, but only non-fanout edges: a one-to-many
+// or many-to-many relationship needs the right side pre-aggregated, or a bridge
+// deduplicated, before it is safe to aggregate across. Compiling one as a plain
+// join would inflate every measure with no visible error, so the compiler
+// refuses it — and surfacing that here means the run fails at retrieval with a
+// named cause instead of at compile with its budget already spent.
+const JoinFanoutRiskCode = "JOIN_FANOUT_NOT_COMPILABLE"
+
+// JoinNotAllowedRiskCode marks a path the semantic graph itself refused.
+const JoinNotAllowedRiskCode = "JOIN_PATH_NOT_ALLOWED"
+
+// graphPlanRisks reduces a resolved plan to the relationships it traverses and
+// the governed risks the caller must see. It is separated from the tool handler
+// because this is the risk policy, not I/O: which conditions block a run is a
+// governance decision that has to be testable on its own.
+func graphPlanRisks(
+	plan graph.GraphPlan, degraded bool, degradationReason string,
+) ([]askdata.ID, []toolhost.GraphRisk) {
+	relationships := make([]askdata.ID, 0)
+	risks := make([]toolhost.GraphRisk, 0)
+	seenRelationship := map[askdata.ID]bool{}
+	riskCounts := map[string]int{}
+	for _, path := range plan.JoinPaths {
+		for _, step := range path.Steps {
+			if !seenRelationship[step.RelationshipVersionID] {
+				seenRelationship[step.RelationshipVersionID] = true
+				relationships = append(relationships, step.RelationshipVersionID)
+			}
+		}
+		for _, code := range path.RiskCodes {
+			riskCounts[string(code)]++
+		}
+		// A path the graph refused is a blocking risk, not an omission.
+		if !path.Allowed {
+			riskCounts[JoinNotAllowedRiskCode]++
+		}
+		// Fanout-bearing steps are refused by the compiler; report them before a
+		// plan is selected rather than after the budget is spent.
+		for _, step := range path.Steps {
+			if step.Cardinality != registry.CardinalityOneToOne &&
+				step.Cardinality != registry.CardinalityManyToOne ||
+				step.FanoutPolicy != registry.FanoutSafe {
+				riskCounts[JoinFanoutRiskCode]++
+			}
+		}
+	}
+	codes := make([]string, 0, len(riskCounts))
+	for code := range riskCounts {
+		codes = append(codes, code)
+	}
+	// Deterministic order: the result is hashed into evidence.
+	sort.Strings(codes)
+	for _, code := range codes {
+		risks = append(risks, toolhost.GraphRisk{
+			Code:     code,
+			Blocking: code == JoinNotAllowedRiskCode || code == JoinFanoutRiskCode,
+		})
+	}
+	if degraded && degradationReason != "" {
+		risks = append(risks, toolhost.GraphRisk{Code: degradationReason})
+	}
+	return relationships, risks
+}
 
 // resolveGraphPlan resolves the join path for a bound semantic bundle.
 //
@@ -28,12 +97,29 @@ func (binding *Binding) resolveGraphPlan(
 	if binding.services.Graph == nil {
 		return output, ErrToolUnavailable
 	}
+	if binding.services.Reader == nil {
+		return output, ErrToolUnavailable
+	}
+	metricRefs, err := binding.graphObjectRefs(ctx, "METRIC", input.MetricVersionIDs)
+	if err != nil {
+		return output, err
+	}
+	modelRefs, err := binding.graphObjectRefs(ctx, "MODEL", input.ModelVersionIDs)
+	if err != nil {
+		return output, err
+	}
+	dimensionRefs, err := binding.graphObjectRefs(ctx, "DIMENSION", input.DimensionVersionIDs)
+	if err != nil {
+		return output, err
+	}
+	memberRefs, err := binding.graphObjectRefs(ctx, "MEMBER", input.MemberVersionIDs)
+	if err != nil {
+		return output, err
+	}
 	resolution, err := binding.services.Graph.Resolve(ctx, graph.PlanRequest{
 		Scope: binding.run.Scope, DomainID: binding.run.DomainID,
-		MetricRefs:    objectRefs(input.MetricVersionIDs),
-		ModelRefs:     objectRefs(input.ModelVersionIDs),
-		DimensionRefs: objectRefs(input.DimensionVersionIDs),
-		MemberRefs:    objectRefs(input.MemberVersionIDs),
+		MetricRefs: metricRefs, ModelRefs: modelRefs,
+		DimensionRefs: dimensionRefs, MemberRefs: memberRefs,
 	})
 	if err != nil {
 		return output, err
@@ -43,33 +129,9 @@ func (binding *Binding) resolveGraphPlan(
 	for _, model := range resolution.Plan.Models {
 		models = append(models, model.VersionID)
 	}
-	relationships := make([]askdata.ID, 0)
-	risks := make([]toolhost.GraphRisk, 0)
-	seenRelationship := map[askdata.ID]bool{}
-	riskCounts := map[string]int{}
-	for _, path := range resolution.Plan.JoinPaths {
-		for _, step := range path.Steps {
-			if !seenRelationship[step.RelationshipVersionID] {
-				seenRelationship[step.RelationshipVersionID] = true
-				relationships = append(relationships, step.RelationshipVersionID)
-			}
-		}
-		for _, code := range path.RiskCodes {
-			riskCounts[string(code)]++
-		}
-		// A path the graph refused is a blocking risk, not an omission.
-		if !path.Allowed {
-			riskCounts["JOIN_PATH_NOT_ALLOWED"]++
-		}
-	}
-	for code, count := range riskCounts {
-		risks = append(risks, toolhost.GraphRisk{
-			Code: code, Blocking: count > 0 && code == "JOIN_PATH_NOT_ALLOWED",
-		})
-	}
-	if resolution.Degraded && resolution.DegradationReason != "" {
-		risks = append(risks, toolhost.GraphRisk{Code: resolution.DegradationReason})
-	}
+	relationships, risks := graphPlanRisks(
+		resolution.Plan, resolution.Degraded, resolution.DegradationReason,
+	)
 
 	payload, err := json.Marshal(resolution.Plan)
 	if err != nil {
@@ -114,7 +176,7 @@ func (binding *Binding) compileSemanticQuery(
 	if err != nil {
 		return output, err
 	}
-	binding.plans.put(artifact.PlanHash, artifact)
+	binding.plans.put(artifact.PlanHash, artifact, input.SemanticIR)
 
 	shapes := make([]toolhost.ParameterShapeSummary, 0)
 	seenShape := map[string]bool{}
@@ -136,7 +198,8 @@ func (binding *Binding) compileSemanticQuery(
 	}
 	evidence := binding.evidence(askdata.EvidenceKindQueryPlan, binding.run.DomainID, payload)
 	output.Result = toolhost.CompileSemanticQueryResult{
-		PlanHash: artifact.PlanHash, PlanCount: len(artifact.Plans),
+		PlanHash: artifact.PlanHash, SemanticIRHash: artifact.IRHash,
+		PlanCount:       len(artifact.Plans),
 		ParameterShapes: shapes, MaxRows: input.SemanticIR.Limit,
 		EvidenceIDs: []askdata.ID{evidence.EvidenceID},
 	}
@@ -167,7 +230,28 @@ func (binding *Binding) validateQueryPlan(
 	if !ok {
 		return output, toolhost.ErrInvalidInvocation
 	}
-	validation, err := binding.services.Validator.Validate(ctx, artifact)
+	var (
+		validation validator.ValidationArtifact
+		err        error
+	)
+	if artifact.ResolvedTimeSpec != nil {
+		if binding.services.Coverage == nil {
+			return output, ErrToolUnavailable
+		}
+		materializationIDs := planMaterializationIDs(artifact)
+		if len(materializationIDs) == 0 {
+			return output, toolhost.ErrInvalidInvocation
+		}
+		coverage, coverageErr := binding.services.Coverage.Evaluate(
+			ctx, string(binding.run.Scope.TenantID), materializationIDs, *artifact.ResolvedTimeSpec,
+		)
+		if coverageErr != nil {
+			return output, coverageErr
+		}
+		validation, err = binding.services.Validator.ValidateCovered(ctx, artifact, coverage)
+	} else {
+		validation, err = binding.services.Validator.Validate(ctx, artifact)
+	}
 	if err != nil {
 		// A rejected plan is a governed outcome the model must see, not a tool
 		// failure: it reports not-allowed with the rejection code as a risk.
@@ -216,10 +300,37 @@ func (binding *Binding) validateQueryPlan(
 	return output, nil
 }
 
-func objectRefs(values []askdata.ID) []graph.ObjectVersionRef {
-	result := make([]graph.ObjectVersionRef, 0, len(values))
-	for _, value := range values {
-		result = append(result, graph.ObjectVersionRef{VersionID: value})
+func planMaterializationIDs(artifact compiler.QueryArtifact) []string {
+	seen := make(map[string]bool, len(artifact.Plans))
+	values := make([]string, 0, len(artifact.Plans))
+	for _, plan := range artifact.Plans {
+		value := string(plan.Source.MaterializationID)
+		if plan.Source.MaterializationID.Validate() != nil || seen[value] {
+			continue
+		}
+		seen[value] = true
+		values = append(values, value)
 	}
-	return result
+	sort.Strings(values)
+	return values
+}
+
+func (binding *Binding) graphObjectRefs(
+	ctx context.Context,
+	objectType string,
+	values []askdata.ID,
+) ([]graph.ObjectVersionRef, error) {
+	rows, err := binding.services.Reader.ReleasedVersionRefs(
+		ctx, binding.run.Scope, binding.run.DomainID, objectType, plainIDs(values),
+	)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]graph.ObjectVersionRef, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, graph.ObjectVersionRef{
+			ObjectID: askdata.ID(row.ObjectID), VersionID: askdata.ID(row.ObjectVersionID), Version: row.Version,
+		})
+	}
+	return result, nil
 }

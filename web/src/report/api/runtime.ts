@@ -1,32 +1,21 @@
 import { apiRequest } from '../../lib/api'
 import type { ReportComponentState } from '../runtime/state'
+import type {
+  Block, GlobalFilter, Page, ReportComponent, ReportDefinition, Section, Slot,
+} from '../render/schema'
 
-export type RuntimeFilter = {
-  id: string
-  type: 'SINGLE_SELECT' | 'MULTI_SELECT' | 'DATE' | 'DATE_RANGE' | 'RELATIVE_TIME' | 'NUMBER_RANGE' | 'SEARCH_SELECT' | 'PARAMETER_INPUT' | 'SELECT' | 'BOOLEAN'
-  fieldRef: { dataContextId: string; field: string }
-  scope: { type: string; targetIds: string[] }
-  defaultValue?: { mode?: string; unit?: string; offset?: number; values?: string[]; minimum?: number; maximum?: number; boolean?: boolean }
-}
-
-export type RuntimeSlot = { id: string; componentId?: string }
-export type RuntimeBlock = { id: string; type: string; zones: Array<{ id: string; type: string; slots: RuntimeSlot[] }> }
-export type RuntimeSection = { id: string; name: string; order: number; blocks: RuntimeBlock[] }
-export type RuntimePage = { id: string; name: string; order: number; sections: RuntimeSection[] }
-export type RuntimeComponent = {
-  id: string
-  templateRef: { type: string; version: string }
-  dataBinding?: { bindingMode: 'SEMANTIC_IR' | 'DATASET_FIELD' }
-  options: { title?: string; subtitle?: string; richText?: string; numberFormat?: string; showLegend?: boolean; showLabel?: boolean }
-}
-
-export type RuntimeDefinition = {
-  metadata: { id: string; code: string; name: string; description?: string; reportType: 'REPORT' | 'DASHBOARD'; locale?: string }
-  globalFilters: RuntimeFilter[]
-  pages: RuntimePage[]
-  components: RuntimeComponent[]
-  runtimePolicy: { refreshMode: 'MANUAL' | 'ON_OPEN' | 'INTERVAL'; refreshIntervalSeconds: number; maxConcurrentQueries: number; componentTimeoutMs: number; exportEnabled: boolean; failureMode: 'PARTIAL' | 'STRICT' }
-}
+/**
+ * 运行页读取的就是发布制品里那份不可变的 Report Definition。这里只做类型别名，
+ * 不再声明「运行时够用」的裁剪结构——那会让画布、区块布局与槽位网格在运行侧
+ * 消失，渲染器也就无从按定义还原布局。
+ */
+export type RuntimeFilter = GlobalFilter
+export type RuntimeSlot = Slot
+export type RuntimeBlock = Block
+export type RuntimeSection = Section
+export type RuntimePage = Page
+export type RuntimeComponent = ReportComponent
+export type RuntimeDefinition = ReportDefinition
 
 export type LoadedReport = {
   reportId: string
@@ -79,6 +68,11 @@ export type CreatedReportShare = {
   token: string
 }
 
+export type AccessedReportShare = {
+  version: ReportVersion & { definition: RuntimeDefinition }
+  filterSnapshot: Record<string, unknown>
+}
+
 export type ExportFormat = 'PDF' | 'PNG' | 'CSV' | 'XLSX'
 export type ReportExportJob = {
   id: string
@@ -88,6 +82,65 @@ export type ReportExportJob = {
   objectUri?: string
   createdAt?: string
   expiresAt?: string
+}
+
+export type ReportSchedule = {
+  id: string
+  reportId: string
+  reportVersionId: string
+  name: string
+  scheduleKind: 'DAILY' | 'WEEKLY' | 'MONTHLY'
+  localTime: string
+  weekdays: number[]
+  dayOfMonth?: number
+  timezone: string
+  businessCalendar: 'CALENDAR_DAYS' | 'WEEKDAYS'
+  state: 'ACTIVE' | 'PAUSED' | 'DISABLED'
+  nextRunAt: string
+  consecutiveFailures: number
+  maxConsecutiveFailures: number
+  ownerUserId: string
+  recordVersion: number
+  lastFailureCode?: string
+}
+
+export type ReportSubscription = {
+  id: string
+  scheduleId: string
+  recipientUserId: string
+  channel: 'IN_APP'
+  state: 'ACTIVE' | 'REVOKED'
+  recordVersion: number
+}
+
+export type ReportDelivery = {
+  id: string
+  scheduleId: string
+  subscriptionId: string
+  reportId: string
+  reportVersionId: string
+  recipientUserId: string
+  scheduledFor: string
+  channel: 'IN_APP'
+  state: 'PENDING' | 'RUNNING' | 'READY' | 'FAILED' | 'MISSED' | 'SKIPPED'
+  attempt: number
+  reportLink?: string
+  failureCode?: string
+  readAt?: string
+  createdAt: string
+}
+
+export type ReportShareRecord = {
+  id: string
+  reportId: string
+  reportVersionId?: string
+  shareType: 'INTERNAL_USER' | 'INTERNAL_GROUP'
+  principalId: string
+  filterSnapshot?: Record<string, unknown>
+  createdAt: string
+  expiresAt: string
+  expiredAt?: string
+  revokedAt?: string
 }
 
 export type RuntimePlanInput = {
@@ -134,6 +187,17 @@ export const reportRuntimeAPI = {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
     })
   },
+  listShares(reportId: string) {
+    return apiRequest<{ items: ReportShareRecord[] }>(`/v1/reports/${encodeURIComponent(reportId)}/shares`)
+  },
+  revokeShare(reportId: string, shareId: string) {
+    return apiRequest<{ revoked: boolean }>(`/v1/reports/${encodeURIComponent(reportId)}/shares/${encodeURIComponent(shareId)}/revoke`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({}),
+    })
+  },
+  accessShare(token: string) {
+    return apiRequest<AccessedReportShare>(`/v1/report-shares/${encodeURIComponent(token)}`)
+  },
   async createExport(reportId: string, input: { versionNo: number; format: ExportFormat; pageIds?: string[]; filterValues?: Record<string, unknown>; asOf: string; timezone: string }) {
     const value = await apiRequest<Record<string, unknown>>(`/v1/reports/${encodeURIComponent(reportId)}/exports`, {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
@@ -144,10 +208,63 @@ export const reportRuntimeAPI = {
     const value = await apiRequest<Record<string, unknown>>(`/v1/reports/${encodeURIComponent(reportId)}/exports/${encodeURIComponent(exportId)}`)
     return normalizeExportJob(value)
   },
+  exportDownloadURL(reportId: string, exportId: string) {
+    return `/api/v1/reports/${encodeURIComponent(reportId)}/exports/${encodeURIComponent(exportId)}/download`
+  },
   async retryExport(reportId: string, exportId: string) {
     const value = await apiRequest<Record<string, unknown>>(`/v1/reports/${encodeURIComponent(reportId)}/exports/${encodeURIComponent(exportId)}/retry`, {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({}),
     })
     return normalizeExportJob(value)
+  },
+  listSchedules(reportId: string) {
+    return apiRequest<{ items: ReportSchedule[] }>(`/v1/reports/${encodeURIComponent(reportId)}/schedules?limit=100`)
+  },
+  createSchedule(reportId: string, input: {
+    reportVersionId: string
+    name: string
+    scheduleKind: ReportSchedule['scheduleKind']
+    localTime: string
+    weekdays: number[]
+    dayOfMonth?: number
+    timezone: string
+    businessCalendar: ReportSchedule['businessCalendar']
+    maxConsecutiveFailures?: number
+    missAfterSeconds?: number
+  }) {
+    return apiRequest<ReportSchedule>(`/v1/reports/${encodeURIComponent(reportId)}/schedules`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
+    })
+  },
+  getSchedule(scheduleId: string) {
+    return apiRequest<{ schedule: ReportSchedule; subscriptions: ReportSubscription[] }>(`/v1/report-schedules/${encodeURIComponent(scheduleId)}`)
+  },
+  setScheduleState(scheduleId: string, state: 'pause' | 'resume', expectedVersion: number) {
+    return apiRequest<ReportSchedule>(`/v1/report-schedules/${encodeURIComponent(scheduleId)}/${state}`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ expectedVersion }),
+    })
+  },
+  subscribeSchedule(scheduleId: string, recipientUserId: string) {
+    return apiRequest<ReportSubscription>(`/v1/report-schedules/${encodeURIComponent(scheduleId)}/subscriptions`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ recipientUserId, channel: 'IN_APP' }),
+    })
+  },
+  unsubscribeSchedule(scheduleId: string, subscriptionId: string) {
+    return apiRequest<{ revoked: boolean }>(`/v1/report-schedules/${encodeURIComponent(scheduleId)}/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+      method: 'DELETE', headers: idempotencyHeaders(), body: JSON.stringify({}),
+    })
+  },
+  backfillSchedule(scheduleId: string, scheduledFor: string) {
+    return apiRequest<{ deliveryCount: number }>(`/v1/report-schedules/${encodeURIComponent(scheduleId)}/backfill`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ scheduledFor }),
+    })
+  },
+  listDeliveries() {
+    return apiRequest<{ items: ReportDelivery[] }>('/v1/report-deliveries?limit=100')
+  },
+  markDeliveryRead(deliveryId: string) {
+    return apiRequest<ReportDelivery>(`/v1/report-deliveries/${encodeURIComponent(deliveryId)}/read`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({}),
+    })
   },
 }

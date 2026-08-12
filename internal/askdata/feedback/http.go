@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -173,14 +174,17 @@ func writeFeedbackJSON(writer http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(writer).Encode(value)
 }
 func writeFeedbackError(writer http.ResponseWriter, err error) {
-	status, code := http.StatusInternalServerError, "FEEDBACK_INTERNAL"
+	status, code, message := http.StatusInternalServerError, "FEEDBACK_INTERNAL", "反馈治理服务暂时不可用，请稍后重试"
 	switch {
 	case errors.Is(err, ErrInvalid):
-		status, code = http.StatusBadRequest, "FEEDBACK_INVALID"
+		status, code, message = http.StatusBadRequest, "FEEDBACK_INVALID", "请检查反馈治理内容后重试"
 	case errors.Is(err, ErrNotFound):
-		status, code = http.StatusNotFound, "FEEDBACK_NOT_FOUND"
+		status, code, message = http.StatusNotFound, "FEEDBACK_NOT_FOUND", "未找到该反馈工单或改进候选"
 	case errors.Is(err, ErrConflict), errors.Is(err, ErrIllegalTransition):
-		status, code = http.StatusConflict, "FEEDBACK_CONFLICT"
+		status, code, message = http.StatusConflict, "FEEDBACK_CONFLICT", "状态已被更新，请刷新后重试"
 	}
-	writeFeedbackJSON(writer, status, map[string]any{"error": map[string]string{"code": code, "message": http.StatusText(status)}})
+	if status >= http.StatusInternalServerError {
+		slog.Error("feedback governance request failed", "error", err)
+	}
+	writeFeedbackJSON(writer, status, map[string]string{"code": code, "message": message})
 }

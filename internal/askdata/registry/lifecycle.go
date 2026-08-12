@@ -43,6 +43,12 @@ type ReleaseProjectionStartResult struct {
 	Started   bool                   `json:"started"`
 }
 
+type ReleaseProjectionRetryResult struct {
+	ReleaseID    string `json:"releaseId"`
+	Status       string `json:"status"`
+	RetriedCount int    `json:"retriedCount"`
+}
+
 type EvaluationBatchPlanInput struct {
 	EvaluationSetID   string `json:"evaluationSetId"`
 	EvaluationBatchID string `json:"evaluationBatchId"`
@@ -70,10 +76,12 @@ type ReleaseGateInput struct {
 }
 
 type ReleaseGateResult struct {
-	Passed      bool            `json:"passed"`
-	ReceiptHash string          `json:"receiptHash"`
-	Failures    []string        `json:"failures"`
-	Facts       json.RawMessage `json:"facts"`
+	Passed            bool            `json:"passed"`
+	ReceiptHash       string          `json:"receiptHash"`
+	Failures          []string        `json:"failures"`
+	Facts             json.RawMessage `json:"facts"`
+	EvaluationSetID   string          `json:"evaluationSetId,omitempty"`
+	EvaluationBatchID string          `json:"evaluationBatchId,omitempty"`
 }
 
 type ReleaseReviewReportInput struct {
@@ -126,10 +134,13 @@ type ReleaseLifecycleSnapshot struct {
 	LatestGate           *ReleaseGateResult `json:"latestGate,omitempty"`
 	ReviewReportCount    int                `json:"reviewReportCount"`
 	ApprovalCount        int                `json:"approvalCount"`
+	ApprovedRoles        []string           `json:"approvedRoles"`
+	ActorHasApproved     bool               `json:"actorHasApproved"`
 }
 
 type ReleaseLifecycleBackend interface {
 	ValidateAndStartProjection(context.Context, AdminScope, string) (ReleaseProjectionStartResult, error)
+	RetryFailedProjections(context.Context, AdminScope, string) (ReleaseProjectionRetryResult, error)
 	PlanEvaluationBatch(context.Context, AdminScope, string, EvaluationBatchPlanInput) (EvaluationBatchPlanResult, error)
 	RecordErrorBudget(context.Context, AdminScope, string, ErrorBudgetAttachmentInput) (string, error)
 	RecomputeReleaseGate(context.Context, AdminScope, string, ReleaseGateInput) (ReleaseGateResult, error)
@@ -137,6 +148,23 @@ type ReleaseLifecycleBackend interface {
 	SubmitReleaseApproval(context.Context, AdminScope, string, ReleaseApprovalInput) (ReleaseApprovalResult, error)
 	ActivateRelease(context.Context, AdminScope, string, ReleaseActivationInput) (ReleaseActivationResult, error)
 	GetReleaseLifecycle(context.Context, AdminScope, string) (ReleaseLifecycleSnapshot, error)
+}
+
+func (store *PostgresStore) RetryFailedProjections(
+	ctx context.Context, scope AdminScope, releaseID string,
+) (ReleaseProjectionRetryResult, error) {
+	if err := store.validateLifecycle(ctx, scope, releaseID); err != nil {
+		return ReleaseProjectionRetryResult{}, err
+	}
+	result := ReleaseProjectionRetryResult{ReleaseID: releaseID}
+	err := store.withReleasePermission(ctx, scope, releaseID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT askdata.retry_failed_release_projections($1,$2)`,
+			releaseID, scope.ActorID).Scan(&result.RetriedCount); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT status FROM askdata.releases WHERE id=$1`, releaseID).Scan(&result.Status)
+	})
+	return result, normalizeLifecycleError(err)
 }
 
 // IdempotencyRepository lets the authenticated HTTP adapter apply the shared
@@ -414,23 +442,30 @@ func (store *PostgresStore) GetReleaseLifecycle(
 			   AND projection.expected_content_hash=release.content_hash
 			   AND projection.applied_content_hash=release.content_hash),
 			(SELECT count(*) FROM askdata.release_review_reports AS report WHERE report.release_id=release.id),
-			(SELECT count(*) FROM askdata.release_approvals AS approval WHERE approval.release_id=release.id)
+			(SELECT count(*) FROM askdata.release_approvals AS approval WHERE approval.release_id=release.id),
+			COALESCE((SELECT array_agg(approval.review_role ORDER BY approval.review_slot)
+				FROM askdata.release_approvals AS approval WHERE approval.release_id=release.id),ARRAY[]::text[]),
+			EXISTS(SELECT 1 FROM askdata.release_approvals AS approval
+				WHERE approval.release_id=release.id AND approval.reviewer_id=$3)
 		FROM askdata.releases AS release
 		JOIN askdata.release_state AS state ON state.tenant_id=release.tenant_id AND state.domain_id=release.domain_id
-		WHERE release.id=$1 AND release.domain_id=$2`, releaseID, scope.DomainID).Scan(
+		WHERE release.id=$1 AND release.domain_id=$2`, releaseID, scope.DomainID, scope.ActorID).Scan(
 			&result.ReleaseID, &result.Status, &result.ContentHash, &result.ReleaseVersion,
 			&result.ReleaseStateVersion, &activeID, &result.ReadyProjectionCount,
-			&result.ReviewReportCount, &result.ApprovalCount); err != nil {
+			&result.ReviewReportCount, &result.ApprovalCount, &result.ApprovedRoles,
+			&result.ActorHasApproved); err != nil {
 			return err
 		}
 		if activeID != nil {
 			result.ActiveReleaseID = *activeID
 		}
 		var latest ReleaseGateResult
-		err := tx.QueryRow(ctx, `SELECT passed,receipt_hash,failure_codes,facts_json
+		err := tx.QueryRow(ctx, `SELECT passed,receipt_hash,failure_codes,facts_json,
+			evaluation_set_id::text,evaluation_batch_id::text
 			FROM askdata.release_evaluation_gate_receipts
 			WHERE release_id=$1 ORDER BY recomputed_at DESC,id DESC LIMIT 1`, releaseID).
-			Scan(&latest.Passed, &latest.ReceiptHash, &latest.Failures, &latest.Facts)
+			Scan(&latest.Passed, &latest.ReceiptHash, &latest.Failures, &latest.Facts,
+				&latest.EvaluationSetID, &latest.EvaluationBatchID)
 		if err == nil {
 			result.LatestGate = &latest
 			return nil

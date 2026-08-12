@@ -77,9 +77,26 @@ func (runner *SemanticRuntimeRunner) CompileAndExecuteSemanticIR(
 			ctx, identity, request.ReportVersionID, request.CompilationArtifactID, request.FixedPlanHash,
 		)
 	} else {
-		persisted, err = runner.artifacts.LoadQueryArtifact(
+		var snapshot askcompiler.ReportQuerySnapshot
+		snapshot, err = runner.artifacts.LoadQueryArtifact(
 			ctx, identity, request.ReportVersionID, request.SourceRunID, request.FixedPlanHash,
 		)
+		if err == nil {
+			if !reflect.DeepEqual(snapshot.ResolvedTimeSpec, request.ResolvedTimeSpec) {
+				return QueryResult{}, NewError(
+					"REPORT_SEMANTIC_ARTIFACT_INVALID", "semantic report time contract does not match its source artifact", nil,
+				)
+			}
+			release := askdata.ReleaseRef{ReleaseID: request.ReleaseID, ContentHash: request.ContentHash}
+			var scope askdata.PolicyScope
+			scope, err = runner.scopes.ResolveViewerScope(ctx, identity, release)
+			if err == nil {
+				persisted, err = runner.rehydrator.RehydrateSnapshot(ctx, scope, request.IR, request.FixedPlanHash, snapshot)
+			}
+			if err == nil {
+				return runner.executeLiveSemanticIR(ctx, identity, request, persisted)
+			}
+		}
 	}
 	if err != nil {
 		return QueryResult{}, err
@@ -131,8 +148,18 @@ func (runner *SemanticRuntimeRunner) executePersistedSemanticIR(
 		return QueryResult{}, NewError("NO_PERMISSION", "semantic report plan cannot be resolved for this viewer", err)
 	}
 
+	return runner.executeLiveSemanticIR(ctx, identity, request, live)
+}
+
+func (runner *SemanticRuntimeRunner) executeLiveSemanticIR(
+	ctx context.Context,
+	identity store.Identity,
+	request SemanticExecutionRequest,
+	live askcompiler.QueryArtifact,
+) (QueryResult, error) {
 	partial := false
 	var validation validator.ValidationArtifact
+	var err error
 	if live.ResolvedTimeSpec != nil {
 		materializationIDs, err := semanticMaterializationIDs(live)
 		if err != nil {

@@ -112,17 +112,9 @@ func TestLoopRecordsModelCostAndStopsOnRunCostLimit(t *testing.T) {
 }
 
 func TestLoopRecordsQueryScanCostAndFailsClosedWhenMeasurementIsMissing(t *testing.T) {
-	request, conversation := loopRequestFixture(t, StatePlanValidating, cognition.StagePlanSelection)
-	queryEvidence := loopEvidence("query-cost-result", askdata.EvidenceKindQueryResult)
-	runner := &scriptedLoopCognition{actions: []cognition.Action{
-		executeQueryToolAction(request, conversation),
-		clarificationAction(cognition.StagePlanSelection, queryEvidence),
-	}}
-	tools := &fakeLoopTools{
-		available: []toolhost.ToolName{toolhost.ToolExecuteQueryPlan}, evidence: queryEvidence,
-		progress: true, charge: toolhost.BudgetCharge{ToolCalls: 1, FormalQueries: 1},
-		queryScanBytes: 64 << 20,
-	}
+	request, conversation := loopRequestFixture(t, StateIRReady, cognition.StagePlanSelection)
+	runner := &scriptedLoopCognition{actions: []cognition.Action{planProposalAction(request, conversation)}}
+	tools := &planPipelineTools{evidence: conversation, queryScanBytes: 64 << 20}
 	governor := &fakeLoopCostGovernor{}
 	options := DefaultLoopOptions()
 	options.CostGovernor = governor
@@ -133,8 +125,8 @@ func TestLoopRecordsQueryScanCostAndFailsClosedWhenMeasurementIsMissing(t *testi
 	if _, err := loop.Run(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
-	if len(governor.records) != 3 || len(governor.checks) != 3 {
-		t.Fatalf("expected model/query/model accounting, got records=%#v checks=%#v", governor.records, governor.checks)
+	if len(governor.records) != 2 || len(governor.checks) != 2 {
+		t.Fatalf("expected model/query accounting, got records=%#v checks=%#v", governor.records, governor.checks)
 	}
 	queryRecord := governor.records[1]
 	if queryRecord.Provider != "warehouse" || queryRecord.Model != string(toolhost.ToolExecuteQueryPlan) ||
@@ -142,15 +134,12 @@ func TestLoopRecordsQueryScanCostAndFailsClosedWhenMeasurementIsMissing(t *testi
 		t.Fatalf("unexpected query cost record: %#v", queryRecord)
 	}
 
-	request, conversation = loopRequestFixture(t, StatePlanValidating, cognition.StagePlanSelection)
+	request, conversation = loopRequestFixture(t, StateIRReady, cognition.StagePlanSelection)
 	governor = &fakeLoopCostGovernor{}
 	options.CostGovernor = governor
 	loop, _ = NewLoop(
-		&scriptedLoopCognition{actions: []cognition.Action{executeQueryToolAction(request, conversation)}},
-		&fakeLoopTools{
-			available: []toolhost.ToolName{toolhost.ToolExecuteQueryPlan}, evidence: queryEvidence,
-			progress: true, charge: toolhost.BudgetCharge{ToolCalls: 1, FormalQueries: 1},
-		},
+		&scriptedLoopCognition{actions: []cognition.Action{planProposalAction(request, conversation)}},
+		&planPipelineTools{evidence: conversation},
 		options,
 	)
 	if _, err := loop.Run(context.Background(), request); !errors.Is(err, ErrLoopCostAccountingFailed) {

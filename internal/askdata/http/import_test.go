@@ -17,6 +17,41 @@ import (
 	registryimport "intelligent-report-generation-system/internal/askdata/registry/import"
 )
 
+type httpImportReader struct {
+	value registryimport.SemanticImport
+	err   error
+}
+
+func (reader *httpImportReader) Get(
+	_ context.Context, _, _, _ string,
+) (registryimport.SemanticImport, error) {
+	return reader.value, reader.err
+}
+
+func TestImportStatusUsesAuthenticatedScope(t *testing.T) {
+	scope := testAdminScope()
+	importID := uuid.NewString()
+	reader := &httpImportReader{value: registryimport.SemanticImport{
+		ID: importID, TenantID: scope.TenantID, DomainID: scope.DomainID,
+		AssetType: registryimport.AssetEvalCase, State: registryimport.StateValidated,
+		TotalRows: 12, ValidRows: 12,
+	}}
+	handler := newProtectedAdminHandlerWithImports(
+		&fakeAdminBackend{},
+		func(context.Context) (registry.AdminScope, error) { return scope, nil },
+		nil, nil, nil, ImportMutationServices{Reads: reader},
+	)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet, "/api/v1/askdata/semantic/imports/"+importID, nil,
+	))
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"state":"VALIDATED"`) ||
+		!strings.Contains(response.Body.String(), `"validRows":12`) {
+		t.Fatalf("response = %d/%s", response.Code, response.Body.String())
+	}
+}
+
 func TestImportTemplateDownloadUsesAuthenticatedDomainAndSafeHeaders(t *testing.T) {
 	scope := testAdminScope()
 	service := registryimport.NewTemplateService(httpTemplateCatalog{references: []registryimport.TemplateReference{

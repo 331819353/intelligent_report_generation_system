@@ -4,7 +4,6 @@ export type Collision = { firstId: string; secondId: string }
 export type Slot = { id: string; grid: GridRect; componentId: string; mergedFrom?: string[] }
 export type GridSize = { w: number; h: number }
 
-export type CompactMode = 'NONE' | 'VERTICAL'
 export type ZoneHeightMode = 'FIXED' | 'AUTO' | 'FR' | 'HIDDEN'
 export type MobileHeightMode = 'AUTO' | 'FIXED' | 'ASPECT_RATIO'
 export type MobileSlotMode = 'STACK' | 'CAROUSEL' | 'PRIMARY_ONLY' | 'COLLAPSE'
@@ -79,17 +78,6 @@ export type MobileManifest = {
   }
 }
 
-export type DesktopCanvas = {
-  columns: number
-  baseRowHeight: number
-  gapX: number
-  gapY: number
-  paddingX: number
-  paddingY: number
-}
-
-export type PixelRect = { x: number; y: number; width: number; height: number }
-
 export type SlotMergeCode =
   | 'REPORT_SLOT_MERGE_NOT_RECTANGULAR'
   | 'REPORT_SLOT_MERGE_MULTIPLE_COMPONENTS'
@@ -158,145 +146,6 @@ export function validateSlotMerge(
     return 'REPORT_SLOT_MERGE_BELOW_MIN_SIZE'
   }
   return undefined
-}
-
-export function slotRenderSize(block: GridSize, zone: GridSize, slot: GridSize): GridSize {
-  if (block.w < 1 || block.h < 1 || zone.w < 1 || zone.h < 1 || slot.w < 1 || slot.h < 1) {
-    return { w: 0, h: 0 }
-  }
-  return {
-    w: Math.ceil(block.w * slot.w / zone.w),
-    h: Math.ceil(block.h * slot.h / zone.h),
-  }
-}
-
-/** Converts runtime pixels without adding derived values to Report Definition JSON. */
-export function desktopPixelRect(canvas: DesktopCanvas, grid: GridRect, containerWidth: number): PixelRect {
-  if (canvas.columns < 1 || containerWidth <= 0 || grid.x < 0 || grid.y < 0 ||
-      grid.w < 1 || grid.h < 1 || grid.x + grid.w > canvas.columns) {
-    throw new Error('desktop pixel conversion input is invalid')
-  }
-  const usableWidth = containerWidth - 2 * canvas.paddingX - (canvas.columns - 1) * canvas.gapX
-  if (usableWidth <= 0) throw new Error('desktop container is too narrow for the configured grid')
-  const columnWidth = usableWidth / canvas.columns
-  return {
-    x: canvas.paddingX + grid.x * (columnWidth + canvas.gapX),
-    y: canvas.paddingY + grid.y * (canvas.baseRowHeight + canvas.gapY),
-    width: grid.w * columnWidth + (grid.w - 1) * canvas.gapX,
-    height: grid.h * canvas.baseRowHeight + (grid.h - 1) * canvas.gapY,
-  }
-}
-
-export function compactBlocks(blocks: LayoutBlock[], mode: CompactMode): LayoutBlock[] {
-  const result = blocks.map(block => ({
-    ...block,
-    layout: { ...block.layout, desktop: { ...block.layout.desktop } },
-  }))
-  if (mode === 'NONE') return result
-  const order = result.map((_, index) => index).sort((left, right) => {
-    const a = result[left]
-    const b = result[right]
-    return a.layout.desktop.y - b.layout.desktop.y ||
-      a.layout.desktop.x - b.layout.desktop.x || a.id.localeCompare(b.id)
-  })
-  const placed: number[] = []
-  for (const index of order) {
-    const current = result[index]
-    let top = 0
-    for (const previousIndex of placed) {
-      const previous = result[previousIndex].layout.desktop
-      if (previous.x < current.layout.desktop.x + current.layout.desktop.w &&
-          current.layout.desktop.x < previous.x + previous.w) {
-        top = Math.max(top, previous.y + previous.h)
-      }
-    }
-    current.layout.desktop.y = top
-    placed.push(index)
-  }
-  return result
-}
-
-export function calculateZoneHeights(
-  zones: Zone[],
-  totalHeight: number,
-  priority = [...zones]
-    .sort((a, b) => (b.layout.emptyPriority ?? 0) - (a.layout.emptyPriority ?? 0) || a.id.localeCompare(b.id))
-    .map(zone => zone.id),
-): Record<string, number> {
-  const result: Record<string, number> = {}
-  let remaining = totalHeight
-  let weighted: Zone[] = []
-  let totalWeight = 0
-  for (const zone of zones) {
-    switch (zone.layout.heightMode) {
-      case 'HIDDEN':
-        result[zone.id] = 0
-        break
-      case 'FIXED': {
-        const height = zone.layout.fixedHeight ?? zone.layout.minHeight
-        result[zone.id] = height
-        remaining -= height
-        break
-      }
-      case 'AUTO':
-        result[zone.id] = zone.layout.minHeight
-        remaining -= zone.layout.minHeight
-        break
-      case 'FR':
-        result[zone.id] = zone.layout.minHeight
-        remaining -= zone.layout.minHeight
-        weighted.push(zone)
-        if ((zone.layout.fr ?? 0) > 0) totalWeight += zone.layout.fr!
-        break
-    }
-  }
-  while (remaining > 0 && weighted.length > 0 && totalWeight > 0) {
-    const available = remaining
-    let progress = 0
-    const next: Zone[] = []
-    let nextWeight = 0
-    for (const zone of weighted) {
-      let share = Math.max(1, Math.floor(available * zone.layout.fr! / totalWeight))
-      share = Math.min(share, remaining)
-      if (zone.layout.maxHeight !== undefined) {
-        share = Math.min(share, zone.layout.maxHeight - result[zone.id])
-      }
-      if (share > 0) {
-        result[zone.id] += share
-        remaining -= share
-        progress += share
-      }
-      if (zone.layout.maxHeight === undefined || result[zone.id] < zone.layout.maxHeight) {
-        next.push(zone)
-        nextWeight += zone.layout.fr!
-      }
-      if (remaining === 0) break
-    }
-    if (progress === 0) break
-    weighted = next
-    totalWeight = nextWeight
-  }
-
-  const byId = new Map(zones.map(zone => [zone.id, zone]))
-  let freed = 0
-  for (const zone of zones) {
-    if (zone.layout.heightMode !== 'HIDDEN' && zone.slots.length === 0) {
-      freed += result[zone.id]
-      result[zone.id] = 0
-    }
-  }
-  for (const id of priority) {
-    if (freed === 0) break
-    const zone = byId.get(id)
-    if (!zone || zone.slots.length === 0 || !['AUTO', 'FR'].includes(zone.layout.heightMode)) continue
-    let capacity = freed
-    if (zone.layout.maxHeight !== undefined) capacity = Math.min(capacity, zone.layout.maxHeight - result[id])
-    if (capacity > 0) {
-      result[id] += capacity
-      freed -= capacity
-    }
-  }
-  return result
 }
 
 export function mobileBlockHeight(layout: MobileLayout, containerWidth: number, autoHeight: number): number {

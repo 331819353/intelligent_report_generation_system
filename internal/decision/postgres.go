@@ -228,7 +228,7 @@ func (store *PostgresStore) Submit(ctx context.Context, identity Identity, id as
 		}
 		for index, approver := range inside.ApproverUserIDs {
 			if approver == identity.ActorID {
-				return ErrPolicyUnavailable
+				return ErrSelfApproval
 			}
 			_, err = tx.Exec(ctx, `INSERT INTO decision.decision_approvals(id,tenant_id,domain_id,decision_id,approver_user_id,sequence_no,status,created_at)
 			VALUES($1,$2,$3,$4,$5,$6,'PENDING',$7)`, uuid.NewString(), identity.TenantID, identity.DomainID, id, approver, index+1, now)
@@ -515,11 +515,12 @@ func (store *PostgresStore) ConfirmOutcome(ctx context.Context, identity Identit
 		if current.Status != StatusReviewDue && current.Status != StatusInExecution && current.Status != StatusReopened {
 			return ErrIllegalTransition
 		}
+		var metricCount int64
 		var ready bool
-		if err = tx.QueryRow(ctx, `SELECT count(*)>0 AND bool_and(refresh_status IN ('SUCCEEDED','NO_DATA')) FROM decision.outcome_metrics WHERE tenant_id=$1 AND decision_id=$2`, identity.TenantID, decisionID).Scan(&ready); err != nil {
+		if err = tx.QueryRow(ctx, `SELECT count(*),COALESCE(bool_and(refresh_status IN ('SUCCEEDED','NO_DATA')),false) FROM decision.outcome_metrics WHERE tenant_id=$1 AND decision_id=$2`, identity.TenantID, decisionID).Scan(&metricCount, &ready); err != nil {
 			return err
 		}
-		if !ready {
+		if !outcomeReviewReady(metricCount, ready, input) {
 			return ErrOutcomeBlocked
 		}
 		status := ReviewConfirmed
@@ -541,6 +542,17 @@ func (store *PostgresStore) ConfirmOutcome(ctx context.Context, identity Identit
 		return err
 	})
 	return result, mapConcurrent(err)
+}
+
+func outcomeReviewReady(metricCount int64, metricsReady bool, input ConfirmOutcomeInput) bool {
+	if metricCount > 0 {
+		return metricsReady
+	}
+	// A decision created from a published report can be fully executed before a
+	// semantic KPI is configured. Preserve a truthful closure path: it may be
+	// reviewed only as evidence-inconclusive, with an explicit audit note. This
+	// avoids both a permanent lifecycle dead end and an invented success claim.
+	return input.Conclusion == ConclusionInconclusive && validText(input.Notes, 1, 4096)
 }
 
 func (store *PostgresStore) TransitionDecision(ctx context.Context, identity Identity, id askdata.ID, expected int64, target Status, reason string, now time.Time) (Aggregate, error) {

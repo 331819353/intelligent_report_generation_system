@@ -31,24 +31,11 @@ func TestPostgresRecallAuditRecordsLabelFreeSampleAndComparesExact(t *testing.T)
 	adminPool := openRecallAuditPool(t, ctx, adminURL)
 	defer adminPool.Close()
 
-	var tenantID, domainID, actorID string
-	syntheticPlatform := false
-	if err := adminPool.QueryRow(ctx, `SELECT membership.tenant_id::text,
-		membership.domain_id::text,membership.user_id::text
-		FROM platform.domain_memberships AS membership
-		JOIN platform.business_domains AS domain
-		  ON domain.id=membership.domain_id AND domain.tenant_id=membership.tenant_id
-		JOIN platform.users AS user_account
-		  ON user_account.id=membership.user_id AND user_account.tenant_id=membership.tenant_id
-		WHERE membership.status='ACTIVE' AND domain.status='ACTIVE'
-		  AND domain.deleted_at IS NULL AND user_account.deleted_at IS NULL
-		ORDER BY membership.created_at LIMIT 1`).Scan(&tenantID, &domainID, &actorID); err != nil {
-		if err != pgx.ErrNoRows {
-			t.Fatal(err)
-		}
-		tenantID, domainID, actorID = uuid.NewString(), uuid.NewString(), uuid.NewString()
-		syntheticPlatform = true
-	}
+	// Recall cadence is tenant-wide. A shared seed tenant may legitimately have
+	// a recent production-like audit and would make this fixture skip, so keep
+	// the integration proof isolated in its own tenant.
+	tenantID, domainID, actorID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	syntheticPlatform := true
 
 	releaseID := uuid.NewString()
 	releaseHash := string(askdata.HashBytes([]byte("SEARCH-006 integration " + releaseID)))

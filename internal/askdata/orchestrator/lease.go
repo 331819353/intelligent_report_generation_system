@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"intelligent-report-generation-system/internal/askdata"
-	"intelligent-report-generation-system/internal/platform/database"
 )
 
 var ErrInvalidLease = errors.New("question run lease request is invalid")
@@ -53,13 +52,8 @@ func (store *LeaseStore) ListTenantIDs(ctx context.Context) ([]string, error) {
 	if store == nil || store.pool == nil {
 		return nil, ErrInvalidLease
 	}
-	rows, err := store.pool.Query(ctx, `SELECT DISTINCT tenant_id::text
-		FROM askdata.question_runs
-		WHERE current_state NOT IN (
-		  'CLARIFICATION_REQUIRED','CLARIFICATION_EXPIRED',
-		  'OUT_OF_SCOPE','ANSWERED','BLOCKED'
-		)
-		ORDER BY 1`)
+	rows, err := store.pool.Query(ctx, `SELECT tenant_id::text
+		FROM askdata.list_question_run_tenants()`)
 	if err != nil {
 		return nil, err
 	}
@@ -123,35 +117,28 @@ func (store *LeaseStore) Claim(
 // bug to work around.
 func (store *LeaseStore) ActorRoleIDs(
 	ctx context.Context,
-	tenantID, actorID askdata.ID,
+	tenantID, actorID, runID askdata.ID,
 ) ([]askdata.ID, error) {
-	if store == nil || store.pool == nil || tenantID.Validate() != nil || actorID.Validate() != nil {
+	if store == nil || store.pool == nil || tenantID.Validate() != nil ||
+		actorID.Validate() != nil || runID.Validate() != nil {
 		return nil, ErrInvalidLease
 	}
 	roleIDs := []askdata.ID{}
-	err := database.WithTenantTx(ctx, store.pool, string(tenantID), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT role.id::text
-			FROM platform.user_roles AS assignment
-			JOIN platform.roles AS role
-			  ON role.tenant_id=assignment.tenant_id AND role.id=assignment.role_id
-			WHERE assignment.tenant_id=$1 AND assignment.user_id=$2
-			  AND role.status='ACTIVE' AND role.deleted_at IS NULL
-			ORDER BY role.id
-			LIMIT $3`, string(tenantID), string(actorID), askdata.MaxPolicyRoles+1)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var roleID string
-			if err := rows.Scan(&roleID); err != nil {
-				return err
-			}
-			roleIDs = append(roleIDs, askdata.ID(roleID))
-		}
-		return rows.Err()
-	})
+	rows, err := store.pool.Query(ctx, `SELECT role_id::text
+		FROM askdata.list_question_run_actor_roles($1::uuid,$2::uuid,$3::uuid)`,
+		string(tenantID), string(actorID), string(runID))
 	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var roleID string
+		if err := rows.Scan(&roleID); err != nil {
+			return nil, err
+		}
+		roleIDs = append(roleIDs, askdata.ID(roleID))
+	}
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	if len(roleIDs) == 0 || len(roleIDs) > askdata.MaxPolicyRoles {

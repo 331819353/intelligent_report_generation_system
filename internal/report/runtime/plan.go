@@ -12,20 +12,27 @@ import (
 )
 
 type PlanRequest struct {
-	PageID           askdata.ID
-	PageIDs          []askdata.ID
-	VisibleBlockIDs  []askdata.ID
-	ExpandedSlotIDs  []askdata.ID
-	Mobile           bool
-	Export           bool
-	PolicyScopeHash  string
-	FilterValues     map[askdata.ID]any
-	TemporaryFilters []ResolvedFilter
+	PageID          askdata.ID
+	PageIDs         []askdata.ID
+	VisibleBlockIDs []askdata.ID
+	ExpandedSlotIDs []askdata.ID
+	Mobile          bool
+	Export          bool
+	PolicyScopeHash string
+	FilterValues    map[askdata.ID]any
 
-	// Filters is retained as an internal compatibility alias for callers that
-	// already hold server-resolved temporary filters. Public HTTP requests are
-	// decoded into FilterValues and never populate this field directly.
-	Filters []ResolvedFilter
+	// SelectionFilters carries interaction-derived filters per target component.
+	// Cross-filtering is inherently per-target — an interaction names which
+	// components it affects — so a single report-wide temporary filter list
+	// could not express it. Only ResolveSelections populates this, so a client
+	// can never inject a filter the definition does not declare.
+	SelectionFilters map[askdata.ID][]ResolvedFilter
+
+	// Unexecutable reports why a component cannot run against the current
+	// execution target, or "" when it can. It is consulted before a query is
+	// built so that one unexecutable binding is reported on its own component
+	// instead of failing the whole page.
+	Unexecutable func(report.Component) string `json:"-"`
 }
 
 func BuildExecutionPlan(definition report.ReportDefinition, request PlanRequest) (ExecutionPlan, error) {
@@ -78,11 +85,18 @@ func BuildExecutionPlan(definition report.ReportDefinition, request PlanRequest)
 						if !exists {
 							return ExecutionPlan{}, fmt.Errorf("component %q is missing", slot.ComponentID)
 						}
-						temporary := append([]ResolvedFilter(nil), request.TemporaryFilters...)
-						temporary = append(temporary, request.Filters...)
+						if request.Unexecutable != nil {
+							if reason := request.Unexecutable(component); reason != "" {
+								result.Components = append(result.Components, ComponentPlan{
+									ComponentID: component.ID, PageID: page.ID, BlockID: block.ID,
+									SlotID: slot.ID, Blocked: reason,
+								})
+								continue
+							}
+						}
 						filters, err := ResolveFilters(
 							definition, page.ID, section.ID, block.ID, component.ID,
-							request.FilterValues, temporary,
+							request.FilterValues, request.SelectionFilters[component.ID],
 						)
 						if err != nil {
 							return ExecutionPlan{}, fmt.Errorf("component %q filters: %w", component.ID, err)

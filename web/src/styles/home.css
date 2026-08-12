@@ -209,7 +209,7 @@
 
 @media (max-width: 760px) {
   .home-shell .topbar-title-row { gap: 2px; }
-  .home-title-meta { font-size: 11px; }
+  .home-title-meta { font-size: 14px; }
   .home-resume-panel,
   .home-question-launcher { padding-inline: 16px; }
   .home-resume-content { grid-template-columns: 52px minmax(0, 1fr); }

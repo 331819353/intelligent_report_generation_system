@@ -16,9 +16,12 @@ import (
 	"intelligent-report-generation-system/internal/access"
 	aiplatform "intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/askdata"
+	"intelligent-report-generation-system/internal/askdata/answer"
 	askdatacompiler "intelligent-report-generation-system/internal/askdata/compiler"
 	askdatafeedback "intelligent-report-generation-system/internal/askdata/feedback"
 	askdatahttp "intelligent-report-generation-system/internal/askdata/http"
+	"intelligent-report-generation-system/internal/askdata/ircontract"
+	askdataorchestrator "intelligent-report-generation-system/internal/askdata/orchestrator"
 	"intelligent-report-generation-system/internal/askdata/registry"
 	registryimport "intelligent-report-generation-system/internal/askdata/registry/import"
 	askdatareportasset "intelligent-report-generation-system/internal/askdata/reportasset"
@@ -51,20 +54,40 @@ import (
 	reportauthorization "intelligent-report-generation-system/internal/report/authorization"
 	reportfollow "intelligent-report-generation-system/internal/report/follow"
 	reporthttp "intelligent-report-generation-system/internal/report/http"
-	reportinsight "intelligent-report-generation-system/internal/report/insight"
+	"intelligent-report-generation-system/internal/report/insight"
 	reportpublication "intelligent-report-generation-system/internal/report/publication"
 	reportai "intelligent-report-generation-system/internal/report/reportai"
+	"intelligent-report-generation-system/internal/report/reportinsight"
 	reportruntime "intelligent-report-generation-system/internal/report/runtime"
 	reportschedule "intelligent-report-generation-system/internal/report/schedule"
 	reportsharing "intelligent-report-generation-system/internal/report/sharing"
 	reportstore "intelligent-report-generation-system/internal/report/store"
 	reporttemplate "intelligent-report-generation-system/internal/report/template"
 	"intelligent-report-generation-system/internal/runtimeconfig"
+	"intelligent-report-generation-system/internal/support"
 	"intelligent-report-generation-system/internal/userlifecycle"
 	"intelligent-report-generation-system/internal/workitem"
 )
 
 type savedQuestionLauncher struct{ service *askdatahttp.PostgresService }
+
+type savedQuestionRunResolver struct{ service *askdatahttp.PostgresService }
+
+func (resolver savedQuestionRunResolver) ResolveSavedQuestionIR(
+	ctx context.Context, identity savedquestion.Identity, runID askdata.ID,
+) (ircontract.SemanticIR, error) {
+	snapshot, err := resolver.service.GetQuestion(ctx, askdatahttp.RequestIdentity{
+		TenantID: identity.TenantID, DomainID: identity.DomainID, ActorID: identity.ActorID,
+	}, runID)
+	if err != nil {
+		return ircontract.SemanticIR{}, err
+	}
+	semanticIR, err := askdatahttp.SavedQuestionSemanticIR(snapshot)
+	if err != nil {
+		return ircontract.SemanticIR{}, savedquestion.ErrInvalid
+	}
+	return semanticIR, nil
+}
 
 func (launcher savedQuestionLauncher) LaunchSavedQuestion(
 	ctx context.Context, input savedquestion.LaunchInput,
@@ -77,7 +100,8 @@ func (launcher savedQuestionLauncher) LaunchSavedQuestion(
 	result, err := launcher.service.CreateQuestion(ctx, askdatahttp.RequestIdentity{
 		TenantID: input.Identity.TenantID, DomainID: input.Identity.DomainID, ActorID: input.Identity.ActorID,
 	}, askdatahttp.CreateQuestionInput{
-		QuestionHash: questionHash, IdempotencyKeyHash: idempotencyHash, ConversationID: conversationID,
+		Question: input.Question.QuestionText, QuestionHash: questionHash,
+		IdempotencyKeyHash: idempotencyHash, ConversationID: conversationID,
 		SavedQuestionID: input.Question.ID,
 	})
 	if err != nil {
@@ -127,8 +151,12 @@ func main() {
 	tokens := auth.NewTokenManager(cfg.AuthTokenIssuer, cfg.AuthAccessSecret, cfg.AuthAccessTTL)
 	authService := auth.NewService(auth.NewPostgresStore(pool), passwords, tokens, cfg.AuthRefreshTTL)
 	accessService := access.NewService(access.NewPostgresStore(pool))
-	accessAdminHandler := access.NewAdminHandler(authService, access.NewAdminStore(pool))
-	userLifecycleService, err := userlifecycle.NewService(pool, access.NewAdminStore(pool))
+	accessAdminStore := access.NewAdminStore(pool)
+	accessAdminHandler := access.NewAdminHandler(authService, accessAdminStore)
+	operationalObservabilityHandler := observability.NewOperationalHandler(
+		authService, accessAdminStore, observability.NewOperationalStore(pool),
+	)
+	userLifecycleService, err := userlifecycle.NewService(pool, accessAdminStore)
 	if err != nil {
 		logger.Error("initialize user lifecycle service", "error", err)
 		os.Exit(1)
@@ -136,7 +164,7 @@ func main() {
 	userLifecycleHandler := userlifecycle.NewHandler(
 		authService, platformidempotency.NewPostgresRepository(pool), userLifecycleService,
 	)
-	runtimeConfigService, err := runtimeconfig.NewService(pool, access.NewAdminStore(pool))
+	runtimeConfigService, err := runtimeconfig.NewService(pool, accessAdminStore)
 	if err != nil {
 		logger.Error("initialize runtime configuration service", "error", err)
 		os.Exit(1)
@@ -144,6 +172,7 @@ func main() {
 	runtimeConfigHandler := runtimeconfig.NewHandler(
 		authService, platformidempotency.NewPostgresRepository(pool), runtimeConfigService,
 	)
+	supportHandler := support.NewHandler(authService, support.NewRepository(pool))
 	assetScopeHandler := access.NewAssetScopeHandler(authService, access.NewAssetScopeStore(pool))
 
 	dataSourceRepo := datasource.NewPostgresRepository(pool)
@@ -288,10 +317,26 @@ func main() {
 	questionService := askdatahttp.NewPostgresServiceWithClarificationTimeout(
 		pool, cfg.AskDataClarificationTimeout,
 	)
+	questionRetention, err := askdataorchestrator.NewRetentionPolicy(askdataorchestrator.RetentionConfig{
+		QuestionMode: askdataorchestrator.OriginalQuestionMode(cfg.AskDataQuestionRetentionMode),
+		QuestionTTL:  cfg.AskDataQuestionRetentionTTL, RunArtifactTTL: cfg.AskDataRunArtifactTTL,
+		QuestionEncryptionKey: cfg.AskDataQuestionEncryptionKey,
+	})
+	if err != nil {
+		logger.Error("initialize AskData question retention", "error", err)
+		os.Exit(1)
+	}
+	questionEnvelopes, err := askdataorchestrator.NewPostgresQuestionEnvelopeStore(pool, questionRetention)
+	if err != nil {
+		logger.Error("initialize AskData question envelopes", "error", err)
+		os.Exit(1)
+	}
+	questionService.SetQuestionEnvelopeStore(questionEnvelopes)
 	questionHandler := askdatahttp.NewHandler(authService, questionService)
 	savedQuestionHandler := savedquestion.NewHandler(
 		authService, savedquestion.NewPostgresRepository(pool),
 		savedQuestionLauncher{service: questionService},
+		savedQuestionRunResolver{service: questionService},
 	)
 	feedbackTicketHandler := askdatafeedback.NewHandler(
 		authService, askdatafeedback.NewPostgresRepository(pool),
@@ -325,6 +370,7 @@ func main() {
 		registryimport.NewUploadService(objectStorage, semanticImportStore, cfg.MinIOUploadsBucket),
 		registryimport.NewReportService(semanticImportStore),
 		askdatahttp.ImportMutationServices{
+			Reads: semanticImportStore,
 			Commit: registryimport.NewCommitService(
 				semanticImportStore, registryimport.NewPostgresDraftCreator(),
 			),
@@ -370,12 +416,41 @@ func main() {
 		logger.Error("initialize report component registry", "error", err)
 		os.Exit(1)
 	}
+	// The verifier only accepts the wordlist version it actually loaded.
+	const reportPolicyWordlistVersion = "1.0.0"
+	reportInsightArtifacts := insight.NewPostgresStore(pool)
+
+	// Report conclusions are written by the model but may only be stored if they
+	// pass the same fact verifier Ask Data uses. A nil verifier leaves the
+	// generate endpoint unavailable rather than storing unchecked prose.
+	var reportNarrativeService *reportinsight.NarrativeService
+	if reportNarrativeVerifier, verifierErr := answer.NewVerifier(answer.ReleaseVerifierPolicy{
+		VerifierVersion:       answer.VerifierVersion,
+		PolicyWordlistVersion: reportPolicyWordlistVersion,
+	}); verifierErr != nil {
+		slog.Warn("report conclusion generation disabled", "error", verifierErr)
+	} else {
+		reportNarrativeService = &reportinsight.NarrativeService{
+			Model: reportinsight.AINarrativeModel{
+				AI: aiService,
+				Identity: func(ctx context.Context) (askdata.ID, askdata.ID, askdata.ID) {
+					identity, _ := reportai.InvocationIdentityFrom(ctx)
+					return identity.TenantID, identity.ActorID, identity.ReportID
+				},
+			},
+			Verifier: reportNarrativeVerifier, Artifacts: reportInsightArtifacts,
+			VerifierVersion:       answer.VerifierVersion,
+			PolicyWordlistVersion: reportPolicyWordlistVersion,
+			NewID:                 func() askdata.ID { return askdata.ID(uuid.NewString()) },
+		}
+	}
+
 	reportAIGenerator, err := reportai.NewOrchestratedGenerator(aiService)
 	if err != nil {
 		logger.Error("initialize report AI generator", "error", err)
 		os.Exit(1)
 	}
-	reportInsightRegistry := reportinsight.NewRegistry()
+	reportInsightRegistry := insight.NewRegistry()
 	reportDatasetRunner, err := reportruntime.NewDatasetVersionRunner(queryService)
 	if err != nil {
 		logger.Error("initialize report dataset runtime", "error", err)
@@ -493,7 +568,8 @@ func main() {
 		reportsharing.Service{Repository: reportsharing.NewPostgresRepository(pool),
 			Authorizer: reportAuthorizer, Versions: reportRepository},
 		reportpublication.NewExportJobStore(pool),
-		reportinsight.NewPostgresStore(pool),
+		objectStorage, cfg.MinIOUploadsBucket,
+		reportInsightArtifacts,
 		reportai.NewPostgresStore(pool),
 		reportAssetService,
 		reporthttp.AIOptions{
@@ -501,7 +577,8 @@ func main() {
 			Reviewer: reportAIGenerator,
 			Selector: reportAIGenerator, Contexts: reportai.NewPostgresFieldCatalog(pool),
 			Fields: reportai.NewPostgresFieldCatalog(pool), Components: reportComponentRegistry,
-			Methods: reportInsightRegistry, Runtime: reportRuntime, Upgrade: reportUpgradeService,
+			Methods: reportInsightRegistry, Runtime: reportRuntime, Measures: queryService,
+			Narrative: reportNarrativeService, Upgrade: reportUpgradeService,
 		},
 	)
 
@@ -524,6 +601,8 @@ func main() {
 	api.Handle("/api/v1/reports/", reportHandler)
 	api.Handle("/api/v1/report-data-contexts", reportHandler)
 	api.Handle("/api/v1/report-component-manifests", reportHandler)
+	api.Handle("/api/v1/report-templates", reportHandler)
+	api.Handle("/api/v1/report-templates/", reportHandler)
 	api.Handle("GET /api/v1/reports/{id}/schedules", reportScheduleHandler)
 	api.Handle("POST /api/v1/reports/{id}/schedules", reportScheduleHandler)
 	api.Handle("/api/v1/report-schedules/", reportScheduleHandler)
@@ -538,6 +617,8 @@ func main() {
 	api.Handle("/api/v1/work-items", workItemHandler)
 	api.Handle("/api/v1/work-items/", workItemHandler)
 	api.Handle("/api/v1/runtime-config/", runtimeConfigHandler)
+	api.Handle("/api/v1/support-tickets", supportHandler)
+	api.Handle("/api/v1/support-tickets/", supportHandler)
 	api.Handle("/api/v1/data-requests", dataRequestHandler)
 	api.Handle("/api/v1/data-requests/", dataRequestHandler)
 	api.Handle("/api/v1/askdata/semantic/", semanticAdminHandler)
@@ -547,10 +628,12 @@ func main() {
 	api.Handle("/api/v1/domain-applications/", accessAdminHandler)
 	api.Handle("/api/v1/managed-domains", accessAdminHandler)
 	api.Handle("/api/v1/platform-management/", accessAdminHandler)
+	api.Handle("GET /api/v1/platform-management/observability", operationalObservabilityHandler)
 	api.Handle("/api/v1/domains", accessAdminHandler)
 	api.Handle("/api/v1/domains/", accessAdminHandler)
 	api.Handle("/api/v1/users", accessAdminHandler)
 	api.Handle("/api/v1/users/", accessAdminHandler)
+	api.Handle("/api/v1/share-targets", accessAdminHandler)
 	api.Handle("GET /api/v1/users/{id}/deactivation-preview", userLifecycleHandler)
 	api.Handle("POST /api/v1/users/{id}/deactivation-batches", userLifecycleHandler)
 	api.Handle("/api/v1/user-lifecycle-batches/", userLifecycleHandler)

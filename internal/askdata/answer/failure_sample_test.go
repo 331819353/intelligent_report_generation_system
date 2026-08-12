@@ -11,7 +11,7 @@ import (
 
 func TestFailureSamplesContainOnlyHashSpanCodeAndReleasedIDs(t *testing.T) {
 	secret := "未经校验的客户原文 999 元"
-	binding := BindingEvidence{Objects: []ObjectEvidence{
+	binding := BindingEvidence{Source: BindingSourceSemanticRelease, Objects: []ObjectEvidence{
 		{ObjectID: "metric:revenue@v1", Kind: ObjectMetric, Bound: true},
 		{ObjectID: "dimension:region@v1", Kind: ObjectDimension, Bound: true},
 		{ObjectID: "member:east@v1", Kind: ObjectMember, Bound: true},

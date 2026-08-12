@@ -185,7 +185,13 @@ func compileAggregationDocument(t *testing.T, semanticIR ir.SemanticIR, resoluti
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := compileQueryPlan(QueryRoleCurrent, document, source, shapes, values, semanticIR.Limit)
+	placement, err := placeJoinedModels(resolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := compileQueryPlan(
+		QueryRoleCurrent, document, source, placement.sources, shapes, values, semanticIR.Limit,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

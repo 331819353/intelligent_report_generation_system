@@ -163,6 +163,13 @@ func (fixture *repositoryFixture) FindByTokenHash(_ context.Context, _ store.Ide
 	return fixture.record, nil
 }
 
+func (fixture *repositoryFixture) ListCreated(_ context.Context, _ store.Identity, reportID askdata.ID, _ int) ([]Record, error) {
+	if fixture.record.ReportID != reportID {
+		return []Record{}, nil
+	}
+	return []Record{fixture.record}, nil
+}
+
 func (fixture *repositoryFixture) Revoke(_ context.Context, _ store.Identity, id askdata.ID, now time.Time) error {
 	if fixture.record.ID != id || fixture.record.RevokedAt != nil {
 		return store.ErrNotFound

@@ -1,10 +1,10 @@
 import {
-  Archive, CaretRight, DotsThreeVertical, Funnel, MagnifyingGlass, PencilSimple,
-  PushPin, PushPinSlash, WarningCircle, X,
+  Archive, BookmarkSimple, CaretRight, DotsThreeVertical, Funnel, MagnifyingGlass, PencilSimple,
+  Play, PushPin, PushPinSlash, Trash, WarningCircle, X,
 } from '@phosphor-icons/react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { conversationStateLabel, formatConversationTime, groupConversations } from '../../lib/conversation-data'
-import { mapAskDataError, questionAPI, type ConversationSummary } from '../../lib/ask-data-api'
+import { mapAskDataError, questionAPI, type ConversationSummary, type SavedQuestion } from '../../lib/ask-data-api'
 
 type ConversationRailProps = {
   snapshot: boolean
@@ -12,6 +12,7 @@ type ConversationRailProps = {
   refreshKey: number
   onNew: () => void
   onSelect: (conversation: ConversationSummary) => void
+  onActiveChange?: (conversation: ConversationSummary) => void
 }
 
 const snapshotConversations: ConversationSummary[] = [
@@ -31,7 +32,7 @@ const snapshotConversations: ConversationSummary[] = [
   runCount: suffix === '100' ? 4 : 1, recordVersion: 1, updatedAt: String(updatedAt),
 } satisfies ConversationSummary))
 
-export function ConversationRail({ snapshot, activeConversationId, refreshKey, onNew, onSelect }: ConversationRailProps) {
+export function ConversationRail({ snapshot, activeConversationId, refreshKey, onNew, onSelect, onActiveChange }: ConversationRailProps) {
   const [items, setItems] = useState<ConversationSummary[]>(snapshot ? snapshotConversations : [])
   const [query, setQuery] = useState('')
   const [archived, setArchived] = useState(false)
@@ -42,6 +43,9 @@ export function ConversationRail({ snapshot, activeConversationId, refreshKey, o
   const [renameValue, setRenameValue] = useState('')
   const [busy, setBusy] = useState(false)
   const [nextCursor, setNextCursor] = useState('')
+  const [savedOpen, setSavedOpen] = useState(false)
+  const [savedQuestions, setSavedQuestions] = useState<SavedQuestion[]>([])
+  const [savedLoading, setSavedLoading] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
   const load = async (cursor = '', append = false) => {
@@ -82,16 +86,19 @@ export function ConversationRail({ snapshot, activeConversationId, refreshKey, o
   }, [archived, items, query, snapshot])
   const groups = useMemo(() => groupConversations(visibleItems, snapshot ? new Date('2026-08-10T12:00:00+08:00') : new Date()), [snapshot, visibleItems])
   const updateItem = (updated: ConversationSummary) => setItems(current => current.map(item => item.conversationId === updated.conversationId ? updated : item))
+  const notifyActive = (updated: ConversationSummary) => {
+    if (updated.conversationId === activeConversationId) onActiveChange?.(updated)
+  }
   const mutate = async (item: ConversationSummary, action: 'pin' | 'unpin' | 'archive' | 'restore') => {
     setBusy(true); setError(''); setOpenMenu('')
     try {
       if (snapshot) {
         if (action === 'archive') setItems(current => current.filter(candidate => candidate.conversationId !== item.conversationId))
-        else updateItem({ ...item, pinned: action === 'pin', archived: action === 'restore' ? false : item.archived, recordVersion: item.recordVersion + 1 })
+        else { const updated = { ...item, pinned: action === 'pin', archived: action === 'restore' ? false : item.archived, recordVersion: item.recordVersion + 1 }; updateItem(updated); notifyActive(updated) }
       } else {
         const updated = await questionAPI.mutateConversation(item.conversationId, action, item.recordVersion)
         if (action === 'archive' || action === 'restore') setItems(current => current.filter(candidate => candidate.conversationId !== item.conversationId))
-        else updateItem(updated)
+        else { updateItem(updated); notifyActive(updated) }
       }
     } catch (cause) {
       setError(mapAskDataError(cause).message)
@@ -106,13 +113,53 @@ export function ConversationRail({ snapshot, activeConversationId, refreshKey, o
     setBusy(true); setError('')
     try {
       const label = renameValue.trim()
-      if (snapshot) updateItem({ ...renameTarget, label, recordVersion: renameTarget.recordVersion + 1 })
-      else updateItem(await questionAPI.renameConversation(renameTarget.conversationId, renameTarget.recordVersion, label))
+      const updated = snapshot
+        ? { ...renameTarget, label, recordVersion: renameTarget.recordVersion + 1 }
+        : await questionAPI.renameConversation(renameTarget.conversationId, renameTarget.recordVersion, label)
+      updateItem(updated)
+      notifyActive(updated)
       setRenameTarget(null)
     } catch (cause) {
       setError(mapAskDataError(cause).message)
     } finally {
       setBusy(false)
+    }
+  }
+
+  const loadSaved = async () => {
+    setSavedOpen(value => !value)
+    if (savedOpen || snapshot || savedQuestions.length > 0) return
+    setSavedLoading(true); setError('')
+    try {
+      const page = await questionAPI.listSavedQuestions({ limit: 20 })
+      setSavedQuestions(page.items.filter(item => item.status !== 'ARCHIVED'))
+    } catch (cause) {
+      setError(mapAskDataError(cause).message)
+    } finally {
+      setSavedLoading(false)
+    }
+  }
+
+  const openSaved = async (item: SavedQuestion) => {
+    setSavedLoading(true); setError('')
+    try {
+      const launched = await questionAPI.openSavedQuestion(item.id)
+      window.location.assign(`/ask-data?runId=${encodeURIComponent(launched.runId)}`)
+    } catch (cause) {
+      setError(mapAskDataError(cause).message)
+      setSavedLoading(false)
+    }
+  }
+
+  const archiveSaved = async (item: SavedQuestion) => {
+    setSavedLoading(true); setError('')
+    try {
+      await questionAPI.archiveSavedQuestion(item.id)
+      setSavedQuestions(items => items.filter(candidate => candidate.id !== item.id))
+    } catch (cause) {
+      setError(mapAskDataError(cause).message)
+    } finally {
+      setSavedLoading(false)
     }
   }
 
@@ -125,6 +172,15 @@ export function ConversationRail({ snapshot, activeConversationId, refreshKey, o
       <label className="ask-session-search"><MagnifyingGlass size={15} aria-hidden="true" /><span className="sr-only">搜索会话</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索会话或问题" /></label>
       <button className={archived ? 'is-active' : ''} type="button" aria-label={archived ? '显示进行中的会话' : '显示已归档会话'} aria-pressed={archived} onClick={() => setArchived(value => !value)}><Funnel size={16} /></button>
     </div>
+    <button className={`ask-saved-toggle ${savedOpen ? 'is-active' : ''}`} type="button" aria-expanded={savedOpen} onClick={() => void loadSaved()}><BookmarkSimple size={15} weight="duotone" />常用问题<CaretRight size={13} /></button>
+    {savedOpen && <div className="ask-saved-list">
+      {savedLoading && savedQuestions.length === 0 && <p><span className="ask-loader-ring" />正在加载…</p>}
+      {!savedLoading && savedQuestions.length === 0 && <p>暂无收藏的问题</p>}
+      {savedQuestions.map(item => <article key={item.id}>
+        <button type="button" disabled={savedLoading || item.status !== 'ACTIVE'} title={item.questionText} onClick={() => void openSaved(item)}><Play size={13} weight="fill" /><span><strong>{item.name}</strong><small>{item.visibility === 'PRIVATE' ? '仅自己' : item.visibility === 'TEAM' ? '团队可用' : '认证候选'}</small></span></button>
+        <button type="button" aria-label={`删除收藏 ${item.name}`} disabled={savedLoading} onClick={() => void archiveSaved(item)}><Trash size={13} /></button>
+      </article>)}
+    </div>}
     {loading && items.length === 0 && <div className="ask-session-feedback"><span className="ask-loader-ring" />正在加载会话…</div>}
     {!loading && error && items.length === 0 && <div className="ask-session-feedback is-error"><WarningCircle size={17} />{error}<button type="button" onClick={() => void load()}>重试</button></div>}
     <div className="ask-session-list">

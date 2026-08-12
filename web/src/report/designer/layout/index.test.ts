@@ -3,18 +3,13 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import {
-  calculateZoneHeights,
-  compactBlocks,
-  desktopPixelRect,
   detectCollisions,
   mobileBlockHeight,
-  slotRenderSize,
   toMobileLayout,
   validateSlotMerge,
   type LayoutBlock,
   type MobilePageSource,
   type Slot,
-  type Zone,
 } from './index.ts'
 
 type Contract = {
@@ -48,28 +43,6 @@ test('TypeScript collision and merge decisions consume the Go contract fixture',
     const slots: Slot[] = fixture.slots.map(({ id, componentId, ...grid }) => ({ id, componentId, grid }))
     assert.equal(validateSlotMerge(slots, fixture.slotIds, fixture.minimum) ?? '', fixture.expectedCode, fixture.name)
   }
-})
-
-test('desktop pixels, compact mode and four zone height modes match the server rules', () => {
-  assert.deepEqual(desktopPixelRect({
-    columns: 24, baseRowHeight: 32, gapX: 8, gapY: 8, paddingX: 16, paddingY: 12,
-  }, { x: 2, y: 3, w: 4, h: 5 }, 1200), { x: 114, y: 132, width: 188, height: 192 })
-  assert.deepEqual(slotRenderSize({ w: 12, h: 6 }, { w: 4, h: 2 }, { w: 2, h: 1 }), { w: 6, h: 3 })
-  const blocks: LayoutBlock[] = [
-    { id: 'block_a', layout: { desktop: { x: 0, y: 4, w: 6, h: 2 } } },
-    { id: 'block_b', layout: { desktop: { x: 0, y: 9, w: 6, h: 2 } } },
-    { id: 'block_c', layout: { desktop: { x: 8, y: 7, w: 6, h: 2 } } },
-  ]
-  assert.deepEqual(compactBlocks(blocks, 'VERTICAL').map(block => block.layout.desktop.y), [0, 2, 0])
-  assert.deepEqual(blocks.map(block => block.layout.desktop.y), [4, 9, 7])
-
-  const zones: Zone[] = [
-    { id: 'fixed', type: 'HEADER', layout: { heightMode: 'FIXED', minHeight: 40, fixedHeight: 80 }, slots: [slot('sf')] },
-    { id: 'auto', type: 'CONTENT', layout: { heightMode: 'AUTO', minHeight: 40 }, slots: [slot('sa')] },
-    { id: 'fr', type: 'INSIGHT', layout: { heightMode: 'FR', minHeight: 50, maxHeight: 220, fr: 1 }, slots: [slot('sr')] },
-    { id: 'hidden', type: 'FOOTER', layout: { heightMode: 'HIDDEN', minHeight: 0 }, slots: [slot('sh')] },
-  ]
-  assert.deepEqual(calculateZoneHeights(zones, 300), { fixed: 80, auto: 40, fr: 180, hidden: 0 })
 })
 
 test('mobile conversion covers all slot modes, drawer, primary query and height modes', () => {

@@ -41,7 +41,7 @@ func (repository *PostgresIntentRepository) CreatePreview(
 	err = database.WithTenantTx(ctx, repository.pool, string(identity.TenantID), func(tx pgx.Tx) error {
 		var state string
 		var version int64
-		if err := tx.QueryRow(ctx, `SELECT state,record_version FROM askdata.question_runs
+		if err := tx.QueryRow(ctx, `SELECT current_state,record_version FROM askdata.question_runs
 			WHERE id=$1 AND tenant_id=$2 AND domain_id=$3 AND actor_id=$4`,
 			request.QuestionRunID, identity.TenantID, identity.DomainID, identity.ActorID,
 		).Scan(&state, &version); err != nil {
@@ -120,10 +120,12 @@ func (repository *PostgresIntentRepository) Confirm(
 			}
 			result.Replayed = true
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO askdata.add_to_report_outbox(tenant_id,intent_id)
-			SELECT tenant_id,id FROM askdata.add_to_report_intents WHERE id=$1 AND state='PENDING'
-			ON CONFLICT(intent_id) DO NOTHING`, intentID); err != nil {
+		var enqueued bool
+		if err := tx.QueryRow(ctx, `SELECT askdata.enqueue_add_to_report_intent($1)`, intentID).Scan(&enqueued); err != nil {
 			return err
+		}
+		if !enqueued {
+			return ErrIntentState
 		}
 		row := tx.QueryRow(ctx, `SELECT id::text,tenant_id::text,actor_user_id::text,question_run_id::text,target_report_id::text,
 			operation_bundle_json,preview_hash,state,applied_revision_no,COALESCE(rejection_code,''),

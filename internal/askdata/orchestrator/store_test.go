@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"intelligent-report-generation-system/internal/askdata"
+	"intelligent-report-generation-system/internal/askdata/ircontract"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
 	"intelligent-report-generation-system/internal/platform/database"
 )
@@ -46,14 +47,25 @@ func TestValidateActorScopeFailsClosedWithoutExactAccessContext(t *testing.T) {
 func TestPrepareCreateAcceptsOnlyOneGovernedSeedSource(t *testing.T) {
 	scope, domainID := testPolicyScope(t)
 	ctx := database.WithAccessContext(context.Background(), string(scope.ActorID), string(domainID))
-	semanticIR := json.RawMessage(`{"irVersion":"semantic-ir-v1"}`)
+	semanticIRValue := ircontract.SemanticIR{
+		IRVersion: ircontract.Version, SemanticReleaseID: scope.Release.ReleaseID,
+		SemanticContentHash: scope.Release.ContentHash, DomainID: domainID,
+		ModelVersionID: askdata.ID(uuid.NewString()),
+		Metrics:        []ircontract.Metric{{MetricVersionID: askdata.ID(uuid.NewString()), Alias: "metric_1"}},
+		GroupBy:        []ircontract.GroupBy{}, Filters: []ircontract.Filter{}, Sort: []ircontract.Sort{},
+		Limit: 100, OtherPolicy: ircontract.OtherNone, TieBreaking: ircontract.TieDeterministicCut,
+	}
+	_, semanticIR, semanticIRHash, err := ircontract.Canonicalize(semanticIRValue)
+	if err != nil {
+		t.Fatal(err)
+	}
 	base := CreateRunRequest{
 		Scope: scope, DomainID: domainID, ConversationID: askdata.ID(uuid.NewString()),
 		IdempotencyKeyHash: testHash("1"), QuestionHash: testHash("2"),
 	}
 	base.SeedContext = &SeedContext{
 		Source: SeedSourceSavedQuestion, SavedQuestionID: askdata.ID(uuid.NewString()),
-		SemanticIR: semanticIR, SemanticIRHash: askdata.HashBytes(semanticIR),
+		SemanticIR: semanticIR, SemanticIRHash: semanticIRHash,
 		PinnedReleaseID: scope.Release.ReleaseID,
 	}
 	if _, _, err := prepareCreateRequest(ctx, base); err != nil {
@@ -130,6 +142,27 @@ func TestArtifactHashIsCanonicalAndDeclaredHashIsChecked(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalidRun) {
 		t.Fatalf("wrong declared hash error = %v", err)
+	}
+}
+
+func TestAnswerCompletionUsesAuditSafeArtifactEnvelope(t *testing.T) {
+	scope, domainID := testPolicyScope(t)
+	request := TransitionRequest{
+		Scope: scope, DomainID: domainID, RunID: askdata.ID(uuid.NewString()), TargetState: StateAnswered,
+	}
+	_, err := prepareCompletionArtifact(request, CompletionArtifactInput{
+		Code: "ANSWER_VERIFIED", Type: ArtifactAnswer, SchemaVersion: "answer-v1",
+		Payload: json.RawMessage(`{"artifact":{"schemaVersion":"1.0"},"outcome":{"state":"COMPLETE"}}`),
+	})
+	if err != nil {
+		t.Fatalf("audit-safe answer envelope error = %v", err)
+	}
+	_, err = prepareCompletionArtifact(request, CompletionArtifactInput{
+		Code: "ANSWER_VERIFIED", Type: ArtifactAnswer, SchemaVersion: "answer-v1",
+		Payload: json.RawMessage(`{"answer":{"schemaVersion":"1.0"}}`),
+	})
+	if !errors.Is(err, ErrInvalidRun) {
+		t.Fatalf("legacy forbidden answer envelope error = %v", err)
 	}
 }
 

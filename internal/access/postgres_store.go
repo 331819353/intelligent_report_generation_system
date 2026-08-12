@@ -13,9 +13,8 @@ type PostgresStore struct{ pool *pgxpool.Pool }
 // NewPostgresStore 创建 PostgreSQL 权限判定存储。
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
-// Allowed 按平台、领域、用户三级固定边界判定权限。平台管理员拥有全部权限，
-// 但仍需明确选择领域以保持数据隔离；领域管理员只管理所属领域，普通用户可
-// 配置但不能发布。
+// Allowed 按平台、领域、用户三级固定边界判定权限。对象级写入继续服从资产
+// Owner/领域管理员边界，避免中间件放行后又被数据层 RLS 伪装成 404。
 func (s *PostgresStore) Allowed(ctx context.Context, check Check) (allowed bool, err error) {
 	err = database.WithTenantTx(ctx, s.pool, check.TenantID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT EXISTS (
@@ -40,9 +39,20 @@ func (s *PostgresStore) Allowed(ctx context.Context, check Check) (allowed bool,
             AND $3 IN ('DATA_SOURCE','DATA_ASSET','DATASET')
             AND (
               membership.member_role='DOMAIN_ADMIN'
-              OR $4 IN ('READ','MANAGE')
+			  OR ($4='READ' AND (
+				$5=''
+				OR ($3='DATASET' AND platform.dataset_can_read(NULLIF($5,'')::uuid))
+				OR ($3='DATA_SOURCE' AND platform.data_source_can_read(NULLIF($5,'')::uuid))
+				OR ($3='DATA_ASSET' AND platform.metadata_table_can_read(NULLIF($5,'')::uuid))
+			  ))
+              OR ($4='MANAGE' AND (
+                $5=''
+				OR ($3='DATASET' AND platform.dataset_can_write(NULLIF($5,'')::uuid))
+				OR ($3='DATA_SOURCE' AND platform.data_source_can_write(NULLIF($5,'')::uuid))
+				OR ($3='DATA_ASSET' AND platform.metadata_table_can_write(NULLIF($5,'')::uuid))
+			  ))
             )
-        )`, check.TenantID, check.UserID, check.ResourceType, check.Action).Scan(&allowed)
+        )`, check.TenantID, check.UserID, check.ResourceType, check.Action, check.ObjectID).Scan(&allowed)
 	})
 	return allowed, err
 }

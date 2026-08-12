@@ -10,14 +10,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/cognition"
+	"intelligent-report-generation-system/internal/askdata/ircontract"
 	semanticregistry "intelligent-report-generation-system/internal/askdata/registry"
 	"intelligent-report-generation-system/internal/askdata/toolhost"
 )
 
 const (
-	loopCheckpointHashVersion = "question-loop-checkpoint-v1"
+	loopCheckpointHashVersion = "question-loop-checkpoint-v2"
 	toolReplaySchemaVersion   = "tool-execution-replay-v1"
 )
 
@@ -168,25 +170,7 @@ func (store *PostgresStore) CheckpointLoop(
 		}
 
 		toolIndex := 0
-		for _, round := range prepared.rounds {
-			event, err := newLoopAuditEvent(current, eventIndex+1, previousHash, loopAuditEventInput{
-				Type: EventLLMDecision, Stage: string(request.Stage), Status: EventSucceeded,
-				Code:        string(round.execution.Round.Action.Action),
-				AIRequestID: askdata.ID(round.execution.Round.AIRequestID),
-				ActionHash:  round.execution.Round.ActionHash, EvidenceIDs: round.evidenceIDs,
-				Details: cognitionAuditDetails(round.execution), DurationMS: &round.execution.DurationMS,
-			})
-			if err != nil {
-				return err
-			}
-			if err := appendEvent(event); err != nil {
-				return err
-			}
-			if round.execution.Round.Action.Action != cognition.ActionCallTool {
-				continue
-			}
-			tool := prepared.tools[toolIndex]
-			toolIndex++
+		emitToolAudit := func(tool preparedToolAudit) error {
 			index, err := nextArtifactIndexTx(ctx, tx, current)
 			if err != nil {
 				return err
@@ -226,9 +210,40 @@ func (store *PostgresStore) CheckpointLoop(
 			if err != nil {
 				return err
 			}
-			if err := appendEvent(toolEvent); err != nil {
+			return appendEvent(toolEvent)
+		}
+		for _, round := range prepared.rounds {
+			event, err := newLoopAuditEvent(current, eventIndex+1, previousHash, loopAuditEventInput{
+				Type: EventLLMDecision, Stage: string(request.Stage), Status: EventSucceeded,
+				Code:        string(round.execution.Round.Action.Action),
+				AIRequestID: askdata.ID(round.execution.Round.AIRequestID),
+				ActionHash:  round.execution.Round.ActionHash, EvidenceIDs: round.evidenceIDs,
+				Details: cognitionAuditDetails(round.execution), DurationMS: &round.execution.DurationMS,
+			})
+			if err != nil {
 				return err
 			}
+			if err := appendEvent(event); err != nil {
+				return err
+			}
+			if round.execution.Round.Action.Action != cognition.ActionCallTool {
+				continue
+			}
+			tool := prepared.tools[toolIndex]
+			toolIndex++
+			if err := emitToolAudit(tool); err != nil {
+				return err
+			}
+		}
+		// Deterministic acceptance pipelines (binding graph validation and
+		// compile/validate/execute) have no synthetic LLM round. They still need
+		// the same replay artifact, tool-call record and TOOL_RESULT event as
+		// model-requested tools.
+		for toolIndex < len(prepared.tools) {
+			if err := emitToolAudit(prepared.tools[toolIndex]); err != nil {
+				return err
+			}
+			toolIndex++
 		}
 
 		budgetEvent, err := newLoopAuditEvent(current, eventIndex+1, previousHash, loopAuditEventInput{
@@ -376,9 +391,16 @@ func prepareLoopAuditFacts(
 	toolDelta := request.Result.Usage.ToolCallsUsed - current.Usage.ToolCallsUsed
 	formalDelta := request.Result.Usage.FormalQueriesUsed - current.Usage.FormalQueriesUsed
 	validationDelta := request.Result.Usage.ValidationQueriesUsed - current.Usage.ValidationQueriesUsed
-	if llmDelta < len(request.Result.CognitionRounds) || llmDelta > len(request.Result.CognitionRounds)+1 ||
-		(llmDelta != len(request.Result.CognitionRounds) && request.Failure == nil) ||
-		stepDelta != llmDelta+len(request.Result.ToolExecutions) {
+	deterministicPlan := isDeterministicPlanDecision(request.Stage, request.Result)
+	deterministicBinding := isDeterministicBindingDecision(request.Stage, request.Result)
+	deterministicUnderstanding := isDeterministicUnderstandingDecision(request.Stage, request.Result)
+	usageMatches := llmDelta >= len(request.Result.CognitionRounds) && llmDelta <= len(request.Result.CognitionRounds)+1 &&
+		(llmDelta == len(request.Result.CognitionRounds) || request.Failure != nil) &&
+		stepDelta == llmDelta+len(request.Result.ToolExecutions)
+	if deterministicPlan {
+		usageMatches = llmDelta == 0 && stepDelta == len(request.Result.ToolExecutions)
+	}
+	if !usageMatches || len(request.Result.ToolRequests) != len(request.Result.ToolExecutions) {
 		return nil, nil, fmt.Errorf("%w: loop usage does not match audited rounds", ErrInvalidRun)
 	}
 
@@ -406,11 +428,16 @@ func prepareLoopAuditFacts(
 		if toolIndex >= len(request.Result.ToolExecutions) {
 			return nil, nil, fmt.Errorf("%w: tool action is missing its execution", ErrInvalidRun)
 		}
-		prepared, err := prepareToolAudit(current, execution.Round.Action, request.Result.ToolExecutions[toolIndex])
+		call := request.Result.ToolRequests[toolIndex]
+		if execution.Round.Action.ToolCall == nil || execution.Round.Action.ToolCall.CallID != call.CallID ||
+			execution.Round.Action.ToolCall.Tool != call.Tool {
+			return nil, nil, fmt.Errorf("%w: cognition tool request does not match execution", ErrInvalidRun)
+		}
+		prepared, err := prepareToolAudit(current, call, request.Result.ToolExecutions[toolIndex])
 		if err != nil {
 			return nil, nil, err
 		}
-		if !containsToolCallID(request.Result.SeenToolCallIDs, execution.Round.Action.ToolCall.CallID) {
+		if !containsToolCallID(request.Result.SeenToolCallIDs, call.CallID) {
 			return nil, nil, fmt.Errorf("%w: audited tool call is missing from replay guards", ErrInvalidRun)
 		}
 		chargedTools += prepared.charge.ToolCalls
@@ -419,19 +446,44 @@ func prepareLoopAuditFacts(
 		tools = append(tools, prepared)
 		toolIndex++
 	}
+	if toolIndex < len(request.Result.ToolExecutions) {
+		if err := validateDeterministicToolAudit(request, toolIndex); err != nil {
+			return nil, nil, err
+		}
+		for toolIndex < len(request.Result.ToolExecutions) {
+			call := request.Result.ToolRequests[toolIndex]
+			prepared, err := prepareToolAudit(current, call, request.Result.ToolExecutions[toolIndex])
+			if err != nil {
+				return nil, nil, err
+			}
+			if !containsToolCallID(request.Result.SeenToolCallIDs, call.CallID) {
+				return nil, nil, fmt.Errorf("%w: deterministic tool call is missing from replay guards", ErrInvalidRun)
+			}
+			chargedTools += prepared.charge.ToolCalls
+			chargedFormal += prepared.charge.FormalQueries
+			chargedValidation += prepared.charge.ValidationQueries
+			tools = append(tools, prepared)
+			toolIndex++
+		}
+	}
 	if toolIndex != len(request.Result.ToolExecutions) || chargedTools != toolDelta ||
 		chargedFormal != formalDelta || chargedValidation != validationDelta {
 		return nil, nil, fmt.Errorf("%w: tool charges do not match checkpoint usage", ErrInvalidRun)
 	}
 	if request.Result.Decision.ActionHash != "" {
-		if len(request.Result.CognitionRounds) == 0 {
+		if deterministicPlan || deterministicBinding || deterministicUnderstanding {
+			if deterministicPlan && len(request.Result.CognitionRounds) != 0 {
+				return nil, nil, fmt.Errorf("%w: deterministic plan cannot contain cognition rounds", ErrInvalidRun)
+			}
+		} else if len(request.Result.CognitionRounds) == 0 {
 			return nil, nil, fmt.Errorf("%w: final decision is missing its cognition round", ErrInvalidRun)
-		}
-		last := request.Result.CognitionRounds[len(request.Result.CognitionRounds)-1].Round
-		if validateCognitionRound(request.Result.Decision, request.Stage, nil) != nil ||
-			last.Action.Action == cognition.ActionCallTool || last.ActionHash != request.Result.Decision.ActionHash ||
-			!sameRoundAuditSummary(last, request.Result.Decision) {
-			return nil, nil, fmt.Errorf("%w: final decision does not match the last round", ErrInvalidRun)
+		} else {
+			last := request.Result.CognitionRounds[len(request.Result.CognitionRounds)-1].Round
+			if validateCognitionRound(request.Result.Decision, request.Stage, nil) != nil ||
+				last.Action.Action == cognition.ActionCallTool || last.ActionHash != request.Result.Decision.ActionHash ||
+				!sameRoundAuditSummary(last, request.Result.Decision) {
+				return nil, nil, fmt.Errorf("%w: final decision does not match the last round", ErrInvalidRun)
+			}
 		}
 	} else if request.Failure == nil {
 		return nil, nil, fmt.Errorf("%w: successful checkpoint requires a final decision", ErrInvalidRun)
@@ -439,15 +491,15 @@ func prepareLoopAuditFacts(
 	return rounds, tools, nil
 }
 
-func prepareToolAudit(current Run, action cognition.Action, execution toolhost.Execution) (preparedToolAudit, error) {
-	if action.ToolCall == nil || execution.Validate() != nil ||
-		execution.Response.CallID != action.ToolCall.CallID || execution.Response.Tool != action.ToolCall.Tool {
+func prepareToolAudit(current Run, callRequest toolhost.CallRequest, execution toolhost.Execution) (preparedToolAudit, error) {
+	if toolhost.ValidateCall(callRequest, toolhost.DefaultArgumentValidator{}) != nil || execution.Validate() != nil ||
+		execution.Response.CallID != callRequest.CallID || execution.Response.Tool != callRequest.Tool {
 		return preparedToolAudit{}, fmt.Errorf("%w: tool audit binding is invalid", ErrInvalidRun)
 	}
 	requestHash, _, err := semanticregistry.CanonicalContentHash(struct {
 		Tool      toolhost.ToolName      `json:"tool"`
 		Arguments toolhost.ToolArguments `json:"arguments"`
-	}{Tool: action.ToolCall.Tool, Arguments: action.ToolCall.Arguments})
+	}{Tool: callRequest.Tool, Arguments: callRequest.Arguments})
 	if err != nil {
 		return preparedToolAudit{}, fmt.Errorf("%w: tool request hash failed", ErrInvalidRun)
 	}
@@ -467,7 +519,7 @@ func prepareToolAudit(current Run, action cognition.Action, execution toolhost.E
 	call := ToolCall{
 		TenantID: current.TenantID, DomainID: current.DomainID, ActorID: current.ActorID,
 		RunID: current.ID, Release: current.Release, PolicyScopeHash: current.PolicyScopeHash,
-		RunVersion: current.RecordVersion, CallID: action.ToolCall.CallID, Tool: action.ToolCall.Tool,
+		RunVersion: current.RecordVersion, CallID: callRequest.CallID, Tool: callRequest.Tool,
 		State: current.State, Status: string(status), RequestHash: requestHash, ResultHash: resultHash,
 		EvidenceIDs: evidence, Budget: budget, DurationMS: execution.DurationMS, ErrorCode: errorCode,
 	}
@@ -508,6 +560,146 @@ func prepareToolAudit(current Run, action cognition.Action, execution toolhost.E
 	return preparedToolAudit{
 		call: call, artifact: artifact, charge: execution.Charge, graphDegraded: graphDegraded,
 	}, nil
+}
+
+func validateDeterministicToolAudit(request LoopCheckpointRequest, start int) error {
+	if start < 0 || start >= len(request.Result.ToolRequests) {
+		return fmt.Errorf("%w: unexpected deterministic tool execution", ErrInvalidRun)
+	}
+	last := request.Result.Decision.Action
+	if !isDeterministicBindingDecision(request.Stage, request.Result) && len(request.Result.CognitionRounds) > 0 {
+		last = request.Result.CognitionRounds[len(request.Result.CognitionRounds)-1].Round.Action
+	}
+	if last.Action == cognition.ActionProposeBinding && last.BindingProposal != nil &&
+		(request.Stage == cognition.StageCandidateJudgment || request.Stage == cognition.StageDisambiguation) {
+		return validateDeterministicBindingToolAudit(request, start, *last.BindingProposal)
+	}
+	if request.Stage != cognition.StagePlanSelection {
+		return fmt.Errorf("%w: unexpected deterministic tool stage", ErrInvalidRun)
+	}
+	if last.Action != cognition.ActionProposePlan || last.PlanProposal == nil {
+		return fmt.Errorf("%w: deterministic plan tools require a plan proposal", ErrInvalidRun)
+	}
+	remaining := len(request.Result.ToolRequests) - start
+	if remaining < 1 || remaining > 3 || (request.Failure == nil && remaining != 3) {
+		return fmt.Errorf("%w: deterministic plan tool sequence is incomplete", ErrInvalidRun)
+	}
+	calls := request.Result.ToolRequests[start:]
+	executions := request.Result.ToolExecutions[start:]
+	if calls[0].Tool != toolhost.ToolCompileSemanticQuery || calls[0].Arguments.SemanticIR == nil ||
+		calls[0].Arguments.Release != request.Scope.Release ||
+		!sameSemanticIR(*calls[0].Arguments.SemanticIR, last.PlanProposal.SemanticIR) {
+		return fmt.Errorf("%w: deterministic compile request is invalid", ErrInvalidRun)
+	}
+	if remaining == 1 {
+		return nil
+	}
+	var compiled toolhost.CompileSemanticQueryResult
+	if executions[0].Response.Status != toolhost.ResponseSuccess ||
+		askdata.DecodeStrictJSON(executions[0].Response.Result, &compiled) != nil ||
+		calls[1].Tool != toolhost.ToolValidateQueryPlan || calls[1].Arguments.PlanHash == nil ||
+		*calls[1].Arguments.PlanHash != compiled.PlanHash {
+		return fmt.Errorf("%w: deterministic validation request is invalid", ErrInvalidRun)
+	}
+	if remaining == 2 {
+		return nil
+	}
+	var validation toolhost.ValidateQueryPlanResult
+	if executions[1].Response.Status != toolhost.ResponseSuccess ||
+		askdata.DecodeStrictJSON(executions[1].Response.Result, &validation) != nil || !validation.Allowed ||
+		calls[2].Tool != toolhost.ToolExecuteQueryPlan || calls[2].Arguments.PlanHash == nil ||
+		*calls[2].Arguments.PlanHash != compiled.PlanHash || calls[2].Arguments.MaxRows == nil ||
+		*calls[2].Arguments.MaxRows != compiled.MaxRows {
+		return fmt.Errorf("%w: deterministic execution request is invalid", ErrInvalidRun)
+	}
+	return nil
+}
+
+func validateDeterministicBindingToolAudit(
+	request LoopCheckpointRequest,
+	start int,
+	proposal cognition.BindingProposal,
+) error {
+	remaining := len(request.Result.ToolRequests) - start
+	if remaining < 1 || remaining > 3 || (request.Failure == nil && remaining != 2 && remaining != 3) {
+		return fmt.Errorf("%w: deterministic binding tool sequence is incomplete", ErrInvalidRun)
+	}
+	models, metrics, dimensions, members := bindingObjectVersionIDs(proposal)
+	calls := request.Result.ToolRequests[start:]
+	offset := 0
+	if calls[0].Tool == toolhost.ToolGetSemanticContracts {
+		wanted := append(append(append([]askdata.ID{}, models...), metrics...), dimensions...)
+		wanted = append(wanted, members...)
+		if calls[0].Arguments.Release != request.Scope.Release ||
+			!containsAllAuditIDs(calls[0].Arguments.ObjectVersionIDs, wanted) {
+			return fmt.Errorf("%w: deterministic contract request is invalid", ErrInvalidRun)
+		}
+		offset = 1
+	}
+	if offset >= len(calls) || calls[offset].Tool != toolhost.ToolResolveGraphPlan ||
+		calls[offset].Arguments.Release != request.Scope.Release ||
+		!sameIDs(calls[offset].Arguments.ModelVersionIDs, models) ||
+		!sameIDs(calls[offset].Arguments.MetricVersionIDs, metrics) ||
+		!sameIDs(calls[offset].Arguments.DimensionVersionIDs, dimensions) ||
+		!sameIDs(calls[offset].Arguments.MemberVersionIDs, members) {
+		return fmt.Errorf("%w: deterministic graph request is invalid", ErrInvalidRun)
+	}
+	if len(calls) == offset+1 {
+		return nil
+	}
+	if calls[offset+1].Tool != toolhost.ToolValidateSemanticBundle ||
+		!sameIDs(calls[offset+1].Arguments.ModelVersionIDs, models) ||
+		!sameIDs(calls[offset+1].Arguments.MetricVersionIDs, metrics) ||
+		!sameIDs(calls[offset+1].Arguments.DimensionVersionIDs, dimensions) ||
+		!sameIDs(calls[offset+1].Arguments.MemberVersionIDs, members) {
+		return fmt.Errorf("%w: deterministic bundle validation request is invalid", ErrInvalidRun)
+	}
+	if request.Failure == nil {
+		var validation toolhost.ValidateSemanticBundleResult
+		validationIndex := start + offset + 1
+		if request.Result.ToolExecutions[validationIndex].Response.Status != toolhost.ResponseSuccess ||
+			askdata.DecodeStrictJSON(request.Result.ToolExecutions[validationIndex].Response.Result, &validation) != nil ||
+			!validation.Valid {
+			return fmt.Errorf("%w: deterministic binding validation did not pass", ErrInvalidRun)
+		}
+	}
+	return nil
+}
+
+func containsAllAuditIDs(values, wanted []askdata.ID) bool {
+	seen := make(map[askdata.ID]bool, len(values))
+	for _, value := range values {
+		seen[value] = true
+	}
+	for _, value := range wanted {
+		if !seen[value] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameIDs(left, right []askdata.ID) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	seen := make(map[askdata.ID]int, len(left))
+	for _, value := range left {
+		seen[value]++
+	}
+	for _, value := range right {
+		if seen[value] == 0 {
+			return false
+		}
+		seen[value]--
+	}
+	return true
+}
+
+func sameSemanticIR(left, right ircontract.SemanticIR) bool {
+	leftHash, _, leftErr := semanticregistry.CanonicalContentHash(left)
+	rightHash, _, rightErr := semanticregistry.CanonicalContentHash(right)
+	return leftErr == nil && rightErr == nil && leftHash == rightHash
 }
 
 func graphDegradedResult(execution toolhost.Execution) (bool, error) {
@@ -657,15 +849,23 @@ func computeLoopCheckpointHash(request LoopCheckpointRequest) (askdata.ContentHa
 			"redactionCount": round.Round.RedactionCount, "durationMs": round.DurationMS,
 		})
 	}
+	if len(request.Result.ToolRequests) != len(request.Result.ToolExecutions) {
+		return "", fmt.Errorf("%w: checkpoint tool requests do not match executions", ErrInvalidRun)
+	}
 	tools := make([]map[string]any, 0, len(request.Result.ToolExecutions))
-	for _, execution := range request.Result.ToolExecutions {
+	for index, execution := range request.Result.ToolExecutions {
 		responseHash, _, err := semanticregistry.CanonicalContentHash(execution.Response)
 		if err != nil {
 			return "", fmt.Errorf("%w: checkpoint tool response hash failed", ErrInvalidRun)
 		}
+		requestHash, _, err := semanticregistry.CanonicalContentHash(request.Result.ToolRequests[index])
+		if err != nil {
+			return "", fmt.Errorf("%w: checkpoint tool request hash failed", ErrInvalidRun)
+		}
 		tools = append(tools, map[string]any{
 			"definitionHash": execution.DefinitionHash, "responseHash": responseHash,
-			"charge": execution.Charge, "durationMs": execution.DurationMS, "timedOut": execution.TimedOut,
+			"requestHash": requestHash, "charge": execution.Charge,
+			"durationMs": execution.DurationMS, "timedOut": execution.TimedOut,
 		})
 	}
 	failureCode, failureStatus := "", EventStatus("")
@@ -689,6 +889,10 @@ func computeLoopCheckpointHash(request LoopCheckpointRequest) (askdata.ContentHa
 		"actions": actions, "tools": tools, "failureCode": failureCode,
 		"failureStatus": failureStatus, "completionHash": completionHash,
 		"hashes": hashUpdateDocument(request.Hashes),
+	}
+	if request.Result.Decision.ActionHash != "" && (len(request.Result.CognitionRounds) == 0 ||
+		request.Result.CognitionRounds[len(request.Result.CognitionRounds)-1].Round.ActionHash != request.Result.Decision.ActionHash) {
+		document["deterministicDecisionHash"] = request.Result.Decision.ActionHash
 	}
 	hash, _, err := semanticregistry.CanonicalContentHash(document)
 	if err != nil {
@@ -920,7 +1124,15 @@ func validateDecisionTarget(
 		return nil
 	}
 	if failure != nil {
-		return fmt.Errorf("%w: checkpoint cannot contain both a decision and a failure", ErrInvalidRun)
+		// A deterministic acceptance decision may be followed by a trusted
+		// compile/validate/execute failure. Preserve both facts so the partial
+		// host tool chain remains auditable and the bounded root cause is not
+		// replaced by a secondary checkpoint-shape error.
+		if target != StateBlocked || (decision.Action.Action != cognition.ActionProposePlan &&
+			decision.Action.Action != cognition.ActionProposeBinding) {
+			return fmt.Errorf("%w: checkpoint cannot contain both a decision and a failure", ErrInvalidRun)
+		}
+		return nil
 	}
 	switch decision.Action.Action {
 	case cognition.ActionClarify:
@@ -941,6 +1153,45 @@ func validateDecisionTarget(
 		}
 	}
 	return nil
+}
+
+func isDeterministicPlanDecision(stage cognition.Stage, result LoopResult) bool {
+	decision := result.Decision
+	if stage != cognition.StagePlanSelection || len(result.CognitionRounds) != 0 ||
+		decision.ActionHash.Validate() != nil || decision.Action.Action != cognition.ActionProposePlan ||
+		decision.Action.PlanProposal == nil || decision.Action.Validate() != nil ||
+		decision.AIRequestID != "" || decision.Provider != "" || decision.ProviderModel != "" ||
+		decision.Attempts != 0 || decision.Usage != (ai.Usage{}) || decision.CostMicros != 0 || decision.RedactionCount != 0 {
+		return false
+	}
+	payload, err := json.Marshal(decision.Action)
+	return err == nil && askdata.HashBytes(payload) == decision.ActionHash
+}
+
+func isDeterministicBindingDecision(stage cognition.Stage, result LoopResult) bool {
+	decision := result.Decision
+	if stage != cognition.StageCandidateJudgment ||
+		decision.ActionHash.Validate() != nil || decision.Action.Action != cognition.ActionProposeBinding ||
+		decision.Action.BindingProposal == nil || decision.Action.Validate() != nil ||
+		decision.AIRequestID != "" || decision.Provider != "" || decision.ProviderModel != "" ||
+		decision.Attempts != 0 || decision.Usage != (ai.Usage{}) || decision.CostMicros != 0 || decision.RedactionCount != 0 {
+		return false
+	}
+	payload, err := json.Marshal(decision.Action)
+	return err == nil && askdata.HashBytes(payload) == decision.ActionHash
+}
+
+func isDeterministicUnderstandingDecision(stage cognition.Stage, result LoopResult) bool {
+	decision := result.Decision
+	if stage != cognition.StageUnderstanding || len(result.CognitionRounds) != 0 ||
+		decision.ActionHash.Validate() != nil || decision.Action.Action != cognition.ActionProposeUnderstanding ||
+		decision.Action.Understanding == nil || decision.Action.Validate() != nil ||
+		decision.AIRequestID != "" || decision.Provider != "" || decision.ProviderModel != "" ||
+		decision.Attempts != 0 || decision.Usage != (ai.Usage{}) || decision.CostMicros != 0 || decision.RedactionCount != 0 {
+		return false
+	}
+	payload, err := json.Marshal(decision.Action)
+	return err == nil && askdata.HashBytes(payload) == decision.ActionHash
 }
 
 func sameRoundAuditSummary(left, right cognition.RoundResult) bool {

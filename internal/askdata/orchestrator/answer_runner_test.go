@@ -110,6 +110,7 @@ func newAnswerRunnerFixture(t *testing.T) answerRunnerFixture {
 		}}, Derivations: []answer.DerivationEvidence{},
 	}.Normalize()
 	binding := answer.BindingEvidence{
+		Source:  answer.BindingSourceSemanticRelease,
 		Version: answer.BindingEvidenceVersion, SemanticReleaseID: run.Release.ReleaseID,
 		Objects: []answer.ObjectEvidence{{
 			ObjectID: "metric:sales@v1", Kind: answer.ObjectMetric, Bound: true, Names: []string{"销售额"},

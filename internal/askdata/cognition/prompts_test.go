@@ -28,13 +28,18 @@ func TestSchemaForStagePinsStageAndActionVocabulary(t *testing.T) {
 			if err := json.Unmarshal(schema.Schema, &root); err != nil {
 				t.Fatal(err)
 			}
-			properties := root["properties"].(map[string]any)
-			if got := properties["stage"].(map[string]any)["const"]; got != string(stage) {
-				t.Fatalf("stage const = %#v", got)
+			branches := root["oneOf"].([]any)
+			if len(branches) != len(allowedActions(stage)) {
+				t.Fatalf("action branches = %#v", branches)
 			}
-			actions := properties["action"].(map[string]any)["enum"].([]any)
-			if len(actions) != len(allowedActions(stage)) {
-				t.Fatalf("action enum = %#v", actions)
+			for _, value := range branches {
+				properties := value.(map[string]any)["properties"].(map[string]any)
+				if got := properties["stage"].(map[string]any)["const"]; got != string(stage) {
+					t.Fatalf("stage const = %#v", got)
+				}
+				if _, ok := properties["action"].(map[string]any)["const"].(string); !ok {
+					t.Fatalf("action branch is not discriminated: %#v", properties["action"])
+				}
 			}
 			lower := strings.ToLower(string(schema.Schema))
 			if strings.Contains(lower, `"sql"`) || strings.Contains(lower, `"ngql"`) {
